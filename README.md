@@ -214,7 +214,7 @@ const Mnist = struct {
         var x = input.flattenAll().convert(.f32);
         const layers: []const Layer = &.{ self.fc1, self.fc2 };
         for (layers) |layer| {
-            x = layer.call(.forward, .{x});
+            x = zml.call(layer, .forward, .{x});
         }
         return x.argMax(0, .u8).indices;
     }
