@@ -1,0 +1,21 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+cc_library(
+    name = "macos_c",
+    srcs = ["macos.c"],
+    hdrs = ["macos.h"],
+    visibility = ["//zml/tools:__subpackages__"],
+)
+
+zig_library(
+    name = "tools",
+    srcs = ["tracer.zig"],
+    main = "tools.zig",
+    visibility = ["//visibility:public"],
+    deps = select({
+        "@platforms//os:macos": [
+            ":macos_c",
+        ],
+        "//conditions:default": [],
+    }),
+)

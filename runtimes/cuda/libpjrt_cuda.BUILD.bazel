@@ -1,0 +1,32 @@
+load("@aspect_bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+load("@zml//bazel:cc_import.bzl", "cc_import")
+
+copy_to_directory(
+    name = "sandbox",
+    srcs = [
+        "@cuda_nvcc//:libdevice",
+        "@cuda_nvcc//:ptxas",
+    ],
+    include_external_repositories = ["**"],
+)
+
+cc_import(
+    name = "libpjrt_cuda",
+    data = [":sandbox"],
+    shared_library = "libpjrt_cuda.so",
+    visibility = ["@zml//runtimes/cuda:__subpackages__"],
+    deps = [
+        "@cuda_cudart//:cudart",
+        "@cuda_cupti//:cupti",
+        "@cuda_nvcc//:nvvm",
+        "@cuda_nvrtc//:nvrtc",
+        "@cudnn//:cudnn",
+        "@libcublas//:cublas",
+        "@libcufft//:cufft",
+        "@libcusolver//:cusolver",
+        "@libcusparse//:cusparse",
+        "@libnccl//:nccl",
+        "@libnvjitlink//:nvjitlink",
+        "@zlib",
+    ],
+)

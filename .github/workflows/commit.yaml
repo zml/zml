@@ -1,0 +1,44 @@
+name: commit
+on:
+  push:
+    branches:
+    - master
+    tags:
+    - '*'
+  pull_request:
+
+env:
+  ZIG_VERSION: 0.13.0
+  BAZELISK_VERSION: 1.20.0
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ !contains(github.ref, 'master')}}
+
+jobs:
+  test:
+    runs-on: ["runs-on","runner=4cpu-linux-x64", "image=ubuntu24-amd64", "run-id=${{ github.run_id }}"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Format
+        run: zig fmt --check *.zig zml/ examples/ async/ mlir/ pjrt/
+
+      - name: No Autofix
+        run: bash -c 'grep "// autofix" zml/**/*.zig ; [ 1 -eq $? ]'
+
+      - name: Setup Bazel
+        run: |
+          wget https://github.com/bazelbuild/bazelisk/releases/download/v${{ env.BAZELISK_VERSION }}/bazelisk-linux-amd64 -O ~/bin/bazel
+          chmod +x ~/bin/bazel
+          
+      - name: Tests
+        run: |
+          export PATH=$PATH:~/bin
+          bazel test --remote_cache=grpc://127.0.0.1:15501 //zml:test --test_output=streamed

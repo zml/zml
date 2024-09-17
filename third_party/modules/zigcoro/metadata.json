@@ -1,0 +1,17 @@
+{
+    "homepage": "https://github.com/rsepassi/zigcoro",
+    "maintainers": [
+        {
+            "email": "bzlmod@zml.ai",
+            "github": "zml",
+            "name": "ZML Engineering Team"
+        }
+    ],
+    "repository": [
+        "github:rsepassi/zigcoro"
+    ],
+    "versions": [
+        "20240829.0-fc1db29"
+    ],
+    "yanked_versions": {}
+}

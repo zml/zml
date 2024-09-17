@@ -1,0 +1,14 @@
+load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
+
+copy_file(
+    name = "libpjrt_tpu_so",
+    src = "libtpu/libtpu.so",
+    out = "libpjrt_tpu.so",
+    allow_symlink = True,
+)
+
+cc_import(
+    name = "libpjrt_tpu",
+    shared_library = ":libpjrt_tpu_so",
+    visibility = ["@zml//runtimes/tpu:__subpackages__"],
+)

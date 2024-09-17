@@ -1,0 +1,17 @@
+{
+    "homepage": "https://github.com/gwenzek/zig-protobuf",
+    "maintainers": [
+        {
+            "email": "bzlmod@zml.ai",
+            "github": "zml",
+            "name": "ZML Engineering Team"
+        }
+    ],
+    "repository": [
+        "gwenzek/zig-protobuf"
+    ],
+    "versions": [
+        "20240722.0-c644d11"
+    ],
+    "yanked_versions": {}
+}

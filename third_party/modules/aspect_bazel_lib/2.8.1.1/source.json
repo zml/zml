@@ -1,0 +1,11 @@
+{
+    "integrity": "sha256-aINU7mvuunGUJD1z6wmSuaEujt7u7FtlRPS1MaMRIjc=",
+    "strip_prefix": "bazel-lib-2.8.1",
+    "url": "https://github.com/aspect-build/bazel-lib/releases/download/v2.8.1/bazel-lib-v2.8.1.tar.gz",
+    "patches": {
+        "go_dev_dep.patch": "sha256-DTc/hk+etl4D50M0BLRik2vHbrgDb6rds+Dj4xphWb4=",
+        "module_dot_bazel_version.patch": "sha256-cEMv6bY7Sc5dERv8YG0lq45zuZCsVPNn4oAN9aOkf40=",
+        "0001-fix-add-repo-mapping-to-tar-archive.patch": ""
+    },
+    "patch_strip": 1
+}

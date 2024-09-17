@@ -1,0 +1,30 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+load("//bazel:zig_proto_library.bzl", "zig_proto_library")
+
+cc_library(
+    name = "dlfcn",
+    hdrs = ["dlfcn.h"],
+)
+
+zig_library(
+    name = "pjrt",
+    srcs = ["profiler.zig"],
+    main = "pjrt.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":profiler_options_proto",
+        "//runtimes",
+        "@xla//xla/pjrt/c:pjrt_c_api_gpu_extension_hdrs",
+        "@xla//xla/pjrt/c:pjrt_c_api_hdrs",
+        "@xla//xla/pjrt/c:pjrt_c_api_profiler_extension_hdrs",
+    ] + select({
+        "@platforms//os:linux": [":dlfcn"],
+        "//conditions:default": [],
+    }),
+)
+
+zig_proto_library(
+    name = "profiler_options_proto",
+    import_name = "//tsl:profiler_options_proto",
+    deps = ["@tsl//tsl/profiler/protobuf:profiler_options_proto"],
+)

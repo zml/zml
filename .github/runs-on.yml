@@ -1,0 +1,11 @@
+images:
+  ubuntu24-amd64:
+    platform: "linux"
+    arch: "amd64"
+    ami: "ami-04a92520784b93e73"
+    preinstall: |
+      #!/bin/bash
+      wget https://github.com/jbdalido/bazel-remote/releases/download/test/bazel-remote -O /usr/local/bin/bzlcache
+      chmod +x /usr/local/bin/bzlcache
+      echo "Run bazel cache"
+      systemd-run --property=Restart=always /usr/local/bin/bzlcache --max_size=1000 --grpc_address 127.0.0.1:15501 --dir=/tmp/cache --s3.region eu-west-3 --s3.bucket runs-on-s3bucketcache-jycgicewbssh --s3.auth_method iam_role --s3.prefix cache --s3.endpoint=s3.eu-west-3.amazonaws.com --storage_mode uncompressed

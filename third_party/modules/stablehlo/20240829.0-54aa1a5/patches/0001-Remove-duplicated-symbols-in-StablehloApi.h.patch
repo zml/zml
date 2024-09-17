@@ -1,0 +1,83 @@
+From f11d9bd7639f63cba681caa39cea27af114a4a71 Mon Sep 17 00:00:00 2001
+From: Steeve Morin <steeve.morin@gmail.com>
+Date: Mon, 2 Sep 2024 23:02:28 +0200
+Subject: [PATCH 1/2] Remove duplicated symbols in StablehloApi.h
+
+This causes C compilers to choke.
+
+Refs #2494
+---
+ stablehlo/integrations/c/StablehloApi.cpp      |  2 +-
+ stablehlo/integrations/c/StablehloApi.h        | 15 +--------------
+ stablehlo/integrations/python/StablehloApi.cpp |  2 +-
+ 3 files changed, 3 insertions(+), 16 deletions(-)
+
+diff --git a/stablehlo/integrations/c/StablehloApi.cpp b/stablehlo/integrations/c/StablehloApi.cpp
+index 8d922198..9b41ff21 100644
+--- a/stablehlo/integrations/c/StablehloApi.cpp
++++ b/stablehlo/integrations/c/StablehloApi.cpp
+@@ -98,7 +98,7 @@ MlirLogicalResult stablehloSerializePortableArtifact(
+   return mlirLogicalResultSuccess();
+ }
+ 
+-MlirLogicalResult stablehloDeserializePortableArtifact(
++MlirLogicalResult stablehloDeserializePortableArtifactToBytecode(
+     MlirStringRef artifactStr, MlirStringCallback callback, void *userData) {
+   mlir::detail::CallbackOstream stream(callback, userData);
+   if (failed(mlir::stablehlo::deserializePortableArtifact(unwrap(artifactStr),
+diff --git a/stablehlo/integrations/c/StablehloApi.h b/stablehlo/integrations/c/StablehloApi.h
+index 4c542508..f94dca8d 100644
+--- a/stablehlo/integrations/c/StablehloApi.h
++++ b/stablehlo/integrations/c/StablehloApi.h
+@@ -76,16 +76,6 @@ MLIR_CAPI_EXPORTED MlirLogicalResult stablehloSerializePortableArtifact(
+     MlirStringRef moduleStr, MlirStringRef targetVersion,
+     MlirStringCallback callback, void* userData);
+ 
+-// Write a StableHLO program expressed as a string (either prettyprinted MLIR
+-// module or MLIR bytecode) to a portable artifact.
+-// Can fail if `moduleStr` cannot be parsed, or if it cannot be expressed in the
+-// `targetVersion` version of StableHLO, e.g. if it's using new or removed
+-// features, or if it involves unsupported dialects.
+-// Returns false on failure.
+-MLIR_CAPI_EXPORTED MlirLogicalResult stablehloSerializePortableArtifact(
+-    MlirModule moduleStr, MlirStringRef targetVersion,
+-    MlirStringCallback callback, void* userData);
+-
+ // Read a StableHLO program from a portable artifact, returning the module as
+ // MLIR bytecode. Note, this bytecode returned is not a portable artifact,
+ // and has the stability of returning textual assembly format. Bytecode is
+@@ -93,7 +83,7 @@ MLIR_CAPI_EXPORTED MlirLogicalResult stablehloSerializePortableArtifact(
+ // Can fail if `artifactStr` cannot be expressed in the current version of
+ // StableHLO, e.g. if it's using incompatible features.
+ // Returns false on failure.
+-MLIR_CAPI_EXPORTED MlirLogicalResult stablehloDeserializePortableArtifact(
++MLIR_CAPI_EXPORTED MlirLogicalResult stablehloDeserializePortableArtifactAsBytecode(
+     MlirStringRef artifactStr, MlirStringCallback callback, void* userData);
+ 
+ // Read a StableHLO program from a portable artifact, returning the module as
+@@ -109,9 +99,6 @@ MLIR_CAPI_EXPORTED MlirModule stablehloDeserializePortableArtifact(
+ 
+ // Call the Interpreter, returns MlirArrayAttr of dense element
+ // MlirAttribute results
+-MLIR_CAPI_EXPORTED MlirModule stablehloDeserializePortableArtifact(
+-    MlirStringRef artifactStr, MlirContext ctx);
+-
+ // Entrypoint for calling the StableHLO reference interpreter.
+ // Returns an array attribute of dense element attributes for results.
+ // Sets error code to non-zero on failure.
+diff --git a/stablehlo/integrations/python/StablehloApi.cpp b/stablehlo/integrations/python/StablehloApi.cpp
+index 46a640e1..4229ef76 100644
+--- a/stablehlo/integrations/python/StablehloApi.cpp
++++ b/stablehlo/integrations/python/StablehloApi.cpp
+@@ -213,7 +213,7 @@ void AddPortableApi(py::module &m) {
+       "deserialize_portable_artifact_str",
+       [](std::string_view artifact) -> py::bytes {
+         StringWriterHelper accumulator;
+-        if (mlirLogicalResultIsFailure(stablehloDeserializePortableArtifact(
++        if (mlirLogicalResultIsFailure(stablehloDeserializePortableArtifactToBytecode(
+                 toMlirStringRef(artifact), accumulator.getMlirStringCallback(),
+                 accumulator.getUserData()))) {
+           PyErr_SetString(PyExc_ValueError, "failed to deserialize module");
+-- 
+2.39.3 (Apple Git-146)
+

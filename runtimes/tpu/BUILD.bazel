@@ -1,0 +1,5 @@
+alias(
+    name = "tpu",
+    actual = "@libpjrt_tpu",
+    visibility = ["//visibility:public"],
+)

@@ -1,0 +1,41 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+load("//bazel:zig.bzl", "zig_cc_test")
+
+zig_library(
+    name = "dialects",
+    srcs = [
+        "arith.zig",
+        "func.zig",
+        "math.zig",
+        "tensor.zig",
+    ],
+    import_name = "mlir/dialects",
+    main = "dialects.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":stablehlo",
+        "//mlir",
+    ],
+)
+
+zig_cc_test(
+    name = "test",
+    deps = [":dialects"],
+)
+
+zig_library(
+    name = "stablehlo",
+    import_name = "mlir/dialects/stablehlo",
+    main = "stablehlo.zig",
+    visibility = ["//mlir/dialects:__subpackages__"],
+    deps = [
+        "//mlir",
+        "//mlir:c",
+        "@stablehlo//:stablehlo_capi",
+    ],
+)
+
+zig_cc_test(
+    name = "stablehlo_test",
+    deps = [":stablehlo"],
+)

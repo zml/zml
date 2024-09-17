@@ -1,0 +1,64 @@
+load("@aspect_bazel_lib//lib:tar.bzl", "mtree_spec", "tar")
+load("@aspect_bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
+load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
+load("@zml//bazel:zig.bzl", "zig_cc_binary")
+
+zig_cc_binary(
+    name = "simple_layer",
+    main = "main.zig",
+    deps = [
+        "@zml//async",
+        "@zml//zml",
+    ],
+)
+
+# Manifest created from the simple_layer binary and friends
+mtree_spec(
+    name = "mtree",
+    srcs = [":simple_layer"],
+)
+
+# Create a tar archive from the above manifest
+tar(
+    name = "archive",
+    srcs = [":simple_layer"],
+    args = [
+        "--options",
+        "zstd:compression-level=9",
+    ],
+    compress = "zstd",
+    mtree = ":mtree",
+)
+
+# The actual docker image, with entrypoint, created from tar archive
+oci_image(
+    name = "image_",
+    base = "@distroless_cc_debian12",
+    entrypoint = ["./{}/simple_layer".format(package_name())],
+    tars = [":archive"],
+)
+
+# We always want to create the image for Linux
+platform_transition_filegroup(
+    name = "image",
+    srcs = [":image_"],
+    target_platform = "@zml//platforms:linux_amd64",
+)
+
+# Load will immediatly load the image (eg: docker load)
+oci_load(
+    name = "load",
+    image = ":image",
+    repo_tags = [
+        "distroless/simple_layer:latest",
+    ],
+)
+
+# Bazel target for pushing the Linux image to the docker registry
+oci_push(
+    name = "push",
+    image = ":image",
+    remote_tags = ["latest"],
+    # override with -- --repository foo.bar/org/image
+    repository = "index.docker.io/renerocksai/simple_layer",
+)

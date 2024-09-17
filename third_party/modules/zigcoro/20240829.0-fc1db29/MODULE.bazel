@@ -1,0 +1,8 @@
+module(
+    name = "zigcoro",
+    version = "20240829.0-fc1db29",
+    compatibility_level = 1,
+)
+
+bazel_dep(name = "rules_zig", version = "20240904.0-010da15")
+bazel_dep(name = "libxev", version = "20240825.0-dbe2291")

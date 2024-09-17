@@ -1,0 +1,7 @@
+module(
+    name = "zig-yaml",
+    version = "20240903.0-83d5fdf",
+    compatibility_level = 1,
+)
+
+bazel_dep(name = "rules_zig", version = "20240904.0-010da15")

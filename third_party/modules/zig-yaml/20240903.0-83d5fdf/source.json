@@ -1,0 +1,9 @@
+{
+    "strip_prefix": "zig-yaml-83d5fdfdd6c847b4bd2a8cad73b05a5c6447984b",
+    "url": "https://github.com/gwenzek/zig-yaml/archive/83d5fdfdd6c847b4bd2a8cad73b05a5c6447984b.tar.gz",
+    "integrity": "sha256-uusblAIZQgyKlg0qVmuHWD2JG+dMM+N6oKNGZsBdpEk=",
+    "overlay": {
+        "MODULE.bazel": "",
+        "BUILD.bazel": ""
+    }
+}

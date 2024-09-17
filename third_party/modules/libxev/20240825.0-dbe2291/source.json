@@ -1,0 +1,9 @@
+{
+    "strip_prefix": "libxev-dbe22910a43e9e8ec9948d3cbd73d8488a074967",
+    "url": "https://github.com/mitchellh/libxev/archive/dbe22910a43e9e8ec9948d3cbd73d8488a074967.tar.gz",
+    "integrity": "sha256-JM70bkRUyuAQXKV1piJ6I0IClzCrXV43sdLfIKVC9Lo=",
+    "overlay": {
+        "MODULE.bazel": "",
+        "BUILD.bazel": ""
+    }
+}

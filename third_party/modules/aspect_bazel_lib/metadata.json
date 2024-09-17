@@ -1,0 +1,25 @@
+{
+    "homepage": "https://docs.aspect.build/rules/aspect_bazel_lib",
+    "maintainers": [
+        {
+            "name": "Alex Eagle",
+            "email": "alex@aspect.dev",
+            "github": "alexeagle"
+        },
+        {
+            "name": "Derek Cormier",
+            "email": "derek@aspect.dev",
+            "github": "kormide"
+        }
+    ],
+    "repository": [
+        "github:aspect-build/bazel-lib"
+    ],
+    "versions": [
+        "2.8.1.1"
+    ],
+    "yanked_versions": {
+        "1.31.0": "1.31.0 has a breaking change to the default yq version",
+        "1.34.2": "The version field has a leading 'v' due to a release automation bug"
+    }
+}

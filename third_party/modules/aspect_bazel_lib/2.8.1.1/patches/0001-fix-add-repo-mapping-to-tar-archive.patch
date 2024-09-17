@@ -1,0 +1,50 @@
+From 5dbe6a2604e440b684add7b44531898acc8631b4 Mon Sep 17 00:00:00 2001
+From: Steeve Morin <steeve.morin@gmail.com>
+Date: Sun, 8 Sep 2024 21:17:29 +0200
+Subject: [PATCH] fix: add repo mapping to tar archive
+
+When using bzlmod, runfiles lookup will fail without it.
+---
+ lib/private/tar.bzl | 17 +++++++++++++----
+ 1 file changed, 13 insertions(+), 4 deletions(-)
+
+diff --git a/lib/private/tar.bzl b/lib/private/tar.bzl
+index 733ff60..29434f6 100644
+--- a/lib/private/tar.bzl
++++ b/lib/private/tar.bzl
+@@ -147,12 +147,19 @@ def _tar_impl(ctx):
+     args.add(ctx.file.mtree, format = "@%s")
+     inputs.append(ctx.file.mtree)
+ 
++    src_runfiles = []
++    for src in ctx.attr.srcs:
++        src_di = src[DefaultInfo]
++        if getattr(src_di.files_to_run, "repo_mapping_manifest", None) != None:
++            src_runfiles.append(depset(
++                direct = [src_di.files_to_run.repo_mapping_manifest],
++                transitive = [src_di.default_runfiles.files],
++            ))
++        else:
++            src_runfiles.append(src_di.default_runfiles.files)
+     ctx.actions.run(
+         executable = bsdtar.tarinfo.binary,
+-        inputs = depset(direct = inputs, transitive = [bsdtar.default.files] + [
+-            src[DefaultInfo].default_runfiles.files
+-            for src in ctx.attr.srcs
+-        ]),
++        inputs = depset(direct = inputs, transitive = [bsdtar.default.files] + src_runfiles),
+         outputs = [out],
+         arguments = [args],
+         mnemonic = "Tar",
+@@ -234,6 +241,8 @@ def _mtree_impl(ctx):
+         workspace_name = str(ctx.workspace_name)
+ 
+         content.add(_mtree_line(runfiles_dir, type = "dir"))
++        if getattr(default_info.files_to_run, "repo_mapping_manifest", None) != None:
++            content.add(_mtree_line("{}/_repo_mapping".format(runfiles_dir), type = "file", content = default_info.files_to_run.repo_mapping_manifest.path))
+         content.add_all(
+             s.default_runfiles.files,
+             expand_directories = True,
+-- 
+2.39.3 (Apple Git-146)
+

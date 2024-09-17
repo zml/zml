@@ -1,0 +1,11 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "async",
+    main = "async.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@zigcoro//:libcoro",
+        "@libxev//:xev",
+    ],
+)

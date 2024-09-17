@@ -1,0 +1,93 @@
+load("@aspect_bazel_lib//lib:expand_template.bzl", "expand_template")
+load("@aspect_bazel_lib//lib:tar.bzl", "mtree_spec", "tar")
+load("@aspect_bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
+load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
+load("@zml//bazel:zig.bzl", "zig_cc_binary")
+
+# Executable
+zig_cc_binary(
+    name = "mnist",
+    args = [
+        "$(location @com_github_ggerganov_ggml_mnist//file)",
+        "$(location @com_github_ggerganov_ggml_mnist_data//file)",
+    ],
+    data = [
+        "@com_github_ggerganov_ggml_mnist//file",
+        "@com_github_ggerganov_ggml_mnist_data//file",
+    ],
+    main = "mnist.zig",
+    deps = [
+        "@zml//async",
+        "@zml//zml",
+    ],
+)
+
+mtree_spec(
+    name = "mtree",
+    srcs = [":mnist"],
+)
+
+tar(
+    name = "archive",
+    srcs = [":mnist"],
+    args = [
+        "--options",
+        "zstd:compression-level=9",
+    ],
+    compress = "zstd",
+    mtree = ":mtree",
+)
+
+expand_template(
+    name = "entrypoint",
+    data = [
+        ":mnist",
+        "@com_github_ggerganov_ggml_mnist//file",
+        "@com_github_ggerganov_ggml_mnist_data//file",
+    ],
+    substitutions = {
+        ":model": "$(rlocationpath @com_github_ggerganov_ggml_mnist//file)",
+        ":data": "$(rlocationpath @com_github_ggerganov_ggml_mnist_data//file)",
+    },
+    template = [
+        "./{}/mnist".format(package_name()),
+        "./{}/mnist.runfiles/:model".format(package_name()),
+        "./{}/mnist.runfiles/:data".format(package_name()),
+    ],
+)
+
+oci_image(
+    name = "image_",
+    base = "@distroless_cc_debian12",
+    entrypoint = ":entrypoint",
+    tars = [":archive"],
+)
+
+platform_transition_filegroup(
+    name = "image",
+    srcs = [":image_"],
+    target_platform = "@zml//platforms:linux_amd64",
+)
+
+oci_load(
+    name = "load",
+    image = ":image",
+    repo_tags = [
+        "distroless/mnist:latest",
+    ],
+)
+
+oci_push(
+    name = "push",
+    image = ":image",
+    remote_tags = ["latest"],
+    repository = "index.docker.io/steeve/mnist",
+)
+
+oci_load(
+    name = "debug_image",
+    image = ":image",
+    repo_tags = [
+        "distroless/mnist:latest",
+    ],
+)

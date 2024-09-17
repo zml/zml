@@ -1,0 +1,8 @@
+alias(
+    name = "cpu",
+    actual = select({
+        "@platforms//os:macos": "@libpjrt_cpu_darwin_arm64//:libpjrt_cpu",
+        "@platforms//os:linux": "@libpjrt_cpu_linux_amd64//:libpjrt_cpu",
+    }),
+    visibility = ["//visibility:public"],
+)

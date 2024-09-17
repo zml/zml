@@ -1,0 +1,7 @@
+module(
+    name = "sentencepiece",
+    version = "20240618.0-d7ace0a",
+    compatibility_level = 1,
+)
+
+bazel_dep(name = "rules_proto", version = "6.0.0-rc1")

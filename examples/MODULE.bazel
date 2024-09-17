@@ -1,0 +1,163 @@
+module(name = "examples")
+
+bazel_dep(name = "bazel_skylib", version = "1.7.1")
+bazel_dep(name = "rules_zig", version = "20240912.0-41bfe84")
+bazel_dep(name = "platforms", version = "0.0.10")
+bazel_dep(name = "zml", version = "0.1.0")
+bazel_dep(name = "aspect_bazel_lib", version = "2.8.1.1")
+
+bazel_dep(name = "rules_oci", version = "2.0.0")
+oci = use_extension("@rules_oci//oci:extensions.bzl", "oci")
+oci.pull(
+    name = "distroless_cc_debian12",
+    digest = "sha256:1850aee2ff72864350058d83d681c757d45c885986d15fcca7309b9e5c69f39a",
+    image = "gcr.io/distroless/cc-debian12",
+    platforms = [
+        "linux/amd64",
+    ],
+)
+use_repo(oci, "distroless_cc_debian12", "distroless_cc_debian12_linux_amd64")
+
+# Mnist weights
+http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
+
+http_file(
+    name = "com_github_ggerganov_ggml_mnist",
+    downloaded_file_path = "mnist.pt",
+    sha256 = "d8a25252e28915e147720c19223721f0f53e3317493727ca754a2dd672450ba9",
+    url = "https://github.com/ggerganov/ggml/raw/18703ad600cc68dbdb04d57434c876989a841d12/examples/mnist/models/mnist/mnist_model.state_dict",
+)
+
+http_file(
+    name = "com_github_ggerganov_ggml_mnist_data",
+    downloaded_file_path = "mnist.ylc",
+    sha256 = "0fa7898d509279e482958e8ce81c8e77db3f2f8254e26661ceb7762c4d494ce7",
+    url = "https://github.com/ggerganov/ggml/raw/18703ad600cc68dbdb04d57434c876989a841d12/examples/mnist/models/mnist/t10k-images.idx3-ubyte",
+)
+
+# Llama weights
+huggingface = use_extension("@zml//bazel:huggingface.bzl", "huggingface")
+
+huggingface.model(
+    name = "Karpathy-TinyLlama-Stories",
+    build_file_content = """\
+load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
+
+# leverage copy_file to rename tokenizer extension
+# which allow zml.aio.detectFormatAndLoadTokenizer
+# to leverage the right tokenizer
+copy_file(
+    name = "stories15M",
+    src = "stories15M.bin",
+    out = "stories15M.tinyllama",
+    allow_symlink = True,
+    visibility = ["//visibility:public"],
+)
+
+copy_file(
+    name = "stories110M",
+    src = "stories110M.bin",
+    out = "stories110M.tinyllama",
+    allow_symlink = True,
+    visibility = ["//visibility:public"],
+)
+""",
+    commit = "0bd21da7698eaf29a0d7de3992de8a46ef624add",
+    includes = [
+        "stories15M.bin",
+        "stories110M.bin",
+    ],
+    model = "karpathy/tinyllamas",
+)
+use_repo(huggingface, "Karpathy-TinyLlama-Stories")
+
+http_file(
+    name = "Karpathy-TinyLlama-Tokenizer",
+    downloaded_file_path = "stories260K.tinyllama",
+    sha256 = "50a52ef822ee9e83de5ce9d0be0a025a773d019437f58b5ff9dcafb063ece361",
+    url = "https://github.com/karpathy/llama2.c/raw/c02865df300f3bd9e567ce061000dc23bf785a17/tokenizer.bin",
+)
+
+huggingface.model(
+    name = "Meta-Llama-3.1-8B-Instruct",
+    build_file_content = """\
+package(default_visibility = ["//visibility:public"])
+filegroup(
+    name = "model",
+    srcs = glob(["*.safetensors"]) + ["model.safetensors.index.json"],
+)
+
+filegroup(
+    name = "tokenizer",
+    srcs = ["tokenizer.json"],
+)
+""",
+    commit = "5206a32e0bd3067aef1ce90f5528ade7d866253f",
+    includes = [
+        "*.safetensors",
+        "model.safetensors.index.json",
+        "tokenizer.json",
+    ],
+    model = "meta-llama/Meta-Llama-3.1-8B-Instruct",
+)
+use_repo(huggingface, "Meta-Llama-3.1-8B-Instruct")
+
+huggingface.model(
+    name = "TinyLlama-1.1B-Chat-v1.0",
+    build_file_content = """\
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "model",
+    srcs = ["model.safetensors"],
+)
+
+filegroup(
+    name = "tokenizer",
+    srcs = ["tokenizer.model"],
+)
+""",
+    commit = "fe8a4ea1ffedaf415f4da2f062534de366a451e6",
+    includes = [
+        "model.safetensors",
+        "tokenizer.model",
+    ],
+    model = "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+)
+use_repo(huggingface, "TinyLlama-1.1B-Chat-v1.0")
+
+huggingface.model(
+    name = "OpenLM-Research-OpenLLaMA-3B",
+    build_file_content = """\
+load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "model",
+    srcs = ["model.safetensors"],
+)
+
+filegroup(
+    name = "tokenizer",
+    srcs = [":tokenizer_pb"],
+)
+
+# leverage copy_file to rename tokenizer extension
+# which allow zml.aio.detectFormatAndLoadTokenizer
+# to leverage the right tokenizer
+copy_file(
+    name = "tokenizer_pb",
+    src = "tokenizer.model",
+    out = "tokenizer.pb",
+    allow_symlink = True,
+)
+""",
+    commit = "fcc2e809eb8f14dabba84d76a0ddc17b8ea05356",
+    includes = [
+        "model.safetensors",
+        "tokenizer.model",
+    ],
+    model = "openlm-research/open_llama_3b",
+)
+use_repo(huggingface, "OpenLM-Research-OpenLLaMA-3B")

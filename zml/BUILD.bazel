@@ -1,0 +1,84 @@
+load("@aspect_bazel_lib//lib:tar.bzl", "mtree_spec", "tar")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zls_completion")
+load("//bazel:zig.bzl", "zig_cc_test")
+load("//bazel:zig_proto_library.bzl", "zig_proto_library")
+
+cc_library(
+    name = "posix",
+    hdrs = ["posix.h"],
+)
+
+zig_library(
+    name = "zml",
+    srcs = glob([
+        "*.zig",
+        "aio/**/*.zig",
+        "nn/**/*.zig",
+        "ops/**/*.zig",
+    ]),
+    copts = ["-lc"],
+    main = "zml.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":posix",
+        ":sentencepiece_model_proto",
+        ":xla_proto",
+        "//async",
+        "//mlir",
+        "//mlir/dialects",
+        "//pjrt",
+        "//runtimes",
+        "//zml/tools",
+        "@rules_zig//zig/lib:libc",
+        "@rules_zig//zig/runfiles",
+        "@zig-yaml//:zig-yaml",
+    ],
+)
+
+zls_completion(
+    name = "completion",
+    deps = [":zml"],
+)
+
+zig_proto_library(
+    name = "xla_proto",
+    import_name = "//xla:xla_proto",
+    deps = ["@xla//xla/pjrt:compile_options_proto"],
+)
+
+zig_proto_library(
+    name = "sentencepiece_model_proto",
+    import_name = "//sentencepiece:model_proto",
+    deps = ["@sentencepiece//:sentencepiece_model_proto"],
+)
+
+# All ZML Tests
+
+zig_cc_test(
+    name = "test",
+    data = [
+        "aio/torch/simple.pt",
+        "aio/torch/simple_test.pickle",
+    ],
+    test_runner = "test_runner.zig",
+    deps = [":zml"],
+)
+
+filegroup(
+    name = "srcs",
+    srcs = [":test_test_lib"],
+    output_group = "srcs",
+)
+
+mtree_spec(
+    name = "mtree",
+    srcs = [":srcs"],
+)
+
+tar(
+    name = "sources",
+    srcs = [":srcs"],
+    args = [
+    ],
+    mtree = ":mtree",
+)

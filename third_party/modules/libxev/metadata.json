@@ -1,0 +1,18 @@
+{
+    "homepage": "https://github.com/mitchellh/libxev",
+    "maintainers": [
+        {
+            "email": "bzlmod@zml.ai",
+            "github": "zml",
+            "name": "ZML Engineering Team"
+        }
+    ],
+    "repository": [
+        "github:mitchellh/libxev"
+    ],
+    "versions": [
+        "20240825.0-dbe2291",
+        "20240910.0-a2d9b31"
+    ],
+    "yanked_versions": {}
+}

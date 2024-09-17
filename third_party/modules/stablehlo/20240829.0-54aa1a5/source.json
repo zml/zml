@@ -1,0 +1,12 @@
+{
+    "strip_prefix": "stablehlo-54aa1a57178251981da616b877dda1a88d840d11",
+    "url": "https://github.com/openxla/stablehlo/archive/54aa1a57178251981da616b877dda1a88d840d11.tar.gz",
+    "integrity": "sha256-PFXXs3vQ+WlMiCC8twbGEFbsBEF/67Z4qtmq8CtUSUU=",
+    "overlay": {
+        "MODULE.bazel": ""
+    },
+    "patch_strip": 1,
+    "patches": {
+        "0001-Remove-duplicated-symbols-in-StablehloApi.h.patch": ""
+    }
+}

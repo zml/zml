@@ -1,0 +1,11 @@
+--- a/bootstrapped-generator/main.zig
++++ b/bootstrapped-generator/main.zig
+@@ -6,7 +6,7 @@ const descriptor = @import("google/protobuf/descriptor.pb.zig");
+ const mem = std.mem;
+ const FullName = @import("./FullName.zig").FullName;
+ 
+-const USE_MODULES = false;
++const USE_MODULES = true;
+ 
+ const allocator = std.heap.page_allocator;
+ 

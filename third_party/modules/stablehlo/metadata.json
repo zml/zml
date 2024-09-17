@@ -1,0 +1,17 @@
+{
+    "homepage": "https://github.com/openxla/stablehlo",
+    "maintainers": [
+        {
+            "email": "bzlmod@zml.ai",
+            "github": "zml",
+            "name": "ZML Engineering Team"
+        }
+    ],
+    "repository": [
+        "github:openxla/stablehlo"
+    ],
+    "versions": [
+        "20240829.0-54aa1a5"
+    ],
+    "yanked_versions": {}
+}

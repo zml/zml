@@ -1,0 +1,27 @@
+{
+    "editor.formatOnSave": true,
+    "files.exclude": {
+        "**/.git": true,
+        "**/.svn": true,
+        "**/.hg": true,
+        "**/CVS": true,
+        "**/.DS_Store": true,
+        "**/bazel-*": true
+    },
+    "files.watcherExclude": {
+        "**/bazel-*": true,
+    },
+    // "files.trimTrailingWhitespace": true,
+    "files.insertFinalNewline": true,
+    "bazel.buildifierFixOnFormat": true,
+    "bazel.queriesShareServer": true,
+    "bazel.pathsToIgnore": [
+        "."
+    ],
+    "bazel.buildifierExecutable": "@buildifier_prebuilt//:buildifier",
+    "zig.formattingProvider": "zls",
+    "zig.initialSetupDone": true,
+    "zig.path": "${workspaceFolder}/tools/zig.sh",
+    "zig.zls.globalCachePath": null,
+    "zig.zls.path": "${workspaceFolder}/tools/zls.sh",
+}

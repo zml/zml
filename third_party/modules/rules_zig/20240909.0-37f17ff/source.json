@@ -1,0 +1,5 @@
+{
+    "type": "git_repository",
+    "remote": "https://github.com/zml/rules_zig.git",
+    "commit": "37f17ffd2f6d04fc4bf9b583f9a1b117856a88d1"
+}

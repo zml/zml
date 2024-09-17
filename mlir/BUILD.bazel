@@ -1,0 +1,39 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+load("//bazel:zig.bzl", "zig_cc_test")
+
+cc_library(
+    name = "mlirx",
+    srcs = ["mlirx.cc"],
+    hdrs = ["mlirx.h"],
+    includes = ["."],
+    deps = [
+        "@llvm-project//mlir:CAPIIR",
+    ],
+)
+
+cc_library(
+    name = "c",
+    hdrs = ["c.h"],
+    visibility = ["//mlir:__subpackages__"],
+    deps = [
+        "@llvm-project//mlir:CAPIArith",
+        "@llvm-project//mlir:CAPIIR",
+        "@llvm-project//mlir:CAPIMath",
+        "@llvm-project//mlir:CAPITransforms",
+    ],
+)
+
+zig_library(
+    name = "mlir",
+    main = "mlir.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":c",
+        ":mlirx",
+    ],
+)
+
+zig_cc_test(
+    name = "test",
+    deps = [":mlir"],
+)

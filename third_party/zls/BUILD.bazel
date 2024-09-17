@@ -1,0 +1,14 @@
+load(":zls.bzl", "targets", "zig_runner", "zls_runner")
+
+toolchain_type(name = "toolchain_type")
+
+targets()
+
+zig_runner(
+    name = "zig",
+)
+
+zls_runner(
+    name = "zls",
+    zig = ":zig",
+)

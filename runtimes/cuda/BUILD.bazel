@@ -1,0 +1,5 @@
+alias(
+    name = "cuda",
+    actual = "@libpjrt_cuda",
+    visibility = ["//visibility:public"],
+)

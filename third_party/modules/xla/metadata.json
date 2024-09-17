@@ -1,0 +1,17 @@
+{
+    "homepage": "https://github.com/openxla/xla",
+    "maintainers": [
+        {
+            "email": "bzlmod@zml.ai",
+            "github": "zml",
+            "name": "ZML Engineering Team"
+        }
+    ],
+    "repository": [
+        "github:openxla/xla"
+    ],
+    "versions": [
+        "20240902.0-d18cd64"
+    ],
+    "yanked_versions": {}
+}

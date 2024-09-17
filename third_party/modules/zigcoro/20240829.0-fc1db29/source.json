@@ -1,0 +1,14 @@
+{
+    "strip_prefix": "zigcoro-fc1db29dee049ce572a516f1586cce0eca4fcb2a",
+    "url": "https://github.com/rsepassi/zigcoro/archive/fc1db29dee049ce572a516f1586cce0eca4fcb2a.tar.gz",
+    "integrity": "sha256-2ynCPLSRFPto3HIOhDTBDyUS770PNMI9ioMkj8Z7Y+s=",
+    "overlay": {
+        "MODULE.bazel": "",
+        "BUILD.bazel": ""
+    },
+    "patch_strip": 1,
+    "patches": {
+        "0001-Handle-generic-function-in-Signature.patch": "",
+        "0002-asyncio-return-error-super-set-in-pread-pwrite.patch": ""
+    }
+}

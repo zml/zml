@@ -1,0 +1,12 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "zig-yaml",
+    srcs = glob([
+        "src/*.zig",
+        "src/parse/*.zig",
+        "src/yaml/*.zig",
+    ]),
+    main = "src/yaml.zig",
+    visibility = ["//visibility:public"],
+)

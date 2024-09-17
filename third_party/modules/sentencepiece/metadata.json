@@ -1,0 +1,17 @@
+{
+    "homepage": "https://github.com/google/sentencepiece",
+    "maintainers": [
+        {
+            "email": "bzlmod@zml.ai",
+            "github": "zml",
+            "name": "ZML Engineering Team"
+        }
+    ],
+    "repository": [
+        "google/sentencepiece"
+    ],
+    "versions": [
+        "20240618.0-d7ace0a"
+    ],
+    "yanked_versions": {}
+}

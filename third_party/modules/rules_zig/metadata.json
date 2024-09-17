@@ -1,0 +1,20 @@
+{
+    "homepage": "https://github.com/zml/rules_zig",
+    "maintainers": [
+        {
+            "email": "bzlmod@zml.ai",
+            "github": "zml",
+            "name": "ZML Engineering Team"
+        }
+    ],
+    "repository": [
+        "github:zml/rules_zig"
+    ],
+    "versions": [
+        "20240904.0-010da15",
+        "20240909.0-37f17ff",
+        "20240912.0-41bfe84",
+        "20240913.0-1957d05"
+    ],
+    "yanked_versions": {}
+}

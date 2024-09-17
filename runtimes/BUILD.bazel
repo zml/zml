@@ -1,0 +1,42 @@
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
+
+RUNTIMES = {
+    "cpu": True,
+    "cuda": False,
+    "rocm": False,
+    "tpu": False,
+}
+
+[
+    bool_flag(
+        name = runtime,
+        build_setting_default = default,
+    )
+    for runtime, default in RUNTIMES.items()
+]
+
+[
+    config_setting(
+        name = "_{}".format(runtime),
+        flag_values = {":{}".format(runtime): "True"},
+    )
+    for runtime in RUNTIMES.keys()
+]
+
+cc_library(
+    name = "runtimes",
+    visibility = ["//visibility:public"],
+    deps = select({
+        ":_cpu": ["//runtimes/cpu"],
+        "//conditions:default": [],
+    }) + select({
+        ":_cuda": ["//runtimes/cuda"],
+        "//conditions:default": [],
+    }) + select({
+        ":_rocm": ["//runtimes/rocm"],
+        "//conditions:default": [],
+    }) + select({
+        ":_tpu": ["//runtimes/tpu"],
+        "//conditions:default": [],
+    }),
+)

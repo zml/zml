@@ -1,0 +1,17 @@
+{
+    "homepage": "https://github.com/llvm/llvm-project",
+    "maintainers": [
+        {
+            "email": "bzlmod@zml.ai",
+            "github": "zml",
+            "name": "ZML Engineering Team"
+        }
+    ],
+    "repository": [
+        "github:llvm/llvm-project"
+    ],
+    "versions": [
+        "20240823.0-f142f8a"
+    ],
+    "yanked_versions": {}
+}

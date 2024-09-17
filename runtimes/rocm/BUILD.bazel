@@ -1,0 +1,21 @@
+filegroup(
+    name = "zmlrocmhooks_srcs",
+    srcs = ["zmlrocmhooks.cc"],
+    visibility = ["@libpjrt_rocm//:__subpackages__"],
+)
+
+alias(
+    name = "hipblaslt",
+    actual = "@libpjrt_rocm//:hipblaslt",
+)
+
+alias(
+    name = "gfx",
+    actual = "@libpjrt_rocm//:gfx",
+)
+
+alias(
+    name = "rocm",
+    actual = "@libpjrt_rocm",
+    visibility = ["//visibility:public"],
+)

@@ -1,0 +1,9 @@
+{
+    "strip_prefix": "sentencepiece-d7ace0a4df17af17d73dc8fe6ff92cfd8d08e2b8",
+    "url": "https://github.com/google/sentencepiece/archive/d7ace0a4df17af17d73dc8fe6ff92cfd8d08e2b8.tar.gz",
+    "integrity": "sha256-bt8QFNNIpqcJoCNMUrmWfUf0uNobtk8pW+XbHL+ZRLg=",
+    "overlay": {
+        "MODULE.bazel": "",
+        "BUILD.bazel": ""
+    }
+}

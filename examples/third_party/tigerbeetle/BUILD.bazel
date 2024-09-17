@@ -1,0 +1,11 @@
+# Files in this folder come from the very fine folks of TigerBeetle
+# and is licensed under Apache 2.0 attribution license.
+# https://github.com/tigerbeetle/tigerbeetle
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "flags",
+    import_name = "tigerbeetle/flags",
+    main = "flags.zig",
+    visibility = ["//visibility:public"],
+)

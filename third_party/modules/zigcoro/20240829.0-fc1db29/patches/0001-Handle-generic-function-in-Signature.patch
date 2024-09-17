@@ -1,0 +1,48 @@
+From e2416ff5ec9cad5572e6a5edac3f949b75024c00 Mon Sep 17 00:00:00 2001
+From: Steeve Morin <steeve.morin@gmail.com>
+Date: Tue, 6 Aug 2024 11:34:35 +0200
+Subject: [PATCH 1/2] Handle generic function in Signature
+
+---
+ src/coro.zig | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/src/coro.zig b/src/coro.zig
+index 9285489..8a34717 100644
+--- a/src/coro.zig
++++ b/src/coro.zig
+@@ -266,6 +266,7 @@ const CoroT = struct {
+         YieldT: type = void,
+         InjectT: type = void,
+         ArgsT: type,
++        _ReturnT: type,
+ 
+         // If the function this signature represents is compile-time known,
+         // it can be held here.
+@@ -273,19 +274,21 @@ const CoroT = struct {
+ 
+         fn init(comptime Func: anytype, comptime options: CoroT.Options) @This() {
+             const FuncT = if (@TypeOf(Func) == type) Func else @TypeOf(Func);
++            const ArgsT = options.ArgsT orelse ArgsTuple(FuncT);
+             return .{
+                 .Func = FuncT,
+                 .YieldT = options.YieldT,
+                 .InjectT = options.InjectT,
+-                .ArgsT = options.ArgsT orelse ArgsTuple(FuncT),
++                .ArgsT = ArgsT,
+                 .func_ptr = if (@TypeOf(Func) == type) null else struct {
+                     const val = Func;
+                 },
++                ._ReturnT = @TypeOf(@call(.auto, Func, @as(ArgsT, undefined))),
+             };
+         }
+ 
+         pub fn ReturnT(comptime self: @This()) type {
+-            return @typeInfo(self.Func).Fn.return_type.?;
++            return self._ReturnT;
+         }
+     };
+ 
+-- 
+2.39.3 (Apple Git-146)
+

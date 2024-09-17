@@ -1,0 +1,79 @@
+module(
+    name = "zml",
+)
+
+new_git_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:git.bzl", "new_git_repository")
+
+bazel_dep(name = "bazel_skylib", version = "1.7.1")
+bazel_dep(name = "hermetic_cc_toolchain", version = "3.1.0")
+bazel_dep(name = "patchelf", version = "0.18.0")
+bazel_dep(name = "platforms", version = "0.0.10")
+bazel_dep(name = "rules_cc", version = "0.0.9")
+bazel_dep(name = "rules_pkg", version = "1.0.1")
+bazel_dep(name = "rules_proto", version = "6.0.2")
+
+bazel_dep(name = "buildifier_prebuilt", version = "6.4.0", dev_dependency = True)
+
+bazel_dep(name = "aspect_bazel_lib", version = "2.8.1.1")
+bazel_lib_toolchains = use_extension("@aspect_bazel_lib//lib:extensions.bzl", "toolchains", dev_dependency = True)
+use_repo(bazel_lib_toolchains, "jq_toolchains")
+
+toolchains = use_extension("@hermetic_cc_toolchain//toolchain:ext.bzl", "toolchains")
+use_repo(toolchains, "zig_sdk")
+
+bazel_dep(name = "rules_zig", version = "20240913.0-1957d05")
+zig = use_extension("@rules_zig//zig:extensions.bzl", "zig")
+zig.index(file = "//bazel:zig_index.json")
+zig.toolchain(zig_version = "0.14.0-dev.363+c3faae6bf")
+zig.mirrors(urls = [
+    "https://mirror.zml.ai/zig",
+])
+use_repo(zig, "zig_toolchains")
+
+register_toolchains("@rules_zig//zig/target:all")
+register_toolchains("@zig_toolchains//:all")
+register_toolchains(
+    "@zig_sdk//toolchain:linux_amd64_gnu.2.31",
+    "@zig_sdk//toolchain:linux_arm64_gnu.2.31",
+)
+
+cpu = use_extension("//runtimes/cpu:cpu.bzl", "cpu_pjrt_plugin")
+use_repo(cpu, "libpjrt_cpu_darwin_arm64", "libpjrt_cpu_linux_amd64")
+
+cuda = use_extension("//runtimes/cuda:cuda.bzl", "cuda_packages")
+use_repo(cuda, "libpjrt_cuda")
+
+rocm = use_extension("//runtimes/rocm:rocm.bzl", "rocm_packages")
+use_repo(rocm, "libpjrt_rocm")
+
+tpu = use_extension("//runtimes/tpu:tpu.bzl", "tpu_packages")
+use_repo(tpu, "libpjrt_tpu")
+
+zls = use_extension("//third_party/zls:zls.bzl", "repo")
+use_repo(zls, "zls_aarch64-macos", "zls_x86_64-linux")
+
+register_toolchains("//third_party/zls:all")
+
+bazel_dep(name = "libxev", version = "20240910.0-a2d9b31")
+bazel_dep(name = "llvm-raw", version = "20240823.0-f142f8a")
+
+llvm = use_extension("@llvm-raw//utils/bazel:extension.bzl", "llvm")
+llvm.configure(
+    targets = [
+        "AArch64",
+        "X86",
+        "NVPTX",
+    ],
+)
+use_repo(llvm, "llvm-project")
+
+bazel_dep(name = "stablehlo", version = "20240829.0-54aa1a5")
+bazel_dep(name = "xla", version = "20240902.0-d18cd64")
+
+tsl = use_extension("@xla//:tsl.bzl", "tsl")
+use_repo(tsl, "tsl")
+
+bazel_dep(name = "zigcoro", version = "20240829.0-fc1db29")
+bazel_dep(name = "sentencepiece", version = "20240618.0-d7ace0a")
+bazel_dep(name = "zig-protobuf", version = "20240722.0-c644d11")
+bazel_dep(name = "zig-yaml", version = "20240903.0-83d5fdf")

@@ -1,0 +1,7 @@
+load("@rules_proto//proto:defs.bzl", "proto_library")
+
+proto_library(
+    name = "sentencepiece_model_proto",
+    srcs = ["src/sentencepiece_model.proto"],
+    visibility = ["//visibility:public"],
+)

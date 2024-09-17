@@ -1,0 +1,17 @@
+{
+    "homepage": "https://github.com/gwenzek/zig-yaml",
+    "maintainers": [
+        {
+            "email": "bzlmod@zml.ai",
+            "github": "zml",
+            "name": "ZML Engineering Team"
+        }
+    ],
+    "repository": [
+        "github:gwenzek/zig-yaml"
+    ],
+    "versions": [
+        "20240903.0-83d5fdf"
+    ],
+    "yanked_versions": {}
+}

@@ -1,0 +1,29 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+genrule(
+    name = "libcoro_options_gen",
+    outs = ["options.zig"],
+    cmd = """\
+cat <<EOF > $@
+pub const default_stack_size: usize = 4096;
+pub const debug_log_level: usize = 0;
+EOF
+""",
+)
+
+zig_library(
+    name = "libcoro_options",
+    main = ":libcoro_options_gen",
+)
+
+zig_library(
+    name = "libcoro",
+    srcs = glob(["src/*.zig"]),
+    extra_srcs = glob(["src/asm/*.s"]),
+    main = "src/main.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":libcoro_options",
+        "@libxev//:xev",
+    ],
+)

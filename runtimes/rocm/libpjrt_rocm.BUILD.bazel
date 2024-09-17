@@ -1,0 +1,88 @@
+load("@aspect_bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag", "string_list_flag")
+load("@zml//bazel:cc_import.bzl", "cc_import")
+
+string_list_flag(
+    name = "gfx",
+    build_setting_default = ["all"],
+    visibility = [
+        "@rocblas//:__subpackages__",
+        "@hipblaslt-dev//:__subpackages__",
+    ],
+)
+
+bool_flag(
+    name = "hipblaslt",
+    build_setting_default = True,
+)
+
+config_setting(
+    name = "_hipblaslt",
+    flag_values = {":hipblaslt": "True"},
+)
+
+copy_to_directory(
+    name = "sandbox",
+    srcs = [
+        "@rocm-device-libs//:runfiles",
+        "@rocm-llvm//:lld",
+    ],
+    include_external_repositories = ["*"],
+)
+
+cc_library(
+    name = "zmlrocmhooks_lib",
+    data = ["@rocblas//:runfiles"],
+    srcs = ["@zml//runtimes/rocm:zmlrocmhooks_srcs"],
+    linkopts = [
+        "-lc",
+        "-ldl",
+    ],
+    deps = ["@bazel_tools//tools/cpp/runfiles"],
+)
+
+cc_shared_library(
+    name = "zmlrocmhooks_so",
+    shared_lib_name = "libzmlrocmhooks.so.0",
+    deps = [":zmlrocmhooks_lib"],
+)
+
+cc_import(
+    name = "zmlrocmhooks",
+    shared_library = ":zmlrocmhooks_so",
+)
+
+cc_import(
+    name = "libpjrt_rocm",
+    data = [
+        ":sandbox",
+        "@rocblas//:runfiles",
+    ] + select({
+        ":_hipblaslt": ["@hipblaslt-dev//:runfiles"],
+        "//conditions:default": [],
+    }),
+    shared_library = "libpjrt_rocm.so",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":zmlrocmhooks",
+        "@comgr//:amd_comgr",
+        "@hip-runtime-amd//:amdhip",
+        "@hipblaslt",
+        "@hsa-amd-aqlprofile//:hsa-amd-aqlprofile",
+        "@hsa-rocr//:hsa-runtime",
+        "@miopen-hip//:MIOpen",
+        "@rccl",
+        "@rocblas",
+        "@rocm-core",
+        "@rocm-smi-lib//:rocm_smi",
+        "@rocprofiler-register",
+        "@roctracer",
+        "@libelf",
+        "@libdrm",
+        "@libnuma",
+        "@libzstd",
+        "@libdrm-amdgpu",
+        "@libtinfo",
+        "@zlib1g",
+    ],
+)
