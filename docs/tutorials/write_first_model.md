@@ -137,7 +137,7 @@ You see, in ZML AI models are just structs with a forward function!
 There are more things to observe:
 
 - forward functions typically take Tensors as inputs, and return Tensors.
-    - more advanced use-cases are passing in / returning structs or tuples, like 
+    - more advanced use-cases are passing in / returning structs or tuples, like
       `struct { Tensor, Tensor }` as an example for a tuple of two tensors.
       You can see such use-cases, for example in the
       [Llama Model](https://github.com/zml/zml/tree/master/examples/llama)
@@ -251,12 +251,15 @@ const model_shapes = try zml.aio.populateModel(Layer, allocator, bs);
 
 // Start compiling. This uses the inferred shapes from the BufferStore.
 // The shape of the input tensor, we have to pass in manually.
-var compilation = try async_(zml.compileModel, .{ allocator, model_shapes, .forward, .{input_shape}, platform });
+var compilation = try async_(
+    zml.compileModel,
+    .{ allocator, model_shapes, .forward, .{input_shape}, platform },
+);
 
 // Produce a bufferized weights struct from the fake BufferStore.
 // This is like the inferred shapes, but with actual values.
 // We will need to send those to the computation device later.
-const model_weights = try zml.aio.loadBuffers(Layer, .{}, bs, arena, platform);
+var model_weights = try zml.aio.loadBuffers(Layer, .{}, bs, arena, platform);
 defer zml.aio.unloadBuffers(&model_weights);  // for good practice
 
 // Wait for compilation to finish
@@ -305,11 +308,15 @@ in device memory.
 
 ```zig
 // prepare an input buffer
-// Here, we use zml.HostBuffer.fromSlice to show how you would create a HostBuffer 
-// with a specific shape from an array.
-// For situations where e.g. you have an [4]f16 array but need a .{2, 2} input shape.
+// Here, we use zml.HostBuffer.fromSlice to show how you would create a 
+// HostBuffer with a specific shape from an array.
+// For situations where e.g. you have an [4]f16 array but need a .{2, 2} input 
+// shape.
 var input = [3]f16{ 5.0, 5.0, 5.0 };
-var input_buffer = try zml.Buffer.from(platform, zml.HostBuffer.fromSlice(input_shape, &input));
+var input_buffer = try zml.Buffer.from(
+    platform,
+    zml.HostBuffer.fromSlice(input_shape, &input),
+);
 defer input_buffer.deinit();
 
 // call our executable module
@@ -469,33 +476,41 @@ pub fn asyncMain() !void {
         .buffers = buffers,
     };
 
-    // A clone of our model, consisting of shapes. We only need shapes for compiling.
-    // We use the BufferStore to infer the shapes.
+    // A clone of our model, consisting of shapes. We only need shapes for
+    // compiling. We use the BufferStore to infer the shapes.
     const model_shapes = try zml.aio.populateModel(Layer, allocator, bs);
 
     // Start compiling. This uses the inferred shapes from the BufferStore.
     // The shape of the input tensor, we have to pass in manually.
-    var compilation = try async_(zml.compileModel, .{ allocator, model_shapes, .forward, .{input_shape}, platform });
+    var compilation = try async_(
+        zml.compileModel,
+        .{ allocator, model_shapes, .forward, .{input_shape}, platform },
+    );
 
     // Produce a bufferized weights struct from the fake BufferStore.
     // This is like the inferred shapes, but with actual values.
     // We will need to send those to the computation device later.
-    const model_weights = try zml.aio.loadBuffers(Layer, .{}, bs, arena, platform);
-    defer zml.aio.unloadBuffers(&model_weights);
+    var model_weights = try zml.aio.loadBuffers(Layer, .{}, bs, arena, platform);
+    defer zml.aio.unloadBuffers(&model_weights); // for good practice
 
     // Wait for compilation to finish
     const compiled = try compilation.await_();
 
-    // pass the model weights to the compiled module to create an executable module
+    // pass the model weights to the compiled module to create an executable 
+    // module
     var executable = try compiled.prepare(arena, model_weights);
     defer executable.deinit();
 
     // prepare an input buffer
-    // Here, we use zml.HostBuffer.fromSlice to show how you would create a HostBuffer
-    // with a specific shape from an array.
-    // For situations where e.g. you have an [4]f16 array but need a .{2, 2} input shape.
+    // Here, we use zml.HostBuffer.fromSlice to show how you would create a 
+    // HostBuffer with a specific shape from an array.
+    // For situations where e.g. you have an [4]f16 array but need a .{2, 2} 
+    // input shape.
     var input = [3]f16{ 5.0, 5.0, 5.0 };
-    var input_buffer = try zml.Buffer.from(platform, zml.HostBuffer.fromSlice(input_shape, &input));
+    var input_buffer = try zml.Buffer.from(
+        platform,
+        zml.HostBuffer.fromSlice(input_shape, &input),
+    );
     defer input_buffer.deinit();
 
     // call our executable module
