@@ -2,14 +2,14 @@
   <img src="https://zml.ai/docs-assets/zml-banner.png" style="width:100%; height:120px;">
   <a href="https://zml.ai">Website</a>
   | <a href="#getting-started">Getting Started</a>
-  | <a href="./docs/README.md">Documentation</a>
+  | <a href="https://docs.zml.ai">Documentation</a>
   | <a href="https://discord.gg/6y72SN2E7H">Discord</a>
   | <a href="./CONTRIBUTING.md">Contributing</a>
 </div>
 
 [ZML]: https://zml.ai/
 [Getting Started]: #getting-started
-[Documentation]: ./docs/README.md
+[Documentation]: https://docs.zml.ai
 [Contributing]: ./CONTRIBUTING.md
 [Discord]: https://discord.gg/6y72SN2E7H
 
@@ -242,8 +242,10 @@ const Sdpa = struct {
 
 # Where to go next:
 
-You might want to check out more [examples](./examples) or read through the
-[documentation on GitHub](./docs/README.md).
+You might want to check out more [examples](./examples), read through the
+[documentation directly on GitHub](./docs/README.md), or, for the full rendering
+experience, browse the 
+[online documentation with included API reference](https://docs.zml.ai).
 
 
 
