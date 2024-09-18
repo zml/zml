@@ -379,6 +379,7 @@ pub const PickleData = struct {
                         const key, const val = seq_values[0..2].*;
                         switch (key) {
                             .string => |s| {
+                                // Handle Pytorch specific fields
                                 if (std.mem.eql(u8, s, "_modules") or std.mem.eql(u8, s, "_parameters") or std.mem.eql(u8, s, "_buffers")) {
                                     try self.parseValue(allocator, store, prefix, val);
                                 } else {
