@@ -1900,6 +1900,8 @@ pub const Tensor = struct {
     /// If several axes are passed, then the last axis of indices is treated as coordinates:
     /// - gatherValues(f: [a,b,c], .{.b, .c}, ind: [n,2])[a, n] == f[a, ind[n][0], ind[n][1]]
     /// - gatherValues(f: [a,b,c,d], .{.b, .c}, ind: [a, n,2])[a, n, d] == f[a, ind[a, n][0], ind[a, n][1], d]
+    ///
+    /// It is possible to use gatherValues without tags, but batching won't be available.
     pub fn gatherValues(self: Tensor, axes_: anytype, indices: Tensor, opts: GatherOpts) Tensor {
         // scoped_log.debug("gatherValues({}, {any}, {})", .{ self, axes_, indices });
         const AxesT = @TypeOf(axes_);
@@ -1913,45 +1915,65 @@ pub const Tensor = struct {
         meta.assert(val_axes.len > 0, "gatherValues expects 1 or more axes to operate one, received none. Example: `x.gatherValues(.a, indices, .{{}})`", .{});
         for (val_axes.constSlice(), 0..) |a, i| {
             if (i > 0) {
-                meta.assert(a == val_axes.get(i - 1) + 1, "gatherValues expects 'axes_' too be contiguous. But {any} aren't contiguous in {}", .{ axes_, self });
+                meta.assert(a == val_axes.get(i - 1) + 1, "gatherValues expects 'axes_' too be sequential. But {any} aren't sequential in {}", .{ axes_, self });
+            }
+        }
+
+        const AxisKind = enum { batching, offset, collapsed, indices };
+        var self_kind: std.BoundedArray(AxisKind, MAX_RANK) = .{};
+        var indices_batch_axes: Shape.DimsArray = .{};
+        for (self._shape.tags(), 0..self.rank()) |t, self_ax| {
+            const maybe_val_ax = std.mem.indexOfScalar(u3, val_axes.constSlice(), @intCast(self_ax));
+            if (indices._shape.hasTag(t)) |id_ax| {
+                // tag is both in self and indices -> it's a batching dim
+                // Note: tags are required for batching.
+                self_kind.appendAssumeCapacity(.batching);
+                indices_batch_axes.appendAssumeCapacity(id_ax);
+                meta.assert(maybe_val_ax == null, "gatherValues expects axes to be either batches or slices axes. Axis {s} has been found both in `axes={any}` and `indices={}`", .{ t, axes_, indices });
+            } else if (maybe_val_ax) |_| {
+                // for gatherValues we collapsed all gathered axes
+                // (contrary to gatherSlices where we collapse none)
+                self_kind.appendAssumeCapacity(.collapsed);
+            } else {
+                self_kind.appendAssumeCapacity(.offset);
             }
         }
 
         // When we receive several axes_ we need an extra dimension to store
         // one index per axis, which makes the coordinates of one value.
-        // Otherwise stablehlo uses the "indices.rank()" default value.
+        // Otherwi se stablehlo uses the "indices.rank()" default value.
         const index_coord_axis = if (axes_is_scalar)
             indices.rank()
-        else
-            indices._shape.hasTag(.coord) orelse indices._shape.axis(-1);
+        else blk: {
+            const ax = indices._shape.hasTag(.coord) orelse indices._shape.axis(-1);
+            meta.assert(indices.dim(ax) == val_axes.len, "gatherValues with axes={any}, expects indices to be of shape [..., {}], got: {}", .{ axes_, val_axes.len, indices });
+            break :blk ax;
+        };
 
         // compute res shape
-        // TODO: its the shape we want, but not always what MLIR produces,
-        // because MLIR is biased toward indices shape.
-        var new_axes: i8 = 0;
         var res_shape = Shape.init(.{}, self.dtype());
-        for (0..self.rank()) |ax_usize| {
+        var res_kind: std.BoundedArray(AxisKind, MAX_RANK) = .{};
+        for (self_kind.constSlice(), 0..) |kind, ax_usize| {
             const ax: u3 = @intCast(ax_usize);
-            if (std.mem.indexOfScalar(u3, val_axes.constSlice(), ax)) |val_id| {
-                // The first val_ax is special cause this is the place where we insert the indexed axis.
-                if (val_id == 0) {
-                    for (indices._shape.tags(), 0..indices.rank()) |t, id_ax| {
-                        if (id_ax == index_coord_axis) {
-                            continue;
-                        } else if (self._shape.hasTag(t)) |self_ax| {
-                            // tag is both in self and indices -> it's a batching dim
-                            // Note: tags are required for batching.
-                            // self_batch_axes.appendAssumeCapacity(@intCast(self_ax));
-                            // indices_batch_axes.appendAssumeCapacity(id_ax);
-                            meta.assert(std.mem.indexOfScalar(u3, val_axes.constSlice(), @intCast(self_ax)) == null, "gatherValues expect axes to be either batches or slices axes. Axis {s} has been found both in `axes={any}` and `indices={}`", .{ t, axes_, indices });
-                        } else {
-                            res_shape = res_shape.insertTag(val_axes.get(0) + new_axes, indices.dim(id_ax), t);
-                            new_axes += 1;
-                        }
+            if (ax == val_axes.get(0)) {
+                // The first val_ax is special cause this is the place where we insert indices axes.
+                for (indices._shape.tags(), 0..indices.rank()) |t, id_ax| {
+                    if (id_ax == index_coord_axis) continue;
+                    if (std.mem.indexOfScalar(i64, indices_batch_axes.constSlice(), @intCast(id_ax))) |_| {
+                        // batching dim are already in res
+                        continue;
                     }
+
+                    res_shape = res_shape.appendDim(indices.dim(id_ax), t);
+                    res_kind.appendAssumeCapacity(.indices);
                 }
-            } else {
-                res_shape = res_shape.appendDim(self.dim(ax), self._shape.tag(ax));
+            }
+            switch (kind) {
+                .collapsed => continue,
+                else => {
+                    res_shape = res_shape.appendDim(self.dim(ax), self._shape.tag(ax));
+                    res_kind.appendAssumeCapacity(kind);
+                },
             }
         }
 
@@ -1962,40 +1984,16 @@ pub const Tensor = struct {
             return self.dynamicSlice1d(val_axes.get(0), 1, indices.flattenAll().squeeze(0)).reshape(res_shape);
         }
 
-        const ax_shift: i8 = new_axes - @as(i8, @intCast(val_axes.len));
-        // scoped_log.debug("gatherValues --> {} (ax_shift={})", .{ res_shape, ax_shift });
-
-        var slice_dims = self._shape._dims;
-        var self_batch_axes: std.BoundedArray(i64, MAX_RANK) = .{};
-        var indices_batch_axes: std.BoundedArray(i64, MAX_RANK) = .{};
-        var collapsed_slice_axes: std.BoundedArray(i64, MAX_RANK) = .{};
-        var start_index_map: std.BoundedArray(i64, MAX_RANK) = .{};
-        var self_offset_axes: std.BoundedArray(i64, MAX_RANK) = .{};
-        for (self._shape.tags(), 0..self.rank()) |t, self_ax| {
-            const maybe_val_ax = std.mem.indexOfScalar(u3, val_axes.constSlice(), @intCast(self_ax));
-            if (indices._shape.hasTag(t)) |id_ax| {
-                // tag is both in self and indices -> it's a batching dim
-                // Note: tags are required for batching.
-                slice_dims.set(self_ax, 1);
-                self_batch_axes.appendAssumeCapacity(@intCast(self_ax));
-                indices_batch_axes.appendAssumeCapacity(id_ax);
-                meta.assert(maybe_val_ax == null, "gatherValues expect axes to be either batches or slices axes. Axis {s} has been found both in `axes={any}` and `indices={}`", .{ t, axes_, indices });
-            } else if (maybe_val_ax) |_| {
-                // This is a working axis,
-                // and is collected in `start_index_map`.
-                slice_dims.set(self_ax, 1);
-                collapsed_slice_axes.appendAssumeCapacity(@intCast(self_ax));
-                start_index_map.appendAssumeCapacity(@intCast(self_ax));
-            } else {
-                // non-batching, non-working axes
-                const new_axis: i64 = if (self_ax < val_axes.get(0))
-                    @intCast(self_ax)
-                else
-                    @as(i64, @intCast(self_ax)) + ax_shift;
-                self_offset_axes.appendAssumeCapacity(new_axis);
-            }
+        var slice_dims: Shape.DimsArray = .{};
+        for (self_kind.constSlice(), self.dims()) |k, d| {
+            slice_dims.appendAssumeCapacity(switch (k) {
+                .batching, .collapsed => 1,
+                .offset => d,
+                .indices => unreachable,
+            });
         }
 
+        // scoped_log.debug("gatherValues --> {} {any}", .{ res_shape, res_kind.constSlice() });
         const loc = self.getContext().mlirCtx().location(@src());
         const gather_op = dialect.stablehlo.gather(
             self.getContext().mlirCtx(),
@@ -2004,18 +2002,18 @@ pub const Tensor = struct {
             slice_dims.constSlice(),
             loc,
             .{
-                .offset_dims = self_offset_axes.constSlice(),
-                .collapsed_slice_dims = collapsed_slice_axes.constSlice(),
-                .operand_batching_dims = self_batch_axes.constSlice(),
+                .offset_dims = _collectAxes(AxisKind, res_kind, .offset).constSlice(),
+                .collapsed_slice_dims = _collectAxes(AxisKind, self_kind, .collapsed).constSlice(),
+                .operand_batching_dims = _collectAxes(AxisKind, self_kind, .batching).constSlice(),
                 .start_indices_batching_dims = indices_batch_axes.constSlice(),
-                .start_index_map = start_index_map.constSlice(),
+                .start_index_map = _collectAxes(AxisKind, self_kind, .collapsed).constSlice(),
                 .index_vector_dim = index_coord_axis,
                 .indices_are_sorted = opts.indices_are_sorted,
             },
         );
 
         const mlir_shape = fromMlirValue(gather_op.result(0)).shape();
-        meta.assert(mlir_shape.eql(res_shape), "gatherValues expects that batching indices appear in the same order in 'self' and 'indices', got: self={}, indices={}", .{ self, indices });
+        meta.assert(mlir_shape.eql(res_shape), "gatherValues expects that batching indices appear in the same order in 'self' and 'indices', got: self={}, indices={}. You should transpose one or the other.", .{ self, indices });
         return _result(res_shape, gather_op.result(0));
     }
 
@@ -2039,13 +2037,14 @@ pub const Tensor = struct {
                 // Favor val shape, instead of indices shape.
                 .{ .{ .a = 10, .b = 20 }, .b, .{ .n = 8 }, .{ .a = 10, .n = 8 } },
                 .{ .{ .a = 10, .b = 20, .c = 30 }, .b, .{ .n = 8 }, .{ .a = 10, .n = 8, .c = 30 } },
-                // TODO: https://github.com/zml/zml/issues/400
                 // batching axes are implicits.
+                // TODO: batched gather don't compile https://github.com/zml/zml/issues/400
                 .{ .{ .a = 10, .b = 20 }, .b, .{ .a = 10 }, .{ .a = 10 } },
                 .{ .{ .a = 10, .b = 20 }, .a, .{ .b = 20 }, .{ .b = 20 } },
                 .{ .{ .a = 10, .b = 20 }, .b, .{ .a = 10, .n = 8 }, .{ .a = 10, .n = 8 } },
-                // TODO: stablehlo.gather is biased toward indices shape (like gatherSlice). This make it awkward to use when you have both batching dimension and new indices dimensions.
-                // The solution is probably to transpose indices ourselves.
+                // stablehlo.gather is biased toward indices shape (like gatherSlice).
+                // This make it awkward to use when you have both batching dimension and new indices dimensions.
+                // For now we reject those, and let user explicitly transpose self or indices if needed.
                 // .{ .{ .a = 10, .b = 20 }, .b, .{ .n = 8, .a = 10 }, .{ .a = 10, .n = 8 } },
                 // Also handle tuples
                 .{ .{ .a = 10, .b = 20 }, .{ .a, .b }, .{ .n = 8, ._ = 2 }, .{ .n = 8 } },
@@ -3470,4 +3469,14 @@ test shapesOf {
         try std.testing.expectEqual(fc2_weight_shape, shapes.fc2.weight);
         try std.testing.expectEqual(fc2_bias_shape, shapes.fc2.bias);
     }
+}
+
+fn _collectAxes(T: type, bounded_array: std.BoundedArray(T, Tensor.MAX_RANK), value: T) std.BoundedArray(i64, Tensor.MAX_RANK) {
+    var res: std.BoundedArray(i64, Tensor.MAX_RANK) = .{};
+    for (bounded_array.constSlice(), 0..) |v, ax| {
+        if (v == value) {
+            res.appendAssumeCapacity(@intCast(ax));
+        }
+    }
+    return res;
 }

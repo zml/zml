@@ -20,11 +20,9 @@ pub const Shape = struct {
     pub const TagUnknown = "_".ptr;
     const TagLast = "last".ptr;
 
-    // Note: we can't make those public otherwise `refAllDeclsRecursive`
-    // will try to compile `std.BoundedArray.Writer` and will produce a compile error.
-    const DimsArray = std.BoundedArray(i64, MAX_RANK);
-    const TagsArray = std.BoundedArray(Tag, MAX_RANK);
-    const AxesArray = std.BoundedArray(u3, MAX_RANK);
+    pub const DimsArray = std.BoundedArray(i64, MAX_RANK);
+    pub const TagsArray = std.BoundedArray(Tag, MAX_RANK);
+    pub const AxesArray = std.BoundedArray(u3, MAX_RANK);
 
     const UnknownTags: TagsArray = .{ .len = 0, .buffer = [_]Tag{TagUnknown} ** MAX_RANK };
 
