@@ -418,16 +418,16 @@ test "Read pickle (simple)" {
                 try testing.expect(key == .string);
                 try testing.expectEqualStrings("int", key.string);
                 const value = kv.seq[1][1];
-                try testing.expect(value == .int);
-                try testing.expect(value.int == 1);
+                try testing.expect(value == .int64);
+                try testing.expect(value.int64 == 1);
             },
             2 => {
                 const key = kv.seq[1][0];
                 try testing.expect(key == .string);
                 try testing.expectEqualStrings("float", key.string);
                 const value = kv.seq[1][1];
-                try testing.expect(value == .float);
-                try testing.expectEqual(@as(f64, 3.141592), value.float);
+                try testing.expect(value == .float64);
+                try testing.expectEqual(@as(f64, 3.141592), value.float64);
             },
             3 => {
                 const key = kv.seq[1][0];
@@ -437,8 +437,8 @@ test "Read pickle (simple)" {
                 try testing.expect(value == .seq);
                 try testing.expect(value.seq[0] == .list);
                 for (value.seq[1], 0..) |item, j| {
-                    try testing.expect(item == .int);
-                    try testing.expect(item.int == @as(i64, @intCast(j)));
+                    try testing.expect(item == .int64);
+                    try testing.expect(item.int64 == @as(i64, @intCast(j)));
                 }
             },
             4 => {
@@ -450,8 +450,8 @@ test "Read pickle (simple)" {
                 try testing.expect(value.seq[0] == .tuple);
                 try testing.expect(value.seq[1][0] == .string);
                 try testing.expectEqualStrings("a", value.seq[1][0].string);
-                try testing.expect(value.seq[1][1] == .int);
-                try testing.expect(value.seq[1][1].int == 10);
+                try testing.expect(value.seq[1][1] == .int64);
+                try testing.expect(value.seq[1][1].int64 == 10);
             },
             else => unreachable,
         }
