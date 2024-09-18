@@ -1,0 +1,3 @@
+# Until https://github.com/bazelbuild/bazel/issues/21515 is fixed
+examples
+third_party/modules
