@@ -85,7 +85,7 @@ pub fn Q4_0(comptime dtype: zml.DataType) type {
             const indices = indices1.add(indices2);
 
             // We select the values we are interested in with the indices, group them by pair and bitcast them to f16, then convert them to f32.
-            const scales = input.gather1d(0, indices, .{ .indices_are_sorted = true }).reshape(.{ block_count, 2 }).bitCast(.f16).convert(.f32);
+            const scales = input.gatherValues(0, indices, .{ .indices_are_sorted = true }).reshape(.{ block_count, 2 }).bitCast(.f16).convert(.f32);
 
             return scales;
         }
@@ -107,7 +107,7 @@ pub fn Q4_0(comptime dtype: zml.DataType) type {
             // NOTE(Corendos): i4 is not supported by bitcast convert, so we need the following workaround.
 
             // We select the values we are interested in with the indices, these are our quantized_weights.
-            const quantized_weights = input.gather1d(0, indices, .{ .indices_are_sorted = true });
+            const quantized_weights = input.gatherValues(0, indices, .{ .indices_are_sorted = true });
             const lb_weights = quantized_weights
                 .logical(.And, zml.Tensor.constant(.{16 * block_count}, zml.Data.init(.u8, 0xf)))
                 .bitCast(.i8);

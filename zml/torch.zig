@@ -186,7 +186,7 @@ pub fn roll(self: Tensor, shifts: []const i64, axes_: []const u8) Tensor {
     const start = @mod(self.dim(a) - shifts[0], self.dim(a));
     const idx = Tensor.arange(.{ .start = start, .end = start + self.dim(a) }, .f32);
     const divisor: f32 = @floatFromInt(self.dim(a));
-    return self.gather1d(a, idx.fmod(divisor).convert(.i32), .{});
+    return self.gatherValues(a, idx.fmod(divisor).convert(.i32), .{});
 }
 
 test roll {
