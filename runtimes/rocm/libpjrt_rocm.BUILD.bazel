@@ -8,12 +8,16 @@ string_list_flag(
     visibility = [
         "@rocblas//:__subpackages__",
         "@hipblaslt-dev//:__subpackages__",
+        "@zml//runtimes/rocm:__subpackages__",
     ],
 )
 
 bool_flag(
     name = "hipblaslt",
     build_setting_default = True,
+    visibility = [
+        "@zml//runtimes/rocm:__subpackages__",
+    ],
 )
 
 config_setting(
