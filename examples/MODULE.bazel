@@ -10,13 +10,19 @@ bazel_dep(name = "rules_oci", version = "2.0.0")
 oci = use_extension("@rules_oci//oci:extensions.bzl", "oci")
 oci.pull(
     name = "distroless_cc_debian12",
-    digest = "sha256:1850aee2ff72864350058d83d681c757d45c885986d15fcca7309b9e5c69f39a",
+    digest = "sha256:b6e1e913f633495eeb80a41e03de1a41aa863e9b19902309b180ffdc4b99db2c",
     image = "gcr.io/distroless/cc-debian12",
     platforms = [
         "linux/amd64",
+        "linux/arm64/v8",
     ],
 )
-use_repo(oci, "distroless_cc_debian12", "distroless_cc_debian12_linux_amd64")
+use_repo(
+    oci,
+    "distroless_cc_debian12",
+    "distroless_cc_debian12_linux_amd64",
+    "distroless_cc_debian12_linux_arm64_v8",
+)
 
 # Mnist weights
 http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
