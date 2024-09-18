@@ -33,6 +33,7 @@ def _get_token_via_file(rctx):
     p = rctx.path(rctx.getenv("HOME") + "/.cache/huggingface/token")
     if p.exists:
         return rctx.read(p)
+    return None
 
 def _get_token_via_git_credentials(rctx):
     input = """\
@@ -54,6 +55,7 @@ def _get_token(rctx):
         _get_token_via_git_credentials(rctx)
     if t:
         return t.strip()
+    return None
 
 def _huggingface_repository_impl(rctx):
     headers = {
