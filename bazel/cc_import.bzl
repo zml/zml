@@ -36,19 +36,19 @@ _cc_import_runfiles = rule(
 )
 
 def cc_import(
-        name,
-        static_library = None,
-        pic_static_library = None,
-        shared_library = None,
-        interface_library = None,
-        data = None,
-        deps = None,
-        visibility = None,
-        soname = None,
-        add_needed = None,
-        remove_needed = None,
-        replace_needed = None,
-        **kwargs):
+    name,
+    static_library = None,
+    pic_static_library = None,
+    shared_library = None,
+    interface_library = None,
+    data = None,
+    deps = None,
+    visibility = None,
+    soname = None,
+    add_needed = None,
+    remove_needed = None,
+    replace_needed = None,
+    **kwargs):
     if shared_library and (soname or add_needed or remove_needed or replace_needed):
         patched_name = "{}_patchelf".format(name)
         patchelf(

@@ -1,7 +1,7 @@
 module(
     name = "zigcoro",
-    compatibility_level = 1,
     version = "20240829.0-fc1db29",
+    compatibility_level = 1,
 )
 
 bazel_dep(name = "rules_zig", version = "20240904.0-010da15")
