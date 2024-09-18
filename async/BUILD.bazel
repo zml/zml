@@ -5,7 +5,7 @@ zig_library(
     main = "async.zig",
     visibility = ["//visibility:public"],
     deps = [
-        "@zigcoro//:libcoro",
         "@libxev//:xev",
+        "@zigcoro//:libcoro",
     ],
 )

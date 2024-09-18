@@ -5,9 +5,10 @@ bazel_dep(name = "rules_zig", version = "20240912.0-41bfe84")
 bazel_dep(name = "platforms", version = "0.0.10")
 bazel_dep(name = "zml", version = "0.1.0")
 bazel_dep(name = "aspect_bazel_lib", version = "2.8.1.1")
-
 bazel_dep(name = "rules_oci", version = "2.0.0")
+
 oci = use_extension("@rules_oci//oci:extensions.bzl", "oci")
+
 oci.pull(
     name = "distroless_cc_debian12",
     digest = "sha256:b6e1e913f633495eeb80a41e03de1a41aa863e9b19902309b180ffdc4b99db2c",
@@ -17,6 +18,7 @@ oci.pull(
         "linux/arm64/v8",
     ],
 )
+
 use_repo(
     oci,
     "distroless_cc_debian12",
@@ -70,11 +72,12 @@ copy_file(
 """,
     commit = "0bd21da7698eaf29a0d7de3992de8a46ef624add",
     includes = [
-        "stories15M.bin",
         "stories110M.bin",
+        "stories15M.bin",
     ],
     model = "karpathy/tinyllamas",
 )
+
 use_repo(huggingface, "Karpathy-TinyLlama-Stories")
 
 http_file(
@@ -106,6 +109,7 @@ filegroup(
     ],
     model = "meta-llama/Meta-Llama-3.1-8B-Instruct",
 )
+
 use_repo(huggingface, "Meta-Llama-3.1-8B-Instruct")
 
 huggingface.model(
@@ -130,6 +134,7 @@ filegroup(
     ],
     model = "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
 )
+
 use_repo(huggingface, "TinyLlama-1.1B-Chat-v1.0")
 
 huggingface.model(
@@ -166,4 +171,5 @@ copy_file(
     ],
     model = "openlm-research/open_llama_3b",
 )
+
 use_repo(huggingface, "OpenLM-Research-OpenLLaMA-3B")

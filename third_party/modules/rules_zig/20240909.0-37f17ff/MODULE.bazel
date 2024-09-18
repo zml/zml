@@ -1,7 +1,7 @@
 module(
     name = "rules_zig",
-    version = "20240909.0-37f17ff",
     compatibility_level = 1,
+    version = "20240909.0-37f17ff",
 )
 
 bazel_dep(name = "aspect_bazel_lib", version = "2.8.1")
@@ -9,7 +9,9 @@ bazel_dep(name = "bazel_skylib", version = "1.7.1")
 bazel_dep(name = "platforms", version = "0.0.10")
 
 zig = use_extension("//zig:extensions.bzl", "zig")
+
 zig.index(file = "//zig/private:versions.json")
+
 use_repo(zig, "zig_toolchains")
 
 register_toolchains("@rules_zig//zig/target:all")
@@ -21,26 +23,30 @@ zig_dev = use_extension(
     "zig",
     dev_dependency = True,
 )
+
 zig_dev.toolchain(zig_version = "0.13.0")
+
 zig_dev.toolchain(zig_version = "0.12.1")
+
 zig_dev.toolchain(zig_version = "0.12.0")
+
 zig_dev.toolchain(zig_version = "0.11.0")
 
-bazel_dep(name = "rules_cc", version = "0.0.9", dev_dependency = True)
-bazel_dep(name = "stardoc", version = "0.7.0", dev_dependency = True, repo_name = "io_bazel_stardoc")
-bazel_dep(name = "gazelle", version = "0.38.0", dev_dependency = True, repo_name = "bazel_gazelle")
-bazel_dep(name = "bazel_skylib_gazelle_plugin", version = "1.7.1", dev_dependency = True)
+bazel_dep(name = "rules_cc", dev_dependency = True, version = "0.0.9")
+bazel_dep(name = "stardoc", dev_dependency = True, repo_name = "io_bazel_stardoc", version = "0.7.0")
+bazel_dep(name = "gazelle", dev_dependency = True, repo_name = "bazel_gazelle", version = "0.38.0")
+bazel_dep(name = "bazel_skylib_gazelle_plugin", dev_dependency = True, version = "1.7.1")
 bazel_dep(
     name = "buildifier_prebuilt",
-    version = "7.3.1",
     dev_dependency = True,
+    version = "7.3.1",
 )
-bazel_dep(name = "rules_multirun", version = "0.9.0", dev_dependency = True)
-bazel_dep(name = "rules_python", version = "0.35.0", dev_dependency = True)
+bazel_dep(name = "rules_multirun", dev_dependency = True, version = "0.9.0")
+bazel_dep(name = "rules_python", dev_dependency = True, version = "0.35.0")
 bazel_dep(
     name = "rules_bazel_integration_test",
-    version = "0.25.0",
     dev_dependency = True,
+    version = "0.25.0",
 )
 
 bazel_binaries = use_extension(
@@ -51,7 +57,9 @@ bazel_binaries = use_extension(
 
 # NOTE: Keep in sync with WORKSPACE.
 bazel_binaries.download(version_file = "//:.bazelversion")
+
 bazel_binaries.download(version = "7.0.0")
+
 use_repo(
     bazel_binaries,
     "bazel_binaries",
@@ -65,4 +73,4 @@ use_repo(
 # cgrindel_bazel_starlib/shlib/lib/message.sh fails in
 # rules_bazel_integration_test/tools/update_deleted_packages.sh when invoked
 # through the rules_multirun target //util:update.
-bazel_dep(name = "cgrindel_bazel_starlib", version = "0.21.0", dev_dependency = True)
+bazel_dep(name = "cgrindel_bazel_starlib", dev_dependency = True, version = "0.21.0")
