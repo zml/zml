@@ -314,79 +314,76 @@ pub const PickleData = struct {
             .pers_id => |pers_id| try self.parseValue(allocator, store, prefix, pers_id.ref),
             .seq => |*seq| switch (seq[0]) {
                 .list, .tuple, .set, .frozen_set => {
-                    const elemCheck = struct {
-                        fn call(comptime T: ValueType) fn (v: Value) bool {
-                            return struct {
-                                fn call(val: Value) bool {
-                                    return val == T;
+                    if (seq[1].len == 0) return;
+                    var valid_slice = true;
+                    switch (seq[1][0]) {
+                        inline .int, .float, .bool => |val0, tag| {
+                            var values: std.ArrayListUnmanaged(switch (tag) {
+                                .int => i64,
+                                .float => f64,
+                                .bool => bool,
+                                else => unreachable,
+                            }) = .{};
+                            try values.append(allocator, val0);
+                            for (seq[1][1..], 1..) |val, i| {
+                                if (std.meta.activeTag(val) != tag) valid_slice = false;
+                                switch (valid_slice) {
+                                    true => try values.append(allocator, @field(val, @tagName(tag))),
+                                    false => {
+                                        var new_prefix = prefix;
+                                        if (prefix.items.len > 0) {
+                                            new_prefix.appendAssumeCapacity('.');
+                                        }
+                                        new_prefix.items.len += std.fmt.formatIntBuf(new_prefix.unusedCapacitySlice(), i, 10, .lower, .{});
+                                        try self.parseValue(allocator, store, new_prefix, val);
+                                    },
                                 }
-                            }.call;
-                        }
-                    }.call;
-
-                    if (seq[1].len > 0 and switch (seq[1][0]) {
-                        inline .int, .bool, .float => |_, tag| utils.allTrue(seq[1][1..], elemCheck(tag)),
-                        else => false,
-                    }) {
-                        const out: []u8 = switch (seq[1][0]) {
-                            .int => blk: {
-                                const d = try allocator.alloc(i64, seq[1].len);
-                                for (seq[1], 0..) |item, i| {
-                                    d[i] = item.int;
-                                }
-                                break :blk std.mem.sliceAsBytes(d);
-                            },
-                            .float => blk: {
-                                const d = try allocator.alloc(f64, seq[1].len);
-                                for (seq[1], 0..) |item, i| {
-                                    d[i] = item.float;
-                                }
-                                break :blk std.mem.sliceAsBytes(d);
-                            },
-                            else => blk: {
-                                const d = try allocator.alloc(bool, seq[1].len);
-                                for (seq[1], 0..) |item, i| {
-                                    d[i] = item.bool;
-                                }
-                                break :blk std.mem.sliceAsBytes(d);
-                            },
-                        };
-                        const key = try allocator.dupe(u8, prefix.items);
-                        const d = try store._metadata.getOrPut(allocator, key);
-                        if (d.found_existing) {
-                            log.warn("Duplicate key: {s}", .{prefix.items});
-                            allocator.free(key);
-                            allocator.free(out);
-                        } else d.value_ptr.* = @unionInit(zml.aio.Value, "array", .{ .item_type = switch (seq[1][0]) {
-                            .int => .int64,
-                            .float => .float64,
-                            .string => .string,
-                            else => .boolval,
-                        }, .data = out });
-                    } else {
-                        for (seq[1], 0..) |item, i| {
-                            var new_prefix = prefix;
-                            if (v.isPrimitive()) {
-                                if (prefix.items.len > 0) {
-                                    new_prefix.appendAssumeCapacity('.');
-                                }
-                                new_prefix.items.len += std.fmt.formatIntBuf(new_prefix.unusedCapacitySlice(), i, 10, .lower, .{});
                             }
-                            try self.parseValue(allocator, store, new_prefix, item);
-                        }
+                            const used_tag = switch (tag) {
+                                .int => .int64,
+                                .float => .float64,
+                                .bool => .boolval,
+                                else => unreachable,
+                            };
+                            switch (valid_slice) {
+                                true => try store._metadata.put(
+                                    allocator,
+                                    try allocator.dupe(u8, prefix.items),
+                                    .{ .array = .{ .item_type = used_tag, .data = std.mem.sliceAsBytes(try values.toOwnedSlice(allocator)) } },
+                                ),
+                                false => for (values.items, 0..) |val, i| {
+                                    var new_prefix = prefix;
+                                    if (prefix.items.len > 0) {
+                                        new_prefix.appendAssumeCapacity('.');
+                                    }
+                                    new_prefix.items.len += std.fmt.formatIntBuf(new_prefix.unusedCapacitySlice(), i, 10, .lower, .{});
+                                    try store._metadata.put(allocator, try allocator.dupe(u8, new_prefix.items), @unionInit(zml.aio.Value, @tagName(used_tag), val));
+                                },
+                            }
+                        },
+                        else => {
+                            for (seq[1], 0..) |item, i| {
+                                var new_prefix = prefix;
+                                if (v.isPrimitive()) {
+                                    if (prefix.items.len > 0) {
+                                        new_prefix.appendAssumeCapacity('.');
+                                    }
+                                    new_prefix.items.len += std.fmt.formatIntBuf(new_prefix.unusedCapacitySlice(), i, 10, .lower, .{});
+                                }
+                                try self.parseValue(allocator, store, new_prefix, item);
+                            }
+                        },
                     }
                 },
-                .dict => {
-                    for (seq[1]) |item| {
-                        try self.parseValue(allocator, store, prefix, item);
-                    }
+                .dict => for (seq[1]) |item| {
+                    try self.parseValue(allocator, store, prefix, item);
                 },
                 .kv_tuple => {
                     const key = seq[1][0];
                     const val = seq[1][1];
                     switch (key) {
                         .string => |s| {
-                            if (std.mem.eql(u8, s, "_modules") or std.mem.eql(u8, s, "_parameters") or std.mem.eql(u8, s, "_buffers")) {
+                            if (std.meta.stringToEnum(enum { _modules, _parameters, _buffers }, s)) |_| {
                                 try self.parseValue(allocator, store, prefix, val);
                             } else {
                                 var new_prefix = prefix;
