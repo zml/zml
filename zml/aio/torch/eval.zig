@@ -81,7 +81,7 @@ pub const PickleMemo = struct {
                     }
                 },
                 .seq => |*v| {
-                    for (v[1]) |*item| {
+                    for (v.values) |*item| {
                         if (item.containsRef()) {
                             item.* = try self.resolve(allocator, item.*, recursive);
                         }
@@ -148,7 +148,7 @@ pub const PickleMemo = struct {
                 try self.resolveAllRefs(allocator, depth + 1, v.member, fix_values),
                 try self.resolveAllRefs(allocator, depth + 1, v.args, fix_values),
             ) },
-            .seq => |v| .{ .seq = .{ v[0], try self.resolveAllRefsIter(allocator, depth + 1, v[1], fix_values) } },
+            .seq => |v| .{ .seq = .{ .type = v.type, .values = try self.resolveAllRefsIter(allocator, depth + 1, v.values, fix_values) } },
             .pers_id => |v| .{ .pers_id = try PersId.init(allocator, try self.resolveAllRefs(allocator, depth + 1, v.ref, fix_values)) },
             else => try val.clone(allocator),
         };
@@ -252,7 +252,7 @@ pub fn evaluate(allocator: std.mem.Allocator, x: []const PickleOp, resolve_refs:
                 const kv = try alloc.alloc(Value, 2);
                 kv[0] = items[idx];
                 kv[1] = items[idx + 1];
-                kv_items.appendAssumeCapacity(.{ .seq = .{ .kv_tuple, kv } });
+                kv_items.appendAssumeCapacity(.{ .seq = .{ .type = .kv_tuple, .values = kv } });
             }
             return kv_items.toOwnedSlice();
         }
@@ -283,19 +283,19 @@ pub fn evaluate(allocator: std.mem.Allocator, x: []const PickleOp, resolve_refs:
                 const member = try memo.resolve(allocator, try stack.pop(), true);
                 break :blk .{ .build = try Build.init(allocator, member, args) };
             }),
-            .empty_dict => try stack.values.append(.{ .seq = .{ .dict, &[_]Value{} } }),
+            .empty_dict => try stack.values.append(.{ .seq = .{ .type = .dict, .values = &[_]Value{} } }),
             .get => |v| try stack.values.append(.{ .ref = try std.fmt.parseInt(u32, v, 10) }),
             inline .binget, .long_binget => |v| try stack.values.append(.{ .ref = v }),
-            .empty_list => try stack.values.append(.{ .seq = .{ .list, &[_]Value{} } }),
+            .empty_list => try stack.values.append(.{ .seq = .{ .type = .list, .values = &[_]Value{} } }),
             .binput, .long_binput => |v| {
                 try memo.insert(v, try stack.pop());
                 try stack.values.append(.{ .ref = v });
             },
             .tuple => try stack.values.append(blk: {
                 const popped = try stack.popMark(allocator);
-                break :blk .{ .seq = .{ .tuple, popped } };
+                break :blk .{ .seq = .{ .type = .tuple, .values = popped } };
             }),
-            .empty_tuple => try stack.values.append(.{ .seq = .{ .tuple, &[_]Value{} } }),
+            .empty_tuple => try stack.values.append(.{ .seq = .{ .type = .tuple, .values = &[_]Value{} } }),
             .setitem => {
                 const v, const k = .{ try stack.pop(), try stack.pop() };
                 const top = try stack.lastMut();
@@ -303,11 +303,11 @@ pub fn evaluate(allocator: std.mem.Allocator, x: []const PickleOp, resolve_refs:
                 switch (rtop.*) {
                     .global => |obj| {
                         obj.args = try assuredResize(Value, allocator, obj.args, obj.args.len + 1);
-                        obj.args[obj.args.len - 1] = .{ .seq = .{ .tuple, try allocator.dupe(Value, &.{ k, v }) } };
+                        obj.args[obj.args.len - 1] = .{ .seq = .{ .type = .tuple, .values = try allocator.dupe(Value, &.{ k, v }) } };
                     },
                     .seq => |*tup| {
-                        tup[1] = try assuredResize(Value, allocator, tup[1], tup[1].len + 1);
-                        tup[1][tup[1].len - 1] = .{ .seq = .{ .tuple, try allocator.dupe(Value, &.{ k, v }) } };
+                        tup.values = try assuredResize(Value, allocator, tup.values, tup.values.len + 1);
+                        tup.values[tup.values.len - 1] = .{ .seq = .{ .type = .tuple, .values = try allocator.dupe(Value, &.{ k, v }) } };
                     },
                     else => {
                         return error.BadStackTopForSetItem;
@@ -323,11 +323,11 @@ pub fn evaluate(allocator: std.mem.Allocator, x: []const PickleOp, resolve_refs:
                 switch (rtop.*) {
                     .global => |obj| {
                         obj.args = try assuredResize(Value, allocator, obj.args, obj.args.len + 1);
-                        obj.args[obj.args.len - 1] = .{ .seq = .{ .tuple, kv_items } };
+                        obj.args[obj.args.len - 1] = .{ .seq = .{ .type = .tuple, .values = kv_items } };
                     },
                     .seq => |*tup| {
-                        tup[1] = try assuredResize(Value, allocator, tup[1], tup[1].len + 1);
-                        tup[1][tup[1].len - 1] = .{ .seq = .{ .tuple, kv_items } };
+                        tup.values = try assuredResize(Value, allocator, tup.values, tup.values.len + 1);
+                        tup.values[tup.values.len - 1] = .{ .seq = .{ .type = .tuple, .values = kv_items } };
                     },
                     else => {
                         defer allocator.free(kv_items);
@@ -339,17 +339,17 @@ pub fn evaluate(allocator: std.mem.Allocator, x: []const PickleOp, resolve_refs:
             .tuple1 => try stack.values.append(blk: {
                 const tup_values = try allocator.alloc(Value, 1);
                 tup_values[0] = try stack.pop();
-                break :blk .{ .seq = .{ .tuple, tup_values } };
+                break :blk .{ .seq = .{ .type = .tuple, .values = tup_values } };
             }),
             .tuple2 => try stack.values.append(blk: {
                 const tup_values = try allocator.alloc(Value, 2);
                 inline for (0..2) |i| tup_values[(tup_values.len - 1) - i] = try stack.pop();
-                break :blk .{ .seq = .{ .tuple, tup_values } };
+                break :blk .{ .seq = .{ .type = .tuple, .values = tup_values } };
             }),
             .tuple3 => try stack.values.append(blk: {
                 const tup_values = try allocator.alloc(Value, 3);
                 inline for (0..3) |i| tup_values[(tup_values.len - 1) - i] = try stack.pop();
-                break :blk .{ .seq = .{ .tuple, tup_values } };
+                break :blk .{ .seq = .{ .type = .tuple, .values = tup_values } };
             }),
             .append => {
                 const v = try stack.pop();
@@ -361,8 +361,8 @@ pub fn evaluate(allocator: std.mem.Allocator, x: []const PickleOp, resolve_refs:
                         obj.args[obj.args.len - 1] = v;
                     },
                     .seq => |*tup| {
-                        tup[1] = try assuredResize(Value, allocator, tup[1], tup[1].len + 1);
-                        tup[1][tup[1].len - 1] = v;
+                        tup.values = try assuredResize(Value, allocator, tup.values, tup.values.len + 1);
+                        tup.values[tup.values.len - 1] = v;
                     },
                     else => {
                         return error.BadStackTopForAppend;
@@ -381,9 +381,9 @@ pub fn evaluate(allocator: std.mem.Allocator, x: []const PickleOp, resolve_refs:
                         @memcpy(obj.args[obj_len..], postmark);
                     },
                     .seq => |*tup| {
-                        const tup_len = tup[1].len;
-                        tup[1] = try assuredResize(Value, allocator, tup[1], tup_len + postmark.len);
-                        @memcpy(tup[1][tup_len..], postmark);
+                        const tup_len = tup.values.len;
+                        tup.values = try assuredResize(Value, allocator, tup.values, tup_len + postmark.len);
+                        @memcpy(tup.values[tup_len..], postmark);
                     },
                     else => {
                         return error.BadStackTopForAppends;
@@ -394,12 +394,12 @@ pub fn evaluate(allocator: std.mem.Allocator, x: []const PickleOp, resolve_refs:
                 const popped = try stack.popMark(allocator);
                 defer allocator.free(popped);
                 const kv_items = try makeKVList(allocator, popped);
-                break :blk .{ .seq = .{ .dict, kv_items } };
+                break :blk .{ .seq = .{ .type = .dict, .values = kv_items } };
             }),
-            .list => try stack.values.append(.{ .seq = .{ .list, try stack.popMark(allocator) } }),
+            .list => try stack.values.append(.{ .seq = .{ .type = .list, .values = try stack.popMark(allocator) } }),
             .inst => |v| try stack.values.append(blk: {
                 const tup_items = try allocator.dupe(Value, &.{ .{ .string = v[0] }, .{ .string = v[1] } });
-                break :blk .{ .object = try Object.init(allocator, .{ .seq = .{ .tuple, tup_items } }, try stack.popMark(allocator)) };
+                break :blk .{ .object = try Object.init(allocator, .{ .seq = .{ .type = .tuple, .values = tup_items } }, try stack.popMark(allocator)) };
             }),
             .obj => try stack.values.append(blk: {
                 const markidx = try stack.findMark();
@@ -418,7 +418,7 @@ pub fn evaluate(allocator: std.mem.Allocator, x: []const PickleOp, resolve_refs:
                 args[0] = try stack.pop();
                 break :blk .{ .object = try Object.init(allocator, try stack.pop(), args) };
             }),
-            .empty_set => try stack.values.append(.{ .seq = .{ .set, &[_]Value{} } }),
+            .empty_set => try stack.values.append(.{ .seq = .{ .type = .set, .values = &[_]Value{} } }),
             .additems => {
                 const postmark = try stack.popMark(allocator);
                 defer allocator.free(postmark);
@@ -431,19 +431,19 @@ pub fn evaluate(allocator: std.mem.Allocator, x: []const PickleOp, resolve_refs:
                         @memcpy(obj.args[obj_len..], postmark);
                     },
                     .seq => |*tup| {
-                        const tup_len = tup[1].len;
-                        tup[1] = try assuredResize(Value, allocator, tup[1], tup_len + postmark.len);
-                        @memcpy(tup[1][tup_len..], postmark);
+                        const tup_len = tup.values.len;
+                        tup.values = try assuredResize(Value, allocator, tup.values, tup_len + postmark.len);
+                        @memcpy(tup.values[tup_len..], postmark);
                     },
                     else => {
                         return error.BadStackTopForSetItem;
                     },
                 }
             },
-            .frozenset => try stack.values.append(.{ .seq = .{ .frozen_set, try stack.popMark(allocator) } }),
+            .frozenset => try stack.values.append(.{ .seq = .{ .type = .frozen_set, .values = try stack.popMark(allocator) } }),
             .newobj_ex => try stack.values.append(blk: {
                 const kwargs, const args, const cls = .{ try stack.pop(), try stack.pop(), try stack.pop() };
-                const new_seq: Sequence = .{ .tuple, try allocator.dupe(Value, &.{ args, kwargs }) };
+                const new_seq: Sequence = .{ .type = .tuple, .values = try allocator.dupe(Value, &.{ args, kwargs }) };
                 break :blk .{ .object = try Object.init(allocator, cls, try allocator.dupe(Value, &.{.{ .seq = new_seq }})) };
             }),
             .stack_global => try stack.values.append(blk: {
@@ -451,7 +451,7 @@ pub fn evaluate(allocator: std.mem.Allocator, x: []const PickleOp, resolve_refs:
                     try memo.resolve(allocator, try stack.pop(), true),
                     try memo.resolve(allocator, try stack.pop(), true),
                 };
-                const new_seq: Sequence = .{ .tuple, try allocator.dupe(Value, &.{ gn, mn }) };
+                const new_seq: Sequence = .{ .type = .tuple, .values = try allocator.dupe(Value, &.{ gn, mn }) };
                 break :blk .{ .object = try Object.init(allocator, .{ .seq = new_seq }, &[_]Value{}) };
             }),
             .memoize => {

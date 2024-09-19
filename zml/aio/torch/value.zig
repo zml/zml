@@ -65,7 +65,10 @@ pub const Build = struct {
     }
 };
 
-pub const Sequence = struct { SequenceType, []Value };
+pub const Sequence = struct {
+    type: SequenceType,
+    values: []Value,
+};
 
 pub const PersId = struct {
     allocator: std.mem.Allocator,
@@ -184,8 +187,8 @@ pub const Value = union(ValueType) {
             .raw, .raw_num => |v| v.deinit(allocator),
             inline .app, .object, .global, .build, .pers_id => |v| v.deinit(),
             .seq => |v| {
-                for (v[1]) |*val| val.deinit(allocator);
-                allocator.free(v[1]);
+                for (v.values) |*val| val.deinit(allocator);
+                allocator.free(v.values);
             },
             .string, .bytes => |v| allocator.free(v),
             .bigint => self.bigint.deinit(),
@@ -242,13 +245,13 @@ pub const Value = union(ValueType) {
             .seq => |v| {
                 try writer.writeAll(".{\n");
                 try writeIndents(indents + 2, writer);
-                try writer.print(".{s},\n", .{@tagName(v[0])});
+                try writer.print(".{s},\n", .{@tagName(v.type)});
                 try writeIndents(indents + 2, writer);
-                if (v[1].len > 0) {
+                if (v.values.len > 0) {
                     try writer.writeAll(".{\n");
-                    for (v[1], 0..) |arg, i| {
+                    for (v.values, 0..) |arg, i| {
                         try internalFormat(arg, indents + 3, writer);
-                        if (i < v[1].len - 1) try writer.writeAll(",");
+                        if (i < v.values.len - 1) try writer.writeAll(",");
                         try writer.writeByte('\n');
                     }
                     try writeIndents(indents + 2, writer);
@@ -283,8 +286,8 @@ pub const Value = union(ValueType) {
             inline .raw, .raw_num => |v, tag| @unionInit(Value, @tagName(tag), try v.clone(allocator)),
             inline .app, .object, .global, .build, .pers_id => |v, tag| @unionInit(Value, @tagName(tag), try v.clone(allocator)),
             .seq => |seq| blk: {
-                const new_val: Sequence = .{ seq[0], try allocator.alloc(Value, seq[1].len) };
-                for (seq[1], 0..) |v, i| new_val[1][i] = try v.clone(allocator);
+                const new_val: Sequence = .{ .type = seq.type, .values = try allocator.alloc(Value, seq.values.len) };
+                for (seq.values, 0..) |v, i| new_val.values[i] = try v.clone(allocator);
                 break :blk .{ .seq = new_val };
             },
             inline .string, .bytes => |v, tag| @unionInit(Value, @tagName(tag), try allocator.dupe(u8, v)),
@@ -296,7 +299,7 @@ pub const Value = union(ValueType) {
     pub fn isPrimitive(self: Value) bool {
         return switch (self) {
             .int64, .bigint, .float64, .string, .bytes, .boolval, .none => true,
-            .seq => |seq| utils.allTrue(seq[1], Value.isPrimitive),
+            .seq => |seq| utils.allTrue(seq.values, Value.isPrimitive),
             else => false,
         };
     }
@@ -316,7 +319,7 @@ pub const Value = union(ValueType) {
             },
             .pers_id => |v| return v.ref.containsRef(),
             .seq => |v| {
-                for (v[1]) |val| if (val.containsRef()) return true;
+                for (v.values) |val| if (val.containsRef()) return true;
                 return false;
             },
             else => return false,
@@ -389,8 +392,8 @@ pub const Value = union(ValueType) {
                 v.ref = try v.ref.coerceFromRaw(allocator);
                 break :blk self;
             },
-            .seq => |*v| blk: {
-                for (v[1]) |*val| {
+            .seq => |v| blk: {
+                for (v.values) |*val| {
                     val.* = try val.coerceFromRaw(allocator);
                 }
                 break :blk self;
