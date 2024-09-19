@@ -269,7 +269,10 @@ pub fn MapType(From: type, To: type) type {
                         []const map(ptr_info.child)
                     else
                         []map(ptr_info.child),
-                    .One => *map(ptr_info.child),
+                    .One => if (ptr_info.is_const)
+                        *const map(ptr_info.child)
+                    else
+                        *map(ptr_info.child),
                     else => T,
                 },
                 .Optional => |opt_info| ?map(opt_info.child),
@@ -446,8 +449,9 @@ pub fn visit(comptime cb: anytype, ctx: FnParam(cb, 0), v: anytype) void {
         const Callback = @TypeOf(cb);
         @compileError("zml.meta.visit is expecting a pointer input to go with following callback signature: " ++ @typeName(Callback) ++ " but received: " ++ @typeName(T));
     }
-
     const ptr_info = type_info_v.Pointer;
+    if (@typeInfo(ptr_info.child) == .Fn) return;
+    if (ptr_info.child == anyopaque) return;
     // This is important, because with trivial types like void,
     // Zig sometimes decide to call `visit` at comptime, but can't do
     // the pointer wrangling logic at comptime.
