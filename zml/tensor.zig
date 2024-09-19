@@ -523,7 +523,7 @@ pub const Tensor = struct {
             float_bits = float_bits.logical(.OR, scalar(1, dt).bitCast(uint_dtype));
 
             // float_bits now uniformly represents number in [1, 2[ range.
-            // Let's convert to floats, and substract one to go to [0, 1[ range.
+            // Let's convert to floats, and subtract one to go to [0, 1[ range.
             var floats = float_bits.bitCast(dt).sub(scalar(1, dt));
             floats = floats.mul(scalar(opts.max - opts.min, dt)).addConstant(opts.min);
 
