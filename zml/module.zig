@@ -140,8 +140,8 @@ pub const CompilationContext = struct {
     /// `blkctx` represents values from outside the block that can be accessed inside the block.
     pub fn makeBlock(
         self: *CompilationContext,
-        comptime func: anytype,
         comptime S: ops.BlockSignature,
+        func: *const S.Fn,
         blkctx: S.BlkCtx,
         args: S.Args,
     ) mlir.Block {
