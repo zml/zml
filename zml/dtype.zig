@@ -4,6 +4,10 @@ const floats = @import("floats.zig");
 const C64 = std.math.Complex(f32);
 const C128 = std.math.Complex(f64);
 
+test {
+    std.testing.refAllDecls(@This());
+}
+
 pub const DataType = enum(u8) {
     bool,
     f8e4m3b11fnuz,

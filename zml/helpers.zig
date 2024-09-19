@@ -8,6 +8,10 @@ const Tensor = @import("tensor.zig").Tensor;
 const EnumLiteral = @TypeOf(.enum_literal);
 const log = std.log.scoped(.zml_tensor);
 
+test {
+    std.testing.refAllDecls(@This());
+}
+
 const ShapeError = error{ DimMismatch, NotFound };
 const NOT_SET: i64 = 0;
 const DIM_MISMATCH: i64 = -1;

@@ -8,6 +8,10 @@ const log = std.log.scoped(.zml_tokenizer);
 const helpers = @import("helpers.zig");
 const meta = @import("meta.zig");
 
+test {
+    std.testing.refAllDecls(@This());
+}
+
 /// Byte Pair Encoding tokenizer generally used for LLM.
 pub const Tokenizer = struct {
     tokens: [][]const u8,

@@ -16,6 +16,10 @@ const log = std.log.scoped(.zml_tensor);
 
 const cuda = @import("nn/cuda.zig");
 
+test {
+    std.testing.refAllDecls(@This());
+}
+
 pub const Linear = struct {
     weight: Tensor,
     bias: ?Tensor = null,
@@ -536,7 +540,7 @@ pub fn resizeLinear1d(image: Tensor, axis: i8, new_len: u63, opt: ResizeOpts) Te
     const left = scaled.floor();
     const right = left.addConstant(1);
 
-    const values = image.gatherSlices1d(axis, 2, left.convert(.i32), .{ .indices_are_sorted = true });
+    const values = image.gatherValues(axis, left.convert(.i32), .{ .indices_are_sorted = true });
     const left_val, const right_val = helpers.mapTensors(
         Tensor.squeeze,
         values.convert(.f32).chunkExact(2, axis + 1),
@@ -579,7 +583,7 @@ pub fn resizeCubic1d(image: Tensor, axis: i8, new_len: u63, opt: ResizeOpts) Ten
     std.debug.assert(pos.dim(1) == 4);
 
     const context = scaled.floor().addConstant(-1).convert(.i32).maximum(Tensor.scalar(0, .i32));
-    const values = image.gatherSlices1d(axis, 4, context, .{ .indices_are_sorted = true });
+    const values = image.gatherValues(axis, context, .{ .indices_are_sorted = true });
 
     const weights_: [4][4]f32 = .{
         .{ 0, 1, 0, 0 },
@@ -828,14 +832,12 @@ fn sdpaChunk(q: Tensor, k: Tensor, v: Tensor, opts: SdpaOpts) PartialAttn {
     };
 }
 test "sdpaMemEfficient without mask" {
-    if (true) return error.SkipZigTest;
-
     const platform = zml.testing.env();
     const allocator = std.testing.allocator;
 
     // Note we use small input vectors to have the tests run reasonably fast,
     // but don't expect speed ups with this small sizes.
-    const rng = try zml.compileFn(allocator, Tensor.Rng.normal, .{ Shape.init(.{ 1, 10, 512, 64 }, .f16), .{ .mean = 0, .stddev = 1 } }, platform);
+    const rng = try zml.compileFn(allocator, Tensor.Rng.normal, .{ Shape.init(.{ 1, 10, 512, 64 }, .f32), .{ .mean = 0, .stddev = 1 } }, platform);
     defer rng.deinit();
 
     // Note: it's fine to pass undefined here, cause the arguments have already been baked into the executable.
@@ -863,17 +865,15 @@ test "sdpaMemEfficient without mask" {
 }
 
 test "sdpaMemEfficient with mask" {
-    if (true) return error.SkipZigTest;
-
     const platform = zml.testing.env();
     const allocator = std.testing.allocator;
 
     // Note we use small input vectors to have the tests run reasonably fast,
     // but don't expect speed ups with this small sizes.
-    const rng = try zml.compileFn(allocator, Tensor.Rng.normal, .{ Shape.init(.{ 1, 10, 512, 64 }, .f16), .{ .mean = 0, .stddev = 1 } }, platform);
+    const rng = try zml.compileFn(allocator, Tensor.Rng.normal, .{ Shape.init(.{ 1, 10, 512, 64 }, .f32), .{ .mean = 0, .stddev = 1 } }, platform);
     defer rng.deinit();
 
-    const rng_mask = try zml.compileFn(allocator, Tensor.Rng.normal, .{ Shape.init(.{ 512, 512 }, .f16), .{ .mean = 0, .stddev = 1 } }, platform);
+    const rng_mask = try zml.compileFn(allocator, Tensor.Rng.normal, .{ Shape.init(.{ 512, 512 }, .f32), .{ .mean = 0, .stddev = 1 } }, platform);
     defer rng_mask.deinit();
 
     // Note: it's fine to pass undefined here, cause the arguments have already been backed into the executable.

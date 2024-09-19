@@ -9,6 +9,10 @@ const RawPickleOp = @import("ops.zig").RawPickleOp;
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
+test {
+    std.testing.refAllDecls(@This());
+}
+
 pub const Decoder = struct {
     buffer_file: zml.aio.MemoryMappedFile,
     file_map: std.StringArrayHashMapUnmanaged(std.zip.Iterator(asynk.File.SeekableStream).Entry) = .{},
