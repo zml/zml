@@ -2247,6 +2247,227 @@ pub const Tensor = struct {
         try zml.testing.expectClose(expected, result, 0);
     }
 
+    pub const ScatterOpts = struct {
+        indices_are_sorted: bool = false,
+        indices_are_unique: bool = false,
+        update_fn: *const fn (*const anyopaque, Tensor, Tensor) Tensor = override,
+        update_fn_ctx: *const anyopaque = undefined,
+
+        pub fn override(_: *const anyopaque, old_value: Tensor, new_value: Tensor) Tensor {
+            _ = old_value;
+            return new_value;
+        }
+
+        pub fn increment(_: *const anyopaque, old_value: Tensor, new_value: Tensor) Tensor {
+            return old_value.add(new_value);
+        }
+    };
+
+    /// Update the given tensors, by copying `values` into self slices.
+    /// The slices are chosen at runtime using the given axes and runtime indices.
+    /// * slice_shape represents the shape of the slices to extract,
+    ///   it must be smaller than original shape.
+    ///   It must use a subset of self axes.
+    ///   If slice_shape is **not** tagged, then it must have the same rank than self.
+    /// * `indices` represents a set of coordinates.
+    ///   The coordinates are read from the `.coord` axis, or last axis if `.coord` is not found.
+    ///   The coordinate axis must have `slice_shape.rank()` dims.
+    ///   The coordinates represent the "top-left" corner of the slice to extract.
+    /// * the output tensor starts with axes from `indices`.
+    /// * if the input tensor has tagged axes, matching `indices` axes,
+    ///    they will be considered "batching" axes.
+    ///
+    /// Sample input/output shapes:
+    /// * scatterSlices([A, B, C, D], [N, 2], [N, B', C']) -> [A, B, C, D]
+    /// * scatterSlices(x(a,b,c,d), g(n,m), y[n,b,c]) [A,B,C,D] {
+    ///   var z = x;
+    ///   for (0..N) |n| { z[a,g[n,0]+b,g[n,1]+c,d] = y[n,a,b,c,d]; }
+    /// }
+    ///
+    /// **Warning**: if `opts.update_fn` is not associative not all calls to `scatterSlices` are sound.
+    /// In particular if you scatter overlapping slices, with the default `zml.Tensor.ScatterOpts.override`,
+    /// then the result will depend on the execution order that you don't control.
+    pub fn scatterSlices(self: Tensor, indices: Tensor, updates: Tensor, opts: ScatterOpts) Tensor {
+        scoped_log.warn("scatterSlices({}, {}, {})", .{ self, indices, updates });
+        meta.assert(self.dtype() == updates.dtype(), "scatterSlices expects input and 'updates' tensors to be of the same type, got {} and {}", .{ self.dtype(), updates.dtype() });
+        meta.assert(indices.rank() >= 1, "scatterSlices expects 'indices' to have at least one rank", .{});
+        const AxisKind = enum { batching, update_window, inserted_window, window_id };
+        var self_kind: std.BoundedArray(AxisKind, MAX_RANK) = .{};
+        var indices_batch_axes: Shape.DimsArray = .{};
+        for (self._shape.tags()) |t| {
+            if (updates._shape.hasTag(t)) |_| {
+                if (indices._shape.hasTag(t)) |id_ax| {
+                    // tag is in self, indices and updates -> it's a batching dim
+                    self_kind.appendAssumeCapacity(.batching);
+                    indices_batch_axes.appendAssumeCapacity(id_ax);
+                } else {
+                    self_kind.appendAssumeCapacity(.update_window);
+                }
+            } else {
+                self_kind.appendAssumeCapacity(.inserted_window);
+            }
+        }
+        scoped_log.warn(" self_kind -> {any}", .{self_kind.constSlice()});
+
+        const index_coord_axis = indices._shape.hasTag(.coord) orelse indices._shape.axis(-1);
+        // meta.assert(indices.dim(index_coord_axis) == axes_.len, "scatterSlices({}, axes_={any}, indices, updates) expects 'indices' to be a tensor [..., {}], got {}", .{ self, axes_, axes_.len, indices });
+        var up_kind: std.BoundedArray(AxisKind, MAX_RANK) = .{};
+        var scatter_dims_to_self_axes: Shape.DimsArray = .{};
+        for (updates._shape.tags(), 0..) |t, up_ax| {
+            if (self._shape.hasTag(t)) |self_ax| {
+                if (self_kind.get(self_ax) == .batching) {
+                    up_kind.appendAssumeCapacity(.batching);
+                } else {
+                    meta.assert(updates.dim(up_ax) <= self.dim(self_ax), "scatterSlices expects the slices described in 'updates' to fit inside 'self', but along axis .{s} it doesn't. Got self={}, updates={}.", .{ t, self, updates });
+                    up_kind.appendAssumeCapacity(.update_window);
+                    // if (updates.dim(up_ax) < self.dim(self_ax)) {
+                    scatter_dims_to_self_axes.appendAssumeCapacity(self_ax);
+                    // }
+                }
+            } else {
+                up_kind.appendAssumeCapacity(.window_id);
+            }
+        }
+        scoped_log.warn(" up_kind -> {any}", .{up_kind.constSlice()});
+        // const n_window_id_axes = _collectAxes(AxisKind, up_kind, .window_id).len;
+        // const n_update_axes = _collectAxes(AxisKind, up_kind, .update_window).len;
+        // n_update_axes == 0 is equivalent to a scatterValues, and we need an axes argument, to interpret the offset.
+        // meta.assert(n_update_axes >= 1 and n_window_id_axes == indices.rank() - 1, "scatterSlices expects 'updates' to be made of at least one axes from 'self' and all axes from 'indices', got self={}, indices={}, updates={}", .{self, indices, updates});
+
+        const ctx = self.getContext();
+        const mlir_ctx = ctx.mlirCtx();
+
+        const _scalar: Tensor = .{ ._shape = Shape.init(.{}, self.dtype()), ._id = undefined };
+        const UpdateS = ops.BlockSign(ScatterOpts.increment);
+        const update_block = ctx.makeBlock(UpdateS, opts.update_fn, opts.update_fn_ctx, .{ _scalar, _scalar });
+        const loc = mlir_ctx.location(@src());
+
+        scoped_log.warn(
+            \\ -> ScatterAttr:
+            \\      .update_window_dims={d},
+            \\      .inserted_window_dims={d},
+            \\      .input_batching_dims={d},
+            \\      .scatter_indices_batching_dims={d},
+            \\      .scatter_dims_to_operand_dims={d},
+            \\      .index_vector_dim={}
+        , .{
+            _collectAxes(AxisKind, up_kind, .update_window).constSlice(),
+            _collectAxes(AxisKind, self_kind, .inserted_window).constSlice(),
+            _collectAxes(AxisKind, self_kind, .batching).constSlice(),
+            indices_batch_axes.constSlice(),
+            scatter_dims_to_self_axes.constSlice(),
+            index_coord_axis,
+        });
+        const scatter_attr = dialect.stablehlo.ScatterDimensionNumbersAttribute.init(mlir_ctx, .{
+            .update_window_dims = _collectAxes(AxisKind, up_kind, .update_window).constSlice(),
+            .inserted_window_dims = _collectAxes(AxisKind, self_kind, .inserted_window).constSlice(),
+            .input_batching_dims = _collectAxes(AxisKind, self_kind, .batching).constSlice(),
+            .scatter_indices_batching_dims = indices_batch_axes.constSlice(),
+            .scatter_dims_to_operand_dims = scatter_dims_to_self_axes.constSlice(),
+            .index_vector_dim = index_coord_axis,
+        });
+
+        const op = mlir.Operation.make(
+            mlir_ctx,
+            "stablehlo.scatter",
+            .{
+                .variadic_operands = &.{ &.{self.value()}, &.{indices.value()}, &.{updates.value()} },
+                .blocks = &.{update_block},
+                .attributes = &.{
+                    .{ "scatter_dimension_numbers", scatter_attr.asAttr() },
+                    .{ "indices_are_sorted", mlir.BoolAttribute.init(mlir_ctx, opts.indices_are_sorted).asAttr() },
+                    .{ "unique_indices", mlir.BoolAttribute.init(mlir_ctx, opts.indices_are_unique).asAttr() },
+                },
+                .result_type_inference = true,
+                .location = loc,
+            },
+        );
+        return _result(self._shape, op.result(0));
+    }
+
+    test scatterSlices {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        {
+            // Only test shapes
+            var comp = try zml.module.CompilationContext.init(std.heap.page_allocator, "test", platform);
+            defer comp.deinit();
+            comp.activate();
+            defer comp.deactivate();
+
+            inline for (.{
+                .{ .{ .a = 10 }, .{ ._ = 1 }, .{ .a = 3 } },
+                .{ .{ .a = 10, .b = 20 }, .{ .a = 10, .n = 8, ._ = 1 }, .{ .a = 10, .n = 8, .b = 2 } },
+                .{ .{ .a = 10, .b = 20 }, .{ .n = 8, ._ = 1 }, .{ .n = 8, .a = 2 } },
+                .{ .{ .a = 10, .b = 20 }, .{ .n = 8, ._ = 2 }, .{ .n = 8, .a = 3, .b = 2 } },
+            }) |testcase| {
+                const x_shape, const idx_shape, const updates_shapes = testcase;
+                const x = Tensor.constant(x_shape, .{ .f16 = 0 });
+                const idx = Tensor.constant(idx_shape, .{ .i32 = 0 });
+                const updates = Tensor.constant(updates_shapes, .{ .f16 = 0 });
+
+                const y = scatterSlices(x, idx, updates, .{});
+                // Shape doesn't change with scatterSlices
+                try zml.testing.expectEqualShapes(x.shape(), y.shape());
+                try std.testing.expect(y.value().owner().verify());
+            }
+        }
+        {
+            // Test with actual values.
+            const range = try zml.HostBuffer.arange(std.testing.allocator, .{ .end = 2 * 3 * 4 * 2 }, .u16);
+            defer range.deinit(std.testing.allocator);
+            const operand = try range.reshape(.{ .a = 2, .b = 3, .c = 4, .d = 2 }).toDevice(platform);
+            defer operand.deinit();
+            const start_indices = (try zml.Buffer.fromArray(
+                platform,
+                [2][2][3][2]i32{
+                    .{
+                        .{ .{ 0, 0 }, .{ 1, 0 }, .{ 2, 1 } },
+                        .{ .{ 0, 1 }, .{ 1, 1 }, .{ 0, 9 } },
+                    },
+                    .{
+                        .{ .{ 0, 0 }, .{ 2, 1 }, .{ 2, 2 } },
+                        .{ .{ 1, 2 }, .{ 0, 1 }, .{ 1, 0 } },
+                    },
+                },
+            )).withTags(.{ .n, .a, .m, .coord });
+            defer start_indices.deinit();
+
+            const values = (try zml.Buffer.fromArray(platform, [2][2][3][2][2]u16{
+                .{
+                    .{ .{ .{ 1, 1 }, .{ 1, 1 } }, .{ .{ 1, 1 }, .{ 1, 1 } }, .{ .{ 1, 1 }, .{ 1, 1 } } },
+                    .{ .{ .{ 1, 1 }, .{ 1, 1 } }, .{ .{ 1, 1 }, .{ 1, 1 } }, .{ .{ 1, 1 }, .{ 1, 1 } } },
+                },
+                .{
+                    .{ .{ .{ 1, 1 }, .{ 1, 1 } }, .{ .{ 1, 1 }, .{ 1, 1 } }, .{ .{ 1, 1 }, .{ 1, 1 } } },
+                    .{ .{ .{ 1, 1 }, .{ 1, 1 } }, .{ .{ 1, 1 }, .{ 1, 1 } }, .{ .{ 1, 1 }, .{ 1, 1 } } },
+                },
+            })).withTags(.{ .n, .a, .m, .c, .b });
+            defer values.deinit();
+
+            const scatter_opts = meta.MapType(Tensor, zml.Buffer).map(ScatterOpts){
+                .update_fn = &ScatterOpts.increment,
+                .update_fn_ctx = undefined,
+            };
+            const result = try zml.testing.compileAndCall(platform, scatterSlices, .{ operand, start_indices, values, scatter_opts });
+
+            const expected = zml.HostBuffer.fromArray(&[2][3][4][2]u16{
+                .{
+                    .{ .{ 3, 4 }, .{ 6, 7 }, .{ 6, 7 }, .{ 7, 8 } },
+                    .{ .{ 9, 10 }, .{ 11, 12 }, .{ 15, 16 }, .{ 17, 18 } },
+                    .{ .{ 17, 18 }, .{ 19, 20 }, .{ 22, 23 }, .{ 24, 25 } },
+                },
+                .{
+                    .{ .{ 25, 26 }, .{ 28, 29 }, .{ 30, 31 }, .{ 31, 32 } },
+                    .{ .{ 35, 36 }, .{ 38, 39 }, .{ 38, 39 }, .{ 39, 40 } },
+                    .{ .{ 41, 42 }, .{ 44, 45 }, .{ 46, 47 }, .{ 47, 48 } },
+                },
+            });
+            try zml.testing.expectClose(expected, result, 0);
+        }
+    }
+
     /// Returns a Tensor containing the maximum over a given axis.
     pub fn max(self: Tensor, axis_: anytype) Tensor {
         const a = self.axis(axis_);
