@@ -416,6 +416,10 @@ pub const BoolAttribute = struct {
     pub fn value(self: Self) bool {
         return c.mlirBoolAttrGetValue(self.inner());
     }
+
+    pub fn asAttr(self: Self) Attribute {
+        return self.as(Attribute).?;
+    }
 };
 
 pub const TypeAttribute = struct {

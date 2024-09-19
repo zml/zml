@@ -928,29 +928,35 @@ pub const ScatterDimensionNumbersAttribute = struct {
 
     pub fn init(
         ctx: mlir.Context,
-        update_window_dims: []const i64,
-        inserted_window_dims: []const i64,
-        input_batching_dims: []const i64,
-        scatter_indices_batching_dims: []const i64,
-        scatter_dims_to_operand_dims: []const i64,
-        index_vector_dim: i64,
+        args: struct {
+            update_window_dims: []const i64,
+            inserted_window_dims: []const i64,
+            input_batching_dims: []const i64,
+            scatter_indices_batching_dims: []const i64,
+            scatter_dims_to_operand_dims: []const i64,
+            index_vector_dim: i64,
+        },
     ) Self {
         return Self.wrap(
             c.stablehloScatterDimensionNumbersGet(
                 ctx.inner(),
-                @intCast(update_window_dims.len),
-                update_window_dims.ptr,
-                @intCast(inserted_window_dims.len),
-                inserted_window_dims.ptr,
-                @intCast(input_batching_dims.len),
-                input_batching_dims.ptr,
-                @intCast(scatter_indices_batching_dims.len),
-                scatter_indices_batching_dims.ptr,
-                @intCast(scatter_dims_to_operand_dims.len),
-                scatter_dims_to_operand_dims.ptr,
-                index_vector_dim,
+                @intCast(args.update_window_dims.len),
+                args.update_window_dims.ptr,
+                @intCast(args.inserted_window_dims.len),
+                args.inserted_window_dims.ptr,
+                @intCast(args.input_batching_dims.len),
+                args.input_batching_dims.ptr,
+                @intCast(args.scatter_indices_batching_dims.len),
+                args.scatter_indices_batching_dims.ptr,
+                @intCast(args.scatter_dims_to_operand_dims.len),
+                args.scatter_dims_to_operand_dims.ptr,
+                args.index_vector_dim,
             ),
         );
+    }
+
+    pub fn asAttr(self: ScatterDimensionNumbersAttribute) mlir.Attribute {
+        return self.as(mlir.Attribute).?;
     }
 
     pub fn getUpdateWindowDimsSize(self: Self) usize {
