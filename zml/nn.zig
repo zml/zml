@@ -38,7 +38,7 @@ pub const TokenEmbedding = struct {
     pub fn forward(self: TokenEmbedding, idx: Tensor) Tensor {
         meta.assert(idx.dtype().isInteger(), "TokenEmbedding expects an integer input, received: {}", .{idx});
         meta.assert(self.weight.rank() == 2, "TokenEmbedding expects it's weight Tensor to be a 2D matrix, got {}", .{self.weight});
-        return self.weight.gather1d(0, idx, .{});
+        return self.weight.gatherValues(0, idx, .{});
     }
 };
 
@@ -393,7 +393,7 @@ pub fn nearest(input: Tensor, scale_factor: []const f64) Tensor {
         const n = out_shape.dim(d);
         const ratio = meta.divFloat(f32, input.dim(d), n);
         const offsets = Tensor.arange(.{ .end = n }, .f32).addConstant(0.5).scale(ratio).floor().convert(.i32);
-        res = res.gather1d(d, offsets, .{ .indices_are_sorted = true });
+        res = res.gatherValues(d, offsets, .{ .indices_are_sorted = true });
     }
     return res;
 }
@@ -927,7 +927,7 @@ pub fn sampleTokens(activations: Tensor, opts: SamplingStrategy, rng: Tensor.Rng
 
     // topk_idx is indices into topk.values ! so in the range [0, topk]
     // Convert for the original indices from the full [0, voc] range.
-    const next_tokens = topk.indices.gather1d(.voc, topk_idx.squeeze(.topk), .{}).squeeze(.voc);
+    const next_tokens = topk.indices.gatherValues(.voc, topk_idx.squeeze(.topk), .{});
     // log.debug("sampleTokens({}) -> {} -> {} -> {}", .{ activations, topk.indices, topk_idx, next_tokens });
     return .{ next_tokens, next_rng };
 }
