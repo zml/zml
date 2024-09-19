@@ -90,7 +90,11 @@ prompt = "Q: What is the largest animal?\nA:"
 # so let's stop collecting after 1000 layers.
 pipeline = zml_utils.ActivationCollector(pipeline, max_layers=1000, stop_after_first_step=True)
 output, activations = pipeline(prompt)
-print(output)
+
+# `output` can be `None` if activations collection
+# has stopped before the end of the inference
+if output:
+    print(output)
 
 # Save activations to a file.
 filename = model_path.split("/")[-1] + ".activations.pt"
