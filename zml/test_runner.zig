@@ -25,7 +25,7 @@ pub fn main() anyerror!void {
 }
 
 pub fn asyncMain() void {
-    const test_fn_list = builtin.test_functions;
+    const test_fn_list: []const std.builtin.TestFn = builtin.test_functions;
     var ok_count: usize = 0;
     var skip_count: usize = 0;
     var fail_count: usize = 0;
@@ -35,9 +35,24 @@ pub fn asyncMain() void {
     });
     const have_tty = std.io.getStdErr().isTty();
 
+    var args = std.process.args();
+    // Skip executable path
+    _ = args.next().?;
+
+    const filter_query = if (args.next()) |arg| blk: {
+        std.debug.print("Only tests with name including `{s}` will be ran\n", .{arg});
+        break :blk arg;
+    } else blk: {
+        break :blk "";
+    };
+
     var leaks: usize = 0;
 
     for (test_fn_list, 0..) |test_fn, i| {
+        if (std.mem.indexOf(u8, test_fn.name, filter_query) == null) {
+            continue;
+        }
+
         testing.allocator_instance = .{};
         defer {
             if (testing.allocator_instance.deinit() == .leak) {
