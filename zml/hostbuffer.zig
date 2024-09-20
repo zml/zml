@@ -158,8 +158,9 @@ pub const HostBuffer = struct {
         return self._shape.dtype();
     }
 
-    pub fn strides(self: HostBuffer) ?[]const i64 {
-        return self._strides;
+    pub fn strides(self: *const HostBuffer) ?[]const i64 {
+        // Pass strides per pointer otherwise we return a pointer to this stack frame.
+        return if (self._strides) |*strd| strd[0..self.rank()] else null;
     }
 
     pub fn data(self: HostBuffer) []const u8 {

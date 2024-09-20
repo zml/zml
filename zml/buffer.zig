@@ -4,7 +4,6 @@ const testing = std.testing;
 const meta = @import("meta.zig");
 const pjrt = @import("pjrt");
 const pjrtx = @import("pjrtx.zig");
-const platform = @import("platform.zig");
 
 const Context = @import("context.zig").Context;
 const HostBuffer = @import("hostbuffer.zig").HostBuffer;
@@ -12,7 +11,7 @@ const Shape = @import("shape.zig").Shape;
 const Tensor = @import("tensor.zig").Tensor;
 const Data = @import("dtype.zig").Data;
 const DataType = @import("dtype.zig").DataType;
-const Target = @import("platform.zig").Target;
+const Platform = @import("platform.zig").Platform;
 
 test {
     std.testing.refAllDecls(Buffer);
@@ -26,54 +25,74 @@ test {
 pub const Buffer = struct {
     _shape: Shape,
     _shards: Shape = undefined,
-    _platform: platform.Platform,
+    _platform: Platform,
     _data: *pjrtx.Buffer,
 
     /// Copies the content of the given buffer from host memory to the accelerator memory.
-    pub fn from(platform_: platform.Platform, buf: HostBuffer) !Buffer {
-        const pjrt_buffer = try platform_.pjrt_client.bufferFromHostBuffer(platform_.pjrt_api, .{
+    pub fn from(platform: Platform, buf: HostBuffer) !Buffer {
+        const pjrt_buffer = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, .{
             .data = buf.data,
             .buffer_type = pjrtx.Buffer.BufferTypeFromDType(buf.shape().dtype()),
             .dims = buf.shape().dims(),
-            .byte_strides = null,
-            .device = platform_.getDevices()[0],
+            .byte_strides = buf.strides(),
+            .device = platform.getDevices()[0],
             .host_buffer_semantics = .ImmutableUntilTransferCompletes,
         });
         return .{
-            ._platform = platform_,
+            ._platform = platform,
             ._shape = buf.shape(),
             ._data = pjrt_buffer,
         };
     }
 
     /// Wraps a pre-exisiting `pjrt.Buffer` into a `zml.Buffer`.
-    pub fn fromPjrtBuffer(platform_: platform.Platform, pjrt_buffer: *pjrtx.Buffer) Buffer {
+    pub fn fromPjrtBuffer(platform: Platform, pjrt_buffer: *pjrtx.Buffer) Buffer {
         return .{
-            ._platform = platform_,
-            ._shape = _shapeFromPjrtBuffer(platform_, pjrt_buffer),
+            ._platform = platform,
+            ._shape = _shapeFromPjrtBuffer(platform, pjrt_buffer),
             ._data = pjrt_buffer,
         };
     }
 
     /// Copies the given Zig slice to the accelerator memory and
     /// return a Buffer with the given dimensions.
-    pub fn fromSlice(platform_: platform.Platform, dimz: anytype, s: anytype) !Buffer {
+    pub fn fromSlice(platform: Platform, dimz: anytype, s: anytype) !Buffer {
         const sh = Shape.init(dimz, DataType.fromSliceElementType(s));
-        return from(platform_, HostBuffer.fromBytes(sh, std.mem.sliceAsBytes(s)));
+        return from(platform, HostBuffer.fromBytes(sh, std.mem.sliceAsBytes(s)));
     }
 
     /// Copies the given Zig array to the accelerator memory and
     /// return a Buffer using the array shape.
-    pub fn fromArray(platform_: platform.Platform, arr: anytype) !Buffer {
+    pub fn fromArray(platform: Platform, arr: anytype) !Buffer {
         const host_buffer = HostBuffer.fromArray(&arr);
-        return try host_buffer.toDevice(platform_);
+        return try from(platform, host_buffer);
     }
 
     /// Creates a Buffer with a single element.
-    pub fn scalar(platform_: platform.Platform, val: anytype, dtype_: DataType) !Buffer {
+    pub fn scalar(platform: Platform, val: anytype, dtype_: DataType) !Buffer {
         const x = dtype_.constant(val);
         const host_buffer = HostBuffer.fromBytes(Shape.init(.{}, dtype_), x.constSlice());
-        return try host_buffer.toDevice(platform_);
+        return try from(platform, host_buffer);
+    }
+
+    /// Creates a Buffer with a single element repeated manytime.
+    pub fn constant(platform: Platform, shape_: Shape, val: anytype) !Buffer {
+        const x = shape_.dtype().constant(val);
+        const host_buffer: HostBuffer = .{
+            ._shape = shape_,
+            ._strides = [1]i64{0} ** Shape.MAX_RANK,
+            .data = x.constSlice(),
+        };
+        return try from(platform, host_buffer);
+    }
+
+    test constant {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        const x = try constant(platform, Shape.init(.{ 4, 3, 2 }, .u16), 42);
+        const y = try x.getValue([4 * 3 * 2]u16);
+        try std.testing.expectEqual([_]u16{42} ** (4 * 3 * 2), y);
     }
 
     /// Creates a Buffer as a view of memory visible from the device,
@@ -83,7 +102,7 @@ pub const Buffer = struct {
     /// Be careful though, as it requires a specific alignment.
     /// Also note that it might not work on all platforms,
     /// could lead to crashes and is considerably slower.
-    pub fn asViewOf(platform_: platform.Platform, buf: HostBuffer) !Buffer {
+    pub fn asViewOf(platform: Platform, buf: HostBuffer) !Buffer {
         const minor_to_major: [Shape.MAX_RANK]i64 = comptime blk: {
             var res: [Shape.MAX_RANK]i64 = undefined;
             for (0..Shape.MAX_RANK) |i| {
@@ -92,11 +111,11 @@ pub const Buffer = struct {
             break :blk res;
         };
 
-        const pjrt_buffer = try platform_.pjrt_client.createViewOfDeviceBuffer(platform_.pjrt_api, .{
+        const pjrt_buffer = try platform.pjrt_client.createViewOfDeviceBuffer(platform.pjrt_api, .{
             .data = buf.data,
             .element_type = pjrtx.Buffer.BufferTypeFromDType(buf.shape().dtype()),
             .dims = buf.shape().dims(),
-            .device = platform_.getDevices()[0],
+            .device = platform.getDevices()[0],
             .layout = .{
                 .Tiled = .{
                     .minor_to_major = minor_to_major[Shape.MAX_RANK - buf.shape().rank() ..],
@@ -107,7 +126,7 @@ pub const Buffer = struct {
         });
 
         return .{
-            ._platform = platform_,
+            ._platform = platform,
             ._shape = buf.shape(),
             ._data = pjrt_buffer,
         };
@@ -184,8 +203,8 @@ pub const Buffer = struct {
         try writer.print("Tensor({_})", .{self._shape});
     }
 
-    fn _shapeFromPjrtBuffer(platform_: platform.Platform, buf: *pjrtx.Buffer) Shape {
-        const dt: DataType = switch (buf.getElementType(platform_.pjrt_api)) {
+    fn _shapeFromPjrtBuffer(platform: Platform, buf: *pjrtx.Buffer) Shape {
+        const dt: DataType = switch (buf.getElementType(platform.pjrt_api)) {
             // Please keep the list exhaustive and in the same order than in DataType.
             .PRED => .bool,
             .F8E4M3B11FNUZ => .f8e4m3b11fnuz,
@@ -212,7 +231,7 @@ pub const Buffer = struct {
             .INVALID => @panic("Can't handle INVALID Pjrt buffers."),
         };
 
-        return Shape.init(buf.getDimensions(platform_.pjrt_api), dt);
+        return Shape.init(buf.getDimensions(platform.pjrt_api), dt);
     }
 
     pub const From = meta.MapType(Tensor, Buffer).map;
