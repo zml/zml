@@ -15,11 +15,41 @@ test {
 
 pub const Decoder = struct {
     buffer_file: zml.aio.MemoryMappedFile,
-    file_map: std.StringArrayHashMapUnmanaged(std.zip.Iterator(asynk.File.SeekableStream).Entry) = .{},
+    file_map: std.StringArrayHashMapUnmanaged(FileEntry) = .{},
     tar_file: ?TarStream = null,
     ops: []PickleOp,
     is_zip_file: bool,
     zip_prefix: []const u8 = &[_]u8{},
+
+    pub const FileEntry = struct {
+        version_needed_to_extract: u16,
+        flags: u16,
+        compression_method: std.zip.CompressionMethod,
+        last_modification_time: u16,
+        last_modification_date: u16,
+        header_zip_offset: u64,
+        crc32: u32,
+        filename_len: u32,
+        compressed_size: u64,
+        uncompressed_size: u64,
+        file_offset: u64,
+
+        pub fn init(entry: anytype) FileEntry {
+            return .{
+                .version_needed_to_extract = entry.version_needed_to_extract,
+                .flags = @as(u16, @bitCast(entry.flags)),
+                .compression_method = entry.compression_method,
+                .last_modification_time = entry.last_modification_time,
+                .last_modification_date = entry.last_modification_date,
+                .header_zip_offset = entry.header_zip_offset,
+                .crc32 = entry.crc32,
+                .filename_len = entry.filename_len,
+                .compressed_size = entry.compressed_size,
+                .uncompressed_size = entry.uncompressed_size,
+                .file_offset = entry.file_offset,
+            };
+        }
+    };
 
     const magic = "PK\x03\x04";
 
@@ -64,12 +94,12 @@ pub const Decoder = struct {
         self.* = undefined;
     }
 
-    fn parseOps(self: *Decoder, allocator: Allocator, seekable_stream: asynk.File.SeekableStream) ![]PickleOp {
+    fn parseOps(self: *Decoder, allocator: Allocator, seekable_stream: anytype) ![]PickleOp {
         // TODO(SuperAuguste): deflate using `std.compress.flate`'s `decompressor`
         // TODO(SuperAuguste): explore swapping in non-generic reader here instead of using switch(?)
         //                     not sure if that'd actually be beneficial in any way
 
-        var iter = try std.zip.Iterator(asynk.File.SeekableStream).init(seekable_stream);
+        var iter = try std.zip.Iterator(@TypeOf(seekable_stream)).init(seekable_stream);
         var filename_buf: [std.fs.max_path_bytes]u8 = undefined;
         while (try iter.next()) |entry| {
             const filename = filename_buf[0..entry.filename_len];
@@ -78,7 +108,7 @@ pub const Decoder = struct {
             if (len != filename.len) return error.ZipBadFileOffset;
             if (isBadFilename(filename)) return error.ZipBadFilename;
             std.mem.replaceScalar(u8, filename, '\\', '/'); // normalize path separators
-            try self.file_map.put(allocator, try allocator.dupe(u8, filename), entry);
+            try self.file_map.put(allocator, try allocator.dupe(u8, filename), FileEntry.init(entry));
         }
 
         var file_iter = self.file_map.iterator();
@@ -101,7 +131,7 @@ pub const Decoder = struct {
                     if (local_header.last_modification_date != entry.last_modification_date)
                         return error.ZipMismatchModDate;
 
-                    if (@as(u16, @bitCast(local_header.flags)) != @as(u16, @bitCast(entry.flags)))
+                    if (@as(u16, @bitCast(local_header.flags)) != entry.flags)
                         return error.ZipMismatchFlags;
                     if (local_header.crc32 != 0 and local_header.crc32 != entry.crc32)
                         return error.ZipMismatchCrc32;

@@ -148,7 +148,7 @@ pub const PickleData = struct {
             if (local_header.last_modification_date != entry.last_modification_date)
                 return error.ZipMismatchModDate;
 
-            if (@as(u16, @bitCast(local_header.flags)) != @as(u16, @bitCast(entry.flags)))
+            if (@as(u16, @bitCast(local_header.flags)) != entry.flags)
                 return error.ZipMismatchFlags;
             if (local_header.crc32 != 0 and local_header.crc32 != entry.crc32)
                 return error.ZipMismatchCrc32;
