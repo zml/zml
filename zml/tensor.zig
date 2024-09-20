@@ -2444,7 +2444,7 @@ pub const Tensor = struct {
         return result;
     }
 
-    pub fn chunkExact(self: Tensor, n_chunks: comptime_int, axis_: i64) [n_chunks]Tensor {
+    pub fn chunkExact(self: Tensor, n_chunks: comptime_int, axis_: anytype) [n_chunks]Tensor {
         const a = self.axis(axis_);
         const length = self.dim(a);
         _ = @divExact(length, n_chunks);

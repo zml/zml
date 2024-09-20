@@ -16,6 +16,11 @@ const log = std.log.scoped(.zml_tensor);
 
 const cuda = @import("nn/cuda.zig");
 
+test {
+    _ = cuda;
+    std.testing.refAllDecls(@This());
+}
+
 pub const Linear = struct {
     weight: Tensor,
     bias: ?Tensor = null,
@@ -302,7 +307,7 @@ test "real/img" {
 }
 
 test "rope" {
-    const platofrm = zml.testing.env();
+    const platform = zml.testing.env();
 
     const TestRope = struct {
         fn forward(x: Tensor, opts: RopeOpts) Tensor {
@@ -326,9 +331,9 @@ test "rope" {
 
     // x is made such as the interleaved and sequential reps are the same.
     // So the two implementations should give the same results.
-    const x = try zml.Buffer.fromSlice(platofrm, .{ 1, 5, 4 }, &[_]f32{ 1.0, 0.1, -1.0, -0.5 } ** 5);
-    const res1 = try zml.testing.compileAndCall(platofrm, TestRope.forward, .{ x, RopeOpts{ .impl = .interleaved } });
-    const res2 = try zml.testing.compileAndCall(platofrm, TestRope.forward, .{ x, RopeOpts{ .impl = .sequential } });
+    const x = try zml.Buffer.fromSlice(platform, .{ 1, 5, 4 }, &[_]f32{ 1.0, 0.1, -1.0, -0.5 } ** 5);
+    const res1 = try zml.testing.compileAndCall(platform, TestRope.forward, .{ x, RopeOpts{ .impl = .interleaved } });
+    const res2 = try zml.testing.compileAndCall(platform, TestRope.forward, .{ x, RopeOpts{ .impl = .sequential } });
 
     try zml.testing.expectClose(res1, res2, 1e-4);
 }
@@ -516,36 +521,63 @@ test nearest {
     }
 }
 
-pub const ResizeOpts = struct { original_len: ?Tensor = null };
+pub const ResizeOpts = struct { original_len: ?Tensor = null, precision: ?zml.DataType = null };
 
-pub fn resizeBilinear(image: Tensor, axes: []const i8, dims: []const u63, opt: ResizeOpts) Tensor {
+pub fn resizeBilinear(image: Tensor, resized_axes: anytype, opt: ResizeOpts) Tensor {
+    const new_size, const tags_ = Shape.parseStruct(u63, resized_axes);
     var out = image;
-    for (axes, dims) |a, d| {
+    for (new_size.constSlice(), tags_.constSlice()) |d, t| {
+        const ax = image.shape().axis(t);
         const child_opt: ResizeOpts = .{
-            .original_len = if (opt.original_len) |o| o.choose1d(0, a) else null,
+            .original_len = if (opt.original_len) |o| o.choose1d(0, ax) else null,
         };
-        out = resizeLinear1d(out, a, d, child_opt);
+        out = resizeLinear1d(out, ax, d, child_opt);
     }
     return out;
 }
 
+test resizeBilinear {
+    const platform = zml.testing.env();
+
+    // Only test shapes
+    var comp = try zml.module.CompilationContext.init(std.heap.page_allocator, "test", platform);
+    defer comp.deinit();
+    comp.activate();
+    defer comp.deactivate();
+
+    inline for (.{
+        .{ .{ .a = 10, .b = 10 }, .{ .a = 20 }, .{ .a = 20, .b = 10 } },
+        .{ .{ .a = 10, .b = 10 }, .{ .b = 5 }, .{ .a = 10, .b = 5 } },
+        .{ .{ .a = 10, .b = 10 }, .{ .a = 20, .b = 5 }, .{ .a = 20, .b = 5 } },
+    }) |testcase| {
+        const x_shape, const resizing, const res_shape = testcase;
+        const x = Tensor.constant(x_shape, .{ .f16 = 0 });
+        const y = resizeBilinear(x, resizing, .{});
+        try zml.testing.expectEqualShapes(Shape.init(res_shape, .f16), y.shape());
+        try std.testing.expect(y.value().owner().verify());
+    }
+}
+
 pub fn resizeLinear1d(image: Tensor, axis: i8, new_len: u63, opt: ResizeOpts) Tensor {
-    const og_len = opt.original_len orelse Tensor.scalar(image.dim(axis), .f32);
-    const ratio = og_len.convert(.f32).scale(meta.divFloat(f32, 1, new_len));
-    const scaled = Tensor.arange(.{ .end = new_len }, .f32).mul(ratio);
+    const res_shape = image.shape().set(axis, new_len);
+
+    const dtype = opt.precision orelse image.dtype();
+    const og_len = opt.original_len orelse Tensor.scalar(image.dim(axis), dtype);
+    const ratio = og_len.convert(dtype).scale(meta.divFloat(f32, 1, new_len));
+    const scaled = Tensor.arange(.{ .end = new_len }, dtype).mul(ratio);
     const left = scaled.floor();
     const right = left.addConstant(1);
 
-    const values = image.gatherSlices1d(axis, 2, left.convert(.i32), .{ .indices_are_sorted = true });
-    const left_val, const right_val = helpers.mapTensors(
-        Tensor.squeeze,
-        values.convert(.f32).chunkExact(2, axis + 1),
-        .{@as(i64, @intCast(axis + 1))},
-    );
-    const left_weight = right.sub(scaled).broadcast(left_val.shape(), &.{axis});
-    const right_weight = scaled.sub(left).broadcast(left_val.shape(), &.{axis});
+    // TODO: check that two gather isn't too bad perf wise.
+    // Normally we should use gatherSlices to collect the values 2 by 2,
+    // but gatherSlices messes up with the order of axes.
+    const left_val = image.gatherValues(axis, left.convert(.i32), .{ .indices_are_sorted = true }).convert(dtype);
+    const right_val = image.gatherValues(axis, right.convert(.i32), .{ .indices_are_sorted = true }).convert(dtype);
 
-    return left_val.mul(left_weight).add(right_val.mul(right_weight)).convert(image.dtype());
+    const left_weight = right.sub(scaled).broadcast(res_shape, &.{axis});
+    const right_weight = scaled.sub(left).broadcast(res_shape, &.{axis});
+
+    return left_val.mul(left_weight).add(right_val.mul(right_weight)).convert(image.dtype()).withTags(image.shape().tags());
 }
 
 /// Bicubic interpolation of the given image.
@@ -926,8 +958,4 @@ pub fn sampleTokens(activations: Tensor, opts: SamplingStrategy, rng: Tensor.Rng
     const next_tokens = topk.indices.gatherValues(.voc, topk_idx.squeeze(.topk), .{});
     // log.debug("sampleTokens({}) -> {} -> {} -> {}", .{ activations, topk.indices, topk_idx, next_tokens });
     return .{ next_tokens, next_rng };
-}
-
-test {
-    _ = cuda;
 }
