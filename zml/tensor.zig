@@ -23,11 +23,11 @@ const dialect = struct {
     const stablehlo = @import("mlir/dialects").stablehlo;
 };
 
-test {
-    std.testing.refAllDecls(@This());
-}
-
 const scoped_log = std.log.scoped(.zml_tensor);
+
+test {
+    std.testing.refAllDecls(Tensor);
+}
 
 /// Represents an abstract Tensor object, which can be the input,
 /// output, weight or activations of a neural network.
@@ -163,6 +163,12 @@ pub const Tensor = struct {
     pub fn rename(self: Tensor, renames: anytype) Tensor {
         var res = self;
         res._shape = self._shape.rename(renames);
+        return res;
+    }
+
+    pub fn renameAxis(self: Tensor, ax: i8, name: EnumLiteral) Tensor {
+        var res = self;
+        res._shape._tags.set(self.axis(ax), @tagName(name).ptr);
         return res;
     }
 
@@ -462,7 +468,7 @@ pub const Tensor = struct {
             };
         }
 
-        pub fn init(platform: Platform, seed: u128) !Buffer.From(Rng) {
+        pub fn init(platform: Platform, seed: u128) !Bufferized(Rng) {
             const bits: [2]u64 = @bitCast(seed);
             return .{
                 ._state = try Buffer.fromSlice(platform, Shape.init(.{2}, .u64), &bits),
@@ -1071,7 +1077,12 @@ pub const Tensor = struct {
     /// In this version batching dimensions need to be explicitly specified.
     /// The result shape is made of (batching_axes ++ lhs_result_axes ++ rhs_result_axes.
     /// Where "result axes" are non-contracting, non-batching axes of each input tensor.
-    pub fn dotGeneral(lhs: Tensor, rhs: Tensor, contracting_axes: []const [2]i8, batching_axes: []const [2]i8) Tensor {
+    pub fn dotGeneral(
+        lhs: Tensor,
+        rhs: Tensor,
+        contracting_axes: []const [2]i8,
+        batching_axes: []const [2]i8,
+    ) Tensor {
         meta.assert(lhs.dtype() == rhs.dtype(), "dotGeneral expects tensors to be of the same type, got {} and {}", .{ lhs.dtype(), rhs.dtype() });
 
         const Axes = std.BoundedArray(i64, MAX_RANK);
@@ -1271,6 +1282,17 @@ pub const Tensor = struct {
             .{ .permutation = toI64(permutation) },
         );
         return _result(res_shape, op.result(0));
+    }
+
+    pub fn swapAxes(self: Tensor, a: anytype, b: anytype) Tensor {
+        if (self.axis(a) == self.axis(b)) return self;
+        var perm: Shape.AxesArray = .{};
+        for (0..self.rank()) |i| {
+            perm.appendAssumeCapacity(@intCast(i));
+        }
+        perm.set(self.axis(a), self.axis(b));
+        perm.set(self.axis(b), self.axis(a));
+        return self.transpose(perm.constSlice());
     }
 
     /// Returns a Tensor with the given axis unflattened.
@@ -1577,11 +1599,7 @@ pub const Tensor = struct {
         return _result(self._shape, expm1_op.result(0));
     }
 
-    pub const ArangeArgs = struct {
-        start: i64 = 0,
-        end: i64,
-        step: i64 = 1,
-    };
+    pub const ArangeArgs = HostBuffer.ArangeArgs;
 
     /// Returns a Tensor containing evenly spaced values within a given interval.
     pub fn arange(args: ArangeArgs, dt: DataType) Tensor {
@@ -1868,14 +1886,6 @@ pub const Tensor = struct {
 
         const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "reverse({any})", .{axes_});
         const reverse_op = dialect.stablehlo.reverse(self.getContext().mlirCtx(), self.value(), toI64(actual_axes.constSlice()), loc);
-        return _result(self._shape, reverse_op.result(0));
-    }
-
-    /// Returns a Tensor with the given axes reversed.
-    pub fn reverseMany(self: Tensor, axes_: []const i64) Tensor {
-        const actual_axes = self._shape.axes(axes_).constSlice();
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "reverse({d})", .{actual_axes});
-        const reverse_op = dialect.stablehlo.reverseMany(self.getContext().mlirCtx(), self.value(), @ptrCast(actual_axes), loc);
         return _result(self._shape, reverse_op.result(0));
     }
 
@@ -2448,7 +2458,7 @@ pub const Tensor = struct {
         return result;
     }
 
-    pub fn chunkExact(self: Tensor, n_chunks: comptime_int, axis_: i64) [n_chunks]Tensor {
+    pub fn chunkExact(self: Tensor, n_chunks: comptime_int, axis_: anytype) [n_chunks]Tensor {
         const a = self.axis(axis_);
         const length = self.dim(a);
         _ = @divExact(length, n_chunks);
@@ -3483,4 +3493,10 @@ fn _collectAxes(T: type, bounded_array: std.BoundedArray(T, Tensor.MAX_RANK), va
         }
     }
     return res;
+}
+
+/// Returns a mirrored version of T where each Tensor has been replaced by a Buffer.
+pub fn Bufferized(comptime T: type) type {
+    const M = meta.MapType(Tensor, Buffer);
+    return M.map(T);
 }

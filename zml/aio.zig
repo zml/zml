@@ -18,6 +18,19 @@ pub const log = std.log.scoped(.zml_aio);
 pub const Value = @import("aio/value.zig").Value;
 const HostBuffer = @import("hostbuffer.zig").HostBuffer;
 
+test {
+    std.testing.refAllDecls(@This());
+    std.testing.refAllDecls(gguf);
+    // TODO(@cryptodeal)
+    // std.testing.refAllDecls(nemo);
+    std.testing.refAllDecls(safetensors);
+    std.testing.refAllDecls(sentencepiece);
+    std.testing.refAllDecls(tinyllama);
+    std.testing.refAllDecls(torch);
+    // TODO(@cryptodeal)
+    // std.testing.refAllDecls(yaml);
+}
+
 /// Detects the format of the model file (base on filename) and open it.
 pub fn detectFormatAndOpen(allocator: std.mem.Allocator, model_path: []const u8) !BufferStore {
     return if (std.mem.endsWith(u8, model_path, ".safetensors"))
@@ -584,8 +597,4 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
         //},
         else => {},
     }
-}
-
-test {
-    std.testing.refAllDecls(@This());
 }

@@ -1,15 +1,14 @@
 const std = @import("std");
 
+const meta = @import("meta.zig");
 const Buffer = @import("buffer.zig").Buffer;
-const Shape = @import("shape.zig").Shape;
-const Tensor = @import("tensor.zig").Tensor;
 const Data = @import("dtype.zig").Data;
 const DataType = @import("dtype.zig").DataType;
 const Platform = @import("platform.zig").Platform;
-const meta = @import("meta.zig");
+const Shape = @import("shape.zig").Shape;
 
 test {
-    std.testing.refAllDecls(@This());
+    std.testing.refAllDecls(HostBuffer);
 }
 
 /// Represents a tensor with associated data allocated by user code.
@@ -99,10 +98,16 @@ pub const HostBuffer = struct {
         };
     }
 
+    pub const ArangeArgs = struct {
+        start: i64 = 0,
+        end: i64,
+        step: i64 = 1,
+    };
+
     /// Allocates a HostBuffer with the given shape.
     /// The memory is initialized with increasing numbers.
     /// The caller owns the memory, and need to call `deinit()`.
-    pub fn arange(allocator: std.mem.Allocator, args: Tensor.ArangeArgs, dt: DataType) !HostBuffer {
+    pub fn arange(allocator: std.mem.Allocator, args: ArangeArgs, dt: DataType) !HostBuffer {
         meta.assert(args.start < args.end, "arange expects 'args.start' to be less than 'args.end', got {} and {}", .{ args.start, args.end });
         meta.assert(args.step > 0, "arange expects 'args.step' to be positive, got {}", .{args.step});
 
@@ -137,12 +142,6 @@ pub const HostBuffer = struct {
         }
     }
 
-    /// Embeds a tensor with concrete values into an Mlir program.
-    /// The content is copied, so the HostBuffer can be safely `deinit`.
-    pub fn toStaticTensor(self: HostBuffer) Tensor {
-        return Tensor.staticTensor(self.shape(), self.data);
-    }
-
     /// Copies this HostBuffer to the given accelerator.
     pub fn toDevice(self: HostBuffer, platform_: Platform) !Buffer {
         return try Buffer.from(platform_, self);
@@ -164,8 +163,9 @@ pub const HostBuffer = struct {
         return self._shape.dtype();
     }
 
-    pub fn strides(self: HostBuffer) ?[]const i64 {
-        return self._strides;
+    pub fn strides(self: *const HostBuffer) ?[]const i64 {
+        // Pass strides per pointer otherwise we return a pointer to this stack frame.
+        return if (self._strides) |*strd| strd[0..self.rank()] else null;
     }
 
     pub fn data(self: HostBuffer) []const u8 {
