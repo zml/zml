@@ -148,8 +148,8 @@ Once you've been granted access, you're ready to download a gated model like
 ```
 # requires token in $HOME/.cache/huggingface/token
 cd examples
-bazel run -c opt //llama:Meta-Llama-3-8b
-bazel run -c opt //llama:Meta-Llama-3-8b -- --promt="Once upon a time,"
+bazel run -c opt //llama:Llama-3.1-8B-Instruct
+bazel run -c opt //llama:Llama-3.1-8B-Instruct -- --promt="Once upon a time,"
 ```
 
 
