@@ -996,7 +996,8 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, m
         else => {},
     }
 
-    const loaded_executable = try platform.pjrt_client.compile(platform.pjrt_api, arena, module, try options.encode(arena));
+    const options_bytes = try options.encode(arena);
+    const loaded_executable = try platform.pjrt_client.compile(platform.pjrt_api, arena, module, options_bytes);
     errdefer unreachable; // errdefer loaded_executable.deinit();
 
     if (platform.compilation_options.cache_location) |compilation_cache_location| {
