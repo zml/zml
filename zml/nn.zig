@@ -521,7 +521,18 @@ test nearest {
     }
 }
 
-pub const ResizeOpts = struct { original_len: ?Tensor = null, precision: ?zml.DataType = null };
+pub const ResizeOpts = struct {
+    /// scalar tensor containing the original dimension of the image.
+    /// It can be different from the image shape,
+    /// if the image has been padded.
+    /// This allows to compile one module that handle different input image sizes.
+    original_len: ?Tensor = null,
+
+    /// Internal precision to do the interpolation.
+    /// Result will always use the same dtype than the original.
+    /// If not set, will use the image dtype, unless it's an integer type, in which case f32 will be used.
+    precision: ?zml.DataType = null,
+};
 
 pub fn resizeBilinear(image: Tensor, resized_axes: anytype, opt: ResizeOpts) Tensor {
     const new_size, const tags_ = Shape.parseStruct(u63, resized_axes);
@@ -561,7 +572,7 @@ test resizeBilinear {
 pub fn resizeLinear1d(image: Tensor, axis: i8, new_len: u63, opt: ResizeOpts) Tensor {
     const res_shape = image.shape().set(axis, new_len);
 
-    const dtype = opt.precision orelse image.dtype();
+    const dtype = opt.precision orelse if (image.dtype().class() == .integer) .f32 else image.dtype();
     const og_len = opt.original_len orelse Tensor.scalar(image.dim(axis), dtype);
     const ratio = og_len.convert(dtype).scale(meta.divFloat(f32, 1, new_len));
     const scaled = Tensor.arange(.{ .end = new_len }, dtype).mul(ratio);
@@ -577,45 +588,74 @@ pub fn resizeLinear1d(image: Tensor, axis: i8, new_len: u63, opt: ResizeOpts) Te
     const left_weight = right.sub(scaled).broadcast(res_shape, &.{axis});
     const right_weight = scaled.sub(left).broadcast(res_shape, &.{axis});
 
-    return left_val.mul(left_weight).add(right_val.mul(right_weight)).convert(image.dtype()).withTags(image.shape().tags());
+    const res = left_val.mul(left_weight).add(right_val.mul(right_weight));
+    return res.convert(image.dtype()).withTags(image.shape().tags());
 }
 
 /// Bicubic interpolation of the given image.
 /// Warning as of May 2024 the cpu backend don't optimize this very well
 /// and is not able to merge the weighting with the gather,
 /// leading to 20x slow down compared to STB implementation.
-pub fn resizeBicubic(image: Tensor, axes: []const i8, dims: []const u63, opt: ResizeOpts) Tensor {
+pub fn resizeBicubic(image: Tensor, resized_axes: anytype, opt: ResizeOpts) Tensor {
+    const new_size, const tags_ = Shape.parseStruct(u63, resized_axes);
     var out = image;
-    for (axes, dims) |a, d| {
+    for (new_size.constSlice(), tags_.constSlice()) |d, t| {
+        const ax = image.shape().axis(t);
         const child_opt: ResizeOpts = .{
-            .original_len = if (opt.original_len) |o| o.choose1d(0, a) else null,
+            .original_len = if (opt.original_len) |o| o.choose1d(0, ax) else null,
         };
-        out = resizeCubic1d(out, a, d, child_opt);
+        out = resizeCubic1d(out, ax, d, child_opt);
     }
     return out;
 }
 
+test resizeBicubic {
+    const platform = zml.testing.env();
+
+    // Only test shapes
+    var comp = try zml.module.CompilationContext.init(std.heap.page_allocator, "test", platform);
+    defer comp.deinit();
+    comp.activate();
+    defer comp.deactivate();
+
+    inline for (.{
+        .{ .{ .a = 10, .b = 10 }, .{ .a = 20 }, .{ .a = 20, .b = 10 } },
+        .{ .{ .a = 10, .b = 10 }, .{ .b = 5 }, .{ .a = 10, .b = 5 } },
+        .{ .{ .a = 10, .b = 10 }, .{ .a = 20, .b = 5 }, .{ .a = 20, .b = 5 } },
+    }) |testcase| {
+        const x_shape, const resizing, const res_shape = testcase;
+        const x = Tensor.constant(x_shape, .{ .f16 = 0 });
+        const y = resizeBicubic(x, resizing, .{});
+        try zml.testing.expectEqualShapes(Shape.init(res_shape, .f16), y.shape());
+        try std.testing.expect(y.value().owner().verify());
+    }
+}
+
 pub fn resizeCubic1d(image: Tensor, axis: i8, new_len: u63, opt: ResizeOpts) Tensor {
     // Extract neighboring pixels from the image.
-    const og_len = opt.original_len orelse Tensor.scalar(image.dim(axis), .f32);
-    const ratio = og_len.convert(.f32).scale(meta.divFloat(f32, 1, new_len));
-    const scaled = Tensor.arange(.{ .end = new_len }, .f32).mul(ratio);
+    const dtype = opt.precision orelse if (image.dtype().class() == .integer) .f32 else image.dtype();
+    const og_len = opt.original_len orelse Tensor.scalar(image.dim(axis), dtype);
+
+    const ratio = og_len.convert(dtype).scale(meta.divFloat(f32, 1, new_len));
+    const scaled = Tensor.arange(.{ .end = new_len }, dtype).mul(ratio);
     const t = scaled.sub(scaled.floor());
     const pos = Tensor.stack(&.{
-        Tensor.scalar(1, .f32).broadcast(t.shape(), &.{}),
+        Tensor.constant(t.shape(), dtype.one()),
         t,
         t.mul(t),
-        t.pow(Tensor.scalar(3, .f32)),
-    }, -1, .features);
+        t.pow(Tensor.scalar(3, dtype)),
+    }, .last, ._interpolated);
+
     std.debug.assert(pos.dim(0) == new_len);
     std.debug.assert(pos.dim(1) == 4);
 
     const neighbors = scaled.floor().addConstant(-1).convert(.i32).maximum(Tensor.scalar(0, .i32));
-    var slice = image.shape();
-    for (0..slice.rank()) |i| {
-        slice = slice.set(i, if (i == axis) 4 else 1);
-    }
-    const values = image.gatherSlices(slice, neighbors, .{ .indices_are_sorted = true });
+
+    const values = image.renameAxis(axis, ._neighbors).gatherSlices(
+        Shape.init(.{ ._neighbors = 4 }, image.dtype()),
+        neighbors.appendAxes(.{.coord}),
+        .{ .indices_are_sorted = true },
+    ).convert(dtype);
 
     const weights_: [4][4]f32 = .{
         .{ 0, 1, 0, 0 },
@@ -623,22 +663,24 @@ pub fn resizeCubic1d(image: Tensor, axis: i8, new_len: u63, opt: ResizeOpts) Ten
         .{ 1, -2.5, 2, -0.5 },
         .{ -0.5, 1.5, -1.5, 0.5 },
     };
-    const weights = zml.Tensor.constantTensor(zml.HostBuffer.fromArray(&weights_));
+    const weights = zml.Tensor.constantTensor(zml.HostBuffer.fromArray(&weights_)).convert(dtype).withTags(.{ ._interpolated, ._neighbors });
 
     // actually do the interpolation.
     // Note: ideally this matmul should be inlined with the gather, but that's currently not the case.
-    var res = values.convert(.f32).dotGeneral(weights, &.{.{ axis + 1, 1 }}, &.{});
-    res = pos.dotGeneral(res, &.{.{ 1, image.rank() }}, &.{.{ 0, axis }});
+    // TODO: not being able to use dot here is a bit annoying.
+    var res = values.dotGeneral(weights, &.{.{ values.axis(._neighbors), weights.axis(._neighbors) }}, &.{});
+    res = pos.dotGeneral(res, &.{.{ pos.axis(._interpolated), res.axis(._interpolated) }}, &.{.{ 0, 0 }});
 
     // the current axis is outputted in first position because it's a batching dim, put it back in place.
-    // if (axis != 0)
-    //     res = res.transpose(Shape.range(image.rank()).swap(0, axis).dims());
+    if (axis != 0) {
+        res = res.swapAxes(0, axis);
+    }
 
     // verify the shape
     const res_shape = image.shape().set(axis, new_len);
     // log.debug("resizeCubic1d: ({}, {}, {}, {}) -> {}", .{ image, axis, new_len, opt, res });
     std.debug.assert(std.mem.eql(i64, res_shape.dims(), res.dims()));
-    return res.convert(image.dtype());
+    return res.convert(image.dtype()).withTags(image.shape());
 }
 
 /// Return causal attention masks for the given shape.

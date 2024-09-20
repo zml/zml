@@ -23,10 +23,6 @@ const dialect = struct {
     const stablehlo = @import("mlir/dialects").stablehlo;
 };
 
-test {
-    std.testing.refAllDecls(@This());
-}
-
 const scoped_log = std.log.scoped(.zml_tensor);
 
 test {
@@ -167,6 +163,12 @@ pub const Tensor = struct {
     pub fn rename(self: Tensor, renames: anytype) Tensor {
         var res = self;
         res._shape = self._shape.rename(renames);
+        return res;
+    }
+
+    pub fn renameAxis(self: Tensor, ax: i8, name: EnumLiteral) Tensor {
+        var res = self;
+        res._shape._tags.set(self.axis(ax), @tagName(name).ptr);
         return res;
     }
 
@@ -1075,7 +1077,12 @@ pub const Tensor = struct {
     /// In this version batching dimensions need to be explicitly specified.
     /// The result shape is made of (batching_axes ++ lhs_result_axes ++ rhs_result_axes.
     /// Where "result axes" are non-contracting, non-batching axes of each input tensor.
-    pub fn dotGeneral(lhs: Tensor, rhs: Tensor, contracting_axes: []const [2]i8, batching_axes: []const [2]i8) Tensor {
+    pub fn dotGeneral(
+        lhs: Tensor,
+        rhs: Tensor,
+        contracting_axes: []const [2]i8,
+        batching_axes: []const [2]i8,
+    ) Tensor {
         meta.assert(lhs.dtype() == rhs.dtype(), "dotGeneral expects tensors to be of the same type, got {} and {}", .{ lhs.dtype(), rhs.dtype() });
 
         const Axes = std.BoundedArray(i64, MAX_RANK);
@@ -1275,6 +1282,17 @@ pub const Tensor = struct {
             .{ .permutation = toI64(permutation) },
         );
         return _result(res_shape, op.result(0));
+    }
+
+    pub fn swapAxes(self: Tensor, a: anytype, b: anytype) Tensor {
+        if (self.axis(a) == self.axis(b)) return self;
+        var perm: Shape.AxesArray = .{};
+        for (0..self.rank()) |i| {
+            perm.appendAssumeCapacity(@intCast(i));
+        }
+        perm.set(self.axis(a), self.axis(b));
+        perm.set(self.axis(b), self.axis(a));
+        return self.transpose(perm.constSlice());
     }
 
     /// Returns a Tensor with the given axis unflattened.
