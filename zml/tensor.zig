@@ -1682,12 +1682,12 @@ pub const Tensor = struct {
 
     /// Returns a constant Tensor with the given value.
     pub fn constant(dimz: anytype, val: Data) Tensor {
-        const sh = Shape.init(dimz, val.dataType());
-        const singleton_sh = Shape.init(.{}, val.dataType());
+        const sh = Shape.init(dimz, val.dtype());
+        const singleton_sh = Shape.init(.{}, val.dtype());
         const ctx = CompilationContext.current().mlirCtx();
         const loc = ctx.location(@src()).namedFmt(ctx, "dims={d}, value={}", .{ sh, val });
         const result_type = mlir.ext.RankedTensorType.fromShape(ctx, singleton_sh);
-        const elem_type = mlir.ext.denseElementAttrType(val.dataType());
+        const elem_type = mlir.ext.denseElementAttrType(val.dtype());
         var constant_op = dialect.stablehlo.constant(ctx, result_type, elem_type, val.constSlice(), loc);
         if (sh.rank() > 0) {
             constant_op = dialect.stablehlo.broadcast_in_dim(ctx, constant_op.result(0), &.{}, mlir.ext.RankedTensorType.fromShape(ctx, sh).as(mlir.Type).?, loc);
