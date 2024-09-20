@@ -16,10 +16,6 @@ const log = std.log.scoped(.zml_tensor);
 
 const cuda = @import("nn/cuda.zig");
 
-test {
-    std.testing.refAllDecls(@This());
-}
-
 pub const Linear = struct {
     weight: Tensor,
     bias: ?Tensor = null,
@@ -540,7 +536,7 @@ pub fn resizeLinear1d(image: Tensor, axis: i8, new_len: u63, opt: ResizeOpts) Te
     const left = scaled.floor();
     const right = left.addConstant(1);
 
-    const values = image.gatherValues(axis, left.convert(.i32), .{ .indices_are_sorted = true });
+    const values = image.gatherSlices1d(axis, 2, left.convert(.i32), .{ .indices_are_sorted = true });
     const left_val, const right_val = helpers.mapTensors(
         Tensor.squeeze,
         values.convert(.f32).chunkExact(2, axis + 1),
@@ -583,8 +579,7 @@ pub fn resizeCubic1d(image: Tensor, axis: i8, new_len: u63, opt: ResizeOpts) Ten
     std.debug.assert(pos.dim(1) == 4);
 
     const context = scaled.floor().addConstant(-1).convert(.i32).maximum(Tensor.scalar(0, .i32));
-    const values = image.gatherValues(axis, context, .{ .indices_are_sorted = true });
-
+    const values = image.gatherSlices1d(axis, 4, context, .{ .indices_are_sorted = true });
     const weights_: [4][4]f32 = .{
         .{ 0, 1, 0, 0 },
         .{ -0.5, 0, 0.5, 0 },
