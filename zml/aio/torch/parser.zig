@@ -388,6 +388,7 @@ const TarStream = struct {
 };
 
 test "Read pickle (simple)" {
+    const Value = @import("value.zig").Value;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -402,64 +403,36 @@ test "Read pickle (simple)" {
     try testing.expect(vals.stack.len == 2);
     // skip first value (frame)
     try testing.expect(vals.stack[1] == .seq);
-    try testing.expect(vals.stack[1].seq[0] == .dict);
-    const entries = vals.stack[1].seq[1][0].seq[1];
+    try testing.expect(vals.stack[1].seq.type == .dict);
+    const entries = vals.stack[1].seq.values[0].seq.values;
     try testing.expect(entries.len == 5);
-    for (entries, 0..) |kv, i| {
-        try testing.expect(kv == .seq);
-        try testing.expect(kv.seq[0] == .kv_tuple);
-        switch (i) {
-            0 => {
-                const key = kv.seq[1][0];
-                try testing.expect(key == .string);
-                try testing.expectEqualStrings("hello", key.string);
-                const value = kv.seq[1][1];
-                try testing.expect(value == .string);
-                try testing.expectEqualStrings("world", value.string);
-            },
-            1 => {
-                const key = kv.seq[1][0];
-                try testing.expect(key == .string);
-                try testing.expectEqualStrings("int", key.string);
-                const value = kv.seq[1][1];
-                try testing.expect(value == .int);
-                try testing.expect(value.int == 1);
-            },
-            2 => {
-                const key = kv.seq[1][0];
-                try testing.expect(key == .string);
-                try testing.expectEqualStrings("float", key.string);
-                const value = kv.seq[1][1];
-                try testing.expect(value == .float);
-                try testing.expectEqual(@as(f64, 3.141592), value.float);
-            },
-            3 => {
-                const key = kv.seq[1][0];
-                try testing.expect(key == .string);
-                try testing.expectEqualStrings("list", key.string);
-                const value = kv.seq[1][1];
-                try testing.expect(value == .seq);
-                try testing.expect(value.seq[0] == .list);
-                for (value.seq[1], 0..) |item, j| {
-                    try testing.expect(item == .int);
-                    try testing.expect(item.int == @as(i64, @intCast(j)));
-                }
-            },
-            4 => {
-                const key = kv.seq[1][0];
-                try testing.expect(key == .string);
-                try testing.expectEqualStrings("tuple", key.string);
-                const value = kv.seq[1][1];
-                try testing.expect(value == .seq);
-                try testing.expect(value.seq[0] == .tuple);
-                try testing.expect(value.seq[1][0] == .string);
-                try testing.expectEqualStrings("a", value.seq[1][0].string);
-                try testing.expect(value.seq[1][1] == .int);
-                try testing.expect(value.seq[1][1].int == 10);
-            },
-            else => unreachable,
-        }
-    }
+    const expected: []const Value = &.{
+        .{ .seq = .{ .type = .kv_tuple, .values = @constCast(@as([]const Value, &.{ .{ .string = "hello" }, .{ .string = "world" } })) } },
+        .{ .seq = .{ .type = .kv_tuple, .values = @constCast(@as([]const Value, &.{ .{ .string = "int" }, .{ .int64 = 1 } })) } },
+        .{ .seq = .{ .type = .kv_tuple, .values = @constCast(@as([]const Value, &.{ .{ .string = "float" }, .{ .float64 = 3.141592 } })) } },
+        .{ .seq = .{ .type = .kv_tuple, .values = @constCast(@as([]const Value, &.{
+            .{ .string = "list" },
+            .{ .seq = .{ .type = .list, .values = @constCast(@as([]const Value, &.{
+                .{ .int64 = 0 },
+                .{ .int64 = 1 },
+                .{ .int64 = 2 },
+                .{ .int64 = 3 },
+                .{ .int64 = 4 },
+            })) } },
+        })) } },
+        .{ .seq = .{ .type = .kv_tuple, .values = @constCast(@as([]const Value, &.{
+            .{ .string = "tuple" },
+            .{ .seq = .{
+                .type = .tuple,
+                .values = @constCast(@as([]const Value, &.{
+                    .{ .string = "a" },
+                    .{ .int64 = 10 },
+                })),
+            } },
+        })) } },
+    };
+
+    try std.testing.expectEqualDeep(expected, entries);
 }
 
 test "Read pickle (zipped)" {

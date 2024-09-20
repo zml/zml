@@ -65,7 +65,10 @@ pub const Build = struct {
     }
 };
 
-pub const Sequence = struct { SequenceType, []Value };
+pub const Sequence = struct {
+    type: SequenceType,
+    values: []Value,
+};
 
 pub const PersId = struct {
     allocator: std.mem.Allocator,
@@ -100,11 +103,11 @@ pub const ValueType = enum {
     seq,
     string,
     bytes,
-    int,
+    int64,
     bigint,
-    float,
+    float64,
     raw_num,
-    bool,
+    boolval,
     none,
 };
 
@@ -160,7 +163,7 @@ pub const Value = union(ValueType) {
     /// An integer, but not the crazy kind that comes as a string
     /// that has to be parsed. You can look in `Value.raw_num` for
     /// those.
-    int: i64,
+    int64: i64,
 
     /// An integer that can't fit in i64.
     bigint: big_int.Managed,
@@ -168,13 +171,13 @@ pub const Value = union(ValueType) {
     /// An float, but not the crazy kind that comes as a string
     /// that has to be parsed. You can look in `Value.raw_num` for
     /// those.
-    float: f64,
+    float64: f64,
 
     /// Some kind of weird number we can't handle.
     raw_num: PickleOp,
 
     /// A boolean value.
-    bool: bool,
+    boolval: bool,
 
     /// Python `None`.
     none: void,
@@ -184,8 +187,8 @@ pub const Value = union(ValueType) {
             .raw, .raw_num => |v| v.deinit(allocator),
             inline .app, .object, .global, .build, .pers_id => |v| v.deinit(),
             .seq => |v| {
-                for (v[1]) |*val| val.deinit(allocator);
-                allocator.free(v[1]);
+                for (v.values) |*val| val.deinit(allocator);
+                allocator.free(v.values);
             },
             .string, .bytes => |v| allocator.free(v),
             .bigint => self.bigint.deinit(),
@@ -205,7 +208,7 @@ pub const Value = union(ValueType) {
         try writeIndents(indents + 1, writer);
         try writer.print(".{s} = ", .{@tagName(std.meta.activeTag(value))});
         switch (value) {
-            inline .ref, .int, .float => |v| try writer.print("{d} ", .{v}),
+            inline .ref, .int64, .float64 => |v| try writer.print("{d} ", .{v}),
             .app, .object, .global => |v| {
                 try writer.writeAll(".{\n");
                 try internalFormat(v.member, indents + 2, writer);
@@ -242,13 +245,13 @@ pub const Value = union(ValueType) {
             .seq => |v| {
                 try writer.writeAll(".{\n");
                 try writeIndents(indents + 2, writer);
-                try writer.print(".{s},\n", .{@tagName(v[0])});
+                try writer.print(".{s},\n", .{@tagName(v.type)});
                 try writeIndents(indents + 2, writer);
-                if (v[1].len > 0) {
+                if (v.values.len > 0) {
                     try writer.writeAll(".{\n");
-                    for (v[1], 0..) |arg, i| {
+                    for (v.values, 0..) |arg, i| {
                         try internalFormat(arg, indents + 3, writer);
-                        if (i < v[1].len - 1) try writer.writeAll(",");
+                        if (i < v.values.len - 1) try writer.writeAll(",");
                         try writer.writeByte('\n');
                     }
                     try writeIndents(indents + 2, writer);
@@ -283,8 +286,8 @@ pub const Value = union(ValueType) {
             inline .raw, .raw_num => |v, tag| @unionInit(Value, @tagName(tag), try v.clone(allocator)),
             inline .app, .object, .global, .build, .pers_id => |v, tag| @unionInit(Value, @tagName(tag), try v.clone(allocator)),
             .seq => |seq| blk: {
-                const new_val: Sequence = .{ seq[0], try allocator.alloc(Value, seq[1].len) };
-                for (seq[1], 0..) |v, i| new_val[1][i] = try v.clone(allocator);
+                const new_val: Sequence = .{ .type = seq.type, .values = try allocator.alloc(Value, seq.values.len) };
+                for (seq.values, 0..) |v, i| new_val.values[i] = try v.clone(allocator);
                 break :blk .{ .seq = new_val };
             },
             inline .string, .bytes => |v, tag| @unionInit(Value, @tagName(tag), try allocator.dupe(u8, v)),
@@ -295,8 +298,8 @@ pub const Value = union(ValueType) {
 
     pub fn isPrimitive(self: Value) bool {
         return switch (self) {
-            .int, .bigint, .float, .string, .bytes, .bool, .none => true,
-            .seq => |seq| utils.allTrue(seq[1], Value.isPrimitive),
+            .int64, .bigint, .float64, .string, .bytes, .boolval, .none => true,
+            .seq => |seq| utils.allTrue(seq.values, Value.isPrimitive),
             else => false,
         };
     }
@@ -316,7 +319,7 @@ pub const Value = union(ValueType) {
             },
             .pers_id => |v| return v.ref.containsRef(),
             .seq => |v| {
-                for (v[1]) |val| if (val.containsRef()) return true;
+                for (v.values) |val| if (val.containsRef()) return true;
                 return false;
             },
             else => return false,
@@ -336,7 +339,7 @@ pub const Value = union(ValueType) {
     pub fn coerceFromRaw(self: Value, allocator: std.mem.Allocator) !Value {
         return switch (self) {
             .raw => |raw_val| switch (raw_val) {
-                .binint, .binint1, .binint2 => |val| .{ .int = val },
+                .binint, .binint1, .binint2 => |val| .{ .int64 = val },
                 .long1, .long4 => |b| if (b.len != 0) {
                     var bint = try big_int.Managed.initCapacity(allocator, std.math.big.int.calcTwosCompLimbCount(b.len));
                     var mutable = bint.toMutable();
@@ -345,10 +348,10 @@ pub const Value = union(ValueType) {
                     const max_comp = bint.toConst().order(BI64MAX);
                     if ((min_comp == .gt or min_comp == .eq) and (max_comp == .lt or max_comp == .eq)) {
                         defer bint.deinit();
-                        return .{ .int = try bint.to(i64) };
+                        return .{ .int64 = try bint.to(i64) };
                     } else return .{ .bigint = bint };
                 } else .{ .raw_num = raw_val },
-                .binfloat => |val| .{ .float = val },
+                .binfloat => |val| .{ .float64 = val },
                 .binunicode, .binunicode8, .short_binunicode => |s| .{ .string = s },
                 .binbytes, .binbytes8, .short_binbytes, .bytearray8 => |b| .{ .bytes = b },
                 // This isn't how Pickle actually works but we just try to UTF8 decode the
@@ -356,17 +359,17 @@ pub const Value = union(ValueType) {
                 // actually cares they can just fix values themselves or recover the raw bytes
                 // from the UTF8 string (it's guaranteed to be reversible, as far as I know).
                 .binstring, .short_binstring => |b| if (std.unicode.utf8ValidateSlice(b)) .{ .string = b } else .{ .bytes = b },
-                .newtrue => .{ .bool = true },
-                .newfalse => .{ .bool = false },
+                .newtrue => .{ .boolval = true },
+                .newfalse => .{ .boolval = false },
                 .none => .{ .none = {} },
                 inline .int,
                 .float,
                 .long,
                 => |v, tag| {
                     if (tag == .int and std.mem.eql(u8, v, "01")) {
-                        return .{ .bool = true };
+                        return .{ .boolval = true };
                     } else if (tag == .int and std.mem.eql(u8, v, "00")) {
-                        return .{ .bool = false };
+                        return .{ .boolval = false };
                     } else {
                         return .{ .raw_num = raw_val };
                     }
@@ -389,8 +392,8 @@ pub const Value = union(ValueType) {
                 v.ref = try v.ref.coerceFromRaw(allocator);
                 break :blk self;
             },
-            .seq => |*v| blk: {
-                for (v[1]) |*val| {
+            .seq => |v| blk: {
+                for (v.values) |*val| {
                     val.* = try val.coerceFromRaw(allocator);
                 }
                 break :blk self;
