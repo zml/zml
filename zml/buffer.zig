@@ -14,6 +14,10 @@ const Data = @import("dtype.zig").Data;
 const DataType = @import("dtype.zig").DataType;
 const Target = @import("platform.zig").Target;
 
+test {
+    std.testing.refAllDecls(Buffer);
+}
+
 /// Buffer is a multi-dimension array, whose memory is allocated on an accelerator.
 ///
 /// * contains a handle that the ZML runtime can use to convert into a physical address, but there is no guarantee this address is visible from the CPU.

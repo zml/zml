@@ -9,7 +9,7 @@ const Platform = @import("platform.zig").Platform;
 const meta = @import("meta.zig");
 
 test {
-    std.testing.refAllDecls(@This());
+    std.testing.refAllDecls(HostBuffer);
 }
 
 /// Represents a tensor with associated data allocated by user code.
@@ -135,12 +135,6 @@ pub const HostBuffer = struct {
             defer x.deinit(std.testing.allocator);
             try std.testing.expectEqualSlices(i32, &.{ -3, -1, 1, 3, 5, 7, 9, 11 }, x.items(i32));
         }
-    }
-
-    /// Embeds a tensor with concrete values into an Mlir program.
-    /// The content is copied, so the HostBuffer can be safely `deinit`.
-    pub fn toStaticTensor(self: HostBuffer) Tensor {
-        return Tensor.staticTensor(self.shape(), self.data);
     }
 
     /// Copies this HostBuffer to the given accelerator.

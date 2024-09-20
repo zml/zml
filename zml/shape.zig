@@ -9,7 +9,7 @@ const EnumLiteral = @TypeOf(.enum_literal);
 const log = std.log.scoped(.shape);
 
 test {
-    std.testing.refAllDecls(@This());
+    std.testing.refAllDecls(Shape);
 }
 
 /// Represent the shape of a tensor.
