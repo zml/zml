@@ -580,6 +580,7 @@ pub fn resizeCubic1d(image: Tensor, axis: i8, new_len: u63, opt: ResizeOpts) Ten
 
     const context = scaled.floor().addConstant(-1).convert(.i32).maximum(Tensor.scalar(0, .i32));
     const values = image.gatherSlices1d(axis, 4, context, .{ .indices_are_sorted = true });
+
     const weights_: [4][4]f32 = .{
         .{ 0, 1, 0, 0 },
         .{ -0.5, 0, 0.5, 0 },
