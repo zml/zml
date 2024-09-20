@@ -39,8 +39,8 @@ pub fn asyncMain() void {
     // Skip executable path
     _ = args.next().?;
 
-    const filter_query = if (args.next()) |arg| blk: {
-        std.debug.print("Only tests with name including `{s}` will be ran\n", .{arg});
+    const identifier_query = if (args.next()) |arg| blk: {
+        std.debug.print("Only tests with identifiers that includes `{s}` will be ran\n", .{arg});
         break :blk arg;
     } else blk: {
         break :blk "";
@@ -49,7 +49,7 @@ pub fn asyncMain() void {
     var leaks: usize = 0;
 
     for (test_fn_list, 0..) |test_fn, i| {
-        if (std.mem.indexOf(u8, test_fn.name, filter_query) == null) {
+        if (std.mem.indexOf(u8, test_fn.name, identifier_query) == null) {
             continue;
         }
 
