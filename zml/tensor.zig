@@ -29,6 +29,10 @@ test {
 
 const scoped_log = std.log.scoped(.zml_tensor);
 
+test {
+    std.testing.refAllDecls(Tensor);
+}
+
 /// Represents an abstract Tensor object, which can be the input,
 /// output, weight or activations of a neural network.
 /// Tensor are abstract in the sense they only represent a computation,
@@ -1868,14 +1872,6 @@ pub const Tensor = struct {
 
         const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "reverse({any})", .{axes_});
         const reverse_op = dialect.stablehlo.reverse(self.getContext().mlirCtx(), self.value(), toI64(actual_axes.constSlice()), loc);
-        return _result(self._shape, reverse_op.result(0));
-    }
-
-    /// Returns a Tensor with the given axes reversed.
-    pub fn reverseMany(self: Tensor, axes_: []const i64) Tensor {
-        const actual_axes = self._shape.axes(axes_).constSlice();
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "reverse({d})", .{actual_axes});
-        const reverse_op = dialect.stablehlo.reverseMany(self.getContext().mlirCtx(), self.value(), @ptrCast(actual_axes), loc);
         return _result(self._shape, reverse_op.result(0));
     }
 

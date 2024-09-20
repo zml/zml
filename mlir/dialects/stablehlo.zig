@@ -384,18 +384,6 @@ pub fn reverse(ctx: mlir.Context, operand: mlir.Value, dimensions: []const i64, 
     });
 }
 
-pub fn reverseMany(ctx: mlir.Context, operand: mlir.Value, dimensions: []const i64, location: mlir.Location) mlir.Operation {
-    const result_type = operand.getType();
-    return mlir.Operation.make(ctx, "stablehlo.reverse", .{
-        .operands = &.{operand},
-        .results = &.{result_type},
-        .attributes = &.{
-            .{ "dimensions", mlir.DenseArrayAttribute(.i64).init(ctx, dimensions).as(mlir.Attribute).? },
-        },
-        .location = location,
-    });
-}
-
 pub fn compare(ctx: mlir.Context, lhs: mlir.Value, rhs: mlir.Value, comparison_direction: ComparisonDirection, compare_type: CompareType, location: mlir.Location) mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.compare", .{
         .operands = &.{ lhs, rhs },
