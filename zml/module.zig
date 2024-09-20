@@ -23,7 +23,7 @@ const Tensor = @import("tensor.zig").Tensor;
 const ShapeOf = @import("tensor.zig").ShapeOf;
 const Shape = @import("shape.zig").Shape;
 const Buffer = @import("buffer.zig").Buffer;
-const Bufferized = @import("buffer.zig").Bufferized;
+const Bufferized = @import("tensor.zig").Bufferized;
 const Tracer = @import("tools/tracer.zig").Tracer;
 
 const log = std.log.scoped(.zml_module);

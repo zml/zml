@@ -1,12 +1,11 @@
 const std = @import("std");
 
+const meta = @import("meta.zig");
 const Buffer = @import("buffer.zig").Buffer;
-const Shape = @import("shape.zig").Shape;
-const Tensor = @import("tensor.zig").Tensor;
 const Data = @import("dtype.zig").Data;
 const DataType = @import("dtype.zig").DataType;
 const Platform = @import("platform.zig").Platform;
-const meta = @import("meta.zig");
+const Shape = @import("shape.zig").Shape;
 
 test {
     std.testing.refAllDecls(HostBuffer);
@@ -99,10 +98,16 @@ pub const HostBuffer = struct {
         };
     }
 
+    pub const ArangeArgs = struct {
+        start: i64 = 0,
+        end: i64,
+        step: i64 = 1,
+    };
+
     /// Allocates a HostBuffer with the given shape.
     /// The memory is initialized with increasing numbers.
     /// The caller owns the memory, and need to call `deinit()`.
-    pub fn arange(allocator: std.mem.Allocator, args: Tensor.ArangeArgs, dt: DataType) !HostBuffer {
+    pub fn arange(allocator: std.mem.Allocator, args: ArangeArgs, dt: DataType) !HostBuffer {
         meta.assert(args.start < args.end, "arange expects 'args.start' to be less than 'args.end', got {} and {}", .{ args.start, args.end });
         meta.assert(args.step > 0, "arange expects 'args.step' to be positive, got {}", .{args.step});
 

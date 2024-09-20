@@ -6,12 +6,11 @@ const pjrt = @import("pjrt");
 const pjrtx = @import("pjrtx.zig");
 
 const Context = @import("context.zig").Context;
-const HostBuffer = @import("hostbuffer.zig").HostBuffer;
-const Shape = @import("shape.zig").Shape;
-const Tensor = @import("tensor.zig").Tensor;
 const Data = @import("dtype.zig").Data;
 const DataType = @import("dtype.zig").DataType;
+const HostBuffer = @import("hostbuffer.zig").HostBuffer;
 const Platform = @import("platform.zig").Platform;
+const Shape = @import("shape.zig").Shape;
 
 test {
     std.testing.refAllDecls(Buffer);
@@ -200,7 +199,7 @@ pub const Buffer = struct {
     ) !void {
         _ = fmt;
         _ = options;
-        try writer.print("Tensor({_})", .{self._shape});
+        try writer.print("Buffer({_})", .{self._shape});
     }
 
     fn _shapeFromPjrtBuffer(platform: Platform, buf: *pjrtx.Buffer) Shape {
@@ -233,12 +232,4 @@ pub const Buffer = struct {
 
         return Shape.init(buf.getDimensions(platform.pjrt_api), dt);
     }
-
-    pub const From = meta.MapType(Tensor, Buffer).map;
 };
-
-/// Returns a mirrored version of T where each Tensor has been replaced by a Buffer.
-pub fn Bufferized(comptime T: type) type {
-    const M = meta.MapType(Tensor, Buffer);
-    return M.map(T);
-}

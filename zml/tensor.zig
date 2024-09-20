@@ -468,7 +468,7 @@ pub const Tensor = struct {
             };
         }
 
-        pub fn init(platform: Platform, seed: u128) !Buffer.From(Rng) {
+        pub fn init(platform: Platform, seed: u128) !Bufferized(Rng) {
             const bits: [2]u64 = @bitCast(seed);
             return .{
                 ._state = try Buffer.fromSlice(platform, Shape.init(.{2}, .u64), &bits),
@@ -1599,11 +1599,7 @@ pub const Tensor = struct {
         return _result(self._shape, expm1_op.result(0));
     }
 
-    pub const ArangeArgs = struct {
-        start: i64 = 0,
-        end: i64,
-        step: i64 = 1,
-    };
+    pub const ArangeArgs = HostBuffer.ArangeArgs;
 
     /// Returns a Tensor containing evenly spaced values within a given interval.
     pub fn arange(args: ArangeArgs, dt: DataType) Tensor {
@@ -3497,4 +3493,10 @@ fn _collectAxes(T: type, bounded_array: std.BoundedArray(T, Tensor.MAX_RANK), va
         }
     }
     return res;
+}
+
+/// Returns a mirrored version of T where each Tensor has been replaced by a Buffer.
+pub fn Bufferized(comptime T: type) type {
+    const M = meta.MapType(Tensor, Buffer);
+    return M.map(T);
 }
