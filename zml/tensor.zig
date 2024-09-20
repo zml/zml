@@ -23,6 +23,10 @@ const dialect = struct {
     const stablehlo = @import("mlir/dialects").stablehlo;
 };
 
+test {
+    std.testing.refAllDecls(@This());
+}
+
 const scoped_log = std.log.scoped(.zml_tensor);
 
 /// Represents an abstract Tensor object, which can be the input,
@@ -654,7 +658,7 @@ pub const Tensor = struct {
                         break :blk powers;
                     };
                     const values = Tensor.constantTensor(HostBuffer.fromArray(&powers)).withTags(.{.d});
-                    const counts = values.gatherValues(.d, samples, .{}).sum(.d).bitCast(.u16);
+                    const counts = values.gatherValues(.d, samples, .{}).sum(.n).bitCast(.u16);
                     const actual_dist = counts.reshape(target_dist.shape()).convert(target_dist.dtype()).divByConst(s.dim(.n));
                     return .{ rng, .{ .mean = mean_, .variance = variance, .actual_dist = actual_dist } };
                 }

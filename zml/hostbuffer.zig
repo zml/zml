@@ -8,6 +8,10 @@ const DataType = @import("dtype.zig").DataType;
 const Platform = @import("platform.zig").Platform;
 const meta = @import("meta.zig");
 
+test {
+    std.testing.refAllDecls(@This());
+}
+
 /// Represents a tensor with associated data allocated by user code.
 /// If the memory is `.managed` it needs to be freed with `x.deinit(allocator)`
 /// If the memory is `.unmanaged` it doesn't need to be freed (eg memory mapped, or tracked elsewhere).

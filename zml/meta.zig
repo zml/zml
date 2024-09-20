@@ -2,6 +2,10 @@ const std = @import("std");
 
 const testing = std.testing;
 
+test {
+    std.testing.refAllDecls(@This());
+}
+
 /// Computes floating point value division between two integers.
 pub fn divFloat(T: type, numerator: anytype, denominator: anytype) T {
     return toFloat(T, numerator) / toFloat(T, denominator);

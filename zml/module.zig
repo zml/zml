@@ -28,6 +28,10 @@ const Tracer = @import("tools/tracer.zig").Tracer;
 
 const log = std.log.scoped(.zml_module);
 
+test {
+    std.testing.refAllDecls(@This());
+}
+
 pub const CompilationContext = struct {
     _platform: Platform,
 

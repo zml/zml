@@ -1,5 +1,9 @@
 const std = @import("std");
 
+test {
+    std.testing.refAllDecls(@This());
+}
+
 fn allBitsOne(v: anytype) bool {
     return v == std.math.maxInt(@TypeOf(v));
 }

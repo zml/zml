@@ -828,14 +828,12 @@ fn sdpaChunk(q: Tensor, k: Tensor, v: Tensor, opts: SdpaOpts) PartialAttn {
     };
 }
 test "sdpaMemEfficient without mask" {
-    if (true) return error.SkipZigTest;
-
     const platform = zml.testing.env();
     const allocator = std.testing.allocator;
 
     // Note we use small input vectors to have the tests run reasonably fast,
     // but don't expect speed ups with this small sizes.
-    const rng = try zml.compileFn(allocator, Tensor.Rng.normal, .{ Shape.init(.{ 1, 10, 512, 64 }, .f16), .{ .mean = 0, .stddev = 1 } }, platform);
+    const rng = try zml.compileFn(allocator, Tensor.Rng.normal, .{ Shape.init(.{ 1, 10, 512, 64 }, .f32), .{ .mean = 0, .stddev = 1 } }, platform);
     defer rng.deinit();
 
     // Note: it's fine to pass undefined here, cause the arguments have already been baked into the executable.
@@ -863,17 +861,15 @@ test "sdpaMemEfficient without mask" {
 }
 
 test "sdpaMemEfficient with mask" {
-    if (true) return error.SkipZigTest;
-
     const platform = zml.testing.env();
     const allocator = std.testing.allocator;
 
     // Note we use small input vectors to have the tests run reasonably fast,
     // but don't expect speed ups with this small sizes.
-    const rng = try zml.compileFn(allocator, Tensor.Rng.normal, .{ Shape.init(.{ 1, 10, 512, 64 }, .f16), .{ .mean = 0, .stddev = 1 } }, platform);
+    const rng = try zml.compileFn(allocator, Tensor.Rng.normal, .{ Shape.init(.{ 1, 10, 512, 64 }, .f32), .{ .mean = 0, .stddev = 1 } }, platform);
     defer rng.deinit();
 
-    const rng_mask = try zml.compileFn(allocator, Tensor.Rng.normal, .{ Shape.init(.{ 512, 512 }, .f16), .{ .mean = 0, .stddev = 1 } }, platform);
+    const rng_mask = try zml.compileFn(allocator, Tensor.Rng.normal, .{ Shape.init(.{ 512, 512 }, .f32), .{ .mean = 0, .stddev = 1 } }, platform);
     defer rng_mask.deinit();
 
     // Note: it's fine to pass undefined here, cause the arguments have already been backed into the executable.

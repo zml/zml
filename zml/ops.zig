@@ -21,6 +21,10 @@ const dialect = struct {
 const assert = std.debug.assert;
 const log = std.log.scoped(.zml_tensor);
 
+test {
+    std.testing.refAllDecls(@This());
+}
+
 /// Generate an MLIR call to the given member function with the given tensors.
 pub fn call(self: anytype, comptime func: meta.DeclEnum(@TypeOf(self)), args: anytype) @TypeOf(@call(.auto, @field(meta.UnwrapPtr(@TypeOf(self)), @tagName(func)), .{self} ++ args)) {
     // TODO: this should use `self.getContext().callFunc(self, args)`
