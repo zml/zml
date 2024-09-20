@@ -610,8 +610,12 @@ pub fn resizeCubic1d(image: Tensor, axis: i8, new_len: u63, opt: ResizeOpts) Ten
     std.debug.assert(pos.dim(0) == new_len);
     std.debug.assert(pos.dim(1) == 4);
 
-    const context = scaled.floor().addConstant(-1).convert(.i32).maximum(Tensor.scalar(0, .i32));
-    const values = image.gatherSlices1d(axis, 4, context, .{ .indices_are_sorted = true });
+    const neighbors = scaled.floor().addConstant(-1).convert(.i32).maximum(Tensor.scalar(0, .i32));
+    var slice = image.shape();
+    for (0..slice.rank()) |i| {
+        slice = slice.set(i, if (i == axis) 4 else 1);
+    }
+    const values = image.gatherSlices(slice, neighbors, .{ .indices_are_sorted = true });
 
     const weights_: [4][4]f32 = .{
         .{ 0, 1, 0, 0 },
