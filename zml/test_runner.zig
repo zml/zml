@@ -40,7 +40,7 @@ pub fn asyncMain() void {
     _ = args.next().?;
 
     const identifier_query = if (args.next()) |arg| blk: {
-        std.debug.print("Only tests with identifiers that includes `{s}` will be ran\n", .{arg});
+        std.debug.print("Only tests with identifiers that includes `{s}` will be run\n", .{arg});
         break :blk arg;
     } else blk: {
         break :blk "";
