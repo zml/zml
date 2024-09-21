@@ -19,12 +19,8 @@ pub fn open(allocator: Allocator, path: []const u8) !zml.aio.BufferStore {
     const yaml_data = try file.reader().readAllAlloc(arena, (try file.metadata()).size());
     const parsed = try yaml.Yaml.load(arena, yaml_data);
 
-    const map = parsed.docs.items[0].map;
-    var map_iter = map.iterator();
-    while (map_iter.next()) |entry| {
-        var prefix_buf: [1024]u8 = undefined;
-        try parseMetadata(arena, &res, StringBuilder.initBuffer(&prefix_buf), entry.key, entry.value);
-    }
+    var prefix_buf: [1024]u8 = undefined;
+    try parseMetadata(arena, &res, StringBuilder.initBuffer(&prefix_buf), parsed.docs.items[0]);
     return res;
 }
 

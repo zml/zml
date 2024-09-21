@@ -34,7 +34,7 @@ pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore
             const parsed = try yaml.Yaml.load(arena, yaml_data);
 
             var prefix_buf: [1024]u8 = undefined;
-            try zml.aio.yaml.parseMetadata(arena, &res, StringBuilder.initBuffer(&prefix_buf), parsed.docs.items[0].map);
+            try zml.aio.yaml.parseMetadata(arena, &res, StringBuilder.initBuffer(&prefix_buf), parsed.docs.items[0]);
         } else if (std.mem.endsWith(u8, file.name, ".ckpt") or std.mem.endsWith(u8, file.name, ".pt")) {
             const start = try mapped_file.file.getPos();
             var tmp: zml.aio.torch.PickleData = .{
