@@ -2052,7 +2052,6 @@ pub const Tensor = struct {
                 .{ .{ .a = 10, .b = 20 }, .b, .{ .n = 8 }, .{ .a = 10, .n = 8 } },
                 .{ .{ .a = 10, .b = 20, .c = 30 }, .b, .{ .n = 8 }, .{ .a = 10, .n = 8, .c = 30 } },
                 // batching axes are implicits.
-                // TODO: batched gather don't compile https://github.com/zml/zml/issues/400
                 .{ .{ .a = 10, .b = 20 }, .b, .{ .a = 10 }, .{ .a = 10 } },
                 .{ .{ .a = 10, .b = 20 }, .a, .{ .b = 20 }, .{ .b = 20 } },
                 .{ .{ .a = 10, .b = 20 }, .b, .{ .a = 10, .n = 8 }, .{ .a = 10, .n = 8 } },
@@ -2206,20 +2205,13 @@ pub const Tensor = struct {
                 try zml.testing.expectEqualShapes(Shape.init(res_shape, .f16), y.shape());
                 try std.testing.expect(y.value().owner().verify());
 
-                // The batching dims test case doesn't pass.
-                // The weird part is that the MLIR seems valid, but pjrt doesn't accept it.
-                // TODO: https://github.com/zml/zml/issues/400
-                const mod = zml.compileFn(std.testing.allocator, gatherSlices, .{ x.shape(), slice_shape, idx.shape(), .{ .indices_are_sorted = true } }, platform);
-
-                if (mod) |m| {
-                    m.deinit();
-                } else |err| {
-                    if (@hasField(@TypeOf(idx_shape), "a")) {
-                        scoped_log.warn("Skipping compilation test of gather with batching dims: https://github.com/zml/zml/issues/400", .{});
-                    } else {
-                        return err;
-                    }
-                }
+                const mod = try zml.compileFn(
+                    std.testing.allocator,
+                    gatherSlices,
+                    .{ x.shape(), slice_shape, idx.shape(), .{ .indices_are_sorted = true } },
+                    platform,
+                );
+                defer mod.deinit();
             }
         }
 
