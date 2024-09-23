@@ -11,7 +11,8 @@
         "github:llvm/llvm-project"
     ],
     "versions": [
-        "20240823.0-f142f8a"
+        "20240823.0-f142f8a",
+        "20240919.0-94c024a",
     ],
     "yanked_versions": {}
 }

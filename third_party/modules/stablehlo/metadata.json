@@ -11,7 +11,8 @@
         "github:openxla/stablehlo"
     ],
     "versions": [
-        "20240829.0-54aa1a5"
+        "20240829.0-54aa1a5",
+        "20240917.0-78c753a",
     ],
     "yanked_versions": {}
 }
