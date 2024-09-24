@@ -23,12 +23,14 @@ pub const Shape = struct {
     pub const DimsArray = std.BoundedArray(i64, MAX_RANK);
     pub const TagsArray = std.BoundedArray(Tag, MAX_RANK);
     pub const AxesArray = std.BoundedArray(u3, MAX_RANK);
+    pub const ShardingInfo = @Vector(MAX_RANK, bool);
 
     const UnknownTags: TagsArray = .{ .len = 0, .buffer = [_]Tag{TagUnknown} ** MAX_RANK };
 
     _dtype: DataType,
     _dims: DimsArray = .{},
     _tags: TagsArray = UnknownTags,
+    _sharding_info: ShardingInfo = @splat(false),
 
     pub fn parseDimensions(v: anytype) struct { DimsArray, TagsArray } {
         const T = @TypeOf(v);
@@ -286,7 +288,7 @@ pub const Shape = struct {
             return res;
         }
 
-        meta.compileError("Wrong type, got {}", .{T});
+        meta.compileError("axes expects an int-tuple or a tuple of enum literal, got {}", .{T});
     }
 
     fn axisFromInt(self: Shape, d: isize) u3 {
@@ -661,6 +663,14 @@ pub const Shape = struct {
     pub fn withDtype(self: Shape, dt: DataType) Shape {
         var res = self;
         res._dtype = dt;
+        return res;
+    }
+
+    pub fn withSharding(self: Shape, axes_: anytype) Shape {
+        var res = self;
+        for (self.axes(axes_).constSlice()) |ax| {
+            res._sharding_info[ax] = true;
+        }
         return res;
     }
 

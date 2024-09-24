@@ -25,14 +25,9 @@ pub const Buffer = struct {
     _shape: Shape,
     _api: *const pjrt.Api,
     _shards: Shards,
-    _sharding_info: ShardingInfo,
 
     pub const MAX_NUM_SHARDS: u8 = 8;
     pub const Shards = std.BoundedArray(*pjrt.Buffer, MAX_NUM_SHARDS);
-    const ShardingInfo = @Vector(Shape.MAX_RANK, bool);
-    comptime {
-        std.debug.assert(@sizeOf(ShardingInfo) == 1);
-    }
 
     /// Copies the content of the given buffer from host memory to the accelerator memory.
     pub fn from(platform: Platform, buf: HostBuffer) !Buffer {
@@ -40,7 +35,6 @@ pub const Buffer = struct {
             ._api = platform.pjrt_api,
             ._shape = buf.shape(),
             ._shards = .{},
-            ._sharding_info = @splat(false),
         };
 
         for (platform.getDevices()) |dev| {
@@ -72,7 +66,6 @@ pub const Buffer = struct {
                 dtypeFromBufferType(pjrt_buffers[0].getElementType(platform.pjrt_api)),
             ),
             ._shards = shards,
-            ._sharding_info = @splat(false),
         };
     }
 
@@ -154,7 +147,6 @@ pub const Buffer = struct {
             ._api = platform.pjrt_api,
             ._shape = buf.shape(),
             ._shards = shards,
-            ._sharding_info = @splat(true),
         };
     }
 
@@ -239,7 +231,7 @@ pub const Buffer = struct {
 
     fn hasShardedAxis(self: Buffer) bool {
         if (self._shards.len == 1) return false;
-        return @reduce(.Or, self._sharding_info);
+        return @reduce(.Or, self._shape._sharding_info);
     }
 };
 
