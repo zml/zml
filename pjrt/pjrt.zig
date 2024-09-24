@@ -724,11 +724,11 @@ pub const Event = opaque {
         return ret.is_ready;
     }
 
-    pub fn getEventError(self: *const Event, api: *const Api) ApiError!?*Error {
-        const ret = try api.call(.PJRT_Event_Error, .{
-            .event = self.inner(),
-        });
-        return @ptrCast(ret);
+    pub fn getEventError(self: *const Event, api: *const Api) ?*Error {
+        var args: Api.CallFnArgType(.PJRT_Event_Error) = .{ .event = self.inner() };
+        args = pjrtStruct(args);
+        const result: ?*c.PJRT_Error = api.inner.PJRT_Event_Error.?(&args);
+        return @ptrCast(result);
     }
 
     pub fn await_(self: *const Event, api: *const Api) ApiError!void {
