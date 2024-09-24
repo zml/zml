@@ -565,48 +565,57 @@ fn assignBlockArguments(v: anytype, block: mlir.Block, start: usize) usize {
 }
 
 /// Visit the given struct and fill the `buffers` slice with the buffer associated with encountered Tensor.
-fn fillBuffers(v: anytype, buffers: []*pjrt.Buffer) void {
+fn fillBuffers(v: anytype, buffers: []const [*]*pjrt.Buffer, start: u32, len: u32) void {
     const LocalContext = struct {
-        index: usize,
-        buffers: []*pjrt.Buffer,
+        index: u32,
+        buffers: []const [*]*pjrt.Buffer,
     };
-    var ctx: LocalContext = .{
-        .index = 0,
+    var capture: LocalContext = .{
+        .index = start,
         .buffers = buffers,
     };
     meta.visit((struct {
-        fn cb(inner_context: *LocalContext, buffer: *const Buffer) void {
-            // meta.assert(!buffer._data.isDeleted(), "Can't use {} (argument buffer {}) because its pjrt buffer has been donated", .{ buffer, inner_context.index });
-            meta.internalAssert(buffer._shards.len == 1, "TODO: support sharded Buffer", .{});
-            inner_context.buffers[inner_context.index] = buffer._shards.get(0);
-            inner_context.index += 1;
+        fn cb(ctx: *LocalContext, buffer: *const Buffer) void {
+            // meta.assert(!buffer._data.isDeleted(), "Can't use {} (argument buffer {}) because its pjrt buffer has been donated", .{ buffer, ctx.index });
+            const model_sharding = ctx.buffers.len;
+            meta.assert(buffer._shards.len == model_sharding, "Can't feed a {}-sharded tensor into a {}-sharded model", .{ buffer._shards.len, ctx.buffers.len });
+            for (buffer._shards.constSlice(), 0..) |shard, d| {
+                ctx.buffers[d][ctx.index] = shard;
+            }
+            ctx.index += 1;
         }
-    }).cb, &ctx, v);
-    assert(ctx.index == buffers.len);
+    }).cb, &capture, v);
+    assert(capture.index == start + len);
 }
 
 /// Visit the given struct and override tensors by creating a new one using the provided PJRT buffers.
-pub fn assignRawBuffers(v: anytype, platform: Platform, buffers: []*pjrt.Buffer) void {
+pub fn assignRawBuffers(v: anytype, platform: Platform, buffers: []const [*]*pjrt.Buffer, expected_count: u32) void {
     const LocalContext = struct {
-        index: usize,
+        index: u32,
         platform: Platform,
-        buffers: []*pjrt.Buffer,
+        buffers: []const [*]*pjrt.Buffer,
+        expected_count: u32,
     };
-    var ctx: LocalContext = .{
+    var local_ctx: LocalContext = .{
         .index = 0,
         .platform = platform,
         .buffers = buffers,
+        .expected_count = expected_count,
     };
     meta.visit((struct {
-        fn cb(inner_context: *LocalContext, buffer: *Buffer) void {
-            const i = inner_context.index;
-            if (i < inner_context.buffers.len) {
-                buffer.* = Buffer.fromPjrtBuffers(inner_context.platform, &.{inner_context.buffers[i]});
+        fn cb(ctx: *LocalContext, buffer: *Buffer) void {
+            const i = ctx.index;
+            ctx.index += 1;
+            if (i >= ctx.expected_count) return;
+
+            var shards: Buffer.Shards = .{};
+            for (ctx.buffers) |buff| {
+                shards.appendAssumeCapacity(buff[i]);
             }
-            inner_context.index += 1;
+            buffer.* = Buffer.fromPjrtBuffers(ctx.platform, shards.constSlice());
         }
-    }).cb, &ctx, v);
-    meta.assert(ctx.index == buffers.len, "Pjrt call returned {} tensors, but the return type {s}, contains {} Buffers. Note that modules need to have a comptime know number of returned tensors.", .{ buffers.len, @typeName(@TypeOf(v)), ctx.index });
+    }).cb, &local_ctx, v);
+    meta.internalAssert(local_ctx.index == expected_count, "Pjrt call returned {} tensors, but the return type {s}, contains {} Buffers. Note that modules need to have a comptime know number of returned tensors.", .{ buffers.len, @typeName(@TypeOf(v)), local_ctx.index });
 }
 
 /// Visit the given struct and assign op results to each tensor found.
@@ -638,11 +647,13 @@ const BaseExe = struct {
     /// The PJRT executable representing the compiled module.
     exe: *pjrt.LoadedExecutable,
     /// Number of buffers in the model.
-    model_buffer_count: usize,
+    model_buffer_count: u32,
     /// Number of buffers in the arguments.
-    args_buffer_count: usize,
+    args_buffer_count: u32,
     /// Number of buffers in result.
-    result_buffer_count: usize,
+    result_buffer_count: u32,
+    /// Num devices used (>1 for sharded executable)
+    num_devices: u8,
 };
 
 /// Represents a ZML model, compiled into a PJRT executable.
@@ -675,34 +686,52 @@ pub fn ExeWithWeights(comptime func: anytype) type {
         /// The raw untyped compiled module.
         inner: BaseExe,
 
-        /// The allocator used for bookkeeping.
-        allocator: std.mem.Allocator,
-
         /// Pre-allocated slice of buffers to use as inputs when the module is called.
-        input_buffers: []*pjrt.Buffer,
+        input_buffers: []const [*]*pjrt.Buffer,
 
         /// Pre-allocated slice of buffers to use as outputs when the module is called.
-        output_buffers: []*pjrt.Buffer,
+        output_buffers: []const [*]*pjrt.Buffer,
+
+        /// Internal memory slice used.
+        _data_buffer: []*pjrt.Buffer,
+
+        /// And the allocator backing _data_buffer.
+        _allocator: std.mem.Allocator,
 
         pub fn initFromModel(allocator: std.mem.Allocator, inner: BaseExe, model: Bufferized(Signature.ModelT)) !Self {
-            const input_buffers = try allocator.alloc(*pjrt.Buffer, inner.model_buffer_count + inner.args_buffer_count);
-            errdefer allocator.free(input_buffers);
-            fillBuffers(&model, input_buffers[0..inner.model_buffer_count]);
+            const n_buffers = inner.model_buffer_count + inner.args_buffer_count + inner.result_buffer_count;
 
-            const output_buffers = try allocator.alloc(*pjrt.Buffer, inner.result_buffer_count);
-            errdefer allocator.free(output_buffers);
+            const n_devices = inner.num_devices;
+            const n_ptrs = (2 + n_buffers) * inner.num_devices;
+
+            const data_buffer = try allocator.alloc(*pjrt.Buffer, n_ptrs);
+            errdefer allocator.free(data_buffer);
+
+            var fba = std.heap.FixedBufferAllocator.init(std.mem.sliceAsBytes(data_buffer));
+            const alloc = fba.allocator();
+
+            const input_buffers = alloc.alloc([*]*pjrt.Buffer, n_devices) catch unreachable;
+            for (input_buffers) |*input| {
+                input.* = (alloc.alloc(*pjrt.Buffer, inner.model_buffer_count + inner.args_buffer_count) catch unreachable).ptr;
+            }
+            fillBuffers(&model, input_buffers, 0, inner.model_buffer_count);
+
+            const output_buffers = alloc.alloc([*]*pjrt.Buffer, n_devices) catch unreachable;
+            for (output_buffers) |*output| {
+                output.* = (alloc.alloc(*pjrt.Buffer, inner.result_buffer_count) catch unreachable).ptr;
+            }
 
             return .{
                 .inner = inner,
-                .allocator = allocator,
                 .input_buffers = input_buffers,
                 .output_buffers = output_buffers,
+                ._data_buffer = data_buffer,
+                ._allocator = allocator,
             };
         }
 
         pub fn deinit(self: Self) void {
-            self.allocator.free(self.input_buffers);
-            self.allocator.free(self.output_buffers);
+            self._allocator.free(self._data_buffer);
         }
 
         pub fn platform(self: Self) Platform {
@@ -710,13 +739,13 @@ pub fn ExeWithWeights(comptime func: anytype) type {
         }
 
         pub fn call(self: Self, args: Bufferized(Signature.ArgsT)) Bufferized(Signature.ReturnT) {
-            fillBuffers(&args, self.input_buffers[self.inner.model_buffer_count..][0..self.inner.args_buffer_count]);
+            fillBuffers(&args, self.input_buffers, self.inner.model_buffer_count, self.inner.args_buffer_count);
             var event: [1]*pjrt.Event = undefined;
 
             self.inner.exe.execute(self.inner.platform.pjrt_api, .{
-                .arguments = &.{self.input_buffers.ptr},
-                .num_args = self.input_buffers.len,
-                .results = &.{self.output_buffers.ptr},
+                .arguments = self.input_buffers,
+                .num_args = self.inner.args_buffer_count + self.inner.model_buffer_count,
+                .results = self.output_buffers,
                 .events = &event,
                 // TODO: this allows to tell a specific buffer shouldn't be donated,
                 // even if it has been marked as "can be donated" during compilation.
@@ -724,7 +753,7 @@ pub fn ExeWithWeights(comptime func: anytype) type {
             }) catch unreachable;
 
             var result: Bufferized(Signature.ReturnT) = undefined;
-            assignRawBuffers(&result, self.inner.platform, self.output_buffers);
+            assignRawBuffers(&result, self.inner.platform, self.output_buffers, self.inner.result_buffer_count);
             return result;
         }
     };
@@ -767,12 +796,18 @@ fn compileInternal(
         if (time_ms > 1000) log.info("Compilation took {d:.3}s", .{meta.divFloat(f32, time_ms, 1000)});
     }
 
+    const num_devices = if (context._platform.compilation_options.sharding_enabled)
+        context._platform.getDevices().len
+    else
+        1;
+
     return .{
         .platform = context._platform,
         .exe = loaded_executable,
         .model_buffer_count = f.n_model,
         .args_buffer_count = f.n_args,
-        .result_buffer_count = f.res_types.len,
+        .result_buffer_count = @intCast(f.res_types.len),
+        .num_devices = @intCast(num_devices),
     };
 }
 
@@ -876,6 +911,12 @@ fn computeModuleHash(platform: Platform, module: mlir.Module) u64 {
     const api_version = platform.pjrt_api.version();
     writer.writeInt(i64, api_version.major, .little) catch unreachable;
     writer.writeInt(i64, api_version.minor, .little) catch unreachable;
+    const opts = platform.compilation_options;
+    writer.writeByte(if (opts.sharding_enabled) 1 else 0) catch unreachable;
+    writer.writeByte(opts.sharding_axes.len) catch unreachable;
+    for (opts.sharding_axes.constSlice()) |sharding_ax| {
+        writer.print("{s}", .{sharding_ax}) catch unreachable;
+    }
 
     return hasher.final();
 }
@@ -933,10 +974,15 @@ fn loadOrCompilePjrtExecutable(
 }
 
 fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, module: mlir.Module, module_hash: u64) !*pjrt.LoadedExecutable {
+    const opts = platform.compilation_options;
     var options: xla_pb.CompileOptionsProto = .{
         .executable_build_options = .{
             .num_replicas = 1,
-            .num_partitions = 1,
+            .num_partitions = if (opts.sharding_enabled)
+                @intCast(platform.getDevices().len)
+            else
+                1,
+            .use_spmd_partitioning = opts.sharding_enabled,
         },
     };
     // Let the arena deinit, zig-protobuf deinit is very slow.

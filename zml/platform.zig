@@ -31,6 +31,8 @@ pub const CompilationOptions = struct {
     xla_dump_to: ?[]const u8 = null,
     xla_dump_fusion_visualization: bool = false,
     cache_location: ?[]const u8 = null,
+    sharding_enabled: bool = true,
+    sharding_axes: std.BoundedArray([*:0]const u8, 8) = .{},
 };
 
 pub const Platform = struct {
