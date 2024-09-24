@@ -23,9 +23,16 @@ test {
 /// * can be created by calling `HostBuffer.toDevice(platform)`.
 pub const Buffer = struct {
     _shape: Shape,
-    _shards: Shape = undefined,
     _api: *const pjrt.Api,
-    _data: *pjrtx.Buffer,
+    _shards: Shards,
+    _sharding_info: ShardingInfo,
+
+    pub const MAX_NUM_SHARDS: u8 = 8;
+    const Shards = std.BoundedArray(*pjrt.Buffer, MAX_NUM_SHARDS);
+    const ShardingInfo = @Vector(Shape.MAX_RANK, bool);
+    comptime {
+        std.debug.assert(@sizeOf(ShardingInfo) == 1);
+    }
 
     /// Copies the content of the given buffer from host memory to the accelerator memory.
     pub fn from(platform: Platform, buf: HostBuffer) !Buffer {
@@ -37,19 +44,28 @@ pub const Buffer = struct {
             .device = platform.getDevices()[0],
             .host_buffer_semantics = .ImmutableUntilTransferCompletes,
         });
-        return .{
+
+        var res: Buffer = .{
             ._api = platform.pjrt_api,
             ._shape = buf.shape(),
-            ._data = pjrt_buffer,
+            ._shards = .{},
+            ._sharding_info = @splat(false),
         };
+        res._shards.appendAssumeCapacity(pjrt_buffer);
+        return res;
     }
 
-    /// Wraps a pre-exisiting `pjrt.Buffer` into a `zml.Buffer`.
-    pub fn fromPjrtBuffer(platform: Platform, pjrt_buffer: *pjrtx.Buffer) Buffer {
+    /// Wraps pre-exisiting `pjrt.Buffer` shards into one `zml.Buffer`.
+    pub fn fromPjrtBuffers(platform: Platform, pjrt_buffers: []const *pjrt.Buffer) Buffer {
+        meta.assert(pjrt_buffers.len <= MAX_NUM_SHARDS, "ZML doesn't support having more than {} shards. Received {} shards for one buffer.", .{ MAX_NUM_SHARDS, pjrt_buffers.len });
+        meta.assert(pjrt_buffers.len > 0, "fromPjrtBuffers expects at least one buffer, got 0.", .{});
+        var shards: Shards = .{};
+        shards.appendSliceAssumeCapacity(pjrt_buffers);
         return .{
             ._api = platform.pjrt_api,
-            ._shape = _shapeFromPjrtBuffer(platform, pjrt_buffer),
-            ._data = pjrt_buffer,
+            ._shape = _shapeFromPjrtBuffer(platform, pjrt_buffers[0]),
+            ._shards = shards,
+            ._sharding_info = @splat(true),
         };
     }
 
@@ -114,6 +130,7 @@ pub const Buffer = struct {
             .data = buf.data,
             .element_type = pjrtx.bufferTypeFromDtype(buf.shape().dtype()),
             .dims = buf.shape().dims(),
+            // TODO: split in shards
             .device = platform.getDevices()[0],
             .layout = .{
                 .Tiled = .{
@@ -124,10 +141,13 @@ pub const Buffer = struct {
             },
         });
 
+        var shards: Shards = .{};
+        shards.appendAssumeCapacity(pjrt_buffer);
         return .{
             ._api = platform.pjrt_api,
             ._shape = buf.shape(),
-            ._data = pjrt_buffer,
+            ._shards = shards,
+            ._sharding_info = @splat(true),
         };
     }
 
@@ -135,7 +155,8 @@ pub const Buffer = struct {
     pub fn getValue(self: Buffer, T: type) !T {
         meta.assert(self._shape.byteSize() == @sizeOf(T), "Buffer {} has {d} bytes of data, can't load it to a {s} with {d} bytes", .{ self, self._shape.byteSize(), @typeName(T), @sizeOf(T) });
         var res: T = undefined;
-        const event = try self._data.toHostBuffer(self._api, std.mem.asBytes(&res));
+        meta.internalAssert(self._shards.len == 1, "TODO: support sharded Buffer -> Host transfer", .{});
+        const event = try self._shards.get(0).toHostBuffer(self._api, std.mem.asBytes(&res));
         try event.await_(self._api);
         return res;
     }
@@ -144,7 +165,8 @@ pub const Buffer = struct {
     /// and return a new `HostBuffer` object with the same shape.
     /// The returned `HostBuffer` doesn't own the memory.
     pub fn toHost(self: Buffer, output: []u8) !HostBuffer {
-        const event = try self._data.toHostBuffer(self._api, output);
+        meta.internalAssert(self._shards.len == 1, "TODO: support sharded Buffer -> Host transfer", .{});
+        const event = try self._shards.get(0).toHostBuffer(self._api, output);
         try event.await_(self._api);
         return HostBuffer.fromBytes(self.shape(), output);
     }
@@ -153,7 +175,8 @@ pub const Buffer = struct {
     /// The returned `HostBuffer` does own the memory.
     pub fn toHostAlloc(self: Buffer, allocator: std.mem.Allocator) !HostBuffer {
         const output = try HostBuffer.empty(allocator, self.shape());
-        const event = try self._data.toHostBuffer(self._api, @constCast(output.data));
+        meta.internalAssert(self._shards.len == 1, "TODO: support sharded Buffer -> Host transfer", .{});
+        const event = try self._shards.get(0).toHostBuffer(self._api, @constCast(output.data));
         try event.await_(self._api);
         return output;
     }
@@ -162,7 +185,9 @@ pub const Buffer = struct {
     /// Depending on the platform, the memory is typically not released to the OS
     /// but just marked as available in the memory pool.
     pub fn deinit(self: *const Buffer) void {
-        self._data.deinit(self._api);
+        for (self._shards.constSlice()) |buffer| {
+            buffer.deinit(self._api);
+        }
     }
 
     /// This Buffer shape.

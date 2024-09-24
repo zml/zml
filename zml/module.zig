@@ -577,7 +577,8 @@ fn fillBuffers(v: anytype, buffers: []*pjrt.Buffer) void {
     meta.visit((struct {
         fn cb(inner_context: *LocalContext, buffer: *const Buffer) void {
             // meta.assert(!buffer._data.isDeleted(), "Can't use {} (argument buffer {}) because its pjrt buffer has been donated", .{ buffer, inner_context.index });
-            inner_context.buffers[inner_context.index] = buffer._data;
+            meta.internalAssert(buffer._shards.len == 1, "TODO: support sharded Buffer", .{});
+            inner_context.buffers[inner_context.index] = buffer._shards.get(0);
             inner_context.index += 1;
         }
     }).cb, &ctx, v);
@@ -600,7 +601,7 @@ pub fn assignRawBuffers(v: anytype, platform: Platform, buffers: []*pjrt.Buffer)
         fn cb(inner_context: *LocalContext, buffer: *Buffer) void {
             const i = inner_context.index;
             if (i < inner_context.buffers.len) {
-                buffer.* = Buffer.fromPjrtBuffer(inner_context.platform, inner_context.buffers[i]);
+                buffer.* = Buffer.fromPjrtBuffers(inner_context.platform, &.{inner_context.buffers[i]});
             }
             inner_context.index += 1;
         }
