@@ -24,21 +24,21 @@ test {
 pub const Buffer = struct {
     _shape: Shape,
     _shards: Shape = undefined,
-    _platform: Platform,
+    _api: *const pjrt.Api,
     _data: *pjrtx.Buffer,
 
     /// Copies the content of the given buffer from host memory to the accelerator memory.
     pub fn from(platform: Platform, buf: HostBuffer) !Buffer {
         const pjrt_buffer = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, .{
             .data = buf.data,
-            .buffer_type = pjrtx.Buffer.BufferTypeFromDType(buf.shape().dtype()),
+            .buffer_type = pjrtx.bufferTypeFromDtype(buf.shape().dtype()),
             .dims = buf.shape().dims(),
             .byte_strides = buf.strides(),
             .device = platform.getDevices()[0],
             .host_buffer_semantics = .ImmutableUntilTransferCompletes,
         });
         return .{
-            ._platform = platform,
+            ._api = platform.pjrt_api,
             ._shape = buf.shape(),
             ._data = pjrt_buffer,
         };
@@ -47,7 +47,7 @@ pub const Buffer = struct {
     /// Wraps a pre-exisiting `pjrt.Buffer` into a `zml.Buffer`.
     pub fn fromPjrtBuffer(platform: Platform, pjrt_buffer: *pjrtx.Buffer) Buffer {
         return .{
-            ._platform = platform,
+            ._api = platform.pjrt_api,
             ._shape = _shapeFromPjrtBuffer(platform, pjrt_buffer),
             ._data = pjrt_buffer,
         };
@@ -112,7 +112,7 @@ pub const Buffer = struct {
 
         const pjrt_buffer = try platform.pjrt_client.createViewOfDeviceBuffer(platform.pjrt_api, .{
             .data = buf.data,
-            .element_type = pjrtx.Buffer.BufferTypeFromDType(buf.shape().dtype()),
+            .element_type = pjrtx.bufferTypeFromDtype(buf.shape().dtype()),
             .dims = buf.shape().dims(),
             .device = platform.getDevices()[0],
             .layout = .{
@@ -125,7 +125,7 @@ pub const Buffer = struct {
         });
 
         return .{
-            ._platform = platform,
+            ._api = platform.pjrt_api,
             ._shape = buf.shape(),
             ._data = pjrt_buffer,
         };
@@ -135,7 +135,8 @@ pub const Buffer = struct {
     pub fn getValue(self: Buffer, T: type) !T {
         meta.assert(self._shape.byteSize() == @sizeOf(T), "Buffer {} has {d} bytes of data, can't load it to a {s} with {d} bytes", .{ self, self._shape.byteSize(), @typeName(T), @sizeOf(T) });
         var res: T = undefined;
-        try self._data.toHostBuffer(self._platform.pjrt_api, std.mem.asBytes(&res));
+        const event = try self._data.toHostBuffer(self._api, std.mem.asBytes(&res));
+        try event.await_(self._api);
         return res;
     }
 
@@ -143,7 +144,8 @@ pub const Buffer = struct {
     /// and return a new `HostBuffer` object with the same shape.
     /// The returned `HostBuffer` doesn't own the memory.
     pub fn toHost(self: Buffer, output: []u8) !HostBuffer {
-        try self._data.toHostBuffer(self._platform.pjrt_api, output);
+        const event = try self._data.toHostBuffer(self._api, output);
+        try event.await_(self._api);
         return HostBuffer.fromBytes(self.shape(), output);
     }
 
@@ -151,7 +153,8 @@ pub const Buffer = struct {
     /// The returned `HostBuffer` does own the memory.
     pub fn toHostAlloc(self: Buffer, allocator: std.mem.Allocator) !HostBuffer {
         const output = try HostBuffer.empty(allocator, self.shape());
-        try self._data.toHostBuffer(self._platform.pjrt_api, @constCast(output.data));
+        const event = try self._data.toHostBuffer(self._api, @constCast(output.data));
+        try event.await_(self._api);
         return output;
     }
 
@@ -159,7 +162,7 @@ pub const Buffer = struct {
     /// Depending on the platform, the memory is typically not released to the OS
     /// but just marked as available in the memory pool.
     pub fn deinit(self: *const Buffer) void {
-        self._data.deinit(self._platform.pjrt_api);
+        self._data.deinit(self._api);
     }
 
     /// This Buffer shape.
