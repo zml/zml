@@ -3,7 +3,6 @@ const testing = std.testing;
 
 const meta = @import("meta.zig");
 const pjrt = @import("pjrt");
-const pjrtx = @import("pjrtx.zig");
 
 const Context = @import("context.zig").Context;
 const Data = @import("dtype.zig").Data;
@@ -13,6 +12,7 @@ const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
 
 test {
+    std.testing.refAllDecls(@This());
     std.testing.refAllDecls(Buffer);
 }
 
@@ -28,7 +28,7 @@ pub const Buffer = struct {
     _sharding_info: ShardingInfo,
 
     pub const MAX_NUM_SHARDS: u8 = 8;
-    const Shards = std.BoundedArray(*pjrt.Buffer, MAX_NUM_SHARDS);
+    pub const Shards = std.BoundedArray(*pjrt.Buffer, MAX_NUM_SHARDS);
     const ShardingInfo = @Vector(Shape.MAX_RANK, bool);
     comptime {
         std.debug.assert(@sizeOf(ShardingInfo) == 1);
@@ -36,22 +36,25 @@ pub const Buffer = struct {
 
     /// Copies the content of the given buffer from host memory to the accelerator memory.
     pub fn from(platform: Platform, buf: HostBuffer) !Buffer {
-        const pjrt_buffer = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, .{
-            .data = buf.data,
-            .buffer_type = pjrtx.bufferTypeFromDtype(buf.shape().dtype()),
-            .dims = buf.shape().dims(),
-            .byte_strides = buf.strides(),
-            .device = platform.getDevices()[0],
-            .host_buffer_semantics = .ImmutableUntilTransferCompletes,
-        });
-
         var res: Buffer = .{
             ._api = platform.pjrt_api,
             ._shape = buf.shape(),
             ._shards = .{},
             ._sharding_info = @splat(false),
         };
-        res._shards.appendAssumeCapacity(pjrt_buffer);
+
+        for (platform.getDevices()) |dev| {
+            const pjrt_buffer = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, .{
+                .data = buf.data,
+                .buffer_type = bufferTypeFromDtype(buf.shape().dtype()),
+                .dims = buf.shape().dims(),
+                .byte_strides = buf.strides(),
+                .device = dev,
+                .host_buffer_semantics = .ImmutableUntilTransferCompletes,
+            });
+
+            res._shards.appendAssumeCapacity(pjrt_buffer);
+        }
         return res;
     }
 
@@ -63,9 +66,13 @@ pub const Buffer = struct {
         shards.appendSliceAssumeCapacity(pjrt_buffers);
         return .{
             ._api = platform.pjrt_api,
-            ._shape = _shapeFromPjrtBuffer(platform, pjrt_buffers[0]),
+            ._shape = Shape.init(
+                // This isn't with sharded axes.
+                pjrt_buffers[0].getDimensions(platform.pjrt_api),
+                dtypeFromBufferType(pjrt_buffers[0].getElementType(platform.pjrt_api)),
+            ),
             ._shards = shards,
-            ._sharding_info = @splat(true),
+            ._sharding_info = @splat(false),
         };
     }
 
@@ -128,7 +135,7 @@ pub const Buffer = struct {
 
         const pjrt_buffer = try platform.pjrt_client.createViewOfDeviceBuffer(platform.pjrt_api, .{
             .data = buf.data,
-            .element_type = pjrtx.bufferTypeFromDtype(buf.shape().dtype()),
+            .element_type = bufferTypeFromDtype(buf.shape().dtype()),
             .dims = buf.shape().dims(),
             // TODO: split in shards
             .device = platform.getDevices()[0],
@@ -155,7 +162,7 @@ pub const Buffer = struct {
     pub fn getValue(self: Buffer, T: type) !T {
         meta.assert(self._shape.byteSize() == @sizeOf(T), "Buffer {} has {d} bytes of data, can't load it to a {s} with {d} bytes", .{ self, self._shape.byteSize(), @typeName(T), @sizeOf(T) });
         var res: T = undefined;
-        meta.internalAssert(self._shards.len == 1, "TODO: support sharded Buffer -> Host transfer", .{});
+        meta.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
         const event = try self._shards.get(0).toHostBuffer(self._api, std.mem.asBytes(&res));
         try event.await_(self._api);
         return res;
@@ -165,7 +172,7 @@ pub const Buffer = struct {
     /// and return a new `HostBuffer` object with the same shape.
     /// The returned `HostBuffer` doesn't own the memory.
     pub fn toHost(self: Buffer, output: []u8) !HostBuffer {
-        meta.internalAssert(self._shards.len == 1, "TODO: support sharded Buffer -> Host transfer", .{});
+        meta.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
         const event = try self._shards.get(0).toHostBuffer(self._api, output);
         try event.await_(self._api);
         return HostBuffer.fromBytes(self.shape(), output);
@@ -175,7 +182,7 @@ pub const Buffer = struct {
     /// The returned `HostBuffer` does own the memory.
     pub fn toHostAlloc(self: Buffer, allocator: std.mem.Allocator) !HostBuffer {
         const output = try HostBuffer.empty(allocator, self.shape());
-        meta.internalAssert(self._shards.len == 1, "TODO: support sharded Buffer -> Host transfer", .{});
+        meta.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
         const event = try self._shards.get(0).toHostBuffer(self._api, @constCast(output.data));
         try event.await_(self._api);
         return output;
@@ -230,34 +237,76 @@ pub const Buffer = struct {
         try writer.print("Buffer({_})", .{self._shape});
     }
 
-    fn _shapeFromPjrtBuffer(platform: Platform, buf: *pjrtx.Buffer) Shape {
-        const dt: DataType = switch (buf.getElementType(platform.pjrt_api)) {
-            // Please keep the list exhaustive and in the same order than in DataType.
-            .PRED => .bool,
-            .F8E4M3B11FNUZ => .f8e4m3b11fnuz,
-            .F8E4M3FN => .f8e4m3fn,
-            .F8E4M3FNUZ => .f8e4m3fnuz,
-            .F8E5M2 => .f8e5m2,
-            .F8E5M2FNUZ => .f8e5m2fnuz,
-            .BF16 => .bf16,
-            .F16 => .f16,
-            .F32 => .f32,
-            .F64 => .f64,
-            .S4 => .i4,
-            .S8 => .i8,
-            .S16 => .i16,
-            .S32 => .i32,
-            .S64 => .i64,
-            .U4 => .u4,
-            .U8 => .u8,
-            .U16 => .u16,
-            .U32 => .u32,
-            .U64 => .u64,
-            .C64 => .c64,
-            .C128 => .c128,
-            .INVALID => @panic("Can't handle INVALID Pjrt buffers."),
-        };
-
-        return Shape.init(buf.getDimensions(platform.pjrt_api), dt);
+    fn hasShardedAxis(self: Buffer) bool {
+        if (self._shards.len == 1) return false;
+        return @reduce(.Or, self._sharding_info);
     }
 };
+
+pub fn bufferTypeFromDtype(dt: DataType) pjrt.BufferType {
+    return switch (dt) {
+        .bool => .PRED,
+        .f8e4m3b11fnuz => .F8E4M3B11FNUZ,
+        .f8e4m3fn => .F8E4M3FN,
+        .f8e4m3fnuz => .F8E4M3FNUZ,
+        .f8e5m2 => .F8E5M2,
+        .f8e5m2fnuz => .F8E5M2FNUZ,
+        .bf16 => .BF16,
+        .f16 => .F16,
+        .f32 => .F32,
+        .f64 => .F64,
+        .i8 => .S8,
+        .i4 => .S4,
+        .i16 => .S16,
+        .i32 => .S32,
+        .i64 => .S64,
+        .u4 => .U4,
+        .u8 => .U8,
+        .u16 => .U16,
+        .u32 => .U32,
+        .u64 => .U64,
+        .c64 => .C64,
+        .c128 => .C128,
+    };
+}
+
+pub fn dtypeFromBufferType(pjrt_type: pjrt.BufferType) DataType {
+    return switch (pjrt_type) {
+        .PRED => .bool,
+        .F8E4M3B11FNUZ => .f8e4m3b11fnuz,
+        .F8E4M3FN => .f8e4m3fn,
+        .F8E4M3FNUZ => .f8e4m3fnuz,
+        .F8E5M2 => .f8e5m2,
+        .F8E5M2FNUZ => .f8e5m2fnuz,
+        .BF16 => .bf16,
+        .F16 => .f16,
+        .F32 => .f32,
+        .F64 => .f64,
+        .S8 => .i8,
+        .S4 => .i4,
+        .S16 => .i16,
+        .S32 => .i32,
+        .S64 => .i64,
+        .U4 => .u4,
+        .U8 => .u8,
+        .U16 => .u16,
+        .U32 => .u32,
+        .U64 => .u64,
+        .C64 => .c64,
+        .C128 => .c128,
+        .INVALID => @panic("Found an invalid pjrt buffer"),
+    };
+}
+
+test bufferTypeFromDtype {
+    inline for (@typeInfo(DataType).Enum.fields) |field| {
+        const dt: DataType = @enumFromInt(field.value);
+        try std.testing.expectEqual(dt, dtypeFromBufferType(bufferTypeFromDtype(dt)));
+    }
+
+    inline for (@typeInfo(pjrt.BufferType).Enum.fields) |field| {
+        const dt: pjrt.BufferType = @enumFromInt(field.value);
+        if (dt == .INVALID) continue;
+        try std.testing.expectEqual(dt, bufferTypeFromDtype(dtypeFromBufferType(dt)));
+    }
+}

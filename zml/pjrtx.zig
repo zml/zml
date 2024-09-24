@@ -188,33 +188,6 @@ pub const Client = opaque {
 //     }
 // };
 
-pub fn bufferTypeFromDtype(dt: dtype.DataType) pjrt.BufferType {
-    return switch (dt) {
-        .bool => .PRED,
-        .f8e4m3b11fnuz => .F8E4M3B11FNUZ,
-        .f8e4m3fn => .F8E4M3FN,
-        .f8e4m3fnuz => .F8E4M3FNUZ,
-        .f8e5m2 => .F8E5M2,
-        .f8e5m2fnuz => .F8E5M2FNUZ,
-        .bf16 => .BF16,
-        .f16 => .F16,
-        .f32 => .F32,
-        .f64 => .F64,
-        .i8 => .S8,
-        .i4 => .S4,
-        .i16 => .S16,
-        .i32 => .S32,
-        .i64 => .S64,
-        .u4 => .U4,
-        .u8 => .U8,
-        .u16 => .U16,
-        .u32 => .U32,
-        .u64 => .U64,
-        .c64 => .C64,
-        .c128 => .C128,
-    };
-}
-
 pub const Event = opaque {
     pub const inner = InnerMixin(pjrt.Event).inner;
 
