@@ -15,6 +15,7 @@ const Target = @import("platform.zig").Target;
 
 const log = std.log.scoped(.zml);
 
+pub const Buffer = pjrt.Buffer;
 pub const Device = pjrt.Device;
 pub const DeviceDescription = pjrt.DeviceDescription;
 pub const Api = pjrt.Api;
@@ -26,6 +27,12 @@ pub const GetCostAnalysisError = pjrt.GetCostAnalysisError;
 pub const SerializeResult = pjrt.SerializeResult;
 pub const Executable = pjrt.Executable;
 pub const ExecuteError = ApiError;
+
+test {
+    std.testing.refAllDecls(Client);
+    std.testing.refAllDecls(Event);
+    // std.testing.refAllDecls(LoadedExecutable);
+}
 
 fn InnerMixin(comptime innerT: type) type {
     return struct {
@@ -63,7 +70,7 @@ pub const Client = opaque {
         const buffer, const event_ = try self.inner().bufferFromHostBuffer(api, args);
         const event: *Event = @ptrCast(event_);
         try event.await_(api);
-        return @ptrCast(buffer);
+        return buffer;
     }
 
     pub fn deserializeAndLoad(self: *const Client, api: *const Api, bytes: []const u8) ApiError!*LoadedExecutable {
@@ -169,74 +176,44 @@ pub const Client = opaque {
     }
 };
 
-pub const Buffer = opaque {
-    const inner = InnerMixin(pjrt.Buffer).inner;
+// pub const GpuCustomCallRegistry = struct {
+//     pub usingnamespace WrapperMixin(GpuCustomCallRegistry, pjrt.GpuCustomCallRegistry);
 
-    pub const BufferType = pjrt.BufferType;
+//     inner: GpuCustomCallRegistry.UnionType,
 
-    pub fn BufferTypeFromDType(dt: dtype.DataType) BufferType {
-        return switch (dt) {
-            .bool => .PRED,
-            .f8e4m3b11fnuz => .F8E4M3B11FNUZ,
-            .f8e4m3fn => .F8E4M3FN,
-            .f8e4m3fnuz => .F8E4M3FNUZ,
-            .f8e5m2 => .F8E5M2,
-            .f8e5m2fnuz => .F8E5M2FNUZ,
-            .bf16 => .BF16,
-            .f16 => .F16,
-            .f32 => .F32,
-            .f64 => .F64,
-            .i8 => .S8,
-            .i4 => .S4,
-            .i16 => .S16,
-            .i32 => .S32,
-            .i64 => .S64,
-            .u4 => .U4,
-            .u8 => .U8,
-            .u16 => .U16,
-            .u32 => .U32,
-            .u64 => .U64,
-            .c64 => .C64,
-            .c128 => .C128,
-        };
-    }
+//     pub fn registerCustomCall(self: GpuCustomCallRegistry, api_version: usize, name: []const u8, func: pjrt.CustomCallSignature) ApiError!void {
+//         return switch (self.inner) {
+//             inline else => |v| v.registerCustomCall(api_version, name, func),
+//         };
+//     }
+// };
 
-    pub const HostBufferSemantics = pjrt.HostBufferSemantics;
-    pub const MemoryLayoutType = pjrt.MemoryLayoutType;
-
-    pub fn deinit(self: *Buffer, api: *const Api) void {
-        self.inner().deinit(api);
-    }
-
-    pub fn delete(self: *Buffer, api: *const Api) void {
-        self.inner().delete(api);
-    }
-
-    pub fn toHostBuffer(self: *const Buffer, api: *const Api, dst: []u8) ApiError!void {
-        var event = try self.inner().toHostBuffer(api, dst);
-        try event.await_(api);
-    }
-
-    pub fn getDimensions(self: *const Buffer, api: *const Api) []const i64 {
-        return self.inner().getDimensions(api);
-    }
-
-    pub fn getElementType(self: *const Buffer, api: *const Api) BufferType {
-        return self.inner().getElementType(api);
-    }
-
-    pub fn isDeleted(self: *const Buffer, api: *const Api) bool {
-        return self.inner().isDeleted(api);
-    }
-
-    pub fn getDevice(self: *const Buffer, api: *const Api) ApiError!*Device {
-        return @ptrCast(try self.inner().getDevice(api));
-    }
-
-    pub fn getOpaqueDeviceMemoryDataPointer(self: *const Buffer, api: *const Api) ApiError!*anyopaque {
-        return self.inner().getOpaqueDeviceMemoryDataPointer(api);
-    }
-};
+pub fn bufferTypeFromDtype(dt: dtype.DataType) pjrt.BufferType {
+    return switch (dt) {
+        .bool => .PRED,
+        .f8e4m3b11fnuz => .F8E4M3B11FNUZ,
+        .f8e4m3fn => .F8E4M3FN,
+        .f8e4m3fnuz => .F8E4M3FNUZ,
+        .f8e5m2 => .F8E5M2,
+        .f8e5m2fnuz => .F8E5M2FNUZ,
+        .bf16 => .BF16,
+        .f16 => .F16,
+        .f32 => .F32,
+        .f64 => .F64,
+        .i8 => .S8,
+        .i4 => .S4,
+        .i16 => .S16,
+        .i32 => .S32,
+        .i64 => .S64,
+        .u4 => .U4,
+        .u8 => .U8,
+        .u16 => .U16,
+        .u32 => .U32,
+        .u64 => .U64,
+        .c64 => .C64,
+        .c128 => .C128,
+    };
+}
 
 pub const Event = opaque {
     pub const inner = InnerMixin(pjrt.Event).inner;
@@ -249,7 +226,7 @@ pub const Event = opaque {
         return self.inner().isReady(api);
     }
 
-    pub fn getEventError(self: *const Event, api: *const Api) ApiError!?*Error {
+    pub fn getEventError(self: *const Event, api: *const Api) ?*Error {
         return self.inner().getEventError(api);
     }
 
