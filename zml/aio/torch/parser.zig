@@ -95,10 +95,6 @@ pub const Decoder = struct {
     }
 
     fn parseOps(self: *Decoder, allocator: Allocator, seekable_stream: anytype) ![]PickleOp {
-        // TODO(SuperAuguste): deflate using `std.compress.flate`'s `decompressor`
-        // TODO(SuperAuguste): explore swapping in non-generic reader here instead of using switch(?)
-        //                     not sure if that'd actually be beneficial in any way
-
         var iter = try std.zip.Iterator(@TypeOf(seekable_stream)).init(seekable_stream);
         var filename_buf: [std.fs.max_path_bytes]u8 = undefined;
         while (try iter.next()) |entry| {

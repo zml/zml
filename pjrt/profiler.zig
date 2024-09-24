@@ -128,64 +128,6 @@ pub const Profiler = struct {
     }
 };
 
-// If this was working it would be a good alternative to xspace_to_json.cc
-// const xspace = @import("xspace.pb.zig");
-// pub fn printDataAsXSpace(allocator: std.mem.Allocator, data: []const u8) void {
-//     var arena = std.heap.ArenaAllocator.init(allocator);
-//     defer arena.deinit();
-//
-//     const space = xspace.XSpace.decode(data, arena.allocator()) catch |e| {
-//         std.log.err("Couldn't load profiling data: {}", .{e});
-//         return;
-//     };
-//
-//     for (space.errors.items) |err| {
-//         std.log.err("{s}", .{err.getSlice()});
-//     }
-//     for (space.warnings.items) |warning| {
-//         std.log.warn("{s}", .{warning.getSlice()});
-//     }
-//     for (space.hostnames.items) |host| {
-//         std.log.info("Profiled host {s}", .{host.getSlice()});
-//     }
-//     for (space.planes.items) |plane| {
-//         var event_metadata = std.hash_map.AutoHashMap(i64, xspace.XEventMetadata).init(arena.allocator());
-//         event_metadata.ensureTotalCapacity(@intCast(plane.event_metadata.items.len)) catch return;
-//         defer event_metadata.deinit();
-//         for (plane.event_metadata.items) |event_meta_entry| {
-//             if (event_meta_entry.value) |event_meta| {
-//                 event_metadata.putAssumeCapacity(event_meta.id, event_meta);
-//             }
-//         }
-//         std.log.info("Profiled device {s}", .{plane.name.getSlice()});
-
-//         for (plane.lines.items) |line| {
-//             std.log.info(
-//                 "{d} -> {d} xline {s} ({d} events)",
-//                 .{ line.timestamp_ns, line.duration_ps, line.name.getSlice(), line.events.items.len },
-//             );
-//             const ps_per_ns: i64 = 1000;
-//             var duration_ns: i64 = 0;
-//             var last_metadata_id: i64 = 0;
-//             for (line.events.items) |event| {
-//                 if (event.metadata_id != last_metadata_id and duration_ns != 0) {
-//                     const duration_us = @as(f32, @floatFromInt(duration_ns)) / std.time.ns_per_us;
-//                     const meta = event_metadata.get(event.metadata_id).?;
-//                     std.log.info("event {s}: {d:.1}μs", .{ meta.name.getSlice(), duration_us });
-
-//                     last_metadata_id = event.metadata_id;
-//                     duration_ns = 0;
-//                 }
-//                 duration_ns += @divFloor(event.duration_ps, ps_per_ns);
-
-//                 const duration_us = @as(f32, @floatFromInt(duration_ns)) / std.time.ns_per_us;
-//                 const meta = event_metadata.get(event.metadata_id).?;
-//                 std.log.info("event {s}: {d:.1}μs", .{ meta.name.getSlice(), duration_us });
-//             }
-//         }
-//     }
-// }
-
 const ProfilingData = union(enum) {
     owned: []const u8,
     external: []const u8,

@@ -746,9 +746,7 @@ fn compileInternal(
 
     var timer = std.time.Timer.start() catch null;
     const tensor_args = context.tensorFromShapes(ModuleSignature(func).ArgsT, arena, args);
-    // TODO: this is fast, doesn't make system call, and use mutable state.
-    // does it need to be async ?
-    // const f = try CompilationContext.generateBytecode(context, arena, "main", func, &model, &tensor_args, .{ .add_donations_attributes = true });
+    // Run in a dedicated thread because compilation relies on `threadlocal`.
     const f = try asynk.callGeneric(CompilationContext.generateBytecode, .{ context, arena, "main", func, &model, &tensor_args, .{ .add_donations_attributes = true } });
     context._module.getBody().appendOperation(f.mlir_fn);
 
