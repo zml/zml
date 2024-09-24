@@ -55,7 +55,7 @@ use_repo(zls, "zls_aarch64-macos", "zls_x86_64-linux")
 register_toolchains("//third_party/zls:all")
 
 bazel_dep(name = "libxev", version = "20240910.0-a2d9b31")
-bazel_dep(name = "llvm-raw", version = "20240823.0-f142f8a")
+bazel_dep(name = "llvm-raw", version = "20240919.0-94c024a")
 
 llvm = use_extension("@llvm-raw//utils/bazel:extension.bzl", "llvm")
 llvm.configure(
@@ -67,8 +67,8 @@ llvm.configure(
 )
 use_repo(llvm, "llvm-project")
 
-bazel_dep(name = "stablehlo", version = "20240829.0-54aa1a5")
-bazel_dep(name = "xla", version = "20240902.0-d18cd64")
+bazel_dep(name = "stablehlo", version = "20240917.0-78c753a")
+bazel_dep(name = "xla", version = "20240919.0-1b18dd6")
 
 tsl = use_extension("@xla//:tsl.bzl", "tsl")
 use_repo(tsl, "tsl")

@@ -11,7 +11,8 @@
         "github:openxla/xla"
     ],
     "versions": [
-        "20240902.0-d18cd64"
+        "20240902.0-d18cd64",
+        "20240919.0-1b18dd6",
     ],
     "yanked_versions": {}
 }
