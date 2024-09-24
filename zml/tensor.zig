@@ -1925,14 +1925,14 @@ pub const Tensor = struct {
     /// - gatherValues(f: [a,b,c,d], .{.b, .c}, ind: [a, n,2])[a, n, d] == f[a, ind[a, n][0], ind[a, n][1], d]
     ///
     /// It is possible to use gatherValues without tags, but batching won't be available.
-    pub fn gatherValues(self: Tensor, axes_: anytype, indices: Tensor, opts: GatherOpts) Tensor {
-        // scoped_log.debug("gatherValues({}, {any}, {})", .{ self, axes_, indices });
-        const axes_is_scalar, const coord_axes = _parseGatherCoord(self, axes_);
+    pub fn gatherValues(self: Tensor, coord_axes: anytype, indices: Tensor, opts: GatherOpts) Tensor {
+        // scoped_log.debug("gatherValues({}, {any}, {})", .{ self, coord_axes, indices });
+        const single_coord, const coord_axes_ = _parseGatherCoord(self, coord_axes);
 
-        meta.assert(coord_axes.len > 0, "gatherValues expects 1 or more axes to operate one, received none. Example: `x.gatherValues(.a, indices, .{{}})`", .{});
-        for (coord_axes.constSlice(), 0..) |a, i| {
+        meta.assert(coord_axes_.len > 0, "gatherValues expects 1 or more axes to operate one, received none. Example: `x.gatherValues(.a, indices, .{{}})`", .{});
+        for (coord_axes_.constSlice(), 0..) |a, i| {
             if (i > 0) {
-                meta.assert(a == coord_axes.get(i - 1) + 1, "gatherValues expects 'axes_' too be sequential. But {any} aren't sequential in {}", .{ axes_, self });
+                meta.assert(a == coord_axes_.get(i - 1) + 1, "gatherValues expects 'coord_axes' too be sequential. But {any} aren't sequential in {}", .{ coord_axes, self });
             }
         }
 
@@ -1940,13 +1940,13 @@ pub const Tensor = struct {
         var self_kind: std.BoundedArray(AxisKind, MAX_RANK) = .{};
         var indices_batch_axes: Shape.DimsArray = .{};
         for (self._shape.tags(), 0..self.rank()) |t, self_ax| {
-            const maybe_val_ax = std.mem.indexOfScalar(u3, coord_axes.constSlice(), @intCast(self_ax));
+            const maybe_val_ax = std.mem.indexOfScalar(u3, coord_axes_.constSlice(), @intCast(self_ax));
             if (indices._shape.hasTag(t)) |id_ax| {
                 // tag is both in self and indices -> it's a batching dim
                 // Note: tags are required for batching.
                 self_kind.appendAssumeCapacity(.batching);
                 indices_batch_axes.appendAssumeCapacity(id_ax);
-                meta.assert(maybe_val_ax == null, "gatherValues expects axes to be either batches or slices axes. Axis {s} has been found both in `axes={any}` and `indices={}`", .{ t, axes_, indices });
+                meta.assert(maybe_val_ax == null, "gatherValues expects axes to be either batches or slices axes. Axis {s} has been found both in `axes={any}` and `indices={}`", .{ t, coord_axes, indices });
             } else if (maybe_val_ax) |_| {
                 // for gatherValues we collapsed all gathered axes
                 // (contrary to gatherSlices where we collapse none)
@@ -1956,14 +1956,14 @@ pub const Tensor = struct {
             }
         }
 
-        // When we receive several axes_ we need an extra dimension to store
+        // When we receive several coord_axes we need an extra dimension to store
         // one index per axis, which makes the coordinates of one value.
         // Otherwi se stablehlo uses the "indices.rank()" default value.
-        const index_coord_axis = if (axes_is_scalar)
+        const index_coord_axis = if (single_coord)
             indices.rank()
         else blk: {
             const ax = indices._shape.hasTag(.coord) orelse indices._shape.axis(-1);
-            meta.assert(indices.dim(ax) == coord_axes.len, "gatherValues with axes={any}, expects indices to be of shape [..., {}], got: {}", .{ axes_, coord_axes.len, indices });
+            meta.assert(indices.dim(ax) == coord_axes_.len, "gatherValues with axes={any}, expects indices to be of shape [..., {}], got: {}", .{ coord_axes, coord_axes_.len, indices });
             break :blk ax;
         };
 
@@ -1972,7 +1972,7 @@ pub const Tensor = struct {
         var res_kind: std.BoundedArray(AxisKind, MAX_RANK) = .{};
         for (self_kind.constSlice(), 0..) |kind, ax_usize| {
             const ax: u3 = @intCast(ax_usize);
-            if (ax == coord_axes.get(0)) {
+            if (ax == coord_axes_.get(0)) {
                 // The first val_ax is special cause this is the place where we insert indices axes.
                 for (indices._shape.tags(), 0..indices.rank()) |t, id_ax| {
                     if (id_ax == index_coord_axis) continue;
@@ -1998,7 +1998,7 @@ pub const Tensor = struct {
         // Sometimes the backend recognize this pattern, but not always.
         // So let us handle that.
         if (indices.count() == 1) {
-            return self.dynamicSlice1d(coord_axes.get(0), 1, indices.flattenAll().squeeze(0)).reshape(res_shape);
+            return self.dynamicSlice1d(coord_axes_.get(0), 1, indices.flattenAll().squeeze(0)).reshape(res_shape);
         }
 
         var slice_dims: Shape.DimsArray = .{};
@@ -2242,18 +2242,32 @@ pub const Tensor = struct {
     }
 
     pub const ScatterOpts = struct {
+        /// Promise scatter that all coordinates in `indices` are sorted, wrt to the final in memory offset.
+        /// Result is undefined if the promise is violated.
         indices_are_sorted: bool = false,
+
+        /// Promise scatter that slices don't overlap.
+        /// Result is undefined if the promise is violated.
         indices_are_unique: bool = false,
+
+        /// Function used to update previous value in `self` with values from `updates`.
+        /// If `update_fn` is not associative (ie the order of execution matter),
+        /// then you should make sure the slices don't overlap,
+        /// otherwise the result will depend on the runtime scheduling
+        /// of the operator which is backend specific.
         update_fn: *const fn (*const anyopaque, Tensor, Tensor) Tensor = increment,
+
+        /// Extra data that may be needed for a custom update function.
+        /// `override` and `increment` don't need it, leaving it to undefined works.
         update_fn_ctx: *const anyopaque = undefined,
+
+        pub fn increment(_: *const anyopaque, old_value: Tensor, new_value: Tensor) Tensor {
+            return old_value.add(new_value);
+        }
 
         pub fn override(_: *const anyopaque, old_value: Tensor, new_value: Tensor) Tensor {
             _ = old_value;
             return new_value;
-        }
-
-        pub fn increment(_: *const anyopaque, old_value: Tensor, new_value: Tensor) Tensor {
-            return old_value.add(new_value);
         }
     };
 
@@ -2264,7 +2278,7 @@ pub const Tensor = struct {
     ///   It's allowed to not mention a specific axis if the coordinate for this axis is always `0`.
     ///   Similarly to `gatherValues`, the coordinates are read from the `.coord` axis, or last axis if `.coord` is not found.
     ///   The coordinates represent the "top-left" corner of the slice to extract.
-    ///   `indices.dim(.coord)` must match `axes_.len`.
+    ///   `indices.dim(.coord)` must match `coord_axes.len`.
     ///   Other axes identify one "slice" and they must be found inside `updates`.
     ///
     /// * the output tensor starts with axes from `indices`.
@@ -2281,14 +2295,13 @@ pub const Tensor = struct {
     /// **Warning**: if `opts.update_fn` is not associative not all calls to `scatterSlices` are sound.
     /// In particular if you scatter overlapping slices, with `zml.Tensor.ScatterOpts.override`,
     /// then the result will depend on the execution order that you don't control.
-    pub fn scatterSlices(self: Tensor, axes_: anytype, indices: Tensor, updates: Tensor, opts: ScatterOpts) Tensor {
+    pub fn scatterSlices(self: Tensor, coord_axes: anytype, indices: Tensor, updates: Tensor, opts: ScatterOpts) Tensor {
         const loc = @src();
-        scoped_log.warn("scatterSlices({}, {any}, {}, {})", .{ self, axes_, indices, updates });
+        // scoped_log.debug("scatterSlices({}, {any}, {}, {})", .{ self, coord_axes, indices, updates });
 
-        const axes_is_scalar, const coord_axes = _parseGatherCoord(self, axes_);
         meta.assert(self.dtype() == updates.dtype(), "scatterSlices expects input and 'updates' tensors to be of the same type, got {} and {}", .{ self.dtype(), updates.dtype() });
 
-        // TODO: if (indices.rank() == 1) return dynamicUpdateSlice;
+        const single_coord, const coord_axes_ = _parseGatherCoord(self, coord_axes);
         const AxisKind = enum { batching, update_window, inserted_window, window_id };
         var self_kind: std.BoundedArray(AxisKind, MAX_RANK) = .{};
         var indices_batch_axes: Shape.DimsArray = .{};
@@ -2305,16 +2318,20 @@ pub const Tensor = struct {
                 self_kind.appendAssumeCapacity(.inserted_window);
             }
         }
-        scoped_log.warn(" self_kind -> {any}", .{self_kind.constSlice()});
+        // scoped_log.warn(" self_kind -> {any}", .{self_kind.constSlice()});
 
-        const index_coord_axis = if (axes_is_scalar)
+        const index_coord_axis = if (single_coord)
             indices.rank()
         else blk: {
-            const coord_ax = indices._shape.hasTag(.coord) orelse indices._shape.axis(-1);
-            meta.assert(indices.dim(coord_ax) == coord_axes.len, "scatterSlices({}, axes_={any}, indices, updates) expects 'indices' to be a tensor [..., {}], got {}", .{ self, axes_, coord_axes.len, indices });
+            const ax = indices._shape.hasTag(.coord) orelse indices._shape.axis(-1);
+            meta.assert(indices.dim(ax) == coord_axes_.len, "scatterSlices({}, coord_axes={any}, indices, updates) expects 'indices' to be a tensor [..., {}], got {}", .{ self, coord_axes, coord_axes_.len, indices });
 
-            break :blk coord_ax;
+            break :blk ax;
         };
+        if (indices.count() == 1) {
+            return self.dynamicUpdateSlice1d(updates, coord_axes_.get(0), indices.reshape(.{}));
+        }
+
         var up_kind: std.BoundedArray(AxisKind, MAX_RANK) = .{};
         // Note: we assume the scatter_dims appear in the same order inside indices and inside self.
         for (updates._shape.tags(), 0..) |t, up_ax| {
@@ -2331,12 +2348,11 @@ pub const Tensor = struct {
                 std.debug.panic("scatterSlices expects 'updates' to be made of axes from 'self={}' and from 'indices={}', got unknown tag {s} in {}", .{ self, indices, t, updates });
             }
         }
-        scoped_log.warn(" up_kind -> {any}", .{up_kind.constSlice()});
         const n_indices_axes = updates.rank() - _collectAxes(AxisKind, up_kind, .update_window).len;
-        if (axes_is_scalar) {
-            meta.assert(n_indices_axes == indices.rank(), "scatterSlices({}, {any}) expects 'updates' to contain all axes from 'indices', got indices={}, updates={}", .{ self, axes_, indices, updates });
+        if (single_coord) {
+            meta.assert(n_indices_axes == indices.rank(), "scatterSlices({}, {any}) expects 'updates' to contain all axes from 'indices', got indices={}, updates={}", .{ self, coord_axes, indices, updates });
         } else {
-            meta.assert(n_indices_axes == indices.rank() - 1, "scatterSlices({}, {any}) expects 'updates' to contain all-but-last axes from 'indices', got indices={}, updates={}", .{ self, axes_, indices, updates });
+            meta.assert(n_indices_axes == indices.rank() - 1, "scatterSlices({}, {any}) expects 'updates' to contain all-but-last axes from 'indices', got indices={}, updates={}", .{ self, coord_axes, indices, updates });
         }
 
         const ctx = self.getContext();
@@ -2346,28 +2362,12 @@ pub const Tensor = struct {
         const UpdateS = ops.BlockSign(ScatterOpts.increment);
         const update_block = ctx.makeBlock(UpdateS, opts.update_fn, opts.update_fn_ctx, .{ _scalar, _scalar });
 
-        scoped_log.warn(
-            \\ -> ScatterAttr:
-            \\      .update_window_dims={d},
-            \\      .inserted_window_dims={d},
-            \\      .input_batching_dims={d},
-            \\      .scatter_indices_batching_dims={d},
-            \\      .scatter_dims_to_operand_dims={d},
-            \\      .index_vector_dim={}
-        , .{
-            _collectAxes(AxisKind, up_kind, .update_window).constSlice(),
-            _collectAxes(AxisKind, self_kind, .inserted_window).constSlice(),
-            _collectAxes(AxisKind, self_kind, .batching).constSlice(),
-            indices_batch_axes.constSlice(),
-            toI64(coord_axes.constSlice()),
-            index_coord_axis,
-        });
         const scatter_attr = dialect.stablehlo.ScatterDimensionNumbersAttribute.init(mlir_ctx, .{
             .update_window_dims = _collectAxes(AxisKind, up_kind, .update_window).constSlice(),
             .inserted_window_dims = _collectAxes(AxisKind, self_kind, .inserted_window).constSlice(),
             .input_batching_dims = _collectAxes(AxisKind, self_kind, .batching).constSlice(),
             .scatter_indices_batching_dims = indices_batch_axes.constSlice(),
-            .scatter_dims_to_operand_dims = toI64(coord_axes.constSlice()),
+            .scatter_dims_to_operand_dims = toI64(coord_axes_.constSlice()),
             .index_vector_dim = index_coord_axis,
         });
 
@@ -2394,9 +2394,9 @@ pub const Tensor = struct {
         const platform = zml.testing.env();
 
         const Local = struct {
-            pub fn scatter(self: Tensor, axes_: Shape.AxesArray, indices: Tensor, updates: Tensor) Tensor {
+            pub fn scatter(self: Tensor, coord_axes: Shape.AxesArray, indices: Tensor, updates: Tensor) Tensor {
                 return self.scatterSlices(
-                    axes_.constSlice(),
+                    coord_axes.constSlice(),
                     indices,
                     updates,
                     .{ .update_fn = ScatterOpts.increment },
