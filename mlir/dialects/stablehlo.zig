@@ -273,20 +273,41 @@ pub fn gather(
     );
 }
 
-pub const ScatterArgs = struct {
-    update_window_dims: []const i64,
-    inserted_window_dims: []const i64,
-    scatter_dims_to_operand_dims: []const i64,
-    index_vector_dim: i64,
-    indices_are_sorted: bool = false,
-    unique_indices: bool = false,
-};
-
 fn elementTypeOrSelf(typ: mlir.Type) mlir.Type {
     return if (typ.as(mlir.ShapedType)) |shaped| {
         return shaped.elementType();
     } else typ;
 }
+
+pub const ScatterArgs = struct {
+    update_window_dims: []const i64,
+    inserted_window_dims: []const i64,
+    input_batching_dims: []const i64,
+    scatter_indices_batching_dims: []const i64,
+    scatter_dims_to_operand_dims: []const i64,
+    index_vector_dim: i64,
+    indices_are_sorted: bool = false,
+    unique_indices: bool = false,
+
+    pub fn getScatterDimensionNumbers(self: ScatterArgs, ctx: mlir.Context) mlir.Attribute {
+        return mlir.Attribute.wrap(
+            c.stablehloScatterDimensionNumbersGet(
+                ctx.inner(),
+                @intCast(self.update_window_dims.len),
+                self.update_window_dims.ptr,
+                @intCast(self.inserted_window_dims.len),
+                self.inserted_window_dims.ptr,
+                @intCast(self.input_batching_dims.len),
+                self.input_batching_dims.ptr,
+                @intCast(self.scatter_indices_batching_dims.len),
+                self.scatter_indices_batching_dims.ptr,
+                @intCast(self.scatter_dims_to_operand_dims.len),
+                self.scatter_dims_to_operand_dims.ptr,
+                self.index_vector_dim,
+            ),
+        );
+    }
+};
 
 pub fn scatter(
     ctx: mlir.Context,
@@ -294,16 +315,7 @@ pub fn scatter(
     scatter_indices: []const mlir.Value,
     updates: []const mlir.Value,
     update_block: mlir.Block,
-    args: struct {
-        update_window_dims: []const i64,
-        inserted_window_dims: []const i64,
-        input_batching_dims: []const i64,
-        scatter_indices_batching_dims: []const i64,
-        scatter_dims_to_operand_dims: []const i64,
-        index_vector_dim: i64,
-        indices_are_sorted: bool = false,
-        unique_indices: bool = false,
-    },
+    args: ScatterArgs,
     location: mlir.Location,
 ) mlir.Operation {
     return mlir.Operation.make(
@@ -313,15 +325,7 @@ pub fn scatter(
             .variadic_operands = &.{ inputs, scatter_indices, updates },
             .blocks = &.{update_block},
             .attributes = &.{
-                .{ "scatter_dimension_numbers", ScatterDimensionNumbersAttribute.init(
-                    ctx,
-                    args.update_window_dims,
-                    args.inserted_window_dims,
-                    args.input_batching_dims,
-                    args.scatter_indices_batching_dims,
-                    args.scatter_dims_to_operand_dims,
-                    args.index_vector_dim,
-                ).asAttr() },
+                .{ "scatter_dimension_numbers", args.getScatterDimensionNumbers(ctx) },
                 .{ "indices_are_sorted", mlir.BoolAttribute.init(ctx, args.indices_are_sorted).as(mlir.Attribute).? },
                 .{ "unique_indices", mlir.BoolAttribute.init(ctx, args.unique_indices).as(mlir.Attribute).? },
             },
@@ -955,88 +959,6 @@ pub const OutputOperandAliasAttribute = struct {
             @intCast(operand_tuple_indices.len),
             operand_tuple_indices.ptr,
         ));
-    }
-};
-
-pub const ScatterDimensionNumbersAttribute = struct {
-    _inner: c.MlirAttribute,
-
-    pub usingnamespace mlir.MlirHelpers(ScatterDimensionNumbersAttribute, .{
-        .is_a_fn = c.stablehloAttributeIsAScatterDimensionNumbers,
-        .is_null_fn = c.mlirAttributeIsNull,
-        .dump_fn = c.mlirAttributeDump,
-        .equal_fn = c.mlirAttributeEqual,
-    });
-    const Self = ScatterDimensionNumbersAttribute;
-
-    pub fn init(
-        ctx: mlir.Context,
-        args: struct {
-            update_window_dims: []const i64,
-            inserted_window_dims: []const i64,
-            input_batching_dims: []const i64,
-            scatter_indices_batching_dims: []const i64,
-            scatter_dims_to_operand_dims: []const i64,
-            index_vector_dim: i64,
-        },
-    ) Self {
-        return Self.wrap(
-            c.stablehloScatterDimensionNumbersGet(
-                ctx.inner(),
-                @intCast(args.update_window_dims.len),
-                args.update_window_dims.ptr,
-                @intCast(args.inserted_window_dims.len),
-                args.inserted_window_dims.ptr,
-                @intCast(args.input_batching_dims.len),
-                args.input_batching_dims.ptr,
-                @intCast(args.scatter_indices_batching_dims.len),
-                args.scatter_indices_batching_dims.ptr,
-                @intCast(args.scatter_dims_to_operand_dims.len),
-                args.scatter_dims_to_operand_dims.ptr,
-                args.index_vector_dim,
-            ),
-        );
-    }
-
-    pub fn asAttr(self: ScatterDimensionNumbersAttribute) mlir.Attribute {
-        return self.as(mlir.Attribute).?;
-    }
-
-    pub fn getUpdateWindowDimsSize(self: Self) usize {
-        return @intCast(c.stablehloScatterDimensionNumbersGetUpdateWindowDimsSize(self.inner()));
-    }
-
-    pub fn getUpdateWindowDimsElem(self: Self, pos: usize) i64 {
-        return c.stablehloScatterDimensionNumbersGetUpdateWindowDimsElem(self.inner(), @intCast(pos));
-    }
-
-    pub fn getInsertedWindowDimsSize(self: Self) usize {
-        return @intCast(c.stablehloScatterDimensionNumbersGetInsertedWindowDimsSize(self.inner()));
-    }
-
-    pub fn getInsertedWindowDimsElem(self: Self, pos: usize) i64 {
-        return c.stablehloScatterDimensionNumbersGetInsertedWindowDimsElem(self.inner(), @intCast(pos));
-    }
-
-    pub fn getInputBatchingDimsSize(self: Self) usize {
-        return @intCast(c.stablehloScatterDimensionNumbersGetInputBatchingDimsSize(self.inner()));
-    }
-
-    pub fn getInputBatchingDimsElem(self: Self, pos: usize) i64 {
-        return c.stablehloScatterDimensionNumbersGetInputBatchingDimsElem(self.inner(), @intCast(pos));
-    }
-
-    pub fn getScatterIndicesBatchingDimsSize(self: Self) usize {
-        return @intCast(c.stablehloScatterDimensionNumbersGetScatterIndicesBatchingDimsSize(self.inner()));
-    }
-
-    pub fn getScatterIndicesBatchingDimsElem(self: Self, pos: usize) i64 {
-        return c.stablehloScatterDimensionNumbersGetScatterIndicesBatchingDimsElem(self.inner(), @intCast(pos));
-    }
-
-    pub fn getIndexVectorDim(self: Self) i64 {
-        // There really is "Scatter" missing in the function name
-        return c.stablehloDimensionNumbersGetIndexVectorDim(self.inner());
     }
 };
 
