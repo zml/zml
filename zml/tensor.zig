@@ -196,11 +196,6 @@ pub const Tensor = struct {
         return res;
     }
 
-    /// Returns a slice containing the strides for a Tensor.
-    pub inline fn computeStrides(self: Tensor) []const i64 {
-        return self._shape.computeStrides(self.dtype().sizeOf()).constSlice();
-    }
-
     var _global_tensor_counter: u64 = 0;
 
     /// Internal use

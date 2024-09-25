@@ -700,7 +700,8 @@ pub const Shape = struct {
         }
     }
 
-    pub fn computeStrides(self: Shape, base_stride: u32) std.BoundedArray(i64, MAX_RANK) {
+    pub fn computeStrides(self: Shape) std.BoundedArray(i64, MAX_RANK) {
+        const base_stride = self.dtype().sizeOf();
         const rk = self.rank();
         var strides: std.BoundedArray(i64, MAX_RANK) = .{ .len = @intCast(self.rank()) };
         if (rk == 0) return strides;

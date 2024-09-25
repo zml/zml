@@ -147,9 +147,15 @@ pub const HostBuffer = struct {
         return try Buffer.from(platform_, self);
     }
 
+    /// Interpret the underlying data as a contiguous slice.
+    /// WARNING: It's only valid if the buffer is contiguous.
+    /// Strided buffers can't use this method.
     pub fn items(self: HostBuffer, comptime T: type) []const T {
         if (DataType.fromZigType(T) != self.dtype()) {
-            std.debug.panic("Can't reinterpret HostBuffer({_}) as {s}", .{ self.shape(), @typeName(T) });
+            std.debug.panic("Can't reinterpret {} as {s}", .{ self, @typeName(T) });
+        }
+        if (!self.isContiguous()) {
+            std.debug.panic("{} isn't contiguous", .{self});
         }
         const ptr: [*]const T = @alignCast(@ptrCast(self.data.ptr));
         return ptr[0..self._shape.count()];
@@ -180,15 +186,64 @@ pub const HostBuffer = struct {
         return self._shape.count();
     }
 
-    pub fn dim(self: HostBuffer, axis: anytype) i64 {
-        return self._shape.dim(axis);
+    pub fn dim(self: HostBuffer, axis_: anytype) i64 {
+        return self._shape.dim(axis_);
+    }
+
+    pub fn axis(self: HostBuffer, axis_: anytype) u3 {
+        return self._shape.axis(axis_);
+    }
+
+    pub fn isContiguous(self: HostBuffer) bool {
+        const strd = self._strides orelse return true;
+        const cont_strides = self._shape.computeStrides();
+        return std.mem.eql(i64, strd[0..self.rank()], cont_strides.constSlice());
     }
 
     pub fn reshape(self: HostBuffer, shape_: anytype) HostBuffer {
-        meta.assert(self._strides == null, "reshape expects a contiguous tensor, got: {}", .{self});
+        meta.assert(self.isContiguous(), "reshape expects a contiguous tensor, got: {}", .{self});
         var res = self;
         res._shape = self._shape.reshape(shape_);
         return res;
+    }
+
+    pub const Slice = struct {
+        start: i64 = 0,
+        end: ?i64 = null,
+    };
+
+    /// Slices the input Tensor over the given axis_ using the given parameters.
+    pub fn slice1d(self: HostBuffer, axis_: anytype, s: Slice) HostBuffer {
+        const ax = self._shape.axis(axis_);
+        const d = self.dim(ax);
+        const start: i64 = if (s.start < 0) s.start + d else s.start;
+        var end = s.end orelse d;
+        if (end < 0) end += d;
+        meta.assert(start >= 0 and start < d, "slice1d({}, {}) expects the slice start to be between 0 and {} got: {}", .{ self, ax, d, start });
+        meta.assert(end >= 1 and end <= d, "slice1d({}, {}) expects the slice end to be between 1 and {} got: {}", .{ self, ax, d, end });
+        meta.assert(start < end, "slice1d({}, {}) expects the slice start ({}) to be smaller than the end ({})", .{ self, ax, start, end });
+
+        // If strides weren't set it means original buffer is contiguous.
+        // But it won't be anymore after slicing. The strides don't change though.
+        const _strides = self._strides orelse self._shape.computeStrides().buffer;
+        const offset: usize = @intCast(start * _strides[ax]);
+        return .{
+            ._shape = self.shape().set(ax, end - start),
+            .data = self.data[offset..],
+            ._strides = _strides,
+            ._memory = .unmanaged,
+        };
+    }
+
+    pub fn format(
+        self: HostBuffer,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        _ = options;
+        try writer.print("HostBuffer(.{_})", .{self._shape});
     }
 };
 
