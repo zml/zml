@@ -319,14 +319,6 @@ pub const Client = opaque {
         return Profiler.init(null, options);
     }
 
-    // pub fn getGpuCustomCallRegistry(self: *const Client, api: *const Api) ?*GpuCustomCallRegistry {
-    //     if (api.lookupExtension(c.PJRT_Gpu_Custom_Call, c.PJRT_Extension_Type_Gpu_Custom_Call)) |ext| {
-    //         return .{ .custom_call_register = ext.custom_call.? };
-    //     }
-    //     log.warn("No Gpu Custom Call registry found for platform: {}", .{self});
-    //     return null;
-    // }
-
     pub fn deserializeAndLoad(self: *const Client, api: *const Api, bytes: []const u8) ApiError!*LoadedExecutable {
         const ret = try api.call(.PJRT_Executable_DeserializeAndLoad, .{
             .client = self.inner(),
@@ -364,32 +356,6 @@ pub const Client = opaque {
         return @ptrCast(ret.buffer.?);
     }
 };
-
-// // pub const CustomCallSignature = *const fn (*anyopaque, **anyopaque, [*c]const u8, usize) callconv(.C) void;
-
-// // pub const GpuCustomCallRegistry = struct {
-// //     custom_call_register: *const c.PJRT_Gpu_Register_Custom_Call,
-
-// //     pub fn registerCustomCall(self: GpuCustomCallRegistry, api: *const Api, api_version: usize, name: []const u8, func: CustomCallSignature) ApiError!void {
-// //         var ret = pjrtStruct(c.PJRT_Gpu_Register_Custom_Call_Args{
-// //             .function_name = name.ptr,
-// //             .function_name_size = name.len,
-// //             .api_version = @intCast(api_version),
-// //             .custom_call_function = @ptrCast(@constCast(func)),
-// //         });
-// //         const result = self.custom_call_register(&ret);
-// //         if (result) |pjrt_c_error| {
-// //             const pjrt_error = .{ .inner = pjrt_c_error };
-// //             log.err("{s}", .{pjrt_error.getMessage(api)});
-// //             return pjrt_error.getCode().toApiError();
-// //         }
-// //     }
-// // };
-
-// // const OldPjrtExtension = extern struct {
-// //     type: c.PJRT_Extension_Type,
-// //     next: [*]OldPjrtExtension,
-// // };
 
 pub const Device = opaque {
     const inner = InnerMixin(c.PJRT_Device).inner;

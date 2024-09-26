@@ -348,9 +348,6 @@ pub const Shape = struct {
         return self.dtype().sizeOf() * self.count();
     }
 
-    // Aliases
-    pub const numel = count;
-
     /// Compares the two shapes described, ignoring tagging.
     pub fn eql(self: Shape, other: Shape) bool {
         return std.mem.eql(i64, self.dims(), other.dims()) and self.dtype() == other.dtype();
@@ -882,78 +879,6 @@ pub const Shape = struct {
             ),
         );
     }
-
-    /// Parses an anytype argument of the form `val` or `.{ .a = val }`.l
-    /// Helps offering consistent API through ZML.
-    // pub fn parseTaggedValue(
-    //     T: type,
-    //     default_tag: EnumLiteral,
-    //     d: anytype,
-    // ) struct { Tag, T } {
-    //     const err_msg = "Expected one tagged dimension, received a tuple: " ++ @typeName(@TypeOf(d));
-    //     return switch (@typeInfo(@TypeOf(d))) {
-    //         .Int, .ComptimeInt => .{ toTag(default_tag), @intCast(d) },
-    //         .Struct => |struct_info| {
-    //             if (struct_info.fields.len != 1) @compileError(err_msg);
-    //             const name = struct_info.fields[0].name;
-    //             return .{ name.ptr, @intCast(@field(d, name)) };
-    //         },
-    //         else => @compileError(err_msg),
-    //     };
-    // }
-
-    /// Parses a list of tags `.{ .a, .b, .c }` into a `[]Tag`
-    // pub inline fn parseTagList(comptime axes_: anytype) []Tag {
-    //     switch (@typeInfo(@TypeOf(axes_))) {
-    //         .Struct, .Array => {
-    //             var _tags: [axes_.len]Tag = undefined;
-    //             inline for (axes_, &_tags) |a, *t| t.* = toTag(a);
-    //             return &_tags;
-    //         },
-    //         else => @compileError("Expected a tuple of enum literal, but found " ++ @tagName(@TypeOf(axes))),
-    //     }
-    // }
-
-    /// Parses a comptime struct into a struct similarly to Shape.init,
-    /// but with a custom type in place of the `i64` dimensions.
-    /// Helps offering consistent API through ZML.
-    // pub fn parseShapedValue(T: type, value: anytype) struct {
-    //     std.BoundedArray(Tag, MAX_RANK),
-    //     std.BoundedArray(T, MAX_RANK),
-    // } {
-    //     const too_long_err = std.fmt.comptimePrint("Received too many axes, maximum supported is {d}", .{MAX_RANK});
-
-    //     var _tags: [MAX_RANK]Tag = [_]Tag{TagUnknown} ** MAX_RANK;
-    //     const struct_info = switch (@typeInfo(@TypeOf(value))) {
-    //         .Struct => |struct_info| struct_info,
-    //         else => return .{
-    //             .{ .len = 0, .buffer = _tags },
-    //             std.BoundedArray(T, MAX_RANK).fromSlice(value) catch @panic(too_long_err),
-    //         },
-    //     };
-
-    //     meta.assertComptime(struct_info.fields.len <= MAX_RANK, too_long_err, .{});
-
-    //     var values: std.BoundedArray(T, MAX_RANK) = .{};
-    //     inline for (struct_info.fields) |field| {
-    //         if (T == Tag) {
-    //             values.appendAssumeCapacity(toTag(@field(value, field.name)));
-    //         } else {
-    //             // If you have an error here it means Zig wasn't able to convert between the
-    //             // value you passed and the expected `T`.
-    //             values.appendAssumeCapacity(@field(value, field.name));
-    //         }
-    //     }
-    //     if (!struct_info.is_tuple) {
-    //         inline for (struct_info.fields, 0..) |field, i| {
-    //             _tags[i] = toTag(field);
-    //         }
-    //     }
-    //     return .{
-    //         .{ .len = struct_info.fields.len, .buffer = _tags },
-    //         values,
-    //     };
-    // }
 
     fn intersectTags(a: []const Tag, b: []const Tag) TagsArray {
         var res = TagsArray.init(0) catch unreachable;

@@ -218,13 +218,6 @@ test "real/img" {
     const platform = zml.testing.env();
 
     const Fns = struct {
-        // fn testSplitMergeIsId(impl: RopeOpts.Implementation) Tensor {
-        //     const x = Tensor.arange(.{ .end = 20 }, .f32).reshape(.{ 5, 4 });
-        //     const real, const imag = splitRealImg(x, impl);
-        //     const y = mergeRealImg(real, imag, impl);
-        //     return y.cmp(.EQ, x).flatten(0).convert(.i32).sum(-1);
-        // }
-
         fn testSplitMergeIsId(impl: RopeOpts.Implementation) Tensor {
             const x = Tensor.arange(.{ .end = 20 }, .f32).reshape(.{ 5, 4 });
             const real, const imag = splitRealImg(x, impl);

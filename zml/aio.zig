@@ -300,23 +300,12 @@ fn _populateStruct(
                     log.warn("No layer found at {s}", .{prefix});
                 }
                 return true;
-            } else if (ptr_info.size == .One) {
-                //if (ptr_info.child != zml.Tensor and ptr_info.child != ?zml.Tensor) {
-                //    // Note: should we recurse on all pointers ?
-                //    log.warn("Not looking into: {any}", .{prefix});
-                //    return false;
-                //}
-                //obj.* = try allocator.create(ptr_info.child);
-                //return try _populateStruct(allocator, buffer_store, unique_id, prefix, obj.*, required);
             } else {
                 std.log.err("{s} - {s}: {s} type not supported", .{ @src().fn_name, prefix, @typeName(T) });
                 return false;
             }
         },
         .Struct => |struct_info| {
-            // TODO(Corentin): See if we keep that
-            //if (@hasDecl(T, "_zml_reader_skip_me_")) return false;
-
             var partial_struct = false;
             inline for (struct_info.fields) |field| {
                 try prefix_builder.push(allocator, field.name);
@@ -343,46 +332,12 @@ fn _populateStruct(
             }
             return true;
         },
-        //.Array => |array_info| {
-        //    var new_prefix = prefix;
-        //    if (prefix.items.len > 0)
-        //        new_prefix.appendAssumeCapacity('.');
-        //    const len = new_prefix.items.len;
-        //    for (obj, 0..) |*value, i| {
-        //        new_prefix.items.len += std.fmt.formatIntBuf(new_prefix.unusedCapacitySlice(), i, 10, .lower, .{});
-        //        const found = try _populateStruct(allocator, buffer_store, unique_id, new_prefix, value, required);
-        //        if (!found) return false;
-        //        new_prefix.shrinkRetainingCapacity(len);
-        //    }
-        //    const num_layers = buffer_store.numLayers(prefix.items);
-        //    if (num_layers != array_info.len) {
-        //        log.warn("Found {d} layers with prefix {s}, but only loaded {d}", .{ num_layers, prefix.items, array_info.len });
-        //    }
-        //    return true;
-        //},
         .Optional => |opt_info| {
             obj.* = @as(opt_info.child, undefined);
             const found = try _populateStruct(allocator, prefix_builder, unique_id, buffer_store, &(obj.*.?), false);
             if (!found) obj.* = null;
             return true;
         },
-        //.Union => |union_info| {
-        //    // Note: the main issue here is that several fields could match but we only return the first one.
-        //    inline for (union_info.fields) |field| {
-        //        // interpret obj as a "field", and try to populate that.
-        //        obj.* = @unionInit(T, field.name, undefined);
-        //        const found = try _populateStruct(allocator, buffer_store, unique_id, prefix, &@field(obj.*, field.name), false);
-        //        if (found) {
-        //            std.log.info("Interpreted {s} as {s}", .{ prefix.items, @typeName(field.type) });
-        //            return true;
-        //        }
-        //    }
-        //    obj.* = undefined;
-        //    if (required) {
-        //        std.log.err("Not able to intepret {s} as any member of the union: {s}", .{ prefix.items, @typeName(T) });
-        //    }
-        //    return false;
-        //},
         .Int => {
             obj.* = undefined;
             return true;
@@ -540,9 +495,6 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
             } else return error.TypeNotSupported;
         },
         .Struct => |struct_info| {
-            // TODO(Corentin): See if we keep that
-            //if (@hasDecl(T, "_zml_reader_skip_me_")) return false;
-
             inline for (struct_info.fields) |field| {
                 try prefix_builder.push(allocator, field.name);
                 defer prefix_builder.pop();
@@ -550,23 +502,6 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
                 try visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, &@field(obj, field.name), platform);
             }
         },
-        //.Array => |array_info| {
-        //    var new_prefix = prefix;
-        //    if (prefix.items.len > 0)
-        //        new_prefix.appendAssumeCapacity('.');
-        //    const len = new_prefix.items.len;
-        //    for (obj, 0..) |*value, i| {
-        //        new_prefix.items.len += std.fmt.formatIntBuf(new_prefix.unusedCapacitySlice(), i, 10, .lower, .{});
-        //        const found = try _populateStruct(allocator, buffer_store, unique_id, new_prefix, value, required);
-        //        if (!found) return false;
-        //        new_prefix.shrinkRetainingCapacity(len);
-        //    }
-        //    const num_layers = buffer_store.numLayers(prefix.items);
-        //    if (num_layers != array_info.len) {
-        //        log.warn("Found {d} layers with prefix {s}, but only loaded {d}", .{ num_layers, prefix.items, array_info.len });
-        //    }
-        //    return true;
-        //},
         .Optional => |opt_info| {
             var child = @as(opt_info.child, undefined);
             if (visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, &child, platform)) {
@@ -576,23 +511,6 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
                 else => return err,
             }
         },
-        //.Union => |union_info| {
-        //    // Note: the main issue here is that several fields could match but we only return the first one.
-        //    inline for (union_info.fields) |field| {
-        //        // interpret obj as a "field", and try to populate that.
-        //        obj.* = @unionInit(T, field.name, undefined);
-        //        const found = try _populateStruct(allocator, buffer_store, unique_id, prefix, &@field(obj.*, field.name), false);
-        //        if (found) {
-        //            std.log.info("Interpreted {s} as {s}", .{ prefix.items, @typeName(field.type) });
-        //            return true;
-        //        }
-        //    }
-        //    obj.* = undefined;
-        //    if (required) {
-        //        std.log.err("Not able to intepret {s} as any member of the union: {s}", .{ prefix.items, @typeName(T) });
-        //    }
-        //    return false;
-        //},
         else => {},
     }
 }

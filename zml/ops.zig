@@ -547,17 +547,6 @@ fn _BlockSign(comptime func: anytype, blk_type: BlockType) BlockSignature {
         if (i >= arg_start) {
             n_tensors += staticCountTensors(ArgType) orelse @compileError("Can't use " ++ @typeName(ArgType) ++ " in an MLIR function, because it has a variable number of tensors");
         }
-
-        // if (arg.type) |ArgType| {
-        //     full_args[i] = ArgType;
-        //     if (i >= arg_start) {
-        //         n_tensors += staticCountTensors(ArgType) orelse @compileError("Can't use " ++ @typeName(ArgType) ++ " in an MLIR function, because it has a variable number of tensors");
-        //     }
-        // } else {
-        //     // anytype are considered to not have tensors.
-        //     // violation of this will be detected when calling `compile()` but not at Zig compile time.
-        //     full_args[i] = void;
-        // }
     }
     const FullArgs = std.meta.Tuple(&full_args);
     const BlkCtx = switch (blk_type) {

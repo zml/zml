@@ -49,10 +49,6 @@ pub fn collectDims(
                         expected_dim.* = DIM_MISMATCH;
                     }
                 }
-                // TODO: strict mode:
-                // else if (mode == .strict) {
-                //     @compileError("Found unexpected axis " ++ @tagName(a) ++ " when collecting " ++ @typeName(ShapeStruct(dims)));
-                // }
             }
         }
     }).cb, &context, v);

@@ -167,33 +167,7 @@ pub const Client = opaque {
     pub fn getProfiler(self: *const Client, api: *const Api, options: pjrt.Profiler.Options) pjrt.Profiler {
         return self.inner().getProfiler(api, options);
     }
-
-    // pub fn getGpuCustomCallRegistry(self: Client) ?GpuCustomCallRegistry {
-    //     return switch (self.inner) {
-    //         inline else => |v, tag| if (v.getGpuCustomCallRegistry()) |registry| GpuCustomCallRegistry.wrap(tag, registry) else null,
-    //     };
-    // }
-
-    // pub fn getGpuCustomCallRegistry(self: *const Client, api: *const Api) ?*GpuCustomCallRegistry {
-    //     if (api.lookupExtension(c.PJRT_Gpu_Custom_Call, c.PJRT_Extension_Type_Gpu_Custom_Call)) |ext| {
-    //         return .{ .custom_call_register = ext.custom_call.? };
-    //     }
-    //     log.warn("No Gpu Custom Call registry found for platform: {}", .{self});
-    //     return null;
-    // }
 };
-
-// pub const GpuCustomCallRegistry = struct {
-//     pub usingnamespace WrapperMixin(GpuCustomCallRegistry, pjrt.GpuCustomCallRegistry);
-
-//     inner: GpuCustomCallRegistry.UnionType,
-
-//     pub fn registerCustomCall(self: GpuCustomCallRegistry, api_version: usize, name: []const u8, func: pjrt.CustomCallSignature) ApiError!void {
-//         return switch (self.inner) {
-//             inline else => |v| v.registerCustomCall(api_version, name, func),
-//         };
-//     }
-// };
 
 pub const Buffer = opaque {
     const inner = InnerMixin(pjrt.Buffer).inner;
