@@ -2,6 +2,7 @@ const builtin = @import("builtin");
 const std = @import("std");
 
 const mlir = @import("mlir");
+const dialect = @import("mlir/dialects");
 const pjrt = @import("pjrt");
 const dtype = @import("dtype.zig");
 const meta = @import("meta.zig");
