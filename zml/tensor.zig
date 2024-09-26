@@ -159,6 +159,12 @@ pub const Tensor = struct {
         return res;
     }
 
+    pub fn withSharding(self: Tensor, axes_: anytype) Tensor {
+        var res = self;
+        res._shape = self._shape.withSharding(axes_);
+        return res;
+    }
+
     /// Returns a Tensor with new tag names.
     pub fn rename(self: Tensor, renames: anytype) Tensor {
         var res = self;
