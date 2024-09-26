@@ -47,7 +47,7 @@ pub fn MlirTypeMethods(comptime InnerT: type) type {
 /// Alternative to MlirWrapperType
 pub const MlirStrCallback = fn (c.MlirStringRef, ?*anyopaque) callconv(.C) void;
 
-fn MlirHelpersMethods(comptime OuterT: type) type {
+fn MlirHelpersMethods(OuterT: type) type {
     switch (@typeInfo(OuterT)) {
         .Struct => |info| {
             if (info.fields.len != 1) @compileError("Mlir wrapper type can only wrap one Mlir value. Received: " ++ @typeName(OuterT));
@@ -381,6 +381,10 @@ pub const StringAttribute = struct {
 
     pub fn value(self: Self) []const u8 {
         return fromStringRef(c.mlirStringAttrGetValue(self.inner()));
+    }
+
+    pub fn asAttr(self: StringAttribute) Attribute {
+        return .{ ._inner = self._inner };
     }
 };
 
@@ -731,22 +735,28 @@ pub const DictionaryAttribute = struct {
         .equal_fn = c.mlirAttributeEqual,
     });
 
-    const Self = DictionaryAttribute;
-
-    pub fn init(ctx: Context, attributes: []const NamedAttribute) Self {
-        return Self.wrap(c.mlirDictionaryAttrGet(ctx.inner(), @intCast(attributes.len), @ptrCast(attributes.ptr)));
+    pub fn init(ctx: Context, attributes: []const NamedAttribute) DictionaryAttribute {
+        return DictionaryAttribute.wrap(c.mlirDictionaryAttrGet(
+            ctx.inner(),
+            @intCast(attributes.len),
+            @ptrCast(attributes.ptr),
+        ));
     }
 
-    pub fn size(self: Self) usize {
+    pub fn size(self: DictionaryAttribute) usize {
         return @intCast(c.mlirDictionaryAttrGetNumElements(self.inner()));
     }
 
-    pub fn get(self: Self, pos: usize) NamedAttribute {
+    pub fn get(self: DictionaryAttribute, pos: usize) NamedAttribute {
         return NamedAttribute.wrap(c.mlirDictionaryAttrGetElement(self.inner(), @intCast(pos)));
     }
 
-    pub fn getByName(self: Self, name: [:0]const u8) ?NamedAttribute {
+    pub fn getByName(self: DictionaryAttribute, name: [:0]const u8) ?NamedAttribute {
         return NamedAttribute.wrapOr(c.mlirDictionaryAttrGetElementByName(self.inner(), name));
+    }
+
+    pub fn asAttr(self: DictionaryAttribute) Attribute {
+        return .{ ._inner = self._inner };
     }
 };
 
