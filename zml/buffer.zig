@@ -16,6 +16,8 @@ test {
     std.testing.refAllDecls(Buffer);
 }
 
+const log = std.log.scoped(.zml);
+
 /// Buffer is a multi-dimension array, whose memory is allocated on an accelerator.
 ///
 /// * contains a handle that the ZML runtime can use to convert into a physical address, but there is no guarantee this address is visible from the CPU.
@@ -26,23 +28,39 @@ pub const Buffer = struct {
     _api: *const pjrt.Api,
     _shards: Shards,
 
-    pub const MAX_NUM_SHARDS: u8 = 8;
+    pub const MAX_NUM_SHARDS: u8 = Platform.MAX_NUM_DEVICES;
     pub const Shards = std.BoundedArray(*pjrt.Buffer, MAX_NUM_SHARDS);
 
     /// Copies the content of the given buffer from host memory to the accelerator memory.
-    pub fn from(platform: Platform, buf: HostBuffer) !Buffer {
+    pub fn from(platform: Platform, host_buffer: HostBuffer) !Buffer {
         var res: Buffer = .{
             ._api = platform.pjrt_api,
-            ._shape = buf.shape(),
+            ._shape = host_buffer.shape(),
             ._shards = .{},
         };
 
-        for (platform.getDevices()) |dev| {
+        const sharding_ax: ?u3 = std.simd.lastTrue(host_buffer.shape()._sharding_info);
+        const n_devices: i64 = @intCast(platform.getDevices().len);
+        const chunk_size = if (sharding_ax) |ax| cs: {
+            // This kind of sharding error should be detected earlier on.
+            meta.assert(@rem(host_buffer.dim(ax), n_devices) == 0, "Buffer.from({}) expects the sharding axis {} to have a dimension divisble by the number of devices ({}).", .{ host_buffer, ax, n_devices });
+            break :cs @divExact(host_buffer.dim(ax), n_devices);
+        } else 0;
+
+        const buffer_type = bufferTypeFromDtype(host_buffer.shape().dtype());
+        const byte_strides = host_buffer.strides() orelse host_buffer.shape().computeStrides().constSlice();
+
+        for (platform.getDevices(), 0..) |dev, i| {
+            const buf = if (sharding_ax) |ax| buf: {
+                const start: i64 = @as(i64, @intCast(i)) * chunk_size;
+                break :buf host_buffer.slice1d(ax, .{ .start = start, .end = start + chunk_size });
+            } else host_buffer;
+
             const pjrt_buffer = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, .{
                 .data = buf.data,
-                .buffer_type = bufferTypeFromDtype(buf.shape().dtype()),
+                .buffer_type = buffer_type,
                 .dims = buf.shape().dims(),
-                .byte_strides = buf.strides(),
+                .byte_strides = byte_strides,
                 .device = dev,
                 .host_buffer_semantics = .ImmutableUntilTransferCompletes,
             });

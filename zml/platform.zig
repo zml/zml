@@ -6,6 +6,7 @@ const meta = @import("meta.zig");
 const module = @import("module.zig");
 const pjrt = @import("pjrtx.zig");
 const pjrt_core = @import("pjrt");
+const log = std.log.scoped(.zml);
 
 pub const Target = enum {
     cpu,
@@ -41,8 +42,14 @@ pub const Platform = struct {
     pjrt_client: *pjrt.Client,
     compilation_options: CompilationOptions = .{},
 
+    pub const MAX_NUM_DEVICES: u8 = 8;
+
     pub fn init(target: Target, api: *const pjrt.Api) !Platform {
         const pjrt_client = try pjrt.Client.init(api, &.{});
+        const true_num_devices = pjrt_client.getAddressableDevices(api).len;
+        if (true_num_devices > MAX_NUM_DEVICES) {
+            log.warn("platform {} got {} devices, but ZML only support up to {} devices. Some devices won't be used.", .{ target, true_num_devices, MAX_NUM_DEVICES });
+        }
         return .{
             .target = target,
             .pjrt_api = api,
@@ -52,7 +59,15 @@ pub const Platform = struct {
     }
 
     pub fn getDevices(self: Platform) []const *const pjrt_core.Device {
-        return self.pjrt_client.getAddressableDevices(self.pjrt_api);
+        const all_devices = self.pjrt_client.getAddressableDevices(self.pjrt_api);
+        if (all_devices.len > MAX_NUM_DEVICES) {
+            return all_devices[0..MAX_NUM_DEVICES];
+        }
+        return all_devices;
+    }
+
+    pub fn numDevices(self: Platform) u8 {
+        return @intCast(self.getDevices().len);
     }
 
     pub fn withCompilationOptions(self: Platform, opts: CompilationOptions) Platform {
