@@ -2257,7 +2257,7 @@ pub const Tensor = struct {
                 }
             }.cmp,
             self,
-            Tensor.scalar(0, self.dtype()),
+            Tensor.constant(&.{}, self.dtype().minValue()),
             &.{a},
         );
     }
@@ -2272,7 +2272,7 @@ pub const Tensor = struct {
                 }
             }.cmp,
             self,
-            Tensor.scalar(0, self.dtype()),
+            Tensor.constant(&.{}, self.dtype().maxValue()),
             &.{a},
         );
     }
