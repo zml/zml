@@ -663,3 +663,36 @@ test zip {
     const a_sum: A = try zip(Sum.call, testing.allocator, &[_]A{ a0, a1 }, .{});
     try testing.expectEqual(A{ .a = 5, .b = .{ 7, 9 } }, a_sum);
 }
+
+/// Given a func(X) -> Y or a func(Ctx, X) -> Y,
+/// finds all X in the given object, and write the result of func(X) into an arraylist.
+pub fn collect(func: anytype, func_ctx: _CollectCtx(func), out: *std.ArrayList(FnResult(func)), obj: anytype) error{OutOfMemory}!void {
+    assertComptime(@typeInfo(@TypeOf(func)).Fn.params.len <= 2, "zml.meta.collect expects a func with two arguments, got: {}", .{@TypeOf(func)});
+    const LocalContext = struct {
+        func_ctx: _CollectCtx(func),
+        out: *std.ArrayList(FnResult(func)),
+        oom: bool = false,
+    };
+    var context = LocalContext{ .func_ctx = func_ctx, .out = out };
+    visit((struct {
+        fn cb(ctx: *LocalContext, val: *const _CollectArg(func)) void {
+            if (ctx.oom) return;
+            const res = if (_CollectCtx(func) == void) func(val.*) else func(ctx.func_ctx, val.*);
+            ctx.out.append(res) catch {
+                ctx.oom = true;
+            };
+        }
+    }).cb, &context, obj);
+    if (context.oom) return error.OutOfMemory;
+}
+
+fn _CollectCtx(func: anytype) type {
+    const params = @typeInfo(@TypeOf(func)).Fn.params;
+    if (params.len == 1) return void;
+    return params[0].type orelse @compileError("anytype not supported in collect");
+}
+
+fn _CollectArg(func: anytype) type {
+    const params = @typeInfo(@TypeOf(func)).Fn.params;
+    return params[params.len - 1].type orelse @compileError("anytype not supported in collect");
+}
