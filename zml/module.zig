@@ -1060,17 +1060,21 @@ fn loadOrCompilePjrtExecutable(
 
 fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, module: mlir.Module, module_hash: u64) !*pjrt.LoadedExecutable {
     const opts = platform.compilation_options;
-    const mesh_shape = std.ArrayListUnmanaged(i64).initBuffer(@constCast(&[1]i64{platform.numDevices()}));
     var options: xla_pb.CompileOptionsProto = .{
         .executable_build_options = .{
-            .num_replicas = 1,
-            .num_partitions = if (opts.sharding_enabled)
-                @intCast(platform.getDevices().len)
-            else
-                1,
+            // Note: the XLA naming replicas/partition is confusing here.
+            // They refer to the program and not the weights.
+            // If the program is partionned across several GPUs (ie compute happens without communication),
+            // then the weights need to be replicated on each GPU.
+            // But if the program is replicated (several GPUs contribute to the same matmul)
+            // then the weights can be splitted.
+            // Since ZML API is Tensor centric, we usually understand sharding as "weights are splitted",
+            // ie, program is replicated.
+            .num_replicas = if (opts.sharding_enabled) @intCast(platform.getDevices().len) else 1,
+            .num_partitions = 1,
+            // .num_partitions = if (opts.sharding_enabled) @intCast(platform.getDevices().len) else 1,
+            // .num_replicas = 1,
             .use_spmd_partitioning = opts.sharding_enabled,
-            .use_auto_spmd_partitioning = opts.sharding_enabled,
-            .auto_spmd_partitioning_mesh_shape = mesh_shape,
         },
     };
     // Let the arena deinit, zig-protobuf deinit is very slow.

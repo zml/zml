@@ -39,7 +39,9 @@ pub const Buffer = struct {
             ._shards = .{},
         };
 
-        const sharding_ax: ?u3 = std.simd.lastTrue(host_buffer.shape()._sharding_info);
+        // We shard only on the first axis so that the chunks are still contiguous.
+        // TODO: support more advanced sharding specs
+        const sharding_ax: ?u3 = std.simd.firstTrue(host_buffer.shape()._sharding_info);
         const n_devices: i64 = @intCast(platform.getDevices().len);
         const chunk_size = if (sharding_ax) |ax| cs: {
             // This kind of sharding error should be detected earlier on.
