@@ -1932,7 +1932,7 @@ pub const Tensor = struct {
         meta.assert(coord_axes_.len > 0, "gatherValues expects 1 or more axes to operate one, received none. Example: `x.gatherValues(.a, indices, .{{}})`", .{});
         for (coord_axes_.constSlice(), 0..) |a, i| {
             if (i > 0) {
-                meta.assert(a == coord_axes_.get(i - 1) + 1, "gatherValues expects 'coord_axes' too be sequential. But {any} aren't sequential in {}", .{ coord_axes, self });
+                meta.assert(a == coord_axes_.get(i - 1) + 1, "gatherValues expects 'coord_axes' to be sequential. But {any} aren't sequential in {}", .{ coord_axes, self });
             }
         }
 
@@ -1940,14 +1940,14 @@ pub const Tensor = struct {
         var self_kind: std.BoundedArray(AxisKind, MAX_RANK) = .{};
         var indices_batch_axes: Shape.DimsArray = .{};
         for (self._shape.tags(), 0..self.rank()) |t, self_ax| {
-            const maybe_val_ax = std.mem.indexOfScalar(u3, coord_axes_.constSlice(), @intCast(self_ax));
+            const maybe_coord_ax = std.mem.indexOfScalar(u3, coord_axes_.constSlice(), @intCast(self_ax));
             if (indices._shape.hasTag(t)) |id_ax| {
                 // tag is both in self and indices -> it's a batching dim
                 // Note: tags are required for batching.
                 self_kind.appendAssumeCapacity(.batching);
                 indices_batch_axes.appendAssumeCapacity(id_ax);
-                meta.assert(maybe_val_ax == null, "gatherValues expects axes to be either batches or slices axes. Axis {s} has been found both in `axes={any}` and `indices={}`", .{ t, coord_axes, indices });
-            } else if (maybe_val_ax) |_| {
+                meta.assert(maybe_coord_ax == null, "gatherValues expects axes to appear at most twice. Axis {s} has been found both in 'self={any}', in 'coord_axes_={any}' and in 'indices={}'", .{ self._shape._tags.get(self_ax), self, coord_axes, indices });
+            } else if (maybe_coord_ax) |_| {
                 // for gatherValues we collapsed all gathered axes
                 // (contrary to gatherSlices where we collapse none)
                 self_kind.appendAssumeCapacity(.collapsed);
@@ -2251,7 +2251,7 @@ pub const Tensor = struct {
         indices_are_unique: bool = false,
 
         /// Function used to update previous value in `self` with values from `updates`.
-        /// If `update_fn` is not associative (ie the order of execution matter),
+        /// If `update_fn` is not associative (ie the order of execution matters),
         /// then you should make sure the slices don't overlap,
         /// otherwise the result will depend on the runtime scheduling
         /// of the operator which is backend specific.
@@ -2274,8 +2274,8 @@ pub const Tensor = struct {
     /// Update the given tensors, by copying `values` into self slices.
     /// The slices are chosen at runtime by interpreting indices as coordinates into `self`.
     /// * `indices` represents a set of coordinates into `self`.
-    ///   For the sake of simplifying the creation of those `indices` tensor,
-    ///   It's allowed to not mention a specific axis if the coordinate for this axis is always `0`.
+    ///   For the sake of simplifying the creation of `indices` tensor,
+    ///   it's allowed to not mention a specific axis if the coordinate for this axis is always `0`.
     ///   Similarly to `gatherValues`, the coordinates are read from the `.coord` axis, or last axis if `.coord` is not found.
     ///   The coordinates represent the "top-left" corner of the slice to extract.
     ///   `indices.dim(.coord)` must match `coord_axes.len`.

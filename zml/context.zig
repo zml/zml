@@ -49,7 +49,7 @@ pub const Context = struct {
         Context.mlir_once.call();
 
         var platforms = PlatformsMap.initFill(null);
-        var num_platform: u8 = 0;
+        var num_platforms: u8 = 0;
         var it = Context.apis.iterator();
         while (it.next()) |entry| {
             if (entry.value.*) |api| {
@@ -63,10 +63,10 @@ pub const Context = struct {
                     continue;
                 }
                 platforms.set(target, p);
-                num_platform += 1;
+                num_platforms += 1;
             }
         }
-        if (num_platform == 0) return error.NotFound;
+        if (num_platforms == 0) return error.NotFound;
         return .{
             .platforms = platforms,
         };
