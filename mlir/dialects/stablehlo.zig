@@ -288,6 +288,49 @@ fn elementTypeOrSelf(typ: mlir.Type) mlir.Type {
     } else typ;
 }
 
+pub fn scatter(
+    ctx: mlir.Context,
+    inputs: []const mlir.Value,
+    scatter_indices: []const mlir.Value,
+    updates: []const mlir.Value,
+    update_block: mlir.Block,
+    args: struct {
+        update_window_dims: []const i64,
+        inserted_window_dims: []const i64,
+        input_batching_dims: []const i64,
+        scatter_indices_batching_dims: []const i64,
+        scatter_dims_to_operand_dims: []const i64,
+        index_vector_dim: i64,
+        indices_are_sorted: bool = false,
+        unique_indices: bool = false,
+    },
+    location: mlir.Location,
+) mlir.Operation {
+    return mlir.Operation.make(
+        ctx,
+        "stablehlo.scatter",
+        .{
+            .variadic_operands = &.{ inputs, scatter_indices, updates },
+            .blocks = &.{update_block},
+            .attributes = &.{
+                .{ "scatter_dimension_numbers", ScatterDimensionNumbersAttribute.init(
+                    ctx,
+                    args.update_window_dims,
+                    args.inserted_window_dims,
+                    args.input_batching_dims,
+                    args.scatter_indices_batching_dims,
+                    args.scatter_dims_to_operand_dims,
+                    args.index_vector_dim,
+                ).asAttr() },
+                .{ "indices_are_sorted", mlir.BoolAttribute.init(ctx, args.indices_are_sorted).as(mlir.Attribute).? },
+                .{ "unique_indices", mlir.BoolAttribute.init(ctx, args.unique_indices).as(mlir.Attribute).? },
+            },
+            .result_type_inference = true,
+            .location = location,
+        },
+    );
+}
+
 pub fn iota(ctx: mlir.Context, dimension: i64, result_type: mlir.Type, location: mlir.Location) mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.iota", .{
         .operands = &.{},

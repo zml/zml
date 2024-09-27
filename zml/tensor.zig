@@ -2362,29 +2362,23 @@ pub const Tensor = struct {
         const UpdateS = ops.BlockSign(ScatterOpts.increment);
         const update_block = ctx.makeBlock(UpdateS, opts.update_fn, opts.update_fn_ctx, .{ _scalar, _scalar });
 
-        const scatter_attr = dialect.stablehlo.ScatterDimensionNumbersAttribute.init(mlir_ctx, .{
-            .update_window_dims = _collectAxes(AxisKind, up_kind, .update_window).constSlice(),
-            .inserted_window_dims = _collectAxes(AxisKind, self_kind, .inserted_window).constSlice(),
-            .input_batching_dims = _collectAxes(AxisKind, self_kind, .batching).constSlice(),
-            .scatter_indices_batching_dims = indices_batch_axes.constSlice(),
-            .scatter_dims_to_operand_dims = toI64(coord_axes_.constSlice()),
-            .index_vector_dim = index_coord_axis,
-        });
-
-        const op = mlir.Operation.make(
+        const op = dialect.stablehlo.scatter(
             mlir_ctx,
-            "stablehlo.scatter",
+            &.{self.value()},
+            &.{indices.value()},
+            &.{updates.value()},
+            update_block,
             .{
-                .variadic_operands = &.{ &.{self.value()}, &.{indices.value()}, &.{updates.value()} },
-                .blocks = &.{update_block},
-                .attributes = &.{
-                    .{ "scatter_dimension_numbers", scatter_attr.asAttr() },
-                    .{ "indices_are_sorted", mlir.BoolAttribute.init(mlir_ctx, opts.indices_are_sorted).asAttr() },
-                    .{ "unique_indices", mlir.BoolAttribute.init(mlir_ctx, opts.indices_are_unique).asAttr() },
-                },
-                .result_type_inference = true,
-                .location = mlir_ctx.location(loc),
+                .update_window_dims = _collectAxes(AxisKind, up_kind, .update_window).constSlice(),
+                .inserted_window_dims = _collectAxes(AxisKind, self_kind, .inserted_window).constSlice(),
+                .input_batching_dims = _collectAxes(AxisKind, self_kind, .batching).constSlice(),
+                .scatter_indices_batching_dims = indices_batch_axes.constSlice(),
+                .scatter_dims_to_operand_dims = toI64(coord_axes_.constSlice()),
+                .index_vector_dim = index_coord_axis,
+                .indices_are_sorted = opts.indices_are_sorted,
+                .unique_indices = opts.indices_are_unique,
             },
+            mlir_ctx.location(loc),
         );
         return _result(self._shape, op.result(0));
     }
