@@ -290,14 +290,14 @@ pub const Shape = struct {
     }
 
     fn axisFromInt(self: Shape, d: isize) u3 {
-        const rank_: i8 = self.rank();
-        if (d < 0) {
-            return @intCast(d + rank_);
+        const rk: i8 = self.rank();
+        if (d < -rk or d > rk) {
+            meta.panic("Tensor {} doesn't have dimension: {d}", .{ self, d });
         }
-        if (d > rank_) {
-            meta.panic("Tensor doesn't have dimension: {d}", .{d});
-        }
-        return @intCast(d);
+        return if (d < 0)
+            @intCast(d + rk)
+        else
+            @intCast(d);
     }
 
     fn axisFromTagMaybe(self: Shape, d: Tag) ?u3 {

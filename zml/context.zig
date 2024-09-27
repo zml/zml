@@ -49,18 +49,24 @@ pub const Context = struct {
         Context.mlir_once.call();
 
         var platforms = PlatformsMap.initFill(null);
+        var num_platforms: u8 = 0;
         var it = Context.apis.iterator();
         while (it.next()) |entry| {
             if (entry.value.*) |api| {
                 const target = entry.key;
-                const p = Platform.init(target, api) catch continue;
+                const p = Platform.init(target, api) catch |err| {
+                    log.err("Failed to load platform .{s}: {}", .{ @tagName(target), err });
+                    continue;
+                };
                 if (p.getDevices().len == 0) {
                     log.err("No device found for platform {} !", .{target});
                     continue;
                 }
                 platforms.set(target, p);
+                num_platforms += 1;
             }
         }
+        if (num_platforms == 0) return error.NotFound;
         return .{
             .platforms = platforms,
         };
@@ -121,13 +127,13 @@ pub const Context = struct {
     pub fn autoPlatform(self: *Context) Platform {
         // the last platform is the one that with the high enum number, so considered
         // to be the "best" one
-        var platform_: Platform = undefined;
+        var platform_: ?Platform = null;
         var iterator = self.platforms.iterator();
         while (iterator.next()) |entry| {
             if (entry.value.*) |p| {
                 platform_ = p;
             }
         }
-        return platform_;
+        return platform_ orelse @panic("No platform found !");
     }
 };

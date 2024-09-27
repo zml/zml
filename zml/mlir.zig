@@ -155,7 +155,7 @@ pub const ext = struct {
 
     pub const DenseIntOrFPElementsAttribute = struct {
         pub fn fromData(data: dtype.Data, result_type: mlir.Type) mlir.Attribute {
-            return switch (data.dataType()) {
+            return switch (data.dtype()) {
                 .bool => mlir.DenseIntOrFPElementsAttribute(.bool).init(result_type, data.constSlice()).as(mlir.Attribute).?,
                 .i8 => mlir.DenseIntOrFPElementsAttribute(.i8).init(result_type, data.constSlice()).as(mlir.Attribute).?,
                 .i16 => mlir.DenseIntOrFPElementsAttribute(.i16).init(result_type, data.constSlice()).as(mlir.Attribute).?,

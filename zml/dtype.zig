@@ -234,11 +234,11 @@ pub const Data = union(DataType) {
     /// If the `dtype` and `@TypeOf(value)` are incompatible
     /// or a cast from `value` to `FieldType(dtype)` would
     /// be lossy, a panic occurs.
-    pub fn init(dtype: DataType, value: anytype) Data {
+    pub fn init(dtype_: DataType, value: anytype) Data {
         const T = @TypeOf(value);
         const Ti = @typeInfo(T);
 
-        return switch (dtype) {
+        return switch (dtype_) {
             .bool => switch (Ti) {
                 .Bool => .{ .bool = value },
                 .ComptimeInt, .Int, .ComptimeFloat, .Float => .{ .bool = value != 0 },
@@ -302,7 +302,7 @@ pub const Data = union(DataType) {
         try std.testing.expectEqual(C128.init(1, 2), Data.init(.c128, C64.init(1, 2)).c128);
     }
 
-    pub fn dataType(self: Data) DataType {
+    pub fn dtype(self: Data) DataType {
         return std.meta.activeTag(self);
     }
 
@@ -327,7 +327,7 @@ pub const Data = union(DataType) {
             },
             else => {},
         }
-        std.debug.panic("Unsupported conversion {} -> {s}", .{ self.dataType(), @typeName(T) });
+        std.debug.panic("Unsupported conversion {} -> {s}", .{ self.dtype(), @typeName(T) });
     }
 };
 
