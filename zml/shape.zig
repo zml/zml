@@ -671,6 +671,8 @@ pub const Shape = struct {
 
     pub fn withSharding(self: Shape, axes_: anytype) Shape {
         var res = self;
+        // Reset sharding.
+        res._sharding_info = @splat(false);
         for (self.axes(axes_).constSlice()) |ax| {
             res._sharding_info[ax] = true;
         }
