@@ -17,6 +17,7 @@ pub const Tokenizer = struct {
     tokens: [][]const u8,
     token_lookup: std.StringHashMapUnmanaged(u32),
     special_tokens: SpecialTokens,
+    mapped_tokens: std.StringArrayHashMapUnmanaged(u32),
 
     scores: []f32,
     max_token_len: u32,
@@ -66,6 +67,7 @@ pub const Tokenizer = struct {
             .normalizer = normalizer,
             .vocab_size = vocab_size,
             .special_tokens = special_tokens,
+            .mapped_tokens = .{},
         };
     }
 
@@ -120,6 +122,57 @@ pub const Tokenizer = struct {
         return self.token_lookup.get(str);
     }
 
+    fn toHex(dst: []u8, src: []const u8, comptime case: std.fmt.Case) ![]u8 {
+        return std.fmt.bufPrint(dst, "<0x{s}>", .{switch (case) {
+            .lower => std.fmt.fmtSliceHexLower(src),
+            else => std.fmt.fmtSliceHexUpper(src),
+        }});
+    }
+
+    pub fn preprocess(self: *Tokenizer, allocator: std.mem.Allocator, raw: []const u8) ![]const u8 {
+        var out = std.ArrayList(u8).init(allocator);
+
+        var utf8 = (try std.unicode.Utf8View.init(raw)).iterator();
+        while (utf8.nextCodepointSlice()) |codepoint| {
+            // do not handle spaces (normalizer handles)
+            if (std.mem.eql(u8, codepoint, " ")) {
+                try out.appendSlice(codepoint);
+                continue;
+            }
+            // If found in `Tokenizer.lookup`, append it
+            if (self.lookup(codepoint)) |_| {
+                try out.appendSlice(codepoint);
+                continue;
+            }
+
+            const arena = self.arena_state.allocator();
+
+            // If uppercase hex representation is found, append
+            // (e.g. Huggingface models sometimes converts `\n` to `<0x0A>`).
+            var upper_buffer: [100]u8 = undefined;
+            const upper_hex = try toHex(&upper_buffer, codepoint, .upper);
+            if (self.lookup(upper_hex)) |id| {
+                try self.mapped_tokens.put(arena, codepoint, id);
+                try out.appendSlice(upper_hex);
+                continue;
+            }
+
+            // If lowercase hex representation is found, append
+            // (e.g. Huggingface models sometimes converts `\n` to `<0x0A>`).
+            var lower_buffer: [100]u8 = undefined;
+            const lower_hex = try toHex(&lower_buffer, codepoint, .lower);
+            if (self.lookup(lower_hex)) |id| {
+                try self.mapped_tokens.put(arena, codepoint, id);
+                try out.appendSlice(lower_hex);
+                continue;
+            }
+
+            // Otherwise, append the codepoint as is (will become `<unk>`).
+            try out.appendSlice(codepoint);
+        }
+        return out.toOwnedSlice();
+    }
+
     pub const EncodeOptions = struct {
         /// Should the beginning of sentence '<s>' token be added.
         add_bos: bool = true,
@@ -127,9 +180,11 @@ pub const Tokenizer = struct {
         pad_to: u32 = 0,
     };
 
-    pub fn encode(self: *const Tokenizer, allocator: std.mem.Allocator, raw: []const u8, options: EncodeOptions) ![]u32 {
+    pub fn encode(self: *Tokenizer, allocator: std.mem.Allocator, raw: []const u8, options: EncodeOptions) ![]u32 {
         // log.debug("Tokenizer.encode('{s}')", .{raw});
-        const input = if (self.normalizer) |n| try n.normalize(allocator, raw) else raw;
+        const preprocessed_raw = try self.preprocess(allocator, raw);
+        defer allocator.free(preprocessed_raw);
+        const input = if (self.normalizer) |n| try n.normalize(allocator, preprocessed_raw) else preprocessed_raw;
         defer if (self.normalizer) |_| allocator.free(input);
         // log.debug("Tokenizer.encode.normalize -> '{s}'", .{input});
 
@@ -144,7 +199,18 @@ pub const Tokenizer = struct {
         var num_tokens: usize = 0;
         var off: usize = 0;
         while (off < input.len) {
-            const utf_len = try std.unicode.utf8ByteSequenceLength(input[off]);
+            var utf_len: usize = try std.unicode.utf8ByteSequenceLength(input[off]);
+            if (utf_len == 1 and input[off] == '<') {
+                const chars_left = input[off..];
+                var mapped_tokens_iter = self.mapped_tokens.iterator();
+                while (mapped_tokens_iter.next()) |t| {
+                    const mapped_to = self.tokens[t.value_ptr.*];
+                    if (chars_left.len >= mapped_to.len and std.mem.eql(u8, mapped_to, chars_left[0..mapped_to.len])) {
+                        utf_len = mapped_to.len;
+                        break;
+                    }
+                }
+            }
             defer off += utf_len;
 
             mergeable[num_tokens] = .idk;
@@ -206,7 +272,7 @@ pub const Tokenizer = struct {
 
                             meta.assert(std.mem.eql(u8, cur_tok, input[input_off..][0..cur_tok.len]), "current token '{s}' not found in input string '{s}' !", .{ cur_tok, input[input_off..] });
                         }
-                        const concat_tokens = input[input_off..][0 .. cur_tok.len + next_tok.len];
+                        const concat_tokens = input[input_off..][0 .. cur_tok.len + if (tok_buff[i + 1] == self.special_tokens.unk) 1 else next_tok.len];
                         // Save the result
                         mergeable[i] = if (self.lookup(concat_tokens)) |tok|
                             .{ .ready = tok }
@@ -304,6 +370,11 @@ pub const Tokenizer = struct {
 
                 // don't output a space at beginning of text.
                 if (output.items.len > 0) try output.append(' ');
+            }
+
+            var tmp_buffer: [100]u8 = undefined;
+            if (std.mem.startsWith(u8, piece, "<0x") and piece[piece.len - 1] == '>') {
+                piece = try std.fmt.hexToBytes(&tmp_buffer, piece[3 .. piece.len - 1]);
             }
 
             try output.appendSlice(piece);
