@@ -71,7 +71,7 @@ pub const Shape = struct {
             return .{ dims_, tags_ };
         }
 
-        meta.compileError("Wrong type, got {}", .{T});
+        meta.compileError("expected a dimension tuple eg '.{{ .a = 10, .b = 20}}' or '.{{ 10, 20 }}', got {}", .{T});
     }
 
     test parseDimensions {
@@ -385,6 +385,9 @@ pub const Shape = struct {
                 try writer.print("{s}.{s}={d}", .{ prefix, t, d });
             } else {
                 try writer.print("{s}{d}", .{ prefix, d });
+            }
+            if (self._sharding_info[i]) {
+                try writer.writeByte('!');
             }
         }
         _ = try writer.print("}}, dtype=.{s}", .{@tagName(self.dtype())});
