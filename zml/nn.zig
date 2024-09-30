@@ -25,14 +25,6 @@ pub const Linear = struct {
     weight: Tensor,
     bias: ?Tensor = null,
 
-    pub fn postInit(self: *Linear) bool {
-        self.weight._shape = self.weight._shape.withSharding(.{-1});
-        if (self.bias) |*bias| {
-            bias._shape = bias._shape.withSharding(.{-1});
-        }
-        return true;
-    }
-
     pub fn forward(self: Linear, x: Tensor) Tensor {
         var y = x.dotGeneral(self.weight.convert(x.dtype()), &.{.{ -1, -1 }}, &.{});
         // If self.weight doesn't have tags, preserve tags from x.

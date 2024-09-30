@@ -331,10 +331,6 @@ fn _populateStruct(
                 }
             }
 
-            if (@hasDecl(T, "postInit")) {
-                // Allow postInit to mark the initialization has failed.
-                return obj.postInit();
-            }
             return true;
         },
         .Optional => |opt_info| {
