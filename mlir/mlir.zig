@@ -30,7 +30,7 @@ pub fn registerPasses(comptime passes: []const u8) void {
     @field(c, "mlirRegister" ++ passes ++ "Passes")();
 }
 
-fn successOr(res: c.MlirLogicalResult, err: anytype) !void {
+pub fn successOr(res: c.MlirLogicalResult, err: anytype) !void {
     return if (res.value == 0) err;
 }
 
