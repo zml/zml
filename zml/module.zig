@@ -649,7 +649,7 @@ fn fillBuffers(v: anytype, buffers: []const [*]*pjrt.Buffer, start: u32, len: u3
         index: u32,
         buffers: []const [*]*pjrt.Buffer,
     };
-    var capture: LocalContext = .{
+    var context: LocalContext = .{
         .index = start,
         .buffers = buffers,
     };
@@ -663,8 +663,8 @@ fn fillBuffers(v: anytype, buffers: []const [*]*pjrt.Buffer, start: u32, len: u3
             }
             ctx.index += 1;
         }
-    }).cb, &capture, v);
-    assert(capture.index == start + len);
+    }).cb, &context, v);
+    assert(context.index == start + len);
 }
 
 /// Visit the given struct and override tensors by creating a new one using the provided PJRT buffers.
