@@ -772,39 +772,47 @@ pub fn ExeWithWeights(comptime func: anytype) type {
         output_buffers: []const [*]*pjrt.Buffer,
 
         /// Internal memory slice used.
-        _data_buffer: []*pjrt.Buffer,
+        _data_buffer: []*anyopaque,
 
         /// And the allocator backing _data_buffer.
         _allocator: std.mem.Allocator,
 
         pub fn initFromModel(allocator: std.mem.Allocator, inner: BaseExe, model: Bufferized(Signature.ModelT)) !Self {
-            const n_buffers = inner.model_buffer_count + inner.args_buffer_count + inner.result_buffer_count;
-
+            const n_input_buffers = inner.model_buffer_count + inner.args_buffer_count;
+            const n_result_buffers = inner.result_buffer_count;
             const n_devices = inner.num_devices;
-            const n_ptrs = (2 + n_buffers) * inner.num_devices;
+            const n_ptrs = (1 + n_input_buffers + 1 + n_result_buffers) * n_devices;
 
-            const data_buffer = try allocator.alloc(*pjrt.Buffer, n_ptrs);
-            errdefer allocator.free(data_buffer);
+            // Allocate once for all the *pjrt.Buffer we need to store,
+            const all_buffers = try allocator.alloc(*anyopaque, n_ptrs);
+            errdefer allocator.free(all_buffers);
 
-            var fba = std.heap.FixedBufferAllocator.init(std.mem.sliceAsBytes(data_buffer));
-            const alloc = fba.allocator();
+            // then split the memory in one slice per device, and also distinguish between input/output.
+            const parts = splitBuffer(
+                *anyopaque,
+                all_buffers,
+                .{ n_devices, n_input_buffers * n_devices, n_devices, n_result_buffers * n_devices },
+            );
+            const input_buffers_per_device: [][*]*pjrt.Buffer = @ptrCast(parts[0]);
+            const all_input_buffers: []*pjrt.Buffer = @ptrCast(parts[1]);
+            const output_buffers_per_device: [][*]*pjrt.Buffer = @ptrCast(parts[2]);
+            const all_output_buffers: []*pjrt.Buffer = @ptrCast(parts[3]);
 
-            const input_buffers = alloc.alloc([*]*pjrt.Buffer, n_devices) catch unreachable;
-            for (input_buffers) |*input| {
-                input.* = (alloc.alloc(*pjrt.Buffer, inner.model_buffer_count + inner.args_buffer_count) catch unreachable).ptr;
+            for (input_buffers_per_device, 0..n_devices) |*input, i| {
+                input.* = all_input_buffers[i * n_input_buffers ..].ptr;
             }
-            fillBuffers(&model, input_buffers, 0, inner.model_buffer_count);
+            fillBuffers(&model, input_buffers_per_device, 0, inner.model_buffer_count);
 
-            const output_buffers = alloc.alloc([*]*pjrt.Buffer, n_devices) catch unreachable;
-            for (output_buffers) |*output| {
-                output.* = (alloc.alloc(*pjrt.Buffer, inner.result_buffer_count) catch unreachable).ptr;
+            for (output_buffers_per_device, 0..n_devices) |*output, i| {
+                output.* = all_output_buffers[i * n_result_buffers ..].ptr;
             }
+            // Note: all_output_buffers is left undefined, it will be written to in `call`.
 
             return .{
                 .inner = inner,
-                .input_buffers = input_buffers,
-                .output_buffers = output_buffers,
-                ._data_buffer = data_buffer,
+                .input_buffers = input_buffers_per_device,
+                .output_buffers = output_buffers_per_device,
+                ._data_buffer = all_buffers,
                 ._allocator = allocator,
             };
         }
@@ -1488,4 +1496,15 @@ fn hashArray(hasher: anytype, key: anytype, comptime strat: HashStrategy) void {
     for (key) |element| {
         hash(hasher, element, strat);
     }
+}
+
+fn splitBuffer(T: type, buffer: []T, lengths: anytype) [lengths.len][]T {
+    var res: [lengths.len][]T = undefined;
+    var i: usize = 0;
+    inline for (&res, lengths) |*r, len| {
+        r.* = buffer[i .. i + len];
+        i += len;
+    }
+    std.debug.assert(i == buffer.len);
+    return res;
 }
