@@ -363,7 +363,7 @@ pub const CompilationContext = struct {
         const mlir_ctx = self.mlirCtx();
         if (!self._platform.compilation_options.sharding_enabled) return;
 
-        const world_size = self._platform.numDevices();
+        const num_partitions = self._platform.sharding().num_partitions;
         var sharding_str: std.BoundedArray(u8, 128) = .{};
 
         const mhlo_default_layout = mlir.NamedAttribute.init(
@@ -373,7 +373,7 @@ pub const CompilationContext = struct {
         for (attributes, shapes) |*attr, shape| {
             attr.appendAssumeCapacity(mhlo_default_layout);
 
-            writeShardingRepresentation(shape, world_size, sharding_str.writer()) catch unreachable;
+            writeShardingRepresentation(shape, num_partitions, sharding_str.writer()) catch unreachable;
             defer sharding_str.len = 0;
             attr.appendAssumeCapacity(mlir.NamedAttribute.init(
                 mlir.Identifier.get(mlir_ctx, "mhlo.sharding"),
@@ -382,18 +382,18 @@ pub const CompilationContext = struct {
         }
     }
 
-    fn writeShardingRepresentation(shape: Shape, world_size: u8, writer: anytype) @TypeOf(writer).Error!void {
+    fn writeShardingRepresentation(shape: Shape, num_partitions: u8, writer: anytype) @TypeOf(writer).Error!void {
         const n_sharded: u8 = @popCount(@as(u8, @bitCast(shape._sharding_info)));
-        if (n_sharded == 0 or world_size == 1) {
+        if (n_sharded == 0 or num_partitions == 1) {
             try writer.writeAll("{replicated}");
             return;
         }
         try writer.writeAll("{devices=[");
         for (0..shape.rank()) |i| {
-            try writer.print("{d}", .{if (shape._sharding_info[i]) world_size else 1});
+            try writer.print("{d}", .{if (shape._sharding_info[i]) num_partitions else 1});
             if (i < shape.rank() - 1) try writer.writeByte(',');
         }
-        try writer.print("]<=[{d}]}}", .{world_size});
+        try writer.print("]<=[{d}]}}", .{num_partitions});
     }
 
     test writeShardingRepresentation {
@@ -859,16 +859,10 @@ fn compileInternal(
     const f = try asynk.callGeneric(CompilationContext.generateBytecode, .{ context, arena, "main", func, &model, &tensor_args, .{ .add_donations_attributes = true } });
     context._module.getBody().appendOperation(f.mlir_fn);
 
-    // All replica / no partitions.
-    const num_devices = if (context._platform.compilation_options.sharding_enabled)
-        context._platform.numDevices()
-    else
-        1;
-    if (num_devices > 1) {
-        const mlir_ctx = context._mlir_ctx;
-        context._module.op().setAttributeByName("mhlo.num_partitions", mlir.IntegerAttribute(.i32).init(mlir_ctx, 1).as(mlir.Attribute).?);
-        context._module.op().setAttributeByName("mhlo.num_replicas", mlir.IntegerAttribute(.i32).init(mlir_ctx, @intCast(num_devices)).as(mlir.Attribute).?);
-    }
+    const sharding = context._platform.sharding();
+    const mlir_ctx = context._mlir_ctx;
+    context._module.op().setAttributeByName("mhlo.num_replicas", mlir.IntegerAttribute(.i32).init(mlir_ctx, sharding.num_replicas).asAttr());
+    context._module.op().setAttributeByName("mhlo.num_partitions", mlir.IntegerAttribute(.i32).init(mlir_ctx, sharding.num_partitions).asAttr());
 
     const loaded_executable = loadOrCompilePjrtExecutable(arena, context._platform, context._module) catch |err| {
         log.err(
@@ -892,7 +886,7 @@ fn compileInternal(
         .model_buffer_count = f.n_model,
         .args_buffer_count = f.n_args,
         .result_buffer_count = @intCast(f.res_types.len),
-        .num_devices = @intCast(num_devices),
+        .num_devices = sharding.num_replicas * sharding.num_partitions,
     };
 }
 
@@ -1059,22 +1053,12 @@ fn loadOrCompilePjrtExecutable(
 }
 
 fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, module: mlir.Module, module_hash: u64) !*pjrt.LoadedExecutable {
-    const opts = platform.compilation_options;
+    const sharding = platform.sharding();
     var options: xla_pb.CompileOptionsProto = .{
         .executable_build_options = .{
-            // Note: the XLA naming replicas/partition is confusing here.
-            // They refer to the program and not the weights.
-            // If the program is partionned across several GPUs (ie compute happens without communication),
-            // then the weights need to be replicated on each GPU.
-            // But if the program is replicated (several GPUs contribute to the same matmul)
-            // then the weights can be splitted.
-            // Since ZML API is Tensor centric, we usually understand sharding as "weights are splitted",
-            // ie, program is replicated.
-            .num_replicas = if (opts.sharding_enabled) @intCast(platform.getDevices().len) else 1,
-            .num_partitions = 1,
-            // .num_partitions = if (opts.sharding_enabled) @intCast(platform.getDevices().len) else 1,
-            // .num_replicas = 1,
-            .use_spmd_partitioning = opts.sharding_enabled,
+            .num_replicas = sharding.num_replicas,
+            .num_partitions = sharding.num_partitions,
+            .use_spmd_partitioning = sharding.num_partitions > 1 or sharding.num_replicas > 1,
         },
     };
     // Let the arena deinit, zig-protobuf deinit is very slow.

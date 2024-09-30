@@ -42,7 +42,9 @@ pub fn asyncMain() !void {
     defer context.deinit();
 
     // Auto-select platform
-    const platform = context.autoPlatform();
+    const platform = context.autoPlatform().withCompilationOptions(.{
+        .sharding_enabled = true,
+    });
     {
         // List available targets
         std.debug.print("Available Platforms:\n", .{});
@@ -76,8 +78,8 @@ pub fn asyncMain() !void {
     var args = std.process.args();
     const cli_args = flags.parse(&args, CliArgs);
 
-    const input_shape = zml.Shape.init(.{ cli_args.size, cli_args.size }, cli_args.dtype);
-
+    const left_shape = zml.Shape.init(.{ cli_args.size, cli_args.size }, cli_args.dtype).withTags(.{ .m, .k }).withSharding(.{.k});
+    const right_shape = left_shape.withTags(.{ .n, .k }).withSharding(.{.k});
     var timer = try std.time.Timer.start();
 
     std.debug.print("\nCompiling model to MLIR....\n", .{});
@@ -85,7 +87,7 @@ pub fn asyncMain() !void {
     // Start compiling.
     // The shape of the input tensor, we have to pass in manually.
     timer.reset();
-    var compilation = try async_(zml.module.compileModel, .{ allocator, Benchmark{}, .forward, .{ input_shape.withTags(.{ .m, .k }), input_shape.withTags(.{ .k, .n }) }, platform });
+    var compilation = try async_(zml.module.compileModel, .{ allocator, Benchmark{}, .forward, .{ left_shape, right_shape }, platform });
 
     // Wait for compilation to finish
     const compiled = try compilation.await_();
@@ -100,9 +102,9 @@ pub fn asyncMain() !void {
     var rng = std.Random.DefaultPrng.init(0);
     const random = rng.random();
 
-    var a_buffer = try createRandomBuffer(allocator, platform, input_shape, random);
+    var a_buffer = try createRandomBuffer(allocator, platform, left_shape, random);
     defer a_buffer.deinit();
-    var b_buffer = try createRandomBuffer(allocator, platform, input_shape, random);
+    var b_buffer = try createRandomBuffer(allocator, platform, right_shape, random);
     defer b_buffer.deinit();
 
     std.debug.print("\nRunning benchmark....\n", .{});
@@ -122,6 +124,10 @@ pub fn asyncMain() !void {
     const elapsed_s = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s;
 
     std.debug.print("\n✅ Benchmark done!\n\n", .{});
+
+    const res = try result.toHostAlloc(allocator);
+    defer res.deinit(allocator);
+    std.debug.print("vals = [{}, {}, {}]", .{ res.data[0], res.data[8192 + 5], res.data[8192 * 8192 - 1] });
 
     const floating_op_count = 2 * cli_args.size * cli_args.size * cli_args.size;
     const flops = @as(f64, @floatFromInt(floating_op_count)) / elapsed_s;

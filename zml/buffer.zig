@@ -41,18 +41,21 @@ pub const Buffer = struct {
 
         // We shard only on the first axis so that the chunks are still contiguous.
         // TODO: support more advanced sharding specs
+        meta.assert(platform.sharding().num_replicas == 1, "ZML doesn't support num_replicas > 1 for now, got: {}", .{platform.sharding()});
         const sharding_ax: ?u3 = std.simd.firstTrue(host_buffer.shape()._sharding_info);
-        const n_devices: i64 = @intCast(platform.getDevices().len);
+        const n_partitions = platform.sharding().num_partitions;
         const chunk_size = if (sharding_ax) |ax| cs: {
             // This kind of sharding error should be detected earlier on.
-            meta.assert(@rem(host_buffer.dim(ax), n_devices) == 0, "Buffer.from({}) expects the sharding axis {} to have a dimension divisble by the number of devices ({}).", .{ host_buffer, ax, n_devices });
-            break :cs @divExact(host_buffer.dim(ax), n_devices);
+            meta.assert(@rem(host_buffer.dim(ax), n_partitions) == 0, "Buffer.from({}) expects the sharding axis {} to have a dimension divisble by the number of devices ({}).", .{ host_buffer, ax, n_partitions });
+            break :cs @divExact(host_buffer.dim(ax), n_partitions);
         } else 0;
 
         const buffer_type = bufferTypeFromDtype(host_buffer.shape().dtype());
         const byte_strides = host_buffer.strides() orelse host_buffer.shape().computeStrides().constSlice();
 
-        for (platform.getDevices(), 0..) |dev, i| {
+        const devices = platform.getDevices();
+        for (0..n_partitions) |i| {
+            // If no sharding if found, the given buffer is replicated on all devices.
             const buf = if (sharding_ax) |ax| buf: {
                 const start: i64 = @as(i64, @intCast(i)) * chunk_size;
                 break :buf host_buffer.slice1d(ax, .{ .start = start, .end = start + chunk_size });
@@ -63,7 +66,7 @@ pub const Buffer = struct {
                 .buffer_type = buffer_type,
                 .dims = buf.shape().dims(),
                 .byte_strides = byte_strides,
-                .device = dev,
+                .device = devices[i],
                 .host_buffer_semantics = .ImmutableUntilTransferCompletes,
             });
 

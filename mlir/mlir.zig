@@ -497,6 +497,10 @@ pub fn IntegerAttribute(comptime it: IntegerTypes) type {
         pub fn get(value: IntAttr) ZigType {
             return @intCast(getter(value.inner()));
         }
+
+        pub fn asAttr(self: IntAttr) Attribute {
+            return .{ ._inner = self._inner };
+        }
     };
 }
 
