@@ -668,6 +668,9 @@ pub const Buffer = opaque {
         const ret = api.call(.PJRT_Buffer_Dimensions, .{
             .buffer = self.inner(),
         }) catch unreachable;
+        if (ret.num_dims == 0) {
+            return &.{};
+        }
         return ret.dims[0..ret.num_dims];
     }
 
