@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const pjrt = @import("pjrt");
 
 const runfiles = @import("runfiles");
 
@@ -7,7 +8,6 @@ const xla_pb = @import("//xla:xla_proto");
 const meta = @import("meta.zig");
 const mlir = @import("mlir.zig");
 const ops = @import("ops.zig");
-const pjrt = @import("pjrtx.zig");
 const protobuf = @import("io/protobuf");
 const asynk = @import("async");
 const aio = @import("aio.zig");

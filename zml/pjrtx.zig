@@ -7,31 +7,30 @@ const dtype = @import("dtype.zig");
 const meta = @import("meta.zig");
 const asynk = @import("async");
 
-pub const Profiler = pjrt.Profiler;
-pub const ApiError = pjrt.ApiError;
-pub const ErrorCode = pjrt.ErrorCode;
-
 const Target = @import("platform.zig").Target;
 
-const log = std.log.scoped(.zml);
+pub const ApiError = pjrt.ApiError;
+const ErrorCode = pjrt.ErrorCode;
+const Profiler = pjrt.Profiler;
 
-pub const Buffer = pjrt.Buffer;
-pub const Device = pjrt.Device;
-pub const DeviceDescription = pjrt.DeviceDescription;
+const Device = pjrt.Device;
+const DeviceDescription = pjrt.DeviceDescription;
 pub const Api = pjrt.Api;
-pub const NamedValue = pjrt.NamedValue;
-pub const ClientInitError = pjrt.ClientInitError;
-pub const CompileError = std.mem.Allocator.Error || ApiError;
-pub const Error = pjrt.Error;
-pub const GetCostAnalysisError = pjrt.GetCostAnalysisError;
-pub const SerializeResult = pjrt.SerializeResult;
-pub const Executable = pjrt.Executable;
-pub const ExecuteError = ApiError;
+const NamedValue = pjrt.NamedValue;
+const ClientInitError = pjrt.ClientInitError;
+const CompileError = std.mem.Allocator.Error || pjrt.ApiError;
+const Error = pjrt.Error;
+const GetCostAnalysisError = pjrt.GetCostAnalysisError;
+const SerializeResult = pjrt.SerializeResult;
+const Executable = pjrt.Executable;
+const ExecuteError = pjrt.ApiError;
+const LoadedExecutable = pjrt.LoadedExecutable;
+
+const log = std.log.scoped(.zml);
 
 test {
     std.testing.refAllDecls(Client);
     std.testing.refAllDecls(Event);
-    std.testing.refAllDecls(LoadedExecutable);
 }
 
 fn InnerMixin(comptime innerT: type) type {
@@ -66,7 +65,8 @@ pub const Client = opaque {
     }
 
     pub const BufferFromHostBufferArgs = pjrt.Client.BufferFromHostBufferArgs;
-    pub fn bufferFromHostBuffer(self: *const Client, api: *const Api, args: BufferFromHostBufferArgs) !*Buffer {
+
+    pub fn bufferFromHostBuffer(self: *const Client, api: *const Api, args: BufferFromHostBufferArgs) !*pjrt.Buffer {
         const buffer, const event_ = try self.inner().bufferFromHostBuffer(api, args);
         const event: *Event = @ptrCast(event_);
         try event.await_(api);
@@ -74,11 +74,11 @@ pub const Client = opaque {
     }
 
     pub fn deserializeAndLoad(self: *const Client, api: *const Api, bytes: []const u8) ApiError!*LoadedExecutable {
-        return @ptrCast(try asynk.call(pjrt.Client.deserializeAndLoad, .{ self.inner(), api, bytes }));
+        return try asynk.call(pjrt.Client.deserializeAndLoad, .{ self.inner(), api, bytes });
     }
 
     pub const CreateViewOfDeviceBufferArgs = pjrt.Client.CreateViewOfDeviceBufferArgs;
-    pub fn createViewOfDeviceBuffer(self: *const Client, api: *const Api, args: CreateViewOfDeviceBufferArgs) ApiError!*Buffer {
+    pub fn createViewOfDeviceBuffer(self: *const Client, api: *const Api, args: CreateViewOfDeviceBufferArgs) ApiError!*pjrt.Buffer {
         var args_ = args;
         args_.on_delete_callback = args_.on_delete_callback orelse &(struct {
             fn call(_: ?*anyopaque, _: ?*anyopaque) callconv(.C) void {}
@@ -145,19 +145,19 @@ pub const Client = opaque {
         // Note: we may need to restore IR downgrade if we need to support old pjrt plugins.
         module.op().writeBytecode(buffer.writer());
 
-        return @ptrCast(try self.inner().compile(api, .{
+        return try self.inner().compile(api, .{
             .bytecode = buffer.items,
             .bytecode_format = .mlir,
             .compile_options_pb = compile_options_pb,
-        }));
+        });
     }
 
     fn compileSync2(self: *const Client, api: *const Api, module: []const u8, compile_options_pb: []const u8) CompileError!*LoadedExecutable {
-        return @ptrCast(try self.inner().compile(api, .{
+        return try self.inner().compile(api, .{
             .bytecode = module,
             .bytecode_format = .mlir,
             .compile_options_pb = compile_options_pb,
-        }));
+        });
     }
 
     pub fn compile(self: *const Client, api: *const Api, allocator: std.mem.Allocator, module: mlir.Module, compile_options_pb: []const u8) CompileError!*LoadedExecutable {
@@ -220,51 +220,5 @@ pub const Event = opaque {
             defer e.deinit(api);
             return e.getCode(api).toApiError();
         }
-    }
-};
-
-pub const LoadedExecutable = opaque {
-    const inner = InnerMixin(pjrt.LoadedExecutable).inner;
-
-    // pub fn deinit(self: *LoadedExecutable, api: *const Api) void {
-    //     self.inner().deinit(api);
-    // }
-
-    pub fn delete(self: *LoadedExecutable, api: *const Api) void {
-        self.inner().delete(api);
-    }
-
-    pub fn isDeleted(self: *const LoadedExecutable, api: *const Api) bool {
-        return self.inner().isDeleted(api);
-    }
-
-    // TODO fix me
-    // pub fn getAddressableDevices(self: *const LoadedExecutable, api: *const Api) []*const Device {
-    //     return self.inner().getAddressableDevices(api);
-    // }
-
-    pub fn execute(self: *const LoadedExecutable, api: *const Api, args: struct {
-        arguments: []const [*]const *const Buffer,
-        num_args: usize,
-        results: []const [*]*Buffer,
-        events: []*Event,
-        non_donatable_input_indices: []const i64 = &.{},
-    }) ExecuteError!void {
-        try self.inner().execute(api, .{
-            .num_args = args.num_args,
-            .arguments = @ptrCast(args.arguments),
-            .results = @ptrCast(args.results),
-            .events = @ptrCast(args.events),
-            .non_donatable_input_indices = args.non_donatable_input_indices,
-        });
-
-        for (args.events) |event| {
-            // TODO(Corentin): Maybe better handle the error here.
-            event.await_(api) catch return error.Unknown;
-        }
-    }
-
-    pub fn getExecutable(self: *LoadedExecutable, api: *const Api) ApiError!*Executable {
-        return try self.inner().getExecutable(api);
     }
 };
