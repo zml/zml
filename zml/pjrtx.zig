@@ -31,7 +31,7 @@ pub const ExecuteError = ApiError;
 test {
     std.testing.refAllDecls(Client);
     std.testing.refAllDecls(Event);
-    // std.testing.refAllDecls(LoadedExecutable);
+    std.testing.refAllDecls(LoadedExecutable);
 }
 
 fn InnerMixin(comptime innerT: type) type {
@@ -176,18 +176,6 @@ pub const Client = opaque {
     }
 };
 
-// pub const GpuCustomCallRegistry = struct {
-//     pub usingnamespace WrapperMixin(GpuCustomCallRegistry, pjrt.GpuCustomCallRegistry);
-
-//     inner: GpuCustomCallRegistry.UnionType,
-
-//     pub fn registerCustomCall(self: GpuCustomCallRegistry, api_version: usize, name: []const u8, func: pjrt.CustomCallSignature) ApiError!void {
-//         return switch (self.inner) {
-//             inline else => |v| v.registerCustomCall(api_version, name, func),
-//         };
-//     }
-// };
-
 pub const Event = opaque {
     pub const inner = InnerMixin(pjrt.Event).inner;
 
@@ -238,9 +226,9 @@ pub const Event = opaque {
 pub const LoadedExecutable = opaque {
     const inner = InnerMixin(pjrt.LoadedExecutable).inner;
 
-    pub fn deinit(self: *LoadedExecutable, api: *const Api) void {
-        self.inner().deinit(api);
-    }
+    // pub fn deinit(self: *LoadedExecutable, api: *const Api) void {
+    //     self.inner().deinit(api);
+    // }
 
     pub fn delete(self: *LoadedExecutable, api: *const Api) void {
         self.inner().delete(api);
@@ -250,9 +238,10 @@ pub const LoadedExecutable = opaque {
         return self.inner().isDeleted(api);
     }
 
-    pub fn getAddressableDevices(self: *const LoadedExecutable, api: *const Api) []*const Device {
-        return self.inner().getAddressableDevices(api);
-    }
+    // TODO fix me
+    // pub fn getAddressableDevices(self: *const LoadedExecutable, api: *const Api) []*const Device {
+    //     return self.inner().getAddressableDevices(api);
+    // }
 
     pub fn execute(self: *const LoadedExecutable, api: *const Api, args: struct {
         arguments: []const [*]const *const Buffer,

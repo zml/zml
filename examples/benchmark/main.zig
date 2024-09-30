@@ -79,7 +79,7 @@ pub fn asyncMain() !void {
     const cli_args = flags.parse(&args, CliArgs);
 
     const left_shape = zml.Shape.init(.{ cli_args.size, cli_args.size }, cli_args.dtype).withTags(.{ .m, .k }).withSharding(.{.k});
-    const right_shape = left_shape.withTags(.{ .n, .k }).withSharding(.{.k});
+    const right_shape = left_shape.withTags(.{ .k, .n }).withSharding(.{.k});
     var timer = try std.time.Timer.start();
 
     std.debug.print("\nCompiling model to MLIR....\n", .{});
@@ -124,10 +124,6 @@ pub fn asyncMain() !void {
     const elapsed_s = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s;
 
     std.debug.print("\n✅ Benchmark done!\n\n", .{});
-
-    const res = try result.toHostAlloc(allocator);
-    defer res.deinit(allocator);
-    std.debug.print("vals = [{}, {}, {}]", .{ res.data[0], res.data[8192 + 5], res.data[8192 * 8192 - 1] });
 
     const floating_op_count = 2 * cli_args.size * cli_args.size * cli_args.size;
     const flops = @as(f64, @floatFromInt(floating_op_count)) / elapsed_s;
