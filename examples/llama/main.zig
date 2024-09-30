@@ -36,7 +36,7 @@ pub fn generateText(
     llama: LlamaLM,
     mod_prefill: zml.module.ExeWithWeights(LlamaLM.forward),
     mod: zml.module.ExeWithWeights(LlamaLM.forward),
-    tokenizer: zml.tokenizer.Tokenizer,
+    tokenizer: *zml.tokenizer.Tokenizer,
     allocator: std.mem.Allocator,
     seed: u128,
     prompt: []const u8,
@@ -260,6 +260,6 @@ pub fn asyncMain() !void {
     log.info("✅ Prompt: {s}\n", .{prompt});
 
     const seed = cli_args.seed orelse @as(u128, @bitCast(std.time.nanoTimestamp()));
-    const story = try generateText(llama, llama_module_prefill, llama_module, tokenizer, allocator, seed, prompt);
+    const story = try generateText(llama, llama_module_prefill, llama_module, &tokenizer, allocator, seed, prompt);
     defer allocator.free(story);
 }
