@@ -256,8 +256,11 @@ pub fn asyncMain() !void {
     const compile_end = std.time.milliTimestamp();
     log.info("✅ Compiled model in {d} milliseconds! \n", .{compile_end - compile_start});
 
-    const prompt = cli_args.prompt orelse "Once upon a time, there was a little girl named Lily.";
+    const prompt = cli_args.prompt orelse "Q: What is the largest animal?\nA:";
     log.info("✅ Prompt: {s}\n", .{prompt});
+
+    std.debug.print("Tokens[61]: {any}\n", .{tokenizer.tokens[61]});
+    std.debug.print("Tokens[31871]: {any}\n", .{tokenizer.tokens[31871]});
 
     const seed = cli_args.seed orelse @as(u128, @bitCast(std.time.nanoTimestamp()));
     const story = try generateText(llama, llama_module_prefill, llama_module, tokenizer, allocator, seed, prompt);
