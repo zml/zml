@@ -330,7 +330,6 @@ fn _populateStruct(
                     }
                 }
             }
-
             return true;
         },
         .Optional => |opt_info| {

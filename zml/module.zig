@@ -990,12 +990,6 @@ fn computeModuleHash(platform: Platform, module: mlir.Module) u64 {
     const api_version = platform.pjrt_api.version();
     writer.writeInt(i64, api_version.major, .little) catch unreachable;
     writer.writeInt(i64, api_version.minor, .little) catch unreachable;
-    const opts = platform.compilation_options;
-    writer.writeByte(if (opts.sharding_enabled) 1 else 0) catch unreachable;
-    writer.writeByte(opts.sharding_axes.len) catch unreachable;
-    for (opts.sharding_axes.constSlice()) |sharding_ax| {
-        writer.print("{s}", .{sharding_ax}) catch unreachable;
-    }
 
     return hasher.final();
 }
