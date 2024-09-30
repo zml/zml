@@ -78,8 +78,8 @@ pub fn asyncMain() !void {
     var args = std.process.args();
     const cli_args = flags.parse(&args, CliArgs);
 
-    const left_shape = zml.Shape.init(.{ cli_args.size, cli_args.size }, cli_args.dtype).withTags(.{ .m, .k }).withSharding(.{.k});
-    const right_shape = left_shape.withTags(.{ .k, .n }).withSharding(.{.k});
+    const a_shape = zml.Shape.init(.{ cli_args.size, cli_args.size }, cli_args.dtype).withTags(.{ .m, .k }).withSharding(.{.k});
+    const b_shape = a_shape.withTags(.{ .k, .n }).withSharding(.{.k});
     var timer = try std.time.Timer.start();
 
     std.debug.print("\nCompiling model to MLIR....\n", .{});
@@ -87,7 +87,7 @@ pub fn asyncMain() !void {
     // Start compiling.
     // The shape of the input tensor, we have to pass in manually.
     timer.reset();
-    var compilation = try async_(zml.module.compileModel, .{ allocator, Benchmark{}, .forward, .{ left_shape, right_shape }, platform });
+    var compilation = try async_(zml.module.compileModel, .{ allocator, Benchmark{}, .forward, .{ a_shape, b_shape }, platform });
 
     // Wait for compilation to finish
     const compiled = try compilation.await_();
@@ -102,9 +102,9 @@ pub fn asyncMain() !void {
     var rng = std.Random.DefaultPrng.init(0);
     const random = rng.random();
 
-    var a_buffer = try createRandomBuffer(allocator, platform, left_shape, random);
+    var a_buffer = try createRandomBuffer(allocator, platform, a_shape, random);
     defer a_buffer.deinit();
-    var b_buffer = try createRandomBuffer(allocator, platform, right_shape, random);
+    var b_buffer = try createRandomBuffer(allocator, platform, b_shape, random);
     defer b_buffer.deinit();
 
     std.debug.print("\nRunning benchmark....\n", .{});
