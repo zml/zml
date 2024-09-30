@@ -47,13 +47,7 @@ pub fn loadTokenizerFromModelProto(allocator: std.mem.Allocator, model: sentence
     errdefer tokenizer.deinit();
 
     for (model.pieces.items) |*piece| {
-        const token = piece.piece.?.getSlice();
-        if (std.mem.startsWith(u8, token, "<0x") and std.mem.endsWith(u8, token, ">")) {
-            var buf: [4]u8 = undefined;
-            try tokenizer.addToken(piece.score.?, try std.fmt.hexToBytes(&buf, token[3 .. token.len - 1]));
-        } else {
-            try tokenizer.addToken(piece.score.?, token);
-        }
+        try tokenizer.addToken(piece.score.?, piece.piece.?.getSlice());
     }
 
     return tokenizer;

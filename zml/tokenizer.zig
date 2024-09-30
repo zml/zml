@@ -16,6 +16,7 @@ test {
 pub const Tokenizer = struct {
     tokens: [][]const u8,
     token_lookup: std.StringHashMapUnmanaged(u32),
+    fallback_lookup: std.StringHashMapUnmanaged(u32) = .{},
     special_tokens: SpecialTokens,
 
     scores: []f32,
@@ -81,18 +82,21 @@ pub const Tokenizer = struct {
         const n = try tok_reader.read(token);
         std.debug.assert(n == len);
 
-        self.addOwnedToken(score, token);
+        return self.addOwnedToken(score, token);
+    }
+
+    fn isByteFallback(token: []const u8) bool {
+        return std.mem.startsWith(u8, token, "<0x") and std.mem.endsWith(u8, token, ">");
     }
 
     /// Adds a new token (and copy it)
     pub fn addToken(self: *Tokenizer, score: f32, token: []const u8) !void {
         const arena = self.arena_state.allocator();
-
-        self.addOwnedToken(score, try arena.dupe(u8, token));
+        return self.addOwnedToken(score, try arena.dupe(u8, token));
     }
 
     /// Adds a new token (without copying it)
-    pub fn addOwnedToken(self: *Tokenizer, score: f32, token: []const u8) void {
+    pub fn addOwnedToken(self: *Tokenizer, score: f32, token: []const u8) !void {
         const i = self.next_token_id;
         std.debug.assert(i < self.vocab_size);
         self.next_token_id += 1;
@@ -102,10 +106,18 @@ pub const Tokenizer = struct {
         const v = self.token_lookup.getOrPutAssumeCapacity(token);
         if (!v.found_existing) {
             v.value_ptr.* = i;
+
+            if (isByteFallback(token)) {
+                const arena = self.arena_state.allocator();
+                var buf: [4]u8 = undefined;
+                const dupe_hex_bytes = try arena.dupe(u8, try std.fmt.hexToBytes(&buf, token[3 .. token.len - 1]));
+                try self.fallback_lookup.put(arena, dupe_hex_bytes, i);
+                self.tokens[i] = dupe_hex_bytes;
+            }
         }
     }
 
-    pub fn addOwnedTokenByIndex(self: *Tokenizer, i: u32, score: f32, token: []const u8) void {
+    pub fn addOwnedTokenByIndex(self: *Tokenizer, i: u32, score: f32, token: []const u8) !void {
         std.debug.assert(i < self.vocab_size);
         self.next_token_id += 1;
         self.scores[i] = score;
@@ -113,11 +125,23 @@ pub const Tokenizer = struct {
         const v = self.token_lookup.getOrPutAssumeCapacity(token);
         if (!v.found_existing) {
             v.value_ptr.* = @intCast(i);
+
+            if (isByteFallback(token)) {
+                const arena = self.arena_state.allocator();
+                var buf: [4]u8 = undefined;
+                const dupe_hex_bytes = try arena.dupe(u8, try std.fmt.hexToBytes(&buf, token[3 .. token.len - 1]));
+                try self.fallback_lookup.put(arena, dupe_hex_bytes, i);
+                self.tokens[i] = dupe_hex_bytes;
+            }
         }
     }
 
     fn lookup(self: *const Tokenizer, str: []const u8) ?u32 {
         return self.token_lookup.get(str);
+    }
+
+    fn lookupFallback(self: *const Tokenizer, str: []const u8) ?u32 {
+        return self.fallback_lookup.get(str);
     }
 
     pub const EncodeOptions = struct {
@@ -151,7 +175,7 @@ pub const Tokenizer = struct {
             defer num_tokens += 1;
 
             const char = input[off..][0..utf_len];
-            tok_buff[num_tokens] = self.lookup(char) orelse
+            tok_buff[num_tokens] = self.lookup(char) orelse self.lookupFallback(char) orelse
                 // TODO: split unknown token into bytes if model supports it
                 self.special_tokens.unk;
             if (tok_buff[num_tokens] == self.special_tokens.unk) {
@@ -197,7 +221,6 @@ pub const Tokenizer = struct {
                         continue;
                     },
                     .idk => {
-                        const next_tok = self.tokens[tok_buff[i + 1]];
 
                         // Special tokens can't be concatenated.
                         if (builtin.mode == .Debug and tok_buff[i] != self.special_tokens.unk) {
@@ -206,7 +229,10 @@ pub const Tokenizer = struct {
 
                             meta.assert(std.mem.eql(u8, cur_tok, input[input_off..][0..cur_tok.len]), "current token '{s}' not found in input string '{s}' !", .{ cur_tok, input[input_off..] });
                         }
-                        const concat_tokens = input[input_off..][0 .. cur_tok.len + next_tok.len];
+                        const next_tok = self.tokens[tok_buff[i + 1]];
+                        // if `next_tok` is `.unk`, length is 1; otherwise, it's the length of the token.
+                        const next_tok_len = if (tok_buff[i + 1] == self.special_tokens.unk) 1 else next_tok.len;
+                        const concat_tokens = input[input_off..][0 .. cur_tok.len + next_tok_len];
                         // Save the result
                         mergeable[i] = if (self.lookup(concat_tokens)) |tok|
                             .{ .ready = tok }
@@ -703,7 +729,8 @@ pub fn fromHfJson(allocator: std.mem.Allocator, tokenizer_path: []const u8) !Tok
     const vocab = main_object.get("model").?.object.get("vocab").?.object;
     const vocab_size: u32 = @intCast(vocab.count() + added_tokens.items.len);
 
-    // TODO not all tokenizer.json are Gpt2 encoded, detect when it's needed or not.
+    // not all tokenizer.json are Gpt2 encoded
+    // we detect when it's needed or not.
     const normalizer = Normalizer.wellKnown(.gpt2);
     var decoder = try Gpt2TextDecoder.init(allocator);
     defer decoder.deinit();
@@ -716,16 +743,53 @@ pub fn fromHfJson(allocator: std.mem.Allocator, tokenizer_path: []const u8) !Tok
     defer all_tokens.shrinkAndFree(all_tokens.items.len);
 
     var it = vocab.iterator();
+    var skip_decoding: bool = false;
     while (it.next()) |kv| {
-        const token = try decoder.decode(&all_tokens, kv.key_ptr.*);
+        const token = decoder.decode(&all_tokens, kv.key_ptr.*) catch |err| {
+            switch (err) {
+                error.InvalidInput => {
+                    skip_decoding = true;
+                    break;
+                },
+                else => return err,
+            }
+        };
         const idx: u32 = @intCast(kv.value_ptr.*.integer);
         // std.debug.assert(idx == tokenizer.next_token_id);
-        tokenizer.addOwnedTokenByIndex(idx, @floatFromInt(vocab_size - idx), token);
+        try tokenizer.addOwnedTokenByIndex(idx, @floatFromInt(vocab_size - idx), token);
+    }
+
+    // re-run if skip_token
+    if (skip_decoding) {
+        // reset tokenizer vocab token index
+        tokenizer.next_token_id = 0;
+        // reset token arena
+        all_tokens.clearRetainingCapacity();
+        it = vocab.iterator();
+        while (it.next()) |kv| {
+            const token = kv.key_ptr.*;
+            const idx: u32 = @intCast(kv.value_ptr.*.integer);
+            // std.debug.assert(idx == tokenizer.next_token_id);
+            // insert to arena
+            const start = all_tokens.items.len;
+            try all_tokens.appendSlice(token);
+            try tokenizer.addOwnedTokenByIndex(idx, @floatFromInt(vocab_size - idx), all_tokens.items[start..]);
+        }
     }
 
     for (added_tokens.items) |token_obj| {
-        const token = try decoder.decode(&all_tokens, token_obj.object.get("content").?.string);
-        tokenizer.addOwnedTokenByIndex(
+        const v = token_obj.object.get("content").?.string;
+        const token = token: {
+            if (skip_decoding) {
+                const start = all_tokens.items.len;
+                try all_tokens.appendSlice(v);
+                break :token all_tokens.items[start..];
+            } else {
+                const token = try decoder.decode(&all_tokens, v);
+                break :token token;
+            }
+        };
+        try tokenizer.addOwnedTokenByIndex(
             @intCast(token_obj.object.get("id").?.integer),
             0,
             token,
