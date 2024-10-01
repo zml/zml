@@ -102,7 +102,7 @@ pub fn getGgufTokenizer(self: zml.aio.BufferStore, allocator: std.mem.Allocator)
         tokenizer.normalizer.?.flags.add_dummy_prefix = true;
         tokenizer.normalizer.?.flags.escape_whitespaces = false;
         tokenizer.special_tokens.hard_space = tokenizer.next_token_id;
-        try tokenizer.addOwnedToken(0, " ");
+        tokenizer.addOwnedToken(0, " ");
     }
 
     return tokenizer;

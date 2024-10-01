@@ -16,7 +16,6 @@ test {
 pub const Tokenizer = struct {
     tokens: [][]const u8,
     token_lookup: std.StringHashMapUnmanaged(u32),
-    fallback_lookup: std.StringHashMapUnmanaged(u32) = .{},
     special_tokens: SpecialTokens,
 
     scores: []f32,
@@ -85,10 +84,6 @@ pub const Tokenizer = struct {
         return self.addOwnedToken(score, token);
     }
 
-    fn isByteFallback(token: []const u8) bool {
-        return std.mem.startsWith(u8, token, "<0x") and std.mem.endsWith(u8, token, ">");
-    }
-
     /// Adds a new token (and copy it)
     pub fn addToken(self: *Tokenizer, score: f32, token: []const u8) !void {
         const arena = self.arena_state.allocator();
@@ -96,7 +91,7 @@ pub const Tokenizer = struct {
     }
 
     /// Adds a new token (without copying it)
-    pub fn addOwnedToken(self: *Tokenizer, score: f32, token: []const u8) !void {
+    pub fn addOwnedToken(self: *Tokenizer, score: f32, token: []const u8) void {
         const i = self.next_token_id;
         std.debug.assert(i < self.vocab_size);
         self.next_token_id += 1;
@@ -106,18 +101,10 @@ pub const Tokenizer = struct {
         const v = self.token_lookup.getOrPutAssumeCapacity(token);
         if (!v.found_existing) {
             v.value_ptr.* = i;
-
-            if (isByteFallback(token)) {
-                const arena = self.arena_state.allocator();
-                var buf: [4]u8 = undefined;
-                const dupe_hex_bytes = try arena.dupe(u8, try std.fmt.hexToBytes(&buf, token[3 .. token.len - 1]));
-                try self.fallback_lookup.put(arena, dupe_hex_bytes, i);
-                self.tokens[i] = dupe_hex_bytes;
-            }
         }
     }
 
-    pub fn addOwnedTokenByIndex(self: *Tokenizer, i: u32, score: f32, token: []const u8) !void {
+    pub fn addOwnedTokenByIndex(self: *Tokenizer, i: u32, score: f32, token: []const u8) void {
         std.debug.assert(i < self.vocab_size);
         self.next_token_id += 1;
         self.scores[i] = score;
@@ -125,23 +112,11 @@ pub const Tokenizer = struct {
         const v = self.token_lookup.getOrPutAssumeCapacity(token);
         if (!v.found_existing) {
             v.value_ptr.* = @intCast(i);
-
-            if (isByteFallback(token)) {
-                const arena = self.arena_state.allocator();
-                var buf: [4]u8 = undefined;
-                const dupe_hex_bytes = try arena.dupe(u8, try std.fmt.hexToBytes(&buf, token[3 .. token.len - 1]));
-                try self.fallback_lookup.put(arena, dupe_hex_bytes, i);
-                self.tokens[i] = dupe_hex_bytes;
-            }
         }
     }
 
     fn lookup(self: *const Tokenizer, str: []const u8) ?u32 {
         return self.token_lookup.get(str);
-    }
-
-    fn lookupFallback(self: *const Tokenizer, str: []const u8) ?u32 {
-        return self.fallback_lookup.get(str);
     }
 
     pub const EncodeOptions = struct {
@@ -175,7 +150,7 @@ pub const Tokenizer = struct {
             defer num_tokens += 1;
 
             const char = input[off..][0..utf_len];
-            tok_buff[num_tokens] = self.lookup(char) orelse self.lookupFallback(char) orelse
+            tok_buff[num_tokens] = self.lookup(char) orelse
                 // TODO: split unknown token into bytes if model supports it
                 self.special_tokens.unk;
             if (tok_buff[num_tokens] == self.special_tokens.unk) {
@@ -729,71 +704,60 @@ pub fn fromHfJson(allocator: std.mem.Allocator, tokenizer_path: []const u8) !Tok
     const vocab = main_object.get("model").?.object.get("vocab").?.object;
     const vocab_size: u32 = @intCast(vocab.count() + added_tokens.items.len);
 
-    // not all tokenizer.json are Gpt2 encoded
-    // we detect when it's needed or not.
     const normalizer = Normalizer.wellKnown(.gpt2);
-    var decoder = try Gpt2TextDecoder.init(allocator);
-    defer decoder.deinit();
+    var gpt2_decoder = try Gpt2TextDecoder.init(allocator);
+    defer gpt2_decoder.deinit();
 
     var tokenizer = try Tokenizer.init(allocator, vocab_size, 256, normalizer, undefined, true);
 
     // Buffer containing all concatenated tokens.
     // Reserve a big chunk, to avoid grow event, but release over-allocated memory.
-    var all_tokens = try std.ArrayList(u8).initCapacity(tokenizer.arena_state.allocator(), 24 * vocab.count());
+    var all_tokens = try std.ArrayList(u8).initCapacity(tokenizer.arena_state.allocator(), 24 * vocab_size);
     defer all_tokens.shrinkAndFree(all_tokens.items.len);
 
     var it = vocab.iterator();
-    var skip_decoding: bool = false;
+    // gpt2 based tokenizer got a special way of encoding unicode.
+    // we don't know in advance if this will be used by this tokenizer or not.
+    // so we assume it is the case, but if we find some unicode character,
+    // outside of the range used by gpt2 we know it was wrong, and start over.
+    var is_gpt2_vocab: bool = true;
     while (it.next()) |kv| {
-        const token = decoder.decode(&all_tokens, kv.key_ptr.*) catch |err| {
+        const token = gpt2_decoder.decode(&all_tokens, kv.key_ptr.*) catch |err| {
             switch (err) {
                 error.InvalidInput => {
-                    skip_decoding = true;
+                    is_gpt2_vocab = false;
                     break;
                 },
                 else => return err,
             }
         };
         const idx: u32 = @intCast(kv.value_ptr.*.integer);
-        // std.debug.assert(idx == tokenizer.next_token_id);
-        try tokenizer.addOwnedTokenByIndex(idx, @floatFromInt(vocab_size - idx), token);
+        tokenizer.addOwnedTokenByIndex(idx, @floatFromInt(vocab_size - idx), token);
     }
 
-    // re-run if skip_token
-    if (skip_decoding) {
-        // reset tokenizer vocab token index
+    if (!is_gpt2_vocab) {
+        // We where wrong, this is not a gpt2 vocab, start over,
+        // and reset the tokenizer state.
         tokenizer.next_token_id = 0;
-        // reset token arena
         all_tokens.clearRetainingCapacity();
         it = vocab.iterator();
         while (it.next()) |kv| {
-            const token = kv.key_ptr.*;
             const idx: u32 = @intCast(kv.value_ptr.*.integer);
-            // std.debug.assert(idx == tokenizer.next_token_id);
-            // insert to arena
-            const start = all_tokens.items.len;
-            try all_tokens.appendSlice(token);
-            try tokenizer.addOwnedTokenByIndex(idx, @floatFromInt(vocab_size - idx), all_tokens.items[start..]);
+            const token = try dup(&all_tokens, kv.key_ptr.*);
+            tokenizer.addOwnedTokenByIndex(idx, @floatFromInt(vocab_size - idx), token);
         }
     }
 
+    // More tokens, typically added during fine tuning of the model.
     for (added_tokens.items) |token_obj| {
         const v = token_obj.object.get("content").?.string;
-        const token = token: {
-            if (skip_decoding) {
-                const start = all_tokens.items.len;
-                try all_tokens.appendSlice(v);
-                break :token all_tokens.items[start..];
-            } else {
-                const token = try decoder.decode(&all_tokens, v);
-                break :token token;
-            }
-        };
-        try tokenizer.addOwnedTokenByIndex(
-            @intCast(token_obj.object.get("id").?.integer),
-            0,
-            token,
-        );
+        const id: u32 = @intCast(token_obj.object.get("id").?.integer);
+        const token = try if (is_gpt2_vocab)
+            gpt2_decoder.decode(&all_tokens, v)
+        else
+            dup(&all_tokens, v);
+
+        tokenizer.addOwnedTokenByIndex(id, 0, token);
     }
 
     tokenizer.special_tokens = .{
@@ -802,5 +766,50 @@ pub fn fromHfJson(allocator: std.mem.Allocator, tokenizer_path: []const u8) !Tok
         .unk = tokenizer.lookup("<unk>") orelse std.math.maxInt(u32),
     };
 
+    if (main_object.get("model").?.object.get("byte_fallback")) |byte_fallback| {
+        if (byte_fallback) {
+            try rewriteByteFallbackTokens(&tokenizer, &all_tokens);
+        }
+    }
     return tokenizer;
+}
+
+/// Some tokenizers have bytes encoded in hex like this: "<0x40>".
+/// This break the tokenization algorithm because the input text
+/// will contain "@" not "<0x40>",
+/// and if the input contains "<0x40>" it needs to not be treated as a single byte.
+/// So we replace byte fallbacks strings, by their corresponding character.
+/// This enables the normal tokenization algorithm to work.
+fn rewriteByteFallbackTokens(tokenizer: *Tokenizer, all_tokens: *std.ArrayList(u8)) !void {
+    var byte_fallback_buf = "<0x00>".*;
+
+    for (0..256) |c_usize| {
+        const c: u8 = @truncate(c_usize);
+
+        // First lookup the byte fallback entry.
+        // Note: we assume upper case, but we could try both upper and lower case if needed.
+        _ = std.fmt.bufPrintIntToSlice(byte_fallback_buf[3..5], c, 16, .upper, .{ .fill = '0', .width = 2 });
+        const entry = tokenizer.token_lookup.getEntry(&byte_fallback_buf) orelse {
+            log.err("Tokenizer has \"byte_fallback\" = true, but doesn't contains the byte fallback token {s}", .{byte_fallback_buf});
+            return error.InvalidInput;
+        };
+
+        // Check if the character is already present in the vocab.
+        // In that case, nothing to do,
+        // but note that the fallback token will be "unreachable",
+        // ie there is no way the tokenizer can produce it.
+        if (tokenizer.token_lookup.get(&.{c})) |_| continue;
+
+        const idx: u32 = entry.value_ptr.*;
+        const single_byte_token = try dup(all_tokens, &.{c});
+        tokenizer.token_lookup.removeByPtr(entry.key_ptr);
+        tokenizer.addOwnedTokenByIndex(idx, tokenizer.scores[idx], single_byte_token);
+    }
+}
+
+/// Returns a copy of the given string, stored inside the given ArrayList.
+fn dup(buffer: *std.ArrayList(u8), str: []const u8) ![]const u8 {
+    const n = buffer.items.len;
+    try buffer.appendSlice(str);
+    return buffer.items[n..];
 }
