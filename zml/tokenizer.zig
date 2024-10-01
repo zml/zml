@@ -819,6 +819,7 @@ pub fn fromHfJson(allocator: std.mem.Allocator, tokenizer_path: []const u8) !Tok
         // We where wrong, this is not a gpt2 vocab, start over,
         // and reset the tokenizer state.
         tokenizer.next_token_id = 0;
+        tokenizer.token_lookup.clearRetainingCapacity();
         all_tokens.clearRetainingCapacity();
         it = vocab.iterator();
         while (it.next()) |kv| {
