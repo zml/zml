@@ -146,15 +146,12 @@ pub const Tokenizer = struct {
 
         var num_tokens: usize = 0;
         var it: CharTokenIterator = .{ .input = input };
-        while (it.nextCodepointToken(self)) |token| : (num_tokens += 1) {
+        while (try it.nextCodepointToken(self)) |token| : (num_tokens += 1) {
             tok_buff[num_tokens] = token;
             mergeable[num_tokens] = if (token == self.special_tokens.hard_space)
                 .hard_space
             else
                 .idk;
-        } else |exit| switch (exit) {
-            error.Success => {},
-            else => |err| return err,
         }
 
         var stable_prefix: usize = 0;
@@ -307,6 +304,41 @@ pub const Tokenizer = struct {
             if (opts.sep.len > 0) try output.appendSlice(opts.sep);
         }
     }
+
+    /// Some tokenizers have bytes encoded in hex like this: "<0x40>".
+    /// This break the tokenization algorithm because the input text
+    /// will contain "@" not "<0x40>",
+    /// and if the input contains "<0x40>" it needs to not be treated as a single byte.
+    /// So we replace byte fallbacks strings, by their corresponding character.
+    /// This enables the normal tokenization algorithm to work.
+    pub fn rewriteByteFallbackTokens(tokenizer: *Tokenizer) !void {
+        tokenizer.byte_fallback = true;
+        var single_bytes = try tokenizer.arena_state.allocator().alloc(u8, 256);
+        var byte_fallback_buf = "<0x00>".*;
+
+        for (0..256) |i| {
+            const c: u8 = @truncate(i);
+            single_bytes[i] = c;
+
+            // First lookup the byte fallback entry.
+            // Note: we assume upper case, but we could try both upper and lower case if needed.
+            _ = std.fmt.bufPrintIntToSlice(byte_fallback_buf[3..5], c, 16, .upper, .{ .fill = '0', .width = 2 });
+            const entry = tokenizer.token_lookup.getEntry(&byte_fallback_buf) orelse {
+                log.err("Tokenizer has \"byte_fallback\" = true, but doesn't contains the byte fallback token {s}", .{byte_fallback_buf});
+                return error.InvalidInput;
+            };
+
+            // Check if the character is already present in the vocab.
+            // In that case, nothing to do,
+            // but note that the fallback token will be "unreachable",
+            // ie there is no way the tokenizer can produce it.
+            if (tokenizer.token_lookup.get(&.{c})) |_| continue;
+
+            const idx: u32 = entry.value_ptr.*;
+            tokenizer.token_lookup.removeByPtr(entry.key_ptr);
+            tokenizer.addOwnedTokenByIndex(idx, tokenizer.scores[idx], single_bytes[i .. i + 1]);
+        }
+    }
 };
 
 test Tokenizer {
@@ -338,8 +370,8 @@ const CharTokenIterator = struct {
     state: union(enum) { by_codepoint, by_byte: u8 } = .by_codepoint,
     input: []const u8,
 
-    fn nextCodepointToken(self: *CharTokenIterator, tokenizer: *const Tokenizer) error{ TruncatedInput, Utf8InvalidStartByte, Success }!u32 {
-        if (self.input.len == 0) return error.Success;
+    fn nextCodepointToken(self: *CharTokenIterator, tokenizer: *const Tokenizer) error{ TruncatedInput, Utf8InvalidStartByte }!?u32 {
+        if (self.input.len == 0) return null;
         return switch (self.state) {
             .by_byte => |*byte_left| {
                 const idx = tokenizer.lookup(self.input[0..1]) orelse {
@@ -396,9 +428,9 @@ test CharTokenIterator {
         tokenizer.byte_fallback = false;
         var it: CharTokenIterator = .{ .input = "ζℳL" };
         var res: std.BoundedArray(u32, 8) = .{};
-        while (it.nextCodepointToken(&tokenizer)) |token| {
+        while (try it.nextCodepointToken(&tokenizer)) |token| {
             res.appendAssumeCapacity(token);
-        } else |_| {}
+        }
         try std.testing.expectEqualSlices(u32, &[_]u32{ 3, 0, 7 }, res.constSlice());
     }
 
@@ -407,9 +439,9 @@ test CharTokenIterator {
         tokenizer.byte_fallback = true;
         var it: CharTokenIterator = .{ .input = "ζℳL" };
         var res: std.BoundedArray(u32, 8) = .{};
-        while (it.nextCodepointToken(&tokenizer)) |token| {
+        while (try it.nextCodepointToken(&tokenizer)) |token| {
             res.appendAssumeCapacity(token);
-        } else |_| {}
+        }
         try std.testing.expectEqualSlices(u32, &[_]u32{ 3, 4, 5, 6, 7 }, res.constSlice());
     }
 }
@@ -789,11 +821,17 @@ pub fn fromHfJson(allocator: std.mem.Allocator, tokenizer_path: []const u8) !Tok
     defer gpt2_decoder.deinit();
 
     var tokenizer = try Tokenizer.init(allocator, vocab_size, 256, normalizer, undefined, true);
+    errdefer tokenizer.deinit();
 
     // Buffer containing all concatenated tokens.
     // Reserve a big chunk, to avoid grow event, but release over-allocated memory.
-    var all_tokens = try std.ArrayList(u8).initCapacity(tokenizer.arena_state.allocator(), 24 * vocab_size);
-    defer all_tokens.shrinkAndFree(all_tokens.items.len);
+    var all_tokens = try std.ArrayList(u8).initCapacity(tokenizer.arena_state.allocator(), file_content.len);
+    const original_alloc = all_tokens.items.ptr;
+    // A re-alloc event here means we have invalidated all slices inside the tokenizer.
+    // If this is too annoying we could switch to a custom type instead of slices.
+    defer {
+        std.debug.assert(all_tokens.items.ptr == original_alloc);
+    }
 
     var it = vocab.iterator();
     // gpt2 based tokenizer got a special way of encoding unicode.
@@ -840,6 +878,8 @@ pub fn fromHfJson(allocator: std.mem.Allocator, tokenizer_path: []const u8) !Tok
 
         tokenizer.addOwnedTokenByIndex(id, 0, token);
     }
+    // We won't add more tokens here, let release.
+    all_tokens.shrinkAndFree(all_tokens.items.len);
 
     tokenizer.special_tokens = .{
         .bos = tokenizer.lookup("<s>") orelse tokenizer.lookup("<|begin_of_text|>") orelse @panic("bos token not found !"),
@@ -849,44 +889,10 @@ pub fn fromHfJson(allocator: std.mem.Allocator, tokenizer_path: []const u8) !Tok
 
     if (main_object.get("model").?.object.get("byte_fallback")) |byte_fallback| {
         if (byte_fallback == .bool and byte_fallback.bool) {
-            try rewriteByteFallbackTokens(&tokenizer, &all_tokens);
+            try tokenizer.rewriteByteFallbackTokens();
         }
     }
     return tokenizer;
-}
-
-/// Some tokenizers have bytes encoded in hex like this: "<0x40>".
-/// This break the tokenization algorithm because the input text
-/// will contain "@" not "<0x40>",
-/// and if the input contains "<0x40>" it needs to not be treated as a single byte.
-/// So we replace byte fallbacks strings, by their corresponding character.
-/// This enables the normal tokenization algorithm to work.
-fn rewriteByteFallbackTokens(tokenizer: *Tokenizer, all_tokens: *std.ArrayList(u8)) !void {
-    tokenizer.byte_fallback = true;
-    var byte_fallback_buf = "<0x00>".*;
-
-    for (0..256) |c_usize| {
-        const c: u8 = @truncate(c_usize);
-
-        // First lookup the byte fallback entry.
-        // Note: we assume upper case, but we could try both upper and lower case if needed.
-        _ = std.fmt.bufPrintIntToSlice(byte_fallback_buf[3..5], c, 16, .upper, .{ .fill = '0', .width = 2 });
-        const entry = tokenizer.token_lookup.getEntry(&byte_fallback_buf) orelse {
-            log.err("Tokenizer has \"byte_fallback\" = true, but doesn't contains the byte fallback token {s}", .{byte_fallback_buf});
-            return error.InvalidInput;
-        };
-
-        // Check if the character is already present in the vocab.
-        // In that case, nothing to do,
-        // but note that the fallback token will be "unreachable",
-        // ie there is no way the tokenizer can produce it.
-        if (tokenizer.token_lookup.get(&.{c})) |_| continue;
-
-        const idx: u32 = entry.value_ptr.*;
-        const single_byte_token = try dup(all_tokens, &.{c});
-        tokenizer.token_lookup.removeByPtr(entry.key_ptr);
-        tokenizer.addOwnedTokenByIndex(idx, tokenizer.scores[idx], single_byte_token);
-    }
 }
 
 /// Returns a copy of the given string, stored inside the given ArrayList.
