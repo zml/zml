@@ -107,6 +107,7 @@ pub const Tokenizer = struct {
         if (!v.found_existing) {
             v.value_ptr.* = i;
 
+
             if (isByteFallback(token)) {
                 const arena = self.arena_state.allocator();
                 var buf: [4]u8 = undefined;
@@ -765,6 +766,8 @@ pub fn fromHfJson(allocator: std.mem.Allocator, tokenizer_path: []const u8) !Tok
         tokenizer.next_token_id = 0;
         // reset token arena
         all_tokens.clearRetainingCapacity();
+        tokenizer.token_lookup.clearRetainingCapacity();
+        tokenizer.fallback_lookup.clearRetainingCapacity();
         it = vocab.iterator();
         while (it.next()) |kv| {
             const token = kv.key_ptr.*;
