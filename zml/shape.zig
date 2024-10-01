@@ -23,12 +23,14 @@ pub const Shape = struct {
     pub const DimsArray = std.BoundedArray(i64, MAX_RANK);
     pub const TagsArray = std.BoundedArray(Tag, MAX_RANK);
     pub const AxesArray = std.BoundedArray(u3, MAX_RANK);
+    pub const ShardingInfo = @Vector(MAX_RANK, bool);
 
     const UnknownTags: TagsArray = .{ .len = 0, .buffer = [_]Tag{TagUnknown} ** MAX_RANK };
 
     _dtype: DataType,
     _dims: DimsArray = .{},
     _tags: TagsArray = UnknownTags,
+    _sharding_info: ShardingInfo = @splat(false),
 
     pub fn parseDimensions(v: anytype) struct { DimsArray, TagsArray } {
         const T = @TypeOf(v);
@@ -69,7 +71,7 @@ pub const Shape = struct {
             return .{ dims_, tags_ };
         }
 
-        meta.compileError("Wrong type, got {}", .{T});
+        meta.compileError("expected a dimension tuple eg '.{{ .a = 10, .b = 20}}' or '.{{ 10, 20 }}', got {}", .{T});
     }
 
     test parseDimensions {
@@ -286,7 +288,7 @@ pub const Shape = struct {
             return res;
         }
 
-        meta.compileError("Wrong type, got {}", .{T});
+        meta.compileError("axes expects an int-tuple or a tuple of enum literal, got {}", .{T});
     }
 
     fn axisFromInt(self: Shape, d: isize) u3 {
@@ -383,6 +385,9 @@ pub const Shape = struct {
                 try writer.print("{s}.{s}={d}", .{ prefix, t, d });
             } else {
                 try writer.print("{s}{d}", .{ prefix, d });
+            }
+            if (self._sharding_info[i]) {
+                try writer.writeByte('!');
             }
         }
         _ = try writer.print("}}, dtype=.{s}", .{@tagName(self.dtype())});
@@ -664,6 +669,16 @@ pub const Shape = struct {
         return res;
     }
 
+    pub fn withSharding(self: Shape, axes_: anytype) Shape {
+        var res = self;
+        // Reset sharding.
+        res._sharding_info = @splat(false);
+        for (self.axes(axes_).constSlice()) |ax| {
+            res._sharding_info[ax] = true;
+        }
+        return res;
+    }
+
     /// Renames some of the tags in this shape.
     /// Shape.init(.{ .a = 10, .b = 20 }).rename(.{ .b = .batch }); // .{ .a = 10, .batch = 20 };
     pub fn rename(self: Shape, renames: anytype) Shape {
@@ -690,7 +705,8 @@ pub const Shape = struct {
         }
     }
 
-    pub fn computeStrides(self: Shape, base_stride: u32) std.BoundedArray(i64, MAX_RANK) {
+    pub fn computeStrides(self: Shape) std.BoundedArray(i64, MAX_RANK) {
+        const base_stride = self.dtype().sizeOf();
         const rk = self.rank();
         var strides: std.BoundedArray(i64, MAX_RANK) = .{ .len = @intCast(self.rank()) };
         if (rk == 0) return strides;

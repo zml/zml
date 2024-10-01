@@ -159,6 +159,12 @@ pub const Tensor = struct {
         return res;
     }
 
+    pub fn withSharding(self: Tensor, axes_: anytype) Tensor {
+        var res = self;
+        res._shape = self._shape.withSharding(axes_);
+        return res;
+    }
+
     /// Returns a Tensor with new tag names.
     pub fn rename(self: Tensor, renames: anytype) Tensor {
         var res = self;
@@ -194,11 +200,6 @@ pub const Tensor = struct {
         res._donation = self.getContext().getValueAndDonation(origin)[1];
 
         return res;
-    }
-
-    /// Returns a slice containing the strides for a Tensor.
-    pub inline fn computeStrides(self: Tensor) []const i64 {
-        return self._shape.computeStrides(self.dtype().sizeOf()).constSlice();
     }
 
     var _global_tensor_counter: u64 = 0;

@@ -3,7 +3,6 @@ const testing = std.testing;
 
 const meta = @import("meta.zig");
 const pjrt = @import("pjrt");
-const pjrtx = @import("pjrtx.zig");
 
 const Context = @import("context.zig").Context;
 const Data = @import("dtype.zig").Data;
@@ -13,8 +12,11 @@ const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
 
 test {
+    std.testing.refAllDecls(@This());
     std.testing.refAllDecls(Buffer);
 }
+
+const log = std.log.scoped(.zml);
 
 /// Buffer is a multi-dimension array, whose memory is allocated on an accelerator.
 ///
@@ -23,33 +25,70 @@ test {
 /// * can be created by calling `HostBuffer.toDevice(platform)`.
 pub const Buffer = struct {
     _shape: Shape,
-    _shards: Shape = undefined,
-    _platform: Platform,
-    _data: *pjrtx.Buffer,
+    _api: *const pjrt.Api,
+    _shards: Shards,
+
+    pub const MAX_NUM_SHARDS: u8 = Platform.MAX_NUM_DEVICES;
+    pub const Shards = std.BoundedArray(*pjrt.Buffer, MAX_NUM_SHARDS);
 
     /// Copies the content of the given buffer from host memory to the accelerator memory.
-    pub fn from(platform: Platform, buf: HostBuffer) !Buffer {
-        const pjrt_buffer = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, .{
-            .data = buf.data,
-            .buffer_type = pjrtx.Buffer.BufferTypeFromDType(buf.shape().dtype()),
-            .dims = buf.shape().dims(),
-            .byte_strides = buf.strides(),
-            .device = platform.getDevices()[0],
-            .host_buffer_semantics = .ImmutableUntilTransferCompletes,
-        });
-        return .{
-            ._platform = platform,
-            ._shape = buf.shape(),
-            ._data = pjrt_buffer,
+    pub fn from(platform: Platform, host_buffer: HostBuffer) !Buffer {
+        var res: Buffer = .{
+            ._api = platform.pjrt_api,
+            ._shape = host_buffer.shape(),
+            ._shards = .{},
         };
+
+        // We shard only on the first axis so that the chunks are still contiguous.
+        // TODO: support more advanced sharding specs
+        meta.assert(platform.sharding().num_replicas == 1, "ZML doesn't support num_replicas > 1 for now, got: {}", .{platform.sharding()});
+        const sharding_ax: ?u3 = std.simd.firstTrue(host_buffer.shape()._sharding_info);
+        const n_partitions = platform.sharding().num_partitions;
+        const chunk_size = if (sharding_ax) |ax| cs: {
+            // This kind of sharding error should be detected earlier on.
+            meta.assert(@rem(host_buffer.dim(ax), n_partitions) == 0, "Buffer.from({}) expects the sharding axis {} to have a dimension divisble by the number of devices ({}).", .{ host_buffer, ax, n_partitions });
+            break :cs @divExact(host_buffer.dim(ax), n_partitions);
+        } else 0;
+
+        const buffer_type = bufferTypeFromDtype(host_buffer.shape().dtype());
+        const byte_strides = host_buffer.strides() orelse host_buffer.shape().computeStrides().constSlice();
+
+        const devices = platform.getDevices();
+        for (0..n_partitions) |i| {
+            // If no sharding if found, the given buffer is replicated on all devices.
+            const buf = if (sharding_ax) |ax| buf: {
+                const start: i64 = @as(i64, @intCast(i)) * chunk_size;
+                break :buf host_buffer.slice1d(ax, .{ .start = start, .end = start + chunk_size });
+            } else host_buffer;
+
+            const pjrt_buffer = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, .{
+                .data = buf.data,
+                .buffer_type = buffer_type,
+                .dims = buf.shape().dims(),
+                .byte_strides = byte_strides,
+                .device = devices[i],
+                .host_buffer_semantics = .ImmutableUntilTransferCompletes,
+            });
+
+            res._shards.appendAssumeCapacity(pjrt_buffer);
+        }
+        return res;
     }
 
-    /// Wraps a pre-exisiting `pjrt.Buffer` into a `zml.Buffer`.
-    pub fn fromPjrtBuffer(platform: Platform, pjrt_buffer: *pjrtx.Buffer) Buffer {
+    /// Wraps pre-exisiting `pjrt.Buffer` shards into one `zml.Buffer`.
+    pub fn fromPjrtBuffers(platform: Platform, pjrt_buffers: []const *pjrt.Buffer) Buffer {
+        meta.assert(pjrt_buffers.len <= MAX_NUM_SHARDS, "ZML doesn't support having more than {} shards. Received {} shards for one buffer.", .{ MAX_NUM_SHARDS, pjrt_buffers.len });
+        meta.assert(pjrt_buffers.len > 0, "fromPjrtBuffers expects at least one buffer, got 0.", .{});
+        var shards: Shards = .{};
+        shards.appendSliceAssumeCapacity(pjrt_buffers);
         return .{
-            ._platform = platform,
-            ._shape = _shapeFromPjrtBuffer(platform, pjrt_buffer),
-            ._data = pjrt_buffer,
+            ._api = platform.pjrt_api,
+            ._shape = Shape.init(
+                // This isn't with sharded axes.
+                pjrt_buffers[0].getDimensions(platform.pjrt_api),
+                dtypeFromBufferType(pjrt_buffers[0].getElementType(platform.pjrt_api)),
+            ),
+            ._shards = shards,
         };
     }
 
@@ -112,8 +151,9 @@ pub const Buffer = struct {
 
         const pjrt_buffer = try platform.pjrt_client.createViewOfDeviceBuffer(platform.pjrt_api, .{
             .data = buf.data,
-            .element_type = pjrtx.Buffer.BufferTypeFromDType(buf.shape().dtype()),
+            .element_type = bufferTypeFromDtype(buf.shape().dtype()),
             .dims = buf.shape().dims(),
+            // TODO: split in shards
             .device = platform.getDevices()[0],
             .layout = .{
                 .Tiled = .{
@@ -124,10 +164,12 @@ pub const Buffer = struct {
             },
         });
 
+        var shards: Shards = .{};
+        shards.appendAssumeCapacity(pjrt_buffer);
         return .{
-            ._platform = platform,
+            ._api = platform.pjrt_api,
             ._shape = buf.shape(),
-            ._data = pjrt_buffer,
+            ._shards = shards,
         };
     }
 
@@ -135,7 +177,9 @@ pub const Buffer = struct {
     pub fn getValue(self: Buffer, T: type) !T {
         meta.assert(self._shape.byteSize() == @sizeOf(T), "Buffer {} has {d} bytes of data, can't load it to a {s} with {d} bytes", .{ self, self._shape.byteSize(), @typeName(T), @sizeOf(T) });
         var res: T = undefined;
-        try self._data.toHostBuffer(self._platform.pjrt_api, std.mem.asBytes(&res));
+        meta.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
+        const event = try self._shards.get(0).toHostBuffer(self._api, std.mem.asBytes(&res));
+        try event.await_(self._api);
         return res;
     }
 
@@ -143,7 +187,9 @@ pub const Buffer = struct {
     /// and return a new `HostBuffer` object with the same shape.
     /// The returned `HostBuffer` doesn't own the memory.
     pub fn toHost(self: Buffer, output: []u8) !HostBuffer {
-        try self._data.toHostBuffer(self._platform.pjrt_api, output);
+        meta.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
+        const event = try self._shards.get(0).toHostBuffer(self._api, output);
+        try event.await_(self._api);
         return HostBuffer.fromBytes(self.shape(), output);
     }
 
@@ -151,7 +197,9 @@ pub const Buffer = struct {
     /// The returned `HostBuffer` does own the memory.
     pub fn toHostAlloc(self: Buffer, allocator: std.mem.Allocator) !HostBuffer {
         const output = try HostBuffer.empty(allocator, self.shape());
-        try self._data.toHostBuffer(self._platform.pjrt_api, @constCast(output.data));
+        meta.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
+        const event = try self._shards.get(0).toHostBuffer(self._api, @constCast(output.data));
+        try event.await_(self._api);
         return output;
     }
 
@@ -159,7 +207,9 @@ pub const Buffer = struct {
     /// Depending on the platform, the memory is typically not released to the OS
     /// but just marked as available in the memory pool.
     pub fn deinit(self: *const Buffer) void {
-        self._data.deinit(self._platform.pjrt_api);
+        for (self._shards.constSlice()) |buffer| {
+            buffer.deinit(self._api);
+        }
     }
 
     /// This Buffer shape.
@@ -202,34 +252,76 @@ pub const Buffer = struct {
         try writer.print("Buffer({_})", .{self._shape});
     }
 
-    fn _shapeFromPjrtBuffer(platform: Platform, buf: *pjrtx.Buffer) Shape {
-        const dt: DataType = switch (buf.getElementType(platform.pjrt_api)) {
-            // Please keep the list exhaustive and in the same order than in DataType.
-            .PRED => .bool,
-            .F8E4M3B11FNUZ => .f8e4m3b11fnuz,
-            .F8E4M3FN => .f8e4m3fn,
-            .F8E4M3FNUZ => .f8e4m3fnuz,
-            .F8E5M2 => .f8e5m2,
-            .F8E5M2FNUZ => .f8e5m2fnuz,
-            .BF16 => .bf16,
-            .F16 => .f16,
-            .F32 => .f32,
-            .F64 => .f64,
-            .S4 => .i4,
-            .S8 => .i8,
-            .S16 => .i16,
-            .S32 => .i32,
-            .S64 => .i64,
-            .U4 => .u4,
-            .U8 => .u8,
-            .U16 => .u16,
-            .U32 => .u32,
-            .U64 => .u64,
-            .C64 => .c64,
-            .C128 => .c128,
-            .INVALID => @panic("Can't handle INVALID Pjrt buffers."),
-        };
-
-        return Shape.init(buf.getDimensions(platform.pjrt_api), dt);
+    fn hasShardedAxis(self: Buffer) bool {
+        if (self._shards.len == 1) return false;
+        return @reduce(.Or, self._shape._sharding_info);
     }
 };
+
+pub fn bufferTypeFromDtype(dt: DataType) pjrt.BufferType {
+    return switch (dt) {
+        .bool => .PRED,
+        .f8e4m3b11fnuz => .F8E4M3B11FNUZ,
+        .f8e4m3fn => .F8E4M3FN,
+        .f8e4m3fnuz => .F8E4M3FNUZ,
+        .f8e5m2 => .F8E5M2,
+        .f8e5m2fnuz => .F8E5M2FNUZ,
+        .bf16 => .BF16,
+        .f16 => .F16,
+        .f32 => .F32,
+        .f64 => .F64,
+        .i8 => .S8,
+        .i4 => .S4,
+        .i16 => .S16,
+        .i32 => .S32,
+        .i64 => .S64,
+        .u4 => .U4,
+        .u8 => .U8,
+        .u16 => .U16,
+        .u32 => .U32,
+        .u64 => .U64,
+        .c64 => .C64,
+        .c128 => .C128,
+    };
+}
+
+pub fn dtypeFromBufferType(pjrt_type: pjrt.BufferType) DataType {
+    return switch (pjrt_type) {
+        .PRED => .bool,
+        .F8E4M3B11FNUZ => .f8e4m3b11fnuz,
+        .F8E4M3FN => .f8e4m3fn,
+        .F8E4M3FNUZ => .f8e4m3fnuz,
+        .F8E5M2 => .f8e5m2,
+        .F8E5M2FNUZ => .f8e5m2fnuz,
+        .BF16 => .bf16,
+        .F16 => .f16,
+        .F32 => .f32,
+        .F64 => .f64,
+        .S8 => .i8,
+        .S4 => .i4,
+        .S16 => .i16,
+        .S32 => .i32,
+        .S64 => .i64,
+        .U4 => .u4,
+        .U8 => .u8,
+        .U16 => .u16,
+        .U32 => .u32,
+        .U64 => .u64,
+        .C64 => .c64,
+        .C128 => .c128,
+        .INVALID => @panic("Found an invalid pjrt buffer"),
+    };
+}
+
+test bufferTypeFromDtype {
+    inline for (@typeInfo(DataType).Enum.fields) |field| {
+        const dt: DataType = @enumFromInt(field.value);
+        try std.testing.expectEqual(dt, dtypeFromBufferType(bufferTypeFromDtype(dt)));
+    }
+
+    inline for (@typeInfo(pjrt.BufferType).Enum.fields) |field| {
+        const dt: pjrt.BufferType = @enumFromInt(field.value);
+        if (dt == .INVALID) continue;
+        try std.testing.expectEqual(dt, bufferTypeFromDtype(dtypeFromBufferType(dt)));
+    }
+}

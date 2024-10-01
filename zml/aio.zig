@@ -398,7 +398,12 @@ pub fn loadModelBuffers(
 ) !zml.Bufferized(Model) {
     return try loadModelBuffersWithPrefix(Model, model, buffer_store, allocator, platform, "");
 }
-
+/// Creates a bufferized version of a Model from the given BufferStore and the given prefix.
+/// For details about bufferization, see the documentation of Bufferized(T).
+///
+/// This will represent the weights of the model, loaded on a specific platform.
+/// It can be used with a `module.Exe` (a compiled version of the same Model), to make a
+/// `module.ExeWithWeights` ready to be called.
 pub fn loadModelBuffersWithPrefix(
     comptime Model: type,
     model: Model,
@@ -408,44 +413,18 @@ pub fn loadModelBuffersWithPrefix(
     prefix: []const u8,
 ) !zml.Bufferized(Model) {
     // Allocate the bufferized version.
-    // We set fields to undefined, cause visitStructAndLoadBuffer is responsible
+    // We copy the shape, and let visitStructAndLoadBuffer write the other fields.
     // to write them just afterward.
     var res: zml.Bufferized(Model) = undefined;
     try zml.meta.mapAlloc(struct {
-        pub fn initBuffer(_: void, _: zml.Tensor) zml.Buffer {
-            return undefined;
+        pub fn initBuffer(_: void, tensor: zml.Tensor) zml.Buffer {
+            return .{ ._shape = tensor.shape(), ._api = undefined, ._shards = undefined };
         }
     }.initBuffer, allocator, {}, model, &res);
 
     var prefix_builder: PrefixBuilder = .{};
     try prefix_builder.push(allocator, prefix);
     defer prefix_builder.deinit(allocator);
-
-    try visitStructAndLoadBuffer(allocator, &prefix_builder, buffer_store, &res, platform);
-    return res;
-}
-
-/// Creates a bufferized version of a Model from the given BufferStore and the given prefix.
-/// For details about bufferization, see the documentation of Bufferized(T).
-///
-/// This will represent the weights of the model, loaded on a specific platform.
-/// It can be used with a `module.Exe` (a compiled version of the same Model), to make a
-/// `module.ExeWithWeights` ready to be called.
-pub fn loadBuffersFromModelWithPrefix(comptime Model: type, model: Model, buffer_store: BufferStore, allocator: std.mem.Allocator, prefix: []const u8, platform: zml.Platform) !zml.Bufferized(Model) {
-
-    // Allocate the bufferized version.
-    // We set fields to undefined, cause visitStructAndLoadBuffer is responsible
-    // to write them just afterward.
-    var res: zml.Bufferized(Model) = undefined;
-    try zml.meta.mapAlloc(struct {
-        pub fn initBuffer(_: void, _: zml.Tensor) zml.Buffer {
-            return undefined;
-        }
-    }.initBuffer, allocator, {}, model, &res);
-
-    var prefix_builder: PrefixBuilder = .{};
-    defer prefix_builder.deinit(allocator);
-    try prefix_builder.push(allocator, prefix);
 
     try visitStructAndLoadBuffer(allocator, &prefix_builder, buffer_store, &res, platform);
     return res;
@@ -474,7 +453,12 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
     const prefix = prefix_builder.data.items;
     if (T == zml.Buffer) {
         return if (buffer_store.get(prefix)) |host_buffer| {
-            obj.* = try zml.Buffer.from(platform, host_buffer);
+            // obj._shape has been set inside `loadModelBuffersWithPrefix`, before calling us.
+            var buf_with_metadata = host_buffer;
+            log.warn("loading {s} ({})", .{ prefix, obj._shape });
+            zml.meta.assert(host_buffer.shape().eql(obj._shape), "loadModelBuffers expects to find the same shapes in the model and in the buffer store, got {} and {} for tensor {s}", .{ obj._shape, host_buffer, prefix });
+            buf_with_metadata._shape = obj._shape;
+            obj.* = try zml.Buffer.from(platform, buf_with_metadata);
         } else {
             return error.BufferNotFound;
         };
@@ -484,10 +468,7 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
         .Pointer => |ptr_info| {
             if (ptr_info.size == .Slice) {
                 for (obj.*, 0..) |*value, i| {
-                    var buffer: [100]u8 = undefined;
-                    const new_prefix = std.fmt.bufPrint(&buffer, "{d}", .{i}) catch unreachable;
-
-                    try prefix_builder.push(allocator, new_prefix);
+                    try prefix_builder.pushDigit(allocator, i);
                     defer prefix_builder.pop();
 
                     try visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, value, platform);
@@ -502,13 +483,9 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
                 try visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, &@field(obj, field.name), platform);
             }
         },
-        .Optional => |opt_info| {
-            var child = @as(opt_info.child, undefined);
-            if (visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, &child, platform)) {
-                obj.* = child;
-            } else |err| switch (err) {
-                error.BufferNotFound => {},
-                else => return err,
+        .Optional => {
+            if (obj.*) |*obj_val| {
+                try visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, obj_val, platform);
             }
         },
         else => {},

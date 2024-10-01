@@ -49,8 +49,10 @@ pub const CompilationContext = struct {
     _unique_id: u64 = 10000,
     _tracer: Tracer,
 
-    const TensorToBlockArg = std.AutoHashMapUnmanaged(Tensor._Id, struct { mlir.Value, Tensor._Donation });
     threadlocal var _current: ?*CompilationContext = null;
+
+    const TensorToBlockArg = std.AutoHashMapUnmanaged(Tensor._Id, struct { mlir.Value, Tensor._Donation });
+    const AttributeList = std.BoundedArray(mlir.NamedAttribute, 3);
 
     pub fn init(allocator: std.mem.Allocator, name: []const u8, platform: Platform) !CompilationContext {
         const mlir_registry = mlir.Registry.init() catch unreachable;
@@ -181,7 +183,7 @@ pub const CompilationContext = struct {
         comptime func: anytype,
         model: *const ModuleSignature(func).ModelT,
         args: *const ModuleSignature(func).ArgsT,
-        opts: struct { add_donations_attributes: bool = false },
+        opts: struct { add_donations_attributes: bool = false, sharding: bool = true },
     ) error{OutOfMemory}!MlirFn {
         const frame = self._tracer.frameStart("generateBytecode.emit");
         errdefer self._tracer.frameEnd(frame, "generateBytecode.emit");
@@ -197,17 +199,25 @@ pub const CompilationContext = struct {
 
         const tensor_count = model_tensor_count + args_tensor_count;
 
-        const loc = self.mlirCtx().location(@src());
+        const mlir_ctx = self.mlirCtx();
+        const loc = mlir_ctx.location(@src());
 
         const locations = try arena.alloc(mlir.Location, tensor_count);
-        for (locations) |*l| l.* = mlir.Location.unknown(self.mlirCtx());
-        var input_types = try arena.alloc(mlir.Type, tensor_count);
-        fillMlirTypes(model, self.mlirCtx(), input_types[0..model_tensor_count]);
-        fillMlirTypes(args, self.mlirCtx(), input_types[model_tensor_count..]);
+        @memset(locations, mlir.Location.unknown(mlir_ctx));
+
+        var input_shapes = try std.ArrayList(Shape).initCapacity(arena, tensor_count);
+        meta.collect(Tensor.shape, {}, &input_shapes, model) catch unreachable;
+        meta.internalAssert(input_shapes.items.len == model_tensor_count, "model has changed ?", .{});
+        meta.collect(Tensor.shape, {}, &input_shapes, args) catch unreachable;
+        meta.internalAssert(input_shapes.items.len == tensor_count, "args have changed ?", .{});
+
+        const input_types = try arena.alloc(mlir.Type, tensor_count);
+        for (input_types, input_shapes.items) |*t, sh| t.* = mlir.ext.mlirType(mlir_ctx, sh);
 
         // Note: this isn't stricly necessary. We call `countTensor` on `fn_res`.
         // But it forces user to have simpler function.
         const out_tensor_count = comptime ops.staticCountTensors(ModuleSignature(func).ReturnT) orelse @compileError("Can't use " ++ @typeName(ModuleSignature(func).ReturnT) ++ " in an MLIR function, because it has a variable number of tensors");
+        // Those are returned to caller so we don't put them in the arena.
         const fn_res_types = try allocator.alloc(mlir.Type, out_tensor_count);
         const fn_res_shapes = try allocator.alloc(Shape, out_tensor_count);
         const fn_res_donations = try allocator.alloc(Tensor._Donation, out_tensor_count);
@@ -234,20 +244,25 @@ pub const CompilationContext = struct {
 
             var fn_res_values: [out_tensor_count]mlir.Value = undefined;
             self.extractValuesAndTypes(&fn_res, &fn_res_values, fn_res_types, fn_res_shapes, fn_res_donations);
-            const fn_ret = dialect.func.return_(self.mlirCtx(), &fn_res_values, loc);
+            const fn_ret = dialect.func.return_(mlir_ctx, &fn_res_values, loc);
             fn_body.addOperationsRecursive(fn_ret);
         }
 
+        const arg_attrs = try arena.alloc(AttributeList, tensor_count);
+        @memset(arg_attrs, .{});
+
         // Donations attributes only make sense on the main function.
-        const attrs: []const mlir.Attribute = if (opts.add_donations_attributes)
-            try self.addDonationsAttribute(arena, fn_res_donations, tensor_count)
-        else
-            &.{};
+        if (opts.add_donations_attributes) {
+            self.addDonationsAttributes(arg_attrs, fn_res_donations);
+        }
+        if (opts.sharding) {
+            self.addShardingAttributes(arg_attrs, input_shapes.items);
+        }
 
         const mlir_fn = dialect.func.func(self.mlirCtx(), .{
             .sym_name = fn_name,
-            .args = input_types[0..],
-            .arg_attrs = attrs,
+            .args = input_types,
+            .arg_attrs = try finalizeAttributeList(arena, mlir_ctx, arg_attrs),
             .results = fn_res_types,
             .block = fn_body,
             .location = loc,
@@ -277,12 +292,7 @@ pub const CompilationContext = struct {
 
     /// Given a list of donations mapping output buffers to input buffers,
     /// generate donation attribute for each `n_args` input argument.
-    fn addDonationsAttribute(self: *const CompilationContext, allocator: std.mem.Allocator, donations: []const Tensor._Donation, n_args: usize) ![]mlir.Attribute {
-        const empty = mlir.DictionaryAttribute.init(self.mlirCtx(), &.{}).as(mlir.Attribute).?;
-
-        const arg_attrs = try allocator.alloc(mlir.Attribute, n_args);
-        @memset(arg_attrs, empty);
-
+    fn addDonationsAttributes(self: CompilationContext, attributes: []AttributeList, donations: []const Tensor._Donation) void {
         var n_donations: usize = 0;
         for (donations, 0..) |donation, index| {
             switch (donation) {
@@ -293,23 +303,23 @@ pub const CompilationContext = struct {
                 .input_buffer => {},
                 .arg => |a| {
                     n_donations += 1;
-                    meta.assert(arg_attrs[a].eql(empty), "Donation error ! Argument {} has been donated twice ! To {} and to {}", .{ a, index, arg_attrs[a] });
-                    arg_attrs[a] = mlir.DictionaryAttribute.init(self.mlirCtx(), &.{
+                    // This will break the day we writer another attribute before donation.
+                    // When the time come, do a more fancy lookup here to check if an argument
+                    // is donated twice.
+                    meta.assert(attributes[a].len == 0, "Donation error ! Argument {} has been donated twice ! To {} and to {}", .{ a, index, attributes[a].buffer[0] });
+                    attributes[a].appendAssumeCapacity(
                         mlir.NamedAttribute.init(
                             mlir.Identifier.get(self.mlirCtx(), "tf.aliasing_output"),
                             mlir.IntegerAttribute(.i32).init(self.mlirCtx(), @intCast(index)).as(mlir.Attribute).?,
                         ),
-                    }).as(mlir.Attribute).?;
-                    // log.debug("attribute: {}", .{arg_attrs[a]});
+                    );
+                    // log.debug("attribute: {}", .{attributes[a].constSlice()});
                 },
             }
         }
-
-        if (n_donations == 0) return &.{};
-        return arg_attrs;
     }
 
-    test addDonationsAttribute {
+    test addDonationsAttributes {
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -343,10 +353,79 @@ pub const CompilationContext = struct {
         // `%arg0` is the bias of the model, `%arg1` is `x`.
         try std.testing.expectEqual(1, f.n_model);
         try std.testing.expectEqual(1, f.n_args);
-        std.testing.expect(std.mem.indexOf(u8, mlir_bytecode.items, "%arg1: tensor<8xf16> {tf.aliasing_output = 0 : i32}") != null) catch |err| {
+        std.testing.expect(std.mem.indexOf(u8, mlir_bytecode.items, "tf.aliasing_output = 0 : i32") != null) catch |err| {
             log.warn("Didn't produced the expected IR:\n{s}", .{mlir_bytecode.items});
             return err;
         };
+    }
+
+    fn addShardingAttributes(self: CompilationContext, attributes: []AttributeList, shapes: []const Shape) void {
+        const mlir_ctx = self.mlirCtx();
+        if (!self._platform.compilation_options.sharding_enabled) return;
+
+        const num_partitions = self._platform.sharding().num_partitions;
+        var sharding_str: std.BoundedArray(u8, 128) = .{};
+
+        const mhlo_default_layout = mlir.NamedAttribute.init(
+            mlir.Identifier.get(mlir_ctx, "mhlo.layout_mode"),
+            mlir.StringAttribute.init(mlir_ctx, "default").asAttr(),
+        );
+        for (attributes, shapes) |*attr, shape| {
+            attr.appendAssumeCapacity(mhlo_default_layout);
+
+            writeShardingRepresentation(shape, num_partitions, sharding_str.writer()) catch unreachable;
+            defer sharding_str.len = 0;
+            attr.appendAssumeCapacity(mlir.NamedAttribute.init(
+                mlir.Identifier.get(mlir_ctx, "mhlo.sharding"),
+                mlir.StringAttribute.init(mlir_ctx, sharding_str.constSlice()).asAttr(),
+            ));
+        }
+    }
+
+    fn writeShardingRepresentation(shape: Shape, num_partitions: u8, writer: anytype) @TypeOf(writer).Error!void {
+        const n_sharded: u8 = @popCount(@as(u8, @bitCast(shape._sharding_info)));
+        if (n_sharded == 0 or num_partitions == 1) {
+            try writer.writeAll("{replicated}");
+            return;
+        }
+        try writer.writeAll("{devices=[");
+        for (0..shape.rank()) |i| {
+            try writer.print("{d}", .{if (shape._sharding_info[i]) num_partitions else 1});
+            if (i < shape.rank() - 1) try writer.writeByte(',');
+        }
+        try writer.print("]<=[{d}]}}", .{num_partitions});
+    }
+
+    test writeShardingRepresentation {
+        var rule: [64]u8 = undefined;
+        const x = Shape.init(.{ 16, 8 }, .f32);
+
+        // By default tensors are replicated.
+        {
+            var fbs = std.io.fixedBufferStream(&rule);
+            try writeShardingRepresentation(x, 4, fbs.writer());
+            try std.testing.expectEqualStrings("{replicated}", fbs.getWritten());
+        }
+        // Shard along first axis.
+        {
+            var fbs = std.io.fixedBufferStream(&rule);
+            try writeShardingRepresentation(x.withSharding(.{0}), 4, fbs.writer());
+            try std.testing.expectEqualStrings("{devices=[4,1]<=[4]}", fbs.getWritten());
+        }
+        // Also shard along second axis.
+        {
+            var fbs = std.io.fixedBufferStream(&rule);
+            try writeShardingRepresentation(x.withSharding(.{ 0, 1 }), 2, fbs.writer());
+            try std.testing.expectEqualStrings("{devices=[2,2]<=[2]}", fbs.getWritten());
+        }
+    }
+
+    fn finalizeAttributeList(allocator: std.mem.Allocator, mlir_ctx: mlir.Context, attributes: []AttributeList) ![]mlir.Attribute {
+        const res = try allocator.alloc(mlir.Attribute, attributes.len);
+        for (res, attributes) |*r, attr| {
+            r.* = mlir.DictionaryAttribute.init(mlir_ctx, attr.constSlice()).asAttr();
+        }
+        return res;
     }
 
     /// Generates an MLIR `func.call` of the given function.
@@ -565,47 +644,57 @@ fn assignBlockArguments(v: anytype, block: mlir.Block, start: usize) usize {
 }
 
 /// Visit the given struct and fill the `buffers` slice with the buffer associated with encountered Tensor.
-fn fillBuffers(v: anytype, buffers: []*pjrt.Buffer) void {
+fn fillBuffers(v: anytype, buffers: []const [*]*pjrt.Buffer, start: u32, len: u32) void {
     const LocalContext = struct {
-        index: usize,
-        buffers: []*pjrt.Buffer,
+        index: u32,
+        buffers: []const [*]*pjrt.Buffer,
     };
-    var ctx: LocalContext = .{
-        .index = 0,
+    var context: LocalContext = .{
+        .index = start,
         .buffers = buffers,
     };
     meta.visit((struct {
-        fn cb(inner_context: *LocalContext, buffer: *const Buffer) void {
-            // meta.assert(!buffer._data.isDeleted(), "Can't use {} (argument buffer {}) because its pjrt buffer has been donated", .{ buffer, inner_context.index });
-            inner_context.buffers[inner_context.index] = buffer._data;
-            inner_context.index += 1;
+        fn cb(ctx: *LocalContext, buffer: *const Buffer) void {
+            // meta.assert(!buffer._data.isDeleted(), "Can't use {} (argument buffer {}) because its pjrt buffer has been donated", .{ buffer, ctx.index });
+            const model_sharding = ctx.buffers.len;
+            meta.assert(buffer._shards.len == model_sharding, "Can't feed a {}-sharded tensor into a {}-sharded model", .{ buffer._shards.len, ctx.buffers.len });
+            for (buffer._shards.constSlice(), 0..) |shard, d| {
+                ctx.buffers[d][ctx.index] = shard;
+            }
+            ctx.index += 1;
         }
-    }).cb, &ctx, v);
-    assert(ctx.index == buffers.len);
+    }).cb, &context, v);
+    assert(context.index == start + len);
 }
 
 /// Visit the given struct and override tensors by creating a new one using the provided PJRT buffers.
-pub fn assignRawBuffers(v: anytype, platform: Platform, buffers: []*pjrt.Buffer) void {
+pub fn assignRawBuffers(v: anytype, platform: Platform, buffers: []const [*]*pjrt.Buffer, expected_count: u32) void {
     const LocalContext = struct {
-        index: usize,
+        index: u32,
         platform: Platform,
-        buffers: []*pjrt.Buffer,
+        buffers: []const [*]*pjrt.Buffer,
+        expected_count: u32,
     };
-    var ctx: LocalContext = .{
+    var local_ctx: LocalContext = .{
         .index = 0,
         .platform = platform,
         .buffers = buffers,
+        .expected_count = expected_count,
     };
     meta.visit((struct {
-        fn cb(inner_context: *LocalContext, buffer: *Buffer) void {
-            const i = inner_context.index;
-            if (i < inner_context.buffers.len) {
-                buffer.* = Buffer.fromPjrtBuffer(inner_context.platform, inner_context.buffers[i]);
+        fn cb(ctx: *LocalContext, buffer: *Buffer) void {
+            const i = ctx.index;
+            ctx.index += 1;
+            if (i >= ctx.expected_count) return;
+
+            var shards: Buffer.Shards = .{};
+            for (ctx.buffers) |buff| {
+                shards.appendAssumeCapacity(buff[i]);
             }
-            inner_context.index += 1;
+            buffer.* = Buffer.fromPjrtBuffers(ctx.platform, shards.constSlice());
         }
-    }).cb, &ctx, v);
-    meta.assert(ctx.index == buffers.len, "Pjrt call returned {} tensors, but the return type {s}, contains {} Buffers. Note that modules need to have a comptime know number of returned tensors.", .{ buffers.len, @typeName(@TypeOf(v)), ctx.index });
+    }).cb, &local_ctx, v);
+    meta.internalAssert(local_ctx.index == expected_count, "Pjrt call returned {} tensors, but the return type {s}, contains {} Buffers. Note that modules need to have a comptime know number of returned tensors.", .{ buffers.len, @typeName(@TypeOf(v)), local_ctx.index });
 }
 
 /// Visit the given struct and assign op results to each tensor found.
@@ -637,11 +726,13 @@ const BaseExe = struct {
     /// The PJRT executable representing the compiled module.
     exe: *pjrt.LoadedExecutable,
     /// Number of buffers in the model.
-    model_buffer_count: usize,
+    model_buffer_count: u32,
     /// Number of buffers in the arguments.
-    args_buffer_count: usize,
+    args_buffer_count: u32,
     /// Number of buffers in result.
-    result_buffer_count: usize,
+    result_buffer_count: u32,
+    /// Num devices used (>1 for sharded executable)
+    num_devices: u8,
 };
 
 /// Represents a ZML model, compiled into a PJRT executable.
@@ -674,34 +765,56 @@ pub fn ExeWithWeights(comptime func: anytype) type {
         /// The raw untyped compiled module.
         inner: BaseExe,
 
-        /// The allocator used for bookkeeping.
-        allocator: std.mem.Allocator,
-
         /// Pre-allocated slice of buffers to use as inputs when the module is called.
-        input_buffers: []*pjrt.Buffer,
+        input_per_device: []const [*]*pjrt.Buffer,
 
         /// Pre-allocated slice of buffers to use as outputs when the module is called.
-        output_buffers: []*pjrt.Buffer,
+        output_per_device: []const [*]*pjrt.Buffer,
+
+        /// Internal memory slice used.
+        _all_buffers: []*pjrt.Buffer,
+        _all_per_device: [][*]*pjrt.Buffer,
+
+        /// And the allocator backing _data_buffer.
+        _allocator: std.mem.Allocator,
 
         pub fn initFromModel(allocator: std.mem.Allocator, inner: BaseExe, model: Bufferized(Signature.ModelT)) !Self {
-            const input_buffers = try allocator.alloc(*pjrt.Buffer, inner.model_buffer_count + inner.args_buffer_count);
-            errdefer allocator.free(input_buffers);
-            fillBuffers(&model, input_buffers[0..inner.model_buffer_count]);
+            const n_input_buffers = inner.model_buffer_count + inner.args_buffer_count;
+            const n_output_buffers = inner.result_buffer_count;
+            const n_devices = inner.num_devices;
 
-            const output_buffers = try allocator.alloc(*pjrt.Buffer, inner.result_buffer_count);
-            errdefer allocator.free(output_buffers);
+            // Allocate once for all the *pjrt.Buffer we need to store ...
+            const all_buffers = try allocator.alloc(*pjrt.Buffer, (n_input_buffers + n_output_buffers) * n_devices);
+            errdefer allocator.free(all_buffers);
+            const all_input_buffers, const all_output_buffers = splitBuffer(*pjrt.Buffer, all_buffers, .{ n_input_buffers * n_devices, n_output_buffers * n_devices });
+
+            // ... and once for all the [*]*pjrt.Buffer.
+            const all_per_device = try allocator.alloc([*]*pjrt.Buffer, 2 * n_devices);
+            errdefer allocator.free(all_per_device);
+            const input_per_device, const output_per_device = splitBuffer([*]*pjrt.Buffer, all_per_device, .{ n_devices, n_devices });
+
+            for (0..n_devices) |i| {
+                input_per_device[i] = all_input_buffers[i * n_input_buffers ..].ptr;
+                output_per_device[i] = all_output_buffers[i * n_output_buffers ..].ptr;
+            }
+
+            fillBuffers(&model, input_per_device, 0, inner.model_buffer_count);
+            // Note: all_output_buffers is left undefined, it will be written to in `call`.
 
             return .{
                 .inner = inner,
-                .allocator = allocator,
-                .input_buffers = input_buffers,
-                .output_buffers = output_buffers,
+                .input_per_device = input_per_device,
+                .output_per_device = output_per_device,
+                ._all_buffers = all_buffers,
+                ._all_per_device = all_per_device,
+                ._allocator = allocator,
             };
         }
 
         pub fn deinit(self: Self) void {
-            self.allocator.free(self.input_buffers);
-            self.allocator.free(self.output_buffers);
+            // Free in reverse order of allocation.
+            self._allocator.free(self._all_per_device);
+            self._allocator.free(self._all_buffers);
         }
 
         pub fn platform(self: Self) Platform {
@@ -709,13 +822,13 @@ pub fn ExeWithWeights(comptime func: anytype) type {
         }
 
         pub fn call(self: Self, args: Bufferized(Signature.ArgsT)) Bufferized(Signature.ReturnT) {
-            fillBuffers(&args, self.input_buffers[self.inner.model_buffer_count..][0..self.inner.args_buffer_count]);
+            fillBuffers(&args, self.input_per_device, self.inner.model_buffer_count, self.inner.args_buffer_count);
             var event: [1]*pjrt.Event = undefined;
 
             self.inner.exe.execute(self.inner.platform.pjrt_api, .{
-                .arguments = &.{self.input_buffers.ptr},
-                .num_args = self.input_buffers.len,
-                .results = &.{self.output_buffers.ptr},
+                .arguments = self.input_per_device,
+                .num_args = self.inner.args_buffer_count + self.inner.model_buffer_count,
+                .results = self.output_per_device,
                 .events = &event,
                 // TODO: this allows to tell a specific buffer shouldn't be donated,
                 // even if it has been marked as "can be donated" during compilation.
@@ -723,7 +836,7 @@ pub fn ExeWithWeights(comptime func: anytype) type {
             }) catch unreachable;
 
             var result: Bufferized(Signature.ReturnT) = undefined;
-            assignRawBuffers(&result, self.inner.platform, self.output_buffers);
+            assignRawBuffers(&result, self.inner.platform, self.output_per_device, self.inner.result_buffer_count);
             return result;
         }
     };
@@ -750,6 +863,11 @@ fn compileInternal(
     const f = try asynk.callGeneric(CompilationContext.generateBytecode, .{ context, arena, "main", func, &model, &tensor_args, .{ .add_donations_attributes = true } });
     context._module.getBody().appendOperation(f.mlir_fn);
 
+    const sharding = context._platform.sharding();
+    const mlir_ctx = context._mlir_ctx;
+    context._module.op().setAttributeByName("mhlo.num_replicas", mlir.IntegerAttribute(.i32).init(mlir_ctx, sharding.num_replicas).asAttr());
+    context._module.op().setAttributeByName("mhlo.num_partitions", mlir.IntegerAttribute(.i32).init(mlir_ctx, sharding.num_partitions).asAttr());
+
     const loaded_executable = loadOrCompilePjrtExecutable(arena, context._platform, context._module) catch |err| {
         log.err(
             "pjrt-{s} failed to compile following valid MLIR:\n{}\n{}",
@@ -771,7 +889,8 @@ fn compileInternal(
         .exe = loaded_executable,
         .model_buffer_count = f.n_model,
         .args_buffer_count = f.n_args,
-        .result_buffer_count = f.res_types.len,
+        .result_buffer_count = @intCast(f.res_types.len),
+        .num_devices = sharding.num_replicas * sharding.num_partitions,
     };
 }
 
@@ -932,10 +1051,12 @@ fn loadOrCompilePjrtExecutable(
 }
 
 fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, module: mlir.Module, module_hash: u64) !*pjrt.LoadedExecutable {
+    const sharding = platform.sharding();
     var options: xla_pb.CompileOptionsProto = .{
         .executable_build_options = .{
-            .num_replicas = 1,
-            .num_partitions = 1,
+            .num_replicas = sharding.num_replicas,
+            .num_partitions = sharding.num_partitions,
+            .use_spmd_partitioning = sharding.num_partitions > 1 or sharding.num_replicas > 1,
         },
     };
     // Let the arena deinit, zig-protobuf deinit is very slow.
@@ -1371,4 +1492,15 @@ fn hashArray(hasher: anytype, key: anytype, comptime strat: HashStrategy) void {
     for (key) |element| {
         hash(hasher, element, strat);
     }
+}
+
+fn splitBuffer(T: type, buffer: []T, lengths: anytype) [lengths.len][]T {
+    var res: [lengths.len][]T = undefined;
+    var i: usize = 0;
+    inline for (&res, lengths) |*r, len| {
+        r.* = buffer[i .. i + len];
+        i += len;
+    }
+    std.debug.assert(i == buffer.len);
+    return res;
 }

@@ -6,6 +6,7 @@ const meta = @import("meta.zig");
 const module = @import("module.zig");
 const pjrt = @import("pjrtx.zig");
 const pjrt_core = @import("pjrt");
+const log = std.log.scoped(.zml);
 
 pub const Target = enum {
     cpu,
@@ -31,6 +32,8 @@ pub const CompilationOptions = struct {
     xla_dump_to: ?[]const u8 = null,
     xla_dump_fusion_visualization: bool = false,
     cache_location: ?[]const u8 = null,
+    sharding_enabled: bool = false,
+    sharding_axes: std.BoundedArray([*:0]const u8, 8) = .{},
 };
 
 pub const Platform = struct {
@@ -39,8 +42,14 @@ pub const Platform = struct {
     pjrt_client: *pjrt.Client,
     compilation_options: CompilationOptions = .{},
 
+    pub const MAX_NUM_DEVICES: u8 = 8;
+
     pub fn init(target: Target, api: *const pjrt.Api) !Platform {
         const pjrt_client = try pjrt.Client.init(api, &.{});
+        const true_num_devices = pjrt_client.getAddressableDevices(api).len;
+        if (true_num_devices > MAX_NUM_DEVICES) {
+            log.warn("platform {} got {} devices, but ZML only support up to {} devices. Some devices won't be used.", .{ target, true_num_devices, MAX_NUM_DEVICES });
+        }
         return .{
             .target = target,
             .pjrt_api = api,
@@ -50,7 +59,26 @@ pub const Platform = struct {
     }
 
     pub fn getDevices(self: Platform) []const *const pjrt_core.Device {
-        return self.pjrt_client.getAddressableDevices(self.pjrt_api);
+        const all_devices = self.pjrt_client.getAddressableDevices(self.pjrt_api);
+        if (all_devices.len > MAX_NUM_DEVICES) {
+            return all_devices[0..MAX_NUM_DEVICES];
+        }
+        return all_devices;
+    }
+
+    pub const Sharding = struct { num_replicas: u8, num_partitions: u8 };
+
+    pub fn sharding(self: Platform) Sharding {
+        // replicas run the same function but with different inputs,
+        // while partitions contribute to one evaluation over a shared input.
+        // Inside an inference process, we generally don't want replicas,
+        // as it's best to fully isolate replicas on different processes.
+        // For now we hardcode num_replicas = 1.
+        const num_devices: u8 = @intCast(self.getDevices().len);
+        return if (self.compilation_options.sharding_enabled)
+            .{ .num_replicas = 1, .num_partitions = num_devices }
+        else
+            .{ .num_replicas = 1, .num_partitions = 1 };
     }
 
     pub fn withCompilationOptions(self: Platform, opts: CompilationOptions) Platform {
