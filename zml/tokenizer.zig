@@ -10,6 +10,8 @@ const meta = @import("meta.zig");
 
 test {
     std.testing.refAllDecls(@This());
+    std.testing.refAllDecls(Normalizer);
+    std.testing.refAllDecls(Tokenizer);
 }
 
 /// Byte Pair Encoding tokenizer generally used for LLM.
@@ -21,6 +23,8 @@ pub const Tokenizer = struct {
     scores: []f32,
     max_token_len: u32,
     normalizer: ?Normalizer,
+    // Allows to split unknown unicode characters into bytes.
+    byte_fallback: bool = false,
 
     arena_state: std.heap.ArenaAllocator,
     vocab_size: u32,
@@ -141,24 +145,16 @@ pub const Tokenizer = struct {
         const mergeable = try allocator.alloc(MergeState, tok_buff.len);
 
         var num_tokens: usize = 0;
-        var off: usize = 0;
-        while (off < input.len) {
-            const utf_len = try std.unicode.utf8ByteSequenceLength(input[off]);
-            defer off += utf_len;
-
-            mergeable[num_tokens] = .idk;
-            defer num_tokens += 1;
-
-            const char = input[off..][0..utf_len];
-            tok_buff[num_tokens] = self.lookup(char) orelse
-                // TODO: split unknown token into bytes if model supports it
-                self.special_tokens.unk;
-            if (tok_buff[num_tokens] == self.special_tokens.unk) {
-                log.debug("Token not found for char '{s}' (@{x})", .{ char, char });
-            }
-            if (tok_buff[num_tokens] == self.special_tokens.hard_space) {
-                mergeable[num_tokens] = .hard_space;
-            }
+        var it: CharTokenIterator = .{ .input = input };
+        while (it.nextCodepointToken(self)) |token| : (num_tokens += 1) {
+            tok_buff[num_tokens] = token;
+            mergeable[num_tokens] = if (token == self.special_tokens.hard_space)
+                .hard_space
+            else
+                .idk;
+        } else |exit| switch (exit) {
+            error.Success => {},
+            else => |err| return err,
         }
 
         var stable_prefix: usize = 0;
@@ -331,6 +327,91 @@ test Tokenizer {
     try testing.expect(tokenizer.lookup("world") == 1);
 
     // TODO: test Tokenizer.decode, Tokenizer.encode, Tokenizer.readTokenInto
+}
+
+/// Given a slice, split it in the most simple tokens using the given tokenizer tokens.
+/// The output of this can be used to initialize the tokenization algorithm.
+/// Normally we split the input text into utf8 codepoint,
+/// but if we find an unknown codepoint we either split it in bytes, or use the special "unknown" token,
+/// depending on the tokenizer configuration.
+const CharTokenIterator = struct {
+    state: union(enum) { by_codepoint, by_byte: u8 } = .by_codepoint,
+    input: []const u8,
+
+    fn nextCodepointToken(self: *CharTokenIterator, tokenizer: *const Tokenizer) error{ TruncatedInput, Utf8InvalidStartByte, Success }!u32 {
+        if (self.input.len == 0) return error.Success;
+        return switch (self.state) {
+            .by_byte => |*byte_left| {
+                const idx = tokenizer.lookup(self.input[0..1]) orelse {
+                    // Normally this has been caught when calling `rewriteByteFallbackTokens`.
+                    std.debug.panic("Tokenizer has \"byte_fallback\" = true, but doesn't contains the byte fallback for token '<0x{X:02}>'", .{self.input[0]});
+                };
+
+                self.input = self.input[1..];
+                byte_left.* -|= 1;
+                if (byte_left.* == 0) self.state = .by_codepoint;
+                return idx;
+            },
+            .by_codepoint => {
+                // Try to lookup valid utf8 codepoint first.
+                const utf8_len = try std.unicode.utf8ByteSequenceLength(self.input[0]);
+                if (self.input.len < utf8_len) return error.TruncatedInput;
+                if (tokenizer.lookup(self.input[0..utf8_len])) |idx| {
+                    self.input = self.input[utf8_len..];
+                    return idx;
+                }
+
+                // Otherwise split in bytes if it's allowed.
+                if (tokenizer.byte_fallback) {
+                    // TODO: replace this by a continue statement next time we bump Zig.
+                    self.state = .{ .by_byte = utf8_len };
+                    return self.nextCodepointToken(tokenizer);
+                }
+
+                // Or mark the full utf8 codepoint as unknown.
+                log.debug("Token not found for char '{s}'", .{self.input[0..utf8_len]});
+                self.input = self.input[utf8_len..];
+                return tokenizer.special_tokens.unk;
+            },
+        };
+    }
+};
+
+test CharTokenIterator {
+    const special_tokens: Tokenizer.SpecialTokens = .{ .unk = 0, .bos = 1, .eos = 2 };
+    var tokenizer = try Tokenizer.init(std.testing.allocator, 16, 4, null, special_tokens, true);
+    defer tokenizer.deinit();
+
+    tokenizer.addOwnedToken(1.0, "<unk>"); // 0
+    tokenizer.addOwnedToken(1.0, "<s>"); // 1
+    tokenizer.addOwnedToken(1.0, "</s>"); // 2
+    tokenizer.addOwnedToken(1.0, "ζ"); // 3
+    tokenizer.addOwnedToken(1.0, &.{0xE2}); // 4: ℳ, first byte
+    tokenizer.addOwnedToken(1.0, &.{0x84}); // 5: ℳ, second byte
+    tokenizer.addOwnedToken(1.0, &.{0xB3}); // 6: ℳ, third byte
+    tokenizer.addOwnedToken(1.0, "L"); // 7
+
+    // No byte fallback
+    {
+        tokenizer.byte_fallback = false;
+        var it: CharTokenIterator = .{ .input = "ζℳL" };
+        var res: std.BoundedArray(u32, 8) = .{};
+        while (it.nextCodepointToken(&tokenizer)) |token| {
+            res.appendAssumeCapacity(token);
+        } else |_| {}
+        try std.testing.expectEqualSlices(u32, &[_]u32{ 3, 0, 7 }, res.constSlice());
+    }
+
+    // with byte fallback
+    {
+        tokenizer.byte_fallback = true;
+        var it: CharTokenIterator = .{ .input = "ζℳL" };
+        var res: std.BoundedArray(u32, 8) = .{};
+        while (it.nextCodepointToken(&tokenizer)) |token| {
+            res.appendAssumeCapacity(token);
+        } else |_| {}
+        try std.testing.expectEqualSlices(u32, &[_]u32{ 3, 4, 5, 6, 7 }, res.constSlice());
+    }
 }
 
 /// Text normalizer. Most tokenizer assumes the input text have been prepocessed
@@ -614,7 +695,6 @@ pub const Gpt2TextDecoder = struct {
         try self.code_to_byte.ensureTotalCapacity(256);
         errdefer unreachable;
 
-        // The eon
         var n: usize = 0;
         for (0..256) |index| {
             var code: Code = .{ .buffer = .{ 0, 0 }, .len = 0 }; // 0-init
@@ -767,7 +847,7 @@ pub fn fromHfJson(allocator: std.mem.Allocator, tokenizer_path: []const u8) !Tok
     };
 
     if (main_object.get("model").?.object.get("byte_fallback")) |byte_fallback| {
-        if (byte_fallback) {
+        if (byte_fallback == .bool and byte_fallback.bool) {
             try rewriteByteFallbackTokens(&tokenizer, &all_tokens);
         }
     }
@@ -781,6 +861,7 @@ pub fn fromHfJson(allocator: std.mem.Allocator, tokenizer_path: []const u8) !Tok
 /// So we replace byte fallbacks strings, by their corresponding character.
 /// This enables the normal tokenization algorithm to work.
 fn rewriteByteFallbackTokens(tokenizer: *Tokenizer, all_tokens: *std.ArrayList(u8)) !void {
+    tokenizer.byte_fallback = true;
     var byte_fallback_buf = "<0x00>".*;
 
     for (0..256) |c_usize| {
