@@ -1,18 +1,17 @@
 const builtin = @import("builtin");
 const std = @import("std");
-const mlir = @import("mlir");
+
 const asynk = @import("async");
+const mlir = @import("mlir");
+const pjrt = @import("pjrt");
 
 const platform = @import("platform.zig");
-const pjrtx = @import("pjrtx.zig");
-
-const available_targets = @import("platform.zig").available_targets;
 const Target = @import("platform.zig").Target;
 const Platform = @import("platform.zig").Platform;
 
 const log = std.log.scoped(.zml);
 
-const PjrtApiMap = std.EnumArray(Target, ?*const pjrtx.Api);
+const PjrtApiMap = std.EnumArray(Target, ?*const pjrt.Api);
 const PlatformsMap = std.EnumArray(Target, ?Platform);
 
 /// Every program using ZML must start with a `zml.Context.init(.{});`
@@ -27,7 +26,7 @@ pub const Context = struct {
         fn call() void {
             inline for (platform.available_targets) |t| {
                 if (canLoad(t)) {
-                    if (pjrtx.Api.loadFrom(platformToLibrary(t))) |api| {
+                    if (pjrt.Api.loadFrom(platformToLibrary(t))) |api| {
                         Context.apis.set(t, api);
                     } else |_| {}
                 }
@@ -107,7 +106,7 @@ pub const Context = struct {
         return std.mem.eql(u8, &buf, GoogleComputeEngine);
     }
 
-    pub fn pjrtApi(target: Target) *const pjrtx.Api {
+    pub fn pjrtApi(target: Target) *const pjrt.Api {
         return Context.apis.get(target).?;
     }
 

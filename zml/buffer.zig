@@ -1,9 +1,9 @@
 const std = @import("std");
 const testing = std.testing;
 
-const meta = @import("meta.zig");
 const pjrt = @import("pjrt");
 
+const meta = @import("meta.zig");
 const Context = @import("context.zig").Context;
 const Data = @import("dtype.zig").Data;
 const DataType = @import("dtype.zig").DataType;
@@ -53,6 +53,7 @@ pub const Buffer = struct {
         const buffer_type = bufferTypeFromDtype(host_buffer.shape().dtype());
         const byte_strides = host_buffer.strides() orelse host_buffer.shape().computeStrides().constSlice();
 
+        var events: std.BoundedArray(*pjrt.Event, MAX_NUM_SHARDS) = .{};
         const devices = platform.getDevices();
         for (0..n_partitions) |i| {
             // If no sharding if found, the given buffer is replicated on all devices.
@@ -61,7 +62,7 @@ pub const Buffer = struct {
                 break :buf host_buffer.slice1d(ax, .{ .start = start, .end = start + chunk_size });
             } else host_buffer;
 
-            const pjrt_buffer = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, .{
+            const pjrt_buffer, const event = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, .{
                 .data = buf.data,
                 .buffer_type = buffer_type,
                 .dims = buf.shape().dims(),
@@ -70,7 +71,12 @@ pub const Buffer = struct {
                 .host_buffer_semantics = .ImmutableUntilTransferCompletes,
             });
 
+            events.appendAssumeCapacity(event);
             res._shards.appendAssumeCapacity(pjrt_buffer);
+        }
+
+        for (events.constSlice()) |event| {
+            try platform.awaitEvent(event);
         }
         return res;
     }
