@@ -766,59 +766,55 @@ pub fn ExeWithWeights(comptime func: anytype) type {
         inner: BaseExe,
 
         /// Pre-allocated slice of buffers to use as inputs when the module is called.
-        input_buffers: []const [*]*pjrt.Buffer,
+        input_per_device: []const [*]*pjrt.Buffer,
 
         /// Pre-allocated slice of buffers to use as outputs when the module is called.
-        output_buffers: []const [*]*pjrt.Buffer,
+        output_per_device: []const [*]*pjrt.Buffer,
 
         /// Internal memory slice used.
-        _data_buffer: []*anyopaque,
+        _all_buffers: []*pjrt.Buffer,
+        _all_per_device: [][*]*pjrt.Buffer,
 
         /// And the allocator backing _data_buffer.
         _allocator: std.mem.Allocator,
 
         pub fn initFromModel(allocator: std.mem.Allocator, inner: BaseExe, model: Bufferized(Signature.ModelT)) !Self {
             const n_input_buffers = inner.model_buffer_count + inner.args_buffer_count;
-            const n_result_buffers = inner.result_buffer_count;
+            const n_output_buffers = inner.result_buffer_count;
             const n_devices = inner.num_devices;
-            const n_ptrs = (1 + n_input_buffers + 1 + n_result_buffers) * n_devices;
 
-            // Allocate once for all the *pjrt.Buffer we need to store,
-            const all_buffers = try allocator.alloc(*anyopaque, n_ptrs);
+            // Allocate once for all the *pjrt.Buffer we need to store ...
+            const all_buffers = try allocator.alloc(*pjrt.Buffer, (n_input_buffers + n_output_buffers) * n_devices);
             errdefer allocator.free(all_buffers);
+            const all_input_buffers, const all_output_buffers = splitBuffer(*pjrt.Buffer, all_buffers, .{ n_input_buffers * n_devices, n_output_buffers * n_devices });
 
-            // then split the memory in one slice per device, and also distinguish between input/output.
-            const parts = splitBuffer(
-                *anyopaque,
-                all_buffers,
-                .{ n_devices, n_input_buffers * n_devices, n_devices, n_result_buffers * n_devices },
-            );
-            const input_buffers_per_device: [][*]*pjrt.Buffer = @ptrCast(parts[0]);
-            const all_input_buffers: []*pjrt.Buffer = @ptrCast(parts[1]);
-            const output_buffers_per_device: [][*]*pjrt.Buffer = @ptrCast(parts[2]);
-            const all_output_buffers: []*pjrt.Buffer = @ptrCast(parts[3]);
+            // ... and once for all the [*]*pjrt.Buffer.
+            const all_per_device = try allocator.alloc([*]*pjrt.Buffer, 2 * n_devices);
+            errdefer allocator.free(all_per_device);
+            const input_per_device, const output_per_device = splitBuffer([*]*pjrt.Buffer, all_per_device, .{ n_devices, n_devices });
 
-            for (input_buffers_per_device, 0..n_devices) |*input, i| {
-                input.* = all_input_buffers[i * n_input_buffers ..].ptr;
+            for (0..n_devices) |i| {
+                input_per_device[i] = all_input_buffers[i * n_input_buffers ..].ptr;
+                output_per_device[i] = all_output_buffers[i * n_output_buffers ..].ptr;
             }
-            fillBuffers(&model, input_buffers_per_device, 0, inner.model_buffer_count);
 
-            for (output_buffers_per_device, 0..n_devices) |*output, i| {
-                output.* = all_output_buffers[i * n_result_buffers ..].ptr;
-            }
+            fillBuffers(&model, input_per_device, 0, inner.model_buffer_count);
             // Note: all_output_buffers is left undefined, it will be written to in `call`.
 
             return .{
                 .inner = inner,
-                .input_buffers = input_buffers_per_device,
-                .output_buffers = output_buffers_per_device,
-                ._data_buffer = all_buffers,
+                .input_per_device = input_per_device,
+                .output_per_device = output_per_device,
+                ._all_buffers = all_buffers,
+                ._all_per_device = all_per_device,
                 ._allocator = allocator,
             };
         }
 
         pub fn deinit(self: Self) void {
-            self._allocator.free(self._data_buffer);
+            // Free in reverse order of allocation.
+            self._allocator.free(self._all_per_device);
+            self._allocator.free(self._all_buffers);
         }
 
         pub fn platform(self: Self) Platform {
@@ -826,13 +822,13 @@ pub fn ExeWithWeights(comptime func: anytype) type {
         }
 
         pub fn call(self: Self, args: Bufferized(Signature.ArgsT)) Bufferized(Signature.ReturnT) {
-            fillBuffers(&args, self.input_buffers, self.inner.model_buffer_count, self.inner.args_buffer_count);
+            fillBuffers(&args, self.input_per_device, self.inner.model_buffer_count, self.inner.args_buffer_count);
             var event: [1]*pjrt.Event = undefined;
 
             self.inner.exe.execute(self.inner.platform.pjrt_api, .{
-                .arguments = self.input_buffers,
+                .arguments = self.input_per_device,
                 .num_args = self.inner.args_buffer_count + self.inner.model_buffer_count,
-                .results = self.output_buffers,
+                .results = self.output_per_device,
                 .events = &event,
                 // TODO: this allows to tell a specific buffer shouldn't be donated,
                 // even if it has been marked as "can be donated" during compilation.
@@ -840,7 +836,7 @@ pub fn ExeWithWeights(comptime func: anytype) type {
             }) catch unreachable;
 
             var result: Bufferized(Signature.ReturnT) = undefined;
-            assignRawBuffers(&result, self.inner.platform, self.output_buffers, self.inner.result_buffer_count);
+            assignRawBuffers(&result, self.inner.platform, self.output_per_device, self.inner.result_buffer_count);
             return result;
         }
     };
