@@ -697,6 +697,22 @@ pub fn custom_call(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCa
     });
 }
 
+pub fn sharding(ctx: mlir.Context, inputs: []const mlir.Value, sharding_spec: mlir.StringAttribute, res_types: []const mlir.Type, location: mlir.Location) mlir.Operation {
+    return mlir.Operation.make(ctx, "stablehlo.custom_call", .{
+        .operands = inputs,
+        .results = res_types,
+        .attributes = &.{
+            .{ "api_version", mlir.IntegerAttribute(.i32).init(ctx, 1).as(mlir.Attribute).? },
+            .{ "call_target_name", mlir.StringAttribute.init(ctx, "Sharding").as(mlir.Attribute).? },
+            .{ "has_side_effect", mlir.BoolAttribute.init(ctx, false).as(mlir.Attribute).? },
+            .{ "backend_config", mlir.StringAttribute.init(ctx, &.{}).as(mlir.Attribute).? },
+            .{ "output_operand_aliases", mlir.ArrayAttribute.init(ctx, &.{}).as(mlir.Attribute).? },
+            .{ "mhlo.sharding", sharding_spec.asAttr() },
+        },
+        .location = location,
+    });
+}
+
 pub const DotDimensionNumbersAttribute = struct {
     _inner: c.MlirAttribute,
 

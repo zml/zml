@@ -5,11 +5,23 @@ const flags = @import("tigerbeetle/flags");
 
 const async_ = asynk.async_;
 
+// set this to false to disable the verbose logging
+const show_mlir = true;
+
+pub const std_options = .{
+    .log_level = .warn,
+    .log_scope_levels = &[_]std.log.ScopeLevel{
+        .{ .scope = .pjrt, .level = if (show_mlir) .debug else .err },
+        .{ .scope = .zml_module, .level = if (show_mlir) .debug else .err },
+        .{ .scope = .zml, .level = if (show_mlir) .debug else .err },
+    },
+};
+
 /// Model definition
 const Benchmark = struct {
     pub fn forward(self: Benchmark, a: zml.Tensor, b: zml.Tensor) zml.Tensor {
         _ = self;
-        return a.dot(b, .{.k});
+        return a.withSharding(.{.k}).dot(b.withSharding(.{.k}), .{.k}).withSharding(.{.m});
     }
 };
 
@@ -68,7 +80,7 @@ pub fn asyncMain() !void {
                         deviceKind,
                     });
                     // we only list 1 CPU device
-                    if (target == .cpu) break;
+                    if (target == .cpu and platform.sharding().num_partitions == 1) break;
                 }
             }
         }

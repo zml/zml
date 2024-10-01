@@ -241,7 +241,7 @@ pub fn asyncMain() !void {
 
     const compile_start = std.time.milliTimestamp();
     var fut_mod_prefill = try async_(zml.compile, .{ allocator, LlamaLM, .{llama_options}, .forward, .{ tokens_shape, token_idx_shape, null, rng_shape }, ts, platform });
-    var fut_mod = try async_(zml.compile, .{ allocator, LlamaLM, .{llama_options}, .forward, .{ tokens_shape, token_idx_shape, kv_cache_shape, rng_shape }, ts, platform });
+    var fut_mod = try async_(zml.compile, .{ allocator, LlamaLM, .{llama_options}, .forward, .{ tokens_shape, token_idx_shape, kv_cache_shape, rng_shape }, ts, platform, .{} });
 
     log.info("Starting loading weights", .{});
     var llama_weights = try zml.aio.loadBuffers(LlamaLM, .{llama_options}, ts, model_arena, platform);
