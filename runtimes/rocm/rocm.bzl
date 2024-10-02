@@ -1,9 +1,9 @@
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 load("//bazel:http_deb_archive.bzl", "http_deb_archive")
 
-ROCM_VERSION = "6.2"
+ROCM_VERSION = "6.2.2"
 BASE_URL = "https://repo.radeon.com/rocm/apt/{}".format(ROCM_VERSION)
-STRIP_PREFIX = "opt/rocm-6.2.0"
+STRIP_PREFIX = "opt/rocm-6.2.2"
 
 def pkg_kwargs(pkg, packages):
     return {
