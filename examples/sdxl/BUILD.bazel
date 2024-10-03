@@ -23,7 +23,7 @@ native_binary(
         # prompt encoder, and vocab
         "$(location @StabilityAI-sd-turbo//:prompt_encoder)",
         "$(location @StabilityAI-sd-turbo//:vocab)",
-        "'A grand city in the year 2100, atmospheric, hyper realistic, 8k, epic composition'",
+        "'A baby panda drinking tea'",
         "$(location :sd-turbo.activations.pt)",
     ],
     data = [
