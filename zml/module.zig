@@ -847,6 +847,16 @@ pub fn ExeWithWeights(comptime func: anytype) type {
             return self.inner.platform;
         }
 
+        pub fn getOutputBuffer(self: Self, i: usize) Buffer {
+            var shards: Buffer.Shards = .{};
+            for (self.output_per_device) |dev_out| {
+                shards.appendAssumeCapacity(dev_out[i]);
+            }
+
+            const out_shape = self.inner.result_buffer_shapes[i];
+            return Buffer.fromPjrtBuffers(self.platform(), out_shape, shards.constSlice());
+        }
+
         pub fn call(self: Self, args: Bufferized(Signature.ArgsT)) Bufferized(Signature.ReturnT) {
             fillBuffers(&args, self.input_per_device, self.inner.model_buffer_count, self.inner.args_buffer_count);
             var event: [1]*pjrt.Event = undefined;
