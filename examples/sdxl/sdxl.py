@@ -19,10 +19,14 @@ image.save("output.png")
 filename = model_path.split("/")[-1] + ".activations.pt"
 
 print(f"Found {len(activations)} activations")
-breakpoint()
 for k in list(activations.keys()):
     if k.startswith("text_encoder"):
         activations.pop(k)
+        continue
+
+    activations[k] = activations[k].to(torch.float16);
+
+breakpoint()
 print(f"Saving {len(activations)} activations to {filename}")
 
 torch.save(activations, filename)
