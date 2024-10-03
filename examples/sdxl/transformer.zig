@@ -48,14 +48,12 @@ pub const LlamaLM = struct {
         self: LlamaLM,
         tokens_: Tensor,
         token_index: Tensor,
-        kv_cache: ?KvCache,
         rng: Tensor.Rng,
     ) struct { Tensor, Tensor, Tensor.Rng } {
         meta.assert(tokens_.dtype() == .i32 and tokens_.rank() >= 1 and token_index.dtype() == .i32 and token_index.rank() == 0, "Can't run ClipTextTransformer ! Expected >=1d tokens and 0d token_index, got: {} and {}", .{ tokens_, token_index });
 
         var tokens = tokens_.withPartialTags(.{.s});
-        const out, const updated_kv_cache = zml.call(self.model, .forward, .{ tokens, if (kv_cache == null) null else token_index, kv_cache });
-        _ = updated_kv_cache; // autofix
+        const out = zml.call(self.model, .forward, .{ tokens, null });
         tokens, const new_rng = updateTokens(self.lm_head, tokens, token_index, out, rng, self.gen_opts);
         return .{ tokens, increment(0, token_index), new_rng };
     }
@@ -85,31 +83,6 @@ pub const LlamaLM = struct {
 
     pub fn increment(_: u8, token_index: Tensor) Tensor {
         return token_index.addConstant(1).reuseBuffer(token_index);
-    }
-
-    /// Run the generation entirely within pjrt.
-    pub fn generate(self: LlamaLM, tokens: Tensor, token_index: Tensor, rng: Tensor.Rng) Tensor {
-        // Generate the first token using the prompt and generate the KV-cache initial values.
-        const prefill = zml.call(self, .forward, .{ tokens, token_index, null, rng });
-
-        const Gen = struct {
-            /// Same as LlamaLM.forward but without optional in the signature
-            pub fn forward(lm: LlamaLM, t_ids: Tensor, t_idx: Tensor, kv_cache_: KvCache, inner_rng: Tensor.Rng) struct { Tensor, Tensor, KvCache, Tensor.Rng } {
-                var kv_cache = kv_cache_;
-                kv_cache.k = kv_cache.k.withPartialTags(.{ .layer, .h, .k, .hd });
-                kv_cache.v = kv_cache.v.withPartialTags(.{ .layer, .h, .k, .hd });
-                return zml.call(lm, .forward, .{ t_ids._ctx, t_ids, t_idx, kv_cache, inner_rng });
-            }
-            // / Stops when we generated `max_seq_len` tokens.
-            pub fn shouldContinue(lm: LlamaLM, t_ids: Tensor, t_idx: Tensor, kv_cache: KvCache, inner_rng: Tensor.Rng) Tensor {
-                _ = kv_cache;
-                _ = inner_rng;
-                std.debug.assert(t_ids.dim(1) == lm.model.max_seq_len);
-                return t_idx.cmp(.LT, Tensor.scalar(t_ids._ctx, lm.model.max_seq_len, t_idx.dtype()));
-            }
-        };
-        // Generate remaining tokens using the KV-cache, return tokens.
-        return zml.ops.while_(Gen.shouldContinue, Gen.forward, self, prefill)[0];
     }
 };
 
@@ -154,21 +127,22 @@ pub const ClipTextTransformer = struct {
 
     /// Forward one token, using KV cache for previous tokens.
     /// Returns result and updated KV cache.
-    pub fn forward(self: ClipTextTransformer, tokens: Tensor, token_index: ?Tensor, kv_cache: ?KvCache) Tensor {
+    pub fn forward(self: ClipTextTransformer, tokens: Tensor, token_index: ?Tensor) Tensor {
         const embeds = embed(self.embed_tokens, tokens, token_index);
 
         var hidden = embeds;
-        const kv_cache0 = kv_cache orelse self.initKvCache(embeds.shape());
-
-        var updated_kv_cache = kv_cache0;
         for (self.layers, 0..) |layer, i| {
-            hidden, updated_kv_cache = zml.call(layer, .forward, .{ hidden, token_index, updated_kv_cache.atLayer(i) });
+            _ = i; // autofix
+            hidden = zml.call(layer, .forward, .{
+                hidden,
+                token_index,
+            });
             hidden = hidden.withPartialTags(.{ .s, .d });
         }
         // TODO: tags seem to be lost by `callFunc`.
         const output = zml.call(self.norm, .forward, .{hidden.withPartialTags(.{ .s, .d })});
 
-        return .{ output, updated_kv_cache.reuseBuffer(kv_cache0) };
+        return output;
     }
 
     pub fn embed(embed_tokens_: zml.nn.TokenEmbedding, tokens_: Tensor, token_index: ?Tensor) Tensor {
@@ -177,14 +151,6 @@ pub const ClipTextTransformer = struct {
         else
             tokens_;
         return zml.call(embed_tokens_, .forward, .{tokens}).withPartialTags(.{ .s, .d });
-    }
-
-    fn initKvCache(self: ClipTextTransformer, embed_shape: zml.Shape) KvCache {
-        const dims = self.shape();
-        var kv_shape = embed_shape.insert(0, .{ .layer = dims.layer }).rename(.{ .s = .k }).splitAxes(.{ .d = .{ .h = dims.nkvh, .hd = dims.hd } });
-        const perm = kv_shape.contiguousPerm(.{ .h, .k, .hd });
-        kv_shape = kv_shape.transpose(perm.constSlice());
-        return KvCache.init(kv_shape);
     }
 };
 
@@ -198,38 +164,20 @@ pub const TransformerLayer = struct {
         self: TransformerLayer,
         x0: Tensor,
         token_index: ?Tensor,
-        kv_cache: ?KvCache,
-    ) struct { Tensor, KvCache } {
+    ) Tensor {
         // Self Attention
         //log.debug("TransformerLayer({}) -> {}", .{ x0, self.input_layernorm.forward(x0) });
         meta.assert(x0.rank() >= 2 and x0.shape().hasTags(.{ .s, .d }), "TransformerLayer expected input shape: {{..., .s, .d}}, received: {}", .{x0});
 
         const x0_normalized = zml.call(self.input_layernorm, .forward, .{x0});
-        const delta0, const updated_kv_cache = zml.call(self.self_attn, .forward, .{ x0_normalized, token_index, kv_cache });
+        const delta0 = zml.call(self.self_attn, .forward, .{ x0_normalized, token_index });
         const x1 = x0.add(delta0);
 
         // Fully Connected
         const x1_normalized = zml.call(self.post_attention_layernorm, .forward, .{x1});
         const x2 = zml.call(self.mlp, .forward, .{x1_normalized}).add(x1);
 
-        return .{ x2.reuseBuffer(x0), updated_kv_cache };
-    }
-};
-
-const RmsNorm = struct {
-    weight: Tensor,
-    eps: f32 = 1e-5,
-
-    /// L2 normalization of input tensor along `.d` axis.
-    pub fn forward(self: RmsNorm, input: Tensor) Tensor {
-        const x = if (input.shape().isFullyTagged()) input else input.withPartialTags(.{.d});
-        // upcast to improve precision
-        const xf32 = x.convert(.f32);
-        const mean = xf32.mul(xf32).mean(.d);
-        const rsqrt = Tensor.rsqrt(mean.addConstant(self.eps)).convert(x.dtype());
-        const normalized = x.mul(rsqrt.broad(x.shape()));
-
-        return normalized.mul(self.weight.convert(x.dtype()).withTags(.{.d}).broad(x.shape()));
+        return x2.reuseBuffer(x0);
     }
 };
 
@@ -264,20 +212,14 @@ pub const SelfAttn = struct {
     /// since the beginning of the sequence, and kv_cache won't be read.
     /// In both case, kv_cache will be updated with the computed key and value.
     /// x: {.b, .s, .d } -> .{.b, .s, .d}
-    pub fn forward(
-        self: SelfAttn,
-        x: Tensor,
-        token_index: ?Tensor,
-        kv_cache_: ?KvCache,
-    ) struct { Tensor, KvCache } {
+    pub fn forward(self: SelfAttn, x: Tensor, token_index: ?Tensor) Tensor {
         // log.debug("x.shape: {}", .{x.shape()});
         const num_kv_heads = if (self.num_kv_heads > 0) self.num_kv_heads else self.num_heads;
         var q = zml.call(self.q_proj, .forward, .{x}).splitAxis(-1, .{ .h = self.num_heads, .hd = .auto });
         var k = zml.call(self.k_proj, .forward, .{x}).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto });
         var v = zml.call(self.v_proj, .forward, .{x}).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto });
         // Generate the attention mask.
-        const kv_cache = kv_cache_ orelse initKvCache(k.shape());
-        const seq_len = kv_cache.k.dim(.k);
+        const seq_len = k.dim(.k);
         var attn_mask = zml.nn.causalAttnMask(.{ .q = seq_len, .k = seq_len }, x.dtype(), null);
         var cos, var sin = zml.nn.ropeCosSin(.{ .s = seq_len, .hd = k.dim(.hd) }, x.dtype(), self.rope_opts);
         if (token_index) |idx| {
@@ -295,88 +237,8 @@ pub const SelfAttn = struct {
         k = k.rename(.{ .s = .k });
         v = v.rename(.{ .s = .k });
 
-        const new_kv_cache = kv_cache.update(k, v, token_index orelse Tensor.scalar(0, .i32));
-        if (token_index) |_| {
-            std.debug.assert(q.dim(.q) == 1);
-            k = new_kv_cache.keys();
-            v = new_kv_cache.values();
-        }
-
         const attn_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask, .allow_cudnn = false });
         const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
-        return .{ zml.call(self.o_proj, .forward, .{attn}), new_kv_cache };
-    }
-
-    fn initKvCache(key_shape: zml.Shape) KvCache {
-        // When we call initKvCache, we haven't renamed .s to .k yet.
-        var kv_shape = key_shape.insert(0, .{ .layer = 1 }).rename(.{ .s = .k });
-        const perm = kv_shape.contiguousPerm(.{ .h, .k, .hd });
-        kv_shape = kv_shape.transpose(perm.constSlice());
-        var res = KvCache.init(kv_shape);
-        res.layer_index = Tensor.scalar(0, .i32);
-        return res;
-    }
-};
-
-pub const KvCache = struct {
-    k: Tensor,
-    v: Tensor,
-    layer_index: Tensor,
-
-    pub fn init(kv_shape: zml.Shape) KvCache {
-        // The KV-cache is initialized with ones to detect reads of uninitialized memory.
-        return .{
-            .k = Tensor.constant(kv_shape, kv_shape.dtype().one()),
-            .v = Tensor.constant(kv_shape, kv_shape.dtype().one()),
-            .layer_index = Tensor.scalar(-1, .i32),
-        };
-    }
-
-    pub fn initShape(kv_shape: zml.Shape) ShapeOf(KvCache) {
-        return .{
-            .k = kv_shape,
-            .v = kv_shape,
-            .layer_index = zml.Shape.init(.{}, .i32),
-        };
-    }
-
-    pub fn keys(self: KvCache) Tensor {
-        return self.k.dynamicSlice(.{ .layer = .{ .start = self.layer_index, .len = 1 } }).squeeze(.layer);
-    }
-
-    pub fn values(self: KvCache) Tensor {
-        return self.v.dynamicSlice(.{ .layer = .{ .start = self.layer_index, .len = 1 } }).squeeze(.layer);
-    }
-
-    pub fn update(self: KvCache, new_k: Tensor, new_v: Tensor, token_index: Tensor) KvCache {
-        return .{
-            .k = self.k.dynamicUpdateSlice(
-                .{ .layer = self.layer_index, .k = token_index },
-                // transpose to match kv-cache layout
-                new_k.contiguous(.{ .h, .k, .hd }),
-            ).reuseBuffer(self.k),
-            .v = self.v.dynamicUpdateSlice(
-                .{ .layer = self.layer_index, .k = token_index },
-                // transpose to match kv-cache layout
-                new_v.contiguous(.{ .h, .k, .hd }),
-            ).reuseBuffer(self.v),
-            .layer_index = self.layer_index,
-        };
-    }
-
-    pub fn atLayer(self: KvCache, layer_index: usize) KvCache {
-        return .{
-            .k = self.k,
-            .v = self.v,
-            .layer_index = Tensor.scalar(layer_index, .i32),
-        };
-    }
-
-    pub fn reuseBuffer(self: KvCache, other: KvCache) KvCache {
-        return .{
-            .k = self.k.reuseBuffer(other.k),
-            .v = self.v.reuseBuffer(other.v),
-            .layer_index = self.layer_index.reuseBuffer(other.layer_index),
-        };
+        return .{zml.call(self.o_proj, .forward, .{attn})};
     }
 };
