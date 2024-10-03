@@ -145,8 +145,15 @@ pub fn compileAndCallWithTensors(platform: zml.Platform, func: anytype, shape_ar
     return mod.call(buffer_args);
 }
 
-pub fn testLayer(platform: zml.Platform, buffer_store: zml.aio.BufferStore, comptime name: []const u8, layer: anytype, layer_weights: zml.Bufferized(@TypeOf(layer)), tolerance: f32) !void {
-    try testLayerOut(platform, buffer_store, name, name ++ ".out", layer, layer_weights, tolerance);
+pub fn testLayer(
+    platform: zml.Platform,
+    activations: zml.aio.BufferStore,
+    comptime name: []const u8,
+    layer: anytype,
+    layer_weights: zml.Bufferized(@TypeOf(layer)),
+    tolerance: f32,
+) !void {
+    try testLayerOut(platform, activations, name, name ++ ".out", layer, layer_weights, tolerance);
 }
 
 pub fn testLayerOut(
@@ -175,7 +182,7 @@ pub fn testLayerOut(
         log.warn("Reference models uses {d} inputs, but implementation uses {d}", .{ n_in_exp, n_in });
     }
 
-    const exe = try zml.compileModel(alloc, layer, .forward, input_shapes, platform, .{});
+    const exe = try zml.compileModel(alloc, layer, .forward, input_shapes, platform);
 
     const n_out_exp = activations.countLayers(out_name);
     if (exe.inner.result_buffer_count != n_out_exp) {
@@ -214,18 +221,18 @@ pub fn testLayerOut(
         try fetch_ctx.prefix.ensureTotalCapacity(alloc, name.len + 32);
         fetch_ctx.prefix.appendSliceAssumeCapacity(name ++ ".in.");
         try zml.meta.mapAlloc(FetchCtx.fetch, alloc, &fetch_ctx, input_tensors, &input_buffers);
-        defer zml.aio.unloadBuffers(input_buffers);
+        defer zml.aio.unloadBuffers(&input_buffers);
         _ = mod.call(input_buffers);
     }
 
     var buf: [1024]u8 = undefined;
-    for (mod.output_buffers, 0..) |out, i| {
+    for (0..mod.inner.result_buffer_count) |i| {
         const full_name = std.fmt.bufPrint(&buf, "{s}.{d}", .{ out_name, i }) catch unreachable;
         const expected_out = activations.get(full_name) orelse {
             log.warn("Output buffer not found: {s}", .{full_name});
             continue;
         };
-        zml.testing.expectClose(expected_out, zml.Buffer.fromPjrtBuffer(platform, out), tolerance) catch |err| {
+        zml.testing.expectClose(expected_out, mod.getOutputBuffer(i), tolerance) catch |err| {
             log.err("{s}.{d} doesn't match !", .{ out_name, i });
             return err;
         };

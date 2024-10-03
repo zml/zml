@@ -821,6 +821,13 @@ pub fn ExeWithWeights(comptime func: anytype) type {
             return self.inner.platform;
         }
 
+        pub fn getOutputBuffer(self: Self, i: usize) Buffer {
+            // TODO
+            meta.assert(self.inner.num_devices == 1, "TODO support sharded output", .{});
+            const out = self.output_per_device[0][i];
+            return Buffer.fromPjrtBuffers(self.inner.platform, &.{out});
+        }
+
         pub fn call(self: Self, args: Bufferized(Signature.ArgsT)) Bufferized(Signature.ReturnT) {
             fillBuffers(&args, self.input_per_device, self.inner.model_buffer_count, self.inner.args_buffer_count);
             var event: [1]*pjrt.Event = undefined;
