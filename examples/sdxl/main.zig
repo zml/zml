@@ -35,14 +35,18 @@ pub fn asyncMain() !void {
     const vae_model_path = args[1];
     _ = vae_model_path; // autofix
     const unet_model_path = args[2];
-    const prompt_encoders_model_path = args[3];
-    _ = prompt_encoders_model_path; // autofix
+    const prompt_encoder_model_path = args[3];
     const vocab_path = args[4];
     _ = vocab_path; // autofix
     const prompt = args[5];
     const activation_path = args[6];
 
     log.info("Prompt: {s}", .{prompt});
+
+    var prompt_encoder_store = try zml.aio.detectFormatAndOpen(allocator, prompt_encoder_model_path);
+    defer prompt_encoder_store.deinit();
+
+    log.info("Loaded prompt encoder from {s}, found {} buffers.", .{ prompt_encoder_model_path, prompt_encoder_store.buffers.count() });
 
     // var vae_weights = try zml.aio.detectFormatAndOpen(allocator, vae_model_path);
     // defer vae_weights.deinit();
@@ -118,7 +122,7 @@ pub const GroupNorm = struct {
         var x_grouped = x.splitAxis(.channels, .{ .group = self.group_size, .c = .auto });
         x_grouped = x_grouped.merge(.{ .cwh = .{ .c, .width, .height } });
 
-        const normed = zml.nn.normalizeVariance(x_grouped, self.eps).reshape(x.shape());
+        const normed = zml.nn.normalizeVariance(x_grouped, .cwh, self.eps).reshape(x.shape());
 
         var out = normed.mul(self.weight.withTags(.{.channels}).broad(x.shape()));
         out = out.add(self.bias.withTags(.{.channels}).broad(x.shape()));
