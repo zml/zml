@@ -9,6 +9,7 @@ zig_cc_binary(
         "@zml//async",
         "@zml//zml",
     ],
+    srcs = ["transformer.zig"],
 )
 
 native_binary(
