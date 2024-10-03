@@ -1,0 +1,33 @@
+load("@bazel_skylib//rules:native_binary.bzl", "native_binary")
+load("@zml//bazel:zig.bzl", "zig_cc_binary")
+
+zig_cc_binary(
+    name = "sdxl_bin",
+    main = "main.zig",
+    deps = [
+        "//third_party/tigerbeetle:flags",
+        "@zml//async",
+        "@zml//zml",
+    ],
+)
+
+native_binary(
+    name = "sdxl",
+    src = ":sdxl_bin",
+    args = [
+        # vae model
+        "$(location @StabilityAI-sd-turbo//:vae)",
+        # lightning model
+        "$(location @StabilityAI-sd-turbo//:unet)",
+        # prompt encoder, and vocab
+        "$(location @StabilityAI-sd-turbo//:prompt_encoder)",
+        "$(location @StabilityAI-sd-turbo//:vocab)",
+        "'A grand city in the year 2100, atmospheric, hyper realistic, 8k, epic composition'",
+    ],
+    data = [
+        "@StabilityAI-sd-turbo//:vae",
+        "@StabilityAI-sd-turbo//:unet",
+        "@StabilityAI-sd-turbo//:prompt_encoder",
+        "@StabilityAI-sd-turbo//:vocab",
+    ],
+)
