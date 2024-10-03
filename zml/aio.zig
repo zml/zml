@@ -305,6 +305,7 @@ fn _populateStruct(
             }
         },
         .Struct => |struct_info| {
+            // TODO support tuple
             var partial_struct = false;
             inline for (struct_info.fields) |field| {
                 try prefix_builder.push(allocator, field.name);
