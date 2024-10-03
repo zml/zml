@@ -5,6 +5,8 @@ const meta = zml.meta;
 const asynk = @import("async");
 const flags = @import("tigerbeetle/flags");
 
+const transformer = @import("transformer.zig");
+
 const log = std.log.scoped(.sdxl);
 
 pub fn main() !void {
@@ -46,7 +48,9 @@ pub fn asyncMain() !void {
     var prompt_encoder_store = try zml.aio.detectFormatAndOpen(allocator, prompt_encoder_model_path);
     defer prompt_encoder_store.deinit();
 
-    log.info("Loaded prompt encoder from {s}, found {} buffers.", .{ prompt_encoder_model_path, prompt_encoder_store.buffers.count() });
+    const prompt_encoder = try zml.aio.populateModel(transformer.Llama, arena, prompt_encoder_store);
+
+    log.info("Loaded prompt encoder from {s}, found {} buffers: {}", .{ prompt_encoder_model_path, prompt_encoder_store.buffers.count(), prompt_encoder });
 
     // var vae_weights = try zml.aio.detectFormatAndOpen(allocator, vae_model_path);
     // defer vae_weights.deinit();
