@@ -3,9 +3,8 @@ const testing = std.testing;
 
 const zml = @import("zml");
 const meta = zml.meta;
-const flags = @import("tigerbeetle/flags");
 
-const log = std.log.scoped(.llama);
+const log = std.log.scoped(.sdxl);
 const gguf = zml.io.gguf;
 const Buffer = zml.Buffer;
 const Tensor = zml.Tensor;
@@ -13,25 +12,19 @@ const ShapeOf = zml.ShapeOf;
 const expectClose = zml.testing.expectClose;
 
 pub const LlamaOptions = struct {
-    gen_opts: zml.nn.SamplingStrategy,
-    max_seq_len: u32,
     num_heads: i64,
     num_kv_heads: i64,
     rms_norm_eps: f32,
     rope_opts: zml.nn.RopeOpts,
 };
 
-/// Llama architecture, using huggingface transformers naming.
+/// ClipTextTransformer architecture, using huggingface transformers naming.
 /// Dimensions of activations: {.b, .s, .d}
 pub const LlamaLM = struct {
     lm_head: zml.nn.Linear,
-    model: Llama,
-
-    // Options controlling generation
-    gen_opts: zml.nn.SamplingStrategy = .{},
+    model: ClipTextTransformer,
 
     pub fn init(self: *LlamaLM, options: LlamaOptions) void {
-        self.gen_opts = options.gen_opts;
         self.model.max_seq_len = options.max_seq_len;
         self.model.num_heads = options.num_heads;
         self.model.num_kv_heads = options.num_kv_heads;
@@ -58,7 +51,7 @@ pub const LlamaLM = struct {
         kv_cache: ?KvCache,
         rng: Tensor.Rng,
     ) struct { Tensor, Tensor, Tensor.Rng } {
-        meta.assert(tokens_.dtype() == .i32 and tokens_.rank() >= 1 and token_index.dtype() == .i32 and token_index.rank() == 0, "Can't run Llama ! Expected >=1d tokens and 0d token_index, got: {} and {}", .{ tokens_, token_index });
+        meta.assert(tokens_.dtype() == .i32 and tokens_.rank() >= 1 and token_index.dtype() == .i32 and token_index.rank() == 0, "Can't run ClipTextTransformer ! Expected >=1d tokens and 0d token_index, got: {} and {}", .{ tokens_, token_index });
 
         var tokens = tokens_.withPartialTags(.{.s});
         const out, const updated_kv_cache = zml.call(self.model, .forward, .{ tokens, if (kv_cache == null) null else token_index, kv_cache });
@@ -120,10 +113,13 @@ pub const LlamaLM = struct {
     }
 };
 
-pub const Llama = struct {
-    embed_tokens: zml.nn.TokenEmbedding,
-    norm: RmsNorm,
-    layers: []TransformerLayer,
+pub const ClipTextTransformer = struct {
+    embeddings: struct {
+        token_embedding: zml.nn.TokenEmbedding,
+        position_embedding: struct { weight: zml.Tensor },
+    },
+    encoder: struct { layers: []TransformerLayer },
+    final_layer_norm: zml.nn.LayerNorm,
 
     max_seq_len: u32 = 0,
     num_heads: i64 = 32,
@@ -142,7 +138,7 @@ pub const Llama = struct {
         dtype: zml.DataType,
     };
 
-    pub fn shape(self: Llama) Shape {
+    pub fn shape(self: ClipTextTransformer) Shape {
         const key_dim = self.layers[0].self_attn.k_proj.weight.dim(0);
         const num_kv_heads = if (self.num_kv_heads > 0) self.num_kv_heads else self.num_heads;
 
@@ -158,7 +154,7 @@ pub const Llama = struct {
 
     /// Forward one token, using KV cache for previous tokens.
     /// Returns result and updated KV cache.
-    pub fn forward(self: Llama, tokens: Tensor, token_index: ?Tensor, kv_cache: ?KvCache) Tensor {
+    pub fn forward(self: ClipTextTransformer, tokens: Tensor, token_index: ?Tensor, kv_cache: ?KvCache) Tensor {
         const embeds = embed(self.embed_tokens, tokens, token_index);
 
         var hidden = embeds;
@@ -183,7 +179,7 @@ pub const Llama = struct {
         return zml.call(embed_tokens_, .forward, .{tokens}).withPartialTags(.{ .s, .d });
     }
 
-    fn initKvCache(self: Llama, embed_shape: zml.Shape) KvCache {
+    fn initKvCache(self: ClipTextTransformer, embed_shape: zml.Shape) KvCache {
         const dims = self.shape();
         var kv_shape = embed_shape.insert(0, .{ .layer = dims.layer }).rename(.{ .s = .k }).splitAxes(.{ .d = .{ .h = dims.nkvh, .hd = dims.hd } });
         const perm = kv_shape.contiguousPerm(.{ .h, .k, .hd });
@@ -193,10 +189,10 @@ pub const Llama = struct {
 };
 
 pub const TransformerLayer = struct {
-    input_layernorm: RmsNorm,
+    layer_norm1: zml.nn.LayerNorm,
     self_attn: SelfAttn,
-    post_attention_layernorm: RmsNorm,
-    mlp: Mlp,
+    layer_norm2: zml.nn.LayerNorm,
+    mlp: ClipMlp,
 
     pub fn forward(
         self: TransformerLayer,
@@ -237,16 +233,17 @@ const RmsNorm = struct {
     }
 };
 
-const Mlp = struct {
-    up_proj: zml.nn.Linear, // (dim -> hidden_dim)
-    gate_proj: zml.nn.Linear, // (dim -> hidden_dim)
-    down_proj: zml.nn.Linear, // (hidden_dim -> dim)
+const ClipMlp = struct {
+    fc1: zml.nn.Linear,
+    fc2: zml.nn.Linear,
+    activation: zml.nn.Activation = .gelu,
 
-    pub fn forward(self: Mlp, x: Tensor) Tensor {
-        const proj = zml.call(self.up_proj, .forward, .{x});
-        var output = zml.call(self.gate_proj, .forward, .{x});
-        output = output.silu().mul(proj);
-        return zml.call(self.down_proj, .forward, .{output});
+    pub fn forward(self: ClipMlp, x: Tensor) Tensor {
+        var y = x;
+        y = self.fc1.forward(y);
+        y = self.activation.forward(y);
+        y = self.fc2.forward(y);
+        return y;
     }
 };
 
@@ -255,7 +252,7 @@ pub const SelfAttn = struct {
     k_proj: zml.nn.Linear,
     v_proj: zml.nn.Linear,
 
-    o_proj: zml.nn.Linear,
+    out_proj: zml.nn.Linear,
     num_heads: i64 = undefined,
     num_kv_heads: i64 = 0,
     rope_opts: zml.nn.RopeOpts = undefined,

@@ -593,6 +593,7 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
             buf_with_metadata._shape = obj._shape;
             obj.* = try zml.Buffer.from(platform, buf_with_metadata);
         } else {
+            log.warn("Buffer not found: '{s}'", .{prefix});
             return error.BufferNotFound;
         };
     }

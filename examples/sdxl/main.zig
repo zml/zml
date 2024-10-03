@@ -6,6 +6,7 @@ const asynk = @import("async");
 const flags = @import("tigerbeetle/flags");
 
 const transformer = @import("transformer.zig");
+const ClipTextTransformer = transformer.ClipTextTransformer;
 
 const log = std.log.scoped(.sdxl);
 
@@ -42,15 +43,19 @@ pub fn asyncMain() !void {
     _ = vocab_path; // autofix
     const prompt = args[5];
     const activation_path = args[6];
+    var activations = try zml.aio.detectFormatAndOpen(allocator, activation_path);
+    defer activations.deinit();
 
     log.info("Prompt: {s}", .{prompt});
 
     var prompt_encoder_store = try zml.aio.detectFormatAndOpen(allocator, prompt_encoder_model_path);
     defer prompt_encoder_store.deinit();
 
-    const prompt_encoder = try zml.aio.populateModel(transformer.Llama, arena, prompt_encoder_store);
+    const prompt_encoder = try zml.aio.populateModelWithPrefix(ClipTextTransformer, arena, prompt_encoder_store, "text_model");
 
+    const prompt_encoder_weights = try zml.aio.loadModelBuffersWithPrefix(ClipTextTransformer, prompt_encoder, prompt_encoder_store, arena, platform, "text_model");
     log.info("Loaded prompt encoder from {s}, found {} buffers: {}", .{ prompt_encoder_model_path, prompt_encoder_store.buffers.count(), prompt_encoder });
+    try testPromptEncoder(platform, activations, prompt_encoder, prompt_encoder_weights);
 
     // var vae_weights = try zml.aio.detectFormatAndOpen(allocator, vae_model_path);
     // defer vae_weights.deinit();
@@ -73,11 +78,15 @@ pub fn asyncMain() !void {
     }
     log.info("Unet: {}", .{unet});
 
-    var activations = try zml.aio.detectFormatAndOpen(allocator, activation_path);
-    defer activations.deinit();
-
     const unet_weights = try zml.aio.loadModelBuffers(Unet2DConditionModel, unet, unet_store, arena, platform);
+    try testUnet(platform, activations, unet, unet_weights);
+}
 
+fn testPromptEncoder(platform: zml.Platform, activations: zml.aio.BufferStore, encoder: ClipTextTransformer, encoder_weights: zml.Bufferized(ClipTextTransformer)) !void {
+    try zml.testing.testLayer(platform, activations, "text_encoder.text_model.encoder.layers.1.mlp", encoder.encoder.layers[1].mlp, encoder_weights.encoder.layers[1].mlp, 5e-2);
+}
+
+fn testUnet(platform: zml.Platform, activations: zml.aio.BufferStore, unet: Unet2DConditionModel, unet_weights: zml.Bufferized(Unet2DConditionModel)) !void {
     try zml.testing.testLayer(platform, activations, "unet.conv_in", unet.conv_in, unet_weights.conv_in, 5e-3);
     try zml.testing.testLayer(platform, activations, "unet.conv_out", unet.conv_out, unet_weights.conv_out, 5e-3);
     try zml.testing.testLayer(platform, activations, "unet.conv_norm_out", unet.conv_norm_out, unet_weights.conv_norm_out, 5e-3);
