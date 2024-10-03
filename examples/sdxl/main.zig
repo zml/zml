@@ -51,7 +51,14 @@ pub fn asyncMain() !void {
     var prompt_encoder_store = try zml.aio.detectFormatAndOpen(allocator, prompt_encoder_model_path);
     defer prompt_encoder_store.deinit();
 
-    const prompt_encoder = try zml.aio.populateModelWithPrefix(ClipTextTransformer, arena, prompt_encoder_store, "text_model");
+    var prompt_encoder = try zml.aio.populateModelWithPrefix(ClipTextTransformer, arena, prompt_encoder_store, "text_model");
+
+    prompt_encoder.init(.{
+        .max_position_embeddings = 77,
+        .num_heads = 16,
+        .layer_norm_eps = 1e-5,
+        .hidden_act = .gelu,
+    });
 
     const prompt_encoder_weights = try zml.aio.loadModelBuffersWithPrefix(ClipTextTransformer, prompt_encoder, prompt_encoder_store, arena, platform, "text_model");
     log.info("Loaded prompt encoder from {s}, found {} buffers: {}", .{ prompt_encoder_model_path, prompt_encoder_store.buffers.count(), prompt_encoder });
@@ -83,15 +90,18 @@ pub fn asyncMain() !void {
 }
 
 fn testPromptEncoder(platform: zml.Platform, activations: zml.aio.BufferStore, encoder: ClipTextTransformer, encoder_weights: zml.Bufferized(ClipTextTransformer)) !void {
-    try zml.testing.testLayer(platform, activations, "text_encoder.text_model.encoder.layers.1.mlp", encoder.encoder.layers[1].mlp, encoder_weights.encoder.layers[1].mlp, 5e-2);
+    try zml.testing.testLayer(platform, activations, "text_encoder.text_model.encoder.layers.1.mlp", encoder.encoder.layers[1].mlp, encoder_weights.encoder.layers[1].mlp, 0.05);
+    try zml.testing.testLayer(platform, activations, "text_encoder.text_model.encoder.layers.1", encoder.encoder.layers[1], encoder_weights.encoder.layers[1], 0.05);
+    try zml.testing.testLayer(platform, activations, "text_encoder.text_model.embeddings", encoder.embeddings, encoder_weights.embeddings, 0.001);
+    try zml.testing.testLayer(platform, activations, "text_encoder.text_model", encoder, encoder_weights, 0.1);
 }
 
 fn testUnet(platform: zml.Platform, activations: zml.aio.BufferStore, unet: Unet2DConditionModel, unet_weights: zml.Bufferized(Unet2DConditionModel)) !void {
-    try zml.testing.testLayer(platform, activations, "unet.conv_in", unet.conv_in, unet_weights.conv_in, 5e-3);
-    try zml.testing.testLayer(platform, activations, "unet.conv_out", unet.conv_out, unet_weights.conv_out, 5e-3);
-    try zml.testing.testLayer(platform, activations, "unet.conv_norm_out", unet.conv_norm_out, unet_weights.conv_norm_out, 5e-3);
+    try zml.testing.testLayer(platform, activations, "unet.conv_in", unet.conv_in, unet_weights.conv_in, 0.005);
+    try zml.testing.testLayer(platform, activations, "unet.conv_out", unet.conv_out, unet_weights.conv_out, 0.005);
+    try zml.testing.testLayer(platform, activations, "unet.conv_norm_out", unet.conv_norm_out, unet_weights.conv_norm_out, 0.005);
 
-    try zml.testing.testLayer(platform, activations, "unet.down_blocks.3.resnets.0", unet.down_blocks.@"3".resnets[0], unet_weights.down_blocks.@"3".resnets[0], 5e-2);
+    try zml.testing.testLayer(platform, activations, "unet.down_blocks.3.resnets.0", unet.down_blocks.@"3".resnets[0], unet_weights.down_blocks.@"3".resnets[0], 0.05);
 }
 
 pub const Unet2DConditionModel = struct {
