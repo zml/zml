@@ -384,6 +384,7 @@ fn _populateStruct(
             }
         },
         .Struct => |struct_info| {
+            // TODO support tuple
             var partial_struct = false;
             inline for (struct_info.fields) |field| {
                 if (field.is_comptime or @sizeOf(field.type) == 0) continue;

@@ -57,6 +57,12 @@ pub fn asyncMain() !void {
     var unet = try zml.aio.populateModel(Unet2DConditionModel, arena, unet_store);
     unet.conv_norm_out.group_size = 32;
     unet.conv_norm_out.eps = 1e-5;
+    for (unet.down_blocks.@"3".resnets) |*resnet| {
+        resnet.norm1.group_size = 32;
+        resnet.norm1.eps = 1e-5;
+        resnet.norm2.group_size = 32;
+        resnet.norm2.eps = 1e-5;
+    }
     log.info("Unet: {}", .{unet});
 
     var activations = try zml.aio.detectFormatAndOpen(allocator, activation_path);
@@ -65,7 +71,10 @@ pub fn asyncMain() !void {
     const unet_weights = try zml.aio.loadModelBuffers(Unet2DConditionModel, unet, unet_store, arena, platform);
 
     try zml.testing.testLayer(platform, activations, "unet.conv_in", unet.conv_in, unet_weights.conv_in, 5e-3);
+    try zml.testing.testLayer(platform, activations, "unet.conv_out", unet.conv_out, unet_weights.conv_out, 5e-3);
     try zml.testing.testLayer(platform, activations, "unet.conv_norm_out", unet.conv_norm_out, unet_weights.conv_norm_out, 5e-3);
+
+    try zml.testing.testLayer(platform, activations, "unet.down_blocks.3.resnets.0", unet.down_blocks.@"3".resnets[0], unet_weights.down_blocks.@"3".resnets[0], 5e-2);
 }
 
 pub const Unet2DConditionModel = struct {
@@ -73,7 +82,7 @@ pub const Unet2DConditionModel = struct {
 
     // time_proj
     // time_embedding
-    // down_blocks
+    down_blocks: DownBlocks,
     // up_blocks
     // mid_block
 
@@ -115,5 +124,48 @@ pub const GroupNorm = struct {
         out = out.add(self.bias.withTags(.{.channels}).broad(x.shape()));
 
         return out;
+    }
+};
+
+pub const DownBlocks = struct {
+    @"0": CrossAttnDownBlock2D,
+    @"1": CrossAttnDownBlock2D,
+    @"2": CrossAttnDownBlock2D,
+    @"3": DownBlock2D,
+
+    pub const CrossAttnDownBlock2D = struct {};
+
+    pub const DownBlock2D = struct {
+        resnets: []ResnetBlock2D,
+    };
+};
+
+pub const ResnetBlock2D = struct {
+    norm1: GroupNorm,
+    conv1: Conv2d,
+    time_emb_proj: zml.nn.Linear,
+    norm2: GroupNorm,
+    conv2: Conv2d,
+    nonlinearity: zml.nn.Activation = .silu,
+    // TODO: output_scale_factor ?
+
+    pub fn forward(self: ResnetBlock2D, images: zml.Tensor, time_embedding: zml.Tensor) zml.Tensor {
+        const x = images.withPartialTags(.{ .channels, .width, .height });
+        var hidden = self.norm1.forward(x);
+        hidden = self.nonlinearity.forward(hidden);
+        hidden = self.conv1.forward(hidden);
+
+        var t_emb = time_embedding.withPartialTags(.{.channels});
+        t_emb = self.nonlinearity.forward(t_emb);
+        t_emb = self.time_emb_proj.forward(t_emb);
+
+        log.warn("hidden: {}, temb: {}", .{ hidden, t_emb });
+        hidden = hidden.add(t_emb.appendAxes(.{ .width, .height }).broad(x.shape()));
+        hidden = self.norm2.forward(hidden);
+
+        hidden = self.nonlinearity.forward(hidden);
+        hidden = self.conv2.forward(hidden);
+
+        return x.add(hidden);
     }
 };
