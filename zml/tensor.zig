@@ -3,6 +3,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const testing = std.testing;
 
+const pjrt = @import("pjrtx.zig");
 const meta = @import("meta.zig");
 const mlir = @import("mlir.zig");
 const ops = @import("ops.zig");
@@ -3486,26 +3487,43 @@ test "argMax" {
     }
 }
 
-test "Tensor.dynamicSlice1d" {
+fn dynamicSlice1d() void {
     const zml = @import("zml.zig");
     const platform = zml.testing.env();
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
     const T = f32;
 
     {
+        defer _ = arena_state.reset(.retain_capacity);
         const x = try zml.Buffer.fromArray(platform, [10]T{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 });
         const z = try zml.Buffer.scalar(platform, 4, .i32);
-        const res = try zml.testing.compileAndCall(platform, Tensor.dynamicSlice1d, .{ x, 0, 2, z });
+        var comp = zml.module.CompilationContext.init(allocator, "test", platform, .{});
+        defer comp.deinit();
+        var x_tensor = x.shape();
+        var args: struct { i8, u63, zml.Shape } = .{ 0, 2, z.shape() };
+        var dynamicSlice = try zml.compileRaw(allocator, &comp, Tensor.dynamicSlice1d, &x_tensor, &args);
 
-        try testing.expectEqual([2]T{ 4, 5 }, try res.getValue([2]T));
+        var res: [1]*pjrt.Buffer = undefined;
+        dynamicSlice.call(&.{ x._data, z._data }, &res);
+        try testing.expectEqual([2]T{ 4, 5 }, try zml.Buffer.fromPjrtBuffer(platform, res[0]).getValue([2]T));
     }
 
     {
         // Strided
-        const x = try zml.Buffer.fromArray(platform, [2][5]T{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } });
-        const z = try zml.Buffer.scalar(platform, 3, .i32);
+        var x = try zml.Buffer.fromArray(platform, [2][5]T{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } });
+        var z = try zml.Buffer.scalar(platform, 3, .i32);
 
-        const res = try zml.testing.compileAndCall(platform, Tensor.dynamicSlice1d, .{ x, 1, 2, z });
-        try testing.expectEqual([4]T{ 3, 4, 8, 9 }, res.getValue([4]T));
+        var comp = zml.module.CompilationContext.init(allocator, "test", platform, .{});
+        defer comp.deinit();
+        var x_tensor = x.shape();
+        var args: struct { i8, u63, zml.Tensor } = .{ 1, 2, z.shape() };
+        var dynamicSlice = try zml.compileRaw(allocator, &comp, Tensor.dynamicSlice1d, &x_tensor, &args);
+
+        var res: [1]*pjrt.Buffer = undefined;
+        dynamicSlice.call(&.{ x._data, z._data }, &res);
+        try testing.expectEqualSlices(T, &.{ 3, 4, 8, 9 }, &(try zml.Buffer.fromPjrtBuffer(platform, res[0]).getValue([4]T)));
     }
 }
 
