@@ -23,7 +23,7 @@ native_binary(
         # prompt encoder, and vocab
         "$(location @StabilityAI-sd-turbo//:prompt_encoder)",
         "$(location @StabilityAI-sd-turbo//:vocab)",
-        "'A baby panda drinking tea'",
+        "'A cinematic shot of a baby racoon wearing an intricate italian priest robe.'",
         "$(location :sd-turbo.activations.pt)",
     ],
     data = [
