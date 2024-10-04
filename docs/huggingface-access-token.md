@@ -20,10 +20,8 @@ access token to log into your account on Huggingface, directly from `bazel`, in 
 You can use the `HUGGINGFACE_TOKEN` environment variable to store the token or use
 its standard location:
 ```
-mkdir -p $HOME/.cache/huggingface/; echo -n <hf_my_token> > "$HOME/.cache/huggingface/token"
+mkdir -p $HOME/.cache/huggingface/; echo <hf_my_token> > "$HOME/.cache/huggingface/token"
 ```
-
-The `-n` is important in order to not append an "end of line" character at the end of the file that would corrupt the token.
 
 Now you're ready to download a gated model like `Meta-Llama-3-8b`!
 
