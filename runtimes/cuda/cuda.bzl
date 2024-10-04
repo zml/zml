@@ -4,8 +4,8 @@ load("//bazel:http_deb_archive.bzl", "http_deb_archive")
 
 ARCH = "linux-x86_64"
 
-CUDA_VERSION = "12.6.1"
-CUDNN_VERSION = "9.3.0"
+CUDA_VERSION = "12.6.2"
+CUDNN_VERSION = "9.4.0"
 
 _CC_IMPORT_TPL = """\
 cc_import(
