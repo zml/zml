@@ -128,13 +128,15 @@ pub const Tokenizer = struct {
         add_bos: bool = true,
         add_eos: bool = false,
         pad_to: u32 = 0,
+        // Print tokenization intermediary steps.
+        debug: bool = false,
     };
 
     pub fn encode(self: *const Tokenizer, allocator: std.mem.Allocator, raw: []const u8, options: EncodeOptions) ![]u32 {
-        // log.debug("Tokenizer.encode('{s}')", .{raw});
+        if (options.debug) log.debug("Tokenizer.encode('{s}')", .{raw});
         const input = if (self.normalizer) |n| try n.normalize(allocator, raw) else raw;
         defer if (self.normalizer) |_| allocator.free(input);
-        // log.debug("Tokenizer.encode.normalize -> '{s}'", .{input});
+        if (options.debug) log.debug("Tokenizer.encode.normalize -> '{s}'", .{input});
 
         // Allocate a buffer that can fit all indices as well as extra character if requested.
         // We then slice it so that the token merging code doesn't see the bos token.
@@ -158,7 +160,12 @@ pub const Tokenizer = struct {
         var stable_off: usize = 0;
         while (true) {
             // Step by step visualization of the progress.
-            // log.debug("tokens: {d} -> {s}", .{ tok_buff[0..num_tokens], try self.decodeWithOpts(allocator, tok_buff[0..num_tokens], .{ .sep = "|" }) });
+            if (options.debug) {
+                var _debug_buf: [256]u8 = undefined;
+                var debug_progress: std.ArrayList(u8) = .{ .items = _debug_buf[0..0], .capacity = _debug_buf.len, .allocator = undefined };
+                self.decodeWithOpts(&debug_progress, tok_buff[0..num_tokens], .{ .sep = "|" }) catch {};
+                log.debug("tokens: {d} -> {s}", .{ tok_buff[0..num_tokens], debug_progress.items });
+            }
             var best_score: f32 = -1e10;
             var best_token: u32 = 0;
             var best_idx: ?usize = null;
@@ -273,7 +280,7 @@ pub const Tokenizer = struct {
     /// Converts the given slice of tokens back into bytes.
     /// Note that if the tokenizer allows sub-unicode bytes, it's possible
     /// the output is not valid utf8.
-    pub fn decode(self: *const Tokenizer, allocator: std.mem.Allocator, input: []const u32) ![]u8 {
+    pub fn decode(self: *const Tokenizer, allocator: std.mem.Allocator, input: []const u32) error{OutOfMemory}![]u8 {
         var output = std.ArrayList(u8).init(allocator);
         errdefer output.deinit();
 
@@ -286,7 +293,7 @@ pub const Tokenizer = struct {
         output: *std.ArrayList(u8),
         input: []const u32,
         opts: struct { sep: []const u8 = "" },
-    ) !void {
+    ) error{OutOfMemory}!void {
         // Flag used to indicate if the first dummy whitespace has been consumed.
         for (input) |id| {
             // Retrieve the slice corresponding to the id.
@@ -795,15 +802,14 @@ pub fn fromHfJson(allocator: std.mem.Allocator, tokenizer_path: []const u8) !Tok
     const file = try std.fs.cwd().openFile(tokenizer_path, .{});
     defer file.close();
 
-    const file_content = try file.readToEndAlloc(allocator, 32 * 1024 * 1024);
-    defer allocator.free(file_content);
-    // TODO create local arena and use parseFromSliceLeaky.
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, file_content, .{
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const file_content = try file.readToEndAlloc(arena, 32 * 1024 * 1024);
+
+    const info = try std.json.parseFromSliceLeaky(std.json.Value, arena, file_content, .{
         .duplicate_field_behavior = .use_last,
     });
-    defer parsed.deinit();
-    const info = parsed.value;
-
     const main_object = switch (info) {
         .object => |obj| if (obj.get("added_tokens") == null or obj.get("model") == null) {
             return error.InvalidFormat;
