@@ -140,6 +140,10 @@ fn testUnet(platform: zml.Platform, activations: zml.aio.BufferStore, unet: Unet
     try zml.testing.testLayer(platform, activations, "unet.conv_norm_out", unet.conv_norm_out, unet_weights.conv_norm_out, 0.005);
 
     try zml.testing.testLayer(platform, activations, "unet.down_blocks.3.resnets.0", unet.down_blocks.@"3".resnets[0], unet_weights.down_blocks.@"3".resnets[0], 0.05);
+
+    try zml.testing.testLayer(platform, activations, "unet.down_blocks.3", unet.down_blocks.@"3", unet_weights.down_blocks.@"3", 0.05);
+
+    try zml.testing.testLayer(platform, activations, "unet.down_blocks.0", unet.down_blocks.@"0", unet_weights.down_blocks.@"0", 0.05);
 }
 
 pub const Unet2DConditionModel = struct {
@@ -198,10 +202,21 @@ pub const DownBlocks = struct {
     @"2": CrossAttnDownBlock2D,
     @"3": DownBlock2D,
 
-    pub const CrossAttnDownBlock2D = struct {};
+    pub const CrossAttnDownBlock2D = struct {
+        attentions: []Transformer2DModel,
+        resnets: []ResnetBlock2D,
+    };
 
     pub const DownBlock2D = struct {
         resnets: []ResnetBlock2D,
+
+        pub fn forward(self: DownBlock2D, images: zml.Tensor, time_embedding: zml.Tensor) zml.Tensor {
+            var y = images;
+            for (self.resnets) |resnet| {
+                y = zml.call(resnet, .forward, .{ y, time_embedding });
+            }
+            return y;
+        }
     };
 };
 
@@ -233,6 +248,37 @@ pub const ResnetBlock2D = struct {
 
         return x.add(hidden);
     }
+};
+
+pub const Transformer2DModel = struct {
+    norm: GroupNorm,
+    proj_in: zml.nn.Linear,
+    transformer_blocks: []BasicTransformerBlock,
+};
+
+pub const BasicTransformerBlock = struct {
+    norm1: zml.nn.LayerNorm,
+    attn1: Attention,
+    norm2: zml.nn.LayerNorm,
+    attn2: Attention,
+    norm3: zml.nn.LayerNorm,
+    ff: struct { net: struct {
+        @"0": GEGLU,
+        @"2": zml.nn.Linear,
+    } },
+
+    const Attention = struct {
+        to_q: zml.nn.Linear,
+        to_k: zml.nn.Linear,
+        to_v: zml.nn.Linear,
+        to_out: struct {
+            @"0": zml.nn.Linear,
+        },
+    };
+
+    const GEGLU = struct {
+        proj: zml.nn.Linear,
+    };
 };
 
 pub fn loadSdTurboTokenizer(allocator: std.mem.Allocator, vocab_json_path: []const u8) !zml.tokenizer.Tokenizer {
