@@ -20,8 +20,10 @@ download models.
 * store the token on your machine (replace the placeholder with your actual
   token):
 
+You can use the `HUGGINGFACE_TOKEN` environment variable to store the token or use
+its standard location:
 ```
-echo -n <hf_my_token> > `$HOME/.cache/huggingface/token`
+mkdir -p $HOME/.cache/huggingface/; echo -n <hf_my_token> > "$HOME/.cache/huggingface/token"
 ```
 
 The `-n` is important in order to not append an "end of line" character at the
@@ -32,7 +34,8 @@ Now you're ready to download a gated model like `Meta-Llama-3-8b`!
 **Example:**
 
 ```
-# requires token in $HOME/.cache/huggingface/token
+# requires token in $HOME/.cache/huggingface/token, as created by the
+# `huggingface-cli login` command, or the `HUGGINGFACE_TOKEN` environment variable.
 cd examples
 bazel run -c opt //llama:Meta-Llama-3-8b
 bazel run -c opt //llama:Meta-Llama-3-8b -- --promt="Once upon a time,"

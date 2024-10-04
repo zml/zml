@@ -63,7 +63,7 @@ referred to as the "prompt".
 
 To start, you can use a small model trained specifically on children's history
 books. This model has been trained by [Andrej Karpathy](https://x.com/karpathy);
-you can read more about it on his 
+you can read more about it on his
 [Github](https://github.com/karpathy/llama2.c).
 
 ```
@@ -86,14 +86,15 @@ This model has restrictions, see
 [here](https://huggingface.co/meta-llama/Meta-Llama-3-8B): it **requires
 approval from Meta on Huggingface**, which can take a few hours to get granted.
 
-While waiting for approval, you can already 
+While waiting for approval, you can already
 [generate your Huggingface access token](../howtos/huggingface_access_token.md).
 
 Once you've been granted access, you're ready to download a gated model like
 `Meta-Llama-3-8b`!
 
 ```
-# requires token in $HOME/.cache/huggingface/token
+# requires token in $HOME/.cache/huggingface/token, as created by the
+# `huggingface-cli login` command, or the `HUGGINGFACE_TOKEN` environment variable.
 cd examples
 bazel run -c opt //llama:Meta-Llama-3-8b
 bazel run -c opt //llama:Meta-Llama-3-8b -- --promt="Once upon a time,"
@@ -134,12 +135,12 @@ bazel run -c opt //llama:OpenLLaMA-3B             \
 
 In [Deploying Models on a Server](../howtos/deploy_on_server.md), we show how you can
 cross-compile and package for a specific architecture, then deploy and run your
-model. Alternatively, you can also [dockerize](../howtos/dockerize_models.md) your 
+model. Alternatively, you can also [dockerize](../howtos/dockerize_models.md) your
 model.
 
 You might also want to check out the
 [examples](https://github.com/zml/zml/tree/master/examples), read through the
-[documentation](../README.md), start 
-[writing your first model](../tutorials/write_first_model.md), or read about more 
+[documentation](../README.md), start
+[writing your first model](../tutorials/write_first_model.md), or read about more
 high-level [ZML concepts](../learn/concepts.md).
 
