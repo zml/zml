@@ -40,7 +40,6 @@ pub fn asyncMain() !void {
     const unet_model_path = args[2];
     const prompt_encoder_model_path = args[3];
     const vocab_path = args[4];
-    _ = vocab_path; // autofix
     const prompt = args[5];
     const activation_path = args[6];
     var activations = try zml.aio.detectFormatAndOpen(allocator, activation_path);
@@ -48,21 +47,60 @@ pub fn asyncMain() !void {
 
     log.info("Prompt: {s}", .{prompt});
 
-    var prompt_encoder_store = try zml.aio.detectFormatAndOpen(allocator, prompt_encoder_model_path);
-    defer prompt_encoder_store.deinit();
-
-    var prompt_encoder = try zml.aio.populateModelWithPrefix(ClipTextTransformer, arena, prompt_encoder_store, "text_model");
-
-    prompt_encoder.init(.{
+    const prompt_encoder_config: transformer.ClipTextConfig = .{
         .max_position_embeddings = 77,
         .num_heads = 16,
         .layer_norm_eps = 1e-5,
         .hidden_act = .gelu,
-    });
+    };
 
-    const prompt_encoder_weights = try zml.aio.loadModelBuffersWithPrefix(ClipTextTransformer, prompt_encoder, prompt_encoder_store, arena, platform, "text_model");
-    log.info("Loaded prompt encoder from {s}, found {} buffers: {}", .{ prompt_encoder_model_path, prompt_encoder_store.buffers.count(), prompt_encoder });
-    try testPromptEncoder(platform, activations, prompt_encoder, prompt_encoder_weights);
+    const tokenizer = try loadSdTurboTokenizer(allocator, vocab_path);
+    defer tokenizer.deinit();
+    const prompt_tokens = try tokenizer.encode(allocator, prompt, .{
+        .add_bos = true,
+        .add_eos = true,
+        .pad_to = prompt_encoder_config.max_position_embeddings,
+        .debug = true,
+    });
+    log.info("prompt tokens: {d}", .{prompt_tokens});
+    defer allocator.free(prompt_tokens);
+
+    const prompt_dev = try zml.Buffer.fromSlice(
+        platform,
+        .{ .s = prompt_encoder_config.max_position_embeddings },
+        prompt_tokens,
+    );
+
+    const prompt_encoder_exe = blk: {
+        var local_arena = std.heap.ArenaAllocator.init(allocator);
+        defer local_arena.deinit();
+        const arena_alloc = local_arena.allocator();
+
+        var store = try zml.aio.detectFormatAndOpen(allocator, prompt_encoder_model_path);
+        defer store.deinit();
+
+        var prompt_encoder = try zml.aio.populateModelWithPrefix(ClipTextTransformer, arena_alloc, store, "text_model");
+        prompt_encoder.init(prompt_encoder_config);
+
+        const prompt_encoder_weights = try zml.aio.loadModelBuffersWithPrefix(ClipTextTransformer, prompt_encoder, store, arena_alloc, platform, "text_model");
+        log.info("Loaded prompt encoder from {s}, found {} buffers: {}", .{ prompt_encoder_model_path, store.buffers.count(), prompt_encoder });
+
+        // try testPromptEncoder(platform, activations, prompt_encoder, prompt_encoder_weights);
+
+        const exe = try zml.compileModel(
+            allocator,
+            prompt_encoder,
+            .forward,
+            .{zml.Shape.init(.{ .s = prompt_encoder.config.max_position_embeddings }, .i32)},
+            platform,
+        );
+
+        break :blk try exe.prepare(allocator, prompt_encoder_weights);
+    };
+    defer prompt_encoder_exe.deinit();
+
+    const prompt_embed = prompt_encoder_exe.call(.{prompt_dev});
+    _ = prompt_embed; // autofix
 
     // var vae_weights = try zml.aio.detectFormatAndOpen(allocator, vae_model_path);
     // defer vae_weights.deinit();
@@ -196,3 +234,56 @@ pub const ResnetBlock2D = struct {
         return x.add(hidden);
     }
 };
+
+pub fn loadSdTurboTokenizer(allocator: std.mem.Allocator, vocab_json_path: []const u8) !zml.tokenizer.Tokenizer {
+    const file = try std.fs.cwd().openFile(vocab_json_path, .{});
+    defer file.close();
+
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const file_content = try file.readToEndAlloc(arena, 32 * 1024 * 1024);
+
+    const info = try std.json.parseFromSliceLeaky(std.json.Value, arena, file_content, .{
+        .duplicate_field_behavior = .use_last,
+    });
+
+    const json_vocab = switch (info) {
+        .object => |obj| obj,
+        else => return error.InvalidFormat,
+    };
+
+    const n: u32 = @intCast(json_vocab.count() + 1);
+    const normalizer: zml.tokenizer.Normalizer = .{ .flags = .{
+        .escape_whitespaces = false,
+        .remove_extra_whitespaces = true,
+        .add_dummy_prefix = false,
+        .add_dummy_suffix = true,
+        .lower_case_ascii = true,
+        .split_on_punct_ascii = true,
+    } };
+    var tokenizer = try zml.tokenizer.Tokenizer.init(allocator, n, 256, normalizer, undefined, true);
+    const tok_alloc = tokenizer.arena_state.allocator();
+    for (json_vocab.keys(), json_vocab.values()) |key, value| {
+        const idx: u32 = switch (value) {
+            .integer => |i| @intCast(i),
+            else => return error.InvalidFormat,
+        };
+        // Replaced "</w>" suffix by " "
+        var word = try tok_alloc.dupe(u8, key);
+        if (std.mem.endsWith(u8, word, "</w>")) {
+            word = word[0 .. word.len - "</w>".len + 1];
+            word[word.len - 1] = ' ';
+        }
+        tokenizer.addOwnedTokenByIndex(idx, @floatFromInt(n - idx), word);
+    }
+    tokenizer.addOwnedTokenByIndex(n - 1, 0, try tok_alloc.dupe(u8, " "));
+
+    tokenizer.special_tokens = .{
+        .bos = tokenizer.token_lookup.get("<|startoftext|>").?,
+        .eos = tokenizer.token_lookup.get("<|endoftext|>").?,
+        .unk = tokenizer.token_lookup.get("<|endoftext|>").?,
+        .pad = tokenizer.token_lookup.get("!").?,
+    };
+    return tokenizer;
+}
