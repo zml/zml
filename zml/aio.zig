@@ -276,7 +276,7 @@ fn _populateStruct(
         };
     }
 
-    switch (type_info) {
+    return switch (type_info) {
         .Pointer => |ptr_info| {
             if (ptr_info.size == .Slice) {
                 obj.* = &.{};
@@ -288,7 +288,6 @@ fn _populateStruct(
                     for (obj.*, 0..) |*value, i| {
                         try prefix_builder.pushDigit(allocator, i);
                         defer prefix_builder.pop();
-
                         const found = try _populateStruct(allocator, prefix_builder, unique_id, buffer_store, value, required);
                         if (!found) {
                             std.log.err("Not able to load {s} as {s}", .{ prefix, @typeName(ptr_info.child) });
@@ -308,12 +307,12 @@ fn _populateStruct(
             // TODO support tuple
             var partial_struct = false;
             inline for (struct_info.fields) |field| {
+                if (field.is_comptime or @sizeOf(field.type) == 0) continue;
                 try prefix_builder.push(allocator, field.name);
                 defer prefix_builder.pop();
 
                 var has_default = false;
                 if (field.default_value) |_| has_default = true;
-
                 const field_found = try _populateStruct(allocator, prefix_builder, unique_id, buffer_store, &@field(obj, field.name), required and !has_default);
                 partial_struct = partial_struct or field_found;
                 if (!field_found) {
@@ -346,11 +345,64 @@ fn _populateStruct(
             obj.* = undefined;
             return true;
         },
+        .Void => true,
         else => if (required) {
             std.log.err("{s}: {s} type not supported", .{ prefix, @typeName(T) });
             return error.UnsupportedMetadataType;
         } else return false,
-    }
+    };
+}
+
+test populateModel {
+    const Model = struct {
+        a: zml.Tensor,
+        b: struct { a: zml.Tensor, b: u32 },
+        c: []zml.Tensor,
+        d: []struct { a: zml.Tensor, b: u32 },
+        e: struct { zml.Tensor, u32, struct { a: u32, b: zml.Tensor, c: void } },
+        f: ?zml.Tensor,
+        g: ?zml.Tensor,
+
+        // Create a fake HostBuffer, we use the given integer to identify the created buffer.
+        fn _newHostBuffer(n: u32) zml.HostBuffer {
+            return .{ ._shape = zml.Shape.init(.{n}, .f16), .data = undefined };
+        }
+    };
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var store: BufferStore = .{ .arena = arena_state };
+    try store.buffers.ensureUnusedCapacity(arena_state.allocator(), 16);
+    store.buffers.putAssumeCapacity("a", Model._newHostBuffer(10));
+    store.buffers.putAssumeCapacity("b.a", Model._newHostBuffer(20));
+    store.buffers.putAssumeCapacity("c.0", Model._newHostBuffer(30));
+    store.buffers.putAssumeCapacity("c.1", Model._newHostBuffer(31));
+    store.buffers.putAssumeCapacity("c.2", Model._newHostBuffer(32));
+    store.buffers.putAssumeCapacity("d.0.a", Model._newHostBuffer(40));
+    store.buffers.putAssumeCapacity("d.1.a", Model._newHostBuffer(41));
+    store.buffers.putAssumeCapacity("d.2.a", Model._newHostBuffer(42));
+    store.buffers.putAssumeCapacity("e.0", Model._newHostBuffer(50));
+    store.buffers.putAssumeCapacity("e.2.b", Model._newHostBuffer(51));
+    store.buffers.putAssumeCapacity("f", Model._newHostBuffer(60));
+    // no entry for g.
+    store.buffers.putAssumeCapacity("unused_entry", Model._newHostBuffer(1000));
+
+    const model = try populateModel(Model, arena_state.allocator(), store);
+
+    try std.testing.expectEqual(10, model.a.dim(0));
+    try std.testing.expectEqual(20, model.b.a.dim(0));
+    try std.testing.expectEqual(3, model.c.len);
+    try std.testing.expectEqual(30, model.c[0].dim(0));
+    try std.testing.expectEqual(31, model.c[1].dim(0));
+    try std.testing.expectEqual(32, model.c[2].dim(0));
+    try std.testing.expectEqual(3, model.d.len);
+    try std.testing.expectEqual(40, model.d[0].a.dim(0));
+    try std.testing.expectEqual(41, model.d[1].a.dim(0));
+    try std.testing.expectEqual(42, model.d[2].a.dim(0));
+    try std.testing.expectEqual(50, model.e[0].dim(0));
+    try std.testing.expectEqual(51, model.e[2].b.dim(0));
+    try std.testing.expectEqual(60, model.f.?.dim(0));
+    try std.testing.expectEqual(null, model.g);
 }
 
 /// Creates a bufferized version of a Model from the given BufferStore. For details about
@@ -478,6 +530,7 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
         },
         .Struct => |struct_info| {
             inline for (struct_info.fields) |field| {
+                if (field.is_comptime or @sizeOf(field.type) == 0) continue;
                 try prefix_builder.push(allocator, field.name);
                 defer prefix_builder.pop();
 
