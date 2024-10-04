@@ -15,7 +15,7 @@ Here is how you can generate a **"read-only public repositories"** access token 
 * store the token on your machine (replace the placeholder with your actual token):
 
 ```
-echo -n <hf_my_token> > `$HOME/.cache/huggingface/token`
+mkdir -p $HOME/.cache/huggingface/; echo -n <hf_my_token> > "$HOME/.cache/huggingface/token"
 ```
 
 The `-n` is important in order to not append an "end of line" character at the end of the file that would corrupt the token.
