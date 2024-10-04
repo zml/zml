@@ -7,11 +7,11 @@ model_path = "stabilityai/sd-turbo"
 
 device = "cpu"
 precision = torch.float32
-prompt = "A baby panda drinking tea"
+prompt = "A cinematic shot of a baby racoon wearing an intricate italian priest robe."
 
 pipe = diffusers.AutoPipelineForText2Image.from_pretrained(model_path, torch_dtype=precision)
 pipe = zml_utils.ActivationCollector(pipe, blacklist_regexes=[r"text_encoder.*"])
-output, activations = pipe(prompt=prompt, num_inference_steps=2, strength=0.5, guidance_spcale=0.0)
+output, activations = pipe(prompt=prompt, num_inference_steps=3, guidance_scale=0.0)
 
 image = output.images[0]
 image.save("output.png")
