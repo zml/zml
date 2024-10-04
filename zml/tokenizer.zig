@@ -15,6 +15,12 @@ test {
 }
 
 /// Byte Pair Encoding tokenizer generally used for LLM.
+/// The algorithm is as follow:
+/// * Normalize the input string (eg lower-case)
+/// * Split the normalized string into unicode codepoint,
+///   retrieve the token id for each codepoint.
+/// * For each token, look at its neighbor and try to merge the pair if possible.
+/// * Repeat until no token can be merged with its neighbor.
 pub const Tokenizer = struct {
     tokens: [][]const u8,
     token_lookup: std.StringHashMapUnmanaged(u32),
