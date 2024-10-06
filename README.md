@@ -146,7 +146,8 @@ Once you've been granted access, you're ready to download a gated model like
 `Meta-Llama-3-8b`!
 
 ```
-# requires token in $HOME/.cache/huggingface/token
+# requires token in $HOME/.cache/huggingface/token, as created by the
+# `huggingface-cli login` command, or the `HUGGINGFACE_TOKEN` environment variable.
 cd examples
 bazel run -c opt //llama:Llama-3.1-8B-Instruct
 bazel run -c opt //llama:Llama-3.1-8B-Instruct -- --prompt="Once upon a time,"
@@ -244,7 +245,7 @@ const Sdpa = struct {
 
 You might want to check out more [examples](./examples), read through the
 [documentation directly on GitHub](./docs/README.md), or, for the full rendering
-experience, browse the 
+experience, browse the
 [online documentation with included API reference](https://docs.zml.ai).
 
 
