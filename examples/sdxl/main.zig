@@ -148,7 +148,7 @@ fn testUnet(platform: zml.Platform, activations: zml.aio.BufferStore, unet: Unet
     try zml.testing.testLayer(platform, activations, "unet.down_blocks.0.attentions.1.transformer_blocks.0.ff.net.0", unet.down_blocks.@"0".attentions[1].transformer_blocks[0].ff.net.@"0", unet_weights.down_blocks.@"0".attentions[1].transformer_blocks[0].ff.net.@"0", 0.05);
     try zml.testing.testLayer(platform, activations, "unet.down_blocks.0.attentions.1.transformer_blocks.0", unet.down_blocks.@"0".attentions[1].transformer_blocks[0], unet_weights.down_blocks.@"0".attentions[1].transformer_blocks[0], 0.05);
     try zml.testing.testLayer(platform, activations, "unet.down_blocks.0.attentions.1", unet.down_blocks.@"0".attentions[1], unet_weights.down_blocks.@"0".attentions[1], 0.05);
-    // try zml.testing.testLayer(platform, activations, "unet.down_blocks.0", unet.down_blocks.@"0", unet_weights.down_blocks.@"0", 0.05);
+    try zml.testing.testLayer(platform, activations, "unet.down_blocks.0", unet.down_blocks.@"0", unet_weights.down_blocks.@"0", 0.05);
 }
 
 pub const Unet2DConditionModel = struct {
@@ -210,11 +210,21 @@ pub const DownBlocks = struct {
     pub const CrossAttnDownBlock2D = struct {
         attentions: []Transformer2DModel,
         resnets: []ResnetBlock2D,
+        // TODO: downsamplers: Downsample2D
 
-        pub fn forward(self: CrossAttnDownBlock2D, images: zml.Tensor, encoder_hidden_states: zml.Tensor) zml.Tensor {
-            _ = encoder_hidden_states; // autofix
-            _ = self; // autofix
-            return images;
+        pub fn forward(
+            self: CrossAttnDownBlock2D,
+            images: zml.Tensor,
+            time_embedding: zml.Tensor,
+            encoder_hidden_states: zml.Tensor,
+        ) zml.Tensor {
+            var hidden = images;
+            for (self.resnets, self.attentions) |resnet, attn| {
+                hidden = zml.call(resnet, .forward, .{ hidden, time_embedding });
+                hidden = zml.call(attn, .forward, .{ hidden, encoder_hidden_states });
+            }
+            // TODO: self.downsamplers
+            return hidden;
         }
     };
 
@@ -250,7 +260,6 @@ pub const ResnetBlock2D = struct {
         t_emb = self.nonlinearity.forward(t_emb);
         t_emb = self.time_emb_proj.forward(t_emb);
 
-        log.warn("hidden: {}, temb: {}", .{ hidden, t_emb });
         hidden = hidden.add(t_emb.appendAxes(.{ .width, .height }).broad(x.shape()));
         hidden = self.norm2.forward(hidden);
 
@@ -290,33 +299,25 @@ pub const BasicTransformerBlock = struct {
     norm2: zml.nn.LayerNorm,
     attn2: Attention,
     norm3: zml.nn.LayerNorm,
-    ff: struct { net: struct {
-        @"0": GEGLU,
-        @"2": zml.nn.Linear,
-    } },
+    ff: struct { net: struct { GEGLU, void, zml.nn.Linear } },
 
     const Attention = struct {
         to_q: zml.nn.Linear,
         to_k: zml.nn.Linear,
         to_v: zml.nn.Linear,
-        to_out: struct {
-            @"0": zml.nn.Linear,
-        },
+        to_out: struct { zml.nn.Linear },
 
         pub fn forward(self: Attention, input: zml.Tensor, context: zml.Tensor) zml.Tensor {
             const x = if (input.shape().isFullyTagged()) input else input.withTags(.{ .b, .wh, .channels });
             const ctx = if (input.shape().isFullyTagged()) context else context.withTags(.{ .b, .k, .channels });
             const nh = 5;
-            log.info("x={}, context={}", .{ x, ctx });
             const q = zml.call(self.to_q, .forward, .{x.rename(.{ .wh = .q })}).splitAxis(.channels, .{ .h = nh, .hd = .auto });
             const k = zml.call(self.to_k, .forward, .{ctx}).splitAxis(.channels, .{ .h = nh, .hd = .auto });
             const v = zml.call(self.to_v, .forward, .{ctx}).splitAxis(.channels, .{ .h = nh, .hd = .auto });
 
-            log.info("q={}, k={}, v={}", .{ q, k, v });
             const attn_output = zml.nn.sdpa(q, k, v, .{});
             const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .wh, .d = .channels });
             const out = zml.call(self.to_out.@"0", .forward, .{attn});
-            log.info("out={}", .{out});
             return out;
         }
     };
@@ -331,7 +332,6 @@ pub const BasicTransformerBlock = struct {
     };
 
     pub fn forward(self: BasicTransformerBlock, images: zml.Tensor, encoder_hidden_state: zml.Tensor) zml.Tensor {
-        log.warn("x: {}, encoder_hidden_state {}", .{ images, encoder_hidden_state });
         var hidden = images;
         {
             // First self-attention
