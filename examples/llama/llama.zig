@@ -13,6 +13,7 @@ const ShapeOf = zml.ShapeOf;
 const expectClose = zml.testing.expectClose;
 
 pub const LlamaOptions = struct {
+    sharding: bool = true,
     gen_opts: zml.nn.SamplingStrategy,
     max_seq_len: u32,
     num_heads: i64,
@@ -43,6 +44,16 @@ pub const LlamaLM = struct {
             layer.input_layernorm.eps = options.rms_norm_eps;
             layer.post_attention_layernorm.eps = options.rms_norm_eps;
         }
+
+        zml.meta.visit(struct {
+            fn cb(_: void, layer: *zml.nn.Linear) void {
+                layer.weight = layer.weight.withSharding(.{-1});
+                if (layer.bias) |*b| {
+                    b.* = b.withSharding(.{-1});
+                }
+            }
+        }.cb, {}, &self.model);
+        self.lm_head.weight = self.lm_head.weight.withSharding(.{0});
     }
 
     /// Predicts the token at `token_index` position.
@@ -356,12 +367,12 @@ pub const KvCache = struct {
                 .{ .layer = self.layer_index, .k = token_index },
                 // transpose to match kv-cache layout
                 new_k.contiguous(.{ .h, .k, .hd }),
-            ).reuseBuffer(self.k),
+            ), // .reuseBuffer(self.k),
             .v = self.v.dynamicUpdateSlice(
                 .{ .layer = self.layer_index, .k = token_index },
                 // transpose to match kv-cache layout
                 new_v.contiguous(.{ .h, .k, .hd }),
-            ).reuseBuffer(self.v),
+            ), // .reuseBuffer(self.v),
             .layer_index = self.layer_index,
         };
     }
@@ -375,10 +386,12 @@ pub const KvCache = struct {
     }
 
     pub fn reuseBuffer(self: KvCache, other: KvCache) KvCache {
-        return .{
-            .k = self.k.reuseBuffer(other.k),
-            .v = self.v.reuseBuffer(other.v),
-            .layer_index = self.layer_index.reuseBuffer(other.layer_index),
-        };
+        _ = other; // autofix
+        return self;
+        // return .{
+        //     .k = self.k.reuseBuffer(other.k),
+        //     .v = self.v.reuseBuffer(other.v),
+        //     .layer_index = self.layer_index.reuseBuffer(other.layer_index),
+        // };
     }
 };
