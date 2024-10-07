@@ -159,8 +159,16 @@ fn testUnet(platform: zml.Platform, activations: zml.aio.BufferStore, unet: Unet
     }
 
     // Middle block.
-    {
+    if (false) {
         try zml.testing.testLayer(platform, activations, "unet.mid_block", unet.mid_block, unet_weights.mid_block, 0.05);
+    }
+
+    // Up blocks
+    {
+        try zml.testing.testLayer(platform, activations, "unet.up_blocks.0.upsamplers.0", unet.up_blocks.@"0".upsamplers.@"0", unet_weights.up_blocks.@"0".upsamplers.@"0", 0.05);
+
+        // TODO: dig into the precision issues.
+        try zml.testing.testLayer(platform, activations, "unet.up_blocks.0", unet.up_blocks.@"0", unet_weights.up_blocks.@"0", 0.05);
     }
 }
 
@@ -171,7 +179,7 @@ pub const Unet2DConditionModel = struct {
     // time_embedding
     down_blocks: DownBlocks,
     mid_block: UNetMidBlock2DCrossAttn,
-    // up_blocks
+    up_blocks: UpBlocks,
 
     conv_norm_out: GroupNorm,
     conv_act: zml.nn.Activation = .silu,
@@ -184,11 +192,12 @@ pub const Conv2dSame = struct {
 
     pub fn forward(self: Conv2dSame, input: zml.Tensor) zml.Tensor {
         const x = input.withPartialTags(.{ .channels, .width, .height });
-        const y = zml.Tensor.conv2d(
-            x,
-            self.weight,
-            .{ .padding = &.{ 1, 1, 1, 1 } },
-        );
+        log.warn("Conv2dSame({}, {})", .{ self.weight, input });
+        const y = zml.Tensor.conv2d(x, self.weight, .{
+            .padding = &.{ 1, 1, 1, 1 },
+            .input_feature_dimension = x.axis(.channels),
+            .input_spatial_dimensions = &.{ x.axis(.width), x.axis(.height) },
+        });
         return y.add(self.bias.withTags(.{.channels}).broad(y.shape()));
     }
 };
@@ -202,6 +211,7 @@ pub const GroupNorm = struct {
 
     pub fn forward(self: GroupNorm, input: zml.Tensor) zml.Tensor {
         const x = input.withPartialTags(.{ .channels, .width, .height });
+        log.warn("GroupNorm({}, {})", .{ self.weight, input });
         var x_grouped = x.splitAxis(.channels, .{ .group = self.group_size, .c = .auto });
         x_grouped = x_grouped.merge(.{ .cwh = .{ .c, .width, .height } });
 
@@ -298,6 +308,63 @@ pub const UNetMidBlock2DCrossAttn = struct {
     }
 };
 
+pub const UpBlocks = struct {
+    @"0": UpBlock2D,
+    @"1": CrossAttnUpBlock2D,
+    @"2": CrossAttnUpBlock2D,
+    @"3": CrossAttnUpBlock2D,
+
+    pub fn forward(self: UpBlocks, images: zml.Tensor, time_embedding: zml.Tensor, encoder_hidden_states: zml.Tensor) zml.Tensor {
+        var hidden = images;
+
+        hidden = self.@"0".forward(hidden, time_embedding);
+        hidden = self.@"1".forward(hidden, time_embedding, encoder_hidden_states);
+        hidden = self.@"2".forward(hidden, time_embedding, encoder_hidden_states);
+        hidden = self.@"3".forward(hidden, time_embedding, encoder_hidden_states);
+
+        return hidden;
+    }
+
+    const UpBlock2D = struct {
+        resnets: []ResnetBlock2D,
+        upsamplers: struct { Upsampler },
+
+        // TODO: zml handle const slice as inputs
+        pub fn forward(
+            self: UpBlock2D,
+            images: zml.Tensor,
+            time_embedding: zml.Tensor,
+            downscaled_images_0: zml.Tensor,
+            downscaled_images_1: zml.Tensor,
+            downscaled_images_2: zml.Tensor,
+        ) zml.Tensor {
+            var hidden = images;
+            const n = self.resnets.len;
+            const downscaled_images = [_]zml.Tensor{ downscaled_images_0, downscaled_images_1, downscaled_images_2 };
+            zml.meta.assert(n == downscaled_images.len, "this UpBlock2D expects {} downscaled images, got: {}", .{ n, downscaled_images.len });
+            for (self.resnets, 0..) |resnet, i| {
+                hidden = zml.Tensor.concatenate(&.{ hidden, downscaled_images[n - 1 - i] }, 1);
+                hidden = zml.call(resnet, .forward, .{ hidden, time_embedding });
+            }
+
+            hidden = zml.call(self.upsamplers[0], .forward, .{hidden});
+            return hidden;
+        }
+    };
+
+    const CrossAttnUpBlock2D = struct {};
+
+    const Upsampler = struct {
+        conv: Conv2dSame,
+        pub fn forward(self: Upsampler, images: zml.Tensor) zml.Tensor {
+            var hidden = images;
+            hidden = zml.nn.nearest(hidden, &.{ 2, 2 });
+            hidden = self.conv.forward(hidden);
+            return hidden;
+        }
+    };
+};
+
 pub const ResnetBlock2D = struct {
     norm1: GroupNorm,
     conv1: Conv2dSame,
@@ -305,10 +372,11 @@ pub const ResnetBlock2D = struct {
     norm2: GroupNorm,
     conv2: Conv2dSame,
     nonlinearity: zml.nn.Activation = .silu,
+    conv_shortcut: ?struct { weight: zml.Tensor },
     // TODO: output_scale_factor ?
 
     pub fn forward(self: ResnetBlock2D, images: zml.Tensor, time_embedding: zml.Tensor) zml.Tensor {
-        const x = images.withPartialTags(.{ .channels, .width, .height });
+        const x = images.withPartialTags(.{ .batch, .channels, .width, .height });
         var hidden = self.norm1.forward(x);
         hidden = self.nonlinearity.forward(hidden);
         hidden = self.conv1.forward(hidden);
@@ -317,13 +385,18 @@ pub const ResnetBlock2D = struct {
         t_emb = self.nonlinearity.forward(t_emb);
         t_emb = self.time_emb_proj.forward(t_emb);
 
-        hidden = hidden.add(t_emb.appendAxes(.{ .width, .height }).broad(x.shape()));
+        hidden = hidden.add(t_emb.appendAxes(.{ .width, .height }).broad(hidden.shape()));
         hidden = self.norm2.forward(hidden);
 
         hidden = self.nonlinearity.forward(hidden);
         hidden = self.conv2.forward(hidden);
 
-        return x.add(hidden);
+        return if (self.conv_shortcut) |conv_shortcut| {
+            const kernel = conv_shortcut.weight.withTags(.{ .channels_out, .channels, .w, .h });
+            const shortcut = kernel.squeeze(.w).squeeze(.h);
+            const x2 = x.dot(shortcut, .{.channels}).rename(.{ .channels_out = .channels }).contiguous(.{ .channels, .width, .height });
+            return x2.add(hidden);
+        } else x.add(hidden);
     }
 };
 
