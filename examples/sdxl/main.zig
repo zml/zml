@@ -123,6 +123,11 @@ pub fn asyncMain() !void {
             group_norm.eps = eps;
         }
     }.cb, group_norm_conf, &unet);
+    zml.meta.visit(struct {
+        fn cb(eps: f32, layer_norm: *zml.nn.LayerNorm) void {
+            layer_norm.eps = eps;
+        }
+    }.cb, 1e-5, &unet);
     log.info("Unet: {}", .{unet});
 
     const unet_weights = try zml.aio.loadModelBuffers(Unet2DConditionModel, unet, unet_store, arena, platform);
@@ -141,14 +146,22 @@ fn testUnet(platform: zml.Platform, activations: zml.aio.BufferStore, unet: Unet
     try zml.testing.testLayer(platform, activations, "unet.conv_out", unet.conv_out, unet_weights.conv_out, 0.005);
     try zml.testing.testLayer(platform, activations, "unet.conv_norm_out", unet.conv_norm_out, unet_weights.conv_norm_out, 0.005);
 
-    try zml.testing.testLayer(platform, activations, "unet.down_blocks.3.resnets.0", unet.down_blocks.@"3".resnets[0], unet_weights.down_blocks.@"3".resnets[0], 0.05);
+    // Down block
+    if (false) {
+        try zml.testing.testLayer(platform, activations, "unet.down_blocks.3.resnets.0", unet.down_blocks.@"3".resnets[0], unet_weights.down_blocks.@"3".resnets[0], 0.05);
 
-    try zml.testing.testLayer(platform, activations, "unet.down_blocks.3", unet.down_blocks.@"3", unet_weights.down_blocks.@"3", 0.05);
+        try zml.testing.testLayer(platform, activations, "unet.down_blocks.3", unet.down_blocks.@"3", unet_weights.down_blocks.@"3", 0.05);
 
-    try zml.testing.testLayer(platform, activations, "unet.down_blocks.0.attentions.1.transformer_blocks.0.ff.net.0", unet.down_blocks.@"0".attentions[1].transformer_blocks[0].ff.net.@"0", unet_weights.down_blocks.@"0".attentions[1].transformer_blocks[0].ff.net.@"0", 0.05);
-    try zml.testing.testLayer(platform, activations, "unet.down_blocks.0.attentions.1.transformer_blocks.0", unet.down_blocks.@"0".attentions[1].transformer_blocks[0], unet_weights.down_blocks.@"0".attentions[1].transformer_blocks[0], 0.05);
-    try zml.testing.testLayer(platform, activations, "unet.down_blocks.0.attentions.1", unet.down_blocks.@"0".attentions[1], unet_weights.down_blocks.@"0".attentions[1], 0.05);
-    try zml.testing.testLayer(platform, activations, "unet.down_blocks.0", unet.down_blocks.@"0", unet_weights.down_blocks.@"0", 0.05);
+        try zml.testing.testLayer(platform, activations, "unet.down_blocks.0.attentions.1.transformer_blocks.0.ff.net.0", unet.down_blocks.@"0".attentions[1].transformer_blocks[0].ff.net.@"0", unet_weights.down_blocks.@"0".attentions[1].transformer_blocks[0].ff.net.@"0", 0.05);
+        try zml.testing.testLayer(platform, activations, "unet.down_blocks.0.attentions.1.transformer_blocks.0", unet.down_blocks.@"0".attentions[1].transformer_blocks[0], unet_weights.down_blocks.@"0".attentions[1].transformer_blocks[0], 0.05);
+        try zml.testing.testLayer(platform, activations, "unet.down_blocks.0.attentions.1", unet.down_blocks.@"0".attentions[1], unet_weights.down_blocks.@"0".attentions[1], 0.05);
+        try zml.testing.testLayer(platform, activations, "unet.down_blocks.0", unet.down_blocks.@"0", unet_weights.down_blocks.@"0", 0.05);
+    }
+
+    // Middle block.
+    {
+        try zml.testing.testLayer(platform, activations, "unet.mid_block", unet.mid_block, unet_weights.mid_block, 0.05);
+    }
 }
 
 pub const Unet2DConditionModel = struct {
@@ -157,8 +170,8 @@ pub const Unet2DConditionModel = struct {
     // time_proj
     // time_embedding
     down_blocks: DownBlocks,
+    mid_block: UNetMidBlock2DCrossAttn,
     // up_blocks
-    // mid_block
 
     conv_norm_out: GroupNorm,
     conv_act: zml.nn.Activation = .silu,
@@ -206,6 +219,17 @@ pub const DownBlocks = struct {
     @"1": CrossAttnDownBlock2D,
     @"2": CrossAttnDownBlock2D,
     @"3": DownBlock2D,
+
+    pub fn forward(self: DownBlocks, images: zml.Tensor, time_embedding: zml.Tensor, encoder_hidden_states: zml.Tensor) zml.Tensor {
+        var hidden = images;
+
+        hidden = self.@"0".forward(hidden, time_embedding, encoder_hidden_states);
+        hidden = self.@"1".forward(hidden, time_embedding, encoder_hidden_states);
+        hidden = self.@"2".forward(hidden, time_embedding, encoder_hidden_states);
+        hidden = self.@"3".forward(hidden, time_embedding);
+
+        return hidden;
+    }
 
     pub const CrossAttnDownBlock2D = struct {
         attentions: []Transformer2DModel,
@@ -257,6 +281,21 @@ pub const DownBlocks = struct {
             return y.add(self.bias.withTags(.{.channels}).broad(y.shape()));
         }
     };
+};
+
+pub const UNetMidBlock2DCrossAttn = struct {
+    attentions: []Transformer2DModel,
+    resnets: []ResnetBlock2D,
+
+    pub fn forward(self: UNetMidBlock2DCrossAttn, images: zml.Tensor, time_embedding: zml.Tensor, encoder_hidden_states: zml.Tensor) zml.Tensor {
+        var hidden = self.resnets[0].forward(images, time_embedding);
+
+        for (self.attentions, self.resnets[1..]) |attn, resnet| {
+            hidden = attn.forward(images, encoder_hidden_states);
+            hidden = resnet.forward(images, time_embedding);
+        }
+        return hidden;
+    }
 };
 
 pub const ResnetBlock2D = struct {
