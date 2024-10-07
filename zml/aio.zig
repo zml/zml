@@ -363,9 +363,8 @@ fn _populateStruct(
 
                 const len = buffer_store.countLayers(prefix);
                 if (len > 0) {
-                    obj.* = try allocator.alloc(ptr_info.child, len);
-
-                    for (obj.*, 0..) |*value, i| {
+                    const slice = try allocator.alloc(ptr_info.child, len);
+                    for (slice, 0..) |*value, i| {
                         try prefix_builder.pushDigit(allocator, i);
                         defer prefix_builder.pop();
                         const found = try _populateStruct(allocator, prefix_builder, unique_id, buffer_store, value, required);
@@ -374,6 +373,7 @@ fn _populateStruct(
                             return false;
                         }
                     }
+                    obj.* = slice;
                 } else if (required) {
                     log.warn("No layer found at {s}", .{prefix});
                 }
@@ -382,6 +382,19 @@ fn _populateStruct(
                 log.err("{s} - {s}: {s} type not supported", .{ @src().fn_name, prefix, @typeName(T) });
                 return false;
             }
+        },
+        .Array => |arr_info| {
+            for (obj, 0..) |*value, i| {
+                try prefix_builder.pushDigit(allocator, i);
+                defer prefix_builder.pop();
+                const found = try _populateStruct(allocator, prefix_builder, unique_id, buffer_store, value, required);
+                if (!found) {
+                    std.log.err("Not able to load {s} as {s}", .{ prefix, @typeName(arr_info.child) });
+                    return false;
+                }
+            }
+
+            return true;
         },
         .Struct => |struct_info| {
             // TODO support tuple
@@ -621,6 +634,13 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
         .Optional => {
             if (obj.*) |*obj_val| {
                 try visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, obj_val, platform);
+            }
+        },
+        .Array => {
+            for (obj, 0..) |*value, i| {
+                try prefix_builder.pushDigit(allocator, i);
+                defer prefix_builder.pop();
+                try visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, value, platform);
             }
         },
         else => {},

@@ -332,7 +332,7 @@ pub fn for_(comptime func: anytype, blk_ctx: BlockSign(func).BlkCtx, num_steps_:
 
     const for_blk: ForBlk = .{ .blk_ctx = blk_ctx, .step_tag = step_tag, .num_steps = num_steps };
     var result_buffers: @TypeOf(first_step) = undefined;
-    try meta.mapAlloc(ForBlk.prep, allocator, for_blk, first_step, &result_buffers);
+    meta.mapAlloc(ForBlk.prep, allocator, for_blk, first_step, &result_buffers) catch @panic("Out of memory");
 
     return while_(
         ForBlk.done,
