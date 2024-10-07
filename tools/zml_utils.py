@@ -84,7 +84,7 @@ class ActivationCollector:
 
         tensors = {}
 
-        for name, outputs, inputs in self.outs.values():
+        for name, inputs, outputs in self.outs.values():
             # Only save first layer for a smaller file.
             for blacklist in self.blacklist_regexes:
                 if re.match(blacklist, name):
@@ -93,15 +93,16 @@ class ActivationCollector:
             if name == "":
                 # Skip the softmax output
                 continue
-            if (outputs, inputs) == (None, None):
+            if (inputs, outputs) == (None, None):
                 # print(f"no inputs/outputs for {name}")
                 continue
-            for idx, inp in enumerate(inputs):
-                tensors[f"{name}.in.{idx}"] = inp
+            for prefix, inp in inputs:
+                tensors[f"{name}.in{prefix}"] = inp
 
-            for idx, out in enumerate(outputs):
-                tensors[f"{name}.out.{idx}"] = out
+            for prefix, out in outputs:
+                tensors[f"{name}.out{prefix}"] = out
 
+        print(f"Collected activations for {len(self.outs)} layers, found {len(tensors)} activations")
         for k, v in tensors.items():
             print(k, "->", v.shape)
 
@@ -123,13 +124,12 @@ class ActivationCollector:
             return
 
         assert out is not None
-        outs = [o.detach().cpu() for o in _flatten(out)]
-        inputs = [i.detach().cpu() for i in _flatten(input)]
+        outs = _serialize((out,) if isinstance(out, torch.Tensor) else out)
 
         kwargs = inspect.stack()[1].frame.f_locals["kwargs"]
-        extra_inputs = [i.detach().cpu() for i in _flatten(kwargs)]
+        inputs = _serialize(list(input) + list(kwargs.values()))
 
-        self.outs[id(module)] = (name, outs, inputs + extra_inputs)
+        self.outs[id(module)] = (name, inputs, outs)
         if 0 < self.max_layers < self.count:
             print(f"stopping collection cause we got {self.count} activations already")
             raise ActivationCollector.CollectionOver()
@@ -150,21 +150,24 @@ def save_with_confirmation(filename: str, tensors: dict):
     torch.save(tensors, filename)
 
 
-def _flatten(out):
+def _serialize(out, prefix = "") -> list:
+    """Extract tensor with their names from a given python object."""
+    outs = []
     if out is None:
-        return []
+        return outs
     elif isinstance(out, torch.Tensor):
-        outs = [out]
-    elif isinstance(out, tuple):
-        outs = []
-        for x in out:
-            outs.extend(_flatten(x))
+        outs = [(prefix, out.detach().cpu())]
+    elif isinstance(out, tuple) or isinstance(out, list):
+        for i, x in enumerate(out):
+            outs.extend(_serialize(x, f"{prefix}.{i}" ))
     elif isinstance(out, dict):
         outs = []
-        for x in out.values():
-            outs.extend(_flatten(x))
+        for k, x in out.items():
+            outs.extend(_serialize(x, f"{prefix}.{k}"))
+    elif isinstance(out, float) or isinstance(out, int) or isinstance(out, bool):
+        pass
     else:
-        outs = []
+        print("unsupported output type: {}", type(out))
     return outs
 
 
