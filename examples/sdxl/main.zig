@@ -152,7 +152,7 @@ fn testUnet(platform: zml.Platform, activations: zml.aio.BufferStore, unet: Unet
 }
 
 pub const Unet2DConditionModel = struct {
-    conv_in: Conv2d,
+    conv_in: Conv2dSame,
 
     // time_proj
     // time_embedding
@@ -162,14 +162,14 @@ pub const Unet2DConditionModel = struct {
 
     conv_norm_out: GroupNorm,
     conv_act: zml.nn.Activation = .silu,
-    conv_out: Conv2d,
+    conv_out: Conv2dSame,
 };
 
-pub const Conv2d = struct {
+pub const Conv2dSame = struct {
     weight: zml.Tensor,
     bias: zml.Tensor,
 
-    pub fn forward(self: Conv2d, input: zml.Tensor) zml.Tensor {
+    pub fn forward(self: Conv2dSame, input: zml.Tensor) zml.Tensor {
         const x = input.withPartialTags(.{ .channels, .width, .height });
         const y = zml.Tensor.conv2d(
             x,
@@ -210,7 +210,7 @@ pub const DownBlocks = struct {
     pub const CrossAttnDownBlock2D = struct {
         attentions: []Transformer2DModel,
         resnets: []ResnetBlock2D,
-        // TODO: downsamplers: Downsample2D
+        downsamplers: struct { struct { conv: Conv2dHalf } },
 
         pub fn forward(
             self: CrossAttnDownBlock2D,
@@ -223,7 +223,7 @@ pub const DownBlocks = struct {
                 hidden = zml.call(resnet, .forward, .{ hidden, time_embedding });
                 hidden = zml.call(attn, .forward, .{ hidden, encoder_hidden_states });
             }
-            // TODO: self.downsamplers
+            hidden = zml.call(self.downsamplers[0].conv, .forward, .{hidden});
             return hidden;
         }
     };
@@ -239,14 +239,32 @@ pub const DownBlocks = struct {
             return y;
         }
     };
+
+    pub const Conv2dHalf = struct {
+        weight: zml.Tensor,
+        bias: zml.Tensor,
+
+        pub fn forward(self: Conv2dHalf, input: zml.Tensor) zml.Tensor {
+            const x = input.withPartialTags(.{ .channels, .width, .height });
+            const y = zml.Tensor.conv2d(
+                x,
+                self.weight,
+                .{
+                    .padding = &.{ 1, 1, 1, 1 },
+                    .window_strides = &.{ 2, 2 },
+                },
+            );
+            return y.add(self.bias.withTags(.{.channels}).broad(y.shape()));
+        }
+    };
 };
 
 pub const ResnetBlock2D = struct {
     norm1: GroupNorm,
-    conv1: Conv2d,
+    conv1: Conv2dSame,
     time_emb_proj: zml.nn.Linear,
     norm2: GroupNorm,
-    conv2: Conv2d,
+    conv2: Conv2dSame,
     nonlinearity: zml.nn.Activation = .silu,
     // TODO: output_scale_factor ?
 
