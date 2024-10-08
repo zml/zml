@@ -1,0 +1,52 @@
+load("@bazel_skylib//rules:native_binary.bzl", "native_binary")
+load("@bazel_skylib//rules:diff_test.bzl", "diff_test")
+load("@zml//bazel:zig.bzl", "zig_cc_binary")
+
+zig_cc_binary(
+    name = "tokenizer_test_bin",
+    main = "main.zig",
+    deps = [
+        "//third_party/tigerbeetle:flags",
+        "@zml//async",
+        "@zml//zml",
+    ],
+)
+
+native_binary(
+    name = "CodeLlama-7b-hf",
+    src = ":tokenizer_test_bin",
+    args = [
+        "--tokenizer=$(location @CodeLlama-7b-hf//:tokenizer)",
+        "--prompt=' Hello world'",
+        "--expected='1,15043,3186'",
+    ],
+    data = [
+        "@CodeLlama-7b-hf//:tokenizer",
+    ],
+)
+
+# TODO(cryptodeal)
+
+genrule(
+    name = "zml_output",
+    cmd = "$SRCS > $@",
+    srcs = [":tokenizer_test_bin", "@CodeLlama-7b-hf//:tokenizer", "input.txt"],
+    outs = ["zml_output.txt"],
+)
+
+python_binary(
+    name = "hf_tokenizer",
+    main = "tokenizer_test.py",
+)
+
+genrule(
+    name = "hf_output",
+    cmd = "$SRCS > $@",
+    srcs = [":hf_tokenizer", "input.txt"],
+    outs = ["hf_output.txt"],
+)
+
+diff_test(
+    name = "tokenizer_test",
+    srcs = [":hf_output", ":zml_output"]
+)
