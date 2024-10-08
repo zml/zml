@@ -294,7 +294,7 @@ pub const Tokenizer = struct {
         input: []const u32,
         opts: struct { sep: []const u8 = "" },
     ) error{OutOfMemory}!void {
-        const escaped = if (self.normalizer) |n| n.escape_whitespaces else null;
+        const escaped = if (self.normalizer) |n| n.escapedSpace() else null;
         // Flag used to indicate if the first dummy whitespace has been consumed.
         for (input) |id| {
             // Retrieve the slice corresponding to the id.
@@ -460,7 +460,7 @@ pub const Normalizer = struct {
     /// Space token used by sentencepiece derived tokenizer.
     pub const sentencepiece_space = "▁"; // \xe2\x96\x81
 
-    escape_whitespaces: ?[]const u8 = null,
+    _whitespace: std.BoundedArray(u8, 8) = .{},
 
     flags: packed struct {
         remove_extra_whitespaces: bool,
@@ -473,6 +473,18 @@ pub const Normalizer = struct {
         // doing this processing ahead of time simplifies the logic
         split_on_punct_ascii: bool,
     },
+
+    pub fn init(flags: std.meta.FieldType(Normalizer, .flags), escaped_whitespace: ?[]const u8) Normalizer {
+        var res: Normalizer = .{ .flags = flags };
+        if (escaped_whitespace) |escaped| {
+            res._whitespace.appendSliceAssumeCapacity(escaped);
+        }
+        return res;
+    }
+
+    pub inline fn escapedSpace(self: Normalizer) ?[]const u8 {
+        return if (self._whitespace.len > 1) self._whitespace.constSlice() else null;
+    }
 
     fn addSlice(data: []const u8, consumed: usize, normalized: *std.ArrayList(u8), normalized_to_origin: *std.ArrayList(usize)) !void {
         try normalized.appendSlice(data);
@@ -522,7 +534,7 @@ pub const Normalizer = struct {
         }
 
         // Pre-allocate outputs
-        const space = self.escape_whitespaces orelse " ";
+        const space = self.escapedSpace() orelse " ";
         const overhead = if (self.flags.split_on_punct_ascii) space.len + 1 else space.len;
         var normalized = try std.ArrayList(u8).initCapacity(allocator, trimmed_input.len * overhead + 2 * space.len);
         errdefer normalized.deinit();
@@ -555,7 +567,7 @@ pub const Normalizer = struct {
             if (slice.len == 1) ascii: {
                 // The more advanced logic only works with ascii atm
                 var byte = slice[0];
-                if (self.escape_whitespaces != null and byte == ' ') {
+                if (self.escapedSpace() != null and byte == ' ') {
                     // replace the space token by the special token
                     try addSlice(space, origin, &normalized, &normalized_to_origin);
                     is_prev_word = false;
@@ -602,24 +614,106 @@ pub const Normalizer = struct {
 
     pub fn wellKnown(impl: KnownImplementation) Normalizer {
         return switch (impl) {
-            .sentencepiece => .{ .escape_whitespaces = Normalizer.sentencepiece_space, .flags = .{
+            .sentencepiece => init(.{
                 .remove_extra_whitespaces = true,
                 .add_dummy_prefix = true,
                 .add_dummy_suffix = false,
                 .lower_case_ascii = false,
                 .split_on_punct_ascii = false,
-            } },
-            .gpt2 => .{ .flags = .{
+            }, sentencepiece_space),
+            .gpt2 => init(.{
                 .remove_extra_whitespaces = true,
                 .add_dummy_prefix = true,
                 .add_dummy_suffix = false,
                 .lower_case_ascii = false,
                 .split_on_punct_ascii = false,
-            } },
+            }, null),
         };
     }
-};
 
+    pub fn fromHfJson(config: std.json.ObjectMap) error{InvalidNormalizerJson}!Normalizer {
+        var normalizer: Normalizer = .{ .flags = .{
+            .remove_extra_whitespaces = false,
+            .add_dummy_suffix = false,
+            .add_dummy_prefix = false,
+            .lower_case_ascii = false,
+            .split_on_punct_ascii = false,
+        } };
+
+        // Normalizer config can be a single normalizer, or a sequence of normalizers.
+        const maybe_steps = object_get(config, .array, "normalizers");
+        const steps = if (maybe_steps) |st| st.items else &.{std.json.Value{ .object = config }};
+
+        for (steps) |step_val| {
+            if (step_val != .object) {
+                return error.InvalidNormalizerJson;
+            }
+            const step = step_val.object;
+
+            const step_type = object_get(step, .string, "type") orelse {
+                return error.InvalidNormalizerJson;
+            };
+            if (std.mem.eql(u8, "Prepend", step_type)) {
+                normalizer.flags.add_dummy_prefix = true;
+            } else if (std.mem.eql(u8, "Append", step_type)) {
+                normalizer.flags.add_dummy_suffix = true;
+            } else if (std.mem.eql(u8, "Replace", step_type)) {
+                const pattern = object_get(step, .object, "pattern") orelse return error.InvalidNormalizerJson;
+                const str_pattern = object_get(pattern, .string, "String") orelse return error.InvalidNormalizerJson;
+
+                if (std.mem.eql(u8, str_pattern, " ")) {
+                    normalizer._whitespace.appendSliceAssumeCapacity(
+                        object_get(step, .string, "content") orelse return error.InvalidNormalizerJson,
+                    );
+                } else {
+                    log.warn("Normalizer Replace pattern not supported: '{s}' -> '{s}'", .{ str_pattern, object_get(pattern, .string, "content") orelse "" });
+                }
+            } else {
+                log.warn("Unknown normalizer type: {s}", .{step_type});
+            }
+        }
+
+        return normalizer;
+    }
+
+    test "Normalizer.fromHfJson" {
+        const config_json =
+            \\{
+            \\    "type": "Sequence",
+            \\    "normalizers": [
+            \\      {
+            \\        "type": "Prepend",
+            \\        "prepend": "▁"
+            \\      },
+            \\      {
+            \\        "type": "Replace",
+            \\        "pattern": {
+            \\          "String": " "
+            \\        },
+            \\        "content": "▁"
+            \\      }
+            \\    ]
+            \\}
+        ;
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const config = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), config_json, .{});
+        const normalizer = try Normalizer.fromHfJson(config.object);
+
+        const expected = Normalizer{
+            ._whitespace = .{ .buffer = [_]u8{ 0xe2, 0x96, 0x81 } ++ [_]u8{0} ** 5, .len = 3 },
+            .flags = .{
+                .remove_extra_whitespaces = false,
+                .add_dummy_prefix = true,
+                .add_dummy_suffix = false,
+                .lower_case_ascii = false,
+                .split_on_punct_ascii = false,
+            },
+        };
+        try std.testing.expectEqual(expected.flags, normalizer.flags);
+        try std.testing.expectEqualStrings(expected.escapedSpace().?, normalizer.escapedSpace().?);
+    }
+};
 pub const KnownImplementation = enum(u8) {
     sentencepiece,
     gpt2,
@@ -677,16 +771,16 @@ test Normalizer {
     }
 
     {
-        const n: Normalizer = .{
-            .escape_whitespaces = "▁",
-            .flags = .{
+        const n = Normalizer.init(
+            .{
                 .remove_extra_whitespaces = false,
                 .add_dummy_prefix = true,
                 .add_dummy_suffix = false,
                 .lower_case_ascii = false,
                 .split_on_punct_ascii = false,
             },
-        };
+            Normalizer.sentencepiece_space,
+        );
         const res = try n.normalize(testing.allocator, "Hello  world!");
         defer testing.allocator.free(res);
 
@@ -827,10 +921,12 @@ pub fn fromHfJson(allocator: std.mem.Allocator, tokenizer_path: []const u8) !Tok
     const vocab = main_object.get("model").?.object.get("vocab").?.object;
     const vocab_size: u32 = @intCast(vocab.count() + added_tokens.items.len);
 
-    const normalizer = Normalizer.wellKnown(.gpt2);
-    var gpt2_decoder = try Gpt2TextDecoder.init(allocator);
-    defer gpt2_decoder.deinit();
+    const normalizer = if (object_get(main_object, .object, "normalizer")) |normalizer_config|
+        try Normalizer.fromHfJson(normalizer_config)
+    else
+        Normalizer.wellKnown(.gpt2);
 
+    // delay init of special tokens.
     var tokenizer = try Tokenizer.init(allocator, vocab_size, 256, normalizer, undefined, true);
     errdefer tokenizer.deinit();
 
@@ -844,12 +940,14 @@ pub fn fromHfJson(allocator: std.mem.Allocator, tokenizer_path: []const u8) !Tok
         std.debug.assert(all_tokens.items.ptr == original_alloc);
     }
 
-    var it = vocab.iterator();
     // gpt2 based tokenizer got a special way of encoding unicode.
     // we don't know in advance if this will be used by this tokenizer or not.
     // so we assume it is the case, but if we find some unicode character,
     // outside of the range used by gpt2 we know it was wrong, and start over.
     var is_gpt2_vocab: bool = true;
+    var gpt2_decoder = try Gpt2TextDecoder.init(allocator);
+    defer gpt2_decoder.deinit();
+    var it = vocab.iterator();
     while (it.next()) |kv| {
         const token = gpt2_decoder.decode(&all_tokens, kv.key_ptr.*) catch |err| {
             switch (err) {
@@ -911,4 +1009,15 @@ fn dup(buffer: *std.ArrayList(u8), str: []const u8) ![]const u8 {
     const n = buffer.items.len;
     try buffer.appendSlice(str);
     return buffer.items[n..];
+}
+
+/// Returns the given entry in a json object only if it has the right type.
+fn object_get(
+    object: std.json.ObjectMap,
+    comptime kind: std.meta.FieldEnum(std.json.Value),
+    key: []const u8,
+) ?std.meta.FieldType(std.json.Value, kind) {
+    const val = object.get(key) orelse return null;
+    if (val != kind) return null;
+    return @field(val, @tagName(kind));
 }
