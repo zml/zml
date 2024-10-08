@@ -287,14 +287,15 @@ pub const Tokenizer = struct {
         input: []const u32,
         opts: struct { sep: []const u8 = "" },
     ) !void {
+        const escaped = if (self.normalizer) |n| n.escape_whitespaces else null;
         // Flag used to indicate if the first dummy whitespace has been consumed.
         for (input) |id| {
             // Retrieve the slice corresponding to the id.
             var piece = self.lookupPiece(id);
 
             // Convert `▁` to a regular space.
-            if (std.mem.startsWith(u8, piece, Normalizer.space_symbol)) {
-                piece = piece[Normalizer.space_symbol.len..];
+            if (escaped != null and std.mem.startsWith(u8, piece, escaped.?)) {
+                piece = piece[escaped.?.len..];
 
                 // don't output a space at beginning of text.
                 if (output.items.len > 0) try output.append(' ');
@@ -349,7 +350,7 @@ test Tokenizer {
         .eos = 2,
     };
 
-    var tokenizer = try Tokenizer.init(allocator, 10, 5, .{}, special_tokens, true);
+    var tokenizer = try Tokenizer.init(allocator, 10, 5, null, special_tokens, true);
     defer tokenizer.deinit();
 
     try tokenizer.addToken(10, "hello");
@@ -446,23 +447,25 @@ test CharTokenIterator {
     }
 }
 
-/// Text normalizer. Most tokenizer assumes the input text have been prepocessed
-/// with on of those.
+/// Text normalizer.
+/// Most tokenizer assumes the input text have been prepocessed with on of those.
 pub const Normalizer = struct {
-    pub const space_symbol = "▁"; // \xe2\x96\x81
+    /// Space token used by sentencepiece derived tokenizer.
+    pub const sentencepiece_space = "▁"; // \xe2\x96\x81
+
+    escape_whitespaces: ?[]const u8 = null,
 
     flags: packed struct {
-        escape_whitespaces: bool = true,
-        remove_extra_whitespaces: bool = true,
-        add_dummy_prefix: bool = true,
-        add_dummy_suffix: bool = false,
+        remove_extra_whitespaces: bool,
+        add_dummy_prefix: bool,
+        add_dummy_suffix: bool,
         /// Cheap lower casing.
         /// TODO: try to match Python "lower"
-        lower_case_ascii: bool = false,
+        lower_case_ascii: bool,
         /// cheap ascii punct splitting.
         // doing this processing ahead of time simplifies the logic
-        split_on_punct_ascii: bool = false,
-    } = .{},
+        split_on_punct_ascii: bool,
+    },
 
     fn addSlice(data: []const u8, consumed: usize, normalized: *std.ArrayList(u8), normalized_to_origin: *std.ArrayList(usize)) !void {
         try normalized.appendSlice(data);
@@ -512,7 +515,7 @@ pub const Normalizer = struct {
         }
 
         // Pre-allocate outputs
-        const space = if (self.flags.escape_whitespaces) Normalizer.space_symbol else " ";
+        const space = self.escape_whitespaces orelse " ";
         const overhead = if (self.flags.split_on_punct_ascii) space.len + 1 else space.len;
         var normalized = try std.ArrayList(u8).initCapacity(allocator, trimmed_input.len * overhead + 2 * space.len);
         errdefer normalized.deinit();
@@ -545,7 +548,7 @@ pub const Normalizer = struct {
             if (slice.len == 1) ascii: {
                 // The more advanced logic only works with ascii atm
                 var byte = slice[0];
-                if (self.flags.escape_whitespaces and byte == ' ') {
+                if (self.escape_whitespaces != null and byte == ' ') {
                     // replace the space token by the special token
                     try addSlice(space, origin, &normalized, &normalized_to_origin);
                     is_prev_word = false;
@@ -592,8 +595,7 @@ pub const Normalizer = struct {
 
     pub fn wellKnown(impl: KnownImplementation) Normalizer {
         return switch (impl) {
-            .sentencepiece => .{ .flags = .{
-                .escape_whitespaces = true,
+            .sentencepiece => .{ .escape_whitespaces = Normalizer.sentencepiece_space, .flags = .{
                 .remove_extra_whitespaces = true,
                 .add_dummy_prefix = true,
                 .add_dummy_suffix = false,
@@ -601,7 +603,6 @@ pub const Normalizer = struct {
                 .split_on_punct_ascii = false,
             } },
             .gpt2 => .{ .flags = .{
-                .escape_whitespaces = false,
                 .remove_extra_whitespaces = true,
                 .add_dummy_prefix = true,
                 .add_dummy_suffix = false,
@@ -634,14 +635,13 @@ fn isPunct(unicode_char: []const u8) bool {
 }
 
 test Normalizer {
-    try testing.expectEqualSlices(u8, "▁", Normalizer.space_symbol);
-
     {
         const n: Normalizer = .{ .flags = .{
-            .escape_whitespaces = false,
             .remove_extra_whitespaces = true,
             .add_dummy_prefix = true,
             .add_dummy_suffix = false,
+            .lower_case_ascii = false,
+            .split_on_punct_ascii = false,
         } };
         const res = try n.normalizeWithMapping(testing.allocator, "Hellŏ  world!");
         defer res.deinit(testing.allocator);
@@ -657,10 +657,11 @@ test Normalizer {
 
     {
         const n: Normalizer = .{ .flags = .{
-            .escape_whitespaces = false,
             .remove_extra_whitespaces = true,
             .add_dummy_prefix = true,
             .add_dummy_suffix = true,
+            .lower_case_ascii = false,
+            .split_on_punct_ascii = false,
         } };
         const res = try n.normalize(testing.allocator, "Hello  world!");
         defer testing.allocator.free(res);
@@ -669,12 +670,16 @@ test Normalizer {
     }
 
     {
-        const n: Normalizer = .{ .flags = .{
-            .escape_whitespaces = true,
-            .remove_extra_whitespaces = false,
-            .add_dummy_prefix = true,
-            .add_dummy_suffix = false,
-        } };
+        const n: Normalizer = .{
+            .escape_whitespaces = "▁",
+            .flags = .{
+                .remove_extra_whitespaces = false,
+                .add_dummy_prefix = true,
+                .add_dummy_suffix = false,
+                .lower_case_ascii = false,
+                .split_on_punct_ascii = false,
+            },
+        };
         const res = try n.normalize(testing.allocator, "Hello  world!");
         defer testing.allocator.free(res);
 
@@ -683,11 +688,11 @@ test Normalizer {
 
     {
         const n: Normalizer = .{ .flags = .{
-            .escape_whitespaces = false,
             .remove_extra_whitespaces = true,
             .add_dummy_prefix = false,
             .add_dummy_suffix = true,
             .lower_case_ascii = true,
+            .split_on_punct_ascii = false,
         } };
         const res = try n.normalize(testing.allocator, "Hello  world!");
         defer testing.allocator.free(res);
@@ -697,10 +702,10 @@ test Normalizer {
 
     {
         const n: Normalizer = .{ .flags = .{
-            .escape_whitespaces = false,
             .remove_extra_whitespaces = true,
             .add_dummy_prefix = false,
             .add_dummy_suffix = true,
+            .lower_case_ascii = false,
             .split_on_punct_ascii = true,
         } };
         const res = try n.normalize(testing.allocator, "Hello  world!");

@@ -57,14 +57,16 @@ pub fn getGgufTokenizer(self: zml.aio.BufferStore, allocator: std.mem.Allocator)
     };
 
     // default options
-    const gguf_normalizer: zml.tokenizer.Normalizer = .{ .flags = .{
-        .escape_whitespaces = true,
-        .remove_extra_whitespaces = true,
-        .add_dummy_prefix = true,
-        .add_dummy_suffix = false,
-        .lower_case_ascii = false,
-        .split_on_punct_ascii = false,
-    } };
+    const gguf_normalizer: zml.tokenizer.Normalizer = .{
+        .escape_whitespaces = zml.tokenizer.Normalizer.sentencepiece_space,
+        .flags = .{
+            .remove_extra_whitespaces = true,
+            .add_dummy_prefix = true,
+            .add_dummy_suffix = false,
+            .lower_case_ascii = false,
+            .split_on_punct_ascii = false,
+        },
+    };
 
     const extra_tokens: u8 = if (tokenizer_impl == .gpt2) 1 else 0;
     const n_tokens: u32 = @intCast(tokens.len + extra_tokens);
@@ -100,7 +102,7 @@ pub fn getGgufTokenizer(self: zml.aio.BufferStore, allocator: std.mem.Allocator)
     // Gpt2 tokenizer always splits on spaces.
     if (tokenizer_impl == .gpt2) {
         tokenizer.normalizer.?.flags.add_dummy_prefix = true;
-        tokenizer.normalizer.?.flags.escape_whitespaces = false;
+        tokenizer.normalizer.?.escape_whitespaces = null;
         tokenizer.special_tokens.hard_space = tokenizer.next_token_id;
         tokenizer.addOwnedToken(0, " ");
     }
