@@ -301,11 +301,13 @@ pub const Tokenizer = struct {
             var piece = self.lookupPiece(id);
 
             // Convert `▁` to a regular space.
-            if (escaped != null and std.mem.startsWith(u8, piece, escaped.?)) {
-                piece = piece[escaped.?.len..];
-
-                // don't output a space at beginning of text.
-                if (output.items.len > 0) try output.append(' ');
+            if (escaped) |escspc| {
+                // we modify piece inside the loop, so we can use it in the condition
+                while (std.mem.startsWith(u8, piece, escaped.?)) {
+                    piece = piece[escspc.len..];
+                    // don't output a space at beginning of text.
+                    if (output.items.len > 0) try output.append(' ');
+                }
             }
 
             try output.appendSlice(piece);
