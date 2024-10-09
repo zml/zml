@@ -90,7 +90,7 @@ pub const LayerNorm = struct {
     eps: f32 = 1e-5,
 
     pub fn forward(self: LayerNorm, x: Tensor) Tensor {
-        const normed = normalizeVariance(x, self.eps);
+        const normed = normalizeVariance(x, -1, self.eps);
 
         var out = normed.mul(self.weight.broadcastLeft(x.shape()));
         if (self.bias) |bias| out = out.add(bias.broadcastLeft(x.shape()));
@@ -100,25 +100,27 @@ pub const LayerNorm = struct {
 };
 
 /// Center and scale by the variance.
-/// normalize(x, eps) = (x - mean(x)) / sqrt(var(x) + eps)
+/// normalize(x, axis, eps) = (x - mean(x, axis)) / sqrt(var(x, axis) + eps)
 /// Work on the last axis.
-pub fn normalizeVariance(x: Tensor, eps: f32) Tensor {
-    const N: f32 = @floatFromInt(x.dim(-1));
+pub fn normalizeVariance(x: Tensor, axis_: anytype, eps: f32) Tensor {
+    const a = x.axis(axis_);
+    const N: f32 = @floatFromInt(x.dim(a));
 
     // Upcast to improve precision
     const xf32 = x.convert(.f32);
-    const mean = xf32.sum(-1).scale(1.0 / N);
+    const mean = xf32.sum(a).scale(1.0 / N);
     const mean_dev = xf32.sub(mean.broadcastRight(xf32.shape()));
-    const variance = mean_dev.mul(mean_dev).sum(-1).scale(1.0 / N);
+    const variance = mean_dev.mul(mean_dev).sum(a).scale(1.0 / N);
     const rsqrt = Tensor.rsqrt(variance.addConstant(eps));
 
     return mean_dev.mul(rsqrt.broadcastRight(mean_dev.shape())).convert(x.dtype());
 }
 
 // ref: https://pytorch.org/docs/stable/generated/torch.nn.functional.normalize.html
-// Implementation equivalent to `nn.functional.normalize(tensor, dim=-1)` call
-pub fn normalizeL2(input: Tensor, eps: f32) Tensor {
-    const inv_norm = input.pow(Tensor.scalar(2, input.dtype())).sum(-1).addConstant(eps).rsqrt();
+// Implementation equivalent to `nn.functional.normalize(tensor, dim=a)` call
+pub fn normalizeL2(input: Tensor, axis_: anytype, eps: f32) Tensor {
+    const a = input.axis(axis_);
+    const inv_norm = input.pow(Tensor.scalar(2, input.dtype())).sum(a).addConstant(eps).rsqrt();
     return input.mul(inv_norm.broad(input.shape()));
 }
 
@@ -126,8 +128,12 @@ test normalizeL2 {
     const platform = zml.testing.env();
 
     const input = try zml.Buffer.fromSlice(platform, .{ 2, 2 }, &[_]f32{ -0.9686, -1.0058, -1.7808, 0.6698 });
-
-    const res = try zml.testing.compileAndCall(platform, zml.nn.normalizeL2, .{ input, 1e-12 });
+    const Local = struct {
+        fn _normalizeL2(x: Tensor, axis_: i8, eps: f32) Tensor {
+            return normalizeL2(x, axis_, eps);
+        }
+    };
+    const res = try zml.testing.compileAndCall(platform, Local._normalizeL2, .{ input, -1, 1e-12 });
     const expectation = zml.HostBuffer.fromSlice(.{ 2, 2 }, &[_]f32{ -0.6937, -0.7203, -0.9360, 0.3520 });
     try zml.testing.expectClose(expectation, res, 1e-4);
 }

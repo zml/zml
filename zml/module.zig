@@ -521,7 +521,7 @@ pub const CompilationContext = struct {
 
     /// Create tensor from the given shapes.
     /// Each created tensor will receive a unique id, local to this CompilationContext.
-    pub fn tensorFromShapes(self: *CompilationContext, ArgsT: type, allocator: std.mem.Allocator, args_shapes: anytype) ArgsT {
+    pub fn tensorFromShapes(self: *CompilationContext, ArgsT: type, allocator: std.mem.Allocator, args_shapes: anytype) !ArgsT {
         const Local = struct {
             fn tensorFromShape(arg_id: *u64, shape: Shape) Tensor {
                 defer arg_id.* += 1;
@@ -821,6 +821,13 @@ pub fn ExeWithWeights(comptime func: anytype) type {
             return self.inner.platform;
         }
 
+        pub fn getOutputBuffer(self: Self, i: usize) Buffer {
+            // TODO
+            meta.assert(self.inner.num_devices == 1, "TODO support sharded output", .{});
+            const out = self.output_per_device[0][i];
+            return Buffer.fromPjrtBuffers(self.inner.platform, &.{out});
+        }
+
         pub fn call(self: Self, args: Bufferized(Signature.ArgsT)) Bufferized(Signature.ReturnT) {
             fillBuffers(&args, self.input_per_device, self.inner.model_buffer_count, self.inner.args_buffer_count);
             var event: [1]*pjrt.Event = undefined;
@@ -858,7 +865,7 @@ fn compileInternal(
     const arena = arena_state.allocator();
 
     var timer = std.time.Timer.start() catch null;
-    const tensor_args = context.tensorFromShapes(ModuleSignature(func).ArgsT, arena, args);
+    const tensor_args = try context.tensorFromShapes(ModuleSignature(func).ArgsT, arena, args);
     // Run in a dedicated thread because compilation relies on `threadlocal`.
     const f = try asynk.callGeneric(CompilationContext.generateBytecode, .{ context, arena, "main", func, &model, &tensor_args, .{ .add_donations_attributes = true } });
     context._module.getBody().appendOperation(f.mlir_fn);
