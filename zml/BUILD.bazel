@@ -15,6 +15,10 @@ zig_library(
         "aio/**/*.zig",
         "nn/**/*.zig",
         "ops/**/*.zig",
+        # TODO: test_runner.zig should not be here.
+        # It's here for now because it seems that test_runner property in zig_test is misbehaving.
+        # See https://github.com/zml/rules_zig/issues/2
+        "test_runner.zig",
     ]),
     copts = ["-lc"],
     main = "zml.zig",
@@ -60,8 +64,14 @@ zig_cc_test(
         "aio/torch/simple.pt",
         "aio/torch/simple_test.pickle",
     ],
-    test_runner = "test_runner.zig",
+    test_runner = ":test_runner",
     deps = [":zml"],
+)
+
+filegroup(
+    name = "test_runner",
+    srcs = ["test_runner.zig"],
+    visibility = ["//visibility:public"],
 )
 
 filegroup(
