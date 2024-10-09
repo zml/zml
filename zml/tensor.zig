@@ -1292,6 +1292,13 @@ pub const Tensor = struct {
         return self.sum(axis_).divByConst(self.dim(axis_));
     }
 
+    /// Returns a Tensor containing the norm of each vector along the given axis.
+    pub fn norm(self: Tensor, axis_: anytype, power: f32) Tensor {
+        const a = self.axis(axis_);
+        const norm_to_the_power = self.pow(Tensor.scalar(power, self.dtype())).sum(a);
+        return norm_to_the_power.pow(Tensor.scalar(1.0 / power, self.dtype()));
+    }
+
     /// Returns a transposed Tensor computed using the given axes.
     pub fn transpose(self: Tensor, axes_: anytype) Tensor {
         const axes__ = self.axes(axes_).constSlice();
