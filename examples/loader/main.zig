@@ -60,7 +60,7 @@ pub fn asyncMain() !void {
     while (it.next()) |entry| : (i += 1) {
         const host_buffer = entry.value_ptr.*;
         total_bytes += host_buffer.data.len;
-        std.debug.print("Buffer: {any} / {any}\n", .{ i + 1, buffer_store.buffers.count() });
+        std.debug.print("Buffer: {s} ({any} / {any})\n", .{ entry.key_ptr.*, i + 1, buffer_store.buffers.count() });
         buffers[i] = try zml.Buffer.from(platform, host_buffer);
     }
 

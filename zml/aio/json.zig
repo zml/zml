@@ -27,77 +27,86 @@ pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore
     return res;
 }
 
-pub fn parseMetadata(allocator: Allocator, store: *zml.aio.BufferStore, key: StringBuilder, val: std.json.Value) !void {
+pub fn parseMetadata(allocator: Allocator, store: *zml.aio.BufferStore, prefix: StringBuilder, val: std.json.Value) !void {
     const metadata = &store._metadata;
-    switch (val) {
-        .null => try metadata.put(allocator, try allocator.dupe(u8, key.items), .{ .null = {} }),
-        .bool => |v| try metadata.put(allocator, try allocator.dupe(u8, key.items), .{ .boolval = v }),
-        .integer => |v| try metadata.put(allocator, try allocator.dupe(u8, key.items), .{ .int64 = v }),
-        .float => |v| try metadata.put(allocator, try allocator.dupe(u8, key.items), .{ .float64 = v }),
-        .number_string, .string => |v| try metadata.put(allocator, try allocator.dupe(u8, key.items), .{ .string = try allocator.dupe(u8, v) }),
-        .array => |v| switch (validSlice(v)) {
-            true => {
-                if (v.items.len == 0) return;
-                switch (v.items[0]) {
-                    .bool => {
+    const key = prefix.items;
+    return switch (val) {
+        .null => try metadata.put(allocator, try allocator.dupe(u8, key), .{ .null = {} }),
+        .bool => |v| try metadata.put(allocator, try allocator.dupe(u8, key), .{ .boolval = v }),
+        .integer => |v| try metadata.put(allocator, try allocator.dupe(u8, key), .{ .int64 = v }),
+        .float => |v| try metadata.put(allocator, try allocator.dupe(u8, key), .{ .float64 = v }),
+        .number_string, .string => |v| try metadata.put(allocator, try allocator.dupe(u8, key), .{ .string = try allocator.dupe(u8, v) }),
+        .array => |v| {
+            if (v.items.len == 0) return;
+            return if (validSlice(v)) |item_type| {
+                const data, const dtype: zml.aio.Value.Slice.ItemType = switch (item_type) {
+                    .bool => blk: {
                         const values = try allocator.alloc(bool, v.items.len);
-                        errdefer allocator.free(values);
                         for (v.items, 0..) |item, i| values[i] = item.bool;
-                        try metadata.put(allocator, try allocator.dupe(u8, key.items), .{ .array = .{ .item_type = .boolval, .data = std.mem.sliceAsBytes(values) } });
+                        break :blk .{ std.mem.sliceAsBytes(values), .boolval };
                     },
-                    .integer => {
+                    .integer => blk: {
                         const values = try allocator.alloc(i64, v.items.len);
-                        errdefer allocator.free(values);
                         for (v.items, 0..) |item, i| values[i] = item.integer;
-                        try metadata.put(allocator, try allocator.dupe(u8, key.items), .{ .array = .{ .item_type = .int64, .data = std.mem.sliceAsBytes(values) } });
+                        break :blk .{ std.mem.sliceAsBytes(values), .int64 };
                     },
-                    .float => {
+                    .float => blk: {
                         const values = try allocator.alloc(f64, v.items.len);
-                        errdefer allocator.free(values);
                         for (v.items, 0..) |item, i| values[i] = item.float;
-                        try metadata.put(allocator, try allocator.dupe(u8, key.items), .{ .array = .{ .item_type = .float64, .data = std.mem.sliceAsBytes(values) } });
+                        break :blk .{ std.mem.sliceAsBytes(values), .float64 };
                     },
-                    inline .string, .number_string => |_, tag| {
+                    inline .string, .number_string => |tag| blk: {
                         const values = try allocator.alloc([]const u8, v.items.len);
-                        errdefer allocator.free(values);
                         for (v.items, 0..) |item, i| {
                             values[i] = @field(item, @tagName(tag));
                         }
-                        try metadata.put(allocator, try allocator.dupe(u8, key.items), .{ .array = .{ .item_type = .string, .data = std.mem.sliceAsBytes(values) } });
+                        break :blk .{ std.mem.sliceAsBytes(values), .string };
                     },
-                    else => unreachable,
+                    .null, .array, .object => unreachable,
+                };
+                try metadata.put(
+                    allocator,
+                    try allocator.dupe(u8, key),
+                    .{ .array = .{ .item_type = dtype, .data = data } },
+                );
+            } else {
+                for (v.items, 0..) |item, i| {
+                    var new_prefix = prefix;
+                    if (prefix.items.len > 0)
+                        new_prefix.appendAssumeCapacity('.');
+                    new_prefix.items.len += std.fmt.formatIntBuf(new_prefix.unusedCapacitySlice(), i, 10, .lower, .{});
+                    try parseMetadata(allocator, store, new_prefix, item);
                 }
-            },
-            false => for (v.items, 0..) |item, i| {
-                var new_key = key;
-                if (key.items.len > 0)
-                    new_key.appendAssumeCapacity('.');
-                new_key.items.len += std.fmt.formatIntBuf(new_key.unusedCapacitySlice(), i, 10, .lower, .{});
-                try parseMetadata(allocator, store, new_key, item);
-            },
+            };
         },
         .object => |v| {
             var obj_iter = v.iterator();
             while (obj_iter.next()) |entry| {
-                var new_key = key;
-                if (key.items.len > 0)
-                    new_key.appendAssumeCapacity('.');
-                new_key.appendSliceAssumeCapacity(entry.key_ptr.*);
-                try parseMetadata(allocator, store, new_key, entry.value_ptr.*);
+                var new_prefix = prefix;
+                if (prefix.items.len > 0)
+                    new_prefix.appendAssumeCapacity('.');
+                new_prefix.appendSliceAssumeCapacity(entry.key_ptr.*);
+                try parseMetadata(allocator, store, new_prefix, entry.value_ptr.*);
             }
         },
-    }
+    };
 }
 
-fn validSlice(v: std.json.Array) bool {
-    const item_type = std.meta.activeTag(v.items[0]);
+/// We can only create a Zig slice out of json array, if all values
+/// in the array have the same type.
+fn validSlice(v: std.json.Array) ?std.meta.Tag(std.json.Value) {
+    if (v.items.len == 0) return null;
+
+    const item_type: std.meta.Tag(std.json.Value) = v.items[0];
     switch (item_type) {
-        .null, .array, .object => return false,
+        .null, .array, .object => return null,
         else => {},
     }
 
-    for (v.items[1..]) |item|
-        if (item_type != std.meta.activeTag(item)) return false;
+    for (v.items[1..]) |item| {
+        if (item != item_type)
+            return null;
+    }
 
-    return true;
+    return item_type;
 }
