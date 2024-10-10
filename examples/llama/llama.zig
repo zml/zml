@@ -43,6 +43,16 @@ pub const LlamaLM = struct {
             layer.input_layernorm.eps = options.rms_norm_eps;
             layer.post_attention_layernorm.eps = options.rms_norm_eps;
         }
+
+        zml.meta.visit(struct {
+            fn cb(_: void, layer: *zml.nn.Linear) void {
+                layer.weight = layer.weight.withSharding(.{-1});
+                if (layer.bias) |*b| {
+                    b.* = b.withSharding(.{-1});
+                }
+            }
+        }.cb, {}, &self.model);
+        self.lm_head.weight = self.lm_head.weight.withSharding(.{0});
     }
 
     /// Predicts the token at `token_index` position.
@@ -328,8 +338,8 @@ pub const KvCache = struct {
     pub fn init(kv_shape: zml.Shape) KvCache {
         // The KV-cache is initialized with ones to detect reads of uninitialized memory.
         return .{
-            .k = Tensor.constant(kv_shape, kv_shape.dtype().one()),
-            .v = Tensor.constant(kv_shape, kv_shape.dtype().one()),
+            .k = Tensor.constant(kv_shape, kv_shape.dtype().one()).withSharding(.{.h}),
+            .v = Tensor.constant(kv_shape, kv_shape.dtype().one()).withSharding(.{.h}),
             .layer_index = Tensor.scalar(-1, .i32),
         };
     }
