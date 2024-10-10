@@ -20,41 +20,6 @@ const StringBuilder = std.ArrayListUnmanaged(u8);
 const Allocator = std.mem.Allocator;
 const log = std.log.scoped(.zml_io);
 
-const TorchType = enum {
-    float64,
-    double,
-    float32,
-    float,
-    float16,
-    half,
-    bfloat16,
-    int64,
-    long,
-    int32,
-    int,
-    int16,
-    short,
-    int8,
-    char,
-    uint8,
-    byte,
-};
-
-fn dtypeFromStr(str: []const u8) !zml.DataType {
-    const case = std.meta.stringToEnum(TorchType, str) orelse return error.UnknownTensorType;
-    return switch (case) {
-        .float64, .double => .f64,
-        .float32, .float => .f32,
-        .float16, .half => .f16,
-        .bfloat16 => .bf16,
-        .int64, .long => .i64,
-        .int32, .int => .i32,
-        .int16, .short => .i16,
-        .int8, .char => .i8,
-        .uint8, .byte => .u8,
-    };
-}
-
 /// Opens and loads a BufferStore from the torch file at the given path.
 pub fn open(allocator: Allocator, path: []const u8) !zml.aio.BufferStore {
     const file = asynk.File.open(path, .{}) catch |err| {
@@ -80,6 +45,37 @@ pub fn open(allocator: Allocator, path: []const u8) !zml.aio.BufferStore {
     return res;
 }
 
+/// Convert from a torch.<type>Storage to a `zml.DataType`.
+/// TODO: make this future proof, storage type are going to get replaced with torch.UntypedStorage
+/// See https://pytorch.org/docs/stable/storage.html
+fn storageToDtype(storage_type: []const u8) !zml.DataType {
+    const torch_type = storage_type[0 .. storage_type.len - "Storage".len];
+    const map = std.StaticStringMap(zml.DataType).initComptime(.{
+        .{ "Double", .f64 },
+        .{ "Float", .f32 },
+        .{ "Half", .f16 },
+        .{ "Long", .i64 },
+        .{ "Int", .i32 },
+        .{ "Short", .i16 },
+        .{ "Char", .i8 },
+        .{ "Byte", .u8 },
+        .{ "Bool", .bool },
+        .{ "BFloat16", .bf16 },
+        .{ "ComplexDouble", .c128 },
+        .{ "ComplexFloat", .c64 },
+        // QUInt8Storage
+        // QInt8Storage
+        // QInt32Storage
+        // QUInt4x2Storage
+        // QUInt2x4Storage
+    });
+
+    return map.get(torch_type) orelse {
+        log.err("Unsupported torch storage type: {s}", .{storage_type});
+        return error.UnsupportedDataType;
+    };
+}
+
 pub const PickleData = struct {
     stack: PickleStack,
     memo: PickleMemo,
@@ -89,7 +85,7 @@ pub const PickleData = struct {
         return switch (v) {
             .global => |object| switch (object.member) {
                 .raw => |raw| {
-                    if (std.mem.eql(u8, ns, raw.global[0]) and std.mem.eql(u8, name, raw.global[1]) and object.args[0] == .seq) {
+                    if (std.mem.eql(u8, ns, raw.global.module) and std.mem.eql(u8, name, raw.global.class) and object.args[0] == .seq) {
                         return true;
                     } else return false;
                 },
@@ -179,7 +175,7 @@ pub const PickleData = struct {
                     const rank = raw_shape.values.len;
                     const shape = dimsFromValues(raw_shape.values);
                     var strides = dimsFromValues(raw_strides.values);
-                    const stype: []const u8, const sfile: []const u8, const sdev: []const u8 = switch (pidval.ref) {
+                    const storage_type, const sfile = switch (pidval.ref) {
                         .seq => |seq| blk: {
                             const sargs = seq.values;
                             if (seq.type == .tuple and
@@ -191,17 +187,16 @@ pub const PickleData = struct {
                             {
                                 const op = sargs[1].raw.global;
                                 const sfile = sargs[2].string;
-                                const sdev = sargs[3].string;
-                                const styp = op[1];
-                                if (std.mem.eql(u8, "torch", op[0]) and std.mem.endsWith(u8, styp, "Storage")) {
-                                    break :blk .{ std.ascii.lowerString(styp[0 .. styp.len - 7], styp[0 .. styp.len - 7]), sfile, sdev };
+                                // const sdev = sargs[3].string;
+                                if (std.mem.eql(u8, "torch", op.module) and std.mem.endsWith(u8, op.class, "Storage")) {
+                                    break :blk .{ op.class, sfile };
                                 } else @panic("Unexpected storage type part of persistant ID");
                             } else @panic("Unexpected value for persistant ID");
                         },
                         else => @panic("Unexpected value for persistant ID"),
                     };
-                    _ = sdev;
-                    const data_type = try dtypeFromStr(stype);
+
+                    const data_type = try storageToDtype(storage_type);
                     for (strides[0..rank]) |*s| s.* *= data_type.sizeOf();
 
                     var sfile_buf = std.ArrayList(u8).init(allocator);
@@ -296,10 +291,7 @@ pub const PickleData = struct {
                                     log.err("Duplicate key: {s}", .{new_prefix.items});
                                     allocator.free(key);
                                 } else {
-                                    const val = try allocator.alloc(u8, global[0].len + 1 + global[1].len);
-                                    @memcpy(val[0..global[0].len], global[0]);
-                                    val[global[0].len] = '.';
-                                    @memcpy(val[global[0].len + 1 ..], global[1]);
+                                    const val = try std.mem.join(allocator, ".", &.{ global.module, global.class });
                                     d.value_ptr.* = .{ .string = val };
                                 }
                             },
