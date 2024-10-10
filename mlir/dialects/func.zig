@@ -8,17 +8,23 @@ pub fn func(
         args: []const mlir.Type,
         arg_attrs: []const mlir.Attribute = &.{},
         results: []const mlir.Type,
+        res_attrs: []const mlir.Attribute = &.{},
         block: mlir.Block,
         location: mlir.Location,
     },
 ) mlir.Operation {
     const AttrTuple = struct { [:0]const u8, mlir.Attribute };
-    var attrs_tuple_buffer = std.BoundedArray(AttrTuple, 3){};
+    var attrs_tuple_buffer = std.BoundedArray(AttrTuple, 4){};
     attrs_tuple_buffer.appendAssumeCapacity(.{ "sym_name", mlir.StringAttribute.init(ctx, args.sym_name).as(mlir.Attribute).? });
     attrs_tuple_buffer.appendAssumeCapacity(.{ "function_type", mlir.TypeAttribute.init((mlir.FunctionType.init(ctx, args.args, args.results) catch unreachable).as(mlir.Type).?).as(mlir.Attribute).? });
     if (args.arg_attrs.len > 0) {
         attrs_tuple_buffer.appendAssumeCapacity(.{ "arg_attrs", mlir.ArrayAttribute.init(ctx, args.arg_attrs).as(mlir.Attribute).? });
     }
+
+    if (args.res_attrs.len > 0) {
+        attrs_tuple_buffer.appendAssumeCapacity(.{ "res_attrs", mlir.ArrayAttribute.init(ctx, args.res_attrs).as(mlir.Attribute).? });
+    }
+
     return mlir.Operation.make(ctx, "func.func", .{
         .blocks = &.{args.block},
         .attributes = attrs_tuple_buffer.constSlice(),

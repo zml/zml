@@ -82,18 +82,14 @@ pub const Buffer = struct {
     }
 
     /// Wraps pre-exisiting `pjrt.Buffer` shards into one `zml.Buffer`.
-    pub fn fromPjrtBuffers(platform: Platform, pjrt_buffers: []const *pjrt.Buffer) Buffer {
+    pub fn fromPjrtBuffers(platform: Platform, shape_: Shape, pjrt_buffers: []const *pjrt.Buffer) Buffer {
         meta.assert(pjrt_buffers.len <= MAX_NUM_SHARDS, "ZML doesn't support having more than {} shards. Received {} shards for one buffer.", .{ MAX_NUM_SHARDS, pjrt_buffers.len });
         meta.assert(pjrt_buffers.len > 0, "fromPjrtBuffers expects at least one buffer, got 0.", .{});
         var shards: Shards = .{};
         shards.appendSliceAssumeCapacity(pjrt_buffers);
         return .{
             ._api = platform.pjrt_api,
-            ._shape = Shape.init(
-                // This isn't with sharded axes.
-                pjrt_buffers[0].getDimensions(platform.pjrt_api),
-                dtypeFromBufferType(pjrt_buffers[0].getElementType(platform.pjrt_api)),
-            ),
+            ._shape = shape_,
             ._shards = shards,
         };
     }

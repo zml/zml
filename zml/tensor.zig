@@ -159,9 +159,30 @@ pub const Tensor = struct {
     }
 
     pub fn withSharding(self: Tensor, axes_: anytype) Tensor {
-        var res = self;
-        res._shape = self._shape.withSharding(axes_);
-        return res;
+        return switch (self._id) {
+            .arg_id, .mlir => {
+                const ctx = self.getContext();
+                var res = self;
+                res._shape = self._shape.withSharding(axes_);
+
+                const sharding = ctx.getShardingAttr(res._shape);
+
+                const op = dialect.stablehlo.sharding(
+                    ctx.mlirCtx(),
+                    &.{self.value()},
+                    sharding,
+                    &.{self.value().getType()},
+                    ctx.mlirCtx().location(@src()),
+                );
+
+                return _result(res._shape, op.result(0));
+            },
+            .buffer_id => {
+                var res = self;
+                res._shape = self._shape.withSharding(axes_);
+                return res;
+            },
+        };
     }
 
     /// Returns a Tensor with new tag names.
