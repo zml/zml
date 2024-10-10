@@ -361,23 +361,19 @@ pub const CompilationContext = struct {
         };
     }
 
-    pub fn getShardingConstraints(self: CompilationContext, shape: Shape) mlir.StringAttribute {
+    pub fn getShardingAttr(self: CompilationContext, shape: Shape) mlir.StringAttribute {
         const mlir_ctx = self.mlirCtx();
 
         const num_partitions = self._platform.sharding().num_partitions;
         var sharding_str: std.BoundedArray(u8, 128) = .{};
 
         writeShardingRepresentation(shape, num_partitions, sharding_str.writer()) catch unreachable;
-        defer sharding_str.len = 0;
         return mlir.StringAttribute.init(mlir_ctx, sharding_str.constSlice());
     }
 
     fn addShardingAttributes(self: CompilationContext, arg_attrs: []AttributeList, res_attrs: []AttributeList, input_shapes: []const Shape, output_shapes: []const Shape) void {
         const mlir_ctx = self.mlirCtx();
         if (!self._platform.compilation_options.sharding_enabled) return;
-
-        const num_partitions = self._platform.sharding().num_partitions;
-        var sharding_str: std.BoundedArray(u8, 128) = .{};
 
         const mhlo_default_layout = mlir.NamedAttribute.init(
             mlir.Identifier.get(mlir_ctx, "mhlo.layout_mode"),
@@ -386,22 +382,21 @@ pub const CompilationContext = struct {
         for (arg_attrs, input_shapes) |*attr, shape| {
             attr.appendAssumeCapacity(mhlo_default_layout);
 
-            writeShardingRepresentation(shape, num_partitions, sharding_str.writer()) catch unreachable;
-            defer sharding_str.len = 0;
+            const sharding_attr = self.getShardingAttr(shape);
             attr.appendAssumeCapacity(mlir.NamedAttribute.init(
                 mlir.Identifier.get(mlir_ctx, "mhlo.sharding"),
-                mlir.StringAttribute.init(mlir_ctx, sharding_str.constSlice()).asAttr(),
+                sharding_attr.asAttr(),
             ));
         }
 
         for (res_attrs, output_shapes) |*attr, shape| {
             attr.appendAssumeCapacity(mhlo_default_layout);
 
-            writeShardingRepresentation(shape, num_partitions, sharding_str.writer()) catch unreachable;
-            defer sharding_str.len = 0;
+            const sharding_attr = self.getShardingAttr(shape);
+
             attr.appendAssumeCapacity(mlir.NamedAttribute.init(
                 mlir.Identifier.get(mlir_ctx, "mhlo.sharding"),
-                mlir.StringAttribute.init(mlir_ctx, sharding_str.constSlice()).asAttr(),
+                sharding_attr.asAttr(),
             ));
         }
     }

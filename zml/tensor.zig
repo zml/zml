@@ -165,12 +165,12 @@ pub const Tensor = struct {
                 var res = self;
                 res._shape = self._shape.withSharding(axes_);
 
-                const sharding_spec = ctx.getShardingConstraints(res._shape);
+                const sharding = ctx.getShardingAttr(res._shape);
 
                 const op = dialect.stablehlo.sharding(
                     ctx.mlirCtx(),
                     &.{self.value()},
-                    sharding_spec,
+                    sharding,
                     &.{self.value().getType()},
                     ctx.mlirCtx().location(@src()),
                 );

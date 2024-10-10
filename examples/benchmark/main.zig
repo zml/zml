@@ -5,16 +5,9 @@ const flags = @import("tigerbeetle/flags");
 
 const async_ = asynk.async_;
 
-// set this to false to disable the verbose logging
-const show_mlir = true;
-
+// set log level to debug to print the generated IR
 pub const std_options = .{
-    .log_level = .warn,
-    .log_scope_levels = &[_]std.log.ScopeLevel{
-        .{ .scope = .pjrt, .level = if (show_mlir) .debug else .err },
-        .{ .scope = .zml_module, .level = if (show_mlir) .debug else .err },
-        .{ .scope = .zml, .level = if (show_mlir) .debug else .err },
-    },
+    .log_level = .debug,
 };
 
 /// Model definition

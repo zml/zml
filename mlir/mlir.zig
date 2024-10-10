@@ -466,6 +466,10 @@ pub const ArrayAttribute = struct {
     pub fn get(self: Self, index: usize) Attribute {
         return Attribute.wrap(c.mlirArrayAttrGetElement(self.inner(), @intCast(index)));
     }
+
+    pub fn asAttr(self: Self) Attribute {
+        return .{ ._inner = self._inner };
+    }
 };
 
 pub fn IntegerAttribute(comptime it: IntegerTypes) type {
