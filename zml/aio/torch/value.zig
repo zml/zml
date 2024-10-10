@@ -265,7 +265,7 @@ pub const Value = union(ValueType) {
             },
             .string => |v| try writer.print("\"{s}\"", .{v}),
             .raw => |v| switch (v) {
-                .global => |raw_global| try writer.print("\"{s}\", \"{s}\"", .{ raw_global[0], raw_global[1] }),
+                .global => |py_type| try writer.print("\"{s}\", \"{s}\"", .{ py_type.module, py_type.class }),
                 else => try writer.print("{any}", .{v}),
             },
             inline else => |v| {

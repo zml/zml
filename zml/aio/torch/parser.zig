@@ -240,13 +240,12 @@ pub const Decoder = struct {
                 },
                 .append => try results.append(.{ .append = {} }),
                 .build => try results.append(.{ .build = {} }),
-                .global => {
-                    const buf0 = try reader.readUntilDelimiterAlloc(allocator, '\n', len);
-                    errdefer allocator.free(buf0);
-                    const buf1 = try reader.readUntilDelimiterAlloc(allocator, '\n', len);
-                    errdefer allocator.free(buf1);
-                    _ = (buf1.len + 1);
-                    try results.append(.{ .global = .{ buf0, buf1 } });
+                .global, .inst => {
+                    const module = try reader.readUntilDelimiterAlloc(allocator, '\n', len);
+                    errdefer allocator.free(module);
+                    const class = try reader.readUntilDelimiterAlloc(allocator, '\n', len);
+                    errdefer allocator.free(class);
+                    try results.append(.{ .global = .{ .module = module, .class = class } });
                 },
                 .dict => try results.append(.{ .dict = {} }),
                 .empty_dict => try results.append(.{ .empty_dict = {} }),
@@ -257,14 +256,6 @@ pub const Decoder = struct {
                     try results.append(.{ .get = buf });
                 },
                 .binget => try results.append(.{ .binget = try reader.readByte() }),
-                .inst => {
-                    const buf0 = try reader.readUntilDelimiterAlloc(allocator, '\n', len);
-                    errdefer allocator.free(buf0);
-                    const buf1 = try reader.readUntilDelimiterAlloc(allocator, '\n', len);
-                    errdefer allocator.free(buf1);
-                    _ = (buf1.len + 1);
-                    try results.append(.{ .inst = .{ buf0, buf1 } });
-                },
                 .long_binget => try results.append(.{ .long_binget = try reader.readInt(u32, .little) }),
                 .list => try results.append(.{ .list = {} }),
                 .empty_list => try results.append(.{ .empty_list = {} }),

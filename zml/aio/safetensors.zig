@@ -11,30 +11,6 @@ const StringBuilder = std.ArrayListUnmanaged(u8);
 const Allocator = std.mem.Allocator;
 const log = std.log.scoped(.zml_io);
 
-fn stringToDtype(v: []const u8) !zml.DataType {
-    const Case = enum { F64, F32, F16, BF16, F8_E4M3, I64, I32, I16, I8, U64, U32, U16, U8, BOOL };
-    if (std.meta.stringToEnum(Case, v)) |case| {
-        return switch (case) {
-            .F64 => .f64,
-            .F32 => .f32,
-            .F16 => .f16,
-            .BF16 => .bf16,
-            .F8_E4M3 => .f8e4m3fn,
-            .I64 => .i64,
-            .I32 => .i32,
-            .I16 => .i16,
-            .I8 => .i8,
-            .U64 => .u64,
-            .U32 => .u32,
-            .U16 => .u16,
-            .U8 => .u8,
-            .BOOL => .bool,
-        };
-    }
-    std.log.err("Unsupported type-string: {s}\n", .{v});
-    return error.UnsupportedDataType;
-}
-
 pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore {
     var res: zml.aio.BufferStore = .{
         .arena = std.heap.ArenaAllocator.init(allocator),
@@ -93,9 +69,13 @@ fn loadFile(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.Array
 
     const json_header_length: usize = @intCast(try r.readInt(u64, std.builtin.Endian.little));
     const json_data = try allocator.alloc(u8, json_header_length);
-    _ = try r.readAtLeast(json_data, json_header_length);
-    const metadata = try std.json.parseFromSliceLeaky(std.json.Value, allocator, json_data, .{ .allocate = .alloc_if_needed });
+    const n = try r.readAll(json_data);
+    if (n != json_header_length) {
+        log.err("Failed to read the full {} bytes of json header from file {s}", .{ n, path });
+        return error.CorruptedFile;
+    }
 
+    const metadata = try std.json.parseFromSliceLeaky(std.json.Value, allocator, json_data[0..n], .{});
     var buffer_file = try MemoryMappedFile.init(file);
     errdefer buffer_file.deinit();
     buffer_file.data_offset = 8 + json_header_length;
@@ -137,4 +117,28 @@ fn loadFile(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.Array
         const buf = HostBuffer.fromBytes(out_shape, buffer_file.mappedSlice(start, out_shape.byteSize()));
         try store.buffers.put(allocator, try allocator.dupe(u8, key), buf);
     }
+}
+
+fn stringToDtype(safetensor_type: []const u8) !zml.DataType {
+    const map = std.StaticStringMap(zml.DataType).initComptime(.{
+        .{ "F64", .f64 },
+        .{ "F32", .f32 },
+        .{ "F16", .f16 },
+        .{ "BF16", .bf16 },
+        .{ "F8_E4M3", .f8e4m3fn },
+        .{ "I64", .i64 },
+        .{ "I32", .i32 },
+        .{ "I16", .i16 },
+        .{ "I8", .i8 },
+        .{ "U64", .u64 },
+        .{ "U32", .u32 },
+        .{ "U16", .u16 },
+        .{ "U8", .u8 },
+        .{ "BOOL", .bool },
+    });
+
+    return map.get(safetensor_type) orelse {
+        log.err("Unsupported safetensor data type: {s}", .{safetensor_type});
+        return error.UnsupportedDataType;
+    };
 }

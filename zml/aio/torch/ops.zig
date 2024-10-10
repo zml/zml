@@ -7,35 +7,35 @@ pub const PickleOp = union(RawPickleOp) {
     pop,
     pop_mark,
     dup,
-    float: []u8,
-    int: []u8,
+    float: []const u8,
+    int: []const u8,
     binint: i32,
     binint1: u8,
-    long: []u8,
+    long: []const u8,
     binint2: u16,
     none,
-    persid: []u8,
+    persid: []const u8,
     binpersid,
     reduce,
-    string: []u8,
-    binstring: []u8,
-    short_binstring: []u8,
-    unicode: []u8,
-    binunicode: []u8,
+    string: []const u8,
+    binstring: []const u8,
+    short_binstring: []const u8,
+    unicode: []const u8,
+    binunicode: []const u8,
     append,
     build,
-    global: [2][]u8,
+    global: PyType,
     dict,
     empty_dict,
     appends,
-    get: []u8,
+    get: []const u8,
     binget: u8,
-    inst: [2][]u8,
+    inst: PyType,
     long_binget: u32,
     list,
     empty_list,
     obj,
-    put: []u8,
+    put: []const u8,
     binput: u8,
     long_binput: u32,
     setitem,
@@ -53,13 +53,13 @@ pub const PickleOp = union(RawPickleOp) {
     tuple3,
     newtrue,
     newfalse,
-    long1: []u8,
-    long4: []u8,
-    binbytes: []u8,
-    short_binbytes: []u8,
-    short_binunicode: []u8,
-    binunicode8: []u8,
-    binbytes8: []u8,
+    long1: []const u8,
+    long4: []const u8,
+    binbytes: []const u8,
+    short_binbytes: []const u8,
+    short_binunicode: []const u8,
+    binunicode8: []const u8,
+    binbytes8: []const u8,
     empty_set,
     additems,
     frozenset,
@@ -67,9 +67,11 @@ pub const PickleOp = union(RawPickleOp) {
     stack_global,
     memoize,
     frame: u64,
-    bytearray8: []u8,
+    bytearray8: []const u8,
     next_buffer,
     readonly_buffer,
+
+    pub const PyType = struct { module: []const u8, class: []const u8 };
 
     pub fn deinit(self: PickleOp, allocator: std.mem.Allocator) void {
         switch (self) {
@@ -93,10 +95,9 @@ pub const PickleOp = union(RawPickleOp) {
             .binbytes8,
             .bytearray8,
             => |v| allocator.free(v),
-            .global, .inst => |fields| {
-                inline for (fields) |field| {
-                    allocator.free(field);
-                }
+            .global, .inst => |py_type| {
+                allocator.free(py_type.module);
+                allocator.free(py_type.class);
             },
             else => {},
         }
@@ -131,12 +132,10 @@ pub const PickleOp = union(RawPickleOp) {
                 return res;
             },
             inline .global, .inst => |v, tag| {
-                var out: std.meta.Tuple(&.{ []u8, []u8 }) = undefined;
-                inline for (0..2) |i| {
-                    out[i] = try allocator.alloc(u8, v[i].len);
-                    @memcpy(out[i], v[i]);
-                }
-                @field(res, @tagName(tag)) = out;
+                @field(res, @tagName(tag)) = PyType{
+                    .module = try allocator.dupe(u8, v.module),
+                    .class = try allocator.dupe(u8, v.class),
+                };
                 return res;
             },
             else => self,
