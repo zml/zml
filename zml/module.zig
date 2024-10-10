@@ -1155,6 +1155,12 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, m
     // Note: we may need to restore IR downgrade if we need to support old pjrt plugins.
     module.op().writeBytecode(mlir_bytecode.writer());
 
+    {
+        var temp = std.ArrayList(u8).init(arena);
+        defer temp.deinit();
+        dialect.stablehlo.stablehloGetMinimumVersion(temp.writer());
+    }
+
     const loaded_executable = try asynk.call(pjrt.Client.compile, .{
         platform.pjrt_client, platform.pjrt_api, .{
             .bytecode = mlir_bytecode.items,
