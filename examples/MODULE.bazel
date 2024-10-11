@@ -161,3 +161,40 @@ copy_file(
     model = "openlm-research/open_llama_3b",
 )
 use_repo(huggingface, "OpenLM-Research-OpenLLaMA-3B")
+
+
+huggingface.model(
+    name = "StabilityAI-sd-turbo",
+    build_file_content = """\
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "vae",
+    srcs = ["vae/diffusion_pytorch_model.fp16.safetensors"],
+)
+
+filegroup(
+    name = "prompt_encoder",
+    srcs = ["text_encoder/model.fp16.safetensors",],
+)
+
+filegroup(
+    name = "vocab",
+    srcs = ["tokenizer/vocab.json"],
+)
+
+filegroup(
+    name = "unet",
+    srcs = ["unet/diffusion_pytorch_model.fp16.safetensors"],
+)
+""",
+    commit = "0096a99066b73650354282eeef18114cf0dab75c",
+    model = "stabilityai/sd-turbo",
+    includes = [
+        "vae/diffusion_pytorch_model.fp16.safetensors",
+        "text_encoder/model.fp16.safetensors",
+        "tokenizer/vocab.json",
+        "unet/diffusion_pytorch_model.fp16.safetensors",
+    ],
+)
+use_repo(huggingface, "StabilityAI-sd-turbo")
