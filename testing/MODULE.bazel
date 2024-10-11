@@ -1,0 +1,47 @@
+module(name = "testing")
+
+bazel_dep(name = "bazel_skylib", version = "1.7.1")
+bazel_dep(name = "rules_zig", version = "20240912.0-41bfe84")
+bazel_dep(name = "platforms", version = "0.0.10")
+bazel_dep(name = "zml", version = "0.1.0")
+bazel_dep(name = "rules_python", version = "0.36.0")
+
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+python.toolchain(
+    python_version = "3.9.13",
+)
+use_repo(
+    python,
+    python_3_9 = "python_3_9_13",
+)
+
+pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
+pip.parse(
+    download_only = True,
+    hub_name = "pypi",
+    # We need to use the same version here as in the `python.toolchain` call.
+    python_version = "3.9.13",
+    requirements_lock = "//tokenizer:requirements_lock.txt",
+)
+use_repo(pip, "pypi")
+
+# Llama weights
+huggingface = use_extension("@zml//bazel:huggingface.bzl", "huggingface")
+
+huggingface.model(
+    name = "CodeLlama-7b-hf",
+    build_file_content = """\
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "tokenizer",
+    srcs = ["tokenizer.json"],
+)
+""",
+    commit = "6c284d1468fe6c413cf56183e69b194dcfa27fe6",
+    includes = [
+        "tokenizer.json",
+    ],
+    model = "codellama/CodeLlama-7b-hf",
+)
+use_repo(huggingface, "CodeLlama-7b-hf")

@@ -1,5 +1,4 @@
 load("@bazel_skylib//rules:diff_test.bzl", "diff_test")
-load("@bazel_skylib//rules:native_binary.bzl", "native_binary")
 load("@rules_python//python:defs.bzl", "py_binary")
 load("@rules_python//python:pip.bzl", "compile_pip_requirements")
 load("@zml//bazel:zig.bzl", "zig_cc_binary")
@@ -15,21 +14,9 @@ zig_cc_binary(
     name = "tokenizer_test_bin",
     main = "main.zig",
     deps = [
-        "//third_party/tigerbeetle:flags",
+        "@zml//flags",
         "@zml//async",
         "@zml//zml",
-    ],
-)
-
-native_binary(
-    name = "CodeLlama-7b-hf",
-    src = ":tokenizer_test_bin",
-    args = [
-        "--tokenizer=$(location @CodeLlama-7b-hf//:tokenizer)",
-        "--prompt='Hello world'",
-    ],
-    data = [
-        "@CodeLlama-7b-hf//:tokenizer",
     ],
 )
 
@@ -45,7 +32,7 @@ py_binary(
     name = "hf_tokenizer",
     main = "tokenizer_test.py",
     srcs = ["tokenizer_test.py"],
-    deps = ["@pypi//transformers:pkg"],
+    deps = ["@pypi//tokenizers:pkg"],
 )
 
 genrule(
@@ -57,7 +44,7 @@ genrule(
 )
 
 diff_test(
-    name = "tokenizer_test",
+    name = "tokenizer",
     file1 = ":hf_output",
     file2 = ":zml_output",
 )

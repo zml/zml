@@ -1,0 +1,21 @@
+platforms:
+  @zml//platforms:linux_amd64
+    --cpu=k8
+
+  @zml//platforms:linux_arm64
+    --cpu=aarch64
+
+  @zml//platforms:macos_arm64
+    --cpu=darwin_arm64
+    --apple_platform_type=macos
+
+flags:
+  --cpu=darwin_arm64
+  --apple_platform_type=macos
+    @zml//platforms:macos_arm64
+
+  --cpu=k8
+    @zml//platforms:linux_amd64
+
+  --cpu=aarch64
+    @zml//platforms:linux_arm64

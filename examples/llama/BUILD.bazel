@@ -11,8 +11,8 @@ zig_cc_binary(
     ],
     main = "main.zig",
     deps = [
-        "//third_party/tigerbeetle:flags",
         "@zml//async",
+        "@zml//flags",
         "@zml//zml",
     ],
 )
@@ -107,8 +107,8 @@ zig_cc_binary(
     ],
     main = "test.zig",
     deps = [
-        "//third_party/tigerbeetle:flags",
         "@zml//async",
+        "@zml//flags",
         "@zml//zml",
     ],
 )

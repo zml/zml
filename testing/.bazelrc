@@ -1,0 +1,82 @@
+# If we are running from the ZML repo, try to load the .bazelrc-zml above
+try-import      %workspace%/../.bazelrc-examples
+try-import      %workspace%/.bazelrc-zml
+
+# Faster hash function
+startup         --digest_function=blake3
+
+common          --enable_workspace=false
+
+# Don't need for now
+common          --lockfile_mode=update
+
+# Needed by LLVM and/or XLA
+common          --experimental_repo_remote_exec
+
+# Self explanatory
+common          --enable_platform_specific_config
+
+# Ensure host tools are built optimized
+build           --host_compilation_mode=opt
+
+# Suppress all warnings, LLVM and friends are too noisy
+build           --copt='-w'
+build           --host_copt='-w'
+
+# Enable C++17
+build           --cxxopt='-std=c++17'
+build           --host_cxxopt='-std=c++17'
+build           --enable_runfiles
+
+# Ensure the local env doesn't leak into the build
+build           --incompatible_strict_action_env
+
+# We don't to check the built files in the sandbox or repositories
+build           --noexperimental_check_output_files
+fetch           --noexperimental_check_output_files
+query           --noexperimental_check_output_files
+build           --noexperimental_check_external_repository_files
+fetch           --noexperimental_check_external_repository_files
+query           --noexperimental_check_external_repository_files
+
+# Performance
+build           --reuse_sandbox_directories
+build           --nolegacy_external_runfiles
+
+build           --experimental_output_directory_naming_scheme=diff_against_dynamic_baseline
+# Mount the zig cache into the sandboxes
+build:macos     --sandbox_add_mount_pair=/var/tmp
+build:linux     --sandbox_add_mount_pair=/tmp
+
+# Ensure workers are sandboxed
+build           --worker_sandboxing
+
+# Allows symlinks with spaces
+build           --experimental_inprocess_symlink_creation
+
+# Build in debug for now, by default
+build           --compilation_mode=dbg
+
+build           --experimental_cc_shared_library
+build           --incompatible_use_cc_configure_from_rules_cc
+build           --experimental_starlark_cc_import
+
+build           --compiler=clang
+
+build:macos     --macos_sdk_version=13.0
+
+# Print test errors in the console
+test            --test_output=errors
+
+build:debug     --compilation_mode=opt
+build:debug     --strategy=ZigBuildLib=local
+build:debug     --strategy=ZigBuildObj=local
+build:debug     --strategy=ZigBuildTestLib=local
+
+common:silent   --noshow_progress
+common:silent   --ui_event_filters=,+error,+fail
+common:silent   --show_result=0
+common:silent   --logging=0
+
+common          --registry=https://bazel-registry.zml.ai
+common          --registry=https://bcr.bazel.build
