@@ -12,6 +12,8 @@ test {
 }
 
 pub const Parser = struct {
+    // TODO: move the file logic to torch.PytorchFile
+    // the Pickle parser shouldn't have to deal with the zip archive stuff used by Pytorch
     buffer_file: zml.aio.MemoryMappedFile,
     file_map: std.StringArrayHashMapUnmanaged(FileEntry) = .{},
     tar_file: ?TarStream = null,

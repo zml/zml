@@ -47,6 +47,7 @@ pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore
     return res;
 }
 
+// TODO: rename me to PytorchFile
 pub const PickleData = struct {
     stack: eval.PickleStack,
     memo: eval.PickleMemo,
