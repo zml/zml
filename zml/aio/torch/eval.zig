@@ -3,8 +3,8 @@ const zml = @import("../../zml.zig");
 const meta = zml.meta;
 
 const value = @import("value.zig");
+const pickle = @import("pickle.zig");
 const BTreeMap = @import("b_tree_map.zig").BTreeMap;
-const PickleOp = @import("ops.zig").PickleOp;
 
 const Build = value.Build;
 const Object = value.Object;
@@ -233,7 +233,7 @@ pub const PickleStack = struct {
     }
 };
 
-pub fn evaluate(allocator: std.mem.Allocator, x: []const PickleOp, resolve_refs: bool) !struct { PickleStack, PickleMemo } {
+pub fn evaluate(allocator: std.mem.Allocator, x: []const pickle.Op, resolve_refs: bool) !struct { PickleStack, PickleMemo } {
     var stack = InternalStack.init(allocator);
     defer stack.deinit();
     var memo = PickleMemo.init(allocator);

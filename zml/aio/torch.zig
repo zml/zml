@@ -4,11 +4,9 @@ const zml = @import("../zml.zig");
 
 const HostBuffer = @import("../hostbuffer.zig").HostBuffer;
 
-const toVoidSlice = @import("utils.zig").toVoidSlice;
 const eval = @import("torch/eval.zig");
-const utils = @import("torch/utils.zig");
 const value = @import("torch/value.zig");
-const Decoder = @import("torch/parser.zig").Decoder;
+const parser = @import("torch/parser.zig");
 const PersId = value.PersId;
 const Sequence = value.Sequence;
 const Value = value.Value;
@@ -19,9 +17,8 @@ const log = std.log.scoped(.zml_io);
 
 test {
     std.testing.refAllDecls(eval);
-    std.testing.refAllDecls(utils);
     std.testing.refAllDecls(value);
-    std.testing.refAllDecls(@import("torch/parser.zig"));
+    std.testing.refAllDecls(parser);
 }
 
 /// Opens and loads a BufferStore from the torch file at the given path.
@@ -32,27 +29,28 @@ pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore
     };
     errdefer file.close() catch unreachable;
 
+    // Temporary memory needed to parse the pytorch file.
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const tmp_alloc = arena.allocator();
+
+    const _parser = try parser.Parser.init(tmp_alloc, file);
+    const stack, const memo = try eval.evaluate(tmp_alloc, _parser.ops, true);
+
+    // But we create the HostBuffer objects inside the result BufferStore arena.
     var res: zml.aio.BufferStore = .{
         .arena = std.heap.ArenaAllocator.init(allocator),
     };
-
-    const arena = res.arena.allocator();
-
-    var tmp: PickleData = .{
-        .data = try Decoder.init(arena, file),
-        .memo = undefined,
-        .stack = undefined,
-    };
-    tmp.stack, tmp.memo = try eval.evaluate(arena, tmp.data.ops, true);
-    res.files = try arena.dupe(zml.aio.MemoryMappedFile, &.{tmp.data.buffer_file});
-    try tmp.parseModel(arena, &res);
+    res.files = try res.arena.allocator().dupe(zml.aio.MemoryMappedFile, &.{_parser.buffer_file});
+    var tmp: PickleData = .{ .data = _parser, .memo = memo, .stack = stack };
+    try tmp.parseModel(res.arena.allocator(), &res);
     return res;
 }
 
 pub const PickleData = struct {
     stack: eval.PickleStack,
     memo: eval.PickleMemo,
-    data: Decoder,
+    data: parser.Parser,
 
     fn basicTypeCheck(object: *const value.Object, module: []const u8, class: []const u8) bool {
         return switch (object.member) {

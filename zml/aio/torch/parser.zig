@@ -1,23 +1,21 @@
 const asynk = @import("async");
 const std = @import("std");
-const zml = @import("../../zml.zig");
-
-const utils = @import("utils.zig");
-const PickleOp = @import("ops.zig").PickleOp;
-const RawPickleOp = @import("ops.zig").RawPickleOp;
-
-const Allocator = std.mem.Allocator;
 const testing = std.testing;
+const Allocator = std.mem.Allocator;
+
+const zml = @import("../../zml.zig");
+const pickle = @import("pickle.zig");
 
 test {
     std.testing.refAllDecls(@This());
+    std.testing.refAllDecls(Parser);
 }
 
-pub const Decoder = struct {
+pub const Parser = struct {
     buffer_file: zml.aio.MemoryMappedFile,
     file_map: std.StringArrayHashMapUnmanaged(FileEntry) = .{},
     tar_file: ?TarStream = null,
-    ops: []PickleOp,
+    ops: []pickle.Op,
     is_zip_file: bool,
     zip_prefix: []const u8 = &[_]u8{},
 
@@ -53,11 +51,11 @@ pub const Decoder = struct {
 
     const magic = "PK\x03\x04";
 
-    pub fn fromTarFile(allocator: Allocator, mapped: zml.aio.MemoryMappedFile, file: std.tar.Iterator(asynk.File.Reader).File) !Decoder {
+    pub fn fromTarFile(allocator: Allocator, mapped: zml.aio.MemoryMappedFile, file: std.tar.Iterator(asynk.File.Reader).File) !Parser {
         const tar_stream = try TarStream.init(file);
         const file_magic = try tar_stream.reader().readBytesNoEof(magic.len);
         try tar_stream.seekTo(0);
-        var self: Decoder = .{
+        var self: Parser = .{
             .buffer_file = mapped,
             .tar_file = tar_stream,
             .ops = undefined,
@@ -72,10 +70,10 @@ pub const Decoder = struct {
         return self;
     }
 
-    pub fn init(allocator: Allocator, file: asynk.File) !Decoder {
+    pub fn init(allocator: Allocator, file: asynk.File) !Parser {
         const file_magic = try file.reader().readBytesNoEof(magic.len);
         try file.seekTo(0);
-        var self: Decoder = .{
+        var self: Parser = .{
             .buffer_file = try zml.aio.MemoryMappedFile.init(file),
             .is_zip_file = std.mem.eql(u8, &file_magic, magic),
             .ops = undefined,
@@ -89,12 +87,12 @@ pub const Decoder = struct {
         return self;
     }
 
-    pub fn deinit(self: *Decoder) void {
+    pub fn deinit(self: *Parser) void {
         self.buffer_file.deinit();
         self.* = undefined;
     }
 
-    fn parseOps(self: *Decoder, allocator: Allocator, seekable_stream: anytype) ![]PickleOp {
+    fn parseOps(self: *Parser, allocator: Allocator, seekable_stream: anytype) ![]pickle.Op {
         var iter = try std.zip.Iterator(@TypeOf(seekable_stream)).init(seekable_stream);
         var filename_buf: [std.fs.max_path_bytes]u8 = undefined;
         while (try iter.next()) |entry| {
@@ -167,12 +165,12 @@ pub const Decoder = struct {
         return error.PickleNotFound;
     }
 
-    fn parse(allocator: Allocator, reader: anytype, len: usize) ![]PickleOp {
-        var results = std.ArrayList(PickleOp).init(allocator);
+    fn parse(allocator: Allocator, reader: anytype, len: usize) ![]pickle.Op {
+        var results = std.ArrayList(pickle.Op).init(allocator);
         errdefer results.deinit();
         outer: while (true) {
             const b = try reader.readByte();
-            switch (@as(RawPickleOp, @enumFromInt(b))) {
+            switch (@as(pickle.OpCode, @enumFromInt(b))) {
                 .mark => try results.append(.{ .mark = {} }),
                 .stop => {
                     try results.append(.{ .stop = {} });
@@ -351,7 +349,7 @@ pub const Decoder = struct {
                 },
                 .next_buffer => try results.append(.{ .next_buffer = {} }),
                 .readonly_buffer => try results.append(.{ .readonly_buffer = {} }),
-                else => {},
+                _ => {},
             }
         }
         return results.toOwnedSlice();
@@ -411,7 +409,7 @@ test "Read pickle (simple)" {
     const allocator = arena.allocator();
     const eval = @import("eval.zig");
     const file = try asynk.File.open("zml/aio/torch/simple_test.pickle", .{ .mode = .read_only });
-    var data = try Decoder.init(allocator, file);
+    var data = try Parser.init(allocator, file);
     defer data.deinit();
     var vals, var memo = try eval.evaluate(allocator, data.ops, true);
     defer vals.deinit();
@@ -457,11 +455,11 @@ test "Read pickle (zipped)" {
     defer arena.deinit();
     const allocator = arena.allocator();
     const file = try asynk.File.open("zml/aio/torch/simple.pt", .{ .mode = .read_only });
-    var data = try Decoder.init(allocator, file);
+    var data = try Parser.init(allocator, file);
     defer data.deinit();
 }
 
-pub fn isBadFilename(filename: []const u8) bool {
+fn isBadFilename(filename: []const u8) bool {
     if (filename.len == 0 or filename[0] == '/')
         return true;
 

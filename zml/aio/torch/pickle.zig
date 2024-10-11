@@ -1,7 +1,7 @@
 const std = @import("std");
 
 /// A decoded Pickle operation in its natural state.
-pub const PickleOp = union(RawPickleOp) {
+pub const Op = union(OpCode) {
     mark,
     stop,
     pop,
@@ -73,7 +73,7 @@ pub const PickleOp = union(RawPickleOp) {
 
     pub const PyType = struct { module: []const u8, class: []const u8 };
 
-    pub fn deinit(self: PickleOp, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: Op, allocator: std.mem.Allocator) void {
         switch (self) {
             .float,
             .int,
@@ -103,7 +103,7 @@ pub const PickleOp = union(RawPickleOp) {
         }
     }
 
-    pub fn clone(self: PickleOp, allocator: std.mem.Allocator) !PickleOp {
+    pub fn clone(self: Op, allocator: std.mem.Allocator) !Op {
         var res = self;
         return switch (self) {
             inline .float,
@@ -144,7 +144,8 @@ pub const PickleOp = union(RawPickleOp) {
 };
 
 /// The values for the possible opcodes are in this enum.
-pub const RawPickleOp = enum(u8) {
+/// Reference: https://github.com/python/cpython/blob/3.13/Lib/pickletools.py
+pub const OpCode = enum(u8) {
     mark = '(', // push special markobject on stack
     stop = '.', // every pickle ends with stop
     pop = '0', // discard topmost stack item
