@@ -5,6 +5,26 @@ bazel_dep(name = "rules_zig", version = "20240912.0-41bfe84")
 bazel_dep(name = "platforms", version = "0.0.10")
 bazel_dep(name = "zml", version = "0.1.0")
 bazel_dep(name = "aspect_bazel_lib", version = "2.8.1.1")
+bazel_dep(name = "rules_python", version = "0.36.0")
+
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+python.toolchain(
+    python_version = "3.9.13",
+)
+use_repo(
+    python,
+    python_3_9 = "python_3_9_13",
+)
+
+pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
+pip.parse(
+    download_only = True,
+    hub_name = "pypi",
+    # We need to use the same version here as in the `python.toolchain` call.
+    python_version = "3.9.13",
+    requirements_lock = "//tokenizer_test:requirements_lock.txt",
+)
+use_repo(pip, "pypi")
 
 bazel_dep(name = "rules_oci", version = "2.0.0")
 oci = use_extension("@rules_oci//oci:extensions.bzl", "oci")
@@ -101,6 +121,30 @@ filegroup(
     model = "meta-llama/Meta-Llama-3.1-8B-Instruct",
 )
 use_repo(huggingface, "Meta-Llama-3.1-8B-Instruct")
+
+huggingface.model(
+    name = "CodeLlama-7b-hf",
+    build_file_content = """\
+package(default_visibility = ["//visibility:public"])
+filegroup(
+    name = "model",
+    srcs = glob(["*.safetensors"]) + ["model.safetensors.index.json"],
+)
+
+filegroup(
+    name = "tokenizer",
+    srcs = ["tokenizer.json"],
+)
+""",
+    commit = "6c284d1468fe6c413cf56183e69b194dcfa27fe6",
+    includes = [
+        "*.safetensors",
+        "model.safetensors.index.json",
+        "tokenizer.json",
+    ],
+    model = "codellama/CodeLlama-7b-hf",
+)
+use_repo(huggingface, "CodeLlama-7b-hf")
 
 huggingface.model(
     name = "TinyLlama-1.1B-Chat-v1.0",
