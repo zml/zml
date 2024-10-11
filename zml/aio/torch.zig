@@ -10,18 +10,22 @@ const utils = @import("torch/utils.zig");
 const value = @import("torch/value.zig");
 const Decoder = @import("torch/parser.zig").Decoder;
 const PersId = value.PersId;
-const PickleMemo = eval.PickleMemo;
-const PickleStack = eval.PickleStack;
 const Sequence = value.Sequence;
 const Value = value.Value;
 const ValueType = value.ValueType;
 
 const StringBuilder = std.ArrayListUnmanaged(u8);
-const Allocator = std.mem.Allocator;
 const log = std.log.scoped(.zml_io);
 
+test {
+    std.testing.refAllDecls(eval);
+    std.testing.refAllDecls(utils);
+    std.testing.refAllDecls(value);
+    std.testing.refAllDecls(@import("torch/parser.zig"));
+}
+
 /// Opens and loads a BufferStore from the torch file at the given path.
-pub fn open(allocator: Allocator, path: []const u8) !zml.aio.BufferStore {
+pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore {
     const file = asynk.File.open(path, .{}) catch |err| {
         log.err("Failed to open {s}: {}", .{ path, err });
         return err;
@@ -45,221 +49,28 @@ pub fn open(allocator: Allocator, path: []const u8) !zml.aio.BufferStore {
     return res;
 }
 
-/// Convert from a torch.<type>Storage to a `zml.DataType`.
-/// TODO: make this future proof, storage type are going to get replaced with torch.UntypedStorage
-/// See https://pytorch.org/docs/stable/storage.html
-fn storageToDtype(storage_type: []const u8) !zml.DataType {
-    const torch_type = storage_type[0 .. storage_type.len - "Storage".len];
-    const map = std.StaticStringMap(zml.DataType).initComptime(.{
-        .{ "Double", .f64 },
-        .{ "Float", .f32 },
-        .{ "Half", .f16 },
-        .{ "Long", .i64 },
-        .{ "Int", .i32 },
-        .{ "Short", .i16 },
-        .{ "Char", .i8 },
-        .{ "Byte", .u8 },
-        .{ "Bool", .bool },
-        .{ "BFloat16", .bf16 },
-        .{ "ComplexDouble", .c128 },
-        .{ "ComplexFloat", .c64 },
-        // QUInt8Storage
-        // QInt8Storage
-        // QInt32Storage
-        // QUInt4x2Storage
-        // QUInt2x4Storage
-    });
-
-    return map.get(torch_type) orelse {
-        log.err("Unsupported torch storage type: {s}", .{storage_type});
-        return error.UnsupportedDataType;
-    };
-}
-
 pub const PickleData = struct {
-    stack: PickleStack,
-    memo: PickleMemo,
+    stack: eval.PickleStack,
+    memo: eval.PickleMemo,
     data: Decoder,
 
-    fn basicTypeCheck(v: Value, ns: []const u8, name: []const u8) bool {
-        return switch (v) {
-            .global => |object| switch (object.member) {
-                .raw => |raw| {
-                    if (std.mem.eql(u8, ns, raw.global.module) and std.mem.eql(u8, name, raw.global.class) and object.args[0] == .seq) {
-                        return true;
-                    } else return false;
-                },
-                else => false,
-            },
+    fn basicTypeCheck(object: *const value.Object, module: []const u8, class: []const u8) bool {
+        return switch (object.member) {
+            .raw => |raw| return (object.args[0] == .seq and
+                std.mem.eql(u8, module, raw.global.module) and
+                std.mem.eql(u8, class, raw.global.class)),
             else => false,
         };
     }
 
-    fn isTensor(v: Value) bool {
-        if (basicTypeCheck(v, "torch._utils", "_rebuild_tensor_v2")) {
-            const args = v.global.args[0].seq.values;
-            if (args.len >= 5 and
-                args[0] == .pers_id and
-                args[1] == .int64 and
-                args[2] == .seq and args[2].seq.type == .tuple and
-                args[3] == .seq and args[3].seq.type == .tuple)
-            {
-                return true;
-            } else @panic("Unexpected value in call to torch._utils._rebuild_tensor_v2");
-        }
-        return false;
-    }
-
-    fn dimsFromValues(values: []Value) [zml.Tensor.MAX_RANK]i64 {
-        std.debug.assert(values.len <= zml.Tensor.MAX_RANK);
-        var result: [zml.Tensor.MAX_RANK]i64 = undefined;
-        for (values, result[0..values.len]) |val, *elem| {
-            switch (val) {
-                .int64 => |int| elem.* = int,
-                else => @panic("Bad value for shape item"),
-            }
-        }
-        return result;
-    }
-
-    pub fn parseModel(self: *PickleData, allocator: Allocator, store: *zml.aio.BufferStore) !void {
+    pub fn parseModel(self: *PickleData, allocator: std.mem.Allocator, store: *zml.aio.BufferStore) !void {
         for (self.stack.stack) |item| {
             var prefix_buf: [1024]u8 = undefined;
             try self.parseValue(allocator, store, StringBuilder.initBuffer(&prefix_buf), item);
         }
     }
 
-    fn tensorOffset(self: *PickleData, seekable_stream: anytype, sfile: []const u8) !u64 {
-        if (self.data.file_map.get(sfile)) |entry| {
-            const local_header = blk: {
-                try seekable_stream.seekTo(entry.file_offset);
-                break :blk try seekable_stream.context.reader().readStructEndian(std.zip.LocalFileHeader, .little);
-            };
-            if (!std.mem.eql(u8, &local_header.signature, &std.zip.local_file_header_sig))
-                return error.ZipBadFileOffset;
-            if (local_header.version_needed_to_extract != entry.version_needed_to_extract)
-                return error.ZipMismatchVersionNeeded;
-            if (local_header.last_modification_time != entry.last_modification_time)
-                return error.ZipMismatchModTime;
-            if (local_header.last_modification_date != entry.last_modification_date)
-                return error.ZipMismatchModDate;
-
-            if (@as(u16, @bitCast(local_header.flags)) != entry.flags)
-                return error.ZipMismatchFlags;
-            if (local_header.crc32 != 0 and local_header.crc32 != entry.crc32)
-                return error.ZipMismatchCrc32;
-            if (local_header.compressed_size != 0 and
-                local_header.compressed_size != entry.compressed_size)
-                return error.ZipMismatchCompLen;
-            if (local_header.uncompressed_size != 0 and
-                local_header.uncompressed_size != entry.uncompressed_size)
-                return error.ZipMismatchUncompLen;
-            if (local_header.filename_len != entry.filename_len)
-                return error.ZipMismatchFilenameLen;
-
-            return (try seekable_stream.context.getPos()) +
-                @as(u64, local_header.filename_len) +
-                @as(u64, local_header.extra_len);
-        }
-
-        std.log.err("Could not find file ending in `{s}` in archive", .{sfile});
-        return error.TensorNotFound;
-    }
-
-    fn parseTorchGlobal(self: *PickleData, allocator: Allocator, store: *zml.aio.BufferStore, prefix: StringBuilder, v: Value) !bool {
-        return switch (v) {
-            .global => |object| {
-                if (isTensor(v)) {
-                    const args = object.args[0].seq.values;
-                    const pidval: *PersId, var offs: u64, const raw_shape: Sequence, const raw_strides: Sequence = .{ args[0].pers_id, @intCast(args[1].int64), args[2].seq, args[3].seq };
-                    const rank = raw_shape.values.len;
-                    const shape = dimsFromValues(raw_shape.values);
-                    var strides = dimsFromValues(raw_strides.values);
-                    const storage_type, const sfile = switch (pidval.ref) {
-                        .seq => |seq| blk: {
-                            const sargs = seq.values;
-                            if (seq.type == .tuple and
-                                sargs.len >= 5 and
-                                sargs[0] == .string and std.mem.eql(u8, sargs[0].string, "storage") and
-                                sargs[1] == .raw and sargs[1].raw == .global and
-                                sargs[2] == .string and
-                                sargs[3] == .string)
-                            {
-                                const op = sargs[1].raw.global;
-                                const sfile = sargs[2].string;
-                                // const sdev = sargs[3].string;
-                                if (std.mem.eql(u8, "torch", op.module) and std.mem.endsWith(u8, op.class, "Storage")) {
-                                    break :blk .{ op.class, sfile };
-                                } else @panic("Unexpected storage type part of persistant ID");
-                            } else @panic("Unexpected value for persistant ID");
-                        },
-                        else => @panic("Unexpected value for persistant ID"),
-                    };
-
-                    const data_type = try storageToDtype(storage_type);
-                    for (strides[0..rank]) |*s| s.* *= data_type.sizeOf();
-
-                    var sfile_buf = std.ArrayList(u8).init(allocator);
-                    defer sfile_buf.deinit();
-                    try sfile_buf.writer().print("{s}data/{s}", .{ self.data.zip_prefix, sfile });
-
-                    // find offsets for tensor zip file
-                    const absolute_offset = blk: {
-                        if (self.data.tar_file) |t| {
-                            break :blk try self.tensorOffset(t.seekableStream(), sfile_buf.items);
-                        } else {
-                            break :blk try self.tensorOffset(self.data.buffer_file.file.seekableStream(), sfile_buf.items);
-                        }
-                    };
-                    offs = offs * data_type.sizeOf();
-                    const key = try allocator.dupe(u8, prefix.items);
-                    const entry = try store.buffers.getOrPut(allocator, key);
-                    if (entry.found_existing) {
-                        log.warn("Duplicate key: {s}", .{prefix.items});
-                        allocator.free(key);
-                    }
-                    const out_shape = zml.Shape.init(shape[0..rank], data_type);
-                    entry.value_ptr.* = HostBuffer.fromStridedSlice(
-                        out_shape,
-                        self.data.buffer_file.mappedSlice((if (self.data.tar_file) |t| t.start else 0) + absolute_offset + offs, out_shape.byteSize()),
-                        strides[0..rank],
-                    );
-                    return true;
-                } else if (basicTypeCheck(v, "torch", "Size")) {
-                    const size = object.args[0].seq.values[0].seq.values;
-                    const key = try allocator.dupe(u8, prefix.items);
-                    const entry = try store._metadata.getOrPut(allocator, key);
-                    if (entry.found_existing) {
-                        log.warn("Duplicate key: {s}", .{prefix.items});
-                        allocator.free(key);
-                    }
-                    const d = try allocator.alloc(i64, size.len);
-                    for (d, 0..) |*di, i| di.* = size[i].int64;
-                    entry.value_ptr.* = .{ .array = .{ .item_type = .int64, .data = std.mem.sliceAsBytes(d) } };
-                    return true;
-                } else if (basicTypeCheck(v, "fractions", "Fraction")) {
-                    const fraction_str = object.args[0].seq.values[0].string;
-                    if (std.mem.indexOfScalar(u8, fraction_str, '/')) |split_idx| {
-                        {
-                            var new_prefix = prefix;
-                            new_prefix.appendSliceAssumeCapacity(".numerator");
-                            try store._metadata.put(allocator, try allocator.dupe(u8, new_prefix.items), .{ .int64 = try std.fmt.parseInt(i64, fraction_str[0..split_idx], 10) });
-                        }
-                        {
-                            var new_prefix = prefix;
-                            new_prefix.appendSliceAssumeCapacity(".denominator");
-                            try store._metadata.put(allocator, try allocator.dupe(u8, new_prefix.items), .{ .int64 = try std.fmt.parseInt(i64, fraction_str[split_idx + 1 ..], 10) });
-                        }
-                        return true;
-                    }
-                }
-                return false;
-            },
-            else => false,
-        };
-    }
-
-    pub fn parseValue(self: *PickleData, allocator: Allocator, store: *zml.aio.BufferStore, prefix: StringBuilder, v: Value) !void {
+    pub fn parseValue(self: *PickleData, allocator: std.mem.Allocator, store: *zml.aio.BufferStore, prefix: StringBuilder, v: Value) !void {
         switch (v) {
             .app, .object, .global => |object| {
                 if (!(try self.parseTorchGlobal(allocator, store, prefix, v))) {
@@ -415,8 +226,194 @@ pub const PickleData = struct {
             else => {},
         }
     }
+
+    fn parseTorchGlobal(self: *PickleData, allocator: std.mem.Allocator, store: *zml.aio.BufferStore, prefix: StringBuilder, v: Value) !bool {
+        return switch (v) {
+            .global => |object| {
+                if (try self.parseTensor(allocator, object)) |host_buffer| {
+                    const key = try allocator.dupe(u8, prefix.items);
+                    const entry = try store.buffers.getOrPut(allocator, key);
+                    if (entry.found_existing) {
+                        log.warn("Duplicate key: {s}", .{prefix.items});
+                        allocator.free(key);
+                    }
+                    entry.value_ptr.* = host_buffer;
+                    return true;
+                } else if (basicTypeCheck(object, "torch", "Size")) {
+                    const size = object.args[0].seq.values[0].seq.values;
+                    const key = try allocator.dupe(u8, prefix.items);
+                    const entry = try store._metadata.getOrPut(allocator, key);
+                    if (entry.found_existing) {
+                        log.warn("Duplicate key: {s}", .{prefix.items});
+                        allocator.free(key);
+                    }
+                    const d = try allocator.alloc(i64, size.len);
+                    for (d, 0..) |*di, i| di.* = size[i].int64;
+                    entry.value_ptr.* = .{ .array = .{ .item_type = .int64, .data = std.mem.sliceAsBytes(d) } };
+                    return true;
+                } else if (basicTypeCheck(object, "fractions", "Fraction")) {
+                    const fraction_str = object.args[0].seq.values[0].string;
+                    if (std.mem.indexOfScalar(u8, fraction_str, '/')) |split_idx| {
+                        {
+                            var new_prefix = prefix;
+                            new_prefix.appendSliceAssumeCapacity(".numerator");
+                            try store._metadata.put(allocator, try allocator.dupe(u8, new_prefix.items), .{ .int64 = try std.fmt.parseInt(i64, fraction_str[0..split_idx], 10) });
+                        }
+                        {
+                            var new_prefix = prefix;
+                            new_prefix.appendSliceAssumeCapacity(".denominator");
+                            try store._metadata.put(allocator, try allocator.dupe(u8, new_prefix.items), .{ .int64 = try std.fmt.parseInt(i64, fraction_str[split_idx + 1 ..], 10) });
+                        }
+                        return true;
+                    }
+                }
+                return false;
+            },
+            else => false,
+        };
+    }
+
+    fn parseTensor(self: *PickleData, tmp_allocator: std.mem.Allocator, object: *value.Object) !?zml.HostBuffer {
+        if (!basicTypeCheck(object, "torch._utils", "_rebuild_tensor_v2")) {
+            return null;
+        }
+
+        const args = object.args[0].seq.values;
+        if (args.len < 4 or
+            args[0] != .pers_id or
+            args[1] != .int64 or
+            args[2] != .seq or args[2].seq.type != .tuple or
+            args[3] != .seq or args[3].seq.type != .tuple)
+        {
+            log.err("Unexpected value in call to torch._utils._rebuild_tensor_v2", .{});
+            return error.InvalidInput;
+        }
+
+        const pid: *PersId = args[0].pers_id;
+        var offset: u64 = @intCast(args[1].int64);
+        const raw_dims: Sequence = args[2].seq;
+        const raw_strides: Sequence = args[3].seq;
+        const dims = try parseDims(raw_dims.values);
+        var strides = try parseDims(raw_strides.values);
+
+        const dtype, const storage_file = try parseStorage(pid.ref);
+        // Pytorch store "item" strides, while ZML uses byte strides.
+        for (strides.slice()) |*s| s.* *= dtype.sizeOf();
+        // Same thing for the offset.
+        offset = offset * dtype.sizeOf();
+
+        const filename = try std.mem.join(tmp_allocator, "", &.{ self.data.zip_prefix, "data/", storage_file });
+        defer tmp_allocator.free(filename);
+
+        // The offset in the pickle is the offset inside the storage_file.
+        // But .pt are made of several files, so we need to append the file offset.
+        const storage = try self.getStorage(filename);
+        return HostBuffer.fromStridedSlice(
+            zml.Shape.init(dims.constSlice(), dtype),
+            storage[offset..],
+            strides.constSlice(),
+        );
+    }
+
+    fn parseStorage(val: value.Value) !struct { zml.DataType, []const u8 } {
+        if (val != .seq) return error.InvalidInput;
+        const sargs = val.seq.values;
+        if (val.seq.type == .tuple and
+            sargs.len >= 5 and
+            sargs[0] == .string and std.mem.eql(u8, sargs[0].string, "storage") and
+            sargs[1] == .raw and sargs[1].raw == .global and
+            sargs[2] == .string and
+            sargs[3] == .string)
+        {
+            const op = sargs[1].raw.global;
+            const storage_file = sargs[2].string;
+            // const sdev = sargs[3].string;
+            if (!std.mem.eql(u8, "torch", op.module) or
+                !std.mem.endsWith(u8, op.class, "Storage"))
+                return error.InvalidInput;
+
+            return .{
+                try storageToDtype(op.class),
+                storage_file,
+            };
+        } else {
+            return error.InvalidInput;
+        }
+    }
+
+    /// Given the name of one of the files in the .pt tarball,
+    /// return the slice of the memory-mapped .pt corresponding to it.
+    fn getStorage(self: *PickleData, filename: []const u8) ![]const u8 {
+        const maybe_entry = self.data.file_map.get(filename);
+        if (maybe_entry == null) {
+            std.log.err("Could not find file ending in `{s}` in archive", .{filename});
+            return error.TensorNotFound;
+        }
+        const entry = maybe_entry.?;
+        const base_offset: u64 = if (self.data.tar_file) |t| t.start else 0;
+        const file_offset: u64 = base_offset + entry.file_offset;
+        const file = self.data.buffer_file.file;
+        try file.seekTo(entry.file_offset);
+        const local_header = try file.reader().readStructEndian(std.zip.LocalFileHeader, .little);
+
+        if (!std.mem.eql(u8, &local_header.signature, &std.zip.local_file_header_sig))
+            return error.ZipBadFileOffset;
+        if (local_header.compressed_size != 0 and
+            local_header.compressed_size != entry.compressed_size)
+            return error.ZipMismatchCompLen;
+        if (local_header.uncompressed_size != 0 and
+            local_header.uncompressed_size != entry.uncompressed_size)
+            return error.ZipMismatchUncompLen;
+        if (local_header.filename_len != entry.filename_len)
+            return error.ZipMismatchFilenameLen;
+
+        const start = file_offset +
+            @sizeOf(std.zip.LocalFileHeader) +
+            @as(u64, local_header.filename_len) +
+            @as(u64, local_header.extra_len);
+        return self.data.buffer_file.mappedSlice(start, entry.uncompressed_size);
+    }
+
+    fn parseDims(values: []Value) error{InvalidInput}!zml.Shape.DimsArray {
+        zml.meta.assert(values.len <= zml.Tensor.MAX_RANK, "Found Pytorch tensor with unsupported rank {}", .{values.len});
+        var result: zml.Shape.DimsArray = .{};
+        for (values) |val| {
+            switch (val) {
+                .int64 => |d| result.appendAssumeCapacity(d),
+                else => return error.InvalidInput,
+            }
+        }
+        return result;
+    }
 };
 
-test {
-    std.testing.refAllDecls(@This());
+/// Convert from a torch.<type>Storage to a `zml.DataType`.
+/// TODO: make this future proof, storage type are going to get replaced with torch.UntypedStorage
+/// See https://pytorch.org/docs/stable/storage.html
+fn storageToDtype(storage_type: []const u8) !zml.DataType {
+    const torch_type = storage_type[0 .. storage_type.len - "Storage".len];
+    const map = std.StaticStringMap(zml.DataType).initComptime(.{
+        .{ "Double", .f64 },
+        .{ "Float", .f32 },
+        .{ "Half", .f16 },
+        .{ "Long", .i64 },
+        .{ "Int", .i32 },
+        .{ "Short", .i16 },
+        .{ "Char", .i8 },
+        .{ "Byte", .u8 },
+        .{ "Bool", .bool },
+        .{ "BFloat16", .bf16 },
+        .{ "ComplexDouble", .c128 },
+        .{ "ComplexFloat", .c64 },
+        // QUInt8Storage
+        // QInt8Storage
+        // QInt32Storage
+        // QUInt4x2Storage
+        // QUInt2x4Storage
+    });
+
+    return map.get(torch_type) orelse {
+        log.err("Unsupported torch storage type: {s}", .{storage_type});
+        return error.UnsupportedDataType;
+    };
 }
