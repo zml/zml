@@ -5,5 +5,9 @@
     "overlay": {
         "MODULE.bazel": "",
         "BUILD.bazel": ""
+    },
+    "patch_strip": 1,
+    "patches": {
+        "0001-Change-Backend-Linux.patch": ""
     }
 }

@@ -113,7 +113,8 @@ pub const Platform = struct {
         }{
             .notif = try asynk.Notification.init(),
         };
-        defer ctx.notif.deinit();
+        // NOTE(Corentin): Disable this to avoid crash with epoll backend
+        //defer ctx.notif.deinit();
 
         try event.onReady(self.pjrt_api, &(struct {
             fn call(err: ?*pjrt.Error, user_arg: ?*anyopaque) callconv(.C) void {
