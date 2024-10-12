@@ -102,7 +102,8 @@ pub fn callGeneric(comptime func: anytype, args: anytype) FnSignature(func, @Typ
         .notif = Notification.init() catch @panic("Notification.init failed"),
         .args = &args,
     };
-    defer newtask.notif.deinit();
+    // NOTE(Corentin): Disable this to avoid crash with epoll backend
+    //defer newtask.notif.deinit();
 
     AsyncThread.current.thread_pool.schedule(xev.ThreadPool.Batch.from(&newtask._task));
     newtask.notif.wait() catch @panic("Unable to wait for notification");

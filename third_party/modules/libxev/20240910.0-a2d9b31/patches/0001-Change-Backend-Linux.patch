@@ -1,0 +1,22 @@
+From 4db5de34f70d991fedbe28915c8239b97ba7a064 Mon Sep 17 00:00:00 2001
+From: Steeve Morin <steeve.morin@gmail.com>
+Date: Mon, 18 Mar 2024 17:17:34 +0100
+Subject: [PATCH 3/3] [PJRT C API] Ensure C compliance for Profiler Extension
+
+---
+ xla/pjrt/c/pjrt_c_api_profiler_extension.h | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/src/main.zig b/src/main.zig
+index 74f451a..1cfb61c 100644
+--- a/src/main.zig
++++ b/src/main.zig
+@@ -36,7 +36,7 @@ pub const Backend = enum {
+     /// Returns a recommend default backend from inspecting the system.
+     pub fn default() Backend {
+         return @as(?Backend, switch (builtin.os.tag) {
+-            .linux => .io_uring,
++            .linux => .epoll,
+             .ios, .macos => .kqueue,
+             .wasi => .wasi_poll,
+             .windows => .iocp,
