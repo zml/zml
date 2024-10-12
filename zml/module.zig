@@ -849,17 +849,22 @@ pub fn ExeWithWeights(comptime func: anytype) type {
 
         pub fn call(self: Self, args: Bufferized(Signature.ArgsT)) Bufferized(Signature.ReturnT) {
             fillBuffers(&args, self.input_per_device, self.inner.model_buffer_count, self.inner.args_buffer_count);
-            var event: [1]*pjrt.Event = undefined;
+            var events: [Platform.MAX_NUM_DEVICES]*pjrt.Event = undefined;
+            const sharding = self.platform().sharding();
 
             self.inner.exe.execute(self.inner.platform.pjrt_api, .{
                 .arguments = self.input_per_device,
                 .num_args = self.inner.args_buffer_count + self.inner.model_buffer_count,
                 .results = self.output_per_device,
-                .events = &event,
+                .events = events[0..sharding.num_partitions],
                 // TODO: this allows to tell a specific buffer shouldn't be donated,
                 // even if it has been marked as "can be donated" during compilation.
                 .non_donatable_input_indices = &.{},
             }) catch unreachable;
+
+            for (events[0..sharding.num_partitions]) |e| {
+                e.await_(self.inner.platform.pjrt_api) catch unreachable;
+            }
 
             var result: Bufferized(Signature.ReturnT) = undefined;
             assignRawBuffers(&result, self.inner.platform, self.output_per_device, self.inner.result_buffer_shapes, self.inner.result_buffer_count);
