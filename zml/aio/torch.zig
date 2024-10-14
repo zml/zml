@@ -16,6 +16,7 @@ const StringBuilder = std.ArrayListUnmanaged(u8);
 const log = std.log.scoped(.zml_io);
 
 test {
+    std.testing.refAllDecls(@This());
     std.testing.refAllDecls(eval);
     std.testing.refAllDecls(value);
     std.testing.refAllDecls(parser);
@@ -147,7 +148,7 @@ pub const PickleData = struct {
                                     try store._metadata.put(
                                         allocator,
                                         try allocator.dupe(u8, prefix.items),
-                                        .{ .array = .{ .item_type = std.meta.stringToEnum(zml.aio.Value.Slice.ItemType, @tagName(tag)).?, .data = std.mem.sliceAsBytes(try values.toOwnedSlice(allocator)) } },
+                                        try zml.aio.Value.copySlice(allocator, values.items),
                                     );
                                 } else {
                                     for (values.items, 0..) |val, i| {
@@ -156,7 +157,13 @@ pub const PickleData = struct {
                                             new_prefix.appendAssumeCapacity('.');
                                         }
                                         new_prefix.items.len += std.fmt.formatIntBuf(new_prefix.unusedCapacitySlice(), i, 10, .lower, .{});
-                                        try store._metadata.put(allocator, try allocator.dupe(u8, new_prefix.items), @unionInit(zml.aio.Value, @tagName(tag), val));
+                                        const new_tag = switch (tag) {
+                                            .int64 => "int",
+                                            .float64 => "float",
+                                            .boolval => "bool",
+                                            else => unreachable, // we are already inside a switch
+                                        };
+                                        try store._metadata.put(allocator, try allocator.dupe(u8, new_prefix.items), @unionInit(zml.aio.Value, new_tag, val));
                                     }
                                 }
                             },
@@ -212,15 +219,17 @@ pub const PickleData = struct {
                 if (d.found_existing) {
                     log.warn("Duplicate key: {s}", .{prefix.items});
                     allocator.free(key);
-                } else d.value_ptr.* = .{ .array = .{ .item_type = .uint8, .data = @constCast(val) } };
+                } else d.value_ptr.* = .{ .string = val };
             },
-            inline .float64, .int64, .boolval, .bigint, .string => |val, tag| {
+            inline .float64, .int64, .boolval, .bigint, .string => |val| {
                 const key = try allocator.dupe(u8, prefix.items);
                 const d = try store._metadata.getOrPut(allocator, key);
                 if (d.found_existing) {
                     log.warn("Duplicate key: {s}", .{prefix.items});
                     allocator.free(key);
-                } else d.value_ptr.* = @unionInit(zml.aio.Value, @tagName(tag), val);
+                } else {
+                    d.value_ptr.* = zml.aio.Value.wrap(val);
+                }
             },
             else => {},
         }
@@ -248,7 +257,7 @@ pub const PickleData = struct {
                     }
                     const d = try allocator.alloc(i64, size.len);
                     for (d, 0..) |*di, i| di.* = size[i].int64;
-                    entry.value_ptr.* = .{ .array = .{ .item_type = .int64, .data = std.mem.sliceAsBytes(d) } };
+                    entry.value_ptr.* = .{ .array_int = d };
                     return true;
                 } else if (basicTypeCheck(object, "fractions", "Fraction")) {
                     const fraction_str = object.args[0].seq.values[0].string;
@@ -256,12 +265,12 @@ pub const PickleData = struct {
                         {
                             var new_prefix = prefix;
                             new_prefix.appendSliceAssumeCapacity(".numerator");
-                            try store._metadata.put(allocator, try allocator.dupe(u8, new_prefix.items), .{ .int64 = try std.fmt.parseInt(i64, fraction_str[0..split_idx], 10) });
+                            try store._metadata.put(allocator, try allocator.dupe(u8, new_prefix.items), .{ .int = try std.fmt.parseInt(i64, fraction_str[0..split_idx], 10) });
                         }
                         {
                             var new_prefix = prefix;
                             new_prefix.appendSliceAssumeCapacity(".denominator");
-                            try store._metadata.put(allocator, try allocator.dupe(u8, new_prefix.items), .{ .int64 = try std.fmt.parseInt(i64, fraction_str[split_idx + 1 ..], 10) });
+                            try store._metadata.put(allocator, try allocator.dupe(u8, new_prefix.items), .{ .int = try std.fmt.parseInt(i64, fraction_str[split_idx + 1 ..], 10) });
                         }
                         return true;
                     }

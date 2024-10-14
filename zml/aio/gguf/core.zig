@@ -218,28 +218,12 @@ pub const GgufValue = union(ValueType) {
 
     pub fn asLoaderValue(self: GgufValue) zml.aio.Value {
         return switch (self) {
-            .array => |v| .{
-                .array = .{
-                    .item_type = switch (v.child) {
-                        .bool => .boolval,
-                        .uint8 => .uint8,
-                        .int8 => .int8,
-                        .uint16 => .uint16,
-                        .int16 => .int16,
-                        .uint32 => .uint32,
-                        .int32 => .int32,
-                        .float32 => .float32,
-                        .uint64 => .uint64,
-                        .int64 => .int64,
-                        .float64 => .float64,
-                        .string => .string,
-                        // TODO: .array => .array,
-                        else => unreachable,
-                    },
-                    .data = v.data,
-                },
+            .array => {
+                // TODO: pass the allocator here.
+                log.warn("ignoring array metadata", .{});
+                return .null;
             },
-            inline else => |v, tag| @unionInit(zml.aio.Value, @tagName(tag), v),
+            inline else => |v| zml.aio.Value.wrap(v),
         };
     }
 };

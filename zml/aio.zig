@@ -56,7 +56,7 @@ pub fn detectFormatAndLoadTokenizer(allocator: std.mem.Allocator, tokenizer_path
     else if (std.mem.endsWith(u8, tokenizer_path, ".tinyllama"))
         try zml.aio.tinyllama.loadTokenizer(allocator, tokenizer_path, 32000)
     else {
-        zml.log.err("Failed to recognized tokenizer format of: {s}", .{tokenizer_path});
+        log.err("Failed to recognized tokenizer format of: {s}", .{tokenizer_path});
         return error.FormatNotRecognized;
     };
 }
@@ -87,8 +87,8 @@ pub fn populateModelWithPrefix(comptime Model: type, allocator: std.mem.Allocato
     try prefix_builder.push(allocator, prefix);
     defer prefix_builder.deinit(allocator);
 
-    var unique_id = zml.Tensor.reserveIdRange(@intCast(store.buffers.count()));
-    const ok = _populateStruct(allocator, &prefix_builder, &unique_id, store, &model, true) catch |err| {
+    const unique_id = zml.Tensor.reserveIdRange(@intCast(store.buffers.count()));
+    const ok = _populateStruct(allocator, &prefix_builder, unique_id, store, &model, true) catch |err| {
         std.debug.panic("Can't populate model of type {s}: {s}", .{ @typeName(type), @errorName(err) });
     };
     if (!ok) return error.TensorNotFound;
@@ -145,14 +145,14 @@ pub const BufferStore = struct {
         return @field(wrapped_value, @tagName(tag));
     }
 
-    pub fn metadataSlice(self: BufferStore, key: []const u8, comptime tag: Value.Slice.ItemType) ?[]const Value.Slice.toZigType(tag) {
+    pub fn metadataSlice(self: BufferStore, key: []const u8, comptime tag: Value.ItemType) ?[]const tag.toZigType() {
         const wrapped_value = self._metadata.get(key) orelse return null;
-
-        if (wrapped_value != .array or wrapped_value.array.item_type != tag) {
-            return null;
+        const true_tag = std.meta.stringToEnum(std.meta.FieldEnum(Value), @tagName(tag)).?;
+        if (wrapped_value == true_tag) {
+            return @field(wrapped_value, "array_" ++ @tagName(tag));
         }
-        const T = Value.Slice.toZigType(tag);
-        return @alignCast(std.mem.bytesAsSlice(T, wrapped_value.array.data));
+
+        return null;
     }
 };
 
@@ -244,7 +244,7 @@ const PrefixBuilder = struct {
 fn _populateStruct(
     allocator: std.mem.Allocator,
     prefix_builder: *PrefixBuilder,
-    unique_id: *u64,
+    unique_id: u64,
     buffer_store: BufferStore,
     obj: anytype,
     required: bool,
@@ -260,17 +260,17 @@ fn _populateStruct(
 
     const prefix = prefix_builder.data.items;
     if (T == zml.Tensor) {
-        return if (buffer_store.get(prefix)) |buffer| {
+        return if (buffer_store.buffers.getIndex(prefix)) |entry_idx| {
+            const buffer = buffer_store.get(prefix).?;
             obj.* = zml.Tensor{
                 ._shape = buffer.shape(),
-                ._id = .{ .buffer_id = unique_id.* },
+                ._id = .{ .buffer_id = unique_id + entry_idx },
                 ._donation = .input_buffer,
             };
-            unique_id.* += 1;
             return true;
         } else {
             if (required) {
-                std.log.err("Tensor not found: {s} ({d})", .{ prefix, buffer_store.buffers.count() });
+                log.err("Tensor not found: {s} ({d})", .{ prefix, buffer_store.buffers.count() });
             }
             return false;
         };
@@ -290,7 +290,7 @@ fn _populateStruct(
                         defer prefix_builder.pop();
                         const found = try _populateStruct(allocator, prefix_builder, unique_id, buffer_store, value, required);
                         if (!found) {
-                            std.log.err("Not able to load {s} as {s}", .{ prefix, @typeName(ptr_info.child) });
+                            log.err("Not able to load {s} as {s}", .{ prefix_builder.data.items, @typeName(ptr_info.child) });
                             return false;
                         }
                     }
@@ -299,7 +299,7 @@ fn _populateStruct(
                 }
                 return true;
             } else {
-                std.log.err("{s} - {s}: {s} type not supported", .{ @src().fn_name, prefix, @typeName(T) });
+                log.err("{s} - {s}: {s} type not supported", .{ @src().fn_name, prefix, @typeName(T) });
                 return false;
             }
         },
@@ -346,7 +346,7 @@ fn _populateStruct(
         },
         .Void => true,
         else => if (required) {
-            std.log.err("{s}: {s} type not supported", .{ prefix, @typeName(T) });
+            log.err("{s}: {s} type not supported", .{ prefix, @typeName(T) });
             return error.UnsupportedMetadataType;
         } else return false,
     };
@@ -431,7 +431,7 @@ pub fn loadBuffers(
         zml.meta.assertComptime(@TypeOf(init_args) == void or @TypeOf(init_args) == @TypeOf(.{}), "Model of type {} has no init function, so `loadBuffers` should be call with init_args set to {{}} (void)", .{Model});
     }
 
-    return loadModelBuffers(Model, model, buffer_store, allocator, platform);
+    return loadModelBuffersWithPrefix(Model, model, buffer_store, allocator, platform, "");
 }
 
 /// Creates a bufferized version of a Model from the given BufferStore. For details about
@@ -441,13 +441,32 @@ pub fn loadBuffers(
 /// It can be used with a `module.Exe` (a compiled version of the same Model), to make a
 /// `module.ExeWithWeights` ready to be called.
 pub fn loadModelBuffers(
-    comptime Model: type,
-    model: Model,
+    model: anytype,
     buffer_store: BufferStore,
     allocator: std.mem.Allocator,
     platform: zml.Platform,
-) !zml.Bufferized(Model) {
-    return try loadModelBuffersWithPrefix(Model, model, buffer_store, allocator, platform, "");
+) !zml.Bufferized(@TypeOf(model)) {
+    const LocalCtx = struct {
+        buffer_store: BufferStore,
+        platform: zml.Platform,
+        err: ?anyerror = null,
+
+        pub fn cb(ctx: *@This(), x: zml.Tensor) zml.Buffer {
+            const entry = ctx.buffer_store.buffers.entries.get(x._id.buffer_id);
+            const host = entry.value;
+            zml.meta.assert(x.shape().eql(host.shape()), "Mismatch shape for buffer {s}, expected {} got {}", .{ entry.key, x, host });
+            return host.toDevice(ctx.platform) catch |err| {
+                ctx.err = err;
+                return undefined;
+            };
+        }
+    };
+
+    var res: zml.Bufferized(@TypeOf(model)) = undefined;
+    var ctx: LocalCtx = .{ .buffer_store = buffer_store, .platform = platform };
+    try zml.meta.mapAlloc(LocalCtx.cb, allocator, &ctx, model, &res);
+    if (ctx.err) |e| return e;
+    return res;
 }
 /// Creates a bufferized version of a Model from the given BufferStore and the given prefix.
 /// For details about bufferization, see the documentation of Bufferized(T).

@@ -145,6 +145,8 @@ pub fn isSliceOfAny(comptime T: type, comptime f: fn (comptime type) bool) bool 
 }
 
 pub fn DeclEnum(comptime T: type) type {
+    const field_infos = std.meta.declarations(T);
+    if (field_infos.len == 0) compileError("Struct {} has no declarations", .{T});
     return std.meta.DeclEnum(UnwrapPtr(T));
 }
 

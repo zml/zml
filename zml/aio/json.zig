@@ -30,44 +30,40 @@ pub fn parseMetadata(allocator: Allocator, store: *zml.aio.BufferStore, prefix: 
     const metadata = &store._metadata;
     const key = prefix.items;
     return switch (val) {
-        .null => try metadata.put(allocator, try allocator.dupe(u8, key), .{ .null = {} }),
-        .bool => |v| try metadata.put(allocator, try allocator.dupe(u8, key), .{ .boolval = v }),
-        .integer => |v| try metadata.put(allocator, try allocator.dupe(u8, key), .{ .int64 = v }),
-        .float => |v| try metadata.put(allocator, try allocator.dupe(u8, key), .{ .float64 = v }),
+        .null => try metadata.put(allocator, try allocator.dupe(u8, key), .null),
+        .bool => |v| try metadata.put(allocator, try allocator.dupe(u8, key), .{ .bool = v }),
+        .integer => |v| try metadata.put(allocator, try allocator.dupe(u8, key), .{ .int = v }),
+        .float => |v| try metadata.put(allocator, try allocator.dupe(u8, key), .{ .float = v }),
         .number_string, .string => |v| try metadata.put(allocator, try allocator.dupe(u8, key), .{ .string = try allocator.dupe(u8, v) }),
         .array => |v| {
             if (v.items.len == 0) return;
             return if (validSlice(v)) |item_type| {
-                const data, const dtype: zml.aio.Value.Slice.ItemType = switch (item_type) {
+                const data: zml.aio.Value = switch (item_type) {
                     .bool => blk: {
                         const values = try allocator.alloc(bool, v.items.len);
                         for (v.items, 0..) |item, i| values[i] = item.bool;
-                        break :blk .{ std.mem.sliceAsBytes(values), .boolval };
+                        break :blk .{ .array_bool = values };
                     },
                     .integer => blk: {
                         const values = try allocator.alloc(i64, v.items.len);
                         for (v.items, 0..) |item, i| values[i] = item.integer;
-                        break :blk .{ std.mem.sliceAsBytes(values), .int64 };
+                        break :blk .{ .array_int = values };
                     },
                     .float => blk: {
                         const values = try allocator.alloc(f64, v.items.len);
                         for (v.items, 0..) |item, i| values[i] = item.float;
-                        break :blk .{ std.mem.sliceAsBytes(values), .float64 };
+                        break :blk .{ .array_float = values };
                     },
                     inline .string, .number_string => |tag| blk: {
                         const values = try allocator.alloc([]const u8, v.items.len);
                         for (v.items, 0..) |item, i| {
                             values[i] = @field(item, @tagName(tag));
                         }
-                        break :blk .{ std.mem.sliceAsBytes(values), .string };
+                        break :blk .{ .array_string = values };
                     },
                     .null, .array, .object => unreachable,
                 };
-                try metadata.put(
-                    allocator,
-                    try allocator.dupe(u8, key),
-                    .{ .array = .{ .item_type = dtype, .data = data } },
-                );
+                try metadata.put(allocator, try allocator.dupe(u8, key), data);
             } else {
                 for (v.items, 0..) |item, i| {
                     var new_prefix = prefix;

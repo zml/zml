@@ -28,11 +28,11 @@ pub fn loadTokenizerFromFile(allocator: std.mem.Allocator, file: asynk.File) !To
 }
 
 pub fn loadTokenizerFromModelProto(allocator: std.mem.Allocator, model: sentencepiece_proto.ModelProto) !Tokenizer {
-    std.debug.assert(model.trainer_spec.?.model_type.? == .BPE);
+    // std.debug.assert(model.trainer_spec.?.model_type.? == .BPE);
     const special_tokens: Tokenizer.SpecialTokens = .{
-        .unk = @intCast(model.trainer_spec.?.unk_id.?),
-        .bos = @intCast(model.trainer_spec.?.bos_id.?),
-        .eos = @intCast(model.trainer_spec.?.eos_id.?),
+        .unk = readToken(model.trainer_spec.?.unk_id),
+        .bos = readToken(model.trainer_spec.?.bos_id),
+        .eos = readToken(model.trainer_spec.?.eos_id),
         .pad = parseTokenId(model.trainer_spec.?.pad_id),
     };
 
@@ -47,7 +47,9 @@ pub fn loadTokenizerFromModelProto(allocator: std.mem.Allocator, model: sentence
     errdefer tokenizer.deinit();
 
     for (model.pieces.items) |*piece| {
+        const n = tokenizer.next_token_id;
         try tokenizer.addToken(piece.score.?, piece.piece.?.getSlice());
+        std.log.debug("{s} -> {d} -> {d}", .{ piece.piece.?.Owned, piece.score.?, n });
     }
     const byte_fallback = model.trainer_spec.?.byte_fallback orelse false;
     if (byte_fallback) {
@@ -55,6 +57,12 @@ pub fn loadTokenizerFromModelProto(allocator: std.mem.Allocator, model: sentence
     }
 
     return tokenizer;
+}
+
+fn readToken(token: ?i32) u32 {
+    if (token == null) return std.math.maxInt(u32);
+    if (token.? < 0) return std.math.maxInt(u32);
+    return @bitCast(token.?);
 }
 
 fn parseTokenId(id: ?i32) u32 {
@@ -66,13 +74,14 @@ fn parseTokenId(id: ?i32) u32 {
 }
 
 pub fn normalizerFromSpec(spec: sentencepiece_proto.NormalizerSpec) Normalizer {
-    std.log.info("NormalizerSpec: {}", .{spec});
+    // std.log.info("NormalizerSpec: {}", .{spec});
     if (spec.normalization_rule_tsv) |rule_tsv| {
         if (!rule_tsv.isEmpty()) {
             std.debug.panic("SentencePiece model with normalization rules not supported: model.normalizer_spec.normalization_rule_tsv: {s}", .{spec.normalization_rule_tsv.?.getSlice()});
         }
     }
-    if (!std.mem.eql(u8, spec.name.?.getSlice(), "identity")) std.debug.panic("Normalizer only supports NormalizerSpec with name \"identity\", got \"{s}\"", .{spec.name.?.getSlice()});
+    // if (!std.mem.eql(u8, spec.name.?.getSlice(), "identity")) std.debug.panic("Normalizer only supports NormalizerSpec with name \"identity\", got \"{s}\"", .{spec.name.?.getSlice()});
+    // TODO support nmt_nfkc normalizer
     if (!spec.escape_whitespaces.?) std.debug.panic("Normalizer only supports NormalizerSpec with \"escape_whitespaces\" flag set", .{});
     if (spec.remove_extra_whitespaces) |_| {} else std.debug.panic("Normalizer only supports NormalizerSpec with \"remove_extra_whitespaces\" flag set", .{});
 

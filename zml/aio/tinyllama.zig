@@ -91,17 +91,17 @@ pub fn open(allocator: std.mem.Allocator, model_path: []const u8) !zml.aio.Buffe
 
     {
         try res._metadata.ensureUnusedCapacity(arena, 11);
-        res._metadata.putAssumeCapacityNoClobber("dim", .{ .int64 = c.dim });
-        res._metadata.putAssumeCapacityNoClobber("hidden_dim", .{ .int64 = c.hidden_dim });
-        res._metadata.putAssumeCapacityNoClobber("n_layers", .{ .int64 = c.n_layers });
-        res._metadata.putAssumeCapacityNoClobber("num_heads", .{ .int64 = c.n_heads });
-        res._metadata.putAssumeCapacityNoClobber("num_kv_heads", .{ .int64 = c.n_kv_heads });
-        res._metadata.putAssumeCapacityNoClobber("vocab_size", .{ .int64 = c.vocab.size });
-        res._metadata.putAssumeCapacityNoClobber("has_lm_head", .{ .boolval = c.vocab.has_lm_head });
-        res._metadata.putAssumeCapacityNoClobber("max_seq_len", .{ .int64 = c.seq_len });
+        res._metadata.putAssumeCapacityNoClobber("dim", .{ .int = c.dim });
+        res._metadata.putAssumeCapacityNoClobber("hidden_dim", .{ .int = c.hidden_dim });
+        res._metadata.putAssumeCapacityNoClobber("n_layers", .{ .int = c.n_layers });
+        res._metadata.putAssumeCapacityNoClobber("num_heads", .{ .int = c.n_heads });
+        res._metadata.putAssumeCapacityNoClobber("num_kv_heads", .{ .int = c.n_kv_heads });
+        res._metadata.putAssumeCapacityNoClobber("vocab_size", .{ .int = c.vocab.size });
+        res._metadata.putAssumeCapacityNoClobber("has_lm_head", .{ .bool = c.vocab.has_lm_head });
+        res._metadata.putAssumeCapacityNoClobber("max_seq_len", .{ .int = c.seq_len });
         res._metadata.putAssumeCapacityNoClobber("rope_impl", .{ .string = "interleaved" });
-        res._metadata.putAssumeCapacityNoClobber("rope_freq_base", .{ .float64 = 10_000 });
-        res._metadata.putAssumeCapacityNoClobber("rms_norm_eps", .{ .float64 = 1e-6 });
+        res._metadata.putAssumeCapacityNoClobber("rope_freq_base", .{ .float = 10_000 });
+        res._metadata.putAssumeCapacityNoClobber("rms_norm_eps", .{ .float = 1e-6 });
     }
 
     return res;

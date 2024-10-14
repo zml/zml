@@ -36,24 +36,24 @@ pub fn getGgufTokenizer(self: zml.aio.BufferStore, allocator: std.mem.Allocator)
         log.err("GGUF File: Tokens not found", .{});
         return error.TokensNotFound;
     };
-    const scores = self.metadataSlice("tokenizer.ggml.scores", .float32) orelse {
+    const scores = self.metadataSlice("tokenizer.ggml.scores", .float) orelse {
         log.err("GGUF File: Scores not found", .{});
         return error.ScoresNotFound;
     };
     assert(tokens.len == scores.len);
     const tokenizer_type = self.metadata("tokenizer.ggml.model", .string) orelse "llama";
     const tokenizer_impl: zml.tokenizer.KnownImplementation = if (std.mem.eql(u8, tokenizer_type, "gpt2")) .gpt2 else .sentencepiece;
-    const bos = self.metadata("tokenizer.ggml.bos_token_id", .uint32);
-    const eos = self.metadata("tokenizer.ggml.eos_token_id", .uint32);
-    const unk = self.metadata("tokenizer.ggml.unknown_token_id", .uint32);
-    const pad = self.metadata("tokenizer.ggml.padding_token_id", .uint32);
+    const bos = self.metadata("tokenizer.ggml.bos_token_id", .int);
+    const eos = self.metadata("tokenizer.ggml.eos_token_id", .int);
+    const unk = self.metadata("tokenizer.ggml.unknown_token_id", .int);
+    const pad = self.metadata("tokenizer.ggml.padding_token_id", .int);
 
     const NOT_FOUND = std.math.maxInt(u32);
     const special_tokens: zml.tokenizer.Tokenizer.SpecialTokens = .{
-        .bos = bos.?,
-        .eos = eos.?,
-        .unk = unk orelse NOT_FOUND,
-        .pad = pad orelse NOT_FOUND,
+        .bos = @intCast(bos.?),
+        .eos = @intCast(eos.?),
+        .unk = @intCast(unk orelse NOT_FOUND),
+        .pad = @intCast(pad orelse NOT_FOUND),
     };
 
     const gguf_normalizer = if (tokenizer_impl == .gpt2)
@@ -85,10 +85,10 @@ pub fn getGgufTokenizer(self: zml.aio.BufferStore, allocator: std.mem.Allocator)
     for (tokens, 0..tokens.len) |t, i| {
         if (tokenizer_impl == .gpt2) {
             decoded.clearRetainingCapacity();
-            try tokenizer.addToken(scores[i], try gpt2_unicode.?.decode(&decoded, t));
+            try tokenizer.addToken(@floatCast(scores[i]), try gpt2_unicode.?.decode(&decoded, t));
             // log.debug("token: {s} -> {s}", .{t, decoded.items});
         } else {
-            try tokenizer.addToken(scores[i], t);
+            try tokenizer.addToken(@floatCast(scores[i]), t);
         }
     }
 
