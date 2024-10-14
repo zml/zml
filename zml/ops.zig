@@ -14,9 +14,7 @@ const DataType = @import("dtype.zig").DataType;
 const Buffer = buffer.Buffer;
 const EnumLiteral = @TypeOf(.enum_literal);
 
-const dialect = struct {
-    const stablehlo = @import("mlir/dialects").stablehlo;
-};
+const dialect = @import("mlir/dialects");
 
 const assert = std.debug.assert;
 const log = std.log.scoped(.zml_tensor);
