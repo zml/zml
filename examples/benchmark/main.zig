@@ -14,7 +14,7 @@ pub const std_options = .{
 const Benchmark = struct {
     pub fn forward(self: Benchmark, a: zml.Tensor, b: zml.Tensor) zml.Tensor {
         _ = self;
-        return a.withSharding(.{.k}).dot(b.withSharding(.{.k}), .{.k}).withSharding(.{.m});
+        return a.dot(b, .{.k}).withSharding(.{.b});
     }
 };
 
@@ -30,6 +30,7 @@ pub fn asyncMain() !void {
             \\ benchmark --size=4096 --dtype=f16
         ;
         size: usize = 4096,
+        batch_size: usize = 2,
         dtype: zml.DataType = .f16,
     };
 
@@ -83,8 +84,8 @@ pub fn asyncMain() !void {
     var args = std.process.args();
     const cli_args = flags.parse(&args, CliArgs);
 
-    const a_shape = zml.Shape.init(.{ cli_args.size, cli_args.size }, cli_args.dtype).withTags(.{ .m, .k }).withSharding(.{.k});
-    const b_shape = a_shape.withTags(.{ .k, .n }).withSharding(.{.k});
+    const a_shape = zml.Shape.init(.{ cli_args.batch_size, cli_args.size, cli_args.size }, cli_args.dtype).withTags(.{ .b, .m, .k }).withSharding(.{.b});
+    const b_shape = a_shape.withTags(.{ .b, .k, .n }).withSharding(.{.b});
     var timer = try std.time.Timer.start();
 
     std.debug.print("\nCompiling model to MLIR....\n", .{});
@@ -130,7 +131,7 @@ pub fn asyncMain() !void {
 
     std.debug.print("\n✅ Benchmark done!\n\n", .{});
 
-    const floating_op_count = 2 * cli_args.size * cli_args.size * cli_args.size;
+    const floating_op_count = 2 * cli_args.batch_size * cli_args.size * cli_args.size * cli_args.size;
     const flops = @as(f64, @floatFromInt(floating_op_count)) / elapsed_s;
     std.debug.print("Dot product size: {d}x{d} - Datatype: {s} - Elapsed: {d:.3}ms - {d:.3} GFLOP/s\n\n", .{ cli_args.size, cli_args.size, @tagName(cli_args.dtype), elapsed_ms, flops / 1_000_000_000 });
 }
