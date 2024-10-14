@@ -148,7 +148,7 @@ pub const PickleData = struct {
                                     try store._metadata.put(
                                         allocator,
                                         try allocator.dupe(u8, prefix.items),
-                                        try zml.aio.Value.copySlice(allocator, values.items),
+                                        try zml.aio.Metadata.copySlice(allocator, values.items),
                                     );
                                 } else {
                                     for (values.items, 0..) |val, i| {
@@ -163,7 +163,7 @@ pub const PickleData = struct {
                                             .boolval => "bool",
                                             else => unreachable, // we are already inside a switch
                                         };
-                                        try store._metadata.put(allocator, try allocator.dupe(u8, new_prefix.items), @unionInit(zml.aio.Value, new_tag, val));
+                                        try store._metadata.put(allocator, try allocator.dupe(u8, new_prefix.items), @unionInit(zml.aio.Metadata, new_tag, val));
                                     }
                                 }
                             },
@@ -228,7 +228,7 @@ pub const PickleData = struct {
                     log.warn("Duplicate key: {s}", .{prefix.items});
                     allocator.free(key);
                 } else {
-                    d.value_ptr.* = zml.aio.Value.wrap(val);
+                    d.value_ptr.* = zml.aio.Metadata.wrap(val);
                 }
             },
             else => {},

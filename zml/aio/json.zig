@@ -38,7 +38,7 @@ pub fn parseMetadata(allocator: Allocator, store: *zml.aio.BufferStore, prefix: 
         .array => |v| {
             if (v.items.len == 0) return;
             return if (validSlice(v)) |item_type| {
-                const data: zml.aio.Value = switch (item_type) {
+                const data: zml.aio.Metadata = switch (item_type) {
                     .bool => blk: {
                         const values = try allocator.alloc(bool, v.items.len);
                         for (v.items, 0..) |item, i| values[i] = item.bool;

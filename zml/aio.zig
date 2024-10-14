@@ -14,7 +14,6 @@ pub const torch = @import("aio/torch.zig");
 pub const yaml = @import("aio/yaml.zig");
 
 pub const log = std.log.scoped(.zml_aio);
-pub const Value = @import("aio/value.zig").Value;
 const HostBuffer = @import("hostbuffer.zig").HostBuffer;
 
 test {
@@ -98,12 +97,12 @@ pub fn populateModelWithPrefix(comptime Model: type, allocator: std.mem.Allocato
 /// A struct containing all the buffers and metadata found in a model file.
 pub const BufferStore = struct {
     pub const Buffers = std.StringArrayHashMapUnmanaged(HostBuffer);
-    pub const Metadata = std.StringArrayHashMapUnmanaged(Value);
+    pub const Metadatas = std.StringArrayHashMapUnmanaged(Metadata);
 
     arena: std.heap.ArenaAllocator,
     files: []MemoryMappedFile = &.{},
     buffers: Buffers = .{},
-    _metadata: Metadata = .{},
+    _metadata: Metadatas = .{},
 
     pub fn deinit(self: BufferStore) void {
         for (self.files) |*file| file.deinit();
@@ -135,7 +134,7 @@ pub const BufferStore = struct {
         return if (maybe_max_index) |index| index + 1 else 0;
     }
 
-    pub fn metadata(self: BufferStore, key: []const u8, comptime tag: std.meta.FieldEnum(Value)) ?std.meta.FieldType(Value, tag) {
+    pub fn metadata(self: BufferStore, key: []const u8, comptime tag: std.meta.FieldEnum(Metadata)) ?std.meta.FieldType(Metadata, tag) {
         const wrapped_value = self._metadata.get(key) orelse return null;
 
         if (wrapped_value != tag) {
@@ -145,14 +144,71 @@ pub const BufferStore = struct {
         return @field(wrapped_value, @tagName(tag));
     }
 
-    pub fn metadataSlice(self: BufferStore, key: []const u8, comptime tag: Value.ItemType) ?[]const tag.toZigType() {
+    pub fn metadataSlice(self: BufferStore, key: []const u8, comptime tag: Metadata.ItemType) ?[]const tag.toZigType() {
         const wrapped_value = self._metadata.get(key) orelse return null;
-        const true_tag = std.meta.stringToEnum(std.meta.FieldEnum(Value), @tagName(tag)).?;
+        const true_tag = std.meta.stringToEnum(std.meta.FieldEnum(Metadata), @tagName(tag)).?;
         if (wrapped_value == true_tag) {
             return @field(wrapped_value, "array_" ++ @tagName(tag));
         }
 
         return null;
+    }
+};
+
+pub const Metadata = union(enum) {
+    null: void,
+    int: i64,
+    float: f64,
+    bool: bool,
+    string: []const u8,
+
+    array_bool: []const bool,
+    array_int: []const i64,
+    array_float: []const f64,
+    array_string: []const []const u8,
+
+    pub const ItemType = enum {
+        int,
+        float,
+        bool,
+        string,
+
+        pub fn toZigType(comptime kind: ItemType) type {
+            return switch (kind) {
+                .int => i64,
+                .float => f64,
+                .bool => bool,
+                .string => []const u8,
+            };
+        }
+    };
+
+    pub fn wrap(x: anytype) Metadata {
+        return switch (@TypeOf(x)) {
+            inline u8, i8, u16, i16, u32, i32, u64, i64 => .{ .int = @intCast(x) },
+            inline f16, f32, f64 => .{ .float = @floatCast(x) },
+            bool => .{ .bool = x },
+            []const u8 => .{ .string = x },
+            else => @panic("Unsupported type for zml.aio.Value: " ++ @typeName(@TypeOf(x))),
+        };
+    }
+
+    pub fn copySlice(allocator: std.mem.Allocator, any_slice: anytype) !Metadata {
+        return switch (@TypeOf(any_slice[0])) {
+            inline u8, i8, u16, i16, u32, i32, u64, i64 => {
+                const res = try allocator.alloc(i64, any_slice.len);
+                for (res, any_slice) |*r, val| r.* = @intCast(val);
+                return .{ .array_int = res };
+            },
+            inline f16, f32, f64 => {
+                const res = try allocator.alloc(f64, any_slice.len);
+                for (res, any_slice) |*r, val| r.* = @floatCast(val);
+                return .{ .array_float = res };
+            },
+            bool => .{ .array_bool = try allocator.dupe(bool, any_slice) },
+            []const u8 => .{ .array_string = try allocator.dupe([]const u8, @alignCast(any_slice)) },
+            else => @panic("Unsupported type for zml.aio.Value: " ++ @typeName(@TypeOf(any_slice))),
+        };
     }
 };
 

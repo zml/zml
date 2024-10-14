@@ -112,7 +112,19 @@ fn loadMetadata(allocator: Allocator, store: *zml.aio.BufferStore, file: *core.G
             log.warn("Found duplicated metadata key: {s}", .{entry.name});
             continue;
         }
-        res.value_ptr.* = entry.val.asLoaderValue();
+        res.value_ptr.* = switch (entry.val) {
+            .array => |arr| switch (arr.child) {
+                inline .uint8, .int8, .uint16, .int16, .uint32, .int32, .float32, .bool, .string, .uint64, .int64, .float64 => |tag| blk: {
+                    const T = std.meta.FieldType(core.GgufValue, tag);
+                    break :blk try zml.aio.Metadata.copySlice(allocator, std.mem.bytesAsSlice(T, arr.data));
+                },
+                else => blk: {
+                    log.warn("ignoring array metadata", .{});
+                    break :blk .null;
+                },
+            },
+            inline else => |v| zml.aio.Metadata.wrap(v),
+        };
     } else |err| switch (err) {
         error.EndOfMetadata => {},
         else => return err,
