@@ -1,5 +1,4 @@
 const std = @import("std");
-const utils = @import("utils.zig");
 const yaml = @import("zig-yaml");
 const zml = @import("../zml.zig");
 

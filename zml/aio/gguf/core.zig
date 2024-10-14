@@ -1,6 +1,5 @@
 const asynk = @import("async");
 const std = @import("std");
-const utils = @import("../utils.zig");
 const zml = @import("../../zml.zig");
 
 const assert = std.debug.assert;

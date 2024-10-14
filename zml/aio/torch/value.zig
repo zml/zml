@@ -1,9 +1,7 @@
 const std = @import("std");
-const utils = @import("utils.zig");
-
-const PickleOp = @import("ops.zig").PickleOp;
-
 const big_int = std.math.big.int;
+
+const pickle = @import("pickle.zig");
 
 /// The types of sequences that exist.
 pub const SequenceType = enum {
@@ -114,7 +112,7 @@ pub const ValueType = enum {
 /// A processed value.
 pub const Value = union(ValueType) {
     /// Types that we can't handle or just had to give up on processing.
-    raw: PickleOp,
+    raw: pickle.Op,
 
     /// A reference. You might be able to look it up in the memo map
     /// unless there's something weird going on like recursive references.
@@ -174,7 +172,7 @@ pub const Value = union(ValueType) {
     float64: f64,
 
     /// Some kind of weird number we can't handle.
-    raw_num: PickleOp,
+    raw_num: pickle.Op,
 
     /// A boolean value.
     boolval: bool,
@@ -299,7 +297,12 @@ pub const Value = union(ValueType) {
     pub fn isPrimitive(self: Value) bool {
         return switch (self) {
             .int64, .bigint, .float64, .string, .bytes, .boolval, .none => true,
-            .seq => |seq| utils.allTrue(seq.values, Value.isPrimitive),
+            .seq => |seq| {
+                for (seq.values) |v| {
+                    if (!v.isPrimitive()) return false;
+                }
+                return true;
+            },
             else => false,
         };
     }
