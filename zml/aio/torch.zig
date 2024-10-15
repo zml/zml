@@ -37,13 +37,14 @@ pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore
 
     const _parser = try parser.Parser.init(tmp_alloc, file);
     const stack, const memo = try eval.evaluate(tmp_alloc, _parser.ops, true);
+    _ = memo; // autofix
 
     // But we create the HostBuffer objects inside the result BufferStore arena.
     var res: zml.aio.BufferStore = .{
         .arena = std.heap.ArenaAllocator.init(allocator),
     };
     res.files = try res.arena.allocator().dupe(zml.aio.MemoryMappedFile, &.{_parser.buffer_file});
-    var tmp: PickleData = .{ .data = _parser, .memo = memo, .stack = stack };
+    var tmp: PickleData = .{ .data = _parser, .stack = stack };
     try tmp.parseModel(res.arena.allocator(), &res);
     return res;
 }
@@ -51,7 +52,6 @@ pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore
 // TODO: rename me to PytorchFile
 pub const PickleData = struct {
     stack: eval.PickleStack,
-    memo: eval.PickleMemo,
     data: parser.Parser,
 
     fn basicTypeCheck(object: *const value.Object, module: []const u8, class: []const u8) bool {

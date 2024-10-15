@@ -39,10 +39,11 @@ pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore
             const start = try mapped_file.file.getPos();
             var tmp: zml.aio.torch.PickleData = .{
                 .data = try parser.Parser.fromTarFile(arena, mapped_file, file),
-                .memo = undefined,
                 .stack = undefined,
             };
-            tmp.stack, tmp.memo = try eval.evaluate(arena, tmp.data.ops, true);
+            tmp.stack, const memo = try eval.evaluate(arena, tmp.data.ops, true);
+            _ = memo;
+
             try tmp.parseModel(arena, &res);
             // Since we directly manipulate the file handle pointer,
             // reset to the end of file so iterator does not error

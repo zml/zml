@@ -283,10 +283,10 @@ pub const Value = union(ValueType) {
         return switch (self) {
             inline .raw, .raw_num => |v, tag| @unionInit(Value, @tagName(tag), try v.clone(allocator)),
             inline .app, .object, .global, .build, .pers_id => |v, tag| @unionInit(Value, @tagName(tag), try v.clone(allocator)),
-            .seq => |seq| blk: {
-                const new_val: Sequence = .{ .type = seq.type, .values = try allocator.alloc(Value, seq.values.len) };
-                for (seq.values, 0..) |v, i| new_val.values[i] = try v.clone(allocator);
-                break :blk .{ .seq = new_val };
+            .seq => |seq| {
+                const values = try allocator.alloc(Value, seq.values.len);
+                for (seq.values, 0..) |v, i| values[i] = try v.clone(allocator);
+                return .{ .seq = .{ .type = seq.type, .values = values } };
             },
             inline .string, .bytes => |v, tag| @unionInit(Value, @tagName(tag), try allocator.dupe(u8, v)),
             .bigint => |v| .{ .bigint = try v.clone() },

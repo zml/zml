@@ -483,3 +483,50 @@ fn assuredResize(comptime T: type, allocator: std.mem.Allocator, old: []T, new_l
         return new;
     }
 }
+
+test evaluate {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const file = try std.fs.cwd().openFile("zml/aio/torch/simple_test.pickle", .{ .mode = .read_only });
+    var buffered_reader = std.io.bufferedReader(file.reader());
+    const ops = try pickle.parse(allocator, buffered_reader.reader(), 4096);
+
+    var vals, var memo = try evaluate(allocator, ops, true);
+    defer vals.deinit();
+    defer memo.deinit();
+
+    try std.testing.expect(vals.stack.len == 2);
+    // skip first value (frame)
+    try std.testing.expect(vals.stack[1] == .seq);
+    try std.testing.expect(vals.stack[1].seq.type == .dict);
+    const entries = vals.stack[1].seq.values[0].seq.values;
+    try std.testing.expect(entries.len == 5);
+    const expected: []const Value = &.{
+        .{ .seq = .{ .type = .kv_tuple, .values = @constCast(&[_]Value{ .{ .string = "hello" }, .{ .string = "world" } }) } },
+        .{ .seq = .{ .type = .kv_tuple, .values = @constCast(&[_]Value{ .{ .string = "int" }, .{ .int64 = 1 } }) } },
+        .{ .seq = .{ .type = .kv_tuple, .values = @constCast(&[_]Value{ .{ .string = "float" }, .{ .float64 = 3.141592 } }) } },
+        .{ .seq = .{ .type = .kv_tuple, .values = @constCast(&[_]Value{
+            .{ .string = "list" },
+            .{ .seq = .{ .type = .list, .values = @constCast(&[_]Value{
+                .{ .int64 = 0 },
+                .{ .int64 = 1 },
+                .{ .int64 = 2 },
+                .{ .int64 = 3 },
+                .{ .int64 = 4 },
+            }) } },
+        }) } },
+        .{ .seq = .{ .type = .kv_tuple, .values = @constCast(&[_]Value{
+            .{ .string = "tuple" },
+            .{ .seq = .{
+                .type = .tuple,
+                .values = @constCast(&[_]Value{
+                    .{ .string = "a" },
+                    .{ .int64 = 10 },
+                }),
+            } },
+        }) } },
+    };
+
+    try std.testing.expectEqualDeep(expected, entries);
+}

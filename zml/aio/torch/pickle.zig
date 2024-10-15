@@ -224,3 +224,246 @@ pub const OpCode = enum(u8) {
     readonly_buffer = '\x98', // make top of stack readonly
     _,
 };
+
+pub fn parse(allocator: std.mem.Allocator, reader: anytype, max_line_len: usize) ![]const Op {
+    var results = std.ArrayList(Op).init(allocator);
+    errdefer results.deinit();
+    const len = max_line_len;
+
+    while (true) {
+        const b = try reader.readByte();
+        const code: OpCode = @enumFromInt(b);
+        switch (code) {
+            .stop => {
+                //
+                try results.append(.{ .stop = {} });
+                break;
+            },
+            .mark => try results.append(.{ .mark = {} }),
+            .pop => try results.append(.{ .pop = {} }),
+            .pop_mark => try results.append(.{ .pop_mark = {} }),
+            .dup => try results.append(.{ .dup = {} }),
+            .float => {
+                const buf = try reader.readUntilDelimiterAlloc(allocator, '\n', len);
+                errdefer allocator.free(buf);
+                try results.append(.{ .float = buf });
+            },
+            .int => {
+                const buf = try reader.readUntilDelimiterAlloc(allocator, '\n', len);
+                errdefer allocator.free(buf);
+                try results.append(.{ .int = buf });
+            },
+            .binint => try results.append(.{ .binint = try reader.readInt(i32, .little) }),
+            .binint1 => try results.append(.{ .binint1 = try reader.readByte() }),
+            .long => {
+                const buf = try reader.readUntilDelimiterAlloc(allocator, '\n', len);
+                errdefer allocator.free(buf);
+                try results.append(.{ .long = buf });
+            },
+            .binint2 => try results.append(.{ .binint2 = try reader.readInt(u16, .little) }),
+            .none => try results.append(.{ .none = {} }),
+            .persid => {
+                const buf = try reader.readUntilDelimiterAlloc(allocator, '\n', len);
+                errdefer allocator.free(buf);
+                try results.append(.{ .persid = buf });
+            },
+            .binpersid => try results.append(.{ .binpersid = {} }),
+            .reduce => try results.append(.{ .reduce = {} }),
+            .string => {
+                const buf = try reader.readUntilDelimiterAlloc(allocator, '\n', len);
+                errdefer allocator.free(buf);
+                try results.append(.{ .string = buf });
+            },
+            .binstring => {
+                const str_len = try reader.readInt(u32, .little);
+                const buf = try allocator.alloc(u8, str_len);
+                errdefer allocator.free(buf);
+                _ = try reader.read(buf);
+                try results.append(.{ .binstring = buf });
+            },
+            .short_binstring => {
+                const str_len = try reader.readByte();
+                const buf = try allocator.alloc(u8, str_len);
+                errdefer allocator.free(buf);
+                _ = try reader.read(buf);
+                try results.append(.{ .short_binstring = buf });
+            },
+            .unicode => {
+                const buf = try reader.readUntilDelimiterAlloc(allocator, '\n', len);
+                errdefer allocator.free(buf);
+                try results.append(.{ .unicode = buf });
+            },
+            .binunicode => {
+                const str_len = try reader.readInt(u32, .little);
+                const buf = try allocator.alloc(u8, str_len);
+                errdefer allocator.free(buf);
+                _ = try reader.read(buf);
+                try results.append(.{ .binunicode = buf });
+            },
+            .append => try results.append(.{ .append = {} }),
+            .build => try results.append(.{ .build = {} }),
+            .global, .inst => {
+                const module = try reader.readUntilDelimiterAlloc(allocator, '\n', len);
+                errdefer allocator.free(module);
+                const class = try reader.readUntilDelimiterAlloc(allocator, '\n', len);
+                errdefer allocator.free(class);
+                try results.append(.{ .global = .{ .module = module, .class = class } });
+            },
+            .dict => try results.append(.{ .dict = {} }),
+            .empty_dict => try results.append(.{ .empty_dict = {} }),
+            .appends => try results.append(.{ .appends = {} }),
+            .get => {
+                const buf = try reader.readUntilDelimiterAlloc(allocator, '\n', len);
+                errdefer allocator.free(buf);
+                try results.append(.{ .get = buf });
+            },
+            .binget => try results.append(.{ .binget = try reader.readByte() }),
+            .long_binget => try results.append(.{ .long_binget = try reader.readInt(u32, .little) }),
+            .list => try results.append(.{ .list = {} }),
+            .empty_list => try results.append(.{ .empty_list = {} }),
+            .obj => try results.append(.{ .obj = {} }),
+            .put => {
+                const buf = try reader.readUntilDelimiterAlloc(allocator, '\n', len);
+                errdefer allocator.free(buf);
+                try results.append(.{ .put = buf });
+            },
+            .binput => {
+                try results.append(.{ .binput = try reader.readByte() });
+            },
+            .long_binput => {
+                try results.append(.{ .long_binput = try reader.readInt(u32, .little) });
+            },
+            .setitem => try results.append(.{ .setitem = {} }),
+            .tuple => try results.append(.{ .tuple = {} }),
+            .empty_tuple => try results.append(.{ .empty_tuple = {} }),
+            .setitems => try results.append(.{ .setitems = {} }),
+            .binfloat => try results.append(.{ .binfloat = @bitCast(try reader.readInt(u64, .big)) }),
+            .proto => try results.append(.{ .proto = try reader.readByte() }),
+            .newobj => try results.append(.{ .newobj = {} }),
+            .ext1 => try results.append(.{ .ext1 = try reader.readByte() }),
+            .ext2 => try results.append(.{ .ext2 = try reader.readInt(i16, .little) }),
+            .ext4 => try results.append(.{ .ext4 = try reader.readInt(i32, .little) }),
+            .tuple1 => try results.append(.{ .tuple1 = {} }),
+            .tuple2 => try results.append(.{ .tuple2 = {} }),
+            .tuple3 => try results.append(.{ .tuple3 = {} }),
+            .newtrue => try results.append(.{ .newtrue = {} }),
+            .newfalse => try results.append(.{ .newfalse = {} }),
+            .long1 => {
+                const str_len = try reader.readByte();
+                const buf = try allocator.alloc(u8, str_len);
+                errdefer allocator.free(buf);
+                _ = try reader.read(buf);
+                try results.append(.{ .long1 = buf });
+            },
+            .long4 => {
+                const str_len = try reader.readInt(u32, .little);
+                const buf = try allocator.alloc(u8, str_len);
+                errdefer allocator.free(buf);
+                _ = try reader.read(buf);
+                try results.append(.{ .long4 = buf });
+            },
+            .binbytes => {
+                const str_len = try reader.readInt(u32, .little);
+                const buf = try allocator.alloc(u8, str_len);
+                errdefer allocator.free(buf);
+                _ = try reader.read(buf);
+                try results.append(.{ .binbytes = buf });
+            },
+            .binbytes8 => {
+                const str_len = try reader.readInt(u64, .little);
+                const buf = try allocator.alloc(u8, str_len);
+                errdefer allocator.free(buf);
+                _ = try reader.read(buf);
+                try results.append(.{ .binbytes8 = buf });
+            },
+            .short_binbytes => {
+                const str_len = try reader.readByte();
+                const buf = try allocator.alloc(u8, str_len);
+                errdefer allocator.free(buf);
+                _ = try reader.read(buf);
+                try results.append(.{ .short_binbytes = buf });
+            },
+            .binunicode8 => {
+                const str_len = try reader.readInt(u64, .little);
+                const buf = try allocator.alloc(u8, str_len);
+                errdefer allocator.free(buf);
+                _ = try reader.read(buf);
+                try results.append(.{ .binunicode8 = buf });
+            },
+            .short_binunicode => {
+                const str_len = try reader.readByte();
+                const buf = try allocator.alloc(u8, str_len);
+                errdefer allocator.free(buf);
+                _ = try reader.read(buf);
+                try results.append(.{ .short_binunicode = buf });
+            },
+            .empty_set => try results.append(.{ .empty_set = {} }),
+            .additems => try results.append(.{ .additems = {} }),
+            .frozenset => try results.append(.{ .frozenset = {} }),
+            .newobj_ex => try results.append(.{ .newobj_ex = {} }),
+            .stack_global => try results.append(.{ .stack_global = {} }),
+            .memoize => try results.append(.{ .memoize = {} }),
+            .frame => try results.append(.{ .frame = try reader.readInt(u64, .little) }),
+            .bytearray8 => {
+                const str_len = try reader.readInt(u64, .little);
+                const buf = try allocator.alloc(u8, str_len);
+                errdefer allocator.free(buf);
+                _ = try reader.read(buf);
+                try results.append(.{ .bytearray8 = buf });
+            },
+            .next_buffer => try results.append(.{ .next_buffer = {} }),
+            .readonly_buffer => try results.append(.{ .readonly_buffer = {} }),
+            _ => {},
+        }
+    }
+    return results.toOwnedSlice();
+}
+
+test parse {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const file = try std.fs.cwd().openFile("zml/aio/torch/simple_test.pickle", .{ .mode = .read_only });
+    var buffered_reader = std.io.bufferedReader(file.reader());
+    const ops = try parse(allocator, buffered_reader.reader(), 4096);
+
+    try std.testing.expect(ops.len == 35);
+    const expected = [_]Op{
+        .{ .proto = 4 },
+        .{ .frame = 83 },
+        .empty_dict,
+        .memoize,
+        .mark,
+        .{ .short_binunicode = "hello" },
+        .memoize,
+        .{ .short_binunicode = "world" },
+        .memoize,
+        .{ .short_binunicode = "int" },
+        .memoize,
+        .{ .binint1 = 1 },
+        .{ .short_binunicode = "float" },
+        .memoize,
+        .{ .binfloat = 3.141592 },
+        .{ .short_binunicode = "list" },
+        .memoize,
+        .empty_list,
+        .memoize,
+        .mark,
+        .{ .binint1 = 0 },
+        .{ .binint1 = 1 },
+        .{ .binint1 = 2 },
+        .{ .binint1 = 3 },
+        .{ .binint1 = 4 },
+        .appends,
+        .{ .short_binunicode = "tuple" },
+        .memoize,
+        .{ .short_binunicode = "a" },
+        .memoize,
+        .{ .binint1 = 10 },
+        .tuple2,
+        .memoize,
+        .setitems,
+        .stop,
+    };
+    try std.testing.expectEqualDeep(&expected, ops);
+}
