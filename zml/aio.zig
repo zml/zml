@@ -210,6 +210,21 @@ pub const Metadata = union(enum) {
             else => @panic("Unsupported type for zml.aio.Value: " ++ @typeName(@TypeOf(any_slice))),
         };
     }
+
+    pub fn format(
+        self: Metadata,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        _ = options;
+        switch (self) {
+            .null => _ = try writer.write("null"),
+            inline .bool, .array_bool => |b| try writer.print("{any}", .{b}),
+            inline else => |v| try writer.print("{d}", .{v}),
+        }
+    }
 };
 
 /// A file containing contiguous/non-contiguous buffers, that can be read with mmap
