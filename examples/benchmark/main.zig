@@ -14,7 +14,7 @@ pub const std_options = .{
 const Benchmark = struct {
     pub fn forward(self: Benchmark, a: zml.Tensor, b: zml.Tensor) zml.Tensor {
         _ = self;
-        return a.dot(b, .{.k}).withSharding(.{.b});
+        return a.dot(b, .{.k}).withSharding(.{.n});
     }
 };
 
@@ -32,6 +32,8 @@ pub fn asyncMain() !void {
         size: usize = 4096,
         batch_size: usize = 2,
         dtype: zml.DataType = .f16,
+        iterations: usize = 1,
+        sharded: bool = false,
     };
 
     // Short lived allocations
@@ -44,13 +46,17 @@ pub fn asyncMain() !void {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
+    var args = std.process.args();
+    const cli_args = flags.parse(&args, CliArgs);
+
     var context = try zml.Context.init();
     defer context.deinit();
 
     // Auto-select platform
     const platform = context.autoPlatform().withCompilationOptions(.{
-        .sharding_enabled = true,
+        .sharding_enabled = cli_args.sharded,
     });
+
     {
         // List available targets
         std.debug.print("Available Platforms:\n", .{});
@@ -81,11 +87,8 @@ pub fn asyncMain() !void {
         std.debug.print("\n", .{});
     }
 
-    var args = std.process.args();
-    const cli_args = flags.parse(&args, CliArgs);
-
-    const a_shape = zml.Shape.init(.{ cli_args.batch_size, cli_args.size, cli_args.size }, cli_args.dtype).withTags(.{ .b, .m, .k }).withSharding(.{.b});
-    const b_shape = a_shape.withTags(.{ .b, .k, .n }).withSharding(.{.b});
+    const a_shape = zml.Shape.init(.{ cli_args.batch_size, cli_args.size, cli_args.size }, cli_args.dtype).withTags(.{ .b, .m, .k });
+    const b_shape = a_shape.withTags(.{ .b, .k, .n }).withSharding(.{.n});
     var timer = try std.time.Timer.start();
 
     std.debug.print("\nCompiling model to MLIR....\n", .{});
@@ -122,18 +125,32 @@ pub fn asyncMain() !void {
     }
 
     // call our executable module
-    timer.reset();
-    var result: zml.Buffer = executable.call(.{ a_buffer, b_buffer });
-    defer result.deinit();
-    const elapsed_ns = timer.lap();
+    var elapsed_ns: u64 = 0;
+    for (0..cli_args.iterations) |_| {
+        timer.reset();
+        var result: zml.Buffer = executable.call(.{ a_buffer, b_buffer });
+        elapsed_ns += timer.lap();
+        defer result.deinit();
+    }
     const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_ms;
+    const avg_elapsed_ms = elapsed_ms / @as(f64, @floatFromInt(cli_args.iterations));
     const elapsed_s = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s;
 
     std.debug.print("\n✅ Benchmark done!\n\n", .{});
 
-    const floating_op_count = 2 * cli_args.batch_size * cli_args.size * cli_args.size * cli_args.size;
+    const floating_op_count = 2 * cli_args.batch_size * cli_args.size * cli_args.size * cli_args.size * cli_args.iterations;
     const flops = @as(f64, @floatFromInt(floating_op_count)) / elapsed_s;
-    std.debug.print("Dot product size: {d}x{d} - Datatype: {s} - Elapsed: {d:.3}ms - {d:.3} GFLOP/s\n\n", .{ cli_args.size, cli_args.size, @tagName(cli_args.dtype), elapsed_ms, flops / 1_000_000_000 });
+    std.debug.print(
+        \\  Dot product size: {d}x{d}
+        \\  Datatype: {s}
+        \\  Iterations: {d}
+        \\  Total elapsed: {d:.3}ms (avg: {d:.3}ms/it)
+        \\  FLOPs: {d:.3}GFLOP/s
+        \\
+        \\
+        ,
+        .{ cli_args.size, cli_args.size, @tagName(cli_args.dtype), cli_args.iterations, elapsed_ms, avg_elapsed_ms, flops / 1_000_000_000}
+    );
 }
 
 fn createRandomBuffer(allocator: std.mem.Allocator, platform: zml.Platform, shape: zml.Shape, random: std.Random) !zml.Buffer {
