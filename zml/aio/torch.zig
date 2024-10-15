@@ -36,8 +36,7 @@ pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore
     const tmp_alloc = arena.allocator();
 
     const _parser = try parser.Parser.init(tmp_alloc, file);
-    const stack, const memo = try eval.evaluate(tmp_alloc, _parser.ops, true);
-    _ = memo; // autofix
+    const stack = try eval.evaluate(tmp_alloc, _parser.ops, true);
 
     // But we create the HostBuffer objects inside the result BufferStore arena.
     var res: zml.aio.BufferStore = .{
@@ -51,7 +50,7 @@ pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore
 
 // TODO: rename me to PytorchFile
 pub const PickleData = struct {
-    stack: eval.PickleStack,
+    stack: []const Value,
     data: parser.Parser,
 
     fn basicTypeCheck(object: *const value.Object, module: []const u8, class: []const u8) bool {
@@ -64,7 +63,7 @@ pub const PickleData = struct {
     }
 
     pub fn parseModel(self: *PickleData, allocator: std.mem.Allocator, store: *zml.aio.BufferStore) !void {
-        for (self.stack.stack) |item| {
+        for (self.stack) |item| {
             var prefix_buf: [1024]u8 = undefined;
             try self.parseValue(allocator, store, StringBuilder.initBuffer(&prefix_buf), item);
         }

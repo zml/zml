@@ -41,8 +41,7 @@ pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore
                 .data = try parser.Parser.fromTarFile(arena, mapped_file, file),
                 .stack = undefined,
             };
-            tmp.stack, const memo = try eval.evaluate(arena, tmp.data.ops, true);
-            _ = memo;
+            tmp.stack = try eval.evaluate(arena, tmp.data.ops, true);
 
             try tmp.parseModel(arena, &res);
             // Since we directly manipulate the file handle pointer,
