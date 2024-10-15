@@ -428,6 +428,7 @@ test parse {
     const ops = try parse(allocator, buffered_reader.reader(), 4096);
 
     try std.testing.expect(ops.len == 35);
+    // this can be obtained by running: `python -m pickletools simple_test.pickle`
     const expected = [_]Op{
         .{ .proto = 4 },
         .{ .frame = 83 },
