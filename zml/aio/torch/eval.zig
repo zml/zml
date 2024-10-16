@@ -159,64 +159,8 @@ pub const PickleMemo = struct {
     }
 };
 
-pub const Stack = struct {
-    values: std.ArrayList(Value),
-
-    pub fn init(allocator: std.mem.Allocator) Stack {
-        return .{
-            .values = std.ArrayList(Value).init(allocator),
-        };
-    }
-
-    pub fn deinit(self: *Stack) void {
-        const allocator = self.values.allocator;
-        for (0..self.values.items.len) |i| self.values.items[i].deinit(allocator);
-        self.values.deinit();
-        self.* = undefined;
-    }
-
-    pub fn pop(self: *Stack) !Value {
-        if (self.values.items.len == 0) {
-            return error.StackUnderrun;
-        }
-        return self.values.pop();
-    }
-
-    pub fn popMark(self: *Stack, allocator: ?std.mem.Allocator) ![]Value {
-        const markidx = try self.findMark();
-        var postmark: []Value = &[_]Value{};
-        if (allocator) |a| {
-            postmark = try a.alloc(Value, self.values.items.len - (markidx + 1));
-            @memcpy(postmark, self.values.items[markidx + 1 ..]);
-        }
-        self.values.shrinkAndFree(markidx);
-        return postmark;
-    }
-
-    pub fn lastMut(self: *Stack) !*Value {
-        if (self.values.items.len == 0) {
-            return error.UnexpectedEmptyStack;
-        }
-        return &self.values.items[self.values.items.len - 1];
-    }
-
-    pub fn findMark(self: *Stack) !usize {
-        const len = self.values.items.len;
-        for (0..len) |i| {
-            const idx = (len - 1) - i;
-            const val = self.values.items[idx];
-            if (val == .raw and val.raw == .mark) {
-                return idx;
-            }
-        }
-        zml.log.warn("pytorch loader: missing mark", .{});
-        return 0;
-    }
-};
-
 pub fn evaluate(arena: std.mem.Allocator, x: []const pickle.Op, resolve_refs: bool) ![]const Value {
-    var stack = Stack.init(arena);
-    defer stack.deinit();
+    var stack = std.ArrayList(Value).init(arena);
     var memo = PickleMemo.init(arena);
     errdefer memo.deinit();
 
@@ -239,47 +183,44 @@ pub fn evaluate(arena: std.mem.Allocator, x: []const pickle.Op, resolve_refs: bo
         }
     }).call;
 
-    outer: for (x) |op| {
+    for (x) |op| {
         switch (op) {
-            .mark => try stack.values.append(.{ .raw = op }),
-            .stop => break :outer,
-            .pop => _ = try stack.pop(),
-            .pop_mark => _ = try stack.popMark(arena),
-            .dup => {
-                if (stack.values.getLastOrNull()) |item| {
-                    try stack.values.append(try item.clone(arena));
-                } else {
-                    return error.CannotDupEmptyStack;
-                }
-            },
-            .persid => |v| try stack.values.append(.{ .pers_id = try PersId.init(arena, .{ .string = try arena.dupe(u8, v) }) }),
-            .binpersid => try stack.values.append(.{ .pers_id = try PersId.init(arena, try stack.pop()) }),
-            .reduce => try stack.values.append(.{ .global = blk: {
+            .mark => try stack.append(.{ .raw = op }),
+            .stop => break,
+            .pop => _ = try pop(&stack),
+            .pop_mark => try popMarkDiscard(&stack),
+            .dup => if (stack.getLastOrNull()) |item|
+                try stack.append(try item.clone(arena))
+            else
+                return error.CannotDupEmptyStack,
+            .persid => |v| try stack.append(.{ .pers_id = try PersId.init(arena, .{ .string = try arena.dupe(u8, v) }) }),
+            .binpersid => try stack.append(.{ .pers_id = try PersId.init(arena, try pop(&stack)) }),
+            .reduce => try stack.append(.{ .global = blk: {
                 const values = try arena.alloc(Value, 1);
-                values[0] = try memo.resolve(arena, try stack.pop(), true);
-                break :blk try Object.init(arena, try memo.resolve(arena, try stack.pop(), true), values);
+                values[0] = try memo.resolve(arena, try pop(&stack), true);
+                break :blk try Object.init(arena, try memo.resolve(arena, try pop(&stack), true), values);
             } }),
-            .build => try stack.values.append(blk: {
-                const args = try memo.resolve(arena, try stack.pop(), true);
-                const member = try memo.resolve(arena, try stack.pop(), true);
+            .build => try stack.append(blk: {
+                const args = try memo.resolve(arena, try pop(&stack), true);
+                const member = try memo.resolve(arena, try pop(&stack), true);
                 break :blk .{ .build = try Build.init(arena, member, args) };
             }),
-            .empty_dict => try stack.values.append(.{ .seq = .{ .type = .dict, .values = &[_]Value{} } }),
-            .get => |v| try stack.values.append(.{ .ref = try std.fmt.parseInt(u32, v, 10) }),
-            inline .binget, .long_binget => |v| try stack.values.append(.{ .ref = v }),
-            .empty_list => try stack.values.append(.{ .seq = .{ .type = .list, .values = &[_]Value{} } }),
+            .empty_dict => try stack.append(.{ .seq = .{ .type = .dict, .values = &[_]Value{} } }),
+            .get => |v| try stack.append(.{ .ref = try std.fmt.parseInt(u32, v, 10) }),
+            inline .binget, .long_binget => |v| try stack.append(.{ .ref = v }),
+            .empty_list => try stack.append(.{ .seq = .{ .type = .list, .values = &[_]Value{} } }),
             .binput, .long_binput => |v| {
-                try memo.insert(v, try stack.pop());
-                try stack.values.append(.{ .ref = v });
+                try memo.insert(v, try pop(&stack));
+                try stack.append(.{ .ref = v });
             },
-            .tuple => try stack.values.append(blk: {
-                const popped = try stack.popMark(arena);
+            .tuple => try stack.append(blk: {
+                const popped = try popMark(&stack, arena);
                 break :blk .{ .seq = .{ .type = .tuple, .values = popped } };
             }),
-            .empty_tuple => try stack.values.append(.{ .seq = .{ .type = .tuple, .values = &[_]Value{} } }),
+            .empty_tuple => try stack.append(.{ .seq = .{ .type = .tuple, .values = &[_]Value{} } }),
             .setitem => {
-                const v, const k = .{ try stack.pop(), try stack.pop() };
-                const top = try stack.lastMut();
+                const v, const k = .{ try pop(&stack), try pop(&stack) };
+                const top = try lastMut(&stack);
                 const rtop = try memo.resolveMut(top, true);
                 switch (rtop.*) {
                     .global => |obj| {
@@ -296,10 +237,10 @@ pub fn evaluate(arena: std.mem.Allocator, x: []const pickle.Op, resolve_refs: bo
                 }
             },
             .setitems => {
-                const popped = try stack.popMark(arena);
+                const popped = try popMark(&stack, arena);
                 defer arena.free(popped);
                 const kv_items = try makeKVList(arena, popped);
-                const top = try stack.lastMut();
+                const top = try lastMut(&stack);
                 const rtop = try memo.resolveMut(top, true);
                 switch (rtop.*) {
                     .global => |obj| {
@@ -317,24 +258,24 @@ pub fn evaluate(arena: std.mem.Allocator, x: []const pickle.Op, resolve_refs: bo
                 }
             },
             .proto => |proto| meta.assert(proto <= MAX_PROTOCOL, "Unsupported protocol {d}", .{proto}),
-            .tuple1 => try stack.values.append(blk: {
+            .tuple1 => try stack.append(blk: {
                 const tup_values = try arena.alloc(Value, 1);
-                tup_values[0] = try stack.pop();
+                tup_values[0] = try pop(&stack);
                 break :blk .{ .seq = .{ .type = .tuple, .values = tup_values } };
             }),
-            .tuple2 => try stack.values.append(blk: {
+            .tuple2 => try stack.append(blk: {
                 const tup_values = try arena.alloc(Value, 2);
-                inline for (0..2) |i| tup_values[(tup_values.len - 1) - i] = try stack.pop();
+                inline for (0..2) |i| tup_values[(tup_values.len - 1) - i] = try pop(&stack);
                 break :blk .{ .seq = .{ .type = .tuple, .values = tup_values } };
             }),
-            .tuple3 => try stack.values.append(blk: {
+            .tuple3 => try stack.append(blk: {
                 const tup_values = try arena.alloc(Value, 3);
-                inline for (0..3) |i| tup_values[(tup_values.len - 1) - i] = try stack.pop();
+                inline for (0..3) |i| tup_values[(tup_values.len - 1) - i] = try pop(&stack);
                 break :blk .{ .seq = .{ .type = .tuple, .values = tup_values } };
             }),
             .append => {
-                const v = try stack.pop();
-                const top = try stack.lastMut();
+                const v = try pop(&stack);
+                const top = try lastMut(&stack);
                 const rtop = try memo.resolveMut(top, true);
                 switch (rtop.*) {
                     .global => |obj| {
@@ -351,9 +292,9 @@ pub fn evaluate(arena: std.mem.Allocator, x: []const pickle.Op, resolve_refs: bo
                 }
             },
             .appends => {
-                const postmark = try stack.popMark(arena);
+                const postmark = try popMark(&stack, arena);
                 defer arena.free(postmark);
-                const top = try stack.lastMut();
+                const top = try lastMut(&stack);
                 const rtop = try memo.resolveMut(top, true);
                 switch (rtop.*) {
                     .global => |obj| {
@@ -371,39 +312,38 @@ pub fn evaluate(arena: std.mem.Allocator, x: []const pickle.Op, resolve_refs: bo
                     },
                 }
             },
-            .dict => try stack.values.append(blk: {
-                const popped = try stack.popMark(arena);
+            .dict => try stack.append(blk: {
+                const popped = try popMark(&stack, arena);
                 defer arena.free(popped);
                 const kv_items = try makeKVList(arena, popped);
                 break :blk .{ .seq = .{ .type = .dict, .values = kv_items } };
             }),
-            .list => try stack.values.append(.{ .seq = .{ .type = .list, .values = try stack.popMark(arena) } }),
-            .inst => |v| try stack.values.append(blk: {
+            .list => try stack.append(.{ .seq = .{ .type = .list, .values = try popMark(&stack, arena) } }),
+            .inst => |v| try stack.append(blk: {
                 const tup_items = try arena.dupe(Value, &.{ .{ .string = v.module }, .{ .string = v.class } });
-                break :blk .{ .object = try Object.init(arena, .{ .seq = .{ .type = .tuple, .values = tup_items } }, try stack.popMark(arena)) };
+                break :blk .{ .object = try Object.init(arena, .{ .seq = .{ .type = .tuple, .values = tup_items } }, try popMark(&stack, arena)) };
             }),
-            .obj => try stack.values.append(blk: {
-                const markidx = try stack.findMark();
-                const args = try arena.alloc(Value, stack.values.items.len - (markidx + 2));
-                @memcpy(args, stack.values.items[markidx + 2 ..]);
-                const member = stack.values.items[markidx + 1];
+            .obj => try stack.append(blk: {
+                const mark = try findMark(&stack);
+                const args = try arena.dupe(Value, stack.items[mark + 2 ..]);
+                const member = stack.items[mark + 1];
                 break :blk .{ .object = try Object.init(arena, member, args) };
             }),
             .put => |v| {
                 const mid = try std.fmt.parseInt(u32, v, 10);
-                try memo.insert(mid, try stack.pop());
-                try stack.values.append(.{ .ref = mid });
+                try memo.insert(mid, try pop(&stack));
+                try stack.append(.{ .ref = mid });
             },
-            .newobj => try stack.values.append(blk: {
+            .newobj => try stack.append(blk: {
                 const args = try arena.alloc(Value, 1);
-                args[0] = try stack.pop();
-                break :blk .{ .object = try Object.init(arena, try stack.pop(), args) };
+                args[0] = try pop(&stack);
+                break :blk .{ .object = try Object.init(arena, try pop(&stack), args) };
             }),
-            .empty_set => try stack.values.append(.{ .seq = .{ .type = .set, .values = &[_]Value{} } }),
+            .empty_set => try stack.append(.{ .seq = .{ .type = .set, .values = &[_]Value{} } }),
             .additems => {
-                const postmark = try stack.popMark(arena);
+                const postmark = try popMark(&stack, arena);
                 defer arena.free(postmark);
-                const top = try stack.lastMut();
+                const top = try lastMut(&stack);
                 const rtop = try memo.resolveMut(top, true);
                 switch (rtop.*) {
                     .global => |obj| {
@@ -421,33 +361,33 @@ pub fn evaluate(arena: std.mem.Allocator, x: []const pickle.Op, resolve_refs: bo
                     },
                 }
             },
-            .frozenset => try stack.values.append(.{ .seq = .{ .type = .frozen_set, .values = try stack.popMark(arena) } }),
-            .newobj_ex => try stack.values.append(blk: {
-                const kwargs, const args, const cls = .{ try stack.pop(), try stack.pop(), try stack.pop() };
+            .frozenset => try stack.append(.{ .seq = .{ .type = .frozen_set, .values = try popMark(&stack, arena) } }),
+            .newobj_ex => try stack.append(blk: {
+                const kwargs, const args, const cls = .{ try pop(&stack), try pop(&stack), try pop(&stack) };
                 const new_seq: Sequence = .{ .type = .tuple, .values = try arena.dupe(Value, &.{ args, kwargs }) };
                 break :blk .{ .object = try Object.init(arena, cls, try arena.dupe(Value, &.{.{ .seq = new_seq }})) };
             }),
-            .stack_global => try stack.values.append(blk: {
+            .stack_global => try stack.append(blk: {
                 const gn, const mn = .{
-                    try memo.resolve(arena, try stack.pop(), true),
-                    try memo.resolve(arena, try stack.pop(), true),
+                    try memo.resolve(arena, try pop(&stack), true),
+                    try memo.resolve(arena, try pop(&stack), true),
                 };
                 const new_seq: Sequence = .{ .type = .tuple, .values = try arena.dupe(Value, &.{ gn, mn }) };
                 break :blk .{ .object = try Object.init(arena, .{ .seq = new_seq }, &[_]Value{}) };
             }),
             .memoize => {
-                const item = stack.values.getLastOrNull() orelse {
+                const item = stack.getLastOrNull() orelse {
                     return error.StackUnderrun;
                 };
                 try memo.insert(@intCast(memo.map.count()), try item.clone(arena));
             },
-            else => try stack.values.append(.{ .raw = try op.clone(arena) }),
+            else => try stack.append(.{ .raw = try op.clone(arena) }),
         }
     }
     if (resolve_refs) {
-        return try memo.resolveAllRefsIter(arena, 0, stack.values.items, true);
+        return try memo.resolveAllRefsIter(arena, 0, stack.items, true);
     }
-    return stack.values.toOwnedSlice();
+    return stack.toOwnedSlice();
 }
 
 // TODO: this is a unmanaged array list, minus the optimisation. We should use that instead
@@ -506,4 +446,42 @@ test evaluate {
     };
 
     try std.testing.expectEqualDeep(expected, entries);
+}
+
+pub fn pop(values: *std.ArrayList(Value)) !Value {
+    if (values.items.len == 0) {
+        return error.StackUnderrun;
+    }
+    return values.pop();
+}
+
+fn popMarkDiscard(values: *std.ArrayList(Value)) !void {
+    const mark = try findMark(values);
+    values.shrinkRetainingCapacity(mark);
+}
+
+fn popMark(values: *std.ArrayList(Value), allocator: std.mem.Allocator) ![]Value {
+    const mark = try findMark(values);
+    const popping = values.items[mark + 1 ..];
+    values.shrinkRetainingCapacity(mark);
+    return try allocator.dupe(Value, popping);
+}
+
+fn lastMut(values: *std.ArrayList(Value)) !*Value {
+    if (values.items.len == 0) {
+        return error.UnexpectedEmptyStack;
+    }
+    return &values.items[values.items.len - 1];
+}
+
+fn findMark(values: *std.ArrayList(Value)) !usize {
+    const len = values.items.len;
+    for (0..len) |i| {
+        const idx = (len - 1) - i;
+        const val = values.items[idx];
+        if (val == .raw and val.raw == .mark) {
+            return idx;
+        }
+    }
+    return error.MarkNotFound;
 }
