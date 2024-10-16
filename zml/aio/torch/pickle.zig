@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const log = std.log.scoped(.zml_aio);
+
 /// A decoded Pickle operation in its natural state.
 pub const Op = union(OpCode) {
     mark,
@@ -225,6 +227,7 @@ pub const OpCode = enum(u8) {
     _,
 };
 
+/// Read a stream of bytes, and interpret it as a stream of Pickle operators.
 pub fn parse(allocator: std.mem.Allocator, reader: anytype, max_line_len: usize) ![]const Op {
     var results = std.ArrayList(Op).init(allocator);
     errdefer results.deinit();
@@ -338,7 +341,11 @@ pub fn parse(allocator: std.mem.Allocator, reader: anytype, max_line_len: usize)
             .empty_tuple => try results.append(.{ .empty_tuple = {} }),
             .setitems => try results.append(.{ .setitems = {} }),
             .binfloat => try results.append(.{ .binfloat = @bitCast(try reader.readInt(u64, .big)) }),
-            .proto => try results.append(.{ .proto = try reader.readByte() }),
+            .proto => {
+                const version = try reader.readByte();
+                if (version > 5) log.warn("zml.aio.torch.pickle.parse expects a Python pickle object of version <=5, got version {}. Will try to interpret anyway, but this may lead to more errors.", .{version});
+                try results.append(.{ .proto = version });
+            },
             .newobj => try results.append(.{ .newobj = {} }),
             .ext1 => try results.append(.{ .ext1 = try reader.readByte() }),
             .ext2 => try results.append(.{ .ext2 = try reader.readInt(i16, .little) }),
@@ -413,7 +420,10 @@ pub fn parse(allocator: std.mem.Allocator, reader: anytype, max_line_len: usize)
             },
             .next_buffer => try results.append(.{ .next_buffer = {} }),
             .readonly_buffer => try results.append(.{ .readonly_buffer = {} }),
-            _ => {},
+            _ => |unk_tag| {
+                log.err("Unknow pickle operator {}, note we are only supporting pickle protocol up to version 5.", .{unk_tag});
+                return error.NotSupported;
+            },
         }
     }
     return results.toOwnedSlice();
