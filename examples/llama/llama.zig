@@ -42,16 +42,24 @@ pub const LlamaLM = struct {
             layer.self_attn.rope_opts = options.rope_opts;
             layer.input_layernorm.eps = options.rms_norm_eps;
             layer.post_attention_layernorm.eps = options.rms_norm_eps;
+            layer.mlp.up_proj.weight = layer.mlp.up_proj.weight.withSharding(.{0});
+            layer.mlp.gate_proj.weight = layer.mlp.gate_proj.weight.withSharding(.{0});
+            layer.mlp.down_proj.weight = layer.mlp.down_proj.weight.withSharding(.{1});
+
+            layer.self_attn.q_proj.weight = layer.self_attn.q_proj.weight.withSharding(.{0});
+            layer.self_attn.k_proj.weight = layer.self_attn.k_proj.weight.withSharding(.{0});
+            layer.self_attn.v_proj.weight = layer.self_attn.v_proj.weight.withSharding(.{0});
+            layer.self_attn.o_proj.weight = layer.self_attn.o_proj.weight.withSharding(.{1});
         }
 
-        zml.meta.visit(struct {
-            fn cb(_: void, layer: *zml.nn.Linear) void {
-                layer.weight = layer.weight.withSharding(.{-1});
-                if (layer.bias) |*b| {
-                    b.* = b.withSharding(.{-1});
-                }
-            }
-        }.cb, {}, &self.model);
+        //zml.meta.visit(struct {
+        //    fn cb(_: void, layer: *zml.nn.Linear) void {
+        //        layer.weight = layer.weight.withSharding(.{-1});
+        //        if (layer.bias) |*b| {
+        //            b.* = b.withSharding(.{-1});
+        //        }
+        //    }
+        //}.cb, {}, &self.model);
         self.lm_head.weight = self.lm_head.weight.withSharding(.{0});
     }
 
@@ -196,7 +204,7 @@ pub const Llama = struct {
         const dims = self.shape();
         var kv_shape = embed_shape.insert(0, .{ .layer = dims.layer }).rename(.{ .s = .k }).splitAxes(.{ .d = .{ .h = dims.nkvh, .hd = dims.hd } });
         const perm = kv_shape.contiguousPerm(.{ .h, .k, .hd });
-        kv_shape = kv_shape.transpose(perm.constSlice());
+        kv_shape = kv_shape.transpose(perm.constSlice()).withSharding(.{.h});
         return KvCache.init(kv_shape);
     }
 };
@@ -246,7 +254,7 @@ const RmsNorm = struct {
     }
 };
 
-const Mlp = struct {
+pub const Mlp = struct {
     up_proj: zml.nn.Linear, // (dim -> hidden_dim)
     gate_proj: zml.nn.Linear, // (dim -> hidden_dim)
     down_proj: zml.nn.Linear, // (hidden_dim -> dim)
@@ -284,9 +292,9 @@ pub const SelfAttn = struct {
     ) struct { Tensor, KvCache } {
         // log.debug("x.shape: {}", .{x.shape()});
         const num_kv_heads = if (self.num_kv_heads > 0) self.num_kv_heads else self.num_heads;
-        var q = zml.call(self.q_proj, .forward, .{x}).splitAxis(-1, .{ .h = self.num_heads, .hd = .auto });
-        var k = zml.call(self.k_proj, .forward, .{x}).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto });
-        var v = zml.call(self.v_proj, .forward, .{x}).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto });
+        var q = zml.call(self.q_proj, .forward, .{x}).splitAxis(-1, .{ .h = self.num_heads, .hd = .auto }).withSharding(.{.h});
+        var k = zml.call(self.k_proj, .forward, .{x}).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto }).withSharding(.{.h});
+        var v = zml.call(self.v_proj, .forward, .{x}).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto }).withSharding(.{.h});
         // Generate the attention mask.
         const kv_cache = kv_cache_ orelse initKvCache(k.shape());
         const seq_len = kv_cache.k.dim(.k);
@@ -309,7 +317,7 @@ pub const SelfAttn = struct {
 
         const new_kv_cache = kv_cache.update(k, v, token_index orelse Tensor.scalar(0, .i32));
         if (token_index) |_| {
-            std.debug.assert(q.dim(.q) == 1);
+            meta.assert(q.dim(.q) == 1, "Expected dimension .q to be 1, got {}", .{q.dim(.q)});
             k = new_kv_cache.keys();
             v = new_kv_cache.values();
         }

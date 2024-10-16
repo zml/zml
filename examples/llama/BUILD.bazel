@@ -3,6 +3,7 @@ load("@aspect_bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
 load("@bazel_skylib//rules:native_binary.bzl", "native_binary")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
 load("@zml//bazel:zig.bzl", "zig_cc_binary")
+load("@rules_zig//zig:defs.bzl", "zig_library")
 
 zig_cc_binary(
     name = "llama",
@@ -12,6 +13,17 @@ zig_cc_binary(
     main = "main.zig",
     deps = [
         "//third_party/tigerbeetle:flags",
+        "@zml//async",
+        "@zml//zml",
+    ],
+)
+
+zig_library(
+    name = "llamalib",
+    copts = ["-lc"],
+    main = "llama.zig",
+    visibility = ["//visibility:public"],
+    deps = [
         "@zml//async",
         "@zml//zml",
     ],
