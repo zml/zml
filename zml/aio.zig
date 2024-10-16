@@ -512,33 +512,15 @@ pub fn loadBuffers(
 /// It can be used with a `module.Exe` (a compiled version of the same Model), to make a
 /// `module.ExeWithWeights` ready to be called.
 pub fn loadModelBuffers(
-    model: anytype,
+    comptime Model: type,
+    model: Model,
     buffer_store: BufferStore,
     allocator: std.mem.Allocator,
     platform: zml.Platform,
-) !zml.Bufferized(@TypeOf(model)) {
-    const LocalCtx = struct {
-        buffer_store: BufferStore,
-        platform: zml.Platform,
-        err: ?anyerror = null,
-
-        pub fn cb(ctx: *@This(), x: zml.Tensor) zml.Buffer {
-            const entry = ctx.buffer_store.buffers.entries.get(x._id.buffer_id);
-            const host = entry.value;
-            zml.meta.assert(x.shape().eql(host.shape()), "Mismatch shape for buffer {s}, expected {} got {}", .{ entry.key, x, host });
-            return host.toDevice(ctx.platform) catch |err| {
-                ctx.err = err;
-                return undefined;
-            };
-        }
-    };
-
-    var res: zml.Bufferized(@TypeOf(model)) = undefined;
-    var ctx: LocalCtx = .{ .buffer_store = buffer_store, .platform = platform };
-    try zml.meta.mapAlloc(LocalCtx.cb, allocator, &ctx, model, &res);
-    if (ctx.err) |e| return e;
-    return res;
+) !zml.Bufferized(Model) {
+    return try loadModelBuffersWithPrefix(Model, model, buffer_store, allocator, platform, "");
 }
+
 /// Creates a bufferized version of a Model from the given BufferStore and the given prefix.
 /// For details about bufferization, see the documentation of Bufferized(T).
 ///
