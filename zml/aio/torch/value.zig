@@ -342,8 +342,9 @@ pub const Value = union(ValueType) {
     pub fn coerceFromRaw(self: Value, allocator: std.mem.Allocator) !Value {
         return switch (self) {
             .raw => |raw_val| switch (raw_val) {
-                .binint, .binint1, .binint2 => |val| .{ .int64 = val },
-                .long1, .long4 => |b| if (b.len != 0) {
+                .binint => |val| .{ .int64 = val },
+                .long => |b| if (b.len != 0) {
+                    // TODO: handle trailing 'L'
                     var bint = try big_int.Managed.initCapacity(allocator, std.math.big.int.calcTwosCompLimbCount(b.len));
                     var mutable = bint.toMutable();
                     mutable.readTwosComplement(b, b.len, .little, .signed);
@@ -355,28 +356,17 @@ pub const Value = union(ValueType) {
                     } else return .{ .bigint = bint };
                 } else .{ .raw_num = raw_val },
                 .binfloat => |val| .{ .float64 = val },
-                .binunicode, .binunicode8, .short_binunicode => |s| .{ .string = s },
-                .binbytes, .binbytes8, .short_binbytes, .bytearray8 => |b| .{ .bytes = b },
+                .unicode => |s| .{ .string = s },
+                .bytes => |b| .{ .bytes = b },
                 // This isn't how Pickle actually works but we just try to UTF8 decode the
                 // string and if it fails, we make it a bytes value instead. If anyone
                 // actually cares they can just fix values themselves or recover the raw bytes
                 // from the UTF8 string (it's guaranteed to be reversible, as far as I know).
-                .binstring, .short_binstring => |b| if (std.unicode.utf8ValidateSlice(b)) .{ .string = b } else .{ .bytes = b },
-                .newtrue => .{ .boolval = true },
-                .newfalse => .{ .boolval = false },
+                .string => |b| if (std.unicode.utf8ValidateSlice(b)) .{ .string = b } else .{ .bytes = b },
+                .bool => |b| .{ .boolval = b },
                 .none => .{ .none = {} },
-                inline .int,
-                .float,
-                .long,
-                => |v, tag| {
-                    if (tag == .int and std.mem.eql(u8, v, "01")) {
-                        return .{ .boolval = true };
-                    } else if (tag == .int and std.mem.eql(u8, v, "00")) {
-                        return .{ .boolval = false };
-                    } else {
-                        return .{ .raw_num = raw_val };
-                    }
-                },
+                // TODO .int should be handled like .long
+                .int, .float => .{ .raw_num = raw_val },
                 else => self,
             },
             .app, .object, .global => |v| blk: {

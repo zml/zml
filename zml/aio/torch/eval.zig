@@ -206,10 +206,9 @@ pub fn evaluate(arena: std.mem.Allocator, x: []const pickle.Op, resolve_refs: bo
                 break :blk .{ .build = try Build.init(arena, member, args) };
             }),
             .empty_dict => try stack.append(.{ .seq = .{ .type = .dict, .values = &[_]Value{} } }),
-            .get => |v| try stack.append(.{ .ref = try std.fmt.parseInt(u32, v, 10) }),
-            inline .binget, .long_binget => |v| try stack.append(.{ .ref = v }),
+            .get => |v| try stack.append(.{ .ref = v }),
             .empty_list => try stack.append(.{ .seq = .{ .type = .list, .values = &[_]Value{} } }),
-            .binput, .long_binput => |v| {
+            .put => |v| {
                 try memo.insert(v, try pop(&stack));
                 try stack.append(.{ .ref = v });
             },
@@ -329,11 +328,6 @@ pub fn evaluate(arena: std.mem.Allocator, x: []const pickle.Op, resolve_refs: bo
                 const member = stack.items[mark + 1];
                 break :blk .{ .object = try Object.init(arena, member, args) };
             }),
-            .put => |v| {
-                const mid = try std.fmt.parseInt(u32, v, 10);
-                try memo.insert(mid, try pop(&stack));
-                try stack.append(.{ .ref = mid });
-            },
             .newobj => try stack.append(blk: {
                 const args = try arena.alloc(Value, 1);
                 args[0] = try pop(&stack);
