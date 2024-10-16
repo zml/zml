@@ -2,149 +2,6 @@ const std = @import("std");
 
 const log = std.log.scoped(.zml_aio);
 
-/// A decoded Pickle operation in its natural state.
-pub const Op = union(OpCode) {
-    mark,
-    stop,
-    pop,
-    pop_mark,
-    dup,
-    float: []const u8,
-    int: []const u8,
-    binint: i32,
-    binint1: u8,
-    long: []const u8,
-    binint2: u16,
-    none,
-    persid: []const u8,
-    binpersid,
-    reduce,
-    string: []const u8,
-    binstring: []const u8,
-    short_binstring: []const u8,
-    unicode: []const u8,
-    binunicode: []const u8,
-    append,
-    build,
-    global: PyType,
-    dict,
-    empty_dict,
-    appends,
-    get: []const u8,
-    binget: u8,
-    inst: PyType,
-    long_binget: u32,
-    list,
-    empty_list,
-    obj,
-    put: []const u8,
-    binput: u8,
-    long_binput: u32,
-    setitem,
-    tuple,
-    empty_tuple,
-    setitems,
-    binfloat: f64,
-    proto: u8,
-    newobj,
-    ext1: u8,
-    ext2: i16,
-    ext4: i32,
-    tuple1,
-    tuple2,
-    tuple3,
-    newtrue,
-    newfalse,
-    long1: []const u8,
-    long4: []const u8,
-    binbytes: []const u8,
-    short_binbytes: []const u8,
-    short_binunicode: []const u8,
-    binunicode8: []const u8,
-    binbytes8: []const u8,
-    empty_set,
-    additems,
-    frozenset,
-    newobj_ex,
-    stack_global,
-    memoize,
-    frame: u64,
-    bytearray8: []const u8,
-    next_buffer,
-    readonly_buffer,
-
-    pub const PyType = struct { module: []const u8, class: []const u8 };
-
-    pub fn deinit(self: Op, allocator: std.mem.Allocator) void {
-        switch (self) {
-            .float,
-            .int,
-            .long,
-            .persid,
-            .string,
-            .binstring,
-            .short_binstring,
-            .unicode,
-            .binunicode,
-            .get,
-            .put,
-            .long1,
-            .long4,
-            .binbytes,
-            .short_binbytes,
-            .short_binunicode,
-            .binunicode8,
-            .binbytes8,
-            .bytearray8,
-            => |v| allocator.free(v),
-            .global, .inst => |py_type| {
-                allocator.free(py_type.module);
-                allocator.free(py_type.class);
-            },
-            else => {},
-        }
-    }
-
-    pub fn clone(self: Op, allocator: std.mem.Allocator) !Op {
-        var res = self;
-        return switch (self) {
-            inline .float,
-            .int,
-            .long,
-            .persid,
-            .string,
-            .binstring,
-            .short_binstring,
-            .unicode,
-            .binunicode,
-            .get,
-            .put,
-            .long1,
-            .long4,
-            .binbytes,
-            .short_binbytes,
-            .short_binunicode,
-            .binunicode8,
-            .binbytes8,
-            .bytearray8,
-            => |v, tag| {
-                const cloned = try allocator.alloc(u8, v.len);
-                @memcpy(cloned, v);
-                @field(res, @tagName(tag)) = cloned;
-                return res;
-            },
-            inline .global, .inst => |v, tag| {
-                @field(res, @tagName(tag)) = PyType{
-                    .module = try allocator.dupe(u8, v.module),
-                    .class = try allocator.dupe(u8, v.class),
-                };
-                return res;
-            },
-            else => self,
-        };
-    }
-};
-
 /// The values for the possible opcodes are in this enum.
 /// Reference: https://github.com/python/cpython/blob/3.13/Lib/pickletools.py
 pub const OpCode = enum(u8) {
@@ -227,6 +84,112 @@ pub const OpCode = enum(u8) {
     _,
 };
 
+/// A decoded Pickle operation in its natural state.
+pub const Op = union(OpCode) {
+    mark,
+    stop,
+    pop,
+    pop_mark,
+    dup,
+    float: []const u8,
+    int: []const u8,
+    binint: i32,
+    binint1: u8,
+    long: []const u8,
+    binint2: u16,
+    none,
+    persid: []const u8,
+    binpersid,
+    reduce,
+    string: []const u8,
+    binstring: []const u8,
+    short_binstring: []const u8,
+    unicode: []const u8,
+    binunicode: []const u8,
+    append,
+    build,
+    global: PyType,
+    dict,
+    empty_dict,
+    appends,
+    get: []const u8,
+    binget: u8,
+    inst: PyType,
+    long_binget: u32,
+    list,
+    empty_list,
+    obj,
+    put: []const u8,
+    binput: u8,
+    long_binput: u32,
+    setitem,
+    tuple,
+    empty_tuple,
+    setitems,
+    binfloat: f64,
+    proto: u8,
+    newobj,
+    ext1: u8,
+    ext2: i16,
+    ext4: i32,
+    tuple1,
+    tuple2,
+    tuple3,
+    newtrue,
+    newfalse,
+    long1: []const u8,
+    long4: []const u8,
+    binbytes: []const u8,
+    short_binbytes: []const u8,
+    short_binunicode: []const u8,
+    binunicode8: []const u8,
+    binbytes8: []const u8,
+    empty_set,
+    additems,
+    frozenset,
+    newobj_ex,
+    stack_global,
+    memoize,
+    frame: u64,
+    bytearray8: []const u8,
+    next_buffer,
+    readonly_buffer,
+
+    pub const PyType = struct { module: []const u8, class: []const u8 };
+
+    pub fn deinit(self: Op, allocator: std.mem.Allocator) void {
+        switch (self) {
+            // Use a switch on the type of the stored data,
+            // this is easier than listing every opcode.
+            inline else => |v| switch (@TypeOf(v)) {
+                void, u8, u16, u32, u64, i16, i32, f64 => {},
+                []const u8 => allocator.free(v),
+                PyType => {
+                    allocator.free(v.module);
+                    allocator.free(v.class);
+                },
+                else => @compileError("please explicit how to free this new opcode: " ++ @typeName(@TypeOf(v))),
+            },
+        }
+    }
+
+    pub fn clone(self: Op, allocator: std.mem.Allocator) !Op {
+        return switch (self) {
+            // Use a switch on the type of the stored data,
+            // this is easier than listing every opcode.
+            inline else => |v, tag| switch (@TypeOf(v)) {
+                void, u8, u16, u32, u64, i16, i32, f64 => self,
+                []const u8 => @unionInit(Op, @tagName(tag), try allocator.dupe(u8, v)),
+                PyType => @unionInit(Op, @tagName(tag), .{
+                    .module = try allocator.dupe(u8, v.module),
+                    .class = try allocator.dupe(u8, v.class),
+                }),
+                else => @compileError("please explicit how to close this new opcode: " ++ @typeName(@TypeOf(v))),
+            },
+        };
+    }
+};
+
 /// Read a stream of bytes, and interpret it as a stream of Pickle operators.
 pub fn parse(allocator: std.mem.Allocator, reader: anytype, max_line_len: usize) ![]const Op {
     var results = std.ArrayList(Op).init(allocator);
@@ -238,7 +201,6 @@ pub fn parse(allocator: std.mem.Allocator, reader: anytype, max_line_len: usize)
         const code: OpCode = @enumFromInt(b);
         switch (code) {
             .stop => {
-                //
                 try results.append(.{ .stop = {} });
                 break;
             },
@@ -430,12 +392,15 @@ pub fn parse(allocator: std.mem.Allocator, reader: anytype, max_line_len: usize)
 }
 
 test parse {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+    const allocator = std.testing.allocator;
     const file = try std.fs.cwd().openFile("zml/aio/torch/simple_test.pickle", .{ .mode = .read_only });
     var buffered_reader = std.io.bufferedReader(file.reader());
     const ops = try parse(allocator, buffered_reader.reader(), 4096);
+    defer {
+        // Test we are correctly freeing every allocation.
+        for (ops) |op| op.deinit(allocator);
+        allocator.free(ops);
+    }
 
     try std.testing.expect(ops.len == 35);
     // this can be obtained by running: `python -m pickletools simple_test.pickle`

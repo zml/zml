@@ -109,7 +109,7 @@ pub const ValueType = enum {
     none,
 };
 
-/// A processed value.
+/// A pickle operator that has been interpreted.
 pub const Value = union(ValueType) {
     /// Types that we can't handle or just had to give up on processing.
     raw: pickle.Op,
