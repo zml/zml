@@ -186,6 +186,7 @@ pub fn evaluate(arena: std.mem.Allocator, x: []const pickle.Op, resolve_refs: bo
     for (x) |op| {
         switch (op) {
             .mark => try stack.append(.{ .raw = op }),
+            .frame => {},
             .stop => break,
             .pop => _ = try pop(&stack),
             .pop_mark => try popMarkDiscard(&stack),
@@ -407,11 +408,10 @@ test evaluate {
     const vals = try evaluate(allocator, ops, true);
     defer allocator.free(vals);
 
-    try std.testing.expect(vals.len == 2);
-    // skip first value (frame)
-    try std.testing.expect(vals[1] == .seq);
-    try std.testing.expect(vals[1].seq.type == .dict);
-    const entries = vals[1].seq.values[0].seq.values;
+    try std.testing.expect(vals.len == 1);
+    try std.testing.expect(vals[0] == .seq);
+    try std.testing.expect(vals[0].seq.type == .dict);
+    const entries = vals[0].seq.values[0].seq.values;
     try std.testing.expect(entries.len == 5);
     const expected: []const Value = &.{
         .{ .seq = .{ .type = .kv_tuple, .values = @constCast(&[_]Value{ .{ .string = "hello" }, .{ .string = "world" } }) } },

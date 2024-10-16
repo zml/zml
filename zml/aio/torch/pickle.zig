@@ -783,6 +783,7 @@ pub fn parse(allocator: std.mem.Allocator, reader: anytype, max_line_len: usize)
             .binint => .{ .binint = try reader.readInt(i32, .little) },
             .binint1 => .{ .binint = try reader.readByte() },
             .binint2 => .{ .binint = try reader.readInt(u16, .little) },
+            // TODO: long should handle the trailing 'L' -> add a test.
             .long => .{ .long = try reader.readUntilDelimiterAlloc(allocator, '\n', len) },
             .long1 => .{ .long = try _readSlice(reader, allocator, 1) },
             .long4 => .{ .long = try _readSlice(reader, allocator, 4) },
@@ -942,7 +943,6 @@ test parse {
 fn _readSlice(reader: anytype, allocator: std.mem.Allocator, comptime len_bytes: u8) ![]u8 {
     const T = std.meta.Int(.unsigned, 8 * len_bytes);
     const str_len: u64 = try reader.readInt(T, .little);
-
     const buf = try allocator.alloc(u8, str_len);
     errdefer allocator.free(buf);
     _ = try reader.read(buf);
