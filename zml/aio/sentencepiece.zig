@@ -47,9 +47,7 @@ pub fn loadTokenizerFromModelProto(allocator: std.mem.Allocator, model: sentence
     errdefer tokenizer.deinit();
 
     for (model.pieces.items) |*piece| {
-        const n = tokenizer.next_token_id;
         try tokenizer.addToken(piece.score.?, piece.piece.?.getSlice());
-        std.log.debug("{s} -> {d} -> {d}", .{ piece.piece.?.Owned, piece.score.?, n });
     }
     const byte_fallback = model.trainer_spec.?.byte_fallback orelse false;
     if (byte_fallback) {
