@@ -122,7 +122,7 @@ pub const PickleMemo = struct {
         });
     }
 
-    const MemoError = std.math.big.int.Managed.ConvertError || std.mem.Allocator.Error || error{BadMemoRef};
+    const MemoError = Value.UnpickleError || error{BadMemoRef};
 
     pub fn resolveAllRefsIter(self: *PickleMemo, allocator: std.mem.Allocator, depth: usize, vals: []Value, fix_values: bool) MemoError![]Value {
         if (depth >= MAX_DEPTH) {

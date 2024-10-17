@@ -1,5 +1,6 @@
 const std = @import("std");
 const math = std.math;
+const log = std.log.scoped(.zml_aio);
 
 const pickle = @import("pickle.zig");
 
@@ -329,14 +330,28 @@ pub const Value = union(ValueType) {
         }
     }
 
-    pub fn coerceFromRaw(self: Value, allocator: std.mem.Allocator) !Value {
+    pub const UnpickleError = error{ InvalidCharacter, OutOfMemory };
+
+    pub fn coerceFromRaw(self: Value, allocator: std.mem.Allocator) UnpickleError!Value {
         return switch (self) {
             .raw => |raw_val| switch (raw_val) {
                 .none => .none,
                 .bool => |b| .{ .boolval = b },
                 .float => |b| .{ .float64 = std.fmt.parseFloat(f64, b) catch std.math.nan(f64) },
                 .int => |val| .{ .int64 = val },
-                .long => |bytes| if (bytes.len <= 8)
+                .long => |digits| {
+                    const n = std.fmt.parseInt(i64, digits[0 .. digits.len - 1], 10) catch |err| {
+                        switch (err) {
+                            error.Overflow => {
+                                log.warn("Not parsing long integer: {s}", .{digits});
+                                return self;
+                            },
+                            error.InvalidCharacter => return error.InvalidCharacter,
+                        }
+                    };
+                    return .{ .int64 = n };
+                },
+                .binlong => |bytes| if (bytes.len <= 8)
                     .{ .int64 = std.mem.readVarInt(i64, bytes, .little) }
                 else {
                     // Note: we need to copy here, because Zig big int limbs are usize aligned,
@@ -349,7 +364,7 @@ pub const Value = union(ValueType) {
                 },
                 .binfloat => |val| .{ .float64 = val },
                 .unicode => |s| .{ .string = s },
-                .bytes => |b| .{ .bytes = b },
+                inline .bytes, .bytearray => |b| .{ .bytes = b },
                 // This isn't how Pickle actually works but we just try to UTF8 decode the
                 // string and if it fails, we make it a bytes value instead. If anyone
                 // actually cares they can just fix values themselves or recover the raw bytes

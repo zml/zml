@@ -676,6 +676,7 @@ pub const Op = union(enum) {
     int: i32,
     // Python can represent arbitrary long integers
     long: []const u8,
+    binlong: []const u8,
     string: []const u8,
     bytes: []const u8,
     bytearray: []u8,
@@ -766,14 +767,16 @@ pub fn parse(allocator: std.mem.Allocator, reader: anytype, max_line_len: usize)
     var results = std.ArrayList(Op).init(allocator);
     errdefer results.deinit();
     const len = max_line_len;
+    var _buf: std.BoundedArray(u8, 12) = .{};
 
     while (true) {
         const b = try reader.readByte();
         const code: OpCode = @enumFromInt(b);
+        log.warn("reading {}", .{code});
         const op: Op = switch (code) {
             .int => blk: {
-                var _buf: std.BoundedArray(u8, 12) = .{};
-                try reader.streamUntilDelimiter(_buf.writer(), '\n', _buf.len);
+                _buf.len = 0;
+                try reader.streamUntilDelimiter(_buf.writer(), '\n', _buf.capacity() + 1);
                 const buf = _buf.constSlice();
                 // Legacy hack, see OpCode.int documentation
                 // We do this parsing right away to simplify downstream code.
@@ -789,8 +792,8 @@ pub fn parse(allocator: std.mem.Allocator, reader: anytype, max_line_len: usize)
             .binint2 => .{ .int = try reader.readInt(u16, .little) },
             // TODO: long should handle the trailing 'L' -> add a test.
             .long => .{ .long = try reader.readUntilDelimiterAlloc(allocator, '\n', len) },
-            .long1 => .{ .long = try _readSlice(reader, allocator, 1) },
-            .long4 => .{ .long = try _readSlice(reader, allocator, 4) },
+            .long1 => .{ .binlong = try _readSlice(reader, allocator, 1) },
+            .long4 => .{ .binlong = try _readSlice(reader, allocator, 4) },
             .string => .{ .string = try reader.readUntilDelimiterAlloc(allocator, '\n', len) },
             .binstring => .{ .string = try _readSlice(reader, allocator, 4) },
             .short_binstring => .{ .string = try _readSlice(reader, allocator, 1) },
@@ -829,12 +832,9 @@ pub fn parse(allocator: std.mem.Allocator, reader: anytype, max_line_len: usize)
             .dup => .dup,
             .mark => .mark,
             .pop_mark => .pop_mark,
-            .get => blk: {
-                const buf = try reader.readUntilDelimiterAlloc(allocator, '\n', len);
-                defer allocator.free(buf);
-                // If we fail to parse delay the error to the evaluation.
-                const n = std.fmt.parseInt(u32, buf, 10) catch std.math.maxInt(u32);
-                break :blk .{ .get = n };
+            // If we fail to parse delay the error to the evaluation.
+            .get => .{
+                .get = _readDigits(u32, reader, &_buf) catch std.math.maxInt(u32),
             },
             .binget => .{ .get = try reader.readByte() },
             .long_binget => .{ .get = try reader.readInt(u32, .little) },
@@ -928,8 +928,8 @@ test "parse protocol 4" {
         .{ .int = 1234 },
         .{ .int = -123 },
         .{ .int = 1_000_000_000 },
-        .{ .long = &writeIntBuff(u48, 999_000_000_000) },
-        .{ .long = &writeIntBuff(u104, 999_000_000_000_000_000_000_000_000_000) },
+        .{ .binlong = &writeIntBuff(u48, 999_000_000_000) },
+        .{ .binlong = &writeIntBuff(u104, 999_000_000_000_000_000_000_000_000_000) },
         .appends,
         .{ .unicode = "bool" },
         .memoize,
@@ -945,6 +945,109 @@ test "parse protocol 4" {
         .stop,
     };
     try std.testing.expectEqualDeep(&expected, ops);
+}
+
+test "parse protocol 0" {
+    // We also test protocol 0, cause it's more text oriented.
+    const allocator = std.testing.allocator;
+    const pickle_0 =
+        \\(dp0
+        \\Vhello
+        \\p1
+        \\Vworld
+        \\p2
+        \\sVint
+        \\p3
+        \\I1
+        \\sVfloat
+        \\p4
+        \\F3.141592
+        \\sVlist
+        \\p5
+        \\(lp6
+        \\I255
+        \\aI1234
+        \\aI-123
+        \\aI1000000000
+        \\aL999000000000L
+        \\aL999000000000000000000000000000L
+        \\asVbool
+        \\p7
+        \\I00
+        \\sVtuple
+        \\p8
+        \\(Va
+        \\p9
+        \\I10
+        \\tp10
+        \\s.
+    ;
+
+    var stream = std.io.fixedBufferStream(pickle_0);
+    const ops = try parse(allocator, stream.reader(), 4096);
+    defer {
+        // Test we are correctly freeing every allocation.
+        for (ops) |op| op.deinit(allocator);
+        allocator.free(ops);
+    }
+
+    var expected = [_]Op{
+        .mark,
+        .dict,
+        .{ .put = 0 },
+        .{ .unicode = "hello" },
+        .{ .put = 1 },
+        .{ .unicode = "world" },
+        .{ .put = 2 },
+        .setitem,
+        .{ .unicode = "int" },
+        .{ .put = 3 },
+        .{ .int = 1 },
+        .setitem,
+        .{ .unicode = "float" },
+        .{ .put = 4 },
+        .{ .float = "3.141592" },
+        .setitem,
+        .{ .unicode = "list" },
+        .{ .put = 5 },
+        .mark,
+        .list,
+        .{ .put = 6 },
+        .{ .int = 255 },
+        .append,
+        .{ .int = 1234 },
+        .append,
+        .{ .int = -123 },
+        .append,
+        .{ .int = 1_000_000_000 },
+        .append,
+        .{ .long = "999000000000L" },
+        .append,
+        .{ .long = "999000000000000000000000000000L" },
+        .append,
+        .setitem,
+        .{ .unicode = "bool" },
+        .{ .put = 7 },
+        .{ .bool = false },
+        .setitem,
+        .{ .unicode = "tuple" },
+        .{ .put = 8 },
+        .mark,
+        .{ .unicode = "a" },
+        .{ .put = 9 },
+        .{ .int = 10 },
+        .tuple,
+        .{ .put = 10 },
+        .setitem,
+        .stop,
+    };
+    try std.testing.expectEqualDeep(&expected, ops);
+}
+
+fn _readDigits(comptime T: type, reader: anytype, buffer: *std.BoundedArray(u8, 12)) !T {
+    buffer.len = 0;
+    try reader.streamUntilDelimiter(buffer.writer(), '\n', 13);
+    return std.fmt.parseInt(T, buffer.constSlice(), 10);
 }
 
 fn _readSlice(reader: anytype, allocator: std.mem.Allocator, comptime len_bytes: u8) ![]u8 {
