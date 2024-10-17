@@ -62,7 +62,7 @@ zig_cc_test(
     name = "test",
     data = [
         "aio/torch/simple.pt",
-        "aio/torch/simple_test.pickle",
+        "aio/torch/simple_test_4.pickle",
     ],
     test_runner = ":test_runner",
     deps = [":zml"],
