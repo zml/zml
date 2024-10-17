@@ -6,7 +6,7 @@ const HostBuffer = @import("../hostbuffer.zig").HostBuffer;
 
 const eval = @import("torch/eval.zig");
 const value = @import("torch/value.zig");
-const parser = @import("torch/parser.zig");
+const File = @import("torch/file.zig").File;
 const PersId = value.PersId;
 const Sequence = value.Sequence;
 const Value = value.Value;
@@ -19,7 +19,7 @@ test {
     std.testing.refAllDecls(@This());
     std.testing.refAllDecls(eval);
     std.testing.refAllDecls(value);
-    std.testing.refAllDecls(parser);
+    std.testing.refAllDecls(File);
 }
 
 /// Opens and loads a BufferStore from the torch file at the given path.
@@ -35,7 +35,7 @@ pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore
     defer arena.deinit();
     const tmp_alloc = arena.allocator();
 
-    const _parser = try parser.Parser.init(tmp_alloc, file);
+    const _parser = try File.init(tmp_alloc, file);
     const stack = try eval.evaluate(tmp_alloc, _parser.ops, true);
 
     // But we create the HostBuffer objects inside the result BufferStore arena.
@@ -51,7 +51,7 @@ pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore
 // TODO: rename me to PytorchFile
 pub const PickleData = struct {
     stack: []const Value,
-    data: parser.Parser,
+    data: File,
 
     fn basicTypeCheck(object: *const value.Object, module: []const u8, class: []const u8) bool {
         return switch (object.member) {

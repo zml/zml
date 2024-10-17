@@ -4,7 +4,7 @@ const std = @import("std");
 const yaml = @import("zig-yaml");
 const zml = @import("../zml.zig");
 
-const parser = @import("torch/parser.zig");
+const File = @import("torch/file.zig").File;
 
 const StringBuilder = std.ArrayListUnmanaged(u8);
 
@@ -38,7 +38,7 @@ pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore
         } else if (std.mem.endsWith(u8, file.name, ".ckpt") or std.mem.endsWith(u8, file.name, ".pt")) {
             const start = try mapped_file.file.getPos();
             var tmp: zml.aio.torch.PickleData = .{
-                .data = try parser.Parser.fromTarFile(arena, mapped_file, file),
+                .data = try File.fromTarFile(arena, mapped_file, file),
                 .stack = undefined,
             };
             tmp.stack = try eval.evaluate(arena, tmp.data.ops, true);
