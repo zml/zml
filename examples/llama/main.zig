@@ -145,6 +145,7 @@ pub fn asyncMain() !void {
     const compilation_options = zml.CompilationOptions{
         .cache_location = "/tmp/zml/llama/cache",
         .xla_dump_to = "/tmp/zml/llama",
+        .sharding_enabled = true,
     };
 
     const platform = context.autoPlatform().withCompilationOptions(compilation_options);
@@ -234,7 +235,7 @@ pub fn asyncMain() !void {
     // To do so, we would just need to add `.b = batch_size` to `token_shape` and `kv_shape`.
     const tokens_shape = zml.Shape.init(.{ .s = dims.s }, .i32);
     const token_idx_shape = zml.Shape.init(.{}, .i32);
-    const kv_shape = zml.Shape.init(.{ .layer = llama.model.layers.len, .h = dims.nkvh, .k = dims.s, .hd = dims.hd }, dtype);
+    const kv_shape = zml.Shape.init(.{ .layer = llama.model.layers.len, .h = dims.nkvh, .k = dims.s, .hd = dims.hd }, dtype).withSharding(.{.h});
     // needs to be optional
     const kv_cache_shape: ?ShapeOf(KvCache) = KvCache.initShape(kv_shape);
     const rng_shape = Tensor.Rng.shape();
