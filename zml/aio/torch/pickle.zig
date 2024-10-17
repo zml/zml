@@ -772,7 +772,6 @@ pub fn parse(allocator: std.mem.Allocator, reader: anytype, max_line_len: usize)
     while (true) {
         const b = try reader.readByte();
         const code: OpCode = @enumFromInt(b);
-        log.warn("reading {}", .{code});
         const op: Op = switch (code) {
             .int => blk: {
                 _buf.len = 0;

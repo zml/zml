@@ -1,11 +1,12 @@
-const asynk = @import("async");
-const eval = @import("torch/eval.zig");
 const std = @import("std");
+const log = std.log.scoped(.zml_aio);
+
+const asynk = @import("async");
 const yaml = @import("zig-yaml");
+
+const eval = @import("torch/eval.zig");
 const zml = @import("../zml.zig");
-
 const File = @import("torch/file.zig").File;
-
 const StringBuilder = std.ArrayListUnmanaged(u8);
 
 pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore {
@@ -37,13 +38,11 @@ pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore
             try zml.aio.yaml.parseMetadata(arena, &res, StringBuilder.initBuffer(&prefix_buf), parsed.docs.items[0]);
         } else if (std.mem.endsWith(u8, file.name, ".ckpt") or std.mem.endsWith(u8, file.name, ".pt")) {
             const start = try mapped_file.file.getPos();
-            var tmp: zml.aio.torch.PickleData = .{
-                .data = try File.fromTarFile(arena, mapped_file, file),
-                .stack = undefined,
-            };
-            tmp.stack = try eval.evaluate(arena, tmp.data.ops, true);
+            var torch_file = try File.fromTarFile(arena, mapped_file, file);
+            const ops = try torch_file.parsePickle(arena);
+            const values = try eval.evaluate(arena, ops, true);
 
-            try tmp.parseModel(arena, &res);
+            try torch_file.parseModel(arena, values, &res);
             // Since we directly manipulate the file handle pointer,
             // reset to the end of file so iterator does not error
             // and avoid `skipBytes`.

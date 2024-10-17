@@ -1,10 +1,18 @@
-const asynk = @import("async");
 const std = @import("std");
 const testing = std.testing;
-const Allocator = std.mem.Allocator;
+const log = std.log.scoped(.zml_aio);
+
+const asynk = @import("async");
 
 const zml = @import("../../zml.zig");
 const pickle = @import("pickle.zig");
+const value = @import("value.zig");
+const HostBuffer = zml.HostBuffer;
+const PersId = value.PersId;
+const Sequence = value.Sequence;
+const Value = value.Value;
+const ValueType = value.ValueType;
+const StringBuilder = std.ArrayListUnmanaged(u8);
 
 test {
     std.testing.refAllDecls(@This());
@@ -13,11 +21,12 @@ test {
 
 pub const File = struct {
     buffer_file: zml.aio.MemoryMappedFile,
+    /// Map names to sub file
     file_map: std.StringArrayHashMapUnmanaged(FileEntry) = .{},
     tar_file: ?TarStream = null,
-    ops: []const pickle.Op,
     is_zip_file: bool,
-    zip_prefix: []const u8 = &[_]u8{},
+    zip_prefix: []const u8 = &.{},
+    pickle_subfile: struct { start: u64 = 0, len: usize },
 
     pub const FileEntry = struct {
         version_needed_to_extract: u16,
@@ -51,48 +60,55 @@ pub const File = struct {
 
     const magic = "PK\x03\x04";
 
-    pub fn fromTarFile(allocator: Allocator, mapped: zml.aio.MemoryMappedFile, file: std.tar.Iterator(asynk.File.Reader).File) !File {
-        const tar_stream = try TarStream.init(file);
-        const file_magic = try tar_stream.reader().readBytesNoEof(magic.len);
-        try tar_stream.seekTo(0);
-        var self: File = .{
+    pub fn fromTarFile(allocator: std.mem.Allocator, mapped: zml.aio.MemoryMappedFile, file: std.tar.Iterator(asynk.File.Reader).File) !File {
+        const tar_file = try TarStream.init(file);
+        const file_magic = try tar_file.reader().readBytesNoEof(magic.len);
+        try tar_file.seekTo(0);
+        var res: File = .{
             .buffer_file = mapped,
-            .tar_file = tar_stream,
-            .ops = undefined,
+            .tar_file = tar_file,
             .is_zip_file = std.mem.eql(u8, &file_magic, magic),
+            .pickle_subfile = .{ .len = try tar_file.getEndPos() },
         };
-        if (!self.is_zip_file) {
-            const reader = tar_stream.reader();
-            self.ops = try pickle.parse(allocator, reader, try tar_stream.getEndPos());
-        } else {
-            self.ops = try self.parseOps(allocator, self.tar_file.?.seekableStream());
+        if (res.is_zip_file) {
+            try res.parseZipHeaders(allocator, tar_file.seekableStream());
         }
-        return self;
+        return res;
     }
 
-    pub fn init(allocator: Allocator, file: asynk.File) !File {
+    pub fn init(allocator: std.mem.Allocator, file: asynk.File) !File {
         const file_magic = try file.reader().readBytesNoEof(magic.len);
         try file.seekTo(0);
-        var self: File = .{
+        var res: File = .{
             .buffer_file = try zml.aio.MemoryMappedFile.init(file),
             .is_zip_file = std.mem.eql(u8, &file_magic, magic),
-            .ops = undefined,
+            .pickle_subfile = .{ .len = try file.getEndPos() },
         };
-        if (!self.is_zip_file) {
-            const reader = self.buffer_file.file.reader();
-            self.ops = try pickle.parse(allocator, reader, try reader.context.getEndPos());
-        } else {
-            self.ops = try self.parseOps(allocator, self.buffer_file.file.seekableStream());
+
+        if (res.is_zip_file) {
+            try res.parseZipHeaders(allocator, file.seekableStream());
         }
-        return self;
+        return res;
     }
 
-    pub fn deinit(self: *File) void {
+    pub fn close(self: *File) void {
         self.buffer_file.deinit();
-        self.* = undefined;
     }
 
-    fn parseOps(self: *File, allocator: Allocator, seekable_stream: anytype) ![]const pickle.Op {
+    pub fn parsePickle(self: *File, allocator: std.mem.Allocator) ![]const pickle.Op {
+        return if (self.tar_file) |tar_file| {
+            try tar_file.seekTo(self.pickle_subfile.start);
+            return try pickle.parse(allocator, tar_file.reader(), self.pickle_subfile.len);
+        } else {
+            const file = self.buffer_file.file;
+            try file.seekTo(self.pickle_subfile.start);
+            return try pickle.parse(allocator, file.reader(), self.pickle_subfile.len);
+        };
+    }
+
+    fn parseZipHeaders(self: *File, allocator: std.mem.Allocator, seekable_stream: anytype) !void {
+        var file_map: std.StringArrayHashMapUnmanaged(FileEntry) = .{};
+
         var iter = try std.zip.Iterator(@TypeOf(seekable_stream)).init(seekable_stream);
         var filename_buf: [std.fs.max_path_bytes]u8 = undefined;
         while (try iter.next()) |entry| {
@@ -102,69 +118,441 @@ pub const File = struct {
             if (len != filename.len) return error.ZipBadFileOffset;
             if (isBadFilename(filename)) return error.ZipBadFilename;
             std.mem.replaceScalar(u8, filename, '\\', '/'); // normalize path separators
-            try self.file_map.put(allocator, try allocator.dupe(u8, filename), FileEntry.init(entry));
+            try file_map.put(allocator, try allocator.dupe(u8, filename), FileEntry.init(entry));
         }
 
-        var file_iter = self.file_map.iterator();
+        self.file_map = file_map;
+        var file_iter = file_map.iterator();
         while (file_iter.next()) |e| {
             const entry = e.value_ptr.*;
             const filename = e.key_ptr.*;
-            if (std.mem.indexOf(u8, filename, "data.pkl")) |idx| {
-                self.zip_prefix = filename[0..idx];
-                const local_data_header_offset: u64 = local_data_header_offset: {
-                    const local_header = blk: {
-                        try seekable_stream.seekTo(entry.file_offset);
-                        break :blk try seekable_stream.context.reader().readStructEndian(std.zip.LocalFileHeader, .little);
-                    };
-                    if (!std.mem.eql(u8, &local_header.signature, &std.zip.local_file_header_sig))
-                        return error.ZipBadFileOffset;
-                    if (local_header.version_needed_to_extract != entry.version_needed_to_extract)
-                        return error.ZipMismatchVersionNeeded;
-                    if (local_header.last_modification_time != entry.last_modification_time)
-                        return error.ZipMismatchModTime;
-                    if (local_header.last_modification_date != entry.last_modification_date)
-                        return error.ZipMismatchModDate;
+            log.warn("filename: {s}", .{filename});
+            if (!std.mem.endsWith(u8, filename, "data.pkl")) continue;
 
-                    if (@as(u16, @bitCast(local_header.flags)) != entry.flags)
-                        return error.ZipMismatchFlags;
-                    if (local_header.crc32 != 0 and local_header.crc32 != entry.crc32)
-                        return error.ZipMismatchCrc32;
-                    if (local_header.compressed_size != 0 and
-                        local_header.compressed_size != entry.compressed_size)
-                        return error.ZipMismatchCompLen;
-                    if (local_header.uncompressed_size != 0 and
-                        local_header.uncompressed_size != entry.uncompressed_size)
-                        return error.ZipMismatchUncompLen;
-                    if (local_header.filename_len != entry.filename_len)
-                        return error.ZipMismatchFilenameLen;
+            self.zip_prefix = filename[0 .. filename.len - "data.pkl".len];
 
-                    break :local_data_header_offset @as(u64, local_header.filename_len) +
-                        @as(u64, local_header.extra_len);
-                };
-
-                const local_data_file_offset: u64 =
-                    @as(u64, entry.file_offset) +
-                    @as(u64, @sizeOf(std.zip.LocalFileHeader)) +
-                    local_data_header_offset;
-                try seekable_stream.seekTo(local_data_file_offset);
-
+            const local_data_header_offset: u64 = local_data_header_offset: {
                 switch (entry.compression_method) {
-                    .store => {
-                        return pickle.parse(allocator, seekable_stream.context.reader(), entry.uncompressed_size);
-                    },
+                    .store => {},
                     .deflate => {
                         // TODO(cryptodeal): handle decompress
                         @panic("TODO support use of `deflate`");
                     },
                     else => @panic("TODO support other modes of compression"),
                 }
-            }
+                const local_header = blk: {
+                    try seekable_stream.seekTo(entry.file_offset);
+                    break :blk try seekable_stream.context.reader().readStructEndian(std.zip.LocalFileHeader, .little);
+                };
+                if (!std.mem.eql(u8, &local_header.signature, &std.zip.local_file_header_sig))
+                    return error.ZipBadFileOffset;
+                if (local_header.version_needed_to_extract != entry.version_needed_to_extract)
+                    return error.ZipMismatchVersionNeeded;
+                if (local_header.last_modification_time != entry.last_modification_time)
+                    return error.ZipMismatchModTime;
+                if (local_header.last_modification_date != entry.last_modification_date)
+                    return error.ZipMismatchModDate;
+
+                if (@as(u16, @bitCast(local_header.flags)) != entry.flags)
+                    return error.ZipMismatchFlags;
+                if (local_header.crc32 != 0 and local_header.crc32 != entry.crc32)
+                    return error.ZipMismatchCrc32;
+                if (local_header.compressed_size != 0 and
+                    local_header.compressed_size != entry.compressed_size)
+                    return error.ZipMismatchCompLen;
+                if (local_header.uncompressed_size != 0 and
+                    local_header.uncompressed_size != entry.uncompressed_size)
+                    return error.ZipMismatchUncompLen;
+                if (local_header.filename_len != entry.filename_len)
+                    return error.ZipMismatchFilenameLen;
+
+                break :local_data_header_offset @as(u64, local_header.filename_len) +
+                    @as(u64, local_header.extra_len);
+            };
+
+            const local_data_file_offset: u64 =
+                @as(u64, entry.file_offset) +
+                @as(u64, @sizeOf(std.zip.LocalFileHeader)) +
+                local_data_header_offset;
+            self.pickle_subfile = .{ .start = local_data_file_offset, .len = entry.uncompressed_size };
+            return;
         }
 
-        std.log.err("Could not find file ending in `data.pkl` in archive", .{});
+        log.err("Could not find file ending in `data.pkl` in archive", .{});
         return error.PickleNotFound;
     }
+
+    fn basicTypeCheck(object: *const value.Object, module: []const u8, class: []const u8) bool {
+        return switch (object.member) {
+            .raw => |raw| return (object.args[0] == .seq and
+                std.mem.eql(u8, module, raw.global.module) and
+                std.mem.eql(u8, class, raw.global.class)),
+            else => false,
+        };
+    }
+
+    pub fn parseModel(self: File, allocator: std.mem.Allocator, values: []const Value, store: *zml.aio.BufferStore) !void {
+        var prefix_buf: [1024]u8 = undefined;
+        for (values) |item| {
+            try self.parseValue(allocator, store, StringBuilder.initBuffer(&prefix_buf), item);
+        }
+    }
+
+    pub fn parseValue(self: File, allocator: std.mem.Allocator, store: *zml.aio.BufferStore, prefix: StringBuilder, v: Value) !void {
+        switch (v) {
+            .app, .object, .global => |object| {
+                if (!(try self.parseTorchGlobal(allocator, store, prefix, v))) {
+                    try self.parseValue(allocator, store, prefix, object.member);
+                    for (object.args) |item| {
+                        // if possible, coerce to `kv_tuple` (only if key val doesn't match root of prefix)
+                        if (item == .seq and item.seq.type == .tuple and item.seq.values.len == 2 and item.seq.values[0] == .string) {
+                            try self.parseValue(allocator, store, prefix, .{ .seq = .{ .type = .kv_tuple, .values = item.seq.values } });
+                        } else try self.parseValue(allocator, store, prefix, item);
+                    }
+                }
+            },
+            .build => |build| {
+                // `build` contains info about python struct being constructed
+                switch (build.member) {
+                    .object => |obj| switch (obj.member) {
+                        .raw => |raw| switch (raw) {
+                            .global => |global| {
+                                // in this case, we can capture the name of the python type
+                                // which can be used for codegen (e.g. `torch.nn.modules.conv.Conv2d`)
+                                var new_prefix = prefix;
+                                if (prefix.items.len > 0) {
+                                    new_prefix.appendAssumeCapacity('.');
+                                }
+                                new_prefix.appendSliceAssumeCapacity("_gen_type_helper");
+                                const key = try allocator.dupe(u8, new_prefix.items);
+                                const d = try store._metadata.getOrPut(allocator, key);
+                                if (d.found_existing) {
+                                    log.err("Duplicate key: {s}", .{new_prefix.items});
+                                    allocator.free(key);
+                                } else {
+                                    const val = try std.mem.join(allocator, ".", &.{ global.module, global.class });
+                                    d.value_ptr.* = .{ .string = val };
+                                }
+                            },
+                            else => try self.parseValue(allocator, store, prefix, build.member), // parse normally
+                        },
+                        else => try self.parseValue(allocator, store, prefix, build.member), // parse normally
+                    },
+                    else => try self.parseValue(allocator, store, prefix, build.member), // parse normally
+                }
+                try self.parseValue(allocator, store, prefix, build.args);
+            },
+            .pers_id => |pers_id| try self.parseValue(allocator, store, prefix, pers_id.ref),
+            .seq => |seq| {
+                switch (seq.type) {
+                    .list, .tuple, .set, .frozen_set => {
+                        if (seq.values.len == 0) return;
+                        var valid_slice = true;
+                        switch (seq.values[0]) {
+                            inline .int64, .float64, .boolval => |val0, tag| {
+                                const ItemType = switch (tag) {
+                                    .int64 => i64,
+                                    .float64 => f64,
+                                    .boolval => bool,
+                                    else => unreachable,
+                                };
+                                var values: std.ArrayListUnmanaged(ItemType) = .{};
+                                try values.append(allocator, val0);
+                                for (seq.values[1..], 1..) |val, i| {
+                                    if (std.meta.activeTag(val) != tag) valid_slice = false;
+                                    if (valid_slice) {
+                                        try values.append(allocator, @field(val, @tagName(tag)));
+                                    } else {
+                                        var new_prefix = prefix;
+                                        if (prefix.items.len > 0) {
+                                            new_prefix.appendAssumeCapacity('.');
+                                        }
+                                        new_prefix.items.len += std.fmt.formatIntBuf(new_prefix.unusedCapacitySlice(), i, 10, .lower, .{});
+                                        try self.parseValue(allocator, store, new_prefix, val);
+                                    }
+                                }
+
+                                if (valid_slice) {
+                                    try store._metadata.put(
+                                        allocator,
+                                        try allocator.dupe(u8, prefix.items),
+                                        try zml.aio.Metadata.copySlice(allocator, values.items),
+                                    );
+                                } else {
+                                    for (values.items, 0..) |val, i| {
+                                        var new_prefix = prefix;
+                                        if (prefix.items.len > 0) {
+                                            new_prefix.appendAssumeCapacity('.');
+                                        }
+                                        new_prefix.items.len += std.fmt.formatIntBuf(new_prefix.unusedCapacitySlice(), i, 10, .lower, .{});
+                                        const new_tag = switch (tag) {
+                                            .int64 => "int",
+                                            .float64 => "float",
+                                            .boolval => "bool",
+                                            else => unreachable, // we are already inside a switch
+                                        };
+                                        try store._metadata.put(allocator, try allocator.dupe(u8, new_prefix.items), @unionInit(zml.aio.Metadata, new_tag, val));
+                                    }
+                                }
+                            },
+                            else => {
+                                for (seq.values, 0..) |item, i| {
+                                    var new_prefix = prefix;
+                                    if (v.isPrimitive()) {
+                                        if (prefix.items.len > 0) {
+                                            new_prefix.appendAssumeCapacity('.');
+                                        }
+                                        new_prefix.items.len += std.fmt.formatIntBuf(new_prefix.unusedCapacitySlice(), i, 10, .lower, .{});
+                                    }
+                                    try self.parseValue(allocator, store, new_prefix, item);
+                                }
+                            },
+                        }
+                    },
+                    .dict => for (seq.values) |item| {
+                        try self.parseValue(allocator, store, prefix, item);
+                    },
+                    .kv_tuple => {
+                        const key, const val = seq.values[0..2].*;
+                        switch (key) {
+                            .string => |s| {
+                                // Handle Pytorch specific fields
+                                if (std.mem.eql(u8, s, "_modules") or std.mem.eql(u8, s, "_parameters") or std.mem.eql(u8, s, "_buffers")) {
+                                    try self.parseValue(allocator, store, prefix, val);
+                                } else {
+                                    var new_prefix = prefix;
+                                    if (prefix.items.len > 0) {
+                                        new_prefix.appendAssumeCapacity('.');
+                                    }
+                                    new_prefix.appendSliceAssumeCapacity(s);
+                                    try self.parseValue(allocator, store, new_prefix, val);
+                                }
+                            },
+                            .int64 => |int| {
+                                var new_prefix = prefix;
+                                if (prefix.items.len > 0) {
+                                    new_prefix.appendAssumeCapacity('.');
+                                }
+                                new_prefix.items.len += std.fmt.formatIntBuf(new_prefix.unusedCapacitySlice(), int, 10, .lower, .{});
+                                try self.parseValue(allocator, store, new_prefix, val);
+                            },
+                            inline else => |_, tag| std.debug.panic("Unexpected key type: {s}", .{@tagName(tag)}),
+                        }
+                    },
+                }
+            },
+            .bytes => |val| {
+                const key = try allocator.dupe(u8, prefix.items);
+                const d = try store._metadata.getOrPut(allocator, key);
+                if (d.found_existing) {
+                    log.warn("Duplicate key: {s}", .{prefix.items});
+                    allocator.free(key);
+                } else d.value_ptr.* = .{ .string = val };
+            },
+            inline .float64, .int64, .boolval, .bigint, .string => |val| {
+                const key = try allocator.dupe(u8, prefix.items);
+                const d = try store._metadata.getOrPut(allocator, key);
+                if (d.found_existing) {
+                    log.warn("Duplicate key: {s}", .{prefix.items});
+                    allocator.free(key);
+                } else {
+                    d.value_ptr.* = zml.aio.Metadata.wrap(val);
+                }
+            },
+            else => {},
+        }
+    }
+
+    fn parseTorchGlobal(self: File, allocator: std.mem.Allocator, store: *zml.aio.BufferStore, prefix: StringBuilder, v: Value) !bool {
+        return switch (v) {
+            .global => |object| {
+                if (try self.parseTensor(allocator, object)) |host_buffer| {
+                    const key = try allocator.dupe(u8, prefix.items);
+                    const entry = try store.buffers.getOrPut(allocator, key);
+                    if (entry.found_existing) {
+                        log.warn("Duplicate key: {s}", .{prefix.items});
+                        allocator.free(key);
+                    }
+                    entry.value_ptr.* = host_buffer;
+                    return true;
+                } else if (basicTypeCheck(object, "torch", "Size")) {
+                    const size = object.args[0].seq.values[0].seq.values;
+                    const key = try allocator.dupe(u8, prefix.items);
+                    const entry = try store._metadata.getOrPut(allocator, key);
+                    if (entry.found_existing) {
+                        log.warn("Duplicate key: {s}", .{prefix.items});
+                        allocator.free(key);
+                    }
+                    const d = try allocator.alloc(i64, size.len);
+                    for (d, 0..) |*di, i| di.* = size[i].int64;
+                    entry.value_ptr.* = .{ .array_int = d };
+                    return true;
+                } else if (basicTypeCheck(object, "fractions", "Fraction")) {
+                    const fraction_str = object.args[0].seq.values[0].string;
+                    if (std.mem.indexOfScalar(u8, fraction_str, '/')) |split_idx| {
+                        {
+                            var new_prefix = prefix;
+                            new_prefix.appendSliceAssumeCapacity(".numerator");
+                            try store._metadata.put(allocator, try allocator.dupe(u8, new_prefix.items), .{ .int = try std.fmt.parseInt(i64, fraction_str[0..split_idx], 10) });
+                        }
+                        {
+                            var new_prefix = prefix;
+                            new_prefix.appendSliceAssumeCapacity(".denominator");
+                            try store._metadata.put(allocator, try allocator.dupe(u8, new_prefix.items), .{ .int = try std.fmt.parseInt(i64, fraction_str[split_idx + 1 ..], 10) });
+                        }
+                        return true;
+                    }
+                }
+                return false;
+            },
+            else => false,
+        };
+    }
+
+    fn parseTensor(self: File, tmp_allocator: std.mem.Allocator, object: *value.Object) !?zml.HostBuffer {
+        if (!basicTypeCheck(object, "torch._utils", "_rebuild_tensor_v2")) {
+            return null;
+        }
+
+        const args = object.args[0].seq.values;
+        if (args.len < 4 or
+            args[0] != .pers_id or
+            args[1] != .int64 or
+            args[2] != .seq or args[2].seq.type != .tuple or
+            args[3] != .seq or args[3].seq.type != .tuple)
+        {
+            log.err("Unexpected value in call to torch._utils._rebuild_tensor_v2", .{});
+            return error.InvalidInput;
+        }
+
+        const pid: *PersId = args[0].pers_id;
+        var offset: u64 = @intCast(args[1].int64);
+        const raw_dims: Sequence = args[2].seq;
+        const raw_strides: Sequence = args[3].seq;
+        const dims = try parseDims(raw_dims.values);
+        var strides = try parseDims(raw_strides.values);
+
+        const dtype, const storage_file = try parseStorage(pid.ref);
+        // Pytorch store "item" strides, while ZML uses byte strides.
+        for (strides.slice()) |*s| s.* *= dtype.sizeOf();
+        // Same thing for the offset.
+        offset = offset * dtype.sizeOf();
+
+        const filename = try std.mem.join(tmp_allocator, "", &.{ self.zip_prefix, "data/", storage_file });
+        defer tmp_allocator.free(filename);
+
+        // The offset in the pickle is the offset inside the storage_file.
+        // But .pt are made of several files, so we need to append the file offset.
+        const storage = try self.getStorage(filename);
+        return HostBuffer.fromStridedSlice(
+            zml.Shape.init(dims.constSlice(), dtype),
+            storage[offset..],
+            strides.constSlice(),
+        );
+    }
+
+    fn parseStorage(val: value.Value) !struct { zml.DataType, []const u8 } {
+        if (val != .seq) return error.InvalidInput;
+        const sargs = val.seq.values;
+        if (val.seq.type == .tuple and
+            sargs.len >= 5 and
+            sargs[0] == .string and std.mem.eql(u8, sargs[0].string, "storage") and
+            sargs[1] == .raw and sargs[1].raw == .global and
+            sargs[2] == .string and
+            sargs[3] == .string)
+        {
+            const op = sargs[1].raw.global;
+            const storage_file = sargs[2].string;
+            // const sdev = sargs[3].string;
+            if (!std.mem.eql(u8, "torch", op.module) or
+                !std.mem.endsWith(u8, op.class, "Storage"))
+                return error.InvalidInput;
+
+            return .{
+                try storageToDtype(op.class),
+                storage_file,
+            };
+        } else {
+            return error.InvalidInput;
+        }
+    }
+
+    /// Given the name of one of the files in the .pt tarball,
+    /// return the slice of the memory-mapped .pt corresponding to it.
+    fn getStorage(self: File, filename: []const u8) ![]const u8 {
+        const maybe_entry = self.file_map.get(filename);
+        if (maybe_entry == null) {
+            std.log.err("Could not find file ending in `{s}` in archive", .{filename});
+            return error.TensorNotFound;
+        }
+        const entry = maybe_entry.?;
+        const base_offset: u64 = if (self.tar_file) |t| t.start else 0;
+        const file_offset: u64 = base_offset + entry.file_offset;
+        const file = self.buffer_file.file;
+        try file.seekTo(entry.file_offset);
+        const local_header = try file.reader().readStructEndian(std.zip.LocalFileHeader, .little);
+
+        if (!std.mem.eql(u8, &local_header.signature, &std.zip.local_file_header_sig))
+            return error.ZipBadFileOffset;
+        if (local_header.compressed_size != 0 and
+            local_header.compressed_size != entry.compressed_size)
+            return error.ZipMismatchCompLen;
+        if (local_header.uncompressed_size != 0 and
+            local_header.uncompressed_size != entry.uncompressed_size)
+            return error.ZipMismatchUncompLen;
+        if (local_header.filename_len != entry.filename_len)
+            return error.ZipMismatchFilenameLen;
+
+        const start = file_offset +
+            @sizeOf(std.zip.LocalFileHeader) +
+            @as(u64, local_header.filename_len) +
+            @as(u64, local_header.extra_len);
+        return self.buffer_file.mappedSlice(start, entry.uncompressed_size);
+    }
+
+    fn parseDims(values: []Value) error{InvalidInput}!zml.Shape.DimsArray {
+        zml.meta.assert(values.len <= zml.Tensor.MAX_RANK, "Found Pytorch tensor with unsupported rank {}", .{values.len});
+        var result: zml.Shape.DimsArray = .{};
+        for (values) |val| {
+            switch (val) {
+                .int64 => |d| result.appendAssumeCapacity(d),
+                else => return error.InvalidInput,
+            }
+        }
+        return result;
+    }
 };
+
+/// Convert from a torch.<type>Storage to a `zml.DataType`.
+/// TODO: make this future proof, storage type are going to get replaced with torch.UntypedStorage
+/// See https://pytorch.org/docs/stable/storage.html
+fn storageToDtype(storage_type: []const u8) !zml.DataType {
+    const torch_type = storage_type[0 .. storage_type.len - "Storage".len];
+    const map = std.StaticStringMap(zml.DataType).initComptime(.{
+        .{ "Double", .f64 },
+        .{ "Float", .f32 },
+        .{ "Half", .f16 },
+        .{ "Long", .i64 },
+        .{ "Int", .i32 },
+        .{ "Short", .i16 },
+        .{ "Char", .i8 },
+        .{ "Byte", .u8 },
+        .{ "Bool", .bool },
+        .{ "BFloat16", .bf16 },
+        .{ "ComplexDouble", .c128 },
+        .{ "ComplexFloat", .c64 },
+        // QUInt8Storage
+        // QInt8Storage
+        // QInt32Storage
+        // QUInt4x2Storage
+        // QUInt2x4Storage
+    });
+
+    return map.get(torch_type) orelse {
+        log.err("Unsupported torch storage type: {s}", .{storage_type});
+        return error.UnsupportedDataType;
+    };
+}
 
 const TarStream = struct {
     pub const SeekableStream = std.io.SeekableStream(
@@ -218,7 +606,7 @@ test "Read pickle (zipped)" {
     const allocator = arena.allocator();
     const file = try asynk.File.open("zml/aio/torch/simple.pt", .{ .mode = .read_only });
     var data = try File.init(allocator, file);
-    defer data.deinit();
+    defer data.close();
 }
 
 fn isBadFilename(filename: []const u8) bool {

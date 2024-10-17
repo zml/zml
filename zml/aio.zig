@@ -255,7 +255,7 @@ pub const MemoryMappedFile = struct {
         };
     }
 
-    pub fn mappedSlice(self: *MemoryMappedFile, start: usize, len: usize) []const u8 {
+    pub fn mappedSlice(self: MemoryMappedFile, start: usize, len: usize) []const u8 {
         return self.data[self.data_offset + start ..][0..len];
     }
 
