@@ -35,6 +35,23 @@ native_binary(
 )
 
 native_binary(
+    name = "Llama-3.1-70B-Instruct",
+    src = ":llama",
+    args = [
+        "--model=$(location @Meta-Llama-3.1-70B-Instruct//:model.safetensors.index.json)",
+        "--tokenizer=$(location @Meta-Llama-3.1-70B-Instruct//:tokenizer)",
+        "--num-heads=64",
+        "--num-kv-heads=8",
+        "--rope-freq-base=500000",
+    ],
+    data = [
+        "@Meta-Llama-3.1-70B-Instruct//:model",
+        "@Meta-Llama-3.1-70B-Instruct//:model.safetensors.index.json",
+        "@Meta-Llama-3.1-70B-Instruct//:tokenizer",
+    ],
+)
+
+native_binary(
     name = "OpenLLaMA-3B",
     src = ":llama",
     args = [
