@@ -98,11 +98,13 @@ pub const File = struct {
     pub fn parsePickle(self: *File, allocator: std.mem.Allocator) ![]const pickle.Op {
         return if (self.tar_file) |tar_file| {
             try tar_file.seekTo(self.pickle_subfile.start);
-            return try pickle.parse(allocator, tar_file.reader(), self.pickle_subfile.len);
+            var buffered = std.io.bufferedReader(tar_file.reader());
+            return try pickle.parse(allocator, buffered.reader(), self.pickle_subfile.len);
         } else {
             const file = self.buffer_file.file;
             try file.seekTo(self.pickle_subfile.start);
-            return try pickle.parse(allocator, file.reader(), self.pickle_subfile.len);
+            var buffered = std.io.bufferedReader(file.reader());
+            return try pickle.parse(allocator, buffered.reader(), self.pickle_subfile.len);
         };
     }
 
@@ -605,8 +607,26 @@ test "Read pickle (zipped)" {
     defer arena.deinit();
     const allocator = arena.allocator();
     const file = try asynk.File.open("zml/aio/torch/simple.pt", .{ .mode = .read_only });
-    var data = try File.init(allocator, file);
-    defer data.close();
+    var torch_file = try File.init(allocator, file);
+    defer torch_file.close();
+
+    const ops = try torch_file.parsePickle(allocator);
+    defer {
+        for (ops) |op| op.deinit(allocator);
+        allocator.free(ops);
+    }
+
+    var expected = [_]pickle.Op{
+        .{ .proto = 2 },
+        .empty_dict,
+        .{ .put = 0 },
+        .{ .unicode = "a" },
+        .{ .put = 1 },
+        .{ .int = 123 },
+        .setitem,
+        .stop,
+    };
+    try std.testing.expectEqualDeep(&expected, ops);
 }
 
 fn isBadFilename(filename: []const u8) bool {
