@@ -58,7 +58,6 @@ pub const Build = struct {
 pub const SequenceType = enum {
     list,
     dict,
-    kv_tuple,
     tuple,
     set,
     frozen_set,
@@ -67,7 +66,18 @@ pub const SequenceType = enum {
 pub const Sequence = struct {
     type: SequenceType,
     values: []Any,
+
+    pub fn append(self: *Sequence, allocator: std.mem.Allocator, values: []const Any) !void {
+        var array_list = std.ArrayListUnmanaged(Any).fromOwnedSlice(self.values);
+        try array_list.appendSlice(allocator, values);
+        self.values = array_list.items;
+    }
 };
+
+pub fn tuple(values: []const Any) Any {
+    // tuple are readonly, but sequence in general aren't
+    return .{ .seq = .{ .type = .tuple, .values = @constCast(values) } };
+}
 
 pub const PersId = struct {
     allocator: std.mem.Allocator,
@@ -91,7 +101,7 @@ pub const PersId = struct {
     }
 };
 
-pub const PyType = enum {
+pub const Kind = enum {
     raw,
     ref,
     app,
@@ -111,7 +121,7 @@ pub const PyType = enum {
 };
 
 /// A pickle operator that has been interpreted.
-pub const Any = union(PyType) {
+pub const Any = union(Kind) {
     /// Types that we can't handle or just had to give up on processing.
     raw: pickle.Op,
 

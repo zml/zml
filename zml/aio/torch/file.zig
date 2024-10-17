@@ -202,10 +202,7 @@ pub const File = struct {
                 if (!(try self.parseTorchGlobal(allocator, store, prefix, v))) {
                     try self.parseValue(allocator, store, prefix, object.member);
                     for (object.args) |item| {
-                        // if possible, coerce to `kv_tuple` (only if key val doesn't match root of prefix)
-                        if (item == .seq and item.seq.type == .tuple and item.seq.values.len == 2 and item.seq.values[0] == .string) {
-                            try self.parseValue(allocator, store, prefix, .{ .seq = .{ .type = .kv_tuple, .values = item.seq.values } });
-                        } else try self.parseValue(allocator, store, prefix, item);
+                        try self.parseValue(allocator, store, prefix, item);
                     }
                 }
             },
@@ -307,34 +304,34 @@ pub const File = struct {
                             },
                         }
                     },
-                    .dict => for (seq.values) |item| {
-                        try self.parseValue(allocator, store, prefix, item);
-                    },
-                    .kv_tuple => {
-                        const key, const val = seq.values[0..2].*;
-                        switch (key) {
-                            .string => |s| {
-                                // Handle Pytorch specific fields
-                                if (std.mem.eql(u8, s, "_modules") or std.mem.eql(u8, s, "_parameters") or std.mem.eql(u8, s, "_buffers")) {
-                                    try self.parseValue(allocator, store, prefix, val);
-                                } else {
+                    .dict => {
+                        const n = @divExact(seq.values.len, 2);
+                        for (0..n) |i| {
+                            const key, const val = seq.values[2 * i ..][0..2].*;
+                            switch (key) {
+                                .string => |s| {
+                                    // Handle Pytorch specific fields
+                                    if (std.mem.eql(u8, s, "_modules") or std.mem.eql(u8, s, "_parameters") or std.mem.eql(u8, s, "_buffers")) {
+                                        try self.parseValue(allocator, store, prefix, val);
+                                    } else {
+                                        var new_prefix = prefix;
+                                        if (prefix.items.len > 0) {
+                                            new_prefix.appendAssumeCapacity('.');
+                                        }
+                                        new_prefix.appendSliceAssumeCapacity(s);
+                                        try self.parseValue(allocator, store, new_prefix, val);
+                                    }
+                                },
+                                .int64 => |int| {
                                     var new_prefix = prefix;
                                     if (prefix.items.len > 0) {
                                         new_prefix.appendAssumeCapacity('.');
                                     }
-                                    new_prefix.appendSliceAssumeCapacity(s);
+                                    new_prefix.items.len += std.fmt.formatIntBuf(new_prefix.unusedCapacitySlice(), int, 10, .lower, .{});
                                     try self.parseValue(allocator, store, new_prefix, val);
-                                }
-                            },
-                            .int64 => |int| {
-                                var new_prefix = prefix;
-                                if (prefix.items.len > 0) {
-                                    new_prefix.appendAssumeCapacity('.');
-                                }
-                                new_prefix.items.len += std.fmt.formatIntBuf(new_prefix.unusedCapacitySlice(), int, 10, .lower, .{});
-                                try self.parseValue(allocator, store, new_prefix, val);
-                            },
-                            inline else => |_, tag| std.debug.panic("Unexpected key type: {s}", .{@tagName(tag)}),
+                                },
+                                inline else => |_, tag| std.debug.panic("Unexpected key type: {s}", .{@tagName(tag)}),
+                            }
                         }
                     },
                 }

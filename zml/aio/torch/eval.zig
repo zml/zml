@@ -4,27 +4,25 @@ const meta = zml.meta;
 
 const py = @import("py.zig");
 const pickle = @import("pickle.zig");
-const BTreeMap = @import("b_tree_map.zig").BTreeMap;
 
 const MAX_DEPTH: usize = 250;
 const MAX_PROTOCOL: u8 = 5;
 
 pub const PickleMemo = struct {
-    allocator: std.mem.Allocator,
-    map: BTreeMap(u32, py.Any),
+    map: std.AutoHashMap(u32, py.Any),
 
     pub fn init(allocator: std.mem.Allocator) PickleMemo {
         return .{
-            .allocator = allocator,
-            .map = BTreeMap(u32, py.Any).init(allocator),
+            .map = std.AutoHashMap(u32, py.Any).init(allocator),
         };
     }
 
     pub fn deinit(self: *PickleMemo) void {
+        const allocator = self.map.allocator;
         var iterator = self.map.iterator();
         defer iterator.deinit();
         while (iterator.next()) |entry| {
-            entry.value_ptr.deinit(self.allocator);
+            entry.value_ptr.deinit(allocator);
         }
         self.map.deinit() catch unreachable;
         self.* = undefined;
@@ -155,26 +153,6 @@ pub const PickleMemo = struct {
 pub fn evaluate(arena: std.mem.Allocator, x: []const pickle.Op, resolve_refs: bool) ![]const py.Any {
     var stack = std.ArrayList(py.Any).init(arena);
     var memo = PickleMemo.init(arena);
-    errdefer memo.deinit();
-
-    const makeKVList = (struct {
-        pub fn call(alloc: std.mem.Allocator, items: []const py.Any) ![]py.Any {
-            meta.assert(items.len & 1 == 0, "Bad py.Any for setitems", .{});
-            var kv_items = try std.ArrayList(py.Any).initCapacity(alloc, items.len);
-            errdefer kv_items.deinit();
-            var idx: usize = 0;
-            while (idx < items.len) : (idx += 2) {
-                if (idx + 1 >= items.len) {
-                    return error.MissingValueItem;
-                }
-                const kv = try alloc.alloc(py.Any, 2);
-                kv[0] = items[idx];
-                kv[1] = items[idx + 1];
-                kv_items.appendAssumeCapacity(.{ .seq = .{ .type = .kv_tuple, .values = kv } });
-            }
-            return kv_items.toOwnedSlice();
-        }
-    }).call;
 
     for (x) |op| {
         switch (op) {
@@ -182,7 +160,7 @@ pub fn evaluate(arena: std.mem.Allocator, x: []const pickle.Op, resolve_refs: bo
             .frame => {},
             .stop => break,
             .pop => _ = try pop(&stack),
-            .pop_mark => try popMarkDiscard(&stack),
+            .pop_mark => _ = try popMark(&stack),
             .dup => if (stack.getLastOrNull()) |item|
                 try stack.append(try item.clone(arena))
             else
@@ -207,8 +185,8 @@ pub fn evaluate(arena: std.mem.Allocator, x: []const pickle.Op, resolve_refs: bo
                 try stack.append(.{ .ref = v });
             },
             .tuple => try stack.append(blk: {
-                const popped = try popMark(&stack, arena);
-                break :blk .{ .seq = .{ .type = .tuple, .values = popped } };
+                const popped = try popMark(&stack);
+                break :blk .{ .seq = .{ .type = .tuple, .values = try arena.dupe(py.Any, popped) } };
             }),
             .empty_tuple => try stack.append(.{ .seq = .{ .type = .tuple, .values = &[_]py.Any{} } }),
             .setitem => {
@@ -230,22 +208,19 @@ pub fn evaluate(arena: std.mem.Allocator, x: []const pickle.Op, resolve_refs: bo
                 }
             },
             .setitems => {
-                const popped = try popMark(&stack, arena);
-                defer arena.free(popped);
-                const kv_items = try makeKVList(arena, popped);
+                const popped = try popMark(&stack);
                 const top = try lastMut(&stack);
                 const rtop = try memo.resolveMut(top, true);
                 switch (rtop.*) {
                     .global => |obj| {
                         obj.args = try assuredResize(py.Any, arena, obj.args, obj.args.len + 1);
-                        obj.args[obj.args.len - 1] = .{ .seq = .{ .type = .tuple, .values = kv_items } };
+                        obj.args[obj.args.len - 1] = .{ .seq = .{ .type = .dict, .values = popped } };
                     },
-                    .seq => |*tup| {
-                        tup.values = try assuredResize(py.Any, arena, tup.values, tup.values.len + 1);
-                        tup.values[tup.values.len - 1] = .{ .seq = .{ .type = .tuple, .values = kv_items } };
+                    .seq => |*dict| {
+                        if (dict.type != .dict) return error.BadStackTopForSetItems;
+                        try dict.append(arena, popped);
                     },
                     else => {
-                        defer arena.free(kv_items);
                         return error.BadStackTopForSetItems;
                     },
                 }
@@ -285,8 +260,7 @@ pub fn evaluate(arena: std.mem.Allocator, x: []const pickle.Op, resolve_refs: bo
                 }
             },
             .appends => {
-                const postmark = try popMark(&stack, arena);
-                defer arena.free(postmark);
+                const postmark = try popMark(&stack);
                 const top = try lastMut(&stack);
                 const rtop = try memo.resolveMut(top, true);
                 switch (rtop.*) {
@@ -305,17 +279,22 @@ pub fn evaluate(arena: std.mem.Allocator, x: []const pickle.Op, resolve_refs: bo
                     },
                 }
             },
-            .dict => try stack.append(blk: {
-                const popped = try popMark(&stack, arena);
-                defer arena.free(popped);
-                const kv_items = try makeKVList(arena, popped);
-                break :blk .{ .seq = .{ .type = .dict, .values = kv_items } };
-            }),
-            .list => try stack.append(.{ .seq = .{ .type = .list, .values = try popMark(&stack, arena) } }),
-            .inst => |v| try stack.append(blk: {
-                const tup_items = try arena.dupe(py.Any, &.{ .{ .string = v.module }, .{ .string = v.class } });
-                break :blk .{ .object = try py.Object.init(arena, .{ .seq = .{ .type = .tuple, .values = tup_items } }, try popMark(&stack, arena)) };
-            }),
+            .dict => try stack.append(.{ .seq = .{
+                .type = .dict,
+                .values = try arena.dupe(py.Any, try popMark(&stack)),
+            } }),
+            .list => try stack.append(.{ .seq = .{
+                .type = .list,
+                .values = try arena.dupe(py.Any, try popMark(&stack)),
+            } }),
+            .inst => |v| try stack.append(.{ .object = try py.Object.init(
+                arena,
+                try py.tuple(&.{ .{ .string = v.module }, .{ .string = v.class } }).clone(arena),
+                try arena.dupe(py.Any, try popMark(&stack)),
+            ) }),
+            // const tup_items = try arena.dupe(py.Any, &.{ .{ .string = v.module }, .{ .string = v.class } });
+            // break :blk .{ .object = try py.Object.init(arena, .{ .seq = .{ .type = .tuple, .values = tup_items } }, try popMark(&stack)) };
+
             .obj => try stack.append(blk: {
                 const mark = try findMark(&stack);
                 const args = try arena.dupe(py.Any, stack.items[mark + 2 ..]);
@@ -329,8 +308,7 @@ pub fn evaluate(arena: std.mem.Allocator, x: []const pickle.Op, resolve_refs: bo
             }),
             .empty_set => try stack.append(.{ .seq = .{ .type = .set, .values = &[_]py.Any{} } }),
             .additems => {
-                const postmark = try popMark(&stack, arena);
-                defer arena.free(postmark);
+                const postmark = try popMark(&stack);
                 const top = try lastMut(&stack);
                 const rtop = try memo.resolveMut(top, true);
                 switch (rtop.*) {
@@ -349,7 +327,10 @@ pub fn evaluate(arena: std.mem.Allocator, x: []const pickle.Op, resolve_refs: bo
                     },
                 }
             },
-            .frozenset => try stack.append(.{ .seq = .{ .type = .frozen_set, .values = try popMark(&stack, arena) } }),
+            .frozenset => try stack.append(.{ .seq = .{
+                .type = .frozen_set,
+                .values = try arena.dupe(py.Any, try popMark(&stack)),
+            } }),
             .newobj_ex => try stack.append(blk: {
                 const kwargs, const args, const cls = .{ try pop(&stack), try pop(&stack), try pop(&stack) };
                 const new_seq: py.Sequence = .{ .type = .tuple, .values = try arena.dupe(py.Any, &.{ args, kwargs }) };
@@ -404,37 +385,35 @@ test evaluate {
     try std.testing.expect(vals.len == 1);
     try std.testing.expect(vals[0] == .seq);
     try std.testing.expect(vals[0].seq.type == .dict);
-    const entries = vals[0].seq.values[0].seq.values;
+    const entries = vals[0].seq.values;
     const expected: []const py.Any = &.{
-        .{ .seq = .{ .type = .kv_tuple, .values = @constCast(&[_]py.Any{ .{ .string = "hello" }, .{ .string = "world" } }) } },
-        .{ .seq = .{ .type = .kv_tuple, .values = @constCast(&[_]py.Any{ .{ .string = "int" }, .{ .int64 = 1 } }) } },
-        .{ .seq = .{ .type = .kv_tuple, .values = @constCast(&[_]py.Any{ .{ .string = "float" }, .{ .float64 = 3.141592 } }) } },
+        // Key, followed by it's value
+        .{ .string = "hello" }, .{ .string = "world" },
+        .{ .string = "int" },   .{ .int64 = 1 },
+        .{ .string = "float" }, .{ .float64 = 3.141592 },
+        .{ .string = "list" },
         .{
-            .seq = .{ .type = .kv_tuple, .values = @constCast(&[_]py.Any{ .{ .string = "list" }, .{
-                .seq = .{
-                    .type = .list,
-                    .values = @constCast(&[_]py.Any{
-                        .{ .int64 = 255 },
-                        .{ .int64 = 1234 },
-                        .{ .int64 = -123 },
-                        .{ .int64 = 1_000_000_000 },
-                        .{ .int64 = 999_000_000_000 },
-                        .{ .bigint = (try std.math.big.int.Managed.initSet(allocator, 999_000_000_000_000_000_000_000_000_000)).toConst() },
-                    }),
-                },
-            } }) },
-        },
-        .{ .seq = .{ .type = .kv_tuple, .values = @constCast(&[_]py.Any{ .{ .string = "bool" }, .{ .boolval = false } }) } },
-        .{ .seq = .{ .type = .kv_tuple, .values = @constCast(&[_]py.Any{
-            .{ .string = "tuple" },
-            .{ .seq = .{
-                .type = .tuple,
+            .seq = .{
+                .type = .list,
                 .values = @constCast(&[_]py.Any{
-                    .{ .string = "a" },
-                    .{ .int64 = 10 },
+                    .{ .int64 = 255 },
+                    .{ .int64 = 1234 },
+                    .{ .int64 = -123 },
+                    .{ .int64 = 1_000_000_000 },
+                    .{ .int64 = 999_000_000_000 },
+                    .{ .bigint = (try std.math.big.int.Managed.initSet(allocator, 999_000_000_000_000_000_000_000_000_000)).toConst() },
                 }),
-            } },
-        }) } },
+            },
+        },
+        .{ .string = "bool" },  .{ .boolval = false },
+        .{ .string = "tuple" },
+        .{ .seq = .{
+            .type = .tuple,
+            .values = @constCast(&[_]py.Any{
+                .{ .string = "a" },
+                .{ .int64 = 10 },
+            }),
+        } },
     };
 
     try std.testing.expectEqualDeep(expected, entries);
@@ -447,16 +426,11 @@ pub fn pop(values: *std.ArrayList(py.Any)) !py.Any {
     return values.pop();
 }
 
-fn popMarkDiscard(values: *std.ArrayList(py.Any)) !void {
-    const mark = try findMark(values);
-    values.shrinkRetainingCapacity(mark);
-}
-
-fn popMark(values: *std.ArrayList(py.Any), allocator: std.mem.Allocator) ![]py.Any {
+fn popMark(values: *std.ArrayList(py.Any)) ![]py.Any {
     const mark = try findMark(values);
     const popping = values.items[mark + 1 ..];
     values.shrinkRetainingCapacity(mark);
-    return try allocator.dupe(py.Any, popping);
+    return popping;
 }
 
 fn lastMut(values: *std.ArrayList(py.Any)) !*py.Any {
