@@ -1,5 +1,5 @@
 const std = @import("std");
-const big_int = std.math.big.int;
+const math = std.math;
 
 const pickle = @import("pickle.zig");
 
@@ -164,7 +164,7 @@ pub const Value = union(ValueType) {
     int64: i64,
 
     /// An integer that can't fit in i64.
-    bigint: big_int.Managed,
+    bigint: math.big.int.Const,
 
     /// An float, but not the crazy kind that comes as a string
     /// that has to be parsed. You can look in `Value.raw_num` for
@@ -189,7 +189,7 @@ pub const Value = union(ValueType) {
                 allocator.free(v.values);
             },
             .string, .bytes => |v| allocator.free(v),
-            .bigint => self.bigint.deinit(),
+            .bigint => |big| allocator.free(big.limbs),
             else => {},
         }
         self.* = undefined;
@@ -289,7 +289,7 @@ pub const Value = union(ValueType) {
                 return .{ .seq = .{ .type = seq.type, .values = values } };
             },
             inline .string, .bytes => |v, tag| @unionInit(Value, @tagName(tag), try allocator.dupe(u8, v)),
-            .bigint => |v| .{ .bigint = try v.clone() },
+            .bigint => |v| .{ .bigint = (try v.toManaged(allocator)).toConst() },
             else => self,
         };
     }
@@ -329,32 +329,24 @@ pub const Value = union(ValueType) {
         }
     }
 
-    const BI64MIN = big_int.Const{
-        .limbs = &.{@intCast(@abs(std.math.minInt(i64)))},
-        .positive = false,
-    };
-
-    const BI64MAX = big_int.Const{
-        .limbs = &.{@intCast(std.math.maxInt(i64))},
-        .positive = true,
-    };
-
     pub fn coerceFromRaw(self: Value, allocator: std.mem.Allocator) !Value {
         return switch (self) {
             .raw => |raw_val| switch (raw_val) {
+                .none => .none,
+                .bool => |b| .{ .boolval = b },
+                .float => |b| .{ .float64 = std.fmt.parseFloat(f64, b) catch std.math.nan(f64) },
                 .int => |val| .{ .int64 = val },
-                .long => |b| if (b.len != 0) {
-                    // TODO: handle trailing 'L'
-                    var bint = try big_int.Managed.initCapacity(allocator, std.math.big.int.calcTwosCompLimbCount(b.len));
-                    var mutable = bint.toMutable();
-                    mutable.readTwosComplement(b, b.len, .little, .signed);
-                    const min_comp = bint.toConst().order(BI64MIN);
-                    const max_comp = bint.toConst().order(BI64MAX);
-                    if ((min_comp == .gt or min_comp == .eq) and (max_comp == .lt or max_comp == .eq)) {
-                        defer bint.deinit();
-                        return .{ .int64 = try bint.to(i64) };
-                    } else return .{ .bigint = bint };
-                } else .{ .raw_num = raw_val },
+                .long => |bytes| if (bytes.len <= 8)
+                    .{ .int64 = std.mem.readVarInt(i64, bytes, .little) }
+                else {
+                    // Note: we need to copy here, because Zig big int limbs are usize aligned,
+                    // whereas pickle big int are byte aligned.
+                    const n_limbs = std.math.divCeil(usize, bytes.len, @sizeOf(math.big.Limb)) catch unreachable;
+                    var big = (try math.big.int.Managed.initCapacity(allocator, n_limbs)).toMutable();
+                    big.readTwosComplement(bytes, bytes.len * 8, .little, .signed);
+
+                    return .{ .bigint = big.toConst() };
+                },
                 .binfloat => |val| .{ .float64 = val },
                 .unicode => |s| .{ .string = s },
                 .bytes => |b| .{ .bytes = b },
@@ -362,11 +354,10 @@ pub const Value = union(ValueType) {
                 // string and if it fails, we make it a bytes value instead. If anyone
                 // actually cares they can just fix values themselves or recover the raw bytes
                 // from the UTF8 string (it's guaranteed to be reversible, as far as I know).
-                .string => |b| if (std.unicode.utf8ValidateSlice(b)) .{ .string = b } else .{ .bytes = b },
-                .bool => |b| .{ .boolval = b },
-                .none => .{ .none = {} },
-                // feel we should do float parsing at this point
-                .float => .{ .raw_num = raw_val },
+                .string => |b| if (std.unicode.utf8ValidateSlice(b))
+                    .{ .string = b }
+                else
+                    .{ .bytes = b },
                 else => self,
             },
             .app, .object, .global => |v| blk: {

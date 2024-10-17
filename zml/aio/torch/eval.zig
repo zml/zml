@@ -401,7 +401,7 @@ test evaluate {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    const file = try std.fs.cwd().openFile("zml/aio/torch/simple_test.pickle", .{ .mode = .read_only });
+    const file = try std.fs.cwd().openFile("zml/aio/torch/simple_test_4.pickle", .{ .mode = .read_only });
     var buffered_reader = std.io.bufferedReader(file.reader());
     const ops = try pickle.parse(allocator, buffered_reader.reader(), 4096);
 
@@ -412,21 +412,26 @@ test evaluate {
     try std.testing.expect(vals[0] == .seq);
     try std.testing.expect(vals[0].seq.type == .dict);
     const entries = vals[0].seq.values[0].seq.values;
-    try std.testing.expect(entries.len == 5);
     const expected: []const Value = &.{
         .{ .seq = .{ .type = .kv_tuple, .values = @constCast(&[_]Value{ .{ .string = "hello" }, .{ .string = "world" } }) } },
         .{ .seq = .{ .type = .kv_tuple, .values = @constCast(&[_]Value{ .{ .string = "int" }, .{ .int64 = 1 } }) } },
         .{ .seq = .{ .type = .kv_tuple, .values = @constCast(&[_]Value{ .{ .string = "float" }, .{ .float64 = 3.141592 } }) } },
-        .{ .seq = .{ .type = .kv_tuple, .values = @constCast(&[_]Value{
-            .{ .string = "list" },
-            .{ .seq = .{ .type = .list, .values = @constCast(&[_]Value{
-                .{ .int64 = 0 },
-                .{ .int64 = 1 },
-                .{ .int64 = 2 },
-                .{ .int64 = 3 },
-                .{ .int64 = 4 },
-            }) } },
-        }) } },
+        .{
+            .seq = .{ .type = .kv_tuple, .values = @constCast(&[_]Value{ .{ .string = "list" }, .{
+                .seq = .{
+                    .type = .list,
+                    .values = @constCast(&[_]Value{
+                        .{ .int64 = 255 },
+                        .{ .int64 = 1234 },
+                        .{ .int64 = -123 },
+                        .{ .int64 = 1_000_000_000 },
+                        .{ .int64 = 999_000_000_000 },
+                        .{ .bigint = (try std.math.big.int.Managed.initSet(allocator, 999_000_000_000_000_000_000_000_000_000)).toConst() },
+                    }),
+                },
+            } }) },
+        },
+        .{ .seq = .{ .type = .kv_tuple, .values = @constCast(&[_]Value{ .{ .string = "bool" }, .{ .boolval = false } }) } },
         .{ .seq = .{ .type = .kv_tuple, .values = @constCast(&[_]Value{
             .{ .string = "tuple" },
             .{ .seq = .{
