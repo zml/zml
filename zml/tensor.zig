@@ -1413,7 +1413,6 @@ pub const Tensor = struct {
     }
 
     pub const Slice = struct {
-        single: ?i64 = null,
         start: i64 = 0,
         end: ?i64 = null,
         step: i64 = 1,
@@ -1499,9 +1498,8 @@ pub const Tensor = struct {
     }
 
     /// Concatenates the input Tensors along the given axis.
-    pub fn concatenate(tensors: []const Tensor, axis_: i64) Tensor {
+    pub fn concatenate(tensors: []const Tensor, axis_: anytype) Tensor {
         meta.assert(tensors.len <= 32, "concatenate only supports up to 32 tensors, got {}", .{tensors.len});
-        // TODO taggedVal
         var buffer: [32]mlir.Value = undefined;
         std.debug.assert(tensors.len <= buffer.len);
         std.debug.assert(tensors.len > 0);
@@ -2971,6 +2969,8 @@ pub const Tensor = struct {
     }
 
     /// Slices the input Tensor along a specific axis, with a start offset known at runtime.
+    /// Note: this doesn't support tagging, if you have tags,
+    /// you should use `dynamicSlice` directly.
     pub fn dynamicSlice1d(self: Tensor, axis_: i8, len: u63, start_indices: Tensor) Tensor {
         meta.assert(start_indices.rank() == 0, "dynamicSlice1d expects 'start_indices' tensor rank to be equal to 0, got {}", .{start_indices.rank()});
 
