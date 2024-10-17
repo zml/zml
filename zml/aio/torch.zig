@@ -16,6 +16,7 @@ const StringBuilder = std.ArrayListUnmanaged(u8);
 const log = std.log.scoped(.zml_io);
 
 test {
+    std.testing.refAllDecls(@This());
     std.testing.refAllDecls(eval);
     std.testing.refAllDecls(value);
     std.testing.refAllDecls(parser);
@@ -35,22 +36,21 @@ pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore
     const tmp_alloc = arena.allocator();
 
     const _parser = try parser.Parser.init(tmp_alloc, file);
-    const stack, const memo = try eval.evaluate(tmp_alloc, _parser.ops, true);
+    const stack = try eval.evaluate(tmp_alloc, _parser.ops, true);
 
     // But we create the HostBuffer objects inside the result BufferStore arena.
     var res: zml.aio.BufferStore = .{
         .arena = std.heap.ArenaAllocator.init(allocator),
     };
     res.files = try res.arena.allocator().dupe(zml.aio.MemoryMappedFile, &.{_parser.buffer_file});
-    var tmp: PickleData = .{ .data = _parser, .memo = memo, .stack = stack };
+    var tmp: PickleData = .{ .data = _parser, .stack = stack };
     try tmp.parseModel(res.arena.allocator(), &res);
     return res;
 }
 
 // TODO: rename me to PytorchFile
 pub const PickleData = struct {
-    stack: eval.PickleStack,
-    memo: eval.PickleMemo,
+    stack: []const Value,
     data: parser.Parser,
 
     fn basicTypeCheck(object: *const value.Object, module: []const u8, class: []const u8) bool {
@@ -63,7 +63,7 @@ pub const PickleData = struct {
     }
 
     pub fn parseModel(self: *PickleData, allocator: std.mem.Allocator, store: *zml.aio.BufferStore) !void {
-        for (self.stack.stack) |item| {
+        for (self.stack) |item| {
             var prefix_buf: [1024]u8 = undefined;
             try self.parseValue(allocator, store, StringBuilder.initBuffer(&prefix_buf), item);
         }
@@ -147,7 +147,7 @@ pub const PickleData = struct {
                                     try store._metadata.put(
                                         allocator,
                                         try allocator.dupe(u8, prefix.items),
-                                        .{ .array = .{ .item_type = std.meta.stringToEnum(zml.aio.Value.Slice.ItemType, @tagName(tag)).?, .data = std.mem.sliceAsBytes(try values.toOwnedSlice(allocator)) } },
+                                        try zml.aio.Metadata.copySlice(allocator, values.items),
                                     );
                                 } else {
                                     for (values.items, 0..) |val, i| {
@@ -156,7 +156,13 @@ pub const PickleData = struct {
                                             new_prefix.appendAssumeCapacity('.');
                                         }
                                         new_prefix.items.len += std.fmt.formatIntBuf(new_prefix.unusedCapacitySlice(), i, 10, .lower, .{});
-                                        try store._metadata.put(allocator, try allocator.dupe(u8, new_prefix.items), @unionInit(zml.aio.Value, @tagName(tag), val));
+                                        const new_tag = switch (tag) {
+                                            .int64 => "int",
+                                            .float64 => "float",
+                                            .boolval => "bool",
+                                            else => unreachable, // we are already inside a switch
+                                        };
+                                        try store._metadata.put(allocator, try allocator.dupe(u8, new_prefix.items), @unionInit(zml.aio.Metadata, new_tag, val));
                                     }
                                 }
                             },
@@ -212,15 +218,17 @@ pub const PickleData = struct {
                 if (d.found_existing) {
                     log.warn("Duplicate key: {s}", .{prefix.items});
                     allocator.free(key);
-                } else d.value_ptr.* = .{ .array = .{ .item_type = .uint8, .data = @constCast(val) } };
+                } else d.value_ptr.* = .{ .string = val };
             },
-            inline .float64, .int64, .boolval, .bigint, .string => |val, tag| {
+            inline .float64, .int64, .boolval, .bigint, .string => |val| {
                 const key = try allocator.dupe(u8, prefix.items);
                 const d = try store._metadata.getOrPut(allocator, key);
                 if (d.found_existing) {
                     log.warn("Duplicate key: {s}", .{prefix.items});
                     allocator.free(key);
-                } else d.value_ptr.* = @unionInit(zml.aio.Value, @tagName(tag), val);
+                } else {
+                    d.value_ptr.* = zml.aio.Metadata.wrap(val);
+                }
             },
             else => {},
         }
@@ -248,7 +256,7 @@ pub const PickleData = struct {
                     }
                     const d = try allocator.alloc(i64, size.len);
                     for (d, 0..) |*di, i| di.* = size[i].int64;
-                    entry.value_ptr.* = .{ .array = .{ .item_type = .int64, .data = std.mem.sliceAsBytes(d) } };
+                    entry.value_ptr.* = .{ .array_int = d };
                     return true;
                 } else if (basicTypeCheck(object, "fractions", "Fraction")) {
                     const fraction_str = object.args[0].seq.values[0].string;
@@ -256,12 +264,12 @@ pub const PickleData = struct {
                         {
                             var new_prefix = prefix;
                             new_prefix.appendSliceAssumeCapacity(".numerator");
-                            try store._metadata.put(allocator, try allocator.dupe(u8, new_prefix.items), .{ .int64 = try std.fmt.parseInt(i64, fraction_str[0..split_idx], 10) });
+                            try store._metadata.put(allocator, try allocator.dupe(u8, new_prefix.items), .{ .int = try std.fmt.parseInt(i64, fraction_str[0..split_idx], 10) });
                         }
                         {
                             var new_prefix = prefix;
                             new_prefix.appendSliceAssumeCapacity(".denominator");
-                            try store._metadata.put(allocator, try allocator.dupe(u8, new_prefix.items), .{ .int64 = try std.fmt.parseInt(i64, fraction_str[split_idx + 1 ..], 10) });
+                            try store._metadata.put(allocator, try allocator.dupe(u8, new_prefix.items), .{ .int = try std.fmt.parseInt(i64, fraction_str[split_idx + 1 ..], 10) });
                         }
                         return true;
                     }

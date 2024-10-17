@@ -176,20 +176,20 @@ pub const GgufValueType = enum(u32) {
     }
 };
 
-pub const ValueType = enum {
-    uint8,
-    int8,
-    uint16,
-    int16,
-    uint32,
-    int32,
-    float32,
-    uint64,
-    int64,
-    float64,
-    boolval,
-    string,
-    array,
+pub const ValueType = enum(u8) {
+    uint8 = 0,
+    int8 = 1,
+    uint16 = 2,
+    int16 = 3,
+    uint32 = 4,
+    int32 = 5,
+    float32 = 6,
+    bool = 7,
+    string = 8,
+    array = 9,
+    uint64 = 10,
+    int64 = 11,
+    float64 = 12,
 };
 
 // Union of possible values.
@@ -201,47 +201,20 @@ pub const GgufValue = union(ValueType) {
     uint32: u32,
     int32: i32,
     float32: f32,
+    bool: bool,
+    string: []const u8,
+    array: Array,
     uint64: u64,
     int64: i64,
     float64: f64,
-    boolval: bool,
-    string: []const u8,
-    array: Array,
 
     pub const Array = struct {
         // Any value type is valid, including arrays.
-        child: GgufValueType,
+        child: ValueType,
         // Number of elements, not bytes
         len: usize,
         data: []u8,
     };
-
-    pub fn asLoaderValue(self: GgufValue) zml.aio.Value {
-        return switch (self) {
-            .array => |v| .{
-                .array = .{
-                    .item_type = switch (v.child) {
-                        .bool => .boolval,
-                        .uint8 => .uint8,
-                        .int8 => .int8,
-                        .uint16 => .uint16,
-                        .int16 => .int16,
-                        .uint32 => .uint32,
-                        .int32 => .int32,
-                        .float32 => .float32,
-                        .uint64 => .uint64,
-                        .int64 => .int64,
-                        .float64 => .float64,
-                        .string => .string,
-                        // TODO: .array => .array,
-                        else => unreachable,
-                    },
-                    .data = v.data,
-                },
-            },
-            inline else => |v, tag| @unionInit(zml.aio.Value, @tagName(tag), v),
-        };
-    }
 };
 
 // Header
@@ -403,6 +376,9 @@ pub const GgufFile = struct {
 
     fn readArrayHeader(self: *GgufFile, allocator: std.mem.Allocator) !GgufValue.Array {
         const child = try self.readValueType();
+        if (@intFromEnum(child) > @intFromEnum(ValueType.float64)) {
+            return error.UnsupportedGgufType;
+        }
         const len: usize = try self.readInt(u64);
         const data = switch (child) {
             // Since strings have variable lenghts, we need to read them one by one
@@ -414,7 +390,7 @@ pub const GgufFile = struct {
             else => try self.readAlloc(allocator, len * child.sizeOf()),
         };
         return .{
-            .child = child,
+            .child = @enumFromInt(@intFromEnum(child)),
             .len = len,
             .data = data,
         };
@@ -429,7 +405,7 @@ pub const GgufFile = struct {
             .uint32 => .{ .uint32 = try self.readInt(u32) },
             .int32 => .{ .int32 = try self.readInt(i32) },
             .float32 => .{ .float32 = @bitCast(try self.readInt(u32)) },
-            .bool => .{ .boolval = try self.readInt(u8) != 0 },
+            .bool => .{ .bool = try self.readInt(u8) != 0 },
             .string => .{ .string = try self.readString(allocator) },
             .array => .{ .array = try self.readArrayHeader(allocator) },
             .uint64 => .{ .uint64 = try self.readInt(u64) },

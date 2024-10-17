@@ -14,7 +14,6 @@ pub const torch = @import("aio/torch.zig");
 pub const yaml = @import("aio/yaml.zig");
 
 pub const log = std.log.scoped(.zml_aio);
-pub const Value = @import("aio/value.zig").Value;
 const HostBuffer = @import("hostbuffer.zig").HostBuffer;
 
 test {
@@ -56,7 +55,7 @@ pub fn detectFormatAndLoadTokenizer(allocator: std.mem.Allocator, tokenizer_path
     else if (std.mem.endsWith(u8, tokenizer_path, ".tinyllama"))
         try zml.aio.tinyllama.loadTokenizer(allocator, tokenizer_path, 32000)
     else {
-        zml.log.err("Failed to recognized tokenizer format of: {s}", .{tokenizer_path});
+        log.err("Failed to recognized tokenizer format of: {s}", .{tokenizer_path});
         return error.FormatNotRecognized;
     };
 }
@@ -87,8 +86,8 @@ pub fn populateModelWithPrefix(comptime Model: type, allocator: std.mem.Allocato
     try prefix_builder.push(allocator, prefix);
     defer prefix_builder.deinit(allocator);
 
-    var unique_id = zml.Tensor.reserveIdRange(@intCast(store.buffers.count()));
-    const ok = _populateStruct(allocator, &prefix_builder, &unique_id, store, &model, true) catch |err| {
+    const unique_id = zml.Tensor.reserveIdRange(@intCast(store.buffers.count()));
+    const ok = _populateStruct(allocator, &prefix_builder, unique_id, store, &model, true) catch |err| {
         std.debug.panic("Can't populate model of type {s}: {s}", .{ @typeName(type), @errorName(err) });
     };
     if (!ok) return error.TensorNotFound;
@@ -98,12 +97,12 @@ pub fn populateModelWithPrefix(comptime Model: type, allocator: std.mem.Allocato
 /// A struct containing all the buffers and metadata found in a model file.
 pub const BufferStore = struct {
     pub const Buffers = std.StringArrayHashMapUnmanaged(HostBuffer);
-    pub const Metadata = std.StringArrayHashMapUnmanaged(Value);
+    pub const Metadatas = std.StringArrayHashMapUnmanaged(Metadata);
 
     arena: std.heap.ArenaAllocator,
     files: []MemoryMappedFile = &.{},
     buffers: Buffers = .{},
-    _metadata: Metadata = .{},
+    _metadata: Metadatas = .{},
 
     pub fn deinit(self: BufferStore) void {
         for (self.files) |*file| file.deinit();
@@ -135,7 +134,7 @@ pub const BufferStore = struct {
         return if (maybe_max_index) |index| index + 1 else 0;
     }
 
-    pub fn metadata(self: BufferStore, key: []const u8, comptime tag: std.meta.FieldEnum(Value)) ?std.meta.FieldType(Value, tag) {
+    pub fn metadata(self: BufferStore, key: []const u8, comptime tag: std.meta.FieldEnum(Metadata)) ?std.meta.FieldType(Metadata, tag) {
         const wrapped_value = self._metadata.get(key) orelse return null;
 
         if (wrapped_value != tag) {
@@ -145,14 +144,86 @@ pub const BufferStore = struct {
         return @field(wrapped_value, @tagName(tag));
     }
 
-    pub fn metadataSlice(self: BufferStore, key: []const u8, comptime tag: Value.Slice.ItemType) ?[]const Value.Slice.toZigType(tag) {
+    pub fn metadataSlice(self: BufferStore, key: []const u8, comptime tag: Metadata.ItemType) ?[]const tag.toZigType() {
         const wrapped_value = self._metadata.get(key) orelse return null;
-
-        if (wrapped_value != .array or wrapped_value.array.item_type != tag) {
-            return null;
+        const true_tag = std.meta.stringToEnum(std.meta.FieldEnum(Metadata), @tagName(tag)).?;
+        if (wrapped_value == true_tag) {
+            return @field(wrapped_value, "array_" ++ @tagName(tag));
         }
-        const T = Value.Slice.toZigType(tag);
-        return @alignCast(std.mem.bytesAsSlice(T, wrapped_value.array.data));
+
+        return null;
+    }
+};
+
+pub const Metadata = union(enum) {
+    null: void,
+    int: i64,
+    float: f64,
+    bool: bool,
+    string: []const u8,
+
+    array_bool: []const bool,
+    array_int: []const i64,
+    array_float: []const f64,
+    array_string: []const []const u8,
+
+    pub const ItemType = enum {
+        int,
+        float,
+        bool,
+        string,
+
+        pub fn toZigType(comptime kind: ItemType) type {
+            return switch (kind) {
+                .int => i64,
+                .float => f64,
+                .bool => bool,
+                .string => []const u8,
+            };
+        }
+    };
+
+    pub fn wrap(x: anytype) Metadata {
+        return switch (@TypeOf(x)) {
+            inline u8, i8, u16, i16, u32, i32, u64, i64 => .{ .int = @intCast(x) },
+            inline f16, f32, f64 => .{ .float = @floatCast(x) },
+            bool => .{ .bool = x },
+            []const u8 => .{ .string = x },
+            else => @panic("Unsupported type for zml.aio.Value: " ++ @typeName(@TypeOf(x))),
+        };
+    }
+
+    pub fn copySlice(allocator: std.mem.Allocator, any_slice: anytype) !Metadata {
+        return switch (@TypeOf(any_slice[0])) {
+            inline u8, i8, u16, i16, u32, i32, u64, i64 => {
+                const res = try allocator.alloc(i64, any_slice.len);
+                for (res, any_slice) |*r, val| r.* = @intCast(val);
+                return .{ .array_int = res };
+            },
+            inline f16, f32, f64 => {
+                const res = try allocator.alloc(f64, any_slice.len);
+                for (res, any_slice) |*r, val| r.* = @floatCast(val);
+                return .{ .array_float = res };
+            },
+            bool => .{ .array_bool = try allocator.dupe(bool, any_slice) },
+            []const u8 => .{ .array_string = try allocator.dupe([]const u8, @alignCast(any_slice)) },
+            else => @panic("Unsupported type for zml.aio.Value: " ++ @typeName(@TypeOf(any_slice))),
+        };
+    }
+
+    pub fn format(
+        self: Metadata,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        _ = options;
+        switch (self) {
+            .null => _ = try writer.write("null"),
+            inline .bool, .array_bool => |b| try writer.print("{any}", .{b}),
+            inline else => |v| try writer.print("{d}", .{v}),
+        }
     }
 };
 
@@ -244,7 +315,7 @@ const PrefixBuilder = struct {
 fn _populateStruct(
     allocator: std.mem.Allocator,
     prefix_builder: *PrefixBuilder,
-    unique_id: *u64,
+    unique_id: u64,
     buffer_store: BufferStore,
     obj: anytype,
     required: bool,
@@ -260,17 +331,17 @@ fn _populateStruct(
 
     const prefix = prefix_builder.data.items;
     if (T == zml.Tensor) {
-        return if (buffer_store.get(prefix)) |buffer| {
+        return if (buffer_store.buffers.getIndex(prefix)) |entry_idx| {
+            const buffer = buffer_store.get(prefix).?;
             obj.* = zml.Tensor{
                 ._shape = buffer.shape(),
-                ._id = .{ .buffer_id = unique_id.* },
+                ._id = .{ .buffer_id = unique_id + entry_idx },
                 ._donation = .input_buffer,
             };
-            unique_id.* += 1;
             return true;
         } else {
             if (required) {
-                std.log.err("Tensor not found: {s} ({d})", .{ prefix, buffer_store.buffers.count() });
+                log.err("Tensor not found: {s} ({d})", .{ prefix, buffer_store.buffers.count() });
             }
             return false;
         };
@@ -290,7 +361,7 @@ fn _populateStruct(
                         defer prefix_builder.pop();
                         const found = try _populateStruct(allocator, prefix_builder, unique_id, buffer_store, value, required);
                         if (!found) {
-                            std.log.err("Not able to load {s} as {s}", .{ prefix, @typeName(ptr_info.child) });
+                            log.err("Not able to load {s} as {s}", .{ prefix_builder.data.items, @typeName(ptr_info.child) });
                             return false;
                         }
                     }
@@ -299,7 +370,7 @@ fn _populateStruct(
                 }
                 return true;
             } else {
-                std.log.err("{s} - {s}: {s} type not supported", .{ @src().fn_name, prefix, @typeName(T) });
+                log.err("{s} - {s}: {s} type not supported", .{ @src().fn_name, prefix, @typeName(T) });
                 return false;
             }
         },
@@ -346,7 +417,7 @@ fn _populateStruct(
         },
         .Void => true,
         else => if (required) {
-            std.log.err("{s}: {s} type not supported", .{ prefix, @typeName(T) });
+            log.err("{s}: {s} type not supported", .{ prefix, @typeName(T) });
             return error.UnsupportedMetadataType;
         } else return false,
     };
@@ -431,7 +502,7 @@ pub fn loadBuffers(
         zml.meta.assertComptime(@TypeOf(init_args) == void or @TypeOf(init_args) == @TypeOf(.{}), "Model of type {} has no init function, so `loadBuffers` should be call with init_args set to {{}} (void)", .{Model});
     }
 
-    return loadModelBuffers(Model, model, buffer_store, allocator, platform);
+    return loadModelBuffersWithPrefix(Model, model, buffer_store, allocator, platform, "");
 }
 
 /// Creates a bufferized version of a Model from the given BufferStore. For details about
@@ -449,6 +520,7 @@ pub fn loadModelBuffers(
 ) !zml.Bufferized(Model) {
     return try loadModelBuffersWithPrefix(Model, model, buffer_store, allocator, platform, "");
 }
+
 /// Creates a bufferized version of a Model from the given BufferStore and the given prefix.
 /// For details about bufferization, see the documentation of Bufferized(T).
 ///

@@ -25,8 +25,8 @@ pub fn open(allocator: Allocator, path: []const u8) !zml.aio.BufferStore {
 
 pub fn parseMetadata(allocator: Allocator, store: *zml.aio.BufferStore, key: StringBuilder, val: yaml.Value) !void {
     switch (val) {
-        .int => |v| try store._metadata.put(allocator, try allocator.dupe(u8, key.items), .{ .int64 = v }),
-        .float => |v| try store._metadata.put(allocator, try allocator.dupe(u8, key.items), .{ .float64 = v }),
+        .int => |v| try store._metadata.put(allocator, try allocator.dupe(u8, key.items), .{ .int = v }),
+        .float => |v| try store._metadata.put(allocator, try allocator.dupe(u8, key.items), .{ .float = v }),
         .string => |v| try store._metadata.put(allocator, try allocator.dupe(u8, key.items), .{ .string = v }),
         .list => |v| switch (validSlice(v)) {
             true => {
@@ -36,13 +36,13 @@ pub fn parseMetadata(allocator: Allocator, store: *zml.aio.BufferStore, key: Str
                         const values = try allocator.alloc(i64, v.len);
                         errdefer allocator.free(values);
                         for (v, 0..) |item, i| values[i] = item.int;
-                        try store._metadata.put(allocator, try allocator.dupe(u8, key.items), .{ .array = .{ .item_type = .int64, .data = std.mem.sliceAsBytes(values) } });
+                        try store._metadata.put(allocator, try allocator.dupe(u8, key.items), .{ .array_int = values });
                     },
                     .float => {
                         const values = try allocator.alloc(f64, v.len);
                         errdefer allocator.free(values);
                         for (v, 0..) |item, i| values[i] = item.float;
-                        try store._metadata.put(allocator, try allocator.dupe(u8, key.items), .{ .array = .{ .item_type = .float64, .data = std.mem.sliceAsBytes(values) } });
+                        try store._metadata.put(allocator, try allocator.dupe(u8, key.items), .{ .array_float = values });
                     },
                     .string => {
                         const values = try allocator.alloc([]const u8, v.len);
@@ -50,7 +50,7 @@ pub fn parseMetadata(allocator: Allocator, store: *zml.aio.BufferStore, key: Str
                         for (v, 0..) |item, i| {
                             values[i] = try allocator.dupe(u8, item.string);
                         }
-                        try store._metadata.put(allocator, try allocator.dupe(u8, key.items), .{ .array = .{ .item_type = .string, .data = std.mem.sliceAsBytes(values) } });
+                        try store._metadata.put(allocator, try allocator.dupe(u8, key.items), .{ .array_string = values });
                     },
                     .list => unreachable,
                     else => {},
