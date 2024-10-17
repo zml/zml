@@ -182,8 +182,7 @@ pub const File = struct {
 
     fn basicTypeCheck(object: *const py.Object, module: []const u8, class: []const u8) bool {
         return switch (object.member) {
-            .raw => |raw| return (object.args[0] == .seq and
-                std.mem.eql(u8, module, raw.global.module) and
+            .raw => |raw| return (std.mem.eql(u8, module, raw.global.module) and
                 std.mem.eql(u8, class, raw.global.class)),
             else => false,
         };
@@ -371,7 +370,7 @@ pub const File = struct {
                     entry.value_ptr.* = host_buffer;
                     return true;
                 } else if (basicTypeCheck(object, "torch", "Size")) {
-                    const size = object.args[0].seq.values[0].seq.values;
+                    const size = object.args;
                     const key = try allocator.dupe(u8, prefix.items);
                     const entry = try store._metadata.getOrPut(allocator, key);
                     if (entry.found_existing) {
@@ -383,7 +382,7 @@ pub const File = struct {
                     entry.value_ptr.* = .{ .array_int = d };
                     return true;
                 } else if (basicTypeCheck(object, "fractions", "Fraction")) {
-                    const fraction_str = object.args[0].seq.values[0].string;
+                    const fraction_str = object.args[0].string;
                     if (std.mem.indexOfScalar(u8, fraction_str, '/')) |split_idx| {
                         {
                             var new_prefix = prefix;
@@ -409,14 +408,14 @@ pub const File = struct {
             return null;
         }
 
-        const args = object.args[0].seq.values;
+        const args = object.args;
         if (args.len < 4 or
             args[0] != .pers_id or
             args[1] != .int64 or
             args[2] != .seq or args[2].seq.type != .tuple or
             args[3] != .seq or args[3].seq.type != .tuple)
         {
-            log.err("Unexpected py.Any in call to torch._utils._rebuild_tensor_v2", .{});
+            log.err("Unexpected py.Any in call to torch._utils._rebuild_tensor_v2: {}", .{object.*});
             return error.InvalidInput;
         }
 

@@ -8,17 +8,19 @@ pub const Object = struct {
     allocator: std.mem.Allocator,
     member: Any,
     args: []Any,
+    kwargs: []Any,
 
-    pub fn init(allocator: std.mem.Allocator, member: Any, args: []Any) !*Object {
+    pub fn init(allocator: std.mem.Allocator, member: Any, args: []Any, kwargs: []Any) !*Object {
         const self = try allocator.create(Object);
-        self.* = .{ .allocator = allocator, .member = member, .args = args };
+        self.* = .{ .allocator = allocator, .member = member, .args = args, .kwargs = kwargs };
         return self;
     }
 
     pub fn clone(self: *Object, allocator: std.mem.Allocator) std.mem.Allocator.Error!*Object {
         const res = try allocator.create(Object);
-        res.* = .{ .allocator = allocator, .member = try self.member.clone(allocator), .args = try allocator.alloc(Any, self.args.len) };
+        res.* = .{ .allocator = allocator, .member = try self.member.clone(allocator), .args = try allocator.alloc(Any, self.args.len), .kwargs = try allocator.alloc(Any, self.kwargs.len) };
         for (self.args, 0..) |v, i| res.args[i] = try v.clone(allocator);
+        for (self.kwargs, 0..) |v, i| res.kwargs[i] = try v.clone(allocator);
         return res;
     }
 
@@ -66,12 +68,6 @@ pub const SequenceType = enum {
 pub const Sequence = struct {
     type: SequenceType,
     values: []Any,
-
-    pub fn append(self: *Sequence, allocator: std.mem.Allocator, values: []const Any) !void {
-        var array_list = std.ArrayListUnmanaged(Any).fromOwnedSlice(self.values);
-        try array_list.appendSlice(allocator, values);
-        self.values = array_list.items;
-    }
 };
 
 pub fn tuple(values: []const Any) Any {
