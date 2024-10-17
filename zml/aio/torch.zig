@@ -3,7 +3,7 @@ const std = @import("std");
 const zml = @import("../zml.zig");
 
 const eval = @import("torch/eval.zig");
-const value = @import("torch/value.zig");
+const py_object = @import("torch/py_object.zig");
 const File = @import("torch/file.zig").File;
 
 const StringBuilder = std.ArrayListUnmanaged(u8);
@@ -12,7 +12,7 @@ const log = std.log.scoped(.zml_aio);
 test {
     std.testing.refAllDecls(@This());
     std.testing.refAllDecls(eval);
-    std.testing.refAllDecls(value);
+    std.testing.refAllDecls(py_object);
     std.testing.refAllDecls(File);
 }
 

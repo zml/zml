@@ -6,12 +6,12 @@ const asynk = @import("async");
 
 const zml = @import("../../zml.zig");
 const pickle = @import("pickle.zig");
-const value = @import("value.zig");
+const py_object = @import("py_object.zig");
 const HostBuffer = zml.HostBuffer;
-const PersId = value.PersId;
-const Sequence = value.Sequence;
-const Value = value.Value;
-const ValueType = value.ValueType;
+const PersId = py_object.PersId;
+const Sequence = py_object.Sequence;
+const Value = py_object.AnyPy;
+const ValueType = py_object.PyType;
 const StringBuilder = std.ArrayListUnmanaged(u8);
 
 test {
@@ -184,7 +184,7 @@ pub const File = struct {
         return error.PickleNotFound;
     }
 
-    fn basicTypeCheck(object: *const value.Object, module: []const u8, class: []const u8) bool {
+    fn basicTypeCheck(object: *const py_object.Object, module: []const u8, class: []const u8) bool {
         return switch (object.member) {
             .raw => |raw| return (object.args[0] == .seq and
                 std.mem.eql(u8, module, raw.global.module) and
@@ -411,7 +411,7 @@ pub const File = struct {
         };
     }
 
-    fn parseTensor(self: File, tmp_allocator: std.mem.Allocator, object: *value.Object) !?zml.HostBuffer {
+    fn parseTensor(self: File, tmp_allocator: std.mem.Allocator, object: *py_object.Object) !?zml.HostBuffer {
         if (!basicTypeCheck(object, "torch._utils", "_rebuild_tensor_v2")) {
             return null;
         }
@@ -453,7 +453,7 @@ pub const File = struct {
         );
     }
 
-    fn parseStorage(val: value.Value) !struct { zml.DataType, []const u8 } {
+    fn parseStorage(val: py_object.AnyPy) !struct { zml.DataType, []const u8 } {
         if (val != .seq) return error.InvalidInput;
         const sargs = val.seq.values;
         if (val.seq.type == .tuple and

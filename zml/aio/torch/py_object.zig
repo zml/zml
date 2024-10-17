@@ -16,10 +16,10 @@ pub const SequenceType = enum {
 
 pub const Object = struct {
     allocator: std.mem.Allocator,
-    member: Value,
-    args: []Value,
+    member: AnyPy,
+    args: []AnyPy,
 
-    pub fn init(allocator: std.mem.Allocator, member: Value, args: []Value) !*Object {
+    pub fn init(allocator: std.mem.Allocator, member: AnyPy, args: []AnyPy) !*Object {
         const self = try allocator.create(Object);
         self.* = .{ .allocator = allocator, .member = member, .args = args };
         return self;
@@ -27,7 +27,7 @@ pub const Object = struct {
 
     pub fn clone(self: *Object, allocator: std.mem.Allocator) std.mem.Allocator.Error!*Object {
         const res = try allocator.create(Object);
-        res.* = .{ .allocator = allocator, .member = try self.member.clone(allocator), .args = try allocator.alloc(Value, self.args.len) };
+        res.* = .{ .allocator = allocator, .member = try self.member.clone(allocator), .args = try allocator.alloc(AnyPy, self.args.len) };
         for (self.args, 0..) |v, i| res.args[i] = try v.clone(allocator);
         return res;
     }
@@ -42,10 +42,10 @@ pub const Object = struct {
 
 pub const Build = struct {
     allocator: std.mem.Allocator,
-    member: Value,
-    args: Value,
+    member: AnyPy,
+    args: AnyPy,
 
-    pub fn init(allocator: std.mem.Allocator, member: Value, args: Value) !*Build {
+    pub fn init(allocator: std.mem.Allocator, member: AnyPy, args: AnyPy) !*Build {
         const self = try allocator.create(Build);
         self.* = .{ .allocator = allocator, .member = member, .args = args };
         return self;
@@ -66,14 +66,14 @@ pub const Build = struct {
 
 pub const Sequence = struct {
     type: SequenceType,
-    values: []Value,
+    values: []AnyPy,
 };
 
 pub const PersId = struct {
     allocator: std.mem.Allocator,
-    ref: Value,
+    ref: AnyPy,
 
-    pub fn init(allocator: std.mem.Allocator, ref: Value) !*PersId {
+    pub fn init(allocator: std.mem.Allocator, ref: AnyPy) !*PersId {
         const self = try allocator.create(PersId);
         self.* = .{ .allocator = allocator, .ref = ref };
         return self;
@@ -91,7 +91,7 @@ pub const PersId = struct {
     }
 };
 
-pub const ValueType = enum {
+pub const PyType = enum {
     raw,
     ref,
     app,
@@ -111,7 +111,7 @@ pub const ValueType = enum {
 };
 
 /// A pickle operator that has been interpreted.
-pub const Value = union(ValueType) {
+pub const AnyPy = union(PyType) {
     /// Types that we can't handle or just had to give up on processing.
     raw: pickle.Op,
 
@@ -181,7 +181,7 @@ pub const Value = union(ValueType) {
     /// Python `None`.
     none: void,
 
-    pub fn deinit(self: *Value, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *AnyPy, allocator: std.mem.Allocator) void {
         switch (self.*) {
             .raw, .raw_num => |v| v.deinit(allocator),
             inline .app, .object, .global, .build, .pers_id => |v| v.deinit(),
@@ -201,7 +201,7 @@ pub const Value = union(ValueType) {
         // try writer.writeByteNTimes('\t');
     }
 
-    fn internalFormat(value: Value, indents: usize, writer: anytype) !void {
+    fn internalFormat(value: AnyPy, indents: usize, writer: anytype) !void {
         try writeIndents(indents, writer);
         try writer.writeAll(".{\n");
         try writeIndents(indents + 1, writer);
@@ -276,26 +276,26 @@ pub const Value = union(ValueType) {
         try writer.writeByte('}');
     }
 
-    pub fn format(self: Value, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(self: AnyPy, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
         return internalFormat(self, 0, writer);
     }
 
-    pub fn clone(self: Value, allocator: std.mem.Allocator) !Value {
+    pub fn clone(self: AnyPy, allocator: std.mem.Allocator) !AnyPy {
         return switch (self) {
-            inline .raw, .raw_num => |v, tag| @unionInit(Value, @tagName(tag), try v.clone(allocator)),
-            inline .app, .object, .global, .build, .pers_id => |v, tag| @unionInit(Value, @tagName(tag), try v.clone(allocator)),
+            inline .raw, .raw_num => |v, tag| @unionInit(AnyPy, @tagName(tag), try v.clone(allocator)),
+            inline .app, .object, .global, .build, .pers_id => |v, tag| @unionInit(AnyPy, @tagName(tag), try v.clone(allocator)),
             .seq => |seq| {
-                const values = try allocator.alloc(Value, seq.values.len);
+                const values = try allocator.alloc(AnyPy, seq.values.len);
                 for (seq.values, 0..) |v, i| values[i] = try v.clone(allocator);
                 return .{ .seq = .{ .type = seq.type, .values = values } };
             },
-            inline .string, .bytes => |v, tag| @unionInit(Value, @tagName(tag), try allocator.dupe(u8, v)),
+            inline .string, .bytes => |v, tag| @unionInit(AnyPy, @tagName(tag), try allocator.dupe(u8, v)),
             .bigint => |v| .{ .bigint = (try v.toManaged(allocator)).toConst() },
             else => self,
         };
     }
 
-    pub fn isPrimitive(self: Value) bool {
+    pub fn isPrimitive(self: AnyPy) bool {
         return switch (self) {
             .int64, .bigint, .float64, .string, .bytes, .boolval, .none => true,
             .seq => |seq| {
@@ -308,7 +308,7 @@ pub const Value = union(ValueType) {
         };
     }
 
-    pub fn containsRef(self: Value) bool {
+    pub fn containsRef(self: AnyPy) bool {
         switch (self) {
             .ref => return true,
             .app, .object, .global => |v| {
@@ -332,7 +332,7 @@ pub const Value = union(ValueType) {
 
     pub const UnpickleError = error{ InvalidCharacter, OutOfMemory };
 
-    pub fn coerceFromRaw(self: Value, allocator: std.mem.Allocator) UnpickleError!Value {
+    pub fn coerceFromRaw(self: AnyPy, allocator: std.mem.Allocator) UnpickleError!AnyPy {
         return switch (self) {
             .raw => |raw_val| switch (raw_val) {
                 .none => .none,

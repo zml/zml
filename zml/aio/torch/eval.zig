@@ -2,16 +2,16 @@ const std = @import("std");
 const zml = @import("../../zml.zig");
 const meta = zml.meta;
 
-const value = @import("value.zig");
+const py_object = @import("py_object.zig");
 const pickle = @import("pickle.zig");
 const BTreeMap = @import("b_tree_map.zig").BTreeMap;
 
-const Build = value.Build;
-const Object = value.Object;
-const PersId = value.PersId;
-const Sequence = value.Sequence;
-const SequenceType = value.SequenceType;
-const Value = value.Value;
+const Build = py_object.Build;
+const Object = py_object.Object;
+const PersId = py_object.PersId;
+const Sequence = py_object.Sequence;
+const SequenceType = py_object.SequenceType;
+const Value = py_object.AnyPy;
 
 const MAX_DEPTH: usize = 250;
 const MAX_PROTOCOL: u8 = 5;
