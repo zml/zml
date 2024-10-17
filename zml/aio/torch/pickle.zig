@@ -673,9 +673,8 @@ pub const OpCode = enum(u8) {
 /// because operators having same semantics, but different encoding have been merged.
 /// ex: string, binstring, short_binstring -> string.
 pub const Op = union(enum) {
-    // Initially numbers were represented by strings...
-    int: []const u8,
-    binint: i32,
+    int: i32,
+    // Python can represent arbitrary long integers
     long: []const u8,
     string: []const u8,
     bytes: []const u8,
@@ -773,16 +772,21 @@ pub fn parse(allocator: std.mem.Allocator, reader: anytype, max_line_len: usize)
         const code: OpCode = @enumFromInt(b);
         const op: Op = switch (code) {
             .int => blk: {
-                const buf = try reader.readUntilDelimiterAlloc(allocator, '\n', len);
+                var _buf: std.BoundedArray(u8, 12) = .{};
+                try reader.streamUntilDelimiter(_buf.writer(), '\n', _buf.len);
+                const buf = _buf.constSlice();
                 // Legacy hack, see OpCode.int documentation
                 // We do this parsing right away to simplify downstream code.
-                if (std.mem.eql(u8, "00", buf)) break :blk .{ .bool = false };
-                if (std.mem.eql(u8, "01", buf)) break :blk .{ .bool = true };
-                break :blk .{ .int = buf };
+                break :blk if (std.mem.eql(u8, "00", buf))
+                    .{ .bool = false }
+                else if (std.mem.eql(u8, "01", buf))
+                    .{ .bool = true }
+                else
+                    .{ .int = try std.fmt.parseInt(i32, buf, 10) };
             },
-            .binint => .{ .binint = try reader.readInt(i32, .little) },
-            .binint1 => .{ .binint = try reader.readByte() },
-            .binint2 => .{ .binint = try reader.readInt(u16, .little) },
+            .binint => .{ .int = try reader.readInt(i32, .little) },
+            .binint1 => .{ .int = try reader.readByte() },
+            .binint2 => .{ .int = try reader.readInt(u16, .little) },
             // TODO: long should handle the trailing 'L' -> add a test.
             .long => .{ .long = try reader.readUntilDelimiterAlloc(allocator, '\n', len) },
             .long1 => .{ .long = try _readSlice(reader, allocator, 1) },
@@ -887,9 +891,9 @@ pub fn parse(allocator: std.mem.Allocator, reader: anytype, max_line_len: usize)
     return results.toOwnedSlice();
 }
 
-test parse {
+test "parse protocol 4" {
     const allocator = std.testing.allocator;
-    const file = try std.fs.cwd().openFile("zml/aio/torch/simple_test.pickle", .{ .mode = .read_only });
+    const file = try std.fs.cwd().openFile("zml/aio/torch/simple_test_4.pickle", .{ .mode = .read_only });
     var buffered_reader = std.io.bufferedReader(file.reader());
     const ops = try parse(allocator, buffered_reader.reader(), 4096);
     defer {
@@ -898,11 +902,10 @@ test parse {
         allocator.free(ops);
     }
 
-    try std.testing.expect(ops.len == 35);
-    // this can be obtained by running: `python -m pickletools simple_test.pickle`
-    const expected = [_]Op{
+    // this can be obtained by running: `python -m pickletools simple_test_4.pickle`
+    var expected = [_]Op{
         .{ .proto = 4 },
-        .{ .frame = 83 },
+        .{ .frame = 119 },
         .empty_dict,
         .memoize,
         .mark,
@@ -912,7 +915,7 @@ test parse {
         .memoize,
         .{ .unicode = "int" },
         .memoize,
-        .{ .binint = 1 },
+        .{ .int = 1 },
         .{ .unicode = "float" },
         .memoize,
         .{ .binfloat = 3.141592 },
@@ -921,17 +924,21 @@ test parse {
         .empty_list,
         .memoize,
         .mark,
-        .{ .binint = 0 },
-        .{ .binint = 1 },
-        .{ .binint = 2 },
-        .{ .binint = 3 },
-        .{ .binint = 4 },
+        .{ .int = 255 },
+        .{ .int = 1234 },
+        .{ .int = -123 },
+        .{ .int = 1_000_000_000 },
+        .{ .long = &writeIntBuff(u48, 999_000_000_000) },
+        .{ .long = &writeIntBuff(u104, 999_000_000_000_000_000_000_000_000_000) },
         .appends,
+        .{ .unicode = "bool" },
+        .memoize,
+        .{ .bool = false },
         .{ .unicode = "tuple" },
         .memoize,
         .{ .unicode = "a" },
         .memoize,
-        .{ .binint = 10 },
+        .{ .int = 10 },
         .tuple2,
         .memoize,
         .setitems,
@@ -947,4 +954,10 @@ fn _readSlice(reader: anytype, allocator: std.mem.Allocator, comptime len_bytes:
     errdefer allocator.free(buf);
     _ = try reader.read(buf);
     return buf;
+}
+
+fn writeIntBuff(comptime T: type, value: T) [@divExact(@typeInfo(T).Int.bits, 8)]u8 {
+    var res: [@divExact(@typeInfo(T).Int.bits, 8)]u8 = undefined;
+    std.mem.writeInt(T, &res, value, .little);
+    return res;
 }

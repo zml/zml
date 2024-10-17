@@ -342,7 +342,7 @@ pub const Value = union(ValueType) {
     pub fn coerceFromRaw(self: Value, allocator: std.mem.Allocator) !Value {
         return switch (self) {
             .raw => |raw_val| switch (raw_val) {
-                .binint => |val| .{ .int64 = val },
+                .int => |val| .{ .int64 = val },
                 .long => |b| if (b.len != 0) {
                     // TODO: handle trailing 'L'
                     var bint = try big_int.Managed.initCapacity(allocator, std.math.big.int.calcTwosCompLimbCount(b.len));
@@ -365,8 +365,8 @@ pub const Value = union(ValueType) {
                 .string => |b| if (std.unicode.utf8ValidateSlice(b)) .{ .string = b } else .{ .bytes = b },
                 .bool => |b| .{ .boolval = b },
                 .none => .{ .none = {} },
-                // TODO .int should be handled like .long
-                .int, .float => .{ .raw_num = raw_val },
+                // feel we should do float parsing at this point
+                .float => .{ .raw_num = raw_val },
                 else => self,
             },
             .app, .object, .global => |v| blk: {
