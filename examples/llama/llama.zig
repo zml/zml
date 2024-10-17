@@ -52,7 +52,11 @@ pub const LlamaLM = struct {
             layer.self_attn.o_proj.weight = layer.self_attn.o_proj.weight.withSharding(.{1});
         }
 
-        self.lm_head.weight = self.lm_head.weight.withSharding(.{0});
+        // TODO(Corentin): Fix lm_head sharding when top-k sampling is enabled.
+        // It currently crashes/compilation fails
+        if (options.gen_opts.topk == 1) {
+            self.lm_head.weight = self.lm_head.weight.withSharding(.{0});
+        }
     }
 
     /// Predicts the token at `token_index` position.
