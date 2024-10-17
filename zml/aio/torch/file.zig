@@ -6,12 +6,8 @@ const asynk = @import("async");
 
 const zml = @import("../../zml.zig");
 const pickle = @import("pickle.zig");
-const py_object = @import("py_object.zig");
+const py = @import("py.zig");
 const HostBuffer = zml.HostBuffer;
-const PersId = py_object.PersId;
-const Sequence = py_object.Sequence;
-const Value = py_object.AnyPy;
-const ValueType = py_object.PyType;
 const StringBuilder = std.ArrayListUnmanaged(u8);
 
 test {
@@ -184,7 +180,7 @@ pub const File = struct {
         return error.PickleNotFound;
     }
 
-    fn basicTypeCheck(object: *const py_object.Object, module: []const u8, class: []const u8) bool {
+    fn basicTypeCheck(object: *const py.Object, module: []const u8, class: []const u8) bool {
         return switch (object.member) {
             .raw => |raw| return (object.args[0] == .seq and
                 std.mem.eql(u8, module, raw.global.module) and
@@ -193,14 +189,14 @@ pub const File = struct {
         };
     }
 
-    pub fn parseModel(self: File, allocator: std.mem.Allocator, values: []const Value, store: *zml.aio.BufferStore) !void {
+    pub fn parseModel(self: File, allocator: std.mem.Allocator, values: []const py.Any, store: *zml.aio.BufferStore) !void {
         var prefix_buf: [1024]u8 = undefined;
         for (values) |item| {
             try self.parseValue(allocator, store, StringBuilder.initBuffer(&prefix_buf), item);
         }
     }
 
-    pub fn parseValue(self: File, allocator: std.mem.Allocator, store: *zml.aio.BufferStore, prefix: StringBuilder, v: Value) !void {
+    pub fn parseValue(self: File, allocator: std.mem.Allocator, store: *zml.aio.BufferStore, prefix: StringBuilder, v: py.Any) !void {
         switch (v) {
             .app, .object, .global => |object| {
                 if (!(try self.parseTorchGlobal(allocator, store, prefix, v))) {
@@ -365,7 +361,7 @@ pub const File = struct {
         }
     }
 
-    fn parseTorchGlobal(self: File, allocator: std.mem.Allocator, store: *zml.aio.BufferStore, prefix: StringBuilder, v: Value) !bool {
+    fn parseTorchGlobal(self: File, allocator: std.mem.Allocator, store: *zml.aio.BufferStore, prefix: StringBuilder, v: py.Any) !bool {
         return switch (v) {
             .global => |object| {
                 if (try self.parseTensor(allocator, object)) |host_buffer| {
@@ -411,7 +407,7 @@ pub const File = struct {
         };
     }
 
-    fn parseTensor(self: File, tmp_allocator: std.mem.Allocator, object: *py_object.Object) !?zml.HostBuffer {
+    fn parseTensor(self: File, tmp_allocator: std.mem.Allocator, object: *py.Object) !?zml.HostBuffer {
         if (!basicTypeCheck(object, "torch._utils", "_rebuild_tensor_v2")) {
             return null;
         }
@@ -423,14 +419,14 @@ pub const File = struct {
             args[2] != .seq or args[2].seq.type != .tuple or
             args[3] != .seq or args[3].seq.type != .tuple)
         {
-            log.err("Unexpected value in call to torch._utils._rebuild_tensor_v2", .{});
+            log.err("Unexpected py.Any in call to torch._utils._rebuild_tensor_v2", .{});
             return error.InvalidInput;
         }
 
-        const pid: *PersId = args[0].pers_id;
+        const pid: *py.PersId = args[0].pers_id;
         var offset: u64 = @intCast(args[1].int64);
-        const raw_dims: Sequence = args[2].seq;
-        const raw_strides: Sequence = args[3].seq;
+        const raw_dims: py.Sequence = args[2].seq;
+        const raw_strides: py.Sequence = args[3].seq;
         const dims = try parseDims(raw_dims.values);
         var strides = try parseDims(raw_strides.values);
 
@@ -453,7 +449,7 @@ pub const File = struct {
         );
     }
 
-    fn parseStorage(val: py_object.AnyPy) !struct { zml.DataType, []const u8 } {
+    fn parseStorage(val: py.Any) !struct { zml.DataType, []const u8 } {
         if (val != .seq) return error.InvalidInput;
         const sargs = val.seq.values;
         if (val.seq.type == .tuple and
@@ -512,7 +508,7 @@ pub const File = struct {
         return self.buffer_file.mappedSlice(start, entry.uncompressed_size);
     }
 
-    fn parseDims(values: []Value) error{InvalidInput}!zml.Shape.DimsArray {
+    fn parseDims(values: []py.Any) error{InvalidInput}!zml.Shape.DimsArray {
         zml.meta.assert(values.len <= zml.Tensor.MAX_RANK, "Found Pytorch tensor with unsupported rank {}", .{values.len});
         var result: zml.Shape.DimsArray = .{};
         for (values) |val| {

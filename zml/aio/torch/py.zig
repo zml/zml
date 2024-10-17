@@ -4,22 +4,12 @@ const log = std.log.scoped(.zml_aio);
 
 const pickle = @import("pickle.zig");
 
-/// The types of sequences that exist.
-pub const SequenceType = enum {
-    list,
-    dict,
-    kv_tuple,
-    tuple,
-    set,
-    frozen_set,
-};
-
 pub const Object = struct {
     allocator: std.mem.Allocator,
-    member: AnyPy,
-    args: []AnyPy,
+    member: Any,
+    args: []Any,
 
-    pub fn init(allocator: std.mem.Allocator, member: AnyPy, args: []AnyPy) !*Object {
+    pub fn init(allocator: std.mem.Allocator, member: Any, args: []Any) !*Object {
         const self = try allocator.create(Object);
         self.* = .{ .allocator = allocator, .member = member, .args = args };
         return self;
@@ -27,7 +17,7 @@ pub const Object = struct {
 
     pub fn clone(self: *Object, allocator: std.mem.Allocator) std.mem.Allocator.Error!*Object {
         const res = try allocator.create(Object);
-        res.* = .{ .allocator = allocator, .member = try self.member.clone(allocator), .args = try allocator.alloc(AnyPy, self.args.len) };
+        res.* = .{ .allocator = allocator, .member = try self.member.clone(allocator), .args = try allocator.alloc(Any, self.args.len) };
         for (self.args, 0..) |v, i| res.args[i] = try v.clone(allocator);
         return res;
     }
@@ -42,10 +32,10 @@ pub const Object = struct {
 
 pub const Build = struct {
     allocator: std.mem.Allocator,
-    member: AnyPy,
-    args: AnyPy,
+    member: Any,
+    args: Any,
 
-    pub fn init(allocator: std.mem.Allocator, member: AnyPy, args: AnyPy) !*Build {
+    pub fn init(allocator: std.mem.Allocator, member: Any, args: Any) !*Build {
         const self = try allocator.create(Build);
         self.* = .{ .allocator = allocator, .member = member, .args = args };
         return self;
@@ -64,16 +54,26 @@ pub const Build = struct {
     }
 };
 
+/// The types of sequences that exist.
+pub const SequenceType = enum {
+    list,
+    dict,
+    kv_tuple,
+    tuple,
+    set,
+    frozen_set,
+};
+
 pub const Sequence = struct {
     type: SequenceType,
-    values: []AnyPy,
+    values: []Any,
 };
 
 pub const PersId = struct {
     allocator: std.mem.Allocator,
-    ref: AnyPy,
+    ref: Any,
 
-    pub fn init(allocator: std.mem.Allocator, ref: AnyPy) !*PersId {
+    pub fn init(allocator: std.mem.Allocator, ref: Any) !*PersId {
         const self = try allocator.create(PersId);
         self.* = .{ .allocator = allocator, .ref = ref };
         return self;
@@ -111,7 +111,7 @@ pub const PyType = enum {
 };
 
 /// A pickle operator that has been interpreted.
-pub const AnyPy = union(PyType) {
+pub const Any = union(PyType) {
     /// Types that we can't handle or just had to give up on processing.
     raw: pickle.Op,
 
@@ -181,7 +181,7 @@ pub const AnyPy = union(PyType) {
     /// Python `None`.
     none: void,
 
-    pub fn deinit(self: *AnyPy, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *Any, allocator: std.mem.Allocator) void {
         switch (self.*) {
             .raw, .raw_num => |v| v.deinit(allocator),
             inline .app, .object, .global, .build, .pers_id => |v| v.deinit(),
@@ -201,7 +201,7 @@ pub const AnyPy = union(PyType) {
         // try writer.writeByteNTimes('\t');
     }
 
-    fn internalFormat(value: AnyPy, indents: usize, writer: anytype) !void {
+    fn internalFormat(value: Any, indents: usize, writer: anytype) !void {
         try writeIndents(indents, writer);
         try writer.writeAll(".{\n");
         try writeIndents(indents + 1, writer);
@@ -276,26 +276,26 @@ pub const AnyPy = union(PyType) {
         try writer.writeByte('}');
     }
 
-    pub fn format(self: AnyPy, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(self: Any, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
         return internalFormat(self, 0, writer);
     }
 
-    pub fn clone(self: AnyPy, allocator: std.mem.Allocator) !AnyPy {
+    pub fn clone(self: Any, allocator: std.mem.Allocator) !Any {
         return switch (self) {
-            inline .raw, .raw_num => |v, tag| @unionInit(AnyPy, @tagName(tag), try v.clone(allocator)),
-            inline .app, .object, .global, .build, .pers_id => |v, tag| @unionInit(AnyPy, @tagName(tag), try v.clone(allocator)),
+            inline .raw, .raw_num => |v, tag| @unionInit(Any, @tagName(tag), try v.clone(allocator)),
+            inline .app, .object, .global, .build, .pers_id => |v, tag| @unionInit(Any, @tagName(tag), try v.clone(allocator)),
             .seq => |seq| {
-                const values = try allocator.alloc(AnyPy, seq.values.len);
+                const values = try allocator.alloc(Any, seq.values.len);
                 for (seq.values, 0..) |v, i| values[i] = try v.clone(allocator);
                 return .{ .seq = .{ .type = seq.type, .values = values } };
             },
-            inline .string, .bytes => |v, tag| @unionInit(AnyPy, @tagName(tag), try allocator.dupe(u8, v)),
+            inline .string, .bytes => |v, tag| @unionInit(Any, @tagName(tag), try allocator.dupe(u8, v)),
             .bigint => |v| .{ .bigint = (try v.toManaged(allocator)).toConst() },
             else => self,
         };
     }
 
-    pub fn isPrimitive(self: AnyPy) bool {
+    pub fn isPrimitive(self: Any) bool {
         return switch (self) {
             .int64, .bigint, .float64, .string, .bytes, .boolval, .none => true,
             .seq => |seq| {
@@ -308,7 +308,7 @@ pub const AnyPy = union(PyType) {
         };
     }
 
-    pub fn containsRef(self: AnyPy) bool {
+    pub fn containsRef(self: Any) bool {
         switch (self) {
             .ref => return true,
             .app, .object, .global => |v| {
@@ -332,7 +332,7 @@ pub const AnyPy = union(PyType) {
 
     pub const UnpickleError = error{ InvalidCharacter, OutOfMemory };
 
-    pub fn coerceFromRaw(self: AnyPy, allocator: std.mem.Allocator) UnpickleError!AnyPy {
+    pub fn coerceFromRaw(self: Any, allocator: std.mem.Allocator) UnpickleError!Any {
         return switch (self) {
             .raw => |raw_val| switch (raw_val) {
                 .none => .none,
