@@ -673,10 +673,10 @@ pub const OpCode = enum(u8) {
 /// because operators having same semantics, but different encoding have been merged.
 /// ex: string, binstring, short_binstring -> string.
 pub const Op = union(enum) {
-    // Initially numbers were represented by strings...
-    int: []const u8,
-    binint: i32,
+    int: i32,
+    // Python can represent arbitrary long integers
     long: []const u8,
+    binlong: []const u8,
     string: []const u8,
     bytes: []const u8,
     bytearray: []u8,
@@ -767,26 +767,32 @@ pub fn parse(allocator: std.mem.Allocator, reader: anytype, max_line_len: usize)
     var results = std.ArrayList(Op).init(allocator);
     errdefer results.deinit();
     const len = max_line_len;
+    var _buf: std.BoundedArray(u8, 12) = .{};
 
     while (true) {
         const b = try reader.readByte();
         const code: OpCode = @enumFromInt(b);
         const op: Op = switch (code) {
             .int => blk: {
-                const buf = try reader.readUntilDelimiterAlloc(allocator, '\n', len);
+                _buf.len = 0;
+                try reader.streamUntilDelimiter(_buf.writer(), '\n', _buf.capacity() + 1);
+                const buf = _buf.constSlice();
                 // Legacy hack, see OpCode.int documentation
                 // We do this parsing right away to simplify downstream code.
-                if (std.mem.eql(u8, "00", buf)) break :blk .{ .bool = false };
-                if (std.mem.eql(u8, "01", buf)) break :blk .{ .bool = true };
-                break :blk .{ .int = buf };
+                break :blk if (std.mem.eql(u8, "00", buf))
+                    .{ .bool = false }
+                else if (std.mem.eql(u8, "01", buf))
+                    .{ .bool = true }
+                else
+                    .{ .int = try std.fmt.parseInt(i32, buf, 10) };
             },
-            .binint => .{ .binint = try reader.readInt(i32, .little) },
-            .binint1 => .{ .binint = try reader.readByte() },
-            .binint2 => .{ .binint = try reader.readInt(u16, .little) },
+            .binint => .{ .int = try reader.readInt(i32, .little) },
+            .binint1 => .{ .int = try reader.readByte() },
+            .binint2 => .{ .int = try reader.readInt(u16, .little) },
             // TODO: long should handle the trailing 'L' -> add a test.
             .long => .{ .long = try reader.readUntilDelimiterAlloc(allocator, '\n', len) },
-            .long1 => .{ .long = try _readSlice(reader, allocator, 1) },
-            .long4 => .{ .long = try _readSlice(reader, allocator, 4) },
+            .long1 => .{ .binlong = try _readSlice(reader, allocator, 1) },
+            .long4 => .{ .binlong = try _readSlice(reader, allocator, 4) },
             .string => .{ .string = try reader.readUntilDelimiterAlloc(allocator, '\n', len) },
             .binstring => .{ .string = try _readSlice(reader, allocator, 4) },
             .short_binstring => .{ .string = try _readSlice(reader, allocator, 1) },
@@ -825,12 +831,9 @@ pub fn parse(allocator: std.mem.Allocator, reader: anytype, max_line_len: usize)
             .dup => .dup,
             .mark => .mark,
             .pop_mark => .pop_mark,
-            .get => blk: {
-                const buf = try reader.readUntilDelimiterAlloc(allocator, '\n', len);
-                defer allocator.free(buf);
-                // If we fail to parse delay the error to the evaluation.
-                const n = std.fmt.parseInt(u32, buf, 10) catch std.math.maxInt(u32);
-                break :blk .{ .get = n };
+            // If we fail to parse delay the error to the evaluation.
+            .get => .{
+                .get = _readDigits(u32, reader, &_buf) catch std.math.maxInt(u32),
             },
             .binget => .{ .get = try reader.readByte() },
             .long_binget => .{ .get = try reader.readInt(u32, .little) },
@@ -887,9 +890,9 @@ pub fn parse(allocator: std.mem.Allocator, reader: anytype, max_line_len: usize)
     return results.toOwnedSlice();
 }
 
-test parse {
+test "parse protocol 4" {
     const allocator = std.testing.allocator;
-    const file = try std.fs.cwd().openFile("zml/aio/torch/simple_test.pickle", .{ .mode = .read_only });
+    const file = try std.fs.cwd().openFile("zml/aio/torch/simple_test_4.pickle", .{ .mode = .read_only });
     var buffered_reader = std.io.bufferedReader(file.reader());
     const ops = try parse(allocator, buffered_reader.reader(), 4096);
     defer {
@@ -898,11 +901,10 @@ test parse {
         allocator.free(ops);
     }
 
-    try std.testing.expect(ops.len == 35);
-    // this can be obtained by running: `python -m pickletools simple_test.pickle`
-    const expected = [_]Op{
+    // this can be obtained by running: `python -m pickletools simple_test_4.pickle`
+    var expected = [_]Op{
         .{ .proto = 4 },
-        .{ .frame = 83 },
+        .{ .frame = 119 },
         .empty_dict,
         .memoize,
         .mark,
@@ -912,7 +914,7 @@ test parse {
         .memoize,
         .{ .unicode = "int" },
         .memoize,
-        .{ .binint = 1 },
+        .{ .int = 1 },
         .{ .unicode = "float" },
         .memoize,
         .{ .binfloat = 3.141592 },
@@ -921,23 +923,130 @@ test parse {
         .empty_list,
         .memoize,
         .mark,
-        .{ .binint = 0 },
-        .{ .binint = 1 },
-        .{ .binint = 2 },
-        .{ .binint = 3 },
-        .{ .binint = 4 },
+        .{ .int = 255 },
+        .{ .int = 1234 },
+        .{ .int = -123 },
+        .{ .int = 1_000_000_000 },
+        .{ .binlong = &writeIntBuff(u48, 999_000_000_000) },
+        .{ .binlong = &writeIntBuff(u104, 999_000_000_000_000_000_000_000_000_000) },
         .appends,
+        .{ .unicode = "bool" },
+        .memoize,
+        .{ .bool = false },
         .{ .unicode = "tuple" },
         .memoize,
         .{ .unicode = "a" },
         .memoize,
-        .{ .binint = 10 },
+        .{ .int = 10 },
         .tuple2,
         .memoize,
         .setitems,
         .stop,
     };
     try std.testing.expectEqualDeep(&expected, ops);
+}
+
+test "parse protocol 0" {
+    // We also test protocol 0, cause it's more text oriented.
+    const allocator = std.testing.allocator;
+    const pickle_0 =
+        \\(dp0
+        \\Vhello
+        \\p1
+        \\Vworld
+        \\p2
+        \\sVint
+        \\p3
+        \\I1
+        \\sVfloat
+        \\p4
+        \\F3.141592
+        \\sVlist
+        \\p5
+        \\(lp6
+        \\I255
+        \\aI1234
+        \\aI-123
+        \\aI1000000000
+        \\aL999000000000L
+        \\aL999000000000000000000000000000L
+        \\asVbool
+        \\p7
+        \\I00
+        \\sVtuple
+        \\p8
+        \\(Va
+        \\p9
+        \\I10
+        \\tp10
+        \\s.
+    ;
+
+    var stream = std.io.fixedBufferStream(pickle_0);
+    const ops = try parse(allocator, stream.reader(), 4096);
+    defer {
+        // Test we are correctly freeing every allocation.
+        for (ops) |op| op.deinit(allocator);
+        allocator.free(ops);
+    }
+
+    var expected = [_]Op{
+        .mark,
+        .dict,
+        .{ .put = 0 },
+        .{ .unicode = "hello" },
+        .{ .put = 1 },
+        .{ .unicode = "world" },
+        .{ .put = 2 },
+        .setitem,
+        .{ .unicode = "int" },
+        .{ .put = 3 },
+        .{ .int = 1 },
+        .setitem,
+        .{ .unicode = "float" },
+        .{ .put = 4 },
+        .{ .float = "3.141592" },
+        .setitem,
+        .{ .unicode = "list" },
+        .{ .put = 5 },
+        .mark,
+        .list,
+        .{ .put = 6 },
+        .{ .int = 255 },
+        .append,
+        .{ .int = 1234 },
+        .append,
+        .{ .int = -123 },
+        .append,
+        .{ .int = 1_000_000_000 },
+        .append,
+        .{ .long = "999000000000L" },
+        .append,
+        .{ .long = "999000000000000000000000000000L" },
+        .append,
+        .setitem,
+        .{ .unicode = "bool" },
+        .{ .put = 7 },
+        .{ .bool = false },
+        .setitem,
+        .{ .unicode = "tuple" },
+        .{ .put = 8 },
+        .mark,
+        .{ .unicode = "a" },
+        .{ .put = 9 },
+        .{ .int = 10 },
+        .tuple,
+        .{ .put = 10 },
+        .setitem,
+        .stop,
+    };
+    try std.testing.expectEqualDeep(&expected, ops);
+}
+
+fn _readDigits(comptime T: type, reader: anytype, buffer: *std.BoundedArray(u8, 12)) !T {
+    buffer.len = 0;
+    try reader.streamUntilDelimiter(buffer.writer(), '\n', 13);
+    return std.fmt.parseInt(T, buffer.constSlice(), 10);
 }
 
 fn _readSlice(reader: anytype, allocator: std.mem.Allocator, comptime len_bytes: u8) ![]u8 {
@@ -947,4 +1056,10 @@ fn _readSlice(reader: anytype, allocator: std.mem.Allocator, comptime len_bytes:
     errdefer allocator.free(buf);
     _ = try reader.read(buf);
     return buf;
+}
+
+fn writeIntBuff(comptime T: type, value: T) [@divExact(@typeInfo(T).Int.bits, 8)]u8 {
+    var res: [@divExact(@typeInfo(T).Int.bits, 8)]u8 = undefined;
+    std.mem.writeInt(T, &res, value, .little);
+    return res;
 }
