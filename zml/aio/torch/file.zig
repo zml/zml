@@ -75,17 +75,17 @@ pub const File = struct {
         return res;
     }
 
-    pub fn init(allocator: std.mem.Allocator, file: asynk.File) !File {
-        const file_magic = try file.reader().readBytesNoEof(magic.len);
-        try file.seekTo(0);
+    pub fn init(allocator: std.mem.Allocator, mmap_file: zml.aio.MemoryMappedFile) !File {
+        const file_magic = try mmap_file.file.reader().readBytesNoEof(magic.len);
+        try mmap_file.file.seekTo(0);
         var res: File = .{
-            .buffer_file = try zml.aio.MemoryMappedFile.init(file),
+            .buffer_file = mmap_file,
             .is_zip_file = std.mem.eql(u8, &file_magic, magic),
-            .pickle_subfile = .{ .len = try file.getEndPos() },
+            .pickle_subfile = .{ .len = mmap_file.data.len },
         };
 
         if (res.is_zip_file) {
-            try res.parseZipHeaders(allocator, file.seekableStream());
+            try res.parseZipHeaders(allocator, mmap_file.file.seekableStream());
         }
         return res;
     }
@@ -624,9 +624,6 @@ const TarStream = struct {
 };
 
 test "Read pickle (zipped)" {
-    // Note: this is not a good example to
-    var tmp_arena = std.heap.ArenaAllocator.init(testing.allocator);
-    const tmp_alloc = tmp_arena.allocator();
     // test file created with following python snippet:
     //
     // import torch
@@ -635,23 +632,26 @@ test "Read pickle (zipped)" {
     // tensor = torch.tensor([[2, 4, 3, 2]], dtype=torch.uint8)
     // torch.save({ "model": model, "tensor": tensor}, "simple.pt")
     const file = try asynk.File.open("zml/aio/torch/simple.pt", .{ .mode = .read_only });
-    var torch_file = try File.init(tmp_alloc, file);
-    // We don't close the file directly, it will be closed by the store.
-
-    const ops = try torch_file.parsePickle(tmp_alloc);
-    try std.testing.expectEqual(302, ops.len);
-
-    const py_values = try eval.evaluate(tmp_alloc, ops, true);
-    var store_arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer store_arena.deinit();
-
-    var store = try zml.aio.BufferStore.init(testing.allocator, &.{torch_file.buffer_file});
+    const mmap_file = try zml.aio.MemoryMappedFile.init(file);
+    var store = try zml.aio.BufferStore.init(testing.allocator, &.{mmap_file});
     defer store.deinit();
-    try torch_file.parseModel(py_values, &store);
 
-    // Now free the tmp_arena, all data needed should have been copied into the store arena.
-    tmp_arena.deinit();
+    {
+        var tmp_arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer tmp_arena.deinit();
+        const tmp_alloc = tmp_arena.allocator();
+        var torch_file = try File.init(tmp_alloc, mmap_file);
+        // We don't close the file directly, it will be closed by the store.
 
+        const ops = try torch_file.parsePickle(tmp_alloc);
+        try std.testing.expectEqual(302, ops.len);
+
+        const py_values = try eval.evaluate(tmp_alloc, ops, true);
+        try torch_file.parseModel(py_values, &store);
+    }
+
+    // now we have freed the tmp_arena.
+    // all data needed should have been copied into the store arena.
     try zml.testing.expectEqualShapes(
         zml.Shape.init(.{ 1, 4 }, .u8),
         store.get("tensor").?.shape(),

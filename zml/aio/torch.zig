@@ -29,7 +29,9 @@ pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore
     defer arena.deinit();
     const tmp_alloc = arena.allocator();
 
-    var torch_file = try File.init(tmp_alloc, file);
+    const mmap_file = try zml.aio.MemoryMappedFile.init(file);
+    var torch_file = try File.init(tmp_alloc, mmap_file);
+
     const ops = try torch_file.parsePickle(tmp_alloc);
     const py_values = try eval.evaluate(tmp_alloc, ops, true);
 
