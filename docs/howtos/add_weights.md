@@ -2,7 +2,7 @@
 # Adding Weights Files
 
 Our [first model](../tutorials/write_first_model.md) did not need any weights files.
-We just created weights and bias at runtime.
+We just created weights and biases at runtime.
 
 But real-world models typically need weights files, and maybe some other
 supporting files. 

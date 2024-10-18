@@ -8,7 +8,7 @@
 - add some Bazel to integrate our code with ZML
 - no weights files or anything external is required for this example
 
-The reason we're doing our excercise in the `examples` folder is because it's
+The reason we're doing our exercise in the `examples` folder is because it's
 especially prepared for new ZML projects. It contains everything needed for ZML
 development. From `bazel` configs to `vscode` settings, and `neovim` LSP
 support. The `examples` folder serves as a cookiecutter ZML project example,

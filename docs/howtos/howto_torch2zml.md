@@ -258,7 +258,7 @@ pub fn asyncMain() !void {
 
 During this phase, you have three kinds of errors that can appear:
 
-* Zig compilation errors: we've all have been there, learning a new language
+* Zig compilation errors: we've all been there, learning a new language
   can be tough. Normally, the compiler should help you figure out what's wrong.
   You can also check [ZML concepts](../learn/concepts.md) that explains types used
   by ZML.

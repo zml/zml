@@ -1,7 +1,7 @@
 
 ### Greetings, Programs!
 
-If you want run our example models, please head over to 
+If you want to run our example models, please head over to 
 [Getting Started](./tutorials/getting_started.md).
 
 Ready to write some code? Try starting with [your first model in ZML](./tutorials/write_first_model.md), or familiarize yourself with the high-level [ZML concepts](./learn/concepts.md) first.
