@@ -4,54 +4,58 @@ const log = std.log.scoped(.zml_aio);
 
 const pickle = @import("pickle.zig");
 
+/// Correspond to a function/constructor call
 pub const Object = struct {
-    allocator: std.mem.Allocator,
     member: Any,
     args: []Any,
     kwargs: []Any,
 
     pub fn init(allocator: std.mem.Allocator, member: Any, args: []Any, kwargs: []Any) !*Object {
         const self = try allocator.create(Object);
-        self.* = .{ .allocator = allocator, .member = member, .args = args, .kwargs = kwargs };
+        self.* = .{ .member = member, .args = args, .kwargs = kwargs };
         return self;
     }
 
     pub fn clone(self: *Object, allocator: std.mem.Allocator) std.mem.Allocator.Error!*Object {
         const res = try allocator.create(Object);
-        res.* = .{ .allocator = allocator, .member = try self.member.clone(allocator), .args = try allocator.alloc(Any, self.args.len), .kwargs = try allocator.alloc(Any, self.kwargs.len) };
+        res.* = .{
+            .member = try self.member.clone(allocator),
+            .args = try allocator.alloc(Any, self.args.len),
+            .kwargs = try allocator.alloc(Any, self.kwargs.len),
+        };
         for (self.args, 0..) |v, i| res.args[i] = try v.clone(allocator);
         for (self.kwargs, 0..) |v, i| res.kwargs[i] = try v.clone(allocator);
         return res;
     }
 
-    pub fn deinit(self: *Object) void {
-        self.member.deinit(self.allocator);
-        for (self.args) |*v| v.deinit(self.allocator);
-        self.allocator.free(self.args);
-        self.allocator.destroy(self);
+    pub fn deinit(self: *Object, allocator: std.mem.Allocator) void {
+        self.member.deinit(allocator);
+        for (self.args) |*v| v.deinit(allocator);
+        allocator.free(self.args);
+        allocator.destroy(self);
     }
 };
 
-pub const Build = struct {
-    allocator: std.mem.Allocator,
-    member: Any,
-    args: Any,
+/// Correspond to the __set_state__ call when pickle finishes building an object.
+pub const SetState = struct {
+    obj: Any,
+    state: Any,
 
-    pub fn init(allocator: std.mem.Allocator, member: Any, args: Any) !*Build {
-        const self = try allocator.create(Build);
-        self.* = .{ .allocator = allocator, .member = member, .args = args };
-        return self;
-    }
-
-    pub fn clone(self: *Build, allocator: std.mem.Allocator) std.mem.Allocator.Error!*Build {
-        const res = try allocator.create(Build);
-        res.* = .{ .allocator = allocator, .member = try self.member.clone(allocator), .args = try self.args.clone(allocator) };
+    pub fn init(allocator: std.mem.Allocator, obj: Any, state: Any) !*SetState {
+        const res = try allocator.create(SetState);
+        res.* = .{ .obj = obj, .state = state };
         return res;
     }
 
-    pub fn deinit(self: *Build) void {
-        self.member.deinit(self.allocator);
-        self.args.deinit(self.allocator);
+    pub fn clone(self: *SetState, allocator: std.mem.Allocator) std.mem.Allocator.Error!*SetState {
+        const res = try allocator.create(SetState);
+        res.* = .{ .obj = try self.obj.clone(allocator), .state = try self.state.clone(allocator) };
+        return res;
+    }
+
+    pub fn deinit(self: *SetState, allocator: std.mem.Allocator) void {
+        self.obj.deinit(allocator);
+        self.state.deinit(allocator);
         self.allocator.destroy(self);
     }
 };
@@ -76,24 +80,23 @@ pub fn tuple(values: []const Any) Any {
 }
 
 pub const PersId = struct {
-    allocator: std.mem.Allocator,
     ref: Any,
 
     pub fn init(allocator: std.mem.Allocator, ref: Any) !*PersId {
         const self = try allocator.create(PersId);
-        self.* = .{ .allocator = allocator, .ref = ref };
+        self.* = .{ .ref = ref };
         return self;
     }
 
     pub fn clone(self: *PersId, allocator: std.mem.Allocator) std.mem.Allocator.Error!*PersId {
         const res = try allocator.create(PersId);
-        res.* = .{ .allocator = allocator, .ref = try self.ref.clone(allocator) };
+        res.* = .{ .ref = try self.ref.clone(allocator) };
         return res;
     }
 
-    pub fn deinit(self: *PersId) void {
-        self.ref.deinit(self.allocator);
-        self.allocator.destroy(self);
+    pub fn deinit(self: *PersId, allocator: std.mem.Allocator) void {
+        self.ref.deinit(allocator);
+        allocator.destroy(self);
     }
 };
 
@@ -137,7 +140,7 @@ pub const Any = union(Kind) {
 
     /// Something we tried to build. The first tuple member is the
     /// thing, the second one is the arguments it got applied to.
-    build: *Build,
+    build: *SetState,
 
     /// References to persistant storage. They basically could be anything.
     /// You kind of have to know what the thing you're trying to
@@ -253,9 +256,9 @@ pub const Any = union(Kind) {
             },
             .build => |v| {
                 try writer.writeAll(".{\n");
-                try internalFormat(v.member, indents + 2, writer);
+                try internalFormat(v.obj, indents + 2, writer);
                 try writer.writeAll(",\n");
-                try internalFormat(v.args, indents + 2, writer);
+                try internalFormat(v.state, indents + 2, writer);
                 try writer.writeAll(",\n");
                 try writeIndents(indents + 1, writer);
                 try writer.writeAll("}");
@@ -340,8 +343,8 @@ pub const Any = union(Kind) {
                 return false;
             },
             .build => |v| {
-                if (v.member.containsRef()) return true;
-                if (v.args.containsRef()) return true;
+                if (v.obj.containsRef()) return true;
+                if (v.state.containsRef()) return true;
                 return false;
             },
             .pers_id => |v| return v.ref.containsRef(),
@@ -406,8 +409,8 @@ pub const Any = union(Kind) {
                 break :blk self;
             },
             .build => |v| blk: {
-                v.member = try v.member.coerceFromRaw(allocator);
-                v.args = try v.args.coerceFromRaw(allocator);
+                v.obj = try v.obj.coerceFromRaw(allocator);
+                v.state = try v.state.coerceFromRaw(allocator);
                 break :blk self;
             },
             .pers_id => |v| blk: {

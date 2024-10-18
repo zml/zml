@@ -59,11 +59,11 @@ pub const PickleMemo = struct {
                     }
                 },
                 .build => |v| {
-                    if (v.member.containsRef()) {
-                        v.member = try self.resolve(allocator, v.member, recursive);
+                    if (v.obj.containsRef()) {
+                        v.obj = try self.resolve(allocator, v.obj, recursive);
                     }
-                    if (v.args.containsRef()) {
-                        v.args = try self.resolve(allocator, v.args, recursive);
+                    if (v.state.containsRef()) {
+                        v.state = try self.resolve(allocator, v.state, recursive);
                     }
                 },
                 .pers_id => |v| {
@@ -135,10 +135,10 @@ pub const PickleMemo = struct {
                 try self.resolveAllRefsIter(allocator, depth + 1, v.args, fix_values),
                 try self.resolveAllRefsIter(allocator, depth + 1, v.kwargs, fix_values),
             )),
-            .build => |v| .{ .build = try py.Build.init(
+            .build => |v| .{ .build = try py.SetState.init(
                 allocator,
-                try self.resolveAllRefs(allocator, depth + 1, v.member, fix_values),
-                try self.resolveAllRefs(allocator, depth + 1, v.args, fix_values),
+                try self.resolveAllRefs(allocator, depth + 1, v.obj, fix_values),
+                try self.resolveAllRefs(allocator, depth + 1, v.state, fix_values),
             ) },
             .seq => |v| .{ .seq = .{ .type = v.type, .values = try self.resolveAllRefsIter(allocator, depth + 1, v.values, fix_values) } },
             .pers_id => |v| .{ .pers_id = try py.PersId.init(allocator, try self.resolveAllRefs(allocator, depth + 1, v.ref, fix_values)) },
@@ -179,7 +179,7 @@ pub fn evaluate(arena: std.mem.Allocator, x: []const pickle.Op, resolve_refs: bo
             .build => try stack.append(blk: {
                 const args = try memo.resolve(arena, try pop(&stack), true);
                 const member = try memo.resolve(arena, try pop(&stack), true);
-                break :blk .{ .build = try py.Build.init(arena, member, args) };
+                break :blk .{ .build = try py.SetState.init(arena, member, args) };
             }),
             .empty_dict => try stack.append(.{ .seq = .{ .type = .dict, .values = &[_]py.Any{} } }),
             .get => |v| try stack.append(.{ .ref = v }),

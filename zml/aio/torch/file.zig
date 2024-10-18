@@ -226,7 +226,7 @@ pub const File = struct {
             },
             .build => |build| {
                 // `build` contains info about python struct being constructed
-                switch (build.member) {
+                switch (build.obj) {
                     .object => |obj| switch (obj.member) {
                         .raw => |raw| switch (raw) {
                             .global => |global| {
@@ -247,13 +247,13 @@ pub const File = struct {
                                     d.value_ptr.* = .{ .string = val };
                                 }
                             },
-                            else => try self.parseValue(allocator, store, prefix, build.member), // parse normally
+                            else => try self.parseValue(allocator, store, prefix, build.obj), // parse normally
                         },
-                        else => try self.parseValue(allocator, store, prefix, build.member), // parse normally
+                        else => try self.parseValue(allocator, store, prefix, build.obj), // parse normally
                     },
-                    else => try self.parseValue(allocator, store, prefix, build.member), // parse normally
+                    else => try self.parseValue(allocator, store, prefix, build.obj), // parse normally
                 }
-                try self.parseValue(allocator, store, prefix, build.args);
+                try self.parseValue(allocator, store, prefix, build.state);
             },
             .pers_id => |pers_id| try self.parseValue(allocator, store, prefix, pers_id.ref),
             .seq => |seq| {
