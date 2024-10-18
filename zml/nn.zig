@@ -91,9 +91,9 @@ pub const LayerNorm = struct {
 
     pub fn forward(self: LayerNorm, x: Tensor) Tensor {
         const normed = normalizeVariance(x, self.eps);
-
-        var out = normed.mul(self.weight.broadcastLeft(x.shape()));
-        if (self.bias) |bias| out = out.add(bias.broadcastLeft(x.shape()));
+        const ax = x.axis(-1);
+        var out = normed.mul(self.weight.broadcast(x.shape(), &.{ax}));
+        if (self.bias) |bias| out = out.add(bias.broadcast(x.shape(), &.{ax}));
 
         return out;
     }
@@ -760,8 +760,8 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
     const dims = helpers.collectDims(.{ .h, .q, .k, .hd }, &.{ q, k, v, attn_mask }, .strict) catch {
         meta.panic(err_template ++ "Inputs have incompatible shapes.", err_args);
     };
-    const sqrtHeadDim: f16 = 1.0 / std.math.sqrt(@as(f16, @floatFromInt(dims.hd)));
-    const scale_logit = if (opts.scale) |s| s else Tensor.scalar(sqrtHeadDim, .f16);
+    const sqrtHeadDim: f32 = 1.0 / std.math.sqrt(@as(f32, @floatFromInt(dims.hd)));
+    const scale_logit = if (opts.scale) |s| s else Tensor.scalar(sqrtHeadDim, k.dtype());
     k = k.mul(scale_logit.convert(k.dtype()));
 
     var attn_weights = q.dot(k, .{.hd});
