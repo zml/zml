@@ -36,8 +36,8 @@ pub fn asyncMain() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
     const vae_model_path = args[1];
-    _ = vae_model_path; // autofix
     const unet_model_path = args[2];
+    _ = unet_model_path; // autofix
     const prompt_encoder_model_path = args[3];
     const vocab_path = args[4];
     const prompt = args[5];
@@ -70,6 +70,7 @@ pub fn asyncMain() !void {
         .{ .s = prompt_encoder_config.max_position_embeddings },
         prompt_tokens,
     );
+    _ = prompt_dev; // autofix
 
     const prompt_encoder_exe = blk: {
         var local_arena = std.heap.ArenaAllocator.init(allocator);
@@ -99,39 +100,53 @@ pub fn asyncMain() !void {
     };
     defer prompt_encoder_exe.deinit();
 
-    const prompt_embed = prompt_encoder_exe.call(.{prompt_dev});
-    _ = prompt_embed; // autofix
+    // const prompt_embed = prompt_encoder_exe.call(.{prompt_dev});
+    // _ = prompt_embed; // autofix
 
-    // var vae_weights = try zml.aio.detectFormatAndOpen(allocator, vae_model_path);
-    // defer vae_weights.deinit();
+    const vae_store = try zml.aio.detectFormatAndOpen(allocator, vae_model_path);
+    defer vae_store.deinit();
+    var vae = try zml.aio.populateModel(AutoEncoderKl, arena, vae_store);
+    const vae_weights = try zml.aio.loadModelBuffers(AutoEncoderKl, vae, vae_store, arena, platform);
+    // defer zml.aio.unloadBuffers(vae_weights);
 
-    // log.info("Loaded VAE from {s}, found {} buffers.", .{vae_model_path, vae_weights.buffers.count()});
-
-    var unet_store = try zml.aio.detectFormatAndOpen(allocator, unet_model_path);
-    defer unet_store.deinit();
-
-    log.info("Loaded unet from {s}, found {} buffers.", .{ unet_model_path, unet_store.buffers.count() });
-
-    var unet = try zml.aio.populateModel(Unet2DConditionModel, arena, unet_store);
-    unet.conv_norm_out.group_size = 32;
-    unet.conv_norm_out.eps = 1e-5;
+    log.info("Loaded VAE from {s}, found {} buffers.", .{ vae_model_path, vae_store.buffers.count() });
     const group_norm_conf: struct { u32, f32 } = .{ 32, 1e-5 };
+
+    log.info("vae.group_norm -> {}", .{vae.decoder.mid_block.attentions[0].group_norm});
     zml.meta.visit(struct {
-        fn cb(conf: struct { u32, f32 }, group_norm: *GroupNorm) void {
+        fn cb(conf: struct { u32, f32 }, group_norm: *zml.nn.GroupNorm) void {
             const group_size, const eps = conf;
             group_norm.group_size = group_size;
             group_norm.eps = eps;
         }
-    }.cb, group_norm_conf, &unet);
-    zml.meta.visit(struct {
-        fn cb(eps: f32, layer_norm: *zml.nn.LayerNorm) void {
-            layer_norm.eps = eps;
-        }
-    }.cb, 1e-5, &unet);
-    log.info("Unet: {}", .{unet});
+    }.cb, group_norm_conf, &vae);
+    log.info("vae.group_norm -> {}", .{vae.decoder.mid_block.attentions[0].group_norm});
+    try testVae(platform, activations, vae.decoder, vae_weights.decoder);
 
-    const unet_weights = try zml.aio.loadModelBuffers(Unet2DConditionModel, unet, unet_store, arena, platform);
-    try testUnet(platform, activations, unet, unet_weights);
+    // var unet_store = try zml.aio.detectFormatAndOpen(allocator, unet_model_path);
+    // defer unet_store.deinit();
+
+    // log.info("Loaded unet from {s}, found {} buffers.", .{ unet_model_path, unet_store.buffers.count() });
+
+    // var unet = try zml.aio.populateModel(Unet2DConditionModel, arena, unet_store);
+    // const group_norm_conf: struct { u32, f32 } = .{ 32, 1e-5 };
+    // zml.meta.visit(struct {
+    //     fn cb(conf: struct { u32, f32 }, group_norm: *GroupNorm) void {
+    //         const group_size, const eps = conf;
+    //         group_norm.group_size = group_size;
+    //         group_norm.eps = eps;
+    //     }
+    // }.cb, group_norm_conf, &unet);
+    // zml.meta.visit(struct {
+    //     fn cb(eps: f32, layer_norm: *zml.nn.LayerNorm) void {
+    //         layer_norm.eps = eps;
+    //     }
+    // }.cb, 1e-5, &unet);
+    // log.info("Unet: {}", .{unet});
+
+    // const unet_weights = try zml.aio.loadModelBuffers(Unet2DConditionModel, unet, unet_store, arena, platform);
+    // _ = unet_weights; // autofix
+    // try testUnet(platform, activations, unet, unet_weights);
 }
 
 fn testPromptEncoder(platform: zml.Platform, activations: zml.aio.BufferStore, encoder: ClipTextTransformer, encoder_weights: zml.Bufferized(ClipTextTransformer)) !void {
@@ -172,6 +187,76 @@ fn testUnet(platform: zml.Platform, activations: zml.aio.BufferStore, unet: Unet
     }
 }
 
+fn testVae(platform: zml.Platform, activations: zml.aio.BufferStore, vae: AutoEncoderKl.Decoder, vae_weights: zml.Bufferized(AutoEncoderKl.Decoder)) !void {
+    // TODO this seems a bit high
+    // try zml.testing.testLayer(platform, activations, "vae.decoder.conv_in", vae.conv_in, vae_weights.conv_in, 0.02);
+    // try zml.testing.testLayer(platform, activations, "vae.decoder.conv_out", vae.conv_out, vae_weights.conv_out, 0.02);
+    try zml.testing.testLayer(platform, activations, "vae.decoder.mid_block", vae.mid_block, vae_weights.mid_block, 0.02);
+}
+
+pub const AutoEncoderKl = struct {
+    decoder: Decoder,
+    post_quant_conv: Conv2dSame,
+
+    const Decoder = struct {
+        conv_in: Conv2dSame,
+        // up_blocks:
+        mid_block: UNetMidBlock2D,
+        conv_norm_out: zml.nn.GroupNorm,
+        conv_act: zml.nn.Activation = .silu,
+        conv_out: Conv2dSame,
+    };
+
+    pub const UNetMidBlock2D = struct {
+        attentions: []Attention,
+        resnets: []ResnetBlock2D,
+
+        pub fn forward(self: UNetMidBlock2D, images: zml.Tensor) zml.Tensor {
+            const x = images.withTags(.{ .b, .channels, .height, .width });
+            var hidden = self.resnets[0].forward(x, null);
+
+            for (self.attentions, self.resnets[1..]) |attn, resnet| {
+                hidden = attn.forward(hidden);
+                hidden = resnet.forward(hidden, null);
+            }
+            return hidden;
+        }
+    };
+
+    pub const Attention = struct {
+        group_norm: zml.nn.GroupNorm,
+        to_q: zml.nn.Linear,
+        to_k: zml.nn.Linear,
+        to_v: zml.nn.Linear,
+        to_out: struct { zml.nn.Linear },
+
+        pub fn forward(self: Attention, input: zml.Tensor) zml.Tensor {
+            const x0 = if (input.shape().isFullyTagged()) input else input.withTags(.{ .b, .channels, .height, .width });
+            var x = x0.merge(.{ .hw = .{ .height, .width } });
+            x = zml.nn.groupNorm(x, .channels, .hw, self.group_norm);
+            x = x.contiguous(.{.channels});
+            // log.info("x: {}", .{x});
+
+            const ctx = x.rename(.{ .hw = .k });
+            const nh = 1;
+            const q = zml.call(self.to_q, .forward, .{x.rename(.{ .hw = .q })}).splitAxis(.channels, .{ .h = nh, .hd = .auto });
+            // log.info("q: {}", .{q});
+            const k = zml.call(self.to_k, .forward, .{ctx}).splitAxis(.channels, .{ .h = nh, .hd = .auto });
+            // log.info("k: {}", .{k});
+            const v = zml.call(self.to_v, .forward, .{ctx}).splitAxis(.channels, .{ .h = nh, .hd = .auto });
+            // log.info("v: {}", .{v});
+
+            const attn_output = zml.nn.sdpa(q, k, v, .{});
+            const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .hw, .d = .channels });
+            var out = zml.call(self.to_out.@"0", .forward, .{attn});
+
+            out = out.splitAxis(.hw, .{ .height = x0.dim(.height), .width = .auto });
+            out = out.transpose(x0.shape());
+            return out;
+        }
+    };
+};
+
 pub const Unet2DConditionModel = struct {
     conv_in: Conv2dSame,
 
@@ -181,7 +266,7 @@ pub const Unet2DConditionModel = struct {
     mid_block: UNetMidBlock2DCrossAttn,
     up_blocks: UpBlocks,
 
-    conv_norm_out: GroupNorm,
+    conv_norm_out: zml.nn.GroupNorm,
     conv_act: zml.nn.Activation = .silu,
     conv_out: Conv2dSame,
 };
@@ -191,7 +276,7 @@ pub const Conv2dSame = struct {
     bias: zml.Tensor,
 
     pub fn forward(self: Conv2dSame, input: zml.Tensor) zml.Tensor {
-        const x = input.withPartialTags(.{ .channels, .width, .height });
+        const x = input.withPartialTags(.{ .channels, .height, .width });
         log.warn("Conv2dSame({}, {})", .{ self.weight, input });
         const y = zml.Tensor.conv2d(x, self.weight, .{
             .padding = &.{ 1, 1, 1, 1 },
@@ -202,27 +287,13 @@ pub const Conv2dSame = struct {
     }
 };
 
-pub const GroupNorm = struct {
-    weight: zml.Tensor,
-    bias: zml.Tensor,
+pub fn groupNorm2D(weights: zml.nn.GroupNorm, input: zml.Tensor) zml.Tensor {
+    // log.warn("GroupNorm({}, {})", .{ self.weight, input });
+    const x = input.withPartialTags(.{ .channels, .height, .width }).merge(.{ .hw = .{ .height, .width } });
 
-    group_size: u32,
-    eps: f32,
-
-    pub fn forward(self: GroupNorm, input: zml.Tensor) zml.Tensor {
-        const x = input.withPartialTags(.{ .channels, .width, .height });
-        log.warn("GroupNorm({}, {})", .{ self.weight, input });
-        var x_grouped = x.splitAxis(.channels, .{ .group = self.group_size, .c = .auto });
-        x_grouped = x_grouped.merge(.{ .cwh = .{ .c, .width, .height } });
-
-        const normed = zml.nn.normalizeVariance(x_grouped, .cwh, self.eps).reshape(x.shape());
-
-        var out = normed.mul(self.weight.withTags(.{.channels}).broad(x.shape()));
-        out = out.add(self.bias.withTags(.{.channels}).broad(x.shape()));
-
-        return out;
-    }
-};
+    const x_norm = zml.nn.groupNorm(x, .channels, .hw, weights);
+    return x_norm.reshape(input.shape());
+}
 
 pub const DownBlocks = struct {
     @"0": CrossAttnDownBlock2D,
@@ -279,7 +350,7 @@ pub const DownBlocks = struct {
         bias: zml.Tensor,
 
         pub fn forward(self: Conv2dHalf, input: zml.Tensor) zml.Tensor {
-            const x = input.withPartialTags(.{ .channels, .width, .height });
+            const x = input.withPartialTags(.{ .channels, .height, .width });
             const y = zml.Tensor.conv2d(
                 x,
                 self.weight,
@@ -301,8 +372,8 @@ pub const UNetMidBlock2DCrossAttn = struct {
         var hidden = self.resnets[0].forward(images, time_embedding);
 
         for (self.attentions, self.resnets[1..]) |attn, resnet| {
-            hidden = attn.forward(images, encoder_hidden_states);
-            hidden = resnet.forward(images, time_embedding);
+            hidden = attn.forward(hidden, encoder_hidden_states);
+            hidden = resnet.forward(hidden, time_embedding);
         }
         return hidden;
     }
@@ -363,51 +434,54 @@ pub const UpBlocks = struct {
 };
 
 pub const ResnetBlock2D = struct {
-    norm1: GroupNorm,
+    norm1: zml.nn.GroupNorm,
     conv1: Conv2dSame,
-    time_emb_proj: zml.nn.Linear,
-    norm2: GroupNorm,
+    time_emb_proj: ?zml.nn.Linear,
+    norm2: zml.nn.GroupNorm,
     conv2: Conv2dSame,
     nonlinearity: zml.nn.Activation = .silu,
     conv_shortcut: ?struct { weight: zml.Tensor },
     // TODO: output_scale_factor ?
 
-    pub fn forward(self: ResnetBlock2D, images: zml.Tensor, time_embedding: zml.Tensor) zml.Tensor {
-        const x = images.withPartialTags(.{ .batch, .channels, .width, .height });
-        var hidden = self.norm1.forward(x);
+    pub fn forward(self: ResnetBlock2D, images: zml.Tensor, time_embedding: ?zml.Tensor) zml.Tensor {
+        const x = images.withPartialTags(.{ .batch, .channels, .height, .width });
+        var hidden = groupNorm2D(self.norm1, x);
         hidden = self.nonlinearity.forward(hidden);
         hidden = self.conv1.forward(hidden);
 
-        var t_emb = time_embedding.withPartialTags(.{.channels});
-        t_emb = self.nonlinearity.forward(t_emb);
-        t_emb = self.time_emb_proj.forward(t_emb);
+        if (self.time_emb_proj) |time_emb_proj| {
+            var t_emb = time_embedding.?.withPartialTags(.{.channels});
+            t_emb = self.nonlinearity.forward(t_emb);
+            t_emb = time_emb_proj.forward(t_emb);
+            hidden = hidden.add(t_emb.appendAxes(.{ .height, .width }).broad(hidden.shape()));
+        } else {
+            zml.meta.assert(time_embedding == null, "This model doesn' support time embeddings", .{});
+        }
 
-        hidden = hidden.add(t_emb.appendAxes(.{ .width, .height }).broad(hidden.shape()));
-        hidden = self.norm2.forward(hidden);
-
+        hidden = groupNorm2D(self.norm2, hidden);
         hidden = self.nonlinearity.forward(hidden);
         hidden = self.conv2.forward(hidden);
 
         return if (self.conv_shortcut) |conv_shortcut| {
             const kernel = conv_shortcut.weight.withTags(.{ .channels_out, .channels, .w, .h });
             const shortcut = kernel.squeeze(.w).squeeze(.h);
-            const x2 = x.dot(shortcut, .{.channels}).rename(.{ .channels_out = .channels }).contiguous(.{ .channels, .width, .height });
+            const x2 = x.dot(shortcut, .{.channels}).rename(.{ .channels_out = .channels }).contiguous(.{ .channels, .height, .width });
             return x2.add(hidden);
         } else x.add(hidden);
     }
 };
 
 pub const Transformer2DModel = struct {
-    norm: GroupNorm,
+    norm: zml.nn.GroupNorm,
     proj_in: zml.nn.Linear,
     transformer_blocks: []BasicTransformerBlock,
     proj_out: zml.nn.Linear,
 
     pub fn forward(self: Transformer2DModel, images: zml.Tensor, encoder_hidden_states: zml.Tensor) zml.Tensor {
-        const x = images.withPartialTags(.{ .b, .channels, .width, .height });
+        const x = images.withPartialTags(.{ .b, .channels, .height, .width });
         var hidden = x;
-        hidden = self.norm.forward(hidden);
-        hidden = hidden.merge(.{ .wh = .{ .width, .height } }).contiguous(.{.channels});
+        hidden = groupNorm2D(self.norm, hidden);
+        hidden = hidden.merge(.{ .hw = .{ .height, .width } }).contiguous(.{.channels});
         hidden = self.proj_in.forward(hidden);
 
         for (self.transformer_blocks) |block| {
@@ -415,7 +489,7 @@ pub const Transformer2DModel = struct {
         }
 
         hidden = self.proj_out.forward(hidden);
-        hidden = hidden.contiguous(.{.wh}).splitAxis(.wh, .{ .width = x.dim(.width), .height = x.dim(.height) });
+        hidden = hidden.contiguous(.{.hw}).splitAxis(.hw, .{ .height = x.dim(.height), .width = .auto });
         return hidden.add(x);
     }
 };
@@ -435,15 +509,15 @@ pub const BasicTransformerBlock = struct {
         to_out: struct { zml.nn.Linear },
 
         pub fn forward(self: Attention, input: zml.Tensor, context: zml.Tensor) zml.Tensor {
-            const x = if (input.shape().isFullyTagged()) input else input.withTags(.{ .b, .wh, .channels });
+            const x = if (input.shape().isFullyTagged()) input else input.withTags(.{ .b, .hw, .channels });
             const ctx = if (input.shape().isFullyTagged()) context else context.withTags(.{ .b, .k, .channels });
             const nh = 5;
-            const q = zml.call(self.to_q, .forward, .{x.rename(.{ .wh = .q })}).splitAxis(.channels, .{ .h = nh, .hd = .auto });
+            const q = zml.call(self.to_q, .forward, .{x.rename(.{ .hw = .q })}).splitAxis(.channels, .{ .h = nh, .hd = .auto });
             const k = zml.call(self.to_k, .forward, .{ctx}).splitAxis(.channels, .{ .h = nh, .hd = .auto });
             const v = zml.call(self.to_v, .forward, .{ctx}).splitAxis(.channels, .{ .h = nh, .hd = .auto });
 
             const attn_output = zml.nn.sdpa(q, k, v, .{});
-            const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .wh, .d = .channels });
+            const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .hw, .d = .channels });
             const out = zml.call(self.to_out.@"0", .forward, .{attn});
             return out;
         }
@@ -462,20 +536,20 @@ pub const BasicTransformerBlock = struct {
         var hidden = images;
         {
             // First self-attention
-            var y = self.norm1.forward(hidden);
+            var y = groupNorm2D(self.norm1, hidden);
             y = self.attn1.forward(y, y.withPartialTags(.{ .k, .channels }));
             hidden = hidden.add(y);
         }
 
         {
             // Then cross-attention
-            var y = self.norm2.forward(hidden);
+            var y = groupNorm2D(self.norm2, hidden);
             y = self.attn2.forward(y, encoder_hidden_state.withTags(.{ .b, .k, .channels }));
             hidden = hidden.add(y);
         }
 
         {
-            var y = self.norm3.forward(hidden);
+            var y = groupNorm2D(self.norm3, hidden);
             y = self.ff.net.@"0".forward(y); // GEGLU
             y = self.ff.net.@"2".forward(y); // Linear
             hidden = hidden.add(y);
@@ -504,7 +578,6 @@ pub fn loadSdTurboTokenizer(allocator: std.mem.Allocator, vocab_json_path: []con
 
     const n: u32 = @intCast(json_vocab.count() + 1);
     const normalizer: zml.tokenizer.Normalizer = .{ .flags = .{
-        .escape_whitespaces = false,
         .remove_extra_whitespaces = true,
         .add_dummy_prefix = false,
         .add_dummy_suffix = true,
