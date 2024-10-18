@@ -15,8 +15,11 @@ pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore
     };
     errdefer res.arena.deinit();
 
+    // TODO(cryptodeal): this is incorrect, you should use a temporary arena for all intermediary allocations.
     const arena = res.arena.allocator();
 
+    // TODO(cryptodeal): mapped_file will never be close in case of success.
+    // You need to store it inside the result.
     var mapped_file = try zml.aio.MemoryMappedFile.init(try asynk.File.open(path, .{}));
     errdefer mapped_file.deinit();
 
@@ -42,7 +45,7 @@ pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore
             const ops = try torch_file.parsePickle(arena);
             const values = try eval.evaluate(arena, ops, true);
 
-            try torch_file.parseModel(arena, values, &res);
+            try torch_file.parseModel(values, &res);
             // Since we directly manipulate the file handle pointer,
             // reset to the end of file so iterator does not error
             // and avoid `skipBytes`.

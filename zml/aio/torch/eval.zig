@@ -58,7 +58,7 @@ pub const PickleMemo = struct {
                         }
                     }
                 },
-                .build => |v| {
+                .set_state => |v| {
                     if (v.obj.containsRef()) {
                         v.obj = try self.resolve(allocator, v.obj, recursive);
                     }
@@ -135,7 +135,7 @@ pub const PickleMemo = struct {
                 try self.resolveAllRefsIter(allocator, depth + 1, v.args, fix_values),
                 try self.resolveAllRefsIter(allocator, depth + 1, v.kwargs, fix_values),
             )),
-            .build => |v| .{ .build = try py.SetState.init(
+            .set_state => |v| .{ .set_state = try py.SetState.init(
                 allocator,
                 try self.resolveAllRefs(allocator, depth + 1, v.obj, fix_values),
                 try self.resolveAllRefs(allocator, depth + 1, v.state, fix_values),
@@ -179,7 +179,7 @@ pub fn evaluate(arena: std.mem.Allocator, x: []const pickle.Op, resolve_refs: bo
             .build => try stack.append(blk: {
                 const args = try memo.resolve(arena, try pop(&stack), true);
                 const member = try memo.resolve(arena, try pop(&stack), true);
-                break :blk .{ .build = try py.SetState.init(arena, member, args) };
+                break :blk .{ .set_state = try py.SetState.init(arena, member, args) };
             }),
             .empty_dict => try stack.append(.{ .seq = .{ .type = .dict, .values = &[_]py.Any{} } }),
             .get => |v| try stack.append(.{ .ref = v }),
@@ -194,7 +194,8 @@ pub fn evaluate(arena: std.mem.Allocator, x: []const pickle.Op, resolve_refs: bo
             }),
             .empty_tuple => try stack.append(.{ .seq = .{ .type = .tuple, .values = &[_]py.Any{} } }),
             .setitem => {
-                const v, const k = .{ try pop(&stack), try pop(&stack) };
+                const v = try memo.resolve(arena, try pop(&stack), true);
+                const k = try memo.resolve(arena, try pop(&stack), true);
                 const top = try lastMut(&stack);
                 const rtop = try memo.resolveMut(top, true);
                 switch (rtop.*) {
@@ -211,7 +212,7 @@ pub fn evaluate(arena: std.mem.Allocator, x: []const pickle.Op, resolve_refs: bo
                 }
             },
             .setitems => {
-                const popped = try popMark(&stack);
+                const popped = try memo.resolveAllRefsIter(arena, 0, try popMark(&stack), true);
                 const top = try lastMut(&stack);
                 const rtop = try memo.resolveMut(top, true);
                 switch (rtop.*) {

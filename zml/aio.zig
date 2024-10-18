@@ -104,6 +104,15 @@ pub const BufferStore = struct {
     buffers: Buffers = .{},
     _metadata: Metadatas = .{},
 
+    /// Create an empty BufferStore. Takes owneship of the given files.
+    pub fn init(allocator: std.mem.Allocator, files: []const MemoryMappedFile) error{OutOfMemory}!BufferStore {
+        var self: zml.aio.BufferStore = .{
+            .arena = std.heap.ArenaAllocator.init(allocator),
+        };
+        self.files = try self.arena.allocator().dupe(MemoryMappedFile, files);
+        return self;
+    }
+
     pub fn deinit(self: BufferStore) void {
         for (self.files) |*file| file.deinit();
         self.arena.deinit();

@@ -105,7 +105,7 @@ pub const Kind = enum {
     ref,
     app,
     object,
-    build,
+    set_state,
     pers_id,
     global,
     seq,
@@ -138,9 +138,10 @@ pub const Any = union(Kind) {
     /// thing, the second one is the arguments it got applied to.
     object: *Object,
 
-    /// Something we tried to build. The first tuple member is the
-    /// thing, the second one is the arguments it got applied to.
-    build: *SetState,
+    /// Correspond to the __set_state__ call when pickle finishes building an object.
+    /// The first tuple member is the target object,
+    /// the second one is the "state" argument
+    set_state: *SetState,
 
     /// References to persistant storage. They basically could be anything.
     /// You kind of have to know what the thing you're trying to
@@ -254,7 +255,7 @@ pub const Any = union(Kind) {
                 try writeIndents(indents + 1, writer);
                 try writer.writeAll("}");
             },
-            .build => |v| {
+            .set_state => |v| {
                 try writer.writeAll(".{\n");
                 try internalFormat(v.obj, indents + 2, writer);
                 try writer.writeAll(",\n");
@@ -263,7 +264,7 @@ pub const Any = union(Kind) {
                 try writeIndents(indents + 1, writer);
                 try writer.writeAll("}");
             },
-            inline .pers_id => |v| {
+            .pers_id => |v| {
                 try writer.writeByte('\n');
                 try internalFormat(v.ref, indents + 2, writer);
             },
@@ -309,7 +310,7 @@ pub const Any = union(Kind) {
     pub fn clone(self: Any, allocator: std.mem.Allocator) !Any {
         return switch (self) {
             inline .raw, .raw_num => |v, tag| @unionInit(Any, @tagName(tag), try v.clone(allocator)),
-            inline .app, .object, .global, .build, .pers_id => |v, tag| @unionInit(Any, @tagName(tag), try v.clone(allocator)),
+            inline .app, .object, .global, .set_state, .pers_id => |v, tag| @unionInit(Any, @tagName(tag), try v.clone(allocator)),
             .seq => |seq| {
                 const values = try allocator.alloc(Any, seq.values.len);
                 for (seq.values, 0..) |v, i| values[i] = try v.clone(allocator);
@@ -342,7 +343,7 @@ pub const Any = union(Kind) {
                 for (v.args) |arg| if (arg.containsRef()) return true;
                 return false;
             },
-            .build => |v| {
+            .set_state => |v| {
                 if (v.obj.containsRef()) return true;
                 if (v.state.containsRef()) return true;
                 return false;
@@ -408,7 +409,7 @@ pub const Any = union(Kind) {
                 }
                 break :blk self;
             },
-            .build => |v| blk: {
+            .set_state => |v| blk: {
                 v.obj = try v.obj.coerceFromRaw(allocator);
                 v.state = try v.state.coerceFromRaw(allocator);
                 break :blk self;

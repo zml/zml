@@ -7,7 +7,10 @@ const asynk = @import("async");
 const zml = @import("../../zml.zig");
 const pickle = @import("pickle.zig");
 const py = @import("py.zig");
+const eval = @import("eval.zig");
 const HostBuffer = zml.HostBuffer;
+
+// TODO(cryptodeal): use zml.aio.PrefixBuilder instead
 const StringBuilder = std.ArrayListUnmanaged(u8);
 
 test {
@@ -187,14 +190,16 @@ pub const File = struct {
         };
     }
 
-    pub fn parseModel(self: File, allocator: std.mem.Allocator, values: []const py.Any, store: *zml.aio.BufferStore) !void {
+    pub fn parseModel(self: File, values: []const py.Any, store: *zml.aio.BufferStore) !void {
         var prefix_buf: [1024]u8 = undefined;
+        const allocator = store.arena.allocator();
         for (values) |item| {
             try self.parseValue(allocator, store, StringBuilder.initBuffer(&prefix_buf), item);
         }
     }
 
     pub fn parseValue(self: File, allocator: std.mem.Allocator, store: *zml.aio.BufferStore, prefix: StringBuilder, v: py.Any) !void {
+        // log.warn("Parsing {}", .{v});
         switch (v) {
             .app, .object, .global => |object| {
                 if (!(try self.parseTorchGlobal(allocator, store, prefix, v))) {
@@ -224,9 +229,9 @@ pub const File = struct {
                     }
                 }
             },
-            .build => |build| {
-                // `build` contains info about python struct being constructed
-                switch (build.obj) {
+            .set_state => |set_state| {
+                // `set_state` contains info about python struct being constructed
+                switch (set_state.obj) {
                     .object => |obj| switch (obj.member) {
                         .raw => |raw| switch (raw) {
                             .global => |global| {
@@ -247,13 +252,13 @@ pub const File = struct {
                                     d.value_ptr.* = .{ .string = val };
                                 }
                             },
-                            else => try self.parseValue(allocator, store, prefix, build.obj), // parse normally
+                            else => try self.parseValue(allocator, store, prefix, set_state.obj), // parse normally
                         },
-                        else => try self.parseValue(allocator, store, prefix, build.obj), // parse normally
+                        else => try self.parseValue(allocator, store, prefix, set_state.obj), // parse normally
                     },
-                    else => try self.parseValue(allocator, store, prefix, build.obj), // parse normally
+                    else => try self.parseValue(allocator, store, prefix, set_state.obj), // parse normally
                 }
-                try self.parseValue(allocator, store, prefix, build.state);
+                try self.parseValue(allocator, store, prefix, set_state.state);
             },
             .pers_id => |pers_id| try self.parseValue(allocator, store, prefix, pers_id.ref),
             .seq => |seq| {
@@ -329,12 +334,18 @@ pub const File = struct {
                             const key, const val = seq.values[2 * i ..][0..2].*;
                             switch (key) {
                                 .string => |s| {
-                                    var new_prefix = prefix;
-                                    if (prefix.items.len > 0) {
-                                        new_prefix.appendAssumeCapacity('.');
+                                    // Handle Pytorch specific fields.
+                                    if (std.mem.eql(u8, s, "_modules") or std.mem.eql(u8, s, "_parameters") or std.mem.eql(u8, s, "_buffers")) {
+                                        try self.parseValue(allocator, store, prefix, val);
+                                    } else {
+                                        var new_prefix = prefix;
+                                        if (prefix.items.len > 0) {
+                                            new_prefix.appendAssumeCapacity('.');
+                                        }
+                                        new_prefix.appendSliceAssumeCapacity(s);
+
+                                        try self.parseValue(allocator, store, new_prefix, val);
                                     }
-                                    new_prefix.appendSliceAssumeCapacity(s);
-                                    try self.parseValue(allocator, store, new_prefix, val);
                                 },
                                 .int64 => |int| {
                                     var new_prefix = prefix;
@@ -613,30 +624,46 @@ const TarStream = struct {
 };
 
 test "Read pickle (zipped)" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+    // Note: this is not a good example to
+    var tmp_arena = std.heap.ArenaAllocator.init(testing.allocator);
+    const tmp_alloc = tmp_arena.allocator();
+    // test file created with following python snippet:
+    //
+    // import torch
+    // torch.manual_seed(0)
+    // model = torch.nn.Conv2d(2, 2, 3, stride=2, padding=[2, 4], dtype=torch.float16)
+    // tensor = torch.tensor([[2, 4, 3, 2]], dtype=torch.uint8)
+    // torch.save({ "model": model, "tensor": tensor}, "simple.pt")
     const file = try asynk.File.open("zml/aio/torch/simple.pt", .{ .mode = .read_only });
-    var torch_file = try File.init(allocator, file);
-    defer torch_file.close();
+    var torch_file = try File.init(tmp_alloc, file);
+    // We don't close the file directly, it will be closed by the store.
 
-    const ops = try torch_file.parsePickle(allocator);
-    defer {
-        for (ops) |op| op.deinit(allocator);
-        allocator.free(ops);
-    }
+    const ops = try torch_file.parsePickle(tmp_alloc);
+    try std.testing.expectEqual(302, ops.len);
 
-    var expected = [_]pickle.Op{
-        .{ .proto = 2 },
-        .empty_dict,
-        .{ .put = 0 },
-        .{ .unicode = "a" },
-        .{ .put = 1 },
-        .{ .int = 123 },
-        .setitem,
-        .stop,
-    };
-    try std.testing.expectEqualDeep(&expected, ops);
+    const py_values = try eval.evaluate(tmp_alloc, ops, true);
+    var store_arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer store_arena.deinit();
+
+    var store = try zml.aio.BufferStore.init(testing.allocator, &.{torch_file.buffer_file});
+    defer store.deinit();
+    try torch_file.parseModel(py_values, &store);
+
+    // Now free the tmp_arena, all data needed should have been copied into the store arena.
+    tmp_arena.deinit();
+
+    try zml.testing.expectEqualShapes(
+        zml.Shape.init(.{ 1, 4 }, .u8),
+        store.get("tensor").?.shape(),
+    );
+    try zml.testing.expectEqualShapes(
+        zml.Shape.init(.{ 2, 2, 3, 3 }, .f16),
+        store.get("model.weight").?.shape(),
+    );
+    try zml.testing.expectEqualShapes(
+        zml.Shape.init(.{2}, .f16),
+        store.get("model.bias").?.shape(),
+    );
 }
 
 fn isBadFilename(filename: []const u8) bool {
