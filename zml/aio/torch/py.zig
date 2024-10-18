@@ -216,14 +216,31 @@ pub const Any = union(Kind) {
             inline .ref, .int64, .float64 => |v| try writer.print("{d} ", .{v}),
             .app, .object, .global => |v| {
                 try writer.writeAll(".{\n");
+                try writeIndents(indents + 2, writer);
+                try writer.writeAll(".fn =");
                 try internalFormat(v.member, indents + 2, writer);
                 try writer.writeAll(",\n");
                 try writeIndents(indents + 2, writer);
+                try writer.writeAll(".args = ");
                 if (v.args.len > 0) {
                     try writer.writeAll(".{\n");
                     for (v.args, 0..) |arg, i| {
                         try internalFormat(arg, indents + 3, writer);
                         if (i < v.args.len - 1) try writer.writeAll(",");
+                        try writer.writeByte('\n');
+                    }
+                    try writeIndents(indents + 2, writer);
+                    try writer.writeAll("},\n");
+                } else {
+                    try writer.writeAll(".{},\n");
+                }
+                try writeIndents(indents + 2, writer);
+                try writer.writeAll(".kwargs =");
+                if (v.kwargs.len > 0) {
+                    try writer.writeAll(".{\n");
+                    for (v.kwargs, 0..) |arg, i| {
+                        try internalFormat(arg, indents + 3, writer);
+                        if (i < v.kwargs.len - 1) try writer.writeAll(",");
                         try writer.writeByte('\n');
                     }
                     try writeIndents(indents + 2, writer);

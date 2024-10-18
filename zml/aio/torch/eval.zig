@@ -199,7 +199,7 @@ pub fn evaluate(arena: std.mem.Allocator, x: []const pickle.Op, resolve_refs: bo
                 const rtop = try memo.resolveMut(top, true);
                 switch (rtop.*) {
                     .global => |obj| {
-                        try append(arena, &obj.args, &.{ k, v });
+                        try append(arena, &obj.kwargs, &.{ k, v });
                     },
                     .seq => |*dict| {
                         if (dict.type != .dict) return error.BadStackTopForSetItem;
@@ -216,7 +216,7 @@ pub fn evaluate(arena: std.mem.Allocator, x: []const pickle.Op, resolve_refs: bo
                 const rtop = try memo.resolveMut(top, true);
                 switch (rtop.*) {
                     .global => |obj| {
-                        try append(arena, &obj.args, popped);
+                        try append(arena, &obj.kwargs, popped);
                     },
                     .seq => |*dict| {
                         if (dict.type != .dict) return error.BadStackTopForSetItems;

@@ -124,7 +124,6 @@ pub const File = struct {
         while (file_iter.next()) |e| {
             const entry = e.value_ptr.*;
             const filename = e.key_ptr.*;
-            log.warn("filename: {s}", .{filename});
             if (!std.mem.endsWith(u8, filename, "data.pkl")) continue;
 
             self.zip_prefix = filename[0 .. filename.len - "data.pkl".len];
@@ -202,6 +201,26 @@ pub const File = struct {
                     try self.parseValue(allocator, store, prefix, object.member);
                     for (object.args) |item| {
                         try self.parseValue(allocator, store, prefix, item);
+                    }
+                    if (object.kwargs.len % 2 != 0) return error.InvalidInput;
+                    const n_kwargs = @divExact(object.kwargs.len, 2);
+
+                    for (0..n_kwargs) |i| {
+                        const key, const val = object.kwargs[2 * i ..][0..2].*;
+                        // kwargs can only be keyed by string.
+                        if (key != .string) return error.InvalidInput;
+                        // Handle Pytorch specific fields
+                        const s = key.string;
+                        if (std.mem.eql(u8, s, "_modules") or std.mem.eql(u8, s, "_parameters") or std.mem.eql(u8, s, "_buffers")) {
+                            try self.parseValue(allocator, store, prefix, val);
+                        } else {
+                            var new_prefix = prefix;
+                            if (prefix.items.len > 0) {
+                                new_prefix.appendAssumeCapacity('.');
+                            }
+                            new_prefix.appendSliceAssumeCapacity(s);
+                            try self.parseValue(allocator, store, new_prefix, val);
+                        }
                     }
                 }
             },
@@ -305,21 +324,17 @@ pub const File = struct {
                     },
                     .dict => {
                         const n = @divExact(seq.values.len, 2);
+                        log.info("found dict with {} entries", .{n});
                         for (0..n) |i| {
                             const key, const val = seq.values[2 * i ..][0..2].*;
                             switch (key) {
                                 .string => |s| {
-                                    // Handle Pytorch specific fields
-                                    if (std.mem.eql(u8, s, "_modules") or std.mem.eql(u8, s, "_parameters") or std.mem.eql(u8, s, "_buffers")) {
-                                        try self.parseValue(allocator, store, prefix, val);
-                                    } else {
-                                        var new_prefix = prefix;
-                                        if (prefix.items.len > 0) {
-                                            new_prefix.appendAssumeCapacity('.');
-                                        }
-                                        new_prefix.appendSliceAssumeCapacity(s);
-                                        try self.parseValue(allocator, store, new_prefix, val);
+                                    var new_prefix = prefix;
+                                    if (prefix.items.len > 0) {
+                                        new_prefix.appendAssumeCapacity('.');
                                     }
+                                    new_prefix.appendSliceAssumeCapacity(s);
+                                    try self.parseValue(allocator, store, new_prefix, val);
                                 },
                                 .int64 => |int| {
                                     var new_prefix = prefix;
@@ -329,7 +344,10 @@ pub const File = struct {
                                     new_prefix.items.len += std.fmt.formatIntBuf(new_prefix.unusedCapacitySlice(), int, 10, .lower, .{});
                                     try self.parseValue(allocator, store, new_prefix, val);
                                 },
-                                inline else => |_, tag| std.debug.panic("Unexpected key type: {s}", .{@tagName(tag)}),
+                                inline else => |_, tag| {
+                                    log.debug("Ignoring unsupported key type found in torch file: {s}", .{@tagName(tag)});
+                                    continue;
+                                },
                             }
                         }
                     },
