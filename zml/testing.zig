@@ -69,6 +69,12 @@ pub fn expectClose(left_: anytype, right_: anytype, tolerance: f32) !void {
         log.err("left.dtype ({}) != right.dtype ({})", .{ left.dtype(), right.dtype() });
         return error.TestUnexpectedResult;
     }
+    if (!left.isContiguous()) {
+        log.err("Left input isn't contiguous: {} ({d})", .{ left, left.strides().? });
+    }
+    if (!right.isContiguous()) {
+        log.err("Right input isn't contiguous: {} ({d})", .{ right, right.strides().? });
+    }
     switch (left.dtype()) {
         inline .f16, .f32, .f64 => |t| {
             const L = t.toZigType();
