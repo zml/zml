@@ -1268,6 +1268,7 @@ pub const Tensor = struct {
     }
 
     /// Returns a Tensor containing the sum of elements over the given axis.
+    /// Ouput shape is the input shape with the axis_ dim set to 1.
     pub fn sum(self: Tensor, axis_: anytype) Tensor {
         const a = self.axis(axis_);
         return ops.reduce(
@@ -1283,6 +1284,7 @@ pub const Tensor = struct {
     }
 
     /// Returns a Tensor containing the mean of elements over the given axis.
+    /// Ouput shape is the input shape with the axis_ dim set to 1.
     pub fn mean(self: Tensor, axis_: anytype) Tensor {
         return self.sum(axis_).divByConst(self.dim(axis_));
     }
@@ -2760,7 +2762,7 @@ pub const Tensor = struct {
         window_strides: ?i64,
         base_dilations: i64 = 1,
         window_dilations: i64 = 1,
-        padding: []const i64 = &.{0},
+        padding: [2]i64 = .{ 0, 0 },
     }) MaxPoolRes {
         // TODO migrate to the following syntax.
         // maxPool(.{.a = .{ .stride = 5, .dilation = 2, .padding = .{0, 1} },
@@ -2771,16 +2773,21 @@ pub const Tensor = struct {
         //     .padding = .{ .a = .{ 0, 2 }, .b = .{0, 2}
         // })
 
-        meta.assert(opts.padding.len == 1 or opts.padding.len == 2 * self.rank(), "maxPool1d expects 'opts.padding' length to be a single integer or to be equal to the double of input tensor rank, got {} (input tensor rank is {})", .{ opts.padding.len, self.rank() });
-
-        // Note: the problem is initPoolArg assuming last axis
         // TODO: support maxPool on non last axis
         const a = self.axis(-1);
+        const ones = [_]i64{1} ** Tensor.MAX_RANK;
+        var window_dimensions = ones;
+        window_dimensions[a] = opts.window_dimensions;
+        var window_strides = window_dimensions;
+        if (opts.window_strides) |stride| window_strides[a] = stride;
 
-        const window_dimensions = initPoolArg(self.rank(), &.{opts.window_dimensions});
-        const window_strides = if (opts.window_strides) |ws| initPoolArg(self.rank(), &.{ws}) else window_dimensions;
-        const base_dilation = initPoolArg(self.rank(), &.{opts.base_dilations});
-        const window_dilations = initPoolArg(self.rank(), &.{opts.window_dilations});
+        var base_dilations = ones;
+        base_dilations[a] = opts.base_dilations;
+        var window_dilations = ones;
+        window_dilations[a] = opts.window_dilations;
+
+        var padding = [_][2]i64{.{ 0, 0 }} ** Tensor.MAX_RANK;
+        padding[a] = opts.padding;
 
         return ops.reduceWindow(
             MaxPoolRes.cmp,
@@ -2789,38 +2796,36 @@ pub const Tensor = struct {
             .{
                 .window_dimensions = window_dimensions[0..self.rank()],
                 .window_strides = window_strides[0..self.rank()],
-                .base_dilations = base_dilation[0..self.rank()],
+                .base_dilations = base_dilations[0..self.rank()],
                 .window_dilations = window_dilations[0..self.rank()],
-                .padding_values = opts.padding,
-                .padding_shape = &.{ @intCast(self.rank()), 2 },
+                .padding = padding[0..self.rank()],
             },
         );
     }
 
     /// Computes the 2d maxPool operation on the input Tensor.
     pub fn maxPool2d(self: Tensor, opts: struct {
-        window_dimensions: []const i64,
-        window_strides: ?[]const i64 = null,
-        base_dilations: []const i64 = &.{ 1, 1 },
-        window_dilations: []const i64 = &.{ 1, 1 },
-        padding: []const i64 = &.{0},
+        window_dimensions: [2]i64,
+        window_strides: ?[2]i64 = null,
+        base_dilations: [2]i64 = .{ 1, 1 },
+        window_dilations: [2]i64 = .{ 1, 1 },
+        padding: [2][2]i64 = .{ .{ 0, 0 }, .{ 0, 0 } },
     }) MaxPoolRes {
-        // TODO: rewrite using modern ZML, add ops.reduceWindow
+        // TODO: rewrite using modern ZML
         meta.guard(self.rank() == 3 or self.rank() == 4, @src());
-        meta.guard(opts.window_dimensions.len == 2, @src());
-        meta.guard(opts.window_strides == null or opts.window_strides.?.len == 2, @src());
-        meta.guard(opts.base_dilations.len == 2, @src());
-        meta.guard(opts.window_dilations.len == 2, @src());
-        meta.assert(opts.padding.len == 1 or opts.padding.len == 2 * self.rank(), "Padding needs to either be a single integer, or to be 2x time the number of input rank. In maxPool({}, .padding={d})", .{ self, opts.padding });
 
         // TODO: support maxPool on non last axis
         // Note: the problem is initPoolArg assuming last axis
         const a = self.axis(-1);
 
-        const window_dimensions = initPoolArg(self.rank(), opts.window_dimensions);
-        const window_strides = if (opts.window_strides) |ws| initPoolArg(self.rank(), ws) else window_dimensions;
-        const base_dilation = initPoolArg(self.rank(), opts.base_dilations);
-        const window_dilations = initPoolArg(self.rank(), opts.window_dilations);
+        const window_dimensions = initPoolArg(self.rank(), &opts.window_dimensions);
+        const window_strides = if (opts.window_strides) |ws| initPoolArg(self.rank(), &ws) else window_dimensions;
+        const base_dilation = initPoolArg(self.rank(), &opts.base_dilations);
+        const window_dilations = initPoolArg(self.rank(), &opts.window_dilations);
+
+        var padding = [_][2]i64{.{ 0, 0 }} ** Tensor.MAX_RANK;
+        padding[a - 1] = opts.padding[0];
+        padding[a] = opts.padding[1];
 
         return ops.reduceWindow(
             MaxPoolRes.cmp,
@@ -2831,8 +2836,7 @@ pub const Tensor = struct {
                 .window_strides = window_strides[0..self.rank()],
                 .base_dilations = base_dilation[0..self.rank()],
                 .window_dilations = window_dilations[0..self.rank()],
-                .padding_values = opts.padding,
-                .padding_shape = &.{ @intCast(self.rank()), 2 },
+                .padding = padding[0..self.rank()],
             },
         );
     }
@@ -3559,8 +3563,8 @@ test "Tensor.maxPool2d" {
     const MaxPool = struct {
         pub fn forward(x: Tensor) Tensor.ArgMaxRes {
             return x.maxPool2d(.{
-                .window_dimensions = &.{ 3, 2 },
-                .window_strides = &.{ 2, 1 },
+                .window_dimensions = .{ 3, 2 },
+                .window_strides = .{ 2, 1 },
             });
         }
     };
