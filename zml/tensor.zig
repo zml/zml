@@ -1289,6 +1289,54 @@ pub const Tensor = struct {
         return self.sum(axis_).divByConst(self.dim(axis_));
     }
 
+    /// Returns a Tensor containing the cumulative sum of elementes over the given axis.
+    /// Ouput shape is the same as input shape.
+    /// [0, 1, 0, 1, 0, 0, 1, 1].cumulativeSum(0) -> [0, 1, 1, 2, 2, 2, 3, 4]
+    pub fn cumulativeSum(self: Tensor, axis_: anytype) Tensor {
+        const rk = self.rank();
+        const a = self.axis(axis_);
+
+        const ones = [_]i64{1} ** MAX_RANK;
+        var window_dimensions = ones;
+        window_dimensions[a] = self.dim(a);
+        var padding = [_][2]i64{.{ 0, 0 }} ** MAX_RANK;
+        padding[a] = .{ self.dim(a) - 1, 0 };
+        return ops.reduceWindow(
+            Tensor.add,
+            self,
+            Tensor.scalar(0, self.dtype()),
+            .{
+                .base_dilations = ones[0..rk],
+                .window_dilations = ones[0..rk],
+                .window_strides = ones[0..rk],
+                .window_dimensions = window_dimensions[0..rk],
+                .padding = padding[0..rk],
+            },
+        );
+    }
+
+    test cumulativeSum {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        // Wrap slice1d to hide the anytype in the signature.
+        const Local = struct {
+            pub fn _cumsum(input: Tensor) Tensor {
+                return input.cumulativeSum(-1);
+            }
+        };
+
+        const x = try zml.Buffer.fromArray(
+            platform,
+            [2][5]f32{ .{ 0, 1, 1, 0, 1 }, .{ 3, 1, 0, 2, 1 } },
+        );
+        const res = try zml.testing.compileAndCall(platform, Local._cumsum, .{x});
+        try testing.expectEqual(
+            [2][5]f32{ .{ 0, 1, 2, 2, 3 }, .{ 3, 4, 4, 6, 7 } },
+            try res.getValue([2][5]f32),
+        );
+    }
+
     /// Returns a transposed Tensor computed using the given axes.
     pub fn transpose(self: Tensor, axes_: anytype) Tensor {
         const axes__ = self.axes(axes_).constSlice();
