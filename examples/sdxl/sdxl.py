@@ -21,7 +21,7 @@ filename = model_path.split("/")[-1] + ".activations.pt"
 print(f"Found {len(activations)} activations")
 for k in list(activations.keys()):
     if (activations[k].dtype == torch.float32):
-        activations[k] = activations[k].to(torch.float16);
+        activations[k] = activations[k].to(torch.float16).contiguous();
 
 breakpoint()
 print(f"Saving {len(activations)} activations to {filename}")
