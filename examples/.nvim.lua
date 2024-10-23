@@ -7,6 +7,7 @@ else
         settings = {
             zls = {
                 enable_autofix = true,
+                zig_exe_path = vim.fn.getcwd() .. "/tools/zig.sh"
             },
         },
     }
