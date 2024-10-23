@@ -1321,7 +1321,7 @@ pub const Tensor = struct {
         else
             .{ self.dim(a) - 1, 0 };
 
-        return ops.reduceWindow(
+        var res = ops.reduceWindow(
             Tensor.add,
             self,
             Tensor.scalar(0, self.dtype()),
@@ -1333,6 +1333,8 @@ pub const Tensor = struct {
                 .padding = padding[0..rk],
             },
         );
+        res._shape = self._shape;
+        return res;
     }
 
     test cumulativeSum {
