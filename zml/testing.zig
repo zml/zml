@@ -70,7 +70,7 @@ pub fn expectClose(left_: anytype, right_: anytype, tolerance: f32) !void {
         return error.TestUnexpectedResult;
     }
     switch (left.dtype()) {
-        inline .f16, .f32, .f64 => |t| {
+        inline .f16, .bf16, .f32, .f64 => |t| {
             const L = t.toZigType();
             const left_data = left.items(L);
             switch (right.dtype()) {
@@ -78,7 +78,7 @@ pub fn expectClose(left_: anytype, right_: anytype, tolerance: f32) !void {
                     const R = rt.toZigType();
                     const right_data = right.items(R);
                     for (left_data, right_data, 0..) |l, r, i| {
-                        if (!approxEq(L, l, zml.floats.floatCast(L, r), @floatCast(tolerance))) {
+                        if (!approxEq(f32, zml.floats.floatCast(f32, l), zml.floats.floatCast(f32, r), tolerance)) {
                             log.err("left.data != right_data.\n < {d:.3} \n > {d:.3}\n  error at idx {d}: {d:.3} != {d:.3}", .{ center(left_data, i), center(right_data, i), i, left_data[i], right_data[i] });
                             return error.TestUnexpectedResult;
                         }
