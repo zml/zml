@@ -701,7 +701,6 @@ pub fn causalAttnMask(
     }
 
     if (dtype.isFloat()) {
-        meta.guard(dtype.isFloat(), @src()); // -inf only exists for floats
         const zeros = Tensor.constant(mask.shape(), dtype.zero());
         const minus_inf = Tensor.constant(mask.shape(), dtype.minValue());
         mask = Tensor.select(mask, zeros, minus_inf);

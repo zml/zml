@@ -3340,6 +3340,77 @@ pub const Tensor = struct {
         return _result(self._shape.withDtype(.bool), op.result(0));
     }
 
+    /// For each matrix specified by the two axes, returns the lower triangular part of it.
+    /// The other elements are set to 0.
+    /// Usage: `.{ .b = 32, .w = 20, .h = 20 }.triangular(.{ .w, .h}, 0);`
+    ///
+    /// * if `num_diagonals` is set to 0, the diagonal is not modified.
+    /// * if set to -1, the diagonal is set to 0
+    /// * if set to n, the n "quasi diagonal" above the diagonal are conserved.
+    ///
+    /// To get the upper triangular part, swap the order of axes:
+    /// `.{ .b = 32, .w = 20, .h = 20 }.triangular(.{ .h, .w }, 0);`
+    pub fn triangular(self: Tensor, axes_: anytype, num_diagonals: i32) Tensor {
+        meta.assertComptime(meta.isTuple(@TypeOf(axes_)) and axes_.len == 2, "triangular expects exactly two axes to work on.", .{});
+        const _axes = self.axes(axes_);
+
+        const x = Tensor.iota(self.shape(), .i32, _axes.get(0));
+        const y = Tensor.iota(self.shape(), .i32, _axes.get(1));
+
+        const zeros = Tensor.constant(self.shape(), self.dtype().zero());
+        return x.addConstant(num_diagonals).cmp(.GE, y).select(self, zeros);
+    }
+
+    test triangular {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        const Local = struct {
+            pub fn _tri(input: Tensor, num_diagonals: i32) Tensor {
+                return input.triangular(.{ -2, -1 }, num_diagonals);
+            }
+        };
+
+        const x = try zml.Buffer.fromArray(platform, [3][3]u8{
+            .{ 1, 1, 1 },
+            .{ 1, 1, 1 },
+            .{ 1, 1, 1 },
+        });
+        {
+            const res = try zml.testing.compileAndCall(platform, Local._tri, .{ x, 0 });
+            try testing.expectEqual(
+                [3][3]u8{
+                    .{ 1, 0, 0 },
+                    .{ 1, 1, 0 },
+                    .{ 1, 1, 1 },
+                },
+                try res.getValue([3][3]u8),
+            );
+        }
+        {
+            const res = try zml.testing.compileAndCall(platform, Local._tri, .{ x, 1 });
+            try testing.expectEqual(
+                [3][3]u8{
+                    .{ 1, 1, 0 },
+                    .{ 1, 1, 1 },
+                    .{ 1, 1, 1 },
+                },
+                try res.getValue([3][3]u8),
+            );
+        }
+        {
+            const res = try zml.testing.compileAndCall(platform, Local._tri, .{ x, -1 });
+            try testing.expectEqual(
+                [3][3]u8{
+                    .{ 0, 0, 0 },
+                    .{ 1, 0, 0 },
+                    .{ 1, 1, 0 },
+                },
+                try res.getValue([3][3]u8),
+            );
+        }
+    }
+
     /// For each element at index `i`, if `bool_tensor[i] == true`, `output[i] = on_true[i]`
     /// otherwise, if `bool_tensor[i] == false`, `output[i] = on_false[i]`
     pub fn select(bool_tensor: Tensor, on_true: Tensor, on_false: Tensor) Tensor {
@@ -3508,7 +3579,7 @@ pub const Tensor = struct {
     ) fn (Tensor, Tensor) Tensor {
         return struct {
             pub fn binaryOpHelper(self: Tensor, other: Tensor) Tensor {
-                meta.assert(self.dtype() == other.dtype(), "{s} expects tensor to be of same type, got {} and {}", .{ op_name, self.dtype(), other.dtype() });
+                meta.assert(self.dtype() == other.dtype(), "{s} expects tensor to be of same type, got {} and {}", .{ op_name, self, other });
 
                 if (self.rank() == 0 and other.rank() != 0) {
                     return binaryOpHelper(self.broad(other._shape), other);
