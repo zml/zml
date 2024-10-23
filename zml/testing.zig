@@ -69,6 +69,12 @@ pub fn expectClose(left_: anytype, right_: anytype, tolerance: f32) !void {
         log.err("left.dtype ({}) != right.dtype ({})", .{ left.dtype(), right.dtype() });
         return error.TestUnexpectedResult;
     }
+    if (!left.isContiguous()) {
+        log.err("Left input isn't contiguous: {} ({d})", .{ left, left.strides().? });
+    }
+    if (!right.isContiguous()) {
+        log.err("Right input isn't contiguous: {} ({d})", .{ right, right.strides().? });
+    }
     switch (left.dtype()) {
         inline .bf16,
         .f16,
@@ -208,40 +214,9 @@ pub fn testLayerOut(
     }
     const mod = try exe.prepare(alloc, layer_weights);
 
-    const FetchCtx = struct {
-        store: zml.aio.BufferStore,
-        index: u32,
-        prefix: std.ArrayListUnmanaged(u8),
-        platform: zml.Platform,
-
-        fn fetch(ctx: *@This(), x: zml.Tensor) zml.Buffer {
-            _ = x;
-            defer ctx.index += 1;
-            var full_prefix = ctx.*.prefix;
-            _ = full_prefix.writer(undefined).print("{d}", .{ctx.index}) catch unreachable;
-            log.info("prefix: {s}", .{full_prefix.items});
-            const host = ctx.store.get(full_prefix.items) orelse {
-                log.err("Didn't find test input: {s}", .{full_prefix.items});
-                @panic("Missing test input");
-            };
-            return host.toDevice(ctx.platform) catch unreachable;
-        }
-    };
-
-    // Note: zml.populateModelWithPrefix isn't enough,
-    // because it assumes we have the same structure in the activation file
-    // than in the function signature.
-    // But for sake of decoupling the reference implementation
-    // and ZML code that's not always the case.
-    {
-        var input_buffers: zml.Bufferized(FwdSign.ArgsT) = undefined;
-        var fetch_ctx: FetchCtx = .{ .store = activations, .index = 0, .prefix = .{}, .platform = platform };
-        try fetch_ctx.prefix.ensureTotalCapacity(alloc, name.len + 32);
-        fetch_ctx.prefix.appendSliceAssumeCapacity(name ++ ".in.");
-        try zml.meta.mapAlloc(FetchCtx.fetch, alloc, &fetch_ctx, input_tensors, &input_buffers);
-        defer zml.aio.unloadBuffers(&input_buffers);
-        _ = mod.call(input_buffers);
-    }
+    var input_buffers = try zml.aio.loadModelBuffersWithPrefix(FwdSign.ArgsT, input_tensors, activations, alloc, platform, name ++ ".in");
+    defer zml.aio.unloadBuffers(&input_buffers);
+    _ = mod.call(input_buffers);
 
     var buf: [1024]u8 = undefined;
     for (0..mod.inner.result_buffer_count) |i| {

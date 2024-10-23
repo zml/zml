@@ -224,6 +224,8 @@ pub fn MapType(From: type, To: type) type {
                 From => return To,
                 *From => return *To,
                 ?From => return ?To,
+                []From => return []To,
+                []const From => return []const To,
                 else => {},
             }
 
@@ -292,7 +294,7 @@ pub fn MapType(From: type, To: type) type {
 /// `mapAlloc` can allocate new slices to write the result if the result struct requires it.
 /// The caller is owning said allocations, using an `ArenaAllocator` might help tracking them.
 // TODO: handle tuple to slice conversion
-pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam(cb, 0), from: anytype, to: anytype) !void {
+pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam(cb, 0), from: anytype, to: anytype) error{OutOfMemory}!void {
     // const Ctx = FnParam(cb, 0);
     const From = FnParam(cb, 1);
     const FromStruct = @TypeOf(from);
