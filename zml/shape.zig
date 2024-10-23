@@ -523,11 +523,11 @@ pub const Shape = struct {
         return res;
     }
 
-    pub fn remove(self: Shape, d: anytype) Shape {
+    pub fn remove(self: Shape, axis_: anytype) Shape {
         var res = self;
-        const d_ = self.axis(d);
-        _ = res._dims.orderedRemove(d_);
-        _ = res._tags.orderedRemove(d_);
+        const a = self.axis(axis_);
+        _ = res._dims.orderedRemove(a);
+        _ = res._tags.orderedRemove(a);
         return res;
     }
 
