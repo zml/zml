@@ -1289,21 +1289,11 @@ pub const Tensor = struct {
         return self.sum(axis_).divByConst(self.dim(axis_));
     }
 
-    pub const CumulativeSumOpt = struct {
-        start_with_zero: bool = false,
-    };
-
     /// Returns a Tensor containing the cumulative sum of elements over the given axis.
     /// Ouput shape is the same as input shape.
-    /// [0, 1, 0, 1, 0, 0, 1, 1].cumulativeSum(0, .{}) -> [0, 1, 1, 2, 2, 2, 3, 4]
+    /// [0, 1, 0, 1, 0, 0, 1, 1].cumulativeSum(0) -> [0, 1, 1, 2, 2, 2, 3, 4]
     /// The last value contains the sum of all element in the array.
-    ///
-    /// When `.start_with_zero = true` is set,
-    /// we do the cumulative sum up to the last value.
-    /// This "shift" the results to the right:
-    /// [0, 1, 0, 1, 0, 0, 1, 1].cumulativeSum(0, .{ .start_with_zero = true }) -> [0, 0, 1, 1, 2, 2, 2, 3]
-    /// This is sometimes preferred if eg, you want to sample from a distribution of probabilities.
-    pub fn cumulativeSum(self: Tensor, axis_: anytype, opts: CumulativeSumOpt) Tensor {
+    pub fn cumulativeSum(self: Tensor, axis_: anytype) Tensor {
         const rk = self.rank();
         const a = self.axis(axis_);
 
@@ -1311,10 +1301,7 @@ pub const Tensor = struct {
         var window_dimensions = ones;
         window_dimensions[a] = self.dim(a);
         var padding = [_][2]i64{.{ 0, 0 }} ** MAX_RANK;
-        padding[a] = if (opts.start_with_zero)
-            .{ self.dim(a), -1 }
-        else
-            .{ self.dim(a) - 1, 0 };
+        padding[a] = .{ self.dim(a) - 1, 0 };
 
         var res = ops.reduceWindow(
             Tensor.add,
@@ -1337,8 +1324,8 @@ pub const Tensor = struct {
         const platform = zml.testing.env();
 
         const Local = struct {
-            pub fn _cumsum(input: Tensor, opt: CumulativeSumOpt) Tensor {
-                return input.cumulativeSum(-1, opt);
+            pub fn _cumsum(input: Tensor) Tensor {
+                return input.withPartialTags(.{.n}).cumulativeSum(.n);
             }
         };
 
@@ -1346,21 +1333,11 @@ pub const Tensor = struct {
             platform,
             [2][5]f32{ .{ 0, 1, 1, 0, 1 }, .{ 3, 1, 0, 2, 1 } },
         );
-        {
-            const res = try zml.testing.compileAndCall(platform, Local._cumsum, .{ x, .{ .start_with_zero = false } });
-            try testing.expectEqual(
-                [2][5]f32{ .{ 0, 1, 2, 2, 3 }, .{ 3, 4, 4, 6, 7 } },
-                try res.getValue([2][5]f32),
-            );
-        }
-
-        {
-            const res = try zml.testing.compileAndCall(platform, Local._cumsum, .{ x, .{ .start_with_zero = true } });
-            try testing.expectEqual(
-                [2][5]f32{ .{ 0, 0, 1, 2, 2 }, .{ 0, 3, 4, 4, 6 } },
-                try res.getValue([2][5]f32),
-            );
-        }
+        const res = try zml.testing.compileAndCall(platform, Local._cumsum, .{x});
+        try testing.expectEqual(
+            [2][5]f32{ .{ 0, 1, 2, 2, 3 }, .{ 3, 4, 4, 6, 7 } },
+            try res.getValue([2][5]f32),
+        );
     }
 
     /// Returns a transposed Tensor computed using the given axes.
@@ -1944,47 +1921,45 @@ pub const Tensor = struct {
         return _result(output_shape, reshape_value.result(0));
     }
 
-    pub const Pad1dOpts = struct { low: i64, high: i64, interior: i64 = 0 };
-
-    /// Pads the input Tensor with the given value over the given axis.
-    pub fn pad1d(self: Tensor, axis_: i8, pad_value: anytype, opts: Pad1dOpts) Tensor {
-        const ZEROS = [_]i64{0} ** MAX_RANK;
-        var padding_low = ZEROS;
-        var padding_high = ZEROS;
-        var padding_interior = ZEROS;
-        const a = self.axis(axis_);
-        padding_low[a] = opts.low;
-        padding_high[a] = opts.high;
-        padding_interior[a] = opts.interior;
-
-        const rk = self.rank();
-        return self.pad(
-            pad_value,
-            .{ .low = padding_low[0..rk], .high = padding_high[0..rk], .interior = padding_interior[0..rk] },
-        );
-    }
+    pub const Pad = struct {
+        low: i32 = 0,
+        high: i32 = 0,
+        interior: i32 = 0,
+    };
 
     /// Pads the input Tensor with the given values.
-    pub fn pad(self: Tensor, pad_value: anytype, opts: dialect.stablehlo.PadOpts) Tensor {
-        meta.assert(opts.low.len == self.rank(), "pad expects tensor rank and 'opts.low' length to be equal, got {} and {}", .{ self.rank(), opts.low.len });
-        meta.assert(opts.high.len == self.rank(), "pad expects tensor rank and 'opts.high' length to be equal, got {} and {}", .{ self.rank(), opts.high.len });
+    /// Usage: x.pad(0, .{ .a = .{ .low = 1, .high = 1 }});
+    pub fn pad(self: Tensor, padding_value: anytype, paddings: anytype) Tensor {
+        const _paddings = self.shape().parseAxesOptions(Pad, paddings, .{});
+
         const ZEROS = [_]i64{0} ** MAX_RANK;
-        const interior = opts.interior orelse ZEROS[0..self.rank()];
+        var low = ZEROS;
+        var high = ZEROS;
+        var interior = ZEROS;
 
-        var new_shape = self._shape;
+        var res_shape = self._shape;
+        for (_paddings.constSlice(), 0..) |padding, i| {
+            low[i] = padding.low;
+            high[i] = padding.high;
+            interior[i] = padding.interior;
 
-        for (0..self.rank()) |i| {
-            const d = self.dim(i) + opts.low[i] + (@max(self.dim(i) - 1, 0) * interior[i]) + opts.high[i];
-            new_shape = new_shape.set(i, d);
+            var d: i64 = self.dim(i);
+            d += low[i] + (@max(d - 1, 0) * interior[i]) + high[i];
+            res_shape._dims.set(i, d);
         }
 
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "pad(value={}, opts={})", .{ pad_value, opts });
-        var full_opts = opts;
-        full_opts.interior = opts.interior orelse ZEROS[0..self.rank()];
-        const pad_value_tensor = Tensor.scalar(pad_value, self.dtype());
-        const pad_op = dialect.stablehlo.pad(self.getContext().mlirCtx(), self.value(), pad_value_tensor.value(), full_opts, loc);
+        const rk = self.rank();
+        const mlir_ctx = self.getContext().mlirCtx();
+        const loc = mlir_ctx.location(@src()).namedFmt(mlir_ctx, "pad({},{})", .{ padding_value, _paddings });
+        const pad_op = dialect.stablehlo.pad(
+            mlir_ctx,
+            self.value(),
+            Tensor.scalar(padding_value, self.dtype()).value(),
+            .{ .low = low[0..rk], .high = high[0..rk], .interior = interior[0..rk] },
+            loc,
+        );
 
-        return _result(new_shape, pad_op.result(0));
+        return _result(res_shape, pad_op.result(0));
     }
 
     /// Inserts 1-dim axes at the given position, with the given tags.

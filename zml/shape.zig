@@ -943,6 +943,39 @@ pub const Shape = struct {
         try testing.expectEqualSlices(Tag, &.{ "a".ptr, "b".ptr }, tags_.constSlice());
     }
 
+    /// Parses a struct literal into a list of options for each axes.
+    pub fn parseAxesOptions(self: Shape, T: type, options: anytype, default: T) std.BoundedArray(T, MAX_RANK) {
+        const V = @TypeOf(options);
+
+        var res: std.BoundedArray(T, MAX_RANK) = .{};
+        if (comptime meta.isSliceOf(V, T)) {
+            meta.assert(options.len == self.rank(), "expects exactly {} options in slice, for {} got {}", .{ self.rank(), self, options.len });
+            for (options) |d| {
+                res.appendAssumeCapacity(d);
+            }
+        }
+
+        if (comptime meta.isStruct(V)) {
+            for (0..self.rank()) |_| res.appendAssumeCapacity(default);
+            const fields = std.meta.fields(V);
+            meta.assertComptime(fields.len <= MAX_RANK, "expects up to {} options struct literal, got {}", .{ V, MAX_RANK, fields.len });
+            inline for (fields) |field| {
+                const a = self.axis(field);
+                res.buffer[a] = @field(options, field.name);
+            }
+            return res;
+        }
+
+        meta.compileError("parseStruct expects struct or tuple, got {}", .{V});
+    }
+
+    test parseAxesOptions {
+        const shape = Shape.init(.{ .a = 10, .b = 20, .c = 30 }, .u8);
+        const scaling = shape.parseAxesOptions(f32, .{ .b = 1.2, .a = 0.1 }, 1.0);
+
+        try testing.expectEqualSlices(f32, &.{ 0.1, 1.2, 1.0 }, scaling.constSlice());
+    }
+
     test "comptimeShape" {
         comptime {
             const s = Shape.init(.{ .a = 5, .b = 6, .c = 7 }, .f32);
