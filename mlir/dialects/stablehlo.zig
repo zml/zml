@@ -481,7 +481,7 @@ pub fn round_nearest_even(ctx: mlir.Context, value: mlir.Value, location: mlir.L
 pub const PadOpts = struct {
     low: []const i64,
     high: []const i64,
-    interior: ?[]const i64,
+    interior: []const i64,
 };
 
 pub fn pad(ctx: mlir.Context, value: mlir.Value, padding_value: mlir.Value, opts: PadOpts, location: mlir.Location) mlir.Operation {
@@ -491,7 +491,7 @@ pub fn pad(ctx: mlir.Context, value: mlir.Value, padding_value: mlir.Value, opts
         .attributes = &.{
             .{ "edge_padding_low", mlir.DenseArrayAttribute(.i64).init(ctx, opts.low).as(mlir.Attribute).? },
             .{ "edge_padding_high", mlir.DenseArrayAttribute(.i64).init(ctx, opts.high).as(mlir.Attribute).? },
-            .{ "interior_padding", mlir.DenseArrayAttribute(.i64).init(ctx, opts.interior.?).as(mlir.Attribute).? },
+            .{ "interior_padding", mlir.DenseArrayAttribute(.i64).init(ctx, opts.interior).as(mlir.Attribute).? },
         },
         .location = location,
     });
