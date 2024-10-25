@@ -1268,7 +1268,7 @@ pub const Tensor = struct {
     }
 
     /// Returns a Tensor containing the sum of elements over the given axis.
-    /// Ouput shape is the input shape with the axis_ dim set to 1.
+    /// Output shape is the input shape with the axis_ dim set to 1.
     pub fn sum(self: Tensor, axis_: anytype) Tensor {
         const a = self.axis(axis_);
         return ops.reduce(
@@ -1284,13 +1284,13 @@ pub const Tensor = struct {
     }
 
     /// Returns a Tensor containing the mean of elements over the given axis.
-    /// Ouput shape is the input shape with the axis_ dim set to 1.
+    /// Output shape is the input shape with the axis_ dim set to 1.
     pub fn mean(self: Tensor, axis_: anytype) Tensor {
         return self.sum(axis_).divByConst(self.dim(axis_));
     }
 
     /// Returns a Tensor containing the cumulative sum of elements over the given axis.
-    /// Ouput shape is the same as input shape.
+    /// Output shape is the same as input shape.
     /// [0, 1, 0, 1, 0, 0, 1, 1].cumulativeSum(0) -> [0, 1, 1, 2, 2, 2, 3, 4]
     /// The last value contains the sum of all element in the array.
     pub fn cumulativeSum(self: Tensor, axis_: anytype) Tensor {
