@@ -1252,7 +1252,7 @@ pub const Tensor = struct {
     /// silu(x) = x σ(x)
     /// https://paperswithcode.com/method/silu
     pub fn silu(x: Tensor) Tensor {
-        return x.mul(x.sigmoid());
+        return x.mul(x.logistic());
     }
 
     /// Returns a Tensor containing the softmax function applied to each element of the input Tensor.
