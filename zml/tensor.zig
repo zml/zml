@@ -3139,6 +3139,7 @@ pub const Tensor = struct {
     /// Tensor(.{ .a = 2, .b = 5 }).dynamicUpdateSlice(.{ .a = scalar(1, .i32) }, Tensor(.{ .b = 5 }));
     /// ```
     pub fn dynamicUpdateSlice(self: Tensor, offset_: anytype, update_: Tensor) Tensor {
+        // TODO: add updateSlice for when the offset isn't dynamic
         meta.assert(self.dtype() == update_.dtype(), "dynamicUpdateSlice expects input and 'update_' tensors to be of the same type, got {} and {}", .{ self.dtype(), update_.dtype() });
 
         const offset, const offset_tags = Shape.parseStruct(Tensor, offset_);
