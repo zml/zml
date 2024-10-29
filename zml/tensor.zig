@@ -1188,6 +1188,8 @@ pub const Tensor = struct {
         return _result(self._shape, op.result(0));
     }
 
+    pub const logistic = sigmoid;
+
     /// Returns a Tensor containing the ReLU activation function applied to each element of the input Tensor.
     pub fn relu(self: Tensor) Tensor {
         return self.maximum(Tensor.constant(self.dims(), self.dtype().zero()));
