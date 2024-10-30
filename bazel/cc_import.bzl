@@ -36,21 +36,22 @@ _cc_import_runfiles = rule(
 )
 
 def cc_import(
-    name,
-    static_library = None,
-    pic_static_library = None,
-    shared_library = None,
-    interface_library = None,
-    data = None,
-    deps = None,
-    visibility = None,
-    soname = None,
-    add_needed = None,
-    remove_needed = None,
-    replace_needed = None,
-    **kwargs):
-    if shared_library and (soname or add_needed or remove_needed or replace_needed):
-        patched_name = "{}_patchelf".format(name)
+        name,
+        static_library = None,
+        pic_static_library = None,
+        shared_library = None,
+        interface_library = None,
+        data = None,
+        deps = None,
+        visibility = None,
+        soname = None,
+        add_needed = None,
+        remove_needed = None,
+        replace_needed = None,
+        rename_dynamic_symbols = None,
+        **kwargs):
+    if shared_library and (soname or add_needed or remove_needed or replace_needed or rename_dynamic_symbols):
+        patched_name = "{}.patchelf".format(name)
         patchelf(
             name = patched_name,
             shared_library = shared_library,
@@ -58,11 +59,12 @@ def cc_import(
             add_needed = add_needed,
             remove_needed = remove_needed,
             replace_needed = replace_needed,
+            rename_dynamic_symbols = rename_dynamic_symbols,
         )
         shared_library = ":" + patched_name
     if data:
         _cc_import(
-            name = name + "_no_runfiles",
+            name = name + ".norunfiles",
             static_library = static_library,
             pic_static_library = pic_static_library,
             shared_library = shared_library,
@@ -71,15 +73,10 @@ def cc_import(
             deps = deps,
             **kwargs
         )
-        _cc_import_runfiles(
+        native.cc_library(
             name = name,
-            src = ":{}_no_runfiles".format(name),
-            static_library = static_library,
-            pic_static_library = pic_static_library,
-            shared_library = shared_library,
-            interface_library = interface_library,
             data = data,
-            deps = deps,
+            deps = [name + ".norunfiles"],
             visibility = visibility,
         )
     else:
@@ -89,7 +86,6 @@ def cc_import(
             pic_static_library = pic_static_library,
             shared_library = shared_library,
             interface_library = interface_library,
-            data = data,
             deps = deps,
             visibility = visibility,
             **kwargs

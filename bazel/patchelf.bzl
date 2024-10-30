@@ -1,6 +1,3 @@
-def _render_kv(e):
-    return e
-
 def _patchelf_impl(ctx):
     output_name = ctx.file.shared_library.basename
     if ctx.attr.soname:
@@ -26,8 +23,19 @@ def _patchelf_impl(ctx):
         for k, v in ctx.attr.replace_needed.items():
             commands.append('"$1" --replace-needed "{}" "{}" "$3"'.format(k, v))
 
+    renamed_syms = ctx.actions.declare_file("{}.rename.txt".format(ctx.label.name))
+    if ctx.attr.rename_dynamic_symbols:
+        content = "\n".join([
+            "{} {}".format(k, v)
+            for k, v in ctx.attr.rename_dynamic_symbols.items()
+        ])
+        ctx.actions.write(renamed_syms, content)
+        commands.append('"$1" --rename-dynamic-symbols "{}" "$3"'.format(renamed_syms.path))
+    else:
+        ctx.actions.write(renamed_syms, "")
+
     ctx.actions.run_shell(
-        inputs = [ctx.file.shared_library],
+        inputs = [ctx.file.shared_library, renamed_syms],
         outputs = [output],
         arguments = [ctx.executable._patchelf.path, ctx.file.shared_library.path, output.path],
         command = "\n".join(commands),
@@ -48,6 +56,7 @@ patchelf = rule(
         "add_needed": attr.string_list(),
         "remove_needed": attr.string_list(),
         "replace_needed": attr.string_dict(),
+        "rename_dynamic_symbols": attr.string_dict(),
         "_patchelf": attr.label(
             default = "@patchelf",
             allow_single_file = True,
