@@ -2,7 +2,7 @@ const std = @import("std");
 const zml = @import("zml");
 const asynk = @import("async");
 
-const async_ = asynk.async_;
+const asyncc = asynk.asyncc;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};

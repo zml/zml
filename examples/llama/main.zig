@@ -6,8 +6,6 @@ const asynk = @import("async");
 const flags = @import("tigerbeetle/flags");
 const llama_mod = @import("llama.zig");
 
-const async_ = asynk.async_;
-
 const LlamaLM = llama_mod.LlamaLM;
 const Llama = llama_mod.Llama;
 const KvCache = llama_mod.KvCache;
@@ -241,8 +239,8 @@ pub fn asyncMain() !void {
     const rng_shape = Tensor.Rng.shape();
 
     const compile_start = std.time.milliTimestamp();
-    var fut_mod_prefill = try async_(zml.compile, .{ allocator, LlamaLM, .{llama_options}, .forward, .{ tokens_shape, token_idx_shape, null, rng_shape }, ts, platform });
-    var fut_mod = try async_(zml.compile, .{ allocator, LlamaLM, .{llama_options}, .forward, .{ tokens_shape, token_idx_shape, kv_cache_shape, rng_shape }, ts, platform });
+    var fut_mod_prefill = try asynk.asyncGeneric(zml.compile, .{ allocator, LlamaLM, .{llama_options}, .forward, .{ tokens_shape, token_idx_shape, null, rng_shape }, ts, platform });
+    var fut_mod = try asynk.asyncGeneric(zml.compile, .{ allocator, LlamaLM, .{llama_options}, .forward, .{ tokens_shape, token_idx_shape, kv_cache_shape, rng_shape }, ts, platform });
 
     log.info("Starting loading weights", .{});
     var llama_weights = try zml.aio.loadBuffers(LlamaLM, .{llama_options}, ts, model_arena, platform);

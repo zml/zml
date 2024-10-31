@@ -70,16 +70,20 @@ fn FrameExx(comptime func: anytype, comptime argsT: type) type {
     };
 }
 
-pub fn async_(comptime func: anytype, args: anytype) !FrameEx(func, @TypeOf(args)) {
+pub fn asyncc(comptime func: anytype, args: FnSignature(func, null).ArgsT) !FrameEx(func, @TypeOf(args)) {
+    return asyncGeneric(func, args);
+}
+
+pub fn asyncGeneric(comptime func: anytype, args: anytype) !FrameEx(func, @TypeOf(args)) {
     const frame = try aio.xasync(func, args, null);
     return FrameEx(func, @TypeOf(args)).from(frame);
 }
 
-pub fn call(comptime func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) @TypeOf(callGeneric(func, args)) {
-    return callGeneric(func, args);
+pub fn callBlocking(comptime func: anytype, args: FnSignature(func, null).ArgsT) @TypeOf(callBlockingGeneric(func, args)) {
+    return callBlockingGeneric(func, args);
 }
 
-pub fn callGeneric(comptime func: anytype, args: anytype) FnSignature(func, @TypeOf(args)).ReturnT {
+pub fn callBlockingGeneric(comptime func: anytype, args: anytype) FnSignature(func, @TypeOf(args)).ReturnT {
     const Signature = FnSignature(func, @TypeOf(args));
 
     const TaskT = struct {
@@ -224,7 +228,11 @@ pub const File = struct {
     }
 
     pub fn open(path: []const u8, flags: std.fs.File.OpenFlags) !File {
-        return init(try call(std.fs.Dir.openFile, .{ std.fs.cwd(), path, flags }));
+        return init(try callBlocking(std.fs.Dir.openFile, .{ std.fs.cwd(), path, flags }));
+    }
+
+    pub fn access(path: []const u8, flags: std.fs.File.OpenFlags) !void {
+        return try callBlocking(std.fs.Dir.access, .{ std.fs.cwd(), path, flags });
     }
 
     pub fn read(self: File, buf: []u8) !usize {
@@ -274,23 +282,23 @@ pub const File = struct {
     }
 
     pub fn stat(self: File) !std.fs.File.Stat {
-        return try call(std.fs.File.stat, .{self.asFile()});
+        return try callBlocking(std.fs.File.stat, .{self.asFile()});
     }
 
     pub fn seekBy(self: File, offset: i64) !void {
-        try call(std.fs.File.seekBy, .{ self.asFile(), offset });
+        try callBlocking(std.fs.File.seekBy, .{ self.asFile(), offset });
     }
 
     pub fn seekTo(self: File, offset: u64) !void {
-        try call(std.fs.File.seekTo, .{ self.asFile(), offset });
+        try callBlocking(std.fs.File.seekTo, .{ self.asFile(), offset });
     }
 
     pub fn getPos(self: File) !u64 {
-        return try call(std.fs.File.getPos, .{self.asFile()});
+        return try callBlocking(std.fs.File.getPos, .{self.asFile()});
     }
 
     pub fn getEndPos(self: File) !u64 {
-        return try call(std.fs.File.getEndPos, .{self.asFile()});
+        return try callBlocking(std.fs.File.getEndPos, .{self.asFile()});
     }
 };
 
@@ -342,7 +350,7 @@ pub const Socket = struct {
             addr: std.net.Address,
         };
         pub const Writer = std.io.GenericWriter(WriterContext, FnSignature(UDP.write, null).ReturnErrorSet.?, struct {
-            fn call(self: WriterContext, buf: []const u8) !usize {
+            fn callBlocking(self: WriterContext, buf: []const u8) !usize {
                 return self.file.write(self.addr, buf);
             }
         }.call);
