@@ -15,6 +15,7 @@ bazel_dep(name = "rules_proto", version = "6.0.2")
 bazel_dep(name = "buildifier_prebuilt", version = "6.4.0", dev_dependency = True)
 
 bazel_dep(name = "aspect_bazel_lib", version = "2.8.1.1")
+
 bazel_lib_toolchains = use_extension("@aspect_bazel_lib//lib:extensions.bzl", "toolchains", dev_dependency = True)
 use_repo(bazel_lib_toolchains, "jq_toolchains")
 
@@ -22,6 +23,7 @@ toolchains = use_extension("@hermetic_cc_toolchain//toolchain:ext.bzl", "toolcha
 use_repo(toolchains, "zig_sdk")
 
 bazel_dep(name = "rules_zig", version = "20240913.0-1957d05")
+
 zig = use_extension("@rules_zig//zig:extensions.bzl", "zig")
 zig.index(file = "//bazel:zig_index.json")
 zig.toolchain(zig_version = "0.14.0-dev.363+c3faae6bf")
@@ -31,11 +33,36 @@ zig.mirrors(urls = [
 use_repo(zig, "zig_toolchains")
 
 register_toolchains("@rules_zig//zig/target:all")
+
 register_toolchains("@zig_toolchains//:all")
+
 register_toolchains(
     "@zig_sdk//toolchain:linux_amd64_gnu.2.31",
     "@zig_sdk//toolchain:linux_arm64_gnu.2.31",
 )
+
+bazel_dep(name = "rules_python", version = "0.37.0")
+bazel_dep(name = "rules_uv", version = "0.34.0")
+bazel_dep(name = "aspect_rules_py", version = "1.0.0-rc0")
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+python.toolchain(python_version = "3.11")
+use_repo(python, "python_versions")
+
+pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
+pip.parse(
+    hub_name = "neuron_py_deps",
+    python_version = "3.11",
+    download_only = True,
+    extra_pip_args = [
+        "--abi=cp311",
+        "--implementation=cp",
+        "--python-version=311",
+        "--platform=linux_x86_64",
+        "--platform=manylinux2014_x86_64",
+    ],
+    requirements_lock = "//runtimes/neuron:requirements.lock.txt",
+)
+use_repo(pip, "neuron_py_deps")
 
 cpu = use_extension("//runtimes/cpu:cpu.bzl", "cpu_pjrt_plugin")
 use_repo(cpu, "libpjrt_cpu_darwin_arm64", "libpjrt_cpu_linux_amd64")
@@ -48,6 +75,9 @@ use_repo(rocm, "libpjrt_rocm")
 
 tpu = use_extension("//runtimes/tpu:tpu.bzl", "tpu_packages")
 use_repo(tpu, "libpjrt_tpu")
+
+neuron = use_extension("//runtimes/neuron:neuron.bzl", "neuron_packages")
+use_repo(neuron, "aws-neuronx-collectives", "aws-neuronx-runtime-lib")
 
 zls = use_extension("//third_party/zls:zls.bzl", "repo")
 use_repo(zls, "zls_aarch64-macos", "zls_x86_64-linux")
