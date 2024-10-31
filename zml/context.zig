@@ -4,6 +4,8 @@ const std = @import("std");
 const asynk = @import("async");
 const mlir = @import("mlir");
 const pjrt = @import("pjrt");
+const c = @import("c");
+const runfiles = @import("runfiles");
 
 const platform = @import("platform.zig");
 const Target = @import("platform.zig").Target;
@@ -40,10 +42,38 @@ pub const Context = struct {
         }
     }.call);
 
+    var runfiles_once = std.once(struct {
+        fn call_() !void {
+            if (std.process.hasEnvVarConstant("RUNFILES_MANIFEST_FILE") or std.process.hasEnvVarConstant("RUNFILES_DIR")) {
+                return;
+            }
+
+            var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+            const allocator = arena.allocator();
+            defer arena.deinit();
+
+            var envMap = std.process.EnvMap.init(allocator);
+            var r = (try runfiles.Runfiles.create(.{ .allocator = allocator })) orelse return;
+            try r.environment(&envMap);
+
+            var it = envMap.iterator();
+            while (it.next()) |entry| {
+                const keyZ = try allocator.dupeZ(u8, entry.key_ptr.*);
+                const valueZ = try allocator.dupeZ(u8, entry.value_ptr.*);
+                _ = c.setenv(keyZ.ptr, valueZ.ptr, 1);
+            }
+        }
+
+        fn call() void {
+            call_() catch @panic("Unable to init runfiles env");
+        }
+    }.call);
+
     platforms: PlatformsMap,
 
     /// Creates a ZML Context and returns it.
     pub fn init() !Context {
+        Context.runfiles_once.call();
         Context.apis_once.call();
         Context.mlir_once.call();
 
