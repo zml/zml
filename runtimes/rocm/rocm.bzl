@@ -1,17 +1,18 @@
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+load("//bazel:dpkg.bzl", "dpkg")
 load("//bazel:http_deb_archive.bzl", "http_deb_archive")
 
 ROCM_VERSION = "6.2.2"
 BASE_URL = "https://repo.radeon.com/rocm/apt/{}".format(ROCM_VERSION)
 STRIP_PREFIX = "opt/rocm-6.2.2"
 
-def pkg_kwargs(pkg, packages):
-    return {
-        "name": pkg,
-        "urls": [BASE_URL + "/" + packages[pkg]["Filename"]],
-        "sha256": packages[pkg]["SHA256"],
-        "strip_prefix": STRIP_PREFIX,
-    }
+def pkg_kwargs(pkg):
+    return dict(
+        name = pkg.Package,
+        urls = [BASE_URL + "/" + pkg.Filename],
+        sha256 = pkg.SHA256,
+        strip_prefix = STRIP_PREFIX,
+    )
 
 def _ubuntu_package(path, deb_path, sha256, name, shared_library):
     return {
@@ -118,7 +119,10 @@ load("@zml//runtimes/rocm:gfx.bzl", "bytecode_select")
 cc_import(
     name = "rocblas",
     shared_library = "lib/librocblas.so.4",
-    add_needed = ["libzmlrocmhooks.so.0"],
+    add_needed = ["libzmlxrocm.so.0"],
+    rename_dynamic_symbols = {
+        "dlopen": "zmlxrocm_dlopen",
+    },
     visibility = ["@libpjrt_rocm//:__subpackages__"],
 )
 
@@ -147,7 +151,10 @@ load("@zml//bazel:cc_import.bzl", "cc_import")
 cc_import(
     name = "hipblaslt",
     shared_library = "lib/libhipblaslt.so.0",
-    add_needed = ["libzmlrocmhooks.so.0"],
+    add_needed = ["libzmlxrocm.so.0"],
+    rename_dynamic_symbols = {
+        "dlopen": "zmlxrocm_dlopen",
+    },
     visibility = ["@libpjrt_rocm//:__subpackages__"],
 )
 """,
@@ -193,32 +200,14 @@ filegroup(
 """,
 }
 
-def _packages_to_dict(txt):
-    packages = {}
-    current_pkg = {}
-    for line in txt.splitlines():
-        if line == "":
-            if current_pkg:
-                packages[current_pkg["Package"]] = current_pkg
-            current_pkg = {}
-            continue
-        if line.startswith(" "):
-            current_pkg[key] += line
-            continue
-        split = line.split(": ", 1)
-        key = split[0]
-        value = len(split) > 1 and split[1] or ""
-        current_pkg[key] = value
-    return packages
-
 def _rocm_impl(mctx):
-    data = mctx.read(Label("@zml//runtimes/rocm:packages.amd64.txt"))
-    PACKAGES = _packages_to_dict(data)
+    all_packages = dpkg.read_packages(mctx, "@zml//runtimes/rocm:packages.amd64.txt")
 
-    for pkg, build_file_content in _PACKAGES.items():
+    for pkg_name, build_file_content in _PACKAGES.items():
+        pkg = all_packages[pkg_name].values()[0]
         http_deb_archive(
             build_file_content = build_file_content,
-            **pkg_kwargs(pkg, PACKAGES)
+            **pkg_kwargs(pkg)
         )
 
     for repository, kwargs in _UBUNTU_PACKAGES.items():
