@@ -13,7 +13,6 @@ zig_library(
     visibility = ["//visibility:public"],
     deps = [
         ":profiler_options_proto",
-        "//runtimes",
         "@xla//xla/pjrt/c:pjrt_c_api_gpu_extension_hdrs",
         "@xla//xla/pjrt/c:pjrt_c_api_hdrs",
         "@xla//xla/pjrt/c:pjrt_c_api_profiler_extension_hdrs",

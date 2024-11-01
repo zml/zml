@@ -1,5 +1,27 @@
-alias(
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+cc_library(
+    name = "empty",
+)
+
+cc_library(
+    name = "libpjrt_tpu",
+    defines = ["ZML_RUNTIME_TPU"],
+    deps = ["@libpjrt_tpu"],
+)
+
+zig_library(
     name = "tpu",
-    actual = "@libpjrt_tpu",
+    import_name = "runtimes/tpu",
+    main = "tpu.zig",
     visibility = ["//visibility:public"],
+    deps = [
+        "//pjrt",
+    ] + select({
+        "//runtimes:tpu.enabled": [
+            ":libpjrt_tpu",
+            "//async",
+        ],
+        "//conditions:default": [":empty"],
+    }),
 )

@@ -1,3 +1,5 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
 filegroup(
     name = "zmlxrocm_srcs",
     srcs = ["zmlxrocm.cc"],
@@ -14,8 +16,28 @@ alias(
     actual = "@libpjrt_rocm//:gfx",
 )
 
-alias(
+cc_library(
+    name = "empty",
+)
+
+cc_library(
+    name = "libpjrt_rocm",
+    defines = ["ZML_RUNTIME_ROCM"],
+    deps = ["@libpjrt_rocm"],
+)
+
+zig_library(
     name = "rocm",
-    actual = "@libpjrt_rocm",
+    import_name = "runtimes/rocm",
+    main = "rocm.zig",
     visibility = ["//visibility:public"],
+    deps = [
+        "//pjrt",
+    ] + select({
+        "//runtimes:rocm.enabled": [
+            ":libpjrt_rocm",
+            "//async",
+        ],
+        "//conditions:default": [":empty"],
+    }),
 )
