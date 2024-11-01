@@ -20,6 +20,7 @@ pub const available_targets = switch (builtin.os.tag) {
         .cuda,
         .rocm,
         .tpu,
+        .neuron,
     },
     else => [_]Target{},
 };
