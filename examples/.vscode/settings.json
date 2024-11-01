@@ -24,4 +24,6 @@
     "zig.path": "${workspaceFolder}/tools/zig.sh",
     "zig.zls.globalCachePath": null,
     "zig.zls.path": "${workspaceFolder}/tools/zls.sh",
+    "C_Cpp.formatting": "clangFormat",
+    "C_Cpp.clang_format_style": "Microsoft",
 }

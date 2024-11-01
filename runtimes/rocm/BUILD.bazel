@@ -1,6 +1,6 @@
 filegroup(
-    name = "zmlrocmhooks_srcs",
-    srcs = ["zmlrocmhooks.cc"],
+    name = "zmlxrocm_srcs",
+    srcs = ["zmlxrocm.cc"],
     visibility = ["@libpjrt_rocm//:__subpackages__"],
 )
 

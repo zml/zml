@@ -31,9 +31,9 @@ copy_to_directory(
 )
 
 cc_library(
-    name = "zmlrocmhooks_lib",
+    name = "zmlxrocm_lib",
     data = ["@rocblas//:runfiles"],
-    srcs = ["@zml//runtimes/rocm:zmlrocmhooks_srcs"],
+    srcs = ["@zml//runtimes/rocm:zmlxrocm_srcs"],
     linkopts = [
         "-lc",
         "-ldl",
@@ -42,14 +42,14 @@ cc_library(
 )
 
 cc_shared_library(
-    name = "zmlrocmhooks_so",
-    shared_lib_name = "libzmlrocmhooks.so.0",
-    deps = [":zmlrocmhooks_lib"],
+    name = "zmlxrocm_so",
+    shared_lib_name = "libzmlxrocm.so.0",
+    deps = [":zmlxrocm_lib"],
 )
 
 cc_import(
-    name = "zmlrocmhooks",
-    shared_library = ":zmlrocmhooks_so",
+    name = "zmlxrocm",
+    shared_library = ":zmlxrocm_so",
 )
 
 cc_import(
@@ -64,7 +64,7 @@ cc_import(
     shared_library = "libpjrt_rocm.so",
     visibility = ["//visibility:public"],
     deps = [
-        ":zmlrocmhooks",
+        ":zmlxrocm",
         "@comgr//:amd_comgr",
         "@hip-runtime-amd//:amdhip",
         "@hipblaslt",
