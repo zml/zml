@@ -3,17 +3,13 @@ const std = @import("std");
 
 const pjrt = @import("pjrt");
 const asynk = @import("async");
+const runtimes = @import("runtimes");
 
 const meta = @import("meta.zig");
 const module = @import("module.zig");
 const log = std.log.scoped(.zml);
 
-pub const Target = enum {
-    cpu,
-    cuda,
-    rocm,
-    tpu,
-};
+pub const Target = runtimes.Platform;
 
 pub const available_targets = switch (builtin.os.tag) {
     .macos => [_]Target{

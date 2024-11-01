@@ -1,5 +1,27 @@
-alias(
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+cc_library(
+    name = "empty",
+)
+
+cc_library(
+    name = "libpjrt_cuda",
+    defines = ["ZML_RUNTIME_CUDA"],
+    deps = ["@libpjrt_cuda"],
+)
+
+zig_library(
     name = "cuda",
-    actual = "@libpjrt_cuda",
+    import_name = "runtimes/cuda",
+    main = "cuda.zig",
     visibility = ["//visibility:public"],
+    deps = [
+        "//pjrt",
+    ] + select({
+        "//runtimes:cuda.enabled": [
+            ":libpjrt_cuda",
+            "//async",
+        ],
+        "//conditions:default": [":empty"],
+    }),
 )

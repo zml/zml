@@ -8,7 +8,7 @@
 
 #include "tools/cpp/runfiles/runfiles.h"
 
-__attribute__((constructor)) static void setup_runfiles(int argc, char **argv)
+static void setup_runfiles(int argc, char **argv) __attribute__((constructor))
 {
     using bazel::tools::cpp::runfiles::Runfiles;
     auto runfiles = std::unique_ptr<Runfiles>(Runfiles::Create(argv[0], BAZEL_CURRENT_REPOSITORY));
@@ -33,7 +33,7 @@ __attribute__((constructor)) static void setup_runfiles(int argc, char **argv)
     setenv("ROCM_PATH", ROCM_PATH.c_str(), 1);
 }
 
-extern "C" void *zmlxrocm_dlopen(const char *filename, int flags)
+extern "C" void *zmlxrocm_dlopen(const char *filename, int flags) __attribute__((visibility("default")))
 {
     if (filename != NULL)
     {

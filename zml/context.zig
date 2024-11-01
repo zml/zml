@@ -6,6 +6,7 @@ const mlir = @import("mlir");
 const pjrt = @import("pjrt");
 const c = @import("c");
 const runfiles = @import("runfiles");
+const runtimes = @import("runtimes");
 
 const platform = @import("platform.zig");
 const Target = @import("platform.zig").Target;
@@ -26,12 +27,10 @@ pub const Context = struct {
     var apis = PjrtApiMap.initFill(null);
     var apis_once = std.once(struct {
         fn call() void {
-            inline for (platform.available_targets) |t| {
-                if (canLoad(t)) {
-                    if (pjrt.Api.loadFrom(platformToLibrary(t))) |api| {
-                        Context.apis.set(t, api);
-                    } else |_| {}
-                }
+            inline for (comptime std.enums.values(runtimes.Platform)) |t| {
+                if (runtimes.load(t)) |api| {
+                    Context.apis.set(t, api);
+                } else |_| {}
             }
         }
     }.call);
@@ -110,30 +109,6 @@ pub const Context = struct {
         return switch (target) {
             inline else => "libpjrt_" ++ @tagName(target) ++ ext,
         };
-    }
-
-    fn canLoad(t: Target) bool {
-        return switch (t) {
-            .tpu => isRunningOnGCP() catch false,
-            else => true,
-        };
-    }
-
-    /// Check if running on Google Compute Engine, because TPUs will poll the
-    /// metadata server, hanging the process. So only do it on GCP.
-    /// Do it using the official method at:
-    /// https://cloud.google.com/compute/docs/instances/detect-compute-engine?hl=en#use_operating_system_tools_to_detect_if_a_vm_is_running_in
-    fn isRunningOnGCP() !bool {
-        // TODO: abstract that in the client and fail init
-        const GoogleComputeEngine = "Google Compute Engine";
-
-        var f = try asynk.File.open("/sys/devices/virtual/dmi/id/product_name", .{ .mode = .read_only });
-        defer f.close() catch {};
-
-        var buf = [_]u8{0} ** GoogleComputeEngine.len;
-        _ = try f.reader().readAll(&buf);
-
-        return std.mem.eql(u8, &buf, GoogleComputeEngine);
     }
 
     pub fn pjrtApi(target: Target) *const pjrt.Api {
