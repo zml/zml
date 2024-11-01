@@ -1141,15 +1141,39 @@ fn loadOrCompilePjrtExecutable(
     }
 }
 
+// NOTE(Corendos): Hack needed because Protobuf struct are not public.
+pub const DeviceAssignmentProto = struct {
+    replica_count: i32 = 0,
+    computation_count: i32 = 0,
+    computation_devices: std.ArrayListUnmanaged(ComputationDevice) = .{},
+
+    pub const ComputationDevice = struct {
+        replica_device_ids: std.ArrayListUnmanaged(i64) = .{},
+    };
+};
+
 fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, module: mlir.Module, module_hash: u64) !*pjrt.LoadedExecutable {
     const sharding = platform.sharding();
     var options: xla_pb.CompileOptionsProto = .{
         .executable_build_options = .{
+            .device_ordinal = -1,
             .num_replicas = sharding.num_replicas,
             .num_partitions = sharding.num_partitions,
             .use_spmd_partitioning = sharding.num_partitions > 1 or sharding.num_replicas > 1,
         },
     };
+
+    var computation_devices = try std.ArrayListUnmanaged(DeviceAssignmentProto.ComputationDevice).initCapacity(arena, sharding.num_partitions);
+    for (0..sharding.num_partitions) |i| {
+        var replica_device_ids = std.ArrayListUnmanaged(i64).initCapacity(arena, 1) catch unreachable;
+        replica_device_ids.appendAssumeCapacity(@intCast(i));
+        computation_devices.appendAssumeCapacity(.{ .replica_device_ids = replica_device_ids });
+    }
+
+    var device_assignment: DeviceAssignmentProto = .{ .replica_count = sharding.num_replicas, .computation_count = sharding.num_partitions, .computation_devices = computation_devices };
+
+    options.executable_build_options.?.device_assignment = @as(*@TypeOf(options.executable_build_options.?.device_assignment.?), @ptrCast(&device_assignment)).*;
+
     // Let the arena deinit, zig-protobuf deinit is very slow.
     if (platform.compilation_options.xla_dump_to) |xla_dump_to| {
         try options.env_option_overrides.append(arena, .{
