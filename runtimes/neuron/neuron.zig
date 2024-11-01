@@ -27,9 +27,10 @@ fn isRunningOnEC2() !bool {
     return std.mem.eql(u8, &buf, AmazonEC2);
 }
 
-fn toWchar(str: []const u8, out: []c.wchar_t) []c.wchar_t {
+fn toWchar(str: []const u8, out: [:0]c.wchar_t) [:0]c.wchar_t {
     const len = c.mbstowcs(out.ptr, str.ptr, str.len);
-    return out[0..len];
+    out[len] = 0;
+    return out[0..len :0];
 }
 
 fn pyErrorOrExit(status: c.PyStatus) void {
@@ -61,7 +62,7 @@ fn initialize() !void {
     const r = r_.withSourceRepo(bazel_builtin.current_repository);
 
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    var wbuf: [std.fs.max_path_bytes]c.wchar_t = undefined;
+    var wbuf: [std.fs.max_path_bytes:0]c.wchar_t = undefined;
 
     {
         const neuronx_cc = (try r.rlocation("zml/runtimes/neuron/neuronx-cc", &buf)).?;
