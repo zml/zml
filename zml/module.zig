@@ -859,7 +859,7 @@ pub fn ExeWithWeights(comptime func: anytype) type {
 
         pub fn call(self: Self, args: Bufferized(Signature.ArgsT)) Bufferized(Signature.ReturnT) {
             fillBuffers(&args, self.input_per_device, self.inner.model_buffer_count, self.inner.args_buffer_count);
-            var events: [Platform.MAX_NUM_DEVICES]*pjrt.Event = undefined;
+            var events = [_]?*pjrt.Event{null} ** Platform.MAX_NUM_DEVICES;
             const sharding = self.platform().sharding();
 
             self.inner.exe.execute(self.inner.platform.pjrt_api, .{
@@ -873,7 +873,9 @@ pub fn ExeWithWeights(comptime func: anytype) type {
             }) catch unreachable;
 
             for (events[0..sharding.num_partitions]) |e| {
-                e.await_(self.inner.platform.pjrt_api) catch unreachable;
+                if (e) |ev| {
+                    ev.await_(self.inner.platform.pjrt_api) catch unreachable;
+                }
             }
 
             var result: Bufferized(Signature.ReturnT) = undefined;

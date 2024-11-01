@@ -284,7 +284,7 @@ pub const Client = opaque {
         host_buffer_semantics: HostBufferSemantics,
     };
 
-    pub fn bufferFromHostBuffer(self: *const Client, api: *const Api, args: BufferFromHostBufferArgs) ApiError!struct { *Buffer, *Event } {
+    pub fn bufferFromHostBuffer(self: *const Client, api: *const Api, args: BufferFromHostBufferArgs) ApiError!struct { *Buffer, ?*Event } {
         const ret = try api.call(.PJRT_Client_BufferFromHostBuffer, .{
             .client = self.inner(),
             .data = @ptrCast(@constCast(args.data.ptr)),
@@ -300,9 +300,10 @@ pub const Client = opaque {
             .done_with_host_buffer = null,
             .buffer = null,
         });
+
         return .{
             @ptrCast(ret.buffer.?),
-            @ptrCast(ret.done_with_host_buffer.?),
+            @ptrCast(ret.done_with_host_buffer),
         };
     }
 
@@ -499,7 +500,7 @@ pub const LoadedExecutable = opaque {
         num_args: usize,
         arguments: []const [*]const *const Buffer,
         results: []const [*]*Buffer,
-        events: []*Event,
+        events: []?*Event,
         non_donatable_input_indices: []const i64 = &.{},
     }) ApiError!void {
         var options = pjrtStruct(c.PJRT_ExecuteOptions{
@@ -648,13 +649,13 @@ pub const Buffer = opaque {
         return ret.is_on_cpu;
     }
 
-    pub fn toHostBuffer(self: *const Buffer, api: *const Api, dst: []u8) ApiError!*Event {
+    pub fn toHostBuffer(self: *const Buffer, api: *const Api, dst: []u8) ApiError!?*Event {
         const ret = try api.call(.PJRT_Buffer_ToHostBuffer, .{
             .src = self.inner(),
             .dst = @ptrCast(dst.ptr),
             .dst_size = dst.len,
         });
-        return @ptrCast(ret.event.?);
+        return @ptrCast(ret.event);
     }
 
     pub fn getElementType(self: *const Buffer, api: *const Api) BufferType {
