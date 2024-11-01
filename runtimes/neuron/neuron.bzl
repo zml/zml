@@ -38,13 +38,13 @@ cc_import(
 }
 
 def _neuron_impl(mctx):
-    PACKAGES = dpkg.read_packages(mctx, "@zml//runtimes/neuron:packages.amd64.txt")
+    packages = dpkg.read_packages(mctx, "@zml//runtimes/neuron:packages.amd64.txt")
     for pkg_name, pkg_data in _PACKAGES.items():
-        pkg = PACKAGES[pkg_name][pkg_data.version]
+        pkg = packages[pkg_name][pkg_data.version]
         http_deb_archive(
-            name = pkg["Package"],
-            urls = [BASE_URL + "/" + pkg["Filename"]],
-            sha256 = pkg["SHA256"],
+            name = pkg.Package,
+            urls = [BASE_URL + "/" + pkg.Filename],
+            sha256 = pkg.SHA256,
             strip_prefix = STRIP_PREFIX,
             build_file_content = pkg_data.build_file_content,
         )
@@ -57,54 +57,4 @@ def _neuron_impl(mctx):
 
 neuron_packages = module_extension(
     implementation = _neuron_impl,
-)
-
-def _perform_transition_impl(input_settings, attr):
-    settings = dict(input_settings)
-    settings["@rules_python//python/config_settings:bootstrap_impl"] = attr.bootstrap_impl
-    return settings
-
-_perform_transition = transition(
-    implementation = _perform_transition_impl,
-    inputs = [
-        "@rules_python//python/config_settings:bootstrap_impl",
-    ],
-    outputs = [
-        "@rules_python//python/config_settings:bootstrap_impl",
-    ],
-)
-
-def _py_reconfig_impl(ctx):
-    default_info = ctx.attr.target[DefaultInfo]
-    exe_ext = default_info.files_to_run.executable.extension
-    executable = ctx.actions.declare_file(exe_name)
-    ctx.actions.symlink(output = executable, target_file = default_info.files_to_run.executable)
-
-    default_outputs = [executable]
-
-    return [
-        DefaultInfo(
-            executable = executable,
-            files = depset(default_outputs),
-            # On windows, the other default outputs must also be included
-            # in runfiles so the exe launcher can find the backing file.
-            runfiles = ctx.runfiles(default_outputs).merge(
-                default_info.default_runfiles,
-            ),
-        ),
-        testing.TestEnvironment(
-            environment = ctx.attr.env,
-        ),
-    ]
-
-py_reconfig = rule(
-    implementation = _py_reconfig_impl,
-    attrs = {
-        "env": attr.string_dict(),
-        "bootstrap_impl": attr.label(
-            default = Label("//command_line_option:default_info"),
-            executable = True,
-        ),
-    },
-    output_to_genfiles = True,
 )
