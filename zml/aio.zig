@@ -247,7 +247,7 @@ pub const MemoryMappedFile = struct {
 
     pub fn init(file: asynk.File) !MemoryMappedFile {
         const data_len: usize = (try file.stat()).size;
-        const data_ = try asynk.call(std.posix.mmap, .{
+        const data_ = try asynk.callBlocking(std.posix.mmap, .{
             null,
             data_len,
             std.posix.PROT.READ,
@@ -256,7 +256,7 @@ pub const MemoryMappedFile = struct {
             0,
         });
 
-        try asynk.call(posix.madvise, .{ data_.ptr, @intCast(data_.len), @intCast(c.MADV_SEQUENTIAL) });
+        try asynk.callBlocking(posix.madvise, .{ data_.ptr, @intCast(data_.len), @intCast(c.MADV_SEQUENTIAL) });
 
         return .{
             .file = file,

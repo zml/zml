@@ -53,12 +53,12 @@ By the way, you can access the complete source code of this walkthrough here:
 
 Before firing up our editor, let's quickly talk about a few basic ZML
 fundamentals.
- 
+
 In ZML, we describe a _Module_, which represents our AI model, as a Zig
 `struct`. That struct can contain Tensor fields that are used for computation,
 e.g. weights and biases. In the _forward_ function of a Module, we describe the
 computation by calling tensor operations like _mul_, _add_, _dotGeneral_,
-_conv2D_, etc., or even nested Modules. 
+_conv2D_, etc., or even nested Modules.
 
 ZML creates an MLIR representation of the computation when we compile the
 Module. For compilation, only the _Shapes_ of all tensors must be known. No
@@ -102,7 +102,7 @@ const zml = @import("zml");
 const asynk = @import("async");
 
 // shortcut to the async_ function in the asynk module
-const async_ = asynk.async_;
+const asyncc = asynk.asyncc;
 ```
 
 You will use above lines probably in all ZML projects. Also, note that **ZML is
@@ -198,7 +198,7 @@ We also initialize the ZML context `context` and get our CPU `platform`
 automatically.
 
 
-### The BufferStore 
+### The BufferStore
 
 Next, we need to set up the concrete weight and bias tensors for our model.
 Typically, we would load them from disk. But since our example works without
@@ -251,7 +251,7 @@ const model_shapes = try zml.aio.populateModel(Layer, allocator, bs);
 
 // Start compiling. This uses the inferred shapes from the BufferStore.
 // The shape of the input tensor, we have to pass in manually.
-var compilation = try async_(
+var compilation = try asyncc(
     zml.compileModel,
     .{ allocator, model_shapes, .forward, .{input_shape}, platform },
 );
@@ -278,7 +278,7 @@ compile (we used auto platform).
 ### Creating the Executable Model
 
 Now that we have compiled the module utilizing the shapes, we turn it into an
-executable. 
+executable.
 
 ```zig
 // pass the model weights to the compiled module to create an executable module
@@ -308,9 +308,9 @@ in device memory.
 
 ```zig
 // prepare an input buffer
-// Here, we use zml.HostBuffer.fromSlice to show how you would create a 
+// Here, we use zml.HostBuffer.fromSlice to show how you would create a
 // HostBuffer with a specific shape from an array.
-// For situations where e.g. you have an [4]f16 array but need a .{2, 2} input 
+// For situations where e.g. you have an [4]f16 array but need a .{2, 2} input
 // shape.
 var input = [3]f16{ 5.0, 5.0, 5.0 };
 var input_buffer = try zml.Buffer.from(
@@ -420,7 +420,7 @@ const std = @import("std");
 const zml = @import("zml");
 const asynk = @import("async");
 
-const async_ = asynk.async_;
+const asyncc = asynk.asyncc;
 
 /// Model definition
 const Layer = struct {
@@ -482,7 +482,7 @@ pub fn asyncMain() !void {
 
     // Start compiling. This uses the inferred shapes from the BufferStore.
     // The shape of the input tensor, we have to pass in manually.
-    var compilation = try async_(
+    var compilation = try asyncc(
         zml.compileModel,
         .{ allocator, model_shapes, .forward, .{input_shape}, platform },
     );
@@ -496,15 +496,15 @@ pub fn asyncMain() !void {
     // Wait for compilation to finish
     const compiled = try compilation.await_();
 
-    // pass the model weights to the compiled module to create an executable 
+    // pass the model weights to the compiled module to create an executable
     // module
     var executable = try compiled.prepare(arena, model_weights);
     defer executable.deinit();
 
     // prepare an input buffer
-    // Here, we use zml.HostBuffer.fromSlice to show how you would create a 
+    // Here, we use zml.HostBuffer.fromSlice to show how you would create a
     // HostBuffer with a specific shape from an array.
-    // For situations where e.g. you have an [4]f16 array but need a .{2, 2} 
+    // For situations where e.g. you have an [4]f16 array but need a .{2, 2}
     // input shape.
     var input = [3]f16{ 5.0, 5.0, 5.0 };
     var input_buffer = try zml.Buffer.from(

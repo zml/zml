@@ -901,7 +901,7 @@ fn compileInternal(
     var timer = std.time.Timer.start() catch null;
     const tensor_args = context.tensorFromShapes(ModuleSignature(func).ArgsT, arena, args);
     // Run in a dedicated thread because compilation relies on `threadlocal`.
-    const f = try asynk.callGeneric(CompilationContext.generateBytecode, .{ context, arena, "main", func, &model, &tensor_args });
+    const f = try asynk.callBlockingGeneric(CompilationContext.generateBytecode, .{ context, arena, "main", func, &model, &tensor_args });
     context._module.getBody().appendOperation(f.mlir_fn);
 
     const sharding = context._platform.sharding();
@@ -1170,7 +1170,7 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, m
     // Note: we may need to restore IR downgrade if we need to support old pjrt plugins.
     module.op().writeBytecode(mlir_bytecode.writer());
 
-    const loaded_executable = try asynk.call(pjrt.Client.compile, .{
+    const loaded_executable = try asynk.callBlocking(pjrt.Client.compile, .{
         platform.pjrt_client, platform.pjrt_api, .{
             .bytecode = mlir_bytecode.items,
             .bytecode_format = .mlir,

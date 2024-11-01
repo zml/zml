@@ -2,8 +2,6 @@ const std = @import("std");
 const zml = @import("zml");
 const asynk = @import("async");
 
-const async_ = asynk.async_;
-
 const show_mlir = true;
 
 /// Model definition
@@ -115,7 +113,7 @@ pub fn asyncMain() !void {
     } else {
         std.debug.print("Compiling model to MLIR....\r", .{});
     }
-    var compilation = try async_(zml.compile, .{ allocator, Mnist, .{}, .forward, .{zml.Shape.init(.{ 28, 28 }, .u8)}, buffer_store, platform });
+    var compilation = try asynk.asyncGeneric(zml.compile, .{ allocator, Mnist, .{}, .forward, .{zml.Shape.init(.{ 28, 28 }, .u8)}, buffer_store, platform });
 
     // Wait for end of compilation and end of weights loading.
     const compiled_mnist = try compilation.await_();

@@ -3,7 +3,7 @@ const zml = @import("zml");
 const asynk = @import("async");
 const flags = @import("tigerbeetle/flags");
 
-const async_ = asynk.async_;
+const asyncc = asynk.asyncc;
 
 // set log level to debug to print the generated IR
 pub const std_options = .{
@@ -92,7 +92,7 @@ pub fn asyncMain() !void {
     // Start compiling.
     // The shape of the input tensor, we have to pass in manually.
     timer.reset();
-    var compilation = try async_(zml.module.compileModel, .{ allocator, Benchmark{}, .forward, .{ a_shape, b_shape }, platform });
+    var compilation = try asyncc(zml.module.compileModel, .{ allocator, Benchmark{}, .forward, .{ a_shape, b_shape }, platform });
 
     // Wait for compilation to finish
     const compiled = try compilation.await_();
