@@ -52,6 +52,7 @@ pub const Activation = union(enum) {
     tanh,
     relu,
     leakyReLU: f32,
+    elu: f32,
     silu,
     gelu,
     quick_gelu,
@@ -63,9 +64,17 @@ pub const Activation = union(enum) {
             .relu => x.relu(),
             .silu => x.silu(),
             .gelu => x.gelu(),
+            .elu => |alpha| elu(x, alpha),
             .quick_gelu => x.quickGelu(),
             .leakyReLU => |slope| x.leakyReLU(slope),
         };
+    }
+
+    pub fn elu(x: Tensor, alpha: f32) Tensor {
+        return x.cmp(.GE, Tensor.scalar(0, x.dtype())).select(
+            x,
+            x.exp().addConstant(-1).scale(alpha),
+        );
     }
 };
 
@@ -701,7 +710,6 @@ pub fn causalAttnMask(
     }
 
     if (dtype.isFloat()) {
-        meta.guard(dtype.isFloat(), @src()); // -inf only exists for floats
         const zeros = Tensor.constant(mask.shape(), dtype.zero());
         const minus_inf = Tensor.constant(mask.shape(), dtype.minValue());
         mask = Tensor.select(mask, zeros, minus_inf);

@@ -244,18 +244,24 @@ pub fn testLayerOut(
     }
 
     var buf: [1024]u8 = undefined;
+    var failed: bool = false;
     for (0..mod.inner.result_buffer_count) |i| {
         const full_name = std.fmt.bufPrint(&buf, "{s}.{d}", .{ out_name, i }) catch unreachable;
         const expected_out = activations.get(full_name) orelse {
             log.warn("Output buffer not found: {s}", .{full_name});
             continue;
         };
-        zml.testing.expectClose(expected_out, mod.getOutputBuffer(i), tolerance) catch |err| {
-            log.err("{s}.{d} doesn't match !", .{ out_name, i });
-            return err;
+        zml.testing.expectClose(expected_out, mod.getOutputBuffer(i), tolerance) catch |err| switch (err) {
+            error.TestUnexpectedResult => {
+                log.err("{s}.{d} doesn't match !", .{ out_name, i });
+                failed = true;
+                continue;
+            },
+            else => return err,
         };
     }
 
+    if (failed) return error.TestUnexpectedResult;
     log.info("all good for {s} !", .{name});
 }
 
