@@ -297,6 +297,9 @@ pub const CompilationContext = struct {
     /// Given a list of donations mapping output buffers to input buffers,
     /// generate donation attribute for each `n_args` input argument.
     fn addDonationsAttributes(self: CompilationContext, attributes: []AttributeList, donations: []const Tensor._Donation) void {
+        if (self.target() == .neuron) {
+            return;
+        }
         var n_donations: usize = 0;
         for (donations, 0..) |donation, index| {
             switch (donation) {
