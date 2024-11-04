@@ -363,9 +363,8 @@ fn _populateStruct(
 
                 const len = buffer_store.countLayers(prefix);
                 if (len > 0) {
-                    obj.* = try allocator.alloc(ptr_info.child, len);
-
-                    for (obj.*, 0..) |*value, i| {
+                    const slice = try allocator.alloc(ptr_info.child, len);
+                    for (slice, 0..) |*value, i| {
                         try prefix_builder.pushDigit(allocator, i);
                         defer prefix_builder.pop();
                         const found = try _populateStruct(allocator, prefix_builder, unique_id, buffer_store, value, required);
@@ -374,6 +373,7 @@ fn _populateStruct(
                             return false;
                         }
                     }
+                    obj.* = slice;
                 } else if (required) {
                     log.warn("No layer found at {s}", .{prefix});
                 }
@@ -383,7 +383,21 @@ fn _populateStruct(
                 return false;
             }
         },
+        .Array => |arr_info| {
+            for (obj, 0..) |*value, i| {
+                try prefix_builder.pushDigit(allocator, i);
+                defer prefix_builder.pop();
+                const found = try _populateStruct(allocator, prefix_builder, unique_id, buffer_store, value, required);
+                if (!found) {
+                    std.log.err("Not able to load {s} as {s}", .{ prefix, @typeName(arr_info.child) });
+                    return false;
+                }
+            }
+
+            return true;
+        },
         .Struct => |struct_info| {
+            // TODO support tuple
             var partial_struct = false;
             inline for (struct_info.fields) |field| {
                 if (field.is_comptime or @sizeOf(field.type) == 0) continue;
@@ -592,6 +606,7 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
             buf_with_metadata._shape = obj._shape;
             obj.* = try zml.Buffer.from(platform, buf_with_metadata);
         } else {
+            log.warn("Buffer not found: '{s}'", .{prefix});
             return error.BufferNotFound;
         };
     }
@@ -619,6 +634,13 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
         .Optional => {
             if (obj.*) |*obj_val| {
                 try visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, obj_val, platform);
+            }
+        },
+        .Array => {
+            for (obj, 0..) |*value, i| {
+                try prefix_builder.pushDigit(allocator, i);
+                defer prefix_builder.pop();
+                try visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, value, platform);
             }
         },
         else => {},

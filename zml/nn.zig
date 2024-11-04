@@ -84,52 +84,95 @@ pub fn chainModules(module_list: anytype, input: Tensor) Tensor {
 }
 
 /// Layer Normalization
+/// https://paperswithcode.com/method/layer-normalization
 pub const LayerNorm = struct {
     weight: Tensor,
     bias: ?Tensor = null,
     eps: f32 = 1e-5,
 
     pub fn forward(self: LayerNorm, x: Tensor) Tensor {
-        const normed = normalizeVariance(x, self.eps);
-        const ax = x.axis(-1);
-        var out = normed.mul(self.weight.broadcast(x.shape(), &.{ax}));
-        if (self.bias) |bias| out = out.add(bias.broadcast(x.shape(), &.{ax}));
-
-        return out;
+        return layerNorm(x, -1, self);
     }
 };
 
+/// Layer Normalization
+/// https://paperswithcode.com/method/layer-normalization
+pub fn layerNorm(input: Tensor, normalization_axis: anytype, opts: LayerNorm) Tensor {
+    const ax = input.axis(normalization_axis);
+    const normed = normalizeVariance(input, ax, opts.eps);
+    var out = normed.mul(opts.weight.broadcast(input.shape(), &.{ax}));
+    if (opts.bias) |bias| out = out.add(bias.broadcast(input.shape(), &.{ax}));
+
+    return out;
+}
+
+pub const GroupNorm = struct {
+    weight: zml.Tensor,
+    bias: zml.Tensor,
+
+    group_size: u32,
+    eps: f32,
+
+    pub fn forward(self: GroupNorm, grouping_axis: anytype, normalization_axis: anytype, input: zml.Tensor) zml.Tensor {
+        return groupNorm(input, grouping_axis, normalization_axis, self);
+    }
+};
+
+/// Group normalization
+/// https://paperswithcode.com/method/group-normalization
+/// ![Group normalization visualization](https://production-media.paperswithcode.com/methods/Screen_Shot_2020-05-23_at_11.26.56_PM_BQOdMKA.png)
+pub fn groupNorm(input: zml.Tensor, grouping_axis: anytype, normalization_axis: anytype, opts: GroupNorm) zml.Tensor {
+    const group_ax = input.axis(grouping_axis);
+
+    var grouped = input.merge(.{ ._group_ = .{ group_ax, normalization_axis } });
+    grouped = grouped.splitAxis(._group_, .{ ._group_ = opts.group_size, ._group_items_ = .auto });
+
+    const normed = normalizeVariance(grouped, ._group_items_, opts.eps).reshape(input.shape());
+
+    var out = normed.mul(opts.weight.broadcast(input.shape(), &.{group_ax}));
+    out = out.add(opts.bias.broadcast(input.shape(), &.{group_ax}));
+
+    return out;
+}
+
 /// Center and scale by the variance.
-/// normalize(x, eps) = (x - mean(x)) / sqrt(var(x) + eps)
+/// normalize(x, axis, eps) = (x - mean(x, axis)) / sqrt(var(x, axis) + eps)
 /// Work on the last axis.
-pub fn normalizeVariance(x: Tensor, eps: f32) Tensor {
-    const N: f32 = @floatFromInt(x.dim(-1));
+pub fn normalizeVariance(x: Tensor, axis_: anytype, eps: f32) Tensor {
+    const a = x.axis(axis_);
+    const N: f32 = @floatFromInt(x.dim(a));
 
     // Upcast to improve precision
     const xf32 = x.convert(.f32);
-    const mean = xf32.sum(-1).scale(1.0 / N);
+    const mean = xf32.sum(a).scale(1.0 / N);
     const mean_dev = xf32.sub(mean.broadcastRight(xf32.shape()));
-    const variance = mean_dev.mul(mean_dev).sum(-1).scale(1.0 / N);
+    const variance = mean_dev.mul(mean_dev).sum(a).scale(1.0 / N);
     const rsqrt = Tensor.rsqrt(variance.addConstant(eps));
 
     return mean_dev.mul(rsqrt.broadcastRight(mean_dev.shape())).convert(x.dtype());
 }
 
-// ref: https://pytorch.org/docs/stable/generated/torch.nn.functional.normalize.html
-// Implementation equivalent to `nn.functional.normalize(tensor, dim=-1)` call
-pub fn normalizeL2(input: Tensor, eps: f32) Tensor {
-    const inv_norm = input.pow(Tensor.scalar(2, input.dtype())).sum(-1).addConstant(eps).rsqrt();
-    return input.mul(inv_norm.broad(input.shape()));
+/// L² normalization of each individual vector extracted along the given axis.
+/// normalize(X, .b, ϵ)[a, b, c] = X(a, b, c) / max(‖X(a, :, c)‖², ϵ)
+pub fn normalizeL2(input: Tensor, axis_: anytype, eps: f32) Tensor {
+    const norm = input.norm(axis_, 2);
+    // Replace norms that are too close to 0 by ϵ.
+    const max_norm_eps = norm.maximum(Tensor.scalar(eps, input.dtype()));
+    return input.div(max_norm_eps.broad(input.shape()));
 }
 
 test normalizeL2 {
     const platform = zml.testing.env();
 
     const input = try zml.Buffer.fromSlice(platform, .{ 2, 2 }, &[_]f32{ -0.9686, -1.0058, -1.7808, 0.6698 });
-
-    const res = try zml.testing.compileAndCall(platform, zml.nn.normalizeL2, .{ input, 1e-12 });
-    const expectation = zml.HostBuffer.fromSlice(.{ 2, 2 }, &[_]f32{ -0.6937, -0.7203, -0.9360, 0.3520 });
-    try zml.testing.expectClose(expectation, res, 1e-4);
+    const Local = struct {
+        fn _normalizeL2(x: Tensor) Tensor {
+            return normalizeL2(x, -1, 1e-12);
+        }
+    };
+    const actual = try zml.testing.compileAndCall(platform, Local._normalizeL2, .{input});
+    const expected = [2][2]f32{ .{ -0.6937, -0.7203 }, .{ -0.9360, 0.3520 } };
+    try zml.testing.expectClose(zml.HostBuffer.fromArray(&expected), actual, 1e-4);
 }
 
 pub const RopeOpts = struct {
