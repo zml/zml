@@ -114,7 +114,7 @@ pub fn load() !*const pjrt.Api {
         return error.Unavailable;
     }
 
-    try initialize();
     setNeuronCCFlags();
+    try initialize();
     return try pjrt.Api.loadFrom("libpjrt_neuron.so");
 }
