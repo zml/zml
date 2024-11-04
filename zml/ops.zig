@@ -211,8 +211,7 @@ pub const ReduceWindowOpts = struct {
     window_strides: []const i64,
     base_dilations: []const i64,
     window_dilations: []const i64,
-    padding_values: []const i64,
-    padding_shape: []const i64,
+    padding: []const [2]i64,
 };
 
 pub fn reduceWindow(
@@ -235,7 +234,10 @@ pub fn reduceWindow(
 
     const loc = ctx.mlirCtx().location(@src());
 
-    const pad_shape = mlir.RankedTensorType.init(opts.padding_shape, mlir.ext.Type.fromDType(ctx.mlirCtx(), .i64)).as(mlir.Type).?;
+    const pad_shape = mlir.RankedTensorType.init(
+        &.{ @intCast(opts.padding.len), 2 },
+        mlir.ext.Type.fromDType(ctx.mlirCtx(), .i64),
+    ).as(mlir.Type).?;
     const op = mlir.Operation.make(ctx.mlirCtx(), "stablehlo.reduce_window", .{
         .variadic_operands = &.{ input_values[0..], init_values[0..] },
         .result_type_inference = true,
@@ -245,7 +247,7 @@ pub fn reduceWindow(
             .{ "window_strides", mlir.DenseArrayAttribute(.i64).init(ctx.mlirCtx(), opts.window_strides).as(mlir.Attribute).? },
             .{ "base_dilations", mlir.DenseArrayAttribute(.i64).init(ctx.mlirCtx(), opts.base_dilations).as(mlir.Attribute).? },
             .{ "window_dilations", mlir.DenseArrayAttribute(.i64).init(ctx.mlirCtx(), opts.window_dilations).as(mlir.Attribute).? },
-            .{ "padding", mlir.DenseIntOrFPElementsAttribute(.i64).init(pad_shape, std.mem.sliceAsBytes(opts.padding_values)).as(mlir.Attribute).? },
+            .{ "padding", mlir.DenseIntOrFPElementsAttribute(.i64).init(pad_shape, std.mem.sliceAsBytes(opts.padding)).as(mlir.Attribute).? },
         },
         .location = loc,
     });
