@@ -3,41 +3,7 @@ const xev = @import("xev");
 const libcoro = @import("libcoro");
 const aio = libcoro.asyncio;
 
-/// Normalize from a real tuple to a generic tuple. This is needed because
-/// real tuples are reifed tuples are not the same.
-fn NormalizedTuple(comptime T: type) type {
-    const ti = @typeInfo(T).Struct;
-    var types: [ti.fields.len]type = undefined;
-    inline for (ti.fields, 0..) |field, i| {
-        types[i] = field.type;
-    }
-    return std.meta.Tuple(&types);
-}
-
-pub fn FnSignature(comptime func: anytype, comptime argsT: ?type) type {
-    return struct {
-        pub const FuncT = if (@TypeOf(func) == type) func else @TypeOf(func);
-        pub const ArgsT = blk: {
-            if (@typeInfo(FuncT).Fn.params.len == 0) {
-                break :blk @TypeOf(.{});
-            }
-            break :blk argsT orelse std.meta.ArgsTuple(FuncT);
-        };
-        pub const ReturnT = @TypeOf(@call(.auto, func, @as(ArgsT, undefined)));
-        pub const ReturnPayloadT = blk: {
-            break :blk switch (@typeInfo(ReturnT)) {
-                .ErrorUnion => |u| u.payload,
-                else => ReturnT,
-            };
-        };
-        pub const ReturnErrorSet: ?type = blk: {
-            break :blk switch (@typeInfo(ReturnT)) {
-                .ErrorUnion => |u| u.error_set,
-                else => null,
-            };
-        };
-    };
-}
+const FnSignature = @import("meta.zig").FnSignature;
 
 pub fn Frame(comptime func: anytype) type {
     const Signature = FnSignature(func, null);
@@ -151,9 +117,7 @@ pub const AsyncThread = struct {
     loop: *xev.Loop,
     thread_pool: *xev.ThreadPool,
 
-    pub fn main(allocator: std.mem.Allocator, comptime func: anytype, args: anytype) !FnSignature(func, NormalizedTuple(@TypeOf(args))).ReturnPayloadT {
-        const Signature = FnSignature(func, NormalizedTuple(@TypeOf(args)));
-
+    pub fn main(allocator: std.mem.Allocator, comptime func: anytype, args: anytype) !void {
         var thread_pool = xev.ThreadPool.init(.{});
         defer {
             thread_pool.shutdown();
@@ -178,11 +142,7 @@ pub const AsyncThread = struct {
             .default_stack_size = 16 * 1024 * 1024,
         });
 
-        if (Signature.ReturnErrorSet) |_| {
-            return try aio.run(&executor, func, args, null);
-        } else {
-            return aio.run(&executor, func, args, null);
-        }
+        return try aio.run(&executor, func, args, null);
     }
 };
 
@@ -217,6 +177,10 @@ pub const File = struct {
 
     fn asFile(self: File) std.fs.File {
         return .{ .handle = self.inner.file.fd };
+    }
+
+    pub fn handle(self: File) std.fs.File.Handle {
+        return self.inner.file.fd;
     }
 
     pub fn init(file_: std.fs.File) !File {

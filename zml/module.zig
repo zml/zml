@@ -49,6 +49,7 @@ pub const CompilationContext = struct {
     _unique_id: u64 = 10000,
     _tracer: Tracer,
 
+    _previous: ?*CompilationContext = null,
     threadlocal var _current: ?*CompilationContext = null;
 
     const TensorToBlockArg = std.AutoHashMapUnmanaged(Tensor._Id, struct { mlir.Value, Tensor._Donation });
@@ -95,12 +96,14 @@ pub const CompilationContext = struct {
     }
 
     pub fn activate(self: *CompilationContext) void {
+        self._previous = _current;
         _current = self;
     }
 
     pub fn deactivate(self: *CompilationContext) void {
         std.debug.assert(_current != null and _current.? == self);
-        _current = null;
+        _current = self._previous;
+        self._previous = null;
     }
 
     pub fn current() *CompilationContext {

@@ -252,7 +252,7 @@ pub const MemoryMappedFile = struct {
             data_len,
             std.posix.PROT.READ,
             .{ .TYPE = .PRIVATE },
-            file.inner.file.fd,
+            file.handle(),
             0,
         });
 
