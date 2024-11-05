@@ -1,14 +1,14 @@
 const builtin = @import("builtin");
 const std = @import("std");
-
-const asynk = @import("async");
 const mlir = @import("mlir");
-const pjrt = @import("pjrt");
 const c = @import("c");
 const runfiles = @import("runfiles");
 const runtimes = @import("runtimes");
 
 const platform = @import("platform.zig");
+const pjrt = @import("pjrtx.zig");
+
+const available_targets = @import("platform.zig").available_targets;
 const Target = @import("platform.zig").Target;
 const Platform = @import("platform.zig").Platform;
 

@@ -93,6 +93,27 @@ pub const AsyncThread = struct {
     }
 };
 
+pub const Notification = struct {
+    inner: std.Thread.ResetEvent,
+
+    pub fn init() !Notification {
+        return .{ .inner = .{} };
+    }
+
+    pub fn notify(self: *Notification) !void {
+        self.inner.set();
+    }
+
+    pub fn wait(self: *Notification) !void {
+        self.inner.wait();
+    }
+
+    pub fn deinit(self: *Notification) void {
+        self.inner.set();
+        self.* = undefined;
+    }
+};
+
 pub fn StdIn() !File {
     return File.init(std.io.getStdIn()) catch @panic("Unable to open stdin");
 }
