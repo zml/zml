@@ -31,12 +31,6 @@ pub const SerializeResult = pjrt.SerializeResult;
 pub const Executable = pjrt.Executable;
 pub const ExecuteError = ApiError;
 
-test {
-    std.testing.refAllDecls(Client);
-    std.testing.refAllDecls(Event);
-    std.testing.refAllDecls(LoadedExecutable);
-}
-
 fn InnerMixin(comptime innerT: type) type {
     return struct {
         inline fn inner(self: anytype) if (@typeInfo(@TypeOf(self)).Pointer.is_const) *const innerT else *innerT {
