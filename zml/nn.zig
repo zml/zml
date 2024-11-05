@@ -1010,3 +1010,118 @@ pub fn sampleTokens(activations: Tensor, opts: SamplingStrategy, rng: Tensor.Rng
     // log.debug("sampleTokens({}) -> {} -> {} -> {}", .{ activations, topk.indices, topk_idx, next_tokens });
     return .{ next_tokens, next_rng };
 }
+
+pub const DynamicSamplingStrategy = struct {
+    max_top_k: u32,
+    top_k: Tensor,
+    temperature: Tensor,
+    top_p: Tensor,
+    min_p: Tensor,
+
+    pub fn shapes(dtype: DataType, max_top_k: u32) zml.ShapeOf(DynamicSamplingStrategy) {
+        const scalar_shape = Shape.init(.{}, dtype);
+        return .{
+            .max_top_k = max_top_k,
+            .top_k = scalar_shape,
+            .temperature = scalar_shape,
+            .top_p = scalar_shape,
+            .min_p = scalar_shape,
+        };
+    }
+
+    pub fn makeBuffers(
+        platform: zml.Platform,
+        dtype: zml.DataType,
+        args: struct {
+            top_k: u32,
+            temperature: f32 = 1.0,
+            top_p: f32 = 1.0,
+            min_p: f32 = 0.0,
+        },
+    ) !zml.Bufferized(DynamicSamplingStrategy) {
+        return .{
+            .max_top_k = 0,
+            .top_k = try zml.Buffer.scalar(platform, args.top_k, dtype),
+            .temperature = try zml.Buffer.scalar(platform, args.temperature, dtype),
+            .top_p = try zml.Buffer.scalar(platform, args.top_p, dtype),
+            .min_p = try zml.Buffer.scalar(platform, args.min_p, dtype),
+        };
+    }
+};
+
+/// Given the output of the last layer of a LM with a `.voc` axis,
+/// Compute indices for the next tokens, following the given sampling strategy.
+/// The dynamic sampling strategy is more expressive but top_p requires computing the softmax.
+pub fn sampleTokensDynamic(logits: Tensor, opts: DynamicSamplingStrategy, rng: Tensor.Rng) struct { Tensor, Tensor.Rng } {
+    var x, const topk_indices = fixupLogits(logits, opts);
+
+    // the rest is similar to sampleTokens
+    const next_rng, const gumbel_noise = rng.gumbel(x.shape());
+    x = x.add(gumbel_noise);
+
+    const topk_idx = x.argMax(.topk, .i32).indices;
+    const next_tokens = topk_indices.gatherValues(.voc, topk_idx.squeeze(.topk), .{});
+    return .{ next_tokens, next_rng };
+}
+
+fn fixupLogits(logits: Tensor, opts: DynamicSamplingStrategy) [2]Tensor {
+    const min_inf = Tensor.constant(.{}, logits.dtype().minValue());
+
+    // First reduce the vocab size to a reasonable sub set of candidate.
+    const full_topk = if (opts.max_top_k > 0)
+        logits.topK(opts.max_top_k, .voc, .{ .descending = true })
+    else
+        logits.sort(.voc, .{ .descending = true });
+
+    // After the topk, we don't have .voc indices, anymore, only topk.
+    var x = full_topk.values.rename(.{ .voc = .topk });
+    // mask values above the dynamic top_k
+    x = Tensor.iota(x.shape().withDtype(.i32), .topk).cmp(.GE, opts.top_k).select(min_inf, x);
+    x = x.mul(opts.temperature);
+
+    const probs = x.softmax(.topk);
+    const probs_sum = probs.cumulativeSum(.topk);
+    const probs_max = probs.slice1d(.topk, .{ .start = 0, .end = 1 });
+
+    // Ensure top_p is at least greater than the probability of the top token, otherwise all tokens are masked.
+    const top_p = probs_max.maximum(opts.top_p).broad(x.shape());
+    x = probs_sum.cmp(.GT, top_p).select(min_inf, x);
+
+    const min_p = probs_max.mul(opts.min_p).broad(x.shape());
+    x = probs.cmp(.LT, min_p).select(min_inf, x);
+    return .{ x, full_topk.indices };
+}
+
+test sampleTokensDynamic {
+    const platform = zml.testing.env();
+    const allocator = std.testing.allocator;
+
+    const ___ = @log(0.0);
+    const logits = [_]f32{ @log(2.0), @log(1.0), @log(4.0), @log(3.0) };
+    const top_k_indices = [_]i32{ 2, 3, 0, 1 };
+    const logits_buff = try zml.Buffer.fromArray(platform, logits);
+    const mod = try zml.compileFn(allocator, fixupLogits, .{ Shape.init(.{ .voc = logits.len }, .f32), DynamicSamplingStrategy.shapes(.f32, 0) }, platform);
+    defer mod.deinit();
+
+    inline for (.{
+        // top_k == logits.len -> just sort the input
+        .{ .{ .top_k = 4 }, [_]f32{ @log(4.0), @log(3.0), @log(2.0), @log(1.0) } },
+        .{ .{ .top_k = 2 }, [_]f32{ @log(4.0), @log(3.0), ___, ___ } },
+        .{ .{ .top_k = 2, .temperature = 0.1 }, [_]f32{ @log(4.0) * 0.1, @log(3.0) * 0.1, ___, ___ } },
+        // top_k == logits.len and small top_p  -> make sure at least one is returned
+        .{ .{ .top_k = 4, .top_p = 0.1 }, [_]f32{ @log(4.0), ___, ___, ___ } },
+        .{ .{ .top_k = 4, .top_p = 0.701 }, [_]f32{ @log(4.0), @log(3.0), ___, ___ } },
+        .{ .{ .top_k = 4, .top_p = 0.901 }, [_]f32{ @log(4.0), @log(3.0), @log(2.0), ___ } },
+        // Here top_p is computed on the top 3 items, so 0.701 isn't enougth anymore to allow @log(3.0)
+        .{ .{ .top_k = 3, .top_p = 0.701 }, [_]f32{ @log(4.0), ___, ___, ___ } },
+        // Here top_p allows the first 3 results, but min_p only accepts the first two.
+        .{ .{ .top_k = 4, .top_p = 0.901, .min_p = 0.6 }, [_]f32{ @log(4.0), @log(3.0), ___, ___ } },
+    }) |args_expected| {
+        const args, const expected = args_expected;
+        log.warn("sampleTokensDynamic: {}", .{args});
+        // Top_k == logits.len, so this just sort the items
+        const new_logits, const indices = mod.call(.{ logits_buff, try DynamicSamplingStrategy.makeBuffers(platform, .f32, args) });
+        try std.testing.expectEqual(top_k_indices, try indices.getValue(@TypeOf(top_k_indices)));
+        try zml.testing.expectEqual(expected, try new_logits.getValue(@TypeOf(expected)));
+    }
+}
