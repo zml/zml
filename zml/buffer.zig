@@ -1,10 +1,10 @@
 const std = @import("std");
 const testing = std.testing;
 
-const pjrt = @import("pjrt");
+const meta = @import("meta.zig");
+const pjrt = @import("pjrtx.zig");
 const asynk = @import("async");
 
-const meta = @import("meta.zig");
 const Context = @import("context.zig").Context;
 const Data = @import("dtype.zig").Data;
 const DataType = @import("dtype.zig").DataType;
@@ -54,17 +54,7 @@ pub const Buffer = struct {
         const buffer_type = bufferTypeFromDtype(host_buffer.shape().dtype());
         const byte_strides = host_buffer.strides() orelse host_buffer.shape().computeStrides().constSlice();
 
-        const xbufferFromHostBuffer = struct {
-            fn do(self: *const pjrt.Client, api: *const pjrt.Api, args: pjrt.Client.BufferFromHostBufferArgs) pjrt.ApiError!*pjrt.Buffer {
-                const buffer, const ev = try asynk.callBlocking(pjrt.Client.bufferFromHostBuffer, .{ self, api, args });
-                if (ev) |e| {
-                    e.deinit(api);
-                }
-                return buffer;
-            }
-        }.do;
-
-        var frames: std.BoundedArray(asynk.Frame(xbufferFromHostBuffer), MAX_NUM_SHARDS) = .{};
+        var frames: std.BoundedArray(asynk.Frame(pjrt.Client.bufferFromHostBuffer), MAX_NUM_SHARDS) = .{};
         const devices = platform.getDevices();
         for (0..n_partitions) |i| {
             // If no sharding if found, the given buffer is replicated on all devices.
@@ -73,7 +63,7 @@ pub const Buffer = struct {
                 break :buf host_buffer.slice1d(ax, .{ .start = start, .end = start + chunk_size });
             } else host_buffer;
 
-            const frame = try asynk.asyncc(xbufferFromHostBuffer, .{
+            const frame = try asynk.asyncc(pjrt.Client.bufferFromHostBuffer, .{
                 platform.pjrt_client,
                 platform.pjrt_api,
                 .{

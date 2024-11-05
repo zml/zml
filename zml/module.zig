@@ -1,6 +1,5 @@
 const builtin = @import("builtin");
 const std = @import("std");
-const pjrt = @import("pjrt");
 
 const runfiles = @import("runfiles");
 
@@ -8,6 +7,7 @@ const xla_pb = @import("//xla:xla_proto");
 const meta = @import("meta.zig");
 const mlir = @import("mlir.zig");
 const ops = @import("ops.zig");
+const pjrt = @import("pjrtx.zig");
 const protobuf = @import("io/protobuf");
 const asynk = @import("async");
 const aio = @import("aio.zig");
@@ -1170,19 +1170,7 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, m
 
     const options_bytes = try options.encode(arena);
 
-    var mlir_bytecode = std.ArrayList(u8).init(arena);
-    defer mlir_bytecode.deinit();
-    // Note: we may need to restore IR downgrade if we need to support old pjrt plugins.
-    module.op().writeBytecode(mlir_bytecode.writer());
-
-    const loaded_executable = try asynk.callBlocking(pjrt.Client.compile, .{
-        platform.pjrt_client, platform.pjrt_api, .{
-            .bytecode = mlir_bytecode.items,
-            .bytecode_format = .mlir,
-            .compile_options_pb = options_bytes,
-        },
-    });
-
+    const loaded_executable = try platform.pjrt_client.compile(platform.pjrt_api, arena, module, options_bytes);
     errdefer loaded_executable.deinit();
 
     if (platform.compilation_options.cache_location) |compilation_cache_location| {

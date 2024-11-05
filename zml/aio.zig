@@ -2,6 +2,7 @@ const builtin = @import("builtin");
 const asynk = @import("async");
 const std = @import("std");
 const zml = @import("zml.zig");
+const pjrt = @import("pjrtx.zig");
 const c = @import("c");
 const posix = @import("posix.zig");
 

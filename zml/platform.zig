@@ -1,12 +1,12 @@
 const builtin = @import("builtin");
 const std = @import("std");
 
-const pjrt = @import("pjrt");
 const asynk = @import("async");
 const runtimes = @import("runtimes");
 
 const meta = @import("meta.zig");
 const module = @import("module.zig");
+const pjrt = @import("pjrtx.zig");
 const log = std.log.scoped(.zml);
 
 pub const Target = runtimes.Platform;
@@ -92,38 +92,5 @@ pub const Platform = struct {
     /// Platforms with known profiler extensions: cuda, xpu
     pub fn getProfiler(self: Platform, options: pjrt.Profiler.Options) pjrt.Profiler {
         return self.pjrt_client.getProfiler(self.pjrt_api, options);
-    }
-
-    /// Suspend the current co-routine while awaiting for a pjrt event to be over.
-    pub fn awaitEvent(self: Platform, event: *pjrt.Event) !void {
-        defer event.deinit(self.pjrt_api);
-        // If we aren't in a coroutine just use the normal blocking api.
-        if (!asynk.inCoro()) {
-            return try event.await_(self.pjrt_api);
-        }
-
-        var ctx = struct {
-            err: ?*pjrt.Error = null,
-            notif: asynk.Notification,
-            ready: bool = false,
-        }{
-            .notif = try asynk.Notification.init(),
-        };
-        defer ctx.notif.deinit();
-
-        try event.onReady(self.pjrt_api, &(struct {
-            fn call(err: ?*pjrt.Error, user_arg: ?*anyopaque) callconv(.C) void {
-                const ctx_: *@TypeOf(ctx) = @ptrCast(@alignCast(user_arg.?));
-                ctx_.err = err;
-                @atomicStore(bool, &ctx_.ready, true, .seq_cst);
-                ctx_.notif.notify() catch @panic("Unable to notify");
-            }
-        }.call), &ctx);
-        // Suspend
-        try ctx.notif.wait();
-        if (ctx.err) |e| {
-            defer e.deinit(self.pjrt_api);
-            return e.getCode(self.pjrt_api).toApiError();
-        }
     }
 };

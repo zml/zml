@@ -370,5 +370,3 @@ pub const Mutex = struct {
         _ = self.inner.recv();
     }
 };
-
-pub const inCoro = libcoro.inCoro;

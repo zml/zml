@@ -1187,23 +1187,37 @@ pub fn stablehloVersionFromCompatibilityRequirement(requirement: c.MlirStablehlo
     return context.str;
 }
 
-pub fn stablehloGetMinimumVersion(writer: anytype) void {
-    var context = .{ .writer = writer };
-    const WriterContext = @TypeOf(context);
+pub fn getMinimumVersion() []const u8 {
+    const state = struct {
+        var buf: [32]u8 = undefined;
+        var str: []const u8 = undefined;
+        var once = std.once(call);
 
-    c.stablehloGetMinimumVersion((struct {
-        pub fn callback(mlir_str: c.MlirStringRef, userdata: ?*anyopaque) callconv(.C) void {
-            const inner_ctx: *WriterContext = @ptrCast(@alignCast(userdata));
-            _ = inner_ctx.writer.write(mlir.fromStringRef(mlir_str)) catch unreachable;
+        fn call() void {
+            var stream = std.io.fixedBufferStream(&buf);
+            var context = .{ .writer = stream.writer() };
+            const WriterContext = @TypeOf(context);
+
+            c.stablehloGetMinimumVersion((struct {
+                pub fn callback(mlir_str: c.MlirStringRef, userdata: ?*anyopaque) callconv(.C) void {
+                    const inner_ctx: *WriterContext = @ptrCast(@alignCast(userdata));
+                    _ = inner_ctx.writer.write(mlir.fromStringRef(mlir_str)) catch unreachable;
+                }
+            }).callback, &context);
+
+            str = buf[0..stream.pos];
         }
-    }).callback, &context);
+    };
+
+    state.once.call();
+    return state.str;
 }
 
-pub fn serializePortableArtifact(module_str: []const u8, target_version: []const u8, writer: anytype) !void {
+pub fn serializePortableArtifact(bytecode: []const u8, target_version: []const u8, writer: anytype) !void {
     var context = .{ .writer = writer };
     const WriterContext = @TypeOf(context);
 
-    try mlir.successOr(c.stablehloSerializePortableArtifactFromStringRef(mlir.stringRef(module_str), mlir.stringRef(target_version), (struct {
+    try mlir.successOr(c.stablehloSerializePortableArtifactFromStringRef(mlir.stringRef(bytecode), mlir.stringRef(target_version), (struct {
         pub fn callback(mlir_str: c.MlirStringRef, userdata: ?*anyopaque) callconv(.C) void {
             const inner_ctx: *WriterContext = @ptrCast(@alignCast(userdata));
             _ = inner_ctx.writer.write(mlir.fromStringRef(mlir_str)) catch unreachable;
