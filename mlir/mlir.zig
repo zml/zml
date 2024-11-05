@@ -434,14 +434,16 @@ pub const TypeAttribute = struct {
         .dump_fn = c.mlirAttributeDump,
         .equal_fn = c.mlirAttributeEqual,
     });
-    const Self = TypeAttribute;
-
-    pub fn init(type_: Type) Self {
-        return Self.wrap(c.mlirTypeAttrGet(type_.inner()));
+    pub fn init(type_: Type) TypeAttribute {
+        return TypeAttribute.wrap(c.mlirTypeAttrGet(type_.inner()));
     }
 
-    pub fn typ(self: Self) Type {
+    pub fn typ(self: TypeAttribute) Type {
         return Type.wrap(c.mlirAttributeGetType(self.inner()));
+    }
+
+    pub fn asAttr(self: TypeAttribute) Attribute {
+        return self.as(Attribute).?;
     }
 };
 
@@ -788,9 +790,9 @@ pub const Operation = struct {
         ) orelse Error.InvalidMlir;
     }
 
-    pub fn make(ctx: Context, op_name: [:0]const u8, args: struct {
-        pub const AttrTuple = struct { [:0]const u8, Attribute };
+    pub const AttrTuple = struct { [:0]const u8, Attribute };
 
+    pub fn make(ctx: Context, op_name: [:0]const u8, args: struct {
         operands: ?[]const Value = null,
         variadic_operands: ?[]const []const Value = null,
         results: ?[]const Type = null,
@@ -1294,6 +1296,13 @@ pub const FloatTypes = enum {
     f64,
 
     unknown,
+
+    pub fn asType(self: FloatTypes, ctx: Context) ?Type {
+        return switch (self) {
+            .unknown => null,
+            inline else => |ft| FloatType(ft).init(ctx).asType(),
+        };
+    }
 };
 
 pub fn FloatType(comptime ft: FloatTypes) type {
@@ -1345,6 +1354,10 @@ pub fn FloatType(comptime ft: FloatTypes) type {
                 }
             }
             return false;
+        }
+
+        pub fn asType(self: Float) Type {
+            return self.as(Type).?;
         }
     };
 }
