@@ -3,7 +3,6 @@ const std = @import("std");
 const assert = std.debug.assert;
 const testing = std.testing;
 
-const pjrt = @import("pjrtx.zig");
 const meta = @import("meta.zig");
 const mlir = @import("mlir.zig");
 const ops = @import("ops.zig");
