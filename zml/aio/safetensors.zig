@@ -38,10 +38,10 @@ fn loadFromIndex(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.
 
     const json_data = try allocator.alloc(u8, (try file.stat()).size);
     _ = try r.readAtLeast(json_data, json_data.len);
-    const metadata = try std.json.parseFromSliceLeaky(std.json.Value, allocator, json_data, .{ .allocate = .alloc_if_needed });
+    const index = try std.json.parseFromSliceLeaky(std.json.Value, allocator, json_data, .{ .allocate = .alloc_if_needed });
     var loaded_files = std.StringHashMap(void).init(allocator);
 
-    const weight_map = metadata.object.get("weight_map").?.object;
+    const weight_map = index.object.get("weight_map").?.object;
     var it = weight_map.iterator();
     while (it.next()) |entry| {
         const filename = entry.value_ptr.string;
@@ -54,6 +54,11 @@ fn loadFromIndex(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.
 
         const full_filename = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(path).?, filename });
         try loadFile(allocator, store, files, full_filename);
+    }
+
+    if (index.object.get("__metadata__")) |metadata| {
+        var prefix_buf: [1024]u8 = undefined;
+        try json.parseMetadata(allocator, store, StringBuilder.initBuffer(&prefix_buf), metadata);
     }
 }
 
