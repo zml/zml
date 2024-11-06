@@ -24,5 +24,13 @@ pub fn main() !void {
     const output = try converter.toJson(allocator);
     defer allocator.free(output);
 
-    std.debug.print("{s}\n", .{output});
+    var path_buffer: [1028]u8 = undefined;
+    var output_path = std.ArrayListUnmanaged(u8).initBuffer(&path_buffer);
+    output_path.appendSliceAssumeCapacity(cli_args.path[0..std.mem.lastIndexOf(u8, cli_args.path, std.fs.path.extension(cli_args.path)).?]);
+    output_path.appendSliceAssumeCapacity(".json");
+
+    var output_file = try std.fs.createFileAbsolute(output_path.items, .{});
+    defer output_file.close();
+
+    try output_file.writeAll(output);
 }
