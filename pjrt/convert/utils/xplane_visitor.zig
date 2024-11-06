@@ -111,8 +111,8 @@ pub const XEventVisitor = struct {
         return self.metadata.name.getSlice();
     }
 
-    pub fn timestampPs(self: *const XEventVisitor) i64 {
-        return @as(i64, @intCast(math_utils.nanoToPico(@intCast(self.line.timestamp_ns)))) + self.event.data.?.offset_ps;
+    pub fn timestampPs(self: *const XEventVisitor) u128 {
+        return math_utils.nanoToPico(@intCast(self.line.timestamp_ns)) + @as(u128, @intCast(self.event.data.?.offset_ps));
     }
 
     pub fn durationPs(self: *const XEventVisitor) i64 {
@@ -258,7 +258,7 @@ pub const XPlaneVisitor = struct {
     }
 
     pub fn getEventMetadata(self: *const XPlaneVisitor, event_metadata_id: i64) *const xplane_proto.XEventMetadata {
-        for (self.plane.event_metadata.items) |event_metadata| {
+        for (self.plane.event_metadata.items) |*event_metadata| {
             if (event_metadata.value) |*v| {
                 if (v.id == event_metadata_id) return v;
             }
@@ -268,7 +268,7 @@ pub const XPlaneVisitor = struct {
     }
 
     pub fn getStatMetadata(self: *const XPlaneVisitor, stat_metadata_id: i64) *const xplane_proto.XStatMetadata {
-        for (self.plane.stat_metadata.items) |stat_metadata| {
+        for (self.plane.stat_metadata.items) |*stat_metadata| {
             if (stat_metadata.value) |*v| {
                 if (v.id == stat_metadata_id) return v;
             }

@@ -18,7 +18,7 @@ pub const TraceContainer = struct {
         device_id: u32 = 0,
         resource_id: u32 = 0,
         name: []const u8 = &[_]u8{},
-        timestamp_ps: u64 = 0,
+        timestamp_ps: u128 = 0,
         duration_ps: u64 = 0,
         args: std.StringHashMapUnmanaged([]const u8) = .{},
     };
