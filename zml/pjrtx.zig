@@ -24,7 +24,7 @@ pub const DeviceDescription = pjrt.DeviceDescription;
 pub const Api = pjrt.Api;
 pub const NamedValue = pjrt.NamedValue;
 pub const ClientInitError = pjrt.ClientInitError;
-pub const CompileError = std.mem.Allocator.Error || ApiError;
+pub const CompileError = std.mem.Allocator.Error || error{InvalidMlirBytecodeVersion} || ApiError;
 pub const Error = pjrt.Error;
 pub const GetCostAnalysisError = pjrt.GetCostAnalysisError;
 pub const SerializeResult = pjrt.SerializeResult;
@@ -89,16 +89,16 @@ pub const Client = opaque {
     fn compileSync(self: *const Client, api: *const Api, allocator: std.mem.Allocator, module: mlir.Module, compile_options_pb: []const u8) CompileError!*LoadedExecutable {
         var bytecode = std.ArrayList(u8).init(allocator);
         defer bytecode.deinit();
-        module.op().writeBytecodeWithConfig(bytecode.writer(), .{ .desiredEmitedVersion = 1 }) catch {
-            std.debug.print("failed to write module bytecode\n", .{});
-            unreachable;
+        module.op().writeBytecodeWithConfig(bytecode.writer(), .{ .desiredEmitedVersion = 1 }) catch |err| {
+            log.err("failed to write module bytecode: {}", .{err});
+            return err;
         };
 
         var serialized_buffer = std.ArrayList(u8).init(allocator);
         defer serialized_buffer.deinit();
-        dialects.stablehlo.serializePortableArtifact(bytecode.items, dialects.stablehlo.getMinimumVersion(), serialized_buffer.writer()) catch {
-            std.debug.print("failed to serialize to portable artifact\n", .{});
-            unreachable;
+        dialects.stablehlo.serializePortableArtifact(bytecode.items, dialects.stablehlo.getMinimumVersion(), serialized_buffer.writer()) catch |err| {
+            log.err("failed to serialize to portable artifact: {}", .{err});
+            return err;
         };
 
         return @ptrCast(try self.inner().compile(api, .{

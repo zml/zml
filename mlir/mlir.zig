@@ -945,8 +945,11 @@ pub const Operation = struct {
             c.mlirBytecodeWriterConfigDesiredEmitVersion(cfg, v);
         }
 
-        var writer_context = .{ .writer = writer };
-        const WriterContext = @TypeOf(writer_context);
+        const WriterContext = struct {
+            writer: @TypeOf(writer),
+            write_error: ?@TypeOf(writer).Error = null,
+        };
+        var writer_context: WriterContext = .{ .writer = writer };
 
         try successOr(c.mlirOperationWriteBytecodeWithConfig(
             self.inner(),
@@ -954,11 +957,15 @@ pub const Operation = struct {
             (struct {
                 pub fn callback(str: c.MlirStringRef, ctx_: ?*anyopaque) callconv(.C) void {
                     const inner_writer_context: *WriterContext = @ptrCast(@alignCast(ctx_));
-                    _ = inner_writer_context.writer.write(str.data[0..str.length]) catch unreachable;
+                    _ = inner_writer_context.writer.write(str.data[0..str.length]) catch |err| {
+                        inner_writer_context.write_error = err;
+                    };
                 }
             }).callback,
             &writer_context,
         ), error.InvalidMlirBytecodeVersion);
+
+        if (writer_context.write_error) |err| return err;
     }
 
     /// Enable a full dump of the IR.
