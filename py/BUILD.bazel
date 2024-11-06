@@ -1,0 +1,44 @@
+load("@python_versions//3.11:defs.bzl", "py_binary")
+load("@rules_zig//zig:defs.bzl", "zig_library")
+load("@zml//bazel:zig.bzl", "zig_cc_binary")
+load(":py_binary.bzl", "python_bootstrap")
+
+py_binary(
+    name = "sandbox",
+    srcs = ["empty.py"],
+    main = "empty.py",
+    precompile = "enabled",
+    precompile_source_retention = "omit_source",
+    pyc_collection = "include_pyc",
+)
+
+python_bootstrap(
+    name = "python_bootstrap",
+    main = "empty.py",
+    deps = [":sandbox"],
+)
+
+zig_library(
+    name = "pyoptions",
+    main = ":python_bootstrap",
+)
+
+cc_library(
+    name = "libpython",
+    hdrs = ["libpython.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@rules_python//python/cc:current_py_cc_headers",
+        "@rules_python//python/cc:current_py_cc_libs",
+    ],
+)
+
+zig_cc_binary(
+    name = "py",
+    data = [":sandbox"],
+    main = "pymain.zig",
+    deps = [
+        ":libpython",
+        ":pyoptions",
+    ],
+)
