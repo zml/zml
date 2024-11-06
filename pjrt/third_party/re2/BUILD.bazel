@@ -1,0 +1,10 @@
+cc_library(
+    name = "regexp",
+    deps = [
+        "@re2",
+        "@com_google_absl//absl/strings",
+    ],
+    visibility = ["//visibility:public"],
+    srcs = ["re2.cc"],
+    hdrs = ["re2.h"],
+)

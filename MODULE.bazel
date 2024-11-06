@@ -77,3 +77,7 @@ bazel_dep(name = "zigcoro", version = "20240829.0-fc1db29")
 bazel_dep(name = "sentencepiece", version = "20240618.0-d7ace0a")
 bazel_dep(name = "zig-protobuf", version = "20240722.0-c644d11")
 bazel_dep(name = "zig-yaml", version = "20240903.0-83d5fdf")
+
+# PJRT Profiler Dep
+bazel_dep(name = "re2", version = "2024-07-02")
+bazel_dep(name = "abseil-cpp", version = "20240116.0", repo_name = "com_google_absl")
