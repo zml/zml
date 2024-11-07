@@ -1,5 +1,5 @@
+const mvzr = @import("mvzr");
 const std = @import("std");
-const c = @import("c");
 
 pub const Category = enum {
     unknown,
@@ -12,12 +12,6 @@ pub const Category = enum {
     memcpy_h_to_h,
 };
 
-pub const TfOp = struct {
-    category: Category = .unknown,
-    name: []const u8,
-    type_: []const u8,
-};
-
 const unknown_op = "";
 const dataset_op = "Dataset";
 const memcpy_h_to_d_op = "MemcpyHToD";
@@ -25,38 +19,43 @@ const memcpy_d_to_h_op = "MemcpyDToH";
 const memcpy_d_to_d_op = "MemcpyDToD";
 const memcpy_h_to_h_op = "MemcpyHToH";
 
-const kIterator = "Iterator";
-const kSeparator = "::";
-const kNameScopeSeparator = '/';
-const kOpNameSuffixSeparator = '_';
-pub fn getMemcpyOp(tf_op_fullname: []const u8) ?TfOp {
-    var tf_op: TfOp = undefined;
-    tf_op.name = tf_op_fullname;
+const iterator = "Iterator";
+const name_scope_separator = '/';
+const op_name_suffix_separator = '_';
+
+pub fn getMemcpyCategory(tf_op_fullname: []const u8) ?Category {
     if (std.ascii.startsWithIgnoreCase(tf_op_fullname, "MEMCPYHToD")) {
-        tf_op.category = .memcpy_h_to_d;
-        tf_op.type_ = memcpy_h_to_d_op;
-        return tf_op;
+        return .memcpy_h_to_d;
     }
     if (std.ascii.startsWithIgnoreCase(tf_op_fullname, "MEMCPYDToH")) {
-        tf_op.category = .memcpy_d_to_h;
-        tf_op.type_ = memcpy_d_to_h_op;
-        return tf_op;
+        return .memcpy_d_to_h;
     }
     if (std.ascii.startsWithIgnoreCase(tf_op_fullname, "MEMCPYDToD")) {
-        tf_op.category = .memcpy_d_to_d;
-        tf_op.type_ = memcpy_d_to_d_op;
-        return tf_op;
+        return .memcpy_d_to_d;
     } else if (std.ascii.startsWithIgnoreCase(tf_op_fullname, "MEMCPYHToH")) {
-        tf_op.category = .memcpy_h_to_h;
-        tf_op.type_ = memcpy_h_to_h_op;
-        return tf_op;
+        return .memcpy_h_to_h;
     }
     return null;
 }
 
+pub fn fullMatch(haystack: []const u8, needle: []const u8) bool {
+    if (mvzr.compile(needle)) |regex| {
+        if (regex.match(haystack)) |m| {
+            return m.start == 0 and m.end == haystack.len;
+        }
+    }
+    return false;
+}
+
 // Example inputs: "MyOpName", "MyNamespace>MyOpName"
 pub fn isTfOpName(op_name: []const u8) bool {
-    return c.isTfOpName(op_name.ptr, op_name.len);
+    const tf_op_name_regex = "[A-Za-z0-9.][A-Za-z0-9_.\\/>-]*";
+    return fullMatch(op_name, tf_op_name_regex);
+}
+
+pub fn isJaxOpType(op_name: []const u8) bool {
+    const jax_op_type_regex = "[a-z_][a-z0-9_]*(\\[.*\\])?";
+    return fullMatch(op_name, jax_op_type_regex);
 }
 
 /// Returns an op type derived from an op name.
@@ -64,10 +63,10 @@ fn deriveOpType(full_op_name: []const u8) []const u8 {
     // Use the op name without name scopes and suffix as an op type. A full op
     // name consists of name scopes, an op type, and optionally a numeric suffix
     // (e.g., model/layer/MatMul_1).
-    var name_scopes_and_op_name = std.mem.splitScalar(u8, full_op_name, kNameScopeSeparator);
+    var name_scopes_and_op_name = std.mem.splitScalar(u8, full_op_name, name_scope_separator);
     var op_name: []const u8 = undefined;
     while (name_scopes_and_op_name.next()) |part| op_name = part;
-    var op_type_and_maybe_suffix = std.mem.splitScalar(u8, op_name, kOpNameSuffixSeparator);
+    var op_type_and_maybe_suffix = std.mem.splitScalar(u8, op_name, op_name_suffix_separator);
     var maybe_suffix: []const u8 = undefined;
     while (op_type_and_maybe_suffix.next()) |part| maybe_suffix = part;
     var op_type = op_name;
@@ -79,44 +78,38 @@ fn deriveOpType(full_op_name: []const u8) []const u8 {
     return op_type;
 }
 
-pub fn parseTfOpFullName(tf_op_fullname: []const u8) TfOp {
+pub fn parseTfOpCategory(tf_op_fullname: []const u8) Category {
     // For op types below, they all have the format "<op_name>:<op_type>", though
     // op_type could be empty.
-    var tf_op: TfOp = .{ .category = .unknown, .name = tf_op_fullname, .type_ = unknown_op };
     var split = std.mem.splitScalar(u8, tf_op_fullname, ':');
-
     var size: usize = 0;
     while (split.next()) |_| : (size += 1) {}
     split.reset();
 
     if (size != 2) {
         // Two possibilities here: GPU memcpy op or invalid op.
-        if (getMemcpyOp(split.first())) |tfop| return tfop;
-        return tf_op;
+        if (getMemcpyCategory(split.first())) |cat| {
+            return cat;
+        } else return .unknown;
     }
     const parts: [2][]const u8 = [_][]const u8{ split.first(), split.rest() };
 
     // Check for a Dataset op.
-    if (std.mem.eql(u8, parts[0], kIterator)) {
+    if (std.mem.eql(u8, parts[0], iterator)) {
         // Dataset Op names (e.g., Iterator::Batch::Map::TFRecord) do not follow the
         // format of TF Op names. But we still want to capture them for
         // input-pipeline analysis.
-        tf_op.category = .tf_data;
-        tf_op.type_ = dataset_op;
-        return tf_op;
+        return .tf_data;
     }
 
     // Check for Tensorflow Op.
     if (isTfOpName(parts[0]) and isTfOpName(parts[1])) {
-        tf_op.category = .tensorflow;
-        tf_op.name = parts[0];
-        tf_op.type_ = parts[1];
-        return tf_op;
+        return .tensorflow;
     }
 
     // Check for JAX op.
     const op_type: []const u8 = if (parts[1].len == 0) deriveOpType(parts[0]) else parts[1];
-    if (c.isJaxOpType(op_type.ptr, op_type.len)) {
+    if (isJaxOpType(op_type)) {
         // JAX category introduces op_type with '[]' including unnecessary details
         // to represent a group of ops.
         // We need to striping the brackets and contents inside. Based on our
@@ -126,18 +119,12 @@ pub fn parseTfOpFullName(tf_op_fullname: []const u8) TfOp {
         // Example:
         //    "transpose[permutation=(0, 3, 1, 2)]"  =>  "transpose"
         // See: go/xprof-jax-op-type
-        tf_op.category = .jax;
-        tf_op.name = parts[0];
-        tf_op.type_ = op_type[0 .. std.mem.indexOfScalar(u8, op_type, '[') orelse op_type.len];
-        return tf_op;
+        return .jax;
     }
 
     if (parts[1].len == 0) {
-        tf_op.category = .tensorflow;
-        tf_op.name = parts[0];
-        tf_op.type_ = op_type;
-        return tf_op;
+        return .tensorflow;
     }
 
-    return tf_op;
+    return .unknown;
 }

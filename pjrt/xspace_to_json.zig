@@ -18,7 +18,14 @@ pub fn main() !void {
     var args = std.process.args();
     const cli_args = flags.parse(&args, CliArgs);
 
-    var converter = try TraceConverter.init(allocator, cli_args.path);
+    var fd = try std.fs.openFileAbsolute(cli_args.path, .{});
+    defer fd.close();
+
+    const pb_buffer = try fd.readToEndAlloc(allocator, (try fd.stat()).size);
+    defer allocator.free(pb_buffer);
+    if (pb_buffer.len == 0) return error.EmptyBuffer;
+
+    var converter = try TraceConverter.init(allocator, pb_buffer);
     defer converter.deinit();
 
     const output = try converter.toJson(allocator);
@@ -33,4 +40,5 @@ pub fn main() !void {
     defer output_file.close();
 
     try output_file.writeAll(output);
+    std.debug.print("Wrote JSON to {s}\n", .{output_path.items});
 }

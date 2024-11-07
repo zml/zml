@@ -44,6 +44,6 @@ zig_cc_binary(
     deps = [
         ":xplane_proto",
         "//examples/third_party/tigerbeetle:flags",
-        "//pjrt/third_party/re2:regexp",
+        "@mvzr//:mvzr",
     ],
 )

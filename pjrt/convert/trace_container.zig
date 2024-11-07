@@ -96,12 +96,12 @@ pub const TraceContainer = struct {
         for (xplane.plane.lines.items) |*l| {
             const xline = xplane_visitor.XLineVisitor.init(xplane, l);
             const resource_id: u32 = @intCast(xline.displayId());
-            if (std.mem.eql(u8, xline.displayName(), xla_async_op_line_name)) return;
+            if (std.mem.eql(u8, xline.displayName(), xla_async_op_line_name)) continue;
             for (xline.line.events.items) |*e| {
                 const xevent = xplane_visitor.XEventVisitor.init(xline.plane, xline.line, e);
                 const event_type: xplane_schema.HostEventType = xevent
                     .type_ orelse .UnknownHostEventType;
-                if (event_type.isInternalEvent()) return;
+                if (event_type.isInternalEvent()) continue;
                 var event = try self.createEvent(allocator);
                 event.device_id = device_id;
                 event.resource_id = resource_id;
@@ -117,9 +117,9 @@ pub const TraceContainer = struct {
                 const xevent_md_visitor = xevent.metadataVisitor();
                 for (xevent_md_visitor.stats_owner.stats.items) |*s| {
                     const xstat = xplane_visitor.XStatVisitor.init(xevent_md_visitor.plane, s);
-                    if (xstat.stat.value == null) return;
+                    if (xstat.stat.value == null) continue;
                     if (xstat.type()) |t| {
-                        if (t.isInternalStat()) return;
+                        if (t.isInternalStat()) continue;
                         if (t == .step_name) {
                             event.name = try xstat.toString(allocator);
                         }
@@ -129,9 +129,9 @@ pub const TraceContainer = struct {
 
                 for (xevent.event.stats.items) |*s| {
                     const xstat = xplane_visitor.XStatVisitor.init(xevent.plane, s);
-                    if (xstat.stat.value == null) return;
+                    if (xstat.stat.value == null) continue;
                     if (xstat.type()) |t| {
-                        if (t.isInternalStat()) return;
+                        if (t.isInternalStat()) continue;
                         if (t == .step_name) {
                             event.name = try xstat.toString(allocator);
                         }

@@ -1,0 +1,17 @@
+{
+  "homepage": "https://github.com/mnemnion/mvzr",
+  "maintainers": [
+    {
+      "email": "bzlmod@zml.ai",
+      "github": "zml",
+      "name": "ZML Engineering Team"
+    }
+  ],
+  "repository": [
+    "github:mnemnion/mvzr"
+  ],
+  "versions": [
+    "20240906.0-fbae8ac"
+  ],
+  "yanked_versions": {}
+}

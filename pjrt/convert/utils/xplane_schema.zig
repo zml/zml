@@ -99,7 +99,7 @@ pub const HostEventType = enum(u16) {
     }
 
     pub fn fromTfOpEventType(event_name: []const u8) ?HostEventType {
-        return switch (tf_op_utils.parseTfOpFullName(event_name).category) {
+        return switch (tf_op_utils.parseTfOpCategory(event_name)) {
             .tensorflow => .TfOpRun,
             .tf_data => .Iterator,
             else => null,

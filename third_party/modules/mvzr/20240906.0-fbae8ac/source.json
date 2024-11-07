@@ -1,0 +1,9 @@
+{
+  "strip_prefix": "mvzr-fbae8acd049a9f2e59344147f567cf4660784e33",
+  "url": "https://github.com/mnemnion/mvzr/archive/fbae8acd049a9f2e59344147f567cf4660784e33.tar.gz",
+  "integrity": "sha256-R9HYWtdoPBuuc4hC6FXXMXO7NWoQcXGEPYLk5n635VU=",
+  "overlay": {
+    "MODULE.bazel": "",
+    "BUILD.bazel": ""
+  }
+}

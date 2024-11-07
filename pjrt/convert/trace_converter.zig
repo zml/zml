@@ -8,31 +8,13 @@ pub const TraceConverter = struct {
     container: TraceContainer = .{},
     xspace: xplane_proto.XSpace = .{},
 
-    pub fn init(allocator: std.mem.Allocator, path: []const u8) !TraceConverter {
+    pub fn init(allocator: std.mem.Allocator, pb_buffer: []const u8) !TraceConverter {
         var res: TraceConverter = .{
             .arena = std.heap.ArenaAllocator.init(allocator),
         };
-
-        var fd = try std.fs.openFileAbsolute(path, .{});
-        defer fd.close();
-
         const arena = res.arena.allocator();
-
-        const pb_buffer = try fd.readToEndAlloc(arena, (try fd.stat()).size);
-        if (pb_buffer.len == 0) return error.EmptyBuffer;
-
         res.xspace = try xplane_proto.XSpace.decode(pb_buffer, arena);
-
-        var events: usize = 0;
-        for (res.xspace.planes.items) |plane| {
-            for (plane.lines.items) |line| {
-                events += line.events.items.len;
-            }
-        }
-
-        std.debug.print("Found {d} events across {d} spaces.\n", .{ events, res.xspace.planes.items.len });
         res.container = try TraceContainer.fromXSpace(arena, &res.xspace);
-
         return res;
     }
 
