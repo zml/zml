@@ -96,32 +96,36 @@ pub fn chainModules(module_list: anytype, input: Tensor) Tensor {
 pub const LayerNorm = struct {
     weight: Tensor,
     bias: ?Tensor = null,
-    eps: f32 = 1e-5,
+    eps: f32 = 1e-6,
 
     pub fn forward(self: LayerNorm, x: Tensor) Tensor {
-        const normed = normalizeVariance(x, self.eps);
+        const xf32 = x.convert(.f32);
         const ax = x.axis(-1);
-        var out = normed.mul(self.weight.broadcast(x.shape(), &.{ax}));
-        if (self.bias) |bias| out = out.add(bias.broadcast(x.shape(), &.{ax}));
 
-        return out;
+        const normed = normalizeVariance2(xf32, self.eps);
+
+        var out = normed.mul(self.weight.convert(.f32).broadcast(xf32.shape(), &.{ax}));
+        if (self.bias) |bias| out = out.add(bias.broadcast(xf32.shape(), &.{ax}));
+
+        return out.convert(x.dtype());
     }
 };
 
 /// Center and scale by the variance.
 /// normalize(x, eps) = (x - mean(x)) / sqrt(var(x) + eps)
 /// Work on the last axis.
-pub fn normalizeVariance(x: Tensor, eps: f32) Tensor {
-    const N: f32 = @floatFromInt(x.dim(-1));
-
-    // Upcast to improve precision
+pub fn normalizeVariance2(x: Tensor, eps_: f32) Tensor {
     const xf32 = x.convert(.f32);
-    const mean = xf32.sum(-1).scale(1.0 / N);
-    const mean_dev = xf32.sub(mean.broadcastRight(xf32.shape()));
-    const variance = mean_dev.mul(mean_dev).sum(-1).scale(1.0 / N);
-    const rsqrt = Tensor.rsqrt(variance.addConstant(eps));
+    const channels = Tensor.scalar(xf32.dim(-1), xf32.dtype());
+    const eps = Tensor.scalar(eps_, xf32.dtype());
 
-    return mean_dev.mul(rsqrt.broadcastRight(mean_dev.shape())).convert(x.dtype());
+    const mean = xf32.sum(-1).div(channels);
+    const xshift = xf32.sub(mean.broad(xf32.shape()));
+    const variance = xshift.pow(Tensor.scalar(2, xf32.dtype())).sum(-1).div(channels);
+    const rstd = variance.add(eps).pow(Tensor.scalar(-0.5, xf32.dtype()));
+    const norm = xshift.mul(rstd.broadcastRight(xf32.shape()));
+
+    return norm.convert(x.dtype());
 }
 
 // ref: https://pytorch.org/docs/stable/generated/torch.nn.functional.normalize.html
