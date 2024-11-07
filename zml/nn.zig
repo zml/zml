@@ -102,7 +102,7 @@ pub const LayerNorm = struct {
         const xf32 = x.convert(.f32);
         const ax = x.axis(-1);
 
-        const normed = normalizeVariance2(xf32, self.eps);
+        const normed = normalizeVariance(xf32, self.eps);
 
         var out = normed.mul(self.weight.convert(.f32).broadcast(xf32.shape(), &.{ax}));
         if (self.bias) |bias| out = out.add(bias.broadcast(xf32.shape(), &.{ax}));
@@ -114,7 +114,7 @@ pub const LayerNorm = struct {
 /// Center and scale by the variance.
 /// normalize(x, eps) = (x - mean(x)) / sqrt(var(x) + eps)
 /// Work on the last axis.
-pub fn normalizeVariance2(x: Tensor, eps_: f32) Tensor {
+pub fn normalizeVariance(x: Tensor, eps_: f32) Tensor {
     const xf32 = x.convert(.f32);
     const channels = Tensor.scalar(xf32.dim(-1), xf32.dtype());
     const eps = Tensor.scalar(eps_, xf32.dtype());
