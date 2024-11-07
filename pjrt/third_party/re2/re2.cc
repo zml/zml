@@ -19,10 +19,5 @@ extern "C" {
     return RE2::FullMatch(op_type_view, *kJaxOpTypeRegEx);
   }
 
-  bool isNumber(const char *str, size_t len) {
-    int64_t unused;
-    absl::string_view str_view(str, len);
-    return absl::SimpleAtoi(str_view, &unused);
-  }
 }
 

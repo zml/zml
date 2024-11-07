@@ -1,9 +1,30 @@
 const std = @import("std");
-const trace_utils = @import("utils/trace_utils.zig");
 const xplane_proto = @import("//tsl:xplane_proto");
 const xplane_schema = @import("utils/xplane_schema.zig");
 const xplane_utils = @import("utils/xplane_utils.zig");
 const xplane_visitor = @import("utils/xplane_visitor.zig");
+
+// Constants used as trace_viewer PID (device_id in trace_events.proto).
+// PID 0 is unused.
+// Support up to 500 accelerator devices.
+const first_device_id = 1;
+const last_device_id = 500;
+// Support Upto 200 custom planes as fake devices (i.e., planes with a
+// "/custom:" prefix). See `<project_name>::custom_plane_prefix` for more
+// information
+const first_custom_plane_device_id = last_device_id + 1;
+const max_custom_plane_devices_per_host = 200;
+const last_custom_plane_device_id = first_custom_plane_device_id + max_custom_plane_devices_per_host - 1;
+
+// Host threads are shown as a single fake device.
+pub const host_threads_device_id = last_custom_plane_device_id + 1;
+
+pub const xla_async_op_line_name = "Async XLA Ops";
+
+pub const host_threads_plane_name = "/host:CPU";
+pub const gpu_plane_prefix = "/device:GPU:";
+pub const tpu_plane_prefix = "/device:TPU:";
+pub const custom_plane_prefix = "/device:CUSTOM:";
 
 pub const TraceContainer = struct {
     metadata: Trace = .{},
@@ -52,25 +73,19 @@ pub const TraceContainer = struct {
     fn buildDeviceAndResources(allocator: std.mem.Allocator, device_id: u32, plane: *const xplane_visitor.XPlaneVisitor, device: *Device) !void {
         device.name = plane.name();
         device.device_id = device_id;
-        var context: BuilderCtx = .{
-            .sort_by_ordinal = (device_id == trace_utils.kHostThreadsDeviceId),
-            .device = device,
-        };
-        try plane.forEachLine(allocator, struct {
-            pub fn call(a: std.mem.Allocator, line: xplane_visitor.XLineVisitor, ctx: ?*anyopaque) !void {
-                const ctx_: *BuilderCtx = @ptrCast(@alignCast(ctx));
-                const resource_id: u32 = @intCast(line.displayId());
-                const resource = try ctx_.device.mutableResource(a, resource_id);
-                resource.resource_id = resource_id;
-                resource.name = line.displayName();
-                if (ctx_.sort_by_ordinal) {
-                    // When sort_index is absent (i.e. 0), resource id will be used.
-                    // Therefore sort_index starts with 1.
-                    ctx_.ordinal += 1;
-                    resource.sort_index = ctx_.ordinal;
-                }
+        const sort_by_ordinal = (device_id == host_threads_device_id);
+        var ordinal: u32 = 0;
+        for (plane.plane.lines.items) |*l| {
+            var line = xplane_visitor.XLineVisitor.init(plane, l);
+            const resource_id: u32 = @intCast(line.displayId());
+            const resource = try device.mutableResource(allocator, resource_id);
+            resource.resource_id = resource_id;
+            resource.name = line.displayName();
+            if (sort_by_ordinal) {
+                ordinal += 1;
+                resource.sort_index = ordinal;
             }
-        }.call, &context);
+        }
     }
 
     fn xplaneToTraceEvents(self: *TraceContainer, allocator: std.mem.Allocator, device_id: u32, xplane: *const xplane_visitor.XPlaneVisitor) !void {
@@ -78,70 +93,53 @@ pub const TraceContainer = struct {
         try buildDeviceAndResources(allocator, device_id, xplane, try self.mutableDevice(allocator, device_id));
 
         // Convert events.
+        for (xplane.plane.lines.items) |*l| {
+            const xline = xplane_visitor.XLineVisitor.init(xplane, l);
+            const resource_id: u32 = @intCast(xline.displayId());
+            if (std.mem.eql(u8, xline.displayName(), xla_async_op_line_name)) return;
+            for (xline.line.events.items) |*e| {
+                const xevent = xplane_visitor.XEventVisitor.init(xline.plane, xline.line, e);
+                const event_type: xplane_schema.HostEventType = xevent
+                    .type_ orelse .UnknownHostEventType;
+                if (event_type.isInternalEvent()) return;
+                var event = try self.createEvent(allocator);
+                event.device_id = device_id;
+                event.resource_id = resource_id;
+                if (xevent.hasDisplayName()) {
+                    event.name = xevent.displayName();
+                    try event.args.put(allocator, "long_name", xevent.name());
+                } else {
+                    event.name = xevent.name();
+                }
+                event.timestamp_ps = @intCast(xevent.timestampPs());
+                event.duration_ps = @intCast(xevent.durationPs());
 
-        const PerLineCtx = struct {
-            device_id: u32,
-            container: *TraceContainer,
-        };
-        var line_ctx: PerLineCtx = .{ .device_id = device_id, .container = self };
-        try xplane.forEachLine(allocator, struct {
-            pub fn call(a1: std.mem.Allocator, xline: xplane_visitor.XLineVisitor, l_ctx: ?*anyopaque) !void {
-                const parsed_line_ctx: *PerLineCtx = @ptrCast(@alignCast(l_ctx));
-                const resource_id: u32 = @intCast(xline.displayId());
-                if (std.mem.eql(u8, xline.displayName(), xplane_schema.kXlaAsyncOpLineName)) return;
-                const PerEachEventCtx = struct {
-                    device_id: u32,
-                    resource_id: u32,
-                    container: *TraceContainer,
-                };
-
-                var evt_ctx: PerEachEventCtx = .{
-                    .device_id = parsed_line_ctx.device_id,
-                    .resource_id = resource_id,
-                    .container = parsed_line_ctx.container,
-                };
-                try xline.forEachEvent(a1, struct {
-                    pub fn call(a2: std.mem.Allocator, xevent: xplane_visitor.XEventVisitor, e_ctx: ?*anyopaque) !void {
-                        const parsed_event_ctx: *PerEachEventCtx = @ptrCast(@alignCast(e_ctx));
-                        const event_type: xplane_schema.HostEventType = xevent
-                            .type_ orelse .kUnknownHostEventType;
-                        if (event_type.isInternalEvent()) return;
-                        var event = try parsed_event_ctx.container.createEvent(a2);
-                        event.device_id = parsed_event_ctx.device_id;
-                        event.resource_id = parsed_event_ctx.resource_id;
-                        if (xevent.hasDisplayName()) {
-                            event.name = xevent.displayName();
-                            try event.args.put(a2, "long_name", xevent.name());
-                        } else {
-                            event.name = xevent.name();
+                const xevent_md_visitor = xevent.metadataVisitor();
+                for (xevent_md_visitor.stats_owner.stats.items) |*s| {
+                    const xstat = xplane_visitor.XStatVisitor.init(xevent_md_visitor.plane, s);
+                    if (xstat.stat.value == null) return;
+                    if (xstat.type()) |t| {
+                        if (t.isInternalStat()) return;
+                        if (t == .step_name) {
+                            event.name = try xstat.toString(allocator);
                         }
-                        event.timestamp_ps = @intCast(xevent.timestampPs());
-                        event.duration_ps = @intCast(xevent.durationPs());
-
-                        const PerStatCtx = struct {
-                            event: *TraceEvent,
-                        };
-
-                        var stat_ctx: PerStatCtx = .{ .event = event };
-                        const for_each_stat = struct {
-                            pub fn call(a3: std.mem.Allocator, xstat: xplane_visitor.XStatVisitor, s_ctx: ?*anyopaque) !void {
-                                const parsed_stat_ctx: *PerStatCtx = @ptrCast(@alignCast(s_ctx));
-                                if (xstat.stat.value == null) return;
-                                if (xstat.type()) |t| {
-                                    if (t.isInternalStat()) return;
-                                    if (t == .kStepName) {
-                                        parsed_stat_ctx.event.name = try xstat.toString(a3);
-                                    }
-                                }
-                                try parsed_stat_ctx.event.args.put(a3, xstat.name(), try xstat.toString(a3));
-                            }
-                        }.call;
-                        try xevent.metadataVisitor().forEachStat(a2, for_each_stat, &stat_ctx);
-                        try xevent.forEachStat(a2, for_each_stat, &stat_ctx);
                     }
-                }.call, &evt_ctx);
+                    try event.args.put(allocator, xstat.name(), try xstat.toString(allocator));
+                }
+
+                for (xevent.event.stats.items) |*s| {
+                    const xstat = xplane_visitor.XStatVisitor.init(xevent.plane, s);
+                    if (xstat.stat.value == null) return;
+                    if (xstat.type()) |t| {
+                        if (t.isInternalStat()) return;
+                        if (t == .step_name) {
+                            event.name = try xstat.toString(allocator);
+                        }
+                    }
+                    try event.args.put(allocator, xstat.name(), try xstat.toString(allocator));
+                }
             }
-        }.call, &line_ctx);
+        }
     }
 
     fn getTraceViewerMaxEvents() !u64 {
@@ -153,25 +151,25 @@ pub const TraceContainer = struct {
 
     pub fn fromXSpace(allocator: std.mem.Allocator, xspace: *const xplane_proto.XSpace) !TraceContainer {
         var self: TraceContainer = .{};
-        if (xplane_utils.findPlaneWithName(xspace, xplane_schema.kHostThreadsPlaneName)) |hp| {
+        if (xplane_utils.findPlaneWithName(xspace, host_threads_plane_name)) |hp| {
             const xplane = try xplane_visitor.XPlaneVisitor.init(
                 allocator,
                 hp,
                 &.{ xplane_schema.HostEventType.fromString, xplane_schema.HostEventType.fromTfOpEventType },
                 &.{xplane_schema.StatType.fromString},
             );
-            try self.xplaneToTraceEvents(allocator, trace_utils.kHostThreadsDeviceId, &xplane);
+            try self.xplaneToTraceEvents(allocator, host_threads_device_id, &xplane);
         }
 
-        var device_planes = try xplane_utils.findPlanesWithPrefix(allocator, xspace, xplane_schema.kGpuPlanePrefix);
+        var device_planes = try xplane_utils.findPlanesWithPrefix(allocator, xspace, gpu_plane_prefix);
 
         // We don't expect GPU and TPU planes and custom devices to be present in the
         // same XSpace.
         if (device_planes.len == 0) {
-            device_planes = try xplane_utils.findPlanesWithPrefix(allocator, xspace, xplane_schema.kTpuPlanePrefix);
+            device_planes = try xplane_utils.findPlanesWithPrefix(allocator, xspace, tpu_plane_prefix);
         }
         if (device_planes.len == 0) {
-            device_planes = try xplane_utils.findPlanesWithPrefix(allocator, xspace, xplane_schema.kCustomPlanePrefix);
+            device_planes = try xplane_utils.findPlanesWithPrefix(allocator, xspace, custom_plane_prefix);
         }
 
         for (device_planes) |dp| {
@@ -181,7 +179,7 @@ pub const TraceContainer = struct {
                 &.{ xplane_schema.HostEventType.fromString, xplane_schema.HostEventType.fromTfOpEventType },
                 &.{xplane_schema.StatType.fromString},
             );
-            const device_id: u32 = trace_utils.kFirstDeviceId + @as(u32, @intCast(xplane.plane.id));
+            const device_id: u32 = first_device_id + @as(u32, @intCast(xplane.plane.id));
             try self.xplaneToTraceEvents(allocator, device_id, &xplane);
         }
 

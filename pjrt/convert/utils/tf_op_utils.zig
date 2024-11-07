@@ -2,28 +2,28 @@ const std = @import("std");
 const c = @import("c");
 
 pub const Category = enum {
-    kUnknown,
-    kTensorFlow,
-    kJax,
-    kTfData,
-    kMemcpyHToD,
-    kMemcpyDToH,
-    kMemcpyDToD,
-    kMemcpyHToH,
+    unknown,
+    tensorflow,
+    jax,
+    tf_data,
+    memcpy_h_to_d,
+    memcpy_d_to_h,
+    memcpy_d_to_d,
+    memcpy_h_to_h,
 };
 
 pub const TfOp = struct {
-    category: Category = .kUnknown,
+    category: Category = .unknown,
     name: []const u8,
     type_: []const u8,
 };
 
-const kUnknownOp = "";
-const kDatasetOp = "Dataset";
-const kMemcpyHToDOp = "MemcpyHToD";
-const kMemcpyDToHOp = "MemcpyDToH";
-const kMemcpyDToDOp = "MemcpyDToD";
-const kMemcpyHToHOp = "MemcpyHToH";
+const unknown_op = "";
+const dataset_op = "Dataset";
+const memcpy_h_to_d_op = "MemcpyHToD";
+const memcpy_d_to_h_op = "MemcpyDToH";
+const memcpy_d_to_d_op = "MemcpyDToD";
+const memcpy_h_to_h_op = "MemcpyHToH";
 
 const kIterator = "Iterator";
 const kSeparator = "::";
@@ -33,22 +33,22 @@ pub fn getMemcpyOp(tf_op_fullname: []const u8) ?TfOp {
     var tf_op: TfOp = undefined;
     tf_op.name = tf_op_fullname;
     if (std.ascii.startsWithIgnoreCase(tf_op_fullname, "MEMCPYHToD")) {
-        tf_op.category = .kMemcpyHToD;
-        tf_op.type_ = kMemcpyHToDOp;
+        tf_op.category = .memcpy_h_to_d;
+        tf_op.type_ = memcpy_h_to_d_op;
         return tf_op;
     }
     if (std.ascii.startsWithIgnoreCase(tf_op_fullname, "MEMCPYDToH")) {
-        tf_op.category = .kMemcpyDToH;
-        tf_op.type_ = kMemcpyDToHOp;
+        tf_op.category = .memcpy_d_to_h;
+        tf_op.type_ = memcpy_d_to_h_op;
         return tf_op;
     }
     if (std.ascii.startsWithIgnoreCase(tf_op_fullname, "MEMCPYDToD")) {
-        tf_op.category = .kMemcpyDToD;
-        tf_op.type_ = kMemcpyDToDOp;
+        tf_op.category = .memcpy_d_to_d;
+        tf_op.type_ = memcpy_d_to_d_op;
         return tf_op;
     } else if (std.ascii.startsWithIgnoreCase(tf_op_fullname, "MEMCPYHToH")) {
-        tf_op.category = .kMemcpyHToH;
-        tf_op.type_ = kMemcpyHToHOp;
+        tf_op.category = .memcpy_h_to_h;
+        tf_op.type_ = memcpy_h_to_h_op;
         return tf_op;
     }
     return null;
@@ -71,18 +71,18 @@ fn deriveOpType(full_op_name: []const u8) []const u8 {
     var maybe_suffix: []const u8 = undefined;
     while (op_type_and_maybe_suffix.next()) |part| maybe_suffix = part;
     var op_type = op_name;
-    if (c.isNumber(maybe_suffix.ptr, maybe_suffix.len)) {
+    if (std.fmt.parseInt(i64, maybe_suffix, 10)) |_| {
         // NOTE: assuming a numeric suffix is not part of an op type while
         // technically it is allowed.
         op_type = op_type[0 .. op_name.len - maybe_suffix.len - 1];
-    }
+    } else |_| {}
     return op_type;
 }
 
 pub fn parseTfOpFullName(tf_op_fullname: []const u8) TfOp {
     // For op types below, they all have the format "<op_name>:<op_type>", though
     // op_type could be empty.
-    var tf_op: TfOp = .{ .category = .kUnknown, .name = tf_op_fullname, .type_ = kUnknownOp };
+    var tf_op: TfOp = .{ .category = .unknown, .name = tf_op_fullname, .type_ = unknown_op };
     var split = std.mem.splitScalar(u8, tf_op_fullname, ':');
 
     var size: usize = 0;
@@ -101,14 +101,14 @@ pub fn parseTfOpFullName(tf_op_fullname: []const u8) TfOp {
         // Dataset Op names (e.g., Iterator::Batch::Map::TFRecord) do not follow the
         // format of TF Op names. But we still want to capture them for
         // input-pipeline analysis.
-        tf_op.category = .kTfData;
-        tf_op.type_ = kDatasetOp;
+        tf_op.category = .tf_data;
+        tf_op.type_ = dataset_op;
         return tf_op;
     }
 
     // Check for Tensorflow Op.
     if (isTfOpName(parts[0]) and isTfOpName(parts[1])) {
-        tf_op.category = .kTensorFlow;
+        tf_op.category = .tensorflow;
         tf_op.name = parts[0];
         tf_op.type_ = parts[1];
         return tf_op;
@@ -126,14 +126,14 @@ pub fn parseTfOpFullName(tf_op_fullname: []const u8) TfOp {
         // Example:
         //    "transpose[permutation=(0, 3, 1, 2)]"  =>  "transpose"
         // See: go/xprof-jax-op-type
-        tf_op.category = .kJax;
+        tf_op.category = .jax;
         tf_op.name = parts[0];
         tf_op.type_ = op_type[0 .. std.mem.indexOfScalar(u8, op_type, '[') orelse op_type.len];
         return tf_op;
     }
 
     if (parts[1].len == 0) {
-        tf_op.category = .kTensorFlow;
+        tf_op.category = .tensorflow;
         tf_op.name = parts[0];
         tf_op.type_ = op_type;
         return tf_op;

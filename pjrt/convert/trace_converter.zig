@@ -1,4 +1,3 @@
-const math_utils = @import("utils/math_utils.zig");
 const std = @import("std");
 const xplane_proto = @import("//tsl:xplane_proto");
 
@@ -61,6 +60,10 @@ pub const TraceConverter = struct {
             }.call,
         );
         return pairs;
+    }
+
+    fn picoToMicro(p: anytype) f64 {
+        return @as(f64, @floatFromInt(p)) / 1E6;
     }
 
     pub fn toJson(self: *TraceConverter, allocator: std.mem.Allocator) ![]const u8 {
@@ -146,7 +149,7 @@ pub const TraceConverter = struct {
                 , .{ device_id, resource_id, sort_index });
             }
         }
-        std.debug.print("container.events_.items.len: {d}\n", .{self.container.events.items.len});
+
         for (self.container.events.items) |event| {
             const duration_ps = @max(event.duration_ps, 1);
             try writer.print(
@@ -154,8 +157,8 @@ pub const TraceConverter = struct {
             , .{
                 event.device_id,
                 event.resource_id,
-                math_utils.picoToMicro(event.timestamp_ps),
-                math_utils.picoToMicro(duration_ps),
+                picoToMicro(event.timestamp_ps),
+                picoToMicro(duration_ps),
                 event.name,
             });
             if (event.args.count() != 0) {

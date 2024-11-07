@@ -1,4 +1,3 @@
-const math_utils = @import("math_utils.zig");
 const std = @import("std");
 const xplane_proto = @import("//tsl:xplane_proto");
 const xplane_schema = @import("xplane_schema.zig");
@@ -12,17 +11,6 @@ pub const XEventMetadataVisitor = struct {
             .plane = plane,
             .stats_owner = metadata,
         };
-    }
-
-    pub fn forEachStat(
-        self: *const XEventMetadataVisitor,
-        allocator: std.mem.Allocator,
-        cb: fn (allocator: std.mem.Allocator, xstat: XStatVisitor, ctx: ?*anyopaque) std.mem.Allocator.Error!void,
-        ctx: ?*anyopaque,
-    ) !void {
-        for (self.stats_owner.stats.items) |*stat| {
-            try cb(allocator, XStatVisitor.init(self.plane, stat), ctx);
-        }
     }
 };
 
@@ -111,8 +99,12 @@ pub const XEventVisitor = struct {
         return self.metadata.name.getSlice();
     }
 
+    fn nanoToPico(n: u128) u128 {
+        return n * 1000;
+    }
+
     pub fn timestampPs(self: *const XEventVisitor) u128 {
-        return math_utils.nanoToPico(@intCast(self.line.timestamp_ns)) + @as(u128, @intCast(self.event.data.?.offset_ps));
+        return nanoToPico(@intCast(self.line.timestamp_ns)) + @as(u128, @intCast(self.event.data.?.offset_ps));
     }
 
     pub fn durationPs(self: *const XEventVisitor) i64 {
@@ -121,17 +113,6 @@ pub const XEventVisitor = struct {
 
     pub fn metadataVisitor(self: *const XEventVisitor) XEventMetadataVisitor {
         return XEventMetadataVisitor.init(self.plane, self.metadata);
-    }
-
-    pub fn forEachStat(
-        self: *const XEventVisitor,
-        allocator: std.mem.Allocator,
-        cb: fn (allocator: std.mem.Allocator, xstat: XStatVisitor, ctx: ?*anyopaque) std.mem.Allocator.Error!void,
-        ctx: ?*anyopaque,
-    ) !void {
-        for (self.event.stats.items) |*stat| {
-            try cb(allocator, XStatVisitor.init(self.plane, stat), ctx);
-        }
     }
 };
 
@@ -172,17 +153,6 @@ pub const XLineVisitor = struct {
 
     pub fn numEvents(self: *const XLineVisitor) usize {
         return self.line.events.len;
-    }
-
-    pub fn forEachEvent(
-        self: *const XLineVisitor,
-        allocator: std.mem.Allocator,
-        cb: fn (allocator: std.mem.Allocator, event: XEventVisitor, ctx: ?*anyopaque) std.mem.Allocator.Error!void,
-        ctx: ?*anyopaque,
-    ) !void {
-        for (self.line.events.items) |*event| {
-            try cb(allocator, XEventVisitor.init(self.plane, self.line, event), ctx);
-        }
     }
 };
 
@@ -278,16 +248,5 @@ pub const XPlaneVisitor = struct {
 
     pub fn getStatType(self: *const XPlaneVisitor, stat_metadata_id: i64) ?xplane_schema.StatType {
         return self.stat_type_by_id.get(stat_metadata_id);
-    }
-
-    pub fn forEachLine(
-        self: *const XPlaneVisitor,
-        allocator: std.mem.Allocator,
-        cb: fn (allocator: std.mem.Allocator, xline: XLineVisitor, ctx: ?*anyopaque) std.mem.Allocator.Error!void,
-        ctx: ?*anyopaque,
-    ) !void {
-        for (self.plane.lines.items) |*line| {
-            try cb(allocator, XLineVisitor.init(self, line), ctx);
-        }
     }
 };

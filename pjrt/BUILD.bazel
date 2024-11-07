@@ -36,18 +36,12 @@ zig_proto_library(
     deps = ["@tsl//tsl/profiler/protobuf:xplane_proto"],
 )
 
-zig_proto_library(
-    name = "trace_events_proto",
-    import_name = "//tsl:trace_events_proto",
-    deps = ["@tsl//tsl/profiler/protobuf:trace_events_proto"],
-)
 zig_cc_binary(
     name = "xspace_to_json",
     srcs = glob(["convert/**/*.zig"]),
     main = "xspace_to_json.zig",
     visibility = ["//visibility:public"],
     deps = [
-        ":trace_events_proto",
         ":xplane_proto",
         "//examples/third_party/tigerbeetle:flags",
         "//pjrt/third_party/re2:regexp",
