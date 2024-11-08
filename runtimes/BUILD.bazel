@@ -26,6 +26,27 @@ RUNTIMES = {
     for runtime in RUNTIMES.keys()
 ]
 
+filegroup(
+    name = "layers",
+    srcs = select({
+        ":cpu.enabled": ["//runtimes/cpu:layers"],
+        "//conditions:default": [],
+    }) + select({
+        ":cuda.enabled": ["//runtimes/cuda:layers"],
+        "//conditions:default": [],
+    }) + select({
+        ":neuron.enabled": ["//runtimes/neuron:layers"],
+        "//conditions:default": [],
+    }) + select({
+        ":rocm.enabled": ["//runtimes/rocm:layers"],
+        "//conditions:default": [],
+    }) + select({
+        ":tpu.enabled": ["//runtimes/tpu:layers"],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+)
+
 zig_library(
     name = "runtimes",
     main = "runtimes.zig",
