@@ -148,9 +148,12 @@ tar(
 
 oci_image(
     name = "image_",
-    base = "@distroless_cc_debian12",
+    base = "@distroless_cc_debian12_debug",
     entrypoint = ["./{}/llama".format(package_name())],
-    tars = [":archive"],
+    tars = [
+        "@zml//runtimes:layers",
+        ":archive",
+    ],
 )
 
 platform_transition_filegroup(

@@ -1,0 +1,21 @@
+# Packages for examples/debian_snapshot.
+#
+#  Anytime this file is changed, the lockfile needs to be regenerated.
+#
+#  To generate the ubuntu_base.lock.json run the following command
+#
+#     bazel run @neuron_bookworm//:lock
+#
+version: 1
+
+sources:
+  - channel: bookworm main
+    url: https://deb.debian.org/debian
+
+archs:
+  - "amd64"
+
+packages:
+  - "bash"
+  - "zlib1g"
+  - "libxml2"
