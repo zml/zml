@@ -26,9 +26,6 @@ py_console_script_binary(
     name = "neuronx-cc",
     binary_rule = py_binary,
     pkg = "@neuron_py_deps//neuronx_cc",
-    precompile = "enabled",
-    precompile_source_retention = "omit_source",
-    pyc_collection = "include_pyc",
     visibility = ["//visibility:public"],
 )
 
@@ -36,9 +33,6 @@ py_binary(
     name = "sandbox",
     srcs = ["empty.py"],
     main = "empty.py",
-    precompile = "enabled",
-    precompile_source_retention = "omit_source",
-    pyc_collection = "include_pyc",
     deps = [
         ":neuronx-cc",
         "@neuron_py_deps//libneuronxla",
