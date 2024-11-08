@@ -5,6 +5,7 @@ const c = @import("c");
 const std = @import("std");
 const runfiles = @import("runfiles");
 const bazel_builtin = @import("bazel_builtin");
+const libneuronxla_pyenv = @import("libneuronxla_pyenv");
 
 pub fn isEnabled() bool {
     return @hasDecl(c, "ZML_RUNTIME_NEURON");
@@ -65,29 +66,26 @@ fn initialize() !void {
     var wbuf: [std.fs.max_path_bytes:0]c.wchar_t = undefined;
 
     {
-        const neuronx_cc = (try r.rlocation("zml/runtimes/neuron/neuronx-cc", &buf)).?;
-        const neuronx_cc_path = std.fs.path.dirname(neuronx_cc).?;
-        const path = std.posix.getenv("PATH") orelse "";
-        const new_path = try std.fmt.allocPrintZ(allocator, "{s}:{s}", .{ neuronx_cc_path, path });
-        _ = c.setenv("PATH", new_path.ptr, 1);
+        const path = (try r.rlocation(libneuronxla_pyenv.home, &buf)).?;
+        const wpath = toWchar(std.fs.path.dirname(path).?, &wbuf);
+        pyErrorOrExit(c.PyConfig_SetString(&config, &config.home, wpath.ptr));
     }
 
     {
         config.module_search_paths_set = 1;
-
-        const python_bootstrap_path = (try r.rlocation("zml/runtimes/neuron/python_bootstrap.txt", &buf)).?;
-        const python_bootstrap = try asynk.File.open(python_bootstrap_path, .{ .mode = .read_only });
-        defer python_bootstrap.close() catch {};
-
-        var step: usize = 0;
-        while (try python_bootstrap.reader().readUntilDelimiterOrEof(&buf, '\n')) |line| {
-            const wline = toWchar(line, &wbuf);
+        for (libneuronxla_pyenv.modules) |module| {
+            const path = (try r.rlocation(module, &buf)).?;
+            const wline = toWchar(std.fs.path.dirname(path).?, &wbuf);
             pyErrorOrExit(c.PyWideStringList_Append(&config.module_search_paths, wline.ptr));
-            if (step == 0) {
-                pyErrorOrExit(c.PyConfig_SetString(&config, &config.home, wline.ptr));
-            }
-            step += 1;
         }
+    }
+
+    {
+        const neuronx_cc = (try r.rlocation("zml/runtimes/neuron/neuronx-cc/neuronx-cc", &buf)).?;
+        const neuronx_cc_path = std.fs.path.dirname(neuronx_cc).?;
+        const path = std.posix.getenv("PATH") orelse "";
+        const new_path = try std.fmt.allocPrintZ(allocator, "{s}:{s}", .{ neuronx_cc_path, path });
+        _ = c.setenv("PATH", new_path.ptr, 1);
     }
 
     pyErrorOrExit(c.Py_InitializeFromConfig(&config));
