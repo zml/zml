@@ -96,7 +96,7 @@ pub fn chainModules(module_list: anytype, input: Tensor) Tensor {
 pub const LayerNorm = struct {
     weight: Tensor,
     bias: ?Tensor = null,
-    eps: f32 = 1e-6,
+    eps: f32 = 1e-5,
 
     pub fn forward(self: LayerNorm, x: Tensor) Tensor {
         const xf32 = x.convert(.f32);
