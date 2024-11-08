@@ -190,6 +190,24 @@
 			"sha256": "9b1b269020cec6aced3b39f096f7b67edd1f0d4ab24f412cb6506d0800e19cbf",
 			"url": "https://deb.debian.org/debian/pool/main/g/gcc-12/libstdc++6_12.2.0-14_amd64.deb",
 			"version": "12.2.0-14"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "aws-neuronx-runtime-lib_2.22.14.0-6e27b8d5b_amd64",
+			"name": "aws-neuronx-runtime-lib",
+			"sha256": "a5ed94fef14f6d37cfe8f0c39675e0f52e6bd80d09597aaba9dba84fecd803f5",
+			"url": "https://apt.repos.neuron.amazonaws.com/pool/main/a/aws-neuronx-runtime-lib/aws-neuronx-runtime-lib_2.22.14.0-6e27b8d5b_amd64.deb",
+			"version": "2.22.14.0-6e27b8d5b"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "aws-neuronx-collectives_2.22.26.0-17a033bc8_amd64",
+			"name": "aws-neuronx-collectives",
+			"sha256": "b9fc445d91cf4ead411910f4b7fb5804f70ab928d0819f3ef35a3df42b05f125",
+			"url": "https://apt.repos.neuron.amazonaws.com/pool/main/a/aws-neuronx-collectives/aws-neuronx-collectives_2.22.26.0-17a033bc8_amd64.deb",
+			"version": "2.22.26.0-17a033bc8"
 		}
 	],
 	"version": 1
