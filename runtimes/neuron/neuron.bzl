@@ -1,3 +1,6 @@
+load("@python_versions//3.11:defs.bzl", _py_binary = "py_binary")
+load("@rules_python//python:defs.bzl", "PyInfo")
+load("@with_cfg.bzl", "with_cfg")
 load("//bazel:dpkg.bzl", "dpkg")
 load("//bazel:http_deb_archive.bzl", "http_deb_archive")
 
@@ -58,3 +61,8 @@ def _neuron_impl(mctx):
 neuron_packages = module_extension(
     implementation = _neuron_impl,
 )
+
+py_binary_with_script, _py_binary_internal = with_cfg(
+    kind = _py_binary,
+    extra_providers = [PyInfo],
+).set(Label("@rules_python//python/config_settings:bootstrap_impl"), "script").build()

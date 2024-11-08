@@ -1,12 +1,22 @@
 load("@bazel_skylib//rules:select_file.bzl", "select_file")
-load("@python_versions//3.11:defs.bzl", "py_binary")
 load("@rules_python//python:pip.bzl", "compile_pip_requirements")
 load("@rules_python//python/entry_points:py_console_script_binary.bzl", "py_console_script_binary")
 load("@rules_uv//uv:pip.bzl", "pip_compile")
 load("@rules_zig//zig:defs.bzl", "zig_library")
 load("@zml//bazel:cc_import.bzl", "cc_import")
-load("@zml//bazel:pybootstrap.bzl", "python_bootstrap")
 load("@zml//bazel:runfiles.bzl", "runfiles_to_default")
+load(":neuron.bzl", "py_binary_with_script")
+load(":pyenv.bzl", "pyenv_zig")
+
+pyenv_zig(
+    name = "libneuronxla_pyenv_zig",
+    deps = [":libneuronxla"],
+)
+
+zig_library(
+    name = "libneuronxla_pyenv",
+    main = ":libneuronxla_pyenv_zig",
+)
 
 pip_compile(
     name = "update_requirements",
@@ -24,24 +34,19 @@ pip_compile(
 
 py_console_script_binary(
     name = "neuronx-cc",
-    binary_rule = py_binary,
+    binary_rule = py_binary_with_script,
     pkg = "@neuron_py_deps//neuronx_cc",
     visibility = ["//visibility:public"],
 )
 
-py_binary(
-    name = "sandbox",
+py_binary_with_script(
+    name = "libneuronxla",
     srcs = ["empty.py"],
     main = "empty.py",
     deps = [
         ":neuronx-cc",
         "@neuron_py_deps//libneuronxla",
     ],
-)
-
-python_bootstrap(
-    name = "python_bootstrap",
-    deps = [":sandbox"],
 )
 
 cc_library(
@@ -57,7 +62,7 @@ cc_library(
 compile_pip_requirements(
     name = "requirements",
     src = "requirements.in",
-    py_binary = py_binary,
+    py_binary = py_binary_with_script,
     requirements_txt = "requirements_lock.txt",
 )
 
@@ -78,11 +83,7 @@ cc_import(
         "libpython3.11.so.1.0",
         "libzmlxneuron.so.0",
     ],
-    data = [
-        ":neuronx-cc",
-        ":python_bootstrap",
-        ":sandbox",
-    ],
+    data = [":libneuronxla"],
     shared_library = ":libneuronpjrt_so",
     soname = "libpjrt_neuron.so",
     deps = [
@@ -133,6 +134,7 @@ zig_library(
         "//pjrt",
     ] + select({
         "//runtimes:neuron.enabled": [
+            ":libneuronxla_pyenv",
             ":libpjrt_neuron",
             ":libpython",
             "//async",
