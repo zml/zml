@@ -96,8 +96,28 @@ fn initialize() !void {
     _ = c.PyEval_SaveThread();
 }
 
+fn comptimeStrJoin(comptime separator: [:0]const u8, comptime slices: []const [:0]const u8) [:0]const u8 {
+    comptime var ret = slices[0];
+    inline for (slices[1..]) |slice| {
+        ret = ret ++ separator ++ slice;
+    }
+    return ret;
+}
+
 pub fn setNeuronCCFlags() void {
-    _ = c.setenv("NEURON_CC_FLAGS", "--model-type=transformer --auto-cast=none", 1);
+    _ = c.setenv("NEURON_CC_FLAGS", comptimeStrJoin(" ", &.{
+        // 30% faster, no visible speed difference on llama
+        "--optlevel=1",
+        // generic is the default, but it fails on transformers, force it
+        "--model-type=transformer",
+        // disable it, we do our own
+        "--auto-cast=none",
+        "--enable-fast-loading-neuron-binaries",
+    }), 1);
+
+    // Enable stochastic rounding
+    // https://awsdocs-neuron.readthedocs-hosted.com/en/latest/general/arch/neuron-features/rounding-modes.html
+    _ = c.setenv("NEURON_RT_STOCHASTIC_ROUNDING_EN", "1", 1);
 }
 
 pub fn load() !*const pjrt.Api {
