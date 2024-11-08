@@ -795,11 +795,11 @@ pub const MemEfficientOps = struct {
 };
 
 pub fn sdpaMemEfficient(q_: Tensor, k_: Tensor, v_: Tensor, opts: MemEfficientOps) Tensor {
-    const q = q_.withTags(.{ .b, .hq, .sq, .hd });
-    const k = k_.withTags(.{ .b, .hk, .sk, .hd });
-    const v = v_.withTags(.{ .b, .hk, .sk, .hd });
+    const q = q_.contiguous(.{ .h, .q, .hd }).withPartialTags(.{ .hq, .sq, .hd });
+    const k = k_.contiguous(.{ .h, .k, .hd }).withPartialTags(.{ .hk, .sk, .hd });
+    const v = v_.contiguous(.{ .h, .k, .hd }).withPartialTags(.{ .hk, .sk, .hd });
     var sdpa_opts = opts.opts;
-    if (sdpa_opts.attn_mask) |*attn_mask| attn_mask.* = attn_mask.withTags(.{ .sq, .sk });
+    if (sdpa_opts.attn_mask) |*attn_mask| attn_mask.* = attn_mask.withPartialTags(.{ .sq, .sk });
 
     const sdpa_mem_efficient: SdpaMemEfficient = .{ .q = q, .k = k, .v = v, .opt = .{
         .query_chunk_size = @intCast(@min(q.dim(.sq), opts.query_chunk_size)),
@@ -825,14 +825,18 @@ const SdpaMemEfficient = struct {
         const res = ops.for_(SdpaMemEfficient.nextQueriesChunk, self, .{ .nq = n_q_chunks });
         // TODO: should "for_" operate on an axis ?
         // res: (nq, b, nh, qlen / nq, dim) -> (b, nh, qlen, dim)
-        return res.transpose(.{ 1, 2, 0, 3, 4 }).flatten(2);
+        if (res.rank() == 3) {
+            return res.transpose(.{ 1, 0, 2 });
+        } else {
+            return res.transpose(.{ 0, 2, 1, 3 }).flatten(0);
+        }
         // return res.transpose(.{ .b, .hq, .nq, .sq, .hd }).merge(.{ .nq, .sq }, .sq);
     }
 
     fn nextQueriesChunk(self: SdpaMemEfficient, idx: Tensor) Tensor {
         const offset = idx.scale(self.opt.query_chunk_size);
         const q_chunk = self.q.dynamicSlice(.{ .sq = .{ .start = offset, .len = self.opt.query_chunk_size } });
-        const attn_chunk = if (self.opt.opts.attn_mask) |attn_mask| attn_mask.dynamicSlice1d(0, self.opt.query_chunk_size, offset) else null;
+        const attn_chunk = if (self.opt.opts.attn_mask) |attn_mask| attn_mask.dynamicSlice1d(attn_mask.axis(.sq), self.opt.query_chunk_size, offset) else null;
 
         var chunk: SdpaMemEfficient = self;
         chunk.q = q_chunk;
@@ -854,7 +858,7 @@ const SdpaMemEfficient = struct {
         const offset = idx.scale(self.opt.key_chunk_size);
         const k_chunk = self.k.dynamicSlice(.{ .sk = .{ .start = offset, .len = self.opt.key_chunk_size } });
         const v_chunk = self.v.dynamicSlice(.{ .sk = .{ .start = offset, .len = self.opt.key_chunk_size } });
-        const attn_chunk = if (self.opt.opts.attn_mask) |mask| mask.dynamicSlice1d(1, self.opt.key_chunk_size, offset) else null;
+        const attn_chunk = if (self.opt.opts.attn_mask) |mask| mask.dynamicSlice1d(mask.axis(.sk), self.opt.key_chunk_size, offset) else null;
 
         return sdpaChunk(self.q, k_chunk, v_chunk, .{ .attn_mask = attn_chunk });
     }
