@@ -143,3 +143,13 @@ zig_library(
         "//conditions:default": [":empty"],
     }),
 )
+
+filegroup(
+    name = "layers",
+    srcs = [
+        "@neuron_bookworm//bash/amd64",
+        "@neuron_bookworm//libxml2/amd64",
+        "@neuron_bookworm//zlib1g/amd64",
+    ],
+    visibility = ["//visibility:public"],
+)
