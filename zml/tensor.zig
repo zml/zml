@@ -1908,9 +1908,9 @@ pub const Tensor = struct {
     }
 
     pub const Pad = struct {
-        low: i32 = 0,
-        high: i32 = 0,
-        interior: i32 = 0,
+        low: i64 = 0,
+        high: i64 = 0,
+        interior: i64 = 0,
     };
 
     /// Pads the input Tensor with the given values.
