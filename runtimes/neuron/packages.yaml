@@ -11,6 +11,8 @@ version: 1
 sources:
   - channel: bookworm main
     url: https://deb.debian.org/debian
+  - channel: jammy main
+    url: https://apt.repos.neuron.amazonaws.com
 
 archs:
   - "amd64"
@@ -19,3 +21,5 @@ packages:
   - "bash"
   - "zlib1g"
   - "libxml2"
+  - "aws-neuronx-runtime-lib"
+  - "aws-neuronx-collectives"
