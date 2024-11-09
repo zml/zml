@@ -28,9 +28,6 @@ pub fn main() !void {
     var converter = try TraceConverter.init(allocator, pb_buffer);
     defer converter.deinit();
 
-    const output = try converter.toJson(allocator);
-    defer allocator.free(output);
-
     var path_buffer: [1028]u8 = undefined;
     var output_path = std.ArrayListUnmanaged(u8).initBuffer(&path_buffer);
     output_path.appendSliceAssumeCapacity(cli_args.path[0..std.mem.lastIndexOf(u8, cli_args.path, std.fs.path.extension(cli_args.path)).?]);
@@ -39,6 +36,7 @@ pub fn main() !void {
     var output_file = try std.fs.createFileAbsolute(output_path.items, .{});
     defer output_file.close();
 
-    try output_file.writeAll(output);
+    try converter.toJson(output_file.writer().any());
+
     std.debug.print("Wrote JSON to {s}\n", .{output_path.items});
 }

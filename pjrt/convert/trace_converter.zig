@@ -1,4 +1,5 @@
 const std = @import("std");
+const trace_events_proto = @import("//tsl:trace_events_proto");
 const xplane_proto = @import("//tsl:xplane_proto");
 
 const TraceContainer = @import("trace_container.zig").TraceContainer;
@@ -26,6 +27,7 @@ pub const TraceConverter = struct {
         allocator: std.mem.Allocator,
         comptime T: type,
         a: std.ArrayListUnmanaged(T),
+        comptime lt_fn: fn (ctx: void, lhs: *const T, rhs: *const T) bool,
     ) ![]const *const T {
         const pairs = try allocator.alloc(*const T, a.items.len);
         for (a.items, 0..) |*pair, i| {
@@ -35,11 +37,7 @@ pub const TraceConverter = struct {
             *const T,
             pairs,
             {},
-            struct {
-                pub fn call(_: void, lhs: *const T, rhs: *const T) bool {
-                    return lhs.key < rhs.key;
-                }
-            }.call,
+            lt_fn,
         );
         return pairs;
     }
@@ -48,41 +46,33 @@ pub const TraceConverter = struct {
         return @as(f64, @floatFromInt(p)) / 1E6;
     }
 
-    pub fn toJson(self: *TraceConverter, allocator: std.mem.Allocator) ![]const u8 {
-        var buffer = std.ArrayList(u8).init(allocator);
-        errdefer buffer.deinit();
-        var writer = buffer.writer();
+    pub fn toJson(self: *TraceConverter, writer: std.io.AnyWriter) !void {
         try writer.writeAll(
             \\{"displayTimeUnit":"ns","metadata":{"highres-ticks":true},"traceEvents":[
         );
 
-        const Entry = std.AutoHashMapUnmanaged(u32, TraceContainer.Device).Entry;
-        const pairs = try allocator.alloc(Entry, self.container.metadata.devices.count());
-        defer allocator.free(pairs);
-        var iter = self.container.metadata.devices.iterator();
-        var idx: usize = 0;
-        while (iter.next()) |entry| : (idx += 1) {
-            pairs[idx] = entry;
-        }
-
         std.mem.sort(
-            Entry,
-            pairs,
+            trace_events_proto.Trace.DevicesEntry,
+            self.container.metadata.devices.items,
             {},
             struct {
-                pub fn call(_: void, lhs: Entry, rhs: Entry) bool {
-                    return lhs.key_ptr.* < rhs.key_ptr.*;
+                pub fn call(
+                    _: void,
+                    lhs: trace_events_proto.Trace.DevicesEntry,
+                    rhs: trace_events_proto.Trace.DevicesEntry,
+                ) bool {
+                    return lhs.key < rhs.key;
                 }
             }.call,
         );
 
-        for (pairs) |id_and_device| {
-            const device_id = id_and_device.key_ptr.*;
-            const device = id_and_device.value_ptr.*;
-            if (device.name.len != 0) {
+        for (self.container.metadata.devices.items) |id_and_device| {
+            const device_id = id_and_device.key;
+            const device = id_and_device.value.?;
+            if (device.name.getSlice().len != 0) {
                 try writer.print(
                     \\{{"ph":"M","pid":{d},"name":"process_name","args":{{"name":"{s}"}}}},
-                , .{ device_id, device.name });
+                , .{ device_id, device.name.getSlice() });
             }
             try writer.print(
                 \\{{"ph":"M","pid":{d},"name":"process_sort_index","args":{{"sort_index":{d}}}}},
@@ -91,37 +81,27 @@ pub const TraceConverter = struct {
                 device_id,
             });
 
-            const ResourceEntry = std.AutoHashMapUnmanaged(u32, TraceContainer.Resource).Entry;
-            const resources = try allocator.alloc(ResourceEntry, device.resources.count());
-            defer allocator.free(resources);
-
-            var resource_iter = device.resources.iterator();
-            idx = 0;
-            while (resource_iter.next()) |entry| : (idx += 1) {
-                resources[idx] = entry;
-            }
-
             std.mem.sort(
-                ResourceEntry,
-                resources,
+                trace_events_proto.Device.ResourcesEntry,
+                device.resources.items,
                 {},
                 struct {
-                    pub fn call(_: void, lhs: ResourceEntry, rhs: ResourceEntry) bool {
-                        return lhs.key_ptr.* < rhs.key_ptr.*;
+                    pub fn call(_: void, lhs: trace_events_proto.Device.ResourcesEntry, rhs: trace_events_proto.Device.ResourcesEntry) bool {
+                        return lhs.key < rhs.key;
                     }
                 }.call,
             );
 
-            for (resources) |id_and_resource| {
-                const resource_id = id_and_resource.key_ptr.*;
-                const resource = id_and_resource.value_ptr.*;
-                if (resource.name.len != 0) {
+            for (device.resources.items) |id_and_resource| {
+                const resource_id = id_and_resource.key;
+                const resource = id_and_resource.value.?;
+                if (resource.name.getSlice().len != 0) {
                     try writer.print(
                         \\{{"ph":"M","pid":{d},"tid":{d},"name":"thread_name","args":{{"name":"{s}"}}}},
                     , .{
                         device_id,
                         resource_id,
-                        resource.name,
+                        resource.name.getSlice(),
                     });
                 }
                 const sort_index = if (resource.sort_index != 0) resource.sort_index else resource_id;
@@ -142,36 +122,36 @@ pub const TraceConverter = struct {
                 picoToMicro(duration_ps),
                 event.name,
             });
-            if (event.args.count() != 0) {
+            if (event.args.items.len != 0) {
                 try writer.writeAll(
                     \\,"args":{
                 );
-                const ArgsEntry = std.StringHashMapUnmanaged([]const u8).Entry;
-                const sorted_args = try allocator.alloc(ArgsEntry, event.args.count());
-                defer allocator.free(sorted_args);
-                var args_iter = event.args.iterator();
-                idx = 0;
-                while (args_iter.next()) |entry| : (idx += 1) {
-                    sorted_args[idx] = entry;
-                }
 
-                std.mem.sort(ArgsEntry, sorted_args, {}, struct {
-                    pub fn call(_: void, lhs: ArgsEntry, rhs: ArgsEntry) bool {
-                        return std.mem.order(u8, lhs.key_ptr.*, rhs.key_ptr.*).compare(std.math.CompareOperator.lt);
+                std.mem.sort(
+                    trace_events_proto.TraceEvent.ArgsEntry,
+                    event.args.items,
+                    {},
+                    struct {
+                        pub fn call(_: void, lhs: trace_events_proto.TraceEvent.ArgsEntry, rhs: trace_events_proto.TraceEvent.ArgsEntry) bool {
+                            return std.mem.order(u8, lhs.key.getSlice(), rhs.key.getSlice()).compare(std.math.CompareOperator.lt);
+                        }
+                    }.call,
+                );
+                for (event.args.items, 0..) |arg, i| {
+                    if (i < event.args.items.len - 1) {
+                        try writer.print(
+                            \\"{s}":"{s}",
+                        , .{ arg.key.getSlice(), arg.value.getSlice() });
+                    } else {
+                        // Last item has closing bracket rather than trailing comma.
+                        try writer.print(
+                            \\"{s}":"{s}"}}
+                        , .{ arg.key.getSlice(), arg.value.getSlice() });
                     }
-                }.call);
-                for (sorted_args) |arg| {
-                    try writer.print(
-                        \\"{s}":"{s}",
-                    , .{ arg.key_ptr.*, arg.value_ptr.* });
                 }
-
-                // Replace trailing comma with closing brace.
-                buffer.items[buffer.items.len - 1] = '}';
             }
             try writer.writeAll("},");
         }
         try writer.writeAll("{}]}");
-        return buffer.toOwnedSlice();
     }
 };
