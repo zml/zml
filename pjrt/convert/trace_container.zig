@@ -64,12 +64,6 @@ pub const TraceContainer = struct {
         sort_index: u32 = 0,
     };
 
-    const BuilderCtx = struct {
-        ordinal: u32 = 0,
-        sort_by_ordinal: bool,
-        device: *Device,
-    };
-
     fn buildDeviceAndResources(allocator: std.mem.Allocator, device_id: u32, plane: *const xplane_visitor.XPlaneVisitor, device: *Device) !void {
         device.name = plane.name();
         device.device_id = device_id;
@@ -105,8 +99,8 @@ pub const TraceContainer = struct {
                 var event = try self.createEvent(allocator);
                 event.device_id = device_id;
                 event.resource_id = resource_id;
-                if (xevent.hasDisplayName()) {
-                    event.name = xevent.displayName();
+                if (xevent.displayName()) |name| {
+                    event.name = name;
                     try event.args.put(allocator, "long_name", xevent.name());
                 } else {
                     event.name = xevent.name();

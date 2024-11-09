@@ -1,6 +1,9 @@
 const std = @import("std");
 const tf_op_utils = @import("tf_op_utils.zig");
 
+// `HostEventType` uses the unconventional casing/formatting
+// so that the string representation of the enum  used in the
+// protobuf encoding directly maps to the zig enum tag name.
 pub const HostEventType = enum(u16) {
     UnknownHostEventType = 0,
     TraceContext,
@@ -128,6 +131,9 @@ pub const HostEventType = enum(u16) {
     }
 };
 
+// `StatType` uses the unconventional casing/formatting
+// so that the string representation of the enum  used in the
+// protobuf encoding directly maps to the zig enum tag name.
 pub const StatType = enum(u16) {
     UnknownStatType = 0,
     // TraceMe arguments.

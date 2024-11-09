@@ -56,7 +56,6 @@ pub const TraceConverter = struct {
             \\{"displayTimeUnit":"ns","metadata":{"highres-ticks":true},"traceEvents":[
         );
 
-        // TODO: finish implementing
         const Entry = std.AutoHashMapUnmanaged(u32, TraceContainer.Device).Entry;
         const pairs = try allocator.alloc(Entry, self.container.metadata.devices.count());
         defer allocator.free(pairs);

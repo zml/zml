@@ -21,25 +21,11 @@ pub const XStatVisitor = struct {
     type_: ?xplane_schema.StatType = null,
 
     pub fn init(plane: *const XPlaneVisitor, stat: *const xplane_proto.XStat) XStatVisitor {
-        return XStatVisitor.internalInit(
-            plane,
-            stat,
-            plane.getStatMetadata(stat.metadata_id),
-            plane.getStatType(stat.metadata_id),
-        );
-    }
-
-    pub fn internalInit(
-        plane: *const XPlaneVisitor,
-        stat: *const xplane_proto.XStat,
-        metadata: *const xplane_proto.XStatMetadata,
-        type_: ?xplane_schema.StatType,
-    ) XStatVisitor {
         return .{
             .stat = stat,
-            .metadata = metadata,
+            .metadata = plane.getStatMetadata(stat.metadata_id),
             .plane = plane,
-            .type_ = type_,
+            .type_ = plane.getStatType(stat.metadata_id),
         };
     }
 
@@ -87,12 +73,8 @@ pub const XEventVisitor = struct {
         };
     }
 
-    pub fn hasDisplayName(self: *const XEventVisitor) bool {
-        return self.metadata.display_name != .Empty;
-    }
-
-    pub fn displayName(self: *const XEventVisitor) []const u8 {
-        return self.metadata.display_name.getSlice();
+    pub fn displayName(self: *const XEventVisitor) ?[]const u8 {
+        return if (self.metadata.display_name != .Empty) self.metadata.display_name.getSlice() else null;
     }
 
     pub fn name(self: *const XEventVisitor) []const u8 {
