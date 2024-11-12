@@ -139,34 +139,3 @@ fn ShapeStruct(comptime dims: anytype) type {
         .is_tuple = false,
     } });
 }
-
-/// Return a new struct with all tensors replaced by the output of the given function.
-pub fn mapTensors(func: anytype, v: anytype, args: anytype) @TypeOf(v) {
-    const T = @TypeOf(v);
-    const type_info = @typeInfo(T);
-    if (T == Tensor) return @call(.auto, func, .{v} ++ args);
-
-    return switch (type_info) {
-        .Pointer => @compileError("mapTensors only accept by value arguments. Received: " ++ @typeName(T)),
-        .Struct => |struct_info| {
-            var copy: T = v;
-            inline for (struct_info.fields) |feeld| {
-                if (feeld.is_comptime) continue;
-                if (@typeInfo(feeld.type) == .Pointer) {
-                    @compileError("mapTensors doesn't follow pointers and don't accept struct containing them. Received: " ++ @typeName(T));
-                }
-                @field(copy, feeld.name) = mapTensors(func, @field(v, feeld.name), args);
-            }
-            return copy;
-        },
-        .Array => {
-            var res: T = undefined;
-            for (v, &res) |item, *r| {
-                r.* = mapTensors(func, item, args);
-            }
-            return res;
-        },
-        .Union, .Optional => @compileError("mapTensors doesn't yet support " ++ @typeName(T)),
-        else => v,
-    };
-}
