@@ -303,7 +303,7 @@ pub fn for_(comptime func: anytype, blk_ctx: BlockSign(func).BlkCtx, num_steps_:
             return Tensor.constant(shape, x.dtype().zero());
         }
 
-        fn wrapFirstStep(x: Tensor, tag_: @TypeOf(step_tag)) Tensor {
+        fn wrapFirstStep(tag_: @TypeOf(step_tag), x: Tensor) Tensor {
             var shape = x.shape();
             shape._dims.insert(0, 1) catch unreachable;
             shape._tags.insert(0, tag_) catch unreachable;
@@ -315,13 +315,14 @@ pub fn for_(comptime func: anytype, blk_ctx: BlockSign(func).BlkCtx, num_steps_:
     // it's only used to infer the output shapes.
     const first_step = @call(.auto, func, .{ blk_ctx, Tensor.scalar(0, .i32) });
     log.debug("for_ first_step: {}", .{first_step});
+    const allocator = CompilationContext.current()._allocator;
     // Optimize for small num reps
     if (num_steps == 1) {
-        // return helpers.mapTensors(ForBlk.wrapFirstStep, first_step, .{ step_tag });
-        return first_step;
+        var res = first_step;
+        meta.mapAlloc(ForBlk.wrapFirstStep, allocator, step_tag, first_step, &res) catch unreachable;
+        return res;
     }
 
-    const allocator = CompilationContext.current()._allocator;
     if (num_steps <= 4) {
         var steps: [4]S.Return = undefined;
         steps[0] = first_step;
@@ -368,16 +369,19 @@ test for_ {
     // Just one baby step
     {
         const squares = try zml.testing.compileAndCall(platform, Squares.forward, .{1});
+        try zml.testing.expectEqualShapes(Shape.init(.{1}, .f32), squares.shape());
         try std.testing.expectEqual(0, squares.getValue(f32));
     }
     // Wow 4 in rows !
     {
         const squares = try zml.testing.compileAndCall(platform, Squares.forward, .{4});
+        try zml.testing.expectEqualShapes(Shape.init(.{4}, .f32), squares.shape());
         try std.testing.expectEqual([_]f32{ 0, 1, 4, 9 }, try squares.getValue([4]f32));
     }
     // AGI is coming, computing 10 squares as it's nothing.
     {
         const squares = try zml.testing.compileAndCall(platform, Squares.forward, .{10});
+        try zml.testing.expectEqualShapes(Shape.init(.{10}, .f32), squares.shape());
         try std.testing.expectEqual(
             [_]f32{ 0, 1, 4, 9, 16, 25, 36, 49, 64, 81 },
             try squares.getValue([10]f32),
