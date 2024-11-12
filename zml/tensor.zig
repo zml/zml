@@ -2537,6 +2537,26 @@ pub const Tensor = struct {
             try std.testing.expect(a.shape().eql(result.shape()));
             try std.testing.expectEqual(expected, result.getValue(@TypeOf(expected)));
         }
+        // Test with setting individual values (no batching)
+        {
+            const a_host = try zml.HostBuffer.arange(std.testing.allocator, .{ .end = 9 }, .i32);
+            const a = try zml.Buffer.from(platform, a_host);
+            defer a.deinit();
+            a_host.deinit(std.testing.allocator);
+
+            const scatter_indices = try zml.Buffer.fromArray(platform, [2][1]i32{ .{2}, .{7} });
+            const updates = try zml.Buffer.fromArray(platform, [2]i32{ 20, 70 });
+
+            const expected = [9]i32{ 0, 1, 22, 3, 4, 5, 6, 77, 8 };
+            const result = try zml.testing.compileAndCall(platform, Local.scatter, .{
+                a,
+                a.shape().axes(.{0}),
+                scatter_indices.withTags(.{ .n, .coord }),
+                updates.withTags(.{.n}),
+            });
+            try std.testing.expect(a.shape().eql(result.shape()));
+            try std.testing.expectEqual(expected, result.getValue(@TypeOf(expected)));
+        }
         {
             // Test with actual values and batching along axis .a
             const operand = try zml.Buffer.constant(platform, Shape.init(.{ .a = 2, .b = 3, .c = 4, .d = 2 }, .u16), 0);
