@@ -119,6 +119,7 @@ tsl = use_extension("@xla//:tsl.bzl", "tsl")
 use_repo(tsl, "tsl")
 
 apt = use_extension("@rules_distroless//apt:extensions.bzl", "apt")
+
 apt.install(
     name = "neuron_bookworm",
     lock = "//runtimes/neuron:packages.lock.json",
@@ -155,3 +156,16 @@ use_repo(crate, "crates")
 
 non_module_deps = use_extension("//:third_party/non_module_deps.bzl", "non_module_deps")
 use_repo(non_module_deps, "com_google_sentencepiece", "org_swig_swig")
+
+apt.install(
+    name = "apt_rocm",
+    # lock = "//runtimes/rocm:packages.lock.json",
+    manifest = "//runtimes/rocm:packages.yaml",
+)
+
+apt.install(
+    name = "apt_common",
+    # lock = "//runtimes/rocm:packages.lock.json",
+    manifest = "//runtimes/common:packages.yaml",
+)
+use_repo(apt, "apt_common", "apt_rocm")
