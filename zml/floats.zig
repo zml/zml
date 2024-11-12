@@ -213,6 +213,7 @@ test BFloat16 {
     try std.testing.expectEqual(BFloat16.fromF32(3.02344107628), BFloat16{ .sign = 0, .exponent = 127 + 1, .mantissa = 65 });
     try std.testing.expectEqual(BFloat16.fromF32(1.0 / 128.0), BFloat16{ .sign = 0, .exponent = 127 - 7, .mantissa = 0 });
     try std.testing.expectEqual(std.mem.toBytes(BFloat16.inf().neg()), [_]u8{ 0x80, 0xff });
+    try std.testing.expectEqual(BFloat16.inf(), BFloat16.fromF32(std.math.inf(f32)));
 
     const lossless = [_]f32{ 0, -2, 1.0 / 128.0, -1e64, std.math.inf(f32) };
     for (&lossless) |v| {
