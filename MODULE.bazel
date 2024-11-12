@@ -109,9 +109,17 @@ bazel_dep(name = "zig-protobuf", version = "20240722.0-c644d11")
 bazel_dep(name = "zig-yaml", version = "20240903.0-83d5fdf")
 
 apt = use_extension("@rules_distroless//apt:extensions.bzl", "apt")
+
 apt.install(
     name = "neuron_bookworm",
     lock = "//runtimes/neuron:packages.lock.json",
     manifest = "//runtimes/neuron:packages.yaml",
 )
 use_repo(apt, "neuron_bookworm")
+
+apt.install(
+    name = "rocm_apt",
+    lock = "//runtimes/rocm:packages.lock.json",
+    manifest = "//runtimes/rocm:packages.yaml",
+)
+use_repo(apt, "rocm_apt")

@@ -1,0 +1,43 @@
+# Packages for examples/debian_snapshot.
+#
+#  Anytime this file is changed, the lockfile needs to be regenerated.
+#
+#  To generate the ubuntu_base.lock.json run the following command
+#
+#     bazel run @libpjrt_rocm_apt//:lock
+#
+version: 1
+
+sources:
+  - channel: bookworm main
+    url: https://snapshot-cloudflare.debian.org/archive/debian/20241127T143620Z/
+  - channel: jammy main
+    url: https://repo.radeon.com/rocm/apt/latest
+
+archs:
+  - "amd64"
+
+packages:
+  - "libdrm2"
+  - "libelf1"
+  - "libnuma1"
+  - "libzstd1"
+  - "libdrm-amdgpu1"
+  - "libtinfo6"
+  - "zlib1g"
+  - "rocm-core"
+  - "rocm-smi-lib"
+  - "hsa-rocr"
+  - "hsa-amd-aqlprofile"
+  - "comgr"
+  - "rocprofiler-register"
+  - "miopen-hip"
+  - "rccl"
+  - "rocm-device-libs"
+  - "hip-dev"
+  - "rocblas"
+  - "roctracer"
+  - "hipblaslt"
+  - "hipblaslt-dev"
+  - "hip-runtime-amd"
+  - "rocm-llvm"
