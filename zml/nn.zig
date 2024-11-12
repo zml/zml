@@ -910,6 +910,7 @@ fn sdpaChunk(q: Tensor, k: Tensor, v: Tensor, opts: SdpaOpts) PartialAttn {
         .max_value = partial.max_value,
     };
 }
+
 test "sdpaMemEfficient without mask" {
     const platform = zml.testing.env();
     const allocator = std.testing.allocator;
@@ -1011,6 +1012,31 @@ pub fn sampleTokens(activations: Tensor, opts: SamplingStrategy, rng: Tensor.Rng
     return .{ next_tokens, next_rng };
 }
 
+test sampleTokens {
+    const platform = zml.testing.env();
+    const allocator = std.testing.allocator;
+
+    const inf = std.math.inf(f32);
+    var rng_buff = try zml.Tensor.Rng.init(platform, 0xdeadbeef);
+    defer rng_buff._state.deinit();
+
+    const mod = try zml.compileFn(allocator, sampleTokens, .{ Shape.init(.{ .voc = 4 }, .f32), .{ .topk = 4, .temperature = 2.0 }, zml.Tensor.Rng.shape() }, platform);
+    defer mod.deinit();
+
+    inline for (.{
+        .{ [_]f32{ inf, 3.0, 2.0, 1.0 }, 0 },
+        .{ [_]f32{ -inf, 3.0, -inf, -inf }, 1 },
+        .{ [_]f32{ 3.0, 2, inf, inf }, 2 },
+    }) |logits_expected| {
+        const logits, const expected: i32 = logits_expected;
+        var logits_buff = try zml.Buffer.fromArray(platform, logits);
+        defer logits_buff.deinit();
+        var sampled, rng_buff = mod.call(.{ logits_buff, undefined, rng_buff });
+        defer sampled.deinit();
+        try zml.testing.expectEqual(expected, try sampled.getValue(i32));
+    }
+}
+
 pub const DynamicSamplingStrategy = struct {
     max_top_k: u32,
     top_k: Tensor,
@@ -1019,13 +1045,14 @@ pub const DynamicSamplingStrategy = struct {
     min_p: Tensor,
 
     pub fn shapes(dtype: DataType, max_top_k: u32) zml.ShapeOf(DynamicSamplingStrategy) {
-        const scalar_shape = Shape.init(.{}, dtype);
+        const scalar_float = Shape.init(.{}, dtype);
+        const scalar_i32 = Shape.init(.{}, .i32);
         return .{
             .max_top_k = max_top_k,
-            .top_k = scalar_shape,
-            .temperature = scalar_shape,
-            .top_p = scalar_shape,
-            .min_p = scalar_shape,
+            .top_k = scalar_i32,
+            .temperature = scalar_float,
+            .top_p = scalar_float,
+            .min_p = scalar_float,
         };
     }
 
@@ -1041,7 +1068,7 @@ pub const DynamicSamplingStrategy = struct {
     ) !zml.Bufferized(DynamicSamplingStrategy) {
         return .{
             .max_top_k = 0,
-            .top_k = try zml.Buffer.scalar(platform, args.top_k, dtype),
+            .top_k = try zml.Buffer.scalar(platform, args.top_k, .i32),
             .temperature = try zml.Buffer.scalar(platform, args.temperature, dtype),
             .top_p = try zml.Buffer.scalar(platform, args.top_p, dtype),
             .min_p = try zml.Buffer.scalar(platform, args.min_p, dtype),
@@ -1079,16 +1106,23 @@ fn fixupLogits(logits: Tensor, opts: DynamicSamplingStrategy) [2]Tensor {
     x = Tensor.iota(x.shape().withDtype(.i32), .topk).cmp(.GE, opts.top_k).select(min_inf, x);
     x = x.mul(opts.temperature);
 
+    // if there are high values in x, softmax can overflow and will create nans in full probs
+    // this propagate to probs_sum and probs_max.
     const probs = x.softmax(.topk);
     const probs_sum = probs.cumulativeSum(.topk);
     const probs_max = probs.slice1d(.topk, .{ .start = 0, .end = 1 });
 
-    // Ensure top_p is at least greater than the probability of the top token, otherwise all tokens are masked.
-    const top_p = probs_max.maximum(opts.top_p).broad(x.shape());
-    x = probs_sum.cmp(.GT, top_p).select(min_inf, x);
-
+    const top_p = opts.top_p.broad(x.shape());
     const min_p = probs_max.mul(opts.min_p).broad(x.shape());
-    x = probs.cmp(.LT, min_p).select(min_inf, x);
+
+    // * if first candidate has very high prob, then probs_sum is always greater than top_p and candidate is full false
+    // * if first candidate score is even bigger, the probs become Nan because of the softmax,
+    // then cmp is is full false, and candidate is full false too.
+    const candidate = probs_sum.cmp(.LE, top_p).logical(.AND, probs.cmp(.GE, min_p));
+    // * so we explicitly always accept first candidate.
+    const first_token = Tensor.iota(x.shape().withDtype(.i32), .topk).cmp(.EQ, Tensor.scalar(0, .i32));
+    x = candidate.logical(.OR, first_token).select(x, min_inf);
+
     return .{ x, full_topk.indices };
 }
 
@@ -1096,7 +1130,7 @@ test sampleTokensDynamic {
     const platform = zml.testing.env();
     const allocator = std.testing.allocator;
 
-    const ___ = @log(0.0);
+    const ___ = -std.math.inf(f32);
     const logits = [_]f32{ @log(2.0), @log(1.0), @log(4.0), @log(3.0) };
     const top_k_indices = [_]i32{ 2, 3, 0, 1 };
     const logits_buff = try zml.Buffer.fromArray(platform, logits);
@@ -1123,5 +1157,19 @@ test sampleTokensDynamic {
         const new_logits, const indices = mod.call(.{ logits_buff, try DynamicSamplingStrategy.makeBuffers(platform, .f32, args) });
         try std.testing.expectEqual(top_k_indices, try indices.getValue(@TypeOf(top_k_indices)));
         try zml.testing.expectEqual(expected, try new_logits.getValue(@TypeOf(expected)));
+    }
+
+    {
+        // Similar but use bf16, and uses infinity to trigger nans after the softmax.
+        const bf16 = zml.floats.BFloat16;
+
+        const mod_bf16 = try zml.compileFn(allocator, fixupLogits, .{ Shape.init(.{ .voc = logits.len }, .bf16), DynamicSamplingStrategy.shapes(.bf16, 0) }, platform);
+        defer mod_bf16.deinit();
+        const boost = bf16.inf();
+        const nerf = bf16.minusInf();
+        const logits_buff_2 = try zml.Buffer.fromArray(platform, [4]bf16{ boost, boost, bf16.fromF32(2), nerf });
+        const new_logits, const indices = mod_bf16.call(.{ logits_buff_2, try DynamicSamplingStrategy.makeBuffers(platform, .bf16, .{ .top_k = 4, .top_p = 0.9, .min_p = 0.1 }) });
+        try std.testing.expectEqual([_]i32{ 0, 1, 2, 3 }, try indices.getValue([4]i32));
+        try zml.testing.expectEqual([_]bf16{ boost, nerf, nerf, nerf }, try new_logits.getValue([4]bf16));
     }
 }
