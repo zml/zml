@@ -26,13 +26,6 @@ pub const gpu_plane_prefix = "/device:GPU:";
 pub const tpu_plane_prefix = "/device:TPU:";
 pub const custom_plane_prefix = "/device:CUSTOM:";
 
-pub fn GetOrPutResult(comptime Key: type, comptime Value: type) type {
-    return struct {
-        key_ptr: *Key,
-        value_ptr: *Value,
-    };
-}
-
 pub const TraceContainer = struct {
     metadata: Trace = .{},
     events: std.ArrayListUnmanaged(*TraceEvent) = .{},
