@@ -23,25 +23,6 @@ pub const TraceConverter = struct {
         self.arena.deinit();
     }
 
-    pub fn sortByKey(
-        allocator: std.mem.Allocator,
-        comptime T: type,
-        a: std.ArrayListUnmanaged(T),
-        comptime lt_fn: fn (ctx: void, lhs: *const T, rhs: *const T) bool,
-    ) ![]const *const T {
-        const pairs = try allocator.alloc(*const T, a.items.len);
-        for (a.items, 0..) |*pair, i| {
-            pairs[i] = pair;
-        }
-        std.mem.sort(
-            *const T,
-            pairs,
-            {},
-            lt_fn,
-        );
-        return pairs;
-    }
-
     fn picoToMicro(p: anytype) f64 {
         return @as(f64, @floatFromInt(p)) / 1E6;
     }
