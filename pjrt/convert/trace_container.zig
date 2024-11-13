@@ -1,9 +1,8 @@
 const std = @import("std");
 const trace_events_proto = @import("//tsl:trace_events_proto");
 const xplane_proto = @import("//tsl:xplane_proto");
-const xplane_schema = @import("utils/xplane_schema.zig");
-const xplane_utils = @import("utils/xplane_utils.zig");
-const xplane_visitor = @import("utils/xplane_visitor.zig");
+const xplane_schema = @import("xplane_schema.zig");
+const xplane_visitor = @import("xplane_visitor.zig");
 
 // Constants used as trace_viewer PID (device_id in trace_events.proto).
 // PID 0 is unused.
@@ -58,17 +57,57 @@ pub const TraceContainer = struct {
         args: std.StringArrayHashMapUnmanaged([]const u8) = .{},
     };
 
+    fn xLineDisplayId(xline: *const xplane_proto.XLine) i64 {
+        return if (xline.display_id != 0) xline.display_id else xline.id;
+    }
+
+    fn xLineDisplayName(xline: *const xplane_proto.XLine) []const u8 {
+        return switch (xline.display_name) {
+            .Empty => xline.name.getSlice(),
+            else => xline.display_name.getSlice(),
+        };
+    }
+
+    fn xstatValueToString(stat: *const xplane_proto.XStat, plane: *const xplane_visitor.XPlaneVisitor, writer: std.io.AnyWriter) !void {
+        if (stat.value) |val| {
+            switch (val) {
+                inline .int64_value, .uint64_value, .double_value => |v| try writer.print("{d}", .{v}),
+                .str_value => |*v| try writer.writeAll(v.getSlice()),
+                .bytes_value => try writer.writeAll("<opaque bytes>"),
+                .ref_value => |v| try writer.writeAll(plane.getStatMetadata(@intCast(v)).name.getSlice()),
+            }
+        } else return;
+    }
+
+    fn findPlaneWithName(space: *const xplane_proto.XSpace, name: []const u8) ?*xplane_proto.XPlane {
+        for (space.planes.items) |*v| {
+            if (std.mem.eql(u8, v.name.getSlice(), name)) return v;
+        }
+        return null;
+    }
+
+    fn findPlanesWithPrefix(
+        allocator: std.mem.Allocator,
+        space: *const xplane_proto.XSpace,
+        prefix: []const u8,
+    ) ![]*const xplane_proto.XPlane {
+        var res = std.ArrayList(*const xplane_proto.XPlane).init(allocator);
+        for (space.planes.items) |*p| {
+            if (std.mem.startsWith(u8, p.name.getSlice(), prefix)) try res.append(p);
+        }
+        return res.toOwnedSlice();
+    }
+
     fn buildDeviceAndResources(allocator: std.mem.Allocator, device_id: u32, plane: *const xplane_visitor.XPlaneVisitor, device: *Device) !void {
         device.name = plane.name();
         device.device_id = device_id;
         const sort_by_ordinal = (device_id == host_threads_device_id);
         var ordinal: u32 = 0;
-        for (plane.plane.lines.items) |*l| {
-            var line = xplane_visitor.XLineVisitor.init(plane, l);
-            const resource_id: u32 = @intCast(line.displayId());
+        for (plane.plane.lines.items) |*xline| {
+            const resource_id: u32 = @intCast(xLineDisplayId(xline));
             var resource: trace_events_proto.Resource = .{
                 .resource_id = resource_id,
-                .name = .{ .Const = line.displayName() },
+                .name = .{ .Const = xLineDisplayName(xline) },
             };
 
             if (sort_by_ordinal) {
@@ -87,52 +126,48 @@ pub const TraceContainer = struct {
         try buildDeviceAndResources(allocator, device_id, xplane, device_entry.value_ptr);
 
         // Convert events.
-        for (xplane.plane.lines.items) |*l| {
-            const xline = xplane_visitor.XLineVisitor.init(xplane, l);
-            const resource_id: u32 = @intCast(xline.displayId());
-            if (std.mem.eql(u8, xline.displayName(), xla_async_op_line_name)) continue;
-            for (xline.line.events.items) |*e| {
-                const xevent = xplane_visitor.XEventVisitor.init(xline.plane, xline.line, e);
-                const event_type: xplane_schema.HostEventType = xevent
-                    .type_ orelse .UnknownHostEventType;
+        for (xplane.plane.lines.items) |*xline| {
+            const resource_id: u32 = @intCast(xLineDisplayId(xline));
+
+            if (std.mem.eql(u8, xLineDisplayName(xline), xla_async_op_line_name)) continue;
+            for (xline.events.items) |*xevent| {
+                const event_type = xplane.getEventType(xevent.metadata_id);
                 if (event_type.isInternalEvent()) continue;
                 var event = try self.createEvent(allocator);
                 event.device_id = device_id;
                 event.resource_id = resource_id;
-                if (xevent.displayName()) |name| {
-                    event.name = name;
-                    try event.args.put(allocator, "long_name", xevent.name());
+
+                const metadata = xplane.getEventMetadata(xevent.metadata_id);
+                if (metadata.display_name != .Empty) {
+                    event.name = metadata.display_name.getSlice();
+                    try event.args.put(allocator, "long_name", metadata.name.getSlice());
                 } else {
-                    event.name = xevent.name();
-                }
-                event.timestamp_ps = @intCast(xevent.timestampPs());
-                event.duration_ps = @intCast(xevent.durationPs());
-
-                const xevent_md_visitor = xevent.metadataVisitor();
-                for (xevent_md_visitor.stats_owner.stats.items) |*s| {
-                    const xstat = xplane_visitor.XStatVisitor.init(xevent_md_visitor.plane, s);
-                    if (xstat.stat.value == null) continue;
-                    const stat_str = try xstat.toString(allocator);
-                    if (xstat.type()) |t| {
-                        if (t.isInternalStat()) continue;
-                        if (t == .step_name) {
-                            event.name = stat_str;
-                        }
-                    }
-                    try event.args.put(allocator, xstat.name(), stat_str);
+                    event.name = metadata.name.getSlice();
                 }
 
-                for (xevent.event.stats.items) |*s| {
-                    const xstat = xplane_visitor.XStatVisitor.init(xevent.plane, s);
-                    if (xstat.stat.value == null) continue;
-                    const stat_str = try xstat.toString(allocator);
-                    if (xstat.type()) |t| {
-                        if (t.isInternalStat()) continue;
-                        if (t == .step_name) {
-                            event.name = try xstat.toString(allocator);
-                        }
-                    }
-                    try event.args.put(allocator, xstat.name(), stat_str);
+                event.timestamp_ps = (@as(u128, @intCast(xline.timestamp_ns)) * 1000) + @as(u128, @intCast(xevent.data.?.offset_ps));
+                event.duration_ps = @intCast(xevent.duration_ps);
+
+                for (metadata.stats.items) |*xstat| {
+                    if (xstat.value == null) continue;
+                    var stat_buffer = std.ArrayList(u8).init(allocator);
+                    try xstatValueToString(xstat, xplane, stat_buffer.writer().any());
+                    const stat_str = try stat_buffer.toOwnedSlice();
+                    const stat_type = xplane.getStatType(xstat.metadata_id);
+                    if (stat_type.isInternalStat()) continue;
+                    if (stat_type == .step_name) event.name = stat_str;
+                    try event.args.put(allocator, xplane.getStatMetadata(xstat.metadata_id).name.getSlice(), stat_str);
+                }
+
+                for (xevent.stats.items) |*xstat| {
+                    if (xstat.value == null) continue;
+                    var stat_buffer = std.ArrayList(u8).init(allocator);
+                    try xstatValueToString(xstat, xplane, stat_buffer.writer().any());
+                    const stat_str = try stat_buffer.toOwnedSlice();
+                    const stat_type = xplane.getStatType(xstat.metadata_id);
+                    if (stat_type.isInternalStat()) continue;
+                    if (stat_type == .step_name) event.name = stat_str;
+                    try event.args.put(allocator, xplane.getStatMetadata(xstat.metadata_id).name.getSlice(), stat_str);
                 }
             }
         }
@@ -147,33 +182,33 @@ pub const TraceContainer = struct {
 
     pub fn fromXSpace(allocator: std.mem.Allocator, xspace: *const xplane_proto.XSpace) !TraceContainer {
         var self: TraceContainer = .{};
-        if (xplane_utils.findPlaneWithName(xspace, host_threads_plane_name)) |hp| {
+        if (findPlaneWithName(xspace, host_threads_plane_name)) |hp| {
             const xplane = try xplane_visitor.XPlaneVisitor.init(
                 allocator,
                 hp,
-                &.{xplane_schema.HostEventType.fromString},
-                &.{xplane_schema.StatType.fromString},
+                xplane_schema.HostEventType.fromString,
+                xplane_schema.StatType.fromString,
             );
             try self.xplaneToTraceEvents(allocator, host_threads_device_id, &xplane);
         }
 
-        var device_planes = try xplane_utils.findPlanesWithPrefix(allocator, xspace, gpu_plane_prefix);
+        var device_planes = try findPlanesWithPrefix(allocator, xspace, gpu_plane_prefix);
 
         // We don't expect GPU and TPU planes and custom devices to be present in the
         // same XSpace.
         if (device_planes.len == 0) {
-            device_planes = try xplane_utils.findPlanesWithPrefix(allocator, xspace, tpu_plane_prefix);
+            device_planes = try findPlanesWithPrefix(allocator, xspace, tpu_plane_prefix);
         }
         if (device_planes.len == 0) {
-            device_planes = try xplane_utils.findPlanesWithPrefix(allocator, xspace, custom_plane_prefix);
+            device_planes = try findPlanesWithPrefix(allocator, xspace, custom_plane_prefix);
         }
 
         for (device_planes) |dp| {
             const xplane = try xplane_visitor.XPlaneVisitor.init(
                 allocator,
                 dp,
-                &.{xplane_schema.HostEventType.fromString},
-                &.{xplane_schema.StatType.fromString},
+                xplane_schema.HostEventType.fromString,
+                xplane_schema.StatType.fromString,
             );
             const device_id: u32 = first_device_id + @as(u32, @intCast(xplane.plane.id));
             try self.xplaneToTraceEvents(allocator, device_id, &xplane);

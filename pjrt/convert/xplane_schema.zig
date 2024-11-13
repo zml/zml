@@ -4,7 +4,7 @@ const std = @import("std");
 // so that the string representation of the enum  used in the
 // protobuf encoding directly maps to the zig enum tag name.
 pub const HostEventType = enum(u16) {
-    UnknownHostEventType = 0,
+    unknown = 0,
     TraceContext,
     SessionRun,
     FunctionRun,
@@ -96,8 +96,8 @@ pub const HostEventType = enum(u16) {
     Delinearize,
     @"TransferBufferFromDevice-FastPath",
 
-    pub fn fromString(event_name: []const u8) ?HostEventType {
-        return std.meta.stringToEnum(HostEventType, event_name);
+    pub fn fromString(event_name: []const u8) HostEventType {
+        return std.meta.stringToEnum(HostEventType, event_name) orelse .unknown;
     }
 
     pub fn isInternalEvent(event_type: HostEventType) bool {
@@ -126,7 +126,7 @@ pub const HostEventType = enum(u16) {
 // so that the string representation of the enum  used in the
 // protobuf encoding directly maps to the zig enum tag name.
 pub const StatType = enum(u16) {
-    UnknownStatType = 0,
+    unknown = 0,
     // TraceMe arguments.
     id,
     device_ordinal,
@@ -274,8 +274,8 @@ pub const StatType = enum(u16) {
     device_offset_ps,
     device_duration_ps,
 
-    pub fn fromString(stat_name: []const u8) ?StatType {
-        return std.meta.stringToEnum(StatType, stat_name);
+    pub fn fromString(stat_name: []const u8) StatType {
+        return std.meta.stringToEnum(StatType, stat_name) orelse .unknown;
     }
 
     pub fn isInternalStat(stat_type: StatType) bool {

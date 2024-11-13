@@ -44,7 +44,7 @@ zig_proto_library(
 
 zig_cc_binary(
     name = "xspace_to_json",
-    srcs = glob(["convert/**/*.zig"]),
+    srcs = glob(["convert/*.zig"]),
     main = "xspace_to_json.zig",
     visibility = ["//visibility:public"],
     deps = [
