@@ -1092,7 +1092,7 @@ fn computeModuleHash(platform: Platform, module: mlir.Module) u64 {
     return hasher.final();
 }
 
-const max_pjrt_executable_size = 100 * 1024 * 1024;
+const max_pjrt_executable_size = 200 * 1024 * 1024;
 
 fn loadPjrtExecutable(arena: std.mem.Allocator, platform: Platform, module_hash: u64, compilation_cache_location: []const u8) !*pjrt.LoadedExecutable {
     const resolved_path = try std.fs.cwd().realpathAlloc(arena, compilation_cache_location);
