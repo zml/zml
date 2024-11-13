@@ -1,7 +1,0 @@
-load("@rules_zig//zig:defs.bzl", "zig_library")
-
-zig_library(
-    name = "mvzr",
-    main = "src/mvzr.zig",
-    visibility = ["//visibility:public"],
-)

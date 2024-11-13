@@ -1,7 +1,6 @@
 const std = @import("std");
 const trace_events_proto = @import("//tsl:trace_events_proto");
 const xplane_proto = @import("//tsl:xplane_proto");
-const protobuf = @import("protobuf");
 const xplane_schema = @import("utils/xplane_schema.zig");
 const xplane_utils = @import("utils/xplane_utils.zig");
 const xplane_visitor = @import("utils/xplane_visitor.zig");
@@ -40,21 +39,14 @@ pub const TraceContainer = struct {
     events: std.ArrayListUnmanaged(*TraceEvent) = .{},
 
     pub const Trace = struct {
-        devices: std.ArrayListUnmanaged(trace_events_proto.Trace.DevicesEntry) = .{},
+        devices: std.AutoArrayHashMapUnmanaged(u32, Device) = .{},
         trace_events: std.ArrayListUnmanaged(TraceEvent) = .{},
+    };
 
-        pub fn getOrPutDevice(self: *Trace, allocator: std.mem.Allocator, key: u32) !GetOrPutResult(u32, ?trace_events_proto.Device) {
-            for (self.devices.items) |*device| {
-                if (key == device.key) {
-                    return .{ .key_ptr = &device.key, .value_ptr = &device.value };
-                }
-            }
-            try self.devices.append(allocator, .{ .key = key });
-            return .{
-                .key_ptr = &self.devices.items[self.devices.items.len - 1].key,
-                .value_ptr = &self.devices.items[self.devices.items.len - 1].value,
-            };
-        }
+    pub const Device = struct {
+        name: []const u8 = &[_]u8{},
+        device_id: u32 = 0,
+        resources: std.AutoArrayHashMapUnmanaged(u32, trace_events_proto.Resource) = .{},
     };
 
     pub const TraceEvent = struct {
@@ -63,37 +55,11 @@ pub const TraceContainer = struct {
         name: []const u8 = &[_]u8{},
         timestamp_ps: u128 = 0,
         duration_ps: u64 = 0,
-        args: std.ArrayListUnmanaged(trace_events_proto.TraceEvent.ArgsEntry) = .{},
-
-        pub fn getOrPutArg(self: *TraceEvent, allocator: std.mem.Allocator, key: []const u8) !GetOrPutResult(protobuf.ManagedString, protobuf.ManagedString) {
-            for (self.args.items) |*arg| {
-                if (std.mem.eql(u8, key, arg.key.getSlice())) {
-                    return .{ .key_ptr = &arg.key, .value_ptr = &arg.value };
-                }
-            }
-            try self.args.append(allocator, .{ .key = .{ .Const = key } });
-            return .{
-                .key_ptr = &self.args.items[self.args.items.len - 1].key,
-                .value_ptr = &self.args.items[self.args.items.len - 1].value,
-            };
-        }
+        args: std.StringArrayHashMapUnmanaged([]const u8) = .{},
     };
 
-    fn getOrPutResource(self: *trace_events_proto.Device, allocator: std.mem.Allocator, key: u32) !GetOrPutResult(u32, ?trace_events_proto.Resource) {
-        for (self.resources.items) |*resource| {
-            if (key == resource.key) {
-                return .{ .key_ptr = &resource.key, .value_ptr = &resource.value };
-            }
-        }
-        try self.resources.append(allocator, .{ .key = key });
-        return .{
-            .key_ptr = &self.resources.items[self.resources.items.len - 1].key,
-            .value_ptr = &self.resources.items[self.resources.items.len - 1].value,
-        };
-    }
-
-    fn buildDeviceAndResources(allocator: std.mem.Allocator, device_id: u32, plane: *const xplane_visitor.XPlaneVisitor, device: *trace_events_proto.Device) !void {
-        device.name = .{ .Const = plane.name() };
+    fn buildDeviceAndResources(allocator: std.mem.Allocator, device_id: u32, plane: *const xplane_visitor.XPlaneVisitor, device: *Device) !void {
+        device.name = plane.name();
         device.device_id = device_id;
         const sort_by_ordinal = (device_id == host_threads_device_id);
         var ordinal: u32 = 0;
@@ -109,17 +75,16 @@ pub const TraceContainer = struct {
                 ordinal += 1;
                 resource.sort_index = ordinal;
             }
-            const resource_entry = try getOrPutResource(device, allocator, resource_id);
-            resource_entry.value_ptr.* = resource;
+            try device.resources.put(allocator, resource_id, resource);
         }
     }
 
     fn xplaneToTraceEvents(self: *TraceContainer, allocator: std.mem.Allocator, device_id: u32, xplane: *const xplane_visitor.XPlaneVisitor) !void {
         // Convert devices and resources.
-        var device: trace_events_proto.Device = .{};
-        try buildDeviceAndResources(allocator, device_id, xplane, &device);
-        const device_entry = try self.getOrPutDevice(allocator, device_id);
-        device_entry.value_ptr.* = device;
+        const device_entry = try self.metadata.devices.getOrPut(allocator, device_id);
+        if (!device_entry.found_existing) device_entry.value_ptr.* = .{};
+
+        try buildDeviceAndResources(allocator, device_id, xplane, device_entry.value_ptr);
 
         // Convert events.
         for (xplane.plane.lines.items) |*l| {
@@ -136,8 +101,7 @@ pub const TraceContainer = struct {
                 event.resource_id = resource_id;
                 if (xevent.displayName()) |name| {
                     event.name = name;
-                    const arg = try event.getOrPutArg(allocator, "long_name");
-                    arg.value_ptr.* = .{ .Const = xevent.name() };
+                    try event.args.put(allocator, "long_name", xevent.name());
                 } else {
                     event.name = xevent.name();
                 }
@@ -155,8 +119,7 @@ pub const TraceContainer = struct {
                             event.name = stat_str;
                         }
                     }
-                    const arg = try event.getOrPutArg(allocator, xstat.name());
-                    arg.value_ptr.* = .{ .Const = stat_str };
+                    try event.args.put(allocator, xstat.name(), stat_str);
                 }
 
                 for (xevent.event.stats.items) |*s| {
@@ -169,8 +132,7 @@ pub const TraceContainer = struct {
                             event.name = try xstat.toString(allocator);
                         }
                     }
-                    const arg = try event.getOrPutArg(allocator, xstat.name());
-                    arg.value_ptr.* = .{ .Const = stat_str };
+                    try event.args.put(allocator, xstat.name(), stat_str);
                 }
             }
         }
@@ -189,7 +151,7 @@ pub const TraceContainer = struct {
             const xplane = try xplane_visitor.XPlaneVisitor.init(
                 allocator,
                 hp,
-                &.{ xplane_schema.HostEventType.fromString, xplane_schema.HostEventType.fromTfOpEventType },
+                &.{xplane_schema.HostEventType.fromString},
                 &.{xplane_schema.StatType.fromString},
             );
             try self.xplaneToTraceEvents(allocator, host_threads_device_id, &xplane);
@@ -210,7 +172,7 @@ pub const TraceContainer = struct {
             const xplane = try xplane_visitor.XPlaneVisitor.init(
                 allocator,
                 dp,
-                &.{ xplane_schema.HostEventType.fromString, xplane_schema.HostEventType.fromTfOpEventType },
+                &.{xplane_schema.HostEventType.fromString},
                 &.{xplane_schema.StatType.fromString},
             );
             const device_id: u32 = first_device_id + @as(u32, @intCast(xplane.plane.id));
@@ -222,19 +184,6 @@ pub const TraceContainer = struct {
         const viewer_max_events = try getTraceViewerMaxEvents();
         self.capEvents(viewer_max_events);
         return self;
-    }
-
-    pub fn getOrPutDevice(self: *TraceContainer, allocator: std.mem.Allocator, key: u32) !GetOrPutResult(u32, ?trace_events_proto.Device) {
-        for (self.metadata.devices.items) |*device| {
-            if (key == device.key) {
-                return .{ .key_ptr = &device.key, .value_ptr = &device.value };
-            }
-        }
-        try self.metadata.devices.append(allocator, .{ .key = key });
-        return .{
-            .key_ptr = &self.metadata.devices.items[self.metadata.devices.items.len - 1].key,
-            .value_ptr = &self.metadata.devices.items[self.metadata.devices.items.len - 1].value,
-        };
     }
 
     pub fn createEvent(self: *TraceContainer, allocator: std.mem.Allocator) !*TraceEvent {

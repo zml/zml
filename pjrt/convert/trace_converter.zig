@@ -51,28 +51,18 @@ pub const TraceConverter = struct {
             \\{"displayTimeUnit":"ns","metadata":{"highres-ticks":true},"traceEvents":[
         );
 
-        std.mem.sort(
-            trace_events_proto.Trace.DevicesEntry,
-            self.container.metadata.devices.items,
-            {},
-            struct {
-                pub fn call(
-                    _: void,
-                    lhs: trace_events_proto.Trace.DevicesEntry,
-                    rhs: trace_events_proto.Trace.DevicesEntry,
-                ) bool {
-                    return lhs.key < rhs.key;
-                }
-            }.call,
-        );
+        self.container.metadata.devices.sort(struct {
+            keys: []const u32,
+            pub fn lessThan(ctx: @This(), lhs: usize, rhs: usize) bool {
+                return ctx.keys[lhs] < ctx.keys[rhs];
+            }
+        }{ .keys = self.container.metadata.devices.keys() });
 
-        for (self.container.metadata.devices.items) |id_and_device| {
-            const device_id = id_and_device.key;
-            const device = id_and_device.value.?;
-            if (device.name.getSlice().len != 0) {
+        for (self.container.metadata.devices.keys(), self.container.metadata.devices.values()) |device_id, *device| {
+            if (device.name.len != 0) {
                 try writer.print(
                     \\{{"ph":"M","pid":{d},"name":"process_name","args":{{"name":"{s}"}}}},
-                , .{ device_id, device.name.getSlice() });
+                , .{ device_id, device.name });
             }
             try writer.print(
                 \\{{"ph":"M","pid":{d},"name":"process_sort_index","args":{{"sort_index":{d}}}}},
@@ -81,20 +71,14 @@ pub const TraceConverter = struct {
                 device_id,
             });
 
-            std.mem.sort(
-                trace_events_proto.Device.ResourcesEntry,
-                device.resources.items,
-                {},
-                struct {
-                    pub fn call(_: void, lhs: trace_events_proto.Device.ResourcesEntry, rhs: trace_events_proto.Device.ResourcesEntry) bool {
-                        return lhs.key < rhs.key;
-                    }
-                }.call,
-            );
+            device.resources.sort(struct {
+                keys: []const u32,
+                pub fn lessThan(ctx: @This(), lhs: usize, rhs: usize) bool {
+                    return ctx.keys[lhs] < ctx.keys[rhs];
+                }
+            }{ .keys = device.resources.keys() });
 
-            for (device.resources.items) |id_and_resource| {
-                const resource_id = id_and_resource.key;
-                const resource = id_and_resource.value.?;
+            for (device.resources.keys(), device.resources.values()) |resource_id, resource| {
                 if (resource.name.getSlice().len != 0) {
                     try writer.print(
                         \\{{"ph":"M","pid":{d},"tid":{d},"name":"thread_name","args":{{"name":"{s}"}}}},
@@ -122,31 +106,28 @@ pub const TraceConverter = struct {
                 picoToMicro(duration_ps),
                 event.name,
             });
-            if (event.args.items.len != 0) {
+            if (event.args.count() != 0) {
                 try writer.writeAll(
                     \\,"args":{
                 );
+                event.args.sort(struct {
+                    keys: []const []const u8,
 
-                std.mem.sort(
-                    trace_events_proto.TraceEvent.ArgsEntry,
-                    event.args.items,
-                    {},
-                    struct {
-                        pub fn call(_: void, lhs: trace_events_proto.TraceEvent.ArgsEntry, rhs: trace_events_proto.TraceEvent.ArgsEntry) bool {
-                            return std.mem.order(u8, lhs.key.getSlice(), rhs.key.getSlice()).compare(std.math.CompareOperator.lt);
-                        }
-                    }.call,
-                );
-                for (event.args.items, 0..) |arg, i| {
-                    if (i < event.args.items.len - 1) {
+                    pub fn lessThan(ctx: @This(), lhs: usize, rhs: usize) bool {
+                        return std.mem.order(u8, ctx.keys[lhs], ctx.keys[rhs]).compare(std.math.CompareOperator.lt);
+                    }
+                }{ .keys = event.args.keys() });
+
+                for (event.args.keys(), event.args.values(), 0..) |key, value, i| {
+                    if (i < event.args.count() - 1) {
                         try writer.print(
                             \\"{s}":"{s}",
-                        , .{ arg.key.getSlice(), arg.value.getSlice() });
+                        , .{ key, value });
                     } else {
                         // Last item has closing bracket rather than trailing comma.
                         try writer.print(
                             \\"{s}":"{s}"}}
-                        , .{ arg.key.getSlice(), arg.value.getSlice() });
+                        , .{ key, value });
                     }
                 }
             }

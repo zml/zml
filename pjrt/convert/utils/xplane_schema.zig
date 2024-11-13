@@ -1,5 +1,4 @@
 const std = @import("std");
-const tf_op_utils = @import("tf_op_utils.zig");
 
 // `HostEventType` uses the unconventional casing/formatting
 // so that the string representation of the enum  used in the
@@ -99,14 +98,6 @@ pub const HostEventType = enum(u16) {
 
     pub fn fromString(event_name: []const u8) ?HostEventType {
         return std.meta.stringToEnum(HostEventType, event_name);
-    }
-
-    pub fn fromTfOpEventType(event_name: []const u8) ?HostEventType {
-        return switch (tf_op_utils.parseTfOpCategory(event_name)) {
-            .tensorflow => .TfOpRun,
-            .tf_data => .Iterator,
-            else => null,
-        };
     }
 
     pub fn isInternalEvent(event_type: HostEventType) bool {

@@ -51,7 +51,5 @@ zig_cc_binary(
         ":trace_events_proto",
         ":xplane_proto",
         "//examples/third_party/tigerbeetle:flags",
-        "@mvzr//:mvzr",
-        "@zig-protobuf//:protobuf",
     ],
 )
