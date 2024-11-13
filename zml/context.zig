@@ -9,6 +9,7 @@ const platform = @import("platform.zig");
 const pjrt = @import("pjrtx.zig");
 
 const available_targets = @import("platform.zig").available_targets;
+const HostBuffer = @import("hostbuffer.zig").HostBuffer;
 const Target = @import("platform.zig").Target;
 const Platform = @import("platform.zig").Platform;
 
@@ -90,6 +91,9 @@ pub const Context = struct {
                     log.err("No device found for platform {} !", .{target});
                     continue;
                 }
+                if (target == .cuda) {
+                    try cuda.registerZmlCustomCalls(p);
+                }
                 platforms.set(target, p);
                 num_platforms += 1;
             }
@@ -139,5 +143,79 @@ pub const Context = struct {
             }
         }
         return platform_ orelse @panic("No platform found !");
+    }
+};
+
+const cuda = struct {
+    var runtime: Runtime = undefined;
+
+    pub fn registerZmlCustomCalls(cuda_platform: Platform) !void {
+        std.debug.assert(cuda_platform.target == .cuda);
+
+        cuda.runtime = try Runtime.init();
+        const registry = cuda_platform.pjrt_api.customCallRegistry().?;
+        try registry.register(cuda_platform.pjrt_api, 0, "zmlHostBufferCallback", &hostBufferCallback);
+    }
+
+    pub const Stream = opaque {};
+    pub const MemcpyKind = enum(c_int) {
+        host_to_host = 0,
+        host_to_device = 1,
+        device_to_host = 2,
+        device_to_device = 3,
+        default = 4,
+    };
+
+    pub const Runtime = struct {
+        memcpyAsync: MemcpyAsync,
+        streamSynchronize: StreamSynchronize,
+
+        const MemcpyAsync = *const fn (dst: *anyopaque, src: *const anyopaque, count: usize, kind: MemcpyKind, stream: *Stream) callconv(.C) c_int;
+        const StreamSynchronize = *const fn (stream: *Stream) callconv(.C) c_int;
+
+        pub fn init() !Runtime {
+            var cudart = try std.DynLib.open("libcudart.so");
+            defer cudart.close();
+
+            return .{
+                .memcpyAsync = cudart.lookup(Runtime.MemcpyAsync, "cudaMemcpyAsync") orelse return error.NotFound,
+                .streamSynchronize = cudart.lookup(Runtime.StreamSynchronize, "cudaStreamSynchronize") orelse return error.NotFound,
+            };
+        }
+    };
+
+    pub const CallbackCtx = struct {
+        host: HostBuffer,
+        mutex: std.Thread.Mutex = std.Thread.Mutex{},
+    };
+    pub const Callback = fn (HostBuffer) void;
+
+    fn getContext(args: [*]const u8, args_len: usize) struct { *const Callback, *CallbackCtx } {
+        std.debug.assert(args_len == @sizeOf(*anyopaque) * 2);
+
+        const raw_fn_ptr: usize = @bitCast(args[0..@sizeOf(*anyopaque)].*);
+        const fn_ptr: *const Callback = @ptrFromInt(raw_fn_ptr);
+
+        const raw_ctx_ptr: usize = @bitCast(args[@sizeOf(*anyopaque)..][0..@sizeOf(*anyopaque)].*);
+        const ctx_ptr: *CallbackCtx = @ptrFromInt(raw_ctx_ptr);
+        return .{ fn_ptr, ctx_ptr };
+    }
+
+    fn hostBufferCallback(opaque_stream: *anyopaque, buffers: [*]*anyopaque, args: [*]const u8, args_len: usize) callconv(.C) void {
+        const stream: *Stream = @ptrCast(opaque_stream);
+        const src: *anyopaque = buffers[0];
+        const callback, const ctx = getContext(args, args_len);
+
+        // Add synchronization because this is called from the device driver.
+        ctx.mutex.lock();
+        defer ctx.mutex.unlock();
+
+        const host_dst: []u8 = @constCast(ctx.host.data);
+        const memcpy_result = cuda.runtime.memcpyAsync(host_dst.ptr, src, host_dst.len, .device_to_host, stream);
+        _ = memcpy_result;
+        const synchronize_result = cuda.runtime.streamSynchronize(stream);
+        _ = synchronize_result;
+
+        callback(ctx.host);
     }
 };
