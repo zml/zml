@@ -1,25 +1,25 @@
 const std = @import("std");
 const mlir = @import("mlir.zig");
-const buffer = @import("buffer.zig");
 
 const helpers = @import("helpers.zig");
 const module = @import("module.zig");
 const meta = @import("meta.zig");
 
+const Buffer = @import("buffer.zig").Buffer;
 const CompilationContext = module.CompilationContext;
-const Tensor = @import("tensor.zig").Tensor;
-const Shape = @import("shape.zig").Shape;
 const Data = @import("dtype.zig").Data;
 const DataType = @import("dtype.zig").DataType;
-const Buffer = buffer.Buffer;
 const EnumLiteral = @TypeOf(.enum_literal);
+const HostBuffer = @import("hostbuffer.zig").HostBuffer;
+const Shape = @import("shape.zig").Shape;
+const Tensor = @import("tensor.zig").Tensor;
 
 const dialect = struct {
     const stablehlo = @import("mlir/dialects").stablehlo;
 };
 
 const assert = std.debug.assert;
-const log = std.log.scoped(.zml_tensor);
+const log = std.log.scoped(.zml);
 
 test {
     std.testing.refAllDecls(@This());
@@ -621,7 +621,7 @@ pub fn identityCustomCall(name: [:0]const u8, input: Tensor, context: *anyopaque
     @memcpy(backend_config[0..8], address[0..8]);
     const ctx = CompilationContext.current();
 
-    const loc = ctx.mlirCtx().location(@src()).namedFmt(ctx.mlirCtx(), "name={s}", .{name});
+    const loc = ctx.mlirCtx().location(@src()).namedFmt(ctx.mlirCtx(), "custom_call({s})", .{name});
 
     const op = dialect.stablehlo.custom_call(
         ctx.mlirCtx(),
@@ -637,4 +637,63 @@ pub fn identityCustomCall(name: [:0]const u8, input: Tensor, context: *anyopaque
         loc,
     );
     return Tensor._result(input.shape(), op.result(0));
+}
+
+/// At runtime the given tensor will be materialized and copied to host,
+/// so that the user can call arbitrary code on it.
+/// TODO: do the same thing but with a pjrt.Buffer, so that the user can decide if they need to copy.
+pub fn addHostCallback(
+    callback: *const fn (HostBuffer) void,
+    input: Tensor,
+) Tensor {
+    if (input.getContext().target() != .cuda) return input;
+
+    const len = input.byteSize();
+    // Reserve memory to be able to log the runtime Buffer later during the computation.
+    // This memory is leaked, we currently have no way to tie this lifetime to the lifetime of the module being compiled.
+    const full_data = std.heap.page_allocator.alignedAlloc(u8, 32, len + 2 * @sizeOf(HostBuffer)) catch {
+        log.err("Failed to pre-allocate buffer to print {}.", .{input});
+        return input;
+    };
+
+    // Save the HostBuffer inside the same memory slice, so that it's still present at runtime.
+    // Use an fba to have the stable buffer at an aligned offset.
+    var fba = std.heap.FixedBufferAllocator.init(full_data[len..]);
+    const stable_buffer_ptr = fba.allocator().create(HostBuffer) catch unreachable;
+    stable_buffer_ptr.* = HostBuffer.fromBytes(input.shape(), full_data[0..len]);
+
+    const backend_config: [2:null]?*const anyopaque = .{ callback, stable_buffer_ptr };
+    const ctx = CompilationContext.current();
+
+    const loc = ctx.mlirCtx().location(@src());
+    const op = dialect.stablehlo.custom_call(
+        ctx.mlirCtx(),
+        &.{input.value()},
+        .{
+            .api_version = 1,
+            .has_side_effect = false,
+            .call_target_name = "zmlHostBufferCallback",
+            .backend_config = @ptrCast(std.mem.sliceAsBytes(&backend_config)),
+            .output_operand_aliases = &.{0},
+        },
+        &.{input.value().getType()},
+        loc,
+    );
+    return Tensor._result(input.shape(), op.result(0));
+}
+
+/// Insert code that will log the content of the given buffer at runtime.
+/// This is only supported on Cuda atm.
+pub fn print(input: Tensor) Tensor {
+    return addHostCallback(&printCallback, input);
+}
+
+fn printCallback(host_buffer: HostBuffer) void {
+    switch (host_buffer.dtype()) {
+        inline else => |dt| {
+            var items = host_buffer.items(dt.toZigType());
+            if (items.len == 100_000) items = items[250..300];
+            std.debug.print("Device buffer: {}: {any}\n", .{ host_buffer.shape(), items });
+        },
+    }
 }
