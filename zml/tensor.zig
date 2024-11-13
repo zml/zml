@@ -656,11 +656,12 @@ pub const Tensor = struct {
         /// Note: we only implement the μ=0, β=1 version.
         pub fn gumbel(self: Rng, shape_: Shape) struct { Rng, Tensor } {
             const rand, const u = self.uniform(
-                shape_,
+                // Always use .f32 to have a big enough mantissa.
+                shape_.withDtype(.f32),
                 // We don't want 0 to be sampled otherwise `log` will return -inf.
-                .{ .min = std.math.floatEps(f64), .max = 1 },
+                .{ .min = std.math.floatEps(f32), .max = 1 },
             );
-            return .{ rand, u.log().scale(-1).log().scale(-1) };
+            return .{ rand, u.log().scale(-1).log().scale(-1).convert(shape_.dtype()) };
         }
 
         test gumbel {
