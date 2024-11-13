@@ -931,6 +931,20 @@ fn compileInternal(
 
     log.debug("******** ZML generated MLIR ********", .{});
     log.debug("{}", .{context._module.op().mlirFormatter(.{})});
+    if (context._platform.compilation_options.xla_dump_to) |xla_dump_to| {
+        // Write the mlir to a file. All errors are discarded, since this is for debugging only.
+        if (std.fs.openDirAbsolute(xla_dump_to, .{})) |dir| {
+            const name_attr = context._module.op().getAttributeByName("sym_name").?.as(mlir.StringAttribute).?;
+            const file_name = std.fmt.allocPrint(arena, "{s}.mlir", .{name_attr.value()}) catch name_attr.value();
+            if (dir.createFile(file_name, .{ .truncate = true })) |file| {
+                context._module.op().print(file.writer(), .{ .debug_info = true, .debug_info_pretty_form = true });
+            } else |_| {
+                log.warn("Failed to open {s}", .{file_name});
+            }
+        } else |_| {
+            log.warn("Folder not found {s}", .{xla_dump_to});
+        }
+    }
 
     if (timer) |*t| {
         const time_ms = @divFloor(t.lap(), std.time.ns_per_ms);
