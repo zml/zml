@@ -7,6 +7,7 @@ const meta = @import("meta.zig");
 
 const Buffer = @import("buffer.zig").Buffer;
 const CompilationContext = module.CompilationContext;
+const Context = @import("context.zig").Context;
 const Data = @import("dtype.zig").Data;
 const DataType = @import("dtype.zig").DataType;
 const EnumLiteral = @TypeOf(.enum_literal);
@@ -651,7 +652,8 @@ pub fn addHostCallback(
     const len = input.byteSize();
     // Reserve memory to be able to log the runtime Buffer later during the computation.
     // This memory is leaked, we currently have no way to tie this lifetime to the lifetime of the module being compiled.
-    const full_data = std.heap.page_allocator.alignedAlloc(u8, 32, len + 2 * @sizeOf(HostBuffer)) catch {
+    const HostCallbackCtx = Context.HostCallbackCtx;
+    const full_data = std.heap.page_allocator.alignedAlloc(u8, 32, len + 2 * @sizeOf(HostCallbackCtx)) catch {
         log.err("Failed to pre-allocate buffer to print {}.", .{input});
         return input;
     };
@@ -659,10 +661,12 @@ pub fn addHostCallback(
     // Save the HostBuffer inside the same memory slice, so that it's still present at runtime.
     // Use an fba to have the stable buffer at an aligned offset.
     var fba = std.heap.FixedBufferAllocator.init(full_data[len..]);
-    const stable_buffer_ptr = fba.allocator().create(HostBuffer) catch unreachable;
-    stable_buffer_ptr.* = HostBuffer.fromBytes(input.shape(), full_data[0..len]);
+    const stable_ctx_ptr = fba.allocator().create(HostCallbackCtx) catch unreachable;
+    stable_ctx_ptr.* = .{
+        .host = HostBuffer.fromBytes(input.shape(), full_data[0..len]),
+    };
 
-    const backend_config: [2:null]?*const anyopaque = .{ callback, stable_buffer_ptr };
+    const backend_config: [2:null]?*const anyopaque = .{ callback, stable_ctx_ptr };
     const ctx = CompilationContext.current();
 
     const loc = ctx.mlirCtx().location(@src());

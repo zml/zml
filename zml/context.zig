@@ -144,6 +144,12 @@ pub const Context = struct {
         }
         return platform_ orelse @panic("No platform found !");
     }
+
+    pub const HostCallbackCtx = struct {
+        host: HostBuffer,
+        mutex: std.Thread.Mutex = std.Thread.Mutex{},
+    };
+    pub const HostCallback = fn (HostBuffer) void;
 };
 
 const cuda = struct {
@@ -184,20 +190,14 @@ const cuda = struct {
         }
     };
 
-    pub const CallbackCtx = struct {
-        host: HostBuffer,
-        mutex: std.Thread.Mutex = std.Thread.Mutex{},
-    };
-    pub const Callback = fn (HostBuffer) void;
-
-    fn getContext(args: [*]const u8, args_len: usize) struct { *const Callback, *CallbackCtx } {
+    fn getContext(args: [*]const u8, args_len: usize) struct { *const Context.HostCallback, *Context.HostCallbackCtx } {
         std.debug.assert(args_len == @sizeOf(*anyopaque) * 2);
 
         const raw_fn_ptr: usize = @bitCast(args[0..@sizeOf(*anyopaque)].*);
-        const fn_ptr: *const Callback = @ptrFromInt(raw_fn_ptr);
+        const fn_ptr: *const Context.HostCallback = @ptrFromInt(raw_fn_ptr);
 
         const raw_ctx_ptr: usize = @bitCast(args[@sizeOf(*anyopaque)..][0..@sizeOf(*anyopaque)].*);
-        const ctx_ptr: *CallbackCtx = @ptrFromInt(raw_ctx_ptr);
+        const ctx_ptr: *Context.HostCallbackCtx = @ptrFromInt(raw_ctx_ptr);
         return .{ fn_ptr, ctx_ptr };
     }
 
