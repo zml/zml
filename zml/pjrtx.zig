@@ -95,7 +95,16 @@ pub const Client = opaque {
 
         var serialized_buffer = std.ArrayList(u8).init(allocator);
         defer serialized_buffer.deinit();
-        dialects.stablehlo.serializePortableArtifact(bytecode.items, dialects.stablehlo.getMinimumVersion(), serialized_buffer.writer()) catch |err| {
+
+        const stablehlo_version: []const u8 = if (api.stableHLOCurrentVersion()) |version_from_api| blk: {
+            break :blk version_from_api;
+        } else blk: {
+            const stablehlo_minimum_version = dialects.stablehlo.getMinimumVersion();
+            log.warn("failed to fetch stablehlo version from plugin api, using stablehlo minimum version: {s}", .{stablehlo_minimum_version});
+            break :blk stablehlo_minimum_version;
+        };
+
+        dialects.stablehlo.serializePortableArtifact(bytecode.items, stablehlo_version, serialized_buffer.writer()) catch |err| {
             log.err("failed to serialize to portable artifact: {}", .{err});
             return err;
         };

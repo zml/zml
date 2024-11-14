@@ -15,6 +15,7 @@ bazel_dep(name = "rules_proto", version = "6.0.2")
 bazel_dep(name = "buildifier_prebuilt", version = "6.4.0", dev_dependency = True)
 
 bazel_dep(name = "aspect_bazel_lib", version = "2.8.1.1")
+
 bazel_lib_toolchains = use_extension("@aspect_bazel_lib//lib:extensions.bzl", "toolchains", dev_dependency = True)
 use_repo(bazel_lib_toolchains, "jq_toolchains")
 
@@ -22,6 +23,7 @@ toolchains = use_extension("@hermetic_cc_toolchain//toolchain:ext.bzl", "toolcha
 use_repo(toolchains, "zig_sdk")
 
 bazel_dep(name = "rules_zig", version = "20240913.0-1957d05")
+
 zig = use_extension("@rules_zig//zig:extensions.bzl", "zig")
 zig.index(file = "//bazel:zig_index.json")
 zig.toolchain(zig_version = "0.14.0-dev.363+c3faae6bf")
@@ -31,7 +33,9 @@ zig.mirrors(urls = [
 use_repo(zig, "zig_toolchains")
 
 register_toolchains("@rules_zig//zig/target:all")
+
 register_toolchains("@zig_toolchains//:all")
+
 register_toolchains(
     "@zig_sdk//toolchain:linux_amd64_gnu.2.31",
     "@zig_sdk//toolchain:linux_arm64_gnu.2.31",
@@ -55,7 +59,7 @@ use_repo(zls, "zls_aarch64-macos", "zls_x86_64-linux")
 register_toolchains("//third_party/zls:all")
 
 bazel_dep(name = "libxev", version = "20240910.0-a2d9b31")
-bazel_dep(name = "llvm-raw", version = "20240919.0-94c024a")
+bazel_dep(name = "llvm-raw", version = "20241113.0-01d233f")
 
 llvm = use_extension("@llvm-raw//utils/bazel:extension.bzl", "llvm")
 llvm.configure(
@@ -67,8 +71,8 @@ llvm.configure(
 )
 use_repo(llvm, "llvm-project")
 
-bazel_dep(name = "stablehlo", version = "20240917.0-78c753a")
-bazel_dep(name = "xla", version = "20240919.0-1b18dd6")
+bazel_dep(name = "stablehlo", version = "20241113.0-37487a8")
+bazel_dep(name = "xla", version = "20241114.0-f25e9a0")
 
 tsl = use_extension("@xla//:tsl.bzl", "tsl")
 use_repo(tsl, "tsl")

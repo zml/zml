@@ -1,9 +1,11 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const stdx = @import("stdx");
+const runtimes = @import("runtimes");
 
 const zml = @import("zml.zig");
 const meta = @import("meta.zig");
+const available_targets = @import("platform.zig").available_targets;
 const shapesOf = @import("tensor.zig").shapesOf;
 
 const log = std.log.scoped(.@"zml/testing");
@@ -23,7 +25,29 @@ pub fn env() zml.Platform {
 
         _ctx = zml.Context.init() catch unreachable;
     }
-    return _ctx.?.platforms.get(.cpu).?.withCompilationOptions(_test_compile_opts);
+
+    var env_map = std.process.getEnvMap(std.testing.allocator) catch unreachable;
+    defer env_map.deinit();
+
+    const test_target = env_map.get("ZML_TEST_TARGET");
+
+    const target: zml.Target = if (test_target) |target| blk: {
+        if (std.meta.stringToEnum(zml.Target, target)) |target_tag| {
+            if (runtimes.isEnabled(target_tag)) {
+                log.debug("Using enabled target {}", .{target_tag});
+                break :blk target_tag;
+            } else {
+                stdx.debug.panic("ZML_TEST_TARGET {} is not enabled", .{target_tag});
+            }
+        } else {
+            stdx.debug.panic("ZML_TEST_TARGET set is not a valid target, {s} was provided but only {any} are availables", .{ target, available_targets });
+        }
+    } else blk: {
+        log.info("ZML_TEST_TARGET not set, using CPU", .{});
+        break :blk .cpu;
+    };
+
+    return _ctx.?.platforms.get(target).?.withCompilationOptions(_test_compile_opts);
 }
 
 var _test_compile_opts: zml.CompilationOptions = .{};

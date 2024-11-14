@@ -140,11 +140,50 @@ pub const Api = struct {
         };
     }
 
+    pub inline fn stableHLOCurrentVersion(self: *const Api) ?[]u8 {
+        const state = struct {
+            var api: *const Api = undefined;
+            var buf: [5]u8 = undefined;
+            var once = std.once(fetch);
+
+            fn fetch() void {
+                if (api.getPluginAttribute("stablehlo_current_version")) |v| {
+                    const sliced_version = v.inner.unnamed_0.int64_array_value[0..v.inner.value_size];
+                    _ = std.fmt.bufPrint(&buf, "{d}.{d}.{d}", .{ sliced_version[0], sliced_version[1], sliced_version[2] }) catch unreachable;
+                }
+            }
+        };
+
+        state.api = self;
+        state.once.call();
+        return state.buf[0..state.buf.len];
+    }
+
     pub fn customCallRegistry(api: *const Api) ?CustomCallRegistry {
         if (api.lookupExtension(c.PJRT_Gpu_Custom_Call, c.PJRT_Extension_Type_Gpu_Custom_Call)) |ext| {
             return .{ .inner = ext.custom_call.? };
         }
         // log.warn("No Custom Call registry found for platform: {}", .{self});
+        return null;
+    }
+
+    fn getPluginAttributes(api: *const Api) []NamedValue {
+        const ret = api.call(.PJRT_Plugin_Attributes, .{
+            .extension_start = null,
+        }) catch unreachable;
+
+        const values: [*]NamedValue = @constCast(@ptrCast(ret.attributes));
+        return values[0..ret.num_attributes];
+    }
+
+    fn getPluginAttribute(api: *const Api, key: []const u8) ?NamedValue {
+        const attributes = api.getPluginAttributes();
+        for (attributes) |attr| {
+            if (std.mem.eql(u8, attr.name(), key)) {
+                return attr;
+            }
+        }
+
         return null;
     }
 };
@@ -870,6 +909,8 @@ pub const NamedValue = extern struct {
 /// * a context struct passed as a slice of bytes
 pub const CustomCall = fn (*anyopaque, [*]*anyopaque, [*]const u8, usize) callconv(.C) void;
 
+// todo : support all missing handlers available in GPU plugin extension: handler_instantiate, handler_prepare, handler_initialize
+// introduced by https://github.com/openxla/xla/commit/ef85a7bcc308313492ebc50295a8a08b4e51b8f5
 pub const CustomCallRegistry = extern struct {
     inner: *const c.PJRT_Gpu_Register_Custom_Call,
 
@@ -878,7 +919,7 @@ pub const CustomCallRegistry = extern struct {
             .function_name = name.ptr,
             .function_name_size = name.len,
             .api_version = @intCast(api_version),
-            .custom_call_function = @ptrCast(@constCast(func)),
+            .handler_execute = @ptrCast(@constCast(func)),
         });
         const result = self.inner(&ret);
         if (result) |pjrt_c_error| {
