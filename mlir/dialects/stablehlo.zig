@@ -1239,19 +1239,57 @@ pub const RngAlgorithm = struct {
 };
 
 pub fn stablehloVersionFromCompatibilityRequirement(requirement: c.MlirStablehloCompatibilityRequirement) []const u8 {
-    const Context = struct {
-        str: []const u8 = &.{},
-    };
-    var context = Context{};
+    const state = struct {
+        var req: c.MlirStablehloCompatibilityRequirement = undefined;
+        var buf: [32]u8 = undefined;
+        var str: []const u8 = undefined;
+        var once = std.once(call);
 
-    c.stablehloVersionFromCompatibilityRequirement(requirement, (struct {
-        pub fn callback(mlir_str: c.MlirStringRef, userdata: ?*anyopaque) callconv(.C) void {
-            const inner_ctx: *Context = @ptrCast(@alignCast(userdata));
-            inner_ctx.str = mlir.fromStringRef(mlir_str);
+        fn call() void {
+            var stream = std.io.fixedBufferStream(&buf);
+            var context = .{ .writer = stream.writer() };
+            const WriterContext = @TypeOf(context);
+
+            c.stablehloVersionFromCompatibilityRequirement(req, (struct {
+                pub fn callback(mlir_str: c.MlirStringRef, userdata: ?*anyopaque) callconv(.C) void {
+                    const inner_ctx: *WriterContext = @ptrCast(@alignCast(userdata));
+                    _ = inner_ctx.writer.write(mlir.fromStringRef(mlir_str)) catch unreachable;
+                }
+            }).callback, &context);
+
+            str = buf[0..stream.pos];
         }
-    }).callback, &context);
+    };
 
-    return context.str;
+    state.req = requirement;
+    state.once.call();
+    return state.str;
+}
+
+pub fn getCurrentVersion() []const u8 {
+    const state = struct {
+        var buf: [32]u8 = undefined;
+        var str: []const u8 = undefined;
+        var once = std.once(call);
+
+        fn call() void {
+            var stream = std.io.fixedBufferStream(&buf);
+            var context = .{ .writer = stream.writer() };
+            const WriterContext = @TypeOf(context);
+
+            c.stablehloGetCurrentVersion((struct {
+                pub fn callback(mlir_str: c.MlirStringRef, userdata: ?*anyopaque) callconv(.C) void {
+                    const inner_ctx: *WriterContext = @ptrCast(@alignCast(userdata));
+                    _ = inner_ctx.writer.write(mlir.fromStringRef(mlir_str)) catch unreachable;
+                }
+            }).callback, &context);
+
+            str = buf[0..stream.pos];
+        }
+    };
+
+    state.once.call();
+    return state.str;
 }
 
 pub fn getMinimumVersion() []const u8 {

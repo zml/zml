@@ -1,0 +1,27 @@
+From 4db5de34f70d991fedbe28915c8239b97ba7a064 Mon Sep 17 00:00:00 2001
+From: Steeve Morin <steeve.morin@gmail.com>
+Date: Mon, 18 Mar 2024 17:17:34 +0100
+Subject: [PATCH 3/3] [PJRT C API] Ensure C compliance for Profiler Extension
+
+---
+ xla/pjrt/c/pjrt_c_api_profiler_extension.h | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/xla/pjrt/c/pjrt_c_api_profiler_extension.h b/xla/pjrt/c/pjrt_c_api_profiler_extension.h
+index c821916ad..89a596123 100644
+--- a/xla/pjrt/c/pjrt_c_api_profiler_extension.h
++++ b/xla/pjrt/c/pjrt_c_api_profiler_extension.h
+@@ -16,8 +16,10 @@ limitations under the License.
+ #ifndef XLA_PJRT_C_PJRT_C_API_PROFILER_EXTENSION_H_
+ #define XLA_PJRT_C_PJRT_C_API_PROFILER_EXTENSION_H_
+ 
++#ifdef __cplusplus
+ #include <cstddef>
+ #include <cstdint>
++#endif
+ 
+ #include "xla/backends/profiler/plugin/profiler_c_api.h"
+ #include "xla/pjrt/c/pjrt_c_api.h"
+-- 
+2.39.3 (Apple Git-146)
+

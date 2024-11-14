@@ -179,11 +179,13 @@ cc_import(
 )
 """,
     )
+
+    # custom plugin serving : tar -zc libpjrt_cuda.so > pjrt-cuda_linux-amd64.tar.gz | sha256sum pjrt-cuda_linux-amd64.tar.gz |  python3 -m http.server 8000
     http_archive(
         name = "libpjrt_cuda",
         build_file = "libpjrt_cuda.BUILD.bazel",
-        url = "https://github.com/zml/pjrt-artifacts/releases/download/v0.2.3/pjrt-cuda_linux-amd64.tar.gz",
-        sha256 = "14f39ffef0c9ac529b1a8957750b0b5f5d2f6d310c0d997436051c53a9eb1618",
+        url = "http://localhost:8000/pjrt-cuda_linux-amd64.tar.gz",
+        sha256 = "5607e5fc7f178f2f959507705d212663cc72c30918d2f0e8f37644e8c8725d74",
     )
 
     return mctx.extension_metadata(

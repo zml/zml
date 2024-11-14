@@ -5,6 +5,7 @@ const mlir = @import("mlir");
 const pjrt = @import("pjrt");
 const std = @import("std");
 const stdx = @import("stdx");
+const c = @import("c");
 
 const dtype = @import("dtype.zig");
 const meta = @import("meta.zig");
@@ -95,7 +96,12 @@ pub const Client = opaque {
 
         var serialized_buffer = std.ArrayList(u8).init(allocator);
         defer serialized_buffer.deinit();
-        dialects.stablehlo.serializePortableArtifact(bytecode.items, dialects.stablehlo.getMinimumVersion(), serialized_buffer.writer()) catch |err| {
+
+        // spec ref: https://github.com/openxla/xla/blob/39967ad6782a861ca029ab8d1a2b25f7e0c3902b/xla/pjrt/pjrt_c_api_client.cc#L399
+        var stablehlo_version_buf: [32]u8 = undefined;
+        const stablehlo_version = api.stableHLOCurrentVersion(&stablehlo_version_buf) orelse dialects.stablehlo.stablehloVersionFromCompatibilityRequirement(c.WEEK_12);
+
+        dialects.stablehlo.serializePortableArtifact(bytecode.items, stablehlo_version, serialized_buffer.writer()) catch |err| {
             log.err("failed to serialize to portable artifact: {}", .{err});
             return err;
         };
