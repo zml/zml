@@ -640,12 +640,12 @@ pub fn identityCustomCall(name: [:0]const u8, input: Tensor, context: *anyopaque
 }
 
 /// At runtime the given tensor will be materialized and copied to host,
-/// so that the user can call arbitrary code on it.
-/// TODO: do the same thing but with a pjrt.Buffer, so that the user can decide if they need to copy.
+/// and the callback will be called on it.
 pub fn addHostCallback(
     callback: *const fn (HostBuffer) void,
     input: Tensor,
 ) Tensor {
+    // TODO: implement addCallback that exposes a pjrt.Buffer, so that the user can decide if they need to copy.
     if (input.getContext().target() != .cuda) return input;
 
     const len = input.byteSize();
@@ -680,20 +680,4 @@ pub fn addHostCallback(
         loc,
     );
     return Tensor._result(input.shape(), op.result(0));
-}
-
-/// Insert code that will log the content of the given buffer at runtime.
-/// This is only supported on Cuda atm.
-pub fn print(input: Tensor) Tensor {
-    return addHostCallback(&printCallback, input);
-}
-
-fn printCallback(host_buffer: HostBuffer) void {
-    switch (host_buffer.dtype()) {
-        inline else => |dt| {
-            var items = host_buffer.items(dt.toZigType());
-            if (items.len == 100_000) items = items[250..300];
-            std.debug.print("Device buffer: {}: {any}\n", .{ host_buffer.shape(), items });
-        },
-    }
 }
