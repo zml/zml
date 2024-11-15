@@ -943,7 +943,7 @@ fn compileInternal(
 
     if (timer) |*t| {
         const time_ms = @divFloor(t.lap(), std.time.ns_per_ms);
-        if (time_ms > 1000) log.info("Compilation took {d:.3}s", .{stdx.math.divFloor(f32, time_ms, 1000)});
+        if (time_ms > 1000) log.info("Compilation took {d:.3}s", .{stdx.math.divFloat(f32, time_ms, 1000)});
     }
 
     var arena_state_exe = std.heap.ArenaAllocator.init(allocator);

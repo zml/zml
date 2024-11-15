@@ -23,7 +23,6 @@ def zig_cc_test(name, env = None, data = [], deps = [], test_runner = None, visi
         name = "{}_test_lib".format(name),
         kind = BINARY_KIND.test_lib,
         test_runner = test_runner,
-        data = data,
         deps = deps + [
             "@rules_zig//zig/lib:libc",
         ],
