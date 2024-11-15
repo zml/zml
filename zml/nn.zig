@@ -1159,8 +1159,6 @@ test sampleTokensDynamic {
         .{ .{ .top_k = 4, .top_p = 0.901, .min_p = 0.6 }, [_]f32{ @log(4.0), @log(3.0), ___, ___ } },
     }) |args_expected| {
         const args, const expected = args_expected;
-        log.warn("sampleTokensDynamic: {}", .{args});
-        // Top_k == logits.len, so this just sort the items
         const new_logits, const indices = mod.call(.{ logits_buff, try DynamicSamplingStrategy.makeBuffers(platform, .f32, args) });
         try std.testing.expectEqual(top_k_indices, try indices.getValue(@TypeOf(top_k_indices)));
         try zml.testing.expectEqual(expected, try new_logits.getValue(@TypeOf(expected)));
