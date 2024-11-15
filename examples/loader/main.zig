@@ -60,8 +60,8 @@ pub fn asyncMain() !void {
     }
 
     const stop = timer.read();
-    const time_in_s = stdx.math.divFloor(f64, stop, std.time.ns_per_s);
-    const mbs = stdx.math.divFloor(f64, total_bytes, 1024 * 1024);
+    const time_in_s = stdx.math.divFloat(f64, stop, std.time.ns_per_s);
+    const mbs = stdx.math.divFloat(f64, total_bytes, 1024 * 1024);
 
     std.debug.print("\nLoading speed: {d:.2} MB/s\n\n", .{mbs / time_in_s});
 }

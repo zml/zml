@@ -93,7 +93,7 @@ pub fn generateText(
     std.debug.print("{s}\n", .{output.items[n..]});
     const end = std.time.microTimestamp();
 
-    const duration = stdx.math.divFloor(f64, end - start, std.time.us_per_s);
+    const duration = stdx.math.divFloat(f64, end - start, std.time.us_per_s);
     const speed = @as(f64, @floatFromInt(max_seq_len)) / duration;
     log.info("✅ Generated {d} tokens in {:.3}s: {d:.3}tok/s", .{ max_seq_len, duration, speed });
 

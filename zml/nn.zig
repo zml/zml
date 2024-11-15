@@ -398,7 +398,7 @@ pub fn nearest(input: Tensor, scale_factor: []const f64) Tensor {
     var res = input;
     for (spatial_dims) |d| {
         const n = out_shape.dim(d);
-        const ratio = stdx.math.divFloor(f32, input.dim(d), n);
+        const ratio = stdx.math.divFloat(f32, input.dim(d), n);
         const offsets = Tensor.arange(.{ .end = n }, .f32).addConstant(0.5).scale(ratio).floor().convert(.i32);
         res = res.gatherValues(d, offsets, .{ .indices_are_sorted = true });
     }
@@ -576,7 +576,7 @@ pub fn resizeLinear1d(image: Tensor, axis: i8, new_len: u63, opt: ResizeOpts) Te
 
     const dtype = opt.precision orelse if (image.dtype().class() == .integer) .f32 else image.dtype();
     const og_len = opt.original_len orelse Tensor.scalar(image.dim(axis), dtype);
-    const ratio = og_len.convert(dtype).scale(stdx.math.divFloor(f32, 1, new_len));
+    const ratio = og_len.convert(dtype).scale(stdx.math.divFloat(f32, 1, new_len));
     const scaled = Tensor.arange(.{ .end = new_len }, dtype).mul(ratio);
     const left = scaled.floor();
     const right = left.addConstant(1);
@@ -638,7 +638,7 @@ pub fn resizeCubic1d(image: Tensor, axis: i8, new_len: u63, opt: ResizeOpts) Ten
     const dtype = opt.precision orelse if (image.dtype().class() == .integer) .f32 else image.dtype();
     const og_len = opt.original_len orelse Tensor.scalar(image.dim(axis), dtype);
 
-    const ratio = og_len.convert(dtype).scale(stdx.math.divFloor(f32, 1, new_len));
+    const ratio = og_len.convert(dtype).scale(stdx.math.divFloat(f32, 1, new_len));
     const scaled = Tensor.arange(.{ .end = new_len }, dtype).mul(ratio);
     const t = scaled.sub(scaled.floor());
     const pos = Tensor.stack(&.{
