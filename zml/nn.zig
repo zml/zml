@@ -846,15 +846,21 @@ const SdpaMemEfficient = struct {
 
     fn scanKeyVal(self: SdpaMemEfficient) Tensor {
         const n_chunks = @divExact(self.k.dim(.k), self.chunking.k_chunk_size);
-        const res = ops.for_(SdpaMemEfficient.nextKeyValChunk, self, .{ .k_chunk = n_chunks });
-        const global_max = res.max_value.max(.k_chunk).broad(res.max_value.shape());
-        const max_diffs = res.max_value.sub(global_max).exp();
-        const attn = res.attn.mul(max_diffs.broad(res.attn.shape())).sum(.k_chunk).squeeze(.k_chunk);
-        const exp_sum = res.exp_sum.mul(max_diffs.convert(.f32)).sum(.k_chunk).squeeze(.k_chunk).convert(attn.dtype());
-        return attn.div(exp_sum.broad(attn.shape()));
+
+        // For now we unroll the loop manually in Zig.
+        // we could use `zml.ops.while` but it's a bit verbose for when you just want to run a fixed number of steps.
+        // `zml.ops.for_` was suppose to help with that,
+        // but because it concatenates intermediary results, it wasn't saving memory.
+        var partial_softmax: ?PartialSoftmax = null;
+        for (0..@intCast(n_chunks)) |idx| {
+            const next = self.nextKeyValChunk(Tensor.scalar(idx, .i32));
+            partial_softmax = if (partial_softmax) |prev| prev.merge(next) else next;
+        }
+
+        return partial_softmax.?.finalize();
     }
 
-    fn nextKeyValChunk(self: SdpaMemEfficient, idx: Tensor) PartialAttn {
+    fn nextKeyValChunk(self: SdpaMemEfficient, idx: Tensor) PartialSoftmax {
         const k_slice: zml.Tensor.DynSlice = .{
             .start = idx.scale(self.chunking.k_chunk_size),
             .len = self.chunking.k_chunk_size,
@@ -868,29 +874,59 @@ const SdpaMemEfficient = struct {
     }
 };
 
-pub const PartialAttn = struct {
-    attn: Tensor,
+pub const PartialSoftmax = struct {
+    values: Tensor,
     exp_sum: Tensor,
     max_value: Tensor,
+
+    pub fn merge(self: PartialSoftmax, other: PartialSoftmax) PartialSoftmax {
+        // Rescale self and other using the new global_max.
+        const global_max = self.max_value.maximum(other.max_value);
+        const new_self = self.rescale(global_max);
+        const new_other = other.rescale(global_max);
+
+        // Now that self and other are using the same scale, we can just add them:
+        return .{
+            .max_value = global_max,
+            .values = new_self.values.add(new_other.values),
+            .exp_sum = new_self.exp_sum.add(new_other.exp_sum),
+        };
+    }
+
+    /// Update max_value and rescale attn and exp_sum accordingly.
+    pub fn rescale(self: PartialSoftmax, max_value: Tensor) PartialSoftmax {
+        const max_diff_exp = self.max_value.sub(max_value).exp();
+        const sum_dtype = self.exp_sum.dtype();
+        return .{
+            .max_value = max_value,
+            .values = self.values.mul(max_diff_exp.broad(self.values.shape())),
+            .exp_sum = self.exp_sum.mul(max_diff_exp.broad(self.exp_sum.shape()).convert(sum_dtype)),
+        };
+    }
+
+    /// Divides the intermediary results by the exp_sum to get the proper attention values.
+    pub fn finalize(self: PartialSoftmax) Tensor {
+        return self.values.div(self.exp_sum.broad(self.values.shape()));
+    }
 };
 
 /// Compute softmax over a chunk.
 /// Returns intermediary results to allow aggregating later.
-pub fn partialSoftmax(self: Tensor, axis: anytype) PartialAttn {
+pub fn partialSoftmax(self: Tensor, axis: anytype) PartialSoftmax {
     const a = self.axis(axis);
     const max_val = self.max(a);
     const out = self.sub(max_val.broad(self.shape())).exp();
     return .{
-        .attn = out,
-        .exp_sum = out.convert(.f32).sum(a).squeeze(a),
-        .max_value = max_val.squeeze(a),
+        .values = out,
+        .exp_sum = out.convert(.f32).sum(a),
+        .max_value = max_val,
     };
 }
 
 /// Compute sdpa on a chunk, and computes a partial softmax.
 /// q: (B, H, Sq, H_dim) ⊙ k: (B, H, Sk, H_dim) -> qk: (B, H, Sq, Sk)
-pub fn sdpaChunk(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) PartialAttn {
-    // this is a dupe of sdpa, but return the PartialAttn instead of true Attn.
+pub fn sdpaChunk(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) PartialSoftmax {
+    // this is a dupe of sdpa, but return the PartialSoftmax instead of true Attn.
     // Consider implementing sdpa from sdpaChunk.
     var q, var k, var v = .{ q_, k_, v_ };
 
@@ -925,13 +961,16 @@ pub fn sdpaChunk(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) PartialAttn
         attn_weights = attn_weights.add(bias);
     }
 
-    const partial = partialSoftmax(attn_weights, -1);
-    const attn = partial.attn.dot(v, .{.k}).transpose(q.shape());
+    const partial = partialSoftmax(attn_weights, .k);
+    const attn = partial.values.dot(v, .{.k}).transpose(q.shape());
 
     return .{
-        .attn = attn,
-        .exp_sum = partial.exp_sum,
-        .max_value = partial.max_value,
+        .values = attn,
+        // The renaming is because the above dot projected values.k into .hd,
+        // do the same thing on the other tensors.
+        // This work because dot is a linear operation, and commutes with `PartialSoftmax.finalize`
+        .exp_sum = partial.exp_sum.rename(.{ .k = .hd }),
+        .max_value = partial.max_value.rename(.{ .k = .hd }),
     };
 }
 
