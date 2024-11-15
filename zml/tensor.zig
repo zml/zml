@@ -1163,19 +1163,20 @@ pub const Tensor = struct {
             res_shape = res_shape.appendDim(rhs._shape.dim(r), rhs._shape.tag(r));
         }
 
-        const loc = lhs.getContext().mlirCtx().location(@src());
+        const mlir_ctx = lhs.getContext().mlirCtx();
+        const loc = mlir_ctx.location(@src());
         const op = dialect.stablehlo.dot_general(
-            lhs.getContext().mlirCtx(),
+            mlir_ctx,
             lhs.value(),
             rhs.value(),
-            mlir.ext.mlirType(lhs.getContext().mlirCtx(), res_shape),
+            mlir.ext.mlirType(mlir_ctx, res_shape),
             loc,
             .{
                 .lhs_batching_dimensions = lhs_batching_axes.constSlice(),
                 .rhs_batching_dimensions = rhs_batching_axes.constSlice(),
                 .lhs_contracting_dimensions = lhs_contracting_axes.constSlice(),
                 .rhs_contracting_dimensions = rhs_contracting_axes.constSlice(),
-                .precision = &.{ .DEFAULT, .DEFAULT },
+                .precision = .fast,
             },
         );
         return _result(res_shape, op.result(0));
