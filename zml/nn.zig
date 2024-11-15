@@ -1079,6 +1079,13 @@ pub const DynamicSamplingStrategy = struct {
 /// Given the output of the last layer of a LM with a `.voc` axis,
 /// Compute indices for the next tokens, following the given sampling strategy.
 /// The dynamic sampling strategy is more expressive but top_p requires computing the softmax.
+///
+/// Options are:
+///
+/// * top_k: only sample among the k top scoring tokens,
+/// * max_top_k: limit a compilation time what is the max possible runtime value for top_k, saving memory and compute by not having to fully sort the tokens.
+/// * top_p: only sample among top scoring tokens whose probabilities sum up to top_p
+/// * min_p: drop tokens whose probabilities are lower than a ratio of the most likely token
 pub fn sampleTokensDynamic(logits: Tensor, opts: DynamicSamplingStrategy, rng: Tensor.Rng) struct { Tensor, Tensor.Rng } {
     var x, const topk_indices = fixupLogits(logits, opts);
 
