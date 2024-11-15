@@ -383,6 +383,18 @@ fn _populateStruct(
                 return false;
             }
         },
+        .Array => |arr_info| {
+            for (obj, 0..) |*value, i| {
+                try prefix_builder.pushDigit(allocator, i);
+                defer prefix_builder.pop();
+                const found = try _populateStruct(allocator, prefix_builder, unique_id, buffer_store, value, required);
+                if (!found) {
+                    log.err("Not able to load {s} as {s}", .{ prefix_builder.data.items, @typeName(arr_info.child) });
+                    return false;
+                }
+            }
+            return true;
+        },
         .Struct => |struct_info| {
             var partial_struct = false;
             inline for (struct_info.fields) |field| {
@@ -594,7 +606,7 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
         } else {
             return error.BufferNotFound;
         };
-    }
+    } else if (T == zml.Shape) return;
 
     switch (type_info) {
         .Pointer => |ptr_info| {
@@ -605,8 +617,16 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
 
                     try visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, value, platform);
                 }
-            } else return error.TypeNotSupported;
+            } else zml.meta.compileError("type not supported by visitStructAndLoadBuffer: {}", .{T});
         },
+        .Array => {
+            for (obj, 0..) |*value, i| {
+                try prefix_builder.pushDigit(allocator, i);
+                defer prefix_builder.pop();
+                try visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, value, platform);
+            }
+        },
+
         .Struct => |struct_info| {
             inline for (struct_info.fields) |field| {
                 if (field.is_comptime or @sizeOf(field.type) == 0) continue;

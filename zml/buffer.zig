@@ -140,14 +140,20 @@ pub const Buffer = struct {
         try std.testing.expectEqual([_]u16{42} ** (4 * 3 * 2), y);
     }
 
-    /// Creates a Buffer as a view of memory visible from the device,
+    /// Creates a Buffer as a view of host memory visible from the device,
     /// thus avoiding a copy.
     ///
-    /// On CUDA, it also allows you to specify a host allocated slice as they seem to be accessible.
-    /// Be careful though, as it requires a specific alignment.
-    /// Also note that it might not work on all platforms,
-    /// could lead to crashes and is considerably slower.
-    pub fn asViewOf(platform: Platform, buf: HostBuffer) !Buffer {
+    /// Be careful though, as it requires a specific alignment
+    /// and it might not work on all platforms,
+    /// could lead to crashes and operations on the buffer will be slower.
+    /// Tested on Cuda 12.4.
+    pub fn asViewOfHostBuffer(platform: Platform, buf: HostBuffer) !Buffer {
+        return asViewOfDeviceBuffer(platform, buf.shape(), null, @constCast(@ptrCast(buf.data.ptr)));
+    }
+
+    /// Creates a Buffer from a pointer into device memory.
+    /// This allows to interface with other libraries producing buffers.
+    pub fn asViewOfDeviceBuffer(platform: Platform, shape_: Shape, stream: ?*const anyopaque, device_data: *anyopaque) !Buffer {
         const minor_to_major: [Shape.MAX_RANK]i64 = comptime blk: {
             var res: [Shape.MAX_RANK]i64 = undefined;
             for (0..Shape.MAX_RANK) |i| {
@@ -156,26 +162,28 @@ pub const Buffer = struct {
             break :blk res;
         };
 
+        const device_bytes: [*]u8 = @ptrCast(device_data);
         const pjrt_buffer = try platform.pjrt_client.createViewOfDeviceBuffer(platform.pjrt_api, .{
-            .data = buf.data,
-            .element_type = bufferTypeFromDtype(buf.shape().dtype()),
-            .dims = buf.shape().dims(),
-            // TODO: split in shards
+            .data = device_bytes[0..shape_.byteSize()],
+            .element_type = bufferTypeFromDtype(shape_.dtype()),
+            .dims = shape_.dims(),
+            // TODO: exposes sharding in the API.
             .device = platform.getDevices()[0],
             .layout = .{
                 .Tiled = .{
-                    .minor_to_major = minor_to_major[Shape.MAX_RANK - buf.shape().rank() ..],
+                    .minor_to_major = minor_to_major[Shape.MAX_RANK - shape_.rank() ..],
                     .tile_dims = &.{},
                     .tile_dims_sizes = &.{},
                 },
             },
+            .stream = @bitCast(@as(usize, @intFromPtr(stream))),
         });
 
         var shards: Shards = .{};
         shards.appendAssumeCapacity(pjrt_buffer);
         return .{
             ._api = platform.pjrt_api,
-            ._shape = buf.shape(),
+            ._shape = shape_,
             ._shards = shards,
         };
     }

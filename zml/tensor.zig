@@ -1908,9 +1908,9 @@ pub const Tensor = struct {
     }
 
     pub const Pad = struct {
-        low: i32 = 0,
-        high: i32 = 0,
-        interior: i32 = 0,
+        low: i64 = 0,
+        high: i64 = 0,
+        interior: i64 = 0,
     };
 
     /// Pads the input Tensor with the given values.
@@ -2538,6 +2538,26 @@ pub const Tensor = struct {
                 a.shape().axes(.{.a}),
                 scatter_indices.withTags(.{ .n, .coord }),
                 updates.withTags(.{ .n, .b }),
+            });
+            try std.testing.expect(a.shape().eql(result.shape()));
+            try std.testing.expectEqual(expected, result.getValue(@TypeOf(expected)));
+        }
+        // Test with setting individual values (no batching)
+        {
+            const a_host = try zml.HostBuffer.arange(std.testing.allocator, .{ .end = 9 }, .i32);
+            const a = try zml.Buffer.from(platform, a_host);
+            defer a.deinit();
+            a_host.deinit(std.testing.allocator);
+
+            const scatter_indices = try zml.Buffer.fromArray(platform, [2][1]i32{ .{2}, .{7} });
+            const updates = try zml.Buffer.fromArray(platform, [2]i32{ 20, 70 });
+
+            const expected = [9]i32{ 0, 1, 22, 3, 4, 5, 6, 77, 8 };
+            const result = try zml.testing.compileAndCall(platform, Local.scatter, .{
+                a,
+                a.shape().axes(.{0}),
+                scatter_indices.withTags(.{ .n, .coord }),
+                updates.withTags(.{.n}),
             });
             try std.testing.expect(a.shape().eql(result.shape()));
             try std.testing.expectEqual(expected, result.getValue(@TypeOf(expected)));
