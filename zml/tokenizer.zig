@@ -1,12 +1,14 @@
 //! Text tokenizer implementations
-const std = @import("std");
 const builtin = @import("builtin");
-const testing = std.testing;
+const std = @import("std");
+const stdx = @import("stdx");
 
-const log = std.log.scoped(.zml_tokenizer);
+const testing = std.testing;
 
 const helpers = @import("helpers.zig");
 const meta = @import("meta.zig");
+
+const log = std.log.scoped(.@"zml/tokenizer");
 
 test {
     std.testing.refAllDecls(@This());
@@ -202,7 +204,7 @@ pub const Tokenizer = struct {
                             // Detects memory corruption of tokens.
                             if (cur_tok.len == 0 or cur_tok.len > self.max_token_len) @panic("Token looks corrupted !");
 
-                            meta.assert(std.mem.eql(u8, cur_tok, input[input_off..][0..cur_tok.len]), "current token '{s}' not found in input string '{s}' !", .{ cur_tok, input[input_off..] });
+                            stdx.debug.assert(std.mem.eql(u8, cur_tok, input[input_off..][0..cur_tok.len]), "current token '{s}' not found in input string '{s}' !", .{ cur_tok, input[input_off..] });
                         }
                         const next_tok = self.tokens[tok_buff[i + 1]];
                         // if `next_tok` is `.unk`, length is 1; otherwise, it's the length of the token.

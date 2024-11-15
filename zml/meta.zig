@@ -1,218 +1,13 @@
 const std = @import("std");
+const stdx = @import("stdx");
+
+const FnParam = stdx.meta.FnParam;
+const asSlice = stdx.meta.asSlice;
 
 const testing = std.testing;
 
 test {
     std.testing.refAllDecls(@This());
-}
-
-/// Computes floating point value division between two integers.
-pub fn divFloat(T: type, numerator: anytype, denominator: anytype) T {
-    return toFloat(T, numerator) / toFloat(T, denominator);
-}
-
-fn toFloat(T: type, x: anytype) T {
-    return switch (@typeInfo(@TypeOf(x))) {
-        .Float => @floatCast(x),
-        else => @floatFromInt(x),
-    };
-}
-
-pub fn guard(check: bool, src: std.builtin.SourceLocation) void {
-    assert(check, "Invalid inputs {s}@{s}:{d}", .{ src.file, src.fn_name, src.line });
-}
-
-pub inline fn internalAssert(check: bool, comptime msg: []const u8, args: anytype) void {
-    assert(check, "ZML internal error: " ++ msg, args);
-}
-
-pub fn assert(check: bool, comptime msg: []const u8, args: anytype) void {
-    if (!check) panic(msg, args);
-}
-
-pub fn panic(comptime msg: []const u8, args: anytype) noreturn {
-    std.log.err(msg, args);
-    @panic(msg);
-}
-
-pub fn compileLog(comptime msg: []const u8, comptime args: anytype) void {
-    @compileLog(std.fmt.comptimePrint(msg, args));
-}
-
-pub fn compileError(comptime msg: []const u8, comptime args: anytype) noreturn {
-    @compileError(std.fmt.comptimePrint(msg, args));
-}
-
-pub fn assertComptime(comptime check: bool, comptime msg: []const u8, comptime args: anytype) void {
-    if (check == false) {
-        compileError(msg, args);
-    }
-}
-
-pub fn isStruct(comptime T: type) bool {
-    return switch (@typeInfo(T)) {
-        .Struct => true,
-        else => false,
-    };
-}
-
-pub fn isTuple(comptime T: type) bool {
-    return switch (@typeInfo(T)) {
-        .Struct => |info| info.is_tuple,
-        else => false,
-    };
-}
-
-pub fn isStructOf(comptime T: type, comptime Elem: type) bool {
-    return switch (@typeInfo(T)) {
-        .Struct => |info| blk: {
-            inline for (info.fields) |field| {
-                if (field.type != Elem) {
-                    break :blk false;
-                }
-            }
-            break :blk true;
-        },
-        else => false,
-    };
-}
-
-pub fn isStructOfAny(comptime T: type, comptime f: fn (comptime type) bool) bool {
-    return switch (@typeInfo(T)) {
-        .Struct => |info| blk: {
-            inline for (info.fields) |field| {
-                if (f(field.type) == false) {
-                    break :blk false;
-                }
-            }
-            break :blk true;
-        },
-        else => false,
-    };
-}
-
-pub fn isTupleOf(comptime T: type, comptime Elem: type) bool {
-    return isTuple(T) and isStructOf(T, Elem);
-}
-
-pub fn isTupleOfAny(comptime T: type, comptime f: fn (comptime type) bool) bool {
-    return isTuple(T) and isStructOfAny(T, f);
-}
-
-pub fn isSliceOf(comptime T: type, comptime Elem: type) bool {
-    return switch (@typeInfo(T)) {
-        .Pointer => |info| switch (info.size) {
-            .Slice => info.child == Elem,
-            .One => switch (@typeInfo(info.child)) {
-                // As Zig, convert pointer to Array as a slice.
-                .Array => |arr_info| arr_info.child == Elem,
-                else => false,
-            },
-            else => false,
-        },
-        else => false,
-    };
-}
-
-pub fn asSlice(comptime T: type) type {
-    const err_msg = "Type " ++ @typeName(T) ++ " can't be interpreted as a slice";
-    return switch (@typeInfo(T)) {
-        .Pointer => |info| switch (info.size) {
-            .Slice => info.child,
-            .One => switch (@typeInfo(info.child)) {
-                // As Zig, convert pointer to Array as a slice.
-                .Array => |arr_info| arr_info.child,
-                else => @compileError(err_msg),
-            },
-            else => @compileError(err_msg),
-        },
-        else => @compileError(err_msg),
-    };
-}
-
-pub fn isInteger(comptime T: type) bool {
-    return switch (@typeInfo(T)) {
-        .Int, .ComptimeInt => true,
-        else => false,
-    };
-}
-
-pub fn isSliceOfAny(comptime T: type, comptime f: fn (comptime type) bool) bool {
-    return switch (@typeInfo(T)) {
-        .Pointer => |info| info.size == .Slice and f(info.child),
-        else => false,
-    };
-}
-
-pub fn DeclEnum(comptime T: type) type {
-    const field_infos = std.meta.declarations(T);
-    if (field_infos.len == 0) compileError("Struct {} has no declarations", .{T});
-    return std.meta.DeclEnum(UnwrapPtr(T));
-}
-
-pub fn UnwrapPtr(comptime T: type) type {
-    return switch (@typeInfo(T)) {
-        .Pointer => |info| switch (info.size) {
-            .One => info.child,
-            else => T,
-        },
-        else => T,
-    };
-}
-
-pub fn FnParam(func: anytype, n: comptime_int) type {
-    return @typeInfo(@TypeOf(func)).Fn.params[n].type orelse @compileError("anytype not supported in callbacks");
-}
-
-pub fn FnParams(func: anytype) type {
-    return std.meta.ArgsTuple(@TypeOf(func));
-}
-
-pub fn FnResult(func: anytype) type {
-    return @typeInfo(@TypeOf(func)).Fn.return_type.?;
-}
-
-pub fn FnResultPayload(func: anytype) type {
-    const return_type = @typeInfo(@TypeOf(func)).Fn.return_type.?;
-    const payload_type = switch (@typeInfo(return_type)) {
-        .ErrorUnion => |u| u.payload,
-        else => return_type,
-    };
-    return payload_type;
-}
-
-pub fn FnResultErrorSet(func: anytype) ?type {
-    const return_type = @typeInfo(@TypeOf(func)).Fn.return_type.?;
-    const error_set = switch (@typeInfo(return_type)) {
-        .ErrorUnion => |u| u.error_set,
-        else => null,
-    };
-    return error_set;
-}
-
-pub fn Signature(comptime func: anytype, comptime argsT: ?type) type {
-    return struct {
-        pub const FuncT = if (@TypeOf(func) == type) func else @TypeOf(func);
-        pub const ArgsT = blk: {
-            if (@typeInfo(FuncT).Fn.params.len == 0) {
-                break :blk @TypeOf(.{});
-            }
-            break :blk argsT orelse std.meta.ArgsTuple(FuncT);
-        };
-        pub const ReturnT = @TypeOf(@call(.auto, func, @as(ArgsT, undefined)));
-        pub const ReturnPayloadT = blk: {
-            break :blk switch (@typeInfo(ReturnT)) {
-                .ErrorUnion => |u| u.payload,
-                else => ReturnT,
-            };
-        };
-        pub const ReturnErrorSet: ?type = blk: {
-            break :blk switch (@typeInfo(ReturnT)) {
-                .ErrorUnion => |u| u.error_set,
-                else => null,
-            };
-        };
-    };
 }
 
 pub fn MapType(From: type, To: type) type {
@@ -299,7 +94,7 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
 
     const type_info_to_ptr = @typeInfo(@TypeOf(to));
     if (type_info_to_ptr != .Pointer) {
-        @compileError("convertType is expecting a mutable `to` argument but received: " ++ @typeName(@TypeOf(to)));
+        stdx.debug.compileError("convertType is expecting a mutable `to` argument but received: " ++ @typeName(@TypeOf(to)));
     }
     const ToStruct = type_info_to_ptr.Pointer.child;
     const type_info_to = @typeInfo(ToStruct);
@@ -348,7 +143,7 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
                 } else if (field.default_value) |_| {
                     @field(to, field.name) = null;
                 } else {
-                    compileError("Mapping {} to {} failed. Missing field {s}", .{ FromStruct, ToStruct, field.name });
+                    stdx.meta.compileError("Mapping {} to {} failed. Missing field {s}", .{ FromStruct, ToStruct, field.name });
                 },
                 else => @field(to, field.name) = @field(from, field.name),
             }
@@ -374,7 +169,7 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
                 }
                 to.* = items;
             },
-            else => @compileError("zml.meta.mapAlloc doesn't support: " ++ @typeName(FromStruct)),
+            else => stdx.meta.compileError("zml.meta.mapAlloc doesn't support: " ++ @typeName(FromStruct)),
         },
         .Optional => if (from) |f| {
             to.* = @as(@typeInfo(type_info_to_ptr.Pointer.child).Optional.child, undefined);
@@ -383,7 +178,7 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
             to.* = null;
         },
         .Int, .Float => to.* = from,
-        else => @compileError("zml.meta.mapAlloc doesn't support: " ++ @typeName(FromStruct)),
+        else => stdx.meta.compileError("zml.meta.mapAlloc doesn't support: " ++ @typeName(FromStruct)),
     }
 }
 
@@ -444,12 +239,12 @@ pub fn visit(comptime cb: anytype, ctx: FnParam(cb, 0), v: anytype) void {
     const type_info_v = @typeInfo(T);
     const K = switch (@typeInfo(FnParam(cb, 1))) {
         .Pointer => |info| info.child,
-        else => @compileError("zml.meta.visit is expecting a pointer value as second parameter in callback to use but found " ++ @typeName(FnParam(cb, 1))),
+        else => stdx.meta.compileError("zml.meta.visit is expecting a pointer value as second parameter in callback to use but found " ++ @typeName(FnParam(cb, 1))),
     };
 
     if (type_info_v != .Pointer) {
         const Callback = @TypeOf(cb);
-        @compileError("zml.meta.visit is expecting a pointer input to go with following callback signature: " ++ @typeName(Callback) ++ " but received: " ++ @typeName(T));
+        stdx.meta.compileError("zml.meta.visit is expecting a pointer input to go with following callback signature: " ++ @typeName(Callback) ++ " but received: " ++ @typeName(T));
     }
     const ptr_info = type_info_v.Pointer;
     if (@typeInfo(ptr_info.child) == .Fn) return;
@@ -512,7 +307,7 @@ pub fn visit(comptime cb: anytype, ctx: FnParam(cb, 0), v: anytype) void {
                 }
             }
         },
-        else => @compileError("Only single pointer and slice are supported. Received " ++ @typeName(T)),
+        else => stdx.meta.compileError("Only single pointer and slice are supported. Received " ++ @typeName(T)),
     }
 }
 
@@ -601,10 +396,8 @@ test visit {
 /// Only T elements of values will be looked at.
 /// This only works for simple types, in particular `zip` doesn't follow pointers.
 /// Which means that zip only allocate temp memory, and nothing need to be freed after the call.
-pub fn zip(func: anytype, allocator: std.mem.Allocator, values: anytype, args: anytype) error{OutOfMemory}!asSlice(@TypeOf(values)) {
+pub fn zip(comptime func: anytype, allocator: std.mem.Allocator, values: anytype, args: anytype) error{OutOfMemory}!asSlice(@TypeOf(values)) {
     const sliceT = @typeInfo(FnParam(func, 0));
-    assertComptime(sliceT == .Pointer and sliceT.Pointer.size == .Slice and sliceT.Pointer.child == FnResult(func), "zip requires a `fn([]const T, Args) T`, received: {}", .{@TypeOf(func)});
-
     const T = sliceT.Pointer.child;
     const V = asSlice(@TypeOf(values));
     if (V == T) {
@@ -613,13 +406,13 @@ pub fn zip(func: anytype, allocator: std.mem.Allocator, values: anytype, args: a
     // const fn_args
 
     return switch (@typeInfo(V)) {
-        .Pointer => @compileError("zip only accept by value arguments. Received: " ++ @typeName(V)),
+        .Pointer => stdx.meta.compileError("zip only accept by value arguments. Received: " ++ @typeName(V)),
         .Struct => |struct_info| {
             var out: V = values[0];
             inline for (struct_info.fields) |f| {
                 if (f.is_comptime) continue;
                 if (@typeInfo(f.type) == .Pointer) {
-                    @compileError("zip doesn't follow pointers and don't accept struct containing them. Received: " ++ @typeName(V));
+                    stdx.meta.compileError("zip doesn't follow pointers and don't accept struct containing them. Received: " ++ @typeName(V));
                 }
                 var fields = try allocator.alloc(f.type, values.len);
                 defer allocator.free(fields);
@@ -632,7 +425,7 @@ pub fn zip(func: anytype, allocator: std.mem.Allocator, values: anytype, args: a
         },
         .Array => |arr_info| {
             if (@typeInfo(arr_info.child) == .Pointer) {
-                @compileError("zip doesn't follow pointers and don't accept struct containing them. Received: " ++ @typeName(V));
+                stdx.meta.compileError("zip doesn't follow pointers and don't accept struct containing them. Received: " ++ @typeName(V));
             }
             var out: V = undefined;
             var slice = try allocator.alloc(arr_info.child, values.len);
@@ -645,7 +438,7 @@ pub fn zip(func: anytype, allocator: std.mem.Allocator, values: anytype, args: a
             }
             return out;
         },
-        .Union, .Optional => @compileError("zip doesn't yet support " ++ @typeName(V)),
+        .Union, .Optional => stdx.meta.compileError("zip doesn't yet support " ++ @typeName(V)),
         else => values[0],
     };
 }
@@ -668,11 +461,11 @@ test zip {
 
 /// Given a func(X) -> Y or a func(Ctx, X) -> Y,
 /// finds all X in the given object, and write the result of func(X) into an arraylist.
-pub fn collect(func: anytype, func_ctx: _CollectCtx(func), out: *std.ArrayList(FnResult(func)), obj: anytype) error{OutOfMemory}!void {
-    assertComptime(@typeInfo(@TypeOf(func)).Fn.params.len <= 2, "zml.meta.collect expects a func with two arguments, got: {}", .{@TypeOf(func)});
+pub fn collect(func: anytype, func_ctx: _CollectCtx(func), out: *std.ArrayList(stdx.meta.FnSignature(func, null).ReturnT), obj: anytype) error{OutOfMemory}!void {
+    stdx.debug.assertComptime(@typeInfo(@TypeOf(func)).Fn.params.len <= 2, "zml.meta.collect expects a func with two arguments, got: {}", .{@TypeOf(func)});
     const LocalContext = struct {
         func_ctx: _CollectCtx(func),
-        out: *std.ArrayList(FnResult(func)),
+        out: *std.ArrayList(stdx.meta.FnSignature(func, null).ReturnT),
         oom: bool = false,
     };
     var context = LocalContext{ .func_ctx = func_ctx, .out = out };
@@ -691,10 +484,10 @@ pub fn collect(func: anytype, func_ctx: _CollectCtx(func), out: *std.ArrayList(F
 fn _CollectCtx(func: anytype) type {
     const params = @typeInfo(@TypeOf(func)).Fn.params;
     if (params.len == 1) return void;
-    return params[0].type orelse @compileError("anytype not supported in collect");
+    return params[0].type orelse stdx.meta.compileError("anytype not supported in collect");
 }
 
 fn _CollectArg(func: anytype) type {
     const params = @typeInfo(@TypeOf(func)).Fn.params;
-    return params[params.len - 1].type orelse @compileError("anytype not supported in collect");
+    return params[params.len - 1].type orelse stdx.meta.compileError("anytype not supported in collect");
 }

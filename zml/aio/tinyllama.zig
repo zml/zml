@@ -1,8 +1,8 @@
 /// Tools to load models from https://huggingface.co/karpathy/tinyllamas/
 /// Originally made to be run with https://github.com/karpathy/llama2.c
-const std = @import("std");
-
 const asynk = @import("async");
+const std = @import("std");
+const stdx = @import("stdx");
 
 const zml = @import("../zml.zig");
 
@@ -86,7 +86,7 @@ pub fn open(allocator: std.mem.Allocator, model_path: []const u8) !zml.aio.Buffe
     const weights_size = off;
     std.log.info("Loaded a tinyllama file of {} bytes.\nThis is the parsed configuration of this llama model: {}", .{ weights_size, c });
     if (file.stat() catch null) |stat| {
-        zml.meta.assert(weights_size == stat.size, "Expected to have a tinyllama file of {} bytes but file only got {} !\nThis is the parsed configuration of this llama model: {}", .{ weights_size, stat.size, c });
+        stdx.debug.assert(weights_size == stat.size, "Expected to have a tinyllama file of {} bytes but file only got {} !\nThis is the parsed configuration of this llama model: {}", .{ weights_size, stat.size, c });
     }
 
     {

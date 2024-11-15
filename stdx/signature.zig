@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const compileError = @import("meta.zig").compileError;
+
 pub fn ArgsTuple(comptime funcT: anytype, comptime argsT: ?type) type {
     const params = @typeInfo(funcT).Fn.params;
     if (params.len == 0) {
@@ -10,7 +12,7 @@ pub fn ArgsTuple(comptime funcT: anytype, comptime argsT: ?type) type {
         return std.meta.ArgsTuple(funcT);
     }
 
-    const args = std.meta.fields(argsT orelse @compileError("generic function requires an explicit ArgsTuple"));
+    const args = std.meta.fields(argsT orelse compileError("generic function requires an explicit ArgsTuple", .{}));
     var tuple_fields: [params.len]std.builtin.Type.StructField = undefined;
     inline for (params, args, 0..) |param, arg, i| {
         if (param.type == null) {
@@ -42,34 +44,11 @@ pub fn ArgsTuple(comptime funcT: anytype, comptime argsT: ?type) type {
     });
 }
 
-pub fn TupleRange(comptime T: type, comptime start: usize, comptime end: usize) type {
-    const fields = std.meta.fields(T);
-    var new_fields: [end - start]std.builtin.Type.StructField = undefined;
-    inline for (start..end, 0..) |i, j| {
-        var new_field = fields[i];
-        var num_buf: [32]u8 = undefined;
-        new_field.name = blk: {
-            const s = std.fmt.formatIntBuf(&num_buf, j, 10, .lower, .{});
-            num_buf[s] = 0;
-            break :blk num_buf[0..s :0];
-        };
-        new_fields[j] = new_field;
-    }
-    return @Type(.{
-        .Struct = .{
-            .is_tuple = true,
-            .layout = .auto,
-            .decls = &.{},
-            .fields = &new_fields,
-        },
-    });
-}
-
 pub fn FnSignature(comptime func: anytype, comptime argsT: ?type) type {
     return FnSignatureX(func, ArgsTuple(@TypeOf(func), argsT));
 }
 
-pub fn FnSignatureX(comptime func: anytype, comptime argsT: type) type {
+fn FnSignatureX(comptime func: anytype, comptime argsT: type) type {
     return struct {
         pub const FuncT = @TypeOf(func);
         pub const ArgsT = argsT;

@@ -6,7 +6,7 @@ const Shape = @import("shape.zig").Shape;
 const Tensor = @import("tensor.zig").Tensor;
 
 const EnumLiteral = @TypeOf(.enum_literal);
-const log = std.log.scoped(.zml_tensor);
+const log = std.log.scoped(.@"zml/tensor");
 
 test {
     std.testing.refAllDecls(@This());

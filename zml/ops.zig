@@ -1,11 +1,13 @@
 const std = @import("std");
-const mlir = @import("mlir.zig");
+const stdx = @import("stdx");
 
+const buffer = @import("buffer.zig");
 const helpers = @import("helpers.zig");
-const module = @import("module.zig");
 const meta = @import("meta.zig");
+const mlir = @import("mlir.zig");
+const module = @import("module.zig");
 
-const Buffer = @import("buffer.zig").Buffer;
+const Buffer = buffer.Buffer;
 const CompilationContext = module.CompilationContext;
 const Context = @import("context.zig").Context;
 const Data = @import("dtype.zig").Data;
@@ -20,14 +22,14 @@ const dialect = struct {
 };
 
 const assert = std.debug.assert;
-const log = std.log.scoped(.zml);
+const log = std.log.scoped(.@"zml/tensor");
 
 test {
     std.testing.refAllDecls(@This());
 }
 
 /// Generate an MLIR call to the given member function with the given tensors.
-pub fn call(self: anytype, comptime func: meta.DeclEnum(@TypeOf(self)), args: anytype) @TypeOf(@call(.auto, @field(meta.UnwrapPtr(@TypeOf(self)), @tagName(func)), .{self} ++ args)) {
+pub fn call(self: anytype, comptime func: stdx.meta.DeclEnum(@TypeOf(self)), args: anytype) @TypeOf(@call(.auto, @field(stdx.meta.UnwrapPtr(@TypeOf(self)), @tagName(func)), .{self} ++ args)) {
     // TODO: this should use `self.getContext().callFunc(self, args)`
 
     return @call(.auto, @field(@TypeOf(self), @tagName(func)), .{self} ++ args);
@@ -121,8 +123,8 @@ test "simple while" {
 
 pub fn reduce(
     comptime body_fn: anytype,
-    inputs: meta.FnParam(body_fn, 0),
-    inits: meta.FnParam(body_fn, 0),
+    inputs: stdx.meta.FnParam(body_fn, 0),
+    inits: stdx.meta.FnParam(body_fn, 0),
     axes: []const i64,
 ) BlockSignNoCtx(body_fn).Return {
     // TODO: actualAxes
@@ -155,7 +157,7 @@ pub fn reduce(
 
     // `stablehlo.reduce` drops axes. We want to avoid that to propagate tags.
     // So we need to broadcast the output of `stablehlo.reduce` to the input shapes.
-    // To that order, we initialize `result` to `inputs`, then we use meta.visit,
+    // To that order, we initialize `result` to `inputs`, then we use stdx.meta.visit,
     // to find the correct mlir.Value, but we first broadcast before creating the final
     // Tensor struct.
     var broadcasting_axes: std.BoundedArray(i64, Tensor.MAX_RANK) = .{};
@@ -217,10 +219,10 @@ pub const ReduceWindowOpts = struct {
 
 pub fn reduceWindow(
     comptime body_fn: anytype,
-    inputs: meta.FnParam(body_fn, 0),
-    inits: meta.FnParam(body_fn, 0),
+    inputs: stdx.meta.FnParam(body_fn, 0),
+    inits: stdx.meta.FnParam(body_fn, 0),
     opts: ReduceWindowOpts,
-) meta.FnResult(body_fn) {
+) stdx.meta.FnResult(body_fn) {
     const BodyS = comptime BlockSignNoCtx(body_fn);
     comptime {
         if (BodyS.Return != @TypeOf(inputs)) @compileError("reduce body function need to have the following signature `fn (left: T, right: T) T`, got: " ++ @typeName(body_fn));
@@ -263,7 +265,7 @@ pub fn reduceWindow(
 pub fn for_(comptime func: anytype, blk_ctx: BlockSign(func).BlkCtx, num_steps_: anytype) BlockSign(func).Return {
     const num_steps: u32, const step_tag = blk: {
         const dims, const tags = Shape.parseDimensions(num_steps_);
-        meta.assert(dims.len == 1, "zml.for_ only supports one num_step, Received: {any}", .{num_steps_});
+        stdx.debug.assert(dims.len == 1, "zml.for_ only supports one num_step, Received: {any}", .{num_steps_});
         break :blk .{ @intCast(dims.get(0)), tags.get(0) };
     };
     const S = comptime BlockSign(func);
@@ -290,7 +292,7 @@ pub fn for_(comptime func: anytype, blk_ctx: BlockSign(func).BlkCtx, num_steps_:
         }
 
         fn updateResBuffer(inputs: []const Tensor, idx: Tensor) Tensor {
-            meta.internalAssert(inputs.len == 2, "too many tensors", .{});
+            stdx.debug.internalAssert(inputs.len == 2, "too many tensors", .{});
             const res, const step_res = inputs[0..2].*;
             return res.dynamicUpdateSlice1d(step_res.insertAxes(0, .{._}), 0, idx);
         }

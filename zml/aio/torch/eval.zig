@@ -1,6 +1,5 @@
 const std = @import("std");
-const zml = @import("../../zml.zig");
-const meta = zml.meta;
+const stdx = @import("stdx");
 
 const py = @import("py.zig");
 const pickle = @import("pickle.zig");
@@ -228,7 +227,7 @@ pub fn evaluate(arena: std.mem.Allocator, x: []const pickle.Op, resolve_refs: bo
                     },
                 }
             },
-            .proto => |proto| meta.assert(proto <= MAX_PROTOCOL, "Unsupported protocol {d}", .{proto}),
+            .proto => |proto| stdx.debug.assert(proto <= MAX_PROTOCOL, "Unsupported protocol {d}", .{proto}),
             .tuple1 => try stack.append(blk: {
                 const tup_values = try arena.alloc(py.Any, 1);
                 tup_values[0] = try pop(&stack);

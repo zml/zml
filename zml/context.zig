@@ -1,22 +1,22 @@
 const builtin = @import("builtin");
-const std = @import("std");
-const mlir = @import("mlir");
 const c = @import("c");
+const mlir = @import("mlir");
 const runfiles = @import("runfiles");
 const runtimes = @import("runtimes");
+const std = @import("std");
+const stdx = @import("stdx");
 
 const platform = @import("platform.zig");
 const pjrt = @import("pjrtx.zig");
 
-const available_targets = @import("platform.zig").available_targets;
 const HostBuffer = @import("hostbuffer.zig").HostBuffer;
-const Target = @import("platform.zig").Target;
-const Platform = @import("platform.zig").Platform;
-
-const log = std.log.scoped(.zml);
-
 const PjrtApiMap = std.EnumArray(Target, ?*const pjrt.Api);
+const Platform = @import("platform.zig").Platform;
 const PlatformsMap = std.EnumArray(Target, ?Platform);
+const Target = @import("platform.zig").Target;
+
+const available_targets = @import("platform.zig").available_targets;
+const log = std.log.scoped(.@"zml/context");
 
 /// Every program using ZML must start with a `zml.Context.init(.{});`
 /// The ZML context contains global state to interact with the different
@@ -143,6 +143,36 @@ pub const Context = struct {
             }
         }
         return platform_ orelse @panic("No platform found !");
+    }
+
+    pub fn printAvailablePlatforms(self: Context, selected: platform.Platform) void {
+        // List available targets
+        log.info("Available Platforms:", .{});
+        const selected_prefix = "✅";
+        const not_selected_prefix = "• ";
+        const selected_postfix = "(AUTO-SELECTED)";
+        const not_selected_postfix = "";
+
+        for (platform.available_targets) |target| {
+            log.info("  {s} {s} {s}", .{
+                if (target == selected.target) selected_prefix else not_selected_prefix,
+                @tagName(target),
+                if (target == selected.target) selected_postfix else not_selected_postfix,
+            });
+
+            // now the platform's devices
+            if (self.platforms.get(target)) |pfm| {
+                for (pfm.getDevices(), 0..) |device, index| {
+                    const deviceKind = device.getDescription(pfm.pjrt_api).getKind(pfm.pjrt_api);
+                    log.info("       ◦ #{d}: {s}", .{
+                        index,
+                        deviceKind,
+                    });
+                    // we only list 1 CPU device
+                    if (target == .cpu) break;
+                }
+            }
+        }
     }
 
     pub const HostCallbackCtx = struct {

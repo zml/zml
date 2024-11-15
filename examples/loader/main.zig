@@ -1,13 +1,12 @@
 const std = @import("std");
+const stdx = @import("stdx");
 const zml = @import("zml");
 const asynk = @import("async");
 
 const asyncc = asynk.asyncc;
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    try asynk.AsyncThread.main(gpa.allocator(), asyncMain, .{});
+    try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain);
 }
 
 pub fn asyncMain() !void {
@@ -36,11 +35,7 @@ pub fn asyncMain() !void {
     defer context.deinit();
 
     const platform = context.autoPlatform();
-    const devices = platform.getDevices();
-
-    for (devices) |device| {
-        std.debug.print("Device visible: {s}\n", .{device.getDescription(platform.pjrt_api).debugString(platform.pjrt_api)});
-    }
+    context.printAvailablePlatforms(platform);
 
     var buffers = try gpa.allocator().alloc(zml.Buffer, buffer_store.buffers.count());
     defer {
@@ -65,8 +60,8 @@ pub fn asyncMain() !void {
     }
 
     const stop = timer.read();
-    const time_in_s = zml.meta.divFloat(f64, stop, std.time.ns_per_s);
-    const mbs = zml.meta.divFloat(f64, total_bytes, 1024 * 1024);
+    const time_in_s = stdx.math.divFloor(f64, stop, std.time.ns_per_s);
+    const mbs = stdx.math.divFloor(f64, total_bytes, 1024 * 1024);
 
     std.debug.print("\nLoading speed: {d:.2} MB/s\n\n", .{mbs / time_in_s});
 }

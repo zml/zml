@@ -7,7 +7,7 @@ const MemoryMappedFile = @import("../aio.zig").MemoryMappedFile;
 
 const StringBuilder = std.ArrayListUnmanaged(u8);
 const Allocator = std.mem.Allocator;
-const log = std.log.scoped(.zml_io);
+const log = std.log.scoped(.@"zml/io");
 
 pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore {
     var res: zml.aio.BufferStore = .{

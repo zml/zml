@@ -1,8 +1,10 @@
+const asynk = @import("async");
 const std = @import("std");
 const zml = @import("zml");
-const asynk = @import("async");
 
 const show_mlir = true;
+
+const log = std.log.scoped(.mnist);
 
 /// Model definition
 const Mnist = struct {
@@ -31,56 +33,21 @@ const Mnist = struct {
 };
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    try asynk.AsyncThread.main(allocator, asyncMain, .{});
+    try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain);
 }
 
 pub fn asyncMain() !void {
-    // Short lived allocations
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const allocator = std.heap.c_allocator;
 
-    // Create ZML context
+    // // Create ZML context
     var context = try zml.Context.init();
     defer context.deinit();
 
-    std.debug.print("\n===========================\n==   ZML MNIST Example   ==\n===========================\n\n", .{});
+    // log.info("\n===========================\n==   ZML MNIST Example   ==\n===========================\n\n", .{});
 
-    // Auto-select platform
+    // // Auto-select platform
     const platform = context.autoPlatform();
-    {
-        // List available targets
-        std.debug.print("Available Platforms:\n", .{});
-        const selected_prefix = "✅";
-        const not_selected_prefix = "• ";
-        const selected_postfix = "(AUTO-SELECTED)\n";
-        const not_selected_postfix = "\n";
-        for (zml.platform.available_targets) |target| {
-            std.debug.print("  {s} {s} {s}", .{
-                if (target == platform.target) selected_prefix else not_selected_prefix,
-                @tagName(target),
-                if (target == platform.target) selected_postfix else not_selected_postfix,
-            });
-
-            // now the platform's devices
-            if (context.platforms.get(target)) |pfm| {
-                for (pfm.getDevices(), 0..) |device, index| {
-                    const deviceKind = device.getDescription(platform.pjrt_api).getKind(platform.pjrt_api);
-                    std.debug.print("       ◦ #{d}: {s}\n", .{
-                        index,
-                        deviceKind,
-                    });
-                    // we only list 1 CPU device
-                    if (target == .cpu) break;
-                }
-            }
-        }
-        std.debug.print("\n", .{});
-    }
+    context.printAvailablePlatforms(platform);
 
     // Parse program args
     const process_args = try std.process.argsAlloc(allocator);
@@ -99,32 +66,26 @@ pub fn asyncMain() !void {
     defer buffer_store.deinit();
 
     const mnist_model = try zml.aio.populateModel(Mnist, allocator, buffer_store);
-    std.debug.print("✅ Read model shapes from PyTorch file {s}\n", .{pt_model});
+    log.info("Reading model shapes from PyTorch file {s}...", .{pt_model});
 
-    // Start loading weights
+    // Start compiling
+    log.info("Compiling model to MLIR....", .{});
+    var start_time = try std.time.Timer.start();
+    var compilation = try asynk.asyncc(zml.compile, .{ allocator, Mnist.forward, .{}, .{zml.Shape.init(.{ 28, 28 }, .u8)}, buffer_store, platform });
+
+    // While compiling, start loading weights on the platform
     var model_weights = try zml.aio.loadModelBuffers(Mnist, mnist_model, buffer_store, arena, platform);
     defer zml.aio.unloadBuffers(&model_weights);
 
-    // Start compiling
-    const comp_start_time = std.time.milliTimestamp();
-    if (show_mlir) {
-        std.debug.print("\nCompiling model to MLIR....\n", .{});
-        std.debug.print("-" ** 160 ++ "\n", .{});
-    } else {
-        std.debug.print("Compiling model to MLIR....\r", .{});
-    }
-    var compilation = try asynk.asyncGeneric(zml.compile, .{ allocator, Mnist, .{}, .forward, .{zml.Shape.init(.{ 28, 28 }, .u8)}, buffer_store, platform });
-
     // Wait for end of compilation and end of weights loading.
-    const compiled_mnist = try compilation.await_();
-    const comp_end_time = std.time.milliTimestamp();
-    if (show_mlir) std.debug.print("-" ** 160 ++ "\n", .{});
-    std.debug.print("✅ Compiled MNIST model in {d} milliseconds! \n", .{comp_end_time - comp_start_time});
+    const compiled_mnist = try compilation.wait();
+    log.info("✅ Compiled model in {d}ms", .{start_time.read() / std.time.ns_per_ms});
 
-    // send weights to accelerator / GPU
     var mnist = try compiled_mnist.prepare(allocator, model_weights);
     defer mnist.deinit();
-    std.debug.print("✅ Weights transferred, starting inference...\n\n", .{});
+    log.info("✅ Weights transferred in {d}ms", .{start_time.read() / std.time.ns_per_ms});
+
+    log.info("Starting inference...", .{});
 
     // Load a random digit image from the dataset.
     const dataset = try asynk.File.open(t10kfilename, .{ .mode = .read_only });
@@ -143,17 +104,18 @@ pub fn asyncMain() !void {
         var result: zml.Buffer = mnist.call(.{input});
         defer result.deinit();
 
-        std.debug.print("\n✅ RECOGNIZED DIGIT:\n", .{});
-        std.debug.print("                       +-------------+\n", .{});
-        std.debug.print("{s}\n", .{digits[try result.getValue(u8)]});
-        std.debug.print("                       +-------------+\n\n", .{});
+        log.info(
+            \\✅ RECOGNIZED DIGIT:
+            \\                       +-------------+
+            \\{s}
+            \\                       +-------------+
+            \\
+        , .{digits[try result.getValue(u8)]});
     }
 }
 
 fn printDigit(digit: [28 * 28]u8) void {
     var buffer: [28][30][2]u8 = undefined;
-    std.debug.print("     R E C O G N I Z I N G   I N P U T   I M A G E :\n", .{});
-    std.debug.print("+---------------------------------------------------------+\n", .{});
     for (0..28) |y| {
         buffer[y][0] = .{ '|', ' ' };
         buffer[y][29] = .{ '|', '\n' };
@@ -168,8 +130,14 @@ fn printDigit(digit: [28 * 28]u8) void {
             };
         }
     }
-    std.fmt.format(asynk.StdOut().writer(), "{s}", .{std.mem.asBytes(&buffer)}) catch unreachable;
-    std.debug.print("+---------------------------------------------------------+\n", .{});
+
+    log.info(
+        \\
+        \\     R E C O G N I Z I N G   I N P U T   I M A G E :
+        \\+---------------------------------------------------------+
+        \\{s}+---------------------------------------------------------+
+        \\
+    , .{std.mem.asBytes(&buffer)});
 }
 
 const digits = [_][]const u8{
@@ -256,10 +224,6 @@ const digits = [_][]const u8{
 };
 
 pub const std_options = .{
-    // Set the global log level to err
-    .log_level = .err,
-    .log_scope_levels = &[_]std.log.ScopeLevel{
-        .{ .scope = .pjrt, .level = .err },
-        .{ .scope = .zml_module, .level = if (show_mlir) .debug else .err },
-    },
+    .logFn = asynk.logFn,
+    .log_level = .info,
 };

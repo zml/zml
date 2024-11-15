@@ -2,7 +2,7 @@ const std = @import("std");
 const c = @import("c");
 const tsl_proto = @import("//tsl:profiler_options_proto");
 
-const log = std.log.scoped(.zml_profiler);
+const log = std.log.scoped(.@"zml/profiler");
 
 /// Pjrt Profiler extension
 pub const Profiler = struct {

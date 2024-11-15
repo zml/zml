@@ -17,9 +17,7 @@ const Layer = struct {
 };
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    try asynk.AsyncThread.main(gpa.allocator(), asyncMain, .{});
+    try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain);
 }
 
 pub fn asyncMain() !void {
@@ -37,6 +35,7 @@ pub fn asyncMain() !void {
     defer context.deinit();
 
     const platform = context.autoPlatform();
+    context.printAvailablePlatforms(platform);
 
     // Our weights and bias to use
     var weights = [4]f16{ 2.0, 2.0, 2.0, 2.0 };

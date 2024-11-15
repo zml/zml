@@ -2,16 +2,22 @@ const std = @import("std");
 const xev = @import("xev");
 
 const FnSignature = @import("meta.zig").FnSignature;
+const NormalizedTuple = @import("meta.zig").NormalizedTuple;
 
 pub fn Frame(comptime func: anytype) type {
     const Signature = FnSignature(func, null);
-    return FrameEx(func, Signature.ArgsT);
+    return FrameExx(func, Signature);
 }
 
 pub fn FrameEx(comptime func: anytype, comptime argsT: type) type {
+    const Signature = FnSignature(func, argsT);
+    return FrameExx(func, Signature);
+}
+
+pub fn FrameExx(comptime func: anytype, comptime Signature: type) type {
     return struct {
         const Self = @This();
-        const Signature = FnSignature(func, argsT);
+        const Signature_ = Signature;
         const Task = struct {
             _task: xev.ThreadPool.Task = .{ .callback = &Self.run },
             event: std.Thread.ResetEvent = .{},
@@ -27,7 +33,8 @@ pub fn FrameEx(comptime func: anytype, comptime argsT: type) type {
             task.event.set();
         }
 
-        pub fn await_(self: *Self) Signature.ReturnT {
+        pub const await_ = wait;
+        pub fn wait(self: *Self) Signature.ReturnT {
             defer {
                 AsyncThread.current.mutex.lock();
                 AsyncThread.current.allocator.destroy(self._task);
@@ -39,11 +46,7 @@ pub fn FrameEx(comptime func: anytype, comptime argsT: type) type {
     };
 }
 
-pub fn asyncc(comptime func: anytype, args: FnSignature(func, null).ArgsT) !FrameEx(func, @TypeOf(args)) {
-    return asyncGeneric(func, args);
-}
-
-pub fn asyncGeneric(comptime func: anytype, args: anytype) !FrameEx(func, @TypeOf(args)) {
+pub fn asyncc(comptime func: anytype, args: anytype) !FrameEx(func, @TypeOf(args)) {
     const FrameT = FrameEx(func, @TypeOf(args));
 
     AsyncThread.current.mutex.lock();
@@ -58,15 +61,11 @@ pub fn asyncGeneric(comptime func: anytype, args: anytype) !FrameEx(func, @TypeO
     return .{ ._task = task };
 }
 
-pub fn callBlocking(comptime func: anytype, args: FnSignature(func, null).ArgsT) @TypeOf(callBlockingGeneric(func, args)) {
-    return callBlockingGeneric(func, args);
-}
-
-pub fn callBlockingGeneric(comptime func: anytype, args: anytype) FnSignature(func, @TypeOf(args)).ReturnT {
+pub inline fn callBlocking(comptime func: anytype, args: anytype) FnSignature(func, @TypeOf(args)).ReturnT {
     return @call(.auto, func, args);
 }
 
-pub fn sleep(ms: u64) !void {
+pub inline fn sleep(ms: u64) !void {
     std.time.sleep(ms * std.time.ns_per_ms);
 }
 
@@ -77,7 +76,7 @@ pub const AsyncThread = struct {
     thread_pool: xev.ThreadPool,
     mutex: std.Thread.Mutex,
 
-    pub fn main(allocator_: std.mem.Allocator, comptime func: anytype, args: anytype) !void {
+    pub fn main(allocator_: std.mem.Allocator, comptime mainFunc: anytype) !void {
         current = .{
             .allocator = allocator_,
             .thread_pool = xev.ThreadPool.init(.{}),
@@ -89,7 +88,7 @@ pub const AsyncThread = struct {
             current.thread_pool.deinit();
         }
 
-        return @call(.auto, func, args);
+        return try mainFunc();
     }
 };
 
@@ -114,15 +113,15 @@ pub const Notification = struct {
     }
 };
 
-pub fn StdIn() !File {
+pub fn getStdIn() !File {
     return File.init(std.io.getStdIn()) catch @panic("Unable to open stdin");
 }
 
-pub fn StdOut() File {
+pub fn getStdOut() File {
     return File.init(std.io.getStdOut()) catch @panic("Unable to open stdout");
 }
 
-pub fn StdErr() File {
+pub fn getStdErr() File {
     return File.init(std.io.getStdErr()) catch @panic("Unable to open stderr");
 }
 
@@ -217,3 +216,23 @@ pub const File = struct {
 };
 
 pub const Mutex = std.Thread.Mutex;
+
+pub fn logFn(
+    comptime message_level: std.log.Level,
+    comptime scope: @Type(.EnumLiteral),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    const level_txt = comptime message_level.asText();
+    const prefix2 = if (scope == .default) ": " else "(" ++ @tagName(scope) ++ "): ";
+    const stderr = getStdErr().writer();
+    var bw = std.io.bufferedWriter(stderr);
+    const writer = bw.writer();
+
+    std.debug.lockStdErr();
+    defer std.debug.unlockStdErr();
+    nosuspend {
+        writer.print(level_txt ++ prefix2 ++ format ++ "\n", args) catch return;
+        bw.flush() catch return;
+    }
+}

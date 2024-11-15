@@ -1,8 +1,8 @@
 //! Test runner for unit test based on https://github.com/ziglang/zig/blob/master/lib/compiler/test_runner.zig with async
-const builtin = @import("builtin");
-
-const std = @import("std");
 const asynk = @import("async");
+const builtin = @import("builtin");
+const std = @import("std");
+
 const io = std.io;
 const testing = std.testing;
 const assert = std.debug.assert;
@@ -21,10 +21,10 @@ var fba = std.heap.FixedBufferAllocator.init(&fba_buffer);
 
 pub fn main() anyerror!void {
     testing.log_level = log_level;
-    try asynk.AsyncThread.main(testing.allocator, asyncMain, .{});
+    try asynk.AsyncThread.main(testing.allocator, asyncMain);
 }
 
-pub fn asyncMain() void {
+pub fn asyncMain() !void {
     const test_fn_list: []const std.builtin.TestFn = builtin.test_functions;
     var ok_count: usize = 0;
     var skip_count: usize = 0;

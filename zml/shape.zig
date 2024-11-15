@@ -1,11 +1,12 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const stdx = @import("stdx");
+
 const testing = std.testing;
 
-const meta = @import("meta.zig");
 const DataType = @import("dtype.zig").DataType;
-
 const EnumLiteral = @TypeOf(.enum_literal);
+
 const log = std.log.scoped(.shape);
 
 test {
@@ -39,7 +40,7 @@ pub const Shape = struct {
             return .{ v._dims, v._tags };
         }
 
-        if (comptime meta.isSliceOfAny(T, meta.isInteger)) {
+        if (comptime stdx.meta.isSliceOfAny(T, stdx.meta.isInteger)) {
             var dims_ = DimsArray.init(0) catch unreachable;
             var tags_ = TagsArray.init(0) catch unreachable;
             for (v) |d| {
@@ -49,19 +50,19 @@ pub const Shape = struct {
             return .{ dims_, tags_ };
         }
 
-        if (comptime meta.isStruct(T)) {
+        if (comptime stdx.meta.isStruct(T)) {
             var dims_: DimsArray = .{};
             var tags_: TagsArray = .{};
             inline for (std.meta.fields(T)) |field| {
                 const fv = @field(v, field.name);
-                if (comptime meta.isInteger(field.type)) {
+                if (comptime stdx.meta.isInteger(field.type)) {
                     dims_.appendAssumeCapacity(@intCast(fv));
                 } else if (comptime isAutoDim(fv)) {
                     dims_.appendAssumeCapacity(-1);
                 } else {
-                    meta.compileError("Field {s} should be an integer or an auto dimension", .{field.name});
+                    stdx.meta.compileError("Field {s} should be an integer or an auto dimension", .{field.name});
                 }
-                if (comptime meta.isTuple(T)) {
+                if (comptime stdx.meta.isTuple(T)) {
                     tags_.appendAssumeCapacity(TagUnknown);
                 } else {
                     tags_.appendAssumeCapacity(toTag(field));
@@ -71,7 +72,7 @@ pub const Shape = struct {
             return .{ dims_, tags_ };
         }
 
-        meta.compileError("expected a dimension tuple eg '.{{ .a = 10, .b = 20}}' or '.{{ 10, 20 }}', got {}", .{T});
+        stdx.meta.compileError("expected a dimension tuple eg '.{{ .a = 10, .b = 20}}' or '.{{ 10, 20 }}', got {}", .{T});
     }
 
     test parseDimensions {
@@ -92,7 +93,7 @@ pub const Shape = struct {
         var axes_ = AxesArray.init(0) catch unreachable;
         var tags_ = TagsArray.init(0) catch unreachable;
 
-        if (comptime meta.isSliceOfAny(T, isAxisConvertible)) {
+        if (comptime stdx.meta.isSliceOfAny(T, isAxisConvertible)) {
             for (v) |d| {
                 axes_.appendAssumeCapacity(self.axis(d));
                 tags_.appendAssumeCapacity(self.tag(d));
@@ -100,7 +101,7 @@ pub const Shape = struct {
             return .{ axes_, tags_ };
         }
 
-        if (comptime meta.isTupleOfAny(T, isAxisConvertible)) {
+        if (comptime stdx.meta.isTupleOfAny(T, isAxisConvertible)) {
             inline for (std.meta.fields(T)) |field| {
                 axes_.appendAssumeCapacity(self.axis(@field(v, field.name)));
                 tags_.appendAssumeCapacity(self.tag(@field(v, field.name)));
@@ -108,12 +109,12 @@ pub const Shape = struct {
             return .{ axes_, tags_ };
         }
 
-        meta.compileError("Wrong type, got {}. Expected .{{.a, .b}}", .{T});
+        stdx.meta.compileError("Wrong type, got {}. Expected .{{.a, .b}}", .{T});
     }
 
     pub fn parseTags(v: anytype) TagsArray {
         const T = @TypeOf(v);
-        meta.assertComptime(meta.isTupleOf(T, EnumLiteral), "Wrong type, got {}. Expected .{{ .a, .b }}", .{T});
+        stdx.debug.assertComptime(stdx.meta.isTupleOf(T, EnumLiteral), "Wrong type, got {}. Expected .{{ .a, .b }}", .{T});
         var tags_ = TagsArray.init(0) catch unreachable;
         inline for (v) |field| {
             tags_.appendAssumeCapacity(toTag(field));
@@ -135,7 +136,7 @@ pub const Shape = struct {
         var res: Shape = .{ ._dtype = dt };
         for (0..rank_) |i| {
             res._dims.append(@intCast(i)) catch {
-                meta.panic("Too many dimensions! Max: {d}, passed: {d}", .{ res._dims.capacity(), rank_ });
+                stdx.debug.panic("Too many dimensions! Max: {d}, passed: {d}", .{ res._dims.capacity(), rank_ });
             };
             res._tags.append(TagUnknown) catch unreachable;
         }
@@ -162,7 +163,7 @@ pub const Shape = struct {
     }
 
     fn isAxisConvertible(comptime T: type) bool {
-        return meta.isInteger(T) or isTagConvertible(T);
+        return stdx.meta.isInteger(T) or isTagConvertible(T);
     }
 
     fn isTagConvertible(comptime T: type) bool {
@@ -180,12 +181,12 @@ pub const Shape = struct {
             EnumLiteral => @tagName(v).ptr,
             std.builtin.Type.StructField => v.name.ptr,
             Tag => v,
-            else => meta.compileError("Value should be an EnumLiteral, a Shape.Tag or a StructField, got {}", .{T}),
+            else => stdx.meta.compileError("Value should be an EnumLiteral, a Shape.Tag or a StructField, got {}", .{T}),
         };
     }
 
     inline fn ensureDimsAndTagsAreSync(self: Shape) void {
-        meta.assert(self._dims.len == self._tags.len, "Tags and dims have diverged! dims={d} tags={d}", .{ self._dims.len, self._tags.len });
+        stdx.debug.assert(self._dims.len == self._tags.len, "Tags and dims have diverged! dims={d} tags={d}", .{ self._dims.len, self._tags.len });
     }
 
     pub fn tag(self: Shape, ax: anytype) Tag {
@@ -220,7 +221,7 @@ pub const Shape = struct {
     pub fn hasTags(self: Shape, tagz: anytype) bool {
         const T = @TypeOf(tagz);
 
-        if (comptime meta.isSliceOf(T, Tag) or meta.isSliceOf(T, EnumLiteral)) {
+        if (comptime stdx.meta.isSliceOf(T, Tag) or stdx.meta.isSliceOf(T, EnumLiteral)) {
             for (tagz) |t| {
                 if (self.hasTag(t) == null) {
                     return false;
@@ -229,7 +230,7 @@ pub const Shape = struct {
             return true;
         }
 
-        if (comptime meta.isTupleOf(T, Tag) or meta.isTupleOf(T, EnumLiteral)) {
+        if (comptime stdx.meta.isTupleOf(T, Tag) or stdx.meta.isTupleOf(T, EnumLiteral)) {
             inline for (tagz) |t| {
                 if (self.hasTag(t) == null) {
                     return false;
@@ -238,7 +239,7 @@ pub const Shape = struct {
             return true;
         }
 
-        meta.compileError("Expected tuple of tags, got {any}", .{T});
+        stdx.meta.compileError("Expected tuple of tags, got {any}", .{T});
     }
 
     pub fn isFullyTagged(self: Shape) bool {
@@ -252,7 +253,7 @@ pub const Shape = struct {
         self.ensureDimsAndTagsAreSync();
 
         const T = @TypeOf(axis_);
-        if (comptime meta.isInteger(T)) {
+        if (comptime stdx.meta.isInteger(T)) {
             return self.axisFromInt(@intCast(axis_));
         }
 
@@ -260,7 +261,7 @@ pub const Shape = struct {
             return self.axisFromTag(toTag(axis_));
         }
 
-        meta.compileError("Wrong axis type, expected .literal, or an integer, got: {any}", .{T});
+        stdx.meta.compileError("Wrong axis type, expected .literal, or an integer, got: {any}", .{T});
     }
 
     pub fn axes(self: Shape, axes_: anytype) AxesArray {
@@ -274,27 +275,27 @@ pub const Shape = struct {
 
         var res = AxesArray.init(0) catch unreachable;
 
-        if (comptime meta.isSliceOfAny(T, meta.isInteger) or meta.isSliceOf(T, Tag)) {
+        if (comptime stdx.meta.isSliceOfAny(T, stdx.meta.isInteger) or stdx.meta.isSliceOf(T, Tag)) {
             for (axes_) |ax| {
                 res.appendAssumeCapacity(self.axis(ax));
             }
             return res;
         }
 
-        if (comptime meta.isStruct(T)) {
+        if (comptime stdx.meta.isStruct(T)) {
             inline for (std.meta.fields(T)) |field| {
                 res.appendAssumeCapacity(self.axis(@field(axes_, field.name)));
             }
             return res;
         }
 
-        meta.compileError("axes expects an int-tuple or a tuple of enum literal, got {}", .{T});
+        stdx.meta.compileError("axes expects an int-tuple or a tuple of enum literal, got {}", .{T});
     }
 
     fn axisFromInt(self: Shape, d: isize) u3 {
         const rk: i8 = self.rank();
         if (d < -rk or d > rk) {
-            meta.panic("Tensor {} doesn't have dimension: {d}", .{ self, d });
+            stdx.debug.panic("Tensor {} doesn't have dimension: {d}", .{ self, d });
         }
         return if (d < 0)
             @intCast(d + rk)
@@ -323,9 +324,9 @@ pub const Shape = struct {
     }
 
     fn axisFromTag(self: Shape, d: Tag) u3 {
-        meta.assert(d != TagUnknown, "The unknown tag .{s} can't be used to fetch axis in {}", .{ d, self });
+        stdx.debug.assert(d != TagUnknown, "The unknown tag .{s} can't be used to fetch axis in {}", .{ d, self });
         return self.axisFromTagMaybe(d) orelse {
-            meta.panic("Tensor {} doesn't have dimension with tag: {s}", .{ self, d });
+            stdx.debug.panic("Tensor {} doesn't have dimension with tag: {s}", .{ self, d });
         };
     }
 
@@ -339,7 +340,7 @@ pub const Shape = struct {
     pub fn count(self: Shape) usize {
         var res: i64 = 1;
         for (self.dims()) |d| {
-            meta.assert(d >= 0, "Can't count elements in shape with negative dimension: {}", .{self});
+            stdx.debug.assert(d >= 0, "Can't count elements in shape with negative dimension: {}", .{self});
             res *= d;
         }
         return @intCast(res);
@@ -398,12 +399,12 @@ pub const Shape = struct {
         var new_shape: Shape = .{ ._dtype = self.dtype() };
         new_shape._dims, new_shape._tags = parseDimensions(new_shape_);
         new_shape.inferMissingAxis(self.count());
-        meta.assert(self.count() == new_shape.count(), "Can't reshape {d} to {d}", .{ self.dims(), new_shape.dims() });
+        stdx.debug.assert(self.count() == new_shape.count(), "Can't reshape {d} to {d}", .{ self.dims(), new_shape.dims() });
         return new_shape;
     }
 
     fn inferMissingAxis(self: *Shape, n_: usize) void {
-        meta.assert(std.mem.count(i64, self.dims(), &.{-1}) < 2, "Cannot infer multiple dimensions when reshaping to: {}", .{self.*});
+        stdx.debug.assert(std.mem.count(i64, self.dims(), &.{-1}) < 2, "Cannot infer multiple dimensions when reshaping to: {}", .{self.*});
 
         const inferred_ax = std.mem.indexOfScalar(i64, self.dims(), -1) orelse return;
         // We can't use `self.count()` yet cause we have negative dims.
@@ -481,7 +482,7 @@ pub const Shape = struct {
     }
 
     pub fn insertTag(self: Shape, axis_: anytype, d: i64, tag_: anytype) Shape {
-        meta.assert(self.rank() < MAX_RANK - 1, "Can't insert new axis in {}, it's already at max rank.", .{self});
+        stdx.debug.assert(self.rank() < MAX_RANK - 1, "Can't insert new axis in {}, it's already at max rank.", .{self});
 
         const ax = if (@TypeOf(axis_) == EnumLiteral and axis_ == .last)
             self.rank()
@@ -573,23 +574,23 @@ pub const Shape = struct {
 
         var res = self;
 
-        if (comptime meta.isSliceOf(T, Tag) or meta.isSliceOf(T, EnumLiteral)) {
-            meta.assert(tagz.len == self.rank(), "Not enough tags for shape {}, got {any}", .{ self, tagz });
+        if (comptime stdx.meta.isSliceOf(T, Tag) or stdx.meta.isSliceOf(T, EnumLiteral)) {
+            stdx.debug.assert(tagz.len == self.rank(), "Not enough tags for shape {}, got {any}", .{ self, tagz });
             for (tagz, 0..) |tag_, i| {
                 res._tags.set(i, toTag(tag_));
             }
             return res;
         }
 
-        if (comptime meta.isTupleOf(T, Tag) or meta.isTupleOf(T, EnumLiteral)) {
-            meta.assert(tagz.len == self.rank(), "Not enough tags for shape {}, got {}", .{ self, tagz });
+        if (comptime stdx.meta.isTupleOf(T, Tag) or stdx.meta.isTupleOf(T, EnumLiteral)) {
+            stdx.debug.assert(tagz.len == self.rank(), "Not enough tags for shape {}, got {}", .{ self, tagz });
             inline for (tagz, 0..) |tag_, i| {
                 res._tags.set(i, toTag(tag_));
             }
             return res;
         }
 
-        meta.compileError("Expected a tuple of enum literals eg: .{ .a, .b, .c } got: {any}", .{@TypeOf(tagz)});
+        stdx.meta.compileError("Expected a tuple of enum literals eg: .{ .a, .b, .c } got: {any}", .{@TypeOf(tagz)});
     }
 
     test withTags {
@@ -620,23 +621,23 @@ pub const Shape = struct {
 
         var res = self;
 
-        if (comptime meta.isSliceOf(T, Tag) or meta.isSliceOf(T, EnumLiteral)) {
-            meta.assert(tagz.len <= self.rank(), "Too many tags for shape {}, got {any}", .{ self, tagz });
+        if (comptime stdx.meta.isSliceOf(T, Tag) or stdx.meta.isSliceOf(T, EnumLiteral)) {
+            stdx.debug.assert(tagz.len <= self.rank(), "Too many tags for shape {}, got {any}", .{ self, tagz });
             for (tagz, self.rank() - tagz.len..) |tag_, i| {
                 res._tags.set(i, toTag(tag_));
             }
             return res;
         }
 
-        if (comptime meta.isTupleOf(T, Tag) or meta.isTupleOf(T, EnumLiteral)) {
-            meta.assert(tagz.len <= self.rank(), "Too many tags for shape {}, got {}", .{ self, tagz });
+        if (comptime stdx.meta.isTupleOf(T, Tag) or stdx.meta.isTupleOf(T, EnumLiteral)) {
+            stdx.debug.assert(tagz.len <= self.rank(), "Too many tags for shape {}, got {}", .{ self, tagz });
             inline for (tagz, self.rank() - tagz.len..) |tag_, i| {
                 res._tags.set(i, toTag(tag_));
             }
             return res;
         }
 
-        meta.compileError("Expected a tuple of enum literals eg: .{ .a, .b, .c } got: {any}", .{@TypeOf(tagz)});
+        stdx.meta.compileError("Expected a tuple of enum literals eg: .{ .a, .b, .c } got: {any}", .{@TypeOf(tagz)});
     }
 
     test withPartialTags {
@@ -683,7 +684,7 @@ pub const Shape = struct {
     /// Shape.init(.{ .a = 10, .b = 20 }).rename(.{ .b = .batch }); // .{ .a = 10, .batch = 20 };
     pub fn rename(self: Shape, renames: anytype) Shape {
         const T = @TypeOf(renames);
-        meta.assertComptime(meta.isStructOfAny(T, isAxisConvertible), "Must pass a struct of enum literals. Passed: {any}", .{T});
+        stdx.debug.assertComptime(stdx.meta.isStructOfAny(T, isAxisConvertible), "Must pass a struct of enum literals. Passed: {any}", .{T});
         var res = self;
         inline for (std.meta.fields(T)) |field| {
             res._tags.set(self.axis(field), toTag(@field(renames, field.name)));
@@ -789,7 +790,7 @@ pub const Shape = struct {
 
     pub fn splitAxes(self: Shape, axes_: anytype) Shape {
         const T = @TypeOf(axes_);
-        meta.assertComptime(meta.isStruct(T), "Must pass struct of enum literals like .{ .a = .{ .a1, .a2 } }. Passed: {any}", .{T});
+        stdx.debug.assertComptime(stdx.meta.isStruct(T), "Must pass struct of enum literals like .{ .a = .{ .a1, .a2 } }. Passed: {any}", .{T});
 
         var res = self;
         inline for (std.meta.fields(T)) |field| {
@@ -822,7 +823,7 @@ pub const Shape = struct {
         var new_dim: i64 = 1;
         for (axes__.constSlice(), first_axis..) |ax, counter| {
             new_dim *= self.dim(ax);
-            meta.assert(ax == counter, "Can't merge shape {} along non-contiguous axes {any}", .{ self, axes_ });
+            stdx.debug.assert(ax == counter, "Can't merge shape {} along non-contiguous axes {any}", .{ self, axes_ });
         }
 
         var new_shape = self;
@@ -863,11 +864,11 @@ pub const Shape = struct {
 
     pub fn mergeAxes(self: Shape, axes_: anytype) Shape {
         const T = @TypeOf(axes_);
-        meta.assertComptime(meta.isStruct(T), "Must pass struct of enum literals like .{ .a = .{ .a1, .a2 } }. Passed: {any}", .{T});
+        stdx.debug.assertComptime(stdx.meta.isStruct(T), "Must pass struct of enum literals like .{ .a = .{ .a1, .a2 } }. Passed: {any}", .{T});
 
         var res = self;
         inline for (std.meta.fields(T)) |field| {
-            meta.assertComptime(meta.isTupleOfAny(field.type, isAxisConvertible) or meta.isSliceOfAny(field.type, isAxisConvertible), "Must pass struct of axes. Passed: {any}", .{field.type});
+            stdx.debug.assertComptime(stdx.meta.isTupleOfAny(field.type, isAxisConvertible) or stdx.meta.isSliceOfAny(field.type, isAxisConvertible), "Must pass struct of axes. Passed: {any}", .{field.type});
             res = res.mergeAxis(field, @field(axes_, field.name));
         }
         return res;
@@ -912,28 +913,28 @@ pub const Shape = struct {
         var vals_: std.BoundedArray(T, MAX_RANK) = .{};
         var tags_: TagsArray = .{};
 
-        if (comptime meta.isSliceOf(V, T)) {
+        if (comptime stdx.meta.isSliceOf(V, T)) {
             for (v) |d| {
                 vals_.appendAssumeCapacity(d);
             }
             return .{ vals_, tags_ };
         }
 
-        if (comptime meta.isStruct(V)) {
+        if (comptime stdx.meta.isStruct(V)) {
             const fields = std.meta.fields(V);
-            meta.assertComptime(fields.len <= MAX_RANK, "Too many fields in struct {} ({d}). Max supported is {d}.", .{ V, fields.len, MAX_RANK });
+            stdx.debug.assertComptime(fields.len <= MAX_RANK, "Too many fields in struct {} ({d}). Max supported is {d}.", .{ V, fields.len, MAX_RANK });
             inline for (fields) |field| {
                 const fv = @field(v, field.name);
                 vals_.appendAssumeCapacity(fv);
 
-                if (!comptime meta.isTuple(V)) {
+                if (!comptime stdx.meta.isTuple(V)) {
                     tags_.appendAssumeCapacity(toTag(field));
                 }
             }
             return .{ vals_, tags_ };
         }
 
-        meta.compileError("parseStruct expects struct or tuple, got {}", .{V});
+        stdx.meta.compileError("parseStruct expects struct or tuple, got {}", .{V});
     }
 
     test parseStruct {
@@ -948,17 +949,17 @@ pub const Shape = struct {
         const V = @TypeOf(options);
 
         var res: std.BoundedArray(T, MAX_RANK) = .{};
-        if (comptime meta.isSliceOf(V, T)) {
-            meta.assert(options.len == self.rank(), "expects exactly {} options in slice, for {} got {}", .{ self.rank(), self, options.len });
+        if (comptime stdx.meta.isSliceOf(V, T)) {
+            stdx.debug.assert(options.len == self.rank(), "expects exactly {} options in slice, for {} got {}", .{ self.rank(), self, options.len });
             for (options) |d| {
                 res.appendAssumeCapacity(d);
             }
         }
 
-        if (comptime meta.isStruct(V)) {
+        if (comptime stdx.meta.isStruct(V)) {
             for (0..self.rank()) |_| res.appendAssumeCapacity(default);
             const fields = std.meta.fields(V);
-            meta.assertComptime(fields.len <= MAX_RANK, "expects up to {} options struct literal, got {}", .{ V, MAX_RANK, fields.len });
+            stdx.debug.assertComptime(fields.len <= MAX_RANK, "expects up to {} options struct literal, got {}", .{ V, MAX_RANK, fields.len });
             inline for (fields) |field| {
                 const a = self.axis(field);
                 res.buffer[a] = @field(options, field.name);
@@ -966,7 +967,7 @@ pub const Shape = struct {
             return res;
         }
 
-        meta.compileError("parseStruct expects struct or tuple, got {}", .{V});
+        stdx.meta.compileError("parseStruct expects struct or tuple, got {}", .{V});
     }
 
     test parseAxesOptions {

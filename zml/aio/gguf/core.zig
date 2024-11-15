@@ -3,7 +3,7 @@ const std = @import("std");
 const zml = @import("../../zml.zig");
 
 const assert = std.debug.assert;
-const log = std.log.scoped(.zml_io);
+const log = std.log.scoped(.@"zml/io");
 
 pub const GgufErrors = error{
     ValueTypeMismatch,

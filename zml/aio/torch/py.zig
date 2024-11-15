@@ -1,6 +1,6 @@
 const std = @import("std");
 const math = std.math;
-const log = std.log.scoped(.zml_aio);
+const log = std.log.scoped(.@"zml/aio");
 
 const pickle = @import("pickle.zig");
 

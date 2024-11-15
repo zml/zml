@@ -504,13 +504,14 @@ pub const LoadedExecutable = opaque {
         return @ptrCast(ret.addressable_devices);
     }
 
-    pub fn execute(self: *const LoadedExecutable, api: *const Api, args: struct {
+    pub const ExecuteArgs = struct {
         num_args: usize,
         arguments: []const [*]const *const Buffer,
         results: []const [*]*Buffer,
         events: []?*Event,
         non_donatable_input_indices: []const i64 = &.{},
-    }) ApiError!void {
+    };
+    pub fn execute(self: *const LoadedExecutable, api: *const Api, args: ExecuteArgs) ApiError!void {
         var options = pjrtStruct(c.PJRT_ExecuteOptions{
             .send_callbacks = null,
             .recv_callbacks = null,

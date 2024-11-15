@@ -1,28 +1,18 @@
-const builtin = @import("builtin");
-const std = @import("std");
-
 const asynk = @import("async");
+const builtin = @import("builtin");
 const runtimes = @import("runtimes");
+const std = @import("std");
+const stdx = @import("stdx");
 
 const meta = @import("meta.zig");
 const module = @import("module.zig");
 const pjrt = @import("pjrtx.zig");
+
 const log = std.log.scoped(.zml);
 
 pub const Target = runtimes.Platform;
 
-pub const available_targets = switch (builtin.os.tag) {
-    .macos => [_]Target{
-        .cpu,
-    },
-    .linux => [_]Target{
-        .cpu,
-        .cuda,
-        .rocm,
-        .tpu,
-    },
-    else => [_]Target{},
-};
+pub const available_targets = std.enums.values(Target);
 
 pub const CompilationOptions = struct {
     xla_dump_to: ?[]const u8 = null,
