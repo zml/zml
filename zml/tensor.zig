@@ -3629,6 +3629,27 @@ pub const Tensor = struct {
             }
         }.binaryOpHelper;
     }
+
+    /// Insert code that will print the content of the given buffer at runtime.
+    /// Only for debug purpose, it has the following limitations:
+    /// * only supported on Cuda atm
+    /// * only prints the first 1024 values
+    /// * pre allocates a buffer on the host to copy the content of the device buffer,
+    /// this buffer won't be freed. You will have one buffer per "print" call in the IR.
+    /// * does device to host synchronization so it will slow down the program execution.
+    pub fn print(input: Tensor) Tensor {
+        return ops.addHostCallback(&printCallback, input);
+    }
+
+    fn printCallback(host_buffer: HostBuffer) void {
+        switch (host_buffer.dtype()) {
+            inline else => |dt| {
+                const items = host_buffer.items(dt.toZigType());
+                const n = @min(items.len, 1024);
+                std.debug.print("Device buffer: {}: {any}\n", .{ host_buffer.shape(), items[0..n] });
+            },
+        }
+    }
 };
 
 fn initPoolArg(rank: usize, data: []const i64) [Tensor.MAX_RANK]i64 {

@@ -139,6 +139,14 @@ pub const Api = struct {
             .minor = @intCast(self.inner.pjrt_api_version.minor_version),
         };
     }
+
+    pub fn customCallRegistry(api: *const Api) ?CustomCallRegistry {
+        if (api.lookupExtension(c.PJRT_Gpu_Custom_Call, c.PJRT_Extension_Type_Gpu_Custom_Call)) |ext| {
+            return .{ .inner = ext.custom_call.? };
+        }
+        // log.warn("No Custom Call registry found for platform: {}", .{self});
+        return null;
+    }
 };
 
 pub const ErrorCode = enum(c.PJRT_Error_Code) {
@@ -852,5 +860,30 @@ pub const NamedValue = extern struct {
             .bool => try writer.print(" .bool = {} ", .{u.bool_value}),
         }
         try writer.writeAll("}");
+    }
+};
+
+/// Custom call signature arguments are:
+/// * a pointer to a platform specific stream handle
+/// * a pointer to an unspecified list of platform specific buffer handle
+/// * a context struct passed as a slice of bytes
+pub const CustomCall = fn (*anyopaque, [*]*anyopaque, [*]const u8, usize) callconv(.C) void;
+
+pub const CustomCallRegistry = extern struct {
+    inner: *const c.PJRT_Gpu_Register_Custom_Call,
+
+    pub fn register(self: *const CustomCallRegistry, api: *const Api, api_version: usize, name: []const u8, func: *const CustomCall) ApiError!void {
+        var ret = pjrtStruct(c.PJRT_Gpu_Register_Custom_Call_Args{
+            .function_name = name.ptr,
+            .function_name_size = name.len,
+            .api_version = @intCast(api_version),
+            .custom_call_function = @ptrCast(@constCast(func)),
+        });
+        const result = self.inner(&ret);
+        if (result) |pjrt_c_error| {
+            const pjrt_error: *Error = @ptrCast(pjrt_c_error);
+            log.err("[GpuRegisterCustomCall] {s}", .{pjrt_error.getMessage(api)});
+            return pjrt_error.getCode(api).toApiError();
+        }
     }
 };
