@@ -1177,8 +1177,6 @@ pub const Tensor = struct {
                 .lhs_contracting_dimensions = lhs_contracting_axes.constSlice(),
                 .rhs_contracting_dimensions = rhs_contracting_axes.constSlice(),
                 .precision = .fast,
-                // .precision = .highest,
-                // .precision = .{ .algorithm = .{ .accumulation = .f32 } },
             },
         );
         return _result(res_shape, op.result(0));
