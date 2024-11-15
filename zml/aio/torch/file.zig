@@ -1,14 +1,15 @@
-const std = @import("std");
-const testing = std.testing;
-const log = std.log.scoped(.zml_aio);
-
 const asynk = @import("async");
+const std = @import("std");
+const stdx = @import("stdx");
 
 const zml = @import("../../zml.zig");
 const pickle = @import("pickle.zig");
 const py = @import("py.zig");
 const eval = @import("eval.zig");
 const HostBuffer = zml.HostBuffer;
+
+const testing = std.testing;
+const log = std.log.scoped(.@"zml/aio");
 
 // TODO(cryptodeal): use zml.aio.PrefixBuilder instead
 const StringBuilder = std.ArrayListUnmanaged(u8);
@@ -329,7 +330,7 @@ pub const File = struct {
                     },
                     .dict => {
                         const n = @divExact(seq.values.len, 2);
-                        log.info("found dict with {} entries", .{n});
+                        log.debug("found dict with {} entries", .{n});
                         for (0..n) |i| {
                             const key, const val = seq.values[2 * i ..][0..2].*;
                             switch (key) {
@@ -534,7 +535,7 @@ pub const File = struct {
     }
 
     fn parseDims(values: []py.Any) error{InvalidInput}!zml.Shape.DimsArray {
-        zml.meta.assert(values.len <= zml.Tensor.MAX_RANK, "Found Pytorch tensor with unsupported rank {}", .{values.len});
+        stdx.debug.assert(values.len <= zml.Tensor.MAX_RANK, "Found Pytorch tensor with unsupported rank {}", .{values.len});
         var result: zml.Shape.DimsArray = .{};
         for (values) |val| {
             switch (val) {

@@ -17,9 +17,7 @@ const Benchmark = struct {
 };
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    try asynk.AsyncThread.main(gpa.allocator(), asyncMain, .{});
+    try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain);
 }
 
 pub fn asyncMain() !void {
@@ -48,35 +46,7 @@ pub fn asyncMain() !void {
     const platform = context.autoPlatform().withCompilationOptions(.{
         .sharding_enabled = true,
     });
-    {
-        // List available targets
-        std.debug.print("Available Platforms:\n", .{});
-        const selected_prefix = "✅";
-        const not_selected_prefix = "• ";
-        const selected_postfix = "(AUTO-SELECTED)\n";
-        const not_selected_postfix = "\n";
-        for (zml.platform.available_targets) |target| {
-            std.debug.print("  {s} {s} {s}", .{
-                if (target == platform.target) selected_prefix else not_selected_prefix,
-                @tagName(target),
-                if (target == platform.target) selected_postfix else not_selected_postfix,
-            });
-
-            // now the platform's devices
-            if (context.platforms.get(target)) |pfm| {
-                for (pfm.getDevices(), 0..) |device, index| {
-                    const deviceKind = device.getDescription(platform.pjrt_api).getKind(platform.pjrt_api);
-                    std.debug.print("       ◦ #{d}: {s}\n", .{
-                        index,
-                        deviceKind,
-                    });
-                    // we only list 1 CPU device
-                    if (target == .cpu and platform.sharding().num_partitions == 1) break;
-                }
-            }
-        }
-        std.debug.print("\n", .{});
-    }
+    context.printAvailablePlatforms(platform);
 
     var args = std.process.args();
     const cli_args = flags.parse(&args, CliArgs);

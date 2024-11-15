@@ -2,14 +2,14 @@ const mlir = @This();
 
 const builtin = @import("builtin");
 const std = @import("std");
+const stdx = @import("stdx");
 
 const dtype = @import("dtype.zig");
-const meta = @import("meta.zig");
 
 const Shape = @import("shape.zig").Shape;
 const Tensor = @import("tensor.zig").Tensor;
 
-const log = std.log.scoped(.zml_mlir);
+const log = std.log.scoped(.@"zml/mlir");
 
 pub usingnamespace @import("mlir");
 
@@ -128,7 +128,7 @@ pub const ext = struct {
                 }
             }
 
-            meta.panic("Could not convert mlir.Type to DataType: {}", .{mlir_type});
+            stdx.debug.panic("Could not convert mlir.Type to DataType: {}", .{mlir_type});
         }
     };
 
@@ -148,7 +148,7 @@ pub const ext = struct {
                     const int_attr = mlir.IntegerAttribute(int_type).init(ctx, @intCast(val));
                     return int_attr.as(mlir.Attribute).?;
                 },
-                inline else => |_, tag| meta.panic("Unsupported data type: {any}", .{tag}),
+                inline else => |_, tag| stdx.debug.panic("Unsupported data type: {any}", .{tag}),
             }
         }
     };
@@ -169,7 +169,7 @@ pub const ext = struct {
                 .f16 => mlir.DenseIntOrFPElementsAttribute(.f16).init(result_type, data.constSlice()).as(mlir.Attribute).?,
                 .f32 => mlir.DenseIntOrFPElementsAttribute(.f32).init(result_type, data.constSlice()).as(mlir.Attribute).?,
                 .f64 => mlir.DenseIntOrFPElementsAttribute(.f64).init(result_type, data.constSlice()).as(mlir.Attribute).?,
-                inline else => |tag| meta.panic("Unsupported data type: {any}", .{tag}),
+                inline else => |tag| stdx.debug.panic("Unsupported data type: {any}", .{tag}),
             };
         }
     };

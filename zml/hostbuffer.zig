@@ -1,6 +1,6 @@
 const std = @import("std");
+const stdx = @import("stdx");
 
-const meta = @import("meta.zig");
 const Buffer = @import("buffer.zig").Buffer;
 const Data = @import("dtype.zig").Data;
 const DataType = @import("dtype.zig").DataType;
@@ -108,13 +108,13 @@ pub const HostBuffer = struct {
     /// The memory is initialized with increasing numbers.
     /// The caller owns the memory, and need to call `deinit()`.
     pub fn arange(allocator: std.mem.Allocator, args: ArangeArgs, dt: DataType) !HostBuffer {
-        meta.assert(args.start < args.end, "arange expects 'args.start' to be less than 'args.end', got {} and {}", .{ args.start, args.end });
-        meta.assert(args.step > 0, "arange expects 'args.step' to be positive, got {}", .{args.step});
+        stdx.debug.assert(args.start < args.end, "arange expects 'args.start' to be less than 'args.end', got {} and {}", .{ args.start, args.end });
+        stdx.debug.assert(args.step > 0, "arange expects 'args.step' to be positive, got {}", .{args.step});
 
         const n_steps = std.math.divCeil(i64, args.end - args.start, args.step) catch unreachable;
         const b = dt.sizeOf();
         const res = try empty(allocator, Shape.init(.{n_steps}, dt));
-        meta.assert(dt.class() == .integer, "arange expects type to be integer, got {} instead.", .{dt});
+        stdx.debug.assert(dt.class() == .integer, "arange expects type to be integer, got {} instead.", .{dt});
         var data_ = @constCast(res.data);
         switch (dt) {
             inline else => {
@@ -201,7 +201,7 @@ pub const HostBuffer = struct {
     }
 
     pub fn reshape(self: HostBuffer, shape_: anytype) HostBuffer {
-        meta.assert(self.isContiguous(), "reshape expects a contiguous tensor, got: {}", .{self});
+        stdx.debug.assert(self.isContiguous(), "reshape expects a contiguous tensor, got: {}", .{self});
         var res = self;
         res._shape = self._shape.reshape(shape_);
         return res;
@@ -219,9 +219,9 @@ pub const HostBuffer = struct {
         const start: i64 = if (s.start < 0) s.start + d else s.start;
         var end = s.end orelse d;
         if (end < 0) end += d;
-        meta.assert(start >= 0 and start < d, "slice1d({}, {}) expects the slice start to be between 0 and {} got: {}", .{ self, ax, d, start });
-        meta.assert(end >= 1 and end <= d, "slice1d({}, {}) expects the slice end to be between 1 and {} got: {}", .{ self, ax, d, end });
-        meta.assert(start < end, "slice1d({}, {}) expects the slice start ({}) to be smaller than the end ({})", .{ self, ax, start, end });
+        stdx.debug.assert(start >= 0 and start < d, "slice1d({}, {}) expects the slice start to be between 0 and {} got: {}", .{ self, ax, d, start });
+        stdx.debug.assert(end >= 1 and end <= d, "slice1d({}, {}) expects the slice end to be between 1 and {} got: {}", .{ self, ax, d, end });
+        stdx.debug.assert(start < end, "slice1d({}, {}) expects the slice start ({}) to be smaller than the end ({})", .{ self, ax, start, end });
 
         // If strides weren't set it means original buffer is contiguous.
         // But it won't be anymore after slicing. The strides don't change though.

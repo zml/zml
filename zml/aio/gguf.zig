@@ -8,7 +8,7 @@ const HostBuffer = @import("../hostbuffer.zig").HostBuffer;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
-const log = std.log.scoped(.zml_io);
+const log = std.log.scoped(.@"zml/io");
 
 pub fn open(allocator: Allocator, path: []const u8) !zml.aio.BufferStore {
     var file = try core.GgufFile.open(path);

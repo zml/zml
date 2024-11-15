@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const log = std.log.scoped(.zml_aio);
+const log = std.log.scoped(.@"zml/aio");
 
 /// All possible pickle operators.
 /// Reference: https://github.com/python/cpython/blob/3.13/Lib/pickletools.py

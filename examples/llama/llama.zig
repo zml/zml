@@ -1,16 +1,16 @@
-const std = @import("std");
-const testing = std.testing;
-
-const zml = @import("zml");
-const meta = zml.meta;
 const flags = @import("tigerbeetle/flags");
+const std = @import("std");
+const stdx = @import("stdx");
+const zml = @import("zml");
 
-const log = std.log.scoped(.llama);
-const gguf = zml.io.gguf;
+const testing = std.testing;
 const Buffer = zml.Buffer;
 const Tensor = zml.Tensor;
 const ShapeOf = zml.ShapeOf;
+
+const gguf = zml.io.gguf;
 const expectClose = zml.testing.expectClose;
+const log = std.log.scoped(.llama);
 
 pub const LlamaOptions = struct {
     gen_opts: zml.nn.SamplingStrategy,
@@ -72,7 +72,7 @@ pub const LlamaLM = struct {
         kv_cache: ?KvCache,
         rng: Tensor.Rng,
     ) struct { Tensor, Tensor, KvCache, Tensor.Rng } {
-        meta.assert(tokens_.dtype() == .i32 and tokens_.rank() >= 1 and token_index.dtype() == .i32 and token_index.rank() == 0, "Can't run Llama ! Expected >=1d tokens and 0d token_index, got: {} and {}", .{ tokens_, token_index });
+        stdx.debug.assert(tokens_.dtype() == .i32 and tokens_.rank() >= 1 and token_index.dtype() == .i32 and token_index.rank() == 0, "Can't run Llama ! Expected >=1d tokens and 0d token_index, got: {} and {}", .{ tokens_, token_index });
 
         var tokens = tokens_.withPartialTags(.{.s});
         const out, const updated_kv_cache = zml.call(self.model, .forward, .{ tokens, if (kv_cache == null) null else token_index, kv_cache });
@@ -219,7 +219,7 @@ pub const TransformerLayer = struct {
     ) struct { Tensor, KvCache } {
         // Self Attention
         //log.debug("TransformerLayer({}) -> {}", .{ x0, self.input_layernorm.forward(x0) });
-        meta.assert(x0.rank() >= 2 and x0.shape().hasTags(.{ .s, .d }), "TransformerLayer expected input shape: {{..., .s, .d}}, received: {}", .{x0});
+        stdx.debug.assert(x0.rank() >= 2 and x0.shape().hasTags(.{ .s, .d }), "TransformerLayer expected input shape: {{..., .s, .d}}, received: {}", .{x0});
 
         const x0_normalized = zml.call(self.input_layernorm, .forward, .{x0});
         const delta0, const updated_kv_cache = zml.call(self.self_attn, .forward, .{ x0_normalized, token_index, kv_cache });
@@ -313,7 +313,7 @@ pub const SelfAttn = struct {
 
         const new_kv_cache = kv_cache.update(k, v, token_index orelse Tensor.scalar(0, .i32));
         if (token_index) |_| {
-            meta.assert(q.dim(.q) == 1, "Expected dimension .q to be 1, got {}", .{q.dim(.q)});
+            stdx.debug.assert(q.dim(.q) == 1, "Expected dimension .q to be 1, got {}", .{q.dim(.q)});
             k = new_kv_cache.keys();
             v = new_kv_cache.values();
         }

@@ -1,11 +1,12 @@
-const std = @import("std");
 const builtin = @import("builtin");
+const std = @import("std");
+const stdx = @import("stdx");
 
 const zml = @import("zml.zig");
 const meta = @import("meta.zig");
 const shapesOf = @import("tensor.zig").shapesOf;
 
-const log = std.log.scoped(.zml_testing);
+const log = std.log.scoped(.@"zml/testing");
 
 var _ctx: ?zml.Context = null;
 
@@ -128,7 +129,7 @@ pub fn expectEqualShapes(expected: zml.Shape, actual: zml.Shape) error{TestExpec
 /// Compile a function and immediatly call it with the given buffers.
 /// The compiled module is discarded after the call.
 /// Useful during testing when a module is typically called only once.
-pub fn compileAndCall(platform: zml.Platform, func: anytype, buffer_args: zml.Bufferized(meta.FnParams(func))) !zml.Bufferized(zml.meta.FnResult(func)) {
+pub fn compileAndCall(platform: zml.Platform, func: anytype, buffer_args: zml.Bufferized(stdx.meta.FnArgs(func))) !zml.Bufferized(stdx.meta.FnResult(func)) {
     // This simplify test API and also ensure this fn isn't used outside of tests.
     const allocator = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -139,7 +140,7 @@ pub fn compileAndCall(platform: zml.Platform, func: anytype, buffer_args: zml.Bu
             return x.shape();
         }
     };
-    var shape_args: zml.ShapeOf(meta.FnParams(func)) = undefined;
+    var shape_args: zml.ShapeOf(stdx.meta.FnArgs(func)) = undefined;
     try meta.mapAlloc(Local.bufferToShape, allocator, {}, buffer_args, &shape_args);
 
     const mod = try zml.compileFn(allocator, func, shape_args, platform);
@@ -151,7 +152,7 @@ pub fn compileAndCall(platform: zml.Platform, func: anytype, buffer_args: zml.Bu
 /// Compile a function and immediatly call it with the given buffers.
 /// The compiled module is discarded after the call.
 /// Useful during testing when a module is typically called only once.
-pub fn compileAndCallWithTensors(platform: zml.Platform, func: anytype, shape_args: zml.ShapeOf(meta.FnParams(func)), buffer_args: zml.Bufferized(meta.FnParams(func))) !zml.Bufferized(zml.meta.FnResult(func)) {
+pub fn compileAndCallWithTensors(platform: zml.Platform, func: anytype, shape_args: zml.ShapeOf(stdx.meta.FnArgs(func)), buffer_args: zml.Bufferized(stdx.meta.FnArgs(func))) !zml.Bufferized(stdx.meta.FnResult(func)) {
     // This simplify test API and also ensure this fn isn't used outside of tests.
     const allocator = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(allocator);

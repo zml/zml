@@ -1,9 +1,9 @@
-const std = @import("std");
-
-const zml = @import("zml");
-const meta = zml.meta;
 const asynk = @import("async");
 const flags = @import("tigerbeetle/flags");
+const std = @import("std");
+const stdx = @import("stdx");
+const zml = @import("zml");
+
 const llama_mod = @import("llama.zig");
 
 const LlamaLM = llama_mod.LlamaLM;
@@ -93,7 +93,7 @@ pub fn generateText(
     std.debug.print("{s}\n", .{output.items[n..]});
     const end = std.time.microTimestamp();
 
-    const duration = zml.meta.divFloat(f64, end - start, std.time.us_per_s);
+    const duration = stdx.math.divFloor(f64, end - start, std.time.us_per_s);
     const speed = @as(f64, @floatFromInt(max_seq_len)) / duration;
     log.info("✅ Generated {d} tokens in {:.3}s: {d:.3}tok/s", .{ max_seq_len, duration, speed });
 
@@ -106,7 +106,7 @@ pub fn generateText(
 }
 
 pub fn main() !void {
-    try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain, .{});
+    try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain);
 }
 
 pub fn asyncMain() !void {
@@ -131,9 +131,7 @@ pub fn asyncMain() !void {
 
     log.info("   LLama was compiled with {}", .{@import("builtin").mode});
 
-    var gpa = std.heap.GeneralPurposeAllocator(.{ .thread_safe = true }){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const allocator = std.heap.c_allocator;
 
     const tmp = try std.fs.openDirAbsolute("/tmp", .{});
     try tmp.makePath("zml/llama/cache");
@@ -147,35 +145,7 @@ pub fn asyncMain() !void {
     };
 
     const platform = context.autoPlatform().withCompilationOptions(compilation_options);
-    {
-        // List available targets
-        std.debug.print("\nSupported Platforms:\n", .{});
-        const selected_prefix = "✅";
-        const not_selected_prefix = "• ";
-        const selected_postfix = "(AUTO-SELECTED)\n";
-        const not_selected_postfix = "\n";
-        for (zml.platform.available_targets) |target| {
-            std.debug.print("  {s} {s} {s}", .{
-                if (target == platform.target) selected_prefix else not_selected_prefix,
-                @tagName(target),
-                if (target == platform.target) selected_postfix else not_selected_postfix,
-            });
-
-            // now the platform's devices
-            if (context.platforms.get(target)) |pfm| {
-                for (pfm.getDevices(), 0..) |device, index| {
-                    const deviceKind = device.getDescription(platform.pjrt_api).getKind(platform.pjrt_api);
-                    std.debug.print("       ◦ #{d}: {s}\n", .{
-                        index,
-                        deviceKind,
-                    });
-                    // we only list 1 CPU device
-                    if (target == .cpu) break;
-                }
-            }
-        }
-        std.debug.print("\n", .{});
-    }
+    context.printAvailablePlatforms(platform);
 
     var args = std.process.args();
     const cli_args = flags.parse(&args, CliArgs);
@@ -213,7 +183,7 @@ pub fn asyncMain() !void {
             .freq_base = @floatCast(ts.metadata("rope_freq_base", .float) orelse @as(f32, @floatFromInt(cli_args.rope_freq_base orelse 10_000))),
         },
     };
-    log.info("✅ Parsed llama config: {}", .{llama_options});
+    log.info("✅\tParsed llama config: {}", .{llama_options});
     llama.init(llama_options);
 
     if (cli_args.tokenizer == null and !std.mem.endsWith(u8, cli_args.model, ".gguf")) {
@@ -221,9 +191,9 @@ pub fn asyncMain() !void {
         @panic("No tokenizer provided");
     }
     const tokenizer_path = cli_args.tokenizer orelse cli_args.model;
-    log.info("   Loading tokenizer from {s}", .{tokenizer_path});
+    log.info("\tLoading tokenizer from {s}", .{tokenizer_path});
     var tokenizer = try zml.aio.detectFormatAndLoadTokenizer(allocator, tokenizer_path);
-    log.info("✅ Loaded tokenizer from {s}", .{tokenizer_path});
+    log.info("✅\tLoaded tokenizer from {s}", .{tokenizer_path});
     defer tokenizer.deinit();
 
     const dims = llama.model.shape();
@@ -238,25 +208,23 @@ pub fn asyncMain() !void {
     const kv_cache_shape: ?ShapeOf(KvCache) = KvCache.initShape(kv_shape);
     const rng_shape = Tensor.Rng.shape();
 
-    const compile_start = std.time.milliTimestamp();
-    var fut_mod_prefill = try asynk.asyncGeneric(zml.compile, .{ allocator, LlamaLM, .{llama_options}, .forward, .{ tokens_shape, token_idx_shape, null, rng_shape }, ts, platform });
-    var fut_mod = try asynk.asyncGeneric(zml.compile, .{ allocator, LlamaLM, .{llama_options}, .forward, .{ tokens_shape, token_idx_shape, kv_cache_shape, rng_shape }, ts, platform });
+    var start = try std.time.Timer.start();
+    var fut_mod_prefill = try asynk.asyncc(zml.compile, .{ allocator, LlamaLM.forward, .{llama_options}, .{ tokens_shape, token_idx_shape, null, rng_shape }, ts, platform });
+    var fut_mod = try asynk.asyncc(zml.compile, .{ allocator, LlamaLM.forward, .{llama_options}, .{ tokens_shape, token_idx_shape, kv_cache_shape, rng_shape }, ts, platform });
 
-    log.info("Starting loading weights", .{});
+    log.info("\tLoading Llama weights from {s}...", .{cli_args.model});
     var llama_weights = try zml.aio.loadBuffers(LlamaLM, .{llama_options}, ts, model_arena, platform);
     defer zml.aio.unloadBuffers(&llama_weights);
-    log.info("✅ Done loading weights", .{});
-    log.info("✅ Llama model loaded from {s}", .{cli_args.model});
+    log.info("✅\tLoaded weights in {d}ms", .{start.read() / std.time.ns_per_ms});
 
     var llama_module_prefill = try (try fut_mod_prefill.await_()).prepare(allocator, llama_weights);
     defer llama_module_prefill.deinit();
     var llama_module = try (try fut_mod.await_()).prepare(allocator, llama_weights);
     defer llama_module.deinit();
-    const compile_end = std.time.milliTimestamp();
-    log.info("✅ Compiled model in {d} milliseconds! \n", .{compile_end - compile_start});
+    log.info("✅\tCompiled model in {d}ms", .{start.read() / std.time.ns_per_ms});
 
     const prompt = cli_args.prompt orelse "Once upon a time, there was a little girl named Lily.";
-    log.info("✅ Prompt: {s}\n", .{prompt});
+    log.info("✅\tPrompt: {s}", .{prompt});
 
     const seed = cli_args.seed orelse @as(u128, @bitCast(std.time.nanoTimestamp()));
     const story = try generateText(llama, llama_module_prefill, llama_module, tokenizer, allocator, seed, prompt);

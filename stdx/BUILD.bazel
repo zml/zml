@@ -1,0 +1,13 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "stdx",
+    srcs = [
+        "debug.zig",
+        "math.zig",
+        "meta.zig",
+        "signature.zig",
+    ],
+    main = "stdx.zig",
+    visibility = ["//visibility:public"],
+)

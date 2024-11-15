@@ -1,32 +1,31 @@
+const asynk = @import("async");
 const builtin = @import("builtin");
-const std = @import("std");
-
+const dialect = @import("mlir/dialects");
+const protobuf = @import("io/protobuf");
 const runfiles = @import("runfiles");
-
+const std = @import("std");
+const stdx = @import("stdx");
 const xla_pb = @import("//xla:xla_proto");
+
 const meta = @import("meta.zig");
 const mlir = @import("mlir.zig");
 const ops = @import("ops.zig");
 const pjrt = @import("pjrtx.zig");
-const protobuf = @import("io/protobuf");
-const asynk = @import("async");
 const aio = @import("aio.zig");
 
-const dialect = @import("mlir/dialects");
-
-const assert = std.debug.assert;
+const Buffer = @import("buffer.zig").Buffer;
+const Bufferized = @import("tensor.zig").Bufferized;
 const Context = @import("context.zig").Context;
 const Location = mlir.Location;
 const Platform = @import("platform.zig").Platform;
+const Shape = @import("shape.zig").Shape;
+const ShapeOf = @import("tensor.zig").ShapeOf;
 const Target = @import("platform.zig").Target;
 const Tensor = @import("tensor.zig").Tensor;
-const ShapeOf = @import("tensor.zig").ShapeOf;
-const Shape = @import("shape.zig").Shape;
-const Buffer = @import("buffer.zig").Buffer;
-const Bufferized = @import("tensor.zig").Bufferized;
 const Tracer = @import("tools/tracer.zig").Tracer;
 
-const log = std.log.scoped(.zml_module);
+const assert = std.debug.assert;
+const log = std.log.scoped(.@"zml/module");
 
 test {
     std.testing.refAllDecls(@This());
@@ -101,7 +100,7 @@ pub const CompilationContext = struct {
     }
 
     pub fn deactivate(self: *CompilationContext) void {
-        std.debug.assert(_current != null and _current.? == self);
+        assert(_current != null and _current.? == self);
         _current = self._previous;
         self._previous = null;
     }
@@ -163,7 +162,7 @@ pub const CompilationContext = struct {
         // So we create a copy of the arguments, and replace values
         // by the block arguments.
         var blk_args = args;
-        assert(assignBlockArguments(&blk_args, block, 0) == N);
+        std.debug.assert(assignBlockArguments(&blk_args, block, 0) == N);
 
         const loc = self.mlirCtx().location(@src());
         const block_res = @call(.auto, func, S.blkArgs(blkctx, blk_args));
@@ -209,9 +208,9 @@ pub const CompilationContext = struct {
 
         var input_shapes = try std.ArrayList(Shape).initCapacity(arena, tensor_count);
         meta.collect(Tensor.shape, {}, &input_shapes, model) catch unreachable;
-        meta.internalAssert(input_shapes.items.len == model_tensor_count, "model has changed ?", .{});
+        stdx.debug.internalAssert(input_shapes.items.len == model_tensor_count, "model has changed ?", .{});
         meta.collect(Tensor.shape, {}, &input_shapes, args) catch unreachable;
-        meta.internalAssert(input_shapes.items.len == tensor_count, "args have changed ?", .{});
+        stdx.debug.internalAssert(input_shapes.items.len == tensor_count, "args have changed ?", .{});
 
         const input_types = try arena.alloc(mlir.Type, tensor_count);
         for (input_types, input_shapes.items) |*t, sh| t.* = mlir.ext.mlirType(mlir_ctx, sh);
@@ -311,7 +310,7 @@ pub const CompilationContext = struct {
                     // This will break the day we writer another attribute before donation.
                     // When the time come, do a more fancy lookup here to check if an argument
                     // is donated twice.
-                    meta.assert(attributes[a].len == 0, "Donation error ! Argument {} has been donated twice ! To {} and to {}", .{ a, index, attributes[a].buffer[0] });
+                    stdx.debug.assert(attributes[a].len == 0, "Donation error ! Argument {} has been donated twice ! To {} and to {}", .{ a, index, attributes[a].buffer[0] });
                     attributes[a].appendAssumeCapacity(
                         mlir.NamedAttribute.init(
                             mlir.Identifier.get(self.mlirCtx(), "tf.aliasing_output"),
@@ -507,7 +506,7 @@ pub const CompilationContext = struct {
         extractValues(args, values[function.n_model..]);
 
         const op = dialect.func.call(self.mlirCtx(), function.name, values, function.res_types, loc);
-        var res: meta.FnResult(func) = undefined;
+        var res: stdx.meta.FnResult(func) = undefined;
         assignResults(&res, function.res_shapes, op);
         return res;
     }
@@ -531,7 +530,7 @@ pub const CompilationContext = struct {
 
                 const res = ctx.self._buffer_to_arg.getOrPutAssumeCapacity(tensor._id);
                 if (res.found_existing) {
-                    std.debug.panic("Failed compilation because received two tensors arguments with the same ID: {} and {}({}).", .{ res.key_ptr.*, tensor, tensor._id });
+                    stdx.debug.panic("Failed compilation because received two tensors arguments with the same ID: {} and {}({}).", .{ res.key_ptr.*, tensor, tensor._id });
                 } else {
                     res.value_ptr.* = .{ arg_value, .{ .arg = @intCast(ctx.index) } };
                 }
@@ -677,9 +676,9 @@ fn fillBuffers(v: anytype, buffers: []const [*]*pjrt.Buffer, start: u32, len: u3
     };
     meta.visit((struct {
         fn cb(ctx: *LocalContext, buffer: *const Buffer) void {
-            // meta.assert(!buffer._data.isDeleted(), "Can't use {} (argument buffer {}) because its pjrt buffer has been donated", .{ buffer, ctx.index });
+            // stdx.debug.assert(!buffer._data.isDeleted(), "Can't use {} (argument buffer {}) because its pjrt buffer has been donated", .{ buffer, ctx.index });
             const model_sharding = ctx.buffers.len;
-            meta.assert(buffer._shards.len == model_sharding, "Can't feed a {}-sharded tensor into a {}-sharded model", .{ buffer._shards.len, ctx.buffers.len });
+            stdx.debug.assert(buffer._shards.len == model_sharding, "Can't feed a {}-sharded tensor into a {}-sharded model", .{ buffer._shards.len, ctx.buffers.len });
             for (buffer._shards.constSlice(), 0..) |shard, d| {
                 ctx.buffers[d][ctx.index] = shard;
             }
@@ -718,7 +717,7 @@ pub fn assignRawBuffers(v: anytype, platform: Platform, buffers: []const [*]*pjr
             buffer.* = Buffer.fromPjrtBuffers(ctx.platform, ctx.buffer_shapes[i], shards.constSlice());
         }
     }).cb, &local_ctx, v);
-    meta.internalAssert(local_ctx.index == expected_count, "Pjrt call returned {} tensors, but the return type {s}, contains {} Buffers. Note that modules need to have a comptime know number of returned tensors.", .{ buffers.len, @typeName(@TypeOf(v)), local_ctx.index });
+    stdx.debug.internalAssert(local_ctx.index == expected_count, "Pjrt call returned {} tensors, but the return type {s}, contains {} Buffers. Note that modules need to have a comptime know number of returned tensors.", .{ buffers.len, @typeName(@TypeOf(v)), local_ctx.index });
 }
 
 /// Visit the given struct and assign op results to each tensor found.
@@ -761,6 +760,13 @@ const BaseExe = struct {
     num_devices: u8,
     /// Allocator backing result_buffer_shapes and deinit by ExeWithWeights
     _allocator: std.heap.ArenaAllocator,
+
+    pub fn serialize(self: BaseExe, writer: anytype) !void {
+        var executable = try self.exe.getExecutable(self.pjrt_api);
+        var serialize_result = try executable.serialize(self.platform.pjrt_api);
+        defer serialize_result.deinit();
+        try writer.writeAll(serialize_result.bytes);
+    }
 };
 
 /// Represents a ZML model, compiled into a PJRT executable.
@@ -779,6 +785,16 @@ pub fn Exe(comptime func: anytype) type {
         pub fn prepare(self: Self, allocator: std.mem.Allocator, model: Bufferized(Signature.ModelT)) !ExeWithWeights(func) {
             return ExeWithWeights(func).initFromModel(allocator, self.inner, model);
         }
+
+        pub fn serialize(self: Self, writer: anytype) !void {
+            return try self.inner.serialize(writer);
+        }
+
+        // pub fn deserialize(allocator: std.mem.Allocator, platform: Platform, reader: anytype) !Self {
+        //     const bytes = try reader.readToEndAlloc(allocator, max_pjrt_executable_size);
+        //     defer allocator.free(bytes);
+        //     return platform.pjrt_client.deserializeAndLoad(platform.pjrt_api, bytes);
+        // }
     };
 }
 
@@ -906,7 +922,7 @@ fn compileInternal(
     var timer = std.time.Timer.start() catch null;
     const tensor_args = context.tensorFromShapes(ModuleSignature(func).ArgsT, arena, args);
     // Run in a dedicated thread because compilation relies on `threadlocal`.
-    const f = try asynk.callBlockingGeneric(CompilationContext.generateBytecode, .{ context, arena, "main", func, &model, &tensor_args });
+    const f = try asynk.callBlocking(CompilationContext.generateBytecode, .{ context, arena, "main", func, &model, &tensor_args });
     context._module.getBody().appendOperation(f.mlir_fn);
 
     const sharding = context._platform.sharding();
@@ -927,7 +943,7 @@ fn compileInternal(
 
     if (timer) |*t| {
         const time_ms = @divFloor(t.lap(), std.time.ns_per_ms);
-        if (time_ms > 1000) log.info("Compilation took {d:.3}s", .{meta.divFloat(f32, time_ms, 1000)});
+        if (time_ms > 1000) log.info("Compilation took {d:.3}s", .{stdx.math.divFloor(f32, time_ms, 1000)});
     }
 
     var arena_state_exe = std.heap.ArenaAllocator.init(allocator);
@@ -945,12 +961,7 @@ fn compileInternal(
     };
 }
 
-/// Compiles a Model struct with the given configuration and shapes, for the given platform.
-/// The steps are:
-/// * lookup at tensors available in the store and create a `model: Model` struct with them
-/// * call `model.init(init_args)` to fields of the model that aren't Tensor, ie hyperparemeters/config
-/// * generate MLIR by calling `model.forward` with tensor of the given shapes and other arguments
-pub fn compile(
+pub fn load(
     allocator: std.mem.Allocator,
     comptime Model: type,
     init_args: anytype,
@@ -974,32 +985,61 @@ pub fn compile(
 }
 
 /// Compiles a Model struct with the given configuration and shapes, for the given platform.
+/// The steps are:
+/// * lookup at tensors available in the store and create a `model: Model` struct with them
+/// * call `model.init(init_args)` to fields of the model that aren't Tensor, ie hyperparemeters/config
+/// * generate MLIR by calling `model.forward` with tensor of the given shapes and other arguments
+pub fn compile(
+    allocator: std.mem.Allocator,
+    comptime func: anytype,
+    init_args: anytype,
+    args_shapes: ShapeOf(ModuleSignature(func).ArgsT),
+    buffer_store: aio.BufferStore,
+    platform: Platform,
+) !Exe(func) {
+    const ModelT = ModuleSignature(func).ModelT;
+
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var model = try aio.populateModel(ModelT, arena, buffer_store);
+
+    // If the Model has a "init" function, call it with the given parameters.
+    if (@hasDecl(ModelT, "init")) {
+        // TODO(Corentin,@Improvement): Add a warning/error if there is no init function but init_args is non-void.
+        @call(.auto, ModelT.init, .{@as(*ModelT, &model)} ++ init_args);
+    }
+
+    return compileModel(allocator, func, model, args_shapes, platform);
+}
+
+/// Compiles a Model struct with the given configuration and shapes, for the given platform.
 /// Generate MLIR by calling `model.forward` with tensor of the given shapes and other arguments
 pub fn compileModel(
     allocator: std.mem.Allocator,
-    model: anytype,
-    comptime func: @TypeOf(.literal),
-    args_shapes: ShapeOf(ModuleSignature(@field(@TypeOf(model), @tagName(func))).ArgsT),
+    comptime func: anytype,
+    model: ModuleSignature(func).ModelT,
+    args_shapes: ShapeOf(ModuleSignature(func).ArgsT),
     platform: Platform,
-) !Exe(@field(@TypeOf(model), @tagName(func))) {
-    const Model = @TypeOf(model);
-    const name = @typeName(Model) ++ "." ++ @tagName(func);
+) !Exe(func) {
+    const ModelT = ModuleSignature(func).ModelT;
+    const name = @typeName(ModelT) ++ ".forward";
     log.info("Compiling {s} with {}", .{ name, args_shapes });
 
     var context = try CompilationContext.init(allocator, name, platform);
     defer context.deinit();
 
-    const raw_module = try compileInternal(allocator, &context, @field(Model, @tagName(func)), model, args_shapes);
+    const raw_module = try compileInternal(allocator, &context, func, model, args_shapes);
 
-    return Exe(@field(Model, @tagName(func))){ .inner = raw_module };
+    return .{ .inner = raw_module };
 }
 
 /// Compiles a function with the given configuration and shapes, for the given platform.
 /// Generate MLIR by calling the given function with tensor of the given shapes.
 pub fn compileFn(
     allocator: std.mem.Allocator,
-    func: anytype,
-    args: ShapeOf(meta.FnParams(func)),
+    comptime func: anytype,
+    args: ShapeOf(stdx.meta.FnArgs(func)),
     platform: Platform,
 ) !ExeWithWeights(FnWithVoidArg(func)) {
     const name = @typeName(@TypeOf(func));
@@ -1008,7 +1048,7 @@ pub fn compileFn(
 
     const Local = struct {
         // This is the function we will actually compile.
-        pub fn forward(_: void, inner_args: meta.FnParams(func)) meta.FnResult(func) {
+        pub fn forward(_: void, inner_args: stdx.meta.FnArgs(func)) stdx.meta.FnResult(func) {
             return @call(.auto, func, inner_args);
         }
     };
@@ -1019,10 +1059,10 @@ pub fn compileFn(
     return try ExeWithWeights(FnWithVoidArg(func)).initFromModel(allocator, raw_module, void_model);
 }
 
-fn FnWithVoidArg(func: anytype) type {
+fn FnWithVoidArg(comptime func: anytype) type {
     const fn_info = @typeInfo(@TypeOf(func)).Fn;
     const void_param = std.builtin.Type.Fn.Param{ .is_generic = false, .is_noalias = false, .type = void };
-    meta.assertComptime(!fn_info.is_generic, "Can't do reflection on generic function: {}", .{@TypeOf(func)});
+    stdx.debug.assertComptime(!fn_info.is_generic, "Can't do reflection on generic function: {}", .{@TypeOf(func)});
     return @Type(.{ .Fn = .{
         .calling_convention = fn_info.calling_convention,
         .is_generic = false,
@@ -1268,10 +1308,10 @@ pub fn ModuleSignature(comptime func: anytype) Sign {
     const FuncT = if (@TypeOf(func) == type) func else @TypeOf(func);
     return .{
         .FuncT = FuncT,
-        .ModelT = @typeInfo(FuncT).Fn.params[0].type orelse @compileError("cannot create,ModuleSignature for function with an 'anytype' parameter"),
+        .ModelT = @typeInfo(FuncT).Fn.params[0].type orelse @compileError("cannot create ModuleSignature for function with an 'anytype' parameter"),
         .ArgsT = blk: {
             const function_info = @typeInfo(FuncT);
-            if (function_info.Fn.params[1..].len == 0) {
+            if (function_info.Fn.params.len < 2) {
                 break :blk @TypeOf(.{});
             }
 

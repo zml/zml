@@ -7,7 +7,7 @@ const py = @import("torch/py.zig");
 const File = @import("torch/file.zig").File;
 
 const StringBuilder = std.ArrayListUnmanaged(u8);
-const log = std.log.scoped(.zml_aio);
+const log = std.log.scoped(.@"zml/aio");
 
 test {
     std.testing.refAllDecls(@This());

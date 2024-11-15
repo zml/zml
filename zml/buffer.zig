@@ -1,9 +1,11 @@
+const asynk = @import("async");
 const std = @import("std");
-const testing = std.testing;
+const stdx = @import("stdx");
 
 const meta = @import("meta.zig");
 const pjrt = @import("pjrtx.zig");
-const asynk = @import("async");
+
+const testing = std.testing;
 
 const Context = @import("context.zig").Context;
 const Data = @import("dtype.zig").Data;
@@ -42,12 +44,12 @@ pub const Buffer = struct {
 
         // We shard only on the first axis so that the chunks are still contiguous.
         // TODO: support more advanced sharding specs
-        meta.assert(platform.sharding().num_replicas == 1, "ZML doesn't support num_replicas > 1 for now, got: {}", .{platform.sharding()});
+        stdx.debug.assert(platform.sharding().num_replicas == 1, "ZML doesn't support num_replicas > 1 for now, got: {}", .{platform.sharding()});
         const sharding_ax: ?u3 = std.simd.firstTrue(host_buffer.shape()._sharding_info);
         const n_partitions = platform.sharding().num_partitions;
         const chunk_size = if (sharding_ax) |ax| cs: {
             // This kind of sharding error should be detected earlier on.
-            meta.assert(@rem(host_buffer.dim(ax), n_partitions) == 0, "Buffer.from({}) expects the sharding axis {} to have a dimension divisble by the number of devices ({}).", .{ host_buffer, ax, n_partitions });
+            stdx.debug.assert(@rem(host_buffer.dim(ax), n_partitions) == 0, "Buffer.from({}) expects the sharding axis {} to have a dimension divisble by the number of devices ({}).", .{ host_buffer, ax, n_partitions });
             break :cs @divExact(host_buffer.dim(ax), n_partitions);
         } else 0;
 
@@ -88,8 +90,8 @@ pub const Buffer = struct {
 
     /// Wraps pre-exisiting `pjrt.Buffer` shards into one `zml.Buffer`.
     pub fn fromPjrtBuffers(platform: Platform, shape_: Shape, pjrt_buffers: []const *pjrt.Buffer) Buffer {
-        meta.assert(pjrt_buffers.len <= MAX_NUM_SHARDS, "ZML doesn't support having more than {} shards. Received {} shards for one buffer.", .{ MAX_NUM_SHARDS, pjrt_buffers.len });
-        meta.assert(pjrt_buffers.len > 0, "fromPjrtBuffers expects at least one buffer, got 0.", .{});
+        stdx.debug.assert(pjrt_buffers.len <= MAX_NUM_SHARDS, "ZML doesn't support having more than {} shards. Received {} shards for one buffer.", .{ MAX_NUM_SHARDS, pjrt_buffers.len });
+        stdx.debug.assert(pjrt_buffers.len > 0, "fromPjrtBuffers expects at least one buffer, got 0.", .{});
         var shards: Shards = .{};
         shards.appendSliceAssumeCapacity(pjrt_buffers);
         return .{
@@ -190,9 +192,9 @@ pub const Buffer = struct {
 
     /// Fetches the content of the given buffer into a stack variable of the given type.
     pub fn getValue(self: Buffer, T: type) !T {
-        meta.assert(self._shape.byteSize() == @sizeOf(T), "Buffer {} has {d} bytes of data, can't load it to a {s} with {d} bytes", .{ self, self._shape.byteSize(), @typeName(T), @sizeOf(T) });
+        stdx.debug.assert(self._shape.byteSize() == @sizeOf(T), "Buffer {} has {d} bytes of data, can't load it to a {s} with {d} bytes", .{ self, self._shape.byteSize(), @typeName(T), @sizeOf(T) });
         var res: T = undefined;
-        meta.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
+        stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
         const maybe_event = try self._shards.get(0).toHostBuffer(self._api, std.mem.asBytes(&res));
         if (maybe_event) |event| {
             try event.await_(self._api);
@@ -204,7 +206,7 @@ pub const Buffer = struct {
     /// and return a new `HostBuffer` object with the same shape.
     /// The returned `HostBuffer` doesn't own the memory.
     pub fn toHost(self: Buffer, output: []u8) !HostBuffer {
-        meta.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
+        stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
         const maybe_event = try self._shards.get(0).toHostBuffer(self._api, output);
         if (maybe_event) |event| {
             try event.await_(self._api);
@@ -216,7 +218,7 @@ pub const Buffer = struct {
     /// The returned `HostBuffer` does own the memory.
     pub fn toHostAlloc(self: Buffer, allocator: std.mem.Allocator) !HostBuffer {
         const output = try HostBuffer.empty(allocator, self.shape());
-        meta.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
+        stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
         const maybe_event = try self._shards.get(0).toHostBuffer(self._api, @constCast(output.data));
         if (maybe_event) |event| {
             try event.await_(self._api);

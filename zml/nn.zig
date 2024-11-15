@@ -1,20 +1,20 @@
 //! Common layer definition and functions for Neural Networks (NN)
 const std = @import("std");
-const assert = std.debug.assert;
-const testing = std.testing;
+const stdx = @import("stdx");
 
-const zml = @import("zml.zig");
-const meta = @import("meta.zig");
+const cuda = @import("nn/cuda.zig");
 const helpers = @import("helpers.zig");
+const meta = @import("meta.zig");
 const ops = @import("ops.zig");
+const zml = @import("zml.zig");
 
 const DataType = @import("dtype.zig").DataType;
 const Shape = @import("shape.zig").Shape;
 const Tensor = @import("tensor.zig").Tensor;
 
-const log = std.log.scoped(.zml_tensor);
-
-const cuda = @import("nn/cuda.zig");
+const assert = std.debug.assert;
+const log = std.log.scoped(.@"zml/tensor");
+const testing = std.testing;
 
 test {
     _ = cuda;
@@ -41,8 +41,8 @@ pub const TokenEmbedding = struct {
     weight: Tensor,
 
     pub fn forward(self: TokenEmbedding, idx: Tensor) Tensor {
-        meta.assert(idx.dtype().isInteger(), "TokenEmbedding expects an integer input, received: {}", .{idx});
-        meta.assert(self.weight.rank() == 2, "TokenEmbedding expects it's weight Tensor to be a 2D matrix, got {}", .{self.weight});
+        stdx.debug.assert(idx.dtype().isInteger(), "TokenEmbedding expects an integer input, received: {}", .{idx});
+        stdx.debug.assert(self.weight.rank() == 2, "TokenEmbedding expects it's weight Tensor to be a 2D matrix, got {}", .{self.weight});
         return self.weight.gatherValues(0, idx, .{});
     }
 };
@@ -159,7 +159,7 @@ pub const CosSin = [2]Tensor;
 /// See: https://paperswithcode.com/method/rope
 pub fn rope(x: Tensor, cos_sin_cache: CosSin, opts: RopeOpts) Tensor {
     const cos, const sin = cos_sin_cache;
-    meta.assert(x.dim(-1) == 2 * cos.dim(-1), "Couldn't compute rope({}, {}, {})", .{ x, cos, sin });
+    stdx.debug.assert(x.dim(-1) == 2 * cos.dim(-1), "Couldn't compute rope({}, {}, {})", .{ x, cos, sin });
     // broadcast cos / sin to .{ batch, .seq, .half_dim }
     const x_real, const x_imag = splitRealImg(x, opts.impl);
     const has_tags = cos.shape().tag(0) != Shape.TagUnknown;
@@ -178,9 +178,9 @@ pub fn rope(x: Tensor, cos_sin_cache: CosSin, opts: RopeOpts) Tensor {
 
 pub fn ropeCosSin(sh: anytype, dtype: DataType, opts: RopeOpts) CosSin {
     const shape = Shape.init(sh, dtype);
-    meta.assert(shape.rank() == 2, "ropeCosSin({}) shape need to exactly have 2 axes", .{shape});
+    stdx.debug.assert(shape.rank() == 2, "ropeCosSin({}) shape need to exactly have 2 axes", .{shape});
     const seq_len, const head_dim = .{ shape.dim(0), shape.dim(1) };
-    meta.assert(@mod(head_dim, 2) == 0, "ropeCosSin requires an even head_dim, got {}", .{head_dim});
+    stdx.debug.assert(@mod(head_dim, 2) == 0, "ropeCosSin requires an even head_dim, got {}", .{head_dim});
 
     // compute sin and cos in f32 before downcasting to x type.
     const inv_freq = invFreq(head_dim, opts.freq_base, .f32);
@@ -364,8 +364,8 @@ pub fn upsample(
 ) Tensor {
     // TODO(james): make `nearest` compatible with resizeBilinear and resizeBicubic, and wrap them here.
     // resize* have API which are more explicit, this assume you want to scale the N-2 last axes.
-    meta.assert(3 <= input.rank() and input.rank() <= 5, "upsample is only implemented for (3,4,5)-D tensors, received {}", .{input});
-    meta.assert(opts.scale_factor.len == 1 or opts.scale_factor.len == input.rank() - 2, "scale factors", .{});
+    stdx.debug.assert(3 <= input.rank() and input.rank() <= 5, "upsample is only implemented for (3,4,5)-D tensors, received {}", .{input});
+    stdx.debug.assert(opts.scale_factor.len == 1 or opts.scale_factor.len == input.rank() - 2, "scale factors", .{});
     return switch (opts.mode) {
         .nearest => {
             var scale_factors: [3]f64 = undefined;
@@ -398,7 +398,7 @@ pub fn nearest(input: Tensor, scale_factor: []const f64) Tensor {
     var res = input;
     for (spatial_dims) |d| {
         const n = out_shape.dim(d);
-        const ratio = meta.divFloat(f32, input.dim(d), n);
+        const ratio = stdx.math.divFloor(f32, input.dim(d), n);
         const offsets = Tensor.arange(.{ .end = n }, .f32).addConstant(0.5).scale(ratio).floor().convert(.i32);
         res = res.gatherValues(d, offsets, .{ .indices_are_sorted = true });
     }
@@ -576,7 +576,7 @@ pub fn resizeLinear1d(image: Tensor, axis: i8, new_len: u63, opt: ResizeOpts) Te
 
     const dtype = opt.precision orelse if (image.dtype().class() == .integer) .f32 else image.dtype();
     const og_len = opt.original_len orelse Tensor.scalar(image.dim(axis), dtype);
-    const ratio = og_len.convert(dtype).scale(meta.divFloat(f32, 1, new_len));
+    const ratio = og_len.convert(dtype).scale(stdx.math.divFloor(f32, 1, new_len));
     const scaled = Tensor.arange(.{ .end = new_len }, dtype).mul(ratio);
     const left = scaled.floor();
     const right = left.addConstant(1);
@@ -638,7 +638,7 @@ pub fn resizeCubic1d(image: Tensor, axis: i8, new_len: u63, opt: ResizeOpts) Ten
     const dtype = opt.precision orelse if (image.dtype().class() == .integer) .f32 else image.dtype();
     const og_len = opt.original_len orelse Tensor.scalar(image.dim(axis), dtype);
 
-    const ratio = og_len.convert(dtype).scale(meta.divFloat(f32, 1, new_len));
+    const ratio = og_len.convert(dtype).scale(stdx.math.divFloor(f32, 1, new_len));
     const scaled = Tensor.arange(.{ .end = new_len }, dtype).mul(ratio);
     const t = scaled.sub(scaled.floor());
     const pos = Tensor.stack(&.{
@@ -693,11 +693,11 @@ pub fn causalAttnMask(
     attn_window_len: ?u32,
 ) Tensor {
     const attn_shape = Shape.init(attn_shape_, dtype);
-    meta.assert(attn_shape.rank() == 2, "causalAttnMask({}) shape need to be exactly 2 axes", .{attn_shape});
+    stdx.debug.assert(attn_shape.rank() == 2, "causalAttnMask({}) shape need to be exactly 2 axes", .{attn_shape});
     const qlen = attn_shape.dim(-2);
-    const q_idx = Tensor.iota(attn_shape, .i32, -2);
+    const q_idx = Tensor.iota(attn_shape, -2);
     const klen = attn_shape.dim(-1);
-    const k_idx = Tensor.iota(attn_shape, .i32, -1);
+    const k_idx = Tensor.iota(attn_shape, -1);
 
     // all elements > main diagonal must be 0
     // (q_idx - window_len < k_idx <= q_idx)
@@ -748,16 +748,16 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
 
     const err_template = "sdpa(q: {}, k: {}, v: {}, attn: {?}) is invalid ! ";
     const err_args = .{ q, k, v, opts.attn_mask };
-    meta.assert(q.shape().hasTags(.{ .h, .q, .hd }), err_template ++ "q is missing tags {{.h, .q, .hd}}", err_args);
-    meta.assert(k.shape().hasTags(.{ .h, .k, .hd }), err_template ++ "k is missing tags {{.h, .k, .hd}}", err_args);
-    meta.assert(v.shape().hasTags(.{ .h, .k, .hd }), err_template ++ "v is missing tags {{.h, .k, .hd}}", err_args);
+    stdx.debug.assert(q.shape().hasTags(.{ .h, .q, .hd }), err_template ++ "q is missing tags {{.h, .q, .hd}}", err_args);
+    stdx.debug.assert(k.shape().hasTags(.{ .h, .k, .hd }), err_template ++ "k is missing tags {{.h, .k, .hd}}", err_args);
+    stdx.debug.assert(v.shape().hasTags(.{ .h, .k, .hd }), err_template ++ "v is missing tags {{.h, .k, .hd}}", err_args);
 
     if (opts.allow_cudnn and cuda.canUseCudnnSdpa(q.dim(.hd), q.dtype())) {
         return cuda.sdpa(q, k, v, opts);
     }
 
     if (q.dim(.h) != k.dim(.h)) {
-        meta.assert(@mod(q.dim(.h), k.dim(.h)) == 0, err_template ++ "Different number of heads for keys and queries, but can't repeat keys.", err_args);
+        stdx.debug.assert(@mod(q.dim(.h), k.dim(.h)) == 0, err_template ++ "Different number of heads for keys and queries, but can't repeat keys.", err_args);
         // Note: we don't try to repeat queries.
         // Repeating keys is the interesting optimisation cause it reduces KV cache memory usage.
         const num_rep: u63 = @intCast(@divExact(q.dim(.h), k.dim(.h)));
@@ -766,7 +766,7 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
     const attn_mask = if (opts.attn_mask) |m| m else null;
 
     const dims = helpers.collectDims(.{ .h, .q, .k, .hd }, &.{ q, k, v, attn_mask }, .strict) catch {
-        meta.panic(err_template ++ "Inputs have incompatible shapes.", err_args);
+        stdx.debug.panic(err_template ++ "Inputs have incompatible shapes.", err_args);
     };
     const sqrtHeadDim: f32 = 1.0 / std.math.sqrt(@as(f32, @floatFromInt(dims.hd)));
     const scale_logit = if (opts.scale) |s| s else Tensor.scalar(sqrtHeadDim, k.dtype());

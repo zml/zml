@@ -1,8 +1,10 @@
-const builtin = @import("builtin");
 const asynk = @import("async");
-const std = @import("std");
-const zml = @import("zml.zig");
+const builtin = @import("builtin");
 const c = @import("c");
+const std = @import("std");
+const stdx = @import("stdx");
+
+const zml = @import("zml.zig");
 const posix = @import("posix.zig");
 
 pub const gguf = @import("aio/gguf.zig");
@@ -13,7 +15,7 @@ pub const tinyllama = @import("aio/tinyllama.zig");
 pub const torch = @import("aio/torch.zig");
 pub const yaml = @import("aio/yaml.zig");
 
-pub const log = std.log.scoped(.zml_aio);
+pub const log = std.log.scoped(.@"zml/aio");
 const HostBuffer = @import("hostbuffer.zig").HostBuffer;
 
 test {
@@ -256,7 +258,11 @@ pub const MemoryMappedFile = struct {
             0,
         });
 
-        try asynk.callBlocking(posix.madvise, .{ data_.ptr, @intCast(data_.len), @intCast(c.MADV_SEQUENTIAL) });
+        try asynk.callBlocking(posix.madvise, .{
+            data_.ptr,
+            @as(usize, @intCast(data_.len)),
+            @as(u32, @intCast(c.MADV_SEQUENTIAL)),
+        });
 
         return .{
             .file = file,
@@ -600,7 +606,7 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
             // obj._shape has been set inside `loadModelBuffersWithPrefix`, before calling us.
             var buf_with_metadata = host_buffer;
             log.debug("Loading buffer {s} ({})", .{ prefix, obj._shape });
-            zml.meta.assert(host_buffer.shape().eql(obj._shape), "loadModelBuffers expects to find the same shapes in the model and in the buffer store, got {} and {} for tensor {s}", .{ obj._shape, host_buffer, prefix });
+            stdx.debug.assert(host_buffer.shape().eql(obj._shape), "loadModelBuffers expects to find the same shapes in the model and in the buffer store, got {} and {} for tensor {s}", .{ obj._shape, host_buffer, prefix });
             buf_with_metadata._shape = obj._shape;
             obj.* = try zml.Buffer.from(platform, buf_with_metadata);
         } else {

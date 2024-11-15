@@ -1,22 +1,21 @@
-const builtin = @import("builtin");
-const std = @import("std");
-
 const asynk = @import("async");
+const builtin = @import("builtin");
+const dialects = @import("mlir/dialects");
 const mlir = @import("mlir");
-
 const pjrt = @import("pjrt");
+const std = @import("std");
+const stdx = @import("stdx");
+
 const dtype = @import("dtype.zig");
 const meta = @import("meta.zig");
-const dialects = @import("mlir/dialects");
-
-pub const Profiler = pjrt.Profiler;
-pub const ApiError = pjrt.ApiError;
-pub const ErrorCode = pjrt.ErrorCode;
 
 const Target = @import("platform.zig").Target;
 
 const log = std.log.scoped(.zml);
 
+pub const Profiler = pjrt.Profiler;
+pub const ApiError = pjrt.ApiError;
+pub const ErrorCode = pjrt.ErrorCode;
 pub const Buffer = pjrt.Buffer;
 pub const BufferType = pjrt.BufferType;
 pub const Device = pjrt.Device;
@@ -181,14 +180,16 @@ pub const LoadedExecutable = opaque {
         return self.inner().getAddressableDevices(api);
     }
 
-    pub fn execute(self: *const LoadedExecutable, api: *const Api, args: struct {
+    pub const ExecuteArgs = struct {
         arguments: []const [*]const *const Buffer,
         num_args: usize,
         results: []const [*]*Buffer,
         events: []?*Event,
         non_donatable_input_indices: []const i64 = &.{},
-    }) ExecuteError!void {
-        try asynk.callBlocking(pjrt.LoadedExecutable.execute, .{ self.inner(), api, .{
+    };
+
+    pub fn execute(self: *const LoadedExecutable, api: *const Api, args: ExecuteArgs) ExecuteError!void {
+        try asynk.callBlocking(pjrt.LoadedExecutable.execute, .{ self.inner(), api, pjrt.LoadedExecutable.ExecuteArgs{
             .num_args = args.num_args,
             .arguments = @ptrCast(args.arguments),
             .results = @ptrCast(args.results),

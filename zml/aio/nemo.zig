@@ -1,5 +1,5 @@
 const std = @import("std");
-const log = std.log.scoped(.zml_aio);
+const log = std.log.scoped(.@"zml/aio");
 
 const asynk = @import("async");
 const yaml = @import("zig-yaml");
