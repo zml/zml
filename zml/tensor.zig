@@ -1748,13 +1748,19 @@ pub const Tensor = struct {
     }
 
     /// Returns a Tensor containing values in increasing order starting from 0 along the given axis.
+    ///
+    /// The output dtype will be `.i32`, unless the given axis has a too big dimension, in that case we use `.i64`.
+    /// In most program this shouldn't matter, because typically this will be used in a comparison,
+    /// or explicitly converted by the user to do floating point arithmetic.
     pub fn iota(sh: Shape, axis_: anytype) Tensor {
-        const ctx = CompilationContext.current();
-        const loc = ctx.mlirCtx().location(@src()).namedFmt(ctx.mlirCtx(), "iota({}, {})", .{ sh, axis_ });
-
         const a = sh.axis(axis_);
-        var op = dialect.stablehlo.iota(ctx.mlirCtx(), @intCast(a), mlir.ext.RankedTensorType.fromShape(ctx.mlirCtx(), sh).as(mlir.Type).?, loc);
-        return _result(sh, op.result(0));
+        const dt: DataType = if (sh.dim(a) <= std.math.maxInt(i32)) .i32 else .i64;
+        const res_shape = sh.withDtype(dt);
+        const mlir_ctx = CompilationContext.current().mlirCtx();
+        const loc = mlir_ctx.location(@src()).namedFmt(mlir_ctx, "iota({}, {})", .{ res_shape, axis_ });
+
+        var op = dialect.stablehlo.iota(mlir_ctx, a, mlir.ext.RankedTensorType.fromShape(mlir_ctx, res_shape).asType(), loc);
+        return _result(res_shape, op.result(0));
     }
 
     pub const LinspaceArgs = struct {
@@ -2824,7 +2830,7 @@ pub const Tensor = struct {
 
         return ops.reduceWindow(
             MaxPoolRes.cmp,
-            .{ .values = self, .indices = iota(self._shape.withDtype(.i32), a) },
+            .{ .values = self, .indices = iota(self._shape, a) },
             .{ .values = Tensor.constant(.{}, self.dtype().minValue()), .indices = Tensor.scalar(0, .i32) },
             .{
                 .window_dimensions = window_dimensions[0..self.rank()],
@@ -2862,7 +2868,7 @@ pub const Tensor = struct {
 
         return ops.reduceWindow(
             MaxPoolRes.cmp,
-            .{ .values = self, .indices = iota(self._shape.withDtype(.i32), a) },
+            .{ .values = self, .indices = iota(self._shape, a) },
             .{ .values = Tensor.constant(.{}, self.dtype().minValue()), .indices = Tensor.scalar(0, .i32) },
             .{
                 .window_dimensions = window_dimensions[0..self.rank()],
@@ -3337,8 +3343,8 @@ pub const Tensor = struct {
         const values = self.insertAxes(a + 1, .{new_tags[1]}).broad(res_shape);
         const zeros = Tensor.constant(res_shape, self.dtype().zero());
 
-        const x = Tensor.iota(res_shape.withDtype(.i32), a);
-        const y = Tensor.iota(res_shape.withDtype(.i32), a + 1);
+        const x = Tensor.iota(res_shape, a);
+        const y = Tensor.iota(res_shape, a + 1);
         var res = x.cmp(.EQ, y).select(values, zeros);
         res._shape = res_shape;
         return res;
@@ -3387,8 +3393,8 @@ pub const Tensor = struct {
         meta.assertComptime(meta.isTuple(@TypeOf(axes_)) and axes_.len == 2, "triangular expects exactly two axes to work on.", .{});
         const _axes = self.axes(axes_);
 
-        const x = Tensor.iota(self.shape().withDtype(.i32), _axes.get(0));
-        const y = Tensor.iota(self.shape().withDtype(.i32), _axes.get(1));
+        const x = Tensor.iota(self.shape(), _axes.get(0));
+        const y = Tensor.iota(self.shape(), _axes.get(1));
 
         const zeros = Tensor.constant(self.shape(), self.dtype().zero());
         return x.addConstant(num_diagonals).cmp(.GE, y).select(self, zeros);

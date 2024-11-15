@@ -1509,6 +1509,10 @@ pub const RankedTensorType = struct {
     pub fn getDimension(self: RankedTensorType, dim: usize) i64 {
         return c.mlirShapedTypeGetDimSize(self.inner(), @intCast(dim));
     }
+
+    pub fn asType(self: RankedTensorType) Type {
+        return self.as(Type).?;
+    }
 };
 
 pub const Dialect = struct {
