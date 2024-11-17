@@ -27,13 +27,9 @@ pub const tpu_plane_prefix = "/device:TPU:";
 pub const custom_plane_prefix = "/device:CUSTOM:";
 
 pub const TraceContainer = struct {
-    metadata: Trace = .{},
-    events: std.ArrayListUnmanaged(*TraceEvent) = .{},
-
-    pub const Trace = struct {
-        devices: std.AutoArrayHashMapUnmanaged(u32, Device) = .{},
-        trace_events: std.ArrayListUnmanaged(TraceEvent) = .{},
-    };
+    arena: std.heap.ArenaAllocator,
+    events: std.ArrayListUnmanaged(TraceEvent) = .{},
+    devices: std.AutoArrayHashMapUnmanaged(u32, Device) = .{},
 
     pub const Device = struct {
         name: []const u8 = &[_]u8{},
@@ -49,6 +45,25 @@ pub const TraceContainer = struct {
         duration_ps: u64 = 0,
         args: std.StringArrayHashMapUnmanaged([]const u8) = .{},
     };
+
+    pub fn init(allocator: std.mem.Allocator, pb_buffer: []const u8, max_events: ?usize) !TraceContainer {
+        var self: TraceContainer = .{
+            .arena = std.heap.ArenaAllocator.init(allocator),
+        };
+        const arena = self.arena.allocator();
+
+        const xspace = try xplane_proto.XSpace.decode(pb_buffer, arena);
+        try self.fromXSpace(arena, &xspace, max_events);
+        return self;
+    }
+
+    pub fn deinit(self: *TraceContainer) void {
+        self.arena.deinit();
+    }
+
+    fn picoToMicro(p: anytype) f64 {
+        return @as(f64, @floatFromInt(p)) / 1E6;
+    }
 
     fn xLineDisplayId(xline: *const xplane_proto.XLine) i64 {
         return if (xline.display_id != 0) xline.display_id else xline.id;
@@ -67,7 +82,7 @@ pub const TraceContainer = struct {
                 inline .int64_value, .uint64_value, .double_value => |v| try writer.print("{d}", .{v}),
                 .str_value => |*v| try writer.writeAll(v.getSlice()),
                 .bytes_value => try writer.writeAll("<opaque bytes>"),
-                .ref_value => |v| try writer.writeAll(plane.getStatMetadata(@intCast(v)).name.getSlice()),
+                .ref_value => |v| try writer.writeAll(plane.getStatMetadataName(@intCast(v))),
             }
         } else return;
     }
@@ -113,7 +128,7 @@ pub const TraceContainer = struct {
 
     fn xplaneToTraceEvents(self: *TraceContainer, allocator: std.mem.Allocator, device_id: u32, xplane: *const xplane_visitor.XPlaneVisitor) !void {
         // Convert devices and resources.
-        const device_entry = try self.metadata.devices.getOrPut(allocator, device_id);
+        const device_entry = try self.devices.getOrPut(allocator, device_id);
         if (!device_entry.found_existing) device_entry.value_ptr.* = .{};
 
         try buildDeviceAndResources(allocator, device_id, xplane, device_entry.value_ptr);
@@ -130,26 +145,27 @@ pub const TraceContainer = struct {
                 event.device_id = device_id;
                 event.resource_id = resource_id;
 
-                const metadata = xplane.getEventMetadata(xevent.metadata_id);
-                if (metadata.display_name != .Empty) {
-                    event.name = metadata.display_name.getSlice();
-                    try event.args.put(allocator, "long_name", metadata.name.getSlice());
-                } else {
-                    event.name = metadata.name.getSlice();
-                }
+                if (xplane.event_metadata_by_id.get(xevent.metadata_id)) |metadata| {
+                    if (metadata.display_name != .Empty) {
+                        event.name = metadata.display_name.getSlice();
+                        try event.args.put(allocator, "long_name", metadata.name.getSlice());
+                    } else {
+                        event.name = metadata.name.getSlice();
+                    }
 
-                event.timestamp_ps = (@as(u128, @intCast(xline.timestamp_ns)) * 1000) + @as(u128, @intCast(xevent.data.?.offset_ps));
-                event.duration_ps = @intCast(xevent.duration_ps);
+                    event.timestamp_ps = (@as(u128, @intCast(xline.timestamp_ns)) * 1000) + @as(u128, @intCast(xevent.data.?.offset_ps));
+                    event.duration_ps = @intCast(xevent.duration_ps);
 
-                for (metadata.stats.items) |*xstat| {
-                    if (xstat.value == null) continue;
-                    var stat_buffer = std.ArrayList(u8).init(allocator);
-                    try xstatValueToString(xstat, xplane, stat_buffer.writer().any());
-                    const stat_str = try stat_buffer.toOwnedSlice();
-                    const stat_type = xplane.getStatType(xstat.metadata_id);
-                    if (stat_type.isInternalStat()) continue;
-                    if (stat_type == .step_name) event.name = stat_str;
-                    try event.args.put(allocator, xplane.getStatMetadata(xstat.metadata_id).name.getSlice(), stat_str);
+                    for (metadata.stats.items) |*xstat| {
+                        if (xstat.value == null) continue;
+                        var stat_buffer = std.ArrayList(u8).init(allocator);
+                        try xstatValueToString(xstat, xplane, stat_buffer.writer().any());
+                        const stat_str = try stat_buffer.toOwnedSlice();
+                        const stat_type = xplane.getStatType(xstat.metadata_id);
+                        if (stat_type.isInternalStat()) continue;
+                        if (stat_type == .step_name) event.name = stat_str;
+                        try event.args.put(allocator, xplane.getStatMetadataName(xstat.metadata_id), stat_str);
+                    }
                 }
 
                 for (xevent.stats.items) |*xstat| {
@@ -160,28 +176,15 @@ pub const TraceContainer = struct {
                     const stat_type = xplane.getStatType(xstat.metadata_id);
                     if (stat_type.isInternalStat()) continue;
                     if (stat_type == .step_name) event.name = stat_str;
-                    try event.args.put(allocator, xplane.getStatMetadata(xstat.metadata_id).name.getSlice(), stat_str);
+                    try event.args.put(allocator, xplane.getStatMetadataName(xstat.metadata_id), stat_str);
                 }
             }
         }
     }
 
-    fn getTraceViewerMaxEvents() !u64 {
-        const kMaxEvents = 1000000;
-        if (std.posix.getenv("TF_PROFILER_TRACE_VIEWER_MAX_EVENTS")) |max_events| {
-            return std.fmt.parseInt(u64, max_events, 10);
-        } else return kMaxEvents;
-    }
-
-    pub fn fromXSpace(allocator: std.mem.Allocator, xspace: *const xplane_proto.XSpace) !TraceContainer {
-        var self: TraceContainer = .{};
+    fn fromXSpace(self: *TraceContainer, allocator: std.mem.Allocator, xspace: *const xplane_proto.XSpace, max_events: ?usize) !void {
         if (findPlaneWithName(xspace, host_threads_plane_name)) |hp| {
-            const xplane = try xplane_visitor.XPlaneVisitor.init(
-                allocator,
-                hp,
-                xplane_schema.HostEventType.fromString,
-                xplane_schema.StatType.fromString,
-            );
+            const xplane = try xplane_visitor.XPlaneVisitor.init(allocator, hp);
             try self.xplaneToTraceEvents(allocator, host_threads_device_id, &xplane);
         }
 
@@ -197,28 +200,19 @@ pub const TraceContainer = struct {
         }
 
         for (device_planes) |dp| {
-            const xplane = try xplane_visitor.XPlaneVisitor.init(
-                allocator,
-                dp,
-                xplane_schema.HostEventType.fromString,
-                xplane_schema.StatType.fromString,
-            );
+            const xplane = try xplane_visitor.XPlaneVisitor.init(allocator, dp);
             const device_id: u32 = first_device_id + @as(u32, @intCast(xplane.plane.id));
             try self.xplaneToTraceEvents(allocator, device_id, &xplane);
         }
 
         // Trace viewer (non-streaming) has scalability issues, we need to drop
         // events to avoid loading failure for trace viewer.
-        const viewer_max_events = try getTraceViewerMaxEvents();
-        self.capEvents(viewer_max_events);
-        return self;
+        if (max_events) |limit| self.capEvents(limit);
     }
 
     pub fn createEvent(self: *TraceContainer, allocator: std.mem.Allocator) !*TraceEvent {
-        const event = try allocator.create(TraceEvent);
-        event.* = .{};
-        try self.events.append(allocator, event);
-        return event;
+        try self.events.append(allocator, .{});
+        return &self.events.items[self.events.items.len - 1];
     }
 
     pub fn capEvents(self: *TraceContainer, max_count: u64) void {
@@ -229,11 +223,101 @@ pub const TraceContainer = struct {
         }
         // sort the events according to start time.
         // TODO: partial sort would improve performance.
-        std.mem.sort(*TraceEvent, self.events.items, {}, struct {
-            pub fn call(_: void, lhs: *TraceEvent, rhs: *TraceEvent) bool {
+        std.mem.sort(TraceEvent, self.events.items, {}, struct {
+            pub fn call(_: void, lhs: TraceEvent, rhs: TraceEvent) bool {
                 return lhs.timestamp_ps < rhs.timestamp_ps;
             }
         }.call);
         self.events.shrinkRetainingCapacity(max_count);
+    }
+
+    pub fn toJson(self: *TraceContainer, writer: std.io.AnyWriter) !void {
+        try writer.writeAll(
+            \\{"displayTimeUnit":"ns","metadata":{"highres-ticks":true},"traceEvents":[
+        );
+
+        self.devices.sort(struct {
+            keys: []const u32,
+            pub fn lessThan(ctx: @This(), lhs: usize, rhs: usize) bool {
+                return ctx.keys[lhs] < ctx.keys[rhs];
+            }
+        }{ .keys = self.devices.keys() });
+
+        for (self.devices.keys(), self.devices.values()) |device_id, *device| {
+            if (device.name.len != 0) {
+                try writer.print(
+                    \\{{"ph":"M","pid":{d},"name":"process_name","args":{{"name":"{s}"}}}},
+                , .{ device_id, device.name });
+            }
+            try writer.print(
+                \\{{"ph":"M","pid":{d},"name":"process_sort_index","args":{{"sort_index":{d}}}}},
+            , .{
+                device_id,
+                device_id,
+            });
+
+            device.resources.sort(struct {
+                keys: []const u32,
+                pub fn lessThan(ctx: @This(), lhs: usize, rhs: usize) bool {
+                    return ctx.keys[lhs] < ctx.keys[rhs];
+                }
+            }{ .keys = device.resources.keys() });
+
+            for (device.resources.keys(), device.resources.values()) |resource_id, resource| {
+                if (resource.name.getSlice().len != 0) {
+                    try writer.print(
+                        \\{{"ph":"M","pid":{d},"tid":{d},"name":"thread_name","args":{{"name":"{s}"}}}},
+                    , .{
+                        device_id,
+                        resource_id,
+                        resource.name.getSlice(),
+                    });
+                }
+                const sort_index = if (resource.sort_index != 0) resource.sort_index else resource_id;
+                try writer.print(
+                    \\{{"ph":"M","pid":{d},"tid":{d},"name":"thread_sort_index","args":{{"sort_index":{d}}}}},
+                , .{ device_id, resource_id, sort_index });
+            }
+        }
+
+        for (self.events.items) |*event| {
+            const duration_ps = @max(event.duration_ps, 1);
+            try writer.print(
+                \\{{"ph":"X","pid":{d},"tid":{d},"ts":{d:.17},"dur":{d:.17},"name":"{s}"
+            , .{
+                event.device_id,
+                event.resource_id,
+                picoToMicro(event.timestamp_ps),
+                picoToMicro(duration_ps),
+                event.name,
+            });
+            if (event.args.count() != 0) {
+                try writer.writeAll(
+                    \\,"args":{
+                );
+                event.args.sort(struct {
+                    keys: []const []const u8,
+
+                    pub fn lessThan(ctx: @This(), lhs: usize, rhs: usize) bool {
+                        return std.mem.order(u8, ctx.keys[lhs], ctx.keys[rhs]).compare(std.math.CompareOperator.lt);
+                    }
+                }{ .keys = event.args.keys() });
+
+                for (event.args.keys(), event.args.values(), 0..) |key, value, i| {
+                    if (i < event.args.count() - 1) {
+                        try writer.print(
+                            \\"{s}":"{s}",
+                        , .{ key, value });
+                    } else {
+                        // Last item has closing bracket rather than trailing comma.
+                        try writer.print(
+                            \\"{s}":"{s}"}}
+                        , .{ key, value });
+                    }
+                }
+            }
+            try writer.writeAll("},");
+        }
+        try writer.writeAll("{}]}");
     }
 };

@@ -1,13 +1,14 @@
 const flags = @import("tigerbeetle/flags");
 const std = @import("std");
 
-const TraceConverter = @import("convert/trace_converter.zig").TraceConverter;
+const TraceContainer = @import("convert/trace_container.zig").TraceContainer;
 
 const CliArgs = struct {
     pub const help =
         \\ llama --path=path_to_profiling_data
     ;
     path: []const u8,
+    max_events: ?usize = null,
 };
 
 pub fn main() !void {
@@ -25,18 +26,20 @@ pub fn main() !void {
     defer allocator.free(pb_buffer);
     if (pb_buffer.len == 0) return error.EmptyBuffer;
 
-    var converter = try TraceConverter.init(allocator, pb_buffer);
+    var converter = try TraceContainer.init(allocator, pb_buffer, cli_args.max_events);
     defer converter.deinit();
 
     var path_buffer: [1028]u8 = undefined;
-    var output_path = std.ArrayListUnmanaged(u8).initBuffer(&path_buffer);
-    output_path.appendSliceAssumeCapacity(cli_args.path[0..std.mem.lastIndexOf(u8, cli_args.path, std.fs.path.extension(cli_args.path)).?]);
-    output_path.appendSliceAssumeCapacity(".json");
 
-    var output_file = try std.fs.createFileAbsolute(output_path.items, .{});
+    const output_path = try std.fmt.bufPrint(&path_buffer, "{s}/{s}.json", .{
+        std.fs.path.dirname(cli_args.path) orelse "",
+        std.fs.path.stem(cli_args.path),
+    });
+
+    var output_file = try std.fs.createFileAbsolute(output_path, .{});
     defer output_file.close();
 
     try converter.toJson(output_file.writer().any());
 
-    std.debug.print("Wrote JSON to {s}\n", .{output_path.items});
+    std.debug.print("Wrote JSON to {s}\n", .{output_path});
 }
