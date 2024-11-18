@@ -110,11 +110,11 @@ pub fn asSlice(comptime T: type) type {
             .One => switch (@typeInfo(info.child)) {
                 // As Zig, convert pointer to Array as a slice.
                 .Array => |arr_info| arr_info.child,
-                else => compileError(err_msg),
+                else => @compileError(err_msg),
             },
-            else => compileError(err_msg),
+            else => @compileError(err_msg),
         },
-        else => compileError(err_msg),
+        else => @compileError(err_msg),
     };
 }
 

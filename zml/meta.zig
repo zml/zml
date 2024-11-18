@@ -94,7 +94,7 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
 
     const type_info_to_ptr = @typeInfo(@TypeOf(to));
     if (type_info_to_ptr != .Pointer) {
-        stdx.debug.compileError("convertType is expecting a mutable `to` argument but received: " ++ @typeName(@TypeOf(to)));
+        stdx.debug.compileError("convertType is expecting a mutable `to` argument but received: {}", .{@TypeOf(to)});
     }
     const ToStruct = type_info_to_ptr.Pointer.child;
     const type_info_to = @typeInfo(ToStruct);
@@ -143,7 +143,7 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
                 } else if (field.default_value) |_| {
                     @field(to, field.name) = null;
                 } else {
-                    stdx.meta.compileError("Mapping {} to {} failed. Missing field {s}", .{ FromStruct, ToStruct, field.name });
+                    stdx.debug.compileError("Mapping {} to {} failed. Missing field {s}", .{ FromStruct, ToStruct, field.name });
                 },
                 else => @field(to, field.name) = @field(from, field.name),
             }
@@ -169,7 +169,7 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
                 }
                 to.* = items;
             },
-            else => stdx.meta.compileError("zml.meta.mapAlloc doesn't support: " ++ @typeName(FromStruct)),
+            else => stdx.debug.compileError("zml.meta.mapAlloc doesn't support: {}", .{FromStruct}),
         },
         .Optional => if (from) |f| {
             to.* = @as(@typeInfo(type_info_to_ptr.Pointer.child).Optional.child, undefined);
@@ -178,7 +178,7 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
             to.* = null;
         },
         .Int, .Float => to.* = from,
-        else => stdx.meta.compileError("zml.meta.mapAlloc doesn't support: " ++ @typeName(FromStruct)),
+        else => stdx.debug.compileError("zml.meta.mapAlloc doesn't support: {}", .{FromStruct}),
     }
 }
 
@@ -239,12 +239,12 @@ pub fn visit(comptime cb: anytype, ctx: FnParam(cb, 0), v: anytype) void {
     const type_info_v = @typeInfo(T);
     const K = switch (@typeInfo(FnParam(cb, 1))) {
         .Pointer => |info| info.child,
-        else => stdx.meta.compileError("zml.meta.visit is expecting a pointer value as second parameter in callback to use but found " ++ @typeName(FnParam(cb, 1))),
+        else => stdx.debug.compileError("zml.meta.visit is expecting a pointer value as second parameter in callback to use but found {}", .{FnParam(cb, 1)}),
     };
 
     if (type_info_v != .Pointer) {
         const Callback = @TypeOf(cb);
-        stdx.meta.compileError("zml.meta.visit is expecting a pointer input to go with following callback signature: " ++ @typeName(Callback) ++ " but received: " ++ @typeName(T));
+        stdx.debug.compileError("zml.meta.visit is expecting a pointer input to go with following callback signature: {} but received: {}", .{ Callback, T });
     }
     const ptr_info = type_info_v.Pointer;
     if (@typeInfo(ptr_info.child) == .Fn) return;
@@ -307,7 +307,7 @@ pub fn visit(comptime cb: anytype, ctx: FnParam(cb, 0), v: anytype) void {
                 }
             }
         },
-        else => stdx.meta.compileError("Only single pointer and slice are supported. Received " ++ @typeName(T)),
+        else => stdx.debug.compileError("Only single pointer and slice are supported. Received {}", .{T}),
     }
 }
 
@@ -320,9 +320,7 @@ test visit {
     const MultipleTypesStruct = struct { prop1: Attr, prop2: OtherAttr, prop3: ?Attr };
     const NestedTypesStruct = struct { prop1: Attr, prop2: OtherAttr, prop3: NestedAttr, prop4: NestedAttrOptional };
 
-    const LocalContext = struct {
-        result: usize,
-    };
+    const LocalContext = struct { result: usize };
 
     {
         var context: LocalContext = .{ .result = 0 };
@@ -406,13 +404,13 @@ pub fn zip(comptime func: anytype, allocator: std.mem.Allocator, values: anytype
     // const fn_args
 
     return switch (@typeInfo(V)) {
-        .Pointer => stdx.meta.compileError("zip only accept by value arguments. Received: " ++ @typeName(V)),
+        .Pointer => stdx.debug.compileError("zip only accept by value arguments. Received: {}", .{V}),
         .Struct => |struct_info| {
             var out: V = values[0];
             inline for (struct_info.fields) |f| {
                 if (f.is_comptime) continue;
                 if (@typeInfo(f.type) == .Pointer) {
-                    stdx.meta.compileError("zip doesn't follow pointers and don't accept struct containing them. Received: " ++ @typeName(V));
+                    stdx.debug.compileError("zip doesn't follow pointers and don't accept struct containing them. Received: {}", .{V});
                 }
                 var fields = try allocator.alloc(f.type, values.len);
                 defer allocator.free(fields);
@@ -425,7 +423,7 @@ pub fn zip(comptime func: anytype, allocator: std.mem.Allocator, values: anytype
         },
         .Array => |arr_info| {
             if (@typeInfo(arr_info.child) == .Pointer) {
-                stdx.meta.compileError("zip doesn't follow pointers and don't accept struct containing them. Received: " ++ @typeName(V));
+                stdx.debug.compileError("zip doesn't follow pointers and don't accept struct containing them. Received: {}", .{V});
             }
             var out: V = undefined;
             var slice = try allocator.alloc(arr_info.child, values.len);
@@ -438,7 +436,7 @@ pub fn zip(comptime func: anytype, allocator: std.mem.Allocator, values: anytype
             }
             return out;
         },
-        .Union, .Optional => stdx.meta.compileError("zip doesn't yet support " ++ @typeName(V)),
+        .Union, .Optional => stdx.debug.compileError("zip doesn't yet support {}", .{V}),
         else => values[0],
     };
 }
@@ -484,10 +482,10 @@ pub fn collect(func: anytype, func_ctx: _CollectCtx(func), out: *std.ArrayList(s
 fn _CollectCtx(func: anytype) type {
     const params = @typeInfo(@TypeOf(func)).Fn.params;
     if (params.len == 1) return void;
-    return params[0].type orelse stdx.meta.compileError("anytype not supported in collect");
+    return params[0].type orelse @compileError("anytype not supported in collect");
 }
 
 fn _CollectArg(func: anytype) type {
     const params = @typeInfo(@TypeOf(func)).Fn.params;
-    return params[params.len - 1].type orelse stdx.meta.compileError("anytype not supported in collect");
+    return params[params.len - 1].type orelse @compileError("anytype not supported in collect");
 }
