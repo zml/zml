@@ -7,9 +7,6 @@ pub const XPlaneVisitor = struct {
     event_metadata_by_id: std.AutoHashMapUnmanaged(i64, *const xplane_proto.XEventMetadata) = .{},
     stat_metadata_by_id: std.AutoHashMapUnmanaged(i64, *const xplane_proto.XStatMetadata) = .{},
 
-    const EventTypeGetter = *const fn ([]const u8) xplane_schema.HostEventType;
-    const StatTypeGetter = *const fn ([]const u8) xplane_schema.StatType;
-
     pub fn init(
         allocator: std.mem.Allocator,
         plane: *const xplane_proto.XPlane,
