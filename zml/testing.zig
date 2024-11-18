@@ -23,7 +23,8 @@ pub fn env() zml.Platform {
 
         _ctx = zml.Context.init() catch unreachable;
     }
-    return _ctx.?.platforms.get(.cpu).?.withCompilationOptions(_test_compile_opts);
+
+    return _ctx.?.autoPlatform().withCompilationOptions(_test_compile_opts);
 }
 
 var _test_compile_opts: zml.CompilationOptions = .{};
