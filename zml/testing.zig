@@ -108,12 +108,7 @@ pub fn expectClose(left_: anytype, right_: anytype, tolerance: f32) !void {
         },
         inline .bool, .u4, .u8, .u16, .u32, .u64, .i4, .i8, .i16, .i32, .i64 => |t| {
             const T = t.toZigType();
-            const left_data = left.items(T);
-            const right_data = right.items(T);
-            if (!std.mem.eql(T, left_data, right_data)) {
-                log.err("left.data ({any}) != right.data ({any})", .{ left_data[0..10], right_data[0..10] });
-                return error.TestUnexpectedResult;
-            }
+            return std.testing.expectEqualSlices(T, left.items(T), right.items(T));
         },
         .c64, .c128 => @panic("TODO: support comparison of complex"),
     }
