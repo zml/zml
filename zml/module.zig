@@ -771,10 +771,13 @@ fn assignResults(op: mlir.Operation, v: anytype, shapes: []Shape) void {
     var context = LocalContext{ .index = 0, .op = op, .shapes = shapes };
     meta.visit((struct {
         fn cb(inner_ctx: *LocalContext, tensor: *Tensor) void {
-            tensor.* = Tensor.fromMlirValue(inner_ctx.op.result(inner_ctx.index));
+            var new = Tensor.fromMlirValue(inner_ctx.op.result(inner_ctx.index));
             if (inner_ctx.shapes) |sh| {
-                tensor._shape = sh[inner_ctx.index];
+                new._shape = sh[inner_ctx.index];
+            } else {
+                new._shape._tags = tensor._shape._tags;
             }
+            tensor.* = new;
             inner_ctx.index += 1;
         }
     }).cb, &context, v);
