@@ -3171,7 +3171,7 @@ pub const Tensor = struct {
             var prev_ax: i8 = -1;
             for (self._shape.tags(), 0..) |t, self_ax| {
                 if (update._shape.hasTag(t)) |up_ax| {
-                    stdx.debug.assert(up_ax == prev_ax + 1, "dynamicUpdateSlice expects 'update_' and input tensor axis to have the same order, got {} and {}. (hint: you need to explicitly transpose 'update_')", .{ update_._shape, self._shape });
+                    stdx.debug.assert(up_ax == prev_ax + 1, "dynamicUpdateSlice expects 'update_' and input tensor axis to have the same order, got {} and {}. (hint: you need to explicitly transpose 'update_')", .{ update_, self });
 
                     update_shape._dims.set(self_ax, update.dim(up_ax));
                     prev_ax = up_ax;
@@ -3182,7 +3182,7 @@ pub const Tensor = struct {
             update = update.reshape(update_shape);
         }
 
-        stdx.debug.assert(self.rank() == update.rank(), "dynamicUpdateSlice expects input and computed update tensors to have the same rank, got {} and {} (hint: it's probably an issue on our side)", .{ self.rank(), update.rank() });
+        stdx.debug.assert(self.rank() == update.rank(), "dynamicUpdateSlice expects input and computed update tensors to have the same rank, got {} and {}", .{ self, update });
 
         for (self.dims(), update.dims(), 0..) |self_d, up_d, ax| {
             const t = self._shape.debugTag(ax);

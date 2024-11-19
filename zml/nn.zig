@@ -818,6 +818,8 @@ const SdpaMemEfficient = struct {
     chunking: SdpaChunks,
 
     fn forward(self: SdpaMemEfficient) Tensor {
+        stdx.debug.assert(@mod(self.q.dim(.q), self.chunking.q_chunk_size) == 0, "sdpaMemEfficient expects the chunk_size to exactly divise the seq_len, got: sdpaMemEfficient({}, {})", .{ self.q, self.chunking });
+        stdx.debug.assert(@mod(self.k.dim(.k), self.chunking.k_chunk_size) == 0, "sdpaMemEfficient expects the chunk_size to exactly divise the seq_len, got: sdpaMemEfficient({}, {})", .{ self.k, self.chunking });
         const n_q_chunks = @divExact(self.q.dim(.q), self.chunking.q_chunk_size);
         const res = ops.for_(SdpaMemEfficient.nextQueriesChunk, self, .{ .nq = n_q_chunks });
 
@@ -894,12 +896,12 @@ pub fn sdpaChunk(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) PartialAttn
 
     const err_template = "sdpa(q: {}, k: {}, v: {}, attn: {?}) is invalid ! ";
     const err_args = .{ q, k, v, opts.attn_mask };
-    meta.assert(q.shape().hasTags(.{ .h, .q, .hd }), err_template ++ "q is missing tags {{.h, .q, .hd}}", err_args);
-    meta.assert(k.shape().hasTags(.{ .h, .k, .hd }), err_template ++ "k is missing tags {{.h, .k, .hd}}", err_args);
-    meta.assert(v.shape().hasTags(.{ .h, .k, .hd }), err_template ++ "v is missing tags {{.h, .k, .hd}}", err_args);
+    stdx.debug.assert(q.shape().hasTags(.{ .h, .q, .hd }), err_template ++ "q is missing tags {{.h, .q, .hd}}", err_args);
+    stdx.debug.assert(k.shape().hasTags(.{ .h, .k, .hd }), err_template ++ "k is missing tags {{.h, .k, .hd}}", err_args);
+    stdx.debug.assert(v.shape().hasTags(.{ .h, .k, .hd }), err_template ++ "v is missing tags {{.h, .k, .hd}}", err_args);
 
     if (q.dim(.h) != k.dim(.h)) {
-        meta.assert(@mod(q.dim(.h), k.dim(.h)) == 0, err_template ++ "Different number of heads for keys and queries, but can't repeat keys.", err_args);
+        stdx.debug.assert(@mod(q.dim(.h), k.dim(.h)) == 0, err_template ++ "Different number of heads for keys and queries, but can't repeat keys.", err_args);
         // Note: we don't try to repeat queries.
         // Repeating keys is the interesting optimisation cause it reduces KV cache memory usage.
         const num_rep: u63 = @intCast(@divExact(q.dim(.h), k.dim(.h)));
@@ -908,7 +910,7 @@ pub fn sdpaChunk(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) PartialAttn
     const attn_mask = if (opts.attn_mask) |m| m else null;
 
     const dims = helpers.collectDims(.{ .h, .q, .k, .hd }, &.{ q, k, v, attn_mask }, .strict) catch {
-        meta.panic(err_template ++ "Inputs have incompatible shapes.", err_args);
+        stdx.debug.panic(err_template ++ "Inputs have incompatible shapes.", err_args);
     };
     const sqrtHeadDim: f32 = 1.0 / std.math.sqrt(@as(f32, @floatFromInt(dims.hd)));
     const head_scaling = if (opts.scale) |s| s else Tensor.scalar(sqrtHeadDim, k.dtype());
