@@ -1,5 +1,5 @@
 load("@aspect_bazel_lib//lib:tar.bzl", "mtree_spec", "tar")
-load("@rules_zig//zig:defs.bzl", "zig_library", "zls_completion")
+load("@rules_zig//zig:defs.bzl", "zig_library")
 load("//bazel:zig.bzl", "zig_cc_test")
 load("//bazel:zig_proto_library.bzl", "zig_proto_library")
 
@@ -38,11 +38,6 @@ zig_library(
         "@rules_zig//zig/runfiles",
         "@zig-yaml//:zig-yaml",
     ],
-)
-
-zls_completion(
-    name = "completion",
-    deps = [":zml"],
 )
 
 zig_proto_library(
