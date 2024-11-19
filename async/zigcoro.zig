@@ -1,123 +1,153 @@
 const std = @import("std");
+const stdx = @import("stdx");
 const xev = @import("xev");
 const libcoro = @import("libcoro");
 const aio = libcoro.asyncio;
-
-const FnSignature = @import("meta.zig").FnSignature;
+const queue_mpsc = @import("queue_mpsc.zig");
 
 pub fn Frame(comptime func: anytype) type {
-    const Signature = FnSignature(func, null);
-    return FrameEx(func, Signature.ArgsT);
+    const Signature = stdx.meta.FnSignature(func, null);
+    return FrameExx(func, Signature.ArgsT, Signature.ReturnT);
 }
 
 pub fn FrameEx(comptime func: anytype, comptime argsT: type) type {
-    return FrameExx(func, argsT);
+    const Signature = stdx.meta.FnSignature(func, argsT);
+    return FrameExx(func, Signature.ArgsT, Signature.ReturnT);
 }
 
-fn FrameExx(comptime func: anytype, comptime argsT: type) type {
+fn FrameExx(comptime func: anytype, comptime argsT: type, comptime returnT: type) type {
     return struct {
         const Self = @This();
-        const Signature = FnSignature(func, argsT);
-        const FrameT = libcoro.FrameT(func, .{ .ArgsT = Signature.ArgsT });
+        const FrameT = libcoro.FrameT(func, .{ .ArgsT = argsT });
 
         inner: FrameT,
 
-        pub fn await_(self: *Self) Signature.ReturnT {
+        pub const wait = await_;
+        pub const awaitt = await_;
+        pub fn await_(self: *Self) returnT {
             defer {
                 self.inner.deinit();
                 self.* = undefined;
             }
             return libcoro.xawait(self.inner);
         }
-
-        fn from(other: anytype) !Self {
-            return .{ .inner = FrameT.wrap(other.frame()) };
-        }
     };
 }
 
-pub fn asyncc(comptime func: anytype, args: FnSignature(func, null).ArgsT) !FrameEx(func, @TypeOf(args)) {
-    return asyncGeneric(func, args);
+pub fn asyncc(comptime func: anytype, args: anytype) !FrameEx(func, @TypeOf(args)) {
+    const Signature = stdx.meta.FnSignature(func, @TypeOf(args));
+    return .{
+        .inner = try aio.xasync(func, @as(Signature.ArgsT, args), null),
+    };
 }
 
-pub fn asyncGeneric(comptime func: anytype, args: anytype) !FrameEx(func, @TypeOf(args)) {
-    const frame = try aio.xasync(func, args, null);
-    return FrameEx(func, @TypeOf(args)).from(frame);
-}
-
-pub fn callBlocking(comptime func: anytype, args: FnSignature(func, null).ArgsT) @TypeOf(callBlockingGeneric(func, args)) {
-    return callBlockingGeneric(func, args);
-}
-
-pub fn callBlockingGeneric(comptime func: anytype, args: anytype) FnSignature(func, @TypeOf(args)).ReturnT {
-    const Signature = FnSignature(func, @TypeOf(args));
+pub fn callBlocking(comptime func: anytype, args: anytype) stdx.meta.FnSignature(func, @TypeOf(args)).ReturnT {
+    const Signature = stdx.meta.FnSignature(func, @TypeOf(args));
 
     const TaskT = struct {
         const Self = @This();
 
         _task: xev.ThreadPool.Task = .{ .callback = &Self.run },
 
-        notif: Notification,
-        args: *const Signature.ArgsT,
+        event: threading.ResetEventSingle = .{},
+        args: Signature.ArgsT,
         result: Signature.ReturnT = undefined,
 
         pub fn run(task_: *xev.ThreadPool.Task) void {
             const task: *Self = @alignCast(@fieldParentPtr("_task", task_));
-            task.result = @call(.auto, func, task.args.*);
-            task.notif.notify() catch @panic("Unable to notify");
+            task.result = @call(.auto, func, task.args);
+            task.event.set();
         }
     };
 
     var newtask: TaskT = .{
-        .notif = Notification.init() catch @panic("Notification.init failed"),
-        .args = &args,
+        .args = args,
     };
-    defer newtask.notif.deinit();
-
     AsyncThread.current.thread_pool.schedule(xev.ThreadPool.Batch.from(&newtask._task));
-    newtask.notif.wait() catch @panic("Unable to wait for notification");
-    return newtask.result;
-}
+    newtask.event.wait();
 
-pub fn tick() void {
-    AsyncThread.current.executor.exec.tick();
+    return newtask.result;
 }
 
 pub fn sleep(ms: u64) !void {
     try aio.sleep(AsyncThread.current.executor, ms);
 }
 
-pub const Notification = struct {
-    inner: aio.AsyncNotification,
+pub const threading = struct {
+    const Waiter = struct {
+        frame: libcoro.Frame,
+        thread: *const AsyncThread,
+        next: ?*Waiter = null,
+    };
 
-    pub fn init() !Notification {
-        return .{
-            .inner = aio.AsyncNotification.init(AsyncThread.current.executor, try xev.Async.init()),
+    const WaiterQueue = queue_mpsc.Intrusive(Waiter);
+
+    pub const ResetEventSingle = struct {
+        const State = union(enum) {
+            unset,
+            waiting: *Waiter,
+            set,
+
+            const unset_state: State = .unset;
+            const set_state: State = .set;
         };
-    }
 
-    pub fn notify(self: *Notification) !void {
-        try self.inner.notif.notify();
-    }
+        waiter: std.atomic.Value(*const State) = std.atomic.Value(*const State).init(&State.unset_state),
 
-    pub fn wait(self: *Notification) !void {
-        try self.inner.wait();
-    }
+        pub fn isSet(self: *ResetEventSingle) bool {
+            return self.waiter.load(&State.set_state, .monotonic) == &State.set_state;
+        }
 
-    pub fn deinit(self: *Notification) void {
-        self.inner.notif.deinit();
-        self.* = undefined;
-    }
+        pub fn reset(self: *ResetEventSingle) void {
+            self.waiter.store(&State.unset_state, .monotonic);
+        }
+
+        pub fn set(self: *ResetEventSingle) void {
+            switch (self.waiter.swap(&State.set_state, .monotonic).*) {
+                .waiting => |waiter| {
+                    waiter.thread.waiters_queue.push(waiter);
+                    waiter.thread.wake();
+                },
+                else => {},
+            }
+        }
+
+        pub fn wait(self: *ResetEventSingle) void {
+            var waiter: Waiter = .{
+                .frame = libcoro.xframe(),
+                .thread = AsyncThread.current,
+            };
+            var new_state: State = .{
+                .waiting = &waiter,
+            };
+            if (self.waiter.cmpxchgStrong(&State.unset_state, &new_state, .monotonic, .monotonic) == null) {
+                libcoro.xsuspend();
+            }
+        }
+    };
 };
 
 pub const AsyncThread = struct {
-    threadlocal var current: AsyncThread = undefined;
+    threadlocal var current: *const AsyncThread = undefined;
 
     executor: *aio.Executor,
     loop: *xev.Loop,
     thread_pool: *xev.ThreadPool,
+    async_notifier: *xev.Async,
+    waiters_queue: *threading.WaiterQueue,
 
-    pub fn main(allocator: std.mem.Allocator, comptime func: anytype, args: anytype) !void {
+    pub fn wake(self: *const AsyncThread) void {
+        self.async_notifier.notify() catch {};
+    }
+
+    fn waker_cb(q: ?*threading.WaiterQueue, _: *xev.Loop, _: *xev.Completion, _: xev.Async.WaitError!void) xev.CallbackAction {
+        while (q.?.pop()) |waiter| {
+            libcoro.xresume(waiter.frame);
+        }
+        return .rearm;
+    }
+
+    pub fn main(allocator: std.mem.Allocator, comptime mainFunc: fn () anyerror!void) !void {
         var thread_pool = xev.ThreadPool.init(.{});
         defer {
             thread_pool.shutdown();
@@ -127,42 +157,54 @@ pub const AsyncThread = struct {
         var loop = try xev.Loop.init(.{
             .thread_pool = &thread_pool,
         });
+
         defer loop.deinit();
 
         var executor = aio.Executor.init(&loop);
 
-        AsyncThread.current = .{
-            .executor = &executor,
-            .loop = &loop,
-            .thread_pool = &thread_pool,
-        };
+        var async_notifier = try xev.Async.init();
+        defer async_notifier.deinit();
+
+        var waiters_queue: threading.WaiterQueue = undefined;
+        waiters_queue.init();
+
+        var c: xev.Completion = undefined;
+        async_notifier.wait(&loop, &c, threading.WaiterQueue, &waiters_queue, &waker_cb);
 
         aio.initEnv(.{
             .stack_allocator = allocator,
             .default_stack_size = 16 * 1024 * 1024,
         });
 
-        return try aio.run(&executor, func, args, null);
+        AsyncThread.current = &.{
+            .executor = &executor,
+            .loop = &loop,
+            .thread_pool = &thread_pool,
+            .async_notifier = &async_notifier,
+            .waiters_queue = &waiters_queue,
+        };
+
+        return try aio.run(&executor, mainFunc, .{}, null);
     }
 };
 
-pub fn StdIn() !File {
+pub fn getStdIn() !File {
     return File.init(std.io.getStdIn()) catch @panic("Unable to open stdin");
 }
 
-pub fn StdOut() File {
+pub fn getStdOut() File {
     return File.init(std.io.getStdOut()) catch @panic("Unable to open stdout");
 }
 
-pub fn StdErr() File {
+pub fn getStdErr() File {
     return File.init(std.io.getStdErr()) catch @panic("Unable to open stderr");
 }
 
 pub const File = struct {
-    pub const SeekError = FnSignature(File.seekTo, null).ReturnErrorSet.? || FnSignature(File.seekBy, null).ReturnErrorSet.?;
-    pub const GetSeekPosError = SeekError || FnSignature(File.stat, null).ReturnErrorSet.?;
-    pub const Reader = std.io.GenericReader(File, FnSignature(File.read, null).ReturnErrorSet.?, File.read);
-    pub const Writer = std.io.GenericWriter(File, FnSignature(File.write, null).ReturnErrorSet.?, File.write);
+    pub const SeekError = stdx.meta.FnSignature(File.seekTo, null).ReturnErrorSet.? || stdx.meta.FnSignature(File.seekBy, null).ReturnErrorSet.?;
+    pub const GetSeekPosError = SeekError || stdx.meta.FnSignature(File.stat, null).ReturnErrorSet.?;
+    pub const Reader = std.io.GenericReader(File, stdx.meta.FnSignature(File.read, null).ReturnErrorSet.?, File.read);
+    pub const Writer = std.io.GenericWriter(File, stdx.meta.FnSignature(File.write, null).ReturnErrorSet.?, File.write);
     pub const SeekableStream = std.io.SeekableStream(
         File,
         SeekError,
@@ -187,10 +229,6 @@ pub const File = struct {
         return .{ .inner = aio.File.init(AsyncThread.current.executor, try xev.File.init(file_)) };
     }
 
-    pub fn fromFd(fd: std.fs.File.Handle) !File {
-        return .{ .inner = aio.File.init(AsyncThread.current.executor, try xev.File.initFd(fd)) };
-    }
-
     pub fn open(path: []const u8, flags: std.fs.File.OpenFlags) !File {
         return init(try callBlocking(std.fs.Dir.openFile, .{ std.fs.cwd(), path, flags }));
     }
@@ -201,7 +239,9 @@ pub const File = struct {
 
     pub fn read(self: File, buf: []u8) !usize {
         // NOTE(Corentin): Early return is required to avoid error with xev on Linux with io_uring backend.
-        if (buf.len == 0) return 0;
+        if (buf.len == 0) {
+            return 0;
+        }
 
         return self.inner.read(.{ .slice = buf }) catch |err| switch (err) {
             // NOTE(Corentin): read shouldn't return an error on EOF, but a read length of 0 instead. This is to be iso with std.fs.File.
@@ -212,7 +252,9 @@ pub const File = struct {
 
     pub fn pread(self: File, buf: []u8, offset: u64) !usize {
         // NOTE(Corentin): Early return is required to avoid error with xev on Linux with io_uring backend.
-        if (buf.len == 0) return 0;
+        if (buf.len == 0) {
+            return 0;
+        }
 
         return self.inner.pread(.{ .slice = buf }, offset) catch |err| switch (err) {
             // NOTE(Corentin): pread shouldn't return an error on EOF, but a read length of 0 instead. This is to be iso with std.fs.File.
@@ -267,53 +309,86 @@ pub const File = struct {
 };
 
 pub const Socket = struct {
+    pub fn Listener(comptime T: type) type {
+        return struct {
+            const Self = @This();
+
+            inner: T.Inner,
+
+            pub fn accept(self: *Self) !T {
+                return .{ .inner = try self.inner.accept() };
+            }
+
+            pub fn close(self: *Self) !void {
+                return self.inner.close();
+            }
+
+            pub fn deinit(self: *Self) !void {
+                self.inner.shutdown();
+            }
+        };
+    }
+
     pub const TCP = struct {
-        pub const Reader = std.io.GenericReader(TCP, FnSignature(TCP.read, null).ReturnErrorSet.?, TCP.read);
-        pub const Writer = std.io.GenericWriter(TCP, FnSignature(TCP.write, null).ReturnErrorSet.?, TCP.write);
+        const Inner = aio.TCP;
+
+        pub const Reader = std.io.GenericReader(TCP, stdx.meta.FnSignature(TCP.read, null).ReturnErrorSet.?, TCP.read);
+        pub const Writer = std.io.GenericWriter(TCP, stdx.meta.FnSignature(TCP.write, null).ReturnErrorSet.?, TCP.write);
 
         inner: aio.TCP,
 
-        pub fn init(addr: std.net.Address) !TCP {
-            return .{ .inner = aio.TCP.init(AsyncThread.current.executor, try xev.TCP.init(addr)) };
+        pub fn listen(addr: std.net.Address) !Listener(TCP) {
+            var self: Listener(TCP) = .{
+                .inner = aio.TCP.init(AsyncThread.current.executor, try xev.TCP.init(addr)),
+            };
+            try self.inner.tcp.bind(addr);
+            try self.inner.tcp.listen(1024);
+            return self;
         }
 
         pub fn deinit(self: *TCP) void {
             self.inner.shutdown();
         }
 
+        pub fn accept(self: *TCP) !TCP {
+            return .{ .inner = try self.inner.accept() };
+        }
+
         pub fn connect(self: *TCP, addr: std.net.Address) !void {
             return self.inner.connect(addr);
         }
 
-        pub fn read(self: *TCP, buf: []u8) !usize {
+        pub fn read(self: TCP, buf: []u8) !usize {
             return self.inner.read(.{ .slice = buf });
         }
 
-        pub fn write(self: *TCP, buf: []const u8) !usize {
+        pub fn write(self: TCP, buf: []const u8) !usize {
             return self.inner.write(.{ .slice = buf });
         }
 
-        pub fn close(self: *TCP) !void {
-            defer self.* = undefined;
+        pub fn close(self: TCP) !void {
+            // defer self.* = undefined;
             return self.inner.close();
         }
 
-        pub fn reader(self: File) Reader {
+        pub fn reader(self: TCP) Reader {
             return .{ .context = self };
         }
 
-        pub fn writer(self: File) Writer {
+        pub fn writer(self: TCP) Writer {
             return .{ .context = self };
         }
     };
 
     pub const UDP = struct {
-        pub const Reader = std.io.GenericReader(UDP, FnSignature(UDP.read, null).ReturnErrorSet.?, UDP.read);
+        const Inner = aio.TCP;
+
+        pub const Reader = std.io.GenericReader(UDP, stdx.meta.FnSignature(UDP.read, null).ReturnErrorSet.?, UDP.read);
         pub const WriterContext = struct {
             file: UDP,
             addr: std.net.Address,
         };
-        pub const Writer = std.io.GenericWriter(WriterContext, FnSignature(UDP.write, null).ReturnErrorSet.?, struct {
+        pub const Writer = std.io.GenericWriter(WriterContext, stdx.meta.FnSignature(UDP.write, null).ReturnErrorSet.?, struct {
             fn callBlocking(self: WriterContext, buf: []const u8) !usize {
                 return self.file.write(self.addr, buf);
             }
@@ -321,8 +396,13 @@ pub const Socket = struct {
 
         inner: aio.UDP,
 
-        pub fn init(addr: std.net.Address) !UDP {
-            return .{ .inner = aio.UDP.init(AsyncThread.current.executor, try xev.UDP.init(addr)) };
+        pub fn listen(addr: std.net.Address) !Listener(UDP) {
+            var self: Listener(UDP) = .{
+                .inner = aio.UDP.init(AsyncThread.current.executor, try xev.UDP.init(addr)),
+            };
+            try self.inner.udp.bind(addr);
+            try self.inner.udp.listen(1024);
+            return self;
         }
 
         pub fn read(self: UDP, buf: []u8) !usize {
@@ -370,3 +450,23 @@ pub const Mutex = struct {
         _ = self.inner.recv();
     }
 };
+
+pub fn logFn(
+    comptime message_level: std.log.Level,
+    comptime scope: @Type(.EnumLiteral),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    const level_txt = comptime message_level.asText();
+    const prefix2 = if (scope == .default) ": " else "(" ++ @tagName(scope) ++ "): ";
+    const stderr = getStdErr().writer();
+    var bw = std.io.bufferedWriter(stderr);
+    const writer = bw.writer();
+
+    std.debug.lockStdErr();
+    defer std.debug.unlockStdErr();
+    nosuspend {
+        writer.print(level_txt ++ prefix2 ++ format ++ "\n", args) catch return;
+        bw.flush() catch return;
+    }
+}

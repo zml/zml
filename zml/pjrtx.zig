@@ -137,23 +137,24 @@ pub const Event = opaque {
     pub fn await_(self: *Event, api: *const Api) !void {
         defer self.deinit(api);
 
+        if (self.isReady(api)) {
+            return;
+        }
+
         var ctx = struct {
             err: ?*pjrt.Error = null,
-            notif: asynk.Notification,
-        }{
-            .notif = try asynk.Notification.init(),
-        };
-        defer ctx.notif.deinit();
+            event: asynk.threading.ResetEventSingle = .{},
+        }{};
 
         try self.inner().onReady(api, &(struct {
             fn call(err: ?*pjrt.Error, user_arg: ?*anyopaque) callconv(.C) void {
                 const ctx_: *@TypeOf(ctx) = @ptrCast(@alignCast(user_arg.?));
                 ctx_.err = err;
-                ctx_.notif.notify() catch @panic("Unable to notify");
+                ctx_.event.set();
             }
         }.call), &ctx);
+        ctx.event.wait();
 
-        try ctx.notif.wait();
         if (ctx.err) |e| {
             defer e.deinit(api);
             return e.getCode(api).toApiError();
