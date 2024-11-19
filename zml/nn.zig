@@ -820,17 +820,35 @@ const SdpaMemEfficient = struct {
     fn forward(self: SdpaMemEfficient) Tensor {
         stdx.debug.assert(@mod(self.q.dim(.q), self.chunking.q_chunk_size) == 0, "sdpaMemEfficient expects the chunk_size to exactly divise the seq_len, got: sdpaMemEfficient({}, {})", .{ self.q, self.chunking });
         stdx.debug.assert(@mod(self.k.dim(.k), self.chunking.k_chunk_size) == 0, "sdpaMemEfficient expects the chunk_size to exactly divise the seq_len, got: sdpaMemEfficient({}, {})", .{ self.k, self.chunking });
-        const n_q_chunks = @divExact(self.q.dim(.q), self.chunking.q_chunk_size);
-        const res = ops.for_(SdpaMemEfficient.nextQueriesChunk, self, .{ .nq = n_q_chunks });
+        const n_q_chunks: u32 = @intCast(@divExact(self.q.dim(.q), self.chunking.q_chunk_size));
+        // if (n_q_chunks == 1) {
+        //     return self.scanKeyVal().transpose(self.q.shape());
+        // }
 
-        // this transposes are needed because `for` inserts a new axis at position 0, potentially before the batching dims.
-        // ideally we should control where for insert its results.
-        // TODO: should "for_" operate on an axis ?
-        return res.contiguous(.{ .nq, .q, .hd }).merge(.{ .q = .{ .nq, .q } }).transpose(self.q.shape());
+        // const res = ops.for_(SdpaMemEfficient.nextQueriesChunk, self, .{ .nq = n_q_chunks });
+        const ctx = zml.module.CompilationContext.current();
+        const q_chunks = ctx._allocator.alloc(zml.Tensor, n_q_chunks) catch unreachable;
+        defer ctx._allocator.free(q_chunks);
+        for (0..n_q_chunks) |i| {
+            const idx: u32 = @intCast(i);
+            const q_slice: zml.Tensor.DynSlice = .{
+                .start = Tensor.scalar(idx * self.chunking.q_chunk_size, .i32),
+                .len = self.chunking.q_chunk_size,
+            };
+            const q_chunk = self.q.dynamicSlice(.{ .q = q_slice });
+            const attn_chunk = if (self.sdpa_opts.attn_mask) |attn_mask| attn_mask.dynamicSlice(.{ .q = q_slice }) else null;
+
+            var chunk: SdpaMemEfficient = self;
+            chunk.q = q_chunk;
+            chunk.sdpa_opts.attn_mask = attn_chunk;
+            q_chunks[i] = chunk.scanKeyVal();
+        }
+
+        const res = zml.Tensor.concatenate(q_chunks, .q);
+        return res.transpose(self.q.shape());
     }
 
     fn nextQueriesChunk(self: SdpaMemEfficient, idx: Tensor) Tensor {
-        log.warn("nextQueriesChunk({})", .{self});
         const q_slice: zml.Tensor.DynSlice = .{
             .start = idx.scale(self.chunking.q_chunk_size),
             .len = self.chunking.q_chunk_size,
@@ -855,6 +873,7 @@ const SdpaMemEfficient = struct {
         for (0..@intCast(n_chunks)) |idx| {
             const next = self.nextKeyValChunk(Tensor.scalar(idx, .i32));
             partial_softmax = if (partial_softmax) |prev| prev.merge(next) else next;
+            // partial_softmax = zml.ops.optimizationBarrier(partial_softmax.?);
         }
 
         return partial_softmax.?.finalize();
@@ -899,14 +918,14 @@ pub const PartialSoftmax = struct {
         const sum_dtype = self.exp_sum.dtype();
         return .{
             .max_value = max_value,
-            .values = self.values.mul(max_diff_exp.broad(self.values.shape())),
-            .exp_sum = self.exp_sum.mul(max_diff_exp.broad(self.exp_sum.shape()).convert(sum_dtype)),
+            .values = self.values.mul(max_diff_exp.transpose(self.values.shape()).broad(self.values.shape())),
+            .exp_sum = self.exp_sum.mul(max_diff_exp.convert(sum_dtype)),
         };
     }
 
     /// Divides the intermediary results by the exp_sum to get the proper attention values.
     pub fn finalize(self: PartialSoftmax) Tensor {
-        return self.values.div(self.exp_sum.broad(self.values.shape()));
+        return self.values.div(self.exp_sum.transpose(self.values.shape()).broad(self.values.shape()).convert(self.values.dtype()));
     }
 };
 
@@ -1044,6 +1063,64 @@ test "sdpaMemEfficient with mask" {
     );
 
     try zml.testing.expectClose(ref_res, res, 2e-3);
+}
+
+test "sdpaMemEfficient transposed" {
+    const platform = zml.testing.env();
+    const allocator = std.testing.allocator;
+
+    // Note we use small input vectors to have the tests run reasonably fast,
+    // but don't expect speed ups with this small sizes.
+    const rng = try zml.compileFn(allocator, Tensor.Rng.normal, .{ Shape.init(.{ 1, 512, 10, 64 }, .f32), .{ .mean = 0, .stddev = 1 } }, platform);
+    defer rng.deinit();
+
+    const rng_mask = try zml.compileFn(allocator, Tensor.Rng.normal, .{ Shape.init(.{ 512, 512 }, .f32), .{ .mean = 0, .stddev = 1 } }, platform);
+    defer rng_mask.deinit();
+
+    // Note: it's fine to pass undefined here, cause the arguments have already been backed into the executable.
+    const q = rng.call(undefined).withTags(.{ .b, .q, .h, .hd });
+    const k = rng.call(undefined).withTags(.{ .b, .k, .h, .hd });
+    const v = rng.call(undefined).withTags(.{ .b, .k, .h, .hd });
+    const mask = rng_mask.call(undefined).withTags(.{ .q, .k });
+
+    const ref_res = try zml.testing.compileAndCall(
+        platform,
+        sdpa,
+        .{ q, k, v, .{ .attn_mask = mask, .scale = null, .bias = null } },
+    );
+    try std.testing.expectEqualSlices(i64, q.shape().dims(), ref_res.shape().dims());
+
+    {
+        const res = try zml.testing.compileAndCall(
+            platform,
+            sdpaMemEfficient,
+            .{
+                q,
+                k,
+                v,
+                .{ .attn_mask = mask, .scale = null, .bias = null },
+                .{ .q_chunk_size = @divExact(512, 2), .k_chunk_size = @divExact(512, 4) },
+            },
+        );
+
+        try zml.testing.expectClose(ref_res, res, 1e-3);
+    }
+
+    {
+        const res = try zml.testing.compileAndCall(
+            platform,
+            sdpaMemEfficient,
+            .{
+                q,
+                k,
+                v,
+                .{ .attn_mask = mask, .scale = null, .bias = null },
+                .{ .q_chunk_size = 512, .k_chunk_size = @divExact(512, 4) },
+            },
+        );
+
+        try zml.testing.expectClose(ref_res, res, 1e-3);
+    }
 }
 
 /// Options controlling generation. The default values correspond to greedy decoding.
