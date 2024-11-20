@@ -6,6 +6,11 @@ const show_mlir = true;
 
 const log = std.log.scoped(.mnist);
 
+pub const std_options: std.Options = .{
+    .logFn = asynk.logFn,
+    .log_level = .info,
+};
+
 /// Model definition
 const Mnist = struct {
     fc1: Layer,
@@ -221,9 +226,4 @@ const digits = [_][]const u8{
     \\                       |   #     #   |
     \\                       |    #####    |
     ,
-};
-
-pub const std_options = .{
-    .logFn = asynk.logFn,
-    .log_level = .info,
 };
