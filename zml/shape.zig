@@ -60,7 +60,7 @@ pub const Shape = struct {
                 } else if (comptime isAutoDim(fv)) {
                     dims_.appendAssumeCapacity(-1);
                 } else {
-                    stdx.meta.compileError("Field {s} should be an integer or an auto dimension", .{field.name});
+                    stdx.debug.compileError("Field {s} should be an integer or an auto dimension", .{field.name});
                 }
                 if (comptime stdx.meta.isTuple(T)) {
                     tags_.appendAssumeCapacity(TagUnknown);
@@ -72,7 +72,7 @@ pub const Shape = struct {
             return .{ dims_, tags_ };
         }
 
-        stdx.meta.compileError("expected a dimension tuple eg '.{{ .a = 10, .b = 20}}' or '.{{ 10, 20 }}', got {}", .{T});
+        stdx.debug.compileError("expected a dimension tuple eg '.{{ .a = 10, .b = 20}}' or '.{{ 10, 20 }}', got {}", .{T});
     }
 
     test parseDimensions {
@@ -109,7 +109,7 @@ pub const Shape = struct {
             return .{ axes_, tags_ };
         }
 
-        stdx.meta.compileError("Wrong type, got {}. Expected .{{.a, .b}}", .{T});
+        stdx.debug.compileError("Wrong type, got {}. Expected .{{.a, .b}}", .{T});
     }
 
     pub fn parseTags(v: anytype) TagsArray {
@@ -181,7 +181,7 @@ pub const Shape = struct {
             EnumLiteral => @tagName(v).ptr,
             std.builtin.Type.StructField => v.name.ptr,
             Tag => v,
-            else => stdx.meta.compileError("Value should be an EnumLiteral, a Shape.Tag or a StructField, got {}", .{T}),
+            else => stdx.debug.compileError("Value should be an EnumLiteral, a Shape.Tag or a StructField, got {}", .{T}),
         };
     }
 
@@ -239,7 +239,7 @@ pub const Shape = struct {
             return true;
         }
 
-        stdx.meta.compileError("Expected tuple of tags, got {any}", .{T});
+        stdx.debug.compileError("Expected tuple of tags, got {any}", .{T});
     }
 
     pub fn isFullyTagged(self: Shape) bool {
@@ -261,7 +261,7 @@ pub const Shape = struct {
             return self.axisFromTag(toTag(axis_));
         }
 
-        stdx.meta.compileError("Wrong axis type, expected .literal, or an integer, got: {any}", .{T});
+        stdx.debug.compileError("Wrong axis type, expected .literal, or an integer, got: {any}", .{T});
     }
 
     pub fn axes(self: Shape, axes_: anytype) AxesArray {
@@ -289,7 +289,7 @@ pub const Shape = struct {
             return res;
         }
 
-        stdx.meta.compileError("axes expects an int-tuple or a tuple of enum literal, got {}", .{T});
+        stdx.debug.compileError("axes expects an int-tuple or a tuple of enum literal, got {}", .{T});
     }
 
     fn axisFromInt(self: Shape, d: isize) u3 {
@@ -590,7 +590,7 @@ pub const Shape = struct {
             return res;
         }
 
-        stdx.meta.compileError("Expected a tuple of enum literals eg: .{ .a, .b, .c } got: {any}", .{@TypeOf(tagz)});
+        stdx.debug.compileError("Expected a tuple of enum literals eg: .{ .a, .b, .c } got: {any}", .{@TypeOf(tagz)});
     }
 
     test withTags {
@@ -637,7 +637,7 @@ pub const Shape = struct {
             return res;
         }
 
-        stdx.meta.compileError("Expected a tuple of enum literals eg: .{ .a, .b, .c } got: {any}", .{@TypeOf(tagz)});
+        stdx.debug.compileError("Expected a tuple of enum literals eg: .{ .a, .b, .c } got: {any}", .{@TypeOf(tagz)});
     }
 
     test withPartialTags {
@@ -934,7 +934,7 @@ pub const Shape = struct {
             return .{ vals_, tags_ };
         }
 
-        stdx.meta.compileError("parseStruct expects struct or tuple, got {}", .{V});
+        stdx.debug.compileError("parseStruct expects struct or tuple, got {}", .{V});
     }
 
     test parseStruct {
@@ -967,7 +967,7 @@ pub const Shape = struct {
             return res;
         }
 
-        stdx.meta.compileError("parseStruct expects struct or tuple, got {}", .{V});
+        stdx.debug.compileError("parseStruct expects struct or tuple, got {}", .{V});
     }
 
     test parseAxesOptions {

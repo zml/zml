@@ -526,7 +526,7 @@ pub fn loadBuffers(
     if (@hasDecl(Model, "init")) {
         @call(.auto, Model.init, .{&model} ++ init_args);
     } else {
-        zml.meta.assertComptime(@TypeOf(init_args) == void or @TypeOf(init_args) == @TypeOf(.{}), "Model of type {} has no init function, so `loadBuffers` should be call with init_args set to {{}} (void)", .{Model});
+        stdx.debug.assertComptime(@TypeOf(init_args) == void or @TypeOf(init_args) == @TypeOf(.{}), "Model of type {} has no init function, so `loadBuffers` should be call with init_args set to {{}} (void)", .{Model});
     }
 
     return loadModelBuffersWithPrefix(Model, model, buffer_store, allocator, platform, "");
@@ -623,7 +623,7 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
 
                     try visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, value, platform);
                 }
-            } else zml.meta.compileError("type not supported by visitStructAndLoadBuffer: {}", .{T});
+            } else stdx.debug.compileError("type not supported by visitStructAndLoadBuffer: {}", .{T});
         },
         .Array => {
             for (obj, 0..) |*value, i| {
