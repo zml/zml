@@ -1306,7 +1306,7 @@ pub const Tensor = struct {
         var padding = [_][2]i64{.{ 0, 0 }} ** MAX_RANK;
         padding[a] = .{ self.dim(a) - 1, 0 };
 
-        var res = ops.reduceWindow(
+        return ops.reduceWindow(
             Tensor.add,
             self,
             Tensor.scalar(0, self.dtype()),
@@ -1318,8 +1318,6 @@ pub const Tensor = struct {
                 .padding = padding[0..rk],
             },
         );
-        res._shape = self._shape;
-        return res;
     }
 
     test cumulativeSum {
@@ -1328,7 +1326,11 @@ pub const Tensor = struct {
 
         const Local = struct {
             pub fn _cumsum(input: Tensor) Tensor {
-                return input.withPartialTags(.{.n}).cumulativeSum(.n);
+                const x = input.withPartialTags(.{.n});
+                const y = x.cumulativeSum(.n);
+                // Check that tags are propagated
+                std.debug.assert(y.shape().eqlWithTags(x.shape()));
+                return y;
             }
         };
 
@@ -2457,7 +2459,7 @@ pub const Tensor = struct {
 
         const _scalar: Tensor = .{ ._shape = Shape.init(.{}, self.dtype()), ._id = undefined };
         const UpdateS = ops.BlockSign(ScatterOpts.increment);
-        const update_block = ctx.makeBlock(UpdateS, opts.update_fn, opts.update_fn_ctx, .{ _scalar, _scalar });
+        const update_block, _ = ctx.makeBlock(UpdateS, opts.update_fn, opts.update_fn_ctx, .{ _scalar, _scalar });
 
         const op = dialect.stablehlo.scatter(
             mlir_ctx,

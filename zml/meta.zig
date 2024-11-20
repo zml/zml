@@ -479,6 +479,28 @@ pub fn collect(func: anytype, func_ctx: _CollectCtx(func), out: *std.ArrayList(s
     if (context.oom) return error.OutOfMemory;
 }
 
+/// Given a func(X) -> Y or a func(Ctx, X) -> Y,
+/// finds all X in the given object, and write the result of func(X) into an arraylist.
+pub fn collectBuf(func: anytype, func_ctx: _CollectCtx(func), obj: anytype, out: []stdx.meta.FnResult(func)) void {
+    stdx.debug.assertComptime(@typeInfo(@TypeOf(func)).Fn.params.len <= 2, "zml.meta.collectBuf expects a func with one or two arguments, got: {}", .{@TypeOf(func)});
+    const LocalContext = struct {
+        func_ctx: _CollectCtx(func),
+        out: @TypeOf(out),
+        idx: usize = 0,
+    };
+    var context = LocalContext{ .func_ctx = func_ctx, .out = out };
+    visit((struct {
+        fn cb(ctx: *LocalContext, val: *const _CollectArg(func)) void {
+            if (ctx.idx >= ctx.out.len) return;
+
+            const res = if (_CollectCtx(func) == void) func(val.*) else func(ctx.func_ctx, val.*);
+            ctx.out[ctx.idx] = res;
+            ctx.idx += 1;
+        }
+    }).cb, &context, obj);
+    std.debug.assert(context.idx == context.out.len);
+}
+
 fn _CollectCtx(func: anytype) type {
     const params = @typeInfo(@TypeOf(func)).Fn.params;
     if (params.len == 1) return void;

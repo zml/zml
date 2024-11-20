@@ -47,8 +47,9 @@ pub fn while_(
         @compileError("cond_fn and body_fn signatures don't match ! " ++ @typeName(@TypeOf(cond_fn)) ++ " and " ++ @typeName(@TypeOf(body_fn)));
     }
     const ctx = CompilationContext.current();
-    const cond_block = ctx.makeBlock(CondS, &cond_fn, blkctx, inputs);
-    const body_block = ctx.makeBlock(BodyS, &body_fn, blkctx, inputs);
+    const cond_block, _ = ctx.makeBlock(CondS, &cond_fn, blkctx, inputs);
+
+    const body_block, const body_res = ctx.makeBlock(BodyS, &body_fn, blkctx, inputs);
     var input_values: [BodyS.nIn]mlir.Value = undefined;
     ctx.extractValues(&inputs, &input_values);
 
@@ -63,9 +64,7 @@ pub fn while_(
         .location = loc,
     });
 
-    var res: BodyS.Args = inputs;
-    module.assignResults(&res, null, op);
-    return res;
+    return fromMlirOperationWithTags(op, body_res);
 }
 
 test "simple while" {
@@ -139,7 +138,7 @@ pub fn reduce(
     var init_values: [N]mlir.Value = undefined;
     ctx.extractValues(&inits, &init_values);
 
-    const body_block = ctx.makeBlock(BodyS, &body_fn, {}, .{ inits, inits });
+    const body_block, _ = ctx.makeBlock(BodyS, &body_fn, {}, .{ inits, inits });
 
     const loc = ctx.mlirCtx().location(@src());
 
@@ -228,7 +227,7 @@ pub fn reduceWindow(
         if (BodyS.Return != @TypeOf(inputs)) @compileError("reduce body function need to have the following signature `fn (left: T, right: T) T`, got: " ++ @typeName(body_fn));
     }
     const ctx = CompilationContext.current();
-    const body_block = ctx.makeBlock(BodyS, &body_fn, {}, .{ inits, inits });
+    const body_block, _ = ctx.makeBlock(BodyS, &body_fn, {}, .{ inits, inits });
     const N = comptime @divExact(BodyS.nIn, 2);
     var input_values: [N]mlir.Value = undefined;
     ctx.extractValues(&inputs, &input_values);
@@ -255,9 +254,7 @@ pub fn reduceWindow(
         .location = loc,
     });
 
-    var res: BodyS.Return = inputs;
-    module.assignResults(&res, null, op);
-    return res;
+    return fromMlirOperationWithTags(op, inputs);
 }
 
 /// Runs a given function for several steps, and returns a stack of each step output.
@@ -407,10 +404,11 @@ pub fn if_(
         @compileError("true_branch_fn and false_branch_fn return types don't match ! " ++ @typeName(TrueBlockSignature.Return) ++ " and " ++ @typeName(FalseBlockSignature.Return));
     }
     const ctx = CompilationContext.current();
-    const true_branch_block = ctx.makeBlock(TrueBlockSignature, &true_branch_fn, blkctx, {});
-    const false_branch_block = ctx.makeBlock(TrueBlockSignature, &false_branch_fn, blkctx, {});
-    const loc = ctx.mlirCtx().location(@src());
+    const true_branch_block, const true_branch_res = ctx.makeBlock(TrueBlockSignature, &true_branch_fn, blkctx, {});
+    const false_branch_block, const false_branch_res = ctx.makeBlock(TrueBlockSignature, &false_branch_fn, blkctx, {});
+    stdx.debug.assert(false_branch_res.shape().eqlWithTags(true_branch_res.shape()), "zml.ops.if_ expects true and false branch to produce outputs of the same shape, but it produced true={} and false={}", .{ true_branch_res, false_branch_res });
 
+    const loc = ctx.mlirCtx().location(@src());
     const op = mlir.Operation.make(ctx.mlirCtx(), "stablehlo.if", .{
         .operands = &.{pred.value()},
         .result_type_inference = true,
@@ -420,9 +418,7 @@ pub fn if_(
         .location = loc,
     });
 
-    var res: TrueBlockSignature.Return = undefined;
-    module.assignResults(&res, null, op);
-    return res;
+    return fromMlirOperationWithTags(op, true_branch_res);
 }
 
 test "if" {
@@ -470,7 +466,7 @@ pub fn sort(
         inits[i * 2 + 1] = Tensor{ ._shape = arg_shape, ._id = undefined, ._donation = .no_buffer };
     }
     const ctx = CompilationContext.current();
-    const block = ctx.makeBlock(BodyS, &comp_fn, blkctx, inits);
+    const block, _ = ctx.makeBlock(BodyS, &comp_fn, blkctx, inits);
     var input_values: [@divExact(BodyS.nIn, 2)]mlir.Value = undefined;
     ctx.extractValues(&inputs, &input_values);
 
@@ -616,6 +612,31 @@ pub fn staticCountTensors(comptime T: type) ?usize {
         },
         else => 0,
     };
+}
+
+/// Create a Tensor struct similar to base, keeping base tags,
+/// but using mlir value and dims from the mlir operation.
+pub fn fromMlirOperationWithTags(op: mlir.Operation, base: anytype) @TypeOf(base) {
+    const LocalContext = struct {
+        index: usize,
+        op: mlir.Operation,
+    };
+    var context = LocalContext{ .index = 0, .op = op };
+    var res = base;
+    meta.visit((struct {
+        fn cb(inner_ctx: *LocalContext, tensor: *Tensor) void {
+            var new = Tensor.fromMlirValue(inner_ctx.op.result(inner_ctx.index));
+            stdx.debug.internalAssert(new.rank() == tensor.rank(), "expected operand result to have rank {} but got {}", .{ tensor.rank(), new });
+            // copy tags and sharding info over
+            // some ops can change dims eg reduceWindow, so we trust mlir here.
+            new._shape._tags = tensor._shape._tags;
+            new._shape._sharding_info = tensor._shape._sharding_info;
+            tensor.* = new;
+            inner_ctx.index += 1;
+        }
+    }).cb, &context, &res);
+    assert(context.index == op.numResults());
+    return res;
 }
 
 /// Produces a custom call to `name` that takes a tensor and returns it.

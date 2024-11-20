@@ -1,7 +1,6 @@
 const asynk = @import("async");
 const builtin = @import("builtin");
 const dialect = @import("mlir/dialects");
-const protobuf = @import("io/protobuf");
 const runfiles = @import("runfiles");
 const std = @import("std");
 const stdx = @import("stdx");
@@ -142,13 +141,17 @@ pub const CompilationContext = struct {
 
     /// Transform a Tensor -> Tensor function into an Mlir block.
     /// `blkctx` represents values from outside the block that can be accessed inside the block.
+    /// Returns both the mlir.Block created and also the Tensors returned by `func`.
+    /// The returned tensors should not be returned to the user,
+    /// because their `mlir.Value` must not escape the block that created them.
+    /// But their shapes/tags can be safely propagated further.
     pub fn makeBlock(
         self: *CompilationContext,
         comptime S: ops.BlockSignature,
         func: *const S.Fn,
         blkctx: S.BlkCtx,
         args: S.Args,
-    ) mlir.Block {
+    ) struct { mlir.Block, S.Return } {
         const N = S.nIn;
         const locations = .{mlir.Location.unknown(self.mlirCtx())} ** N;
         var input_types: [N]mlir.Type = undefined;
@@ -172,7 +175,7 @@ pub const CompilationContext = struct {
         const block_ret = dialect.stablehlo.returns_(self.mlirCtx(), &block_res_values, loc);
         block.addOperationsRecursive(block_ret);
 
-        return block;
+        return .{ block, block_res };
     }
 
     /// Generate an MLIR function from a ZML function.
@@ -502,12 +505,12 @@ pub const CompilationContext = struct {
         const loc = self.mlirCtx().location(@src());
 
         const values = arena.alloc(mlir.Value, function.n_model + function.n_args) catch unreachable;
-        extractValues(model, values[0..function.n_model]);
-        extractValues(args, values[function.n_model..]);
+        self.extractValues(&model, values[0..function.n_model]);
+        self.extractValues(&args, values[function.n_model..]);
 
         const op = dialect.func.call(self.mlirCtx(), function.name, values, function.res_types, loc);
         var res: stdx.meta.FnResult(func) = undefined;
-        assignResults(&res, function.res_shapes, op);
+        assignResults(op, &res, function.res_shapes);
         return res;
     }
 
@@ -595,24 +598,12 @@ pub const CompilationContext = struct {
         };
     }
 
-    /// Visit the given struct and copies the mlir.Value associated with each tensor found.
-    pub fn extractValues(self: *const CompilationContext, v: anytype, values: []mlir.Value) void {
-        const LocalContext = struct {
-            self: *const CompilationContext,
-            index: usize = 0,
-            values: []mlir.Value,
-        };
-        var context = LocalContext{ .self = self, .values = values };
-        meta.visit((struct {
-            fn cb(ctx: *LocalContext, tensor: *const Tensor) void {
-                const value, const donation = ctx.self.getValueAndDonation(tensor.*);
-                _ = donation;
+    fn getValue(self: *const CompilationContext, tensor: Tensor) mlir.Value {
+        return self.getValueAndDonation(tensor)[0];
+    }
 
-                ctx.values[ctx.index] = value;
-                ctx.index += 1;
-            }
-        }).cb, &context, v);
-        assert(context.index == values.len);
+    pub fn extractValues(self: *const CompilationContext, v: anytype, values: []mlir.Value) void {
+        meta.collectBuf(getValue, self, v, values);
     }
 };
 
@@ -721,7 +712,7 @@ pub fn assignRawBuffers(v: anytype, platform: Platform, buffers: []const [*]*pjr
 }
 
 /// Visit the given struct and assign op results to each tensor found.
-pub fn assignResults(v: anytype, shapes: ?[]Shape, op: mlir.Operation) void {
+fn assignResults(op: mlir.Operation, v: anytype, shapes: []Shape) void {
     const LocalContext = struct {
         index: usize,
         op: mlir.Operation,
