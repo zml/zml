@@ -2459,8 +2459,7 @@ pub const Tensor = struct {
 
         const _scalar: Tensor = .{ ._shape = Shape.init(.{}, self.dtype()), ._id = undefined };
         const UpdateS = ops.BlockSign(ScatterOpts.increment);
-        const update_block, const update_res = ctx.makeBlock(UpdateS, opts.update_fn, opts.update_fn_ctx, .{ _scalar, _scalar });
-        _ = update_res;
+        const update_block, _ = ctx.makeBlock(UpdateS, opts.update_fn, opts.update_fn_ctx, .{ _scalar, _scalar });
 
         const op = dialect.stablehlo.scatter(
             mlir_ctx,
