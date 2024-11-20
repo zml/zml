@@ -60,7 +60,7 @@ pub fn asyncMain() !void {
     // Start compiling.
     // The shape of the input tensor, we have to pass in manually.
     timer.reset();
-    var compilation = try asynk.asyncGeneric(zml.module.compileModel, .{ allocator, Benchmark{}, .forward, .{ a_shape, b_shape }, platform });
+    var compilation = try asynk.asyncc(zml.module.compileModel, .{ allocator, Benchmark.forward, Benchmark{}, .{ a_shape, b_shape }, platform });
 
     // Wait for compilation to finish
     const compiled = try compilation.await_();
