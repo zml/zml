@@ -863,20 +863,25 @@ const SdpaMemEfficient = struct {
     }
 
     fn scanKeyVal(self: SdpaMemEfficient) Tensor {
-        const n_chunks = @divExact(self.k.dim(.k), self.chunking.k_chunk_size);
-
-        // For now we unroll the loop manually in Zig.
-        // we could use `zml.ops.while` but it's a bit verbose for when you just want to run a fixed number of steps.
-        // `zml.ops.for_` was suppose to help with that,
-        // but because it concatenates intermediary results, it wasn't saving memory.
+        // Unrolled version
         var partial_softmax: ?PartialSoftmax = null;
+        const n_chunks = @divExact(self.k.dim(.k), self.chunking.k_chunk_size);
         for (0..@intCast(n_chunks)) |idx| {
             const next = self.nextKeyValChunk(Tensor.scalar(idx, .i32));
             partial_softmax = if (partial_softmax) |prev| prev.merge(next) else next;
             // partial_softmax = zml.ops.optimizationBarrier(partial_softmax.?);
         }
-
         return partial_softmax.?.finalize();
+
+        // stablehlo.while version
+        // const partial_softmax, const last_idx = zml.ops.while_(hasNextKeyValChunk, nextKeyValChunkMerge, self, .{ PartialSoftmax.zeros(self.q.shape(), .f32), Tensor.scalar(0, .i32) });
+        // _ = last_idx;
+        // return partial_softmax.finalize();
+    }
+
+    fn nextKeyValChunkMerge(self: SdpaMemEfficient, prev: PartialSoftmax, idx: Tensor) struct { PartialSoftmax, Tensor } {
+        const next = self.nextKeyValChunk(idx);
+        return .{ prev.merge(next), idx.addConstant(1) };
     }
 
     fn nextKeyValChunk(self: SdpaMemEfficient, idx: Tensor) PartialSoftmax {
@@ -891,12 +896,25 @@ const SdpaMemEfficient = struct {
 
         return sdpaChunk(self.q, k_chunk, v_chunk, .{ .attn_mask = attn_chunk });
     }
+
+    pub fn hasNextKeyValChunk(self: SdpaMemEfficient, _: PartialSoftmax, idx: Tensor) zml.Tensor {
+        return idx.cmp(.LT, Tensor.scalar(self.chunking.k_chunk_size, idx.dtype()));
+    }
 };
 
 pub const PartialSoftmax = struct {
     values: Tensor,
     exp_sum: Tensor,
     max_value: Tensor,
+
+    pub fn zeros(q_shape: Shape, exp_sum_precision: DataType) PartialSoftmax {
+        // TODO: this isn't correct
+        return .{
+            .values = Tensor.constant(q_shape, q_shape.dtype().zero()),
+            .exp_sum = Tensor.constant(q_shape.setDim(.hd, 1), exp_sum_precision.zero()),
+            .max_value = Tensor.constant(q_shape.setDim(.hd, 1), q_shape.dtype().minValue()),
+        };
+    }
 
     pub fn merge(self: PartialSoftmax, other: PartialSoftmax) PartialSoftmax {
         // Rescale self and other using the new global_max.
@@ -918,14 +936,14 @@ pub const PartialSoftmax = struct {
         const sum_dtype = self.exp_sum.dtype();
         return .{
             .max_value = max_value,
-            .values = self.values.mul(max_diff_exp.transpose(self.values.shape()).broad(self.values.shape())),
+            .values = self.values.mul(max_diff_exp.broad(self.values.shape())),
             .exp_sum = self.exp_sum.mul(max_diff_exp.convert(sum_dtype)),
         };
     }
 
     /// Divides the intermediary results by the exp_sum to get the proper attention values.
     pub fn finalize(self: PartialSoftmax) Tensor {
-        return self.values.div(self.exp_sum.transpose(self.values.shape()).broad(self.values.shape()).convert(self.values.dtype()));
+        return self.values.div(self.exp_sum.broad(self.values.shape()).convert(self.values.dtype()));
     }
 };
 
@@ -988,8 +1006,8 @@ pub fn sdpaChunk(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) PartialSoft
         // The renaming is because the above dot projected values.k into .hd,
         // do the same thing on the other tensors.
         // This work because dot is a linear operation, and commutes with `PartialSoftmax.finalize`
-        .exp_sum = partial.exp_sum.rename(.{ .k = .hd }),
-        .max_value = partial.max_value.rename(.{ .k = .hd }),
+        .exp_sum = partial.exp_sum.rename(.{ .k = .hd }).transpose(attn.shape()),
+        .max_value = partial.max_value.rename(.{ .k = .hd }).transpose(attn.shape()),
     };
 }
 
