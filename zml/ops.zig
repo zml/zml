@@ -387,6 +387,44 @@ test for_ {
     }
 }
 
+test "nested for" {
+    const OuterProd = struct {
+        const OuterProd = @This();
+
+        x: Tensor,
+        x_row: Tensor = undefined,
+
+        pub fn forward(self: OuterProd) Tensor {
+            return for_(OuterProd.scanRow, self, .{self.x.dim(0)});
+        }
+
+        pub fn scanRow(self: OuterProd, i: Tensor) Tensor {
+            const row = self.x.dynamicSlice(.{.{ .start = i, .len = 1 }});
+            return for_(OuterProd.scanCol, .{ .x = self.x, .x_row = row }, .{self.x.dim(0)});
+        }
+
+        pub fn scanCol(self: OuterProd, j: Tensor) Tensor {
+            const col = self.x.dynamicSlice(.{.{ .start = j, .len = 1 }});
+            return self.x_row.mul(col);
+        }
+    };
+
+    const zml = @import("zml.zig");
+    const platform = zml.testing.env();
+
+    // 5 to prevent inlining
+    const x = try zml.Buffer.fromArray(platform, [5]f32{ 0, 1.0, -1.0, 2.0, -2.0 });
+    const outer_prod = try zml.testing.compileAndCall(platform, OuterProd.forward, .{.{ .x = x, .x_row = x }});
+    const expected: [5][5]f32 = .{
+        .{ 0, 0, 0, 0, 0 },
+        .{ 0, 1.0, -1.0, 2.0, -2.0 },
+        .{ 0, -1.0, 1.0, -2.0, 2.0 },
+        .{ 0, 2.0, -2.0, 4.0, -4.0 },
+        .{ 0, -2.0, 2.0, -4.0, 4.0 },
+    };
+    try std.testing.expectEqual(expected, outer_prod.getValue(@TypeOf(expected)));
+}
+
 pub fn if_2(pred: Tensor, comptime Closure: type, blkctx: BlockSignNoArgs(@field(Closure, "then")).BlkCtx) BlockSignNoArgs(@field(Closure, "then")).Return {
     return if_(pred, @field(Closure, "then"), @field(Closure, "else_"), blkctx);
 }
