@@ -47,9 +47,8 @@ pub fn while_(
         @compileError("cond_fn and body_fn signatures don't match ! " ++ @typeName(@TypeOf(cond_fn)) ++ " and " ++ @typeName(@TypeOf(body_fn)));
     }
     const ctx = CompilationContext.current();
-    const cond_block, _ = ctx.makeBlock(CondS, &cond_fn, blkctx, inputs);
-
-    const body_block, const body_res = ctx.makeBlock(BodyS, &body_fn, blkctx, inputs);
+    const cond_block, _ = ctx.makeBlock(.open, CondS, &cond_fn, blkctx, inputs);
+    const body_block, const body_res = ctx.makeBlock(.open, BodyS, &body_fn, blkctx, inputs);
     var input_values: [BodyS.nIn]mlir.Value = undefined;
     ctx.extractValues(&inputs, &input_values);
 
@@ -138,7 +137,7 @@ pub fn reduce(
     var init_values: [N]mlir.Value = undefined;
     ctx.extractValues(&inits, &init_values);
 
-    const body_block, _ = ctx.makeBlock(BodyS, &body_fn, {}, .{ inits, inits });
+    const body_block, _ = ctx.makeBlock(.hermetic, BodyS, &body_fn, {}, .{ inits, inits });
 
     const loc = ctx.mlirCtx().location(@src());
 
@@ -227,7 +226,7 @@ pub fn reduceWindow(
         if (BodyS.Return != @TypeOf(inputs)) @compileError("reduce body function need to have the following signature `fn (left: T, right: T) T`, got: " ++ @typeName(body_fn));
     }
     const ctx = CompilationContext.current();
-    const body_block, _ = ctx.makeBlock(BodyS, &body_fn, {}, .{ inits, inits });
+    const body_block, _ = ctx.makeBlock(.hermetic, BodyS, &body_fn, {}, .{ inits, inits });
     const N = comptime @divExact(BodyS.nIn, 2);
     var input_values: [N]mlir.Value = undefined;
     ctx.extractValues(&inputs, &input_values);
@@ -404,8 +403,8 @@ pub fn if_(
         @compileError("true_branch_fn and false_branch_fn return types don't match ! " ++ @typeName(TrueBlockSignature.Return) ++ " and " ++ @typeName(FalseBlockSignature.Return));
     }
     const ctx = CompilationContext.current();
-    const true_branch_block, const true_branch_res = ctx.makeBlock(TrueBlockSignature, &true_branch_fn, blkctx, {});
-    const false_branch_block, const false_branch_res = ctx.makeBlock(TrueBlockSignature, &false_branch_fn, blkctx, {});
+    const true_branch_block, const true_branch_res = ctx.makeBlock(.open, TrueBlockSignature, &true_branch_fn, blkctx, {});
+    const false_branch_block, const false_branch_res = ctx.makeBlock(.open, TrueBlockSignature, &false_branch_fn, blkctx, {});
     stdx.debug.assert(false_branch_res.shape().eqlWithTags(true_branch_res.shape()), "zml.ops.if_ expects true and false branch to produce outputs of the same shape, but it produced true={} and false={}", .{ true_branch_res, false_branch_res });
 
     const loc = ctx.mlirCtx().location(@src());
@@ -466,7 +465,7 @@ pub fn sort(
         inits[i * 2 + 1] = Tensor{ ._shape = arg_shape, ._id = undefined, ._donation = .no_buffer };
     }
     const ctx = CompilationContext.current();
-    const block, _ = ctx.makeBlock(BodyS, &comp_fn, blkctx, inits);
+    const block, _ = ctx.makeBlock(.hermetic, BodyS, &comp_fn, blkctx, inits);
     var input_values: [@divExact(BodyS.nIn, 2)]mlir.Value = undefined;
     ctx.extractValues(&inputs, &input_values);
 

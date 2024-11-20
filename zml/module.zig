@@ -30,6 +30,46 @@ test {
     std.testing.refAllDecls(@This());
 }
 
+pub const BlockKind = enum { open, hermetic };
+
+const Block = union(BlockKind) {
+    open: mlir.Block,
+    hermetic: mlir.Block,
+
+    pub fn block(self: Block) mlir.Block {
+        return switch (self) {
+            inline .open, .hermetic => |t| t,
+        };
+    }
+
+    fn appendTensorRecursive(self: Block, x: *const Tensor) void {
+        self.appendValueRecursive(x.value());
+    }
+
+    fn appendValueRecursive(self: Block, value: mlir.Value) void {
+        switch (value.kind()) {
+            .op_result => |parent_op| self.appendOperationRecursive(parent_op),
+            .block_argument => |arg| {
+                // Hermetic blocks are not allowed to use arguments from other blocks.
+                std.debug.assert(self == .open or self.block().eql(arg.block()));
+            },
+            .null => @panic("InvalidMlir"),
+        }
+    }
+
+    fn appendOperationRecursive(self: Block, op: mlir.Operation) void {
+        if (op.block()) |prev_block| {
+            // Hermetic blocks are not allowed to reference values from other blocks.
+            std.debug.assert(self == .open or prev_block.equals(self.block()));
+            return;
+        }
+        for (0..op.numOperands()) |i| {
+            self.appendValueRecursive(op.operand(i));
+        }
+        self.block().appendOperation(op);
+    }
+};
+
 pub const CompilationContext = struct {
     _platform: Platform,
 
@@ -39,7 +79,7 @@ pub const CompilationContext = struct {
 
     _module: mlir.Module,
 
-    _blocks: std.BoundedArray(mlir.Block, 64),
+    _blocks: std.BoundedArray(Block, 64),
     _fn_cache: FnCache,
     _allocator: std.mem.Allocator,
 
@@ -120,22 +160,26 @@ pub const CompilationContext = struct {
         return self._mlir_ctx;
     }
 
-    pub fn currentBlock(self: *const CompilationContext) ?mlir.Block {
+    pub fn currentBlock(self: *const CompilationContext) ?Block {
         return if (self._blocks.len > 0) self._blocks.get(self._blocks.len - 1) else null;
     }
 
-    pub fn openBlock(self: *CompilationContext, args: []const mlir.Type, locs: []const mlir.Location) !mlir.Block {
-        const block = try mlir.Block.init(args, locs);
+    pub fn openBlock(self: *CompilationContext, kind: BlockKind, args: []const mlir.Type, locs: []const mlir.Location) !Block {
+        const mlir_block = try mlir.Block.init(args, locs);
+        const block: Block = switch (kind) {
+            .open => .{ .open = mlir_block },
+            .hermetic => .{ .hermetic = mlir_block },
+        };
         self.pushBlock(block);
         return block;
     }
 
-    pub fn closeBlock(self: *CompilationContext, block: *mlir.Block) void {
+    pub fn closeBlock(self: *CompilationContext, block: Block) void {
         const popped = self._blocks.pop();
-        std.debug.assert(block.equals(popped));
+        std.debug.assert(block.block().eql(popped.block()));
     }
 
-    fn pushBlock(self: *CompilationContext, block: mlir.Block) void {
+    fn pushBlock(self: *CompilationContext, block: Block) void {
         self._blocks.appendAssumeCapacity(block);
     }
 
@@ -147,35 +191,41 @@ pub const CompilationContext = struct {
     /// But their shapes/tags can be safely propagated further.
     pub fn makeBlock(
         self: *CompilationContext,
+        kind: BlockKind,
         comptime S: ops.BlockSignature,
         func: *const S.Fn,
         blkctx: S.BlkCtx,
         args: S.Args,
     ) struct { mlir.Block, S.Return } {
         const N = S.nIn;
-        const locations = .{mlir.Location.unknown(self.mlirCtx())} ** N;
+        const loc = self.mlirCtx().location(@src());
+        const locations = .{loc} ** N;
         var input_types: [N]mlir.Type = undefined;
         fillMlirTypes(&args, self.mlirCtx(), &input_types);
 
-        var block = self.openBlock(&input_types, &locations) catch unreachable;
-        defer self.closeBlock(&block);
+        // Before creating a new block, assign all received values to previous block,
+        // otherwise they will be assign to this block
+        if (self.currentBlock()) |prev_block| {
+            meta.visit(Block.appendTensorRecursive, prev_block, &blkctx);
+        }
+
+        const block = self.openBlock(kind, &input_types, &locations) catch unreachable;
+        defer self.closeBlock(block);
 
         // Here we want to create the block with the correct mlir types.
         // but we don't want to use the values themselves.
         // So we create a copy of the arguments, and replace values
         // by the block arguments.
         var blk_args = args;
-        std.debug.assert(assignBlockArguments(&blk_args, block, 0) == N);
+        std.debug.assert(assignBlockArguments(&blk_args, block.block(), 0) == N);
 
-        const loc = self.mlirCtx().location(@src());
         const block_res = @call(.auto, func, S.blkArgs(blkctx, blk_args));
-
         var block_res_values: [S.nOut]mlir.Value = undefined;
         self.extractValues(&block_res, &block_res_values);
         const block_ret = dialect.stablehlo.returns_(self.mlirCtx(), &block_res_values, loc);
-        block.addOperationsRecursive(block_ret);
+        block.appendOperationRecursive(block_ret);
 
-        return .{ block, block_res };
+        return .{ block.block(), block_res };
     }
 
     /// Generate an MLIR function from a ZML function.
@@ -225,9 +275,9 @@ pub const CompilationContext = struct {
         const fn_res_types = try allocator.alloc(mlir.Type, out_tensor_count);
         const fn_res_shapes = try allocator.alloc(Shape, out_tensor_count);
         const fn_res_donations = try allocator.alloc(Tensor._Donation, out_tensor_count);
-        var fn_body = self.openBlock(input_types, locations) catch unreachable;
+        var fn_body = self.openBlock(.hermetic, input_types, locations) catch unreachable;
         {
-            defer self.closeBlock(&fn_body);
+            defer self.closeBlock(fn_body);
             // Note: we could shrink self._buffer_to_arg once we called `func`.
             // But for now we are only compiling one function per CompilationContext.
             // So we don't need to do this since we won't reuse self._buffer_to_arg anyway.
@@ -235,8 +285,8 @@ pub const CompilationContext = struct {
             // defer self._buffer_to_arg.shrinkRetainingCapacity(n);
 
             try self._buffer_to_arg.ensureUnusedCapacity(self._allocator, @intCast(tensor_count));
-            const assigned_model_count = self.mapBlockArguments(model, fn_body, 0);
-            const assigned_args_count = self.mapBlockArguments(args, fn_body, assigned_model_count);
+            const assigned_model_count = self.mapBlockArguments(model, fn_body.block(), 0);
+            const assigned_args_count = self.mapBlockArguments(args, fn_body.block(), assigned_model_count);
             assert(assigned_model_count == model_tensor_count);
             assert(assigned_args_count == tensor_count);
 
@@ -250,7 +300,7 @@ pub const CompilationContext = struct {
             self.extractValuesAndTypes(&fn_res, &fn_res_values, fn_res_types, fn_res_shapes, fn_res_donations);
 
             const fn_ret = dialect.func.return_(mlir_ctx, &fn_res_values, loc);
-            fn_body.addOperationsRecursive(fn_ret);
+            fn_body.appendOperationRecursive(fn_ret);
         }
 
         const arg_attrs = try arena.alloc(AttributeList, tensor_count);
@@ -271,7 +321,7 @@ pub const CompilationContext = struct {
             .arg_attrs = try finalizeAttributeList(arena, mlir_ctx, arg_attrs),
             .results = fn_res_types,
             .res_attrs = try finalizeAttributeList(arena, mlir_ctx, res_attrs),
-            .block = fn_body,
+            .block = fn_body.block(),
             .location = loc,
         });
 
@@ -921,6 +971,22 @@ fn compileInternal(
     context._module.op().setAttributeByName("mhlo.num_replicas", mlir.IntegerAttribute(.i32).init(mlir_ctx, sharding.num_replicas).asAttr());
     context._module.op().setAttributeByName("mhlo.num_partitions", mlir.IntegerAttribute(.i32).init(mlir_ctx, sharding.num_partitions).asAttr());
 
+    if (context._platform.compilation_options.xla_dump_to) |xla_dump_to| {
+        // Write the mlir to a file. All errors are discarded, since this is for debugging only.
+        if (std.fs.openDirAbsolute(xla_dump_to, .{})) |dir| {
+            const name_attr = context._module.op().getAttributeByName("sym_name").?.as(mlir.StringAttribute).?;
+            const file_name = std.fmt.allocPrint(arena, "{s}.mlir", .{name_attr.value()}) catch name_attr.value();
+            if (dir.createFile(file_name, .{ .truncate = true })) |file| {
+                context._module.op().print(file.writer(), .{ .debug_info = true, .debug_info_pretty_form = true });
+                log.info("Wrote MLIR to {s}/{s}", .{ xla_dump_to, file_name });
+            } else |_| {
+                log.warn("Failed to open {s}", .{file_name});
+            }
+        } else |_| {
+            log.warn("Folder not found {s}", .{xla_dump_to});
+        }
+    }
+
     const loaded_executable = loadOrCompilePjrtExecutable(arena, context._platform, context._module) catch |err| {
         log.err(
             "pjrt-{s} failed to compile following valid MLIR:\n{}\n{}",
@@ -931,20 +997,6 @@ fn compileInternal(
 
     log.debug("******** ZML generated MLIR ********", .{});
     log.debug("{}", .{context._module.op().mlirFormatter(.{})});
-    if (context._platform.compilation_options.xla_dump_to) |xla_dump_to| {
-        // Write the mlir to a file. All errors are discarded, since this is for debugging only.
-        if (std.fs.openDirAbsolute(xla_dump_to, .{})) |dir| {
-            const name_attr = context._module.op().getAttributeByName("sym_name").?.as(mlir.StringAttribute).?;
-            const file_name = std.fmt.allocPrint(arena, "{s}.mlir", .{name_attr.value()}) catch name_attr.value();
-            if (dir.createFile(file_name, .{ .truncate = true })) |file| {
-                context._module.op().print(file.writer(), .{ .debug_info = true, .debug_info_pretty_form = true });
-            } else |_| {
-                log.warn("Failed to open {s}", .{file_name});
-            }
-        } else |_| {
-            log.warn("Folder not found {s}", .{xla_dump_to});
-        }
-    }
 
     if (timer) |*t| {
         const time_ms = @divFloor(t.lap(), std.time.ns_per_ms);
