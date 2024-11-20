@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const stdx = @import("stdx");
 
 const c = @import("c");
 
@@ -140,23 +141,15 @@ pub const Api = struct {
         };
     }
 
-    pub inline fn stableHLOCurrentVersion(self: *const Api) ?[]u8 {
-        const state = struct {
-            var api: *const Api = undefined;
-            var buf: [5]u8 = undefined;
-            var once = std.once(fetch);
+    pub fn stableHLOCurrentVersion(self: *const Api, buf: []u8) ?[]u8 {
+        if (self.getPluginAttribute("stablehlo_current_version")) |v| {
+            stdx.debug.assert(v.kind() == .int64list, "fetched attribute \"stablehlo_current_version\" from the plugin with type `{}`, expected `.int64list`", .{v.kind()});
+            stdx.debug.assert(v.inner.value_size == 3, "expect version format to have 3 elements representing `major.minor.patch` format, got {} elements", .{v.inner.value_size});
+            const value = v.inner.unnamed_0.int64_array_value[0..v.inner.value_size];
+            return std.fmt.bufPrint(buf, "{d}.{d}.{d}", .{ value[0], value[1], value[2] }) catch unreachable;
+        }
 
-            fn fetch() void {
-                if (api.getPluginAttribute("stablehlo_current_version")) |v| {
-                    const sliced_version = v.inner.unnamed_0.int64_array_value[0..v.inner.value_size];
-                    _ = std.fmt.bufPrint(&buf, "{d}.{d}.{d}", .{ sliced_version[0], sliced_version[1], sliced_version[2] }) catch unreachable;
-                }
-            }
-        };
-
-        state.api = self;
-        state.once.call();
-        return state.buf[0..state.buf.len];
+        return null;
     }
 
     pub fn customCallRegistry(api: *const Api) ?CustomCallRegistry {
@@ -165,15 +158,6 @@ pub const Api = struct {
         }
         // log.warn("No Custom Call registry found for platform: {}", .{self});
         return null;
-    }
-
-    fn getPluginAttributes(api: *const Api) []NamedValue {
-        const ret = api.call(.PJRT_Plugin_Attributes, .{
-            .extension_start = null,
-        }) catch unreachable;
-
-        const values: [*]NamedValue = @constCast(@ptrCast(ret.attributes));
-        return values[0..ret.num_attributes];
     }
 
     fn getPluginAttribute(api: *const Api, key: []const u8) ?NamedValue {
@@ -185,6 +169,16 @@ pub const Api = struct {
         }
 
         return null;
+    }
+
+    fn getPluginAttributes(api: *const Api) []const NamedValue {
+        const ret = api.call(.PJRT_Plugin_Attributes, .{
+            .extension_start = null,
+        }) catch unreachable;
+
+        if (ret.attributes == null) return &.{};
+
+        return @ptrCast(ret.attributes[0..ret.num_attributes]);
     }
 };
 
