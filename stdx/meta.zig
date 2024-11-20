@@ -146,7 +146,7 @@ pub fn TupleRangeX(comptime T: type, comptime start: usize, comptime end: usize)
 }
 
 pub fn FnParam(comptime func: anytype, comptime n: comptime_int) type {
-    return @typeInfo(@TypeOf(func)).Fn.params[n].type orelse compileError("anytype is not supported");
+    return @typeInfo(@TypeOf(func)).Fn.params[n].type orelse @compileError("anytype is not supported");
 }
 
 pub fn FnArgs(comptime func: anytype) type {
