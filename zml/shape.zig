@@ -292,33 +292,45 @@ pub const Shape = struct {
         stdx.debug.compileError("axes expects an int-tuple or a tuple of enum literal, got {}", .{T});
     }
 
-    fn axisFromInt(self: Shape, d: isize) u3 {
+    fn axisFromInt(self: Shape, a: isize) u3 {
         const rk: i8 = self.rank();
-        if (d < -rk or d > rk) {
-            stdx.debug.panic("Tensor {} doesn't have dimension: {d}", .{ self, d });
+        if (a < -rk or a > rk) {
+            stdx.debug.panic("Tensor {} doesn't have dimension: {d}", .{ self, a });
         }
-        return if (d < 0)
-            @intCast(d + rk)
+        return if (a < 0)
+            @intCast(a + rk)
         else
-            @intCast(d);
+            @intCast(a);
     }
 
-    fn axisFromTagMaybe(self: Shape, d: Tag) ?u3 {
-        if (d == TagUnknown) {
-            return null;
-        }
+    fn axisFromTagMaybe(self: Shape, t: Tag) ?u3 {
+        if (t == TagUnknown) return null;
+
+        if (axisFromLiteralInt(t)) |ax| return ax;
+
         if (@inComptime()) {
-            for (0.., self.tags()) |tagIndex, t| {
-                const a: []const u8 = std.mem.span(t);
-                const b: []const u8 = std.mem.span(d);
-                if (std.mem.eql(u8, a, b)) {
-                    return @intCast(tagIndex);
+            // At comptime two duplicated strings may have two different representations
+            const t_bytes: []const u8 = std.mem.span(t);
+            for (self.tags(), 0..) |self_tag, ax| {
+                if (std.mem.eql(u8, t_bytes, std.mem.span(self_tag))) {
+                    return @truncate(ax);
                 }
             }
             return null;
         }
-        if (std.mem.indexOfScalar(Tag, self.tags(), d)) |d_| {
-            return @intCast(d_);
+
+        // But at runtime the comptime strings have been deduplicated and ptr match is enough.
+        if (std.mem.indexOfScalar(Tag, self.tags(), t)) |ax| {
+            return @truncate(ax);
+        }
+        return null;
+    }
+
+    /// Handle .{ ._0 = x } syntax.
+    fn axisFromLiteralInt(t: Tag) ?u3 {
+        // match .{ '_', '0-9', null }
+        if (t[0] == '_' and t[1] >= '0' and t[1] < '8' and t[2] == 0) {
+            return @intCast(t[1] - '0');
         }
         return null;
     }
