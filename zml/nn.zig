@@ -863,20 +863,21 @@ const SdpaMemEfficient = struct {
     }
 
     fn scanKeyVal(self: SdpaMemEfficient) Tensor {
-        // Unrolled version
-        var partial_softmax: ?PartialSoftmax = null;
         const n_chunks = @divExact(self.k.dim(.k), self.chunking.k_chunk_size);
-        for (0..@intCast(n_chunks)) |idx| {
-            const next = self.nextKeyValChunk(Tensor.scalar(idx, .i32));
-            partial_softmax = if (partial_softmax) |prev| prev.merge(next) else next;
+        return if (n_chunks <= 1) {
+            // Unrolled version
+            var partial_softmax: ?PartialSoftmax = null;
+            for (0..@intCast(n_chunks)) |idx| {
+                const next = self.nextKeyValChunk(Tensor.scalar(idx, .i32));
+                partial_softmax = if (partial_softmax) |prev| prev.merge(next) else next;
+            }
             // partial_softmax = zml.ops.optimizationBarrier(partial_softmax.?);
-        }
-        return partial_softmax.?.finalize();
-
-        // stablehlo.while version
-        // const partial_softmax, const last_idx = zml.ops.while_(hasNextKeyValChunk, nextKeyValChunkMerge, self, .{ PartialSoftmax.zeros(self.q.shape(), .f32), Tensor.scalar(0, .i32) });
-        // _ = last_idx;
-        // return partial_softmax.finalize();
+            return partial_softmax.?.finalize();
+        } else {
+            // stablehlo.while version
+            const partial_softmax, _ = zml.ops.while_(hasNextKeyValChunk, nextKeyValChunkMerge, self, .{ PartialSoftmax.zeros(self.q.shape(), .f32), Tensor.scalar(0, .i32) });
+            return partial_softmax.finalize();
+        };
     }
 
     fn nextKeyValChunkMerge(self: SdpaMemEfficient, prev: PartialSoftmax, idx: Tensor) struct { PartialSoftmax, Tensor } {
@@ -898,7 +899,8 @@ const SdpaMemEfficient = struct {
     }
 
     pub fn hasNextKeyValChunk(self: SdpaMemEfficient, _: PartialSoftmax, idx: Tensor) zml.Tensor {
-        return idx.cmp(.LT, Tensor.scalar(self.chunking.k_chunk_size, idx.dtype()));
+        const n_chunks = @divExact(self.k.dim(.k), self.chunking.k_chunk_size);
+        return idx.cmp(.LT, Tensor.scalar(n_chunks, idx.dtype()));
     }
 };
 
@@ -908,7 +910,6 @@ pub const PartialSoftmax = struct {
     max_value: Tensor,
 
     pub fn zeros(q_shape: Shape, exp_sum_precision: DataType) PartialSoftmax {
-        // TODO: this isn't correct
         return .{
             .values = Tensor.constant(q_shape, q_shape.dtype().zero()),
             .exp_sum = Tensor.constant(q_shape.setDim(.hd, 1), exp_sum_precision.zero()),
@@ -1011,39 +1012,7 @@ pub fn sdpaChunk(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) PartialSoft
     };
 }
 
-test "sdpaMemEfficient without mask" {
-    const platform = zml.testing.env();
-    const allocator = std.testing.allocator;
-
-    // Note we use small input vectors to have the tests run reasonably fast,
-    // but don't expect speed ups with this small sizes.
-    const rng = try zml.compileFn(allocator, Tensor.Rng.normal, .{ Shape.init(.{ 1, 10, 512, 64 }, .f32), .{ .mean = 0, .stddev = 1 } }, platform);
-    defer rng.deinit();
-
-    // Note: it's fine to pass undefined here, cause the arguments have already been baked into the executable.
-    const q = rng.call(undefined).withTags(.{ .b, .h, .q, .hd });
-    const k = rng.call(undefined).withTags(.{ .b, .h, .k, .hd });
-    const v = rng.call(undefined).withTags(.{ .b, .h, .k, .hd });
-
-    const ref_res = try zml.testing.compileAndCall(
-        platform,
-        sdpa,
-        .{ q, k, v, .{ .attn_mask = null, .scale = null, .bias = null } },
-    );
-    try std.testing.expectEqualSlices(i64, q.shape().dims(), ref_res.shape().dims());
-
-    const res = try zml.testing.compileAndCall(platform, sdpaMemEfficient, .{
-        q,
-        k,
-        v,
-        .{ .attn_mask = null, .scale = null, .bias = null },
-        .{ .q_chunk_size = 256, .k_chunk_size = 128 },
-    });
-
-    try zml.testing.expectClose(ref_res, res, 2e-3);
-}
-
-test "sdpaMemEfficient with mask" {
+test sdpaMemEfficient {
     const platform = zml.testing.env();
     const allocator = std.testing.allocator;
 
@@ -1067,20 +1036,38 @@ test "sdpaMemEfficient with mask" {
         .{ q, k, v, .{ .attn_mask = mask, .scale = null, .bias = null } },
     );
     try std.testing.expectEqualSlices(i64, q.shape().dims(), ref_res.shape().dims());
+    {
+        // 4 k_chunks
+        const res = try zml.testing.compileAndCall(
+            platform,
+            sdpaMemEfficient,
+            .{
+                q,
+                k,
+                v,
+                .{ .attn_mask = mask, .scale = null, .bias = null },
+                .{ .q_chunk_size = 256, .k_chunk_size = @divExact(512, 4) },
+            },
+        );
 
-    const res = try zml.testing.compileAndCall(
-        platform,
-        sdpaMemEfficient,
-        .{
-            q,
-            k,
-            v,
-            .{ .attn_mask = mask, .scale = null, .bias = null },
-            .{ .q_chunk_size = 256, .k_chunk_size = 128 },
-        },
-    );
+        try zml.testing.expectClose(ref_res, res, 2e-3);
+    }
+    {
+        // 16 k_chunks
+        const res = try zml.testing.compileAndCall(
+            platform,
+            sdpaMemEfficient,
+            .{
+                q,
+                k,
+                v,
+                .{ .attn_mask = mask, .scale = null, .bias = null },
+                .{ .q_chunk_size = 256, .k_chunk_size = @divExact(512, 16) },
+            },
+        );
 
-    try zml.testing.expectClose(ref_res, res, 2e-3);
+        try zml.testing.expectClose(ref_res, res, 2e-3);
+    }
 }
 
 test "sdpaMemEfficient transposed" {
