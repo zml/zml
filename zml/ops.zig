@@ -268,7 +268,7 @@ pub fn for_(comptime func: anytype, blk_ctx: BlockSign(func).BlkCtx, num_steps_:
 
     const ForBlk = struct {
         blk_ctx: S.BlkCtx,
-        step_tag: @TypeOf(step_tag), // This is a Shape.Tag, but we rather keep it private
+        step_tag: Shape.Tag,
         num_steps: u32,
         const Self = @This();
 
@@ -294,11 +294,12 @@ pub fn for_(comptime func: anytype, blk_ctx: BlockSign(func).BlkCtx, num_steps_:
         }
 
         /// Prepare buffer to store all results steps.
-        fn prep(self: Self, x: Tensor) Tensor {
-            var shape = x.shape();
-            shape._dims.insert(0, self.num_steps) catch unreachable;
-            shape._tags.insert(0, self.step_tag) catch unreachable;
-            return Tensor.constant(shape, x.dtype().zero());
+        fn prep(self: Self, first_step: Tensor) Tensor {
+            const shape = first_step.shape().insertTag(0, 1, self.step_tag);
+            // Reuse the first step Tensor.
+            // TODO: this is needed because of https://github.com/zml/zml/issues/97
+            // Normally I'd rather NOT reuse first_step to streamline the stablehlo IR.
+            return first_step.reshape(shape).pad(0, .{ ._0 = .{ .high = self.num_steps - 1 } });
         }
 
         fn wrapFirstStep(tag_: @TypeOf(step_tag), x: Tensor) Tensor {
@@ -309,8 +310,9 @@ pub fn for_(comptime func: anytype, blk_ctx: BlockSign(func).BlkCtx, num_steps_:
         }
     };
 
-    // This first step won't appear in the generated MLIR,
-    // it's only used to infer the output shapes.
+    // Compute first step to infer the output shapes.
+    // Normally this shouldn't be reused apart from the unrolled cases,
+    // but because of https://github.com/zml/zml/issues/97 we also reuse it to start the while_ loop.
     const first_step = @call(.auto, func, .{ blk_ctx, Tensor.scalar(0, .i32) });
     log.debug("for_ first_step: {}", .{first_step});
     const allocator = CompilationContext.current()._allocator;
@@ -342,7 +344,8 @@ pub fn for_(comptime func: anytype, blk_ctx: BlockSign(func).BlkCtx, num_steps_:
         for_blk,
         .{
             result_buffers,
-            Tensor.scalar(0, .i32),
+            // First step is already done
+            Tensor.scalar(1, .i32),
         },
     )[0];
 }
@@ -392,15 +395,15 @@ test "nested for" {
         const OuterProd = @This();
 
         x: Tensor,
-        x_row: Tensor = undefined,
+        x_row: Tensor,
 
-        pub fn forward(self: OuterProd) Tensor {
-            return for_(OuterProd.scanRow, self, .{self.x.dim(0)});
+        pub fn forward(x: Tensor) Tensor {
+            return for_(OuterProd.scanRow, x, .{x.dim(0)});
         }
 
-        pub fn scanRow(self: OuterProd, i: Tensor) Tensor {
-            const row = self.x.dynamicSlice(.{.{ .start = i, .len = 1 }});
-            return for_(OuterProd.scanCol, .{ .x = self.x, .x_row = row }, .{self.x.dim(0)});
+        pub fn scanRow(x: Tensor, i: Tensor) Tensor {
+            const row = x.dynamicSlice(.{.{ .start = i, .len = 1 }});
+            return for_(OuterProd.scanCol, .{ .x = x, .x_row = row }, .{x.dim(0)});
         }
 
         pub fn scanCol(self: OuterProd, j: Tensor) Tensor {
@@ -414,7 +417,7 @@ test "nested for" {
 
     // 5 to prevent inlining
     const x = try zml.Buffer.fromArray(platform, [5]f32{ 0, 1.0, -1.0, 2.0, -2.0 });
-    const outer_prod = try zml.testing.compileAndCall(platform, OuterProd.forward, .{.{ .x = x, .x_row = x }});
+    const outer_prod = try zml.testing.compileAndCall(platform, OuterProd.forward, .{x});
     const expected: [5][5]f32 = .{
         .{ 0, 0, 0, 0, 0 },
         .{ 0, 1.0, -1.0, 2.0, -2.0 },
