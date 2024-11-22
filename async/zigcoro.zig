@@ -151,9 +151,9 @@ pub const FrameAllocator = struct {
     }
 
     fn alloc(ctx: *anyopaque, len: usize, ptr_align: u8, ret_addr: usize) ?[*]u8 {
-        _ = len;
         _ = ptr_align;
         _ = ret_addr;
+        stdx.debug.assert(len <= Item.len, "Should always pass a length of less than {d} bytes", .{Item.len});
         const self: *FrameAllocator = @ptrCast(@alignCast(ctx));
         const stack = self.pool.create() catch return null;
         return @ptrCast(stack);
@@ -163,9 +163,8 @@ pub const FrameAllocator = struct {
         _ = ctx;
         _ = buf;
         _ = buf_align;
-        _ = new_len;
         _ = ret_addr;
-        return false;
+        return new_len <= Item.len;
     }
 
     fn free(ctx: *anyopaque, buf: []u8, buf_align: u8, ret_addr: usize) void {
