@@ -1,6 +1,6 @@
 module(
     name = "llvm-raw",
-    version = "20240930.0-6292f11",
+    version = "20241022.0-6c4267f",
     compatibility_level = 1,
 )
 

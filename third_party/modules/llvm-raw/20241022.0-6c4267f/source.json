@@ -1,6 +1,6 @@
 {
-    "strip_prefix": "llvm-project-6292f117c39b9fc72da4e40328eeeda2aa94a5f2",
-    "url": "https://github.com/llvm/llvm-project/archive/6292f117c39b9fc72da4e40328eeeda2aa94a5f2.tar.gz",
+    "strip_prefix": "llvm-project-6c4267fb1779bc5550bb413f33250f9365acfbc6",
+    "url": "https://github.com/llvm/llvm-project/archive/6c4267fb1779bc5550bb413f33250f9365acfbc6.tar.gz",
     "integrity": "sha256-MfWD3i4Hf5KJ/F7+p0vW4aFpT9pfd/CUciU83AcvLl4=",
     "overlay": {
         "BUILD.bazel": "",

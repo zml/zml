@@ -141,7 +141,7 @@ pub const Api = struct {
         };
     }
 
-    pub fn stableHLOCurrentVersion(self: *const Api, buf: []u8) ?[]u8 {
+    pub fn stablehloCurrentVersion(self: *const Api, buf: []u8) ?[]u8 {
         if (self.getPluginAttribute("stablehlo_current_version")) |v| {
             stdx.debug.assert(v.kind() == .int64list, "fetched attribute \"stablehlo_current_version\" from the plugin with type `{}`, expected `.int64list`", .{v.kind()});
             stdx.debug.assert(v.inner.value_size == 3, "expect version format to have 3 elements representing `major.minor.patch` format, got {} elements", .{v.inner.value_size});
