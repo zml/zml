@@ -1241,9 +1241,8 @@ pub const RngAlgorithm = struct {
 pub fn stablehloVersionFromCompatibilityRequirement(requirement: c.MlirStablehloCompatibilityRequirement) []const u8 {
     const state = struct {
         var buf: [32]u8 = undefined;
-        var str: []const u8 = undefined;
 
-        fn call(req: c.MlirStablehloCompatibilityRequirement) void {
+        fn call(req: c.MlirStablehloCompatibilityRequirement) []u8 {
             var stream = std.io.fixedBufferStream(&buf);
             var context = .{ .writer = stream.writer() };
             const WriterContext = @TypeOf(context);
@@ -1255,11 +1254,11 @@ pub fn stablehloVersionFromCompatibilityRequirement(requirement: c.MlirStablehlo
                 }
             }).callback, &context);
 
-            str = buf[0..stream.pos];
+            return buf[0..stream.pos];
         }
     };
 
-    return state.call(requirement).str;
+    return state.call(requirement);
 }
 
 pub fn getCurrentVersion() []const u8 {
@@ -1270,15 +1269,15 @@ pub fn getCurrentVersion() []const u8 {
 
         fn call() void {
             var stream = std.io.fixedBufferStream(&buf);
-            var writer = stream.writer();
-            const Writer = @TypeOf(writer);
+            var writer_ = stream.writer();
+            const ContextWriter = @TypeOf(writer_);
 
             c.stablehloGetCurrentVersion((struct {
                 pub fn callback(mlir_str: c.MlirStringRef, userdata: ?*anyopaque) callconv(.C) void {
-                    const writer: *Writer = @ptrCast(@alignCast(userdata));
+                    const writer: *ContextWriter = @ptrCast(@alignCast(userdata));
                     _ = writer.write(mlir.fromStringRef(mlir_str)) catch unreachable;
                 }
-            }).callback, &writer);
+            }).callback, &writer_);
 
             str = buf[0..stream.pos];
         }

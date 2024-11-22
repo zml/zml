@@ -1236,6 +1236,10 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, m
                 .key = .{ .Const = "xla_gpu_enable_triton_gemm" },
                 .value = .{ .value = .{ .bool_field = false } },
             });
+            // try options.env_option_overrides.append(arena, .{
+            //     .key = .{ .Const = "xla_gpu_enable_latency_hiding_scheduler" },
+            //     .value = .{ .value = .{ .bool_field = true } },
+            // });
             var r_ = try runfiles.Runfiles.create(.{ .allocator = arena }) orelse {
                 log.warn("Bazel runfile not found !", .{});
                 break :cuda_dir;

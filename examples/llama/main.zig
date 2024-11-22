@@ -119,7 +119,7 @@ pub fn asyncMain() !void {
         layer_start: u8 = 0,
         num_layers: ?u8 = null,
         seq_len: u32 = 256,
-        topk: u32 = 2,
+        topk: u32 = 1,
         temperature: u32 = 1,
         num_heads: ?i64 = null,
         num_kv_heads: ?i64 = null,
@@ -139,8 +139,8 @@ pub fn asyncMain() !void {
     defer context.deinit();
 
     const compilation_options = zml.CompilationOptions{
-        .cache_location = "/tmp/zml/llama/cache",
-        .xla_dump_to = "/tmp/zml/llama",
+        // .cache_location = "/tmp/zml/llama/cache",
+        // .xla_dump_to = "/tmp/zml/llama",
         .sharding_enabled = true,
     };
 
@@ -227,6 +227,8 @@ pub fn asyncMain() !void {
     log.info("✅\tPrompt: {s}", .{prompt});
 
     const seed = cli_args.seed orelse @as(u128, @bitCast(std.time.nanoTimestamp()));
-    const story = try generateText(llama, llama_module_prefill, llama_module, tokenizer, allocator, seed, prompt);
-    defer allocator.free(story);
+    for (0..15) |_| {
+        const story = try generateText(llama, llama_module_prefill, llama_module, tokenizer, allocator, seed, prompt);
+        defer allocator.free(story);
+    }
 }
