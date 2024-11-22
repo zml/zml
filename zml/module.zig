@@ -1101,7 +1101,7 @@ pub fn compileFn(
     comptime func: anytype,
     args: ShapeOf(stdx.meta.FnArgs(func)),
     platform: Platform,
-) !ExeWithWeights(FnWithVoidArg(func)) {
+) !FnExe(func) {
     const name = @typeName(@TypeOf(func));
     var context = try CompilationContext.init(allocator, name, platform);
     defer context.deinit();
@@ -1117,6 +1117,10 @@ pub fn compileFn(
     const raw_module = try compileInternal(allocator, &context, Local.forward, void_model, .{args});
     // But we set the signature so that you can call the module as you would call the function.
     return try ExeWithWeights(FnWithVoidArg(func)).initFromModel(allocator, raw_module, void_model);
+}
+
+pub fn FnExe(comptime func: anytype) type {
+    return ExeWithWeights(FnWithVoidArg(func));
 }
 
 fn FnWithVoidArg(comptime func: anytype) type {
