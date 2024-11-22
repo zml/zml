@@ -71,7 +71,7 @@ pub fn asyncMain() !void {
     defer zml.aio.unloadBuffers(&model_weights); // for good practice
 
     // Wait for compilation to finish
-    const compiled = try compilation.await_();
+    const compiled = try compilation.awaitt();
 
     // pass the model weights to the compiled module to create an executable module
     var executable = try compiled.prepare(arena, model_weights);

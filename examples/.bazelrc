@@ -35,9 +35,9 @@ build           --incompatible_strict_action_env
 build           --noexperimental_check_output_files
 fetch           --noexperimental_check_output_files
 query           --noexperimental_check_output_files
-build           --noexperimental_check_external_repository_files
-fetch           --noexperimental_check_external_repository_files
-query           --noexperimental_check_external_repository_files
+# build           --noexperimental_check_external_repository_files
+# fetch           --noexperimental_check_external_repository_files
+# query           --noexperimental_check_external_repository_files
 
 # Performance
 build           --reuse_sandbox_directories

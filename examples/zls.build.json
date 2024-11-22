@@ -2,7 +2,7 @@
   "build_options": [
     {
       "name": "cmd",
-      "value": "bazel run @zml//zml:completion"
+      "value": "bazel run @zml//:completion"
     }
   ]
 }

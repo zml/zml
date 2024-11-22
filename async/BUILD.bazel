@@ -1,51 +1,16 @@
-load("@bazel_skylib//rules:common_settings.bzl", "string_flag")
 load("@rules_zig//zig:defs.bzl", "zig_library")
 
-IMPL = [
-    "threaded",
-    "zigcoro",
-]
-
-string_flag(
-    name = "impl",
-    build_setting_default = "threaded",
-    values = IMPL,
-)
-
-[
-    config_setting(
-        name = "impl.{}".format(impl),
-        flag_values = {":impl": impl},
-    )
-    for impl in IMPL
-]
-
 zig_library(
-    name = "zigcoro",
-    srcs = ["meta.zig"],
+    name = "async",
+    srcs = [
+        "queue_mpsc.zig",
+    ],
     import_name = "async",
     main = "zigcoro.zig",
+    visibility = ["//visibility:public"],
     deps = [
+        "//stdx",
         "@libxev//:xev",
         "@zigcoro//:libcoro",
     ],
-)
-
-zig_library(
-    name = "threaded",
-    srcs = ["meta.zig"],
-    import_name = "async",
-    main = "threaded.zig",
-    deps = [
-        "@libxev//:xev",
-    ],
-)
-
-alias(
-    name = "async",
-    actual = select({
-        ":impl.threaded": ":threaded",
-        ":impl.zigcoro": ":zigcoro",
-    }),
-    visibility = ["//visibility:public"],
 )
