@@ -173,7 +173,7 @@ pub const AsyncThread = struct {
 
         aio.initEnv(.{
             .stack_allocator = allocator,
-            .default_stack_size = 16 * 1024 * 1024,
+            .default_stack_size = 1 * 1024 * 1024,
         });
 
         AsyncThread.current = &.{
