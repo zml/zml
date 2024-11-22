@@ -213,7 +213,6 @@ def _rocm_impl(mctx):
     for repository, kwargs in _UBUNTU_PACKAGES.items():
         http_deb_archive(name = repository, **kwargs)
 
-    # custom plugin serving : tar -zc libpjrt_rocm.so > pjrt-rocm_linux-amd64.tar.gz | sha256sum pjrt-rocm_linux-amd64.tar.gz | python3 -m http.server 8000
     http_archive(
         name = "libpjrt_rocm",
         build_file = "libpjrt_rocm.BUILD.bazel",

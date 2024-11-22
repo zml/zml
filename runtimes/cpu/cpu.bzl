@@ -9,7 +9,6 @@ cc_import(
 """
 
 def _cpu_pjrt_plugin_impl(mctx):
-    # custom plugin serving : tar -zc libpjrt_cpu.so > pjrt-cpu_linux-amd64.tar.gz | sha256sum pjrt-cpu_linux-amd64.tar.gz |  python3 -m http.server 8000
     http_archive(
         name = "libpjrt_cpu_linux_amd64",
         build_file_content = _BUILD.format(ext = "so"),
@@ -17,7 +16,6 @@ def _cpu_pjrt_plugin_impl(mctx):
         url = "https://github.com/zml/pjrt-artifacts/releases/download/v0.2.4/pjrt-cpu_linux-amd64.tar.gz",
     )
 
-    # custom plugin serving : tar -zc libpjrt_cpu.dylib > pjrt-cpu_darwin-arm64.tar.gz | sha256sum pjrt-cpu_darwin-arm64.tar.gz |  python3 -m http.server 8000
     http_archive(
         name = "libpjrt_cpu_darwin_arm64",
         build_file_content = _BUILD.format(ext = "dylib"),

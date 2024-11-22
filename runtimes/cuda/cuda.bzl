@@ -180,7 +180,6 @@ cc_import(
 """,
     )
 
-    # custom plugin serving : tar -zc libpjrt_cuda.so > pjrt-cuda_linux-amd64.tar.gz | sha256sum pjrt-cuda_linux-amd64.tar.gz |  python3 -m http.server 8000
     http_archive(
         name = "libpjrt_cuda",
         build_file = "libpjrt_cuda.BUILD.bazel",

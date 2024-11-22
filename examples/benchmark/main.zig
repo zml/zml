@@ -12,7 +12,7 @@ pub const std_options = .{
 const Benchmark = struct {
     pub fn forward(self: Benchmark, a: zml.Tensor, b: zml.Tensor) zml.Tensor {
         _ = self;
-        return a.withSharding(.{.k}).dot(b.withSharding(.{.k}), .{.k}).withSharding(.{.m}).exp();
+        return a.withSharding(.{.k}).dot(b.withSharding(.{.k}), .{.k}).withSharding(.{.m});
     }
 };
 
@@ -26,7 +26,7 @@ pub fn asyncMain() !void {
             \\ benchmark --size=4096 --dtype=f16
         ;
         size: usize = 4096,
-        dtype: zml.DataType = .bf16,
+        dtype: zml.DataType = .f16,
     };
 
     // Short lived allocations
