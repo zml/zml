@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const log = std.log.scoped(.mlir);
 
 const c = @import("c");
 
@@ -852,7 +853,7 @@ pub const Operation = struct {
             @panic("Failed to create MLIR operation");
         };
         if (args.verify and new_op.verify() == false) {
-            std.log.err("Failed to verify MLIR operation:\n{}", .{new_op.mlirFormatter(.{ .debug_info = true })});
+            log.err("Failed to verify MLIR operation:\n{}", .{new_op.mlirFormatter(.{ .debug_info = true })});
             @panic("Failed to verify MLIR operation");
         }
         return new_op;
@@ -1062,7 +1063,7 @@ pub const Operation = struct {
 pub const OpPrintingFlags = struct {
     elide_large_elements_attrs: ?usize = null,
     debug_info: bool = false,
-    debug_info_pretty_form: bool = false,
+    debug_info_pretty_form: bool = true,
     print_generic_op_form: bool = false,
     use_local_scope: bool = false,
     assume_verified: bool = false,
@@ -1184,20 +1185,40 @@ pub const Value = struct {
         return c.mlirValueIsAOpResult(val.inner());
     }
 
-    pub const Kind = enum {
-        unknown,
-        block_argument,
-        op_result,
+    pub const Kind = union(enum) {
+        block_argument: BlockArgument,
+        op_result: Operation,
+        null,
     };
 
     pub fn kind(val: Value) Kind {
         if (val.isAOpResult()) {
-            return .op_result;
+            return .{ .op_result = val.owner() };
         }
         if (val.isABlockArgument()) {
-            return .block_argument;
+            return .{ .block_argument = .{ ._inner = val._inner } };
         }
-        return .unknown;
+        // From MLIR docs:
+        // https://mlir.llvm.org/doxygen/classmlir_1_1Value.html#details
+        // > An SSA value is either a BlockArgument or the result of an operation.
+        return .null;
+    }
+};
+
+pub const BlockArgument = struct {
+    _inner: c.MlirValue,
+
+    pub fn block(arg: BlockArgument) Block {
+        return Block.wrap(c.mlirBlockArgumentGetOwner(arg._inner));
+    }
+
+    pub fn number(arg: BlockArgument) usize {
+        return @bitCast(c.mlirBlockArgumentGetArgNumber(arg._inner));
+    }
+
+    pub fn format(self: BlockArgument, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        const value = Value{ ._inner = self._inner };
+        return value.format(fmt, options, writer);
     }
 };
 
@@ -1685,21 +1706,5 @@ pub const Block = struct {
         for (ops) |op| {
             c.mlirBlockAppendOwnedOperation(self.inner(), op.inner());
         }
-    }
-
-    pub fn addOperationsRecursive(block: *Block, op_or_result: anytype) void {
-        const op: Operation = switch (@TypeOf(op_or_result)) {
-            Operation => op_or_result,
-            Value => if (op_or_result.kind() == .op_result) op_or_result.owner() else return,
-            else => |t| @compileError("can either be an operation or a value, not " ++ @typeName(t)),
-        };
-        if (op.block()) |prev_block| {
-            std.debug.assert(prev_block.equals(block.*));
-            return;
-        }
-        for (0..op.numOperands()) |i| {
-            block.addOperationsRecursive(op.operand(i));
-        }
-        block.appendOperation(op);
     }
 };

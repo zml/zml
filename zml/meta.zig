@@ -239,7 +239,7 @@ pub fn visit(comptime cb: anytype, ctx: FnParam(cb, 0), v: anytype) void {
     const type_info_v = @typeInfo(T);
     const K = switch (@typeInfo(FnParam(cb, 1))) {
         .Pointer => |info| info.child,
-        else => stdx.debug.compileError("zml.meta.visit is expecting a pointer value as second parameter in callback to use but found {}", .{FnParam(cb, 1)}),
+        else => stdx.debug.compileError("zml.meta.visit is expecting a callback with a pointer as second argument but found {}", .{FnParam(cb, 1)}),
     };
 
     if (type_info_v != .Pointer) {
@@ -307,7 +307,7 @@ pub fn visit(comptime cb: anytype, ctx: FnParam(cb, 0), v: anytype) void {
                 }
             }
         },
-        else => stdx.debug.compileError("Only single pointer and slice are supported. Received {}", .{T}),
+        else => {},
     }
 }
 

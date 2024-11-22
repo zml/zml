@@ -47,9 +47,8 @@ pub fn while_(
         @compileError("cond_fn and body_fn signatures don't match ! " ++ @typeName(@TypeOf(cond_fn)) ++ " and " ++ @typeName(@TypeOf(body_fn)));
     }
     const ctx = CompilationContext.current();
-    const cond_block, _ = ctx.makeBlock(CondS, &cond_fn, blkctx, inputs);
-
-    const body_block, const body_res = ctx.makeBlock(BodyS, &body_fn, blkctx, inputs);
+    const cond_block, _ = ctx.makeBlock(.open, CondS, &cond_fn, blkctx, inputs);
+    const body_block, const body_res = ctx.makeBlock(.open, BodyS, &body_fn, blkctx, inputs);
     var input_values: [BodyS.nIn]mlir.Value = undefined;
     ctx.extractValues(&inputs, &input_values);
 
@@ -138,7 +137,7 @@ pub fn reduce(
     var init_values: [N]mlir.Value = undefined;
     ctx.extractValues(&inits, &init_values);
 
-    const body_block, _ = ctx.makeBlock(BodyS, &body_fn, {}, .{ inits, inits });
+    const body_block, _ = ctx.makeBlock(.hermetic, BodyS, &body_fn, {}, .{ inits, inits });
 
     const loc = ctx.mlirCtx().location(@src());
 
@@ -227,7 +226,7 @@ pub fn reduceWindow(
         if (BodyS.Return != @TypeOf(inputs)) @compileError("reduce body function need to have the following signature `fn (left: T, right: T) T`, got: " ++ @typeName(body_fn));
     }
     const ctx = CompilationContext.current();
-    const body_block, _ = ctx.makeBlock(BodyS, &body_fn, {}, .{ inits, inits });
+    const body_block, _ = ctx.makeBlock(.hermetic, BodyS, &body_fn, {}, .{ inits, inits });
     const N = comptime @divExact(BodyS.nIn, 2);
     var input_values: [N]mlir.Value = undefined;
     ctx.extractValues(&inputs, &input_values);
@@ -269,7 +268,7 @@ pub fn for_(comptime func: anytype, blk_ctx: BlockSign(func).BlkCtx, num_steps_:
 
     const ForBlk = struct {
         blk_ctx: S.BlkCtx,
-        step_tag: @TypeOf(step_tag), // This is a Shape.Tag, but we rather keep it private
+        step_tag: Shape.Tag,
         num_steps: u32,
         const Self = @This();
 
@@ -295,11 +294,12 @@ pub fn for_(comptime func: anytype, blk_ctx: BlockSign(func).BlkCtx, num_steps_:
         }
 
         /// Prepare buffer to store all results steps.
-        fn prep(self: Self, x: Tensor) Tensor {
-            var shape = x.shape();
-            shape._dims.insert(0, self.num_steps) catch unreachable;
-            shape._tags.insert(0, self.step_tag) catch unreachable;
-            return Tensor.constant(shape, x.dtype().zero());
+        fn prep(self: Self, first_step: Tensor) Tensor {
+            const shape = first_step.shape().insertTag(0, 1, self.step_tag);
+            // Reuse the first step Tensor.
+            // TODO: this is needed because of https://github.com/zml/zml/issues/97
+            // Normally I'd rather NOT reuse first_step to streamline the stablehlo IR.
+            return first_step.reshape(shape).pad(0, .{ ._0 = .{ .high = self.num_steps - 1 } });
         }
 
         fn wrapFirstStep(tag_: @TypeOf(step_tag), x: Tensor) Tensor {
@@ -310,8 +310,9 @@ pub fn for_(comptime func: anytype, blk_ctx: BlockSign(func).BlkCtx, num_steps_:
         }
     };
 
-    // This first step won't appear in the generated MLIR,
-    // it's only used to infer the output shapes.
+    // Compute first step to infer the output shapes.
+    // Normally this shouldn't be reused apart from the unrolled cases,
+    // but because of https://github.com/zml/zml/issues/97 we also reuse it to start the while_ loop.
     const first_step = @call(.auto, func, .{ blk_ctx, Tensor.scalar(0, .i32) });
     log.debug("for_ first_step: {}", .{first_step});
     const allocator = CompilationContext.current()._allocator;
@@ -343,7 +344,8 @@ pub fn for_(comptime func: anytype, blk_ctx: BlockSign(func).BlkCtx, num_steps_:
         for_blk,
         .{
             result_buffers,
-            Tensor.scalar(0, .i32),
+            // First step is already done
+            Tensor.scalar(1, .i32),
         },
     )[0];
 }
@@ -388,6 +390,44 @@ test for_ {
     }
 }
 
+test "nested for" {
+    const OuterProd = struct {
+        const OuterProd = @This();
+
+        x: Tensor,
+        x_row: Tensor,
+
+        pub fn forward(x: Tensor) Tensor {
+            return for_(OuterProd.scanRow, x, .{x.dim(0)});
+        }
+
+        pub fn scanRow(x: Tensor, i: Tensor) Tensor {
+            const row = x.dynamicSlice(.{.{ .start = i, .len = 1 }});
+            return for_(OuterProd.scanCol, .{ .x = x, .x_row = row }, .{x.dim(0)});
+        }
+
+        pub fn scanCol(self: OuterProd, j: Tensor) Tensor {
+            const col = self.x.dynamicSlice(.{.{ .start = j, .len = 1 }});
+            return self.x_row.mul(col);
+        }
+    };
+
+    const zml = @import("zml.zig");
+    const platform = zml.testing.env();
+
+    // 5 to prevent inlining
+    const x = try zml.Buffer.fromArray(platform, [5]f32{ 0, 1.0, -1.0, 2.0, -2.0 });
+    const outer_prod = try zml.testing.compileAndCall(platform, OuterProd.forward, .{x});
+    const expected: [5][5]f32 = .{
+        .{ 0, 0, 0, 0, 0 },
+        .{ 0, 1.0, -1.0, 2.0, -2.0 },
+        .{ 0, -1.0, 1.0, -2.0, 2.0 },
+        .{ 0, 2.0, -2.0, 4.0, -4.0 },
+        .{ 0, -2.0, 2.0, -4.0, 4.0 },
+    };
+    try std.testing.expectEqual(expected, outer_prod.getValue(@TypeOf(expected)));
+}
+
 pub fn if_2(pred: Tensor, comptime Closure: type, blkctx: BlockSignNoArgs(@field(Closure, "then")).BlkCtx) BlockSignNoArgs(@field(Closure, "then")).Return {
     return if_(pred, @field(Closure, "then"), @field(Closure, "else_"), blkctx);
 }
@@ -404,8 +444,8 @@ pub fn if_(
         @compileError("true_branch_fn and false_branch_fn return types don't match ! " ++ @typeName(TrueBlockSignature.Return) ++ " and " ++ @typeName(FalseBlockSignature.Return));
     }
     const ctx = CompilationContext.current();
-    const true_branch_block, const true_branch_res = ctx.makeBlock(TrueBlockSignature, &true_branch_fn, blkctx, {});
-    const false_branch_block, const false_branch_res = ctx.makeBlock(TrueBlockSignature, &false_branch_fn, blkctx, {});
+    const true_branch_block, const true_branch_res = ctx.makeBlock(.open, TrueBlockSignature, &true_branch_fn, blkctx, {});
+    const false_branch_block, const false_branch_res = ctx.makeBlock(.open, TrueBlockSignature, &false_branch_fn, blkctx, {});
     stdx.debug.assert(false_branch_res.shape().eqlWithTags(true_branch_res.shape()), "zml.ops.if_ expects true and false branch to produce outputs of the same shape, but it produced true={} and false={}", .{ true_branch_res, false_branch_res });
 
     const loc = ctx.mlirCtx().location(@src());
@@ -466,7 +506,7 @@ pub fn sort(
         inits[i * 2 + 1] = Tensor{ ._shape = arg_shape, ._id = undefined, ._donation = .no_buffer };
     }
     const ctx = CompilationContext.current();
-    const block, _ = ctx.makeBlock(BodyS, &comp_fn, blkctx, inits);
+    const block, _ = ctx.makeBlock(.hermetic, BodyS, &comp_fn, blkctx, inits);
     var input_values: [@divExact(BodyS.nIn, 2)]mlir.Value = undefined;
     ctx.extractValues(&inputs, &input_values);
 
