@@ -1,6 +1,6 @@
 module(
     name = "stablehlo",
-    version = "20241001.0-f7f8e4e",
+    version = "20241021.0-1c0b606",
     compatibility_level = 1,
 )
 
