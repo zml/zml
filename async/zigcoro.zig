@@ -127,6 +127,56 @@ pub const threading = struct {
     };
 };
 
+pub const FrameAllocator = struct {
+    const Item = [1 * 1024 * 1024]u8;
+    const FramePool = std.heap.MemoryPool(Item);
+
+    pool: FramePool,
+
+    pub fn init(allocator_: std.mem.Allocator) !FrameAllocator {
+        return .{
+            .pool = FramePool.init(allocator_),
+        };
+    }
+
+    pub fn allocator(self: *FrameAllocator) std.mem.Allocator {
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .alloc = alloc,
+                .resize = resize,
+                .free = free,
+            },
+        };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, ptr_align: u8, ret_addr: usize) ?[*]u8 {
+        _ = len;
+        _ = ptr_align;
+        _ = ret_addr;
+        const self: *FrameAllocator = @ptrCast(@alignCast(ctx));
+        const stack = self.pool.create() catch return null;
+        return @ptrCast(stack);
+    }
+
+    fn resize(ctx: *anyopaque, buf: []u8, buf_align: u8, new_len: usize, ret_addr: usize) bool {
+        _ = ctx;
+        _ = buf;
+        _ = buf_align;
+        _ = new_len;
+        _ = ret_addr;
+        return false;
+    }
+
+    fn free(ctx: *anyopaque, buf: []u8, buf_align: u8, ret_addr: usize) void {
+        _ = buf_align;
+        _ = ret_addr;
+        const self: *FrameAllocator = @ptrCast(@alignCast(ctx));
+        const v: *align(8) Item = @ptrCast(@alignCast(buf.ptr));
+        self.pool.destroy(v);
+    }
+};
+
 pub const AsyncThread = struct {
     threadlocal var current: *const AsyncThread = undefined;
 
