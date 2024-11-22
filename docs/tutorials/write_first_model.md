@@ -101,7 +101,7 @@ const std = @import("std");
 const zml = @import("zml");
 const asynk = @import("async");
 
-// shortcut to the async_ function in the asynk module
+// shortcut to the asyncc function in the asynk module
 const asyncc = asynk.asyncc;
 ```
 
@@ -263,11 +263,11 @@ var model_weights = try zml.aio.loadBuffers(Layer, .{}, bs, arena, platform);
 defer zml.aio.unloadBuffers(&model_weights);  // for good practice
 
 // Wait for compilation to finish
-const compiled = try compilation.await_();
+const compiled = try compilation.awaitt();
 ```
 
-Compiling is happening in the background via the `async_` function. We call
-`async_` with the `zml.compileModel` function and its arguments
+Compiling is happening in the background via the `asyncc` function. We call
+`asyncc` with the `zml.compileModel` function and its arguments
 separately. The arguments themselves are basically the shapes of the weights in
 the BufferStore, the `.forward` function name in order to compile
 `Layer.forward`, the shape of the input tensor(s), and the platform for which to
@@ -494,7 +494,7 @@ pub fn asyncMain() !void {
     defer zml.aio.unloadBuffers(&model_weights); // for good practice
 
     // Wait for compilation to finish
-    const compiled = try compilation.await_();
+    const compiled = try compilation.awaitt();
 
     // pass the model weights to the compiled module to create an executable
     // module

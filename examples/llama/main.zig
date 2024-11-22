@@ -217,9 +217,9 @@ pub fn asyncMain() !void {
     defer zml.aio.unloadBuffers(&llama_weights);
     log.info("✅\tLoaded weights in {d}ms", .{start.read() / std.time.ns_per_ms});
 
-    var llama_module_prefill = try (try fut_mod_prefill.await_()).prepare(allocator, llama_weights);
+    var llama_module_prefill = try (try fut_mod_prefill.awaitt()).prepare(allocator, llama_weights);
     defer llama_module_prefill.deinit();
-    var llama_module = try (try fut_mod.await_()).prepare(allocator, llama_weights);
+    var llama_module = try (try fut_mod.awaitt()).prepare(allocator, llama_weights);
     defer llama_module.deinit();
     log.info("✅\tCompiled model in {d}ms", .{start.read() / std.time.ns_per_ms});
 

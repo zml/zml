@@ -62,7 +62,7 @@ pub fn asyncMain() !void {
 
     // Start compiling. This uses the inferred shapes from the BufferStore.
     // The shape of the input tensor, we have to pass in manually.
-    var compilation = try asynk.asyncGeneric(zml.compileModel, .{ allocator, model_shapes, .forward, .{input_shape}, platform });
+    var compilation = try asynk.asyncc(zml.compileModel, .{ allocator, Layer.forward, model_shapes, .{input_shape}, platform });
 
     // Produce a bufferized weights struct from the fake BufferStore.
     // This is like the inferred shapes, but with actual values.
@@ -71,7 +71,7 @@ pub fn asyncMain() !void {
     defer zml.aio.unloadBuffers(&model_weights); // for good practice
 
     // Wait for compilation to finish
-    const compiled = try compilation.await_();
+    const compiled = try compilation.awaitt();
 
     // pass the model weights to the compiled module to create an executable module
     var executable = try compiled.prepare(arena, model_weights);

@@ -23,8 +23,8 @@ fn FrameExx(comptime func: anytype, comptime argsT: type, comptime returnT: type
         inner: FrameT,
 
         pub const wait = await_;
-        pub const awaitt = await_;
-        pub fn await_(self: *Self) returnT {
+        pub const await_ = awaitt;
+        pub fn awaitt(self: *Self) returnT {
             defer {
                 self.inner.deinit();
                 self.* = undefined;
