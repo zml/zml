@@ -183,8 +183,8 @@ cc_import(
     http_archive(
         name = "libpjrt_cuda",
         build_file = "libpjrt_cuda.BUILD.bazel",
-        url = "http://localhost:8000/pjrt-cuda_linux-amd64.tar.gz",
-        sha256 = "5607e5fc7f178f2f959507705d212663cc72c30918d2f0e8f37644e8c8725d74",
+        url = "https://github.com/zml/pjrt-artifacts/releases/download/v3.0.0/pjrt-cuda_linux-amd64.tar.gz",
+        sha256 = "1af968c5357b0b78e43416e2b583512d203aa67a770c6b7e616006e7dd63aecc",
     )
 
     return mctx.extension_metadata(
