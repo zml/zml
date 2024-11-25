@@ -17,6 +17,7 @@ pub fn env() zml.Platform {
             .{
                 .cache_location = "/tmp/zml/tests/cache",
                 .xla_dump_to = "/tmp/zml/tests/",
+                .sharding_enabled = true,
             }
         else
             .{};
@@ -197,7 +198,7 @@ pub fn testLayerOut(
         log.warn("Reference models uses {d} inputs, but implementation uses {d}", .{ n_in_exp, n_in });
     }
 
-    const exe = try zml.compileModel(alloc, layer, .forward, input_shapes, platform);
+    const exe = try zml.compileModel(alloc, fwd, layer, input_shapes, platform);
 
     const n_out_exp = activations.countLayers(out_name);
     if (exe.inner.result_buffer_count != n_out_exp) {
