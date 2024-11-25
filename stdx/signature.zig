@@ -47,37 +47,28 @@ pub fn ArgsTuple(comptime funcT: anytype, comptime ArgsT: ?type) type {
     });
 }
 
-pub fn FnSignature(comptime func: anytype, comptime ArgsT: ?type) type {
-    const n_params = switch (@typeInfo(@TypeOf(func))) {
-        .Fn => |fn_info| fn_info.params.len,
-        else => compileError("FnSignature expects a function as first argument got: {}", .{@TypeOf(func)}),
-    };
-    if (ArgsT != null) {
-        const n_args = switch (@typeInfo(ArgsT.?)) {
-            .Struct => |struct_info| struct_info.fields.len,
-            else => compileError("function {} need to be called with a tuple of args", .{@TypeOf(func)}),
-        };
-        if (n_params != n_args) {
-            compileError("function {} expected {} args, got {}", .{ @TypeOf(func), n_params, n_args });
-        }
-    }
-    return FnSignatureX(func, ArgsTuple(@TypeOf(func), ArgsT));
-}
+pub const Signature = struct {
+    FuncT: type,
+    ArgsT: type,
+    ReturnT: type,
+    ReturnPayloadT: type,
+    ReturnErrorSet: ?type,
+};
 
-// TODO: I think this should return a struct instead of returing at type
-// this gives a better error stacktrace because here the error is delayed to when the fields are read.
-fn FnSignatureX(comptime func: anytype, comptime ArgsT_: type) type {
-    return struct {
-        pub const FuncT = @TypeOf(func);
-        pub const ArgsT = ArgsT_;
-        pub const ReturnT = @TypeOf(@call(.auto, func, @as(ArgsT_, undefined)));
-        pub const ReturnPayloadT = switch (@typeInfo(ReturnT)) {
+pub fn FnSignature(comptime func: anytype, comptime argsT_: ?type) Signature {
+    const argsT = ArgsTuple(@TypeOf(func), argsT_);
+    const return_type = @TypeOf(@call(.auto, func, @as(argsT, undefined)));
+    return Signature{
+        .FuncT = @TypeOf(func),
+        .ArgsT = argsT,
+        .ReturnT = return_type,
+        .ReturnPayloadT = switch (@typeInfo(return_type)) {
             .ErrorUnion => |u| u.payload,
-            else => ReturnT,
-        };
-        pub const ReturnErrorSet: ?type = switch (@typeInfo(ReturnT)) {
+            else => return_type,
+        },
+        .ReturnErrorSet = switch (@typeInfo(return_type)) {
             .ErrorUnion => |u| u.error_set,
             else => null,
-        };
+        },
     };
 }
