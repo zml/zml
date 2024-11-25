@@ -44,22 +44,28 @@ pub fn ArgsTuple(comptime funcT: anytype, comptime argsT: ?type) type {
     });
 }
 
-pub fn FnSignature(comptime func: anytype, comptime argsT: ?type) type {
-    return FnSignatureX(func, ArgsTuple(@TypeOf(func), argsT));
-}
+pub const Signature = struct {
+    FuncT: type,
+    ArgsT: type,
+    ReturnT: type,
+    ReturnPayloadT: type,
+    ReturnErrorSet: ?type,
+};
 
-fn FnSignatureX(comptime func: anytype, comptime argsT: type) type {
-    return struct {
-        pub const FuncT = @TypeOf(func);
-        pub const ArgsT = argsT;
-        pub const ReturnT = @TypeOf(@call(.auto, func, @as(ArgsT, undefined)));
-        pub const ReturnPayloadT = switch (@typeInfo(ReturnT)) {
+pub fn FnSignature(comptime func: anytype, comptime argsT_: ?type) Signature {
+    const argsT = ArgsTuple(@TypeOf(func), argsT_);
+    const return_type = @TypeOf(@call(.auto, func, @as(argsT, undefined)));
+    return Signature{
+        .FuncT = @TypeOf(func),
+        .ArgsT = argsT,
+        .ReturnT = return_type,
+        .ReturnPayloadT = switch (@typeInfo(return_type)) {
             .ErrorUnion => |u| u.payload,
-            else => ReturnT,
-        };
-        pub const ReturnErrorSet: ?type = switch (@typeInfo(ReturnT)) {
+            else => return_type,
+        },
+        .ReturnErrorSet = switch (@typeInfo(return_type)) {
             .ErrorUnion => |u| u.error_set,
             else => null,
-        };
+        },
     };
 }
