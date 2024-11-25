@@ -1,0 +1,15 @@
+module(
+    name = "stablehlo",
+    version = "20241021.0-1c0b606",
+    compatibility_level = 1,
+)
+
+bazel_dep(name = "bazel_skylib", version = "1.7.1")
+bazel_dep(name = "rules_cc", version = "0.0.9")
+bazel_dep(name = "llvm-raw", version = "20241022.0-6c4267f")
+
+llvm = use_extension("@llvm-raw//utils/bazel:extension.bzl", "llvm")
+llvm.configure(
+    targets = ["AArch64", "X86", "NVPTX"],
+)
+use_repo(llvm, "llvm-project")
