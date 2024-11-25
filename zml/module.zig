@@ -980,7 +980,7 @@ fn compileInternal(
             const name_attr = context._module.op().getAttributeByName("sym_name").?.as(mlir.StringAttribute).?;
             const file_name = std.fmt.allocPrint(arena, "{s}.mlir", .{name_attr.value()}) catch name_attr.value();
             if (dir.createFile(file_name, .{ .truncate = true })) |file| {
-                context._module.op().print(file.writer(), .{ .debug_info = true, .debug_info_pretty_form = true });
+                context._module.op().print(file.writer(), .{ .debug_info = true, .debug_info_pretty_form = false });
                 log.info("Wrote MLIR to {s}/{s}", .{ xla_dump_to, file_name });
             } else |_| {
                 log.warn("Failed to open {s}", .{file_name});
@@ -1170,7 +1170,10 @@ fn loadPjrtExecutable(arena: std.mem.Allocator, platform: Platform, module_hash:
 
 fn storePjrtExecutable(arena: std.mem.Allocator, platform: Platform, loaded_executable: *pjrt.LoadedExecutable, module_hash: u64, compilation_cache_location: []const u8) !void {
     const resolved_path = try std.fs.cwd().realpathAlloc(arena, compilation_cache_location);
-    const compilation_cache_dir = try std.fs.openDirAbsolute(resolved_path, .{});
+    const compilation_cache_dir = std.fs.openDirAbsolute(resolved_path, .{}) catch blk: {
+        try std.fs.makeDirAbsolute(resolved_path);
+        break :blk try std.fs.openDirAbsolute(resolved_path, .{});
+    };
 
     const loaded_executable_file = try compilation_cache_dir.createFile(try std.fmt.allocPrint(arena, "{x}", .{module_hash}), .{});
     defer loaded_executable_file.close();
