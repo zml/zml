@@ -821,11 +821,7 @@ const SdpaMemEfficient = struct {
         stdx.debug.assert(@mod(self.q.dim(.q), self.chunking.q_chunk_size) == 0, "sdpaMemEfficient expects the chunk_size to exactly divise the seq_len, got: sdpaMemEfficient({}, {})", .{ self.q, self.chunking });
         stdx.debug.assert(@mod(self.k.dim(.k), self.chunking.k_chunk_size) == 0, "sdpaMemEfficient expects the chunk_size to exactly divise the seq_len, got: sdpaMemEfficient({}, {})", .{ self.k, self.chunking });
         const n_q_chunks: u32 = @intCast(@divExact(self.q.dim(.q), self.chunking.q_chunk_size));
-        // if (n_q_chunks == 1) {
-        //     return self.scanKeyVal().transpose(self.q.shape());
-        // }
 
-        // const res = ops.for_(SdpaMemEfficient.nextQueriesChunk, self, .{ .nq = n_q_chunks });
         const ctx = zml.module.CompilationContext.current();
         const q_chunks = ctx._allocator.alloc(zml.Tensor, n_q_chunks) catch unreachable;
         defer ctx._allocator.free(q_chunks);
@@ -864,14 +860,13 @@ const SdpaMemEfficient = struct {
 
     fn scanKeyVal(self: SdpaMemEfficient) Tensor {
         const n_chunks = @divExact(self.k.dim(.k), self.chunking.k_chunk_size);
-        return if (n_chunks <= 1) {
+        return if (n_chunks <= 4) {
             // Unrolled version
             var partial_softmax: ?PartialSoftmax = null;
             for (0..@intCast(n_chunks)) |idx| {
                 const next = self.nextKeyValChunk(Tensor.scalar(idx, .i32));
                 partial_softmax = if (partial_softmax) |prev| prev.merge(next) else next;
             }
-            // partial_softmax = zml.ops.optimizationBarrier(partial_softmax.?);
             return partial_softmax.?.finalize();
         } else {
             // stablehlo.while version
