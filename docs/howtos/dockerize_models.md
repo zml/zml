@@ -7,11 +7,11 @@ just have to append a few lines to your model's `BUILD.bazel`. Here is how it's
 done.
 
 **Note:** This walkthrough will work with your installed container runtime, no
-matter if it's **Docker or e.g. Podman.**  Also, we'll create images in the 
+matter if it's **Docker or e.g. Podman.**  Also, we'll create images in the
 [OCI](https://github.com/opencontainers/image-spec) open image format.
 
 Let's try containerizing our [first model](../tutorials/write_first_model.md), as it
-doesn't need any additional weights files. We'll see [down below](#adding-weights-and-data) 
+doesn't need any additional weights files. We'll see [down below](#adding-weights-and-data)
 how to add those. We'll also see how to add GPU/TPU support for our container
 there.
 
@@ -57,7 +57,7 @@ zig_cc_binary(
 ### 1. The Manifest
 
 To get started, let's make bazel generate a manifest that will be used when
-creating the TAR archive. 
+creating the TAR archive.
 
 ```python
 # Manifest created from the simple_layer binary and friends
@@ -118,7 +118,7 @@ See how we use string interpolation to fill in the folder name for the
 container's entrypoint?
 
 
-Next, we use a transition rule to force the container to be built for 
+Next, we use a transition rule to force the container to be built for
 Linux X86_64:
 
 ```python
@@ -150,10 +150,10 @@ INFO: Build completed successfully, 1 total action
 
 ### 4. The Load
 
-While inspecting the image is surely interesting, we usually want to load the 
+While inspecting the image is surely interesting, we usually want to load the
 image so we can run it.
 
-There is a bazel rule for that: `oci_load`. When we append the following lines 
+There is a bazel rule for that: `oci_load`. When we append the following lines
 to `BUILD.bazel`:
 
 ```python
@@ -218,7 +218,7 @@ how to build Docker images that also contain data files.
 
 You can `bazel run -c opt //mnist:push -- --repository
 index.docker.io/my_org/zml_mnist` in the `./examples` folder if you want to try
-it out. 
+it out.
 
 **Note: Please add one more of the following parameters to specify all the
 platforms your containerized model should support.**
@@ -226,6 +226,7 @@ platforms your containerized model should support.**
 - NVIDIA CUDA: `--@zml//runtimes:cuda=true`
 - AMD RoCM: `--@zml//runtimes:rocm=true`
 - Google TPU: `--@zml//runtimes:tpu=true`
+- AWS Trainium/Inferentia 2: `--@zml//runtimes:neuron=true`
 - **AVOID CPU:** `--@zml//runtimes:cpu=false`
 
 **Example:**
@@ -337,7 +338,7 @@ oci_image(
     name = "image_",
     base = "@distroless_cc_debian12",
     # the entrypoint comes from the expand_template rule `entrypoint` above
-    entrypoint = ":entrypoint", 
+    entrypoint = ":entrypoint",
     tars = [":archive"],
 )
 

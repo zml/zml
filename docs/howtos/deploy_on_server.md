@@ -17,6 +17,7 @@ following arguments to the command line when compiling / running a model:
 - NVIDIA CUDA: `--@zml//runtimes:cuda=true`
 - AMD RoCM: `--@zml//runtimes:rocm=true`
 - Google TPU: `--@zml//runtimes:tpu=true`
+- AWS Trainium/Inferentia 2: `--@zml//runtimes:neuron=true`
 - **AVOID CPU:** `--@zml//runtimes:cpu=false`
 
 So, to run the OpenLLama model from above **on your development machine**

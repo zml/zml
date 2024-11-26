@@ -1,4 +1,6 @@
+load("@aspect_bazel_lib//lib:tar.bzl", "tar")
 load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load("@rules_zig//zig:defs.bzl", "zig_library")
 
 RUNTIMES = {
@@ -6,6 +8,7 @@ RUNTIMES = {
     "cuda": False,
     "rocm": False,
     "tpu": False,
+    "neuron": False,
 }
 
 [
@@ -24,6 +27,39 @@ RUNTIMES = {
     )
     for runtime in RUNTIMES.keys()
 ]
+
+write_file(
+    name = "zml.txt",
+    out = "zml.txt",
+    content = ["ZML loves you <3"],
+)
+
+tar(
+    name = "empty",
+    srcs = [":zml.txt"],
+    mtree = "auto",
+)
+
+filegroup(
+    name = "layers",
+    srcs = [":empty"] + select({
+        ":cpu.enabled": ["//runtimes/cpu:layers"],
+        "//conditions:default": [],
+    }) + select({
+        ":cuda.enabled": ["//runtimes/cuda:layers"],
+        "//conditions:default": [],
+    }) + select({
+        ":neuron.enabled": ["//runtimes/neuron:layers"],
+        "//conditions:default": [],
+    }) + select({
+        ":rocm.enabled": ["//runtimes/rocm:layers"],
+        "//conditions:default": [],
+    }) + select({
+        ":tpu.enabled": ["//runtimes/tpu:layers"],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+)
 
 zig_library(
     name = "runtimes",

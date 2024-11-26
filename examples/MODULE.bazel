@@ -4,9 +4,9 @@ bazel_dep(name = "bazel_skylib", version = "1.7.1")
 bazel_dep(name = "rules_zig", version = "20240913.0-1957d05")
 bazel_dep(name = "platforms", version = "0.0.10")
 bazel_dep(name = "zml", version = "0.1.0")
-bazel_dep(name = "aspect_bazel_lib", version = "2.8.1.1")
-
+bazel_dep(name = "aspect_bazel_lib", version = "2.9.3")
 bazel_dep(name = "rules_oci", version = "2.0.0")
+
 oci = use_extension("@rules_oci//oci:extensions.bzl", "oci")
 oci.pull(
     name = "distroless_cc_debian12",
@@ -17,6 +17,15 @@ oci.pull(
     ],
 )
 use_repo(oci, "distroless_cc_debian12", "distroless_cc_debian12_linux_amd64")
+oci.pull(
+    name = "distroless_cc_debian12_debug",
+    digest = "sha256:ae6f470336acbf2aeffea3db70ec0e74d69bee7270cdb5fa2f28fe840fad57fe",
+    image = "gcr.io/distroless/cc-debian12",
+    platforms = [
+        "linux/amd64",
+    ],
+)
+use_repo(oci, "distroless_cc_debian12_debug", "distroless_cc_debian12_debug_linux_amd64")
 
 # Mnist weights
 http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
@@ -37,7 +46,6 @@ http_file(
 
 # Llama weights
 huggingface = use_extension("@zml//bazel:huggingface.bzl", "huggingface")
-
 huggingface.model(
     name = "Karpathy-TinyLlama-Stories",
     build_file_content = """\
@@ -101,7 +109,6 @@ filegroup(
     model = "meta-llama/Meta-Llama-3.1-8B-Instruct",
 )
 use_repo(huggingface, "Meta-Llama-3.1-8B-Instruct")
-
 huggingface.model(
     name = "Meta-Llama-3.1-70B-Instruct",
     build_file_content = """\
@@ -125,7 +132,6 @@ filegroup(
     model = "meta-llama/Meta-Llama-3.1-70B-Instruct",
 )
 use_repo(huggingface, "Meta-Llama-3.1-70B-Instruct")
-
 huggingface.model(
     name = "TinyLlama-1.1B-Chat-v1.0",
     build_file_content = """\
@@ -149,7 +155,6 @@ filegroup(
     model = "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
 )
 use_repo(huggingface, "TinyLlama-1.1B-Chat-v1.0")
-
 huggingface.model(
     name = "OpenLM-Research-OpenLLaMA-3B",
     build_file_content = """\
