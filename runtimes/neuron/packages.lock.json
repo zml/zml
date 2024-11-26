@@ -9,9 +9,9 @@
 					"version": "5.7-0.5~deb12u1"
 				},
 				{
-					"key": "libc6_2.36-9-p-deb12u8_amd64",
+					"key": "libc6_2.36-9-p-deb12u9_amd64",
 					"name": "libc6",
-					"version": "2.36-9+deb12u8"
+					"version": "2.36-9+deb12u9"
 				},
 				{
 					"key": "libgcc-s1_12.2.0-14_amd64",
@@ -24,9 +24,9 @@
 					"version": "12.2.0-14"
 				},
 				{
-					"key": "base-files_12.4-p-deb12u7_amd64",
+					"key": "base-files_12.4-p-deb12u8_amd64",
 					"name": "base-files",
-					"version": "12.4+deb12u7"
+					"version": "12.4+deb12u8"
 				},
 				{
 					"key": "libtinfo6_6.4-4_amd64",
@@ -52,11 +52,11 @@
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "libc6_2.36-9-p-deb12u8_amd64",
+			"key": "libc6_2.36-9-p-deb12u9_amd64",
 			"name": "libc6",
-			"sha256": "dbb527d86181f4b50edf5790c34c4d0b4ceac7f199b1266a9336b5708f8e9798",
-			"url": "https://deb.debian.org/debian/pool/main/g/glibc/libc6_2.36-9+deb12u8_amd64.deb",
-			"version": "2.36-9+deb12u8"
+			"sha256": "3a043b9dbf1a8c8b5a9e2268253e6dca8c7d431bd7a202fea96364abf374fea9",
+			"url": "https://deb.debian.org/debian/pool/main/g/glibc/libc6_2.36-9+deb12u9_amd64.deb",
+			"version": "2.36-9+deb12u9"
 		},
 		{
 			"arch": "amd64",
@@ -79,11 +79,11 @@
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "base-files_12.4-p-deb12u7_amd64",
+			"key": "base-files_12.4-p-deb12u8_amd64",
 			"name": "base-files",
-			"sha256": "6c6ee8ba40ebfa0fa5165e036a357d6d08cab52fae2a030de786d1396bc19214",
-			"url": "https://deb.debian.org/debian/pool/main/b/base-files/base-files_12.4+deb12u7_amd64.deb",
-			"version": "12.4+deb12u7"
+			"sha256": "b961a69d1b79f093597d89a96f296ddca17d3bab9d166361c42f07a6beb4f685",
+			"url": "https://deb.debian.org/debian/pool/main/b/base-files/base-files_12.4+deb12u8_amd64.deb",
+			"version": "12.4+deb12u8"
 		},
 		{
 			"arch": "amd64",
@@ -98,9 +98,9 @@
 			"arch": "amd64",
 			"dependencies": [
 				{
-					"key": "libc6_2.36-9-p-deb12u8_amd64",
+					"key": "libc6_2.36-9-p-deb12u9_amd64",
 					"name": "libc6",
-					"version": "2.36-9+deb12u8"
+					"version": "2.36-9+deb12u9"
 				},
 				{
 					"key": "libgcc-s1_12.2.0-14_amd64",
@@ -128,9 +128,9 @@
 					"version": "1:1.2.13.dfsg-1"
 				},
 				{
-					"key": "libc6_2.36-9-p-deb12u8_amd64",
+					"key": "libc6_2.36-9-p-deb12u9_amd64",
 					"name": "libc6",
-					"version": "2.36-9+deb12u8"
+					"version": "2.36-9+deb12u9"
 				},
 				{
 					"key": "libgcc-s1_12.2.0-14_amd64",
@@ -194,20 +194,20 @@
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "aws-neuronx-runtime-lib_2.22.14.0-6e27b8d5b_amd64",
+			"key": "aws-neuronx-runtime-lib_2.22.19.0-5856c0b42_amd64",
 			"name": "aws-neuronx-runtime-lib",
-			"sha256": "a5ed94fef14f6d37cfe8f0c39675e0f52e6bd80d09597aaba9dba84fecd803f5",
-			"url": "https://apt.repos.neuron.amazonaws.com/pool/main/a/aws-neuronx-runtime-lib/aws-neuronx-runtime-lib_2.22.14.0-6e27b8d5b_amd64.deb",
-			"version": "2.22.14.0-6e27b8d5b"
+			"sha256": "f952dad4f615f2881a0bf93ba5132d308fdfa697a78a09e2e1653a6c4704222d",
+			"url": "https://apt.repos.neuron.amazonaws.com/pool/main/a/aws-neuronx-runtime-lib/aws-neuronx-runtime-lib_2.22.19.0-5856c0b42_amd64.deb",
+			"version": "2.22.19.0-5856c0b42"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "aws-neuronx-collectives_2.22.26.0-17a033bc8_amd64",
+			"key": "aws-neuronx-collectives_2.22.33.0-d2128d1aa_amd64",
 			"name": "aws-neuronx-collectives",
-			"sha256": "b9fc445d91cf4ead411910f4b7fb5804f70ab928d0819f3ef35a3df42b05f125",
-			"url": "https://apt.repos.neuron.amazonaws.com/pool/main/a/aws-neuronx-collectives/aws-neuronx-collectives_2.22.26.0-17a033bc8_amd64.deb",
-			"version": "2.22.26.0-17a033bc8"
+			"sha256": "1eadead90a7daf6056a10a09d0ac3b72a3e885e6fedacd14b53a11a30d9774b3",
+			"url": "https://apt.repos.neuron.amazonaws.com/pool/main/a/aws-neuronx-collectives/aws-neuronx-collectives_2.22.33.0-d2128d1aa_amd64.deb",
+			"version": "2.22.33.0-d2128d1aa"
 		}
 	],
 	"version": 1
