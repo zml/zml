@@ -1849,9 +1849,13 @@ pub const Tensor = struct {
     /// To avoid use favorise `.broad(shape)` when working with tagged tensors.
     pub fn broadcast(self: Tensor, output_shape: Shape, axes_: []const i64) Tensor {
         const res_shape = output_shape.withDtype(self.dtype());
-
+        stdx.debug.assert(axes_.len == self.rank(), "broadcast expects axes_ to map all axes from self to axes of the output shape, got broadcast({}, {}, {d})", .{ self, output_shape, axes_ });
+        for (0.., axes_) |self_ax, other_ax| {
+            const d = self.dim(self_ax);
+            stdx.debug.assert(d == 1 or d == output_shape.dim(other_ax), "broadcast expects shape axes to either be 1-sized or to match the target size. got broadcast({}, {}, {d}), error on self axis {} mapping to other axis {}", .{ self, output_shape, axes_, self_ax, other_ax });
+        }
         const result_type = mlir.ext.RankedTensorType.fromShape(self.getContext().mlirCtx(), res_shape).as(mlir.Type).?;
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "broadcast({any}, axes={d})", .{ res_shape, axes_ });
+        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "broadcast({}, {any}, axes={d})", .{ self, res_shape, axes_ });
         const broadcast_op = dialect.stablehlo.broadcast_in_dim(self.getContext().mlirCtx(), self.value(), axes_, result_type, loc);
 
         return _result(res_shape, broadcast_op.result(0));
