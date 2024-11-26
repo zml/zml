@@ -115,6 +115,7 @@ following arguments to the command line when compiling or running a model:
 - NVIDIA CUDA: `--@zml//runtimes:cuda=true`
 - AMD RoCM: `--@zml//runtimes:rocm=true`
 - Google TPU: `--@zml//runtimes:tpu=true`
+- AWS Trainium/Inferentia 2: `--@zml//runtimes:neuron=true`
 - **AVOID CPU:** `--@zml//runtimes:cpu=false`
 
 The latter, avoiding compilation for CPU, cuts down compilation time.
