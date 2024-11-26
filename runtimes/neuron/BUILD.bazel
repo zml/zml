@@ -26,6 +26,7 @@ pip_compile(
         "--emit-find-links",
         "--no-strip-extras",
         "--index-strategy unsafe-best-match",
+        "--upgrade",
     ],
     python_platform = "x86_64-unknown-linux-gnu",
     requirements_in = "requirements.in",
