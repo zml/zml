@@ -1835,15 +1835,25 @@ pub const Tensor = struct {
 
     /// Returns a Tensor containing the result of the outer product between the input Tensors.
     pub fn outer(self: Tensor, other: Tensor) Tensor {
-        stdx.debug.assert(self.rank() < 2 and other.rank() < 2 and self.rank() + other.rank() != 0, "outer expects tensor ranks to be at most 1, got {} and {}", .{ self.rank(), other.rank() });
-
         if (self.rank() + other.rank() == 1) {
             return self.mul(other);
         }
 
-        const dimz = .{ self.dim(0), other.dim(0) };
-        const left = self.broadcast(Shape.init(dimz, self.dtype()), &.{0});
-        const right = other.broadcast(Shape.init(dimz, other.dtype()), &.{1});
+        const other_shape = other.shape();
+        var res_shape = self.shape();
+        var batching_axes: u8 = 0;
+        for (0..other.rank()) |ax| {
+            if (other_shape.tag(ax) != Shape.TagUnknown) {
+                if (self.shape().hasTag(other_shape.tag(ax))) |batching_ax| {
+                    stdx.debug.assert(batching_ax == batching_axes and batching_ax == ax, "outer expects batching dims to be the first dims in both tensors, got outer({}, {})", .{ self, other });
+                    batching_axes += 1;
+                }
+            }
+
+            res_shape = res_shape.appendDim(other_shape.dim(ax), other_shape.tag(ax));
+        }
+        const left = self.broad(res_shape);
+        const right = other.broad(res_shape);
         return left.mul(right);
     }
 

@@ -562,6 +562,7 @@ pub const CompilationContext = struct {
         self.extractValues(&args, values[function.n_model..]);
 
         const op = dialect.func.call(self.mlirCtx(), function.name, values, function.res_types, loc);
+        // TODO: tags seem to be lost by `callFunc`.
         var res: stdx.meta.FnResult(func) = undefined;
         assignResults(op, &res, function.res_shapes);
         return res;
