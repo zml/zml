@@ -64,7 +64,7 @@ pub const Client = opaque {
 
     pub const BufferFromHostBufferArgs = pjrt.Client.BufferFromHostBufferArgs;
     pub fn bufferFromHostBuffer(self: *const Client, api: *const Api, args: BufferFromHostBufferArgs) !*Buffer {
-        const buffer, const event_ = try self.inner().bufferFromHostBuffer(api, args);
+        const buffer, const event_ = try asynk.callBlocking(pjrt.Client.bufferFromHostBuffer, .{ self.inner(), api, args });
         if (event_) |event__| {
             const event: *Event = @ptrCast(event__);
             try event.await_(api);
