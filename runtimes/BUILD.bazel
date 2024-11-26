@@ -1,4 +1,6 @@
+load("@aspect_bazel_lib//lib:tar.bzl", "tar")
 load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load("@rules_zig//zig:defs.bzl", "zig_library")
 
 RUNTIMES = {
@@ -26,9 +28,21 @@ RUNTIMES = {
     for runtime in RUNTIMES.keys()
 ]
 
+write_file(
+    name = "zml.txt",
+    out = "zml.txt",
+    content = ["ZML loves you <3"],
+)
+
+tar(
+    name = "empty",
+    srcs = [":zml.txt"],
+    mtree = "auto",
+)
+
 filegroup(
     name = "layers",
-    srcs = select({
+    srcs = [":empty"] + select({
         ":cpu.enabled": ["//runtimes/cpu:layers"],
         "//conditions:default": [],
     }) + select({
