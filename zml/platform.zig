@@ -28,7 +28,7 @@ pub const Platform = struct {
     pjrt_client: *pjrt.Client,
     compilation_options: CompilationOptions = .{},
 
-    pub const MAX_NUM_DEVICES: u8 = 8;
+    pub const MAX_NUM_DEVICES: u8 = 32;
 
     pub fn init(target: Target, api: *const pjrt.Api) !Platform {
         const pjrt_client = try pjrt.Client.init(api, &.{});
