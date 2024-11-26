@@ -12,16 +12,18 @@ const DataType = @import("../dtype.zig").DataType;
 const Data = @import("../dtype.zig").Data;
 const CompilationContext = module.CompilationContext;
 
-pub fn canUseCudnnSdpa(head_dim: i64, dtype: DataType) bool {
+pub fn canUseCudnnSdpa(q_shape: Shape) bool {
     const ctx = CompilationContext.current();
     // TODO(Corendos): Check cuda version, cudnn version, device compatibility.
     if (!ctx.targetIs(.cuda)) return false;
 
+    if (q_shape.rank() != 4) return false;
+
     // NOTE(Corentin): In Cudnn fused MHA head_dim is limited to 128.
-    if (head_dim > 128) return false;
+    if (q_shape.dim(.hd) > 128) return false;
 
     // NOTE(Corentin): In Cudnn fused MHA data type is limited to F16 and BF16.
-    if (dtype != .f16 and dtype != .bf16) return false;
+    if (q_shape.dtype() != .f16 and q_shape.dtype() != .bf16) return false;
 
     return true;
 }

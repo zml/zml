@@ -752,7 +752,7 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
     stdx.debug.assert(k.shape().hasTags(.{ .h, .k, .hd }), err_template ++ "k is missing tags {{.h, .k, .hd}}", err_args);
     stdx.debug.assert(v.shape().hasTags(.{ .h, .k, .hd }), err_template ++ "v is missing tags {{.h, .k, .hd}}", err_args);
 
-    if (opts.allow_cudnn and cuda.canUseCudnnSdpa(q.dim(.hd), q.dtype())) {
+    if (opts.allow_cudnn and cuda.canUseCudnnSdpa(q.shape())) {
         return cuda.sdpa(q, k, v, opts);
     }
 
@@ -769,8 +769,8 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
         stdx.debug.panic(err_template ++ "Inputs have incompatible shapes.", err_args);
     };
     const sqrtHeadDim: f32 = 1.0 / std.math.sqrt(@as(f32, @floatFromInt(dims.hd)));
-    const scale_logit = if (opts.scale) |s| s else Tensor.scalar(sqrtHeadDim, k.dtype());
-    k = k.mul(scale_logit.convert(k.dtype()));
+    const head_scaling = if (opts.scale) |s| s else Tensor.scalar(sqrtHeadDim, k.dtype());
+    k = k.mul(head_scaling.convert(k.dtype()));
 
     var attn_weights = q.dot(k, .{.hd});
     // log.debug("attn_weights : {}", .{attn_weights});
@@ -787,164 +787,227 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
     return attn.transpose(q.shape());
 }
 
-pub const MemEfficientOps = struct {
-    scale: ?f32 = null,
-    query_chunk_size: u32,
-    key_chunk_size: u32,
-    opts: SdpaOpts = .{},
-};
+pub const SdpaChunks = struct { q_chunk_size: u32, k_chunk_size: u32 };
 
-pub fn sdpaMemEfficient(q_: Tensor, k_: Tensor, v_: Tensor, opts: MemEfficientOps) Tensor {
-    const q = q_.withTags(.{ .b, .hq, .sq, .hd });
-    const k = k_.withTags(.{ .b, .hk, .sk, .hd });
-    const v = v_.withTags(.{ .b, .hk, .sk, .hd });
-    var sdpa_opts = opts.opts;
-    if (sdpa_opts.attn_mask) |*attn_mask| attn_mask.* = attn_mask.withTags(.{ .sq, .sk });
+pub fn sdpaMemEfficient(
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    sdpa_opts: SdpaOpts,
+    chunking: SdpaChunks,
+) Tensor {
+    const sdpa_mem_efficient: SdpaMemEfficient = .{
+        .q = q,
+        .k = k,
+        .v = v,
+        .sdpa_opts = sdpa_opts,
+        .chunking = .{
+            .q_chunk_size = @intCast(@min(q.dim(.q), chunking.q_chunk_size)),
+            .k_chunk_size = @intCast(@min(k.dim(.k), chunking.k_chunk_size)),
+        },
+    };
 
-    const sdpa_mem_efficient: SdpaMemEfficient = .{ .q = q, .k = k, .v = v, .opt = .{
-        .query_chunk_size = @intCast(@min(q.dim(.sq), opts.query_chunk_size)),
-        .key_chunk_size = @intCast(@min(k.dim(.sk), opts.key_chunk_size)),
-        .scale = opts.scale,
-        .opts = sdpa_opts,
-    } };
-
-    // TODO(Corentin): Maybe `withTags` could take a Shape to copy from.
-    var result = sdpa_mem_efficient.forward();
-    result._shape = q_.shape();
-    return result;
+    return sdpa_mem_efficient.forward();
 }
 
 const SdpaMemEfficient = struct {
     q: Tensor,
     k: Tensor,
     v: Tensor,
-    opt: MemEfficientOps,
+    sdpa_opts: SdpaOpts,
+    chunking: SdpaChunks,
 
     fn forward(self: SdpaMemEfficient) Tensor {
-        const n_q_chunks = @divExact(self.q.dim(.sq), self.opt.query_chunk_size);
-        const res = ops.for_(SdpaMemEfficient.nextQueriesChunk, self, .{ .nq = n_q_chunks });
-        // TODO: should "for_" operate on an axis ?
-        // res: (nq, b, nh, qlen / nq, dim) -> (b, nh, qlen, dim)
-        return res.transpose(.{ 1, 2, 0, 3, 4 }).flatten(2);
-        // return res.transpose(.{ .b, .hq, .nq, .sq, .hd }).merge(.{ .nq, .sq }, .sq);
+        stdx.debug.assert(@mod(self.q.dim(.q), self.chunking.q_chunk_size) == 0, "sdpaMemEfficient expects the chunk_size to exactly divise the seq_len, got: sdpaMemEfficient({}, {})", .{ self.q, self.chunking });
+        stdx.debug.assert(@mod(self.k.dim(.k), self.chunking.k_chunk_size) == 0, "sdpaMemEfficient expects the chunk_size to exactly divise the seq_len, got: sdpaMemEfficient({}, {})", .{ self.k, self.chunking });
+        const n_q_chunks: u32 = @intCast(@divExact(self.q.dim(.q), self.chunking.q_chunk_size));
+
+        const ctx = zml.module.CompilationContext.current();
+        const q_chunks = ctx._allocator.alloc(zml.Tensor, n_q_chunks) catch unreachable;
+        defer ctx._allocator.free(q_chunks);
+        for (0..n_q_chunks) |i| {
+            const idx: u32 = @intCast(i);
+            const q_slice: zml.Tensor.DynSlice = .{
+                .start = Tensor.scalar(idx * self.chunking.q_chunk_size, .i32),
+                .len = self.chunking.q_chunk_size,
+            };
+            const q_chunk = self.q.dynamicSlice(.{ .q = q_slice });
+            const attn_chunk = if (self.sdpa_opts.attn_mask) |attn_mask| attn_mask.dynamicSlice(.{ .q = q_slice }) else null;
+
+            var chunk: SdpaMemEfficient = self;
+            chunk.q = q_chunk;
+            chunk.sdpa_opts.attn_mask = attn_chunk;
+            q_chunks[i] = chunk.scanKeyVal();
+        }
+
+        const res = zml.Tensor.concatenate(q_chunks, .q);
+        return res.transpose(self.q.shape());
     }
 
     fn nextQueriesChunk(self: SdpaMemEfficient, idx: Tensor) Tensor {
-        const offset = idx.scale(self.opt.query_chunk_size);
-        const q_chunk = self.q.dynamicSlice(.{ .sq = .{ .start = offset, .len = self.opt.query_chunk_size } });
-        const attn_chunk = if (self.opt.opts.attn_mask) |attn_mask| attn_mask.dynamicSlice1d(0, self.opt.query_chunk_size, offset) else null;
+        const q_slice: zml.Tensor.DynSlice = .{
+            .start = idx.scale(self.chunking.q_chunk_size),
+            .len = self.chunking.q_chunk_size,
+        };
+        const q_chunk = self.q.dynamicSlice(.{ .q = q_slice });
+        const attn_chunk = if (self.sdpa_opts.attn_mask) |attn_mask| attn_mask.dynamicSlice(.{ .q = q_slice }) else null;
 
         var chunk: SdpaMemEfficient = self;
         chunk.q = q_chunk;
-        chunk.opt.opts.attn_mask = attn_chunk;
+        chunk.sdpa_opts.attn_mask = attn_chunk;
         return chunk.scanKeyVal();
     }
 
     fn scanKeyVal(self: SdpaMemEfficient) Tensor {
-        const n_chunks = @divExact(self.k.dim(.sk), self.opt.key_chunk_size);
-        const res = ops.for_(SdpaMemEfficient.nextKeyValChunk, self, .{ .k_chunk = n_chunks });
-        const global_max = res.max_value.max(.k_chunk).broad(res.max_value.shape());
-        const max_diffs = res.max_value.sub(global_max).exp();
-        const attn = res.attn.mul(max_diffs.broad(res.attn.shape())).sum(.k_chunk).squeeze(.k_chunk);
-        const exp_sum = res.exp_sum.mul(max_diffs.convert(.f32)).sum(.k_chunk).squeeze(.k_chunk).convert(attn.dtype());
-        return attn.div(exp_sum.broad(self.q.shape()));
+        const n_chunks = @divExact(self.k.dim(.k), self.chunking.k_chunk_size);
+        return if (n_chunks <= 4) {
+            // Unrolled version
+            var partial_softmax: ?PartialSoftmax = null;
+            for (0..@intCast(n_chunks)) |idx| {
+                const next = self.nextKeyValChunk(Tensor.scalar(idx, .i32));
+                partial_softmax = if (partial_softmax) |prev| prev.merge(next) else next;
+            }
+            return partial_softmax.?.finalize();
+        } else {
+            // stablehlo.while version
+            const partial_softmax, _ = zml.ops.while_(hasNextKeyValChunk, nextKeyValChunkMerge, self, .{ PartialSoftmax.zeros(self.q.shape(), .f32), Tensor.scalar(0, .i32) });
+            return partial_softmax.finalize();
+        };
     }
 
-    fn nextKeyValChunk(self: SdpaMemEfficient, idx: Tensor) PartialAttn {
-        const offset = idx.scale(self.opt.key_chunk_size);
-        const k_chunk = self.k.dynamicSlice(.{ .sk = .{ .start = offset, .len = self.opt.key_chunk_size } });
-        const v_chunk = self.v.dynamicSlice(.{ .sk = .{ .start = offset, .len = self.opt.key_chunk_size } });
-        const attn_chunk = if (self.opt.opts.attn_mask) |mask| mask.dynamicSlice1d(1, self.opt.key_chunk_size, offset) else null;
+    fn nextKeyValChunkMerge(self: SdpaMemEfficient, prev: PartialSoftmax, idx: Tensor) struct { PartialSoftmax, Tensor } {
+        const next = self.nextKeyValChunk(idx);
+        return .{ prev.merge(next), idx.addConstant(1) };
+    }
+
+    fn nextKeyValChunk(self: SdpaMemEfficient, idx: Tensor) PartialSoftmax {
+        const k_slice: zml.Tensor.DynSlice = .{
+            .start = idx.scale(self.chunking.k_chunk_size),
+            .len = self.chunking.k_chunk_size,
+        };
+
+        const k_chunk = self.k.dynamicSlice(.{ .k = k_slice });
+        const v_chunk = self.v.dynamicSlice(.{ .k = k_slice });
+        const attn_chunk = if (self.sdpa_opts.attn_mask) |mask| mask.dynamicSlice(.{ .k = k_slice }) else null;
 
         return sdpaChunk(self.q, k_chunk, v_chunk, .{ .attn_mask = attn_chunk });
     }
+
+    pub fn hasNextKeyValChunk(self: SdpaMemEfficient, _: PartialSoftmax, idx: Tensor) zml.Tensor {
+        const n_chunks = @divExact(self.k.dim(.k), self.chunking.k_chunk_size);
+        return idx.cmp(.LT, Tensor.scalar(n_chunks, idx.dtype()));
+    }
 };
 
-pub const PartialAttn = struct {
-    attn: Tensor,
+pub const PartialSoftmax = struct {
+    values: Tensor,
     exp_sum: Tensor,
     max_value: Tensor,
+
+    pub fn zeros(q_shape: Shape, exp_sum_precision: DataType) PartialSoftmax {
+        return .{
+            .values = Tensor.constant(q_shape, q_shape.dtype().zero()),
+            .exp_sum = Tensor.constant(q_shape.setDim(.hd, 1), exp_sum_precision.zero()),
+            .max_value = Tensor.constant(q_shape.setDim(.hd, 1), q_shape.dtype().minValue()),
+        };
+    }
+
+    pub fn merge(self: PartialSoftmax, other: PartialSoftmax) PartialSoftmax {
+        // Rescale self and other using the new global_max.
+        const global_max = self.max_value.maximum(other.max_value);
+        const new_self = self.rescale(global_max);
+        const new_other = other.rescale(global_max);
+
+        // Now that self and other are using the same scale, we can just add them:
+        return .{
+            .max_value = global_max,
+            .values = new_self.values.add(new_other.values),
+            .exp_sum = new_self.exp_sum.add(new_other.exp_sum),
+        };
+    }
+
+    /// Update max_value and rescale attn and exp_sum accordingly.
+    pub fn rescale(self: PartialSoftmax, max_value: Tensor) PartialSoftmax {
+        const max_diff_exp = self.max_value.sub(max_value).exp();
+        const sum_dtype = self.exp_sum.dtype();
+        return .{
+            .max_value = max_value,
+            .values = self.values.mul(max_diff_exp.broad(self.values.shape())),
+            .exp_sum = self.exp_sum.mul(max_diff_exp.convert(sum_dtype)),
+        };
+    }
+
+    /// Divides the intermediary results by the exp_sum to get the proper attention values.
+    pub fn finalize(self: PartialSoftmax) Tensor {
+        return self.values.div(self.exp_sum.broad(self.values.shape()).convert(self.values.dtype()));
+    }
 };
 
 /// Compute softmax over a chunk.
 /// Returns intermediary results to allow aggregating later.
-pub fn partialSoftmax(self: Tensor, axis: anytype) PartialAttn {
+pub fn partialSoftmax(self: Tensor, axis: anytype) PartialSoftmax {
     const a = self.axis(axis);
     const max_val = self.max(a);
     const out = self.sub(max_val.broad(self.shape())).exp();
     return .{
-        .attn = out,
-        .exp_sum = out.convert(.f32).sum(a).squeeze(a),
-        .max_value = max_val.squeeze(a),
+        .values = out,
+        .exp_sum = out.convert(.f32).sum(a),
+        .max_value = max_val,
     };
 }
 
 /// Compute sdpa on a chunk, and computes a partial softmax.
 /// q: (B, H, Sq, H_dim) ⊙ k: (B, H, Sk, H_dim) -> qk: (B, H, Sq, Sk)
-fn sdpaChunk(q: Tensor, k: Tensor, v: Tensor, opts: SdpaOpts) PartialAttn {
-    // const bs, const num_head, const sk, const h_dim = q.dims[0..4];
-    // TODO: rewrite using modern ZML
+pub fn sdpaChunk(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) PartialSoftmax {
+    // this is a dupe of sdpa, but return the PartialSoftmax instead of true Attn.
+    // Consider implementing sdpa from sdpaChunk.
+    var q, var k, var v = .{ q_, k_, v_ };
 
-    // If we have more query heads (hq) than key heads (hk), repeat keys.
-    const k_rep, const v_rep = if (q.dim(.hq) != k.dim(.hk)) blk: {
-        const num_rep: u63 = @intCast(@divExact(q.dim(.hq), k.dim(.hk)));
-        break :blk .{ k.repeat1d(0, num_rep).rename(.{ .hk = .hq }), v.repeat1d(0, num_rep).rename(.{ .hk = .hq }) };
-    } else .{ k.rename(.{ .hk = .hq }), v.rename(.{ .hk = .hq }) };
+    const err_template = "sdpa(q: {}, k: {}, v: {}, attn: {?}) is invalid ! ";
+    const err_args = .{ q, k, v, opts.attn_mask };
+    stdx.debug.assert(q.shape().hasTags(.{ .h, .q, .hd }), err_template ++ "q is missing tags {{.h, .q, .hd}}", err_args);
+    stdx.debug.assert(k.shape().hasTags(.{ .h, .k, .hd }), err_template ++ "k is missing tags {{.h, .k, .hd}}", err_args);
+    stdx.debug.assert(v.shape().hasTags(.{ .h, .k, .hd }), err_template ++ "v is missing tags {{.h, .k, .hd}}", err_args);
 
-    var qk = q.dot(k_rep, .{.hd});
+    if (q.dim(.h) != k.dim(.h)) {
+        stdx.debug.assert(@mod(q.dim(.h), k.dim(.h)) == 0, err_template ++ "Different number of heads for keys and queries, but can't repeat keys.", err_args);
+        // Note: we don't try to repeat queries.
+        // Repeating keys is the interesting optimisation cause it reduces KV cache memory usage.
+        const num_rep: u63 = @intCast(@divExact(q.dim(.h), k.dim(.h)));
+        k, v = .{ k.repeat1d(.h, num_rep), v.repeat1d(.h, num_rep) };
+    }
+    const attn_mask = if (opts.attn_mask) |m| m else null;
 
-    const sqrtHeadDim: f32 = 1.0 / std.math.sqrt(@as(f32, @floatFromInt(q.dim(.hd))));
-    qk = qk.scale(sqrtHeadDim);
+    const dims = helpers.collectDims(.{ .h, .q, .k, .hd }, &.{ q, k, v, attn_mask }, .strict) catch {
+        stdx.debug.panic(err_template ++ "Inputs have incompatible shapes.", err_args);
+    };
+    const sqrtHeadDim: f32 = 1.0 / std.math.sqrt(@as(f32, @floatFromInt(dims.hd)));
+    const head_scaling = if (opts.scale) |s| s else Tensor.scalar(sqrtHeadDim, k.dtype());
+    k = k.mul(head_scaling.convert(k.dtype()));
 
-    std.debug.assert(qk.rank() == q.rank());
-    if (opts.attn_mask) |mask| {
-        qk = qk.add(mask.broad(qk.shape()));
+    var attn_weights = q.dot(k, .{.hd});
+    // log.debug("attn_weights : {}", .{attn_weights});
+    // log.debug("attn_mask : {?}", .{attn_mask});
+    if (attn_mask) |mask| attn_weights = attn_weights.add(mask.broadcastLeft(attn_weights.shape()));
+
+    if (opts.bias) |bias| {
+        attn_weights = attn_weights.add(bias);
     }
 
-    const partial = partialSoftmax(qk, -1);
-    const attn = partial.attn.dot(v_rep, .{.sk});
+    const partial = partialSoftmax(attn_weights, .k);
+    const attn = partial.values.dot(v, .{.k}).transpose(q.shape());
 
     return .{
-        .attn = attn,
-        .exp_sum = partial.exp_sum,
-        .max_value = partial.max_value,
+        .values = attn,
+        // The renaming is because the above dot projected values.k into .hd,
+        // do the same thing on the other tensors.
+        // This work because dot is a linear operation, and commutes with `PartialSoftmax.finalize`
+        .exp_sum = partial.exp_sum.rename(.{ .k = .hd }).transpose(attn.shape()),
+        .max_value = partial.max_value.rename(.{ .k = .hd }).transpose(attn.shape()),
     };
 }
 
-test "sdpaMemEfficient without mask" {
-    const platform = zml.testing.env();
-    const allocator = std.testing.allocator;
-
-    // Note we use small input vectors to have the tests run reasonably fast,
-    // but don't expect speed ups with this small sizes.
-    const rng = try zml.compileFn(allocator, Tensor.Rng.normal, .{ Shape.init(.{ 1, 10, 512, 64 }, .f32), .{ .mean = 0, .stddev = 1 } }, platform);
-    defer rng.deinit();
-
-    // Note: it's fine to pass undefined here, cause the arguments have already been baked into the executable.
-    const q = rng.call(undefined);
-    const k = rng.call(undefined);
-    const v = rng.call(undefined);
-
-    const ref_res = try zml.testing.compileAndCallWithTensors(platform, sdpa, .{
-        q.shape().withTags(.{ .b, .h, .q, .hd }),
-        k.shape().withTags(.{ .b, .h, .k, .hd }),
-        v.shape().withTags(.{ .b, .h, .k, .hd }),
-        .{ .attn_mask = null, .scale = null, .bias = null },
-    }, .{ q, k, v, undefined });
-    try std.testing.expectEqualSlices(i64, q.shape().dims(), ref_res.shape().dims());
-
-    const opts: zml.ShapeOf(MemEfficientOps) = .{ .query_chunk_size = 256, .key_chunk_size = 128, .opts = .{ .attn_mask = null, .scale = null, .bias = null } };
-    const res = try zml.testing.compileAndCallWithTensors(
-        platform,
-        sdpaMemEfficient,
-        .{ q.shape(), k.shape(), v.shape(), opts },
-        .{ q, k, v, undefined },
-    );
-
-    try zml.testing.expectClose(ref_res, res, 2e-3);
-}
-
-test "sdpaMemEfficient with mask" {
+test sdpaMemEfficient {
     const platform = zml.testing.env();
     const allocator = std.testing.allocator;
 
@@ -957,22 +1020,107 @@ test "sdpaMemEfficient with mask" {
     defer rng_mask.deinit();
 
     // Note: it's fine to pass undefined here, cause the arguments have already been backed into the executable.
-    const q = rng.call(undefined);
-    const k = rng.call(undefined);
-    const v = rng.call(undefined);
-    const mask = rng_mask.call(undefined);
+    const q = rng.call(undefined).withTags(.{ .b, .h, .q, .hd });
+    const k = rng.call(undefined).withTags(.{ .b, .h, .k, .hd });
+    const v = rng.call(undefined).withTags(.{ .b, .h, .k, .hd });
+    const mask = rng_mask.call(undefined).withTags(.{ .q, .k });
 
-    const ref_res = try zml.testing.compileAndCall(platform, sdpa, .{ q.withTags(.{ .b, .h, .q, .hd }), k.withTags(.{ .b, .h, .k, .hd }), v.withTags(.{ .b, .h, .k, .hd }), .{ .attn_mask = mask.withTags(.{ .q, .k }), .scale = null, .bias = null } });
+    const ref_res = try zml.testing.compileAndCall(
+        platform,
+        sdpa,
+        .{ q, k, v, .{ .attn_mask = mask, .scale = null, .bias = null } },
+    );
+    try std.testing.expectEqualSlices(i64, q.shape().dims(), ref_res.shape().dims());
+    {
+        // 4 k_chunks
+        const res = try zml.testing.compileAndCall(
+            platform,
+            sdpaMemEfficient,
+            .{
+                q,
+                k,
+                v,
+                .{ .attn_mask = mask, .scale = null, .bias = null },
+                .{ .q_chunk_size = 256, .k_chunk_size = @divExact(512, 4) },
+            },
+        );
+
+        try zml.testing.expectClose(ref_res, res, 2e-3);
+    }
+    {
+        // 16 k_chunks
+        const res = try zml.testing.compileAndCall(
+            platform,
+            sdpaMemEfficient,
+            .{
+                q,
+                k,
+                v,
+                .{ .attn_mask = mask, .scale = null, .bias = null },
+                .{ .q_chunk_size = 256, .k_chunk_size = @divExact(512, 16) },
+            },
+        );
+
+        try zml.testing.expectClose(ref_res, res, 2e-3);
+    }
+}
+
+test "sdpaMemEfficient transposed" {
+    const platform = zml.testing.env();
+    const allocator = std.testing.allocator;
+
+    // Note we use small input vectors to have the tests run reasonably fast,
+    // but don't expect speed ups with this small sizes.
+    const rng = try zml.compileFn(allocator, Tensor.Rng.normal, .{ Shape.init(.{ 1, 512, 10, 64 }, .f32), .{ .mean = 0, .stddev = 1 } }, platform);
+    defer rng.deinit();
+
+    const rng_mask = try zml.compileFn(allocator, Tensor.Rng.normal, .{ Shape.init(.{ 512, 512 }, .f32), .{ .mean = 0, .stddev = 1 } }, platform);
+    defer rng_mask.deinit();
+
+    // Note: it's fine to pass undefined here, cause the arguments have already been backed into the executable.
+    const q = rng.call(undefined).withTags(.{ .b, .q, .h, .hd });
+    const k = rng.call(undefined).withTags(.{ .b, .k, .h, .hd });
+    const v = rng.call(undefined).withTags(.{ .b, .k, .h, .hd });
+    const mask = rng_mask.call(undefined).withTags(.{ .q, .k });
+
+    const ref_res = try zml.testing.compileAndCall(
+        platform,
+        sdpa,
+        .{ q, k, v, .{ .attn_mask = mask, .scale = null, .bias = null } },
+    );
     try std.testing.expectEqualSlices(i64, q.shape().dims(), ref_res.shape().dims());
 
-    const res = try zml.testing.compileAndCall(platform, sdpaMemEfficient, .{ q, k, v, .{
-        .query_chunk_size = 256,
-        .key_chunk_size = 128,
-        .scale = null,
-        .opts = .{ .attn_mask = mask, .scale = null, .bias = null, .allow_cudnn = false },
-    } });
+    {
+        const res = try zml.testing.compileAndCall(
+            platform,
+            sdpaMemEfficient,
+            .{
+                q,
+                k,
+                v,
+                .{ .attn_mask = mask, .scale = null, .bias = null },
+                .{ .q_chunk_size = @divExact(512, 2), .k_chunk_size = @divExact(512, 4) },
+            },
+        );
 
-    try zml.testing.expectClose(ref_res, res, 2e-3);
+        try zml.testing.expectClose(ref_res, res, 1e-3);
+    }
+
+    {
+        const res = try zml.testing.compileAndCall(
+            platform,
+            sdpaMemEfficient,
+            .{
+                q,
+                k,
+                v,
+                .{ .attn_mask = mask, .scale = null, .bias = null },
+                .{ .q_chunk_size = 512, .k_chunk_size = @divExact(512, 4) },
+            },
+        );
+
+        try zml.testing.expectClose(ref_res, res, 1e-3);
+    }
 }
 
 /// Options controlling generation. The default values correspond to greedy decoding.

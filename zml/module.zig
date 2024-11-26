@@ -771,10 +771,13 @@ fn assignResults(op: mlir.Operation, v: anytype, shapes: []Shape) void {
     var context = LocalContext{ .index = 0, .op = op, .shapes = shapes };
     meta.visit((struct {
         fn cb(inner_ctx: *LocalContext, tensor: *Tensor) void {
-            tensor.* = Tensor.fromMlirValue(inner_ctx.op.result(inner_ctx.index));
+            var new = Tensor.fromMlirValue(inner_ctx.op.result(inner_ctx.index));
             if (inner_ctx.shapes) |sh| {
-                tensor._shape = sh[inner_ctx.index];
+                new._shape = sh[inner_ctx.index];
+            } else {
+                new._shape._tags = tensor._shape._tags;
             }
+            tensor.* = new;
             inner_ctx.index += 1;
         }
     }).cb, &context, v);
@@ -977,7 +980,7 @@ fn compileInternal(
             const name_attr = context._module.op().getAttributeByName("sym_name").?.as(mlir.StringAttribute).?;
             const file_name = std.fmt.allocPrint(arena, "{s}.mlir", .{name_attr.value()}) catch name_attr.value();
             if (dir.createFile(file_name, .{ .truncate = true })) |file| {
-                context._module.op().print(file.writer(), .{ .debug_info = true, .debug_info_pretty_form = true });
+                context._module.op().print(file.writer(), .{ .debug_info = true, .debug_info_pretty_form = false });
                 log.info("Wrote MLIR to {s}/{s}", .{ xla_dump_to, file_name });
             } else |_| {
                 log.warn("Failed to open {s}", .{file_name});
@@ -1098,7 +1101,7 @@ pub fn compileFn(
     comptime func: anytype,
     args: ShapeOf(stdx.meta.FnArgs(func)),
     platform: Platform,
-) !ExeWithWeights(FnWithVoidArg(func)) {
+) !FnExe(func) {
     const name = @typeName(@TypeOf(func));
     var context = try CompilationContext.init(allocator, name, platform);
     defer context.deinit();
@@ -1114,6 +1117,10 @@ pub fn compileFn(
     const raw_module = try compileInternal(allocator, &context, Local.forward, void_model, .{args});
     // But we set the signature so that you can call the module as you would call the function.
     return try ExeWithWeights(FnWithVoidArg(func)).initFromModel(allocator, raw_module, void_model);
+}
+
+pub fn FnExe(comptime func: anytype) type {
+    return ExeWithWeights(FnWithVoidArg(func));
 }
 
 fn FnWithVoidArg(comptime func: anytype) type {
@@ -1163,7 +1170,10 @@ fn loadPjrtExecutable(arena: std.mem.Allocator, platform: Platform, module_hash:
 
 fn storePjrtExecutable(arena: std.mem.Allocator, platform: Platform, loaded_executable: *pjrt.LoadedExecutable, module_hash: u64, compilation_cache_location: []const u8) !void {
     const resolved_path = try std.fs.cwd().realpathAlloc(arena, compilation_cache_location);
-    const compilation_cache_dir = try std.fs.openDirAbsolute(resolved_path, .{});
+    const compilation_cache_dir = std.fs.openDirAbsolute(resolved_path, .{}) catch blk: {
+        try std.fs.makeDirAbsolute(resolved_path);
+        break :blk try std.fs.openDirAbsolute(resolved_path, .{});
+    };
 
     const loaded_executable_file = try compilation_cache_dir.createFile(try std.fmt.allocPrint(arena, "{x}", .{module_hash}), .{});
     defer loaded_executable_file.close();
