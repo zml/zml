@@ -8,7 +8,7 @@ pub fn isEnabled() bool {
 }
 
 fn hasNvidiaDevice() bool {
-    asynk.File.access("/dev/nvidia0", .{ .mode = .read_only }) catch return false;
+    asynk.File.access("/dev/nvidiactl", .{ .mode = .read_only }) catch return false;
     return true;
 }
 

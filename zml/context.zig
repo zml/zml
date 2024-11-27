@@ -214,7 +214,7 @@ const cuda = struct {
         const StreamSynchronize = *const fn (stream: *Stream) callconv(.C) c_int;
 
         pub fn init() !Runtime {
-            var cudart = try std.DynLib.open("libcudart.so");
+            var cudart = try std.DynLib.open("libcudart.so.12");
             defer cudart.close();
 
             return .{

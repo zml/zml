@@ -29,14 +29,14 @@ RUNTIMES = {
 ]
 
 write_file(
-    name = "zml.txt",
+    name = "zml_txt",
     out = "zml.txt",
     content = ["ZML loves you <3"],
 )
 
 tar(
     name = "empty",
-    srcs = [":zml.txt"],
+    srcs = [":zml_txt"],
     mtree = "auto",
 )
 

@@ -4,124 +4,133 @@ load("//bazel:http_deb_archive.bzl", "http_deb_archive")
 
 ARCH = "linux-x86_64"
 
-CUDA_VERSION = "12.6.2"
-CUDNN_VERSION = "9.4.0"
+CUDA_VERSION = "12.6.3"
+CUDNN_VERSION = "9.5.1"
 
-_CC_IMPORT_TPL = """\
-cc_import(
-    name = "{name}",
-    shared_library = "lib/{shared_library}",
+def _filegroup(name, srcs):
+    return """\
+filegroup(
+    name = {name},
+    srcs = {srcs},
     visibility = ["@libpjrt_cuda//:__subpackages__"],
 )
-"""
+""".format(name = repr(name), srcs = repr(srcs))
+
+def _cc_import(name, shared_library, deps = []):
+    return """\
+cc_import(
+    name = {name},
+    shared_library = {shared_library},
+    deps = {deps},
+    visibility = ["@libpjrt_cuda//:__subpackages__"],
+)
+""".format(name = repr(name), shared_library = repr(shared_library), deps = repr(deps))
 
 CUDA_PACKAGES = {
-    "cuda_cudart": _CC_IMPORT_TPL.format(name = "cudart", shared_library = "libcudart.so.12"),
-    "cuda_cupti": _CC_IMPORT_TPL.format(name = "cupti", shared_library = "libcupti.so.12"),
-    "libcufft": _CC_IMPORT_TPL.format(name = "cufft", shared_library = "libcufft.so.11"),
-    "libcusolver": _CC_IMPORT_TPL.format(name = "cusolver", shared_library = "libcusolver.so.11"),
-    "libcusparse": _CC_IMPORT_TPL.format(name = "cusparse", shared_library = "libcusparse.so.12"),
-    "libnvjitlink": _CC_IMPORT_TPL.format(name = "nvjitlink", shared_library = "libnvJitLink.so.12"),
-    "cuda_nvcc": """\
-filegroup(
-    name = "ptxas",
-    srcs = ["bin/ptxas"],
-    visibility = ["@libpjrt_cuda//:__subpackages__"],
-)
-
-filegroup(
-    name = "libdevice",
-    srcs = ["nvvm/libdevice/libdevice.10.bc"],
-    visibility = ["@libpjrt_cuda//:__subpackages__"],
-)
-
-cc_import(
-    name = "nvvm",
-    shared_library = "nvvm/lib64/libnvvm.so.4",
-    visibility = ["@libpjrt_cuda//:__subpackages__"],
-)
-""",
-    "cuda_nvrtc": """\
-cc_import(
-    name = "nvrtc",
-    shared_library = "lib/libnvrtc.so.12",
-    visibility = ["@libpjrt_cuda//:__subpackages__"],
-    deps = [":nvrtc_builtins"],
-)
-
-cc_import(
-    name = "nvrtc_builtins",
-    shared_library = "lib/libnvrtc-builtins.so.12.6",
-)
-""",
-    "libcublas": """\
-cc_import(
-    name = "cublasLt",
-    shared_library = "lib/libcublasLt.so.12",
-)
-
-cc_import(
-    name = "cublas",
-    shared_library = "lib/libcublas.so.12",
-    visibility = ["@libpjrt_cuda//:__subpackages__"],
-    deps = [":cublasLt"],
-)
-""",
+    "cuda_cudart": _cc_import(
+        name = "cudart",
+        shared_library = "lib/libcudart.so.12",
+    ),
+    "cuda_cupti": _cc_import(
+        name = "cupti",
+        shared_library = "lib/libcupti.so.12",
+    ),
+    "libcufft": _cc_import(
+        name = "cufft",
+        shared_library = "lib/libcufft.so.11",
+    ),
+    "libcusolver": _cc_import(
+        name = "cusolver",
+        shared_library = "lib/libcusolver.so.11",
+    ),
+    "libcusparse": _cc_import(
+        name = "cusparse",
+        shared_library = "lib/libcusparse.so.12",
+    ),
+    "libnvjitlink": _cc_import(
+        name = "nvjitlink",
+        shared_library = "lib/libnvJitLink.so.12",
+    ),
+    "cuda_nvcc": "\n".join([
+        _filegroup(
+            name = "ptxas",
+            srcs = ["bin/ptxas"],
+        ),
+        _filegroup(
+            name = "libdevice",
+            srcs = ["nvvm/libdevice/libdevice.10.bc"],
+        ),
+        _cc_import(name = "nvvm", shared_library = "nvvm/lib64/libnvvm.so.4"),
+    ]),
+    "cuda_nvrtc": "\n".join([
+        _cc_import(
+            name = "nvrtc",
+            shared_library = "lib/libnvrtc.so.12",
+            deps = [":nvrtc_builtins"],
+        ),
+        _cc_import(
+            name = "nvrtc_builtins",
+            shared_library = "lib/libnvrtc-builtins.so.12.6",
+        ),
+    ]),
+    "libcublas": "\n".join([
+        _cc_import(
+            name = "cublasLt",
+            shared_library = "lib/libcublasLt.so.12",
+        ),
+        _cc_import(
+            name = "cublas",
+            shared_library = "lib/libcublas.so.12",
+            deps = [":cublasLt"],
+        ),
+    ]),
 }
 
 CUDNN_PACKAGES = {
-    "cudnn": """\
-cc_import(
-    name = "cudnn",
-    shared_library = "lib/libcudnn.so.9",
-    visibility = ["@libpjrt_cuda//:__subpackages__"],
-    deps = [
-        ":cudnn_adv",
-        ":cudnn_ops",
-        ":cudnn_cnn",
-        ":cudnn_graph",
-        ":cudnn_engines_precompiled",
-        ":cudnn_engines_runtime_compiled",
-        ":cudnn_heuristic",
-    ],
-)
-
-cc_import(
-    name = "cudnn_adv",
-    shared_library = "lib/libcudnn_adv.so.9",
-)
-
-cc_import(
-    name = "cudnn_ops",
-    shared_library = "lib/libcudnn_ops.so.9",
-)
-
-cc_import(
-    name = "cudnn_cnn",
-    shared_library = "lib/libcudnn_cnn.so.9",
-    deps = [":cudnn_ops"],
-)
-
-cc_import(
-    name = "cudnn_graph",
-    shared_library = "lib/libcudnn_graph.so.9",
-)
-
-cc_import(
-    name = "cudnn_engines_precompiled",
-    shared_library = "lib/libcudnn_engines_precompiled.so.9",
-)
-
-cc_import(
-    name = "cudnn_engines_runtime_compiled",
-    shared_library = "lib/libcudnn_engines_runtime_compiled.so.9",
-)
-
-cc_import(
-    name = "cudnn_heuristic",
-    shared_library = "lib/libcudnn_heuristic.so.9",
-)
-""",
+    "cudnn": "\n".join([
+        _cc_import(
+            name = "cudnn",
+            shared_library = "lib/libcudnn.so.9",
+            deps = [
+                ":cudnn_adv",
+                ":cudnn_ops",
+                ":cudnn_cnn",
+                ":cudnn_graph",
+                ":cudnn_engines_precompiled",
+                ":cudnn_engines_runtime_compiled",
+                ":cudnn_heuristic",
+            ],
+        ),
+        _cc_import(
+            name = "cudnn_adv",
+            shared_library = "lib/libcudnn_adv.so.9",
+        ),
+        _cc_import(
+            name = "cudnn_ops",
+            shared_library = "lib/libcudnn_ops.so.9",
+        ),
+        _cc_import(
+            name = "cudnn_cnn",
+            shared_library = "lib/libcudnn_cnn.so.9",
+            deps = [":cudnn_ops"],
+        ),
+        _cc_import(
+            name = "cudnn_graph",
+            shared_library = "lib/libcudnn_graph.so.9",
+        ),
+        _cc_import(
+            name = "cudnn_engines_precompiled",
+            shared_library = "lib/libcudnn_engines_precompiled.so.9",
+        ),
+        _cc_import(
+            name = "cudnn_engines_runtime_compiled",
+            shared_library = "lib/libcudnn_engines_runtime_compiled.so.9",
+        ),
+        _cc_import(
+            name = "cudnn_heuristic",
+            shared_library = "lib/libcudnn_heuristic.so.9",
+        ),
+    ]),
 }
 
 def _cuda_impl(mctx):
@@ -157,8 +166,8 @@ def _cuda_impl(mctx):
 
     http_deb_archive(
         name = "libnccl",
-        urls = ["https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86_64/libnccl2_2.22.3-1+cuda12.6_amd64.deb"],
-        sha256 = "2f64685bcd503150ab45d00503236a56da58a15eac5fd36508045a74f4e10678",
+        urls = ["https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86_64/libnccl2_2.23.4-1+cuda12.6_amd64.deb"],
+        sha256 = "161e6da03d5faf8f5661a46d63ad524802464b24eadf182cfb4460a8675b2376",
         build_file_content = """\
 cc_import(
     name = "nccl",
@@ -169,8 +178,8 @@ cc_import(
     )
     http_deb_archive(
         name = "zlib",
-        urls = ["http://archive.ubuntu.com/ubuntu/pool/main/z/zlib/zlib1g_1.3.dfsg-3.1ubuntu2.1_amd64.deb"],
-        sha256 = "7074b6a2f6367a10d280c00a1cb02e74277709180bab4f2491a2f355ab2d6c20",
+        urls = ["https://snapshot-cloudflare.debian.org/archive/debian/20241127T143620Z/pool/main/z/zlib/zlib1g_1.3.dfsg%2Breally1.3.1-1%2Bb1_amd64.deb"],
+        sha256 = "015be740d6236ad114582dea500c1d907f29e16d6db00566ca32fb68d71ac90d",
         build_file_content = """\
 cc_import(
     name = "zlib",
@@ -183,8 +192,9 @@ cc_import(
     http_archive(
         name = "libpjrt_cuda",
         build_file = "libpjrt_cuda.BUILD.bazel",
-        url = "https://github.com/zml/pjrt-artifacts/releases/download/v3.0.0/pjrt-cuda_linux-amd64.tar.gz",
-        sha256 = "1af968c5357b0b78e43416e2b583512d203aa67a770c6b7e616006e7dd63aecc",
+        url = "https://files.pythonhosted.org/packages/d7/aa/f15ea857ad9bcff7a0c942dc570ca718b026cc0cc5c513525bb08cacf3c0/jax_cuda12_pjrt-0.4.35-py3-none-manylinux2014_x86_64.whl",
+        type = "zip",
+        sha256 = "0ffe7e1ba65659bd5738c2cc5addaf0a56205d2188eec5da194b63c068e1fdd2",
     )
 
     return mctx.extension_metadata(

@@ -1,6 +1,17 @@
 load("@aspect_bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@zml//bazel:cc_import.bzl", "cc_import")
 
+cc_shared_library(
+    name = "zmlxcuda_so",
+    shared_lib_name = "libzmlxcuda.so.0",
+    deps = ["@zml//runtimes/cuda:zmlxcuda_lib"],
+)
+
+cc_import(
+    name = "zmlxcuda",
+    shared_library = ":zmlxcuda_so",
+)
+
 copy_to_directory(
     name = "sandbox",
     srcs = [
@@ -13,9 +24,15 @@ copy_to_directory(
 cc_import(
     name = "libpjrt_cuda",
     data = [":sandbox"],
-    shared_library = "libpjrt_cuda.so",
+    shared_library = "jax_plugins/xla_cuda12/xla_cuda_plugin.so",
+    soname = "libpjrt_cuda.so",
+    add_needed = ["libzmlxcuda.so.0"],
+    rename_dynamic_symbols = {
+        "dlopen": "zmlxcuda_dlopen",
+    },
     visibility = ["@zml//runtimes/cuda:__subpackages__"],
     deps = [
+        ":zmlxcuda",
         "@cuda_cudart//:cudart",
         "@cuda_cupti//:cupti",
         "@cuda_nvcc//:nvvm",
