@@ -80,6 +80,7 @@ pub const Api = struct {
                 break :blk .{
                     .inner = .{
                         .handle = c.dlopen(&library_c, c.RTLD_LAZY | c.RTLD_LOCAL | c.RTLD_NODELETE) orelse {
+                            log.err("Unable to dlopen plugin: {s}", .{library});
                             return error.FileNotFound;
                         },
                     },
