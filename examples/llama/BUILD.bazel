@@ -18,9 +18,8 @@ zig_cc_binary(
     ],
 )
 
-native_binary(
+cc_binary(
     name = "Llama-3.1-8B-Instruct",
-    src = ":llama",
     args = [
         "--model=$(location @Meta-Llama-3.1-8B-Instruct//:model.safetensors.index.json)",
         "--tokenizer=$(location @Meta-Llama-3.1-8B-Instruct//:tokenizer)",
@@ -33,6 +32,7 @@ native_binary(
         "@Meta-Llama-3.1-8B-Instruct//:model.safetensors.index.json",
         "@Meta-Llama-3.1-8B-Instruct//:tokenizer",
     ],
+    deps = [":llama_lib"],
 )
 
 native_binary(
