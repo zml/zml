@@ -1262,26 +1262,20 @@ pub fn stablehloVersionFromCompatibilityRequirement(requirement: c.MlirStablehlo
 }
 
 pub fn stablehloGetSmallerVersion(version1: []const u8, version2: []const u8) []const u8 {
-    const state = struct {
-        var buf: [32]u8 = undefined;
+    var buf: [32]u8 = undefined;
 
-        fn call(v1: []const u8, v2: []const u8) []const u8 {
-            var stream = std.io.fixedBufferStream(&buf);
-            var context = .{ .writer = stream.writer() };
-            const WriterContext = @TypeOf(context);
+    var stream = std.io.fixedBufferStream(&buf);
+    var context = .{ .writer = stream.writer() };
+    const WriterContext = @TypeOf(context);
 
-            _ = c.stablehloGetSmallerVersion(mlir.stringRef(v1), mlir.stringRef(v2), (struct {
-                pub fn callback(mlir_str: c.MlirStringRef, userdata: ?*anyopaque) callconv(.C) void {
-                    const inner_ctx: *WriterContext = @ptrCast(@alignCast(userdata));
-                    _ = inner_ctx.writer.write(mlir.fromStringRef(mlir_str)) catch unreachable;
-                }
-            }).callback, &context);
-
-            return buf[0..stream.pos];
+    _ = c.stablehloGetSmallerVersion(mlir.stringRef(version1), mlir.stringRef(version2), (struct {
+        pub fn callback(mlir_str: c.MlirStringRef, userdata: ?*anyopaque) callconv(.C) void {
+            const inner_ctx: *WriterContext = @ptrCast(@alignCast(userdata));
+            _ = inner_ctx.writer.write(mlir.fromStringRef(mlir_str)) catch unreachable;
         }
-    };
+    }).callback, &context);
 
-    return state.call(version1, version2);
+    return if (std.mem.eql(u8, buf[0..stream.pos], version1)) version1 else version2;
 }
 
 pub fn getCurrentVersion() []const u8 {
