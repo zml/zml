@@ -106,8 +106,6 @@ pub const Client = opaque {
             break :blk dialects.stablehlo.stablehloVersionFromCompatibilityRequirement(c.WEEK_12);
         };
 
-        std.debug.print("stablehlo_version: {s}\n", .{stablehlo_version});
-
         dialects.stablehlo.serializePortableArtifact(bytecode.items, stablehlo_version, serialized_buffer.writer()) catch |err| {
             log.err("failed to serialize to portable artifact: {}", .{err});
             return err;
