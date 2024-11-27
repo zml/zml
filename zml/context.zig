@@ -98,7 +98,11 @@ pub const Context = struct {
                 num_platforms += 1;
             }
         }
-        if (num_platforms == 0) return error.NotFound;
+        if (num_platforms == 0) {
+            log.err("No platform available", .{});
+            return error.NoPlatformAvailable;
+        }
+
         return .{
             .platforms = platforms,
         };
