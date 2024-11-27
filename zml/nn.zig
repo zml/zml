@@ -183,9 +183,7 @@ pub fn rope(x: Tensor, pos_idx: ?Tensor, opts: RopeOpts) Tensor {
     const y_imag = x_real.mul(sin).add(x_imag.mul(cos));
 
     // flatten last dimensions
-    const y = mergeRealImg(y_real, y_imag, opts.impl);
-    log.warn("rope({}, {?}) -> {}", .{ x, pos_idx, y });
-    return y;
+    return mergeRealImg(y_real, y_imag, opts.impl);
 }
 
 pub fn splitRealImg(x: Tensor, impl: RopeOpts.Implementation) [2]Tensor {
