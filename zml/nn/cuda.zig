@@ -15,7 +15,7 @@ const CompilationContext = module.CompilationContext;
 pub fn canUseCudnnSdpa(q_shape: Shape) bool {
     const ctx = CompilationContext.current();
     // TODO(Corendos): Check cuda version, cudnn version, device compatibility.
-    if (!ctx.targetIs(.cuda)) return false;
+    if (ctx.target() != .cuda) return false;
 
     if (q_shape.rank() != 4) return false;
 
