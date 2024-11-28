@@ -527,7 +527,30 @@ pub const Socket = struct {
     };
 };
 
-pub const Channel = libcoro.Channel;
+pub fn Channel(comptime T: type, capacity: usize) type {
+    return struct {
+        const Self = @This();
+        const Inner = libcoro.Channel(T, .{ .capacity = capacity });
+
+        inner: Inner,
+
+        pub fn init() Self {
+            return .{ .inner = Inner.init(&AsyncThread.current.executor.exec) };
+        }
+
+        pub fn close(self: *Self) void {
+            self.inner.close();
+        }
+
+        pub fn send(self: *Self, val: T) void {
+            self.inner.send(val) catch unreachable;
+        }
+
+        pub fn recv(self: *Self) ?T {
+            return self.inner.recv();
+        }
+    };
+}
 
 pub const Mutex = struct {
     const VoidChannel = libcoro.Channel(void, .{ .capacity = 1 });
