@@ -303,11 +303,11 @@ test "real/img" {
     try testing.expectEqual(20, d_split_interleaved.getValue(i32));
 }
 
-test "rope" {
+test rope {
     const platform = zml.testing.env();
 
     const Local = struct {
-        fn _fwd1(x: Tensor, opts: RopeOpts) Tensor {
+        fn _fwd(x: Tensor, opts: RopeOpts) Tensor {
             var input = x;
             {
                 // Convert input to the requested format
@@ -323,31 +323,14 @@ test "rope" {
             }
             return res;
         }
-
-        fn _fwd2(x: Tensor, idx: Tensor) [2]Tensor {
-            return .{
-                rope(x, idx, .{ .impl = .interleaved }),
-                rope(x.gatherValues(.s, idx, .{}), null, .{ .impl = .interleaved }).gatherValues(.s, idx, .{}),
-            };
-        }
     };
 
-    {
-
-        // x is made such as the interleaved and sequential reps are the same.
-        // So the two implementations should give the same results.
-        const x = try zml.Buffer.fromSlice(platform, .{ .b = 1, .s = 5, .hd = 4 }, &[_]f32{ 1.0, 0.1, -1.0, -0.5 } ** 5);
-        const res1 = try zml.testing.compileAndCall(platform, Local._fwd1, .{ x, RopeOpts{ .impl = .interleaved } });
-        const res2 = try zml.testing.compileAndCall(platform, Local._fwd1, .{ x, RopeOpts{ .impl = .sequential } });
-        try zml.testing.expectClose(res1, res2, 1e-4);
-    }
-
-    // {
-    //     const x = try zml.Buffer.fromSlice(platform, .{ .b = 2, .hd = 4 }, &[2 * 4]f32{ 1.0, 0.1, -1.0, -0.5, 1.0, 0.1, -1.0, -0.5 });
-    //     const idx = try zml.Buffer.fromSlice(platform, .{ .b = 2 }, &[_]i32{ 2, 4 });
-    //     const res1, const res2 = try zml.testing.compileAndCall(platform, Local._fwd2, .{ x, idx });
-    //     try zml.testing.expectClose(res1, res2, 1e-4);
-    // }
+    // x is made such as the interleaved and sequential reps are the same.
+    // So the two implementations should give the same results.
+    const x = try zml.Buffer.fromSlice(platform, .{ .b = 1, .s = 5, .hd = 4 }, &[_]f32{ 1.0, 0.1, -1.0, -0.5 } ** 5);
+    const res1 = try zml.testing.compileAndCall(platform, Local._fwd, .{ x, RopeOpts{ .impl = .interleaved } });
+    const res2 = try zml.testing.compileAndCall(platform, Local._fwd, .{ x, RopeOpts{ .impl = .sequential } });
+    try zml.testing.expectClose(res1, res2, 1e-4);
 }
 
 /// In neural network we generally care about the relative precision,
