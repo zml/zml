@@ -42,8 +42,8 @@ cc_import(
         "@libcufft//:cufft",
         "@libcusolver//:cusolver",
         "@libcusparse//:cusparse",
-        "@libnccl//:nccl",
         "@libnvjitlink//:nvjitlink",
+        "@nccl",
         "@zlib",
     ],
 )

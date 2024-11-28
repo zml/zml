@@ -60,7 +60,10 @@ CUDA_PACKAGES = {
             name = "libdevice",
             srcs = ["nvvm/libdevice/libdevice.10.bc"],
         ),
-        _cc_import(name = "nvvm", shared_library = "nvvm/lib64/libnvvm.so.4"),
+        _cc_import(
+            name = "nvvm",
+            shared_library = "nvvm/lib64/libnvvm.so.4",
+        ),
     ]),
     "cuda_nvrtc": "\n".join([
         _cc_import(
@@ -164,29 +167,24 @@ def _cuda_impl(mctx):
             strip_prefix = paths.basename(arch_data["relative_path"]).replace(".tar.xz", ""),
         )
 
-    http_deb_archive(
-        name = "libnccl",
-        urls = ["https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86_64/libnccl2_2.23.4-1+cuda12.6_amd64.deb"],
-        sha256 = "161e6da03d5faf8f5661a46d63ad524802464b24eadf182cfb4460a8675b2376",
-        build_file_content = """\
-cc_import(
-    name = "nccl",
-    shared_library = "usr/lib/x86_64-linux-gnu/libnccl.so.2",
-    visibility = ["@libpjrt_cuda//:__subpackages__"],
-)
-""",
+    http_archive(
+        name = "nccl",
+        urls = ["https://files.pythonhosted.org/packages/ed/1f/6482380ec8dcec4894e7503490fc536d846b0d59694acad9cf99f27d0e7d/nvidia_nccl_cu12-2.23.4-py3-none-manylinux2014_x86_64.whl"],
+        type = "zip",
+        sha256 = "b097258d9aab2fa9f686e33c6fe40ae57b27df60cedbd15d139701bb5509e0c1",
+        build_file_content = _cc_import(
+            name = "nccl",
+            shared_library = "nvidia/nccl/lib/libnccl.so.2",
+        ),
     )
     http_deb_archive(
         name = "zlib",
         urls = ["https://snapshot-cloudflare.debian.org/archive/debian/20241127T143620Z/pool/main/z/zlib/zlib1g_1.3.dfsg%2Breally1.3.1-1%2Bb1_amd64.deb"],
         sha256 = "015be740d6236ad114582dea500c1d907f29e16d6db00566ca32fb68d71ac90d",
-        build_file_content = """\
-cc_import(
-    name = "zlib",
-    shared_library = "usr/lib/x86_64-linux-gnu/libz.so.1",
-    visibility = ["@libpjrt_cuda//:__subpackages__"],
-)
-""",
+        build_file_content = _cc_import(
+            name = "zlib",
+            shared_library = "usr/lib/x86_64-linux-gnu/libz.so.1",
+        ),
     )
 
     http_archive(
