@@ -32,8 +32,8 @@ pub const std_options = .{
 
 pub fn generateText(
     llama: LlamaLM,
-    mod_prefill: zml.module.ExeWithWeights(LlamaLM.forward),
-    mod: zml.module.ExeWithWeights(LlamaLM.forward),
+    mod_prefill: zml.module.ModuleExe(LlamaLM.forward),
+    mod: zml.module.ModuleExe(LlamaLM.forward),
     tokenizer: zml.tokenizer.Tokenizer,
     allocator: std.mem.Allocator,
     seed: u128,
@@ -217,9 +217,9 @@ pub fn asyncMain() !void {
     defer zml.aio.unloadBuffers(&llama_weights);
     log.info("✅\tLoaded weights in {d}ms", .{start.read() / std.time.ns_per_ms});
 
-    var llama_module_prefill = try (try fut_mod_prefill.awaitt()).prepare(allocator, llama_weights);
+    var llama_module_prefill = (try fut_mod_prefill.awaitt()).prepare(llama_weights);
     defer llama_module_prefill.deinit();
-    var llama_module = try (try fut_mod.awaitt()).prepare(allocator, llama_weights);
+    var llama_module = (try fut_mod.awaitt()).prepare(llama_weights);
     defer llama_module.deinit();
     log.info("✅\tCompiled model in {d}ms", .{start.read() / std.time.ns_per_ms});
 

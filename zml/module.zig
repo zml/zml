@@ -890,8 +890,8 @@ const BaseExe = struct {
     //     return platform.pjrt_client.deserializeAndLoad(platform.pjrt_api, bytes);
     // }
 
-    pub fn feed(self: *BaseExe, x: anytype) void {
-        const n = fillBuffers(&x, self.ready_buffer_count);
+    pub fn prepare(self: *BaseExe, x: anytype) void {
+        const n = fillBuffers(&x, self.input_per_device, self.ready_buffer_count);
         self.ready_buffer_count += n;
     }
 
@@ -906,10 +906,9 @@ const BaseExe = struct {
     }
 };
 
-/// Represents a ZML model, compiled into a PJRT executable.
+/// Represents a ZML function, compiled into a PJRT executable.
 ///
-/// It's not directly callable, as it doesn't have associated model weights.
-/// use `prepare` to assign weights and pre allocate memory needed to call.
+/// The signature of the Exe reflects the arguments that are needed for `call`.
 pub fn Exe(ArgsT: type, ReturnT: type) type {
     return struct {
         const Self = @This();
@@ -921,9 +920,15 @@ pub fn Exe(ArgsT: type, ReturnT: type) type {
             self.inner.deinit();
         }
 
-        pub fn bakeArg(self: *Self, first_arg: ArgsT[0]) !Exe(ArgsT[1..], ReturnT) {
-            var new: Exe(ArgsT[1..], ReturnT) = .{ .inner = self.inner };
-            new.inner.bake(first_arg);
+        /// Hardcode the first argument of the function to the given buffers.
+        /// Returns an Exe with one less argument in `call`.
+        /// In functional languages this is known as currying.
+        ///
+        /// **Warning:** the new Exe reuses the underlying memory of the previous one.
+        /// The caller is responsible to come up with a strategy to call `deinit` exactly once.
+        pub fn prepare(self: Self, first_arg: Bufferized(meta.Head(ArgsT))) Exe(meta.Tail(ArgsT), ReturnT) {
+            var new: Exe(meta.Tail(ArgsT), ReturnT) = .{ .inner = self.inner };
+            new.inner.prepare(first_arg);
             return new;
         }
 
@@ -936,8 +941,8 @@ pub fn Exe(ArgsT: type, ReturnT: type) type {
         }
 
         pub fn call(self: Self, args: Bufferized(ArgsT)) Bufferized(ReturnT) {
-            const n_args = fillBuffers(&args, self.inner.input_per_device, self.inner.ready_buffer_count);
-            std.debug.assert(self.inner.ready_buffer_count + n_args == self.inner.input_buffer_count);
+            const total_ready = fillBuffers(&args, self.inner.input_per_device, self.inner.ready_buffer_count);
+            std.debug.assert(total_ready == self.inner.input_buffer_count);
             self.inner._unsafeCall();
             var result: Bufferized(ReturnT) = undefined;
             assignRawBuffers(&result, self.inner.platform, self.inner.output_per_device, self.inner.result_shapes);
@@ -1059,7 +1064,7 @@ pub fn compile(
     args_shapes: ShapeOf(ModuleSignature(func).ArgsT),
     buffer_store: aio.BufferStore,
     platform: Platform,
-) !ModuleExe(func) {
+) !FnExe(func) {
     const ModelT = ModuleSignature(func).ModelT;
 
     var arena_state = std.heap.ArenaAllocator.init(allocator);
@@ -1084,7 +1089,7 @@ pub fn compileModel(
     model: ModuleSignature(func).ModelT,
     args_shapes: ShapeOf(ModuleSignature(func).ArgsT),
     platform: Platform,
-) !ModuleExe(func) {
+) !FnExe(func) {
     const ModelT = ModuleSignature(func).ModelT;
     const name = @typeName(ModelT) ++ ".forward";
     log.info("Compiling {s} with {}", .{ name, args_shapes });
@@ -1093,7 +1098,7 @@ pub fn compileModel(
     defer context.deinit();
 
     const raw_module = try compileInternal(allocator, &context, func, model, args_shapes);
-
+    // TODO feed model
     return .{ .inner = raw_module };
 }
 
