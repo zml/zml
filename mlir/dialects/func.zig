@@ -4,7 +4,7 @@ const mlir = @import("mlir");
 pub fn func(
     ctx: mlir.Context,
     args: struct {
-        sym_name: [:0]const u8,
+        sym_name: []const u8,
         args: []const mlir.Type,
         arg_attrs: []const mlir.Attribute = &.{},
         results: []const mlir.Type,
