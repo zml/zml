@@ -205,6 +205,7 @@ pub const Tensor = struct {
     pub fn value(self: Tensor) mlir.Value {
         return self.getContext().getValueAndDonation(self)[0];
     }
+
     /// Tell PJRT compiler that memory should be reuse between the two tensors.
     /// The compiler is already aggressively reusing tensors for intermediate results,
     /// but this API allows to reuse buffer between input and output arguments
@@ -1806,13 +1807,20 @@ pub const Tensor = struct {
         const singleton_sh = Shape.init(.{}, val.dtype());
         const ctx = CompilationContext.current().mlirCtx();
         const loc = ctx.location(@src()).namedFmt(ctx, "dims={d}, value={}", .{ sh, val });
-        const result_type = mlir.ext.RankedTensorType.fromShape(ctx, singleton_sh);
-        const elem_type = mlir.ext.denseElementAttrType(val.dtype());
-        var constant_op = dialect.stablehlo.constant(ctx, result_type, elem_type, val.constSlice(), loc);
+        const res_type = mlir.ext.RankedTensorType.fromShape(ctx, singleton_sh);
+
+        var constant_op = if (mlir.ext.denseElementAttrType(val.dtype())) |elem_type|
+            dialect.stablehlo.constant(ctx, res_type, elem_type, val.constSlice(), loc)
+        else blk: {
+            // Not all dtype can be serialized in the IR. If that's not possible, use f32.
+            const val_f32 = val.as(f32);
+            break :blk dialect.stablehlo.constant(ctx, res_type, .f32, std.mem.asBytes(&val_f32), loc);
+        };
+
         if (sh.rank() > 0) {
             constant_op = dialect.stablehlo.broadcast_in_dim(ctx, constant_op.result(0), &.{}, mlir.ext.RankedTensorType.fromShape(ctx, sh).as(mlir.Type).?, loc);
         }
-        return _result(sh, constant_op.result(0));
+        return _result(sh, constant_op.result(0)).convert(val.dtype());
     }
 
     /// Embeds a buffer with concrete values into an Mlir program.
@@ -1820,7 +1828,7 @@ pub const Tensor = struct {
         const ctx = CompilationContext.current().mlirCtx();
         const result_type = mlir.ext.RankedTensorType.fromShape(ctx, val.shape());
         const loc = ctx.location(@src());
-        const elem_type = mlir.ext.denseElementAttrType(val.dtype());
+        const elem_type = mlir.ext.denseElementAttrType(val.dtype()) orelse std.debug.panic("constantTensor expects a dtype that can be serialized to MLIR, like f32 or i32, got {}", .{val.shape()});
         const constant_op = dialect.stablehlo.constant(ctx, result_type, elem_type, val.data, loc);
         return _result(val.shape(), constant_op.result(0));
     }
@@ -2429,7 +2437,7 @@ pub const Tensor = struct {
 
             break :blk ax;
         };
-        if (indices.count() == 1) {
+        if (indices.count() == 1 and !single_coord) {
             return self.dynamicUpdateSlice1d(updates, coord_axes_.get(0), indices.reshape(.{}));
         }
 
@@ -3135,6 +3143,7 @@ pub const Tensor = struct {
     }
 
     /// Updates a slice of the input Tensor along a specific axis using the given 'update' Tensor, with a start offset known at runtime.
+    /// Note this is the untagged api, if you have tags, you should use dynamicUpdateSlice directly.
     pub fn dynamicUpdateSlice1d(self: Tensor, update: Tensor, axis_: i64, offset: Tensor) Tensor {
         const placeholder = Tensor.scalar(0, .i32);
         var start_indices = [_]Tensor{placeholder} ** MAX_RANK;
