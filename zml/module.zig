@@ -803,9 +803,6 @@ const BaseExe = struct {
     /// Number of buffers already fed to the executable.
     ready_buffer_count: u32,
 
-    /// Number of buffers still needed by this executable.
-    args_buffer_count: u32,
-
     /// Total number of buffers needed by this executable.
     input_buffer_count: u32,
 
@@ -840,7 +837,6 @@ const BaseExe = struct {
             .platform = platform,
             .exe = exe,
             .ready_buffer_count = 0,
-            .args_buffer_count = args.n_in,
             .input_buffer_count = args.n_in,
             .num_devices = args.n_devices,
             .input_per_device = input_per_device,
@@ -855,8 +851,11 @@ const BaseExe = struct {
     }
 
     pub fn call(self: BaseExe) void {
-        // TODO: not sure what's the best way to track this while keeping BaseExe constant.
-        // stdx.debug.assert(self.ready_buffer_count == self.input_buffer_count, "BaseExe isn't ready to be called, expected {} buffer inputs got {}", .{self.input_buffer_count, self.ready_buffer_count});
+        stdx.debug.assert(self.input_buffer_count == self.ready_buffer_count, "BaseExe isn't ready to be called, expected {} buffer inputs got {}", .{ self.input_buffer_count, self.ready_buffer_count });
+        return self._unsafeCall();
+    }
+
+    pub fn _unsafeCall(self: BaseExe) void {
         var events = [_]?*pjrt.Event{null} ** Platform.MAX_NUM_DEVICES;
         const sharding = self.platform.sharding();
 
@@ -891,19 +890,9 @@ const BaseExe = struct {
     //     return platform.pjrt_client.deserializeAndLoad(platform.pjrt_api, bytes);
     // }
 
-    pub fn feedBuffer(self: BaseExe, buffer: Buffer) void {
-        // stdx.debug.assert(!buffer._data.isDeleted(), "Can't use {} (argument buffer {}) because its pjrt buffer has been donated", .{ buffer, ctx.index });
-        const model_sharding = self.input_per_device.len;
-        stdx.debug.assert(buffer._shards.len == model_sharding, "Can't feed a {}-sharded tensor into a {}-sharded model", .{ buffer._shards.len, model_sharding });
-        for (buffer._shards.constSlice(), 0..) |shard, d| {
-            self.input_per_device[d][self.ready_buffer_count] = shard;
-        }
-        self.ready_buffer_count += 1;
-        self.args_buffer_count -= 1;
-    }
-
     pub fn feed(self: *BaseExe, x: anytype) void {
-        meta.visit(feedBuffer, self, &x);
+        const n = fillBuffers(&x, self.ready_buffer_count);
+        self.ready_buffer_count += n;
     }
 
     pub fn getOutputBuffer(self: BaseExe, i: usize) Buffer {
@@ -928,14 +917,6 @@ pub fn Exe(ArgsT: type, ReturnT: type) type {
         /// The raw untyped compiled module.
         inner: BaseExe,
 
-        pub fn initFromModel(base: BaseExe, model: Bufferized(meta.Head(ArgsT))) !Exe(meta.Tail(ArgsT), ReturnT) {
-            var res = base;
-            const n = fillBuffers(&model, res.input_per_device, res.ready_buffer_count);
-            res.ready_buffer_count += n;
-            res.args_buffer_count -= n;
-            return .{ .inner = res };
-        }
-
         pub fn deinit(self: Self) void {
             self.inner.deinit();
         }
@@ -955,8 +936,9 @@ pub fn Exe(ArgsT: type, ReturnT: type) type {
         }
 
         pub fn call(self: Self, args: Bufferized(ArgsT)) Bufferized(ReturnT) {
-            _ = fillBuffers(&args, self.inner.input_per_device, self.inner.ready_buffer_count);
-            self.inner.call();
+            const n_args = fillBuffers(&args, self.inner.input_per_device, self.inner.ready_buffer_count);
+            std.debug.assert(self.inner.ready_buffer_count + n_args == self.inner.input_buffer_count);
+            self.inner._unsafeCall();
             var result: Bufferized(ReturnT) = undefined;
             assignRawBuffers(&result, self.inner.platform, self.inner.output_per_device, self.inner.result_shapes);
             return result;
