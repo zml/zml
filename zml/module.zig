@@ -922,7 +922,7 @@ pub fn Exe(ArgsT: type, ReturnT: type) type {
 
         /// Hardcode the first argument of the function to the given buffers.
         /// Returns an Exe with one less argument in `call`.
-        /// In functional languages this is known as currying.
+        /// In functional languages this is known as partial application.
         ///
         /// **Warning:** the new Exe reuses the underlying memory of the previous one.
         /// The caller is responsible to come up with a strategy to call `deinit` exactly once.
