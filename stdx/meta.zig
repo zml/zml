@@ -184,3 +184,25 @@ pub fn Tail(Tuple: type) type {
         else => @compileError("Tail works on tuple type"),
     };
 }
+
+pub fn Head(Tuple: type) type {
+    return switch (@typeInfo(Tuple)) {
+        .Struct => |struct_info| {
+            if (struct_info.fields.len == 0) @compileError("Can't tail empty tuple");
+            return struct_info.fields[0].type;
+        },
+        else => @compileError("Head works on tuple type"),
+    };
+}
+
+pub fn Tail(Tuple: type) type {
+    return switch (@typeInfo(Tuple)) {
+        .Struct => |struct_info| {
+            if (struct_info.fields.len == 0) @compileError("Can't tail empty tuple");
+            var types: [struct_info.fields.len - 1]type = undefined;
+            for (struct_info.fields[1..], 0..) |field, i| types[i] = field.type;
+            return std.meta.Tuple(&types);
+        },
+        else => @compileError("Tail works on tuple type"),
+    };
+}
