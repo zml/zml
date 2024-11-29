@@ -193,11 +193,12 @@ pub const CompilationContext = struct {
         module.op().setAttributeByName("mhlo.num_replicas", mlir.IntegerAttribute(.i32).init(mlir_ctx, sharding.num_replicas).asAttr());
         module.op().setAttributeByName("mhlo.num_partitions", mlir.IntegerAttribute(.i32).init(mlir_ctx, sharding.num_partitions).asAttr());
 
+        const module_hash = computeModuleHash(self._platform, module);
         if (self._platform.compilation_options.xla_dump_to) |xla_dump_to| {
-            // Write the mlir to a file. All erors are discarded, since this is for debugging only.
+            // Write the mlir to a file. All errors are discarded, since this is for debugging only.
             if (std.fs.openDirAbsolute(xla_dump_to, .{})) |dir| {
                 const name = self._name;
-                const file_name = std.fmt.allocPrint(arena, "{s}.mlir", .{name}) catch name;
+                const file_name = std.fmt.allocPrint(arena, "{s}_{x}.mlir", .{ name, module_hash }) catch name;
                 if (dir.createFile(file_name, .{ .truncate = true })) |file| {
                     module.op().print(file.writer(), .{ .debug_info = true, .debug_info_pretty_form = false });
                     log.info("Wrote MLIR to {s}/{s}", .{ xla_dump_to, file_name });
@@ -212,7 +213,6 @@ pub const CompilationContext = struct {
         const tracer = Tracer.init("ai.zml.compilation");
         const compile_frame = tracer.frameStart("pjrt cached compilation");
         defer tracer.frameEnd(compile_frame, "pjrt cached compilation");
-        const module_hash = computeModuleHash(self._platform, module);
 
         const loaded_executable: *pjrt.LoadedExecutable = blk: {
             const cache_location = try absoluteCacheFileZ(arena, self._platform.compilation_options.cache_location, module_hash);
