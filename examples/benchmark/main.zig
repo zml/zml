@@ -2,6 +2,7 @@ const std = @import("std");
 const zml = @import("zml");
 const asynk = @import("async");
 const flags = @import("tigerbeetle/flags");
+const ffi = @import("ffi");
 
 // set log level to debug to print the generated IR
 pub const std_options = .{
@@ -12,7 +13,11 @@ pub const std_options = .{
 const Benchmark = struct {
     pub fn forward(self: Benchmark, a: zml.Tensor, b: zml.Tensor) zml.Tensor {
         _ = self;
-        return a.withSharding(.{.k}).dot(b.withSharding(.{.k}), .{.k}).withSharding(.{.m});
+        var c = a.withSharding(.{.k}).dot(b.withSharding(.{.k}), .{.k}).withSharding(.{.m});
+
+        c = c.print();
+
+        return c;
     }
 };
 
@@ -72,7 +77,7 @@ pub fn asyncMain() !void {
     var executable = try compiled.prepare(arena, .{});
     defer executable.deinit();
 
-    var rng = std.Random.DefaultPrng.init(0);
+    var rng = std.Random.DefaultPrng.init(1);
     const random = rng.random();
 
     var a_buffer = try createRandomBuffer(allocator, platform, a_shape, random);

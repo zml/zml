@@ -1,4 +1,5 @@
 const std = @import("std");
+const stdx = @import("stdx");
 
 const c = @import("c");
 const mlir = @import("mlir");
@@ -732,32 +733,159 @@ pub fn convolution(
     });
 }
 
-pub const CustomCallOpts = struct {
-    call_target_name: [:0]const u8,
-    has_side_effect: bool,
-    backend_config: [:0]const u8 = &.{},
-    api_version: i32,
-    output_operand_aliases: []const i64,
+pub const BackendConfig = struct {
+    entries: []const struct { name: [:0]const u8, value: BackendConfigValue } = &.{},
+
+    pub fn toMlirAttribute(self: BackendConfig, allocator: std.mem.Allocator, ctx: mlir.Context) error{OutOfMemory}!mlir.Attribute {
+        const named_attributes = try allocator.alloc(mlir.NamedAttribute, self.entries.len);
+        errdefer allocator.free(named_attributes);
+
+        for (self.entries, named_attributes) |entry, *named_attribute| {
+            named_attribute.* = mlir.NamedAttribute.init(mlir.Identifier.get(ctx, entry.name), try entry.value.toMlirAttribute(allocator, ctx));
+        }
+
+        return mlir.DictionaryAttribute.init(ctx, named_attributes).as(mlir.Attribute).?;
+    }
+};
+
+pub const ScalarType = enum {
+    i64,
+    f64,
+};
+
+pub const Scalar = union(ScalarType) {
+    i64: i64,
+    f64: f64,
+
+    pub fn toMlirAttribute(self: Scalar, ctx: mlir.Context) !mlir.Attribute {
+        return switch (self) {
+            .i64 => |v| mlir.IntegerAttribute(.i64).init(ctx, v).as(mlir.Attribute).?,
+            .f64 => |v| mlir.FloatAttribute(.f64).init(ctx, v).as(mlir.Attribute).?,
+        };
+    }
+};
+
+pub const ScalarArray = union(ScalarType) {
+    i64: []const i64,
+    f64: []const f64,
+
+    pub fn toMlirAttribute(self: ScalarArray, allocator: std.mem.Allocator, ctx: mlir.Context) !mlir.Attribute {
+        return switch (self) {
+            .i64 => |v| b: {
+                const attributes = try allocator.alloc(mlir.Attribute, v.len);
+                errdefer allocator.free(attributes);
+
+                for (attributes, v) |*a, v2| a.* = mlir.IntegerAttribute(.i64).init(ctx, v2).as(mlir.Attribute).?;
+                break :b mlir.ArrayAttribute.init(ctx, attributes).as(mlir.Attribute).?;
+            },
+            .f64 => |v| b: {
+                const attributes = try allocator.alloc(mlir.Attribute, v.len);
+                errdefer allocator.free(attributes);
+
+                for (attributes, v) |*a, v2| a.* = mlir.FloatAttribute(.f64).init(ctx, v2).as(mlir.Attribute).?;
+                break :b mlir.ArrayAttribute.init(ctx, attributes).as(mlir.Attribute).?;
+            },
+        };
+    }
+};
+
+pub const BackendConfigValueType = enum {
+    scalar,
+    array,
+    dictionary,
+    string,
+};
+
+pub const BackendConfigValue = union(BackendConfigValueType) {
+    scalar: Scalar,
+    array: ScalarArray,
+    dictionary: BackendConfig,
+    string: []const u8,
+
+    pub fn toMlirAttribute(self: BackendConfigValue, allocator: std.mem.Allocator, ctx: mlir.Context) !mlir.Attribute {
+        return switch (self) {
+            .scalar => |scalar| scalar.toMlirAttribute(ctx),
+            .array => |array| array.toMlirAttribute(allocator, ctx),
+            .dictionary => |dictionary| dictionary.toMlirAttribute(allocator, ctx),
+            .string => |string| mlir.StringAttribute.init(ctx, string).as(mlir.Attribute).?,
+        };
+    }
+};
+
+pub const CustomCallType = enum {
+    legacy,
+    ffi,
+};
+
+pub const CustomCallOpts = union(CustomCallType) {
+    legacy: struct {
+        api_version: i64 = 0,
+        call_target_name: [:0]const u8,
+        has_side_effect: bool,
+        backend_config: [:0]const u8 = &.{},
+        output_operand_aliases: []const i64,
+    },
+    ffi: struct {
+        api_version: i64 = 4,
+        call_target_name: [:0]const u8,
+        has_side_effect: bool,
+        backend_config: BackendConfig = .{},
+        output_operand_aliases: []const i64,
+    },
+
+    pub fn callTargetName(self: CustomCallOpts) [:0]const u8 {
+        return switch (self) {
+            inline else => |v| v.call_target_name,
+        };
+    }
+
+    pub fn hasSideEffect(self: CustomCallOpts) bool {
+        return switch (self) {
+            inline else => |v| v.has_side_effect,
+        };
+    }
+
+    pub fn outputOperandAlias(self: CustomCallOpts) []const i64 {
+        return switch (self) {
+            inline else => |v| v.output_operand_aliases,
+        };
+    }
+
+    pub fn apiVersion(self: CustomCallOpts) i64 {
+        return switch (self) {
+            inline else => |v| v.api_version,
+        };
+    }
 };
 
 pub fn custom_call(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCallOpts, res_types: []const mlir.Type, location: mlir.Location) mlir.Operation {
+    switch (opts) {
+        .legacy => |v| stdx.debug.assert(v.api_version >= 0 and v.api_version <= 3, "Expected api_version to be 0, 1, 2 or 3 for legacy custom call, got {}", .{v.api_version}),
+        .ffi => |v| stdx.debug.assert(v.api_version == 4, "Expected api_version to be 4 for ffi custom call, got {}", .{v.api_version}),
+    }
+
     var buffer: [1024]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buffer);
     const allocator = fba.allocator();
 
-    const output_operand_aliases = allocator.alloc(mlir.Attribute, opts.output_operand_aliases.len) catch unreachable;
-    for (opts.output_operand_aliases, 0..) |alias, i| {
+    const output_operand_aliases = allocator.alloc(mlir.Attribute, opts.outputOperandAlias().len) catch unreachable;
+    for (opts.outputOperandAlias(), 0..) |alias, i| {
         output_operand_aliases[i] = OutputOperandAliasAttribute.init(ctx, &.{}, alias, &.{}).as(mlir.Attribute).?;
     }
+
+    const backend_config_attribute = switch (opts) {
+        .legacy => |v| mlir.StringAttribute.init(ctx, v.backend_config).as(mlir.Attribute).?,
+        .ffi => |v| v.backend_config.toMlirAttribute(allocator, ctx) catch unreachable,
+    };
 
     return mlir.Operation.make(ctx, "stablehlo.custom_call", .{
         .operands = inputs,
         .results = res_types,
         .attributes = &.{
-            .{ "api_version", mlir.IntegerAttribute(.i32).init(ctx, opts.api_version).as(mlir.Attribute).? },
-            .{ "call_target_name", mlir.StringAttribute.init(ctx, opts.call_target_name).as(mlir.Attribute).? },
-            .{ "has_side_effect", mlir.BoolAttribute.init(ctx, opts.has_side_effect).as(mlir.Attribute).? },
-            .{ "backend_config", mlir.StringAttribute.init(ctx, opts.backend_config).as(mlir.Attribute).? },
+            .{ "api_version", mlir.IntegerAttribute(.i32).init(ctx, opts.apiVersion()).as(mlir.Attribute).? },
+            .{ "call_target_name", mlir.StringAttribute.init(ctx, opts.callTargetName()).as(mlir.Attribute).? },
+            .{ "has_side_effect", mlir.BoolAttribute.init(ctx, opts.hasSideEffect()).as(mlir.Attribute).? },
+            .{ "backend_config", backend_config_attribute },
             .{ "output_operand_aliases", mlir.ArrayAttribute.init(ctx, output_operand_aliases).as(mlir.Attribute).? },
         },
         .location = location,

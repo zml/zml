@@ -29,6 +29,7 @@ zig_library(
     main = "stablehlo.zig",
     visibility = ["//mlir/dialects:__subpackages__"],
     deps = [
+        "//stdx",
         "//mlir",
         "//mlir:c",
         "@stablehlo//:stablehlo_capi",

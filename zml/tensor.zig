@@ -3673,7 +3673,7 @@ pub const Tensor = struct {
     /// this buffer won't be freed. You will have one buffer per "print" call in the IR.
     /// * does device to host synchronization so it will slow down the program execution.
     pub fn print(input: Tensor) Tensor {
-        return ops.addHostCallback(&printCallback, input);
+        return ops.addHostCallback2(&printCallback, input);
     }
 
     fn printCallback(host_buffer: HostBuffer) void {

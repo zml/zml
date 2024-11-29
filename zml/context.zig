@@ -8,6 +8,7 @@ const stdx = @import("stdx");
 
 const platform = @import("platform.zig");
 const pjrt = @import("pjrtx.zig");
+const ffi = @import("ffi");
 
 const HostBuffer = @import("hostbuffer.zig").HostBuffer;
 const PjrtApiMap = std.EnumArray(Target, ?*const pjrt.Api);
@@ -194,7 +195,8 @@ const cuda = struct {
 
         cuda.runtime = try Runtime.init();
         const registry = cuda_platform.pjrt_api.customCallRegistry().?;
-        try registry.register(cuda_platform.pjrt_api, 0, "zmlHostBufferCallback", &hostBufferCallback);
+        try registry.registerLegacy(cuda_platform.pjrt_api, "zmlHostBufferCallback", &hostBufferCallback);
+        try registry.registerFfi(cuda_platform.pjrt_api, "zmlHostBufferCallback2", &hostBufferCallback2);
     }
 
     pub const Stream = opaque {};
@@ -235,6 +237,18 @@ const cuda = struct {
         return .{ fn_ptr, ctx_ptr };
     }
 
+    fn getContext2(attrs: ffi.Attrs) struct { *const Context.HostCallback, *Context.HostCallbackCtx } {
+        const context_scalar = attrs.getAttrByNameAs(ffi.Scalar, "context") orelse unreachable;
+        std.debug.assert(context_scalar.dtype == .s64);
+        const ctx: *Context.HostCallbackCtx = @ptrFromInt(@as(usize, @bitCast(@as(*i64, @ptrCast(@alignCast(context_scalar.value))).*)));
+
+        const callback_scalar = attrs.getAttrByNameAs(ffi.Scalar, "callback") orelse unreachable;
+        std.debug.assert(callback_scalar.dtype == .s64);
+        const callback: *const Context.HostCallback = @ptrFromInt(@as(usize, @bitCast(@as(*i64, @ptrCast(@alignCast(callback_scalar.value))).*)));
+
+        return .{ callback, ctx };
+    }
+
     fn hostBufferCallback(opaque_stream: *anyopaque, buffers: [*]*anyopaque, args: [*]const u8, args_len: usize) callconv(.C) void {
         const stream: *Stream = @ptrCast(opaque_stream);
         const src: *anyopaque = buffers[0];
@@ -251,5 +265,31 @@ const cuda = struct {
         _ = synchronize_result;
 
         callback(ctx.host);
+    }
+
+    fn hostBufferCallback2(call_frame: *ffi.CallFrame) callconv(.C) ?*ffi.Error {
+        if (call_frame.extension_start != null and call_frame.extension_start.?.type == .metadata) {
+            const metadata_extension: *ffi.MetadataExtension = @fieldParentPtr("extension_base", call_frame.extension_start.?);
+            metadata_extension.metadata.?.api_version.major_version = ffi.ApiVersion.major;
+            metadata_extension.metadata.?.api_version.minor_version = ffi.ApiVersion.minor;
+            return null;
+        }
+
+        const stream: *Stream = @ptrCast(call_frame.api.?.getStream(call_frame.ctx.?) catch unreachable);
+        const src: *anyopaque = call_frame.args.getArgAs(ffi.Buffer, 0).data.?;
+        const callback, const ctx = getContext2(call_frame.attrs);
+
+        // Add synchronization because this is called from the device driver.
+        ctx.mutex.lock();
+        defer ctx.mutex.unlock();
+
+        const host_dst: []u8 = @constCast(ctx.host.data);
+        const memcpy_result = cuda.runtime.memcpyAsync(host_dst.ptr, src, host_dst.len, .device_to_host, stream);
+        _ = memcpy_result;
+        const synchronize_result = cuda.runtime.streamSynchronize(stream);
+        _ = synchronize_result;
+
+        callback(ctx.host);
+        return null;
     }
 };

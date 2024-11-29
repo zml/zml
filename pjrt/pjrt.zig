@@ -1,6 +1,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const stdx = @import("stdx");
+const ffi = @import("ffi");
 
 const c = @import("c");
 
@@ -909,11 +910,26 @@ pub const CustomCall = fn (*anyopaque, [*]*anyopaque, [*]const u8, usize) callco
 pub const CustomCallRegistry = extern struct {
     inner: *const c.PJRT_Gpu_Register_Custom_Call,
 
-    pub fn register(self: *const CustomCallRegistry, api: *const Api, api_version: usize, name: []const u8, func: *const CustomCall) ApiError!void {
+    pub fn registerLegacy(self: *const CustomCallRegistry, api: *const Api, name: []const u8, func: *const CustomCall) ApiError!void {
         var ret = pjrtStruct(c.PJRT_Gpu_Register_Custom_Call_Args{
             .function_name = name.ptr,
             .function_name_size = name.len,
-            .api_version = @intCast(api_version),
+            .api_version = 0,
+            .handler_execute = @ptrCast(@constCast(func)),
+        });
+        const result = self.inner(&ret);
+        if (result) |pjrt_c_error| {
+            const pjrt_error: *Error = @ptrCast(pjrt_c_error);
+            log.err("[GpuRegisterCustomCall] {s}", .{pjrt_error.getMessage(api)});
+            return pjrt_error.getCode(api).toApiError();
+        }
+    }
+
+    pub fn registerFfi(self: *const CustomCallRegistry, api: *const Api, name: []const u8, func: *const ffi.Handler) ApiError!void {
+        var ret = pjrtStruct(c.PJRT_Gpu_Register_Custom_Call_Args{
+            .function_name = name.ptr,
+            .function_name_size = name.len,
+            .api_version = 1,
             .handler_execute = @ptrCast(@constCast(func)),
         });
         const result = self.inner(&ret);

@@ -1,0 +1,13 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "ffi",
+    #srcs = ["ffi.zig"],
+    main = "ffi.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//stdx",
+        "@xla//xla/ffi/api:c_api",
+    ],
+)
+
