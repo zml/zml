@@ -5,7 +5,7 @@ const flags = @import("tigerbeetle/flags");
 
 // set log level to debug to print the generated IR
 pub const std_options = .{
-    .log_level = .debug,
+    .log_level = .warn,
 };
 
 pub fn benchmark(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
@@ -51,7 +51,7 @@ pub fn asyncMain() !void {
     // Start compiling.
     // The shape of the input tensor, we have to pass in manually.
     timer.reset();
-    var compilation = try asynk.asyncc(zml.module.compileFn, .{ allocator, benchmark, .{ a_shape, b_shape }, platform });
+    var compilation = try asynk.asyncc(zml.compileFn, .{ allocator, benchmark, .{ a_shape, b_shape }, platform });
 
     // Wait for compilation to finish
     const executable = try compilation.awaitt();

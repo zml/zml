@@ -604,7 +604,7 @@ pub const CompilationContext = struct {
         func_name: [:0]const u8,
         comptime func: anytype,
         args: stdx.meta.FnArgs(func),
-    ) stdx.meta.FnReturn(func) {
+    ) stdx.meta.FnResult(func) {
         var arena_state = std.heap.ArenaAllocator.init(self._allocator);
         defer arena_state.deinit();
         const arena = arena_state.allocator();

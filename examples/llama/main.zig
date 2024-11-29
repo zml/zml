@@ -32,8 +32,8 @@ pub const std_options = .{
 
 pub fn generateText(
     llama: LlamaLM,
-    mod_prefill: zml.module.ModuleExe(LlamaLM.forward),
-    mod: zml.module.ModuleExe(LlamaLM.forward),
+    mod_prefill: zml.ModuleExe(LlamaLM.forward),
+    mod: zml.ModuleExe(LlamaLM.forward),
     tokenizer: zml.tokenizer.Tokenizer,
     allocator: std.mem.Allocator,
     seed: u128,

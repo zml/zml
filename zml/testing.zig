@@ -187,7 +187,7 @@ pub fn testLayerOut(
     log.info("Testing {s}", .{name});
 
     const fwd = @TypeOf(layer).forward;
-    const FwdSign = zml.module.ModuleSignature(fwd);
+    const FwdSign = zml.ModuleSignature(fwd);
 
     const input_tensors = try zml.aio.populateModelWithPrefix(FwdSign.ArgsT, alloc, activations, name ++ ".in");
     const input_shapes = try shapesOf(input_tensors, alloc);

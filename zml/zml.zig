@@ -32,8 +32,10 @@ pub const tokenizer = @import("tokenizer.zig");
 
 pub const call = ops.call;
 pub const compile = exe.compile;
-pub const compileModel = exe.compileModel;
 pub const compileFn = exe.compileFn;
+pub const compileModel = exe.compileModel;
+pub const FnExe = exe.FnExe;
+pub const ModuleExe = exe.ModuleExe;
 
 pub const ops = @import("ops.zig");
 pub const tools = struct {
