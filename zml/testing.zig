@@ -204,7 +204,7 @@ pub fn testLayerOut(
     if (exe.inner.result_buffer_count != n_out_exp) {
         log.warn("Reference models produces {d} outputs, but implementation produces {d}", .{ n_out_exp, exe.inner.result_buffer_count });
     }
-    const mod = try exe.prepare(alloc, layer_weights);
+    const mod = exe.prepare(layer_weights);
 
     const FetchCtx = struct {
         store: zml.aio.BufferStore,
