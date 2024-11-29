@@ -1304,57 +1304,6 @@ pub fn xxHash64Writer(hasher: *std.hash.XxHash64) XxHash64Writer {
     return .{ .hasher = hasher };
 }
 
-pub fn hasTensors(comptime T: type) bool {
-    if (T == Tensor) return true;
-
-    return switch (@typeInfo(T)) {
-        inline .Array, .Pointer, .Optional => |info| hasTensors(info.child),
-        inline .Struct, .Union => |info| {
-            inline for (info.fields) |field| {
-                if (hasTensors(field.type)) return true;
-            }
-            return false;
-        },
-        else => false,
-    };
-}
-
-test "hasTensors" {
-    comptime {
-        try std.testing.expect(hasTensors(?Tensor));
-        try std.testing.expect(hasTensors(struct { u8, ?Tensor }));
-        try std.testing.expect(!hasTensors(struct { u8, usize }));
-    }
-}
-
-pub fn hasConstTensors(comptime T: type, comptime self_const: bool) bool {
-    if (T == Tensor) return self_const;
-
-    return switch (@typeInfo(T)) {
-        inline .Array, .Optional => |info| hasTensors(info.child) and self_const,
-        .Pointer => |ptr_info| hasConstTensors(ptr_info.child, ptr_info.is_const),
-        inline .Struct, .Union => |info| {
-            inline for (info.fields) |field| {
-                if (hasConstTensors(field.type, self_const)) return true;
-            }
-            return false;
-        },
-        else => false,
-    };
-}
-
-test "hasConstTensors" {
-    try std.testing.expect(!hasConstTensors(?Tensor, false));
-    try std.testing.expect(hasConstTensors(struct { u8, ?Tensor }, true));
-    try std.testing.expect(!hasConstTensors(struct { u8, *Tensor }, true));
-    try std.testing.expect(hasConstTensors(struct { u8, *const Tensor }, false));
-    try std.testing.expect(!hasConstTensors(struct { *Tensor }, false));
-    try std.testing.expect(!hasConstTensors(std.meta.Tuple(&[_]type{*Tensor}), false));
-    try std.testing.expect(!hasConstTensors(struct { u8, usize }, false));
-    try std.testing.expect(hasConstTensors(struct { [5]Tensor, usize }, true));
-    try std.testing.expect(!hasConstTensors(struct { [5]Tensor, usize }, false));
-}
-
 // making this a struct force all fields to be evaluted on creation,
 // which gives a better error stacktrace
 // than delaying the error to when the object fields are read.
