@@ -234,8 +234,7 @@ pub const CompilationContext = struct {
         allocator: std.mem.Allocator,
         fn_name: []const u8,
         comptime func: anytype,
-        model: *const ModuleSignature(func).ModelT,
-        args: *const ModuleSignature(func).ArgsT,
+        args: *const stdx.meta.FnArgs(func),
     ) error{OutOfMemory}!MlirFn {
         const frame = self._tracer.frameStart("generateBytecode.emit");
         errdefer self._tracer.frameEnd(frame, "generateBytecode.emit");
@@ -246,10 +245,7 @@ pub const CompilationContext = struct {
         defer arena_state.deinit();
         const arena = arena_state.allocator();
 
-        const model_tensor_count = countTensors(model);
-        const args_tensor_count = countTensors(args);
-
-        const tensor_count = model_tensor_count + args_tensor_count;
+        const tensor_count = countTensors(args);
 
         const mlir_ctx = self.mlirCtx();
         const loc = mlir_ctx.location(@src());
@@ -258,8 +254,6 @@ pub const CompilationContext = struct {
         @memset(locations, mlir.Location.unknown(mlir_ctx));
 
         var input_shapes = try std.ArrayList(Shape).initCapacity(arena, tensor_count);
-        meta.collect(Tensor.shape, {}, &input_shapes, model) catch unreachable;
-        stdx.debug.internalAssert(input_shapes.items.len == model_tensor_count, "model has changed ?", .{});
         meta.collect(Tensor.shape, {}, &input_shapes, args) catch unreachable;
         stdx.debug.internalAssert(input_shapes.items.len == tensor_count, "args have changed ?", .{});
 
@@ -268,7 +262,8 @@ pub const CompilationContext = struct {
 
         // Note: this isn't stricly necessary. We call `countTensor` on `fn_res`.
         // But it forces user to have simpler function.
-        const out_tensor_count = comptime ops.staticCountTensors(ModuleSignature(func).ReturnT) orelse @compileError("Can't use " ++ @typeName(ModuleSignature(func).ReturnT) ++ " in an MLIR function, because it has a variable number of tensors");
+        const ReturnT = stdx.meta.FnResult(func);
+        const out_tensor_count = comptime ops.staticCountTensors(ReturnT) orelse @compileError("Can't use " ++ @typeName(ReturnT) ++ " in an MLIR function, because it has a variable number of tensors");
         // Those are returned to caller so we don't put them in the arena.
         const fn_res_types = try allocator.alloc(mlir.Type, out_tensor_count);
         const fn_res_shapes = try allocator.alloc(Shape, out_tensor_count);
@@ -283,15 +278,13 @@ pub const CompilationContext = struct {
             // defer self._buffer_to_arg.shrinkRetainingCapacity(n);
 
             try self._buffer_to_arg.ensureUnusedCapacity(self._allocator, @intCast(tensor_count));
-            const assigned_model_count = self.mapBlockArguments(model, fn_body.block(), 0);
-            const assigned_args_count = self.mapBlockArguments(args, fn_body.block(), assigned_model_count);
-            assert(assigned_model_count == model_tensor_count);
+            const assigned_args_count = self.mapBlockArguments(args, fn_body.block(), 0);
             assert(assigned_args_count == tensor_count);
 
             const fn_res = forward: {
                 self.activate();
                 defer self.deactivate();
-                break :forward @call(.auto, func, .{model.*} ++ args.*);
+                break :forward @call(.auto, func, args.*);
             };
 
             var fn_res_values: [out_tensor_count]mlir.Value = undefined;
@@ -337,8 +330,7 @@ pub const CompilationContext = struct {
         return .{
             .mlir_fn = mlir_fn,
             .name = fn_name,
-            .n_model = @intCast(model_tensor_count),
-            .n_args = @intCast(args_tensor_count),
+            .num_args = @intCast(tensor_count),
             .res_types = fn_res_types,
             .res_shapes = fn_res_shapes,
             .res_donations = fn_res_donations,
@@ -401,16 +393,15 @@ pub const CompilationContext = struct {
 
         var comp = try zml.module.CompilationContext.init(allocator, "test", platform);
         defer comp.deinit();
-        var tensor_args = .{Tensor{ ._shape = s, ._id = .{ .arg_id = 1234 } }};
-        const f = try comp.generateBytecode(allocator, "test.generateBytecode.Local.forward", Local.forward, &model, &tensor_args);
+        var tensor_args = .{ model, Tensor{ ._shape = s, ._id = .{ .arg_id = 1234 } } };
+        const f = try comp.generateBytecode(allocator, "test.generateBytecode.Local.forward", Local.forward, &tensor_args);
 
         var mlir_bytecode: std.ArrayListUnmanaged(u8) = .{};
         try mlir_bytecode.writer(allocator).print("{}", .{f.mlir_fn.mlirFormatter(.{})});
 
         // Check that the `x` input argument gives its buffer to the result tensor.
         // `%arg0` is the bias of the model, `%arg1` is `x`.
-        try std.testing.expectEqual(1, f.n_model);
-        try std.testing.expectEqual(1, f.n_args);
+        try std.testing.expectEqual(2, f.num_args);
         std.testing.expect(std.mem.indexOf(u8, mlir_bytecode.items, "tf.aliasing_output = 0 : i32") != null) catch |err| {
             log.warn("Didn't produced the expected IR:\n{s}", .{mlir_bytecode.items});
             return err;
@@ -959,25 +950,23 @@ pub fn ModuleExe(comptime func: anytype) type {
     return Exe(sign.ArgsT, sign.ReturnT);
 }
 
-/// Compiles the given module with the given arguments.
-/// The `model` (first fn argument), is treated differently from the other args.
-/// This helps to have two separate lifetimes for the model buffers,
-/// and for the arguments buffer.
+/// Compiles the given function with the given arguments.
+/// This is the untyped API and is not meant to be use directly.
+/// * args can contain a mix of tensors and shapes, allowing to pass a "model struct" containig tensors.
 fn compileInternal(
     allocator: std.mem.Allocator,
     context: *CompilationContext,
     comptime func: anytype,
-    model: ModuleSignature(func).ModelT,
-    args: ShapeOf(ModuleSignature(func).ArgsT),
+    args: anytype,
 ) !BaseExe {
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
     var timer = std.time.Timer.start() catch null;
-    const tensor_args = context.tensorFromShapes(ModuleSignature(func).ArgsT, arena, args);
+    const tensor_args = context.tensorFromShapes(stdx.meta.FnArgs(func), arena, args);
     // Run in a dedicated thread because compilation relies on `threadlocal`.
-    const f = try asynk.callBlocking(CompilationContext.generateBytecode, .{ context, arena, "main", func, &model, &tensor_args });
+    const f = try asynk.callBlocking(CompilationContext.generateBytecode, .{ context, arena, "main", func, &tensor_args });
     context._module.getBody().appendOperation(f.mlir_fn);
 
     const sharding = context._platform.sharding();
@@ -1022,7 +1011,7 @@ fn compileInternal(
         context._platform,
         loaded_executable,
         .{
-            .n_in = f.n_model + f.n_args,
+            .n_in = f.num_args,
             .result_shapes = f.res_shapes,
             .n_devices = sharding.num_replicas * sharding.num_partitions,
         },
@@ -1097,9 +1086,7 @@ pub fn compileModel(
     var context = try CompilationContext.init(allocator, name, platform);
     defer context.deinit();
 
-    const raw_module = try compileInternal(allocator, &context, func, model, args_shapes);
-    // TODO feed model
-    return .{ .inner = raw_module };
+    return .{ .inner = try compileInternal(allocator, &context, func, .{model} ++ args_shapes) };
 }
 
 /// Compiles a function with the given configuration and shapes, for the given platform.
@@ -1114,17 +1101,7 @@ pub fn compileFn(
     var context = try CompilationContext.init(allocator, name, platform);
     defer context.deinit();
 
-    const Local = struct {
-        // This is the function we will actually compile.
-        pub fn forward(_: void, inner_args: stdx.meta.FnArgs(func)) stdx.meta.FnResult(func) {
-            return @call(.auto, func, inner_args);
-        }
-    };
-
-    const void_model: void = {};
-    const base_exe = try compileInternal(allocator, &context, Local.forward, void_model, .{args});
-    // But we set the signature so that you can call the module as you would call the function.
-    return .{ .inner = base_exe };
+    return .{ .inner = try compileInternal(allocator, &context, func, args) };
 }
 
 pub fn FnExe(comptime func: anytype) type {
@@ -1393,7 +1370,7 @@ pub fn ModuleSignature(comptime func: anytype) Sign {
     const FuncT = if (@TypeOf(func) == type) func else @TypeOf(func);
     const function_info = @typeInfo(FuncT);
 
-    const n_args = @max(function_info.Fn.params.len - 1, 0);
+    const n_args = @max(function_info.Fn.params.len, 1) - 1;
     comptime var argument_field_list: [n_args]type = undefined;
     for (0..n_args) |i| {
         const arg = function_info.Fn.params[i + 1];
@@ -1412,8 +1389,7 @@ pub fn ModuleSignature(comptime func: anytype) Sign {
 
 pub const MlirFn = struct {
     name: []const u8,
-    n_model: u32,
-    n_args: u32,
+    num_args: u32,
     res_types: []mlir.Type,
     res_shapes: []Shape,
     res_donations: []Tensor._Donation,
