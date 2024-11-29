@@ -30,6 +30,110 @@ test {
     std.testing.refAllDecls(@This());
 }
 
+/// Compiles a Model struct with the given configuration and shapes, for the given platform.
+/// The steps are:
+/// * lookup at tensors available in the store and create a `model: Model` struct with them
+/// * call `model.init(init_args)` to fields of the model that aren't Tensor, ie hyperparemeters/config
+/// * generate MLIR by calling `model.forward` with tensor of the given shapes and other arguments
+pub fn compile(
+    allocator: std.mem.Allocator,
+    comptime func: anytype,
+    init_args: anytype,
+    args_shapes: ShapeOf(ModuleSignature(func).ArgsT),
+    buffer_store: aio.BufferStore,
+    platform: Platform,
+) !FnExe(func) {
+    const ModelT = ModuleSignature(func).ModelT;
+
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var model = try aio.populateModel(ModelT, arena, buffer_store);
+
+    // If the Model has a "init" function, call it with the given parameters.
+    if (@hasDecl(ModelT, "init")) {
+        // TODO(Corentin,@Improvement): Add a warning/error if there is no init function but init_args is non-void.
+        @call(.auto, ModelT.init, .{@as(*ModelT, &model)} ++ init_args);
+    }
+
+    return compileModel(allocator, func, model, args_shapes, platform);
+}
+
+/// Compiles a Model struct with the given configuration and shapes, for the given platform.
+/// Generate MLIR by calling `model.forward` with tensor of the given shapes and other arguments
+pub fn compileModel(
+    allocator: std.mem.Allocator,
+    comptime func: anytype,
+    model: ModuleSignature(func).ModelT,
+    args_shapes: ShapeOf(ModuleSignature(func).ArgsT),
+    platform: Platform,
+) !FnExe(func) {
+    const ModelT = ModuleSignature(func).ModelT;
+    const name = @typeName(ModelT) ++ ".forward";
+    log.info("Compiling {s} with {}", .{ name, args_shapes });
+
+    var context = try CompilationContext.init(allocator, name, platform);
+    defer context.deinit();
+
+    return .{ .inner = try context.compileInternal(allocator, func, .{model} ++ args_shapes) };
+}
+
+/// Compiles a function with the given configuration and shapes, for the given platform.
+/// Generate MLIR by calling the given function with tensor of the given shapes.
+pub fn compileFn(
+    allocator: std.mem.Allocator,
+    comptime func: anytype,
+    args: ShapeOf(stdx.meta.FnArgs(func)),
+    platform: Platform,
+) !FnExe(func) {
+    const name = @typeName(@TypeOf(func));
+    var context = try CompilationContext.init(allocator, name, platform);
+    defer context.deinit();
+
+    return .{ .inner = try context.compileInternal(allocator, func, args) };
+}
+
+pub fn FnExe(comptime func: anytype) type {
+    return Exe(stdx.meta.FnArgs(func), stdx.meta.FnResult(func));
+}
+
+/// Represents a ZML model, compiled into a PJRT executable, and ready to call.
+/// The buffers for the model weights are saved inside the struct and will be used in `call`.
+/// You only need to pass the remaining arguments.
+/// Creating a `ModuleExe` is a two steps proccess:
+///
+/// ```
+/// const exe: zml.FnExe(MyModel.forward) = try zml.compile(allocator, MyModel.forward, init_args, model_shapes, buffer_store, platform);`
+/// const module: zml.ModuleExe(MyModel.forward) = exe.prepare(model_buffers);
+/// ```
+pub fn ModuleExe(comptime func: anytype) type {
+    const AllArgs = stdx.meta.FnArgs(func);
+    const len = @typeInfo(AllArgs).Struct.fields.len;
+    stdx.debug.assertComptime(len > 0, "ModuleExe expects a function with at least one argument where the first one is treated as the module, got {}", .{func});
+    return Exe(stdx.meta.Tail(AllArgs), stdx.meta.FnResult(func));
+}
+
+// making this a struct force all fields to be evaluted on creation,
+// which gives a better error stacktrace
+// than delaying the error to when the object fields are read.
+const Sign = struct {
+    ModelT: type,
+    ArgsT: type,
+    ReturnT: type,
+};
+
+pub fn ModuleSignature(comptime func: anytype) Sign {
+    const AllArgsT = stdx.meta.FnArgs(func);
+    const len = @typeInfo(AllArgsT).Struct.fields.len;
+    stdx.debug.assertComptime(len > 0, "ModuleExe expects a function with at least one argument where the first one is treated as the module, got {}", .{func});
+
+    return .{
+        .ModelT = stdx.meta.Head(AllArgsT),
+        .ArgsT = stdx.meta.Tail(AllArgsT),
+        .ReturnT = stdx.meta.FnResult(func),
+    };
+}
+
 pub const BlockKind = enum { open, hermetic };
 
 const Block = union(BlockKind) {
@@ -70,6 +174,15 @@ const Block = union(BlockKind) {
     }
 };
 
+pub const MlirFn = struct {
+    name: []const u8,
+    num_args: u32,
+    res_types: []mlir.Type,
+    res_shapes: []Shape,
+    res_donations: []Tensor._Donation,
+    mlir_fn: mlir.Operation,
+};
+
 pub const CompilationContext = struct {
     _platform: Platform,
     _name: []const u8,
@@ -82,6 +195,7 @@ pub const CompilationContext = struct {
 
     _blocks: std.BoundedArray(Block, 64),
     _fn_cache: FnCache,
+    // TODO: make this an arena, that way it's fine if ops allocate inside it.
     _allocator: std.mem.Allocator,
 
     _buffer_to_arg: TensorToBlockArg = .{},
@@ -156,6 +270,98 @@ pub const CompilationContext = struct {
 
     pub fn mlirCtx(self: *const CompilationContext) mlir.Context {
         return self._mlir_ctx;
+    }
+
+    /// Compiles the given function with the given arguments.
+    /// This is the untyped API and is not meant to be use directly.
+    ///
+    /// * allocator is used to allocate the
+    /// * args can contain a mix of tensors and shapes, allowing to pass a "model struct" containig tensors.
+    fn compileInternal(
+        self: *CompilationContext,
+        allocator: std.mem.Allocator,
+        comptime func: anytype,
+        args: anytype,
+    ) !BaseExe {
+        var arena_state = std.heap.ArenaAllocator.init(allocator);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+
+        var timer = std.time.Timer.start() catch null;
+        const tensor_args = self.tensorFromShapes(stdx.meta.FnArgs(func), arena, args);
+        // Run in a dedicated thread because compilation relies on `threadlocal`.
+        const f = try asynk.callBlocking(CompilationContext.generateBytecode, .{ self, arena, "main", func, &tensor_args });
+        const module = self._module;
+        module.getBody().appendOperation(f.mlir_fn);
+
+        const sharding = self._platform.sharding();
+        const mlir_ctx = self._mlir_ctx;
+        module.op().setAttributeByName("mhlo.num_replicas", mlir.IntegerAttribute(.i32).init(mlir_ctx, sharding.num_replicas).asAttr());
+        module.op().setAttributeByName("mhlo.num_partitions", mlir.IntegerAttribute(.i32).init(mlir_ctx, sharding.num_partitions).asAttr());
+
+        if (self._platform.compilation_options.xla_dump_to) |xla_dump_to| {
+            // Write the mlir to a file. All erors are discarded, since this is for debugging only.
+            if (std.fs.openDirAbsolute(xla_dump_to, .{})) |dir| {
+                const name = self._name;
+                const file_name = std.fmt.allocPrint(arena, "{s}.mlir", .{name}) catch name;
+                if (dir.createFile(file_name, .{ .truncate = true })) |file| {
+                    module.op().print(file.writer(), .{ .debug_info = true, .debug_info_pretty_form = false });
+                    log.info("Wrote MLIR to {s}/{s}", .{ xla_dump_to, file_name });
+                } else |_| {
+                    log.warn("Failed to open {s}", .{file_name});
+                }
+            } else |_| {
+                log.warn("Folder not found {s}", .{xla_dump_to});
+            }
+        }
+
+        const tracer = Tracer.init("ai.zml.compilation");
+        const compile_frame = tracer.frameStart("pjrt cached compilation");
+        defer tracer.frameEnd(compile_frame, "pjrt cached compilation");
+        const module_hash = computeModuleHash(self._platform, module);
+
+        const loaded_executable: *pjrt.LoadedExecutable = blk: {
+            const cache_location = try absoluteCacheFileZ(arena, self._platform.compilation_options.cache_location, module_hash);
+            if (cache_location) |cache_file| {
+                if (loadPjrtExecutable(arena, self._platform, cache_file)) |exe| {
+                    break :blk exe;
+                } else |_| {}
+            }
+
+            const loaded_executable = compileModuleToPjrtExecutable(arena, self._platform, module) catch |err| {
+                log.err(
+                    "pjrt-{s} failed to compile following valid MLIR:\n{}\n{}",
+                    .{ @tagName(self._platform.target), module.op().mlirFormatter(.{}), err },
+                );
+                return err;
+            };
+
+            if (cache_location) |cache_file| {
+                storePjrtExecutable(self._platform, loaded_executable, cache_file) catch |err| {
+                    log.debug("Failed to store module: {}", .{err});
+                };
+            }
+            break :blk loaded_executable;
+        };
+
+        log.debug("******** ZML generated MLIR ********", .{});
+        log.debug("{}", .{module.op().mlirFormatter(.{})});
+
+        if (timer) |*t| {
+            const time_ms = @divFloor(t.lap(), std.time.ns_per_ms);
+            if (time_ms > 1000) log.info("Compilation took {d:.3}s", .{stdx.math.divFloat(f32, time_ms, 1000)});
+        }
+
+        return BaseExe.init(
+            allocator,
+            self._platform,
+            loaded_executable,
+            .{
+                .n_in = f.num_args,
+                .result_shapes = f.res_shapes,
+                .n_devices = sharding.num_replicas * sharding.num_partitions,
+            },
+        );
     }
 
     fn currentBlock(self: *const CompilationContext) ?Block {
@@ -650,6 +856,332 @@ pub const CompilationContext = struct {
     }
 };
 
+/// Represents an MLIR module compiled into a PJRT executable.
+/// The BaseExe is a plain old struct and doesn't have information about Zig types.
+///
+/// It also contains pre-allocated buffers so that we can pass them to PJRT_LoadedExecutable_Execute
+/// without allocations.
+const BaseExe = struct {
+    /// The platform for which this module was compiled.
+    platform: Platform,
+
+    /// The PJRT executable representing the compiled module.
+    exe: *pjrt.LoadedExecutable,
+
+    /// Pre-allocated slice of buffers to use as inputs when the module is called.
+    input_per_device: []const [*]*pjrt.Buffer,
+
+    /// Pre-allocated slice of buffers to use as outputs when the module is called.
+    output_per_device: []const [*]*pjrt.Buffer,
+
+    /// Number of buffers already fed to the executable.
+    ready_buffer_count: u32,
+
+    /// Total number of buffers needed by this executable.
+    input_buffer_count: u32,
+
+    result_shapes: []Shape,
+
+    /// Num devices used (>1 for sharded executable)
+    num_devices: u8,
+
+    /// Allocator backing memory
+    _arena: std.heap.ArenaAllocator,
+
+    pub fn init(parent_allocator: std.mem.Allocator, platform: Platform, exe: *pjrt.LoadedExecutable, args: struct { n_in: u32, result_shapes: []const Shape, n_devices: u8 }) !BaseExe {
+        var arena = std.heap.ArenaAllocator.init(parent_allocator);
+        errdefer arena.deinit();
+        const allocator = arena.allocator();
+        const n_out = args.result_shapes.len;
+        const n_devices = args.n_devices;
+        // Allocate once for all the *pjrt.Buffer we need to store ...
+        const all_buffers = try allocator.alloc(*pjrt.Buffer, (args.n_in + n_out) * n_devices);
+        const all_input_buffers, const all_output_buffers = splitBuffer(*pjrt.Buffer, all_buffers, .{ args.n_in * n_devices, n_out * n_devices });
+
+        // ... and once for all the [*]*pjrt.Buffer.
+        const all_per_device = try allocator.alloc([*]*pjrt.Buffer, 2 * n_devices);
+        const input_per_device, const output_per_device = splitBuffer([*]*pjrt.Buffer, all_per_device, .{ n_devices, n_devices });
+
+        for (0..n_devices) |i| {
+            input_per_device[i] = all_input_buffers[i * args.n_in ..].ptr;
+            output_per_device[i] = all_output_buffers[i * n_out ..].ptr;
+        }
+
+        return .{
+            .platform = platform,
+            .exe = exe,
+            .ready_buffer_count = 0,
+            .input_buffer_count = args.n_in,
+            .num_devices = args.n_devices,
+            .input_per_device = input_per_device,
+            .output_per_device = output_per_device,
+            .result_shapes = try allocator.dupe(Shape, args.result_shapes),
+            ._arena = arena,
+        };
+    }
+
+    pub fn deinit(self: BaseExe) void {
+        self._arena.deinit();
+    }
+
+    pub fn call(self: BaseExe) void {
+        stdx.debug.assert(self.input_buffer_count == self.ready_buffer_count, "BaseExe isn't ready to be called, expected {} buffer inputs got {}", .{ self.input_buffer_count, self.ready_buffer_count });
+        return self._unsafeCall();
+    }
+
+    pub fn _unsafeCall(self: BaseExe) void {
+        var events = [_]?*pjrt.Event{null} ** Platform.MAX_NUM_DEVICES;
+        const sharding = self.platform.sharding();
+
+        self.exe.execute(self.platform.pjrt_api, .{
+            .arguments = self.input_per_device,
+            .num_args = self.input_buffer_count,
+            .results = self.output_per_device,
+            .events = events[0..sharding.num_partitions],
+            // this allows to tell a specific buffer shouldn't be donated,
+            // even if it has been marked as "can be donated" during compilation.
+            // TODO: expose it ?
+            .non_donatable_input_indices = &.{},
+        }) catch unreachable;
+
+        for (events[0..sharding.num_partitions]) |e| {
+            if (e) |ev| {
+                ev.await_(self.platform.pjrt_api) catch unreachable;
+            }
+        }
+    }
+
+    pub fn serialize(self: BaseExe, writer: anytype) !void {
+        var executable = try self.exe.getExecutable(self.platform.pjrt_api);
+        var serialize_result = try executable.serialize(self.platform.pjrt_api);
+        defer serialize_result.deinit();
+        try writer.writeAll(serialize_result.bytes);
+    }
+
+    // pub fn deserialize(allocator: std.mem.Allocator, platform: Platform, reader: anytype) !Self {
+    //     const bytes = try reader.readToEndAlloc(allocator, max_pjrt_executable_size);
+    //     defer allocator.free(bytes);
+    //     return platform.pjrt_client.deserializeAndLoad(platform.pjrt_api, bytes);
+    // }
+
+    pub fn prepare(self: *BaseExe, x: anytype) void {
+        const n = fillBuffers(&x, self.input_per_device, self.ready_buffer_count);
+        self.ready_buffer_count += n;
+    }
+
+    pub fn getOutputBuffer(self: BaseExe, i: usize) Buffer {
+        var shards: Buffer.Shards = .{};
+        for (self.output_per_device) |dev_out| {
+            shards.appendAssumeCapacity(dev_out[i]);
+        }
+
+        const out_shape = self.inner.result_buffer_shapes[i];
+        return Buffer.fromPjrtBuffers(self.platform(), out_shape, shards.constSlice());
+    }
+};
+
+/// Represents a ZML function, compiled into a PJRT executable.
+/// The signature of the Exe reflects the arguments that are needed for `call`.
+pub fn Exe(ArgsT: type, ReturnT: type) type {
+    return struct {
+        const Self = @This();
+
+        /// The raw untyped compiled module.
+        inner: BaseExe,
+
+        pub fn deinit(self: Self) void {
+            self.inner.deinit();
+        }
+
+        /// Hardcode the first argument of the function to the given buffers.
+        /// Returns an Exe with one less argument in `call`.
+        /// In functional languages this is known as partial application.
+        ///
+        /// **Warning:** the new Exe reuses the underlying memory of the previous one.
+        /// The caller is responsible to come up with a strategy to call `deinit` exactly once.
+        pub fn prepare(self: Self, first_arg: Bufferized(stdx.meta.Head(ArgsT))) Exe(stdx.meta.Tail(ArgsT), ReturnT) {
+            var new: Exe(stdx.meta.Tail(ArgsT), ReturnT) = .{ .inner = self.inner };
+            new.inner.prepare(first_arg);
+            return new;
+        }
+
+        pub fn serialize(self: Self, writer: anytype) !void {
+            return try self.inner.serialize(writer);
+        }
+
+        pub fn platform(self: Self) Platform {
+            return self.inner.platform;
+        }
+
+        pub fn call(self: Self, args: Bufferized(ArgsT)) Bufferized(ReturnT) {
+            const total_ready = fillBuffers(&args, self.inner.input_per_device, self.inner.ready_buffer_count);
+            std.debug.assert(total_ready == self.inner.input_buffer_count);
+            self.inner._unsafeCall();
+            var result: Bufferized(ReturnT) = undefined;
+            assignRawBuffers(&result, self.inner.platform, self.inner.output_per_device, self.inner.result_shapes);
+            return result;
+        }
+    };
+}
+
+fn computeModuleHash(platform: Platform, module: mlir.Module) u64 {
+    var hasher = std.hash.XxHash64.init(0);
+    var hasher_writer = xxHash64Writer(&hasher);
+    const writer = hasher_writer.writer();
+
+    // Hash the canonicalized IR, without debug information that can change across builds.
+    module.op().writeBytecode(writer);
+    //module.op().print(writer, .{ .debug_info = false });
+    // Writes can't fail because we are writing to a hasher.
+    writer.writeAll(platform.pjrt_client.getPlatformName(platform.pjrt_api)) catch unreachable;
+    const api_version = platform.pjrt_api.version();
+    writer.writeInt(i64, api_version.major, .little) catch unreachable;
+    writer.writeInt(i64, api_version.minor, .little) catch unreachable;
+
+    return hasher.final();
+}
+
+fn absoluteCacheFileZ(arena: std.mem.Allocator, cache_path: ?[]const u8, module_hash: u64) !?[:0]const u8 {
+    if (cache_path == null) return null;
+    const resolved_path = try std.fs.cwd().realpathAlloc(arena, cache_path.?);
+    std.fs.makeDirAbsolute(resolved_path) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+
+    var buf: [24]u8 = undefined;
+    const module_name = std.fmt.bufPrint(&buf, "{x}.pjrt", .{module_hash}) catch unreachable;
+    return try std.fs.path.joinZ(arena, &.{ resolved_path, module_name });
+}
+
+fn loadPjrtExecutable(arena: std.mem.Allocator, platform: Platform, absolute_file: [:0]const u8) !*pjrt.LoadedExecutable {
+    const loaded_executable_file = try std.fs.openFileAbsoluteZ(absolute_file, .{});
+    defer loaded_executable_file.close();
+
+    const exe_size = if (loaded_executable_file.stat()) |stat| stat.size else |_| 400 * 1024 * 1024;
+    const bytes = try arena.alloc(u8, exe_size);
+    defer arena.free(bytes);
+
+    const size = try loaded_executable_file.readAll(bytes);
+
+    log.info("Loading module from {s}", .{absolute_file});
+    return platform.pjrt_client.deserializeAndLoad(platform.pjrt_api, bytes[0..size]) catch |err| {
+        log.warn("Failed to load module: {}", .{err});
+        return err;
+    };
+}
+
+fn storePjrtExecutable(platform: Platform, loaded_executable: *pjrt.LoadedExecutable, absolute_file: [:0]const u8) !void {
+    const loaded_executable_file = try std.fs.createFileAbsoluteZ(absolute_file, .{});
+    defer loaded_executable_file.close();
+
+    var executable = try loaded_executable.getExecutable(platform.pjrt_api);
+    defer executable.deinit(platform.pjrt_api);
+
+    var serialize_result = try executable.serialize(platform.pjrt_api);
+    defer serialize_result.deinit();
+
+    try loaded_executable_file.writeAll(serialize_result.bytes);
+    log.info("Stored module to {s}", .{absolute_file});
+}
+
+fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, module: mlir.Module) !*pjrt.LoadedExecutable {
+    const sharding = platform.sharding();
+
+    // NOTE(Corendos): Hack needed because Protobuf struct are not public.
+    const DeviceAssignmentProto = @TypeOf(xla_pb.CompileOptionsProto.init().executable_build_options.?.device_assignment.?);
+    var options: xla_pb.CompileOptionsProto = .{
+        .executable_build_options = .{
+            .device_ordinal = -1,
+            .num_replicas = sharding.num_replicas,
+            .num_partitions = sharding.num_partitions,
+            .use_spmd_partitioning = sharding.num_partitions > 1 or sharding.num_replicas > 1,
+            .device_assignment = .{
+                .replica_count = sharding.num_replicas,
+                .computation_count = sharding.num_partitions,
+                .computation_devices = blk: {
+                    var computation_devices = try std.ArrayListUnmanaged(DeviceAssignmentProto.ComputationDevice).initCapacity(arena, sharding.num_partitions);
+                    for (0..sharding.num_partitions) |i| {
+                        var replica_device_ids = std.ArrayListUnmanaged(i64).initCapacity(arena, 1) catch unreachable;
+                        replica_device_ids.appendAssumeCapacity(@intCast(i));
+                        computation_devices.appendAssumeCapacity(.{ .replica_device_ids = replica_device_ids });
+                    }
+                    break :blk computation_devices;
+                },
+            },
+        },
+    };
+
+    // Let the arena deinit, zig-protobuf deinit is very slow.
+    if (platform.compilation_options.xla_dump_to) |xla_dump_to| {
+        try options.env_option_overrides.append(arena, .{
+            .key = .{ .Const = "xla_dump_to" },
+            .value = .{ .value = .{ .string_field = .{ .Const = xla_dump_to } } },
+        });
+        if (platform.compilation_options.xla_dump_fusion_visualization) {
+            try options.env_option_overrides.append(arena, .{
+                .key = .{ .Const = "xla_dump_hlo_as_html" },
+                .value = .{ .value = .{ .bool_field = true } },
+            });
+            try options.env_option_overrides.append(arena, .{
+                .key = .{ .Const = "xla_dump_hlo_as_dot" },
+                .value = .{ .value = .{ .bool_field = true } },
+            });
+            try options.env_option_overrides.append(arena, .{
+                .key = .{ .Const = "xla_dump_fusion_visualization" },
+                .value = .{ .value = .{ .bool_field = true } },
+            });
+        }
+    }
+    switch (platform.target) {
+        .cuda => cuda_dir: {
+            // NVIDIA recommends to disable Triton GEMM on JAX:
+            // https://github.com/NVIDIA/JAX-Toolbox?tab=readme-ov-file#environment-variables
+            try options.env_option_overrides.append(arena, .{
+                .key = .{ .Const = "xla_gpu_enable_triton_gemm" },
+                .value = .{ .value = .{ .bool_field = false } },
+            });
+            // try options.env_option_overrides.append(arena, .{
+            //     .key = .{ .Const = "xla_gpu_enable_latency_hiding_scheduler" },
+            //     .value = .{ .value = .{ .bool_field = true } },
+            // });
+            var r_ = try runfiles.Runfiles.create(.{ .allocator = arena }) orelse {
+                log.warn("Bazel runfile not found !", .{});
+                break :cuda_dir;
+            };
+            defer r_.deinit(arena);
+            const source_repo = @import("bazel_builtin").current_repository;
+            const r = r_.withSourceRepo(source_repo);
+            const cuda_data_dir = (try r.rlocationAlloc(arena, "libpjrt_cuda/sandbox")).?;
+            log.info("xla_gpu_cuda_data_dir: {s}", .{cuda_data_dir});
+            try options.env_option_overrides.append(arena, .{
+                .key = .{ .Const = "xla_gpu_cuda_data_dir" },
+                .value = .{
+                    .value = .{
+                        .string_field = .{ .Const = cuda_data_dir },
+                    },
+                },
+            });
+        },
+        .rocm => {
+            // Disable Triton GEMM on ROCM. For some reason it's much, much slower when
+            // enabled on CDNA and it's used on RDNA. Disable it altogether.
+            try options.env_option_overrides.append(arena, .{
+                .key = .{ .Const = "xla_gpu_enable_triton_gemm" },
+                .value = .{ .value = .{ .bool_field = false } },
+            });
+        },
+        else => {},
+    }
+
+    const options_bytes = try options.encode(arena);
+
+    const loaded_executable = try platform.pjrt_client.compile(platform.pjrt_api, arena, module, options_bytes);
+    errdefer loaded_executable.deinit();
+
+    return loaded_executable;
+}
+
 /// Visit the given struct and recursively counts the number of tensors found.
 pub fn countTensors(v: anytype) usize {
     const LocalContext = struct {
@@ -775,515 +1307,6 @@ fn assignResults(op: mlir.Operation, v: anytype, shapes: []Shape) void {
     assert(context.index == op.numResults());
 }
 
-/// Represents an MLIR module compiled into a PJRT executable.
-/// The BaseExe is a plain old struct and doesn't have information
-/// about Zig types.
-const BaseExe = struct {
-    /// The platform for which this module was compiled.
-    platform: Platform,
-
-    /// The PJRT executable representing the compiled module.
-    exe: *pjrt.LoadedExecutable,
-
-    /// Pre-allocated slice of buffers to use as inputs when the module is called.
-    input_per_device: []const [*]*pjrt.Buffer,
-
-    /// Pre-allocated slice of buffers to use as outputs when the module is called.
-    output_per_device: []const [*]*pjrt.Buffer,
-
-    /// Number of buffers already fed to the executable.
-    ready_buffer_count: u32,
-
-    /// Total number of buffers needed by this executable.
-    input_buffer_count: u32,
-
-    result_shapes: []Shape,
-
-    /// Num devices used (>1 for sharded executable)
-    num_devices: u8,
-
-    /// Allocator backing memory
-    _arena: std.heap.ArenaAllocator,
-
-    pub fn init(parent_allocator: std.mem.Allocator, platform: Platform, exe: *pjrt.LoadedExecutable, args: struct { n_in: u32, result_shapes: []const Shape, n_devices: u8 }) !BaseExe {
-        var arena = std.heap.ArenaAllocator.init(parent_allocator);
-        errdefer arena.deinit();
-        const allocator = arena.allocator();
-        const n_out = args.result_shapes.len;
-        const n_devices = args.n_devices;
-        // Allocate once for all the *pjrt.Buffer we need to store ...
-        const all_buffers = try allocator.alloc(*pjrt.Buffer, (args.n_in + n_out) * n_devices);
-        const all_input_buffers, const all_output_buffers = splitBuffer(*pjrt.Buffer, all_buffers, .{ args.n_in * n_devices, n_out * n_devices });
-
-        // ... and once for all the [*]*pjrt.Buffer.
-        const all_per_device = try allocator.alloc([*]*pjrt.Buffer, 2 * n_devices);
-        const input_per_device, const output_per_device = splitBuffer([*]*pjrt.Buffer, all_per_device, .{ n_devices, n_devices });
-
-        for (0..n_devices) |i| {
-            input_per_device[i] = all_input_buffers[i * args.n_in ..].ptr;
-            output_per_device[i] = all_output_buffers[i * n_out ..].ptr;
-        }
-
-        return .{
-            .platform = platform,
-            .exe = exe,
-            .ready_buffer_count = 0,
-            .input_buffer_count = args.n_in,
-            .num_devices = args.n_devices,
-            .input_per_device = input_per_device,
-            .output_per_device = output_per_device,
-            .result_shapes = try allocator.dupe(Shape, args.result_shapes),
-            ._arena = arena,
-        };
-    }
-
-    pub fn deinit(self: BaseExe) void {
-        self._arena.deinit();
-    }
-
-    pub fn call(self: BaseExe) void {
-        stdx.debug.assert(self.input_buffer_count == self.ready_buffer_count, "BaseExe isn't ready to be called, expected {} buffer inputs got {}", .{ self.input_buffer_count, self.ready_buffer_count });
-        return self._unsafeCall();
-    }
-
-    pub fn _unsafeCall(self: BaseExe) void {
-        var events = [_]?*pjrt.Event{null} ** Platform.MAX_NUM_DEVICES;
-        const sharding = self.platform.sharding();
-
-        self.exe.execute(self.platform.pjrt_api, .{
-            .arguments = self.input_per_device,
-            .num_args = self.input_buffer_count,
-            .results = self.output_per_device,
-            .events = events[0..sharding.num_partitions],
-            // this allows to tell a specific buffer shouldn't be donated,
-            // even if it has been marked as "can be donated" during compilation.
-            // TODO: expose it ?
-            .non_donatable_input_indices = &.{},
-        }) catch unreachable;
-
-        for (events[0..sharding.num_partitions]) |e| {
-            if (e) |ev| {
-                ev.await_(self.platform.pjrt_api) catch unreachable;
-            }
-        }
-    }
-
-    pub fn serialize(self: BaseExe, writer: anytype) !void {
-        var executable = try self.exe.getExecutable(self.platform.pjrt_api);
-        var serialize_result = try executable.serialize(self.platform.pjrt_api);
-        defer serialize_result.deinit();
-        try writer.writeAll(serialize_result.bytes);
-    }
-
-    // pub fn deserialize(allocator: std.mem.Allocator, platform: Platform, reader: anytype) !Self {
-    //     const bytes = try reader.readToEndAlloc(allocator, max_pjrt_executable_size);
-    //     defer allocator.free(bytes);
-    //     return platform.pjrt_client.deserializeAndLoad(platform.pjrt_api, bytes);
-    // }
-
-    pub fn prepare(self: *BaseExe, x: anytype) void {
-        const n = fillBuffers(&x, self.input_per_device, self.ready_buffer_count);
-        self.ready_buffer_count += n;
-    }
-
-    pub fn getOutputBuffer(self: BaseExe, i: usize) Buffer {
-        var shards: Buffer.Shards = .{};
-        for (self.output_per_device) |dev_out| {
-            shards.appendAssumeCapacity(dev_out[i]);
-        }
-
-        const out_shape = self.inner.result_buffer_shapes[i];
-        return Buffer.fromPjrtBuffers(self.platform(), out_shape, shards.constSlice());
-    }
-};
-
-/// Represents a ZML function, compiled into a PJRT executable.
-///
-/// The signature of the Exe reflects the arguments that are needed for `call`.
-pub fn Exe(ArgsT: type, ReturnT: type) type {
-    return struct {
-        const Self = @This();
-
-        /// The raw untyped compiled module.
-        inner: BaseExe,
-
-        pub fn deinit(self: Self) void {
-            self.inner.deinit();
-        }
-
-        /// Hardcode the first argument of the function to the given buffers.
-        /// Returns an Exe with one less argument in `call`.
-        /// In functional languages this is known as partial application.
-        ///
-        /// **Warning:** the new Exe reuses the underlying memory of the previous one.
-        /// The caller is responsible to come up with a strategy to call `deinit` exactly once.
-        pub fn prepare(self: Self, first_arg: Bufferized(meta.Head(ArgsT))) Exe(meta.Tail(ArgsT), ReturnT) {
-            var new: Exe(meta.Tail(ArgsT), ReturnT) = .{ .inner = self.inner };
-            new.inner.prepare(first_arg);
-            return new;
-        }
-
-        pub fn serialize(self: Self, writer: anytype) !void {
-            return try self.inner.serialize(writer);
-        }
-
-        pub fn platform(self: Self) Platform {
-            return self.inner.platform;
-        }
-
-        pub fn call(self: Self, args: Bufferized(ArgsT)) Bufferized(ReturnT) {
-            const total_ready = fillBuffers(&args, self.inner.input_per_device, self.inner.ready_buffer_count);
-            std.debug.assert(total_ready == self.inner.input_buffer_count);
-            self.inner._unsafeCall();
-            var result: Bufferized(ReturnT) = undefined;
-            assignRawBuffers(&result, self.inner.platform, self.inner.output_per_device, self.inner.result_shapes);
-            return result;
-        }
-    };
-}
-
-/// Represents a ZML model, compiled into a PJRT executable, and ready to call.
-/// The buffers for the model weights are saved inside the struct and will be used in `call`.
-/// You only need to pass the remaining arguments.
-pub fn ModuleExe(comptime func: anytype) type {
-    const sign = ModuleSignature(func);
-    return Exe(sign.ArgsT, sign.ReturnT);
-}
-
-/// Compiles the given function with the given arguments.
-/// This is the untyped API and is not meant to be use directly.
-/// * args can contain a mix of tensors and shapes, allowing to pass a "model struct" containig tensors.
-fn compileInternal(
-    allocator: std.mem.Allocator,
-    context: *CompilationContext,
-    comptime func: anytype,
-    args: anytype,
-) !BaseExe {
-    var arena_state = std.heap.ArenaAllocator.init(allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    var timer = std.time.Timer.start() catch null;
-    const tensor_args = context.tensorFromShapes(stdx.meta.FnArgs(func), arena, args);
-    // Run in a dedicated thread because compilation relies on `threadlocal`.
-    const f = try asynk.callBlocking(CompilationContext.generateBytecode, .{ context, arena, "main", func, &tensor_args });
-    context._module.getBody().appendOperation(f.mlir_fn);
-
-    const sharding = context._platform.sharding();
-    const mlir_ctx = context._mlir_ctx;
-    context._module.op().setAttributeByName("mhlo.num_replicas", mlir.IntegerAttribute(.i32).init(mlir_ctx, sharding.num_replicas).asAttr());
-    context._module.op().setAttributeByName("mhlo.num_partitions", mlir.IntegerAttribute(.i32).init(mlir_ctx, sharding.num_partitions).asAttr());
-
-    if (context._platform.compilation_options.xla_dump_to) |xla_dump_to| {
-        // Write the mlir to a file. All errors are discarded, since this is for debugging only.
-        if (std.fs.openDirAbsolute(xla_dump_to, .{})) |dir| {
-            const name = context._name;
-            const file_name = std.fmt.allocPrint(arena, "{s}.mlir", .{name}) catch name;
-            if (dir.createFile(file_name, .{ .truncate = true })) |file| {
-                context._module.op().print(file.writer(), .{ .debug_info = true, .debug_info_pretty_form = false });
-                log.info("Wrote MLIR to {s}/{s}", .{ xla_dump_to, file_name });
-            } else |_| {
-                log.warn("Failed to open {s}", .{file_name});
-            }
-        } else |_| {
-            log.warn("Folder not found {s}", .{xla_dump_to});
-        }
-    }
-
-    const loaded_executable = loadOrCompilePjrtExecutable(arena, context._platform, context._module) catch |err| {
-        log.err(
-            "pjrt-{s} failed to compile following valid MLIR:\n{}\n{}",
-            .{ @tagName(context._platform.target), context._module.op().mlirFormatter(.{}), err },
-        );
-        return err;
-    };
-
-    log.debug("******** ZML generated MLIR ********", .{});
-    log.debug("{}", .{context._module.op().mlirFormatter(.{})});
-
-    if (timer) |*t| {
-        const time_ms = @divFloor(t.lap(), std.time.ns_per_ms);
-        if (time_ms > 1000) log.info("Compilation took {d:.3}s", .{stdx.math.divFloat(f32, time_ms, 1000)});
-    }
-
-    return BaseExe.init(
-        allocator,
-        context._platform,
-        loaded_executable,
-        .{
-            .n_in = f.num_args,
-            .result_shapes = f.res_shapes,
-            .n_devices = sharding.num_replicas * sharding.num_partitions,
-        },
-    );
-}
-
-pub fn load(
-    allocator: std.mem.Allocator,
-    comptime Model: type,
-    init_args: anytype,
-    comptime func: @TypeOf(.literal),
-    args_shapes: ShapeOf(ModuleSignature(@field(Model, @tagName(func))).ArgsT),
-    buffer_store: aio.BufferStore,
-    platform: Platform,
-) !ModuleExe(@field(Model, @tagName(func))) {
-    var arena_state = std.heap.ArenaAllocator.init(allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    var model = try aio.populateModel(Model, arena, buffer_store);
-
-    // If the Model has a "init" function, call it with the given parameters.
-    if (@hasDecl(Model, "init")) {
-        // TODO(Corentin,@Improvement): Add a warning/error if there is no init function but init_args is non-void.
-        @call(.auto, Model.init, .{@as(*Model, &model)} ++ init_args);
-    }
-
-    return compileModel(allocator, model, func, args_shapes, platform);
-}
-
-/// Compiles a Model struct with the given configuration and shapes, for the given platform.
-/// The steps are:
-/// * lookup at tensors available in the store and create a `model: Model` struct with them
-/// * call `model.init(init_args)` to fields of the model that aren't Tensor, ie hyperparemeters/config
-/// * generate MLIR by calling `model.forward` with tensor of the given shapes and other arguments
-pub fn compile(
-    allocator: std.mem.Allocator,
-    comptime func: anytype,
-    init_args: anytype,
-    args_shapes: ShapeOf(ModuleSignature(func).ArgsT),
-    buffer_store: aio.BufferStore,
-    platform: Platform,
-) !FnExe(func) {
-    const ModelT = ModuleSignature(func).ModelT;
-
-    var arena_state = std.heap.ArenaAllocator.init(allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    var model = try aio.populateModel(ModelT, arena, buffer_store);
-
-    // If the Model has a "init" function, call it with the given parameters.
-    if (@hasDecl(ModelT, "init")) {
-        // TODO(Corentin,@Improvement): Add a warning/error if there is no init function but init_args is non-void.
-        @call(.auto, ModelT.init, .{@as(*ModelT, &model)} ++ init_args);
-    }
-
-    return compileModel(allocator, func, model, args_shapes, platform);
-}
-
-/// Compiles a Model struct with the given configuration and shapes, for the given platform.
-/// Generate MLIR by calling `model.forward` with tensor of the given shapes and other arguments
-pub fn compileModel(
-    allocator: std.mem.Allocator,
-    comptime func: anytype,
-    model: ModuleSignature(func).ModelT,
-    args_shapes: ShapeOf(ModuleSignature(func).ArgsT),
-    platform: Platform,
-) !FnExe(func) {
-    const ModelT = ModuleSignature(func).ModelT;
-    const name = @typeName(ModelT) ++ ".forward";
-    log.info("Compiling {s} with {}", .{ name, args_shapes });
-
-    var context = try CompilationContext.init(allocator, name, platform);
-    defer context.deinit();
-
-    return .{ .inner = try compileInternal(allocator, &context, func, .{model} ++ args_shapes) };
-}
-
-/// Compiles a function with the given configuration and shapes, for the given platform.
-/// Generate MLIR by calling the given function with tensor of the given shapes.
-pub fn compileFn(
-    allocator: std.mem.Allocator,
-    comptime func: anytype,
-    args: ShapeOf(stdx.meta.FnArgs(func)),
-    platform: Platform,
-) !FnExe(func) {
-    const name = @typeName(@TypeOf(func));
-    var context = try CompilationContext.init(allocator, name, platform);
-    defer context.deinit();
-
-    return .{ .inner = try compileInternal(allocator, &context, func, args) };
-}
-
-pub fn FnExe(comptime func: anytype) type {
-    return Exe(stdx.meta.FnArgs(func), stdx.meta.FnResult(func));
-}
-
-fn computeModuleHash(platform: Platform, module: mlir.Module) u64 {
-    var hasher = std.hash.XxHash64.init(0);
-    var hasher_writer = xxHash64Writer(&hasher);
-    const writer = hasher_writer.writer();
-
-    // Hash the canonicalized IR, without debug information that can change across builds.
-    module.op().writeBytecode(writer);
-    //module.op().print(writer, .{ .debug_info = false });
-    // Writes can't fail because we are writing to a hasher.
-    writer.writeAll(platform.pjrt_client.getPlatformName(platform.pjrt_api)) catch unreachable;
-    const api_version = platform.pjrt_api.version();
-    writer.writeInt(i64, api_version.major, .little) catch unreachable;
-    writer.writeInt(i64, api_version.minor, .little) catch unreachable;
-
-    return hasher.final();
-}
-
-const max_pjrt_executable_size = 400 * 1024 * 1024;
-
-fn loadPjrtExecutable(arena: std.mem.Allocator, platform: Platform, module_hash: u64, compilation_cache_location: []const u8) !*pjrt.LoadedExecutable {
-    const resolved_path = try std.fs.cwd().realpathAlloc(arena, compilation_cache_location);
-    const compilation_cache_dir = try std.fs.openDirAbsolute(resolved_path, .{});
-    var buf: [16]u8 = undefined;
-    const filename = try std.fmt.bufPrint(&buf, "{x}", .{module_hash});
-    const loaded_executable_file = try compilation_cache_dir.openFile(filename, .{});
-    defer loaded_executable_file.close();
-
-    const bytes = try loaded_executable_file.readToEndAlloc(arena, max_pjrt_executable_size);
-
-    return platform.pjrt_client.deserializeAndLoad(platform.pjrt_api, bytes);
-}
-
-fn storePjrtExecutable(arena: std.mem.Allocator, platform: Platform, loaded_executable: *pjrt.LoadedExecutable, module_hash: u64, compilation_cache_location: []const u8) !void {
-    const resolved_path = try std.fs.cwd().realpathAlloc(arena, compilation_cache_location);
-    const compilation_cache_dir = std.fs.openDirAbsolute(resolved_path, .{}) catch blk: {
-        try std.fs.makeDirAbsolute(resolved_path);
-        break :blk try std.fs.openDirAbsolute(resolved_path, .{});
-    };
-
-    const loaded_executable_file = try compilation_cache_dir.createFile(try std.fmt.allocPrint(arena, "{x}", .{module_hash}), .{});
-    defer loaded_executable_file.close();
-
-    var executable = try loaded_executable.getExecutable(platform.pjrt_api);
-    defer executable.deinit(platform.pjrt_api);
-
-    var serialize_result = try executable.serialize(platform.pjrt_api);
-    defer serialize_result.deinit();
-
-    try loaded_executable_file.writeAll(serialize_result.bytes);
-}
-
-fn loadOrCompilePjrtExecutable(
-    arena: std.mem.Allocator,
-    platform: Platform,
-    module: mlir.Module,
-) !*pjrt.LoadedExecutable {
-    const tracer = Tracer.init("ai.zml.compilation");
-    const compile_frame = tracer.frameStart("pjrt cached compilation");
-    defer tracer.frameEnd(compile_frame, "pjrt cached compilation");
-    const module_hash = computeModuleHash(platform, module);
-
-    if (platform.compilation_options.cache_location) |compilation_cache_location| {
-        log.debug("Loading module from {s}", .{compilation_cache_location});
-        return loadPjrtExecutable(arena, platform, module_hash, compilation_cache_location) catch |err| {
-            log.debug("Failed to load module: {}", .{err});
-            return compileModuleToPjrtExecutable(arena, platform, module, module_hash);
-        };
-    } else {
-        return compileModuleToPjrtExecutable(arena, platform, module, module_hash);
-    }
-}
-
-fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, module: mlir.Module, module_hash: u64) !*pjrt.LoadedExecutable {
-    const sharding = platform.sharding();
-
-    // NOTE(Corendos): Hack needed because Protobuf struct are not public.
-    const DeviceAssignmentProto = @TypeOf(xla_pb.CompileOptionsProto.init().executable_build_options.?.device_assignment.?);
-    var options: xla_pb.CompileOptionsProto = .{
-        .executable_build_options = .{
-            .device_ordinal = -1,
-            .num_replicas = sharding.num_replicas,
-            .num_partitions = sharding.num_partitions,
-            .use_spmd_partitioning = sharding.num_partitions > 1 or sharding.num_replicas > 1,
-            .device_assignment = .{
-                .replica_count = sharding.num_replicas,
-                .computation_count = sharding.num_partitions,
-                .computation_devices = blk: {
-                    var computation_devices = try std.ArrayListUnmanaged(DeviceAssignmentProto.ComputationDevice).initCapacity(arena, sharding.num_partitions);
-                    for (0..sharding.num_partitions) |i| {
-                        var replica_device_ids = std.ArrayListUnmanaged(i64).initCapacity(arena, 1) catch unreachable;
-                        replica_device_ids.appendAssumeCapacity(@intCast(i));
-                        computation_devices.appendAssumeCapacity(.{ .replica_device_ids = replica_device_ids });
-                    }
-                    break :blk computation_devices;
-                },
-            },
-        },
-    };
-
-    // Let the arena deinit, zig-protobuf deinit is very slow.
-    if (platform.compilation_options.xla_dump_to) |xla_dump_to| {
-        try options.env_option_overrides.append(arena, .{
-            .key = .{ .Const = "xla_dump_to" },
-            .value = .{ .value = .{ .string_field = .{ .Const = xla_dump_to } } },
-        });
-        if (platform.compilation_options.xla_dump_fusion_visualization) {
-            try options.env_option_overrides.append(arena, .{
-                .key = .{ .Const = "xla_dump_hlo_as_html" },
-                .value = .{ .value = .{ .bool_field = true } },
-            });
-            try options.env_option_overrides.append(arena, .{
-                .key = .{ .Const = "xla_dump_hlo_as_dot" },
-                .value = .{ .value = .{ .bool_field = true } },
-            });
-            try options.env_option_overrides.append(arena, .{
-                .key = .{ .Const = "xla_dump_fusion_visualization" },
-                .value = .{ .value = .{ .bool_field = true } },
-            });
-        }
-    }
-    switch (platform.target) {
-        .cuda => cuda_dir: {
-            // NVIDIA recommends to disable Triton GEMM on JAX:
-            // https://github.com/NVIDIA/JAX-Toolbox?tab=readme-ov-file#environment-variables
-            try options.env_option_overrides.append(arena, .{
-                .key = .{ .Const = "xla_gpu_enable_triton_gemm" },
-                .value = .{ .value = .{ .bool_field = false } },
-            });
-            // try options.env_option_overrides.append(arena, .{
-            //     .key = .{ .Const = "xla_gpu_enable_latency_hiding_scheduler" },
-            //     .value = .{ .value = .{ .bool_field = true } },
-            // });
-            var r_ = try runfiles.Runfiles.create(.{ .allocator = arena }) orelse {
-                log.warn("Bazel runfile not found !", .{});
-                break :cuda_dir;
-            };
-            defer r_.deinit(arena);
-            const source_repo = @import("bazel_builtin").current_repository;
-            const r = r_.withSourceRepo(source_repo);
-            const cuda_data_dir = (try r.rlocationAlloc(arena, "libpjrt_cuda/sandbox")).?;
-            log.info("xla_gpu_cuda_data_dir: {s}", .{cuda_data_dir});
-            try options.env_option_overrides.append(arena, .{
-                .key = .{ .Const = "xla_gpu_cuda_data_dir" },
-                .value = .{
-                    .value = .{
-                        .string_field = .{ .Const = cuda_data_dir },
-                    },
-                },
-            });
-        },
-        .rocm => {
-            // Disable Triton GEMM on ROCM. For some reason it's much, much slower when
-            // enabled on CDNA and it's used on RDNA. Disable it altogether.
-            try options.env_option_overrides.append(arena, .{
-                .key = .{ .Const = "xla_gpu_enable_triton_gemm" },
-                .value = .{ .value = .{ .bool_field = false } },
-            });
-        },
-        else => {},
-    }
-
-    const options_bytes = try options.encode(arena);
-
-    const loaded_executable = try platform.pjrt_client.compile(platform.pjrt_api, arena, module, options_bytes);
-    errdefer loaded_executable.deinit();
-
-    if (platform.compilation_options.cache_location) |compilation_cache_location| {
-        log.debug("Storing module to {s}", .{compilation_cache_location});
-        storePjrtExecutable(arena, platform, loaded_executable, module_hash, compilation_cache_location) catch |err| {
-            log.debug("Failed to store module: {}", .{err});
-        };
-    }
-
-    return loaded_executable;
-}
-
 pub const XxHash64Writer = struct {
     hasher: *std.hash.XxHash64,
 
@@ -1303,47 +1326,6 @@ pub const XxHash64Writer = struct {
 pub fn xxHash64Writer(hasher: *std.hash.XxHash64) XxHash64Writer {
     return .{ .hasher = hasher };
 }
-
-// making this a struct force all fields to be evaluted on creation,
-// which gives a better error stacktrace
-// than delaying the error to when the object fields are read.
-const Sign = struct {
-    FuncT: type,
-    ModelT: type,
-    FlatArgsT: []const type,
-    ArgsT: type,
-    ReturnT: type,
-};
-
-pub fn ModuleSignature(comptime func: anytype) Sign {
-    const FuncT = if (@TypeOf(func) == type) func else @TypeOf(func);
-    const function_info = @typeInfo(FuncT);
-
-    const n_args = @max(function_info.Fn.params.len, 1) - 1;
-    comptime var argument_field_list: [n_args]type = undefined;
-    for (0..n_args) |i| {
-        const arg = function_info.Fn.params[i + 1];
-        const T = arg.type orelse @compileError("cannot create ModuleSignature for function with an 'anytype' parameter");
-        argument_field_list[i] = T;
-    }
-
-    return .{
-        .FuncT = FuncT,
-        .ModelT = @typeInfo(FuncT).Fn.params[0].type orelse @compileError("cannot create ModuleSignature for function with an 'anytype' parameter"),
-        .ArgsT = if (n_args > 0) std.meta.Tuple(&argument_field_list) else @TypeOf(.{}),
-        .FlatArgsT = &argument_field_list,
-        .ReturnT = @typeInfo(FuncT).Fn.return_type.?,
-    };
-}
-
-pub const MlirFn = struct {
-    name: []const u8,
-    num_args: u32,
-    res_types: []mlir.Type,
-    res_shapes: []Shape,
-    res_donations: []Tensor._Donation,
-    mlir_fn: mlir.Operation,
-};
 
 pub const FnCache = struct {
     pub const Key = struct { fn_ptr: *const anyopaque, input_hash: u64 };
@@ -1463,7 +1445,8 @@ pub fn hashArgs(mod: anytype) u64 {
 pub fn hashShape(hasher: *std.hash.Wyhash, shape: Shape) void {
     // Note: if we enforced 0-init dims then we could hash dims instead.
     hashArray(hasher, shape.dims(), .Shallow);
-    hash(hasher, shape.dtype(), .Shallow);
+    hash(hasher, shape._dtype, .Shallow);
+    hash(hasher, shape._sharding_info, .Shallow);
     for (shape.tags()) |tag| {
         hash(hasher, @intFromPtr(tag), .Shallow);
     }
