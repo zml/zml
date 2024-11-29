@@ -100,13 +100,13 @@ filegroup(
     srcs = ["tokenizer.json"],
 )
 """,
-    commit = "5206a32e0bd3067aef1ce90f5528ade7d866253f",
+    commit = "d04e592bb4f6aa9cfee91e2e20afa771667e1d4b",
     includes = [
         "*.safetensors",
         "model.safetensors.index.json",
         "tokenizer.json",
     ],
-    model = "meta-llama/Meta-Llama-3.1-8B-Instruct",
+    model = "meta-llama/Meta-Llama-3.1-8B",
 )
 use_repo(huggingface, "Meta-Llama-3.1-8B-Instruct")
 huggingface.model(

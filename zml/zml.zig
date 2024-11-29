@@ -33,6 +33,8 @@ pub const call = ops.call;
 pub const compile = module.compile;
 pub const compileModel = module.compileModel;
 pub const compileFn = module.compileFn;
+pub const Exe = module.Exe;
+pub const ExeWithWeights = module.ExeWithWeights;
 
 pub const ops = @import("ops.zig");
 pub const tools = struct {
