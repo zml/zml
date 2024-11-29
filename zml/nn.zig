@@ -775,7 +775,7 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
     var attn_weights = q.dot(k, .{.hd});
     // log.debug("attn_weights : {}", .{attn_weights});
     // log.debug("attn_mask : {?}", .{attn_mask});
-    if (attn_mask) |mask| attn_weights = attn_weights.add(mask.broadcastLeft(attn_weights.shape()));
+    if (attn_mask) |mask| attn_weights = attn_weights.add(mask.broad(attn_weights.shape()));
 
     attn_weights = attn_weights.convert(.f32);
     if (opts.bias) |bias| {
@@ -988,7 +988,7 @@ pub fn sdpaChunk(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) PartialSoft
     var attn_weights = q.dot(k, .{.hd});
     // log.debug("attn_weights : {}", .{attn_weights});
     // log.debug("attn_mask : {?}", .{attn_mask});
-    if (attn_mask) |mask| attn_weights = attn_weights.add(mask.broadcastLeft(attn_weights.shape()));
+    if (attn_mask) |mask| attn_weights = attn_weights.add(mask.broad(attn_weights.shape()));
 
     if (opts.bias) |bias| {
         attn_weights = attn_weights.add(bias);

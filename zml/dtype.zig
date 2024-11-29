@@ -10,6 +10,7 @@ test {
 
 pub const DataType = enum(u8) {
     bool,
+    // Note: the support of the float8 is a bit spotty, f8e4m3b11fnuz seems to be the most supported one on Cuda.
     f8e4m3b11fnuz,
     f8e4m3fn,
     f8e4m3fnuz,

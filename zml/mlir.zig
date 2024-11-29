@@ -18,7 +18,7 @@ pub const ext = struct {
         return mlir.RankedTensorType.init(sh.dims(), mlir.ext.Type.fromDType(ctx, sh.dtype())).as(mlir.Type).?;
     }
 
-    pub fn denseElementAttrType(dt: dtype.DataType) mlir.DenseElementsAttributeTypes {
+    pub fn denseElementAttrType(dt: dtype.DataType) ?mlir.DenseElementsAttributeTypes {
         return switch (dt) {
             .bool => .bool,
             .i8 => .i8,
@@ -33,7 +33,7 @@ pub const ext = struct {
             .f16 => .f16,
             .f32 => .f32,
             .f64 => .f64,
-            inline else => |tag| @panic("Unsupported data type: " ++ @tagName(tag)),
+            else => null,
         };
     }
 
