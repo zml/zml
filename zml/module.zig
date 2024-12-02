@@ -75,6 +75,11 @@ pub const MlirFn = struct {
     res_shapes: []Shape,
     res_donations: []Tensor._Donation,
     mlir_fn: mlir.Operation,
+
+    pub const Kind = enum {
+        main,
+        private,
+    };
 };
 
 pub const CompilationContext = struct {
@@ -151,7 +156,6 @@ pub const CompilationContext = struct {
     pub fn deactivate(self: *CompilationContext) void {
         std.debug.assert(_current != null and _current.? == self);
         _current = self._previous;
-        self._previous = null;
     }
 
     pub fn current() *CompilationContext {
@@ -184,7 +188,7 @@ pub const CompilationContext = struct {
         var timer = std.time.Timer.start() catch null;
         const tensor_args = try self.tensorFromShapes(stdx.meta.FnArgs(func), arena, args);
         // Run in a dedicated thread because compilation relies on `threadlocal`.
-        const f = try asynk.callBlocking(CompilationContext.generateBytecode, .{ self, arena, "main", func, &tensor_args });
+        const f = try asynk.callBlocking(CompilationContext.emitMlir, .{ self, arena, func, &tensor_args, .{ .name = "main", .kind = .main } });
         const module = self._module;
         module.getBody().appendOperation(f.mlir_fn);
 
@@ -329,15 +333,18 @@ pub const CompilationContext = struct {
     /// Generate an MLIR function from a ZML function.
     /// The caller is responsible to have properly created the input
     /// tensors with unique tensor ids.
-    pub fn generateBytecode(
+    pub fn emitMlir(
         self: *CompilationContext,
         allocator: std.mem.Allocator,
-        fn_name: []const u8,
         comptime func: anytype,
         args: *const stdx.meta.FnArgs(func),
+        opts: struct {
+            name: []const u8,
+            kind: MlirFn.Kind = .private,
+        },
     ) error{OutOfMemory}!MlirFn {
-        const frame = self._tracer.frameStart("generateBytecode.emit");
-        errdefer self._tracer.frameEnd(frame, "generateBytecode.emit");
+        const frame = self._tracer.frameStart("emitMlir.emit");
+        errdefer self._tracer.frameEnd(frame, "emitMlir.emit");
 
         // Note: only temp allocations are done in the arena,
         // the other allocations are managed by the caller.
@@ -371,11 +378,6 @@ pub const CompilationContext = struct {
         var fn_body = self.openBlock(.hermetic, input_types, locations) catch unreachable;
         {
             defer self.closeBlock(fn_body);
-            // Note: we could shrink self._buffer_to_arg once we called `func`.
-            // But for now we are only compiling one function per CompilationContext.
-            // So we don't need to do this since we won't reuse self._buffer_to_arg anyway.
-            // const n = self._buffer_to_arg.count();
-            // defer self._buffer_to_arg.shrinkRetainingCapacity(n);
 
             try self._buffer_to_arg.ensureUnusedCapacity(self._allocator, @intCast(tensor_count));
             const assigned_args_count = self.mapBlockArguments(args, fn_body.block(), 0);
@@ -400,14 +402,15 @@ pub const CompilationContext = struct {
         const res_attrs = try arena.alloc(AttributeList, out_tensor_count);
         @memset(res_attrs, .{});
 
-        // Donations attributes only make sense on the main function.
-        self.addDonationsAttributes(arg_attrs, fn_res_donations);
-
-        if (self._platform.sharding().num_partitions > 1) {
-            self.addShardingAttributes(arg_attrs, res_attrs, input_shapes.items, fn_res_shapes);
+        if (opts.kind == .main) {
+            self.addDonationsAttributes(arg_attrs, fn_res_donations);
+            if (self._platform.sharding().num_partitions > 1) {
+                self.addShardingAttributes(arg_attrs, res_attrs, input_shapes.items, fn_res_shapes);
+            }
         }
+
         const mlir_fn = dialect.func.func(self.mlirCtx(), .{
-            .sym_name = fn_name,
+            .sym_name = opts.name,
             .args = input_types,
             .arg_attrs = try finalizeAttributeList(arena, mlir_ctx, arg_attrs),
             .results = fn_res_types,
@@ -416,9 +419,9 @@ pub const CompilationContext = struct {
             .location = loc,
         });
 
-        self._tracer.frameEnd(frame, "generateBytecode.emit");
-        const canonicalize_frame = self._tracer.frameStart("generateBytecode.canonicalize");
-        defer self._tracer.frameEnd(canonicalize_frame, "generateBytecode.canonicalize");
+        self._tracer.frameEnd(frame, "emitMlir.emit");
+        const canonicalize_frame = self._tracer.frameStart("emitMlir.canonicalize");
+        defer self._tracer.frameEnd(canonicalize_frame, "emitMlir.canonicalize");
         self._mlir_canonicalizer.runOnOp(mlir_fn) catch |err| switch (err) {
             error.InvalidMlir => {
                 log.err("Failed to canonicalize invalid mlir: {}", .{mlir_fn.mlirFormatter(.{})});
@@ -429,7 +432,7 @@ pub const CompilationContext = struct {
 
         return .{
             .mlir_fn = mlir_fn,
-            .name = fn_name,
+            .name = opts.name,
             .num_args = @intCast(tensor_count),
             .res_types = fn_res_types,
             .res_shapes = fn_res_shapes,
@@ -491,7 +494,7 @@ pub const CompilationContext = struct {
         var comp = try zml.module.CompilationContext.init(allocator, "test", platform);
         defer comp.deinit();
         var tensor_args = .{ model, Tensor{ ._shape = s, ._id = .{ .arg_id = 1234 } } };
-        const f = try comp.generateBytecode(allocator, "test.generateBytecode.Local.forward", Local.forward, &tensor_args);
+        const f = try comp.emitMlir(allocator, Local.forward, &tensor_args, .{ .name = "test.emitMlir.Local.forward", .kind = .main });
 
         var mlir_bytecode: std.ArrayListUnmanaged(u8) = .{};
         try mlir_bytecode.writer(allocator).print("{}", .{f.mlir_fn.mlirFormatter(.{})});
@@ -635,7 +638,9 @@ pub const CompilationContext = struct {
                 }
             }.cb, self._allocator, &arg_id, args, &tensor_args) catch @panic("OutOfMemory");
 
-            const f = self.generateBytecode(arena, full_name, func, &tensor_args) catch @panic("OOM");
+            const f = self.emitMlir(arena, func, &tensor_args, .{
+                .name = full_name,
+            }) catch @panic("OOM");
             self._module.getBody().appendOperation(f.mlir_fn);
 
             break :b self._fn_cache.addEntry(key, f) catch unreachable;
