@@ -481,8 +481,10 @@ pub const CompilationContext = struct {
         const Local = struct {
             bias: Tensor,
 
-            pub fn forward(self: @This(), x: Tensor) Tensor {
-                return zml.ops.call(self, .inner, .{x});
+            pub fn forward(self: @This(), x: Tensor, y: Tensor) [2]Tensor {
+                const x1 = zml.ops.call(self, .inner, .{x});
+                const x2 = zml.ops.call(self, .inner, .{x1});
+                return .{ x1.reuseBuffer(y), x2 };
             }
 
             pub fn inner(self: @This(), x: Tensor) Tensor {
@@ -497,19 +499,25 @@ pub const CompilationContext = struct {
 
         var comp = try zml.module.CompilationContext.init(allocator, "test", platform);
         defer comp.deinit();
-        var tensor_args = .{ model, Tensor{ ._shape = s, ._id = .{ .arg_id = 1234 } } };
+        var tensor_args = .{ model, Tensor{ ._shape = s, ._id = .{ .buffer_id = 1234 } }, Tensor{ ._shape = s, ._id = .{ .buffer_id = 1235 } } };
         const f = try comp.emitMlir(allocator, Local.forward, &tensor_args, .{ .name = "test.emitMlir.Local.forward", .kind = .main });
 
         var mlir_bytecode: std.ArrayListUnmanaged(u8) = .{};
         try mlir_bytecode.writer(allocator).print("{}", .{f.mlir_fn.mlirFormatter(.{})});
 
         // Check that the `x` input argument gives its buffer to the result tensor.
-        // `%arg0` is the bias of the model, `%arg1` is `x`.
-        try std.testing.expectEqual(2, f.num_args);
-        std.testing.expect(std.mem.indexOf(u8, mlir_bytecode.items, "tf.aliasing_output = 0 : i32") != null) catch |err| {
-            log.warn("Didn't produced the expected IR:\n{s}", .{mlir_bytecode.items});
-            return err;
-        };
+        // `%arg0` is the bias of the model, `%arg1` is `x`, `%arg2` is `y`.
+        try std.testing.expectEqual(3, f.num_args);
+        // We should have two buffers being donated.
+        const template = "tf.aliasing_output = {d} : i32";
+        var buf = template.*;
+        for (0..2) |i| {
+            const alias_attr = std.fmt.bufPrint(&buf, template, .{i}) catch unreachable;
+            std.testing.expect(std.mem.indexOf(u8, mlir_bytecode.items, alias_attr) != null) catch |err| {
+                log.warn("Didn't produced the expected IR:\n{s}", .{mlir_bytecode.items});
+                return err;
+            };
+        }
     }
 
     pub fn getShardingAttr(self: CompilationContext, shape: Shape) mlir.StringAttribute {
@@ -654,22 +662,34 @@ pub const CompilationContext = struct {
 
         const values = arena.alloc(mlir.Value, function.num_args) catch unreachable;
         self.extractValues(&args, values);
+
+        const donations = arena.alloc(Tensor._Donation, function.num_args) catch unreachable;
+        meta.collectBuf(struct {
+            pub fn cb(ctx: *const CompilationContext, x: Tensor) Tensor._Donation {
+                return ctx.getValueAndDonation(x)[1];
+            }
+        }.cb, self, &args, donations);
+
         const op = dialect.func.call(self.mlirCtx(), @ptrCast(function.name), values, function.res_types, loc);
         // Note: this assume res can be stack-allocated.
+        // Ideally we should call Zig code to
         var res: stdx.meta.FnResult(func) = undefined;
-        const LocalContext = struct { index: usize = 0, op: mlir.Operation, function: MlirFn };
-        var context: LocalContext = .{ .op = op, .function = function };
+        const LocalContext = struct { index: usize = 0, op: mlir.Operation, function: MlirFn, donations: []Tensor._Donation };
+        var context: LocalContext = .{ .op = op, .function = function, .donations = donations };
         meta.visit((struct {
             fn cb(ctx: *LocalContext, tensor: *Tensor) void {
                 const i = ctx.index;
                 ctx.index += 1;
                 var new = Tensor.fromMlirValue(ctx.op.result(i));
                 new._shape = ctx.function.res_shapes[i];
-                new._donation = ctx.function.res_donations[i];
+                new._donation = switch (ctx.function.res_donations[i]) {
+                    .no_buffer => .no_buffer,
+                    .arg => |input_arg| ctx.donations[input_arg],
+                    .input_buffer => .no_buffer, // user escaped the sandbox
+                };
                 tensor.* = new;
             }
         }).cb, &context, &res);
-
         std.debug.assert(context.index == op.numResults());
         return res;
     }
