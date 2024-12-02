@@ -133,17 +133,17 @@ bazel run -c opt //llama:OpenLLaMA-3B
 bazel run -c opt //llama:OpenLLaMA-3B -- --prompt="Once upon a time,"
 ```
 
-### Meta Llama 3 8B
+### Meta Llama 3.1 8B
 
 This model has restrictions, see
-[here](https://huggingface.co/meta-llama/Meta-Llama-3-8B). It **requires
+[here](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct). It **requires
 approval from Meta on Huggingface**, which can take a few hours to get granted.
 
 While waiting, you can already generate an access token to log into HuggingFace
 from `bazel`; see [here](./docs/huggingface-access-token.md).
 
 Once you've been granted access, you're ready to download a gated model like
-`Meta-Llama-3-8b`!
+`Meta-Llama-3.1-8B-Instruct`!
 
 ```
 # requires token in $HOME/.cache/huggingface/token, as created by the
@@ -153,6 +153,20 @@ bazel run -c opt //llama:Llama-3.1-8B-Instruct
 bazel run -c opt //llama:Llama-3.1-8B-Instruct -- --prompt="Once upon a time,"
 ```
 
+You can also try Llama-3.1-70B-Instruct if you have enough memory.
+
+### Meta Llama 3.2 1B
+
+Like the 8B model above, this model also requires approval. See 
+[here](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct) for access requirements.
+
+```
+cd examples
+bazel run -c opt //llama:Llama-3.2-1B-Instruct
+bazel run -c opt //llama:Llama-3.2-1B-Instruct -- --prompt="Once upon a time,"
+```
+
+For a larger 3.2 model, you can also try Llama-3.2-3B-Instruct.
 
 ## Running Models on GPU / TPU
 
