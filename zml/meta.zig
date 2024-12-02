@@ -86,9 +86,11 @@ pub fn MapType(From: type, To: type) type {
 /// For example it can convert from a comptime array to a runtime slice.
 /// `mapAlloc` can allocate new slices to write the result if the result struct requires it.
 /// The caller is owning said allocations, using an `ArenaAllocator` might help tracking them.
-// TODO: handle tuple to slice conversion
+///
+/// Note: to avoid infinite loop, mapAlloc doesn't look for `From` fields inside `To` struct.
+/// Any `To` struct inside `from` will be copied over to the target.
 pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam(cb, 0), from: anytype, to: anytype) !void {
-    // const Ctx = FnParam(cb, 0);
+    // TODO: handle tuple to slice conversion
     const From = FnParam(cb, 1);
     const To = stdx.meta.FnResult(cb);
     const FromStruct = @TypeOf(from);
@@ -113,12 +115,13 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
         return;
     }
 
-    // Don't go into Shape objects because of the weird tag.
-    // TODO: we could not error on pointers to basic types like u8
-    if (FromStruct == @import("shape.zig").Shape) {
+    if (FromStruct == To) {
         to.* = from;
         return;
     }
+
+    const err_msg = "zml.meta.mapAlloc doesn't support type {}, which was found inside {} for callback: {}";
+    const err_args = .{ FromStruct, From, @TypeOf(cb) };
     switch (type_info_to) {
         .Struct => |info| inline for (info.fields) |field| {
             // if (field.is_comptime) continue;
@@ -149,10 +152,11 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
             .One => switch (type_info_to_ptr.Pointer.size) {
                 // pointer to array -> slice promotion
                 .Slice => {
-                    to.* = try allocator.alloc(type_info_to_ptr.Pointer.child, from.len);
-                    for (from, to.*) |f, *t| {
+                    const items = try allocator.alloc(type_info_to_ptr.Pointer.child, from.len);
+                    for (from, items) |f, *t| {
                         try mapAlloc(cb, allocator, ctx, f, t);
                     }
+                    to.* = items;
                 },
                 else => try mapAlloc(cb, allocator, ctx, from.*, to.*),
             },
@@ -163,7 +167,7 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
                 }
                 to.* = items;
             },
-            else => stdx.debug.compileError("zml.meta.mapAlloc doesn't support: {}", .{FromStruct}),
+            else => stdx.debug.compileError(err_msg, err_args),
         },
         .Optional => if (from) |f| {
             to.* = @as(@typeInfo(type_info_to_ptr.Pointer.child).Optional.child, undefined);
@@ -171,8 +175,8 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
         } else {
             to.* = null;
         },
-        .Int, .Float => to.* = from,
-        else => stdx.debug.compileError("zml.meta.mapAlloc doesn't support: {}", .{FromStruct}),
+        .Int, .Float, .Enum => to.* = from,
+        else => stdx.debug.compileError(err_msg, err_args),
     }
 }
 
