@@ -197,7 +197,7 @@ pub fn asyncMain() !void {
     defer tokenizer.deinit();
 
     const dims = llama.model.shape();
-    const dtype = llama.lm_head.weight.dtype();
+    const dtype = llama.model.embed_tokens.weight.dtype();
 
     // Note: we compile the model without a batching dimension.
     // To do so, we would just need to add `.b = batch_size` to `token_shape` and `kv_shape`.

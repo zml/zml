@@ -24,7 +24,7 @@ pub const LlamaOptions = struct {
 /// Llama architecture, using huggingface transformers naming.
 /// Dimensions of activations: {.b, .s, .d}
 pub const LlamaLM = struct {
-    lm_head: zml.nn.Linear,
+    lm_head: ?zml.nn.Linear = null,
     model: Llama,
 
     // Options controlling generation
@@ -55,7 +55,9 @@ pub const LlamaLM = struct {
         // TODO(Corentin): Fix lm_head sharding when top-k sampling is enabled.
         // It currently crashes/compilation fails
         if (options.gen_opts.topk == 1) {
-            self.lm_head.weight = self.lm_head.weight.withSharding(.{0});
+            if (self.lm_head) |lm_head| {
+                self.lm_head.?.weight = lm_head.weight.withSharding(.{0});
+            }
         }
     }
 
@@ -76,12 +78,12 @@ pub const LlamaLM = struct {
 
         var tokens = tokens_.withPartialTags(.{.s});
         const out, const updated_kv_cache = zml.call(self.model, .forward, .{ tokens, if (kv_cache == null) null else token_index, kv_cache });
-        tokens, const new_rng = updateTokens(self.lm_head, tokens, token_index, out, rng, self.gen_opts);
+        tokens, const new_rng = self.updateTokens(tokens, token_index, out, rng, self.gen_opts);
         return .{ tokens, increment(0, token_index), updated_kv_cache, new_rng };
     }
 
     pub fn updateTokens(
-        lm_head: zml.nn.Linear,
+        self: LlamaLM,
         tokens_: Tensor,
         token_index: Tensor,
         out_: Tensor,
@@ -92,7 +94,11 @@ pub const LlamaLM = struct {
         const out = out_.withPartialTags(.{ .s, .d });
 
         const next_token_pred = out.gatherValues(.s, token_index, .{});
-        var logits = zml.call(lm_head, .forward, .{next_token_pred});
+        var logits = if (self.lm_head) |lm_head|
+            zml.call(lm_head, .forward, .{next_token_pred})
+        else
+            next_token_pred.matmul(self.model.embed_tokens.weight.transpose(.{ -1, -2 })).withTags(.{.d});
+
         if (logits.shape().hasTag(.voc) == null)
             logits = logits.rename(.{ .d = .voc });
 
