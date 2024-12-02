@@ -671,8 +671,11 @@ pub const CompilationContext = struct {
         }.cb, self, &args, donations);
 
         const op = dialect.func.call(self.mlirCtx(), @ptrCast(function.name), values, function.res_types, loc);
+        // Create the result tensor object by combining the operand results,
+        // as well as the registered shapes and donations.
         // Note: this assume res can be stack-allocated.
-        // Ideally we should call Zig code to
+        // Maybe it'd be simpler to just call the Zig function twice to do the shape/donation propagation for us.
+        // But this is blocked on https://github.com/zml/zml/issues/97
         var res: stdx.meta.FnResult(func) = undefined;
         const LocalContext = struct { index: usize = 0, op: mlir.Operation, function: MlirFn, donations: []Tensor._Donation };
         var context: LocalContext = .{ .op = op, .function = function, .donations = donations };

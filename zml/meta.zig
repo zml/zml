@@ -120,8 +120,6 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
         return;
     }
 
-    const err_msg = "zml.meta.mapAlloc doesn't support type {}, which was found inside {} for callback: {}";
-    const err_args = .{ FromStruct, From, @TypeOf(cb) };
     switch (type_info_to) {
         .Struct => |info| inline for (info.fields) |field| {
             // if (field.is_comptime) continue;
@@ -167,7 +165,7 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
                 }
                 to.* = items;
             },
-            else => stdx.debug.compileError(err_msg, err_args),
+            else => stdx.debug.compileError("zml.meta.mapAlloc doesn't support: {}", .{FromStruct}),
         },
         .Optional => if (from) |f| {
             to.* = @as(@typeInfo(type_info_to_ptr.Pointer.child).Optional.child, undefined);
@@ -176,7 +174,7 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
             to.* = null;
         },
         .Int, .Float, .Enum => to.* = from,
-        else => stdx.debug.compileError(err_msg, err_args),
+        else => stdx.debug.compileError("zml.meta.mapAlloc doesn't support: {}", .{FromStruct}),
     }
 }
 
