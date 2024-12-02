@@ -650,17 +650,27 @@ pub const CompilationContext = struct {
             break :b self._fn_cache.addEntry(key, f) catch unreachable;
         };
 
-        // Note: we won't increase the size of the cache until next `call` so
-        // we can use the memory there without worrying about fragmentation.
         const loc = self.mlirCtx().location(@src());
 
         const values = arena.alloc(mlir.Value, function.num_args) catch unreachable;
         self.extractValues(&args, values);
-
         const op = dialect.func.call(self.mlirCtx(), @ptrCast(function.name), values, function.res_types, loc);
-        // TODO: tags seem to be lost by `callFunc`.
+        // Note: this assume res can be stack-allocated.
         var res: stdx.meta.FnResult(func) = undefined;
-        assignResults(op, &res, function.res_shapes);
+        const LocalContext = struct { index: usize = 0, op: mlir.Operation, function: MlirFn };
+        var context: LocalContext = .{ .op = op, .function = function };
+        meta.visit((struct {
+            fn cb(ctx: *LocalContext, tensor: *Tensor) void {
+                const i = ctx.index;
+                ctx.index += 1;
+                var new = Tensor.fromMlirValue(ctx.op.result(i));
+                new._shape = ctx.function.res_shapes[i];
+                new._donation = ctx.function.res_donations[i];
+                tensor.* = new;
+            }
+        }).cb, &context, &res);
+
+        std.debug.assert(context.index == op.numResults());
         return res;
     }
 
@@ -963,29 +973,6 @@ fn assignBlockArguments(v: anytype, block: mlir.Block, start: usize) usize {
         }
     }).cb, &context, v);
     return context.index;
-}
-
-/// Visit the given struct and assign op results to each tensor found.
-fn assignResults(op: mlir.Operation, v: anytype, shapes: []Shape) void {
-    const LocalContext = struct {
-        index: usize,
-        op: mlir.Operation,
-        shapes: ?[]Shape,
-    };
-    var context = LocalContext{ .index = 0, .op = op, .shapes = shapes };
-    meta.visit((struct {
-        fn cb(inner_ctx: *LocalContext, tensor: *Tensor) void {
-            var new = Tensor.fromMlirValue(inner_ctx.op.result(inner_ctx.index));
-            if (inner_ctx.shapes) |sh| {
-                new._shape = sh[inner_ctx.index];
-            } else {
-                new._shape._tags = tensor._shape._tags;
-            }
-            tensor.* = new;
-            inner_ctx.index += 1;
-        }
-    }).cb, &context, v);
-    std.debug.assert(context.index == op.numResults());
 }
 
 pub const XxHash64Writer = struct {
