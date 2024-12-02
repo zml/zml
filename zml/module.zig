@@ -482,6 +482,10 @@ pub const CompilationContext = struct {
             bias: Tensor,
 
             pub fn forward(self: @This(), x: Tensor) Tensor {
+                return zml.ops.call(self, .inner, .{x});
+            }
+
+            pub fn inner(self: @This(), x: Tensor) Tensor {
                 const y = x.add(self.bias);
                 return y.reuseBuffer(x);
             }
