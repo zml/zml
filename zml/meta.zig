@@ -90,8 +90,8 @@ pub fn MapType(From: type, To: type) type {
 pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam(cb, 0), from: anytype, to: anytype) !void {
     // const Ctx = FnParam(cb, 0);
     const From = FnParam(cb, 1);
+    const To = stdx.meta.FnResult(cb);
     const FromStruct = @TypeOf(from);
-
     const type_info_to_ptr = @typeInfo(@TypeOf(to));
     if (type_info_to_ptr != .Pointer) {
         stdx.debug.compileError("convertType is expecting a mutable `to` argument but received: {}", .{@TypeOf(to)});
@@ -100,22 +100,16 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
     const type_info_to = @typeInfo(ToStruct);
 
     if (FromStruct == From) {
-        // Special case for converting from shape to tensor:
-        // If the target type is Shape, skip tensor conversion.
-        // A general `to.* = from` assignment causes a Zig error in this scenario.
-        // (see below)
-        if (ToStruct == @import("shape.zig").Shape and FromStruct == ToStruct) { // FromStruct) {
+        // We have an issues with `Tensor` -> `Shape` -> `Tensor` conversion when compiling ZML functions where one argument is a Shape itself.
+        // Normally we should call `cb` on all `Shape`.
+        // But the "ShapeOf" struct will have more Shape than need on the output.
+        // So here we take a hint from the receiving object.
+        // If the target is indeed a Tensor, use the callback, but if the target is `Shape` just copy it over.
+        if (ToStruct != To and FromStruct == ToStruct) {
             to.* = from;
         } else {
             to.* = @call(.auto, cb, .{ ctx, from });
         }
-        return;
-    }
-
-    // This is generally due to a user error, but let this fn compile,
-    // and the user will have a Zig error.
-    if (FromStruct == ToStruct) {
-        to.* = from;
         return;
     }
 

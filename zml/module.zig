@@ -49,7 +49,7 @@ const Block = union(BlockKind) {
             .op_result => |parent_op| self.appendOperationRecursive(parent_op),
             .block_argument => |arg| {
                 // Hermetic blocks are not allowed to use arguments from other blocks.
-                std.debug.assert(self == .open or self.block().eql(arg.block()));
+                stdx.debug.assert(self == .open or self.block().eql(arg.block()), "Can't add {}  from {?x} block to {?x} block", .{ arg, arg.block()._inner.ptr, self.block()._inner.ptr });
             },
             .null => @panic("InvalidMlir"),
         }
@@ -182,7 +182,7 @@ pub const CompilationContext = struct {
         const arena = arena_state.allocator();
 
         var timer = std.time.Timer.start() catch null;
-        const tensor_args = self.tensorFromShapes(stdx.meta.FnArgs(func), arena, args);
+        const tensor_args = try self.tensorFromShapes(stdx.meta.FnArgs(func), arena, args);
         // Run in a dedicated thread because compilation relies on `threadlocal`.
         const f = try asynk.callBlocking(CompilationContext.generateBytecode, .{ self, arena, "main", func, &tensor_args });
         const module = self._module;
@@ -608,42 +608,47 @@ pub const CompilationContext = struct {
 
         // first, do the "compile" and check the bytecode
         // the result of this will also have the correct tags of the result shapes
-        const dummy_result = self.generateMlirBytecodeForFunction(
-            arena,
-            func_name,
-            func,
-            args,
-        ) catch unreachable; // TODO: do we like unreachable?
-        const bytecode_hash = hashArgs(dummy_result.bytecode_tmp);
-
-        const key: FnCache.Key = .{ .fn_ptr = &func, .input_hash = bytecode_hash };
+        const args_hash = hashArgs(args);
+        const key: FnCache.Key = .{ .fn_ptr = &func, .input_hash = args_hash };
         const function = self._fn_cache.getEntry(key) orelse b: {
             const full_name: [:0]const u8 = if (std.mem.eql(u8, "main", func_name))
                 arena.dupeZ(u8, func_name) catch unreachable
             else
                 std.fmt.allocPrintZ(arena, "{s}_{x}", .{ func_name, key.input_hash }) catch unreachable;
 
-            log.info("addFuncToModule {any} {s}", .{ key, full_name });
+            const og_buffer_to_arg = self._buffer_to_arg;
+            defer {
+                self._buffer_to_arg.deinit(self._allocator);
+                self._buffer_to_arg = og_buffer_to_arg;
+            }
 
-            const value = self.addFuncToModule(
-                arena,
-                full_name,
-                func,
-                args,
-            ) catch unreachable;
+            // Reset the buffer -> assignement
+            self._buffer_to_arg = .{};
 
-            break :b self._fn_cache.addEntry(key, value) catch unreachable;
+            var arg_id: u16 = 0;
+            var tensor_args: @TypeOf(args) = args;
+            meta.mapAlloc(struct {
+                fn cb(arg_id_: *u16, x: Tensor) Tensor {
+                    const a = arg_id_.*;
+                    arg_id_.* += 1;
+                    return Tensor{ ._shape = x._shape, ._id = .{ .arg_id = a }, ._donation = .{ .arg = a } };
+                }
+            }.cb, self._allocator, &arg_id, args, &tensor_args) catch @panic("OutOfMemory");
+
+            const f = self.generateBytecode(arena, full_name, func, &tensor_args) catch @panic("OOM");
+            self._module.getBody().appendOperation(f.mlir_fn);
+
+            break :b self._fn_cache.addEntry(key, f) catch unreachable;
         };
 
         // Note: we won't increase the size of the cache until next `call` so
         // we can use the memory there without worrying about fragmentation.
-
         const loc = self.mlirCtx().location(@src());
 
-        const values = arena.alloc(mlir.Value, function.n_model + function.n_args) catch unreachable;
-        self.extractValues(&args, values[function.n_model..]);
+        const values = arena.alloc(mlir.Value, function.num_args) catch unreachable;
+        self.extractValues(&args, values);
 
-        const op = dialect.func.call(self.mlirCtx(), function.name, values, function.res_types, loc);
+        const op = dialect.func.call(self.mlirCtx(), @ptrCast(function.name), values, function.res_types, loc);
         // TODO: tags seem to be lost by `callFunc`.
         var res: stdx.meta.FnResult(func) = undefined;
         assignResults(op, &res, function.res_shapes);
@@ -669,7 +674,7 @@ pub const CompilationContext = struct {
 
                 const res = ctx.self._buffer_to_arg.getOrPutAssumeCapacity(tensor._id);
                 if (res.found_existing) {
-                    stdx.debug.panic("Failed compilation because received two tensors arguments with the same ID: {} and {}({}).", .{ res.key_ptr.*, tensor, tensor._id });
+                    stdx.debug.panic("Failed compilation because received two tensors arguments with the same ID: {} and {} at index {} ({}).", .{ res.value_ptr.*[0], tensor, ctx.index, tensor._id });
                 } else {
                     res.value_ptr.* = .{ arg_value, .{ .arg = @intCast(ctx.index) } };
                 }
@@ -681,7 +686,7 @@ pub const CompilationContext = struct {
 
     /// Create tensor from the given shapes.
     /// Each created tensor will receive a unique id, local to this CompilationContext.
-    pub fn tensorFromShapes(self: *CompilationContext, ArgsT: type, allocator: std.mem.Allocator, args_shapes: anytype) ArgsT {
+    pub fn tensorFromShapes(self: *CompilationContext, ArgsT: type, allocator: std.mem.Allocator, args_shapes: anytype) !ArgsT {
         const Local = struct {
             fn tensorFromShape(arg_id: *u64, shape: Shape) Tensor {
                 defer arg_id.* += 1;
@@ -1039,8 +1044,7 @@ pub const FnCache = struct {
         const owned_value: MlirFn = .{
             .name = name_copy,
             .mlir_fn = value.mlir_fn,
-            .n_model = value.n_model,
-            .n_args = value.n_args,
+            .num_args = value.num_args,
             .res_types = res_types_copy,
             .res_shapes = res_shapes_copy,
             .res_donations = res_donations_copy,
@@ -1055,47 +1059,55 @@ test FnCache {
     const zml = @import("zml.zig");
     const platform = zml.testing.env();
 
+    const Layer = struct {
+        const Layer_ = @This();
+
+        w: Tensor,
+        b: Tensor,
+
+        pub fn forward(self: Layer_, x: Tensor) Tensor {
+            const wx = self.w.dotGeneral(x, &.{.{ -1, 0 }}, &.{});
+            return wx.add(self.b.broad(wx.shape())).relu();
+        }
+    };
+
     const NN = struct {
         const NN_ = @This();
-        layer_weights: [3]Tensor,
-        layer_biases: [3]Tensor,
+        layers: [3]Layer,
 
         pub fn forward(self: NN_, x0: Tensor) Tensor {
             var x = x0;
-            for (self.layer_weights, self.layer_biases) |w, b| {
-                // TODO use the `call` magic helper
-                // x = ops.callFunc(ctx, NN_, "reluLayer", .{ w, b, x });
-                x = NN_.reluLayer(w, b, x);
+            for (self.layers) |layer| {
+                x = ops.call(layer, .forward, .{x});
             }
             return x;
         }
 
         pub fn forwardRefImpl(self: NN_, x0: Tensor) Tensor {
             var x = x0;
-            for (self.layer_weights, self.layer_biases) |w, b| {
-                x = NN_.reluLayer(w, b, x);
+            for (self.layers) |layer| {
+                x = layer.forward(x);
             }
             return x;
-        }
-
-        pub fn reluLayer(w: Tensor, b: Tensor, x: Tensor) Tensor {
-            const wx = w.dotGeneral(x, &.{.{ -1, 0 }}, &.{});
-            return wx.add(b.broadcastLeft(wx.shape())).relu();
         }
     };
 
     const x = try zml.Buffer.fromSlice(platform, .{2}, &[_]f16{ -1, 1 });
     const nn: zml.Bufferized(NN) = .{
-        .layer_weights = .{
-            try zml.Buffer.fromSlice(platform, .{ 2, 2 }, &[_]f16{ 1, -1, 0, 1 }),
-            try zml.Buffer.fromSlice(platform, .{ 2, 2 }, &[_]f16{ 1, 2, 1, -1 }),
+        .layers = .{
+            .{
+                .w = try zml.Buffer.fromSlice(platform, .{ 2, 2 }, &[_]f16{ 1, -1, 0, 1 }),
+                .b = try zml.Buffer.fromSlice(platform, .{2}, &[_]f16{ 0, 0 }),
+            },
+            .{
+                .w = try zml.Buffer.fromSlice(platform, .{ 2, 2 }, &[_]f16{ 1, 2, 1, -1 }),
+                .b = try zml.Buffer.fromSlice(platform, .{2}, &[_]f16{ 10, 10 }),
+            },
             // third layer is different
-            try zml.Buffer.fromSlice(platform, .{ 3, 2 }, &[_]f16{ 1, 2, 0, 1, -1, 0 }),
-        },
-        .layer_biases = .{
-            try zml.Buffer.fromSlice(platform, .{2}, &[_]f16{ 0, 0 }),
-            try zml.Buffer.fromSlice(platform, .{2}, &[_]f16{ 10, 10 }),
-            try zml.Buffer.fromSlice(platform, .{3}, &[_]f16{ -10, -10, -10 }),
+            .{
+                .w = try zml.Buffer.fromSlice(platform, .{ 3, 2 }, &[_]f16{ 1, 2, 0, 1, -1, 0 }),
+                .b = try zml.Buffer.fromSlice(platform, .{3}, &[_]f16{ -10, -10, -10 }),
+            },
         },
     };
     const res = try zml.testing.compileAndCall(platform, NN.forward, .{ nn, x });
