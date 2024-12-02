@@ -21,12 +21,10 @@ const log = std.log.scoped(.llama);
 const show_mlir = true;
 
 pub const std_options = .{
-    .log_level = .err,
+    .log_level = .warn,
     .log_scope_levels = &[_]std.log.ScopeLevel{
-        .{ .scope = .pjrt, .level = if (show_mlir) .debug else .err },
-        .{ .scope = .zml_module, .level = if (show_mlir) .debug else .err },
-        .{ .scope = .zml, .level = if (show_mlir) .debug else .err },
-        .{ .scope = .llama, .level = if (show_mlir) .debug else .info },
+        .{ .scope = .zml_module, .level = if (show_mlir) .debug else .warn },
+        .{ .scope = .llama, .level = .info },
     },
 };
 
