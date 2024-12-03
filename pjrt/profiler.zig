@@ -2,7 +2,8 @@ const std = @import("std");
 const c = @import("c");
 const tsl_proto = @import("//tsl:profiler_options_proto");
 
-const log = std.log.scoped(.@"zml/profiler");
+const log = std.log.scoped(.@"pjrt/profiler");
+const TraceContainer = @import("convert/trace_container.zig").TraceContainer;
 
 /// Pjrt Profiler extension
 pub const Profiler = struct {
@@ -15,20 +16,39 @@ pub const Profiler = struct {
     pub const Error = c.PLUGIN_Profiler_Error;
     pub const Options = tsl_proto.ProfileOptions;
 
-    pub fn init(api: ?c.PLUGIN_Profiler_Api, options: Options) Profiler {
+    pub const default_options: Options = .{
+        .version = 1,
+        .device_type = .UNSPECIFIED, // profile all devices
+        .include_dataset_ops = false, // tensorflow specific
+        .host_tracer_level = 2,
+        .device_tracer_level = 1,
+        .python_tracer_level = 0,
+        .enable_hlo_proto = true,
+        .start_timestamp_ns = 0,
+        .duration_ms = 0,
+        .repository_path = .Empty,
+    };
+
+    pub fn init(api: ?c.PLUGIN_Profiler_Api) Profiler {
+        return initWithOpts(api, default_options);
+    }
+
+    pub fn initWithOpts(api: ?c.PLUGIN_Profiler_Api, options: Options) Profiler {
         if (api == null) {
             return .{ .api = null, .inner = undefined };
         }
+        var options_with_timestamp = options;
+        options_with_timestamp.start_timestamp_ns = @trunc(std.time.nanoTimestamp());
 
         var buffer: [std.fs.max_path_bytes + @sizeOf(Options) * 4]u8 = undefined;
         var fba = std.heap.FixedBufferAllocator.init(&buffer);
-        const byte_options = options.encode(fba.allocator()) catch unreachable;
-        var res: Profiler = .{ .api = api, .inner = undefined };
+        const byte_options = options_with_timestamp.encode(fba.allocator()) catch unreachable;
         var args: c.PLUGIN_Profiler_Create_Args = .{
             .options = byte_options.ptr,
             .options_size = byte_options.len,
             .profiler = undefined, // out
         };
+        var res: Profiler = .{ .api = api, .inner = undefined };
         res.check(api.?.create.?(&args)) catch unreachable;
 
         res.inner = args.profiler.?;
@@ -70,15 +90,15 @@ pub const Profiler = struct {
         };
         try self.check(self.api.?.collect_data.?(&args));
         std.debug.assert(args.buffer_size_in_bytes > 0);
-        const buffer: ProfilingData = if (args.buffer == null) blk: {
-            std.log.debug("Plugin profiler wants us to allocate {d} bytes for profile data", .{args.buffer_size_in_bytes});
+        return if (args.buffer == null) blk: {
+            log.debug("Plugin profiler wants us to allocate {d} bytes for profile data", .{args.buffer_size_in_bytes});
             // The plugin want us to allocate memory for it:
             const buffer = try allocator.alloc(u8, args.buffer_size_in_bytes);
             args.buffer = buffer.ptr;
             try self.check(self.api.?.collect_data.?(&args));
             break :blk .{ .owned = buffer };
         } else blk: {
-            std.log.debug("Plugin profiler has {d} bytes of profile data", .{args.buffer_size_in_bytes});
+            log.debug("Plugin profiler has {d} bytes of profile data", .{args.buffer_size_in_bytes});
             // Drop sentinel. The profiler plugin returns a null terminated string.
             // But this is creating issues if we save the sentinel on disk,
             // because it will trip up protobuf readers.
@@ -86,9 +106,6 @@ pub const Profiler = struct {
             data = if (data.len > 0 and data[data.len - 1] == 0) data[0 .. data.len - 1] else data;
             break :blk .{ .external = data };
         };
-
-        // printDataAsXSpace(allocator, buffer.items());
-        return buffer;
     }
 
     pub fn dumpDataTo(
@@ -106,6 +123,31 @@ pub const Profiler = struct {
         defer file.close();
         log.info("Writing profiling data to {s} ({} bytes)", .{ file_name, profile_data.items().len });
         return try file.writeAll(profile_data.items());
+    }
+
+    pub fn dumpAsJsonTo(
+        self: *Profiler,
+        allocator: std.mem.Allocator,
+        dir: std.fs.Dir,
+        file_name: []const u8,
+    ) !void {
+        const profile_data = try self.collectData(allocator);
+        defer profile_data.free(allocator);
+
+        if (profile_data.items().len == 0) {
+            log.warn("No profile data was collected: {}", .{self});
+            return;
+        }
+
+        var converter = try TraceContainer.init(allocator, profile_data.items(), null);
+        defer converter.deinit();
+
+        var output_file = try dir.createFile(file_name, .{});
+        defer output_file.close();
+        var buffered_writer = std.io.bufferedWriter(output_file.writer());
+        log.info("Writing profiling data to {s}", .{file_name});
+        try converter.toJson(buffered_writer.writer());
+        try buffered_writer.flush();
     }
 
     fn check(self: *Profiler, c_error: ?*Error) !void {
