@@ -17,7 +17,6 @@ pub const available_targets = std.enums.values(Target);
 pub const CompilationOptions = struct {
     xla_dump_to: ?[]const u8 = null,
     xla_dump_fusion_visualization: bool = false,
-    cache_location: ?[]const u8 = null,
     sharding_enabled: bool = false,
     sharding_axes: std.BoundedArray([*:0]const u8, 8) = .{},
 };

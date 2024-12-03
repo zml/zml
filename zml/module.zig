@@ -203,35 +203,38 @@ pub const CompilationContext = struct {
         module.op().setAttributeByName("mhlo.num_partitions", mlir.IntegerAttribute(.i32).init(mlir_ctx, sharding.num_partitions).asAttr());
 
         const module_hash = computeModuleHash(self._platform, module);
+        var module_dir: ?[]const u8 = null;
+        var pjrt_location: ?[:0]const u8 = null;
+
         if (self._platform.compilation_options.xla_dump_to) |xla_dump_to| {
+            const module_dir_name = try std.fmt.allocPrint(arena, "{s}{s}{s}_{x}.{s}", .{ xla_dump_to, std.fs.path.sep_str, self._name, module_hash, @tagName(self._platform.target) });
+            try std.fs.cwd().makePath(module_dir_name);
+            module_dir = try std.fs.cwd().realpathAlloc(arena, module_dir_name);
+            const cache_dir = try std.fs.cwd().openDir(module_dir.?, .{});
+
             // Write the mlir to a file. All errors are discarded, since this is for debugging only.
-            if (std.fs.openDirAbsolute(xla_dump_to, .{})) |dir| {
-                const name = self._name;
-                const file_name = std.fmt.allocPrint(arena, "{s}_{x}.mlir", .{ name, module_hash }) catch name;
-                if (dir.createFile(file_name, .{ .truncate = true })) |file| {
-                    module.op().print(file.writer(), .{ .debug_info = true, .debug_info_pretty_form = false });
-                    log.info("Wrote MLIR to {s}/{s}", .{ xla_dump_to, file_name });
-                } else |_| {
-                    log.warn("Failed to open {s}", .{file_name});
-                }
+            const mlir_name = "module.mlir";
+            if (cache_dir.createFile(mlir_name, .{ .truncate = true })) |file| {
+                module.op().print(file.writer(), .{ .debug_info = true, .debug_info_pretty_form = false });
+                log.info("Wrote MLIR to {s}/{s}", .{ module_dir.?, mlir_name });
             } else |_| {
-                log.warn("Folder not found {s}", .{xla_dump_to});
+                log.warn("Failed to open {s}", .{mlir_name});
             }
+
+            pjrt_location = try std.fs.path.joinZ(arena, &.{ module_dir.?, "module.pjrt" });
         }
 
-        const tracer = Tracer.init("ai.zml.compilation");
-        const compile_frame = tracer.frameStart("pjrt cached compilation");
-        defer tracer.frameEnd(compile_frame, "pjrt cached compilation");
-
         const loaded_executable: *pjrt.LoadedExecutable = blk: {
-            const cache_location = try absoluteCacheFileZ(arena, self._platform.compilation_options.cache_location, module_hash);
-            if (cache_location) |cache_file| {
-                if (loadPjrtExecutable(arena, self._platform, cache_file)) |exe| {
+            if (pjrt_location) |pjrt_loc| {
+                if (loadPjrtExecutable(arena, self._platform, pjrt_loc)) |exe| {
+                    log.info("Loaded pre-compiled module from {s}", .{pjrt_loc});
                     break :blk exe;
-                } else |_| {}
+                } else |err| {
+                    if (err != error.FileNotFound) log.warn("Failed to load pre-compiled module: {} at {s}", .{ err, pjrt_loc });
+                }
             }
 
-            const loaded_executable = compileModuleToPjrtExecutable(arena, self._platform, module) catch |err| {
+            const loaded_executable = compileModuleToPjrtExecutable(arena, self._platform, module, module_dir.?) catch |err| {
                 log.err(
                     "pjrt-{s} failed to compile following valid MLIR:\n{}\n{}",
                     .{ @tagName(self._platform.target), module.op().mlirFormatter(.{}), err },
@@ -239,9 +242,9 @@ pub const CompilationContext = struct {
                 return err;
             };
 
-            if (cache_location) |cache_file| {
-                storePjrtExecutable(self._platform, loaded_executable, cache_file) catch |err| {
-                    log.debug("Failed to store module: {}", .{err});
+            if (pjrt_location) |pjrt_loc| {
+                storePjrtExecutable(self._platform, loaded_executable, pjrt_loc) catch |err| {
+                    log.warn("Failed to store compiled module: {} at {s}", .{ err, pjrt_loc });
                 };
             }
             break :blk loaded_executable;
@@ -813,22 +816,13 @@ fn computeModuleHash(platform: Platform, module: mlir.Module) u64 {
     return hasher.final();
 }
 
-fn absoluteCacheFileZ(arena: std.mem.Allocator, cache_path: ?[]const u8, module_hash: u64) !?[:0]const u8 {
-    if (cache_path == null) return null;
-    const resolved_path = try std.fs.cwd().realpathAlloc(arena, cache_path.?);
-    std.fs.makeDirAbsolute(resolved_path) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-
-    var buf: [24]u8 = undefined;
-    const module_name = std.fmt.bufPrint(&buf, "{x}.pjrt", .{module_hash}) catch unreachable;
-    return try std.fs.path.joinZ(arena, &.{ resolved_path, module_name });
-}
-
 const max_pjrt_executable_size = 400 * 1024 * 1024;
 
 fn loadPjrtExecutable(arena: std.mem.Allocator, platform: Platform, absolute_file: [:0]const u8) !*pjrt.LoadedExecutable {
+    const tracer = Tracer.init("ai.zml.load_exe");
+    const compile_frame = tracer.frameStart("pjrt load executable");
+    defer tracer.frameEnd(compile_frame, "pjrt load executable");
+
     const loaded_executable_file = try std.fs.openFileAbsoluteZ(absolute_file, .{});
     defer loaded_executable_file.close();
 
@@ -837,12 +831,7 @@ fn loadPjrtExecutable(arena: std.mem.Allocator, platform: Platform, absolute_fil
     defer arena.free(bytes);
 
     const size = try loaded_executable_file.readAll(bytes);
-
-    log.info("Loading module from {s}", .{absolute_file});
-    return platform.pjrt_client.deserializeAndLoad(platform.pjrt_api, bytes[0..size]) catch |err| {
-        log.warn("Failed to load module: {}", .{err});
-        return err;
-    };
+    return try platform.pjrt_client.deserializeAndLoad(platform.pjrt_api, bytes[0..size]);
 }
 
 fn storePjrtExecutable(platform: Platform, loaded_executable: *pjrt.LoadedExecutable, absolute_file: [:0]const u8) !void {
@@ -856,10 +845,13 @@ fn storePjrtExecutable(platform: Platform, loaded_executable: *pjrt.LoadedExecut
     defer serialize_result.deinit();
 
     try loaded_executable_file.writeAll(serialize_result.bytes);
-    log.info("Stored module to {s}", .{absolute_file});
 }
 
-fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, module: mlir.Module) !*pjrt.LoadedExecutable {
+fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, module: mlir.Module, xla_dump_to_: ?[]const u8) !*pjrt.LoadedExecutable {
+    const tracer = Tracer.init("ai.zml.compilation");
+    const compile_frame = tracer.frameStart("pjrt compilation");
+    defer tracer.frameEnd(compile_frame, "pjrt compilation");
+
     const sharding = platform.sharding();
 
     // NOTE(Corendos): Hack needed because Protobuf struct are not public.
@@ -887,7 +879,7 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, m
     };
 
     // Let the arena deinit, zig-protobuf deinit is very slow.
-    if (platform.compilation_options.xla_dump_to) |xla_dump_to| {
+    if (xla_dump_to_ orelse platform.compilation_options.xla_dump_to) |xla_dump_to| {
         try options.env_option_overrides.append(arena, .{
             .key = .{ .Const = "xla_dump_to" },
             .value = .{ .value = .{ .string_field = .{ .Const = xla_dump_to } } },
