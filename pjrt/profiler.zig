@@ -29,16 +29,12 @@ pub const Profiler = struct {
         .repository_path = .Empty,
     };
 
-    pub fn init(api: ?c.PLUGIN_Profiler_Api) Profiler {
-        return initWithOpts(api, default_options);
-    }
-
-    pub fn initWithOpts(api: ?c.PLUGIN_Profiler_Api, options: Options) Profiler {
+    pub fn init(api: ?c.PLUGIN_Profiler_Api, options: ?Options) Profiler {
         if (api == null) {
             return .{ .api = null, .inner = undefined };
         }
-        var options_with_timestamp = options;
-        options_with_timestamp.start_timestamp_ns = @trunc(std.time.nanoTimestamp());
+        var options_with_timestamp = options orelse default_options;
+        options_with_timestamp.start_timestamp_ns = @truncate(@max(0, std.time.nanoTimestamp()));
 
         var buffer: [std.fs.max_path_bytes + @sizeOf(Options) * 4]u8 = undefined;
         var fba = std.heap.FixedBufferAllocator.init(&buffer);
