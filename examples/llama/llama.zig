@@ -367,12 +367,12 @@ pub const KvCache = struct {
                 .{ .layer = self.layer_index, .k = token_index },
                 // transpose to match kv-cache layout
                 new_k.contiguous(.{ .h, .k, .hd }),
-            ),
+            ).reuseBuffer(self.k),
             .v = self.v.dynamicUpdateSlice(
                 .{ .layer = self.layer_index, .k = token_index },
                 // transpose to match kv-cache layout
                 new_v.contiguous(.{ .h, .k, .hd }),
-            ),
+            ).reuseBuffer(self.v),
             .layer_index = self.layer_index,
         };
     }
