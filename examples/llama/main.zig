@@ -71,6 +71,7 @@ pub fn generateText(
 
     const start = std.time.microTimestamp();
     const output_freq: u8 = 1;
+    var eos_index: ?usize = null;
     for (0..output_tokens_len) |i| {
         //_ = i;
         const frame_id = tracer.frameStart(try std.fmt.bufPrintZ(tracer_buffer, "Generate token {}/{}", .{ i + 1, output_tokens_len }));
@@ -82,26 +83,43 @@ pub fn generateText(
             decode_progress += output_freq;
             std.debug.print("{s}", .{output.items[n..]});
             tracer.frameEnd(frame_id, try std.fmt.bufPrintZ(tracer_buffer, "Decoded token {}/{} : {s}", .{ i + 1, output_tokens_len, output.items[n..] }));
+
+            // These are almost certainly not the most optimal way to detect an EOS token.
+            // Do tinyLlama or openLlama use different tokenizers? Can we get these eos values automatically?
+            if (std.mem.indexOfScalar(i32, token_buffer[decode_progress..], 128001)) |_| {
+                eos_index = decode_progress;
+                break;
+            }
+            if (std.mem.indexOfScalar(i32, token_buffer[decode_progress..], 128008)) |_| {
+                eos_index = decode_progress;
+                break;
+            }
+            if (std.mem.indexOfScalar(i32, token_buffer[decode_progress..], 128009)) |_| {
+                eos_index = decode_progress;
+                break;
+            }
         } else {
             tracer.frameEnd(frame_id, try std.fmt.bufPrintZ(tracer_buffer, "Generated token {}/{}", .{ i + 1, output_tokens_len }));
         }
     }
-    std.debug.print("\n", .{});
-
+    var actual_token_count: usize = max_seq_len;
     const n = output.items.len;
-    try tokenizer.decodeWithOpts(&output, @ptrCast(token_buffer[decode_progress..]), .{});
+    if (eos_index) |end_idx| {
+        //Currently prints out EOS token
+        actual_token_count = end_idx + 1;
+    }
+    try tokenizer.decodeWithOpts(&output, @ptrCast(token_buffer[decode_progress..actual_token_count]), .{});
     std.debug.print("{s}\n", .{output.items[n..]});
     const end = std.time.microTimestamp();
 
     const duration = stdx.math.divFloat(f64, end - start, std.time.us_per_s);
-    const speed = @as(f64, @floatFromInt(max_seq_len)) / duration;
-    log.info("✅ Generated {d} tokens in {:.3}s: {d:.3}tok/s", .{ max_seq_len, duration, speed });
+    const speed = @as(f64, @floatFromInt(actual_token_count)) / duration;
+    log.info("✅ Generated {d} tokens in {:.3}s: {d:.3}tok/s", .{ actual_token_count, duration, speed });
 
     _ = try tokens.toHost(std.mem.sliceAsBytes(token_buffer));
-    const end_index = std.mem.indexOfScalar(i32, token_buffer, 128001) orelse max_seq_len;
     output.clearRetainingCapacity();
 
-    try tokenizer.decodeWithOpts(&output, @ptrCast(token_buffer[0..end_index]), .{});
+    try tokenizer.decodeWithOpts(&output, @ptrCast(token_buffer[0..actual_token_count]), .{});
     return output.toOwnedSlice();
 }
 
