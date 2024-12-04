@@ -734,52 +734,6 @@ pub fn addHostCallback(
         .host = HostBuffer.fromBytes(input.shape(), full_data[0..len]),
     };
 
-    const backend_config: [2:null]?*const anyopaque = .{ callback, stable_ctx_ptr };
-    const ctx = CompilationContext.current();
-
-    const loc = ctx.mlirCtx().location(@src());
-    const op = dialect.stablehlo.custom_call(
-        ctx.mlirCtx(),
-        &.{input.value()},
-        .{ .legacy = .{
-            .api_version = 1,
-            .has_side_effect = false,
-            .call_target_name = "zmlHostBufferCallback",
-            .backend_config = @ptrCast(std.mem.sliceAsBytes(&backend_config)),
-            .output_operand_aliases = &.{0},
-        } },
-        &.{input.value().getType()},
-        loc,
-    );
-    return Tensor._result(input.shape(), op.result(0));
-}
-
-/// At runtime the given tensor will be materialized and copied to host,
-/// and the callback will be called on it.
-pub fn addHostCallback2(
-    callback: *const fn (HostBuffer) void,
-    input: Tensor,
-) Tensor {
-    // TODO: implement addCallback that exposes a pjrt.Buffer, so that the user can decide if they need to copy.
-    if (input.getContext().target() != .cuda) return input;
-
-    const len = input.byteSize();
-    // Reserve memory to be able to log the runtime Buffer later during the computation.
-    // This memory is leaked, we currently have no way to tie this lifetime to the lifetime of the module being compiled.
-    const HostCallbackCtx = Context.HostCallbackCtx;
-    const full_data = std.heap.page_allocator.alignedAlloc(u8, 32, len + 2 * @sizeOf(HostCallbackCtx)) catch {
-        log.err("Failed to pre-allocate buffer to print {}.", .{input});
-        return input;
-    };
-
-    // Save the HostBuffer inside the same memory slice, so that it's still present at runtime.
-    // Use an fba to have the stable buffer at an aligned offset.
-    var fba = std.heap.FixedBufferAllocator.init(full_data[len..]);
-    const stable_ctx_ptr = fba.allocator().create(HostCallbackCtx) catch unreachable;
-    stable_ctx_ptr.* = .{
-        .host = HostBuffer.fromBytes(input.shape(), full_data[0..len]),
-    };
-
     const ctx = CompilationContext.current();
 
     const loc = ctx.mlirCtx().location(@src());
@@ -789,7 +743,7 @@ pub fn addHostCallback2(
         .{ .ffi = .{
             .api_version = 4,
             .has_side_effect = false,
-            .call_target_name = "zmlHostBufferCallback2",
+            .call_target_name = "zmlHostBufferCallback",
             .backend_config = .{ .entries = &.{
                 .{ .name = "callback", .value = .{ .scalar = .{ .i64 = @bitCast(@intFromPtr(callback)) } } },
                 .{ .name = "context", .value = .{ .scalar = .{ .i64 = @bitCast(@intFromPtr(stable_ctx_ptr)) } } },
