@@ -106,24 +106,25 @@ pub fn generateText(
             tracer.frameEnd(frame_id, try std.fmt.bufPrintZ(tracer_buffer, "Generated token {}/{}", .{ i + 1, output_tokens_len }));
         }
     }
-    var actual_token_count: usize = max_seq_len;
+    var total_token_count: usize = max_seq_len;
     const n = output.items.len;
     if (eos_index) |end_idx| {
         //Currently prints out EOS token
-        actual_token_count = end_idx + 1;
+        total_token_count = end_idx + 1;
     }
-    try tokenizer.decodeWithOpts(&output, @ptrCast(token_buffer[decode_progress..actual_token_count]), .{});
+    const generated_token_count = total_token_count - prompt_tok.len;
+    try tokenizer.decodeWithOpts(&output, @ptrCast(token_buffer[decode_progress..total_token_count]), .{});
     std.debug.print("{s}\n", .{output.items[n..]});
     const end = std.time.microTimestamp();
 
     const duration = stdx.math.divFloat(f64, end - start, std.time.us_per_s);
-    const speed = @as(f64, @floatFromInt(actual_token_count)) / duration;
-    log.info("✅ Generated {d} tokens in {:.3}s: {d:.3}tok/s", .{ actual_token_count, duration, speed });
+    const speed = @as(f64, @floatFromInt(generated_token_count)) / duration;
+    log.info("✅ Generated {d} tokens in {:.3}s: {d:.3}tok/s", .{ generated_token_count, duration, speed });
 
     _ = try tokens.toHost(std.mem.sliceAsBytes(token_buffer));
     output.clearRetainingCapacity();
 
-    try tokenizer.decodeWithOpts(&output, @ptrCast(token_buffer[0..actual_token_count]), .{});
+    try tokenizer.decodeWithOpts(&output, @ptrCast(token_buffer[0..total_token_count]), .{});
     return output.toOwnedSlice();
 }
 
