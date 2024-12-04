@@ -684,9 +684,7 @@ pub fn fromMlirOperationWithTags(op: mlir.Operation, base: anytype) @TypeOf(base
 /// For example, this can be used to extract tokens quickly if they run on a loop on the
 /// GPU.
 pub fn identityCustomCall(name: [:0]const u8, input: Tensor, context: ?*anyopaque) Tensor {
-    _ = context; // autofix
-    const stable_ptr = std.heap.page_allocator.alloc(u8, 100) catch unreachable;
-    const context_ptr: i64 = @bitCast(@intFromPtr(stable_ptr.ptr));
+    const context_ptr: i64 = @bitCast(@intFromPtr(context));
 
     const ctx = CompilationContext.current();
 
