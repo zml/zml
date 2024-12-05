@@ -86,7 +86,7 @@ pub fn asyncMain() !void {
     const compiled_mnist = try compilation.awaitt();
     log.info("✅ Compiled model in {d}ms", .{start_time.read() / std.time.ns_per_ms});
 
-    var mnist = try compiled_mnist.prepare(allocator, model_weights);
+    const mnist = compiled_mnist.prepare(model_weights);
     defer mnist.deinit();
     log.info("✅ Weights transferred in {d}ms", .{start_time.read() / std.time.ns_per_ms});
 

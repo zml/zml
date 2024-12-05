@@ -1,8 +1,8 @@
 const std = @import("std");
 
-const compileError = @import("meta.zig").compileError;
+const compileError = @import("debug.zig").compileError;
 
-pub fn ArgsTuple(comptime funcT: anytype, comptime argsT: ?type) type {
+pub fn ArgsTuple(comptime funcT: anytype, comptime ArgsT: ?type) type {
     const params = @typeInfo(funcT).Fn.params;
     if (params.len == 0) {
         return @TypeOf(.{});
@@ -12,8 +12,11 @@ pub fn ArgsTuple(comptime funcT: anytype, comptime argsT: ?type) type {
         return std.meta.ArgsTuple(funcT);
     }
 
-    const args = std.meta.fields(argsT orelse compileError("generic function requires an explicit ArgsTuple", .{}));
+    const args = std.meta.fields(ArgsT orelse compileError("generic function requires an explicit ArgsTuple", .{}));
     var tuple_fields: [params.len]std.builtin.Type.StructField = undefined;
+    if (params.len != args.len) {
+        compileError("function {} expected {} args, got {}", .{ funcT, params.len, args.len });
+    }
     inline for (params, args, 0..) |param, arg, i| {
         if (param.type == null) {
             tuple_fields[i] = arg;
@@ -44,15 +47,30 @@ pub fn ArgsTuple(comptime funcT: anytype, comptime argsT: ?type) type {
     });
 }
 
-pub fn FnSignature(comptime func: anytype, comptime argsT: ?type) type {
-    return FnSignatureX(func, ArgsTuple(@TypeOf(func), argsT));
+pub fn FnSignature(comptime func: anytype, comptime ArgsT: ?type) type {
+    const n_params = switch (@typeInfo(@TypeOf(func))) {
+        .Fn => |fn_info| fn_info.params.len,
+        else => compileError("FnSignature expects a function as first argument got: {}", .{@TypeOf(func)}),
+    };
+    if (ArgsT != null) {
+        const n_args = switch (@typeInfo(ArgsT.?)) {
+            .Struct => |struct_info| struct_info.fields.len,
+            else => compileError("function {} need to be called with a tuple of args", .{@TypeOf(func)}),
+        };
+        if (n_params != n_args) {
+            compileError("function {} expected {} args, got {}", .{ @TypeOf(func), n_params, n_args });
+        }
+    }
+    return FnSignatureX(func, ArgsTuple(@TypeOf(func), ArgsT));
 }
 
-fn FnSignatureX(comptime func: anytype, comptime argsT: type) type {
+// TODO: I think this should return a struct instead of returing at type
+// this gives a better error stacktrace because here the error is delayed to when the fields are read.
+fn FnSignatureX(comptime func: anytype, comptime ArgsT_: type) type {
     return struct {
         pub const FuncT = @TypeOf(func);
-        pub const ArgsT = argsT;
-        pub const ReturnT = @TypeOf(@call(.auto, func, @as(ArgsT, undefined)));
+        pub const ArgsT = ArgsT_;
+        pub const ReturnT = @TypeOf(@call(.auto, func, @as(ArgsT_, undefined)));
         pub const ReturnPayloadT = switch (@typeInfo(ReturnT)) {
             .ErrorUnion => |u| u.payload,
             else => ReturnT,
