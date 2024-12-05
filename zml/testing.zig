@@ -138,7 +138,7 @@ pub fn compileAndCall(platform: zml.Platform, func: anytype, buffer_args: zml.Bu
         }
     };
     var shape_args: zml.ShapeOf(stdx.meta.FnArgs(func)) = undefined;
-    try meta.mapAlloc(Local.bufferToShape, allocator, {}, buffer_args, &shape_args);
+    try meta.mapAlloc(Local.bufferToShape, arena.allocator(), {}, buffer_args, &shape_args);
 
     const mod = try zml.compileFn(allocator, func, shape_args, platform);
     defer mod.deinit();

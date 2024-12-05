@@ -30,9 +30,10 @@ test {
 
 /// Generate an MLIR call to the given member function with the given tensors.
 pub fn call(self: anytype, comptime func: stdx.meta.DeclEnum(@TypeOf(self)), args: anytype) @TypeOf(@call(.auto, @field(stdx.meta.UnwrapPtr(@TypeOf(self)), @tagName(func)), .{self} ++ args)) {
-    // TODO: this should use `self.getContext().callFunc(self, args)`
-
-    return @call(.auto, @field(@TypeOf(self), @tagName(func)), .{self} ++ args);
+    const ctx = CompilationContext.current();
+    const name = @typeName(@TypeOf(self)) ++ "." ++ @tagName(func);
+    const actual_fn = @field(@TypeOf(self), @tagName(func));
+    return ctx.callFunc(name, actual_fn, .{self} ++ args);
 }
 
 pub fn while_(

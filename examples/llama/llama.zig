@@ -180,10 +180,8 @@ pub const Llama = struct {
         var updated_kv_cache = kv_cache0;
         for (self.layers, 0..) |layer, i| {
             hidden, updated_kv_cache = zml.call(layer, .forward, .{ hidden, token_index, updated_kv_cache.atLayer(i) });
-            hidden = hidden.withPartialTags(.{ .s, .d });
         }
-        // TODO: tags seem to be lost by `callFunc`.
-        const output = zml.call(self.norm, .forward, .{hidden.withPartialTags(.{ .s, .d })});
+        const output = zml.call(self.norm, .forward, .{hidden});
 
         return .{ output, updated_kv_cache.reuseBuffer(kv_cache0) };
     }

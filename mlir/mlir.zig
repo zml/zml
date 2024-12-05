@@ -333,6 +333,8 @@ pub const Identifier = struct {
     }
 };
 
+pub const AttrTuple = struct { [:0]const u8, Attribute };
+
 pub const Attribute = struct {
     _inner: c.MlirAttribute,
     pub usingnamespace MlirHelpers(Attribute, .{
@@ -790,8 +792,6 @@ pub const Operation = struct {
             c.mlirOperationCreate(state.innerPtr()),
         ) orelse Error.InvalidMlir;
     }
-
-    pub const AttrTuple = struct { [:0]const u8, Attribute };
 
     pub fn make(ctx: Context, op_name: [:0]const u8, args: struct {
         operands: ?[]const Value = null,
