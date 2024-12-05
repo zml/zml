@@ -49,7 +49,7 @@ const Block = union(BlockKind) {
             .op_result => |parent_op| self.appendOperationRecursive(parent_op),
             .block_argument => |arg| {
                 // Hermetic blocks are not allowed to use arguments from other blocks.
-                stdx.debug.assert(self == .open or self.block().eql(arg.block()), "Can't add {}  from {?x} block to {?x} block", .{ arg, arg.block()._inner.ptr, self.block()._inner.ptr });
+                stdx.debug.assert(self == .open or self.block().eql(arg.block()), "Can't add {} from {?x} block to {?x} block", .{ arg, arg.block()._inner.ptr, self.block()._inner.ptr });
             },
             .null => @panic("InvalidMlir"),
         }
