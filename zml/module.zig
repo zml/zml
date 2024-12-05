@@ -776,11 +776,13 @@ fn absoluteCacheFileZ(arena: std.mem.Allocator, cache_path: ?[]const u8, module_
     return try std.fs.path.joinZ(arena, &.{ resolved_path, module_name });
 }
 
+const max_pjrt_executable_size = 400 * 1024 * 1024;
+
 fn loadPjrtExecutable(arena: std.mem.Allocator, platform: Platform, absolute_file: [:0]const u8) !*pjrt.LoadedExecutable {
     const loaded_executable_file = try std.fs.openFileAbsoluteZ(absolute_file, .{});
     defer loaded_executable_file.close();
 
-    const exe_size = if (loaded_executable_file.stat()) |stat| stat.size else |_| 400 * 1024 * 1024;
+    const exe_size = if (loaded_executable_file.stat()) |stat| stat.size else |_| max_pjrt_executable_size;
     const bytes = try arena.alloc(u8, exe_size);
     defer arena.free(bytes);
 
@@ -861,7 +863,7 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, m
             // https://github.com/NVIDIA/JAX-Toolbox?tab=readme-ov-file#environment-variables
             try options.env_option_overrides.append(arena, .{
                 .key = .{ .Const = "xla_gpu_enable_triton_gemm" },
-                .value = .{ .value = .{ .bool_field = true } },
+                .value = .{ .value = .{ .bool_field = false } },
             });
             // try options.env_option_overrides.append(arena, .{
             //     .key = .{ .Const = "xla_gpu_enable_latency_hiding_scheduler" },
