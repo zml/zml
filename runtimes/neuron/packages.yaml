@@ -10,7 +10,7 @@ version: 1
 
 sources:
   - channel: bookworm main
-    url: https://deb.debian.org/debian
+    url: https://snapshot-cloudflare.debian.org/archive/debian/20241127T143620Z/
   - channel: jammy main
     url: https://apt.repos.neuron.amazonaws.com
 
