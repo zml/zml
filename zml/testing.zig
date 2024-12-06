@@ -201,8 +201,8 @@ pub fn testLayerOut(
     const exe = try zml.compileModel(alloc, fwd, layer, input_shapes, platform);
 
     const n_out_exp = activations.countLayers(out_name);
-    if (exe.inner.result_buffer_count != n_out_exp) {
-        log.warn("Reference models produces {d} outputs, but implementation produces {d}", .{ n_out_exp, exe.inner.result_buffer_count });
+    if (exe.inner.result_shapes.len != n_out_exp) {
+        log.warn("Reference models produces {d} outputs, but implementation produces {d}", .{ n_out_exp, exe.inner.result_shapes.len });
     }
     const mod = exe.prepare(layer_weights);
 
@@ -243,13 +243,13 @@ pub fn testLayerOut(
 
     var buf: [1024]u8 = undefined;
     var failed: bool = false;
-    for (0..mod.inner.result_buffer_count) |i| {
+    for (0..mod.inner.result_shapes.len) |i| {
         const full_name = std.fmt.bufPrint(&buf, "{s}.{d}", .{ out_name, i }) catch unreachable;
         const expected_out = activations.get(full_name) orelse {
             log.warn("Output buffer not found: {s}", .{full_name});
             continue;
         };
-        zml.testing.expectClose(expected_out, mod.getOutputBuffer(i), tolerance) catch |err| switch (err) {
+        zml.testing.expectClose(expected_out, mod.inner.getOutputBuffer(i), tolerance) catch |err| switch (err) {
             error.TestUnexpectedResult => {
                 log.err("{s}.{d} doesn't match !", .{ out_name, i });
                 failed = true;
@@ -261,6 +261,34 @@ pub fn testLayerOut(
 
     if (failed) return error.TestUnexpectedResult;
     log.info("all good for {s} !", .{name});
+}
+
+test testLayer {
+    const platform = env();
+
+    // create a model
+    const layer: zml.nn.Linear = .{
+        .weight = zml.Tensor{ ._shape = zml.Shape.init(.{ 5, 2 }, .f32), ._id = .{ .buffer_id = 42 } },
+    };
+    const layer_weights: zml.Bufferized(zml.nn.Linear) = .{
+        .weight = try zml.Buffer.fromArray(
+            platform,
+            [5][2]f32{ .{ 0, 0 }, .{ 0, 1 }, .{ 1, 2 }, .{ -1, -1 }, .{ -1, 0 } },
+        ),
+    };
+
+    // create a buffer store containing the activations:
+    var activations = try zml.aio.BufferStore.init(std.testing.allocator, &.{});
+    defer activations.deinit();
+    {
+        const input = zml.HostBuffer.fromArray(&[2]f32{ 1, -1 });
+        try activations.buffers.put(activations.arena.allocator(), "model.layer.in.0", input);
+        const output = zml.HostBuffer.fromArray(&[5]f32{ 0, -1, -1, 0, -1 });
+        try activations.buffers.put(activations.arena.allocator(), "model.layer.out.0", output);
+    }
+
+    // test the ZML layer reproduces the "captured" activations:
+    try zml.testing.testLayer(platform, activations, "model.layer", layer, layer_weights, 1e-5);
 }
 
 pub inline fn expectEqual(expected: anytype, actual: @TypeOf(expected)) !void {

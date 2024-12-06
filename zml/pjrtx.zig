@@ -42,8 +42,40 @@ fn InnerMixin(comptime innerT: type) type {
 pub const Client = opaque {
     const inner = InnerMixin(pjrt.Client).inner;
 
-    pub fn init(api: *const Api, create_options: []const NamedValue) ClientInitError!*Client {
-        return @ptrCast(try pjrt.Client.init(api, create_options));
+    pub const Allocator = enum {
+        default, // the client chose the best option
+        bfc, // "Best-Fit with Coalescing" algorithm
+        cuda_async, // use cudaMallocAsync
+        platform, // the platform default eg cuMalloc
+    };
+
+    pub const CreateOptions = struct {
+        allocator: Allocator = .default,
+        // preallocate and memory fraction are only used by the bfc allocator
+        preallocate: bool = true,
+        memory_fraction: ?f32 = null,
+        collective_memory_size_mb: ?u16 = null,
+        // TODO support all of https://github.com/openxla/xla/blob/3d31c48c719d331d432132b3e0c2c5ce52650675/xla/pjrt/c/pjrt_c_api_gpu_internal.cc#L76-L86
+    };
+
+    pub fn init(api: *const Api, options: CreateOptions) ClientInitError!*Client {
+        var values: std.BoundedArray(NamedValue, 4) = .{};
+
+        values.appendAssumeCapacity(NamedValue.from("allocator", options.allocator));
+        values.appendAssumeCapacity(NamedValue.from("preallocate", options.preallocate));
+        if (options.memory_fraction) |memory_fraction| {
+            values.appendAssumeCapacity(NamedValue.from("memory_fraction", memory_fraction));
+        }
+        if (options.collective_memory_size_mb) |collective_memory_size_mb| {
+            const collective = @as(i64, collective_memory_size_mb) * 1024 * 1024;
+            values.appendAssumeCapacity(NamedValue.from("collective_memory_size", collective));
+        }
+
+        return initWithOpts(api, values.constSlice());
+    }
+
+    pub fn initWithOpts(api: *const Api, options: []const NamedValue) ClientInitError!*Client {
+        return @ptrCast(try pjrt.Client.init(api, options));
     }
 
     pub fn deinit(self: *Client, api: *const Api) void {

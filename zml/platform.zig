@@ -30,8 +30,8 @@ pub const Platform = struct {
 
     pub const MAX_NUM_DEVICES: u8 = 32;
 
-    pub fn init(target: Target, api: *const pjrt.Api) !Platform {
-        const pjrt_client = try pjrt.Client.init(api, &.{});
+    pub fn init(target: Target, api: *const pjrt.Api, options: pjrt.Client.CreateOptions) !Platform {
+        const pjrt_client = try pjrt.Client.init(api, options);
         const true_num_devices = pjrt_client.getAddressableDevices(api).len;
         if (true_num_devices > MAX_NUM_DEVICES) {
             log.warn("platform {} got {} devices, but ZML only support up to {} devices. Some devices won't be used.", .{ target, true_num_devices, MAX_NUM_DEVICES });

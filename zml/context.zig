@@ -83,7 +83,7 @@ pub const Context = struct {
         while (it.next()) |entry| {
             if (entry.value.*) |api| {
                 const target = entry.key;
-                const p = Platform.init(target, api) catch |err| {
+                const p = Platform.init(target, api, .{}) catch |err| {
                     log.err("Failed to load platform .{s}: {}", .{ @tagName(target), err });
                     continue;
                 };
