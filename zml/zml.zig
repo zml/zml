@@ -36,6 +36,7 @@ pub const compileFn = exe.compileFn;
 pub const compileModel = exe.compileModel;
 pub const FnExe = exe.FnExe;
 pub const ModuleExe = exe.ModuleExe;
+pub const ModuleSignature = exe.ModuleSignature;
 
 pub const ops = @import("ops.zig");
 pub const tools = struct {

@@ -241,8 +241,7 @@ pub const BaseExe = struct {
             shards.appendAssumeCapacity(dev_out[i]);
         }
 
-        const out_shape = self.inner.result_buffer_shapes[i];
-        return Buffer.fromPjrtBuffers(self.platform(), out_shape, shards.constSlice());
+        return Buffer.fromPjrtBuffers(self.platform, self.result_shapes[i], shards.constSlice());
     }
 };
 
