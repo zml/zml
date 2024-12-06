@@ -17,9 +17,7 @@ const HostBuffer = @import("hostbuffer.zig").HostBuffer;
 const Shape = @import("shape.zig").Shape;
 const Tensor = @import("tensor.zig").Tensor;
 
-const dialect = struct {
-    const stablehlo = @import("mlir/dialects").stablehlo;
-};
+const dialect = @import("mlir/dialects");
 
 const assert = std.debug.assert;
 const log = std.log.scoped(.@"zml/tensor");
