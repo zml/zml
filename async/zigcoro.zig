@@ -5,6 +5,51 @@ const libcoro = @import("libcoro");
 const aio = libcoro.asyncio;
 const queue_mpsc = @import("queue_mpsc.zig");
 
+pub const Queue = @import("queue.zig").Intrusive;
+
+pub const Condition = struct {
+    const CoroResume = struct {
+        coro: libcoro.Frame,
+
+        fn init() CoroResume {
+            return .{ .coro = libcoro.xframe() };
+        }
+
+        fn func(self: *CoroResume) libcoro.Executor.Func {
+            return .{ .func = CoroResume.cb, .userdata = self };
+        }
+
+        fn cb(ud: ?*anyopaque) void {
+            const self: *CoroResume = @ptrCast(@alignCast(ud));
+            libcoro.xresume(self.coro);
+        }
+    };
+
+    exec: *libcoro.Executor,
+    waiters: Queue(libcoro.Executor.Func) = .{},
+
+    pub fn init() Condition {
+        return .{ .exec = &AsyncThread.current.executor.exec };
+    }
+
+    pub fn broadcast(self: *Condition) void {
+        while (self.waiters.pop()) |waiter| {
+            self.exec.runSoon(waiter);
+        }
+    }
+
+    pub fn signal(self: *Condition) void {
+        if (self.waiters.pop()) |waiter| self.exec.runSoon(waiter);
+    }
+
+    pub fn wait(self: *Condition) void {
+        var res = CoroResume.init();
+        var cb = res.func();
+        self.waiters.push(&cb);
+        libcoro.xsuspend();
+    }
+};
+
 pub fn Frame(comptime func: anytype) type {
     const Signature = stdx.meta.FnSignature(func, null);
     return FrameExx(func, Signature.ArgsT, Signature.ReturnT);
@@ -481,6 +526,31 @@ pub const Socket = struct {
         }
     };
 };
+
+pub fn Channel(comptime T: type, capacity: usize) type {
+    return struct {
+        const Self = @This();
+        const Inner = libcoro.Channel(T, .{ .capacity = capacity });
+
+        inner: Inner,
+
+        pub fn init() Self {
+            return .{ .inner = Inner.init(&AsyncThread.current.executor.exec) };
+        }
+
+        pub fn close(self: *Self) void {
+            self.inner.close();
+        }
+
+        pub fn send(self: *Self, val: T) void {
+            self.inner.send(val) catch unreachable;
+        }
+
+        pub fn recv(self: *Self) ?T {
+            return self.inner.recv();
+        }
+    };
+}
 
 pub const Mutex = struct {
     const VoidChannel = libcoro.Channel(void, .{ .capacity = 1 });
