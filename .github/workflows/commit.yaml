@@ -42,3 +42,9 @@ jobs:
         run: |
           export PATH=$PATH:~/bin
           bazel test --remote_cache=grpc://127.0.0.1:15501 //zml:test --test_output=streamed
+
+      - name: Build examples
+        working-directory: examples/
+        run: |
+          export PATH=$PATH:~/bin
+          bazel build --config=debug --remote_cache=grpc://127.0.0.1:15501 //llama
