@@ -282,7 +282,8 @@ executable.
 
 ```zig
 // pass the model weights to the compiled module to create an executable module
-var executable = try compiled.prepare(arena, model_weights);
+// all required memory has been allocated in `compile`.
+var executable = compiled.prepare(model_weights);
 defer executable.deinit();
 ```
 
@@ -498,7 +499,7 @@ pub fn asyncMain() !void {
 
     // pass the model weights to the compiled module to create an executable
     // module
-    var executable = try compiled.prepare(arena, model_weights);
+    var executable = compiled.prepare(model_weights);
     defer executable.deinit();
 
     // prepare an input buffer

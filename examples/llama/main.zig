@@ -23,19 +23,17 @@ const eos_tokens: [3]i32 = .{ 128001, 128008, 128009 };
 const show_mlir = true;
 
 pub const std_options = .{
-    .log_level = .err,
+    .log_level = .warn,
     .log_scope_levels = &[_]std.log.ScopeLevel{
-        .{ .scope = .pjrt, .level = if (show_mlir) .debug else .err },
-        .{ .scope = .zml_module, .level = if (show_mlir) .debug else .err },
-        .{ .scope = .zml, .level = if (show_mlir) .debug else .err },
-        .{ .scope = .llama, .level = if (show_mlir) .debug else .info },
+        .{ .scope = .zml_module, .level = if (show_mlir) .debug else .warn },
+        .{ .scope = .llama, .level = .info },
     },
 };
 
 pub fn generateText(
     llama: LlamaLM,
-    mod_prefill: zml.module.ExeWithWeights(LlamaLM.forward),
-    mod: zml.module.ExeWithWeights(LlamaLM.forward),
+    mod_prefill: zml.ModuleExe(LlamaLM.forward),
+    mod: zml.ModuleExe(LlamaLM.forward),
     tokenizer: zml.tokenizer.Tokenizer,
     allocator: std.mem.Allocator,
     seed: u128,
@@ -232,9 +230,9 @@ pub fn asyncMain() !void {
     defer zml.aio.unloadBuffers(&llama_weights);
     log.info("✅\tLoaded weights in {d}ms", .{start.read() / std.time.ns_per_ms});
 
-    var llama_module_prefill = try (try fut_mod_prefill.awaitt()).prepare(allocator, llama_weights);
+    var llama_module_prefill = (try fut_mod_prefill.awaitt()).prepare(llama_weights);
     defer llama_module_prefill.deinit();
-    var llama_module = try (try fut_mod.awaitt()).prepare(allocator, llama_weights);
+    var llama_module = (try fut_mod.awaitt()).prepare(llama_weights);
     defer llama_module.deinit();
     log.info("✅\tCompiled model in {d}ms", .{start.read() / std.time.ns_per_ms});
 

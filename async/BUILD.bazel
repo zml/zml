@@ -3,6 +3,7 @@ load("@rules_zig//zig:defs.bzl", "zig_library")
 zig_library(
     name = "async",
     srcs = [
+        "queue.zig",
         "queue_mpsc.zig",
     ],
     import_name = "async",

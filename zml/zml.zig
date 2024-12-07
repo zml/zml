@@ -18,6 +18,7 @@ pub const Tensor = @import("tensor.zig").Tensor;
 
 // Namespaces
 pub const context = @import("context.zig");
+pub const exe = @import("exe.zig");
 pub const floats = @import("floats.zig");
 pub const helpers = @import("helpers.zig");
 pub const nn = @import("nn.zig");
@@ -30,9 +31,11 @@ pub const torch = @import("torch.zig");
 pub const tokenizer = @import("tokenizer.zig");
 
 pub const call = ops.call;
-pub const compile = module.compile;
-pub const compileModel = module.compileModel;
-pub const compileFn = module.compileFn;
+pub const compile = exe.compile;
+pub const compileFn = exe.compileFn;
+pub const compileModel = exe.compileModel;
+pub const FnExe = exe.FnExe;
+pub const ModuleExe = exe.ModuleExe;
 
 pub const ops = @import("ops.zig");
 pub const tools = struct {

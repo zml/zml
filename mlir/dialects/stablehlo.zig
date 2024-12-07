@@ -189,7 +189,7 @@ pub fn dot_general(
     },
 ) mlir.Operation {
     const precisions = [1]mlir.Attribute{opts.precision.precisionAttr(ctx)} ** 2;
-    const attributes = [3]mlir.Operation.AttrTuple{
+    const attributes = [3]mlir.AttrTuple{
         .{
             "dot_dimension_numbers", DotDimensionNumbersAttribute.init(ctx, .{
                 .lhs_batching_dimensions = opts.lhs_batching_dimensions,
