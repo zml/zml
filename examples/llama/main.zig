@@ -17,6 +17,8 @@ const ShapeOf = zml.ShapeOf;
 
 const log = std.log.scoped(.llama);
 
+const eos_tokens: [3]i32 = .{ 128001, 128008, 128009 };
+
 // set this to false to disable the verbose logging
 const show_mlir = true;
 
@@ -87,19 +89,9 @@ pub fn generateText(
             decode_progress += output_freq;
             std.debug.print("{s}", .{output.items[n..]});
             tracer.frameEnd(frame_id, try std.fmt.bufPrintZ(tracer_buffer, "Decoded token {}/{} : {s}", .{ i + 1, output_tokens_len, output.items[n..] }));
-
-            // These are almost certainly not the most optimal way to detect an EOS token.
-            // Do tinyLlama or openLlama use different tokenizers? Can we get these eos values automatically?
-            if (std.mem.indexOfScalar(i32, token_buffer[decode_progress..], 128001)) |_| {
-                eos_index = decode_progress;
-                break;
-            }
-            if (std.mem.indexOfScalar(i32, token_buffer[decode_progress..], 128008)) |_| {
-                eos_index = decode_progress;
-                break;
-            }
-            if (std.mem.indexOfScalar(i32, token_buffer[decode_progress..], 128009)) |_| {
-                eos_index = decode_progress;
+            if (std.mem.indexOfAny(i32, token_buffer[decode_progress - output_freq ..], &eos_tokens)) |index| {
+                // Handle strange scenarios when eos id isn't the very next token after decode_progress
+                eos_index = decode_progress - output_freq + index;
                 break;
             }
         } else {
@@ -109,7 +101,7 @@ pub fn generateText(
     var total_token_count: usize = max_seq_len;
     const n = output.items.len;
     if (eos_index) |end_idx| {
-        //Currently prints out EOS token
+        // count = eos index + 1
         total_token_count = end_idx + 1;
     }
     const generated_token_count = total_token_count - prompt_tok.len;
