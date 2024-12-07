@@ -6,7 +6,7 @@ const runtimes = @import("runtimes");
 const std = @import("std");
 const stdx = @import("stdx");
 
-const platform = @import("platform.zig");
+const zml_platform = @import("platform.zig");
 const pjrt = @import("pjrtx.zig");
 
 const HostBuffer = @import("hostbuffer.zig").HostBuffer;
@@ -17,6 +17,10 @@ const Target = @import("platform.zig").Target;
 
 const available_targets = @import("platform.zig").available_targets;
 const log = std.log.scoped(.@"zml/context");
+
+test {
+    std.testing.refAllDecls(Context);
+}
 
 /// Every program using ZML must start with a `zml.Context.init(.{});`
 /// The ZML context contains global state to interact with the different
@@ -179,7 +183,7 @@ pub const Context = struct {
         return p;
     }
 
-    pub fn printAvailablePlatforms(self: Context, selected: platform.Platform) void {
+    pub fn printAvailablePlatforms(self: Context, selected: Platform) void {
         // List available targets
         log.info("Available Platforms:", .{});
         const selected_prefix = "✅";
@@ -187,7 +191,7 @@ pub const Context = struct {
         const selected_postfix = "(AUTO-SELECTED)";
         const not_selected_postfix = "";
 
-        for (platform.available_targets) |target| {
+        for (zml_platform.available_targets) |target| {
             log.info("  {s} {s} {s}", .{
                 if (target == selected.target) selected_prefix else not_selected_prefix,
                 @tagName(target),
