@@ -97,7 +97,7 @@ pub const LlamaLM = struct {
         var logits = if (self.lm_head) |lm_head|
             zml.call(lm_head, .forward, .{next_token_pred})
         else
-            next_token_pred.matmul(self.model.embed_tokens.weight.transpose(.{ -1, -2 })).withTags(.{.d});
+            self.model.embed_tokens.weight.withTags(.{ .voc, .d }).dot(next_token_pred, .{.d});
 
         if (logits.shape().hasTag(.voc) == null)
             logits = logits.rename(.{ .d = .voc });
