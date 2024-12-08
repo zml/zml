@@ -88,7 +88,7 @@ pub fn populateModelWithPrefix(comptime Model: type, allocator: std.mem.Allocato
     try prefix_builder.push(allocator, prefix);
     defer prefix_builder.deinit(allocator);
 
-    const unique_id = zml.Tensor.reserveIdRange(@intCast(store.buffers.count()));
+    const unique_id = zml.Tensor._reserveIdRange(@intCast(store.buffers.count()));
     const ok = _populateStruct(allocator, &prefix_builder, unique_id, store, &model, true) catch |err| {
         std.debug.panic("Can't populate model of type {s}: {s}", .{ @typeName(type), @errorName(err) });
     };

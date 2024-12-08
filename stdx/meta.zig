@@ -150,11 +150,17 @@ pub fn FnParam(comptime func: anytype, comptime n: comptime_int) type {
 }
 
 pub fn FnArgs(comptime func: anytype) type {
+    debug.assertComptime(!@typeInfo(@TypeOf(func)).Fn.is_generic, "FnArgs expects non generic function, got: {}", .{@TypeOf(func)});
     return FnSignature(func, null).ArgsT;
 }
 
+pub fn FnArgsWithHint(comptime func: anytype, ArgsT: type) type {
+    debug.assertComptime(@typeInfo(@TypeOf(func)).Fn.is_generic, "FnArgsWithHint expects a generic function, got: {}", .{@TypeOf(func)});
+    return FnSignature(func, ArgsT).ArgsT;
+}
+
 pub fn FnResult(comptime func: anytype) type {
-    return FnSignature(func, null).ReturnT;
+    return @typeInfo(@TypeOf(func)).Fn.return_type orelse @compileError("anytype is not supported");
 }
 
 pub fn Head(Tuple: type) type {
