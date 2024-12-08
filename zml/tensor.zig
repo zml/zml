@@ -1397,6 +1397,7 @@ pub const Tensor = struct {
     ///
     /// unflatten((d0, d1, axis_m, d3), 2, n) -> (d0, d1, n, d2_m, d3)
     pub fn unflatten(self: Tensor, axis_: i8, n: i64) Tensor {
+        // TODO: move to torch.zig, this equivalent to `spitAxis`
         stdx.debug.assert(self.rank() < Tensor.MAX_RANK, "unflatten expects input tensor rank to be less than {}, got {}", .{ Tensor.MAX_RANK, self.rank() });
 
         const a = if (axis_ >= 0) self.axis(axis_) else self.axis(axis_) + 1;
@@ -1452,6 +1453,7 @@ pub const Tensor = struct {
 
     /// Flattens the given axis and the next one, into one new axis.
     pub fn flatten(self: Tensor, axis_: anytype) Tensor {
+        // TODO: move to torch.zig, this is equivalent to merge
         const old_shape = self._shape;
         const a = self.axis(axis_);
         // stdx.debug.assert(a + 1 < self.rank(), "Can't flatten {} on the last axis {}.", .{ self, axis });
@@ -1470,6 +1472,7 @@ pub const Tensor = struct {
     }
 
     pub inline fn flattenAll(self: Tensor) Tensor {
+        // TODO: rename to just flatten, once flatten is moved to torch
         return self.reshape(.{self.count()});
     }
 
@@ -1554,7 +1557,8 @@ pub const Tensor = struct {
         return if (idx < 0) self.dim(axis_) + idx else idx;
     }
 
-    pub fn choose1d(self: Tensor, axis_: i64, i: i64) Tensor {
+    pub fn choose1d(self: Tensor, axis_: anytype, i: i64) Tensor {
+        // TODO: this use case could be handled directly by slice if we added a .single field
         return self.slice1d(axis_, .{ .start = i, .end = i + 1 }).squeeze(axis_);
     }
 
@@ -1658,6 +1662,7 @@ pub const Tensor = struct {
 
     /// Repeats in line each value along the given axes.
     pub fn stutter(self: Tensor, n_reps: []const u63) Tensor {
+        // TODO: this should support the tagged syntax: x.repeat(.{ .a = 3, .b = 2});
         stdx.debug.assert(n_reps.len == self.rank(), "stutter expects tensor rank and 'n_reps' length to be equal, got {} and {}", .{ self.rank(), n_reps.len });
 
         var res = self;
@@ -2939,6 +2944,7 @@ pub const Tensor = struct {
     /// Chunk a given tensor into exactly n parts of equal shape.
     /// `self.dim(axis_)` must be divisible by n_chunks.
     pub fn chunkExact(self: Tensor, axis_: anytype, n_chunks: comptime_int) [n_chunks]Tensor {
+        // TODO: all version of chunks should work with runtime n_chunks and allocate inside the compilation context arena
         const a = self.axis(axis_);
         const d = self.dim(a);
         const chunk_size = @divExact(d, n_chunks);
@@ -3037,6 +3043,7 @@ pub const Tensor = struct {
     }
 
     pub fn split(self: Tensor, allocator: std.mem.Allocator, split_size_or_sections: []const i64, axis_: i64) ![]Tensor {
+        // TODO this should use the compilation context arena
         stdx.debug.assert(split_size_or_sections.len > 0, "split expects 'split_size_or_sections' length to be positive, got {}", .{split_size_or_sections.len});
 
         const a = self.axis(axis_);
@@ -3566,6 +3573,7 @@ pub const Tensor = struct {
     /// In Pytorch/Numpy this is know as `meshgrid` with "ij" mode.
     /// See torch.meshgrid for the "xy" mode.
     pub fn cartesianProduct(comptime N: u3, vectors: [N]Tensor) [N]Tensor {
+        // TODO: use the compilation context allocator
         var out: @TypeOf(vectors) = undefined;
         _cartesianProduct(&vectors, &out);
         return out;
@@ -3641,6 +3649,7 @@ pub const Tensor = struct {
     /// we have:
     /// - res[a, b, c, d] == (A[a], B[b], C[c], D[d])
     pub fn cartesianProductStacked(vectors: []const Tensor) Tensor {
+        // this is workaround to not need an allocator: remove it
         var out = std.BoundedArray(Tensor, Tensor.MAX_RANK).init(vectors.len) catch unreachable;
         _cartesianProduct(vectors, out.slice());
 
