@@ -91,7 +91,7 @@ Let's explain all that.
 The model struct is the Zig code that describes your Neural Network (NN).
 Let's look a the following model architecture:
 
-![Multilayer perceptrons](https://zml.ai/docs-assets/perceptron.png)
+![Multilayer perceptrons](https://raw.githubusercontent.com/zml/zml.github.io/refs/heads/main/docs-assets/perceptron.png)
 
 This is how we can describe it in a Zig struct:
 
