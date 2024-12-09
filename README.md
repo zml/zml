@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="https://zml.ai/docs-assets/zml-banner.png" style="width:100%; height:120px;">
+  <img src="https://raw.githubusercontent.com/zml/zml.github.io/refs/heads/main/docs-assets/zml-banner.png" style="width:100%; height:120px;">
   <a href="https://zml.ai">Website</a>
   | <a href="#getting-started">Getting Started</a>
   | <a href="https://docs.zml.ai">Documentation</a>
