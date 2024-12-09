@@ -86,16 +86,15 @@ pub const CompilationContext = struct {
     _platform: Platform,
     _name: []const u8,
 
+    _arena: std.heap.ArenaAllocator,
     _mlir_ctx: mlir.Context,
     _mlir_registry: mlir.Registry,
     _mlir_canonicalizer: mlir.PassManager,
 
     _module: mlir.Module,
 
-    _blocks: std.BoundedArray(Block, 64),
-    _fn_cache: FnCache,
-    // TODO: make this an arena, that way it's fine if ops allocate inside it.
-    _allocator: std.mem.Allocator,
+    _blocks: std.BoundedArray(Block, 64) = .{},
+    _fn_cache: FnCache = .{},
 
     _buffer_to_arg: TensorToBlockArg = .{},
     _unique_id: u64 = 10000,
@@ -107,7 +106,7 @@ pub const CompilationContext = struct {
     const TensorToBlockArg = std.AutoHashMapUnmanaged(Tensor._Id, struct { mlir.Value, Tensor._Donation });
     const AttributeList = std.BoundedArray(mlir.NamedAttribute, 3);
 
-    pub fn init(allocator: std.mem.Allocator, name: []const u8, platform: Platform) !CompilationContext {
+    pub fn init(allocator_: std.mem.Allocator, name: []const u8, platform: Platform) !CompilationContext {
         const mlir_registry = mlir.Registry.init() catch unreachable;
         inline for (.{ "func", "stablehlo" }) |d| {
             mlir.DialectHandle.fromString(d).insertDialect(mlir_registry);
@@ -127,6 +126,10 @@ pub const CompilationContext = struct {
             try opm.addPipeline("canonicalize");
         }
 
+        var arena = std.heap.ArenaAllocator.init(allocator_);
+        _ = try arena.allocator().alloc(u8, std.mem.page_size);
+        _ = arena.reset(.retain_capacity);
+
         return .{
             ._platform = platform,
             ._name = name,
@@ -135,17 +138,21 @@ pub const CompilationContext = struct {
             ._mlir_canonicalizer = canonicalizer,
             ._module = module,
             ._blocks = .{},
-            ._fn_cache = FnCache.init(allocator),
-            ._allocator = allocator,
+            ._fn_cache = .{},
+            ._arena = arena,
             ._tracer = Tracer.init("ai.zml.compilation"),
         };
     }
 
     pub fn deinit(self: *CompilationContext) void {
-        self._fn_cache.deinit();
+        // self._fn_cache.deinit(self.allocator());
         self._mlir_ctx.deinit();
         self._mlir_registry.deinit();
-        self._buffer_to_arg.deinit(self._allocator);
+        self._arena.deinit();
+    }
+
+    pub fn allocator(self: *CompilationContext) std.mem.Allocator {
+        return self._arena.allocator();
     }
 
     pub fn activate(self: *CompilationContext) void {
@@ -173,22 +180,20 @@ pub const CompilationContext = struct {
     /// Compiles the given function with the given arguments.
     /// This is the untyped API and is not meant to be use directly.
     ///
-    /// * allocator is used to allocate the
+    /// * allocator is used to allocate the result Exe
     /// * args can contain a mix of tensors and shapes, allowing to pass a "model struct" containig tensors.
     pub fn compileInternal(
         self: *CompilationContext,
-        allocator: std.mem.Allocator,
+        allocator_: std.mem.Allocator,
         comptime func: anytype,
         args: anytype,
     ) !BaseExe {
-        var arena_state = std.heap.ArenaAllocator.init(allocator);
-        defer arena_state.deinit();
-        const arena = arena_state.allocator();
+        const arena = self.allocator();
 
         var timer = std.time.Timer.start() catch null;
         const tensor_args = try self.tensorFromShapes(stdx.meta.FnArgs(func), arena, args);
         // Run in a dedicated thread because compilation relies on `threadlocal`.
-        const f = try asynk.callBlocking(CompilationContext.emitMlir, .{ self, arena, func, &tensor_args, .{ .name = "main", .kind = .main } });
+        const f = try asynk.callBlocking(CompilationContext.emitMlir, .{ self, func, &tensor_args, .{ .name = "main", .kind = .main } });
         const module = self._module;
         module.getBody().appendOperation(f.mlir_fn);
 
@@ -251,7 +256,7 @@ pub const CompilationContext = struct {
         }
 
         return BaseExe.init(
-            allocator,
+            allocator_,
             self._platform,
             loaded_executable,
             .{
@@ -335,7 +340,6 @@ pub const CompilationContext = struct {
     /// tensors with unique tensor ids.
     pub fn emitMlir(
         self: *CompilationContext,
-        allocator: std.mem.Allocator,
         comptime func: anytype,
         args: *const stdx.meta.FnArgs(func),
         opts: struct {
@@ -346,9 +350,10 @@ pub const CompilationContext = struct {
         const frame = self._tracer.frameStart("emitMlir.emit");
         errdefer self._tracer.frameEnd(frame, "emitMlir.emit");
 
+        const res_allocator = self.allocator();
         // Note: only temp allocations are done in the arena,
-        // the other allocations are managed by the caller.
-        var arena_state = std.heap.ArenaAllocator.init(allocator);
+        // the other allocations are in the context allocator.
+        var arena_state = std.heap.ArenaAllocator.init(self._arena.child_allocator);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
 
@@ -372,14 +377,14 @@ pub const CompilationContext = struct {
         const ReturnT = stdx.meta.FnResult(func);
         const out_tensor_count = comptime ops.staticCountTensors(ReturnT) orelse @compileError("Can't use " ++ @typeName(ReturnT) ++ " in an MLIR function, because it has a variable number of tensors");
         // Those are returned to caller so we don't put them in the arena.
-        const fn_res_types = try allocator.alloc(mlir.Type, out_tensor_count);
-        const fn_res_shapes = try allocator.alloc(Shape, out_tensor_count);
-        const fn_res_donations = try allocator.alloc(Tensor._Donation, out_tensor_count);
+        const fn_res_types = try res_allocator.alloc(mlir.Type, out_tensor_count);
+        const fn_res_shapes = try res_allocator.alloc(Shape, out_tensor_count);
+        const fn_res_donations = try res_allocator.alloc(Tensor._Donation, out_tensor_count);
         var fn_body = self.openBlock(.hermetic, input_types, locations) catch unreachable;
         {
             defer self.closeBlock(fn_body);
 
-            try self._buffer_to_arg.ensureUnusedCapacity(self._allocator, @intCast(tensor_count));
+            try self._buffer_to_arg.ensureUnusedCapacity(self.allocator(), @intCast(tensor_count));
             const assigned_args_count = self.mapBlockArguments(args, fn_body.block(), 0);
             std.debug.assert(assigned_args_count == tensor_count);
 
@@ -474,7 +479,6 @@ pub const CompilationContext = struct {
         const platform = zml.testing.env();
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
-        const allocator = arena.allocator();
 
         const s = Shape.init(.{8}, .f16);
 
@@ -497,13 +501,14 @@ pub const CompilationContext = struct {
             .bias = zml.Tensor{ ._shape = s, ._id = .{ .buffer_id = 0 } },
         };
 
-        var comp = try zml.module.CompilationContext.init(allocator, "test", platform);
+        var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
         defer comp.deinit();
         var tensor_args = .{ model, Tensor{ ._shape = s, ._id = .{ .buffer_id = 1234 } }, Tensor{ ._shape = s, ._id = .{ .buffer_id = 1235 } } };
-        const f = try comp.emitMlir(allocator, Local.forward, &tensor_args, .{ .name = "test.emitMlir.Local.forward", .kind = .main });
+        const f = try comp.emitMlir(Local.forward, &tensor_args, .{ .name = "test.emitMlir.Local.forward", .kind = .main });
 
-        var mlir_bytecode: std.ArrayListUnmanaged(u8) = .{};
-        try mlir_bytecode.writer(allocator).print("{}", .{f.mlir_fn.mlirFormatter(.{})});
+        var mlir_bytecode = std.ArrayList(u8).init(std.testing.allocator);
+        defer mlir_bytecode.deinit();
+        try mlir_bytecode.writer().print("{}", .{f.mlir_fn.mlirFormatter(.{})});
 
         // Check that the `x` input argument gives its buffer to the result tensor.
         // `%arg0` is the bias of the model, `%arg1` is `x`, `%arg2` is `y`.
@@ -598,8 +603,8 @@ pub const CompilationContext = struct {
         }
     }
 
-    fn finalizeAttributeList(allocator: std.mem.Allocator, mlir_ctx: mlir.Context, attributes: []AttributeList) ![]mlir.Attribute {
-        const res = try allocator.alloc(mlir.Attribute, attributes.len);
+    fn finalizeAttributeList(allocator_: std.mem.Allocator, mlir_ctx: mlir.Context, attributes: []AttributeList) ![]mlir.Attribute {
+        const res = try allocator_.alloc(mlir.Attribute, attributes.len);
         for (res, attributes) |*r, attr| {
             r.* = mlir.DictionaryAttribute.init(mlir_ctx, attr.constSlice()).asAttr();
         }
@@ -617,7 +622,7 @@ pub const CompilationContext = struct {
         comptime func: anytype,
         args: stdx.meta.FnArgs(func),
     ) stdx.meta.FnResult(func) {
-        var arena_state = std.heap.ArenaAllocator.init(self._allocator);
+        var arena_state = std.heap.ArenaAllocator.init(self._arena.child_allocator);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
 
@@ -625,6 +630,8 @@ pub const CompilationContext = struct {
         // the result of this will also have the correct tags of the result shapes
         const args_hash = hashArgs(args);
         const key: FnCache.Key = .{ .fn_ptr = &func, .input_hash = args_hash };
+
+        log.warn("before compiling {s}: %arg0 ->  {?} (in {})", .{ func_name, self._buffer_to_arg.get(.{ .arg_id = 0 }), self._buffer_to_arg });
         const function = self._fn_cache.getEntry(key) orelse b: {
             const full_name: [:0]const u8 = if (std.mem.eql(u8, "main", func_name))
                 arena.dupeZ(u8, func_name) catch unreachable
@@ -633,7 +640,7 @@ pub const CompilationContext = struct {
 
             const og_buffer_to_arg = self._buffer_to_arg;
             defer {
-                self._buffer_to_arg.deinit(self._allocator);
+                self._buffer_to_arg.deinit(self.allocator());
                 self._buffer_to_arg = og_buffer_to_arg;
             }
 
@@ -648,17 +655,19 @@ pub const CompilationContext = struct {
                     arg_id_.* += 1;
                     return Tensor{ ._shape = x._shape, ._id = .{ .arg_id = a }, ._donation = .{ .arg = a } };
                 }
-            }.cb, self._allocator, &arg_id, args, &tensor_args) catch @panic("OutOfMemory");
+            }.cb, arena, &arg_id, args, &tensor_args) catch @panic("OutOfMemory");
 
-            const f = self.emitMlir(arena, func, &tensor_args, .{
+            const f = self.emitMlir(func, &tensor_args, .{
                 .name = full_name,
             }) catch @panic("OOM");
             self._module.getBody().appendOperation(f.mlir_fn);
 
-            break :b self._fn_cache.addEntry(key, f) catch unreachable;
+            break :b self._fn_cache.addEntry(self.allocator(), key, f) catch unreachable;
         };
 
         const loc = self.mlirCtx().location(@src());
+
+        log.warn("after compiling {s}: %arg0 ->  {?} (in {})", .{ func_name, self._buffer_to_arg.get(.{ .arg_id = 0 }), self._buffer_to_arg });
 
         const values = arena.alloc(mlir.Value, function.num_args) catch unreachable;
         self.extractValues(&args, values);
@@ -728,7 +737,7 @@ pub const CompilationContext = struct {
 
     /// Create tensor from the given shapes.
     /// Each created tensor will receive a unique id, local to this CompilationContext.
-    pub fn tensorFromShapes(self: *CompilationContext, ArgsT: type, allocator: std.mem.Allocator, args_shapes: anytype) !ArgsT {
+    pub fn tensorFromShapes(self: *CompilationContext, ArgsT: type, allocator_: std.mem.Allocator, args_shapes: anytype) !ArgsT {
         const Local = struct {
             fn tensorFromShape(arg_id: *u64, shape: Shape) Tensor {
                 defer arg_id.* += 1;
@@ -740,7 +749,7 @@ pub const CompilationContext = struct {
             }
         };
         var tensor_args: ArgsT = undefined;
-        try meta.mapAlloc(Local.tensorFromShape, allocator, &self._unique_id, args_shapes, &tensor_args);
+        try meta.mapAlloc(Local.tensorFromShape, allocator_, &self._unique_id, args_shapes, &tensor_args);
         return tensor_args;
     }
 
@@ -1021,44 +1030,28 @@ pub fn xxHash64Writer(hasher: *std.hash.XxHash64) XxHash64Writer {
 pub const FnCache = struct {
     pub const Key = struct { fn_ptr: *const anyopaque, input_hash: u64 };
 
-    // TODO: merge arenas
-    cache: std.AutoHashMapUnmanaged(Key, MlirFn),
-    // Arena for the cache entries
-    cache_arena: std.heap.ArenaAllocator,
-    // Arena for the cache data (name, res_type)
-    cache_data_arena: std.heap.ArenaAllocator,
+    cache: std.AutoHashMapUnmanaged(Key, MlirFn) = .{},
 
-    pub fn init(allocator: std.mem.Allocator) FnCache {
-        return .{
-            .cache = .{},
-            .cache_arena = std.heap.ArenaAllocator.init(allocator),
-            .cache_data_arena = std.heap.ArenaAllocator.init(allocator),
-        };
-    }
-
-    pub fn deinit(self: FnCache) void {
-        self.cache_arena.deinit();
-        self.cache_data_arena.deinit();
+    pub fn deinit(self: FnCache, allocator: std.mem.Allocator) void {
+        self.cache.deinit(allocator);
     }
 
     pub fn getEntry(self: *const FnCache, key: Key) ?MlirFn {
         return self.cache.get(key);
     }
 
-    pub fn addEntry(self: *FnCache, key: Key, value: MlirFn) !MlirFn {
-        var cache_data_allocator = self.cache_data_arena.allocator();
+    pub fn addEntry(self: *FnCache, allocator: std.mem.Allocator, key: Key, value: MlirFn) !MlirFn {
+        const res_types_copy = try allocator.dupe(mlir.Type, value.res_types);
+        errdefer allocator.free(res_types_copy);
 
-        const res_types_copy = try cache_data_allocator.dupe(mlir.Type, value.res_types);
-        errdefer cache_data_allocator.free(res_types_copy);
+        const res_shapes_copy = try allocator.dupe(Shape, value.res_shapes);
+        errdefer allocator.free(res_shapes_copy);
 
-        const res_shapes_copy = try cache_data_allocator.dupe(Shape, value.res_shapes);
-        errdefer cache_data_allocator.free(res_shapes_copy);
+        const res_donations_copy = try allocator.dupe(Tensor._Donation, value.res_donations);
+        errdefer allocator.free(res_donations_copy);
 
-        const res_donations_copy = try cache_data_allocator.dupe(Tensor._Donation, value.res_donations);
-        errdefer cache_data_allocator.free(res_donations_copy);
-
-        const name_copy = try cache_data_allocator.dupeZ(u8, value.name);
-        errdefer cache_data_allocator.free(name_copy);
+        const name_copy = try allocator.dupeZ(u8, value.name);
+        errdefer allocator.free(name_copy);
 
         const owned_value: MlirFn = .{
             .name = name_copy,
@@ -1069,7 +1062,7 @@ pub const FnCache = struct {
             .res_donations = res_donations_copy,
         };
 
-        try self.cache.putNoClobber(self.cache_arena.allocator(), key, owned_value);
+        try self.cache.putNoClobber(allocator, key, owned_value);
         return owned_value;
     }
 };

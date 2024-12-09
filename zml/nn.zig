@@ -816,8 +816,8 @@ const SdpaMemEfficient = struct {
         const n_q_chunks: u32 = @intCast(@divExact(self.q.dim(.q), self.chunking.q_chunk_size));
 
         const ctx = zml.module.CompilationContext.current();
-        const q_chunks = ctx._allocator.alloc(zml.Tensor, n_q_chunks) catch unreachable;
-        defer ctx._allocator.free(q_chunks);
+        const q_chunks = ctx.allocator().alloc(zml.Tensor, n_q_chunks) catch unreachable;
+        defer ctx.allocator().free(q_chunks);
         for (0..n_q_chunks) |i| {
             const idx: u32 = @intCast(i);
             const q_slice: zml.Tensor.DynSlice = .{
