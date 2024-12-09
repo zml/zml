@@ -131,6 +131,9 @@ bazel run -c opt //llama:OpenLLaMA-3B             \
           -- --prompt="Once upon a time,"
 ```
 
+## Troubleshooting
+
+If you run into trouble in the setup process, please check out the [Troubleshooting](../misc/troubleshooting.md) guide.
 
 ## Where to go next:
 
