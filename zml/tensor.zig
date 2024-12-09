@@ -1077,7 +1077,7 @@ pub const Tensor = struct {
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
 
-        var comp = try zml.module.CompilationContext.init(std.heap.page_allocator, "test", platform);
+        var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
         defer comp.deinit();
 
         comp.activate();
@@ -2171,7 +2171,7 @@ pub const Tensor = struct {
 
         {
             // Only test shapes
-            var comp = try zml.module.CompilationContext.init(std.heap.page_allocator, "test", platform);
+            var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
             defer comp.deinit();
             comp.activate();
             defer comp.deactivate();
@@ -2307,7 +2307,7 @@ pub const Tensor = struct {
 
         {
             // Only test shapes
-            var comp = try zml.module.CompilationContext.init(std.heap.page_allocator, "test", platform);
+            var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
             defer comp.deinit();
             comp.activate();
             defer comp.deactivate();
@@ -2531,7 +2531,7 @@ pub const Tensor = struct {
 
         {
             // Only test shapes
-            var comp = try zml.module.CompilationContext.init(std.heap.page_allocator, "test", platform);
+            var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
             defer comp.deinit();
             comp.activate();
             defer comp.deactivate();
@@ -2944,7 +2944,6 @@ pub const Tensor = struct {
     /// Chunk a given tensor into exactly n parts of equal shape.
     /// `self.dim(axis_)` must be divisible by n_chunks.
     pub fn chunkExact(self: Tensor, axis_: anytype, n_chunks: comptime_int) [n_chunks]Tensor {
-        // TODO: all version of chunks should work with runtime n_chunks and allocate inside the compilation context arena
         const a = self.axis(axis_);
         const d = self.dim(a);
         const chunk_size = @divExact(d, n_chunks);
@@ -2961,7 +2960,7 @@ pub const Tensor = struct {
         const platform = zml.testing.env();
 
         // Only test shapes
-        var comp = try zml.module.CompilationContext.init(std.heap.page_allocator, "test", platform);
+        var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
         defer comp.deinit();
         comp.activate();
         defer comp.deactivate();
@@ -2976,7 +2975,7 @@ pub const Tensor = struct {
             const chunks = x.chunkExact(ax, n_chunks);
 
             const res_shape = Shape.init(res, .f16);
-            for (&chunks) |chk| {
+            for (chunks) |chk| {
                 try zml.testing.expectEqualShapes(res_shape, chk.shape());
             }
         }
@@ -2988,13 +2987,14 @@ pub const Tensor = struct {
         self: Tensor,
         axis_: i64,
         n_chunks: comptime_int,
-    ) std.BoundedArray(Tensor, n_chunks + 1) {
+    ) []Tensor {
         const a = self.axis(axis_);
         const d = self.dim(a);
         const chunk_size: i64 = @divFloor(d, n_chunks);
         const tail_chunk_size: i64 = @rem(d, chunk_size);
 
-        var chunks: std.BoundedArray(Tensor, n_chunks + 1) = .{};
+        const allocator = self.getContext().allocator();
+        var chunks = std.ArrayListUnmanaged(Tensor).initCapacity(allocator, n_chunks + 1) catch @panic("OOM");
         for (0..n_chunks) |i| {
             const start: i64 = @as(i64, @intCast(i)) * chunk_size;
             chunks.appendAssumeCapacity(
@@ -3005,7 +3005,7 @@ pub const Tensor = struct {
             const start: i64 = n_chunks * chunk_size;
             chunks.appendAssumeCapacity(self.slice1d(a, .{ .start = start }));
         }
-        return chunks;
+        return chunks.items;
     }
 
     test chunkAllowTrailing {
@@ -3013,7 +3013,7 @@ pub const Tensor = struct {
         const platform = zml.testing.env();
 
         // Only test shapes
-        var comp = try zml.module.CompilationContext.init(std.heap.page_allocator, "test", platform);
+        var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
         defer comp.deinit();
         comp.activate();
         defer comp.deactivate();
@@ -3029,36 +3029,34 @@ pub const Tensor = struct {
             const chunks = x.chunkAllowTrailing(x.axis(ax), n_chunks);
 
             const res_shape = Shape.init(res, .f16);
-            for (chunks.constSlice()[0..n_chunks]) |chk| {
+            for (chunks[0..n_chunks]) |chk| {
                 try zml.testing.expectEqualShapes(res_shape, chk.shape());
             }
             const trailing_shape = Shape.init(trailing, .f16);
             if (trailing_shape.rank() > 0) {
                 try std.testing.expectEqual(n_chunks + 1, chunks.len);
-                try zml.testing.expectEqualShapes(trailing_shape, chunks.get(n_chunks).shape());
+                try zml.testing.expectEqualShapes(trailing_shape, chunks[n_chunks].shape());
             } else {
                 try std.testing.expectEqual(n_chunks, chunks.len);
             }
         }
     }
 
-    pub fn split(self: Tensor, allocator: std.mem.Allocator, split_size_or_sections: []const i64, axis_: i64) ![]Tensor {
-        // TODO this should use the compilation context arena
-        stdx.debug.assert(split_size_or_sections.len > 0, "split expects 'split_size_or_sections' length to be positive, got {}", .{split_size_or_sections.len});
+    pub fn split(self: Tensor, axis_: anytype, split_sizes: []const i64) []Tensor {
+        stdx.debug.assert(split_sizes.len > 0, "split expects at least one 'split_sizes', got 0", .{});
 
         const a = self.axis(axis_);
-        const length = self.dim(a);
-        if (split_size_or_sections.len != 1) {
-            var split_sum: i64 = 0;
-            for (split_size_or_sections) |n| split_sum += n;
-            stdx.debug.assert(split_sum == length, "split expects sum of 'split_size_or_sections' values and axis dimension to be equal, got {} and {}", .{ split_sum, length });
-        }
+        const d = self.dim(a);
+        var split_sum: i64 = 0;
+        for (split_sizes) |n| split_sum += n;
+        stdx.debug.assert(split_sum == d, "split expects sum of 'split_sizes' values and axis dimension to be equal, got {} and {}", .{ split_sum, d });
 
-        const res = try allocator.alloc(Tensor, split_size_or_sections.len);
+        const allocator = self.getContext().allocator();
+        const res = allocator.alloc(Tensor, split_sizes.len) catch @panic("OOM");
         errdefer allocator.dealloc(res);
 
         var start: i64 = 0;
-        for (split_size_or_sections, 0..) |n, i| {
+        for (split_sizes, 0..) |n, i| {
             res[i] = self.slice1d(a, .{ .start = start, .end = start + n });
             start += n;
         }
@@ -3573,7 +3571,6 @@ pub const Tensor = struct {
     /// In Pytorch/Numpy this is know as `meshgrid` with "ij" mode.
     /// See torch.meshgrid for the "xy" mode.
     pub fn cartesianProduct(comptime N: u3, vectors: [N]Tensor) [N]Tensor {
-        // TODO: use the compilation context allocator
         var out: @TypeOf(vectors) = undefined;
         _cartesianProduct(&vectors, &out);
         return out;
@@ -3649,7 +3646,6 @@ pub const Tensor = struct {
     /// we have:
     /// - res[a, b, c, d] == (A[a], B[b], C[c], D[d])
     pub fn cartesianProductStacked(vectors: []const Tensor) Tensor {
-        // this is workaround to not need an allocator: remove it
         var out = std.BoundedArray(Tensor, Tensor.MAX_RANK).init(vectors.len) catch unreachable;
         _cartesianProduct(vectors, out.slice());
 
