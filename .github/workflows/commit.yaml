@@ -48,3 +48,6 @@ jobs:
         run: |
           export PATH=$PATH:~/bin
           bazel build --config=debug --remote_cache=grpc://127.0.0.1:15501 //llama
+          bazel build --config=debug --remote_cache=grpc://127.0.0.1:15501 //mnist
+          bazel build --config=debug --remote_cache=grpc://127.0.0.1:15501 //simple_layer
+          bazel build --config=debug --remote_cache=grpc://127.0.0.1:15501 //loader:safetensors
