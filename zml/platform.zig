@@ -90,20 +90,23 @@ pub const Platform = struct {
 const _CreateOptions = struct {
     // XLA CPU client doesn't read options
     // https://github.com/openxla/xla/blob/42496a28c374bd35f493cc5dbde74805407245dc/xla/pjrt/c/pjrt_c_api_cpu_internal.cc#L33-L46
-    cpu: void = {},
+    cpu: NoOpt = .{},
 
     // match XLA defaults
     // https://github.com/openxla/xla/blob/3e87afa11a865cf91137522492918ad18bfe5b7c/xla/pjrt/plugin/xla_gpu/xla_gpu_allocator_config.h#L25-L60
     cuda: Cuda = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.75 } } },
-    rocm: void = {},
-    tpu: void = {},
-    neuron: void = {},
+    rocm: NoOpt = .{},
+    tpu: NoOpt = .{},
+    neuron: NoOpt = .{},
+
+    // NoOpt instead of void to allow it to work with json. Yes, it's a bit annoying.
+    pub const NoOpt = struct {};
 
     pub const Cuda = struct {
         // Use the same default than XLA.
         allocator: Allocator = .{ .bfc = .{} },
         // TODO support all of https://github.com/openxla/xla/blob/3d31c48c719d331d432132b3e0c2c5ce52650675/xla/pjrt/c/pjrt_c_api_gpu_internal.cc#L76-L86
-        // visible_devices
+        visible_devices: []const u16 = &.{},
         // node_id
         // num_nodes
         // enable_mock_nccl
@@ -113,9 +116,9 @@ const _CreateOptions = struct {
             /// "Best-Fit with Coalescing" algorithm
             bfc: Options,
             /// use cudaMallocAsync
-            cuda_async: Options,
+            @"async": Options,
             /// use raw cuMalloc
-            platform,
+            platform: NoOpt,
 
             pub const Options = struct {
                 preallocate: bool = true,
@@ -129,7 +132,7 @@ const _CreateOptions = struct {
                 .platform => {
                     values.appendAssumeCapacity(pjrt.NamedValue.fromString("allocator", "platform"));
                 },
-                .bfc, .cuda_async => |opt| {
+                .bfc, .@"async" => |opt| {
                     values.appendAssumeCapacity(pjrt.NamedValue.from("allocator", self.allocator));
                     values.appendAssumeCapacity(pjrt.NamedValue.from("preallocate", opt.preallocate));
                     if (opt.memory_fraction > 0) {
@@ -152,7 +155,7 @@ const _CreateOptions = struct {
             inline else => |t| {
                 stdx.debug.assertComptime(@hasField(_CreateOptions, @tagName(t)), "zml.platform.CreateOptions doesn't list target {s}", .{@tagName(t)});
                 const options = @field(self, @tagName(t));
-                stdx.debug.assertComptime(@TypeOf(options) == void, "foo {s}", .{@tagName(t)});
+                stdx.debug.assertComptime(@sizeOf(@TypeOf(options)) == 0, "zml.platform.CreateOptions.{s} is discarded", .{@tagName(t)});
             },
         }
         return values.items;
