@@ -51,7 +51,7 @@ pub fn asyncMain() !void {
     // log.info("\n===========================\n==   ZML MNIST Example   ==\n===========================\n\n", .{});
 
     // // Auto-select platform
-    const platform = context.autoPlatform();
+    const platform = context.autoPlatform(.{});
     context.printAvailablePlatforms(platform);
 
     // Parse program args

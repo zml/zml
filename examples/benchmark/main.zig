@@ -34,7 +34,7 @@ pub fn asyncMain() !void {
     defer context.deinit();
 
     // Auto-select platform
-    const platform = context.autoPlatform().withCompilationOptions(.{
+    const platform = context.autoPlatform(.{}).withCompilationOptions(.{
         .sharding_enabled = true,
     });
     context.printAvailablePlatforms(platform);

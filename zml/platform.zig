@@ -29,8 +29,9 @@ pub const Platform = struct {
     compilation_options: CompilationOptions = .{},
 
     pub const MAX_NUM_DEVICES: u8 = 32;
+    pub const CreateOptions = pjrt.Client.CreateOptions;
 
-    pub fn init(target: Target, api: *const pjrt.Api, options: pjrt.Client.CreateOptions) !Platform {
+    pub fn init(target: Target, api: *const pjrt.Api, options: CreateOptions) !Platform {
         const pjrt_client = try pjrt.Client.init(api, options);
         const true_num_devices = pjrt_client.getAddressableDevices(api).len;
         if (true_num_devices > MAX_NUM_DEVICES) {

@@ -146,7 +146,7 @@ pub fn asyncMain() !void {
         .sharding_enabled = true,
     };
 
-    const platform = context.autoPlatform().withCompilationOptions(compilation_options);
+    const platform = context.autoPlatform(.{}).withCompilationOptions(compilation_options);
     context.printAvailablePlatforms(platform);
 
     var args = std.process.args();
