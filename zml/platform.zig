@@ -88,36 +88,58 @@ pub const Platform = struct {
 };
 
 const _CreateOptions = struct {
+    // XLA CPU client doesn't read options
+    // https://github.com/openxla/xla/blob/42496a28c374bd35f493cc5dbde74805407245dc/xla/pjrt/c/pjrt_c_api_cpu_internal.cc#L33-L46
     cpu: void = {},
-    cuda: ?Cuda = null,
+
+    // match XLA defaults
+    // https://github.com/openxla/xla/blob/3e87afa11a865cf91137522492918ad18bfe5b7c/xla/pjrt/plugin/xla_gpu/xla_gpu_allocator_config.h#L25-L60
+    cuda: Cuda = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.75 } } },
     rocm: void = {},
     tpu: void = {},
     neuron: void = {},
 
     pub const Cuda = struct {
-        allocator: Allocator = .default,
-        // preallocate and memory fraction are only used by the bfc allocator
-        preallocate: bool = true,
-        memory_fraction: ?f32 = null,
-        collective_memory_size_mb: ?u16 = null,
+        // Use the same default than XLA.
+        allocator: Allocator = .{ .bfc = .{} },
         // TODO support all of https://github.com/openxla/xla/blob/3d31c48c719d331d432132b3e0c2c5ce52650675/xla/pjrt/c/pjrt_c_api_gpu_internal.cc#L76-L86
+        // visible_devices
+        // node_id
+        // num_nodes
+        // enable_mock_nccl
+        // mock_gpu_topology
 
-        pub const Allocator = enum {
-            default, // the client chose the best option
-            bfc, // "Best-Fit with Coalescing" algorithm
-            cuda_async, // use cudaMallocAsync
-            platform, // the platform default eg cuMalloc
+        pub const Allocator = union(enum) {
+            /// "Best-Fit with Coalescing" algorithm
+            bfc: Options,
+            /// use cudaMallocAsync
+            cuda_async: Options,
+            /// use raw cuMalloc
+            platform,
+
+            pub const Options = struct {
+                preallocate: bool = true,
+                memory_fraction: f32 = 0.75,
+                collective_memory_size_mb: u32 = 0,
+            };
         };
 
         pub fn writeNamedValues(self: Cuda, values: *std.ArrayListUnmanaged(pjrt.NamedValue)) void {
-            values.appendAssumeCapacity(pjrt.NamedValue.from("allocator", self.allocator));
-            values.appendAssumeCapacity(pjrt.NamedValue.from("preallocate", self.preallocate));
-            if (self.memory_fraction) |memory_fraction| {
-                values.appendAssumeCapacity(pjrt.NamedValue.from("memory_fraction", memory_fraction));
-            }
-            if (self.collective_memory_size_mb) |collective_memory_size_mb| {
-                const collective = @as(i64, collective_memory_size_mb) * 1024 * 1024;
-                values.appendAssumeCapacity(pjrt.NamedValue.from("collective_memory_size", collective));
+            switch (self.allocator) {
+                .platform => {
+                    values.appendAssumeCapacity(pjrt.NamedValue.fromString("allocator", "platform"));
+                },
+                .bfc, .cuda_async => |opt| {
+                    values.appendAssumeCapacity(pjrt.NamedValue.from("allocator", self.allocator));
+                    values.appendAssumeCapacity(pjrt.NamedValue.from("preallocate", opt.preallocate));
+                    if (opt.memory_fraction > 0) {
+                        values.appendAssumeCapacity(pjrt.NamedValue.from("memory_fraction", opt.memory_fraction));
+                    }
+                    if (opt.collective_memory_size_mb > 0) {
+                        const collective = @as(i64, opt.collective_memory_size_mb) * 1024 * 1024;
+                        values.appendAssumeCapacity(pjrt.NamedValue.from("collective_memory_size", collective));
+                    }
+                },
             }
         }
     };
@@ -126,19 +148,13 @@ const _CreateOptions = struct {
         var values = std.ArrayListUnmanaged(pjrt.NamedValue).fromOwnedSlice(out);
         values.shrinkRetainingCapacity(0);
         switch (target) {
+            .cuda => self.cuda.writeNamedValues(&values),
             inline else => |t| {
+                stdx.debug.assertComptime(@hasField(_CreateOptions, @tagName(t)), "zml.platform.CreateOptions doesn't list target {s}", .{@tagName(t)});
                 const options = @field(self, @tagName(t));
-                if (@TypeOf(options) == void) return &.{};
-
-                if (options) |opt| opt.writeNamedValues(&values);
+                stdx.debug.assertComptime(@TypeOf(options) == void, "foo {s}", .{@tagName(t)});
             },
         }
         return values.items;
     }
 };
-
-comptime {
-    for (std.meta.fields(Target)) |target_field| {
-        stdx.debug.assertComptime(@hasField(_CreateOptions, target_field.name), "CreateOptions doesn't list target {s}", target_field.name);
-    }
-}

@@ -135,6 +135,7 @@ pub const Context = struct {
     pub fn platformByPreferences(self: *Context, opts: Platform.CreateOptions, prefered: []const Target) Platform {
         // Try prefered targets.
         for (prefered) |target| {
+            if (apis.get(target) == null) continue;
             return self.platform(target, opts) catch |err| {
                 log.err("Failed to load platform .{s}: {}", .{ @tagName(target), err });
                 continue;
@@ -150,10 +151,7 @@ pub const Context = struct {
             if (entry.value.* == null) continue;
             if (std.mem.indexOfScalar(Target, prefered, target) != null) continue;
             return self.platform(target, opts) catch |err| {
-                switch (err) {
-                    error.PlatformNotCompiled => {},
-                    else => log.err("Failed to load platform .{s}: {}", .{ @tagName(target), err }),
-                }
+                log.err("Failed to load platform .{s}: {}", .{ @tagName(target), err });
                 continue;
             };
         }
