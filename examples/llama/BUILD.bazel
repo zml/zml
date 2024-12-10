@@ -52,6 +52,39 @@ cc_binary(
 )
 
 cc_binary(
+    name = "Llama-3.2-1B-Instruct",
+    args = [
+        "--model=$(location @Meta-Llama-3.2-1B-Instruct//:model.safetensors)",
+        "--tokenizer=$(location @Meta-Llama-3.2-1B-Instruct//:tokenizer)",
+        "--num-heads=32",
+        "--num-kv-heads=8",
+        "--rope-freq-base=500000",
+    ],
+    data = [
+        "@Meta-Llama-3.2-1B-Instruct//:model.safetensors",
+        "@Meta-Llama-3.2-1B-Instruct//:tokenizer",
+    ],
+    deps = [":llama_lib"],
+)
+
+cc_binary(
+    name = "Llama-3.2-3B-Instruct",
+    args = [
+        "--model=$(location @Meta-Llama-3.2-3B-Instruct//:model.safetensors.index.json)",
+        "--tokenizer=$(location @Meta-Llama-3.2-3B-Instruct//:tokenizer)",
+        "--num-heads=24",
+        "--num-kv-heads=8",
+        "--rope-freq-base=500000",
+    ],
+    data = [
+        "@Meta-Llama-3.2-3B-Instruct//:model",
+        "@Meta-Llama-3.2-3B-Instruct//:model.safetensors.index.json",
+        "@Meta-Llama-3.2-3B-Instruct//:tokenizer",
+    ],
+    deps = [":llama_lib"],
+)
+
+cc_binary(
     name = "OpenLLaMA-3B",
     args = [
         "--model=$(location @OpenLM-Research-OpenLLaMA-3B//:model)",
