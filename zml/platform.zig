@@ -118,7 +118,7 @@ const _CreateOptions = struct {
             /// use cudaMallocAsync
             @"async": Options,
             /// use raw cuMalloc
-            platform: NoOpt,
+            platform,
 
             pub const Options = struct {
                 preallocate: bool = true,

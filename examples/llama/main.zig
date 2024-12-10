@@ -140,6 +140,8 @@ pub fn asyncMain() !void {
         prompt: ?[]const u8 = null,
         test_activations: ?[]const u8 = null,
         seed: ?u128 = null,
+        // eg: --create-options='{"cuda":{"allocator":{"bfc": {"memory_fraction": 0.99}}}}'
+        create_options: []const u8 = "{}",
     };
 
     log.info("   LLama was compiled with {}", .{@import("builtin").mode});
@@ -157,9 +159,6 @@ pub fn asyncMain() !void {
         .sharding_enabled = true,
     };
 
-    const platform = context.autoPlatform(.{}).withCompilationOptions(compilation_options);
-    context.printAvailablePlatforms(platform);
-
     var args = std.process.args();
     const cli_args = flags.parse(&args, CliArgs);
     const model_file = cli_args.model;
@@ -167,6 +166,10 @@ pub fn asyncMain() !void {
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const model_arena = arena_state.allocator();
+
+    const create_opts = try std.json.parseFromSliceLeaky(zml.Platform.CreateOptions, model_arena, cli_args.create_options, .{});
+    const platform = context.autoPlatform(create_opts).withCompilationOptions(compilation_options);
+    context.printAvailablePlatforms(platform);
 
     log.info("Model file: {s}", .{model_file});
 
