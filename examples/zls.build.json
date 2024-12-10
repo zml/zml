@@ -1,8 +1,2 @@
 {
-  "build_options": [
-    {
-      "name": "cmd",
-      "value": "bazel run @zml//:completion"
-    }
-  ]
 }
