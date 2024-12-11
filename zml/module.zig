@@ -631,7 +631,6 @@ pub const CompilationContext = struct {
         const args_hash = hashArgs(args);
         const key: FnCache.Key = .{ .fn_ptr = &func, .input_hash = args_hash };
 
-        log.warn("before compiling {s}: %arg0 ->  {?} (in {})", .{ func_name, self._buffer_to_arg.get(.{ .arg_id = 0 }), self._buffer_to_arg });
         const function = self._fn_cache.getEntry(key) orelse b: {
             const full_name: [:0]const u8 = if (std.mem.eql(u8, "main", func_name))
                 arena.dupeZ(u8, func_name) catch unreachable
@@ -666,8 +665,6 @@ pub const CompilationContext = struct {
         };
 
         const loc = self.mlirCtx().location(@src());
-
-        log.warn("after compiling {s}: %arg0 ->  {?} (in {})", .{ func_name, self._buffer_to_arg.get(.{ .arg_id = 0 }), self._buffer_to_arg });
 
         const values = arena.alloc(mlir.Value, function.num_args) catch unreachable;
         self.extractValues(&args, values);
