@@ -207,7 +207,8 @@ pub const CompilationContext = struct {
         var pjrt_location: ?[:0]const u8 = null;
 
         if (self._platform.compilation_options.xla_dump_to) |xla_dump_to| {
-            const module_dir_name = try std.fmt.allocPrint(arena, "{s}{s}{s}_{x}.{s}", .{ xla_dump_to, std.fs.path.sep_str, self._name, module_hash, @tagName(self._platform.target) });
+            const sep = std.fs.path.sep_str;
+            const module_dir_name = try std.fmt.allocPrint(arena, "{s}{s}{s}{s}{s}_{x}", .{ xla_dump_to, sep, @tagName(self._platform.target), sep, self._name, module_hash });
             try std.fs.cwd().makePath(module_dir_name);
             module_dir = try std.fs.cwd().realpathAlloc(arena, module_dir_name);
             const cache_dir = try std.fs.cwd().openDir(module_dir.?, .{});
