@@ -90,23 +90,20 @@ pub const Platform = struct {
 const _CreateOptions = struct {
     // XLA CPU client doesn't read options
     // https://github.com/openxla/xla/blob/42496a28c374bd35f493cc5dbde74805407245dc/xla/pjrt/c/pjrt_c_api_cpu_internal.cc#L33-L46
-    cpu: NoOpt = .{},
+    cpu: struct {} = .{},
 
-    // match XLA defaults
+    // bump memory fraction from XLA defaults of 75% to 90%.
+    // Even on a 8GB GPU it should leave enough space for the Cuda driver
     // https://github.com/openxla/xla/blob/3e87afa11a865cf91137522492918ad18bfe5b7c/xla/pjrt/plugin/xla_gpu/xla_gpu_allocator_config.h#L25-L60
-    cuda: Cuda = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.75 } } },
-    rocm: NoOpt = .{},
-    tpu: NoOpt = .{},
-    neuron: NoOpt = .{},
-
-    // NoOpt instead of void to allow it to work with json. Yes, it's a bit annoying.
-    pub const NoOpt = struct {};
+    cuda: Cuda = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
+    rocm: struct {} = .{},
+    tpu: struct {} = .{},
+    neuron: struct {} = .{},
 
     pub const Cuda = struct {
-        // Use the same default than XLA.
         allocator: Allocator = .{ .bfc = .{} },
         // TODO support all of https://github.com/openxla/xla/blob/3d31c48c719d331d432132b3e0c2c5ce52650675/xla/pjrt/c/pjrt_c_api_gpu_internal.cc#L76-L86
-        visible_devices: []const u16 = &.{},
+        // visible_devices: []const i64 = &.{},
         // node_id
         // num_nodes
         // enable_mock_nccl
@@ -122,7 +119,7 @@ const _CreateOptions = struct {
 
             pub const Options = struct {
                 preallocate: bool = true,
-                memory_fraction: f32 = 0.75,
+                memory_fraction: f32 = 0.90,
                 collective_memory_size_mb: u32 = 0,
             };
         };
@@ -143,6 +140,9 @@ const _CreateOptions = struct {
                         values.appendAssumeCapacity(pjrt.NamedValue.from("collective_memory_size", collective));
                     }
                 },
+            }
+            if (self.visible_devices.len > 0) {
+                values.appendAssumeCapacity(pjrt.NamedValue.from("visible_devices", self.visible_devices));
             }
         }
     };
