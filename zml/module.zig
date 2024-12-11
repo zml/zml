@@ -879,38 +879,27 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, m
     };
 
     // Let the arena deinit, zig-protobuf deinit is very slow.
+    try options.env_option_overrides.ensureUnusedCapacity(arena, 16);
     if (xla_dump_to_ orelse platform.compilation_options.xla_dump_to) |xla_dump_to| {
-        try options.env_option_overrides.append(arena, .{
-            .key = .{ .Const = "xla_dump_to" },
-            .value = .{ .value = .{ .string_field = .{ .Const = xla_dump_to } } },
-        });
+        setFlag(&options, "xla_dump_to", xla_dump_to);
         if (platform.compilation_options.xla_dump_fusion_visualization) {
-            try options.env_option_overrides.append(arena, .{
-                .key = .{ .Const = "xla_dump_hlo_as_html" },
-                .value = .{ .value = .{ .bool_field = true } },
-            });
-            try options.env_option_overrides.append(arena, .{
-                .key = .{ .Const = "xla_dump_hlo_as_dot" },
-                .value = .{ .value = .{ .bool_field = true } },
-            });
-            try options.env_option_overrides.append(arena, .{
-                .key = .{ .Const = "xla_dump_fusion_visualization" },
-                .value = .{ .value = .{ .bool_field = true } },
-            });
+            setFlag(&options, "xla_dump_hlo_as_html", true);
+            setFlag(&options, "xla_dump_hlo_as_dot", true);
+            setFlag(&options, "xla_dump_fusion_visualization", true);
         }
     }
     switch (platform.target) {
         .cuda => cuda_dir: {
             // NVIDIA recommends to disable Triton GEMM on JAX:
             // https://github.com/NVIDIA/JAX-Toolbox?tab=readme-ov-file#environment-variables
-            try options.env_option_overrides.append(arena, .{
-                .key = .{ .Const = "xla_gpu_enable_triton_gemm" },
-                .value = .{ .value = .{ .bool_field = false } },
-            });
-            // try options.env_option_overrides.append(arena, .{
-            //     .key = .{ .Const = "xla_gpu_enable_latency_hiding_scheduler" },
-            //     .value = .{ .value = .{ .bool_field = true } },
-            // });
+            setFlag(&options, "xla_gpu_enable_triton_gemm", false);
+            //  setFlag(&options, "xla_gpu_enable_cudnn_fmha", true);
+            //  setFlag(&options, "xla_gpu_fused_attention_use_cudnn_rng", true);
+            //  setFlag(&options, "xla_gpu_enable_cudnn_layer_norm", true);
+            //  setFlag(&options, "xla_gpu_enable_custom_fusions", true);
+            //  setFlag(&options, "xla_gpu_enable_dynamic_slice_fusion", true);
+            //  setFlag(&options, "xla_gpu_use_runtime_fusion", true);
+            //  setFlag(&options, "xla_gpu_enable_latency_hiding_scheduler", true);
             var r_ = try runfiles.Runfiles.create(.{ .allocator = arena }) orelse {
                 log.warn("Bazel runfile not found !", .{});
                 break :cuda_dir;
@@ -920,22 +909,12 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, m
             const r = r_.withSourceRepo(source_repo);
             const cuda_data_dir = (try r.rlocationAlloc(arena, "libpjrt_cuda/sandbox")).?;
             log.info("xla_gpu_cuda_data_dir: {s}", .{cuda_data_dir});
-            try options.env_option_overrides.append(arena, .{
-                .key = .{ .Const = "xla_gpu_cuda_data_dir" },
-                .value = .{
-                    .value = .{
-                        .string_field = .{ .Const = cuda_data_dir },
-                    },
-                },
-            });
+            setFlag(&options, "xla_gpu_cuda_data_dir", cuda_data_dir);
         },
         .rocm => {
             // Disable Triton GEMM on ROCM. For some reason it's much, much slower when
             // enabled on CDNA and it's used on RDNA. Disable it altogether.
-            try options.env_option_overrides.append(arena, .{
-                .key = .{ .Const = "xla_gpu_enable_triton_gemm" },
-                .value = .{ .value = .{ .bool_field = false } },
-            });
+            setFlag(&options, "xla_gpu_enable_triton_gemm", false);
         },
         else => {},
     }
@@ -946,6 +925,16 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, m
     errdefer loaded_executable.deinit();
 
     return loaded_executable;
+}
+
+fn setFlag(options: *xla_pb.CompileOptionsProto, comptime flag: [:0]const u8, value: anytype) void {
+    const option: xla_pb.OptionOverrideProto = switch (@typeInfo(@TypeOf(value))) {
+        .Bool => .{ .value = .{ .bool_field = value } },
+        .Int => .{ .value = .{ .int_field = value } },
+        .Float => .{ .value = .{ .double_field = value } },
+        else => .{ .value = .{ .string_field = .{ .Const = value } } },
+    };
+    options.env_option_overrides.appendAssumeCapacity(.{ .key = .{ .Const = flag }, .value = option });
 }
 
 /// Visit the given struct and recursively counts the number of tensors found.
