@@ -96,7 +96,7 @@ pub const CompilationContext = struct {
     _blocks: std.BoundedArray(Block, 64) = .{},
     _fn_cache: FnCache = .{},
 
-    _buffer_to_arg: TensorToBlockArg = .{},
+    _block_args: TensorToBlockArg = .{},
     _unique_id: u64 = 10000,
     _tracer: Tracer,
 
@@ -372,6 +372,15 @@ pub const CompilationContext = struct {
         const input_types = try arena.alloc(mlir.Type, tensor_count);
         for (input_types, input_shapes.items) |*t, sh| t.* = mlir.ext.mlirType(mlir_ctx, sh);
 
+        const og_block_args = self._block_args;
+        defer {
+            self._block_args.deinit(self.allocator());
+            self._block_args = og_block_args;
+        }
+
+        // Reset the buffer -> assignement
+        self._block_args = .{};
+
         // Note: this isn't stricly necessary. We call `countTensor` on `fn_res`.
         // But it forces user to have simpler function.
         const ReturnT = stdx.meta.FnResult(func);
@@ -384,7 +393,7 @@ pub const CompilationContext = struct {
         {
             defer self.closeBlock(fn_body);
 
-            try self._buffer_to_arg.ensureUnusedCapacity(self.allocator(), @intCast(tensor_count));
+            try self._block_args.ensureUnusedCapacity(self.allocator(), @intCast(tensor_count));
             const assigned_args_count = self.mapBlockArguments(args, fn_body.block(), 0);
             std.debug.assert(assigned_args_count == tensor_count);
 
@@ -637,15 +646,6 @@ pub const CompilationContext = struct {
             else
                 std.fmt.allocPrintZ(arena, "{s}_{x}", .{ func_name, key.input_hash }) catch unreachable;
 
-            const og_buffer_to_arg = self._buffer_to_arg;
-            defer {
-                self._buffer_to_arg.deinit(self.allocator());
-                self._buffer_to_arg = og_buffer_to_arg;
-            }
-
-            // Reset the buffer -> assignement
-            self._buffer_to_arg = .{};
-
             var arg_id: u16 = 0;
             var tensor_args: @TypeOf(args) = args;
             meta.mapAlloc(struct {
@@ -707,7 +707,7 @@ pub const CompilationContext = struct {
     ///
     /// This is done so that we have a mapping between the arguments of the kernel associated with a module and the actual Tensors
     /// stored in the Module.
-    /// Caller need to allocate required memory in self._buffer_to_arg.
+    /// Caller need to allocate required memory in self._block_args.
     pub fn mapBlockArguments(self: *CompilationContext, v: anytype, block: mlir.Block, start: usize) usize {
         const LocalContext = struct {
             index: usize,
@@ -720,7 +720,7 @@ pub const CompilationContext = struct {
                 const arg_value = ctx.block.argument(ctx.index);
                 // log.debug("mapping {} to arg {}", .{ tensor._id, ctx.index });
 
-                const res = ctx.self._buffer_to_arg.getOrPutAssumeCapacity(tensor._id);
+                const res = ctx.self._block_args.getOrPutAssumeCapacity(tensor._id);
                 if (res.found_existing) {
                     stdx.debug.panic("Failed compilation because received two tensors arguments with the same ID: {} and {} at index {} ({}).", .{ res.value_ptr.*[0], tensor, ctx.index, tensor._id });
                 } else {
@@ -777,7 +777,7 @@ pub const CompilationContext = struct {
 
     pub fn getValueAndDonation(self: *const CompilationContext, tensor: Tensor) struct { mlir.Value, Tensor._Donation } {
         return switch (tensor._id) {
-            .buffer_id, .arg_id => if (self._buffer_to_arg.get(tensor._id)) |res|
+            .buffer_id, .arg_id => if (self._block_args.get(tensor._id)) |res|
                 .{ res[0], res[1] }
             else {
                 log.err("Found unknown tensor id {}({})", .{ tensor, tensor._id });
