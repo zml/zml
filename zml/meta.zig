@@ -120,9 +120,11 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
         return;
     }
 
+    if (@sizeOf(ToStruct) == 0) return;
+
     switch (type_info_to) {
         .Struct => |info| inline for (info.fields) |field| {
-            // if (field.is_comptime) continue;
+            if (field.is_comptime or @sizeOf(field.type) == 0) continue;
             const field_type_info = @typeInfo(field.type);
             // If the field is already a pointer, we recurse with it directly, otherwise, we recurse with a pointer to the field.
             switch (field_type_info) {
@@ -187,6 +189,8 @@ test mapAlloc {
         }
     };
 
+    const Empty = struct {};
+
     const AA = struct {
         field: A,
         array: [2]A,
@@ -195,6 +199,7 @@ test mapAlloc {
         // We want to allow conversion from comptime to runtime, because Zig type inference works like this.
         comptime static_val: u8 = 8,
         comptime static_slice: [2]A = .{ .{ .a = 11 }, .{ .a = 12 } },
+        field_with_empty: struct { A, Empty },
     };
     const BB = struct {
         field: B,
@@ -203,6 +208,7 @@ test mapAlloc {
         other: u8,
         static_val: u8,
         static_slice: []B,
+        field_with_empty: struct { B, Empty },
     };
 
     const aa: AA = .{
@@ -210,6 +216,7 @@ test mapAlloc {
         .array = .{ .{ .a = 5 }, .{ .a = 6 } },
         .other = 7,
         .slice = &.{ .{ .a = 9 }, .{ .a = 10 } },
+        .field_with_empty = .{ .{ .a = 9 }, .{} },
     };
     var bb: BB = undefined;
 
