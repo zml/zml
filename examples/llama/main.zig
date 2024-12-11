@@ -140,7 +140,7 @@ pub fn asyncMain() !void {
         prompt: ?[]const u8 = null,
         test_activations: ?[]const u8 = null,
         seed: ?u128 = null,
-        // eg: --create-options='{"cuda":{"allocator":{"bfc": {"memory_fraction": 0.99}}}}'
+        // eg: --create-options='{"cuda":{"allocator":{"bfc":{"memory_fraction": 0.99}}}}'
         create_options: []const u8 = "{}",
     };
 
