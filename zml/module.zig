@@ -145,7 +145,7 @@ pub const CompilationContext = struct {
     }
 
     pub fn deinit(self: *CompilationContext) void {
-        // self._fn_cache.deinit(self.allocator());
+        // No need to deinit self._fn_cache cause it uses our arena
         self._mlir_ctx.deinit();
         self._mlir_registry.deinit();
         self._arena.deinit();
