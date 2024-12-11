@@ -316,7 +316,7 @@ pub fn for_(comptime func: anytype, blk_ctx: BlockSign(func).BlkCtx, num_steps_:
     // but because of https://github.com/zml/zml/issues/97 we also reuse it to start the while_ loop.
     const first_step = @call(.auto, func, .{ blk_ctx, Tensor.scalar(0, .i32) });
     log.debug("for_ first_step: {}", .{first_step});
-    const allocator = CompilationContext.current()._allocator;
+    const allocator = CompilationContext.current().allocator();
     // Optimize for small num reps
     if (num_steps == 1) {
         var res = first_step;

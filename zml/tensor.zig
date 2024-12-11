@@ -126,7 +126,7 @@ pub const Tensor = struct {
 
     /// Returns the dimension of axis 'axis_'.
     ///
-    /// 'axis_' can be a signed integer or a tag.
+    /// 'axis_' can be an integer or a tag.
     pub fn dim(self: Tensor, axis_: anytype) i64 {
         return self._shape.dim(axis_);
     }
@@ -138,9 +138,16 @@ pub const Tensor = struct {
 
     /// Returns the index of axis 'axis_'.
     ///
-    /// 'axis_' can be a signed integer or a tag.
+    /// 'axis_' can be an integer or a tag.
     pub fn axis(self: Tensor, axis_: anytype) u3 {
         return self._shape.axis(axis_);
+    }
+
+    /// Returns the indices of each of the given axes.
+    ///
+    /// 'axis_' can be an integer or a tag.
+    pub fn axes(self: Tensor, axes_: anytype) std.BoundedArray(u3, Tensor.MAX_RANK) {
+        return self._shape.axes(axes_);
     }
 
     /// Returns a Tensor tagged with the tags in 'tagz'.
@@ -227,13 +234,13 @@ pub const Tensor = struct {
     var _global_tensor_counter: u64 = 0;
 
     /// Internal use
-    pub fn reserveIdRange(len: u32) u64 {
+    pub fn _reserveIdRange(len: u32) u64 {
         return @atomicRmw(u64, &_global_tensor_counter, .Add, len, .seq_cst);
     }
 
     /// Internal use
     pub fn setUniqueId(self: *Tensor) void {
-        self._id = .{ .buffer_id = reserveIdRange(1) };
+        self._id = .{ .buffer_id = _reserveIdRange(1) };
     }
 
     /// Returns a Tensor containing the absolute value of each element of the input Tensor.
@@ -357,7 +364,7 @@ pub const Tensor = struct {
 
     /// Returns the Cholesky decomposition of the input Tensor.
     ///
-    /// 'lower' controls the form of the outut Tensor. The output will be lower-triangular if 'lower' is true
+    /// 'lower' controls the form of the output Tensor. The output will be lower-triangular if 'lower' is true
     /// and upper-triangular otherwise.
     pub fn cholesky(self: Tensor, lower: bool) Tensor {
         stdx.debug.assert(self.rank() <= 2, "cholesky expects tensor rank to be <= 2, got {}", .{self.rank()});
@@ -1070,7 +1077,7 @@ pub const Tensor = struct {
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
 
-        var comp = try zml.module.CompilationContext.init(std.heap.page_allocator, "test", platform);
+        var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
         defer comp.deinit();
 
         comp.activate();
@@ -1390,6 +1397,7 @@ pub const Tensor = struct {
     ///
     /// unflatten((d0, d1, axis_m, d3), 2, n) -> (d0, d1, n, d2_m, d3)
     pub fn unflatten(self: Tensor, axis_: i8, n: i64) Tensor {
+        // TODO: move to torch.zig, this equivalent to `spitAxis`
         stdx.debug.assert(self.rank() < Tensor.MAX_RANK, "unflatten expects input tensor rank to be less than {}, got {}", .{ Tensor.MAX_RANK, self.rank() });
 
         const a = if (axis_ >= 0) self.axis(axis_) else self.axis(axis_) + 1;
@@ -1445,6 +1453,7 @@ pub const Tensor = struct {
 
     /// Flattens the given axis and the next one, into one new axis.
     pub fn flatten(self: Tensor, axis_: anytype) Tensor {
+        // TODO: move to torch.zig, this is equivalent to merge
         const old_shape = self._shape;
         const a = self.axis(axis_);
         // stdx.debug.assert(a + 1 < self.rank(), "Can't flatten {} on the last axis {}.", .{ self, axis });
@@ -1463,6 +1472,7 @@ pub const Tensor = struct {
     }
 
     pub inline fn flattenAll(self: Tensor) Tensor {
+        // TODO: rename to just flatten, once flatten is moved to torch
         return self.reshape(.{self.count()});
     }
 
@@ -1547,7 +1557,8 @@ pub const Tensor = struct {
         return if (idx < 0) self.dim(axis_) + idx else idx;
     }
 
-    pub fn choose1d(self: Tensor, axis_: i64, i: i64) Tensor {
+    pub fn choose1d(self: Tensor, axis_: anytype, i: i64) Tensor {
+        // TODO: this use case could be handled directly by slice if we added a .single field
         return self.slice1d(axis_, .{ .start = i, .end = i + 1 }).squeeze(axis_);
     }
 
@@ -1651,6 +1662,7 @@ pub const Tensor = struct {
 
     /// Repeats in line each value along the given axes.
     pub fn stutter(self: Tensor, n_reps: []const u63) Tensor {
+        // TODO: this should support the tagged syntax: x.repeat(.{ .a = 3, .b = 2});
         stdx.debug.assert(n_reps.len == self.rank(), "stutter expects tensor rank and 'n_reps' length to be equal, got {} and {}", .{ self.rank(), n_reps.len });
 
         var res = self;
@@ -2159,7 +2171,7 @@ pub const Tensor = struct {
 
         {
             // Only test shapes
-            var comp = try zml.module.CompilationContext.init(std.heap.page_allocator, "test", platform);
+            var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
             defer comp.deinit();
             comp.activate();
             defer comp.deactivate();
@@ -2295,7 +2307,7 @@ pub const Tensor = struct {
 
         {
             // Only test shapes
-            var comp = try zml.module.CompilationContext.init(std.heap.page_allocator, "test", platform);
+            var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
             defer comp.deinit();
             comp.activate();
             defer comp.deactivate();
@@ -2519,7 +2531,7 @@ pub const Tensor = struct {
 
         {
             // Only test shapes
-            var comp = try zml.module.CompilationContext.init(std.heap.page_allocator, "test", platform);
+            var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
             defer comp.deinit();
             comp.activate();
             defer comp.deactivate();
@@ -2759,8 +2771,10 @@ pub const Tensor = struct {
         return .{ .values = res[0], .indices = res[1] };
     }
 
+    pub const ArgSortOpts = struct { descending: bool = false };
+
     /// Returns a Tensor containing the indices corresponding to the sorted values over the given axis.
-    pub fn argsort(self: Tensor, axis_: i64, opts: struct { descending: bool = false }) Tensor {
+    pub fn argsort(self: Tensor, axis_: anytype, opts: ArgSortOpts) Tensor {
         return self.sort(axis_, .{ .descending = opts.descending }).indices;
     }
 
@@ -2768,13 +2782,19 @@ pub const Tensor = struct {
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
 
+        const Local = struct {
+            pub fn _argsort(x: Tensor, axis_: u3, opts: ArgSortOpts) Tensor {
+                return x.argsort(axis_, opts);
+            }
+        };
+
         var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena_state.deinit();
         const allocator = arena_state.allocator();
         // 2D Tensor - dim = 1, ascending
         {
             const x = try zml.Buffer.fromSlice(platform, .{ 2, 5 }, &[_]f32{ -0.9264, 0.7156, 1.0202, 0.3992, 1.2349, 1.0003, -0.1932, 1.3935, 0.7316, 0.0851 });
-            const res = try zml.testing.compileAndCall(platform, Tensor.argsort, .{ x, 1, .{} });
+            const res = try zml.testing.compileAndCall(platform, Local._argsort, .{ x, 1, .{} });
             const res_cpu = try res.toHostAlloc(allocator);
             try testing.expectEqualSlices(i32, &.{ 0, 3, 1, 2, 4, 1, 4, 3, 0, 2 }, res_cpu.items(i32));
         }
@@ -2787,7 +2807,7 @@ pub const Tensor = struct {
                 0.6626,  -0.3040, -0.8726, -1.4805, -1.6943, 1.1055,  -2.0078, -0.5288, 0.8813,  0.8008,
                 2.0527,  1.1230,  0.5430,  0.2494,  -0.9434, 0.7876,  0.1818,  0.9258,  -2.4902, 1.5918,
             });
-            const res_dev = try zml.testing.compileAndCall(platform, Tensor.argsort, .{ x, 1, .{ .descending = true } });
+            const res_dev = try zml.testing.compileAndCall(platform, Local._argsort, .{ x, 1, .{ .descending = true } });
             const res = try res_dev.toHostAlloc(allocator);
             try testing.expectEqualSlices(i32, &.{
                 4, 1, 1, 2, 0, 2, 0, 0, 3, 4,
@@ -2809,7 +2829,7 @@ pub const Tensor = struct {
                 64, 86, 62, 88,
                 57, 21, 19, 12,
             });
-            const res_dev = try zml.testing.compileAndCallWithTensors(platform, Tensor.argsort, .{ x.shape(), 3, .{} }, .{ x, 0, .{} });
+            const res_dev = try zml.testing.compileAndCall(platform, Local._argsort, .{ x, 3, .{} });
             const res = try res_dev.toHostAlloc(allocator);
             try testing.expectEqualSlices(i32, &.{
                 2, 1, 3, 0,
@@ -2921,10 +2941,6 @@ pub const Tensor = struct {
         );
     }
 
-    pub inline fn axes(self: Tensor, axes_: anytype) std.BoundedArray(u3, Tensor.MAX_RANK) {
-        return self._shape.axes(axes_);
-    }
-
     /// Chunk a given tensor into exactly n parts of equal shape.
     /// `self.dim(axis_)` must be divisible by n_chunks.
     pub fn chunkExact(self: Tensor, axis_: anytype, n_chunks: comptime_int) [n_chunks]Tensor {
@@ -2944,7 +2960,7 @@ pub const Tensor = struct {
         const platform = zml.testing.env();
 
         // Only test shapes
-        var comp = try zml.module.CompilationContext.init(std.heap.page_allocator, "test", platform);
+        var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
         defer comp.deinit();
         comp.activate();
         defer comp.deactivate();
@@ -2959,7 +2975,7 @@ pub const Tensor = struct {
             const chunks = x.chunkExact(ax, n_chunks);
 
             const res_shape = Shape.init(res, .f16);
-            for (&chunks) |chk| {
+            for (chunks) |chk| {
                 try zml.testing.expectEqualShapes(res_shape, chk.shape());
             }
         }
@@ -2971,13 +2987,14 @@ pub const Tensor = struct {
         self: Tensor,
         axis_: i64,
         n_chunks: comptime_int,
-    ) std.BoundedArray(Tensor, n_chunks + 1) {
+    ) []Tensor {
         const a = self.axis(axis_);
         const d = self.dim(a);
         const chunk_size: i64 = @divFloor(d, n_chunks);
         const tail_chunk_size: i64 = @rem(d, chunk_size);
 
-        var chunks: std.BoundedArray(Tensor, n_chunks + 1) = .{};
+        const allocator = self.getContext().allocator();
+        var chunks = std.ArrayListUnmanaged(Tensor).initCapacity(allocator, n_chunks + 1) catch @panic("OOM");
         for (0..n_chunks) |i| {
             const start: i64 = @as(i64, @intCast(i)) * chunk_size;
             chunks.appendAssumeCapacity(
@@ -2988,7 +3005,7 @@ pub const Tensor = struct {
             const start: i64 = n_chunks * chunk_size;
             chunks.appendAssumeCapacity(self.slice1d(a, .{ .start = start }));
         }
-        return chunks;
+        return chunks.items;
     }
 
     test chunkAllowTrailing {
@@ -2996,7 +3013,7 @@ pub const Tensor = struct {
         const platform = zml.testing.env();
 
         // Only test shapes
-        var comp = try zml.module.CompilationContext.init(std.heap.page_allocator, "test", platform);
+        var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
         defer comp.deinit();
         comp.activate();
         defer comp.deactivate();
@@ -3012,35 +3029,34 @@ pub const Tensor = struct {
             const chunks = x.chunkAllowTrailing(x.axis(ax), n_chunks);
 
             const res_shape = Shape.init(res, .f16);
-            for (chunks.constSlice()[0..n_chunks]) |chk| {
+            for (chunks[0..n_chunks]) |chk| {
                 try zml.testing.expectEqualShapes(res_shape, chk.shape());
             }
             const trailing_shape = Shape.init(trailing, .f16);
             if (trailing_shape.rank() > 0) {
                 try std.testing.expectEqual(n_chunks + 1, chunks.len);
-                try zml.testing.expectEqualShapes(trailing_shape, chunks.get(n_chunks).shape());
+                try zml.testing.expectEqualShapes(trailing_shape, chunks[n_chunks].shape());
             } else {
                 try std.testing.expectEqual(n_chunks, chunks.len);
             }
         }
     }
 
-    pub fn split(self: Tensor, allocator: std.mem.Allocator, split_size_or_sections: []const i64, axis_: i64) ![]Tensor {
-        stdx.debug.assert(split_size_or_sections.len > 0, "split expects 'split_size_or_sections' length to be positive, got {}", .{split_size_or_sections.len});
+    pub fn split(self: Tensor, axis_: anytype, split_sizes: []const i64) []Tensor {
+        stdx.debug.assert(split_sizes.len > 0, "split expects at least one 'split_sizes', got 0", .{});
 
         const a = self.axis(axis_);
-        const length = self.dim(a);
-        if (split_size_or_sections.len != 1) {
-            var split_sum: i64 = 0;
-            for (split_size_or_sections) |n| split_sum += n;
-            stdx.debug.assert(split_sum == length, "split expects sum of 'split_size_or_sections' values and axis dimension to be equal, got {} and {}", .{ split_sum, length });
-        }
+        const d = self.dim(a);
+        var split_sum: i64 = 0;
+        for (split_sizes) |n| split_sum += n;
+        stdx.debug.assert(split_sum == d, "split expects sum of 'split_sizes' values and axis dimension to be equal, got {} and {}", .{ split_sum, d });
 
-        const res = try allocator.alloc(Tensor, split_size_or_sections.len);
+        const allocator = self.getContext().allocator();
+        const res = allocator.alloc(Tensor, split_sizes.len) catch @panic("OOM");
         errdefer allocator.dealloc(res);
 
         var start: i64 = 0;
-        for (split_size_or_sections, 0..) |n, i| {
+        for (split_sizes, 0..) |n, i| {
             res[i] = self.slice1d(a, .{ .start = start, .end = start + n });
             start += n;
         }
@@ -3528,7 +3544,7 @@ pub const Tensor = struct {
     }
 
     /// Returns a Tensor containing boolean indicating if there is a non-zero value over the given axis.
-    pub fn any(self: Tensor, axis_: i64) Tensor {
+    pub fn any(self: Tensor, axis_: anytype) Tensor {
         const pred = self.cmp(.NE, Tensor.constant(self.dims(), self.dtype().zero()));
         const red = ops.reduce(
             struct {

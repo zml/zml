@@ -127,6 +127,9 @@ pub fn expectEqualShapes(expected: zml.Shape, actual: zml.Shape) error{TestExpec
 /// Compile a function and immediatly call it with the given buffers.
 /// The compiled module is discarded after the call.
 /// Useful during testing when a module is typically called only once.
+///
+/// Note: `func` needs explicit types on all parameters.
+/// To test a function with `anytype` (typically for tagged API), you need to create a specialized version of it with specific types.
 pub fn compileAndCall(platform: zml.Platform, func: anytype, buffer_args: zml.Bufferized(stdx.meta.FnArgs(func))) !zml.Bufferized(stdx.meta.FnResult(func)) {
     // This simplify test API and also ensure this fn isn't used outside of tests.
     const allocator = std.testing.allocator;

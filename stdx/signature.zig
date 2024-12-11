@@ -12,7 +12,7 @@ pub fn ArgsTuple(comptime funcT: anytype, comptime ArgsT: ?type) type {
         return std.meta.ArgsTuple(funcT);
     }
 
-    const args = std.meta.fields(ArgsT orelse compileError("generic function requires an explicit ArgsTuple", .{}));
+    const args = std.meta.fields(ArgsT orelse @compileError("generic function requires an explicit ArgsTuple"));
     var tuple_fields: [params.len]std.builtin.Type.StructField = undefined;
     if (params.len != args.len) {
         compileError("function {} expected {} args, got {}", .{ funcT, params.len, args.len });
@@ -23,7 +23,7 @@ pub fn ArgsTuple(comptime funcT: anytype, comptime ArgsT: ?type) type {
             continue;
         }
         const T = param.type.?;
-        var num_buf: [32]u8 = undefined;
+        var num_buf: [8]u8 = undefined;
         tuple_fields[i] = .{
             .name = blk: {
                 const s = std.fmt.formatIntBuf(&num_buf, i, 10, .lower, .{});
