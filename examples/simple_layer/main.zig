@@ -34,7 +34,7 @@ pub fn asyncMain() !void {
     var context = try zml.Context.init();
     defer context.deinit();
 
-    const platform = context.autoPlatform();
+    const platform = context.autoPlatform(.{});
     context.printAvailablePlatforms(platform);
 
     // Our weights and bias to use

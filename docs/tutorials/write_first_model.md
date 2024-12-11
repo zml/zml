@@ -184,7 +184,7 @@ pub fn asyncMain() !void {
     var context = try zml.Context.init();
     defer context.deinit();
 
-    const platform = context.autoPlatform();
+    const platform = context.autoPlatform(.{});
     ...
 }
 ```
@@ -458,7 +458,7 @@ pub fn asyncMain() !void {
     var context = try zml.Context.init();
     defer context.deinit();
 
-    const platform = context.autoPlatform();
+    const platform = context.autoPlatform(.{});
 
     // Our weights and bias to use
     var weights = [3]f16{ 2.0, 2.0, 2.0 };

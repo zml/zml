@@ -823,7 +823,7 @@ pub const NamedValue = extern struct {
             []i64, []const i64 => fromInt64List(name_, value),
             f32 => fromFloat(name_, value),
             bool => fromBool(name_, value),
-            else => unreachable,
+            else => fromString(name_, @tagName(value)),
         };
     }
 

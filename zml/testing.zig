@@ -8,11 +8,11 @@ const shapesOf = @import("tensor.zig").shapesOf;
 
 const log = std.log.scoped(.@"zml/testing");
 
-var _ctx: ?zml.Context = null;
+var _platform: ?zml.Platform = null;
 
 pub fn env() zml.Platform {
     if (!builtin.is_test) @compileError("Cannot use zml.testing.env outside of a test block");
-    if (_ctx == null) {
+    if (_platform == null) {
         _test_compile_opts = if (initCacheDir())
             .{
                 .cache_location = "/tmp/zml/tests/cache",
@@ -22,10 +22,11 @@ pub fn env() zml.Platform {
         else
             .{};
 
-        _ctx = zml.Context.init() catch unreachable;
+        var ctx = zml.Context.init() catch unreachable;
+        _platform = ctx.autoPlatform(.{}).withCompilationOptions(_test_compile_opts);
     }
 
-    return _ctx.?.autoPlatform().withCompilationOptions(_test_compile_opts);
+    return _platform.?;
 }
 
 var _test_compile_opts: zml.CompilationOptions = .{};

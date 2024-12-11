@@ -249,7 +249,7 @@ pub fn asyncMain() !void {
     
     var ctx = try zml.Context.init();
     defer ctx.deinit();
-    const platform = ctx.autoPlatform();
+    const platform = ctx.autoPlatform(.{});
     const mlp_weights = try zml.aio.loadModelBuffers(Mlp, mlp_shape, model_weights, allocator, platform);
 
     zml.testing.testLayer(platform, activations, "model.layers.0.mlp", mlp_shape, mlp_weights, 1e-3);
