@@ -823,7 +823,12 @@ pub const NamedValue = extern struct {
             []i64, []const i64 => fromInt64List(name_, value),
             f32 => fromFloat(name_, value),
             bool => fromBool(name_, value),
-            else => fromString(name_, @tagName(value)),
+            else => switch (@typeInfo(@TypeOf(value))) {
+                .Enum => fromString(name_, @tagName(value)),
+                .Int, .ComptimeInt => fromInt64(name_, @intCast(value)),
+                .Float, .ComptimeFloat => fromFloat(name_, @floatCast(value)),
+                else => stdx.debug.compileError("pjrt.NamedValue.from doesn't support type {}", .{@TypeOf(value)}),
+            },
         };
     }
 

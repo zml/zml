@@ -103,11 +103,14 @@ const _CreateOptions = struct {
     pub const Cuda = struct {
         allocator: Allocator = .{ .bfc = .{} },
         // TODO support all of https://github.com/openxla/xla/blob/3d31c48c719d331d432132b3e0c2c5ce52650675/xla/pjrt/c/pjrt_c_api_gpu_internal.cc#L76-L86
-        // visible_devices: []const i64 = &.{},
-        // node_id
-        // num_nodes
-        // enable_mock_nccl
-        // mock_gpu_topology
+        visible_devices: []const i64 = &.{},
+        node_id: ?u8 = null,
+        num_nodes: ?u8 = null,
+        // mock_nccl: union(enum) {
+        //     off,
+        //     mock_with_actual_topology, // enable_mock_nccl
+        //     mock_with_custom_topology: []const u8, // enable_mock_nccl+mock_gpu_topology
+        // };
 
         pub const Allocator = union(enum) {
             /// "Best-Fit with Coalescing" algorithm
@@ -130,7 +133,7 @@ const _CreateOptions = struct {
                     values.appendAssumeCapacity(pjrt.NamedValue.fromString("allocator", "platform"));
                 },
                 .bfc, .@"async" => |opt| {
-                    values.appendAssumeCapacity(pjrt.NamedValue.from("allocator", self.allocator));
+                    values.appendAssumeCapacity(pjrt.NamedValue.fromString("allocator", @tagName(self.allocator)));
                     values.appendAssumeCapacity(pjrt.NamedValue.from("preallocate", opt.preallocate));
                     if (opt.memory_fraction > 0) {
                         values.appendAssumeCapacity(pjrt.NamedValue.from("memory_fraction", opt.memory_fraction));
@@ -144,6 +147,8 @@ const _CreateOptions = struct {
             if (self.visible_devices.len > 0) {
                 values.appendAssumeCapacity(pjrt.NamedValue.from("visible_devices", self.visible_devices));
             }
+            if (self.node_id) |node_id| values.appendAssumeCapacity(pjrt.NamedValue.from("node_id", node_id));
+            if (self.num_nodes) |num_nodes| values.appendAssumeCapacity(pjrt.NamedValue.from("num_nodes", num_nodes));
         }
     };
 
