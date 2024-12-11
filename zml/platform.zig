@@ -141,9 +141,6 @@ const _CreateOptions = struct {
                     }
                 },
             }
-            if (self.visible_devices.len > 0) {
-                values.appendAssumeCapacity(pjrt.NamedValue.from("visible_devices", self.visible_devices));
-            }
         }
     };
 
