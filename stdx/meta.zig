@@ -178,3 +178,44 @@ pub fn Tail(Tuple: type) type {
         else => @compileError("Tail works on tuple type"),
     };
 }
+
+fn MergedTuple(comptime T: type, comptime U: type) type {
+    const t_type_info = @typeInfo(T);
+    const u_type_info = @typeInfo(U);
+    if (t_type_info != .Struct or !t_type_info.Struct.is_tuple) @compileError("Expected T to be a tuple");
+    if (u_type_info != .Struct or !u_type_info.Struct.is_tuple) @compileError("Expected U to be a tuple");
+
+    const field_count = t_type_info.Struct.fields.len + u_type_info.Struct.fields.len;
+    var fields: [field_count]std.builtin.Type.StructField = undefined;
+    inline for (t_type_info.Struct.fields, 0..) |f, i| {
+        fields[i] = f;
+        fields[i].name = std.fmt.comptimePrint("{d}", .{i});
+    }
+    inline for (u_type_info.Struct.fields, 0..) |f, i| {
+        fields[t_type_info.Struct.fields.len + i] = f;
+        fields[t_type_info.Struct.fields.len + i].name = std.fmt.comptimePrint("{d}", .{t_type_info.Struct.fields.len + i});
+    }
+
+    const V = std.builtin.Type{
+        .Struct = .{
+            .decls = &.{},
+            .fields = &fields,
+            .is_tuple = true,
+            .layout = .auto,
+        },
+    };
+
+    return @Type(V);
+}
+
+fn mergeTuple(t: anytype, u: anytype) MergedTuple(@TypeOf(t), @TypeOf(u)) {
+    var result: MergedTuple(@TypeOf(t), @TypeOf(u)) = undefined;
+    inline for (0..t.len) |i| {
+        result[i] = t[i];
+    }
+    inline for (0..u.len) |i| {
+        result[t.len + i] = u[i];
+    }
+
+    return result;
+}

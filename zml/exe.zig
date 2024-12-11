@@ -63,7 +63,10 @@ pub fn compileModel(
     var context = try CompilationContext.init(allocator, name, platform);
     defer context.deinit();
 
-    return .{ .inner = try context.compileInternal(allocator, func, .{model} ++ args_shapes) };
+    // NOTE(Corentin): We use `stdx.meta.mergeTuple` here because it happens that **SOMETIMES**, using
+    // .{model} ++ args_shapes result in non-null nullable field of args_shapes were null in the resulting tuple.
+    const merged_args = stdx.meta.mergeTuple(.{model}, args_shapes);
+    return .{ .inner = try context.compileInternal(allocator, func, merged_args) };
 }
 
 /// Compiles a function with the given configuration and shapes, for the given platform.
@@ -281,7 +284,7 @@ pub fn Exe(ArgsT: type, ReturnT: type) type {
 
         pub fn call(self: Self, args: Bufferized(ArgsT)) Bufferized(ReturnT) {
             const total_ready = fillBuffers(&args, self.inner.input_per_device, self.inner.ready_buffer_count);
-            std.debug.assert(total_ready == self.inner.input_buffer_count);
+            stdx.debug.assert(total_ready == self.inner.input_buffer_count, "Exe isn't ready to be called, expected {} buffer inputs got {}", .{ self.inner.input_buffer_count, total_ready });
             self.inner._unsafeCall();
             var result: Bufferized(ReturnT) = undefined;
             assignRawBuffers(&result, self.inner.platform, self.inner.output_per_device, self.inner.result_shapes);
