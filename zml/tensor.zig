@@ -127,8 +127,8 @@ pub const Tensor = struct {
     /// Returns the dimension of axis 'axis_'.
     ///
     /// 'axis_' can be an integer or a tag.
-    pub fn dim(self: Tensor, axis_: anytype) i64 {
-        return self._shape.dim(axis_);
+    pub fn dim(self: Tensor, axis_: anytype) u63 {
+        return @intCast(self._shape.dim(axis_));
     }
 
     /// Returns the dimensions of a Tensor as a slice.
@@ -1772,7 +1772,7 @@ pub const Tensor = struct {
         const dt: DataType = if (sh.dim(a) <= std.math.maxInt(i32)) .i32 else .i64;
         const res_shape = sh.withDtype(dt);
         const mlir_ctx = CompilationContext.current().mlirCtx();
-        const loc = mlir_ctx.location(@src()).namedFmt(mlir_ctx, "iota({}, {})", .{ res_shape, axis_ });
+        const loc = mlir_ctx.location(@src()).namedFmt(mlir_ctx, "iota({_}, {})", .{ res_shape, axis_ });
 
         var op = dialect.stablehlo.iota(mlir_ctx, a, mlir.ext.RankedTensorType.fromShape(mlir_ctx, res_shape).asType(), loc);
         return _result(res_shape, op.result(0));
@@ -1808,7 +1808,7 @@ pub const Tensor = struct {
         return res;
     }
 
-    /// Returns a 0d Tensor with the given value.
+    /// Returns a 0-rank Tensor with the given value.
     pub fn scalar(val: anytype, dt: DataType) Tensor {
         return Tensor.constant(.{}, Data.init(dt, val));
     }
@@ -1942,6 +1942,12 @@ pub const Tensor = struct {
         const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "reshape({any})", .{output_shape});
         const reshape_value = dialect.stablehlo.reshape(self.getContext().mlirCtx(), self.value(), tensor_type, loc);
         return _result(output_shape, reshape_value.result(0));
+    }
+
+    /// Converts the given 1 element Tensor into a 0-rank Tensor.
+    pub fn asScalar(self: Tensor) Tensor {
+        stdx.debug.assert(self.count() == 1, "Tensor.asScalar expects an input with exactly 1-element got {}", .{self});
+        return self.reshape(.{});
     }
 
     pub const Pad = struct {
@@ -2129,7 +2135,7 @@ pub const Tensor = struct {
         // Sometimes the backend recognize this pattern, but not always.
         // So let us handle that.
         if (indices.count() == 1) {
-            return self.dynamicSlice1d(coord_axes_.get(0), 1, indices.flattenAll().squeeze(0)).reshape(res_shape);
+            return self.dynamicSlice1d(coord_axes_.get(0), .{ .start = indices.flattenAll().squeeze(0), .len = 1 }).reshape(res_shape);
         }
 
         var slice_dims: Shape.DimsArray = .{};
@@ -3066,25 +3072,21 @@ pub const Tensor = struct {
     /// Slices the input Tensor along a specific axis, with a start offset known at runtime.
     /// Note: this doesn't support tagging, if you have tags,
     /// you should use `dynamicSlice` directly.
-    pub fn dynamicSlice1d(self: Tensor, axis_: i8, len: u63, start_indices: Tensor) Tensor {
-        stdx.debug.assert(start_indices.rank() == 0, "dynamicSlice1d expects 'start_indices' tensor rank to be equal to 0, got {}", .{start_indices.rank()});
+    pub fn dynamicSlice1d(self: Tensor, axis_: i8, slice_: DynSlice) Tensor {
+        stdx.debug.assert(slice_.start.rank() == 0, "dynamicSlice1d expects 'slice_.start' tensor rank to be a scalar, got {}", .{slice_.start});
 
         const a = self.axis(axis_);
-        const new_shape = self._shape.set(a, len);
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "axis={}, len={}", .{ axis_, len });
-        var indices: [Tensor.MAX_RANK]mlir.Value = undefined;
-        for (0..self.rank()) |i| {
-            indices[i] = if (i == a)
-                start_indices.value()
-            else
-                constant(.{}, start_indices.dtype().zero()).value();
-        }
+        const new_shape = self._shape.set(a, slice_.len);
+        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "dynSlice({}, len={})", .{ axis_, slice_.len });
+
+        var start_indices = [_]mlir.Value{constant(.{}, slice_.start.dtype().zero()).value()} ** MAX_RANK;
+        start_indices[a] = slice_.start.value();
 
         const op = dialect.stablehlo.dynamicSlice(
             self.getContext().mlirCtx(),
             self.value(),
             new_shape.dims(),
-            indices[0..self.rank()],
+            start_indices[0..self.rank()],
             loc,
         );
 
