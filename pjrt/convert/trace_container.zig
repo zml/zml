@@ -76,7 +76,7 @@ pub const TraceContainer = struct {
         };
     }
 
-    fn xstatValueToString(stat: *const xplane_proto.XStat, plane: *const xplane_visitor.XPlaneVisitor, writer: std.io.AnyWriter) !void {
+    fn xstatValueToString(stat: *const xplane_proto.XStat, plane: *const xplane_visitor.XPlaneVisitor, writer: anytype) !void {
         if (stat.value) |val| {
             switch (val) {
                 inline .int64_value, .uint64_value, .double_value => |v| try writer.print("{d}", .{v}),
@@ -231,7 +231,7 @@ pub const TraceContainer = struct {
         self.events.shrinkRetainingCapacity(max_count);
     }
 
-    pub fn toJson(self: *TraceContainer, writer: std.io.AnyWriter) !void {
+    pub fn toJson(self: *TraceContainer, writer: anytype) !void {
         try writer.writeAll(
             \\{"displayTimeUnit":"ns","metadata":{"highres-ticks":true},"traceEvents":[
         );
