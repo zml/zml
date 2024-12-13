@@ -1371,7 +1371,12 @@ pub const Tensor = struct {
         }
 
         const res_shape = self._shape.transpose(permutation);
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "tr({any})", .{axes_});
+        if (transposeIsJustAReshape(self.shape(), permutation)) {
+            scoped_log.warn("Rewriting transpose({}, {d}) as a reshape({}, {})", .{ self, permutation, self, res_shape });
+            return self.reshape(res_shape);
+        }
+
+        const loc = self.getContext().location(@src(), "transpose({_}, {d})", .{ self.shape(), permutation });
         const op = dialect.stablehlo.transpose(
             self.getContext().mlirCtx(),
             self.value(),
@@ -3117,7 +3122,7 @@ pub const Tensor = struct {
         // TODO use slices and slices_tags for the format.
         // Currently this prints: "dynSlice(struct{q: struct{start: tensor.Tensor, comptime len: comptime_int = 1}}{ .q = struct{start: tensor.Tensor, comptime len: comptime_int = 1}{ .start = Tensor({1,10}, dtype=.i64), .len = 1 } })"
         // which is kinda ugly.
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "dynSlice({any})", .{slices_});
+        const loc = self.getContext().location(@src(), "dynSlice({any})", .{slices_});
 
         const idx_dtype = if (slices.len > 0) slices.get(0).start.dtype() else .i32;
         const zero = Tensor.scalar(0, idx_dtype).value();
@@ -3155,7 +3160,7 @@ pub const Tensor = struct {
         {
             const x = try zml.Buffer.fromArray(platform, [10]T{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 });
             const z = try zml.Buffer.scalar(platform, 4, .i32);
-            const res = try zml.testing.compileAndCall(platform, Tensor.dynamicSlice1d, .{ x, 0, 2, z });
+            const res = try zml.testing.compileAndCall(platform, Tensor.dynamicSlice1d, .{ x, 0, .{ .len = 2, .start = z } });
 
             try testing.expectEqual([2]T{ 4, 5 }, try res.getValue([2]T));
         }
@@ -3165,7 +3170,7 @@ pub const Tensor = struct {
             const x = try zml.Buffer.fromArray(platform, [2][5]T{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } });
             const z = try zml.Buffer.scalar(platform, 3, .i32);
 
-            const res = try zml.testing.compileAndCall(platform, Tensor.dynamicSlice1d, .{ x, 1, 2, z });
+            const res = try zml.testing.compileAndCall(platform, Tensor.dynamicSlice1d, .{ x, 1, .{ .len = 2, .start = z } });
             try testing.expectEqual([4]T{ 3, 4, 8, 9 }, res.getValue([4]T));
         }
     }
@@ -3977,4 +3982,34 @@ inline fn toI64(values: anytype) []i64 {
     var res: [Tensor.MAX_RANK]i64 = undefined;
     for (values, 0..) |val, i| res[i] = @intCast(val);
     return res[0..values.len];
+}
+
+fn transposeIsJustAReshape(x: Shape, permutation: []const i64) bool {
+    var perm: std.BoundedArray(u8, Tensor.MAX_RANK) = .{};
+    for (permutation) |ax| {
+        perm.appendAssumeCapacity(@intCast(ax));
+    }
+
+    for (0..permutation.len) |i| {
+        if (x.dim(i) != 1) continue;
+
+        const squeezed_ax = perm.orderedRemove(i);
+        for (0..perm.len) |j| {
+            const ax = perm.get(j);
+            if (ax > squeezed_ax) perm.set(j, ax - 1);
+        }
+    }
+
+    const no_op = [Tensor.MAX_RANK]u8{ 0, 1, 2, 3, 4, 5, 6, 7 };
+    return std.mem.eql(u8, perm.constSlice(), no_op[0..perm.len]);
+}
+
+test transposeIsJustAReshape {
+    try std.testing.expect(transposeIsJustAReshape(Shape.init(.{ 5, 1, 3 }, .i32), &.{ 0, 1, 2 }));
+    try std.testing.expect(transposeIsJustAReshape(Shape.init(.{ 5, 1, 3 }, .i32), &.{ 1, 0, 2 }));
+    try std.testing.expect(!transposeIsJustAReshape(Shape.init(.{ 5, 1, 3 }, .i32), &.{ 2, 1, 0 }));
+    try std.testing.expect(transposeIsJustAReshape(Shape.init(.{ 64, 8, 1, 128 }, .bf16), &.{ 0, 2, 1, 3 }));
+    try std.testing.expect(!transposeIsJustAReshape(Shape.init(.{ 64, 8, 155, 128 }, .bf16), &.{ 0, 2, 1, 3 }));
+    try std.testing.expect(transposeIsJustAReshape(Shape.init(.{ 64, 1, 1, 128 }, .bf16), &.{ 1, 2, 0, 3 }));
+    try std.testing.expect(!transposeIsJustAReshape(Shape.init(.{ 64, 1, 155, 128 }, .bf16), &.{ 1, 2, 0, 3 }));
 }
