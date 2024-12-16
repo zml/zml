@@ -19,11 +19,16 @@
         "."
     ],
     "bazel.buildifierExecutable": "@buildifier_prebuilt//:buildifier",
-    "zig.formattingProvider": "zls",
-    "zig.initialSetupDone": true,
-    "zig.path": "${workspaceFolder}/tools/zig.sh",
-    "zig.zls.globalCachePath": null,
-    "zig.zls.path": "${workspaceFolder}/tools/zls.sh",
     "C_Cpp.formatting": "clangFormat",
     "C_Cpp.clang_format_style": "Microsoft",
+    "zig.formattingProvider": "zls",
+    "zig.path": "x",
+    "zig.zls.path": "${workspaceFolder}/tools/zls.sh",
+    "[zig]": {
+        "editor.suggest.insertMode": "replace",
+        "editor.stickyScroll.defaultModel": "foldingProviderModel",
+        "editor.codeActionsOnSave": {
+            "source.fixAll": "explicit",
+        }
+    },
 }
