@@ -368,7 +368,7 @@ pub const CompilationContext = struct {
         defer arena_state.deinit();
         const arena = arena_state.allocator();
 
-        const tensor_count = countTensors(args);
+        const tensor_count = meta.count(Tensor, args);
 
         const mlir_ctx = self.mlirCtx();
         const loc = mlir_ctx.location(@src());
@@ -798,7 +798,7 @@ pub const CompilationContext = struct {
         };
     }
 
-    fn getValue(self: *const CompilationContext, tensor: Tensor) mlir.Value {
+    pub fn getValue(self: *const CompilationContext, tensor: Tensor) mlir.Value {
         return self.getValueAndDonation(tensor)[0];
     }
 
