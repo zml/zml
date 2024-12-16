@@ -58,9 +58,9 @@ pub const Tensor = struct {
         options: std.fmt.FormatOptions,
         writer: anytype,
     ) !void {
-        _ = fmt;
         _ = options;
-        try writer.print("Tensor({_})", .{self._shape});
+        const bare_fmt = fmt.len == 1 and fmt[0] == '_';
+        try writer.print(if (bare_fmt) "{_}" else "Tensor({_})", .{self._shape});
     }
 
     /// Returns the shape of a Tensor.
@@ -277,7 +277,7 @@ pub const Tensor = struct {
 
         res_shape = res_shape.withDtype(dt);
 
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "bitCast({})", .{dt});
+        const loc = self.getContext().location(@src(), "bitCast({s})", .{@tagName(dt)});
         const op = dialect.stablehlo.bitcast_convert(
             self.getContext().mlirCtx(),
             self.value(),
@@ -349,17 +349,17 @@ pub const Tensor = struct {
 
     /// Returns a Tensor containing the element-wise left-shift operation of 'self' by 'other'.
     pub fn shiftLeft(self: Tensor, other: Tensor) Tensor {
-        return binaryOp("shiftLeft", dialect.stablehlo.shift_left)(self, other);
+        return binaryOp(@src(), "shiftLeft", dialect.stablehlo.shift_left)(self, other);
     }
 
     /// Returns a Tensor containing the element-wise arithmetic right-shift operation of 'self' by 'other'.
     pub fn shiftRightArithmetic(self: Tensor, other: Tensor) Tensor {
-        return binaryOp("shiftRightArithmetic", dialect.stablehlo.shift_right_arithmetic)(self, other);
+        return binaryOp(@src(), "shiftRightArithmetic", dialect.stablehlo.shift_right_arithmetic)(self, other);
     }
 
     /// Returns a Tensor containing the element-wise logical right-shift operation of 'self' by 'other'.
     pub fn shiftRightLogical(self: Tensor, other: Tensor) Tensor {
-        return binaryOp("shiftRightLogical", dialect.stablehlo.shift_right_logical)(self, other);
+        return binaryOp(@src(), "shiftRightLogical", dialect.stablehlo.shift_right_logical)(self, other);
     }
 
     /// Returns the Cholesky decomposition of the input Tensor.
@@ -369,7 +369,7 @@ pub const Tensor = struct {
     pub fn cholesky(self: Tensor, lower: bool) Tensor {
         stdx.debug.assert(self.rank() <= 2, "cholesky expects tensor rank to be <= 2, got {}", .{self.rank()});
 
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "lower={}", .{lower});
+        const loc = self.getContext().location(@src(), "lower={}", .{lower});
         const op = dialect.stablehlo.cholesky(self.getContext().mlirCtx(), self.value(), lower, loc);
         return _result(self._shape, op.result(0));
     }
@@ -379,7 +379,7 @@ pub const Tensor = struct {
         stdx.debug.assert(self.dtype() == other.dtype(), "triangularSolve expects tensors to be of the same type, got {} and {}", .{ self.dtype(), other.dtype() });
         stdx.debug.assert(self.rank() <= 2 and self.rank() == other.rank(), "triangularSolve expects tensors to have the same rank and be <= 2, got {} and {}", .{ self.rank(), other.rank() });
 
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "opts={}", .{opts});
+        const loc = self.getContext().location(@src(), "triangularSolve({_}, {})", .{ self, opts });
         const op = dialect.stablehlo.triangular_solve(self.getContext().mlirCtx(), self.value(), other.value(), loc, opts);
         return _result(self._shape, op.result(0));
     }
@@ -492,7 +492,7 @@ pub const Tensor = struct {
             },
         };
 
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "opts={}", .{opts});
+        const loc = self.getContext().location(@src(), "fft({_},{})", .{ self, opts });
         const op = dialect.stablehlo.fft(self.getContext().mlirCtx(), self.value(), loc, opts);
         return _result(sh, op.result(0));
     }
@@ -522,7 +522,7 @@ pub const Tensor = struct {
         /// but it is not guaranteed to be deterministic between implementations.
         pub fn bitGenerator(self: Rng, sh: Shape) struct { Rng, Tensor } {
             const ctx = CompilationContext.current();
-            const loc = ctx.mlirCtx().location(@src()).namedFmt(ctx.mlirCtx(), "rand.bitGen({})", .{sh});
+            const loc = ctx.location(@src(), "rand.bitGen({_})", .{sh});
             const op = dialect.stablehlo.rng_bit_generator(
                 ctx.mlirCtx(),
                 self.algorithm,
@@ -646,12 +646,12 @@ pub const Tensor = struct {
         pub fn normal(sh: Shape, opts: struct { mean: f64 = 0, stddev: f64 = 1 }) Tensor {
             stdx.debug.assert(sh.dtype().isFloat(), "normal expects tensor type to be a float, got {}", .{sh.dtype()});
 
-            const ctx = CompilationContext.current().mlirCtx();
-            const loc = ctx.location(@src()).namedFmt(ctx, "rand.normal({}, opts={})", .{ sh, opts });
+            const ctx = CompilationContext.current();
+            const loc = ctx.location(@src(), "rand.normal({_}, mean={},stddev={})", .{ sh, opts.mean, opts.stddev });
             const a = Tensor.constant(.{}, Data.init(sh.dtype(), opts.mean));
             const b = Tensor.constant(.{}, Data.init(sh.dtype(), opts.stddev));
             const res_shape = Tensor.constantTensor(HostBuffer.fromSlice(.{sh.rank()}, sh.dims()));
-            const op = dialect.stablehlo.rng(ctx, a.value(), b.value(), res_shape.value(), .NORMAL, loc);
+            const op = dialect.stablehlo.rng(ctx.mlirCtx(), a.value(), b.value(), res_shape.value(), .NORMAL, loc);
             return _result(sh, op.result(0));
         }
 
@@ -744,7 +744,7 @@ pub const Tensor = struct {
         stdx.debug.assert(1 <= exponent_bits, "reducePrecision expects 'exponent_bits' to be >= 1, got {}", .{exponent_bits});
         stdx.debug.assert(0 <= mantissa_bits, "reducePrecision expects 'mantissa_bits' to be positive, got {}", .{mantissa_bits});
 
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "reducePrecision(exponent_bits={}, mantissa_bits={})", .{ exponent_bits, mantissa_bits });
+        const loc = self.getContext().location(@src(), "reducePrecision(exponent_bits={}, mantissa_bits={})", .{ exponent_bits, mantissa_bits });
         const op = dialect.stablehlo.reduce_precision(self.getContext().mlirCtx(), self.value(), exponent_bits, mantissa_bits, loc);
         return _result(self._shape, op.result(0));
     }
@@ -867,7 +867,7 @@ pub const Tensor = struct {
             batch_group_count: i64 = 1,
         },
     ) Tensor {
-        const loc = input.getContext().mlirCtx().location(@src()).namedFmt(input.getContext().mlirCtx(), "opts={}", .{opts});
+        const loc = input.getContext().location(@src(), "opts={}", .{opts});
         return input.convolution(kernel, .{
             .window_strides = &.{opts.window_strides},
             .pad_value = opts.padding,
@@ -912,7 +912,7 @@ pub const Tensor = struct {
             batch_group_count: i64 = 1,
         },
     ) Tensor {
-        const loc = input.getContext().mlirCtx().location(@src()).namedFmt(input.getContext().mlirCtx(), "opts={}", .{opts});
+        const loc = input.getContext().location(@src(), "opts={}", .{opts});
         return input.convolution(kernel, .{
             .window_strides = opts.window_strides,
             .pad_value = opts.padding,
@@ -935,37 +935,37 @@ pub const Tensor = struct {
 
     /// Returns a Tensor containing the element-wise addition of the input Tensors.
     pub fn add(self: Tensor, other: Tensor) Tensor {
-        return binaryOp("add", dialect.stablehlo.add)(self, other);
+        return binaryOp(@src(), "add", dialect.stablehlo.add)(self, other);
     }
 
     /// Returns a Tensor containing the element-wise subtraction of the input Tensors.
     pub fn sub(self: Tensor, other: Tensor) Tensor {
-        return binaryOp("subtract", dialect.stablehlo.subtract)(self, other);
+        return binaryOp(@src(), "subtract", dialect.stablehlo.subtract)(self, other);
     }
 
     /// Returns a Tensor containing the element-wise multiplication of the input Tensors.
     pub fn mul(self: Tensor, other: Tensor) Tensor {
-        return binaryOp("mul", dialect.stablehlo.multiply)(self, other);
+        return binaryOp(@src(), "mul", dialect.stablehlo.multiply)(self, other);
     }
 
     /// Returns a Tensor containing the element-wise division of the input Tensors.
     pub fn div(self: Tensor, other: Tensor) Tensor {
-        return binaryOp("div", dialect.stablehlo.divide)(self, other);
+        return binaryOp(@src(), "div", dialect.stablehlo.divide)(self, other);
     }
 
     /// Returns a Tensor containing the element-wise exponentiation of the input Tensors.
     pub fn pow(self: Tensor, other: Tensor) Tensor {
-        return binaryOp("pow", dialect.stablehlo.power)(self, other);
+        return binaryOp(@src(), "pow", dialect.stablehlo.power)(self, other);
     }
 
     /// Returns a Tensor containing the element-wise maximum operation of the input Tensors.
     pub fn maximum(self: Tensor, other: Tensor) Tensor {
-        return binaryOp("maximum", dialect.stablehlo.maximum)(self, other);
+        return binaryOp(@src(), "maximum", dialect.stablehlo.maximum)(self, other);
     }
 
     /// Returns a Tensor containing the element-wise minimum operation of the input Tensors.
     pub fn minimum(self: Tensor, other: Tensor) Tensor {
-        return binaryOp("minimum", dialect.stablehlo.minimum)(self, other);
+        return binaryOp(@src(), "minimum", dialect.stablehlo.minimum)(self, other);
     }
 
     /// Returns a Tensor containing the element-wise addition of the input Tensor with a constant.
@@ -988,9 +988,9 @@ pub const Tensor = struct {
     /// Returns a Tensor containing the element-wise logical operation of the input Tensors.
     pub fn logical(self: Tensor, comptime logical_op: LogicalOp, other: Tensor) Tensor {
         return switch (logical_op) {
-            .OR => binaryOp("or", dialect.stablehlo.or_)(self, other),
-            .XOR => binaryOp("xor", dialect.stablehlo.xor)(self, other),
-            .AND => binaryOp("and", dialect.stablehlo.and_)(self, other),
+            .OR => binaryOp(@src(), "or", dialect.stablehlo.or_)(self, other),
+            .XOR => binaryOp(@src(), "xor", dialect.stablehlo.xor)(self, other),
+            .AND => binaryOp(@src(), "and", dialect.stablehlo.and_)(self, other),
         };
     }
 
@@ -1007,16 +1007,16 @@ pub const Tensor = struct {
     }
 
     /// Returns a Tensor containing the element-wise conversion to another type.
-    pub fn convert(self: Tensor, dt: DataType) Tensor {
-        if (dt == self.dtype()) {
+    pub fn convert(self: Tensor, to: DataType) Tensor {
+        if (to == self.dtype()) {
             return self;
         }
 
-        const res_type = mlir.RankedTensorType.init(self.dims(), mlir.ext.Type.fromDType(self.getContext().mlirCtx(), dt)).as(mlir.Type).?;
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "dtype={}", .{dt});
+        const res_type = mlir.RankedTensorType.init(self.dims(), mlir.ext.Type.fromDType(self.getContext().mlirCtx(), to)).as(mlir.Type).?;
+        const loc = self.getContext().location(@src(), "convert({_},to={s})", .{ self, @tagName(to) });
 
         const op = dialect.stablehlo.convert(self.getContext().mlirCtx(), self.value(), res_type, loc);
-        return _result(self._shape.withDtype(dt), op.result(0));
+        return _result(self._shape.withDtype(to), op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise rounding operation of the input Tensor.
@@ -1174,7 +1174,7 @@ pub const Tensor = struct {
         }
 
         const mlir_ctx = lhs.getContext().mlirCtx();
-        const loc = mlir_ctx.location(@src());
+        const loc = lhs.getContext().location(@src(), "dot({_},{_},contracting={any},batching={any}", .{ lhs, rhs, contracting_axes, batching_axes });
         const op = dialect.stablehlo.dot_general(
             mlir_ctx,
             lhs.value(),
@@ -1376,7 +1376,7 @@ pub const Tensor = struct {
             return self.reshape(res_shape);
         }
 
-        const loc = self.getContext().location(@src(), "transpose({_}, {d})", .{ self.shape(), permutation });
+        const loc = self.getContext().location(@src(), "transpose({_}, {d})", .{ self, permutation });
         const op = dialect.stablehlo.transpose(
             self.getContext().mlirCtx(),
             self.value(),
@@ -1409,7 +1409,7 @@ pub const Tensor = struct {
         const new_dim = std.math.divExact(i64, self.dim(a), n) catch std.debug.panic("unflatten expects chosen dimension to be divisible by 'n' but {} is not divisible by {}", .{ self.dim(a), n });
         const new_shape = self._shape.set(a, n).insert(a + 1, .{ ._ = new_dim });
 
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "axis={}, n={}", .{ axis_, n });
+        const loc = self.getContext().location(@src(), "axis={}, n={}", .{ axis_, n });
         const reshaped_val = dialect.stablehlo.reshape(
             self.getContext().mlirCtx(),
             self.value(),
@@ -1426,7 +1426,7 @@ pub const Tensor = struct {
     pub fn splitAxis(self: Tensor, ax: anytype, split_shape: anytype) Tensor {
         const new_shape = self._shape.splitAxis(ax, split_shape);
 
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "splitAxis({}, {any})", .{ ax, split_shape });
+        const loc = self.getContext().location(@src(), "splitAxis({}, {any})", .{ ax, split_shape });
         const reshaped_val = dialect.stablehlo.reshape(
             self.getContext().mlirCtx(),
             self.value(),
@@ -1464,8 +1464,7 @@ pub const Tensor = struct {
         // stdx.debug.assert(a + 1 < self.rank(), "Can't flatten {} on the last axis {}.", .{ self, axis });
         const new_shape = old_shape.remove(a + 1).set(a, old_shape.dim(a) * old_shape.dim(a + 1));
 
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "axis={}", .{axis_});
-
+        const loc = self.getContext().location(@src(), "flatten({_},{})", .{ self, axis_ });
         const reshaped_val = dialect.stablehlo.reshape(
             self.getContext().mlirCtx(),
             self.value(),
@@ -1583,8 +1582,9 @@ pub const Tensor = struct {
         }
 
         const res_shape = tensors[0]._shape.set(a, concatenated_dim);
-        const loc = tensors[0].getContext().mlirCtx().location(@src()).namedFmt(tensors[0].getContext().mlirCtx(), "axis={}", .{axis_});
-        const op = dialect.stablehlo.concatenate(tensors[0].getContext().mlirCtx(), buffer[0..tensors.len], a, loc);
+        const ctx = tensors[0].getContext();
+        const loc = ctx.location(@src(), "axis={}", .{axis_});
+        const op = dialect.stablehlo.concatenate(ctx.mlirCtx(), buffer[0..tensors.len], a, loc);
         // log.debug("concatenate({}, {}, {d}) -> {d}", .{ tensors[0], tensors[1], a, res_shape });
         return _result(res_shape, op.result(0));
     }
@@ -1749,7 +1749,7 @@ pub const Tensor = struct {
         stdx.debug.assert(args.step > 0, "arange expects 'args.step' to be positive, got {}", .{args.step});
 
         const ctx = CompilationContext.current();
-        const loc = ctx.mlirCtx().location(@src()).namedFmt(ctx.mlirCtx(), "{}, dtype={}", .{ args, dt });
+        const loc = ctx.location(@src(), "arange({}, dtype={})", .{ args, dt });
 
         const n_steps = std.math.divCeil(i64, args.end - args.start, args.step) catch unreachable;
         const sh = Shape.init(.{n_steps}, dt);
@@ -1776,9 +1776,10 @@ pub const Tensor = struct {
         const a = sh.axis(axis_);
         const dt: DataType = if (sh.dim(a) <= std.math.maxInt(i32)) .i32 else .i64;
         const res_shape = sh.withDtype(dt);
-        const mlir_ctx = CompilationContext.current().mlirCtx();
-        const loc = mlir_ctx.location(@src()).namedFmt(mlir_ctx, "iota({_}, {})", .{ res_shape, axis_ });
+        const ctx = CompilationContext.current();
+        const loc = ctx.location(@src(), "iota({_}, {})", .{ res_shape, axis_ });
 
+        const mlir_ctx = ctx.mlirCtx();
         var op = dialect.stablehlo.iota(mlir_ctx, a, mlir.ext.RankedTensorType.fromShape(mlir_ctx, res_shape).asType(), loc);
         return _result(res_shape, op.result(0));
     }
@@ -1796,7 +1797,7 @@ pub const Tensor = struct {
         stdx.debug.assert(dt.isFloat(), "linspace expects type to be a float, got {} (hint: use arange instead)", .{dt});
 
         const ctx = CompilationContext.current();
-        const loc = ctx.mlirCtx().location(@src()).namedFmt(ctx.mlirCtx(), "linspace({}, dtype={})", .{ args, dt });
+        const loc = ctx.location(@src(), "linspace({}, dtype={})", .{ args, dt });
 
         const sh = Shape.init(.{args.steps}, dt);
         var iota_op = dialect.stablehlo.iota(ctx.mlirCtx(), 0, mlir.ext.mlirType(ctx.mlirCtx(), sh), loc);
@@ -1823,7 +1824,7 @@ pub const Tensor = struct {
         const sh = Shape.init(dimz, val.dtype());
         const singleton_sh = Shape.init(.{}, val.dtype());
         const ctx = CompilationContext.current().mlirCtx();
-        const loc = ctx.location(@src()).namedFmt(ctx, "dims={d}, value={}", .{ sh, val });
+        const loc = CompilationContext.current().location(@src(), "dims={d}, value={}", .{ sh, val });
         const res_type = mlir.ext.RankedTensorType.fromShape(ctx, singleton_sh);
 
         var constant_op = if (mlir.ext.denseElementAttrType(val.dtype())) |elem_type|
@@ -1889,9 +1890,10 @@ pub const Tensor = struct {
             const d = self.dim(self_ax);
             stdx.debug.assert(d == 1 or d == output_shape.dim(other_ax), "broadcast expects shape axes to either be 1-sized or to match the target size. got broadcast({}, {}, {d}), error on self axis {} mapping to other axis {}", .{ self, output_shape, axes_, self_ax, other_ax });
         }
-        const result_type = mlir.ext.RankedTensorType.fromShape(self.getContext().mlirCtx(), res_shape).as(mlir.Type).?;
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "broadcast({}, {any}, axes={d})", .{ self, res_shape, axes_ });
-        const broadcast_op = dialect.stablehlo.broadcast_in_dim(self.getContext().mlirCtx(), self.value(), axes_, result_type, loc);
+        const ctx = self.getContext();
+        const result_type = mlir.ext.RankedTensorType.fromShape(ctx.mlirCtx(), res_shape).as(mlir.Type).?;
+        const loc = ctx.location(@src(), "broadcast({_}, {_}, axes={d})", .{ self, res_shape, axes_ });
+        const broadcast_op = dialect.stablehlo.broadcast_in_dim(ctx.mlirCtx(), self.value(), axes_, result_type, loc);
 
         return _result(res_shape, broadcast_op.result(0));
     }
@@ -1944,7 +1946,7 @@ pub const Tensor = struct {
     pub fn reshape(self: Tensor, output_shape_: anytype) Tensor {
         const output_shape = self._shape.reshape(output_shape_);
         const tensor_type = mlir.ext.RankedTensorType.fromShape(self.getContext().mlirCtx(), output_shape);
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "reshape({any})", .{output_shape});
+        const loc = self.getContext().location(@src(), "reshape({any})", .{output_shape});
         const reshape_value = dialect.stablehlo.reshape(self.getContext().mlirCtx(), self.value(), tensor_type, loc);
         return _result(output_shape, reshape_value.result(0));
     }
@@ -2035,7 +2037,7 @@ pub const Tensor = struct {
     pub fn reverse(self: Tensor, axes_: anytype) Tensor {
         const actual_axes = self._shape.axes(axes_);
 
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "reverse({any})", .{axes_});
+        const loc = self.getContext().location(@src(), "reverse({any})", .{axes_});
         const reverse_op = dialect.stablehlo.reverse(self.getContext().mlirCtx(), self.value(), toI64(actual_axes.constSlice()), loc);
         return _result(self._shape, reverse_op.result(0));
     }
@@ -3082,7 +3084,7 @@ pub const Tensor = struct {
 
         const a = self.axis(axis_);
         const new_shape = self._shape.set(a, slice_.len);
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "dynSlice({}, len={})", .{ axis_, slice_.len });
+        const loc = self.getContext().location(@src(), "dynSlice({}, len={})", .{ axis_, slice_.len });
 
         var start_indices = [_]mlir.Value{constant(.{}, slice_.start.dtype().zero()).value()} ** MAX_RANK;
         start_indices[a] = slice_.start.value();
@@ -3382,7 +3384,7 @@ pub const Tensor = struct {
 
         stdx.debug.assert(self._shape.eql(other._shape), "cmp expects input tensor shapes to match, got {} and {}", .{ self._shape, other._shape });
 
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "cmp(.{s})", .{@tagName(direction)});
+        const loc = self.getContext().location(@src(), "cmp(.{s})", .{@tagName(direction)});
         const op = dialect.stablehlo.compare(
             self.getContext().mlirCtx(),
             self.value(),
@@ -3686,6 +3688,7 @@ pub const Tensor = struct {
     }
 
     fn binaryOp(
+        src: std.builtin.SourceLocation,
         op_name: []const u8,
         op_fn: fn (mlir.Context, mlir.Value, mlir.Value, mlir.Location) mlir.Operation,
     ) fn (Tensor, Tensor) Tensor {
@@ -3703,9 +3706,9 @@ pub const Tensor = struct {
 
                 stdx.debug.assert(self._shape.eql(other._shape), "{s} expects tensor shapes to match, got {} and {}", .{ op_name, self._shape, other._shape });
 
-                const mlirCtx = self.getContext().mlirCtx();
-                const location = mlirCtx.location(@src());
-                const ret = @call(.auto, op_fn, .{ mlirCtx, self.value(), other.value(), location });
+                const ctx = self.getContext();
+                const location = ctx.location(src, "{s}({_}, {_})", .{ op_name, self, other });
+                const ret = @call(.auto, op_fn, .{ ctx.mlirCtx(), self.value(), other.value(), location });
                 return _result(self._shape, ret.result(0));
             }
         }.binaryOpHelper;
