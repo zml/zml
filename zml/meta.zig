@@ -392,6 +392,26 @@ test visit {
     }
 }
 
+pub fn count(T: type, value: anytype) u32 {
+    var counter: u32 = 0;
+    visit(struct {
+        pub fn cb(res: *u32, _: *const T) void {
+            res.* += 1;
+        }
+    }.cb, &counter, value);
+    return counter;
+}
+
+pub fn first(T: type, value: anytype) T {
+    var res: ?T = null;
+    visit(struct {
+        pub fn cb(res_ptr: *?T, x: *const T) void {
+            if (res_ptr.* == null) res_ptr.* = x.*;
+        }
+    }.cb, &res, &value);
+    return res.?;
+}
+
 /// Given a `fn([]const T, Args) T` and a slice of values,
 /// will combine all values in one value.
 /// Only T elements of values will be looked at.
