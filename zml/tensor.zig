@@ -2399,19 +2399,14 @@ pub const Tensor = struct {
         /// then you should make sure the slices don't overlap,
         /// otherwise the result will depend on the runtime scheduling
         /// of the operator which is backend specific.
-        update_fn: *const fn (*const anyopaque, Tensor, Tensor) Tensor = increment,
+        update_fn: *const fn (Tensor, Tensor) Tensor = increment,
 
-        /// Extra data that may be needed for a custom update function.
-        /// `override` and `increment` don't need it, leaving it to undefined works.
-        update_fn_ctx: *const anyopaque = undefined,
-
-        pub fn increment(_: *const anyopaque, old_value: Tensor, new_value: Tensor) Tensor {
-            return old_value.add(new_value);
+        pub fn increment(old_value: Tensor, new_value: Tensor) Tensor {
+            return old_value.add(new_value.convert(old_value.dtype()));
         }
 
-        pub fn override(_: *const anyopaque, old_value: Tensor, new_value: Tensor) Tensor {
-            _ = old_value;
-            return new_value;
+        pub fn override(old_value: Tensor, new_value: Tensor) Tensor {
+            return new_value.convert(old_value.dtype());
         }
     };
 
@@ -2440,91 +2435,17 @@ pub const Tensor = struct {
     /// In particular if you scatter overlapping slices, with `zml.Tensor.ScatterOpts.override`,
     /// then the result will depend on the execution order that you don't control.
     pub fn scatterSlices(self: Tensor, coord_axes: anytype, indices: Tensor, updates: Tensor, opts: ScatterOpts) Tensor {
-        const loc = @src();
         // scoped_log.debug("scatterSlices({}, {any}, {}, {})", .{ self, coord_axes, indices, updates });
 
-        stdx.debug.assert(self.dtype() == updates.dtype(), "scatterSlices expects input and 'updates' tensors to be of the same type, got {} and {}", .{ self.dtype(), updates.dtype() });
+        const UpdateType = @TypeOf(ScatterOpts.increment);
 
-        const single_coord, const coord_axes_ = _parseGatherCoord(self, coord_axes);
-        const AxisKind = enum { batching, update_window, inserted_window, window_id };
-        var self_kind: std.BoundedArray(AxisKind, MAX_RANK) = .{};
-        var indices_batch_axes: Shape.DimsArray = .{};
-        for (self._shape.tags()) |t| {
-            if (updates._shape.hasTag(t)) |_| {
-                if (indices._shape.hasTag(t)) |id_ax| {
-                    // tag is in self, indices and updates -> it's a batching dim
-                    self_kind.appendAssumeCapacity(.batching);
-                    indices_batch_axes.appendAssumeCapacity(id_ax);
-                } else {
-                    self_kind.appendAssumeCapacity(.update_window);
-                }
-            } else {
-                self_kind.appendAssumeCapacity(.inserted_window);
+        const Custom = struct {
+            pub fn inc(custom: *const UpdateType, old_value: Tensor, new_value: Tensor) Tensor {
+                return @call(.auto, custom, .{ old_value, new_value });
             }
-        }
-        // scoped_log.warn(" self_kind -> {any}", .{self_kind.constSlice()});
-
-        const index_coord_axis = if (single_coord)
-            indices.rank()
-        else blk: {
-            const ax = indices._shape.hasTag(.coord) orelse indices._shape.axis(-1);
-            stdx.debug.assert(indices.dim(ax) == coord_axes_.len, "scatterSlices({}, coord_axes={any}, indices, updates) expects 'indices' to be a tensor [..., {}], got {}", .{ self, coord_axes, coord_axes_.len, indices });
-
-            break :blk ax;
         };
-        if (indices.count() == 1 and !single_coord) {
-            return self.dynamicUpdateSlice1d(updates, coord_axes_.get(0), indices.reshape(.{}));
-        }
 
-        var up_kind: std.BoundedArray(AxisKind, MAX_RANK) = .{};
-        // Note: we assume the scatter_dims appear in the same order inside indices and inside self.
-        for (updates._shape.tags(), 0..) |t, up_ax| {
-            if (self._shape.hasTag(t)) |self_ax| {
-                if (self_kind.get(self_ax) == .batching) {
-                    up_kind.appendAssumeCapacity(.batching);
-                } else {
-                    stdx.debug.assert(updates.dim(up_ax) <= self.dim(self_ax), "scatterSlices expects the slices described in 'updates' to fit inside 'self', but along axis .{s} it doesn't. Got self={}, updates={}.", .{ t, self, updates });
-                    up_kind.appendAssumeCapacity(.update_window);
-                }
-            } else if (t == Shape.TagUnknown or indices._shape.hasTag(t) != null) {
-                up_kind.appendAssumeCapacity(.window_id);
-            } else {
-                std.debug.panic("scatterSlices expects 'updates' to be made of axes from 'self={}' and from 'indices={}', got unknown tag {s} in {}", .{ self, indices, t, updates });
-            }
-        }
-        const n_indices_axes = updates.rank() - _collectAxes(AxisKind, up_kind, .update_window).len;
-        if (single_coord) {
-            stdx.debug.assert(n_indices_axes == indices.rank(), "scatterSlices({}, {any}) expects 'updates' to contain all axes from 'indices', got indices={}, updates={}", .{ self, coord_axes, indices, updates });
-        } else {
-            stdx.debug.assert(n_indices_axes == indices.rank() - 1, "scatterSlices({}, {any}) expects 'updates' to contain all-but-last axes from 'indices', got indices={}, updates={}", .{ self, coord_axes, indices, updates });
-        }
-
-        const ctx = self.getContext();
-        const mlir_ctx = ctx.mlirCtx();
-
-        const _scalar: Tensor = .{ ._shape = Shape.init(.{}, self.dtype()), ._id = undefined };
-        const UpdateS = ops.BlockSign(ScatterOpts.increment);
-        const update_block, _ = ctx.makeBlock(.hermetic, UpdateS, opts.update_fn, opts.update_fn_ctx, .{ _scalar, _scalar });
-
-        const op = dialect.stablehlo.scatter(
-            mlir_ctx,
-            &.{self.value()},
-            &.{indices.value()},
-            &.{updates.value()},
-            update_block,
-            .{
-                .update_window_dims = _collectAxes(AxisKind, up_kind, .update_window).constSlice(),
-                .inserted_window_dims = _collectAxes(AxisKind, self_kind, .inserted_window).constSlice(),
-                .input_batching_dims = _collectAxes(AxisKind, self_kind, .batching).constSlice(),
-                .scatter_indices_batching_dims = indices_batch_axes.constSlice(),
-                .scatter_dims_to_operand_dims = toI64(coord_axes_.constSlice()),
-                .index_vector_dim = index_coord_axis,
-                .indices_are_sorted = opts.indices_are_sorted,
-                .unique_indices = opts.indices_are_unique,
-            },
-            mlir_ctx.location(loc),
-        );
-        return _result(self._shape, op.result(0));
+        return ops.scatter(Tensor, *const UpdateType, Custom.inc, self, opts.update_fn, coord_axes, indices, updates, opts);
     }
 
     test scatterSlices {
@@ -3949,7 +3870,7 @@ test shapesOf {
     }
 }
 
-fn _collectAxes(T: type, bounded_array: std.BoundedArray(T, Tensor.MAX_RANK), value: T) std.BoundedArray(i64, Tensor.MAX_RANK) {
+pub fn _collectAxes(T: type, bounded_array: std.BoundedArray(T, Tensor.MAX_RANK), value: T) std.BoundedArray(i64, Tensor.MAX_RANK) {
     var res: std.BoundedArray(i64, Tensor.MAX_RANK) = .{};
     for (bounded_array.constSlice(), 0..) |v, ax| {
         if (v == value) {
@@ -3959,7 +3880,7 @@ fn _collectAxes(T: type, bounded_array: std.BoundedArray(T, Tensor.MAX_RANK), va
     return res;
 }
 
-fn _parseGatherCoord(self: Tensor, axes_: anytype) struct { bool, std.BoundedArray(u3, Tensor.MAX_RANK) } {
+pub fn _parseGatherCoord(self: Tensor, axes_: anytype) struct { bool, std.BoundedArray(u3, Tensor.MAX_RANK) } {
     const AxesT = @TypeOf(axes_);
     const axes_is_scalar = AxesT == EnumLiteral or AxesT == comptime_int or @typeInfo(AxesT) == .Int;
 
