@@ -235,6 +235,22 @@ pub const HostBuffer = struct {
         };
     }
 
+    pub fn squeeze(self: HostBuffer, axis_: anytype) HostBuffer {
+        const ax = self._shape.axis(axis_);
+        stdx.debug.assert(self.dim(ax) == 1, "squeeze expects a 1-d axis got {} in {}", .{ ax, self });
+
+        var _strides: ?[Shape.MAX_RANK]i64 = self._strides;
+        if (self._strides) |strydes| {
+            std.mem.copyForwards(i64, _strides.?[0 .. Shape.MAX_RANK - 1], strydes[1..]);
+        }
+        return .{
+            ._shape = self.shape().drop(ax),
+            .data = self.data,
+            ._strides = _strides,
+            ._memory = self._memory,
+        };
+    }
+
     pub fn format(
         self: HostBuffer,
         comptime fmt: []const u8,
@@ -244,6 +260,51 @@ pub const HostBuffer = struct {
         _ = fmt;
         _ = options;
         try writer.print("HostBuffer(.{_})", .{self._shape});
+    }
+
+    pub fn prettyPrint(self: HostBuffer, writer: anytype) !void {
+        return self.prettyPrintIndented(4, 0, writer);
+    }
+
+    fn prettyPrintIndented(self: HostBuffer, num_rows: u8, indent_level: u8, writer: anytype) !void {
+        if (self.rank() == 1) {
+            try writer.writeByteNTimes(' ', indent_level);
+            switch (self.dtype()) {
+                inline else => |dt| {
+                    const values = self.items(dt.toZigType());
+                    const n = @min(values.len, 1024);
+                    try writer.print("{any},\n", .{values[0..n]});
+                },
+            }
+            return;
+        }
+        try writer.writeByteNTimes(' ', indent_level);
+        _ = try writer.write("{\n");
+        defer {
+            writer.writeByteNTimes(' ', indent_level) catch {};
+            _ = writer.write("},\n") catch {};
+        }
+
+        // Write first rows
+        const n: u64 = @intCast(self.dim(0));
+        for (0..@min(num_rows, n)) |d| {
+            const di: i64 = @intCast(d);
+            const sliced_self = self.slice1d(0, .{ .start = di, .end = di + 1 }).squeeze(0);
+            try sliced_self.prettyPrintIndented(num_rows, indent_level + 2, writer);
+        }
+
+        if (n < num_rows) return;
+        // Skip middle rows
+        if (n > 2 * num_rows) {
+            try writer.writeByteNTimes(' ', indent_level + 2);
+            _ = try writer.write("...\n");
+        }
+        // Write last rows
+        for (@max(n - num_rows, num_rows)..n) |d| {
+            const di: i64 = @intCast(d);
+            const sliced_self = self.slice1d(0, .{ .start = di, .end = di + 1 }).squeeze(0);
+            try sliced_self.prettyPrintIndented(num_rows, indent_level + 2, writer);
+        }
     }
 };
 

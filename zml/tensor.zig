@@ -1364,7 +1364,7 @@ pub const Tensor = struct {
         else
             toI64(axes__);
 
-        stdx.debug.assert(permutation.len == self.rank(), "transpose expects input tensor rank and 'axes_' length to be equal, got {} and {}", .{ self.rank(), permutation.len });
+        stdx.debug.assert(permutation.len == self.rank(), "transpose expects input tensor rank and 'axes_' length to be equal, got {_} and {d}", .{ self, permutation[0..@min(permutation.len, MAX_RANK + 2)] });
 
         if (std.mem.eql(i64, permutation, no_op[0..self.rank()])) {
             return self;
@@ -3647,13 +3647,11 @@ pub const Tensor = struct {
     }
 
     fn printCallback(host_buffer: HostBuffer) void {
-        switch (host_buffer.dtype()) {
-            inline else => |dt| {
-                const items = host_buffer.items(dt.toZigType());
-                const n = @min(items.len, 1024);
-                std.debug.print("Device buffer: {}: {any}\n", .{ host_buffer.shape(), items[0..n] });
-            },
-        }
+        std.debug.lockStdErr();
+        defer std.debug.unlockStdErr();
+        const stderr = std.io.getStdErr().writer();
+        stderr.print("Device buffer: {}:", .{host_buffer.shape()}) catch return;
+        host_buffer.prettyPrint(stderr) catch return;
     }
 };
 
