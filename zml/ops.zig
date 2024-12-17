@@ -803,7 +803,7 @@ pub fn scatter(
         indices.rank()
     else blk: {
         const ax = indices._shape.hasTag(.coord) orelse indices._shape.axis(-1);
-        stdx.debug.assert(indices.dim(ax) == coord_axes_.len, "scatter({}, coord_axes={any}, indices, updates) expects 'indices' to be a tensor [..., {}], got {}", .{ self, coord_axes, coord_axes_.len, indices });
+        stdx.debug.assert(indices.dim(ax) == coord_axes_.len, "scatter({_}, coord_axes={any}, indices, updates) expects 'indices' to be a tensor [..., {}], got {_}", .{ self, coord_axes, coord_axes_.len, indices });
 
         break :blk ax;
     };
@@ -818,20 +818,20 @@ pub fn scatter(
             if (self_kind.get(self_ax) == .batching) {
                 up_kind.appendAssumeCapacity(.batching);
             } else {
-                stdx.debug.assert(update.dim(up_ax) <= self.dim(self_ax), "scatter expects the slices described in 'updates' to fit inside 'self', but along axis .{s} it doesn't. Got self={}, updates={}.", .{ t, self, update });
+                stdx.debug.assert(update.dim(up_ax) <= self.dim(self_ax), "scatter expects the slices described in 'updates' to fit inside 'self', but along axis .{s} it doesn't. Got self={_}, updates={_}.", .{ t, self, update });
                 up_kind.appendAssumeCapacity(.update_window);
             }
         } else if (t == Shape.TagUnknown or indices._shape.hasTag(t) != null) {
             up_kind.appendAssumeCapacity(.window_id);
         } else {
-            std.debug.panic("scatter expects 'updates' to be made of axes from self={} and from indices={}, got unknown tag {s} in {}", .{ self, indices, t, update });
+            std.debug.panic("scatter expects 'updates' to be made of axes from self={_} and from indices={_}, got unknown tag {s} in {_}", .{ self, indices, t, update });
         }
     }
     const n_indices_axes = update.rank() - _collectAxes(AxisKind, up_kind, .update_window).len;
     if (single_coord) {
-        stdx.debug.assert(n_indices_axes == indices.rank(), "scatter({}, {any}) expects 'updates' to contain all axes from 'indices', got indices={}, updates={}", .{ self, coord_axes, indices, update });
+        stdx.debug.assert(n_indices_axes == indices.rank(), "scatter({_}, {any}) expects 'updates' to contain all axes from 'indices', got indices={_}, updates={_}", .{ self, coord_axes, indices, update });
     } else {
-        stdx.debug.assert(n_indices_axes == indices.rank() - 1, "scatter({}, {any}) expects 'updates' to contain all-but-last axes from 'indices', got indices={}, updates={}", .{ self, coord_axes, indices, update });
+        stdx.debug.assert(n_indices_axes == indices.rank() - 1, "scatter({_}, {any}) expects 'updates' to contain all-but-last axes from 'indices', got indices={_}, updates={_}", .{ self, coord_axes, indices, update });
     }
 
     const mlir_ctx = ctx.mlirCtx();
