@@ -13,14 +13,10 @@ var _platform: ?zml.Platform = null;
 pub fn env() zml.Platform {
     if (!builtin.is_test) @compileError("Cannot use zml.testing.env outside of a test block");
     if (_platform == null) {
-        _test_compile_opts = if (initCacheDir())
-            .{
-                .cache_location = "/tmp/zml/tests/cache",
-                .xla_dump_to = "/tmp/zml/tests/",
-                .sharding_enabled = true,
-            }
-        else
-            .{};
+        _test_compile_opts = .{
+            .xla_dump_to = "/tmp/zml/tests/",
+            .sharding_enabled = true,
+        };
 
         var ctx = zml.Context.init() catch unreachable;
         _platform = ctx.autoPlatform(.{}).withCompilationOptions(_test_compile_opts);
@@ -30,12 +26,6 @@ pub fn env() zml.Platform {
 }
 
 var _test_compile_opts: zml.CompilationOptions = .{};
-
-fn initCacheDir() bool {
-    const tmp = std.fs.openDirAbsolute("/tmp", .{}) catch return false;
-    tmp.makePath("zml/tests/cache") catch return false;
-    return true;
-}
 
 /// In neural network we generally care about the relative precision,
 /// but on a given dimension, if the output is close to 0, then the precision

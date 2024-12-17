@@ -359,7 +359,7 @@ pub const Client = opaque {
             }
         }
         log.warn("No profiler found for platform: {}", .{self});
-        return Profiler.init(null, options);
+        return Profiler.init(null, null);
     }
 
     pub fn deserializeAndLoad(self: *const Client, api: *const Api, bytes: []const u8) ApiError!*LoadedExecutable {

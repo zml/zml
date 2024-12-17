@@ -17,7 +17,6 @@ pub const available_targets = std.enums.values(Target);
 pub const CompilationOptions = struct {
     xla_dump_to: ?[]const u8 = null,
     xla_dump_fusion_visualization: bool = false,
-    cache_location: ?[]const u8 = null,
     sharding_enabled: bool = false,
     sharding_axes: std.BoundedArray([*:0]const u8, 8) = .{},
 };
@@ -82,8 +81,8 @@ pub const Platform = struct {
     /// Returns the Profiler for this API.
     /// Not all platform have a profiling api, for those the profiler object will do nothing.
     /// Platforms with known profiler extensions: cuda, xpu
-    pub fn getProfiler(self: Platform, options: pjrt.Profiler.Options) pjrt.Profiler {
-        return self.pjrt_client.getProfiler(self.pjrt_api, options);
+    pub fn getProfiler(self: Platform, options: ?pjrt.Profiler.Options) pjrt.Profiler {
+        return self.pjrt_client.getProfiler(self.pjrt_api, options orelse pjrt.Profiler.default_options);
     }
 };
 

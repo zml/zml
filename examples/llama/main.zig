@@ -154,7 +154,6 @@ pub fn asyncMain() !void {
     defer context.deinit();
 
     const compilation_options = zml.CompilationOptions{
-        .cache_location = "/tmp/zml/llama/cache",
         .xla_dump_to = "/tmp/zml/llama",
         .sharding_enabled = true,
     };

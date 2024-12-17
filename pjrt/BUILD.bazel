@@ -10,11 +10,13 @@ cc_library(
 
 zig_library(
     name = "pjrt",
-    srcs = ["profiler.zig"],
+    srcs = ["profiler.zig"] + glob(["convert/*.zig"]),
     main = "pjrt.zig",
     visibility = ["//visibility:public"],
     deps = [
         ":profiler_options_proto",
+        ":trace_events_proto",
+        ":xplane_proto",
         "//stdx",
         "@xla//xla/pjrt/c:pjrt_c_api_gpu_extension_hdrs",
         "@xla//xla/pjrt/c:pjrt_c_api_hdrs",
