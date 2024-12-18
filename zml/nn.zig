@@ -716,7 +716,6 @@ pub fn causalAttnMask(
 pub const SdpaOpts = struct {
     attn_mask: ?Tensor = null,
     scale: ?Tensor = null,
-    bias: ?Tensor = null,
     allow_cudnn: bool = true,
     // TODO: put a callback instead of all this field,
     // so that
@@ -769,12 +768,7 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
     // log.debug("attn_weights : {}", .{attn_weights});
     // log.debug("attn_mask : {?}", .{attn_mask});
     if (attn_mask) |mask| attn_weights = attn_weights.add(mask.broad(attn_weights.shape()));
-
-    attn_weights = attn_weights.convert(.f32);
-    if (opts.bias) |bias| {
-        attn_weights = attn_weights.add(bias);
-    }
-    attn_weights = attn_weights.softmax(.k).convert(q.dtype());
+    attn_weights = attn_weights.convert(.f32).softmax(.k).convert(q.dtype());
 
     var attn = attn_weights.dot(v, .{.k});
     return attn.transpose(q.shape());
@@ -983,10 +977,6 @@ pub fn sdpaChunk(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) PartialSoft
     // log.debug("attn_mask : {?}", .{attn_mask});
     if (attn_mask) |mask| attn_weights = attn_weights.add(mask.broad(attn_weights.shape()));
 
-    if (opts.bias) |bias| {
-        attn_weights = attn_weights.add(bias);
-    }
-
     const partial = partialSoftmax(attn_weights, .k);
     const attn = partial.values.dot(v, .{.k}).transpose(q.shape());
 
@@ -1021,7 +1011,7 @@ test sdpaMemEfficient {
     const ref_res = try zml.testing.compileAndCall(
         platform,
         sdpa,
-        .{ q, k, v, .{ .attn_mask = mask, .scale = null, .bias = null } },
+        .{ q, k, v, .{ .attn_mask = mask, .scale = null } },
     );
     try std.testing.expectEqualSlices(i64, q.shape().dims(), ref_res.shape().dims());
     {
@@ -1033,7 +1023,7 @@ test sdpaMemEfficient {
                 q,
                 k,
                 v,
-                .{ .attn_mask = mask, .scale = null, .bias = null },
+                .{ .attn_mask = mask, .scale = null },
                 .{ .q_chunk_size = 256, .k_chunk_size = @divExact(512, 4) },
             },
         );
@@ -1049,7 +1039,7 @@ test sdpaMemEfficient {
                 q,
                 k,
                 v,
-                .{ .attn_mask = mask, .scale = null, .bias = null },
+                .{ .attn_mask = mask, .scale = null },
                 .{ .q_chunk_size = 256, .k_chunk_size = @divExact(512, 16) },
             },
         );
@@ -1079,7 +1069,7 @@ test "sdpaMemEfficient transposed" {
     const ref_res = try zml.testing.compileAndCall(
         platform,
         sdpa,
-        .{ q, k, v, .{ .attn_mask = mask, .scale = null, .bias = null } },
+        .{ q, k, v, .{ .attn_mask = mask, .scale = null } },
     );
     try std.testing.expectEqualSlices(i64, q.shape().dims(), ref_res.shape().dims());
 
@@ -1091,7 +1081,7 @@ test "sdpaMemEfficient transposed" {
                 q,
                 k,
                 v,
-                .{ .attn_mask = mask, .scale = null, .bias = null },
+                .{ .attn_mask = mask, .scale = null },
                 .{ .q_chunk_size = @divExact(512, 2), .k_chunk_size = @divExact(512, 4) },
             },
         );
@@ -1107,7 +1097,7 @@ test "sdpaMemEfficient transposed" {
                 q,
                 k,
                 v,
-                .{ .attn_mask = mask, .scale = null, .bias = null },
+                .{ .attn_mask = mask, .scale = null },
                 .{ .q_chunk_size = 512, .k_chunk_size = @divExact(512, 4) },
             },
         );
