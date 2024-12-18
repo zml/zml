@@ -2244,7 +2244,8 @@ pub const Tensor = struct {
     /// while gatherValues, always copy values one by one, and as such don't have the same issues.
     /// In our example the contiguous dimension .d is not sliced
     /// and gatherSlices can copy data by group of C'*D elements.
-    pub fn gatherSlices(self: Tensor, slice_shape: Shape, indices: Tensor, opts: GatherOpts) Tensor {
+    pub fn gatherSlices(self: Tensor, slice_shape_: anytype, indices: Tensor, opts: GatherOpts) Tensor {
+        const slice_shape = if (@TypeOf(slice_shape_) == Shape) slice_shape_ else Shape.init(slice_shape_, .i32);
         // scoped_log.debug("gatherSlice({}, {_}, {})", .{ self, slice_shape, indices });
 
         const tagged_api = slice_shape.isFullyTagged();
@@ -2294,7 +2295,7 @@ pub const Tensor = struct {
             }
         }
 
-        const loc = self.getContext().mlirCtx().location(@src());
+        const loc = self.getContext().location(@src(), "gatherSlices({_}, slice_shape={_}, idx={_})", .{ self, slice_shape, indices });
         const gather_op = dialect.stablehlo.gather(
             self.getContext().mlirCtx(),
             self.value(),
@@ -2317,6 +2318,12 @@ pub const Tensor = struct {
     test gatherSlices {
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
+
+        const Local = struct {
+            pub fn _gatherSlices(self: Tensor, slice_shape: Shape, indices: Tensor, opts: GatherOpts) Tensor {
+                return self.gatherSlices(slice_shape, indices, opts);
+            }
+        };
 
         {
             // Only test shapes
@@ -2354,7 +2361,7 @@ pub const Tensor = struct {
 
                 const mod = try zml.compileFn(
                     std.testing.allocator,
-                    gatherSlices,
+                    Local._gatherSlices,
                     .{ x.shape(), slice_shape, idx.shape(), .{ .indices_are_sorted = true } },
                     platform,
                 );
@@ -2370,7 +2377,7 @@ pub const Tensor = struct {
         const start_indices = (try zml.Buffer.fromArray(platform, [2][2]i32{ .{ 2, 1 }, .{ 0, 3 } })).withTags(.{ .n, ._ });
         defer start_indices.deinit();
 
-        const result = try zml.testing.compileAndCall(platform, gatherSlices, .{ operand, Shape.init(.{ .b = 2, .c = 3 }, .u16), start_indices, .{} });
+        const result = try zml.testing.compileAndCall(platform, Local._gatherSlices, .{ operand, Shape.init(.{ .b = 2, .c = 3 }, .u16), start_indices, .{} });
 
         const expected = zml.HostBuffer.fromArray(&[2][2][2][3]u16{
             .{
