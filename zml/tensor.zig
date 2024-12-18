@@ -3483,17 +3483,31 @@ pub const Tensor = struct {
     /// Returns a Tensor containing boolean indicating if there is a non-zero value over the given axis.
     pub fn any(self: Tensor, axis_: anytype) Tensor {
         const pred = self.cmp(.NE, Tensor.constant(self.dims(), self.dtype().zero()));
-        const red = ops.reduce(
+        return ops.reduce(
             struct {
                 pub fn acc(x: Tensor, res: Tensor) Tensor {
                     return res.logical(.OR, x);
                 }
             }.acc,
             pred,
-            Tensor.scalar(0, pred.dtype()),
+            Tensor.scalar(false, .bool),
             &.{self.axis(axis_)},
         );
-        return red;
+    }
+
+    /// Returns a Tensor containing boolean indicating if there is a non-zero value over the given axis.
+    pub fn all(self: Tensor, axis_: anytype) Tensor {
+        const pred = if (self.dtype() == .bool) self else self.cmp(.NE, Tensor.scalar(0, self.dtype()));
+        return ops.reduce(
+            struct {
+                pub fn acc(x: Tensor, res: Tensor) Tensor {
+                    return res.logical(.AND, x);
+                }
+            }.acc,
+            pred,
+            Tensor.scalar(true, .bool),
+            &.{self.axis(axis_)},
+        );
     }
 
     /// Given a set of N vectors of lengths A, B, C, D,
