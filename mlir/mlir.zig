@@ -619,7 +619,7 @@ pub const DenseElementsAttributeTypes = enum {
 
 pub fn DenseIntOrFPElementsAttribute(comptime dt: DenseElementsAttributeTypes) type {
     const ZigInDataType, const ZigOutDataType, const initFn, const getValue = switch (dt) {
-        .bool => .{ i32, bool, c.mlirDenseElementsAttrBoolGet, c.mlirDenseElementsAttrGetBoolValue },
+        .bool => .{ bool, bool, c.mlirDenseElementsAttrBoolGet, c.mlirDenseElementsAttrGetBoolValue },
         .i8 => .{ i8, i8, c.mlirDenseElementsAttrInt8Get, c.mlirDenseElementsAttrGetInt8Value },
         .i16 => .{ i16, i16, c.mlirDenseElementsAttrInt16Get, c.mlirDenseElementsAttrGetInt16Value },
         .i32 => .{ i32, i32, c.mlirDenseElementsAttrInt32Get, c.mlirDenseElementsAttrGetInt32Value },

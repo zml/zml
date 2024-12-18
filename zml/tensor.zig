@@ -1818,6 +1818,22 @@ pub const Tensor = struct {
         return Tensor.constant(.{}, Data.init(dt, val));
     }
 
+    test scalar {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        const Local = struct {
+            pub fn _fwd() [6]Tensor {
+                var res: [6]Tensor = undefined;
+                const dtypes = .{ .bool, .u8, .i32, .f32, .bf16, .u64 };
+                inline for (0..6) |i| res[i] = scalar(0, dtypes[i]);
+                return res;
+            }
+        };
+
+        _ = try zml.testing.compileAndCall(platform, Local._fwd, .{});
+    }
+
     /// Returns a constant Tensor with the given value.
     pub fn constant(dimz: anytype, val: Data) Tensor {
         const sh = Shape.init(dimz, val.dtype());
