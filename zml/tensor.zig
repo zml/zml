@@ -1599,7 +1599,7 @@ pub const Tensor = struct {
         const res_shape = shape0.insertTag(axis_, 1, tag);
 
         for (tensors[1..]) |tensor| {
-            stdx.debug.assert(shape0.eqlWithTags(tensor._shape), "stack expects tensor shapes to match, got {} and {}", .{ tensor._shape, shape0 });
+            stdx.debug.assert(shape0.eqlWithTags(tensor._shape), "stack expects tensor shapes to match, got {} and {}", .{ shape0, tensor._shape });
         }
 
         var reshaped: [32]Tensor = undefined;
@@ -1870,22 +1870,8 @@ pub const Tensor = struct {
             return self.mul(other);
         }
 
-        const other_shape = other.shape();
-        var res_shape = self.shape();
-        var batching_axes: u8 = 0;
-        for (0..other.rank()) |ax| {
-            if (other_shape.tag(ax) != Shape.TagUnknown) {
-                if (self.shape().hasTag(other_shape.tag(ax))) |batching_ax| {
-                    stdx.debug.assert(batching_ax == batching_axes and batching_ax == ax, "outer expects batching dims to be the first dims in both tensors, got outer({}, {})", .{ self, other });
-                    batching_axes += 1;
-                }
-            }
-
-            res_shape = res_shape.appendDim(other_shape.dim(ax), other_shape.tag(ax));
-        }
-        const left = self.broad(res_shape);
-        const right = other.broad(res_shape);
-        return left.mul(right);
+        const res_shape = self.shape().outer(other.shape());
+        return self.broad(res_shape).mul(other.broad(res_shape));
     }
 
     /// Given a tensor and a shape of the same rank,
