@@ -685,7 +685,7 @@ pub const Tensor = struct {
                     // Test out the gumbel reparametrization trick
                     var x = target_dist.log().withTags(.{.d}).broad(s);
                     x = x.add(data);
-                    const samples = x.argMax(.d, .i32).indices.squeeze(.d);
+                    const samples = x.argMax(.d).indices.squeeze(.d);
 
                     // count 0, 1, 2 and 3 in samples:
                     // - map 0 to 1, 1 to 2**16, 2 to 2**32, 3 to N**58
@@ -2645,15 +2645,14 @@ pub const Tensor = struct {
     /// Stable argmax:
     /// * bubbles up Nan
     /// * in case of equality the smallest index matching the maximum
-    pub fn argMax(x: Tensor, axis_: anytype, index_dtype: DataType) ArgMaxRes {
-        stdx.debug.assert(index_dtype.isInteger(), "argMax expect index type to be an integer, got {}", .{index_dtype});
-
+    pub fn argMax(x: Tensor, axis_: anytype) ArgMaxRes {
         const a = x.axis(axis_);
+        const dt: DataType = if (x.dim(a) <= std.math.maxInt(i32)) .i32 else .i64;
 
         return ops.reduce(
             ArgMaxRes.cmp,
-            .{ .values = x, .indices = Tensor.arange(.{ .end = x.dim(a) }, index_dtype).broadcast(x.shape(), &.{a}) },
-            .{ .values = Tensor.constant(&.{}, x.dtype().minValue()), .indices = Tensor.scalar(0, index_dtype) },
+            .{ .values = x, .indices = Tensor.arange(.{ .end = x.dim(a) }, dt).broadcast(x.shape(), &.{a}) },
+            .{ .values = Tensor.constant(&.{}, x.dtype().minValue()), .indices = Tensor.scalar(0, dt) },
             &.{a},
         );
     }
@@ -2664,7 +2663,7 @@ pub const Tensor = struct {
         const allocator = std.testing.allocator;
         const ArgMaxTest = struct {
             pub fn forward(x: Tensor) Tensor.ArgMaxRes {
-                return x.argMax(1, .i32);
+                return x.argMax(1);
             }
         };
 
