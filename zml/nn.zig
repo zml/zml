@@ -1117,7 +1117,7 @@ pub const SamplingStrategy = struct {
 /// Returns an integer tensor with a shape similar to the input, but without the .voc axis.
 pub fn sampleTokens(activations: Tensor, opts: SamplingStrategy, rng: Tensor.Rng) struct { Tensor, Tensor.Rng } {
     if (opts.topk <= 1) {
-        const next_tokens = activations.argMax(.voc, .i32).indices.squeeze(.voc);
+        const next_tokens = activations.argMax(.voc).indices.squeeze(.voc);
         return .{ next_tokens, rng };
     }
 
@@ -1134,7 +1134,7 @@ pub fn sampleTokens(activations: Tensor, opts: SamplingStrategy, rng: Tensor.Rng
     // https://en.wikipedia.org/wiki/Gumbel_distribution#Gumbel_reparametrization_tricks
     const next_rng, const gumbel_noise = rng.gumbel(x.shape());
     x = x.add(gumbel_noise);
-    const topk_idx = x.argMax(.topk, .i32).indices;
+    const topk_idx = x.argMax(.topk).indices;
 
     // topk_idx is indices into topk.values ! so in the range [0, topk]
     // Convert for the original indices from the full [0, voc] range.
@@ -1224,7 +1224,7 @@ pub fn sampleTokensDynamic(logits: Tensor, opts: DynamicSamplingStrategy, rng: T
     const next_rng, const gumbel_noise = rng.gumbel(x.shape());
     x = x.add(gumbel_noise);
 
-    const topk_idx = x.argMax(.topk, .i32).indices;
+    const topk_idx = x.argMax(.topk).indices;
     const next_tokens = topk_indices.gatherValues(.voc, topk_idx.squeeze(.topk), .{});
     return .{ next_tokens, next_rng };
 }
