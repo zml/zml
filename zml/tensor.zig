@@ -318,13 +318,6 @@ pub const Tensor = struct {
     }
 
     /// Returns a Tensor containing the element-wise remainder of dividend 'self' and divisor 'other'.
-    pub fn remainder(self: Tensor, other: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
-        const op = dialect.stablehlo.remainder(self.getContext().mlirCtx(), self.value(), other.value(), loc);
-        return _result(self._shape, op.result(0));
-    }
-
-    /// Returns a Tensor containing the element-wise remainder of dividend 'self' and divisor 'other'.
     ///
     /// See https://pytorch.org/docs/stable/generated/torch.fmod.html for more details.
     pub fn fmod(self: Tensor, divisor: f32) Tensor {
@@ -966,6 +959,11 @@ pub const Tensor = struct {
     /// Returns a Tensor containing the element-wise minimum operation of the input Tensors.
     pub fn minimum(self: Tensor, other: Tensor) Tensor {
         return binaryOp(@src(), "minimum", dialect.stablehlo.minimum)(self, other);
+    }
+
+    /// Returns a Tensor containing the element-wise remainder of dividend 'self' and divisor 'other'.
+    pub fn remainder(self: Tensor, other: Tensor) Tensor {
+        return binaryOp(@src(), "remainder", dialect.stablehlo.remainder)(self, other);
     }
 
     /// Returns a Tensor containing the element-wise addition of the input Tensor with a constant.
