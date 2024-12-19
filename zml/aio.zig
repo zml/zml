@@ -367,7 +367,14 @@ fn _populateStruct(
             if (ptr_info.size == .Slice) {
                 obj.* = &.{};
 
-                const len = buffer_store.countLayers(prefix);
+                var len = buffer_store.countLayers(prefix);
+
+                const prefix_needed = "model.layers";
+
+                if (std.mem.eql(u8, prefix, prefix_needed)) {
+                    len = 2;
+                }
+
                 if (len > 0) {
                     obj.* = try allocator.alloc(ptr_info.child, len);
 

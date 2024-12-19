@@ -756,6 +756,19 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
         const num_rep: u63 = @intCast(@divExact(q.dim(.h), k.dim(.h)));
         k, v = .{ k.repeat1d(.h, num_rep), v.repeat1d(.h, num_rep) };
     }
+
+    // q = q.withSharding(.{.q});
+    // k = k.withSharding(.{.k});
+    // v = v.withSharding(.{.k});
+
+    // warning(zml/tensor): sdpa q: Tensor({.b=1,.q=11,.h=32!,.hd=128}, dtype=.bf16)
+    // warning(zml/tensor): sdpa k: Tensor({.b=1,.k=11,.h=32!,.hd=128}, dtype=.bf16)
+    // warning(zml/tensor): sdpa v: Tensor({.b=1,.k=11,.h=32!,.hd=128}, dtype=.bf16)
+
+    log.warn("sdpa q: {}", .{q});
+    log.warn("sdpa k: {}", .{k});
+    log.warn("sdpa v: {}", .{v});
+
     const attn_mask = if (opts.attn_mask) |m| m else null;
 
     const dims = helpers.collectDims(.{ .h, .q, .k, .hd }, &.{ q, k, v, attn_mask }, .strict) catch {

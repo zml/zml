@@ -145,21 +145,11 @@ cc_binary(
 zig_cc_binary(
     name = "test-implementation",
     srcs = ["llama.zig"],
-    args = [
-        "--model=$(location @Meta-Llama-3.1-8B-Instruct//:model.safetensors.index.json)",
-        "--num-heads=32",
-        "--num-kv-heads=8",
-        "--rope-freq-base=500000",
-    ],
-    data = [
-        "@Meta-Llama-3.1-8B-Instruct//:model",
-        "@Meta-Llama-3.1-8B-Instruct//:model.safetensors.index.json",
-    ],
     main = "test.zig",
     deps = [
         "//third_party/tigerbeetle:flags",
         "@zml//async",
-        "@zml//metax",
+        "@zml//stdx",
         "@zml//zml",
     ],
 )
