@@ -853,6 +853,8 @@ pub const Operation = struct {
             @panic("Failed to create MLIR operation");
         };
         if (args.verify and new_op.verify() == false) {
+            std.debug.lockStdErr();
+            defer std.debug.unlockStdErr();
             log.err("Failed to verify MLIR operation:\n{}", .{new_op.mlirFormatter(.{ .debug_info = true })});
             @panic("Failed to verify MLIR operation");
         }
