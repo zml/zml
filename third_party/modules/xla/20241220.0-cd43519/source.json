@@ -1,0 +1,14 @@
+{
+    "strip_prefix": "xla-cd435197ce4c24a509ea5954e64a3211e132d5a7",
+    "url": "https://github.com/openxla/xla/archive/cd435197ce4c24a509ea5954e64a3211e132d5a7.tar.gz",
+    "integrity": "sha256-mHrtwvYsBJiSQwizq/32UFaozXE6qghmye4EWvPIYG8=",
+    "overlay": {
+        "tsl.bzl": "",
+        "workspace.bzl": "",
+        "MODULE.bazel": ""
+    },
+    "patch_strip": 1,
+    "patches": {
+        "0003-PJRT-C-API-Ensure-C-compliance-for-Profiler-Extensio.patch": ""
+    }
+}

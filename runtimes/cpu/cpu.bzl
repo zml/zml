@@ -19,8 +19,8 @@ def _cpu_pjrt_plugin_impl(mctx):
     http_archive(
         name = "libpjrt_cpu_darwin_arm64",
         build_file_content = _BUILD.format(ext = "dylib"),
-        sha256 = "f166ee5ba1d50383731aa79831d4bd2ef3338c5948ae92c2442105d20280506c",
-        url = "https://github.com/zml/pjrt-artifacts/releases/download/v3.0.0/pjrt-cpu_darwin-arm64.tar.gz",
+        sha256 = "33b1a5c670d0dda8852cfe9d0ef68467003e0669a7a4b043e0954852385c91df",
+        url = "http://localhost:8000/pjrt-cpu_darwin-arm64.tar.gz",
     )
 
     return mctx.extension_metadata(

@@ -1,0 +1,10 @@
+{
+    "strip_prefix": "llvm-project-b5d02786be31f45ca5919b3b73e99d8958330f78",
+    "url": "https://github.com/llvm/llvm-project/archive/b5d02786be31f45ca5919b3b73e99d8958330f78.tar.gz",
+    "integrity": "sha256-ZbsKcCY5m1PmmSiHIyDfyBEC/Du7SUGRCzj0ZD/ZoTA=",
+    "overlay": {
+        "BUILD.bazel": "",
+        "MODULE.bazel": "",
+        "utils/bazel/extension.bzl": ""
+    }
+}
