@@ -1,0 +1,109 @@
+licenses(["restricted"])  # GPLv3
+
+exports_files(["LICENSE"])
+
+filegroup(
+    name = "lib",
+    srcs = glob([
+        "Lib/*.*",
+        "Lib/c/*.*",
+        "Lib/std/*.*",
+        "Lib/typemaps/*.*",
+    ]),
+    visibility = ["//visibility:public"],
+)
+
+cc_binary(
+    name = "swig",
+    srcs = glob([
+        "Source/CParse/*.h",
+        "Source/CParse/*.c",
+        "Source/DOH/*.h",
+        "Source/DOH/*.c",
+        "Source/Include/*.h",
+        "Source/Preprocessor/*.h",
+        "Source/Preprocessor/*.c",
+        "Source/Swig/*.h",
+        "Source/Swig/*.c",
+    ]) + [
+        "Source/Include/swigconfig.h",
+        "Source/Modules/allocate.cxx",
+        "Source/Modules/c.cxx",
+        "Source/Modules/contract.cxx",
+        "Source/Modules/directors.cxx",
+        "Source/Modules/emit.cxx",
+        "Source/Modules/interface.cxx",
+        "Source/Modules/lang.cxx",
+        "Source/Modules/main.cxx",
+        "Source/Modules/nested.cxx",
+        "Source/Modules/overload.cxx",
+        "Source/Modules/swigmain-lite.cxx",
+        "Source/Modules/swigmod.h",
+        "Source/Modules/typepass.cxx",
+        "Source/Modules/utils.cxx",
+        "Source/Modules/xml.cxx",
+    ],
+    includes = [
+        "Source/CParse",
+        "Source/DOH",
+        "Source/Include",
+        "Source/Modules",
+        "Source/Preprocessor",
+        "Source/Swig",
+    ],
+    data = [":lib"],
+    output_licenses = ["unencumbered"],
+    visibility = ["//visibility:public"],
+    deps = ["@pcre2"],
+)
+
+genrule(
+    name = "swigconfig",
+    outs = ["Source/Include/swigconfig.h"],
+    cmd = """\
+cat <<EOF >$@
+#define HAVE_BOOL
+#define HAVE_PCRE
+#define HAVE_POPEN
+#define PACKAGE_BUGREPORT \"http://www.swig.org\"
+#define PACKAGE_VERSION \"4.3.0\"
+#define STDC_HEADERS
+#define SWIG_CXX \"bazel4lyfe\"
+#define SWIG_LIB \"external/org_swig_swig/Lib\"
+#define SWIG_LIB_WIN_UNIX \"\"
+#define SWIG_PLATFORM \"bazel4lyfe\"
+EOF
+""",
+)
+
+genrule(
+    name = "get_rid_of_stuff_we_dont_need_yet",
+    srcs = ["Source/Modules/swigmain.cxx"],
+    outs = ["Source/Modules/swigmain-lite.cxx"],
+    cmd = """\
+sed -e '/swig_allegrocl/d' \
+    -e '/swig_chicken/d' \
+    -e '/swig_clisp/d' \
+    -e '/swig_csharp/d' \
+    -e '/swig_d/d' \
+    -e '/swig_guile/d' \
+    -e '/swig_go/d' \
+    -e '/swig_java/d' \
+    -e '/swig_lua/d' \
+    -e '/swig_modula3/d' \
+    -e '/swig_mzscheme/d' \
+    -e '/swig_ocaml/d' \
+    -e '/swig_octave/d' \
+    -e '/swig_perl/d' \
+    -e '/swig_php/d' \
+    -e '/swig_pike/d' \
+    -e '/swig_python/d' \
+    -e '/swig_r/d' \
+    -e '/swig_ruby/d' \
+    -e '/swig_scilab/d' \
+    -e '/swig_sexp/d' \
+    -e '/swig_tcl/d' \
+    -e '/swig_uffi/d' \
+    $< >$@
+""",
+)
