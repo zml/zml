@@ -1,0 +1,61 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+load("@zml//bazel:zig.bzl", "zig_cc_binary")
+load("//bazel:swig.bzl", "swig_cc_library")
+
+cc_library(
+    name = "bridge",
+    srcs = ["sentencepiece_c.cc"],
+    hdrs = ["sentencepiece_c.h"],
+    deps = [
+        "//ffi",
+        "@com_google_sentencepiece//:sentencepiece_processor",
+    ],
+)
+
+cc_binary(
+    name = "sentencepiece_playground",
+    srcs = ["sentencepiece_playground.cc"],
+    copts = ["-lc"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@com_google_sentencepiece//:sentencepiece_processor",
+    ],
+)
+
+zig_library(
+    name = "sentencepiece",
+    import_name = "sentencepiece",
+    main = "sentencepiece.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":bridge",
+        "//ffi:ffi_zig",
+    ],
+)
+
+cc_library(
+    name = "zig",
+    hdrs = ["zig.h"],
+)
+
+swig_cc_library(
+    name = "sentencepiece_swig",
+    interface = "sentencepiece.i",
+    module = "sentencepiece",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":zig",
+        "@com_google_sentencepiece//:sentencepiece_processor",
+    ],
+)
+
+zig_cc_binary(
+    name = "main",
+    srcs = ["sentencepiece.zig"],
+    main = "main.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":sentencepiece_swig",
+        ":zig",
+    ],
+)
