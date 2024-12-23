@@ -12,6 +12,9 @@ bazel_dep(name = "rules_cc", version = "0.0.17")
 bazel_dep(name = "rules_pkg", version = "1.0.1")
 bazel_dep(name = "rules_proto", version = "7.1.0")
 bazel_dep(name = "with_cfg.bzl", version = "0.8.0")
+bazel_dep(name = "protobuf", version = "29.2")
+bazel_dep(name = "pcre2", version = "10.43")
+bazel_dep(name = "abseil-cpp", version = "20240722.0.bcr.2")
 bazel_dep(name = "buildifier_prebuilt", version = "7.3.1", dev_dependency = True)
 bazel_dep(name = "aspect_bazel_lib", version = "2.11.0")
 bazel_dep(name = "rules_distroless", version = "0.3.8")
@@ -114,3 +117,6 @@ apt.install(
     manifest = "//runtimes/neuron:packages.yaml",
 )
 use_repo(apt, "neuron_bookworm")
+
+non_module_deps = use_extension("//:third_party/non_module_deps.bzl", "non_module_deps")
+use_repo(non_module_deps, "com_google_sentencepiece", "org_swig_swig")
