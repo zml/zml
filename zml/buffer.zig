@@ -85,7 +85,68 @@ pub const Buffer = struct {
             const pjrt_buffer = try frame.awaitt();
             res._shards.appendAssumeCapacity(pjrt_buffer);
         }
+
         return res;
+    }
+
+    pub fn from2(platform: Platform, host_buffer: HostBuffer) !Buffer {
+        var res: Buffer = .{
+            ._api = platform.pjrt_api,
+            ._shape = host_buffer.shape(),
+            ._shards = .{},
+        };
+
+        // We shard only on the first axis so that the chunks are still contiguous.
+        // TODO: support more advanced sharding specs
+        stdx.debug.assert(platform.sharding().num_replicas == 1, "ZML doesn't support num_replicas > 1 for now, got: {}", .{platform.sharding()});
+        const sharding_ax: ?u3 = std.simd.firstTrue(host_buffer.shape()._sharding_info);
+        const n_partitions = platform.sharding().num_partitions;
+        const chunk_size = if (sharding_ax) |ax| cs: {
+            // This kind of sharding error should be detected earlier on.
+            stdx.debug.assert(@rem(host_buffer.dim(ax), n_partitions) == 0, "Buffer.from({}) expects the sharding axis {} to have a dimension divisble by the number of devices ({}).", .{ host_buffer, ax, n_partitions });
+            break :cs @divExact(host_buffer.dim(ax), n_partitions);
+        } else 0;
+
+        const buffer_type = bufferTypeFromDtype(host_buffer.shape().dtype());
+        const byte_strides = host_buffer.strides() orelse host_buffer.shape().computeStrides().constSlice();
+
+        const devices = platform.getDevices();
+        // var dma_took = try stdx.time.Timer.start();
+        // _ = dma_took; // autofix
+        for (0..n_partitions) |i| {
+            const buf = if (sharding_ax) |ax| buf: {
+                const start: i64 = @as(i64, @intCast(i)) * chunk_size;
+                break :buf host_buffer.slice1d(ax, .{ .start = start, .end = start + chunk_size });
+            } else host_buffer;
+
+            const pjrt_buffer, const event = try platform.pjrt_client.bufferFromHostBuffer2(
+                platform.pjrt_api,
+                .{
+                    .data = buf.data,
+                    .buffer_type = buffer_type,
+                    .dims = buf.shape().dims(),
+                    .byte_strides = byte_strides,
+                    .device = devices[i],
+                    .host_buffer_semantics = .ImmutableUntilTransferCompletes,
+                },
+            );
+            if (event) |ev| {
+                ev.deinit(platform.pjrt_api);
+            }
+            res._shards.appendAssumeCapacity(pjrt_buffer);
+        }
+        // log.info("DMA TOOK: {}", .{dma_took.read()});
+
+        return res;
+    }
+
+    pub fn awaitt(self: Buffer) !Buffer {
+        for (self._shards.constSlice()) |buffer| {
+            if (buffer.getReadyEvent(self._api)) |ev| {
+                try ev.awaitt(self._api);
+            }
+        }
+        return self;
     }
 
     /// Wraps pre-exisiting `pjrt.Buffer` shards into one `zml.Buffer`.
@@ -106,6 +167,11 @@ pub const Buffer = struct {
     pub fn fromSlice(platform: Platform, dimz: anytype, s: anytype) !Buffer {
         const sh = Shape.init(dimz, DataType.fromSliceElementType(s));
         return from(platform, HostBuffer.fromBytes(sh, std.mem.sliceAsBytes(s)));
+    }
+
+    pub fn fromSlice2(platform: Platform, dimz: anytype, s: anytype) !Buffer {
+        const sh = Shape.init(dimz, DataType.fromSliceElementType(s));
+        return from2(platform, HostBuffer.fromBytes(sh, std.mem.sliceAsBytes(s)));
     }
 
     /// Copies the given Zig array to the accelerator memory and

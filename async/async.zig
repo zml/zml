@@ -15,7 +15,13 @@ pub const Condition = struct {
     }
 
     pub fn broadcast(self: *Condition) void {
-        self.inner.broadcast();
+        if (self.waiters.empty()) {
+            return;
+        }
+        while (self.waiters.pop()) |waiter| {
+            self.exec.runSoon(waiter);
+        }
+        _ = self.exec.tick();
     }
 
     pub fn signal(self: *Condition) void {
@@ -146,7 +152,7 @@ pub const threading = struct {
             };
             if (self.waiter.cmpxchgStrong(&State.unset_state, &new_state, .monotonic, .monotonic) == null) {
                 while (self.isSet() == false) {
-                    coro.xsuspend();
+                    libcoro.xsuspend();
                 }
             }
         }

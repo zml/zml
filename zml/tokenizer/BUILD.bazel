@@ -1,0 +1,35 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+load("@zml//bazel:zig.bzl", "zig_cc_binary")
+load("//bazel:swig.bzl", "swig_cc_library")
+
+swig_cc_library(
+    name = "sentencepiece_swig",
+    interface = "sentencepiece.i",
+    module = "sentencepiece",
+    deps = [
+        "//ffi:cc",
+        "@com_google_sentencepiece//:sentencepiece_processor",
+    ],
+)
+
+zig_library(
+    name = "tokenizer",
+    import_name = "zml/tokenizer",
+    main = "tokenizer.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//async",
+        "//ffi:zig",
+        "//zml/tokenizer/hftokenizers",
+        "//zml/tokenizer/sentencepiece",
+    ],
+)
+
+zig_cc_binary(
+    name = "main",
+    main = "main.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":tokenizer",
+    ],
+)

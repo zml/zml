@@ -49,6 +49,12 @@ pub fn generateText(
     }
 
     const prompt_tok = tokenizer.encode(allocator, prompt, .{}) catch unreachable;
+    var tokenizer_encoder = try tokenizer.encoder();
+    defer tokenizer_encoder.deinit();
+
+    var tokenizer_decoder = try tokenizer.decoder();
+    defer tokenizer_decoder.deinit();
+
     log.debug("Tokenized Prompt {d}", .{prompt_tok});
     const dims = llama.model.shape();
     const max_seq_len = dims.s;
@@ -65,8 +71,8 @@ pub fn generateText(
     var output = std.ArrayList(u8).init(allocator);
     defer output.deinit();
 
-    var tokens = try zml.Buffer.fromSlice(mod.platform(), .{max_seq_len}, token_buffer);
-    const prefill_token_index = try zml.Buffer.fromSlice(mod.platform(), .{}, &[_]i32{@intCast(prompt_tok.len - 1)});
+    var tokens = try zml.Buffer.fromSlice2(mod.platform(), .{max_seq_len}, token_buffer);
+    const prefill_token_index = try zml.Buffer.fromSlice2(mod.platform(), .{}, &[_]i32{@intCast(prompt_tok.len - 1)});
     //defer prefill_token_index.deinit();
 
     var rng = try zml.Tensor.Rng.init(mod.platform(), seed);
@@ -78,11 +84,50 @@ pub fn generateText(
 
     const tracer = zml.tools.Tracer.init("ai.zml.models.llama");
     var decode_progress = prompt_tok.len;
+    decode_progress = decode_progress;
     const output_tokens_len = max_seq_len - prompt_tok.len - 1;
 
     const start = std.time.microTimestamp();
     const output_freq: u8 = 1;
     var eos_index: ?usize = null;
+    eos_index = eos_index;
+
+    //for (0..10) |i| {
+    //    const frame_id = tracer.frameStart(try std.fmt.bufPrintZ(tracer_buffer, "Generate token {}/{}", .{ i + 1, output_tokens_len }));
+    //    tokens, token_index, kv_cache, rng = mod.call(.{ tokens, token_index, kv_cache, rng });
+    //    //token_index.deinit();
+    //    //token_index = new_token_index;
+    //    if ((i + 1) % output_freq == 0) {
+    //        const n = output.items.len;
+    //        _ = try tokens.toHost(std.mem.sliceAsBytes(token_buffer));
+    //        try tokenizer.decodeWithOpts(&output, @ptrCast(token_buffer[decode_progress..][0..output_freq]), .{});
+    //        decode_progress += output_freq;
+    //        std.debug.print("{s}", .{output.items[n..]});
+    //        tracer.frameEnd(frame_id, try std.fmt.bufPrintZ(tracer_buffer, "Decoded token {}/{} : {s}", .{ i + 1, output_tokens_len, output.items[n..] }));
+    //        if (std.mem.indexOfAny(i32, token_buffer[decode_progress - output_freq ..], &eos_tokens)) |index| {
+    //            // Handle strange scenarios when eos id isn't the very next token after decode_progress
+    //            eos_index = decode_progress - output_freq + index;
+    //            break;
+    //        }
+    //    } else {
+    //        tracer.frameEnd(frame_id, try std.fmt.bufPrintZ(tracer_buffer, "Generated token {}/{}", .{ i + 1, output_tokens_len }));
+    //    }
+    //    //_ = frame_id; // autofix
+    //    //tokens, const new_token_index, kv_cache, rng = mod.call(.{ tokens, token_index, kv_cache, rng });
+    //    //token_index.deinit();
+    //    //token_index = new_token_index;
+
+    //    //const n = output.items.len;
+    //    //_ = n; // autofix
+    //    //_ = try tokens.toHost(std.mem.sliceAsBytes(token_buffer));
+
+    //    //const chunk = try tokenizer_decoder.next(@intCast(token_buffer[decode_progress])) orelse unreachable;
+    //    //try output.appendSlice(chunk);
+    //    //decode_progress += 1;
+
+    //    //std.debug.print("{s}", .{chunk});
+    //}
+
     for (0..output_tokens_len) |i| {
         //_ = i;
         const frame_id = tracer.frameStart(try std.fmt.bufPrintZ(tracer_buffer, "Generate token {}/{}", .{ i + 1, output_tokens_len }));
@@ -92,7 +137,10 @@ pub fn generateText(
         if ((i + 1) % output_freq == 0) {
             const n = output.items.len;
             _ = try tokens.toHost(std.mem.sliceAsBytes(token_buffer));
-            try tokenizer.decodeWithOpts(&output, @ptrCast(token_buffer[decode_progress..][0..output_freq]), .{});
+
+            const chunk = tokenizer_decoder.next(@intCast(token_buffer[decode_progress])) orelse unreachable;
+            try output.appendSlice(chunk);
+
             decode_progress += output_freq;
             std.debug.print("{s}", .{output.items[n..]});
             tracer.frameEnd(frame_id, try std.fmt.bufPrintZ(tracer_buffer, "Decoded token {}/{} : {s}", .{ i + 1, output_tokens_len, output.items[n..] }));
@@ -112,7 +160,9 @@ pub fn generateText(
         total_token_count = end_idx + 1;
     }
     const generated_token_count = total_token_count - prompt_tok.len;
-    try tokenizer.decodeWithOpts(&output, @ptrCast(token_buffer[decode_progress..total_token_count]), .{});
+    const chunk = tokenizer_decoder.next(@intCast(token_buffer[decode_progress])) orelse unreachable;
+    try output.appendSlice(chunk);
+    //try tokenizer.decodeWithOpts(&output, @ptrCast(token_buffer[decode_progress..total_token_count]), .{});
     std.debug.print("{s}\n", .{output.items[n..]});
     const end = std.time.microTimestamp();
 
@@ -216,7 +266,7 @@ pub fn asyncMain() !void {
     }
     const tokenizer_path = cli_args.tokenizer orelse cli_args.model;
     log.info("\tLoading tokenizer from {s}", .{tokenizer_path});
-    var tokenizer = try zml.aio.detectFormatAndLoadTokenizer(allocator, tokenizer_path);
+    var tokenizer = try zml.tokenizer.Tokenizer.from_file(allocator, tokenizer_path);
     log.info("✅\tLoaded tokenizer from {s}", .{tokenizer_path});
     defer tokenizer.deinit();
 

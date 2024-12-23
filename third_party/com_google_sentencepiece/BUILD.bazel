@@ -1,0 +1,38 @@
+load(":fwd.bzl", "include_fwd")
+
+include_fwd(
+    name = "absl_hdrs",
+    includes = [
+        "absl/container/flat_hash_map.h",
+        "absl/container/flat_hash_set.h",
+        "absl/flags/flag.h",
+        "absl/flags/parse.h",
+        "absl/flags/usage.h",
+        "absl/strings/match.h",
+        "absl/strings/numbers.h",
+        "absl/strings/str_cat.h",
+        "absl/strings/str_format.h",
+        "absl/strings/str_join.h",
+        "absl/strings/str_replace.h",
+        "absl/strings/str_split.h",
+        "absl/strings/string_view.h",
+        "absl/strings/strip.h",
+    ],
+)
+
+cc_library(
+    name = "absl",
+    hdrs = [":absl_hdrs"],
+    include_prefix = "third_party",
+    includes = ["."],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/flags:flag",
+        "@abseil-cpp//absl/flags:parse",
+        "@abseil-cpp//absl/flags:usage",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:string_view",
+    ],
+)
