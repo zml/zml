@@ -114,3 +114,6 @@ apt.install(
     manifest = "//runtimes/neuron:packages.yaml",
 )
 use_repo(apt, "neuron_bookworm")
+
+non_module_deps = use_extension("//:third_party/non_module_deps.bzl", "non_module_deps")
+use_repo(non_module_deps, "com_google_sentencepiece", "org_swig_swig")
