@@ -1,0 +1,28 @@
+load("@rules_rust//rust:defs.bzl", "rust_static_library")
+load("@zml//bazel:zig.bzl", "zig_cc_binary")
+
+rust_static_library(
+    name = "hf_tokenizers_rs",
+    srcs = ["src/lib.rs"],
+    crate_name = "zml_hf_tokenizers",
+    edition = "2021",
+    deps = [
+        "@crates//:tokenizers",
+    ],
+)
+
+cc_library(
+    name = "hf_tokenizers",
+    hdrs = ["hf_tokenizers.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":hf_tokenizers_rs",
+    ],
+)
+
+zig_cc_binary(
+    name = "main",
+    main = "main.zig",
+    visibility = ["//visibility:public"],
+    deps = [":hf_tokenizers"],
+)
