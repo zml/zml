@@ -121,3 +121,13 @@ use_repo(apt, "neuron_bookworm")
 
 non_module_deps = use_extension("//:third_party/non_module_deps.bzl", "non_module_deps")
 use_repo(non_module_deps, "com_google_sentencepiece", "org_swig_swig")
+
+bazel_dep(name = "rules_rust", version = "0.56.0")
+
+crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+crate.from_cargo(
+    name = "crates",
+    cargo_lockfile = "//zml/tokenizer/hf_tokenizers:Cargo.lock",
+    manifests = ["//zml/tokenizer/hf_tokenizers:Cargo.toml"],
+)
+use_repo(crate, "crates")

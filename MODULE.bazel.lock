@@ -13,6 +13,7 @@
     "https://bazel-registry.zml.ai/modules/abseil-cpp/20240722.0.bcr.2/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/apple_support/1.11.1/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/apple_support/1.15.1/MODULE.bazel": "not found",
+    "https://bazel-registry.zml.ai/modules/apple_support/1.17.1/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/apple_support/1.5.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/aspect_bazel_lib/2.7.9/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/aspect_bazel_lib/2.8.1/MODULE.bazel": "not found",
@@ -20,11 +21,13 @@
     "https://bazel-registry.zml.ai/modules/aspect_bazel_lib/2.9.3/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/aspect_rules_py/1.0.0-rc0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/bazel_features/1.1.1/MODULE.bazel": "not found",
+    "https://bazel-registry.zml.ai/modules/bazel_features/1.10.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/bazel_features/1.11.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/bazel_features/1.15.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/bazel_features/1.17.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/bazel_features/1.18.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/bazel_features/1.19.0/MODULE.bazel": "not found",
+    "https://bazel-registry.zml.ai/modules/bazel_features/1.21.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/bazel_features/1.3.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/bazel_features/1.4.1/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/bazel_features/1.9.1/MODULE.bazel": "not found",
@@ -79,6 +82,7 @@
     "https://bazel-registry.zml.ai/modules/rules_cc/0.0.1/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_cc/0.0.10/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_cc/0.0.16/MODULE.bazel": "not found",
+    "https://bazel-registry.zml.ai/modules/rules_cc/0.0.17/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_cc/0.0.2/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_cc/0.0.6/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_cc/0.0.8/MODULE.bazel": "not found",
@@ -126,7 +130,9 @@
     "https://bazel-registry.zml.ai/modules/rules_python/0.34.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_python/0.37.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_python/0.4.0/MODULE.bazel": "not found",
+    "https://bazel-registry.zml.ai/modules/rules_rust/0.56.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_shell/0.2.0/MODULE.bazel": "not found",
+    "https://bazel-registry.zml.ai/modules/rules_shell/0.3.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_swift/1.15.1/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_uv/0.34.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/stardoc/0.5.1/MODULE.bazel": "not found",
@@ -157,7 +163,8 @@
     "https://bcr.bazel.build/modules/abseil-cpp/20240722.0.bcr.2/source.json": "464f3012c8f40cd51facbfc6962563971c6bd55f45ba16bd98313f2de73340c5",
     "https://bcr.bazel.build/modules/apple_support/1.11.1/MODULE.bazel": "1843d7cd8a58369a444fc6000e7304425fba600ff641592161d9f15b179fb896",
     "https://bcr.bazel.build/modules/apple_support/1.15.1/MODULE.bazel": "a0556fefca0b1bb2de8567b8827518f94db6a6e7e7d632b4c48dc5f865bc7c85",
-    "https://bcr.bazel.build/modules/apple_support/1.15.1/source.json": "517f2b77430084c541bc9be2db63fdcbb7102938c5f64c17ee60ffda2e5cf07b",
+    "https://bcr.bazel.build/modules/apple_support/1.17.1/MODULE.bazel": "655c922ab1209978a94ef6ca7d9d43e940cd97d9c172fb55f94d91ac53f8610b",
+    "https://bcr.bazel.build/modules/apple_support/1.17.1/source.json": "6b2b8c74d14e8d485528a938e44bdb72a5ba17632b9e14ef6e68a5ee96c8347f",
     "https://bcr.bazel.build/modules/apple_support/1.5.0/MODULE.bazel": "50341a62efbc483e8a2a6aec30994a58749bd7b885e18dd96aa8c33031e558ef",
     "https://bcr.bazel.build/modules/aspect_bazel_lib/2.7.9/MODULE.bazel": "06e54f2b345b8eb7adceed2329b273da00d0368e28a9ebd9dfc75b4a052dac85",
     "https://bcr.bazel.build/modules/aspect_bazel_lib/2.8.1/MODULE.bazel": "812d2dd42f65dca362152101fbec418029cc8fd34cbad1a2fde905383d705838",
@@ -167,12 +174,14 @@
     "https://bcr.bazel.build/modules/aspect_rules_py/1.0.0-rc0/MODULE.bazel": "32d7c3fc7dea1aef4a95475e91a9cdd79473c4bd6a198906a306bea2fbc4e601",
     "https://bcr.bazel.build/modules/aspect_rules_py/1.0.0-rc0/source.json": "b8eaced4b9ab418f3498d9657f98c980e58f6fad397fc17081955dcf3813be3f",
     "https://bcr.bazel.build/modules/bazel_features/1.1.1/MODULE.bazel": "27b8c79ef57efe08efccbd9dd6ef70d61b4798320b8d3c134fd571f78963dbcd",
+    "https://bcr.bazel.build/modules/bazel_features/1.10.0/MODULE.bazel": "f75e8807570484a99be90abcd52b5e1f390362c258bcb73106f4544957a48101",
     "https://bcr.bazel.build/modules/bazel_features/1.11.0/MODULE.bazel": "f9382337dd5a474c3b7d334c2f83e50b6eaedc284253334cf823044a26de03e8",
     "https://bcr.bazel.build/modules/bazel_features/1.15.0/MODULE.bazel": "d38ff6e517149dc509406aca0db3ad1efdd890a85e049585b7234d04238e2a4d",
     "https://bcr.bazel.build/modules/bazel_features/1.17.0/MODULE.bazel": "039de32d21b816b47bd42c778e0454217e9c9caac4a3cf8e15c7231ee3ddee4d",
     "https://bcr.bazel.build/modules/bazel_features/1.18.0/MODULE.bazel": "1be0ae2557ab3a72a57aeb31b29be347bcdc5d2b1eb1e70f39e3851a7e97041a",
     "https://bcr.bazel.build/modules/bazel_features/1.19.0/MODULE.bazel": "59adcdf28230d220f0067b1f435b8537dd033bfff8db21335ef9217919c7fb58",
-    "https://bcr.bazel.build/modules/bazel_features/1.19.0/source.json": "d7bf14517c1b25b9d9c580b0f8795fceeae08a7590f507b76aace528e941375d",
+    "https://bcr.bazel.build/modules/bazel_features/1.21.0/MODULE.bazel": "675642261665d8eea09989aa3b8afb5c37627f1be178382c320d1b46afba5e3b",
+    "https://bcr.bazel.build/modules/bazel_features/1.21.0/source.json": "3e8379efaaef53ce35b7b8ba419df829315a880cb0a030e5bb45c96d6d5ecb5f",
     "https://bcr.bazel.build/modules/bazel_features/1.3.0/MODULE.bazel": "cdcafe83ec318cda34e02948e81d790aab8df7a929cec6f6969f13a489ccecd9",
     "https://bcr.bazel.build/modules/bazel_features/1.4.1/MODULE.bazel": "e45b6bb2350aff3e442ae1111c555e27eac1d915e77775f6fdc4b351b758b5d7",
     "https://bcr.bazel.build/modules/bazel_features/1.9.1/MODULE.bazel": "8f679097876a9b609ad1f60249c49d68bfab783dd9be012faf9d82547b14815a",
@@ -242,7 +251,8 @@
     "https://bcr.bazel.build/modules/rules_cc/0.0.1/MODULE.bazel": "cb2aa0747f84c6c3a78dad4e2049c154f08ab9d166b1273835a8174940365647",
     "https://bcr.bazel.build/modules/rules_cc/0.0.10/MODULE.bazel": "ec1705118f7eaedd6e118508d3d26deba2a4e76476ada7e0e3965211be012002",
     "https://bcr.bazel.build/modules/rules_cc/0.0.16/MODULE.bazel": "7661303b8fc1b4d7f532e54e9d6565771fea666fbdf839e0a86affcd02defe87",
-    "https://bcr.bazel.build/modules/rules_cc/0.0.16/source.json": "227e83737046aa4f50015da48e98e0d8ab42fd0ec74d8d653b6cc9f9a357f200",
+    "https://bcr.bazel.build/modules/rules_cc/0.0.17/MODULE.bazel": "2ae1d8f4238ec67d7185d8861cb0a2cdf4bc608697c331b95bf990e69b62e64a",
+    "https://bcr.bazel.build/modules/rules_cc/0.0.17/source.json": "4db99b3f55c90ab28d14552aa0632533e3e8e5e9aea0f5c24ac0014282c2a7c5",
     "https://bcr.bazel.build/modules/rules_cc/0.0.2/MODULE.bazel": "6915987c90970493ab97393024c156ea8fb9f3bea953b2f3ec05c34f19b5695c",
     "https://bcr.bazel.build/modules/rules_cc/0.0.6/MODULE.bazel": "abf360251023dfe3efcef65ab9d56beefa8394d4176dd29529750e1c57eaa33f",
     "https://bcr.bazel.build/modules/rules_cc/0.0.8/MODULE.bazel": "964c85c82cfeb6f3855e6a07054fdb159aced38e99a5eecf7bce9d53990afa3e",
@@ -300,8 +310,11 @@
     "https://bcr.bazel.build/modules/rules_python/0.37.0/MODULE.bazel": "bd90c62e4c789ea94ed61ab21a5a538dd4145548d1de994192049652d433816e",
     "https://bcr.bazel.build/modules/rules_python/0.37.0/source.json": "c17b8ca7a2348fd8fa96ad5b414223dd1ce5d6e8265c3134a88d337b0554d53c",
     "https://bcr.bazel.build/modules/rules_python/0.4.0/MODULE.bazel": "9208ee05fd48bf09ac60ed269791cf17fb343db56c8226a720fbb1cdf467166c",
+    "https://bcr.bazel.build/modules/rules_rust/0.56.0/MODULE.bazel": "3295b00757db397122092322fe1e920be7f5c9fbfb8619138977e820f2cbbbae",
+    "https://bcr.bazel.build/modules/rules_rust/0.56.0/source.json": "7dc294c3decd40af8f7b83897a5936e764d3ae8584b4056862978fb3870ab8d7",
     "https://bcr.bazel.build/modules/rules_shell/0.2.0/MODULE.bazel": "fda8a652ab3c7d8fee214de05e7a9916d8b28082234e8d2c0094505c5268ed3c",
-    "https://bcr.bazel.build/modules/rules_shell/0.2.0/source.json": "7f27af3c28037d9701487c4744b5448d26537cc66cdef0d8df7ae85411f8de95",
+    "https://bcr.bazel.build/modules/rules_shell/0.3.0/MODULE.bazel": "de4402cd12f4cc8fda2354fce179fdb068c0b9ca1ec2d2b17b3e21b24c1a937b",
+    "https://bcr.bazel.build/modules/rules_shell/0.3.0/source.json": "c55ed591aa5009401ddf80ded9762ac32c358d2517ee7820be981e2de9756cf3",
     "https://bcr.bazel.build/modules/rules_swift/1.15.1/MODULE.bazel": "7031d3e5221b54dfee3901d221f10f54a8b0f2a64d4616de7879bcf83fe8d85d",
     "https://bcr.bazel.build/modules/rules_swift/1.15.1/source.json": "6472a4607d0a2f39eeb7daae78054b995aba593caad99aa64561f631fcf93a63",
     "https://bcr.bazel.build/modules/rules_uv/0.34.0/MODULE.bazel": "fb7c2da897786eac4b643d1ed516be715c11566620ee5cf022d7009298ad9590",
@@ -329,8 +342,8 @@
   "moduleExtensions": {
     "@@apple_support~//crosstool:setup.bzl%apple_cc_configure_extension": {
       "general": {
-        "bzlTransitiveDigest": "7rY6uLsMi3Ma6rwkL3yK4deWcIXKE2ScY4Kt8lA079s=",
-        "usagesDigest": "2rUj1nIKMIRWTPS0bs9eJAzlNwSbV3APk1f7UNpjXq0=",
+        "bzlTransitiveDigest": "SKth1NgruDWmWTeXDCh0A0NfAgafC4gc2LLGmtsh+xc=",
+        "usagesDigest": "M6JoVI4x/XU3HC+5Z3XrwK+Q5ctDj3gF34U1L4s7m9o=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},
         "envVariables": {},
@@ -1152,6 +1165,210 @@
           }
         },
         "recordedRepoMappingEntries": []
+      }
+    },
+    "@@rules_distroless~//apt:extensions.bzl%apt": {
+      "general": {
+        "bzlTransitiveDigest": "rCfUzSGMSZSoItAWsqjTUC8ki4434a+MaUc8Ar3697c=",
+        "usagesDigest": "8/uJYwaWKZossA3jGwUl3q4Z/6ztn1xuhLcQjImLkoU=",
+        "recordedFileInputs": {
+          "@@//runtimes/neuron/packages.lock.json": "4cf407725dcd905a3334f79302735d5085901f27b34bd402e9678fad58354622"
+        },
+        "recordedDirentsInputs": {},
+        "envVariables": {},
+        "generatedRepoSpecs": {
+          "neuron_bookworm_bash_5.2.15-2-p-b7_amd64": {
+            "bzlFile": "@@bazel_tools//tools/build_defs/repo:http.bzl",
+            "ruleClassName": "http_archive",
+            "attributes": {
+              "build_file_content": "\ngenrule(\n    name = \"data\",\n    srcs = glob([\"data.tar*\"]),\n    outs = [\"layer.tar.gz\"],\n    cmd = \"\"\"\n    # Per the dpkg-dev man page:\n    # https://manpages.debian.org/bookworm/dpkg-dev/deb.5.en.html\n    #\n    # Debian data.tar files can be:\n    #  - .tar uncompressed, supported since dpkg 1.10.24\n    #  - .tar compressed with\n    #    *  gzip: .gz\n    #    * bzip2: .bz2, supported since dpkg 1.10.24\n    #    *  lzma: .lzma, supported since dpkg 1.13.25\n    #    *    xz: .xz, supported since dpkg 1.15.6\n    #    *  zstd: .zst, supported since dpkg 1.21.18\n    #\n    # ZSTD_BIN can decompress all formats except bzip2\n    #\n    # The OCI image spec supports .tar and .tar compressed with gzip or zstd.\n    # Bazel needs the output filename to be fixed in advanced so we settle for\n    # gzip compression.\n\n    data_file=\"$$(basename $<)\"\n\n    if [[ \"$$data_file\" == \"data.tar.bz2\" ]]; then\n      # TODO: support bz2\n      echo \"ERROR: unsupported compression: bz2\"\n      exit 1\n    elif [[ \"$$data_file\" == \"data.tar.gz\" ]]; then\n      mv $< $@\n    elif [[ \"$$data_file\" == \"data.tar\" ]]; then\n      $(ZSTD_BIN) --compress --format=gzip $< >$@\n    else\n      $(ZSTD_BIN) --force --decompress --stdout $< |\n      $(ZSTD_BIN) --compress --format=gzip - >$@\n    fi\n    \"\"\",\n    toolchains = [\"@zstd_toolchains//:resolved_toolchain\"],\n    visibility = [\"//visibility:public\"],\n)\n\nfilegroup(\n    name = \"control\",\n    srcs = glob([\"control.tar.*\"]),\n    visibility = [\"//visibility:public\"],\n)\n",
+              "urls": [
+                "https://deb.debian.org/debian/pool/main/b/bash/bash_5.2.15-2+b7_amd64.deb"
+              ],
+              "sha256": "d3c65202568384a588ea32017b243fe64ca054943a008cba4e5bd8f9e79975c4"
+            }
+          },
+          "neuron_bookworm_debianutils_5.7-0.5_deb12u1_amd64": {
+            "bzlFile": "@@bazel_tools//tools/build_defs/repo:http.bzl",
+            "ruleClassName": "http_archive",
+            "attributes": {
+              "build_file_content": "\ngenrule(\n    name = \"data\",\n    srcs = glob([\"data.tar*\"]),\n    outs = [\"layer.tar.gz\"],\n    cmd = \"\"\"\n    # Per the dpkg-dev man page:\n    # https://manpages.debian.org/bookworm/dpkg-dev/deb.5.en.html\n    #\n    # Debian data.tar files can be:\n    #  - .tar uncompressed, supported since dpkg 1.10.24\n    #  - .tar compressed with\n    #    *  gzip: .gz\n    #    * bzip2: .bz2, supported since dpkg 1.10.24\n    #    *  lzma: .lzma, supported since dpkg 1.13.25\n    #    *    xz: .xz, supported since dpkg 1.15.6\n    #    *  zstd: .zst, supported since dpkg 1.21.18\n    #\n    # ZSTD_BIN can decompress all formats except bzip2\n    #\n    # The OCI image spec supports .tar and .tar compressed with gzip or zstd.\n    # Bazel needs the output filename to be fixed in advanced so we settle for\n    # gzip compression.\n\n    data_file=\"$$(basename $<)\"\n\n    if [[ \"$$data_file\" == \"data.tar.bz2\" ]]; then\n      # TODO: support bz2\n      echo \"ERROR: unsupported compression: bz2\"\n      exit 1\n    elif [[ \"$$data_file\" == \"data.tar.gz\" ]]; then\n      mv $< $@\n    elif [[ \"$$data_file\" == \"data.tar\" ]]; then\n      $(ZSTD_BIN) --compress --format=gzip $< >$@\n    else\n      $(ZSTD_BIN) --force --decompress --stdout $< |\n      $(ZSTD_BIN) --compress --format=gzip - >$@\n    fi\n    \"\"\",\n    toolchains = [\"@zstd_toolchains//:resolved_toolchain\"],\n    visibility = [\"//visibility:public\"],\n)\n\nfilegroup(\n    name = \"control\",\n    srcs = glob([\"control.tar.*\"]),\n    visibility = [\"//visibility:public\"],\n)\n",
+              "urls": [
+                "https://deb.debian.org/debian/pool/main/d/debianutils/debianutils_5.7-0.5~deb12u1_amd64.deb"
+              ],
+              "sha256": "55f951359670eb3236c9e2ccd5fac9ccb3db734f5a22aff21589e7a30aee48c9"
+            }
+          },
+          "neuron_bookworm_libc6_2.36-9-p-deb12u9_amd64": {
+            "bzlFile": "@@bazel_tools//tools/build_defs/repo:http.bzl",
+            "ruleClassName": "http_archive",
+            "attributes": {
+              "build_file_content": "\ngenrule(\n    name = \"data\",\n    srcs = glob([\"data.tar*\"]),\n    outs = [\"layer.tar.gz\"],\n    cmd = \"\"\"\n    # Per the dpkg-dev man page:\n    # https://manpages.debian.org/bookworm/dpkg-dev/deb.5.en.html\n    #\n    # Debian data.tar files can be:\n    #  - .tar uncompressed, supported since dpkg 1.10.24\n    #  - .tar compressed with\n    #    *  gzip: .gz\n    #    * bzip2: .bz2, supported since dpkg 1.10.24\n    #    *  lzma: .lzma, supported since dpkg 1.13.25\n    #    *    xz: .xz, supported since dpkg 1.15.6\n    #    *  zstd: .zst, supported since dpkg 1.21.18\n    #\n    # ZSTD_BIN can decompress all formats except bzip2\n    #\n    # The OCI image spec supports .tar and .tar compressed with gzip or zstd.\n    # Bazel needs the output filename to be fixed in advanced so we settle for\n    # gzip compression.\n\n    data_file=\"$$(basename $<)\"\n\n    if [[ \"$$data_file\" == \"data.tar.bz2\" ]]; then\n      # TODO: support bz2\n      echo \"ERROR: unsupported compression: bz2\"\n      exit 1\n    elif [[ \"$$data_file\" == \"data.tar.gz\" ]]; then\n      mv $< $@\n    elif [[ \"$$data_file\" == \"data.tar\" ]]; then\n      $(ZSTD_BIN) --compress --format=gzip $< >$@\n    else\n      $(ZSTD_BIN) --force --decompress --stdout $< |\n      $(ZSTD_BIN) --compress --format=gzip - >$@\n    fi\n    \"\"\",\n    toolchains = [\"@zstd_toolchains//:resolved_toolchain\"],\n    visibility = [\"//visibility:public\"],\n)\n\nfilegroup(\n    name = \"control\",\n    srcs = glob([\"control.tar.*\"]),\n    visibility = [\"//visibility:public\"],\n)\n",
+              "urls": [
+                "https://deb.debian.org/debian/pool/main/g/glibc/libc6_2.36-9+deb12u9_amd64.deb"
+              ],
+              "sha256": "3a043b9dbf1a8c8b5a9e2268253e6dca8c7d431bd7a202fea96364abf374fea9"
+            }
+          },
+          "neuron_bookworm_libgcc-s1_12.2.0-14_amd64": {
+            "bzlFile": "@@bazel_tools//tools/build_defs/repo:http.bzl",
+            "ruleClassName": "http_archive",
+            "attributes": {
+              "build_file_content": "\ngenrule(\n    name = \"data\",\n    srcs = glob([\"data.tar*\"]),\n    outs = [\"layer.tar.gz\"],\n    cmd = \"\"\"\n    # Per the dpkg-dev man page:\n    # https://manpages.debian.org/bookworm/dpkg-dev/deb.5.en.html\n    #\n    # Debian data.tar files can be:\n    #  - .tar uncompressed, supported since dpkg 1.10.24\n    #  - .tar compressed with\n    #    *  gzip: .gz\n    #    * bzip2: .bz2, supported since dpkg 1.10.24\n    #    *  lzma: .lzma, supported since dpkg 1.13.25\n    #    *    xz: .xz, supported since dpkg 1.15.6\n    #    *  zstd: .zst, supported since dpkg 1.21.18\n    #\n    # ZSTD_BIN can decompress all formats except bzip2\n    #\n    # The OCI image spec supports .tar and .tar compressed with gzip or zstd.\n    # Bazel needs the output filename to be fixed in advanced so we settle for\n    # gzip compression.\n\n    data_file=\"$$(basename $<)\"\n\n    if [[ \"$$data_file\" == \"data.tar.bz2\" ]]; then\n      # TODO: support bz2\n      echo \"ERROR: unsupported compression: bz2\"\n      exit 1\n    elif [[ \"$$data_file\" == \"data.tar.gz\" ]]; then\n      mv $< $@\n    elif [[ \"$$data_file\" == \"data.tar\" ]]; then\n      $(ZSTD_BIN) --compress --format=gzip $< >$@\n    else\n      $(ZSTD_BIN) --force --decompress --stdout $< |\n      $(ZSTD_BIN) --compress --format=gzip - >$@\n    fi\n    \"\"\",\n    toolchains = [\"@zstd_toolchains//:resolved_toolchain\"],\n    visibility = [\"//visibility:public\"],\n)\n\nfilegroup(\n    name = \"control\",\n    srcs = glob([\"control.tar.*\"]),\n    visibility = [\"//visibility:public\"],\n)\n",
+              "urls": [
+                "https://deb.debian.org/debian/pool/main/g/gcc-12/libgcc-s1_12.2.0-14_amd64.deb"
+              ],
+              "sha256": "f3d1d48c0599aea85b7f2077a01d285badc42998c1a1e7473935d5cf995c8141"
+            }
+          },
+          "neuron_bookworm_gcc-12-base_12.2.0-14_amd64": {
+            "bzlFile": "@@bazel_tools//tools/build_defs/repo:http.bzl",
+            "ruleClassName": "http_archive",
+            "attributes": {
+              "build_file_content": "\ngenrule(\n    name = \"data\",\n    srcs = glob([\"data.tar*\"]),\n    outs = [\"layer.tar.gz\"],\n    cmd = \"\"\"\n    # Per the dpkg-dev man page:\n    # https://manpages.debian.org/bookworm/dpkg-dev/deb.5.en.html\n    #\n    # Debian data.tar files can be:\n    #  - .tar uncompressed, supported since dpkg 1.10.24\n    #  - .tar compressed with\n    #    *  gzip: .gz\n    #    * bzip2: .bz2, supported since dpkg 1.10.24\n    #    *  lzma: .lzma, supported since dpkg 1.13.25\n    #    *    xz: .xz, supported since dpkg 1.15.6\n    #    *  zstd: .zst, supported since dpkg 1.21.18\n    #\n    # ZSTD_BIN can decompress all formats except bzip2\n    #\n    # The OCI image spec supports .tar and .tar compressed with gzip or zstd.\n    # Bazel needs the output filename to be fixed in advanced so we settle for\n    # gzip compression.\n\n    data_file=\"$$(basename $<)\"\n\n    if [[ \"$$data_file\" == \"data.tar.bz2\" ]]; then\n      # TODO: support bz2\n      echo \"ERROR: unsupported compression: bz2\"\n      exit 1\n    elif [[ \"$$data_file\" == \"data.tar.gz\" ]]; then\n      mv $< $@\n    elif [[ \"$$data_file\" == \"data.tar\" ]]; then\n      $(ZSTD_BIN) --compress --format=gzip $< >$@\n    else\n      $(ZSTD_BIN) --force --decompress --stdout $< |\n      $(ZSTD_BIN) --compress --format=gzip - >$@\n    fi\n    \"\"\",\n    toolchains = [\"@zstd_toolchains//:resolved_toolchain\"],\n    visibility = [\"//visibility:public\"],\n)\n\nfilegroup(\n    name = \"control\",\n    srcs = glob([\"control.tar.*\"]),\n    visibility = [\"//visibility:public\"],\n)\n",
+              "urls": [
+                "https://deb.debian.org/debian/pool/main/g/gcc-12/gcc-12-base_12.2.0-14_amd64.deb"
+              ],
+              "sha256": "1a03df5a57833d65b5bb08cfa19d50e76f29088dc9e64fb934af42d9023a0807"
+            }
+          },
+          "neuron_bookworm_base-files_12.4-p-deb12u8_amd64": {
+            "bzlFile": "@@bazel_tools//tools/build_defs/repo:http.bzl",
+            "ruleClassName": "http_archive",
+            "attributes": {
+              "build_file_content": "\ngenrule(\n    name = \"data\",\n    srcs = glob([\"data.tar*\"]),\n    outs = [\"layer.tar.gz\"],\n    cmd = \"\"\"\n    # Per the dpkg-dev man page:\n    # https://manpages.debian.org/bookworm/dpkg-dev/deb.5.en.html\n    #\n    # Debian data.tar files can be:\n    #  - .tar uncompressed, supported since dpkg 1.10.24\n    #  - .tar compressed with\n    #    *  gzip: .gz\n    #    * bzip2: .bz2, supported since dpkg 1.10.24\n    #    *  lzma: .lzma, supported since dpkg 1.13.25\n    #    *    xz: .xz, supported since dpkg 1.15.6\n    #    *  zstd: .zst, supported since dpkg 1.21.18\n    #\n    # ZSTD_BIN can decompress all formats except bzip2\n    #\n    # The OCI image spec supports .tar and .tar compressed with gzip or zstd.\n    # Bazel needs the output filename to be fixed in advanced so we settle for\n    # gzip compression.\n\n    data_file=\"$$(basename $<)\"\n\n    if [[ \"$$data_file\" == \"data.tar.bz2\" ]]; then\n      # TODO: support bz2\n      echo \"ERROR: unsupported compression: bz2\"\n      exit 1\n    elif [[ \"$$data_file\" == \"data.tar.gz\" ]]; then\n      mv $< $@\n    elif [[ \"$$data_file\" == \"data.tar\" ]]; then\n      $(ZSTD_BIN) --compress --format=gzip $< >$@\n    else\n      $(ZSTD_BIN) --force --decompress --stdout $< |\n      $(ZSTD_BIN) --compress --format=gzip - >$@\n    fi\n    \"\"\",\n    toolchains = [\"@zstd_toolchains//:resolved_toolchain\"],\n    visibility = [\"//visibility:public\"],\n)\n\nfilegroup(\n    name = \"control\",\n    srcs = glob([\"control.tar.*\"]),\n    visibility = [\"//visibility:public\"],\n)\n",
+              "urls": [
+                "https://deb.debian.org/debian/pool/main/b/base-files/base-files_12.4+deb12u8_amd64.deb"
+              ],
+              "sha256": "b961a69d1b79f093597d89a96f296ddca17d3bab9d166361c42f07a6beb4f685"
+            }
+          },
+          "neuron_bookworm_libtinfo6_6.4-4_amd64": {
+            "bzlFile": "@@bazel_tools//tools/build_defs/repo:http.bzl",
+            "ruleClassName": "http_archive",
+            "attributes": {
+              "build_file_content": "\ngenrule(\n    name = \"data\",\n    srcs = glob([\"data.tar*\"]),\n    outs = [\"layer.tar.gz\"],\n    cmd = \"\"\"\n    # Per the dpkg-dev man page:\n    # https://manpages.debian.org/bookworm/dpkg-dev/deb.5.en.html\n    #\n    # Debian data.tar files can be:\n    #  - .tar uncompressed, supported since dpkg 1.10.24\n    #  - .tar compressed with\n    #    *  gzip: .gz\n    #    * bzip2: .bz2, supported since dpkg 1.10.24\n    #    *  lzma: .lzma, supported since dpkg 1.13.25\n    #    *    xz: .xz, supported since dpkg 1.15.6\n    #    *  zstd: .zst, supported since dpkg 1.21.18\n    #\n    # ZSTD_BIN can decompress all formats except bzip2\n    #\n    # The OCI image spec supports .tar and .tar compressed with gzip or zstd.\n    # Bazel needs the output filename to be fixed in advanced so we settle for\n    # gzip compression.\n\n    data_file=\"$$(basename $<)\"\n\n    if [[ \"$$data_file\" == \"data.tar.bz2\" ]]; then\n      # TODO: support bz2\n      echo \"ERROR: unsupported compression: bz2\"\n      exit 1\n    elif [[ \"$$data_file\" == \"data.tar.gz\" ]]; then\n      mv $< $@\n    elif [[ \"$$data_file\" == \"data.tar\" ]]; then\n      $(ZSTD_BIN) --compress --format=gzip $< >$@\n    else\n      $(ZSTD_BIN) --force --decompress --stdout $< |\n      $(ZSTD_BIN) --compress --format=gzip - >$@\n    fi\n    \"\"\",\n    toolchains = [\"@zstd_toolchains//:resolved_toolchain\"],\n    visibility = [\"//visibility:public\"],\n)\n\nfilegroup(\n    name = \"control\",\n    srcs = glob([\"control.tar.*\"]),\n    visibility = [\"//visibility:public\"],\n)\n",
+              "urls": [
+                "https://deb.debian.org/debian/pool/main/n/ncurses/libtinfo6_6.4-4_amd64.deb"
+              ],
+              "sha256": "072d908f38f51090ca28ca5afa3b46b2957dc61fe35094c0b851426859a49a51"
+            }
+          },
+          "neuron_bookworm_zlib1g_1-1.2.13.dfsg-1_amd64": {
+            "bzlFile": "@@bazel_tools//tools/build_defs/repo:http.bzl",
+            "ruleClassName": "http_archive",
+            "attributes": {
+              "build_file_content": "\ngenrule(\n    name = \"data\",\n    srcs = glob([\"data.tar*\"]),\n    outs = [\"layer.tar.gz\"],\n    cmd = \"\"\"\n    # Per the dpkg-dev man page:\n    # https://manpages.debian.org/bookworm/dpkg-dev/deb.5.en.html\n    #\n    # Debian data.tar files can be:\n    #  - .tar uncompressed, supported since dpkg 1.10.24\n    #  - .tar compressed with\n    #    *  gzip: .gz\n    #    * bzip2: .bz2, supported since dpkg 1.10.24\n    #    *  lzma: .lzma, supported since dpkg 1.13.25\n    #    *    xz: .xz, supported since dpkg 1.15.6\n    #    *  zstd: .zst, supported since dpkg 1.21.18\n    #\n    # ZSTD_BIN can decompress all formats except bzip2\n    #\n    # The OCI image spec supports .tar and .tar compressed with gzip or zstd.\n    # Bazel needs the output filename to be fixed in advanced so we settle for\n    # gzip compression.\n\n    data_file=\"$$(basename $<)\"\n\n    if [[ \"$$data_file\" == \"data.tar.bz2\" ]]; then\n      # TODO: support bz2\n      echo \"ERROR: unsupported compression: bz2\"\n      exit 1\n    elif [[ \"$$data_file\" == \"data.tar.gz\" ]]; then\n      mv $< $@\n    elif [[ \"$$data_file\" == \"data.tar\" ]]; then\n      $(ZSTD_BIN) --compress --format=gzip $< >$@\n    else\n      $(ZSTD_BIN) --force --decompress --stdout $< |\n      $(ZSTD_BIN) --compress --format=gzip - >$@\n    fi\n    \"\"\",\n    toolchains = [\"@zstd_toolchains//:resolved_toolchain\"],\n    visibility = [\"//visibility:public\"],\n)\n\nfilegroup(\n    name = \"control\",\n    srcs = glob([\"control.tar.*\"]),\n    visibility = [\"//visibility:public\"],\n)\n",
+              "urls": [
+                "https://deb.debian.org/debian/pool/main/z/zlib/zlib1g_1.2.13.dfsg-1_amd64.deb"
+              ],
+              "sha256": "d7dd1d1411fedf27f5e27650a6eff20ef294077b568f4c8c5e51466dc7c08ce4"
+            }
+          },
+          "neuron_bookworm_libxml2_2.9.14-p-dfsg-1.3_deb12u1_amd64": {
+            "bzlFile": "@@bazel_tools//tools/build_defs/repo:http.bzl",
+            "ruleClassName": "http_archive",
+            "attributes": {
+              "build_file_content": "\ngenrule(\n    name = \"data\",\n    srcs = glob([\"data.tar*\"]),\n    outs = [\"layer.tar.gz\"],\n    cmd = \"\"\"\n    # Per the dpkg-dev man page:\n    # https://manpages.debian.org/bookworm/dpkg-dev/deb.5.en.html\n    #\n    # Debian data.tar files can be:\n    #  - .tar uncompressed, supported since dpkg 1.10.24\n    #  - .tar compressed with\n    #    *  gzip: .gz\n    #    * bzip2: .bz2, supported since dpkg 1.10.24\n    #    *  lzma: .lzma, supported since dpkg 1.13.25\n    #    *    xz: .xz, supported since dpkg 1.15.6\n    #    *  zstd: .zst, supported since dpkg 1.21.18\n    #\n    # ZSTD_BIN can decompress all formats except bzip2\n    #\n    # The OCI image spec supports .tar and .tar compressed with gzip or zstd.\n    # Bazel needs the output filename to be fixed in advanced so we settle for\n    # gzip compression.\n\n    data_file=\"$$(basename $<)\"\n\n    if [[ \"$$data_file\" == \"data.tar.bz2\" ]]; then\n      # TODO: support bz2\n      echo \"ERROR: unsupported compression: bz2\"\n      exit 1\n    elif [[ \"$$data_file\" == \"data.tar.gz\" ]]; then\n      mv $< $@\n    elif [[ \"$$data_file\" == \"data.tar\" ]]; then\n      $(ZSTD_BIN) --compress --format=gzip $< >$@\n    else\n      $(ZSTD_BIN) --force --decompress --stdout $< |\n      $(ZSTD_BIN) --compress --format=gzip - >$@\n    fi\n    \"\"\",\n    toolchains = [\"@zstd_toolchains//:resolved_toolchain\"],\n    visibility = [\"//visibility:public\"],\n)\n\nfilegroup(\n    name = \"control\",\n    srcs = glob([\"control.tar.*\"]),\n    visibility = [\"//visibility:public\"],\n)\n",
+              "urls": [
+                "https://deb.debian.org/debian/pool/main/libx/libxml2/libxml2_2.9.14+dfsg-1.3~deb12u1_amd64.deb"
+              ],
+              "sha256": "35b76cb7038fc1c940204a4f05f33ffb79d027353ce469397d9adcf8f9b3e1a7"
+            }
+          },
+          "neuron_bookworm_liblzma5_5.4.1-0.2_amd64": {
+            "bzlFile": "@@bazel_tools//tools/build_defs/repo:http.bzl",
+            "ruleClassName": "http_archive",
+            "attributes": {
+              "build_file_content": "\ngenrule(\n    name = \"data\",\n    srcs = glob([\"data.tar*\"]),\n    outs = [\"layer.tar.gz\"],\n    cmd = \"\"\"\n    # Per the dpkg-dev man page:\n    # https://manpages.debian.org/bookworm/dpkg-dev/deb.5.en.html\n    #\n    # Debian data.tar files can be:\n    #  - .tar uncompressed, supported since dpkg 1.10.24\n    #  - .tar compressed with\n    #    *  gzip: .gz\n    #    * bzip2: .bz2, supported since dpkg 1.10.24\n    #    *  lzma: .lzma, supported since dpkg 1.13.25\n    #    *    xz: .xz, supported since dpkg 1.15.6\n    #    *  zstd: .zst, supported since dpkg 1.21.18\n    #\n    # ZSTD_BIN can decompress all formats except bzip2\n    #\n    # The OCI image spec supports .tar and .tar compressed with gzip or zstd.\n    # Bazel needs the output filename to be fixed in advanced so we settle for\n    # gzip compression.\n\n    data_file=\"$$(basename $<)\"\n\n    if [[ \"$$data_file\" == \"data.tar.bz2\" ]]; then\n      # TODO: support bz2\n      echo \"ERROR: unsupported compression: bz2\"\n      exit 1\n    elif [[ \"$$data_file\" == \"data.tar.gz\" ]]; then\n      mv $< $@\n    elif [[ \"$$data_file\" == \"data.tar\" ]]; then\n      $(ZSTD_BIN) --compress --format=gzip $< >$@\n    else\n      $(ZSTD_BIN) --force --decompress --stdout $< |\n      $(ZSTD_BIN) --compress --format=gzip - >$@\n    fi\n    \"\"\",\n    toolchains = [\"@zstd_toolchains//:resolved_toolchain\"],\n    visibility = [\"//visibility:public\"],\n)\n\nfilegroup(\n    name = \"control\",\n    srcs = glob([\"control.tar.*\"]),\n    visibility = [\"//visibility:public\"],\n)\n",
+              "urls": [
+                "https://deb.debian.org/debian/pool/main/x/xz-utils/liblzma5_5.4.1-0.2_amd64.deb"
+              ],
+              "sha256": "d4b7736e58512a2b047f9cb91b71db5a3cf9d3451192fc6da044c77bf51fe869"
+            }
+          },
+          "neuron_bookworm_libicu72_72.1-3_amd64": {
+            "bzlFile": "@@bazel_tools//tools/build_defs/repo:http.bzl",
+            "ruleClassName": "http_archive",
+            "attributes": {
+              "build_file_content": "\ngenrule(\n    name = \"data\",\n    srcs = glob([\"data.tar*\"]),\n    outs = [\"layer.tar.gz\"],\n    cmd = \"\"\"\n    # Per the dpkg-dev man page:\n    # https://manpages.debian.org/bookworm/dpkg-dev/deb.5.en.html\n    #\n    # Debian data.tar files can be:\n    #  - .tar uncompressed, supported since dpkg 1.10.24\n    #  - .tar compressed with\n    #    *  gzip: .gz\n    #    * bzip2: .bz2, supported since dpkg 1.10.24\n    #    *  lzma: .lzma, supported since dpkg 1.13.25\n    #    *    xz: .xz, supported since dpkg 1.15.6\n    #    *  zstd: .zst, supported since dpkg 1.21.18\n    #\n    # ZSTD_BIN can decompress all formats except bzip2\n    #\n    # The OCI image spec supports .tar and .tar compressed with gzip or zstd.\n    # Bazel needs the output filename to be fixed in advanced so we settle for\n    # gzip compression.\n\n    data_file=\"$$(basename $<)\"\n\n    if [[ \"$$data_file\" == \"data.tar.bz2\" ]]; then\n      # TODO: support bz2\n      echo \"ERROR: unsupported compression: bz2\"\n      exit 1\n    elif [[ \"$$data_file\" == \"data.tar.gz\" ]]; then\n      mv $< $@\n    elif [[ \"$$data_file\" == \"data.tar\" ]]; then\n      $(ZSTD_BIN) --compress --format=gzip $< >$@\n    else\n      $(ZSTD_BIN) --force --decompress --stdout $< |\n      $(ZSTD_BIN) --compress --format=gzip - >$@\n    fi\n    \"\"\",\n    toolchains = [\"@zstd_toolchains//:resolved_toolchain\"],\n    visibility = [\"//visibility:public\"],\n)\n\nfilegroup(\n    name = \"control\",\n    srcs = glob([\"control.tar.*\"]),\n    visibility = [\"//visibility:public\"],\n)\n",
+              "urls": [
+                "https://deb.debian.org/debian/pool/main/i/icu/libicu72_72.1-3_amd64.deb"
+              ],
+              "sha256": "e239c1c9f52bee0ff627f291552d63691b765ec7c5cdf6de7c7ae4dec0275857"
+            }
+          },
+          "neuron_bookworm_libstdc-p--p-6_12.2.0-14_amd64": {
+            "bzlFile": "@@bazel_tools//tools/build_defs/repo:http.bzl",
+            "ruleClassName": "http_archive",
+            "attributes": {
+              "build_file_content": "\ngenrule(\n    name = \"data\",\n    srcs = glob([\"data.tar*\"]),\n    outs = [\"layer.tar.gz\"],\n    cmd = \"\"\"\n    # Per the dpkg-dev man page:\n    # https://manpages.debian.org/bookworm/dpkg-dev/deb.5.en.html\n    #\n    # Debian data.tar files can be:\n    #  - .tar uncompressed, supported since dpkg 1.10.24\n    #  - .tar compressed with\n    #    *  gzip: .gz\n    #    * bzip2: .bz2, supported since dpkg 1.10.24\n    #    *  lzma: .lzma, supported since dpkg 1.13.25\n    #    *    xz: .xz, supported since dpkg 1.15.6\n    #    *  zstd: .zst, supported since dpkg 1.21.18\n    #\n    # ZSTD_BIN can decompress all formats except bzip2\n    #\n    # The OCI image spec supports .tar and .tar compressed with gzip or zstd.\n    # Bazel needs the output filename to be fixed in advanced so we settle for\n    # gzip compression.\n\n    data_file=\"$$(basename $<)\"\n\n    if [[ \"$$data_file\" == \"data.tar.bz2\" ]]; then\n      # TODO: support bz2\n      echo \"ERROR: unsupported compression: bz2\"\n      exit 1\n    elif [[ \"$$data_file\" == \"data.tar.gz\" ]]; then\n      mv $< $@\n    elif [[ \"$$data_file\" == \"data.tar\" ]]; then\n      $(ZSTD_BIN) --compress --format=gzip $< >$@\n    else\n      $(ZSTD_BIN) --force --decompress --stdout $< |\n      $(ZSTD_BIN) --compress --format=gzip - >$@\n    fi\n    \"\"\",\n    toolchains = [\"@zstd_toolchains//:resolved_toolchain\"],\n    visibility = [\"//visibility:public\"],\n)\n\nfilegroup(\n    name = \"control\",\n    srcs = glob([\"control.tar.*\"]),\n    visibility = [\"//visibility:public\"],\n)\n",
+              "urls": [
+                "https://deb.debian.org/debian/pool/main/g/gcc-12/libstdc++6_12.2.0-14_amd64.deb"
+              ],
+              "sha256": "9b1b269020cec6aced3b39f096f7b67edd1f0d4ab24f412cb6506d0800e19cbf"
+            }
+          },
+          "neuron_bookworm_aws-neuronx-runtime-lib_2.22.19.0-5856c0b42_amd64": {
+            "bzlFile": "@@bazel_tools//tools/build_defs/repo:http.bzl",
+            "ruleClassName": "http_archive",
+            "attributes": {
+              "build_file_content": "\ngenrule(\n    name = \"data\",\n    srcs = glob([\"data.tar*\"]),\n    outs = [\"layer.tar.gz\"],\n    cmd = \"\"\"\n    # Per the dpkg-dev man page:\n    # https://manpages.debian.org/bookworm/dpkg-dev/deb.5.en.html\n    #\n    # Debian data.tar files can be:\n    #  - .tar uncompressed, supported since dpkg 1.10.24\n    #  - .tar compressed with\n    #    *  gzip: .gz\n    #    * bzip2: .bz2, supported since dpkg 1.10.24\n    #    *  lzma: .lzma, supported since dpkg 1.13.25\n    #    *    xz: .xz, supported since dpkg 1.15.6\n    #    *  zstd: .zst, supported since dpkg 1.21.18\n    #\n    # ZSTD_BIN can decompress all formats except bzip2\n    #\n    # The OCI image spec supports .tar and .tar compressed with gzip or zstd.\n    # Bazel needs the output filename to be fixed in advanced so we settle for\n    # gzip compression.\n\n    data_file=\"$$(basename $<)\"\n\n    if [[ \"$$data_file\" == \"data.tar.bz2\" ]]; then\n      # TODO: support bz2\n      echo \"ERROR: unsupported compression: bz2\"\n      exit 1\n    elif [[ \"$$data_file\" == \"data.tar.gz\" ]]; then\n      mv $< $@\n    elif [[ \"$$data_file\" == \"data.tar\" ]]; then\n      $(ZSTD_BIN) --compress --format=gzip $< >$@\n    else\n      $(ZSTD_BIN) --force --decompress --stdout $< |\n      $(ZSTD_BIN) --compress --format=gzip - >$@\n    fi\n    \"\"\",\n    toolchains = [\"@zstd_toolchains//:resolved_toolchain\"],\n    visibility = [\"//visibility:public\"],\n)\n\nfilegroup(\n    name = \"control\",\n    srcs = glob([\"control.tar.*\"]),\n    visibility = [\"//visibility:public\"],\n)\n",
+              "urls": [
+                "https://apt.repos.neuron.amazonaws.com/pool/main/a/aws-neuronx-runtime-lib/aws-neuronx-runtime-lib_2.22.19.0-5856c0b42_amd64.deb"
+              ],
+              "sha256": "f952dad4f615f2881a0bf93ba5132d308fdfa697a78a09e2e1653a6c4704222d"
+            }
+          },
+          "neuron_bookworm_aws-neuronx-collectives_2.22.33.0-d2128d1aa_amd64": {
+            "bzlFile": "@@bazel_tools//tools/build_defs/repo:http.bzl",
+            "ruleClassName": "http_archive",
+            "attributes": {
+              "build_file_content": "\ngenrule(\n    name = \"data\",\n    srcs = glob([\"data.tar*\"]),\n    outs = [\"layer.tar.gz\"],\n    cmd = \"\"\"\n    # Per the dpkg-dev man page:\n    # https://manpages.debian.org/bookworm/dpkg-dev/deb.5.en.html\n    #\n    # Debian data.tar files can be:\n    #  - .tar uncompressed, supported since dpkg 1.10.24\n    #  - .tar compressed with\n    #    *  gzip: .gz\n    #    * bzip2: .bz2, supported since dpkg 1.10.24\n    #    *  lzma: .lzma, supported since dpkg 1.13.25\n    #    *    xz: .xz, supported since dpkg 1.15.6\n    #    *  zstd: .zst, supported since dpkg 1.21.18\n    #\n    # ZSTD_BIN can decompress all formats except bzip2\n    #\n    # The OCI image spec supports .tar and .tar compressed with gzip or zstd.\n    # Bazel needs the output filename to be fixed in advanced so we settle for\n    # gzip compression.\n\n    data_file=\"$$(basename $<)\"\n\n    if [[ \"$$data_file\" == \"data.tar.bz2\" ]]; then\n      # TODO: support bz2\n      echo \"ERROR: unsupported compression: bz2\"\n      exit 1\n    elif [[ \"$$data_file\" == \"data.tar.gz\" ]]; then\n      mv $< $@\n    elif [[ \"$$data_file\" == \"data.tar\" ]]; then\n      $(ZSTD_BIN) --compress --format=gzip $< >$@\n    else\n      $(ZSTD_BIN) --force --decompress --stdout $< |\n      $(ZSTD_BIN) --compress --format=gzip - >$@\n    fi\n    \"\"\",\n    toolchains = [\"@zstd_toolchains//:resolved_toolchain\"],\n    visibility = [\"//visibility:public\"],\n)\n\nfilegroup(\n    name = \"control\",\n    srcs = glob([\"control.tar.*\"]),\n    visibility = [\"//visibility:public\"],\n)\n",
+              "urls": [
+                "https://apt.repos.neuron.amazonaws.com/pool/main/a/aws-neuronx-collectives/aws-neuronx-collectives_2.22.33.0-d2128d1aa_amd64.deb"
+              ],
+              "sha256": "1eadead90a7daf6056a10a09d0ac3b72a3e885e6fedacd14b53a11a30d9774b3"
+            }
+          },
+          "neuron_bookworm_resolve": {
+            "bzlFile": "@@rules_distroless~//apt/private:resolve.bzl",
+            "ruleClassName": "deb_resolve",
+            "attributes": {
+              "manifest": "@@//runtimes/neuron:packages.yaml",
+              "resolve_transitive": true
+            }
+          },
+          "neuron_bookworm": {
+            "bzlFile": "@@rules_distroless~//apt/private:index.bzl",
+            "ruleClassName": "deb_package_index",
+            "attributes": {
+              "lock": "@@//runtimes/neuron:packages.lock.json",
+              "lock_content": "{\n\t\"packages\": [\n\t\t{\n\t\t\t\"arch\": \"amd64\",\n\t\t\t\"dependencies\": [\n\t\t\t\t{\n\t\t\t\t\t\"key\": \"debianutils_5.7-0.5_deb12u1_amd64\",\n\t\t\t\t\t\"name\": \"debianutils\",\n\t\t\t\t\t\"version\": \"5.7-0.5~deb12u1\"\n\t\t\t\t},\n\t\t\t\t{\n\t\t\t\t\t\"key\": \"libc6_2.36-9-p-deb12u9_amd64\",\n\t\t\t\t\t\"name\": \"libc6\",\n\t\t\t\t\t\"version\": \"2.36-9+deb12u9\"\n\t\t\t\t},\n\t\t\t\t{\n\t\t\t\t\t\"key\": \"libgcc-s1_12.2.0-14_amd64\",\n\t\t\t\t\t\"name\": \"libgcc-s1\",\n\t\t\t\t\t\"version\": \"12.2.0-14\"\n\t\t\t\t},\n\t\t\t\t{\n\t\t\t\t\t\"key\": \"gcc-12-base_12.2.0-14_amd64\",\n\t\t\t\t\t\"name\": \"gcc-12-base\",\n\t\t\t\t\t\"version\": \"12.2.0-14\"\n\t\t\t\t},\n\t\t\t\t{\n\t\t\t\t\t\"key\": \"base-files_12.4-p-deb12u8_amd64\",\n\t\t\t\t\t\"name\": \"base-files\",\n\t\t\t\t\t\"version\": \"12.4+deb12u8\"\n\t\t\t\t},\n\t\t\t\t{\n\t\t\t\t\t\"key\": \"libtinfo6_6.4-4_amd64\",\n\t\t\t\t\t\"name\": \"libtinfo6\",\n\t\t\t\t\t\"version\": \"6.4-4\"\n\t\t\t\t}\n\t\t\t],\n\t\t\t\"key\": \"bash_5.2.15-2-p-b7_amd64\",\n\t\t\t\"name\": \"bash\",\n\t\t\t\"sha256\": \"d3c65202568384a588ea32017b243fe64ca054943a008cba4e5bd8f9e79975c4\",\n\t\t\t\"url\": \"https://deb.debian.org/debian/pool/main/b/bash/bash_5.2.15-2+b7_amd64.deb\",\n\t\t\t\"version\": \"5.2.15-2+b7\"\n\t\t},\n\t\t{\n\t\t\t\"arch\": \"amd64\",\n\t\t\t\"dependencies\": [],\n\t\t\t\"key\": \"debianutils_5.7-0.5_deb12u1_amd64\",\n\t\t\t\"name\": \"debianutils\",\n\t\t\t\"sha256\": \"55f951359670eb3236c9e2ccd5fac9ccb3db734f5a22aff21589e7a30aee48c9\",\n\t\t\t\"url\": \"https://deb.debian.org/debian/pool/main/d/debianutils/debianutils_5.7-0.5~deb12u1_amd64.deb\",\n\t\t\t\"version\": \"5.7-0.5~deb12u1\"\n\t\t},\n\t\t{\n\t\t\t\"arch\": \"amd64\",\n\t\t\t\"dependencies\": [],\n\t\t\t\"key\": \"libc6_2.36-9-p-deb12u9_amd64\",\n\t\t\t\"name\": \"libc6\",\n\t\t\t\"sha256\": \"3a043b9dbf1a8c8b5a9e2268253e6dca8c7d431bd7a202fea96364abf374fea9\",\n\t\t\t\"url\": \"https://deb.debian.org/debian/pool/main/g/glibc/libc6_2.36-9+deb12u9_amd64.deb\",\n\t\t\t\"version\": \"2.36-9+deb12u9\"\n\t\t},\n\t\t{\n\t\t\t\"arch\": \"amd64\",\n\t\t\t\"dependencies\": [],\n\t\t\t\"key\": \"libgcc-s1_12.2.0-14_amd64\",\n\t\t\t\"name\": \"libgcc-s1\",\n\t\t\t\"sha256\": \"f3d1d48c0599aea85b7f2077a01d285badc42998c1a1e7473935d5cf995c8141\",\n\t\t\t\"url\": \"https://deb.debian.org/debian/pool/main/g/gcc-12/libgcc-s1_12.2.0-14_amd64.deb\",\n\t\t\t\"version\": \"12.2.0-14\"\n\t\t},\n\t\t{\n\t\t\t\"arch\": \"amd64\",\n\t\t\t\"dependencies\": [],\n\t\t\t\"key\": \"gcc-12-base_12.2.0-14_amd64\",\n\t\t\t\"name\": \"gcc-12-base\",\n\t\t\t\"sha256\": \"1a03df5a57833d65b5bb08cfa19d50e76f29088dc9e64fb934af42d9023a0807\",\n\t\t\t\"url\": \"https://deb.debian.org/debian/pool/main/g/gcc-12/gcc-12-base_12.2.0-14_amd64.deb\",\n\t\t\t\"version\": \"12.2.0-14\"\n\t\t},\n\t\t{\n\t\t\t\"arch\": \"amd64\",\n\t\t\t\"dependencies\": [],\n\t\t\t\"key\": \"base-files_12.4-p-deb12u8_amd64\",\n\t\t\t\"name\": \"base-files\",\n\t\t\t\"sha256\": \"b961a69d1b79f093597d89a96f296ddca17d3bab9d166361c42f07a6beb4f685\",\n\t\t\t\"url\": \"https://deb.debian.org/debian/pool/main/b/base-files/base-files_12.4+deb12u8_amd64.deb\",\n\t\t\t\"version\": \"12.4+deb12u8\"\n\t\t},\n\t\t{\n\t\t\t\"arch\": \"amd64\",\n\t\t\t\"dependencies\": [],\n\t\t\t\"key\": \"libtinfo6_6.4-4_amd64\",\n\t\t\t\"name\": \"libtinfo6\",\n\t\t\t\"sha256\": \"072d908f38f51090ca28ca5afa3b46b2957dc61fe35094c0b851426859a49a51\",\n\t\t\t\"url\": \"https://deb.debian.org/debian/pool/main/n/ncurses/libtinfo6_6.4-4_amd64.deb\",\n\t\t\t\"version\": \"6.4-4\"\n\t\t},\n\t\t{\n\t\t\t\"arch\": \"amd64\",\n\t\t\t\"dependencies\": [\n\t\t\t\t{\n\t\t\t\t\t\"key\": \"libc6_2.36-9-p-deb12u9_amd64\",\n\t\t\t\t\t\"name\": \"libc6\",\n\t\t\t\t\t\"version\": \"2.36-9+deb12u9\"\n\t\t\t\t},\n\t\t\t\t{\n\t\t\t\t\t\"key\": \"libgcc-s1_12.2.0-14_amd64\",\n\t\t\t\t\t\"name\": \"libgcc-s1\",\n\t\t\t\t\t\"version\": \"12.2.0-14\"\n\t\t\t\t},\n\t\t\t\t{\n\t\t\t\t\t\"key\": \"gcc-12-base_12.2.0-14_amd64\",\n\t\t\t\t\t\"name\": \"gcc-12-base\",\n\t\t\t\t\t\"version\": \"12.2.0-14\"\n\t\t\t\t}\n\t\t\t],\n\t\t\t\"key\": \"zlib1g_1-1.2.13.dfsg-1_amd64\",\n\t\t\t\"name\": \"zlib1g\",\n\t\t\t\"sha256\": \"d7dd1d1411fedf27f5e27650a6eff20ef294077b568f4c8c5e51466dc7c08ce4\",\n\t\t\t\"url\": \"https://deb.debian.org/debian/pool/main/z/zlib/zlib1g_1.2.13.dfsg-1_amd64.deb\",\n\t\t\t\"version\": \"1:1.2.13.dfsg-1\"\n\t\t},\n\t\t{\n\t\t\t\"arch\": \"amd64\",\n\t\t\t\"dependencies\": [\n\t\t\t\t{\n\t\t\t\t\t\"key\": \"zlib1g_1-1.2.13.dfsg-1_amd64\",\n\t\t\t\t\t\"name\": \"zlib1g\",\n\t\t\t\t\t\"version\": \"1:1.2.13.dfsg-1\"\n\t\t\t\t},\n\t\t\t\t{\n\t\t\t\t\t\"key\": \"libc6_2.36-9-p-deb12u9_amd64\",\n\t\t\t\t\t\"name\": \"libc6\",\n\t\t\t\t\t\"version\": \"2.36-9+deb12u9\"\n\t\t\t\t},\n\t\t\t\t{\n\t\t\t\t\t\"key\": \"libgcc-s1_12.2.0-14_amd64\",\n\t\t\t\t\t\"name\": \"libgcc-s1\",\n\t\t\t\t\t\"version\": \"12.2.0-14\"\n\t\t\t\t},\n\t\t\t\t{\n\t\t\t\t\t\"key\": \"gcc-12-base_12.2.0-14_amd64\",\n\t\t\t\t\t\"name\": \"gcc-12-base\",\n\t\t\t\t\t\"version\": \"12.2.0-14\"\n\t\t\t\t},\n\t\t\t\t{\n\t\t\t\t\t\"key\": \"liblzma5_5.4.1-0.2_amd64\",\n\t\t\t\t\t\"name\": \"liblzma5\",\n\t\t\t\t\t\"version\": \"5.4.1-0.2\"\n\t\t\t\t},\n\t\t\t\t{\n\t\t\t\t\t\"key\": \"libicu72_72.1-3_amd64\",\n\t\t\t\t\t\"name\": \"libicu72\",\n\t\t\t\t\t\"version\": \"72.1-3\"\n\t\t\t\t},\n\t\t\t\t{\n\t\t\t\t\t\"key\": \"libstdc-p--p-6_12.2.0-14_amd64\",\n\t\t\t\t\t\"name\": \"libstdc++6\",\n\t\t\t\t\t\"version\": \"12.2.0-14\"\n\t\t\t\t}\n\t\t\t],\n\t\t\t\"key\": \"libxml2_2.9.14-p-dfsg-1.3_deb12u1_amd64\",\n\t\t\t\"name\": \"libxml2\",\n\t\t\t\"sha256\": \"35b76cb7038fc1c940204a4f05f33ffb79d027353ce469397d9adcf8f9b3e1a7\",\n\t\t\t\"url\": \"https://deb.debian.org/debian/pool/main/libx/libxml2/libxml2_2.9.14+dfsg-1.3~deb12u1_amd64.deb\",\n\t\t\t\"version\": \"2.9.14+dfsg-1.3~deb12u1\"\n\t\t},\n\t\t{\n\t\t\t\"arch\": \"amd64\",\n\t\t\t\"dependencies\": [],\n\t\t\t\"key\": \"liblzma5_5.4.1-0.2_amd64\",\n\t\t\t\"name\": \"liblzma5\",\n\t\t\t\"sha256\": \"d4b7736e58512a2b047f9cb91b71db5a3cf9d3451192fc6da044c77bf51fe869\",\n\t\t\t\"url\": \"https://deb.debian.org/debian/pool/main/x/xz-utils/liblzma5_5.4.1-0.2_amd64.deb\",\n\t\t\t\"version\": \"5.4.1-0.2\"\n\t\t},\n\t\t{\n\t\t\t\"arch\": \"amd64\",\n\t\t\t\"dependencies\": [],\n\t\t\t\"key\": \"libicu72_72.1-3_amd64\",\n\t\t\t\"name\": \"libicu72\",\n\t\t\t\"sha256\": \"e239c1c9f52bee0ff627f291552d63691b765ec7c5cdf6de7c7ae4dec0275857\",\n\t\t\t\"url\": \"https://deb.debian.org/debian/pool/main/i/icu/libicu72_72.1-3_amd64.deb\",\n\t\t\t\"version\": \"72.1-3\"\n\t\t},\n\t\t{\n\t\t\t\"arch\": \"amd64\",\n\t\t\t\"dependencies\": [],\n\t\t\t\"key\": \"libstdc-p--p-6_12.2.0-14_amd64\",\n\t\t\t\"name\": \"libstdc++6\",\n\t\t\t\"sha256\": \"9b1b269020cec6aced3b39f096f7b67edd1f0d4ab24f412cb6506d0800e19cbf\",\n\t\t\t\"url\": \"https://deb.debian.org/debian/pool/main/g/gcc-12/libstdc++6_12.2.0-14_amd64.deb\",\n\t\t\t\"version\": \"12.2.0-14\"\n\t\t},\n\t\t{\n\t\t\t\"arch\": \"amd64\",\n\t\t\t\"dependencies\": [],\n\t\t\t\"key\": \"aws-neuronx-runtime-lib_2.22.19.0-5856c0b42_amd64\",\n\t\t\t\"name\": \"aws-neuronx-runtime-lib\",\n\t\t\t\"sha256\": \"f952dad4f615f2881a0bf93ba5132d308fdfa697a78a09e2e1653a6c4704222d\",\n\t\t\t\"url\": \"https://apt.repos.neuron.amazonaws.com/pool/main/a/aws-neuronx-runtime-lib/aws-neuronx-runtime-lib_2.22.19.0-5856c0b42_amd64.deb\",\n\t\t\t\"version\": \"2.22.19.0-5856c0b42\"\n\t\t},\n\t\t{\n\t\t\t\"arch\": \"amd64\",\n\t\t\t\"dependencies\": [],\n\t\t\t\"key\": \"aws-neuronx-collectives_2.22.33.0-d2128d1aa_amd64\",\n\t\t\t\"name\": \"aws-neuronx-collectives\",\n\t\t\t\"sha256\": \"1eadead90a7daf6056a10a09d0ac3b72a3e885e6fedacd14b53a11a30d9774b3\",\n\t\t\t\"url\": \"https://apt.repos.neuron.amazonaws.com/pool/main/a/aws-neuronx-collectives/aws-neuronx-collectives_2.22.33.0-d2128d1aa_amd64.deb\",\n\t\t\t\"version\": \"2.22.33.0-d2128d1aa\"\n\t\t}\n\t],\n\t\"version\": 1\n}",
+              "package_template": "@@rules_distroless~//apt/private:package.BUILD.tmpl"
+            }
+          }
+        },
+        "moduleExtensionMetadata": {
+          "explicitRootModuleDirectDeps": [
+            "neuron_bookworm"
+          ],
+          "explicitRootModuleDirectDevDeps": [],
+          "useAllRepos": "NO",
+          "reproducible": false
+        },
+        "recordedRepoMappingEntries": [
+          [
+            "rules_distroless~",
+            "aspect_bazel_lib",
+            "aspect_bazel_lib~"
+          ],
+          [
+            "rules_distroless~",
+            "bazel_tools",
+            "bazel_tools"
+          ]
+        ]
       }
     },
     "@@rules_kotlin~//src/main/starlark/core/repositories:bzlmod_setup.bzl%rules_kotlin_extensions": {
@@ -5084,6 +5301,7 @@
           ],
           [
             "rules_python~",
+            "rules_rust~",
             "bazel_tools",
             "bazel_tools"
           ],
