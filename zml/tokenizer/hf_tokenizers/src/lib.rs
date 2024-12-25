@@ -32,17 +32,23 @@ extern "C" fn hf_tokenizers_encode(
     string: ZigSlice<u8>,
 ) -> ZigSlice<u32> {
     let input_str = std::str::from_utf8(string.as_slice()).unwrap();
-    let encoded = unsafe { (*t).encode_fast(input_str, false) }.unwrap();
-    let len = encoded.get_ids().len();
-    return ZigSlice {
-        ptr: Box::into_raw(encoded.get_ids().to_vec().into_boxed_slice()),
+    let encoded = unsafe { t.as_ref() }
+        .unwrap()
+        .encode_fast(input_str, false)
+        .unwrap();
+    let mut ids = encoded.get_ids().to_owned().into_boxed_slice();
+    let len = ids.len();
+    let ret = ZigSlice {
+        ptr: ids.as_mut_ptr(),
         len: len,
     };
+    std::mem::forget(ids);
+    return ret;
 }
 
 #[no_mangle]
 extern "C" fn hf_tokenizers_tokens_drop(tokens: ZigSlice<u32>) {
-    // drop(unsafe { Box::from_raw(tokens.ptr) });
+    drop(unsafe { Box::from_raw(tokens.ptr) });
 }
 
 #[no_mangle]
@@ -50,15 +56,21 @@ extern "C" fn hf_tokenizers_decode(
     t: *mut tokenizers::Tokenizer,
     ids: ZigSlice<u32>,
 ) -> ZigSlice<u8> {
-    let decoded = unsafe { (*t).decode(ids.as_slice(), false).unwrap() };
+    let decoded = unsafe { t.as_ref() }
+        .unwrap()
+        .decode(ids.as_slice(), false)
+        .unwrap();
     let len = decoded.len();
-    return ZigSlice {
-        ptr: decoded.into_boxed_str().as_mut_ptr(),
-        len: len,
+    let mut dstr = decoded.into_boxed_str();
+    let ret = ZigSlice {
+        ptr: dstr.as_mut_ptr(),
+        len: dstr.len(),
     };
+    std::mem::forget(dstr);
+    return ret;
 }
 
 #[no_mangle]
 extern "C" fn hf_tokenizers_str_drop(tokens: ZigSlice<u8>) {
-    // drop(unsafe { Box::from_raw(tokens.ptr) });
+    drop(unsafe { Box::from_raw(tokens.ptr) });
 }

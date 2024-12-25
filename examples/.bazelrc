@@ -64,6 +64,7 @@ build           --experimental_starlark_cc_import
 
 build           --compiler=clang
 
+build:macos     --action_env=MACOSX_DEPLOYMENT_TARGET=13.0
 build:macos     --macos_sdk_version=13.0
 
 # Used by the tsl overlay in python_init_repositories for the bazelified xla module 20241025.0-4663f04 and later

@@ -4,4 +4,4 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tokenizers = "0.21.0"
+tokenizers = { version = "0.21.0", default-features = false, features = ["onig"] }
