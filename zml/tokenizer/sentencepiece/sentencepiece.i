@@ -8,23 +8,19 @@
 #include <string>
 #include <vector>
 #include <sentencepiece_processor.h>
-#include "zml/tokenizer/sentencepiece/zig.h"
+#include "ffi/zig_slice.h"
 %}
 
-%extend std::vector {
-    T* data() {
-        return $self->data();
-    };
-}
-
-%template(std_vector_int) std::vector<int>;
+%insert("cheader") %{
+#include "ffi/zig_slice.h"
+%}
 
 %typemap(in) absl::string_view {
-    $1 = absl::string_view($input.ptr, $input.len);
+    $1 = absl::string_view((char *)$input.ptr, $input.len);
 }
 
 %typemap(out, optimal="1") const std::string& %{
-    $result.ptr = (char *)($1->data());
+    $result.ptr = (void *)($1->data());
     $result.len = (size_t)($1->length());
 %}
 %typemap(ctype) absl::string_view, const std::string& "zig_slice"
@@ -44,6 +40,14 @@ namespace std {
         return *$self;
     };
 }
+
+%extend std::vector {
+    T* data() {
+        return $self->data();
+    };
+}
+
+%template(std_vector_int) std::vector<int>;
 
 %typemap(out) sentencepiece::util::Status %{
     $result = $1.code();
