@@ -11,7 +11,7 @@ impl<T> ZigSlice<T> {
 }
 
 #[no_mangle]
-extern "C" fn hf_tokenizers_new(path: ZigSlice<u8>) -> *mut tokenizers::Tokenizer {
+extern "C" fn hftokenizers_new(path: ZigSlice<u8>) -> *mut tokenizers::Tokenizer {
     return Box::into_raw(Box::new(
         tokenizers::Tokenizer::from_file(std::path::Path::new(
             std::str::from_utf8(path.as_slice()).unwrap(),
@@ -22,12 +22,12 @@ extern "C" fn hf_tokenizers_new(path: ZigSlice<u8>) -> *mut tokenizers::Tokenize
 }
 
 #[no_mangle]
-extern "C" fn hf_tokenizers_drop(t: *mut tokenizers::Tokenizer) {
+extern "C" fn hftokenizers_drop(t: *mut tokenizers::Tokenizer) {
     drop(unsafe { Box::from_raw(t) });
 }
 
 #[no_mangle]
-extern "C" fn hf_tokenizers_encode(
+extern "C" fn hftokenizers_encode(
     t: *mut tokenizers::Tokenizer,
     string: ZigSlice<u8>,
 ) -> ZigSlice<u32> {
@@ -36,23 +36,20 @@ extern "C" fn hf_tokenizers_encode(
         .unwrap()
         .encode_fast(input_str, false)
         .unwrap();
-    let mut ids = encoded.get_ids().to_owned().into_boxed_slice();
-    let len = ids.len();
-    let ret = ZigSlice {
-        ptr: ids.as_mut_ptr(),
-        len: len,
+    let ids = encoded.get_ids();
+    return ZigSlice {
+        len: ids.len(),
+        ptr: Box::into_raw(ids.to_owned().into_boxed_slice()) as *mut u32,
     };
-    std::mem::forget(ids);
-    return ret;
 }
 
 #[no_mangle]
-extern "C" fn hf_tokenizers_tokens_drop(tokens: ZigSlice<u32>) {
+extern "C" fn hftokenizers_tokens_drop(tokens: ZigSlice<u32>) {
     drop(unsafe { Box::from_raw(tokens.ptr) });
 }
 
 #[no_mangle]
-extern "C" fn hf_tokenizers_decode(
+extern "C" fn hftokenizers_decode(
     t: *mut tokenizers::Tokenizer,
     ids: ZigSlice<u32>,
 ) -> ZigSlice<u8> {
@@ -60,17 +57,13 @@ extern "C" fn hf_tokenizers_decode(
         .unwrap()
         .decode(ids.as_slice(), false)
         .unwrap();
-    let len = decoded.len();
-    let mut dstr = decoded.into_boxed_str();
-    let ret = ZigSlice {
-        ptr: dstr.as_mut_ptr(),
-        len: dstr.len(),
+    return ZigSlice {
+        len: decoded.len(),
+        ptr: Box::into_raw(decoded.into_boxed_str()) as *mut u8,
     };
-    std::mem::forget(dstr);
-    return ret;
 }
 
 #[no_mangle]
-extern "C" fn hf_tokenizers_str_drop(tokens: ZigSlice<u8>) {
+extern "C" fn hftokenizers_str_drop(tokens: ZigSlice<u8>) {
     drop(unsafe { Box::from_raw(tokens.ptr) });
 }

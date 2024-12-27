@@ -165,13 +165,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hf_tokenizers"
-version = "0.1.0"
-dependencies = [
- "tokenizers",
-]
-
-[[package]]
 name = "ident_case"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -617,4 +610,11 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "zml_tokenizer_hftokenizers"
+version = "0.1.0"
+dependencies = [
+ "tokenizers",
 ]

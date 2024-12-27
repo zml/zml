@@ -1,5 +1,6 @@
 const std = @import("std");
 const c = @import("c");
+const ffi = @import("ffi");
 
 pub const SentencePieceError = error{
     Cancelled,
@@ -36,7 +37,7 @@ pub const DecoderStream = struct {
         return ret;
     }
 
-    pub fn next(self: *DecoderStream, next_token: i32) !?[]const u8 {
+    pub fn next(self: *DecoderStream, next_token: u32) !?[]const u8 {
         if (self.decoder.tokens().len >= TokensSize) {
             const tokens = self.decoder.tokens();
             inline for (0..TokensSize - 1) |i| {
@@ -54,7 +55,7 @@ pub const DecoderStream = struct {
         }
         for (1..self.last_tokens.len) |i| {
             if (std.mem.startsWith(u8, new_tokens, self.last_tokens[i..])) {
-                const toks = new_tokens[self.last_tokens.len - i..];
+                const toks = new_tokens[self.last_tokens.len - i ..];
                 self.last_tokens = self.buffer[0..new_tokens.len];
                 @memcpy(self.last_tokens, new_tokens);
                 return toks;
@@ -88,10 +89,12 @@ pub const SentencePieceProcessor = opaque {
             c.std_vector_int_clear(self.vec);
         }
 
-        pub fn encode(self: *Encoder, input: []const u8) ![]const i32 {
-            const str = c.zig_slice{ .ptr = input.ptr, .len = @intCast(input.len), };
-            try assertOk(c.SentencePieceProcessor_Encode(@ptrCast(self.inner), str, self.vec));
-            return c.std_vector_int_data(self.vec)[0..c.std_vector_int_size(self.vec)];
+        pub fn encode(self: *Encoder, input: []const u8) ![]const u32 {
+            try assertOk(c.SentencePieceProcessor_Encode(@ptrCast(self.inner), ffi.ZigSlice.from(input), self.vec));
+            return ffi.ZigSlice.to(u32, .{
+                .ptr = c.std_vector_int_data(self.vec),
+                .len = c.std_vector_int_size(self.vec),
+            });
         }
     };
 
@@ -108,8 +111,8 @@ pub const SentencePieceProcessor = opaque {
             };
         }
 
-        pub fn append(self: *Decoder, token: i32) void {
-            c.std_vector_int_push_back(self.vec, token);
+        pub fn append(self: *Decoder, token: u32) void {
+            c.std_vector_int_push_back(self.vec, @intCast(token));
         }
 
         pub fn deinit(self: *Decoder) void {
@@ -137,11 +140,11 @@ pub const SentencePieceProcessor = opaque {
 
         pub fn string(self: *const Decoder) []const u8 {
             const res = c.std_string_data(self.str);
-            return res.ptr[0..res.len];
+            return ffi.ZigSlice.to(u8, res);
         }
 
-        pub fn tokens(self: *const Decoder) []i32 {
-            const ptr: [*c]i32 = @ptrCast(c.std_vector_int_data(self.vec));
+        pub fn tokens(self: *const Decoder) []u32 {
+            const ptr: [*c]u32 = @ptrCast(c.std_vector_int_data(self.vec));
             return ptr[0..c.std_vector_int_size(self.vec)];
         }
     };
@@ -169,7 +172,6 @@ pub const SentencePieceProcessor = opaque {
         };
     }
 
-
     pub fn load(model: []const u8) !*SentencePieceProcessor {
         const sp: *SentencePieceProcessor = @ptrCast(c.SentencePieceProcessor_new());
         errdefer sp.deinit();
@@ -182,7 +184,7 @@ pub const SentencePieceProcessor = opaque {
     }
 
     fn load_from(self: *SentencePieceProcessor, model: []const u8) !void {
-        try assertOk(c.SentencePieceProcessor_Load(@ptrCast(self), c.zig_slice{ .ptr = @constCast(model.ptr), .len = @intCast(model.len) }));
+        try assertOk(c.SentencePieceProcessor_Load(@ptrCast(self), ffi.ZigSlice.from(model)));
     }
 
     pub fn encoder(self: *SentencePieceProcessor) Encoder {
@@ -241,16 +243,16 @@ pub fn main() !void {
     for (tokens) |token| {
         if (try stream.next(token)) |chunk| {
             // std.debug.print("{s}", .{chunk});
-            std.debug.print("{d}us - {s}\n", .{start.lap() / std.time.ns_per_us, chunk});
+            std.debug.print("{d}us - {s}\n", .{ start.lap() / std.time.ns_per_us, chunk });
         }
     }
 
     // var start = try std.time.Timer.start();
-    // var it = std.mem.window(i32, tokens, 3, 1);
+    // var it = std.mem.window(u32, tokens, 3, 1);
     // while (it.next()) |slice| {
     //     if (decoder.tokens().len >= 4) {
     //         const kept_tokens = decoder.tokens()[1..];
-    //         std.mem.copyForwards(i32, decoder.tokens()[0..kept_tokens.len], kept_tokens);
+    //         std.mem.copyForwards(u32, decoder.tokens()[0..kept_tokens.len], kept_tokens);
     //         kept_tokens[kept_tokens.len - 1] = slice[2];
     //     } else {
     //         for (slice) |token| {
@@ -278,9 +280,6 @@ pub fn main() !void {
     // }
     // const decoded = try decoder.decode();
     // std.debug.print("Decoded: {s}\n", .{decoded});
-
-
-
 
     // const model = "/Users/steeve/Downloads/poolside.sp.pb";
 

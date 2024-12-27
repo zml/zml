@@ -1,27 +1,106 @@
-pub const Tokenizer = struct {
-    pub const Decoder = struct {
-        pub fn step(self: *Decoder, token_id: u32) []const u8 {
-            return input;
+const std = @import("std");
+const hftokenizers = @import("hftokenizers");
+const sentencepiece = @import("sentencepiece");
+
+const Tokenizers = enum {
+    hftokenizers,
+    sentencepiece,
+};
+
+pub const Tokenizer = union(Tokenizers) {
+    pub const Encoder = union(Tokenizers) {
+        hftokenizers: hftokenizers.Encoder,
+        sentencepiece: sentencepiece.Encoder,
+
+        pub fn deinit(self: *Encoder) void {
+            switch (self.*) {
+                inline else => |*v| v.deinit(),
+            }
         }
 
-        pub fn reset(self: *Decoder) void {
-            _ = self; // autofix
+        pub fn reset(self: *Encoder) void {
+            switch (self.*) {
+                inline else => |*v| v.reset(),
+            }
+        }
+
+        pub fn encode(self: *Encoder, input: []const u8) ![]const u32 {
+            return switch (self.*) {
+                inline else => |*v| v.encode(input),
+            };
+        }
+
+        pub fn ids(self: Encoder) []const u32 {
+            return switch (self) {
+                inline else => |v| v.ids(),
+            };
         }
     };
 
-    pub fn init() Tokenizer {
-        return Tokenizer{};
+    pub const Decoder = union(Tokenizers) {
+        hftokenizers: hftokenizers.Decoder,
+        sentencepiece: sentencepiece.Decoder,
+
+        pub fn deinit(self: *Decoder) void {
+            switch (self.*) {
+                inline else => |*v| v.deinit(),
+            }
+        }
+
+        pub fn reset(self: *Decoder) void {
+            switch (self.*) {
+                inline else => |*v| v.reset(),
+            }
+        }
+
+        pub fn decode(self: *Decoder, ids_: []const u32) ![]const u8 {
+            return switch (self.*) {
+                inline else => |*v| v.decode(ids_),
+            };
+        }
+
+        pub fn string(self: Decoder) []const u8 {
+            return switch (self.*) {
+                inline else => |v| v.string(),
+            };
+        }
+
+        pub fn ids(self: Decoder) []u32 {
+            return switch (self.*) {
+                inline else => |v| v.ids(),
+            };
+        }
+    };
+
+    hftokenizers: *hftokenizers.HFTokenizer,
+    sentencepiece: *sentencepiece.SentencePieceProcessor,
+
+    pub fn from_file(allocator: std.mem.Allocator, model: []const u8) !Tokenizer {
+        _ = allocator; // autofix
+        if (std.mem.endsWith(u8, model, ".pb")) {
+            return .{ .sentencepiece = try sentencepiece.SentencePieceProcessor.from_file(model) };
+        }
+        if (std.mem.endsWith(u8, model, ".json")) {
+            return .{ .hftokenizers = try hftokenizers.HFTokenizer.from_file(model) };
+        }
+        return error.InvalidArgument;
     }
 
-    pub fn encode(self: *Tokenizer, input: []const u8) []const u32 {
-        _ = input; // autofix
-        _ = self; // autofix
-        return &.{};
+    pub fn deinit(self: *Tokenizer) void {
+        switch (self.*) {
+            inline else => |t| t.deinit(),
+        }
     }
 
-    pub fn decode(self: *Tokenizer, input: []const u32) []const u8 {
-        _ = input; // autofix
-        _ = self; // autofix
-        return &.{};
+    pub fn encoder(self: Tokenizer) !Encoder {
+        return switch (self) {
+            inline else => |v, tag| @unionInit(Encoder, @tagName(tag), try v.encoder()),
+        };
+    }
+
+    pub fn decoder(self: Tokenizer) !Decoder {
+        return switch (self) {
+            inline else => |v, tag| @unionInit(Decoder, @tagName(tag), try v.decoder()),
+        };
     }
 };

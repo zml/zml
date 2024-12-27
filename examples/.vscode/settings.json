@@ -31,4 +31,7 @@
             "source.fixAll": "explicit",
         }
     },
+    "rust-analyzer.linkedProjects": [
+        "${workspaceFolder}/zml/tokenizer/hftokenizers/Cargo.toml"
+    ]
 }
