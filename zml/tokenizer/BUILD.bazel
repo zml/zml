@@ -13,23 +13,22 @@ swig_cc_library(
 )
 
 zig_library(
-    name = "sentencepiece",
-    import_name = "sentencepiece",
-    main = "sentencepiece.zig",
+    name = "tokenizer",
+    import_name = "zml/tokenizer",
+    main = "tokenizer.zig",
     visibility = ["//visibility:public"],
     deps = [
-        ":sentencepiece_swig",
         "//ffi:zig",
+        "//zml/tokenizer/hftokenizers",
+        "//zml/tokenizer/sentencepiece",
     ],
 )
 
 zig_cc_binary(
     name = "main",
-    srcs = ["sentencepiece.zig"],
     main = "main.zig",
     visibility = ["//visibility:public"],
     deps = [
-        ":sentencepiece_swig",
-        "//ffi:zig",
+        ":tokenizer",
     ],
 )
