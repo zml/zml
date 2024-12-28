@@ -16,8 +16,7 @@ extern "C" fn hftokenizers_new(path: ZigSlice<u8>) -> *mut tokenizers::Tokenizer
         tokenizers::Tokenizer::from_file(std::path::Path::new(
             std::str::from_utf8(path.as_slice()).unwrap(),
         ))
-        .unwrap()
-        .into(),
+        .unwrap(),
     ));
 }
 
@@ -66,4 +65,13 @@ extern "C" fn hftokenizers_decode(
 #[no_mangle]
 extern "C" fn hftokenizers_str_drop(tokens: ZigSlice<u8>) {
     drop(unsafe { Box::from_raw(tokens.ptr) });
+}
+
+#[no_mangle]
+extern "C" fn hftokenizers_token_to_id(t: *mut tokenizers::Tokenizer, token: ZigSlice<u8>) -> u32 {
+    let id = unsafe { t.as_ref() }
+        .unwrap()
+        .token_to_id(std::str::from_utf8(token.as_slice()).unwrap())
+        .unwrap();
+    return id;
 }

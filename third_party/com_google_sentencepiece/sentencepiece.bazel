@@ -90,6 +90,6 @@ cc_library(
         ":darts_clone",
         ":sentencepiece_cc_proto",
         ":sentencepiece_model_cc_proto",
-        "@@//third_party/com_google_sentencepiece:absl",
+        "@zml//third_party/com_google_sentencepiece:absl",
     ],
 )
