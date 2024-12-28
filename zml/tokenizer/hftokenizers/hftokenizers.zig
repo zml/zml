@@ -33,8 +33,13 @@ pub const Encoder = struct {
 };
 
 pub const Decoder = struct {
+    const StringBuffer = std.BoundedArray(u8, 128);
+    const TokensIdsBuffer = std.BoundedArray(u32, 4);
+
     inner: *HFTokenizer,
     current_string: ?[]const u8 = null,
+    last_string: StringBuffer = .{ .len = 0 },
+    last_token_ids: TokensIdsBuffer = .{ .len = 0 },
 
     fn init(inner: *HFTokenizer) Decoder {
         return .{ .inner = inner };
@@ -60,6 +65,29 @@ pub const Decoder = struct {
     pub fn string(self: *const Decoder) []const u8 {
         return self.current_string orelse &.{};
     }
+
+    pub fn next(self: *Decoder, token_id: u32) !?[]const u8 {
+        if (self.last_token_ids.len >= self.last_token_ids.capacity()) {
+            _ = self.last_token_ids.orderedRemove(0);
+        }
+        self.last_token_ids.appendAssumeCapacity(token_id);
+        const new_string = try self.decode(self.last_token_ids.constSlice());
+        if (self.last_string.len == 0) {
+            self.last_string = try StringBuffer.fromSlice(new_string);
+            return new_string;
+        }
+        var view = try std.unicode.Utf8View.init(self.last_string.constSlice());
+        var it = view.iterator();
+        while (it.nextCodepointSlice()) |cp| {
+            const start = it.i - cp.len;
+            if (std.mem.startsWith(u8, new_string, self.last_string.constSlice()[start..])) {
+                const chunk = new_string[self.last_string.len - start ..];
+                self.last_string = try StringBuffer.fromSlice(new_string);
+                return chunk;
+            }
+        }
+        return null;
+    }
 };
 
 pub const HFTokenizer = opaque {
@@ -68,7 +96,7 @@ pub const HFTokenizer = opaque {
     }
 
     pub fn deinit(self: *HFTokenizer) void {
-        return c.hftokenizers_drop(self);
+        return c.hftokenizers_drop(@ptrCast(self));
     }
 
     pub fn encoder(self: *HFTokenizer) !Encoder {
@@ -77,5 +105,9 @@ pub const HFTokenizer = opaque {
 
     pub fn decoder(self: *HFTokenizer) !Decoder {
         return Decoder.init(self);
+    }
+
+    pub fn token_to_id(self: *HFTokenizer, token: []const u8) u32 {
+        return c.hftokenizers_token_to_id(@ptrCast(self), ffi.ZigSlice.from(token));
     }
 };
