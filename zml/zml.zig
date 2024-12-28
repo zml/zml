@@ -28,7 +28,8 @@ pub const platform = @import("platform.zig");
 pub const testing = @import("testing.zig");
 pub const torch = @import("torch.zig");
 
-pub const tokenizer = @import("tokenizer.zig");
+// pub const tokenizer = @import("tokenizer.zig");
+pub const tokenizer = @import("zml/tokenizer");
 
 pub const call = ops.call;
 pub const compile = exe.compile;

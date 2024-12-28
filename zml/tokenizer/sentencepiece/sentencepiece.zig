@@ -80,18 +80,18 @@ pub const Encoder = struct {
 };
 
 pub const Decoder = struct {
-    const TokensBufferSize = 4;
-    const StringBufferSize = 128;
+    const StringBufferSize = 64;
+    const StringBuffer = std.BoundedArray(u8, StringBufferSize);
+    const TokenIdsBufferSize = 4;
 
     inner: *SentencePieceProcessor,
     vec: *c.std_vector_int,
     str: *c.std_string,
-    str_buffer: [StringBufferSize]u8 = undefined,
-    last_tokens: []u8 = &.{},
+    last_string: StringBuffer = .{ .len = 0 },
 
     fn init(inner: *SentencePieceProcessor) !Decoder {
         const vec = try (c.std_vector_int_new() orelse std.mem.Allocator.Error.OutOfMemory);
-        c.std_vector_int_reserve(vec, TokensBufferSize);
+        c.std_vector_int_reserve(vec, TokenIdsBufferSize);
         errdefer c.std_vector_int_delete(vec);
 
         const str = try (c.std_string_new() orelse std.mem.Allocator.Error.OutOfMemory);
@@ -134,6 +134,33 @@ pub const Decoder = struct {
         const ptr: [*c]u32 = @ptrCast(c.std_vector_int_data(self.vec));
         return ptr[0..c.std_vector_int_size(self.vec)];
     }
+
+    pub fn next(self: *Decoder, token_id: u32) !?[]const u8 {
+        const current_ids = self.ids();
+        if (current_ids.len >= c.std_vector_int_capacity(self.vec)) {
+            std.mem.copyForwards(u32, current_ids[0 .. current_ids.len - 1], current_ids[1..]);
+            current_ids[current_ids.len - 1] = token_id;
+        } else {
+            c.std_vector_int_push_back(self.vec, @intCast(token_id));
+        }
+        try assertOk(c.SentencePieceProcessor_Decode(@ptrCast(self.inner), self.vec, self.str));
+        const new_string = self.string();
+        if (self.last_string.len == 0) {
+            self.last_string = try StringBuffer.fromSlice(new_string);
+            return new_string;
+        }
+        var view = try std.unicode.Utf8View.init(self.last_string.constSlice());
+        var it = view.iterator();
+        while (it.nextCodepointSlice()) |cp| {
+            const start = it.i - cp.len;
+            if (std.mem.startsWith(u8, new_string, self.last_string.constSlice()[start..])) {
+                const chunk = new_string[self.last_string.len - start ..];
+                self.last_string = try StringBuffer.fromSlice(new_string);
+                return chunk;
+            }
+        }
+        return &.{};
+    }
 };
 
 pub const SentencePieceProcessor = opaque {
@@ -154,5 +181,9 @@ pub const SentencePieceProcessor = opaque {
 
     pub fn decoder(self: *SentencePieceProcessor) !Decoder {
         return try Decoder.init(self);
+    }
+
+    pub fn token_to_id(self: *SentencePieceProcessor, token: []const u8) u32 {
+        return @intCast(c.SentencePieceProcessor_PieceToId(@ptrCast(self), ffi.ZigSlice.from(token)));
     }
 };
