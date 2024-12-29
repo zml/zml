@@ -123,10 +123,28 @@ use_repo(non_module_deps, "com_google_sentencepiece", "org_swig_swig")
 
 bazel_dep(name = "rules_rust", version = "0.56.0")
 
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(
+    edition = "2021",
+    versions = ["1.83.0"],
+    extra_target_triples = [
+        "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-gnu",
+    ],
+)
+use_repo(rust, "rust_toolchains")
+register_toolchains("@rust_toolchains//:all")
+
 crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
 crate.from_cargo(
     name = "crates",
     cargo_lockfile = "//zml/tokenizer/hftokenizers:Cargo.lock",
     manifests = ["//zml/tokenizer/hftokenizers:Cargo.toml"],
+    supported_platform_triples = [
+        "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-gnu",
+    ],
 )
 use_repo(crate, "crates")
