@@ -262,6 +262,20 @@ pub const HostBuffer = struct {
         try writer.print("HostBuffer(.{_})", .{self._shape});
     }
 
+    pub fn pretty(self: HostBuffer) PrettyPrinter {
+        return .{ .x = self };
+    }
+
+    pub const PrettyPrinter = struct {
+        x: HostBuffer,
+
+        pub fn format(self: PrettyPrinter, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+            _ = fmt;
+            _ = options;
+            try prettyPrint(self.x, writer);
+        }
+    };
+
     pub fn prettyPrint(self: HostBuffer, writer: anytype) !void {
         return self.prettyPrintIndented(4, 0, writer);
     }

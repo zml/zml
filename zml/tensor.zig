@@ -1621,7 +1621,7 @@ pub const Tensor = struct {
 
     /// Repeats a Tensor several times along the given axis.
     ///
-    /// * repeat1d(x, concat(&.{x, x, x, x}, axis);
+    /// * repeat1d(x, axis, 4) = concat(&.{x, x, x, x}, axis);
     /// * repeat1d([0, 1, 2, 3], 0, 2) = [0, 1, 2, 3, 0, 1, 2, 3]
     pub fn repeat1d(self: Tensor, axis_: anytype, n_rep: u63) Tensor {
         if (n_rep == 1) {
@@ -3738,11 +3738,7 @@ pub const Tensor = struct {
     }
 
     fn printCallback(host_buffer: HostBuffer) void {
-        std.debug.lockStdErr();
-        defer std.debug.unlockStdErr();
-        const stderr = std.io.getStdErr().writer();
-        stderr.print("Device buffer: {}:", .{host_buffer.shape()}) catch return;
-        host_buffer.prettyPrint(stderr) catch return;
+        std.debug.print("Device buffer: {}: {}", .{ host_buffer.shape(), host_buffer.pretty() });
     }
 };
 
