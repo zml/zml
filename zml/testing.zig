@@ -53,6 +53,7 @@ pub fn expectClose(left_: anytype, right_: anytype, tolerance: f32) !void {
         if (should_free_left) left.deinit(allocator);
         if (should_free_right) right.deinit(allocator);
     }
+    errdefer log.err("--> Left: {}\n--> Right: {}", .{ left.pretty(), right.pretty() });
 
     if (!std.mem.eql(i64, left.shape().dims(), right.shape().dims())) {
         log.err("left.shape() {} != right.shape() {}", .{ left.shape(), right.shape() });
