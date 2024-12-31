@@ -25,6 +25,7 @@ pub const nn = @import("nn.zig");
 pub const module = @import("module.zig");
 pub const meta = @import("meta.zig");
 pub const platform = @import("platform.zig");
+pub const pjrt = @import("pjrtx.zig");
 pub const testing = @import("testing.zig");
 pub const torch = @import("torch.zig");
 
