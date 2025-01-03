@@ -2407,6 +2407,9 @@ pub const Tensor = struct {
         /// of the operator which is backend specific.
         update_fn: *const fn (Tensor, Tensor) Tensor = increment,
 
+        allow_double_transpose: bool = false,
+        allow_while_loop: bool = false,
+
         pub fn increment(old_value: Tensor, new_value: Tensor) Tensor {
             return old_value.add(new_value.convert(old_value.dtype()));
         }
