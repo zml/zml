@@ -774,6 +774,7 @@ pub fn scatter(
     const n_inputs = meta.count(Tensor, &inputs);
     const n_updates = meta.count(Tensor, &updates);
     stdx.debug.assert(n_inputs == n_updates, "zml.ops.scatter expects the same number of tensors in inputs and updates, got {} and {}", .{ n_inputs, n_updates });
+    // TODO: check all dtypes are the same, this is currently an XLA limitation on scatter
 
     // Note: I was a bit lazy here, and I only look at tags on the first tensor.
     // we probably should check all of them.
@@ -849,8 +850,8 @@ pub fn scatter(
     defer input_values.deinit();
     meta.collect(CompilationContext.getValue, ctx, &input_values, &inputs) catch unreachable;
     var updates_values = std.ArrayList(mlir.Value).initCapacity(ctx.allocator(), n_updates) catch @panic("OOM");
-    meta.collect(CompilationContext.getValue, ctx, &updates_values, &updates) catch unreachable;
     defer updates_values.deinit();
+    meta.collect(CompilationContext.getValue, ctx, &updates_values, &updates) catch unreachable;
 
     const op = dialect.stablehlo.scatter(
         mlir_ctx,
@@ -861,6 +862,9 @@ pub fn scatter(
         .{
             .update_window_dims = _collectAxes(AxisKind, up_kind, .update_window).constSlice(),
             .inserted_window_dims = _collectAxes(AxisKind, self_kind, .inserted_window).constSlice(),
+            // TODO: the batching_dims is a lie
+            // although they are in stablehlo, they aren't handled well by "scatter_simplifier" pass that insert extra transposes when it sees them,
+            // while they act as extra coordinates. we should rewrite them
             .input_batching_dims = _collectAxes(AxisKind, self_kind, .batching).constSlice(),
             .scatter_indices_batching_dims = indices_batch_axes.constSlice(),
             .scatter_dims_to_operand_dims = toI64(coord_axes_.constSlice()),
