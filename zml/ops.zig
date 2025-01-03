@@ -760,15 +760,13 @@ pub fn scatter(
     comptime update_fn: fn (BlkCtx, T, T) T,
     inputs: T,
     blkctx: BlkCtx,
-    coord_axes: anytype,
-    indices: Tensor,
+    index_tensors: anytype,
     updates: T,
     opts: Tensor.ScatterOpts,
 ) T {
     const loc = @src();
     const ctx = CompilationContext.current();
 
-    const _parseGatherCoord = @import("tensor.zig")._parseGatherCoord;
     const _collectAxes = @import("tensor.zig")._collectAxes;
 
     const n_inputs = meta.count(Tensor, &inputs);
@@ -780,17 +778,24 @@ pub fn scatter(
     // we probably should check all of them.
     const self = meta.first(Tensor, inputs);
     const update = meta.first(Tensor, updates);
-    log.warn("{_}.scatterSlices({any}, {}, {})", .{ self, coord_axes, indices, update });
-    const single_coord, const coord_axes_ = _parseGatherCoord(self, coord_axes);
+    log.warn("{_}.scatterSlices({any}, {})", .{ self, index_tensors, update });
+    const indices_per_axis, const coord_axes_ = Shape.parseStruct(Tensor, index_tensors);
+    if (indices_per_axis.len == 0) return inputs;
+    const indices_shape = indices_per_axis.get(0).shape();
+    // TODO: validate indices_shape: all tensors should have the same shape
+    // TODO: validate coord axes: all coord_axes should exist inside self
+
     const AxisKind = enum { batching, update_window, inserted_window, window_id };
     var self_kind: std.BoundedArray(AxisKind, Tensor.MAX_RANK) = .{};
     var indices_batch_axes: Shape.DimsArray = .{};
     for (self._shape.tags()) |t| {
         if (update._shape.hasTag(t)) |_| {
-            if (indices._shape.hasTag(t)) |id_ax| {
+            if (std.mem.indexOfScalar(Shape.Tag, coord_axes_.constSlice(), t)) |_| {
+                self_kind.appendAssumeCapacity(.update_window);
+            } else if (indices_shape.hasTag(t)) |id_ax| {
                 // tag is in self, indices and updates -> it's a batching dim
                 self_kind.appendAssumeCapacity(.batching);
-                indices_batch_axes.appendAssumeCapacity(id_ax);
+                indices_batch_axes.appendAssumeCapacity(@intCast(id_ax));
             } else {
                 self_kind.appendAssumeCapacity(.update_window);
             }
@@ -798,42 +803,31 @@ pub fn scatter(
             self_kind.appendAssumeCapacity(.inserted_window);
         }
     }
-    // scoped_log.warn(" self_kind -> {any}", .{self_kind.constSlice()});
+    log.warn("  * self_kind -> {any}", .{self_kind.constSlice()});
 
-    const index_coord_axis = if (single_coord)
-        indices.rank()
-    else blk: {
-        const ax = indices._shape.hasTag(.coord) orelse indices._shape.axis(-1);
-        stdx.debug.assert(indices.dim(ax) == coord_axes_.len, "scatter({_}, coord_axes={any}, indices, updates) expects 'indices' to be a tensor [..., {}], got {_}", .{ self, coord_axes, coord_axes_.len, indices });
-
-        break :blk ax;
-    };
-    if (T == Tensor and indices.count() == 1 and !single_coord) {
-        return self.dynamicUpdateSlice1d(updates, coord_axes_.get(0), indices.reshape(.{}));
+    if (T == Tensor and indices_per_axis.len == 1 and indices_per_axis.get(0).count() == 1) {
+        return self.dynamicUpdateSlice1d(updates, self.axis(coord_axes_.get(0)), indices_per_axis.get(0).reshape(.{}));
     }
 
     var up_kind: std.BoundedArray(AxisKind, Tensor.MAX_RANK) = .{};
     // Note: we assume the scatter_dims appear in the same order inside indices and inside self.
     for (update._shape.tags(), 0..) |t, up_ax| {
-        if (self._shape.hasTag(t)) |self_ax| {
+        if (t == Shape.TagUnknown or indices_shape.hasTag(t) != null) {
+            up_kind.appendAssumeCapacity(.window_id);
+        } else if (self._shape.hasTag(t)) |self_ax| {
             if (self_kind.get(self_ax) == .batching) {
                 up_kind.appendAssumeCapacity(.batching);
             } else {
                 stdx.debug.assert(update.dim(up_ax) <= self.dim(self_ax), "scatter expects the slices described in 'updates' to fit inside 'self', but along axis .{s} it doesn't. Got self={_}, updates={_}.", .{ t, self, update });
                 up_kind.appendAssumeCapacity(.update_window);
             }
-        } else if (t == Shape.TagUnknown or indices._shape.hasTag(t) != null) {
-            up_kind.appendAssumeCapacity(.window_id);
         } else {
-            std.debug.panic("scatter expects 'updates' to be made of axes from self={_} and from indices={_}, got unknown tag {s} in {_}", .{ self, indices, t, update });
+            std.debug.panic("scatter expects 'updates' to be made of axes from self={_} and from indices={s}, got unknown tag {s} in {_}", .{ self, coord_axes_.constSlice(), t, update });
         }
     }
-    const n_indices_axes = update.rank() - _collectAxes(AxisKind, up_kind, .update_window).len;
-    if (single_coord) {
-        stdx.debug.assert(n_indices_axes == indices.rank(), "scatter({_}, {any}) expects 'updates' to contain all axes from 'indices', got indices={_}, updates={_}", .{ self, coord_axes, indices, update });
-    } else {
-        stdx.debug.assert(n_indices_axes == indices.rank() - 1, "scatter({_}, {any}) expects 'updates' to contain all-but-last axes from 'indices', got indices={_}, updates={_}", .{ self, coord_axes, indices, update });
-    }
+    log.warn("  * up_kind -> {any}", .{up_kind.constSlice()});
+    // const n_indices_axes = update.rank() - _collectAxes(AxisKind, up_kind, .update_window).len;
+    // stdx.debug.assert(n_indices_axes == coord_axes_.len, "scatter({_}, {any}) expects 'updates' to contain all axes from 'indices', got indices={s}, updates={_}", .{ self, index_tensors, coord_axes_.constSlice(), update });
 
     const mlir_ctx = ctx.mlirCtx();
     var _scalar: T = inputs;
@@ -853,6 +847,7 @@ pub fn scatter(
     defer updates_values.deinit();
     meta.collect(CompilationContext.getValue, ctx, &updates_values, &updates) catch unreachable;
 
+    const indices = Tensor.stack(indices_per_axis.constSlice(), .last, .coord);
     const op = dialect.stablehlo.scatter(
         mlir_ctx,
         input_values.items,
@@ -867,8 +862,8 @@ pub fn scatter(
             // while they act as extra coordinates. we should rewrite them
             .input_batching_dims = _collectAxes(AxisKind, self_kind, .batching).constSlice(),
             .scatter_indices_batching_dims = indices_batch_axes.constSlice(),
-            .scatter_dims_to_operand_dims = toI64(coord_axes_.constSlice()),
-            .index_vector_dim = index_coord_axis,
+            .scatter_dims_to_operand_dims = toI64(self.axes(coord_axes_.constSlice()).constSlice()),
+            .index_vector_dim = indices.rank() - 1,
             .indices_are_sorted = opts.indices_are_sorted,
             .unique_indices = opts.indices_are_unique,
         },
