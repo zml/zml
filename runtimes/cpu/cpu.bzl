@@ -12,15 +12,15 @@ def _cpu_pjrt_plugin_impl(mctx):
     http_archive(
         name = "libpjrt_cpu_linux_amd64",
         build_file_content = _BUILD.format(ext = "so"),
-        sha256 = "646b8ea61e690af0e4133637343674fb072e7d5e3a29694e6f84bb66ea75a6f0",
-        url = "https://github.com/zml/pjrt-artifacts/releases/download/v3.0.0/pjrt-cpu_linux-amd64.tar.gz",
+        sha256 = "14f0cd3541532b648b61c4f7ad66c27f37be9051876f71196c692abd9dd1a13b",  # todo: change checksum
+        url = "https://github.com/zml/pjrt-artifacts/releases/download/v4.0.0/pjrt-cpu_linux-amd64.tar.gz",
     )
 
     http_archive(
         name = "libpjrt_cpu_darwin_arm64",
         build_file_content = _BUILD.format(ext = "dylib"),
-        sha256 = "f166ee5ba1d50383731aa79831d4bd2ef3338c5948ae92c2442105d20280506c",
-        url = "https://github.com/zml/pjrt-artifacts/releases/download/v3.0.0/pjrt-cpu_darwin-arm64.tar.gz",
+        sha256 = "0993df85f38efc2d630b1412e3cde6e131933ccaa5502444e35e4aff5ec84de3",  # todo: change checksum
+        url = "https://github.com/zml/pjrt-artifacts/releases/download/v4.0.0/pjrt-cpu_darwin-arm64.tar.gz",
     )
 
     return mctx.extension_metadata(
