@@ -33,6 +33,9 @@ pub const Condition = struct {
     }
 
     pub fn broadcast(self: *Condition) void {
+        if (self.waiters.empty()) {
+            return;
+        }
         while (self.waiters.pop()) |waiter| {
             self.exec.runSoon(waiter);
         }
