@@ -38,7 +38,7 @@ pub const HostBuffer = struct {
     /// The returned HostBuffer doesn't take ownership of the slice
     /// that will still need to be deallocated.
     pub fn fromBytes(shape_: Shape, data_: []const u8) HostBuffer {
-        std.debug.assert(shape_.byteSize() == data_.len);
+        stdx.debug.assert(shape_.byteSize() == data_.len, "shape {} and data {} don't match", .{ shape_.byteSize(), data_.len });
         return .{
             ._shape = shape_,
             .data = data_,
