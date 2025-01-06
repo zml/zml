@@ -36,6 +36,7 @@ pub const Condition = struct {
         while (self.waiters.pop()) |waiter| {
             self.exec.runSoon(waiter);
         }
+        _ = self.exec.tick();
     }
 
     pub fn signal(self: *Condition) void {
