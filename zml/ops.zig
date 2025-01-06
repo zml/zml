@@ -16,6 +16,7 @@ const EnumLiteral = @TypeOf(.enum_literal);
 const HostBuffer = @import("hostbuffer.zig").HostBuffer;
 const Shape = @import("shape.zig").Shape;
 const Tensor = @import("tensor.zig").Tensor;
+const _collectAxes = @import("tensor.zig")._collectAxes;
 
 const dialect = struct {
     const stablehlo = @import("mlir/dialects").stablehlo;
@@ -767,8 +768,6 @@ pub fn scatter(
     const loc = @src();
     const ctx = CompilationContext.current();
 
-    const _collectAxes = @import("tensor.zig")._collectAxes;
-
     const n_inputs = meta.count(Tensor, &inputs);
     const n_updates = meta.count(Tensor, &updates);
     stdx.debug.assert(n_inputs == n_updates, "zml.ops.scatter expects the same number of tensors in inputs and updates, got {} and {}", .{ n_inputs, n_updates });
@@ -779,7 +778,7 @@ pub fn scatter(
     const self = meta.first(Tensor, inputs);
     const update = meta.first(Tensor, updates);
     log.warn("{_}.scatterSlices({any}, {})", .{ self, index_tensors, update });
-    const indices_per_axis, const coord_axes_ = Shape.parseStruct(Tensor, index_tensors);
+    var indices_per_axis, var coord_axes_ = Shape.parseStruct(Tensor, index_tensors);
     log.warn("  * indices_per_axis -> {any}", .{indices_per_axis.constSlice()});
     log.warn("  * coord_axes_ -> {any}", .{coord_axes_.constSlice()});
 
@@ -797,7 +796,7 @@ pub fn scatter(
     // TODO: validate coord axes: all coord_axes should exist inside self
 
     var config = scatterConfig(self.shape(), update.shape(), indices_per_axis, coord_axes_);
-    const indices = scatterRewrite(&config, indices_per_axis);
+    const indices = scatterPrepareIndices(&config, self.shape(), update.shape(), &indices_per_axis, &coord_axes_);
     // const n_indices_axes = update.rank() - _collectAxes(AxisKind, up_kind, .update_window).len;
     // stdx.debug.assert(n_indices_axe == coord_axes_.len, "scatter({_}, {any}) expects 'updates' to contain all axes from 'indices', got indices={s}, updates={_}", .{ self, index_tensors, coord_axes_.constSlice(), update });
 
@@ -939,6 +938,7 @@ fn scatterConfig(
     }
     log.warn("  * op_kind -> {any}", .{op_kind.constSlice()});
     log.warn("  * up_kind -> {any}", .{up_kind.constSlice()});
+    log.warn("  * scatter_to_operand_axes -> {any}", .{scatter_to_operand_axes.constSlice()});
 
     return .{
         .op_kind = op_kind,
@@ -991,12 +991,53 @@ test scatterConfig {
 ///
 /// Is allowed to reorder stuff to simplify the job of the backend,
 /// and to expand the batching dims.
-fn scatterRewrite(
+fn scatterPrepareIndices(
     cfg: *ScatterConfig,
-    indices_per_axis: std.BoundedArray(Tensor, Tensor.MAX_RANK),
+    op: Shape,
+    update: Shape,
+    indices_per_axis: *std.BoundedArray(Tensor, Tensor.MAX_RANK),
+    indices_axes: *Shape.TagsArray,
 ) Tensor {
-    _ = cfg; // autofix
-    return Tensor.stack(indices_per_axis.constSlice(), .last, .coord);
+    var old_scatter_to_op_axes = cfg.scatter_to_operand_axes;
+    const batching = _collectAxes(AxisKind, cfg.op_kind, .batching);
+    for (batching.constSlice()) |batch_ax| {
+        const id_shape = indices_per_axis.get(0).shape();
+        // batching requires tagging, so we're sure to have a tag here.
+        const batch_tag = op.tag(batch_ax);
+        indices_axes.appendAssumeCapacity(batch_tag);
+        const batch_id = Tensor.iota(id_shape, batch_tag).convert(id_shape.dtype());
+        indices_per_axis.appendAssumeCapacity(batch_id);
+        cfg.op_kind.buffer[@intCast(batch_ax)] = .inserted_window;
+        cfg.up_kind.buffer[update.axis(batch_tag)] = .window_id;
+        old_scatter_to_op_axes.appendAssumeCapacity(batch_ax);
+    }
+    cfg.indices_batch_axes = .{};
+
+    log.warn("  * scatter_to_op_axes -> {any}", .{cfg.scatter_to_operand_axes.constSlice()});
+    log.warn("  * old_scatter_to_op_axes -> {any}", .{old_scatter_to_op_axes.constSlice()});
+
+    // Reorder the axes so that in indices_per_axis is ordered like in op if possible.
+    // TODO: transpose updates if needed
+    var indices: std.BoundedArray(Tensor, Tensor.MAX_RANK) = .{};
+    var scatter_to_op_axes: Shape.DimsArray = .{};
+
+    while (old_scatter_to_op_axes.len > 0) {
+        const scatter_ax = std.sort.argMin(i64, old_scatter_to_op_axes.constSlice(), {}, std.sort.asc(i64)).?;
+        const op_ax = old_scatter_to_op_axes.orderedRemove(scatter_ax);
+        const scatter_idx = indices_per_axis.orderedRemove(scatter_ax);
+
+        scatter_to_op_axes.appendAssumeCapacity(op_ax);
+        indices.appendAssumeCapacity(scatter_idx);
+    }
+    cfg.scatter_to_operand_axes = scatter_to_op_axes;
+
+    for (scatter_to_op_axes.constSlice(), 0..) |sc_ax, i| {
+        if (i != sc_ax) {
+            log.warn("Found a slow scatter pattern, which is going to generate a while loop: scatter({_}, {any}, {_}). Because the index axes aren't the major ones in the input tensor.", .{ op, scatter_to_op_axes.constSlice(), update });
+            break;
+        }
+    }
+    return Tensor.stack(indices.constSlice(), .last, .coord);
 }
 
 inline fn toI64(values: anytype) []i64 {
