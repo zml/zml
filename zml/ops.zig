@@ -796,9 +796,10 @@ pub fn scatter(
     // TODO: validate indices_shape: all tensors should have the same shape
     // TODO: validate coord axes: all coord_axes should exist inside self
 
-    const config = scatterConfig(self.shape(), update.shape(), indices_per_axis, coord_axes_);
+    var config = scatterConfig(self.shape(), update.shape(), indices_per_axis, coord_axes_);
+    const indices = scatterRewrite(&config, indices_per_axis);
     // const n_indices_axes = update.rank() - _collectAxes(AxisKind, up_kind, .update_window).len;
-    // stdx.debug.assert(n_indices_axes == coord_axes_.len, "scatter({_}, {any}) expects 'updates' to contain all axes from 'indices', got indices={s}, updates={_}", .{ self, index_tensors, coord_axes_.constSlice(), update });
+    // stdx.debug.assert(n_indices_axe == coord_axes_.len, "scatter({_}, {any}) expects 'updates' to contain all axes from 'indices', got indices={s}, updates={_}", .{ self, index_tensors, coord_axes_.constSlice(), update });
 
     const mlir_ctx = ctx.mlirCtx();
     var _scalar: T = inputs;
@@ -818,7 +819,6 @@ pub fn scatter(
     defer updates_values.deinit();
     meta.collect(CompilationContext.getValue, ctx, &updates_values, &updates) catch unreachable;
 
-    const indices = Tensor.stack(indices_per_axis.constSlice(), .last, .coord);
     const op = dialect.stablehlo.scatter(
         mlir_ctx,
         input_values.items,
@@ -985,6 +985,18 @@ test scatterConfig {
         try std.testing.expectEqualSlices(AxisKind, &.{ .inserted_window, .update_window }, cfg.op_kind.constSlice());
         try std.testing.expectEqualSlices(AxisKind, &.{ .window_id, .window_id, .update_window }, cfg.up_kind.constSlice());
     }
+}
+
+/// Concatenate all indices tensor in one tensor.
+///
+/// Is allowed to reorder stuff to simplify the job of the backend,
+/// and to expand the batching dims.
+fn scatterRewrite(
+    cfg: *ScatterConfig,
+    indices_per_axis: std.BoundedArray(Tensor, Tensor.MAX_RANK),
+) Tensor {
+    _ = cfg; // autofix
+    return Tensor.stack(indices_per_axis.constSlice(), .last, .coord);
 }
 
 inline fn toI64(values: anytype) []i64 {
