@@ -910,7 +910,8 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, m
             //  setFlag(&options, "xla_gpu_fused_attention_use_cudnn_rng", true);
             //  setFlag(&options, "xla_gpu_enable_cudnn_layer_norm", true);
             //  setFlag(&options, "xla_gpu_enable_custom_fusions", true);
-            //  setFlag(&options, "xla_gpu_enable_dynamic_slice_fusion", true);
+            setFlag(&options, "xla_gpu_enable_dynamic_slice_fusion", true);
+            setFlag(&options, "xla_gpu_enable_while_loop_double_buffering", true);
             //  setFlag(&options, "xla_gpu_use_runtime_fusion", true);
             //  setFlag(&options, "xla_gpu_enable_latency_hiding_scheduler", true);
             var r_ = try runfiles.Runfiles.create(.{ .allocator = arena }) orelse {
