@@ -780,55 +780,85 @@ pub fn scatter(
     const update = meta.first(Tensor, updates);
     log.warn("{_}.scatterSlices({any}, {})", .{ self, index_tensors, update });
     const indices_per_axis, const coord_axes_ = Shape.parseStruct(Tensor, index_tensors);
+    log.warn("  * indices_per_axis -> {any}", .{indices_per_axis.constSlice()});
+    log.warn("  * coord_axes_ -> {any}", .{coord_axes_.constSlice()});
+
     if (indices_per_axis.len == 0) return inputs;
     const indices_shape = indices_per_axis.get(0).shape();
+    const tagged_api = coord_axes_.len > 0;
+    if (T == Tensor and indices_per_axis.len == 1 and indices_shape.count() == 1) {
+        return self.dynamicUpdateSlice1d(
+            updates,
+            if (tagged_api) self.axis(coord_axes_.get(0)) else 0,
+            indices_per_axis.get(0).reshape(.{}),
+        );
+    }
+
     // TODO: validate indices_shape: all tensors should have the same shape
     // TODO: validate coord axes: all coord_axes should exist inside self
 
     const AxisKind = enum { batching, update_window, inserted_window, window_id };
+
     var self_kind: std.BoundedArray(AxisKind, Tensor.MAX_RANK) = .{};
+    var up_kind: std.BoundedArray(AxisKind, Tensor.MAX_RANK) = .{};
     var indices_batch_axes: Shape.DimsArray = .{};
-    for (self._shape.tags()) |t| {
-        if (update._shape.hasTag(t)) |_| {
-            if (indices_shape.hasTag(t)) |id_ax| {
-                if (std.mem.indexOfScalar(Shape.Tag, coord_axes_.constSlice(), t) != null) {
-                    // tag is in indices AND in coords -> it's a batching dim that has been rewritten to a regular insertion dim
-                    self_kind.appendAssumeCapacity(.inserted_window);
+    var scatter_to_operand_axes: Shape.DimsArray = .{};
+
+    if (tagged_api) {
+        for (coord_axes_.constSlice()) |t| {
+            scatter_to_operand_axes.appendAssumeCapacity(self.axis(t));
+        }
+
+        for (self._shape.tags()) |t| {
+            if (update._shape.hasTag(t)) |_| {
+                if (indices_shape.hasTag(t)) |id_ax| {
+                    if (std.mem.indexOfScalar(Shape.Tag, coord_axes_.constSlice(), t) != null) {
+                        // tag is in indices AND in coords -> it's a batching dim that has been rewritten to a regular insertion dim
+                        self_kind.appendAssumeCapacity(.inserted_window);
+                    } else {
+                        // tag is in self, indices and updates -> it's a batching dim
+                        self_kind.appendAssumeCapacity(.batching);
+                        indices_batch_axes.appendAssumeCapacity(@intCast(id_ax));
+                    }
                 } else {
-                    // tag is in self, indices and updates -> it's a batching dim
-                    self_kind.appendAssumeCapacity(.batching);
-                    indices_batch_axes.appendAssumeCapacity(@intCast(id_ax));
+                    self_kind.appendAssumeCapacity(.update_window);
                 }
             } else {
-                self_kind.appendAssumeCapacity(.update_window);
+                self_kind.appendAssumeCapacity(.inserted_window);
             }
-        } else {
+        }
+
+        // Note: we assume the scatter_dims appear in the same order inside indices and inside self.
+        for (update._shape.tags(), 0..) |t, up_ax| {
+            if (t == Shape.TagUnknown or indices_shape.hasTag(t) != null) {
+                up_kind.appendAssumeCapacity(.window_id);
+            } else if (self._shape.hasTag(t)) |self_ax| {
+                if (self_kind.get(self_ax) == .batching) {
+                    up_kind.appendAssumeCapacity(.batching);
+                } else {
+                    stdx.debug.assert(update.dim(up_ax) <= self.dim(self_ax), "scatter expects the slices described in 'updates' to fit inside 'self', but along axis .{s} it doesn't. Got self={_}, updates={_}.", .{ t, self, update });
+                    up_kind.appendAssumeCapacity(.update_window);
+                }
+            } else {
+                std.debug.panic("scatter expects 'updates' to be made of axes from self={_} and from indices={s}, got unknown tag {s} in {_}", .{ self, coord_axes_.constSlice(), t, update });
+            }
+        }
+    } else {
+        for (0..indices_per_axis.len) |i| {
             self_kind.appendAssumeCapacity(.inserted_window);
+            scatter_to_operand_axes.appendAssumeCapacity(@intCast(i));
+            up_kind.appendAssumeCapacity(.window_id);
+        }
+        for (indices_per_axis.len..self.rank()) |_| {
+            self_kind.appendAssumeCapacity(.update_window);
+        }
+        for (indices_per_axis.len..updates.rank()) |_| {
+            up_kind.appendAssumeCapacity(.update_window);
         }
     }
     log.warn("  * self_kind -> {any}", .{self_kind.constSlice()});
-
-    if (T == Tensor and indices_per_axis.len == 1 and indices_per_axis.get(0).count() == 1) {
-        return self.dynamicUpdateSlice1d(updates, self.axis(coord_axes_.get(0)), indices_per_axis.get(0).reshape(.{}));
-    }
-
-    var up_kind: std.BoundedArray(AxisKind, Tensor.MAX_RANK) = .{};
-    // Note: we assume the scatter_dims appear in the same order inside indices and inside self.
-    for (update._shape.tags(), 0..) |t, up_ax| {
-        if (t == Shape.TagUnknown or indices_shape.hasTag(t) != null) {
-            up_kind.appendAssumeCapacity(.window_id);
-        } else if (self._shape.hasTag(t)) |self_ax| {
-            if (self_kind.get(self_ax) == .batching) {
-                up_kind.appendAssumeCapacity(.batching);
-            } else {
-                stdx.debug.assert(update.dim(up_ax) <= self.dim(self_ax), "scatter expects the slices described in 'updates' to fit inside 'self', but along axis .{s} it doesn't. Got self={_}, updates={_}.", .{ t, self, update });
-                up_kind.appendAssumeCapacity(.update_window);
-            }
-        } else {
-            std.debug.panic("scatter expects 'updates' to be made of axes from self={_} and from indices={s}, got unknown tag {s} in {_}", .{ self, coord_axes_.constSlice(), t, update });
-        }
-    }
     log.warn("  * up_kind -> {any}", .{up_kind.constSlice()});
+
     // const n_indices_axes = update.rank() - _collectAxes(AxisKind, up_kind, .update_window).len;
     // stdx.debug.assert(n_indices_axes == coord_axes_.len, "scatter({_}, {any}) expects 'updates' to contain all axes from 'indices', got indices={s}, updates={_}", .{ self, index_tensors, coord_axes_.constSlice(), update });
 
@@ -865,7 +895,7 @@ pub fn scatter(
             // while they act as extra coordinates. we should rewrite them
             .input_batching_dims = _collectAxes(AxisKind, self_kind, .batching).constSlice(),
             .scatter_indices_batching_dims = indices_batch_axes.constSlice(),
-            .scatter_dims_to_operand_dims = toI64(self.axes(coord_axes_.constSlice()).constSlice()),
+            .scatter_dims_to_operand_dims = scatter_to_operand_axes.constSlice(),
             .index_vector_dim = indices.rank() - 1,
             .indices_are_sorted = opts.indices_are_sorted,
             .unique_indices = opts.indices_are_unique,
