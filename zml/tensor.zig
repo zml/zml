@@ -2471,6 +2471,14 @@ pub const Tensor = struct {
                 );
             }
 
+            pub fn scatterCB(self: Tensor, coords: Tensor, updates: Tensor) Tensor {
+                return self.scatterSlices(
+                    .{ .c = coords.choose1d(.coord, 0), .b = coords.choose1d(.coord, 1) },
+                    updates,
+                    .{ .update_fn = ScatterOpts.increment },
+                );
+            }
+
             pub fn idx(idx_shape: anytype) Tensor {
                 return Tensor.constant(idx_shape, .{ .i32 = 0 });
             }
@@ -2547,49 +2555,49 @@ pub const Tensor = struct {
             try std.testing.expect(a.shape().eql(result.shape()));
             try std.testing.expectEqual(expected, result.getValue(@TypeOf(expected)));
         }
-        // {
-        //     // Test with actual values and batching along axis .a
-        //     const operand = try zml.Buffer.constant(platform, Shape.init(.{ .a = 2, .b = 3, .c = 4, .d = 2 }, .u16), 0);
-        //     defer operand.deinit();
-        //     const start_indices = (try zml.Buffer.fromArray(
-        //         platform,
-        //         [2][2][3][2]i32{
-        //             .{
-        //                 .{ .{ 0, 0 }, .{ 1, 0 }, .{ 2, 1 } },
-        //                 .{ .{ 0, 1 }, .{ 1, 1 }, .{ 0, 9 } },
-        //             },
-        //             .{
-        //                 .{ .{ 0, 0 }, .{ 2, 1 }, .{ 2, 2 } },
-        //                 .{ .{ 1, 2 }, .{ 0, 1 }, .{ 1, 0 } },
-        //             },
-        //         },
-        //     )).withTags(.{ .n, .a, .m, .coord });
-        //     defer start_indices.deinit();
+        {
+            // Test with actual values and batching along axis .a
+            const operand = try zml.Buffer.constant(platform, Shape.init(.{ .a = 2, .b = 3, .c = 4, .d = 2 }, .u16), 0);
+            defer operand.deinit();
+            const start_indices = (try zml.Buffer.fromArray(
+                platform,
+                [2][2][3][2]i32{
+                    .{
+                        .{ .{ 0, 0 }, .{ 1, 0 }, .{ 2, 1 } },
+                        .{ .{ 0, 1 }, .{ 1, 1 }, .{ 0, 9 } },
+                    },
+                    .{
+                        .{ .{ 0, 0 }, .{ 2, 1 }, .{ 2, 2 } },
+                        .{ .{ 1, 2 }, .{ 0, 1 }, .{ 1, 0 } },
+                    },
+                },
+            )).withTags(.{ .n, .a, .m, .coord });
+            defer start_indices.deinit();
 
-        //     const values = try zml.Buffer.constant(
-        //         platform,
-        //         Shape.init(.{ .n = 2, .a = 2, .m = 3, .c = 2, .d = 2 }, .u16),
-        //         1,
-        //     );
-        //     defer values.deinit();
+            const values = try zml.Buffer.constant(
+                platform,
+                Shape.init(.{ .n = 2, .a = 2, .m = 3, .c = 2, .d = 2 }, .u16),
+                1,
+            );
+            defer values.deinit();
 
-        //     const result = try zml.testing.compileAndCall(platform, Local.scatter, .{ operand, operand.shape().axes(.{ .c, .b }), start_indices, values });
+            const result = try zml.testing.compileAndCall(platform, Local.scatterCB, .{ operand, start_indices, values });
 
-        //     const expected = [2][3][4][2]u16{
-        //         .{
-        //             .{ .{ 2, 2 }, .{ 3, 3 }, .{ 1, 1 }, .{ 0, 0 } },
-        //             .{ .{ 0, 0 }, .{ 0, 0 }, .{ 2, 2 }, .{ 2, 2 } },
-        //             .{ .{ 0, 0 }, .{ 0, 0 }, .{ 1, 1 }, .{ 1, 1 } },
-        //         },
-        //         .{
-        //             .{ .{ 0, 0 }, .{ 1, 1 }, .{ 1, 1 }, .{ 0, 0 } },
-        //             .{ .{ 2, 2 }, .{ 3, 3 }, .{ 1, 1 }, .{ 0, 0 } },
-        //             .{ .{ 0, 0 }, .{ 1, 1 }, .{ 1, 1 }, .{ 0, 0 } },
-        //         },
-        //     };
-        //     try std.testing.expect(operand.shape().eql(result.shape()));
-        //     try std.testing.expectEqual(expected, result.getValue(@TypeOf(expected)));
-        // }
+            const expected = [2][3][4][2]u16{
+                .{
+                    .{ .{ 2, 2 }, .{ 3, 3 }, .{ 1, 1 }, .{ 0, 0 } },
+                    .{ .{ 0, 0 }, .{ 0, 0 }, .{ 2, 2 }, .{ 2, 2 } },
+                    .{ .{ 0, 0 }, .{ 0, 0 }, .{ 1, 1 }, .{ 1, 1 } },
+                },
+                .{
+                    .{ .{ 0, 0 }, .{ 1, 1 }, .{ 1, 1 }, .{ 0, 0 } },
+                    .{ .{ 2, 2 }, .{ 3, 3 }, .{ 1, 1 }, .{ 0, 0 } },
+                    .{ .{ 0, 0 }, .{ 1, 1 }, .{ 1, 1 }, .{ 0, 0 } },
+                },
+            };
+            try std.testing.expect(operand.shape().eql(result.shape()));
+            try std.testing.expectEqual(expected, result.getValue(@TypeOf(expected)));
+        }
     }
 
     /// Returns a Tensor containing the maximum over a given axis.
