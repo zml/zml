@@ -790,12 +790,15 @@ pub fn scatter(
     var indices_batch_axes: Shape.DimsArray = .{};
     for (self._shape.tags()) |t| {
         if (update._shape.hasTag(t)) |_| {
-            if (std.mem.indexOfScalar(Shape.Tag, coord_axes_.constSlice(), t)) |_| {
-                self_kind.appendAssumeCapacity(.update_window);
-            } else if (indices_shape.hasTag(t)) |id_ax| {
-                // tag is in self, indices and updates -> it's a batching dim
-                self_kind.appendAssumeCapacity(.batching);
-                indices_batch_axes.appendAssumeCapacity(@intCast(id_ax));
+            if (indices_shape.hasTag(t)) |id_ax| {
+                if (std.mem.indexOfScalar(Shape.Tag, coord_axes_.constSlice(), t) != null) {
+                    // tag is in indices AND in coords -> it's a batching dim that has been rewritten to a regular insertion dim
+                    self_kind.appendAssumeCapacity(.inserted_window);
+                } else {
+                    // tag is in self, indices and updates -> it's a batching dim
+                    self_kind.appendAssumeCapacity(.batching);
+                    indices_batch_axes.appendAssumeCapacity(@intCast(id_ax));
+                }
             } else {
                 self_kind.appendAssumeCapacity(.update_window);
             }
