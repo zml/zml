@@ -8,6 +8,7 @@ zig_library(
         "math.zig",
         "meta.zig",
         "signature.zig",
+        "time.zig",
     ],
     main = "stdx.zig",
     visibility = ["//visibility:public"],

@@ -1,6 +1,7 @@
 const std = @import("std");
 const hftokenizers = @import("hftokenizers");
 const sentencepiece = @import("sentencepiece");
+const asynk = @import("async");
 
 const Tokenizers = enum {
     hftokenizers,
@@ -84,10 +85,10 @@ pub const Tokenizer = union(Tokenizers) {
     pub fn from_file(allocator: std.mem.Allocator, model: []const u8) !Tokenizer {
         _ = allocator; // autofix
         if (std.mem.endsWith(u8, model, ".pb")) {
-            return .{ .sentencepiece = try sentencepiece.SentencePieceProcessor.from_file(model) };
+            return .{ .sentencepiece = try asynk.callBlocking(sentencepiece.SentencePieceProcessor.from_file, .{model}) };
         }
         if (std.mem.endsWith(u8, model, ".json")) {
-            return .{ .hftokenizers = try hftokenizers.HFTokenizer.from_file(model) };
+            return .{ .hftokenizers = try asynk.callBlocking(hftokenizers.HFTokenizer.from_file, .{model}) };
         }
         return error.InvalidArgument;
     }
