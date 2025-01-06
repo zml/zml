@@ -2492,6 +2492,7 @@ pub const Tensor = struct {
                 .{ .{ .a = 10, .b = 20 }, .{ .b = idx(.{ .a = 10, .n = 8 }) }, .{ .a = 10, .n = 8, .b = 2 } },
                 // similar, but use the normalized form where a is no longer an explicit batching axis.
                 .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{ .a2 = 10, .n = 8 }), .b = idx(.{ .a2 = 10, .n = 8 }) }, .{ .a2 = 10, .n = 8, .b = 2 } },
+                .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{ .a = 10, .n = 8 }), .b = idx(.{ .a = 10, .n = 8 }) }, .{ .a = 10, .n = 8, .b = 2 } },
                 // I'm not sure I like this variant, cause `b` is not mentionned in updates.
                 // So 'stablehlo.scatter' is implicitly broadcasting the updates along `b` axis.
                 // OTOH asking the user to do the broadcasting isn't trivial cause they will need to do shape wrangling and that's annoying.
