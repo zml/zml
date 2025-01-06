@@ -32,14 +32,19 @@ pub const TraceContainer = struct {
     devices: std.AutoArrayHashMapUnmanaged(u32, Device) = .{},
 
     pub const Device = struct {
-        name: []const u8 = &[_]u8{},
+        name: []const u8 = "",
         device_id: u32 = 0,
-        resources: std.AutoArrayHashMapUnmanaged(u32, trace_events_proto.Resource) = .{},
+        resources: std.AutoArrayHashMapUnmanaged(i64, Resource) = .{},
+    };
+
+    pub const Resource = struct {
+        name: []const u8,
+        sort_index: u64 = 0,
     };
 
     pub const TraceEvent = struct {
         device_id: u32 = 0,
-        resource_id: u32 = 0,
+        resource_id: i64 = 0,
         name: []const u8 = &[_]u8{},
         timestamp_ps: u128 = 0,
         duration_ps: u64 = 0,
@@ -110,19 +115,17 @@ pub const TraceContainer = struct {
         device.name = plane.name();
         device.device_id = device_id;
         const sort_by_ordinal = (device_id == host_threads_device_id);
-        var ordinal: u32 = 0;
+
+        var ordinal: u64 = 0;
         for (plane.plane.lines.items) |*xline| {
-            const resource_id: u32 = @intCast(xLineDisplayId(xline));
-            var resource: trace_events_proto.Resource = .{
-                .resource_id = resource_id,
-                .name = .{ .Const = xLineDisplayName(xline) },
+            if (sort_by_ordinal) ordinal += 1;
+
+            const resource: Resource = .{
+                .name = xLineDisplayName(xline),
+                .sort_index = ordinal,
             };
 
-            if (sort_by_ordinal) {
-                ordinal += 1;
-                resource.sort_index = ordinal;
-            }
-            try device.resources.put(allocator, resource_id, resource);
+            try device.resources.put(allocator, xLineDisplayId(xline), resource);
         }
     }
 
@@ -135,7 +138,7 @@ pub const TraceContainer = struct {
 
         // Convert events.
         for (xplane.plane.lines.items) |*xline| {
-            const resource_id: u32 = @intCast(xLineDisplayId(xline));
+            const resource_id = xLineDisplayId(xline);
 
             if (std.mem.eql(u8, xLineDisplayName(xline), xla_async_op_line_name)) continue;
             for (xline.events.items) |*xevent| {
@@ -257,23 +260,23 @@ pub const TraceContainer = struct {
             });
 
             device.resources.sort(struct {
-                keys: []const u32,
+                keys: []const i64,
                 pub fn lessThan(ctx: @This(), lhs: usize, rhs: usize) bool {
                     return ctx.keys[lhs] < ctx.keys[rhs];
                 }
             }{ .keys = device.resources.keys() });
 
             for (device.resources.keys(), device.resources.values()) |resource_id, resource| {
-                if (resource.name.getSlice().len != 0) {
+                if (resource.name.len != 0) {
                     try writer.print(
                         \\{{"ph":"M","pid":{d},"tid":{d},"name":"thread_name","args":{{"name":"{s}"}}}},
                     , .{
                         device_id,
                         resource_id,
-                        resource.name.getSlice(),
+                        resource.name,
                     });
                 }
-                const sort_index = if (resource.sort_index != 0) resource.sort_index else resource_id;
+                const sort_index: i64 = if (resource.sort_index != 0) @intCast(resource.sort_index) else resource_id;
                 try writer.print(
                     \\{{"ph":"M","pid":{d},"tid":{d},"name":"thread_sort_index","args":{{"sort_index":{d}}}}},
                 , .{ device_id, resource_id, sort_index });
