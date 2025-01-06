@@ -1566,6 +1566,7 @@ pub const Tensor = struct {
 
     /// Concatenates the input Tensors along the given axis.
     pub fn concatenate(tensors: []const Tensor, axis_: anytype) Tensor {
+        if (tensors.len == 1) return tensors[0];
         stdx.debug.assert(tensors.len <= 32, "concatenate only supports up to 32 tensors, got {}", .{tensors.len});
         var buffer: [32]mlir.Value = undefined;
         std.debug.assert(tensors.len <= buffer.len);
