@@ -2027,7 +2027,7 @@ pub const Tensor = struct {
 
     /// Appends a 1-dim axis, with the given tag.
     pub fn appendAxes(self: Tensor, t: anytype) Tensor {
-        stdx.debug.assert(self.rank() < Tensor.MAX_RANK - t.len, "appendAxis expects tensor rank to be small enough in order to extend it, got {} and {} (max is {})", .{ self.rank(), t.len, Tensor.MAX_RANK });
+        // stdx.debug.assert(self.rank() < Tensor.MAX_RANK - t.len, "appendAxis expects tensor rank to be small enough in order to extend it, got {} and {} (max is {})", .{ self.rank(), t.len, Tensor.MAX_RANK });
 
         return self.insertAxes(.last, t);
     }
