@@ -14,7 +14,6 @@ pub fn env() zml.Platform {
     if (!builtin.is_test) @compileError("Cannot use zml.testing.env outside of a test block");
     if (_platform == null) {
         _test_compile_opts = .{
-            .xla_dump_to = "/tmp/zml/tests/",
             .sharding_enabled = true,
         };
 

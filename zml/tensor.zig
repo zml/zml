@@ -2524,7 +2524,7 @@ pub const Tensor = struct {
                     coord_axes.constSlice(),
                     indices,
                     updates,
-                    .{ .update_fn = ScatterOpts.increment, .indices_are_sorted = true },
+                    .{ .update_fn = ScatterOpts.increment },
                 );
             }
         };
