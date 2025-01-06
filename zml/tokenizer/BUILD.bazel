@@ -18,6 +18,7 @@ zig_library(
     main = "tokenizer.zig",
     visibility = ["//visibility:public"],
     deps = [
+        "//async",
         "//ffi:zig",
         "//zml/tokenizer/hftokenizers",
         "//zml/tokenizer/sentencepiece",
