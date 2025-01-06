@@ -1776,7 +1776,7 @@ pub const Tensor = struct {
         const dt: DataType = if (sh.dim(a) <= std.math.maxInt(i32)) .i32 else .i64;
         const res_shape = sh.withDtype(dt);
         const ctx = CompilationContext.current();
-        const loc = ctx.location(@src(), "iota({_}, {})", .{ res_shape, axis_ });
+        const loc = ctx.location(@src(), "iota({_}, {})", .{ res_shape, a });
 
         const mlir_ctx = ctx.mlirCtx();
         var op = dialect.stablehlo.iota(mlir_ctx, a, mlir.ext.RankedTensorType.fromShape(mlir_ctx, res_shape).asType(), loc);
