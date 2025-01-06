@@ -1,0 +1,10 @@
+{
+    "strip_prefix": "with_cfg.bzl-5970101069756fc0229bbaf14bc950a93797aac1",
+    "url": "https://github.com/fmeum/with_cfg.bzl/archive/5970101069756fc0229bbaf14bc950a93797aac1.tar.gz",
+    "integrity": "sha256-CGfikut+1IZo4FwwIIsP5snSIofO3qoR23+PO3gXKvM=",
+    "overlay": {},
+    "patch_strip": 1,
+    "patches": {
+        "0001-PyInfo-temp-fix-for-with_cfg.patch": ""
+    }
+}

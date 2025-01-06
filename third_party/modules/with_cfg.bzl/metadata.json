@@ -1,0 +1,17 @@
+{
+    "homepage": "https://github.com/fmeum/with_cfg.bzl",
+    "maintainers": [
+        {
+            "email": "bzlmod@zml.ai",
+            "github": "zml",
+            "name": "ZML Engineering Team"
+        }
+    ],
+    "repository": [
+        "github:fmeum/with_cfg.bzl"
+    ],
+    "versions": [
+        "20250106.0-bfe9f41"
+    ],
+    "yanked_versions": {}
+}
