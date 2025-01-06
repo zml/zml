@@ -106,10 +106,7 @@ _PACKAGES = {
         _CC_IMPORT_TPL.format(name = "MIOpen", shared_library = "libMIOpen.so.1"),
         _RUNFILES_TPL.format(name = "runfiles", glob = repr(["share/miopen/**"])),
     ]),
-    "rccl": "".join([
-        _CC_IMPORT_TPL.format(name = "rccl", shared_library = "librccl.so.1"),
-        _RUNFILES_TPL.format(name = "runfiles", glob = repr(["share/rccl/msccl-algorithms/**"])),
-    ]),
+    "rccl": _CC_IMPORT_TPL.format(name = "rccl", shared_library = "librccl.so.1"),
     "rocm-device-libs": _RUNFILES_TPL.format(name = "runfiles", glob = repr(["amdgcn/**"])),
     "hip-dev": _RUNFILES_TPL.format(name = "runfiles", glob = repr(["share/**"])),
     "rocblas": """\
