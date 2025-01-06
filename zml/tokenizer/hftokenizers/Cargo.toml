@@ -4,7 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tokenizers = { version = "0.21.0", default-features = false, features = ["onig"] }
+# onig-sys fails to build with zig cc, disable it via the unstable_wasm feature, which switches
+# the regex library to using fancy.
+tokenizers = { version = "0.21.0", default-features = false, features = ["unstable_wasm"] }
 
 [lib]
 name = "zml_tokenizer_hftokenizers"
