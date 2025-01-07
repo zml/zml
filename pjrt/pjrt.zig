@@ -732,7 +732,7 @@ pub const Buffer = opaque {
         return ret.on_device_size_in_bytes;
     }
 
-    pub fn copyToDevice(self: *const Buffer, api: *const Api, device: Device) ApiError!Buffer {
+    pub fn copyToDevice(self: *const Buffer, api: *const Api, device: Device) ApiError!*Buffer {
         const ret = try api.call(.PJRT_Buffer_CopyToDevice, .{
             .buffer = self.inner(),
             .dst_device = device.inner,
