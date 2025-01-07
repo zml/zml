@@ -57,13 +57,9 @@ pub const Client = opaque {
     }
 
     pub const BufferFromHostBufferArgs = pjrt.Client.BufferFromHostBufferArgs;
-    pub fn bufferFromHostBuffer(self: *const Client, api: *const Api, args: BufferFromHostBufferArgs) ApiError!*Buffer {
-        const buffer, const event_ = try asynk.callBlocking(pjrt.Client.bufferFromHostBuffer, .{ self.inner(), api, args });
-        if (event_) |event__| {
-            const event: *Event = @ptrCast(event__);
-            try event.await_(api);
-        }
-        return @ptrCast(buffer);
+    pub fn bufferFromHostBuffer(self: *const Client, api: *const Api, args: BufferFromHostBufferArgs) !struct { *Buffer, ?*Event } {
+        const buffer, const event_ = try self.inner().bufferFromHostBuffer(api, args);
+        return .{ @ptrCast(buffer), @ptrCast(event_) };
     }
 
     pub fn deserializeAndLoad(self: *const Client, api: *const Api, bytes: []const u8) ApiError!*LoadedExecutable {
@@ -153,10 +149,6 @@ pub const Buffer = opaque {
         return self.inner().isOnCpu(api);
     }
 
-    pub fn memory(self: *const Buffer, api: *const Api) *const Memory {
-        return self.inner().memory(api);
-    }
-
     pub fn toHostBuffer(self: *const Buffer, api: *const Api, dst: []u8) ApiError!?*Event {
         return @ptrCast(try self.inner().toHostBuffer(api, dst));
     }
@@ -209,7 +201,8 @@ pub const Event = opaque {
         return self.inner().getEventError(api);
     }
 
-    pub fn await_(self: *Event, api: *const Api) ApiError!void {
+    pub const await_ = awaitt;
+    pub fn awaitt(self: *Event, api: *const Api) !void {
         defer self.deinit(api);
 
         if (self.isReady(api)) {
@@ -265,13 +258,13 @@ pub const LoadedExecutable = opaque {
     };
 
     pub fn execute(self: *const LoadedExecutable, api: *const Api, args: ExecuteArgs) ExecuteError!void {
-        try asynk.callBlocking(pjrt.LoadedExecutable.execute, .{ self.inner(), api, pjrt.LoadedExecutable.ExecuteArgs{
+        try self.inner().execute(api, pjrt.LoadedExecutable.ExecuteArgs{
             .num_args = args.num_args,
             .arguments = @ptrCast(args.arguments),
             .results = @ptrCast(args.results),
             .events = @ptrCast(args.events),
             .non_donatable_input_indices = args.non_donatable_input_indices,
-        } });
+        });
     }
 
     pub fn getExecutable(self: *LoadedExecutable, api: *const Api) ApiError!*Executable {
