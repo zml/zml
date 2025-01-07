@@ -135,8 +135,9 @@ pub const Profiler = struct {
             return;
         }
 
-        var converter = try TraceContainer.init(allocator, profile_data.items(), 1_000_000);
+        var converter = TraceContainer.init(allocator);
         defer converter.deinit();
+        try converter.parseXSpaceBytes(profile_data.items(), 1_000_000);
 
         var output_file = try dir.createFile(file_name, .{});
         defer output_file.close();
