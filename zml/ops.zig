@@ -777,20 +777,18 @@ pub fn scatter(
     // we probably should check all of them.
     const self = meta.first(Tensor, inputs);
     const update = meta.first(Tensor, updates);
-    log.warn("{_}.scatterSlices({any}, {})", .{ self, index_tensors, update });
     var indices_per_axis, var coord_axes_ = Shape.parseStruct(Tensor, index_tensors);
-    log.warn("  * indices_per_axis -> {any}", .{indices_per_axis.constSlice()});
-    log.warn("  * coord_axes_ -> {any}", .{coord_axes_.constSlice()});
 
     if (indices_per_axis.len == 0) return inputs;
-    const tagged_api = coord_axes_.len > 0;
-    if (T == Tensor and indices_per_axis.len == 1 and indices_per_axis.get(0).count() == 1) {
-        return self.dynamicUpdateSlice1d(
-            updates,
-            if (tagged_api) self.axis(coord_axes_.get(0)) else 0,
-            indices_per_axis.get(0).reshape(.{}),
-        );
-    }
+    // The rewrite to dynamicUpdateSlice1d doesn't work for {layer=32,b=8,k=1024,h=8!,hd=128,bf16}.scatterSlices(.{ .layer = Tensor({i32}) }, Tensor({b=8,k=1024,h=8!,hd=128,bf16}))
+    // const tagged_api = coord_axes_.len > 0;
+    // if (T == Tensor and indices_per_axis.len == 1 and indices_per_axis.get(0).count() == 1 and ) {
+    //     return self.dynamicUpdateSlice1d(
+    //         updates,
+    //         if (tagged_api) self.axis(coord_axes_.get(0)) else 0,
+    //         indices_per_axis.get(0).reshape(.{}),
+    //     );
+    // }
 
     // TODO: validate indices_shape: all tensors should have the same shape
     // TODO: validate coord axes: all coord_axes should exist inside self
@@ -936,9 +934,6 @@ fn scatterConfig(
             up_kind.appendAssumeCapacity(.update_window);
         }
     }
-    log.warn("  * op_kind -> {any}", .{op_kind.constSlice()});
-    log.warn("  * up_kind -> {any}", .{up_kind.constSlice()});
-    log.warn("  * scatter_to_operand_axes -> {any}", .{scatter_to_operand_axes.constSlice()});
 
     return .{
         .op_kind = op_kind,
@@ -1012,9 +1007,6 @@ fn scatterPrepareIndices(
         old_scatter_to_op_axes.appendAssumeCapacity(batch_ax);
     }
     cfg.indices_batch_axes = .{};
-
-    log.warn("  * scatter_to_op_axes -> {any}", .{cfg.scatter_to_operand_axes.constSlice()});
-    log.warn("  * old_scatter_to_op_axes -> {any}", .{old_scatter_to_op_axes.constSlice()});
 
     // Reorder the axes so that in indices_per_axis is ordered like in op if possible.
     // TODO: transpose updates if needed
