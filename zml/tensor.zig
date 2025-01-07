@@ -3990,7 +3990,7 @@ fn transposeIsJustAReshape(x: Shape, permutation: []const i64) bool {
     if (permutation.len > x.rank()) return false;
     for (permutation) |ax| {
         const squeezable = x.dim(ax) == 1;
-        perm.appendAssumeCapacity(.{@intCast(ax), squeezable});
+        perm.appendAssumeCapacity(.{ @intCast(ax), squeezable });
     }
 
     var effective_ax: u8 = 0;
@@ -4013,15 +4013,14 @@ fn transposeIsJustAReshape(x: Shape, permutation: []const i64) bool {
     return true;
 }
 
-
 test transposeIsJustAReshape {
-    try std.testing.expect(transposeIsJustAReshape(Shape.init(.{ 5, 1, 3}, .i32), &.{0, 1, 2}));
-    try std.testing.expect(transposeIsJustAReshape(Shape.init(.{ 5, 1, 3}, .i32), &.{1, 0, 2}));
-    try std.testing.expect(!transposeIsJustAReshape(Shape.init(.{ 5, 1, 3}, .i32), &.{2, 1, 0}));
-    try std.testing.expect(transposeIsJustAReshape(Shape.init(.{64,8,1,128},.bf16), &.{0,2,1,3}));
-    try std.testing.expect(!transposeIsJustAReshape(Shape.init(.{64,8,155,128},.bf16), &.{0,2,1,3}));
-    try std.testing.expect(transposeIsJustAReshape(Shape.init(.{64,1,1,128},.bf16), &.{1,2,0,3}));
-    try std.testing.expect(!transposeIsJustAReshape(Shape.init(.{.b=1,.h=10,.q=155,.hd=1},.f32), &.{0,2,1,3}));
-    try std.testing.expect(!transposeIsJustAReshape(Shape.init(.{1,10,155,1},.f32), &.{0,2,3,1}));
-    try std.testing.expect(transposeIsJustAReshape(Shape.init(.{1,10,155,1},.f32), &.{0,1,3,2}));
+    try std.testing.expect(transposeIsJustAReshape(Shape.init(.{ 5, 1, 3 }, .i32), &.{ 0, 1, 2 }));
+    try std.testing.expect(transposeIsJustAReshape(Shape.init(.{ 5, 1, 3 }, .i32), &.{ 1, 0, 2 }));
+    try std.testing.expect(!transposeIsJustAReshape(Shape.init(.{ 5, 1, 3 }, .i32), &.{ 2, 1, 0 }));
+    try std.testing.expect(transposeIsJustAReshape(Shape.init(.{ 64, 8, 1, 128 }, .bf16), &.{ 0, 2, 1, 3 }));
+    try std.testing.expect(!transposeIsJustAReshape(Shape.init(.{ 64, 8, 155, 128 }, .bf16), &.{ 0, 2, 1, 3 }));
+    try std.testing.expect(transposeIsJustAReshape(Shape.init(.{ 64, 1, 1, 128 }, .bf16), &.{ 1, 2, 0, 3 }));
+    try std.testing.expect(!transposeIsJustAReshape(Shape.init(.{ .b = 1, .h = 10, .q = 155, .hd = 1 }, .f32), &.{ 0, 2, 1, 3 }));
+    try std.testing.expect(!transposeIsJustAReshape(Shape.init(.{ 1, 10, 155, 1 }, .f32), &.{ 0, 2, 3, 1 }));
+    try std.testing.expect(transposeIsJustAReshape(Shape.init(.{ 1, 10, 155, 1 }, .f32), &.{ 0, 1, 3, 2 }));
 }
