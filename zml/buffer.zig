@@ -85,6 +85,7 @@ pub const Buffer = struct {
             const pjrt_buffer = try frame.awaitt();
             res._shards.appendAssumeCapacity(pjrt_buffer);
         }
+
         return res;
     }
 
