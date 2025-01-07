@@ -79,36 +79,37 @@ pub const Buffer = struct {
         const buffer_type = bufferTypeFromDtype(host_buffer.shape().dtype());
         const byte_strides = host_buffer.strides() orelse host_buffer.shape().computeStrides().constSlice();
 
-        var frames: std.BoundedArray(asynk.Frame(pjrt.Client.bufferFromHostBuffer), MAX_NUM_SHARDS) = .{};
         const devices = platform.getDevices();
         for (0..n_partitions) |i| {
-            // If no sharding if found, the given buffer is replicated on all devices.
             const buf = if (sharding_ax) |ax| buf: {
                 const start: i64 = @as(i64, @intCast(i)) * chunk_size;
                 break :buf host_buffer.slice1d(ax, .{ .start = start, .end = start + chunk_size });
             } else host_buffer;
 
-            const frame = try asynk.asyncc(pjrt.Client.bufferFromHostBuffer, .{
-                platform.pjrt_client,
-                platform.pjrt_api,
-                .{
-                    .data = buf.data,
-                    .buffer_type = buffer_type,
-                    .dims = buf.shape().dims(),
-                    .byte_strides = byte_strides,
-                    .device = devices[i],
-                    .host_buffer_semantics = .ImmutableOnlyDuringCall,
-                },
+            const pjrt_buffer, const event = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, .{
+                .data = buf.data,
+                .buffer_type = buffer_type,
+                .dims = buf.shape().dims(),
+                .byte_strides = byte_strides,
+                .device = devices[i],
+                .host_buffer_semantics = .ImmutableUntilTransferCompletes,
             });
-
-            frames.appendAssumeCapacity(frame);
-        }
-
-        for (frames.slice()) |*frame| {
-            const pjrt_buffer = try frame.awaitt();
+            if (event) |ev| {
+                ev.deinit(platform.pjrt_api);
+            }
             res._shards.appendAssumeCapacity(pjrt_buffer);
         }
+
         return res;
+    }
+
+    pub fn awaitt(self: Buffer) !Buffer {
+        for (self._shards.constSlice()) |buffer| {
+            if (buffer.getReadyEvent(self._api)) |ev| {
+                try ev.awaitt(self._api);
+            }
+        }
+        return self;
     }
 
     /// Wraps pre-exisiting `pjrt.Buffer` shards into one `zml.Buffer`.
@@ -127,6 +128,11 @@ pub const Buffer = struct {
     /// Copies the given Zig slice to the accelerator memory and
     /// return a Buffer with the given dimensions.
     pub fn fromSlice(platform: Platform, dimz: anytype, s: anytype) !Buffer {
+        const sh = Shape.init(dimz, DataType.fromSliceElementType(s));
+        return from(platform, HostBuffer.fromBytes(sh, std.mem.sliceAsBytes(s)));
+    }
+
+    pub fn fromSlice2(platform: Platform, dimz: anytype, s: anytype) !Buffer {
         const sh = Shape.init(dimz, DataType.fromSliceElementType(s));
         return from(platform, HostBuffer.fromBytes(sh, std.mem.sliceAsBytes(s)));
     }
