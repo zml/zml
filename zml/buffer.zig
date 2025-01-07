@@ -90,36 +90,37 @@ pub const Buffer = struct {
         const buffer_type = bufferTypeFromDtype(host_buffer.shape().dtype());
         const byte_strides = host_buffer.strides() orelse host_buffer.shape().computeStrides().constSlice();
 
-        var frames: std.BoundedArray(asynk.Frame(pjrt.Client.bufferFromHostBuffer), MAX_NUM_SHARDS) = .{};
         const devices = platform.getDevices();
         for (0..n_partitions) |i| {
-            // If no sharding if found, the given buffer is replicated on all devices.
             const buf = if (sharding_ax) |ax| buf: {
                 const start: i64 = @as(i64, @intCast(i)) * chunk_size;
                 break :buf host_buffer.slice1d(ax, .{ .start = start, .end = start + chunk_size });
             } else host_buffer;
 
-            const frame = try asynk.asyncc(pjrt.Client.bufferFromHostBuffer, .{
-                platform.pjrt_client,
-                platform.pjrt_api,
-                pjrt.Client.BufferFromHostBufferArgs{
-                    .data = buf.data,
-                    .buffer_type = buffer_type,
-                    .dims = buf.shape().dims(),
-                    .byte_strides = byte_strides,
-                    .device = devices[i],
-                    .host_buffer_semantics = .ImmutableOnlyDuringCall,
-                },
+            const pjrt_buffer, const event = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, .{
+                .data = buf.data,
+                .buffer_type = buffer_type,
+                .dims = buf.shape().dims(),
+                .byte_strides = byte_strides,
+                .device = devices[i],
+                .host_buffer_semantics = .ImmutableUntilTransferCompletes,
             });
-
-            frames.appendAssumeCapacity(frame);
-        }
-
-        for (frames.slice()) |*frame| {
-            const pjrt_buffer = try frame.awaitt();
+            if (event) |ev| {
+                ev.deinit(platform.pjrt_api);
+            }
             res._shards.appendAssumeCapacity(pjrt_buffer);
         }
+
         return res;
+    }
+
+    pub fn awaitt(self: Buffer) !Buffer {
+        for (self._shards.constSlice()) |buffer| {
+            if (buffer.getReadyEvent(self._api)) |ev| {
+                try ev.awaitt(self._api);
+            }
+        }
+        return self;
     }
 
     /// Wraps pre-exisiting `pjrt.Buffer` shards into one `zml.Buffer`.
@@ -274,7 +275,7 @@ pub const Buffer = struct {
         stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
         const maybe_event = try self._shards.get(0).toHostBuffer(self._api, std.mem.asBytes(&res));
         if (maybe_event) |event| {
-            try event.await_(self._api);
+            try event.awaitt(self._api);
         }
         return res;
     }
@@ -285,10 +286,11 @@ pub const Buffer = struct {
     pub fn toHost(self: Buffer, output: []u8) !HostBuffer {
         stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
         const maybe_event = try self._shards.get(0).toHostBuffer(self._api, output);
-        if (maybe_event) |event| {
-            try event.await_(self._api);
-        }
-        return HostBuffer.fromBytes(self.shape(), output);
+        var hb = HostBuffer.fromBytes(self.shape(), output);
+        hb._event = maybe_event;
+        hb._api = self._api;
+        hb._ready = if (maybe_event) |ev| ev.isReady(self._api) else true;
+        return hb;
     }
 
     /// Copies the content of the Buffer to the host.
@@ -297,9 +299,9 @@ pub const Buffer = struct {
         const output = try HostBuffer.empty(allocator, self.shape());
         stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
         const maybe_event = try self._shards.get(0).toHostBuffer(self._api, @constCast(output.data));
-        if (maybe_event) |event| {
-            try event.await_(self._api);
-        }
+        output._event = maybe_event;
+        output._api = self._api;
+        output._ready = if (maybe_event) |ev| ev.isReady(self._api) else true;
         return output;
     }
 

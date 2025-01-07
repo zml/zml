@@ -105,7 +105,7 @@ pub fn asyncMain() !void {
         defer input.deinit();
 
         printDigit(sample);
-        var result: zml.Buffer = mnist.call(.{input});
+        var result: zml.Buffer = mnist.call(.{try input.awaitt()});
         defer result.deinit();
 
         log.info(
