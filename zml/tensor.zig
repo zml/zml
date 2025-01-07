@@ -1371,7 +1371,11 @@ pub const Tensor = struct {
         }
 
         const res_shape = self._shape.transpose(permutation);
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "tr({any})", .{axes_});
+        if (transposeIsJustAReshape(self.shape(), permutation)) {
+            return self.reshape(res_shape);
+        }
+
+        const loc = self.getContext().location(@src(), "transpose({_}, {d})", .{ self.shape(), permutation });
         const op = dialect.stablehlo.transpose(
             self.getContext().mlirCtx(),
             self.value(),
@@ -1772,7 +1776,7 @@ pub const Tensor = struct {
         const dt: DataType = if (sh.dim(a) <= std.math.maxInt(i32)) .i32 else .i64;
         const res_shape = sh.withDtype(dt);
         const mlir_ctx = CompilationContext.current().mlirCtx();
-        const loc = mlir_ctx.location(@src()).namedFmt(mlir_ctx, "iota({}, {})", .{ res_shape, axis_ });
+        const loc = mlir_ctx.location(@src()).namedFmt(mlir_ctx, "iota({_}, {})", .{ res_shape, a });
 
         var op = dialect.stablehlo.iota(mlir_ctx, a, mlir.ext.RankedTensorType.fromShape(mlir_ctx, res_shape).asType(), loc);
         return _result(res_shape, op.result(0));
@@ -1808,9 +1812,25 @@ pub const Tensor = struct {
         return res;
     }
 
-    /// Returns a 0d Tensor with the given value.
+    /// Returns a 0-rank Tensor with the given value.
     pub fn scalar(val: anytype, dt: DataType) Tensor {
         return Tensor.constant(.{}, Data.init(dt, val));
+    }
+
+    test scalar {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        const Local = struct {
+            pub fn _fwd() [6]Tensor {
+                var res: [6]Tensor = undefined;
+                const dtypes = .{ .bool, .u8, .i32, .f32, .bf16, .u64 };
+                inline for (0..6) |i| res[i] = scalar(0, dtypes[i]);
+                return res;
+            }
+        };
+
+        _ = try zml.testing.compileAndCall(platform, Local._fwd, .{});
     }
 
     /// Returns a constant Tensor with the given value.
@@ -1942,6 +1962,12 @@ pub const Tensor = struct {
         const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "reshape({any})", .{output_shape});
         const reshape_value = dialect.stablehlo.reshape(self.getContext().mlirCtx(), self.value(), tensor_type, loc);
         return _result(output_shape, reshape_value.result(0));
+    }
+
+    /// Converts the given 1 element Tensor into a 0-rank Tensor.
+    pub fn asScalar(self: Tensor) Tensor {
+        stdx.debug.assert(self.count() == 1, "Tensor.asScalar expects an input with exactly 1-element got {}", .{self});
+        return self.reshape(.{});
     }
 
     pub const Pad = struct {
@@ -2129,7 +2155,7 @@ pub const Tensor = struct {
         // Sometimes the backend recognize this pattern, but not always.
         // So let us handle that.
         if (indices.count() == 1) {
-            return self.dynamicSlice1d(coord_axes_.get(0), 1, indices.flattenAll().squeeze(0)).reshape(res_shape);
+            return self.dynamicSlice1d(coord_axes_.get(0), .{ .start = indices.flattenAll().squeeze(0), .len = 1 }).reshape(res_shape);
         }
 
         var slice_dims: Shape.DimsArray = .{};
@@ -3066,25 +3092,21 @@ pub const Tensor = struct {
     /// Slices the input Tensor along a specific axis, with a start offset known at runtime.
     /// Note: this doesn't support tagging, if you have tags,
     /// you should use `dynamicSlice` directly.
-    pub fn dynamicSlice1d(self: Tensor, axis_: i8, len: u63, start_indices: Tensor) Tensor {
-        stdx.debug.assert(start_indices.rank() == 0, "dynamicSlice1d expects 'start_indices' tensor rank to be equal to 0, got {}", .{start_indices.rank()});
+    pub fn dynamicSlice1d(self: Tensor, axis_: i8, slice_: DynSlice) Tensor {
+        stdx.debug.assert(slice_.start.rank() == 0, "dynamicSlice1d expects 'slice_.start' tensor rank to be a scalar, got {}", .{slice_.start});
 
         const a = self.axis(axis_);
-        const new_shape = self._shape.set(a, len);
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "axis={}, len={}", .{ axis_, len });
-        var indices: [Tensor.MAX_RANK]mlir.Value = undefined;
-        for (0..self.rank()) |i| {
-            indices[i] = if (i == a)
-                start_indices.value()
-            else
-                constant(.{}, start_indices.dtype().zero()).value();
-        }
+        const new_shape = self._shape.set(a, slice_.len);
+        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "dynSlice({}, len={})", .{ axis_, slice_.len });
+
+        var start_indices = [_]mlir.Value{constant(.{}, slice_.start.dtype().zero()).value()} ** MAX_RANK;
+        start_indices[a] = slice_.start.value();
 
         const op = dialect.stablehlo.dynamicSlice(
             self.getContext().mlirCtx(),
             self.value(),
             new_shape.dims(),
-            indices[0..self.rank()],
+            start_indices[0..self.rank()],
             loc,
         );
 
@@ -3115,7 +3137,7 @@ pub const Tensor = struct {
         // TODO use slices and slices_tags for the format.
         // Currently this prints: "dynSlice(struct{q: struct{start: tensor.Tensor, comptime len: comptime_int = 1}}{ .q = struct{start: tensor.Tensor, comptime len: comptime_int = 1}{ .start = Tensor({1,10}, dtype=.i64), .len = 1 } })"
         // which is kinda ugly.
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "dynSlice({any})", .{slices_});
+        const loc = self.getContext().location(@src(), "dynSlice({any})", .{slices_});
 
         const idx_dtype = if (slices.len > 0) slices.get(0).start.dtype() else .i32;
         const zero = Tensor.scalar(0, idx_dtype).value();
@@ -3153,7 +3175,7 @@ pub const Tensor = struct {
         {
             const x = try zml.Buffer.fromArray(platform, [10]T{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 });
             const z = try zml.Buffer.scalar(platform, 4, .i32);
-            const res = try zml.testing.compileAndCall(platform, Tensor.dynamicSlice1d, .{ x, 0, 2, z });
+            const res = try zml.testing.compileAndCall(platform, Tensor.dynamicSlice1d, .{ x, 0, .{ .len = 2, .start = z } });
 
             try testing.expectEqual([2]T{ 4, 5 }, try res.getValue([2]T));
         }
@@ -3163,7 +3185,7 @@ pub const Tensor = struct {
             const x = try zml.Buffer.fromArray(platform, [2][5]T{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } });
             const z = try zml.Buffer.scalar(platform, 3, .i32);
 
-            const res = try zml.testing.compileAndCall(platform, Tensor.dynamicSlice1d, .{ x, 1, 2, z });
+            const res = try zml.testing.compileAndCall(platform, Tensor.dynamicSlice1d, .{ x, 1, .{ .len = 2, .start = z } });
             try testing.expectEqual([4]T{ 3, 4, 8, 9 }, res.getValue([4]T));
         }
     }
@@ -3975,4 +3997,45 @@ inline fn toI64(values: anytype) []i64 {
     var res: [Tensor.MAX_RANK]i64 = undefined;
     for (values, 0..) |val, i| res[i] = @intCast(val);
     return res[0..values.len];
+}
+
+fn transposeIsJustAReshape(x: Shape, permutation: []const i64) bool {
+    var perm: std.BoundedArray(struct { u8, bool }, Tensor.MAX_RANK) = .{};
+    // Don't rewrite on invalid inputs.
+    if (permutation.len > x.rank()) return false;
+    for (permutation) |ax| {
+        const squeezable = x.dim(ax) == 1;
+        perm.appendAssumeCapacity(.{ @intCast(ax), squeezable });
+    }
+
+    var effective_ax: u8 = 0;
+    for (0..perm.len) |i| {
+        const ax, const squeezable = perm.get(i);
+        if (squeezable) {
+            // Effectively squeeze this axis by decrementing axes coming after by 1.
+            for (i..perm.len) |j| {
+                if (perm.buffer[j][0] > ax) {
+                    perm.buffer[j][0] -= 1;
+                }
+            }
+            continue;
+        }
+
+        if (ax != effective_ax) return false;
+        effective_ax += 1;
+    }
+
+    return true;
+}
+
+test transposeIsJustAReshape {
+    try std.testing.expect(transposeIsJustAReshape(Shape.init(.{ 5, 1, 3 }, .i32), &.{ 0, 1, 2 }));
+    try std.testing.expect(transposeIsJustAReshape(Shape.init(.{ 5, 1, 3 }, .i32), &.{ 1, 0, 2 }));
+    try std.testing.expect(!transposeIsJustAReshape(Shape.init(.{ 5, 1, 3 }, .i32), &.{ 2, 1, 0 }));
+    try std.testing.expect(transposeIsJustAReshape(Shape.init(.{ 64, 8, 1, 128 }, .bf16), &.{ 0, 2, 1, 3 }));
+    try std.testing.expect(!transposeIsJustAReshape(Shape.init(.{ 64, 8, 155, 128 }, .bf16), &.{ 0, 2, 1, 3 }));
+    try std.testing.expect(transposeIsJustAReshape(Shape.init(.{ 64, 1, 1, 128 }, .bf16), &.{ 1, 2, 0, 3 }));
+    try std.testing.expect(!transposeIsJustAReshape(Shape.init(.{ .b = 1, .h = 10, .q = 155, .hd = 1 }, .f32), &.{ 0, 2, 1, 3 }));
+    try std.testing.expect(!transposeIsJustAReshape(Shape.init(.{ 1, 10, 155, 1 }, .f32), &.{ 0, 2, 3, 1 }));
+    try std.testing.expect(transposeIsJustAReshape(Shape.init(.{ 1, 10, 155, 1 }, .f32), &.{ 0, 1, 3, 2 }));
 }

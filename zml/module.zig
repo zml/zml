@@ -177,6 +177,10 @@ pub const CompilationContext = struct {
         return self._mlir_ctx;
     }
 
+    pub fn location(self: *const CompilationContext, src: std.builtin.SourceLocation, comptime name: [:0]const u8, args: anytype) mlir.Location {
+        return self._mlir_ctx.location(src).namedFmt(self._mlir_ctx, name, args);
+    }
+
     /// Compiles the given function with the given arguments.
     /// This is the untyped API and is not meant to be use directly.
     ///
@@ -883,10 +887,12 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, m
     try options.env_option_overrides.ensureUnusedCapacity(arena, 16);
     if (xla_dump_to_ orelse platform.compilation_options.xla_dump_to) |xla_dump_to| {
         setFlag(&options, "xla_dump_to", xla_dump_to);
+        setFlag(&options, "xla_dump_hlo_as_dot", true);
         if (platform.compilation_options.xla_dump_fusion_visualization) {
-            setFlag(&options, "xla_dump_hlo_as_html", true);
-            setFlag(&options, "xla_dump_hlo_as_dot", true);
             setFlag(&options, "xla_dump_fusion_visualization", true);
+        }
+        if (platform.compilation_options.xla_dump_hlo_pass_re) |re| {
+            setFlag(&options, "xla_dump_hlo_pass_re", re);
         }
     }
     switch (platform.target) {

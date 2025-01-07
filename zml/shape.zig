@@ -391,20 +391,23 @@ pub const Shape = struct {
         const bare_fmt = fmt.len == 1 and fmt[0] == '_';
         _ = try writer.write(if (bare_fmt) "{" else "Shape({");
 
+        var need_comma = false;
         for (self.dims(), 0..) |d, i| {
-            const prefix = if (i == 0) "" else ",";
+            if (need_comma) try writer.writeByte(',');
             const t = self.tag(i);
             if (t != TagUnknown) {
-                try writer.print("{s}.{s}={d}", .{ prefix, t, d });
+                try writer.print("{s}={d}", .{ t, d });
             } else {
-                try writer.print("{s}{d}", .{ prefix, d });
+                try writer.print("{d}", .{d});
             }
             if (self._sharding_info[i]) {
                 try writer.writeByte('!');
             }
+            need_comma = true;
         }
-        _ = try writer.print("}}, dtype=.{s}", .{@tagName(self.dtype())});
-        if (!bare_fmt) _ = try writer.write(")");
+        if (need_comma) try writer.writeByte(',');
+        _ = try writer.write(@tagName(self.dtype()));
+        _ = try writer.write(if (bare_fmt) "}" else "})");
     }
 
     pub fn reshape(self: Shape, new_shape_: anytype) Shape {
