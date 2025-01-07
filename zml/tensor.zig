@@ -127,8 +127,8 @@ pub const Tensor = struct {
     /// Returns the dimension of axis 'axis_'.
     ///
     /// 'axis_' can be an integer or a tag.
-    pub fn dim(self: Tensor, axis_: anytype) u63 {
-        return @intCast(self._shape.dim(axis_));
+    pub fn dim(self: Tensor, axis_: anytype) i64 {
+        return self._shape.dim(axis_);
     }
 
     /// Returns the dimensions of a Tensor as a slice.
