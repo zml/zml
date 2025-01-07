@@ -1372,7 +1372,6 @@ pub const Tensor = struct {
 
         const res_shape = self._shape.transpose(permutation);
         if (transposeIsJustAReshape(self.shape(), permutation)) {
-            scoped_log.warn("Rewriting transpose({}, {d}) as a reshape({}, {})", .{ self, permutation, self, res_shape });
             return self.reshape(res_shape);
         }
 
