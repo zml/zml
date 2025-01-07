@@ -13,18 +13,16 @@ var _platform: ?zml.Platform = null;
 pub fn env() zml.Platform {
     if (!builtin.is_test) @compileError("Cannot use zml.testing.env outside of a test block");
     if (_platform == null) {
-        _test_compile_opts = .{
-            .sharding_enabled = true,
-        };
-
         var ctx = zml.Context.init() catch unreachable;
-        _platform = ctx.autoPlatform(.{}).withCompilationOptions(_test_compile_opts);
+        _platform = ctx.autoPlatform(.{}).withCompilationOptions(.{
+            .xla_dump_to = "/tmp/zml/tests/",
+            .sharding_enabled = true,
+            .xla_dump_hlo_pass_re = ".*",
+        });
     }
 
     return _platform.?;
 }
-
-var _test_compile_opts: zml.CompilationOptions = .{};
 
 /// In neural network we generally care about the relative precision,
 /// but on a given dimension, if the output is close to 0, then the precision

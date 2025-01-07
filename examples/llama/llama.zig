@@ -194,7 +194,7 @@ pub const Llama = struct {
 
     pub fn embed(embed_tokens_: zml.nn.TokenEmbedding, tokens_: Tensor, token_index: ?Tensor) Tensor {
         const tokens = if (token_index) |idx|
-            tokens_.dynamicSlice1d(-1, 1, idx)
+            tokens_.dynamicSlice1d(-1, .{ .start = idx, .len = 1 })
         else
             tokens_;
         return zml.call(embed_tokens_, .forward, .{tokens}).withPartialTags(.{ .s, .d });
