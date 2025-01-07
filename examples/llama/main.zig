@@ -166,7 +166,7 @@ const params = clap.parseParamsComptime(
     \\--seed           <UINT>     random seed (optional)
     \\--seq-len        <UINT>     sequence length
     \\--create-options <STRING>   platform creation options JSON, defaults to {}
-    \\--no-llama3      <BOOL>     skip prompt template 
+    \\--no-llama3      <BOOL>     skip prompt template
     \\--sharding       <BOOL>     default: true: sharding on or off
 );
 
