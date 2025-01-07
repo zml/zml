@@ -57,8 +57,8 @@ pub fn generateText(
     var output = std.ArrayList(u8).init(allocator);
     defer output.deinit();
 
-    var tokens = try zml.Buffer.fromSlice(mod.platform(), .{max_seq_len}, token_buffer);
-    var prefill_token_index = try zml.Buffer.fromSlice(mod.platform(), .{}, &[_]i32{@intCast(prompt_tok.len - 1)});
+    var tokens = try zml.Buffer.fromSlice2(mod.platform(), .{max_seq_len}, token_buffer);
+    var prefill_token_index = try zml.Buffer.fromSlice2(mod.platform(), .{}, &[_]i32{@intCast(prompt_tok.len - 1)});
     defer prefill_token_index.deinit();
 
     var rng = try zml.Tensor.Rng.init(mod.platform(), seed);
