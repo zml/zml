@@ -445,6 +445,7 @@ fn _populateStruct(
             return true;
         },
         .Void => true,
+        .Union => true,
         else => if (required) {
             log.err("{s}: {s} type not supported", .{ prefix, @typeName(T) });
             return error.UnsupportedMetadataType;
