@@ -175,7 +175,7 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
         } else {
             to.* = null;
         },
-        .Int, .Float, .Enum => to.* = from,
+        .Int, .Float, .Enum, .Union => to.* = from,
         else => stdx.debug.compileError("zml.meta.mapAlloc doesn't support: {}", .{FromStruct}),
     }
 }
