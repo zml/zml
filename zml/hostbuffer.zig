@@ -2,6 +2,8 @@ const std = @import("std");
 
 const stdx = @import("stdx");
 
+const pjrt = @import("pjrtx.zig");
+
 const Buffer = @import("buffer.zig").Buffer;
 const Data = @import("dtype.zig").Data;
 const DataType = @import("dtype.zig").DataType;
@@ -24,6 +26,9 @@ pub const HostBuffer = struct {
         managed: std.mem.Alignment,
         unmanaged,
     } = .unmanaged,
+    _ready: bool = true,
+    _api: ?*const pjrt.Api = null,
+    _event: ?*pjrt.Event = null,
 
     /// Allocates a HostBuffer with the given shape.
     /// The memory is left undefined.
@@ -299,6 +304,20 @@ pub const HostBuffer = struct {
             ._strides = strd.buffer,
             ._memory = self._memory,
         };
+    }
+
+    pub fn awaitt(self: *HostBuffer) !*HostBuffer {
+        if (self._ready) {
+            return self;
+        }
+        if (self._event) |ev| {
+            if (self._api) |api| {
+                try ev.awaitt(api);
+            } else {
+                stdx.debug.panic("Got an event but no API. This should not happen.", .{});
+            }
+        }
+        return self;
     }
 
     pub fn format(
