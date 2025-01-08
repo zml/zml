@@ -75,6 +75,8 @@ pub const ModernBertAttention = struct {
         sliding_window_mask: Tensor,
         position_ids: Tensor,
     ) Tensor {
+        _ = position_ids; // autofix
+
         const batch_size = hidden_states.shape().dim(0);
         const seq_length = hidden_states.shape().dim(1);
         const num_heads = 12; // config.json: num_attention_heads
@@ -90,14 +92,13 @@ pub const ModernBertAttention = struct {
         var qkv: Tensor = zml.call(self.Wqkv, .forward, .{hidden_states}); // Wqkv.out.0
 
         // Reshape to { batch_size, seq_len, 3, num_heads, head_dim }
-        qkv = qkv.reshape(.{ batch_size, seq_length, 3, num_heads, head_dim });
-        // Transpose for attention computation  { batch_size, seq_len, 3, num_heads, head_dim } -> { batch_size, num_heads, 3, seq_length, head_dim }
-        qkv = qkv.transpose(.{ 0, 3, 2, 1, 4 });
+        qkv = qkv.reshape(.{ batch_size, seq_length, 3, num_heads, head_dim }).withTags(.{ .b, .s, .fixed, .h, .hd });
 
-        // Split into query, key, value tensors - each { batch_size, num_heads, seq_length, head_dim }
-        var q = qkv.slice1d(2, .{ .start = 0, .end = 1 }).squeeze(2).withTags(.{ .b, .h, .s, .hd });
-        var k = qkv.slice1d(2, .{ .start = 1, .end = 2 }).squeeze(2).withTags(.{ .b, .h, .s, .hd });
-        var v = qkv.slice1d(2, .{ .start = 2, .end = 3 }).squeeze(2).withTags(.{ .b, .h, .s, .hd });
+        // Split into query, key, value tensors - each { batch_size, seq_length, num_heads, head_dim }
+        // TODO: replace with: var q, var k, var v = qkv.chunkExact(.fixed, 2);
+        var q = qkv.slice1d(.fixed, .{ .start = 0, .end = 1 }).squeeze(.fixed);
+        var k = qkv.slice1d(.fixed, .{ .start = 1, .end = 2 }).squeeze(.fixed);
+        var v = qkv.slice1d(.fixed, .{ .start = 2, .end = 3 }).squeeze(.fixed);
 
         // Apply rotary position embeddings (RoPE)
         // Layer 0, 3, 6, 9, 12 ... use global RoPE
@@ -106,11 +107,9 @@ pub const ModernBertAttention = struct {
             .impl = .sequential,
             .freq_base = if (self.is_global_attention) 160_000 else 10_000,
         };
-        const pos_idx = null; // TODO: This is temporary, need to implement position_ids ?
-        _ = position_ids;
 
-        q = zml.nn.rope(q, pos_idx, rope_opts);
-        k = zml.nn.rope(k, pos_idx, rope_opts);
+        q = zml.nn.rope(q, null, rope_opts);
+        k = zml.nn.rope(k, null, rope_opts);
 
         // rename dimensions for sdpa
         q = q.rename(.{ .s = .q });
@@ -126,10 +125,7 @@ pub const ModernBertAttention = struct {
         };
 
         // Scaled dot product attention
-        var attn_output = zml.nn.sdpa(q, k, v, sdqa_opts);
-
-        // { batch, heads, query_seq, head_dim } -> { batch, query_seq, heads * head_dim }
-        attn_output = attn_output.transpose(.{ .b, .q, .h, .hd });
+        const attn_output = zml.nn.sdpa(q, k, v, sdqa_opts);
         const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
 
         // Final projection
