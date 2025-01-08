@@ -262,6 +262,8 @@ pub const HostBuffer = struct {
         try writer.print("HostBuffer(.{_})", .{self._shape});
     }
 
+    /// Formatter for a HostBuffer that also print the values not just the shape.
+    /// Usage: `std.log.info("my buffer: {}", .{buffer.pretty()});`
     pub fn pretty(self: HostBuffer) PrettyPrinter {
         return .{ .x = self };
     }
