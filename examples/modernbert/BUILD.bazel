@@ -1,0 +1,11 @@
+load("@zml//bazel:zig.bzl", "zig_cc_binary")
+
+zig_cc_binary(
+    name = "test-implementation",
+    srcs = ["modernbert.zig"],
+    main = "test.zig",
+    deps = [
+        "@zml//async",
+        "@zml//zml",
+    ],
+)
