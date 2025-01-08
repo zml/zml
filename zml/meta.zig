@@ -235,7 +235,6 @@ test mapAlloc {
     try testing.expectEqual(12, bb.static_slice[1].b);
 }
 
-/// Recursively visit the given struct and calls the callback for each K found.
 /// The `v` parameter must me a pointer, and tensor data need to be mutable if callbacks needs it.
 pub fn visit(comptime cb: anytype, ctx: FnParam(cb, 0), v: anytype) void {
     const T = @TypeOf(v);
@@ -269,6 +268,7 @@ pub fn visit(comptime cb: anytype, ctx: FnParam(cb, 0), v: anytype) void {
         } else switch (@typeInfo(ptr_info.child)) {
             .Struct => |s| inline for (s.fields) |field_info| {
                 if (field_info.is_comptime) continue;
+                if (@sizeOf(field_info.type) == 0) continue;
                 const field_type_info = @typeInfo(field_info.type);
                 // If the field is already a pointer, we recurse with it directly, otherwise, we recurse with a pointer to the field.
                 switch (field_type_info) {
@@ -390,6 +390,86 @@ test visit {
 
         try std.testing.expectEqual(6, context.result);
     }
+}
+
+pub fn edit(comptime cb: anytype, ctx: _CollectCtx(cb), from: anytype) @TypeOf(from) {
+    const T = _CollectArg(cb);
+    stdx.debug.assertComptime(stdx.meta.FnResult(cb) == T, "edit expects a `fn(T) T` or a `fn(Ctx, T) T callback got {}", .{@TypeOf(cb)});
+
+    var res = from;
+    if (@TypeOf(ctx) == void) {
+        visit(struct {
+            pub fn _cb(_: void, x: *T) void {
+                x.* = cb(x.*);
+            }
+        }._cb, ctx, &res);
+    } else {
+        visit(struct {
+            pub fn _cb(_ctx: _CollectCtx(cb), x: *T) void {
+                x.* = cb(_ctx, x.*);
+            }
+        }._cb, ctx, &res);
+    }
+
+    return res;
+}
+
+test edit {
+    const A = struct {
+        a: i8,
+        pub fn increment(offset: u8, a: @This()) @This() {
+            return .{ .a = a.a + offset };
+        }
+
+        pub fn negate(a: @This()) @This() {
+            return .{ .a = -a.a };
+        }
+    };
+
+    const Empty = struct {};
+
+    const AA = struct {
+        field: A,
+        array: [2]A,
+        other: u8,
+        // We want to allow conversion from comptime to runtime, because Zig type inference works like this.
+        field_with_empty: struct { A, Empty },
+    };
+
+    const aa: AA = .{
+        .field = .{ .a = 4 },
+        .array = .{ .{ .a = 5 }, .{ .a = 6 } },
+        .other = 7,
+        .field_with_empty = .{ .{ .a = 9 }, .{} },
+    };
+
+    const bb = edit(A.negate, {}, aa);
+    try testing.expectEqual(bb, AA{
+        .field = .{ .a = -4 },
+        .array = .{ .{ .a = -5 }, .{ .a = -6 } },
+        .other = 7,
+        .field_with_empty = .{ .{ .a = -9 }, .{} },
+    });
+}
+
+pub fn count(T: type, value: anytype) u32 {
+    var counter: u32 = 0;
+    visit(struct {
+        pub fn cb(res: *u32, _: *const T) void {
+            res.* += 1;
+        }
+    }.cb, &counter, value);
+    return counter;
+}
+
+pub fn first(T: type, value: anytype) T {
+    var res: ?T = null;
+    visit(struct {
+        pub fn cb(res_ptr: *?T, x: *const T) void {
+            if (res_ptr.* == null) res_ptr.* = x.*;
+        }
+    }.cb, &res, &value);
+    return res.?;
 }
 
 /// Given a `fn([]const T, Args) T` and a slice of values,

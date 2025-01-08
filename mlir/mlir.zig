@@ -619,7 +619,7 @@ pub const DenseElementsAttributeTypes = enum {
 
 pub fn DenseIntOrFPElementsAttribute(comptime dt: DenseElementsAttributeTypes) type {
     const ZigInDataType, const ZigOutDataType, const initFn, const getValue = switch (dt) {
-        .bool => .{ i32, bool, c.mlirDenseElementsAttrBoolGet, c.mlirDenseElementsAttrGetBoolValue },
+        .bool => .{ bool, bool, c.mlirDenseElementsAttrBoolGet, c.mlirDenseElementsAttrGetBoolValue },
         .i8 => .{ i8, i8, c.mlirDenseElementsAttrInt8Get, c.mlirDenseElementsAttrGetInt8Value },
         .i16 => .{ i16, i16, c.mlirDenseElementsAttrInt16Get, c.mlirDenseElementsAttrGetInt16Value },
         .i32 => .{ i32, i32, c.mlirDenseElementsAttrInt32Get, c.mlirDenseElementsAttrGetInt32Value },
@@ -853,6 +853,8 @@ pub const Operation = struct {
             @panic("Failed to create MLIR operation");
         };
         if (args.verify and new_op.verify() == false) {
+            std.debug.lockStdErr();
+            defer std.debug.unlockStdErr();
             log.err("Failed to verify MLIR operation:\n{}", .{new_op.mlirFormatter(.{ .debug_info = true })});
             @panic("Failed to verify MLIR operation");
         }

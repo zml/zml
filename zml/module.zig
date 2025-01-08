@@ -177,6 +177,10 @@ pub const CompilationContext = struct {
         return self._mlir_ctx;
     }
 
+    pub fn location(self: *const CompilationContext, src: std.builtin.SourceLocation, comptime name: [:0]const u8, args: anytype) mlir.Location {
+        return self._mlir_ctx.location(src).namedFmt(self._mlir_ctx, name, args);
+    }
+
     /// Compiles the given function with the given arguments.
     /// This is the untyped API and is not meant to be use directly.
     ///
@@ -235,7 +239,7 @@ pub const CompilationContext = struct {
                 }
             }
 
-            const loaded_executable = compileModuleToPjrtExecutable(arena, self._platform, module, module_dir.?) catch |err| {
+            const loaded_executable = compileModuleToPjrtExecutable(arena, self._platform, module, module_dir) catch |err| {
                 log.err(
                     "pjrt-{s} failed to compile following valid MLIR:\n{}\n{}",
                     .{ @tagName(self._platform.target), module.op().mlirFormatter(.{}), err },
@@ -361,7 +365,7 @@ pub const CompilationContext = struct {
         defer arena_state.deinit();
         const arena = arena_state.allocator();
 
-        const tensor_count = countTensors(args);
+        const tensor_count = meta.count(Tensor, args);
 
         const mlir_ctx = self.mlirCtx();
         const loc = mlir_ctx.location(@src());
@@ -791,7 +795,7 @@ pub const CompilationContext = struct {
         };
     }
 
-    fn getValue(self: *const CompilationContext, tensor: Tensor) mlir.Value {
+    pub fn getValue(self: *const CompilationContext, tensor: Tensor) mlir.Value {
         return self.getValueAndDonation(tensor)[0];
     }
 
@@ -883,10 +887,12 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, m
     try options.env_option_overrides.ensureUnusedCapacity(arena, 16);
     if (xla_dump_to_ orelse platform.compilation_options.xla_dump_to) |xla_dump_to| {
         setFlag(&options, "xla_dump_to", xla_dump_to);
+        setFlag(&options, "xla_dump_hlo_as_dot", true);
         if (platform.compilation_options.xla_dump_fusion_visualization) {
-            setFlag(&options, "xla_dump_hlo_as_html", true);
-            setFlag(&options, "xla_dump_hlo_as_dot", true);
             setFlag(&options, "xla_dump_fusion_visualization", true);
+        }
+        if (platform.compilation_options.xla_dump_hlo_pass_re) |re| {
+            setFlag(&options, "xla_dump_hlo_pass_re", re);
         }
     }
     switch (platform.target) {
@@ -898,7 +904,8 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, m
             //  setFlag(&options, "xla_gpu_fused_attention_use_cudnn_rng", true);
             //  setFlag(&options, "xla_gpu_enable_cudnn_layer_norm", true);
             //  setFlag(&options, "xla_gpu_enable_custom_fusions", true);
-            //  setFlag(&options, "xla_gpu_enable_dynamic_slice_fusion", true);
+            setFlag(&options, "xla_gpu_enable_dynamic_slice_fusion", true);
+            setFlag(&options, "xla_gpu_enable_while_loop_double_buffering", true);
             //  setFlag(&options, "xla_gpu_use_runtime_fusion", true);
             //  setFlag(&options, "xla_gpu_enable_latency_hiding_scheduler", true);
             var r_ = try runfiles.Runfiles.create(.{ .allocator = arena }) orelse {
