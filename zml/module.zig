@@ -810,8 +810,11 @@ fn computeModuleHash(platform: Platform, module: mlir.Module) u64 {
     const writer = hasher_writer.writer();
 
     // Hash the canonicalized IR, without debug information that can change across builds.
-    module.op().writeBytecode(writer);
-    //module.op().print(writer, .{ .debug_info = false });
+    module.op().print(writer, .{ .debug_info = false });
+    // Note: before we where using module.op().writeBytecode(writer),
+    // but it crashes on some inputs, notably for unused variables.
+    // So we use the text representation of the mlir.
+    // See https://github.com/zml/zml/issues/97.
     // Writes can't fail because we are writing to a hasher.
     writer.writeAll(platform.pjrt_client.getPlatformName(platform.pjrt_api)) catch unreachable;
     const api_version = platform.pjrt_api.version();
