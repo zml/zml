@@ -1884,11 +1884,17 @@ pub const Tensor = struct {
     /// you will lose the tags.
     /// To avoid use favorise `.broad(shape)` when working with tagged tensors.
     pub fn broadcast(self: Tensor, output_shape: Shape, axes_: []const i64) Tensor {
-        const res_shape = output_shape.withDtype(self.dtype());
         stdx.debug.assert(axes_.len == self.rank(), "broadcast expects axes_ to map all axes from self to axes of the output shape, got broadcast({}, {}, {d})", .{ self, output_shape, axes_ });
         for (0.., axes_) |self_ax, other_ax| {
             const d = self.dim(self_ax);
             stdx.debug.assert(d == 1 or d == output_shape.dim(other_ax), "broadcast expects shape axes to either be 1-sized or to match the target size. got broadcast({}, {}, {d}), error on self axis {} mapping to other axis {}", .{ self, output_shape, axes_, self_ax, other_ax });
+        }
+
+        const res_shape = output_shape.withDtype(self.dtype());
+        if (std.mem.eql(i64, self.dims(), output_shape.dims())) {
+            // No broadcast needed. We don't emit a new stablehlo value
+            // but we propagate output_shape tags.
+            return _result(res_shape, self.value());
         }
         const ctx = self.getContext();
         const result_type = mlir.ext.RankedTensorType.fromShape(ctx.mlirCtx(), res_shape).as(mlir.Type).?;
@@ -1923,9 +1929,13 @@ pub const Tensor = struct {
 
     /// Broadcasts a Tensor to the given shape, extending dimensions if needed.
     pub fn broad(self: Tensor, other: Shape) Tensor {
+        // Already the right shape
+        if (std.mem.eql(i64, self.dims(), other.dims())) return self;
+
         // Non ambiguous broadcasting
         if (self._shape.rank() == 0 or self._shape.rank() == other.rank()) {
-            return self.broadcast(other, Shape.range(self._shape.rank(), .bool).dims());
+            const all_axes = [MAX_RANK]i64{ 0, 1, 2, 3, 4, 5, 6, 7 };
+            return self.broadcast(other, all_axes[0..self.rank()]);
         }
 
         // check that each axis of self maps to an axis of other
