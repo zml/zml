@@ -4040,3 +4040,19 @@ test transposeIsJustAReshape {
     try std.testing.expect(!transposeIsJustAReshape(Shape.init(.{ 1, 10, 155, 1 }, .f32), &.{ 0, 2, 3, 1 }));
     try std.testing.expect(transposeIsJustAReshape(Shape.init(.{ 1, 10, 155, 1 }, .f32), &.{ 0, 1, 3, 2 }));
 }
+
+test "unused tensor" {
+    const zml = @import("zml.zig");
+    const platform = zml.testing.env();
+
+    const Local = struct {
+        pub fn forward(x: Tensor) Tensor {
+            const y = x.addConstant(1);
+            _ = y;
+            return x;
+        }
+    };
+
+    const mod = try zml.compileFn(std.testing.allocator, Local.forward, .{Shape.init(.{10}, .f32)}, platform);
+    defer mod.deinit();
+}
