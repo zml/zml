@@ -1008,4 +1008,20 @@ pub const Shape = struct {
             try std.testing.expectEqual(1, s.axis(.b));
         }
     }
+
+    pub fn outer(self: Shape, other: Shape) Shape {
+        var res_shape = self;
+        var batching_axes: u8 = 0;
+        for (0..other.rank()) |ax| {
+            if (other.tag(ax) != Shape.TagUnknown) {
+                if (self.hasTag(other.tag(ax))) |batching_ax| {
+                    stdx.debug.assert(batching_ax == batching_axes and batching_ax == ax, "outer expects batching dims to be the first dims in both tensors, got outer({}, {})", .{ self, other });
+                    batching_axes += 1;
+                }
+            }
+
+            res_shape = res_shape.appendDim(other.dim(ax), other.tag(ax));
+        }
+        return res_shape;
+    }
 };
