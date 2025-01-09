@@ -109,11 +109,6 @@ pub const Buffer = struct {
         return from(platform, HostBuffer.fromBytes(sh, std.mem.sliceAsBytes(s)));
     }
 
-    pub fn fromSlice2(platform: Platform, dimz: anytype, s: anytype) !Buffer {
-        const sh = Shape.init(dimz, DataType.fromSliceElementType(s));
-        return from(platform, HostBuffer.fromBytes(sh, std.mem.sliceAsBytes(s)));
-    }
-
     /// Copies the given Zig array to the accelerator memory and
     /// return a Buffer using the array shape.
     pub fn fromArray(platform: Platform, arr: anytype) !Buffer {
