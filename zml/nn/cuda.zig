@@ -118,9 +118,6 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
     if (opts.attn_mask) |attn_mask| {
         bias = bias.add(attn_mask.broad(bias.shape()));
     }
-    if (opts.bias) |b| {
-        bias = bias.add(b);
-    }
 
     const mlir_ctx = ctx.mlirCtx();
     const loc = mlir_ctx.location(@src());

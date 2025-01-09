@@ -33,7 +33,7 @@ const Mnist = struct {
         for (layers) |layer| {
             x = zml.call(layer, .forward, .{x});
         }
-        return x.argMax(0, .u8).indices;
+        return x.argMax(0).indices.convert(.u8);
     }
 };
 
