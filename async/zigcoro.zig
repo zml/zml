@@ -144,7 +144,7 @@ pub const threading = struct {
         waiter: std.atomic.Value(*const State) = std.atomic.Value(*const State).init(&State.unset_state),
 
         pub fn isSet(self: *ResetEventSingle) bool {
-            return self.waiter.load(&State.set_state, .monotonic) == &State.set_state;
+            return self.waiter.load(.monotonic) == &State.set_state;
         }
 
         pub fn reset(self: *ResetEventSingle) void {
@@ -170,7 +170,9 @@ pub const threading = struct {
                 .waiting = &waiter,
             };
             if (self.waiter.cmpxchgStrong(&State.unset_state, &new_state, .monotonic, .monotonic) == null) {
-                libcoro.xsuspend();
+                while (self.isSet() == false) {
+                    libcoro.xsuspend();
+                }
             }
         }
     };
