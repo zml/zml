@@ -106,13 +106,16 @@ pub const CompilationContext = struct {
     const TensorToBlockArg = std.AutoHashMapUnmanaged(Tensor._Id, struct { mlir.Value, Tensor._Donation });
     const AttributeList = std.BoundedArray(mlir.NamedAttribute, 3);
 
-    pub fn init(allocator_: std.mem.Allocator, name: []const u8, platform: Platform) !CompilationContext {
+    pub fn init(allocator_: std.mem.Allocator, full_name: []const u8, platform: Platform) !CompilationContext {
         const mlir_registry = mlir.Registry.init() catch unreachable;
         inline for (.{ "func", "stablehlo" }) |d| {
             mlir.DialectHandle.fromString(d).insertDialect(mlir_registry);
         }
         var mlir_ctx = mlir.Context.initWithRegistry(mlir_registry, false) catch unreachable;
         mlir_ctx.loadAllAvailableDialects();
+
+        // Too long module names create too long file paths.
+        const name = full_name[0..@min(128, full_name.len)];
 
         const loc = mlir_ctx.location(@src()).named(mlir_ctx, "main");
         const module = mlir.Module.init(loc);
