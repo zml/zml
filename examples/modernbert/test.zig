@@ -6,9 +6,9 @@ const Tensor = zml.Tensor;
 const modernbert = @import("modernbert.zig");
 const ModernBertEmbeddings = modernbert.ModernBertEmbeddings;
 const ModernBertMLP = modernbert.ModernBertMLP;
-const ModernBertAttentionLocal = modernbert.ModernBertAttentionLocal;
-const ModernBertAttentionGlobal = modernbert.ModernBertAttentionGlobal;
+const ModernBertAttention = modernbert.ModernBertAttention;
 const ModernBertEncoderLayer = modernbert.ModernBertEncoderLayer;
+const ModernBertModel = modernbert.ModernBertModel;
 
 // ModernBERT
 const ACTIVATIONS_FILE_PATH: []const u8 = "/Users/victor/Documents/development/zml-torch-activation-example/ModernBERT-base.activations.pt";
@@ -227,14 +227,14 @@ pub fn asyncMain() !void {
     log.info("\n\nTesting model.layers.2.attn layer:", .{});
 
     const attn_shape = try zml.aio.populateModelWithPrefix(
-        ModernBertAttentionLocal,
+        ModernBertAttention,
         model_arena,
         weights_file,
         "model.layers.2.attn",
     );
 
     const attn_weights = try zml.aio.loadModelBuffersWithPrefix(
-        ModernBertAttentionLocal,
+        ModernBertAttention,
         attn_shape,
         weights_file,
         model_arena,
@@ -254,15 +254,16 @@ pub fn asyncMain() !void {
     // model.layers.3.attn
     log.info("\n\nTesting model.layers.3.attn layer:", .{});
 
-    const attn_global_shape = try zml.aio.populateModelWithPrefix(
-        ModernBertAttentionGlobal,
+    var attn_global_shape = try zml.aio.populateModelWithPrefix(
+        ModernBertAttention,
         model_arena,
         weights_file,
         "model.layers.3.attn",
     );
+    attn_global_shape.is_global_attention = true;
 
     const attn_global_weights = try zml.aio.loadModelBuffersWithPrefix(
-        ModernBertAttentionGlobal,
+        ModernBertAttention,
         attn_global_shape,
         weights_file,
         model_arena,
@@ -280,30 +281,62 @@ pub fn asyncMain() !void {
     );
 
     // model.layers.2
-    log.info("\n\nTesting model.layers.2 layer:", .{});
+    // log.info("\n\nTesting model.layers.2 layer:", .{});
+    //
+    // const layer_shape = try zml.aio.populateModelWithPrefix(
+    //     ModernBertEncoderLayer,
+    //     model_arena,
+    //     weights_file,
+    //     "model.layers.2",
+    // );
+    //
+    // const layer_weights = try zml.aio.loadModelBuffersWithPrefix(
+    //     ModernBertEncoderLayer,
+    //     layer_shape,
+    //     weights_file,
+    //     model_arena,
+    //     compute_platform,
+    //     "model.layers.2",
+    // );
+    //
+    // try zml.testing.testLayer(
+    //     compute_platform,
+    //     activations,
+    //     "model.model.layers.2",
+    //     layer_shape,
+    //     layer_weights,
+    //     2e-3,
+    // );
 
-    const layer_shape = try zml.aio.populateModelWithPrefix(
-        ModernBertEncoderLayer,
+    // model
+    log.info("\n\nTesting model layer:", .{});
+
+    // Create the model and configure it.
+    var modern_bert_model = try zml.aio.populateModelWithPrefix(
+        ModernBertModel,
         model_arena,
         weights_file,
-        "model.layers.2",
+        "model",
     );
+    modern_bert_model.init();
 
-    const layer_weights = try zml.aio.loadModelBuffersWithPrefix(
-        ModernBertEncoderLayer,
-        layer_shape,
+    // Load the weights.
+    var modern_bert_weights = try zml.aio.loadModelBuffersWithPrefix(
+        ModernBertModel,
+        modern_bert_model,
         weights_file,
         model_arena,
         compute_platform,
-        "model.layers.2",
+        "model",
     );
+    defer zml.aio.unloadBuffers(&modern_bert_weights);
 
     try zml.testing.testLayer(
         compute_platform,
         activations,
-        "model.model.layers.2",
-        layer_shape,
-        layer_weights,
-        2e-3,
+        "model.model",
+        modern_bert_model,
+        modern_bert_weights,
+        1e-3,
     );
 }

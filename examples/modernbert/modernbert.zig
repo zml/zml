@@ -30,7 +30,6 @@ pub const ModernBertEmbeddings = struct {
     }
 };
 
-// TODO: Create geglu fn in tensor.zig ?
 /// Switch out the old MLP layers for GeGLU layers, improving on the original BERT’s GeLU activation function.
 ///
 /// The GeGLU activation function is a combination of the Gated Linear Unit (GLU) and the Gaussian Error Linear Unit (GeLU).
@@ -60,7 +59,7 @@ pub const ModernBertMLP = struct {
 
 /// Performs multi-headed self attention on a batch of unpadded sequences.
 ///
-/// TODO: If Flash Attention 2 is installed, this module uses Flash Attention to improve throughput.
+/// If Flash Attention 2 is installed, this module uses Flash Attention to improve throughput.
 /// If Flash Attention 2 is not installed, the implementation will use SDPA,
 pub const ModernBertAttention = struct {
     Wqkv: zml.nn.Linear,
@@ -133,49 +132,8 @@ pub const ModernBertAttention = struct {
     }
 };
 
-pub const ModernBertAttentionLocal = struct {
-    Wqkv: zml.nn.Linear,
-    Wo: zml.nn.Linear,
-
-    pub fn forward(
-        self: ModernBertAttentionLocal,
-        hidden_states: Tensor,
-        attention_mask: Tensor,
-        sliding_window_mask: Tensor,
-        position_ids: Tensor,
-    ) Tensor {
-        const attn = ModernBertAttention{
-            .Wqkv = self.Wqkv,
-            .Wo = self.Wo,
-            .is_global_attention = false,
-        };
-        return attn.forward(hidden_states, attention_mask, sliding_window_mask, position_ids);
-    }
-};
-
-pub const ModernBertAttentionGlobal = struct {
-    Wqkv: zml.nn.Linear,
-    Wo: zml.nn.Linear,
-
-    pub fn forward(
-        self: ModernBertAttentionGlobal,
-        hidden_states: Tensor,
-        attention_mask: Tensor,
-        sliding_window_mask: Tensor,
-        position_ids: Tensor,
-    ) Tensor {
-        const attn = ModernBertAttention{
-            .Wqkv = self.Wqkv,
-            .Wo = self.Wo,
-            .is_global_attention = true,
-        };
-        return attn.forward(hidden_states, attention_mask, sliding_window_mask, position_ids);
-    }
-};
-
 pub const ModernBertEncoderLayer = struct {
-    // TODO: Special case for layer 0 using a union type to handle both "void" and zml.nn.LayerNorm cases
-    attn_norm: zml.nn.LayerNorm,
+    attn_norm: ?zml.nn.LayerNorm = null,
     attn: ModernBertAttention,
     mlp_norm: zml.nn.LayerNorm,
     mlp: ModernBertMLP,
@@ -192,9 +150,7 @@ pub const ModernBertEncoderLayer = struct {
         sliding_window_mask: Tensor,
         position_ids: Tensor,
     ) Tensor {
-        // TODO: Handle global and local attention
-
-        // Layer norm → Attention → Residual connection
+        // TODO: Test this when attn_norm = null
         const attn_norm_output: Tensor = zml.call(self.attn_norm, .forward, .{hidden_states});
         const attn_output: Tensor = zml.call(self.attn, .forward, .{
             attn_norm_output,
@@ -204,7 +160,6 @@ pub const ModernBertEncoderLayer = struct {
         });
         var output = hidden_states.add(attn_output);
 
-        // Layer norm → MLP → Residual connection
         const mlp_norm_output: Tensor = zml.call(self.mlp_norm, .forward, .{output});
         const mlp_output = zml.call(self.mlp, .forward, .{mlp_norm_output});
         output = output.add(mlp_output);
@@ -215,16 +170,22 @@ pub const ModernBertEncoderLayer = struct {
 
 pub const ModernBertModel = struct {
     embeddings: ModernBertEmbeddings,
-    // layers: []ModernBertEncoderLayer,
+    layers: []ModernBertEncoderLayer,
     final_norm: zml.nn.LayerNorm,
 
     pub fn init(self: *ModernBertModel) void {
-        self.final_norm.eps = norm_eps;
+        for (self.layers, 0..) |*encoder_layer, layer_idx| {
+            encoder_layer.attn.is_global_attention = (layer_idx % 3 == 0);
+        }
     }
 
     pub fn forward(self: ModernBertModel, input_ids: Tensor, attention_mask: Tensor) Tensor {
         _ = attention_mask; // autofix
-        _ = self; // autofix
+
+        for (self.layers, 0..) |*encoder_layer, layer_idx| {
+            log.info("encoder_layer {} attn_norm {?} and is_global {}", .{ layer_idx, encoder_layer.attn_norm, encoder_layer.attn.is_global_attention });
+        }
+
         return Tensor.constant(input_ids.shape(), input_ids.dtype().zero());
     }
 };
