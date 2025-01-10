@@ -786,9 +786,14 @@ pub fn scatter(
     // we probably should check all of them.
     const self = meta.first(Tensor, inputs);
     const update = meta.first(Tensor, updates);
-    var indices_per_axis, var coord_axes_ = Shape.parseStruct(Tensor, index_tensors);
+    var indices_per_axis, var indices_axes = Shape.parseStruct(Tensor, index_tensors);
 
     if (indices_per_axis.len == 0) return inputs;
+
+    // validate coord axes: all coord_axes should exist inside self
+    for (indices_axes.constSlice()) |t| {
+        stdx.debug.assert(self._shape.hasTag(t) != null, "zml.ops.scatter expects axes of indices to be axes of inputs, got input={_} and indices={any}", .{ self, indices_axes });
+    }
 
     // Handle scalar indices by broadcasting them to the indices with the highest rank.
     const indices_shape = blk: {
@@ -801,28 +806,23 @@ pub fn scatter(
         break :blk higher_rank;
     };
     for (indices_per_axis.slice()) |*idx| {
-        stdx.debug.assert(idx.shape().canBroadcastTo(indices_shape), "zml.ops.scatter expects all indices tensor to have the same shape, got {any}", .{indices_per_axis.slice()});
+        stdx.debug.assert(idx.shape().canBroadcastTo(indices_shape), "zml.ops.scatter expects all indices tensor to have the same shape, got {_}", .{indices_per_axis.slice()});
+        stdx.debug.assert(idx.dtype() == indices_shape.dtype(), "zml.ops.scatter expects all indices tensor to have the same dtype, got {_}", .{indices_per_axis.slice()});
         idx.* = idx.broad(indices_shape);
     }
 
-    // The rewrite to dynamicUpdateSlice1d doesn't work for {layer=32,b=8,k=1024,h=8!,hd=128,bf16}.scatterSlices(.{ .layer = Tensor({i32}) }, Tensor({b=8,k=1024,h=8!,hd=128,bf16}))
-    // const tagged_api = coord_axes_.len > 0;
-    // if (T == Tensor and indices_per_axis.len == 1 and indices_per_axis.get(0).count() == 1 and ) {
-    //     return self.dynamicUpdateSlice1d(
-    //         updates,
-    //         if (tagged_api) self.axis(coord_axes_.get(0)) else 0,
-    //         indices_per_axis.get(0).reshape(.{}),
-    //     );
-    // }
+    // rewrite simple scatters to dynamicUpdateSlice.
+    if (T == Tensor and indices_shape.rank() == 0) {
+        return self.dynamicUpdateSlice(index_tensors, updates);
+    }
 
-    // TODO: validate coord axes: all coord_axes should exist inside self
     // TODO: ideally we should catch all possible scatter errors and provide nice error messages.
     // TODO: simplify writing scatter by transposing updates
 
-    var config = scatterConfig(self.shape(), update.shape(), indices_per_axis, coord_axes_);
-    const indices = scatterPrepareIndices(&config, self.shape(), update.shape(), &indices_per_axis, &coord_axes_);
+    var config = scatterConfig(self.shape(), update.shape(), indices_per_axis, indices_axes);
+    const indices = scatterPrepareIndices(&config, self.shape(), update.shape(), &indices_per_axis, &indices_axes);
     // const n_indices_axes = update.rank() - _collectAxes(AxisKind, up_kind, .update_window).len;
-    // stdx.debug.assert(n_indices_axe == coord_axes_.len, "scatter({_}, {any}) expects 'updates' to contain all axes from 'indices', got indices={s}, updates={_}", .{ self, index_tensors, coord_axes_.constSlice(), update });
+    // stdx.debug.assert(n_indices_axe == indices_axes.len, "scatter({_}, {any}) expects 'updates' to contain all axes from 'indices', got indices={s}, updates={_}", .{ self, index_tensors, indices_axes.constSlice(), update });
 
     const mlir_ctx = ctx.mlirCtx();
     var _scalar: T = inputs;
@@ -894,25 +894,25 @@ fn scatterConfig(
     op: Shape,
     update: Shape,
     indices_per_axis: std.BoundedArray(Tensor, Tensor.MAX_RANK),
-    coord_axes_: Shape.TagsArray,
+    indices_axes: Shape.TagsArray,
 ) ScatterConfig {
     var op_kind: std.BoundedArray(AxisKind, Tensor.MAX_RANK) = .{};
     var up_kind: std.BoundedArray(AxisKind, Tensor.MAX_RANK) = .{};
     var indices_batch_axes: Shape.DimsArray = .{};
     var scatter_to_operand_axes: Shape.DimsArray = .{};
 
-    const tagged_api = coord_axes_.len > 0;
+    const tagged_api = indices_axes.len > 0;
     const indices = indices_per_axis.get(0).shape();
 
     if (tagged_api) {
-        for (coord_axes_.constSlice()) |t| {
+        for (indices_axes.constSlice()) |t| {
             scatter_to_operand_axes.appendAssumeCapacity(op.axis(t));
         }
 
         for (op.tags()) |t| {
             if (update.hasTag(t)) |_| {
                 if (indices.hasTag(t)) |id_ax| {
-                    if (std.mem.indexOfScalar(Shape.Tag, coord_axes_.constSlice(), t) != null) {
+                    if (std.mem.indexOfScalar(Shape.Tag, indices_axes.constSlice(), t) != null) {
                         // tag is in indices AND in coords -> it's a batching dim that has been rewritten to a regular insertion dim
                         op_kind.appendAssumeCapacity(.inserted_window);
                     } else {
@@ -944,7 +944,7 @@ fn scatterConfig(
                 up_kind.appendAssumeCapacity(.update_window);
             } else {
                 // TODO: consider accepting untagged update here.
-                std.debug.panic("scatter expects 'updates' to be made of axes from op={_} and from indices={s}, got unknown tag {s} in {_}", .{ op, coord_axes_.constSlice(), t, update });
+                std.debug.panic("scatter expects 'updates' to be made of axes from op={_} and from indices={s}, got unknown tag {s} in {_}", .{ op, indices_axes.constSlice(), t, update });
             }
         }
     } else {
