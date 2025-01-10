@@ -886,6 +886,7 @@ const ScatterConfig = struct {
     up_kind: std.BoundedArray(AxisKind, Tensor.MAX_RANK) = .{},
     indices_batch_axes: Shape.DimsArray = .{},
     scatter_to_operand_axes: Shape.DimsArray = .{},
+    updates_transpose: Shape.AxesArray = .{},
 };
 
 const AxisKind = enum { batching, update_window, inserted_window, window_id };
@@ -900,6 +901,7 @@ fn scatterConfig(
     var up_kind: std.BoundedArray(AxisKind, Tensor.MAX_RANK) = .{};
     var indices_batch_axes: Shape.DimsArray = .{};
     var scatter_to_operand_axes: Shape.DimsArray = .{};
+    var updates_transpose: Shape.AxesArray = .{};
 
     const tagged_api = indices_axes.len > 0;
     const indices = indices_per_axis.get(0).shape();
@@ -908,9 +910,15 @@ fn scatterConfig(
         for (indices_axes.constSlice()) |t| {
             scatter_to_operand_axes.appendAssumeCapacity(op.axis(t));
         }
+        for (indices.tags()) |t| {
+            stdx.debug.assert(update.hasTag(t) != null, "scatter expects 'updates' to have all axes of 'indices', got updates={} and indices={s}", .{ update, indices_axes.constSlice() });
+            updates_transpose.appendAssumeCapacity(update.axis(t));
+        }
 
         for (op.tags()) |t| {
-            if (update.hasTag(t)) |_| {
+            if (update.hasTag(t)) |up_ax| {
+                updates_transpose.appendAssumeCapacity(up_ax);
+
                 if (indices.hasTag(t)) |id_ax| {
                     if (std.mem.indexOfScalar(Shape.Tag, indices_axes.constSlice(), t) != null) {
                         // tag is in indices AND in coords -> it's a batching dim that has been rewritten to a regular insertion dim
@@ -928,7 +936,6 @@ fn scatterConfig(
             }
         }
 
-        // Note: we assume the scatter_dims appear in the same order inside indices and inside op.
         for (update.tags(), 0..) |t, up_ax| {
             // Handle batch axes right away.
             if (op.hasTag(t)) |self_ax| {
@@ -959,6 +966,9 @@ fn scatterConfig(
         for (indices_per_axis.len..update.rank()) |_| {
             up_kind.appendAssumeCapacity(.update_window);
         }
+        for (0..update.rank()) |i| {
+            updates_transpose.appendAssumeCapacity(@intCast(i));
+        }
     }
 
     return .{
@@ -966,6 +976,7 @@ fn scatterConfig(
         .up_kind = up_kind,
         .indices_batch_axes = indices_batch_axes,
         .scatter_to_operand_axes = scatter_to_operand_axes,
+        .updates_transpose = updates_transpose,
     };
 }
 

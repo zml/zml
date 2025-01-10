@@ -2558,6 +2558,8 @@ pub const Tensor = struct {
                 .{ .{ .a = 10 }, .{ .a = idx(.{}) }, .{ .a = 3 } },
                 // Use .a as a batching axis with .a=10 x .n=8 updates of 2 elements of .b
                 .{ .{ .a = 10, .b = 20 }, .{ .b = idx(.{ .a = 10, .n = 8 }) }, .{ .a = 10, .n = 8, .b = 2 } },
+                // Same but with update transposed
+                .{ .{ .a = 10, .b = 20 }, .{ .b = idx(.{ .a = 10, .n = 8 }) }, .{ .a = 10, .b = 2, .n = 8 } },
                 // similar, but use the normalized form where a is no longer an explicit batching axis.
                 .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{ .a2 = 10, .n = 8 }), .b = idx(.{ .a2 = 10, .n = 8 }) }, .{ .a2 = 10, .n = 8, .b = 2 } },
                 .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{ .a = 10, .n = 8 }), .b = idx(.{ .a = 10, .n = 8 }) }, .{ .a = 10, .n = 8, .b = 2 } },
