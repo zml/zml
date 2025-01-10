@@ -505,13 +505,13 @@ pub const CompilationContext = struct {
         const Local = struct {
             bias: Tensor,
 
-            pub fn forward(self: @This(), x: Tensor, y: Tensor) [2]Tensor {
-                const x1 = zml.ops.call(self, .inner, .{x});
-                const x2 = zml.ops.call(self, .inner, .{x1});
+            pub fn _forward(self: @This(), x: Tensor, y: Tensor) [2]Tensor {
+                const x1 = zml.ops.call(self, ._inner, .{x});
+                const x2 = zml.ops.call(self, ._inner, .{x1});
                 return .{ x1.reuseBuffer(y), x2 };
             }
 
-            pub fn inner(self: @This(), x: Tensor) Tensor {
+            pub fn _inner(self: @This(), x: Tensor) Tensor {
                 const y = x.add(self.bias);
                 return y.reuseBuffer(x);
             }
@@ -524,7 +524,7 @@ pub const CompilationContext = struct {
         var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
         defer comp.deinit();
         var tensor_args = .{ model, Tensor{ ._shape = s, ._id = .{ .buffer_id = 1234 } }, Tensor{ ._shape = s, ._id = .{ .buffer_id = 1235 } } };
-        const f = try comp.emitMlir(Local.forward, &tensor_args, .{ .name = "test.emitMlir.Local.forward", .kind = .main });
+        const f = try comp.emitMlir(Local._forward, &tensor_args, .{ .name = "test.emitMlir.Local.forward", .kind = .main });
 
         var mlir_bytecode = std.ArrayList(u8).init(std.testing.allocator);
         defer mlir_bytecode.deinit();
@@ -910,8 +910,8 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, m
             //  setFlag(&options, "xla_gpu_fused_attention_use_cudnn_rng", true);
             //  setFlag(&options, "xla_gpu_enable_cudnn_layer_norm", true);
             //  setFlag(&options, "xla_gpu_enable_custom_fusions", true);
-            setFlag(&options, "xla_gpu_enable_dynamic_slice_fusion", true);
-            setFlag(&options, "xla_gpu_enable_while_loop_double_buffering", true);
+            //  setFlag(&options, "xla_gpu_enable_dynamic_slice_fusion", true);
+            //  setFlag(&options, "xla_gpu_enable_while_loop_double_buffering", true);
             //  setFlag(&options, "xla_gpu_use_runtime_fusion", true);
             //  setFlag(&options, "xla_gpu_enable_latency_hiding_scheduler", true);
             var r_ = try runfiles.Runfiles.create(.{ .allocator = arena }) orelse {

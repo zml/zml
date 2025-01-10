@@ -780,7 +780,6 @@ pub fn scatter(
     const n_inputs = meta.count(Tensor, &inputs);
     const n_updates = meta.count(Tensor, &updates);
     stdx.debug.assert(n_inputs == n_updates, "zml.ops.scatter expects the same number of tensors in inputs and updates, got {} and {}", .{ n_inputs, n_updates });
-    // TODO: check all dtypes are the same, this is currently an XLA limitation on scatter
 
     // Note: I was a bit lazy here, and I only look at tags on the first tensor.
     // we probably should check all of them.
@@ -817,8 +816,6 @@ pub fn scatter(
     }
 
     // TODO: ideally we should catch all possible scatter errors and provide nice error messages.
-    // TODO: simplify writing scatter by transposing updates
-
     var config = scatterConfig(self.shape(), update.shape(), indices_per_axis, indices_axes);
     const indices = scatterPrepareIndices(&config, self.shape(), update.shape(), &indices_per_axis, &indices_axes);
     // const n_indices_axes = update.rank() - _collectAxes(AxisKind, up_kind, .update_window).len;
@@ -851,9 +848,6 @@ pub fn scatter(
         .{
             .update_window_dims = _collectAxes(AxisKind, config.up_kind, .update_window).constSlice(),
             .inserted_window_dims = _collectAxes(AxisKind, config.op_kind, .inserted_window).constSlice(),
-            // TODO: the batching_dims is a lie
-            // although they are in stablehlo, they aren't handled well by "scatter_simplifier" pass that insert extra transposes when it sees them,
-            // while they act as extra coordinates. we should rewrite them
             .input_batching_dims = _collectAxes(AxisKind, config.op_kind, .batching).constSlice(),
             .scatter_indices_batching_dims = config.indices_batch_axes.constSlice(),
             .scatter_dims_to_operand_dims = config.scatter_to_operand_axes.constSlice(),
@@ -990,12 +984,12 @@ test scatterConfig {
     defer comp.deactivate();
 
     const Local = struct {
-        pub fn idx(idx_shape: anytype) Tensor {
+        pub fn _idx(idx_shape: anytype) Tensor {
             return Tensor.constant(idx_shape, .{ .i32 = 0 });
         }
     };
 
-    const idx = Local.idx;
+    const idx = Local._idx;
     const op = Shape.init(.{ .a = 10, .b = 20 }, .f32);
 
     // Use .a as a batching axis with .a=10 x .n=8 updates of 2 elements of .b
