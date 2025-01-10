@@ -1929,10 +1929,16 @@ pub const Tensor = struct {
 
     /// Broadcasts a Tensor to the given shape, extending dimensions if needed.
     pub fn broad(self: Tensor, other: Shape) Tensor {
+        // TODO: broad is too restrictive because sometime you only want to specify one specific axis
+        // Note: if you code below, make sure to update Shape.canBroadcastTo.
+        stdx.debug.assert(self._shape.canBroadcastTo(other), "Can't broadcast {} to {}", .{ self, other });
+
         // Already the right shape
         if (std.mem.eql(i64, self.dims(), other.dims())) return self;
 
         // Non ambiguous broadcasting
+        // TODO: broad is error prone because of this:
+        // it will happily broadcast .{ .a = 10, .b = 1 } to .{ .b = 10, .a = 5 }
         if (self._shape.rank() == 0 or self._shape.rank() == other.rank()) {
             const all_axes = [MAX_RANK]i64{ 0, 1, 2, 3, 4, 5, 6, 7 };
             return self.broadcast(other, all_axes[0..self.rank()]);
@@ -1941,13 +1947,7 @@ pub const Tensor = struct {
         // check that each axis of self maps to an axis of other
         var axes_: std.BoundedArray(i64, MAX_RANK) = .{};
         for (self._shape.tags()) |t| {
-            if (t != Shape.TagUnknown) {
-                if (other.hasTag(t)) |ax| {
-                    axes_.appendAssumeCapacity(@intCast(other.axis(ax)));
-                } else {
-                    std.debug.panic("Can't broadcast {} to {}", .{ self, other });
-                }
-            }
+            axes_.appendAssumeCapacity(@intCast(other.axis(t)));
         }
         return self.broadcast(other, axes_.constSlice());
     }

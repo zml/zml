@@ -789,6 +789,22 @@ pub fn scatter(
     var indices_per_axis, var coord_axes_ = Shape.parseStruct(Tensor, index_tensors);
 
     if (indices_per_axis.len == 0) return inputs;
+
+    // Handle scalar indices by broadcasting them to the indices with the highest rank.
+    const indices_shape = blk: {
+        var higher_rank = indices_per_axis.get(0).shape();
+        for (indices_per_axis.constSlice()[1..]) |indices| {
+            if (indices.rank() > higher_rank.rank()) {
+                higher_rank = indices.shape();
+            }
+        }
+        break :blk higher_rank;
+    };
+    for (indices_per_axis.slice()) |*idx| {
+        stdx.debug.assert(idx.shape().canBroadcastTo(indices_shape), "zml.ops.scatter expects all indices tensor to have the same shape, got {any}", .{indices_per_axis.slice()});
+        idx.* = idx.broad(indices_shape);
+    }
+
     // The rewrite to dynamicUpdateSlice1d doesn't work for {layer=32,b=8,k=1024,h=8!,hd=128,bf16}.scatterSlices(.{ .layer = Tensor({i32}) }, Tensor({b=8,k=1024,h=8!,hd=128,bf16}))
     // const tagged_api = coord_axes_.len > 0;
     // if (T == Tensor and indices_per_axis.len == 1 and indices_per_axis.get(0).count() == 1 and ) {
@@ -799,7 +815,6 @@ pub fn scatter(
     //     );
     // }
 
-    // TODO: validate indices_shape: all tensors should have the same shape
     // TODO: validate coord axes: all coord_axes should exist inside self
     // TODO: ideally we should catch all possible scatter errors and provide nice error messages.
     // TODO: simplify writing scatter by transposing updates
