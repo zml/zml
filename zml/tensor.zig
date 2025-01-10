@@ -2403,12 +2403,13 @@ pub const Tensor = struct {
     }
 
     pub const ScatterOpts = struct {
-        /// Promise scatter that all coordinates in `indices` are sorted, wrt to the final in memory offset.
+        /// Promise scatter that all coordinates in `indices` are sorted, wrt to the final offset in `self`
         /// Result is undefined if the promise is violated.
         indices_are_sorted: bool = false,
 
         /// Promise scatter that slices don't overlap.
         /// Result is undefined if the promise is violated.
+        /// This allows for better code generation, because it means that updates can be applied in parallel.
         indices_are_unique: bool = false,
 
         /// Function used to update previous value in `self` with values from `updates`.
@@ -2417,9 +2418,6 @@ pub const Tensor = struct {
         /// otherwise the result will depend on the runtime scheduling
         /// of the operator which is backend specific.
         update_fn: *const fn (Tensor, Tensor) Tensor = increment,
-
-        allow_double_transpose: bool = false,
-        allow_while_loop: bool = false,
 
         pub fn increment(old_value: Tensor, new_value: Tensor) Tensor {
             return old_value.add(new_value.convert(old_value.dtype()));
@@ -2430,32 +2428,85 @@ pub const Tensor = struct {
         }
     };
 
-    /// Update the given tensors, by copying `values` into self slices.
+    /// Update the given tensor, by copying `values` into slice by slice into `self`.
     /// The slices are chosen at runtime by interpreting indices as coordinates into `self`.
-    /// * `indices` represents a set of coordinates into `self`.
-    ///   For the sake of simplifying the creation of `indices` tensor,
-    ///   it's allowed to not mention a specific axis if the coordinate for this axis is always `0`.
-    ///   Similarly to `gatherValues`, the coordinates are read from the `.coord` axis, or last axis if `.coord` is not found.
-    ///   The coordinates represent the "top-left" corner of the slice to extract.
-    ///   `indices.dim(.coord)` must match `coord_axes.len`.
-    ///   Other axes identify one "slice" and they must be found inside `updates`.
+    /// This is a generalized version of `dynamicUpdateSlice` where more than one offset can be specified at a time.
     ///
-    /// * the output tensor starts with axes from `indices`.
-    /// * if the input tensor has tagged axes, matching `indices` axes,
-    ///    they will be considered "batching" axes.
+    /// ### Arguments
     ///
-    /// Sample input/output shapes:
-    /// * scatterSlices([A, B, C, D], .{b, c}, [N, 2], [N, B', C']) -> [A, B, C, D]
-    /// * scatterSlices(x(a,b,c,d), g(n,m), y[n,b,c]) [A,B,C,D] {
-    ///   var z = x;
-    ///   for (0..N) |n| { z[a,g[n,0]+b',g[n,1]+c',d] = y[n,a,b',c',d]; }
+    /// * Return a tensor with same shape than `self`, with updated content.
+    /// * `indices` is a set of Tensor (typically rank 1), representing coordinates into `self`.
+    ///   all indices must have the same shape, but scalars are accepted.
+    ///
+    /// * each `indices` entry contains offset along an axes into `self`.
+    /// Typically axes are identified by their tags, but in the absence of tags on `indices`,
+    /// The entry in indices will be assigned to axes of `self` from major to minor axis.
+    /// It is recommended to have indices referencing only major axes of `self` for better performance.
+    ///
+    /// * `values` shape is obtained by concatenating the shape of `indices` with the shape of the slices to be extracted.
+    ///
+    /// * `opts`: `zml.Tensor.ScatterOpts` des
+    ///
+    /// ### Sample input/output shapes with corresponding pseudo-code.
+    ///
+    /// Basic `scatterSlices` with the first two axes (.a, .b) being indexed, and full (.c, .d) slice copies:
+    ///
+    /// ```
+    /// fn scatterSlices(x[A, B, C, D], .{.a=off_a[N], .b=off_b[N]}, y[N, C, D]) [A, B, C, D] {
+    ///     var z = x;
+    ///     for (0..N) |n| {
+    ///         for (0..C) |c| for (0..D) |d| {{
+    ///             z[off_a[n],off_b[n],c,d] += y[n, c, d];
+    ///         }}
+    ///     }
+    ///     return z;
     /// }
+    /// ```
     ///
-    /// **Warning**: if `opts.update_fn` is not associative not all calls to `scatterSlices` are sound.
+    /// `scatterSlices` with the first three axes (.a, .b, .c) being indexed, and a partial copy of (.c, .d).
+    /// Note that .c axis is present both in the indices and updates, and `updates.dim(.c) < self.dim(.c)`.
+    ///
+    /// ```
+    /// fn scatterSlices(x[A, B, C, D], .{.a=off_a[N], .b=off_b[N], .c=off_c[N]}, y[N, C', D]) [A, B, C, D] {
+    ///     var z = x;
+    ///     for (0..N) |n| {
+    ///        for (0..C') |c| for (0..D) |d| {{
+    ///           z[off_a[n],off_b[n],off_c[n]+c,d] += y[n, c, d];
+    ///        }}
+    ///     }
+    ///     return z;
+    /// }
+    /// ```
+    ///
+    /// `scatterSlices` with the first axis .a being indexed, and where .b is used as a batching axis.
+    /// Note that here .b axis is present in `self`, `off_a`, and `updates`,
+    /// and is not mentionned in the axes of indices.
+    ///
+    /// ```
+    /// fn scatterSlices(x[A, B, C, D], .{.a=off_a[B,N]}, y[N, B, C, D]) [A, B, C, D] {
+    ///     var z = x;
+    ///     for (0..B) |b| {
+    ///         for (0..N) |n| {
+    ///             for (0..C) |c| for (0..D) |d| {{
+    ///                 z[off_a[b,n],b,c,d] += y[n, b, c, d];
+    ///             }}
+    ///         }
+    ///     }
+    ///     return z;
+    /// }
+    /// ```
+    ///
+    /// ### Warnings
+    ///
+    /// * if `opts.update_fn` is not associative not all calls to `scatterSlices` are sound.
     /// In particular if you scatter overlapping slices, with `zml.Tensor.ScatterOpts.override`,
     /// then the result will depend on the execution order that you don't control.
+    ///
+    /// * `scatterSlices` is a very expressive operator, and can lead to complicated code generation
+    /// that requires host<->device synchronization.
+    /// ZML tries to generate the easiest to optimize IR, and will warn you if it generates known problematic IR.
     pub fn scatterSlices(self: Tensor, indices: anytype, updates: Tensor, opts: ScatterOpts) Tensor {
-        // scoped_log.debug("scatterSlices({}, {any}, {}, {})", .{ self, coord_axes, indices, updates });
+        scoped_log.debug("scatterSlices({}, {any}, {})", .{ self, indices, updates });
 
         const UpdateType = @TypeOf(ScatterOpts.increment);
 
@@ -3921,7 +3972,7 @@ pub fn _collectAxes(T: type, bounded_array: std.BoundedArray(T, Tensor.MAX_RANK)
     return res;
 }
 
-pub fn _parseGatherCoord(self: Tensor, axes_: anytype) struct { bool, std.BoundedArray(u3, Tensor.MAX_RANK) } {
+fn _parseGatherCoord(self: Tensor, axes_: anytype) struct { bool, std.BoundedArray(u3, Tensor.MAX_RANK) } {
     const AxesT = @TypeOf(axes_);
     const axes_is_scalar = AxesT == EnumLiteral or AxesT == comptime_int or @typeInfo(AxesT) == .Int;
 

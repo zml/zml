@@ -755,6 +755,15 @@ pub fn addHostCallback(
     return Tensor._result(input.shape(), op.result(0));
 }
 
+/// Generalized version of scatter to many inputs.
+/// See `zml.Tensor.scatterSlices` for documentation on scatter.
+///
+/// This allows to use the same indices to update several tensors at once,
+/// and where the update function is allow to look at elements from the different tensors
+/// to compute the final value.
+///
+/// This sounds nice but in practice XLA doesn't support this well on GPU,
+/// and will generate slow code. In practice stick with `zml.Tensor.scatterSlices`.
 pub fn scatter(
     comptime T: type,
     comptime BlkCtx: type,
@@ -792,6 +801,8 @@ pub fn scatter(
 
     // TODO: validate indices_shape: all tensors should have the same shape
     // TODO: validate coord axes: all coord_axes should exist inside self
+    // TODO: ideally we should catch all possible scatter errors and provide nice error messages.
+    // TODO: simplify writing scatter by transposing updates
 
     var config = scatterConfig(self.shape(), update.shape(), indices_per_axis, coord_axes_);
     const indices = scatterPrepareIndices(&config, self.shape(), update.shape(), &indices_per_axis, &coord_axes_);
