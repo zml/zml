@@ -2495,11 +2495,10 @@ pub const Tensor = struct {
     ///
     /// ### Warnings
     ///
-    /// * if `opts.update_fn` is not associative not all calls to `scatterSlices` are sound.
+    /// - if `opts.update_fn` is not associative not all calls to `scatterSlices` are sound.
     /// In particular if you scatter overlapping slices, with `zml.Tensor.ScatterOpts.override`,
     /// then the result will depend on the execution order that you don't control.
-    ///
-    /// * `scatterSlices` is a very expressive operator, and can lead to complicated code generation
+    /// - `scatterSlices` is a very expressive operator, and can lead to complicated code generation
     /// that requires host<->device synchronization.
     /// ZML tries to generate the easiest to optimize IR, and will warn you if it generates known problematic IR.
     pub fn scatterSlices(self: Tensor, indices: anytype, updates: Tensor, opts: ScatterOpts) Tensor {
@@ -2560,9 +2559,6 @@ pub const Tensor = struct {
                 // similar, but use the normalized form where a is no longer an explicit batching axis.
                 .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{ .a2 = 10, .n = 8 }), .b = idx(.{ .a2 = 10, .n = 8 }) }, .{ .a2 = 10, .n = 8, .b = 2 } },
                 .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{ .a = 10, .n = 8 }), .b = idx(.{ .a = 10, .n = 8 }) }, .{ .a = 10, .n = 8, .b = 2 } },
-                // I'm not sure I like this variant, cause `b` is not mentionned in updates.
-                // So 'stablehlo.scatter' is implicitly broadcasting the updates along `b` axis.
-                // OTOH asking the user to do the broadcasting isn't trivial cause they will need to do shape wrangling and that's annoying.
                 .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{ .n = 8 }) }, .{ .n = 8, .a = 2 } },
                 .{ .{ .a = 10, .b = 20 }, .{ .b = idx(.{ .n = 8 }), .a = idx(.{ .n = 8 }) }, .{ .n = 8, .a = 3, .b = 2 } },
                 .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{ .n = 8 }), .b = idx(.{ .n = 8 }) }, .{ .a = 3, .n = 8, .b = 2 } },
@@ -2739,12 +2735,12 @@ pub const Tensor = struct {
         const platform = zml.testing.env();
         const allocator = std.testing.allocator;
         const ArgMaxTest = struct {
-            pub fn forward(x: Tensor) Tensor.ArgMaxRes {
+            pub fn _fwd(x: Tensor) Tensor.ArgMaxRes {
                 return x.argMax(1);
             }
         };
 
-        const argmax = try zml.compileFn(allocator, ArgMaxTest.forward, .{Shape.init(.{ 1, 5 }, .f32)}, platform);
+        const argmax = try zml.compileFn(allocator, ArgMaxTest._fwd, .{Shape.init(.{ 1, 5 }, .f32)}, platform);
         defer argmax.deinit();
         // Test with tie
         {
@@ -3289,10 +3285,10 @@ pub const Tensor = struct {
             const res = try zml.testing.compileAndCall(
                 platform,
                 struct {
-                    pub fn forward(x_: Tensor, idx_: struct { a: Tensor }, y_: Tensor) Tensor {
+                    pub fn _fwd(x_: Tensor, idx_: struct { a: Tensor }, y_: Tensor) Tensor {
                         return x_.dynamicUpdateSlice(idx_, y_);
                     }
-                }.forward,
+                }._fwd,
                 .{ x.withTags(.{.a}), .{ .a = idx }, y.withTags(.{.a}) },
             );
             try testing.expectEqual([10]f32{ 0, 1, 2, 3, -1, -1, 6, 7, 8, 9 }, try res.getValue([10]f32));
@@ -3307,10 +3303,10 @@ pub const Tensor = struct {
             const res = try zml.testing.compileAndCall(
                 platform,
                 struct {
-                    pub fn forward(x_: Tensor, idx_: Tensor, y_: Tensor) Tensor {
+                    pub fn _fwd(x_: Tensor, idx_: Tensor, y_: Tensor) Tensor {
                         return x_.dynamicUpdateSlice(.{ .b = idx_ }, y_);
                     }
-                }.forward,
+                }._fwd,
                 .{ x.withTags(.{ .a, .b }), idx, y.withTags(.{.a}) },
             );
             try testing.expectEqualDeep(
@@ -3327,10 +3323,10 @@ pub const Tensor = struct {
             const res = try zml.testing.compileAndCall(
                 platform,
                 struct {
-                    pub fn forward(x_: Tensor, idx_: Tensor, y_: Tensor) Tensor {
+                    pub fn _fwd(x_: Tensor, idx_: Tensor, y_: Tensor) Tensor {
                         return x_.dynamicUpdateSlice(.{ zml.Tensor.scalar(0, .i32), idx_ }, y_);
                     }
-                }.forward,
+                }._fwd,
                 .{ x, idx, y },
             );
             try testing.expectEqualDeep(
@@ -3348,10 +3344,10 @@ pub const Tensor = struct {
             const res = try zml.testing.compileAndCall(
                 platform,
                 struct {
-                    pub fn forward(x_: Tensor, idx_: struct { a: Tensor, b: Tensor }, y_: Tensor) Tensor {
+                    pub fn _fwd(x_: Tensor, idx_: struct { a: Tensor, b: Tensor }, y_: Tensor) Tensor {
                         return x_.dynamicUpdateSlice(idx_, y_);
                     }
-                }.forward,
+                }._fwd,
                 .{ x.withTags(.{ .a, .b }), .{ .a = idx_a, .b = idx_b }, y.withTags(.{.a}) },
             );
             try testing.expectEqualDeep(
@@ -3367,11 +3363,11 @@ pub const Tensor = struct {
             const idx_a = try zml.Buffer.scalar(platform, 1, .i32);
             const idx_b = try zml.Buffer.scalar(platform, 3, .i32);
             const A = struct {
-                pub fn forward(x_: Tensor, idx_: [2]Tensor, y_: Tensor) Tensor {
+                pub fn _fwd(x_: Tensor, idx_: [2]Tensor, y_: Tensor) Tensor {
                     return x_.dynamicUpdateSlice(&idx_, y_);
                 }
             };
-            const res = try zml.testing.compileAndCall(platform, A.forward, .{ x, .{ idx_a, idx_b }, y });
+            const res = try zml.testing.compileAndCall(platform, A._fwd, .{ x, .{ idx_a, idx_b }, y });
             try testing.expectEqualDeep(
                 [2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, -1, 9 } },
                 res.getValue([2][5]f32),
@@ -3795,7 +3791,7 @@ test "Tensor.maxPool1d" {
     const platform = zml.testing.env();
 
     const MaxPool = struct {
-        pub fn forward(x: zml.Tensor) Tensor.ArgMaxRes {
+        pub fn _fwd(x: zml.Tensor) Tensor.ArgMaxRes {
             return x.maxPool1d(.{
                 .window_dimensions = 3,
                 .window_strides = 2,
@@ -3807,7 +3803,7 @@ test "Tensor.maxPool1d" {
     for (&data, 0..) |*v, i| v.* = @floatFromInt(i);
 
     const x = try zml.Buffer.fromSlice(platform, .{ 2, 2, 5 }, &data);
-    const result = try zml.testing.compileAndCall(platform, MaxPool.forward, .{x});
+    const result = try zml.testing.compileAndCall(platform, MaxPool._fwd, .{x});
     try zml.testing.expectEqualShapes(Shape.init(.{ 2, 2, 2 }, .f32), result.values.shape());
     try zml.testing.expectEqualShapes(Shape.init(.{ 2, 2, 2 }, .i32), result.indices.shape());
     const buffer = result.values.getValue([2][2][2]f32);
@@ -3831,7 +3827,7 @@ test "Tensor.maxPool2d" {
     const platform = zml.testing.env();
 
     const MaxPool = struct {
-        pub fn forward(x: Tensor) Tensor.ArgMaxRes {
+        pub fn _fwd(x: Tensor) Tensor.ArgMaxRes {
             return x.maxPool2d(.{
                 .window_dimensions = .{ 3, 2 },
                 .window_strides = .{ 2, 1 },
@@ -3843,7 +3839,7 @@ test "Tensor.maxPool2d" {
     for (&data, 0..) |*v, i| v.* = @floatFromInt(i);
     const x = try zml.Buffer.fromSlice(platform, .{ 2, 2, 5, 5 }, &data);
 
-    const result = try zml.testing.compileAndCall(platform, MaxPool.forward, .{x});
+    const result = try zml.testing.compileAndCall(platform, MaxPool._fwd, .{x});
     try zml.testing.expectEqualShapes(Shape.init(.{ 2, 2, 2, 4 }, .f32), result.values.shape());
     try zml.testing.expectEqualShapes(Shape.init(.{ 2, 2, 2, 4 }, .i32), result.indices.shape());
     var buffer: [2][2][2][4]f32 = undefined;

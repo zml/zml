@@ -505,7 +505,7 @@ pub const CompilationContext = struct {
         const Local = struct {
             bias: Tensor,
 
-            pub fn _forward(self: @This(), x: Tensor, y: Tensor) [2]Tensor {
+            pub fn _fwd(self: @This(), x: Tensor, y: Tensor) [2]Tensor {
                 const x1 = zml.ops.call(self, ._inner, .{x});
                 const x2 = zml.ops.call(self, ._inner, .{x1});
                 return .{ x1.reuseBuffer(y), x2 };
@@ -524,7 +524,7 @@ pub const CompilationContext = struct {
         var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
         defer comp.deinit();
         var tensor_args = .{ model, Tensor{ ._shape = s, ._id = .{ .buffer_id = 1234 } }, Tensor{ ._shape = s, ._id = .{ .buffer_id = 1235 } } };
-        const f = try comp.emitMlir(Local._forward, &tensor_args, .{ .name = "test.emitMlir.Local.forward", .kind = .main });
+        const f = try comp.emitMlir(Local._fwd, &tensor_args, .{ .name = "test.emitMlir.Local.forward", .kind = .main });
 
         var mlir_bytecode = std.ArrayList(u8).init(std.testing.allocator);
         defer mlir_bytecode.deinit();
@@ -1069,7 +1069,7 @@ test FnCache {
         w: Tensor,
         b: Tensor,
 
-        pub fn forward(self: Layer_, x: Tensor) Tensor {
+        pub fn _fwd(self: Layer_, x: Tensor) Tensor {
             const wx = self.w.dotGeneral(x, &.{.{ -1, 0 }}, &.{});
             return wx.add(self.b.broad(wx.shape())).relu();
         }
@@ -1079,18 +1079,18 @@ test FnCache {
         const NN_ = @This();
         layers: [3]Layer,
 
-        pub fn forward(self: NN_, x0: Tensor) Tensor {
+        pub fn _fwd(self: NN_, x0: Tensor) Tensor {
             var x = x0;
             for (self.layers) |layer| {
-                x = ops.call(layer, .forward, .{x});
+                x = ops.call(layer, ._fwd, .{x});
             }
             return x;
         }
 
-        pub fn forwardRefImpl(self: NN_, x0: Tensor) Tensor {
+        pub fn _forwardRefImpl(self: NN_, x0: Tensor) Tensor {
             var x = x0;
             for (self.layers) |layer| {
-                x = layer.forward(x);
+                x = layer._fwd(x);
             }
             return x;
         }
@@ -1114,8 +1114,8 @@ test FnCache {
             },
         },
     };
-    const res = try zml.testing.compileAndCall(platform, NN.forward, .{ nn, x });
-    const expected = try zml.testing.compileAndCall(platform, NN.forwardRefImpl, .{ nn, x });
+    const res = try zml.testing.compileAndCall(platform, NN._fwd, .{ nn, x });
+    const expected = try zml.testing.compileAndCall(platform, NN._forwardRefImpl, .{ nn, x });
     try zml.testing.expectClose(expected, res, 1e-4);
 }
 

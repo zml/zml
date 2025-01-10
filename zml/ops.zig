@@ -74,23 +74,23 @@ test "simple while" {
         end: Tensor,
         const CountInts = @This();
 
-        pub fn hasNext(self: CountInts, i: Tensor, sum: Tensor) Tensor {
+        pub fn _hasNext(self: CountInts, i: Tensor, sum: Tensor) Tensor {
             _ = sum;
             return i.cmp(.LT, self.end);
         }
 
-        pub fn next(self: CountInts, i: Tensor, sum: Tensor) [2]Tensor {
+        pub fn _next(self: CountInts, i: Tensor, sum: Tensor) [2]Tensor {
             const r1 = i.add(self.step);
             const r2 = sum.add(i);
             return .{ r1, r2 };
         }
 
-        pub fn forward(self: CountInts, init_i: Tensor, init_sum: Tensor) [2]Tensor {
+        pub fn _fwd(self: CountInts, init_i: Tensor, init_sum: Tensor) [2]Tensor {
             const x = init_i.scale(2);
-            return while_(CountInts.hasNext, CountInts.next, self, .{ x, init_sum });
+            return while_(CountInts._hasNext, CountInts._next, self, .{ x, init_sum });
         }
 
-        pub fn zigForward(step: i64, end: i64, init_i: i64, init_sum: i64) [2]i64 {
+        pub fn _zigForward(step: i64, end: i64, init_i: i64, init_sum: i64) [2]i64 {
             const x = init_i * 2;
             var i = x;
             var sum = init_sum;
@@ -111,14 +111,14 @@ test "simple while" {
         .step = try zml.Buffer.fromSlice(platform, .{}, &[_]i64{1}),
         .end = try zml.Buffer.fromSlice(platform, .{}, &[_]i64{10}),
     };
-    const res0, const res1 = try zml.testing.compileAndCall(platform, CountInts.forward, .{ counter, init_i, init_sum });
+    const res0, const res1 = try zml.testing.compileAndCall(platform, CountInts._fwd, .{ counter, init_i, init_sum });
     const last_i = try res0.getValue(i64);
     const sum = try res1.getValue(i64);
 
     try std.testing.expectEqual(10, last_i);
     try std.testing.expectEqual(45, sum);
 
-    try std.testing.expectEqual(.{ 10, 45 }, CountInts.zigForward(1, 10, 0, 0));
+    try std.testing.expectEqual(.{ 10, 45 }, CountInts._zigForward(1, 10, 0, 0));
 }
 
 pub fn reduce(
@@ -362,7 +362,7 @@ test for_ {
             return f.mul(f);
         }
 
-        pub fn forward(num_steps: u63) Tensor {
+        pub fn _fwd(num_steps: u63) Tensor {
             return for_(Squares.sq, .{}, .{num_steps});
         }
     };
@@ -371,19 +371,19 @@ test for_ {
 
     // Just one baby step
     {
-        const squares = try zml.testing.compileAndCall(platform, Squares.forward, .{1});
+        const squares = try zml.testing.compileAndCall(platform, Squares._fwd, .{1});
         try zml.testing.expectEqualShapes(Shape.init(.{1}, .f32), squares.shape());
         try std.testing.expectEqual(0, squares.getValue(f32));
     }
     // Wow 4 in rows !
     {
-        const squares = try zml.testing.compileAndCall(platform, Squares.forward, .{4});
+        const squares = try zml.testing.compileAndCall(platform, Squares._fwd, .{4});
         try zml.testing.expectEqualShapes(Shape.init(.{4}, .f32), squares.shape());
         try std.testing.expectEqual([_]f32{ 0, 1, 4, 9 }, try squares.getValue([4]f32));
     }
     // AGI is coming, computing 10 squares as it's nothing.
     {
-        const squares = try zml.testing.compileAndCall(platform, Squares.forward, .{10});
+        const squares = try zml.testing.compileAndCall(platform, Squares._fwd, .{10});
         try zml.testing.expectEqualShapes(Shape.init(.{10}, .f32), squares.shape());
         try std.testing.expectEqual(
             [_]f32{ 0, 1, 4, 9, 16, 25, 36, 49, 64, 81 },
@@ -399,7 +399,7 @@ test "nested for" {
         x: Tensor,
         x_row: Tensor,
 
-        pub fn forward(x: Tensor) Tensor {
+        pub fn _fwd(x: Tensor) Tensor {
             return for_(OuterProd.scanRow, x, .{x.dim(0)});
         }
 
@@ -419,7 +419,7 @@ test "nested for" {
 
     // 5 to prevent inlining
     const x = try zml.Buffer.fromArray(platform, [5]f32{ 0, 1.0, -1.0, 2.0, -2.0 });
-    const outer_prod = try zml.testing.compileAndCall(platform, OuterProd.forward, .{x});
+    const outer_prod = try zml.testing.compileAndCall(platform, OuterProd._fwd, .{x});
     const expected: [5][5]f32 = .{
         .{ 0, 0, 0, 0, 0 },
         .{ 0, 1.0, -1.0, 2.0, -2.0 },
@@ -469,7 +469,7 @@ test "if" {
     const allocator = std.testing.allocator;
 
     const IfMod = struct {
-        pub fn forward(pred: Tensor, a: Tensor, b: Tensor) Tensor {
+        pub fn _fwd(pred: Tensor, a: Tensor, b: Tensor) Tensor {
             const result = if_(pred.convert(.bool), condTrue, condFalse, .{ a, b });
             return result;
         }
@@ -487,7 +487,7 @@ test "if" {
         const pred = Shape.init(.{}, .i32);
         const a = Shape.init(.{ 4, 4 }, .f32);
         const b = Shape.init(.{ 4, 4 }, .f32);
-        const mod = try zml.compileFn(allocator, IfMod.forward, .{ pred, a, b }, platform);
+        const mod = try zml.compileFn(allocator, IfMod._fwd, .{ pred, a, b }, platform);
         defer mod.deinit();
     }
 }
