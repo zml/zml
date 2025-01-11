@@ -6,6 +6,7 @@ zig_cc_binary(
     main = "test.zig",
     deps = [
         "@zml//async",
+        "@zml//stdx",
         "@zml//zml",
     ],
 )

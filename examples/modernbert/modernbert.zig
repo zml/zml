@@ -1,6 +1,7 @@
 const std = @import("std");
 const zml = @import("zml");
 const asynk = @import("async");
+const stdx = @import("stdx");
 const log = std.log;
 const Tensor = zml.Tensor;
 
@@ -72,10 +73,7 @@ pub const ModernBertAttention = struct {
         hidden_states: Tensor,
         attention_mask: Tensor,
         sliding_window_mask: Tensor,
-        position_ids: Tensor,
     ) Tensor {
-        _ = position_ids; // autofix
-
         const batch_size = hidden_states.shape().dim(0);
         const seq_length = hidden_states.shape().dim(1);
         const num_heads = 12; // config.json: num_attention_heads
@@ -139,7 +137,9 @@ pub const ModernBertEncoderLayer = struct {
     mlp: ModernBertMLP,
 
     pub fn init(self: *ModernBertEncoderLayer) void {
-        self.attn_norm.eps = norm_eps;
+        if (self.attn_norm) |attn_norm| {
+            attn_norm.eps = norm_eps;
+        }
         self.mlp_norm.eps = norm_eps;
     }
 
@@ -148,16 +148,18 @@ pub const ModernBertEncoderLayer = struct {
         hidden_states: Tensor,
         attention_mask: Tensor,
         sliding_window_mask: Tensor,
-        position_ids: Tensor,
     ) Tensor {
-        // TODO: Test this when attn_norm = null
-        const attn_norm_output: Tensor = zml.call(self.attn_norm, .forward, .{hidden_states});
+        const attn_norm_output = if (self.attn_norm) |attn_norm|
+            zml.call(attn_norm, .forward, .{hidden_states})
+        else
+            hidden_states;
+
         const attn_output: Tensor = zml.call(self.attn, .forward, .{
             attn_norm_output,
             attention_mask,
             sliding_window_mask,
-            position_ids,
         });
+        log.info("attn_output : {}", .{attn_output});
         var output = hidden_states.add(attn_output);
 
         const mlp_norm_output: Tensor = zml.call(self.mlp_norm, .forward, .{output});
@@ -180,12 +182,94 @@ pub const ModernBertModel = struct {
     }
 
     pub fn forward(self: ModernBertModel, input_ids: Tensor, attention_mask: Tensor) Tensor {
-        _ = attention_mask; // autofix
+        var hidden_states: Tensor = zml.call(self.embeddings, .forward, .{input_ids});
 
-        for (self.layers, 0..) |*encoder_layer, layer_idx| {
-            log.info("encoder_layer {} attn_norm {?} and is_global {}", .{ layer_idx, encoder_layer.attn_norm, encoder_layer.attn.is_global_attention });
+        // Original py code : global_attention_mask = _prepare_4d_attention_mask(attention_mask, self.dtype)
+        const global_attention_mask = zml.nn.expandMask(attention_mask, input_ids.dtype(), null);
+        log.info("global_attention_mask : {}", .{global_attention_mask});
+
+        // TODO: Confirm this is the correct way to do this. insertAxes, appendAxes or reshape instead of unsqueeze ?
+        // Create position indices (for rows and cols)
+        // Original py code : rows = torch.arange(global_attention_mask.shape[2]).unsqueeze(0)
+        // { 1, 1, 9, 9 } -> { 1, 9 } and { 9, 1 }
+        const seq_length = global_attention_mask.dim(.s);
+        const target_shape = zml.Shape.init(.{ .tgt = seq_length, .s = seq_length }, global_attention_mask.dtype());
+
+        // For cols: [1, seq_length] -> [seq_length, seq_length]
+        const rows = Tensor.arange(.{ .end = seq_length }, global_attention_mask.dtype())
+            .unsqueeze(0)
+            .withTags(.{ .tgt, .s })
+            .broad(target_shape);
+
+        // const rows = Tensor.arange(.{ .end = global_attention_mask.dim(2) }, global_attention_mask.dtype()).unsqueeze(0);
+        // const rows = Tensor.arange(.{ .end = global_attention_mask.dim(.tgt) }, global_attention_mask.dtype()).reshape(.{ 1, global_attention_mask.dim(.tgt) });
+        log.info("rows : {}", .{rows});
+
+        // For cols: [1, seq_length] -> [seq_length, seq_length]
+        const cols = Tensor.arange(.{ .end = seq_length }, global_attention_mask.dtype())
+            .unsqueeze(1)
+            .withTags(.{ .tgt, .s })
+            .broad(target_shape);
+
+        // const cols = Tensor.arange(.{ .end = global_attention_mask.dim(3) }, global_attention_mask.dtype()).unsqueeze(1);
+        // const cols = Tensor.arange(.{ .end = global_attention_mask.dim(.s) }, global_attention_mask.dtype()).reshape(.{ global_attention_mask.dim(.s), 1 });
+        log.info("cols : {}", .{cols});
+
+        // Calculate distance between positions
+        // Original py code : distance = torch.abs(rows - rows.T)
+
+        // Broadcast both tensors to a common shape {9,9}
+        // const target_shape = zml.Shape.init(.{ .tgt = 9, .s = 9 }, global_attention_mask.dtype());
+        // const rows_broad = rows.broad(target_shape);
+        // const cols_broad = cols.broad(target_shape);
+        // const distance = rows_broad.sub(cols_broad).abs();
+
+        // Now both rows and cols have shape {tgt=seq_length, s=seq_length}
+        const distance = rows.sub(cols).abs();
+        log.info("distance : {}", .{distance});
+
+        // Create sliding window mask (1 for positions within window, 0 outside)
+        // Original py code : window_mask = (distance <= self.config.local_attention // 2).unsqueeze(0).unsqueeze(0)
+        // config.jsonn : local_attention
+        var window_mask = distance.cmp(.LE, Tensor.scalar(@divExact(local_attention, 2), distance.dtype()))
+            .unsqueeze(0)
+            .unsqueeze(0);
+
+        // Use broadcastLeft to match global_attention_mask shape
+        window_mask = window_mask.broadcastLeft(global_attention_mask.shape());
+        log.info("window_mask : {}", .{window_mask});
+
+        // var window_mask = distance.cmp(.LE, Tensor.scalar(@divExact(local_attention, 2), distance.dtype()))
+        //     .insertAxes(0, .{ .b, .h }); // Add batch and head dimensions
+        //
+        // // Use broadcastLeft since we want to add dimensions at the beginning
+        // window_mask = window_mask.broadcastLeft(global_attention_mask.shape());
+
+        // Combine with existing mask
+        // Original py code : sliding_window_mask = global_attention_mask.masked_fill(window_mask.logical_not(), torch.finfo(self.dtype).min)
+        // const zeros = Tensor.constant(global_attention_mask.shape(), global_attention_mask.dtype().zero());
+        // const minus_inf = Tensor.constant(global_attention_mask.shape(), global_attention_mask.dtype().minValue());
+        // const sliding_window_mask = if (global_attention_mask.dtype().isFloat()) Tensor.select(window_mask, zeros, minus_inf) else window_mask.convert(global_attention_mask.dtype());
+
+        const sliding_window_mask = if (global_attention_mask.dtype().isFloat())
+            Tensor.select(window_mask, global_attention_mask, Tensor.constant(global_attention_mask.shape(), global_attention_mask.dtype().minValue()))
+        else
+            window_mask.convert(global_attention_mask.dtype());
+        log.info("sliding_window_mask : {}", .{sliding_window_mask});
+
+        // Process through all encoder layers
+        for (self.layers) |encoder_layer| {
+            const layer_outputs: Tensor = zml.call(encoder_layer, .forward, .{
+                hidden_states,
+                attention_mask,
+                sliding_window_mask,
+            });
+            hidden_states = layer_outputs;
         }
 
-        return Tensor.constant(input_ids.shape(), input_ids.dtype().zero());
+        // Final layer normalization
+        hidden_states = zml.call(self.final_norm, .forward, .{hidden_states});
+
+        return hidden_states;
     }
 };
