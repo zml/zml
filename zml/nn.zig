@@ -713,6 +713,35 @@ pub fn causalAttnMask(
     return mask;
 }
 
+/// Expands attention_mask from `[bsz, seq_len]` to `[bsz, 1, tgt_seq_len, src_seq_len]`.
+/// ref: https://github.com/huggingface/transformers/blob/15bd3e61f8d3680ca472c9314ad07584d20f7b81/src/transformers/modeling_attn_mask_utils.py#L181
+pub fn expandMask(mask: Tensor, dtype: zml.DataType, tgt_len: ?i64) Tensor {
+    stdx.debug.assert(mask.rank() == 2, "expandMask({}) shape need to be exactly 2 axes", .{mask.shape()});
+
+    // bsz, src_len = mask.size()
+    // tgt_len = tgt_len if tgt_len is not None else src_len
+    const src_len = mask.dim(-1);
+    const batch_size = mask.dim(-2);
+    const target_len = tgt_len orelse src_len;
+
+    // expanded_mask = mask[:, None, None, :].expand(bsz, 1, tgt_len, src_len).to(dtype)
+    // mask{:, None, None, :} -> { batch_size, 1, 1, src_len }
+    const expanded_mask = mask.insertAxes(-1, .{ .head, .tgt }).broadcastLeft(zml.Shape.init(.{
+        .b = batch_size,
+        .head = 1,
+        .tgt = target_len,
+        .s = src_len,
+    }, dtype));
+
+    // 1.0 - expanded_mask
+    const inverted_mask = Tensor.constant(expanded_mask.shape(), dtype.one()).sub(expanded_mask);
+
+    // return inverted_mask.masked_fill(inverted_mask.to(torch.bool), torch.finfo(dtype).min)
+    const zeros = Tensor.constant(inverted_mask.shape(), dtype.zero());
+    const minus_inf = Tensor.constant(inverted_mask.shape(), dtype.minValue());
+    return inverted_mask.cmp(.GT, zeros).select(minus_inf, inverted_mask);
+}
+
 pub const SdpaOpts = struct {
     attn_mask: ?Tensor = null,
     scale: ?Tensor = null,
