@@ -70,9 +70,9 @@ pub const ModernBertAttention = struct {
     /// sdpa_attention_forward
     pub fn forward(
         self: ModernBertAttention,
-        hidden_states: Tensor,
-        attention_mask: Tensor,
-        sliding_window_mask: Tensor,
+        hidden_states: Tensor, // { batch_size, seq_length, hidden_size } {1,9,768}
+        attention_mask: Tensor, // {1,1,9,9}
+        sliding_window_mask: Tensor, // {1,1,9,9}
     ) Tensor {
         const batch_size = hidden_states.shape().dim(0);
         const seq_length = hidden_states.shape().dim(1);
@@ -145,9 +145,9 @@ pub const ModernBertEncoderLayer = struct {
 
     pub fn forward(
         self: ModernBertEncoderLayer,
-        hidden_states: Tensor,
-        attention_mask: Tensor,
-        sliding_window_mask: Tensor,
+        hidden_states: Tensor, // { batch_size, seq_length, hidden_size } {1,9,768}
+        attention_mask: Tensor, // {1,1,9,9}
+        sliding_window_mask: Tensor, // {1,1,9,9}
     ) Tensor {
         const attn_norm_output = if (self.attn_norm) |attn_norm|
             zml.call(attn_norm, .forward, .{hidden_states})
@@ -174,6 +174,7 @@ pub const ModernBertModel = struct {
     embeddings: ModernBertEmbeddings,
     layers: []ModernBertEncoderLayer,
     final_norm: zml.nn.LayerNorm,
+    dtype: zml.DataType = .f32,
 
     pub fn init(self: *ModernBertModel) void {
         for (self.layers, 0..) |*encoder_layer, layer_idx| {
@@ -184,8 +185,8 @@ pub const ModernBertModel = struct {
     pub fn forward(self: ModernBertModel, input_ids: Tensor, attention_mask: Tensor) Tensor {
         var hidden_states: Tensor = zml.call(self.embeddings, .forward, .{input_ids});
 
-        // Original py code : global_attention_mask = _prepare_4d_attention_mask(attention_mask, self.dtype)
-        const global_attention_mask = zml.nn.expandMask(attention_mask, input_ids.dtype(), null);
+        // global_attention_mask = _prepare_4d_attention_mask(attention_mask, self.dtype)
+        const global_attention_mask = zml.nn.expandMask(attention_mask, input_ids.dtype(), null).convert(self.dtype);
         log.info("global_attention_mask : {}", .{global_attention_mask});
 
         // TODO: Confirm this is the correct way to do this. insertAxes, appendAxes or reshape instead of unsqueeze ?
@@ -261,7 +262,7 @@ pub const ModernBertModel = struct {
         for (self.layers) |encoder_layer| {
             const layer_outputs: Tensor = zml.call(encoder_layer, .forward, .{
                 hidden_states,
-                attention_mask,
+                global_attention_mask,
                 sliding_window_mask,
             });
             hidden_states = layer_outputs;

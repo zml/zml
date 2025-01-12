@@ -403,6 +403,6 @@ pub fn asyncMainBertModel() !void {
         "model.model",
         modern_bert_model,
         modern_bert_weights,
-        1e-3,
+        1e-2,
     );
 }
