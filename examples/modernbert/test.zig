@@ -15,7 +15,7 @@ const ACTIVATIONS_FILE_PATH: []const u8 = "/Users/victor/Documents/development/z
 const MODEL_WEIGHTS_FILE_PATH: []const u8 = "/Users/victor/.cache/huggingface/hub/models--answerdotai--ModernBERT-base/snapshots/5756c58a31a2478f9e62146021f48295a92c3da5/model.safetensors";
 
 pub fn main() !void {
-    try asynk.AsyncThread.main(std.heap.c_allocator, asyncMainBertModel);
+    try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain);
 }
 
 // for (0..activations.buffers.count()) |i| {
@@ -307,72 +307,6 @@ pub fn asyncMain() !void {
         layer_weights,
         2e-3,
     );
-
-    // model
-    // log.info("\n\nTesting model layer:", .{});
-
-    // Create the model and configure it.
-    // var modern_bert_model = try zml.aio.populateModelWithPrefix(
-    //     ModernBertModel,
-    //     model_arena,
-    //     weights_file,
-    //     "model",
-    // );
-    // modern_bert_model.init();
-    //
-    // // Load the weights.
-    // var modern_bert_weights = try zml.aio.loadModelBuffersWithPrefix(
-    //     ModernBertModel,
-    //     modern_bert_model,
-    //     weights_file,
-    //     model_arena,
-    //     compute_platform,
-    //     "model",
-    // );
-    // defer zml.aio.unloadBuffers(&modern_bert_weights);
-    //
-    // try zml.testing.testLayer(
-    //     compute_platform,
-    //     activations,
-    //     "model.model",
-    //     modern_bert_model,
-    //     modern_bert_weights,
-    //     1e-3,
-    // );
-}
-
-pub fn asyncMainBertModel() !void {
-    // Short lived allocations
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    // Initialize the ZML context
-    var context = try zml.Context.init();
-    defer context.deinit();
-
-    // Auto-select platform
-    const compute_platform = context.autoPlatform(.{});
-    log.info("Selected platform: {s}", .{@tagName(compute_platform.target)});
-
-    // Create a dedicated memory arena for model-related allocations (dedicated to model shapes and weights)
-    var arena_state = std.heap.ArenaAllocator.init(allocator);
-    defer arena_state.deinit();
-    const model_arena = arena_state.allocator();
-
-    // Load the model weights file and parse its structure (shape)
-    var weights_file = try zml.aio.detectFormatAndOpen(allocator, MODEL_WEIGHTS_FILE_PATH);
-    defer weights_file.deinit();
-
-    // Log the total number of layers and details of the first layer from weights
-    const first_layer_key = weights_file.buffers.keys()[0];
-    log.info("Model contains {d} layers. Loaded from: {s}", .{ weights_file.buffers.count(), MODEL_WEIGHTS_FILE_PATH });
-    log.info("First layer key: \"{s}\" / First layer buffer: {?}", .{ first_layer_key, weights_file.buffers.get(first_layer_key) });
-
-    // Load the activation data file
-    const activations = try zml.aio.torch.open(model_arena, ACTIVATIONS_FILE_PATH);
-    defer activations.deinit();
-    log.info("Found {} activations in {s}", .{ activations.buffers.count(), ACTIVATIONS_FILE_PATH });
 
     // model
     log.info("\n\nTesting model layer:", .{});

@@ -1,7 +1,6 @@
 const std = @import("std");
 const zml = @import("zml");
 const asynk = @import("async");
-const stdx = @import("stdx");
 const log = std.log;
 const Tensor = zml.Tensor;
 
@@ -170,11 +169,59 @@ pub const ModernBertEncoderLayer = struct {
     }
 };
 
+pub fn generateSlidingWindowMask(global_attention_mask: Tensor) Tensor {
+    const tgt_seq_len = global_attention_mask.dim(.tgt);
+    const src_seq_len = global_attention_mask.dim(.src);
+    const target_shape = zml.Shape.init(.{ .tgt = tgt_seq_len, .src = src_seq_len }, global_attention_mask.dtype());
+
+    // TODO: Confirm this is the correct way to do this : reshape (or insertAxes, appendAxes) instead of unsqueeze ?
+
+    // Create position indices (for rows and cols)
+    // Original py code : rows = torch.arange(global_attention_mask.shape[2]).unsqueeze(0)
+    var rows = Tensor.arange(.{ .end = tgt_seq_len }, global_attention_mask.dtype())
+        .unsqueeze(0);
+    // var rows = Tensor.arange(.{ .end = tgt_seq_len }, global_attention_mask.dtype())
+    //     .reshape(.{ 1, tgt_seq_len });
+    log.info("rows : {}", .{rows});
+    var cols = rows.transpose(.{});
+    log.info("cols : {}", .{cols});
+
+    // Calculate distance between positions
+    // Original py code : distance = torch.abs(rows - rows.T)
+
+    // broadcast both tensors to a common shape
+    rows = rows.broad(target_shape);
+    cols = cols.broad(target_shape);
+
+    // now both rows and cols have shape
+    const distance = rows.sub(cols).abs();
+    log.info("distance : {}", .{distance});
+
+    // Create sliding window mask (1 for positions within window, 0 outside)
+    // Original py code : window_mask = (distance <= self.config.local_attention // 2).unsqueeze(0).unsqueeze(0)
+    // config.json : local_attention
+    var window_mask = distance.cmp(.LE, Tensor.scalar(@divExact(local_attention, 2), distance.dtype()))
+        .unsqueeze(0)
+        .unsqueeze(0);
+
+    // match global_attention_mask shape
+    window_mask = window_mask.broadcastLeft(global_attention_mask.shape());
+
+    // Combine with existing mask
+    // Original py code : sliding_window_mask = global_attention_mask.masked_fill(window_mask.logical_not(), torch.finfo(self.dtype).min)
+    if (global_attention_mask.dtype().isFloat()) {
+        const minus_inf = Tensor.constant(global_attention_mask.shape(), global_attention_mask.dtype().minValue());
+        return Tensor.select(window_mask, global_attention_mask, minus_inf);
+    } else {
+        return window_mask.convert(global_attention_mask.dtype());
+    }
+}
+
 pub const ModernBertModel = struct {
     embeddings: ModernBertEmbeddings,
     layers: []ModernBertEncoderLayer,
     final_norm: zml.nn.LayerNorm,
-    dtype: zml.DataType = .f32,
+    dtype: zml.DataType = .f32, // config.json: torch_dtype
 
     pub fn init(self: *ModernBertModel) void {
         for (self.layers, 0..) |*encoder_layer, layer_idx| {
@@ -186,76 +233,10 @@ pub const ModernBertModel = struct {
         var hidden_states: Tensor = zml.call(self.embeddings, .forward, .{input_ids});
 
         // global_attention_mask = _prepare_4d_attention_mask(attention_mask, self.dtype)
-        const global_attention_mask = zml.nn.expandMask(attention_mask, input_ids.dtype(), null).convert(self.dtype);
+        const global_attention_mask = zml.nn.expandMask(attention_mask, self.dtype, null);
         log.info("global_attention_mask : {}", .{global_attention_mask});
 
-        // TODO: Confirm this is the correct way to do this. insertAxes, appendAxes or reshape instead of unsqueeze ?
-        // Create position indices (for rows and cols)
-        // Original py code : rows = torch.arange(global_attention_mask.shape[2]).unsqueeze(0)
-        // { 1, 1, 9, 9 } -> { 1, 9 } and { 9, 1 }
-        const seq_length = global_attention_mask.dim(.s);
-        const target_shape = zml.Shape.init(.{ .tgt = seq_length, .s = seq_length }, global_attention_mask.dtype());
-
-        // For cols: [1, seq_length] -> [seq_length, seq_length]
-        const rows = Tensor.arange(.{ .end = seq_length }, global_attention_mask.dtype())
-            .unsqueeze(0)
-            .withTags(.{ .tgt, .s })
-            .broad(target_shape);
-
-        // const rows = Tensor.arange(.{ .end = global_attention_mask.dim(2) }, global_attention_mask.dtype()).unsqueeze(0);
-        // const rows = Tensor.arange(.{ .end = global_attention_mask.dim(.tgt) }, global_attention_mask.dtype()).reshape(.{ 1, global_attention_mask.dim(.tgt) });
-        log.info("rows : {}", .{rows});
-
-        // For cols: [1, seq_length] -> [seq_length, seq_length]
-        const cols = Tensor.arange(.{ .end = seq_length }, global_attention_mask.dtype())
-            .unsqueeze(1)
-            .withTags(.{ .tgt, .s })
-            .broad(target_shape);
-
-        // const cols = Tensor.arange(.{ .end = global_attention_mask.dim(3) }, global_attention_mask.dtype()).unsqueeze(1);
-        // const cols = Tensor.arange(.{ .end = global_attention_mask.dim(.s) }, global_attention_mask.dtype()).reshape(.{ global_attention_mask.dim(.s), 1 });
-        log.info("cols : {}", .{cols});
-
-        // Calculate distance between positions
-        // Original py code : distance = torch.abs(rows - rows.T)
-
-        // Broadcast both tensors to a common shape {9,9}
-        // const target_shape = zml.Shape.init(.{ .tgt = 9, .s = 9 }, global_attention_mask.dtype());
-        // const rows_broad = rows.broad(target_shape);
-        // const cols_broad = cols.broad(target_shape);
-        // const distance = rows_broad.sub(cols_broad).abs();
-
-        // Now both rows and cols have shape {tgt=seq_length, s=seq_length}
-        const distance = rows.sub(cols).abs();
-        log.info("distance : {}", .{distance});
-
-        // Create sliding window mask (1 for positions within window, 0 outside)
-        // Original py code : window_mask = (distance <= self.config.local_attention // 2).unsqueeze(0).unsqueeze(0)
-        // config.jsonn : local_attention
-        var window_mask = distance.cmp(.LE, Tensor.scalar(@divExact(local_attention, 2), distance.dtype()))
-            .unsqueeze(0)
-            .unsqueeze(0);
-
-        // Use broadcastLeft to match global_attention_mask shape
-        window_mask = window_mask.broadcastLeft(global_attention_mask.shape());
-        log.info("window_mask : {}", .{window_mask});
-
-        // var window_mask = distance.cmp(.LE, Tensor.scalar(@divExact(local_attention, 2), distance.dtype()))
-        //     .insertAxes(0, .{ .b, .h }); // Add batch and head dimensions
-        //
-        // // Use broadcastLeft since we want to add dimensions at the beginning
-        // window_mask = window_mask.broadcastLeft(global_attention_mask.shape());
-
-        // Combine with existing mask
-        // Original py code : sliding_window_mask = global_attention_mask.masked_fill(window_mask.logical_not(), torch.finfo(self.dtype).min)
-        // const zeros = Tensor.constant(global_attention_mask.shape(), global_attention_mask.dtype().zero());
-        // const minus_inf = Tensor.constant(global_attention_mask.shape(), global_attention_mask.dtype().minValue());
-        // const sliding_window_mask = if (global_attention_mask.dtype().isFloat()) Tensor.select(window_mask, zeros, minus_inf) else window_mask.convert(global_attention_mask.dtype());
-
-        const sliding_window_mask = if (global_attention_mask.dtype().isFloat())
-            Tensor.select(window_mask, global_attention_mask, Tensor.constant(global_attention_mask.shape(), global_attention_mask.dtype().minValue()))
-        else
-            window_mask.convert(global_attention_mask.dtype());
+        const sliding_window_mask = generateSlidingWindowMask(global_attention_mask);
         log.info("sliding_window_mask : {}", .{sliding_window_mask});
 
         // Process through all encoder layers
