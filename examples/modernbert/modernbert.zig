@@ -88,13 +88,13 @@ pub const ModernBertAttention = struct {
         var qkv: Tensor = zml.call(self.Wqkv, .forward, .{hidden_states}); // Wqkv.out.0
 
         // Reshape to { batch_size, seq_len, 3, num_heads, head_dim }
-        qkv = qkv.reshape(.{ batch_size, seq_length, 3, num_heads, head_dim }).withTags(.{ .b, .s, .fixed, .h, .hd });
+        qkv = qkv.reshape(.{ batch_size, seq_length, 3, num_heads, head_dim }).withTags(.{ .b, .s, .chunk, .h, .hd });
 
         // Split into query, key, value tensors - each { batch_size, seq_length, num_heads, head_dim }
-        // TODO: replace with: var q, var k, var v = qkv.chunkExact(.fixed, 2);
-        var q = qkv.slice1d(.fixed, .{ .start = 0, .end = 1 }).squeeze(.fixed);
-        var k = qkv.slice1d(.fixed, .{ .start = 1, .end = 2 }).squeeze(.fixed);
-        var v = qkv.slice1d(.fixed, .{ .start = 2, .end = 3 }).squeeze(.fixed);
+        var q, var k, var v = qkv.chunkExact(.chunk, 3);
+        q = q.squeeze(.chunk);
+        k = k.squeeze(.chunk);
+        v = v.squeeze(.chunk);
 
         // Apply rotary position embeddings (RoPE)
         // Layer 0, 3, 6, 9, 12 ... use global RoPE
@@ -241,12 +241,11 @@ pub const ModernBertModel = struct {
 
         // Process through all encoder layers
         for (self.layers) |encoder_layer| {
-            const layer_outputs: Tensor = zml.call(encoder_layer, .forward, .{
+            hidden_states = zml.call(encoder_layer, .forward, .{
                 hidden_states,
                 global_attention_mask,
                 sliding_window_mask,
             });
-            hidden_states = layer_outputs;
         }
 
         // Final layer normalization
@@ -255,3 +254,27 @@ pub const ModernBertModel = struct {
         return hidden_states;
     }
 };
+
+// TODO: Refactor using act: zml.nn.Activation ? (e.g. gelu)
+pub const ModernBertPredictionHead = struct {
+    dense: zml.nn.Linear,
+    norm: zml.nn.LayerNorm,
+
+    pub fn init(self: *ModernBertPredictionHead) void {
+        self.norm.eps = norm_eps;
+    }
+
+    pub fn forward(self: ModernBertPredictionHead, hidden_states: Tensor) Tensor {
+        // Perform dense
+        const dense_output: Tensor = zml.call(self.dense, .forward, .{hidden_states});
+
+        // Apply activation
+        const activated_output = dense_output.gelu();
+
+        // Perform norm
+        return zml.call(self.norm, .forward, .{activated_output});
+    }
+};
+
+// TODO: Implement ModernBertForMaskedLM
+pub const ModernBertForMaskedLM = struct {};

@@ -1,6 +1,44 @@
 load("@zml//bazel:zig.bzl", "zig_cc_binary")
 
 zig_cc_binary(
+    name = "modernbert",
+    srcs = ["modernbert.zig"],
+    main = "main.zig",
+    deps = [
+        "//third_party/tigerbeetle:flags",
+        "@zml//async",
+        "@zml//stdx",
+        "@zml//zml",
+    ],
+)
+
+cc_binary(
+    name = "ModernBERT-base",
+    args = [
+        "--model=$(location @ModernBERT-base//:model.safetensors)",
+        "--tokenizer=$(location @ModernBERT-base//:tokenizer)",
+    ],
+    data = [
+        "@ModernBERT-base//:model.safetensors",
+        "@ModernBERT-base//:tokenizer",
+    ],
+    deps = [":llama_lib"],
+)
+
+cc_binary(
+    name = "ModernBERT-large",
+    args = [
+        "--model=$(location @ModernBERT-large//:model.safetensors)",
+        "--tokenizer=$(location @ModernBERT-large//:tokenizer)",
+    ],
+    data = [
+        "@ModernBERT-large//:model.safetensors",
+        "@ModernBERT-large//:tokenizer",
+    ],
+    deps = [":llama_lib"],
+)
+
+zig_cc_binary(
     name = "test-implementation",
     srcs = ["modernbert.zig"],
     main = "test.zig",

@@ -18,10 +18,6 @@ pub fn main() !void {
     try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain);
 }
 
-// for (0..activations.buffers.count()) |i| {
-//     log.info("activations {d}: {s}", .{ i, activations.buffers.entries.get(i).key });
-// }
-
 pub fn asyncMain() !void {
     // Short lived allocations
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
