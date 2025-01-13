@@ -7,6 +7,7 @@ zig_library(
         "io.zig",
         "math.zig",
         "meta.zig",
+        "queue.zig",
         "signature.zig",
     ],
     main = "stdx.zig",

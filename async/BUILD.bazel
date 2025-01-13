@@ -3,15 +3,18 @@ load("@rules_zig//zig:defs.bzl", "zig_library")
 zig_library(
     name = "async",
     srcs = [
-        "queue.zig",
-        "queue_mpsc.zig",
+        "asyncio.zig",
+        "channel.zig",
+        "coro.zig",
+        "coro_base.zig",
+        "executor.zig",
+        "stack.zig",
     ],
-    import_name = "async",
-    main = "zigcoro.zig",
+    extra_srcs = glob(["asm/*.s"]),
+    main = "async.zig",
     visibility = ["//visibility:public"],
     deps = [
         "//stdx",
         "@libxev//:xev",
-        "@zigcoro//:libcoro",
     ],
 )
