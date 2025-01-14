@@ -1036,6 +1036,10 @@ pub const Tensor = struct {
         return @import("torch.zig").matmul(lhs, rhs);
     }
 
+    pub fn unsqueeze(self: Tensor, axis_: anytype) Tensor {
+        return @import("torch.zig").unsqueeze(self, axis_);
+    }
+
     /// Matrix multiplication, where contracting axes are specified using their tags.
     /// eg dot(.{ .a, .b, .c }, .{ .a, .c, .d }, .{ .c }) -> .{ .a, .c, .d }
     /// Axes with the same tag on both sides, and which aren't contracting,
