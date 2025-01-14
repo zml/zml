@@ -1,17 +1,5 @@
-From 0d1c2f8258072148459d3114b9ccaf43c02e0958 Mon Sep 17 00:00:00 2001
-From: Steeve Morin <steeve@zml.ai>
-Date: Tue, 19 Nov 2024 16:14:14 +0100
-Subject: [PATCH] backend/epoll: implement eventfd wakeup notification
-
-Tries to mimic what happens in backend/kqueue.
-
-Closes #4
----
- src/backend/epoll.zig | 42 ++++++++++++++++++++++++++++++++++++++++++
- 1 file changed, 42 insertions(+)
-
 diff --git a/src/backend/epoll.zig b/src/backend/epoll.zig
-index ae4ec7d..f44d326 100644
+index ae4ec7d..f84c687 100644
 --- a/src/backend/epoll.zig
 +++ b/src/backend/epoll.zig
 @@ -21,6 +21,12 @@ pub const Loop = struct {
@@ -59,7 +47,7 @@ index ae4ec7d..f44d326 100644
 +
 +            var ev: linux.epoll_event = .{
 +                .events = linux.EPOLL.IN | linux.EPOLL.RDHUP,
-+                .data = .{ .ptr = 0 },
++                .data = .{ .fd = self.eventfd.fd },
 +            };
 +            posix.epoll_ctl(
 +                self.fd,
@@ -75,18 +63,21 @@ index ae4ec7d..f44d326 100644
          }
  
          // Submit all the submissions. We copy the submission queue so that
-@@ -369,6 +397,10 @@ pub const Loop = struct {
+@@ -369,6 +397,13 @@ pub const Loop = struct {
  
              // Process all our events and invoke their completion handlers
              for (events[0..n]) |ev| {
-+                // Zero data values are internal events that we do nothing
-+                // on such as the eventfd wakeup.
-+                if (ev.data.ptr == 0) continue;
++                // Handle wakeup eventfd
++                if (ev.data.fd == self.eventfd.fd) {
++                    var buffer: u64 = undefined;
++                    _ = posix.read(self.eventfd.fd, std.mem.asBytes(&buffer)) catch {};
++                    continue;
++                }
 +
                  const c: *Completion = @ptrFromInt(@as(usize, @intCast(ev.data.ptr)));
  
                  // We get the fd and mark this as in progress we can properly
-@@ -415,6 +447,7 @@ pub const Loop = struct {
+@@ -415,6 +450,7 @@ pub const Loop = struct {
          const pool = self.thread_pool orelse return error.ThreadPoolRequired;
  
          // Setup our completion state so that thread_perform can do stuff
@@ -94,7 +85,7 @@ index ae4ec7d..f44d326 100644
          c.task_completions = &self.thread_pool_completions;
          c.task = .{ .callback = Loop.thread_perform };
  
-@@ -436,6 +469,14 @@ pub const Loop = struct {
+@@ -436,6 +472,14 @@ pub const Loop = struct {
  
          // Add to our completion queue
          c.task_completions.push(c);
@@ -109,7 +100,7 @@ index ae4ec7d..f44d326 100644
      }
  
      fn start(self: *Loop, completion: *Completion) void {
-@@ -800,6 +841,7 @@ pub const Completion = struct {
+@@ -800,6 +844,7 @@ pub const Completion = struct {
      /// reliable way to get access to the loop and shouldn't be used
      /// except internally.
      task: ThreadPool.Task = undefined,
