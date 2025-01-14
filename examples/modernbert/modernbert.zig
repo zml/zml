@@ -12,6 +12,12 @@ pub const layer_norm_eps = 1e-05;
 pub const norm_eps = 1e-05;
 pub const local_attention = 128;
 
+pub const ModernBertOptions = struct {
+    hidden_size: i64,
+    intermediate_size: i64,
+    num_attention_heads: i64,
+};
+
 pub const ModernBertEmbeddings = struct {
     tok_embeddings: zml.nn.TokenEmbedding,
     norm: zml.nn.LayerNorm,

@@ -7,15 +7,14 @@ const Tensor = zml.Tensor;
 const modernbert = @import("modernbert.zig");
 
 // set this to false to disable the verbose logging
-// const show_mlir = true;
-//
-// pub const std_options = .{
-//     .log_level = .warn,
-//     .log_scope_levels = &[_]std.log.ScopeLevel{
-//         .{ .scope = .zml_module, .level = if (show_mlir) .debug else .warn },
-//         .{ .scope = .modernbert, .level = .info },
-//     },
-// };
+const show_mlir = true;
+pub const std_options = .{
+    .log_level = .warn,
+    .log_scope_levels = &[_]std.log.ScopeLevel{
+        .{ .scope = .zml_module, .level = if (show_mlir) .debug else .warn },
+        .{ .scope = .modernbert, .level = .info },
+    },
+};
 
 pub fn main() !void {
     try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain);
@@ -24,8 +23,8 @@ pub fn main() !void {
 pub fn asyncMain() !void {
     const CliArgs = struct {
         model: []const u8,
+        tokenizer: ?[]const u8 = null,
         text: ?[]const u8 = null, // Zig is the [MASK] programming language. Paris is the capital of [MASK].
-        // eg: --create-options='{"cuda":{"allocator":{"bfc":{"memory_fraction": 0.99}}}}'
         create_options: []const u8 = "{}",
     };
 
@@ -55,4 +54,15 @@ pub fn asyncMain() !void {
     context.printAvailablePlatforms(platform);
 
     log.info("Model file: {s}", .{model_file});
+
+    var ts = try zml.aio.detectFormatAndOpen(allocator, model_file);
+    defer ts.deinit();
+
+    const modern_bert_for_masked_lm = try zml.aio.populateModel(modernbert.ModernBertForMaskedLM, model_arena, ts);
+    log.info("ModernBERT: {}", .{modern_bert_for_masked_lm});
+
+    if (cli_args.tokenizer == null) {
+        log.err("Model doesn't have an embbedded tokenizer, please provide a path to a tokenizer.", .{});
+        @panic("No tokenizer provided");
+    }
 }
