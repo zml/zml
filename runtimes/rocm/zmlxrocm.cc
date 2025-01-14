@@ -10,17 +10,18 @@
 
 static void setup_runfiles(int argc, char **argv) __attribute__((constructor))
 {
+    std::ifstream s{argv[0]};
     using bazel::tools::cpp::runfiles::Runfiles;
     auto runfiles = std::unique_ptr<Runfiles>(Runfiles::Create(argv[0], BAZEL_CURRENT_REPOSITORY));
 
     auto HIPBLASLT_EXT_OP_LIBRARY_PATH =
-        runfiles->Rlocation("hipblaslt-dev/lib/hipblaslt/library/hipblasltExtOpLibrary.dat");
+        runfiles->Rlocation("hipblaslt/lib/hipblaslt/library/hipblasltExtOpLibrary.dat");
     if (HIPBLASLT_EXT_OP_LIBRARY_PATH != "")
     {
         setenv("HIPBLASLT_EXT_OP_LIBRARY_PATH", HIPBLASLT_EXT_OP_LIBRARY_PATH.c_str(), 1);
     }
 
-    auto HIPBLASLT_TENSILE_LIBPATH = runfiles->Rlocation("hipblaslt-dev/lib/hipblaslt/library");
+    auto HIPBLASLT_TENSILE_LIBPATH = runfiles->Rlocation("hipblaslt/lib/hipblaslt/library");
     if (HIPBLASLT_TENSILE_LIBPATH != "")
     {
         setenv("HIPBLASLT_TENSILE_LIBPATH", HIPBLASLT_TENSILE_LIBPATH.c_str(), 1);

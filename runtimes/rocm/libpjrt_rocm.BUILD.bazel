@@ -7,7 +7,7 @@ string_list_flag(
     build_setting_default = ["all"],
     visibility = [
         "@rocblas//:__subpackages__",
-        "@hipblaslt-dev//:__subpackages__",
+        "@hipblaslt//:__subpackages__",
     ],
 )
 
@@ -58,7 +58,7 @@ cc_import(
         ":sandbox",
         "@rocblas//:runfiles",
     ] + select({
-        ":_hipblaslt": ["@hipblaslt-dev//:runfiles"],
+        ":_hipblaslt": ["@hipblaslt//:runfiles"],
         "//conditions:default": [],
     }),
     shared_library = "libpjrt_rocm.so",
