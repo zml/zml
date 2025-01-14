@@ -410,6 +410,28 @@ pub const Shape = struct {
         _ = try writer.write(if (bare_fmt) "}" else "})");
     }
 
+    /// Broadcasts a Tensor to the given shape, extending dimensions if needed.
+    pub fn canBroadcastTo(self: Shape, other: Shape) bool {
+        // Already the right shape
+        if (std.mem.eql(i64, self.dims(), other.dims())) return true;
+
+        // Non ambiguous broadcasting
+        // TODO: broad is error prone because of this:
+        // it will happily broadcast .{ .a = 10, .b = 1 } to .{ .b = 10, .a = 5 }
+        if (self.rank() == 0 or self.rank() == other.rank()) {
+            for (0..self.rank()) |i| {
+                if (self.dim(i) != 1 and self.dim(i) != other.dim(i)) return false;
+            }
+            return true;
+        }
+
+        for (self.dims(), self.tags()) |d, t| {
+            const other_ax = other.hasTag(t) orelse return false;
+            if (d != 1 and d != other.dim(other_ax)) return false;
+        }
+        return true;
+    }
+
     pub fn reshape(self: Shape, new_shape_: anytype) Shape {
         var new_shape: Shape = .{ ._dtype = self.dtype() };
         new_shape._dims, new_shape._tags = parseDimensions(new_shape_);
