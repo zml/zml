@@ -2,9 +2,9 @@ load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 load("//bazel:dpkg.bzl", "dpkg")
 load("//bazel:http_deb_archive.bzl", "http_deb_archive")
 
-ROCM_VERSION = "6.2.2"
+ROCM_VERSION = "6.3.1"
 BASE_URL = "https://repo.radeon.com/rocm/apt/{}".format(ROCM_VERSION)
-STRIP_PREFIX = "opt/rocm-6.2.2"
+STRIP_PREFIX = "opt/rocm-6.3.1"
 
 def pkg_kwargs(pkg):
     return dict(
@@ -148,6 +148,7 @@ cc_import(
 """,
     "hipblaslt": """\
 load("@zml//bazel:cc_import.bzl", "cc_import")
+load("@zml//runtimes/rocm:gfx.bzl", "bytecode_select")
 cc_import(
     name = "hipblaslt",
     shared_library = "lib/libhipblaslt.so.0",
@@ -157,9 +158,6 @@ cc_import(
     },
     visibility = ["@libpjrt_rocm//:__subpackages__"],
 )
-""",
-    "hipblaslt-dev": """\
-load("@zml//runtimes/rocm:gfx.bzl", "bytecode_select")
 
 bytecode_select(
     name = "bytecodes",
