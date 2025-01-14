@@ -90,23 +90,28 @@ pub const LlamaLM = struct {
         rng: Tensor.Rng,
         opts: zml.nn.SamplingStrategy,
     ) struct { Tensor, Tensor.Rng } {
+        _ = opts; // autofix
         const tokens = tokens_.withPartialTags(.{.s});
         const out = out_.withPartialTags(.{ .s, .d });
-
         const next_token_pred = out.gatherValues(.s, token_index, .{});
-        var logits = if (self.lm_head) |lm_head|
-            zml.call(lm_head, .forward, .{next_token_pred})
-        else
-            self.model.embed_tokens.weight.withTags(.{ .voc, .d }).dot(next_token_pred, .{.d});
 
-        if (logits.shape().hasTag(.voc) == null)
-            logits = logits.rename(.{ .d = .voc });
+        // List interesting tokens, hardcoded but can be passed as argument if preferrable.
+        const interesting = Tensor.constantTensor(zml.HostBuffer.fromArray(&[2]i32{ 123, 124 })).withTags(.{.small_voc});
+        var lm_head = if (self.lm_head) |lm_head| lm_head.weight else self.model.embed_tokens.weight;
+        // Reduce lm_head to the interesting tokens
+        lm_head = lm_head.withTags(.{ .voc, .d }).gatherValues(.voc, interesting, .{});
 
-        const next_token, const new_rng = zml.nn.sampleTokens(logits, opts, rng);
+        // Chose the most likely among interesting tokens
+        var logits = lm_head.dot(next_token_pred, .{.d});
+        // I've replaced sampling with argmax, but you call use sampling here to if needed.
+        const top_interesting_idx = logits.argMax(.small_voc).indices.squeeze(.small_voc);
+        // Then translate the idx back to a token id.
+        const next_token = interesting.gatherValues(.small_voc, top_interesting_idx, .{});
+
         const next_token_index = token_index.addConstant(1);
         const new_tokens = tokens.dynamicUpdateSlice(.{ .s = next_token_index }, next_token);
 
-        return .{ new_tokens.reuseBuffer(tokens_), new_rng };
+        return .{ new_tokens.reuseBuffer(tokens_), rng };
     }
 
     pub fn increment(_: u8, token_index: Tensor) Tensor {
