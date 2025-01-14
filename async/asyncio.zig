@@ -367,7 +367,7 @@ pub const File = struct {
     }
 
     const PReadResult = xev.ReadError!usize;
-    pub fn pread(self: Self, buf: xev.ReadBuffer, offset: u64) PReadResult {
+    pub fn pread(self: Self, buf: xev.ReadBuffer, offset: u64) !usize {
         const ResultT = PReadResult;
         const Data = struct {
             result: ResultT = undefined,
@@ -404,7 +404,7 @@ pub const File = struct {
     }
 
     const PWriteResult = xev.WriteError!usize;
-    pub fn pwrite(self: Self, buf: xev.WriteBuffer, offset: u64) PWriteResult {
+    pub fn pwrite(self: Self, buf: xev.WriteBuffer, offset: u64) !usize {
         const ResultT = PWriteResult;
         const Data = struct {
             result: ResultT = undefined,
