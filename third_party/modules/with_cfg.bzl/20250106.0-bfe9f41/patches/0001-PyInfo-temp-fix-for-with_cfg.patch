@@ -1,0 +1,25 @@
+From bfe9f411de53734f4e29db6e1e4f29b3eb7c3013 Mon Sep 17 00:00:00 2001
+From: Jean-Baptiste Dalido <jb@zml.ai>
+Date: Mon, 6 Jan 2025 15:10:49 +0100
+Subject: [PATCH] PyInfo: temp fix for with_cfg
+
+---
+ with_cfg/private/rule_defaults.bzl | 2 --
+ 1 file changed, 2 deletions(-)
+
+diff --git a/with_cfg/private/rule_defaults.bzl b/with_cfg/private/rule_defaults.bzl
+index d24f918..dd58009 100644
+--- a/with_cfg/private/rule_defaults.bzl
++++ b/with_cfg/private/rule_defaults.bzl
+@@ -10,8 +10,6 @@ DEFAULT_PROVIDERS = [
+     JavaInfo,
+     JavaPluginInfo,
+     OutputGroupInfo,
+-    PyInfo,
+-    PyRuntimeInfo,
+     apple_common.Objc,
+     apple_common.XcodeProperties,
+     apple_common.XcodeVersionConfig,
+-- 
+2.39.3 (Apple Git-146)
+
