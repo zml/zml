@@ -157,7 +157,7 @@ pub const AsyncThread = struct {
     threadlocal var current: *const AsyncThread = undefined;
 
     executor: *aio.Executor,
-    stack_allocator: *stack.PooledStackAllocator,
+    stack_allocator: *stack.StackAllocator,
     loop: *xev.Loop,
     thread_pool: *xev.ThreadPool,
     async_notifier: *xev.Async,
@@ -197,7 +197,7 @@ pub const AsyncThread = struct {
         var c: xev.Completion = undefined;
         async_notifier.wait(&loop, &c, threading.WaiterQueue, &waiters_queue, &waker_cb);
 
-        var stack_allocator = stack.PooledStackAllocator.init(allocator);
+        var stack_allocator = stack.StackAllocator.init(allocator);
         defer stack_allocator.deinit();
 
         AsyncThread.current = &.{
