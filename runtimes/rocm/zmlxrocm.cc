@@ -10,7 +10,8 @@
 
 static void setup_runfiles(int argc, char **argv) __attribute__((constructor))
 {
-    std::ifstream s{argv[0]};
+    // DELETE ME
+    std::ifstream f(argv[0]);
     using bazel::tools::cpp::runfiles::Runfiles;
     auto runfiles = std::unique_ptr<Runfiles>(Runfiles::Create(argv[0], BAZEL_CURRENT_REPOSITORY));
 
