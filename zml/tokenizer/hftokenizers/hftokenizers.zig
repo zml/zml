@@ -12,7 +12,8 @@ pub const Encoder = struct {
 
     pub fn reset(self: *Encoder) void {
         if (self.current_ids) |current_ids_| {
-            c.hftokenizers_tokens_drop(ffi.ZigSlice.from(current_ids_));
+            _ = current_ids_; // autofix
+            //c.hftokenizers_tokens_drop(ffi.ZigSlice.from(current_ids_));
             self.current_ids = null;
         }
     }

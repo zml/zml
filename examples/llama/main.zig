@@ -42,19 +42,19 @@ pub fn generateText(
     var profiler = mod.platform().getProfiler(null);
     defer profiler.deinit();
 
-    profiler.start();
-    defer {
-        profiler.stop();
-        profiler.dumpAsJsonTo(allocator, std.fs.cwd(), "trace.json") catch unreachable;
-    }
+    //profiler.start();
+    //defer {
+    //    profiler.stop();
+    //    profiler.dumpAsJsonTo(allocator, std.fs.cwd(), "trace.json") catch unreachable;
+    //}
 
-    const prompt_tok = tokenizer.encode(allocator, prompt, .{}) catch unreachable;
     var tokenizer_encoder = try tokenizer.encoder();
     defer tokenizer_encoder.deinit();
 
     var tokenizer_decoder = try tokenizer.decoder();
     defer tokenizer_decoder.deinit();
 
+    const prompt_tok = try tokenizer_encoder.encode(prompt);
     log.debug("Tokenized Prompt {d}", .{prompt_tok});
     const dims = llama.model.shape();
     const max_seq_len = dims.s;
@@ -72,8 +72,8 @@ pub fn generateText(
     defer output.deinit();
 
     var tokens = try zml.Buffer.fromSlice2(mod.platform(), .{max_seq_len}, token_buffer);
-    const prefill_token_index = try zml.Buffer.fromSlice2(mod.platform(), .{}, &[_]i32{@intCast(prompt_tok.len - 1)});
-    //defer prefill_token_index.deinit();
+    var prefill_token_index = try zml.Buffer.fromSlice2(mod.platform(), .{}, &[_]i32{@intCast(prompt_tok.len - 1)});
+    defer prefill_token_index.deinit();
 
     var rng = try zml.Tensor.Rng.init(mod.platform(), seed);
     tokens, var token_index, var kv_cache, rng = mod_prefill.call(.{ tokens, prefill_token_index, null, rng });
@@ -131,14 +131,14 @@ pub fn generateText(
     for (0..output_tokens_len) |i| {
         //_ = i;
         const frame_id = tracer.frameStart(try std.fmt.bufPrintZ(tracer_buffer, "Generate token {}/{}", .{ i + 1, output_tokens_len }));
-        tokens, token_index, kv_cache, rng = mod.call(.{ tokens, token_index, kv_cache, rng });
-        //token_index.deinit();
-        //token_index = new_token_index;
+        tokens, const new_token_index, kv_cache, rng = mod.call(.{ tokens, token_index, kv_cache, rng });
+        token_index.deinit();
+        token_index = new_token_index;
         if ((i + 1) % output_freq == 0) {
             const n = output.items.len;
             _ = try tokens.toHost(std.mem.sliceAsBytes(token_buffer));
 
-            const chunk = tokenizer_decoder.next(@intCast(token_buffer[decode_progress])) orelse unreachable;
+            const chunk = try tokenizer_decoder.next(@intCast(token_buffer[decode_progress])) orelse unreachable;
             try output.appendSlice(chunk);
 
             decode_progress += output_freq;
@@ -160,7 +160,7 @@ pub fn generateText(
         total_token_count = end_idx + 1;
     }
     const generated_token_count = total_token_count - prompt_tok.len;
-    const chunk = tokenizer_decoder.next(@intCast(token_buffer[decode_progress])) orelse unreachable;
+    const chunk = try tokenizer_decoder.next(@intCast(token_buffer[decode_progress])) orelse unreachable;
     try output.appendSlice(chunk);
     //try tokenizer.decodeWithOpts(&output, @ptrCast(token_buffer[decode_progress..total_token_count]), .{});
     std.debug.print("{s}\n", .{output.items[n..]});
@@ -173,7 +173,7 @@ pub fn generateText(
     _ = try tokens.toHost(std.mem.sliceAsBytes(token_buffer));
     output.clearRetainingCapacity();
 
-    try tokenizer.decodeWithOpts(&output, @ptrCast(token_buffer[0..total_token_count]), .{});
+    //try tokenizer.decodeWithOpts(&output, @ptrCast(token_buffer[0..total_token_count]), .{});
     return output.toOwnedSlice();
 }
 
@@ -301,6 +301,8 @@ pub fn asyncMain() !void {
     log.info("✅\tPrompt: {s}", .{prompt});
 
     const seed = cli_args.seed orelse @as(u128, @bitCast(std.time.nanoTimestamp()));
-    const story = try generateText(llama, llama_module_prefill, llama_module, tokenizer, allocator, seed, prompt);
-    defer allocator.free(story);
+    for (0..10) |_| {
+        const story = try generateText(llama, llama_module_prefill, llama_module, tokenizer, allocator, seed, prompt);
+        defer allocator.free(story);
+    }
 }

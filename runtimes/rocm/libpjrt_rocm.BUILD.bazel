@@ -61,10 +61,6 @@ cc_import(
         ":_hipblaslt": ["@hipblaslt//:runfiles"],
         "//conditions:default": [],
     }),
-    add_needed = ["libzmlxrocm.so.0"],
-    rename_dynamic_symbols = {
-        "dlopen": "zmlxrocm_dlopen",
-    },
     shared_library = "libpjrt_rocm.so",
     add_needed = ["libzmlxrocm.so.0"],
     rename_dynamic_symbols = {
