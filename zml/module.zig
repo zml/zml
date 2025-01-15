@@ -931,8 +931,8 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, m
 fn setFlag(options: *xla_pb.CompileOptionsProto, comptime flag: [:0]const u8, value: anytype) void {
     const option: xla_pb.OptionOverrideProto = switch (@typeInfo(@TypeOf(value))) {
         .Bool => .{ .value = .{ .bool_field = value } },
-        .Int => .{ .value = .{ .int_field = value } },
-        .Float => .{ .value = .{ .double_field = value } },
+        .ComptimeInt, .Int => .{ .value = .{ .int_field = value } },
+        .ComptimeFloat, .Float => .{ .value = .{ .double_field = value } },
         else => .{ .value = .{ .string_field = .{ .Const = value } } },
     };
     options.env_option_overrides.appendAssumeCapacity(.{ .key = .{ .Const = flag }, .value = option });
