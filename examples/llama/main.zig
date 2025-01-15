@@ -66,8 +66,8 @@ pub fn generateText(
     defer output.deinit();
 
     var tokens = try zml.Buffer.fromSlice(mod.platform(), .{max_seq_len}, token_buffer);
-    var prefill_token_index = try zml.Buffer.fromSlice(mod.platform(), .{}, &[_]i32{@intCast(prompt_tok.len - 1)});
-    defer prefill_token_index.deinit();
+    const prefill_token_index = try zml.Buffer.fromSlice(mod.platform(), .{}, &[_]i32{@intCast(prompt_tok.len - 1)});
+    //defer prefill_token_index.deinit();
 
     var rng = try zml.Tensor.Rng.init(mod.platform(), seed);
     tokens, var token_index, var kv_cache, rng = mod_prefill.call(.{ tokens, prefill_token_index, null, rng });
@@ -86,9 +86,9 @@ pub fn generateText(
     for (0..output_tokens_len) |i| {
         //_ = i;
         const frame_id = tracer.frameStart(try std.fmt.bufPrintZ(tracer_buffer, "Generate token {}/{}", .{ i + 1, output_tokens_len }));
-        tokens, const new_token_index, kv_cache, rng = mod.call(.{ tokens, token_index, kv_cache, rng });
-        token_index.deinit();
-        token_index = new_token_index;
+        tokens, token_index, kv_cache, rng = mod.call(.{ tokens, token_index, kv_cache, rng });
+        //token_index.deinit();
+        //token_index = new_token_index;
         if ((i + 1) % output_freq == 0) {
             const n = output.items.len;
             _ = try tokens.toHost(std.mem.sliceAsBytes(token_buffer));

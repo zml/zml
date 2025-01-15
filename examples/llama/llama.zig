@@ -110,7 +110,7 @@ pub const LlamaLM = struct {
     }
 
     pub fn increment(_: u8, token_index: Tensor) Tensor {
-        return token_index.addConstant(1);
+        return token_index.addConstant(1).reuseBuffer(token_index);
     }
 
     /// Run the generation entirely within pjrt.
