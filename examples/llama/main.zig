@@ -39,6 +39,15 @@ pub fn generateText(
     seed: u128,
     prompt: []const u8,
 ) ![]const u8 {
+    var profiler = mod.platform().getProfiler(null);
+    defer profiler.deinit();
+
+    profiler.start();
+    defer {
+        profiler.stop();
+        profiler.dumpAsJsonTo(allocator, std.fs.cwd(), "trace.json") catch unreachable;
+    }
+
     const prompt_tok = tokenizer.encode(allocator, prompt, .{}) catch unreachable;
     log.debug("Tokenized Prompt {d}", .{prompt_tok});
     const dims = llama.model.shape();
