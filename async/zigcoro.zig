@@ -1,35 +1,52 @@
 const std = @import("std");
 const stdx = @import("stdx");
 const xev = @import("xev");
-const coro = @import("coro.zig");
-const executor = @import("executor.zig");
-const channel_mod = @import("channel.zig");
-const aio = @import("asyncio.zig");
-const stack = @import("stack.zig");
+const libcoro = @import("libcoro");
+const aio = libcoro.asyncio;
+const queue_mpsc = @import("queue_mpsc.zig");
+
+pub const Queue = @import("queue.zig").Intrusive;
 
 pub const Condition = struct {
-    inner: executor.Condition,
+    const CoroResume = struct {
+        coro: libcoro.Frame,
+
+        fn init() CoroResume {
+            return .{ .coro = libcoro.xframe() };
+        }
+
+        fn func(self: *CoroResume) libcoro.Executor.Func {
+            return .{ .func = CoroResume.cb, .userdata = self };
+        }
+
+        fn cb(ud: ?*anyopaque) void {
+            const self: *CoroResume = @ptrCast(@alignCast(ud));
+            libcoro.xresume(self.coro);
+        }
+    };
+
+    exec: *libcoro.Executor,
+    waiters: Queue(libcoro.Executor.Func) = .{},
 
     pub fn init() Condition {
-        return .{ .inner = executor.Condition.init(&AsyncThread.current.executor.exec) };
+        return .{ .exec = &AsyncThread.current.executor.exec };
     }
 
     pub fn broadcast(self: *Condition) void {
-        if (self.waiters.empty()) {
-            return;
-        }
         while (self.waiters.pop()) |waiter| {
             self.exec.runSoon(waiter);
         }
-        _ = self.exec.tick();
     }
 
     pub fn signal(self: *Condition) void {
-        self.inner.signal();
+        if (self.waiters.pop()) |waiter| self.exec.runSoon(waiter);
     }
 
     pub fn wait(self: *Condition) void {
-        self.inner.wait();
+        var res = CoroResume.init();
+        var cb = res.func();
+        self.waiters.push(&cb);
+        libcoro.xsuspend();
     }
 };
 
@@ -46,7 +63,7 @@ pub fn FrameEx(comptime func: anytype, comptime argsT: type) type {
 fn FrameExx(comptime func: anytype, comptime argsT: type, comptime returnT: type) type {
     return struct {
         const Self = @This();
-        const FrameT = coro.FrameT(func, argsT);
+        const FrameT = libcoro.FrameT(func, .{ .ArgsT = argsT });
 
         inner: FrameT,
 
@@ -54,20 +71,18 @@ fn FrameExx(comptime func: anytype, comptime argsT: type, comptime returnT: type
         pub const await_ = awaitt;
         pub fn awaitt(self: *Self) returnT {
             defer {
-                AsyncThread.current.stack_allocator.destroy(&self.inner._frame.stack);
                 self.inner.deinit();
                 self.* = undefined;
             }
-            return coro.xawait(self.inner);
+            return libcoro.xawait(self.inner);
         }
     };
 }
 
 pub fn asyncc(comptime func: anytype, args: anytype) !FrameEx(func, @TypeOf(args)) {
     const Signature = stdx.meta.FnSignature(func, @TypeOf(args));
-    const new_stack = try AsyncThread.current.stack_allocator.create();
     return .{
-        .inner = try aio.xasync(func, @as(Signature.ArgsT, args), new_stack),
+        .inner = try aio.xasync(func, @as(Signature.ArgsT, args), null),
     };
 }
 
@@ -105,12 +120,12 @@ pub fn sleep(ms: u64) !void {
 
 pub const threading = struct {
     const Waiter = struct {
-        frame: coro.Frame,
+        frame: libcoro.Frame,
         thread: *const AsyncThread,
         next: ?*Waiter = null,
     };
 
-    const WaiterQueue = stdx.queue.MPSC(Waiter);
+    const WaiterQueue = queue_mpsc.Intrusive(Waiter);
 
     pub const ResetEventSingle = struct {
         const State = union(enum) {
@@ -125,7 +140,7 @@ pub const threading = struct {
         waiter: std.atomic.Value(*const State) = std.atomic.Value(*const State).init(&State.unset_state),
 
         pub fn isSet(self: *ResetEventSingle) bool {
-            return self.waiter.load(.monotonic) == &State.set_state;
+            return self.waiter.load(&State.set_state, .monotonic) == &State.set_state;
         }
 
         pub fn reset(self: *ResetEventSingle) void {
@@ -144,26 +159,72 @@ pub const threading = struct {
 
         pub fn wait(self: *ResetEventSingle) void {
             var waiter: Waiter = .{
-                .frame = coro.xframe(),
+                .frame = libcoro.xframe(),
                 .thread = AsyncThread.current,
             };
             var new_state: State = .{
                 .waiting = &waiter,
             };
             if (self.waiter.cmpxchgStrong(&State.unset_state, &new_state, .monotonic, .monotonic) == null) {
-                while (self.isSet() == false) {
-                    libcoro.xsuspend();
-                }
+                libcoro.xsuspend();
             }
         }
     };
+};
+
+pub const FrameAllocator = struct {
+    const Item = [1 * 1024 * 1024]u8;
+    const FramePool = std.heap.MemoryPool(Item);
+
+    pool: FramePool,
+
+    pub fn init(allocator_: std.mem.Allocator) !FrameAllocator {
+        return .{
+            .pool = FramePool.init(allocator_),
+        };
+    }
+
+    pub fn allocator(self: *FrameAllocator) std.mem.Allocator {
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .alloc = alloc,
+                .resize = resize,
+                .free = free,
+            },
+        };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, ptr_align: u8, ret_addr: usize) ?[*]u8 {
+        _ = ptr_align;
+        _ = ret_addr;
+        stdx.debug.assert(len <= Item.len, "Should always pass a length of less than {d} bytes", .{Item.len});
+        const self: *FrameAllocator = @ptrCast(@alignCast(ctx));
+        const stack = self.pool.create() catch return null;
+        return @ptrCast(stack);
+    }
+
+    fn resize(ctx: *anyopaque, buf: []u8, buf_align: u8, new_len: usize, ret_addr: usize) bool {
+        _ = ctx;
+        _ = buf;
+        _ = buf_align;
+        _ = ret_addr;
+        return new_len <= Item.len;
+    }
+
+    fn free(ctx: *anyopaque, buf: []u8, buf_align: u8, ret_addr: usize) void {
+        _ = buf_align;
+        _ = ret_addr;
+        const self: *FrameAllocator = @ptrCast(@alignCast(ctx));
+        const v: *align(8) Item = @ptrCast(@alignCast(buf.ptr));
+        self.pool.destroy(v);
+    }
 };
 
 pub const AsyncThread = struct {
     threadlocal var current: *const AsyncThread = undefined;
 
     executor: *aio.Executor,
-    stack_allocator: *stack.StackAllocator,
     loop: *xev.Loop,
     thread_pool: *xev.ThreadPool,
     async_notifier: *xev.Async,
@@ -175,7 +236,7 @@ pub const AsyncThread = struct {
 
     fn waker_cb(q: ?*threading.WaiterQueue, _: *xev.Loop, _: *xev.Completion, _: xev.Async.WaitError!void) xev.CallbackAction {
         while (q.?.pop()) |waiter| {
-            coro.xresume(waiter.frame);
+            libcoro.xresume(waiter.frame);
         }
         return .rearm;
     }
@@ -190,9 +251,10 @@ pub const AsyncThread = struct {
         var loop = try xev.Loop.init(.{
             .thread_pool = &thread_pool,
         });
+
         defer loop.deinit();
 
-        var executor_ = aio.Executor.init(&loop);
+        var executor = aio.Executor.init(&loop);
 
         var async_notifier = try xev.Async.init();
         defer async_notifier.deinit();
@@ -203,23 +265,20 @@ pub const AsyncThread = struct {
         var c: xev.Completion = undefined;
         async_notifier.wait(&loop, &c, threading.WaiterQueue, &waiters_queue, &waker_cb);
 
-        var stack_allocator = stack.StackAllocator.init(allocator);
-        defer stack_allocator.deinit();
+        aio.initEnv(.{
+            .stack_allocator = allocator,
+            .default_stack_size = 1 * 1024 * 1024,
+        });
 
         AsyncThread.current = &.{
-            .executor = &executor_,
-            .stack_allocator = &stack_allocator,
+            .executor = &executor,
             .loop = &loop,
             .thread_pool = &thread_pool,
             .async_notifier = &async_notifier,
             .waiters_queue = &waiters_queue,
         };
 
-        // allocate the main coroutine stack, on the current thread's stack!
-        var mainStackData: stack.Stack.Data = undefined;
-        const mainStack = stack.Stack.init(&mainStackData);
-
-        return try aio.run(&executor_, mainFunc, .{}, mainStack);
+        return try aio.run(&executor, mainFunc, .{}, null);
     }
 };
 
@@ -471,7 +530,7 @@ pub const Socket = struct {
 pub fn Channel(comptime T: type, capacity: usize) type {
     return struct {
         const Self = @This();
-        const Inner = channel_mod.Channel(T, capacity);
+        const Inner = libcoro.Channel(T, .{ .capacity = capacity });
 
         inner: Inner,
 
@@ -479,16 +538,8 @@ pub fn Channel(comptime T: type, capacity: usize) type {
             return .{ .inner = Inner.init(&AsyncThread.current.executor.exec) };
         }
 
-        pub fn initWithLen(len: usize) Self {
-            return .{ .inner = Inner.initWithLen(&AsyncThread.current.executor.exec, len) };
-        }
-
         pub fn close(self: *Self) void {
             self.inner.close();
-        }
-
-        pub fn try_send(self: *Self, val: T) bool {
-            return self.inner.try_send(val);
         }
 
         pub fn send(self: *Self, val: T) void {
@@ -498,19 +549,11 @@ pub fn Channel(comptime T: type, capacity: usize) type {
         pub fn recv(self: *Self) ?T {
             return self.inner.recv();
         }
-
-        pub fn try_recv(self: *Self) ?T {
-            return self.inner.try_recv();
-        }
     };
 }
 
-pub fn channel(comptime T: type, len: usize, comptime capacity: usize) Channel(T, capacity) {
-    return Channel(T, capacity).initWithLen(len);
-}
-
 pub const Mutex = struct {
-    const VoidChannel = coro.Channel(void, 1);
+    const VoidChannel = libcoro.Channel(void, .{ .capacity = 1 });
 
     inner: VoidChannel,
 

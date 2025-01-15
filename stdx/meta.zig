@@ -4,7 +4,6 @@ const debug = @import("debug.zig");
 const compileError = debug.compileError;
 
 pub const FnSignature = @import("signature.zig").FnSignature;
-pub const Signature = @import("signature.zig").Signature;
 
 pub fn isStruct(comptime T: type) bool {
     return switch (@typeInfo(T)) {

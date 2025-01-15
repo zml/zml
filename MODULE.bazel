@@ -106,6 +106,7 @@ bazel_dep(name = "xla", version = "20250103.0-5f1fe6a")
 tsl = use_extension("@xla//:tsl.bzl", "tsl")
 use_repo(tsl, "tsl")
 
+bazel_dep(name = "zigcoro", version = "20240829.0-fc1db29")
 bazel_dep(name = "sentencepiece", version = "20240618.0-d7ace0a")
 bazel_dep(name = "zig-protobuf", version = "20240722.0-c644d11")
 bazel_dep(name = "zig-yaml", version = "20240903.0-83d5fdf")

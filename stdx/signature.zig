@@ -48,7 +48,6 @@ pub fn ArgsTuple(comptime funcT: anytype, comptime ArgsT: ?type) type {
 }
 
 pub const Signature = struct {
-    Func: type,
     FuncT: type,
     ArgsT: type,
     ReturnT: type,
@@ -60,9 +59,6 @@ pub fn FnSignature(comptime func: anytype, comptime argsT_: ?type) Signature {
     const argsT = ArgsTuple(@TypeOf(func), argsT_);
     const return_type = @TypeOf(@call(.auto, func, @as(argsT, undefined)));
     return Signature{
-        .Func = struct {
-            pub const Value = func;
-        },
         .FuncT = @TypeOf(func),
         .ArgsT = argsT,
         .ReturnT = return_type,
