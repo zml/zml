@@ -17,10 +17,7 @@ cc_binary(
     args = [
         "--model=$(location @ModernBERT-base//:model.safetensors)",
         "--tokenizer=$(location @ModernBERT-base//:tokenizer)",
-        # "--hidden-size=768",
-        # "--intermediate-size=1152",
-        # "--num-attention-heads=12",
-        # "--num-hidden-layers=22",
+        "--num-attention-heads=12",
     ],
     data = [
         "@ModernBERT-base//:model.safetensors",
@@ -34,10 +31,7 @@ cc_binary(
     args = [
         "--model=$(location @ModernBERT-large//:model.safetensors)",
         "--tokenizer=$(location @ModernBERT-large//:tokenizer)",
-        # "--hidden-size=1024",
-        # "--intermediate-size=2624",
-        # "--num-attention-heads=16",
-        # "--num-hidden-layers=28",
+        "--num-attention-heads=16",
     ],
     data = [
         "@ModernBERT-large//:model.safetensors",

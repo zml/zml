@@ -9,6 +9,7 @@ const ModernBertMLP = modernbert.ModernBertMLP;
 const ModernBertAttention = modernbert.ModernBertAttention;
 const ModernBertEncoderLayer = modernbert.ModernBertEncoderLayer;
 const ModernBertModel = modernbert.ModernBertModel;
+const ModernBertOptions = modernbert.ModernBertOptions;
 
 // ModernBERT
 const ACTIVATIONS_FILE_PATH: []const u8 = "/Users/victor/Documents/development/zml-torch-activation-example/ModernBERT-base.activations.pt";
@@ -50,6 +51,10 @@ pub fn asyncMain() !void {
     const activations = try zml.aio.torch.open(model_arena, ACTIVATIONS_FILE_PATH);
     defer activations.deinit();
     log.info("Found {} activations in {s}", .{ activations.buffers.count(), ACTIVATIONS_FILE_PATH });
+
+    const modernbert_base_options: ModernBertOptions = .{
+        .num_attention_heads = 12,
+    };
 
     // model.embeddings.tok_embeddings
     log.info("\n\nTesting model.embeddings.tok_embeddings layer:", .{});
@@ -222,12 +227,13 @@ pub fn asyncMain() !void {
     // model.layers.2.attn
     log.info("\n\nTesting model.layers.2.attn layer:", .{});
 
-    const attn_shape = try zml.aio.populateModelWithPrefix(
+    var attn_shape = try zml.aio.populateModelWithPrefix(
         ModernBertAttention,
         model_arena,
         weights_file,
         "model.layers.2.attn",
     );
+    attn_shape.num_heads = modernbert_base_options.num_attention_heads;
 
     const attn_weights = try zml.aio.loadModelBuffersWithPrefix(
         ModernBertAttention,
@@ -257,6 +263,7 @@ pub fn asyncMain() !void {
         "model.layers.3.attn",
     );
     attn_global_shape.is_global_attention = true;
+    attn_global_shape.num_heads = modernbert_base_options.num_attention_heads;
 
     const attn_global_weights = try zml.aio.loadModelBuffersWithPrefix(
         ModernBertAttention,
@@ -279,12 +286,13 @@ pub fn asyncMain() !void {
     // model.layers.2
     log.info("\n\nTesting model.layers.2 layer:", .{});
 
-    const layer_shape = try zml.aio.populateModelWithPrefix(
+    var layer_shape = try zml.aio.populateModelWithPrefix(
         ModernBertEncoderLayer,
         model_arena,
         weights_file,
         "model.layers.2",
     );
+    layer_shape.attn.num_heads = modernbert_base_options.num_attention_heads;
 
     const layer_weights = try zml.aio.loadModelBuffersWithPrefix(
         ModernBertEncoderLayer,
@@ -314,7 +322,7 @@ pub fn asyncMain() !void {
         weights_file,
         "model",
     );
-    modern_bert_model.init();
+    modern_bert_model.init(modernbert_base_options);
 
     // Load the weights.
     var modern_bert_weights = try zml.aio.loadModelBuffersWithPrefix(
