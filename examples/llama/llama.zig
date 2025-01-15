@@ -366,16 +366,17 @@ pub const KvCache = struct {
     }
 
     pub fn update(self: KvCache, new_k: Tensor, new_v: Tensor, token_index: Tensor) KvCache {
+        const k_shape = self.k.shape().drop(.layer);
         return .{
-            .k = self.k.dynamicUpdateSlice(
+            .k = self.k.scatterSlices(
                 .{ .layer = self.layer_index, .k = token_index },
-                // transpose to match kv-cache layout
-                new_k.contiguous(.{ .h, .k, .hd }),
+                new_k.convert(self.k.dtype()).transpose(k_shape),
+                .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override },
             ).reuseBuffer(self.k),
-            .v = self.v.dynamicUpdateSlice(
+            .v = self.v.scatterSlices(
                 .{ .layer = self.layer_index, .k = token_index },
-                // transpose to match kv-cache layout
-                new_v.contiguous(.{ .h, .k, .hd }),
+                new_v.convert(self.v.dtype()).transpose(k_shape),
+                .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override },
             ).reuseBuffer(self.v),
             .layer_index = self.layer_index,
         };
