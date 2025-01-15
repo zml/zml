@@ -62,6 +62,10 @@ cc_import(
         "//conditions:default": [],
     }),
     shared_library = "libpjrt_rocm.so",
+    add_needed = ["libzmlxrocm.so.0"],
+    rename_dynamic_symbols = {
+        "dlopen": "zmlxrocm_dlopen",
+    },
     visibility = ["//visibility:public"],
     deps = [
         ":zmlxrocm",
