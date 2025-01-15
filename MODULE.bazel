@@ -71,7 +71,7 @@ cuda = use_extension("//runtimes/cuda:cuda.bzl", "cuda_packages")
 use_repo(cuda, "libpjrt_cuda")
 
 rocm = use_extension("//runtimes/rocm:rocm.bzl", "rocm_packages")
-use_repo(rocm, "libpjrt_rocm")
+use_repo(rocm, "libpjrt_rocm", "hipblaslt", "rocblas")
 
 tpu = use_extension("//runtimes/tpu:tpu.bzl", "tpu_packages")
 use_repo(tpu, "libpjrt_tpu")

@@ -127,9 +127,17 @@ cc_import(
 )
 
 bytecode_select(
-    name = "runfiles",
+    name = "bytecodes",
     bytecodes = glob(["lib/rocblas/library/*"]),
     enabled_gfx = "@libpjrt_rocm//:gfx",
+)
+
+filegroup(
+    name = "runfiles",
+    srcs = [
+        ":bytecodes",
+        "lib/rocblas/library/TensileManifest.txt",
+    ],
     visibility = ["@libpjrt_rocm//:__subpackages__"],
 )
 """,
@@ -171,8 +179,9 @@ bytecode_select(
 filegroup(
     name = "runfiles",
     srcs = [
-        "lib/hipblaslt/library/hipblasltExtOpLibrary.dat",
         ":bytecodes",
+        "lib/hipblaslt/library/hipblasltExtOpLibrary.dat",
+        "lib/hipblaslt/library/TensileManifest.txt",
     ],
     visibility = ["@libpjrt_rocm//:__subpackages__"],
 )

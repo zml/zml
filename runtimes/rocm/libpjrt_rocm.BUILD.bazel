@@ -38,7 +38,6 @@ cc_library(
         "-lc",
         "-ldl",
     ],
-    deps = ["@bazel_tools//tools/cpp/runfiles"],
 )
 
 cc_shared_library(
@@ -64,12 +63,17 @@ cc_import(
     shared_library = "libpjrt_rocm.so",
     visibility = ["//visibility:public"],
     deps = [
-        ":zmlxrocm",
         "@comgr//:amd_comgr",
         "@hip-runtime-amd//:amdhip",
         "@hipblaslt",
         "@hsa-amd-aqlprofile//:hsa-amd-aqlprofile",
         "@hsa-rocr//:hsa-runtime",
+        "@libdrm-amdgpu",
+        "@libdrm",
+        "@libelf",
+        "@libnuma",
+        "@libtinfo",
+        "@libzstd",
         "@miopen-hip//:MIOpen",
         "@rccl",
         "@rocblas",
@@ -77,12 +81,7 @@ cc_import(
         "@rocm-smi-lib//:rocm_smi",
         "@rocprofiler-register",
         "@roctracer",
-        "@libelf",
-        "@libdrm",
-        "@libnuma",
-        "@libzstd",
-        "@libdrm-amdgpu",
-        "@libtinfo",
         "@zlib1g",
+        "@zml//runtimes/rocm:zmlxrocm",
     ],
 )
