@@ -211,7 +211,7 @@ pub const CompilationContext = struct {
 
         const module_hash = computeModuleHash(self._platform, module);
         var module_dir: ?[]const u8 = null;
-        var pjrt_location: ?[:0]const u8 = null;
+        const pjrt_location: ?[:0]const u8 = null;
 
         if (self._platform.compilation_options.xla_dump_to) |xla_dump_to| {
             const sep = std.fs.path.sep_str;
@@ -229,7 +229,7 @@ pub const CompilationContext = struct {
                 log.warn("Failed to open {s}", .{mlir_name});
             }
 
-            pjrt_location = try std.fs.path.joinZ(arena, &.{ module_dir.?, "module.pjrt" });
+            //pjrt_location = try std.fs.path.joinZ(arena, &.{ module_dir.?, "module.pjrt" });
         }
 
         const loaded_executable: *pjrt.LoadedExecutable = blk: {
