@@ -2,7 +2,6 @@ const std = @import("std");
 
 const asynk = @import("async");
 const dialect = @import("mlir/dialects");
-const runfiles = @import("runfiles");
 const stdx = @import("stdx");
 const xla_pb = @import("//xla:xla_proto");
 
@@ -902,10 +901,11 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, m
         }
     }
     switch (platform.target) {
-        .cuda => cuda_dir: {
-            // NVIDIA recommends to disable Triton GEMM on JAX:
+        .cuda => {
+            // NVIDIA recommends these settings
             // https://github.com/NVIDIA/JAX-Toolbox?tab=readme-ov-file#environment-variables
             setFlag(&options, "xla_gpu_enable_triton_gemm", false);
+            setFlag(&options, "xla_gpu_enable_latency_hiding_scheduler", true);
             //  setFlag(&options, "xla_gpu_enable_cudnn_fmha", true);
             //  setFlag(&options, "xla_gpu_fused_attention_use_cudnn_rng", true);
             //  setFlag(&options, "xla_gpu_enable_cudnn_layer_norm", true);
@@ -913,17 +913,6 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, m
             //  setFlag(&options, "xla_gpu_enable_dynamic_slice_fusion", true);
             //  setFlag(&options, "xla_gpu_enable_while_loop_double_buffering", true);
             //  setFlag(&options, "xla_gpu_use_runtime_fusion", true);
-            //  setFlag(&options, "xla_gpu_enable_latency_hiding_scheduler", true);
-            var r_ = try runfiles.Runfiles.create(.{ .allocator = arena }) orelse {
-                log.warn("Bazel runfile not found !", .{});
-                break :cuda_dir;
-            };
-            defer r_.deinit(arena);
-            const source_repo = @import("bazel_builtin").current_repository;
-            const r = r_.withSourceRepo(source_repo);
-            const cuda_data_dir = (try r.rlocationAlloc(arena, "libpjrt_cuda/sandbox")).?;
-            log.info("xla_gpu_cuda_data_dir: {s}", .{cuda_data_dir});
-            setFlag(&options, "xla_gpu_cuda_data_dir", cuda_data_dir);
         },
         .rocm => {
             // Disable Triton GEMM on ROCM. For some reason it's much, much slower when

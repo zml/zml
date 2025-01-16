@@ -71,7 +71,7 @@ cuda = use_extension("//runtimes/cuda:cuda.bzl", "cuda_packages")
 use_repo(cuda, "libpjrt_cuda")
 
 rocm = use_extension("//runtimes/rocm:rocm.bzl", "rocm_packages")
-use_repo(rocm, "libpjrt_rocm")
+use_repo(rocm, "libpjrt_rocm", "hipblaslt", "rocblas")
 
 tpu = use_extension("//runtimes/tpu:tpu.bzl", "tpu_packages")
 use_repo(tpu, "libpjrt_tpu")
@@ -84,7 +84,7 @@ use_repo(zls, "zls_aarch64-macos", "zls_x86_64-linux")
 
 register_toolchains("//third_party/zls:all")
 
-bazel_dep(name = "libxev", version = "20241119.0-6afcde9")
+bazel_dep(name = "libxev", version = "20241208.0-db6a52b")
 bazel_dep(name = "llvm-raw", version = "20250102.0-f739aa4")
 
 llvm = use_extension("@llvm-raw//utils/bazel:extension.bzl", "llvm")
