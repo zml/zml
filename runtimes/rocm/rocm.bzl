@@ -119,10 +119,6 @@ load("@zml//runtimes/rocm:gfx.bzl", "bytecode_select")
 cc_import(
     name = "rocblas",
     shared_library = "lib/librocblas.so.4",
-    add_needed = ["libzmlxrocm.so.0"],
-    rename_dynamic_symbols = {
-        "dlopen": "zmlxrocm_dlopen",
-    },
     visibility = ["@libpjrt_rocm//:__subpackages__"],
 )
 
@@ -160,10 +156,6 @@ load("@zml//runtimes/rocm:gfx.bzl", "bytecode_select")
 cc_import(
     name = "hipblaslt",
     shared_library = "lib/libhipblaslt.so.0",
-    add_needed = ["libzmlxrocm.so.0"],
-    rename_dynamic_symbols = {
-        "dlopen": "zmlxrocm_dlopen",
-    },
     visibility = ["@libpjrt_rocm//:__subpackages__"],
 )
 
