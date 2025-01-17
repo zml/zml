@@ -1,100 +1,7 @@
-From 12fb50bdd4b62c8e111f12eecb171257b6af6038 Mon Sep 17 00:00:00 2001
-From: Mitchell Hashimoto <m@mitchellh.com>
-Date: Mon, 4 Nov 2024 13:30:10 -0800
-Subject: [PATCH 1/8] Revert "Fix potential ThreadPool UAF (#113)"
-
-This reverts commit dbe22910a43e9e8ec9948d3cbd73d8488a074967, reversing
-changes made to 43c7e4b3308f359e5b758db2d824d7c447f4ed3f.
----
- src/ThreadPool.zig | 8 ++++++--
- 1 file changed, 6 insertions(+), 2 deletions(-)
-
-diff --git a/src/ThreadPool.zig b/src/ThreadPool.zig
-index 9e0ff02..1d0123b 100644
---- a/src/ThreadPool.zig
-+++ b/src/ThreadPool.zig
-@@ -335,8 +335,12 @@ fn unregister(noalias self: *ThreadPool, noalias maybe_thread: ?*Thread) void {
- 
- fn join(self: *ThreadPool) void {
-     // Wait for the thread pool to be shutdown() then for all threads to enter a joinable state
--    self.join_event.wait();
--    const sync: Sync = @bitCast(self.sync.load(.monotonic));
-+    var sync: Sync = @bitCast(self.sync.load(.monotonic));
-+    if (!(sync.state == .shutdown and sync.spawned == 0)) {
-+        self.join_event.wait();
-+        sync = @bitCast(self.sync.load(.monotonic));
-+    }
-+
-     assert(sync.state == .shutdown);
-     assert(sync.spawned == 0);
- 
-
-From f6dea8bb85593cca6d4a54d92d4b05fe15b1eb41 Mon Sep 17 00:00:00 2001
-From: Corentin Godeau <corentin.godeau@zml.ai>
-Date: Tue, 10 Sep 2024 11:23:28 +0200
-Subject: [PATCH 2/8] fix: avoid overflow in kqueue backend
-
-When there is more than 256 events, the `events` slice could overflow
-when processing completions.
----
- src/backend/kqueue.zig | 3 +++
- 1 file changed, 3 insertions(+)
-
-diff --git a/src/backend/kqueue.zig b/src/backend/kqueue.zig
-index 834f916..456f64f 100644
---- a/src/backend/kqueue.zig
-+++ b/src/backend/kqueue.zig
-@@ -437,6 +437,9 @@ pub const Loop = struct {
-                     // Only resubmit if we aren't already active (in the queue)
-                     .rearm => if (!c_active) self.submissions.push(c),
-                 }
-+
-+                // If we filled the events slice, we break to avoid overflow.
-+                if (changes == events.len) break;
-             }
- 
-             // Determine our next timeout based on the timers
-
-From 890e2711ff9eb82bbceda2e6229b9c9a8d0b60da Mon Sep 17 00:00:00 2001
-From: David Rubin <daviru007@icloud.com>
-Date: Fri, 6 Dec 2024 20:43:52 -0800
-Subject: [PATCH 3/8] remove race from threadpool
-
----
- src/ThreadPool.zig | 8 +++-----
- 1 file changed, 3 insertions(+), 5 deletions(-)
-
-diff --git a/src/ThreadPool.zig b/src/ThreadPool.zig
-index 1d0123b..aec09d7 100644
---- a/src/ThreadPool.zig
-+++ b/src/ThreadPool.zig
-@@ -291,6 +291,7 @@ pub noinline fn shutdown(self: *ThreadPool) void {
-             // Wake up any threads sleeping on the idle_event.
-             // TODO: I/O polling notification here.
-             if (sync.idle > 0) self.idle_event.shutdown();
-+            if (sync.spawned == 0) self.join_event.notify();
-             return;
-         });
-     }
-@@ -335,11 +336,8 @@ fn unregister(noalias self: *ThreadPool, noalias maybe_thread: ?*Thread) void {
- 
- fn join(self: *ThreadPool) void {
-     // Wait for the thread pool to be shutdown() then for all threads to enter a joinable state
--    var sync: Sync = @bitCast(self.sync.load(.monotonic));
--    if (!(sync.state == .shutdown and sync.spawned == 0)) {
--        self.join_event.wait();
--        sync = @bitCast(self.sync.load(.monotonic));
--    }
-+    self.join_event.wait();
-+    const sync: Sync = @bitCast(self.sync.load(.monotonic));
- 
-     assert(sync.state == .shutdown);
-     assert(sync.spawned == 0);
-
-From d82ee736a1548e6564a296315f33902ae09aa298 Mon Sep 17 00:00:00 2001
+From 8927108937e23ce2ad547a310dabd976ddcaa39d Mon Sep 17 00:00:00 2001
 From: Steeve Morin <steeve@zml.ai>
 Date: Tue, 19 Nov 2024 16:14:14 +0100
-Subject: [PATCH 4/8] backend/epoll: implement eventfd wakeup notification
+Subject: [PATCH 1/5] backend/epoll: implement eventfd wakeup notification
 
 Tries to mimic what happens in backend/kqueue.
 
@@ -211,10 +118,10 @@ index ae4ec7d..f44d326 100644
      task_result: Result = undefined,
  
 
-From 320f1ae9ccc95ce814e246b35ca0f9fd2361f43e Mon Sep 17 00:00:00 2001
+From bf6c19eb1c06d1fb1b3cb5a66ea2ce8f743da5ba Mon Sep 17 00:00:00 2001
 From: Corentin Godeau <corentin@zml.ai>
 Date: Tue, 14 Jan 2025 14:43:54 +0000
-Subject: [PATCH 5/8] backend/epoll: read the wakeup eventfd to avoid being
+Subject: [PATCH 2/5] backend/epoll: read the wakeup eventfd to avoid being
  awaken again
 
 ---
@@ -251,10 +158,10 @@ index f44d326..f84c687 100644
                  const c: *Completion = @ptrFromInt(@as(usize, @intCast(ev.data.ptr)));
  
 
-From 258a64180c901b5e1f9a2c75f1ac77a758411450 Mon Sep 17 00:00:00 2001
+From c0ae753a9874bf78a48bf25b4362b6cca4de1da1 Mon Sep 17 00:00:00 2001
 From: Steeve Morin <steeve@zml.ai>
 Date: Fri, 17 Jan 2025 20:47:42 +0000
-Subject: [PATCH 6/8] epoll: use infinite timeout for epoll_wait
+Subject: [PATCH 3/5] epoll: use infinite timeout for epoll_wait
 
 Since eventfd is now implemented.
 ---
@@ -277,17 +184,16 @@ index f84c687..e3eee20 100644
                  // Determine the time in milliseconds.
                  const ms_now = @as(u64, @intCast(self.cached_now.tv_sec)) * std.time.ms_per_s +
 
-From 9ff535f9b6fac454d454f2799b93863dc9aba7d4 Mon Sep 17 00:00:00 2001
+From 84e75a10ec1c10ea2a13edfcd8a31e582458fc88 Mon Sep 17 00:00:00 2001
 From: Steeve Morin <steeve@zml.ai>
 Date: Fri, 17 Jan 2025 20:48:27 +0000
-Subject: [PATCH 7/8] epoll,kqueue: dispatch close in threadpool
+Subject: [PATCH 4/5] epoll: dispatch close in threadpool
 
 Close might block, so dispatch it inside a threadpool.
 ---
  src/backend/epoll.zig  | 15 +++++++++++++--
- src/backend/kqueue.zig |  6 +++++-
  src/watcher/stream.zig | 16 ++++++++++++++++
- 3 files changed, 34 insertions(+), 3 deletions(-)
+ 2 files changed, 29 insertions(+), 2 deletions(-)
 
 diff --git a/src/backend/epoll.zig b/src/backend/epoll.zig
 index e3eee20..0f4a2ac 100644
@@ -336,30 +242,6 @@ index e3eee20..0f4a2ac 100644
      Unknown,
  };
  
-diff --git a/src/backend/kqueue.zig b/src/backend/kqueue.zig
-index 456f64f..9914309 100644
---- a/src/backend/kqueue.zig
-+++ b/src/backend/kqueue.zig
-@@ -1102,7 +1102,6 @@ pub const Completion = struct {
-     fn perform(self: *Completion, ev_: ?*const Kevent) Result {
-         return switch (self.op) {
-             .cancel,
--            .close,
-             .noop,
-             .timer,
-             .shutdown,
-@@ -1232,6 +1231,11 @@ pub const Completion = struct {
- 
-                 break :res .{ .proc = 0 };
-             },
-+
-+            .close => |*op| res: {
-+                posix.close(op.fd);
-+                break :res .{ .close = {} };
-+            },
-         };
-     }
- 
 diff --git a/src/watcher/stream.zig b/src/watcher/stream.zig
 index 7f5df6f..bc95282 100644
 --- a/src/watcher/stream.zig
@@ -388,10 +270,10 @@ index 7f5df6f..bc95282 100644
          }
      };
 
-From 003416b0b410e70daab0d55ddc48e8e443f4fd09 Mon Sep 17 00:00:00 2001
+From 5bc3ad9f23a03ff3af7a4ec33c8bfa4f3cc6bae9 Mon Sep 17 00:00:00 2001
 From: Steeve Morin <steeve@zml.ai>
 Date: Fri, 17 Jan 2025 20:59:18 +0000
-Subject: [PATCH 8/8] epoll: don't count immediate actions
+Subject: [PATCH 5/5] epoll: don't count immediate actions
 
 If an immediate action is dispatched, the loop might block
 on epoll_wait even though only one action was requested.

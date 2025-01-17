@@ -48,8 +48,8 @@ fn FrameExx(comptime func: anytype, comptime argsT: type, comptime returnT: type
         pub const await_ = awaitt;
         pub fn awaitt(self: *Self) returnT {
             defer {
-                AsyncThread.current.stack_allocator.destroy(&self.inner._frame.stack);
                 self.inner.deinit();
+                AsyncThread.current.stack_allocator.destroy(&self.inner._frame.stack);
                 self.* = undefined;
             }
             return coro.xawait(self.inner);
@@ -145,16 +145,14 @@ pub const threading = struct {
                 .waiting = &waiter,
             };
             if (self.waiter.cmpxchgStrong(&State.unset_state, &new_state, .monotonic, .monotonic) == null) {
-                while (self.isSet() == false) {
-                    coro.xsuspend();
-                }
+                coro.xsuspend();
             }
         }
     };
 };
 
 pub const AsyncThread = struct {
-    threadlocal var current: *const AsyncThread = undefined;
+    threadlocal var current: *AsyncThread = undefined;
 
     executor: *aio.Executor,
     stack_allocator: *stack.StackAllocator,
@@ -167,8 +165,8 @@ pub const AsyncThread = struct {
         self.async_notifier.notify() catch {};
     }
 
-    fn waker_cb(q: ?*threading.WaiterQueue, _: *xev.Loop, _: *xev.Completion, _: xev.Async.WaitError!void) xev.CallbackAction {
-        while (q.?.pop()) |waiter| {
+    fn wakerCallback(self: ?*AsyncThread, _: *xev.Loop, _: *xev.Completion, _: xev.Async.WaitError!void) xev.CallbackAction {
+        while (self.?.waiters_queue.pop()) |waiter| {
             coro.xresume(waiter.frame);
         }
         return .rearm;
@@ -194,13 +192,10 @@ pub const AsyncThread = struct {
         var waiters_queue: threading.WaiterQueue = undefined;
         waiters_queue.init();
 
-        var c: xev.Completion = undefined;
-        async_notifier.wait(&loop, &c, threading.WaiterQueue, &waiters_queue, &waker_cb);
-
         var stack_allocator = stack.StackAllocator.init(allocator);
         defer stack_allocator.deinit();
 
-        AsyncThread.current = &.{
+        var asyncThread: AsyncThread = .{
             .executor = &executor_,
             .stack_allocator = &stack_allocator,
             .loop = &loop,
@@ -208,6 +203,10 @@ pub const AsyncThread = struct {
             .async_notifier = &async_notifier,
             .waiters_queue = &waiters_queue,
         };
+        AsyncThread.current = &asyncThread;
+
+        var c2: xev.Completion = undefined;
+        async_notifier.wait(AsyncThread.current.loop, &c2, AsyncThread, AsyncThread.current, &AsyncThread.wakerCallback);
 
         // allocate the main coroutine stack, on the current thread's stack!
         var mainStackData: stack.Stack.Data = undefined;
@@ -527,6 +526,10 @@ pub fn logFn(
     comptime format: []const u8,
     args: anytype,
 ) void {
+    if (coro.inCoro() == false) {
+        return std.log.defaultLog(message_level, scope, format, args);
+    }
+
     const level_txt = comptime message_level.asText();
     const prefix2 = if (scope == .default) ": " else "(" ++ @tagName(scope) ++ "): ";
     const stderr = getStdErr().writer();

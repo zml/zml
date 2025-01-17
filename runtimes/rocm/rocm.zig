@@ -70,5 +70,5 @@ pub fn load() !*const pjrt.Api {
 
     try setupRocmEnv();
 
-    return try pjrt.Api.loadFrom("libpjrt_rocm.so");
+    return try asynk.callBlocking(pjrt.Api.loadFrom, .{"libpjrt_rocm.so"});
 }
