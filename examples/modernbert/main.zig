@@ -7,14 +7,14 @@ const Tensor = zml.Tensor;
 const modernbert = @import("modernbert.zig");
 
 // set this to false to disable the verbose logging
-const show_mlir = true;
-pub const std_options = .{
-    .log_level = .warn,
-    .log_scope_levels = &[_]std.log.ScopeLevel{
-        .{ .scope = .zml_module, .level = if (show_mlir) .debug else .warn },
-        .{ .scope = .modernbert, .level = .info },
-    },
-};
+// const show_mlir = true;
+// pub const std_options = .{
+//     .log_level = .warn,
+//     .log_scope_levels = &[_]std.log.ScopeLevel{
+//         .{ .scope = .zml_module, .level = if (show_mlir) .debug else .warn },
+//         .{ .scope = .modernbert, .level = .info },
+//     },
+// };
 
 pub fn predictMaskedTokens(
     bert: modernbert.ModernBertForMaskedLM,
@@ -24,10 +24,40 @@ pub fn predictMaskedTokens(
     text: []const u8,
 ) !void {
     _ = bert; // autofix
-    _ = mod; // autofix
 
-    const tokenized_input = try tokenizer.encode(allocator, text, .{});
-    log.info("tokenized_input: {d}", .{tokenized_input});
+    const max_seq_len = 8192;
+
+    const tokens_u32 = try tokenizer.encode(allocator, text, .{});
+
+    if (tokens_u32.len > max_seq_len) {
+        return error.InvalidInput;
+    }
+
+    var input_ids_buffer = try allocator.alloc(i32, max_seq_len);
+    @memset(input_ids_buffer, 0);
+    for (0..tokens_u32.len) |i| {
+        input_ids_buffer[i] = @intCast(tokens_u32[i]);
+    }
+
+    // 1 for real tokens, 0 for padding
+    var attention_mask_buffer = try allocator.alloc(i32, max_seq_len);
+    @memset(attention_mask_buffer, 0); // First set all to 0
+    for (0..tokens_u32.len) |i| {
+        attention_mask_buffer[i] = 1;
+    }
+
+    defer allocator.free(tokens_u32);
+    defer allocator.free(input_ids_buffer);
+    defer allocator.free(attention_mask_buffer);
+
+    const input_ids = try zml.Buffer.fromSlice(mod.platform(), .{ 1, max_seq_len }, input_ids_buffer);
+    // log.info("input_ids: {}", .{input_ids});
+
+    const attention_mask = try zml.Buffer.fromSlice(mod.platform(), .{ 1, max_seq_len }, attention_mask_buffer);
+    // log.info("attention_mask: {}", .{attention_mask});
+
+    const prediction_scores = mod.call(.{ input_ids, attention_mask });
+    log.info("prediction_scores: {}", .{prediction_scores});
 }
 
 pub fn main() !void {
@@ -124,7 +154,7 @@ pub fn asyncMain() !void {
     defer bert_module.deinit();
     log.info("✅\tCompiled model in {d}ms", .{start.read() / std.time.ns_per_ms});
 
-    const text = cli_args.text orelse "Zig is the [MASK] programming language.";
+    const text = cli_args.text orelse "Zig is the [MASK] programming language"; // the text does not contain any characters that would be affected by NFC norm
     log.info("\tInput text: {s}", .{text});
 
     try predictMaskedTokens(modern_bert_for_masked_lm, bert_module, tokenizer, allocator, text);

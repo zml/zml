@@ -459,12 +459,16 @@ test CharTokenIterator {
     }
 }
 
-/// Normalize the input text using the NFC normalization form.
-/// TODO: I still need to do some research to understand what I need to do here
-/// https://github.com/huggingface/tokenizers/blob/main/bindings/python/src/normalizers.rs
-pub fn normalizeNFC(allocator: std.mem.Allocator, input: []const u8) !void { // ![]const u8 {
-    _ = allocator; // autofix
-    log.info("[normalizeNFC]: {}", .{input});
+/// Normalize the input text using the NFC (Normalization Form Canonical Composition) normalization form.
+///
+/// TODO: Right now, it just check if the input is a valid utf-8. Should implement a proper NFC norm, with complete decomposition/composition and mapping tables
+pub fn normalizeNFC(input: []const u8) ![]const u8 {
+    // valid utf8
+    if (!std.unicode.utf8ValidateSlice(input)) {
+        return error.InvalidUTF8;
+    }
+
+    return input;
 }
 
 /// Text normalizer.
@@ -533,10 +537,9 @@ pub const Normalizer = struct {
         var consumed: usize = 0;
         var trimmed_input = input;
 
-        // NFC normalization
-        // TODO: Replace with a proper NFC normalization implementationn
+        // NFC normalization. é=>U+00E9
         if (self.flags.use_nfc) {
-            try normalizeNFC(allocator, input);
+            trimmed_input = try normalizeNFC(input);
         }
 
         // Skip leading whitespaces.
