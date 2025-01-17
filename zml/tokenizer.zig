@@ -460,21 +460,11 @@ test CharTokenIterator {
 }
 
 /// Normalize the input text using the NFC normalization form.
-/// TODO: I am totally not sure of this. Currently debugging, this only validates utf-8
-/// See future issue:
-pub fn normalizeNFC(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
-    var normalized = try std.ArrayList(u8).initCapacity(allocator, input.len);
-    errdefer normalized.deinit();
-
-    // Validate UTF-8 and copy
-    var iter = (try std.unicode.Utf8View.init(input)).iterator();
-    while (iter.nextCodepoint()) |codepoint| {
-        var buf: [4]u8 = undefined;
-        const len = try std.unicode.utf8Encode(codepoint, &buf);
-        try normalized.appendSlice(buf[0..len]);
-    }
-
-    return normalized.toOwnedSlice();
+/// TODO: I still need to do some research to understand what I need to do here
+/// https://github.com/huggingface/tokenizers/blob/main/bindings/python/src/normalizers.rs
+pub fn normalizeNFC(allocator: std.mem.Allocator, input: []const u8) !void { // ![]const u8 {
+    _ = allocator; // autofix
+    log.info("[normalizeNFC]: {}", .{input});
 }
 
 /// Text normalizer.
@@ -539,20 +529,15 @@ pub const Normalizer = struct {
 
     /// Returns both the normalized string and a mapping between the normalized string and the original.
     pub fn normalizeWithMapping(self: Normalizer, allocator: std.mem.Allocator, input: []const u8) !Result {
-        // If NFC normalization is enabled, at least validate UTF-8
-        var working_input = input;
-        if (self.flags.use_nfc) {
-            // TODO: Replace with proper NFC normalization
-            working_input = normalizeNFC(allocator, input) catch |err| switch (err) {
-                error.InvalidUtf8 => return error.InvalidUtf8,
-                else => working_input,
-            };
-            defer if (working_input.ptr != input.ptr) allocator.free(working_input);
-        }
-
         // Number of bytes consumed from the input.
         var consumed: usize = 0;
-        var trimmed_input = working_input;
+        var trimmed_input = input;
+
+        // NFC normalization
+        // TODO: Replace with a proper NFC normalization implementationn
+        if (self.flags.use_nfc) {
+            try normalizeNFC(allocator, input);
+        }
 
         // Skip leading whitespaces.
         if (self.flags.remove_extra_whitespaces) {

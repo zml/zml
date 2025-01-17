@@ -23,13 +23,11 @@ pub fn predictMaskedTokens(
     allocator: std.mem.Allocator,
     text: []const u8,
 ) !void {
-    _ = text; // autofix
-    _ = allocator; // autofix
-    _ = tokenizer; // autofix
-    _ = mod; // autofix
     _ = bert; // autofix
+    _ = mod; // autofix
 
-    log.info("Hello World!", .{});
+    const tokenized_input = try tokenizer.encode(allocator, text, .{});
+    log.info("tokenized_input: {d}", .{tokenized_input});
 }
 
 pub fn main() !void {
