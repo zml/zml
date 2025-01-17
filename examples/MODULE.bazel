@@ -7,6 +7,9 @@ bazel_dep(name = "zml", version = "0.1.0")
 bazel_dep(name = "aspect_bazel_lib", version = "2.9.3")
 bazel_dep(name = "rules_oci", version = "2.0.0")
 
+non_module_deps = use_extension("//:third_party/non_module_deps.bzl", "non_module_deps")
+use_repo(non_module_deps, "com_github_hejsil_clap")
+
 oci = use_extension("@rules_oci//oci:extensions.bzl", "oci")
 oci.pull(
     name = "distroless_cc_debian12",
@@ -142,19 +145,22 @@ huggingface.model(
 package(default_visibility = ["//visibility:public"])
 filegroup(
     name = "model",
-    srcs = glob(["*.safetensors"]) + ["model.safetensors.index.json"],
+    # srcs = glob(["*.safetensors"]) + ["model.safetensors.index.json"] + ["config.json"],
+    srcs = glob(["*.safetensors", "*.json"]),
 )
 
-filegroup(
-    name = "tokenizer",
-    srcs = ["tokenizer.json"],
-)
+# filegroup(
+#     name = "tokenizer",
+#     srcs = ["tokenizer.json"],
+# )
 """,
     commit = "5206a32e0bd3067aef1ce90f5528ade7d866253f",
     includes = [
         "*.safetensors",
-        "model.safetensors.index.json",
-        "tokenizer.json",
+        "*.json",
+        # "model.safetensors.index.json",
+        # "tokenizer.json",
+        # "config.json",
     ],
     model = "meta-llama/Meta-Llama-3.1-8B-Instruct",
 )

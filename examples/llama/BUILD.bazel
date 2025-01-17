@@ -10,7 +10,7 @@ zig_cc_binary(
     ],
     main = "main.zig",
     deps = [
-        "//third_party/tigerbeetle:flags",
+        "@com_github_hejsil_clap//:clap",
         "@zml//async",
         "@zml//stdx",
         "@zml//zml",
@@ -20,19 +20,26 @@ zig_cc_binary(
 cc_binary(
     name = "Llama-3.1-8B-Instruct",
     args = [
+        "--model-config=$(location @Meta-Llama-3.1-8B-Instruct//:config.json)",
         "--model=$(location @Meta-Llama-3.1-8B-Instruct//:model.safetensors.index.json)",
-        "--tokenizer=$(location @Meta-Llama-3.1-8B-Instruct//:tokenizer)",
-        "--num-heads=32",
-        "--num-kv-heads=8",
-        "--rope-freq-base=500000",
+        "--tokenizer=$(location @Meta-Llama-3.1-8B-Instruct//:tokenizer.json)",
     ],
     data = [
-        "@Meta-Llama-3.1-8B-Instruct//:model",
+        "@Meta-Llama-3.1-8B-Instruct//:config.json",
         "@Meta-Llama-3.1-8B-Instruct//:model.safetensors.index.json",
-        "@Meta-Llama-3.1-8B-Instruct//:tokenizer",
+        "@Meta-Llama-3.1-8B-Instruct//:tokenizer.json",
     ],
     deps = [":llama_lib"],
 )
+
+
+#############################################################################
+# TODO:
+#############################################################################
+#
+# Targets below this line need some love
+#
+#############################################################################
 
 cc_binary(
     name = "Llama-3.1-70B-Instruct",
