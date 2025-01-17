@@ -262,7 +262,7 @@ pub fn asyncMain() !void {
     const kv_cache = try llama.KvCache.initBuffer(kv_shape, platform);
     _ = kv_cache; // autofix
 
-    log.info("✅\tPrompt: {s}", .{res.args.prompt});
+    log.info("✅\tPrompt: {s}", .{res.args.prompt orelse "Once upon a time, "});
 
     // const story = try generateText(llama, llama_module_prefill, llama_module, tokenizer, allocator, cli_args);
     // defer allocator.free(story);

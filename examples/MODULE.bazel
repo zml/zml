@@ -139,32 +139,25 @@ use_repo(huggingface, "Meta-Llama-3.2-3B-Instruct")
 
 
 # Llama 3.1
+
 huggingface.model(
     name = "Meta-Llama-3.1-8B-Instruct",
     build_file_content = """\
 package(default_visibility = ["//visibility:public"])
 filegroup(
-    name = "model",
-    # srcs = glob(["*.safetensors"]) + ["model.safetensors.index.json"] + ["config.json"],
-    srcs = glob(["*.safetensors", "*.json"]),
+    name = "Meta-Llama-3.1-8B-Instruct",
+    srcs = glob(["*.json", "*.safetensors"]),
 )
-
-# filegroup(
-#     name = "tokenizer",
-#     srcs = ["tokenizer.json"],
-# )
 """,
     commit = "5206a32e0bd3067aef1ce90f5528ade7d866253f",
     includes = [
         "*.safetensors",
         "*.json",
-        # "model.safetensors.index.json",
-        # "tokenizer.json",
-        # "config.json",
     ],
     model = "meta-llama/Meta-Llama-3.1-8B-Instruct",
 )
 use_repo(huggingface, "Meta-Llama-3.1-8B-Instruct")
+
 huggingface.model(
     name = "Meta-Llama-3.1-70B-Instruct",
     build_file_content = """\

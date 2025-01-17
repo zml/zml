@@ -21,10 +21,11 @@ cc_binary(
     name = "Llama-3.1-8B-Instruct",
     args = [
         "--model-config=$(location @Meta-Llama-3.1-8B-Instruct//:config.json)",
-        "--model=$(location @Meta-Llama-3.1-8B-Instruct//:model.safetensors.index.json)",
-        "--tokenizer=$(location @Meta-Llama-3.1-8B-Instruct//:tokenizer.json)",
+        "--model-weights=$(location @Meta-Llama-3.1-8B-Instruct//:model.safetensors.index.json)",
+        "--model-tokenizer=$(location @Meta-Llama-3.1-8B-Instruct//:tokenizer.json)",
     ],
     data = [
+        "@Meta-Llama-3.1-8B-Instruct",
         "@Meta-Llama-3.1-8B-Instruct//:config.json",
         "@Meta-Llama-3.1-8B-Instruct//:model.safetensors.index.json",
         "@Meta-Llama-3.1-8B-Instruct//:tokenizer.json",
