@@ -7,14 +7,14 @@ const Tensor = zml.Tensor;
 const modernbert = @import("modernbert.zig");
 
 // set this to false to disable the verbose logging
-// const show_mlir = true;
-// pub const std_options = .{
-//     .log_level = .warn,
-//     .log_scope_levels = &[_]std.log.ScopeLevel{
-//         .{ .scope = .zml_module, .level = if (show_mlir) .debug else .warn },
-//         .{ .scope = .modernbert, .level = .info },
-//     },
-// };
+const show_mlir = true;
+pub const std_options = .{
+    .log_level = .warn,
+    .log_scope_levels = &[_]std.log.ScopeLevel{
+        .{ .scope = .zml_module, .level = if (show_mlir) .debug else .warn },
+        .{ .scope = .modernbert, .level = .info },
+    },
+};
 
 pub fn predictMaskedTokens(
     bert: modernbert.ModernBertForMaskedLM,
@@ -39,9 +39,8 @@ pub fn predictMaskedTokens(
         input_ids_buffer[i] = @intCast(tokens_u32[i]);
     }
 
-    // 1 for real tokens, 0 for padding
     var attention_mask_buffer = try allocator.alloc(i32, max_seq_len);
-    @memset(attention_mask_buffer, 0); // First set all to 0
+    @memset(attention_mask_buffer, 0);
     for (0..tokens_u32.len) |i| {
         attention_mask_buffer[i] = 1;
     }
@@ -50,11 +49,11 @@ pub fn predictMaskedTokens(
     defer allocator.free(input_ids_buffer);
     defer allocator.free(attention_mask_buffer);
 
-    const input_ids = try zml.Buffer.fromSlice(mod.platform(), .{ 1, max_seq_len }, input_ids_buffer);
-    // log.info("input_ids: {}", .{input_ids});
+    const input_ids = try zml.Buffer.fromSlice(mod.platform(), .{max_seq_len}, input_ids_buffer);
+    log.info("input_ids: {}", .{input_ids});
 
-    const attention_mask = try zml.Buffer.fromSlice(mod.platform(), .{ 1, max_seq_len }, attention_mask_buffer);
-    // log.info("attention_mask: {}", .{attention_mask});
+    const attention_mask = try zml.Buffer.fromSlice(mod.platform(), .{max_seq_len}, attention_mask_buffer);
+    log.info("attention_mask: {}", .{attention_mask});
 
     const prediction_scores = mod.call(.{ input_ids, attention_mask });
     log.info("prediction_scores: {}", .{prediction_scores});
@@ -106,7 +105,7 @@ pub fn asyncMain() !void {
     const num_attention_heads = cli_args.num_attention_heads orelse ts.metadata("num_heads", .int) orelse @panic("--num-attention-heads is required for this model");
     const modernbert_options = modernbert.ModernBertOptions{
         .num_attention_heads = num_attention_heads,
-        .tie_word_embeddings = true, // TODO: from cli_args ?
+        .tie_word_embeddings = true, // TODO: from cli_args
     };
     var modern_bert_for_masked_lm = try zml.aio.populateModel(modernbert.ModernBertForMaskedLM, model_arena, ts);
 
