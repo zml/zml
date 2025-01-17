@@ -28,6 +28,7 @@ pub const std_options = .{
         .{ .scope = .zml_module, .level = if (show_mlir) .debug else .warn },
         .{ .scope = .llama, .level = .info },
     },
+    .logFn = asynk.logFn,
 };
 
 pub fn generateText(

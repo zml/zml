@@ -52,7 +52,7 @@ pub fn run(
     args: anytype,
     stack: anytype,
 ) !stdx.meta.FnSignature(func, @TypeOf(args)).ReturnPayloadT {
-    stdx.debug.assert(libcoro.inCoro() == false, "Not in a corouine", .{});
+    stdx.debug.assert(libcoro.inCoro() == false, "Not in a coroutine", .{});
     const frame = try xasync(func, args, stack);
     defer frame.deinit();
     try runCoro(exec, frame);
@@ -88,20 +88,20 @@ pub fn sleep(exec: *Executor, ms: u64) !void {
     return data.result;
 }
 
-fn waitForCompletionOutsideCoro(exec: *Executor, c: *xev.Completion) !void {
+pub fn waitForCompletionOutsideCoro(exec: *Executor, c: *xev.Completion) !void {
     @setCold(true);
     while (c.state() != .dead) {
         try exec.tick();
     }
 }
 
-fn waitForCompletionInCoro(c: *xev.Completion) void {
+pub fn waitForCompletionInCoro(c: *xev.Completion) void {
     while (c.state() != .dead) {
         libcoro.xsuspend();
     }
 }
 
-fn waitForCompletion(exec: *Executor, c: *xev.Completion) !void {
+pub fn waitForCompletion(exec: *Executor, c: *xev.Completion) !void {
     if (libcoro.inCoro()) {
         waitForCompletionInCoro(c);
     } else {

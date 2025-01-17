@@ -76,7 +76,7 @@ pub fn xresume(frame: anytype) void {
 /// Must be called from within a coroutine (i.e. not the top level).
 pub fn xsuspend() void {
     xsuspendSafe() catch |e| {
-        log.err("{any}\n", .{e});
+        log.err("{any}", .{e});
         @panic("xsuspend");
     };
 }
@@ -160,10 +160,10 @@ const Coro = struct {
     fn runcoro(from: *base.Coro, this: *base.Coro) callconv(.C) noreturn {
         const from_coro: *Coro = @fieldParentPtr("impl", from);
         const this_coro: *Coro = @fieldParentPtr("impl", this);
-        log.debug("coro start {any}\n", .{this_coro.id});
+        log.debug("coro start {any}", .{this_coro.id});
         @call(.auto, this_coro.func, .{});
         this_coro.status = .Done;
-        log.debug("coro done {any}\n", .{this_coro.id});
+        log.debug("coro done {any}", .{this_coro.id});
         thread_state.switchOut(from_coro);
 
         // Never returns
@@ -258,7 +258,7 @@ const CoroT = struct {
             fn wrapfn() void {
                 const storage = thread_state.currentStorage(InnerStorage);
                 storage.retval = @call(
-                    .always_inline,
+                    .auto,
                     Sig.Func.Value,
                     storage.args,
                 );
@@ -317,7 +317,7 @@ const ThreadState = struct {
 
     /// Called from resume
     fn switchIn(self: *ThreadState, target: Frame) void {
-        log.debug("coro resume {any} from {any}\n", .{ target.id, self.current().id });
+        log.debug("coro resume {any} from {any}", .{ target.id, self.current().id });
 
         // Switch to target, setting this coro as the resumer.
         self.switchTo(target, true);
@@ -332,7 +332,7 @@ const ThreadState = struct {
 
     /// Called from suspend
     fn switchOut(self: *ThreadState, target: Frame) void {
-        log.debug("coro suspend {any} to {any}\n", .{ self.current().id, target.id });
+        log.debug("coro suspend {any} to {any}", .{ self.current().id, target.id });
         self.switchTo(target, false);
     }
 

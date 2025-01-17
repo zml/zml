@@ -116,7 +116,9 @@ pub const BufferStore = struct {
     }
 
     pub fn deinit(self: BufferStore) void {
-        for (self.files) |*file| file.deinit();
+        for (self.files) |*file| {
+            file.deinit();
+        }
         self.arena.deinit();
     }
 
