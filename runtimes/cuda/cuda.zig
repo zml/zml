@@ -1,8 +1,8 @@
+const builtin = @import("builtin");
 const std = @import("std");
 
 const asynk = @import("async");
 const bazel_builtin = @import("bazel_builtin");
-const builtin = @import("builtin");
 const c = @import("c");
 const pjrt = @import("pjrt");
 const runfiles = @import("runfiles");
@@ -49,5 +49,5 @@ pub fn load() !*const pjrt.Api {
     // See https://github.com/openxla/xla/issues/21428
     try setupXlaGpuCudaDirFlag();
 
-    return try pjrt.Api.loadFrom("libpjrt_cuda.so");
+    return try asynk.callBlocking(pjrt.Api.loadFrom, .{"libpjrt_cuda.so"});
 }

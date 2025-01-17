@@ -1,8 +1,9 @@
 const builtin = @import("builtin");
+const std = @import("std");
+
 const asynk = @import("async");
 const pjrt = @import("pjrt");
 const c = @import("c");
-const std = @import("std");
 
 pub fn isEnabled() bool {
     return @hasDecl(c, "ZML_RUNTIME_TPU");
@@ -36,5 +37,5 @@ pub fn load() !*const pjrt.Api {
         return error.Unavailable;
     }
 
-    return try pjrt.Api.loadFrom("libpjrt_tpu.so");
+    return try asynk.callBlocking(pjrt.Api.loadFrom, .{"libpjrt_tpu.so"});
 }

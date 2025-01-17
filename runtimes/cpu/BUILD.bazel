@@ -21,7 +21,10 @@ zig_library(
     deps = [
         "//pjrt",
     ] + select({
-        "//runtimes:cpu.enabled": [":libpjrt_cpu"],
+        "//runtimes:cpu.enabled": [
+            ":libpjrt_cpu",
+            "//async",
+        ],
         "//conditions:default": [":empty"],
     }),
 )
