@@ -16,6 +16,22 @@ pub const std_options = .{
     },
 };
 
+pub fn predictMaskedTokens(
+    bert: modernbert.ModernBertForMaskedLM,
+    mod: zml.ModuleExe(modernbert.ModernBertForMaskedLM.forward),
+    tokenizer: zml.tokenizer.Tokenizer,
+    allocator: std.mem.Allocator,
+    text: []const u8,
+) !void {
+    _ = text; // autofix
+    _ = allocator; // autofix
+    _ = tokenizer; // autofix
+    _ = mod; // autofix
+    _ = bert; // autofix
+
+    log.info("Hello World!", .{});
+}
+
 pub fn main() !void {
     try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain);
 }
@@ -25,7 +41,7 @@ pub fn asyncMain() !void {
         model: []const u8,
         tokenizer: ?[]const u8 = null,
         num_attention_heads: ?i64 = null,
-        text: ?[]const u8 = null, // Zig is the [MASK] programming language. Paris is the capital of [MASK].
+        text: ?[]const u8 = null,
         create_options: []const u8 = "{}",
     };
 
@@ -62,6 +78,7 @@ pub fn asyncMain() !void {
     const num_attention_heads = cli_args.num_attention_heads orelse ts.metadata("num_heads", .int) orelse @panic("--num-attention-heads is required for this model");
     const modernbert_options = modernbert.ModernBertOptions{
         .num_attention_heads = num_attention_heads,
+        .tie_word_embeddings = true, // TODO: from cli_args ?
     };
     var modern_bert_for_masked_lm = try zml.aio.populateModel(modernbert.ModernBertForMaskedLM, model_arena, ts);
 
@@ -82,4 +99,35 @@ pub fn asyncMain() !void {
     var tokenizer = try zml.aio.detectFormatAndLoadTokenizer(allocator, tokenizer_path);
     log.info("✅\tLoaded tokenizer from {s}", .{tokenizer_path});
     defer tokenizer.deinit();
+
+    // Prepare shapes for compilation
+    const input_shape = zml.Shape.init(.{ .b = 1, .s = 9 }, .i32); // config.json: max_position_embeddings=8192
+    const attention_mask_shape = input_shape;
+
+    // Compile the model
+    log.info("\tCompiling model...", .{});
+    var start = try std.time.Timer.start();
+    var fut_mod = try asynk.asyncc(zml.compile, .{
+        allocator,
+        modernbert.ModernBertForMaskedLM.forward,
+        .{modernbert_options},
+        .{ input_shape, attention_mask_shape },
+        ts,
+        platform,
+    });
+
+    // Load weights
+    log.info("\tLoading ModernBERT weights from {s}...", .{cli_args.model});
+    var bert_weights = try zml.aio.loadBuffers(modernbert.ModernBertForMaskedLM, .{modernbert_options}, ts, model_arena, platform);
+    defer zml.aio.unloadBuffers(&bert_weights);
+    log.info("✅\tLoaded weights in {d}ms", .{start.read() / std.time.ns_per_ms});
+
+    var bert_module = (try fut_mod.awaitt()).prepare(bert_weights);
+    defer bert_module.deinit();
+    log.info("✅\tCompiled model in {d}ms", .{start.read() / std.time.ns_per_ms});
+
+    const text = cli_args.text orelse "Zig is the [MASK] programming language.";
+    log.info("\tInput text: {s}", .{text});
+
+    try predictMaskedTokens(modern_bert_for_masked_lm, bert_module, tokenizer, allocator, text);
 }

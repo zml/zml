@@ -6,12 +6,12 @@ const Tensor = zml.Tensor;
 
 pub const ModernBertOptions = struct {
     num_attention_heads: i64,
+    tie_word_embeddings: bool = false,
 };
 
 pub const ModernBertEmbeddings = struct {
     tok_embeddings: zml.nn.TokenEmbedding,
     norm: zml.nn.LayerNorm,
-    drop: void,
 
     pub fn forward(self: ModernBertEmbeddings, input_ids: Tensor) Tensor {
         // Perform tok_embeddings
@@ -70,12 +70,6 @@ pub const ModernBertAttention = struct {
         const hidden_size = hidden_states.shape().dim(2);
         const num_heads = self.num_heads;
         const head_dim = @divExact(hidden_size, num_heads);
-
-        if (self.is_global_attention) {
-            log.info("Global attention", .{});
-        } else {
-            log.info("Local attention", .{});
-        }
 
         // Project to query, key, value - { batch_size, seq_len, 3 * num_heads * head_dim }
         var qkv: Tensor = zml.call(self.Wqkv, .forward, .{hidden_states}); // Wqkv.out.0
@@ -144,7 +138,7 @@ pub const ModernBertEncoderLayer = struct {
             attention_mask,
             sliding_window_mask,
         });
-        log.info("attn_output : {}", .{attn_output});
+
         var output = hidden_states.add(attn_output);
 
         const mlp_norm_output: Tensor = zml.call(self.mlp_norm, .forward, .{output});
@@ -168,9 +162,7 @@ pub fn generateSlidingWindowMask(global_attention_mask: Tensor) Tensor {
         .unsqueeze(0);
     // var rows = Tensor.arange(.{ .end = tgt_seq_len }, global_attention_mask.dtype())
     //     .reshape(.{ 1, tgt_seq_len });
-    log.info("rows : {}", .{rows});
     var cols = rows.transpose(.{});
-    log.info("cols : {}", .{cols});
 
     // Calculate distance between positions
     // Original py code : distance = torch.abs(rows - rows.T)
@@ -181,7 +173,6 @@ pub fn generateSlidingWindowMask(global_attention_mask: Tensor) Tensor {
 
     // now both rows and cols have shape
     const distance = rows.sub(cols).abs();
-    log.info("distance : {}", .{distance});
 
     // Create sliding window mask (1 for positions within window, 0 outside)
     // Original py code : window_mask = (distance <= self.config.local_attention // 2).unsqueeze(0).unsqueeze(0)
@@ -221,10 +212,8 @@ pub const ModernBertModel = struct {
 
         // global_attention_mask = _prepare_4d_attention_mask(attention_mask, self.dtype)
         const global_attention_mask = zml.nn.expandMask(attention_mask, self.dtype, null);
-        log.info("global_attention_mask : {}", .{global_attention_mask});
 
         const sliding_window_mask = generateSlidingWindowMask(global_attention_mask);
-        log.info("sliding_window_mask : {}", .{sliding_window_mask});
 
         // Process through all encoder layers
         for (self.layers) |encoder_layer| {
@@ -259,21 +248,31 @@ pub const ModernBertPredictionHead = struct {
     }
 };
 
-// TODO: Implement ModernBertForMaskedLM
 pub const ModernBertForMaskedLM = struct {
-    // decoder.bias = zml.nn.Linear
     model: ModernBertModel,
     head: ModernBertPredictionHead,
+    tie_word_embeddings: bool = false,
 
     pub fn init(self: *ModernBertForMaskedLM, options: ModernBertOptions) void {
+        self.tie_word_embeddings = options.tie_word_embeddings;
         self.model.init(options);
     }
 
+    // {1,9,i64}
+    // {1,9,i64}
+    // out : {1,9,50368,f32}
     pub fn forward(self: ModernBertForMaskedLM, input_ids: Tensor, attention_mask: Tensor) Tensor {
-        const outputs: Tensor = zml.call(self.model, .forward, .{ input_ids, attention_mask });
-        log.info("outputs : {}", .{outputs});
-
-        const sequence_output = outputs[0];
+        const sequence_output: Tensor = zml.call(self.model, .forward, .{ input_ids, attention_mask });
         log.info("sequence_output : {}", .{sequence_output});
+
+        var prediction_scores = zml.call(self.head, .forward, .{sequence_output});
+        if (self.tie_word_embeddings == true) {
+            log.info("Tying word embeddings", .{});
+            const decoder = zml.nn.Linear{ .weight = self.model.embeddings.tok_embeddings.weight };
+            prediction_scores = zml.call(decoder, .forward, .{prediction_scores});
+        }
+        log.info("prediction_scores : {}", .{prediction_scores});
+
+        return prediction_scores;
     }
 };

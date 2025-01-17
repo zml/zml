@@ -3,13 +3,8 @@ const zml = @import("zml");
 const asynk = @import("async");
 const log = std.log;
 const Tensor = zml.Tensor;
-const modernbert = @import("modernbert.zig");
-const ModernBertEmbeddings = modernbert.ModernBertEmbeddings;
-const ModernBertMLP = modernbert.ModernBertMLP;
-const ModernBertAttention = modernbert.ModernBertAttention;
-const ModernBertEncoderLayer = modernbert.ModernBertEncoderLayer;
-const ModernBertModel = modernbert.ModernBertModel;
-const ModernBertOptions = modernbert.ModernBertOptions;
+const modernbert_module = @import("modernbert.zig");
+const ModernBertOptions = modernbert_module.ModernBertOptions;
 
 // ModernBERT
 const ACTIVATIONS_FILE_PATH: []const u8 = "/Users/victor/Documents/development/zml-torch-activation-example/ModernBERT-base.activations.pt";
@@ -52,8 +47,9 @@ pub fn asyncMain() !void {
     defer activations.deinit();
     log.info("Found {} activations in {s}", .{ activations.buffers.count(), ACTIVATIONS_FILE_PATH });
 
-    const modernbert_base_options: ModernBertOptions = .{
+    const modernbert_base_options: modernbert_module.ModernBertOptions = .{
         .num_attention_heads = 12,
+        .tie_word_embeddings = true,
     };
 
     // model.embeddings.tok_embeddings
@@ -116,14 +112,14 @@ pub fn asyncMain() !void {
     log.info("\n\nTesting model.embeddings layer:", .{});
 
     const embeddings_shape = try zml.aio.populateModelWithPrefix(
-        ModernBertEmbeddings,
+        modernbert_module.ModernBertEmbeddings,
         model_arena,
         weights_file,
         "model.embeddings",
     );
 
     const embeddings_weights = try zml.aio.loadModelBuffersWithPrefix(
-        ModernBertEmbeddings,
+        modernbert_module.ModernBertEmbeddings,
         embeddings_shape,
         weights_file,
         model_arena,
@@ -172,14 +168,14 @@ pub fn asyncMain() !void {
     log.info("\n\nTesting model.layers.2.mlp layer:", .{});
 
     const mlp_shape = try zml.aio.populateModelWithPrefix(
-        ModernBertMLP,
+        modernbert_module.ModernBertMLP,
         model_arena,
         weights_file,
         "model.layers.2.mlp",
     );
 
     const mlp_weights = try zml.aio.loadModelBuffersWithPrefix(
-        ModernBertMLP,
+        modernbert_module.ModernBertMLP,
         mlp_shape,
         weights_file,
         model_arena,
@@ -228,7 +224,7 @@ pub fn asyncMain() !void {
     log.info("\n\nTesting model.layers.2.attn layer:", .{});
 
     var attn_shape = try zml.aio.populateModelWithPrefix(
-        ModernBertAttention,
+        modernbert_module.ModernBertAttention,
         model_arena,
         weights_file,
         "model.layers.2.attn",
@@ -236,7 +232,7 @@ pub fn asyncMain() !void {
     attn_shape.num_heads = modernbert_base_options.num_attention_heads;
 
     const attn_weights = try zml.aio.loadModelBuffersWithPrefix(
-        ModernBertAttention,
+        modernbert_module.ModernBertAttention,
         attn_shape,
         weights_file,
         model_arena,
@@ -257,7 +253,7 @@ pub fn asyncMain() !void {
     log.info("\n\nTesting model.layers.3.attn layer:", .{});
 
     var attn_global_shape = try zml.aio.populateModelWithPrefix(
-        ModernBertAttention,
+        modernbert_module.ModernBertAttention,
         model_arena,
         weights_file,
         "model.layers.3.attn",
@@ -266,7 +262,7 @@ pub fn asyncMain() !void {
     attn_global_shape.num_heads = modernbert_base_options.num_attention_heads;
 
     const attn_global_weights = try zml.aio.loadModelBuffersWithPrefix(
-        ModernBertAttention,
+        modernbert_module.ModernBertAttention,
         attn_global_shape,
         weights_file,
         model_arena,
@@ -287,7 +283,7 @@ pub fn asyncMain() !void {
     log.info("\n\nTesting model.layers.2 layer:", .{});
 
     var layer_shape = try zml.aio.populateModelWithPrefix(
-        ModernBertEncoderLayer,
+        modernbert_module.ModernBertEncoderLayer,
         model_arena,
         weights_file,
         "model.layers.2",
@@ -295,7 +291,7 @@ pub fn asyncMain() !void {
     layer_shape.attn.num_heads = modernbert_base_options.num_attention_heads;
 
     const layer_weights = try zml.aio.loadModelBuffersWithPrefix(
-        ModernBertEncoderLayer,
+        modernbert_module.ModernBertEncoderLayer,
         layer_shape,
         weights_file,
         model_arena,
@@ -317,7 +313,7 @@ pub fn asyncMain() !void {
 
     // Create the model and configure it.
     var modern_bert_model = try zml.aio.populateModelWithPrefix(
-        ModernBertModel,
+        modernbert_module.ModernBertModel,
         model_arena,
         weights_file,
         "model",
@@ -325,15 +321,14 @@ pub fn asyncMain() !void {
     modern_bert_model.init(modernbert_base_options);
 
     // Load the weights.
-    var modern_bert_weights = try zml.aio.loadModelBuffersWithPrefix(
-        ModernBertModel,
+    const modern_bert_weights = try zml.aio.loadModelBuffersWithPrefix(
+        modernbert_module.ModernBertModel,
         modern_bert_model,
         weights_file,
         model_arena,
         compute_platform,
         "model",
     );
-    defer zml.aio.unloadBuffers(&modern_bert_weights);
 
     try zml.testing.testLayer(
         compute_platform,
@@ -343,4 +338,65 @@ pub fn asyncMain() !void {
         modern_bert_weights,
         1e-2,
     );
+
+    // head
+    log.info("\n\nTesting model layer:", .{});
+
+    const head_shape = try zml.aio.populateModelWithPrefix(
+        modernbert_module.ModernBertPredictionHead,
+        model_arena,
+        weights_file,
+        "head",
+    );
+
+    const head_weights = try zml.aio.loadModelBuffersWithPrefix(
+        modernbert_module.ModernBertPredictionHead,
+        head_shape,
+        weights_file,
+        model_arena,
+        compute_platform,
+        "head",
+    );
+
+    try zml.testing.testLayer(
+        compute_platform,
+        activations,
+        "model.head",
+        head_shape,
+        head_weights,
+        9e-2, // TODO: too high tolerance
+    );
+
+    // for (0..activations.buffers.count()) |i| {
+    //     log.info("activations {} - {s}:{s}", .{ i, activations.buffers.entries.get(i).key, activations.buffers.entries.get(i).value.shape() });
+    // }
+
+    // // ModernBertForMaskedLM
+    // log.info("\n\nTesting ModernBertForMaskedLM:", .{});
+    //
+    // var modern_bert_for_masked_lm = try zml.aio.populateModelWithPrefix(
+    //     ModernBertForMaskedLM,
+    //     model_arena,
+    //     weights_file,
+    //     "",
+    // );
+    // modern_bert_for_masked_lm.init(modernbert_base_options);
+    //
+    // const modern_bert_for_masked_lm_weights = try zml.aio.loadModelBuffersWithPrefix(
+    //     ModernBertForMaskedLM,
+    //     modern_bert_for_masked_lm,
+    //     weights_file,
+    //     model_arena,
+    //     compute_platform,
+    //     "",
+    // );
+    //
+    // try zml.testing.testLayer(
+    //     compute_platform,
+    //     activations,
+    //     "model",
+    //     modern_bert_for_masked_lm,
+    //     modern_bert_for_masked_lm_weights,
+    //     1e-2,
+    // );
 }
