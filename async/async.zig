@@ -526,6 +526,10 @@ pub fn logFn(
     comptime format: []const u8,
     args: anytype,
 ) void {
+    if (coro.inCoro() == false) {
+        return std.log.defaultLog(message_level, scope, format, args);
+    }
+
     const level_txt = comptime message_level.asText();
     const prefix2 = if (scope == .default) ": " else "(" ++ @tagName(scope) ++ "): ";
     const stderr = getStdErr().writer();
