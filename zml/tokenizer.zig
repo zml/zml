@@ -385,6 +385,16 @@ const CharTokenIterator = struct {
 
     fn nextCodepointToken(self: *CharTokenIterator, tokenizer: *const Tokenizer) error{ TruncatedInput, Utf8InvalidStartByte }!?u32 {
         if (self.input.len == 0) return null;
+
+        // [MASK] token
+        if (self.input.len >= 6 and
+            tokenizer.special_tokens.mask != std.math.maxInt(u32) and
+            std.mem.eql(u8, self.input[0..6], "[MASK]"))
+        {
+            self.input = self.input[6..];
+            return tokenizer.special_tokens.mask;
+        }
+
         return switch (self.state) {
             .by_byte => |*byte_left| {
                 const idx = tokenizer.lookup(self.input[0..1]) orelse {

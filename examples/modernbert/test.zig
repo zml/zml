@@ -367,9 +367,9 @@ pub fn asyncMain() !void {
         9e-2, // TODO: too high tolerance
     );
 
-    // for (0..activations.buffers.count()) |i| {
-    //     log.info("activations {} - {s}:{s}", .{ i, activations.buffers.entries.get(i).key, activations.buffers.entries.get(i).value.shape() });
-    // }
+    for (0..activations.buffers.count()) |i| {
+        log.info("activations {} - {s}:{s}", .{ i, activations.buffers.entries.get(i).key, activations.buffers.entries.get(i).value.shape() });
+    }
 
     // // ModernBertForMaskedLM
     // log.info("\n\nTesting ModernBertForMaskedLM:", .{});

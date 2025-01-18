@@ -248,6 +248,13 @@ pub const ModernBertPredictionHead = struct {
     }
 };
 
+// model.in.0:Shape({1,9,i64})
+// model.in.1:Shape({1,9,i64})
+// model.out.0:Shape({1,9,50368,f32})
+// model.model.in.0:Shape({1,9,i64})
+// model.model.in.1:Shape({1,9,i64})
+// model.model.out.0:Shape({1,9,768,f32})
+
 pub const ModernBertForMaskedLM = struct {
     model: ModernBertModel,
     head: ModernBertPredictionHead,
