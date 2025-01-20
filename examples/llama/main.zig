@@ -57,7 +57,7 @@ pub fn generateText(
     config: LlamaLM.Config,
     llama_: LlamaLM,
     mod_prefill: zml.ModuleExe(LlamaLM.forward),
-    mod: zml.ModuleExe(LlamaLM.forward),
+    mod_generate: zml.ModuleExe(LlamaLM.forward),
     kv_cache_: zml.Bufferized(llama.KvCache),
     tokenizer: zml.tokenizer.Tokenizer,
     allocator: std.mem.Allocator,
@@ -66,82 +66,85 @@ pub fn generateText(
 ) ![]const u8 {
     var tokenizer_encoder = try tokenizer.encoder();
     defer tokenizer_encoder.deinit();
-
     var tokenizer_decoder = try tokenizer.decoder();
     defer tokenizer_decoder.deinit();
 
-    // const prompt_tok = try tokenizer_encoder.encode(prompt);
     const prompt_tok = try tokenize(allocator, tokenizer, config, prompt);
-    log.info("Tokenized Prompt len={d}: {d}", .{ prompt_tok.len, prompt_tok });
-
-    var decoded_prompt_tokens = std.ArrayList(u8).init(allocator);
-    defer decoded_prompt_tokens.deinit();
-    for (prompt_tok) |tok| {
-        const chunk = try tokenizer_decoder.next(@intCast(tok)) orelse unreachable;
-        try decoded_prompt_tokens.appendSlice(chunk);
-    }
-    log.info("Decoded prompt tokens: >>{s}<<", .{decoded_prompt_tokens.items});
+    defer allocator.free(prompt_tok);
 
     const dims = llama_.model.shape();
     const max_seq_len = dims.s;
-    const token_buffer = try allocator.alloc(i32, @intCast(max_seq_len));
-    @memset(token_buffer, 0);
+
+    // Prefill
+    // initialize a 0..max_seq_len buffer with the tokenized prompt
+    const prefill_buffer = try allocator.alloc(i32, @intCast(max_seq_len));
+    @memset(prefill_buffer, 0);
     for (0..prompt_tok.len) |i| {
-        token_buffer[i] = @intCast(prompt_tok[i]);
+        prefill_buffer[i] = @intCast(prompt_tok[i]);
     }
+    defer allocator.free(prefill_buffer);
 
-    defer allocator.free(token_buffer);
-    defer allocator.free(prompt_tok);
-    var output = std.ArrayList(u8).init(allocator);
-    defer output.deinit();
+    const platform = mod_generate.platform();
 
-    var tokens = try zml.Buffer.fromSlice(mod.platform(), .{max_seq_len}, token_buffer);
-    var prefill_token_index = try zml.Buffer.fromSlice(mod.platform(), .{}, &[_]i32{0});
+    // prepare device buffers for the prefill tokens and the index
+    var prefill_tokens = try zml.Buffer.fromSlice(platform, .{max_seq_len}, prefill_buffer);
+    defer prefill_tokens.deinit();
+    var prefill_token_index = try zml.Buffer.fromSlice(platform, .{}, &[_]i32{0});
     defer prefill_token_index.deinit();
 
-    var rng = try zml.Tensor.Rng.init(mod.platform(), seed);
-    tokens, var kv_cache, rng = mod_prefill.call(.{ tokens, prefill_token_index, kv_cache_, rng });
-
+    // init RNG and prefill
+    var rng = try zml.Tensor.Rng.init(platform, seed);
+    prefill_tokens, var kv_cache, rng = mod_prefill.call(.{ prefill_tokens, prefill_token_index, kv_cache_, rng });
     defer kv_cache.k.deinit();
     defer kv_cache.v.deinit();
     defer kv_cache.layer_index.deinit();
 
-    var decode_progress = prompt_tok.len;
-
-    // TODO: eos
-    var eos_index: ?usize = null;
-    eos_index = eos_index;
-
-    _ = try tokens.toHost(std.mem.sliceAsBytes(token_buffer));
-
-    var decoded_prefill_tokens = std.ArrayList(u8).init(allocator);
-    defer decoded_prefill_tokens.deinit();
-    for (token_buffer) |tok| {
-        const chunk = try tokenizer_decoder.next(@intCast(tok)) orelse unreachable;
-        try decoded_prefill_tokens.appendSlice(chunk);
-    }
-
-    var new_token_hostbuffer = [_]u32{prompt_tok[prompt_tok.len - 1]};
-    var current_token = try zml.Buffer.fromSlice(mod.platform(), .{}, &new_token_hostbuffer);
+    // Prepare for token-by-token generation
+    var first_token_hostbuffer = [_]u32{prompt_tok[prompt_tok.len - 1]}; // start with the prompt's last token
+    var current_token = try zml.Buffer.fromSlice(platform, .{}, &first_token_hostbuffer);
     defer current_token.deinit();
 
-    var new_token_out = [_]u32{0};
+    // Here we will copy the generated token from device
+    var generated_token_buffer = [_]u32{0};
 
-    for (0..10) |i| {
+    // Here we collect the generated text
+    var output = std.ArrayList(u8).init(allocator);
+    defer output.deinit();
+    var decode_progress = prompt_tok.len;
+
+    generation: for (0..max_seq_len - prompt_tok.len - 1) |i| {
+        // current token index needs to go into a zml.Buffer
         const token_index_buffer = &[_]i32{@intCast(prompt_tok.len + i)};
-        const token_index = try zml.Buffer.fromSlice(mod.platform(), .{}, token_index_buffer);
+        const token_index = try zml.Buffer.fromSlice(platform, .{}, token_index_buffer);
         defer token_index.deinit();
 
-        current_token, kv_cache, rng = mod.call(.{ current_token, token_index, kv_cache, rng });
+        // call to generate the next token
+        current_token, kv_cache, rng = mod_generate.call(.{ current_token, token_index, kv_cache, rng });
 
-        _ = try current_token.toHost(std.mem.sliceAsBytes(&new_token_out));
+        // extract the generated token from the buffer
+        _ = try current_token.toHost(std.mem.sliceAsBytes(&generated_token_buffer));
+        const generated_token = generated_token_buffer[0];
 
-        const chunk = try tokenizer_decoder.next(@intCast(new_token_out[0])) orelse unreachable;
+        // de-tokenize generated token into a string
+        const chunk = try tokenizer_decoder.next(@intCast(generated_token)) orelse unreachable;
+
+        // check for eos
+        switch (config.eos_token_id.value) {
+            .int => |eos| if (generated_token == @as(u32, @intCast(eos))) break :generation,
+            .ints => |eos_list| {
+                for (eos_list) |eos| {
+                    if (generated_token == @as(u32, @intCast(eos))) break :generation;
+                }
+            },
+        }
+
+        // collect and print generated sequence
         try output.appendSlice(chunk);
-        decode_progress += 1;
+        std.debug.print("{s}", .{chunk});
 
-        log.info("Generated #{d}:{d}=>>{s}<< ", .{ token_index_buffer[0], new_token_out[0], chunk });
+        decode_progress += 1;
     }
+    std.debug.print("\n", .{});
     return output.toOwnedSlice();
 }
 
@@ -245,15 +248,12 @@ pub fn asyncMain() !void {
 
     const batch_size = 1;
 
-    // const tokens_shape = zml.Shape.init(.{ .b = batch_size, .s = llama_options.chunked_prefill_size }, .u32);
     const tokens_shape_prefill = zml.Shape.init(.{ .b = batch_size, .s = llama_options.max_seq_len }, .u32);
     const tokens_shape = zml.Shape.init(.{ .b = batch_size, .s = 1 }, .u32);
     const token_idx_shape = zml.Shape.init(.{ .b = batch_size }, .u32);
 
-    // const kv_shape = zml.Shape.init(.{ .layer = model_instance.model.layers.len, .b = bs, .h = dims.nkvh, .k = dims.s, .hd = dims.hd }, dtype).withSharding(.{.h});
     const kv_shape = zml.Shape.init(.{ .layer = model_instance.model.layers.len, .b = batch_size, .k = dims.s, .h = dims.nkvh, .hd = dims.hd }, dtype).withSharding(.{.h});
 
-    // needs to be optional
     const kv_cache_shape: zml.ShapeOf(llama.KvCache) = llama.KvCache.initShape(kv_shape);
     const rng_shape = zml.Tensor.Rng.shape();
 
@@ -296,9 +296,6 @@ pub fn asyncMain() !void {
     log.info("Creating KvCache", .{});
     const kv_cache = try llama.KvCache.initBuffer(kv_shape, platform);
 
-    const prompt = res.args.prompt orelse "Q: The capitol of France is?\nA: ";
-    log.info("✅\tPrompt: {s}", .{prompt});
-
     var tokenizer = blk: {
         if (res.args.@"model-tokenizer") |tok| {
             log.info("Loading tokenizer from {s}", .{tok});
@@ -313,10 +310,11 @@ pub fn asyncMain() !void {
     };
     errdefer tokenizer.deinit();
 
-    const seed = res.args.seed orelse @as(u128, @bitCast(std.time.nanoTimestamp()));
-    // const story = try generateText(model_instance, llama_module_prefill, llama_module, kv_cache, tokenizer, allocator, seed, prompt[0..]);
-    const story = try generateText(config, model_instance, llama_module_prefill, llama_module, kv_cache, tokenizer, allocator, seed, prompt[0..]);
-    defer allocator.free(story);
+    const prompt = res.args.prompt orelse "Q: The capitol of France is? A: ";
+    log.info("✅\tPrompt: {s}", .{prompt});
 
-    log.info("✅\tGenerated: {s}", .{story});
+    const seed = res.args.seed orelse @as(u128, @bitCast(std.time.nanoTimestamp()));
+    const generated_text = try generateText(config, model_instance, llama_module_prefill, llama_module, kv_cache, tokenizer, allocator, seed, prompt[0..]);
+    // generated text will be printed token by token.
+    defer allocator.free(generated_text);
 }
