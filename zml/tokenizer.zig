@@ -626,6 +626,13 @@ pub const Normalizer = struct {
                 .lower_case_ascii = false,
                 .split_on_punct_ascii = false,
             }, sentencepiece_space),
+            .llama3 => init(.{
+                .remove_extra_whitespaces = true,
+                .add_dummy_prefix = false,
+                .add_dummy_suffix = false,
+                .lower_case_ascii = false,
+                .split_on_punct_ascii = false,
+            }, null),
             .gpt2 => init(.{
                 .remove_extra_whitespaces = true,
                 .add_dummy_prefix = true,
@@ -722,6 +729,7 @@ pub const Normalizer = struct {
 pub const KnownImplementation = enum(u8) {
     sentencepiece,
     gpt2,
+    llama3,
 };
 
 fn isPunct(unicode_char: []const u8) bool {
@@ -930,7 +938,7 @@ pub fn fromHfJson(allocator: std.mem.Allocator, tokenizer_path: []const u8) !Tok
     const normalizer = if (objectGet(main_object, .object, "normalizer")) |normalizer_config|
         try Normalizer.fromHfJson(normalizer_config)
     else
-        Normalizer.wellKnown(.gpt2);
+        Normalizer.wellKnown(.llama3);
 
     // delay init of special tokens.
     var tokenizer = try Tokenizer.init(allocator, vocab_size, 256, normalizer, undefined, true);
@@ -1015,7 +1023,7 @@ pub fn fromHfJson(allocator: std.mem.Allocator, tokenizer_path: []const u8) !Tok
         if (is_gpt2_vocab) {
             tokenizer.byte_fallback = true;
         } else {
-            log.warn("The given tokenizer can't handle unknown token: no unknown token was set, and byte_fallback is disabled too ! The tokenizer will panic when facing unknown tokens.",.{});
+            log.warn("The given tokenizer can't handle unknown token: no unknown token was set, and byte_fallback is disabled too ! The tokenizer will panic when facing unknown tokens.", .{});
         }
     } else if (byte_fallback) {
         try tokenizer.rewriteByteFallbackTokens();
