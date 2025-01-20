@@ -262,7 +262,7 @@ pub const Buffer = struct {
         stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
         const maybe_event = try self._shards.get(0).buffer.toHostBuffer(self._api, std.mem.asBytes(&res));
         if (maybe_event) |event| {
-            try event.await_(self._api);
+            try event.awaitt(self._api);
         }
         return res;
     }
