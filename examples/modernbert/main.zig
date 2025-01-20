@@ -16,11 +16,10 @@ pub const std_options = .{
     },
 };
 
-pub const max_seq_len = 32; // 8192
+pub const max_seq_len = 64; // 8192
 
 // fill-mask pipeline
 // ref: https://github.com/huggingface/transformers/blob/main/src/transformers/pipelines/fill_mask.py
-// ref: https://github.com/huggingface/transformers.js/blob/026e89f0c429bc5875493ac2325ec2381d71e4d6/src/pipelines.js#L603
 pub fn predictMaskedTokens(
     bert: modernbert.ModernBertForMaskedLM,
     mod: zml.ModuleExe(modernbert.ModernBertForMaskedLM.forward),
@@ -95,9 +94,63 @@ pub fn predictMaskedTokens(
     log.debug("input_ids: {}", .{input_ids});
     log.debug("attention_mask: {}", .{attention_mask});
 
-    const prediction_scores: zml.Buffer = mod.call(.{ input_ids, attention_mask });
-    defer prediction_scores.deinit();
-    log.info("prediction_scores: {}", .{prediction_scores});
+    // predictions : { batch dimension 1, sequence length max_seq_len, vocabulary size (number of possible tokens)}
+    // forward pass to get logits - shape is [batch=1, seq_len, vocab_size]
+    // {1, x, 50368}
+    const outputs: zml.Buffer = mod.call(.{ input_ids, attention_mask });
+    defer outputs.deinit();
+
+    // Get the output shape dimensions
+    var host_buffer = try outputs.toHostAlloc(allocator);
+    defer host_buffer.deinit(allocator);
+
+    const vocab_size = tokenizer.tokens.len;
+    const top_k = 2;
+
+    // for each masked position
+    for (mask_positions.items) |mask_pos| {
+        // Get logits for current position
+        // In the output tensor, we want batch 0, sequence position mask_pos, and all vocab logits
+        const base_offset = mask_pos * vocab_size;
+        const logits = @as([*]f32, @ptrCast(@alignCast(@constCast(host_buffer.data.ptr))))[base_offset .. base_offset + vocab_size];
+
+        var indices = try allocator.alloc(usize, vocab_size);
+        defer allocator.free(indices);
+        for (0..vocab_size) |i| {
+            indices[i] = i;
+        }
+
+        // sort desc
+        const Context = struct {
+            logits: []const f32,
+            pub fn lessThan(ctx: @This(), a: usize, b: usize) bool {
+                return ctx.logits[a] > ctx.logits[b];
+            }
+        };
+        std.mem.sort(usize, indices, Context{ .logits = logits }, Context.lessThan);
+
+        for (0..top_k) |k| {
+            const token_id = indices[k];
+            const score = logits[token_id];
+
+            // Create a buffer for a single token
+            var single_token_buffer = [_]u32{@intCast(token_id)};
+
+            // Temporary buffer for decoded text
+            var decoded_text = std.ArrayList(u8).init(allocator);
+            defer decoded_text.deinit();
+
+            // Decode this single token
+            try tokenizer.decodeWithOpts(&decoded_text, &single_token_buffer, .{});
+
+            log.info("\t{} score: {d:.3} | token_id: {} | text: '{s}'", .{
+                k + 1,
+                score,
+                token_id,
+                decoded_text.items,
+            });
+        }
+    }
 }
 
 pub fn main() !void {
