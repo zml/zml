@@ -1,4 +1,3 @@
-const flags = @import("tigerbeetle/flags");
 const std = @import("std");
 const stdx = @import("stdx");
 const zml = @import("zml");
@@ -12,36 +11,51 @@ const gguf = zml.io.gguf;
 const expectClose = zml.testing.expectClose;
 const log = std.log.scoped(.llama);
 
-pub const LlamaOptions = struct {
-    gen_opts: zml.nn.SamplingStrategy,
-    max_seq_len: u32,
-    num_heads: i64,
-    num_kv_heads: i64,
-    rms_norm_eps: f32,
-    rope_opts: zml.nn.RopeOpts,
-};
-
 /// Llama architecture, using huggingface transformers naming.
 /// Dimensions of activations: {.b, .s, .d}
 pub const LlamaLM = struct {
-    lm_head: ?zml.nn.Linear = null,
+    pub const Config = struct {
+        bos_token_id: u32,
+        eos_token_id: stdx.json.Union(union(enum) {
+            int: u32,
+            ints: []u32,
+        }),
+        num_hidden_layers: usize,
+        num_attention_heads: usize,
+        num_key_value_heads: usize,
+        rope_theta: f32,
+        max_position_embeddings: usize,
+        rms_norm_eps: f32,
+    };
+
+    pub const Options = struct {
+        sampling_strategy: ?zml.nn.SamplingStrategy,
+        max_seq_len: usize,
+    };
+
+    lm_head: zml.nn.Linear,
     model: Llama,
 
     // Options controlling generation
     gen_opts: zml.nn.SamplingStrategy = .{},
+    config: Config,
 
-    pub fn init(self: *LlamaLM, options: LlamaOptions) void {
-        self.gen_opts = options.gen_opts;
-        self.model.max_seq_len = options.max_seq_len;
-        self.model.num_heads = options.num_heads;
-        self.model.num_kv_heads = options.num_kv_heads;
-        self.model.rope_opts = options.rope_opts;
+    pub fn init(self: *LlamaLM, config: Config, options: Options) void {
+        self.config = config;
+        self.gen_opts = options.sampling_strategy orelse .{};
+        self.model.max_seq_len = @intCast(options.max_seq_len);
+        self.model.num_heads = @intCast(config.num_attention_heads);
+        self.model.num_kv_heads = @intCast(config.num_key_value_heads);
+        self.model.rope_opts = .{
+            .impl = .sequential,
+            .freq_base = config.rope_theta,
+        };
         for (self.model.layers) |*layer| {
-            layer.self_attn.num_heads = options.num_heads;
-            layer.self_attn.num_kv_heads = options.num_kv_heads;
-            layer.self_attn.rope_opts = options.rope_opts;
-            layer.input_layernorm.eps = options.rms_norm_eps;
-            layer.post_attention_layernorm.eps = options.rms_norm_eps;
+            layer.self_attn.num_heads = self.model.num_heads;
+            layer.self_attn.num_kv_heads = self.model.num_kv_heads;
+            layer.self_attn.rope_opts = self.model.rope_opts;
+            layer.input_layernorm.eps = config.rms_norm_eps;
+            layer.post_attention_layernorm.eps = config.rms_norm_eps;
             layer.mlp.up_proj.weight = layer.mlp.up_proj.weight.withSharding(.{0});
             layer.mlp.gate_proj.weight = layer.mlp.gate_proj.weight.withSharding(.{0});
             layer.mlp.down_proj.weight = layer.mlp.down_proj.weight.withSharding(.{1});
@@ -54,10 +68,8 @@ pub const LlamaLM = struct {
 
         // TODO(Corentin): Fix lm_head sharding when top-k sampling is enabled.
         // It currently crashes/compilation fails
-        if (options.gen_opts.topk == 1) {
-            if (self.lm_head) |lm_head| {
-                self.lm_head.?.weight = lm_head.weight.withSharding(.{0});
-            }
+        if (self.gen_opts.topk == 1) {
+            self.lm_head.weight = self.lm_head.weight.withSharding(.{0});
         }
     }
 
@@ -71,71 +83,37 @@ pub const LlamaLM = struct {
         self: LlamaLM,
         tokens_: Tensor,
         token_index: Tensor,
-        kv_cache: ?KvCache,
+        kv_cache: KvCache,
         rng: Tensor.Rng,
-    ) struct { Tensor, Tensor, KvCache, Tensor.Rng } {
-        stdx.debug.assert(tokens_.dtype() == .i32 and tokens_.rank() >= 1 and token_index.dtype() == .i32 and token_index.rank() == 0, "Can't run Llama ! Expected >=1d tokens and 0d token_index, got: {} and {}", .{ tokens_, token_index });
+    ) struct { Tensor, KvCache, Tensor.Rng } {
+        stdx.debug.assert(tokens_.dtype() == .u32 and tokens_.rank() >= 1 and token_index.dtype() == .u32 and token_index.rank() <= 1, "Can't run Llama ! Expected >=1d tokens and 0d token_index, got: {} and {}", .{ tokens_, token_index });
 
         var tokens = tokens_.withPartialTags(.{.s});
-        const out, const updated_kv_cache = zml.call(self.model, .forward, .{ tokens, if (kv_cache == null) null else token_index, kv_cache });
-        tokens, const new_rng = self.updateTokens(tokens, token_index, out, rng, self.gen_opts);
-        return .{ tokens, increment(0, token_index), updated_kv_cache, new_rng };
+        const out, const updated_kv_cache = zml.call(self.model, .forward, .{ tokens, token_index, kv_cache });
+        tokens, const new_rng = sampleTokens(self.lm_head, tokens, out, rng, self.gen_opts);
+        return .{ tokens, updated_kv_cache, new_rng };
     }
 
-    pub fn updateTokens(
-        self: LlamaLM,
+    pub fn sampleTokens(
+        lm_head: zml.nn.Linear,
         tokens_: Tensor,
-        token_index: Tensor,
         out_: Tensor,
         rng: Tensor.Rng,
         opts: zml.nn.SamplingStrategy,
     ) struct { Tensor, Tensor.Rng } {
-        const tokens = tokens_.withPartialTags(.{.s});
         const out = out_.withPartialTags(.{ .s, .d });
 
-        const next_token_pred = out.gatherValues(.s, token_index, .{});
-        var logits = if (self.lm_head) |lm_head|
-            zml.call(lm_head, .forward, .{next_token_pred})
-        else
-            self.model.embed_tokens.weight.withTags(.{ .voc, .d }).dot(next_token_pred, .{.d});
+        var logits = zml.call(lm_head, .forward, .{out});
 
         if (logits.shape().hasTag(.voc) == null)
             logits = logits.rename(.{ .d = .voc });
 
-        const next_token, const new_rng = zml.nn.sampleTokens(logits, opts, rng);
-        const next_token_index = token_index.addConstant(1);
-        const new_tokens = tokens.dynamicUpdateSlice(.{ .s = next_token_index }, next_token);
-
-        return .{ new_tokens.reuseBuffer(tokens_), new_rng };
+        const next_tokens, const new_rng = zml.nn.sampleTokens(logits, opts, rng);
+        return .{ next_tokens.reuseBuffer(tokens_), new_rng };
     }
 
     pub fn increment(_: u8, token_index: Tensor) Tensor {
-        return token_index.addConstant(1);
-    }
-
-    /// Run the generation entirely within pjrt.
-    pub fn generate(self: LlamaLM, tokens: Tensor, token_index: Tensor, rng: Tensor.Rng) Tensor {
-        // Generate the first token using the prompt and generate the KV-cache initial values.
-        const prefill = zml.call(self, .forward, .{ tokens, token_index, null, rng });
-
-        const Gen = struct {
-            /// Same as LlamaLM.forward but without optional in the signature
-            pub fn forward(lm: LlamaLM, t_ids: Tensor, t_idx: Tensor, kv_cache_: KvCache, inner_rng: Tensor.Rng) struct { Tensor, Tensor, KvCache, Tensor.Rng } {
-                var kv_cache = kv_cache_;
-                kv_cache.k = kv_cache.k.withPartialTags(.{ .layer, .h, .k, .hd });
-                kv_cache.v = kv_cache.v.withPartialTags(.{ .layer, .h, .k, .hd });
-                return zml.call(lm, .forward, .{ t_ids._ctx, t_ids, t_idx, kv_cache, inner_rng });
-            }
-            // / Stops when we generated `max_seq_len` tokens.
-            pub fn shouldContinue(lm: LlamaLM, t_ids: Tensor, t_idx: Tensor, kv_cache: KvCache, inner_rng: Tensor.Rng) Tensor {
-                _ = kv_cache;
-                _ = inner_rng;
-                std.debug.assert(t_ids.dim(1) == lm.model.max_seq_len);
-                return t_idx.cmp(.LT, Tensor.scalar(t_ids._ctx, lm.model.max_seq_len, t_idx.dtype()));
-            }
-        };
-        // Generate remaining tokens using the KV-cache, return tokens.
-        return zml.ops.while_(Gen.shouldContinue, Gen.forward, self, prefill)[0];
+        return token_index.addConstant(1).reuseBuffer(token_index);
     }
 };
 
@@ -177,33 +155,28 @@ pub const Llama = struct {
 
     /// Forward one token, using KV cache for previous tokens.
     /// Returns result and updated KV cache.
-    pub fn forward(self: Llama, tokens: Tensor, token_index: ?Tensor, kv_cache: ?KvCache) struct { Tensor, KvCache } {
-        const embeds = embed(self.embed_tokens, tokens, token_index);
+    pub fn forward(self: Llama, tokens: Tensor, token_index: Tensor, kv_cache: KvCache) struct { Tensor, KvCache } {
+        const embeds = embed(self.embed_tokens, tokens);
 
         var hidden = embeds;
-        const kv_cache0 = kv_cache orelse self.initKvCache(embeds.shape());
 
-        var updated_kv_cache = kv_cache0;
+        var updated_kv_cache = kv_cache;
         for (self.layers, 0..) |layer, i| {
             hidden, updated_kv_cache = zml.call(layer, .forward, .{ hidden, token_index, updated_kv_cache.atLayer(i) });
         }
         const output = zml.call(self.norm, .forward, .{hidden});
 
-        return .{ output, updated_kv_cache.reuseBuffer(kv_cache0) };
+        return .{ output, updated_kv_cache.reuseBuffer(kv_cache) };
     }
 
-    pub fn embed(embed_tokens_: zml.nn.TokenEmbedding, tokens_: Tensor, token_index: ?Tensor) Tensor {
-        const tokens = if (token_index) |idx|
-            tokens_.dynamicSlice1d(-1, .{ .start = idx, .len = 1 })
-        else
-            tokens_;
-        return zml.call(embed_tokens_, .forward, .{tokens}).withPartialTags(.{ .s, .d });
+    pub fn embed(embed_tokens_: zml.nn.TokenEmbedding, tokens_: Tensor) Tensor {
+        return zml.call(embed_tokens_, .forward, .{tokens_}).withPartialTags(.{.d});
     }
 
     fn initKvCache(self: Llama, embed_shape: zml.Shape) KvCache {
         const dims = self.shape();
         var kv_shape = embed_shape.insert(0, .{ .layer = dims.layer }).rename(.{ .s = .k }).splitAxes(.{ .d = .{ .h = dims.nkvh, .hd = dims.hd } });
-        const perm = kv_shape.contiguousPerm(.{ .h, .k, .hd });
+        const perm = kv_shape.contiguousPerm(.{ .k, .h, .hd });
         kv_shape = kv_shape.transpose(perm.constSlice());
         return KvCache.init(kv_shape);
     }
@@ -218,8 +191,8 @@ pub const TransformerLayer = struct {
     pub fn forward(
         self: TransformerLayer,
         x0: Tensor,
-        token_index: ?Tensor,
-        kv_cache: ?KvCache,
+        token_index: Tensor,
+        kv_cache: KvCache,
     ) struct { Tensor, KvCache } {
         // Self Attention
         //log.debug("TransformerLayer({}) -> {}", .{ x0, self.input_layernorm.forward(x0) });
@@ -287,39 +260,41 @@ pub const SelfAttn = struct {
     pub fn forward(
         self: SelfAttn,
         x: Tensor,
-        token_index: ?Tensor,
-        kv_cache_: ?KvCache,
+        token_index: Tensor,
+        kv_cache: KvCache,
     ) struct { Tensor, KvCache } {
-        // log.debug("x.shape: {}", .{x.shape()});
         const num_kv_heads = if (self.num_kv_heads > 0) self.num_kv_heads else self.num_heads;
         var q = zml.call(self.q_proj, .forward, .{x}).splitAxis(-1, .{ .h = self.num_heads, .hd = .auto }).withSharding(.{.h});
         var k = zml.call(self.k_proj, .forward, .{x}).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto }).withSharding(.{.h});
         var v = zml.call(self.v_proj, .forward, .{x}).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto }).withSharding(.{.h});
+
         // Generate the attention mask.
-        const kv_cache = kv_cache_ orelse initKvCache(k.shape());
         const seq_len = kv_cache.k.dim(.k);
         var attn_mask = zml.nn.causalAttnMask(.{ .q = seq_len, .k = seq_len }, x.dtype(), null);
-        if (token_index) |idx| {
-            // Note: in Pytorch it would be very inefficient to generate the full attn_mask,
-            // then slice into it, but XLA is able to optimize this correctly.
-            attn_mask = attn_mask.dynamicSlice(.{ .q = .{ .start = idx, .len = 1 } });
-        }
+
+        // Note: in Pytorch it would be very inefficient to generate the full attn_mask,
+        // then slice into it, but XLA is able to optimize this correctly.
+        attn_mask = attn_mask.gatherSlices(zml.Shape.init(.{ .q = x.dim(.s) }, attn_mask.dtype()), token_index.reshape(.{ .b = token_index.shape().dim(0), .coord = 1 }), .{});
 
         // In self-attention, .s axis is used both for keys and queries.
-        q = zml.nn.rope(q, token_index, self.rope_opts);
-        k = zml.nn.rope(k, token_index, self.rope_opts);
+        const pos_index = b: {
+            const temp = Tensor.arange(.{ .end = x.dim(.s) }, token_index.dtype()).withTags(.{.s}).broad(zml.Shape.init(.{ .b = token_index.shape().dim(0), .s = x.dim(.s) }, token_index.dtype()));
+            break :b temp.add(token_index.withTags(.{.b}).broad(temp.shape()));
+        };
+
+        q = zml.nn.rope(q, pos_index, self.rope_opts);
+        k = zml.nn.rope(k, pos_index, self.rope_opts);
         q = q.rename(.{ .s = .q });
         k = k.rename(.{ .s = .k });
         v = v.rename(.{ .s = .k });
 
-        const new_kv_cache = kv_cache.update(k, v, token_index orelse Tensor.scalar(0, .i32));
-        if (token_index) |_| {
-            stdx.debug.assert(q.dim(.q) == 1, "Expected dimension .q to be 1, got {}", .{q.dim(.q)});
-            k = new_kv_cache.keys();
-            v = new_kv_cache.values();
-        }
+        const dtype = q.dtype();
+        const new_kv_cache = kv_cache.update(k, v, token_index);
+        k = new_kv_cache.keys().convert(dtype);
+        v = new_kv_cache.values().convert(dtype);
 
-        const attn_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask, .allow_cudnn = false });
+        const attn_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask, .allow_cudnn = true });
+        // const attn_output = zml.nn.sdpaMemEfficient(q, k, v, .{ .attn_mask = attn_mask }, .{ .q_chunk_size = 4096, .k_chunk_size = 1024 });
         const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
         return .{ zml.call(self.o_proj, .forward, .{attn}), new_kv_cache };
     }
@@ -330,7 +305,7 @@ pub const SelfAttn = struct {
         const perm = kv_shape.contiguousPerm(.{ .h, .k, .hd });
         kv_shape = kv_shape.transpose(perm.constSlice());
         var res = KvCache.init(kv_shape);
-        res.layer_index = Tensor.scalar(0, .i32);
+        res.layer_index = Tensor.scalar(0, .u32);
         return res;
     }
 };
@@ -345,7 +320,7 @@ pub const KvCache = struct {
         return .{
             .k = Tensor.constant(kv_shape, kv_shape.dtype().one()).withSharding(.{.h}),
             .v = Tensor.constant(kv_shape, kv_shape.dtype().one()).withSharding(.{.h}),
-            .layer_index = Tensor.scalar(-1, .i32),
+            .layer_index = Tensor.scalar(-1, .u32),
         };
     }
 
@@ -353,7 +328,15 @@ pub const KvCache = struct {
         return .{
             .k = kv_shape,
             .v = kv_shape,
-            .layer_index = zml.Shape.init(.{}, .i32),
+            .layer_index = zml.Shape.init(.{}, .u32),
+        };
+    }
+
+    pub fn initBuffer(kv_shape: zml.Shape, platform: zml.Platform) !zml.Bufferized(KvCache) {
+        return .{
+            .k = try zml.Buffer.constant(platform, kv_shape, 1),
+            .v = try zml.Buffer.constant(platform, kv_shape, 1),
+            .layer_index = try zml.Buffer.constant(platform, zml.Shape.init(.{}, .u32), 0),
         };
     }
 
@@ -365,17 +348,33 @@ pub const KvCache = struct {
         return self.v.dynamicSlice(.{ .layer = .{ .start = self.layer_index, .len = 1 } }).squeeze(.layer);
     }
 
-    pub fn update(self: KvCache, new_k: Tensor, new_v: Tensor, token_index: Tensor) KvCache {
-        return .{
-            .k = self.k.dynamicUpdateSlice(
-                .{ .layer = self.layer_index, .k = token_index },
-                // transpose to match kv-cache layout
-                new_k.contiguous(.{ .h, .k, .hd }),
+    pub fn update(self: KvCache, new_k: Tensor, new_v: Tensor, token_index: ?Tensor) KvCache {
+        const k_shape = self.k.shape().drop(.layer);
+        var layer = self.layer_index;
+        layer = if (token_index) |idx| layer.broad(idx.shape()) else layer;
+
+        return if (token_index) |idx| .{
+            .k = self.k.scatterSlices(
+                .{ .layer = layer, .k = idx },
+                new_k.convert(self.k.dtype()).transpose(k_shape),
+                .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override },
             ).reuseBuffer(self.k),
-            .v = self.v.dynamicUpdateSlice(
-                .{ .layer = self.layer_index, .k = token_index },
-                // transpose to match kv-cache layout
-                new_v.contiguous(.{ .h, .k, .hd }),
+            .v = self.v.scatterSlices(
+                .{ .layer = layer, .k = idx },
+                new_v.convert(self.v.dtype()).transpose(k_shape),
+                .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override },
+            ).reuseBuffer(self.v),
+            .layer_index = self.layer_index,
+        } else .{
+            .k = self.k.scatterSlices(
+                .{ .layer = layer },
+                new_k.convert(self.k.dtype()).transpose(k_shape),
+                .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override },
+            ).reuseBuffer(self.k),
+            .v = self.v.scatterSlices(
+                .{ .layer = layer },
+                new_v.convert(self.v.dtype()).transpose(k_shape),
+                .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override },
             ).reuseBuffer(self.v),
             .layer_index = self.layer_index,
         };
@@ -385,7 +384,7 @@ pub const KvCache = struct {
         return .{
             .k = self.k,
             .v = self.v,
-            .layer_index = Tensor.scalar(layer_index, .i32),
+            .layer_index = Tensor.scalar(layer_index, .u32),
         };
     }
 
