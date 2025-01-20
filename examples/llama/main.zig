@@ -27,110 +27,123 @@ pub const std_options = .{
         .{ .scope = .llama, .level = .info },
     },
 };
+pub fn tokenize(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, config: LlamaLM.Config, prompt: []const u8) ![]u32 {
+    var tokens = std.ArrayList(u32).init(allocator);
+    var encoder = try tokenizer.encoder();
+    defer encoder.deinit();
 
-// pub fn generateText(
-//     mod_llama: LlamaLM,
-//     mod_prefill: zml.ModuleExe(LlamaLM.forwardPrefill),
-//     mod: zml.ModuleExe(LlamaLM.forward),
-//     tokenizer: zml.tokenizer.Tokenizer,
-//     allocator: std.mem.Allocator,
-//     opts: CliArgs,
-// ) ![]const u8 {
-//     const prompt_tok = tokenizer.encode(allocator, opts.prompt, .{}) catch unreachable;
-//     const batch_size = opts.batch_size;
-//     log.info("✅\tTokenized prompt: {d}", .{prompt_tok.len});
-//     const dims = llama.model.shape();
-//     const max_seq_len = dims.s;
-//     const token_buffer = try allocator.alloc(i32, @intCast(batch_size * max_seq_len));
-//     @memset(token_buffer, 0);
-//     for (0..batch_size) |b| {
-//         const seq = token_buffer[b * max_seq_len ..];
-//         for (0..prompt_tok.len) |i| {
-//             seq[i] = @intCast(prompt_tok[i]);
-//         }
-//     }
-//
-//     const tracer_buffer = try allocator.alloc(u8, @intCast(batch_size * max_seq_len));
-//     defer allocator.free(token_buffer);
-//     defer allocator.free(tracer_buffer);
-//     defer allocator.free(prompt_tok);
-//     var output = std.ArrayList(u8).init(allocator);
-//     defer output.deinit();
-//
-//     var tokens = try zml.Buffer.fromSlice(mod.platform(), .{ batch_size, max_seq_len }, token_buffer);
-//     var token_index = try zml.Buffer.constant(mod.platform(), zml.Shape.init(.{batch_size}, .i32), prompt_tok.len - 1);
-//
-//     var profiler = if (opts.profile != null) mod.platform().getProfiler(null) else undefined;
-//     const seed = opts.seed orelse @as(u128, @bitCast(std.time.nanoTimestamp()));
-//     var rng = try zml.Tensor.Rng.init(mod.platform(), seed);
-//     if (opts.profile != null) profiler.start();
-//     const prefill_start = std.time.microTimestamp();
-//     tokens, token_index, var kv_cache, rng = mod_prefill.call(.{ tokens, token_index, rng });
-//     const prefill_end = std.time.microTimestamp();
-//     defer kv_cache.k.deinit();
-//     defer kv_cache.v.deinit();
-//     defer kv_cache.layer_index.deinit();
-//
-//     const tracer = zml.tools.Tracer.init("ai.zml.models.llama");
-//     var decode_progress = prompt_tok.len;
-//     const output_tokens_len = max_seq_len - prompt_tok.len - 1;
-//
-//     const start = std.time.microTimestamp();
-//     const output_freq: u8 = 1;
-//     for (0..output_tokens_len) |i| {
-//         //_ = i;
-//         const frame_id = tracer.frameStart(try std.fmt.bufPrintZ(tracer_buffer, "Generate token {}/{}", .{ i + 1, output_tokens_len }));
-//         tokens, token_index, kv_cache, rng = mod.call(.{ tokens, token_index, kv_cache, rng });
-//         if (!opts.benchmark and batch_size == 1 and (i + 1) % output_freq == 0) {
-//             const n = output.items.len;
-//             _ = try tokens.toHost(std.mem.sliceAsBytes(token_buffer));
-//             try tokenizer.decodeWithOpts(&output, @ptrCast(token_buffer[decode_progress..][0..output_freq]), .{});
-//             decode_progress += output_freq;
-//             // std.debug.print("{s}", .{output.items[n..]});
-//             tracer.frameEnd(frame_id, try std.fmt.bufPrintZ(tracer_buffer, "Decoded token {}/{} : {s}", .{ i + 1, output_tokens_len, output.items[n..] }));
-//         } else {
-//             tracer.frameEnd(frame_id, try std.fmt.bufPrintZ(tracer_buffer, "Generated token {}/{}", .{ i + 1, output_tokens_len }));
-//         }
-//     }
-//     // std.debug.print("\n", .{});
-//
-//     const end = std.time.microTimestamp();
-//     if (opts.profile) |profile_file| {
-//         profiler.stop();
-//         try profiler.dumpAsJsonTo(allocator, std.fs.cwd(), profile_file);
-//     }
-//
-//     {
-//         const duration = stdx.math.divFloat(f64, prefill_end - prefill_start, std.time.us_per_s);
-//         const speed = @as(f64, @floatFromInt(batch_size * prompt_tok.len)) / duration;
-//         log.info("✅ Prefilled {d} tokens in {:.3}s: {d:.3}tok/s", .{ batch_size * prompt_tok.len, duration, speed });
-//     }
-//
-//     {
-//         const duration = stdx.math.divFloat(f64, end - start, std.time.us_per_s);
-//         const speed = @as(f64, @floatFromInt(batch_size * output_tokens_len)) / duration;
-//         log.info("✅ Generated {d} tokens in {:.3}s: {d:.3}tok/s", .{ batch_size * output_tokens_len, duration, speed });
-//     }
-//
-//     {
-//         const duration = stdx.math.divFloat(f64, end - prefill_start, std.time.us_per_s);
-//         const speed = @as(f64, @floatFromInt(batch_size * output_tokens_len)) / duration;
-//         log.info("✅ Observed throughput from user perspective (including prefilling latency) num_tokeks={d} duration={d}s {d:.3}tok/s", .{ batch_size * output_tokens_len, duration, speed });
-//     }
-//
-//     if (opts.benchmark) std.process.exit(0);
-//
-//     _ = try tokens.toHost(std.mem.sliceAsBytes(token_buffer));
-//     for (0..@min(batch_size, 4)) |b| {
-//         output.clearRetainingCapacity();
-//         const seq = token_buffer[b * max_seq_len ..][0..max_seq_len];
-//         const end_index = std.mem.indexOfScalar(i32, seq, 128001) orelse max_seq_len;
-//         try tokenizer.decodeWithOpts(&output, @ptrCast(seq[0..end_index]), .{});
-//         std.debug.print("Generation: {}\n{s}\n", .{ b, output.items });
-//     }
-//
-//     return output.toOwnedSlice();
-// }
+    const start_header_id = tokenizer.token_to_id("<|start_header_id|>");
+    const end_header_id = tokenizer.token_to_id("<|end_header_id|>");
+    const eot_id = tokenizer.token_to_id("<|eot_id|>");
+    const newline_id = (try encoder.encode("\n"))[0];
+
+    try tokens.append(config.bos_token_id);
+
+    try tokens.append(start_header_id);
+    try tokens.appendSlice(try encoder.encode("user"));
+    try tokens.appendSlice(&.{ end_header_id, newline_id, newline_id });
+
+    try tokens.appendSlice(try encoder.encode(prompt));
+    try tokens.appendSlice(&.{ eot_id, newline_id });
+    try tokens.appendSlice(try encoder.encode("\n"));
+    try tokens.append(start_header_id);
+    try tokens.appendSlice(try encoder.encode("assistant"));
+    try tokens.append(end_header_id);
+
+    return tokens.toOwnedSlice();
+}
+
+pub fn generateText(
+    config: LlamaLM.Config,
+    llama_: LlamaLM,
+    mod_prefill: zml.ModuleExe(LlamaLM.forward),
+    mod: zml.ModuleExe(LlamaLM.forward),
+    kv_cache_: zml.Bufferized(llama.KvCache),
+    tokenizer: zml.tokenizer.Tokenizer,
+    allocator: std.mem.Allocator,
+    seed: u128,
+    prompt: []const u8,
+) ![]const u8 {
+    var tokenizer_encoder = try tokenizer.encoder();
+    defer tokenizer_encoder.deinit();
+
+    var tokenizer_decoder = try tokenizer.decoder();
+    defer tokenizer_decoder.deinit();
+
+    // const prompt_tok = try tokenizer_encoder.encode(prompt);
+    const prompt_tok = try tokenize(allocator, tokenizer, config, prompt);
+    log.info("Tokenized Prompt len={d}: {d}", .{ prompt_tok.len, prompt_tok });
+
+    var decoded_prompt_tokens = std.ArrayList(u8).init(allocator);
+    defer decoded_prompt_tokens.deinit();
+    for (prompt_tok) |tok| {
+        const chunk = try tokenizer_decoder.next(@intCast(tok)) orelse unreachable;
+        try decoded_prompt_tokens.appendSlice(chunk);
+    }
+    log.info("Decoded prompt tokens: >>{s}<<", .{decoded_prompt_tokens.items});
+
+    const dims = llama_.model.shape();
+    const max_seq_len = dims.s;
+    const token_buffer = try allocator.alloc(i32, @intCast(max_seq_len));
+    @memset(token_buffer, 0);
+    for (0..prompt_tok.len) |i| {
+        token_buffer[i] = @intCast(prompt_tok[i]);
+    }
+
+    defer allocator.free(token_buffer);
+    defer allocator.free(prompt_tok);
+    var output = std.ArrayList(u8).init(allocator);
+    defer output.deinit();
+
+    var tokens = try zml.Buffer.fromSlice(mod.platform(), .{max_seq_len}, token_buffer);
+    var prefill_token_index = try zml.Buffer.fromSlice(mod.platform(), .{}, &[_]i32{0});
+    defer prefill_token_index.deinit();
+
+    var rng = try zml.Tensor.Rng.init(mod.platform(), seed);
+    tokens, var kv_cache, rng = mod_prefill.call(.{ tokens, prefill_token_index, kv_cache_, rng });
+
+    defer kv_cache.k.deinit();
+    defer kv_cache.v.deinit();
+    defer kv_cache.layer_index.deinit();
+
+    var decode_progress = prompt_tok.len;
+
+    // TODO: eos
+    var eos_index: ?usize = null;
+    eos_index = eos_index;
+
+    _ = try tokens.toHost(std.mem.sliceAsBytes(token_buffer));
+
+    var decoded_prefill_tokens = std.ArrayList(u8).init(allocator);
+    defer decoded_prefill_tokens.deinit();
+    for (token_buffer) |tok| {
+        const chunk = try tokenizer_decoder.next(@intCast(tok)) orelse unreachable;
+        try decoded_prefill_tokens.appendSlice(chunk);
+    }
+
+    var new_token_hostbuffer = [_]u32{prompt_tok[prompt_tok.len - 1]};
+    var current_token = try zml.Buffer.fromSlice(mod.platform(), .{}, &new_token_hostbuffer);
+    defer current_token.deinit();
+
+    var new_token_out = [_]u32{0};
+
+    for (0..10) |i| {
+        const token_index_buffer = &[_]i32{@intCast(prompt_tok.len + i)};
+        const token_index = try zml.Buffer.fromSlice(mod.platform(), .{}, token_index_buffer);
+        defer token_index.deinit();
+
+        current_token, kv_cache, rng = mod.call(.{ current_token, token_index, kv_cache, rng });
+
+        _ = try current_token.toHost(std.mem.sliceAsBytes(&new_token_out));
+
+        const chunk = try tokenizer_decoder.next(@intCast(new_token_out[0])) orelse unreachable;
+        try output.appendSlice(chunk);
+        decode_progress += 1;
+
+        log.info("Generated #{d}:{d}=>>{s}<< ", .{ token_index_buffer[0], new_token_out[0], chunk });
+    }
+    return output.toOwnedSlice();
+}
 
 const params = clap.parseParamsComptime(
     \\--help                    print this help
@@ -139,6 +152,7 @@ const params = clap.parseParamsComptime(
     \\--model-name <STRING>     model name
     \\--model-weights <PATH>    model weights path
     \\--model-tokenizer <PATH>  tokenizer path
+    \\--seed <UINT>             random seed (optional)
     \\--seq-len <UINT>          sequence length
 );
 
@@ -206,6 +220,7 @@ pub fn asyncMain() !void {
     // const create_opts = try std.json.parseFromSlice(zml.Platform.CreateOptions, allocator, cli_args.create_options, .{});
     // const platform = context.autoPlatform(create_opts.value).withCompilationOptions(compilation_options);
     // create_opts.deinit();
+
     const platform = context.autoPlatform(.{}).withCompilationOptions(compilation_options);
     context.printAvailablePlatforms(platform);
 
@@ -243,9 +258,29 @@ pub fn asyncMain() !void {
     const rng_shape = zml.Tensor.Rng.shape();
 
     var start = try std.time.Timer.start();
-    var fut_mod_prefill = try asynk.asyncc(zml.compile, .{ allocator, llama.LlamaLM.forward, .{ config, llama_options }, .{ tokens_shape_prefill, token_idx_shape, kv_cache_shape, rng_shape }, ts, platform });
+    var fut_mod_prefill = try asynk.asyncc(zml.compile, .{
+        allocator, llama.LlamaLM.forward, .{ config, llama_options },
+        .{
+            tokens_shape_prefill,
+            token_idx_shape,
+            kv_cache_shape,
+            rng_shape,
+        },
+        ts,
+        platform,
+    });
 
-    var fut_mod = try asynk.asyncc(zml.compile, .{ allocator, llama.LlamaLM.forward, .{ config, llama_options }, .{ tokens_shape, token_idx_shape, kv_cache_shape, rng_shape }, ts, platform });
+    var fut_mod = try asynk.asyncc(zml.compile, .{
+        allocator, llama.LlamaLM.forward, .{ config, llama_options },
+        .{
+            tokens_shape,
+            token_idx_shape,
+            kv_cache_shape,
+            rng_shape,
+        },
+        ts,
+        platform,
+    });
 
     log.info("\tLoading Llama weights from {?s}...", .{res.args.@"model-weights"});
     var llama_weights = try zml.aio.loadBuffers(llama.LlamaLM, .{ config, llama_options }, ts, model_arena.allocator(), platform);
@@ -260,10 +295,28 @@ pub fn asyncMain() !void {
 
     log.info("Creating KvCache", .{});
     const kv_cache = try llama.KvCache.initBuffer(kv_shape, platform);
-    _ = kv_cache; // autofix
 
-    log.info("✅\tPrompt: {s}", .{res.args.prompt orelse "Once upon a time, "});
+    const prompt = res.args.prompt orelse "Q: The capitol of France is?\nA: ";
+    log.info("✅\tPrompt: {s}", .{prompt});
 
-    // const story = try generateText(llama, llama_module_prefill, llama_module, tokenizer, allocator, cli_args);
-    // defer allocator.free(story);
+    var tokenizer = blk: {
+        if (res.args.@"model-tokenizer") |tok| {
+            log.info("Loading tokenizer from {s}", .{tok});
+            var timer = try stdx.time.Timer.start();
+            defer log.info("Loaded tokenizer from {s} [{}]", .{ tok, timer.read() });
+
+            break :blk try zml.tokenizer.Tokenizer.from_file(model_arena.allocator(), tok);
+        } else {
+            log.err("Missing --model-tokenizer", .{});
+            return;
+        }
+    };
+    errdefer tokenizer.deinit();
+
+    const seed = res.args.seed orelse @as(u128, @bitCast(std.time.nanoTimestamp()));
+    // const story = try generateText(model_instance, llama_module_prefill, llama_module, kv_cache, tokenizer, allocator, seed, prompt[0..]);
+    const story = try generateText(config, model_instance, llama_module_prefill, llama_module, kv_cache, tokenizer, allocator, seed, prompt[0..]);
+    defer allocator.free(story);
+
+    log.info("✅\tGenerated: {s}", .{story});
 }
