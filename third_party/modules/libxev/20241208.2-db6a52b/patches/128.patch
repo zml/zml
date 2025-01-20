@@ -117,6 +117,8 @@ index ae4ec7d..f44d326 100644
      task_completions: *Loop.TaskCompletionQueue = undefined,
      task_result: Result = undefined,
  
+-- 
+2.39.5 (Apple Git-154)
 
 From 40dc25fa922fe436418f9c01acd9b76a74593ddb Mon Sep 17 00:00:00 2001
 From: Corentin Godeau <corentin@zml.ai>
@@ -157,6 +159,8 @@ index f44d326..f84c687 100644
  
                  const c: *Completion = @ptrFromInt(@as(usize, @intCast(ev.data.ptr)));
  
+-- 
+2.39.5 (Apple Git-154)
 
 From c082ed1270a59d4276d7ac6752833b6730fa73d5 Mon Sep 17 00:00:00 2001
 From: Steeve Morin <steeve@zml.ai>
@@ -183,6 +187,8 @@ index f84c687..e3eee20 100644
  
                  // Determine the time in milliseconds.
                  const ms_now = @as(u64, @intCast(self.cached_now.tv_sec)) * std.time.ms_per_s +
+-- 
+2.39.5 (Apple Git-154)
 
 From e8f23275bf736bcc39cb0c9e4617f6e1338c5880 Mon Sep 17 00:00:00 2001
 From: Steeve Morin <steeve@zml.ai>
@@ -294,6 +300,8 @@ index 7f5df6f..bc95282 100644
              loop.add(c);
          }
      };
+-- 
+2.39.5 (Apple Git-154)
 
 From 378a3968b8820aef5a6ab64d1893d022b1b6d70c Mon Sep 17 00:00:00 2001
 From: Steeve Morin <steeve@zml.ai>
@@ -346,3 +354,6 @@ index 0f4a2ac..fb7e59e 100644
          while (self.active > 0 and (wait == 0 or wait_rem > 0)) {
              self.update_now();
              const now_timer: Operation.Timer = .{ .next = self.cached_now };
+-- 
+2.39.5 (Apple Git-154)
+
