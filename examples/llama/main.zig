@@ -129,9 +129,11 @@ pub fn generateText(
 
         tracer.frameEnd(frame_id, try std.fmt.bufPrintZ(tracer_buffer, "Generated token {}/{}", .{ i + 1, output_tokens_len }));
 
-        // extract the generated token from the buffer
-        _ = try current_token.toHost(std.mem.sliceAsBytes(&generated_token_buffer));
+        // extract the generated token from the buffer, async
+        var fut_tok_buf = try current_token.toHost(std.mem.sliceAsBytes(&generated_token_buffer));
+        _ = try fut_tok_buf.awaitt();
         const generated_token = generated_token_buffer[0];
+
         // de-tokenize generated token into a string
         const chunk = try tokenizer_decoder.next(@intCast(generated_token)) orelse unreachable;
         num_tokens_generated = i;
