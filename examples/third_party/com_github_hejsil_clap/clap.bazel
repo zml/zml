@@ -1,0 +1,9 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "clap",
+    import_name = "clap",
+    srcs = glob(["clap/*.zig"]),
+    main = "clap.zig",
+    visibility = ["//visibility:public"],
+)
