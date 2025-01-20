@@ -100,7 +100,6 @@ pub fn predictMaskedTokens(
     const outputs: zml.Buffer = mod.call(.{ input_ids, attention_mask });
     defer outputs.deinit();
 
-    // Get the output shape dimensions
     var host_buffer = try outputs.toHostAlloc(allocator);
     defer host_buffer.deinit(allocator);
 
@@ -108,11 +107,15 @@ pub fn predictMaskedTokens(
     const top_k = 2;
 
     // for each masked position
+    // TODO: reimplement this.
     for (mask_positions.items) |mask_pos| {
-        // Get logits for current position
-        // In the output tensor, we want batch 0, sequence position mask_pos, and all vocab logits
         const base_offset = mask_pos * vocab_size;
+
+        // TODO: This is shit.
         const logits = @as([*]f32, @ptrCast(@alignCast(@constCast(host_buffer.data.ptr))))[base_offset .. base_offset + vocab_size];
+
+        // apply softmax to get probabilities
+        // logits = try softmax(allocator, logits);
 
         var indices = try allocator.alloc(usize, vocab_size);
         defer allocator.free(indices);
@@ -133,14 +136,11 @@ pub fn predictMaskedTokens(
             const token_id = indices[k];
             const score = logits[token_id];
 
-            // Create a buffer for a single token
             var single_token_buffer = [_]u32{@intCast(token_id)};
 
-            // Temporary buffer for decoded text
             var decoded_text = std.ArrayList(u8).init(allocator);
             defer decoded_text.deinit();
 
-            // Decode this single token
             try tokenizer.decodeWithOpts(&decoded_text, &single_token_buffer, .{});
 
             log.info("\t{} score: {d:.3} | token_id: {} | text: '{s}'", .{
