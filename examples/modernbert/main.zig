@@ -16,8 +16,11 @@ pub const std_options = .{
     },
 };
 
-pub const max_seq_len = 64; // 8192
+pub const max_seq_len = 32; // 8192
 
+// fill-mask pipeline
+// ref: https://github.com/huggingface/transformers/blob/main/src/transformers/pipelines/fill_mask.py
+// ref: https://github.com/huggingface/transformers.js/blob/026e89f0c429bc5875493ac2325ec2381d71e4d6/src/pipelines.js#L603
 pub fn predictMaskedTokens(
     bert: modernbert.ModernBertForMaskedLM,
     mod: zml.ModuleExe(modernbert.ModernBertForMaskedLM.forward),
@@ -28,28 +31,45 @@ pub fn predictMaskedTokens(
     _ = bert; // autofix
 
     // shapes
-    const seq_len = 9;
-    _ = seq_len; // autofix
     const input_shape = zml.Shape.init(.{ .b = 1, .s = max_seq_len }, .i64);
     const attention_mask_shape = input_shape;
 
     const tokens_u32 = try tokenizer.encode(allocator, text, .{});
+    defer allocator.free(tokens_u32);
     if (tokens_u32.len > max_seq_len) {
         log.err("Input text too long: {} tokens > {} max", .{ tokens_u32.len, max_seq_len });
         return error.InvalidInput;
     }
 
-    log.info("Tokenized input text: {any} | length: {}", .{ tokens_u32, tokens_u32.len });
+    log.info("\tTokenized input text: {any} | length: {}", .{ tokens_u32, tokens_u32.len });
 
     // debug
     for (tokens_u32, 0..) |token, i| {
         if (i < tokenizer.tokens.len) {
-            log.info("Token {}: {s} -> '{}'", .{ i, tokenizer.tokens[token], token });
+            log.debug("Token {}: {s} -> '{}'", .{ i, tokenizer.tokens[token], token });
         }
     }
 
+    // find positions of [MASK] tokens
+    var mask_positions = std.ArrayList(usize).init(allocator);
+    defer mask_positions.deinit();
+
+    for (tokens_u32, 0..) |token, i| {
+        if (token == tokenizer.special_tokens.mask) {
+            try mask_positions.append(i);
+        }
+    }
+
+    if (mask_positions.items.len == 0) {
+        log.err("No mask tokens found in input text", .{});
+        return error.InvalidInput;
+    }
+
+    // prepare input tensors
     var input_ids_buffer = try allocator.alloc(i64, max_seq_len);
     var attention_mask_buffer = try allocator.alloc(i64, max_seq_len);
+    defer allocator.free(input_ids_buffer);
+    defer allocator.free(attention_mask_buffer);
 
     // init all values to 0
     @memset(input_ids_buffer, 0);
@@ -57,34 +77,27 @@ pub fn predictMaskedTokens(
 
     // fill actual tokens and mask
     const copy_len = @min(tokens_u32.len, max_seq_len);
-    log.info("Copying {} tokens into buffer of length {}", .{ copy_len, max_seq_len });
+    log.debug("Copying {} tokens into buffer of length {}", .{ copy_len, max_seq_len });
 
     for (0..copy_len) |index| {
         input_ids_buffer[index] = @intCast(tokens_u32[index]);
         attention_mask_buffer[index] = 1;
     }
 
-    defer allocator.free(tokens_u32);
-    defer allocator.free(input_ids_buffer);
-    defer allocator.free(attention_mask_buffer);
-
-    log.info("Input buffer: {any}", .{input_ids_buffer});
-    log.info("Attention buffer: {any}", .{attention_mask_buffer});
+    log.debug("Input buffer: {any}", .{input_ids_buffer});
+    log.debug("Attention buffer: {any}", .{attention_mask_buffer});
 
     const input_ids = try zml.Buffer.fromSlice(mod.platform(), input_shape.dims(), input_ids_buffer);
-    log.info("input_ids: {}", .{input_ids});
-
+    defer input_ids.deinit();
     const attention_mask = try zml.Buffer.fromSlice(mod.platform(), attention_mask_shape.dims(), attention_mask_buffer);
-    log.info("attention_mask: {}", .{attention_mask});
+    defer attention_mask.deinit();
 
-    // const prediction_scores = mod.call(.{ input_ids, attention_mask });
-    // log.info("prediction_scores: {}", .{prediction_scores});
-    //
-    // var output = std.ArrayList(u8).init(allocator);
-    // defer output.deinit();
-    //
-    // const mask_token_id = tokenizer.special_tokens.mask;
-    // log.info("mask_token_id : {}", .{mask_token_id});
+    log.debug("input_ids: {}", .{input_ids});
+    log.debug("attention_mask: {}", .{attention_mask});
+
+    const prediction_scores: zml.Buffer = mod.call(.{ input_ids, attention_mask });
+    defer prediction_scores.deinit();
+    log.info("prediction_scores: {}", .{prediction_scores});
 }
 
 pub fn main() !void {
@@ -182,7 +195,7 @@ pub fn asyncMain() !void {
     defer bert_module.deinit();
     log.info("✅\tCompiled model in {d}ms", .{start.read() / std.time.ns_per_ms});
 
-    const text = cli_args.text orelse "Zig is the [MASK] programming language."; // this text does not contain any characters that would be affected by NFC norm
+    const text = cli_args.text orelse "Zig is the [MASK] programming language.";
     log.info("\tInput text: {s}", .{text});
 
     try predictMaskedTokens(modern_bert_for_masked_lm, bert_module, tokenizer, allocator, text);

@@ -1038,7 +1038,6 @@ pub fn fromHfJson(allocator: std.mem.Allocator, tokenizer_path: []const u8) !Tok
         .bos = tokenizer.lookup("[CLS]") orelse tokenizer.lookup("<s>") orelse tokenizer.lookup("<|begin_of_text|>") orelse @panic("bos token not found !"),
         .eos = tokenizer.lookup("[SEP]") orelse tokenizer.lookup("</s>") orelse tokenizer.lookup("<|end_of_text|>") orelse @panic("eos token not found !"),
         .unk = tokenizer.lookup("[UNK]") orelse tokenizer.lookup("<unk>") orelse std.math.maxInt(u32),
-        .pad = tokenizer.lookup("[PAD]") orelse std.math.maxInt(u32),
         .mask = tokenizer.lookup("[MASK]") orelse std.math.maxInt(u32),
     };
 
