@@ -83,7 +83,8 @@ pub fn generateText(
         token_index = new_token_index;
         if ((i + 1) % output_freq == 0) {
             const n = output.items.len;
-            _ = try tokens.toHost(std.mem.sliceAsBytes(token_buffer));
+            var hb = try tokens.toHost(std.mem.sliceAsBytes(token_buffer));
+            _ = try hb.awaitt();
             try tokenizer.decodeWithOpts(&output, @ptrCast(token_buffer[decode_progress..][0..output_freq]), .{});
             decode_progress += output_freq;
             std.debug.print("{s}", .{output.items[n..]});
@@ -112,7 +113,8 @@ pub fn generateText(
     const speed = @as(f64, @floatFromInt(generated_token_count)) / duration;
     log.info("✅ Generated {d} tokens in {:.3}s: {d:.3}tok/s", .{ generated_token_count, duration, speed });
 
-    _ = try tokens.toHost(std.mem.sliceAsBytes(token_buffer));
+    var tokens_host_buffer = try tokens.toHost(std.mem.sliceAsBytes(token_buffer));
+    _ = try tokens_host_buffer.awaitt();
     output.clearRetainingCapacity();
 
     try tokenizer.decodeWithOpts(&output, @ptrCast(token_buffer[0..total_token_count]), .{});

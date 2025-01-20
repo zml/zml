@@ -203,7 +203,7 @@ pub const Buffer = struct {
         stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
         const maybe_event = try self._shards.get(0).toHostBuffer(self._api, std.mem.asBytes(&res));
         if (maybe_event) |event| {
-            try event.await_(self._api);
+            try event.awaitt(self._api);
         }
         return res;
     }
@@ -214,10 +214,11 @@ pub const Buffer = struct {
     pub fn toHost(self: Buffer, output: []u8) !HostBuffer {
         stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
         const maybe_event = try self._shards.get(0).toHostBuffer(self._api, output);
-        if (maybe_event) |event| {
-            try event.await_(self._api);
-        }
-        return HostBuffer.fromBytes(self.shape(), output);
+        var hb = HostBuffer.fromBytes(self.shape(), output);
+        hb._event = maybe_event;
+        hb._api = self._api;
+        hb._ready = if (maybe_event) |ev| ev.isReady(self._api) else true;
+        return hb;
     }
 
     /// Copies the content of the Buffer to the host.
@@ -226,9 +227,9 @@ pub const Buffer = struct {
         const output = try HostBuffer.empty(allocator, self.shape());
         stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
         const maybe_event = try self._shards.get(0).toHostBuffer(self._api, @constCast(output.data));
-        if (maybe_event) |event| {
-            try event.await_(self._api);
-        }
+        output._event = maybe_event;
+        output._api = self._api;
+        output._ready = if (maybe_event) |ev| ev.isReady(self._api) else true;
         return output;
     }
 
