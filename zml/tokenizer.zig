@@ -38,6 +38,7 @@ pub const Tokenizer = struct {
         unk: u32,
         pad: u32 = std.math.maxInt(u32),
         hard_space: u32 = std.math.maxInt(u32),
+        mask: u32 = std.math.maxInt(u32),
     };
 
     pub fn init(
@@ -384,6 +385,16 @@ const CharTokenIterator = struct {
 
     fn nextCodepointToken(self: *CharTokenIterator, tokenizer: *const Tokenizer) error{ TruncatedInput, Utf8InvalidStartByte }!?u32 {
         if (self.input.len == 0) return null;
+
+        // [MASK] token
+        if (self.input.len >= 6 and
+            tokenizer.special_tokens.mask != std.math.maxInt(u32) and
+            std.mem.eql(u8, self.input[0..6], "[MASK]"))
+        {
+            self.input = self.input[6..];
+            return tokenizer.special_tokens.mask;
+        }
+
         return switch (self.state) {
             .by_byte => |*byte_left| {
                 const idx = tokenizer.lookup(self.input[0..1]) orelse {
@@ -458,6 +469,18 @@ test CharTokenIterator {
     }
 }
 
+/// Normalize the input text using the NFC (Normalization Form Canonical Composition) normalization form.
+///
+/// TODO: Right now, it just check if the input is a valid utf-8. Should implement a proper NFC norm, with complete decomposition/composition and mapping tables
+pub fn normalizeNFC(input: []const u8) ![]const u8 {
+    // valid utf8
+    if (!std.unicode.utf8ValidateSlice(input)) {
+        return error.InvalidUTF8;
+    }
+
+    return input;
+}
+
 /// Text normalizer.
 /// Most tokenizer assumes the input text have been prepocessed with on of those.
 pub const Normalizer = struct {
@@ -476,6 +499,7 @@ pub const Normalizer = struct {
         /// cheap ascii punct splitting.
         // doing this processing ahead of time simplifies the logic
         split_on_punct_ascii: bool,
+        use_nfc: bool,
     },
 
     pub fn init(flags: std.meta.FieldType(Normalizer, .flags), escaped_whitespace: ?[]const u8) Normalizer {
@@ -522,6 +546,11 @@ pub const Normalizer = struct {
         // Number of bytes consumed from the input.
         var consumed: usize = 0;
         var trimmed_input = input;
+
+        // NFC normalization. é=>U+00E9
+        if (self.flags.use_nfc) {
+            trimmed_input = try normalizeNFC(input);
+        }
 
         // Skip leading whitespaces.
         if (self.flags.remove_extra_whitespaces) {
@@ -624,6 +653,7 @@ pub const Normalizer = struct {
                 .add_dummy_suffix = false,
                 .lower_case_ascii = false,
                 .split_on_punct_ascii = false,
+                .use_nfc = false,
             }, sentencepiece_space),
             .gpt2 => init(.{
                 .remove_extra_whitespaces = true,
@@ -631,6 +661,7 @@ pub const Normalizer = struct {
                 .add_dummy_suffix = false,
                 .lower_case_ascii = false,
                 .split_on_punct_ascii = false,
+                .use_nfc = false,
             }, null),
         };
     }
@@ -642,6 +673,7 @@ pub const Normalizer = struct {
             .add_dummy_prefix = false,
             .lower_case_ascii = false,
             .split_on_punct_ascii = false,
+            .use_nfc = false,
         } };
 
         // Normalizer config can be a single normalizer, or a sequence of normalizers.
@@ -657,7 +689,9 @@ pub const Normalizer = struct {
             const step_type = object_get(step, .string, "type") orelse {
                 return error.InvalidNormalizerJson;
             };
-            if (std.mem.eql(u8, "Prepend", step_type)) {
+            if (std.mem.eql(u8, "NFC", step_type)) {
+                normalizer.flags.use_nfc = true;
+            } else if (std.mem.eql(u8, "Prepend", step_type)) {
                 normalizer.flags.add_dummy_prefix = true;
             } else if (std.mem.eql(u8, "Append", step_type)) {
                 normalizer.flags.add_dummy_suffix = true;
@@ -712,6 +746,7 @@ pub const Normalizer = struct {
                 .add_dummy_suffix = false,
                 .lower_case_ascii = false,
                 .split_on_punct_ascii = false,
+                .use_nfc = false,
             },
         };
         try std.testing.expectEqual(expected.flags, normalizer.flags);
@@ -747,6 +782,7 @@ test Normalizer {
             .add_dummy_suffix = false,
             .lower_case_ascii = false,
             .split_on_punct_ascii = false,
+            .use_nfc = false,
         } };
         const res = try n.normalizeWithMapping(testing.allocator, "Hellŏ  world!");
         defer res.deinit(testing.allocator);
@@ -767,6 +803,7 @@ test Normalizer {
             .add_dummy_suffix = true,
             .lower_case_ascii = false,
             .split_on_punct_ascii = false,
+            .use_nfc = false,
         } };
         const res = try n.normalize(testing.allocator, "Hello  world!");
         defer testing.allocator.free(res);
@@ -782,6 +819,7 @@ test Normalizer {
                 .add_dummy_suffix = false,
                 .lower_case_ascii = false,
                 .split_on_punct_ascii = false,
+                .use_nfc = false,
             },
             Normalizer.sentencepiece_space,
         );
@@ -798,6 +836,7 @@ test Normalizer {
             .add_dummy_suffix = true,
             .lower_case_ascii = true,
             .split_on_punct_ascii = false,
+            .use_nfc = false,
         } };
         const res = try n.normalize(testing.allocator, "Hello  world!");
         defer testing.allocator.free(res);
@@ -812,6 +851,7 @@ test Normalizer {
             .add_dummy_suffix = true,
             .lower_case_ascii = false,
             .split_on_punct_ascii = true,
+            .use_nfc = false,
         } };
         const res = try n.normalize(testing.allocator, "Hello  world!");
         defer testing.allocator.free(res);
@@ -995,9 +1035,10 @@ pub fn fromHfJson(allocator: std.mem.Allocator, tokenizer_path: []const u8) !Tok
     all_tokens.shrinkAndFree(all_tokens.items.len);
 
     tokenizer.special_tokens = .{
-        .bos = tokenizer.lookup("<s>") orelse tokenizer.lookup("<|begin_of_text|>") orelse @panic("bos token not found !"),
-        .eos = tokenizer.lookup("</s>") orelse tokenizer.lookup("<|end_of_text|>") orelse @panic("eos token not found !"),
-        .unk = tokenizer.lookup("<unk>") orelse std.math.maxInt(u32),
+        .bos = tokenizer.lookup("[CLS]") orelse tokenizer.lookup("<s>") orelse tokenizer.lookup("<|begin_of_text|>") orelse @panic("bos token not found !"),
+        .eos = tokenizer.lookup("[SEP]") orelse tokenizer.lookup("</s>") orelse tokenizer.lookup("<|end_of_text|>") orelse @panic("eos token not found !"),
+        .unk = tokenizer.lookup("[UNK]") orelse tokenizer.lookup("<unk>") orelse std.math.maxInt(u32),
+        .mask = tokenizer.lookup("[MASK]") orelse std.math.maxInt(u32),
     };
 
     if (main_object.get("model").?.object.get("byte_fallback")) |byte_fallback| {

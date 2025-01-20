@@ -83,6 +83,7 @@ pub fn normalizerFromSpec(spec: sentencepiece_proto.NormalizerSpec) Normalizer {
             .add_dummy_suffix = false,
             .lower_case_ascii = false,
             .split_on_punct_ascii = false,
+            .use_nfc = false,
         },
         if (spec.escape_whitespaces orelse false) Normalizer.sentencepiece_space else null,
     );
