@@ -485,7 +485,7 @@ pub fn Channel(comptime T: type, capacity: usize) type {
         }
 
         pub fn send(self: *Self, val: T) void {
-            self.inner.send(val) catch unreachable;
+            self.inner.send(val);
         }
 
         pub fn recv(self: *Self) ?T {
