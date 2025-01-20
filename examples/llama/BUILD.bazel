@@ -33,6 +33,22 @@ cc_binary(
     deps = [":llama_lib"],
 )
 
+cc_binary(
+    name = "Llama-3.1-70B-Instruct",
+    args = [
+        "--model-config=$(location @Meta-Llama-3.1-70B-Instruct//:config.json)",
+        "--model-weights=$(location @Meta-Llama-3.1-70B-Instruct//:model.safetensors.index.json)",
+        "--model-tokenizer=$(location @Meta-Llama-3.1-70B-Instruct//:tokenizer.json)",
+    ],
+    data = [
+        "@Meta-Llama-3.1-70B-Instruct",
+        "@Meta-Llama-3.1-70B-Instruct//:config.json",
+        "@Meta-Llama-3.1-70B-Instruct//:model.safetensors.index.json",
+        "@Meta-Llama-3.1-70B-Instruct//:tokenizer.json",
+    ],
+    deps = [":llama_lib"],
+)
+
 
 #############################################################################
 # TODO:
@@ -43,39 +59,23 @@ cc_binary(
 #############################################################################
 
 
-# cc_binary(
-#     name = "Llama-3.1-70B-Instruct",
-#     args = [
-#         "--model=$(location @Meta-Llama-3.1-70B-Instruct//:model.safetensors.index.json)",
-#         "--tokenizer=$(location @Meta-Llama-3.1-70B-Instruct//:tokenizer)",
-#         "--num-heads=64",
-#         "--num-kv-heads=8",
-#         "--rope-freq-base=500000",
-#     ],
-#     data = [
-#         "@Meta-Llama-3.1-70B-Instruct//:model",
-#         "@Meta-Llama-3.1-70B-Instruct//:model.safetensors.index.json",
-#         "@Meta-Llama-3.1-70B-Instruct//:tokenizer",
-#     ],
-#     deps = [":llama_lib"],
-# )
-#
-# cc_binary(
-#     name = "Llama-3.2-1B-Instruct",
-#     args = [
-#         "--model=$(location @Meta-Llama-3.2-1B-Instruct//:model.safetensors)",
-#         "--tokenizer=$(location @Meta-Llama-3.2-1B-Instruct//:tokenizer)",
-#         "--num-heads=32",
-#         "--num-kv-heads=8",
-#         "--rope-freq-base=500000",
-#     ],
-#     data = [
-#         "@Meta-Llama-3.2-1B-Instruct//:model.safetensors",
-#         "@Meta-Llama-3.2-1B-Instruct//:tokenizer",
-#     ],
-#     deps = [":llama_lib"],
-# )
-#
+# error(zml/aio): Tensor not found: lm_head.weight (146)
+cc_binary(
+    name = "Llama-3.2-1B-Instruct",
+    args = [
+        "--model-config=$(location @Meta-Llama-3.2-1B-Instruct//:config.json)",
+        "--model-weights=$(location @Meta-Llama-3.2-1B-Instruct//:model.safetensors)",
+        "--model-tokenizer=$(location @Meta-Llama-3.2-1B-Instruct//:tokenizer.json)",
+    ],
+    data = [
+        "@Meta-Llama-3.2-1B-Instruct",
+        "@Meta-Llama-3.2-1B-Instruct//:config.json",
+        "@Meta-Llama-3.2-1B-Instruct//:model.safetensors",
+        "@Meta-Llama-3.2-1B-Instruct//:tokenizer.json",
+    ],
+    deps = [":llama_lib"],
+)
+
 # cc_binary(
 #     name = "Llama-3.2-3B-Instruct",
 #     args = [
