@@ -27,6 +27,7 @@ pub const std_options = .{
         .{ .scope = .llama, .level = .info },
     },
 };
+
 pub fn tokenize(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, config: LlamaLM.Config, prompt: []const u8) ![]u32 {
     var tokens = std.ArrayList(u32).init(allocator);
     var encoder = try tokenizer.encoder();
@@ -110,9 +111,18 @@ pub fn generateText(
     // Here we collect the generated text
     var output = std.ArrayList(u8).init(allocator);
     defer output.deinit();
-    var decode_progress = prompt_tok.len;
 
-    generation: for (0..max_seq_len - prompt_tok.len - 1) |i| {
+    const tracer_buffer = try allocator.alloc(u8, @intCast(max_seq_len));
+    defer allocator.free(tracer_buffer);
+    const tracer = zml.tools.Tracer.init("ai.zml.models.llama");
+    const output_tokens_len = max_seq_len - prompt_tok.len - 1;
+    const start = std.time.microTimestamp();
+
+    var num_tokens_generated: usize = 0;
+
+    generation: for (0..output_tokens_len) |i| {
+        const frame_id = tracer.frameStart(try std.fmt.bufPrintZ(tracer_buffer, "Generate token {}/{}", .{ i + 1, output_tokens_len }));
+
         // current token index needs to go into a zml.Buffer
         const token_index_buffer = &[_]i32{@intCast(prompt_tok.len + i)};
         const token_index = try zml.Buffer.fromSlice(platform, .{}, token_index_buffer);
@@ -121,12 +131,14 @@ pub fn generateText(
         // call to generate the next token
         current_token, kv_cache, rng = mod_generate.call(.{ current_token, token_index, kv_cache, rng });
 
+        tracer.frameEnd(frame_id, try std.fmt.bufPrintZ(tracer_buffer, "Generated token {}/{}", .{ i + 1, output_tokens_len }));
+
         // extract the generated token from the buffer
         _ = try current_token.toHost(std.mem.sliceAsBytes(&generated_token_buffer));
         const generated_token = generated_token_buffer[0];
-
         // de-tokenize generated token into a string
         const chunk = try tokenizer_decoder.next(@intCast(generated_token)) orelse unreachable;
+        num_tokens_generated = i;
 
         // check for eos
         switch (config.eos_token_id.value) {
@@ -141,10 +153,12 @@ pub fn generateText(
         // collect and print generated sequence
         try output.appendSlice(chunk);
         std.debug.print("{s}", .{chunk});
-
-        decode_progress += 1;
     }
+    const end = std.time.microTimestamp();
+    const duration = stdx.math.divFloat(f64, end - start, std.time.us_per_s);
+    const speed = @as(f64, @floatFromInt(num_tokens_generated)) / duration;
     std.debug.print("\n", .{});
+    log.info("✅ Generated {d} tokens in {:.3}s: {d:.3}tok/s", .{ num_tokens_generated, duration, speed });
     return output.toOwnedSlice();
 }
 
@@ -310,7 +324,7 @@ pub fn asyncMain() !void {
     };
     errdefer tokenizer.deinit();
 
-    const prompt = res.args.prompt orelse "Q: The capitol of France is? A: ";
+    const prompt = res.args.prompt orelse "Q: The capital of France is? A: ";
     log.info("✅\tPrompt: {s}", .{prompt});
 
     const seed = res.args.seed orelse @as(u128, @bitCast(std.time.nanoTimestamp()));
