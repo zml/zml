@@ -12,7 +12,7 @@ zig_cc_binary(
     ],
     main = "main.zig",
     deps = [
-        "//third_party/tigerbeetle:flags",
+        "@com_github_hejsil_clap//:clap",
         "@zml//async",
         "@zml//stdx",
         "@zml//zml",
@@ -22,127 +22,136 @@ zig_cc_binary(
 cc_binary(
     name = "Llama-3.1-8B-Instruct",
     args = [
-        "--model=$(location @Meta-Llama-3.1-8B-Instruct//:model.safetensors.index.json)",
-        "--tokenizer=$(location @Meta-Llama-3.1-8B-Instruct//:tokenizer)",
-        "--num-heads=32",
-        "--num-kv-heads=8",
-        "--rope-freq-base=500000",
+        "--model-config=$(location @Meta-Llama-3.1-8B-Instruct//:config.json)",
+        "--model-weights=$(location @Meta-Llama-3.1-8B-Instruct//:model.safetensors.index.json)",
+        "--model-tokenizer=$(location @Meta-Llama-3.1-8B-Instruct//:tokenizer.json)",
     ],
     data = [
-        "@Meta-Llama-3.1-8B-Instruct//:model",
+        "@Meta-Llama-3.1-8B-Instruct",
+        "@Meta-Llama-3.1-8B-Instruct//:config.json",
         "@Meta-Llama-3.1-8B-Instruct//:model.safetensors.index.json",
-        "@Meta-Llama-3.1-8B-Instruct//:tokenizer",
+        "@Meta-Llama-3.1-8B-Instruct//:tokenizer.json",
     ],
     deps = [":llama_lib"],
 )
 
-cc_binary(
-    name = "Llama-3.1-70B-Instruct",
-    args = [
-        "--model=$(location @Meta-Llama-3.1-70B-Instruct//:model.safetensors.index.json)",
-        "--tokenizer=$(location @Meta-Llama-3.1-70B-Instruct//:tokenizer)",
-        "--num-heads=64",
-        "--num-kv-heads=8",
-        "--rope-freq-base=500000",
-    ],
-    data = [
-        "@Meta-Llama-3.1-70B-Instruct//:model",
-        "@Meta-Llama-3.1-70B-Instruct//:model.safetensors.index.json",
-        "@Meta-Llama-3.1-70B-Instruct//:tokenizer",
-    ],
-    deps = [":llama_lib"],
-)
 
-cc_binary(
-    name = "Llama-3.2-1B-Instruct",
-    args = [
-        "--model=$(location @Meta-Llama-3.2-1B-Instruct//:model.safetensors)",
-        "--tokenizer=$(location @Meta-Llama-3.2-1B-Instruct//:tokenizer)",
-        "--num-heads=32",
-        "--num-kv-heads=8",
-        "--rope-freq-base=500000",
-    ],
-    data = [
-        "@Meta-Llama-3.2-1B-Instruct//:model.safetensors",
-        "@Meta-Llama-3.2-1B-Instruct//:tokenizer",
-    ],
-    deps = [":llama_lib"],
-)
+#############################################################################
+# TODO:
+#############################################################################
+#
+# Targets below this line need some love
+#
+#############################################################################
 
-cc_binary(
-    name = "Llama-3.2-3B-Instruct",
-    args = [
-        "--model=$(location @Meta-Llama-3.2-3B-Instruct//:model.safetensors.index.json)",
-        "--tokenizer=$(location @Meta-Llama-3.2-3B-Instruct//:tokenizer)",
-        "--num-heads=24",
-        "--num-kv-heads=8",
-        "--rope-freq-base=500000",
-    ],
-    data = [
-        "@Meta-Llama-3.2-3B-Instruct//:model",
-        "@Meta-Llama-3.2-3B-Instruct//:model.safetensors.index.json",
-        "@Meta-Llama-3.2-3B-Instruct//:tokenizer",
-    ],
-    deps = [":llama_lib"],
-)
 
-cc_binary(
-    name = "OpenLLaMA-3B",
-    args = [
-        "--model=$(location @OpenLM-Research-OpenLLaMA-3B//:model)",
-        "--tokenizer=$(location @OpenLM-Research-OpenLLaMA-3B//:tokenizer)",
-        "--num-heads=32",
-        "--num-kv-heads=32",
-        "--rope-freq-base=10000",
-    ],
-    data = [
-        "@OpenLM-Research-OpenLLaMA-3B//:model",
-        "@OpenLM-Research-OpenLLaMA-3B//:tokenizer",
-    ],
-    deps = [":llama_lib"],
-)
-
-cc_binary(
-    name = "TinyLlama-1.1B-Chat",
-    args = [
-        "--model=$(location @TinyLlama-1.1B-Chat-v1.0//:model.safetensors)",
-        "--tokenizer=$(location @TinyLlama-1.1B-Chat-v1.0//:tokenizer)",
-        "--num-heads=32",
-        "--num-kv-heads=4",
-        "--rope-freq-base=10000",
-    ],
-    data = [
-        "@TinyLlama-1.1B-Chat-v1.0//:model.safetensors",
-        "@TinyLlama-1.1B-Chat-v1.0//:tokenizer",
-    ],
-    deps = [":llama_lib"],
-)
-
-cc_binary(
-    name = "TinyLlama-Stories-110M",
-    args = [
-        "--model=$(location @Karpathy-TinyLlama-Stories//:stories110M)",
-        "--tokenizer=$(location @Karpathy-TinyLlama-Tokenizer//file)",
-    ],
-    data = [
-        "@Karpathy-TinyLlama-Stories//:stories110M",
-        "@Karpathy-TinyLlama-Tokenizer//file",
-    ],
-    deps = [":llama_lib"],
-)
-
-cc_binary(
-    name = "TinyLlama-Stories-15M",
-    args = [
-        "--model=$(location @Karpathy-TinyLlama-Stories//:stories15M)",
-        "--tokenizer=$(location @Karpathy-TinyLlama-Tokenizer//file)",
-    ],
-    data = [
-        "@Karpathy-TinyLlama-Stories//:stories15M",
-        "@Karpathy-TinyLlama-Tokenizer//file",
-    ],
-    deps = [":llama_lib"],
-)
+# cc_binary(
+#     name = "Llama-3.1-70B-Instruct",
+#     args = [
+#         "--model=$(location @Meta-Llama-3.1-70B-Instruct//:model.safetensors.index.json)",
+#         "--tokenizer=$(location @Meta-Llama-3.1-70B-Instruct//:tokenizer)",
+#         "--num-heads=64",
+#         "--num-kv-heads=8",
+#         "--rope-freq-base=500000",
+#     ],
+#     data = [
+#         "@Meta-Llama-3.1-70B-Instruct//:model",
+#         "@Meta-Llama-3.1-70B-Instruct//:model.safetensors.index.json",
+#         "@Meta-Llama-3.1-70B-Instruct//:tokenizer",
+#     ],
+#     deps = [":llama_lib"],
+# )
+#
+# cc_binary(
+#     name = "Llama-3.2-1B-Instruct",
+#     args = [
+#         "--model=$(location @Meta-Llama-3.2-1B-Instruct//:model.safetensors)",
+#         "--tokenizer=$(location @Meta-Llama-3.2-1B-Instruct//:tokenizer)",
+#         "--num-heads=32",
+#         "--num-kv-heads=8",
+#         "--rope-freq-base=500000",
+#     ],
+#     data = [
+#         "@Meta-Llama-3.2-1B-Instruct//:model.safetensors",
+#         "@Meta-Llama-3.2-1B-Instruct//:tokenizer",
+#     ],
+#     deps = [":llama_lib"],
+# )
+#
+# cc_binary(
+#     name = "Llama-3.2-3B-Instruct",
+#     args = [
+#         "--model=$(location @Meta-Llama-3.2-3B-Instruct//:model.safetensors.index.json)",
+#         "--tokenizer=$(location @Meta-Llama-3.2-3B-Instruct//:tokenizer)",
+#         "--num-heads=24",
+#         "--num-kv-heads=8",
+#         "--rope-freq-base=500000",
+#     ],
+#     data = [
+#         "@Meta-Llama-3.2-3B-Instruct//:model",
+#         "@Meta-Llama-3.2-3B-Instruct//:model.safetensors.index.json",
+#         "@Meta-Llama-3.2-3B-Instruct//:tokenizer",
+#     ],
+#     deps = [":llama_lib"],
+# )
+#
+# cc_binary(
+#     name = "OpenLLaMA-3B",
+#     args = [
+#         "--model=$(location @OpenLM-Research-OpenLLaMA-3B//:model)",
+#         "--tokenizer=$(location @OpenLM-Research-OpenLLaMA-3B//:tokenizer)",
+#         "--num-heads=32",
+#         "--num-kv-heads=32",
+#         "--rope-freq-base=10000",
+#     ],
+#     data = [
+#         "@OpenLM-Research-OpenLLaMA-3B//:model",
+#         "@OpenLM-Research-OpenLLaMA-3B//:tokenizer",
+#     ],
+#     deps = [":llama_lib"],
+# )
+#
+# cc_binary(
+#     name = "TinyLlama-1.1B-Chat",
+#     args = [
+#         "--model=$(location @TinyLlama-1.1B-Chat-v1.0//:model.safetensors)",
+#         "--tokenizer=$(location @TinyLlama-1.1B-Chat-v1.0//:tokenizer)",
+#         "--num-heads=32",
+#         "--num-kv-heads=4",
+#         "--rope-freq-base=10000",
+#     ],
+#     data = [
+#         "@TinyLlama-1.1B-Chat-v1.0//:model.safetensors",
+#         "@TinyLlama-1.1B-Chat-v1.0//:tokenizer",
+#     ],
+#     deps = [":llama_lib"],
+# )
+#
+# cc_binary(
+#     name = "TinyLlama-Stories-110M",
+#     args = [
+#         "--model=$(location @Karpathy-TinyLlama-Stories//:stories110M)",
+#         "--tokenizer=$(location @Karpathy-TinyLlama-Tokenizer//file)",
+#     ],
+#     data = [
+#         "@Karpathy-TinyLlama-Stories//:stories110M",
+#         "@Karpathy-TinyLlama-Tokenizer//file",
+#     ],
+#     deps = [":llama_lib"],
+# )
+#
+# cc_binary(
+#     name = "TinyLlama-Stories-15M",
+#     args = [
+#         "--model=$(location @Karpathy-TinyLlama-Stories//:stories15M)",
+#         "--tokenizer=$(location @Karpathy-TinyLlama-Tokenizer//file)",
+#     ],
+#     data = [
+#         "@Karpathy-TinyLlama-Stories//:stories15M",
+#         "@Karpathy-TinyLlama-Tokenizer//file",
+#     ],
+#     deps = [":llama_lib"],
+# )
 
 zig_cc_binary(
     name = "test-implementation",
