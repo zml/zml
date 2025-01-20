@@ -57,24 +57,6 @@ pub const Executor = struct {
 };
 
 pub const Condition = struct {
-    const Waiter = struct {
-        coro: libcoro.Frame,
-        notified: bool = false,
-
-        fn init() Waiter {
-            return .{ .coro = libcoro.xframe() };
-        }
-
-        fn func(self: *Waiter) Executor.Func {
-            return .{ .func = Waiter.cb, .userdata = self };
-        }
-
-        fn cb(ud: ?*anyopaque) void {
-            const self: *Waiter = @ptrCast(@alignCast(ud));
-            libcoro.xresume(self.coro);
-        }
-    };
-
     exec: *Executor,
     waiters: stdx.queue.SPSC(Executor.Func) = .{},
 
@@ -83,29 +65,20 @@ pub const Condition = struct {
     }
 
     pub fn broadcast(self: *Condition) void {
-        var waiter_func = self.waiters.head;
-        while (waiter_func) |wf| : (waiter_func = wf.next) {
-            const waiter: *Waiter = @ptrCast(@alignCast(wf.userdata));
-            waiter.notified = true;
-        }
         self.exec.runAllSoon(self.waiters);
     }
 
     pub fn signal(self: *Condition) void {
         if (self.waiters.pop()) |waiter_func| {
-            const waiter: *Waiter = @ptrCast(@alignCast(waiter_func.userdata));
-            waiter.notified = true;
             self.exec.runSoon(waiter_func);
         }
     }
 
     pub fn wait(self: *Condition) void {
-        var waiter = Waiter.init();
-        var cb = waiter.func();
+        var cr = CoroResume.init();
+        var cb = cr.func();
         self.waiters.push(&cb);
-        while (waiter.notified == false) {
-            libcoro.xsuspend();
-        }
+        libcoro.xsuspend();
     }
 };
 
