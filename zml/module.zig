@@ -242,10 +242,8 @@ pub const CompilationContext = struct {
             }
 
             const loaded_executable = compileModuleToPjrtExecutable(arena, self._platform, module, module_dir) catch |err| {
-                log.err(
-                    "pjrt-{s} failed to compile following valid MLIR:\n{}\n{}",
-                    .{ @tagName(self._platform.target), module.op().mlirFormatter(.{}), err },
-                );
+                log.err("pjrt-{s} failed to compile: {}", .{ @tagName(self._platform.target), err });
+                if (module_dir) |dir| log.err("mlir can be found at {s}/module.mlir", .{dir});
                 return err;
             };
 
