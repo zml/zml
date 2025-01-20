@@ -8,6 +8,10 @@ impl<T> ZigSlice<T> {
     fn as_slice(&self) -> &[T] {
         unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
     }
+
+    fn as_slice_mut(&self) -> &mut [T] {
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
 }
 
 #[no_mangle]
@@ -35,16 +39,26 @@ extern "C" fn hftokenizers_encode(
         .unwrap()
         .encode_fast(input_str, false)
         .unwrap();
-    let ids = encoded.get_ids();
-    return ZigSlice {
+
+    // Convert the result to a boxed slice
+    let mut ids: Box<[u32]> = encoded.get_ids().to_owned().into_boxed_slice();
+
+    // Retrieve the zig slice associated to the boxed slice.
+    let slice = ZigSlice {
+        ptr: ids.as_mut_ptr(),
         len: ids.len(),
-        ptr: Box::into_raw(ids.to_owned().into_boxed_slice()) as *mut u32,
     };
+
+    // Leak the box so that it's not deallocated.
+    Box::leak(ids);
+
+    return slice;
 }
 
 #[no_mangle]
 extern "C" fn hftokenizers_tokens_drop(tokens: ZigSlice<u32>) {
-    drop(unsafe { Box::from_raw(tokens.ptr) });
+    // Reconstruct the Box from the zig slice so that it's dropped.
+    drop(unsafe { Box::from_raw(tokens.as_slice_mut()) });
 }
 
 #[no_mangle]
@@ -56,15 +70,25 @@ extern "C" fn hftokenizers_decode(
         .unwrap()
         .decode(ids.as_slice(), false)
         .unwrap();
-    return ZigSlice {
-        len: decoded.len(),
-        ptr: Box::into_raw(decoded.into_boxed_str()) as *mut u8,
+
+    // Convert the result to a boxed slice
+    let mut string: Box<[u8]> = decoded.into_bytes().into_boxed_slice();
+
+    // Retrieve the zig slice associated to the boxed slice.
+    let slice = ZigSlice {
+        ptr: string.as_mut_ptr(),
+        len: string.len(),
     };
+
+    // Leak the box so that it's not deallocated.
+    Box::leak(string);
+
+    return slice;
 }
 
 #[no_mangle]
 extern "C" fn hftokenizers_str_drop(tokens: ZigSlice<u8>) {
-    drop(unsafe { Box::from_raw(tokens.ptr) });
+    drop(unsafe { Box::from_raw(tokens.as_slice_mut()) });
 }
 
 #[no_mangle]
