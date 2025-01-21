@@ -112,7 +112,7 @@ fn newBuff(store: *zml.aio.BufferStore, name: []const u8, sh: anytype, offset: u
     const n = shape.byteSize();
     const buff = zml.HostBuffer.fromBytes(shape, store.files[0].data[offset..][0..n]);
     store.buffers.putAssumeCapacityNoClobber(name, buff);
-    zml.log.info("Found {s}: {}", .{ name, shape });
+    zml.log.debug("Found {s}: {}", .{ name, shape });
     return offset + n;
 }
 
@@ -125,7 +125,7 @@ fn splitBuff(store: *zml.aio.BufferStore, comptime fmt: []const u8, sh: anytype,
         const buff = zml.HostBuffer.fromBytes(shape, store.files[0].data[off..][0..n]);
         store.buffers.putAssumeCapacityNoClobber(name, buff);
         off += n;
-        if (i == 0) zml.log.info("Found {s}: {}", .{ name, shape });
+        if (i == 0) zml.log.debug("Found {s}: {}", .{ name, shape });
     }
     return off;
 }

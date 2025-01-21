@@ -285,14 +285,20 @@ pub const HostBuffer = struct {
     fn prettyPrintIndented(self: HostBuffer, num_rows: u8, indent_level: u8, writer: anytype) !void {
         if (self.rank() == 1) {
             try writer.writeByteNTimes(' ', indent_level);
-            switch (self.dtype()) {
+            return switch (self.dtype()) {
                 inline else => |dt| {
                     const values = self.items(dt.toZigType());
-                    const n = @min(values.len, 1024);
-                    try writer.print("{any},\n", .{values[0..n]});
+                    // Write first rows
+                    const num_cols: u32 = 12;
+                    const n: u64 = @intCast(self.dim(0));
+                    if (n <= num_cols) {
+                        try writer.print("{any},\n", .{values[0..n]});
+                    } else {
+                        const half = @divExact(num_cols, 2);
+                        try writer.print("{any}, ..., {any},\n", .{ values[0..half], values[n - half ..] });
+                    }
                 },
-            }
-            return;
+            };
         }
         try writer.writeByteNTimes(' ', indent_level);
         _ = try writer.write("{\n");
