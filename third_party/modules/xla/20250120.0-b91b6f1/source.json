@@ -1,7 +1,7 @@
 {
     "strip_prefix": "xla-b91b6f1ad0e75b2295f811a262cdce744180d2ea",
     "url": "https://github.com/openxla/xla/archive/b91b6f1ad0e75b2295f811a262cdce744180d2ea.tar.gz",
-    "integrity": "sha256-0+kdYIla4F63oPfACtw6LmmMLdKTFlBBrgvc9PmxFoI=",
+    "integrity": "sha256-bbR90jyswoHMWRN0kV1mvXsaR0n8XsblPNGA+QOfeCk=",
     "overlay": {
         "tsl.bzl": "",
         "workspace.bzl": "",
