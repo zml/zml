@@ -306,7 +306,7 @@ pub const Tokenizer = struct {
             // Convert `▁` to a regular space.
             if (escaped) |escspc| {
                 // we modify piece inside the loop, so we can use it in the condition
-                while (std.mem.startsWith(u8, piece, escaped.?)) {
+                while (std.mem.startsWith(u8, piece, escspc)) {
                     piece = piece[escspc.len..];
                     // don't output a space at beginning of text.
                     if (output.items.len > 0) try output.append(' ');
@@ -930,7 +930,6 @@ pub fn fromHfJson(allocator: std.mem.Allocator, tokenizer_path: []const u8) !Tok
     };
 
     const model = objectGet(main_object, .object, "model") orelse return error.InvalidFormat;
-    // TODO: remove all panics
     const vocab = objectGet(model, .object, "vocab") orelse return error.InvalidFormat;
     const added_tokens = if (objectGet(main_object, .array, "added_tokens")) |added| added.items else &.{};
     const vocab_size: u32 = @intCast(vocab.count() + added_tokens.len);
@@ -992,8 +991,8 @@ pub fn fromHfJson(allocator: std.mem.Allocator, tokenizer_path: []const u8) !Tok
 
     // More tokens, typically added during fine tuning of the model.
     for (added_tokens) |token_obj| {
-        const v = token_obj.object.get("content").?.string;
-        const id: u32 = @intCast(token_obj.object.get("id").?.integer);
+        const v = objectGet(token_obj, .string, "content") orelse return error.InvalidFormat;
+        const id: u32 = @intCast(objectGet(token_obj, .integer, "id") orelse return error.InvalidFormat);
         const token = try if (is_gpt2_vocab)
             gpt2_decoder.decode(&all_tokens, v)
         else
@@ -1010,6 +1009,7 @@ pub fn fromHfJson(allocator: std.mem.Allocator, tokenizer_path: []const u8) !Tok
     }
 
     tokenizer.special_tokens = .{
+        // TODO allow users to specify special tokens or read them from a tokenizer_config.json file
         .bos = tokenizer.lookup("<s>") orelse tokenizer.lookup("<|begin_of_text|>") orelse @panic("bos token not found !"),
         .eos = tokenizer.lookup("</s>") orelse tokenizer.lookup("<|end_of_text|>") orelse @panic("eos token not found !"),
         .unk = unk orelse std.math.maxInt(u32),
