@@ -69,8 +69,8 @@ pub const StackAllocator = struct {
         return .{ .allocator = allocator };
     }
 
-    pub fn deinit(self: *StackAllocator) void {
-        _ = self; // autofix
+    pub fn deinit(_: *StackAllocator) void {
+        // empty
     }
 
     pub fn create(self: *StackAllocator) !Stack {

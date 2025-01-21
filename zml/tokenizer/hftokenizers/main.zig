@@ -15,8 +15,7 @@ pub fn main() !void {
     // try pouet.appendSlice(encoded.ids);
 
     var t = try std.time.Timer.start();
-    for (0..100) |i| {
-        _ = i; // autofix
+    for (0..100) |_| {
         try pouet.appendSlice(encoded.ids);
         t.reset();
         var decoded = HFTokenizers.decode(tokenizer, pouet.items);
