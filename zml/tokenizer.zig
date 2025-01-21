@@ -991,8 +991,9 @@ pub fn fromHfJson(allocator: std.mem.Allocator, tokenizer_path: []const u8) !Tok
 
     // More tokens, typically added during fine tuning of the model.
     for (added_tokens) |token_obj| {
-        const v = objectGet(token_obj, .string, "content") orelse return error.InvalidFormat;
-        const id: u32 = @intCast(objectGet(token_obj, .integer, "id") orelse return error.InvalidFormat);
+        if (token_obj != .object) return error.InvalidFormat;
+        const v = objectGet(token_obj.object, .string, "content") orelse return error.InvalidFormat;
+        const id: u32 = @intCast(objectGet(token_obj.object, .integer, "id") orelse return error.InvalidFormat);
         const token = try if (is_gpt2_vocab)
             gpt2_decoder.decode(&all_tokens, v)
         else
