@@ -76,7 +76,6 @@ pub const LlamaLM = struct {
     /// Predicts the token at `token_index` position.
     /// Returns:
     ///  - updated `tokens`,
-    ///  - `token_idx` + 1,
     ///  - updated KV cache
     ///  - a Rng state to allow for probabilistic generation
     pub fn forward(

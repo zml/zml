@@ -173,10 +173,6 @@ const params = clap.parseParamsComptime(
     \\--seq-len <UINT>          sequence length
 );
 
-pub fn bool_parser(in: []const u8) error{}!bool {
-    return std.mem.indexOfScalar(u8, "tTyY1", in[0]) != null;
-}
-
 pub fn main() !void {
     try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain);
 }
@@ -187,7 +183,6 @@ pub fn asyncMain() !void {
     const allocator = std.heap.c_allocator;
 
     const parsers = comptime .{
-        .BOOL = bool_parser,
         .UINT = clap.parsers.int(usize, 0),
         .STRING = clap.parsers.string,
         .PATH = clap.parsers.string,
