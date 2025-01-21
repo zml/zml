@@ -55,7 +55,7 @@ pub const Buffer = struct {
     _shards: Shards,
 
     pub const MAX_NUM_SHARDS: u8 = Platform.MAX_NUM_DEVICES;
-    pub const Shards = std.BoundedArray(*pjrt.Buffer, MAX_NUM_SHARDS);
+    pub const Shards = std.BoundedArray(Shard, MAX_NUM_SHARDS);
 
     /// Copies the content of the given buffer from host memory to the accelerator memory.
     pub fn from(platform: Platform, host_buffer: HostBuffer) !Buffer {
@@ -94,20 +94,19 @@ pub const Buffer = struct {
                 .device = devices[i],
                 .host_buffer_semantics = .ImmutableUntilTransferCompletes,
             });
-            if (event) |ev| {
-                ev.deinit(platform.pjrt_api);
-            }
-            res._shards.appendAssumeCapacity(pjrt_buffer);
+            res._shards.appendAssumeCapacity(.{
+                .api = platform.pjrt_api,
+                .buffer = pjrt_buffer,
+                .ready_event = event,
+            });
         }
 
         return res;
     }
 
-    pub fn awaitt(self: Buffer) !Buffer {
-        for (self._shards.constSlice()) |buffer| {
-            if (buffer.getReadyEvent(self._api)) |ev| {
-                try ev.awaitt(self._api);
-            }
+    pub fn awaitt(self: *Buffer) !*Buffer {
+        for (self._shards.slice()) |*shard| {
+            try shard.awaitt();
         }
         return self;
     }
@@ -117,7 +116,12 @@ pub const Buffer = struct {
         stdx.debug.assert(pjrt_buffers.len <= MAX_NUM_SHARDS, "ZML doesn't support having more than {} shards. Received {} shards for one buffer.", .{ MAX_NUM_SHARDS, pjrt_buffers.len });
         stdx.debug.assert(pjrt_buffers.len > 0, "fromPjrtBuffers expects at least one buffer, got 0.", .{});
         var shards: Shards = .{};
-        shards.appendSliceAssumeCapacity(pjrt_buffers);
+        for (pjrt_buffers) |pjrt_buffer| {
+            shards.appendAssumeCapacity(.{
+                .api = platform.pjrt_api,
+                .buffer = pjrt_buffer,
+            });
+        }
         return .{
             ._api = platform.pjrt_api,
             ._shape = shape_,
@@ -274,11 +278,12 @@ pub const Buffer = struct {
     /// The returned `HostBuffer` doesn't own the memory.
     pub fn toHost(self: Buffer, output: []u8) !HostBuffer {
         stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
-        const maybe_event = try self._shards.get(0).toHostBuffer(self._api, output);
-        if (maybe_event) |event| {
-            try event.await_(self._api);
-        }
-        return HostBuffer.fromBytes(self.shape(), output);
+        const maybe_event = try self._shards.get(0).buffer.toHostBuffer(self._api, output);
+        var hb = HostBuffer.fromBytes(self.shape(), output);
+        hb._event = maybe_event;
+        hb._api = self._api;
+        hb._ready = if (maybe_event) |ev| ev.isReady(self._api) else true;
+        return hb;
     }
 
     /// Copies the content of the Buffer to the host.
@@ -286,10 +291,10 @@ pub const Buffer = struct {
     pub fn toHostAlloc(self: Buffer, allocator: std.mem.Allocator) !HostBuffer {
         const output = try HostBuffer.empty(allocator, self.shape());
         stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
-        const maybe_event = try self._shards.get(0).toHostBuffer(self._api, @constCast(output.data));
-        if (maybe_event) |event| {
-            try event.await_(self._api);
-        }
+        const maybe_event = try self._shards.get(0).buffer.toHostBuffer(self._api, @constCast(output.data));
+        output._event = maybe_event;
+        output._api = self._api;
+        output._ready = if (maybe_event) |ev| ev.isReady(self._api) else true;
         return output;
     }
 
@@ -297,8 +302,8 @@ pub const Buffer = struct {
     /// Depending on the platform, the memory is typically not released to the OS
     /// but just marked as available in the memory pool.
     pub fn deinit(self: *const Buffer) void {
-        for (self._shards.constSlice()) |buffer| {
-            buffer.deinit(self._api);
+        for (self._shards.constSlice()) |shard| {
+            shard.buffer.deinit(self._api);
         }
     }
 
