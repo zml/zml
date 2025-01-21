@@ -319,7 +319,7 @@ pub fn asyncMain() !void {
     };
     errdefer tokenizer.deinit();
 
-    const prompt = res.args.prompt orelse "Q: The capital of France is? A: ";
+    const prompt = res.args.prompt orelse "What is the capital of France?";
     log.info("✅\tPrompt: {s}", .{prompt});
 
     const seed = res.args.seed orelse @as(u128, @bitCast(std.time.nanoTimestamp()));
