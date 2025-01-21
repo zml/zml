@@ -91,42 +91,41 @@ http_file(
 
 # Llama 3.2
 
-# huggingface.model(
-#     name = "Meta-Llama-3.2-1B-Instruct",
-#     build_file_content = """\
-# package(default_visibility = ["//visibility:public"])
-# filegroup(
-#     name = "Meta-Llama-3.2-1B-Instruct",
-#     srcs = glob(["*.json", "*.safetensors"]),
-# )
-# """,
-#     commit = "9213176726f574b556790deb65791e0c5aa438b6",
-#     includes = [
-#         "*.safetensors",
-#         "*.json",
-#     ],
-#     model = "meta-llama/Llama-3.2-1B-Instruct",
-# )
-# use_repo(huggingface, "Meta-Llama-3.2-1B-Instruct")
+huggingface.model(
+    name = "Meta-Llama-3.2-1B-Instruct",
+    build_file_content = """\
+package(default_visibility = ["//visibility:public"])
+filegroup(
+    name = "Meta-Llama-3.2-1B-Instruct",
+    srcs = glob(["*.json", "*.safetensors"]),
+)
+""",
+    commit = "9213176726f574b556790deb65791e0c5aa438b6",
+    includes = [
+        "*.safetensors",
+        "*.json",
+    ],
+    model = "meta-llama/Llama-3.2-1B-Instruct",
+)
+use_repo(huggingface, "Meta-Llama-3.2-1B-Instruct")
 
-# huggingface.model(
-#     name = "Meta-Llama-3.2-3B-Instruct",
-#     build_file_content = """\
-# package(default_visibility = ["//visibility:public"])
-# filegroup(
-#     name = "Meta-Llama-3.2-3B-Instruct",
-#     srcs = glob(["*.safetensors"]) + ["*.json"],
-# )
-#
-# """,
-#     commit = "0cb88a4f764b7a12671c53f0838cd831a0843b95",
-#     includes = [
-#         "*.safetensors",
-#         "*.json",
-#     ],
-#     model = "meta-llama/Llama-3.2-3B-Instruct",
-# )
-# use_repo(huggingface, "Meta-Llama-3.2-3B-Instruct")
+huggingface.model(
+    name = "Meta-Llama-3.2-3B-Instruct",
+    build_file_content = """\
+package(default_visibility = ["//visibility:public"])
+filegroup(
+    name = "Meta-Llama-3.2-3B-Instruct",
+    srcs = glob(["*.json", "*.safetensors"]),
+)
+""",
+    commit = "0cb88a4f764b7a12671c53f0838cd831a0843b95",
+    includes = [
+        "*.safetensors",
+        "*.json",
+    ],
+    model = "meta-llama/Llama-3.2-3B-Instruct",
+)
+use_repo(huggingface, "Meta-Llama-3.2-3B-Instruct")
 
 # Llama 3.1
 

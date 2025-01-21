@@ -52,15 +52,6 @@ cc_binary(
 )
 
 
-#############################################################################
-# TODO:
-#############################################################################
-#
-# Targets below this line need some love
-#
-#############################################################################
-
-
 # error(zml/aio): Tensor not found: lm_head.weight (146)
 cc_binary(
     name = "Llama-3.2-1B-Instruct",
@@ -78,80 +69,23 @@ cc_binary(
     deps = [":llama_lib"],
 )
 
-# cc_binary(
-#     name = "Llama-3.2-3B-Instruct",
-#     args = [
-#         "--model=$(location @Meta-Llama-3.2-3B-Instruct//:model.safetensors.index.json)",
-#         "--tokenizer=$(location @Meta-Llama-3.2-3B-Instruct//:tokenizer)",
-#         "--num-heads=24",
-#         "--num-kv-heads=8",
-#         "--rope-freq-base=500000",
-#     ],
-#     data = [
-#         "@Meta-Llama-3.2-3B-Instruct//:model",
-#         "@Meta-Llama-3.2-3B-Instruct//:model.safetensors.index.json",
-#         "@Meta-Llama-3.2-3B-Instruct//:tokenizer",
-#     ],
-#     deps = [":llama_lib"],
-# )
+# error(zml/aio): Tensor not found: lm_head.weight (254)
+cc_binary(
+    name = "Llama-3.2-3B-Instruct",
+    args = [
+        "--model-config=$(location @Meta-Llama-3.2-3B-Instruct//:config.json)",
+        "--model-weights=$(location @Meta-Llama-3.2-3B-Instruct//:model.safetensors.index.json)",
+        "--model-tokenizer=$(location @Meta-Llama-3.2-3B-Instruct//:tokenizer.json)",
+    ],
+    data = [
+        "@Meta-Llama-3.2-3B-Instruct",
+        "@Meta-Llama-3.2-3B-Instruct//:config.json",
+        "@Meta-Llama-3.2-3B-Instruct//:model.safetensors.index.json",
+        "@Meta-Llama-3.2-3B-Instruct//:tokenizer.json",
+    ],
+    deps = [":llama_lib"],
+)
 #
-# cc_binary(
-#     name = "OpenLLaMA-3B",
-#     args = [
-#         "--model=$(location @OpenLM-Research-OpenLLaMA-3B//:model)",
-#         "--tokenizer=$(location @OpenLM-Research-OpenLLaMA-3B//:tokenizer)",
-#         "--num-heads=32",
-#         "--num-kv-heads=32",
-#         "--rope-freq-base=10000",
-#     ],
-#     data = [
-#         "@OpenLM-Research-OpenLLaMA-3B//:model",
-#         "@OpenLM-Research-OpenLLaMA-3B//:tokenizer",
-#     ],
-#     deps = [":llama_lib"],
-# )
-#
-# cc_binary(
-#     name = "TinyLlama-1.1B-Chat",
-#     args = [
-#         "--model=$(location @TinyLlama-1.1B-Chat-v1.0//:model.safetensors)",
-#         "--tokenizer=$(location @TinyLlama-1.1B-Chat-v1.0//:tokenizer)",
-#         "--num-heads=32",
-#         "--num-kv-heads=4",
-#         "--rope-freq-base=10000",
-#     ],
-#     data = [
-#         "@TinyLlama-1.1B-Chat-v1.0//:model.safetensors",
-#         "@TinyLlama-1.1B-Chat-v1.0//:tokenizer",
-#     ],
-#     deps = [":llama_lib"],
-# )
-#
-# cc_binary(
-#     name = "TinyLlama-Stories-110M",
-#     args = [
-#         "--model=$(location @Karpathy-TinyLlama-Stories//:stories110M)",
-#         "--tokenizer=$(location @Karpathy-TinyLlama-Tokenizer//file)",
-#     ],
-#     data = [
-#         "@Karpathy-TinyLlama-Stories//:stories110M",
-#         "@Karpathy-TinyLlama-Tokenizer//file",
-#     ],
-#     deps = [":llama_lib"],
-# )
-#
-# cc_binary(
-#     name = "TinyLlama-Stories-15M",
-#     args = [
-#         "--model=$(location @Karpathy-TinyLlama-Stories//:stories15M)",
-#         "--tokenizer=$(location @Karpathy-TinyLlama-Tokenizer//file)",
-#     ],
-#     data = [
-#         "@Karpathy-TinyLlama-Stories//:stories15M",
-#         "@Karpathy-TinyLlama-Tokenizer//file",
-#     ],
-#     deps = [":llama_lib"],
-# )
 
 zig_cc_binary(
     name = "test-implementation",
@@ -193,12 +127,12 @@ zig_cc_binary(
 
 mtree_spec(
     name = "mtree",
-    srcs = [":llama"],
+    srcs = [":Llama-3.1-8B-Instruct"],
 )
 
 tar(
     name = "archive",
-    srcs = [":llama"],
+    srcs = [":Llama-3.1-8B-Instruct"],
     args = [
         "--options",
         "zstd:compression-level=9",
@@ -227,7 +161,7 @@ oci_load(
     name = "load",
     image = ":image",
     repo_tags = [
-        "distroless/llama:latest",
+        "distroless/llama-3.1-8B-Instruct:latest",
     ],
 )
 
@@ -235,5 +169,5 @@ oci_push(
     name = "push",
     image = ":image",
     remote_tags = ["latest"],
-    repository = "index.docker.io/steeve/llama",
+    repository = "index.docker.io/steeve/llama-3.1-8B-Instruct",
 )
