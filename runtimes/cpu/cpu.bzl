@@ -12,7 +12,7 @@ def _cpu_pjrt_plugin_impl(mctx):
     http_archive(
         name = "libpjrt_cpu_linux_amd64",
         build_file_content = _BUILD.format(ext = "so"),
-        sha256 = "35b6aefa0359317ae2892f846d6da892bee2116d8c6722e397ef0120cf572183",
+        sha256 = "8e9c7e2804d1abe5a07d0147ad98b6cd4f105c8c39dfd70b832f16c36784f4d0",
         url = "http://localhost:8000/pjrt-cpu_linux-amd64.tar.gz",
     )
 
