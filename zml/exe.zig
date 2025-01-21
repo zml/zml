@@ -316,7 +316,7 @@ fn fillBuffers(v: anytype, buffers: []const [*]*pjrt.Buffer, start: u32) u32 {
             const model_sharding = ctx.buffers.len;
             stdx.debug.assert(buffer._shards.len == model_sharding, "Can't feed a {}-sharded tensor into a {}-sharded model", .{ buffer._shards.len, ctx.buffers.len });
             for (buffer._shards.constSlice(), 0..) |shard, d| {
-                ctx.buffers[d][ctx.index] = shard;
+                ctx.buffers[d][ctx.index] = shard.buffer;
             }
             ctx.index += 1;
         }
@@ -344,7 +344,7 @@ fn assignRawBuffers(v: anytype, platform: Platform, buffers: []const [*]*pjrt.Bu
             ctx.index += 1;
             if (i >= ctx.buffer_shapes.len) return;
 
-            var shards: Buffer.Shards = .{};
+            var shards: std.BoundedArray(*pjrt.Buffer, Buffer.MAX_NUM_SHARDS) = .{};
             for (ctx.buffers) |buff| {
                 shards.appendAssumeCapacity(buff[i]);
             }
