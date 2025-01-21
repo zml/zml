@@ -289,7 +289,7 @@ pub const Buffer = struct {
     /// Copies the content of the Buffer to the host.
     /// The returned `HostBuffer` does own the memory.
     pub fn toHostAlloc(self: Buffer, allocator: std.mem.Allocator) !HostBuffer {
-        const output = try HostBuffer.empty(allocator, self.shape());
+        var output = try HostBuffer.empty(allocator, self.shape());
         stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
         const maybe_event = try self._shards.get(0).buffer.toHostBuffer(self._api, @constCast(output.data));
         output._event = maybe_event;
