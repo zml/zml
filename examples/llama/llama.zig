@@ -33,7 +33,7 @@ pub const LlamaLM = struct {
         max_seq_len: usize,
     };
 
-    lm_head: zml.nn.Linear,
+    lm_head: ?zml.nn.Linear,
     model: Llama,
 
     // Options controlling generation
@@ -68,8 +68,8 @@ pub const LlamaLM = struct {
 
         // TODO(Corentin): Fix lm_head sharding when top-k sampling is enabled.
         // It currently crashes/compilation fails
-        if (self.gen_opts.topk == 1) {
-            self.lm_head.weight = self.lm_head.weight.withSharding(.{0});
+        if (self.gen_opts.topk == 1 and self.lm_head != null) {
+            self.lm_head.?.weight = self.lm_head.?.weight.withSharding(.{0});
         }
     }
 
@@ -90,12 +90,13 @@ pub const LlamaLM = struct {
 
         var tokens = tokens_.withPartialTags(.{.s});
         const out, const updated_kv_cache = zml.call(self.model, .forward, .{ tokens, token_index, kv_cache });
-        tokens, const new_rng = sampleTokens(self.lm_head, tokens, out, rng, self.gen_opts);
+        tokens, const new_rng = self.sampleTokens(self.lm_head, tokens, out, rng, self.gen_opts);
         return .{ tokens, updated_kv_cache, new_rng };
     }
 
     pub fn sampleTokens(
-        lm_head: zml.nn.Linear,
+        self: LlamaLM,
+        lm_head_: ?zml.nn.Linear,
         tokens_: Tensor,
         out_: Tensor,
         rng: Tensor.Rng,
@@ -103,7 +104,13 @@ pub const LlamaLM = struct {
     ) struct { Tensor, Tensor.Rng } {
         const out = out_.withPartialTags(.{ .s, .d });
 
-        var logits = zml.call(lm_head, .forward, .{out});
+        var logits = blk: {
+            if (lm_head_) |lm_head| {
+                break :blk zml.call(lm_head, .forward, .{out});
+            } else {
+                break :blk self.model.embed_tokens.weight.withTags(.{ .voc, .d }).dot(out, .{.d});
+            }
+        };
 
         if (logits.shape().hasTag(.voc) == null)
             logits = logits.rename(.{ .d = .voc });
