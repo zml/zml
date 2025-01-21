@@ -173,6 +173,7 @@ const params = clap.parseParamsComptime(
     \\--model-tokenizer <PATH>  tokenizer path
     \\--seed <UINT>             random seed (optional)
     \\--seq-len <UINT>          sequence length
+    \\--create-opts <STRING>    platform creation options JSON, defaults to {}
 );
 
 pub fn main() !void {
@@ -230,12 +231,12 @@ pub fn asyncMain() !void {
         .sharding_enabled = true,
     };
 
-    // TODO: add --create-opts <PATH> json string/file with creation options
-    // const create_opts = try std.json.parseFromSlice(zml.Platform.CreateOptions, allocator, cli_args.create_options, .{});
-    // const platform = context.autoPlatform(create_opts.value).withCompilationOptions(compilation_options);
-    // create_opts.deinit();
-
-    const platform = context.autoPlatform(.{}).withCompilationOptions(compilation_options);
+    // initialize ZML platform with optional create opts
+    // eg: --create-options='{"cuda":{"allocator":{"bfc":{"memory_fraction": 0.99}}}}'
+    const create_opts_json = res.args.@"create-opts" orelse "{}";
+    const create_opts = try std.json.parseFromSlice(zml.Platform.CreateOptions, allocator, create_opts_json, .{});
+    const platform = context.autoPlatform(create_opts.value).withCompilationOptions(compilation_options);
+    create_opts.deinit();
     context.printAvailablePlatforms(platform);
 
     var ts = try zml.aio.detectFormatAndOpen(allocator, res.args.@"model-weights".?);
