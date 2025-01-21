@@ -145,7 +145,9 @@ pub const threading = struct {
                 .waiting = &waiter,
             };
             if (self.waiter.cmpxchgStrong(&State.unset_state, &new_state, .monotonic, .monotonic) == null) {
-                coro.xsuspend();
+                while (self.isSet() == false) {
+                    coro.xsuspend();
+                }
             }
         }
     };
