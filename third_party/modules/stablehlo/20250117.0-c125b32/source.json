@@ -1,7 +1,7 @@
 {
     "strip_prefix": "stablehlo-c125b3284819fec57120231cf4430657dab7b881",
     "url": "https://github.com/openxla/stablehlo/archive/c125b3284819fec57120231cf4430657dab7b881.tar.gz",
-    "integrity": "sha256-TuaG8q6WCdJGl4ECpu8YO8ORYcRo0NSff3xHKVj8Ixw=",
+    "integrity": "sha256-h4iBDLVbK2JZRDY7qdmNdns25AoVjpLekKdmsETEDf8=",
     "overlay": {
         "MODULE.bazel": ""
     }
