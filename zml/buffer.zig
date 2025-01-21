@@ -260,7 +260,7 @@ pub const Buffer = struct {
         stdx.debug.assert(self._shape.byteSize() == @sizeOf(T), "Buffer {} has {d} bytes of data, can't load it to a {s} with {d} bytes", .{ self, self._shape.byteSize(), @typeName(T), @sizeOf(T) });
         var res: T = undefined;
         stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
-        const maybe_event = try self._shards.get(0).toHostBuffer(self._api, std.mem.asBytes(&res));
+        const maybe_event = try self._shards.get(0).buffer.toHostBuffer(self._api, std.mem.asBytes(&res));
         if (maybe_event) |event| {
             try event.await_(self._api);
         }
