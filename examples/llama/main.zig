@@ -171,7 +171,7 @@ const params = clap.parseParamsComptime(
     \\--model-tokenizer <PATH>  tokenizer path
     \\--seed <UINT>             random seed (optional)
     \\--seq-len <UINT>          sequence length
-    \\--create-opts <STRING>    platform creation options JSON, defaults to {}
+    \\--create-options <STRING> platform creation options JSON, defaults to {}
 );
 
 pub fn main() !void {
@@ -229,9 +229,9 @@ pub fn asyncMain() !void {
         .sharding_enabled = true,
     };
 
-    // initialize ZML platform with optional create opts
+    // initialize ZML platform with optional create options
     // eg: --create-options='{"cuda":{"allocator":{"bfc":{"memory_fraction": 0.99}}}}'
-    const create_opts_json = res.args.@"create-opts" orelse "{}";
+    const create_opts_json = res.args.@"create-options" orelse "{}";
     const create_opts = try std.json.parseFromSlice(zml.Platform.CreateOptions, allocator, create_opts_json, .{});
     const platform = context.autoPlatform(create_opts.value).withCompilationOptions(compilation_options);
     create_opts.deinit();
@@ -242,7 +242,6 @@ pub fn asyncMain() !void {
 
     var model_arena = std.heap.ArenaAllocator.init(allocator);
     var model_instance = try zml.aio.populateModel(llama.LlamaLM, model_arena.allocator(), ts);
-    model_instance = model_instance; // autofix
 
     const llama_options: llama.LlamaLM.Options = .{
         .max_seq_len = @intCast(res.args.@"seq-len" orelse 256),
