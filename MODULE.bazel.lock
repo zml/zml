@@ -58,6 +58,7 @@
     "https://bazel-registry.zml.ai/modules/patchelf/0.18.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/pcre2/10.43/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/platforms/0.0.10/MODULE.bazel": "not found",
+    "https://bazel-registry.zml.ai/modules/platforms/0.0.11/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/platforms/0.0.4/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/platforms/0.0.5/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/platforms/0.0.6/MODULE.bazel": "not found",
@@ -130,7 +131,7 @@
     "https://bazel-registry.zml.ai/modules/rules_python/0.34.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_python/0.37.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_python/0.4.0/MODULE.bazel": "not found",
-    "https://bazel-registry.zml.ai/modules/rules_rust/0.56.0/MODULE.bazel": "not found",
+    "https://bazel-registry.zml.ai/modules/rules_rust/0.57.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_shell/0.2.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_shell/0.3.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_swift/1.15.1/MODULE.bazel": "not found",
@@ -221,7 +222,8 @@
     "https://bcr.bazel.build/modules/pcre2/10.43/MODULE.bazel": "08eaa025111bd0fedc14a8187c2905fa6ee4501fbe558193e9bf6cc3e2cdf23c",
     "https://bcr.bazel.build/modules/pcre2/10.43/source.json": "8b4149e707094f1d5b57df7216539c3415226e814085c4d960bd9f3d49581b88",
     "https://bcr.bazel.build/modules/platforms/0.0.10/MODULE.bazel": "8cb8efaf200bdeb2150d93e162c40f388529a25852b332cec879373771e48ed5",
-    "https://bcr.bazel.build/modules/platforms/0.0.10/source.json": "f22828ff4cf021a6b577f1bf6341cb9dcd7965092a439f64fc1bb3b7a5ae4bd5",
+    "https://bcr.bazel.build/modules/platforms/0.0.11/MODULE.bazel": "0daefc49732e227caa8bfa834d65dc52e8cc18a2faf80df25e8caea151a9413f",
+    "https://bcr.bazel.build/modules/platforms/0.0.11/source.json": "f7e188b79ebedebfe75e9e1d098b8845226c7992b307e28e1496f23112e8fc29",
     "https://bcr.bazel.build/modules/platforms/0.0.4/MODULE.bazel": "9b328e31ee156f53f3c416a64f8491f7eb731742655a47c9eec4703a71644aee",
     "https://bcr.bazel.build/modules/platforms/0.0.5/MODULE.bazel": "5733b54ea419d5eaf7997054bb55f6a1d0b5ff8aedf0176fef9eea44f3acda37",
     "https://bcr.bazel.build/modules/platforms/0.0.6/MODULE.bazel": "ad6eeef431dc52aefd2d77ed20a4b353f8ebf0f4ecdd26a807d2da5aa8cd0615",
@@ -310,8 +312,8 @@
     "https://bcr.bazel.build/modules/rules_python/0.37.0/MODULE.bazel": "bd90c62e4c789ea94ed61ab21a5a538dd4145548d1de994192049652d433816e",
     "https://bcr.bazel.build/modules/rules_python/0.37.0/source.json": "c17b8ca7a2348fd8fa96ad5b414223dd1ce5d6e8265c3134a88d337b0554d53c",
     "https://bcr.bazel.build/modules/rules_python/0.4.0/MODULE.bazel": "9208ee05fd48bf09ac60ed269791cf17fb343db56c8226a720fbb1cdf467166c",
-    "https://bcr.bazel.build/modules/rules_rust/0.56.0/MODULE.bazel": "3295b00757db397122092322fe1e920be7f5c9fbfb8619138977e820f2cbbbae",
-    "https://bcr.bazel.build/modules/rules_rust/0.56.0/source.json": "7dc294c3decd40af8f7b83897a5936e764d3ae8584b4056862978fb3870ab8d7",
+    "https://bcr.bazel.build/modules/rules_rust/0.57.0/MODULE.bazel": "645cd4f378625a5402902725dc8ee6fe73692add5ce206dcd39573b9a443c779",
+    "https://bcr.bazel.build/modules/rules_rust/0.57.0/source.json": "146954fe01c8ebf67335ebbff07dbec604a2fa8ab35fa69a5beb7659c5ca425f",
     "https://bcr.bazel.build/modules/rules_shell/0.2.0/MODULE.bazel": "fda8a652ab3c7d8fee214de05e7a9916d8b28082234e8d2c0094505c5268ed3c",
     "https://bcr.bazel.build/modules/rules_shell/0.3.0/MODULE.bazel": "de4402cd12f4cc8fda2354fce179fdb068c0b9ca1ec2d2b17b3e21b24c1a937b",
     "https://bcr.bazel.build/modules/rules_shell/0.3.0/source.json": "c55ed591aa5009401ddf80ded9762ac32c358d2517ee7820be981e2de9756cf3",
@@ -1148,23 +1150,6 @@
             "hermetic_cc_toolchain~"
           ]
         ]
-      }
-    },
-    "@@platforms//host:extension.bzl%host_platform": {
-      "general": {
-        "bzlTransitiveDigest": "WewbYICdNVp22bzUQafEVMzMIpBnNjJ3zqKlUOCDIGc=",
-        "usagesDigest": "lahmepTIzD3nISwPaii6RoG5yBY4oMtoHucEdZ1Z5xk=",
-        "recordedFileInputs": {},
-        "recordedDirentsInputs": {},
-        "envVariables": {},
-        "generatedRepoSpecs": {
-          "host_platform": {
-            "bzlFile": "@@platforms//host:extension.bzl",
-            "ruleClassName": "host_platform_repo",
-            "attributes": {}
-          }
-        },
-        "recordedRepoMappingEntries": []
       }
     },
     "@@rules_distroless~//apt:extensions.bzl%apt": {

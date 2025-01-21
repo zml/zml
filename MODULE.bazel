@@ -118,12 +118,11 @@ use_repo(apt, "neuron_bookworm")
 non_module_deps = use_extension("//:third_party/non_module_deps.bzl", "non_module_deps")
 use_repo(non_module_deps, "com_google_sentencepiece", "org_swig_swig")
 
-bazel_dep(name = "rules_rust", version = "0.56.0")
-
+bazel_dep(name = "rules_rust", version = "0.57.0")
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(
     edition = "2021",
-    versions = ["1.83.0"],
+    versions = ["1.84.0"],
     extra_target_triples = [
         "aarch64-apple-darwin",
         "aarch64-unknown-linux-gnu",
