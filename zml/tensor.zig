@@ -2808,7 +2808,8 @@ pub const Tensor = struct {
         {
             const x = try zml.Buffer.fromSlice(platform, .{ 2, 5 }, &[_]f32{ -0.9264, 0.7156, 1.0202, 0.3992, 1.2349, 1.0003, -0.1932, 1.3935, 0.7316, 0.0851 });
             const res = try zml.testing.compileAndCall(platform, Local._argsort, .{ x, 1, .{} });
-            const res_cpu = try res.toHostAlloc(allocator);
+            var res_cpu = try res.toHostAlloc(allocator);
+            _ = try res_cpu.awaitt();
             try testing.expectEqualSlices(i32, &.{ 0, 3, 1, 2, 4, 1, 4, 3, 0, 2 }, res_cpu.items(i32));
         }
         // 3D Tensor, dim = 1, descending
@@ -2821,7 +2822,8 @@ pub const Tensor = struct {
                 2.0527,  1.1230,  0.5430,  0.2494,  -0.9434, 0.7876,  0.1818,  0.9258,  -2.4902, 1.5918,
             });
             const res_dev = try zml.testing.compileAndCall(platform, Local._argsort, .{ x, 1, .{ .descending = true } });
-            const res = try res_dev.toHostAlloc(allocator);
+            var res = try res_dev.toHostAlloc(allocator);
+            _ = try res.awaitt();
             try testing.expectEqualSlices(i32, &.{
                 4, 1, 1, 2, 0, 2, 0, 0, 3, 4,
                 2, 0, 4, 4, 1, 3, 4, 4, 1, 0,
@@ -2843,7 +2845,8 @@ pub const Tensor = struct {
                 57, 21, 19, 12,
             });
             const res_dev = try zml.testing.compileAndCall(platform, Local._argsort, .{ x, 3, .{} });
-            const res = try res_dev.toHostAlloc(allocator);
+            var res = try res_dev.toHostAlloc(allocator);
+            _ = try res.awaitt();
             try testing.expectEqualSlices(i32, &.{
                 2, 1, 3, 0,
                 2, 3, 1, 0,
@@ -3839,11 +3842,14 @@ test "Tensor.maxPool2d" {
     for (&data, 0..) |*v, i| v.* = @floatFromInt(i);
     const x = try zml.Buffer.fromSlice(platform, .{ 2, 2, 5, 5 }, &data);
 
-    const result = try zml.testing.compileAndCall(platform, MaxPool._fwd, .{x});
+    var result = try zml.testing.compileAndCall(platform, MaxPool._fwd, .{x});
+
     try zml.testing.expectEqualShapes(Shape.init(.{ 2, 2, 2, 4 }, .f32), result.values.shape());
     try zml.testing.expectEqualShapes(Shape.init(.{ 2, 2, 2, 4 }, .i32), result.indices.shape());
-    var buffer: [2][2][2][4]f32 = undefined;
-    _ = try result.values.toHost(std.mem.asBytes(&buffer));
+    var buffer_array: [2][2][2][4]f32 = undefined;
+    var buffer = try result.values.toHost(std.mem.asBytes(&buffer_array));
+    _ = try buffer.awaitt();
+
     try std.testing.expectEqualDeep(
         [2][2][2][4]f32{
             .{
@@ -3855,7 +3861,7 @@ test "Tensor.maxPool2d" {
                 .{ .{ 86, 87, 88, 89 }, .{ 96, 97, 98, 99 } },
             },
         },
-        buffer,
+        buffer_array,
     );
 }
 

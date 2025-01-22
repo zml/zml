@@ -208,7 +208,7 @@ pub const Buffer = struct {
             .api = platform.pjrt_api,
             .buffer = pjrt_buffer,
             // TODO: would an event even be applicable here?
-            // .ready_event = pjrt_buffer.getReadyEvent(platform.pjrt_api),
+            .ready_event = pjrt_buffer.getReadyEvent(platform.pjrt_api),
         });
 
         return .{

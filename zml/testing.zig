@@ -47,6 +47,9 @@ pub fn expectClose(left_: anytype, right_: anytype, tolerance: f32) !void {
     else
         .{ right_, false };
 
+    _ = try left.awaitt();
+    _ = try right.awaitt();
+
     defer {
         if (should_free_left) left.deinit(allocator);
         if (should_free_right) right.deinit(allocator);
