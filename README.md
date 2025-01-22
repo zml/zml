@@ -112,27 +112,6 @@ bazel run -c opt //mnist
 
 
 
-### TinyLlama, Stories 15M
-
-Our LLM examples start with a small model trained specifically on children's
-history books. This model has been trained by [Andrej
-Karpathy](https://x.com/karpathy); you can read more about it on his
-[GitHub](https://github.com/karpathy/llama2.c).
-
-```
-cd examples
-bazel run -c opt //llama:TinyLlama-Stories-15M
-bazel run -c opt //llama:TinyLlama-Stories-15M -- --prompt="Once upon a time, there was a cute little dragon"
-```
-
-### OpenLLama 3B
-
-```
-cd examples
-bazel run -c opt //llama:OpenLLaMA-3B
-bazel run -c opt //llama:OpenLLaMA-3B -- --prompt="Once upon a time,"
-```
-
 ### Meta Llama 3.1 8B
 
 This model has restrictions, see
@@ -150,23 +129,23 @@ Once you've been granted access, you're ready to download a gated model like
 # `huggingface-cli login` command, or the `HUGGINGFACE_TOKEN` environment variable.
 cd examples
 bazel run -c opt //llama:Llama-3.1-8B-Instruct
-bazel run -c opt //llama:Llama-3.1-8B-Instruct -- --prompt="Once upon a time,"
+bazel run -c opt //llama:Llama-3.1-8B-Instruct -- --prompt="What is the capital of France?"
 ```
 
-You can also try Llama-3.1-70B-Instruct if you have enough memory.
+You can also try `Llama-3.1-70B-Instruct` if you have enough memory.
 
 ### Meta Llama 3.2 1B
 
-Like the 8B model above, this model also requires approval. See 
+Like the 8B model above, this model also requires approval. See
 [here](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct) for access requirements.
 
 ```
 cd examples
 bazel run -c opt //llama:Llama-3.2-1B-Instruct
-bazel run -c opt //llama:Llama-3.2-1B-Instruct -- --prompt="Once upon a time,"
+bazel run -c opt //llama:Llama-3.2-1B-Instruct -- --prompt="What is the capital of France?"
 ```
 
-For a larger 3.2 model, you can also try Llama-3.2-3B-Instruct.
+For a larger 3.2 model, you can also try `Llama-3.2-3B-Instruct`.
 
 ## Running Models on GPU / TPU
 
@@ -186,9 +165,9 @@ run the following:
 
 ```
 cd examples
-bazel run -c opt //llama:OpenLLaMA-3B        \
-          --@zml//runtimes:cuda=true         \
-          -- --prompt="Once upon a time,"
+bazel run -c opt //llama:Llama-3.2-1B-Instruct             \
+          --@zml//runtimes:cuda=true                       \
+          -- --prompt="What is the capital of France?"
 ```
 
 
