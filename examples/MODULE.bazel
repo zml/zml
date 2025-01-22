@@ -55,7 +55,7 @@ huggingface.model(
 load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
 
 # leverage copy_file to rename tokenizer extension
-# which allow zml.aio.detectFormatAndLoadTokenizer
+# which allow zml.tokenizer.from_file
 # to leverage the right tokenizer
 copy_file(
     name = "stories15M",
