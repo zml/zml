@@ -238,10 +238,14 @@ pub const BaseExe = struct {
     pub fn getOutputBuffer(self: BaseExe, i: usize) Buffer {
         var shards: Buffer.Shards = .{};
         for (self.output_per_device) |dev_out| {
-            shards.appendAssumeCapacity(dev_out[i]);
+            shards.appendAssumeCapacity(.{ .buffer = dev_out[i], .api = self.platform.pjrt_api });
         }
 
-        return Buffer.fromPjrtBuffers(self.platform, self.result_shapes[i], shards.constSlice());
+        return .{
+            ._api = self.platform.pjrt_api,
+            ._shape = self.result_shapes[i],
+            ._shards = shards,
+        };
     }
 };
 

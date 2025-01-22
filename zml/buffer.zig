@@ -204,7 +204,13 @@ pub const Buffer = struct {
         });
 
         var shards: Shards = .{};
-        shards.appendAssumeCapacity(pjrt_buffer);
+        shards.appendAssumeCapacity(.{
+            .api = platform.pjrt_api,
+            .buffer = pjrt_buffer,
+            // TODO: would an event even be applicable here?
+            // .ready_event = pjrt_buffer.getReadyEvent(platform.pjrt_api),
+        });
+
         return .{
             ._api = platform.pjrt_api,
             ._shape = shape_,
