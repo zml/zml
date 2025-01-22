@@ -7,14 +7,14 @@ const Tensor = zml.Tensor;
 const modernbert = @import("modernbert.zig");
 
 // set this to false to disable the verbose logging
-const show_mlir = true;
-pub const std_options = .{
-    .log_level = .warn,
-    .log_scope_levels = &[_]std.log.ScopeLevel{
-        .{ .scope = .zml_module, .level = if (show_mlir) .debug else .warn },
-        .{ .scope = .modernbert, .level = .info },
-    },
-};
+// const show_mlir = true;
+// pub const std_options = .{
+//     .log_level = .warn,
+//     .log_scope_levels = &[_]std.log.ScopeLevel{
+//         .{ .scope = .zml_module, .level = if (show_mlir) .debug else .warn },
+//         .{ .scope = .modernbert, .level = .info },
+//     },
+// };
 
 // pub const max_seq_len = 64; // 8192
 
@@ -161,14 +161,14 @@ pub fn unmask(
 
     log.info("Top predictions:", .{});
     for (indices[0..5]) |token_id| {
-        if (token_id >= vocab_size) continue;
+        if (token_id >= vocab_size) continue; // TODO: remove
 
         var token_buffer = [_]u32{@intCast(token_id)};
         var token_text = std.ArrayList(u8).init(allocator);
         defer token_text.deinit();
         try tokenizer.decodeWithOpts(&token_text, &token_buffer, .{});
 
-        log.info("\tscore: {d:.6}, token: '{s}'", .{ logits[token_id], token_text.items });
+        log.info("\tscore: {d:.6}, word: '{s}', token: {}", .{ logits[token_id], token_text.items, token_id });
     }
 }
 
@@ -227,7 +227,10 @@ pub fn asyncMain() !void {
         @panic("No tokenizer provided");
     }
 
+    log.info("ModernBERT decoder before init : {?}", .{modern_bert_for_masked_lm.decoder});
     modern_bert_for_masked_lm.init(modernbert_options);
+    log.info("ModernBERT decoder after init : {?}", .{modern_bert_for_masked_lm.decoder});
+
     log.info("✅\tParsed ModernBERT config: {}", .{modernbert_options});
 
     if (cli_args.tokenizer == null) {

@@ -231,55 +231,86 @@ pub const ModernBertModel = struct {
     }
 };
 
-// TODO: Refactor using act: zml.nn.Activation ? (e.g. .gelu)
 pub const ModernBertPredictionHead = struct {
     dense: zml.nn.Linear,
     norm: zml.nn.LayerNorm,
 
     pub fn forward(self: ModernBertPredictionHead, hidden_states: Tensor) Tensor {
-        // Perform dense
         const dense_output: Tensor = zml.call(self.dense, .forward, .{hidden_states});
 
-        // Apply activation
         const activated_output = dense_output.gelu();
 
-        // Perform norm
         return zml.call(self.norm, .forward, .{activated_output});
     }
 };
 
-// model.in.0:Shape({1,9,i64})
-// model.in.1:Shape({1,9,i64})
-// model.out.0:Shape({1,9,50368,f32})
-// model.model.in.0:Shape({1,9,i64})
-// model.model.in.1:Shape({1,9,i64})
-// model.model.out.0:Shape({1,9,768,f32})
+pub const ModernBertLinearDecoder = struct {
+    weight: ?Tensor = null,
+    bias: ?Tensor = null,
+
+    pub fn forward(self: ModernBertLinearDecoder, x: Tensor) Tensor {
+        if (self.weight) |weight| {
+            var y = x.dotGeneral(weight.convert(x.dtype()), &.{.{ -1, -1 }}, &.{});
+
+            if (y.shape().tag(-1) == zml.Shape.TagUnknown) {
+                y._shape._tags.set(y.rank() - 1, x.shape().tag(-1));
+            }
+
+            return if (self.bias) |bias| y.add(bias.broadcastLeft(y.shape())) else y;
+        } else {
+            return x;
+        }
+    }
+};
 
 pub const ModernBertForMaskedLM = struct {
     model: ModernBertModel,
     head: ModernBertPredictionHead,
-    tie_word_embeddings: bool = false,
+    decoder: ModernBertLinearDecoder,
 
     pub fn init(self: *ModernBertForMaskedLM, options: ModernBertOptions) void {
-        self.tie_word_embeddings = options.tie_word_embeddings;
         self.model.init(options);
+
+        if (options.tie_word_embeddings == true) {
+            self.decoder.weight = self.model.embeddings.tok_embeddings.weight;
+        }
     }
 
-    // {1,9,i64}
-    // {1,9,i64}
-    // out : {1,9,50368,f32}
     pub fn forward(self: ModernBertForMaskedLM, input_ids: Tensor, attention_mask: Tensor) Tensor {
-        const sequence_output: Tensor = zml.call(self.model, .forward, .{ input_ids, attention_mask });
-        log.info("sequence_output : {}", .{sequence_output});
+        const outputs = zml.call(self.model, .forward, .{ input_ids, attention_mask });
 
-        var prediction_scores = zml.call(self.head, .forward, .{sequence_output});
-        if (self.tie_word_embeddings == true) {
-            log.info("Tying word embeddings", .{});
-            const decoder = zml.nn.Linear{ .weight = self.model.embeddings.tok_embeddings.weight };
-            prediction_scores = zml.call(decoder, .forward, .{prediction_scores});
-        }
-        log.info("prediction_scores : {}", .{prediction_scores});
+        var prediction_scores = zml.call(self.head, .forward, .{outputs});
+        prediction_scores = zml.call(self.decoder, .forward, .{prediction_scores});
 
         return prediction_scores;
     }
 };
+
+// pub const ModernBertForMaskedLM_ = struct {
+//     model: ModernBertModel,
+//     head: ModernBertPredictionHead,
+//     decoder: ?zml.nn.Linear = null,
+//
+//     pub fn init(self: *ModernBertForMaskedLM_, options: ModernBertOptions) void {
+//         self.model.init(options);
+//
+//         if (options.tie_word_embeddings == true) {
+//             self.decoder.? = zml.nn.Linear{ .weight = self.model.embeddings.tok_embeddings.weight };
+//         }
+//     }
+//
+//     pub fn forward(self: ModernBertForMaskedLM_, input_ids: Tensor, attention_mask: Tensor) Tensor {
+//         const outputs: Tensor = zml.call(self.model, .forward, .{ input_ids, attention_mask });
+//         log.info("outputs : {}", .{outputs});
+//
+//         // var prediction_scores = zml.call(self.head, .forward, .{sequence_output});
+//         // if (self.tie_word_embeddings == true) {
+//         //     log.info("Tying word embeddings", .{});
+//         //     const decoder = zml.nn.Linear{ .weight = self.model.embeddings.tok_embeddings.weight };
+//         //     prediction_scores = zml.call(decoder, .forward, .{prediction_scores});
+//         // }
+//         // log.info("prediction_scores : {}", .{prediction_scores});
+//
+//         return outputs;
+//     }
+// };

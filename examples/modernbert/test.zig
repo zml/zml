@@ -36,11 +36,7 @@ pub fn asyncMain() !void {
     // Load the model weights file and parse its structure (shape)
     var weights_file = try zml.aio.detectFormatAndOpen(allocator, MODEL_WEIGHTS_FILE_PATH);
     defer weights_file.deinit();
-
-    // Log the total number of layers and details of the first layer from weights
-    const first_layer_key = weights_file.buffers.keys()[0];
     log.info("Model contains {d} layers. Loaded from: {s}", .{ weights_file.buffers.count(), MODEL_WEIGHTS_FILE_PATH });
-    log.info("First layer key: \"{s}\" / First layer buffer: {?}", .{ first_layer_key, weights_file.buffers.get(first_layer_key) });
 
     // Load the activation data file
     const activations = try zml.aio.torch.open(model_arena, ACTIVATIONS_FILE_PATH);
@@ -367,36 +363,37 @@ pub fn asyncMain() !void {
         9e-2, // TODO: too high tolerance
     );
 
-    for (0..activations.buffers.count()) |i| {
-        log.info("activations {} - {s}:{s}", .{ i, activations.buffers.entries.get(i).key, activations.buffers.entries.get(i).value.shape() });
-    }
+    // for (0..weights_file.buffers.count()) |i| {
+    //     if (std.mem.indexOf(u8, weights_file.buffers.entries.get(i).key, "decoder") != null or
+    //         std.mem.indexOf(u8, weights_file.buffers.entries.get(i).key, "head") != null)
+    //         log.info("weights {} - {s}: {s}", .{ i, weights_file.buffers.entries.get(i).key, weights_file.buffers.entries.get(i).value.shape() });
+    // }
+    // for (0..activations.buffers.count()) |i| {
+    //     if (std.mem.indexOf(u8, activations.buffers.entries.get(i).key, "decoder") != null or
+    //         std.mem.indexOf(u8, activations.buffers.entries.get(i).key, "head") != null)
+    //         log.info("activations {} - {s}: {s}", .{ i, activations.buffers.entries.get(i).key, activations.buffers.entries.get(i).value.shape() });
+    // }
 
-    // // ModernBertForMaskedLM
-    // log.info("\n\nTesting ModernBertForMaskedLM:", .{});
-    //
-    // var modern_bert_for_masked_lm = try zml.aio.populateModelWithPrefix(
-    //     ModernBertForMaskedLM,
-    //     model_arena,
-    //     weights_file,
-    //     "",
-    // );
-    // modern_bert_for_masked_lm.init(modernbert_base_options);
-    //
-    // const modern_bert_for_masked_lm_weights = try zml.aio.loadModelBuffersWithPrefix(
-    //     ModernBertForMaskedLM,
-    //     modern_bert_for_masked_lm,
-    //     weights_file,
-    //     model_arena,
-    //     compute_platform,
-    //     "",
-    // );
-    //
-    // try zml.testing.testLayer(
-    //     compute_platform,
-    //     activations,
-    //     "model",
-    //     modern_bert_for_masked_lm,
-    //     modern_bert_for_masked_lm_weights,
-    //     1e-2,
-    // );
+    // ModernBertForMaskedLM
+    log.info("\n\nTesting ModernBertForMaskedLM:", .{});
+
+    var modern_bert_for_masked_lm = try zml.aio.populateModel(
+        modernbert_module.ModernBertForMaskedLM,
+        model_arena,
+        weights_file,
+    );
+    log.info("decoder layer before weights: {?}", .{modern_bert_for_masked_lm.decoder});
+    modern_bert_for_masked_lm.init(modernbert_base_options);
+
+    const modern_bert_for_masked_lm_weights = try zml.aio.loadModelBuffersWithPrefix(modernbert_module.ModernBertForMaskedLM, modern_bert_for_masked_lm, weights_file, model_arena, compute_platform, "");
+    log.info("decoder layer after weights: {?}", .{modern_bert_for_masked_lm.decoder});
+
+    try zml.testing.testLayer(
+        compute_platform,
+        activations,
+        "model",
+        modern_bert_for_masked_lm,
+        modern_bert_for_masked_lm_weights,
+        1e-2,
+    );
 }

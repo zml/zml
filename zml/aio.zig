@@ -590,6 +590,58 @@ pub fn unloadBuffers(model: anytype) void {
     }).cb, {}, model);
 }
 
+/// Assists in debuggigng `BufferNotFound` error
+/// This is useful when a buffer key is not found and you want to identify possible alternatives (or typos)
+fn findSimilarBufferKeys(original_key: []const u8, store: BufferStore, temp_allocator: std.mem.Allocator) void {
+    const suffixes = [_][]const u8{ "", ".weight", ".bias" };
+    var shown_keys = std.StringHashMap(void).init(temp_allocator);
+    defer shown_keys.deinit();
+
+    // remove suffix .weight and .bias
+    var base_key = original_key;
+    for (suffixes) |suffix| {
+        if (std.mem.endsWith(u8, original_key, suffix)) {
+            base_key = original_key[0 .. original_key.len - suffix.len];
+            break;
+        }
+    }
+
+    // first test: look for exact matches
+    var matches: usize = 0;
+    var it = store.buffers.iterator();
+    while (it.next()) |entry| {
+        const key = entry.key_ptr.*;
+        if (std.mem.startsWith(u8, key, base_key)) {
+            if (matches == 0) log.warn("Similar buffers found:", .{});
+            if (!shown_keys.contains(key)) {
+                log.warn("  - {s}: {}", .{ key, entry.value_ptr.*.shape() });
+                shown_keys.put(key, {}) catch continue;
+                matches += 1;
+            }
+        }
+    }
+
+    // second test: progressive partial matches
+    if (matches == 0) {
+        var components = std.mem.split(u8, base_key, ".");
+        while (components.next()) |component| {
+            matches = 0;
+            it = store.buffers.iterator();
+            while (it.next()) |entry| {
+                const key = entry.key_ptr.*;
+                if (std.mem.indexOf(u8, key, component) != null and !shown_keys.contains(key)) {
+                    if (matches == 0) log.warn("Partial matches for '{s}':", .{component});
+                    log.warn("  - {s}: {}", .{ key, entry.value_ptr.*.shape() });
+                    shown_keys.put(key, {}) catch continue;
+                    matches += 1;
+                    if (matches >= 5) break;
+                }
+            }
+            if (matches > 0) break;
+        }
+    }
+}
+
 fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *PrefixBuilder, buffer_store: BufferStore, obj: anytype, platform: zml.Platform) !void {
     const err_msg = "visitStructAndLoadBuffer must be called with a pointer to type. Received ";
     const type_info, const T = switch (@typeInfo(@TypeOf(obj))) {
@@ -610,6 +662,10 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
             buf_with_metadata._shape = obj._shape;
             obj.* = try zml.Buffer.from(platform, buf_with_metadata);
         } else {
+            log.err("Buffer not found: {s}", .{prefix});
+
+            findSimilarBufferKeys(prefix, buffer_store, allocator);
+
             return error.BufferNotFound;
         };
     } else if (T == zml.Shape) return;
