@@ -383,12 +383,12 @@ pub fn asyncMain() !void {
         weights_file,
     );
 
+    const modern_bert_for_masked_lm_weights = try zml.aio.loadModelBuffersWithPrefix(modernbert_module.ModernBertForMaskedLM, modern_bert_for_masked_lm, weights_file, model_arena, compute_platform, "");
+    log.info("modern_bert_for_masked_lm_weights: {}", .{modern_bert_for_masked_lm_weights.decoder});
+
     log.info("decoder weights before init: {?}", .{modern_bert_for_masked_lm.decoder});
     modern_bert_for_masked_lm.init(modernbert_base_options);
     log.info("decoder weights after init: {?}", .{modern_bert_for_masked_lm.decoder});
-
-    const modern_bert_for_masked_lm_weights = try zml.aio.loadModelBuffersWithPrefix(modernbert_module.ModernBertForMaskedLM, modern_bert_for_masked_lm, weights_file, model_arena, compute_platform, "");
-    log.info("modern_bert_for_masked_lm_weights: {}", .{modern_bert_for_masked_lm_weights.decoder});
 
     try zml.testing.testLayer(
         compute_platform,
