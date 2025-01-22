@@ -1,6 +1,6 @@
 module(
     name = "xla",
-    version = "20250120.0-b91b6f1",
+    version = "20250122.0-cc075be",
     compatibility_level = 1,
 )
 
