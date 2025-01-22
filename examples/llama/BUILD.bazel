@@ -23,9 +23,9 @@ zig_cc_binary(
 cc_binary(
     name = "Llama-3.1-8B-Instruct",
     args = [
-        "--model-config=$(location @Meta-Llama-3.1-8B-Instruct//:config.json)",
-        "--model-weights=$(location @Meta-Llama-3.1-8B-Instruct//:model.safetensors.index.json)",
-        "--model-tokenizer=$(location @Meta-Llama-3.1-8B-Instruct//:tokenizer.json)",
+        "--config=$(location @Meta-Llama-3.1-8B-Instruct//:config.json)",
+        "--weights=$(location @Meta-Llama-3.1-8B-Instruct//:model.safetensors.index.json)",
+        "--tokenizer=$(location @Meta-Llama-3.1-8B-Instruct//:tokenizer.json)",
     ],
     data = [
         "@Meta-Llama-3.1-8B-Instruct",
@@ -39,9 +39,9 @@ cc_binary(
 cc_binary(
     name = "Llama-3.1-70B-Instruct",
     args = [
-        "--model-config=$(location @Meta-Llama-3.1-70B-Instruct//:config.json)",
-        "--model-weights=$(location @Meta-Llama-3.1-70B-Instruct//:model.safetensors.index.json)",
-        "--model-tokenizer=$(location @Meta-Llama-3.1-70B-Instruct//:tokenizer.json)",
+        "--config=$(location @Meta-Llama-3.1-70B-Instruct//:config.json)",
+        "--weights=$(location @Meta-Llama-3.1-70B-Instruct//:model.safetensors.index.json)",
+        "--tokenizer=$(location @Meta-Llama-3.1-70B-Instruct//:tokenizer.json)",
     ],
     data = [
         "@Meta-Llama-3.1-70B-Instruct",
@@ -56,9 +56,9 @@ cc_binary(
 cc_binary(
     name = "Llama-3.2-1B-Instruct",
     args = [
-        "--model-config=$(location @Meta-Llama-3.2-1B-Instruct//:config.json)",
-        "--model-weights=$(location @Meta-Llama-3.2-1B-Instruct//:model.safetensors)",
-        "--model-tokenizer=$(location @Meta-Llama-3.2-1B-Instruct//:tokenizer.json)",
+        "--config=$(location @Meta-Llama-3.2-1B-Instruct//:config.json)",
+        "--weights=$(location @Meta-Llama-3.2-1B-Instruct//:model.safetensors)",
+        "--tokenizer=$(location @Meta-Llama-3.2-1B-Instruct//:tokenizer.json)",
     ],
     data = [
         "@Meta-Llama-3.2-1B-Instruct",
@@ -72,9 +72,9 @@ cc_binary(
 cc_binary(
     name = "Llama-3.2-3B-Instruct",
     args = [
-        "--model-config=$(location @Meta-Llama-3.2-3B-Instruct//:config.json)",
-        "--model-weights=$(location @Meta-Llama-3.2-3B-Instruct//:model.safetensors.index.json)",
-        "--model-tokenizer=$(location @Meta-Llama-3.2-3B-Instruct//:tokenizer.json)",
+        "--config=$(location @Meta-Llama-3.2-3B-Instruct//:config.json)",
+        "--weights=$(location @Meta-Llama-3.2-3B-Instruct//:model.safetensors.index.json)",
+        "--tokenizer=$(location @Meta-Llama-3.2-3B-Instruct//:tokenizer.json)",
     ],
     data = [
         "@Meta-Llama-3.2-3B-Instruct",
@@ -90,10 +90,8 @@ zig_cc_binary(
     name = "test-implementation",
     srcs = ["llama.zig"],
     args = [
-        "--model=$(location @Meta-Llama-3.1-8B-Instruct//:model.safetensors.index.json)",
-        "--num-heads=32",
-        "--num-kv-heads=8",
-        "--rope-freq-base=500000",
+        "--weights=$(location @Meta-Llama-3.1-8B-Instruct//:model.safetensors.index.json)",
+        "--config=$(location @Meta-Llama-3.1-8B-Instruct//:config.json)",
     ],
     data = [
         "@Meta-Llama-3.1-8B-Instruct//:model",
@@ -156,9 +154,9 @@ expand_template(
     },
     template = [
         "./{}/Llama-3.2-1B-Instruct".format(package_name()),
-        "--model-config=./{}/Llama-3.2-1B-Instruct.runfiles/:config".format(package_name()),
-        "--model-weights=./{}/Llama-3.2-1B-Instruct.runfiles/:weights".format(package_name()),
-        "--model-tokenizer=./{}/Llama-3.2-1B-Instruct.runfiles/:tokenizer".format(package_name()),
+        "--config=./{}/Llama-3.2-1B-Instruct.runfiles/:config".format(package_name()),
+        "--weights=./{}/Llama-3.2-1B-Instruct.runfiles/:weights".format(package_name()),
+        "--tokenizer=./{}/Llama-3.2-1B-Instruct.runfiles/:tokenizer".format(package_name()),
     ],
 )
 

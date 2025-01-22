@@ -17,18 +17,11 @@ const ShapeOf = zml.ShapeOf;
 
 const log = std.log.scoped(.llama);
 
-// set this to false to disable the verbose logging
-const show_mlir = false;
-
 pub const std_options = .{
-    .log_level = .warn,
-    .log_scope_levels = &[_]std.log.ScopeLevel{
-        .{ .scope = .@"zml/module", .level = if (show_mlir) .debug else .warn },
-        .{ .scope = .llama, .level = .info },
-    },
+    .log_level = .info,
 };
 
-pub fn tokenize(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, config: LlamaLM.Config, prompt: []const u8) ![]u32 {
+pub fn tokenizePromptLlama3(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, config: LlamaLM.Config, prompt: []const u8) ![]u32 {
     var tokens = std.ArrayList(u32).init(allocator);
     var encoder = try tokenizer.encoder();
     defer encoder.deinit();
@@ -70,7 +63,7 @@ pub fn generateText(
     var tokenizer_decoder = try tokenizer.decoder();
     defer tokenizer_decoder.deinit();
 
-    const prompt_tok = try tokenize(allocator, tokenizer, config, prompt);
+    const prompt_tok = try tokenizePromptLlama3(allocator, tokenizer, config, prompt);
     defer allocator.free(prompt_tok);
 
     const dims = llama_.model.shape();
@@ -165,10 +158,9 @@ pub fn generateText(
 const params = clap.parseParamsComptime(
     \\--help                    print this help
     \\--prompt <STRING>         the prompt
-    \\--model-config <PATH>     config.json path
-    \\--model-name <STRING>     model name
-    \\--model-weights <PATH>    model weights path
-    \\--model-tokenizer <PATH>  tokenizer path
+    \\--config <PATH>     config.json path
+    \\--weights <PATH>    model weights path
+    \\--tokenizer <PATH>  tokenizer path
     \\--seed <UINT>             random seed (optional)
     \\--seq-len <UINT>          sequence length
     \\--create-options <STRING> platform creation options JSON, defaults to {}
@@ -208,7 +200,7 @@ pub fn asyncMain() !void {
     }
 
     const config = blk: {
-        if (res.args.@"model-config") |config_json_path| {
+        if (res.args.config) |config_json_path| {
             var config_json_file = try asynk.File.open(config_json_path, .{ .mode = .read_only });
             defer config_json_file.close() catch unreachable;
             var reader = std.json.reader(allocator, config_json_file.reader());
@@ -216,7 +208,7 @@ pub fn asyncMain() !void {
             const config_obj = try std.json.parseFromTokenSourceLeaky(llama.LlamaLM.Config, allocator, &reader, .{ .ignore_unknown_fields = true });
             break :blk config_obj;
         } else {
-            log.err("Missing --model-config", .{});
+            log.err("Missing --config", .{});
             return;
         }
     };
@@ -237,7 +229,7 @@ pub fn asyncMain() !void {
     create_opts.deinit();
     context.printAvailablePlatforms(platform);
 
-    var ts = try zml.aio.detectFormatAndOpen(allocator, res.args.@"model-weights".?);
+    var ts = try zml.aio.detectFormatAndOpen(allocator, res.args.weights.?);
     defer ts.deinit();
 
     var model_arena = std.heap.ArenaAllocator.init(allocator);
@@ -291,7 +283,7 @@ pub fn asyncMain() !void {
         platform,
     });
 
-    log.info("\tLoading Llama weights from {?s}...", .{res.args.@"model-weights"});
+    log.info("\tLoading Llama weights from {?s}...", .{res.args.weights});
     var llama_weights = try zml.aio.loadBuffers(llama.LlamaLM, .{ config, llama_options }, ts, model_arena.allocator(), platform);
     defer zml.aio.unloadBuffers(&llama_weights);
     log.info("✅\tLoaded weights in {}", .{std.fmt.fmtDuration(start.read())});
@@ -306,14 +298,14 @@ pub fn asyncMain() !void {
     const kv_cache = try llama.KvCache.initBuffer(kv_shape, platform);
 
     var tokenizer = blk: {
-        if (res.args.@"model-tokenizer") |tok| {
+        if (res.args.tokenizer) |tok| {
             log.info("Loading tokenizer from {s}", .{tok});
             var timer = try stdx.time.Timer.start();
             defer log.info("Loaded tokenizer from {s} [{}]", .{ tok, timer.read() });
 
             break :blk try zml.tokenizer.Tokenizer.from_file(model_arena.allocator(), tok);
         } else {
-            log.err("Missing --model-tokenizer", .{});
+            log.err("Missing --tokenizer", .{});
             return;
         }
     };
