@@ -244,6 +244,7 @@ pub const ModernBertPredictionHead = struct {
     }
 };
 
+/// Similar to zml.nn.Linear, but with optional weight
 pub const ModernBertLinearDecoder = struct {
     weight: ?Tensor = null,
     bias: ?Tensor = null,
@@ -270,47 +271,23 @@ pub const ModernBertForMaskedLM = struct {
 
     pub fn init(self: *ModernBertForMaskedLM, options: ModernBertOptions) void {
         self.model.init(options);
-
         if (options.tie_word_embeddings == true) {
             self.decoder.weight = self.model.embeddings.tok_embeddings.weight;
         }
     }
 
     pub fn forward(self: ModernBertForMaskedLM, input_ids: Tensor, attention_mask: Tensor) Tensor {
+        log.info("[head.dense]: {?} | {?}", .{ self.head.dense.weight, self.head.dense.bias });
+        log.info("[head.norm]: {?} | {?} | {?}", .{ self.head.norm.weight, self.head.norm.bias, self.head.norm.eps });
+        log.info("[decoder]: {?} | {?}", .{ self.decoder.weight, self.decoder.bias });
+
         const outputs = zml.call(self.model, .forward, .{ input_ids, attention_mask });
 
         var prediction_scores = zml.call(self.head, .forward, .{outputs});
-        prediction_scores = zml.call(self.decoder, .forward, .{prediction_scores});
+        if (self.decoder.weight != null) {
+            prediction_scores = zml.call(self.decoder, .forward, .{prediction_scores});
+        }
 
         return prediction_scores;
     }
 };
-
-// pub const ModernBertForMaskedLM_ = struct {
-//     model: ModernBertModel,
-//     head: ModernBertPredictionHead,
-//     decoder: ?zml.nn.Linear = null,
-//
-//     pub fn init(self: *ModernBertForMaskedLM_, options: ModernBertOptions) void {
-//         self.model.init(options);
-//
-//         if (options.tie_word_embeddings == true) {
-//             self.decoder.? = zml.nn.Linear{ .weight = self.model.embeddings.tok_embeddings.weight };
-//         }
-//     }
-//
-//     pub fn forward(self: ModernBertForMaskedLM_, input_ids: Tensor, attention_mask: Tensor) Tensor {
-//         const outputs: Tensor = zml.call(self.model, .forward, .{ input_ids, attention_mask });
-//         log.info("outputs : {}", .{outputs});
-//
-//         // var prediction_scores = zml.call(self.head, .forward, .{sequence_output});
-//         // if (self.tie_word_embeddings == true) {
-//         //     log.info("Tying word embeddings", .{});
-//         //     const decoder = zml.nn.Linear{ .weight = self.model.embeddings.tok_embeddings.weight };
-//         //     prediction_scores = zml.call(decoder, .forward, .{prediction_scores});
-//         // }
-//         // log.info("prediction_scores : {}", .{prediction_scores});
-//
-//         return outputs;
-//     }
-// };

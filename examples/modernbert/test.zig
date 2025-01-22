@@ -363,16 +363,16 @@ pub fn asyncMain() !void {
         9e-2, // TODO: too high tolerance
     );
 
-    // for (0..weights_file.buffers.count()) |i| {
-    //     if (std.mem.indexOf(u8, weights_file.buffers.entries.get(i).key, "decoder") != null or
-    //         std.mem.indexOf(u8, weights_file.buffers.entries.get(i).key, "head") != null)
-    //         log.info("weights {} - {s}: {s}", .{ i, weights_file.buffers.entries.get(i).key, weights_file.buffers.entries.get(i).value.shape() });
-    // }
-    // for (0..activations.buffers.count()) |i| {
-    //     if (std.mem.indexOf(u8, activations.buffers.entries.get(i).key, "decoder") != null or
-    //         std.mem.indexOf(u8, activations.buffers.entries.get(i).key, "head") != null)
-    //         log.info("activations {} - {s}: {s}", .{ i, activations.buffers.entries.get(i).key, activations.buffers.entries.get(i).value.shape() });
-    // }
+    for (0..weights_file.buffers.count()) |i| {
+        if (std.mem.indexOf(u8, weights_file.buffers.entries.get(i).key, "decoder") != null or
+            std.mem.indexOf(u8, weights_file.buffers.entries.get(i).key, "head") != null)
+            log.info("weights {} - {s}: {s}", .{ i, weights_file.buffers.entries.get(i).key, weights_file.buffers.entries.get(i).value.shape() });
+    }
+    for (0..activations.buffers.count()) |i| {
+        if (std.mem.indexOf(u8, activations.buffers.entries.get(i).key, "decoder") != null or
+            std.mem.indexOf(u8, activations.buffers.entries.get(i).key, "head") != null)
+            log.info("activations {} - {s}: {s}", .{ i, activations.buffers.entries.get(i).key, activations.buffers.entries.get(i).value.shape() });
+    }
 
     // ModernBertForMaskedLM
     log.info("\n\nTesting ModernBertForMaskedLM:", .{});
@@ -382,11 +382,13 @@ pub fn asyncMain() !void {
         model_arena,
         weights_file,
     );
-    log.info("decoder layer before weights: {?}", .{modern_bert_for_masked_lm.decoder});
+
+    log.info("decoder weights before init: {?}", .{modern_bert_for_masked_lm.decoder});
     modern_bert_for_masked_lm.init(modernbert_base_options);
+    log.info("decoder weights after init: {?}", .{modern_bert_for_masked_lm.decoder});
 
     const modern_bert_for_masked_lm_weights = try zml.aio.loadModelBuffersWithPrefix(modernbert_module.ModernBertForMaskedLM, modern_bert_for_masked_lm, weights_file, model_arena, compute_platform, "");
-    log.info("decoder layer after weights: {?}", .{modern_bert_for_masked_lm.decoder});
+    log.info("modern_bert_for_masked_lm_weights: {}", .{modern_bert_for_masked_lm_weights.decoder});
 
     try zml.testing.testLayer(
         compute_platform,

@@ -244,7 +244,6 @@ pub fn asyncMain() !void {
     defer tokenizer.deinit();
 
     // Prepare shapes for compilation
-    // Note: we compile the model without a batching dimension ?
     const max_seq_len = 64;
     const input_shape = zml.Shape.init(.{ .b = 1, .s = max_seq_len }, .i64);
     const attention_mask_shape = input_shape;
