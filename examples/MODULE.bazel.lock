@@ -1818,7 +1818,7 @@
           "@@rules_rust~~rust_host_tools~rust_host_tools//bin/rustc": "e3e06445198bea9f1c304f8bd992b7437b81258a158cb4aaefedac285f02b340",
           "@@zml~//zml/tokenizer/hftokenizers/Cargo.toml": "b0b28872bb74e13aec7ef0ef8dfd5ec99a8573bc12085c0f36711f2a87912061",
           "@@zml~//zml/tokenizer/hftokenizers/Cargo.lock": "a1bf3371beab9dea6e2f360919132709f2d00e1e9de2d228657075b4c70d3d5c",
-          "@@//MODULE.bazel": "8765a2c72d14bb349a8bc081df8a3080c65941ca763be2252b1781cb7b049e9b",
+          "@@//MODULE.bazel": "9a489281cab82d74432fe4ce3bf193460d3a91901e04f26e09f24ca09059bbfa",
           "@@rules_rust~~rust_host_tools~rust_host_tools//bin/cargo": "aa7e54426eef1583c10ff403497acf409fa807a9720df876ec67e818e262ead4"
         },
         "recordedDirentsInputs": {},
