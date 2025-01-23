@@ -227,9 +227,7 @@ pub fn asyncMain() !void {
         @panic("No tokenizer provided");
     }
 
-    log.info("ModernBERT decoder before init : {?}", .{modern_bert_for_masked_lm.decoder});
     modern_bert_for_masked_lm.init(modernbert_options);
-    log.info("ModernBERT decoder after init : {?}", .{modern_bert_for_masked_lm.decoder});
 
     log.info("✅\tParsed ModernBERT config: {}", .{modernbert_options});
 

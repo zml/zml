@@ -244,50 +244,31 @@ pub const ModernBertPredictionHead = struct {
     }
 };
 
-/// Similar to zml.nn.Linear, but with optional weight
-pub const ModernBertLinearDecoder = struct {
-    weight: ?Tensor = null,
-    bias: ?Tensor = null,
-
-    pub fn forward(self: ModernBertLinearDecoder, x: Tensor) Tensor {
-        if (self.weight) |weight| {
-            var y = x.dotGeneral(weight.convert(x.dtype()), &.{.{ -1, -1 }}, &.{});
-
-            if (y.shape().tag(-1) == zml.Shape.TagUnknown) {
-                y._shape._tags.set(y.rank() - 1, x.shape().tag(-1));
-            }
-
-            return if (self.bias) |bias| y.add(bias.broadcastLeft(y.shape())) else y;
-        } else {
-            return x;
-        }
-    }
-};
-
+// input :  {1,9,768}
+// output : {1,9,50368}
 pub const ModernBertForMaskedLM = struct {
     model: ModernBertModel,
     head: ModernBertPredictionHead,
-    decoder: ModernBertLinearDecoder,
+    decoder: ?zml.nn.Linear = null,
 
     pub fn init(self: *ModernBertForMaskedLM, options: ModernBertOptions) void {
         self.model.init(options);
         if (options.tie_word_embeddings == true) {
-            self.decoder.weight = self.model.embeddings.tok_embeddings.weight;
+            self.decoder = null;
         }
     }
 
     pub fn forward(self: ModernBertForMaskedLM, input_ids: Tensor, attention_mask: Tensor) Tensor {
-        log.info("[head.dense]: {?} | {?}", .{ self.head.dense.weight, self.head.dense.bias });
-        log.info("[head.norm]: {?} | {?} | {?}", .{ self.head.norm.weight, self.head.norm.bias, self.head.norm.eps });
-        log.info("[decoder]: {?} | {?}", .{ self.decoder.weight, self.decoder.bias });
+        const outputs: Tensor = zml.call(self.model, .forward, .{ input_ids, attention_mask });
 
-        const outputs = zml.call(self.model, .forward, .{ input_ids, attention_mask });
+        const head_outputs: Tensor = zml.call(self.head, .forward, .{outputs});
 
-        var prediction_scores = zml.call(self.head, .forward, .{outputs});
-        if (self.decoder.weight != null) {
-            prediction_scores = zml.call(self.decoder, .forward, .{prediction_scores});
+        // either use decoder or tied weights
+        if (self.decoder) |decoder| {
+            return zml.call(decoder, .forward, .{head_outputs});
+        } else {
+            const emb_weight = self.model.embeddings.tok_embeddings.weight.withTags(.{ .voc, .d });
+            return head_outputs.withTags(.{ .b, .s, .d }).dot(emb_weight, .{.d});
         }
-
-        return prediction_scores;
     }
 };
