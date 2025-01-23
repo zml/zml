@@ -6,7 +6,7 @@ module(
 
 bazel_dep(name = "platforms", version = "0.0.8")
 bazel_dep(name = "bazel_skylib", version = "1.5.0")
-bazel_dep(name = "rules_cc", version = "0.0.12")
+bazel_dep(name = "rules_cc", version = "0.0.9")
 bazel_dep(name = "rules_apple", version = "3.2.1", repo_name = "build_bazel_rules_apple")
 bazel_dep(name = "abseil-cpp", version = "20240116.0", repo_name = "com_google_absl")
 bazel_dep(name = "rules_python", version = "0.29.0")

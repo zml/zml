@@ -9,6 +9,6 @@
     },
     "patch_strip": 1,
     "patches": {
-        "0003-PJRT-C-API-Ensure-C-compliance-for-Profiler-Extensio.patch": "",
+        "0003-PJRT-C-API-Ensure-C-compliance-for-Profiler-Extensio.patch": ""
     }
 }
