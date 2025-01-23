@@ -1,7 +1,7 @@
 From 6cf475b500521c1b8be06f590fdbc1818f0dc44b Mon Sep 17 00:00:00 2001
 From: Jean-Baptiste Dalido <jb@zml.ai>
 Date: Mon, 6 Jan 2025 13:33:13 +0100
-Subject: [PATCH] bazel: migration to bazel 8.0.0
+Subject: [PATCH] bazel: migration to bazel 8.0.1
 
 ---
  .bazelversion                                       | 2 +-
@@ -14,7 +14,7 @@ index f22d756da3..fa5fce04b3 100644
 +++ b/.bazelversion
 @@ -1 +1 @@
 -6.5.0
-+8.0.0
++8.0.1
 \ No newline at end of file
 diff --git a/third_party/tsl/third_party/gpus/cuda_configure.bzl b/third_party/tsl/third_party/gpus/cuda_configure.bzl
 index d62531152d..71d80a5a99 100644
