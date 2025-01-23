@@ -208,8 +208,8 @@ def _cuda_impl(mctx):
     http_archive(
         name = "libpjrt_cuda",
         build_file = "libpjrt_cuda.BUILD.bazel",
-        url = "http://localhost:8000/pjrt-cuda_linux-amd64.tar.gz",
-        sha256 = "e8be6f9e566df3f41c6a9ba9da0007fe0f678cee64aa198d4b53c93781edba22",
+        url = "https://github.com/zml/pjrt-artifacts/releases/download/v5.0.0/pjrt-cuda_linux-amd64.tar.gz",
+        sha256 = "1c3ca76d887d112762d03ebb28f17a08beebf6338453c3044a36225e1678a113",
     )
 
     return mctx.extension_metadata(

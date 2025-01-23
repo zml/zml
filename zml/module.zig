@@ -925,7 +925,7 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, m
             const source_repo = @import("bazel_builtin").current_repository;
             const r = r_.withSourceRepo(source_repo);
             const cuda_data_dir = (try r.rlocationAlloc(arena, "libpjrt_cuda/sandbox")).?;
-            log.info("xla_gpu_cuda_data_dir: {s}", .{cuda_data_dir});
+            log.debug("xla_gpu_cuda_data_dir: {s}", .{cuda_data_dir});
             setFlag(&options, "xla_gpu_cuda_data_dir", cuda_data_dir);
         },
         .rocm => {
