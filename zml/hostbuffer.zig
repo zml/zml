@@ -195,9 +195,12 @@ pub const HostBuffer = struct {
     }
 
     pub fn isContiguous(self: HostBuffer) bool {
-        const strd = self._strides orelse return true;
+        const _strides = self._strides orelse return true;
         const cont_strides = self._shape.computeStrides();
-        return std.mem.eql(i64, strd[0..self.rank()], cont_strides.constSlice());
+        for (self._shape.dims(), _strides[0..self.rank()], cont_strides.constSlice()) |d, stride, cont_stride| {
+            if (d != 1 and stride != cont_stride) return false;
+        }
+        return true;
     }
 
     pub fn reshape(self: HostBuffer, shape_: anytype) HostBuffer {
@@ -230,7 +233,8 @@ pub const HostBuffer = struct {
         return .{
             ._shape = self.shape().set(ax, end - start),
             .data = self.data[offset..],
-            ._strides = _strides,
+            // When axis is 0, we stay contiguous.
+            ._strides = if (ax == 0) self._strides else _strides,
             ._memory = .unmanaged,
         };
     }
