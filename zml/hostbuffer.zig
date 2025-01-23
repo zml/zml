@@ -195,9 +195,12 @@ pub const HostBuffer = struct {
     }
 
     pub fn isContiguous(self: HostBuffer) bool {
-        const strd = self._strides orelse return true;
+        const _strides = self._strides orelse return true;
         const cont_strides = self._shape.computeStrides();
-        return std.mem.eql(i64, strd[0..self.rank()], cont_strides.constSlice());
+        for (self._shape.dims(), _strides[0..self.rank()], cont_strides.constSlice()) |d, stride, cont_stride| {
+            if (d != 1 and stride != cont_stride) return false;
+        }
+        return true;
     }
 
     pub fn reshape(self: HostBuffer, shape_: anytype) HostBuffer {
@@ -219,9 +222,9 @@ pub const HostBuffer = struct {
         const start: i64 = if (s.start < 0) s.start + d else s.start;
         var end = s.end orelse d;
         if (end < 0) end += d;
-        stdx.debug.assert(start >= 0 and start < d, "slice1d({}, {}) expects the slice start to be between 0 and {} got: {}", .{ self, ax, d, start });
-        stdx.debug.assert(end >= 1 and end <= d, "slice1d({}, {}) expects the slice end to be between 1 and {} got: {}", .{ self, ax, d, end });
-        stdx.debug.assert(start < end, "slice1d({}, {}) expects the slice start ({}) to be smaller than the end ({})", .{ self, ax, start, end });
+        stdx.debug.assert(start >= 0 and start < d, "slice1d({}, {}) expects the slice start to be between 0 and {} got: {}", .{ self, ax, d, s });
+        stdx.debug.assert(end >= 1 and end <= d, "slice1d({}, {}) expects the slice end to be between 1 and {} got: {}", .{ self, ax, d, s });
+        stdx.debug.assert(start < end, "slice1d({}, {}) expects the slice start ({}) to be smaller than the end ({}), got: {}", .{ self, ax, start, end, s });
 
         // If strides weren't set it means original buffer is contiguous.
         // But it won't be anymore after slicing. The strides don't change though.
@@ -230,8 +233,25 @@ pub const HostBuffer = struct {
         return .{
             ._shape = self.shape().set(ax, end - start),
             .data = self.data[offset..],
-            ._strides = _strides,
+            // When axis is 0, we stay contiguous.
+            ._strides = if (ax == 0) self._strides else _strides,
             ._memory = .unmanaged,
+        };
+    }
+
+    pub fn squeeze(self: HostBuffer, axis_: anytype) HostBuffer {
+        const ax = self._shape.axis(axis_);
+        stdx.debug.assert(self.dim(ax) == 1, "squeeze expects a 1-d axis got {} in {}", .{ ax, self });
+
+        var _strides: ?[Shape.MAX_RANK]i64 = self._strides;
+        if (self._strides) |strydes| {
+            std.mem.copyForwards(i64, _strides.?[0 .. Shape.MAX_RANK - 1], strydes[1..]);
+        }
+        return .{
+            ._shape = self.shape().drop(ax),
+            .data = self.data,
+            ._strides = _strides,
+            ._memory = self._memory,
         };
     }
 
@@ -244,6 +264,73 @@ pub const HostBuffer = struct {
         _ = fmt;
         _ = options;
         try writer.print("HostBuffer(.{_})", .{self._shape});
+    }
+
+    /// Formatter for a HostBuffer that also print the values not just the shape.
+    /// Usage: `std.log.info("my buffer: {}", .{buffer.pretty()});`
+    pub fn pretty(self: HostBuffer) PrettyPrinter {
+        return .{ .x = self };
+    }
+
+    pub const PrettyPrinter = struct {
+        x: HostBuffer,
+
+        pub fn format(self: PrettyPrinter, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+            _ = fmt;
+            _ = options;
+            try prettyPrint(self.x, writer);
+        }
+    };
+
+    pub fn prettyPrint(self: HostBuffer, writer: anytype) !void {
+        return self.prettyPrintIndented(4, 0, writer);
+    }
+
+    fn prettyPrintIndented(self: HostBuffer, num_rows: u8, indent_level: u8, writer: anytype) !void {
+        if (self.rank() == 1) {
+            try writer.writeByteNTimes(' ', indent_level);
+            return switch (self.dtype()) {
+                inline else => |dt| {
+                    const values = self.items(dt.toZigType());
+                    // Write first rows
+                    const num_cols: u32 = 12;
+                    const n: u64 = @intCast(self.dim(0));
+                    if (n <= num_cols) {
+                        try writer.print("{any},\n", .{values[0..n]});
+                    } else {
+                        const half = @divExact(num_cols, 2);
+                        try writer.print("{any}, ..., {any},\n", .{ values[0..half], values[n - half ..] });
+                    }
+                },
+            };
+        }
+        try writer.writeByteNTimes(' ', indent_level);
+        _ = try writer.write("{\n");
+        defer {
+            writer.writeByteNTimes(' ', indent_level) catch {};
+            _ = writer.write("},\n") catch {};
+        }
+
+        // Write first rows
+        const n: u64 = @intCast(self.dim(0));
+        for (0..@min(num_rows, n)) |d| {
+            const di: i64 = @intCast(d);
+            const sliced_self = self.slice1d(0, .{ .start = di, .end = di + 1 }).squeeze(0);
+            try sliced_self.prettyPrintIndented(num_rows, indent_level + 2, writer);
+        }
+
+        if (n < num_rows) return;
+        // Skip middle rows
+        if (n > 2 * num_rows) {
+            try writer.writeByteNTimes(' ', indent_level + 2);
+            _ = try writer.write("...\n");
+        }
+        // Write last rows
+        for (@max(n - num_rows, num_rows)..n) |d| {
+            const di: i64 = @intCast(d);
+            const sliced_self = self.slice1d(0, .{ .start = di, .end = di + 1 }).squeeze(0);
+            try sliced_self.prettyPrintIndented(num_rows, indent_level + 2, writer);
+        }
     }
 };
 

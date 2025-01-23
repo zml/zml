@@ -91,7 +91,7 @@ Let's explain all that.
 The model struct is the Zig code that describes your Neural Network (NN).
 Let's look a the following model architecture:
 
-![Multilayer perceptrons](https://zml.ai/docs-assets/perceptron.png)
+![Multilayer perceptrons](https://raw.githubusercontent.com/zml/zml.github.io/refs/heads/main/docs-assets/perceptron.png)
 
 This is how we can describe it in a Zig struct:
 
@@ -144,12 +144,12 @@ corresponding types.
 
 3. Compile the model struct and its `forward` function into an executable.
    `foward` is a `Tensor -> Tensor` function, executable is a
-   `zml.Exe(Model.forward)`
+   `zml.FnExe(Model.forward)`
 
 4. Load the model weights from disk, onto accelerator memory ->
    `zml.Bufferized(Model)` struct (with `zml.Buffer` inside)
 
-5. Bind the model weights to the executable `zml.ExeWithWeight(Model.forward)`
+5. Bind the model weights to the executable `zml.ModuleExe(Model.forward)`
 
 6. Load some user inputs (custom struct), encode them into arrays of numbers
    (`zml.HostBuffer`), and copy them to the accelerator (`zml.Buffer`).

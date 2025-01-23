@@ -8,32 +8,20 @@ const shapesOf = @import("tensor.zig").shapesOf;
 
 const log = std.log.scoped(.@"zml/testing");
 
-var _ctx: ?zml.Context = null;
+var _platform: ?zml.Platform = null;
 
 pub fn env() zml.Platform {
     if (!builtin.is_test) @compileError("Cannot use zml.testing.env outside of a test block");
-    if (_ctx == null) {
-        _test_compile_opts = if (initCacheDir())
-            .{
-                .cache_location = "/tmp/zml/tests/cache",
-                .xla_dump_to = "/tmp/zml/tests/",
-                .sharding_enabled = true,
-            }
-        else
-            .{};
-
-        _ctx = zml.Context.init() catch unreachable;
+    if (_platform == null) {
+        var ctx = zml.Context.init() catch unreachable;
+        _platform = ctx.autoPlatform(.{}).withCompilationOptions(.{
+            .xla_dump_to = "/tmp/zml/tests/",
+            .sharding_enabled = true,
+            .xla_dump_hlo_pass_re = ".*",
+        });
     }
 
-    return _ctx.?.autoPlatform().withCompilationOptions(_test_compile_opts);
-}
-
-var _test_compile_opts: zml.CompilationOptions = .{};
-
-fn initCacheDir() bool {
-    const tmp = std.fs.openDirAbsolute("/tmp", .{}) catch return false;
-    tmp.makePath("zml/tests/cache") catch return false;
-    return true;
+    return _platform.?;
 }
 
 /// In neural network we generally care about the relative precision,
@@ -63,6 +51,7 @@ pub fn expectClose(left_: anytype, right_: anytype, tolerance: f32) !void {
         if (should_free_left) left.deinit(allocator);
         if (should_free_right) right.deinit(allocator);
     }
+    errdefer log.err("\n--> Left: {}\n--> Right: {}", .{ left.pretty(), right.pretty() });
 
     if (!std.mem.eql(i64, left.shape().dims(), right.shape().dims())) {
         log.err("left.shape() {} != right.shape() {}", .{ left.shape(), right.shape() });
@@ -126,6 +115,9 @@ pub fn expectEqualShapes(expected: zml.Shape, actual: zml.Shape) error{TestExpec
 /// Compile a function and immediatly call it with the given buffers.
 /// The compiled module is discarded after the call.
 /// Useful during testing when a module is typically called only once.
+///
+/// Note: `func` needs explicit types on all parameters.
+/// To test a function with `anytype` (typically for tagged API), you need to create a specialized version of it with specific types.
 pub fn compileAndCall(platform: zml.Platform, func: anytype, buffer_args: zml.Bufferized(stdx.meta.FnArgs(func))) !zml.Bufferized(stdx.meta.FnResult(func)) {
     // This simplify test API and also ensure this fn isn't used outside of tests.
     const allocator = std.testing.allocator;
@@ -138,7 +130,7 @@ pub fn compileAndCall(platform: zml.Platform, func: anytype, buffer_args: zml.Bu
         }
     };
     var shape_args: zml.ShapeOf(stdx.meta.FnArgs(func)) = undefined;
-    try meta.mapAlloc(Local.bufferToShape, allocator, {}, buffer_args, &shape_args);
+    try meta.mapAlloc(Local.bufferToShape, arena.allocator(), {}, buffer_args, &shape_args);
 
     const mod = try zml.compileFn(allocator, func, shape_args, platform);
     defer mod.deinit();
@@ -187,7 +179,7 @@ pub fn testLayerOut(
     log.info("Testing {s}", .{name});
 
     const fwd = @TypeOf(layer).forward;
-    const FwdSign = zml.module.ModuleSignature(fwd);
+    const FwdSign = zml.ModuleSignature(fwd);
 
     const input_tensors = try zml.aio.populateModelWithPrefix(FwdSign.ArgsT, alloc, activations, name ++ ".in");
     const input_shapes = try shapesOf(input_tensors, alloc);
@@ -201,10 +193,10 @@ pub fn testLayerOut(
     const exe = try zml.compileModel(alloc, fwd, layer, input_shapes, platform);
 
     const n_out_exp = activations.countLayers(out_name);
-    if (exe.inner.result_buffer_count != n_out_exp) {
-        log.warn("Reference models produces {d} outputs, but implementation produces {d}", .{ n_out_exp, exe.inner.result_buffer_count });
+    if (exe.inner.result_shapes.len != n_out_exp) {
+        log.warn("Reference models produces {d} outputs, but implementation produces {d}", .{ n_out_exp, exe.inner.result_shapes.len });
     }
-    const mod = try exe.prepare(alloc, layer_weights);
+    const mod = exe.prepare(layer_weights);
 
     const FetchCtx = struct {
         store: zml.aio.BufferStore,
@@ -243,13 +235,13 @@ pub fn testLayerOut(
 
     var buf: [1024]u8 = undefined;
     var failed: bool = false;
-    for (0..mod.inner.result_buffer_count) |i| {
+    for (0..mod.inner.result_shapes.len) |i| {
         const full_name = std.fmt.bufPrint(&buf, "{s}.{d}", .{ out_name, i }) catch unreachable;
         const expected_out = activations.get(full_name) orelse {
             log.warn("Output buffer not found: {s}", .{full_name});
             continue;
         };
-        zml.testing.expectClose(expected_out, mod.getOutputBuffer(i), tolerance) catch |err| switch (err) {
+        zml.testing.expectClose(expected_out, mod.inner.getOutputBuffer(i), tolerance) catch |err| switch (err) {
             error.TestUnexpectedResult => {
                 log.err("{s}.{d} doesn't match !", .{ out_name, i });
                 failed = true;
@@ -261,6 +253,34 @@ pub fn testLayerOut(
 
     if (failed) return error.TestUnexpectedResult;
     log.info("all good for {s} !", .{name});
+}
+
+test testLayer {
+    const platform = env();
+
+    // create a model
+    const layer: zml.nn.Linear = .{
+        .weight = zml.Tensor{ ._shape = zml.Shape.init(.{ 5, 2 }, .f32), ._id = .{ .buffer_id = 42 } },
+    };
+    const layer_weights: zml.Bufferized(zml.nn.Linear) = .{
+        .weight = try zml.Buffer.fromArray(
+            platform,
+            [5][2]f32{ .{ 0, 0 }, .{ 0, 1 }, .{ 1, 2 }, .{ -1, -1 }, .{ -1, 0 } },
+        ),
+    };
+
+    // create a buffer store containing the activations:
+    var activations = try zml.aio.BufferStore.init(std.testing.allocator, &.{});
+    defer activations.deinit();
+    {
+        const input = zml.HostBuffer.fromArray(&[2]f32{ 1, -1 });
+        try activations.buffers.put(activations.arena.allocator(), "model.layer.in.0", input);
+        const output = zml.HostBuffer.fromArray(&[5]f32{ 0, -1, -1, 0, -1 });
+        try activations.buffers.put(activations.arena.allocator(), "model.layer.out.0", output);
+    }
+
+    // test the ZML layer reproduces the "captured" activations:
+    try zml.testing.testLayer(platform, activations, "model.layer", layer, layer_weights, 1e-5);
 }
 
 pub inline fn expectEqual(expected: anytype, actual: @TypeOf(expected)) !void {

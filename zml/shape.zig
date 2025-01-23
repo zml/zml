@@ -391,20 +391,45 @@ pub const Shape = struct {
         const bare_fmt = fmt.len == 1 and fmt[0] == '_';
         _ = try writer.write(if (bare_fmt) "{" else "Shape({");
 
+        var need_comma = false;
         for (self.dims(), 0..) |d, i| {
-            const prefix = if (i == 0) "" else ",";
+            if (need_comma) try writer.writeByte(',');
             const t = self.tag(i);
             if (t != TagUnknown) {
-                try writer.print("{s}.{s}={d}", .{ prefix, t, d });
+                try writer.print("{s}={d}", .{ t, d });
             } else {
-                try writer.print("{s}{d}", .{ prefix, d });
+                try writer.print("{d}", .{d});
             }
             if (self._sharding_info[i]) {
                 try writer.writeByte('!');
             }
+            need_comma = true;
         }
-        _ = try writer.print("}}, dtype=.{s}", .{@tagName(self.dtype())});
-        if (!bare_fmt) _ = try writer.write(")");
+        if (need_comma) try writer.writeByte(',');
+        _ = try writer.write(@tagName(self.dtype()));
+        _ = try writer.write(if (bare_fmt) "}" else "})");
+    }
+
+    /// Broadcasts a Tensor to the given shape, extending dimensions if needed.
+    pub fn canBroadcastTo(self: Shape, other: Shape) bool {
+        // Already the right shape
+        if (std.mem.eql(i64, self.dims(), other.dims())) return true;
+
+        // Non ambiguous broadcasting
+        // TODO: broad is error prone because of this:
+        // it will happily broadcast .{ .a = 10, .b = 1 } to .{ .b = 10, .a = 5 }
+        if (self.rank() == 0 or self.rank() == other.rank()) {
+            for (0..self.rank()) |i| {
+                if (self.dim(i) != 1 and self.dim(i) != other.dim(i)) return false;
+            }
+            return true;
+        }
+
+        for (self.dims(), self.tags()) |d, t| {
+            const other_ax = other.hasTag(t) orelse return false;
+            if (d != 1 and d != other.dim(other_ax)) return false;
+        }
+        return true;
     }
 
     pub fn reshape(self: Shape, new_shape_: anytype) Shape {
@@ -1004,5 +1029,21 @@ pub const Shape = struct {
             try std.testing.expectEqual(4 * 5 * 6 * 7, s.byteSize());
             try std.testing.expectEqual(1, s.axis(.b));
         }
+    }
+
+    pub fn outer(self: Shape, other: Shape) Shape {
+        var res_shape = self;
+        var batching_axes: u8 = 0;
+        for (0..other.rank()) |ax| {
+            if (other.tag(ax) != Shape.TagUnknown) {
+                if (self.hasTag(other.tag(ax))) |batching_ax| {
+                    stdx.debug.assert(batching_ax == batching_axes and batching_ax == ax, "outer expects batching dims to be the first dims in both tensors, got outer({}, {})", .{ self, other });
+                    batching_axes += 1;
+                }
+            }
+
+            res_shape = res_shape.appendDim(other.dim(ax), other.tag(ax));
+        }
+        return res_shape;
     }
 };

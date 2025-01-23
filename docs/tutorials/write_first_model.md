@@ -154,7 +154,7 @@ like this:
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    try asynk.AsyncThread.main(gpa.allocator(), asyncMain, .{});
+    try asynk.AsyncThread.main(gpa.allocator(), asyncMain);
 }
 
 
@@ -184,7 +184,7 @@ pub fn asyncMain() !void {
     var context = try zml.Context.init();
     defer context.deinit();
 
-    const platform = context.autoPlatform();
+    const platform = context.autoPlatform(.{});
     ...
 }
 ```
@@ -222,7 +222,7 @@ try buffers.put(arena, "weight", zml.HostBuffer.fromArray(&weights));
 try buffers.put(arena, "bias", zml.HostBuffer.fromArray(&bias));
 
 // the actual BufferStore
-var bs: zml.aio.BufferStore = .{
+const bs: zml.aio.BufferStore = .{
     .arena = arena_state,
     .buffers = buffers,
 };
@@ -253,7 +253,7 @@ const model_shapes = try zml.aio.populateModel(Layer, allocator, bs);
 // The shape of the input tensor, we have to pass in manually.
 var compilation = try asyncc(
     zml.compileModel,
-    .{ allocator, model_shapes, .forward, .{input_shape}, platform },
+    .{ allocator, Layer.forward, model_shapes, .{input_shape}, platform },
 );
 
 // Produce a bufferized weights struct from the fake BufferStore.
@@ -282,7 +282,8 @@ executable.
 
 ```zig
 // pass the model weights to the compiled module to create an executable module
-var executable = try compiled.prepare(arena, model_weights);
+// all required memory has been allocated in `compile`.
+var executable = compiled.prepare(model_weights);
 defer executable.deinit();
 ```
 
@@ -439,7 +440,7 @@ const Layer = struct {
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    try asynk.AsyncThread.main(gpa.allocator(), asyncMain, .{});
+    try asynk.AsyncThread.main(gpa.allocator(), asyncMain);
 }
 
 pub fn asyncMain() !void {
@@ -457,7 +458,7 @@ pub fn asyncMain() !void {
     var context = try zml.Context.init();
     defer context.deinit();
 
-    const platform = context.autoPlatform();
+    const platform = context.autoPlatform(.{});
 
     // Our weights and bias to use
     var weights = [3]f16{ 2.0, 2.0, 2.0 };
@@ -482,10 +483,7 @@ pub fn asyncMain() !void {
 
     // Start compiling. This uses the inferred shapes from the BufferStore.
     // The shape of the input tensor, we have to pass in manually.
-    var compilation = try asyncc(
-        zml.compileModel,
-        .{ allocator, model_shapes, .forward, .{input_shape}, platform },
-    );
+    var compilation = try asyncc(zml.compileModel, .{ allocator, Layer.forward, model_shapes, .{input_shape}, platform });
 
     // Produce a bufferized weights struct from the fake BufferStore.
     // This is like the inferred shapes, but with actual values.
@@ -498,7 +496,7 @@ pub fn asyncMain() !void {
 
     // pass the model weights to the compiled module to create an executable
     // module
-    var executable = try compiled.prepare(arena, model_weights);
+    var executable = compiled.prepare(model_weights);
     defer executable.deinit();
 
     // prepare an input buffer

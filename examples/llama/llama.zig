@@ -24,7 +24,7 @@ pub const LlamaOptions = struct {
 /// Llama architecture, using huggingface transformers naming.
 /// Dimensions of activations: {.b, .s, .d}
 pub const LlamaLM = struct {
-    lm_head: zml.nn.Linear,
+    lm_head: ?zml.nn.Linear = null,
     model: Llama,
 
     // Options controlling generation
@@ -55,7 +55,9 @@ pub const LlamaLM = struct {
         // TODO(Corentin): Fix lm_head sharding when top-k sampling is enabled.
         // It currently crashes/compilation fails
         if (options.gen_opts.topk == 1) {
-            self.lm_head.weight = self.lm_head.weight.withSharding(.{0});
+            if (self.lm_head) |lm_head| {
+                self.lm_head.?.weight = lm_head.weight.withSharding(.{0});
+            }
         }
     }
 
@@ -76,12 +78,12 @@ pub const LlamaLM = struct {
 
         var tokens = tokens_.withPartialTags(.{.s});
         const out, const updated_kv_cache = zml.call(self.model, .forward, .{ tokens, if (kv_cache == null) null else token_index, kv_cache });
-        tokens, const new_rng = updateTokens(self.lm_head, tokens, token_index, out, rng, self.gen_opts);
+        tokens, const new_rng = self.updateTokens(tokens, token_index, out, rng, self.gen_opts);
         return .{ tokens, increment(0, token_index), updated_kv_cache, new_rng };
     }
 
     pub fn updateTokens(
-        lm_head: zml.nn.Linear,
+        self: LlamaLM,
         tokens_: Tensor,
         token_index: Tensor,
         out_: Tensor,
@@ -92,7 +94,11 @@ pub const LlamaLM = struct {
         const out = out_.withPartialTags(.{ .s, .d });
 
         const next_token_pred = out.gatherValues(.s, token_index, .{});
-        var logits = zml.call(lm_head, .forward, .{next_token_pred});
+        var logits = if (self.lm_head) |lm_head|
+            zml.call(lm_head, .forward, .{next_token_pred})
+        else
+            self.model.embed_tokens.weight.withTags(.{ .voc, .d }).dot(next_token_pred, .{.d});
+
         if (logits.shape().hasTag(.voc) == null)
             logits = logits.rename(.{ .d = .voc });
 
@@ -104,7 +110,7 @@ pub const LlamaLM = struct {
     }
 
     pub fn increment(_: u8, token_index: Tensor) Tensor {
-        return token_index.addConstant(1).reuseBuffer(token_index);
+        return token_index.addConstant(1);
     }
 
     /// Run the generation entirely within pjrt.
@@ -180,17 +186,15 @@ pub const Llama = struct {
         var updated_kv_cache = kv_cache0;
         for (self.layers, 0..) |layer, i| {
             hidden, updated_kv_cache = zml.call(layer, .forward, .{ hidden, token_index, updated_kv_cache.atLayer(i) });
-            hidden = hidden.withPartialTags(.{ .s, .d });
         }
-        // TODO: tags seem to be lost by `callFunc`.
-        const output = zml.call(self.norm, .forward, .{hidden.withPartialTags(.{ .s, .d })});
+        const output = zml.call(self.norm, .forward, .{hidden});
 
         return .{ output, updated_kv_cache.reuseBuffer(kv_cache0) };
     }
 
     pub fn embed(embed_tokens_: zml.nn.TokenEmbedding, tokens_: Tensor, token_index: ?Tensor) Tensor {
         const tokens = if (token_index) |idx|
-            tokens_.dynamicSlice1d(-1, 1, idx)
+            tokens_.dynamicSlice1d(-1, .{ .start = idx, .len = 1 })
         else
             tokens_;
         return zml.call(embed_tokens_, .forward, .{tokens}).withPartialTags(.{ .s, .d });
@@ -295,18 +299,15 @@ pub const SelfAttn = struct {
         const kv_cache = kv_cache_ orelse initKvCache(k.shape());
         const seq_len = kv_cache.k.dim(.k);
         var attn_mask = zml.nn.causalAttnMask(.{ .q = seq_len, .k = seq_len }, x.dtype(), null);
-        var cos, var sin = zml.nn.ropeCosSin(.{ .s = seq_len, .hd = k.dim(.hd) }, x.dtype(), self.rope_opts);
         if (token_index) |idx| {
-            // Note: in Pytorch it would be very inefficient to generate the full ropeCosSin and attn_mask matrices, then slice into it,
-            // but XLA is able to optimize this correctly.
+            // Note: in Pytorch it would be very inefficient to generate the full attn_mask,
+            // then slice into it, but XLA is able to optimize this correctly.
             attn_mask = attn_mask.dynamicSlice(.{ .q = .{ .start = idx, .len = 1 } });
-            cos = cos.dynamicSlice(.{ .s = .{ .start = idx, .len = 1 } });
-            sin = sin.dynamicSlice(.{ .s = .{ .start = idx, .len = 1 } });
         }
 
         // In self-attention, .s axis is used both for keys and queries.
-        q = zml.nn.rope(q, .{ cos, sin }, self.rope_opts);
-        k = zml.nn.rope(k, .{ cos, sin }, self.rope_opts);
+        q = zml.nn.rope(q, token_index, self.rope_opts);
+        k = zml.nn.rope(k, token_index, self.rope_opts);
         q = q.rename(.{ .s = .q });
         k = k.rename(.{ .s = .k });
         v = v.rename(.{ .s = .k });

@@ -33,7 +33,7 @@ const Mnist = struct {
         for (layers) |layer| {
             x = zml.call(layer, .forward, .{x});
         }
-        return x.argMax(0, .u8).indices;
+        return x.argMax(0).indices.convert(.u8);
     }
 };
 
@@ -51,7 +51,7 @@ pub fn asyncMain() !void {
     // log.info("\n===========================\n==   ZML MNIST Example   ==\n===========================\n\n", .{});
 
     // // Auto-select platform
-    const platform = context.autoPlatform();
+    const platform = context.autoPlatform(.{});
     context.printAvailablePlatforms(platform);
 
     // Parse program args
@@ -86,7 +86,7 @@ pub fn asyncMain() !void {
     const compiled_mnist = try compilation.awaitt();
     log.info("✅ Compiled model in {d}ms", .{start_time.read() / std.time.ns_per_ms});
 
-    var mnist = try compiled_mnist.prepare(allocator, model_weights);
+    const mnist = compiled_mnist.prepare(model_weights);
     defer mnist.deinit();
     log.info("✅ Weights transferred in {d}ms", .{start_time.read() / std.time.ns_per_ms});
 

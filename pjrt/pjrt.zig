@@ -359,7 +359,7 @@ pub const Client = opaque {
             }
         }
         log.warn("No profiler found for platform: {}", .{self});
-        return Profiler.init(null, options);
+        return Profiler.init(null, null);
     }
 
     pub fn deserializeAndLoad(self: *const Client, api: *const Api, bytes: []const u8) ApiError!*LoadedExecutable {
@@ -823,7 +823,7 @@ pub const NamedValue = extern struct {
             []i64, []const i64 => fromInt64List(name_, value),
             f32 => fromFloat(name_, value),
             bool => fromBool(name_, value),
-            else => unreachable,
+            else => fromString(name_, @tagName(value)),
         };
     }
 

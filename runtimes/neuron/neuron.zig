@@ -1,11 +1,12 @@
 const builtin = @import("builtin");
-const asynk = @import("async");
-const pjrt = @import("pjrt");
-const c = @import("c");
 const std = @import("std");
-const runfiles = @import("runfiles");
+
+const asynk = @import("async");
 const bazel_builtin = @import("bazel_builtin");
+const c = @import("c");
 const libneuronxla_pyenv = @import("libneuronxla_pyenv");
+const pjrt = @import("pjrt");
+const runfiles = @import("runfiles");
 
 pub fn isEnabled() bool {
     return @hasDecl(c, "ZML_RUNTIME_NEURON");
@@ -103,6 +104,8 @@ fn comptimeStrJoin(comptime separator: [:0]const u8, comptime slices: []const [:
 }
 
 pub fn setNeuronCCFlags() void {
+    // See neuronxcc reference:
+    // https://awsdocs-neuron.readthedocs-hosted.com/en/latest/compiler/neuronx-cc/api-reference-guide/neuron-compiler-cli-reference-guide.html#neuron-compiler-cli-reference-guide
     _ = c.setenv("NEURON_CC_FLAGS", comptimeStrJoin(" ", &.{
         // 30% faster, no visible speed difference on llama
         "--optlevel=1",
@@ -134,5 +137,5 @@ pub fn load() !*const pjrt.Api {
 
     setNeuronCCFlags();
     try initialize();
-    return try pjrt.Api.loadFrom("libpjrt_neuron.so");
+    return try asynk.callBlocking(pjrt.Api.loadFrom, .{"libpjrt_neuron.so"});
 }

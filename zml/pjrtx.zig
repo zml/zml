@@ -42,8 +42,8 @@ fn InnerMixin(comptime innerT: type) type {
 pub const Client = opaque {
     const inner = InnerMixin(pjrt.Client).inner;
 
-    pub fn init(api: *const Api, create_options: []const NamedValue) ClientInitError!*Client {
-        return @ptrCast(try pjrt.Client.init(api, create_options));
+    pub fn init(api: *const Api, options: []const NamedValue) ClientInitError!*Client {
+        return @ptrCast(try pjrt.Client.init(api, options));
     }
 
     pub fn deinit(self: *Client, api: *const Api) void {

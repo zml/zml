@@ -1,6 +1,8 @@
 const builtin = @import("builtin");
-const pjrt = @import("pjrt");
+
+const asynk = @import("async");
 const c = @import("c");
+const pjrt = @import("pjrt");
 
 pub fn isEnabled() bool {
     return @hasDecl(c, "ZML_RUNTIME_CPU");
@@ -16,5 +18,5 @@ pub fn load() !*const pjrt.Api {
         .macos, .ios, .watchos => ".dylib",
         else => ".so",
     };
-    return try pjrt.Api.loadFrom("libpjrt_cpu" ++ ext);
+    return try asynk.callBlocking(pjrt.Api.loadFrom, .{"libpjrt_cpu" ++ ext});
 }

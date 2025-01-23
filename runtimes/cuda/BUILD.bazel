@@ -27,6 +27,8 @@ zig_library(
         "//runtimes:cuda.enabled": [
             ":libpjrt_cuda",
             "//async",
+            "//stdx",
+            "@rules_zig//zig/runfiles",
         ],
         "//conditions:default": [":empty"],
     }),

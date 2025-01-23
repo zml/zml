@@ -17,6 +17,7 @@ copy_to_directory(
     srcs = [
         "@cuda_nvcc//:libdevice",
         "@cuda_nvcc//:ptxas",
+        "@cuda_nvcc//:nvlink",
     ],
     include_external_repositories = ["**"],
 )
@@ -24,8 +25,7 @@ copy_to_directory(
 cc_import(
     name = "libpjrt_cuda",
     data = [":sandbox"],
-    shared_library = "jax_plugins/xla_cuda12/xla_cuda_plugin.so",
-    soname = "libpjrt_cuda.so",
+    shared_library = "libpjrt_cuda.so",
     add_needed = ["libzmlxcuda.so.0"],
     rename_dynamic_symbols = {
         "dlopen": "zmlxcuda_dlopen",
@@ -35,6 +35,7 @@ cc_import(
         ":zmlxcuda",
         "@cuda_cudart//:cudart",
         "@cuda_cupti//:cupti",
+        "@cuda_nvcc//:nvptxcompiler",
         "@cuda_nvcc//:nvvm",
         "@cuda_nvrtc//:nvrtc",
         "@cudnn//:cudnn",

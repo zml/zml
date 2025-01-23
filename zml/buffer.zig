@@ -124,12 +124,50 @@ pub const Buffer = struct {
 
     /// Creates a Buffer with a single element repeated manytime.
     pub fn constant(platform: Platform, shape_: Shape, val: anytype) !Buffer {
+        var start = try std.time.Timer.start();
+        defer {
+            const duration_ms = stdx.math.divFloat(f32, start.read(), std.time.ns_per_ms);
+            if (duration_ms > 100) {
+                const size_gb = stdx.math.divFloat(f32, shape_.byteSize(), 1024 * 1024 * 1024);
+                log.info("Wrote constant({_}) to device ({d:.2}Gb) in {d:.0}ms: {d:.2}Gb/s", .{ shape_, size_gb, duration_ms, size_gb / duration_ms * 1000 });
+            }
+        }
+
+        // Convert val to the requested dtype.
         const x = shape_.dtype().constant(val);
-        const host_buffer: HostBuffer = .{
-            ._shape = shape_,
-            ._strides = [1]i64{0} ** Shape.MAX_RANK,
-            .data = x.constSlice(),
-        };
+        const byte_size = shape_.dtype().sizeOf();
+        const max_bytes = 1024;
+
+        // Naive version for scalars and buffers with long last axis.
+        if (shape_.rank() < 1 or byte_size * shape_.dim(-1) > max_bytes) {
+            const host_buffer: HostBuffer = .{
+                ._shape = shape_,
+                ._strides = [1]i64{0} ** Shape.MAX_RANK,
+                .data = x.constSlice(),
+            };
+            return try from(platform, host_buffer);
+        }
+
+        // To speed up copies, duplicate the scalar value into a vector,
+        // so that PJRT can copy row by row.
+        // Because this is respecting the shape, it won't work if the last axis is too big.
+        // If this becomes an issue, we should create a new intermediary Buffer by splitting last axis into { n, max_bytes }
+        // so that the trick works, and then reshape it
+        // We could also handle sharded constant directly in this function to avoid having to create too big arrays.
+        var bytes: [max_bytes]u8 align(64) = undefined;
+        var strides = [1]i64{0} ** Shape.MAX_RANK;
+        strides[shape_.rank() - 1] = byte_size;
+
+        switch (byte_size) {
+            inline 1, 2, 4, 8, 16 => |b| {
+                const Int = std.meta.Int(.unsigned, b * 8);
+                const x_as_int: Int = @bitCast(x.constSlice()[0..b].*);
+                const bytes_as_int: [*]Int = @ptrCast(&bytes);
+                @memset(bytes_as_int[0..@intCast(shape_.dim(-1))], x_as_int);
+            },
+            else => unreachable,
+        }
+        const host_buffer: HostBuffer = .{ ._shape = shape_, ._strides = strides, .data = &bytes };
         return try from(platform, host_buffer);
     }
 
