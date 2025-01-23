@@ -9,7 +9,7 @@ on:
 
 env:
   ZIG_VERSION: 0.13.0
-  BAZELISK_VERSION: 1.20.0
+  BAZELISK_VERSION: 1.25.0
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
