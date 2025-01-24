@@ -1,0 +1,10 @@
+{
+    "integrity": "sha256-qDX+Vfvc2OgPOFhKsi0IQGYsZ/L+s2vWeUAtqWQdxx4=",
+    "strip_prefix": "re2-6dcd83d60f7944926bfd308cc13979fc53dd69ca",
+    "url": "https://github.com/google/re2/archive/6dcd83d60f7944926bfd308cc13979fc53dd69ca.tar.gz",
+    "overlay": {
+      "MODULE.bazel": ""
+    },
+    "patch_strip": 0,
+    "patches": {}
+}
