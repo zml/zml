@@ -195,9 +195,12 @@ pub const HostBuffer = struct {
     }
 
     pub fn isContiguous(self: HostBuffer) bool {
-        const strd = self._strides orelse return true;
+        const _strides = self._strides orelse return true;
         const cont_strides = self._shape.computeStrides();
-        return std.mem.eql(i64, strd[0..self.rank()], cont_strides.constSlice());
+        for (self._shape.dims(), _strides[0..self.rank()], cont_strides.constSlice()) |d, stride, cont_stride| {
+            if (d != 1 and stride != cont_stride) return false;
+        }
+        return true;
     }
 
     pub fn reshape(self: HostBuffer, shape_: anytype) HostBuffer {
@@ -219,9 +222,9 @@ pub const HostBuffer = struct {
         const start: i64 = if (s.start < 0) s.start + d else s.start;
         var end = s.end orelse d;
         if (end < 0) end += d;
-        stdx.debug.assert(start >= 0 and start < d, "slice1d({}, {}) expects the slice start to be between 0 and {} got: {}", .{ self, ax, d, start });
-        stdx.debug.assert(end >= 1 and end <= d, "slice1d({}, {}) expects the slice end to be between 1 and {} got: {}", .{ self, ax, d, end });
-        stdx.debug.assert(start < end, "slice1d({}, {}) expects the slice start ({}) to be smaller than the end ({})", .{ self, ax, start, end });
+        stdx.debug.assert(start >= 0 and start < d, "slice1d({}, {}) expects the slice start to be between 0 and {} got: {}", .{ self, ax, d, s });
+        stdx.debug.assert(end >= 1 and end <= d, "slice1d({}, {}) expects the slice end to be between 1 and {} got: {}", .{ self, ax, d, s });
+        stdx.debug.assert(start < end, "slice1d({}, {}) expects the slice start ({}) to be smaller than the end ({}), got: {}", .{ self, ax, start, end, s });
 
         // If strides weren't set it means original buffer is contiguous.
         // But it won't be anymore after slicing. The strides don't change though.
@@ -230,7 +233,8 @@ pub const HostBuffer = struct {
         return .{
             ._shape = self.shape().set(ax, end - start),
             .data = self.data[offset..],
-            ._strides = _strides,
+            // When axis is 0, we stay contiguous.
+            ._strides = if (ax == 0) self._strides else _strides,
             ._memory = .unmanaged,
         };
     }
