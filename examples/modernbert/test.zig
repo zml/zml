@@ -385,25 +385,25 @@ pub fn asyncMain() !void {
     //         log.info("activations {} - {s}: {s}", .{ i, activations.buffers.entries.get(i).key, activations.buffers.entries.get(i).value.shape() });
     // }
 
-    // // ModernBertForMaskedLM
-    // log.info("\n\nTesting ModernBertForMaskedLM:", .{});
-    //
-    // var modern_bert_for_masked_lm = try zml.aio.populateModel(
-    //     modernbert_module.ModernBertForMaskedLM,
-    //     model_arena,
-    //     weights_file,
-    // );
-    //
-    // modern_bert_for_masked_lm.init(modernbert_base_options);
-    //
-    // const modern_bert_for_masked_lm_weights = try zml.aio.loadModelBuffersWithPrefix(modernbert_module.ModernBertForMaskedLM, modern_bert_for_masked_lm, weights_file, model_arena, compute_platform, "");
-    //
-    // try zml.testing.testLayer(
-    //     compute_platform,
-    //     activations,
-    //     "model",
-    //     modern_bert_for_masked_lm,
-    //     modern_bert_for_masked_lm_weights,
-    //     1e-2,
-    // );
+    // ModernBertForMaskedLM
+    log.info("\n\nTesting ModernBertForMaskedLM:", .{});
+
+    var modern_bert_for_masked_lm = try zml.aio.populateModel(
+        modernbert_module.ModernBertForMaskedLM,
+        model_arena,
+        weights_file,
+    );
+
+    modern_bert_for_masked_lm.init(modernbert_base_options);
+
+    const modern_bert_for_masked_lm_weights = try zml.aio.loadModelBuffersWithPrefix(modernbert_module.ModernBertForMaskedLM, modern_bert_for_masked_lm, weights_file, model_arena, compute_platform, "");
+
+    try zml.testing.testLayer(
+        compute_platform,
+        activations,
+        "model",
+        modern_bert_for_masked_lm,
+        modern_bert_for_masked_lm_weights,
+        1e-2,
+    );
 }
