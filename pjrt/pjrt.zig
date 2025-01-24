@@ -33,6 +33,12 @@ fn pjrtStructSize(comptime T: type) usize {
 inline fn pjrtStruct(v: anytype) @TypeOf(v) {
     var ret = v;
     ret.struct_size = pjrtStructSize(@TypeOf(v));
+    //FIXME: Neuron PJRT Plugin has a strict struct size comparison asert.
+    //       "==" instead of ">=" like in the reference implementations in XLA.
+    if (@TypeOf(v) == c.PJRT_Client_Create_Args) {
+        std.debug.print("type is {any} and size is {}\n", .{ @TypeOf(v), ret.struct_size });
+        ret.struct_size -= 16;
+    }
     return ret;
 }
 
