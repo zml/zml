@@ -157,16 +157,16 @@ pub fn generateText(
 }
 
 const params = clap.parseParamsComptime(
-    \\--help                    print this help
-    \\--prompt <STRING>         the prompt
-    \\--config <PATH>     config.json path
-    \\--weights <PATH>    model weights path
-    \\--tokenizer <PATH>  tokenizer path
-    \\--seed <UINT>             random seed (optional)
-    \\--seq-len <UINT>          sequence length
-    \\--create-options <STRING> platform creation options JSON, defaults to {}
-    \\--no-llama3 <BOOL>  skip prompt template 
-    \\--sharding <BOOL>  default: true: sharding on or off
+    \\--help                      print this help
+    \\--prompt         <STRING>   the prompt
+    \\--config         <PATH>     config.json path
+    \\--weights        <PATH>     model weights path
+    \\--tokenizer      <PATH>     tokenizer path
+    \\--seed           <UINT>     random seed (optional)
+    \\--seq-len        <UINT>     sequence length
+    \\--create-options <STRING>   platform creation options JSON, defaults to {}
+    \\--no-llama3      <BOOL>     skip prompt template 
+    \\--sharding       <BOOL>     default: true: sharding on or off
 );
 
 pub fn bool_parser(in: []const u8) error{}!bool {
