@@ -21,6 +21,23 @@ zig_cc_binary(
 )
 
 cc_binary(
+    name = "TinyLlama-15M-stories",
+    args = [
+        "--config=$(location @TinyLlama-15M-stories//:config.json)",
+        "--weights=$(location @TinyLlama-15M-stories//:model.safetensors)",
+        "--tokenizer=$(location @TinyLlama-15M-stories//:tokenizer.json)",
+        "--no-llama3", # don't do llama3 template prompt encoding
+    ],
+    data = [
+        "@TinyLlama-15M-stories",
+        "@TinyLlama-15M-stories//:config.json",
+        "@TinyLlama-15M-stories//:model.safetensors",
+        "@TinyLlama-15M-stories//:tokenizer.json",
+    ],
+    deps = [":llama_lib"],
+)
+
+cc_binary(
     name = "Llama-3.1-8B-Instruct",
     args = [
         "--config=$(location @Meta-Llama-3.1-8B-Instruct//:config.json)",

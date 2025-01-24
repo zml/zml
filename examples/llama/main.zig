@@ -57,13 +57,14 @@ pub fn generateText(
     allocator: std.mem.Allocator,
     seed: u128,
     prompt: []const u8,
+    skip_llama3_encoding: bool,
 ) ![]const u8 {
     var tokenizer_encoder = try tokenizer.encoder();
     defer tokenizer_encoder.deinit();
     var tokenizer_decoder = try tokenizer.decoder();
     defer tokenizer_decoder.deinit();
 
-    const prompt_tok = try tokenizePromptLlama3(allocator, tokenizer, config, prompt);
+    const prompt_tok = if (skip_llama3_encoding) try tokenizer_encoder.encode(prompt) else try tokenizePromptLlama3(allocator, tokenizer, config, prompt);
     defer allocator.free(prompt_tok);
 
     const dims = llama_.model.shape();
@@ -164,7 +165,12 @@ const params = clap.parseParamsComptime(
     \\--seed <UINT>             random seed (optional)
     \\--seq-len <UINT>          sequence length
     \\--create-options <STRING> platform creation options JSON, defaults to {}
+    \\--no-llama3 <BOOL>  skip prompt template 
 );
+
+pub fn bool_parser(in: []const u8) error{}!bool {
+    return std.mem.indexOfScalar(u8, "tTyY1", in[0]) != null;
+}
 
 pub fn main() !void {
     try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain);
@@ -176,6 +182,7 @@ pub fn asyncMain() !void {
     const allocator = std.heap.c_allocator;
 
     const parsers = comptime .{
+        .BOOL = bool_parser,
         .UINT = clap.parsers.int(usize, 0),
         .STRING = clap.parsers.string,
         .PATH = clap.parsers.string,
@@ -315,7 +322,8 @@ pub fn asyncMain() !void {
     log.info("✅\tPrompt: {s}", .{prompt});
 
     const seed = res.args.seed orelse @as(u128, @bitCast(std.time.nanoTimestamp()));
-    const generated_text = try generateText(config, model_instance, llama_module_prefill, llama_module, kv_cache, tokenizer, allocator, seed, prompt[0..]);
+    const skip_llama3_encoding = res.args.@"no-llama3" orelse false;
+    const generated_text = try generateText(config, model_instance, llama_module_prefill, llama_module, kv_cache, tokenizer, allocator, seed, prompt[0..], skip_llama3_encoding);
     // generated text will be printed token by token.
     defer allocator.free(generated_text);
 }
