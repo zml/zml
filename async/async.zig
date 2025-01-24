@@ -505,16 +505,16 @@ pub fn channel(comptime T: type, len: usize, comptime capacity: usize) Channel(T
 }
 
 pub const Mutex = struct {
-    const VoidChannel = coro.Channel(void, 1);
+    const VoidChannel = Channel(void, 1);
 
     inner: VoidChannel,
 
     pub fn init() Mutex {
-        return .{ .inner = VoidChannel.init(&AsyncThread.current.executor.exec) };
+        return .{ .inner = VoidChannel.init() };
     }
 
-    pub fn lock(self: *Mutex) !void {
-        try self.inner.send({});
+    pub fn lock(self: *Mutex) void {
+        self.inner.send({});
     }
 
     pub fn unlock(self: *Mutex) void {
@@ -522,26 +522,45 @@ pub const Mutex = struct {
     }
 };
 
-pub fn logFn(
+pub const LogFn = fn (
     comptime message_level: std.log.Level,
-    comptime scope: @Type(.EnumLiteral),
+    comptime scope: @TypeOf(.enum_literal),
     comptime format: []const u8,
     args: anytype,
-) void {
-    if (coro.inCoro() == false) {
-        return std.log.defaultLog(message_level, scope, format, args);
-    }
+) void;
 
-    const level_txt = comptime message_level.asText();
-    const prefix2 = if (scope == .default) ": " else "(" ++ @tagName(scope) ++ "): ";
-    const stderr = getStdErr().writer();
-    var bw = std.io.bufferedWriter(stderr);
-    const writer = bw.writer();
+pub fn logFn(comptime fallbackLogFn: LogFn) LogFn {
+    return struct {
+        const Self = @This();
 
-    std.debug.lockStdErr();
-    defer std.debug.unlockStdErr();
-    nosuspend {
-        writer.print(level_txt ++ prefix2 ++ format ++ "\n", args) catch return;
-        bw.flush() catch return;
-    }
+        var mu: ?Mutex = null;
+
+        pub fn call(
+            comptime message_level: std.log.Level,
+            comptime scope: @TypeOf(.enum_literal),
+            comptime format: []const u8,
+            args: anytype,
+        ) void {
+            if (coro.inCoro() == false) {
+                return fallbackLogFn(message_level, scope, format, args);
+            }
+
+            const level_txt = comptime message_level.asText();
+            const prefix2 = if (scope == .default) ": " else "(" ++ @tagName(scope) ++ "): ";
+            const stderr = getStdErr().writer();
+            var bw = std.io.bufferedWriter(stderr);
+            const writer = bw.writer();
+
+            var mutex = Self.mu orelse blk: {
+                Self.mu = Mutex.init();
+                break :blk Self.mu.?;
+            };
+            mutex.lock();
+            defer mutex.unlock();
+            nosuspend {
+                writer.print(level_txt ++ prefix2 ++ format ++ "\n", args) catch return;
+                bw.flush() catch return;
+            }
+        }
+    }.call;
 }
