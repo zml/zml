@@ -19,6 +19,7 @@ const log = std.log.scoped(.llama);
 
 pub const std_options = .{
     .log_level = .info,
+    .logFn = asynk.logFn(std.log.defaultLog),
 };
 
 pub fn tokenizePromptLlama3(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, config: LlamaLM.Config, prompt: []const u8) ![]u32 {
