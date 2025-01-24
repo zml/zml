@@ -96,6 +96,6 @@ extern "C" fn hftokenizers_token_to_id(t: *mut tokenizers::Tokenizer, token: Zig
     let id = unsafe { t.as_ref() }
         .unwrap()
         .token_to_id(std::str::from_utf8(token.as_slice()).unwrap())
-        .unwrap();
+        .unwrap_or(u32::MAX);
     return id;
 }

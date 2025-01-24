@@ -107,7 +107,7 @@ pub const HFTokenizer = opaque {
         return Decoder.init(self);
     }
 
-    pub fn token_to_id(self: *HFTokenizer, token: []const u8) u32 {
+    pub fn token_to_id(self: *HFTokenizer, token: []const u8) ?u32 {
         return c.hftokenizers_token_to_id(@ptrCast(self), ffi.ZigSlice.from(token));
     }
 };

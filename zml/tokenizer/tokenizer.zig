@@ -111,7 +111,7 @@ pub const Tokenizer = union(Tokenizers) {
         };
     }
 
-    pub fn token_to_id(self: Tokenizer, token: []const u8) u32 {
+    pub fn token_to_id(self: Tokenizer, token: []const u8) ?u32 {
         return switch (self) {
             inline else => |v| v.token_to_id(token),
         };
