@@ -152,6 +152,7 @@ pub fn loadTokenizer(allocator: std.mem.Allocator, tokenizer_path: []const u8, v
         }
         tokenizer.vocab_size = i;
     }
+    try tokenizer.rewriteByteFallbackTokens();
     return tokenizer;
 }
 
