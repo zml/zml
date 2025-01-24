@@ -134,8 +134,8 @@ const Coro = struct {
         return initFromStack(func, stack_, storage);
     }
 
-    pub fn deinit(self: Coro) void {
-        _ = self; // autofix
+    pub fn deinit(_: Coro) void {
+        // empty
     }
 
     fn initFromStack(func: *const fn () void, stack_: stack.Stack, storage: ?*anyopaque) !Frame {
@@ -423,8 +423,7 @@ const CoroId = struct {
 const StackOverflow = struct {
     const magic_number: usize = 0x5E574D6D;
 
-    fn check(coro: Frame) !void {
-        _ = coro; // autofix
+    fn check(_: Frame) !void {
         // const stack = coro.stack.ptr;
         // const sp = coro.impl.stack_pointer;
         // const magic_number_ptr: *usize = @ptrCast(stack);
@@ -435,8 +434,7 @@ const StackOverflow = struct {
         // }
     }
 
-    fn setMagicNumber(stack_: stack.Stack) !void {
-        _ = stack_; // autofix
+    fn setMagicNumber(_: stack.Stack) !void {
         // if (stack.len <= @sizeOf(usize)) {
         //     return Error.StackTooSmall;
         // }

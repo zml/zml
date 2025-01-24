@@ -7,7 +7,10 @@ new_git_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:git.bzl"
 bazel_dep(name = "bazel_skylib", version = "1.7.1")
 bazel_dep(name = "hermetic_cc_toolchain", version = "3.1.1")
 bazel_dep(name = "patchelf", version = "0.18.0")
+bazel_dep(name = "pcre2", version = "10.43")
+bazel_dep(name = "abseil-cpp", version = "20240722.0.bcr.2")
 bazel_dep(name = "platforms", version = "0.0.10")
+bazel_dep(name = "protobuf", version = "29.2")
 bazel_dep(name = "rules_cc", version = "0.0.17")
 bazel_dep(name = "rules_pkg", version = "1.0.1")
 bazel_dep(name = "rules_proto", version = "7.1.0")
@@ -114,3 +117,33 @@ apt.install(
     manifest = "//runtimes/neuron:packages.yaml",
 )
 use_repo(apt, "neuron_bookworm")
+
+non_module_deps = use_extension("//:third_party/non_module_deps.bzl", "non_module_deps")
+use_repo(non_module_deps, "com_google_sentencepiece", "org_swig_swig")
+
+bazel_dep(name = "rules_rust", version = "0.57.0")
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(
+    edition = "2021",
+    versions = ["1.84.0"],
+    extra_target_triples = [
+        "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-gnu",
+    ],
+)
+use_repo(rust, "rust_toolchains")
+register_toolchains("@rust_toolchains//:all")
+
+crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+crate.from_cargo(
+    name = "crates",
+    cargo_lockfile = "//zml/tokenizer/hftokenizers:Cargo.lock",
+    manifests = ["//zml/tokenizer/hftokenizers:Cargo.toml"],
+    supported_platform_triples = [
+        "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-gnu",
+    ],
+)
+use_repo(crate, "crates")
