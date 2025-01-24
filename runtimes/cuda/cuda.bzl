@@ -5,7 +5,7 @@ load("//bazel:http_deb_archive.bzl", "http_deb_archive")
 ARCH = "linux-x86_64"
 
 CUDA_VERSION = "12.6.3"
-CUDNN_VERSION = "9.5.1"
+CUDNN_VERSION = "9.6.0"
 
 def _filegroup(name, srcs):
     return """\
@@ -25,6 +25,16 @@ cc_import(
     visibility = ["@libpjrt_cuda//:__subpackages__"],
 )
 """.format(name = repr(name), shared_library = repr(shared_library), deps = repr(deps))
+
+def _cc_import_static(name, static_library, deps = []):
+    return """\
+cc_import(
+    name = {name},
+    static_library = {static_library},
+    deps = {deps},
+    visibility = ["@libpjrt_cuda//:__subpackages__"],
+)
+""".format(name = repr(name), static_library = repr(static_library), deps = repr(deps))
 
 CUDA_PACKAGES = {
     "cuda_cudart": _cc_import(
@@ -57,12 +67,20 @@ CUDA_PACKAGES = {
             srcs = ["bin/ptxas"],
         ),
         _filegroup(
+            name = "nvlink",
+            srcs = ["bin/nvlink"],
+        ),
+        _filegroup(
             name = "libdevice",
             srcs = ["nvvm/libdevice/libdevice.10.bc"],
         ),
         _cc_import(
             name = "nvvm",
             shared_library = "nvvm/lib64/libnvvm.so.4",
+        ),
+        _cc_import_static(
+            name = "nvptxcompiler",
+            static_library = "lib/libnvptxcompiler_static.a",
         ),
     ]),
     "cuda_nvrtc": "\n".join([
@@ -190,9 +208,8 @@ def _cuda_impl(mctx):
     http_archive(
         name = "libpjrt_cuda",
         build_file = "libpjrt_cuda.BUILD.bazel",
-        url = "https://files.pythonhosted.org/packages/d7/aa/f15ea857ad9bcff7a0c942dc570ca718b026cc0cc5c513525bb08cacf3c0/jax_cuda12_pjrt-0.4.35-py3-none-manylinux2014_x86_64.whl",
-        type = "zip",
-        sha256 = "0ffe7e1ba65659bd5738c2cc5addaf0a56205d2188eec5da194b63c068e1fdd2",
+        url = "https://github.com/zml/pjrt-artifacts/releases/download/v5.0.0/pjrt-cuda_linux-amd64.tar.gz",
+        sha256 = "1c3ca76d887d112762d03ebb28f17a08beebf6338453c3044a36225e1678a113",
     )
 
     return mctx.extension_metadata(

@@ -17,23 +17,24 @@ const ShapeOf = zml.ShapeOf;
 
 const log = std.log.scoped(.llama);
 
+const eos_tokens: [3]i32 = .{ 128001, 128008, 128009 };
+
 // set this to false to disable the verbose logging
 const show_mlir = true;
 
 pub const std_options = .{
-    .log_level = .err,
+    .log_level = .warn,
     .log_scope_levels = &[_]std.log.ScopeLevel{
-        .{ .scope = .pjrt, .level = if (show_mlir) .debug else .err },
-        .{ .scope = .zml_module, .level = if (show_mlir) .debug else .err },
-        .{ .scope = .zml, .level = if (show_mlir) .debug else .err },
-        .{ .scope = .llama, .level = if (show_mlir) .debug else .info },
+        .{ .scope = .zml_module, .level = if (show_mlir) .debug else .warn },
+        .{ .scope = .llama, .level = .info },
     },
+    .logFn = asynk.logFn,
 };
 
 pub fn generateText(
     llama: LlamaLM,
-    mod_prefill: zml.module.ExeWithWeights(LlamaLM.forward),
-    mod: zml.module.ExeWithWeights(LlamaLM.forward),
+    mod_prefill: zml.ModuleExe(LlamaLM.forward),
+    mod: zml.ModuleExe(LlamaLM.forward),
     tokenizer: zml.tokenizer.Tokenizer,
     allocator: std.mem.Allocator,
     seed: u128,
@@ -57,10 +58,12 @@ pub fn generateText(
     defer output.deinit();
 
     var tokens = try zml.Buffer.fromSlice(mod.platform(), .{max_seq_len}, token_buffer);
-    var token_index = try zml.Buffer.fromSlice(mod.platform(), .{}, &[_]i32{@intCast(prompt_tok.len - 1)});
+    var prefill_token_index = try zml.Buffer.fromSlice(mod.platform(), .{}, &[_]i32{@intCast(prompt_tok.len - 1)});
+    defer prefill_token_index.deinit();
 
     var rng = try zml.Tensor.Rng.init(mod.platform(), seed);
-    tokens, token_index, var kv_cache, rng = mod_prefill.call(.{ tokens, token_index, null, rng });
+    tokens, var token_index, var kv_cache, rng = mod_prefill.call(.{ tokens, prefill_token_index, null, rng });
+    defer token_index.deinit();
     defer kv_cache.k.deinit();
     defer kv_cache.v.deinit();
     defer kv_cache.layer_index.deinit();
@@ -71,10 +74,13 @@ pub fn generateText(
 
     const start = std.time.microTimestamp();
     const output_freq: u8 = 1;
+    var eos_index: ?usize = null;
     for (0..output_tokens_len) |i| {
         //_ = i;
         const frame_id = tracer.frameStart(try std.fmt.bufPrintZ(tracer_buffer, "Generate token {}/{}", .{ i + 1, output_tokens_len }));
-        tokens, token_index, kv_cache, rng = mod.call(.{ tokens, token_index, kv_cache, rng });
+        tokens, const new_token_index, kv_cache, rng = mod.call(.{ tokens, token_index, kv_cache, rng });
+        token_index.deinit();
+        token_index = new_token_index;
         if ((i + 1) % output_freq == 0) {
             const n = output.items.len;
             _ = try tokens.toHost(std.mem.sliceAsBytes(token_buffer));
@@ -82,26 +88,34 @@ pub fn generateText(
             decode_progress += output_freq;
             std.debug.print("{s}", .{output.items[n..]});
             tracer.frameEnd(frame_id, try std.fmt.bufPrintZ(tracer_buffer, "Decoded token {}/{} : {s}", .{ i + 1, output_tokens_len, output.items[n..] }));
+            if (std.mem.indexOfAny(i32, token_buffer[decode_progress - output_freq ..], &eos_tokens)) |index| {
+                // Handle strange scenarios when eos id isn't the very next token after decode_progress
+                eos_index = decode_progress - output_freq + index;
+                break;
+            }
         } else {
             tracer.frameEnd(frame_id, try std.fmt.bufPrintZ(tracer_buffer, "Generated token {}/{}", .{ i + 1, output_tokens_len }));
         }
     }
-    std.debug.print("\n", .{});
-
+    var total_token_count: usize = max_seq_len;
     const n = output.items.len;
-    try tokenizer.decodeWithOpts(&output, @ptrCast(token_buffer[decode_progress..]), .{});
+    if (eos_index) |end_idx| {
+        // count = eos index + 1
+        total_token_count = end_idx + 1;
+    }
+    const generated_token_count = total_token_count - prompt_tok.len;
+    try tokenizer.decodeWithOpts(&output, @ptrCast(token_buffer[decode_progress..total_token_count]), .{});
     std.debug.print("{s}\n", .{output.items[n..]});
     const end = std.time.microTimestamp();
 
     const duration = stdx.math.divFloat(f64, end - start, std.time.us_per_s);
-    const speed = @as(f64, @floatFromInt(max_seq_len)) / duration;
-    log.info("✅ Generated {d} tokens in {:.3}s: {d:.3}tok/s", .{ max_seq_len, duration, speed });
+    const speed = @as(f64, @floatFromInt(generated_token_count)) / duration;
+    log.info("✅ Generated {d} tokens in {:.3}s: {d:.3}tok/s", .{ generated_token_count, duration, speed });
 
     _ = try tokens.toHost(std.mem.sliceAsBytes(token_buffer));
-    const end_index = std.mem.indexOfScalar(i32, token_buffer, 128001) orelse max_seq_len;
     output.clearRetainingCapacity();
 
-    try tokenizer.decodeWithOpts(&output, @ptrCast(token_buffer[0..end_index]), .{});
+    try tokenizer.decodeWithOpts(&output, @ptrCast(token_buffer[0..total_token_count]), .{});
     return output.toOwnedSlice();
 }
 
@@ -127,6 +141,8 @@ pub fn asyncMain() !void {
         prompt: ?[]const u8 = null,
         test_activations: ?[]const u8 = null,
         seed: ?u128 = null,
+        // eg: --create-options='{"cuda":{"allocator":{"bfc":{"memory_fraction": 0.99}}}}'
+        create_options: []const u8 = "{}",
     };
 
     log.info("   LLama was compiled with {}", .{@import("builtin").mode});
@@ -139,13 +155,9 @@ pub fn asyncMain() !void {
     defer context.deinit();
 
     const compilation_options = zml.CompilationOptions{
-        .cache_location = "/tmp/zml/llama/cache",
         .xla_dump_to = "/tmp/zml/llama",
         .sharding_enabled = true,
     };
-
-    const platform = context.autoPlatform().withCompilationOptions(compilation_options);
-    context.printAvailablePlatforms(platform);
 
     var args = std.process.args();
     const cli_args = flags.parse(&args, CliArgs);
@@ -154,6 +166,10 @@ pub fn asyncMain() !void {
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const model_arena = arena_state.allocator();
+
+    const create_opts = try std.json.parseFromSliceLeaky(zml.Platform.CreateOptions, model_arena, cli_args.create_options, .{});
+    const platform = context.autoPlatform(create_opts).withCompilationOptions(compilation_options);
+    context.printAvailablePlatforms(platform);
 
     log.info("Model file: {s}", .{model_file});
 
@@ -197,7 +213,7 @@ pub fn asyncMain() !void {
     defer tokenizer.deinit();
 
     const dims = llama.model.shape();
-    const dtype = llama.lm_head.weight.dtype();
+    const dtype = llama.model.embed_tokens.weight.dtype();
 
     // Note: we compile the model without a batching dimension.
     // To do so, we would just need to add `.b = batch_size` to `token_shape` and `kv_shape`.
@@ -217,9 +233,9 @@ pub fn asyncMain() !void {
     defer zml.aio.unloadBuffers(&llama_weights);
     log.info("✅\tLoaded weights in {d}ms", .{start.read() / std.time.ns_per_ms});
 
-    var llama_module_prefill = try (try fut_mod_prefill.awaitt()).prepare(allocator, llama_weights);
+    var llama_module_prefill = (try fut_mod_prefill.awaitt()).prepare(llama_weights);
     defer llama_module_prefill.deinit();
-    var llama_module = try (try fut_mod.awaitt()).prepare(allocator, llama_weights);
+    var llama_module = (try fut_mod.awaitt()).prepare(llama_weights);
     defer llama_module.deinit();
     log.info("✅\tCompiled model in {d}ms", .{start.read() / std.time.ns_per_ms});
 

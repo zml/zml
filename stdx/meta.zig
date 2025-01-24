@@ -4,6 +4,7 @@ const debug = @import("debug.zig");
 const compileError = debug.compileError;
 
 pub const FnSignature = @import("signature.zig").FnSignature;
+pub const Signature = @import("signature.zig").Signature;
 
 pub fn isStruct(comptime T: type) bool {
     return switch (@typeInfo(T)) {
@@ -150,9 +151,37 @@ pub fn FnParam(comptime func: anytype, comptime n: comptime_int) type {
 }
 
 pub fn FnArgs(comptime func: anytype) type {
+    debug.assertComptime(!@typeInfo(@TypeOf(func)).Fn.is_generic, "FnArgs expects non generic function, got: {}", .{@TypeOf(func)});
     return FnSignature(func, null).ArgsT;
 }
 
+pub fn FnArgsWithHint(comptime func: anytype, ArgsT: type) type {
+    debug.assertComptime(@typeInfo(@TypeOf(func)).Fn.is_generic, "FnArgsWithHint expects a generic function, got: {}", .{@TypeOf(func)});
+    return FnSignature(func, ArgsT).ArgsT;
+}
+
 pub fn FnResult(comptime func: anytype) type {
-    return FnSignature(func, null).ReturnT;
+    return @typeInfo(@TypeOf(func)).Fn.return_type orelse @compileError("anytype is not supported");
+}
+
+pub fn Head(Tuple: type) type {
+    return switch (@typeInfo(Tuple)) {
+        .Struct => |struct_info| {
+            if (struct_info.fields.len == 0) @compileError("Can't tail empty tuple");
+            return struct_info.fields[0].type;
+        },
+        else => @compileError("Head works on tuple type"),
+    };
+}
+
+pub fn Tail(Tuple: type) type {
+    return switch (@typeInfo(Tuple)) {
+        .Struct => |struct_info| {
+            if (struct_info.fields.len == 0) @compileError("Can't tail empty tuple");
+            var types: [struct_info.fields.len - 1]type = undefined;
+            for (struct_info.fields[1..], 0..) |field, i| types[i] = field.type;
+            return std.meta.Tuple(&types);
+        },
+        else => @compileError("Tail works on tuple type"),
+    };
 }

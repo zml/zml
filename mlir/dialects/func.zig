@@ -4,7 +4,7 @@ const mlir = @import("mlir");
 pub fn func(
     ctx: mlir.Context,
     args: struct {
-        sym_name: [:0]const u8,
+        sym_name: []const u8,
         args: []const mlir.Type,
         arg_attrs: []const mlir.Attribute = &.{},
         results: []const mlir.Type,
@@ -13,8 +13,7 @@ pub fn func(
         location: mlir.Location,
     },
 ) mlir.Operation {
-    const AttrTuple = struct { [:0]const u8, mlir.Attribute };
-    var attrs_tuple_buffer = std.BoundedArray(AttrTuple, 4){};
+    var attrs_tuple_buffer = std.BoundedArray(mlir.AttrTuple, 4){};
     attrs_tuple_buffer.appendAssumeCapacity(.{ "sym_name", mlir.StringAttribute.init(ctx, args.sym_name).as(mlir.Attribute).? });
     attrs_tuple_buffer.appendAssumeCapacity(.{ "function_type", mlir.TypeAttribute.init((mlir.FunctionType.init(ctx, args.args, args.results) catch unreachable).as(mlir.Type).?).as(mlir.Attribute).? });
     if (args.arg_attrs.len > 0) {

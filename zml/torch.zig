@@ -105,8 +105,8 @@ pub fn unsqueeze(
 }
 
 test unsqueeze {
-    const UnsqueezeTest = struct {
-        pub fn forward(x: Tensor) Tensor {
+    const Local = struct {
+        pub fn _fwd(x: Tensor) Tensor {
             var y = x;
             y = unsqueeze(y, 0);
             y = unsqueeze(y, -1);
@@ -117,7 +117,7 @@ test unsqueeze {
     const platform = zml.testing.env();
 
     const x = try zml.Buffer.fromArray(platform, @as([8]f16, undefined));
-    const res = try zml.testing.compileAndCall(platform, UnsqueezeTest.forward, .{x});
+    const res = try zml.testing.compileAndCall(platform, Local._fwd, .{x});
     try zml.testing.expectEqualShapes(zml.Shape.init(.{ 1, 8, 1, 1 }, .f16), res.shape());
 }
 
@@ -247,7 +247,7 @@ test meshgrid {
     const y = try zml.Buffer.fromSlice(platform, .{4}, &[_]i32{ 0, 1, 2, 3 });
 
     const Local = struct {
-        pub fn meshgrid2(a: Tensor, b: Tensor, indexing: MeshgridIndexing) [2]Tensor {
+        pub fn _meshgrid2(a: Tensor, b: Tensor, indexing: MeshgridIndexing) [2]Tensor {
             return meshgrid(2, .{ a, b }, indexing);
         }
     };
@@ -255,7 +255,7 @@ test meshgrid {
     // Only test .xy mode, sinc .ij is just calling cartesianProduct which
     // got its own tests.
     {
-        const xs, const ys = try zml.testing.compileAndCall(platform, Local.meshgrid2, .{ x, y, .xy });
+        const xs, const ys = try zml.testing.compileAndCall(platform, Local._meshgrid2, .{ x, y, .xy });
         try std.testing.expectEqualSlices(i64, &.{ 4, 6 }, xs.dims());
         try std.testing.expectEqualSlices(i64, &.{ 4, 6 }, ys.dims());
         try std.testing.expectEqualDeep(

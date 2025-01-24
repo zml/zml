@@ -5,16 +5,12 @@ const flags = @import("tigerbeetle/flags");
 
 // set log level to debug to print the generated IR
 pub const std_options = .{
-    .log_level = .debug,
+    .log_level = .warn,
 };
 
-/// Model definition
-const Benchmark = struct {
-    pub fn forward(self: Benchmark, a: zml.Tensor, b: zml.Tensor) zml.Tensor {
-        _ = self;
-        return a.withSharding(.{.k}).dot(b.withSharding(.{.k}), .{.k}).withSharding(.{.m});
-    }
-};
+pub fn benchmark(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
+    return a.withSharding(.{.k}).dot(b.withSharding(.{.k}), .{.k}).withSharding(.{.m});
+}
 
 pub fn main() !void {
     try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain);
@@ -34,16 +30,11 @@ pub fn asyncMain() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // Arena allocator for BufferStore etc.
-    var arena_state = std.heap.ArenaAllocator.init(allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
     var context = try zml.Context.init();
     defer context.deinit();
 
     // Auto-select platform
-    const platform = context.autoPlatform().withCompilationOptions(.{
+    const platform = context.autoPlatform(.{}).withCompilationOptions(.{
         .sharding_enabled = true,
     });
     context.printAvailablePlatforms(platform);
@@ -60,17 +51,14 @@ pub fn asyncMain() !void {
     // Start compiling.
     // The shape of the input tensor, we have to pass in manually.
     timer.reset();
-    var compilation = try asynk.asyncc(zml.module.compileModel, .{ allocator, Benchmark.forward, Benchmark{}, .{ a_shape, b_shape }, platform });
+    var compilation = try asynk.asyncc(zml.compileFn, .{ allocator, benchmark, .{ a_shape, b_shape }, platform });
 
     // Wait for compilation to finish
-    const compiled = try compilation.awaitt();
+    const executable = try compilation.awaitt();
+    defer executable.deinit();
     const compilation_elapsed = timer.lap() / std.time.ns_per_ms;
     std.debug.print("-" ** 160 ++ "\n\n", .{});
     std.debug.print("✅ Compiled Benchmark model in {d} milliseconds! \n", .{compilation_elapsed});
-
-    // pass the model weights to the compiled module to create an executable module
-    var executable = try compiled.prepare(arena, .{});
-    defer executable.deinit();
 
     var rng = std.Random.DefaultPrng.init(0);
     const random = rng.random();

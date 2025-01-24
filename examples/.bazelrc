@@ -66,13 +66,15 @@ build           --compiler=clang
 
 build:macos     --macos_sdk_version=13.0
 
-# Used by the tsl overlay in python_init_repositories for the bazelified xla module 20241025.0-4663f04
+# Used by the tsl overlay in python_init_repositories for the bazelified xla module 20241025.0-4663f04 and later
 build           --repo_env HERMETIC_PYTHON_VERSION=3.11
 
 # Print test errors in the console
 test            --test_output=errors
 
+# --config=debug will used optmized backend, but all the frontend zig code will be compiled in debug mode.
 build:debug     --compilation_mode=opt
+build:debug     --@rules_zig//zig/settings:mode=debug
 build:debug     --strategy=ZigBuildLib=local
 build:debug     --strategy=ZigBuildObj=local
 build:debug     --strategy=ZigBuildTestLib=local

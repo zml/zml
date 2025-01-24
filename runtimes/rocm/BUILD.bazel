@@ -1,8 +1,23 @@
 load("@rules_zig//zig:defs.bzl", "zig_library")
 
-filegroup(
-    name = "zmlxrocm_srcs",
-    srcs = ["zmlxrocm.cc"],
+cc_library(
+    name = "zmlxrocm_lib",
+    srcs = ["zmlxrocm.c"],
+    linkopts = [
+        "-lc",
+        "-ldl",
+    ],
+)
+
+cc_shared_library(
+    name = "zmlxrocm_so",
+    shared_lib_name = "libzmlxrocm.so.0",
+    deps = [":zmlxrocm_lib"],
+)
+
+cc_import(
+    name = "zmlxrocm",
+    shared_library = ":zmlxrocm_so",
     visibility = ["@libpjrt_rocm//:__subpackages__"],
 )
 
@@ -37,6 +52,8 @@ zig_library(
         "//runtimes:rocm.enabled": [
             ":libpjrt_rocm",
             "//async",
+            "//stdx",
+            "@rules_zig//zig/runfiles",
         ],
         "//conditions:default": [":empty"],
     }),

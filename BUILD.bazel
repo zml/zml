@@ -2,6 +2,7 @@ load("@rules_zig//zig:defs.bzl", "zls_completion")
 
 zls_completion(
     name = "completion",
+    visibility = ["//visibility:public"],
     deps = [
         "//async",
         "//stdx",

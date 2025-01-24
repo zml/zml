@@ -34,7 +34,7 @@ pub fn asyncMain() !void {
     var context = try zml.Context.init();
     defer context.deinit();
 
-    const platform = context.autoPlatform();
+    const platform = context.autoPlatform(.{});
     context.printAvailablePlatforms(platform);
 
     // Our weights and bias to use
@@ -74,7 +74,7 @@ pub fn asyncMain() !void {
     const compiled = try compilation.awaitt();
 
     // pass the model weights to the compiled module to create an executable module
-    var executable = try compiled.prepare(arena, model_weights);
+    var executable = compiled.prepare(model_weights);
     defer executable.deinit();
 
     // prepare an input buffer

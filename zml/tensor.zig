@@ -58,9 +58,9 @@ pub const Tensor = struct {
         options: std.fmt.FormatOptions,
         writer: anytype,
     ) !void {
-        _ = fmt;
         _ = options;
-        try writer.print("Tensor({_})", .{self._shape});
+        const bare_fmt = fmt.len == 1 and fmt[0] == '_';
+        try writer.print(if (bare_fmt) "{_}" else "Tensor({_})", .{self._shape});
     }
 
     /// Returns the shape of a Tensor.
@@ -126,7 +126,7 @@ pub const Tensor = struct {
 
     /// Returns the dimension of axis 'axis_'.
     ///
-    /// 'axis_' can be a signed integer or a tag.
+    /// 'axis_' can be an integer or a tag.
     pub fn dim(self: Tensor, axis_: anytype) i64 {
         return self._shape.dim(axis_);
     }
@@ -138,9 +138,16 @@ pub const Tensor = struct {
 
     /// Returns the index of axis 'axis_'.
     ///
-    /// 'axis_' can be a signed integer or a tag.
+    /// 'axis_' can be an integer or a tag.
     pub fn axis(self: Tensor, axis_: anytype) u3 {
         return self._shape.axis(axis_);
+    }
+
+    /// Returns the indices of each of the given axes.
+    ///
+    /// 'axis_' can be an integer or a tag.
+    pub fn axes(self: Tensor, axes_: anytype) std.BoundedArray(u3, Tensor.MAX_RANK) {
+        return self._shape.axes(axes_);
     }
 
     /// Returns a Tensor tagged with the tags in 'tagz'.
@@ -205,6 +212,7 @@ pub const Tensor = struct {
     pub fn value(self: Tensor) mlir.Value {
         return self.getContext().getValueAndDonation(self)[0];
     }
+
     /// Tell PJRT compiler that memory should be reuse between the two tensors.
     /// The compiler is already aggressively reusing tensors for intermediate results,
     /// but this API allows to reuse buffer between input and output arguments
@@ -226,13 +234,13 @@ pub const Tensor = struct {
     var _global_tensor_counter: u64 = 0;
 
     /// Internal use
-    pub fn reserveIdRange(len: u32) u64 {
+    pub fn _reserveIdRange(len: u32) u64 {
         return @atomicRmw(u64, &_global_tensor_counter, .Add, len, .seq_cst);
     }
 
     /// Internal use
     pub fn setUniqueId(self: *Tensor) void {
-        self._id = .{ .buffer_id = reserveIdRange(1) };
+        self._id = .{ .buffer_id = _reserveIdRange(1) };
     }
 
     /// Returns a Tensor containing the absolute value of each element of the input Tensor.
@@ -269,7 +277,7 @@ pub const Tensor = struct {
 
         res_shape = res_shape.withDtype(dt);
 
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "bitCast({})", .{dt});
+        const loc = self.getContext().location(@src(), "bitCast({s})", .{@tagName(dt)});
         const op = dialect.stablehlo.bitcast_convert(
             self.getContext().mlirCtx(),
             self.value(),
@@ -310,13 +318,6 @@ pub const Tensor = struct {
     }
 
     /// Returns a Tensor containing the element-wise remainder of dividend 'self' and divisor 'other'.
-    pub fn remainder(self: Tensor, other: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
-        const op = dialect.stablehlo.remainder(self.getContext().mlirCtx(), self.value(), other.value(), loc);
-        return _result(self._shape, op.result(0));
-    }
-
-    /// Returns a Tensor containing the element-wise remainder of dividend 'self' and divisor 'other'.
     ///
     /// See https://pytorch.org/docs/stable/generated/torch.fmod.html for more details.
     pub fn fmod(self: Tensor, divisor: f32) Tensor {
@@ -341,27 +342,27 @@ pub const Tensor = struct {
 
     /// Returns a Tensor containing the element-wise left-shift operation of 'self' by 'other'.
     pub fn shiftLeft(self: Tensor, other: Tensor) Tensor {
-        return binaryOp("shiftLeft", dialect.stablehlo.shift_left)(self, other);
+        return binaryOp(@src(), "shiftLeft", dialect.stablehlo.shift_left)(self, other);
     }
 
     /// Returns a Tensor containing the element-wise arithmetic right-shift operation of 'self' by 'other'.
     pub fn shiftRightArithmetic(self: Tensor, other: Tensor) Tensor {
-        return binaryOp("shiftRightArithmetic", dialect.stablehlo.shift_right_arithmetic)(self, other);
+        return binaryOp(@src(), "shiftRightArithmetic", dialect.stablehlo.shift_right_arithmetic)(self, other);
     }
 
     /// Returns a Tensor containing the element-wise logical right-shift operation of 'self' by 'other'.
     pub fn shiftRightLogical(self: Tensor, other: Tensor) Tensor {
-        return binaryOp("shiftRightLogical", dialect.stablehlo.shift_right_logical)(self, other);
+        return binaryOp(@src(), "shiftRightLogical", dialect.stablehlo.shift_right_logical)(self, other);
     }
 
     /// Returns the Cholesky decomposition of the input Tensor.
     ///
-    /// 'lower' controls the form of the outut Tensor. The output will be lower-triangular if 'lower' is true
+    /// 'lower' controls the form of the output Tensor. The output will be lower-triangular if 'lower' is true
     /// and upper-triangular otherwise.
     pub fn cholesky(self: Tensor, lower: bool) Tensor {
         stdx.debug.assert(self.rank() <= 2, "cholesky expects tensor rank to be <= 2, got {}", .{self.rank()});
 
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "lower={}", .{lower});
+        const loc = self.getContext().location(@src(), "lower={}", .{lower});
         const op = dialect.stablehlo.cholesky(self.getContext().mlirCtx(), self.value(), lower, loc);
         return _result(self._shape, op.result(0));
     }
@@ -371,7 +372,7 @@ pub const Tensor = struct {
         stdx.debug.assert(self.dtype() == other.dtype(), "triangularSolve expects tensors to be of the same type, got {} and {}", .{ self.dtype(), other.dtype() });
         stdx.debug.assert(self.rank() <= 2 and self.rank() == other.rank(), "triangularSolve expects tensors to have the same rank and be <= 2, got {} and {}", .{ self.rank(), other.rank() });
 
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "opts={}", .{opts});
+        const loc = self.getContext().location(@src(), "triangularSolve({_}, {})", .{ self, opts });
         const op = dialect.stablehlo.triangular_solve(self.getContext().mlirCtx(), self.value(), other.value(), loc, opts);
         return _result(self._shape, op.result(0));
     }
@@ -484,7 +485,7 @@ pub const Tensor = struct {
             },
         };
 
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "opts={}", .{opts});
+        const loc = self.getContext().location(@src(), "fft({_},{})", .{ self, opts });
         const op = dialect.stablehlo.fft(self.getContext().mlirCtx(), self.value(), loc, opts);
         return _result(sh, op.result(0));
     }
@@ -514,7 +515,7 @@ pub const Tensor = struct {
         /// but it is not guaranteed to be deterministic between implementations.
         pub fn bitGenerator(self: Rng, sh: Shape) struct { Rng, Tensor } {
             const ctx = CompilationContext.current();
-            const loc = ctx.mlirCtx().location(@src()).namedFmt(ctx.mlirCtx(), "rand.bitGen({})", .{sh});
+            const loc = ctx.location(@src(), "rand.bitGen({_})", .{sh});
             const op = dialect.stablehlo.rng_bit_generator(
                 ctx.mlirCtx(),
                 self.algorithm,
@@ -638,12 +639,12 @@ pub const Tensor = struct {
         pub fn normal(sh: Shape, opts: struct { mean: f64 = 0, stddev: f64 = 1 }) Tensor {
             stdx.debug.assert(sh.dtype().isFloat(), "normal expects tensor type to be a float, got {}", .{sh.dtype()});
 
-            const ctx = CompilationContext.current().mlirCtx();
-            const loc = ctx.location(@src()).namedFmt(ctx, "rand.normal({}, opts={})", .{ sh, opts });
+            const ctx = CompilationContext.current();
+            const loc = ctx.location(@src(), "rand.normal({_}, mean={},stddev={})", .{ sh, opts.mean, opts.stddev });
             const a = Tensor.constant(.{}, Data.init(sh.dtype(), opts.mean));
             const b = Tensor.constant(.{}, Data.init(sh.dtype(), opts.stddev));
             const res_shape = Tensor.constantTensor(HostBuffer.fromSlice(.{sh.rank()}, sh.dims()));
-            const op = dialect.stablehlo.rng(ctx, a.value(), b.value(), res_shape.value(), .NORMAL, loc);
+            const op = dialect.stablehlo.rng(ctx.mlirCtx(), a.value(), b.value(), res_shape.value(), .NORMAL, loc);
             return _result(sh, op.result(0));
         }
 
@@ -684,7 +685,7 @@ pub const Tensor = struct {
                     // Test out the gumbel reparametrization trick
                     var x = target_dist.log().withTags(.{.d}).broad(s);
                     x = x.add(data);
-                    const samples = x.argMax(.d, .i32).indices.squeeze(.d);
+                    const samples = x.argMax(.d).indices.squeeze(.d);
 
                     // count 0, 1, 2 and 3 in samples:
                     // - map 0 to 1, 1 to 2**16, 2 to 2**32, 3 to N**58
@@ -736,7 +737,7 @@ pub const Tensor = struct {
         stdx.debug.assert(1 <= exponent_bits, "reducePrecision expects 'exponent_bits' to be >= 1, got {}", .{exponent_bits});
         stdx.debug.assert(0 <= mantissa_bits, "reducePrecision expects 'mantissa_bits' to be positive, got {}", .{mantissa_bits});
 
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "reducePrecision(exponent_bits={}, mantissa_bits={})", .{ exponent_bits, mantissa_bits });
+        const loc = self.getContext().location(@src(), "reducePrecision(exponent_bits={}, mantissa_bits={})", .{ exponent_bits, mantissa_bits });
         const op = dialect.stablehlo.reduce_precision(self.getContext().mlirCtx(), self.value(), exponent_bits, mantissa_bits, loc);
         return _result(self._shape, op.result(0));
     }
@@ -859,7 +860,7 @@ pub const Tensor = struct {
             batch_group_count: i64 = 1,
         },
     ) Tensor {
-        const loc = input.getContext().mlirCtx().location(@src()).namedFmt(input.getContext().mlirCtx(), "opts={}", .{opts});
+        const loc = input.getContext().location(@src(), "opts={}", .{opts});
         return input.convolution(kernel, .{
             .window_strides = &.{opts.window_strides},
             .pad_value = opts.padding,
@@ -904,7 +905,7 @@ pub const Tensor = struct {
             batch_group_count: i64 = 1,
         },
     ) Tensor {
-        const loc = input.getContext().mlirCtx().location(@src()).namedFmt(input.getContext().mlirCtx(), "opts={}", .{opts});
+        const loc = input.getContext().location(@src(), "opts={}", .{opts});
         return input.convolution(kernel, .{
             .window_strides = opts.window_strides,
             .pad_value = opts.padding,
@@ -927,37 +928,42 @@ pub const Tensor = struct {
 
     /// Returns a Tensor containing the element-wise addition of the input Tensors.
     pub fn add(self: Tensor, other: Tensor) Tensor {
-        return binaryOp("add", dialect.stablehlo.add)(self, other);
+        return binaryOp(@src(), "add", dialect.stablehlo.add)(self, other);
     }
 
     /// Returns a Tensor containing the element-wise subtraction of the input Tensors.
     pub fn sub(self: Tensor, other: Tensor) Tensor {
-        return binaryOp("subtract", dialect.stablehlo.subtract)(self, other);
+        return binaryOp(@src(), "subtract", dialect.stablehlo.subtract)(self, other);
     }
 
     /// Returns a Tensor containing the element-wise multiplication of the input Tensors.
     pub fn mul(self: Tensor, other: Tensor) Tensor {
-        return binaryOp("mul", dialect.stablehlo.multiply)(self, other);
+        return binaryOp(@src(), "mul", dialect.stablehlo.multiply)(self, other);
     }
 
     /// Returns a Tensor containing the element-wise division of the input Tensors.
     pub fn div(self: Tensor, other: Tensor) Tensor {
-        return binaryOp("div", dialect.stablehlo.divide)(self, other);
+        return binaryOp(@src(), "div", dialect.stablehlo.divide)(self, other);
     }
 
     /// Returns a Tensor containing the element-wise exponentiation of the input Tensors.
     pub fn pow(self: Tensor, other: Tensor) Tensor {
-        return binaryOp("pow", dialect.stablehlo.power)(self, other);
+        return binaryOp(@src(), "pow", dialect.stablehlo.power)(self, other);
     }
 
     /// Returns a Tensor containing the element-wise maximum operation of the input Tensors.
     pub fn maximum(self: Tensor, other: Tensor) Tensor {
-        return binaryOp("maximum", dialect.stablehlo.maximum)(self, other);
+        return binaryOp(@src(), "maximum", dialect.stablehlo.maximum)(self, other);
     }
 
     /// Returns a Tensor containing the element-wise minimum operation of the input Tensors.
     pub fn minimum(self: Tensor, other: Tensor) Tensor {
-        return binaryOp("minimum", dialect.stablehlo.minimum)(self, other);
+        return binaryOp(@src(), "minimum", dialect.stablehlo.minimum)(self, other);
+    }
+
+    /// Returns a Tensor containing the element-wise remainder of dividend 'self' and divisor 'other'.
+    pub fn remainder(self: Tensor, other: Tensor) Tensor {
+        return binaryOp(@src(), "remainder", dialect.stablehlo.remainder)(self, other);
     }
 
     /// Returns a Tensor containing the element-wise addition of the input Tensor with a constant.
@@ -980,9 +986,9 @@ pub const Tensor = struct {
     /// Returns a Tensor containing the element-wise logical operation of the input Tensors.
     pub fn logical(self: Tensor, comptime logical_op: LogicalOp, other: Tensor) Tensor {
         return switch (logical_op) {
-            .OR => binaryOp("or", dialect.stablehlo.or_)(self, other),
-            .XOR => binaryOp("xor", dialect.stablehlo.xor)(self, other),
-            .AND => binaryOp("and", dialect.stablehlo.and_)(self, other),
+            .OR => binaryOp(@src(), "or", dialect.stablehlo.or_)(self, other),
+            .XOR => binaryOp(@src(), "xor", dialect.stablehlo.xor)(self, other),
+            .AND => binaryOp(@src(), "and", dialect.stablehlo.and_)(self, other),
         };
     }
 
@@ -999,16 +1005,16 @@ pub const Tensor = struct {
     }
 
     /// Returns a Tensor containing the element-wise conversion to another type.
-    pub fn convert(self: Tensor, dt: DataType) Tensor {
-        if (dt == self.dtype()) {
+    pub fn convert(self: Tensor, to: DataType) Tensor {
+        if (to == self.dtype()) {
             return self;
         }
 
-        const res_type = mlir.RankedTensorType.init(self.dims(), mlir.ext.Type.fromDType(self.getContext().mlirCtx(), dt)).as(mlir.Type).?;
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "dtype={}", .{dt});
+        const res_type = mlir.RankedTensorType.init(self.dims(), mlir.ext.Type.fromDType(self.getContext().mlirCtx(), to)).as(mlir.Type).?;
+        const loc = self.getContext().location(@src(), "convert({_},to={s})", .{ self, @tagName(to) });
 
         const op = dialect.stablehlo.convert(self.getContext().mlirCtx(), self.value(), res_type, loc);
-        return _result(self._shape.withDtype(dt), op.result(0));
+        return _result(self._shape.withDtype(to), op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise rounding operation of the input Tensor.
@@ -1069,7 +1075,7 @@ pub const Tensor = struct {
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
 
-        var comp = try zml.module.CompilationContext.init(std.heap.page_allocator, "test", platform);
+        var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
         defer comp.deinit();
 
         comp.activate();
@@ -1166,7 +1172,7 @@ pub const Tensor = struct {
         }
 
         const mlir_ctx = lhs.getContext().mlirCtx();
-        const loc = mlir_ctx.location(@src());
+        const loc = lhs.getContext().location(@src(), "dot({_},{_},contracting={any},batching={any}", .{ lhs, rhs, contracting_axes, batching_axes });
         const op = dialect.stablehlo.dot_general(
             mlir_ctx,
             lhs.value(),
@@ -1356,14 +1362,18 @@ pub const Tensor = struct {
         else
             toI64(axes__);
 
-        stdx.debug.assert(permutation.len == self.rank(), "transpose expects input tensor rank and 'axes_' length to be equal, got {} and {}", .{ self.rank(), permutation.len });
+        stdx.debug.assert(permutation.len == self.rank(), "transpose expects input tensor rank and 'axes_' length to be equal, got {_} and {d}", .{ self, permutation[0..@min(permutation.len, MAX_RANK + 2)] });
 
         if (std.mem.eql(i64, permutation, no_op[0..self.rank()])) {
             return self;
         }
 
         const res_shape = self._shape.transpose(permutation);
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "tr({any})", .{axes_});
+        if (transposeIsJustAReshape(self.shape(), permutation)) {
+            return self.reshape(res_shape);
+        }
+
+        const loc = self.getContext().location(@src(), "transpose({_}, {d})", .{ self, permutation });
         const op = dialect.stablehlo.transpose(
             self.getContext().mlirCtx(),
             self.value(),
@@ -1389,13 +1399,14 @@ pub const Tensor = struct {
     ///
     /// unflatten((d0, d1, axis_m, d3), 2, n) -> (d0, d1, n, d2_m, d3)
     pub fn unflatten(self: Tensor, axis_: i8, n: i64) Tensor {
+        // TODO: move to torch.zig, this equivalent to `spitAxis`
         stdx.debug.assert(self.rank() < Tensor.MAX_RANK, "unflatten expects input tensor rank to be less than {}, got {}", .{ Tensor.MAX_RANK, self.rank() });
 
         const a = if (axis_ >= 0) self.axis(axis_) else self.axis(axis_) + 1;
         const new_dim = std.math.divExact(i64, self.dim(a), n) catch std.debug.panic("unflatten expects chosen dimension to be divisible by 'n' but {} is not divisible by {}", .{ self.dim(a), n });
         const new_shape = self._shape.set(a, n).insert(a + 1, .{ ._ = new_dim });
 
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "axis={}, n={}", .{ axis_, n });
+        const loc = self.getContext().location(@src(), "axis={}, n={}", .{ axis_, n });
         const reshaped_val = dialect.stablehlo.reshape(
             self.getContext().mlirCtx(),
             self.value(),
@@ -1412,7 +1423,7 @@ pub const Tensor = struct {
     pub fn splitAxis(self: Tensor, ax: anytype, split_shape: anytype) Tensor {
         const new_shape = self._shape.splitAxis(ax, split_shape);
 
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "splitAxis({}, {any})", .{ ax, split_shape });
+        const loc = self.getContext().location(@src(), "splitAxis({}, {any})", .{ ax, split_shape });
         const reshaped_val = dialect.stablehlo.reshape(
             self.getContext().mlirCtx(),
             self.value(),
@@ -1444,13 +1455,13 @@ pub const Tensor = struct {
 
     /// Flattens the given axis and the next one, into one new axis.
     pub fn flatten(self: Tensor, axis_: anytype) Tensor {
+        // TODO: move to torch.zig, this is equivalent to merge
         const old_shape = self._shape;
         const a = self.axis(axis_);
         // stdx.debug.assert(a + 1 < self.rank(), "Can't flatten {} on the last axis {}.", .{ self, axis });
         const new_shape = old_shape.remove(a + 1).set(a, old_shape.dim(a) * old_shape.dim(a + 1));
 
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "axis={}", .{axis_});
-
+        const loc = self.getContext().location(@src(), "flatten({_},{})", .{ self, axis_ });
         const reshaped_val = dialect.stablehlo.reshape(
             self.getContext().mlirCtx(),
             self.value(),
@@ -1462,6 +1473,7 @@ pub const Tensor = struct {
     }
 
     pub inline fn flattenAll(self: Tensor) Tensor {
+        // TODO: rename to just flatten, once flatten is moved to torch
         return self.reshape(.{self.count()});
     }
 
@@ -1523,21 +1535,21 @@ pub const Tensor = struct {
 
         // Wrap slice1d to hide the anytype in the signature.
         const Local = struct {
-            pub fn slice1dAxis(input: Tensor, ax: i8, slice_: Tensor.Slice) Tensor {
+            pub fn _slice1dAxis(input: Tensor, ax: i8, slice_: Tensor.Slice) Tensor {
                 return input.slice1d(ax, slice_);
             }
         };
 
         {
-            const res = try zml.testing.compileAndCallWithTensors(platform, Local.slice1dAxis, .{ x.shape(), 0, .{ .end = 1 } }, .{ x, 0, .{ .end = 1 } });
+            const res = try zml.testing.compileAndCallWithTensors(platform, Local._slice1dAxis, .{ x.shape(), 0, .{ .end = 1 } }, .{ x, 0, .{ .end = 1 } });
             try testing.expectEqual([5]f32{ 0, 1, 2, 3, 4 }, try res.getValue([5]f32));
         }
         {
-            const res = try zml.testing.compileAndCallWithTensors(platform, Local.slice1dAxis, .{ x.shape(), 1, .{ .start = 1, .step = 2 } }, .{ x, 0, .{ .start = 1, .step = 2 } });
+            const res = try zml.testing.compileAndCallWithTensors(platform, Local._slice1dAxis, .{ x.shape(), 1, .{ .start = 1, .step = 2 } }, .{ x, 0, .{ .start = 1, .step = 2 } });
             try testing.expectEqual([4]f32{ 1, 3, 6, 8 }, try res.getValue([4]f32));
         }
         {
-            const res = try zml.testing.compileAndCallWithTensors(platform, Local.slice1dAxis, .{ x.shape(), -1, .{ .start = -2 } }, .{ x, 0, .{ .start = -2 } });
+            const res = try zml.testing.compileAndCallWithTensors(platform, Local._slice1dAxis, .{ x.shape(), -1, .{ .start = -2 } }, .{ x, 0, .{ .start = -2 } });
             try testing.expectEqual([4]f32{ 3, 4, 8, 9 }, try res.getValue([4]f32));
         }
     }
@@ -1546,12 +1558,14 @@ pub const Tensor = struct {
         return if (idx < 0) self.dim(axis_) + idx else idx;
     }
 
-    pub fn choose1d(self: Tensor, axis_: i64, i: i64) Tensor {
+    pub fn choose1d(self: Tensor, axis_: anytype, i: i64) Tensor {
+        // TODO: this use case could be handled directly by slice if we added a .single field
         return self.slice1d(axis_, .{ .start = i, .end = i + 1 }).squeeze(axis_);
     }
 
     /// Concatenates the input Tensors along the given axis.
     pub fn concatenate(tensors: []const Tensor, axis_: anytype) Tensor {
+        if (tensors.len == 1) return tensors[0];
         stdx.debug.assert(tensors.len <= 32, "concatenate only supports up to 32 tensors, got {}", .{tensors.len});
         var buffer: [32]mlir.Value = undefined;
         std.debug.assert(tensors.len <= buffer.len);
@@ -1566,8 +1580,9 @@ pub const Tensor = struct {
         }
 
         const res_shape = tensors[0]._shape.set(a, concatenated_dim);
-        const loc = tensors[0].getContext().mlirCtx().location(@src()).namedFmt(tensors[0].getContext().mlirCtx(), "axis={}", .{axis_});
-        const op = dialect.stablehlo.concatenate(tensors[0].getContext().mlirCtx(), buffer[0..tensors.len], a, loc);
+        const ctx = tensors[0].getContext();
+        const loc = ctx.location(@src(), "axis={}", .{axis_});
+        const op = dialect.stablehlo.concatenate(ctx.mlirCtx(), buffer[0..tensors.len], a, loc);
         // log.debug("concatenate({}, {}, {d}) -> {d}", .{ tensors[0], tensors[1], a, res_shape });
         return _result(res_shape, op.result(0));
     }
@@ -1585,7 +1600,7 @@ pub const Tensor = struct {
         const res_shape = shape0.insertTag(axis_, 1, tag);
 
         for (tensors[1..]) |tensor| {
-            stdx.debug.assert(shape0.eqlWithTags(tensor._shape), "stack expects tensor shapes to match, got {} and {}", .{ tensor._shape, shape0 });
+            stdx.debug.assert(shape0.eqlWithTags(tensor._shape), "stack expects tensor shapes to match, got {} and {}", .{ shape0, tensor._shape });
         }
 
         var reshaped: [32]Tensor = undefined;
@@ -1605,7 +1620,7 @@ pub const Tensor = struct {
 
     /// Repeats a Tensor several times along the given axis.
     ///
-    /// * repeat1d(x, concat(&.{x, x, x, x}, axis);
+    /// * repeat1d(x, axis, 4) = concat(&.{x, x, x, x}, axis);
     /// * repeat1d([0, 1, 2, 3], 0, 2) = [0, 1, 2, 3, 0, 1, 2, 3]
     pub fn repeat1d(self: Tensor, axis_: anytype, n_rep: u63) Tensor {
         if (n_rep == 1) {
@@ -1650,6 +1665,7 @@ pub const Tensor = struct {
 
     /// Repeats in line each value along the given axes.
     pub fn stutter(self: Tensor, n_reps: []const u63) Tensor {
+        // TODO: this should support the tagged syntax: x.repeat(.{ .a = 3, .b = 2});
         stdx.debug.assert(n_reps.len == self.rank(), "stutter expects tensor rank and 'n_reps' length to be equal, got {} and {}", .{ self.rank(), n_reps.len });
 
         var res = self;
@@ -1731,7 +1747,7 @@ pub const Tensor = struct {
         stdx.debug.assert(args.step > 0, "arange expects 'args.step' to be positive, got {}", .{args.step});
 
         const ctx = CompilationContext.current();
-        const loc = ctx.mlirCtx().location(@src()).namedFmt(ctx.mlirCtx(), "{}, dtype={}", .{ args, dt });
+        const loc = ctx.location(@src(), "arange({}, dtype={})", .{ args, dt });
 
         const n_steps = std.math.divCeil(i64, args.end - args.start, args.step) catch unreachable;
         const sh = Shape.init(.{n_steps}, dt);
@@ -1758,9 +1774,10 @@ pub const Tensor = struct {
         const a = sh.axis(axis_);
         const dt: DataType = if (sh.dim(a) <= std.math.maxInt(i32)) .i32 else .i64;
         const res_shape = sh.withDtype(dt);
-        const mlir_ctx = CompilationContext.current().mlirCtx();
-        const loc = mlir_ctx.location(@src()).namedFmt(mlir_ctx, "iota({}, {})", .{ res_shape, axis_ });
+        const ctx = CompilationContext.current();
+        const loc = ctx.location(@src(), "iota({_}, {})", .{ res_shape, a });
 
+        const mlir_ctx = ctx.mlirCtx();
         var op = dialect.stablehlo.iota(mlir_ctx, a, mlir.ext.RankedTensorType.fromShape(mlir_ctx, res_shape).asType(), loc);
         return _result(res_shape, op.result(0));
     }
@@ -1778,7 +1795,7 @@ pub const Tensor = struct {
         stdx.debug.assert(dt.isFloat(), "linspace expects type to be a float, got {} (hint: use arange instead)", .{dt});
 
         const ctx = CompilationContext.current();
-        const loc = ctx.mlirCtx().location(@src()).namedFmt(ctx.mlirCtx(), "linspace({}, dtype={})", .{ args, dt });
+        const loc = ctx.location(@src(), "linspace({}, dtype={})", .{ args, dt });
 
         const sh = Shape.init(.{args.steps}, dt);
         var iota_op = dialect.stablehlo.iota(ctx.mlirCtx(), 0, mlir.ext.mlirType(ctx.mlirCtx(), sh), loc);
@@ -1795,9 +1812,25 @@ pub const Tensor = struct {
         return res;
     }
 
-    /// Returns a 0d Tensor with the given value.
+    /// Returns a 0-rank Tensor with the given value.
     pub fn scalar(val: anytype, dt: DataType) Tensor {
         return Tensor.constant(.{}, Data.init(dt, val));
+    }
+
+    test scalar {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        const Local = struct {
+            pub fn _fwd() [6]Tensor {
+                var res: [6]Tensor = undefined;
+                const dtypes = .{ .bool, .u8, .i32, .f32, .bf16, .u64 };
+                inline for (0..6) |i| res[i] = scalar(0, dtypes[i]);
+                return res;
+            }
+        };
+
+        _ = try zml.testing.compileAndCall(platform, Local._fwd, .{});
     }
 
     /// Returns a constant Tensor with the given value.
@@ -1805,14 +1838,21 @@ pub const Tensor = struct {
         const sh = Shape.init(dimz, val.dtype());
         const singleton_sh = Shape.init(.{}, val.dtype());
         const ctx = CompilationContext.current().mlirCtx();
-        const loc = ctx.location(@src()).namedFmt(ctx, "dims={d}, value={}", .{ sh, val });
-        const result_type = mlir.ext.RankedTensorType.fromShape(ctx, singleton_sh);
-        const elem_type = mlir.ext.denseElementAttrType(val.dtype());
-        var constant_op = dialect.stablehlo.constant(ctx, result_type, elem_type, val.constSlice(), loc);
+        const loc = CompilationContext.current().location(@src(), "dims={d}, value={}", .{ sh, val });
+        const res_type = mlir.ext.RankedTensorType.fromShape(ctx, singleton_sh);
+
+        var constant_op = if (mlir.ext.denseElementAttrType(val.dtype())) |elem_type|
+            dialect.stablehlo.constant(ctx, res_type, elem_type, val.constSlice(), loc)
+        else blk: {
+            // Not all dtype can be serialized in the IR. If that's not possible, use f32.
+            const val_f32 = val.as(f32);
+            break :blk dialect.stablehlo.constant(ctx, res_type, .f32, std.mem.asBytes(&val_f32), loc);
+        };
+
         if (sh.rank() > 0) {
             constant_op = dialect.stablehlo.broadcast_in_dim(ctx, constant_op.result(0), &.{}, mlir.ext.RankedTensorType.fromShape(ctx, sh).as(mlir.Type).?, loc);
         }
-        return _result(sh, constant_op.result(0));
+        return _result(sh, constant_op.result(0)).convert(val.dtype());
     }
 
     /// Embeds a buffer with concrete values into an Mlir program.
@@ -1820,23 +1860,19 @@ pub const Tensor = struct {
         const ctx = CompilationContext.current().mlirCtx();
         const result_type = mlir.ext.RankedTensorType.fromShape(ctx, val.shape());
         const loc = ctx.location(@src());
-        const elem_type = mlir.ext.denseElementAttrType(val.dtype());
+        const elem_type = mlir.ext.denseElementAttrType(val.dtype()) orelse std.debug.panic("constantTensor expects a dtype that can be serialized to MLIR, like f32 or i32, got {}", .{val.shape()});
         const constant_op = dialect.stablehlo.constant(ctx, result_type, elem_type, val.data, loc);
         return _result(val.shape(), constant_op.result(0));
     }
 
     /// Returns a Tensor containing the result of the outer product between the input Tensors.
     pub fn outer(self: Tensor, other: Tensor) Tensor {
-        stdx.debug.assert(self.rank() < 2 and other.rank() < 2 and self.rank() + other.rank() != 0, "outer expects tensor ranks to be at most 1, got {} and {}", .{ self.rank(), other.rank() });
-
         if (self.rank() + other.rank() == 1) {
             return self.mul(other);
         }
 
-        const dimz = .{ self.dim(0), other.dim(0) };
-        const left = self.broadcast(Shape.init(dimz, self.dtype()), &.{0});
-        const right = other.broadcast(Shape.init(dimz, other.dtype()), &.{1});
-        return left.mul(right);
+        const res_shape = self.shape().outer(other.shape());
+        return self.broad(res_shape).mul(other.broad(res_shape));
     }
 
     /// Given a tensor and a shape of the same rank,
@@ -1848,11 +1884,22 @@ pub const Tensor = struct {
     /// you will lose the tags.
     /// To avoid use favorise `.broad(shape)` when working with tagged tensors.
     pub fn broadcast(self: Tensor, output_shape: Shape, axes_: []const i64) Tensor {
-        const res_shape = output_shape.withDtype(self.dtype());
+        stdx.debug.assert(axes_.len == self.rank(), "broadcast expects axes_ to map all axes from self to axes of the output shape, got broadcast({}, {}, {d})", .{ self, output_shape, axes_ });
+        for (0.., axes_) |self_ax, other_ax| {
+            const d = self.dim(self_ax);
+            stdx.debug.assert(d == 1 or d == output_shape.dim(other_ax), "broadcast expects shape axes to either be 1-sized or to match the target size. got broadcast({}, {}, {d}), error on self axis {} mapping to other axis {}", .{ self, output_shape, axes_, self_ax, other_ax });
+        }
 
-        const result_type = mlir.ext.RankedTensorType.fromShape(self.getContext().mlirCtx(), res_shape).as(mlir.Type).?;
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "broadcast({any}, axes={d})", .{ res_shape, axes_ });
-        const broadcast_op = dialect.stablehlo.broadcast_in_dim(self.getContext().mlirCtx(), self.value(), axes_, result_type, loc);
+        const res_shape = output_shape.withDtype(self.dtype());
+        if (std.mem.eql(i64, self.dims(), output_shape.dims())) {
+            // No broadcast needed. We don't emit a new stablehlo value
+            // but we propagate output_shape tags.
+            return _result(res_shape, self.value());
+        }
+        const ctx = self.getContext();
+        const result_type = mlir.ext.RankedTensorType.fromShape(ctx.mlirCtx(), res_shape).as(mlir.Type).?;
+        const loc = ctx.location(@src(), "broadcast({_}, {_}, axes={d})", .{ self, res_shape, axes_ });
+        const broadcast_op = dialect.stablehlo.broadcast_in_dim(ctx.mlirCtx(), self.value(), axes_, result_type, loc);
 
         return _result(res_shape, broadcast_op.result(0));
     }
@@ -1882,21 +1929,25 @@ pub const Tensor = struct {
 
     /// Broadcasts a Tensor to the given shape, extending dimensions if needed.
     pub fn broad(self: Tensor, other: Shape) Tensor {
+        // TODO: broad is too restrictive because sometime you only want to specify one specific axis
+        // Note: if you code below, make sure to update Shape.canBroadcastTo.
+        stdx.debug.assert(self._shape.canBroadcastTo(other), "Can't broadcast {} to {}", .{ self, other });
+
+        // Already the right shape
+        if (std.mem.eql(i64, self.dims(), other.dims())) return self;
+
         // Non ambiguous broadcasting
+        // TODO: broad is error prone because of this:
+        // it will happily broadcast .{ .a = 10, .b = 1 } to .{ .b = 10, .a = 5 }
         if (self._shape.rank() == 0 or self._shape.rank() == other.rank()) {
-            return self.broadcast(other, Shape.range(self._shape.rank(), .bool).dims());
+            const all_axes = [MAX_RANK]i64{ 0, 1, 2, 3, 4, 5, 6, 7 };
+            return self.broadcast(other, all_axes[0..self.rank()]);
         }
 
         // check that each axis of self maps to an axis of other
         var axes_: std.BoundedArray(i64, MAX_RANK) = .{};
         for (self._shape.tags()) |t| {
-            if (t != Shape.TagUnknown) {
-                if (other.hasTag(t)) |ax| {
-                    axes_.appendAssumeCapacity(@intCast(other.axis(ax)));
-                } else {
-                    std.debug.panic("Can't broadcast {} to {}", .{ self, other });
-                }
-            }
+            axes_.appendAssumeCapacity(@intCast(other.axis(t)));
         }
         return self.broadcast(other, axes_.constSlice());
     }
@@ -1905,9 +1956,15 @@ pub const Tensor = struct {
     pub fn reshape(self: Tensor, output_shape_: anytype) Tensor {
         const output_shape = self._shape.reshape(output_shape_);
         const tensor_type = mlir.ext.RankedTensorType.fromShape(self.getContext().mlirCtx(), output_shape);
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "reshape({any})", .{output_shape});
+        const loc = self.getContext().location(@src(), "reshape({any})", .{output_shape});
         const reshape_value = dialect.stablehlo.reshape(self.getContext().mlirCtx(), self.value(), tensor_type, loc);
         return _result(output_shape, reshape_value.result(0));
+    }
+
+    /// Converts the given 1 element Tensor into a 0-rank Tensor.
+    pub fn asScalar(self: Tensor) Tensor {
+        stdx.debug.assert(self.count() == 1, "Tensor.asScalar expects an input with exactly 1-element got {}", .{self});
+        return self.reshape(.{});
     }
 
     pub const Pad = struct {
@@ -1990,7 +2047,7 @@ pub const Tensor = struct {
     pub fn reverse(self: Tensor, axes_: anytype) Tensor {
         const actual_axes = self._shape.axes(axes_);
 
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "reverse({any})", .{axes_});
+        const loc = self.getContext().location(@src(), "reverse({any})", .{axes_});
         const reverse_op = dialect.stablehlo.reverse(self.getContext().mlirCtx(), self.value(), toI64(actual_axes.constSlice()), loc);
         return _result(self._shape, reverse_op.result(0));
     }
@@ -2095,7 +2152,7 @@ pub const Tensor = struct {
         // Sometimes the backend recognize this pattern, but not always.
         // So let us handle that.
         if (indices.count() == 1) {
-            return self.dynamicSlice1d(coord_axes_.get(0), 1, indices.flattenAll().squeeze(0)).reshape(res_shape);
+            return self.dynamicSlice1d(coord_axes_.get(0), .{ .start = indices.flattenAll().squeeze(0), .len = 1 }).reshape(res_shape);
         }
 
         var slice_dims: Shape.DimsArray = .{};
@@ -2137,7 +2194,7 @@ pub const Tensor = struct {
 
         {
             // Only test shapes
-            var comp = try zml.module.CompilationContext.init(std.heap.page_allocator, "test", platform);
+            var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
             defer comp.deinit();
             comp.activate();
             defer comp.deactivate();
@@ -2197,7 +2254,8 @@ pub const Tensor = struct {
     /// while gatherValues, always copy values one by one, and as such don't have the same issues.
     /// In our example the contiguous dimension .d is not sliced
     /// and gatherSlices can copy data by group of C'*D elements.
-    pub fn gatherSlices(self: Tensor, slice_shape: Shape, indices: Tensor, opts: GatherOpts) Tensor {
+    pub fn gatherSlices(self: Tensor, slice_shape_: anytype, indices: Tensor, opts: GatherOpts) Tensor {
+        const slice_shape = if (@TypeOf(slice_shape_) == Shape) slice_shape_ else Shape.init(slice_shape_, .i32);
         // scoped_log.debug("gatherSlice({}, {_}, {})", .{ self, slice_shape, indices });
 
         const tagged_api = slice_shape.isFullyTagged();
@@ -2247,7 +2305,7 @@ pub const Tensor = struct {
             }
         }
 
-        const loc = self.getContext().mlirCtx().location(@src());
+        const loc = self.getContext().location(@src(), "gatherSlices({_}, slice_shape={_}, idx={_})", .{ self, slice_shape, indices });
         const gather_op = dialect.stablehlo.gather(
             self.getContext().mlirCtx(),
             self.value(),
@@ -2271,9 +2329,15 @@ pub const Tensor = struct {
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
 
+        const Local = struct {
+            pub fn _gatherSlices(self: Tensor, slice_shape: Shape, indices: Tensor, opts: GatherOpts) Tensor {
+                return self.gatherSlices(slice_shape, indices, opts);
+            }
+        };
+
         {
             // Only test shapes
-            var comp = try zml.module.CompilationContext.init(std.heap.page_allocator, "test", platform);
+            var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
             defer comp.deinit();
             comp.activate();
             defer comp.deactivate();
@@ -2307,7 +2371,7 @@ pub const Tensor = struct {
 
                 const mod = try zml.compileFn(
                     std.testing.allocator,
-                    gatherSlices,
+                    Local._gatherSlices,
                     .{ x.shape(), slice_shape, idx.shape(), .{ .indices_are_sorted = true } },
                     platform,
                 );
@@ -2323,7 +2387,7 @@ pub const Tensor = struct {
         const start_indices = (try zml.Buffer.fromArray(platform, [2][2]i32{ .{ 2, 1 }, .{ 0, 3 } })).withTags(.{ .n, ._ });
         defer start_indices.deinit();
 
-        const result = try zml.testing.compileAndCall(platform, gatherSlices, .{ operand, Shape.init(.{ .b = 2, .c = 3 }, .u16), start_indices, .{} });
+        const result = try zml.testing.compileAndCall(platform, Local._gatherSlices, .{ operand, Shape.init(.{ .b = 2, .c = 3 }, .u16), start_indices, .{} });
 
         const expected = zml.HostBuffer.fromArray(&[2][2][2][3]u16{
             .{
@@ -2339,12 +2403,13 @@ pub const Tensor = struct {
     }
 
     pub const ScatterOpts = struct {
-        /// Promise scatter that all coordinates in `indices` are sorted, wrt to the final in memory offset.
+        /// Promise scatter that all coordinates in `indices` are sorted, wrt to the final offset in `self`
         /// Result is undefined if the promise is violated.
         indices_are_sorted: bool = false,
 
         /// Promise scatter that slices don't overlap.
         /// Result is undefined if the promise is violated.
+        /// This allows for better code generation, because it means that updates can be applied in parallel.
         indices_are_unique: bool = false,
 
         /// Function used to update previous value in `self` with values from `updates`.
@@ -2352,132 +2417,102 @@ pub const Tensor = struct {
         /// then you should make sure the slices don't overlap,
         /// otherwise the result will depend on the runtime scheduling
         /// of the operator which is backend specific.
-        update_fn: *const fn (*const anyopaque, Tensor, Tensor) Tensor = increment,
+        update_fn: *const fn (Tensor, Tensor) Tensor = increment,
 
-        /// Extra data that may be needed for a custom update function.
-        /// `override` and `increment` don't need it, leaving it to undefined works.
-        update_fn_ctx: *const anyopaque = undefined,
-
-        pub fn increment(_: *const anyopaque, old_value: Tensor, new_value: Tensor) Tensor {
-            return old_value.add(new_value);
+        pub fn increment(old_value: Tensor, new_value: Tensor) Tensor {
+            return old_value.add(new_value.convert(old_value.dtype()));
         }
 
-        pub fn override(_: *const anyopaque, old_value: Tensor, new_value: Tensor) Tensor {
-            _ = old_value;
-            return new_value;
+        pub fn override(old_value: Tensor, new_value: Tensor) Tensor {
+            return new_value.convert(old_value.dtype());
         }
     };
 
-    /// Update the given tensors, by copying `values` into self slices.
+    /// Update the given tensor, by copying `values` into slice by slice into `self`.
     /// The slices are chosen at runtime by interpreting indices as coordinates into `self`.
-    /// * `indices` represents a set of coordinates into `self`.
-    ///   For the sake of simplifying the creation of `indices` tensor,
-    ///   it's allowed to not mention a specific axis if the coordinate for this axis is always `0`.
-    ///   Similarly to `gatherValues`, the coordinates are read from the `.coord` axis, or last axis if `.coord` is not found.
-    ///   The coordinates represent the "top-left" corner of the slice to extract.
-    ///   `indices.dim(.coord)` must match `coord_axes.len`.
-    ///   Other axes identify one "slice" and they must be found inside `updates`.
+    /// This is a generalized version of `dynamicUpdateSlice` where more than one offset can be specified at a time.
     ///
-    /// * the output tensor starts with axes from `indices`.
-    /// * if the input tensor has tagged axes, matching `indices` axes,
-    ///    they will be considered "batching" axes.
+    /// ### Arguments
     ///
-    /// Sample input/output shapes:
-    /// * scatterSlices([A, B, C, D], .{b, c}, [N, 2], [N, B', C']) -> [A, B, C, D]
-    /// * scatterSlices(x(a,b,c,d), g(n,m), y[n,b,c]) [A,B,C,D] {
-    ///   var z = x;
-    ///   for (0..N) |n| { z[a,g[n,0]+b',g[n,1]+c',d] = y[n,a,b',c',d]; }
+    /// - Return a tensor with same shape than `self`, with updated content.
+    /// - `indices` is a set of Tensor (typically rank 1), representing coordinates into `self`.
+    ///   all indices must have the same shape, but scalars are accepted.
+    /// - each `indices` entry contains offset along an axes into `self`.
+    /// Typically axes are identified by their tags, but in the absence of tags on `indices`,
+    /// The entry in indices will be assigned to axes of `self` from major to minor axis.
+    /// It is recommended to have indices referencing only major axes of `self` for better performance.
+    /// - `values` shape is obtained by concatenating the shape of `indices` with the shape of the slices to be extracted.
+    /// - `opts`: `zml.Tensor.ScatterOpts` des
+    ///
+    /// ### Sample input/output shapes with corresponding pseudo-code.
+    ///
+    /// Basic `scatterSlices` with the first two axes (.a, .b) being indexed, and full (.c, .d) slice copies:
+    ///
+    /// ```
+    /// fn scatterSlices(x[A, B, C, D], .{.a=off_a[N], .b=off_b[N]}, y[N, C, D]) [A, B, C, D] {
+    ///     var z = x;
+    ///     for (0..N) |n| {
+    ///         for (0..C) |c| for (0..D) |d| {{
+    ///             z[off_a[n],off_b[n],c,d] += y[n, c, d];
+    ///         }}
+    ///     }
+    ///     return z;
     /// }
+    /// ```
     ///
-    /// **Warning**: if `opts.update_fn` is not associative not all calls to `scatterSlices` are sound.
+    /// `scatterSlices` with the first three axes (.a, .b, .c) being indexed, and a partial copy of (.c, .d).
+    /// Note that .c axis is present both in the indices and updates, and `updates.dim(.c) < self.dim(.c)`.
+    ///
+    /// ```
+    /// fn scatterSlices(x[A, B, C, D], .{.a=off_a[N], .b=off_b[N], .c=off_c[N]}, y[N, C', D]) [A, B, C, D] {
+    ///     var z = x;
+    ///     for (0..N) |n| {
+    ///        for (0..C') |c| for (0..D) |d| {{
+    ///           z[off_a[n],off_b[n],off_c[n]+c,d] += y[n, c, d];
+    ///        }}
+    ///     }
+    ///     return z;
+    /// }
+    /// ```
+    ///
+    /// `scatterSlices` with the first axis .a being indexed, and where .b is used as a batching axis.
+    /// Note that here .b axis is present in `self`, `off_a`, and `updates`,
+    /// and is not mentionned in the axes of indices.
+    ///
+    /// ```
+    /// fn scatterSlices(x[A, B, C, D], .{.a=off_a[B,N]}, y[N, B, C, D]) [A, B, C, D] {
+    ///     var z = x;
+    ///     for (0..B) |b| {
+    ///         for (0..N) |n| {
+    ///             for (0..C) |c| for (0..D) |d| {{
+    ///                 z[off_a[b,n],b,c,d] += y[n, b, c, d];
+    ///             }}
+    ///         }
+    ///     }
+    ///     return z;
+    /// }
+    /// ```
+    ///
+    /// ### Warnings
+    ///
+    /// - if `opts.update_fn` is not associative not all calls to `scatterSlices` are sound.
     /// In particular if you scatter overlapping slices, with `zml.Tensor.ScatterOpts.override`,
     /// then the result will depend on the execution order that you don't control.
-    pub fn scatterSlices(self: Tensor, coord_axes: anytype, indices: Tensor, updates: Tensor, opts: ScatterOpts) Tensor {
-        const loc = @src();
-        // scoped_log.debug("scatterSlices({}, {any}, {}, {})", .{ self, coord_axes, indices, updates });
+    /// - `scatterSlices` is a very expressive operator, and can lead to complicated code generation
+    /// that requires host<->device synchronization.
+    /// ZML tries to generate the easiest to optimize IR, and will warn you if it generates known problematic IR.
+    pub fn scatterSlices(self: Tensor, indices: anytype, updates: Tensor, opts: ScatterOpts) Tensor {
+        scoped_log.debug("scatterSlices({}, {any}, {})", .{ self, indices, updates });
 
-        stdx.debug.assert(self.dtype() == updates.dtype(), "scatterSlices expects input and 'updates' tensors to be of the same type, got {} and {}", .{ self.dtype(), updates.dtype() });
+        const UpdateType = @TypeOf(ScatterOpts.increment);
 
-        const single_coord, const coord_axes_ = _parseGatherCoord(self, coord_axes);
-        const AxisKind = enum { batching, update_window, inserted_window, window_id };
-        var self_kind: std.BoundedArray(AxisKind, MAX_RANK) = .{};
-        var indices_batch_axes: Shape.DimsArray = .{};
-        for (self._shape.tags()) |t| {
-            if (updates._shape.hasTag(t)) |_| {
-                if (indices._shape.hasTag(t)) |id_ax| {
-                    // tag is in self, indices and updates -> it's a batching dim
-                    self_kind.appendAssumeCapacity(.batching);
-                    indices_batch_axes.appendAssumeCapacity(id_ax);
-                } else {
-                    self_kind.appendAssumeCapacity(.update_window);
-                }
-            } else {
-                self_kind.appendAssumeCapacity(.inserted_window);
+        const Custom = struct {
+            pub fn inc(custom: *const UpdateType, old_value: Tensor, new_value: Tensor) Tensor {
+                return @call(.auto, custom, .{ old_value, new_value });
             }
-        }
-        // scoped_log.warn(" self_kind -> {any}", .{self_kind.constSlice()});
-
-        const index_coord_axis = if (single_coord)
-            indices.rank()
-        else blk: {
-            const ax = indices._shape.hasTag(.coord) orelse indices._shape.axis(-1);
-            stdx.debug.assert(indices.dim(ax) == coord_axes_.len, "scatterSlices({}, coord_axes={any}, indices, updates) expects 'indices' to be a tensor [..., {}], got {}", .{ self, coord_axes, coord_axes_.len, indices });
-
-            break :blk ax;
         };
-        if (indices.count() == 1) {
-            return self.dynamicUpdateSlice1d(updates, coord_axes_.get(0), indices.reshape(.{}));
-        }
 
-        var up_kind: std.BoundedArray(AxisKind, MAX_RANK) = .{};
-        // Note: we assume the scatter_dims appear in the same order inside indices and inside self.
-        for (updates._shape.tags(), 0..) |t, up_ax| {
-            if (self._shape.hasTag(t)) |self_ax| {
-                if (self_kind.get(self_ax) == .batching) {
-                    up_kind.appendAssumeCapacity(.batching);
-                } else {
-                    stdx.debug.assert(updates.dim(up_ax) <= self.dim(self_ax), "scatterSlices expects the slices described in 'updates' to fit inside 'self', but along axis .{s} it doesn't. Got self={}, updates={}.", .{ t, self, updates });
-                    up_kind.appendAssumeCapacity(.update_window);
-                }
-            } else if (t == Shape.TagUnknown or indices._shape.hasTag(t) != null) {
-                up_kind.appendAssumeCapacity(.window_id);
-            } else {
-                std.debug.panic("scatterSlices expects 'updates' to be made of axes from 'self={}' and from 'indices={}', got unknown tag {s} in {}", .{ self, indices, t, updates });
-            }
-        }
-        const n_indices_axes = updates.rank() - _collectAxes(AxisKind, up_kind, .update_window).len;
-        if (single_coord) {
-            stdx.debug.assert(n_indices_axes == indices.rank(), "scatterSlices({}, {any}) expects 'updates' to contain all axes from 'indices', got indices={}, updates={}", .{ self, coord_axes, indices, updates });
-        } else {
-            stdx.debug.assert(n_indices_axes == indices.rank() - 1, "scatterSlices({}, {any}) expects 'updates' to contain all-but-last axes from 'indices', got indices={}, updates={}", .{ self, coord_axes, indices, updates });
-        }
-
-        const ctx = self.getContext();
-        const mlir_ctx = ctx.mlirCtx();
-
-        const _scalar: Tensor = .{ ._shape = Shape.init(.{}, self.dtype()), ._id = undefined };
-        const UpdateS = ops.BlockSign(ScatterOpts.increment);
-        const update_block, _ = ctx.makeBlock(.hermetic, UpdateS, opts.update_fn, opts.update_fn_ctx, .{ _scalar, _scalar });
-
-        const op = dialect.stablehlo.scatter(
-            mlir_ctx,
-            &.{self.value()},
-            &.{indices.value()},
-            &.{updates.value()},
-            update_block,
-            .{
-                .update_window_dims = _collectAxes(AxisKind, up_kind, .update_window).constSlice(),
-                .inserted_window_dims = _collectAxes(AxisKind, self_kind, .inserted_window).constSlice(),
-                .input_batching_dims = _collectAxes(AxisKind, self_kind, .batching).constSlice(),
-                .scatter_indices_batching_dims = indices_batch_axes.constSlice(),
-                .scatter_dims_to_operand_dims = toI64(coord_axes_.constSlice()),
-                .index_vector_dim = index_coord_axis,
-                .indices_are_sorted = opts.indices_are_sorted,
-                .unique_indices = opts.indices_are_unique,
-            },
-            mlir_ctx.location(loc),
-        );
-        return _result(self._shape, op.result(0));
+        return ops.scatter(Tensor, *const UpdateType, Custom.inc, self, opts.update_fn, indices, updates, opts);
     }
 
     test scatterSlices {
@@ -2485,39 +2520,54 @@ pub const Tensor = struct {
         const platform = zml.testing.env();
 
         const Local = struct {
-            pub fn scatter(self: Tensor, coord_axes: Shape.AxesArray, indices: Tensor, updates: Tensor) Tensor {
+            pub fn _scatter(self: Tensor, indices: []const Tensor, updates: Tensor) Tensor {
                 return self.scatterSlices(
-                    coord_axes.constSlice(),
                     indices,
                     updates,
                     .{ .update_fn = ScatterOpts.increment },
                 );
             }
+
+            pub fn _scatterCB(self: Tensor, coords: Tensor, updates: Tensor) Tensor {
+                return self.scatterSlices(
+                    .{ .c = coords.choose1d(.coord, 0), .b = coords.choose1d(.coord, 1) },
+                    updates,
+                    .{ .update_fn = ScatterOpts.increment },
+                );
+            }
+
+            pub fn _idx(idx_shape: anytype) Tensor {
+                return Tensor.constant(idx_shape, .{ .i32 = 0 });
+            }
         };
 
         {
             // Only test shapes
-            var comp = try zml.module.CompilationContext.init(std.heap.page_allocator, "test", platform);
+            var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
             defer comp.deinit();
             comp.activate();
             defer comp.deactivate();
+            const idx = Local._idx;
 
             inline for (.{
-                .{ .{ .a = 10 }, .a, .{}, .{ .a = 3 } },
-                .{ .{ .a = 10, .b = 20 }, .b, .{ .a = 10, .n = 8 }, .{ .a = 10, .n = 8, .b = 2 } },
-                // I'm not sure I like this variant, cause `b` is not mentionned in updates.
-                // So 'stablehlo.scatter' is implicitly broadcasting the updates along `b` axis.
-                // OTOH asking the user to do the broadcasting isn't trivial cause they will need to do shape wrangling and that's annoying.
-                .{ .{ .a = 10, .b = 20 }, .a, .{ .n = 8 }, .{ .n = 8, .a = 2 } },
-                .{ .{ .a = 10, .b = 20 }, .{ .b, .a }, .{ .n = 8, ._ = 2 }, .{ .n = 8, .a = 3, .b = 2 } },
-                .{ .{ .a = 10, .b = 20 }, .{ .a, .b }, .{ .n = 8, ._ = 2 }, .{ .a = 3, .n = 8, .b = 2 } },
+                // This is equivalent to a dynamic update slice, update 3 values at given offset of axis .a:
+                .{ .{ .a = 10 }, .{ .a = idx(.{}) }, .{ .a = 3 } },
+                // Use .a as a batching axis with .a=10 x .n=8 updates of 2 elements of .b
+                .{ .{ .a = 10, .b = 20 }, .{ .b = idx(.{ .a = 10, .n = 8 }) }, .{ .a = 10, .n = 8, .b = 2 } },
+                // Same but with update transposed
+                .{ .{ .a = 10, .b = 20 }, .{ .b = idx(.{ .a = 10, .n = 8 }) }, .{ .a = 10, .b = 2, .n = 8 } },
+                // similar, but use the normalized form where a is no longer an explicit batching axis.
+                .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{ .a2 = 10, .n = 8 }), .b = idx(.{ .a2 = 10, .n = 8 }) }, .{ .a2 = 10, .n = 8, .b = 2 } },
+                .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{ .a = 10, .n = 8 }), .b = idx(.{ .a = 10, .n = 8 }) }, .{ .a = 10, .n = 8, .b = 2 } },
+                .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{ .n = 8 }) }, .{ .n = 8, .a = 2 } },
+                .{ .{ .a = 10, .b = 20 }, .{ .b = idx(.{ .n = 8 }), .a = idx(.{ .n = 8 }) }, .{ .n = 8, .a = 3, .b = 2 } },
+                .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{ .n = 8 }), .b = idx(.{ .n = 8 }) }, .{ .a = 3, .n = 8, .b = 2 } },
             }) |testcase| {
-                const x_shape, const axes_, const idx_shape, const updates_shapes = testcase;
+                const x_shape, const indices, const updates_shapes = testcase;
                 const x = Tensor.constant(x_shape, .{ .f16 = 0 });
-                const idx = Tensor.constant(idx_shape, .{ .i32 = 0 });
                 const updates = Tensor.constant(updates_shapes, .{ .f16 = 0 });
 
-                const y = scatterSlices(x, axes_, idx, updates, .{});
+                const y = scatterSlices(x, indices, updates, .{});
                 // Shape doesn't change with scatterSlices
                 try zml.testing.expectEqualShapes(x.shape(), y.shape());
                 try std.testing.expect(y.value().owner().verify());
@@ -2530,14 +2580,13 @@ pub const Tensor = struct {
             defer a.deinit();
             a_host.deinit(std.testing.allocator);
 
-            const scatter_indices = try zml.Buffer.fromArray(platform, [2][1]i32{ .{0}, .{2} });
+            const scatter_indices = try zml.Buffer.fromArray(platform, [2]i32{ 0, 2 });
             const updates = try zml.Buffer.fromArray(platform, [2][3]i32{ .{ 10, 20, 30 }, .{ 70, 80, 90 } });
 
             const expected = [3][3]i32{ .{ 10, 21, 32 }, .{ 3, 4, 5 }, .{ 76, 87, 98 } };
-            const result = try zml.testing.compileAndCall(platform, Local.scatter, .{
+            const result = try zml.testing.compileAndCall(platform, Local._scatter, .{
                 a,
-                a.shape().axes(.{.a}),
-                scatter_indices.withTags(.{ .n, .coord }),
+                &.{scatter_indices.withTags(.{.n})},
                 updates.withTags(.{ .n, .b }),
             });
             try std.testing.expect(a.shape().eql(result.shape()));
@@ -2550,14 +2599,13 @@ pub const Tensor = struct {
             defer a.deinit();
             a_host.deinit(std.testing.allocator);
 
-            const scatter_indices = try zml.Buffer.fromArray(platform, [2][1]i32{ .{2}, .{7} });
+            const scatter_indices = try zml.Buffer.fromArray(platform, [2]i32{ 2, 7 });
             const updates = try zml.Buffer.fromArray(platform, [2]i32{ 20, 70 });
 
             const expected = [9]i32{ 0, 1, 22, 3, 4, 5, 6, 77, 8 };
-            const result = try zml.testing.compileAndCall(platform, Local.scatter, .{
+            const result = try zml.testing.compileAndCall(platform, Local._scatter, .{
                 a,
-                a.shape().axes(.{0}),
-                scatter_indices.withTags(.{ .n, .coord }),
+                &.{scatter_indices.withTags(.{.n})},
                 updates.withTags(.{.n}),
             });
             try std.testing.expect(a.shape().eql(result.shape()));
@@ -2589,7 +2637,7 @@ pub const Tensor = struct {
             );
             defer values.deinit();
 
-            const result = try zml.testing.compileAndCall(platform, Local.scatter, .{ operand, operand.shape().axes(.{ .c, .b }), start_indices, values });
+            const result = try zml.testing.compileAndCall(platform, Local._scatterCB, .{ operand, start_indices, values });
 
             const expected = [2][3][4][2]u16{
                 .{
@@ -2670,15 +2718,14 @@ pub const Tensor = struct {
     /// Stable argmax:
     /// * bubbles up Nan
     /// * in case of equality the smallest index matching the maximum
-    pub fn argMax(x: Tensor, axis_: anytype, index_dtype: DataType) ArgMaxRes {
-        stdx.debug.assert(index_dtype.isInteger(), "argMax expect index type to be an integer, got {}", .{index_dtype});
-
+    pub fn argMax(x: Tensor, axis_: anytype) ArgMaxRes {
         const a = x.axis(axis_);
+        const dt: DataType = if (x.dim(a) <= std.math.maxInt(i32)) .i32 else .i64;
 
         return ops.reduce(
             ArgMaxRes.cmp,
-            .{ .values = x, .indices = Tensor.arange(.{ .end = x.dim(a) }, index_dtype).broadcast(x.shape(), &.{a}) },
-            .{ .values = Tensor.constant(&.{}, x.dtype().minValue()), .indices = Tensor.scalar(0, index_dtype) },
+            .{ .values = x, .indices = Tensor.arange(.{ .end = x.dim(a) }, dt).broadcast(x.shape(), &.{a}) },
+            .{ .values = Tensor.constant(&.{}, x.dtype().minValue()), .indices = Tensor.scalar(0, dt) },
             &.{a},
         );
     }
@@ -2688,12 +2735,12 @@ pub const Tensor = struct {
         const platform = zml.testing.env();
         const allocator = std.testing.allocator;
         const ArgMaxTest = struct {
-            pub fn forward(x: Tensor) Tensor.ArgMaxRes {
-                return x.argMax(1, .i32);
+            pub fn _fwd(x: Tensor) Tensor.ArgMaxRes {
+                return x.argMax(1);
             }
         };
 
-        const argmax = try zml.compileFn(allocator, ArgMaxTest.forward, .{Shape.init(.{ 1, 5 }, .f32)}, platform);
+        const argmax = try zml.compileFn(allocator, ArgMaxTest._fwd, .{Shape.init(.{ 1, 5 }, .f32)}, platform);
         defer argmax.deinit();
         // Test with tie
         {
@@ -2737,8 +2784,10 @@ pub const Tensor = struct {
         return .{ .values = res[0], .indices = res[1] };
     }
 
+    pub const ArgSortOpts = struct { descending: bool = false };
+
     /// Returns a Tensor containing the indices corresponding to the sorted values over the given axis.
-    pub fn argsort(self: Tensor, axis_: i64, opts: struct { descending: bool = false }) Tensor {
+    pub fn argsort(self: Tensor, axis_: anytype, opts: ArgSortOpts) Tensor {
         return self.sort(axis_, .{ .descending = opts.descending }).indices;
     }
 
@@ -2746,13 +2795,19 @@ pub const Tensor = struct {
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
 
+        const Local = struct {
+            pub fn _argsort(x: Tensor, axis_: u3, opts: ArgSortOpts) Tensor {
+                return x.argsort(axis_, opts);
+            }
+        };
+
         var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena_state.deinit();
         const allocator = arena_state.allocator();
         // 2D Tensor - dim = 1, ascending
         {
             const x = try zml.Buffer.fromSlice(platform, .{ 2, 5 }, &[_]f32{ -0.9264, 0.7156, 1.0202, 0.3992, 1.2349, 1.0003, -0.1932, 1.3935, 0.7316, 0.0851 });
-            const res = try zml.testing.compileAndCall(platform, Tensor.argsort, .{ x, 1, .{} });
+            const res = try zml.testing.compileAndCall(platform, Local._argsort, .{ x, 1, .{} });
             const res_cpu = try res.toHostAlloc(allocator);
             try testing.expectEqualSlices(i32, &.{ 0, 3, 1, 2, 4, 1, 4, 3, 0, 2 }, res_cpu.items(i32));
         }
@@ -2765,7 +2820,7 @@ pub const Tensor = struct {
                 0.6626,  -0.3040, -0.8726, -1.4805, -1.6943, 1.1055,  -2.0078, -0.5288, 0.8813,  0.8008,
                 2.0527,  1.1230,  0.5430,  0.2494,  -0.9434, 0.7876,  0.1818,  0.9258,  -2.4902, 1.5918,
             });
-            const res_dev = try zml.testing.compileAndCall(platform, Tensor.argsort, .{ x, 1, .{ .descending = true } });
+            const res_dev = try zml.testing.compileAndCall(platform, Local._argsort, .{ x, 1, .{ .descending = true } });
             const res = try res_dev.toHostAlloc(allocator);
             try testing.expectEqualSlices(i32, &.{
                 4, 1, 1, 2, 0, 2, 0, 0, 3, 4,
@@ -2787,7 +2842,7 @@ pub const Tensor = struct {
                 64, 86, 62, 88,
                 57, 21, 19, 12,
             });
-            const res_dev = try zml.testing.compileAndCallWithTensors(platform, Tensor.argsort, .{ x.shape(), 3, .{} }, .{ x, 0, .{} });
+            const res_dev = try zml.testing.compileAndCall(platform, Local._argsort, .{ x, 3, .{} });
             const res = try res_dev.toHostAlloc(allocator);
             try testing.expectEqualSlices(i32, &.{
                 2, 1, 3, 0,
@@ -2899,10 +2954,6 @@ pub const Tensor = struct {
         );
     }
 
-    pub inline fn axes(self: Tensor, axes_: anytype) std.BoundedArray(u3, Tensor.MAX_RANK) {
-        return self._shape.axes(axes_);
-    }
-
     /// Chunk a given tensor into exactly n parts of equal shape.
     /// `self.dim(axis_)` must be divisible by n_chunks.
     pub fn chunkExact(self: Tensor, axis_: anytype, n_chunks: comptime_int) [n_chunks]Tensor {
@@ -2922,7 +2973,7 @@ pub const Tensor = struct {
         const platform = zml.testing.env();
 
         // Only test shapes
-        var comp = try zml.module.CompilationContext.init(std.heap.page_allocator, "test", platform);
+        var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
         defer comp.deinit();
         comp.activate();
         defer comp.deactivate();
@@ -2937,7 +2988,7 @@ pub const Tensor = struct {
             const chunks = x.chunkExact(ax, n_chunks);
 
             const res_shape = Shape.init(res, .f16);
-            for (&chunks) |chk| {
+            for (chunks) |chk| {
                 try zml.testing.expectEqualShapes(res_shape, chk.shape());
             }
         }
@@ -2949,13 +3000,14 @@ pub const Tensor = struct {
         self: Tensor,
         axis_: i64,
         n_chunks: comptime_int,
-    ) std.BoundedArray(Tensor, n_chunks + 1) {
+    ) []Tensor {
         const a = self.axis(axis_);
         const d = self.dim(a);
         const chunk_size: i64 = @divFloor(d, n_chunks);
         const tail_chunk_size: i64 = @rem(d, chunk_size);
 
-        var chunks: std.BoundedArray(Tensor, n_chunks + 1) = .{};
+        const allocator = self.getContext().allocator();
+        var chunks = std.ArrayListUnmanaged(Tensor).initCapacity(allocator, n_chunks + 1) catch @panic("OOM");
         for (0..n_chunks) |i| {
             const start: i64 = @as(i64, @intCast(i)) * chunk_size;
             chunks.appendAssumeCapacity(
@@ -2966,7 +3018,7 @@ pub const Tensor = struct {
             const start: i64 = n_chunks * chunk_size;
             chunks.appendAssumeCapacity(self.slice1d(a, .{ .start = start }));
         }
-        return chunks;
+        return chunks.items;
     }
 
     test chunkAllowTrailing {
@@ -2974,7 +3026,7 @@ pub const Tensor = struct {
         const platform = zml.testing.env();
 
         // Only test shapes
-        var comp = try zml.module.CompilationContext.init(std.heap.page_allocator, "test", platform);
+        var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
         defer comp.deinit();
         comp.activate();
         defer comp.deactivate();
@@ -2990,35 +3042,34 @@ pub const Tensor = struct {
             const chunks = x.chunkAllowTrailing(x.axis(ax), n_chunks);
 
             const res_shape = Shape.init(res, .f16);
-            for (chunks.constSlice()[0..n_chunks]) |chk| {
+            for (chunks[0..n_chunks]) |chk| {
                 try zml.testing.expectEqualShapes(res_shape, chk.shape());
             }
             const trailing_shape = Shape.init(trailing, .f16);
             if (trailing_shape.rank() > 0) {
                 try std.testing.expectEqual(n_chunks + 1, chunks.len);
-                try zml.testing.expectEqualShapes(trailing_shape, chunks.get(n_chunks).shape());
+                try zml.testing.expectEqualShapes(trailing_shape, chunks[n_chunks].shape());
             } else {
                 try std.testing.expectEqual(n_chunks, chunks.len);
             }
         }
     }
 
-    pub fn split(self: Tensor, allocator: std.mem.Allocator, split_size_or_sections: []const i64, axis_: i64) ![]Tensor {
-        stdx.debug.assert(split_size_or_sections.len > 0, "split expects 'split_size_or_sections' length to be positive, got {}", .{split_size_or_sections.len});
+    pub fn split(self: Tensor, axis_: anytype, split_sizes: []const i64) []Tensor {
+        stdx.debug.assert(split_sizes.len > 0, "split expects at least one 'split_sizes', got 0", .{});
 
         const a = self.axis(axis_);
-        const length = self.dim(a);
-        if (split_size_or_sections.len != 1) {
-            var split_sum: i64 = 0;
-            for (split_size_or_sections) |n| split_sum += n;
-            stdx.debug.assert(split_sum == length, "split expects sum of 'split_size_or_sections' values and axis dimension to be equal, got {} and {}", .{ split_sum, length });
-        }
+        const d = self.dim(a);
+        var split_sum: i64 = 0;
+        for (split_sizes) |n| split_sum += n;
+        stdx.debug.assert(split_sum == d, "split expects sum of 'split_sizes' values and axis dimension to be equal, got {} and {}", .{ split_sum, d });
 
-        const res = try allocator.alloc(Tensor, split_size_or_sections.len);
+        const allocator = self.getContext().allocator();
+        const res = allocator.alloc(Tensor, split_sizes.len) catch @panic("OOM");
         errdefer allocator.dealloc(res);
 
         var start: i64 = 0;
-        for (split_size_or_sections, 0..) |n, i| {
+        for (split_sizes, 0..) |n, i| {
             res[i] = self.slice1d(a, .{ .start = start, .end = start + n });
             start += n;
         }
@@ -3028,25 +3079,21 @@ pub const Tensor = struct {
     /// Slices the input Tensor along a specific axis, with a start offset known at runtime.
     /// Note: this doesn't support tagging, if you have tags,
     /// you should use `dynamicSlice` directly.
-    pub fn dynamicSlice1d(self: Tensor, axis_: i8, len: u63, start_indices: Tensor) Tensor {
-        stdx.debug.assert(start_indices.rank() == 0, "dynamicSlice1d expects 'start_indices' tensor rank to be equal to 0, got {}", .{start_indices.rank()});
+    pub fn dynamicSlice1d(self: Tensor, axis_: i8, slice_: DynSlice) Tensor {
+        stdx.debug.assert(slice_.start.rank() == 0, "dynamicSlice1d expects 'slice_.start' tensor rank to be a scalar, got {}", .{slice_.start});
 
         const a = self.axis(axis_);
-        const new_shape = self._shape.set(a, len);
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "axis={}, len={}", .{ axis_, len });
-        var indices: [Tensor.MAX_RANK]mlir.Value = undefined;
-        for (0..self.rank()) |i| {
-            indices[i] = if (i == a)
-                start_indices.value()
-            else
-                constant(.{}, start_indices.dtype().zero()).value();
-        }
+        const new_shape = self._shape.set(a, slice_.len);
+        const loc = self.getContext().location(@src(), "dynSlice({}, len={})", .{ axis_, slice_.len });
+
+        var start_indices = [_]mlir.Value{constant(.{}, slice_.start.dtype().zero()).value()} ** MAX_RANK;
+        start_indices[a] = slice_.start.value();
 
         const op = dialect.stablehlo.dynamicSlice(
             self.getContext().mlirCtx(),
             self.value(),
             new_shape.dims(),
-            indices[0..self.rank()],
+            start_indices[0..self.rank()],
             loc,
         );
 
@@ -3077,7 +3124,7 @@ pub const Tensor = struct {
         // TODO use slices and slices_tags for the format.
         // Currently this prints: "dynSlice(struct{q: struct{start: tensor.Tensor, comptime len: comptime_int = 1}}{ .q = struct{start: tensor.Tensor, comptime len: comptime_int = 1}{ .start = Tensor({1,10}, dtype=.i64), .len = 1 } })"
         // which is kinda ugly.
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "dynSlice({any})", .{slices_});
+        const loc = self.getContext().location(@src(), "dynSlice({any})", .{slices_});
 
         const idx_dtype = if (slices.len > 0) slices.get(0).start.dtype() else .i32;
         const zero = Tensor.scalar(0, idx_dtype).value();
@@ -3115,7 +3162,7 @@ pub const Tensor = struct {
         {
             const x = try zml.Buffer.fromArray(platform, [10]T{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 });
             const z = try zml.Buffer.scalar(platform, 4, .i32);
-            const res = try zml.testing.compileAndCall(platform, Tensor.dynamicSlice1d, .{ x, 0, 2, z });
+            const res = try zml.testing.compileAndCall(platform, Tensor.dynamicSlice1d, .{ x, 0, .{ .len = 2, .start = z } });
 
             try testing.expectEqual([2]T{ 4, 5 }, try res.getValue([2]T));
         }
@@ -3125,12 +3172,13 @@ pub const Tensor = struct {
             const x = try zml.Buffer.fromArray(platform, [2][5]T{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } });
             const z = try zml.Buffer.scalar(platform, 3, .i32);
 
-            const res = try zml.testing.compileAndCall(platform, Tensor.dynamicSlice1d, .{ x, 1, 2, z });
+            const res = try zml.testing.compileAndCall(platform, Tensor.dynamicSlice1d, .{ x, 1, .{ .len = 2, .start = z } });
             try testing.expectEqual([4]T{ 3, 4, 8, 9 }, res.getValue([4]T));
         }
     }
 
     /// Updates a slice of the input Tensor along a specific axis using the given 'update' Tensor, with a start offset known at runtime.
+    /// Note this is the untagged api, if you have tags, you should use dynamicUpdateSlice directly.
     pub fn dynamicUpdateSlice1d(self: Tensor, update: Tensor, axis_: i64, offset: Tensor) Tensor {
         const placeholder = Tensor.scalar(0, .i32);
         var start_indices = [_]Tensor{placeholder} ** MAX_RANK;
@@ -3237,10 +3285,10 @@ pub const Tensor = struct {
             const res = try zml.testing.compileAndCall(
                 platform,
                 struct {
-                    pub fn forward(x_: Tensor, idx_: struct { a: Tensor }, y_: Tensor) Tensor {
+                    pub fn _fwd(x_: Tensor, idx_: struct { a: Tensor }, y_: Tensor) Tensor {
                         return x_.dynamicUpdateSlice(idx_, y_);
                     }
-                }.forward,
+                }._fwd,
                 .{ x.withTags(.{.a}), .{ .a = idx }, y.withTags(.{.a}) },
             );
             try testing.expectEqual([10]f32{ 0, 1, 2, 3, -1, -1, 6, 7, 8, 9 }, try res.getValue([10]f32));
@@ -3255,10 +3303,10 @@ pub const Tensor = struct {
             const res = try zml.testing.compileAndCall(
                 platform,
                 struct {
-                    pub fn forward(x_: Tensor, idx_: Tensor, y_: Tensor) Tensor {
+                    pub fn _fwd(x_: Tensor, idx_: Tensor, y_: Tensor) Tensor {
                         return x_.dynamicUpdateSlice(.{ .b = idx_ }, y_);
                     }
-                }.forward,
+                }._fwd,
                 .{ x.withTags(.{ .a, .b }), idx, y.withTags(.{.a}) },
             );
             try testing.expectEqualDeep(
@@ -3275,10 +3323,10 @@ pub const Tensor = struct {
             const res = try zml.testing.compileAndCall(
                 platform,
                 struct {
-                    pub fn forward(x_: Tensor, idx_: Tensor, y_: Tensor) Tensor {
+                    pub fn _fwd(x_: Tensor, idx_: Tensor, y_: Tensor) Tensor {
                         return x_.dynamicUpdateSlice(.{ zml.Tensor.scalar(0, .i32), idx_ }, y_);
                     }
-                }.forward,
+                }._fwd,
                 .{ x, idx, y },
             );
             try testing.expectEqualDeep(
@@ -3296,10 +3344,10 @@ pub const Tensor = struct {
             const res = try zml.testing.compileAndCall(
                 platform,
                 struct {
-                    pub fn forward(x_: Tensor, idx_: struct { a: Tensor, b: Tensor }, y_: Tensor) Tensor {
+                    pub fn _fwd(x_: Tensor, idx_: struct { a: Tensor, b: Tensor }, y_: Tensor) Tensor {
                         return x_.dynamicUpdateSlice(idx_, y_);
                     }
-                }.forward,
+                }._fwd,
                 .{ x.withTags(.{ .a, .b }), .{ .a = idx_a, .b = idx_b }, y.withTags(.{.a}) },
             );
             try testing.expectEqualDeep(
@@ -3315,11 +3363,11 @@ pub const Tensor = struct {
             const idx_a = try zml.Buffer.scalar(platform, 1, .i32);
             const idx_b = try zml.Buffer.scalar(platform, 3, .i32);
             const A = struct {
-                pub fn forward(x_: Tensor, idx_: [2]Tensor, y_: Tensor) Tensor {
+                pub fn _fwd(x_: Tensor, idx_: [2]Tensor, y_: Tensor) Tensor {
                     return x_.dynamicUpdateSlice(&idx_, y_);
                 }
             };
-            const res = try zml.testing.compileAndCall(platform, A.forward, .{ x, .{ idx_a, idx_b }, y });
+            const res = try zml.testing.compileAndCall(platform, A._fwd, .{ x, .{ idx_a, idx_b }, y });
             try testing.expectEqualDeep(
                 [2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, -1, 9 } },
                 res.getValue([2][5]f32),
@@ -3336,7 +3384,7 @@ pub const Tensor = struct {
 
         stdx.debug.assert(self._shape.eql(other._shape), "cmp expects input tensor shapes to match, got {} and {}", .{ self._shape, other._shape });
 
-        const loc = self.getContext().mlirCtx().location(@src()).namedFmt(self.getContext().mlirCtx(), "cmp(.{s})", .{@tagName(direction)});
+        const loc = self.getContext().location(@src(), "cmp(.{s})", .{@tagName(direction)});
         const op = dialect.stablehlo.compare(
             self.getContext().mlirCtx(),
             self.value(),
@@ -3505,32 +3553,47 @@ pub const Tensor = struct {
     }
 
     /// Returns a Tensor containing boolean indicating if there is a non-zero value over the given axis.
-    pub fn any(self: Tensor, axis_: i64) Tensor {
+    pub fn any(self: Tensor, axis_: anytype) Tensor {
         const pred = self.cmp(.NE, Tensor.constant(self.dims(), self.dtype().zero()));
-        const red = ops.reduce(
+        return ops.reduce(
             struct {
                 pub fn acc(x: Tensor, res: Tensor) Tensor {
                     return res.logical(.OR, x);
                 }
             }.acc,
             pred,
-            Tensor.scalar(0, pred.dtype()),
+            Tensor.scalar(false, .bool),
             &.{self.axis(axis_)},
         );
-        return red;
+    }
+
+    /// Returns a Tensor containing boolean indicating if there is a non-zero value over the given axis.
+    pub fn all(self: Tensor, axis_: anytype) Tensor {
+        const pred = if (self.dtype() == .bool) self else self.cmp(.NE, Tensor.scalar(0, self.dtype()));
+        return ops.reduce(
+            struct {
+                pub fn acc(x: Tensor, res: Tensor) Tensor {
+                    return res.logical(.AND, x);
+                }
+            }.acc,
+            pred,
+            Tensor.scalar(true, .bool),
+            &.{self.axis(axis_)},
+        );
     }
 
     /// Given a set of N vectors of lengths A, B, C, D,
     /// returns N tensors of rank N, and shape (A, B, C, D).
-    /// For any coordinate (a, b, c, d),
-    /// we have:
+    /// For any coordinate (a, b, c, d), we have:
+    ///
     /// - res[0][a, b, c, d] == A[a]
     /// - res[1][a, b, c, d] == B[b]
     /// - res[2][a, b, c, d] == C[c]
     /// - res[3][a, b, c, d] == D[d]
+    ///
     /// This is implemented with broadcasting, so typically it won't copy.
     /// In Pytorch/Numpy this is know as `meshgrid` with "ij" mode.
-    /// See torch.meshgrid for the "xy" mode.
+    /// See `zml.torch.meshgrid` for the "xy" mode.
     pub fn cartesianProduct(comptime N: u3, vectors: [N]Tensor) [N]Tensor {
         var out: @TypeOf(vectors) = undefined;
         _cartesianProduct(&vectors, &out);
@@ -3567,13 +3630,13 @@ pub const Tensor = struct {
         const y = try zml.Buffer.fromSlice(client, .{4}, &[_]i32{ 0, 1, 2, 3 });
 
         const Local = struct {
-            pub fn cartesianProduct2(a: Tensor, b: Tensor) [2]Tensor {
+            pub fn _cartesianProduct2(a: Tensor, b: Tensor) [2]Tensor {
                 return cartesianProduct(2, .{ a, b });
             }
         };
 
         {
-            const xs, const ys = try zml.testing.compileAndCall(client, Local.cartesianProduct2, .{ x, y });
+            const xs, const ys = try zml.testing.compileAndCall(client, Local._cartesianProduct2, .{ x, y });
             try std.testing.expectEqualSlices(i64, &.{ 6, 4 }, xs.shape().dims());
             try std.testing.expectEqualSlices(i64, &.{ 6, 4 }, ys.shape().dims());
             try std.testing.expectEqualDeep(
@@ -3603,8 +3666,8 @@ pub const Tensor = struct {
 
     /// Given a set of N vectors of lengths A, B, C, D,
     /// returns 1 tensors of rank N+1, and shape (A, B, C, D, N).
-    /// For any coordinate (a, b, c, d),
-    /// we have:
+    /// For any coordinate (a, b, c, d), we have:
+    ///
     /// - res[a, b, c, d] == (A[a], B[b], C[c], D[d])
     pub fn cartesianProductStacked(vectors: []const Tensor) Tensor {
         var out = std.BoundedArray(Tensor, Tensor.MAX_RANK).init(vectors.len) catch unreachable;
@@ -3620,12 +3683,12 @@ pub const Tensor = struct {
         const y = try zml.Buffer.fromSlice(platform, .{4}, &[_]i32{ 0, 1, 2, 3 });
 
         const Local = struct {
-            pub fn cartesianProduct2(a: Tensor, b: Tensor) Tensor {
+            pub fn _fwd(a: Tensor, b: Tensor) Tensor {
                 return cartesianProductStacked(&.{ a, b });
             }
         };
 
-        const z = try zml.testing.compileAndCall(platform, Local.cartesianProduct2, .{ x, y });
+        const z = try zml.testing.compileAndCall(platform, Local._fwd, .{ x, y });
         try std.testing.expectEqualDeep(
             [6][4][2]i32{
                 .{ .{ 0, 0 }, .{ 0, 1 }, .{ 0, 2 }, .{ 0, 3 } },
@@ -3640,6 +3703,7 @@ pub const Tensor = struct {
     }
 
     fn binaryOp(
+        src: std.builtin.SourceLocation,
         op_name: []const u8,
         op_fn: fn (mlir.Context, mlir.Value, mlir.Value, mlir.Location) mlir.Operation,
     ) fn (Tensor, Tensor) Tensor {
@@ -3657,9 +3721,9 @@ pub const Tensor = struct {
 
                 stdx.debug.assert(self._shape.eql(other._shape), "{s} expects tensor shapes to match, got {} and {}", .{ op_name, self._shape, other._shape });
 
-                const mlirCtx = self.getContext().mlirCtx();
-                const location = mlirCtx.location(@src());
-                const ret = @call(.auto, op_fn, .{ mlirCtx, self.value(), other.value(), location });
+                const ctx = self.getContext();
+                const location = ctx.location(src, "{s}({_}, {_})", .{ op_name, self, other });
+                const ret = @call(.auto, op_fn, .{ ctx.mlirCtx(), self.value(), other.value(), location });
                 return _result(self._shape, ret.result(0));
             }
         }.binaryOpHelper;
@@ -3677,13 +3741,7 @@ pub const Tensor = struct {
     }
 
     fn printCallback(host_buffer: HostBuffer) void {
-        switch (host_buffer.dtype()) {
-            inline else => |dt| {
-                const items = host_buffer.items(dt.toZigType());
-                const n = @min(items.len, 1024);
-                std.debug.print("Device buffer: {}: {any}\n", .{ host_buffer.shape(), items[0..n] });
-            },
-        }
+        std.debug.print("Device buffer: {}: {}", .{ host_buffer.shape(), host_buffer.pretty() });
     }
 };
 
@@ -3733,7 +3791,7 @@ test "Tensor.maxPool1d" {
     const platform = zml.testing.env();
 
     const MaxPool = struct {
-        pub fn forward(x: zml.Tensor) Tensor.ArgMaxRes {
+        pub fn _fwd(x: zml.Tensor) Tensor.ArgMaxRes {
             return x.maxPool1d(.{
                 .window_dimensions = 3,
                 .window_strides = 2,
@@ -3745,7 +3803,7 @@ test "Tensor.maxPool1d" {
     for (&data, 0..) |*v, i| v.* = @floatFromInt(i);
 
     const x = try zml.Buffer.fromSlice(platform, .{ 2, 2, 5 }, &data);
-    const result = try zml.testing.compileAndCall(platform, MaxPool.forward, .{x});
+    const result = try zml.testing.compileAndCall(platform, MaxPool._fwd, .{x});
     try zml.testing.expectEqualShapes(Shape.init(.{ 2, 2, 2 }, .f32), result.values.shape());
     try zml.testing.expectEqualShapes(Shape.init(.{ 2, 2, 2 }, .i32), result.indices.shape());
     const buffer = result.values.getValue([2][2][2]f32);
@@ -3769,7 +3827,7 @@ test "Tensor.maxPool2d" {
     const platform = zml.testing.env();
 
     const MaxPool = struct {
-        pub fn forward(x: Tensor) Tensor.ArgMaxRes {
+        pub fn _fwd(x: Tensor) Tensor.ArgMaxRes {
             return x.maxPool2d(.{
                 .window_dimensions = .{ 3, 2 },
                 .window_strides = .{ 2, 1 },
@@ -3781,7 +3839,7 @@ test "Tensor.maxPool2d" {
     for (&data, 0..) |*v, i| v.* = @floatFromInt(i);
     const x = try zml.Buffer.fromSlice(platform, .{ 2, 2, 5, 5 }, &data);
 
-    const result = try zml.testing.compileAndCall(platform, MaxPool.forward, .{x});
+    const result = try zml.testing.compileAndCall(platform, MaxPool._fwd, .{x});
     try zml.testing.expectEqualShapes(Shape.init(.{ 2, 2, 2, 4 }, .f32), result.values.shape());
     try zml.testing.expectEqualShapes(Shape.init(.{ 2, 2, 2, 4 }, .i32), result.indices.shape());
     var buffer: [2][2][2][4]f32 = undefined;
@@ -3900,7 +3958,7 @@ test shapesOf {
     }
 }
 
-fn _collectAxes(T: type, bounded_array: std.BoundedArray(T, Tensor.MAX_RANK), value: T) std.BoundedArray(i64, Tensor.MAX_RANK) {
+pub fn _collectAxes(T: type, bounded_array: std.BoundedArray(T, Tensor.MAX_RANK), value: T) std.BoundedArray(i64, Tensor.MAX_RANK) {
     var res: std.BoundedArray(i64, Tensor.MAX_RANK) = .{};
     for (bounded_array.constSlice(), 0..) |v, ax| {
         if (v == value) {
@@ -3936,4 +3994,61 @@ inline fn toI64(values: anytype) []i64 {
     var res: [Tensor.MAX_RANK]i64 = undefined;
     for (values, 0..) |val, i| res[i] = @intCast(val);
     return res[0..values.len];
+}
+
+fn transposeIsJustAReshape(x: Shape, permutation: []const i64) bool {
+    var perm: std.BoundedArray(struct { u8, bool }, Tensor.MAX_RANK) = .{};
+    // Don't rewrite on invalid inputs.
+    if (permutation.len > x.rank()) return false;
+    for (permutation) |ax| {
+        const squeezable = x.dim(ax) == 1;
+        perm.appendAssumeCapacity(.{ @intCast(ax), squeezable });
+    }
+
+    var effective_ax: u8 = 0;
+    for (0..perm.len) |i| {
+        const ax, const squeezable = perm.get(i);
+        if (squeezable) {
+            // Effectively squeeze this axis by decrementing axes coming after by 1.
+            for (i..perm.len) |j| {
+                if (perm.buffer[j][0] > ax) {
+                    perm.buffer[j][0] -= 1;
+                }
+            }
+            continue;
+        }
+
+        if (ax != effective_ax) return false;
+        effective_ax += 1;
+    }
+
+    return true;
+}
+
+test transposeIsJustAReshape {
+    try std.testing.expect(transposeIsJustAReshape(Shape.init(.{ 5, 1, 3 }, .i32), &.{ 0, 1, 2 }));
+    try std.testing.expect(transposeIsJustAReshape(Shape.init(.{ 5, 1, 3 }, .i32), &.{ 1, 0, 2 }));
+    try std.testing.expect(!transposeIsJustAReshape(Shape.init(.{ 5, 1, 3 }, .i32), &.{ 2, 1, 0 }));
+    try std.testing.expect(transposeIsJustAReshape(Shape.init(.{ 64, 8, 1, 128 }, .bf16), &.{ 0, 2, 1, 3 }));
+    try std.testing.expect(!transposeIsJustAReshape(Shape.init(.{ 64, 8, 155, 128 }, .bf16), &.{ 0, 2, 1, 3 }));
+    try std.testing.expect(transposeIsJustAReshape(Shape.init(.{ 64, 1, 1, 128 }, .bf16), &.{ 1, 2, 0, 3 }));
+    try std.testing.expect(!transposeIsJustAReshape(Shape.init(.{ .b = 1, .h = 10, .q = 155, .hd = 1 }, .f32), &.{ 0, 2, 1, 3 }));
+    try std.testing.expect(!transposeIsJustAReshape(Shape.init(.{ 1, 10, 155, 1 }, .f32), &.{ 0, 2, 3, 1 }));
+    try std.testing.expect(transposeIsJustAReshape(Shape.init(.{ 1, 10, 155, 1 }, .f32), &.{ 0, 1, 3, 2 }));
+}
+
+test "unused tensor" {
+    const zml = @import("zml.zig");
+    const platform = zml.testing.env();
+
+    const Local = struct {
+        pub fn _fwd(x: Tensor) Tensor {
+            const y = x.addConstant(1);
+            _ = y;
+            return x;
+        }
+    };
+
+    const mod = try zml.compileFn(std.testing.allocator, Local._fwd, .{Shape.init(.{10}, .f32)}, platform);
+    defer mod.deinit();
 }

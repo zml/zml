@@ -15,7 +15,7 @@ const CompilationContext = module.CompilationContext;
 pub fn canUseCudnnSdpa(q_shape: Shape) bool {
     const ctx = CompilationContext.current();
     // TODO(Corendos): Check cuda version, cudnn version, device compatibility.
-    if (!ctx.targetIs(.cuda)) return false;
+    if (ctx.target() != .cuda) return false;
 
     if (q_shape.rank() != 4) return false;
 
@@ -116,16 +116,13 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
     var bias = Tensor.constant(Shape.init(.{ .b = q.dim(.b), .h = q.dim(.h), .q = q.dim(.q), .k = k.dim(.k) }, q.dtype()), Data.init(q.dtype(), 0));
 
     if (opts.attn_mask) |attn_mask| {
-        const mask = attn_mask.withTags(.{ .q, .k }).broad(bias.shape());
-        bias = bias.add(mask);
-    }
-    if (opts.bias) |b| {
-        bias = bias.add(b);
+        bias = bias.add(attn_mask.broad(bias.shape()));
     }
 
-    const loc = ctx.mlirCtx().location(@src());
+    const mlir_ctx = ctx.mlirCtx();
+    const loc = mlir_ctx.location(@src());
     const op = dialect.stablehlo.custom_call(
-        ctx.mlirCtx(),
+        mlir_ctx,
         &.{ q.value(), k.value(), v.value(), bias.value() },
         .{
             .call_target_name = "__cudnn$fmhaScaleBiasSoftmax",
@@ -135,8 +132,8 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
             .output_operand_aliases = &.{},
         },
         &.{
-            mlir.ext.mlirType(ctx.mlirCtx(), q.shape()),
-            mlir.RankedTensorType.init(&.{0}, mlir.IntegerType(.u8).init(ctx.mlirCtx()).as(mlir.Type).?).as(mlir.Type).?,
+            mlir.ext.mlirType(mlir_ctx, q.shape()),
+            mlir.RankedTensorType.init(&.{0}, mlir.IntegerType(.u8).init(mlir_ctx).as(mlir.Type).?).asType(),
         },
         loc,
     );

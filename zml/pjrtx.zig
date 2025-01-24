@@ -42,8 +42,8 @@ fn InnerMixin(comptime innerT: type) type {
 pub const Client = opaque {
     const inner = InnerMixin(pjrt.Client).inner;
 
-    pub fn init(api: *const Api, create_options: []const NamedValue) ClientInitError!*Client {
-        return @ptrCast(try pjrt.Client.init(api, create_options));
+    pub fn init(api: *const Api, options: []const NamedValue) ClientInitError!*Client {
+        return @ptrCast(try pjrt.Client.init(api, options));
     }
 
     pub fn deinit(self: *Client, api: *const Api) void {
@@ -100,11 +100,16 @@ pub const Client = opaque {
         // spec ref: https://github.com/openxla/xla/blob/39967ad6782a861ca029ab8d1a2b25f7e0c3902b/xla/pjrt/pjrt_c_api_client.cc#L399
         var requested_stablehlo_version_buf: [32]u8 = undefined;
         const requested_stablehlo_version = api.stablehloCurrentVersion(&requested_stablehlo_version_buf);
+        std.log.warn("requested_stablehlo_version: {?s}", .{requested_stablehlo_version});
         const stablehlo_version = if (requested_stablehlo_version) |requested_version| blk: {
             break :blk dialects.stablehlo.stablehloGetSmallerVersion(requested_version, dialects.stablehlo.getCurrentVersion());
         } else blk: {
-            break :blk dialects.stablehlo.stablehloVersionFromCompatibilityRequirement(c.WEEK_12);
+            //FIXME: Neuron PJRT Plugin doesn't report StableHLO version and,
+            //       isn't compatible with WEEK_12 compat from our own version,
+            //       but is compatible with MAX.
+            break :blk dialects.stablehlo.stablehloVersionFromCompatibilityRequirement(c.MAX);
         };
+        std.log.warn("stablehlo_version: {?s}", .{stablehlo_version});
 
         dialects.stablehlo.serializePortableArtifact(bytecode.items, stablehlo_version, serialized_buffer.writer()) catch |err| {
             log.err("failed to serialize to portable artifact: {}", .{err});

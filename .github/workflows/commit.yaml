@@ -9,7 +9,7 @@ on:
 
 env:
   ZIG_VERSION: 0.13.0
-  BAZELISK_VERSION: 1.20.0
+  BAZELISK_VERSION: 1.25.0
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -42,3 +42,12 @@ jobs:
         run: |
           export PATH=$PATH:~/bin
           bazel test --remote_cache=grpc://127.0.0.1:15501 //zml:test --test_output=streamed
+
+      - name: Build examples
+        working-directory: examples/
+        run: |
+          export PATH=$PATH:~/bin
+          bazel build --config=debug --remote_cache=grpc://127.0.0.1:15501 //llama
+          bazel build --config=debug --remote_cache=grpc://127.0.0.1:15501 //mnist
+          bazel build --config=debug --remote_cache=grpc://127.0.0.1:15501 //simple_layer
+          bazel build --config=debug --remote_cache=grpc://127.0.0.1:15501 //loader:safetensors

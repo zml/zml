@@ -33,7 +33,7 @@ pub fn asyncMain() !void {
     defer context.deinit();
 
     // Select platform
-    const platform = context.autoPlatform();
+    const platform = context.autoPlatform(.{});
 
     // Parse program args
     var args = std.process.args();

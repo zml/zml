@@ -40,10 +40,8 @@ bytecode_select = rule(
     },
 )
 
-
 def if_gfx(gfx, value):
     return select({
         "@zml//runtimes/rocm:_{}".format(gfx): value,
         "//conditions:default": [],
     })
-

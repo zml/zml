@@ -333,6 +333,8 @@ pub const Identifier = struct {
     }
 };
 
+pub const AttrTuple = struct { [:0]const u8, Attribute };
+
 pub const Attribute = struct {
     _inner: c.MlirAttribute,
     pub usingnamespace MlirHelpers(Attribute, .{
@@ -617,7 +619,7 @@ pub const DenseElementsAttributeTypes = enum {
 
 pub fn DenseIntOrFPElementsAttribute(comptime dt: DenseElementsAttributeTypes) type {
     const ZigInDataType, const ZigOutDataType, const initFn, const getValue = switch (dt) {
-        .bool => .{ i32, bool, c.mlirDenseElementsAttrBoolGet, c.mlirDenseElementsAttrGetBoolValue },
+        .bool => .{ bool, bool, c.mlirDenseElementsAttrBoolGet, c.mlirDenseElementsAttrGetBoolValue },
         .i8 => .{ i8, i8, c.mlirDenseElementsAttrInt8Get, c.mlirDenseElementsAttrGetInt8Value },
         .i16 => .{ i16, i16, c.mlirDenseElementsAttrInt16Get, c.mlirDenseElementsAttrGetInt16Value },
         .i32 => .{ i32, i32, c.mlirDenseElementsAttrInt32Get, c.mlirDenseElementsAttrGetInt32Value },
@@ -790,8 +792,6 @@ pub const Operation = struct {
             c.mlirOperationCreate(state.innerPtr()),
         ) orelse Error.InvalidMlir;
     }
-
-    pub const AttrTuple = struct { [:0]const u8, Attribute };
 
     pub fn make(ctx: Context, op_name: [:0]const u8, args: struct {
         operands: ?[]const Value = null,

@@ -6,7 +6,7 @@ const runtimes = @import("runtimes");
 const std = @import("std");
 const stdx = @import("stdx");
 
-const platform = @import("platform.zig");
+const zml_platform = @import("platform.zig");
 const pjrt = @import("pjrtx.zig");
 
 const HostBuffer = @import("hostbuffer.zig").HostBuffer;
@@ -17,6 +17,10 @@ const Target = @import("platform.zig").Target;
 
 const available_targets = @import("platform.zig").available_targets;
 const log = std.log.scoped(.@"zml/context");
+
+test {
+    std.testing.refAllDecls(Context);
+}
 
 /// Every program using ZML must start with a `zml.Context.init(.{});`
 /// The ZML context contains global state to interact with the different
@@ -77,35 +81,16 @@ pub const Context = struct {
         Context.apis_once.call();
         Context.mlir_once.call();
 
-        var platforms = PlatformsMap.initFill(null);
         var num_platforms: u8 = 0;
-        var it = Context.apis.iterator();
-        while (it.next()) |entry| {
-            if (entry.value.*) |api| {
-                const target = entry.key;
-                const p = Platform.init(target, api) catch |err| {
-                    log.err("Failed to load platform .{s}: {}", .{ @tagName(target), err });
-                    continue;
-                };
-                if (p.getDevices().len == 0) {
-                    log.err("No device found for platform {} !", .{target});
-                    continue;
-                }
-                if (target == .cuda) {
-                    try cuda.registerZmlCustomCalls(p);
-                }
-                platforms.set(target, p);
-                num_platforms += 1;
-            }
+        for (Context.apis.values) |api| {
+            if (api != null) num_platforms += 1;
         }
         if (num_platforms == 0) {
             log.err("No platform available", .{});
             return error.NoPlatformAvailable;
         }
 
-        return .{
-            .platforms = platforms,
-        };
+        return .{ .platforms = PlatformsMap.initFill(null) };
     }
 
     fn platformToLibrary(comptime target: Target) []const u8 {
@@ -133,23 +118,72 @@ pub const Context = struct {
         self.* = undefined;
     }
 
+    const prefered_targets = [_]Target{ .tpu, .neuron, .cuda, .rocm, .cpu };
+
     /// Automatically selects the best Platform loaded in the current Context.
     ///
     /// For example, if supported, this will select a platform corresponding to an accelerator (GPU, TPU, ...).
-    pub fn autoPlatform(self: *Context) Platform {
-        // the last platform is the one that with the high enum number, so considered
-        // to be the "best" one
-        var platform_: ?Platform = null;
-        var iterator = self.platforms.iterator();
-        while (iterator.next()) |entry| {
-            if (entry.value.*) |p| {
-                platform_ = p;
-            }
-        }
-        return platform_ orelse @panic("No platform found !");
+    pub fn autoPlatform(self: *Context, opts: Platform.CreateOptions) Platform {
+        stdx.debug.assert(prefered_targets.len == apis.values.len, "New target need to be inserted inside `zml.Context.preferred_targets`", .{});
+
+        return self.platformByPreferences(opts, &prefered_targets);
     }
 
-    pub fn printAvailablePlatforms(self: Context, selected: platform.Platform) void {
+    /// Given a list of preferred targets to select the best Platform
+    ///
+    /// For example, if supported, this will select a platform corresponding to an accelerator (GPU, TPU, ...).
+    pub fn platformByPreferences(self: *Context, opts: Platform.CreateOptions, prefered: []const Target) Platform {
+        // Try prefered targets.
+        for (prefered) |target| {
+            if (apis.get(target) == null) continue;
+            return self.platform(target, opts) catch |err| {
+                log.err("Failed to load platform .{s}: {}", .{ @tagName(target), err });
+                continue;
+            };
+        }
+
+        // Try unlisted targets
+        var it = Context.apis.iterator();
+        while (it.next()) |entry| {
+            const target = entry.key;
+            // CPU should only be use as fallback.
+            if (target == .cpu) continue;
+            if (entry.value.* == null) continue;
+            if (std.mem.indexOfScalar(Target, prefered, target) != null) continue;
+            return self.platform(target, opts) catch |err| {
+                log.err("Failed to load platform .{s}: {}", .{ @tagName(target), err });
+                continue;
+            };
+        }
+
+        // Finally fallback to cpu.
+        return self.platform(.cpu, opts) catch {
+            log.err("No platform available", .{});
+            @panic("No platform available !");
+        };
+    }
+
+    pub fn platform(self: *Context, target: Target, opts: Platform.CreateOptions) !Platform {
+        if (self.platforms.get(target)) |p| {
+            return p;
+        }
+        const api = Context.apis.get(target);
+        if (api == null) return error.PlatformNotCompiled;
+        const p = try Platform.init(target, api.?, opts);
+        if (p.getDevices().len == 0) {
+            log.err("No device found for platform {} !", .{target});
+            return error.NoDevicesFound;
+        }
+        // TODO: should this be moved to platform.zig ?
+        if (target == .cuda) {
+            try cuda.registerZmlCustomCalls(p);
+        }
+
+        self.platforms.set(target, p);
+        return p;
+    }
+
+    pub fn printAvailablePlatforms(self: Context, selected: Platform) void {
         // List available targets
         log.info("Available Platforms:", .{});
         const selected_prefix = "✅";
@@ -157,7 +191,7 @@ pub const Context = struct {
         const selected_postfix = "(AUTO-SELECTED)";
         const not_selected_postfix = "";
 
-        for (platform.available_targets) |target| {
+        for (zml_platform.available_targets) |target| {
             log.info("  {s} {s} {s}", .{
                 if (target == selected.target) selected_prefix else not_selected_prefix,
                 @tagName(target),

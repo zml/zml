@@ -23,7 +23,10 @@ zig-out/
 # Data files
 *.wav
 *.ecdc
+
+# Python slope
 .venv
+venv
 
 # Editor specific
 ## Neovim

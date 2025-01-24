@@ -1,3 +1,4 @@
+///! Conversion utilities between different Floating point formats.
 const std = @import("std");
 
 test {
@@ -9,12 +10,15 @@ fn allBitsOne(v: anytype) bool {
 }
 
 fn FloatType(sign_bits: u1, exponent_bits: u8, mantissa_bits: u8, innerT: type) type {
-    return packed struct(std.meta.Int(.unsigned, @intCast(sign_bits + exponent_bits + mantissa_bits))) {
+    const bit_size = sign_bits + exponent_bits + mantissa_bits;
+    if (bit_size % 8 != 0) @compileError("FloatType should have a number of bits divisible by 8");
+
+    return packed struct(std.meta.Int(.unsigned, bit_size)) {
         const Self = @This();
 
-        mantissa: std.meta.Int(.unsigned, @intCast(mantissa_bits)),
-        exponent: std.meta.Int(.unsigned, @intCast(exponent_bits)),
-        sign: std.meta.Int(.unsigned, @intCast(sign_bits)),
+        mantissa: std.meta.Int(.unsigned, mantissa_bits),
+        exponent: std.meta.Int(.unsigned, exponent_bits),
+        sign: std.meta.Int(.unsigned, sign_bits),
 
         pub fn zero() Self {
             return .{
@@ -35,34 +39,51 @@ fn FloatType(sign_bits: u1, exponent_bits: u8, mantissa_bits: u8, innerT: type) 
         /// Lossy conversion from f32, similar to @floatCast
         pub fn fromF32(f: f32) Self {
             const vf32: Float32 = @bitCast(f);
-            const precision_loss = @bitSizeOf(@TypeOf(vf32.mantissa)) - mantissa_bits;
+            const exp_bias = comptime Self.expBias();
+            const exponent = @as(u16, vf32.exponent) + exp_bias -| Float32.expBias();
+            const overflow = exponent > std.math.maxInt(std.meta.Int(.unsigned, exponent_bits));
+            if (overflow) {
+                return if (@hasDecl(Self, "inf")) {
+                    return if (vf32.sign == 0) Self.inf() else Self.minusInf();
+                } else Self.nan();
+            }
             return .{
                 .sign = vf32.sign,
-                .exponent = @intCast(vf32.exponent),
-                .mantissa = shr(vf32.mantissa, precision_loss),
+                .exponent = @intCast(exponent),
+                .mantissa = truncMantissa(vf32.mantissa),
             };
         }
 
         /// Lossless conversion to f32.
         pub fn toF32(self: Self) f32 {
             var vf32: Float32 = undefined;
-            const precision_loss = @bitSizeOf(@TypeOf(vf32.mantissa)) - mantissa_bits;
+            if (@hasDecl(Self, "isInf") and self.isInf()) {
+                return if (self.sign == 0) std.math.inf(f32) else -std.math.inf(f32);
+            }
             vf32 = .{
                 .sign = self.sign,
-                .exponent = self.exponent,
-                .mantissa = @shlExact(@as(@TypeOf(vf32.mantissa), self.mantissa), precision_loss),
+                .exponent = if (self.exponent == 0) 0 else @intCast(@as(i16, self.exponent) + Float32.expBias() - Self.expBias()),
+                .mantissa = self.f32Mantissa(),
             };
             return @bitCast(vf32);
         }
 
-        fn truncMantissa(T: type, x: anytype) T {
-            const off = @bitSizeOf(@TypeOf(x)) - @bitSizeOf(T);
+        fn truncMantissa(x: anytype) std.meta.FieldType(Self, .mantissa) {
+            @setRuntimeSafety(false);
+            const off = @bitSizeOf(@TypeOf(x)) - mantissa_bits;
             return @intCast(x >> off);
         }
 
-        fn shr(x: anytype, comptime off: u8) std.meta.Int(.unsigned, @bitSizeOf(@TypeOf(x)) - off) {
-            // @setRuntimeSafety(false);
-            return @intCast(x >> off);
+        fn f32Mantissa(self: Self) std.meta.FieldType(Float32, .mantissa) {
+            @setRuntimeSafety(false);
+            const f32_mantissa_bits = @bitSizeOf(std.meta.FieldType(Float32, .mantissa));
+
+            const Res = std.meta.FieldType(Float32, .mantissa);
+            return @shlExact(@as(Res, self.mantissa), f32_mantissa_bits - mantissa_bits);
+        }
+
+        fn expBias() u8 {
+            return std.math.maxInt(std.meta.Int(.unsigned, exponent_bits - 1));
         }
 
         pub fn format(
@@ -72,7 +93,11 @@ fn FloatType(sign_bits: u1, exponent_bits: u8, mantissa_bits: u8, innerT: type) 
             writer: anytype,
         ) !void {
             _ = options;
-            try writer.print("{" ++ fmt ++ "}", .{self.toF32()});
+            if (fmt.len == 1 and fmt[0] == '_') {
+                try writer.print("{{ .sign={}, .exp={}, .mantissa={} }}", .{ self.sign, self.exponent, self.mantissa });
+            } else {
+                try writer.print("{" ++ fmt ++ "}", .{self.toF32()});
+            }
         }
 
         pub usingnamespace innerT;
@@ -124,6 +149,22 @@ pub const Float8E4M3FNUZ = FloatType(1, 4, 3, struct {
     }
 });
 
+test "Float8E4" {
+    const test_case_e4: TestCase = .{
+        .lossless = &[_]f32{ 0, 1.0, -2, 1.0 / 64.0, -128 },
+        .lossy = &[_]f32{3.02344107628},
+    };
+
+    inline for (.{
+        Float8E4M3B11FNUZ,
+        Float8E4M3FN,
+        Float8E4M3FNUZ,
+    }) |Float8T| {
+        try testCustomFloat(Float8T, test_case_e4);
+        try std.testing.expectEqual(0.0, Float8T.fromF32(1.0 / 128.0).toF32());
+    }
+}
+
 pub const Float8E5M2 = FloatType(1, 5, 2, struct {
     pub fn nan() Float8E5M2 {
         return .{
@@ -172,6 +213,16 @@ pub const Float8E5M2FNUZ = FloatType(1, 5, 2, struct {
     }
 });
 
+test "Float8E5" {
+    const test_case_e5: TestCase = .{
+        .lossless = &[_]f32{ 0, 1.0, -2, 1.0 / 128.0, -128 },
+        .lossy = &[_]f32{3.02344107628},
+    };
+    inline for (.{ Float8E5M2, Float8E5M2FNUZ }) |Float8T| {
+        try testCustomFloat(Float8T, test_case_e5);
+    }
+}
+
 pub const BFloat16 = FloatType(1, 8, 7, struct {
     pub fn nan() BFloat16 {
         return .{
@@ -215,18 +266,10 @@ test BFloat16 {
     try std.testing.expectEqual(std.mem.toBytes(BFloat16.inf().neg()), [_]u8{ 0x80, 0xff });
     try std.testing.expectEqual(BFloat16.inf(), BFloat16.fromF32(std.math.inf(f32)));
 
-    const lossless = [_]f32{ 0, -2, 1.0 / 128.0, -1e64, std.math.inf(f32) };
-    for (&lossless) |v| {
-        try std.testing.expectEqual(v, BFloat16.fromF32(v).toF32());
-    }
-    const lossy = [_]f32{3.02344107628};
-    for (&lossy) |x| {
-        const y = BFloat16.fromF32(x).toF32();
-        if (!std.math.approxEqRel(f32, x, y, 1e-2)) {
-            std.log.err("expected ~{d}, got {d}", .{ x, y });
-            return error.TestUnexpectedResult;
-        }
-    }
+    try testCustomFloat(BFloat16, .{
+        .lossless = &[_]f32{ 0, -2, 1.0 / 128.0, -1e64, std.math.inf(f32) },
+        .lossy = &[_]f32{3.02344107628},
+    });
 }
 
 pub fn floatCast(T: type, x: anytype) T {
@@ -234,4 +277,26 @@ pub fn floatCast(T: type, x: anytype) T {
         f64, f32, f16 => @floatCast(x),
         else => @floatCast(x.toF32()),
     };
+}
+
+const TestCase = struct {
+    lossless: []const f32,
+    lossy: []const f32,
+    tolerance: f32 = 1e-2,
+};
+
+fn testCustomFloat(FloatT: type, test_case: TestCase) !void {
+    for (test_case.lossless) |x| {
+        try std.testing.expectEqual(x, FloatT.fromF32(x).toF32());
+    }
+    for (test_case.lossy) |x| {
+        try expectApproxEqRel(f32, x, FloatT.fromF32(x).toF32(), test_case.tolerance);
+    }
+}
+
+fn expectApproxEqRel(FloatT: type, x: FloatT, y: FloatT, tolerance: FloatT) !void {
+    if (!std.math.approxEqRel(f32, x, y, tolerance)) {
+        std.log.err("expected ~{d}, got {d}", .{ x, y });
+        return error.TestUnexpectedResult;
+    }
 }

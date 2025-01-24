@@ -86,12 +86,14 @@ pub fn MapType(From: type, To: type) type {
 /// For example it can convert from a comptime array to a runtime slice.
 /// `mapAlloc` can allocate new slices to write the result if the result struct requires it.
 /// The caller is owning said allocations, using an `ArenaAllocator` might help tracking them.
-// TODO: handle tuple to slice conversion
+///
+/// Note: to avoid infinite loop, mapAlloc doesn't look for `From` fields inside `To` struct.
+/// Any `To` struct inside `from` will be copied over to the target.
 pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam(cb, 0), from: anytype, to: anytype) !void {
-    // const Ctx = FnParam(cb, 0);
+    // TODO: handle tuple to slice conversion
     const From = FnParam(cb, 1);
+    const To = stdx.meta.FnResult(cb);
     const FromStruct = @TypeOf(from);
-
     const type_info_to_ptr = @typeInfo(@TypeOf(to));
     if (type_info_to_ptr != .Pointer) {
         stdx.debug.compileError("convertType is expecting a mutable `to` argument but received: {}", .{@TypeOf(to)});
@@ -100,11 +102,12 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
     const type_info_to = @typeInfo(ToStruct);
 
     if (FromStruct == From) {
-        // Special case for converting from shape to tensor:
-        // If the target type is Shape, skip tensor conversion.
-        // A general `to.* = from` assignment causes a Zig error in this scenario.
-        // (see below)
-        if (ToStruct == @import("shape.zig").Shape and FromStruct == ToStruct) { // FromStruct) {
+        // We have an issues with `Tensor` -> `Shape` -> `Tensor` conversion when compiling ZML functions where one argument is a Shape itself.
+        // Normally we should call `cb` on all `Shape`.
+        // But the "ShapeOf" struct will have more Shape than need on the output.
+        // So here we take a hint from the receiving object.
+        // If the target is indeed a Tensor, use the callback, but if the target is `Shape` just copy it over.
+        if (ToStruct != To and FromStruct == ToStruct) {
             to.* = from;
         } else {
             to.* = @call(.auto, cb, .{ ctx, from });
@@ -112,22 +115,16 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
         return;
     }
 
-    // This is generally due to a user error, but let this fn compile,
-    // and the user will have a Zig error.
-    if (FromStruct == ToStruct) {
+    if (FromStruct == To) {
         to.* = from;
         return;
     }
 
-    // Don't go into Shape objects because of the weird tag.
-    // TODO: we could not error on pointers to basic types like u8
-    if (FromStruct == @import("shape.zig").Shape) {
-        to.* = from;
-        return;
-    }
+    if (@sizeOf(ToStruct) == 0) return;
+
     switch (type_info_to) {
         .Struct => |info| inline for (info.fields) |field| {
-            // if (field.is_comptime) continue;
+            if (field.is_comptime or @sizeOf(field.type) == 0) continue;
             const field_type_info = @typeInfo(field.type);
             // If the field is already a pointer, we recurse with it directly, otherwise, we recurse with a pointer to the field.
             switch (field_type_info) {
@@ -155,10 +152,11 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
             .One => switch (type_info_to_ptr.Pointer.size) {
                 // pointer to array -> slice promotion
                 .Slice => {
-                    to.* = try allocator.alloc(type_info_to_ptr.Pointer.child, from.len);
-                    for (from, to.*) |f, *t| {
+                    const items = try allocator.alloc(type_info_to_ptr.Pointer.child, from.len);
+                    for (from, items) |f, *t| {
                         try mapAlloc(cb, allocator, ctx, f, t);
                     }
+                    to.* = items;
                 },
                 else => try mapAlloc(cb, allocator, ctx, from.*, to.*),
             },
@@ -177,7 +175,7 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
         } else {
             to.* = null;
         },
-        .Int, .Float => to.* = from,
+        .Int, .Float, .Enum => to.* = from,
         else => stdx.debug.compileError("zml.meta.mapAlloc doesn't support: {}", .{FromStruct}),
     }
 }
@@ -191,6 +189,8 @@ test mapAlloc {
         }
     };
 
+    const Empty = struct {};
+
     const AA = struct {
         field: A,
         array: [2]A,
@@ -199,6 +199,7 @@ test mapAlloc {
         // We want to allow conversion from comptime to runtime, because Zig type inference works like this.
         comptime static_val: u8 = 8,
         comptime static_slice: [2]A = .{ .{ .a = 11 }, .{ .a = 12 } },
+        field_with_empty: struct { A, Empty },
     };
     const BB = struct {
         field: B,
@@ -207,6 +208,7 @@ test mapAlloc {
         other: u8,
         static_val: u8,
         static_slice: []B,
+        field_with_empty: struct { B, Empty },
     };
 
     const aa: AA = .{
@@ -214,6 +216,7 @@ test mapAlloc {
         .array = .{ .{ .a = 5 }, .{ .a = 6 } },
         .other = 7,
         .slice = &.{ .{ .a = 9 }, .{ .a = 10 } },
+        .field_with_empty = .{ .{ .a = 9 }, .{} },
     };
     var bb: BB = undefined;
 
@@ -387,6 +390,26 @@ test visit {
 
         try std.testing.expectEqual(6, context.result);
     }
+}
+
+pub fn count(T: type, value: anytype) u32 {
+    var counter: u32 = 0;
+    visit(struct {
+        pub fn cb(res: *u32, _: *const T) void {
+            res.* += 1;
+        }
+    }.cb, &counter, value);
+    return counter;
+}
+
+pub fn first(T: type, value: anytype) T {
+    var res: ?T = null;
+    visit(struct {
+        pub fn cb(res_ptr: *?T, x: *const T) void {
+            if (res_ptr.* == null) res_ptr.* = x.*;
+        }
+    }.cb, &res, &value);
+    return res.?;
 }
 
 /// Given a `fn([]const T, Args) T` and a slice of values,
