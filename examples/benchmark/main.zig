@@ -6,6 +6,7 @@ const flags = @import("tigerbeetle/flags");
 // set log level to debug to print the generated IR
 pub const std_options = .{
     .log_level = .warn,
+    .logFn = asynk.logFn(std.log.defaultLog),
 };
 
 pub fn benchmark(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
