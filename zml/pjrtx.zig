@@ -103,7 +103,10 @@ pub const Client = opaque {
         const stablehlo_version = if (requested_stablehlo_version) |requested_version| blk: {
             break :blk dialects.stablehlo.stablehloGetSmallerVersion(requested_version, dialects.stablehlo.getCurrentVersion());
         } else blk: {
-            break :blk dialects.stablehlo.stablehloVersionFromCompatibilityRequirement(c.WEEK_12);
+            //FIXME: Neuron PJRT Plugin doesn't report StableHLO version and,
+            //       isn't compatible with WEEK_12 compat from our own version,
+            //       but is compatible with MAX.
+            break :blk dialects.stablehlo.stablehloVersionFromCompatibilityRequirement(c.MAX);
         };
 
         dialects.stablehlo.serializePortableArtifact(bytecode.items, stablehlo_version, serialized_buffer.writer()) catch |err| {
