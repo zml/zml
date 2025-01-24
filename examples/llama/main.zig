@@ -26,9 +26,9 @@ pub fn tokenizePromptLlama3(allocator: std.mem.Allocator, tokenizer: zml.tokeniz
     var encoder = try tokenizer.encoder();
     defer encoder.deinit();
 
-    const start_header_id = tokenizer.token_to_id("<|start_header_id|>");
-    const end_header_id = tokenizer.token_to_id("<|end_header_id|>");
-    const eot_id = tokenizer.token_to_id("<|eot_id|>");
+    const start_header_id = tokenizer.token_to_id("<|start_header_id|>") orelse return error.NoSuchToken;
+    const end_header_id = tokenizer.token_to_id("<|end_header_id|>") orelse return error.NoSuchToken;
+    const eot_id = tokenizer.token_to_id("<|eot_id|>") orelse return error.NoSuchToken;
     const newline_id = (try encoder.encode("\n"))[0];
 
     try tokens.append(config.bos_token_id);
@@ -64,7 +64,7 @@ pub fn generateText(
     var tokenizer_decoder = try tokenizer.decoder();
     defer tokenizer_decoder.deinit();
 
-    const prompt_tok = if (skip_llama3_encoding) try tokenizer_encoder.encode(prompt) else try tokenizePromptLlama3(allocator, tokenizer, config, prompt);
+    const prompt_tok: []const u32 = if (skip_llama3_encoding) try tokenizer_encoder.encode(prompt) else try tokenizePromptLlama3(allocator, tokenizer, config, prompt);
     defer allocator.free(prompt_tok);
 
     const dims = llama_.model.shape();
@@ -72,7 +72,7 @@ pub fn generateText(
 
     // Prefill
     // initialize a 0..max_seq_len buffer with the tokenized prompt
-    const prefill_buffer = try allocator.alloc(i32, @intCast(max_seq_len));
+    const prefill_buffer = try allocator.alloc(u32, @intCast(max_seq_len));
     @memset(prefill_buffer, 0);
     for (0..prompt_tok.len) |i| {
         prefill_buffer[i] = @intCast(prompt_tok[i]);
@@ -84,7 +84,7 @@ pub fn generateText(
     // prepare device buffers for the prefill tokens and the index
     var prefill_tokens = try zml.Buffer.fromSlice(platform, .{max_seq_len}, prefill_buffer);
     defer prefill_tokens.deinit();
-    var prefill_token_index = try zml.Buffer.fromSlice(platform, .{}, &[_]i32{0});
+    var prefill_token_index = try zml.Buffer.fromSlice(platform, .{}, &[_]u32{0});
     defer prefill_token_index.deinit();
 
     // init RNG and prefill
@@ -118,7 +118,7 @@ pub fn generateText(
         const frame_id = tracer.frameStart(try std.fmt.bufPrintZ(tracer_buffer, "Generate token {}/{}", .{ i + 1, output_tokens_len }));
 
         // current token index needs to go into a zml.Buffer
-        const token_index_buffer = &[_]i32{@intCast(prompt_tok.len + i)};
+        const token_index_buffer = &[_]u32{@intCast(prompt_tok.len + i)};
         const token_index = try zml.Buffer.fromSlice(platform, .{}, token_index_buffer);
         defer token_index.deinit();
 
@@ -166,6 +166,7 @@ const params = clap.parseParamsComptime(
     \\--seq-len <UINT>          sequence length
     \\--create-options <STRING> platform creation options JSON, defaults to {}
     \\--no-llama3 <BOOL>  skip prompt template 
+    \\--sharding <BOOL>  default: true: sharding on or off
 );
 
 pub fn bool_parser(in: []const u8) error{}!bool {
@@ -225,7 +226,7 @@ pub fn asyncMain() !void {
 
     const compilation_options = zml.CompilationOptions{
         .xla_dump_to = "/tmp/zml/llama",
-        .sharding_enabled = true,
+        .sharding_enabled = res.args.sharding orelse true,
     };
 
     // initialize ZML platform with optional create options
