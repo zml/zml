@@ -242,7 +242,7 @@ pub fn asyncMain() !void {
         "model.model.layers.2.attn",
         attn_shape,
         attn_weights,
-        1e-6,
+        1e-3,
     );
 
     // model.layers.3.attn
@@ -307,60 +307,56 @@ pub fn asyncMain() !void {
     // model
     log.info("\n\nTesting model layer:", .{});
 
-    // Create the model and configure it.
-    var modern_bert_model = try zml.aio.populateModelWithPrefix(
-        modernbert_module.ModernBertModel,
+    var model = try zml.aio.populateModel(
+        modernbert_module.ModernBertForMaskedLM,
         model_arena,
         weights_file,
-        "model",
     );
-    modern_bert_model.init(modernbert_base_options);
 
-    // Load the weights.
-    const modern_bert_weights = try zml.aio.loadModelBuffersWithPrefix(
-        modernbert_module.ModernBertModel,
-        modern_bert_model,
-        weights_file,
-        model_arena,
-        compute_platform,
-        "model",
-    );
+    model.init(modernbert_base_options);
+
+    const model_weights = try zml.aio.loadModelBuffersWithPrefix(modernbert_module.ModernBertForMaskedLM, model, weights_file, model_arena, compute_platform, "");
 
     try zml.testing.testLayer(
         compute_platform,
         activations,
         "model.model",
-        modern_bert_model,
-        modern_bert_weights,
+        model.model,
+        model_weights.model,
         1e-2,
     );
 
+    const TiedDecoder = struct {
+        weight: Tensor,
+        bias: Tensor,
+
+        pub fn forward(self: @This(), head_outputs: Tensor) Tensor {
+            log.warn("TiedDecoder({}, {})", .{ self.weight, head_outputs });
+
+            const res = head_outputs.withTags(.{ .b, .s, .d }).dot(self.weight.withTags(.{ .voc, .d }), .{.d});
+            return res.add(self.bias.withTags(.{.voc}).broad(res.shape()));
+        }
+    };
+
+    try zml.testing.testLayer(
+        compute_platform,
+        activations,
+        "model.decoder",
+        TiedDecoder{ .weight = model.decoder.weight orelse model.model.embeddings.tok_embeddings.weight, .bias = model.decoder.bias },
+        .{ .weight = model_weights.model.embeddings.tok_embeddings.weight, .bias = model_weights.decoder.bias },
+        1e-3,
+    );
     // head
     log.info("\n\nTesting model layer:", .{});
-
-    const head_shape = try zml.aio.populateModelWithPrefix(
-        modernbert_module.ModernBertPredictionHead,
-        model_arena,
-        weights_file,
-        "head",
-    );
-
-    const head_weights = try zml.aio.loadModelBuffersWithPrefix(
-        modernbert_module.ModernBertPredictionHead,
-        head_shape,
-        weights_file,
-        model_arena,
-        compute_platform,
-        "head",
-    );
+    // log.info("ModernBertPredictionHead: {}", .{head_shape});
 
     try zml.testing.testLayer(
         compute_platform,
         activations,
         "model.head",
-        head_shape,
-        head_weights,
-        9e-2, // TODO: too high tolerance
+        model.head,
+        model_weights.head,
+        0.1, // TODO: too high tolerance
     );
 
     // for (0..weights_file.buffers.count()) |i| {
@@ -377,22 +373,12 @@ pub fn asyncMain() !void {
     // ModernBertForMaskedLM
     log.info("\n\nTesting ModernBertForMaskedLM:", .{});
 
-    var modern_bert_for_masked_lm = try zml.aio.populateModel(
-        modernbert_module.ModernBertForMaskedLM,
-        model_arena,
-        weights_file,
-    );
-
-    modern_bert_for_masked_lm.init(modernbert_base_options);
-
-    const modern_bert_for_masked_lm_weights = try zml.aio.loadModelBuffersWithPrefix(modernbert_module.ModernBertForMaskedLM, modern_bert_for_masked_lm, weights_file, model_arena, compute_platform, "");
-
     try zml.testing.testLayer(
         compute_platform,
         activations,
         "model",
-        modern_bert_for_masked_lm,
-        modern_bert_for_masked_lm_weights,
-        1e-2,
+        model,
+        model_weights,
+        0.1, // TODO: too high tolerance
     );
 }

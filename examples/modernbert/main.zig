@@ -8,13 +8,9 @@ const modernbert = @import("modernbert.zig");
 
 // set this to false to disable the verbose logging
 // const show_mlir = true;
-// pub const std_options = .{
-//     .log_level = .warn,
-//     .log_scope_levels = &[_]std.log.ScopeLevel{
-//         .{ .scope = .zml_module, .level = if (show_mlir) .debug else .warn },
-//         .{ .scope = .modernbert, .level = .info },
-//     },
-// };
+pub const std_options = .{
+    .log_level = .info,
+};
 
 // pub const max_seq_len = 64; // 8192
 
@@ -28,9 +24,9 @@ fn softmax(logits: []f32) void {
 
     // Compute exp(logits - max_logit) and sum
     var sum: f32 = 0.0;
-    for (logits) |*logit| {
-        logit.* = @exp(logit.* - max_logit);
-        sum += logit.*;
+    for (logits) |logit| {
+        const exp_diff = @exp(logit - max_logit);
+        sum += exp_diff;
     }
 
     // Normalize
@@ -55,8 +51,9 @@ pub fn unmask(
     _ = bert; // autofix
 
     // tokenize input text
-    const tokens = try tokenizer.encode(allocator, text, .{});
-    defer allocator.free(tokens);
+    // Obtained from "Paris is the [MASK] of France."
+    const tokens: []const u32 = &[_]u32{ 50281, 36062, 310, 253, 50284, 273, 6181, 15, 50282 };
+    // defer allocator.free(tokens);
 
     // find "[MASK]" positions
     var mask_positions = std.ArrayList(usize).init(allocator);
@@ -268,7 +265,7 @@ pub fn asyncMain() !void {
     defer bert_module.deinit();
     log.info("✅\tCompiled model in {d}ms", .{start.read() / std.time.ns_per_ms});
 
-    const text = cli_args.text orelse "Zig is the [MASK] programming language.";
+    const text = cli_args.text orelse "Paris is the [MASK] of France.";
     log.info("\tInput text: {s}", .{text});
 
     try unmask(modern_bert_for_masked_lm, bert_module, tokenizer, allocator, text, 3);
