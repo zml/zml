@@ -65,6 +65,7 @@ cc_import(
         "dlopen": "zmlxrocm_dlopen",
     },
     shared_library = "libpjrt_rocm.so",
+    soname = "libpjrt_rocm.so",
     visibility = ["//visibility:public"],
     deps = [
         "@comgr//:amd_comgr",
