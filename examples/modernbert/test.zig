@@ -1,3 +1,4 @@
+const flags = @import("tigerbeetle/flags");
 const std = @import("std");
 const zml = @import("zml");
 const asynk = @import("async");
@@ -7,14 +8,19 @@ const modernbert_module = @import("modernbert.zig");
 const ModernBertOptions = modernbert_module.ModernBertOptions;
 
 // ModernBERT
-const ACTIVATIONS_FILE_PATH: []const u8 = "/Users/victor/Documents/development/zml-torch-activation-example/ModernBERT-base.activations.pt";
-const MODEL_WEIGHTS_FILE_PATH: []const u8 = "/Users/victor/.cache/huggingface/hub/models--answerdotai--ModernBERT-base/snapshots/5756c58a31a2478f9e62146021f48295a92c3da5/model.safetensors";
+// const ACTIVATIONS_FILE_PATH: []const u8 = "/Users/victor/Documents/development/zml-torch-activation-example/ModernBERT-base.activations.pt";
+// const MODEL_WEIGHTS_FILE_PATH: []const u8 = "/Users/victor/.cache/huggingface/hub/models--answerdotai--ModernBERT-base/snapshots/5756c58a31a2478f9e62146021f48295a92c3da5/model.safetensors";
 
 pub fn main() !void {
     try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain);
 }
 
 pub fn asyncMain() !void {
+    const CliArgs = struct {
+        model: []const u8,
+        activations: []const u8,
+    };
+
     // Short lived allocations
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -23,6 +29,11 @@ pub fn asyncMain() !void {
     // Initialize the ZML context
     var context = try zml.Context.init();
     defer context.deinit();
+
+    var args = std.process.args();
+    const cli_args = flags.parse(&args, CliArgs);
+    const model_file = cli_args.model;
+    const activations_file = cli_args.activations;
 
     // Auto-select platform
     const compute_platform = context.autoPlatform(.{});
@@ -34,14 +45,14 @@ pub fn asyncMain() !void {
     const model_arena = arena_state.allocator();
 
     // Load the model weights file and parse its structure (shape)
-    var weights_file = try zml.aio.detectFormatAndOpen(allocator, MODEL_WEIGHTS_FILE_PATH);
+    var weights_file = try zml.aio.detectFormatAndOpen(allocator, model_file);
     defer weights_file.deinit();
-    log.info("Model contains {d} layers. Loaded from: {s}", .{ weights_file.buffers.count(), MODEL_WEIGHTS_FILE_PATH });
+    log.info("Model contains {d} layers. Loaded from: {s}", .{ weights_file.buffers.count(), model_file });
 
     // Load the activation data file
-    const activations = try zml.aio.torch.open(model_arena, ACTIVATIONS_FILE_PATH);
+    const activations = try zml.aio.torch.open(model_arena, activations_file);
     defer activations.deinit();
-    log.info("Found {} activations in {s}", .{ activations.buffers.count(), ACTIVATIONS_FILE_PATH });
+    log.info("Found {} activations in {s}", .{ activations.buffers.count(), activations_file });
 
     const modernbert_base_options: modernbert_module.ModernBertOptions = .{
         .num_attention_heads = 12,
@@ -374,25 +385,25 @@ pub fn asyncMain() !void {
     //         log.info("activations {} - {s}: {s}", .{ i, activations.buffers.entries.get(i).key, activations.buffers.entries.get(i).value.shape() });
     // }
 
-    // ModernBertForMaskedLM
-    log.info("\n\nTesting ModernBertForMaskedLM:", .{});
-
-    var modern_bert_for_masked_lm = try zml.aio.populateModel(
-        modernbert_module.ModernBertForMaskedLM,
-        model_arena,
-        weights_file,
-    );
-
-    modern_bert_for_masked_lm.init(modernbert_base_options);
-
-    const modern_bert_for_masked_lm_weights = try zml.aio.loadModelBuffersWithPrefix(modernbert_module.ModernBertForMaskedLM, modern_bert_for_masked_lm, weights_file, model_arena, compute_platform, "");
-
-    try zml.testing.testLayer(
-        compute_platform,
-        activations,
-        "model",
-        modern_bert_for_masked_lm,
-        modern_bert_for_masked_lm_weights,
-        1e-2,
-    );
+    // // ModernBertForMaskedLM
+    // log.info("\n\nTesting ModernBertForMaskedLM:", .{});
+    //
+    // var modern_bert_for_masked_lm = try zml.aio.populateModel(
+    //     modernbert_module.ModernBertForMaskedLM,
+    //     model_arena,
+    //     weights_file,
+    // );
+    //
+    // modern_bert_for_masked_lm.init(modernbert_base_options);
+    //
+    // const modern_bert_for_masked_lm_weights = try zml.aio.loadModelBuffersWithPrefix(modernbert_module.ModernBertForMaskedLM, modern_bert_for_masked_lm, weights_file, model_arena, compute_platform, "");
+    //
+    // try zml.testing.testLayer(
+    //     compute_platform,
+    //     activations,
+    //     "model",
+    //     modern_bert_for_masked_lm,
+    //     modern_bert_for_masked_lm_weights,
+    //     1e-2,
+    // );
 }

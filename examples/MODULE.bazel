@@ -6,6 +6,11 @@ bazel_dep(name = "platforms", version = "0.0.10")
 bazel_dep(name = "zml", version = "0.1.0")
 bazel_dep(name = "aspect_bazel_lib", version = "2.9.3")
 bazel_dep(name = "rules_oci", version = "2.0.0")
+bazel_dep(name = "rules_python", version = "0.37.0")
+bazel_dep(name = "rules_uv", version = "0.34.0")
+
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+python.toolchain(python_version = "3.11")
 
 oci = use_extension("@rules_oci//oci:extensions.bzl", "oci")
 oci.pull(
@@ -288,3 +293,16 @@ filegroup(
     model = "answerdotai/ModernBERT-large",
 )
 use_repo(huggingface, "ModernBERT-large")
+
+modernbert_pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
+
+modernbert_pip.parse(
+    hub_name = "modernbert_pip",
+    requirements_lock = "//modernbert:requirements.lock.txt",
+    python_version = "3.11",
+)
+
+use_repo(
+    modernbert_pip,
+    "modernbert_pip",
+)
