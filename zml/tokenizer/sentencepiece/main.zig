@@ -239,7 +239,6 @@ pub fn main() !void {
     var stream = DecoderStream.init(decoder);
 
     var start = try std.time.Timer.start();
-    // _ = start; // autofix
     for (tokens) |token| {
         if (try stream.next(token)) |chunk| {
             // std.debug.print("{s}", .{chunk});

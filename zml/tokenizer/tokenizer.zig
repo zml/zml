@@ -82,8 +82,7 @@ pub const Tokenizer = union(Tokenizers) {
     hftokenizers: *hftokenizers.HFTokenizer,
     sentencepiece: *sentencepiece.SentencePieceProcessor,
 
-    pub fn from_file(allocator: std.mem.Allocator, model: []const u8) !Tokenizer {
-        _ = allocator; // autofix
+    pub fn from_file(_: std.mem.Allocator, model: []const u8) !Tokenizer {
         if (std.mem.endsWith(u8, model, ".pb")) {
             return .{ .sentencepiece = try asynk.callBlocking(sentencepiece.SentencePieceProcessor.from_file, .{model}) };
         }

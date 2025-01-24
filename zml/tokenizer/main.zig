@@ -2,8 +2,6 @@ const std = @import("std");
 const tokenizer = @import("zml/tokenizer");
 
 pub fn main() !void {
-    const model1 = "/Users/steeve/Downloads/poolside.sp.pb";
-    _ = model1; // autofix
     const model2 = "/private/var/tmp/_bazel_steeve/a67b810d44f2a673ebbd5bab86ccd5cc/external/zml~~huggingface~Meta-Llama-3.1-8B-Instruct/tokenizer.json";
 
     var sp = try tokenizer.Tokenizer.from_file(std.heap.c_allocator, model2);
