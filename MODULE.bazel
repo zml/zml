@@ -101,7 +101,7 @@ llvm.configure(
 use_repo(llvm, "llvm-project")
 
 bazel_dep(name = "stablehlo", version = "20250117.0-c125b32")
-bazel_dep(name = "xla", version = "20250123.0-cc075be")
+bazel_dep(name = "xla", version = "20250124.0-cc075be")
 
 tsl = use_extension("@xla//:tsl.bzl", "tsl")
 use_repo(tsl, "tsl")
