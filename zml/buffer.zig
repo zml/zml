@@ -195,7 +195,9 @@ pub const Buffer = struct {
             else => unreachable,
         }
         const host_buffer: HostBuffer = .{ ._shape = shape_, ._strides = strides, .data = &bytes };
-        return try from(platform, host_buffer);
+        var buf = try from(platform, host_buffer);
+        _ = try buf.awaitt();
+        return buf;
     }
 
     test constant {
