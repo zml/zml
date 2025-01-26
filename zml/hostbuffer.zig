@@ -271,6 +271,7 @@ pub const HostBuffer = struct {
                 stdx.debug.panic("Got an event but no API. This should not happen.", .{});
             }
         }
+        self._ready = true;
         return self;
     }
 
