@@ -126,25 +126,19 @@ filegroup(
 )
 use_repo(huggingface, "Meta-Llama-3.1-70B-Instruct")
 
-
-huggingface.model(
-    name = "TinyLlama-120M-scratch",
-    build_file_content = """\
-package(default_visibility = ["//visibility:public"])
-filegroup(
-    name = "TinyLlama-120M-scratch",
-    srcs = glob(["*.json", "*.safetensors"]),
+http_file(
+    name = "Karpathy-TinyLlama-Stories15M",
+    downloaded_file_path = "stories15M.tinyllama",
+    sha256 = "cd590644d963867a2b6e5a1107f51fad663c41d79c149fbecbbb1f95fa81f49a",
+    url = "https://huggingface.co/karpathy/tinyllamas/resolve/0bd21da7698eaf29a0d7de3992de8a46ef624add/stories15M.bin?download=true",
 )
-""",
-    commit = "89c1bb4ea00861ddaa26c55f102ccb25e161feee",
-    includes = [
-        "*.safetensors",
-        "*.json",
-    ],
-    model = "Hoyeon/TinyLlama-120M-scratch",
-)
-use_repo(huggingface, "TinyLlama-120M-scratch")
 
+http_file(
+    name = "Karpathy-TinyLlama-Tokenizer",
+    downloaded_file_path = "stories260K.tinyllama",
+    sha256 = "50a52ef822ee9e83de5ce9d0be0a025a773d019437f58b5ff9dcafb063ece361",
+    url = "https://github.com/karpathy/llama2.c/raw/c02865df300f3bd9e567ce061000dc23bf785a17/tokenizer.bin",
+)
 
 bazel_dep(name = "rules_rust", version = "0.57.0")
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
