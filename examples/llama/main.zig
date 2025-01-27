@@ -97,7 +97,7 @@ pub fn generateText(
     defer kv_cache.layer_index.deinit();
 
     // Prepare for token-by-token generation
-    var first_token_hostbuffer = [_]u32{@intCast(prompt_tok[prompt_tok.len - 1])}; // start with the prompt's last token
+    var first_token_hostbuffer = [_]u32{prompt_tok[prompt_tok.len - 1]}; // start with the prompt's last token
     var current_token = try zml.Buffer.fromSlice(platform, .{1}, &first_token_hostbuffer);
     defer current_token.deinit();
 
