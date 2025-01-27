@@ -93,9 +93,7 @@ pub fn generateText(
         generated_token_buffer[0] = prefill_buffer[prompt_tok.len - 1];
         break :prefill kv_cache;
     };
-    defer kv_cache.k.deinit();
-    defer kv_cache.v.deinit();
-    defer kv_cache.layer_index.deinit();
+    defer zml.aio.unloadBuffers(&kv_cache);
 
     // Prepare for token-by-token generation,
     // start with the token generated based on the full prompt.
