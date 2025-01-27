@@ -86,7 +86,6 @@ pub const LlamaLM = struct {
         rng: Tensor.Rng,
     ) struct { Tensor, KvCache, Tensor.Rng } {
         stdx.debug.assert(tokens_.dtype() == .u32 and tokens_.rank() >= 1 and token_index.dtype() == .u32 and token_index.rank() <= 1, "Can't run Llama ! Expected >=1d tokens and 0d token_index, got: {} and {}", .{ tokens_, token_index });
-
         var tokens = tokens_.withPartialTags(.{.s});
         const out, const updated_kv_cache = zml.call(self.model, .forward, .{ tokens, token_index, kv_cache });
         tokens, const new_rng = self.sampleTokens(self.lm_head, tokens, out, rng, self.gen_opts);
@@ -115,7 +114,7 @@ pub const LlamaLM = struct {
             logits = logits.rename(.{ .d = .voc });
 
         const next_tokens, const new_rng = zml.nn.sampleTokens(logits, opts, rng);
-        return .{ next_tokens.reuseBuffer(tokens_), new_rng };
+        return .{ next_tokens.convert(tokens_.dtype()).reuseBuffer(tokens_), new_rng };
     }
 
     pub fn increment(_: u8, token_index: Tensor) Tensor {
@@ -163,7 +162,6 @@ pub const Llama = struct {
     /// Returns result and updated KV cache.
     pub fn forward(self: Llama, tokens: Tensor, token_index: Tensor, kv_cache: KvCache) struct { Tensor, KvCache } {
         const embeds = embed(self.embed_tokens, tokens);
-
         var hidden = embeds;
 
         var updated_kv_cache = kv_cache;
@@ -280,12 +278,12 @@ pub const SelfAttn = struct {
 
         // Note: in Pytorch it would be very inefficient to generate the full attn_mask,
         // then slice into it, but XLA is able to optimize this correctly.
-        attn_mask = attn_mask.gatherSlices(zml.Shape.init(.{ .q = x.dim(.s) }, attn_mask.dtype()), token_index.reshape(.{ .b = token_index.shape().dim(0), .coord = 1 }), .{});
+        attn_mask = attn_mask.gatherSlices(zml.Shape.init(.{ .q = x.dim(.s) }, attn_mask.dtype()), token_index.reshape(.{ .coord = 1 }), .{});
 
         // In self-attention, .s axis is used both for keys and queries.
         const pos_index = b: {
-            const temp = Tensor.arange(.{ .end = x.dim(.s) }, token_index.dtype()).withTags(.{.s}).broad(zml.Shape.init(.{ .b = token_index.shape().dim(0), .s = x.dim(.s) }, token_index.dtype()));
-            break :b temp.add(token_index.withTags(.{.b}).broad(temp.shape()));
+            const temp = Tensor.arange(.{ .end = x.dim(.s) }, token_index.dtype()).withTags(.{.s}).broad(zml.Shape.init(.{ .s = x.dim(.s) }, token_index.dtype()));
+            break :b temp.add(token_index.broad(temp.shape()));
         };
 
         q = zml.nn.rope(q, pos_index, self.rope_opts);
