@@ -5219,35 +5219,6 @@
           ]
         ]
       }
-    },
-    "@@upb~//:non_module_deps.bzl%non_module_deps": {
-      "general": {
-        "bzlTransitiveDigest": "zrC0Xg5rY819dsKgDXDP+eTr1lB/eGewLGy9h4DnUBg=",
-        "usagesDigest": "jUN0s3TyKWQVNLdkIwSzKkk73kEAiVZpjP3qSq+wCWA=",
-        "recordedFileInputs": {},
-        "recordedDirentsInputs": {},
-        "envVariables": {},
-        "generatedRepoSpecs": {
-          "utf8_range": {
-            "bzlFile": "@@bazel_tools//tools/build_defs/repo:http.bzl",
-            "ruleClassName": "http_archive",
-            "attributes": {
-              "urls": [
-                "https://github.com/protocolbuffers/utf8_range/archive/de0b4a8ff9b5d4c98108bdfe723291a33c52c54f.zip"
-              ],
-              "strip_prefix": "utf8_range-de0b4a8ff9b5d4c98108bdfe723291a33c52c54f",
-              "sha256": "5da960e5e5d92394c809629a03af3c7709d2d3d0ca731dacb3a9fb4bf28f7702"
-            }
-          }
-        },
-        "recordedRepoMappingEntries": [
-          [
-            "upb~",
-            "bazel_tools",
-            "bazel_tools"
-          ]
-        ]
-      }
     }
   }
 }

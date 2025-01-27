@@ -26,7 +26,9 @@ bazel_dep(name = "rules_zig", version = "20240913.0-1957d05")
 
 zig = use_extension("@rules_zig//zig:extensions.bzl", "zig")
 zig.index(file = "//bazel:zig_index.json")
-zig.toolchain(zig_version = "0.14.0-dev.363+c3faae6bf")
+
+# zig.toolchain(zig_version = "0.14.0-dev.363+c3faae6bf")
+zig.toolchain(zig_version = "0.13.0")
 zig.mirrors(urls = [
     "https://mirror.zml.ai/zig",
 ])
@@ -65,7 +67,7 @@ pip.parse(
 use_repo(pip, "neuron_py_deps")
 
 cpu = use_extension("//runtimes/cpu:cpu.bzl", "cpu_pjrt_plugin")
-use_repo(cpu, "libpjrt_cpu_darwin_arm64", "libpjrt_cpu_linux_amd64")
+use_repo(cpu, "libpjrt_cpu_darwin_arm64", "libpjrt_cpu_darwin_amd64", "libpjrt_cpu_linux_amd64")
 
 cuda = use_extension("//runtimes/cuda:cuda.bzl", "cuda_packages")
 use_repo(cuda, "libpjrt_cuda")
@@ -80,7 +82,7 @@ neuron = use_extension("//runtimes/neuron:neuron.bzl", "neuron_packages")
 use_repo(neuron, "aws-neuronx-collectives", "aws-neuronx-runtime-lib")
 
 zls = use_extension("//third_party/zls:zls.bzl", "repo")
-use_repo(zls, "zls_aarch64-macos", "zls_x86_64-linux")
+use_repo(zls, "zls_aarch64-macos", "zls_x86_64-macos", "zls_x86_64-linux")
 
 register_toolchains("//third_party/zls:all")
 
