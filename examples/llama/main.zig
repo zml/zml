@@ -122,7 +122,7 @@ pub fn generateText(
         // current token index needs to go into a zml.Buffer
         const token_index_buffer = &[_]u32{@intCast(prompt_tok.len + i)};
         const token_index = try zml.Buffer.fromSlice(platform, .{}, token_index_buffer);
-    
+
         defer token_index.deinit();
 
         // call to generate the next token
