@@ -14,7 +14,7 @@ bazel_dep(name = "rules_proto", version = "6.0.0-rc1")
 bazel_dep(name = "rules_java", version = "7.3.2")
 bazel_dep(name = "rules_pkg", version = "0.9.1")
 bazel_dep(name = "zlib", version = "1.2.13")
-bazel_dep(name = "re2", version = "20250124-6dcd83d", repo_name = "com_googlesource_code_re2")
+bazel_dep(name = "re2", version = "2024-07-02.bcr.1", repo_name = "com_googlesource_code_re2")
 bazel_dep(name = "rules_license", version = "0.0.8")
 
 bazel_dep(name = "stablehlo", version = "20250117.0-c125b32")
