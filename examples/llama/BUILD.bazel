@@ -19,21 +19,20 @@ zig_cc_binary(
         "@zml//zml",
     ],
 )
-
 cc_binary(
-    name = "TinyLlama-120M-scratch",
+    name = "TinyLlama-15M",
     args = [
-        "--config=$(location @TinyLlama-120M-scratch//:config.json)",
-        "--weights=$(location @TinyLlama-120M-scratch//:model.safetensors)",
-        "--tokenizer=$(location @TinyLlama-120M-scratch//:tokenizer.json)",
+        "--config=$(location @TinyLlama-15M//:config.json)",
+        "--weights=$(location @TinyLlama-15M//:model.safetensors)",
+        "--tokenizer=$(location @TinyLlama-15M//:tokenizer.json)",
         "--no-llama3=true", # don't do llama3 template prompt encoding
         "--sharding=false", # don't shard this
     ],
     data = [
-        "@TinyLlama-120M-scratch",
-        "@TinyLlama-120M-scratch//:config.json",
-        "@TinyLlama-120M-scratch//:model.safetensors",
-        "@TinyLlama-120M-scratch//:tokenizer.json",
+        "@TinyLlama-15M",
+        "@TinyLlama-15M//:config.json",
+        "@TinyLlama-15M//:model.safetensors",
+        "@TinyLlama-15M//:tokenizer.json",
     ],
     deps = [":llama_lib"],
 )

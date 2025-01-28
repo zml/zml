@@ -128,22 +128,22 @@ use_repo(huggingface, "Meta-Llama-3.1-70B-Instruct")
 
 
 huggingface.model(
-    name = "TinyLlama-120M-scratch",
+    name = "TinyLlama-15M",
     build_file_content = """\
 package(default_visibility = ["//visibility:public"])
 filegroup(
-    name = "TinyLlama-120M-scratch",
+    name = "TinyLlama-15M",
     srcs = glob(["*.json", "*.safetensors"]),
 )
 """,
-    commit = "89c1bb4ea00861ddaa26c55f102ccb25e161feee",
+    commit = "ace7596607754a175c6219989545c722c61aded8",
     includes = [
         "*.safetensors",
         "*.json",
     ],
-    model = "Hoyeon/TinyLlama-120M-scratch",
+    model = "AnirudhRajagopalan1201/TinyLlama-15M",
 )
-use_repo(huggingface, "TinyLlama-120M-scratch")
+use_repo(huggingface, "TinyLlama-15M")
 
 
 bazel_dep(name = "rules_rust", version = "0.57.0")
