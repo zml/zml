@@ -110,6 +110,18 @@ bazel run -c opt //mnist
 ./bazel.sh run -c opt //mnist
 ```
 
+### TinyLlama, Stories 15M
+
+Our LLM examples start with a small model trained specifically on children's
+history books. This model has been trained by [Andrej
+Karpathy](https://x.com/karpathy); you can read more about it on his
+[GitHub](https://github.com/karpathy/llama2.c).
+
+```
+cd examples
+bazel run -c opt //llama:TinyLlama-Stories-15M
+bazel run -c opt //llama:TinyLlama-Stories-15M -- --prompt="Once upon a time, there was a cute little dragon"
+```
 
 
 ### Meta Llama 3.1 8B
