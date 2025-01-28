@@ -70,7 +70,7 @@ pub fn generateText(
         // make the HF tokenizer release the memory
         tokenizer_encoder.reset();
         // free the owned slice in case the llama3 template was used
-        if (skip_llama3_encoding)
+        if (!skip_llama3_encoding)
             allocator.free(prompt_tok);
     }
 
