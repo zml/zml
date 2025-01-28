@@ -67,7 +67,8 @@ pub fn generateText(
 
     const prompt_tok: []const u32 = if (skip_llama3_encoding) try tokenizer_encoder.encode(prompt) else try tokenizePromptLlama3(allocator, tokenizer, config, prompt);
     defer {
-        if (skip_llama3_encoding) tokenizer_encoder.reset() else allocator.free(prompt_tok);
+        tokenizer_encoder.reset();
+        allocator.free(prompt_tok);
     }
 
     const dims = llama_.model.shape();
