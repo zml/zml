@@ -88,12 +88,12 @@ pub const Tokenizer = union(Tokenizers) {
     sentencepiece: *sentencepiece.SentencePieceProcessor,
     homemade: *homemade.Tokenizer,
 
-    pub fn from_file(allocator: std.mem.Allocator, model: []const u8) !Tokenizer {
+    pub fn fromFile(allocator: std.mem.Allocator, model: []const u8) !Tokenizer {
         if (std.mem.endsWith(u8, model, ".pb")) {
-            return .{ .sentencepiece = try asynk.callBlocking(sentencepiece.SentencePieceProcessor.from_file, .{model}) };
+            return .{ .sentencepiece = try asynk.callBlocking(sentencepiece.SentencePieceProcessor.fromFile, .{model}) };
         }
         if (std.mem.endsWith(u8, model, ".json")) {
-            return .{ .hftokenizers = try asynk.callBlocking(hftokenizers.HFTokenizer.from_file, .{model}) };
+            return .{ .hftokenizers = try asynk.callBlocking(hftokenizers.HFTokenizer.fromFile, .{model}) };
         }
 
         if (std.mem.endsWith(u8, model, ".tinyllama")) {
@@ -123,9 +123,9 @@ pub const Tokenizer = union(Tokenizers) {
         };
     }
 
-    pub fn token_to_id(self: Tokenizer, token: []const u8) ?u32 {
+    pub fn tokenToId(self: Tokenizer, token: []const u8) ?u32 {
         return switch (self) {
-            inline else => |v| v.token_to_id(token),
+            inline else => |v| v.tokenToId(token),
         };
     }
 };
