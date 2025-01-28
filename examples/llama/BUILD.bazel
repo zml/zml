@@ -1,7 +1,7 @@
 load("@aspect_bazel_lib//lib:expand_template.bzl", "expand_template")
 load("@aspect_bazel_lib//lib:tar.bzl", "mtree_spec", "tar")
 load("@aspect_bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
-load("@bazel_skylib//rules:native_binary.bzl", "native_binary", "native_test")
+load("@bazel_skylib//rules:native_binary.bzl", "native_test")
 load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
 load("@zml//bazel:zig.bzl", "zig_cc_binary")
@@ -21,9 +21,8 @@ zig_cc_binary(
     ],
 )
 
-native_binary(
+cc_binary(
     name = "Llama-3.1-8B-Instruct",
-    src = ":llama",
     args = [
         "--config=$(location @Meta-Llama-3.1-8B-Instruct//:config.json)",
         "--weights=$(location @Meta-Llama-3.1-8B-Instruct//:model.safetensors.index.json)",
@@ -35,11 +34,11 @@ native_binary(
         "@Meta-Llama-3.1-8B-Instruct//:model.safetensors.index.json",
         "@Meta-Llama-3.1-8B-Instruct//:tokenizer.json",
     ],
+    deps = [":llama_lib"],
 )
 
-native_binary(
+cc_binary(
     name = "Llama-3.1-70B-Instruct",
-    src = ":llama",
     args = [
         "--config=$(location @Meta-Llama-3.1-70B-Instruct//:config.json)",
         "--weights=$(location @Meta-Llama-3.1-70B-Instruct//:model.safetensors.index.json)",
@@ -51,11 +50,11 @@ native_binary(
         "@Meta-Llama-3.1-70B-Instruct//:model.safetensors.index.json",
         "@Meta-Llama-3.1-70B-Instruct//:tokenizer.json",
     ],
+    deps = [":llama_lib"],
 )
 
-native_binary(
+cc_binary(
     name = "Llama-3.2-1B-Instruct",
-    src = ":llama",
     args = [
         "--config=$(location @Meta-Llama-3.2-1B-Instruct//:config.json)",
         "--weights=$(location @Meta-Llama-3.2-1B-Instruct//:model.safetensors)",
@@ -67,11 +66,11 @@ native_binary(
         "@Meta-Llama-3.2-1B-Instruct//:model.safetensors",
         "@Meta-Llama-3.2-1B-Instruct//:tokenizer.json",
     ],
+    deps = [":llama_lib"],
 )
 
-native_binary(
+cc_binary(
     name = "Llama-3.2-3B-Instruct",
-    src = ":llama",
     args = [
         "--config=$(location @Meta-Llama-3.2-3B-Instruct//:config.json)",
         "--weights=$(location @Meta-Llama-3.2-3B-Instruct//:model.safetensors.index.json)",
@@ -83,11 +82,11 @@ native_binary(
         "@Meta-Llama-3.2-3B-Instruct//:model.safetensors.index.json",
         "@Meta-Llama-3.2-3B-Instruct//:tokenizer.json",
     ],
+    deps = [":llama_lib"],
 )
 
-native_binary(
+cc_binary(
     name = "TinyLlama-Stories-15M",
-    src = ":llama",
     args = [
         "--config=$(location :tinyllama_stories15M_json)",
         "--weights=$(location @Karpathy-TinyLlama-Stories15M//file)",
@@ -101,6 +100,7 @@ native_binary(
         "@Karpathy-TinyLlama-Stories15M//file",
         "@Karpathy-TinyLlama-Tokenizer//file",
     ],
+    deps = [":llama_lib"],
 )
 
 write_file(
