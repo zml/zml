@@ -19,6 +19,7 @@ zig_cc_binary(
         "@zml//zml",
     ],
 )
+
 cc_binary(
     name = "TinyLlama-15M",
     args = [
@@ -27,6 +28,7 @@ cc_binary(
         "--tokenizer=$(location @TinyLlama-15M//:tokenizer.json)",
         "--no-llama3=true", # don't do llama3 template prompt encoding
         "--sharding=false", # don't shard this
+        "--prompt='Once upon a time,'",
     ],
     data = [
         "@TinyLlama-15M",
