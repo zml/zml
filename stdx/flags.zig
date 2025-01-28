@@ -84,6 +84,13 @@ pub fn parse(args: *std.process.ArgIterator, comptime CliArgs: type) CliArgs {
     };
 }
 
+/// Parse CLI arguments for current process.
+/// See `stdx.flags.parse` documentation for more.
+pub fn parseProcessArgs(comptime CliArgs: type) CliArgs {
+    var args = std.process.args();
+    return parse(&args, CliArgs);
+}
+
 fn parse_commands(args: *std.process.ArgIterator, comptime Commands: type) Commands {
     comptime assert(@typeInfo(Commands) == .Union);
     comptime assert(std.meta.fields(Commands).len >= 2);

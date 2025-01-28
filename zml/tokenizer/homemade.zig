@@ -1,4 +1,7 @@
 //! Text tokenizer implementations
+//! Disclaimer this is not a very robust implementation:
+//! In particular the normalization is pretty minimalist, only works with ascii, and don't do unicode normalization.
+//! Mostly used for testing models that don't have an official HF/sentencepiece tokenizer.
 const builtin = @import("builtin");
 const std = @import("std");
 

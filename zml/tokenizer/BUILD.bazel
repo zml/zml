@@ -31,6 +31,8 @@ zig_cc_binary(
     main = "main.zig",
     visibility = ["//visibility:public"],
     deps = [
+        "//stdx",
+        "//async",
         ":tokenizer",
     ],
 )
