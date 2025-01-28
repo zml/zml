@@ -21,8 +21,9 @@ zig_cc_binary(
     ],
 )
 
-cc_binary(
+native_binary(
     name = "Llama-3.1-8B-Instruct",
+    src = ":llama",
     args = [
         "--config=$(location @Meta-Llama-3.1-8B-Instruct//:config.json)",
         "--weights=$(location @Meta-Llama-3.1-8B-Instruct//:model.safetensors.index.json)",
@@ -34,11 +35,11 @@ cc_binary(
         "@Meta-Llama-3.1-8B-Instruct//:model.safetensors.index.json",
         "@Meta-Llama-3.1-8B-Instruct//:tokenizer.json",
     ],
-    deps = [":llama_lib"],
 )
 
-cc_binary(
+native_binary(
     name = "Llama-3.1-70B-Instruct",
+    src = ":llama",
     args = [
         "--config=$(location @Meta-Llama-3.1-70B-Instruct//:config.json)",
         "--weights=$(location @Meta-Llama-3.1-70B-Instruct//:model.safetensors.index.json)",
@@ -50,11 +51,11 @@ cc_binary(
         "@Meta-Llama-3.1-70B-Instruct//:model.safetensors.index.json",
         "@Meta-Llama-3.1-70B-Instruct//:tokenizer.json",
     ],
-    deps = [":llama_lib"],
 )
 
-cc_binary(
+native_binary(
     name = "Llama-3.2-1B-Instruct",
+    src = ":llama",
     args = [
         "--config=$(location @Meta-Llama-3.2-1B-Instruct//:config.json)",
         "--weights=$(location @Meta-Llama-3.2-1B-Instruct//:model.safetensors)",
@@ -66,11 +67,11 @@ cc_binary(
         "@Meta-Llama-3.2-1B-Instruct//:model.safetensors",
         "@Meta-Llama-3.2-1B-Instruct//:tokenizer.json",
     ],
-    deps = [":llama_lib"],
 )
 
-cc_binary(
+native_binary(
     name = "Llama-3.2-3B-Instruct",
+    src = ":llama",
     args = [
         "--config=$(location @Meta-Llama-3.2-3B-Instruct//:config.json)",
         "--weights=$(location @Meta-Llama-3.2-3B-Instruct//:model.safetensors.index.json)",
@@ -82,7 +83,6 @@ cc_binary(
         "@Meta-Llama-3.2-3B-Instruct//:model.safetensors.index.json",
         "@Meta-Llama-3.2-3B-Instruct//:tokenizer.json",
     ],
-    deps = [":llama_lib"],
 )
 
 native_binary(
