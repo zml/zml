@@ -16,6 +16,7 @@ zig_library(
     name = "tokenizer",
     import_name = "zml/tokenizer",
     main = "tokenizer.zig",
+    srcs = ["homemade.zig"],
     visibility = ["//visibility:public"],
     deps = [
         "//async",

@@ -3,15 +3,19 @@ const hftokenizers = @import("hftokenizers");
 const sentencepiece = @import("sentencepiece");
 const asynk = @import("async");
 
+const homemade = @import("homemade.zig");
+
 const Tokenizers = enum {
     hftokenizers,
     sentencepiece,
+    homemade,
 };
 
 pub const Tokenizer = union(Tokenizers) {
     pub const Encoder = union(Tokenizers) {
         hftokenizers: hftokenizers.Encoder,
         sentencepiece: sentencepiece.Encoder,
+        homemade: homemade.Encoder,
 
         pub fn deinit(self: *Encoder) void {
             switch (self.*) {
@@ -41,6 +45,7 @@ pub const Tokenizer = union(Tokenizers) {
     pub const Decoder = union(Tokenizers) {
         hftokenizers: hftokenizers.Decoder,
         sentencepiece: sentencepiece.Decoder,
+        homemade: homemade.Decoder,
 
         pub fn deinit(self: *Decoder) void {
             switch (self.*) {
@@ -81,14 +86,22 @@ pub const Tokenizer = union(Tokenizers) {
 
     hftokenizers: *hftokenizers.HFTokenizer,
     sentencepiece: *sentencepiece.SentencePieceProcessor,
+    homemade: *homemade.Tokenizer,
 
-    pub fn from_file(_: std.mem.Allocator, model: []const u8) !Tokenizer {
+    pub fn from_file(allocator: std.mem.Allocator, model: []const u8) !Tokenizer {
         if (std.mem.endsWith(u8, model, ".pb")) {
             return .{ .sentencepiece = try asynk.callBlocking(sentencepiece.SentencePieceProcessor.from_file, .{model}) };
         }
         if (std.mem.endsWith(u8, model, ".json")) {
             return .{ .hftokenizers = try asynk.callBlocking(hftokenizers.HFTokenizer.from_file, .{model}) };
         }
+
+        if (std.mem.endsWith(u8, model, ".tinyllama")) {
+            const tokenizer = try allocator.create(homemade.Tokenizer);
+            tokenizer.* = try asynk.callBlocking(homemade.fromTinyLlamaFile, .{ allocator, model, 32000 });
+            return .{ .homemade = tokenizer };
+        }
+
         return error.InvalidArgument;
     }
 
