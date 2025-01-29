@@ -41,11 +41,13 @@ pub fn expectClose(left_: anytype, right_: anytype, tolerance: f32) !void {
         .{ try left_.toHostAlloc(allocator), true }
     else
         .{ left_, false };
+    _ = try left.awaitt();
 
     var right: zml.HostBuffer, const should_free_right = if (@TypeOf(right_) == zml.Buffer)
         .{ try right_.toHostAlloc(allocator), true }
     else
         .{ right_, false };
+    _ = try right.awaitt();
 
     defer {
         if (should_free_left) left.deinit(allocator);

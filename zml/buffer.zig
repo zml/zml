@@ -28,6 +28,8 @@ const log = std.log.scoped(.zml);
 /// * can be created by calling `HostBuffer.toDevice(platform)`.
 pub const Buffer = struct {
     pub const Shard = struct {
+        // TODO: remove api from here
+        // Also we should use SoA instead of AoS because of the "ready" bool
         api: *const pjrt.Api,
         buffer: *pjrt.Buffer,
         ready_event: ?*pjrt.Event = null,
@@ -103,24 +105,6 @@ pub const Buffer = struct {
             try shard.awaitt();
         }
         return self;
-    }
-
-    /// Wraps pre-exisiting `pjrt.Buffer` shards into one `zml.Buffer`.
-    pub fn fromPjrtBuffers(platform: Platform, shape_: Shape, pjrt_buffers: []const *pjrt.Buffer) Buffer {
-        stdx.debug.assert(pjrt_buffers.len <= MAX_NUM_SHARDS, "ZML doesn't support having more than {} shards. Received {} shards for one buffer.", .{ MAX_NUM_SHARDS, pjrt_buffers.len });
-        stdx.debug.assert(pjrt_buffers.len > 0, "fromPjrtBuffers expects at least one buffer, got 0.", .{});
-        var shards: Shards = .{};
-        for (pjrt_buffers) |pjrt_buffer| {
-            shards.appendAssumeCapacity(.{
-                .api = platform.pjrt_api,
-                .buffer = pjrt_buffer,
-            });
-        }
-        return .{
-            ._api = platform.pjrt_api,
-            ._shape = shape_,
-            ._shards = shards,
-        };
     }
 
     /// Copies the given Zig slice to the accelerator memory and
@@ -222,6 +206,7 @@ pub const Buffer = struct {
 
     /// Creates a Buffer from a pointer into device memory.
     /// This allows to interface with other libraries producing buffers.
+    /// The returned buffer will be considered as ready to read.
     pub fn asViewOfDeviceBuffer(platform: Platform, shape_: Shape, stream: ?*const anyopaque, device_data: *anyopaque) !Buffer {
         const minor_to_major: [Shape.MAX_RANK]i64 = comptime blk: {
             var res: [Shape.MAX_RANK]i64 = undefined;
@@ -249,7 +234,13 @@ pub const Buffer = struct {
         });
 
         var shards: Shards = .{};
-        shards.appendAssumeCapacity(pjrt_buffer);
+        shards.appendAssumeCapacity(.{
+            .api = platform.pjrt_api,
+            .buffer = pjrt_buffer,
+            // We don't have event here so we assume it's ready
+            .ready_event = null,
+            .ready = true,
+        });
         return .{
             ._api = platform.pjrt_api,
             ._shape = shape_,

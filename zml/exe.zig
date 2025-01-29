@@ -140,6 +140,8 @@ pub const BaseExe = struct {
     /// Pre-allocated slice of buffers to use as outputs when the module is called.
     output_per_device: []const [*]*pjrt.Buffer,
 
+    events_per_device: []?*pjrt.Event,
+
     /// Number of buffers already fed to the executable.
     ready_buffer_count: u32,
 
@@ -161,8 +163,8 @@ pub const BaseExe = struct {
         const n_out = args.result_shapes.len;
         const n_devices = args.n_devices;
         // Allocate once for all the *pjrt.Buffer we need to store ...
-        const all_buffers = try allocator.alloc(*pjrt.Buffer, (args.n_in + n_out) * n_devices);
-        const all_input_buffers, const all_output_buffers = splitBuffer(*pjrt.Buffer, all_buffers, .{ args.n_in * n_devices, n_out * n_devices });
+        const all_buffers = try allocator.alloc(*pjrt.Buffer, (args.n_in + n_out + 1) * n_devices);
+        const all_input_buffers, const all_output_buffers, const events_per_device = splitBuffer(*pjrt.Buffer, all_buffers, .{ args.n_in * n_devices, n_out * n_devices, n_devices });
 
         // ... and once for all the [*]*pjrt.Buffer.
         const all_per_device = try allocator.alloc([*]*pjrt.Buffer, 2 * n_devices);
@@ -181,6 +183,7 @@ pub const BaseExe = struct {
             .num_devices = args.n_devices,
             .input_per_device = input_per_device,
             .output_per_device = output_per_device,
+            .events_per_device = @ptrCast(events_per_device),
             .result_shapes = try allocator.dupe(Shape, args.result_shapes),
             ._arena = arena,
         };
@@ -196,25 +199,16 @@ pub const BaseExe = struct {
     }
 
     pub fn _unsafeCall(self: BaseExe) void {
-        var events = [_]?*pjrt.Event{null} ** Platform.MAX_NUM_DEVICES;
-        const sharding = self.platform.sharding();
-
         self.exe.execute(self.platform.pjrt_api, .{
             .arguments = self.input_per_device,
             .num_args = self.input_buffer_count,
             .results = self.output_per_device,
-            .events = events[0..sharding.num_partitions],
+            .events = self.events_per_device,
             // this allows to tell a specific buffer shouldn't be donated,
             // even if it has been marked as "can be donated" during compilation.
             // TODO: expose it ?
             .non_donatable_input_indices = &.{},
         }) catch unreachable;
-
-        // for (events[0..sharding.num_partitions]) |e| {
-        //     if (e) |ev| {
-        //         ev.await_(self.platform.pjrt_api) catch unreachable;
-        //     }
-        // }
     }
 
     pub fn serialize(self: BaseExe, writer: anytype) !void {
@@ -235,13 +229,28 @@ pub const BaseExe = struct {
         self.ready_buffer_count += n;
     }
 
-    pub fn getOutputBuffer(self: BaseExe, i: usize) Buffer {
-        var shards: Buffer.Shards = .{};
-        for (self.output_per_device) |dev_out| {
-            shards.appendAssumeCapacity(dev_out[i]);
-        }
+    pub fn numOutputs(self: BaseExe) u32 {
+        return @intCast(self.result_shapes.len);
+    }
 
-        return Buffer.fromPjrtBuffers(self.platform, self.result_shapes[i], shards.constSlice());
+    /// Takes pjrt.Buffer from each device and make it into a Buffer.
+    /// Set the event of the buffer to the event of the call.
+    pub fn getOutputBuffer(self: BaseExe, i: usize) Buffer {
+        std.debug.assert(i < self.numOutputs());
+        var shards: Buffer.Shards = .{};
+        for (0..self.num_devices) |dev| {
+            shards.appendAssumeCapacity(.{
+                .api = self.platform.pjrt_api,
+                .buffer = self.output_per_device[dev][i],
+                .ready_event = self.events_per_device[dev],
+                .ready = false,
+            });
+        }
+        return .{
+            ._shape = self.result_shapes[i],
+            ._api = self.platform.pjrt_api,
+            ._shards = shards,
+        };
     }
 };
 
@@ -283,7 +292,7 @@ pub fn Exe(ArgsT: type, ReturnT: type) type {
             std.debug.assert(total_ready == self.inner.input_buffer_count);
             self.inner._unsafeCall();
             var result: Bufferized(ReturnT) = undefined;
-            assignRawBuffers(&result, self.inner.platform, self.inner.output_per_device, self.inner.result_shapes);
+            assignRawBuffers(&result, self.inner);
             return result;
         }
     };
@@ -325,31 +334,20 @@ fn fillBuffers(v: anytype, buffers: []const [*]*pjrt.Buffer, start: u32) u32 {
 }
 
 /// Visit the given struct and override tensors by creating a new one using the provided PJRT buffers.
-fn assignRawBuffers(v: anytype, platform: Platform, buffers: []const [*]*pjrt.Buffer, buffer_shapes: []Shape) void {
+fn assignRawBuffers(v: anytype, exe: BaseExe) void {
     const LocalContext = struct {
-        index: u32,
-        platform: Platform,
-        buffers: []const [*]*pjrt.Buffer,
-        buffer_shapes: []Shape,
-    };
-    var local_ctx: LocalContext = .{
-        .index = 0,
-        .platform = platform,
-        .buffers = buffers,
-        .buffer_shapes = buffer_shapes,
-    };
-    meta.visit((struct {
-        fn cb(ctx: *LocalContext, buffer: *Buffer) void {
+        index: u32 = 0,
+        exe: *const BaseExe,
+
+        fn cb(ctx: *@This(), buffer: *Buffer) void {
             const i = ctx.index;
             ctx.index += 1;
-            if (i >= ctx.buffer_shapes.len) return;
+            if (i >= ctx.exe.result_shapes.len) return;
 
-            var shards: std.BoundedArray(*pjrt.Buffer, Buffer.MAX_NUM_SHARDS) = .{};
-            for (ctx.buffers) |buff| {
-                shards.appendAssumeCapacity(buff[i]);
-            }
-            buffer.* = Buffer.fromPjrtBuffers(ctx.platform, ctx.buffer_shapes[i], shards.constSlice());
+            buffer.* = ctx.exe.getOutputBuffer(i);
         }
-    }).cb, &local_ctx, v);
-    stdx.debug.internalAssert(local_ctx.index == buffer_shapes.len, "Pjrt call returned {} tensors, but the return type {s}, contains {} Buffers. Note that modules need to have a comptime know number of returned tensors.", .{ buffers.len, @typeName(@TypeOf(v)), local_ctx.index });
+    };
+    var local_ctx: LocalContext = .{ .exe = &exe };
+    meta.visit(LocalContext.cb, &local_ctx, v);
+    stdx.debug.internalAssert(local_ctx.index == exe.result_shapes.len, "Pjrt call returned {} tensors, but the return type {s}, contains {} Buffers. Note that modules need to have a comptime know number of returned tensors.", .{ exe.result_shapes.len, @typeName(@TypeOf(v)), local_ctx.index });
 }
