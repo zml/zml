@@ -240,7 +240,6 @@ pub const BaseExe = struct {
         var shards: Buffer.Shards = .{};
         for (0..self.num_devices) |dev| {
             shards.appendAssumeCapacity(.{
-                .api = self.platform.pjrt_api,
                 .buffer = self.output_per_device[dev][i],
                 .ready_event = self.events_per_device[dev],
                 .ready = false,

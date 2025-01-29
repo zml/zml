@@ -28,19 +28,18 @@ const log = std.log.scoped(.zml);
 /// * can be created by calling `HostBuffer.toDevice(platform)`.
 pub const Buffer = struct {
     pub const Shard = struct {
-        // TODO: remove api from here
-        // Also we should use SoA instead of AoS because of the "ready" bool
-        api: *const pjrt.Api,
+        // TODO: we should use SoA instead of AoS because of the "ready" bool.
+        // the Buffer struct is already huge.
         buffer: *pjrt.Buffer,
         ready_event: ?*pjrt.Event = null,
         ready: bool = false,
 
-        pub fn awaitt(self: *Shard) !void {
+        pub fn awaitt(self: *Shard, api: *const pjrt.Api) !void {
             if (self.ready) {
                 return;
             }
-            if (self.ready_event orelse self.buffer.getReadyEvent(self.api)) |ev| {
-                try ev.awaitt(self.api);
+            if (self.ready_event orelse self.buffer.getReadyEvent(api)) |ev| {
+                try ev.awaitt(api);
             }
             self.ready = true;
         }
@@ -91,7 +90,6 @@ pub const Buffer = struct {
                 .host_buffer_semantics = .ImmutableUntilTransferCompletes,
             });
             res._shards.appendAssumeCapacity(.{
-                .api = platform.pjrt_api,
                 .buffer = pjrt_buffer,
                 .ready_event = event,
             });
@@ -102,7 +100,7 @@ pub const Buffer = struct {
 
     pub fn awaitt(self: *Buffer) !*Buffer {
         for (self._shards.slice()) |*shard| {
-            try shard.awaitt();
+            try shard.awaitt(self._api);
         }
         return self;
     }
@@ -235,7 +233,6 @@ pub const Buffer = struct {
 
         var shards: Shards = .{};
         shards.appendAssumeCapacity(.{
-            .api = platform.pjrt_api,
             .buffer = pjrt_buffer,
             // We don't have event here so we assume it's ready
             .ready_event = null,
