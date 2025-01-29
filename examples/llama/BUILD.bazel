@@ -102,6 +102,24 @@ cc_binary(
     ],
     deps = [":llama_lib"],
 )
+
+cc_binary(
+    name = "Qwen-2.5-7B",
+    args = [
+        "--config=$(location @Qwen-2.5-7B//:config.json)",
+        "--weights=$(location @Qwen-2.5-7B//:model.safetensors.index.json)",
+        "--tokenizer=$(location @Qwen-2.5-7B//:tokenizer.json)",
+        "--no-llama3=true",
+    ],
+    data = [
+        "@Qwen-2.5-7B",
+        "@Qwen-2.5-7B//:config.json",
+        "@Qwen-2.5-7B//:model.safetensors.index.json",
+        "@Qwen-2.5-7B//:tokenizer.json",
+    ],
+    deps = [":llama_lib"],
+)
+
 #
 
 zig_cc_binary(
