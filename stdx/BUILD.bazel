@@ -4,6 +4,7 @@ zig_library(
     name = "stdx",
     srcs = [
         "debug.zig",
+        "flags.zig",
         "io.zig",
         "json.zig",
         "math.zig",

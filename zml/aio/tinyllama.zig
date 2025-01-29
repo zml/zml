@@ -129,35 +129,3 @@ fn splitBuff(store: *zml.aio.BufferStore, comptime fmt: []const u8, sh: anytype,
     }
     return off;
 }
-
-pub fn loadTokenizer(allocator: std.mem.Allocator, tokenizer_path: []const u8, vocab_size: u32) !zml.tokenizer.Tokenizer {
-    const tokenizer_file = try std.fs.cwd().openFile(tokenizer_path, .{});
-    defer tokenizer_file.close();
-    var tok_reader = std.io.bufferedReader(tokenizer_file.reader());
-    const r = tok_reader.reader();
-
-    const max_token_len = try r.readInt(u32, .little);
-    const special_tokens: zml.tokenizer.Tokenizer.SpecialTokens = .{
-        .unk = 0,
-        .bos = 1,
-        .eos = 2,
-    };
-    var tokenizer = try zml.tokenizer.Tokenizer.init(allocator, vocab_size, max_token_len, null, special_tokens, true);
-    var i: u32 = 0;
-    while (readToken(&tokenizer, &r)) : (i += 1) {
-        // Pass
-    } else |_| {
-        if (i < vocab_size) {
-            zml.log.info("Read {d} words out of {?d}", .{ i, vocab_size });
-        }
-        tokenizer.vocab_size = i;
-    }
-    try tokenizer.rewriteByteFallbackTokens();
-    return tokenizer;
-}
-
-fn readToken(tokenizer: *zml.tokenizer.Tokenizer, tok_reader: anytype) !void {
-    const score: f32 = @bitCast(try tok_reader.readInt(u32, .little));
-    const len: usize = @intCast(try tok_reader.readInt(u32, .little));
-    try tokenizer.readTokenInto(score, len, tok_reader);
-}
