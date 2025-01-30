@@ -324,6 +324,7 @@ pub const Client = opaque {
         byte_strides: ?[]const i64,
         device: *const Device,
         host_buffer_semantics: HostBufferSemantics,
+        memory: *const Memory,
     };
 
     pub fn bufferFromHostBuffer(self: *const Client, api: *const Api, args: BufferFromHostBufferArgs) ApiError!struct { *Buffer, ?*Event } {
@@ -337,7 +338,7 @@ pub const Client = opaque {
             .num_byte_strides = if (args.byte_strides) |bs| bs.len else 0,
             .host_buffer_semantics = @intFromEnum(args.host_buffer_semantics),
             .device = @ptrCast(@constCast(args.device)),
-            .memory = null, // TODO
+            // .memory = @ptrCast(@constCast(args.memory)),
             .device_layout = null, // TODO
             .done_with_host_buffer = null,
             .buffer = null,
@@ -398,6 +399,16 @@ pub const Client = opaque {
         });
         return @ptrCast(ret.buffer.?);
     }
+
+    pub fn addressableMemories(self: *const Client, api: *const Api) []*const Memory {
+        const ret = api.call(.PJRT_Client_AddressableMemories, .{
+            .client = self.inner(),
+        }) catch unreachable;
+        if (ret.addressable_memories) |memories| {
+            return @constCast(@ptrCast(memories[0..ret.num_addressable_memories]));
+        }
+        return &.{};
+    }
 };
 
 pub const Device = opaque {
@@ -422,6 +433,16 @@ pub const Device = opaque {
             .device = self.inner(),
         }) catch unreachable;
         return @intCast(ret.local_hardware_id);
+    }
+
+    pub fn addressableMemories(self: *const Device, api: *const Api) []*const Memory {
+        const ret = api.call(.PJRT_Device_AddressableMemories, .{
+            .device = self.inner(),
+        }) catch unreachable;
+        if (ret.memories) |memories| {
+            return @ptrCast(memories[0..ret.num_memories]);
+        }
+        return &.{};
     }
 };
 
@@ -701,6 +722,31 @@ pub const Buffer = opaque {
         return @ptrCast(ret.event);
     }
 
+    pub fn copyRawToHost(self: *const Buffer, api: *const Api, dst: []u8, offset: i64, size: i64) ApiError!?*Event {
+        const ret = try api.call(.PJRT_Buffer_CopyRawToHost, .{
+            .buffer = self.inner(),
+            .dst = @ptrCast(dst.ptr),
+            .offset = offset,
+            .transfer_size = size,
+        });
+        return @ptrCast(ret.event);
+    }
+
+    pub fn copyToMemory(self: *const Buffer, api: *const Api, dst_memory: *const Memory) ApiError!?*Buffer {
+        const ret = try api.call(.PJRT_Buffer_CopyToMemory, .{
+            .buffer = self.inner(),
+            .dst_memory = @ptrCast(@constCast(dst_memory)),
+        });
+        return @ptrCast(ret.dst_buffer);
+    }
+
+    pub fn getMemory(self: *const Buffer, api: *const Api) *const Memory {
+        const ret = api.call(.PJRT_Buffer_Memory, .{
+            .buffer = self.inner(),
+        }) catch unreachable;
+        return @ptrCast(ret.memory);
+    }
+
     pub fn getElementType(self: *const Buffer, api: *const Api) BufferType {
         const ret = api.call(.PJRT_Buffer_ElementType, .{
             .buffer = self.inner(),
@@ -753,6 +799,18 @@ pub const Buffer = opaque {
         });
         return ret.device_memory_ptr.?;
     }
+
+    pub fn increaseExternalReferenceCount(self: *const Buffer, api: *const Api) ApiError!void {
+        _ = try api.call(.PJRT_Buffer_IncreaseExternalReferenceCount, .{
+            .buffer = self.inner(),
+        });
+    }
+
+    pub fn decreaseExternalReferenceCount(self: *const Buffer, api: *const Api) ApiError!void {
+        _ = try api.call(.PJRT_Buffer_DecreaseExternalReferenceCount, .{
+            .buffer = self.inner(),
+        });
+    }
 };
 
 pub const Event = opaque {
@@ -790,6 +848,68 @@ pub const Event = opaque {
             .callback = @ptrCast(func),
             .user_arg = user_arg,
         });
+    }
+};
+
+pub const Memory = opaque {
+    pub const Kind = enum {
+        device,
+        pinned_host,
+        unpinned_host,
+    };
+
+    const inner = InnerMixin(c.PJRT_Memory).inner;
+
+    pub fn id(self: *const Memory, api: *const Api) usize {
+        const ret = api.call(.PJRT_Memory_Id, .{
+            .memory = self.inner(),
+        }) catch unreachable;
+        return @intCast(ret.id);
+    }
+
+    pub fn kind(self: *const Memory, api: *const Api) Kind {
+        const ret = api.call(.PJRT_Memory_Kind, .{
+            .memory = self.inner(),
+        }) catch unreachable;
+        const kind_ = ret.kind orelse unreachable;
+        return std.meta.stringToEnum(Kind, kind_[0..ret.kind_size]) orelse unreachable;
+    }
+
+    pub fn kindId(self: *const Memory, api: *const Api) usize {
+        const ret = api.call(.PJRT_Memory_Kind_Id, .{
+            .memory = self.inner(),
+        }) catch unreachable;
+        return @bitCast(ret.kind_id);
+    }
+
+    pub fn debugString(self: *const Memory, api: *const Api) []const u8 {
+        const ret = api.call(.PJRT_Memory_DebugString, .{
+            .memory = self.inner(),
+        }) catch unreachable;
+        if (ret.debug_string) |debug_string| {
+            return debug_string[0..ret.debug_string_size];
+        }
+        return &.{};
+    }
+
+    pub fn toString(self: *const Memory, api: *const Api) []const u8 {
+        const ret = api.call(.PJRT_Memory_ToString, .{
+            .memory = self.inner(),
+        }) catch unreachable;
+        if (ret.to_string) |to_string| {
+            return to_string[0..ret.to_string_size];
+        }
+        return &.{};
+    }
+
+    pub fn addressableByDevices(self: *const Memory, api: *const Api) []*Device {
+        const ret = api.call(.PJRT_Memory_AddressableByDevices, .{
+            .event = self.inner(),
+        }) catch unreachable;
+        if (ret.devices) |devices| {
+            return devices[0..ret.num_devices];
+        }
+        return &.{};
     }
 };
 

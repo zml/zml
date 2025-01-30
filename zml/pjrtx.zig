@@ -20,6 +20,7 @@ pub const ErrorCode = pjrt.ErrorCode;
 pub const BufferType = pjrt.BufferType;
 pub const Device = pjrt.Device;
 pub const DeviceDescription = pjrt.DeviceDescription;
+pub const Memory = pjrt.Memory;
 pub const Api = pjrt.Api;
 pub const NamedValue = pjrt.NamedValue;
 pub const ClientInitError = pjrt.ClientInitError;
@@ -123,12 +124,17 @@ pub const Client = opaque {
     pub fn getProfiler(self: *const Client, api: *const Api, options: pjrt.Profiler.Options) pjrt.Profiler {
         return self.inner().getProfiler(api, options);
     }
+
+    pub fn addressableMemories(self: *const Client, api: *const Api) []*const Memory {
+        return self.inner().addressableMemories(api);
+    }
 };
 
 pub const Buffer = opaque {
     pub const inner = InnerMixin(pjrt.Buffer).inner;
 
     pub fn deinit(self: *Buffer, api: *const Api) void {
+        // self.inner().decreaseExternalReferenceCount(api);
         self.inner().deinit(api);
     }
 
@@ -150,6 +156,18 @@ pub const Buffer = opaque {
 
     pub fn toHostBuffer(self: *const Buffer, api: *const Api, dst: []u8) ApiError!?*Event {
         return @ptrCast(try self.inner().toHostBuffer(api, dst));
+    }
+
+    pub fn copyRawToHost(self: *const Buffer, api: *const Api, dst: []u8, offset: i64, size: i64) ApiError!?*Event {
+        return @ptrCast(try self.inner().copyRawToHost(api, dst, offset, size));
+    }
+
+    pub fn copyToMemory(self: *const Buffer, api: *const Api, dst_memory: *const Memory) ApiError!?*Buffer {
+        return @ptrCast(try self.inner().copyToMemory(api, dst_memory));
+    }
+
+    pub fn getMemory(self: *const Buffer, api: *const Api) *const Memory {
+        return self.inner().getMemory(api);
     }
 
     pub fn getElementType(self: *const Buffer, api: *const Api) BufferType {
@@ -179,6 +197,14 @@ pub const Buffer = opaque {
     pub fn getOpaqueDeviceMemoryDataPointer(self: *const Buffer, api: *const Api) ApiError!*anyopaque {
         return try self.inner().getOpaqueDeviceMemoryDataPointer(api);
     }
+
+    pub fn increaseExternalReferenceCount(self: *Buffer, api: *const Api) ApiError!void {
+        try self.inner().increaseExternalReferenceCount(api);
+    }
+
+    pub fn decreaseExternalReferenceCount(self: *Buffer, api: *const Api) ApiError!void {
+        try self.inner().decreaseExternalReferenceCount(api);
+    }
 };
 
 pub const Event = opaque {
@@ -201,24 +227,34 @@ pub const Event = opaque {
         defer self.deinit(api);
 
         if (self.isReady(api)) {
+            std.log.warn("Call isReady already: {any}", .{self});
             return;
         }
+
+        var timer = try stdx.time.Timer.start();
 
         var ctx = struct {
             err: ?*pjrt.Error = null,
             event: asynk.threading.ResetEventSingle = .{},
-        }{};
+            timer: *stdx.time.Timer,
+        }{
+            .timer = &timer,
+        };
 
+        std.log.warn("Call onReady: {any}", .{self});
         try self.inner().onReady(api, &(struct {
             fn call(err: ?*pjrt.Error, user_arg: ?*anyopaque) callconv(.C) void {
                 const ctx_: *@TypeOf(ctx) = @ptrCast(@alignCast(user_arg.?));
+                var timer_ = ctx_.timer;
                 ctx_.err = err;
                 ctx_.event.set();
+                std.log.warn("Callback called: {}", .{timer_.read()});
             }
         }.call), &ctx);
         ctx.event.wait();
 
         if (ctx.err) |e| {
+            log.err("Error waiting for event: {}", .{e});
             defer e.deinit(api);
             return e.getCode(api).toApiError();
         }

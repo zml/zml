@@ -108,6 +108,7 @@ const _CreateOptions = struct {
         // num_nodes
         // enable_mock_nccl
         // mock_gpu_topology
+        should_stage_host_to_device_transfers: bool = false,
 
         pub const Allocator = union(enum) {
             /// "Best-Fit with Coalescing" algorithm
@@ -125,6 +126,8 @@ const _CreateOptions = struct {
         };
 
         pub fn writeNamedValues(self: Cuda, values: *std.ArrayListUnmanaged(pjrt.NamedValue)) void {
+            values.appendAssumeCapacity(pjrt.NamedValue.fromBool("should_stage_host_to_device_transfers", self.should_stage_host_to_device_transfers));
+
             switch (self.allocator) {
                 .platform => {
                     values.appendAssumeCapacity(pjrt.NamedValue.fromString("allocator", "platform"));

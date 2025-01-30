@@ -246,10 +246,13 @@ pub const BaseExe = struct {
                 .ready = false,
             });
         }
+        const output_mem = self.output_per_device[0][0].getMemory(self.platform.pjrt_api);
+
         return .{
             ._shape = self.result_shapes[i],
             ._api = self.platform.pjrt_api,
             ._shards = shards,
+            ._memory = output_mem, // todo
         };
     }
 };
