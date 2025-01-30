@@ -29,7 +29,7 @@ bazel_dep(name = "rules_zig", version = "20240913.0-1957d05")
 
 zig = use_extension("@rules_zig//zig:extensions.bzl", "zig")
 zig.index(file = "//bazel:zig_index.json")
-zig.toolchain(zig_version = "0.13.0")  # "0.14.0-dev.363+c3faae6bf"
+zig.toolchain(zig_version = "0.14.0-dev.363+c3faae6bf")  # 0.13.0 for zig-macos-x86_64
 zig.mirrors(urls = [
     "https://mirror.zml.ai/zig",
 ])
