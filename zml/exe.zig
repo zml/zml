@@ -140,8 +140,6 @@ pub const BaseExe = struct {
     /// Pre-allocated slice of buffers to use as outputs when the module is called.
     output_per_device: []const [*]*pjrt.Buffer,
 
-    events_per_device: []?*pjrt.Event,
-
     /// Number of buffers already fed to the executable.
     ready_buffer_count: u32,
 
@@ -163,8 +161,8 @@ pub const BaseExe = struct {
         const n_out = args.result_shapes.len;
         const n_devices = args.n_devices;
         // Allocate once for all the *pjrt.Buffer we need to store ...
-        const all_buffers = try allocator.alloc(*pjrt.Buffer, (args.n_in + n_out + 1) * n_devices);
-        const all_input_buffers, const all_output_buffers, const events_per_device = splitBuffer(*pjrt.Buffer, all_buffers, .{ args.n_in * n_devices, n_out * n_devices, n_devices });
+        const all_buffers = try allocator.alloc(*pjrt.Buffer, (args.n_in + n_out) * n_devices);
+        const all_input_buffers, const all_output_buffers = splitBuffer(*pjrt.Buffer, all_buffers, .{ args.n_in * n_devices, n_out * n_devices });
 
         // ... and once for all the [*]*pjrt.Buffer.
         const all_per_device = try allocator.alloc([*]*pjrt.Buffer, 2 * n_devices);
@@ -183,7 +181,6 @@ pub const BaseExe = struct {
             .num_devices = args.n_devices,
             .input_per_device = input_per_device,
             .output_per_device = output_per_device,
-            .events_per_device = @ptrCast(events_per_device),
             .result_shapes = try allocator.dupe(Shape, args.result_shapes),
             ._arena = arena,
         };
@@ -199,11 +196,15 @@ pub const BaseExe = struct {
     }
 
     pub fn _unsafeCall(self: BaseExe) void {
+        var events = [_]?*pjrt.Event{null} ** Platform.MAX_NUM_DEVICES;
+        const sharding = self.platform.sharding();
+
         self.exe.execute(self.platform.pjrt_api, .{
             .arguments = self.input_per_device,
             .num_args = self.input_buffer_count,
             .results = self.output_per_device,
-            .events = self.events_per_device,
+            // Create a local inste
+            .events = events[0..sharding.num_partitions],
             // this allows to tell a specific buffer shouldn't be donated,
             // even if it has been marked as "can be donated" during compilation.
             // TODO: expose it ?
@@ -241,7 +242,7 @@ pub const BaseExe = struct {
         for (0..self.num_devices) |dev| {
             shards.appendAssumeCapacity(.{
                 .buffer = self.output_per_device[dev][i],
-                .ready_event = self.events_per_device[dev],
+                .ready_event = null,
                 .ready = false,
             });
         }
