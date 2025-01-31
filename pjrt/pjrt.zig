@@ -502,6 +502,16 @@ pub const Device = opaque {
         }) catch unreachable;
         return @intCast(ret.local_hardware_id);
     }
+
+    pub fn addressableMemories(self: *const Device, api: *const Api) []*const Memory {
+        const ret = api.call(.PJRT_Device_AddressableMemories, .{
+            .device = self.inner(),
+        }) catch unreachable;
+        if (ret.memories) |memories| {
+            return @ptrCast(memories[0..ret.num_memories]);
+        }
+        return &.{};
+    }
 };
 
 pub const DeviceDescription = opaque {

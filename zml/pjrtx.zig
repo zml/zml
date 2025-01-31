@@ -28,8 +28,8 @@ pub const Error = pjrt.Error;
 pub const GetCostAnalysisError = pjrt.GetCostAnalysisError;
 pub const SerializeResult = pjrt.SerializeResult;
 pub const Executable = pjrt.Executable;
-pub const ExecuteError = ApiError;
 pub const Memory = pjrt.Memory;
+pub const ExecuteError = ApiError;
 
 fn InnerMixin(comptime innerT: type) type {
     return struct {
@@ -181,62 +181,6 @@ pub const Buffer = opaque {
 
     pub fn copyToMemory(self: *const Buffer, api: *const Api, memory: *const Memory) ApiError!*Buffer {
         return @ptrCast(self.inner().copyToMemory(api, memory));
-    }
-
-    pub fn getReadyEvent(self: *const Buffer, api: *const Api) ?*Event {
-        return @ptrCast(self.inner().getReadyEvent(api));
-    }
-
-    pub fn getOpaqueDeviceMemoryDataPointer(self: *const Buffer, api: *const Api) ApiError!*anyopaque {
-        return try self.inner().getOpaqueDeviceMemoryDataPointer(api);
-    }
-};
-
-pub const Buffer = opaque {
-    pub const inner = InnerMixin(pjrt.Buffer).inner;
-
-    pub fn deinit(self: *Buffer, api: *const Api) void {
-        self.inner().deinit(api);
-    }
-
-    pub fn getDevice(self: *const Buffer, api: *const Api) ApiError!*Device {
-        return try self.inner().getDevice(api);
-    }
-
-    pub fn delete(self: *Buffer, api: *const Api) void {
-        self.inner().delete(api);
-    }
-
-    pub fn isDeleted(self: *const Buffer, api: *const Api) bool {
-        return self.inner().isDeleted(api);
-    }
-
-    pub fn isOnCpu(self: *const Buffer, api: *const Api) bool {
-        return self.inner().isOnCpu(api);
-    }
-
-    pub fn toHostBuffer(self: *const Buffer, api: *const Api, dst: []u8) ApiError!?*Event {
-        return @ptrCast(try self.inner().toHostBuffer(api, dst));
-    }
-
-    pub fn getElementType(self: *const Buffer, api: *const Api) BufferType {
-        return self.inner().getElementType(api);
-    }
-
-    pub fn getDimensions(self: *const Buffer, api: *const Api) []const i64 {
-        return self.inner().getDimensions(api);
-    }
-
-    pub fn getUnpaddedDimensions(self: *const Buffer, api: *const Api) ApiError![]const i64 {
-        return try self.inner().getUnpaddedDimensions(api);
-    }
-
-    pub fn getOnDeviceSizeInBytes(self: *const Buffer, api: *const Api) ApiError!usize {
-        return try self.inner().getOnDeviceSizeInBytes(api);
-    }
-
-    pub fn copyToDevice(self: *const Buffer, api: *const Api, device: Device) ApiError!*Buffer {
-        return @ptrCast(self.inner().copyToDevice(api, device));
     }
 
     pub fn getReadyEvent(self: *const Buffer, api: *const Api) ?*Event {
