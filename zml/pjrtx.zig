@@ -28,8 +28,8 @@ pub const Error = pjrt.Error;
 pub const GetCostAnalysisError = pjrt.GetCostAnalysisError;
 pub const SerializeResult = pjrt.SerializeResult;
 pub const Executable = pjrt.Executable;
-pub const ExecuteError = ApiError;
 pub const Memory = pjrt.Memory;
+pub const ExecuteError = ApiError;
 
 fn InnerMixin(comptime innerT: type) type {
     return struct {
