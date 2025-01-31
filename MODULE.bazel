@@ -18,7 +18,7 @@ bazel_dep(name = "with_cfg.bzl", version = "0.8.0")
 bazel_dep(name = "buildifier_prebuilt", version = "7.3.1", dev_dependency = True)
 bazel_dep(name = "aspect_bazel_lib", version = "2.11.0")
 bazel_dep(name = "rules_distroless", version = "0.4.2")
-bazel_dep(name = "toolchains_protoc", version = "0.3.6")
+bazel_dep(name = "toolchains_protoc", version = "0.3.7")
 
 # Optional: choose a version of protoc rather than the latest.
 protoc = use_extension("@toolchains_protoc//protoc:extensions.bzl", "protoc")
