@@ -551,12 +551,9 @@ pub fn logFn(comptime fallbackLogFn: LogFn) LogFn {
             var bw = std.io.bufferedWriter(stderr);
             const writer = bw.writer();
 
-            var mutex = Self.mu orelse blk: {
-                Self.mu = Mutex.init();
-                break :blk Self.mu.?;
-            };
-            mutex.lock();
-            defer mutex.unlock();
+            Self.mu = Self.mu orelse Mutex.init();
+            Self.mu.?.lock();
+            defer Self.mu.?.unlock();
             nosuspend {
                 writer.print(level_txt ++ prefix2 ++ format ++ "\n", args) catch return;
                 bw.flush() catch return;
