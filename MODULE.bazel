@@ -18,6 +18,20 @@ bazel_dep(name = "with_cfg.bzl", version = "0.8.0")
 bazel_dep(name = "buildifier_prebuilt", version = "7.3.1", dev_dependency = True)
 bazel_dep(name = "aspect_bazel_lib", version = "2.11.0")
 bazel_dep(name = "rules_distroless", version = "0.4.2")
+bazel_dep(name = "toolchains_protoc", version = "0.3.6")
+
+# Optional: choose a version of protoc rather than the latest.
+protoc = use_extension("@toolchains_protoc//protoc:extensions.bzl", "protoc")
+protoc.toolchain(
+    # Creates a repository to satisfy well-known-types dependencies such as
+    # deps=["@com_google_protobuf//:any_proto"]
+    google_protobuf = "com_google_protobuf",
+    # Pin to any version of protoc
+    version = "v29.2",
+)
+use_repo(protoc, "com_google_protobuf", "toolchains_protoc_hub")
+
+register_toolchains("@toolchains_protoc_hub//:all")
 
 bazel_lib_toolchains = use_extension("@aspect_bazel_lib//lib:extensions.bzl", "toolchains", dev_dependency = True)
 use_repo(bazel_lib_toolchains, "jq_toolchains")
