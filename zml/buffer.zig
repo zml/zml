@@ -162,10 +162,10 @@ pub const Buffer = struct {
 
     pub fn dataInMemory(self: Buffer) ![]const u8 {
         const shard_buffer = self._shards.get(0).buffer;
-        const memoryDataPointer = try shard_buffer.getOpaqueDeviceMemoryDataPointer(self._api);
-        _ = memoryDataPointer; // autofix
-        stdx.debug.assert(self._shards.len == 1, "TODO: support sharded Buffer -> Host transfer", .{});
-        return try self._shards.get(0).buffer.dataInMemory(self._api);
+        const opaqueDataPointer = try shard_buffer.getOpaqueDeviceMemoryDataPointer(self._api);
+        const sizeInbytes = try shard_buffer.getOnDeviceSizeInBytes(self._api);
+        const data = @as([*]const u8, @ptrFromInt(@intFromPtr(opaqueDataPointer)));
+        return data[0..@intCast(sizeInbytes)];
     }
 
     pub fn awaitt(self: *Buffer) !*Buffer {
