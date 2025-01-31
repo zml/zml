@@ -42,7 +42,6 @@ pub const Buffer = struct {
                 try ev.awaitt(api);
             }
             self.ready = true;
-            // try self.buffer.increaseExternalReferenceCount(api);
         }
     };
 
@@ -159,6 +158,14 @@ pub const Buffer = struct {
         }
 
         return res;
+    }
+
+    pub fn dataInMemory(self: Buffer) ![]const u8 {
+        const shard_buffer = self._shards.get(0).buffer;
+        const memoryDataPointer = try shard_buffer.getOpaqueDeviceMemoryDataPointer(self._api);
+        _ = memoryDataPointer; // autofix
+        stdx.debug.assert(self._shards.len == 1, "TODO: support sharded Buffer -> Host transfer", .{});
+        return try self._shards.get(0).buffer.dataInMemory(self._api);
     }
 
     pub fn awaitt(self: *Buffer) !*Buffer {

@@ -22,6 +22,24 @@ pub const std_options = .{
     .logFn = asynk.logFn(std.log.defaultLog),
 };
 
+pub const Runtime = struct {
+    cudaProfilerStart: CudaProfilerStart,
+    cudaProfilerStop: CudaProfilerStop,
+
+    const CudaProfilerStart = *const fn () callconv(.C) c_int;
+    const CudaProfilerStop = *const fn () callconv(.C) c_int;
+
+    pub fn init() !Runtime {
+        var cudart = try std.DynLib.open("libcudart.so.12");
+        defer cudart.close();
+
+        return .{
+            .cudaProfilerStart = cudart.lookup(Runtime.CudaProfilerStart, "cudaProfilerStart") orelse return error.NotFound,
+            .cudaProfilerStop = cudart.lookup(Runtime.CudaProfilerStop, "cudaProfilerStop") orelse return error.NotFound,
+        };
+    }
+};
+
 pub fn tokenizePromptLlama3(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, config: LlamaLM.Config, prompt: []const u8) ![]u32 {
     var tokens = std.ArrayList(u32).init(allocator);
     var encoder = try tokenizer.encoder();
@@ -131,7 +149,7 @@ pub fn generateText(
         tracer.frameEnd(frame_id, try std.fmt.bufPrintZ(tracer_buffer, "Generated token {}/{}", .{ i + 1, output_tokens_len }));
 
         // extract the generated token from the buffer, async
-        var fut_tok_buf = try current_token.toHost(std.mem.sliceAsBytes(&generated_token_buffer));
+        var fut_tok_buf = try current_token.toHostEx(std.mem.sliceAsBytes(&generated_token_buffer), .{});
         _ = try fut_tok_buf.awaitt();
         const generated_token = generated_token_buffer[0];
 
@@ -295,7 +313,10 @@ pub fn asyncMain() !void {
     });
 
     log.info("\tLoading Llama weights from {?s}...", .{res.args.weights});
+    var runtime = Runtime.init() catch unreachable;
+    _ = runtime.cudaProfilerStart();
     var llama_weights = try zml.aio.loadBuffers(llama.LlamaLM, .{ config, llama_options }, ts, model_arena.allocator(), platform);
+    _ = runtime.cudaProfilerStop();
     defer zml.aio.unloadBuffers(&llama_weights);
     log.info("✅\tLoaded weights in {}", .{std.fmt.fmtDuration(start.read())});
 
@@ -327,7 +348,10 @@ pub fn asyncMain() !void {
 
     const seed = res.args.seed orelse @as(u128, @bitCast(std.time.nanoTimestamp()));
     const skip_llama3_encoding = res.args.@"no-llama3" orelse false;
-    const generated_text = try generateText(config, model_instance, llama_module_prefill, llama_module, kv_cache, tokenizer, allocator, seed, prompt[0..], skip_llama3_encoding);
-    // generated text will be printed token by token.
-    defer allocator.free(generated_text);
+    for (0..2) |_| {
+        log.warn("----------------------------------------------", .{});
+        const generated_text = try generateText(config, model_instance, llama_module_prefill, llama_module, kv_cache, tokenizer, allocator, seed, prompt[0..], skip_llama3_encoding);
+        // generated text will be printed token by token.
+        defer allocator.free(generated_text);
+    }
 }

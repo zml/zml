@@ -7,6 +7,7 @@ const stdx = @import("stdx");
 const meta = @import("meta.zig");
 const module = @import("module.zig");
 const pjrt = @import("pjrtx.zig");
+const Shape = @import("shape.zig").Shape;
 
 const log = std.log.scoped(.zml);
 
@@ -84,6 +85,96 @@ pub const Platform = struct {
     /// Platforms with known profiler extensions: cuda, xpu
     pub fn getProfiler(self: Platform, options: ?pjrt.Profiler.Options) pjrt.Profiler {
         return self.pjrt_client.getProfiler(self.pjrt_api, options orelse pjrt.Profiler.default_options);
+    }
+};
+
+// struct PJRT_AsyncHostToDeviceTransferManager_TransferData_Args {
+//   size_t struct_size;
+//   PJRT_Extension_Base* extension_start;
+//   PJRT_AsyncHostToDeviceTransferManager* transfer_manager;
+//   int buffer_index;
+//   const void* data;
+//   int64_t offset;
+//   int64_t transfer_size;
+//   bool is_last_transfer;
+//   PJRT_Event* done_with_h2d_transfer;  // out
+// };
+
+// struct PJRT_AsyncHostToDeviceTransferManager_RetrieveBuffer_Args {
+//   size_t struct_size;
+//   PJRT_Extension_Base* extension_start;
+//   PJRT_AsyncHostToDeviceTransferManager* transfer_manager;
+//   int buffer_index;
+//   PJRT_Buffer* buffer_out;  // out
+// };
+
+// struct PJRT_AsyncHostToDeviceTransferManager_Device_Args {
+//   size_t struct_size;
+//   PJRT_Extension_Base* extension_start;
+//   PJRT_AsyncHostToDeviceTransferManager* transfer_manager;
+//   PJRT_Device* device_out;  // out
+// };
+
+// struct PJRT_AsyncHostToDeviceTransferManager_BufferCount_Args {
+//   size_t struct_size;
+//   PJRT_Extension_Base* extension_start;
+//   PJRT_AsyncHostToDeviceTransferManager* transfer_manager;
+//   size_t buffer_count;  // out
+// };
+
+// struct PJRT_AsyncHostToDeviceTransferManager_BufferSize_Args {
+//   size_t struct_size;
+//   PJRT_Extension_Base* extension_start;
+//   PJRT_AsyncHostToDeviceTransferManager* transfer_manager;
+//   int buffer_index;
+//   size_t buffer_size;  // out
+// };
+
+// struct PJRT_AsyncHostToDeviceTransferManager_AddMetadata_Args {
+//   size_t struct_size;
+//   PJRT_Extension_Base* extension_start;
+//   PJRT_AsyncHostToDeviceTransferManager* transfer_manager;
+//   const PJRT_NamedValue* transfer_metadata;
+//   size_t num_metadata;
+// };
+
+// struct PJRT_Client_CreateBuffersForAsyncHostToDevice_Args {
+//   size_t struct_size;
+//   PJRT_Extension_Base* extension_start;
+//   PJRT_Client* client;
+//   PJRT_ShapeSpec* shape_specs;
+//   size_t num_shape_specs;
+//   PJRT_Buffer_MemoryLayout** device_layouts;  // optional
+//   size_t num_device_layouts;
+//   PJRT_Memory* memory;
+//   PJRT_AsyncHostToDeviceTransferManager* transfer_manager;  // out
+// };
+
+pub const TransferManager = struct {
+    pjrt_client: *pjrt.Client,
+    pjrt_api: *pjrt.Api,
+    pjrt_transfer_manager: []*pjrt.AsyncHostToDeviceTransferManager,
+    shape_specs: []const Shape,
+    memory: *pjrt.Memory,
+
+    pub fn init(platform: Platform, memory_kind: pjrt.Memory.Kind, shapes: []Shape) !TransferManager {
+        const device = platform.getDevices()[0];
+        const memory = device.getMemoryByKind(memory_kind);
+        if (memory == null) {
+            stdx.debug.panic("Device {s} doesn't have memory of kind {s}", .{ device.getName(), @tagName(memory_kind) });
+        }
+
+        return .{
+            .pjrt_client = platform.pjrt_client,
+            .pjrt_api = platform.pjrt_api,
+            .pjrt_transfer_manager = try pjrt.Client.createBuffersForAsyncHostToDevice(platform.pjrt_client, memory, null),
+            .shape_specs = shapes,
+            .memory = memory,
+        };
+    }
+
+    pub fn deinit(self: *TransferManager) void {
+        pjrt.AsyncHostToDeviceTransferManager.deinit(self.pjrt_transfer_manager, self.pjrt_api);
     }
 };
 

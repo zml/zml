@@ -130,6 +130,19 @@ pub const Client = opaque {
     }
 };
 
+pub const DeviceX = opaque {
+    pub fn getMemoryByKind(self: *const Device, api: *const Api, kind: pjrt.MemoryKind) ?*Memory {
+        var mem: ?*Memory = null;
+        const memories = self.inner().addressableMemories(api);
+        for (memories) |m| {
+            if (mem.kind(api) == kind) {
+                mem = m;
+            }
+        }
+        return mem;
+    }
+};
+
 pub const Buffer = opaque {
     pub const inner = InnerMixin(pjrt.Buffer).inner;
 
@@ -300,5 +313,13 @@ pub const LoadedExecutable = opaque {
 
     pub fn getExecutable(self: *LoadedExecutable, api: *const Api) ApiError!*Executable {
         return try self.inner().getExecutable(api);
+    }
+};
+
+pub const AsyncHostToDeviceTransferManager = opaque {
+    const inner = InnerMixin(pjrt.AsyncHostToDeviceTransferManager).inner;
+
+    pub fn deinit(self: *AsyncHostToDeviceTransferManager, api: *const Api) void {
+        self.inner().deinit(api);
     }
 };

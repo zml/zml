@@ -444,6 +444,15 @@ pub const Device = opaque {
         }
         return &.{};
     }
+
+    pub fn getMemoryByKind(self: *const Device, api: *const Api, kind: Memory.Kind) ?*const Memory {
+        const memories = self.addressableMemories(api);
+        return for (memories) |m| blk: {
+            if (m.kind(api) == kind) {
+                break :blk m;
+            }
+        };
+    }
 };
 
 pub const DeviceDescription = opaque {
@@ -810,6 +819,16 @@ pub const Buffer = opaque {
         _ = try api.call(.PJRT_Buffer_DecreaseExternalReferenceCount, .{
             .buffer = self.inner(),
         });
+    }
+};
+
+pub const AsyncHostToDeviceTransferManager = opaque {
+    const inner = InnerMixin(c.PJRT_AsyncHostToDeviceTransferManager).inner;
+
+    pub fn deinit(self: *Event, api: *const Api) void {
+        _ = api.call(.PJRT_AsyncHostToDeviceTransferManager_Destroy, .{
+            .event = self.inner(),
+        }) catch unreachable;
     }
 };
 
