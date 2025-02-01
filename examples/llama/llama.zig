@@ -272,6 +272,11 @@ pub const SelfAttn = struct {
         var k = zml.call(self.k_proj, .forward, .{x}).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto }).withSharding(.{.h});
         var v = zml.call(self.v_proj, .forward, .{x}).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto }).withSharding(.{.h});
 
+        // 🚀 **LOGGING SHAPES RIGHT AFTER PROJECTION**
+        log.info("q.shape = {}", .{q.shape()});
+        log.info("k.shape = {}", .{k.shape()});
+        log.info("v.shape = {}", .{v.shape()});
+
         // Generate the attention mask.
         const seq_len = kv_cache.k.dim(.k);
         var attn_mask = zml.nn.causalAttnMask(.{ .q = seq_len, .k = seq_len }, x.dtype(), null);
@@ -292,10 +297,19 @@ pub const SelfAttn = struct {
         k = k.rename(.{ .s = .k });
         v = v.rename(.{ .s = .k });
 
+        // 🚀 **LOGGING SHAPES BEFORE COMPUTING ATTENTION**
+        log.info("q.shape (after RoPE) = {}", .{q.shape()});
+        log.info("k.shape (after RoPE) = {}", .{k.shape()});
+        log.info("v.shape (after RoPE) = {}", .{v.shape()});
+
         const dtype = q.dtype();
         const new_kv_cache = kv_cache.update(k, v, token_index);
         k = new_kv_cache.keys().convert(dtype);
         v = new_kv_cache.values().convert(dtype);
+
+        // 🚀 **LOGGING SHAPES AFTER KV CACHE UPDATE**
+        log.info("k.shape (after KV cache) = {}", .{k.shape()});
+        log.info("v.shape (after KV cache) = {}", .{v.shape()});
 
         const attn_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask, .allow_cudnn = true });
         // const attn_output = zml.nn.sdpaMemEfficient(q, k, v, .{ .attn_mask = attn_mask }, .{ .q_chunk_size = 4096, .k_chunk_size = 1024 });
