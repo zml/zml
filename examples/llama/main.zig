@@ -27,9 +27,9 @@ pub fn tokenizePromptLlama3(allocator: std.mem.Allocator, tokenizer: zml.tokeniz
     var encoder = try tokenizer.encoder();
     defer encoder.deinit();
 
-    const start_header_id = tokenizer.token_to_id("<|start_header_id|>") orelse return error.NoSuchToken;
-    const end_header_id = tokenizer.token_to_id("<|end_header_id|>") orelse return error.NoSuchToken;
-    const eot_id = tokenizer.token_to_id("<|eot_id|>") orelse return error.NoSuchToken;
+    const start_header_id = tokenizer.tokenToId("<|start_header_id|>") orelse return error.NoSuchToken;
+    const end_header_id = tokenizer.tokenToId("<|end_header_id|>") orelse return error.NoSuchToken;
+    const eot_id = tokenizer.tokenToId("<|eot_id|>") orelse return error.NoSuchToken;
     const newline_id = (try encoder.encode("\n"))[0];
 
     try tokens.append(config.bos_token_id);
@@ -85,7 +85,8 @@ pub fn generateText(
     // prepare device buffers for the prefill tokens and the index
     var prefill_tokens = try zml.Buffer.fromSlice(platform, .{max_seq_len}, prefill_buffer);
     defer prefill_tokens.deinit();
-    var prefill_token_index = try zml.Buffer.fromSlice(platform, .{}, &[_]u32{0});
+    var prefill_token_index = try zml.Buffer.constant(platform, zml.Shape.init(.{}, .u32), 0);
+
     defer prefill_token_index.deinit();
 
     // init RNG and prefill
@@ -97,7 +98,7 @@ pub fn generateText(
 
     // Prepare for token-by-token generation
     var first_token_hostbuffer = [_]u32{prompt_tok[prompt_tok.len - 1]}; // start with the prompt's last token
-    var current_token = try zml.Buffer.fromSlice(platform, .{}, &first_token_hostbuffer);
+    var current_token = try zml.Buffer.fromSlice(platform, .{1}, &first_token_hostbuffer);
     defer current_token.deinit();
 
     // Here we will copy the generated token from device
@@ -121,6 +122,7 @@ pub fn generateText(
         // current token index needs to go into a zml.Buffer
         const token_index_buffer = &[_]u32{@intCast(prompt_tok.len + i)};
         const token_index = try zml.Buffer.fromSlice(platform, .{}, token_index_buffer);
+
         defer token_index.deinit();
 
         // call to generate the next token
@@ -258,13 +260,11 @@ pub fn asyncMain() !void {
     const dims = model_instance.model.shape();
     const dtype = model_instance.model.embed_tokens.weight.dtype();
 
-    const batch_size = 1;
+    const tokens_shape_prefill = zml.Shape.init(.{ .s = llama_options.max_seq_len }, .u32);
+    const tokens_shape = zml.Shape.init(.{ .s = 1 }, .u32);
+    const token_idx_shape = zml.Shape.init(.{}, .u32);
 
-    const tokens_shape_prefill = zml.Shape.init(.{ .b = batch_size, .s = llama_options.max_seq_len }, .u32);
-    const tokens_shape = zml.Shape.init(.{ .b = batch_size, .s = 1 }, .u32);
-    const token_idx_shape = zml.Shape.init(.{ .b = batch_size }, .u32);
-
-    const kv_shape = zml.Shape.init(.{ .layer = model_instance.model.layers.len, .b = batch_size, .k = dims.s, .h = dims.nkvh, .hd = dims.hd }, dtype).withSharding(.{.h});
+    const kv_shape = zml.Shape.init(.{ .layer = model_instance.model.layers.len, .k = dims.s, .h = dims.nkvh, .hd = dims.hd }, dtype).withSharding(.{.h});
 
     const kv_cache_shape: zml.ShapeOf(llama.KvCache) = llama.KvCache.initShape(kv_shape);
     const rng_shape = zml.Tensor.Rng.shape();
@@ -314,7 +314,7 @@ pub fn asyncMain() !void {
             var timer = try stdx.time.Timer.start();
             defer log.info("Loaded tokenizer from {s} [{}]", .{ tok, timer.read() });
 
-            break :blk try zml.tokenizer.Tokenizer.from_file(model_arena.allocator(), tok);
+            break :blk try zml.tokenizer.Tokenizer.fromFile(model_arena.allocator(), tok);
         } else {
             log.err("Missing --tokenizer", .{});
             return;

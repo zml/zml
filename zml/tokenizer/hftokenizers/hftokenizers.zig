@@ -91,7 +91,7 @@ pub const Decoder = struct {
 };
 
 pub const HFTokenizer = opaque {
-    pub fn from_file(model: []const u8) !*HFTokenizer {
+    pub fn fromFile(model: []const u8) !*HFTokenizer {
         return @ptrCast(c.hftokenizers_new(ffi.ZigSlice.from(model)));
     }
 
@@ -107,7 +107,7 @@ pub const HFTokenizer = opaque {
         return Decoder.init(self);
     }
 
-    pub fn token_to_id(self: *HFTokenizer, token: []const u8) ?u32 {
+    pub fn tokenToId(self: *HFTokenizer, token: []const u8) ?u32 {
         return c.hftokenizers_token_to_id(@ptrCast(self), ffi.ZigSlice.from(token));
     }
 };
