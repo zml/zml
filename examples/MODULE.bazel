@@ -47,7 +47,6 @@ http_file(
     url = "https://github.com/ggerganov/ggml/raw/18703ad600cc68dbdb04d57434c876989a841d12/examples/mnist/models/mnist/t10k-images.idx3-ubyte",
 )
 
-
 # Llama 3.2
 
 huggingface = use_extension("@zml//bazel:huggingface.bzl", "huggingface")
@@ -126,7 +125,6 @@ filegroup(
 )
 use_repo(huggingface, "Meta-Llama-3.1-70B-Instruct")
 
-
 huggingface.model(
     name = "TinyLlama-120M-scratch",
     build_file_content = """\
@@ -145,7 +143,6 @@ filegroup(
 )
 use_repo(huggingface, "TinyLlama-120M-scratch")
 
-
 bazel_dep(name = "rules_rust", version = "0.57.0")
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(
@@ -153,6 +150,7 @@ rust.toolchain(
     versions = ["1.84.0"],
     extra_target_triples = [
         "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
         "aarch64-unknown-linux-gnu",
         "x86_64-unknown-linux-gnu",
     ],
