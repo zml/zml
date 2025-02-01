@@ -104,18 +104,18 @@ cc_binary(
 )
 
 cc_binary(
-    name = "Qwen-2.5-7B",
+    name = "Qwen-2.5-7B-Instruct",
     args = [
-        "--config=$(location @Qwen-2.5-7B//:config.json)",
-        "--weights=$(location @Qwen-2.5-7B//:model.safetensors.index.json)",
-        "--tokenizer=$(location @Qwen-2.5-7B//:tokenizer.json)",
+        "--config=$(location @Qwen-2.5-7B-Instruct//:config.json)",
+        "--weights=$(location @Qwen-2.5-7B-Instruct//:model.safetensors.index.json)",
+        "--tokenizer=$(location @Qwen-2.5-7B-Instruct//:tokenizer.json)",
         "--no-llama3=true",
     ],
     data = [
-        "@Qwen-2.5-7B",
-        "@Qwen-2.5-7B//:config.json",
-        "@Qwen-2.5-7B//:model.safetensors.index.json",
-        "@Qwen-2.5-7B//:tokenizer.json",
+        "@Qwen-2.5-7B-Instruct",
+        "@Qwen-2.5-7B-Instruct//:config.json",
+        "@Qwen-2.5-7B-Instruct//:model.safetensors.index.json",
+        "@Qwen-2.5-7B-Instruct//:tokenizer.json",
     ],
     deps = [":llama_lib"],
 )

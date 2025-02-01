@@ -148,22 +148,22 @@ use_repo(huggingface, "TinyLlama-120M-scratch")
 # QWEN-2.5
 
 huggingface.model(
-    name = "Qwen-2.5-7B",
+    name = "Qwen-2.5-7B-Instruct",
     build_file_content = """\
 package(default_visibility = ["//visibility:public"])
 filegroup(
-    name = "Qwen-2.5-7B",
+    name = "Qwen-2.5-7B-Instruct",
     srcs = glob(["*.json", "*.safetensors"]),
 )
 """,
-    commit = "d149729398750b98c0af14eb82c78cfe92750796",
+    commit = "a09a35458c702b33eeacc393d103063234e8bc28",
     includes = [
         "*.safetensors",
         "*.json",
     ],
-    model = "Qwen/Qwen2.5-7B",
+    model = "Qwen/Qwen2.5-7B-Instruct",
 )
-use_repo(huggingface, "Qwen-2.5-7B")
+use_repo(huggingface, "Qwen-2.5-7B-Instruct")
 
 bazel_dep(name = "rules_rust", version = "0.57.0")
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
