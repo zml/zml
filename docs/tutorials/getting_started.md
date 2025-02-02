@@ -59,6 +59,19 @@ Llama is a family of "Large Language Models", trained to generate text, based
 on the beginning of a sentence/book/article. This "beginning" is generally
 referred to as the "prompt".
 
+#### TinyLlama, Stories 15M
+
+To start, you can use a small model trained specifically on children's history
+books. This model has been trained by [Andrej Karpathy](https://x.com/karpathy);
+you can read more about it on his
+[Github](https://github.com/karpathy/llama2.c).
+
+```
+cd examples
+bazel run -c opt //llama:TinyLlama-Stories-15M
+bazel run -c opt //llama:TinyLlama-Stories-15M -- --prompt="Once upon a time, there was a cute little dragon"
+```
+
 #### Meta Llama 3.1 8B
 
 This model has restrictions, see
