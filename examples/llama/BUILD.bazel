@@ -1,7 +1,8 @@
 load("@aspect_bazel_lib//lib:expand_template.bzl", "expand_template")
 load("@aspect_bazel_lib//lib:tar.bzl", "mtree_spec", "tar")
 load("@aspect_bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
-load("@bazel_skylib//rules:native_binary.bzl", "native_binary")
+load("@bazel_skylib//rules:native_binary.bzl", "native_test")
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
 load("@zml//bazel:zig.bzl", "zig_cc_binary")
 
@@ -18,24 +19,6 @@ zig_cc_binary(
         "@zml//stdx",
         "@zml//zml",
     ],
-)
-
-cc_binary(
-    name = "TinyLlama-120M-scratch",
-    args = [
-        "--config=$(location @TinyLlama-120M-scratch//:config.json)",
-        "--weights=$(location @TinyLlama-120M-scratch//:model.safetensors)",
-        "--tokenizer=$(location @TinyLlama-120M-scratch//:tokenizer.json)",
-        "--no-llama3=true", # don't do llama3 template prompt encoding
-        "--sharding=false", # don't shard this
-    ],
-    data = [
-        "@TinyLlama-120M-scratch",
-        "@TinyLlama-120M-scratch//:config.json",
-        "@TinyLlama-120M-scratch//:model.safetensors",
-        "@TinyLlama-120M-scratch//:tokenizer.json",
-    ],
-    deps = [":llama_lib"],
 )
 
 cc_binary(
@@ -70,7 +53,6 @@ cc_binary(
     deps = [":llama_lib"],
 )
 
-
 cc_binary(
     name = "Llama-3.2-1B-Instruct",
     args = [
@@ -102,7 +84,31 @@ cc_binary(
     ],
     deps = [":llama_lib"],
 )
-#
+
+cc_binary(
+    name = "TinyLlama-Stories-15M",
+    args = [
+        "--config=$(location :tinyllama_stories15M_json)",
+        "--weights=$(location @Karpathy-TinyLlama-Stories15M//file)",
+        "--tokenizer=$(location @Karpathy-TinyLlama-Tokenizer//file)",
+        "--prompt='Once upon a time, there was a little girl named Lily.'",
+        "--no-llama3=1", # don't do template prompt encoding, I'm a simple model
+        "--sharding=false", # don't shard me, I'm so small
+    ],
+    data = [
+        ":tinyllama_stories15M_json",
+        "@Karpathy-TinyLlama-Stories15M//file",
+        "@Karpathy-TinyLlama-Tokenizer//file",
+    ],
+    deps = [":llama_lib"],
+)
+
+write_file(
+    name = "tinyllama_stories15M_json",
+    out = "config.json",
+    content = ['{"bos_token_id":1,"eos_token_id":2,"hidden_act":"silu","hidden_size":288,"intermediate_size":768,"max_position_embeddings":256,"model_type":"llama","num_attention_heads":6,"num_hidden_layers":6,"num_key_value_heads":6,"rms_norm_eps":1e-05,"hf_rope_impl":false,"rope_scaling":null,"rope_theta":10000.0}'],
+)
+
 
 zig_cc_binary(
     name = "test-implementation",
@@ -117,27 +123,31 @@ zig_cc_binary(
     ],
     main = "test.zig",
     deps = [
-        "//third_party/tigerbeetle:flags",
         "@zml//async",
-        "@zml//metax",
+        "@zml//stdx",
         "@zml//zml",
     ],
 )
 
-zig_cc_binary(
+native_test(
     name = "test_tokenizer",
-    main = "test_tokenizer.zig",
-    deps = [
-        "//third_party/tigerbeetle:flags",
-        "@zml//stdx",
-        "@zml//zml",
-    ],
+    src = "@zml//zml/tokenizer:main",
     # Note: all Llama-3.x tokenizers are the same,
     # but using the 3.2-1B version because downloading the tokenizer triggers downloading the model.
     args = [
-    "--tokenizer=$(location @Meta-Llama-3.2-1B-Instruct//:tokenizer)",
+    "--tokenizer=$(location @Meta-Llama-3.2-1B-Instruct//:tokenizer.json)",
+    """--prompt='Examples of titles:
+📉 Stock Market Trends
+🍪 Perfect Chocolate Chip Recipe
+Evolution of Music Streaming
+Remote Work Productivity Tips
+Artificial Intelligence in Healthcare
+🎮 Video Game Development Insights
+'""",
+    # this correspond to encoding with HF tokenizers, with bos=False
+    "--expected=41481,315,15671,512,9468,241,231,12937,8152,50730,198,9468,235,103,24118,39520,32013,26371,198,35212,3294,315,10948,45910,198,25732,5664,5761,1968,26788,198,9470,16895,22107,304,39435,198,9468,236,106,8519,4140,11050,73137,198",
     ],
-    data = ["@Meta-Llama-3.2-1B-Instruct//:tokenizer"],
+    data = ["@Meta-Llama-3.2-1B-Instruct//:tokenizer.json"],
 )
 
 mtree_spec(

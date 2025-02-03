@@ -26,6 +26,7 @@ pub const LlamaLM = struct {
         rope_theta: f32,
         max_position_embeddings: usize,
         rms_norm_eps: f32,
+        hf_rope_impl: bool = true,
     };
 
     pub const Options = struct {
@@ -47,7 +48,7 @@ pub const LlamaLM = struct {
         self.model.num_heads = @intCast(config.num_attention_heads);
         self.model.num_kv_heads = @intCast(config.num_key_value_heads);
         self.model.rope_opts = .{
-            .impl = .sequential,
+            .impl = if (config.hf_rope_impl) .sequential else .interleaved,
             .freq_base = config.rope_theta,
         };
         for (self.model.layers) |*layer| {
