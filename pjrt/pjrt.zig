@@ -142,15 +142,21 @@ pub const Api = struct {
         };
     }
 
-    pub fn stablehloCurrentVersion(self: *const Api, buf: []u8) ?[]u8 {
+    pub fn stablehloCurrentVersion(self: *const Api) ?[]const u8 {
+        const state = struct {
+            var buf: [32]u8 = undefined;
+            var str: ?[:0]const u8 = null;
+        };
+        if (state.str) |str| {
+            return str;
+        }
         if (self.getPluginAttribute("stablehlo_current_version")) |v| {
             stdx.debug.assert(v.kind() == .int64list, "fetched attribute \"stablehlo_current_version\" from the plugin with type `{}`, expected `.int64list`", .{v.kind()});
             stdx.debug.assert(v.inner.value_size == 3, "expect version format to have 3 elements representing `major.minor.patch` format, got {} elements", .{v.inner.value_size});
             const value = v.inner.unnamed_0.int64_array_value[0..v.inner.value_size];
-            return std.fmt.bufPrint(buf, "{d}.{d}.{d}", .{ value[0], value[1], value[2] }) catch unreachable;
+            state.str = std.fmt.bufPrintZ(&state.buf, "{d}.{d}.{d}", .{ value[0], value[1], value[2] }) catch unreachable;
         }
-
-        return null;
+        return state.str;
     }
 
     pub fn customCallRegistry(api: *const Api) ?CustomCallRegistry {
