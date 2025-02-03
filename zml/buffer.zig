@@ -112,16 +112,30 @@ pub const Buffer = struct {
         return from(platform, HostBuffer.fromBytes(sh, std.mem.sliceAsBytes(s)));
     }
 
-    pub fn fromSlice2(platform: Platform, dimz: anytype, s: anytype) !Buffer {
-        const sh = Shape.init(dimz, DataType.fromSliceElementType(s));
-        return from(platform, HostBuffer.fromBytes(sh, std.mem.sliceAsBytes(s)));
-    }
-
     /// Copies the given Zig array to the accelerator memory and
     /// return a Buffer using the array shape.
     pub fn fromArray(platform: Platform, arr: anytype) !Buffer {
         const host_buffer = HostBuffer.fromArray(&arr);
-        return try from(platform, host_buffer);
+        var device_buffer = try from(platform, host_buffer);
+        // Await cause we need to finish the copy while the array is still on the stack.
+        // Alternatively we could accept a pointer to the array but that will break all fromArray callers
+        _ = try device_buffer.awaitt();
+        return device_buffer;
+    }
+
+    test fromArray {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        const values_h = [2][8]i32{
+            .{ 0, -1, 2, -3, 4, -5, 6, -7 },
+            .{ 8, -9, 10, -11, 12, -13, 14, -15 },
+        };
+        var values_d = try fromArray(platform, values_h);
+        defer values_d.deinit();
+        _ = try values_d.awaitt();
+
+        try std.testing.expectEqual(-15, (try values_d.getValue([2][8]i32))[1][7]);
     }
 
     /// Creates a Buffer with a single element.

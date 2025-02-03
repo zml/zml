@@ -103,6 +103,25 @@ pub const HostBuffer = struct {
         };
     }
 
+    test fromArray {
+        const zml = @import("zml.zig");
+        {
+            const arr: [2][4]i32 = undefined;
+            const buf = fromArray(&arr);
+            try zml.testing.expectEqualShapes(buf.shape(), Shape.init(.{ 2, 4 }, .i32));
+        }
+        {
+            const arr: [2][4][8]u8 = undefined;
+            const buf = fromArray(&arr);
+            try zml.testing.expectEqualShapes(buf.shape(), Shape.init(.{ 2, 4, 8 }, .u8));
+        }
+        {
+            const arr: [3][2][4]f32 = undefined;
+            const buf = fromArray(&arr);
+            try zml.testing.expectEqualShapes(buf.shape(), Shape.init(.{ 3, 2, 4 }, .f32));
+        }
+    }
+
     pub const ArangeArgs = struct {
         start: i64 = 0,
         end: i64,
