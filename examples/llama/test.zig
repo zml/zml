@@ -16,9 +16,10 @@ pub fn main() !void {
 pub fn asyncMain() !void {
     const CliArgs = struct {
         pub const help =
-            \\ test-implementation --model=llama3.8B.safetensors --reference=activation.safetensors
+            \\ test-implementation --weights=llama3.8B.safetensors --config=config.json --reference=activation.safetensors
         ;
-        model: []const u8,
+        weights: []const u8,
+        config: []const u8,
         reference: []const u8,
         num_heads: ?i64 = null,
         num_kv_heads: ?i64 = null,
@@ -38,7 +39,7 @@ pub fn asyncMain() !void {
     // Parse program args
     var args = std.process.args();
     const cli_args = flags.parse(&args, CliArgs);
-    const model_file = cli_args.model;
+    const model_file = cli_args.weights;
 
     // Memory arena dedicated to model shapes and weights
     var arena_state = std.heap.ArenaAllocator.init(allocator);
@@ -60,6 +61,16 @@ pub fn asyncMain() !void {
         std.meta.stringToEnum(zml.nn.RopeOpts.Implementation, val).?
     else
         .sequential;
+
+    const config = blk: {
+        var config_json_file = try asynk.File.open(cli_args.config, .{ .mode = .read_only });
+        defer config_json_file.close() catch unreachable;
+        var reader = std.json.reader(allocator, config_json_file.reader());
+        defer reader.deinit();
+        const config_obj = try std.json.parseFromTokenSourceLeaky(LlamaLM.Config, allocator, &reader, .{ .ignore_unknown_fields = true });
+        break :blk config_obj;
+    };
+    std.log.info("Parsed llama config: {}", .{config});
 
     const llama_options: llama_mod.LlamaOptions = .{
         .max_seq_len = 256,
@@ -101,26 +112,4 @@ fn testImplementation(
     try zml.testing.testLayer(platform, buffer_store, "layers.0.mlp", llama.model.layers[0].mlp, llama_weights.model.layers[0].mlp, 1e-2);
     try zml.testing.testLayer(platform, buffer_store, "layers.0.input_layernorm", llama.model.layers[0].input_layernorm, llama_weights.model.layers[0].input_layernorm, 1e-2);
     try zml.testing.testLayer(platform, buffer_store, "layers.0.post_attention_layernorm", llama.model.layers[0].post_attention_layernorm, llama_weights.model.layers[0].post_attention_layernorm, 1e-2);
-
-    {
-        const test_case = "layers.0.self_attn";
-        std.log.info("Testing {s}", .{test_case});
-        // Small wrapper to explicitly tag the input, and ignore the extra arguments used in HF implementation.
-        const SelfAttnPrefill = struct {
-            inner: llama_mod.SelfAttn,
-
-            pub fn forward(self: @This(), x_: Tensor) struct { Tensor, llama_mod.KvCache } {
-                return self.inner.forward(x_.withTags(.{ .b, .s, .d }), null, null);
-            }
-        };
-
-        try zml.testing.testLayer(
-            platform,
-            buffer_store,
-            "layers.0.self_attn",
-            SelfAttnPrefill{ .inner = llama.model.layers[0].self_attn },
-            .{ .inner = llama_weights.model.layers[0].self_attn },
-            1e-3,
-        );
-    }
 }

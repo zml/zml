@@ -4,58 +4,6 @@ const zml = @import("../zml.zig");
 
 const sentencepiece_proto = @import("//sentencepiece:model_proto");
 const Normalizer = zml.tokenizer.Normalizer;
-const Tokenizer = zml.tokenizer.Tokenizer;
-
-pub fn loadTokenizerFromPath(allocator: std.mem.Allocator, path: []const u8) !Tokenizer {
-    const file = try asynk.File.open(path, .{});
-    defer file.close() catch unreachable;
-
-    return loadTokenizerFromFile(allocator, file);
-}
-
-pub fn loadTokenizerFromFile(allocator: std.mem.Allocator, file: asynk.File) !Tokenizer {
-    const reader = file.reader();
-    const input = try reader.readAllAlloc(allocator, 16 * 1024 * 1024);
-    defer allocator.free(input);
-
-    var proto_arena = std.heap.ArenaAllocator.init(allocator);
-    defer proto_arena.deinit();
-
-    const model = try sentencepiece_proto.ModelProto.decode(input, proto_arena.allocator());
-    // no deinit, memory will be freed by the proto_arena
-
-    return loadTokenizerFromModelProto(allocator, model);
-}
-
-pub fn loadTokenizerFromModelProto(allocator: std.mem.Allocator, model: sentencepiece_proto.ModelProto) !Tokenizer {
-    std.debug.assert(model.trainer_spec.?.model_type.? == .BPE);
-    const special_tokens: Tokenizer.SpecialTokens = .{
-        .unk = @intCast(model.trainer_spec.?.unk_id.?),
-        .bos = @intCast(model.trainer_spec.?.bos_id.?),
-        .eos = @intCast(model.trainer_spec.?.eos_id.?),
-        .pad = parseTokenId(model.trainer_spec.?.pad_id),
-    };
-
-    var tokenizer = try Tokenizer.init(
-        allocator,
-        @intCast(model.pieces.items.len),
-        @intCast(model.trainer_spec.?.max_sentencepiece_length.?),
-        normalizerFromSpec(model.normalizer_spec.?),
-        special_tokens,
-        true,
-    );
-    errdefer tokenizer.deinit();
-
-    for (model.pieces.items) |*piece| {
-        try tokenizer.addToken(piece.score.?, piece.piece.?.getSlice());
-    }
-    const byte_fallback = model.trainer_spec.?.byte_fallback orelse false;
-    if (byte_fallback) {
-        try tokenizer.rewriteByteFallbackTokens();
-    }
-
-    return tokenizer;
-}
 
 fn parseTokenId(id: ?i32) u32 {
     if (id) |idx| {

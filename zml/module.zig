@@ -243,10 +243,8 @@ pub const CompilationContext = struct {
             }
 
             const loaded_executable = compileModuleToPjrtExecutable(arena, self._platform, module, module_dir) catch |err| {
-                log.err(
-                    "pjrt-{s} failed to compile following valid MLIR:\n{}\n{}",
-                    .{ @tagName(self._platform.target), module.op().mlirFormatter(.{}), err },
-                );
+                log.err("pjrt-{s} failed to compile: {}", .{ @tagName(self._platform.target), err });
+                if (module_dir) |dir| log.err("mlir can be found at {s}/module.mlir", .{dir});
                 return err;
             };
 
@@ -368,7 +366,7 @@ pub const CompilationContext = struct {
         defer arena_state.deinit();
         const arena = arena_state.allocator();
 
-        const tensor_count = countTensors(args);
+        const tensor_count = meta.count(Tensor, args);
 
         const mlir_ctx = self.mlirCtx();
         const loc = mlir_ctx.location(@src());
@@ -505,13 +503,13 @@ pub const CompilationContext = struct {
         const Local = struct {
             bias: Tensor,
 
-            pub fn forward(self: @This(), x: Tensor, y: Tensor) [2]Tensor {
-                const x1 = zml.ops.call(self, .inner, .{x});
-                const x2 = zml.ops.call(self, .inner, .{x1});
+            pub fn _fwd(self: @This(), x: Tensor, y: Tensor) [2]Tensor {
+                const x1 = zml.ops.call(self, ._inner, .{x});
+                const x2 = zml.ops.call(self, ._inner, .{x1});
                 return .{ x1.reuseBuffer(y), x2 };
             }
 
-            pub fn inner(self: @This(), x: Tensor) Tensor {
+            pub fn _inner(self: @This(), x: Tensor) Tensor {
                 const y = x.add(self.bias);
                 return y.reuseBuffer(x);
             }
@@ -524,7 +522,7 @@ pub const CompilationContext = struct {
         var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
         defer comp.deinit();
         var tensor_args = .{ model, Tensor{ ._shape = s, ._id = .{ .buffer_id = 1234 } }, Tensor{ ._shape = s, ._id = .{ .buffer_id = 1235 } } };
-        const f = try comp.emitMlir(Local.forward, &tensor_args, .{ .name = "test.emitMlir.Local.forward", .kind = .main });
+        const f = try comp.emitMlir(Local._fwd, &tensor_args, .{ .name = "test.emitMlir.Local.forward", .kind = .main });
 
         var mlir_bytecode = std.ArrayList(u8).init(std.testing.allocator);
         defer mlir_bytecode.deinit();
@@ -798,7 +796,7 @@ pub const CompilationContext = struct {
         };
     }
 
-    fn getValue(self: *const CompilationContext, tensor: Tensor) mlir.Value {
+    pub fn getValue(self: *const CompilationContext, tensor: Tensor) mlir.Value {
         return self.getValueAndDonation(tensor)[0];
     }
 
@@ -813,8 +811,11 @@ fn computeModuleHash(platform: Platform, module: mlir.Module) u64 {
     const writer = hasher_writer.writer();
 
     // Hash the canonicalized IR, without debug information that can change across builds.
-    module.op().writeBytecode(writer);
-    //module.op().print(writer, .{ .debug_info = false });
+    module.op().print(writer, .{ .debug_info = false });
+    // Note: before we where using module.op().writeBytecode(writer),
+    // but it crashes on some inputs, notably for unused variables.
+    // So we use the text representation of the mlir.
+    // See https://github.com/zml/zml/issues/97.
     // Writes can't fail because we are writing to a hasher.
     writer.writeAll(platform.pjrt_client.getPlatformName(platform.pjrt_api)) catch unreachable;
     const api_version = platform.pjrt_api.version();
@@ -899,27 +900,20 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, m
         }
     }
     switch (platform.target) {
-        .cuda => cuda_dir: {
-            // NVIDIA recommends to disable Triton GEMM on JAX:
+        .cuda => {
+            // NVIDIA recommends these settings
             // https://github.com/NVIDIA/JAX-Toolbox?tab=readme-ov-file#environment-variables
             setFlag(&options, "xla_gpu_enable_triton_gemm", false);
+            setFlag(&options, "xla_gpu_enable_latency_hiding_scheduler", true);
+            setFlag(&options, "xla_gpu_enable_llvm_module_compilation_parallelism", true);
+            setFlag(&options, "xla_gpu_enable_libnvptxcompiler", true);
             //  setFlag(&options, "xla_gpu_enable_cudnn_fmha", true);
             //  setFlag(&options, "xla_gpu_fused_attention_use_cudnn_rng", true);
             //  setFlag(&options, "xla_gpu_enable_cudnn_layer_norm", true);
             //  setFlag(&options, "xla_gpu_enable_custom_fusions", true);
             //  setFlag(&options, "xla_gpu_enable_dynamic_slice_fusion", true);
+            //  setFlag(&options, "xla_gpu_enable_while_loop_double_buffering", true);
             //  setFlag(&options, "xla_gpu_use_runtime_fusion", true);
-            //  setFlag(&options, "xla_gpu_enable_latency_hiding_scheduler", true);
-            var r_ = try runfiles.Runfiles.create(.{ .allocator = arena }) orelse {
-                log.warn("Bazel runfile not found !", .{});
-                break :cuda_dir;
-            };
-            defer r_.deinit(arena);
-            const source_repo = @import("bazel_builtin").current_repository;
-            const r = r_.withSourceRepo(source_repo);
-            const cuda_data_dir = (try r.rlocationAlloc(arena, "libpjrt_cuda/sandbox")).?;
-            log.info("xla_gpu_cuda_data_dir: {s}", .{cuda_data_dir});
-            setFlag(&options, "xla_gpu_cuda_data_dir", cuda_data_dir);
         },
         .rocm => {
             // Disable Triton GEMM on ROCM. For some reason it's much, much slower when
@@ -940,8 +934,8 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, m
 fn setFlag(options: *xla_pb.CompileOptionsProto, comptime flag: [:0]const u8, value: anytype) void {
     const option: xla_pb.OptionOverrideProto = switch (@typeInfo(@TypeOf(value))) {
         .Bool => .{ .value = .{ .bool_field = value } },
-        .Int => .{ .value = .{ .int_field = value } },
-        .Float => .{ .value = .{ .double_field = value } },
+        .ComptimeInt, .Int => .{ .value = .{ .int_field = value } },
+        .ComptimeFloat, .Float => .{ .value = .{ .double_field = value } },
         else => .{ .value = .{ .string_field = .{ .Const = value } } },
     };
     options.env_option_overrides.appendAssumeCapacity(.{ .key = .{ .Const = flag }, .value = option });
@@ -1065,7 +1059,7 @@ test FnCache {
         w: Tensor,
         b: Tensor,
 
-        pub fn forward(self: Layer_, x: Tensor) Tensor {
+        pub fn _fwd(self: Layer_, x: Tensor) Tensor {
             const wx = self.w.dotGeneral(x, &.{.{ -1, 0 }}, &.{});
             return wx.add(self.b.broad(wx.shape())).relu();
         }
@@ -1075,18 +1069,18 @@ test FnCache {
         const NN_ = @This();
         layers: [3]Layer,
 
-        pub fn forward(self: NN_, x0: Tensor) Tensor {
+        pub fn _fwd(self: NN_, x0: Tensor) Tensor {
             var x = x0;
             for (self.layers) |layer| {
-                x = ops.call(layer, .forward, .{x});
+                x = ops.call(layer, ._fwd, .{x});
             }
             return x;
         }
 
-        pub fn forwardRefImpl(self: NN_, x0: Tensor) Tensor {
+        pub fn _forwardRefImpl(self: NN_, x0: Tensor) Tensor {
             var x = x0;
             for (self.layers) |layer| {
-                x = layer.forward(x);
+                x = layer._fwd(x);
             }
             return x;
         }
@@ -1110,8 +1104,8 @@ test FnCache {
             },
         },
     };
-    const res = try zml.testing.compileAndCall(platform, NN.forward, .{ nn, x });
-    const expected = try zml.testing.compileAndCall(platform, NN.forwardRefImpl, .{ nn, x });
+    const res = try zml.testing.compileAndCall(platform, NN._fwd, .{ nn, x });
+    const expected = try zml.testing.compileAndCall(platform, NN._forwardRefImpl, .{ nn, x });
     try zml.testing.expectClose(expected, res, 1e-4);
 }
 

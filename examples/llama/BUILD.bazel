@@ -1,7 +1,11 @@
+load("@aspect_bazel_lib//lib:expand_template.bzl", "expand_template")
 load("@aspect_bazel_lib//lib:tar.bzl", "mtree_spec", "tar")
 load("@aspect_bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
+load("@bazel_skylib//rules:native_binary.bzl", "native_test")
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
 load("@zml//bazel:zig.bzl", "zig_cc_binary")
+
 
 zig_cc_binary(
     name = "llama",
@@ -10,7 +14,7 @@ zig_cc_binary(
     ],
     main = "main.zig",
     deps = [
-        "//third_party/tigerbeetle:flags",
+        "@com_github_hejsil_clap//:clap",
         "@zml//async",
         "@zml//stdx",
         "@zml//zml",
@@ -20,16 +24,15 @@ zig_cc_binary(
 cc_binary(
     name = "Llama-3.1-8B-Instruct",
     args = [
-        "--model=$(location @Meta-Llama-3.1-8B-Instruct//:model.safetensors.index.json)",
-        "--tokenizer=$(location @Meta-Llama-3.1-8B-Instruct//:tokenizer)",
-        "--num-heads=32",
-        "--num-kv-heads=8",
-        "--rope-freq-base=500000",
+        "--config=$(location @Meta-Llama-3.1-8B-Instruct//:config.json)",
+        "--weights=$(location @Meta-Llama-3.1-8B-Instruct//:model.safetensors.index.json)",
+        "--tokenizer=$(location @Meta-Llama-3.1-8B-Instruct//:tokenizer.json)",
     ],
     data = [
-        "@Meta-Llama-3.1-8B-Instruct//:model",
+        "@Meta-Llama-3.1-8B-Instruct",
+        "@Meta-Llama-3.1-8B-Instruct//:config.json",
         "@Meta-Llama-3.1-8B-Instruct//:model.safetensors.index.json",
-        "@Meta-Llama-3.1-8B-Instruct//:tokenizer",
+        "@Meta-Llama-3.1-8B-Instruct//:tokenizer.json",
     ],
     deps = [":llama_lib"],
 )
@@ -37,16 +40,15 @@ cc_binary(
 cc_binary(
     name = "Llama-3.1-70B-Instruct",
     args = [
-        "--model=$(location @Meta-Llama-3.1-70B-Instruct//:model.safetensors.index.json)",
-        "--tokenizer=$(location @Meta-Llama-3.1-70B-Instruct//:tokenizer)",
-        "--num-heads=64",
-        "--num-kv-heads=8",
-        "--rope-freq-base=500000",
+        "--config=$(location @Meta-Llama-3.1-70B-Instruct//:config.json)",
+        "--weights=$(location @Meta-Llama-3.1-70B-Instruct//:model.safetensors.index.json)",
+        "--tokenizer=$(location @Meta-Llama-3.1-70B-Instruct//:tokenizer.json)",
     ],
     data = [
-        "@Meta-Llama-3.1-70B-Instruct//:model",
+        "@Meta-Llama-3.1-70B-Instruct",
+        "@Meta-Llama-3.1-70B-Instruct//:config.json",
         "@Meta-Llama-3.1-70B-Instruct//:model.safetensors.index.json",
-        "@Meta-Llama-3.1-70B-Instruct//:tokenizer",
+        "@Meta-Llama-3.1-70B-Instruct//:tokenizer.json",
     ],
     deps = [":llama_lib"],
 )
@@ -54,15 +56,15 @@ cc_binary(
 cc_binary(
     name = "Llama-3.2-1B-Instruct",
     args = [
-        "--model=$(location @Meta-Llama-3.2-1B-Instruct//:model.safetensors)",
-        "--tokenizer=$(location @Meta-Llama-3.2-1B-Instruct//:tokenizer)",
-        "--num-heads=32",
-        "--num-kv-heads=8",
-        "--rope-freq-base=500000",
+        "--config=$(location @Meta-Llama-3.2-1B-Instruct//:config.json)",
+        "--weights=$(location @Meta-Llama-3.2-1B-Instruct//:model.safetensors)",
+        "--tokenizer=$(location @Meta-Llama-3.2-1B-Instruct//:tokenizer.json)",
     ],
     data = [
+        "@Meta-Llama-3.2-1B-Instruct",
+        "@Meta-Llama-3.2-1B-Instruct//:config.json",
         "@Meta-Llama-3.2-1B-Instruct//:model.safetensors",
-        "@Meta-Llama-3.2-1B-Instruct//:tokenizer",
+        "@Meta-Llama-3.2-1B-Instruct//:tokenizer.json",
     ],
     deps = [":llama_lib"],
 )
@@ -70,61 +72,15 @@ cc_binary(
 cc_binary(
     name = "Llama-3.2-3B-Instruct",
     args = [
-        "--model=$(location @Meta-Llama-3.2-3B-Instruct//:model.safetensors.index.json)",
-        "--tokenizer=$(location @Meta-Llama-3.2-3B-Instruct//:tokenizer)",
-        "--num-heads=24",
-        "--num-kv-heads=8",
-        "--rope-freq-base=500000",
+        "--config=$(location @Meta-Llama-3.2-3B-Instruct//:config.json)",
+        "--weights=$(location @Meta-Llama-3.2-3B-Instruct//:model.safetensors.index.json)",
+        "--tokenizer=$(location @Meta-Llama-3.2-3B-Instruct//:tokenizer.json)",
     ],
     data = [
-        "@Meta-Llama-3.2-3B-Instruct//:model",
+        "@Meta-Llama-3.2-3B-Instruct",
+        "@Meta-Llama-3.2-3B-Instruct//:config.json",
         "@Meta-Llama-3.2-3B-Instruct//:model.safetensors.index.json",
-        "@Meta-Llama-3.2-3B-Instruct//:tokenizer",
-    ],
-    deps = [":llama_lib"],
-)
-
-cc_binary(
-    name = "OpenLLaMA-3B",
-    args = [
-        "--model=$(location @OpenLM-Research-OpenLLaMA-3B//:model)",
-        "--tokenizer=$(location @OpenLM-Research-OpenLLaMA-3B//:tokenizer)",
-        "--num-heads=32",
-        "--num-kv-heads=32",
-        "--rope-freq-base=10000",
-    ],
-    data = [
-        "@OpenLM-Research-OpenLLaMA-3B//:model",
-        "@OpenLM-Research-OpenLLaMA-3B//:tokenizer",
-    ],
-    deps = [":llama_lib"],
-)
-
-cc_binary(
-    name = "TinyLlama-1.1B-Chat",
-    args = [
-        "--model=$(location @TinyLlama-1.1B-Chat-v1.0//:model.safetensors)",
-        "--tokenizer=$(location @TinyLlama-1.1B-Chat-v1.0//:tokenizer)",
-        "--num-heads=32",
-        "--num-kv-heads=4",
-        "--rope-freq-base=10000",
-    ],
-    data = [
-        "@TinyLlama-1.1B-Chat-v1.0//:model.safetensors",
-        "@TinyLlama-1.1B-Chat-v1.0//:tokenizer",
-    ],
-    deps = [":llama_lib"],
-)
-
-cc_binary(
-    name = "TinyLlama-Stories-110M",
-    args = [
-        "--model=$(location @Karpathy-TinyLlama-Stories//:stories110M)",
-        "--tokenizer=$(location @Karpathy-TinyLlama-Tokenizer//file)",
-    ],
-    data = [
-        "@Karpathy-TinyLlama-Stories//:stories110M",
-        "@Karpathy-TinyLlama-Tokenizer//file",
+        "@Meta-Llama-3.2-3B-Instruct//:tokenizer.json",
     ],
     deps = [":llama_lib"],
 )
@@ -132,24 +88,34 @@ cc_binary(
 cc_binary(
     name = "TinyLlama-Stories-15M",
     args = [
-        "--model=$(location @Karpathy-TinyLlama-Stories//:stories15M)",
+        "--config=$(location :tinyllama_stories15M_json)",
+        "--weights=$(location @Karpathy-TinyLlama-Stories15M//file)",
         "--tokenizer=$(location @Karpathy-TinyLlama-Tokenizer//file)",
+        "--prompt='Once upon a time, there was a little girl named Lily.'",
+        "--no-llama3=1", # don't do template prompt encoding, I'm a simple model
+        "--sharding=false", # don't shard me, I'm so small
     ],
     data = [
-        "@Karpathy-TinyLlama-Stories//:stories15M",
+        ":tinyllama_stories15M_json",
+        "@Karpathy-TinyLlama-Stories15M//file",
         "@Karpathy-TinyLlama-Tokenizer//file",
     ],
     deps = [":llama_lib"],
 )
 
+write_file(
+    name = "tinyllama_stories15M_json",
+    out = "config.json",
+    content = ['{"bos_token_id":1,"eos_token_id":2,"hidden_act":"silu","hidden_size":288,"intermediate_size":768,"max_position_embeddings":256,"model_type":"llama","num_attention_heads":6,"num_hidden_layers":6,"num_key_value_heads":6,"rms_norm_eps":1e-05,"hf_rope_impl":false,"rope_scaling":null,"rope_theta":10000.0}'],
+)
+
+
 zig_cc_binary(
     name = "test-implementation",
     srcs = ["llama.zig"],
     args = [
-        "--model=$(location @Meta-Llama-3.1-8B-Instruct//:model.safetensors.index.json)",
-        "--num-heads=32",
-        "--num-kv-heads=8",
-        "--rope-freq-base=500000",
+        "--weights=$(location @Meta-Llama-3.1-8B-Instruct//:model.safetensors.index.json)",
+        "--config=$(location @Meta-Llama-3.1-8B-Instruct//:config.json)",
     ],
     data = [
         "@Meta-Llama-3.1-8B-Instruct//:model",
@@ -157,21 +123,41 @@ zig_cc_binary(
     ],
     main = "test.zig",
     deps = [
-        "//third_party/tigerbeetle:flags",
         "@zml//async",
-        "@zml//metax",
+        "@zml//stdx",
         "@zml//zml",
     ],
 )
 
+native_test(
+    name = "test_tokenizer",
+    src = "@zml//zml/tokenizer:main",
+    # Note: all Llama-3.x tokenizers are the same,
+    # but using the 3.2-1B version because downloading the tokenizer triggers downloading the model.
+    args = [
+    "--tokenizer=$(location @Meta-Llama-3.2-1B-Instruct//:tokenizer.json)",
+    """--prompt='Examples of titles:
+📉 Stock Market Trends
+🍪 Perfect Chocolate Chip Recipe
+Evolution of Music Streaming
+Remote Work Productivity Tips
+Artificial Intelligence in Healthcare
+🎮 Video Game Development Insights
+'""",
+    # this correspond to encoding with HF tokenizers, with bos=False
+    "--expected=41481,315,15671,512,9468,241,231,12937,8152,50730,198,9468,235,103,24118,39520,32013,26371,198,35212,3294,315,10948,45910,198,25732,5664,5761,1968,26788,198,9470,16895,22107,304,39435,198,9468,236,106,8519,4140,11050,73137,198",
+    ],
+    data = ["@Meta-Llama-3.2-1B-Instruct//:tokenizer.json"],
+)
+
 mtree_spec(
     name = "mtree",
-    srcs = [":llama"],
+    srcs = [":Llama-3.2-1B-Instruct"],
 )
 
 tar(
     name = "archive",
-    srcs = [":llama"],
+    srcs = [":Llama-3.2-1B-Instruct"],
     args = [
         "--options",
         "zstd:compression-level=9",
@@ -180,10 +166,33 @@ tar(
     mtree = ":mtree",
 )
 
+expand_template(
+    name = "entrypoint",
+    data = [
+        ":Llama-3.2-1B-Instruct",
+        "@Meta-Llama-3.2-1B-Instruct",
+        "@Meta-Llama-3.2-1B-Instruct//:config.json",
+        "@Meta-Llama-3.2-1B-Instruct//:model.safetensors",
+        "@Meta-Llama-3.2-1B-Instruct//:tokenizer.json",
+    ],
+    substitutions = {
+        ":config": "$(rlocationpath @Meta-Llama-3.2-1B-Instruct//:config.json)",
+        ":weights": "$(rlocationpath @Meta-Llama-3.2-1B-Instruct//:model.safetensors)",
+        ":tokenizer": "$(rlocationpath @Meta-Llama-3.2-1B-Instruct//:tokenizer.json)",
+    },
+    template = [
+        "./{}/Llama-3.2-1B-Instruct".format(package_name()),
+        "--config=./{}/Llama-3.2-1B-Instruct.runfiles/:config".format(package_name()),
+        "--weights=./{}/Llama-3.2-1B-Instruct.runfiles/:weights".format(package_name()),
+        "--tokenizer=./{}/Llama-3.2-1B-Instruct.runfiles/:tokenizer".format(package_name()),
+    ],
+)
+
 oci_image(
     name = "image_",
     base = "@distroless_cc_debian12_debug",
-    entrypoint = ["./{}/llama".format(package_name())],
+    # entrypoint = ["./{}/Llama-3.2-1B-Instruct".format(package_name())],
+    entrypoint = ":entrypoint",
     tars = [
         "@zml//runtimes:layers",
         ":archive",
@@ -200,7 +209,7 @@ oci_load(
     name = "load",
     image = ":image",
     repo_tags = [
-        "distroless/llama:latest",
+        "distroless/llama-3.2-1b-instruct:latest",
     ],
 )
 
@@ -208,5 +217,5 @@ oci_push(
     name = "push",
     image = ":image",
     remote_tags = ["latest"],
-    repository = "index.docker.io/steeve/llama",
+    repository = "index.docker.io/steeve/llama-3.2-1b-instruct",
 )

@@ -1,14 +1,13 @@
-const asynk = @import("async");
 const std = @import("std");
-const zml = @import("zml");
 
-const show_mlir = true;
+const asynk = @import("async");
+const zml = @import("zml");
 
 const log = std.log.scoped(.mnist);
 
 pub const std_options: std.Options = .{
-    .logFn = asynk.logFn,
     .log_level = .info,
+    .logFn = asynk.logFn(std.log.defaultLog),
 };
 
 /// Model definition

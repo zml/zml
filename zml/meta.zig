@@ -175,7 +175,7 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
         } else {
             to.* = null;
         },
-        .Int, .Float, .Enum => to.* = from,
+        .Int, .Float, .Enum, .Union => to.* = from,
         else => stdx.debug.compileError("zml.meta.mapAlloc doesn't support: {}", .{FromStruct}),
     }
 }
@@ -390,6 +390,26 @@ test visit {
 
         try std.testing.expectEqual(6, context.result);
     }
+}
+
+pub fn count(T: type, value: anytype) u32 {
+    var counter: u32 = 0;
+    visit(struct {
+        pub fn cb(res: *u32, _: *const T) void {
+            res.* += 1;
+        }
+    }.cb, &counter, value);
+    return counter;
+}
+
+pub fn first(T: type, value: anytype) T {
+    var res: ?T = null;
+    visit(struct {
+        pub fn cb(res_ptr: *?T, x: *const T) void {
+            if (res_ptr.* == null) res_ptr.* = x.*;
+        }
+    }.cb, &res, &value);
+    return res.?;
 }
 
 /// Given a `fn([]const T, Args) T` and a slice of values,

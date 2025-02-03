@@ -2,9 +2,9 @@ load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 load("//bazel:dpkg.bzl", "dpkg")
 load("//bazel:http_deb_archive.bzl", "http_deb_archive")
 
-ROCM_VERSION = "6.2.2"
+ROCM_VERSION = "6.3.1"
 BASE_URL = "https://repo.radeon.com/rocm/apt/{}".format(ROCM_VERSION)
-STRIP_PREFIX = "opt/rocm-6.2.2"
+STRIP_PREFIX = "opt/rocm-6.3.1"
 
 def pkg_kwargs(pkg):
     return dict(
@@ -106,10 +106,7 @@ _PACKAGES = {
         _CC_IMPORT_TPL.format(name = "MIOpen", shared_library = "libMIOpen.so.1"),
         _RUNFILES_TPL.format(name = "runfiles", glob = repr(["share/miopen/**"])),
     ]),
-    "rccl": "".join([
-        _CC_IMPORT_TPL.format(name = "rccl", shared_library = "librccl.so.1"),
-        _RUNFILES_TPL.format(name = "runfiles", glob = repr(["share/rccl/msccl-algorithms/**"])),
-    ]),
+    "rccl": _CC_IMPORT_TPL.format(name = "rccl", shared_library = "librccl.so.1"),
     "rocm-device-libs": _RUNFILES_TPL.format(name = "runfiles", glob = repr(["amdgcn/**"])),
     "hip-dev": _RUNFILES_TPL.format(name = "runfiles", glob = repr(["share/**"])),
     "rocblas": """\
@@ -119,17 +116,21 @@ load("@zml//runtimes/rocm:gfx.bzl", "bytecode_select")
 cc_import(
     name = "rocblas",
     shared_library = "lib/librocblas.so.4",
-    add_needed = ["libzmlxrocm.so.0"],
-    rename_dynamic_symbols = {
-        "dlopen": "zmlxrocm_dlopen",
-    },
     visibility = ["@libpjrt_rocm//:__subpackages__"],
 )
 
 bytecode_select(
-    name = "runfiles",
+    name = "bytecodes",
     bytecodes = glob(["lib/rocblas/library/*"]),
     enabled_gfx = "@libpjrt_rocm//:gfx",
+)
+
+filegroup(
+    name = "runfiles",
+    srcs = [
+        ":bytecodes",
+        "lib/rocblas/library/TensileManifest.txt",
+    ],
     visibility = ["@libpjrt_rocm//:__subpackages__"],
 )
 """,
@@ -148,18 +149,12 @@ cc_import(
 """,
     "hipblaslt": """\
 load("@zml//bazel:cc_import.bzl", "cc_import")
+load("@zml//runtimes/rocm:gfx.bzl", "bytecode_select")
 cc_import(
     name = "hipblaslt",
     shared_library = "lib/libhipblaslt.so.0",
-    add_needed = ["libzmlxrocm.so.0"],
-    rename_dynamic_symbols = {
-        "dlopen": "zmlxrocm_dlopen",
-    },
     visibility = ["@libpjrt_rocm//:__subpackages__"],
 )
-""",
-    "hipblaslt-dev": """\
-load("@zml//runtimes/rocm:gfx.bzl", "bytecode_select")
 
 bytecode_select(
     name = "bytecodes",
@@ -173,8 +168,9 @@ bytecode_select(
 filegroup(
     name = "runfiles",
     srcs = [
-        "lib/hipblaslt/library/hipblasltExtOpLibrary.dat",
         ":bytecodes",
+        "lib/hipblaslt/library/hipblasltExtOpLibrary.dat",
+        "lib/hipblaslt/library/TensileManifest.txt",
     ],
     visibility = ["@libpjrt_rocm//:__subpackages__"],
 )
@@ -216,8 +212,8 @@ def _rocm_impl(mctx):
     http_archive(
         name = "libpjrt_rocm",
         build_file = "libpjrt_rocm.BUILD.bazel",
-        url = "https://github.com/zml/pjrt-artifacts/releases/download/v4.0.0/pjrt-rocm_linux-amd64.tar.gz",
-        sha256 = "75c2baf2efba0b2c6fe2513d06e542ed3f3a966e43498cc1d932465f646ca34d",
+        url = "https://github.com/zml/pjrt-artifacts/releases/download/v5.0.0/pjrt-rocm_linux-amd64.tar.gz",
+        sha256 = "2c7a687827f63987caa117cd5b56a6e20291681ae1c51edd54241a1181e91d2d",
     )
 
     return mctx.extension_metadata(

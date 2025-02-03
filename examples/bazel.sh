@@ -1,5 +1,5 @@
 #!/bin/bash
-BAZELISK_VERSION=v1.20.0
+BAZELISK_VERSION=v1.25.0
 
 case $OSTYPE in
     "darwin"*)

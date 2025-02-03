@@ -112,7 +112,7 @@ fn newBuff(store: *zml.aio.BufferStore, name: []const u8, sh: anytype, offset: u
     const n = shape.byteSize();
     const buff = zml.HostBuffer.fromBytes(shape, store.files[0].data[offset..][0..n]);
     store.buffers.putAssumeCapacityNoClobber(name, buff);
-    zml.log.info("Found {s}: {}", .{ name, shape });
+    zml.log.debug("Found {s}: {}", .{ name, shape });
     return offset + n;
 }
 
@@ -125,38 +125,7 @@ fn splitBuff(store: *zml.aio.BufferStore, comptime fmt: []const u8, sh: anytype,
         const buff = zml.HostBuffer.fromBytes(shape, store.files[0].data[off..][0..n]);
         store.buffers.putAssumeCapacityNoClobber(name, buff);
         off += n;
-        if (i == 0) zml.log.info("Found {s}: {}", .{ name, shape });
+        if (i == 0) zml.log.debug("Found {s}: {}", .{ name, shape });
     }
     return off;
-}
-
-pub fn loadTokenizer(allocator: std.mem.Allocator, tokenizer_path: []const u8, vocab_size: u32) !zml.tokenizer.Tokenizer {
-    const tokenizer_file = try std.fs.cwd().openFile(tokenizer_path, .{});
-    defer tokenizer_file.close();
-    var tok_reader = std.io.bufferedReader(tokenizer_file.reader());
-    const r = tok_reader.reader();
-
-    const max_token_len = try r.readInt(u32, .little);
-    const special_tokens: zml.tokenizer.Tokenizer.SpecialTokens = .{
-        .unk = 0,
-        .bos = 1,
-        .eos = 2,
-    };
-    var tokenizer = try zml.tokenizer.Tokenizer.init(allocator, vocab_size, max_token_len, null, special_tokens, true);
-    var i: u32 = 0;
-    while (readToken(&tokenizer, &r)) : (i += 1) {
-        // Pass
-    } else |_| {
-        if (i < vocab_size) {
-            zml.log.info("Read {d} words out of {?d}", .{ i, vocab_size });
-        }
-        tokenizer.vocab_size = i;
-    }
-    return tokenizer;
-}
-
-fn readToken(tokenizer: *zml.tokenizer.Tokenizer, tok_reader: anytype) !void {
-    const score: f32 = @bitCast(try tok_reader.readInt(u32, .little));
-    const len: usize = @intCast(try tok_reader.readInt(u32, .little));
-    try tokenizer.readTokenInto(score, len, tok_reader);
 }

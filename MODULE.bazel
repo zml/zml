@@ -5,16 +5,33 @@ module(
 new_git_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:git.bzl", "new_git_repository")
 
 bazel_dep(name = "bazel_skylib", version = "1.7.1")
-bazel_dep(name = "hermetic_cc_toolchain", version = "3.1.0")
+bazel_dep(name = "hermetic_cc_toolchain", version = "3.1.1")
 bazel_dep(name = "patchelf", version = "0.18.0")
+bazel_dep(name = "pcre2", version = "10.43")
+bazel_dep(name = "abseil-cpp", version = "20240722.0.bcr.2")
 bazel_dep(name = "platforms", version = "0.0.10")
-bazel_dep(name = "rules_cc", version = "0.0.9")
+bazel_dep(name = "protobuf", version = "29.2")
+bazel_dep(name = "rules_cc", version = "0.0.17")
 bazel_dep(name = "rules_pkg", version = "1.0.1")
-bazel_dep(name = "rules_proto", version = "6.0.2")
-bazel_dep(name = "with_cfg.bzl", version = "0.5.0")
-bazel_dep(name = "buildifier_prebuilt", version = "6.4.0", dev_dependency = True)
-bazel_dep(name = "aspect_bazel_lib", version = "2.9.3")
-bazel_dep(name = "rules_distroless", version = "0.3.8")
+bazel_dep(name = "rules_proto", version = "7.1.0")
+bazel_dep(name = "with_cfg.bzl", version = "0.8.0")
+bazel_dep(name = "buildifier_prebuilt", version = "7.3.1", dev_dependency = True)
+bazel_dep(name = "aspect_bazel_lib", version = "2.11.0")
+bazel_dep(name = "rules_distroless", version = "0.4.2")
+bazel_dep(name = "toolchains_protoc", version = "0.3.7")
+
+# Optional: choose a version of protoc rather than the latest.
+protoc = use_extension("@toolchains_protoc//protoc:extensions.bzl", "protoc")
+protoc.toolchain(
+    # Creates a repository to satisfy well-known-types dependencies such as
+    # deps=["@com_google_protobuf//:any_proto"]
+    google_protobuf = "com_google_protobuf",
+    # Pin to any version of protoc
+    version = "v29.2",
+)
+use_repo(protoc, "com_google_protobuf", "toolchains_protoc_hub")
+
+register_toolchains("@toolchains_protoc_hub//:all")
 
 bazel_lib_toolchains = use_extension("@aspect_bazel_lib//lib:extensions.bzl", "toolchains", dev_dependency = True)
 use_repo(bazel_lib_toolchains, "jq_toolchains")
@@ -43,9 +60,9 @@ register_toolchains(
     "@zig_sdk//toolchain:linux_arm64_gnu.2.31",
 )
 
-bazel_dep(name = "rules_python", version = "0.37.0")
+bazel_dep(name = "rules_python", version = "0.40.0")
 bazel_dep(name = "rules_uv", version = "0.34.0")
-bazel_dep(name = "aspect_rules_py", version = "1.0.0-rc0")
+bazel_dep(name = "aspect_rules_py", version = "1.0.0")
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
 python.toolchain(python_version = "3.11")
 use_repo(python, "python_versions")
@@ -73,7 +90,7 @@ cuda = use_extension("//runtimes/cuda:cuda.bzl", "cuda_packages")
 use_repo(cuda, "libpjrt_cuda")
 
 rocm = use_extension("//runtimes/rocm:rocm.bzl", "rocm_packages")
-use_repo(rocm, "libpjrt_rocm")
+use_repo(rocm, "libpjrt_rocm", "hipblaslt", "rocblas")
 
 tpu = use_extension("//runtimes/tpu:tpu.bzl", "tpu_packages")
 use_repo(tpu, "libpjrt_tpu")
@@ -86,8 +103,8 @@ use_repo(zls, "zls_aarch64-macos", "zls_x86_64-macos", "zls_x86_64-linux")
 
 register_toolchains("//third_party/zls:all")
 
-bazel_dep(name = "libxev", version = "20241119.0-6afcde9")
-bazel_dep(name = "llvm-raw", version = "20250102.0-f739aa4")
+bazel_dep(name = "libxev", version = "20241208.2-db6a52b")
+bazel_dep(name = "llvm-raw", version = "20250117.0-bf17016")
 
 llvm = use_extension("@llvm-raw//utils/bazel:extension.bzl", "llvm")
 llvm.configure(
@@ -99,13 +116,12 @@ llvm.configure(
 )
 use_repo(llvm, "llvm-project")
 
-bazel_dep(name = "stablehlo", version = "20241220.0-38bb2f9")
-bazel_dep(name = "xla", version = "20250103.0-5f1fe6a")
+bazel_dep(name = "stablehlo", version = "20250117.0-c125b32")
+bazel_dep(name = "xla", version = "20250123.0-cc075be")
 
 tsl = use_extension("@xla//:tsl.bzl", "tsl")
 use_repo(tsl, "tsl")
 
-bazel_dep(name = "zigcoro", version = "20240829.0-fc1db29")
 bazel_dep(name = "sentencepiece", version = "20240618.0-d7ace0a")
 bazel_dep(name = "zig-protobuf", version = "20240722.0-c644d11")
 bazel_dep(name = "zig-yaml", version = "20240903.0-83d5fdf")
@@ -117,3 +133,33 @@ apt.install(
     manifest = "//runtimes/neuron:packages.yaml",
 )
 use_repo(apt, "neuron_bookworm")
+
+non_module_deps = use_extension("//:third_party/non_module_deps.bzl", "non_module_deps")
+use_repo(non_module_deps, "com_google_sentencepiece", "org_swig_swig")
+
+bazel_dep(name = "rules_rust", version = "0.57.0")
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(
+    edition = "2021",
+    versions = ["1.84.0"],
+    extra_target_triples = [
+        "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-gnu",
+    ],
+)
+use_repo(rust, "rust_toolchains")
+register_toolchains("@rust_toolchains//:all")
+
+crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+crate.from_cargo(
+    name = "crates",
+    cargo_lockfile = "//zml/tokenizer/hftokenizers:Cargo.lock",
+    manifests = ["//zml/tokenizer/hftokenizers:Cargo.toml"],
+    supported_platform_triples = [
+        "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-gnu",
+    ],
+)
+use_repo(crate, "crates")

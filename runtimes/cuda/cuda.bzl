@@ -5,7 +5,7 @@ load("//bazel:http_deb_archive.bzl", "http_deb_archive")
 ARCH = "linux-x86_64"
 
 CUDA_VERSION = "12.6.3"
-CUDNN_VERSION = "9.5.1"
+CUDNN_VERSION = "9.6.0"
 
 def _filegroup(name, srcs):
     return """\
@@ -25,6 +25,16 @@ cc_import(
     visibility = ["@libpjrt_cuda//:__subpackages__"],
 )
 """.format(name = repr(name), shared_library = repr(shared_library), deps = repr(deps))
+
+def _cc_import_static(name, static_library, deps = []):
+    return """\
+cc_import(
+    name = {name},
+    static_library = {static_library},
+    deps = {deps},
+    visibility = ["@libpjrt_cuda//:__subpackages__"],
+)
+""".format(name = repr(name), static_library = repr(static_library), deps = repr(deps))
 
 CUDA_PACKAGES = {
     "cuda_cudart": _cc_import(
@@ -57,12 +67,20 @@ CUDA_PACKAGES = {
             srcs = ["bin/ptxas"],
         ),
         _filegroup(
+            name = "nvlink",
+            srcs = ["bin/nvlink"],
+        ),
+        _filegroup(
             name = "libdevice",
             srcs = ["nvvm/libdevice/libdevice.10.bc"],
         ),
         _cc_import(
             name = "nvvm",
             shared_library = "nvvm/lib64/libnvvm.so.4",
+        ),
+        _cc_import_static(
+            name = "nvptxcompiler",
+            static_library = "lib/libnvptxcompiler_static.a",
         ),
     ]),
     "cuda_nvrtc": "\n".join([

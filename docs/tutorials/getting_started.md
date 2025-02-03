@@ -27,7 +27,7 @@ through `bazelisk`, a version manager for `bazel`.
 **Linux:**
 
 ```
-    curl -L -o /usr/local/bin/bazel 'https://github.com/bazelbuild/bazelisk/releases/download/v1.20.0/bazelisk-linux-amd64'
+    curl -L -o /usr/local/bin/bazel 'https://github.com/bazelbuild/bazelisk/releases/download/v1.25.0/bazelisk-linux-amd64'
     chmod +x /usr/local/bin/bazel
 ```
 
@@ -59,46 +59,40 @@ Llama is a family of "Large Language Models", trained to generate text, based
 on the beginning of a sentence/book/article. This "beginning" is generally
 referred to as the "prompt".
 
-#### TinyLlama, Stories 15M
-
-To start, you can use a small model trained specifically on children's history
-books. This model has been trained by [Andrej Karpathy](https://x.com/karpathy);
-you can read more about it on his
-[Github](https://github.com/karpathy/llama2.c).
-
-```
-cd examples
-bazel run -c opt //llama:TinyLlama-Stories-15M
-bazel run -c opt //llama:TinyLlama-Stories-15M -- --prompt="Once upon a time, there was a cute little dragon"
-```
-
-#### OpenLLama 3B
-
-```
-cd examples
-bazel run -c opt //llama:OpenLLaMA-3B
-bazel run -c opt //llama:OpenLLaMA-3B -- --prompt="Once upon a time,"
-```
-
-#### Meta Llama 3 8B
+#### Meta Llama 3.1 8B
 
 This model has restrictions, see
-[here](https://huggingface.co/meta-llama/Meta-Llama-3-8B): it **requires
+[here](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct). It **requires
 approval from Meta on Huggingface**, which can take a few hours to get granted.
 
 While waiting for approval, you can already
 [generate your Huggingface access token](../howtos/huggingface_access_token.md).
 
 Once you've been granted access, you're ready to download a gated model like
-`Meta-Llama-3-8b`!
+`Meta-Llama-3.1-8B-Instruct`!
 
 ```
 # requires token in $HOME/.cache/huggingface/token, as created by the
 # `huggingface-cli login` command, or the `HUGGINGFACE_TOKEN` environment variable.
 cd examples
-bazel run -c opt //llama:Meta-Llama-3-8b
-bazel run -c opt //llama:Meta-Llama-3-8b -- --promt="Once upon a time,"
+bazel run -c opt //llama:Llama-3.1-8B-Instruct
+bazel run -c opt //llama:Llama-3.1-8B-Instruct -- --prompt="What is the capital of France?"
 ```
+
+You can also try `Llama-3.1-70B-Instruct` if you have enough memory.
+
+### Meta Llama 3.2 1B
+
+Like the 8B model above, this model also requires approval. See
+[here](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct) for access requirements.
+
+```
+cd examples
+bazel run -c opt //llama:Llama-3.2-1B-Instruct
+bazel run -c opt //llama:Llama-3.2-1B-Instruct -- --prompt="What is the capital of France?"
+```
+
+For a larger 3.2 model, you can also try `Llama-3.2-3B-Instruct`.
 
 
 ## Run Tests
@@ -126,9 +120,9 @@ run the following:
 
 ```
 cd examples
-bazel run -c opt //llama:OpenLLaMA-3B             \
-          --@zml//runtimes:cuda=true              \
-          -- --prompt="Once upon a time,"
+bazel run -c opt //llama:Llama-3.2-1B-Instruct            \
+          --@zml//runtimes:cuda=true                      \
+          -- --prompt="What is the capital of France?"
 ```
 
 

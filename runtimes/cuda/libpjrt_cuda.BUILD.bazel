@@ -17,6 +17,7 @@ copy_to_directory(
     srcs = [
         "@cuda_nvcc//:libdevice",
         "@cuda_nvcc//:ptxas",
+        "@cuda_nvcc//:nvlink",
     ],
     include_external_repositories = ["**"],
 )
@@ -35,6 +36,7 @@ cc_import(
         ":zmlxcuda",
         "@cuda_cudart//:cudart",
         "@cuda_cupti//:cupti",
+        "@cuda_nvcc//:nvptxcompiler",
         "@cuda_nvcc//:nvvm",
         "@cuda_nvrtc//:nvrtc",
         "@cudnn//:cudnn",

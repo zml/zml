@@ -10,7 +10,6 @@ const posix = @import("posix.zig");
 pub const gguf = @import("aio/gguf.zig");
 pub const nemo = @import("aio/nemo.zig");
 pub const safetensors = @import("aio/safetensors.zig");
-pub const sentencepiece = @import("aio/sentencepiece.zig");
 pub const tinyllama = @import("aio/tinyllama.zig");
 pub const torch = @import("aio/torch.zig");
 pub const yaml = @import("aio/yaml.zig");
@@ -23,8 +22,6 @@ test {
     std.testing.refAllDecls(gguf);
     std.testing.refAllDecls(nemo);
     std.testing.refAllDecls(safetensors);
-    std.testing.refAllDecls(sentencepiece);
-    std.testing.refAllDecls(tinyllama);
     std.testing.refAllDecls(torch);
     std.testing.refAllDecls(yaml);
 }
@@ -43,22 +40,6 @@ pub fn detectFormatAndOpen(allocator: std.mem.Allocator, model_path: []const u8)
         try tinyllama.open(allocator, model_path)
     else {
         std.debug.panic("File extension not recognized: {s}", .{model_path});
-    };
-}
-
-pub fn detectFormatAndLoadTokenizer(allocator: std.mem.Allocator, tokenizer_path: []const u8) !zml.tokenizer.Tokenizer {
-    return if (std.mem.endsWith(u8, tokenizer_path, ".json"))
-        try zml.tokenizer.fromHfJson(allocator, tokenizer_path)
-    else if (std.mem.endsWith(u8, tokenizer_path, ".gguf")) {
-        const store = try gguf.open(allocator, tokenizer_path);
-        return gguf.getGgufTokenizer(store, allocator);
-    } else if (std.mem.endsWith(u8, tokenizer_path, ".pb") or std.mem.endsWith(u8, tokenizer_path, ".model"))
-        try sentencepiece.loadTokenizerFromPath(allocator, tokenizer_path)
-    else if (std.mem.endsWith(u8, tokenizer_path, ".tinyllama"))
-        try zml.aio.tinyllama.loadTokenizer(allocator, tokenizer_path, 32000)
-    else {
-        log.err("Failed to recognized tokenizer format of: {s}", .{tokenizer_path});
-        return error.FormatNotRecognized;
     };
 }
 
@@ -116,7 +97,9 @@ pub const BufferStore = struct {
     }
 
     pub fn deinit(self: BufferStore) void {
-        for (self.files) |*file| file.deinit();
+        for (self.files) |*file| {
+            file.deinit();
+        }
         self.arena.deinit();
     }
 
@@ -443,6 +426,7 @@ fn _populateStruct(
             return true;
         },
         .Void => true,
+        .Union => true,
         else => if (required) {
             log.err("{s}: {s} type not supported", .{ prefix, @typeName(T) });
             return error.UnsupportedMetadataType;
