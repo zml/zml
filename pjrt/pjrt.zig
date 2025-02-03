@@ -209,22 +209,22 @@ pub const ErrorCode = enum(c.PJRT_Error_Code) {
 
     pub fn toApiError(code: ErrorCode) ApiError {
         return switch (code) {
-            .cancelled => error.Cancelled,
-            .unknown => error.Unknown,
-            .invalid_argument => error.InvalidArgument,
-            .deadline_exceeded => error.DeadlineExceeded,
-            .not_found => error.NotFound,
-            .already_exists => error.AlreadyExists,
-            .permission_denied => error.PermissionDenied,
-            .resource_exhausted => error.ResourceExhausted,
-            .failed_precondition => error.FailedPrecondition,
-            .aborted => error.Aborted,
-            .out_of_range => error.OutOfRange,
-            .unimplemented => error.Unimplemented,
-            .internal => error.Internal,
-            .unavailable => error.Unavailable,
-            .data_loss => error.DataLoss,
-            .unauthenticated => error.Unauthenticated,
+            .cancelled => ApiError.Cancelled,
+            .unknown => ApiError.Unknown,
+            .invalid_argument => ApiError.InvalidArgument,
+            .deadline_exceeded => ApiError.DeadlineExceeded,
+            .not_found => ApiError.NotFound,
+            .already_exists => ApiError.AlreadyExists,
+            .permission_denied => ApiError.PermissionDenied,
+            .resource_exhausted => ApiError.ResourceExhausted,
+            .failed_precondition => ApiError.FailedPrecondition,
+            .aborted => ApiError.Aborted,
+            .out_of_range => ApiError.OutOfRange,
+            .unimplemented => ApiError.Unimplemented,
+            .internal => ApiError.Internal,
+            .unavailable => ApiError.Unavailable,
+            .data_loss => ApiError.DataLoss,
+            .unauthenticated => ApiError.Unauthenticated,
         };
     }
 };
