@@ -36,14 +36,13 @@ pub fn tokenizePromptLlama3(allocator: std.mem.Allocator, tokenizer: zml.tokeniz
 
     try tokens.append(start_header_id);
     try tokens.appendSlice(try encoder.encode("user"));
-    try tokens.appendSlice(&.{ end_header_id, newline_id, newline_id });
+    try tokens.appendSlice(&.{ end_header_id, newline_id });
 
     try tokens.appendSlice(try encoder.encode(prompt));
     try tokens.appendSlice(&.{ eot_id, newline_id });
-    try tokens.appendSlice(try encoder.encode("\n"));
     try tokens.append(start_header_id);
     try tokens.appendSlice(try encoder.encode("assistant"));
-    try tokens.append(end_header_id);
+    try tokens.appendSlice(&.{ end_header_id, newline_id });
 
     return tokens.toOwnedSlice();
 }
@@ -168,7 +167,7 @@ const params = clap.parseParamsComptime(
     \\--seed           <UINT>     random seed (optional)
     \\--seq-len        <UINT>     sequence length
     \\--create-options <STRING>   platform creation options JSON, defaults to {}
-    \\--no-llama3      <BOOL>     skip prompt template 
+    \\--no-llama3      <BOOL>     skip prompt template
     \\--sharding       <BOOL>     default: true: sharding on or off
 );
 
