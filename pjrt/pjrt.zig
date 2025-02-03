@@ -324,7 +324,7 @@ pub const Client = opaque {
         byte_strides: ?[]const i64,
         device: *const Device,
         host_buffer_semantics: HostBufferSemantics,
-        memory: *const Memory,
+        memory: ?*const Memory,
     };
 
     pub fn bufferFromHostBuffer(self: *const Client, api: *const Api, args: BufferFromHostBufferArgs) ApiError!struct { *Buffer, ?*Event } {
@@ -338,7 +338,7 @@ pub const Client = opaque {
             .num_byte_strides = if (args.byte_strides) |bs| bs.len else 0,
             .host_buffer_semantics = @intFromEnum(args.host_buffer_semantics),
             .device = @ptrCast(@constCast(args.device)),
-            // .memory = @ptrCast(@constCast(args.memory)),
+            .memory = if (args.memory) |m| @ptrCast(@constCast(m)) else null,
             .device_layout = null, // TODO
             .done_with_host_buffer = null,
             .buffer = null,
@@ -440,18 +440,19 @@ pub const Device = opaque {
             .device = self.inner(),
         }) catch unreachable;
         if (ret.memories) |memories| {
-            return @ptrCast(memories[0..ret.num_memories]);
+            return @ptrCast(@constCast(memories[0..ret.num_memories]));
         }
         return &.{};
     }
 
     pub fn getMemoryByKind(self: *const Device, api: *const Api, kind: Memory.Kind) ?*const Memory {
         const memories = self.addressableMemories(api);
-        return for (memories) |m| blk: {
+        for (memories) |m| {
             if (m.kind(api) == kind) {
-                break :blk m;
+                return m;
             }
-        };
+        }
+        return null;
     }
 };
 
@@ -871,6 +872,8 @@ pub const Event = opaque {
 };
 
 pub const Memory = opaque {
+    // enum class MemoryType { kDevice = 0, kUnified, kCollective, kHost = 5 };
+    // from xla/stream_executor/stream_executor.h enum class MemoryType
     pub const Kind = enum {
         device,
         pinned_host,
@@ -894,7 +897,7 @@ pub const Memory = opaque {
         return std.meta.stringToEnum(Kind, kind_[0..ret.kind_size]) orelse unreachable;
     }
 
-    pub fn kindId(self: *const Memory, api: *const Api) usize {
+    pub fn kindId(self: *const Memory, api: *const Api) i32 {
         const ret = api.call(.PJRT_Memory_Kind_Id, .{
             .memory = self.inner(),
         }) catch unreachable;

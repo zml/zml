@@ -130,24 +130,10 @@ pub const Client = opaque {
     }
 };
 
-pub const DeviceX = opaque {
-    pub fn getMemoryByKind(self: *const Device, api: *const Api, kind: pjrt.MemoryKind) ?*Memory {
-        var mem: ?*Memory = null;
-        const memories = self.inner().addressableMemories(api);
-        for (memories) |m| {
-            if (mem.kind(api) == kind) {
-                mem = m;
-            }
-        }
-        return mem;
-    }
-};
-
 pub const Buffer = opaque {
     pub const inner = InnerMixin(pjrt.Buffer).inner;
 
     pub fn deinit(self: *Buffer, api: *const Api) void {
-        // self.inner().decreaseExternalReferenceCount(api);
         self.inner().deinit(api);
     }
 
@@ -240,28 +226,19 @@ pub const Event = opaque {
         defer self.deinit(api);
 
         if (self.isReady(api)) {
-            std.log.warn("Call isReady already: {any}", .{self});
             return;
         }
-
-        var timer = try stdx.time.Timer.start();
 
         var ctx = struct {
             err: ?*pjrt.Error = null,
             event: asynk.threading.ResetEventSingle = .{},
-            timer: *stdx.time.Timer,
-        }{
-            .timer = &timer,
-        };
+        }{};
 
-        std.log.warn("Call onReady: {any}", .{self});
         try self.inner().onReady(api, &(struct {
             fn call(err: ?*pjrt.Error, user_arg: ?*anyopaque) callconv(.C) void {
                 const ctx_: *@TypeOf(ctx) = @ptrCast(@alignCast(user_arg.?));
-                var timer_ = ctx_.timer;
                 ctx_.err = err;
                 ctx_.event.set();
-                std.log.warn("Callback called: {}", .{timer_.read()});
             }
         }.call), &ctx);
         ctx.event.wait();

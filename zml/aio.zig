@@ -547,19 +547,12 @@ pub fn loadModelBuffersWithPrefix(
     // We copy the shape, and let visitStructAndLoadBuffer write the other fields.
     // to write them just afterward.
     var res: zml.Bufferized(Model) = undefined;
-    const memories = platform.pjrt_client.addressableMemories(platform.pjrt_api); // todo : adresse via device
-    var selected_mem: *const zml.pjrt.Memory = undefined;
-    for (memories) |mem| {
-        if (mem.kind(platform.pjrt_api) == zml.pjrt.Memory.Kind.device) {
-            selected_mem = mem;
-        }
-    }
 
     try zml.meta.mapAlloc(struct {
-        pub fn initBuffer(mem: *const zml.pjrt.Memory, tensor: zml.Tensor) zml.Buffer {
-            return .{ ._shape = tensor.shape(), ._api = undefined, ._shards = undefined, ._memory = mem };
+        pub fn initBuffer(_: void, tensor: zml.Tensor) zml.Buffer {
+            return .{ ._shape = tensor.shape(), ._api = undefined, ._shards = undefined };
         }
-    }.initBuffer, allocator, selected_mem, model, &res);
+    }.initBuffer, allocator, {}, model, &res);
 
     var prefix_builder: PrefixBuilder = .{};
     try prefix_builder.push(allocator, prefix);
@@ -597,7 +590,7 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
             log.debug("Loading buffer {s} ({})", .{ prefix, obj._shape });
             stdx.debug.assert(host_buffer.shape().eql(obj._shape), "loadModelBuffers expects to find the same shapes in the model and in the buffer store, got {} and {} for tensor {s}", .{ obj._shape, host_buffer, prefix });
             buf_with_metadata._shape = obj._shape;
-            obj.* = try zml.Buffer.from2(platform, host_buffer.data, obj._shape);
+            obj.* = try zml.Buffer.from(platform, host_buffer);
             _ = try obj.awaitt();
         } else {
             return error.BufferNotFound;

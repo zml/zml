@@ -47,11 +47,11 @@ pub const Buffer = struct {
 
     _shape: Shape,
     _api: *const pjrt.Api,
-    _memory: *const pjrt.Memory,
     _shards: Shards,
 
     pub const MAX_NUM_SHARDS: u8 = Platform.MAX_NUM_DEVICES;
     pub const Shards = std.BoundedArray(Shard, MAX_NUM_SHARDS);
+    pub const Memory = pjrt.Memory;
 
     /// Copies the content of the given buffer from host memory to the accelerator memory.
     pub fn from(platform: Platform, host_buffer: HostBuffer) !Buffer {
@@ -70,19 +70,11 @@ pub const Buffer = struct {
         const byte_strides = host_buffer.strides() orelse host_buffer.shape().computeStrides().constSlice();
 
         const devices = platform.getDevices();
-        const memories = platform.pjrt_client.addressableMemories(platform.pjrt_api); // todo : adresse via device
-        var selected_mem: *const pjrt.Memory = undefined;
-        for (memories) |mem| {
-            if (mem.kind(platform.pjrt_api) == pjrt.Memory.Kind.device) {
-                selected_mem = mem;
-            }
-        }
 
         var res: Buffer = .{
             ._api = platform.pjrt_api,
             ._shape = host_buffer.shape(),
             ._shards = .{},
-            ._memory = selected_mem,
         };
 
         for (0..n_partitions) |i| {
@@ -97,8 +89,8 @@ pub const Buffer = struct {
                 .dims = buf.shape().dims(),
                 .byte_strides = byte_strides,
                 .device = devices[i],
+                .memory = null,
                 .host_buffer_semantics = .ImmutableUntilTransferCompletes,
-                .memory = res._memory,
             });
             res._shards.appendAssumeCapacity(.{
                 .buffer = pjrt_buffer,
@@ -109,7 +101,7 @@ pub const Buffer = struct {
         return res;
     }
 
-    pub fn from2(platform: Platform, buffer_: []const u8, shape_: Shape) !Buffer {
+    pub fn fromToMemory(platform: Platform, buffer_: []const u8, shape_: Shape, memory_kind: MemoryKind) !Buffer {
         // We shard only on the first axis so that the chunks are still contiguous.
         // TODO: support more advanced sharding specs
         stdx.debug.assert(platform.sharding().num_replicas == 1, "ZML doesn't support num_replicas > 1 for now, got: {}", .{platform.sharding()});
@@ -123,19 +115,11 @@ pub const Buffer = struct {
         const byte_strides = shape_.computeStrides().constSlice();
 
         const devices = platform.getDevices();
-        const memories = platform.pjrt_client.addressableMemories(platform.pjrt_api); // todo : adresse via device
-        var selected_mem: *const pjrt.Memory = undefined;
-        for (memories) |mem| {
-            if (mem.kind(platform.pjrt_api) == pjrt.Memory.Kind.device) {
-                selected_mem = mem;
-            }
-        }
 
         var res: Buffer = .{
             ._api = platform.pjrt_api,
             ._shape = shape_,
             ._shards = .{},
-            ._memory = selected_mem,
         };
 
         for (0..n_partitions) |i| {
@@ -146,10 +130,8 @@ pub const Buffer = struct {
                 .byte_strides = byte_strides,
                 .device = devices[i],
                 .host_buffer_semantics = .ImmutableUntilTransferCompletes,
-                .memory = res._memory,
+                .memory = devices[i].getMemoryByKind(platform.pjrt_api, memory_kind),
             });
-
-            // try pjrt_buffer.increaseExternalReferenceCount(platform.pjrt_api);
 
             res._shards.appendAssumeCapacity(.{
                 .buffer = pjrt_buffer,
@@ -160,12 +142,24 @@ pub const Buffer = struct {
         return res;
     }
 
+    pub fn getMemory(self: Buffer) *const Memory {
+        return self._shards.get(0).buffer.getMemory(self._api);
+    }
+
     pub fn dataInMemory(self: Buffer) ![]const u8 {
         const shard_buffer = self._shards.get(0).buffer;
         const opaqueDataPointer = try shard_buffer.getOpaqueDeviceMemoryDataPointer(self._api);
         const sizeInbytes = try shard_buffer.getOnDeviceSizeInBytes(self._api);
         const data = @as([*]const u8, @ptrFromInt(@intFromPtr(opaqueDataPointer)));
-        return data[0..@intCast(sizeInbytes)];
+        const end: usize = @intCast(sizeInbytes);
+        return data[0..end];
+    }
+
+    pub fn getValueFromDataInMemory(self: Buffer, T: type) !T {
+        stdx.debug.assert(self._shape.byteSize() == @sizeOf(T), "Buffer {} has {d} bytes of data, can't load it to a {s} with {d} bytes", .{ self, self._shape.byteSize(), @typeName(T), @sizeOf(T) });
+        const data = try self.dataInMemory();
+        const value = std.mem.bytesAsValue(T, @constCast(data));
+        return value.*;
     }
 
     pub fn awaitt(self: *Buffer) !*Buffer {
@@ -380,7 +374,6 @@ pub const Buffer = struct {
             ._api = self._api,
             ._shape = self._shape,
             ._shards = shards,
-            ._memory = selected_mem,
         };
     }
 
