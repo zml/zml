@@ -561,8 +561,7 @@ pub fn loadModelBuffersWithPrefix(
     return res;
 }
 
-/// Takes a bufferized version of a `model`, ie a mirror struct of the `model`, and deinit all the
-/// Buffer found.
+/// deprecated, use zml.buffers.deinitAll()
 pub fn unloadBuffers(model: anytype) void {
     zml.meta.visit((struct {
         fn cb(_: void, buffer: *zml.Buffer) void {

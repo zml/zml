@@ -34,7 +34,7 @@ pub const Buffer = struct {
         ready_event: ?*pjrt.Event = null,
         ready: bool = false,
 
-        pub fn awaitt(self: *Shard, api: *const pjrt.Api) !void {
+        pub fn awaitt(self: *Shard, api: *const pjrt.Api) pjrt.ApiError!void {
             if (self.ready) {
                 return;
             }
@@ -98,7 +98,7 @@ pub const Buffer = struct {
         return res;
     }
 
-    pub fn awaitt(self: *Buffer) !*Buffer {
+    pub fn awaitt(self: *Buffer) pjrt.ApiError!*Buffer {
         for (self._shards.slice()) |*shard| {
             try shard.awaitt(self._api);
         }
@@ -403,4 +403,28 @@ test bufferTypeFromDtype {
         if (dt == .INVALID) continue;
         try std.testing.expectEqual(dt, bufferTypeFromDtype(dtypeFromBufferType(dt)));
     }
+}
+
+/// await all buffers in the given struct
+pub fn awaitAll(buffers: anytype) pjrt.ApiError!void {
+    var err: ?pjrt.ApiError = null;
+    meta.visit((struct {
+        fn cb(err_ptr: *?pjrt.ApiError, buffer: *Buffer) void {
+            _ = buffer.awaitt() catch |e| {
+                err_ptr.* = e;
+                return;
+            };
+        }
+    }).cb, &err, buffers);
+
+    return err orelse {};
+}
+
+/// deinit all buffers in the given struct
+pub fn deinitAll(buffers: anytype) void {
+    meta.visit((struct {
+        fn cb(_: void, buffer: *Buffer) void {
+            buffer.deinit();
+        }
+    }).cb, {}, buffers);
 }
