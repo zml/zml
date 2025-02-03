@@ -82,8 +82,11 @@ def _huggingface_repository_impl(rctx):
                     continue
                 if (not includes or _glob(rctx, entry["path"], includes)):
                     tpl = RAW_FILE_URL_REMPLATE
-                    if ("lfs" in entry):
+                    is_lfs = "lfs" in entry
+                    sha256 = ""
+                    if (is_lfs):
                         tpl = LFS_FILE_URL_TEMPLATE
+                        sha256 = entry["lfs"]["oid"]
                     url = tpl.format(
                         model = rctx.attr.model,
                         commit = rctx.attr.commit,
@@ -94,6 +97,7 @@ def _huggingface_repository_impl(rctx):
                         output = entry["path"],
                         canonical_id = entry["oid"],
                         headers = headers,
+                        sha256 = sha256,
                         block = False,
                     ))
 

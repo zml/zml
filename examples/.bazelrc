@@ -87,3 +87,6 @@ common:silent   --logging=0
 
 common          --registry=https://bazel-registry.zml.ai
 common          --registry=https://bcr.bazel.build
+
+# Enable resolving proto compiler from toolchains
+common          --incompatible_enable_proto_toolchain_resolution

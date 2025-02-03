@@ -27,23 +27,22 @@ pub fn tokenizePromptLlama3(allocator: std.mem.Allocator, tokenizer: zml.tokeniz
     var encoder = try tokenizer.encoder();
     defer encoder.deinit();
 
-    const start_header_id = tokenizer.token_to_id("<|start_header_id|>") orelse return error.NoSuchToken;
-    const end_header_id = tokenizer.token_to_id("<|end_header_id|>") orelse return error.NoSuchToken;
-    const eot_id = tokenizer.token_to_id("<|eot_id|>") orelse return error.NoSuchToken;
+    const start_header_id = tokenizer.tokenToId("<|start_header_id|>") orelse return error.NoSuchToken;
+    const end_header_id = tokenizer.tokenToId("<|end_header_id|>") orelse return error.NoSuchToken;
+    const eot_id = tokenizer.tokenToId("<|eot_id|>") orelse return error.NoSuchToken;
     const newline_id = (try encoder.encode("\n"))[0];
 
     try tokens.append(config.bos_token_id);
 
     try tokens.append(start_header_id);
     try tokens.appendSlice(try encoder.encode("user"));
-    try tokens.appendSlice(&.{ end_header_id, newline_id, newline_id });
+    try tokens.appendSlice(&.{ end_header_id, newline_id });
 
     try tokens.appendSlice(try encoder.encode(prompt));
     try tokens.appendSlice(&.{ eot_id, newline_id });
-    try tokens.appendSlice(try encoder.encode("\n"));
     try tokens.append(start_header_id);
     try tokens.appendSlice(try encoder.encode("assistant"));
-    try tokens.append(end_header_id);
+    try tokens.appendSlice(&.{ end_header_id, newline_id });
 
     return tokens.toOwnedSlice();
 }
@@ -168,7 +167,7 @@ const params = clap.parseParamsComptime(
     \\--seed           <UINT>     random seed (optional)
     \\--seq-len        <UINT>     sequence length
     \\--create-options <STRING>   platform creation options JSON, defaults to {}
-    \\--no-llama3      <BOOL>     skip prompt template 
+    \\--no-llama3      <BOOL>     skip prompt template
     \\--sharding       <BOOL>     default: true: sharding on or off
 );
 
@@ -312,7 +311,7 @@ pub fn asyncMain() !void {
             var timer = try stdx.time.Timer.start();
             defer log.info("Loaded tokenizer from {s} [{}]", .{ tok, timer.read() });
 
-            break :blk try zml.tokenizer.Tokenizer.from_file(model_arena.allocator(), tok);
+            break :blk try zml.tokenizer.Tokenizer.fromFile(model_arena.allocator(), tok);
         } else {
             log.err("Missing --tokenizer", .{});
             return;

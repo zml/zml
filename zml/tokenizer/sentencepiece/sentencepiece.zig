@@ -164,7 +164,7 @@ pub const Decoder = struct {
 };
 
 pub const SentencePieceProcessor = opaque {
-    pub fn from_file(model: []const u8) !*SentencePieceProcessor {
+    pub fn fromFile(model: []const u8) !*SentencePieceProcessor {
         const sp: *SentencePieceProcessor = @ptrCast(c.SentencePieceProcessor_new());
         errdefer sp.deinit();
         try assertOk(c.SentencePieceProcessor_Load(@ptrCast(sp), ffi.ZigSlice.from(model)));
@@ -183,7 +183,7 @@ pub const SentencePieceProcessor = opaque {
         return try Decoder.init(self);
     }
 
-    pub fn token_to_id(self: *SentencePieceProcessor, token: []const u8) u32 {
+    pub fn tokenToId(self: *SentencePieceProcessor, token: []const u8) u32 {
         return @intCast(c.SentencePieceProcessor_PieceToId(@ptrCast(self), ffi.ZigSlice.from(token)));
     }
 };

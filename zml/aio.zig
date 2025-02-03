@@ -10,6 +10,7 @@ const posix = @import("posix.zig");
 pub const gguf = @import("aio/gguf.zig");
 pub const nemo = @import("aio/nemo.zig");
 pub const safetensors = @import("aio/safetensors.zig");
+pub const tinyllama = @import("aio/tinyllama.zig");
 pub const torch = @import("aio/torch.zig");
 pub const yaml = @import("aio/yaml.zig");
 
@@ -35,6 +36,8 @@ pub fn detectFormatAndOpen(allocator: std.mem.Allocator, model_path: []const u8)
         try gguf.open(allocator, model_path)
     else if (std.mem.endsWith(u8, model_path, ".pt"))
         try torch.open(allocator, model_path)
+    else if (std.mem.endsWith(u8, model_path, ".tinyllama"))
+        try tinyllama.open(allocator, model_path)
     else {
         std.debug.panic("File extension not recognized: {s}", .{model_path});
     };
