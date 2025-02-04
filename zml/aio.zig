@@ -607,7 +607,7 @@ fn findSimilarBufferKeys(original_key: []const u8, store: BufferStore, temp_allo
 
     // second test: progressive partial matches
     if (matches == 0) {
-        var components = std.mem.split(u8, base_key, ".");
+        var components = std.mem.splitScalar(u8, base_key, '.');
         while (components.next()) |component| {
             matches = 0;
             it = store.buffers.iterator();
