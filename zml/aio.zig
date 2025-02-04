@@ -561,13 +561,27 @@ pub fn loadModelBuffersWithPrefix(
     return res;
 }
 
-/// deprecated, use zml.buffers.deinitAll()
+/// Deinit all buffers in the given struct
 pub fn unloadBuffers(model: anytype) void {
     zml.meta.visit((struct {
         fn cb(_: void, buffer: *zml.Buffer) void {
             buffer.deinit();
         }
     }).cb, {}, model);
+}
+
+/// Await all buffers in the given struct
+pub fn awaitAll(buffers: anytype) !void {
+    var err: ?anyerror = null;
+    zml.meta.visit((struct {
+        fn cb(err_ptr: *?anyerror, buffer: *zml.Buffer) void {
+            _ = buffer.awaitt() catch |e| {
+                err_ptr.* = e;
+            };
+        }
+    }).cb, &err, buffers);
+
+    return err orelse {};
 }
 
 fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *PrefixBuilder, buffer_store: BufferStore, obj: anytype, platform: zml.Platform) !void {
