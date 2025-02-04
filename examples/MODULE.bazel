@@ -2,7 +2,7 @@ module(name = "examples")
 
 bazel_dep(name = "bazel_skylib", version = "1.7.1")
 bazel_dep(name = "rules_zig", version = "20240913.0-1957d05")
-bazel_dep(name = "platforms", version = "0.0.10")
+bazel_dep(name = "platforms", version = "0.0.11")
 bazel_dep(name = "zml", version = "0.1.0")
 bazel_dep(name = "aspect_bazel_lib", version = "2.11.0")
 bazel_dep(name = "rules_oci", version = "2.0.0")
@@ -46,7 +46,6 @@ http_file(
     sha256 = "0fa7898d509279e482958e8ce81c8e77db3f2f8254e26661ceb7762c4d494ce7",
     url = "https://github.com/ggerganov/ggml/raw/18703ad600cc68dbdb04d57434c876989a841d12/examples/mnist/models/mnist/t10k-images.idx3-ubyte",
 )
-
 
 # Llama 3.2
 
