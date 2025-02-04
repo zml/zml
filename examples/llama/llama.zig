@@ -87,16 +87,15 @@ pub const LlamaLM = struct {
         rng: Tensor.Rng,
     ) struct { Tensor, KvCache, Tensor.Rng } {
         stdx.debug.assert(tokens_.dtype() == .u32 and tokens_.rank() >= 1 and token_index.dtype() == .u32 and token_index.rank() <= 1, "Can't run Llama ! Expected >=1d tokens and 0d token_index, got: {} and {}", .{ tokens_, token_index });
-        var tokens = tokens_.withPartialTags(.{.s});
+        const tokens = tokens_.withPartialTags(.{.s});
         const out, const updated_kv_cache = zml.call(self.model, .forward, .{ tokens, token_index, kv_cache });
-        tokens, const new_rng = self.sampleTokens(self.lm_head, tokens, out, rng, self.gen_opts);
-        return .{ tokens, updated_kv_cache, new_rng };
+        const new_tokens, const new_rng = self.sampleTokens(self.lm_head, out, rng, self.gen_opts);
+        return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache, new_rng };
     }
 
     pub fn sampleTokens(
         self: LlamaLM,
         lm_head_: ?zml.nn.Linear,
-        tokens_: Tensor,
         out_: Tensor,
         rng: Tensor.Rng,
         opts: zml.nn.SamplingStrategy,
@@ -115,7 +114,7 @@ pub const LlamaLM = struct {
             logits = logits.rename(.{ .d = .voc });
 
         const next_tokens, const new_rng = zml.nn.sampleTokens(logits, opts, rng);
-        return .{ next_tokens.convert(tokens_.dtype()).reuseBuffer(tokens_), new_rng };
+        return .{ next_tokens, new_rng };
     }
 
     pub fn increment(_: u8, token_index: Tensor) Tensor {
