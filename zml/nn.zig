@@ -934,7 +934,7 @@ pub const PartialSoftmax = struct {
 /// Returns intermediary results to allow aggregating later.
 pub fn partialSoftmax(self: Tensor, axis: anytype) PartialSoftmax {
     const a = self.axis(axis);
-    const max_val = self.max(a);
+    const max_val = self.maximum(Tensor.constant(self.shape(), DataType.constant(self.dtype(), 0))).max(a);
     const out = self.sub(max_val.broad(self.shape())).exp();
     return .{
         .values = out,

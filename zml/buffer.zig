@@ -124,6 +124,10 @@ pub const Buffer = struct {
         return try from(platform, host_buffer);
     }
 
+    pub fn fromBytes(platform: Platform, shape_: Shape, data: []const u8) !Buffer {
+        return from(platform, HostBuffer.fromBytes(shape_, data));
+    }
+
     /// Creates a Buffer with a single element.
     pub fn scalar(platform: Platform, val: anytype, dtype_: DataType) !Buffer {
         const x = dtype_.constant(val);
