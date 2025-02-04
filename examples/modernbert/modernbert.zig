@@ -201,7 +201,10 @@ pub const ModernBertModel = struct {
     dtype: zml.DataType = .f32, // config.json: torch_dtype
 
     pub fn init(self: *ModernBertModel, options: ModernBertOptions) void {
+        self.final_norm.eps = 1e-5;
         for (self.layers, 0..) |*encoder_layer, layer_idx| {
+            if (encoder_layer.attn_norm) |*norm| norm.eps = 1e-5;
+            encoder_layer.mlp_norm.eps = 1e-5;
             encoder_layer.attn.is_global_attention = (layer_idx % 3 == 0);
             encoder_layer.attn.num_heads = options.num_attention_heads;
         }
@@ -244,31 +247,27 @@ pub const ModernBertPredictionHead = struct {
     }
 };
 
-// input :  {1,9,768}
-// output : {1,9,50368}
 pub const ModernBertForMaskedLM = struct {
     model: ModernBertModel,
     head: ModernBertPredictionHead,
-    decoder: ?zml.nn.Linear = null,
+    decoder: struct { weight: ?zml.Tensor, bias: zml.Tensor },
 
     pub fn init(self: *ModernBertForMaskedLM, options: ModernBertOptions) void {
         self.model.init(options);
+        self.head.norm.eps = 1e-5;
         if (options.tie_word_embeddings == true) {
-            self.decoder = null;
+            self.decoder.weight = null;
         }
     }
 
     pub fn forward(self: ModernBertForMaskedLM, input_ids: Tensor, attention_mask: Tensor) Tensor {
         const outputs: Tensor = zml.call(self.model, .forward, .{ input_ids, attention_mask });
-
         const head_outputs: Tensor = zml.call(self.head, .forward, .{outputs});
 
         // either use decoder or tied weights
-        if (self.decoder) |decoder| {
-            return zml.call(decoder, .forward, .{head_outputs});
-        } else {
-            const emb_weight = self.model.embeddings.tok_embeddings.weight.withTags(.{ .voc, .d });
-            return head_outputs.withTags(.{ .b, .s, .d }).dot(emb_weight, .{.d});
-        }
+        const decoder_weights = self.decoder.weight orelse self.model.embeddings.tok_embeddings.weight;
+
+        const results = head_outputs.withTags(.{ .b, .s, .d }).dot(decoder_weights.withTags(.{ .voc, .d }), .{.d});
+        return results.add(self.decoder.bias.withTags(.{.voc}).broad(results.shape()));
     }
 };

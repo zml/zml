@@ -48,7 +48,7 @@ zig_cc_binary(
     srcs = ["modernbert.zig"],
     main = "main.zig",
     deps = [
-        "//third_party/tigerbeetle:flags",
+        "@com_github_hejsil_clap//:clap",
         "@zml//async",
         "@zml//stdx",
         "@zml//zml",
@@ -60,7 +60,7 @@ cc_binary(
     args = [
         "--model=$(location @ModernBERT-base//:model.safetensors)",
         "--tokenizer=$(location @ModernBERT-base//:tokenizer)",
-        "--num-attention-heads=12",
+        "--num-heads=12",
     ],
     data = [
         "@ModernBERT-base//:model.safetensors",
@@ -74,7 +74,7 @@ cc_binary(
     args = [
         "--model=$(location @ModernBERT-large//:model.safetensors)",
         "--tokenizer=$(location @ModernBERT-large//:tokenizer)",
-        "--num-attention-heads=16",
+        "--num-heads=16",
     ],
     data = [
         "@ModernBERT-large//:model.safetensors",
@@ -96,7 +96,7 @@ zig_cc_binary(
     ],
     main = "test.zig",
     deps = [
-        "//third_party/tigerbeetle:flags",
+        "@com_github_hejsil_clap//:clap",
         "@zml//async",
         "@zml//zml",
     ],
