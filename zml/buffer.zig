@@ -27,10 +27,10 @@ const log = std.log.scoped(.zml);
 /// * loading weights from disk directly to the `device zml.aio.loadBuffers`
 /// * can be created by calling `HostBuffer.toDevice(platform)`.
 pub const Buffer = struct {
-    pub const Memory = enum(pjrt.Memory.Kind) {
-        host = pjrt.Memory.Kind.unpinned_host,
-        host_pinned = pjrt.Memory.Kind.pinned_host,
-        device = pjrt.Memory.Kind.device,
+    pub const Memory = enum(@typeInfo(pjrt.Memory.Kind).Enum.tag_type) {
+        host = @intFromEnum(pjrt.Memory.Kind.unpinned_host),
+        host_pinned = @intFromEnum(pjrt.Memory.Kind.pinned_host),
+        device = @intFromEnum(pjrt.Memory.Kind.device),
     };
 
     pub const Shard = struct {
