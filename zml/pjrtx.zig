@@ -62,7 +62,7 @@ pub const Client = opaque {
     }
 
     pub const BufferFromHostBufferArgs = pjrt.Client.BufferFromHostBufferArgs;
-    pub fn bufferFromHostBuffer(self: *const Client, api: *const Api, args: BufferFromHostBufferArgs) !struct { *Buffer, ?*Event } {
+    pub fn bufferFromHostBuffer(self: *const Client, api: *const Api, args: BufferFromHostBufferArgs) ApiError!struct { *Buffer, ?*Event } {
         const buffer, const event_ = try self.inner().bufferFromHostBuffer(api, args);
         return .{ @ptrCast(buffer), @ptrCast(event_) };
     }

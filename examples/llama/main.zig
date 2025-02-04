@@ -22,28 +22,33 @@ pub const std_options = .{
     .logFn = asynk.logFn(std.log.defaultLog),
 };
 
-pub fn tokenizePromptLlama3(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, config: LlamaLM.Config, prompt: []const u8) ![]u32 {
+pub fn tokenizePrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, config: LlamaLM.Config, prompt: []const u8, skip_llama3_encoding: bool) ![]u32 {
     var tokens = std.ArrayList(u32).init(allocator);
     var encoder = try tokenizer.encoder();
     defer encoder.deinit();
 
-    const start_header_id = tokenizer.token_to_id("<|start_header_id|>") orelse return error.NoSuchToken;
-    const end_header_id = tokenizer.token_to_id("<|end_header_id|>") orelse return error.NoSuchToken;
-    const eot_id = tokenizer.token_to_id("<|eot_id|>") orelse return error.NoSuchToken;
+    if (skip_llama3_encoding) {
+        // Copy to the arraylist so the ownership is the same in both branches.
+        try tokens.appendSlice(try encoder.encode(prompt));
+        return tokens.toOwnedSlice();
+    }
+
+    const start_header_id = tokenizer.tokenToId("<|start_header_id|>") orelse return error.NoSuchToken;
+    const end_header_id = tokenizer.tokenToId("<|end_header_id|>") orelse return error.NoSuchToken;
+    const eot_id = tokenizer.tokenToId("<|eot_id|>") orelse return error.NoSuchToken;
     const newline_id = (try encoder.encode("\n"))[0];
 
     try tokens.append(config.bos_token_id);
 
     try tokens.append(start_header_id);
     try tokens.appendSlice(try encoder.encode("user"));
-    try tokens.appendSlice(&.{ end_header_id, newline_id, newline_id });
+    try tokens.appendSlice(&.{ end_header_id, newline_id });
 
     try tokens.appendSlice(try encoder.encode(prompt));
     try tokens.appendSlice(&.{ eot_id, newline_id });
-    try tokens.appendSlice(try encoder.encode("\n"));
     try tokens.append(start_header_id);
     try tokens.appendSlice(try encoder.encode("assistant"));
-    try tokens.append(end_header_id);
+    try tokens.appendSlice(&.{ end_header_id, newline_id });
 
     return tokens.toOwnedSlice();
 }
@@ -60,84 +65,61 @@ pub fn generateText(
     prompt: []const u8,
     skip_llama3_encoding: bool,
 ) ![]const u8 {
-    var tokenizer_encoder = try tokenizer.encoder();
-    defer tokenizer_encoder.deinit();
+    const prompt_tok: []const u32 = try tokenizePrompt(allocator, tokenizer, config, prompt, skip_llama3_encoding);
+    defer allocator.free(prompt_tok);
+
     var tokenizer_decoder = try tokenizer.decoder();
     defer tokenizer_decoder.deinit();
 
-    const prompt_tok: []const u32 = if (skip_llama3_encoding) try tokenizer_encoder.encode(prompt) else try tokenizePromptLlama3(allocator, tokenizer, config, prompt);
-    defer allocator.free(prompt_tok);
-
-    const dims = llama_.model.shape();
-    const max_seq_len = dims.s;
-
-    // Prefill
-    // initialize a 0..max_seq_len buffer with the tokenized prompt
-    const prefill_buffer = try allocator.alloc(u32, @intCast(max_seq_len));
-    @memset(prefill_buffer, 0);
-    for (0..prompt_tok.len) |i| {
-        prefill_buffer[i] = @intCast(prompt_tok[i]);
-    }
-    defer allocator.free(prefill_buffer);
-
     const platform = mod_generate.platform();
+    const max_seq_len = llama_.model.shape().s;
 
-    // prepare device buffers for the prefill tokens and the index
-    var prefill_tokens = try zml.Buffer.fromSlice(platform, .{max_seq_len}, prefill_buffer);
-    defer prefill_tokens.deinit();
-    var prefill_token_index = try zml.Buffer.fromSlice(platform, .{}, &[_]u32{0});
-    defer prefill_token_index.deinit();
-
-    // init RNG and prefill
+    // init RNG and buffers
     var rng = try zml.Tensor.Rng.init(platform, seed);
-    prefill_tokens, var kv_cache, rng = mod_prefill.call(.{ prefill_tokens, prefill_token_index, kv_cache_, rng });
-    defer kv_cache.k.deinit();
-    defer kv_cache.v.deinit();
-    defer kv_cache.layer_index.deinit();
+    var generated_token_buffer = [_]u32{undefined};
 
-    // Prepare for token-by-token generation
-    var first_token_hostbuffer = [_]u32{prompt_tok[prompt_tok.len - 1]}; // start with the prompt's last token
-    var current_token = try zml.Buffer.fromSlice(platform, .{}, &first_token_hostbuffer);
+    var kv_cache = prefill: {
+        // prepare device buffers for the prefill tokens and their positions
+        const prefill_buffer = try allocator.alloc(u32, max_seq_len);
+        @memcpy(prefill_buffer[0..prompt_tok.len], prompt_tok);
+
+        var prefill_tokens = try zml.Buffer.fromSlice(platform, .{max_seq_len}, prefill_buffer);
+        defer prefill_tokens.deinit();
+        var prefill_token_pos = try zml.Buffer.constant(platform, zml.Shape.init(.{}, .u32), 0);
+        defer prefill_token_pos.deinit();
+
+        const prefilled_tokens, const kv_cache, rng = mod_prefill.call(.{ prefill_tokens, prefill_token_pos, kv_cache_, rng });
+        _ = try prefilled_tokens.toHost(std.mem.sliceAsBytes(prefill_buffer));
+        generated_token_buffer[0] = prefill_buffer[prompt_tok.len - 1];
+        break :prefill kv_cache;
+    };
+    defer zml.aio.unloadBuffers(&kv_cache);
+
+    // Prepare for token-by-token generation,
+    // start with the token generated based on the full prompt.
+    var current_token = try zml.Buffer.fromSlice(platform, .{1}, &generated_token_buffer);
     defer current_token.deinit();
-
-    // Here we will copy the generated token from device
-    var generated_token_buffer = [_]u32{0};
 
     // Here we collect the generated text
     var output = std.ArrayList(u8).init(allocator);
     defer output.deinit();
 
-    const tracer_buffer = try allocator.alloc(u8, @intCast(max_seq_len));
-    defer allocator.free(tracer_buffer);
-    const tracer = zml.tools.Tracer.init("ai.zml.models.llama");
     const output_tokens_len = max_seq_len - prompt_tok.len - 1;
     const start = std.time.microTimestamp();
 
-    var num_tokens_generated: usize = 0;
+    // One token has alreadyh been generated by the prefill.
+    var num_tokens_generated: usize = 1;
 
-    generation: for (0..output_tokens_len) |i| {
-        const frame_id = tracer.frameStart(try std.fmt.bufPrintZ(tracer_buffer, "Generate token {}/{}", .{ i + 1, output_tokens_len }));
-
-        // current token index needs to go into a zml.Buffer
-        const token_index_buffer = &[_]u32{@intCast(prompt_tok.len + i)};
-        const token_index = try zml.Buffer.fromSlice(platform, .{}, token_index_buffer);
-        defer token_index.deinit();
-
-        // call to generate the next token
-        current_token, kv_cache, rng = mod_generate.call(.{ current_token, token_index, kv_cache, rng });
-
-        tracer.frameEnd(frame_id, try std.fmt.bufPrintZ(tracer_buffer, "Generated token {}/{}", .{ i + 1, output_tokens_len }));
-
-        // extract the generated token from the buffer, async
-        var fut_tok_buf = try current_token.toHost(std.mem.sliceAsBytes(&generated_token_buffer));
-        _ = try fut_tok_buf.awaitt();
+    generation: for (0..output_tokens_len + 1) |i| {
+        // collect and print generated sequence
+        num_tokens_generated += 1;
         const generated_token = generated_token_buffer[0];
-
-        // de-tokenize generated token into a string
-        const chunk = try tokenizer_decoder.next(@intCast(generated_token)) orelse unreachable;
-        num_tokens_generated = i;
+        const chunk = try tokenizer_decoder.next(generated_token) orelse unreachable;
+        try output.appendSlice(chunk);
+        std.debug.print("{s}", .{chunk});
 
         // check for eos
+        if (i == output_tokens_len) break :generation;
         switch (config.eos_token_id.value) {
             .int => |eos| if (generated_token == @as(u32, @intCast(eos))) break :generation,
             .ints => |eos_list| {
@@ -147,9 +129,16 @@ pub fn generateText(
             },
         }
 
-        // collect and print generated sequence
-        try output.appendSlice(chunk);
-        std.debug.print("{s}", .{chunk});
+        // current token pos needs to go into a zml.Buffer
+        const token_pos_buffer = &[_]u32{@intCast(prompt_tok.len + i)};
+        const token_pos = try zml.Buffer.fromSlice(platform, .{}, token_pos_buffer);
+        defer token_pos.deinit();
+
+        // call to generate the next token
+        current_token, kv_cache, rng = mod_generate.call(.{ current_token, token_pos, kv_cache, rng });
+
+        // extract the generated token from the buffer
+        _ = try current_token.toHost(std.mem.sliceAsBytes(&generated_token_buffer));
     }
     const end = std.time.microTimestamp();
     const duration = stdx.math.divFloat(f64, end - start, std.time.us_per_s);
@@ -258,13 +247,11 @@ pub fn asyncMain() !void {
     const dims = model_instance.model.shape();
     const dtype = model_instance.model.embed_tokens.weight.dtype();
 
-    const batch_size = 1;
+    const tokens_shape_prefill = zml.Shape.init(.{ .s = llama_options.max_seq_len }, .u32);
+    const tokens_shape = zml.Shape.init(.{ .s = 1 }, .u32);
+    const token_idx_shape = zml.Shape.init(.{}, .u32);
 
-    const tokens_shape_prefill = zml.Shape.init(.{ .b = batch_size, .s = llama_options.max_seq_len }, .u32);
-    const tokens_shape = zml.Shape.init(.{ .b = batch_size, .s = 1 }, .u32);
-    const token_idx_shape = zml.Shape.init(.{ .b = batch_size }, .u32);
-
-    const kv_shape = zml.Shape.init(.{ .layer = model_instance.model.layers.len, .b = batch_size, .k = dims.s, .h = dims.nkvh, .hd = dims.hd }, dtype).withSharding(.{.h});
+    const kv_shape = zml.Shape.init(.{ .layer = model_instance.model.layers.len, .k = dims.s, .h = dims.nkvh, .hd = dims.hd }, dtype).withSharding(.{.h});
 
     const kv_cache_shape: zml.ShapeOf(llama.KvCache) = llama.KvCache.initShape(kv_shape);
     const rng_shape = zml.Tensor.Rng.shape();
@@ -314,7 +301,7 @@ pub fn asyncMain() !void {
             var timer = try stdx.time.Timer.start();
             defer log.info("Loaded tokenizer from {s} [{}]", .{ tok, timer.read() });
 
-            break :blk try zml.tokenizer.Tokenizer.from_file(model_arena.allocator(), tok);
+            break :blk try zml.tokenizer.Tokenizer.fromFile(model_arena.allocator(), tok);
         } else {
             log.err("Missing --tokenizer", .{});
             return;

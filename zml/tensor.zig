@@ -2424,11 +2424,12 @@ pub const Tensor = struct {
         }
 
         pub fn increment(old_value: Tensor, new_value: Tensor) Tensor {
-            return old_value.add(new_value.convert(old_value.dtype()));
+            return old_value.add(new_value);
         }
 
         pub fn override(old_value: Tensor, new_value: Tensor) Tensor {
-            return new_value.convert(old_value.dtype());
+            _ = old_value;
+            return new_value;
         }
     };
 
