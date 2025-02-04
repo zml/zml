@@ -21,7 +21,7 @@ zig_cc_binary(
 )
 
 cc_binary(
-    name = "TinyLlama-15M",
+    name = "TinyLlama-Stories-15M",
     args = [
         "--config=$(location @TinyLlama-15M//:config.json)",
         "--weights=$(location @TinyLlama-15M//:model.safetensors)",

@@ -120,7 +120,7 @@ Karpathy](https://x.com/karpathy); you can read more about it on his
 ```
 cd examples
 bazel run -c opt //llama:TinyLlama-Stories-15M
-bazel run -c opt //llama:TinyLlama-Stories-15M -- --prompt="Once upon a time, there was a cute little dragon"
+bazel run -c opt //llama:TinyLlama-Stories-15M -- --prompt="Once upon a time, there was a cute little dragon,"
 ```
 
 
