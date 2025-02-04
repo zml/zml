@@ -13,7 +13,10 @@ pub const std_options = .{
     .log_level = .info,
 };
 
-fn softmax(logits: []f32) void {
+fn softmax(logits: []f32, allocator: std.mem.Allocator) ![]f32 {
+    var result = try allocator.alloc(f32, logits.len);
+    errdefer allocator.free(result);
+
     // Find max for numerical stability
     var max_logit: f32 = -std.math.inf(f32);
     for (logits) |logit| {
@@ -22,33 +25,31 @@ fn softmax(logits: []f32) void {
 
     // Compute exp(logits - max_logit) and sum
     var exp_sum: f32 = 0.0;
-    for (logits) |logit| {
+    for (logits, 0..) |logit, i| {
         const exp_diff = @exp(logit - max_logit);
-        exp_sum += exp_diff;
+        result[i] = exp_diff;
+        exp_sum += result[i];
     }
 
-    if (exp_sum == 0) return;
+    if (exp_sum == 0) return error.DivisionByZero;
 
     // Normalize
-    for (logits) |*logit| {
-        logit.* = @exp(logit.* - max_logit) / exp_sum;
+    for (result) |*logit| {
+        logit.* = logit.* / exp_sum;
     }
+
+    return result;
 }
 
 // fill-mask pipeline
 // ref: https://github.com/huggingface/transformers/blob/main/src/transformers/pipelines/fill_mask.py
 pub fn unmask(
-    bert: modernbert.ModernBertForMaskedLM,
     mod: zml.ModuleExe(modernbert.ModernBertForMaskedLM.forward),
     tokenizer: zml.tokenizer.Tokenizer,
     allocator: std.mem.Allocator,
     seq_len: i64,
     text: []const u8,
-    top_k: usize,
 ) !void {
-    _ = top_k; // autofix
-    _ = bert; // autofix
-
     var tokenizer_decoder = try tokenizer.decoder();
     defer tokenizer_decoder.deinit();
 
@@ -129,15 +130,17 @@ pub fn unmask(
     };
     std.mem.sort(usize, indices, Context{ .logits = logits }, Context.lessThan);
 
-    softmax(logits);
+    // convert to probabilities
+    const probabilities = try softmax(logits, allocator);
+    defer allocator.free(probabilities);
 
-    log.info("Top predictions:", .{});
+    log.info("✅\tTop 5 predictions:", .{});
     for (indices[0..5]) |token_id| {
         const token_text = try tokenizer_decoder.next(@intCast(token_id));
 
         if (token_text) |text_slice| {
-            log.info("\tscore: {d:.6}, word: '{s}', token: {}", .{
-                logits[token_id],
+            log.info("\t\tscore: {d:.6}, word: '{s}', token: {}", .{
+                probabilities[token_id],
                 text_slice,
                 token_id,
             });
@@ -160,35 +163,41 @@ pub fn bool_parser(in: []const u8) error{}!bool {
     return std.mem.indexOfScalar(u8, "tTyY1", in[0]) != null;
 }
 
+fn printUsageAndExit(stderr: anytype) noreturn {
+    stderr.print("usage: ", .{}) catch {};
+    clap.usage(stderr, clap.Help, &params) catch {};
+    stderr.print("\n", .{}) catch {};
+    std.process.exit(0);
+}
+
 pub fn main() !void {
     try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain);
 }
 
 pub fn asyncMain() !void {
     const allocator = std.heap.c_allocator;
+    const stderr = std.io.getStdErr().writer();
 
+    // parse args
     const parsers = comptime .{
         .BOOL = bool_parser,
         .UINT = clap.parsers.int(usize, 0),
         .STRING = clap.parsers.string,
         .PATH = clap.parsers.string,
     };
+
     var diag: clap.Diagnostic = .{};
-    const stderr = std.io.getStdErr().writer();
     var res = clap.parse(clap.Help, &params, parsers, .{
         .diagnostic = &diag,
         .allocator = allocator,
     }) catch |err| {
-        diag.report(stderr, err) catch {};
-        stderr.print("usage: ", .{}) catch {};
-        clap.usage(stderr, clap.Help, &params) catch {};
-        stderr.print("\n", .{}) catch {};
-        return;
+        try diag.report(stderr, err);
+        try printUsageAndExit(stderr);
     };
     defer res.deinit();
 
     if (res.args.help != 0) {
-        clap.help(std.io.getStdErr().writer(), clap.Help, &params, .{}) catch {};
+        try clap.help(stderr, clap.Help, &params, .{});
         return;
     }
 
@@ -277,7 +286,7 @@ pub fn asyncMain() !void {
     const text = res.args.text orelse "Paris is the [MASK] of France.";
     log.info("\tInput text: {s}", .{text});
 
-    try unmask(modern_bert_for_masked_lm, bert_module, tokenizer, allocator, seq_len, text, 3);
+    try unmask(bert_module, tokenizer, allocator, seq_len, text);
 }
 
 pub fn tokenize(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, prompt: []const u8) ![]const u32 {
