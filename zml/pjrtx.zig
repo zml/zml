@@ -14,7 +14,7 @@ const Target = @import("platform.zig").Target;
 
 const log = std.log.scoped(.zml);
 
-pub const Profiler = pjrt.Profiler;
+pub const profiler = pjrt.profiler;
 pub const ApiError = pjrt.ApiError;
 pub const ErrorCode = pjrt.ErrorCode;
 pub const BufferType = pjrt.BufferType;
@@ -29,6 +29,8 @@ pub const GetCostAnalysisError = pjrt.GetCostAnalysisError;
 pub const SerializeResult = pjrt.SerializeResult;
 pub const Executable = pjrt.Executable;
 pub const ExecuteError = ApiError;
+
+const Profiler = profiler.Profiler;
 
 fn InnerMixin(comptime innerT: type) type {
     return struct {
@@ -120,7 +122,7 @@ pub const Client = opaque {
     /// Returns the Profiler for this API.
     /// Not all platform have a profiling api, for those the profiler object will do nothing.
     /// Platforms with known profiler extensions: cuda, xpu
-    pub fn getProfiler(self: *const Client, api: *const Api, options: pjrt.Profiler.Options) pjrt.Profiler {
+    pub fn getProfiler(self: *const Client, api: *const Api, options: Profiler.Options) Profiler {
         return self.inner().getProfiler(api, options);
     }
 };

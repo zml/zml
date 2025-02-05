@@ -3,7 +3,7 @@ const c = @import("c");
 const tsl_proto = @import("//tsl:profiler_options_proto");
 
 const log = std.log.scoped(.@"pjrt/profiler");
-const TraceContainer = @import("convert/trace_container.zig").TraceContainer;
+pub const TraceContainer = @import("convert/trace_container.zig").TraceContainer;
 
 /// Pjrt Profiler extension
 pub const Profiler = struct {
@@ -60,14 +60,14 @@ pub const Profiler = struct {
     }
 
     pub fn start(self: *Profiler) void {
-        self.transition("start", .ready, .started);
+        //self.transition("start", .ready, .started);
         if (self.api == null) return;
         var args: c.PLUGIN_Profiler_Start_Args = .{ .profiler = self.inner };
         self.check(self.api.?.start.?(&args)) catch unreachable;
     }
 
     pub fn stop(self: *Profiler) void {
-        self.transition("stop", .started, .stopped);
+        //self.transition("stop", .started, .stopped);
         if (self.api == null) return;
 
         var args: c.PLUGIN_Profiler_Stop_Args = .{ .profiler = self.inner };
@@ -75,7 +75,7 @@ pub const Profiler = struct {
     }
 
     pub fn collectData(self: *Profiler, allocator: std.mem.Allocator) !ProfilingData {
-        self.transition("collect_data", .stopped, .done);
+        //self.transition("collect_data", .stopped, .done);
         if (self.api == null) return .{ .external = &.{} };
 
         var args: c.PLUGIN_Profiler_CollectData_Args = .{

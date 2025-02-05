@@ -6,7 +6,9 @@ const c = @import("c");
 
 const log = std.log.scoped(.pjrt);
 
-pub const Profiler = @import("profiler.zig").Profiler;
+pub const profiler = @import("profiler.zig");
+
+const Profiler = profiler.Profiler;
 
 test {
     std.testing.refAllDecls(@This());

@@ -82,8 +82,8 @@ pub const Platform = struct {
     /// Returns the Profiler for this API.
     /// Not all platform have a profiling api, for those the profiler object will do nothing.
     /// Platforms with known profiler extensions: cuda, xpu
-    pub fn getProfiler(self: Platform, options: ?pjrt.Profiler.Options) pjrt.Profiler {
-        return self.pjrt_client.getProfiler(self.pjrt_api, options orelse pjrt.Profiler.default_options);
+    pub fn getProfiler(self: Platform, options: ?pjrt.profiler.Profiler.Options) pjrt.profiler.Profiler {
+        return self.pjrt_client.getProfiler(self.pjrt_api, options orelse pjrt.profiler.Profiler.default_options);
     }
 };
 
