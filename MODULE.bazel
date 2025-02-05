@@ -138,7 +138,6 @@ crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
 crate.from_cargo(
     name = "crates",
     cargo_lockfile = "//zml/tokenizer/hftokenizers:Cargo.lock",
-    lockfile = "//zml/tokenizer/hftokenizers:cargo-bazel-lock.json",
     manifests = ["//zml/tokenizer/hftokenizers:Cargo.toml"],
     supported_platform_triples = [
         "aarch64-apple-darwin",
