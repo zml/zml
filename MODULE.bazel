@@ -101,7 +101,7 @@ use_repo(zls, "zls_aarch64-macos", "zls_x86_64-linux")
 
 register_toolchains("//third_party/zls:all")
 
-bazel_dep(name = "libxev", version = "20241208.2-db6a52b")
+bazel_dep(name = "libxev", version = "20252401.0-31eed4e")
 bazel_dep(name = "llvm-raw", version = "20250117.0-bf17016")
 
 llvm = use_extension("@llvm-raw//utils/bazel:extension.bzl", "llvm")
