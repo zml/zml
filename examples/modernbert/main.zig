@@ -7,10 +7,15 @@ const Tensor = zml.Tensor;
 const modernbert = @import("modernbert.zig");
 const stdx = @import("stdx");
 
-// set this to false to disable the verbose logging
-// const show_mlir = true;
 pub const std_options = .{
     .log_level = .info,
+    .log_scope_levels = &[_]std.log.ScopeLevel{
+        .{ .scope = .modernbert, .level = .debug },
+        .{ .scope = .pjrt, .level = .err },
+        .{ .scope = .zml, .level = .err },
+        .{ .scope = .@"zml/module", .level = .err },
+    },
+    .logFn = asynk.logFn(std.log.defaultLog),
 };
 
 fn softmax(logits: []f32, allocator: std.mem.Allocator) ![]f32 {
@@ -41,6 +46,49 @@ fn softmax(logits: []f32, allocator: std.mem.Allocator) ![]f32 {
     return result;
 }
 
+fn findMaskPositions(tokens: []const u32, allocator: std.mem.Allocator) ![]usize {
+    var mask_positions = std.ArrayList(usize).init(allocator);
+    defer mask_positions.deinit();
+
+    for (tokens, 0..) |token, i| {
+        if (token == 50284) {
+            try mask_positions.append(i);
+        }
+    }
+
+    if (mask_positions.items.len == 0) {
+        log.err("Input text must contains `[MASK]`", .{});
+        return error.InvalidInput;
+    }
+
+    if (mask_positions.items.len > 1) log.warn("Currently only supporting one [MASK] per input", .{});
+
+    return mask_positions.toOwnedSlice();
+}
+
+fn prepareTensorInputs(
+    tokens: []const u32,
+    seq_len: i64,
+    allocator: std.mem.Allocator,
+) !struct { ids: []i64, mask: []i64 } {
+    var input_ids = try allocator.alloc(i64, @intCast(seq_len));
+    var attention_mask = try allocator.alloc(i64, @intCast(seq_len));
+    errdefer {
+        allocator.free(input_ids);
+        allocator.free(attention_mask);
+    }
+
+    @memset(input_ids, 0);
+    @memset(attention_mask, 0);
+
+    for (tokens, 0..) |token, i| {
+        input_ids[i] = @intCast(token);
+        attention_mask[i] = 1;
+    }
+
+    return .{ .ids = input_ids, .mask = attention_mask };
+}
+
 // fill-mask pipeline
 // ref: https://github.com/huggingface/transformers/blob/main/src/transformers/pipelines/fill_mask.py
 pub fn unmask(
@@ -53,75 +101,51 @@ pub fn unmask(
     var tokenizer_decoder = try tokenizer.decoder();
     defer tokenizer_decoder.deinit();
 
-    // tokenize input text
+    // Tokenize input text
     const tokens: []const u32 = try tokenize(allocator, tokenizer, text);
     defer allocator.free(tokens);
-    log.info("\tInput tokens: {d}", .{tokens});
 
-    // find "[MASK]" positions
-    var mask_positions = std.ArrayList(usize).init(allocator);
-    defer mask_positions.deinit();
+    // Find "[MASK]" positions
+    const mask_positions = try findMaskPositions(tokens, allocator);
+    defer allocator.free(mask_positions);
 
-    for (tokens, 0..) |token, i| {
-        if (token == 50284) {
-            try mask_positions.append(i);
-        }
+    // Prepare input tensors
+    const inputs = try prepareTensorInputs(tokens, seq_len, allocator);
+    defer {
+        allocator.free(inputs.ids);
+        allocator.free(inputs.mask);
     }
 
-    if (mask_positions.items.len == 0) {
-        log.err("Missing mask in input text : {s}", .{text});
-        return error.InvalidInput;
-    }
-
-    // prepare input tensors
-    var input_ids = try allocator.alloc(i64, @intCast(seq_len));
-    var attention_mask = try allocator.alloc(i64, @intCast(seq_len));
-    defer allocator.free(input_ids);
-    defer allocator.free(attention_mask);
-
-    // init all values to 0
-    @memset(input_ids, 0);
-    @memset(attention_mask, 0);
-
-    // fill with tokens and set mask to 1
-    for (tokens, 0..) |token, i| {
-        input_ids[i] = @intCast(token);
-        attention_mask[i] = 1;
-    }
-
-    // create input tensors
+    // Create input tensors
     const input_shape = zml.Shape.init(.{ .b = 1, .s = seq_len }, .i64);
-    const input_ids_tensor = try zml.Buffer.fromSlice(mod.platform(), input_shape.dims(), input_ids);
+    const input_ids_tensor = try zml.Buffer.fromSlice(mod.platform(), input_shape.dims(), inputs.ids);
     defer input_ids_tensor.deinit();
-    const attention_mask_tensor = try zml.Buffer.fromSlice(mod.platform(), input_shape.dims(), attention_mask);
+    const attention_mask_tensor = try zml.Buffer.fromSlice(mod.platform(), input_shape.dims(), inputs.mask);
     defer attention_mask_tensor.deinit();
 
-    // forward
+    // Model inference and transfers outputs from device (CPU/GPU/TPU) to host memory
     const outputs: zml.Buffer = mod.call(.{ input_ids_tensor, attention_mask_tensor });
     defer outputs.deinit();
-
-    // logits
     var outputs_buffer = try outputs.toHostAlloc(allocator);
     defer outputs_buffer.deinit(allocator);
 
-    const vocab_size = 50368; // tokenizer.tokens.len;
-    const mask_pos = mask_positions.items[0];
-    const base_offset = mask_pos * vocab_size;
+    // TODO: break into processOutputs()
+    const vocab_size = 50368; // TODO: from config.json
+    const base_offset = mask_positions[0] * vocab_size; // Skip to mask position prediction. We only handle the first [MASK] position
 
+    // Logits processing - extract raw predictions scores
     const logits = try allocator.alloc(f32, vocab_size);
     defer allocator.free(logits);
+    const raw_logits = @as([*]const f32, @ptrCast(@alignCast(outputs_buffer.data.ptr))); // This line is hard to read. It converts outputs_buffer pointer to an array of float
+    const predictions_slice = raw_logits[base_offset..][0..vocab_size];
+    @memcpy(logits, predictions_slice); // Then, it copies the relevant slice
 
-    // copy is useless
-    const raw_logits = @as([*]const f32, @ptrCast(@alignCast(outputs_buffer.data.ptr)));
-    @memcpy(logits, raw_logits[base_offset..][0..vocab_size]);
-
+    // Sort desc
     var indices = try allocator.alloc(usize, vocab_size);
     defer allocator.free(indices);
     for (0..vocab_size) |i| {
         indices[i] = i;
     }
-
-    // sort desc
     const Context = struct {
         logits: []const f32,
         pub fn lessThan(ctx: @This(), a: usize, b: usize) bool {
@@ -130,7 +154,7 @@ pub fn unmask(
     };
     std.mem.sort(usize, indices, Context{ .logits = logits }, Context.lessThan);
 
-    // convert to probabilities
+    // Convert to probabilities
     const probabilities = try softmax(logits, allocator);
     defer allocator.free(probabilities);
 
@@ -139,7 +163,7 @@ pub fn unmask(
         const token_text = try tokenizer_decoder.next(@intCast(token_id));
 
         if (token_text) |text_slice| {
-            log.info("\t\tscore: {d:.6}, word: '{s}', token: {}", .{
+            log.info("\t  • score: {d:.6}, word: '{s}', token: {}", .{
                 probabilities[token_id],
                 text_slice,
                 token_id,
@@ -178,7 +202,7 @@ pub fn asyncMain() !void {
     const allocator = std.heap.c_allocator;
     const stderr = std.io.getStdErr().writer();
 
-    // parse args
+    // Parse args
     const parsers = comptime .{
         .BOOL = bool_parser,
         .UINT = clap.parsers.int(usize, 0),
@@ -204,49 +228,47 @@ pub fn asyncMain() !void {
     const tmp = try std.fs.openDirAbsolute("/tmp", .{});
     try tmp.makePath("zml/modernbert/cache");
 
+    // Create ZML context
     var context = try zml.Context.init();
     defer context.deinit();
 
+    // Platform and compilation options
+    const create_opts_json = res.args.@"create-options" orelse "{}";
+    const create_opts = try std.json.parseFromSliceLeaky(zml.Platform.CreateOptions, allocator, create_opts_json, .{});
     const compilation_options = zml.CompilationOptions{
         .xla_dump_to = "/tmp/zml/modernbert",
         .sharding_enabled = res.args.sharding orelse true,
     };
 
-    const create_opts_json = res.args.@"create-options" orelse "{}";
-    const create_opts = try std.json.parseFromSliceLeaky(zml.Platform.CreateOptions, allocator, create_opts_json, .{});
+    // Auto-select platform
     const platform = context.autoPlatform(create_opts).withCompilationOptions(compilation_options);
     context.printAvailablePlatforms(platform);
 
+    // Detects the format of the model file (base on filename) and open it.
     const model_file = res.args.model.?;
-    var ts = try zml.aio.detectFormatAndOpen(allocator, model_file);
-    defer ts.deinit();
+    var tensor_store = try zml.aio.detectFormatAndOpen(allocator, model_file);
+    defer tensor_store.deinit();
 
+    // Memory arena dedicated to model shapes and weights
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const model_arena = arena_state.allocator();
 
-    // const num_attention_heads = if (res.args.@"num-attention-heads ") |num_heads| {
-    //     num_heads;
-    // } else {
-    //     log.err("Missing required input --num-attention-heads", .{});
-    //     return;
-    // };
-
+    // Create the model struct, with tensor shapes extracted from the tensor_store
     const modernbert_options = modernbert.ModernBertOptions{
         .num_attention_heads = 12, // TODO: from res.args
         .tie_word_embeddings = true, // TODO: from res.args
     };
-    var modern_bert_for_masked_lm = try zml.aio.populateModel(modernbert.ModernBertForMaskedLM, model_arena, ts);
-
+    var modern_bert_for_masked_lm = try zml.aio.populateModel(modernbert.ModernBertForMaskedLM, model_arena, tensor_store);
     modern_bert_for_masked_lm.init(modernbert_options);
 
-    log.info("✅\tParsed ModernBERT config: {}", .{modernbert_options});
+    log.info("\tModernBERT options: {}", .{modernbert_options});
 
     var tokenizer = blk: {
         if (res.args.tokenizer) |tok| {
-            log.info("Loading tokenizer from {s}", .{tok});
+            log.info("\tLoading tokenizer from {s}", .{tok});
             var timer = try stdx.time.Timer.start();
-            defer log.info("Loaded tokenizer from {s} [{}]", .{ tok, timer.read() });
+            defer log.info("✅\tLoaded tokenizer from {s} [{}]", .{ tok, timer.read() });
 
             break :blk try zml.tokenizer.Tokenizer.fromFile(model_arena, tok);
         } else {
@@ -261,27 +283,27 @@ pub fn asyncMain() !void {
     const input_shape = zml.Shape.init(.{ .b = 1, .s = seq_len }, .i64);
     const attention_mask_shape = input_shape;
 
-    // Compile the model
-    log.info("\tCompiling model...", .{});
     var start = try std.time.Timer.start();
+
+    // Load weights
+    log.info("\tLoading ModernBERT weights from {?s}...", .{model_file});
+    var bert_weights = try zml.aio.loadBuffers(modernbert.ModernBertForMaskedLM, .{modernbert_options}, tensor_store, model_arena, platform);
+    defer zml.aio.unloadBuffers(&bert_weights);
+    log.info("✅\tLoaded weights in {d}ms", .{start.read() / std.time.ns_per_ms});
+
+    // Compile the model
+    log.info("\tCompiling ModernBERT model...", .{});
     var fut_mod = try asynk.asyncc(zml.compile, .{
         allocator,
         modernbert.ModernBertForMaskedLM.forward,
         .{modernbert_options},
         .{ input_shape, attention_mask_shape },
-        ts,
+        tensor_store,
         platform,
     });
-
-    // Load weights
-    log.info("\tLoading ModernBERT weights from {s}...", .{model_file});
-    var bert_weights = try zml.aio.loadBuffers(modernbert.ModernBertForMaskedLM, .{modernbert_options}, ts, model_arena, platform);
-    defer zml.aio.unloadBuffers(&bert_weights);
-    log.info("✅\tLoaded weights in {d}ms", .{start.read() / std.time.ns_per_ms});
-
     var bert_module = (try fut_mod.awaitt()).prepare(bert_weights);
     defer bert_module.deinit();
-    log.info("✅\tCompiled model in {d}ms", .{start.read() / std.time.ns_per_ms});
+    log.info("✅\tLoaded weights and compiled model in {d}ms", .{start.read() / std.time.ns_per_ms});
 
     const text = res.args.text orelse "Paris is the [MASK] of France.";
     log.info("\tInput text: {s}", .{text});
