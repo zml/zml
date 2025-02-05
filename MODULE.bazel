@@ -42,7 +42,6 @@ protoc.toolchain(
     version = "v29.2",
 )
 use_repo(protoc, "com_google_protobuf", "toolchains_protoc_hub")
-
 register_toolchains("@toolchains_protoc_hub//:all")
 
 zig = use_extension("@rules_zig//zig:extensions.bzl", "zig")
@@ -52,14 +51,11 @@ zig.mirrors(urls = [
     "https://mirror.zml.ai/zig",
 ])
 use_repo(zig, "zig_toolchains")
-
 register_toolchains("@rules_zig//zig/target:all")
-
 register_toolchains("@zig_toolchains//:all")
 
 toolchains = use_extension("@hermetic_cc_toolchain//toolchain:ext.bzl", "toolchains")
 use_repo(toolchains, "zig_sdk")
-
 register_toolchains(
     "@zig_sdk//toolchain:linux_amd64_gnu.2.31",
     "@zig_sdk//toolchain:linux_arm64_gnu.2.31",
@@ -102,7 +98,6 @@ use_repo(neuron, "aws-neuronx-collectives", "aws-neuronx-runtime-lib")
 
 zls = use_extension("//third_party/zls:zls.bzl", "repo")
 use_repo(zls, "zls_aarch64-macos", "zls_x86_64-linux")
-
 register_toolchains("//third_party/zls:all")
 
 llvm = use_extension("@llvm-raw//utils/bazel:extension.bzl", "llvm")
