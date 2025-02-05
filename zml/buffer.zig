@@ -138,6 +138,11 @@ pub const Buffer = struct {
         try std.testing.expectEqual(-15, (try values_d.getValue([2][8]i32))[1][7]);
     }
 
+    /// Creates a buffer from the given shape and bytes.
+    pub fn fromBytes(platform: Platform, shape_: Shape, s: []const u8) !Buffer {
+        return from(platform, HostBuffer.fromBytes(shape_, s));
+    }
+
     /// Creates a Buffer with a single element.
     pub fn scalar(platform: Platform, val: anytype, dtype_: DataType) !Buffer {
         const x = dtype_.constant(val);
