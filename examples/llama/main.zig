@@ -88,7 +88,11 @@ pub fn generateText(
         var prefill_token_pos = try zml.Buffer.constant(platform, zml.Shape.init(.{}, .u32), 0);
         defer prefill_token_pos.deinit();
 
-        const prefilled_tokens, const kv_cache, rng = mod_prefill.call(.{ prefill_tokens, prefill_token_pos, kv_cache_, rng });
+        var kv_cache = kv_cache_;
+        var prefilled_tokens = prefill_tokens;
+        for (0..100) |_| {
+            prefilled_tokens, kv_cache, rng = mod_prefill.call(.{ prefilled_tokens, prefill_token_pos, kv_cache, rng });
+        }
         _ = try prefilled_tokens.toHost(std.mem.sliceAsBytes(prefill_buffer));
         generated_token_buffer[0] = prefill_buffer[prompt_tok.len - 1];
         break :prefill kv_cache;
