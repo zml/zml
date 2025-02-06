@@ -98,12 +98,10 @@ pub fn unmask(
     // Model inference (retrieve indices)
     const outputs_buffer: zml.Buffer = mod.call(.{ input_ids_tensor, attention_mask_tensor });
     defer outputs_buffer.deinit();
-    log.info("outputs_buffer: {}", .{outputs_buffer});
 
     // Transfer the result to host memory (CPU)
     var outputs_host_buffer = try outputs_buffer.toHostAlloc(allocator);
     defer outputs_host_buffer.deinit(allocator);
-    log.debug("outputs_host_buffer: {}", .{outputs_host_buffer});
 
     const raw_indices = @as([*]const i32, @ptrCast(@alignCast(outputs_host_buffer.data.ptr)));
 

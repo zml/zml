@@ -270,7 +270,7 @@ pub const ModernBertForMaskedLM = struct {
         const logits = head_outputs.withTags(.{ .b, .s, .d }).dot(decoder_weights.withTags(.{ .voc, .d }), .{.d});
         const biased_logits = logits.add(self.decoder.bias.withTags(.{.voc}).broad(logits.shape()));
 
-        const probabilities = biased_logits.softmax(-1); // .voc
-        return probabilities.topK(5, -1, .{ .descending = true }).indices; // .voc
+        const probabilities = biased_logits.softmax(.voc);
+        return probabilities.topK(5, .voc, .{ .descending = true }).indices;
     }
 };
