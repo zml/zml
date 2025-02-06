@@ -626,6 +626,12 @@ fn findSimilarBufferKeys(original_key: []const u8, store: BufferStore, temp_allo
     }
 }
 
+/// deinit all buffers in the given struct
+pub fn awaitAll(buffers: anytype) !void {
+    // TODO: implement once we have async buffers.
+    _ = buffers;
+}
+
 fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *PrefixBuilder, buffer_store: BufferStore, obj: anytype, platform: zml.Platform) !void {
     const err_msg = "visitStructAndLoadBuffer must be called with a pointer to type. Received ";
     const type_info, const T = switch (@typeInfo(@TypeOf(obj))) {

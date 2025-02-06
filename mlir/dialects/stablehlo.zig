@@ -780,6 +780,28 @@ pub fn sharding(ctx: mlir.Context, inputs: []const mlir.Value, sharding_spec: ml
     });
 }
 
+pub fn annotate_device_placement(ctx: mlir.Context, inputs: []const mlir.Value, memory_kind: mlir.StringAttribute, res_types: []const mlir.Type, location: mlir.Location) mlir.Operation {
+    const frontend_attributes = mlir.DictionaryAttribute.init(
+        ctx,
+        &.{
+            mlir.NamedAttribute.init(mlir.Identifier.get(ctx, "_xla_buffer_placement"), memory_kind.asAttr()),
+        },
+    ).asAttr();
+    return mlir.Operation.make(ctx, "stablehlo.custom_call", .{
+        .operands = inputs,
+        .results = res_types,
+        .attributes = &.{
+            .{ "api_version", mlir.IntegerAttribute(.i32).init(ctx, 1).asAttr() },
+            .{ "call_target_name", mlir.StringAttribute.init(ctx, "annotate_device_placement").asAttr() },
+            .{ "has_side_effect", mlir.BoolAttribute.init(ctx, true).asAttr() },
+            .{ "backend_config", mlir.StringAttribute.init(ctx, &.{}).asAttr() },
+            .{ "output_operand_aliases", mlir.ArrayAttribute.init(ctx, &.{}).asAttr() },
+            .{ "mhlo.frontend_attributes", frontend_attributes },
+        },
+        .location = location,
+    });
+}
+
 pub const DotDimensionNumbersAttribute = struct {
     _inner: c.MlirAttribute,
 

@@ -17,7 +17,6 @@ const log = std.log.scoped(.zml);
 pub const Profiler = pjrt.Profiler;
 pub const ApiError = pjrt.ApiError;
 pub const ErrorCode = pjrt.ErrorCode;
-pub const Buffer = pjrt.Buffer;
 pub const BufferType = pjrt.BufferType;
 pub const Device = pjrt.Device;
 pub const DeviceDescription = pjrt.DeviceDescription;
@@ -30,6 +29,7 @@ pub const GetCostAnalysisError = pjrt.GetCostAnalysisError;
 pub const SerializeResult = pjrt.SerializeResult;
 pub const Executable = pjrt.Executable;
 pub const ExecuteError = ApiError;
+pub const Memory = pjrt.Memory;
 
 fn InnerMixin(comptime innerT: type) type {
     return struct {
@@ -63,13 +63,13 @@ pub const Client = opaque {
     }
 
     pub const BufferFromHostBufferArgs = pjrt.Client.BufferFromHostBufferArgs;
-    pub fn bufferFromHostBuffer(self: *const Client, api: *const Api, args: BufferFromHostBufferArgs) !*Buffer {
+    pub fn bufferFromHostBuffer(self: *const Client, api: *const Api, args: BufferFromHostBufferArgs) ApiError!*Buffer {
         const buffer, const event_ = try asynk.callBlocking(pjrt.Client.bufferFromHostBuffer, .{ self.inner(), api, args });
         if (event_) |event__| {
             const event: *Event = @ptrCast(event__);
             try event.await_(api);
         }
-        return buffer;
+        return @ptrCast(buffer);
     }
 
     pub fn deserializeAndLoad(self: *const Client, api: *const Api, bytes: []const u8) ApiError!*LoadedExecutable {
@@ -78,12 +78,7 @@ pub const Client = opaque {
 
     pub const CreateViewOfDeviceBufferArgs = pjrt.Client.CreateViewOfDeviceBufferArgs;
     pub fn createViewOfDeviceBuffer(self: *const Client, api: *const Api, args: CreateViewOfDeviceBufferArgs) ApiError!*Buffer {
-        var args_ = args;
-        args_.on_delete_callback = args_.on_delete_callback orelse &(struct {
-            fn call(_: ?*anyopaque, _: ?*anyopaque) callconv(.C) void {}
-        }.call);
-        const buf = try self.inner().createViewOfDeviceBuffer(api, args_);
-        return @ptrCast(buf);
+        return @ptrCast(try self.inner().createViewOfDeviceBuffer(api, args));
     }
 
     fn compileSync(self: *const Client, api: *const Api, allocator: std.mem.Allocator, module: mlir.Module, compile_options_pb: []const u8) CompileError!*LoadedExecutable {
@@ -97,13 +92,11 @@ pub const Client = opaque {
         var serialized_buffer = std.ArrayList(u8).init(allocator);
         defer serialized_buffer.deinit();
 
-        // spec ref: https://github.com/openxla/xla/blob/39967ad6782a861ca029ab8d1a2b25f7e0c3902b/xla/pjrt/pjrt_c_api_client.cc#L399
-        var requested_stablehlo_version_buf: [32]u8 = undefined;
-        const requested_stablehlo_version = api.stablehloCurrentVersion(&requested_stablehlo_version_buf);
-        const stablehlo_version = if (requested_stablehlo_version) |requested_version| blk: {
-            break :blk dialects.stablehlo.stablehloGetSmallerVersion(requested_version, dialects.stablehlo.getCurrentVersion());
-        } else blk: {
-            break :blk dialects.stablehlo.stablehloVersionFromCompatibilityRequirement(c.WEEK_12);
+        const stablehlo_version = blk: {
+            if (api.stablehloCurrentVersion()) |requested_version| {
+                break :blk dialects.stablehlo.stablehloGetSmallerVersion(requested_version, dialects.stablehlo.getCurrentVersion());
+            }
+            break :blk dialects.stablehlo.getMinimumVersion();
         };
 
         dialects.stablehlo.serializePortableArtifact(bytecode.items, stablehlo_version, serialized_buffer.writer()) catch |err| {
@@ -128,6 +121,79 @@ pub const Client = opaque {
     pub fn getProfiler(self: *const Client, api: *const Api, options: pjrt.Profiler.Options) pjrt.Profiler {
         return self.inner().getProfiler(api, options);
     }
+
+    pub fn addressableMemories(self: *const Client, api: *const Api) []*const Memory {
+        return self.inner().addressableMemories(api);
+    }
+
+    pub fn memoryByKind(self: *const Client, api: *const Api, kind: Memory.Kind) ?*Memory {
+        for (self.addressableMemories(api)) |mem| {
+            if (mem.kind(api) == kind) {
+                return mem;
+            }
+        }
+        return null;
+    }
+};
+
+pub const Buffer = opaque {
+    pub const inner = InnerMixin(pjrt.Buffer).inner;
+
+    pub fn deinit(self: *Buffer, api: *const Api) void {
+        self.inner().deinit(api);
+    }
+
+    pub fn getDevice(self: *const Buffer, api: *const Api) ApiError!*Device {
+        return try self.inner().getDevice(api);
+    }
+
+    pub fn delete(self: *Buffer, api: *const Api) void {
+        self.inner().delete(api);
+    }
+
+    pub fn isDeleted(self: *const Buffer, api: *const Api) bool {
+        return self.inner().isDeleted(api);
+    }
+
+    pub fn isOnCpu(self: *const Buffer, api: *const Api) bool {
+        return self.inner().isOnCpu(api);
+    }
+
+    pub fn toHostBuffer(self: *const Buffer, api: *const Api, dst: []u8) ApiError!?*Event {
+        return @ptrCast(try self.inner().toHostBuffer(api, dst));
+    }
+
+    pub fn getElementType(self: *const Buffer, api: *const Api) BufferType {
+        return self.inner().getElementType(api);
+    }
+
+    pub fn getDimensions(self: *const Buffer, api: *const Api) []const i64 {
+        return self.inner().getDimensions(api);
+    }
+
+    pub fn getUnpaddedDimensions(self: *const Buffer, api: *const Api) ApiError![]const i64 {
+        return try self.inner().getUnpaddedDimensions(api);
+    }
+
+    pub fn getOnDeviceSizeInBytes(self: *const Buffer, api: *const Api) ApiError!usize {
+        return try self.inner().getOnDeviceSizeInBytes(api);
+    }
+
+    pub fn copyToDevice(self: *const Buffer, api: *const Api, device: Device) ApiError!*Buffer {
+        return @ptrCast(self.inner().copyToDevice(api, device));
+    }
+
+    pub fn copyToMemory(self: *const Buffer, api: *const Api, memory: *const Memory) ApiError!*Buffer {
+        return @ptrCast(self.inner().copyToMemory(api, memory));
+    }
+
+    pub fn getReadyEvent(self: *const Buffer, api: *const Api) ?*Event {
+        return @ptrCast(self.inner().getReadyEvent(api));
+    }
+
+    pub fn getOpaqueDeviceMemoryDataPointer(self: *const Buffer, api: *const Api) ApiError!*anyopaque {
+        return try self.inner().getOpaqueDeviceMemoryDataPointer(api);
+    }
 };
 
 pub const Event = opaque {
@@ -145,7 +211,7 @@ pub const Event = opaque {
         return self.inner().getEventError(api);
     }
 
-    pub fn await_(self: *Event, api: *const Api) !void {
+    pub fn await_(self: *Event, api: *const Api) ApiError!void {
         defer self.deinit(api);
 
         if (self.isReady(api)) {
@@ -212,5 +278,41 @@ pub const LoadedExecutable = opaque {
 
     pub fn getExecutable(self: *LoadedExecutable, api: *const Api) ApiError!*Executable {
         return try self.inner().getExecutable(api);
+    }
+};
+
+pub const AsyncHostToDeviceTransferManager = opaque {
+    const inner = InnerMixin(pjrt.AsyncHostToDeviceTransferManager).inner;
+
+    pub fn deinit(self: *AsyncHostToDeviceTransferManager, api: *const Api) void {
+        self.inner().deinit(api);
+    }
+
+    pub fn transferData(self: *AsyncHostToDeviceTransferManager, api: *const Api, buffer_index: usize, data: []const u8, offset: i64, is_last_transfer: bool) ApiError!*Event {
+        return @ptrCast(try self.inner().transferData(api, buffer_index, data, offset, is_last_transfer));
+    }
+
+    pub fn retrieveBuffer(self: *AsyncHostToDeviceTransferManager, api: *const Api, buffer_index: usize) ApiError!*Buffer {
+        return @ptrCast(try self.inner().retrieveBuffer(api, buffer_index));
+    }
+
+    pub fn device(self: *AsyncHostToDeviceTransferManager, api: *const Api) *Device {
+        return @ptrCast(self.inner().device(api));
+    }
+
+    pub fn bufferCount(self: *AsyncHostToDeviceTransferManager, api: *const Api) usize {
+        return self.inner().bufferCount(api);
+    }
+
+    pub fn bufferSize(self: *AsyncHostToDeviceTransferManager, api: *const Api, buffer_index: usize) usize {
+        return self.inner().bufferSize(api, buffer_index);
+    }
+
+    pub fn setBufferError(self: *AsyncHostToDeviceTransferManager, api: *const Api, buffer_index: usize, error_code: ErrorCode, error_message: []const u8) void {
+        self.inner().setBufferError(api, buffer_index, error_code, error_message);
+    }
+
+    pub fn addMetadata(self: *AsyncHostToDeviceTransferManager, api: *const Api, transfer_metadata: []const NamedValue) void {
+        return self.inner().addMetadata(api, transfer_metadata);
     }
 };

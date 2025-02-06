@@ -1,0 +1,35 @@
+From 283a911561385e0cc9278dfd350bdc5c5132c9c4 Mon Sep 17 00:00:00 2001
+From: Steeve Morin <steeve@zml.ai>
+Date: Wed, 5 Feb 2025 11:17:01 +0100
+Subject: [PATCH] backend/kqueue: fix empty udata crash
+
+On certain occasions, internal kqueue events are dispatched with an empty udata field.
+This causes a crash when trying to access the udata field in the event handler.
+
+This patch adds a check to ensure that the udata field is not empty before accessing it
+just like in the other events consumer.
+---
+ src/backend/kqueue.zig | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/src/backend/kqueue.zig b/src/backend/kqueue.zig
+index 456f64f..7d919ce 100644
+--- a/src/backend/kqueue.zig
++++ b/src/backend/kqueue.zig
+@@ -206,11 +206,15 @@ pub const Loop = struct {
+             // event list to zero length) because it was leading to
+             // memory corruption we need to investigate.
+             for (events[0..completed]) |ev| {
+-                const c: *Completion = @ptrFromInt(@as(usize, @intCast(ev.udata)));
++                // Zero udata values are internal events that we do nothing
++                // on such as the mach port wakeup.
++                if (ev.udata == 0) continue;
+ 
+                 // We handle deletions separately.
+                 if (ev.flags & posix.system.EV_DELETE != 0) continue;
+ 
++                const c: *Completion = @ptrFromInt(@as(usize, @intCast(ev.udata)));
++
+                 // If EV_ERROR is set, then submission failed for this
+                 // completion. We get the syscall errorcode from data and
+                 // store it.
