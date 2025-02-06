@@ -2,19 +2,17 @@ const std = @import("std");
 const zml = @import("zml");
 const asynk = @import("async");
 
-/// Model definition
-const Layer = struct {
-    bias: ?zml.Tensor = null,
-    weight: zml.Tensor,
+const Tensor = zml.Tensor;
 
-    pub fn forward(self: Layer, x: zml.Tensor) zml.Tensor {
-        var y = self.weight.mul(x);
-        if (self.bias) |bias| {
-            y = y.add(bias);
-        }
-        return y;
-    }
-};
+pub fn conditionalForward(cache: Tensor, indices: Tensor, input: Tensor) Tensor {
+    const pages = cache.gatherValues(.{.page}, indices.appendAxes(.{.coord}), .{});
+    var result = pages.dot(input, .{.hd});
+    const zeros = zml.Tensor.constant(result.shape(), result.dtype().zero());
+    const cutoff = zml.Tensor.constant(indices.shape(), indices.dtype().constant(cache.dim(.page)));
+    const mask = zml.Tensor.cmp(indices, .LT, cutoff).broad(result.shape());
+    result = mask.select(result, zeros);
+    return result;
+}
 
 pub fn main() !void {
     try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain);
@@ -30,69 +28,93 @@ pub fn asyncMain() !void {
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
+    _ = arena; // autofix
 
     var context = try zml.Context.init();
     defer context.deinit();
 
-    const platform = context.autoPlatform(.{});
-    context.printAvailablePlatforms(platform);
-
-    // Our weights and bias to use
-    var weights = [4]f16{ 2.0, 2.0, 2.0, 2.0 };
-    var bias = [4]f16{ 1.0, 2.0, 3.0, 4.0 };
-    const input_shape = zml.Shape.init(.{4}, .f16);
-
-    // We manually produce a BufferStore. You would not normally do that.
-    // A BufferStore is usually created by loading model data from a file.
-    var buffers: zml.aio.BufferStore.Buffers = .{};
-    try buffers.put(arena, "weight", zml.HostBuffer.fromArray(&weights));
-    try buffers.put(arena, "bias", zml.HostBuffer.fromArray(&bias));
-
-    // the actual BufferStore
-    const buffer_store: zml.aio.BufferStore = .{
-        .arena = arena_state,
-        .buffers = buffers,
+    const compilation_options = zml.CompilationOptions{
+        .xla_dump_to = "/tmp/zml/simple_layer",
     };
 
-    // A clone of our model, consisting of shapes. We only need shapes for compiling.
-    // We use the BufferStore to infer the shapes.
-    var model_shapes = try zml.aio.populateModel(Layer, allocator, buffer_store);
-    model_shapes.weight = model_shapes.weight.withSharding(.{-1});
-    model_shapes.bias = model_shapes.bias.?.withSharding(.{-1});
+    const platform = context.autoPlatform(.{}).withCompilationOptions(compilation_options);
+    context.printAvailablePlatforms(platform);
 
-    // Start compiling. This uses the inferred shapes from the BufferStore.
-    // The shape of the input tensor, we have to pass in manually.
-    var compilation = try asynk.asyncc(zml.compileModel, .{ allocator, Layer.forward, model_shapes, .{input_shape}, platform });
+    var profiler = platform.getProfiler(null);
+    defer profiler.deinit();
 
-    // Produce a bufferized weights struct from the fake BufferStore.
-    // This is like the inferred shapes, but with actual values.
-    // We will need to send those to the computation device later.
-    var model_weights = try zml.aio.loadModelBuffers(Layer, model_shapes, buffer_store, arena, platform);
-    defer zml.aio.unloadBuffers(&model_weights); // for good practice
+    profiler.start();
+    defer {
+        profiler.stop();
+        profiler.dumpAsJsonTo(allocator, std.fs.cwd(), "trace.json") catch unreachable;
+    }
 
-    // Wait for compilation to finish
-    const compiled = try compilation.awaitt();
+    const dtype = .bf16;
+    const batch_size = 1;
+    const page_count = 8192;
+    const max_page_count = 2048;
+    const chunk_size = 16;
+    const num_heads = 8;
+    const head_dim = 8192;
 
-    // pass the model weights to the compiled module to create an executable module
-    var executable = compiled.prepare(model_weights);
-    defer executable.deinit();
+    const cache_shape = zml.Shape.init(.{ .page = page_count, .k_chunk = chunk_size, .h = num_heads, .hd = head_dim }, dtype);
+    const indices_shape = zml.Shape.init(.{ .b = batch_size, .max_page = max_page_count }, .u32);
+    const input_shape = zml.Shape.init(.{ .b = batch_size, .q = 1, .h = num_heads, .hd = head_dim }, dtype);
+    const mod = try zml.compileFn(allocator, conditionalForward, .{ cache_shape, indices_shape, input_shape }, platform);
+    defer mod.deinit();
 
-    // prepare an input buffer
-    // Here, we use zml.HostBuffer.fromSlice to show how you would create a HostBuffer
-    // with a specific shape from an array.
-    // For situations where e.g. you have an [4]f16 array but need a .{2, 2} input shape.
-    var input = [4]f16{ 5.0, 5.0, 5.0, 5.0 };
-    var input_buffer = try zml.Buffer.from(platform, zml.HostBuffer.fromSlice(input_shape, &input));
-    defer input_buffer.deinit();
+    var generator = std.Random.DefaultPrng.init(0);
+    const random = generator.random();
+
+    var cache = try createRandomBuffer(allocator, platform, cache_shape, random);
+    defer cache.deinit();
+    var input = try createRandomBuffer(allocator, platform, input_shape, random);
+    defer input.deinit();
+
+    const indices_data = try allocator.alloc(u32, max_page_count);
+    defer allocator.free(indices_data);
+
+    //@memset(indices_data, std.math.maxInt(u32));
+    @memset(indices_data, 1);
+    //indices_data[0] = 1;
+    //@memcpy(indices_data[0..16], &[_]u32{ 3, 5, 17, 546, 43, 68, 22, 23, 24, 25, 26, 27, 89, 90, 91, 92 });
+    var indices = try zml.Buffer.fromSlice(platform, indices_shape, indices_data);
+    _ = try indices.awaitt();
 
     // call our executable module
-    var result: zml.Buffer = executable.call(.{input_buffer});
+    var result: zml.Buffer = mod.call(.{ cache, indices, input });
     defer result.deinit();
+}
 
-    // fetch the result to CPU memory
-    const cpu_result = try result.toHostAlloc(arena);
-    std.debug.print(
-        "\nThe result of {d} * {d} + {d} = {d}\n",
-        .{ &weights, &input, &bias, cpu_result.items(f16) },
-    );
+fn createRandomBuffer(allocator: std.mem.Allocator, platform: zml.Platform, shape: zml.Shape, random: std.Random) !zml.Buffer {
+    const data = try allocator.alloc(u8, shape.byteSize());
+    defer allocator.free(data);
+
+    switch (shape.dtype()) {
+        inline else => |v| {
+            const ZigType = v.toZigType();
+            switch (comptime v.class()) {
+                .bool => unreachable,
+                .integer => {
+                    for (std.mem.bytesAsSlice(ZigType, data)) |*e| e.* = random.int(ZigType);
+                },
+                .float => {
+                    const value = random.float(f64);
+                    for (std.mem.bytesAsSlice(ZigType, data)) |*e| e.* = if (ZigType == f64)
+                        value
+                    else if (ZigType == f32)
+                        @floatCast(value)
+                    else if (ZigType == f16)
+                        @floatCast(value)
+                    else
+                        @bitCast(random.int(std.meta.Int(.unsigned, @bitSizeOf(ZigType))));
+                },
+                .complex => unreachable,
+            }
+        },
+    }
+
+    var temp = try zml.Buffer.fromBytes(platform, shape, data);
+    _ = try temp.awaitt();
+    return temp;
 }
