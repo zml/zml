@@ -139,7 +139,7 @@ http_file(
     url = "https://github.com/karpathy/llama2.c/raw/c02865df300f3bd9e567ce061000dc23bf785a17/tokenizer.bin",
 )
 
-bazel_dep(name = "rules_rust", version = "0.57.0")
+bazel_dep(name = "rules_rust", version = "0.57.1")
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(
     edition = "2021",
