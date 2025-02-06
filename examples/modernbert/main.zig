@@ -96,26 +96,34 @@ pub fn unmask(
     defer attention_mask_tensor.deinit();
 
     // Model inference (retrieve indices)
-    const outputs_buffer: zml.Buffer = mod.call(.{ input_ids_tensor, attention_mask_tensor });
-    defer outputs_buffer.deinit();
+    const indices_buffer: zml.Buffer, const values_buffer: zml.Buffer = mod.call(.{ input_ids_tensor, attention_mask_tensor });
+    defer {
+        indices_buffer.deinit();
+        values_buffer.deinit();
+    }
 
     // Transfer the result to host memory (CPU)
-    var outputs_host_buffer = try outputs_buffer.toHostAlloc(allocator);
-    defer outputs_host_buffer.deinit(allocator);
+    var indices_host_buffer = try indices_buffer.toHostAlloc(allocator);
+    defer indices_host_buffer.deinit(allocator);
+    var values_host_buffer = try values_buffer.toHostAlloc(allocator);
+    defer values_host_buffer.deinit(allocator);
 
-    const raw_indices = @as([*]const i32, @ptrCast(@alignCast(outputs_host_buffer.data.ptr)));
+    const raw_indices = @as([*]const i32, @ptrCast(@alignCast(indices_host_buffer.data.ptr)));
+    const raw_probs = @as([*]const f32, @ptrCast(@alignCast(values_host_buffer.data.ptr)));
 
     // We consider only the first occurrence of [MASK], which has five predictions
     const position_offset = mask_positions[0] * 5;
     const predictions = raw_indices[position_offset .. position_offset + 5];
+    const scores = raw_probs[position_offset .. position_offset + 5];
 
     log.info("✅\tTop 5 predictions:", .{});
-    for (predictions) |token_id| {
+    for (predictions, scores) |token_id, score| {
         const token_text = try tokenizer_decoder.next(@intCast(token_id));
         if (token_text) |word| {
-            log.info("\t  • token: {}, word: '{s}'", .{
-                token_id,
+            log.info("\t  • score: {d:.4}  word: '{s}' token: {}", .{
+                score,
                 word,
+                token_id,
             });
         }
     }

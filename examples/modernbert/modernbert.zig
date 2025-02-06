@@ -260,7 +260,7 @@ pub const ModernBertForMaskedLM = struct {
         }
     }
 
-    pub fn forward(self: ModernBertForMaskedLM, input_ids: Tensor, attention_mask: Tensor) Tensor {
+    pub fn forward(self: ModernBertForMaskedLM, input_ids: Tensor, attention_mask: Tensor) struct { Tensor, Tensor } {
         const outputs: Tensor = zml.call(self.model, .forward, .{ input_ids, attention_mask });
         const head_outputs: Tensor = zml.call(self.head, .forward, .{outputs});
 
@@ -271,6 +271,7 @@ pub const ModernBertForMaskedLM = struct {
         const biased_logits = logits.add(self.decoder.bias.withTags(.{.voc}).broad(logits.shape()));
 
         const probabilities = biased_logits.softmax(.voc);
-        return probabilities.topK(5, .voc, .{ .descending = true }).indices;
+        const top_k = probabilities.topK(5, .voc, .{ .descending = true });
+        return .{ top_k.indices, top_k.values };
     }
 };
