@@ -18,34 +18,6 @@ pub const std_options = .{
     .logFn = asynk.logFn(std.log.defaultLog),
 };
 
-fn softmax(logits: []f32, allocator: std.mem.Allocator) ![]f32 {
-    var result = try allocator.alloc(f32, logits.len);
-    errdefer allocator.free(result);
-
-    // Find max for numerical stability
-    var max_logit: f32 = -std.math.inf(f32);
-    for (logits) |logit| {
-        max_logit = @max(max_logit, logit);
-    }
-
-    // Compute exp(logits - max_logit) and sum
-    var exp_sum: f32 = 0.0;
-    for (logits, 0..) |logit, i| {
-        const exp_diff = @exp(logit - max_logit);
-        result[i] = exp_diff;
-        exp_sum += result[i];
-    }
-
-    if (exp_sum == 0) return error.DivisionByZero;
-
-    // Normalize
-    for (result) |*logit| {
-        logit.* = logit.* / exp_sum;
-    }
-
-    return result;
-}
-
 fn findMaskPositions(tokens: []const u32, allocator: std.mem.Allocator) ![]usize {
     var mask_positions = std.ArrayList(usize).init(allocator);
     defer mask_positions.deinit();
@@ -89,8 +61,8 @@ fn prepareTensorInputs(
     return .{ .ids = input_ids, .mask = attention_mask };
 }
 
-// fill-mask pipeline
-// ref: https://github.com/huggingface/transformers/blob/main/src/transformers/pipelines/fill_mask.py
+/// fill-mask pipeline
+/// ref: https://github.com/huggingface/transformers/blob/main/src/transformers/pipelines/fill_mask.py
 pub fn unmask(
     mod: zml.ModuleExe(modernbert.ModernBertForMaskedLM.forward),
     tokenizer: zml.tokenizer.Tokenizer,
@@ -116,57 +88,36 @@ pub fn unmask(
         allocator.free(inputs.mask);
     }
 
-    // Create input tensors
+    // Create input tensors (on the accelerator)
     const input_shape = zml.Shape.init(.{ .b = 1, .s = seq_len }, .i64);
     const input_ids_tensor = try zml.Buffer.fromSlice(mod.platform(), input_shape.dims(), inputs.ids);
     defer input_ids_tensor.deinit();
     const attention_mask_tensor = try zml.Buffer.fromSlice(mod.platform(), input_shape.dims(), inputs.mask);
     defer attention_mask_tensor.deinit();
 
-    // Model inference and transfers outputs from device (CPU/GPU/TPU) to host memory
-    const outputs: zml.Buffer = mod.call(.{ input_ids_tensor, attention_mask_tensor });
-    defer outputs.deinit();
-    var outputs_buffer = try outputs.toHostAlloc(allocator);
-    defer outputs_buffer.deinit(allocator);
+    // Model inference (retrieve indices)
+    const outputs_buffer: zml.Buffer = mod.call(.{ input_ids_tensor, attention_mask_tensor });
+    defer outputs_buffer.deinit();
+    log.info("outputs_buffer: {}", .{outputs_buffer});
 
-    // TODO: break into processOutputs()
-    const vocab_size = 50368; // TODO: from config.json
-    const base_offset = mask_positions[0] * vocab_size; // Skip to mask position prediction. We only handle the first [MASK] position
+    // Transfer the result to host memory (CPU)
+    var outputs_host_buffer = try outputs_buffer.toHostAlloc(allocator);
+    defer outputs_host_buffer.deinit(allocator);
+    log.debug("outputs_host_buffer: {}", .{outputs_host_buffer});
 
-    // Logits processing - extract raw predictions scores
-    const logits = try allocator.alloc(f32, vocab_size);
-    defer allocator.free(logits);
-    const raw_logits = @as([*]const f32, @ptrCast(@alignCast(outputs_buffer.data.ptr))); // This line is hard to read. It converts outputs_buffer pointer to an array of float
-    const predictions_slice = raw_logits[base_offset..][0..vocab_size];
-    @memcpy(logits, predictions_slice); // Then, it copies the relevant slice
+    const raw_indices = @as([*]const i32, @ptrCast(@alignCast(outputs_host_buffer.data.ptr)));
 
-    // Sort desc
-    var indices = try allocator.alloc(usize, vocab_size);
-    defer allocator.free(indices);
-    for (0..vocab_size) |i| {
-        indices[i] = i;
-    }
-    const Context = struct {
-        logits: []const f32,
-        pub fn lessThan(ctx: @This(), a: usize, b: usize) bool {
-            return ctx.logits[a] > ctx.logits[b];
-        }
-    };
-    std.mem.sort(usize, indices, Context{ .logits = logits }, Context.lessThan);
-
-    // Convert to probabilities
-    const probabilities = try softmax(logits, allocator);
-    defer allocator.free(probabilities);
+    // We consider only the first occurrence of [MASK], which has five predictions
+    const position_offset = mask_positions[0] * 5;
+    const predictions = raw_indices[position_offset .. position_offset + 5];
 
     log.info("✅\tTop 5 predictions:", .{});
-    for (indices[0..5]) |token_id| {
+    for (predictions) |token_id| {
         const token_text = try tokenizer_decoder.next(@intCast(token_id));
-
-        if (token_text) |text_slice| {
-            log.info("\t  • score: {d:.6}, word: '{s}', token: {}", .{
-                probabilities[token_id],
-                text_slice,
+        if (token_text) |word| {
+            log.info("\t  • token: {}, word: '{s}'", .{
                 token_id,
+                word,
             });
         }
     }

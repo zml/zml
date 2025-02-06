@@ -267,7 +267,10 @@ pub const ModernBertForMaskedLM = struct {
         // either use decoder or tied weights
         const decoder_weights = self.decoder.weight orelse self.model.embeddings.tok_embeddings.weight;
 
-        const results = head_outputs.withTags(.{ .b, .s, .d }).dot(decoder_weights.withTags(.{ .voc, .d }), .{.d});
-        return results.add(self.decoder.bias.withTags(.{.voc}).broad(results.shape()));
+        const logits = head_outputs.withTags(.{ .b, .s, .d }).dot(decoder_weights.withTags(.{ .voc, .d }), .{.d});
+        const biased_logits = logits.add(self.decoder.bias.withTags(.{.voc}).broad(logits.shape()));
+
+        const probabilities = biased_logits.softmax(-1); // .voc
+        return probabilities.topK(5, -1, .{ .descending = true }).indices; // .voc
     }
 };

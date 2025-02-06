@@ -220,13 +220,4 @@ fn testImplementation(
         model_weights.head,
         0.1, // TODO: too high tolerance
     );
-
-    // try zml.testing.testLayer(
-    //     compute_platform,
-    //     activations,
-    //     "model",
-    //     model,
-    //     model_weights,
-    //     0.1, // TODO: too high tolerance
-    // );
 }
