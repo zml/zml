@@ -136,6 +136,7 @@ const params = clap.parseParamsComptime(
     \\--tokenizer               <PATH>      tokenizer path
     \\--seq-len                 <UINT>      sequence length
     \\--num-attention-heads     <UINT>      number of attention heads
+    \\--tie-word-embeddings     <BOOL>      default: true: tied weights
     \\--create-options          <STRING>    platform creation options JSON, defaults to {}
     \\--sharding                <BOOL>      default: true: sharding on or off
 );
@@ -213,8 +214,8 @@ pub fn asyncMain() !void {
 
     // Create the model struct, with tensor shapes extracted from the tensor_store
     const modernbert_options = modernbert.ModernBertOptions{
-        .num_attention_heads = 12, // TODO: from res.args
-        .tie_word_embeddings = true, // TODO: from res.args
+        .num_attention_heads = @intCast(res.args.@"num-attention-heads" orelse 12),
+        .tie_word_embeddings = res.args.@"tie-word-embeddings" orelse true,
     };
     var modern_bert_for_masked_lm = try zml.aio.populateModel(modernbert.ModernBertForMaskedLM, model_arena, tensor_store);
     modern_bert_for_masked_lm.init(modernbert_options);

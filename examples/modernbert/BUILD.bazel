@@ -61,6 +61,7 @@ cc_binary(
         "--model=$(location @ModernBERT-base//:model.safetensors)",
         "--tokenizer=$(location @ModernBERT-base//:tokenizer)",
         "--num-attention-heads=12",
+        "--tie-word-embeddings=true",
     ],
     data = [
         "@ModernBERT-base//:model.safetensors",
@@ -75,6 +76,7 @@ cc_binary(
         "--model=$(location @ModernBERT-large//:model.safetensors)",
         "--tokenizer=$(location @ModernBERT-large//:tokenizer)",
         "--num-attention-heads=16",
+        "--tie-word-embeddings=true",
     ],
     data = [
         "@ModernBERT-large//:model.safetensors",
