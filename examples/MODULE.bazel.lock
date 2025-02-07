@@ -4252,7 +4252,7 @@
     "@@rules_rust+//crate_universe:extensions.bzl%crate": {
       "general": {
         "bzlTransitiveDigest": "wCEZ3jfLKpigLStmA+7HYbnchHAogZXm6LI/ugF/gfw=",
-        "usagesDigest": "UELY03NZijaUx1pyJ9ACgXF5a9vdW2KwxZXn94d4mMw=",
+        "usagesDigest": "641905SjTVLGtibJNQNQklx/63ZDVAy9joJU2P7P4ho=",
         "recordedFileInputs": {
           "@@zml+//zml/tokenizer/hftokenizers/Cargo.toml": "b0b28872bb74e13aec7ef0ef8dfd5ec99a8573bc12085c0f36711f2a87912061"
         },
