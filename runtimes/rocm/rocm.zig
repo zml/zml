@@ -48,7 +48,7 @@ fn setupRocmEnv() !void {
     for (rocm_env_entries) |entry| {
         var real_path = r.rlocationAlloc(arena.allocator(), entry.rpath) catch null orelse {
             if (entry.mandatory) {
-                stdx.debug.panic("Unable to find {s} in {s}", .{ entry.name, bazel_builtin.current_repository });
+                stdx.debug.panic("Unable to find {s} in {s}\n", .{ entry.name, bazel_builtin.current_repository });
             }
             continue;
         };
