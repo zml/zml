@@ -36,8 +36,8 @@ def _cpu_pjrt_plugin_impl(mctx):
     http_archive(
         name = "libpjrt_cpu_darwin_amd64",
         build_file_content = _BUILD_DARWIN,
-        sha256 = "6148d65748e129ee03a93ac2a10bed193195ea3583ee844feaf4f5b83c9a4536",
-        url = "https://github.com/zml/pjrt-artifacts/releases/download/v6.0.0-rc/pjrt-cpu_darwin-amd64.tar.gz",
+        sha256 = "b33ea54cf3143d6031e7c9e9eedf964f65c508ed3414b185561dd912625e0a7e",
+        url = "https://github.com/zml/pjrt-artifacts/releases/download/v6.0.0/pjrt-cpu_darwin-amd64.tar.gz",
     )
 
     return mctx.extension_metadata(
