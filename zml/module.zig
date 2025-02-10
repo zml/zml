@@ -701,8 +701,6 @@ pub const CompilationContext = struct {
         // Create the result tensor object by combining the operand results,
         // as well as the registered shapes and donations.
         // Note: this assume res can be stack-allocated.
-        // Maybe it'd be simpler to just call the Zig function twice to do the shape/donation propagation for us.
-        // But this is blocked on https://github.com/zml/zml/issues/97
         var res = @as(*const stdx.meta.FnResult(func), @alignCast(@ptrCast(function.res_tensors))).*;
         const LocalContext = struct { index: usize = 0, op: mlir.Operation, function: MlirFn, donations: []Tensor._Donation };
         var context: LocalContext = .{ .op = op, .function = function, .donations = donations };
@@ -1138,16 +1136,10 @@ test "FnCache with mixed integer/tensor" {
     const x = try zml.Buffer.fromSlice(platform, .{2}, &[_]f16{ -1, 1 });
     const nn: zml.Bufferized(NN) = .{
         .layers = .{
-            .{
-                .w = try zml.Buffer.fromSlice(platform, .{ 2, 2 }, &[_]f16{ 1, -1, 0, 1 }),
-            },
-            .{
-                .w = try zml.Buffer.fromSlice(platform, .{ 2, 2 }, &[_]f16{ 1, 2, 1, -1 }),
-            },
+            .{ .w = try zml.Buffer.fromSlice(platform, .{ 2, 2 }, &[_]f16{ 1, -1, 0, 1 }) },
+            .{ .w = try zml.Buffer.fromSlice(platform, .{ 2, 2 }, &[_]f16{ 1, 2, 1, -1 }) },
             // third layer has different shape
-            .{
-                .w = try zml.Buffer.fromSlice(platform, .{ 3, 2 }, &[_]f16{ 1, 2, 0, 1, -1, 0 }),
-            },
+            .{ .w = try zml.Buffer.fromSlice(platform, .{ 3, 2 }, &[_]f16{ 1, 2, 0, 1, -1, 0 }) },
         },
     };
     const res = try zml.testing.compileAndCall(platform, NN._fwd, .{ nn, x });
