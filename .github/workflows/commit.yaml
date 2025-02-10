@@ -31,7 +31,7 @@ jobs:
         run: zig fmt --check  $(git ls-files --exclude-standard -- '*.zig' | xargs)
 
       - name: No autofix in Zig code
-        run: ! git grep -l '// autofix' -- '*.zig'
+        run: bash -c "! git grep -l '// autofix' -- '*.zig'"
 
       - name: Setup bin directory
         run: |
