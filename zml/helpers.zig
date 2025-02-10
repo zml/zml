@@ -13,7 +13,7 @@ test {
 }
 
 const ShapeError = error{ DimMismatch, NotFound };
-const NOT_SET: i64 = 0;
+const NOT_SET: i64 = -2;
 const DIM_MISMATCH: i64 = -1;
 
 /// Collect the given dimensions inside a struct containing tagged tensors.
@@ -26,10 +26,12 @@ pub fn collectDims(
         res: ShapeStruct(dims),
         mode: @TypeOf(mode),
     };
+
     var context = LocalContext{
-        .res = std.mem.zeroes(ShapeStruct(dims)),
+        .res = undefined,
         .mode = mode,
     };
+    @memset(std.mem.bytesAsSlice(i64, std.mem.asBytes(&context.res)), NOT_SET);
 
     meta.visit((struct {
         fn cb(ctx: *LocalContext, shape: *const Shape) void {
@@ -96,7 +98,7 @@ test collectDims {
             collectDims(.{ .b, .d }, &model, .strict),
             error.DimMismatch,
         );
-        try zml.testing.expectEqual(collectDims(.{ .b, .d }, &model, .ignore_errors), .{ .b = -1, .d = 5 });
+        try zml.testing.expectEqual(collectDims(.{ .b, .d }, &model, .ignore_errors), .{ .b = DIM_MISMATCH, .d = 5 });
     }
     {
         var model: Model = .{
@@ -105,7 +107,7 @@ test collectDims {
             .bias = Shape.init(.{5}, .f32).withTags(.{.d}),
         };
         try std.testing.expectEqual(collectDims(.{ .b, .d, .c }, &model, .strict), error.NotFound);
-        try zml.testing.expectEqual(collectDims(.{ .b, .d, .c }, &model, .ignore_errors), .{ .b = 2, .d = 5, .c = 0 });
+        try zml.testing.expectEqual(collectDims(.{ .b, .d, .c }, &model, .ignore_errors), .{ .b = 2, .d = 5, .c = NOT_SET });
     }
     {
         var model: Model = .{
@@ -114,7 +116,7 @@ test collectDims {
             .bias = Shape.init(.{7}, .f32).withTags(.{.d}),
         };
         try std.testing.expectEqual(collectDims(.{ .b, .d }, &model, .strict), error.DimMismatch);
-        try zml.testing.expectEqual(collectDims(.{ .b, .d }, &model, .ignore_errors), .{ .b = 2, .d = -1 });
+        try zml.testing.expectEqual(collectDims(.{ .b, .d }, &model, .ignore_errors), .{ .b = 2, .d = DIM_MISMATCH });
     }
 }
 
