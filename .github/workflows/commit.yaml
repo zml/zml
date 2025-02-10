@@ -27,27 +27,48 @@ jobs:
         with:
           version: ${{ env.ZIG_VERSION }}
 
+      # todo
       - name: Format
         run: zig fmt --check *.zig zml/ examples/ async/ mlir/ pjrt/
-
+      # todo
       - name: No Autofix
-        run: bash -c 'grep "// autofix" zml/**/*.zig ; [ 1 -eq $? ]'
+        run: bash -c 'grep "// autofix" **/**/*.zig ; [ 1 -eq $? ]'
 
       - name: Setup Bazel
         run: |
           wget https://github.com/bazelbuild/bazelisk/releases/download/v${{ env.BAZELISK_VERSION }}/bazelisk-linux-amd64 -O ~/bin/bazel
           chmod +x ~/bin/bazel
-          
-      - name: Tests
-        run: |
-          export PATH=$PATH:~/bin
-          bazel test --remote_cache=grpc://127.0.0.1:15501 //zml:test --test_output=streamed
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+      
+      - name: ZML / bazel mod explain
+        run: bazel mod explain
 
-      - name: Build examples
+      - name: ZML / bazel mod graph
+        run: bazel mod graph
+
+      - name: ZML / bazel query //...
+        run: bazel query //... -- -//runtimes/neuron/...
+
+      - name: ZML / bazel build //...
+        run: bazel build --config=debug --verbose_failures --remote_cache=grpc://127.0.0.1:15501 //... -- -//runtimes/neuron/...
+
+      - name: ZML / bazel test //...
+        run: bazel test --config=debug --verbose_failures --keep_going --test_output=streamed --test_tag_filters=-no_ci //... -- -//runtimes/neuron/...
+
+      - name: Examples / bazel mod explain
         working-directory: examples/
-        run: |
-          export PATH=$PATH:~/bin
-          bazel build --config=debug --remote_cache=grpc://127.0.0.1:15501 //llama
-          bazel build --config=debug --remote_cache=grpc://127.0.0.1:15501 //mnist
-          bazel build --config=debug --remote_cache=grpc://127.0.0.1:15501 //simple_layer
-          bazel build --config=debug --remote_cache=grpc://127.0.0.1:15501 //loader:safetensors
+        run: bazel mod explain
+
+      - name: Examples / bazel mod graph
+        working-directory: examples/
+        run: bazel mod graph
+
+      - name: Examples / bazel query //...
+        working-directory: examples/
+        run: bazel query //...
+
+      - name: Examples / bazel build //...
+        run: bazel build --config=debug --verbose_failures --remote_cache=grpc://127.0.0.1:15501 --build_tag_filters=-no_ci //...
+
+      - name: Examples / bazel test //...
+        run: bazel test --config=debug --verbose_failures --keep_going --test_output=streamed --build_tag_filters=-no_ci --test_tag_filters=-no_ci //...

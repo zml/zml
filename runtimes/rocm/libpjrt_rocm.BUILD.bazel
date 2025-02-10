@@ -5,15 +5,13 @@ load("@zml//bazel:cc_import.bzl", "cc_import")
 string_list_flag(
     name = "gfx",
     build_setting_default = ["all"],
-    visibility = [
-        "@rocblas//:__subpackages__",
-        "@hipblaslt//:__subpackages__",
-    ],
+    visibility = ["//visibility:public"],
 )
 
 bool_flag(
     name = "hipblaslt",
     build_setting_default = True,
+    visibility = ["//visibility:public"],
 )
 
 config_setting(
