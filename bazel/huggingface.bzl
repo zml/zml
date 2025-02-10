@@ -63,9 +63,7 @@ def _huggingface_repository_impl(rctx):
 
     token = _get_token(rctx)
     if token:
-        print(token)
-
-    # headers["Authorization"] = "Bearer " + token
+        headers["Authorization"] = "Bearer " + token
 
     includes = rctx.attr.includes
     excludes = rctx.attr.excludes
