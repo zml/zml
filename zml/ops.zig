@@ -34,7 +34,7 @@ pub fn call(self: anytype, comptime func: stdx.meta.DeclEnum(@TypeOf(self)), arg
     const ctx = CompilationContext.current();
     const name = @typeName(@TypeOf(self)) ++ "." ++ @tagName(func);
     const actual_fn = @field(@TypeOf(self), @tagName(func));
-    return ctx.callFunc(name, actual_fn, .{self} ++ args);
+    return ctx.callFunc(name, actual_fn, .{self} ++ args) catch @panic("OOM");
 }
 
 pub fn while_(

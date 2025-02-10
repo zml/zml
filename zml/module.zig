@@ -71,6 +71,7 @@ const Block = union(BlockKind) {
 pub const MlirFn = struct {
     name: []const u8,
     num_args: u32,
+    res_tensors: *const anyopaque,
     res_types: []mlir.Type,
     res_shapes: []Shape,
     res_donations: []Tensor._Donation,
@@ -394,7 +395,9 @@ pub const CompilationContext = struct {
         // But it forces user to have simpler function.
         const ReturnT = stdx.meta.FnResult(func);
         const out_tensor_count = comptime ops.staticCountTensors(ReturnT) orelse @compileError("Can't use " ++ @typeName(ReturnT) ++ " in an MLIR function, because it has a variable number of tensors");
-        // Those are returned to caller so we don't put them in the arena.
+
+        // Those are returned to caller so we don't put them in the arena, but in the module allocator.
+        const fn_res = try res_allocator.create(ReturnT);
         const fn_res_types = try res_allocator.alloc(mlir.Type, out_tensor_count);
         const fn_res_shapes = try res_allocator.alloc(Shape, out_tensor_count);
         const fn_res_donations = try res_allocator.alloc(Tensor._Donation, out_tensor_count);
@@ -406,14 +409,14 @@ pub const CompilationContext = struct {
             const assigned_args_count = self.mapBlockArguments(args, fn_body.block(), 0);
             std.debug.assert(assigned_args_count == tensor_count);
 
-            const fn_res = forward: {
+            fn_res.* = forward: {
                 self.activate();
                 defer self.deactivate();
                 break :forward @call(.auto, func, args.*);
             };
 
             var fn_res_values: [out_tensor_count]mlir.Value = undefined;
-            self.extractValuesAndTypes(&fn_res, &fn_res_values, fn_res_types, fn_res_shapes, fn_res_donations);
+            self.extractValuesAndTypes(fn_res, &fn_res_values, fn_res_types, fn_res_shapes, fn_res_donations);
 
             const fn_ret = dialect.func.return_(mlir_ctx, &fn_res_values, loc);
             fn_body.appendOperationRecursive(fn_ret);
@@ -457,6 +460,7 @@ pub const CompilationContext = struct {
             .mlir_fn = mlir_fn,
             .name = opts.name,
             .num_args = @intCast(tensor_count),
+            .res_tensors = fn_res,
             .res_types = fn_res_types,
             .res_shapes = fn_res_shapes,
             .res_donations = fn_res_donations,
@@ -639,46 +643,51 @@ pub const CompilationContext = struct {
         func_name: [:0]const u8,
         comptime func: anytype,
         args: stdx.meta.FnArgs(func),
-    ) stdx.meta.FnResult(func) {
+    ) error{OutOfMemory}!stdx.meta.FnResult(func) {
         var arena_state = std.heap.ArenaAllocator.init(self._arena.child_allocator);
         defer arena_state.deinit();
+        // This arena is used for allocations which won't outlive the function call,
+        // but the function creation uses `self.allocator()` which we'll live for the duration of the compilation.
         const arena = arena_state.allocator();
 
         // first, do the "compile" and check the bytecode
         // the result of this will also have the correct tags of the result shapes
         const args_hash = hashArgs(args);
-        const key: FnCache.Key = .{ .fn_ptr = &func, .input_hash = args_hash };
+        const key: FnKey = .{ .fn_ptr = &func, .input_hash = args_hash };
 
-        const function = self._fn_cache.getEntry(key) orelse b: {
+        const function = self._fn_cache.get(key) orelse b: {
             const full_name: [:0]const u8 = if (std.mem.eql(u8, "main", func_name))
-                arena.dupeZ(u8, func_name) catch unreachable
+                try self.allocator().dupeZ(u8, func_name)
             else
-                std.fmt.allocPrintZ(arena, "{s}_{x}", .{ func_name, key.input_hash }) catch unreachable;
+                try std.fmt.allocPrintZ(self.allocator(), "{s}_{x}", .{ func_name, key.input_hash });
 
             var arg_id: u16 = 0;
             var tensor_args: @TypeOf(args) = args;
-            meta.mapAlloc(struct {
+            try meta.mapAlloc(struct {
                 fn cb(arg_id_: *u16, x: Tensor) Tensor {
                     const a = arg_id_.*;
                     arg_id_.* += 1;
                     return Tensor{ ._shape = x._shape, ._id = .{ .arg_id = a }, ._donation = .{ .arg = a } };
                 }
-            }.cb, arena, &arg_id, args, &tensor_args) catch @panic("OutOfMemory");
+            }.cb, arena, &arg_id, args, &tensor_args);
 
-            const f = self.emitMlir(func, &tensor_args, .{
-                .name = full_name,
-            }) catch @panic("OOM");
+            const f = try self.emitMlir(
+                func,
+                &tensor_args,
+                .{ .name = full_name },
+            );
             self._module.getBody().appendOperation(f.mlir_fn);
 
-            break :b self._fn_cache.addEntry(self.allocator(), key, f) catch unreachable;
+            try self._fn_cache.putNoClobber(self.allocator(), key, f);
+            break :b f;
         };
 
         const loc = self.mlirCtx().location(@src());
 
-        const values = arena.alloc(mlir.Value, function.num_args) catch unreachable;
+        const values = try arena.alloc(mlir.Value, function.num_args);
         self.extractValues(&args, values);
 
-        const donations = arena.alloc(Tensor._Donation, function.num_args) catch unreachable;
+        const donations = try arena.alloc(Tensor._Donation, function.num_args);
         meta.collectBuf(struct {
             pub fn cb(ctx: *const CompilationContext, x: Tensor) Tensor._Donation {
                 return ctx.getValueAndDonation(x)[1];
@@ -691,7 +700,7 @@ pub const CompilationContext = struct {
         // Note: this assume res can be stack-allocated.
         // Maybe it'd be simpler to just call the Zig function twice to do the shape/donation propagation for us.
         // But this is blocked on https://github.com/zml/zml/issues/97
-        var res: stdx.meta.FnResult(func) = undefined;
+        var res = @as(*const stdx.meta.FnResult(func), @alignCast(@ptrCast(function.res_tensors))).*;
         const LocalContext = struct { index: usize = 0, op: mlir.Operation, function: MlirFn, donations: []Tensor._Donation };
         var context: LocalContext = .{ .op = op, .function = function, .donations = donations };
         meta.visit((struct {
@@ -911,6 +920,7 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, m
             //  setFlag(&options, "xla_gpu_fused_attention_use_cudnn_rng", true);
             //  setFlag(&options, "xla_gpu_enable_cudnn_layer_norm", true);
             //  setFlag(&options, "xla_gpu_enable_custom_fusions", true);
+            //  setFlags(&options, "xla_gpu_enable_address_computation_fusion", true);
             //  setFlag(&options, "xla_gpu_enable_dynamic_slice_fusion", true);
             //  setFlag(&options, "xla_gpu_enable_while_loop_double_buffering", true);
             //  setFlag(&options, "xla_gpu_use_runtime_fusion", true);
@@ -1009,45 +1019,8 @@ pub fn xxHash64Writer(hasher: *std.hash.XxHash64) XxHash64Writer {
     return .{ .hasher = hasher };
 }
 
-pub const FnCache = struct {
-    pub const Key = struct { fn_ptr: *const anyopaque, input_hash: u64 };
-
-    cache: std.AutoHashMapUnmanaged(Key, MlirFn) = .{},
-
-    pub fn deinit(self: FnCache, allocator: std.mem.Allocator) void {
-        self.cache.deinit(allocator);
-    }
-
-    pub fn getEntry(self: *const FnCache, key: Key) ?MlirFn {
-        return self.cache.get(key);
-    }
-
-    pub fn addEntry(self: *FnCache, allocator: std.mem.Allocator, key: Key, value: MlirFn) !MlirFn {
-        const res_types_copy = try allocator.dupe(mlir.Type, value.res_types);
-        errdefer allocator.free(res_types_copy);
-
-        const res_shapes_copy = try allocator.dupe(Shape, value.res_shapes);
-        errdefer allocator.free(res_shapes_copy);
-
-        const res_donations_copy = try allocator.dupe(Tensor._Donation, value.res_donations);
-        errdefer allocator.free(res_donations_copy);
-
-        const name_copy = try allocator.dupeZ(u8, value.name);
-        errdefer allocator.free(name_copy);
-
-        const owned_value: MlirFn = .{
-            .name = name_copy,
-            .mlir_fn = value.mlir_fn,
-            .num_args = value.num_args,
-            .res_types = res_types_copy,
-            .res_shapes = res_shapes_copy,
-            .res_donations = res_donations_copy,
-        };
-
-        try self.cache.putNoClobber(allocator, key, owned_value);
-        return owned_value;
-    }
-};
+pub const FnCache = std.AutoHashMapUnmanaged(FnKey, MlirFn);
+pub const FnKey = struct { fn_ptr: *const anyopaque, input_hash: u64 };
 
 test FnCache {
     const zml = @import("zml.zig");
@@ -1101,6 +1074,76 @@ test FnCache {
             .{
                 .w = try zml.Buffer.fromSlice(platform, .{ 3, 2 }, &[_]f16{ 1, 2, 0, 1, -1, 0 }),
                 .b = try zml.Buffer.fromSlice(platform, .{3}, &[_]f16{ -10, -10, -10 }),
+            },
+        },
+    };
+    const res = try zml.testing.compileAndCall(platform, NN._fwd, .{ nn, x });
+    const expected = try zml.testing.compileAndCall(platform, NN._forwardRefImpl, .{ nn, x });
+    try zml.testing.expectClose(expected, res, 1e-4);
+}
+
+test "FnCache with mixed integer/tensor" {
+    const zml = @import("zml.zig");
+    const platform = zml.testing.env();
+
+    const Layer = struct {
+        const Layer_ = @This();
+        var num_call: u32 = 0;
+
+        w: Tensor,
+
+        pub fn _fwd(self: Layer_, x: Tensor) struct { Tensor, usize } {
+            const wx = self.w.dotGeneral(x, &.{.{ -1, 0 }}, &.{});
+            // Note: this is for testing only, it's a bad idea to mutate global state
+            // from a forward function because it can mess with caching.
+            num_call += 1;
+            return .{ wx.addConstant(num_call), num_call };
+        }
+    };
+
+    const NN = struct {
+        const NN_ = @This();
+        layers: [3]Layer,
+
+        pub fn _fwd(self: NN_, x0: Tensor) Tensor {
+            var x = x0;
+            var y: usize = 0;
+            x, y = ops.call(self.layers[0], ._fwd, .{x});
+            std.debug.assert(Layer.num_call == 1);
+            std.debug.assert(y == 1);
+            // Here we call a second time but since first two layers have the same shape,
+            // We hit the function cache, and "num_call" is not incremented.
+            x, y = ops.call(self.layers[1], ._fwd, .{x});
+            std.debug.assert(Layer.num_call == 1);
+            std.debug.assert(y == 1);
+            x, y = ops.call(self.layers[2], ._fwd, .{x});
+            std.debug.assert(Layer.num_call == 2);
+            std.debug.assert(y == 2);
+            return x;
+        }
+
+        pub fn _forwardRefImpl(self: NN_, x0: Tensor) Tensor {
+            var x = x0;
+            for (self.layers, &[_]u32{ 1, 1, 2 }) |layer, bias| {
+                const wx = layer.w.dotGeneral(x, &.{.{ -1, 0 }}, &.{});
+                x = wx.addConstant(bias);
+            }
+            return x;
+        }
+    };
+
+    const x = try zml.Buffer.fromSlice(platform, .{2}, &[_]f16{ -1, 1 });
+    const nn: zml.Bufferized(NN) = .{
+        .layers = .{
+            .{
+                .w = try zml.Buffer.fromSlice(platform, .{ 2, 2 }, &[_]f16{ 1, -1, 0, 1 }),
+            },
+            .{
+                .w = try zml.Buffer.fromSlice(platform, .{ 2, 2 }, &[_]f16{ 1, 2, 1, -1 }),
+            },
+            // third layer has different shape
+            .{
+                .w = try zml.Buffer.fromSlice(platform, .{ 3, 2 }, &[_]f16{ 1, 2, 0, 1, -1, 0 }),
             },
         },
     };
