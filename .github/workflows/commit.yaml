@@ -33,43 +33,48 @@ jobs:
       # - name: No Autofix
       #   run: find . -name "*.zig" -print | while read file; do git check-ignore -q "$file" || (grep -q "// autofix" "$file" && echo "$file"); done | grep -q . ; [ 1 -eq $? ]
 
+      - name: Setup bin directory
+        run: |
+          mkdir -p $HOME/bin
+          echo "$HOME/bin" >> $GITHUB_PATH
+
       - name: Setup Bazel
         run: |
-          mkdir -p ~/bin/
-          wget https://github.com/bazelbuild/bazelisk/releases/download/v${{ env.BAZELISK_VERSION }}/bazelisk-linux-amd64
-          chmod +x ~/bin/bazel
+          wget https://github.com/bazelbuild/bazelisk/releases/download/v1.19.0/bazelisk-linux-amd64
+          chmod +x bazelisk-linux-amd64
+          mv bazelisk-linux-amd64 $HOME/bin/bazel
       
       - name: ZML / bazel mod explain
-        run: ~/bin/bazel mod explain
+        run: bazel mod explain
 
       - name: ZML / bazel mod graph
-        run: ~/bin/bazel mod graph
+        run: bazel mod graph
 
       - name: ZML / bazel query //...
-        run: ~/bin/bazel query --remote_cache=grpc://127.0.0.1:15501 //... -- -//runtimes/neuron/...
+        run: bazel query --remote_cache=grpc://127.0.0.1:15501 //... -- -//runtimes/neuron/...
 
       - name: ZML / bazel build //...
-        run: ~/bin/bazel build --config=debug --verbose_failures --remote_cache=grpc://127.0.0.1:15501 //... -- -//runtimes/neuron/...
+        run: bazel build --config=debug --verbose_failures --remote_cache=grpc://127.0.0.1:15501 //... -- -//runtimes/neuron/...
 
       - name: ZML / bazel test //...
-        run: ~/bin/bazel test --config=debug --verbose_failures --keep_going --test_output=streamed --test_tag_filters=-no_ci //... -- -//runtimes/neuron/...
+        run: bazel test --config=debug --verbose_failures --keep_going --test_output=streamed --test_tag_filters=-no_ci //... -- -//runtimes/neuron/...
 
       - name: Examples / bazel mod explain
         working-directory: examples/
-        run: ~/bin/bazel mod explain
+        run: bazel mod explain
 
       - name: Examples / bazel mod graph
         working-directory: examples/
-        run: ~/bin/bazel mod graph
+        run: bazel mod graph
 
       - name: Examples / bazel query //...
         working-directory: examples/
-        run: ~/bin/bazel query --remote_cache=grpc://127.0.0.1:15501 //...
+        run: bazel query --remote_cache=grpc://127.0.0.1:15501 //...
 
       - name: Examples / bazel build //...
         working-directory: examples/
-        run: ~/bin/bazel build --config=debug --verbose_failures --remote_cache=grpc://127.0.0.1:15501 --build_tag_filters=-no_ci //...
+        run: bazel build --config=debug --verbose_failures --remote_cache=grpc://127.0.0.1:15501 --build_tag_filters=-no_ci //...
 
       # - name: Examples / bazel test //...
       #   working-directory: examples/
-      #   run: ~/bin/bazel test --config=debug --verbose_failures --keep_going --test_output=streamed --build_tag_filters=-no_ci --test_tag_filters=-no_ci //...
+      #   run: bazel test --config=debug --verbose_failures --keep_going --test_output=streamed --build_tag_filters=-no_ci --test_tag_filters=-no_ci //...
