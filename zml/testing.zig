@@ -17,7 +17,6 @@ pub fn env() zml.Platform {
         _platform = ctx.autoPlatform(.{}).withCompilationOptions(.{
             .xla_dump_to = "/tmp/zml/tests/",
             .sharding_enabled = true,
-            .xla_dump_hlo_pass_re = ".*",
         });
     }
 

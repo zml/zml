@@ -115,12 +115,15 @@ pub const CompilationContext = struct {
         var mlir_ctx = mlir.Context.initWithRegistry(mlir_registry, false) catch unreachable;
         mlir_ctx.loadAllAvailableDialects();
 
-        // Too long module names create too long file paths.
-        const name = full_name[0..@min(128, full_name.len)];
+        // Too long module names create too long file paths and files failed to create.
+        // * leave half of the space for parent folder and XLA generated filename,
+        // * leave 17 bytes for the module hash (16 + 1 for underscode).
+        const max_name_len = @divFloor(std.fs.max_path_bytes, 2) - 17;
+        const name = full_name[0..@min(max_name_len, full_name.len)];
 
         const loc = mlir_ctx.location(@src()).named(mlir_ctx, "main");
         const module = mlir.Module.init(loc);
-        module.op().setAttributeByName("sym_name", mlir.StringAttribute.init(mlir_ctx, name).as(mlir.Attribute).?);
+        module.op().setAttributeByName("sym_name", mlir.StringAttribute.init(mlir_ctx, "zml").as(mlir.Attribute).?);
 
         var canonicalizer = try mlir.PassManager.init(mlir_ctx);
         {
@@ -131,12 +134,12 @@ pub const CompilationContext = struct {
         }
 
         var arena = std.heap.ArenaAllocator.init(allocator_);
-        _ = try arena.allocator().alloc(u8, std.mem.page_size);
+        _ = try arena.allocator().alloc(u8, 4096);
         _ = arena.reset(.retain_capacity);
 
         return .{
             ._platform = platform,
-            ._name = name,
+            ._name = try arena.allocator().dupe(u8, name),
             ._mlir_ctx = mlir_ctx,
             ._mlir_registry = mlir_registry,
             ._mlir_canonicalizer = canonicalizer,
