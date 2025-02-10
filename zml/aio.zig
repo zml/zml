@@ -148,7 +148,7 @@ pub const BufferStore = struct {
         return null;
     }
 };
-// autofix
+
 pub const Metadata = union(enum) {
     null: void,
     int: i64,

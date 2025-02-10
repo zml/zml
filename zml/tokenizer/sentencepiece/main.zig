@@ -230,9 +230,9 @@ pub fn main() !void {
 
     // const ss2 = 128;
     // var buf = [_]u8{0} ** ss2;
-    // // _ = buf; // autofix
+    // // _ = buf;
     // var last_tokens: []u8 = &.{};
-    // // _ = last_tokens; // autofix
+    // // _ = last_tokens;
     // decoder.reserve_tokens(4);
     // decoder.reserve_string(128);
 

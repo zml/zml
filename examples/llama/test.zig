@@ -66,7 +66,7 @@ pub fn asyncMain() !void {
         break :blk config_obj;
     };
     std.log.info("Parsed llama config: {}", .{config});
-    // autofix
+
     const llama_config: LlamaLM.Config = .{
         .eos_token_id = config.eos_token_id,
         .bos_token_id = config.bos_token_id,

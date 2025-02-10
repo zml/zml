@@ -27,12 +27,11 @@ jobs:
         with:
           version: ${{ env.ZIG_VERSION }}
 
-      # todo
-      - name: Format
-        run: zig fmt --check *.zig zml/ examples/ async/ mlir/ pjrt/
-      # todo
+      - name: Zig Format
+        run: zig fmt --check  $(find . -name "*.zig" -print | while read file; do git check-ignore -q "$file" || echo "$file"; done | xargs)
+
       - name: No Autofix
-        run: bash -c 'grep "// autofix" **/**/*.zig ; [ 1 -eq $? ]'
+        run: find . -name "*.zig" -print | while read file; do git check-ignore -q "$file" || (grep -q "// autofix" "$file" && echo "$file"); done | grep -q . ; [ 1 -eq $? ]
 
       - name: Setup Bazel
         run: |
@@ -47,7 +46,7 @@ jobs:
         run: bazel mod graph
 
       - name: ZML / bazel query //...
-        run: bazel query //... -- -//runtimes/neuron/...
+        run: bazel query --remote_cache=grpc://127.0.0.1:15501 //... -- -//runtimes/neuron/...
 
       - name: ZML / bazel build //...
         run: bazel build --config=debug --verbose_failures --remote_cache=grpc://127.0.0.1:15501 //... -- -//runtimes/neuron/...
@@ -65,10 +64,12 @@ jobs:
 
       - name: Examples / bazel query //...
         working-directory: examples/
-        run: bazel query //...
+        run: bazel query --remote_cache=grpc://127.0.0.1:15501 //...
 
       - name: Examples / bazel build //...
+        working-directory: examples/
         run: bazel build --config=debug --verbose_failures --remote_cache=grpc://127.0.0.1:15501 --build_tag_filters=-no_ci //...
 
       - name: Examples / bazel test //...
+        working-directory: examples/
         run: bazel test --config=debug --verbose_failures --keep_going --test_output=streamed --build_tag_filters=-no_ci --test_tag_filters=-no_ci //...
