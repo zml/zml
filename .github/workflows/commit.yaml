@@ -22,11 +22,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup bin directory
-        run: |
-          mkdir -p $HOME/bin
-          echo "$HOME/bin" >> $GITHUB_PATH
-
       - name: Setup Zig
         uses: goto-bus-stop/setup-zig@v2
         with:
@@ -37,6 +32,11 @@ jobs:
 
       # - name: No Autofix
       #   run: find . -name "*.zig" -print | while read file; do git check-ignore -q "$file" || (grep -q "// autofix" "$file" && echo "$file"); done | grep -q . ; [ 1 -eq $? ]
+
+      - name: Setup bin directory
+        run: |
+          mkdir -p $HOME/bin
+          echo "$HOME/bin" >> $GITHUB_PATH
 
       - name: Setup Bazel
         run: |
