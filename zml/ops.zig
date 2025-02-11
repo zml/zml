@@ -34,7 +34,7 @@ pub fn call(self: anytype, comptime func: stdx.meta.DeclEnum(@TypeOf(self)), arg
     const ctx = CompilationContext.current();
     const name = @typeName(@TypeOf(self)) ++ "." ++ @tagName(func);
     const actual_fn = @field(@TypeOf(self), @tagName(func));
-    return ctx.callFunc(name, actual_fn, .{self} ++ args);
+    return ctx.callFunc(name, actual_fn, .{self} ++ args) catch @panic("OOM");
 }
 
 pub fn while_(
@@ -445,14 +445,36 @@ pub fn if_(
     if (TrueBlockSignature.Return != FalseBlockSignature.Return) {
         @compileError("true_branch_fn and false_branch_fn return types don't match ! " ++ @typeName(TrueBlockSignature.Return) ++ " and " ++ @typeName(FalseBlockSignature.Return));
     }
+
+    stdx.debug.assert(pred.dtype() == .bool and pred.count() == 1, "zml.ops.if_ expects the condition to have exactly one element of dtype .bool, got {}", .{pred});
+
     const ctx = CompilationContext.current();
     const true_branch_block, const true_branch_res = ctx.makeBlock(.open, TrueBlockSignature, &true_branch_fn, blkctx, {});
     const false_branch_block, const false_branch_res = ctx.makeBlock(.open, TrueBlockSignature, &false_branch_fn, blkctx, {});
-    stdx.debug.assert(false_branch_res.shape().eqlWithTags(true_branch_res.shape()), "zml.ops.if_ expects true and false branch to produce outputs of the same shape, but it produced true={} and false={}", .{ true_branch_res, false_branch_res });
 
+    var true_shapes = std.ArrayList(Shape).init(ctx.allocator());
+    defer true_shapes.deinit();
+    var false_shapes = std.ArrayList(Shape).init(ctx.allocator());
+    defer false_shapes.deinit();
+
+    var failed_to_collect = false;
+    meta.collect(Tensor.shape, {}, &true_shapes, &true_branch_res) catch {
+        failed_to_collect = true;
+    };
+    meta.collect(Tensor.shape, {}, &false_shapes, &false_branch_res) catch {
+        failed_to_collect = true;
+    };
+    if (!failed_to_collect) {
+        stdx.debug.assert(true_shapes.items.len == false_shapes.items.len, "zml.ops.if_ expects the true and false branch to produce the same number of tensors. Got: \n - true branch: {_}\n -false branch: {_}", .{ true_shapes.items, false_shapes.items });
+        for (true_shapes.items, false_shapes.items) |true_shape, false_shape| {
+            stdx.debug.assert(true_shape.eqlWithTags(false_shape), "zml.ops.if_ expects the true and false branch to produce tensors of the same shape. Got: \n - true branch: {_}\n -false branch: {_}", .{ true_shapes.items, false_shapes.items });
+        }
+    }
+
+    const scalar_pred = if (pred.rank() == 0) pred else pred.flattenAll().squeeze(0);
     const loc = ctx.mlirCtx().location(@src());
     const op = mlir.Operation.make(ctx.mlirCtx(), "stablehlo.if", .{
-        .operands = &.{pred.value()},
+        .operands = &.{scalar_pred.value()},
         .result_type_inference = true,
         .blocks = &.{ true_branch_block, false_branch_block },
         // We can't verify right away, cause the weights captured by the if haven't been added yet.
@@ -791,7 +813,7 @@ pub fn scatter(
 
     // validate coord axes: all coord_axes should exist inside self
     for (indices_axes.constSlice()) |t| {
-        stdx.debug.assert(self._shape.hasTag(t) != null, "zml.ops.scatter expects axes of indices to be axes of inputs, got input={_} and indices={any}", .{ self, indices_axes });
+        stdx.debug.assert(self._shape.hasTag(t) != null, "zml.ops.scatter expects axes of indices to be axes of inputs, got input={_} and indices={s}", .{ self, indices_axes.constSlice() });
     }
 
     // Handle scalar indices by broadcasting them to the indices with the highest rank.
@@ -905,7 +927,7 @@ fn scatterConfig(
             scatter_to_operand_axes.appendAssumeCapacity(op.axis(t));
         }
         for (indices.tags()) |t| {
-            stdx.debug.assert(update.hasTag(t) != null, "scatter expects 'updates' to have all axes of 'indices', got updates={} and indices={s}", .{ update, indices_axes.constSlice() });
+            stdx.debug.assert(update.hasTag(t) != null, "scatter expects 'updates' to have all axes of 'indices', got self={_}, updates={_} and indices={_}", .{ op, update, indices });
             updates_transpose.appendAssumeCapacity(update.axis(t));
         }
 
