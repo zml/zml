@@ -190,6 +190,13 @@ pub const BaseExe = struct {
         self._arena.deinit();
     }
 
+    pub fn dupe(self: BaseExe, allocator: std.mem.Allocator) !BaseExe {
+        var copy = try BaseExe.init(allocator, self.platform, self.exe, .{ .n_in = self.input_buffer_count, .result_shapes = self.result_shapes, .n_devices = self.num_devices });
+        errdefer copy.deinit();
+
+        return copy;
+    }
+
     pub fn call(self: BaseExe) void {
         stdx.debug.assert(self.input_buffer_count == self.ready_buffer_count, "BaseExe isn't ready to be called, expected {} buffer inputs got {}", .{ self.input_buffer_count, self.ready_buffer_count });
         return self._unsafeCall();
@@ -268,6 +275,15 @@ pub fn Exe(ArgsT: type, ReturnT: type) type {
             var new: Exe(stdx.meta.Tail(ArgsT), ReturnT) = .{ .inner = self.inner };
             new.inner.prepare(first_arg);
             return new;
+        }
+
+        pub fn dupeAndPrepare(self: Self, allocator: std.mem.Allocator, first_arg: Bufferized(stdx.meta.Head(ArgsT))) !Exe(stdx.meta.Tail(ArgsT), ReturnT) {
+            var new_inner = try self.inner.dupe(allocator);
+            errdefer new_inner.deinit();
+
+            new_inner.prepare(first_arg);
+
+            return .{ .inner = new_inner };
         }
 
         pub fn serialize(self: Self, writer: anytype) !void {
