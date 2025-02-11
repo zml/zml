@@ -514,6 +514,76 @@ test "if" {
     }
 }
 
+/// Execute exactly one of the `branches` given by `index`.
+///
+/// If `index` is out of bound, it is clamped withing bounds.
+///
+/// The branches take no parameters but can access the local context given by `blkctx`.
+pub fn case(
+    index: Tensor,
+    comptime branches: anytype,
+    blkctx: BlockSignNoArgs(branches[0]).BlkCtx,
+) BlockSign(branches[0]).Return {
+    const Signature = BlockSignNoArgs(branches[0]);
+    const ctx = CompilationContext.current();
+
+    const branch_count = branches.len;
+    var blocks: [branch_count]mlir.Block = undefined;
+    var res: [branch_count]Signature.Return = undefined;
+    inline for (branches, 0..) |branch, i| {
+        blocks[i], res[i] = ctx.makeBlock(.open, Signature, &branch, blkctx, {});
+    }
+
+    const loc = ctx.mlirCtx().location(@src());
+    const op = mlir.Operation.make(ctx.mlirCtx(), "stablehlo.case", .{
+        .operands = &.{index.value()},
+        .result_type_inference = true,
+        .blocks = &blocks,
+        // We can't verify right away, cause the weights captured by the if haven't been added yet.
+        .verify = false,
+        .location = loc,
+    });
+
+    return fromMlirOperationWithTags(op, res[0]);
+}
+
+test "case" {
+    const zml = @import("zml.zig");
+    const platform = zml.testing.env();
+
+    const CaseMod = struct {
+        pub fn _fwd(index: Tensor, a: Tensor, b: Tensor) Tensor {
+            const result = case(index, .{ case1, case2, case3 }, .{ a, b });
+            return result;
+        }
+
+        pub fn case1(a: Tensor, b: Tensor) Tensor {
+            return a.matmul(b);
+        }
+
+        pub fn case2(a: Tensor, b: Tensor) Tensor {
+            return a.add(b);
+        }
+
+        pub fn case3(a: Tensor, b: Tensor) Tensor {
+            return a.sub(b);
+        }
+    };
+
+    {
+        const index = try zml.Buffer.fromSlice(platform, .{}, &[1]i32{1});
+        const a = try zml.Buffer.fromSlice(platform, .{ 2, 2 }, &[4]f32{ 1, 1, 2, 2 });
+        const b = try zml.Buffer.fromSlice(platform, .{ 2, 2 }, &[4]f32{ 1, 1, 1, 1 });
+        const result = try zml.testing.compileAndCall(platform, CaseMod._fwd, .{ index, a, b });
+
+        const expected: [2][2]f32 = .{
+            .{ 2, 2 },
+            .{ 3, 3 },
+        };
+        try std.testing.expectEqual(expected, result.getValue(@TypeOf(expected)));
+    }
+}
+
 pub fn sort(
     comptime comp_fn: anytype,
     blkctx: BlockSign(comp_fn).BlkCtx,
