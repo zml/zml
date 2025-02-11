@@ -127,6 +127,19 @@ pub const Profiler = struct {
         dir: std.fs.Dir,
         file_name: []const u8,
     ) !void {
+        log.info("Writing profiling data to {s}", .{file_name});
+        var output_file = try dir.createFile(file_name, .{});
+        defer output_file.close();
+        var buffered_writer = std.io.bufferedWriter(output_file.writer());
+        try self.dumpAsJsonToWriter(allocator, buffered_writer.writer());
+        try buffered_writer.flush();
+    }
+
+    pub fn dumpAsJsonToWriter(
+        self: *Profiler,
+        allocator: std.mem.Allocator,
+        writer: anytype,
+    ) !void {
         const profile_data = try self.collectData(allocator);
         defer profile_data.free(allocator);
 
@@ -139,12 +152,7 @@ pub const Profiler = struct {
         defer converter.deinit();
         try converter.parseXSpaceBytes(profile_data.items(), 1_000_000);
 
-        var output_file = try dir.createFile(file_name, .{});
-        defer output_file.close();
-        var buffered_writer = std.io.bufferedWriter(output_file.writer());
-        log.info("Writing profiling data to {s}", .{file_name});
-        try converter.toJson(buffered_writer.writer());
-        try buffered_writer.flush();
+        try converter.toJson(writer);
     }
 
     fn check(self: *Profiler, c_error: ?*Error) !void {
