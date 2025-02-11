@@ -117,7 +117,7 @@ pub const CompilationContext = struct {
 
         // Too long module names create too long file paths and files failed to create.
         // * leave half of the space for parent folder and XLA generated filename,
-        // * leave 17 bytes for the module hash (16 + 1 for underscode).
+        // * leave 17 bytes for the module hash (16 + 1 for underscore).
         const max_name_len = @divFloor(std.fs.max_path_bytes, 2) - 17;
         const name = full_name[0..@min(max_name_len, full_name.len)];
 
