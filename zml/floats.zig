@@ -83,7 +83,8 @@ fn FloatType(sign_bits: u1, exponent_bits: u8, mantissa_bits: u8, innerT: type) 
         }
 
         fn expBias() u8 {
-            return std.math.maxInt(std.meta.Int(.unsigned, exponent_bits - 1));
+            if (exponent_bits == 1) return 0;
+            return (1 << (exponent_bits - 1)) - 1;
         }
 
         pub fn format(

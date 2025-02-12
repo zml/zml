@@ -1650,10 +1650,10 @@ pub const Location = struct {
     }
 
     pub fn namedFmt(loc: Location, ctx: Context, comptime fmt: [:0]const u8, args: anytype) Location {
-        var buf: [256]u8 = undefined;
+        var buf: [512]u8 = undefined;
         var stream = std.io.fixedBufferStream(&buf);
         std.fmt.format(stream.writer(), fmt, args) catch {
-            buf[256 - 3 ..].* = "...".*;
+            buf[512 - 3 ..].* = "...".*;
         };
         return loc.named(ctx, @ptrCast(stream.getWritten()));
     }

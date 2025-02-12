@@ -96,6 +96,7 @@ pub const CompilationContext = struct {
 
     _blocks: std.BoundedArray(Block, 64) = .{},
     _fn_cache: FnCache = .{},
+    _block_name: []const u8 = "",
 
     _block_args: TensorToBlockArg = .{},
     _unique_id: u64 = 10000,
@@ -185,7 +186,16 @@ pub const CompilationContext = struct {
     }
 
     pub fn location(self: *const CompilationContext, src: std.builtin.SourceLocation, comptime name: [:0]const u8, args: anytype) mlir.Location {
-        return self._mlir_ctx.location(src).namedFmt(self._mlir_ctx, name, args);
+        return if (self._block_name.len == 0)
+            self._mlir_ctx.location(src).namedFmt(self._mlir_ctx, name, args)
+        else if (name.len == 0)
+            self._mlir_ctx.location(src).namedFmt(self._mlir_ctx, "{s}", .{self._block_name})
+        else
+            self._mlir_ctx.location(src).namedFmt(self._mlir_ctx, "{s}/" ++ name, .{self._block_name} ++ args);
+    }
+
+    pub fn setBlockName(self: *CompilationContext, block_name: []const u8) void {
+        self._block_name = block_name;
     }
 
     /// Compiles the given function with the given arguments.
@@ -920,10 +930,10 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, m
             //  setFlag(&options, "xla_gpu_enable_cudnn_fmha", true);
             //  setFlag(&options, "xla_gpu_fused_attention_use_cudnn_rng", true);
             //  setFlag(&options, "xla_gpu_enable_cudnn_layer_norm", true);
-            //  setFlag(&options, "xla_gpu_enable_custom_fusions", true);
-            //  setFlags(&options, "xla_gpu_enable_address_computation_fusion", true);
-            //  setFlag(&options, "xla_gpu_enable_dynamic_slice_fusion", true);
-            //  setFlag(&options, "xla_gpu_enable_while_loop_double_buffering", true);
+            // setFlag(&options, "xla_gpu_enable_custom_fusions", true);
+            // setFlag(&options, "xla_gpu_enable_address_computation_fusion", true);
+            setFlag(&options, "xla_gpu_enable_dynamic_slice_fusion", true);
+            setFlag(&options, "xla_gpu_enable_while_loop_double_buffering", true);
             //  setFlag(&options, "xla_gpu_use_runtime_fusion", true);
         },
         .rocm => {

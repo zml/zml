@@ -245,7 +245,7 @@ pub const Tensor = struct {
 
     /// Returns a Tensor containing the absolute value of each element of the input Tensor.
     pub fn abs(self: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
+        const loc = self.getContext().location(@src(), "", .{});
         const op = dialect.stablehlo.abs(self.getContext().mlirCtx(), self.value(), loc);
         const dt = switch (self.dtype()) {
             .c64 => .f32,
@@ -290,14 +290,14 @@ pub const Tensor = struct {
 
     /// Returns a Tensor containing the element-wise number of leading 0 bits in the input Tensor.
     pub fn countLeadingZeros(self: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
+        const loc = self.getContext().location(@src(), "", .{});
         const op = dialect.stablehlo.count_leading_zeros(self.getContext().mlirCtx(), self.value(), loc);
         return _result(self._shape, op.result(0));
     }
 
     /// Returns a Tensor containing booleans indicating if each element of the input Tensor is finite.
     pub fn isFinite(self: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
+        const loc = self.getContext().location(@src(), "", .{});
         const op = dialect.stablehlo.is_finite(self.getContext().mlirCtx(), self.value(), loc);
         return _result(self._shape.withDtype(.bool), op.result(0));
     }
@@ -305,14 +305,14 @@ pub const Tensor = struct {
     /// Returns a Tensor containing the element-wise number of bits set in the input Tensor.
     pub fn popcnt(self: Tensor) Tensor {
         stdx.debug.assert(self.dtype().isInteger(), "popcnt expects tensor type to be an integer, got {}", .{self.dtype()});
-        const loc = self.getContext().mlirCtx().location(@src());
+        const loc = self.getContext().location(@src(), "", .{});
         const op = dialect.stablehlo.popcnt(self.getContext().mlirCtx(), self.value(), loc);
         return _result(self._shape, op.result(0));
     }
 
     /// Returns a Tensor containing the sign of the input Tensor element-wise.
     pub fn sign(self: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
+        const loc = self.getContext().location(@src(), "", .{});
         const op = dialect.stablehlo.sign(self.getContext().mlirCtx(), self.value(), loc);
         return _result(self._shape, op.result(0));
     }
@@ -381,7 +381,7 @@ pub const Tensor = struct {
     pub fn roundNearestAfz(self: Tensor) Tensor {
         stdx.debug.assert(self.dtype().isFloat(), "roundNearestAfz expects tensor type to be a float, got {}", .{self.dtype()});
 
-        const loc = self.getContext().mlirCtx().location(@src());
+        const loc = self.getContext().location(@src(), "", .{});
         const op = dialect.stablehlo.round_nearest_afz(self.getContext().mlirCtx(), self.value(), loc);
         return _result(self._shape, op.result(0));
     }
@@ -390,7 +390,7 @@ pub const Tensor = struct {
     pub fn roundNearestEven(self: Tensor) Tensor {
         stdx.debug.assert(self.dtype().isFloat(), "roundNearestEven expects tensor type to be a float, got {}", .{self.dtype()});
 
-        const loc = self.getContext().mlirCtx().location(@src());
+        const loc = self.getContext().location(@src(), "", .{});
         const op = dialect.stablehlo.round_nearest_even(self.getContext().mlirCtx(), self.value(), loc);
         return _result(self._shape, op.result(0));
     }
@@ -400,7 +400,7 @@ pub const Tensor = struct {
         stdx.debug.assert(re._shape.eql(im._shape), "complex expects tensor shapes to match, got {} and {}", .{ re._shape, im._shape });
         stdx.debug.assert(re.dtype() == .f32 or re.dtype() == .f64, "complex expects tensors type to be f32 or f64, got {}", .{re.dtype()});
 
-        const loc = re.getContext().mlirCtx().location(@src());
+        const loc = re.getContext().location(@src(), "", .{});
         const op = dialect.stablehlo.complex(re.getContext().mlirCtx(), re.value(), im.value(), loc);
         const dt: DataType = if (re.dtype() == .f32) .c64 else .c128;
         return _result(re._shape.withDtype(dt), op.result(0));
@@ -421,7 +421,7 @@ pub const Tensor = struct {
             .c128 => .f64,
             else => unreachable,
         };
-        const loc = self.getContext().mlirCtx().location(@src());
+        const loc = self.getContext().location(@src(), "", .{});
         const op = dialect.stablehlo.real(self.getContext().mlirCtx(), self.value(), loc);
         return _result(self._shape.withDtype(dt), op.result(0));
     }
@@ -443,7 +443,7 @@ pub const Tensor = struct {
             .c128 => .f64,
             else => unreachable,
         };
-        const loc = self.getContext().mlirCtx().location(@src());
+        const loc = self.getContext().location(@src(), "", .{});
         const op = dialect.stablehlo.imag(self.getContext().mlirCtx(), self.value(), loc);
         return _result(self._shape.withDtype(dt), op.result(0));
     }
@@ -994,13 +994,13 @@ pub const Tensor = struct {
 
     /// Returns a Tensor containing the element-wise floor operation of the input Tensor.
     pub fn floor(self: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
+        const loc = self.getContext().location(@src(), "", .{});
         return _result(self._shape, dialect.stablehlo.floor(self.getContext().mlirCtx(), self.value(), loc).result(0));
     }
 
     /// Returns a Tensor containing the element-wise ceil operation of the input Tensor.
     pub fn ceil(self: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
+        const loc = self.getContext().location(@src(), "", .{});
         return _result(self._shape, dialect.stablehlo.ceil(self.getContext().mlirCtx(), self.value(), loc).result(0));
     }
 
@@ -1019,14 +1019,14 @@ pub const Tensor = struct {
 
     /// Returns a Tensor containing the element-wise rounding operation of the input Tensor.
     pub fn round(self: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
+        const loc = self.getContext().location(@src(), "", .{});
         const sine_op = dialect.stablehlo.round_nearest_even(self.getContext().mlirCtx(), self.value(), loc);
         return _result(self._shape, sine_op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise clamping operation of the input Tensor.
     pub fn clamp(self: Tensor, min_: Tensor, max_: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
+        const loc = self.getContext().location(@src(), "", .{});
         const op = dialect.stablehlo.clamp(self.getContext().mlirCtx(), min_.value(), self.value(), max_.value(), loc);
         return _result(self._shape, op.result(0));
     }
@@ -1192,7 +1192,7 @@ pub const Tensor = struct {
 
     /// Returns a Tensor containing the sigmoid function applied to each element of the input Tensor.
     pub fn sigmoid(self: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
+        const loc = self.getContext().location(@src(), "", .{});
         const op = dialect.stablehlo.logistic(self.getContext().mlirCtx(), self.value(), loc);
         return _result(self._shape, op.result(0));
     }
@@ -1678,63 +1678,63 @@ pub const Tensor = struct {
 
     /// Returns a Tensor containing the element-wise negation of the input Tensor.
     pub fn negate(self: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
+        const loc = self.getContext().location(@src(), "", .{});
         const negate_op = dialect.stablehlo.negate(self.getContext().mlirCtx(), self.value(), loc);
         return _result(self._shape, negate_op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise cosine of the input Tensor.
     pub fn cos(self: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
+        const loc = self.getContext().location(@src(), "", .{});
         const cosine_op = dialect.stablehlo.cosine(self.getContext().mlirCtx(), self.value(), loc);
         return _result(self._shape, cosine_op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise sine of the input Tensor.
     pub fn sin(self: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
+        const loc = self.getContext().location(@src(), "", .{});
         const sine_op = dialect.stablehlo.sine(self.getContext().mlirCtx(), self.value(), loc);
         return _result(self._shape, sine_op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise exponential operation of the input Tensor.
     pub fn exp(self: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
+        const loc = self.getContext().location(@src(), "", .{});
         const op = dialect.stablehlo.exponential(self.getContext().mlirCtx(), self.value(), loc);
         return _result(self._shape, op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise logarithm operation of the input Tensor.
     pub fn log(self: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
+        const loc = self.getContext().location(@src(), "", .{});
         const op = dialect.stablehlo.log(self.getContext().mlirCtx(), self.value(), loc);
         return _result(self._shape, op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise square-root of the input Tensor.
     pub fn sqrt(self: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
+        const loc = self.getContext().location(@src(), "", .{});
         const sqrt_op = dialect.stablehlo.sqrt(self.getContext().mlirCtx(), self.value(), loc);
         return _result(self._shape, sqrt_op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise reverse square-root of the input Tensor.
     pub fn rsqrt(self: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
+        const loc = self.getContext().location(@src(), "", .{});
         const rsqrt_op = dialect.stablehlo.rsqrt(self.getContext().mlirCtx(), self.value(), loc);
         return _result(self._shape, rsqrt_op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise hyperbolic tangent of the input Tensor.
     pub fn tanh(self: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
+        const loc = self.getContext().location(@src(), "", .{});
         const tanh_op = dialect.stablehlo.tanh(self.getContext().mlirCtx(), self.value(), loc);
         return _result(self._shape, tanh_op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise exponential minus one operation of the input Tensor.
     pub fn exponentialMinusOne(self: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
+        const loc = self.getContext().location(@src(), "", .{});
         const expm1_op = dialect.stablehlo.exponential_minus_one(self.getContext().mlirCtx(), self.value(), loc);
         return _result(self._shape, expm1_op.result(0));
     }
@@ -2165,7 +2165,7 @@ pub const Tensor = struct {
         }
 
         // scoped_log.debug("gatherValues --> {} {any}", .{ res_shape, res_kind.constSlice() });
-        const loc = self.getContext().mlirCtx().location(@src());
+        const loc = self.getContext().location(@src(), "", .{});
         const gather_op = dialect.stablehlo.gather(
             self.getContext().mlirCtx(),
             self.value(),
@@ -3264,7 +3264,7 @@ pub const Tensor = struct {
             }
         }
 
-        const loc = self.getContext().mlirCtx().location(@src());
+        const loc = self.getContext().location(@src(), "", .{});
         const op = dialect.stablehlo.dynamic_update_slice(
             self.getContext().mlirCtx(),
             self.value(),
@@ -3534,7 +3534,7 @@ pub const Tensor = struct {
         stdx.debug.assert(bool_tensor._shape.eqlDims(on_true._shape), "select expects input tensor and 'on_true' tensor dimensions to match, got {} and {}", .{ bool_tensor._shape, on_true._shape });
         stdx.debug.assert(bool_tensor._shape.eqlDims(on_false._shape), "select expects input tensor and 'on_false' tensor dimensions to match, got {} and {}", .{ bool_tensor._shape, on_false._shape });
 
-        const loc = bool_tensor.getContext().mlirCtx().location(@src());
+        const loc = bool_tensor.getContext().location(@src(), "", .{});
         const op = dialect.stablehlo.select(
             bool_tensor.getContext().mlirCtx(),
             bool_tensor.value(),
@@ -3548,7 +3548,7 @@ pub const Tensor = struct {
 
     /// Returns a Tensor containing the element-wise not logical operation of the input Tensor.
     pub fn not(self: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
+        const loc = self.getContext().location(@src(), "", .{});
         const op = dialect.stablehlo.not(self.getContext().mlirCtx(), self.value(), loc);
         return _result(self._shape, op.result(0));
     }

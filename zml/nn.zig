@@ -161,6 +161,9 @@ pub const RopeOpts = struct {
 /// - pos_idx: optional tensor which indicates which positions are needed.
 ///   When not set `rope` return all positions from 0 to x.dim(.s) which is the max seq len.
 pub fn rope(x: Tensor, pos_idx: ?Tensor, opts: RopeOpts) Tensor {
+    x.getContext().setBlockName("rope");
+    defer x.getContext().setBlockName("");
+
     stdx.debug.assert(@mod(x.dim(.hd), 2) == 0, "rope expects a even head dim (.hd), got {}", .{x});
 
     const idx = if (pos_idx) |idx| blk: {
