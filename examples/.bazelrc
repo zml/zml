@@ -2,6 +2,10 @@
 try-import      %workspace%/../.bazelrc-examples
 try-import      %workspace%/.bazelrc-zml
 
+common   --override_module=zig-protobuf=%workspace%/../../zig-protobuf
+
+# common   --override_module=libxev=%workspace%/../../libxev
+
 # Faster hash function
 startup         --digest_function=blake3
 

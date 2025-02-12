@@ -47,9 +47,10 @@ register_toolchains("@toolchains_protoc_hub//:all")
 
 zig = use_extension("@rules_zig//zig:extensions.bzl", "zig")
 zig.index(file = "//bazel:zig_index.json")
-zig.toolchain(zig_version = "0.14.0-dev.363+c3faae6bf")
+zig.toolchain(zig_version = "0.14.0-dev.3199+4162f401c")
 zig.mirrors(urls = [
     "https://mirror.zml.ai/zig",
+    "https://ziglang.org/builds/",
 ])
 use_repo(zig, "zig_toolchains")
 

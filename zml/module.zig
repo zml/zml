@@ -204,7 +204,7 @@ pub const CompilationContext = struct {
         var timer = std.time.Timer.start() catch null;
         const tensor_args = try self.tensorFromShapes(stdx.meta.FnArgs(func), arena, args);
         // Run in a dedicated thread because compilation relies on `threadlocal`.
-        const f = try asynk.callBlocking(CompilationContext.emitMlir, .{ self, func, &tensor_args, .{ .name = "main", .kind = .main } });
+        const f = try asynk.callBlocking(CompilationContext.emitMlir, .{ self, func, &tensor_args, CompilationContext.EmitMlirOpts{ .name = "main", .kind = .main } });
         const module = self._module;
         module.getBody().appendOperation(f.mlir_fn);
 
@@ -296,7 +296,7 @@ pub const CompilationContext = struct {
 
     pub fn closeBlock(self: *CompilationContext, block: Block) void {
         const popped = self._blocks.pop();
-        std.debug.assert(block.block().eql(popped.block()));
+        std.debug.assert(block.block().eql(popped.?.block()));
     }
 
     fn pushBlock(self: *CompilationContext, block: Block) void {
@@ -348,6 +348,11 @@ pub const CompilationContext = struct {
         return .{ block.block(), block_res };
     }
 
+    pub const EmitMlirOpts = struct {
+        name: []const u8,
+        kind: MlirFn.Kind = .private,
+    };
+
     /// Generate an MLIR function from a ZML function.
     /// The caller is responsible to have properly created the input
     /// tensors with unique tensor ids.
@@ -355,10 +360,7 @@ pub const CompilationContext = struct {
         self: *CompilationContext,
         comptime func: anytype,
         args: *const stdx.meta.FnArgs(func),
-        opts: struct {
-            name: []const u8,
-            kind: MlirFn.Kind = .private,
-        },
+        opts: EmitMlirOpts,
     ) error{OutOfMemory}!MlirFn {
         const frame = self._tracer.frameStart("emitMlir.emit");
         errdefer self._tracer.frameEnd(frame, "emitMlir.emit");
@@ -944,9 +946,9 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, m
 
 fn setFlag(options: *xla_pb.CompileOptionsProto, comptime flag: [:0]const u8, value: anytype) void {
     const option: xla_pb.OptionOverrideProto = switch (@typeInfo(@TypeOf(value))) {
-        .Bool => .{ .value = .{ .bool_field = value } },
-        .ComptimeInt, .Int => .{ .value = .{ .int_field = value } },
-        .ComptimeFloat, .Float => .{ .value = .{ .double_field = value } },
+        .bool => .{ .value = .{ .bool_field = value } },
+        .comptime_int, .int => .{ .value = .{ .int_field = value } },
+        .comptime_float, .float => .{ .value = .{ .double_field = value } },
         else => .{ .value = .{ .string_field = .{ .Const = value } } },
     };
     options.env_option_overrides.appendAssumeCapacity(.{ .key = .{ .Const = flag }, .value = option });
@@ -1179,11 +1181,11 @@ pub fn hash(hasher: *std.hash.Wyhash, key: anytype, comptime strat: HashStrategy
     }
 
     switch (@typeInfo(Key)) {
-        .NoReturn, .Opaque, .Undefined, .Null, .ComptimeFloat, .ComptimeInt, .Type, .EnumLiteral, .Frame, .Void => return,
+        .noreturn, .@"opaque", .undefined, .null, .comptime_float, .comptime_int, .type, .enum_literal, .frame, .void => return,
 
         // Help the optimizer see that hashing an int is easy by inlining!
         // TODO Check if the situation is better after #561 is resolved.
-        .Int => |int| switch (int.signedness) {
+        .int => |int| switch (int.signedness) {
             .signed => hash(hasher, @as(@Type(.{ .Int = .{
                 .bits = int.bits,
                 .signedness = .unsigned,
@@ -1202,43 +1204,43 @@ pub fn hash(hasher: *std.hash.Wyhash, key: anytype, comptime strat: HashStrategy
         // Note: contrary to Zig we accept hashing floats.
         // Typically the float we are going to hash here are hyperparameters,
         // and not the result of an operation, so bytes should be the same everytime.
-        .Float => hasher.update(std.mem.asBytes(&key)),
-        .Bool => hash(hasher, @intFromBool(key), strat),
-        .Enum => hash(hasher, @intFromEnum(key), strat),
-        .ErrorSet => hash(hasher, @intFromError(key), strat),
-        .AnyFrame, .Fn => hash(hasher, @intFromPtr(key), strat),
-        .Pointer => |info| switch (info.size) {
-            .One => switch (strat) {
-                .Shallow => hash(hasher, @intFromPtr(key), .Shallow),
-                .Deep => hash(hasher, key.*, .Shallow),
-                .DeepRecursive => switch (@typeInfo(info.child)) {
-                    .Opaque, .Fn => hash(hasher, @intFromPtr(key), .Shallow),
+        .float => hasher.update(std.mem.asBytes(&key)),
+        .bool => hash(hasher, @intFromBool(key), strat),
+        .@"enum" => hash(hasher, @intFromEnum(key), strat),
+        .error_set => hash(hasher, @intFromError(key), strat),
+        .@"anyframe", .@"fn" => hash(hasher, @intFromPtr(key), strat),
+        .pointer => |info| switch (info.size) {
+            .one => switch (strat) {
+                .shallow => hash(hasher, @intFromPtr(key), .Shallow),
+                .deep => hash(hasher, key.*, .Shallow),
+                .deeprecursive => switch (@typeInfo(info.child)) {
+                    .@"opaque", .@"fn" => hash(hasher, @intFromPtr(key), .Shallow),
                     else => hash(hasher, key.*, .DeepRecursive),
                 },
             },
-            .Slice => {
+            .slice => {
                 switch (strat) {
-                    .Shallow => hash(hasher, @intFromPtr(key.ptr), .Shallow),
-                    .Deep => hashArray(hasher, key, .Shallow),
-                    .DeepRecursive => hashArray(hasher, key, .DeepRecursive),
+                    .shallow => hash(hasher, @intFromPtr(key.ptr), .Shallow),
+                    .deep => hashArray(hasher, key, .Shallow),
+                    .deeprecursive => hashArray(hasher, key, .DeepRecursive),
                 }
                 hash(hasher, key.len, .Shallow);
             },
-            .Many,
-            .C,
+            .many,
+            .c,
             => switch (strat) {
-                .Shallow => hash(hasher, @intFromPtr(key), .Shallow),
+                .shallow => hash(hasher, @intFromPtr(key), .Shallow),
                 else => @compileError(
                     \\ unknown-length pointers and C pointers cannot be hashed deeply.
                     \\ Consider providing your own hash function.
                 ),
             },
         },
-        .Optional => if (key) |k| hash(hasher, k, strat),
+        .optional => if (key) |k| hash(hasher, k, strat),
 
-        .Array => hashArray(hasher, key, strat),
+        .array => hashArray(hasher, key, strat),
 
-        .Vector => |info| {
+        .vector => |info| {
             if (std.meta.hasUniqueRepresentation(Key)) {
                 hasher.update(std.mem.asBytes(&key));
             } else {
@@ -1249,7 +1251,7 @@ pub fn hash(hasher: *std.hash.Wyhash, key: anytype, comptime strat: HashStrategy
             }
         },
 
-        .Struct => |info| {
+        .@"struct" => |info| {
             inline for (info.fields) |field| {
                 // We reuse the hash of the previous field as the seed for the
                 // next one so that they're dependant.
@@ -1257,7 +1259,7 @@ pub fn hash(hasher: *std.hash.Wyhash, key: anytype, comptime strat: HashStrategy
             }
         },
 
-        .Union => |info| {
+        .@"union" => |info| {
             if (info.tag_type) |tag_type| {
                 const tag = std.meta.activeTag(key);
                 hash(hasher, tag, strat);
@@ -1275,7 +1277,7 @@ pub fn hash(hasher: *std.hash.Wyhash, key: anytype, comptime strat: HashStrategy
             } else @compileError("cannot hash untagged union type: " ++ @typeName(Key) ++ ", provide your own hash function");
         },
 
-        .ErrorUnion => blk: {
+        .error_union => blk: {
             const payload = key catch |err| {
                 hash(hasher, err, strat);
                 break :blk;
