@@ -19,7 +19,7 @@ pub const HostBuffer = struct {
     _strides: ?[Shape.MAX_RANK]i64 = null,
     data: []const u8,
     _memory: union(enum) {
-        managed: u5,
+        managed: std.mem.Alignment,
         unmanaged,
     } = .unmanaged,
 
@@ -29,8 +29,8 @@ pub const HostBuffer = struct {
     pub fn empty(allocator: std.mem.Allocator, sh: Shape) !HostBuffer {
         return .{
             ._shape = sh,
-            .data = try allocator.alignedAlloc(u8, std.atomic.cache_line, sh.byteSize()),
-            ._memory = .{ .managed = std.math.log2_int(u16, std.atomic.cache_line) },
+            .data = try allocator.alignedAlloc(u8, 64, sh.byteSize()),
+            ._memory = .{ .managed = .@"64" },
         };
     }
 
@@ -174,9 +174,10 @@ pub const HostBuffer = struct {
         return if (self._strides) |*strd| strd[0..self.rank()] else null;
     }
 
-    pub fn data(self: HostBuffer) []const u8 {
-        return self.data;
-    }
+    // TODO: rename .data into ._data and make it a [*]u8
+    // pub fn data(self: HostBuffer) []const u8 {
+    //     return self.data;
+    // }
 
     pub inline fn rank(self: HostBuffer) u4 {
         return self._shape.rank();
@@ -336,7 +337,7 @@ pub const HostBuffer = struct {
 
 fn parseArrayInfo(T: type) Shape {
     return switch (@typeInfo(T)) {
-        .Array => |arr| {
+        .array => |arr| {
             const s = parseArrayInfo(arr.child);
             return s.insert(0, .{arr.len});
         },

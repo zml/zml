@@ -27,7 +27,7 @@ const log = std.log.scoped(.zml);
 /// * loading weights from disk directly to the `device zml.aio.loadBuffers`
 /// * can be created by calling `HostBuffer.toDevice(platform)`.
 pub const Buffer = struct {
-    pub const Memory = enum(@typeInfo(pjrt.Memory.Kind).Enum.tag_type) {
+    pub const Memory = enum(@typeInfo(pjrt.Memory.Kind).@"enum".tag_type) {
         host = @intFromEnum(pjrt.Memory.Kind.unpinned_host),
         host_pinned = @intFromEnum(pjrt.Memory.Kind.pinned_host),
         device = @intFromEnum(pjrt.Memory.Kind.device),
@@ -91,7 +91,7 @@ pub const Buffer = struct {
             const frame = try asynk.asyncc(pjrt.Client.bufferFromHostBuffer, .{
                 platform.pjrt_client,
                 platform.pjrt_api,
-                .{
+                pjrt.Client.BufferFromHostBufferArgs{
                     .data = buf.data,
                     .buffer_type = buffer_type,
                     .dims = buf.shape().dims(),
@@ -239,7 +239,7 @@ pub const Buffer = struct {
             // TODO: exposes sharding in the API.
             .device = platform.getDevices()[0],
             .layout = .{
-                .Tiled = .{
+                .tiled = .{
                     .minor_to_major = minor_to_major[Shape.MAX_RANK - shape_.rank() ..],
                     .tile_dims = &.{},
                     .tile_dims_sizes = &.{},
@@ -404,12 +404,12 @@ pub fn dtypeFromBufferType(pjrt_type: pjrt.BufferType) DataType {
 }
 
 test bufferTypeFromDtype {
-    inline for (@typeInfo(DataType).Enum.fields) |field| {
+    inline for (@typeInfo(DataType).@"enum".fields) |field| {
         const dt: DataType = @enumFromInt(field.value);
         try std.testing.expectEqual(dt, dtypeFromBufferType(bufferTypeFromDtype(dt)));
     }
 
-    inline for (@typeInfo(pjrt.BufferType).Enum.fields) |field| {
+    inline for (@typeInfo(pjrt.BufferType).@"enum".fields) |field| {
         const dt: pjrt.BufferType = @enumFromInt(field.value);
         if (dt == .INVALID) continue;
         try std.testing.expectEqual(dt, bufferTypeFromDtype(dtypeFromBufferType(dt)));

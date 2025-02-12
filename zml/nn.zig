@@ -69,14 +69,14 @@ pub const Activation = union(enum) {
             .leakyReLU => |slope| x.leakyReLU(slope),
         };
     }
-
-    pub fn elu(x: Tensor, alpha: f32) Tensor {
-        return x.cmp(.GE, Tensor.scalar(0, x.dtype())).select(
-            x,
-            x.exp().addConstant(-1).scale(alpha),
-        );
-    }
 };
+
+pub fn elu(x: Tensor, alpha: f32) Tensor {
+    return x.cmp(.GE, Tensor.scalar(0, x.dtype())).select(
+        x,
+        x.exp().addConstant(-1).scale(alpha),
+    );
+}
 
 pub fn chainModules(module_list: anytype, input: Tensor) Tensor {
     const T = @TypeOf(module_list);
@@ -1175,6 +1175,13 @@ pub const DynamicSamplingStrategy = struct {
     top_p: Tensor,
     min_p: Tensor,
 
+    pub const Opts = struct {
+        top_k: u32,
+        temperature: f32 = 1.0,
+        top_p: f32 = 1.0,
+        min_p: f32 = 0.0,
+    };
+
     pub fn shapes(dtype: DataType, max_top_k: u32) zml.ShapeOf(DynamicSamplingStrategy) {
         const scalar_float = Shape.init(.{}, dtype);
         const scalar_i32 = Shape.init(.{}, .i32);
@@ -1190,19 +1197,14 @@ pub const DynamicSamplingStrategy = struct {
     pub fn makeBuffers(
         platform: zml.Platform,
         dtype: zml.DataType,
-        args: struct {
-            top_k: u32,
-            temperature: f32 = 1.0,
-            top_p: f32 = 1.0,
-            min_p: f32 = 0.0,
-        },
+        opts: Opts,
     ) !zml.Bufferized(DynamicSamplingStrategy) {
         return .{
             .max_top_k = 0,
-            .top_k = try zml.Buffer.scalar(platform, args.top_k, .i32),
-            .temperature = try zml.Buffer.scalar(platform, args.temperature, dtype),
-            .top_p = try zml.Buffer.scalar(platform, args.top_p, dtype),
-            .min_p = try zml.Buffer.scalar(platform, args.min_p, dtype),
+            .top_k = try zml.Buffer.scalar(platform, opts.top_k, .i32),
+            .temperature = try zml.Buffer.scalar(platform, opts.temperature, dtype),
+            .top_p = try zml.Buffer.scalar(platform, opts.top_p, dtype),
+            .min_p = try zml.Buffer.scalar(platform, opts.min_p, dtype),
         };
     }
 };
@@ -1275,7 +1277,8 @@ test sampleTokensDynamic {
     const mod = try zml.compileFn(allocator, fixupLogits, .{ Shape.init(.{ .voc = logits.len }, .f32), DynamicSamplingStrategy.shapes(.f32, 0) }, platform);
     defer mod.deinit();
 
-    inline for (.{
+    const Args = struct { DynamicSamplingStrategy.Opts, [4]f32 };
+    inline for ([_]Args{
         // top_k == logits.len -> just sort the input
         .{ .{ .top_k = 4 }, [_]f32{ @log(4.0), @log(3.0), @log(2.0), @log(1.0) } },
         .{ .{ .top_k = 2 }, [_]f32{ @log(4.0), @log(3.0), ___, ___ } },

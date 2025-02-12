@@ -95,7 +95,7 @@ pub fn unsqueeze(
 ) Tensor {
     stdx.debug.assert(self.rank() < Tensor.MAX_RANK - 1, "Can't unsqueeze {}, it's already at max rank.", .{self});
     const a = switch (@typeInfo(@TypeOf(axis_))) {
-        .Int, .ComptimeInt => if (axis_ < 0)
+        .int, .comptime_int => if (axis_ < 0)
             @as(i8, self.rank()) + 1 + axis_
         else
             self.axis(axis_),

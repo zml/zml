@@ -107,7 +107,7 @@ test "simple while" {
 
     const init_i = try zml.Buffer.fromSlice(platform, .{}, &[_]i64{0});
     const init_sum = try zml.Buffer.fromSlice(platform, .{}, &[_]i64{0});
-    const counter = .{
+    const counter: zml.Bufferized(CountInts) = .{
         .step = try zml.Buffer.fromSlice(platform, .{}, &[_]i64{1}),
         .end = try zml.Buffer.fromSlice(platform, .{}, &[_]i64{10}),
     };
@@ -301,7 +301,7 @@ pub fn for_(comptime func: anytype, blk_ctx: BlockSign(func).BlkCtx, num_steps_:
             // Reuse the first step Tensor.
             // TODO: this is needed because of https://github.com/zml/zml/issues/97
             // Normally I'd rather NOT reuse first_step to streamline the stablehlo IR.
-            return first_step.reshape(shape).pad(0, .{ ._0 = .{ .high = self.num_steps - 1 } });
+            return first_step.reshape(shape).pad(0, .{ ._0 = Tensor.Pad{ .high = self.num_steps - 1 } });
         }
 
         fn wrapFirstStep(tag_: @TypeOf(step_tag), x: Tensor) Tensor {
@@ -404,12 +404,12 @@ test "nested for" {
         }
 
         pub fn scanRow(x: Tensor, i: Tensor) Tensor {
-            const row = x.dynamicSlice(.{.{ .start = i, .len = 1 }});
+            const row = x.dynamicSlice(.{Tensor.DynSlice{ .start = i, .len = 1 }});
             return for_(OuterProd.scanCol, .{ .x = x, .x_row = row }, .{x.dim(0)});
         }
 
         pub fn scanCol(self: OuterProd, j: Tensor) Tensor {
-            const col = self.x.dynamicSlice(.{.{ .start = j, .len = 1 }});
+            const col = self.x.dynamicSlice(.{Tensor.DynSlice{ .start = j, .len = 1 }});
             return self.x_row.mul(col);
         }
     };
@@ -663,10 +663,10 @@ pub fn fnInfo(comptime func: anytype) std.builtin.Type.Fn {
     }
     const type_info = @typeInfo(@TypeOf(func));
     const err_msg = "`func` must be a function and return one or more `Tensor`. Got: ";
-    if (type_info != .Fn or type_info.Fn.return_type == null) {
+    if (type_info != .@"fn" or type_info.@"fn".return_type == null) {
         @compileError(err_msg ++ @typeName(@TypeOf(func)));
     }
-    return type_info.Fn;
+    return type_info.@"fn";
 }
 
 fn _BlockSign(comptime func: anytype, blk_type: BlockType) BlockSignature {
@@ -731,13 +731,13 @@ pub fn staticCountTensors(comptime T: type) ?usize {
     if (T == Tensor) return 1;
 
     return switch (@typeInfo(T)) {
-        .Array => |array_info| array_info.len * (staticCountTensors(array_info.child) orelse return null),
-        .Pointer => |ptr_info| {
+        .array => |array_info| array_info.len * (staticCountTensors(array_info.child) orelse return null),
+        .pointer => |ptr_info| {
             const n = staticCountTensors(ptr_info.child) orelse return null;
             if (ptr_info.size != .One and n > 0) return null;
             return n;
         },
-        .Struct => |struct_info| {
+        .@"struct" => |struct_info| {
             var count: usize = 0;
             inline for (struct_info.fields) |field| {
                 count += staticCountTensors(field.type) orelse return null;
