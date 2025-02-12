@@ -12,9 +12,6 @@ zig_cc_binary(
         "llama.zig",
     ],
     main = "main.zig",
-    tags = [
-        "no_ci",
-    ],
     deps = [
         "@com_github_hejsil_clap//:clap",
         "@zml//async",

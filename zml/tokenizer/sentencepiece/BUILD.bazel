@@ -1,5 +1,4 @@
 load("@rules_zig//zig:defs.bzl", "zig_library")
-load("@zml//bazel:zig.bzl", "zig_cc_binary")
 load("//bazel:swig.bzl", "swig_cc_library")
 
 swig_cc_library(
@@ -16,17 +15,6 @@ zig_library(
     name = "sentencepiece",
     import_name = "sentencepiece",
     main = "sentencepiece.zig",
-    visibility = ["//visibility:public"],
-    deps = [
-        ":sentencepiece_swig",
-        "//ffi:zig",
-    ],
-)
-
-zig_cc_binary(
-    name = "main",
-    srcs = ["sentencepiece.zig"],
-    main = "main.zig",
     visibility = ["//visibility:public"],
     deps = [
         ":sentencepiece_swig",
