@@ -35,6 +35,9 @@ oci_image(
     name = "image_",
     base = "@distroless_cc_debian12",
     entrypoint = ["./{}/simple_layer".format(package_name())],
+    target_compatible_with = [
+        "@platforms//os:linux",
+    ],
     tars = [":archive"],
 )
 
@@ -42,6 +45,9 @@ oci_image(
 platform_transition_filegroup(
     name = "image",
     srcs = [":image_"],
+    target_compatible_with = [
+        "@platforms//os:linux",
+    ],
     target_platform = "@zml//platforms:linux_amd64",
 )
 
@@ -52,6 +58,9 @@ oci_load(
     repo_tags = [
         "distroless/simple_layer:latest",
     ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+    ],
 )
 
 # Bazel target for pushing the Linux image to the docker registry
@@ -61,4 +70,7 @@ oci_push(
     remote_tags = ["latest"],
     # override with -- --repository foo.bar/org/image
     repository = "index.docker.io/renerocksai/simple_layer",
+    target_compatible_with = [
+        "@platforms//os:linux",
+    ],
 )

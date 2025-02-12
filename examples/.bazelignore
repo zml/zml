@@ -1,0 +1,3 @@
+examples
+third_party/modules
+.zig-cache

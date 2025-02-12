@@ -2,10 +2,12 @@ load("@rules_zig//zig:defs.bzl", "zig_library")
 load("@zml//bazel:zig.bzl", "zig_cc_binary")
 load("//bazel:zig_proto_library.bzl", "zig_proto_library")
 
-
 cc_library(
     name = "dlfcn",
     hdrs = ["dlfcn.h"],
+    target_compatible_with = [
+        "@platforms//os:linux",
+    ],
 )
 
 zig_library(
@@ -40,10 +42,10 @@ zig_proto_library(
 )
 
 zig_proto_library(
-     name = "trace_events_proto",
-     import_name = "//tsl:trace_events_proto",
-     deps = ["@tsl//tsl/profiler/protobuf:trace_events_proto"],
- )
+    name = "trace_events_proto",
+    import_name = "//tsl:trace_events_proto",
+    deps = ["@tsl//tsl/profiler/protobuf:trace_events_proto"],
+)
 
 zig_cc_binary(
     name = "xspace_to_json",
@@ -53,6 +55,6 @@ zig_cc_binary(
     deps = [
         ":trace_events_proto",
         ":xplane_proto",
-        "//examples/third_party/tigerbeetle:flags",
+        "//stdx",
     ],
 )

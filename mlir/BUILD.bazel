@@ -25,6 +25,7 @@ cc_library(
 
 zig_library(
     name = "mlir",
+    copts = ["-lc"],
     main = "mlir.zig",
     visibility = ["//visibility:public"],
     deps = [

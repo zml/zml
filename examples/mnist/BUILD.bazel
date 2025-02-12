@@ -60,12 +60,18 @@ oci_image(
     name = "image_",
     base = "@distroless_cc_debian12",
     entrypoint = ":entrypoint",
+    target_compatible_with = [
+        "@platforms//os:linux",
+    ],
     tars = [":archive"],
 )
 
 platform_transition_filegroup(
     name = "image",
     srcs = [":image_"],
+    target_compatible_with = [
+        "@platforms//os:linux",
+    ],
     target_platform = "@zml//platforms:linux_amd64",
 )
 
@@ -75,6 +81,9 @@ oci_load(
     repo_tags = [
         "distroless/mnist:latest",
     ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+    ],
 )
 
 oci_push(
@@ -82,6 +91,9 @@ oci_push(
     image = ":image",
     remote_tags = ["latest"],
     repository = "index.docker.io/steeve/mnist",
+    target_compatible_with = [
+        "@platforms//os:linux",
+    ],
 )
 
 oci_load(
@@ -89,5 +101,8 @@ oci_load(
     image = ":image",
     repo_tags = [
         "distroless/mnist:latest",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
     ],
 )

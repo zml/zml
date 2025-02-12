@@ -1,7 +1,8 @@
 const std = @import("std");
 const zml = @import("zml");
+const stdx = @import("stdx");
 const asynk = @import("async");
-const flags = @import("tigerbeetle/flags");
+const flags = stdx.flags;
 
 // set log level to debug to print the generated IR
 pub const std_options = .{

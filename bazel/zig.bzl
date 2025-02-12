@@ -7,6 +7,7 @@ def zig_cc_binary(
         env = None,
         data = [],
         deps = [],
+        tags = [],
         visibility = None,
         **kwargs):
     zig_binary(
@@ -24,6 +25,7 @@ def zig_cc_binary(
         env = env,
         data = data,
         deps = [":{}_lib".format(name)],
+        tags = tags,
         visibility = visibility,
     )
 
@@ -34,12 +36,14 @@ def zig_cc_test(
         data = [],
         deps = [],
         test_runner = None,
+        tags = [],
         visibility = None,
         **kwargs):
     zig_binary(
         name = "{}_test_lib".format(name),
         kind = BINARY_KIND.test_lib,
         test_runner = test_runner,
+        tags = tags,
         copts = copts + ["-lc", "-fcompiler-rt"],
         deps = deps + [
             "@rules_zig//zig/lib:libc",
@@ -51,6 +55,7 @@ def zig_cc_test(
         env = env,
         data = data,
         deps = [":{}_test_lib".format(name)],
+        tags = tags,
         visibility = visibility,
         linkstatic = True,
     )

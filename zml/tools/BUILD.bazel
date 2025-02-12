@@ -4,6 +4,9 @@ cc_library(
     name = "macos_c",
     srcs = ["macos.c"],
     hdrs = ["macos.h"],
+    target_compatible_with = [
+        "@platforms//os:macos",
+    ],
     visibility = ["//zml/tools:__subpackages__"],
 )
 

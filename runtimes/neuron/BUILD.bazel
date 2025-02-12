@@ -64,7 +64,7 @@ compile_pip_requirements(
     name = "requirements",
     src = "requirements.in",
     py_binary = py_binary_with_script,
-    requirements_txt = "requirements_lock.txt",
+    requirements_txt = "requirements.lock.txt",
 )
 
 runfiles_to_default(

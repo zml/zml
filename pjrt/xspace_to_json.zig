@@ -1,5 +1,6 @@
-const flags = @import("tigerbeetle/flags");
 const std = @import("std");
+const stdx = @import("stdx");
+const flags = stdx.flags;
 
 const TraceContainer = @import("convert/trace_container.zig").TraceContainer;
 
@@ -26,8 +27,9 @@ pub fn main() !void {
     defer allocator.free(pb_buffer);
     if (pb_buffer.len == 0) return error.EmptyBuffer;
 
-    var converter = try TraceContainer.init(allocator, pb_buffer, cli_args.max_events);
+    var converter = TraceContainer.init(allocator);
     defer converter.deinit();
+    try converter.parseXSpaceBytes(pb_buffer, cli_args.max_events);
 
     var path_buffer: [1028]u8 = undefined;
 
