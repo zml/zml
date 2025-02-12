@@ -411,7 +411,7 @@ pub const Socket = struct {
     };
 
     pub const UDP = struct {
-        const Inner = aio.TCP;
+        const Inner = aio.UDP;
 
         pub const Reader = std.io.GenericReader(UDP, stdx.meta.FnSignature(UDP.read, null).ReturnErrorSet.?, UDP.read);
         pub const WriterContext = struct {
@@ -431,11 +431,11 @@ pub const Socket = struct {
                 .inner = aio.UDP.init(AsyncThread.current.executor, try xev.UDP.init(addr)),
             };
             try self.inner.udp.bind(addr);
-            try self.inner.udp.listen(1024);
+            // try self.inner.udp.listen(1024);
             return self;
         }
 
-        pub fn read(self: UDP, buf: []u8) !usize {
+        pub fn read(self: UDP, buf: []u8) !struct { usize, std.net.Address } {
             return self.inner.read(.{ .slice = buf });
         }
 
