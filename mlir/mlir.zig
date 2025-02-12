@@ -50,7 +50,7 @@ pub const MlirStrCallback = fn (c.MlirStringRef, ?*anyopaque) callconv(.C) void;
 
 fn MlirHelpersMethods(OuterT: type) type {
     switch (@typeInfo(OuterT)) {
-        .Struct => |info| {
+        .@"struct" => |info| {
             if (info.fields.len != 1) @compileError("Mlir wrapper type can only wrap one Mlir value. Received: " ++ @typeName(OuterT));
         },
         else => @compileError("MlirHelpersMethods is only available on an Mlir wrapper struct. Received: " ++ @typeName(OuterT)),

@@ -97,15 +97,15 @@ pub const DataType = enum(u8) {
 
     pub fn fromSliceElementType(slice: anytype) DataType {
         const type_info = @typeInfo(@TypeOf(slice));
-        if (type_info != .Pointer) {
+        if (type_info != .pointer) {
             @compileError("`initFromSlice` expects a slice, got " ++ @tagName(type_info));
         }
 
-        return switch (type_info.Pointer.size) {
-            .Slice, .C, .Many => DataType.fromZigType(type_info.Pointer.child),
-            .One => b: {
-                const child_type_info = @typeInfo(type_info.Pointer.child);
-                break :b DataType.fromZigType(child_type_info.Array.child);
+        return switch (type_info.pointer.size) {
+            .slice, .c, .many => DataType.fromZigType(type_info.pointer.child),
+            .one => b: {
+                const child_type_info = @typeInfo(type_info.pointer.child);
+                break :b DataType.fromZigType(child_type_info.array.child);
             },
         };
     }
@@ -182,10 +182,10 @@ pub const DataType = enum(u8) {
     pub fn minValue(dtype: DataType) Data {
         return switch (dtype) {
             .bool => .{ .bool = false },
-            inline .f8e4m3b11fnuz, .f8e4m3fn, .f8e4m3fnuz, .f8e5m2fnuz => |tag| @unionInit(Data, @tagName(tag), std.meta.FieldType(Data, tag).zero()),
-            inline .f8e5m2, .bf16 => |tag| @unionInit(Data, @tagName(tag), std.meta.FieldType(Data, tag).minusInf()),
-            inline .f16, .f32, .f64 => |tag| @unionInit(Data, @tagName(tag), -std.math.inf(std.meta.FieldType(Data, tag))),
-            inline .i4, .i8, .i16, .i32, .i64, .u4, .u8, .u16, .u32, .u64 => |tag| @unionInit(Data, @tagName(tag), std.math.minInt(std.meta.FieldType(Data, tag))),
+            inline .f8e4m3b11fnuz, .f8e4m3fn, .f8e4m3fnuz, .f8e5m2fnuz => |tag| @unionInit(Data, @tagName(tag), @FieldType(Data, @tagName(tag)).zero()),
+            inline .f8e5m2, .bf16 => |tag| @unionInit(Data, @tagName(tag), @FieldType(Data, @tagName(tag)).minusInf()),
+            inline .f16, .f32, .f64 => |tag| @unionInit(Data, @tagName(tag), -std.math.inf(@FieldType(Data, @tagName(tag)))),
+            inline .i4, .i8, .i16, .i32, .i64, .u4, .u8, .u16, .u32, .u64 => |tag| @unionInit(Data, @tagName(tag), std.math.minInt(@FieldType(Data, @tagName(tag)))),
             inline else => |tag| @panic("Unsupported type: " ++ @tagName(tag)),
         };
     }
@@ -194,9 +194,9 @@ pub const DataType = enum(u8) {
         return switch (dtype) {
             .bool => .{ .bool = true },
             inline .f8e4m3b11fnuz, .f8e4m3fn, .f8e4m3fnuz, .f8e5m2fnuz => |tag| @panic("DataType doesn't have a max value: " ++ @tagName(tag)),
-            inline .f8e5m2, .bf16 => |tag| @unionInit(Data, @tagName(tag), std.meta.FieldType(Data, tag).inf()),
-            inline .f16, .f32, .f64 => |tag| @unionInit(Data, @tagName(tag), std.math.inf(std.meta.FieldType(Data, tag))),
-            inline .i4, .i8, .i16, .i32, .i64, .u4, .u8, .u16, .u32, .u64 => |tag| @unionInit(Data, @tagName(tag), std.math.maxInt(std.meta.FieldType(Data, tag))),
+            inline .f8e5m2, .bf16 => |tag| @unionInit(Data, @tagName(tag), @FieldType(Data, @tagName(tag)).inf()),
+            inline .f16, .f32, .f64 => |tag| @unionInit(Data, @tagName(tag), std.math.inf(@FieldType(Data, @tagName(tag)))),
+            inline .i4, .i8, .i16, .i32, .i64, .u4, .u8, .u16, .u32, .u64 => |tag| @unionInit(Data, @tagName(tag), std.math.maxInt(@FieldType(Data, @tagName(tag)))),
             inline .c64, .c128 => |tag| @panic("DataType doesn't have a max value: " ++ @tagName(tag)),
         };
     }
@@ -241,30 +241,30 @@ pub const Data = union(DataType) {
 
         return switch (dtype_) {
             .bool => switch (Ti) {
-                .Bool => .{ .bool = value },
-                .ComptimeInt, .Int, .ComptimeFloat, .Float => .{ .bool = value != 0 },
+                .bool => .{ .bool = value },
+                .comptime_int, .int, .comptime_float, .float => .{ .bool = value != 0 },
                 else => @panic("Could not create Data of type bool from value of type " ++ @typeName(T)),
             },
             inline .f8e4m3b11fnuz, .f8e4m3fn, .f8e4m3fnuz, .f8e5m2, .f8e5m2fnuz, .bf16 => |tag| switch (Ti) {
-                .ComptimeInt, .Int => @unionInit(Data, @tagName(tag), std.meta.FieldType(Data, tag).fromF32(@floatFromInt(value))),
-                .ComptimeFloat, .Float => @unionInit(Data, @tagName(tag), std.meta.FieldType(Data, tag).fromF32(@floatCast(value))),
+                .comptime_int, .int => @unionInit(Data, @tagName(tag), @FieldType(Data, @tagName(tag)).fromF32(@floatFromInt(value))),
+                .comptime_float, .float => @unionInit(Data, @tagName(tag), @FieldType(Data, @tagName(tag)).fromF32(@floatCast(value))),
                 else => @panic("Could not create Data of type bf16 from value of type " ++ @typeName(T)),
             },
             inline .f16, .f32, .f64 => |tag| switch (Ti) {
-                .ComptimeInt, .Int => @unionInit(Data, @tagName(tag), @floatFromInt(value)),
-                .ComptimeFloat, .Float => @unionInit(Data, @tagName(tag), @floatCast(value)),
+                .comptime_int, .int => @unionInit(Data, @tagName(tag), @floatFromInt(value)),
+                .comptime_float, .float => @unionInit(Data, @tagName(tag), @floatCast(value)),
                 else => @panic("Could not create Data of type " ++ @tagName(tag) ++ " from value of type " ++ @typeName(T)),
             },
             inline .i4, .i8, .i16, .i32, .i64, .u4, .u8, .u16, .u32, .u64 => |tag| switch (Ti) {
-                .ComptimeInt => blk: {
-                    const OutT = std.meta.FieldType(Data, tag);
+                .comptime_int => blk: {
+                    const OutT = @FieldType(Data, @tagName(tag));
                     if (value >= std.math.minInt(OutT) and value <= std.math.maxInt(OutT)) {
                         break :blk @unionInit(Data, @tagName(tag), @intCast(value));
                     } else {
                         @panic("Could not create Data of type " ++ @tagName(tag) ++ " from value of type " ++ @typeName(T));
                     }
                 },
-                .Int => @unionInit(Data, @tagName(tag), @intCast(value)),
+                .int => @unionInit(Data, @tagName(tag), @intCast(value)),
                 else => @panic("Could not create Data of type " ++ @tagName(tag) ++ " from value of type " ++ @typeName(T)),
             },
             .c64 => switch (T) {
@@ -316,13 +316,13 @@ pub const Data = union(DataType) {
     pub fn as(self: Data, comptime T: type) T {
         // TODO allow more lossless conversions
         switch (@typeInfo(T)) {
-            .Bool => return self.bool,
-            .Float => switch (self) {
+            .bool => return self.bool,
+            .float => switch (self) {
                 inline .f16, .f32, .f64 => |v| return @floatCast(v),
                 inline .f8e4m3b11fnuz, .f8e4m3fn, .f8e4m3fnuz, .f8e5m2, .f8e5m2fnuz, .bf16 => |v| return @floatCast(v.toF32()),
                 else => {},
             },
-            .Int => switch (self) {
+            .int => switch (self) {
                 inline .i4, .i8, .i16, .i32, .i64, .u4, .u8, .u16, .u32, .u64 => |v| return @intCast(v),
                 else => {},
             },

@@ -11,7 +11,7 @@ const assert = std.debug.assert;
 // ref: https://github.com/ziglang/zig/issues/5738
 const log_level: std.log.Level = .warn;
 
-pub const std_options = .{
+pub const std_options: std.Options = .{
     .log_level = log_level,
 };
 

@@ -45,7 +45,7 @@ fn loadMetadata(allocator: Allocator, store: *zml.aio.BufferStore, file: *core.G
         res.value_ptr.* = switch (entry.val) {
             .array => |arr| switch (arr.child) {
                 inline .uint8, .int8, .uint16, .int16, .uint32, .int32, .float32, .bool, .string, .uint64, .int64, .float64 => |tag| blk: {
-                    const T = std.meta.FieldType(core.GgufValue, tag);
+                    const T = @FieldType(core.GgufValue, @tagName(tag));
                     break :blk try zml.aio.Metadata.copySlice(allocator, std.mem.bytesAsSlice(T, arr.data));
                 },
                 else => blk: {

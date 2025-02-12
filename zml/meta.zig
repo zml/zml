@@ -23,7 +23,7 @@ pub fn MapType(From: type, To: type) type {
             }
 
             return switch (@typeInfo(T)) {
-                .Struct => |struct_infos| {
+                .@"struct" => |struct_infos| {
                     const fields = struct_infos.fields;
                     var same: bool = true;
                     var struct_fields: [fields.len]std.builtin.Type.StructField = undefined;
@@ -36,7 +36,7 @@ pub fn MapType(From: type, To: type) type {
                                 struct_field.* = .{
                                     .name = field.name,
                                     .type = R,
-                                    .default_value = null,
+                                    .default_value_ptr = null,
                                     .is_comptime = field.is_comptime,
                                     .alignment = @alignOf(R),
                                 };
@@ -45,7 +45,7 @@ pub fn MapType(From: type, To: type) type {
                                 // Generic handling of default value is complicated,
                                 // it would require to call the callback at comptime.
                                 if (R == ?To) {
-                                    struct_field.default_value = &@as(R, null);
+                                    struct_field.default_value_ptr = &@as(R, null);
                                 }
                             }
                         } else {
@@ -53,26 +53,26 @@ pub fn MapType(From: type, To: type) type {
                         }
                     }
                     if (same) return T;
-                    return @Type(.{ .Struct = .{
+                    return @Type(.{ .@"struct" = .{
                         .layout = .auto,
                         .fields = struct_fields[0..],
                         .decls = &.{},
                         .is_tuple = struct_infos.is_tuple,
                     } });
                 },
-                .Array => |arr_info| [arr_info.len]map(arr_info.child),
-                .Pointer => |ptr_info| switch (ptr_info.size) {
-                    .Slice => if (ptr_info.is_const)
+                .array => |arr_info| [arr_info.len]map(arr_info.child),
+                .pointer => |ptr_info| switch (ptr_info.size) {
+                    .slice => if (ptr_info.is_const)
                         []const map(ptr_info.child)
                     else
                         []map(ptr_info.child),
-                    .One => if (ptr_info.is_const)
+                    .one => if (ptr_info.is_const)
                         *const map(ptr_info.child)
                     else
                         *map(ptr_info.child),
                     else => T,
                 },
-                .Optional => |opt_info| ?map(opt_info.child),
+                .optional => |opt_info| ?map(opt_info.child),
                 else => T,
             };
         }
@@ -95,10 +95,10 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
     const To = stdx.meta.FnResult(cb);
     const FromStruct = @TypeOf(from);
     const type_info_to_ptr = @typeInfo(@TypeOf(to));
-    if (type_info_to_ptr != .Pointer) {
+    if (type_info_to_ptr != .pointer) {
         stdx.debug.compileError("convertType is expecting a mutable `to` argument but received: {}", .{@TypeOf(to)});
     }
-    const ToStruct = type_info_to_ptr.Pointer.child;
+    const ToStruct = type_info_to_ptr.pointer.child;
     const type_info_to = @typeInfo(ToStruct);
 
     if (FromStruct == From) {
@@ -123,13 +123,13 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
     if (@sizeOf(ToStruct) == 0) return;
 
     switch (type_info_to) {
-        .Struct => |info| inline for (info.fields) |field| {
+        .@"struct" => |info| inline for (info.fields) |field| {
             if (field.is_comptime or @sizeOf(field.type) == 0) continue;
             const field_type_info = @typeInfo(field.type);
             // If the field is already a pointer, we recurse with it directly, otherwise, we recurse with a pointer to the field.
             switch (field_type_info) {
-                // .Pointer => try convertType(From, To, allocator, @field(from, field.name), @field(to, field.name), Ctx, ctx, cb),
-                .Array, .Optional, .Union, .Struct, .Pointer => if (@hasField(FromStruct, field.name)) {
+                // .pointer => try convertType(From, To, allocator, @field(from, field.name), @field(to, field.name), Ctx, ctx, cb),
+                .array, .optional, .@"union", .@"struct", .pointer => if (@hasField(FromStruct, field.name)) {
                     try mapAlloc(
                         cb,
                         allocator,
@@ -145,14 +145,14 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
                 else => @field(to, field.name) = @field(from, field.name),
             }
         },
-        .Array => for (from, to) |f, *t| {
+        .array => for (from, to) |f, *t| {
             try mapAlloc(cb, allocator, ctx, f, t);
         },
-        .Pointer => |ptr_info| switch (ptr_info.size) {
-            .One => switch (type_info_to_ptr.Pointer.size) {
+        .pointer => |ptr_info| switch (ptr_info.size) {
+            .one => switch (type_info_to_ptr.pointer.size) {
                 // pointer to array -> slice promotion
-                .Slice => {
-                    const items = try allocator.alloc(type_info_to_ptr.Pointer.child, from.len);
+                .slice => {
+                    const items = try allocator.alloc(type_info_to_ptr.pointer.child, from.len);
                     for (from, items) |f, *t| {
                         try mapAlloc(cb, allocator, ctx, f, t);
                     }
@@ -160,8 +160,8 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
                 },
                 else => try mapAlloc(cb, allocator, ctx, from.*, to.*),
             },
-            .Slice => {
-                const items = try allocator.alloc(@typeInfo(ToStruct).Pointer.child, from.len);
+            .slice => {
+                const items = try allocator.alloc(@typeInfo(ToStruct).pointer.child, from.len);
                 for (from, items) |f, *t| {
                     try mapAlloc(cb, allocator, ctx, f, t);
                 }
@@ -169,13 +169,13 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
             },
             else => stdx.debug.compileError("zml.meta.mapAlloc doesn't support: {}", .{FromStruct}),
         },
-        .Optional => if (from) |f| {
-            to.* = @as(@typeInfo(type_info_to_ptr.Pointer.child).Optional.child, undefined);
+        .optional => if (from) |f| {
+            to.* = @as(@typeInfo(type_info_to_ptr.pointer.child).optional.child, undefined);
             try mapAlloc(cb, allocator, ctx, f, &(to.*.?));
         } else {
             to.* = null;
         },
-        .Int, .Float, .Enum, .Union => to.* = from,
+        .int, .float, .@"enum", .@"union" => to.* = from,
         else => stdx.debug.compileError("zml.meta.mapAlloc doesn't support: {}", .{FromStruct}),
     }
 }
@@ -241,16 +241,16 @@ pub fn visit(comptime cb: anytype, ctx: FnParam(cb, 0), v: anytype) void {
     const T = @TypeOf(v);
     const type_info_v = @typeInfo(T);
     const K = switch (@typeInfo(FnParam(cb, 1))) {
-        .Pointer => |info| info.child,
+        .pointer => |info| info.child,
         else => stdx.debug.compileError("zml.meta.visit is expecting a callback with a pointer as second argument but found {}", .{FnParam(cb, 1)}),
     };
 
-    if (type_info_v != .Pointer) {
+    if (type_info_v != .pointer) {
         const Callback = @TypeOf(cb);
         stdx.debug.compileError("zml.meta.visit is expecting a pointer input to go with following callback signature: {} but received: {}", .{ Callback, T });
     }
-    const ptr_info = type_info_v.Pointer;
-    if (@typeInfo(ptr_info.child) == .Fn) return;
+    const ptr_info = type_info_v.pointer;
+    if (@typeInfo(ptr_info.child) == .@"fn") return;
     if (ptr_info.child == anyopaque) return;
     // This is important, because with trivial types like void,
     // Zig sometimes decide to call `visit` at comptime, but can't do
@@ -262,24 +262,24 @@ pub fn visit(comptime cb: anytype, ctx: FnParam(cb, 0), v: anytype) void {
         // If we have a single pointer, two cases:
         // * It's a pointer to K, in which case we call the callback.
         // * It's a pointer to something else, in which case, we explore and recurse if needed.
-        .One => if (ptr_info.child == K) {
+        .one => if (ptr_info.child == K) {
             cb(ctx, v);
         } else if (ptr_info.child == ?K) {
             if (v.*) |*val| cb(ctx, val);
         } else switch (@typeInfo(ptr_info.child)) {
-            .Struct => |s| inline for (s.fields) |field_info| {
+            .@"struct" => |s| inline for (s.fields) |field_info| {
                 if (field_info.is_comptime) continue;
                 const field_type_info = @typeInfo(field_info.type);
                 // If the field is already a pointer, we recurse with it directly, otherwise, we recurse with a pointer to the field.
                 switch (field_type_info) {
-                    .Pointer => visit(cb, ctx, @field(v, field_info.name)),
-                    .Array, .Optional, .Union, .Struct => visit(cb, ctx, &@field(v, field_info.name)),
+                    .pointer => visit(cb, ctx, @field(v, field_info.name)),
+                    .array, .optional, .@"union", .@"struct" => visit(cb, ctx, &@field(v, field_info.name)),
                     else => {},
                 }
             },
-            .Array => |_| for (v) |*elem| visit(cb, ctx, elem),
-            .Optional => if (v.* != null) visit(cb, ctx, &v.*.?),
-            .Union => switch (v.*) {
+            .array => |_| for (v) |*elem| visit(cb, ctx, elem),
+            .optional => if (v.* != null) visit(cb, ctx, &v.*.?),
+            .@"union" => switch (v.*) {
                 inline else => |*v_field| visit(cb, ctx, v_field),
             },
             else => {},
@@ -287,23 +287,23 @@ pub fn visit(comptime cb: anytype, ctx: FnParam(cb, 0), v: anytype) void {
         // If we have a slice, two cases also:
         // * It's a slice of K, in which case we call the callback for each element of the slice.
         // * It's a slice to something else, in which case, for each element we explore and recurse if needed.
-        .Slice => {
+        .slice => {
             for (v) |*v_elem| {
                 if (ptr_info.child == K) {
                     cb(ctx, v_elem);
                 } else switch (@typeInfo(ptr_info.child)) {
-                    .Struct => |s| inline for (s.fields) |field_info| {
+                    .@"struct" => |s| inline for (s.fields) |field_info| {
                         const field_type_info = @typeInfo(field_info.type);
                         // If the field is already a pointer, we recurse with it directly, otherwise, we recurse with a pointer to the field.
-                        if (field_type_info == .Pointer) {
+                        if (field_type_info == .pointer) {
                             visit(cb, ctx, @field(v_elem, field_info.name));
                         } else {
                             visit(cb, ctx, &@field(v_elem, field_info.name));
                         }
                     },
-                    .Array => |_| for (v) |*elem| visit(cb, ctx, elem),
-                    .Optional => if (v.* != null) visit(cb, ctx, &v.*.?),
-                    .Union => switch (v_elem.*) {
+                    .array => |_| for (v) |*elem| visit(cb, ctx, elem),
+                    .optional => if (v.* != null) visit(cb, ctx, &v.*.?),
+                    .@"union" => switch (v_elem.*) {
                         inline else => |*v_field| visit(cb, ctx, v_field),
                     },
                     else => {},
@@ -419,7 +419,7 @@ pub fn first(T: type, value: anytype) T {
 /// Which means that zip only allocate temp memory, and nothing need to be freed after the call.
 pub fn zip(comptime func: anytype, allocator: std.mem.Allocator, values: anytype, args: anytype) error{OutOfMemory}!asSlice(@TypeOf(values)) {
     const sliceT = @typeInfo(FnParam(func, 0));
-    const T = sliceT.Pointer.child;
+    const T = sliceT.pointer.child;
     const V = asSlice(@TypeOf(values));
     if (V == T) {
         return @call(.auto, func, .{values} ++ args);
@@ -427,12 +427,12 @@ pub fn zip(comptime func: anytype, allocator: std.mem.Allocator, values: anytype
     // const fn_args
 
     return switch (@typeInfo(V)) {
-        .Pointer => stdx.debug.compileError("zip only accept by value arguments. Received: {}", .{V}),
-        .Struct => |struct_info| {
+        .pointer => stdx.debug.compileError("zip only accept by value arguments. Received: {}", .{V}),
+        .@"struct" => |struct_info| {
             var out: V = values[0];
             inline for (struct_info.fields) |f| {
                 if (f.is_comptime) continue;
-                if (@typeInfo(f.type) == .Pointer) {
+                if (@typeInfo(f.type) == .pointer) {
                     stdx.debug.compileError("zip doesn't follow pointers and don't accept struct containing them. Received: {}", .{V});
                 }
                 var fields = try allocator.alloc(f.type, values.len);
@@ -444,8 +444,8 @@ pub fn zip(comptime func: anytype, allocator: std.mem.Allocator, values: anytype
             }
             return out;
         },
-        .Array => |arr_info| {
-            if (@typeInfo(arr_info.child) == .Pointer) {
+        .array => |arr_info| {
+            if (@typeInfo(arr_info.child) == .pointer) {
                 stdx.debug.compileError("zip doesn't follow pointers and don't accept struct containing them. Received: {}", .{V});
             }
             var out: V = undefined;
@@ -459,7 +459,7 @@ pub fn zip(comptime func: anytype, allocator: std.mem.Allocator, values: anytype
             }
             return out;
         },
-        .Union, .Optional => stdx.debug.compileError("zip doesn't yet support {}", .{V}),
+        .@"union", .optional => stdx.debug.compileError("zip doesn't yet support {}", .{V}),
         else => values[0],
     };
 }
@@ -483,7 +483,7 @@ test zip {
 /// Given a func(X) -> Y or a func(Ctx, X) -> Y,
 /// finds all X in the given object, and write the result of func(X) into an arraylist.
 pub fn collect(func: anytype, func_ctx: _CollectCtx(func), out: *std.ArrayList(stdx.meta.FnSignature(func, null).ReturnT), obj: anytype) error{OutOfMemory}!void {
-    stdx.debug.assertComptime(@typeInfo(@TypeOf(func)).Fn.params.len <= 2, "zml.meta.collect expects a func with two arguments, got: {}", .{@TypeOf(func)});
+    stdx.debug.assertComptime(@typeInfo(@TypeOf(func)).@"fn".params.len <= 2, "zml.meta.collect expects a func with two arguments, got: {}", .{@TypeOf(func)});
     const LocalContext = struct {
         func_ctx: _CollectCtx(func),
         out: *std.ArrayList(stdx.meta.FnSignature(func, null).ReturnT),
@@ -505,7 +505,7 @@ pub fn collect(func: anytype, func_ctx: _CollectCtx(func), out: *std.ArrayList(s
 /// Given a func(X) -> Y or a func(Ctx, X) -> Y,
 /// finds all X in the given object, and write the result of func(X) into an arraylist.
 pub fn collectBuf(func: anytype, func_ctx: _CollectCtx(func), obj: anytype, out: []stdx.meta.FnResult(func)) void {
-    stdx.debug.assertComptime(@typeInfo(@TypeOf(func)).Fn.params.len <= 2, "zml.meta.collectBuf expects a func with one or two arguments, got: {}", .{@TypeOf(func)});
+    stdx.debug.assertComptime(@typeInfo(@TypeOf(func)).@"fn".params.len <= 2, "zml.meta.collectBuf expects a func with one or two arguments, got: {}", .{@TypeOf(func)});
     const LocalContext = struct {
         func_ctx: _CollectCtx(func),
         out: @TypeOf(out),
@@ -525,12 +525,12 @@ pub fn collectBuf(func: anytype, func_ctx: _CollectCtx(func), obj: anytype, out:
 }
 
 fn _CollectCtx(func: anytype) type {
-    const params = @typeInfo(@TypeOf(func)).Fn.params;
+    const params = @typeInfo(@TypeOf(func)).@"fn".params;
     if (params.len == 1) return void;
     return params[0].type orelse @compileError("anytype not supported in collect");
 }
 
 fn _CollectArg(func: anytype) type {
-    const params = @typeInfo(@TypeOf(func)).Fn.params;
+    const params = @typeInfo(@TypeOf(func)).@"fn".params;
     return params[params.len - 1].type orelse @compileError("anytype not supported in collect");
 }
