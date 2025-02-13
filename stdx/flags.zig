@@ -288,8 +288,8 @@ fn assert_valid_value_type(comptime T: type) void {
     comptime {
         if (T == []const u8 or T == [:0]const u8 or T == ByteSize or @typeInfo(T) == .int) return;
 
-        if (@typeInfo(T) == .Enum) {
-            const info = @typeInfo(T).Enum;
+        if (@typeInfo(T) == .@"enum") {
+            const info = @typeInfo(T).@"enum";
             assert(info.is_exhaustive);
             assert(info.fields.len >= 2);
             return;
