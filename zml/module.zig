@@ -1186,7 +1186,7 @@ pub fn hash(hasher: *std.hash.Wyhash, key: anytype, comptime strat: HashStrategy
         // Help the optimizer see that hashing an int is easy by inlining!
         // TODO Check if the situation is better after #561 is resolved.
         .int => |int| switch (int.signedness) {
-            .signed => hash(hasher, @as(@Type(.{ .Int = .{
+            .signed => hash(hasher, @as(@Type(.{ .int = .{
                 .bits = int.bits,
                 .signedness = .unsigned,
             } }), @bitCast(key)), strat),
@@ -1220,9 +1220,9 @@ pub fn hash(hasher: *std.hash.Wyhash, key: anytype, comptime strat: HashStrategy
             },
             .slice => {
                 switch (strat) {
-                    .shallow => hash(hasher, @intFromPtr(key.ptr), .Shallow),
-                    .deep => hashArray(hasher, key, .Shallow),
-                    .deeprecursive => hashArray(hasher, key, .DeepRecursive),
+                    .Shallow => hash(hasher, @intFromPtr(key.ptr), .Shallow),
+                    .Deep => hashArray(hasher, key, .Shallow),
+                    .DeepRecursive => hashArray(hasher, key, .DeepRecursive),
                 }
                 hash(hasher, key.len, .Shallow);
             },
