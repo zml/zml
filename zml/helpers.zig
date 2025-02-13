@@ -129,12 +129,12 @@ fn ShapeStruct(comptime dims: anytype) type {
         struct_field.* = .{
             .name = @tagName(axis),
             .type = i64,
-            .default_value = &default,
+            .default_value_ptr = &default,
             .is_comptime = false,
             .alignment = @alignOf(i64),
         };
     }
-    return @Type(.{ .Struct = .{
+    return @Type(.{ .@"struct" = .{
         .layout = .@"extern",
         .fields = &struct_fields,
         .decls = &.{},

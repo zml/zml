@@ -1,0 +1,7 @@
+module(
+    name = "libxev",
+    version = "20250213.0-3b68c04",
+    compatibility_level = 1,
+)
+
+bazel_dep(name = "rules_zig", version = "20240904.0-010da15")

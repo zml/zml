@@ -17,7 +17,7 @@ const ShapeOf = zml.ShapeOf;
 
 const log = std.log.scoped(.llama);
 
-pub const std_options = .{
+pub const std_options: std.Options = .{
     .log_level = .info,
     .logFn = asynk.logFn(std.log.defaultLog),
 };

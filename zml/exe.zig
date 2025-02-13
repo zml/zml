@@ -97,7 +97,7 @@ pub fn FnExe(comptime func: anytype) type {
 /// ```
 pub fn ModuleExe(comptime func: anytype) type {
     const AllArgs = stdx.meta.FnArgs(func);
-    const len = @typeInfo(AllArgs).Struct.fields.len;
+    const len = @typeInfo(AllArgs).@"struct".fields.len;
     stdx.debug.assertComptime(len > 0, "ModuleExe expects a function with at least one argument where the first one is treated as the module, got {}", .{func});
     return Exe(stdx.meta.Tail(AllArgs), stdx.meta.FnResult(func));
 }
@@ -113,7 +113,7 @@ const Sign = struct {
 
 pub fn ModuleSignature(comptime func: anytype) Sign {
     const AllArgsT = stdx.meta.FnArgs(func);
-    const len = @typeInfo(AllArgsT).Struct.fields.len;
+    const len = @typeInfo(AllArgsT).@"struct".fields.len;
     stdx.debug.assertComptime(len > 0, "ModuleExe expects a function with at least one argument where the first one is treated as the module, got {}", .{func});
 
     return .{

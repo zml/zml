@@ -3971,7 +3971,7 @@ pub fn _collectAxes(T: type, bounded_array: std.BoundedArray(T, Tensor.MAX_RANK)
 
 fn _parseGatherCoord(self: Tensor, axes_: anytype) struct { bool, std.BoundedArray(u3, Tensor.MAX_RANK) } {
     const AxesT = @TypeOf(axes_);
-    const axes_is_scalar = AxesT == EnumLiteral or AxesT == comptime_int or @typeInfo(AxesT) == .Int;
+    const axes_is_scalar = AxesT == EnumLiteral or AxesT == comptime_int or @typeInfo(AxesT) == .int;
 
     const coord_axes = if (axes_is_scalar)
         std.BoundedArray(u3, Tensor.MAX_RANK).fromSlice(&.{self.axis(axes_)}) catch unreachable

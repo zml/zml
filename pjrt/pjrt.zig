@@ -101,10 +101,10 @@ pub const Api = struct {
 
     fn CallFnArgType(comptime func: Funcs) type {
         const fti = @typeInfo(std.meta.FieldType(c.PJRT_Api, func));
-        const fn_ptr = @typeInfo(fti.Optional.child);
-        const fn_type_info = @typeInfo(fn_ptr.Pointer.child);
-        const arg_array_type_info = @typeInfo(fn_type_info.Fn.params[0].type.?);
-        return arg_array_type_info.Pointer.child;
+        const fn_ptr = @typeInfo(fti.optional.child);
+        const fn_type_info = @typeInfo(fn_ptr.pointer.child);
+        const arg_array_type_info = @typeInfo(fn_type_info.@"fn".params[0].type.?);
+        return arg_array_type_info.pointer.child;
     }
 
     inline fn call(self: *const Api, comptime method: Funcs, arg: CallFnArgType(method)) ApiError!@TypeOf(arg) {
@@ -681,8 +681,8 @@ pub const BufferType = enum(c.PJRT_Buffer_Type) {
 };
 
 pub const MemoryLayoutType = enum(c.PJRT_Buffer_MemoryLayout_Type) {
-    Tiled = c.PJRT_Buffer_MemoryLayout_Type_Tiled,
-    Strides = c.PJRT_Buffer_MemoryLayout_Type_Strides,
+    tiled = c.PJRT_Buffer_MemoryLayout_Type_Tiled,
+    strides = c.PJRT_Buffer_MemoryLayout_Type_Strides,
 };
 
 pub const MemoryLayout = union(MemoryLayoutType) {
@@ -698,12 +698,12 @@ pub const MemoryLayout = union(MemoryLayoutType) {
         byte_strides: []const i64,
     };
 
-    Tiled: Tiled,
-    Strides: Strides,
+    tiled: Tiled,
+    strides: Strides,
 
     fn toCStruct(self: MemoryLayout) c.PJRT_Buffer_MemoryLayout {
         return pjrtStruct(switch (self) {
-            .Tiled => |v| c.PJRT_Buffer_MemoryLayout{
+            .tiled => |v| c.PJRT_Buffer_MemoryLayout{
                 .type = c.PJRT_Buffer_MemoryLayout_Type_Tiled,
                 .unnamed_0 = .{
                     .tiled = c.PJRT_Buffer_MemoryLayout_Tiled{
@@ -715,7 +715,7 @@ pub const MemoryLayout = union(MemoryLayoutType) {
                     },
                 },
             },
-            .Strides => |v| c.PJRT_Buffer_MemoryLayout{
+            .strides => |v| c.PJRT_Buffer_MemoryLayout{
                 .type = c.PJRT_Buffer_MemoryLayout_Type_Strides,
                 .unnamed_0 = .{
                     .strides = c.PJRT_Buffer_MemoryLayout_Strides{

@@ -227,7 +227,7 @@ pub const Metadata = union(enum) {
 pub const MemoryMappedFile = struct {
     /// underlying file handle
     file: asynk.File,
-    data: []align(std.mem.page_size) const u8,
+    data: []align(std.heap.page_size_min) const u8,
     data_offset: u64 = 0,
 
     pub fn init(file: asynk.File) !MemoryMappedFile {
@@ -236,7 +236,7 @@ pub const MemoryMappedFile = struct {
             null,
             data_len,
             std.posix.PROT.READ,
-            .{ .TYPE = .PRIVATE },
+            std.posix.system.MAP{ .TYPE = .PRIVATE },
             file.handle(),
             0,
         });
@@ -305,7 +305,7 @@ const PrefixBuilder = struct {
     }
 
     pub fn pop(self: *PrefixBuilder) void {
-        const last_prefix_len = self.subprefixes.popOrNull() orelse unreachable;
+        const last_prefix_len = self.subprefixes.pop() orelse unreachable;
         self.data.shrinkRetainingCapacity(last_prefix_len);
     }
 };
@@ -320,8 +320,8 @@ fn _populateStruct(
 ) !bool {
     const err_msg = "_populateStruct must be called with a pointer to type. Received ";
     const type_info, const T = switch (@typeInfo(@TypeOf(obj))) {
-        .Pointer => |ptr_info| switch (ptr_info.size) {
-            .One => .{ @typeInfo(ptr_info.child), ptr_info.child },
+        .pointer => |ptr_info| switch (ptr_info.size) {
+            .one => .{ @typeInfo(ptr_info.child), ptr_info.child },
             else => @compileError(err_msg ++ @typeName(@TypeOf(obj))),
         },
         else => @compileError(err_msg ++ @typeName(@TypeOf(obj))),
@@ -346,8 +346,8 @@ fn _populateStruct(
     }
 
     return switch (type_info) {
-        .Pointer => |ptr_info| {
-            if (ptr_info.size == .Slice) {
+        .pointer => |ptr_info| {
+            if (ptr_info.size == .slice) {
                 obj.* = &.{};
 
                 const len = buffer_store.countLayers(prefix);
@@ -372,7 +372,7 @@ fn _populateStruct(
                 return false;
             }
         },
-        .Array => |arr_info| {
+        .array => |arr_info| {
             for (obj, 0..) |*value, i| {
                 try prefix_builder.pushDigit(allocator, i);
                 defer prefix_builder.pop();
@@ -384,7 +384,7 @@ fn _populateStruct(
             }
             return true;
         },
-        .Struct => |struct_info| {
+        .@"struct" => |struct_info| {
             var partial_struct = false;
             inline for (struct_info.fields) |field| {
                 if (field.is_comptime or @sizeOf(field.type) == 0) continue;
@@ -392,11 +392,11 @@ fn _populateStruct(
                 defer prefix_builder.pop();
 
                 var has_default = false;
-                if (field.default_value) |_| has_default = true;
+                if (field.default_value_ptr) |_| has_default = true;
                 const field_found = try _populateStruct(allocator, prefix_builder, unique_id, buffer_store, &@field(obj, field.name), required and !has_default);
                 partial_struct = partial_struct or field_found;
                 if (!field_found) {
-                    if (field.default_value) |v| {
+                    if (field.default_value_ptr) |v| {
                         @field(obj, field.name) = @as(*const field.type, @alignCast(@ptrCast(v))).*;
                     } else {
                         if (partial_struct) {
@@ -411,22 +411,22 @@ fn _populateStruct(
             }
             return true;
         },
-        .Optional => |opt_info| {
+        .optional => |opt_info| {
             obj.* = @as(opt_info.child, undefined);
             const found = try _populateStruct(allocator, prefix_builder, unique_id, buffer_store, &(obj.*.?), false);
             if (!found) obj.* = null;
             return true;
         },
-        .Int => {
+        .int => {
             obj.* = undefined;
             return true;
         },
-        .Float => {
+        .float => {
             obj.* = undefined;
             return true;
         },
-        .Void => true,
-        .Union => true,
+        .void => true,
+        .@"union" => true,
         else => if (required) {
             log.err("{s}: {s} type not supported", .{ prefix, @typeName(T) });
             return error.UnsupportedMetadataType;
@@ -583,8 +583,8 @@ pub fn awaitAll(buffers: anytype) !void {
 fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *PrefixBuilder, buffer_store: BufferStore, obj: anytype, platform: zml.Platform) !void {
     const err_msg = "visitStructAndLoadBuffer must be called with a pointer to type. Received ";
     const type_info, const T = switch (@typeInfo(@TypeOf(obj))) {
-        .Pointer => |ptr_info| switch (ptr_info.size) {
-            .One => .{ @typeInfo(ptr_info.child), ptr_info.child },
+        .pointer => |ptr_info| switch (ptr_info.size) {
+            .one => .{ @typeInfo(ptr_info.child), ptr_info.child },
             else => @compileError(err_msg ++ @typeName(@TypeOf(obj))),
         },
         else => @compileError(err_msg ++ @typeName(@TypeOf(obj))),
@@ -605,8 +605,8 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
     } else if (T == zml.Shape) return;
 
     switch (type_info) {
-        .Pointer => |ptr_info| {
-            if (ptr_info.size == .Slice) {
+        .pointer => |ptr_info| {
+            if (ptr_info.size == .slice) {
                 for (obj.*, 0..) |*value, i| {
                     try prefix_builder.pushDigit(allocator, i);
                     defer prefix_builder.pop();
@@ -615,7 +615,7 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
                 }
             } else stdx.debug.compileError("type not supported by visitStructAndLoadBuffer: {}", .{T});
         },
-        .Array => {
+        .array => {
             for (obj, 0..) |*value, i| {
                 try prefix_builder.pushDigit(allocator, i);
                 defer prefix_builder.pop();
@@ -623,7 +623,7 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
             }
         },
 
-        .Struct => |struct_info| {
+        .@"struct" => |struct_info| {
             inline for (struct_info.fields) |field| {
                 if (field.is_comptime or @sizeOf(field.type) == 0) continue;
                 try prefix_builder.push(allocator, field.name);
@@ -632,7 +632,7 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
                 try visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, &@field(obj, field.name), platform);
             }
         },
-        .Optional => {
+        .optional => {
             if (obj.*) |*obj_val| {
                 try visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, obj_val, platform);
             }

@@ -8,21 +8,21 @@ pub const Signature = @import("signature.zig").Signature;
 
 pub fn isStruct(comptime T: type) bool {
     return switch (@typeInfo(T)) {
-        .Struct => true,
+        .@"struct" => true,
         else => false,
     };
 }
 
 pub fn isTuple(comptime T: type) bool {
     return switch (@typeInfo(T)) {
-        .Struct => |info| info.is_tuple,
+        .@"struct" => |info| info.is_tuple,
         else => false,
     };
 }
 
 pub fn isStructOf(comptime T: type, comptime Elem: type) bool {
     return switch (@typeInfo(T)) {
-        .Struct => |info| blk: {
+        .@"struct" => |info| blk: {
             inline for (info.fields) |field| {
                 if (field.type != Elem) {
                     break :blk false;
@@ -36,7 +36,7 @@ pub fn isStructOf(comptime T: type, comptime Elem: type) bool {
 
 pub fn isStructOfAny(comptime T: type, comptime f: fn (comptime type) bool) bool {
     return switch (@typeInfo(T)) {
-        .Struct => |info| blk: {
+        .@"struct" => |info| blk: {
             inline for (info.fields) |field| {
                 if (f(field.type) == false) {
                     break :blk false;
@@ -58,11 +58,11 @@ pub fn isTupleOfAny(comptime T: type, comptime f: fn (comptime type) bool) bool 
 
 pub fn isSliceOf(comptime T: type, comptime Elem: type) bool {
     return switch (@typeInfo(T)) {
-        .Pointer => |info| switch (info.size) {
-            .Slice => info.child == Elem,
-            .One => switch (@typeInfo(info.child)) {
+        .pointer => |info| switch (info.size) {
+            .slice => info.child == Elem,
+            .one => switch (@typeInfo(info.child)) {
                 // As Zig, convert pointer to Array as a slice.
-                .Array => |arr_info| arr_info.child == Elem,
+                .array => |arr_info| arr_info.child == Elem,
                 else => false,
             },
             else => false,
@@ -73,14 +73,14 @@ pub fn isSliceOf(comptime T: type, comptime Elem: type) bool {
 
 pub fn isInteger(comptime T: type) bool {
     return switch (@typeInfo(T)) {
-        .Int, .ComptimeInt => true,
+        .int, .comptime_int => true,
         else => false,
     };
 }
 
 pub fn isSliceOfAny(comptime T: type, comptime f: fn (comptime type) bool) bool {
     return switch (@typeInfo(T)) {
-        .Pointer => |info| info.size == .Slice and f(info.child),
+        .pointer => |info| info.size == .slice and f(info.child),
         else => false,
     };
 }
@@ -95,8 +95,8 @@ pub fn DeclEnum(comptime T: type) type {
 
 pub fn UnwrapPtr(comptime T: type) type {
     return switch (@typeInfo(T)) {
-        .Pointer => |info| switch (info.size) {
-            .One => info.child,
+        .pointer => |info| switch (info.size) {
+            .one => info.child,
             else => T,
         },
         else => T,
@@ -106,11 +106,11 @@ pub fn UnwrapPtr(comptime T: type) type {
 pub fn asSlice(comptime T: type) type {
     const err_msg = "Type " ++ @typeName(T) ++ " can't be interpreted as a slice";
     return switch (@typeInfo(T)) {
-        .Pointer => |info| switch (info.size) {
-            .Slice => info.child,
-            .One => switch (@typeInfo(info.child)) {
+        .pointer => |info| switch (info.size) {
+            .slice => info.child,
+            .one => switch (@typeInfo(info.child)) {
                 // As Zig, convert pointer to Array as a slice.
-                .Array => |arr_info| arr_info.child,
+                .array => |arr_info| arr_info.child,
                 else => @compileError(err_msg),
             },
             else => @compileError(err_msg),
@@ -137,7 +137,7 @@ pub fn TupleRangeX(comptime T: type, comptime start: usize, comptime end: usize)
         new_fields[j] = new_field;
     }
     return @Type(.{
-        .Struct = .{
+        .@"struct" = .{
             .is_tuple = true,
             .layout = .auto,
             .decls = &.{},
@@ -147,26 +147,26 @@ pub fn TupleRangeX(comptime T: type, comptime start: usize, comptime end: usize)
 }
 
 pub fn FnParam(comptime func: anytype, comptime n: comptime_int) type {
-    return @typeInfo(@TypeOf(func)).Fn.params[n].type orelse @compileError("anytype is not supported");
+    return @typeInfo(@TypeOf(func)).@"fn".params[n].type orelse @compileError("anytype is not supported");
 }
 
 pub fn FnArgs(comptime func: anytype) type {
-    debug.assertComptime(!@typeInfo(@TypeOf(func)).Fn.is_generic, "FnArgs expects non generic function, got: {}", .{@TypeOf(func)});
+    debug.assertComptime(!@typeInfo(@TypeOf(func)).@"fn".is_generic, "FnArgs expects non generic function, got: {}", .{@TypeOf(func)});
     return FnSignature(func, null).ArgsT;
 }
 
 pub fn FnArgsWithHint(comptime func: anytype, ArgsT: type) type {
-    debug.assertComptime(@typeInfo(@TypeOf(func)).Fn.is_generic, "FnArgsWithHint expects a generic function, got: {}", .{@TypeOf(func)});
+    debug.assertComptime(@typeInfo(@TypeOf(func)).@"fn".is_generic, "FnArgsWithHint expects a generic function, got: {}", .{@TypeOf(func)});
     return FnSignature(func, ArgsT).ArgsT;
 }
 
 pub fn FnResult(comptime func: anytype) type {
-    return @typeInfo(@TypeOf(func)).Fn.return_type orelse @compileError("anytype is not supported");
+    return @typeInfo(@TypeOf(func)).@"fn".return_type orelse @compileError("anytype is not supported");
 }
 
 pub fn Head(Tuple: type) type {
     return switch (@typeInfo(Tuple)) {
-        .Struct => |struct_info| {
+        .@"struct" => |struct_info| {
             if (struct_info.fields.len == 0) @compileError("Can't tail empty tuple");
             return struct_info.fields[0].type;
         },
@@ -176,7 +176,7 @@ pub fn Head(Tuple: type) type {
 
 pub fn Tail(Tuple: type) type {
     return switch (@typeInfo(Tuple)) {
-        .Struct => |struct_info| {
+        .@"struct" => |struct_info| {
             if (struct_info.fields.len == 0) @compileError("Can't tail empty tuple");
             var types: [struct_info.fields.len - 1]type = undefined;
             for (struct_info.fields[1..], 0..) |field, i| types[i] = field.type;

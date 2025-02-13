@@ -1058,8 +1058,8 @@ fn _readSlice(reader: anytype, allocator: std.mem.Allocator, comptime len_bytes:
     return buf;
 }
 
-fn writeIntBuff(comptime T: type, value: T) [@divExact(@typeInfo(T).Int.bits, 8)]u8 {
-    var res: [@divExact(@typeInfo(T).Int.bits, 8)]u8 = undefined;
+fn writeIntBuff(comptime T: type, value: T) [@divExact(@typeInfo(T).int.bits, 8)]u8 {
+    var res: [@divExact(@typeInfo(T).int.bits, 8)]u8 = undefined;
     std.mem.writeInt(T, &res, value, .little);
     return res;
 }
