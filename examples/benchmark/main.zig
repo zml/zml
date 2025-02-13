@@ -5,7 +5,7 @@ const asynk = @import("async");
 const flags = stdx.flags;
 
 // set log level to debug to print the generated IR
-pub const std_options = .{
+pub const std_options: std.Options = .{
     .log_level = .warn,
     .logFn = asynk.logFn(std.log.defaultLog),
 };
