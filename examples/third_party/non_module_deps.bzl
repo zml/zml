@@ -5,7 +5,7 @@ def _non_module_deps_impl(mctx):
     new_git_repository(
         name = "com_github_hejsil_clap",
         remote = "https://github.com/Hejsil/zig-clap.git",
-        commit = "d71cc39a94f3e6ccbad00c25d350c9147de4df9f",
+        commit = "068c38f89814079635692c7d0be9f58508c86173",
         build_file = "//:third_party/com_github_hejsil_clap/clap.bazel",
     )
 
