@@ -43,6 +43,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const assert = std.debug.assert;
+const debug = @import("debug.zig");
 
 /// Format and print an error message to stderr, then exit with an exit code of 1.
 pub fn fatal(comptime fmt_string: []const u8, args: anytype) noreturn {
@@ -78,8 +79,8 @@ pub fn parse(args: *std.process.ArgIterator, comptime CliArgs: type) CliArgs {
     assert(args.skip()); // Discard executable name.
 
     return switch (@typeInfo(CliArgs)) {
-        .Union => parse_commands(args, CliArgs),
-        .Struct => parse_flags(args, CliArgs),
+        .@"union" => parse_commands(args, CliArgs),
+        .@"struct" => parse_flags(args, CliArgs),
         else => unreachable,
     };
 }
@@ -127,7 +128,7 @@ fn parse_flags(args: *std.process.ArgIterator, comptime Flags: type) Flags {
         return {};
     }
 
-    assert(@typeInfo(Flags) == .Struct);
+    assert(@typeInfo(Flags) == .@"struct");
 
     comptime var fields: [std.meta.fields(Flags).len]std.builtin.Type.StructField = undefined;
     comptime var field_count = 0;
@@ -136,7 +137,7 @@ fn parse_flags(args: *std.process.ArgIterator, comptime Flags: type) Flags {
 
     comptime for (std.meta.fields(Flags)) |field| {
         if (std.mem.eql(u8, field.name, "positional")) {
-            assert(@typeInfo(field.type) == .Struct);
+            assert(@typeInfo(field.type) == .@"struct");
             positional_fields = std.meta.fields(field.type);
             var optional_tail = false;
             for (positional_fields) |positional_field| {
@@ -146,7 +147,7 @@ fn parse_flags(args: *std.process.ArgIterator, comptime Flags: type) Flags {
                     optional_tail = true;
                 }
                 switch (@typeInfo(positional_field.type)) {
-                    .Optional => |optional| {
+                    .optional => |optional| {
                         // optional flags should have a default
                         assert(default_value(positional_field) != null);
                         assert(default_value(positional_field).? == null);
@@ -162,16 +163,13 @@ fn parse_flags(args: *std.process.ArgIterator, comptime Flags: type) Flags {
             field_count += 1;
 
             switch (@typeInfo(field.type)) {
-                .Bool => {
+                .bool => {
                     // boolean flags should have a default
-                    assert(default_value(field) != null);
-                    assert(default_value(field).? == false);
+                    debug.assertComptime(default_value(field) != null and default_value(field).? == false, "boolean flag --{s} should default to false", .{field.name});
                 },
-                .Optional => |optional| {
+                .optional => |optional| {
                     // optional flags should have a default
-                    assert(default_value(field) != null);
-                    assert(default_value(field).? == null);
-
+                    debug.assertComptime(default_value(field) != null and default_value(field).? == null, "optional flag --{s} should have a null default value", .{field.name});
                     assert_valid_value_type(optional.child);
                 },
                 else => {
@@ -182,15 +180,15 @@ fn parse_flags(args: *std.process.ArgIterator, comptime Flags: type) Flags {
     };
 
     var result: Flags = undefined;
-    // Would use std.enums.EnumFieldStruct(Flags, u32, 0) here but Flags is a Struct not an Enum.
+    // Would use std.enums.EnumFieldStruct(Flags, u32, 0) here but Flags is a struct not an Enum.
     var counts = comptime blk: {
         var count_fields = std.meta.fields(Flags)[0..std.meta.fields(Flags).len].*;
         for (&count_fields) |*field| {
             field.type = u32;
             field.alignment = @alignOf(u32);
-            field.default_value = @ptrCast(&@as(u32, 0));
+            field.default_value_ptr = @ptrCast(&@as(u32, 0));
         }
-        break :blk @Type(.{ .Struct = .{
+        break :blk @Type(.{ .@"struct" = .{
             .layout = .auto,
             .fields = &count_fields,
             .decls = &.{},
@@ -288,7 +286,7 @@ fn parse_flags(args: *std.process.ArgIterator, comptime Flags: type) Flags {
 
 fn assert_valid_value_type(comptime T: type) void {
     comptime {
-        if (T == []const u8 or T == [:0]const u8 or T == ByteSize or @typeInfo(T) == .Int) return;
+        if (T == []const u8 or T == [:0]const u8 or T == ByteSize or @typeInfo(T) == .int) return;
 
         if (@typeInfo(T) == .Enum) {
             const info = @typeInfo(T).Enum;
@@ -343,14 +341,14 @@ fn parse_value(comptime T: type, flag: []const u8, value: [:0]const u8) T {
     assert(value.len > 0);
 
     const V = switch (@typeInfo(T)) {
-        .Optional => |optional| optional.child,
+        .optional => |optional| optional.child,
         else => T,
     };
 
     if (V == []const u8 or V == [:0]const u8) return value;
     if (V == ByteSize) return parse_value_size(flag, value);
-    if (@typeInfo(V) == .Int) return parse_value_int(V, flag, value);
-    if (@typeInfo(V) == .Enum) return parse_value_enum(V, flag, value);
+    if (@typeInfo(V) == .int) return parse_value_int(V, flag, value);
+    if (@typeInfo(V) == .@"enum") return parse_value_enum(V, flag, value);
     comptime unreachable;
 }
 
@@ -508,7 +506,7 @@ fn parse_value_int(comptime T: type, flag: []const u8, value: [:0]const u8) T {
         switch (err) {
             error.Overflow => fatal(
                 "{s}: value exceeds {d}-bit {s} integer: '{s}'",
-                .{ flag, @typeInfo(T).Int.bits, @tagName(@typeInfo(T).Int.signedness), value },
+                .{ flag, @typeInfo(T).int.bits, @tagName(@typeInfo(T).int.signedness), value },
             ),
             error.InvalidCharacter => fatal(
                 "{s}: expected an integer value, but found '{s}' (invalid digit)",
@@ -520,7 +518,7 @@ fn parse_value_int(comptime T: type, flag: []const u8, value: [:0]const u8) T {
 
 fn parse_value_enum(comptime E: type, flag: []const u8, value: [:0]const u8) E {
     assert((flag[0] == '-' and flag[1] == '-') or flag[0] == '<');
-    comptime assert(@typeInfo(E).Enum.is_exhaustive);
+    comptime assert(@typeInfo(E).@"enum".is_exhaustive);
 
     return std.meta.stringToEnum(E, value) orelse fatal(
         "{s}: expected one of {s}, but found '{s}'",
@@ -564,7 +562,7 @@ pub fn flag_name(comptime field: std.builtin.Type.StructField) []const u8 {
 }
 
 test flag_name {
-    const field = @typeInfo(struct { statsd: bool }).Struct.fields[0];
+    const field = @typeInfo(struct { statsd: bool }).@"struct".fields[0];
     try std.testing.expectEqualStrings(flag_name(field), "--statsd");
 }
 
@@ -575,7 +573,7 @@ fn flag_name_positional(comptime field: std.builtin.Type.StructField) []const u8
 
 /// This is essentially `field.default_value`, but with a useful type instead of `?*anyopaque`.
 pub fn default_value(comptime field: std.builtin.Type.StructField) ?field.type {
-    return if (field.default_value) |default_opaque|
+    return if (field.default_value_ptr) |default_opaque|
         @as(*const field.type, @ptrCast(@alignCast(default_opaque))).*
     else
         null;
