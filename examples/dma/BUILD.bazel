@@ -1,0 +1,11 @@
+load("@zml//bazel:zig.bzl", "zig_cc_binary")
+
+zig_cc_binary(
+    name = "dma",
+    main = "main7.zig",
+    deps = [
+        "@zml//async",
+        "@zml//stdx",
+        "@zml//zml",
+    ],
+)

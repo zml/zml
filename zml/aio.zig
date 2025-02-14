@@ -550,6 +550,7 @@ pub fn loadModelBuffersWithPrefix(
     // We copy the shape, and let visitStructAndLoadBuffer write the other fields.
     // to write them just afterward.
     var res: zml.Bufferized(Model) = undefined;
+
     try zml.meta.mapAlloc(struct {
         pub fn initBuffer(_: void, tensor: zml.Tensor) zml.Buffer {
             return .{ ._shape = tensor.shape(), ._api = undefined, ._shards = undefined };

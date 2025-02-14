@@ -502,6 +502,26 @@ pub const Device = opaque {
         }) catch unreachable;
         return @intCast(ret.local_hardware_id);
     }
+
+    pub fn addressableMemories(self: *const Device, api: *const Api) []*const Memory {
+        const ret = api.call(.PJRT_Device_AddressableMemories, .{
+            .device = self.inner(),
+        }) catch unreachable;
+        if (ret.memories) |memories| {
+            return @ptrCast(@constCast(memories[0..ret.num_memories]));
+        }
+        return &.{};
+    }
+
+    pub fn getMemoryByKind(self: *const Device, api: *const Api, kind: Memory.Kind) ?*const Memory {
+        const memories = self.addressableMemories(api);
+        for (memories) |m| {
+            if (m.kind(api) == kind) {
+                return m;
+            }
+        }
+        return null;
+    }
 };
 
 pub const DeviceDescription = opaque {
@@ -778,6 +798,31 @@ pub const Buffer = opaque {
             .dst_size = dst.len,
         });
         return @ptrCast(ret.event);
+    }
+
+    pub fn copyRawToHost(self: *const Buffer, api: *const Api, dst: []u8, offset: i64, size: i64) ApiError!?*Event {
+        const ret = try api.call(.PJRT_Buffer_CopyRawToHost, .{
+            .buffer = self.inner(),
+            .dst = @ptrCast(dst.ptr),
+            .offset = offset,
+            .transfer_size = size,
+        });
+        return @ptrCast(ret.event);
+    }
+
+    pub fn copyToMemory(self: *const Buffer, api: *const Api, dst_memory: *const Memory) ApiError!?*Buffer {
+        const ret = try api.call(.PJRT_Buffer_CopyToMemory, .{
+            .buffer = self.inner(),
+            .dst_memory = @ptrCast(@constCast(dst_memory)),
+        });
+        return @ptrCast(ret.dst_buffer);
+    }
+
+    pub fn getMemory(self: *const Buffer, api: *const Api) *const Memory {
+        const ret = api.call(.PJRT_Buffer_Memory, .{
+            .buffer = self.inner(),
+        }) catch unreachable;
+        return @ptrCast(ret.memory);
     }
 
     pub fn getElementType(self: *const Buffer, api: *const Api) BufferType {

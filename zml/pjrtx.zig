@@ -20,6 +20,7 @@ pub const ErrorCode = pjrt.ErrorCode;
 pub const BufferType = pjrt.BufferType;
 pub const Device = pjrt.Device;
 pub const DeviceDescription = pjrt.DeviceDescription;
+pub const Memory = pjrt.Memory;
 pub const Api = pjrt.Api;
 pub const NamedValue = pjrt.NamedValue;
 pub const ClientInitError = pjrt.ClientInitError;
@@ -163,6 +164,18 @@ pub const Buffer = opaque {
         return @ptrCast(try self.inner().toHostBuffer(api, dst));
     }
 
+    pub fn copyRawToHost(self: *const Buffer, api: *const Api, dst: []u8, offset: i64, size: i64) ApiError!?*Event {
+        return @ptrCast(try self.inner().copyRawToHost(api, dst, offset, size));
+    }
+
+    pub fn copyToMemory(self: *const Buffer, api: *const Api, dst_memory: *const Memory) ApiError!?*Buffer {
+        return @ptrCast(try self.inner().copyToMemory(api, dst_memory));
+    }
+
+    pub fn getMemory(self: *const Buffer, api: *const Api) *const Memory {
+        return self.inner().getMemory(api);
+    }
+
     pub fn getElementType(self: *const Buffer, api: *const Api) BufferType {
         return self.inner().getElementType(api);
     }
@@ -193,6 +206,14 @@ pub const Buffer = opaque {
 
     pub fn getOpaqueDeviceMemoryDataPointer(self: *const Buffer, api: *const Api) ApiError!*anyopaque {
         return try self.inner().getOpaqueDeviceMemoryDataPointer(api);
+    }
+
+    pub fn increaseExternalReferenceCount(self: *Buffer, api: *const Api) ApiError!void {
+        try self.inner().increaseExternalReferenceCount(api);
+    }
+
+    pub fn decreaseExternalReferenceCount(self: *Buffer, api: *const Api) ApiError!void {
+        try self.inner().decreaseExternalReferenceCount(api);
     }
 };
 
@@ -233,6 +254,7 @@ pub const Event = opaque {
         ctx.event.wait();
 
         if (ctx.err) |e| {
+            log.err("Error waiting for event: {}", .{e});
             defer e.deinit(api);
             return e.getCode(api).toApiError();
         }
