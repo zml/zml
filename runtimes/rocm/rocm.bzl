@@ -212,13 +212,13 @@ def _rocm_impl(mctx):
     http_archive(
         name = "libpjrt_rocm",
         build_file = "libpjrt_rocm.BUILD.bazel",
-        url = "https://github.com/zml/pjrt-artifacts/releases/download/v5.0.0/pjrt-rocm_linux-amd64.tar.gz",
-        sha256 = "2c7a687827f63987caa117cd5b56a6e20291681ae1c51edd54241a1181e91d2d",
+        url = "https://github.com/zml/pjrt-artifacts/releases/download/v6.0.0/pjrt-rocm_linux-amd64.tar.gz",
+        sha256 = "0a41e5b255d0b3284e029c11c2362d777557f87778e1531a2117bc46b835395a",
     )
 
     return mctx.extension_metadata(
         reproducible = True,
-        root_module_direct_deps = ["libpjrt_rocm"],
+        root_module_direct_deps = ["libpjrt_rocm", "hipblaslt", "rocblas"],
         root_module_direct_dev_deps = [],
     )
 

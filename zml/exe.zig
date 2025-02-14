@@ -74,8 +74,9 @@ pub fn compileFn(
     args: ShapeOf(stdx.meta.FnArgs(func)),
     platform: Platform,
 ) !FnExe(func) {
-    const name = @typeName(@TypeOf(func));
-    var context = try CompilationContext.init(allocator, name, platform);
+    var pretty_name = try prettyFnName(func, allocator);
+    defer pretty_name.deinit(allocator);
+    var context = try CompilationContext.init(allocator, pretty_name.items, platform);
     defer context.deinit();
 
     return .{ .inner = try context.compileInternal(allocator, func, args) };
@@ -352,4 +353,38 @@ fn assignRawBuffers(v: anytype, platform: Platform, buffers: []const [*]*pjrt.Bu
         }
     }).cb, &local_ctx, v);
     stdx.debug.internalAssert(local_ctx.index == buffer_shapes.len, "Pjrt call returned {} tensors, but the return type {s}, contains {} Buffers. Note that modules need to have a comptime know number of returned tensors.", .{ buffers.len, @typeName(@TypeOf(v)), local_ctx.index });
+}
+
+fn prettyFnName(
+    comptime func: anytype,
+    allocator: std.mem.Allocator,
+) !std.ArrayListUnmanaged(u8) {
+    const full_noisy_name = @typeName(@TypeOf(func));
+    const og_len = full_noisy_name.len;
+    const buffer = try allocator.alloc(u8, og_len);
+    errdefer comptime unreachable; // No errors below this point.
+    var out: []u8 = buffer;
+
+    {
+        const verbose = "tensor.Tensor";
+        const compact = "Tensor";
+        const num_replacements = std.mem.replace(u8, full_noisy_name, verbose, compact, buffer);
+        out.len = out.len + num_replacements * compact.len - num_replacements * verbose.len;
+    }
+
+    {
+        const verbose = "tensor.Tensor.";
+        const compact = "";
+        const num_replacements = std.mem.replace(u8, out, verbose, compact, buffer);
+        out.len = out.len + num_replacements * compact.len - num_replacements * verbose.len;
+    }
+
+    {
+        const verbose = "shape.Shape";
+        const compact = "Shape";
+        const num_replacements = std.mem.replace(u8, out, verbose, compact, buffer);
+        out.len = out.len + num_replacements * compact.len - num_replacements * verbose.len;
+    }
+
+    return .{ .items = out, .capacity = og_len };
 }

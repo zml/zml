@@ -1747,7 +1747,7 @@ pub const Tensor = struct {
 
     /// Returns a Tensor containing evenly spaced values within a given interval.
     pub fn arange(args: ArangeArgs, dt: DataType) Tensor {
-        stdx.debug.assert(args.start < args.end, "arange expects 'args.start' to be less than 'args.end', got {} and {}", .{ args.start, args.end });
+        stdx.debug.assert(args.start <= args.end, "arange expects 'args.start' to be less than 'args.end', got {} and {}", .{ args.start, args.end });
         stdx.debug.assert(args.step > 0, "arange expects 'args.step' to be positive, got {}", .{args.step});
 
         const ctx = CompilationContext.current();
