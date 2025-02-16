@@ -41,6 +41,7 @@ fn findMaskPositions(tokens: []const u32, allocator: std.mem.Allocator) ![]usize
 fn prepareTensorInputs(
     tokens: []const u32,
     seq_len: i64,
+    pad_token: u32,
     allocator: std.mem.Allocator,
 ) !struct { ids: []i64, mask: []i64 } {
     var input_ids = try allocator.alloc(i64, @intCast(seq_len));
@@ -50,13 +51,16 @@ fn prepareTensorInputs(
         allocator.free(attention_mask);
     }
 
-    @memset(input_ids, 0);
+    @memset(input_ids, pad_token);
     @memset(attention_mask, 0);
 
     for (tokens, 0..) |token, i| {
         input_ids[i] = @intCast(token);
         attention_mask[i] = 1;
     }
+
+    log.debug("inputs_ids: length {d} - {any}", .{ input_ids.len, input_ids });
+    log.debug("attention_mask: length {d} - {any}", .{ attention_mask.len, attention_mask });
 
     return .{ .ids = input_ids, .mask = attention_mask };
 }
@@ -73,6 +77,8 @@ pub fn unmask(
     var tokenizer_decoder = try tokenizer.decoder();
     defer tokenizer_decoder.deinit();
 
+    const pad_token = tokenizer.tokenToId("[PAD]") orelse return error.NoSuchToken;
+
     // Tokenize input text
     const tokens: []const u32 = try tokenize(allocator, tokenizer, text);
     defer allocator.free(tokens);
@@ -82,7 +88,7 @@ pub fn unmask(
     defer allocator.free(mask_positions);
 
     // Prepare input tensors
-    const inputs = try prepareTensorInputs(tokens, seq_len, allocator);
+    const inputs = try prepareTensorInputs(tokens, seq_len, pad_token, allocator);
     defer {
         allocator.free(inputs.ids);
         allocator.free(inputs.mask);

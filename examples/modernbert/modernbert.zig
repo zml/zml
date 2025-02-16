@@ -160,7 +160,7 @@ pub fn generateSlidingWindowMask(global_attention_mask: Tensor) Tensor {
     const distance = rows.sub(cols).abs();
 
     // Create sliding window mask (1 for positions within window, 0 outside)
-    const local_attention = 128; // config.json: local_attention
+    const local_attention = 128; // TODO: config.json: local_attention
     var window_mask = distance.cmp(.LE, Tensor.scalar(@divExact(local_attention, 2), distance.dtype()))
         .unsqueeze(0)
         .unsqueeze(0);
