@@ -31,7 +31,7 @@ zig_library(
     deps = [
         "//mlir",
         "//mlir:c",
-        "@stablehlo//:stablehlo_capi",
+        "@stablehlo//:stablehlo_dialect_capi",
     ],
 )
 
