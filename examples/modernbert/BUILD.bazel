@@ -1,26 +1,4 @@
-load("@modernbert_pip//:requirements.bzl", "requirement")
-load("@rules_python//python:py_binary.bzl", "py_binary")
-load("@rules_uv//uv:pip.bzl", "pip_compile")
 load("@zml//bazel:zig.bzl", "zig_cc_binary")
-
-## TODO: Test for multiplatform : linux-amd64, mac-arm64, etc ..
-pip_compile(
-    name = "update-requirements-lock",
-    requirements_in = "requirements.in",
-    requirements_txt = "requirements.lock.txt",
-)
-
-py_binary(
-    name = "activations",
-    srcs = ["activations.py"],
-    deps = [
-        requirement("torch"),
-        requirement("transformers"),
-        requirement("accelerate"),
-        requirement("numpy"),
-        "@zml//tools:zml_utils",
-    ],
-)
 
 filegroup(
     name = "modernbert_activations",
@@ -31,7 +9,6 @@ filegroup(
 
 genrule(
     name = "modernbert_activations_file",
-    srcs = [":activations"],
     outs = ["ModernBERT-base.activations.pt"],
     cmd = """
         BINARY="$(locations :activations)"
