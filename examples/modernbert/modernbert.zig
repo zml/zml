@@ -148,9 +148,7 @@ pub const ModernBertEncoderLayer = struct {
 };
 
 pub fn generateSlidingWindowMask(global_attention_mask: Tensor) Tensor {
-    const batch_size = global_attention_mask.dim(.b);
     const seq_len = global_attention_mask.dim(.src);
-    log.info("Batch size: {d}, Seq len: {d}", .{ batch_size, seq_len });
 
     // Create sequence positions for both dimensions
     const tgt_shape = zml.Shape.init(.{ .tgt = seq_len }, .i32);
@@ -163,7 +161,7 @@ pub fn generateSlidingWindowMask(global_attention_mask: Tensor) Tensor {
     const distance = rows.sub(cols).abs();
 
     // Create sliding window mask (1 for positions within window, 0 outside)
-    const window_size: i64 = 64; // const local_attention = 128; should  be @divExact(local_attention, 2) + TODO: config.json: local_attention
+    const window_size: i64 = @divExact(128, 2); // TODO: config.json: local_attention
     var window_mask = distance.cmp(.LE, Tensor.scalar(window_size, .i32))
         .unsqueeze(0)
         .unsqueeze(0);
