@@ -18,6 +18,8 @@ pub const std_options = .{
     .logFn = asynk.logFn(std.log.defaultLog),
 };
 
+const MAX_SEQ_LEN: usize = 8192;
+
 fn findMaskPositions(allocator: std.mem.Allocator, tokens: []const u32, mask_token: u32) ![]usize {
     var mask_positions = std.ArrayList(usize).init(allocator);
     defer mask_positions.deinit();
@@ -140,7 +142,7 @@ const params = clap.parseParamsComptime(
     \\--tokenizer               <PATH>      tokenizer path
     \\--seq-len                 <UINT>      sequence length
     \\--num-attention-heads     <UINT>      number of attention heads
-    \\--tie-word-embeddings     <BOOL>      default: true: tied weights
+    \\--tie-word-embeddings     <BOOL>      default: false: tied weights
     \\--create-options          <STRING>    platform creation options JSON, defaults to {}
     \\--sharding                <BOOL>      default: true: sharding on or off
 );
@@ -219,7 +221,7 @@ pub fn asyncMain() !void {
     // Create the model struct, with tensor shapes extracted from the tensor_store
     const modernbert_options = modernbert.ModernBertOptions{
         .num_attention_heads = @intCast(res.args.@"num-attention-heads" orelse 12),
-        .tie_word_embeddings = res.args.@"tie-word-embeddings" orelse true,
+        .tie_word_embeddings = res.args.@"tie-word-embeddings" orelse false,
     };
     var modern_bert_for_masked_lm = try zml.aio.populateModel(modernbert.ModernBertForMaskedLM, model_arena, tensor_store);
     modern_bert_for_masked_lm.init(modernbert_options);
@@ -241,7 +243,12 @@ pub fn asyncMain() !void {
     errdefer tokenizer.deinit();
 
     // Prepare shapes for compilation
-    const seq_len = @as(i64, @intCast(res.args.@"seq-len" orelse 64));
+    const seq_len = @as(i64, @intCast(res.args.@"seq-len" orelse 512));
+    if (seq_len > MAX_SEQ_LEN) {
+        log.err("Sequence length {d} exceeds maximum supported length of {d}", .{ seq_len, MAX_SEQ_LEN });
+        return error.InvalidSequenceLength;
+    }
+
     const input_shape = zml.Shape.init(.{ .b = 1, .s = seq_len }, .i64);
     const attention_mask_shape = input_shape;
 

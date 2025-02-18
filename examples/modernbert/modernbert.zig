@@ -161,7 +161,7 @@ pub fn generateSlidingWindowMask(global_attention_mask: Tensor) Tensor {
     const distance = rows.sub(cols).abs();
 
     // Create sliding window mask (1 for positions within window, 0 outside)
-    const window_size: i64 = @divExact(128, 2); // TODO: config.json: local_attention
+    const window_size: i64 = 64; // config.json: @divExact(local_attention, 2)
     var window_mask = distance.cmp(.LE, Tensor.scalar(window_size, .i32))
         .unsqueeze(0)
         .unsqueeze(0);
@@ -188,6 +188,12 @@ pub const ModernBertModel = struct {
     pub fn init(self: *ModernBertModel, options: ModernBertOptions) void {
         self.final_norm.eps = 1e-5;
         for (self.layers, 0..) |*encoder_layer, layer_idx| {
+            encoder_layer.attn.Wqkv.weight = encoder_layer.attn.Wqkv.weight.withSharding(.{0});
+            encoder_layer.attn.Wo.weight = encoder_layer.attn.Wo.weight.withSharding(.{1});
+
+            encoder_layer.mlp.Wi.weight = encoder_layer.mlp.Wi.weight.withSharding(.{0});
+            encoder_layer.mlp.Wo.weight = encoder_layer.mlp.Wo.weight.withSharding(.{1});
+
             if (encoder_layer.attn_norm) |*norm| norm.eps = 1e-5;
             encoder_layer.mlp_norm.eps = 1e-5;
             encoder_layer.attn.is_global_attention = (layer_idx % 3 == 0);
@@ -240,8 +246,13 @@ pub const ModernBertForMaskedLM = struct {
     pub fn init(self: *ModernBertForMaskedLM, options: ModernBertOptions) void {
         self.model.init(options);
         self.head.norm.eps = 1e-5;
+
+        self.head.dense.weight = self.head.dense.weight.withSharding(.{0});
+
         if (options.tie_word_embeddings == true) {
             self.decoder.weight = null;
+        } else if (self.decoder.weight) |decoder_weight| {
+            self.decoder.weight = decoder_weight.withSharding(.{1});
         }
     }
 
