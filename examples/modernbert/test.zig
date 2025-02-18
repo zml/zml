@@ -12,6 +12,13 @@ const params = clap.parseParamsComptime(
     \\--model           <PATH>  model weights path
     \\--activations     <PATH>  model activations path
 );
+
+fn printUsageAndExit(stderr: anytype) noreturn {
+    stderr.print("usage: ", .{}) catch {};
+    clap.usage(stderr, clap.Help, &params) catch {};
+    stderr.print("\n", .{}) catch {};
+    std.process.exit(0);
+}
 pub fn main() !void {
     try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain);
 }
@@ -20,28 +27,26 @@ pub fn asyncMain() !void {
     // Short lived allocations
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
+
     const allocator = gpa.allocator();
+    const stderr = std.io.getStdErr().writer();
 
     // Read CLI arguments
     const parsers = comptime .{
         .PATH = clap.parsers.string,
     };
     var diag: clap.Diagnostic = .{};
-    const stderr = std.io.getStdErr().writer();
     var res = clap.parse(clap.Help, &params, parsers, .{
         .diagnostic = &diag,
         .allocator = allocator,
     }) catch |err| {
-        diag.report(stderr, err) catch {};
-        stderr.print("usage: ", .{}) catch {};
-        clap.usage(stderr, clap.Help, &params) catch {};
-        stderr.print("\n", .{}) catch {};
-        return;
+        try diag.report(stderr, err);
+        try printUsageAndExit(stderr);
     };
     defer res.deinit();
 
     if (res.args.help != 0) {
-        clap.help(std.io.getStdErr().writer(), clap.Help, &params, .{}) catch {};
+        try clap.help(stderr, clap.Help, &params, .{});
         return;
     }
 

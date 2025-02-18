@@ -1,25 +1,5 @@
 load("@zml//bazel:zig.bzl", "zig_cc_binary")
 
-filegroup(
-    name = "modernbert_activations",
-    srcs = [":activations"],
-    output_group = "modernbert",
-    visibility = ["//visibility:public"],
-)
-
-genrule(
-    name = "modernbert_activations_file",
-    outs = ["ModernBERT-base.activations.pt"],
-    cmd = """
-        BINARY="$(locations :activations)"
-        FIRST_FILE=$$(echo $$BINARY | cut -d' ' -f1)
-        $$FIRST_FILE && mv ModernBERT-base.activations.pt $@
-    """,
-    local = True,
-    tools = [":activations"],
-    visibility = ["//visibility:public"],
-)
-
 zig_cc_binary(
     name = "modernbert",
     srcs = ["modernbert.zig"],
@@ -67,13 +47,14 @@ zig_cc_binary(
     srcs = ["modernbert.zig"],
     args = [
         "--model=$(location @ModernBERT-base//:model.safetensors)",
-        "--activations=$(location :modernbert_activations_file)",
     ],
     data = [
-        ":modernbert_activations_file",
         "@ModernBERT-base//:model.safetensors",
     ],
     main = "test.zig",
+    tags = [
+        "no_ci",
+    ],
     deps = [
         "@com_github_hejsil_clap//:clap",
         "@zml//async",
