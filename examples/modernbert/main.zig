@@ -18,12 +18,12 @@ pub const std_options = .{
     .logFn = asynk.logFn(std.log.defaultLog),
 };
 
-fn findMaskPositions(tokens: []const u32, allocator: std.mem.Allocator) ![]usize {
+fn findMaskPositions(allocator: std.mem.Allocator, tokens: []const u32, mask_token: u32) ![]usize {
     var mask_positions = std.ArrayList(usize).init(allocator);
     defer mask_positions.deinit();
 
     for (tokens, 0..) |token, i| {
-        if (token == 50284) {
+        if (token == mask_token) {
             try mask_positions.append(i);
         }
     }
@@ -39,10 +39,10 @@ fn findMaskPositions(tokens: []const u32, allocator: std.mem.Allocator) ![]usize
 }
 
 fn prepareTensorInputs(
+    allocator: std.mem.Allocator,
     tokens: []const u32,
     seq_len: i64,
     pad_token: u32,
-    allocator: std.mem.Allocator,
 ) !struct { ids: []i64, mask: []i64 } {
     var input_ids = try allocator.alloc(i64, @intCast(seq_len));
     var attention_mask = try allocator.alloc(i64, @intCast(seq_len));
@@ -59,18 +59,15 @@ fn prepareTensorInputs(
         attention_mask[i] = 1;
     }
 
-    log.debug("inputs_ids: length {d} - {any}", .{ input_ids.len, input_ids });
-    log.debug("attention_mask: length {d} - {any}", .{ attention_mask.len, attention_mask });
-
     return .{ .ids = input_ids, .mask = attention_mask };
 }
 
 /// fill-mask pipeline
 /// ref: https://github.com/huggingface/transformers/blob/main/src/transformers/pipelines/fill_mask.py
 pub fn unmask(
+    allocator: std.mem.Allocator,
     mod: zml.ModuleExe(modernbert.ModernBertForMaskedLM.forward),
     tokenizer: zml.tokenizer.Tokenizer,
-    allocator: std.mem.Allocator,
     seq_len: i64,
     text: []const u8,
 ) !void {
@@ -78,17 +75,18 @@ pub fn unmask(
     defer tokenizer_decoder.deinit();
 
     const pad_token = tokenizer.tokenToId("[PAD]") orelse return error.NoSuchToken;
+    const mask_token = tokenizer.tokenToId("[MASK]") orelse return error.NoSuchToken;
 
     // Tokenize input text
     const tokens: []const u32 = try tokenize(allocator, tokenizer, text);
     defer allocator.free(tokens);
 
     // Find "[MASK]" positions
-    const mask_positions = try findMaskPositions(tokens, allocator);
+    const mask_positions = try findMaskPositions(allocator, tokens, mask_token);
     defer allocator.free(mask_positions);
 
     // Prepare input tensors
-    const inputs = try prepareTensorInputs(tokens, seq_len, pad_token, allocator);
+    const inputs = try prepareTensorInputs(allocator, tokens, seq_len, pad_token);
     defer {
         allocator.free(inputs.ids);
         allocator.free(inputs.mask);
@@ -272,7 +270,7 @@ pub fn asyncMain() !void {
     const text = res.args.text orelse "Paris is the [MASK] of France.";
     log.info("\tInput text: {s}", .{text});
 
-    try unmask(bert_module, tokenizer, allocator, seq_len, text);
+    try unmask(allocator, bert_module, tokenizer, seq_len, text);
 }
 
 pub fn tokenize(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, prompt: []const u8) ![]const u32 {
