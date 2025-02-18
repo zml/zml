@@ -148,33 +148,37 @@ pub const ModernBertEncoderLayer = struct {
 };
 
 pub fn generateSlidingWindowMask(global_attention_mask: Tensor) Tensor {
-    const tgt_seq_len = global_attention_mask.dim(.tgt);
-    const src_seq_len = global_attention_mask.dim(.src);
-    const mask_shape = zml.Shape.init(.{ .tgt = tgt_seq_len, .src = src_seq_len }, global_attention_mask.dtype());
+    const batch_size = global_attention_mask.dim(.b);
+    const seq_len = global_attention_mask.dim(.src);
+    log.info("Batch size: {d}, Seq len: {d}", .{ batch_size, seq_len });
 
-    // Create position indices (for rows and cols)
-    const rows = Tensor.iota(mask_shape, .tgt);
-    const cols = Tensor.iota(mask_shape, .src);
+    // Create sequence positions for both dimensions
+    const tgt_shape = zml.Shape.init(.{ .tgt = seq_len }, .i32);
+    const src_shape = zml.Shape.init(.{ .src = seq_len }, .i32);
+
+    const rows = Tensor.iota(tgt_shape, .tgt);
+    const cols = Tensor.iota(src_shape, .src);
 
     // Calculate distance between positions
     const distance = rows.sub(cols).abs();
 
     // Create sliding window mask (1 for positions within window, 0 outside)
-    const local_attention = 128; // TODO: config.json: local_attention
-    var window_mask = distance.cmp(.LE, Tensor.scalar(@divExact(local_attention, 2), distance.dtype()))
+    const window_size: i64 = 64; // const local_attention = 128; should  be @divExact(local_attention, 2) + TODO: config.json: local_attention
+    var window_mask = distance.cmp(.LE, Tensor.scalar(window_size, .i32))
         .unsqueeze(0)
         .unsqueeze(0);
 
-    // match global_attention_mask shape
-    window_mask = window_mask.broadcastLeft(global_attention_mask.shape());
+    const minus_inf = Tensor.constant(global_attention_mask.shape(), zml.DataType.minValue(.f32));
 
-    // Combine with existing mask
-    if (global_attention_mask.dtype().isFloat()) {
-        const minus_inf = Tensor.constant(global_attention_mask.shape(), global_attention_mask.dtype().minValue());
-        return Tensor.select(window_mask, global_attention_mask, minus_inf);
-    } else {
-        return window_mask.convert(global_attention_mask.dtype());
-    }
+    // Make global attention mask float
+    const float_global_mask = if (global_attention_mask.dtype().isFloat())
+        global_attention_mask
+    else
+        global_attention_mask.convert(.f32);
+
+    // Expand window mask to match global attention mask shape
+    window_mask = window_mask.broadcastLeft(float_global_mask.shape());
+    return window_mask.select(float_global_mask, minus_inf);
 }
 
 pub const ModernBertModel = struct {
