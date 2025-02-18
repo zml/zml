@@ -1,6 +1,6 @@
 module(
     name = "xla",
-    version = "20250204-0-6789523",
+    version = "20250204.1-6789523",
     compatibility_level = 1,
 )
 
@@ -17,7 +17,7 @@ bazel_dep(name = "zlib", version = "1.2.13")
 bazel_dep(name = "re2", version = "2024-07-02.bcr.1", repo_name = "com_googlesource_code_re2")
 bazel_dep(name = "rules_license", version = "0.0.8")
 
-bazel_dep(name = "stablehlo", version = "20250201.0-7775e3e")
+bazel_dep(name = "stablehlo", version = "20250217.0-4598975")
 
 tsl = use_extension("//:tsl.bzl", "tsl")
 use_repo(tsl, "tsl")
