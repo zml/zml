@@ -102,11 +102,13 @@ pub fn unmask(
     defer attention_mask_tensor.deinit();
 
     // Model inference (retrieve indices)
+    var inference_timer = try std.time.Timer.start();
     const indices_buffer: zml.Buffer, const values_buffer: zml.Buffer = mod.call(.{ input_ids_tensor, attention_mask_tensor });
     defer {
         indices_buffer.deinit();
         values_buffer.deinit();
     }
+    const inference_time = inference_timer.read();
 
     // Transfer the result to host memory (CPU)
     var indices_host_buffer = try indices_buffer.toHostAlloc(allocator);
@@ -121,6 +123,9 @@ pub fn unmask(
     const position_offset = mask_positions[0] * 5;
     const predictions = raw_indices[position_offset .. position_offset + 5];
     const scores = raw_probs[position_offset .. position_offset + 5];
+
+    // Log timing information
+    log.info("⏱️\tModel inference in  {d}ms", .{inference_time / std.time.ns_per_ms});
 
     log.info("✅\tTop 5 predictions:", .{});
     for (predictions, scores) |token_id, score| {
