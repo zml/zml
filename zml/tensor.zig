@@ -966,6 +966,11 @@ pub const Tensor = struct {
         return binaryOp(@src(), "remainder", dialect.stablehlo.remainder)(self, other);
     }
 
+    /// Returns a Tensor containing the element-wise remainder of dividend 'self' and divisor 'other'.
+    pub fn remainderScalar(self: Tensor, b: anytype) Tensor {
+        return self.remainder(scalar(b, self.dtype()));
+    }
+
     /// Returns a Tensor containing the element-wise addition of the input Tensor with a constant.
     pub fn addConstant(self: Tensor, b: anytype) Tensor {
         return self.add(Tensor.scalar(b, self.dtype()));
