@@ -401,9 +401,6 @@ pub fn nearest(input: Tensor, scale_factor: []const f64) Tensor {
 test nearest {
     const platform = zml.testing.env();
 
-    // TODO(@cryptodeal): need to fix this for mlx plugin
-    // try zml.testing.mlxSkipTest(platform);
-
     // 3D Tensor (basic)
     {
         const input_3d_basic = try zml.Buffer.fromArray(platform, [1][1][2]i32{.{.{ 1, 2 }}});

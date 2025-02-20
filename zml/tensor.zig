@@ -2392,9 +2392,6 @@ pub const Tensor = struct {
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
 
-        // TODO(@cryptodeal): need to fix this for mlx plugin
-        // try zml.testing.mlxSkipTest(platform);
-
         {
             // Only test shapes
             var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
@@ -3698,9 +3695,6 @@ pub const Tensor = struct {
     test cartesianProduct {
         const zml = @import("zml.zig");
         const client = zml.testing.env();
-
-        // TODO(@cryptodeal): need to fix this for mlx plugin
-        try zml.testing.mlxSkipTest(client);
 
         const x = try zml.Buffer.fromSlice(client, .{6}, &[_]i32{ 0, 1, 2, 3, 4, 5 });
         const y = try zml.Buffer.fromSlice(client, .{4}, &[_]i32{ 0, 1, 2, 3 });

@@ -9,12 +9,12 @@ bazel_dep(name = "rules_oci", version = "2.0.0")
 
 local_path_override(
     module_name = "xla",
-    path = "../../xla",
+    path = "../../local_xla",
 )
 
 local_path_override(
     module_name = "mlx",
-    path = "../../mlx",
+    path = "../../rebase-mlx",
 )
 
 oci = use_extension("@rules_oci//oci:extensions.bzl", "oci")

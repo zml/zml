@@ -6,12 +6,12 @@ new_git_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:git.bzl"
 
 local_path_override(
     module_name = "xla",
-    path = "../xla",
+    path = "../local_xla",
 )
 
 local_path_override(
     module_name = "mlx",
-    path = "../mlx",
+    path = "../rebase-mlx",
 )
 
 bazel_dep(name = "bazel_skylib", version = "1.7.1")

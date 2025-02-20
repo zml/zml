@@ -194,9 +194,6 @@ pub fn roll(self: Tensor, shifts: []const i64, axes_: []const u8) Tensor {
 test roll {
     const platform = zml.testing.env();
 
-    // TODO(@cryptodeal): need to fix this for mlx plugin
-    try zml.testing.mlxSkipTest(platform);
-
     const input = try zml.Buffer.fromSlice(platform, .{ 4, 2 }, &[_]f32{ 2, 2, 3, 4, 5, 6, 7, 8 });
     const res = try zml.testing.compileAndCall(
         platform,
