@@ -3,12 +3,12 @@ const std = @import("std");
 const compileError = @import("debug.zig").compileError;
 
 pub fn ArgsTuple(comptime funcT: anytype, comptime ArgsT: ?type) type {
-    const params = @typeInfo(funcT).Fn.params;
+    const params = @typeInfo(funcT).@"fn".params;
     if (params.len == 0) {
         return @TypeOf(.{});
     }
 
-    if (@typeInfo(funcT).Fn.is_generic == false) {
+    if (@typeInfo(funcT).@"fn".is_generic == false) {
         return std.meta.ArgsTuple(funcT);
     }
 
@@ -31,14 +31,14 @@ pub fn ArgsTuple(comptime funcT: anytype, comptime ArgsT: ?type) type {
                 break :blk num_buf[0..s :0];
             },
             .type = T,
-            .default_value = null,
+            .default_value_ptr = null,
             .is_comptime = false,
             .alignment = if (@sizeOf(T) > 0) @alignOf(T) else 0,
         };
     }
 
     return @Type(.{
-        .Struct = .{
+        .@"struct" = .{
             .is_tuple = true,
             .layout = .auto,
             .decls = &.{},
@@ -67,11 +67,11 @@ pub fn FnSignature(comptime func: anytype, comptime argsT_: ?type) Signature {
         .ArgsT = argsT,
         .ReturnT = return_type,
         .ReturnPayloadT = switch (@typeInfo(return_type)) {
-            .ErrorUnion => |u| u.payload,
+            .error_union => |u| u.payload,
             else => return_type,
         },
         .ReturnErrorSet = switch (@typeInfo(return_type)) {
-            .ErrorUnion => |u| u.error_set,
+            .error_union => |u| u.error_set,
             else => null,
         },
     };

@@ -33,7 +33,7 @@ pub const Memory = pjrt.Memory;
 
 fn InnerMixin(comptime innerT: type) type {
     return struct {
-        inline fn inner(self: anytype) if (@typeInfo(@TypeOf(self)).Pointer.is_const) *const innerT else *innerT {
+        inline fn inner(self: anytype) if (@typeInfo(@TypeOf(self)).pointer.is_const) *const innerT else *innerT {
             return @ptrCast(self);
         }
     };

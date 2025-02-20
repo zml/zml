@@ -89,7 +89,9 @@ pub fn sleep(exec: *Executor, ms: u64) !void {
 }
 
 pub fn waitForCompletionOutsideCoro(exec: *Executor, c: *xev.Completion) !void {
-    @setCold(true);
+    // which one should it be ?
+    // @branchHint(.cold);
+    @branchHint(.unlikely);
     while (c.state() != .dead) {
         try exec.tick();
     }

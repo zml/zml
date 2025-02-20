@@ -84,7 +84,7 @@ fn loadFile(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.Array
     buffer_file.data_offset = 8 + json_header_length;
 
     try files.append(buffer_file);
-    errdefer _ = files.popOrNull();
+    errdefer _ = files.pop();
 
     var it = metadata.object.iterator();
     while (it.next()) |entry| {

@@ -1,0 +1,32 @@
+load("@rules_proto//proto:defs.bzl", "proto_lang_toolchain")
+load("@rules_zig//zig:defs.bzl", "BINARY_KIND", "zig_binary", "zig_library")
+
+zig_library(
+    name = "protobuf",
+    import_name = "protobuf",
+    main = "src/protobuf.zig",
+    visibility = ["//visibility:public"],
+)
+
+zig_binary(
+    name = "generator",
+    srcs = [
+        "bootstrapped-generator/FullName.zig",
+        "bootstrapped-generator/google/protobuf/compiler/plugin.pb.zig",
+        "bootstrapped-generator/google/protobuf/descriptor.pb.zig",
+    ],
+    kind = BINARY_KIND.exe,
+    main = "bootstrapped-generator/main.zig",
+    visibility = ["//visibility:public"],
+    deps = [":protobuf"],
+)
+
+proto_lang_toolchain(
+    name = "zig_toolchain",
+    command_line = "--zig_out=$(OUT)",
+    output_files = "multiple",
+    plugin = ":generator",
+    plugin_format_flag = "--plugin=protoc-gen-zig=%s",
+    runtime = ":protobuf",
+    visibility = ["//visibility:public"],
+)

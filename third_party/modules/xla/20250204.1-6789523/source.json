@@ -1,0 +1,15 @@
+{
+    "strip_prefix": "xla-6789523d0a42c2cf83309a263f417122c4c63811",
+    "url": "https://github.com/openxla/xla/archive/6789523d0a42c2cf83309a263f417122c4c63811.tar.gz",
+    "integrity": "sha256-7z0MdXQBoGApSYpTvYjKFmg18tGkjJ3P/PPQ487cPc8=",
+    "overlay": {
+        "tsl.bzl": "",
+        "workspace.bzl": "",
+        "MODULE.bazel": ""
+    },
+    "patch_strip": 1,
+    "patches": {
+        "0001-bazel-migration-to-bazel-8.0.1.patch": "",
+        "0003-PJRT-C-API-Ensure-C-compliance-for-Profiler-Extensio.patch": ""
+    }
+}

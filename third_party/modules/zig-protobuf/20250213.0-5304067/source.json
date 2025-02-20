@@ -1,0 +1,9 @@
+{
+    "strip_prefix": "zig-protobuf-5304067205135532c0ad57f78243bfe86dc1ad3f",
+    "url": "https://github.com/gwenzek/zig-protobuf/archive/5304067205135532c0ad57f78243bfe86dc1ad3f.tar.gz",
+    "integrity": "sha256-cdby+J1CGNOvLRvdeASPNlB7y1q59LYcgjFOooBvIcA=",
+    "overlay": {
+        "MODULE.bazel": "",
+        "BUILD.bazel": ""
+    }
+}

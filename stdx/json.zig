@@ -29,9 +29,9 @@ pub fn Union(comptime T: type) type {
                         else => {},
                     },
                     else => switch (@typeInfo(field.type)) {
-                        .Int => if (source == .integer) return .{ .value = @unionInit(T, field.name, @intCast(source.integer)) },
-                        .Float => if (source == .float) return .{ .value = @unionInit(T, field.name, @floatCast(source.float)) },
-                        .Struct => if (source == .object) return .{ .value = @unionInit(T, field.name, try std.json.innerParseFromValue(field.type, allocator, source.object, options)) },
+                        .int => if (source == .integer) return .{ .value = @unionInit(T, field.name, @intCast(source.integer)) },
+                        .float => if (source == .float) return .{ .value = @unionInit(T, field.name, @floatCast(source.float)) },
+                        .@"struct" => if (source == .object) return .{ .value = @unionInit(T, field.name, try std.json.innerParseFromValue(field.type, allocator, source.object, options)) },
                         inline else => switch (source) {
                             .number_string, .array => return .{ .value = @unionInit(T, field.name, try std.json.innerParseFromValue(field.type, allocator, source, options)) },
                             else => {},
