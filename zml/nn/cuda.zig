@@ -37,10 +37,14 @@ fn elementTypeFromDataType(dtype: DataType) [:0]const u8 {
 }
 
 pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
-    const ctx = CompilationContext.current();
-    const q = q_.transpose(.{ .b, .h, .q, .hd });
-    var k = k_.transpose(.{ .b, .h, .k, .hd });
-    const v = v_.transpose(.{ .b, .h, .k, .hd });
+    var q = if (q_.rank() == 3) q_.insertAxes(0, .{.b}) else q_;
+    q = q.transpose(.{ .b, .h, .q, .hd });
+
+    var k = if (k_.rank() == 3) k_.insertAxes(0, .{.b}) else k_;
+    k = k.transpose(.{ .b, .h, .k, .hd });
+
+    var v = if (v_.rank() == 3) v_.insertAxes(0, .{.b}) else v_;
+    v = v.transpose(.{ .b, .h, .k, .hd });
 
     const sqrtHeadDim: f32 = 1.0 / std.math.sqrt(@as(f32, @floatFromInt(q.dim(.hd))));
     const scale: f32 = if (opts.scale) |_| 1.0 else sqrtHeadDim;
@@ -119,6 +123,7 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
         bias = bias.add(attn_mask.broad(bias.shape()));
     }
 
+    const ctx = CompilationContext.current();
     const mlir_ctx = ctx.mlirCtx();
     const loc = mlir_ctx.location(@src());
     const op = dialect.stablehlo.custom_call(
@@ -137,6 +142,8 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
         },
         loc,
     );
-    const result = Tensor._result(q.shape(), op.result(0)).transpose(q_.shape());
+    var result = Tensor._result(q.shape(), op.result(0));
+    if (q_.rank() == 3) result = result.squeeze(.b);
+    result = result.transpose(q_.shape());
     return result;
 }
