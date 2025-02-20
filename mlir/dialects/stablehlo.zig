@@ -1363,3 +1363,11 @@ pub fn serializePortableArtifact(bytecode: []const u8, target_version: []const u
         }
     }).callback, &context), error.InvalidMlirBytecodeVersion);
 }
+
+pub fn optimization_barrier(ctx: mlir.Context, value: mlir.Value, location: mlir.Location) mlir.Value {
+    return mlir.Operation.make(ctx, "stablehlo.optimization_barrier", .{
+        .operands = &.{value},
+        .result_type_inference = true,
+        .location = location,
+    });
+}

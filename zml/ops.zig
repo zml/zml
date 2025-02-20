@@ -777,6 +777,14 @@ pub fn addHostCallback(
     return Tensor._result(input.shape(), op.result(0));
 }
 
+pub fn optimizationBarrier(x: Tensor) Tensor {
+    const ctx = CompilationContext.current();
+    return Tensor._result(
+        x.shape(),
+        dialect.stablehlo.optimization_barrier(x.value(), ctx.location(@src(), "", .{})),
+    );
+}
+
 /// Generalized version of scatter to many inputs.
 /// See `zml.Tensor.scatterSlices` for documentation on scatter.
 ///
@@ -865,6 +873,7 @@ pub fn scatter(
         mlir_ctx,
         input_values.items,
         &.{indices.value()},
+        // TODO transpose updates
         updates_values.items,
         update_block,
         .{
