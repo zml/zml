@@ -1,11 +1,13 @@
-const clap = @import("clap");
 const std = @import("std");
-const zml = @import("zml");
-const asynk = @import("async");
 const log = std.log.scoped(.modernbert);
-const Tensor = zml.Tensor;
+
 const modernbert = @import("modernbert.zig");
+
+const asynk = @import("async");
+const clap = @import("clap");
 const stdx = @import("stdx");
+const zml = @import("zml");
+const Tensor = zml.Tensor;
 
 pub const std_options = .{
     .log_level = .info,
@@ -86,16 +88,6 @@ pub fn asyncMain() !void {
     defer arena_state.deinit();
     const model_arena = arena_state.allocator();
 
-    // Create the model struct, with tensor shapes extracted from the tensor_store
-    const modernbert_options = modernbert.ModernBertOptions{
-        .num_attention_heads = @intCast(cli.args.@"num-attention-heads" orelse 12),
-        .tie_word_embeddings = cli.args.@"tie-word-embeddings" orelse false,
-    };
-    var modern_bert_for_masked_lm = try zml.aio.populateModel(modernbert.ModernBertForMaskedLM, model_arena, tensor_store);
-    modern_bert_for_masked_lm.init(modernbert_options);
-
-    log.info("\tModernBERT options: {}", .{modernbert_options});
-
     var tokenizer = blk: {
         if (cli.args.tokenizer) |tok| {
             log.info("\tLoading tokenizer from {s}", .{tok});
@@ -108,12 +100,24 @@ pub fn asyncMain() !void {
             return;
         }
     };
-    errdefer tokenizer.deinit();
+    defer tokenizer.deinit();
+
+    // Create the model struct, with tensor shapes extracted from the tensor_store
+    // TODO: read from config.json
+    const modernbert_options = modernbert.ModernBertOptions{
+        .pad_token = tokenizer.tokenToId("[PAD]") orelse return error.NoSuchToken,
+        .num_attention_heads = @intCast(cli.args.@"num-attention-heads" orelse 12),
+        .tie_word_embeddings = cli.args.@"tie-word-embeddings" orelse false,
+        .local_attention = 128,
+    };
+    var modern_bert_for_masked_lm = try zml.aio.populateModel(modernbert.ModernBertForMaskedLM, model_arena, tensor_store);
+    modern_bert_for_masked_lm.init(modernbert_options);
+
+    log.info("\tModernBERT options: {}", .{modernbert_options});
 
     // Prepare shapes for compilation
-    const seq_len = @as(i64, @intCast(cli.args.@"seq-len" orelse 512));
-    const input_shape = zml.Shape.init(.{ .b = 1, .s = seq_len }, .i64);
-    const attention_mask_shape = input_shape;
+    const seq_len = @as(i64, @intCast(cli.args.@"seq-len" orelse 256));
+    const input_shape = zml.Shape.init(.{ .b = 1, .s = seq_len }, .u32);
 
     var start = try std.time.Timer.start();
 
@@ -129,7 +133,7 @@ pub fn asyncMain() !void {
         allocator,
         modernbert.ModernBertForMaskedLM.forward,
         .{modernbert_options},
-        .{ input_shape, attention_mask_shape },
+        .{input_shape},
         tensor_store,
         platform,
     });
@@ -168,31 +172,23 @@ pub fn unmask(
 
     // Prepare input tensors
     const inputs = try prepareTensorInputs(allocator, tokens, seq_len, pad_token);
-    defer {
-        allocator.free(inputs.ids);
-        allocator.free(inputs.mask);
-    }
+    defer allocator.free(inputs);
 
     // Create input tensors (on the accelerator)
     const input_shape = zml.Shape.init(.{ .b = 1, .s = seq_len }, .i64);
-    const input_ids_tensor = try zml.Buffer.fromSlice(mod.platform(), input_shape.dims(), inputs.ids);
+    const input_ids_tensor = try zml.Buffer.fromSlice(mod.platform(), input_shape.dims(), inputs);
     defer input_ids_tensor.deinit();
-    const attention_mask_tensor = try zml.Buffer.fromSlice(mod.platform(), input_shape.dims(), inputs.mask);
-    defer attention_mask_tensor.deinit();
 
     // Model inference (retrieve indices)
     var inference_timer = try std.time.Timer.start();
-    const indices_buffer: zml.Buffer, const values_buffer: zml.Buffer = mod.call(.{ input_ids_tensor, attention_mask_tensor });
-    defer {
-        indices_buffer.deinit();
-        values_buffer.deinit();
-    }
+    var topk = mod.call(.{input_ids_tensor});
+    defer zml.aio.unloadBuffers(&topk);
     const inference_time = inference_timer.read();
 
     // Transfer the result to host memory (CPU)
-    var indices_host_buffer = try indices_buffer.toHostAlloc(allocator);
+    var indices_host_buffer = try topk.indices.toHostAlloc(allocator);
     defer indices_host_buffer.deinit(allocator);
-    var values_host_buffer = try values_buffer.toHostAlloc(allocator);
+    var values_host_buffer = try topk.values.toHostAlloc(allocator);
     defer values_host_buffer.deinit(allocator);
 
     const raw_indices = @as([*]const i32, @ptrCast(@alignCast(indices_host_buffer.data.ptr)));
@@ -259,23 +255,15 @@ fn prepareTensorInputs(
     tokens: []const u32,
     seq_len: i64,
     pad_token: u32,
-) !struct { ids: []i64, mask: []i64 } {
-    var input_ids = try allocator.alloc(i64, @intCast(seq_len));
-    var attention_mask = try allocator.alloc(i64, @intCast(seq_len));
-    errdefer {
-        allocator.free(input_ids);
-        allocator.free(attention_mask);
-    }
+) ![]u32 {
+    const input_ids = try allocator.alloc(u32, @intCast(seq_len));
 
     @memset(input_ids, pad_token);
-    @memset(attention_mask, 0);
-
     for (tokens, 0..) |token, i| {
         input_ids[i] = @intCast(token);
-        attention_mask[i] = 1;
     }
 
-    return .{ .ids = input_ids, .mask = attention_mask };
+    return input_ids;
 }
 
 fn bool_parser(in: []const u8) error{}!bool {

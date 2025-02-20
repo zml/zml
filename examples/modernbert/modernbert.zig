@@ -1,12 +1,140 @@
 const std = @import("std");
-const zml = @import("zml");
+const log = std.log.scoped(.modernbert);
+
 const asynk = @import("async");
-const log = std.log;
+const stdx = @import("stdx");
+const zml = @import("zml");
+
 const Tensor = zml.Tensor;
 
 pub const ModernBertOptions = struct {
     num_attention_heads: i64,
+    pad_token: u32,
+    local_attention: u32,
     tie_word_embeddings: bool = false,
+};
+
+pub const ModernBertForMaskedLM = struct {
+    model: ModernBertModel,
+    head: ModernBertPredictionHead,
+    decoder: struct { weight: ?zml.Tensor, bias: zml.Tensor },
+
+    pub fn init(self: *ModernBertForMaskedLM, options: ModernBertOptions) void {
+        self.model.init(options);
+        self.head.norm.eps = 1e-5;
+
+        self.head.dense.weight = self.head.dense.weight.withSharding(.{0});
+
+        if (options.tie_word_embeddings == true) {
+            self.decoder.weight = null;
+        } else if (self.decoder.weight) |decoder_weight| {
+            self.decoder.weight = decoder_weight.withSharding(.{1});
+        }
+    }
+
+    pub fn forward(self: ModernBertForMaskedLM, input_ids: Tensor) zml.Tensor.ArgMaxRes {
+        const outputs: Tensor = zml.call(self.model, .forward, .{input_ids});
+        const head_outputs: Tensor = zml.call(self.head, .forward, .{outputs});
+
+        // either use decoder or tied weights
+        const decoder_weights = self.decoder.weight orelse self.model.embeddings.tok_embeddings.weight;
+
+        const logits = head_outputs.withTags(.{ .b, .s, .d }).dot(decoder_weights.withTags(.{ .voc, .d }), .{.d});
+        const biased_logits = logits.add(self.decoder.bias.withTags(.{.voc}).broad(logits.shape()));
+
+        const probabilities = biased_logits.softmax(.voc);
+        return probabilities.topK(5, .voc, .{ .descending = true });
+    }
+};
+
+pub const ModernBertModel = struct {
+    options: ModernBertOptions,
+    embeddings: ModernBertEmbeddings,
+    layers: []ModernBertEncoderLayer,
+    final_norm: zml.nn.LayerNorm,
+
+    pub fn init(self: *ModernBertModel, options: ModernBertOptions) void {
+        self.options = options;
+        self.final_norm.eps = 1e-5;
+        for (self.layers, 0..) |*encoder_layer, layer_idx| {
+            encoder_layer.attn.Wqkv.weight = encoder_layer.attn.Wqkv.weight.withSharding(.{0});
+            encoder_layer.attn.Wo.weight = encoder_layer.attn.Wo.weight.withSharding(.{1});
+
+            encoder_layer.mlp.Wi.weight = encoder_layer.mlp.Wi.weight.withSharding(.{0});
+            encoder_layer.mlp.Wo.weight = encoder_layer.mlp.Wo.weight.withSharding(.{1});
+
+            if (encoder_layer.attn_norm) |*norm| norm.eps = 1e-5;
+            encoder_layer.mlp_norm.eps = 1e-5;
+            encoder_layer.attn.is_global_attention = (layer_idx % 3 == 0);
+            encoder_layer.attn.num_heads = options.num_attention_heads;
+        }
+    }
+
+    pub fn forward(self: ModernBertModel, input_ids: Tensor) Tensor {
+        var hidden_states: Tensor = zml.call(self.embeddings, .forward, .{input_ids}).withTags(.{ .b, .src, .d });
+
+        const global_mask = globalAttnMask(input_ids, hidden_states.dtype(), self.options.pad_token);
+        const local_mask = localAttnMask(global_mask, self.options.local_attention);
+
+        // Process through all encoder layers
+        for (self.layers) |encoder_layer| {
+            hidden_states = zml.call(encoder_layer, .forward, .{
+                hidden_states,
+                global_mask,
+                local_mask,
+            });
+        }
+
+        // Final layer normalization
+        hidden_states = zml.call(self.final_norm, .forward, .{hidden_states});
+
+        return hidden_states;
+    }
+
+    /// Find [PAD] tokens in inputs, and assign them a -inf attention mask.
+    /// Output shapes follows zml.nn.sdpa convention: .{ .b, .q, .k }
+    pub fn globalAttnMask(input_ids: Tensor, dt: zml.DataType, pad_token: u32) Tensor {
+        const ids = input_ids.withTags(.{ .b, .k });
+
+        // Mask keys where corresponding token is [PAD]
+        const padding = ids.cmp(.EQ, Tensor.scalar(pad_token, ids.dtype()));
+        const pad_mask = padding.select(Tensor.constant(.{}, dt.minValue()), Tensor.constant(.{}, dt.zero()));
+
+        // Broadcast to the desired output shape.
+        const seq_len = ids.dim(.k);
+        const pad_mask_shape = zml.Shape.init(.{ .b = pad_mask.dim(.b), .q = seq_len, .k = seq_len }, dt);
+        return pad_mask.broad(pad_mask_shape).print();
+    }
+
+    /// Restrict global attn mask to a sliding window.
+    /// Output shapes follows zml.nn.sdpa convention: .{ .b, .q, .k }
+    pub fn localAttnMask(global_mask: Tensor, window_size: u32) Tensor {
+        const mask_shape = global_mask.shape();
+
+        // Calculate distance between positions
+        const rows = Tensor.iota(mask_shape, .q);
+        const cols = Tensor.iota(mask_shape, .k);
+        const distance = rows.sub(cols).abs();
+
+        // Note: we divide by two because the BERT local attention is symetric around the query token.
+        // Create sliding window mask (1 for positions within window, 0 outside)
+        const window_mask = distance.cmp(.LE, Tensor.scalar(@divExact(window_size, 2), .i32));
+        const minus_inf = Tensor.constant(mask_shape, mask_shape.dtype().minValue());
+        return window_mask.select(global_mask, minus_inf).print();
+    }
+};
+
+pub const ModernBertPredictionHead = struct {
+    dense: zml.nn.Linear,
+    norm: zml.nn.LayerNorm,
+
+    pub fn forward(self: ModernBertPredictionHead, hidden_states: Tensor) Tensor {
+        const dense_output: Tensor = zml.call(self.dense, .forward, .{hidden_states});
+
+        const activated_output = dense_output.gelu();
+
+        return zml.call(self.norm, .forward, .{activated_output});
+    }
 };
 
 pub const ModernBertEmbeddings = struct {
@@ -22,27 +150,36 @@ pub const ModernBertEmbeddings = struct {
     }
 };
 
-/// Switch out the old MLP layers for GeGLU layers, improving on the original BERT’s GeLU activation function.
-///
-/// The GeGLU activation function is a combination of the Gated Linear Unit (GLU) and the Gaussian Error Linear Unit (GeLU).
-///
-/// see: https://paperswithcode.com/method/geglu
-pub const ModernBertMLP = struct {
-    Wi: zml.nn.Linear,
-    Wo: zml.nn.Linear,
+pub const ModernBertEncoderLayer = struct {
+    attn_norm: ?zml.nn.LayerNorm = null,
+    attn: ModernBertAttention,
+    mlp_norm: zml.nn.LayerNorm,
+    mlp: ModernBertMLP,
 
-    pub fn forward(self: ModernBertMLP, hidden_states: Tensor) Tensor {
-        // Perform Wi
-        const wi_output: Tensor = zml.call(self.Wi, .forward, .{hidden_states});
+    pub fn forward(
+        self: ModernBertEncoderLayer,
+        hidden_states: Tensor,
+        global_mask: Tensor,
+        local_mask: Tensor,
+    ) Tensor {
+        const attn_norm_output = if (self.attn_norm) |attn_norm|
+            zml.call(attn_norm, .forward, .{hidden_states})
+        else
+            hidden_states;
 
-        // Split into input and gate tensors along the last dimension
-        const input, const gate = wi_output.chunkExact(-1, 2);
+        const attn_output: Tensor = zml.call(self.attn, .forward, .{
+            attn_norm_output,
+            global_mask,
+            local_mask,
+        });
 
-        // Apply activation
-        const activated_input = input.gelu().mul(gate);
+        var output = hidden_states.add(attn_output);
 
-        // Perform Wo
-        return zml.call(self.Wo, .forward, .{activated_input});
+        const mlp_norm_output: Tensor = zml.call(self.mlp_norm, .forward, .{output});
+        const mlp_output = zml.call(self.mlp, .forward, .{mlp_norm_output});
+        output = output.add(mlp_output);
+
+        return output;
     }
 };
 
@@ -60,8 +197,8 @@ pub const ModernBertAttention = struct {
     pub fn forward(
         self: ModernBertAttention,
         hidden_states: Tensor,
-        attention_mask: Tensor,
-        sliding_window_mask: Tensor,
+        global_mask: Tensor,
+        local_mask: Tensor,
     ) Tensor {
         const batch_size = hidden_states.shape().dim(0);
         const seq_length = hidden_states.shape().dim(1);
@@ -97,16 +234,8 @@ pub const ModernBertAttention = struct {
         k = k.rename(.{ .s = .k });
         v = v.rename(.{ .s = .k });
 
-        var mask = attention_mask;
-        if (!self.is_global_attention) mask = sliding_window_mask;
-
-        const sdqa_opts = zml.nn.SdpaOpts{
-            .allow_cudnn = false,
-            .attn_mask = mask,
-        };
-
         // Scaled dot product attention
-        const attn_output = zml.nn.sdpa(q, k, v, sdqa_opts);
+        const attn_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = if (self.is_global_attention) global_mask else local_mask });
         const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
 
         // Final projection
@@ -114,160 +243,26 @@ pub const ModernBertAttention = struct {
     }
 };
 
-pub const ModernBertEncoderLayer = struct {
-    attn_norm: ?zml.nn.LayerNorm = null,
-    attn: ModernBertAttention,
-    mlp_norm: zml.nn.LayerNorm,
-    mlp: ModernBertMLP,
+/// Switch out the old MLP layers for GeGLU layers, improving on the original BERT’s GeLU activation function.
+///
+/// The GeGLU activation function is a combination of the Gated Linear Unit (GLU) and the Gaussian Error Linear Unit (GeLU).
+///
+/// see: https://paperswithcode.com/method/geglu
+pub const ModernBertMLP = struct {
+    Wi: zml.nn.Linear,
+    Wo: zml.nn.Linear,
 
-    pub fn forward(
-        self: ModernBertEncoderLayer,
-        hidden_states: Tensor,
-        attention_mask: Tensor,
-        sliding_window_mask: Tensor,
-    ) Tensor {
-        const attn_norm_output = if (self.attn_norm) |attn_norm|
-            zml.call(attn_norm, .forward, .{hidden_states})
-        else
-            hidden_states;
+    pub fn forward(self: ModernBertMLP, hidden_states: Tensor) Tensor {
+        // Perform Wi
+        const wi_output: Tensor = zml.call(self.Wi, .forward, .{hidden_states});
 
-        const attn_output: Tensor = zml.call(self.attn, .forward, .{
-            attn_norm_output,
-            attention_mask,
-            sliding_window_mask,
-        });
+        // Split into input and gate tensors along the last dimension
+        const input, const gate = wi_output.chunkExact(-1, 2);
 
-        var output = hidden_states.add(attn_output);
+        // Apply activation
+        const activated_input = input.gelu().mul(gate);
 
-        const mlp_norm_output: Tensor = zml.call(self.mlp_norm, .forward, .{output});
-        const mlp_output = zml.call(self.mlp, .forward, .{mlp_norm_output});
-        output = output.add(mlp_output);
-
-        return output;
-    }
-};
-
-pub fn generateSlidingWindowMask(global_attention_mask: Tensor) Tensor {
-    const seq_len = global_attention_mask.dim(.src);
-
-    // Create sequence positions for both dimensions
-    const tgt_shape = zml.Shape.init(.{ .tgt = seq_len }, .i32);
-    const src_shape = zml.Shape.init(.{ .src = seq_len }, .i32);
-
-    const rows = Tensor.iota(tgt_shape, .tgt);
-    const cols = Tensor.iota(src_shape, .src);
-
-    // Calculate distance between positions
-    const distance = rows.sub(cols).abs();
-
-    // Create sliding window mask (1 for positions within window, 0 outside)
-    const window_size: i64 = 64; // config.json: @divExact(local_attention, 2)
-    var window_mask = distance.cmp(.LE, Tensor.scalar(window_size, .i32))
-        .unsqueeze(0)
-        .unsqueeze(0);
-
-    const minus_inf = Tensor.constant(global_attention_mask.shape(), zml.DataType.minValue(.f32));
-
-    // Make global attention mask float
-    const float_global_mask = if (global_attention_mask.dtype().isFloat())
-        global_attention_mask
-    else
-        global_attention_mask.convert(.f32);
-
-    // Expand window mask to match global attention mask shape
-    window_mask = window_mask.broadcastLeft(float_global_mask.shape());
-    return window_mask.select(float_global_mask, minus_inf);
-}
-
-pub const ModernBertModel = struct {
-    embeddings: ModernBertEmbeddings,
-    layers: []ModernBertEncoderLayer,
-    final_norm: zml.nn.LayerNorm,
-    dtype: zml.DataType = .f32, // config.json: torch_dtype
-
-    pub fn init(self: *ModernBertModel, options: ModernBertOptions) void {
-        self.final_norm.eps = 1e-5;
-        for (self.layers, 0..) |*encoder_layer, layer_idx| {
-            encoder_layer.attn.Wqkv.weight = encoder_layer.attn.Wqkv.weight.withSharding(.{0});
-            encoder_layer.attn.Wo.weight = encoder_layer.attn.Wo.weight.withSharding(.{1});
-
-            encoder_layer.mlp.Wi.weight = encoder_layer.mlp.Wi.weight.withSharding(.{0});
-            encoder_layer.mlp.Wo.weight = encoder_layer.mlp.Wo.weight.withSharding(.{1});
-
-            if (encoder_layer.attn_norm) |*norm| norm.eps = 1e-5;
-            encoder_layer.mlp_norm.eps = 1e-5;
-            encoder_layer.attn.is_global_attention = (layer_idx % 3 == 0);
-            encoder_layer.attn.num_heads = options.num_attention_heads;
-        }
-    }
-
-    pub fn forward(self: ModernBertModel, input_ids: Tensor, attention_mask: Tensor) Tensor {
-        var hidden_states: Tensor = zml.call(self.embeddings, .forward, .{input_ids});
-
-        // global_attention_mask = _prepare_4d_attention_mask(attention_mask, self.dtype)
-        const global_attention_mask = zml.nn.expandMask(attention_mask, self.dtype, null);
-
-        const sliding_window_mask = generateSlidingWindowMask(global_attention_mask);
-
-        // Process through all encoder layers
-        for (self.layers) |encoder_layer| {
-            hidden_states = zml.call(encoder_layer, .forward, .{
-                hidden_states,
-                global_attention_mask,
-                sliding_window_mask,
-            });
-        }
-
-        // Final layer normalization
-        hidden_states = zml.call(self.final_norm, .forward, .{hidden_states});
-
-        return hidden_states;
-    }
-};
-
-pub const ModernBertPredictionHead = struct {
-    dense: zml.nn.Linear,
-    norm: zml.nn.LayerNorm,
-
-    pub fn forward(self: ModernBertPredictionHead, hidden_states: Tensor) Tensor {
-        const dense_output: Tensor = zml.call(self.dense, .forward, .{hidden_states});
-
-        const activated_output = dense_output.gelu();
-
-        return zml.call(self.norm, .forward, .{activated_output});
-    }
-};
-
-pub const ModernBertForMaskedLM = struct {
-    model: ModernBertModel,
-    head: ModernBertPredictionHead,
-    decoder: struct { weight: ?zml.Tensor, bias: zml.Tensor },
-
-    pub fn init(self: *ModernBertForMaskedLM, options: ModernBertOptions) void {
-        self.model.init(options);
-        self.head.norm.eps = 1e-5;
-
-        self.head.dense.weight = self.head.dense.weight.withSharding(.{0});
-
-        if (options.tie_word_embeddings == true) {
-            self.decoder.weight = null;
-        } else if (self.decoder.weight) |decoder_weight| {
-            self.decoder.weight = decoder_weight.withSharding(.{1});
-        }
-    }
-
-    pub fn forward(self: ModernBertForMaskedLM, input_ids: Tensor, attention_mask: Tensor) struct { Tensor, Tensor } {
-        const outputs: Tensor = zml.call(self.model, .forward, .{ input_ids, attention_mask });
-        const head_outputs: Tensor = zml.call(self.head, .forward, .{outputs});
-
-        // either use decoder or tied weights
-        const decoder_weights = self.decoder.weight orelse self.model.embeddings.tok_embeddings.weight;
-
-        const logits = head_outputs.withTags(.{ .b, .s, .d }).dot(decoder_weights.withTags(.{ .voc, .d }), .{.d});
-        const biased_logits = logits.add(self.decoder.bias.withTags(.{.voc}).broad(logits.shape()));
-
-        const probabilities = biased_logits.softmax(.voc);
-        const top_k = probabilities.topK(5, .voc, .{ .descending = true });
-        return .{ top_k.indices, top_k.values };
+        // Perform Wo
+        return zml.call(self.Wo, .forward, .{activated_input});
     }
 };

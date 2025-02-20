@@ -69,14 +69,14 @@ pub const Activation = union(enum) {
             .leakyReLU => |slope| x.leakyReLU(slope),
         };
     }
-
-    pub fn elu(x: Tensor, alpha: f32) Tensor {
-        return x.cmp(.GE, Tensor.scalar(0, x.dtype())).select(
-            x,
-            x.exp().addConstant(-1).scale(alpha),
-        );
-    }
 };
+
+pub fn elu(x: Tensor, alpha: f32) Tensor {
+    return x.cmp(.GE, Tensor.scalar(0, x.dtype())).select(
+        x,
+        x.exp().addConstant(-1).scale(alpha),
+    );
+}
 
 pub fn chainModules(module_list: anytype, input: Tensor) Tensor {
     const T = @TypeOf(module_list);
@@ -711,34 +711,6 @@ pub fn causalAttnMask(
     }
 
     return mask;
-}
-
-// TODO: Unit tests
-/// Expands attention_mask from `[bsz, seq_len]` to `[bsz, 1, tgt_seq_len, src_seq_len]`.
-///
-/// ref: https://github.com/huggingface/transformers/blob/15bd3e61f8d3680ca472c9314ad07584d20f7b81/src/transformers/modeling_attn_mask_utils.py#L181
-pub fn expandMask(mask: Tensor, dtype: zml.DataType, tgt_len: ?i64) Tensor {
-    stdx.debug.assert(mask.rank() == 2, "expandMask({}) shape need to be exactly 2 axes", .{mask.shape()});
-
-    const batch_size = mask.dim(-2);
-    const src_seq_len = mask.dim(-1);
-    const tgt_seq_len = tgt_len orelse src_seq_len;
-
-    // expanded_mask = mask[:, None, None, :].expand(bsz, 1, tgt_len, src_len).to(dtype)
-    const expanded_mask = mask.insertAxes(-1, .{ .broadcast_dim, .tgt }).broadcastLeft(zml.Shape.init(.{
-        .b = batch_size,
-        .broadcast_dim = 1,
-        .tgt = tgt_seq_len,
-        .src = src_seq_len,
-    }, dtype)).convert(dtype); // TODO: Broadcast with Shape .f32 but still need to convert to .f32 ?
-
-    // inverted_mask = 1.0 - expanded_mask
-    const inverted_mask = Tensor.constant(expanded_mask.shape(), dtype.one()).sub(expanded_mask);
-
-    // return inverted_mask.masked_fill(inverted_mask.to(torch.bool), torch.finfo(dtype).min)
-    const zeros = Tensor.constant(inverted_mask.shape(), dtype.zero());
-    const minus_inf = Tensor.constant(inverted_mask.shape(), dtype.minValue());
-    return inverted_mask.cmp(.GT, zeros).select(minus_inf, inverted_mask);
 }
 
 pub const SdpaOpts = struct {
