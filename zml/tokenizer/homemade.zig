@@ -56,7 +56,7 @@ pub const Tokenizer = struct {
 
         try token_lookup.ensureTotalCapacity(arena, @intCast(vocab_size));
 
-        const tokens: [][]const u8 = if (alloc_tokens) try arena.alloc([]u8, vocab_size) else &.{};
+        const tokens: [][]const u8 = if (alloc_tokens) try arena.alloc([]const u8, vocab_size) else &.{};
         errdefer if (alloc_tokens) arena.free(tokens);
 
         const scores: []f32 = if (alloc_tokens) try arena.alloc(f32, vocab_size) else &.{};
@@ -91,9 +91,8 @@ pub const Tokenizer = struct {
         const arena = self.arena_state.allocator();
 
         const token = try arena.alloc(u8, len);
-        const n = try tok_reader.read(token);
+        const n = try tok_reader.readAll(token);
         std.debug.assert(n == len);
-
         return self.addOwnedToken(score, token);
     }
 

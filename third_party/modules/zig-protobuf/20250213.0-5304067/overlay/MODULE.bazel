@@ -1,0 +1,8 @@
+module(
+    name = "zig-protobuf",
+    version = "20250213.0-5304067",
+    compatibility_level = 1,
+)
+
+bazel_dep(name = "rules_zig", version = "20240904.0-010da15")
+bazel_dep(name = "rules_proto", version = "6.0.0-rc1")
