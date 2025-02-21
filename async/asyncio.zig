@@ -117,6 +117,7 @@ pub const TCP = struct {
 
     pub usingnamespace Stream(Self, xev.TCP, .{
         .close = true,
+        .poll = true,
         .read = .recv,
         .write = .send,
     });
@@ -217,6 +218,7 @@ pub const TCP = struct {
 fn Stream(comptime T: type, comptime StreamT: type, comptime options: xev.stream.Options) type {
     return struct {
         pub usingnamespace if (options.close) Closeable(T, StreamT) else struct {};
+        pub usingnamespace if (options.poll) Pollable(T, StreamT) else struct {};
         pub usingnamespace if (options.read != .none) Readable(T, StreamT) else struct {};
         pub usingnamespace if (options.write != .none) Writeable(T, StreamT) else struct {};
     };
@@ -254,6 +256,46 @@ fn Closeable(comptime T: type, comptime StreamT: type) type {
             const loop = self.exec.loop;
             var c: xev.Completion = .{};
             self.stream().close(loop, &c, Data, &data, &Data.callback);
+
+            try waitForCompletion(self.exec, &c);
+
+            return data.result;
+        }
+    };
+}
+
+fn Pollable(comptime T: type, comptime StreamT: type) type {
+    return struct {
+        const Self = T;
+        const PollResult = xev.PollError!void;
+        pub fn poll(self: Self) !void {
+            const ResultT = PollResult;
+            const Data = struct {
+                result: ResultT = undefined,
+                frame: ?Frame = null,
+
+                fn callback(
+                    userdata: ?*@This(),
+                    l: *xev.Loop,
+                    c: *xev.Completion,
+                    s: StreamT,
+                    result: ResultT,
+                ) xev.CallbackAction {
+                    _ = l;
+                    _ = c;
+                    _ = s;
+                    const data = userdata.?;
+                    data.result = result;
+                    if (data.frame != null) libcoro.xresume(data.frame.?);
+                    return .disarm;
+                }
+            };
+
+            var data: Data = .{ .frame = libcoro.xframe() };
+
+            const loop = self.exec.loop;
+            var c: xev.Completion = .{};
+            self.stream().poll(loop, &c, Data, &data, &Data.callback);
 
             try waitForCompletion(self.exec, &c);
 
@@ -353,6 +395,7 @@ pub const File = struct {
 
     pub usingnamespace Stream(Self, xev.File, .{
         .close = true,
+        .poll = true,
         .read = .read,
         .write = .write,
         .threadpool = true,
@@ -499,6 +542,7 @@ pub const UDP = struct {
 
     pub usingnamespace Stream(Self, xev.UDP, .{
         .close = true,
+        .poll = true,
         .read = .none,
         .write = .none,
     });
