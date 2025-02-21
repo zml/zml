@@ -404,6 +404,7 @@ pub const CompilationContext = struct {
         const fn_res_types = try res_allocator.alloc(mlir.Type, out_tensor_count);
         const fn_res_shapes = try res_allocator.alloc(Shape, out_tensor_count);
         const fn_res_donations = try res_allocator.alloc(Tensor._Donation, out_tensor_count);
+        const fn_res_output_memory_kind = try res_allocator.alloc(Tensor._MemoryKind, out_tensor_count);
         var fn_body = self.openBlock(.hermetic, input_types, locations) catch unreachable;
         {
             defer self.closeBlock(fn_body);
@@ -419,7 +420,7 @@ pub const CompilationContext = struct {
             };
 
             var fn_res_values: [out_tensor_count]mlir.Value = undefined;
-            self.extractValuesAndTypes(fn_res, &fn_res_values, fn_res_types, fn_res_shapes, fn_res_donations);
+            self.extractValuesAndTypes(fn_res, &fn_res_values, fn_res_types, fn_res_shapes, fn_res_donations, fn_res_output_memory_kind);
 
             const fn_ret = dialect.func.return_(mlir_ctx, &fn_res_values, loc);
             fn_body.appendOperationRecursive(fn_ret);
@@ -433,10 +434,14 @@ pub const CompilationContext = struct {
 
         if (opts.kind == .main) {
             self.addDonationsAttributes(arg_attrs, fn_res_donations);
+            self.addOutputMemoryKindAttributes(arg_attrs, fn_res_output_memory_kind);
             if (self._platform.sharding().num_partitions > 1) {
                 self.addShardingAttributes(arg_attrs, res_attrs, input_shapes.items, fn_res_shapes);
             }
         }
+
+        // TODO: @rene remove debug print
+        std.debug.print("res_attrs : {any}", .{res_attrs});
 
         const mlir_fn = dialect.func.func(self.mlirCtx(), .{
             .sym_name = opts.name,
@@ -468,6 +473,18 @@ pub const CompilationContext = struct {
             .res_shapes = fn_res_shapes,
             .res_donations = fn_res_donations,
         };
+    }
+
+    fn addOutputMemoryKindAttributes(self: CompilationContext, attributes: []AttributeList, output_memory_kind: []const Tensor._MemoryKind) void {
+        const mlir_ctx = self.mlirCtx();
+        for (attributes, output_memory_kind) |*attr, memory_kind| {
+            if (memory_kind) |mk| {
+                attr.appendAssumeCapacity(mlir.NamedAttribute.init(
+                    mlir.Identifier.get(mlir_ctx, "mhlo.memory_kind"),
+                    mlir.StringAttribute.init(mlir_ctx, @tagName(mk)).as(mlir.Attribute).?,
+                ));
+            }
+        }
     }
 
     /// Given a list of donations mapping output buffers to input buffers,
@@ -770,7 +787,7 @@ pub const CompilationContext = struct {
     }
 
     /// Visit the given struct and extract the mlir.Value and mlir.Type associated with each tensor found.
-    pub fn extractValuesAndTypes(self: *const CompilationContext, v: anytype, values: []mlir.Value, types: []mlir.Type, shapes: []Shape, donations: []Tensor._Donation) void {
+    pub fn extractValuesAndTypes(self: *const CompilationContext, v: anytype, values: []mlir.Value, types: []mlir.Type, shapes: []Shape, donations: []Tensor._Donation, output_memory_kind: []Tensor._MemoryKind) void {
         std.debug.assert(values.len == types.len);
         const LocalContext = struct {
             self: *const CompilationContext,
@@ -779,8 +796,10 @@ pub const CompilationContext = struct {
             types: []mlir.Type,
             shapes: []Shape,
             donations: []Tensor._Donation,
+            output_memory_kind: []Tensor._MemoryKind,
         };
-        var context = LocalContext{ .self = self, .values = values, .types = types, .shapes = shapes, .donations = donations };
+
+        var context = LocalContext{ .self = self, .values = values, .types = types, .shapes = shapes, .donations = donations, .output_memory_kind = output_memory_kind };
         meta.visit((struct {
             fn cb(ctx: *LocalContext, tensor: *const Tensor) void {
                 const value, const donation = ctx.self.getValueAndDonation(tensor.*);
@@ -788,6 +807,7 @@ pub const CompilationContext = struct {
                 ctx.types[ctx.index] = value.getType();
                 ctx.shapes[ctx.index] = tensor._shape;
                 ctx.donations[ctx.index] = donation;
+                ctx.output_memory_kind[ctx.index] = tensor._output_memory_kind;
                 ctx.index += 1;
             }
         }).cb, &context, v);

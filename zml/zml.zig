@@ -18,6 +18,7 @@ pub const Tensor = @import("tensor.zig").Tensor;
 
 // Namespaces
 pub const context = @import("context.zig");
+pub const buffer = @import("buffer.zig");
 pub const exe = @import("exe.zig");
 pub const floats = @import("floats.zig");
 pub const helpers = @import("helpers.zig");

@@ -27,11 +27,12 @@ const log = std.log.scoped(.zml);
 /// * loading weights from disk directly to the `device zml.aio.loadBuffers`
 /// * can be created by calling `HostBuffer.toDevice(platform)`.
 pub const Buffer = struct {
-    pub const Memory = enum(@typeInfo(pjrt.Memory.Kind).Enum.tag_type) {
-        host = @intFromEnum(pjrt.Memory.Kind.unpinned_host),
-        host_pinned = @intFromEnum(pjrt.Memory.Kind.pinned_host),
-        device = @intFromEnum(pjrt.Memory.Kind.device),
-    };
+    // pub const Memory = enum(@typeInfo(pjrt.Memory.Kind).Enum.tag_type) {
+    //     host = @intFromEnum(pjrt.Memory.Kind.unpinned_host),
+    //     host_pinned = @intFromEnum(pjrt.Memory.Kind.pinned_host),
+    //     device = @intFromEnum(pjrt.Memory.Kind.device),
+    // };
+    pub const Memory = pjrt.Memory;
 
     pub const Shard = struct {
         api: *const pjrt.Api,
@@ -55,15 +56,10 @@ pub const Buffer = struct {
     _shards: Shards,
 
     pub const MAX_NUM_SHARDS: u8 = Platform.MAX_NUM_DEVICES;
-    pub const Shards = std.BoundedArray(*pjrt.Buffer, MAX_NUM_SHARDS);
+    pub const Shards = std.BoundedArray(Shard, MAX_NUM_SHARDS);
 
     /// Copies the content of the given buffer from host memory to the accelerator memory.
     pub fn from(platform: Platform, host_buffer: HostBuffer) !Buffer {
-        var res: Buffer = .{
-            ._api = platform.pjrt_api,
-            ._shape = host_buffer.shape(),
-            ._shards = .{},
-        };
 
         // We shard only on the first axis so that the chunks are still contiguous.
         // TODO: support more advanced sharding specs
@@ -79,8 +75,14 @@ pub const Buffer = struct {
         const buffer_type = bufferTypeFromDtype(host_buffer.shape().dtype());
         const byte_strides = host_buffer.strides() orelse host_buffer.shape().computeStrides().constSlice();
 
-        var frames: std.BoundedArray(asynk.Frame(pjrt.Client.bufferFromHostBuffer), MAX_NUM_SHARDS) = .{};
         const devices = platform.getDevices();
+
+        var res: Buffer = .{
+            ._api = platform.pjrt_api,
+            ._shape = host_buffer.shape(),
+            ._shards = .{},
+        };
+
         for (0..n_partitions) |i| {
             // If no sharding if found, the given buffer is replicated on all devices.
             const buf = if (sharding_ax) |ax| buf: {
@@ -88,27 +90,85 @@ pub const Buffer = struct {
                 break :buf host_buffer.slice1d(ax, .{ .start = start, .end = start + chunk_size });
             } else host_buffer;
 
-            const frame = try asynk.asyncc(pjrt.Client.bufferFromHostBuffer, .{
-                platform.pjrt_client,
-                platform.pjrt_api,
-                .{
-                    .data = buf.data,
-                    .buffer_type = buffer_type,
-                    .dims = buf.shape().dims(),
-                    .byte_strides = byte_strides,
-                    .device = devices[i],
-                    .host_buffer_semantics = .ImmutableOnlyDuringCall,
-                },
+            const pjrt_buffer, const event = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, .{
+                .data = buf.data,
+                .buffer_type = buffer_type,
+                .dims = buf.shape().dims(),
+                .byte_strides = byte_strides,
+                .device = devices[i],
+                .memory = null,
+                .host_buffer_semantics = .ImmutableUntilTransferCompletes,
+            });
+            res._shards.appendAssumeCapacity(.{
+                .api = platform.pjrt_api,
+                .buffer = pjrt_buffer,
+                .ready_event = event,
+            });
+        }
+
+        return res;
+    }
+
+    pub fn fromToMemory(platform: Platform, buffer_: []const u8, shape_: Shape, memory_kind: MemoryKind) !Buffer {
+        // We shard only on the first axis so that the chunks are still contiguous.
+        // TODO: support more advanced sharding specs
+        stdx.debug.assert(platform.sharding().num_replicas == 1, "ZML doesn't support num_replicas > 1 for now, got: {}", .{platform.sharding()});
+        const sharding_ax: ?u3 = std.simd.firstTrue(shape_._sharding_info);
+        _ = sharding_ax; // autofix
+        const n_partitions = platform.sharding().num_partitions;
+        const chunk_size = 0;
+        _ = chunk_size; // autofix
+
+        const buffer_type = bufferTypeFromDtype(shape_.dtype());
+        const byte_strides = shape_.computeStrides().constSlice();
+
+        const devices = platform.getDevices();
+
+        var res: Buffer = .{
+            ._api = platform.pjrt_api,
+            ._shape = shape_,
+            ._shards = .{},
+        };
+
+        for (0..n_partitions) |i| {
+            const pjrt_buffer, const event = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, .{
+                .data = buffer_,
+                .buffer_type = buffer_type,
+                .dims = shape_.dims(),
+                .byte_strides = byte_strides,
+                .device = devices[i],
+                .host_buffer_semantics = .ImmutableUntilTransferCompletes,
+                .memory = devices[i].getMemoryByKind(platform.pjrt_api, memory_kind),
             });
 
-            frames.appendAssumeCapacity(frame);
+            res._shards.appendAssumeCapacity(.{
+                .api = platform.pjrt_api,
+                .buffer = pjrt_buffer,
+                .ready_event = event,
+            });
         }
 
-        for (frames.slice()) |*frame| {
-            const pjrt_buffer = try frame.awaitt();
-            res._shards.appendAssumeCapacity(pjrt_buffer);
-        }
         return res;
+    }
+
+    pub fn getMemory(self: Buffer) *const Memory {
+        return self._shards.get(0).buffer.getMemory(self._api);
+    }
+
+    pub fn dataInMemory(self: Buffer) ![]const u8 {
+        const shard_buffer = self._shards.get(0).buffer;
+        const opaqueDataPointer = try shard_buffer.getOpaqueDeviceMemoryDataPointer(self._api);
+        const sizeInbytes = try shard_buffer.getOnDeviceSizeInBytes(self._api);
+        const data = @as([*]const u8, @ptrFromInt(@intFromPtr(opaqueDataPointer)));
+        const end: usize = @intCast(sizeInbytes);
+        return data[0..end];
+    }
+
+    pub fn getValueFromDataInMemory(self: Buffer, T: type) !T {
+        stdx.debug.assert(self._shape.byteSize() == @sizeOf(T), "Buffer {} has {d} bytes of data, can't load it to a {s} with {d} bytes", .{ self, self._shape.byteSize(), @typeName(T), @sizeOf(T) });
+        const data = try self.dataInMemory();
+        const value = std.mem.bytesAsValue(T, @constCast(data));
+        return value.*;
     }
 
     /// Wraps pre-exisiting `pjrt.Buffer` shards into one `zml.Buffer`.
@@ -116,7 +176,14 @@ pub const Buffer = struct {
         stdx.debug.assert(pjrt_buffers.len <= MAX_NUM_SHARDS, "ZML doesn't support having more than {} shards. Received {} shards for one buffer.", .{ MAX_NUM_SHARDS, pjrt_buffers.len });
         stdx.debug.assert(pjrt_buffers.len > 0, "fromPjrtBuffers expects at least one buffer, got 0.", .{});
         var shards: Shards = .{};
-        shards.appendSliceAssumeCapacity(pjrt_buffers);
+
+        for (pjrt_buffers) |pjb| {
+            shards.appendAssumeCapacity(.{
+                .api = platform.pjrt_api,
+                .buffer = pjb,
+                .ready_event = pjb.getReadyEvent(platform.pjrt_api),
+            });
+        }
         return .{
             ._api = platform.pjrt_api,
             ._shape = shape_,
@@ -127,6 +194,11 @@ pub const Buffer = struct {
     /// Copies the given Zig slice to the accelerator memory and
     /// return a Buffer with the given dimensions.
     pub fn fromSlice(platform: Platform, dimz: anytype, s: anytype) !Buffer {
+        const sh = Shape.init(dimz, DataType.fromSliceElementType(s));
+        return from(platform, HostBuffer.fromBytes(sh, std.mem.sliceAsBytes(s)));
+    }
+
+    pub fn fromSlice2(platform: Platform, dimz: anytype, s: anytype) !Buffer {
         const sh = Shape.init(dimz, DataType.fromSliceElementType(s));
         return from(platform, HostBuffer.fromBytes(sh, std.mem.sliceAsBytes(s)));
     }
@@ -249,7 +321,11 @@ pub const Buffer = struct {
         });
 
         var shards: Shards = .{};
-        shards.appendAssumeCapacity(pjrt_buffer);
+        shards.appendAssumeCapacity(.{
+            .api = platform.pjrt_api,
+            .buffer = pjrt_buffer,
+            .ready_event = pjrt_buffer.getReadyEvent(platform.pjrt_api),
+        });
         return .{
             ._api = platform.pjrt_api,
             ._shape = shape_,
@@ -262,7 +338,7 @@ pub const Buffer = struct {
         stdx.debug.assert(self._shape.byteSize() == @sizeOf(T), "Buffer {} has {d} bytes of data, can't load it to a {s} with {d} bytes", .{ self, self._shape.byteSize(), @typeName(T), @sizeOf(T) });
         var res: T = undefined;
         stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
-        const maybe_event = try self._shards.get(0).toHostBuffer(self._api, std.mem.asBytes(&res));
+        const maybe_event = try self._shards.get(0).buffer.toHostBuffer(self._api, std.mem.asBytes(&res));
         if (maybe_event) |event| {
             try event.await_(self._api);
         }
@@ -274,11 +350,56 @@ pub const Buffer = struct {
     /// The returned `HostBuffer` doesn't own the memory.
     pub fn toHost(self: Buffer, output: []u8) !HostBuffer {
         stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
-        const maybe_event = try self._shards.get(0).toHostBuffer(self._api, output);
+        const maybe_event = try self._shards.get(0).buffer.toHostBuffer(self._api, output);
         if (maybe_event) |event| {
             try event.await_(self._api);
         }
         return HostBuffer.fromBytes(self.shape(), output);
+    }
+
+    const ToHostExOpts = struct {
+        offset: i64 = 0,
+        // If not set, the whole buffer starting from offset (default: 0) on device is copied.
+        size: ?i64 = null,
+    };
+
+    pub fn toHostEx(self: Buffer, output: []u8, opts: ToHostExOpts) !HostBuffer {
+        var host_buffer = HostBuffer.fromBytes(self.shape(), output);
+        stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
+        const size: i64 = opts.size orelse @as(i64, @intCast(output.len)) - opts.offset;
+        const maybe_event = try self._shards.get(0).buffer.copyRawToHost(self._api, @constCast(host_buffer.data), opts.offset, size);
+        host_buffer._event = maybe_event;
+        host_buffer._api = self._api;
+        host_buffer._ready = if (maybe_event) |ev| ev.isReady(self._api) else true;
+        return host_buffer;
+    }
+
+    pub const MemoryKind = pjrt.Memory.Kind;
+    pub fn copyToMemory(self: Buffer, platform: Platform, kind: pjrt.Memory.Kind) !Buffer {
+        const memories = platform.pjrt_client.addressableMemories(platform.pjrt_api); // todo : adresse via device
+        var selected_mem: *const pjrt.Memory = undefined;
+        for (memories) |mem| {
+            if (mem.kind(platform.pjrt_api) == kind) {
+                selected_mem = mem;
+            }
+        }
+
+        var shards: Shards = .{};
+        for (self._shards.constSlice()) |shard| {
+            const pjrt_buffer = try shard.buffer.copyToMemory(self._api, selected_mem);
+            const event = if (pjrt_buffer) |buf| buf.getReadyEvent(self._api) else null;
+            shards.appendAssumeCapacity(.{
+                .api = platform.pjrt_api,
+                .buffer = pjrt_buffer.?,
+                .ready_event = event,
+                .ready = if (event) |ev| ev.isReady(self._api) else true,
+            });
+        }
+        return .{
+            ._api = self._api,
+            ._shape = self._shape,
+            ._shards = shards,
+        };
     }
 
     /// Copies the content of the Buffer to the host.
@@ -286,7 +407,7 @@ pub const Buffer = struct {
     pub fn toHostAlloc(self: Buffer, allocator: std.mem.Allocator) !HostBuffer {
         const output = try HostBuffer.empty(allocator, self.shape());
         stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
-        const maybe_event = try self._shards.get(0).toHostBuffer(self._api, @constCast(output.data));
+        const maybe_event = try self._shards.get(0).buffer.toHostBuffer(self._api, @constCast(output.data));
         if (maybe_event) |event| {
             try event.await_(self._api);
         }
@@ -297,8 +418,8 @@ pub const Buffer = struct {
     /// Depending on the platform, the memory is typically not released to the OS
     /// but just marked as available in the memory pool.
     pub fn deinit(self: *const Buffer) void {
-        for (self._shards.constSlice()) |buffer| {
-            buffer.deinit(self._api);
+        for (self._shards.constSlice()) |shard| {
+            shard.buffer.deinit(self._api);
         }
     }
 
