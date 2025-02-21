@@ -574,7 +574,7 @@ pub fn unloadBuffers(model: anytype) void {
     }).cb, {}, model);
 }
 
-/// deinit all buffers in the given struct
+/// await all buffers in the given struct
 pub fn awaitAll(buffers: anytype) !void {
     // TODO: implement once we have async buffers.
     _ = buffers;
@@ -594,11 +594,9 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
     if (T == zml.Buffer) {
         return if (buffer_store.get(prefix)) |host_buffer| {
             // obj._shape has been set inside `loadModelBuffersWithPrefix`, before calling us.
-            var buf_with_metadata = host_buffer;
             log.debug("Loading buffer {s} ({})", .{ prefix, obj._shape });
             stdx.debug.assert(host_buffer.shape().eql(obj._shape), "loadModelBuffers expects to find the same shapes in the model and in the buffer store, got {} and {} for tensor {s}", .{ obj._shape, host_buffer, prefix });
-            buf_with_metadata._shape = obj._shape;
-            obj.* = try zml.Buffer.from(platform, buf_with_metadata);
+            obj.* = try zml.Buffer.from(platform, host_buffer);
         } else {
             return error.BufferNotFound;
         };

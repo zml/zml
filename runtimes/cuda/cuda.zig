@@ -62,6 +62,12 @@ pub fn load() !*const pjrt.Api {
         log.warn("Detected {s} in LD_LIBRARY_PATH. This can lead to undefined behaviors and crashes", .{nvidiaLibsPath});
     }
 
+    // TODO: @rene remove these!!!!
+    _ = c.setenv("XLA_PJRT_GPU_HOST_MEMORY_LIMIT_GB", "2", 1);
+    _ = c.setenv("XLA_PJRT_GPU_HOST_MEMORY_PREALLOCATE", "true", 1);
+    _ = c.setenv("CUDA_VISIBLE_DEVICES", "0", 1);
+    // END OF remove these
+
     // CUDA path has to be set _before_ loading the PJRT plugin.
     // See https://github.com/openxla/xla/issues/21428
     try setupXlaGpuCudaDirFlag();

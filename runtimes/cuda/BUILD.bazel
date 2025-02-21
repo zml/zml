@@ -1,5 +1,10 @@
 load("@rules_zig//zig:defs.bzl", "zig_library")
 
+exports_files(
+    ["libpjrt_cuda.so"],
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "zmlxcuda_lib",
     srcs = ["zmlxcuda.c"],
