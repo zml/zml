@@ -1,0 +1,7 @@
+load("@rules_python//python:py_library.bzl", "py_library")
+
+py_library(
+    name = "zml_utils",
+    srcs = ["zml_utils.py"],
+    visibility = ["//visibility:public"],
+)

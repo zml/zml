@@ -139,6 +139,53 @@ http_file(
     url = "https://github.com/karpathy/llama2.c/raw/c02865df300f3bd9e567ce061000dc23bf785a17/tokenizer.bin",
 )
 
+# ModernBERT
+huggingface.model(
+    name = "ModernBERT-base",
+    build_file_content = """\
+package(default_visibility = ["//visibility:public"])
+filegroup(
+    name = "model",
+    srcs = ["model.safetensors"],
+)
+
+filegroup(
+    name = "tokenizer",
+    srcs = ["tokenizer.json"],
+)
+""",
+    commit = "94032bb66234a691cf6248265170006a7ced4970",
+    includes = [
+        "model.safetensors",
+        "tokenizer.json",
+    ],
+    model = "answerdotai/ModernBERT-base",
+)
+use_repo(huggingface, "ModernBERT-base")
+
+huggingface.model(
+    name = "ModernBERT-large",
+    build_file_content = """\
+package(default_visibility = ["//visibility:public"])
+filegroup(
+    name = "model",
+    srcs = ["model.safetensors"],
+)
+
+filegroup(
+    name = "tokenizer",
+    srcs = ["tokenizer.json"],
+)
+""",
+    commit = "4bbcbf40bed02ce487125bcb3c897ea9bdc88340",
+    includes = [
+        "model.safetensors",
+        "tokenizer.json",
+    ],
+    model = "answerdotai/ModernBERT-large",
+)
+use_repo(huggingface, "ModernBERT-large")
+
 bazel_dep(name = "rules_rust", version = "0.57.1")
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(

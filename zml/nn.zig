@@ -69,14 +69,14 @@ pub const Activation = union(enum) {
             .leakyReLU => |slope| x.leakyReLU(slope),
         };
     }
-
-    pub fn elu(x: Tensor, alpha: f32) Tensor {
-        return x.cmp(.GE, Tensor.scalar(0, x.dtype())).select(
-            x,
-            x.exp().addConstant(-1).scale(alpha),
-        );
-    }
 };
+
+pub fn elu(x: Tensor, alpha: f32) Tensor {
+    return x.cmp(.GE, Tensor.scalar(0, x.dtype())).select(
+        x,
+        x.exp().addConstant(-1).scale(alpha),
+    );
+}
 
 pub fn chainModules(module_list: anytype, input: Tensor) Tensor {
     const T = @TypeOf(module_list);
@@ -765,8 +765,7 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
     k = k.mul(head_scaling.convert(k.dtype()));
 
     var attn_weights = q.dot(k, .{.hd});
-    // log.debug("attn_weights : {}", .{attn_weights});
-    // log.debug("attn_mask : {?}", .{attn_mask});
+    // log.debug("attn_weights : {}, attn_mask : {?}", .{ attn_weights, attn_mask });
     if (attn_mask) |mask| attn_weights = attn_weights.add(mask.broad(attn_weights.shape()));
     attn_weights = attn_weights.convert(.f32).softmax(.k).convert(q.dtype());
 
