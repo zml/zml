@@ -1,6 +1,6 @@
 module(
     name = "libxev",
-    version = "20252401.0-31eed4e",
+    version = "20250124.0-31eed4e",
     compatibility_level = 1,
 )
 
