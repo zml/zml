@@ -123,7 +123,7 @@ pub const CompilationContext = struct {
 
         const loc = mlir_ctx.location(@src()).named(mlir_ctx, "main");
         const module = mlir.Module.init(loc);
-        module.op().setAttributeByName("sym_name", mlir.StringAttribute.init(mlir_ctx, "zml").as(mlir.Attribute).?);
+        module.op().setAttributeByName("sym_name", mlir.StringAttribute.init(mlir_ctx, name).as(mlir.Attribute).?);
 
         var canonicalizer = try mlir.PassManager.init(mlir_ctx);
         {
@@ -434,7 +434,7 @@ pub const CompilationContext = struct {
 
         if (opts.kind == .main) {
             self.addDonationsAttributes(arg_attrs, fn_res_donations);
-            self.addOutputMemoryKindAttributes(arg_attrs, fn_res_output_memory_kind);
+            self.addOutputMemoryKindAttributes(res_attrs, fn_res_output_memory_kind);
             if (self._platform.sharding().num_partitions > 1) {
                 self.addShardingAttributes(arg_attrs, res_attrs, input_shapes.items, fn_res_shapes);
             }
