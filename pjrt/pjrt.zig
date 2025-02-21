@@ -370,7 +370,7 @@ pub const Client = opaque {
             .num_byte_strides = if (args.byte_strides) |bs| bs.len else 0,
             .host_buffer_semantics = @intFromEnum(args.host_buffer_semantics),
             .device = @ptrCast(@constCast(args.device)),
-            .memory = @ptrCast(@constCast(args.memory)),
+            .memory = if (args.memory) |m| @ptrCast(@constCast(m)) else null,
             .device_layout = null, // TODO
             .done_with_host_buffer = null,
             .buffer = null,
@@ -501,6 +501,26 @@ pub const Device = opaque {
             .device = self.inner(),
         }) catch unreachable;
         return @intCast(ret.local_hardware_id);
+    }
+
+    pub fn addressableMemories(self: *const Device, api: *const Api) []*const Memory {
+        const ret = api.call(.PJRT_Device_AddressableMemories, .{
+            .device = self.inner(),
+        }) catch unreachable;
+        if (ret.memories) |memories| {
+            return @ptrCast(@constCast(memories[0..ret.num_memories]));
+        }
+        return &.{};
+    }
+
+    pub fn getMemoryByKind(self: *const Device, api: *const Api, kind: Memory.Kind) ?*const Memory {
+        const memories = self.addressableMemories(api);
+        for (memories) |m| {
+            if (m.kind(api) == kind) {
+                return m;
+            }
+        }
+        return null;
     }
 };
 
@@ -685,21 +705,18 @@ pub const MemoryLayoutType = enum(c.PJRT_Buffer_MemoryLayout_Type) {
     Strides = c.PJRT_Buffer_MemoryLayout_Type_Strides,
 };
 
-pub const MemoryLayout = union(MemoryLayoutType) {
+pub const MemoryLayout = union(enum(c.PJRT_Buffer_MemoryLayout_Type)) {
     pub const Type = MemoryLayoutType;
 
-    pub const Tiled = struct {
+    Tiled: struct {
         minor_to_major: []const i64,
         tile_dims: []const i64,
         tile_dims_sizes: []const usize,
-    };
+    },
 
-    pub const Strides = struct {
+    Strides: struct {
         byte_strides: []const i64,
-    };
-
-    Tiled: Tiled,
-    Strides: Strides,
+    },
 
     fn toCStruct(self: MemoryLayout) c.PJRT_Buffer_MemoryLayout {
         return pjrtStruct(switch (self) {
@@ -780,6 +797,13 @@ pub const Buffer = opaque {
         return @ptrCast(ret.event);
     }
 
+    pub fn getMemory(self: *const Buffer, api: *const Api) *const Memory {
+        const ret = api.call(.PJRT_Buffer_Memory, .{
+            .buffer = self.inner(),
+        }) catch unreachable;
+        return @ptrCast(ret.memory);
+    }
+
     pub fn getElementType(self: *const Buffer, api: *const Api) BufferType {
         const ret = api.call(.PJRT_Buffer_ElementType, .{
             .buffer = self.inner(),
@@ -833,12 +857,12 @@ pub const Buffer = opaque {
         return ret.device_memory_ptr.?;
     }
 
-    pub fn copyRawToHost(self: *const Buffer, api: *const Api, dst: []u8, offset: i64) ApiError!?*Event {
+    pub fn copyRawToHost(self: *const Buffer, api: *const Api, dst: []u8, offset: i64, size: i64) ApiError!?*Event {
         const ret = try api.call(.PJRT_Buffer_CopyRawToHost, .{
             .buffer = self.inner(),
             .dst = @ptrCast(dst.ptr),
             .offset = offset,
-            .transfer_size = @intCast(dst.len),
+            .transfer_size = size,
         });
         return @ptrCast(ret.event);
     }
