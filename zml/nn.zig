@@ -2,7 +2,7 @@
 const std = @import("std");
 const stdx = @import("stdx");
 
-const cuda = @import("nn/cuda.zig");
+pub const cuda = @import("nn/cuda.zig");
 const helpers = @import("helpers.zig");
 const meta = @import("meta.zig");
 const ops = @import("ops.zig");
