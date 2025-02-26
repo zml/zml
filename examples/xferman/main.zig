@@ -38,7 +38,7 @@ pub fn asyncMain() !void {
     log.debug("shape_arr = {any}", .{shapes});
     var manager = try zml.platform.TransferManager.init(
         platform,
-        .device,
+        .unpinned_host,
         shapes,
     );
     defer manager.deinit();
