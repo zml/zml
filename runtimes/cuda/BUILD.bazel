@@ -39,3 +39,8 @@ filegroup(
     srcs = [],
     visibility = ["//visibility:public"],
 )
+
+exports_files(
+    ["libpjrt_cuda.so"],
+    visibility = ["//visibility:public"],
+)
