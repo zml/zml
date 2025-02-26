@@ -11,6 +11,16 @@ const pjrt = @import("pjrtx.zig");
 const Buffer = @import("buffer.zig").Buffer;
 const Shape = @import("shape.zig").Shape;
 
+const Api = pjrt.Api;
+const AsyncHostToDeviceTransferManager = pjrt.AsyncHostToDeviceTransferManager;
+const Client = pjrt.Client;
+const Device = pjrt.Device;
+const Event = pjrt.Event;
+const Memory = pjrt.Memory;
+const NamedValue = pjrt.NamedValue;
+const Profiler = pjrt.Profiler;
+const ShapeSpec = pjrt.ShapeSpec;
+
 const log = std.log.scoped(.zml);
 
 pub const Target = runtimes.Platform;
@@ -27,16 +37,16 @@ pub const CompilationOptions = struct {
 
 pub const Platform = struct {
     target: Target,
-    pjrt_api: *const pjrt.Api,
-    pjrt_client: *pjrt.Client,
+    pjrt_api: *const Api,
+    pjrt_client: *Client,
     compilation_options: CompilationOptions = .{},
 
     pub const MAX_NUM_DEVICES: u8 = 32;
     pub const CreateOptions = _CreateOptions;
 
-    pub fn init(target: Target, api: *const pjrt.Api, options: CreateOptions) !Platform {
-        var named_values_buf: [16]pjrt.NamedValue = undefined;
-        const pjrt_client = try pjrt.Client.init(api, options.toNamedValues(target, &named_values_buf));
+    pub fn init(target: Target, api: *const Api, options: CreateOptions) !Platform {
+        var named_values_buf: [16]NamedValue = undefined;
+        const pjrt_client = try Client.init(api, options.toNamedValues(target, &named_values_buf));
         const true_num_devices = pjrt_client.getAddressableDevices(api).len;
         if (true_num_devices > MAX_NUM_DEVICES) {
             log.warn("platform {} got {} devices, but ZML only support up to {} devices. Some devices won't be used.", .{ target, true_num_devices, MAX_NUM_DEVICES });
@@ -49,7 +59,7 @@ pub const Platform = struct {
         };
     }
 
-    pub fn getDevices(self: Platform) []const *const pjrt.Device {
+    pub fn getDevices(self: Platform) []const *const Device {
         const all_devices = self.pjrt_client.getAddressableDevices(self.pjrt_api);
         if (all_devices.len > MAX_NUM_DEVICES) {
             return all_devices[0..MAX_NUM_DEVICES];
@@ -85,8 +95,8 @@ pub const Platform = struct {
     /// Returns the Profiler for this API.
     /// Not all platform have a profiling api, for those the profiler object will do nothing.
     /// Platforms with known profiler extensions: cuda, xpu
-    pub fn getProfiler(self: Platform, options: ?pjrt.Profiler.Options) pjrt.Profiler {
-        return self.pjrt_client.getProfiler(self.pjrt_api, options orelse pjrt.Profiler.default_options);
+    pub fn getProfiler(self: Platform, options: ?Profiler.Options) Profiler {
+        return self.pjrt_client.getProfiler(self.pjrt_api, options orelse Profiler.default_options);
     }
 };
 
@@ -153,23 +163,32 @@ pub const Platform = struct {
 // };
 
 pub const TransferManager = struct {
-    pjrt_client: *pjrt.Client,
-    pjrt_api: *const pjrt.Api,
-    // pjrt_transfer_manager: []*pjrt.AsyncHostToDeviceTransferManager,
-    pjrt_transfer_manager: *pjrt.AsyncHostToDeviceTransferManager,
-    shape_specs: std.ArrayList(pjrt.ShapeSpec),
-    memory: *const pjrt.Memory,
+    pjrt_client: *Client,
+    pjrt_api: *const Api,
+    // pjrt_transfer_manager: []*AsyncHostToDeviceTransferManager,
+    pjrt_transfer_manager: *AsyncHostToDeviceTransferManager,
 
-    pub fn init(alloc: std.mem.Allocator, platform: Platform, memory_kind: pjrt.Memory.Kind, shapes: []Shape) !TransferManager {
+    device: *const Device,
+    memory: *const Memory,
+    shape_specs: std.ArrayList(ShapeSpec),
+    events: std.ArrayList(*Event),
+    seen_last_buffer: bool,
+
+    pub fn init(
+        alloc: std.mem.Allocator,
+        platform: Platform,
+        memory_kind: Memory.Kind,
+        shapes: []const Shape,
+    ) !TransferManager {
         const device = platform.getDevices()[0];
         const memory = device.getMemoryByKind(platform.pjrt_api, memory_kind);
         if (memory == null) {
             stdx.debug.panic("Device {s} doesn't have memory of kind {s}", .{ device.getDescription(platform.pjrt_api).getKind(platform.pjrt_api), @tagName(memory_kind) });
         }
-        var shape_specs = std.ArrayList(pjrt.ShapeSpec).init(alloc);
+        var shape_specs = std.ArrayList(ShapeSpec).init(alloc);
         for (shapes) |shape| {
             try shape_specs.append(
-                pjrt.ShapeSpec.init(
+                ShapeSpec.init(
                     shape.dims(),
                     Buffer.bufferTypeFromDtype(shape.dtype()),
                 ),
@@ -179,24 +198,72 @@ pub const TransferManager = struct {
         // setup shape specs
         // TODO
         return .{
+            .device = device,
+            .events = std.ArrayList(*Event).init(alloc),
+            .memory = memory.?,
             .pjrt_client = platform.pjrt_client,
             .pjrt_api = platform.pjrt_api,
-            .pjrt_transfer_manager = try pjrt.Client.createBuffersForAsyncHostToDevice(
+            .pjrt_transfer_manager = try Client.createBuffersForAsyncHostToDevice(
                 platform.pjrt_client,
                 platform.pjrt_api,
                 .{
-                    .shape_specs = shape_specs.items, // TODO: <-- ShapeSpecs go here
+                    .shape_specs = shape_specs.items,
                     .memory = memory.?,
                     .device_layouts = null,
                 },
             ),
+            .seen_last_buffer = false,
             .shape_specs = shape_specs,
-            .memory = memory.?,
         };
     }
 
+    pub fn transferDataSingle(self: *TransferManager, buffer_index: usize, data: []const u8, offset: i64, is_last_transfer: bool) !*Event {
+        if (self.seen_last_buffer) {
+            stdx.debug.panic("Attempting to transferData after a transferData with is_last_transfer=true on device {s} with memory of kind {s}", .{
+                self.device.getDescription(self.pjrt_api).getKind(self.pjrt_api),
+                @tagName(self.memory.kind(self.pjrt_api)),
+            });
+        }
+
+        if (is_last_transfer) {
+            self.seen_last_buffer = true;
+        }
+
+        const event = try self.pjrt_transfer_manager.transferData(self.pjrt_api, buffer_index, data, offset, is_last_transfer);
+        try self.events.append(event);
+
+        if (is_last_transfer and buffer_index != try self.pjrt_transfer_manager.bufferCount(self.pjrt_api) - 1) {
+            stdx.debug.panic(
+                "transferData: is_last_transfer = true for buffer_index {d} which is not the last buffer (expected {d} buffers)!!!",
+                .{ buffer_index, try self.pjrt_transfer_manager.bufferCount(self.pjrt_api) },
+            );
+        }
+        return event;
+    }
+
+    pub const TransferDataMultiOpts = struct {
+        start_index: usize = 0,
+        start_offset: i64 = 0,
+        last_data_is_last_transfer: bool = true,
+    };
+    pub fn transferDataMulti(self: *TransferManager, data_slices: []const []const u8, opts: TransferDataMultiOpts) ![]*Event {
+        var offset = opts.start_offset;
+        for (data_slices, @intCast(opts.start_offset)..) |data, buffer_index| {
+            const is_last_transfer = blk: {
+                if (opts.last_data_is_last_transfer) {
+                    break :blk buffer_index == data_slices.len - 1;
+                } else {
+                    break :blk false;
+                }
+            };
+            _ = try self.transferDataSingle(buffer_index, data, offset, is_last_transfer);
+            offset += @intCast(data.len);
+        }
+        return self.events.items;
+    }
+
     pub fn deinit(self: *TransferManager) void {
-        pjrt.AsyncHostToDeviceTransferManager.deinit(self.pjrt_transfer_manager, self.pjrt_api);
+        AsyncHostToDeviceTransferManager.deinit(self.pjrt_transfer_manager, self.pjrt_api);
         self.shape_specs.deinit();
     }
 };
@@ -239,29 +306,29 @@ const _CreateOptions = struct {
             };
         };
 
-        pub fn writeNamedValues(self: Cuda, values: *std.ArrayListUnmanaged(pjrt.NamedValue)) void {
-            values.appendAssumeCapacity(pjrt.NamedValue.fromBool("should_stage_host_to_device_transfers", self.should_stage_host_to_device_transfers));
+        pub fn writeNamedValues(self: Cuda, values: *std.ArrayListUnmanaged(NamedValue)) void {
+            values.appendAssumeCapacity(NamedValue.fromBool("should_stage_host_to_device_transfers", self.should_stage_host_to_device_transfers));
             switch (self.allocator) {
                 .platform => {
-                    values.appendAssumeCapacity(pjrt.NamedValue.fromString("allocator", "platform"));
+                    values.appendAssumeCapacity(NamedValue.fromString("allocator", "platform"));
                 },
                 .bfc, .@"async" => |opt| {
-                    values.appendAssumeCapacity(pjrt.NamedValue.from("allocator", self.allocator));
-                    values.appendAssumeCapacity(pjrt.NamedValue.from("preallocate", opt.preallocate));
+                    values.appendAssumeCapacity(NamedValue.from("allocator", self.allocator));
+                    values.appendAssumeCapacity(NamedValue.from("preallocate", opt.preallocate));
                     if (opt.memory_fraction > 0) {
-                        values.appendAssumeCapacity(pjrt.NamedValue.from("memory_fraction", opt.memory_fraction));
+                        values.appendAssumeCapacity(NamedValue.from("memory_fraction", opt.memory_fraction));
                     }
                     if (opt.collective_memory_size_mb > 0) {
                         const collective = @as(i64, opt.collective_memory_size_mb) * 1024 * 1024;
-                        values.appendAssumeCapacity(pjrt.NamedValue.from("collective_memory_size", collective));
+                        values.appendAssumeCapacity(NamedValue.from("collective_memory_size", collective));
                     }
                 },
             }
         }
     };
 
-    pub fn toNamedValues(self: _CreateOptions, target: Target, out: []pjrt.NamedValue) []pjrt.NamedValue {
-        var values = std.ArrayListUnmanaged(pjrt.NamedValue).fromOwnedSlice(out);
+    pub fn toNamedValues(self: _CreateOptions, target: Target, out: []NamedValue) []NamedValue {
+        var values = std.ArrayListUnmanaged(NamedValue).fromOwnedSlice(out);
         values.shrinkRetainingCapacity(0);
         switch (target) {
             .cuda => self.cuda.writeNamedValues(&values),
