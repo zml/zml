@@ -248,11 +248,11 @@ pub const TransferManager = struct {
     }
 
     pub const TransferDataMultiOpts = struct {
-        start_index: usize = 0,
+        start_buffer_index: usize = 0,
         last_data_is_last_transfer: bool = true,
     };
     pub fn transferDataMany(self: *TransferManager, data_slices: []const []const u8, opts: TransferDataMultiOpts) ![]*Event {
-        for (data_slices, @intCast(opts.start_index)..) |data, buffer_index| {
+        for (data_slices, @intCast(opts.start_buffer_index)..) |data, buffer_index| {
             const is_last_transfer = blk: {
                 if (opts.last_data_is_last_transfer) {
                     break :blk buffer_index == data_slices.len - 1;

@@ -62,7 +62,8 @@ pub fn asyncMain() !void {
         }
     }
 
-    // transfer both buffers individually, using transferDataMany
+    // transfer both buffers individually, but using transferDataMany to check
+    // continuaton via opts: start_buffer_index, last_data_is_last_transfer
     if (false) {
         // first
         {
@@ -80,7 +81,7 @@ pub fn asyncMain() !void {
         // second
         {
             const events = try manager.transferDataMany(&.{bias_buffer}, .{
-                .start_index = 1,
+                .start_buffer_index = 1,
                 .last_data_is_last_transfer = true, // true is default but we are explicit here
             });
 
