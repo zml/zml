@@ -330,8 +330,8 @@ pub const AsyncHostToDeviceTransferManager = opaque {
         return @ptrCast(self.inner().device(api));
     }
 
-    pub fn bufferCount(self: *AsyncHostToDeviceTransferManager, api: *const Api) usize {
-        return self.inner().bufferCount(api);
+    pub fn bufferCount(self: *AsyncHostToDeviceTransferManager, api: *const Api) ApiError!usize {
+        return try self.inner().bufferCount(api);
     }
 
     pub fn bufferSize(self: *AsyncHostToDeviceTransferManager, api: *const Api, buffer_index: usize) usize {

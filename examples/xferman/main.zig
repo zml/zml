@@ -14,7 +14,6 @@ pub fn asyncMain() !void {
     log.info("   LLama was compiled with {}", .{@import("builtin").mode});
 
     const allocator = std.heap.c_allocator;
-    _ = allocator;
 
     var context = try zml.Context.init();
     defer context.deinit();
@@ -37,10 +36,12 @@ pub fn asyncMain() !void {
 
     log.debug("shape_arr = {any}", .{shapes});
     var manager = try zml.platform.TransferManager.init(
+        allocator,
         platform,
         .unpinned_host,
         shapes,
     );
     defer manager.deinit();
-    log.info("manager : {}", .{manager});
+    const buffer_count = try manager.pjrt_transfer_manager.bufferCount(platform.pjrt_api);
+    log.info("manager has {d} buffers", .{buffer_count});
 }

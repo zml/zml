@@ -260,12 +260,12 @@ pub const ShapeSpec = extern struct {
 
     inner: c.PJRT_ShapeSpec,
 
-    pub fn init(dims_: []const usize, bt: BufferType) ShapeSpec {
+    pub fn init(dims_: []const i64, bt: BufferType) ShapeSpec {
         return .{
             .inner = pjrtStruct(c.PJRT_ShapeSpec{
                 .dims = @ptrCast(@constCast(dims_.ptr)),
-                .num_dims = dims.len,
-                .buffer_type = @intFromEnum(bt),
+                .num_dims = dims_.len,
+                .element_type = @intFromEnum(bt),
             }),
         };
     }

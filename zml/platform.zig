@@ -7,6 +7,8 @@ const stdx = @import("stdx");
 const meta = @import("meta.zig");
 const module = @import("module.zig");
 const pjrt = @import("pjrtx.zig");
+
+const Buffer = @import("buffer.zig").Buffer;
 const Shape = @import("shape.zig").Shape;
 
 const log = std.log.scoped(.zml);
@@ -155,15 +157,25 @@ pub const TransferManager = struct {
     pjrt_api: *const pjrt.Api,
     // pjrt_transfer_manager: []*pjrt.AsyncHostToDeviceTransferManager,
     pjrt_transfer_manager: *pjrt.AsyncHostToDeviceTransferManager,
-    shape_specs: []const Shape,
+    shape_specs: std.ArrayList(pjrt.ShapeSpec),
     memory: *const pjrt.Memory,
 
-    pub fn init(platform: Platform, memory_kind: pjrt.Memory.Kind, shapes: []Shape) !TransferManager {
+    pub fn init(alloc: std.mem.Allocator, platform: Platform, memory_kind: pjrt.Memory.Kind, shapes: []Shape) !TransferManager {
         const device = platform.getDevices()[0];
         const memory = device.getMemoryByKind(platform.pjrt_api, memory_kind);
         if (memory == null) {
             stdx.debug.panic("Device {s} doesn't have memory of kind {s}", .{ device.getDescription(platform.pjrt_api).getKind(platform.pjrt_api), @tagName(memory_kind) });
         }
+        var shape_specs = std.ArrayList(pjrt.ShapeSpec).init(alloc);
+        for (shapes) |shape| {
+            try shape_specs.append(
+                pjrt.ShapeSpec.init(
+                    shape.dims(),
+                    Buffer.bufferTypeFromDtype(shape.dtype()),
+                ),
+            );
+        }
+
         // setup shape specs
         // TODO
         return .{
@@ -173,18 +185,19 @@ pub const TransferManager = struct {
                 platform.pjrt_client,
                 platform.pjrt_api,
                 .{
-                    .shape_specs = &.{}, // TODO: <-- ShapeSpecs go here
+                    .shape_specs = shape_specs.items, // TODO: <-- ShapeSpecs go here
                     .memory = memory.?,
                     .device_layouts = null,
                 },
             ),
-            .shape_specs = shapes,
+            .shape_specs = shape_specs,
             .memory = memory.?,
         };
     }
 
     pub fn deinit(self: *TransferManager) void {
         pjrt.AsyncHostToDeviceTransferManager.deinit(self.pjrt_transfer_manager, self.pjrt_api);
+        self.shape_specs.deinit();
     }
 };
 
