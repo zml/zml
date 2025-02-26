@@ -191,13 +191,10 @@ pub fn unmask(
     var values_host_buffer = try topk.values.toHostAlloc(allocator);
     defer values_host_buffer.deinit(allocator);
 
-    const raw_indices = @as([*]const i32, @ptrCast(@alignCast(indices_host_buffer.data.ptr)));
-    const raw_probs = @as([*]const f32, @ptrCast(@alignCast(values_host_buffer.data.ptr)));
-
     // We consider only the first occurrence of [MASK], which has five predictions
-    const position_offset = mask_positions[0] * 5;
-    const predictions = raw_indices[position_offset .. position_offset + 5];
-    const scores = raw_probs[position_offset .. position_offset + 5];
+    const pred_offset = mask_positions[0] * 5;
+    const predictions = indices_host_buffer.items(i32)[pred_offset..][0..5];
+    const scores = values_host_buffer.items(f32)[pred_offset..][0..5];
 
     // Log timing information
     log.info("⏱️\tModel inference in  {d}ms", .{inference_time / std.time.ns_per_ms});
@@ -206,11 +203,7 @@ pub fn unmask(
     for (predictions, scores) |token_id, score| {
         const token_text = try tokenizer_decoder.next(@intCast(token_id));
         if (token_text) |word| {
-            log.info("\t  • score: {d:.4}  word: '{s}' token: {}", .{
-                score,
-                word,
-                token_id,
-            });
+            log.info("\t  • score: {d:.4}  word: '{s}' token: {}", .{ score, word, token_id });
         }
     }
 }
