@@ -1155,6 +1155,29 @@ fn scatterPrepareIndices(
     return Tensor.stack(indices.constSlice(), .last, .coord);
 }
 
+/// Generate an MLIR call to the given member function with the given tensors.
+pub fn triton(triton_ir: [:0]const u8, args: anytype, res_shape: Shape) Tensor {
+    const ctx = CompilationContext.current();
+
+    var values: [args.len]mlir.Value = undefined;
+    ctx.extractValues(&args, &values);
+
+    const op = dialect.stablehlo.custom_call(
+        ctx.mlirCtx(),
+        &values,
+        .{
+            .call_target_name = "triton::snippet",
+            .backend_config = triton_ir,
+            .api_version = 2,
+            .has_side_effect = false,
+            .output_operand_aliases = &.{},
+        },
+        &.{mlir.ext.mlirType(ctx.mlirCtx(), res_shape)},
+        ctx.mlirCtx().location(@src()),
+    );
+    return Tensor._result(res_shape, op.result(0));
+}
+
 inline fn toI64(values: anytype) []i64 {
     var res: [Tensor.MAX_RANK]i64 = undefined;
     for (values, 0..) |val, i| res[i] = @intCast(val);

@@ -913,7 +913,6 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, m
         .cuda => {
             // NVIDIA recommends these settings
             // https://github.com/NVIDIA/JAX-Toolbox?tab=readme-ov-file#environment-variables
-            setFlag(&options, "xla_gpu_enable_triton_gemm", false);
             setFlag(&options, "xla_gpu_enable_latency_hiding_scheduler", true);
             setFlag(&options, "xla_gpu_enable_llvm_module_compilation_parallelism", true);
             setFlag(&options, "xla_gpu_enable_libnvptxcompiler", true);

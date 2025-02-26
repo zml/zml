@@ -2,13 +2,27 @@ const std = @import("std");
 const zml = @import("zml");
 const asynk = @import("async");
 
+pub const std_options = .{
+    .log_level = .info,
+    .logFn = asynk.logFn(std.log.defaultLog),
+};
+
 /// Model definition
 const Layer = struct {
     bias: ?zml.Tensor = null,
     weight: zml.Tensor,
 
     pub fn forward(self: Layer, x: zml.Tensor) zml.Tensor {
-        var y = self.weight.mul(x);
+        // var y = self.weight.mul(x);
+        var y = zml.ops.triton(
+            \\ module {
+            \\   func.func @my_mul(%arg0: tensor<1xf16>, %arg1: tensor<1xf16>) -> tensor<1xf16> {
+            \\     %0 = arith.mulf %arg0, %arg1 : tensor<1xf16>
+            \\     return %0 : tensor<1xf16>
+            \\   }
+            \\ }
+        , .{ self.weight, x }, x.shape());
+
         if (self.bias) |bias| {
             y = y.add(bias);
         }
@@ -34,7 +48,11 @@ pub fn asyncMain() !void {
     var context = try zml.Context.init();
     defer context.deinit();
 
-    const platform = context.autoPlatform(.{});
+    const platform = context.autoPlatform(.{}).withCompilationOptions(.{
+        .xla_dump_to = "/tmp/zml/simple_layer",
+        .xla_dump_fusion_visualization = true,
+        .xla_dump_hlo_pass_re = "fusion",
+    });
     context.printAvailablePlatforms(platform);
 
     // Our weights and bias to use
