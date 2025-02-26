@@ -150,11 +150,8 @@ pub fn sdpaPaged(q_: Tensor, k_: Tensor, v_: Tensor, sequence_length_q: Tensor, 
     const v = v_.transpose(.{ .page, .h, .k_chunk, .hd });
 
     const sqrtHeadDim: f32 = 1.0 / std.math.sqrt(@as(f32, @floatFromInt(q.dim(.hd))));
-    const scale: f32 = if (opts.scale) |_| 1.0 else sqrtHeadDim;
-
-    if (opts.scale) |s| k = k.mul(s);
-
-    std.debug.print("k.shape: {}\n", .{k.shape()});
+    const head_scaling = if (opts.scale) |s| s else Tensor.scalar(sqrtHeadDim, k.dtype());
+    k = k.mul(head_scaling);
 
     var buffer: [4096]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buffer);
@@ -174,7 +171,7 @@ pub fn sdpaPaged(q_: Tensor, k_: Tensor, v_: Tensor, sequence_length_q: Tensor, 
         \\      "is_cudnn_frontend": true,
         \\      "workspace_size": "0",
         \\    }},
-        \\    "fmha_scale": {d},
+        \\    "fmha_scale": 0,
         \\    "dropout_rate": 0,
         \\    "intermediate_tensor_shape": {{
         \\      "element_type": "{s}",
@@ -214,7 +211,6 @@ pub fn sdpaPaged(q_: Tensor, k_: Tensor, v_: Tensor, sequence_length_q: Tensor, 
         \\}}
     ,
         .{
-            scale,
             elementTypeFromDataType(q.dtype()),
             q.dim(.b),
             q.dim(.h),
@@ -232,6 +228,7 @@ pub fn sdpaPaged(q_: Tensor, k_: Tensor, v_: Tensor, sequence_length_q: Tensor, 
         bias = bias.add(attn_mask.broad(bias.shape()));
     }
 
+    const output_shape = Shape.init(.{ .b = q.dim(.b), .h = q.dim(.h), .q = q.dim(.q), .hd = q.dim(.hd) }, q.dtype());
     const mlir_ctx = ctx.mlirCtx();
     const loc = mlir_ctx.location(@src());
     const op = dialect.stablehlo.custom_call(
@@ -245,12 +242,11 @@ pub fn sdpaPaged(q_: Tensor, k_: Tensor, v_: Tensor, sequence_length_q: Tensor, 
             .output_operand_aliases = &.{},
         },
         &.{
-            mlir.ext.mlirType(mlir_ctx, q.shape()),
+            mlir.ext.mlirType(mlir_ctx, output_shape),
             mlir.RankedTensorType.init(&.{0}, mlir.IntegerType(.u8).init(mlir_ctx).as(mlir.Type).?).asType(),
         },
         loc,
     );
-    const result = Tensor._result(q.shape(), op.result(0)).transpose(q_.shape());
+    const result = Tensor._result(output_shape, op.result(0)).transpose(q_.shape());
     return result;
 }
-
