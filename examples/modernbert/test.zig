@@ -86,6 +86,8 @@ pub fn asyncMain() !void {
     const modernbert_base_options: modernbert_module.ModernBertOptions = .{
         .num_attention_heads = 12,
         .tie_word_embeddings = true,
+        .pad_token = 50283,
+        .local_attention = 128,
     };
     model.init(modernbert_base_options);
 
