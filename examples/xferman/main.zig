@@ -36,7 +36,7 @@ pub fn asyncMain() !void {
     shapes.len = 1;
 
     log.debug("shape_arr = {any}", .{shapes});
-    const manager = try zml.platform.TransferManager.init(
+    var manager = try zml.platform.TransferManager.init(
         platform,
         .device,
         shapes,

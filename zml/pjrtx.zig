@@ -65,7 +65,7 @@ pub const Client = opaque {
 
     pub const CreateBuffersForAsyncHostToDeviceArgs = pjrt.Client.CreateBuffersForAsyncHostToDeviceArgs;
     pub fn createBuffersForAsyncHostToDevice(self: *const Client, api: *const Api, args: CreateBuffersForAsyncHostToDeviceArgs) ApiError!*AsyncHostToDeviceTransferManager {
-        return self.inner().createBuffersForAsyncHostToDevice(api, args);
+        return @ptrCast(try self.inner().createBuffersForAsyncHostToDevice(api, args));
     }
 
     pub const BufferFromHostBufferArgs = pjrt.Client.BufferFromHostBufferArgs;

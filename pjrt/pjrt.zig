@@ -469,7 +469,7 @@ pub const Client = opaque {
     pub fn createBuffersForAsyncHostToDevice(self: *const Client, api: *const Api, args: CreateBuffersForAsyncHostToDeviceArgs) ApiError!*AsyncHostToDeviceTransferManager {
         const ret = try api.call(.PJRT_Client_CreateBuffersForAsyncHostToDevice, .{
             .client = self.inner(),
-            .shape_specs = @ptrCast(args.shape_specs.ptr),
+            .shape_specs = @constCast(@ptrCast(args.shape_specs.ptr)),
             .num_shape_specs = args.shape_specs.len,
             .device_layouts = if (args.device_layouts) |layouts| @ptrCast(@constCast(layouts.ptr)) else null,
             .num_device_layouts = if (args.device_layouts) |layouts| @intCast(layouts.len) else 0,

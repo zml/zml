@@ -153,9 +153,10 @@ pub const Platform = struct {
 pub const TransferManager = struct {
     pjrt_client: *pjrt.Client,
     pjrt_api: *const pjrt.Api,
-    pjrt_transfer_manager: []*pjrt.AsyncHostToDeviceTransferManager,
+    // pjrt_transfer_manager: []*pjrt.AsyncHostToDeviceTransferManager,
+    pjrt_transfer_manager: *pjrt.AsyncHostToDeviceTransferManager,
     shape_specs: []const Shape,
-    memory: *pjrt.Memory,
+    memory: *const pjrt.Memory,
 
     pub fn init(platform: Platform, memory_kind: pjrt.Memory.Kind, shapes: []Shape) !TransferManager {
         const device = platform.getDevices()[0];
@@ -168,9 +169,17 @@ pub const TransferManager = struct {
         return .{
             .pjrt_client = platform.pjrt_client,
             .pjrt_api = platform.pjrt_api,
-            .pjrt_transfer_manager = try pjrt.Client.createBuffersForAsyncHostToDevice(platform.pjrt_client, platform.pjrt_api, null),
+            .pjrt_transfer_manager = try pjrt.Client.createBuffersForAsyncHostToDevice(
+                platform.pjrt_client,
+                platform.pjrt_api,
+                .{
+                    .shape_specs = &.{}, // TODO: <-- ShapeSpecs go here
+                    .memory = memory.?,
+                    .device_layouts = null,
+                },
+            ),
             .shape_specs = shapes,
-            .memory = memory,
+            .memory = memory.?,
         };
     }
 
