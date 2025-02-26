@@ -440,9 +440,6 @@ pub const CompilationContext = struct {
             }
         }
 
-        // TODO: @rene remove debug print
-        std.debug.print("res_attrs : {any}", .{res_attrs});
-
         const mlir_fn = dialect.func.func(self.mlirCtx(), .{
             .sym_name = opts.name,
             .args = input_types,

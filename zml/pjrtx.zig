@@ -65,6 +65,7 @@ pub const Client = opaque {
     pub const BufferFromHostBufferArgs = pjrt.Client.BufferFromHostBufferArgs;
     pub fn bufferFromHostBuffer(self: *const Client, api: *const Api, args: BufferFromHostBufferArgs) ApiError!struct { *Buffer, ?*Event } {
         const buffer, const event_ = try self.inner().bufferFromHostBuffer(api, args);
+        // TODO: @rene we should probably disable awaiting here
         if (event_) |event__| {
             const event: *Event = @ptrCast(event__);
             try event.await_(api);
@@ -78,7 +79,12 @@ pub const Client = opaque {
 
     pub const CreateViewOfDeviceBufferArgs = pjrt.Client.CreateViewOfDeviceBufferArgs;
     pub fn createViewOfDeviceBuffer(self: *const Client, api: *const Api, args: CreateViewOfDeviceBufferArgs) ApiError!*Buffer {
-        return @ptrCast(try self.inner().createViewOfDeviceBuffer(api, args));
+        var args_ = args;
+        args_.on_delete_callback = args_.on_delete_callback;
+        const buf = try self.inner().createViewOfDeviceBuffer(api, args_);
+        return @ptrCast(buf);
+        // TODO: @rene
+        // return @ptrCast(try self.inner().createViewOfDeviceBuffer(api, args));
     }
 
     fn compileSync(self: *const Client, api: *const Api, allocator: std.mem.Allocator, module: mlir.Module, compile_options_pb: []const u8) CompileError!*LoadedExecutable {

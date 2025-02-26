@@ -106,6 +106,7 @@ test "simple while" {
     const platform = zml.testing.env();
 
     const init_i = try zml.Buffer.fromSlice(platform, .{}, &[_]i64{0});
+    std.debug.print("\n\ninit_i = {}", .{init_i._shards});
     const init_sum = try zml.Buffer.fromSlice(platform, .{}, &[_]i64{0});
     const counter = .{
         .step = try zml.Buffer.fromSlice(platform, .{}, &[_]i64{1}),
@@ -115,9 +116,13 @@ test "simple while" {
     const last_i = try res0.getValue(i64);
     const sum = try res1.getValue(i64);
 
+    std.debug.print("\nlast_i = {}\n", .{last_i});
     try std.testing.expectEqual(10, last_i);
+
+    std.debug.print("\nsum = {}\n", .{sum});
     try std.testing.expectEqual(45, sum);
 
+    std.debug.print("\ntesting CountInts._zigForward\n", .{});
     try std.testing.expectEqual(.{ 10, 45 }, CountInts._zigForward(1, 10, 0, 0));
 }
 

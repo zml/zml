@@ -995,6 +995,30 @@ pub const Memory = opaque {
     }
 };
 
+/// A client may want to create a buffer, and hand the buffer to other PjRt
+/// methods, before the data to store in the buffer is available to the client.
+/// This is supported using CreateBuffersForAsyncHostToDevice, which returns an
+/// AsyncHostToDeviceTransferManager helper object.
+///
+/// The PjRtBuffers can be retrieved from the AsyncHostToDeviceTransferManager
+/// and safely passed immediately to downstream PjRt method calls. Subsequently
+/// the client can call methods on the AsyncHostToDeviceTransferManager object
+/// to copy data into the buffers, and once the data copies are complete, the
+/// buffers' definition events will automatically become ready, unblocking
+/// downstream consumers of the buffers.
+///
+/// Depending on the backend's implementation, a single call to
+/// CreateBuffersForAsyncHostToDevice may either:
+///   - Create a "batch" of buffers that share a single definition event, which
+///   may amortize some performance overheads, but means that none of the
+///   buffers are available to downstream consumers until all the transfers
+///   have completed, in which case multiple calls to
+///   CreateBuffersForAsyncHostToDevice should be made if it is desirable for
+///   buffers to become available as soon as transfers into them complete.
+///
+///   - Create a "batch" of buffers with multiple underlying definitions
+///   events, and individual buffers become available to downstream consumers
+///   as soon as transfers into them complete.
 pub const AsyncHostToDeviceTransferManager = opaque {
     const inner = InnerMixin(c.PJRT_AsyncHostToDeviceTransferManager).inner;
 
@@ -1003,7 +1027,17 @@ pub const AsyncHostToDeviceTransferManager = opaque {
             .transfer_manager = self.inner(),
         }) catch unreachable;
     }
-
+    /// Transfers 'data' into a sub-buffer of buffer_index starting at offset, of
+    /// length transfer_size. 'data' must be already laid out in the correct
+    /// on-device format, for example returned by a call to
+    /// buffer->CopyRawToHost. If is_last_transfer is false then the buffer
+    /// remains unavailable to consumers after the transfer completes. If
+    /// is_last_transfer is true then the buffer becomes available to consumers
+    /// after the transfer completes, and no transfer calls (or SetBufferError
+    /// calls) into buffer_index can be made after this call. on_done is called
+    /// when the transfer is complete but before the buffers are made available
+    /// to their consumers. 'data' must remain in scope until on_done is called.
+    /// (calls TransferRawDataToSubBuffer() internally)
     pub fn transferData(self: *AsyncHostToDeviceTransferManager, api: *const Api, buffer_index: usize, data: []const u8, offset: i64, is_last_transfer: bool) ApiError!*Event {
         const ret = try api.call(.PJRT_AsyncHostToDeviceTransferManager_TransferData, .{
             .transfer_manager = self.inner(),

@@ -83,6 +83,7 @@ pub const Buffer = struct {
             ._shards = .{},
         };
 
+        std.debug.print("\n\nn_partitions = {}\n\n", .{n_partitions});
         for (0..n_partitions) |i| {
             // If no sharding if found, the given buffer is replicated on all devices.
             const buf = if (sharding_ax) |ax| buf: {
@@ -195,7 +196,11 @@ pub const Buffer = struct {
     /// return a Buffer with the given dimensions.
     pub fn fromSlice(platform: Platform, dimz: anytype, s: anytype) !Buffer {
         const sh = Shape.init(dimz, DataType.fromSliceElementType(s));
-        return from(platform, HostBuffer.fromBytes(sh, std.mem.sliceAsBytes(s)));
+
+        // std.debug.print("\n\n\nshape = {}", .{sh});
+        const hb = HostBuffer.fromBytes(sh, std.mem.sliceAsBytes(s));
+        // std.debug.print("\nhostbuffer = {}", .{hb});
+        return from(platform, hb);
     }
 
     pub fn fromSlice2(platform: Platform, dimz: anytype, s: anytype) !Buffer {
