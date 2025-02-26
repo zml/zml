@@ -43,9 +43,8 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
     const v = v_.transpose(.{ .b, .h, .k, .hd });
 
     const sqrtHeadDim: f32 = 1.0 / std.math.sqrt(@as(f32, @floatFromInt(q.dim(.hd))));
-    const scale: f32 = if (opts.scale) |_| 1.0 else sqrtHeadDim;
-
-    if (opts.scale) |s| k = k.mul(s);
+    const head_scaling = if (opts.scale) |s| s else Tensor.scalar(sqrtHeadDim, k.dtype());
+    k = k.mul(head_scaling);
 
     var buffer: [4096]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buffer);
@@ -64,7 +63,7 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
         \\      "is_cudnn_frontend": true,
         \\      "workspace_size": "0",
         \\    }},
-        \\    "fmha_scale": {d},
+        \\    "fmha_scale": 0,
         \\    "dropout_rate": 0,
         \\    "intermediate_tensor_shape": {{
         \\      "element_type": "{s}",
@@ -103,7 +102,6 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
         \\}}
     ,
         .{
-            scale,
             elementTypeFromDataType(q.dtype()),
             q.dim(.b),
             q.dim(.h),
