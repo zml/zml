@@ -251,7 +251,7 @@ pub const TransferManager = struct {
         start_index: usize = 0,
         last_data_is_last_transfer: bool = true,
     };
-    pub fn transferDataMulti(self: *TransferManager, data_slices: []const []const u8, opts: TransferDataMultiOpts) ![]*Event {
+    pub fn transferDataMany(self: *TransferManager, data_slices: []const []const u8, opts: TransferDataMultiOpts) ![]*Event {
         for (data_slices, @intCast(opts.start_index)..) |data, buffer_index| {
             const is_last_transfer = blk: {
                 if (opts.last_data_is_last_transfer) {
@@ -261,6 +261,19 @@ pub const TransferManager = struct {
                 }
             };
             _ = try self.transferDataSingle(buffer_index, data, 0, is_last_transfer);
+        }
+        return self.events.items;
+    }
+
+    pub const TransferDataSlicesSpec = struct {
+        offset: usize,
+        len: usize,
+    };
+    pub fn transferDataSlices(self: *TransferManager, input_buffer: []const u8, slice_specs: []const TransferDataSlicesSpec) ![]*Event {
+        for (slice_specs, 0..) |spec, buffer_index| {
+            const is_last_transfer = buffer_index == slice_specs.len - 1;
+            const data_slice = input_buffer[spec.offset .. spec.offset + spec.len];
+            _ = try self.transferDataSingle(buffer_index, data_slice, 0, is_last_transfer);
         }
         return self.events.items;
     }
