@@ -54,7 +54,6 @@ pub fn asyncMain() !void {
     const do_all_at_once = false;
 
     if (do_all_at_once) {
-        // const event = try manager.transferDataSingle(0, weights_buffer, 0, true);
         const events = try manager.transferDataMulti(&.{ weights_buffer, bias_buffer }, .{});
         for (events) |event| {
             while (!event.isReady(api)) : (event_cycle_counter += 1) {
@@ -64,6 +63,7 @@ pub fn asyncMain() !void {
     } else {
         // first
         {
+            // const event = try manager.transferDataSingle(0, weights_buffer, 0, true);
             const events = try manager.transferDataMulti(&.{weights_buffer}, .{
                 .last_data_is_last_transfer = false,
             });
@@ -76,7 +76,8 @@ pub fn asyncMain() !void {
         }
         // second
         {
-            const events = try manager.transferDataMulti(&.{ weights_buffer, bias_buffer }, .{
+            const events = try manager.transferDataMulti(&.{bias_buffer}, .{
+                .start_index = 1,
                 .last_data_is_last_transfer = true, // true is default but we are explicit here
             });
 

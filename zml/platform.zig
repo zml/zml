@@ -229,7 +229,13 @@ pub const TransferManager = struct {
             self.seen_last_buffer = true;
         }
 
-        const event = try self.pjrt_transfer_manager.transferData(self.pjrt_api, buffer_index, data, offset, is_last_transfer);
+        const event = try self.pjrt_transfer_manager.transferData(
+            self.pjrt_api,
+            buffer_index,
+            data,
+            offset,
+            is_last_transfer,
+        );
         try self.events.append(event);
 
         if (is_last_transfer and buffer_index != try self.pjrt_transfer_manager.bufferCount(self.pjrt_api) - 1) {
@@ -243,12 +249,10 @@ pub const TransferManager = struct {
 
     pub const TransferDataMultiOpts = struct {
         start_index: usize = 0,
-        start_offset: i64 = 0,
         last_data_is_last_transfer: bool = true,
     };
     pub fn transferDataMulti(self: *TransferManager, data_slices: []const []const u8, opts: TransferDataMultiOpts) ![]*Event {
-        var offset = opts.start_offset;
-        for (data_slices, @intCast(opts.start_offset)..) |data, buffer_index| {
+        for (data_slices, @intCast(opts.start_index)..) |data, buffer_index| {
             const is_last_transfer = blk: {
                 if (opts.last_data_is_last_transfer) {
                     break :blk buffer_index == data_slices.len - 1;
@@ -256,8 +260,7 @@ pub const TransferManager = struct {
                     break :blk false;
                 }
             };
-            _ = try self.transferDataSingle(buffer_index, data, offset, is_last_transfer);
-            offset += @intCast(data.len);
+            _ = try self.transferDataSingle(buffer_index, data, 0, is_last_transfer);
         }
         return self.events.items;
     }
