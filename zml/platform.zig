@@ -152,22 +152,23 @@ pub const Platform = struct {
 
 pub const TransferManager = struct {
     pjrt_client: *pjrt.Client,
-    pjrt_api: *pjrt.Api,
+    pjrt_api: *const pjrt.Api,
     pjrt_transfer_manager: []*pjrt.AsyncHostToDeviceTransferManager,
     shape_specs: []const Shape,
     memory: *pjrt.Memory,
 
     pub fn init(platform: Platform, memory_kind: pjrt.Memory.Kind, shapes: []Shape) !TransferManager {
         const device = platform.getDevices()[0];
-        const memory = device.getMemoryByKind(memory_kind);
+        const memory = device.getMemoryByKind(platform.pjrt_api, memory_kind);
         if (memory == null) {
-            stdx.debug.panic("Device {s} doesn't have memory of kind {s}", .{ device.getName(), @tagName(memory_kind) });
+            stdx.debug.panic("Device {s} doesn't have memory of kind {s}", .{ device.getDescription(platform.pjrt_api).getKind(platform.pjrt_api), @tagName(memory_kind) });
         }
-
+        // setup shape specs
+        // TODO
         return .{
             .pjrt_client = platform.pjrt_client,
             .pjrt_api = platform.pjrt_api,
-            .pjrt_transfer_manager = try pjrt.Client.createBuffersForAsyncHostToDevice(platform.pjrt_client, memory, null),
+            .pjrt_transfer_manager = try pjrt.Client.createBuffersForAsyncHostToDevice(platform.pjrt_client, platform.pjrt_api, null),
             .shape_specs = shapes,
             .memory = memory,
         };

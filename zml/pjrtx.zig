@@ -30,6 +30,7 @@ pub const SerializeResult = pjrt.SerializeResult;
 pub const Executable = pjrt.Executable;
 pub const ExecuteError = ApiError;
 pub const Memory = pjrt.Memory;
+pub const ShapeSpec = pjrt.ShapeSpec;
 
 fn InnerMixin(comptime innerT: type) type {
     return struct {
@@ -60,6 +61,11 @@ pub const Client = opaque {
 
     pub fn getAddressableDevices(self: *const Client, api: *const Api) []const *const Device {
         return self.inner().getAddressableDevices(api);
+    }
+
+    pub const CreateBuffersForAsyncHostToDeviceArgs = pjrt.Client.CreateBuffersForAsyncHostToDeviceArgs;
+    pub fn createBuffersForAsyncHostToDevice(self: *const Client, api: *const Api, args: CreateBuffersForAsyncHostToDeviceArgs) ApiError!*AsyncHostToDeviceTransferManager {
+        return self.inner().createBuffersForAsyncHostToDevice(api, args);
     }
 
     pub const BufferFromHostBufferArgs = pjrt.Client.BufferFromHostBufferArgs;
