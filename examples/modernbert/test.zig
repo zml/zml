@@ -50,8 +50,16 @@ pub fn asyncMain() !void {
         return;
     }
 
-    const model_file = res.args.model.?;
-    const activations_file = res.args.activations.?;
+    const model_file = res.args.model orelse {
+        stderr.print("Error: missing --model=...\n\n", .{}) catch {};
+        printUsageAndExit(stderr);
+        unreachable;
+    };
+    const activations_file = res.args.activations orelse {
+        stderr.print("Error: missing --activations=...\n\n", .{}) catch {};
+        printUsageAndExit(stderr);
+        unreachable;
+    };
 
     // Initialize the ZML context
     var context = try zml.Context.init();
