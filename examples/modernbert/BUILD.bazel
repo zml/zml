@@ -1,0 +1,63 @@
+load("@zml//bazel:zig.bzl", "zig_cc_binary")
+
+zig_cc_binary(
+    name = "modernbert",
+    srcs = ["modernbert.zig"],
+    main = "main.zig",
+    deps = [
+        "@com_github_hejsil_clap//:clap",
+        "@zml//async",
+        "@zml//stdx",
+        "@zml//zml",
+    ],
+)
+
+cc_binary(
+    name = "ModernBERT-base",
+    args = [
+        "--model=$(location @ModernBERT-base//:model.safetensors)",
+        "--tokenizer=$(location @ModernBERT-base//:tokenizer)",
+        "--num-attention-heads=12",
+        "--tie-word-embeddings=true",
+    ],
+    data = [
+        "@ModernBERT-base//:model.safetensors",
+        "@ModernBERT-base//:tokenizer",
+    ],
+    deps = [":modernbert_lib"],
+)
+
+cc_binary(
+    name = "ModernBERT-large",
+    args = [
+        "--model=$(location @ModernBERT-large//:model.safetensors)",
+        "--tokenizer=$(location @ModernBERT-large//:tokenizer)",
+        "--num-attention-heads=16",
+        "--tie-word-embeddings=true",
+    ],
+    data = [
+        "@ModernBERT-large//:model.safetensors",
+        "@ModernBERT-large//:tokenizer",
+    ],
+    deps = [":modernbert_lib"],
+)
+
+zig_cc_binary(
+    name = "test-implementation",
+    srcs = ["modernbert.zig"],
+    args = [
+        "--model=$(location @ModernBERT-base//:model.safetensors)",
+    ],
+    data = [
+        "@ModernBERT-base//:model.safetensors",
+    ],
+    main = "test.zig",
+    tags = [
+        "no_ci",
+    ],
+    deps = [
+        "@com_github_hejsil_clap//:clap",
+        "@zml//async",
+        "@zml//zml",
+    ],
+)
