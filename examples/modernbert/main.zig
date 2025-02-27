@@ -79,7 +79,11 @@ pub fn asyncMain() !void {
     context.printAvailablePlatforms(platform);
 
     // Detects the format of the model file (base on filename) and open it.
-    const model_file = cli.args.model.?;
+    const model_file = cli.args.model orelse {
+        stderr.print("Error: missing --model=...\n\n", .{}) catch {};
+        printUsageAndExit(stderr);
+        unreachable;
+    };
     var tensor_store = try zml.aio.detectFormatAndOpen(allocator, model_file);
     defer tensor_store.deinit();
 
@@ -96,7 +100,7 @@ pub fn asyncMain() !void {
 
             break :blk try zml.tokenizer.Tokenizer.fromFile(model_arena, tok);
         } else {
-            log.err("Missing --tokenizer", .{});
+            log.err("Error: missing --tokenizer", .{});
             return;
         }
     };
