@@ -43,8 +43,10 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
     const v = v_.transpose(.{ .b, .h, .k, .hd });
 
     const sqrtHeadDim: f32 = 1.0 / std.math.sqrt(@as(f32, @floatFromInt(q.dim(.hd))));
-    const head_scaling = if (opts.scale) |s| s else Tensor.scalar(sqrtHeadDim, k.dtype());
-    k = k.mul(head_scaling);
+    const kernel_scale = if (opts.scale) |_| 1.0 else sqrtHeadDim;
+    if (opts.scale) |s| {
+        k = k.mul(s);
+    }
 
     var buffer: [4096]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buffer);
@@ -64,7 +66,7 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
         \\      "is_cudnn_frontend": true,
         \\      "workspace_size": "0",
         \\    }},
-        \\    "fmha_scale": 0,
+        \\    "fmha_scale": {},
         \\    "dropout_rate": 0,
         \\    "intermediate_tensor_shape": {{
         \\      "element_type": "{s}",
@@ -103,6 +105,7 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
         \\}}
     ,
         .{
+            kernel_scale,
             elementTypeFromDataType(q.dtype()),
             q.dim(.b),
             q.dim(.h),
@@ -152,8 +155,10 @@ pub fn sdpaPaged(q_: Tensor, k_: Tensor, v_: Tensor, sequence_length_q: Tensor, 
     const v = v_.transpose(.{ .page, .h, .k_chunk, .hd });
 
     const sqrtHeadDim: f32 = 1.0 / std.math.sqrt(@as(f32, @floatFromInt(q.dim(.hd))));
-    const head_scaling = if (opts.scale) |s| s else Tensor.scalar(sqrtHeadDim, k.dtype());
-    k = k.mul(head_scaling);
+    const kernel_scale = if (opts.scale) |_| 1.0 else sqrtHeadDim;
+    if (opts.scale) |s| {
+        k = k.mul(s);
+    }
 
     var buffer: [4096]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buffer);
@@ -173,7 +178,7 @@ pub fn sdpaPaged(q_: Tensor, k_: Tensor, v_: Tensor, sequence_length_q: Tensor, 
         \\      "is_cudnn_frontend": true,
         \\      "workspace_size": "0",
         \\    }},
-        \\    "fmha_scale": 0,
+        \\    "fmha_scale": {},
         \\    "dropout_rate": 0,
         \\    "intermediate_tensor_shape": {{
         \\      "element_type": "{s}",
@@ -213,6 +218,7 @@ pub fn sdpaPaged(q_: Tensor, k_: Tensor, v_: Tensor, sequence_length_q: Tensor, 
         \\}}
     ,
         .{
+            kernel_scale,
             elementTypeFromDataType(q.dtype()),
             q.dim(.b),
             q.dim(.h),
@@ -235,7 +241,7 @@ pub fn sdpaPaged(q_: Tensor, k_: Tensor, v_: Tensor, sequence_length_q: Tensor, 
     const loc = mlir_ctx.location(@src());
     const op = dialect.stablehlo.custom_call(
         mlir_ctx,
-        &.{ q.value(), k.value(), v.value(), bias.value(), sequence_length_q.value(), sequence_length_kv.value(), page_table.value(), page_table.value() },
+        &.{ q.value(), k.value(), v.value(), sequence_length_q.value(), sequence_length_kv.value(), page_table.value(), page_table.value() },
         .{
             .call_target_name = "__cudnn$fmhaScaleBiasSoftmax",
             .backend_config = backend_config,
