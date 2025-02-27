@@ -278,6 +278,22 @@ pub const TransferManager = struct {
         return self.events.items;
     }
 
+    pub const Progress = struct {
+        transferred_buffers: usize,
+        total_buffers: usize,
+    };
+    pub fn progress(self: *const TransferManager) !Progress {
+        var buffers_ready: usize = 0;
+        for (self.events.items) |event| {
+            if (event.isReady(self.pjrt_api)) {
+                buffers_ready += 1;
+            }
+        }
+        return .{
+            .transferred_buffers = buffers_ready,
+            .total_buffers = try self.pjrt_transfer_manager.bufferCount(self.pjrt_api),
+        };
+    }
     pub fn deinit(self: *TransferManager) void {
         AsyncHostToDeviceTransferManager.deinit(self.pjrt_transfer_manager, self.pjrt_api);
         self.shape_specs.deinit();
