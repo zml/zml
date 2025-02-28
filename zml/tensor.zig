@@ -1262,8 +1262,15 @@ pub const Tensor = struct {
     /// Returns a Tensor containing the softmax function applied to each element of the input Tensor.
     pub fn softmax(self: Tensor, axis_: anytype) Tensor {
         const a = self.axis(axis_);
+        const max_val = self.max(a);
+        const row_mask = max_val.cmp(.GT, Tensor.scalar(-std.math.inf(f64), self.dtype()));
+
         const exp_diff_max = self.sub(self.max(a).broad(self._shape)).exp();
-        return exp_diff_max.div(exp_diff_max.sum(a).broad(self._shape));
+        const res = exp_diff_max.div(exp_diff_max.sum(a).broad(self._shape));
+
+        // If a row is full -inf return full 0 instead of full nan,
+        // this fix attention when mask hides a full row.
+        return row_mask.broad(self.shape()).select(res, Tensor.scalar(0, self.dtype()));
     }
 
     /// Returns a Tensor containing the log of the sum of exponential over the given axis.
