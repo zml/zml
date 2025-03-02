@@ -16,6 +16,10 @@ pub const yaml = @import("aio/yaml.zig");
 
 pub const log = std.log.scoped(.@"zml/aio");
 const HostBuffer = @import("hostbuffer.zig").HostBuffer;
+const pjrt = @import("pjrtx.zig");
+const Memory = pjrt.Memory;
+const Event = pjrt.Event;
+const Shape = @import("shape.zig").Shape;
 
 test {
     std.testing.refAllDecls(@This());
@@ -79,13 +83,30 @@ pub fn populateModelWithPrefix(comptime Model: type, allocator: std.mem.Allocato
 
 /// A struct containing all the buffers and metadata found in a model file.
 pub const BufferStore = struct {
-    pub const Buffers = std.StringArrayHashMapUnmanaged(HostBuffer);
+    pub const RegisteredBuffer = struct {
+        shape: Shape,
+        data: []u8,
+    };
+    pub const BufferEntry = struct {
+        buffer: ?zml.Buffer = null,
+        shape: Shape,
+        data: []const u8,
+        ready_event: ?*Event = null,
+        transfer_manger_buffer_index: usize,
+    };
+
+    pub const Buffers = std.StringArrayHashMapUnmanaged(BufferEntry);
     pub const Metadatas = std.StringArrayHashMapUnmanaged(Metadata);
+    // pub const TransferManagerSet = std.AutoArrayHashMapUnmanaged(*zml.platform.TransferManager, void);
 
     arena: std.heap.ArenaAllocator,
     files: []MemoryMappedFile = &.{},
     buffers: Buffers = .{},
     _metadata: Metadatas = .{},
+    /// set of transfer managers created in the buffer store:
+    /// one per (device, memoryKind)
+    // transfer_managers: TransferManagerSet = .{},
+    transfer_manager: ?*zml.platform.TransferManager = null,
 
     /// Create an empty BufferStore. Takes owneship of the given files.
     pub fn init(allocator: std.mem.Allocator, files: []const MemoryMappedFile) error{OutOfMemory}!BufferStore {
@@ -96,15 +117,69 @@ pub const BufferStore = struct {
         return self;
     }
 
-    pub fn deinit(self: BufferStore) void {
+    /// when loading shapes (and data) from file, store them here
+    /// we rely on the map preserving order of insertion
+    pub fn registerBuffer(
+        self: *BufferStore,
+        alloc: std.mem.Allocator,
+        key: []const u8,
+        shape: Shape,
+        data: []const u8,
+    ) !void {
+        try self.buffers.put(alloc, key, .{
+            .data = data,
+            .shape = shape,
+            .transfer_manger_buffer_index = self.buffers.count(),
+        });
+    }
+
+    pub fn deinit(self: *BufferStore) void {
         for (self.files) |*file| {
             file.deinit();
+        }
+        if (self.transfer_manager) |xferman| {
+            xferman.deinit();
         }
         self.arena.deinit();
     }
 
-    pub fn get(self: BufferStore, key: []const u8) ?HostBuffer {
-        return self.buffers.get(key);
+    pub fn get(self: BufferStore, key: []const u8) ?zml.Buffer {
+        const entry = self.buffers.get(key) orelse return null;
+        return entry.buffer;
+    }
+
+    pub fn starTransferToDevice(self: *BufferStore, platform: zml.Platform, memory_kind: Memory.Kind) ![]Event {
+        // TODO: work out how many transfer managers we need
+        //       probably one per (memory_kind, device)
+        if (self.transfer_manager != null) {
+            return error.TransferAlreadyStarted;
+        }
+
+        // retrieve the shapes and data slices of all the buffers
+        // we rely on the map preserving order of insertion
+        var shapes = try std.ArrayList(Shape).initCapacity(self.arena, self.registered_buffers.count());
+        var data_slices = try std.ArrayList([]const u8).initCapacity(self.arena, self.registered_buffers.count());
+
+        for (self.buffers.values(), 0..) |reg_buf, idx| {
+            stdx.debug.assert(idx == reg_buf.transfer_manger_buffer_index, "Internal error: TransferManager indices out of sync", .{});
+            shapes.appendAssumeCapacity(reg_buf.shape);
+            data_slices.appendAssumeCapacity(reg_buf.data);
+        }
+
+        self.transfer_manager = try zml.platform.TransferManager.init(
+            self.arena,
+            platform,
+            memory_kind,
+            try shapes.toOwnedSlice(),
+        );
+
+        const events = try self.transfer_manager.?.transferDataMany(try data_slices.toOwnedSlice(), .{});
+        for (self.buffers.values(), events) |*reg_buf, event| {
+            // TODO: for now, we only use our one and only transfer manager
+            reg_buf.buffer = self.transfer_manager.?.buffer(reg_buf.transfer_manger_buffer_index);
+            reg_buf.ready_event = event;
+        }
+        return events;
     }
 
     /// Count layers starting with the given prefix.
@@ -506,7 +581,7 @@ pub fn loadBuffers(
     const arena = arena_state.allocator();
     var model: Model = try zml.aio.populateModel(Model, arena, buffer_store);
 
-    // If the Model has a "init" function, call it with the given parameters.
+    // If the Model has an "init" function, call it with the given parameters.
     if (@hasDecl(Model, "init")) {
         @call(.auto, Model.init, .{&model} ++ init_args);
     } else {
@@ -644,11 +719,11 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
 
     const prefix = prefix_builder.data.items;
     if (T == zml.Buffer) {
-        return if (buffer_store.get(prefix)) |host_buffer| {
+        return if (buffer_store.get(prefix)) |buffer| {
             // obj._shape has been set inside `loadModelBuffersWithPrefix`, before calling us.
             log.debug("Loading buffer {s} ({})", .{ prefix, obj._shape });
-            stdx.debug.assert(host_buffer.shape().eql(obj._shape), "loadModelBuffers expects to find the same shapes in the model and in the buffer store, got {} and {} for tensor {s}", .{ obj._shape, host_buffer, prefix });
-            obj.* = try zml.Buffer.from(platform, host_buffer);
+            stdx.debug.assert(buffer.shape().eql(obj._shape), "loadModelBuffers expects to find the same shapes in the model and in the buffer store, got {} and {} for tensor {s}", .{ obj._shape, buffer, prefix });
+            obj.* = buffer;
         } else {
             log.err("Buffer not found: {s}", .{prefix});
 

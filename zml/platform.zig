@@ -163,6 +163,7 @@ pub const Platform = struct {
 // };
 
 pub const TransferManager = struct {
+    platform: Platform,
     pjrt_client: *Client,
     pjrt_api: *const Api,
     // pjrt_transfer_manager: []*AsyncHostToDeviceTransferManager,
@@ -170,8 +171,10 @@ pub const TransferManager = struct {
 
     device: *const Device,
     memory: *const Memory,
+    shapes: []const Shape,
     shape_specs: std.ArrayList(ShapeSpec),
     events: std.ArrayList(*Event),
+    buffers_alist: std.ArrayList(Buffer),
     seen_last_buffer: bool,
 
     pub fn init(
@@ -180,14 +183,15 @@ pub const TransferManager = struct {
         memory_kind: Memory.Kind,
         shapes: []const Shape,
     ) !TransferManager {
-        const device = platform.getDevices()[0];
+        const device = platform.getDevices()[0]; // TODO: when sharding
         const memory = device.getMemoryByKind(platform.pjrt_api, memory_kind);
         if (memory == null) {
             stdx.debug.panic("Device {s} doesn't have memory of kind {s}", .{ device.getDescription(platform.pjrt_api).getKind(platform.pjrt_api), @tagName(memory_kind) });
         }
-        var shape_specs = std.ArrayList(ShapeSpec).init(alloc);
+        const num_buffers = shapes.len;
+        var shape_specs = try std.ArrayList(ShapeSpec).initCapacity(alloc, num_buffers);
         for (shapes) |shape| {
-            try shape_specs.append(
+            shape_specs.appendAssumeCapacity(
                 ShapeSpec.init(
                     shape.dims(),
                     Buffer.bufferTypeFromDtype(shape.dtype()),
@@ -195,12 +199,12 @@ pub const TransferManager = struct {
             );
         }
 
-        // setup shape specs
-        // TODO
-        return .{
+        var self: TransferManager = .{
+            .buffers_alist = try std.ArrayList(Buffer).initCapacity(alloc, num_buffers),
             .device = device,
-            .events = std.ArrayList(*Event).init(alloc),
+            .events = try std.ArrayList(*Event).initCapacity(alloc, num_buffers),
             .memory = memory.?,
+            .platform = platform,
             .pjrt_client = platform.pjrt_client,
             .pjrt_api = platform.pjrt_api,
             .pjrt_transfer_manager = try Client.createBuffersForAsyncHostToDevice(
@@ -213,8 +217,26 @@ pub const TransferManager = struct {
                 },
             ),
             .seen_last_buffer = false,
+            .shapes = shapes,
             .shape_specs = shape_specs,
         };
+        try self.toZmlBuffers();
+        return self;
+    }
+
+    pub fn deinit(self: *TransferManager) void {
+        self.pjrt_transfer_manager.deinit(self.pjrt_api);
+        self.shape_specs.deinit();
+        self.events.deinit();
+        self.buffers_alist.deinit();
+    }
+
+    pub fn buffers(self: *const TransferManager) []Buffer {
+        return self.buffers_alist.items;
+    }
+
+    pub fn buffer(self: *const TransferManager, index: usize) ?Buffer {
+        return self.buffers_alist.items[index];
     }
 
     pub fn transferDataSingle(self: *TransferManager, buffer_index: usize, data: []const u8, offset: i64, is_last_transfer: bool) !*Event {
@@ -236,7 +258,8 @@ pub const TransferManager = struct {
             offset,
             is_last_transfer,
         );
-        try self.events.append(event);
+        // TODO: might cause crashes if used improperly:
+        self.events.appendAssumeCapacity(event);
 
         if (is_last_transfer and buffer_index != try self.pjrt_transfer_manager.bufferCount(self.pjrt_api) - 1) {
             stdx.debug.panic(
@@ -294,9 +317,17 @@ pub const TransferManager = struct {
             .total_buffers = try self.pjrt_transfer_manager.bufferCount(self.pjrt_api),
         };
     }
-    pub fn deinit(self: *TransferManager) void {
-        AsyncHostToDeviceTransferManager.deinit(self.pjrt_transfer_manager, self.pjrt_api);
-        self.shape_specs.deinit();
+
+    /// called internally to retrieve PJRT buffers that can be accessed via .buffers()
+    fn toZmlBuffers(self: *TransferManager) !void {
+        if (self.buffers_alist.items.len == 0) {
+            for (0..try self.pjrt_transfer_manager.bufferCount(self.pjrt_api)) |buffer_index| {
+                const pjrt_buffer = try self.pjrt_transfer_manager.retrieveBuffer(self.pjrt_api, buffer_index);
+                const shape = self.shapes[buffer_index];
+                const zml_buffer = Buffer.fromPjrtBuffers(self.platform, shape, &.{pjrt_buffer});
+                self.buffers_alist.appendAssumeCapacity(zml_buffer);
+            }
+        }
     }
 };
 

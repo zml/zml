@@ -117,8 +117,14 @@ fn loadFile(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.Array
         // > The byte buffer needs to be entirely indexed, and cannot contain holes. This prevents the creation of polyglot files.
         std.debug.assert(end - start == out_shape.byteSize());
 
-        const buf = HostBuffer.fromBytes(out_shape, buffer_file.mappedSlice(start, out_shape.byteSize()));
-        try store.buffers.put(allocator, try allocator.dupe(u8, key), buf);
+        // const buf = HostBuffer.fromBytes(out_shape, buffer_file.mappedSlice(start, out_shape.byteSize()));
+        const data = buffer_file.mappedSlice(start, out_shape.byteSize());
+        try store.registerBuffer(
+            allocator,
+            try allocator.dupe(u8, key),
+            out_shape,
+            data,
+        );
     }
 }
 

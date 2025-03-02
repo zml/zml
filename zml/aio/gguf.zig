@@ -73,9 +73,16 @@ fn loadBuffers(allocator: Allocator, store: *zml.aio.BufferStore, file: *core.Gg
 
         // TODO: handle quantized types
         const dtype: zml.DataType = info.t.toDtype() orelse return error.UnsupportedGgufType;
-        const buffer = HostBuffer.fromBytes(zml.Shape.init(info.shape(), dtype), file.file.mappedSlice(info.start, info.byte_len));
-        res.value_ptr.* = buffer;
-        // store the info index.
+
+        // const buffer = HostBuffer.fromBytes(zml.Shape.init(info.shape(), dtype), file.file.mappedSlice(info.start, info.byte_len));
+
+        const data = file.file.mappedSlice(info.start, info.byte_len);
+        try store.registerBuffer(
+            allocator,
+            info.name,
+            zml.Shape.init(info.shape(), dtype),
+            data,
+        );
     } else |err| switch (err) {
         error.EndOfMetadata => {},
         else => return err,

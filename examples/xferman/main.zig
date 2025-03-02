@@ -99,7 +99,7 @@ pub fn asyncMain() !void {
             .{ .offset = weights_buffer.len, .len = bias_buffer.len },
         };
         const events = try manager.transferDataSlices(big_buf, slice_specs);
-        _ = events; // autofix
+        _ = events; // we don't need them as we're going to query .progress()
 
         var dt: i128 = undefined;
         while (true) {

@@ -394,10 +394,16 @@ pub const File = struct {
                     const key = try allocator.dupe(u8, prefix.items);
                     const entry = try store.buffers.getOrPut(allocator, key);
                     if (entry.found_existing) {
-                        log.warn("Duplicate key: {s}", .{prefix.items});
+                        log.warn("Duplicate key: {s}", .{key});
                         allocator.free(key);
                     }
-                    entry.value_ptr.* = host_buffer;
+
+                    try store.registerBuffer(
+                        allocator,
+                        key,
+                        host_buffer.shape(),
+                        host_buffer.data,
+                    );
                     return true;
                 } else if (basicTypeCheck(object, "torch", "Size")) {
                     const size = object.args;

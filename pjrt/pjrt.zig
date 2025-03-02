@@ -1050,6 +1050,15 @@ pub const AsyncHostToDeviceTransferManager = opaque {
         return @ptrCast(ret.done_with_h2d_transfer.?);
     }
 
+    /// Returns buffer for buffer_index, which can be passed to downstream
+    /// consumers immediately and will become available once transfers complete.
+    ///
+    /// retrieveBuffer can be called at any convenient time
+    ///
+    /// !!! May not be called more than once for a given buffer_index. !!!
+    ///
+    /// !!! transfer methods can safely be called for a buffer index
+    /// !!! **AFTER RetrieveBuffer** has been called.
     pub fn retrieveBuffer(self: *AsyncHostToDeviceTransferManager, api: *const Api, buffer_index: usize) ApiError!*Buffer {
         const ret = try api.call(.PJRT_AsyncHostToDeviceTransferManager_RetrieveBuffer, .{
             .transfer_manager = self.inner(),
