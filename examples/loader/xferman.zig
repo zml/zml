@@ -9,6 +9,37 @@ pub fn main() !void {
     try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain);
 }
 
+fn checkSlicesForOverlaps(alloc: std.mem.Allocator, entire_buffer: []const u8, subslices: [][]const u8) !void {
+    std.log.info("Checking for overlaps...", .{});
+    var bytefield = try alloc.alloc(bool, entire_buffer.len);
+    defer alloc.free(bytefield);
+
+    for (0..bytefield.len) |i| {
+        bytefield[i] = false;
+    }
+
+    for (subslices, 0..) |sub, idx| {
+        const start: usize = @intFromPtr(sub.ptr) - @intFromPtr(entire_buffer.ptr);
+        if (start + sub.len > entire_buffer.len) {
+            std.log.err("Error: subslice {d} reaches outside of mmapped file: file(0..{d}), subslice({d}..{d})", .{
+                idx,
+                entire_buffer.len,
+                start,
+                start + sub.len,
+            });
+            return error.Overflow;
+        }
+
+        for (start..start + sub.len) |index| {
+            if (bytefield[index] == true) {
+                return error.Overlap;
+            }
+            bytefield[index] = true;
+        }
+    }
+    std.log.info("Checking for overlaps...done", .{});
+}
+
 pub fn asyncMain() !void {
     // Short lived allocations
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -41,11 +72,16 @@ pub fn asyncMain() !void {
     var timer = try std.time.Timer.start();
 
     var bit = buffer_store.buffers.iterator();
+    var slice_list = std.ArrayList([]const u8).init(allocator);
+    defer slice_list.deinit();
     while (bit.next()) |item| {
         const buffer = item.value_ptr;
         const key = item.key_ptr.*;
-        std.log.info("Buffer {d} : {s} {} = {d} bytes @ {*}", .{ bit.index, key, buffer.shape, buffer.data.len, buffer.data.ptr });
+        std.log.info("Buffer {d} : {s} {} = {d} bytes @ {*}", .{ bit.index - 1, key, buffer.shape, buffer.data.len, buffer.data.ptr });
+        try slice_list.append(buffer.data);
     }
+
+    try checkSlicesForOverlaps(allocator, buffer_store.files[0].data, slice_list.items);
 
     const events = try buffer_store.starTransferToDevice(platform, .unpinned_host);
     std.debug.print("Received {d} events\n", .{events.len});
