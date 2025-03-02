@@ -75,4 +75,5 @@ pub fn asyncMain() !void {
         event_cycle_counter,
         end_time - start_time,
     });
+    log.info("Cleaning up...", .{});
 }

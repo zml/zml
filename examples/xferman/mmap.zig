@@ -24,12 +24,34 @@ pub fn asyncMain() !void {
         break :blk path;
     } else {
         std.debug.print("Missing file path argument\n", .{});
-        std.debug.print("Try: bazel run -c opt //loader:safetensors -- /path/to/mymodel.safetensors or /path/to/model.safetensors.index.json \n", .{});
+        std.debug.print("Try: bazel run -c opt //xferman:mmap -- /path/to/mymodel.safetensors or /path/to/model.safetensors.index.json \n", .{});
         std.process.exit(0);
     };
 
-    var buffer_store = try zml.aio.safetensors.open(allocator, file);
+    var mapped_file = try zml.aio.MemoryMappedFile.init(try asynk.File.open(file, .{}));
+    errdefer mapped_file.deinit();
+
+    var buffer_store = try zml.aio.BufferStore.init(allocator, &.{mapped_file});
     defer buffer_store.deinit();
+
+    const NUM_BUFFERS: usize = 146;
+    const BUF_SIZE: usize = mapped_file.data.len / NUM_BUFFERS;
+    const shape = zml.Shape.init(.{BUF_SIZE}, .u8);
+    var free_list = std.ArrayList([]const u8).init(allocator);
+    defer {
+        for (free_list.items) |key| {
+            allocator.free(key);
+        }
+        free_list.deinit();
+    }
+    var offset: usize = 0;
+    for (0..NUM_BUFFERS) |buffer_index| {
+        const filedata = mapped_file.mappedSlice(offset, BUF_SIZE);
+        const key = try std.fmt.allocPrint(allocator, "buffer-{d}", .{buffer_index});
+        try free_list.append(key);
+        try buffer_store.registerBuffer(buffer_store.arena.allocator(), key, shape, filedata);
+        offset += BUF_SIZE;
+    }
 
     var context = try zml.Context.init();
     defer context.deinit();

@@ -83,10 +83,6 @@ pub fn populateModelWithPrefix(comptime Model: type, allocator: std.mem.Allocato
 
 /// A struct containing all the buffers and metadata found in a model file.
 pub const BufferStore = struct {
-    pub const RegisteredBuffer = struct {
-        shape: Shape,
-        data: []u8,
-    };
     pub const BufferEntry = struct {
         buffer: ?zml.Buffer = null,
         shape: Shape,

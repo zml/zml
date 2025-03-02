@@ -20,3 +20,13 @@ zig_cc_binary(
         "@zml//zml",
     ],
 )
+
+zig_cc_binary(
+    name = "mmap",
+    main = "mmap.zig",
+    deps = [
+        "@zml//async",
+        "@zml//stdx",
+        "@zml//zml",
+    ],
+)
