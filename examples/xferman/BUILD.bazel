@@ -10,3 +10,13 @@ zig_cc_binary(
         "@zml//zml",
     ],
 )
+
+zig_cc_binary(
+    name = "manymany",
+    main = "manymany.zig",
+    deps = [
+        "@zml//async",
+        "@zml//stdx",
+        "@zml//zml",
+    ],
+)

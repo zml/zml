@@ -37,26 +37,19 @@ pub fn asyncMain() !void {
     const platform = context.autoPlatform(.{});
     context.printAvailablePlatforms(platform);
 
-    var buffers = try gpa.allocator().alloc(zml.Buffer, buffer_store.buffers.count());
-    defer {
-        for (buffers) |*buf| {
-            buf.deinit();
-        }
-        gpa.allocator().free(buffers);
-    }
-
     var total_bytes: usize = 0;
     var timer = try std.time.Timer.start();
+
+    const events = try buffer_store.starTransferToDevice(platform, .unpinned_host);
+    std.debug.print("Received {d} events\n", .{events.len});
 
     var it = buffer_store.buffers.iterator();
     var i: usize = 0;
     std.debug.print("\nStart to read {d} buffers from store..\n", .{buffer_store.buffers.count()});
 
     while (it.next()) |entry| : (i += 1) {
-        const host_buffer = entry.value_ptr.*;
-        total_bytes += host_buffer.data.len;
+        total_bytes += entry.value_ptr.*.data.len;
         std.debug.print("Buffer: {s} ({any} / {any})\n", .{ entry.key_ptr.*, i + 1, buffer_store.buffers.count() });
-        buffers[i] = try zml.Buffer.from(platform, host_buffer);
     }
 
     const stop = timer.read();

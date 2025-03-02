@@ -251,6 +251,7 @@ pub const TransferManager = struct {
             self.seen_last_buffer = true;
         }
 
+        log.debug("transfer size: {d} - last transfer: {}", .{ data.len, is_last_transfer });
         const event = try self.pjrt_transfer_manager.transferData(
             self.pjrt_api,
             buffer_index,
@@ -258,6 +259,7 @@ pub const TransferManager = struct {
             offset,
             is_last_transfer,
         );
+        log.debug("event: {}", .{event});
         // TODO: might cause crashes if used improperly:
         self.events.appendAssumeCapacity(event);
 
@@ -283,6 +285,7 @@ pub const TransferManager = struct {
                     break :blk false;
                 }
             };
+            log.debug("TransferManager initiating transfer {d}", .{buffer_index});
             _ = try self.transferDataSingle(buffer_index, data, 0, is_last_transfer);
         }
         return self.events.items;

@@ -46,7 +46,7 @@ pub fn asyncMain() !void {
     var event_cycle_counter: usize = 0;
 
     // transfer both slices in one call
-    if (false) {
+    if (true) {
         const events = try manager.transferDataMany(&.{ weights_buffer, bias_buffer }, .{});
         for (events) |event| {
             while (!event.isReady(api)) : (event_cycle_counter += 1) {
@@ -88,16 +88,16 @@ pub fn asyncMain() !void {
 
     // transfer all buffers as slices of one big buffer (as would be the case
     // with an mmapped file)
-    if (true) {
+    if (false) {
         var big_buf = try allocator.alloc(u8, weights_buffer.len + bias_buffer.len);
         @memcpy(big_buf[0..weights_buffer.len], weights_buffer);
         @memcpy(big_buf[weights_buffer.len..], bias_buffer);
 
         const slice_specs: []const zml.platform.TransferManager.TransferDataSlicesSpec =
             &.{
-            .{ .offset = 0, .len = weights_buffer.len },
-            .{ .offset = weights_buffer.len, .len = bias_buffer.len },
-        };
+                .{ .offset = 0, .len = weights_buffer.len },
+                .{ .offset = weights_buffer.len, .len = bias_buffer.len },
+            };
         const events = try manager.transferDataSlices(big_buf, slice_specs);
         _ = events; // we don't need them as we're going to query .progress()
 

@@ -106,7 +106,7 @@ pub const BufferStore = struct {
     /// set of transfer managers created in the buffer store:
     /// one per (device, memoryKind)
     // transfer_managers: TransferManagerSet = .{},
-    transfer_manager: ?*zml.platform.TransferManager = null,
+    transfer_manager: ?zml.platform.TransferManager = null,
 
     /// Create an empty BufferStore. Takes owneship of the given files.
     pub fn init(allocator: std.mem.Allocator, files: []const MemoryMappedFile) error{OutOfMemory}!BufferStore {
@@ -137,7 +137,7 @@ pub const BufferStore = struct {
         for (self.files) |*file| {
             file.deinit();
         }
-        if (self.transfer_manager) |xferman| {
+        if (self.transfer_manager) |*xferman| {
             xferman.deinit();
         }
         self.arena.deinit();
@@ -148,7 +148,7 @@ pub const BufferStore = struct {
         return entry.buffer;
     }
 
-    pub fn starTransferToDevice(self: *BufferStore, platform: zml.Platform, memory_kind: Memory.Kind) ![]Event {
+    pub fn starTransferToDevice(self: *BufferStore, platform: zml.Platform, memory_kind: Memory.Kind) ![]*Event {
         // TODO: work out how many transfer managers we need
         //       probably one per (memory_kind, device)
         if (self.transfer_manager != null) {
@@ -157,8 +157,8 @@ pub const BufferStore = struct {
 
         // retrieve the shapes and data slices of all the buffers
         // we rely on the map preserving order of insertion
-        var shapes = try std.ArrayList(Shape).initCapacity(self.arena, self.registered_buffers.count());
-        var data_slices = try std.ArrayList([]const u8).initCapacity(self.arena, self.registered_buffers.count());
+        var shapes = try std.ArrayList(Shape).initCapacity(self.arena.allocator(), self.buffers.count());
+        var data_slices = try std.ArrayList([]const u8).initCapacity(self.arena.allocator(), self.buffers.count());
 
         for (self.buffers.values(), 0..) |reg_buf, idx| {
             stdx.debug.assert(idx == reg_buf.transfer_manger_buffer_index, "Internal error: TransferManager indices out of sync", .{});
@@ -167,13 +167,16 @@ pub const BufferStore = struct {
         }
 
         self.transfer_manager = try zml.platform.TransferManager.init(
-            self.arena,
+            self.arena.allocator(),
             platform,
             memory_kind,
             try shapes.toOwnedSlice(),
         );
 
-        const events = try self.transfer_manager.?.transferDataMany(try data_slices.toOwnedSlice(), .{});
+        const slices = try data_slices.toOwnedSlice();
+        log.debug("About to transfer {d} slices", .{slices.len});
+        const events = try self.transfer_manager.?.transferDataMany(slices, .{});
+        log.debug("TransferManager created {d} events", .{events.len});
         for (self.buffers.values(), events) |*reg_buf, event| {
             // TODO: for now, we only use our one and only transfer manager
             reg_buf.buffer = self.transfer_manager.?.buffer(reg_buf.transfer_manger_buffer_index);
