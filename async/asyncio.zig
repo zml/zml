@@ -1,6 +1,6 @@
 const std = @import("std");
 const stdx = @import("stdx");
-const xev = @import("xev");
+const xev = @import("xev").Dynamic;
 const libcoro = @import("coro.zig");
 const CoroExecutor = @import("executor.zig").Executor;
 
@@ -115,11 +115,10 @@ pub const TCP = struct {
     exec: *Executor,
     tcp: xev.TCP,
 
-    pub usingnamespace Stream(Self, xev.TCP, .{
-        .close = true,
-        .read = .recv,
-        .write = .send,
-    });
+    pub usingnamespace Closeable(Self, xev.TCP);
+    pub usingnamespace Pollable(Self, xev.TCP);
+    pub usingnamespace Readable(Self, xev.TCP);
+    pub usingnamespace Writeable(Self, xev.TCP);
 
     pub fn init(exec: *Executor, tcp: xev.TCP) Self {
         return .{ .exec = exec, .tcp = tcp };
@@ -214,14 +213,6 @@ pub const TCP = struct {
     }
 };
 
-fn Stream(comptime T: type, comptime StreamT: type, comptime options: xev.stream.Options) type {
-    return struct {
-        pub usingnamespace if (options.close) Closeable(T, StreamT) else struct {};
-        pub usingnamespace if (options.read != .none) Readable(T, StreamT) else struct {};
-        pub usingnamespace if (options.write != .none) Writeable(T, StreamT) else struct {};
-    };
-}
-
 fn Closeable(comptime T: type, comptime StreamT: type) type {
     return struct {
         const Self = T;
@@ -254,6 +245,46 @@ fn Closeable(comptime T: type, comptime StreamT: type) type {
             const loop = self.exec.loop;
             var c: xev.Completion = .{};
             self.stream().close(loop, &c, Data, &data, &Data.callback);
+
+            try waitForCompletion(self.exec, &c);
+
+            return data.result;
+        }
+    };
+}
+
+fn Pollable(comptime T: type, comptime StreamT: type) type {
+    return struct {
+        const Self = T;
+        const PollResult = xev.PollError!void;
+        pub fn poll(self: Self) !void {
+            const ResultT = PollResult;
+            const Data = struct {
+                result: ResultT = undefined,
+                frame: ?Frame = null,
+
+                fn callback(
+                    userdata: ?*@This(),
+                    l: *xev.Loop,
+                    c: *xev.Completion,
+                    s: StreamT,
+                    result: ResultT,
+                ) xev.CallbackAction {
+                    _ = l;
+                    _ = c;
+                    _ = s;
+                    const data = userdata.?;
+                    data.result = result;
+                    if (data.frame != null) libcoro.xresume(data.frame.?);
+                    return .disarm;
+                }
+            };
+
+            var data: Data = .{ .frame = libcoro.xframe() };
+
+            const loop = self.exec.loop;
+            var c: xev.Completion = .{};
+            self.stream().poll(loop, &c, Data, &data, &Data.callback);
 
             try waitForCompletion(self.exec, &c);
 
@@ -351,12 +382,10 @@ pub const File = struct {
     exec: *Executor,
     file: xev.File,
 
-    pub usingnamespace Stream(Self, xev.File, .{
-        .close = true,
-        .read = .read,
-        .write = .write,
-        .threadpool = true,
-    });
+    pub usingnamespace Closeable(Self, xev.File);
+    pub usingnamespace Pollable(Self, xev.File);
+    pub usingnamespace Readable(Self, xev.File);
+    pub usingnamespace Writeable(Self, xev.File);
 
     pub fn init(exec: *Executor, file: xev.File) Self {
         return .{ .exec = exec, .file = file };
@@ -497,11 +526,10 @@ pub const UDP = struct {
     exec: *Executor,
     udp: xev.UDP,
 
-    pub usingnamespace Stream(Self, xev.UDP, .{
-        .close = true,
-        .read = .none,
-        .write = .none,
-    });
+    pub usingnamespace Closeable(Self, xev.TCP);
+    pub usingnamespace Pollable(Self, xev.TCP);
+    pub usingnamespace Readable(Self, xev.TCP);
+    pub usingnamespace Writeable(Self, xev.TCP);
 
     pub fn init(exec: *Executor, udp: xev.UDP) Self {
         return .{ .exec = exec, .udp = udp };
