@@ -64,8 +64,7 @@ fn loadMetadata(allocator: Allocator, store: *zml.aio.BufferStore, file: *core.G
 fn loadBuffers(allocator: Allocator, store: *zml.aio.BufferStore, file: *core.GgufFile) !void {
     try store.buffers.ensureTotalCapacity(allocator, @intCast(file.header.tensor_count));
     while (file.readTensorInfo(allocator)) |info| {
-        const res = store.buffers.getOrPutAssumeCapacity(info.name);
-        if (res.found_existing) {
+        if (store.getShape(info.name) != null) {
             // This file seems invalid. Try to continue anyway.
             log.warn("Found duplicated tensor: {s}", .{info.name});
             continue;

@@ -47,6 +47,13 @@ pub fn asyncMain() !void {
     var context = try zml.Context.init();
     defer context.deinit();
 
+    // log.info("Sleeping for 15 seconds (attach debugger)", .{});
+    // for (0..15) |i| {
+    //     std.time.sleep(1 * std.time.ns_per_s);
+    //     std.debug.print("{d} .. ", .{i});
+    // }
+    // std.debug.print("\n", .{});
+
     // log.info("\n===========================\n==   ZML MNIST Example   ==\n===========================\n\n", .{});
 
     // // Auto-select platform
@@ -70,6 +77,12 @@ pub fn asyncMain() !void {
     defer buffer_store.deinit();
 
     const mnist_model = try zml.aio.populateModel(Mnist, allocator, buffer_store);
+    const events = try buffer_store.starTransferToDevice(platform, .unpinned_host);
+
+    // just to make sure we have buffers
+    for (events) |event| {
+        try event.awaitt(platform.pjrt_api);
+    }
     log.info("Reading model shapes from PyTorch file {s}...", .{pt_model});
 
     // Start compiling

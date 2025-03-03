@@ -392,8 +392,7 @@ pub const File = struct {
             .global => |object| {
                 if (try self.parseTensor(allocator, object)) |host_buffer| {
                     const key = try allocator.dupe(u8, prefix.items);
-                    const entry = try store.buffers.getOrPut(allocator, key);
-                    if (entry.found_existing) {
+                    if (store.getShape(key) != null) {
                         log.warn("Duplicate key: {s}", .{key});
                         allocator.free(key);
                     }
