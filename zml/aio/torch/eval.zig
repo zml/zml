@@ -401,11 +401,11 @@ test evaluate {
     try std.testing.expectEqualDeep(expected, entries);
 }
 
-pub fn pop(values: *std.ArrayList(py.Any)) !py.Any {
+pub fn pop(values: *std.ArrayList(py.Any)) error{StackUnderrun}!py.Any {
     if (values.items.len == 0) {
         return error.StackUnderrun;
     }
-    return values.pop();
+    return values.pop().?;
 }
 
 fn popMark(values: *std.ArrayList(py.Any)) ![]py.Any {

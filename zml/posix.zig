@@ -1,7 +1,7 @@
 const std = @import("std");
 const c = @import("c");
 
-pub fn madvise(ptr: [*]align(std.mem.page_size) u8, length: usize, advice: u32) std.posix.MadviseError!void {
+pub fn madvise(ptr: [*]align(std.heap.page_size_min) u8, length: usize, advice: u32) std.posix.MadviseError!void {
     switch (std.posix.errno(c.madvise(ptr, @intCast(length), @intCast(advice)))) {
         .SUCCESS => return,
         .ACCES => return error.AccessDenied,
