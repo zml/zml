@@ -136,9 +136,6 @@ pub const Buffer = struct {
     test constant {
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
-        // TODO (@cryptodeal): MLX PJRT plugin should not fail this test
-        // try zml.testing.mlxSkipTest(platform);
-
         const x = try constant(platform, Shape.init(.{ 4, 3, 2 }, .u16), 42);
         const y = try x.getValue([4 * 3 * 2]u16);
         try std.testing.expectEqual([_]u16{42} ** (4 * 3 * 2), y);

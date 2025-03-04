@@ -658,7 +658,6 @@ pub const Tensor = struct {
             const platform = zml.testing.env();
 
             // TODO(@cryptodeal): need to fix this for mlx plugin
-            // try zml.testing.mlxSkipTest(platform);
 
             // Compute stats over a uniform distribution on [-2, 10].
             const rand, const stats = try zml.testing.compileAndCall(
@@ -765,7 +764,6 @@ pub const Tensor = struct {
             const platform = zml.testing.env();
 
             // TODO(@cryptodeal): need to fix this for mlx plugin
-            try zml.testing.mlxSkipTest(platform);
 
             const tgt_dist = [_]f32{ 2.0, 1.0, 4.0, 3.0 };
             const rand, const stats = try zml.testing.compileAndCall(platform, Stats.gumbelStats, .{
@@ -2605,9 +2603,6 @@ pub const Tensor = struct {
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
 
-        // TODO(@cryptodeal): need to fix this for mlx plugin
-        try zml.testing.mlxSkipTest(platform);
-
         const Local = struct {
             pub fn scatter(self: Tensor, coord_axes: Shape.AxesArray, indices: Tensor, updates: Tensor) Tensor {
                 return self.scatterSlices(
@@ -2874,7 +2869,7 @@ pub const Tensor = struct {
         const platform = zml.testing.env();
 
         // TODO(@cryptodeal): need to fix this for mlx plugin
-        try zml.testing.mlxSkipTest(platform);
+        // try zml.testing.mlxSkipTest(platform);
 
         const Local = struct {
             pub fn _argsort(x: Tensor, axis_: u3, opts: ArgSortOpts) Tensor {

@@ -1163,9 +1163,6 @@ test sampleTokens {
     const platform = zml.testing.env();
     const allocator = std.testing.allocator;
 
-    // TODO(@cryptodeal): need to fix this for mlx plugin
-    try zml.testing.mlxSkipTest(platform);
-
     const inf = std.math.inf(f32);
     var rng_buff = try zml.Tensor.Rng.init(platform, 0xdeadbeef);
     defer rng_buff._state.deinit();
