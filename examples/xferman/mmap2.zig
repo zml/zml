@@ -67,6 +67,7 @@ pub fn asyncMain() !void {
 
     var mapped_file = try zml.aio.MemoryMappedFile.init(try asynk.File.open(file, .{}));
     errdefer mapped_file.deinit();
+    mapped_file.data_offset = layer_data_offset;
 
     var buffer_store = try zml.aio.BufferStore.init(allocator, &.{mapped_file});
     defer buffer_store.deinit();
@@ -130,6 +131,7 @@ const Layer = struct {
     shape: Shape,
 };
 
+const layer_data_offset: usize = 16808;
 const layers: []const Layer = &.{
     .{ .key = "model.embed_tokens.weight", .start = 0, .len = 525336576, .shape = Shape.init(.{ 128256, 2048 }, .bf16) },
     .{ .key = "model.layers.0.input_layernorm.weight", .start = 525336576, .len = 4096, .shape = Shape.init(.{2048}, .bf16) },

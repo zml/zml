@@ -81,6 +81,7 @@ fn loadFile(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.Array
     var buffer_file = try MemoryMappedFile.init(file);
     errdefer buffer_file.deinit();
     buffer_file.data_offset = 8 + json_header_length;
+    log.info("XXX data_offset = {d}", .{buffer_file.data_offset});
 
     try files.append(buffer_file);
     errdefer _ = files.popOrNull();

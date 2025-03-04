@@ -212,8 +212,7 @@ pub const TransferManager = struct {
             .platform = platform,
             .pjrt_client = platform.pjrt_client,
             .pjrt_api = platform.pjrt_api,
-            .pjrt_transfer_manager = try Client.createBuffersForAsyncHostToDevice(
-                platform.pjrt_client,
+            .pjrt_transfer_manager = try platform.pjrt_client.createBuffersForAsyncHostToDevice(
                 platform.pjrt_api,
                 .{
                     .shape_specs = shape_specs.items,
@@ -332,9 +331,12 @@ pub const TransferManager = struct {
             const buffer_count = try self.pjrt_transfer_manager.bufferCount(self.pjrt_api);
             for (0..buffer_count) |buffer_index| {
                 const pjrt_buffer = try self.pjrt_transfer_manager.retrieveBuffer(self.pjrt_api, buffer_index);
-                log.info("toZmlBuffers: buffer #{d} size: {d}, should be {d}", .{
+                const pjrt_buffer_device_size = try pjrt_buffer.getOnDeviceSizeInBytes(self.pjrt_api);
+                const pjrt_buffer_dims = pjrt_buffer.getDimensions(self.pjrt_api);
+                log.info("toZmlBuffers: buffer #{d} size: {d}, dims={d}, should be size {d}", .{
                     buffer_index,
-                    try pjrt_buffer.getOnDeviceSizeInBytes(self.pjrt_api),
+                    pjrt_buffer_device_size,
+                    pjrt_buffer_dims,
                     self.shapes[buffer_index].byteSize(),
                 });
                 const shape = self.shapes[buffer_index];
