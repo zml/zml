@@ -192,7 +192,7 @@ pub const TransferManager = struct {
         var shape_specs = try std.ArrayList(ShapeSpec).initCapacity(alloc, num_buffers);
         for (shapes, 0..) |shape, shape_idx| {
             const shape_spec = ShapeSpec.init(
-                shape.dims(),
+                try alloc.dupe(i64, shape.dims()), // PJRT takes the .ptr of this
                 Buffer.bufferTypeFromDtype(shape.dtype()),
             );
             shape_specs.appendAssumeCapacity(shape_spec);
