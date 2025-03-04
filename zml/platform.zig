@@ -327,7 +327,11 @@ pub const TransferManager = struct {
             const buffer_count = try self.pjrt_transfer_manager.bufferCount(self.pjrt_api);
             for (0..buffer_count) |buffer_index| {
                 const pjrt_buffer = try self.pjrt_transfer_manager.retrieveBuffer(self.pjrt_api, buffer_index);
-
+                log.info("toZmlBuffers: buffer #{d} size: {d}, should be {d}", .{
+                    buffer_index,
+                    try pjrt_buffer.getOnDeviceSizeInBytes(self.pjrt_api),
+                    self.shapes[buffer_index].byteSize(),
+                });
                 const shape = self.shapes[buffer_index];
                 const zml_buffer = Buffer.fromPjrtBuffers(self.platform, shape, &.{pjrt_buffer});
                 self.buffers_alist.appendAssumeCapacity(zml_buffer);

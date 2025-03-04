@@ -122,7 +122,7 @@ pub const BufferStore = struct {
         shape: Shape,
         data: []const u8,
     ) !void {
-        log.info("Registering buffer {d}: {s} with shape: {}", .{ self.buffers.count(), key , shape});
+        log.info("Registering buffer {d}: {s} with shape: {}", .{ self.buffers.count(), key, shape });
         try self.buffers.put(alloc, key, .{
             .data = data,
             .shape = shape,
@@ -169,7 +169,6 @@ pub const BufferStore = struct {
             // for (self.buffers.values(), 0..) |reg_buf, idx| {
             const reg_buf = kv.value_ptr;
             // stdx.debug.assert(idx == reg_buf.transfer_manger_buffer_index, "Internal error: TransferManager indices out of sync: buffer_idx={d}, transfer_manager_buffer_index={d}, registered buffers: {any}", .{ idx, reg_buf.transfer_manger_buffer_index, self.buffers.values() });
-            log.info("{d}, {d}", .{ idx, reg_buf.transfer_manger_buffer_index });
 
             shapes.appendAssumeCapacity(reg_buf.shape);
             data_slices.appendAssumeCapacity(reg_buf.data);
@@ -188,7 +187,7 @@ pub const BufferStore = struct {
         const slices = try data_slices.toOwnedSlice();
         log.debug("About to transfer {d} slices", .{slices.len});
         for (slices, 0..) |slice, idxx| {
-            log.info("    slice {d} : len={d}", .{idxx, slice.len});
+            log.info("    slice {d} : len={d}", .{ idxx, slice.len });
         }
         const events = try self.transfer_manager.?.transferDataMany(slices, .{});
         log.debug("TransferManager created {d} events", .{events.len});
