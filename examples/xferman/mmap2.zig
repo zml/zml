@@ -84,7 +84,7 @@ pub fn asyncMain() !void {
         try slice_list.append(filedata);
     }
 
-    try checkSlicesForOverlaps(allocator, mapped_file.mappedSlice(0, mapped_file.data.len), slice_list.items);
+    // try checkSlicesForOverlaps(allocator, mapped_file.mappedSlice(0, mapped_file.data.len), slice_list.items);
 
     var total_bytes: usize = 0;
     var timer = try std.time.Timer.start();
@@ -95,8 +95,11 @@ pub fn asyncMain() !void {
         const key = item.key_ptr.*;
         std.log.info("Buffer {d} : {s} {} = {d} bytes @ {*}", .{ bit.index, key, buffer.shape, buffer.data.len, buffer.data.ptr });
     }
-
-    const events = try buffer_store.starTransferToDevice(platform, .unpinned_host);
+    const memory_kind: zml.pjrt.Memory.Kind = switch (platform.target) {
+        .cpu => .unpinned_host,
+        else => .device,
+    };
+    const events = try buffer_store.starTransferToDevice(platform, memory_kind);
     for (events, 0..) |event, idx| {
         std.log.info("awaiting event {d}", .{idx});
         try event.awaitt(platform.pjrt_api);

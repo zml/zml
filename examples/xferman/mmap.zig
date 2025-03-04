@@ -105,7 +105,12 @@ pub fn asyncMain() !void {
         std.log.info("Buffer {d} : {s} {} = {d} bytes @ {*}", .{ bit.index, key, buffer.shape, buffer.data.len, buffer.data.ptr });
     }
 
-    const events = try buffer_store.starTransferToDevice(platform, .unpinned_host);
+    const memory_kind: zml.pjrt.Memory.Kind = switch (platform.target) {
+        .cpu => .unpinned_host,
+        else => .device,
+    };
+
+    const events = try buffer_store.starTransferToDevice(platform, memory_kind);
     for (events, 0..) |event, idx| {
         std.log.info("awaiting event {d}", .{idx});
         try event.awaitt(platform.pjrt_api);
