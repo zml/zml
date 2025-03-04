@@ -251,7 +251,7 @@ pub const TransferManager = struct {
             self.seen_last_buffer = true;
         }
 
-        log.debug("transfer size: {d} - last transfer: {}", .{ data.len, is_last_transfer });
+        log.debug("transfer size: {d} - offset: {d} - last transfer: {}", .{ data.len, offset, is_last_transfer });
         const event = try self.pjrt_transfer_manager.transferData(
             self.pjrt_api,
             buffer_index,
@@ -327,6 +327,7 @@ pub const TransferManager = struct {
             const buffer_count = try self.pjrt_transfer_manager.bufferCount(self.pjrt_api);
             for (0..buffer_count) |buffer_index| {
                 const pjrt_buffer = try self.pjrt_transfer_manager.retrieveBuffer(self.pjrt_api, buffer_index);
+
                 const shape = self.shapes[buffer_index];
                 const zml_buffer = Buffer.fromPjrtBuffers(self.platform, shape, &.{pjrt_buffer});
                 self.buffers_alist.appendAssumeCapacity(zml_buffer);

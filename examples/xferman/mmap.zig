@@ -71,9 +71,16 @@ pub fn asyncMain() !void {
     var buffer_store = try zml.aio.BufferStore.init(allocator, &.{mapped_file});
     defer buffer_store.deinit();
 
+    // const NUM_BUFFERS: usize = 146 / 32;
+    // const shape = zml.Shape.init(.{BUF_SIZE }, .bf16);
+    // const BUF_SIZE: usize = shape.byte
     const NUM_BUFFERS: usize = 146;
-    const BUF_SIZE: usize = mapped_file.data.len / NUM_BUFFERS;
-    const shape = zml.Shape.init(.{BUF_SIZE}, .u8);
+    const NUM_ELEMENTS: usize = mapped_file.data.len / NUM_BUFFERS / 2;
+    const shape = zml.Shape.init(.{NUM_ELEMENTS}, .bf16);
+    const BUF_SIZE = shape.byteSize();
+    // stdx.debug.assert(shape.byteSize() * NUM_BUFFERS / 2 == mapped_file.data.len, "FUCK m={d}, s={d}, NB={d}, NE={d}", .{ mapped_file.data.len, shape.byteSize(), NUM_BUFFERS, NUM_ELEMENTS});
+
+
     var free_list = std.ArrayList([]const u8).init(allocator);
     var slice_list = std.ArrayList([]const u8).init(allocator);
     defer {
