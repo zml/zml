@@ -81,7 +81,10 @@ pub fn asyncMain() !void {
 
     // just to make sure we have buffers
     for (events) |event| {
-        try event.awaitt(platform.pjrt_api);
+        log.info("Awaiting event {}", .{event});
+        while (event.isReady(platform.pjrt_api) == false) {
+            std.time.sleep(500 * std.time.ns_per_ms);
+        }
     }
     log.info("Reading model shapes from PyTorch file {s}...", .{pt_model});
 

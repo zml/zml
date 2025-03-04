@@ -59,14 +59,14 @@ pub fn asyncMain() !void {
         std.process.exit(0);
     };
 
-    var buffer_store = try zml.aio.safetensors.open(allocator, file);
-    defer buffer_store.deinit();
-
     var context = try zml.Context.init();
     defer context.deinit();
 
     const platform = context.autoPlatform(.{});
     context.printAvailablePlatforms(platform);
+
+    var buffer_store = try zml.aio.safetensors.open(allocator, file);
+    defer buffer_store.deinit();
 
     var total_bytes: usize = 0;
     var timer = try std.time.Timer.start();
@@ -75,16 +75,18 @@ pub fn asyncMain() !void {
     var slice_list = std.ArrayList([]const u8).init(allocator);
     defer slice_list.deinit();
     while (bit.next()) |item| {
-        const buffer = item.value_ptr;
+        const buffer_entry = item.value_ptr;
         const key = item.key_ptr.*;
-        std.log.info("Buffer {d} : {s} {} = {d} bytes @ {*}", .{ bit.index - 1, key, buffer.shape, buffer.data.len, buffer.data.ptr });
-        try slice_list.append(buffer.data);
+        std.log.info("Buffer {d} : {s} {} = {d} bytes @ {*}", .{ bit.index - 1, key, buffer_entry.shape, buffer_entry.data.len, buffer_entry.data.ptr });
+        try slice_list.append(buffer_entry.data);
     }
 
-    try checkSlicesForOverlaps(allocator, buffer_store.files[0].data, slice_list.items);
+    // try checkSlicesForOverlaps(allocator, buffer_store.files[0].data, slice_list.items);
 
     const events = try buffer_store.starTransferToDevice(platform, .unpinned_host);
     std.debug.print("Received {d} events\n", .{events.len});
+
+    // TODO: await events
 
     var it = buffer_store.buffers.iterator();
     var i: usize = 0;

@@ -59,6 +59,12 @@ pub fn asyncMain() !void {
         std.process.exit(0);
     };
 
+    var context = try zml.Context.init();
+    defer context.deinit();
+
+    const platform = context.autoPlatform(.{});
+    context.printAvailablePlatforms(platform);
+
     var mapped_file = try zml.aio.MemoryMappedFile.init(try asynk.File.open(file, .{}));
     errdefer mapped_file.deinit();
 
@@ -87,13 +93,7 @@ pub fn asyncMain() !void {
         offset += BUF_SIZE;
     }
 
-    try checkSlicesForOverlaps(allocator, mapped_file.mappedSlice(0, mapped_file.data.len), slice_list.items);
-
-    var context = try zml.Context.init();
-    defer context.deinit();
-
-    const platform = context.autoPlatform(.{});
-    context.printAvailablePlatforms(platform);
+    // try checkSlicesForOverlaps(allocator, mapped_file.mappedSlice(0, mapped_file.data.len), slice_list.items);
 
     var total_bytes: usize = 0;
     var timer = try std.time.Timer.start();
@@ -106,6 +106,10 @@ pub fn asyncMain() !void {
     }
 
     const events = try buffer_store.starTransferToDevice(platform, .unpinned_host);
+    for (events, 0..) |event, idx| {
+        std.log.info("awaiting event {d}", .{idx});
+        try event.awaitt(platform.pjrt_api);
+    }
     std.debug.print("Received {d} events\n", .{events.len});
 
     var it = buffer_store.buffers.iterator();

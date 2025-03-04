@@ -259,7 +259,7 @@ pub const TransferManager = struct {
             offset,
             is_last_transfer,
         );
-        log.debug("event: {}", .{event});
+        // log.debug("event: {}", .{event});
         // TODO: might cause crashes if used improperly:
         self.events.appendAssumeCapacity(event);
 
@@ -285,7 +285,7 @@ pub const TransferManager = struct {
                     break :blk false;
                 }
             };
-            log.debug("TransferManager initiating transfer {d}", .{buffer_index});
+            log.debug("TransferManager initiating transfer {d} of size {d}", .{ buffer_index, data.len });
             _ = try self.transferDataSingle(buffer_index, data, 0, is_last_transfer);
         }
         return self.events.items;
@@ -324,7 +324,8 @@ pub const TransferManager = struct {
     /// called internally to retrieve PJRT buffers that can be accessed via .buffers()
     fn toZmlBuffers(self: *TransferManager) !void {
         if (self.buffers_alist.items.len == 0) {
-            for (0..try self.pjrt_transfer_manager.bufferCount(self.pjrt_api)) |buffer_index| {
+            const buffer_count = try self.pjrt_transfer_manager.bufferCount(self.pjrt_api);
+            for (0..buffer_count) |buffer_index| {
                 const pjrt_buffer = try self.pjrt_transfer_manager.retrieveBuffer(self.pjrt_api, buffer_index);
                 const shape = self.shapes[buffer_index];
                 const zml_buffer = Buffer.fromPjrtBuffers(self.platform, shape, &.{pjrt_buffer});

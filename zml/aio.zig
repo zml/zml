@@ -131,6 +131,7 @@ pub const BufferStore = struct {
     }
 
     pub fn deinit(self: *BufferStore) void {
+        std.debug.print("\n\nBufferStore.deinit()\n\n", .{});
         for (self.files) |*file| {
             file.deinit();
         }

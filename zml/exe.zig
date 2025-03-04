@@ -36,6 +36,8 @@ pub fn compile(
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
+
+    log.info("compile about to populateModel", .{});
     var model = try aio.populateModel(ModelT, arena, buffer_store);
 
     // If the Model has a "init" function, call it with the given parameters.

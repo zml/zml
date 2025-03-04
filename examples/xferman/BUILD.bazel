@@ -29,4 +29,26 @@ zig_cc_binary(
         "@zml//stdx",
         "@zml//zml",
     ],
+    args = [
+        "$(location @Meta-Llama-3.2-1B-Instruct//:model.safetensors)",
+    ],
+    data = [
+        "@Meta-Llama-3.2-1B-Instruct//:model.safetensors",
+    ],
+)
+
+zig_cc_binary(
+    name = "mmap2",
+    main = "mmap2.zig",
+    deps = [
+        "@zml//async",
+        "@zml//stdx",
+        "@zml//zml",
+    ],
+    args = [
+        "$(location @Meta-Llama-3.2-1B-Instruct//:model.safetensors)",
+    ],
+    data = [
+        "@Meta-Llama-3.2-1B-Instruct//:model.safetensors",
+    ],
 )

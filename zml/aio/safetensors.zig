@@ -10,20 +10,18 @@ const Allocator = std.mem.Allocator;
 const log = std.log.scoped(.@"zml/io");
 
 pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore {
-    var res: zml.aio.BufferStore = .{
-        .arena = std.heap.ArenaAllocator.init(allocator),
-    };
-    errdefer res.arena.deinit();
-    const arena = res.arena.allocator();
+    var res = try zml.aio.BufferStore.init(allocator, &.{});
+    errdefer res.deinit();
 
-    var files = std.ArrayList(MemoryMappedFile).init(arena);
+    var files = std.ArrayList(MemoryMappedFile).init(res.arena.allocator());
     errdefer files.deinit();
 
     if (std.mem.endsWith(u8, path, ".safetensors.index.json")) {
-        try loadFromIndex(arena, &res, &files, path);
+        try loadFromIndex(res.arena.allocator(), &res, &files, path);
     } else {
-        try loadFile(arena, &res, &files, path);
+        try loadFile(res.arena.allocator(), &res, &files, path);
     }
+
     res.files = try files.toOwnedSlice();
     return res;
 }
@@ -63,6 +61,7 @@ fn loadFromIndex(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.
 }
 
 fn loadFile(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.ArrayList(MemoryMappedFile), path: []const u8) !void {
+    log.info("safetensors.loadFile", .{});
     const file = asynk.File.open(path, .{}) catch |err| {
         log.err("Failed to open {s}: {}", .{ path, err });
         return err;
@@ -125,6 +124,7 @@ fn loadFile(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.Array
             out_shape,
             data,
         );
+        log.info("XXX key=\"{s}\", start={d}, len={d}, shape={}", .{ key, start, data.len, out_shape });
     }
 }
 
