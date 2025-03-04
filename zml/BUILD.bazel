@@ -36,6 +36,7 @@ zig_library(
         "//zml/tools",
         "@rules_zig//zig/lib:libc",
         "@rules_zig//zig/runfiles",
+        # "@triton//:TritonDialects",
         "@zig-yaml//:zig-yaml",
     ],
 )

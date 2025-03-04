@@ -118,6 +118,9 @@ use_repo(llvm, "llvm-project")
 tsl = use_extension("@xla//:tsl.bzl", "tsl")
 use_repo(tsl, "tsl")
 
+xla_workspace = use_extension("@xla//:workspace.bzl", "xla_workspace")
+use_repo(xla_workspace, "triton")
+
 apt = use_extension("@rules_distroless//apt:extensions.bzl", "apt")
 apt.install(
     name = "neuron_bookworm",

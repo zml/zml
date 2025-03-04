@@ -1,14 +1,18 @@
 load("@tsl//third_party:repo.bzl", "tf_http_archive", "tf_mirror_urls")
 load("@tsl//third_party/gpus:cuda_configure.bzl", "cuda_configure")
 load("@tsl//third_party/gpus:rocm_configure.bzl", "rocm_configure")
+load("@tsl//third_party/pybind11_bazel:workspace.bzl", pybind11_bazel = "repo")
 load("@tsl//third_party/tensorrt:tensorrt_configure.bzl", "tensorrt_configure")
 load("@tsl//tools/toolchains/remote:configure.bzl", "remote_execution_configure")
+load("//third_party/triton:workspace.bzl", triton = "repo")
 
 def _xla_workspace_impl(mctx):
     cuda_configure(name = "local_config_cuda")
     remote_execution_configure(name = "local_config_remote_execution")
     rocm_configure(name = "local_config_rocm")
     tensorrt_configure(name = "local_config_tensorrt")
+    pybind11_bazel()
+    triton()
     tf_http_archive(
         name = "com_github_grpc_grpc",
         sha256 = "b956598d8cbe168b5ee717b5dafa56563eb5201a947856a6688bbeac9cac4e1f",
