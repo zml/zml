@@ -190,13 +190,18 @@ pub const TransferManager = struct {
         }
         const num_buffers = shapes.len;
         var shape_specs = try std.ArrayList(ShapeSpec).initCapacity(alloc, num_buffers);
-        for (shapes) |shape| {
-            shape_specs.appendAssumeCapacity(
-                ShapeSpec.init(
-                    shape.dims(),
-                    Buffer.bufferTypeFromDtype(shape.dtype()),
-                ),
+        for (shapes, 0..) |shape, shape_idx| {
+            const shape_spec = ShapeSpec.init(
+                shape.dims(),
+                Buffer.bufferTypeFromDtype(shape.dtype()),
             );
+            shape_specs.appendAssumeCapacity(shape_spec);
+            log.info("TransferManager.init(): shape #{d} {} -> shape_spec{{dims={d}, buffer_type={}}}", .{
+                shape_idx,
+                shape,
+                shape_spec.dims(),
+                shape_spec.bufferType(),
+            });
         }
 
         var self: TransferManager = .{
