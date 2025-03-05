@@ -110,8 +110,17 @@ pub fn open(allocator: std.mem.Allocator, model_path: []const u8) !zml.aio.Buffe
 fn newBuff(store: *zml.aio.BufferStore, name: []const u8, sh: anytype, offset: usize) usize {
     var shape = zml.Shape.init(sh, .f32);
     const n = shape.byteSize();
-    const buff = zml.HostBuffer.fromBytes(shape, store.files[0].data[offset..][0..n]);
-    store.buffers.putAssumeCapacityNoClobber(name, buff);
+    // const buff = zml.HostBuffer.fromBytes(shape, store.files[0].data[offset..][0..n]);
+    // store.buffers.putAssumeCapacityNoClobber(name, buff);
+    store.registerBuffer(
+        store.arena.allocator(),
+        name,
+        shape,
+        store.files[0].data[offset..][0..n],
+    ) catch |err| {
+        // TODO: @rene
+        zml.log.err("Error {any}", .{err});
+    };
     zml.log.debug("Found {s}: {}", .{ name, shape });
     return offset + n;
 }
@@ -122,8 +131,16 @@ fn splitBuff(store: *zml.aio.BufferStore, comptime fmt: []const u8, sh: anytype,
     var off = offset;
     for (0..layers) |i| {
         const name = try std.fmt.allocPrint(store.arena.allocator(), fmt, .{i});
-        const buff = zml.HostBuffer.fromBytes(shape, store.files[0].data[off..][0..n]);
-        store.buffers.putAssumeCapacityNoClobber(name, buff);
+        // const buff = zml.HostBuffer.fromBytes(shape, store.files[0].data[off..][0..n]);
+        // store.buffers.putAssumeCapacityNoClobber(name, buff);
+
+        try store.registerBuffer(
+            store.arena.allocator(),
+            name,
+            shape,
+            store.files[0].data[off..][0..n],
+        );
+
         off += n;
         if (i == 0) zml.log.debug("Found {s}: {}", .{ name, shape });
     }

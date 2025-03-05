@@ -53,13 +53,19 @@ pub fn asyncMain() !void {
     std.debug.print("\nStart to read {d} buffers from store..\n", .{buffer_store.buffers.count()});
 
     while (it.next()) |entry| : (i += 1) {
-        const host_buffer = entry.value_ptr.*;
+        const buffer_entry = entry.value_ptr.*;
+        const host_buffer = zml.HostBuffer.fromBytes(buffer_entry.shape, buffer_entry.data);
         total_bytes += host_buffer.data.len;
-        std.debug.print("Buffer: {s} ({any} / {any})\n", .{ entry.key_ptr.*, i + 1, buffer_store.buffers.count() });
         buffers[i] = try zml.Buffer.from(platform, host_buffer);
     }
 
     const stop = timer.read();
+
+    // Now print after taking the timing
+    it = buffer_store.buffers.iterator();
+    while (it.next()) |entry| : (i += 1) {
+        std.debug.print("Buffer: {s} ({any} / {any})\n", .{ entry.key_ptr.*, i + 1, buffer_store.buffers.count() });
+    }
     const time_in_s = stdx.math.divFloat(f64, stop, std.time.ns_per_s);
     const mbs = stdx.math.divFloat(f64, total_bytes, 1024 * 1024);
 
