@@ -90,19 +90,18 @@ pub fn asyncMain() !void {
     var total_bytes: usize = 0;
     var timer = try std.time.Timer.start();
 
-    var bit = buffer_store.buffers.iterator();
-    while (bit.next()) |item| {
-        const buffer = item.value_ptr;
-        const key = item.key_ptr.*;
-        std.log.info("Buffer {d} : {s} {} = {d} bytes @ {*}", .{ bit.index, key, buffer.shape, buffer.data.len, buffer.data.ptr });
-    }
+    // var bit = buffer_store.buffers.iterator();
+    // while (bit.next()) |item| {
+    //     const buffer = item.value_ptr;
+    //     const key = item.key_ptr.*;
+    //     std.log.info("Buffer {d} : {s} {} = {d} bytes @ {*}", .{ bit.index, key, buffer.shape, buffer.data.len, buffer.data.ptr });
+    // }
     const memory_kind: zml.pjrt.Memory.Kind = switch (platform.target) {
         .cpu => .unpinned_host,
         else => .device,
     };
     const events = try buffer_store.starTransferToDevice(platform, memory_kind);
-    for (events, 0..) |event, idx| {
-        std.log.info("awaiting event {d}", .{idx});
+    for (events) |event| {
         try event.awaitt(platform.pjrt_api);
     }
     std.debug.print("Received {d} events\n", .{events.len});
@@ -113,7 +112,7 @@ pub fn asyncMain() !void {
 
     while (it.next()) |entry| : (i += 1) {
         total_bytes += entry.value_ptr.*.data.len;
-        std.debug.print("Buffer: {s} ({any} / {any})\n", .{ entry.key_ptr.*, i + 1, buffer_store.buffers.count() });
+        // std.debug.print("Buffer: {s} ({any} / {any})\n", .{ entry.key_ptr.*, i + 1, buffer_store.buffers.count() });
     }
 
     const stop = timer.read();

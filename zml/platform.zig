@@ -190,18 +190,12 @@ pub const TransferManager = struct {
         }
         const num_buffers = shapes.len;
         var shape_specs = try std.ArrayList(ShapeSpec).initCapacity(alloc, num_buffers);
-        for (shapes, 0..) |shape, shape_idx| {
+        for (shapes) |shape| {
             const shape_spec = ShapeSpec.init(
                 try alloc.dupe(i64, shape.dims()), // PJRT takes the .ptr of this
                 Buffer.bufferTypeFromDtype(shape.dtype()),
             );
             shape_specs.appendAssumeCapacity(shape_spec);
-            log.info("TransferManager.init(): shape #{d} {} -> shape_spec{{dims={d}, buffer_type={}}}", .{
-                shape_idx,
-                shape,
-                shape_spec.dims(),
-                shape_spec.bufferType(),
-            });
         }
 
         var self: TransferManager = .{
@@ -255,7 +249,6 @@ pub const TransferManager = struct {
             self.seen_last_buffer = true;
         }
 
-        log.debug("transfer size: {d} - offset: {d} - last transfer: {}", .{ data.len, offset, is_last_transfer });
         const event = try self.pjrt_transfer_manager.transferData(
             self.pjrt_api,
             buffer_index,
@@ -263,7 +256,6 @@ pub const TransferManager = struct {
             offset,
             is_last_transfer,
         );
-        // log.debug("event: {}", .{event});
         // TODO: might cause crashes if used improperly:
         self.events.appendAssumeCapacity(event);
 
@@ -289,7 +281,6 @@ pub const TransferManager = struct {
                     break :blk false;
                 }
             };
-            log.debug("TransferManager initiating transfer {d} of size {d}", .{ buffer_index, data.len });
             _ = try self.transferDataSingle(buffer_index, data, 0, is_last_transfer);
         }
         return self.events.items;
@@ -331,14 +322,8 @@ pub const TransferManager = struct {
             const buffer_count = try self.pjrt_transfer_manager.bufferCount(self.pjrt_api);
             for (0..buffer_count) |buffer_index| {
                 const pjrt_buffer = try self.pjrt_transfer_manager.retrieveBuffer(self.pjrt_api, buffer_index);
-                const pjrt_buffer_device_size = try pjrt_buffer.getOnDeviceSizeInBytes(self.pjrt_api);
-                const pjrt_buffer_dims = pjrt_buffer.getDimensions(self.pjrt_api);
-                log.info("toZmlBuffers: buffer #{d} size: {d}, dims={d}, should be size {d}", .{
-                    buffer_index,
-                    pjrt_buffer_device_size,
-                    pjrt_buffer_dims,
-                    self.shapes[buffer_index].byteSize(),
-                });
+                // const pjrt_buffer_device_size = try pjrt_buffer.getOnDeviceSizeInBytes(self.pjrt_api);
+                // const pjrt_buffer_dims = pjrt_buffer.getDimensions(self.pjrt_api);
                 const shape = self.shapes[buffer_index];
                 const zml_buffer = Buffer.fromPjrtBuffers(self.platform, shape, &.{pjrt_buffer});
                 self.buffers_alist.appendAssumeCapacity(zml_buffer);

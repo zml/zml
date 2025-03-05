@@ -80,7 +80,6 @@ pub fn asyncMain() !void {
     const BUF_SIZE = shape.byteSize();
     // stdx.debug.assert(shape.byteSize() * NUM_BUFFERS / 2 == mapped_file.data.len, "FUCK m={d}, s={d}, NB={d}, NE={d}", .{ mapped_file.data.len, shape.byteSize(), NUM_BUFFERS, NUM_ELEMENTS});
 
-
     var free_list = std.ArrayList([]const u8).init(allocator);
     var slice_list = std.ArrayList([]const u8).init(allocator);
     defer {
@@ -105,12 +104,12 @@ pub fn asyncMain() !void {
     var total_bytes: usize = 0;
     var timer = try std.time.Timer.start();
 
-    var bit = buffer_store.buffers.iterator();
-    while (bit.next()) |item| {
-        const buffer = item.value_ptr;
-        const key = item.key_ptr.*;
-        std.log.info("Buffer {d} : {s} {} = {d} bytes @ {*}", .{ bit.index, key, buffer.shape, buffer.data.len, buffer.data.ptr });
-    }
+    // var bit = buffer_store.buffers.iterator();
+    // while (bit.next()) |item| {
+    //     const buffer = item.value_ptr;
+    //     const key = item.key_ptr.*;
+    //     std.log.info("Buffer {d} : {s} {} = {d} bytes @ {*}", .{ bit.index, key, buffer.shape, buffer.data.len, buffer.data.ptr });
+    // }
 
     const memory_kind: zml.pjrt.Memory.Kind = switch (platform.target) {
         .cpu => .unpinned_host,
@@ -130,7 +129,7 @@ pub fn asyncMain() !void {
 
     while (it.next()) |entry| : (i += 1) {
         total_bytes += entry.value_ptr.*.data.len;
-        std.debug.print("Buffer: {s} ({any} / {any})\n", .{ entry.key_ptr.*, i + 1, buffer_store.buffers.count() });
+        // std.debug.print("Buffer: {s} ({any} / {any})\n", .{ entry.key_ptr.*, i + 1, buffer_store.buffers.count() });
     }
 
     const stop = timer.read();

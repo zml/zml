@@ -122,7 +122,6 @@ pub const BufferStore = struct {
         shape: Shape,
         data: []const u8,
     ) !void {
-        log.info("Registering buffer {d}: {s} with shape: {}", .{ self.buffers.count(), key, shape });
         try self.buffers.put(alloc, key, .{
             .data = data,
             .shape = shape,
@@ -175,8 +174,6 @@ pub const BufferStore = struct {
             idx += 1;
         }
 
-        log.info("done", .{});
-
         self.transfer_manager = try zml.platform.TransferManager.init(
             self.arena.allocator(),
             platform,
@@ -185,12 +182,7 @@ pub const BufferStore = struct {
         );
 
         const slices = try data_slices.toOwnedSlice();
-        log.debug("About to transfer {d} slices", .{slices.len});
-        for (slices, 0..) |slice, idxx| {
-            log.info("    slice {d} : len={d}", .{ idxx, slice.len });
-        }
         const events = try self.transfer_manager.?.transferDataMany(slices, .{});
-        log.debug("TransferManager created {d} events", .{events.len});
         for (self.buffers.values(), events) |*reg_buf, event| {
             // TODO: for now, we only use our one and only transfer manager
             reg_buf.buffer = self.transfer_manager.?.buffer(reg_buf.transfer_manger_buffer_index);
@@ -422,7 +414,6 @@ fn _populateStruct(
     const prefix = prefix_builder.data.items;
     if (T == zml.Tensor) {
         return if (buffer_store.buffers.getIndex(prefix)) |entry_idx| {
-            log.info("Trying to get buffer `{s}` with index {d}", .{ prefix, entry_idx });
             const shape = buffer_store.getShape(prefix).?;
             obj.* = zml.Tensor{
                 ._shape = shape,

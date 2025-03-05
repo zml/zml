@@ -76,17 +76,21 @@ pub fn asyncMain() !void {
     defer slice_list.deinit();
     while (bit.next()) |item| {
         const buffer_entry = item.value_ptr;
-        const key = item.key_ptr.*;
-        std.log.info("Buffer {d} : {s} {} = {d} bytes @ {*}", .{ bit.index - 1, key, buffer_entry.shape, buffer_entry.data.len, buffer_entry.data.ptr });
         try slice_list.append(buffer_entry.data);
     }
 
     // try checkSlicesForOverlaps(allocator, buffer_store.files[0].data, slice_list.items);
 
     const events = try buffer_store.starTransferToDevice(platform, .unpinned_host);
-    std.debug.print("Received {d} events\n", .{events.len});
-
-    // TODO: await events
+    const DO_AWAIT_EVENTS = false;
+    const prefix = if (DO_AWAIT_EVENTS) "A" else "NOT a";
+    std.debug.print("{s} waiting {d} events\n", .{ prefix, events.len });
+    // for (events) |event| {
+    //     while (event.isReady(platform.pjrt_api) == false) {
+    //         // spin
+    //     }
+    // }
+    const stop = timer.read();
 
     var it = buffer_store.buffers.iterator();
     var i: usize = 0;
@@ -97,7 +101,6 @@ pub fn asyncMain() !void {
         std.debug.print("Buffer: {s} ({any} / {any})\n", .{ entry.key_ptr.*, i + 1, buffer_store.buffers.count() });
     }
 
-    const stop = timer.read();
     const time_in_s = stdx.math.divFloat(f64, stop, std.time.ns_per_s);
     const mbs = stdx.math.divFloat(f64, total_bytes, 1024 * 1024);
 

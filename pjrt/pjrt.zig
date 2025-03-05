@@ -1039,7 +1039,6 @@ pub const AsyncHostToDeviceTransferManager = opaque {
     /// to their consumers. 'data' must remain in scope until on_done is called.
     /// (calls TransferRawDataToSubBuffer() internally)
     pub fn transferData(self: *AsyncHostToDeviceTransferManager, api: *const Api, buffer_index: usize, data: []const u8, offset: i64, is_last_transfer: bool) ApiError!*Event {
-        std.debug.print("\n\npjrt.transferData: buffer_index={d}, data.len={d}, offset={d}\n", .{ buffer_index, data.len, offset });
         const ret = try api.call(.PJRT_AsyncHostToDeviceTransferManager_TransferData, .{
             .transfer_manager = self.inner(),
             .buffer_index = @intCast(buffer_index),
