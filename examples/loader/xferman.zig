@@ -81,15 +81,21 @@ pub fn asyncMain() !void {
 
     // try checkSlicesForOverlaps(allocator, buffer_store.files[0].data, slice_list.items);
 
-    const events = try buffer_store.starTransferToDevice(platform, .unpinned_host);
+    const memory_kind: zml.pjrt.Memory.Kind = switch (platform.target) {
+        .cpu => .unpinned_host,
+        else => .device,
+    };
+    const events = try buffer_store.starTransferToDevice(platform, memory_kind);
     const DO_AWAIT_EVENTS = false;
     const prefix = if (DO_AWAIT_EVENTS) "A" else "NOT a";
     std.debug.print("{s} waiting {d} events\n", .{ prefix, events.len });
-    // for (events) |event| {
-    //     while (event.isReady(platform.pjrt_api) == false) {
-    //         // spin
-    //     }
-    // }
+    if (DO_AWAIT_EVENTS) {
+        for (events) |event| {
+            while (event.isReady(platform.pjrt_api) == false) {
+                // spin
+            }
+        }
+    }
     const stop = timer.read();
 
     var it = buffer_store.buffers.iterator();
@@ -105,4 +111,12 @@ pub fn asyncMain() !void {
     const mbs = stdx.math.divFloat(f64, total_bytes, 1024 * 1024);
 
     std.debug.print("\nLoading speed: {d:.2} MB/s\n\n", .{mbs / time_in_s});
+
+    if (!DO_AWAIT_EVENTS) {
+        for (events) |event| {
+            while (event.isReady(platform.pjrt_api) == false) {
+                // spin
+            }
+        }
+    }
 }
