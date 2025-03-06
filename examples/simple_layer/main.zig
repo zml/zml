@@ -2,16 +2,36 @@ const std = @import("std");
 const zml = @import("zml");
 const asynk = @import("async");
 
+pub const std_options = .{
+    .log_level = .info,
+    .logFn = asynk.logFn(std.log.defaultLog),
+};
+
 /// Model definition
 const Layer = struct {
     bias: ?zml.Tensor = null,
     weight: zml.Tensor,
 
     pub fn forward(self: Layer, x: zml.Tensor) zml.Tensor {
-        var y = self.weight.mul(x);
-        if (self.bias) |bias| {
-            y = y.add(bias);
-        }
+        _ = self; // autofix
+        _ = x; // autofix
+        // var y = self.weight.mul(x);
+
+        const xx = zml.Tensor.scalar(3, .f32);
+        const xo = zml.Tensor.scalar(5, .f32);
+
+        const y = zml.ops.triton(.{ xx, xo }, xx.shape(), xo.shape(), .{
+            .name = "add_one",
+            .ir = @embedFile("kernel.mlir"),
+            .grid = .{ 1, 1, 1 },
+            .num_stages = 3,
+            .num_warps = 4,
+            .debug = true,
+        });
+
+        // if (self.bias) |bias| {
+        //     y = y.add(bias);
+        // }
         return y;
     }
 };
@@ -63,15 +83,14 @@ pub fn asyncMain() !void {
     // Start compiling. This uses the inferred shapes from the BufferStore.
     // The shape of the input tensor, we have to pass in manually.
     var compilation = try asynk.asyncc(zml.compileModel, .{ allocator, Layer.forward, model_shapes, .{input_shape}, platform });
-
+    // Wait for compilation to finish
+    const compiled = try compilation.awaitt();
+    std.debug.print("Compilation finished\n", .{});
     // Produce a bufferized weights struct from the fake BufferStore.
     // This is like the inferred shapes, but with actual values.
     // We will need to send those to the computation device later.
     var model_weights = try zml.aio.loadModelBuffers(Layer, model_shapes, buffer_store, arena, platform);
     defer zml.aio.unloadBuffers(&model_weights); // for good practice
-
-    // Wait for compilation to finish
-    const compiled = try compilation.awaitt();
 
     // pass the model weights to the compiled module to create an executable module
     var executable = compiled.prepare(model_weights);
@@ -93,6 +112,6 @@ pub fn asyncMain() !void {
     const cpu_result = try result.toHostAlloc(arena);
     std.debug.print(
         "\nThe result of {d} * {d} + {d} = {d}\n",
-        .{ &weights, &input, &bias, cpu_result.items(f16) },
+        .{ &weights, &input, &bias, cpu_result.items(f32) },
     );
 }
