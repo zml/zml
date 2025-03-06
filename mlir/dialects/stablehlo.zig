@@ -764,6 +764,39 @@ pub fn custom_call(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCa
     });
 }
 
+pub const CustomCallOpts2 = struct {
+    call_target_name: [:0]const u8,
+    has_side_effect: bool,
+    backend_config: mlir.DictionaryAttribute,
+    // api_version: i32,
+    output_operand_aliases: []const i64,
+};
+
+pub fn custom_call2(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCallOpts2, res_types: []const mlir.Type, location: mlir.Location) mlir.Operation {
+    var buffer: [1024]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buffer);
+    const allocator = fba.allocator();
+
+    const output_operand_aliases = allocator.alloc(mlir.Attribute, opts.output_operand_aliases.len) catch unreachable;
+    for (opts.output_operand_aliases, 0..) |alias, i| {
+        output_operand_aliases[i] = OutputOperandAliasAttribute.init(ctx, &.{}, alias, &.{}).as(mlir.Attribute).?;
+    }
+
+    return mlir.Operation.make(ctx, "stablehlo.custom_call", .{
+        .operands = inputs,
+        .results = res_types,
+        .attributes = &.{
+            // .{ "api_version", mlir.IntegerAttribute(.i32).init(ctx, opts.api_version).as(mlir.Attribute).? },
+            .{ "call_target_name", mlir.StringAttribute.init(ctx, opts.call_target_name).as(mlir.Attribute).? },
+            .{ "has_side_effect", mlir.BoolAttribute.init(ctx, opts.has_side_effect).as(mlir.Attribute).? },
+            .{ "backend_config", mlir.StringAttribute.init(ctx, "").as(mlir.Attribute).? },
+            .{ "output_operand_aliases", mlir.ArrayAttribute.init(ctx, output_operand_aliases).as(mlir.Attribute).? },
+            .{ "mhlo.backend_config", opts.backend_config.as(mlir.Attribute).? },
+        },
+        .location = location,
+    });
+}
+
 pub fn sharding(ctx: mlir.Context, inputs: []const mlir.Value, sharding_spec: mlir.StringAttribute, res_types: []const mlir.Type, location: mlir.Location) mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.custom_call", .{
         .operands = inputs,

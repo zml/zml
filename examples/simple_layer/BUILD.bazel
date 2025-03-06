@@ -5,7 +5,18 @@ load("@zml//bazel:zig.bzl", "zig_cc_binary")
 
 zig_cc_binary(
     name = "simple_layer",
+    extra_srcs = ["kernel.mlir"],
     main = "main.zig",
+    deps = [
+        "@zml//async",
+        "@zml//zml",
+    ],
+)
+
+zig_cc_binary(
+    name = "pa",
+    extra_srcs = ["pa_kernel.mlir"],
+    main = "pa.zig",
     deps = [
         "@zml//async",
         "@zml//zml",
