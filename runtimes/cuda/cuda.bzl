@@ -5,7 +5,7 @@ load("//bazel:http_deb_archive.bzl", "http_deb_archive")
 ARCH = "linux-x86_64"
 
 CUDA_VERSION = "12.6.3"
-CUDNN_VERSION = "9.6.0"
+CUDNN_VERSION = "9.7.1"
 
 def _filegroup(name, srcs):
     return """\
