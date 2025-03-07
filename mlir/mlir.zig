@@ -1239,6 +1239,21 @@ pub const Type = struct {
     }
 };
 
+pub const IndexType = struct {
+    _inner: c.MlirType,
+
+    pub usingnamespace MlirHelpers(IndexType, .{
+        .is_null_fn = c.mlirTypeIsNull,
+        .dump_fn = c.mlirTypeDump,
+        .equal_fn = c.mlirTypeEqual,
+        .print_fn = c.mlirTypePrint,
+    });
+
+    pub fn init(ctx: Context) IndexType {
+        return IndexType.wrap(c.mlirIndexTypeGet(ctx.inner()));
+    }
+};
+
 pub const IntegerTypes = enum {
     i1,
     i4,
