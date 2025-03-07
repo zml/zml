@@ -2,9 +2,12 @@ const std = @import("std");
 const zml = @import("zml");
 const asynk = @import("async");
 
-pub const std_options = .{
+pub const std_options: std.Options = .{
     .log_level = .info,
-    .logFn = asynk.logFn(std.log.defaultLog),
+    // .logFn = asynk.logFn(std.log.defaultLog),
+    // .log_scope_levels = .{
+    //     .@"zml/async" = .warn,
+    // },
 };
 
 pub fn forward(
@@ -43,13 +46,16 @@ pub fn forward(
     // 'stride_bt_s': 'i32',
     // 'stride_bt_nb': 'i32'
 
+    // _paged_attn_decode_v1_w_dot_kernel.kd
+    // _paged_attn_decode_v1_w_dot_kernel_tt_load_only__1.kd
+
     const y = zml.ops.triton(.{
         q,
         k,
         v,
-        seq_lens,
         block_tables,
-        zml.Tensor.constant(.{8 * 4}, zml.Data.init(.i8, 0)), // check actually it's none
+        seq_lens,
+        // zml.Tensor.empty(.{8 * 4}, .i8), // check actually it's none
         zml.Tensor.scalar(0.08838834765, .f32),
         // zml.Tensor.scalar(1.0, .f32),
         // zml.Tensor.scalar(1.0, .f32),
@@ -66,10 +72,10 @@ pub fn forward(
         zml.Tensor.scalar(strides_bt.get(0), .i32),
         // zml.Tensor.scalar(strides_bt.get(1), .i32),
     }, output_shape, .{
-        .name = "_paged_attn_decode_v1_w_dot_kernel",
+        .name = "_paged_attn_decode_v1_w_dot_kernel_tt_load_only",
         .ir = @embedFile("pa_kernel.mlir"),
         .grid = .{ 256, 8, 1 },
-        .num_stages = 3,
+        .num_stages = 2,
         .num_warps = 4,
         .debug = false,
     });
@@ -93,33 +99,121 @@ pub fn asyncMain() !void {
     const arena = arena_state.allocator();
     _ = arena; // autofix
 
+    var rng = std.Random.DefaultPrng.init(0);
+    const random = rng.random();
+
     var context = try zml.Context.init();
     defer context.deinit();
 
-    const platform = context.autoPlatform(.{});
-    context.printAvailablePlatforms(platform);
+    const platform = context.autoPlatform(.{}).withCompilationOptions(.{
+        .sharding_enabled = false,
+    });
 
+    const max_seq_len = 2048;
     const query = zml.Shape.init(.{ 256, 8 * 4, 128 }, .bf16);
     const key_cache = zml.Shape.init(.{ 16384, 8, 16, 128 }, .bf16);
     const value_cache = zml.Shape.init(.{ 16384, 8, 16, 128 }, .bf16);
     const seq_lens = zml.Shape.init(.{256}, .i64);
-    const block_tables = zml.Shape.init(.{ 256, 128 }, .i32);
+    const block_tables = zml.Shape.init(.{ 256, max_seq_len / 16 }, .i32);
 
     var compilation = try asynk.asyncc(zml.compileFn, .{ allocator, forward, .{ query, key_cache, value_cache, block_tables, seq_lens }, platform });
     const compiled = try compilation.awaitt();
-    _ = compiled; // autofix
+    defer compiled.deinit();
     std.debug.print("Compilation finished\n", .{});
 
-    // var model_weights = try zml.aio.loadModelBuffers(PagedAttention, model_shapes, buffer_store, arena, platform);
-    // defer zml.aio.unloadBuffers(&model_weights); // for good practice
+    const seqlen_host = try allocator.alloc(i64, 256);
+    defer allocator.free(seqlen_host);
+    @memset(seqlen_host, 1);
+    const page_table_host = try allocator.alloc(i32, 256 * (max_seq_len / 16));
+    defer allocator.free(page_table_host);
+    for (0..256) |i| {
+        for (0..(max_seq_len / 16)) |j| {
+            page_table_host[i * (max_seq_len / 16) + j] = 0;
+        }
+    }
 
-    // var executable = compiled.prepare(model_weights);
-    // defer executable.deinit();
+    {
+        var q_buffer = try createRandomBuffer(allocator, platform, query, random);
+        defer q_buffer.deinit();
+        var k_buffer = try createRandomBuffer(allocator, platform, key_cache, random);
+        defer k_buffer.deinit();
+        var v_buffer = try createRandomBuffer(allocator, platform, value_cache, random);
+        defer v_buffer.deinit();
+        var bt_buffer = try zml.Buffer.fromBytes(platform, block_tables, std.mem.sliceAsBytes(page_table_host));
+        defer bt_buffer.deinit();
+        var sq_buffer = try zml.Buffer.fromBytes(platform, seq_lens, std.mem.sliceAsBytes(seqlen_host));
+        defer sq_buffer.deinit();
 
-    // var input_buffer = try zml.Buffer.from(platform, zml.HostBuffer.fromSlice(input_shape, &input));
-    // defer input_buffer.deinit();
+        // var profiler = platform.getProfiler(null);
+        // defer profiler.deinit();
 
-    // call our executable module
-    // var result: zml.Buffer = executable.call(.{input_buffer});
-    // defer result.deinit();
+        // profiler.start();
+        var result: zml.Buffer = compiled.call(.{ q_buffer, k_buffer, v_buffer, bt_buffer, sq_buffer });
+        defer result.deinit();
+
+        var r = try result.toHostAlloc(allocator);
+        defer r.deinit(allocator);
+        // profiler.stop();
+        // try profiler.dumpAsJsonTo(allocator, std.fs.cwd(), "profile_file.json");
+        std.debug.print("Result: {}\n", .{r.shape()});
+    }
+
+    {
+        var q_buffer = try createRandomBuffer(allocator, platform, query, random);
+        defer q_buffer.deinit();
+        var k_buffer = try createRandomBuffer(allocator, platform, key_cache, random);
+        defer k_buffer.deinit();
+        var v_buffer = try createRandomBuffer(allocator, platform, value_cache, random);
+        defer v_buffer.deinit();
+        var bt_buffer = try zml.Buffer.fromBytes(platform, block_tables, std.mem.sliceAsBytes(page_table_host));
+        defer bt_buffer.deinit();
+        var sq_buffer = try zml.Buffer.fromBytes(platform, seq_lens, std.mem.sliceAsBytes(seqlen_host));
+        defer sq_buffer.deinit();
+
+        // var profiler = platform.getProfiler(null);
+        // defer profiler.deinit();
+
+        // profiler.start();
+        var result: zml.Buffer = compiled.call(.{ q_buffer, k_buffer, v_buffer, bt_buffer, sq_buffer });
+        defer result.deinit();
+
+        var r = try result.toHostAlloc(allocator);
+        defer r.deinit(allocator);
+        // profiler.stop();
+        // try profiler.dumpAsJsonTo(allocator, std.fs.cwd(), "profile_file.json");
+        std.debug.print("Result: {}\n", .{r.shape()});
+    }
+}
+
+fn createRandomBuffer(allocator: std.mem.Allocator, platform: zml.Platform, shape: zml.Shape, random: std.Random) !zml.Buffer {
+    const data = try allocator.alloc(u8, shape.byteSize());
+    defer allocator.free(data);
+
+    switch (shape.dtype()) {
+        inline else => |v| {
+            const ZigType = v.toZigType();
+            switch (comptime v.class()) {
+                .bool => unreachable,
+                .integer => {
+                    for (std.mem.bytesAsSlice(ZigType, data)) |*e| e.* = random.int(ZigType);
+                },
+                .float => {
+                    const value = random.float(f64);
+                    for (std.mem.bytesAsSlice(ZigType, data)) |*e| e.* = if (ZigType == f64)
+                        value
+                    else if (ZigType == f32)
+                        @floatCast(value)
+                    else if (ZigType == f16)
+                        @floatCast(value)
+                    else
+                        @bitCast(random.int(std.meta.Int(.unsigned, @bitSizeOf(ZigType))));
+                },
+                .complex => unreachable,
+            }
+        },
+    }
+
+    var host_buffer = zml.HostBuffer.fromBytes(shape, data);
+    errdefer host_buffer.deinit(allocator);
+    return zml.Buffer.from(platform, host_buffer);
 }
