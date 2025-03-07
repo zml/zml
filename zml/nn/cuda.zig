@@ -121,7 +121,8 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
 
     const mlir_ctx = ctx.mlirCtx();
     const loc = mlir_ctx.location(@src());
-    const op = dialect.stablehlo.custom_call(
+    const op = dialect.stablehlo.custom_call_alloc(
+        ctx.allocator(),
         mlir_ctx,
         &.{ q.value(), k.value(), v.value(), bias.value() },
         .{
@@ -146,8 +147,37 @@ pub const SdpaPagedOpts = struct {
     max_seq_len_kv: usize,
 };
 
-pub fn sdpaPaged(q_: Tensor, k_: Tensor, v_: Tensor, sequence_length_q: Tensor, sequence_length_kv: Tensor, page_table: Tensor, opts: SdpaPagedOpts) Tensor {
+pub fn layout_constraint(input: Tensor, output_shape: Shape) Tensor {
     const ctx = CompilationContext.current();
+    const mlir_ctx = ctx.mlirCtx();
+    const loc = mlir_ctx.location(@src());
+    const op = dialect.stablehlo.custom_call(
+        mlir_ctx,
+        &.{input.value()},
+        .{
+            .call_target_name = "LayoutConstraint",
+            .api_version = 2,
+            .has_side_effect = false,
+            .output_operand_aliases = &.{},
+        },
+        &.{
+            mlir.ext.mlirType(mlir_ctx, output_shape),
+            //mlir.RankedTensorType.init(&.{0}, mlir.IntegerType(.u8).init(mlir_ctx).as(mlir.Type).?).asType(),
+        },
+        loc,
+    );
+    const result = Tensor._result(output_shape, op.result(0));
+    return result;
+}
+
+pub fn sdpaPaged(q_: Tensor, k_: Tensor, v_: Tensor, sequence_length_q: Tensor, sequence_length_kv: Tensor, page_table: Tensor, seq_offset: Tensor, opts: SdpaPagedOpts) Tensor {
+    const ctx = CompilationContext.current();
+    //var q = q_;
+    //var k = k_;
+    //var v = v_;
+    //const q = layout_constraint(q_, q_.shape().transpose(.{ .b, .h, .q, .hd }));
+    //var k = layout_constraint(k_, k_.shape().transpose(.{ .page, .h, .k_chunk, .hd }));
+    //const v = layout_constraint(v_, v_.shape().transpose(.{ .page, .h, .k_chunk, .hd }));
     const q = q_.transpose(.{ .b, .h, .q, .hd });
     var k = k_.transpose(.{ .page, .h, .k_chunk, .hd });
     const v = v_.transpose(.{ .page, .h, .k_chunk, .hd });
@@ -226,20 +256,23 @@ pub fn sdpaPaged(q_: Tensor, k_: Tensor, v_: Tensor, sequence_length_q: Tensor, 
         },
     ) catch unreachable;
 
-    std.debug.print("backend_config: {s}\n", .{backend_config});
-
     var bias = Tensor.constant(Shape.init(.{ .b = q.dim(.b), .h = q.dim(.h), .q = q.dim(.q), .k = opts.max_seq_len_kv }, q.dtype()), Data.init(q.dtype(), 0));
 
     if (opts.attn_mask) |attn_mask| {
         bias = bias.add(attn_mask.broad(bias.shape()));
     }
 
+    //q = q_.transpose(.{ .b, .h, .q, .hd });
+    //q = layout_constraint(q, q.shape());
+    //k = layout_constraint(k, k.shape().transpose(.{ .page, .h, .k_chunk, .hd }));
+    //v = layout_constraint(v, v.shape().transpose(.{ .page, .h, .k_chunk, .hd }));
     const output_shape = Shape.init(.{ .b = q.dim(.b), .h = q.dim(.h), .q = q.dim(.q), .hd = q.dim(.hd) }, q.dtype());
     const mlir_ctx = ctx.mlirCtx();
     const loc = mlir_ctx.location(@src());
-    const op = dialect.stablehlo.custom_call(
+    const op = dialect.stablehlo.custom_call_alloc(
+        ctx.allocator(),
         mlir_ctx,
-        &.{ q.value(), k.value(), v.value(), sequence_length_q.value(), sequence_length_kv.value(), page_table.value(), page_table.value() },
+        &.{ q.value(), k.value(), v.value(), sequence_length_q.value(), sequence_length_kv.value(), page_table.value(), page_table.value(), seq_offset.value() },
         .{
             .call_target_name = "__cudnn$fmhaScaleBiasSoftmax",
             .backend_config = backend_config,
