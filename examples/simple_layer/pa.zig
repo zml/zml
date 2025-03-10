@@ -56,28 +56,30 @@ pub fn forward(
         block_tables,
         seq_lens,
         // zml.Tensor.empty(.{8 * 4}, .i8), // check actually it's none
+
         zml.Tensor.scalar(0.08838834765, .f32),
-        // zml.Tensor.scalar(1.0, .f32),
-        // zml.Tensor.scalar(1.0, .f32),
-        zml.Tensor.scalar(strides_o.get(0), .i32),
-        zml.Tensor.scalar(strides_o.get(1), .i32),
-        // zml.Tensor.scalar(strides_o.get(2), .i32),
-        zml.Tensor.scalar(strides_q.get(0), .i32),
-        zml.Tensor.scalar(strides_q.get(1), .i32),
-        zml.Tensor.scalar(strides_q.get(2), .i32),
-        zml.Tensor.scalar(strides_k.get(0), .i32),
-        zml.Tensor.scalar(strides_k.get(1), .i32),
-        zml.Tensor.scalar(strides_k.get(2), .i32),
-        zml.Tensor.scalar(strides_k.get(3), .i32),
-        zml.Tensor.scalar(strides_bt.get(0), .i32),
+        zml.Tensor.scalar(1.0, .f32),
+        zml.Tensor.scalar(1.0, .f32),
+
+        zml.Tensor.scalar(@divExact(strides_o.get(0), 2), .i32),
+        zml.Tensor.scalar(@divExact(strides_o.get(1), 2), .i32),
+        // zml.Tensor.scalar(strides_o.get(2), .i32), stride_o_hs
+        zml.Tensor.scalar(@divExact(strides_q.get(0), 2), .i32),
+        zml.Tensor.scalar(@divExact(strides_q.get(1), 2), .i32),
+        // zml.Tensor.scalar(strides_q.get(2), .i32),
+        zml.Tensor.scalar(@divExact(strides_k.get(0), 2), .i32),
+        zml.Tensor.scalar(@divExact(strides_k.get(1), 2), .i32),
+        zml.Tensor.scalar(@divExact(strides_k.get(2), 2), .i32),
+        // zml.Tensor.scalar(strides_k.get(3), .i32),
+        zml.Tensor.scalar(@divExact(strides_bt.get(0), 4), .i32),
         // zml.Tensor.scalar(strides_bt.get(1), .i32),
     }, output_shape, .{
         .name = "_paged_attn_decode_v1_w_dot_kernel_tt_load_only",
         .ir = @embedFile("pa_kernel.mlir"),
         .grid = .{ 256, 8, 1 },
-        .num_stages = 2,
+        .num_stages = 1,
         .num_warps = 4,
-        .debug = false,
+        .debug = true,
     });
 
     return y;
@@ -123,39 +125,17 @@ pub fn asyncMain() !void {
 
     const seqlen_host = try allocator.alloc(i64, 256);
     defer allocator.free(seqlen_host);
-    @memset(seqlen_host, 1);
+    @memset(seqlen_host, 2048);
     const page_table_host = try allocator.alloc(i32, 256 * (max_seq_len / 16));
     defer allocator.free(page_table_host);
     for (0..256) |i| {
         for (0..(max_seq_len / 16)) |j| {
-            page_table_host[i * (max_seq_len / 16) + j] = 0;
+            page_table_host[i * (max_seq_len / 16) + j] = @intCast(j);
         }
     }
 
-    {
-        var q_buffer = try createRandomBuffer(allocator, platform, query, random);
-        defer q_buffer.deinit();
-        var k_buffer = try createRandomBuffer(allocator, platform, key_cache, random);
-        defer k_buffer.deinit();
-        var v_buffer = try createRandomBuffer(allocator, platform, value_cache, random);
-        defer v_buffer.deinit();
-        var bt_buffer = try zml.Buffer.fromBytes(platform, block_tables, std.mem.sliceAsBytes(page_table_host));
-        defer bt_buffer.deinit();
-        var sq_buffer = try zml.Buffer.fromBytes(platform, seq_lens, std.mem.sliceAsBytes(seqlen_host));
-        defer sq_buffer.deinit();
-
-        // var profiler = platform.getProfiler(null);
-        // defer profiler.deinit();
-
-        // profiler.start();
-        var result: zml.Buffer = compiled.call(.{ q_buffer, k_buffer, v_buffer, bt_buffer, sq_buffer });
-        defer result.deinit();
-
-        var r = try result.toHostAlloc(allocator);
-        defer r.deinit(allocator);
-        // profiler.stop();
-        // try profiler.dumpAsJsonTo(allocator, std.fs.cwd(), "profile_file.json");
-        std.debug.print("Result: {}\n", .{r.shape()});
+    for (seqlen_host, 0..) |v, i| {
+        std.debug.print("seq_lens[{}] = {}\n", .{ i, v });
     }
 
     {
@@ -177,8 +157,11 @@ pub fn asyncMain() !void {
         var result: zml.Buffer = compiled.call(.{ q_buffer, k_buffer, v_buffer, bt_buffer, sq_buffer });
         defer result.deinit();
 
+        var result2: zml.Buffer = compiled.call(.{ q_buffer, k_buffer, v_buffer, bt_buffer, sq_buffer });
+        defer result2.deinit();
+
         var r = try result.toHostAlloc(allocator);
-        defer r.deinit(allocator);
+        // defer r.deinit(allocator);
         // profiler.stop();
         // try profiler.dumpAsJsonTo(allocator, std.fs.cwd(), "profile_file.json");
         std.debug.print("Result: {}\n", .{r.shape()});
