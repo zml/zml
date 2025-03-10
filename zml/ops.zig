@@ -1171,7 +1171,7 @@ pub const TritonOps = struct {
 };
 
 /// Generate an MLIR call to the given member function with the given tensors.
-pub fn triton(args: anytype, res_shape: anytype, opts: TritonOps) Tensor {
+pub fn triton(args: anytype, res_shape: anytype, res_shape2: anytype, res_shape3: anytype, opts: TritonOps) Tensor {
     const ctx = CompilationContext.current();
 
     var values: [args.len]mlir.Value = undefined;
@@ -1197,7 +1197,7 @@ pub fn triton(args: anytype, res_shape: anytype, opts: TritonOps) Tensor {
             .has_side_effect = false,
             .output_operand_aliases = &.{},
         },
-        &.{mlir.ext.mlirType(ctx.mlirCtx(), res_shape)},
+        &.{ mlir.ext.mlirType(ctx.mlirCtx(), res_shape), mlir.ext.mlirType(ctx.mlirCtx(), res_shape2), mlir.ext.mlirType(ctx.mlirCtx(), res_shape3) },
         ctx.mlirCtx().location(@src()),
     );
 
