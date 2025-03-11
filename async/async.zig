@@ -1,11 +1,13 @@
 const std = @import("std");
 const stdx = @import("stdx");
-const xev = @import("xev");
+const xev = @import("xev").Dynamic;
 const coro = @import("coro.zig");
 const executor = @import("executor.zig");
 const channel_mod = @import("channel.zig");
 const aio = @import("asyncio.zig");
 const stack = @import("stack.zig");
+
+const XevThreadPool = @import("xev").ThreadPool;
 
 pub const Condition = struct {
     inner: executor.Condition,
@@ -71,13 +73,13 @@ pub fn callBlocking(comptime func: anytype, args: anytype) stdx.meta.FnSignature
     const TaskT = struct {
         const Self = @This();
 
-        _task: xev.ThreadPool.Task = .{ .callback = &Self.run },
+        _task: XevThreadPool.Task = .{ .callback = &Self.run },
 
         event: threading.ResetEventSingle = .{},
         args: Signature.ArgsT,
         result: Signature.ReturnT = undefined,
 
-        pub fn run(task_: *xev.ThreadPool.Task) void {
+        pub fn run(task_: *XevThreadPool.Task) void {
             const task: *Self = @alignCast(@fieldParentPtr("_task", task_));
             task.result = @call(.auto, func, task.args);
             task.event.set();
@@ -87,7 +89,7 @@ pub fn callBlocking(comptime func: anytype, args: anytype) stdx.meta.FnSignature
     var newtask: TaskT = .{
         .args = args,
     };
-    AsyncThread.current.thread_pool.schedule(xev.ThreadPool.Batch.from(&newtask._task));
+    AsyncThread.current.thread_pool.schedule(XevThreadPool.Batch.from(&newtask._task));
     newtask.event.wait();
 
     return newtask.result;
@@ -159,7 +161,7 @@ pub const AsyncThread = struct {
     executor: *aio.Executor,
     stack_allocator: *stack.StackAllocator,
     loop: *xev.Loop,
-    thread_pool: *xev.ThreadPool,
+    thread_pool: *XevThreadPool,
     async_notifier: *xev.Async,
     waiters_queue: *threading.WaiterQueue,
 
@@ -175,7 +177,7 @@ pub const AsyncThread = struct {
     }
 
     pub fn main(allocator: std.mem.Allocator, comptime mainFunc: fn () anyerror!void) !void {
-        var thread_pool = xev.ThreadPool.init(.{});
+        var thread_pool = XevThreadPool.init(.{});
         defer {
             thread_pool.shutdown();
             thread_pool.deinit();
@@ -245,18 +247,22 @@ pub const File = struct {
         getEndPos,
     );
 
+    _handle: std.fs.File.Handle,
     inner: aio.File,
 
     fn asFile(self: File) std.fs.File {
-        return .{ .handle = self.inner.file.fd };
+        return .{ .handle = self._handle };
     }
 
     pub fn handle(self: File) std.fs.File.Handle {
-        return self.inner.file.fd;
+        return self._handle;
     }
 
     pub fn init(file_: std.fs.File) !File {
-        return .{ .inner = aio.File.init(AsyncThread.current.executor, try xev.File.init(file_)) };
+        return .{
+            ._handle = file_.handle,
+            .inner = aio.File.init(AsyncThread.current.executor, try xev.File.init(file_)),
+        };
     }
 
     pub fn open(path: []const u8, flags: std.fs.File.OpenFlags) !File {
