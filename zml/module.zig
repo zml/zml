@@ -71,6 +71,7 @@ const Block = union(BlockKind) {
 pub const MlirFn = struct {
     name: []const u8,
     num_args: u32,
+    input_shapes: []Shape,
     res_tensors: *const anyopaque,
     res_types: []mlir.Type,
     res_shapes: []Shape,
@@ -273,7 +274,8 @@ pub const CompilationContext = struct {
             self._platform,
             loaded_executable,
             .{
-                .n_in = f.num_args,
+                .name = f.name,
+                .input_shapes = f.input_shapes,
                 .result_shapes = f.res_shapes,
                 .n_devices = sharding.num_replicas * sharding.num_partitions,
             },
@@ -380,7 +382,7 @@ pub const CompilationContext = struct {
         const locations = try arena.alloc(mlir.Location, tensor_count);
         @memset(locations, mlir.Location.unknown(mlir_ctx));
 
-        var input_shapes = try std.ArrayList(Shape).initCapacity(arena, tensor_count);
+        var input_shapes = try std.ArrayList(Shape).initCapacity(res_allocator, tensor_count);
         meta.collect(Tensor.shape, {}, &input_shapes, args) catch unreachable;
         stdx.debug.internalAssert(input_shapes.items.len == tensor_count, "args have changed ?", .{});
 
@@ -465,6 +467,7 @@ pub const CompilationContext = struct {
             .mlir_fn = mlir_fn,
             .name = opts.name,
             .num_args = @intCast(tensor_count),
+            .input_shapes = input_shapes.items,
             .res_tensors = fn_res,
             .res_types = fn_res_types,
             .res_shapes = fn_res_shapes,
