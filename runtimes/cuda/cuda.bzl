@@ -4,8 +4,13 @@ load("//bazel:http_deb_archive.bzl", "http_deb_archive")
 
 ARCH = "linux-x86_64"
 
-CUDA_VERSION = "12.6.3"
-CUDNN_VERSION = "9.6.0"
+CUDA_REDIST_PREFIX = "https://developer.download.nvidia.com/compute/cuda/redist/"
+CUDA_VERSION = "12.8.1"
+CUDA_REDIST_JSON_SHA256 = "249e28a83008d711d5f72880541c8be6253f6d61608461de4fcb715554a6cf17"
+
+CUDNN_REDIST_PREFIX = "https://developer.download.nvidia.com/compute/cudnn/redist/"
+CUDNN_VERSION = "9.8.0"
+CUDNN_REDIST_JSON_SHA256 = "a1599fa1f8dcb81235157be5de5ab7d3936e75dfc4e1e442d07970afad3c4843"
 
 def _filegroup(name, srcs):
     return """\
@@ -155,8 +160,19 @@ CUDNN_PACKAGES = {
 }
 
 def _cuda_impl(mctx):
-    CUDA_REDIST = json.decode(mctx.read(Label("@zml//runtimes/cuda:cuda.redistrib_{}.json".format(CUDA_VERSION))))
-    CUDNN_REDIST = json.decode(mctx.read(Label("@zml//runtimes/cuda:cudnn.redistrib_{}.json".format(CUDNN_VERSION))))
+    mctx.download(
+        url = CUDA_REDIST_PREFIX + "redistrib_{}.json".format(CUDA_VERSION),
+        output = "cuda.redistrib.json",
+        sha256 = CUDA_REDIST_JSON_SHA256,
+    )
+    CUDA_REDIST = json.decode(mctx.read("cuda.redistrib.json"))
+
+    mctx.download(
+        url = CUDNN_REDIST_PREFIX + "redistrib_{}.json".format(CUDNN_VERSION),
+        output = "cudnn.redistrib.json",
+        sha256 = CUDNN_REDIST_JSON_SHA256,
+    )
+    CUDNN_REDIST = json.decode(mctx.read("cudnn.redistrib.json"))
 
     for pkg, build_file_content in CUDA_PACKAGES.items():
         pkg_data = CUDA_REDIST[pkg]
@@ -166,7 +182,7 @@ def _cuda_impl(mctx):
         http_archive(
             name = pkg,
             build_file_content = build_file_content,
-            url = "https://developer.download.nvidia.com/compute/cuda/redist/" + arch_data["relative_path"],
+            url = CUDA_REDIST_PREFIX + arch_data["relative_path"],
             sha256 = arch_data["sha256"],
             strip_prefix = paths.basename(arch_data["relative_path"]).replace(".tar.xz", ""),
         )
@@ -180,16 +196,16 @@ def _cuda_impl(mctx):
         http_archive(
             name = pkg,
             build_file_content = build_file_content,
-            url = "https://developer.download.nvidia.com/compute/cudnn/redist/" + arch_data["relative_path"],
+            url = CUDNN_REDIST_PREFIX + arch_data["relative_path"],
             sha256 = arch_data["sha256"],
             strip_prefix = paths.basename(arch_data["relative_path"]).replace(".tar.xz", ""),
         )
 
     http_archive(
         name = "nccl",
-        urls = ["https://files.pythonhosted.org/packages/ed/1f/6482380ec8dcec4894e7503490fc536d846b0d59694acad9cf99f27d0e7d/nvidia_nccl_cu12-2.23.4-py3-none-manylinux2014_x86_64.whl"],
+        urls = ["https://files.pythonhosted.org/packages/11/0c/8c78b7603f4e685624a3ea944940f1e75f36d71bd6504330511f4a0e1557/nvidia_nccl_cu12-2.25.1-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl"],
         type = "zip",
-        sha256 = "b097258d9aab2fa9f686e33c6fe40ae57b27df60cedbd15d139701bb5509e0c1",
+        sha256 = "362aed5963fb9ea2ed2f264409baae30143498fd0e5c503aeaa1badd88cdc54a",
         build_file_content = _cc_import(
             name = "nccl",
             shared_library = "nvidia/nccl/lib/libnccl.so.2",
