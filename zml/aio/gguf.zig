@@ -64,8 +64,7 @@ fn loadMetadata(allocator: Allocator, store: *zml.aio.BufferStore, file: *core.G
 fn loadBuffers(allocator: Allocator, store: *zml.aio.BufferStore, file: *core.GgufFile) !void {
     try store.buffers.ensureTotalCapacity(allocator, @intCast(file.header.tensor_count));
     while (file.readTensorInfo(allocator)) |info| {
-        const res = store.buffers.getOrPutAssumeCapacity(info.name);
-        if (res.found_existing) {
+        if (store.getShape(info.name) != null) {
             // This file seems invalid. Try to continue anyway.
             log.warn("Found duplicated tensor: {s}", .{info.name});
             continue;
@@ -73,9 +72,16 @@ fn loadBuffers(allocator: Allocator, store: *zml.aio.BufferStore, file: *core.Gg
 
         // TODO: handle quantized types
         const dtype: zml.DataType = info.t.toDtype() orelse return error.UnsupportedGgufType;
-        const buffer = HostBuffer.fromBytes(zml.Shape.init(info.shape(), dtype), file.file.mappedSlice(info.start, info.byte_len));
-        res.value_ptr.* = buffer;
-        // store the info index.
+
+        // const buffer = HostBuffer.fromBytes(zml.Shape.init(info.shape(), dtype), file.file.mappedSlice(info.start, info.byte_len));
+
+        const data = file.file.mappedSlice(info.start, info.byte_len);
+        try store.registerBuffer(
+            allocator,
+            info.name,
+            zml.Shape.init(info.shape(), dtype),
+            data,
+        );
     } else |err| switch (err) {
         error.EndOfMetadata => {},
         else => return err,

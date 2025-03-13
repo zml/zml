@@ -40,9 +40,11 @@ pub const Tensor = struct {
     _shape: Shape,
     _id: _Id,
     _donation: _Donation = .no_buffer,
+    _output_memory_kind: _MemoryKind = undefined,
 
     pub const _Donation = union(enum) { no_buffer, input_buffer, arg: u16 };
     pub const _Id = union(enum) { mlir: mlir.Value, buffer_id: u64, arg_id: u64 };
+    pub const _MemoryKind = ?Buffer.Memory.Kind;
 
     pub const MAX_RANK = Shape.MAX_RANK;
 
@@ -188,6 +190,33 @@ pub const Tensor = struct {
             .buffer_id => {
                 var res = self;
                 res._shape = self._shape.withSharding(axes_);
+                return res;
+            },
+        };
+    }
+
+    pub fn toMemory(self: Tensor, kind: Buffer.Memory.Kind) Tensor {
+        return switch (self._id) {
+            .arg_id, .mlir => {
+                const ctx = self.getContext();
+                var res = self;
+                res._output_memory_kind = kind;
+
+                const memory_kind = mlir.StringAttribute.init(ctx.mlirCtx(), @tagName(kind));
+
+                const op = dialect.stablehlo.annotate_device_placement(
+                    ctx.mlirCtx(),
+                    &.{self.value()},
+                    memory_kind,
+                    &.{self.value().getType()},
+                    ctx.mlirCtx().location(@src()),
+                );
+
+                return _result(res._shape, op.result(0));
+            },
+            .buffer_id => {
+                var res = self;
+                res._output_memory_kind = kind;
                 return res;
             },
         };

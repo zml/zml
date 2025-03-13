@@ -260,22 +260,22 @@ pub const ShapeSpec = extern struct {
 
     inner: c.PJRT_ShapeSpec,
 
-    pub fn init(dims_: []const usize, bt: BufferType) ShapeSpec {
+    pub fn init(dims_: []const i64, bt: BufferType) ShapeSpec {
         return .{
             .inner = pjrtStruct(c.PJRT_ShapeSpec{
                 .dims = @ptrCast(@constCast(dims_.ptr)),
-                .num_dims = dims.len,
-                .buffer_type = @intFromEnum(bt),
+                .num_dims = dims_.len,
+                .element_type = @intFromEnum(bt),
             }),
         };
     }
 
-    pub fn dims(self: ShapeSpec) []usize {
+    pub fn dims(self: ShapeSpec) []const i64 {
         return self.inner.dims[0..self.inner.num_dims];
     }
 
     pub fn bufferType(self: ShapeSpec) BufferType {
-        return @enumFromInt(self.inner.buffer_type);
+        return @enumFromInt(self.inner.element_type);
     }
 };
 
@@ -370,7 +370,7 @@ pub const Client = opaque {
             .num_byte_strides = if (args.byte_strides) |bs| bs.len else 0,
             .host_buffer_semantics = @intFromEnum(args.host_buffer_semantics),
             .device = @ptrCast(@constCast(args.device)),
-            .memory = @ptrCast(@constCast(args.memory)),
+            .memory = if (args.memory) |m| @ptrCast(@constCast(m)) else null,
             .device_layout = null, // TODO
             .done_with_host_buffer = null,
             .buffer = null,
@@ -469,7 +469,7 @@ pub const Client = opaque {
     pub fn createBuffersForAsyncHostToDevice(self: *const Client, api: *const Api, args: CreateBuffersForAsyncHostToDeviceArgs) ApiError!*AsyncHostToDeviceTransferManager {
         const ret = try api.call(.PJRT_Client_CreateBuffersForAsyncHostToDevice, .{
             .client = self.inner(),
-            .shape_specs = @ptrCast(args.shape_specs.ptr),
+            .shape_specs = @constCast(@ptrCast(args.shape_specs.ptr)),
             .num_shape_specs = args.shape_specs.len,
             .device_layouts = if (args.device_layouts) |layouts| @ptrCast(@constCast(layouts.ptr)) else null,
             .num_device_layouts = if (args.device_layouts) |layouts| @intCast(layouts.len) else 0,
@@ -501,6 +501,26 @@ pub const Device = opaque {
             .device = self.inner(),
         }) catch unreachable;
         return @intCast(ret.local_hardware_id);
+    }
+
+    pub fn addressableMemories(self: *const Device, api: *const Api) []*const Memory {
+        const ret = api.call(.PJRT_Device_AddressableMemories, .{
+            .device = self.inner(),
+        }) catch unreachable;
+        if (ret.memories) |memories| {
+            return @ptrCast(@constCast(memories[0..ret.num_memories]));
+        }
+        return &.{};
+    }
+
+    pub fn getMemoryByKind(self: *const Device, api: *const Api, kind: Memory.Kind) ?*const Memory {
+        const memories = self.addressableMemories(api);
+        for (memories) |m| {
+            if (m.kind(api) == kind) {
+                return m;
+            }
+        }
+        return null;
     }
 };
 
@@ -685,21 +705,18 @@ pub const MemoryLayoutType = enum(c.PJRT_Buffer_MemoryLayout_Type) {
     Strides = c.PJRT_Buffer_MemoryLayout_Type_Strides,
 };
 
-pub const MemoryLayout = union(MemoryLayoutType) {
+pub const MemoryLayout = union(enum(c.PJRT_Buffer_MemoryLayout_Type)) {
     pub const Type = MemoryLayoutType;
 
-    pub const Tiled = struct {
+    Tiled: struct {
         minor_to_major: []const i64,
         tile_dims: []const i64,
         tile_dims_sizes: []const usize,
-    };
+    },
 
-    pub const Strides = struct {
+    Strides: struct {
         byte_strides: []const i64,
-    };
-
-    Tiled: Tiled,
-    Strides: Strides,
+    },
 
     fn toCStruct(self: MemoryLayout) c.PJRT_Buffer_MemoryLayout {
         return pjrtStruct(switch (self) {
@@ -780,6 +797,13 @@ pub const Buffer = opaque {
         return @ptrCast(ret.event);
     }
 
+    pub fn getMemory(self: *const Buffer, api: *const Api) *const Memory {
+        const ret = api.call(.PJRT_Buffer_Memory, .{
+            .buffer = self.inner(),
+        }) catch unreachable;
+        return @ptrCast(ret.memory);
+    }
+
     pub fn getElementType(self: *const Buffer, api: *const Api) BufferType {
         const ret = api.call(.PJRT_Buffer_ElementType, .{
             .buffer = self.inner(),
@@ -833,12 +857,12 @@ pub const Buffer = opaque {
         return ret.device_memory_ptr.?;
     }
 
-    pub fn copyRawToHost(self: *const Buffer, api: *const Api, dst: []u8, offset: i64) ApiError!?*Event {
+    pub fn copyRawToHost(self: *const Buffer, api: *const Api, dst: []u8, offset: i64, size: i64) ApiError!?*Event {
         const ret = try api.call(.PJRT_Buffer_CopyRawToHost, .{
             .buffer = self.inner(),
             .dst = @ptrCast(dst.ptr),
             .offset = offset,
-            .transfer_size = @intCast(dst.len),
+            .transfer_size = size,
         });
         return @ptrCast(ret.event);
     }
@@ -971,6 +995,30 @@ pub const Memory = opaque {
     }
 };
 
+/// A client may want to create a buffer, and hand the buffer to other PjRt
+/// methods, before the data to store in the buffer is available to the client.
+/// This is supported using CreateBuffersForAsyncHostToDevice, which returns an
+/// AsyncHostToDeviceTransferManager helper object.
+///
+/// The PjRtBuffers can be retrieved from the AsyncHostToDeviceTransferManager
+/// and safely passed immediately to downstream PjRt method calls. Subsequently
+/// the client can call methods on the AsyncHostToDeviceTransferManager object
+/// to copy data into the buffers, and once the data copies are complete, the
+/// buffers' definition events will automatically become ready, unblocking
+/// downstream consumers of the buffers.
+///
+/// Depending on the backend's implementation, a single call to
+/// CreateBuffersForAsyncHostToDevice may either:
+///   - Create a "batch" of buffers that share a single definition event, which
+///   may amortize some performance overheads, but means that none of the
+///   buffers are available to downstream consumers until all the transfers
+///   have completed, in which case multiple calls to
+///   CreateBuffersForAsyncHostToDevice should be made if it is desirable for
+///   buffers to become available as soon as transfers into them complete.
+///
+///   - Create a "batch" of buffers with multiple underlying definitions
+///   events, and individual buffers become available to downstream consumers
+///   as soon as transfers into them complete.
 pub const AsyncHostToDeviceTransferManager = opaque {
     const inner = InnerMixin(c.PJRT_AsyncHostToDeviceTransferManager).inner;
 
@@ -979,7 +1027,17 @@ pub const AsyncHostToDeviceTransferManager = opaque {
             .transfer_manager = self.inner(),
         }) catch unreachable;
     }
-
+    /// Transfers 'data' into a sub-buffer of buffer_index starting at offset, of
+    /// length transfer_size. 'data' must be already laid out in the correct
+    /// on-device format, for example returned by a call to
+    /// buffer->CopyRawToHost. If is_last_transfer is false then the buffer
+    /// remains unavailable to consumers after the transfer completes. If
+    /// is_last_transfer is true then the buffer becomes available to consumers
+    /// after the transfer completes, and no transfer calls (or SetBufferError
+    /// calls) into buffer_index can be made after this call. on_done is called
+    /// when the transfer is complete but before the buffers are made available
+    /// to their consumers. 'data' must remain in scope until on_done is called.
+    /// (calls TransferRawDataToSubBuffer() internally)
     pub fn transferData(self: *AsyncHostToDeviceTransferManager, api: *const Api, buffer_index: usize, data: []const u8, offset: i64, is_last_transfer: bool) ApiError!*Event {
         const ret = try api.call(.PJRT_AsyncHostToDeviceTransferManager_TransferData, .{
             .transfer_manager = self.inner(),
@@ -992,6 +1050,15 @@ pub const AsyncHostToDeviceTransferManager = opaque {
         return @ptrCast(ret.done_with_h2d_transfer.?);
     }
 
+    /// Returns buffer for buffer_index, which can be passed to downstream
+    /// consumers immediately and will become available once transfers complete.
+    ///
+    /// retrieveBuffer can be called at any convenient time
+    ///
+    /// !!! May not be called more than once for a given buffer_index. !!!
+    ///
+    /// !!! transfer methods can safely be called for a buffer index
+    /// !!! **AFTER RetrieveBuffer** has been called.
     pub fn retrieveBuffer(self: *AsyncHostToDeviceTransferManager, api: *const Api, buffer_index: usize) ApiError!*Buffer {
         const ret = try api.call(.PJRT_AsyncHostToDeviceTransferManager_RetrieveBuffer, .{
             .transfer_manager = self.inner(),

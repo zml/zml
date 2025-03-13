@@ -392,12 +392,17 @@ pub const File = struct {
             .global => |object| {
                 if (try self.parseTensor(allocator, object)) |host_buffer| {
                     const key = try allocator.dupe(u8, prefix.items);
-                    const entry = try store.buffers.getOrPut(allocator, key);
-                    if (entry.found_existing) {
-                        log.warn("Duplicate key: {s}", .{prefix.items});
+                    if (store.getShape(key) != null) {
+                        log.warn("Duplicate key: {s}", .{key});
                         allocator.free(key);
                     }
-                    entry.value_ptr.* = host_buffer;
+
+                    try store.registerBuffer(
+                        allocator,
+                        key,
+                        host_buffer.shape(),
+                        host_buffer.data,
+                    );
                     return true;
                 } else if (basicTypeCheck(object, "torch", "Size")) {
                     const size = object.args;
