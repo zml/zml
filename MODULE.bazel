@@ -27,7 +27,7 @@ bazel_dep(name = "stablehlo", version = "20250217.0-4598975")
 bazel_dep(name = "toolchains_protoc", version = "0.3.7")
 bazel_dep(name = "with_cfg.bzl", version = "0.8.0")
 bazel_dep(name = "xla", version = "20250204.1-6789523")
-bazel_dep(name = "zig-protobuf", version = "20240722.0-c644d11")
+bazel_dep(name = "zig-protobuf", version = "20250213.0-5304067")
 bazel_dep(name = "zig-yaml", version = "20240903.0-83d5fdf")
 
 bazel_dep(name = "buildifier_prebuilt", version = "7.3.1", dev_dependency = True)
