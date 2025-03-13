@@ -838,7 +838,7 @@ pub fn addHostCallback(
             .api_version = 1,
             .has_side_effect = false,
             .call_target_name = "zmlHostBufferCallback",
-            .backend_config = @ptrCast(std.mem.sliceAsBytes(&backend_config)),
+            .backend_config = .{ .str = @ptrCast(std.mem.sliceAsBytes(&backend_config)) },
             .output_operand_aliases = &.{0},
         },
         &.{input.value().getType()},
