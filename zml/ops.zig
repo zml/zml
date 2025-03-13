@@ -1163,15 +1163,15 @@ inline fn toI64(values: anytype) []i64 {
 
 pub const TritonOps = struct {
     debug: bool = false,
-    name: []const u8,
-    ir: []const u8,
+    name: [:0]const u8,
+    ir: [:0]const u8,
     grid: [3]i32,
     num_stages: i32,
     num_warps: i32,
 };
 
 /// Generate an MLIR call to the given member function with the given tensors.
-pub fn triton(args: anytype, res_shape: anytype, opts: TritonOps) Tensor {
+pub fn triton(args: anytype, res_shape: Shape, opts: TritonOps) Tensor {
     const ctx = CompilationContext.current();
 
     var values: [args.len]mlir.Value = undefined;
@@ -1187,15 +1187,15 @@ pub fn triton(args: anytype, res_shape: anytype, opts: TritonOps) Tensor {
         mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "num_warps"), mlir.IntegerAttribute(.i32).init(ctx.mlirCtx(), @intCast(opts.num_warps)).as(mlir.Attribute).?),
     });
 
-    const op = dialect.stablehlo.custom_call2(
+    const op = dialect.stablehlo.custom_call_alloc(
+        ctx.allocator(),
         ctx.mlirCtx(),
         &values,
         .{
             .call_target_name = "__gpu$xla.gpu.triton",
-            .backend_config = attrs,
-            // .api_version = 4,
+            .backend_config = .{ .dict = attrs },
+            .api_version = 4,
             .has_side_effect = false,
-            .output_operand_aliases = &.{},
         },
         &.{mlir.ext.mlirType(ctx.mlirCtx(), res_shape)},
         ctx.mlirCtx().location(@src()),
