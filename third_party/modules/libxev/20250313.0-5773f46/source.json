@@ -1,11 +1,10 @@
 {
     "strip_prefix": "libxev-5773f46de3937e848db3ff87577add8ef7e8222d",
     "url": "https://github.com/zml/libxev/archive/5773f46de3937e848db3ff87577add8ef7e8222d.tar.gz",
-    "integrity": "sha256-Ev5EqRNZBT2iZqZ/GhztFnv1bxLf8iDcKetIzYly9uI=",
+    "integrity": "sha256-k9cyG0DPhEKwM+/dKiLFT9WeM+c2kCokN8VftOriSxI=",
     "overlay": {
         "MODULE.bazel": "",
-        "BUILD.bazel": "",
-        "main2.zig": ""
+        "BUILD.bazel": ""
     },
     "patches": {
     },
