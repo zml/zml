@@ -735,9 +735,12 @@ pub fn convolution(
 pub const CustomCallOpts = struct {
     call_target_name: [:0]const u8,
     has_side_effect: bool,
-    backend_config: [:0]const u8 = &.{},
+    backend_config: union(enum) {
+        str: [:0]const u8,
+        dict: mlir.DictionaryAttribute,
+    },
     api_version: i32,
-    output_operand_aliases: []const i64,
+    output_operand_aliases: []const i64 = &.{},
 };
 
 pub fn custom_call(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCallOpts, res_types: []const mlir.Type, location: mlir.Location) mlir.Operation {
@@ -757,8 +760,86 @@ pub fn custom_call(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCa
             .{ "api_version", mlir.IntegerAttribute(.i32).init(ctx, opts.api_version).as(mlir.Attribute).? },
             .{ "call_target_name", mlir.StringAttribute.init(ctx, opts.call_target_name).as(mlir.Attribute).? },
             .{ "has_side_effect", mlir.BoolAttribute.init(ctx, opts.has_side_effect).as(mlir.Attribute).? },
-            .{ "backend_config", mlir.StringAttribute.init(ctx, opts.backend_config).as(mlir.Attribute).? },
+            .{
+                "backend_config", switch (opts.backend_config) {
+                    .str => |v| mlir.StringAttribute.init(ctx, v).as(mlir.Attribute).?,
+                    .dict => |v| v.as(mlir.Attribute).?,
+                },
+            },
             .{ "output_operand_aliases", mlir.ArrayAttribute.init(ctx, output_operand_aliases).as(mlir.Attribute).? },
+        },
+        .location = location,
+    });
+}
+
+pub fn custom_call_alloc(allocator: std.mem.Allocator, ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCallOpts, res_types: []const mlir.Type, location: mlir.Location) mlir.Operation {
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+
+    var arena = arena_state.allocator();
+
+    const output_operand_aliases = arena.alloc(mlir.Attribute, opts.output_operand_aliases.len) catch unreachable;
+    for (opts.output_operand_aliases, 0..) |alias, i| {
+        output_operand_aliases[i] = OutputOperandAliasAttribute.init(ctx, &.{}, alias, &.{}).as(mlir.Attribute).?;
+    }
+
+    const indices_of_shape_operands = b: {
+        var indices = std.ArrayList(i64).initCapacity(arena, res_types.len) catch unreachable;
+        for (0..res_types.len) |indice| {
+            indices.appendAssumeCapacity(@intCast(indice));
+        }
+        const indices_of_shape_type = mlir.RankedTensorType.init(&.{@intCast(res_types.len)}, mlir.IntegerType(.i32).init(ctx).as(mlir.Type).?).as(mlir.Type).?;
+        break :b mlir.DenseIntOrFPElementsAttribute(.i32).init(indices_of_shape_type, std.mem.sliceAsBytes(indices.items));
+    };
+    _ = indices_of_shape_operands;
+
+    const operand_layouts = b: {
+        var layouts = std.ArrayList(mlir.Attribute).initCapacity(arena, inputs.len) catch unreachable;
+        const MINOR_TO_MAJOR = [8]i64{ 7, 6, 5, 4, 3, 2, 1, 0 };
+        for (inputs) |input| {
+            const len = MINOR_TO_MAJOR.len;
+            const input_type = input.getType().as(mlir.ShapedType).?;
+            const layout = MINOR_TO_MAJOR[len - input_type.rank() ..];
+            const layout_shape = mlir.RankedTensorType.init(&.{@intCast(layout.len)}, mlir.IndexType.init(ctx).as(mlir.Type).?).as(mlir.Type).?;
+            const layout_attribute = mlir.DenseIntOrFPElementsAttribute(.i64).fromRaw(layout_shape, std.mem.sliceAsBytes(layout)).as(mlir.Attribute).?;
+            layouts.appendAssumeCapacity(layout_attribute);
+        }
+
+        const operand_layouts = mlir.ArrayAttribute.init(ctx, layouts.items).as(mlir.Attribute).?;
+        break :b operand_layouts;
+    };
+    const result_layouts = b: {
+        var layouts = std.ArrayList(mlir.Attribute).initCapacity(arena, res_types.len) catch unreachable;
+        const MINOR_TO_MAJOR = [8]i64{ 7, 6, 5, 4, 3, 2, 1, 0 };
+        for (res_types) |res_raw_type| {
+            const len = MINOR_TO_MAJOR.len;
+            const res_type = res_raw_type.as(mlir.ShapedType).?;
+            const layout = MINOR_TO_MAJOR[len - res_type.rank() ..];
+            const layout_shape = mlir.RankedTensorType.init(&.{@intCast(layout.len)}, mlir.IndexType.init(ctx).as(mlir.Type).?).as(mlir.Type).?;
+            const layout_attribute = mlir.DenseIntOrFPElementsAttribute(.i64).fromRaw(layout_shape, std.mem.sliceAsBytes(layout)).as(mlir.Attribute).?;
+            layouts.appendAssumeCapacity(layout_attribute);
+        }
+
+        const result_layouts = mlir.ArrayAttribute.init(ctx, layouts.items).as(mlir.Attribute).?;
+        break :b result_layouts;
+    };
+
+    return mlir.Operation.make(ctx, "stablehlo.custom_call", .{
+        .operands = inputs,
+        .results = res_types,
+        .attributes = &.{
+            .{ "api_version", mlir.IntegerAttribute(.i32).init(ctx, opts.api_version).as(mlir.Attribute).? },
+            .{ "call_target_name", mlir.StringAttribute.init(ctx, opts.call_target_name).as(mlir.Attribute).? },
+            .{ "has_side_effect", mlir.BoolAttribute.init(ctx, opts.has_side_effect).as(mlir.Attribute).? },
+            .{
+                "backend_config", switch (opts.backend_config) {
+                    .str => |v| mlir.StringAttribute.init(ctx, v).as(mlir.Attribute).?,
+                    .dict => |v| v.as(mlir.Attribute).?,
+                },
+            },
+            .{ "output_operand_aliases", mlir.ArrayAttribute.init(ctx, output_operand_aliases).as(mlir.Attribute).? },
+            .{ "operand_layouts", operand_layouts },
+            .{ "result_layouts", result_layouts },
         },
         .location = location,
     });

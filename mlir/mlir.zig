@@ -649,6 +649,10 @@ pub fn DenseIntOrFPElementsAttribute(comptime dt: DenseElementsAttributeTypes) t
             return Attr.wrap(initFn(shaped_type.inner(), @intCast(values.len), @ptrCast(@alignCast(values.ptr))));
         }
 
+        pub fn fromRaw(shaped_type: Type, raw: []const u8) Attr {
+            return Attr.wrap(c.mlirDenseElementsAttrRawBufferGet(shaped_type.inner(), raw.len, raw.ptr));
+        }
+
         pub fn get(self: Attr, pos: usize) ZigOutDataType {
             return getValue(self.inner(), @intCast(pos));
         }
@@ -1236,6 +1240,21 @@ pub const Type = struct {
         return Type.wrapOr(
             c.mlirTypeParseGet(ctx.inner(), stringRef(str)),
         ) orelse Error.InvalidMlir;
+    }
+};
+
+pub const IndexType = struct {
+    _inner: c.MlirType,
+
+    pub usingnamespace MlirHelpers(IndexType, .{
+        .is_null_fn = c.mlirTypeIsNull,
+        .dump_fn = c.mlirTypeDump,
+        .equal_fn = c.mlirTypeEqual,
+        .print_fn = c.mlirTypePrint,
+    });
+
+    pub fn init(ctx: Context) IndexType {
+        return IndexType.wrap(c.mlirIndexTypeGet(ctx.inner()));
     }
 };
 

@@ -1160,3 +1160,45 @@ inline fn toI64(values: anytype) []i64 {
     for (values, 0..) |val, i| res[i] = @intCast(val);
     return res[0..values.len];
 }
+
+pub const TritonOps = struct {
+    debug: bool = false,
+    name: [:0]const u8,
+    ir: [:0]const u8,
+    grid: [3]i32,
+    num_stages: i32,
+    num_warps: i32,
+};
+
+/// Generate an MLIR call to the given member function with the given tensors.
+pub fn triton(args: anytype, res_shape: Shape, opts: TritonOps) Tensor {
+    const ctx = CompilationContext.current();
+
+    var values: [args.len]mlir.Value = undefined;
+    ctx.extractValues(&args, &values);
+
+    const attrs = mlir.DictionaryAttribute.init(ctx.mlirCtx(), &.{
+        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "name"), mlir.StringAttribute.init(ctx.mlirCtx(), opts.name).as(mlir.Attribute).?),
+        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "ir"), mlir.StringAttribute.init(ctx.mlirCtx(), opts.ir).as(mlir.Attribute).?),
+        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "grid_x"), mlir.IntegerAttribute(.i32).init(ctx.mlirCtx(), @intCast(opts.grid[0])).as(mlir.Attribute).?),
+        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "grid_y"), mlir.IntegerAttribute(.i32).init(ctx.mlirCtx(), @intCast(opts.grid[1])).as(mlir.Attribute).?),
+        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "grid_z"), mlir.IntegerAttribute(.i32).init(ctx.mlirCtx(), @intCast(opts.grid[2])).as(mlir.Attribute).?),
+        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "num_stages"), mlir.IntegerAttribute(.i32).init(ctx.mlirCtx(), @intCast(opts.num_stages)).as(mlir.Attribute).?),
+        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "num_warps"), mlir.IntegerAttribute(.i32).init(ctx.mlirCtx(), @intCast(opts.num_warps)).as(mlir.Attribute).?),
+    });
+
+    const op = dialect.stablehlo.custom_call_alloc(
+        ctx.allocator(),
+        ctx.mlirCtx(),
+        &values,
+        .{
+            .call_target_name = "__gpu$xla.gpu.triton",
+            .backend_config = .{ .dict = attrs },
+            .api_version = 4,
+            .has_side_effect = false,
+        },
+        &.{mlir.ext.mlirType(ctx.mlirCtx(), res_shape)},
+        ctx.mlirCtx().location(@src()),
+    );
+    return Tensor._result(res_shape, op.result(0));
+}
