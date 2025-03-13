@@ -4251,7 +4251,7 @@
     },
     "@@rules_rust+//crate_universe:extensions.bzl%crate": {
       "general": {
-        "bzlTransitiveDigest": "wCEZ3jfLKpigLStmA+7HYbnchHAogZXm6LI/ugF/gfw=",
+        "bzlTransitiveDigest": "yauXEeldGkvrcDghpR/+V5OqtFsV9sNlZyfylzCKer0=",
         "usagesDigest": "UELY03NZijaUx1pyJ9ACgXF5a9vdW2KwxZXn94d4mMw=",
         "recordedFileInputs": {
           "@@zml+//zml/tokenizer/hftokenizers/Cargo.toml": "b0b28872bb74e13aec7ef0ef8dfd5ec99a8573bc12085c0f36711f2a87912061"
@@ -5470,6 +5470,11 @@
             "rules_cc+",
             "bazel_tools",
             "bazel_tools"
+          ],
+          [
+            "rules_cc+",
+            "rules_cc",
+            "rules_cc+"
           ],
           [
             "rules_rust+",
