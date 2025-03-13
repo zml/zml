@@ -85,14 +85,20 @@ pip.parse(
 )
 use_repo(pip, "neuron_py_deps")
 
+common_apt_packages = use_extension("//runtimes/common:packages.bzl", "common_apt_packages")
+use_repo(common_apt_packages, "libdrm-amdgpu1", "libdrm2", "libelf1", "libnuma1", "libtinfo6", "libzstd1", "zlib1g")
+
 cpu = use_extension("//runtimes/cpu:cpu.bzl", "cpu_pjrt_plugin")
 use_repo(cpu, "libpjrt_cpu_darwin_arm64", "libpjrt_cpu_linux_amd64")
 
 cuda = use_extension("//runtimes/cuda:cuda.bzl", "cuda_packages")
 use_repo(cuda, "libpjrt_cuda")
+inject_repo(cuda, "zlib1g")
 
 rocm = use_extension("//runtimes/rocm:rocm.bzl", "rocm_packages")
 use_repo(rocm, "hipblaslt", "libpjrt_rocm", "rocblas")
+
+inject_repo(rocm, "libdrm-amdgpu1", "libdrm2", "libelf1", "libnuma1", "libtinfo6", "libzstd1", "zlib1g")
 
 tpu = use_extension("//runtimes/tpu:tpu.bzl", "tpu_packages")
 use_repo(tpu, "libpjrt_tpu")
@@ -155,3 +161,15 @@ use_repo(crate, "crates")
 
 non_module_deps = use_extension("//:third_party/non_module_deps.bzl", "non_module_deps")
 use_repo(non_module_deps, "com_google_sentencepiece", "org_swig_swig")
+
+apt.install(
+    name = "apt_rocm",
+    lock = "//runtimes/rocm:packages.lock.json",
+    manifest = "//runtimes/rocm:packages.yaml",
+)
+apt.install(
+    name = "apt_common",
+    lock = "//runtimes/rocm:packages.lock.json",
+    manifest = "//runtimes/common:packages.yaml",
+)
+use_repo(apt, "apt_common", "apt_rocm")
