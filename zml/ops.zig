@@ -901,30 +901,28 @@ test "triton" {
     const zml = @import("zml.zig");
     const platform = zml.testing.env();
 
+    if (platform.target != .cuda and platform.target != .rocm) return error.SkipZigTest;
+
     const ir =
-        \\#triton_kernel = "#triton.kernel<grid({}, {}, {}) args({} *f32, {} *f32) -> ()>"
-        \\
-        \\module {
-        \\    tt.func @test(%a : *f32 {tt.divisibility = 16 : i32}, %b : *f32 {tt.divisibility = 16 : i32}) {
-        \\        attributes {{noinline = false}} {{
-        \\        %c0 = arith.constant 0 : i32
-        \\        %c1 = arith.constant 1 : i32
-        \\
-        \\        %data_a = tt.load %a[%c0] {cache = 1 : i32, evict = 1 : i32, isVolatile = false} : f32
-        \\        %data_b = tt.load %b[%c0] {cache = 1 : i32, evict = 1 : i32, isVolatile = false} : f32
-        \\        tt.store %a[%c0], %data_a : f32
-        \\        tt.store %b[%c0], %data_b : f32
-        \\
-        \\        tt.return
-        \\    }
-        \\}
+        \\ module {
+        \\   tt.func public @add_one(%arg0: !tt.ptr<f32, 1> {tt.divisibility = 32 : i32}, %arg1: !tt.ptr<f32, 1> {tt.divisibility = 32 : i32}, %arg2: !tt.ptr<f32, 1> {tt.divisibility = 32 : i32}, %arg3: !tt.ptr<f32, 1> {tt.divisibility = 32 : i32}) {
+        \\     %0 = tt.get_program_id x : i32
+        \\     %1 = tt.load %arg0 {cache = 1 : i32, evict = 1 : i32, isVolatile = false} : !tt.ptr<f32>
+        \\     %2 = tt.load %arg1 {cache = 1 : i32, evict = 1 : i32, isVolatile = false} : !tt.ptr<f32>
+        \\     %cst = arith.constant 1.000000e+00 : f32
+        \\     %3 = arith.addf %1, %cst : f32
+        \\     tt.store %arg2, %3 {cache = 1 : i32, evict = 1 : i32} : !tt.ptr<f32>
+        \\     tt.store %arg3, %2 {cache = 1 : i32, evict = 1 : i32} : !tt.ptr<f32>
+        \\     tt.return
+        \\   }
+        \\ }
     ;
 
     const TritonMod = struct {
         pub fn forward(a: Tensor, b: Tensor) [2]Tensor {
             return triton(.{ a, b }, .{ a.shape(), b.shape() }, .{
                 .debug = false,
-                .name = "test",
+                .name = "add_one",
                 .ir = ir,
                 .grid = .{ 1, 1, 1 },
                 .num_stages = 1,
@@ -933,12 +931,21 @@ test "triton" {
         }
     };
 
-    {
-        const a = try zml.Buffer.fromSlice(platform, .{ 2, 2 }, &[4]f32{ 1, 1, 2, 2 });
-        const b = try zml.Buffer.fromSlice(platform, .{ 2, 2 }, &[4]f32{ 1, 1, 1, 1 });
-        const results = try zml.testing.compileAndCall(platform, TritonMod.forward, .{ a, b });
-        try zml.testing.expectEqual(a, results[0]);
-    }
+    const a = try zml.Buffer.fromSlice(platform, .{}, &[1]f32{1});
+    const b = try zml.Buffer.fromSlice(platform, .{}, &[1]f32{3});
+
+    const results = try zml.testing.compileAndCall(platform, TritonMod.forward, .{ a, b });
+
+    var cpu_result_0 = try results[0].toHostAlloc(std.testing.allocator);
+    defer cpu_result_0.deinit(std.testing.allocator);
+    var cpu_result_1 = try results[1].toHostAlloc(std.testing.allocator);
+    defer cpu_result_1.deinit(std.testing.allocator);
+
+    const expected_result_a: f32 = 2.0;
+    const expected_result_b: f32 = 3.0;
+
+    try std.testing.expectEqual(expected_result_a, cpu_result_0.items(f32)[0]);
+    try std.testing.expectEqual(expected_result_b, cpu_result_1.items(f32)[0]);
 }
 
 /// Generalized version of scatter to many inputs.
