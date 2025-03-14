@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const stdx = @import("stdx");
 const log = std.log.scoped(.mlir);
 
 const c = @import("c");
@@ -591,10 +592,6 @@ pub fn DenseArrayAttribute(comptime dt: DenseArrayTypes) type {
                     .i64 => .i64,
                     else => @compileError("DenseArrayAttribute: unreachable"),
                 });
-
-                pub fn toElements(self: Attr) DenseArray {
-                    return DenseArray.wrap(c.mlirDenseArrayToElements(self.inner()));
-                }
             },
             else => struct {},
         };
@@ -615,28 +612,32 @@ pub const DenseElementsAttributeTypes = enum {
     f16,
     f32,
     f64,
+    index,
 };
 
-pub fn DenseIntOrFPElementsAttribute(comptime dt: DenseElementsAttributeTypes) type {
-    const ZigInDataType, const ZigOutDataType, const initFn, const getValue = switch (dt) {
-        .bool => .{ bool, bool, c.mlirDenseElementsAttrBoolGet, c.mlirDenseElementsAttrGetBoolValue },
-        .i8 => .{ i8, i8, c.mlirDenseElementsAttrInt8Get, c.mlirDenseElementsAttrGetInt8Value },
-        .i16 => .{ i16, i16, c.mlirDenseElementsAttrInt16Get, c.mlirDenseElementsAttrGetInt16Value },
-        .i32 => .{ i32, i32, c.mlirDenseElementsAttrInt32Get, c.mlirDenseElementsAttrGetInt32Value },
-        .i64 => .{ i64, i64, c.mlirDenseElementsAttrInt64Get, c.mlirDenseElementsAttrGetInt64Value },
-        .u8 => .{ u8, u8, c.mlirDenseElementsAttrUInt8Get, c.mlirDenseElementsAttrGetUInt8Value },
-        .u16 => .{ u16, u16, c.mlirDenseElementsAttrUInt16Get, c.mlirDenseElementsAttrGetUInt16Value },
-        .u32 => .{ u32, u32, c.mlirDenseElementsAttrUInt32Get, c.mlirDenseElementsAttrGetUInt32Value },
-        .u64 => .{ u64, u64, c.mlirDenseElementsAttrUInt64Get, c.mlirDenseElementsAttrGetUInt64Value },
-        .bf16 => .{ u16, f32, c.mlirDenseElementsAttrBFloat16Get, c.mlirDenseElementsAttrGetFloatValue },
-        .f16 => .{ f16, f32, c.mlirDenseElementsAttrFloat16Get, c.mlirDenseElementsAttrGetFloatValue },
-        .f32 => .{ f32, f32, c.mlirDenseElementsAttrFloatGet, c.mlirDenseElementsAttrGetFloatValue },
-        .f64 => .{ f64, f64, c.mlirDenseElementsAttrDoubleGet, c.mlirDenseElementsAttrGetDoubleValue },
+pub fn DenseElementsAttribute(comptime dt: DenseElementsAttributeTypes) type {
+    const ZigType = switch (dt) {
+        .bool => bool,
+        .i8 => i8,
+        .i16 => i16,
+        .i32 => i32,
+        .i64 => i64,
+        .u8 => u8,
+        .u16 => u16,
+        .u32 => u32,
+        .u64 => u64,
+        .bf16 => u16,
+        .f16 => f16,
+        .f32 => f32,
+        .f64 => f64,
+        .index => usize,
     };
 
     return struct {
         _inner: c.MlirAttribute,
+
         const Attr = @This();
+
         pub usingnamespace MlirHelpers(Attr, .{
             .is_a_fn = c.mlirAttributeIsADenseElements,
             .is_null_fn = c.mlirAttributeIsNull,
@@ -644,13 +645,31 @@ pub fn DenseIntOrFPElementsAttribute(comptime dt: DenseElementsAttributeTypes) t
             .equal_fn = c.mlirAttributeEqual,
         });
 
-        pub fn init(shaped_type: Type, raw_values: []const u8) Attr {
-            const values = std.mem.bytesAsSlice(ZigInDataType, raw_values);
-            return Attr.wrap(initFn(shaped_type.inner(), @intCast(values.len), @ptrCast(@alignCast(values.ptr))));
+        pub fn init(shaped_type: Type, values: anytype) Attr {
+            return fromRaw(shaped_type, std.mem.sliceAsBytes(values));
         }
 
-        pub fn get(self: Attr, pos: usize) ZigOutDataType {
-            return getValue(self.inner(), @intCast(pos));
+        pub fn fromRaw(shaped_type: Type, values: []const u8) Attr {
+            return Attr.wrapOr(
+                c.mlirDenseElementsAttrRawBufferGet(
+                    shaped_type.inner(),
+                    @intCast(values.len),
+                    @ptrCast(values.ptr),
+                ),
+            ) orelse unreachable;
+        }
+
+        pub fn len(self: Attr) usize {
+            return @intCast(c.mlirElementsAttrGetNumElements(self.inner()));
+        }
+
+        pub fn constSlice(self: Attr) []const ZigType {
+            const ptr: [*]const ZigType = @constCast(@ptrCast(@alignCast(c.mlirDenseElementsAttrGetRawData(self.inner()) orelse unreachable)));
+            return ptr[0..self.len()];
+        }
+
+        pub fn data(self: Attr) []const u8 {
+            return std.mem.sliceAsBytes(self.constSlice());
         }
     };
 }

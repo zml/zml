@@ -219,7 +219,7 @@ pub fn constant(
     location: mlir.Location,
 ) mlir.Operation {
     const attribute = switch (elem_type) {
-        inline else => |dt| mlir.DenseIntOrFPElementsAttribute(dt).init(result_type.as(mlir.Type).?, raw_bytes).as(mlir.Attribute).?,
+        inline else => |dt| mlir.DenseElementsAttribute(dt).fromRaw(result_type.as(mlir.Type).?, raw_bytes).as(mlir.Attribute).?,
     };
 
     return mlir.Operation.make(ctx, "stablehlo.constant", .{
@@ -707,7 +707,7 @@ pub fn convolution(
         .results = &.{res_type},
         .attributes = &.{
             .{ "window_strides", mlir.DenseArrayAttribute(.i64).init(ctx, opts.window_strides).as(mlir.Attribute).? },
-            .{ "padding", mlir.DenseIntOrFPElementsAttribute(.i64).init(pad_shape, std.mem.sliceAsBytes(opts.pad_value)).as(mlir.Attribute).? },
+            .{ "padding", mlir.DenseElementsAttribute(.i64).init(pad_shape, opts.pad_value).as(mlir.Attribute).? },
             .{ "lhs_dilation", mlir.DenseArrayAttribute(.i64).init(ctx, opts.lhs_dilation).as(mlir.Attribute).? },
             .{ "rhs_dilation", mlir.DenseArrayAttribute(.i64).init(ctx, opts.rhs_dilation).as(mlir.Attribute).? },
             .{ "window_reversal", mlir.DenseArrayAttribute(.bool).init(ctx, window_reversal[0..opts.window_reversal.len]).as(mlir.Attribute).? },

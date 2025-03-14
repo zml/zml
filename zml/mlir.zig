@@ -40,19 +40,19 @@ pub const ext = struct {
     pub fn denseElementsAttr(dt: dtype.DataType, _: usize, bytes: []const u8, ranked_type: mlir.RankedTensorType) mlir.Attribute {
         const ranked_type_ = ranked_type.as(mlir.Type).?;
         return switch (dt) {
-            .bool => mlir.DenseIntOrFPElementsAttribute(.bool).init(ranked_type_, bytes).as(mlir.Attribute).?,
-            .i8 => mlir.DenseIntOrFPElementsAttribute(.i8).init(ranked_type_, bytes).as(mlir.Attribute).?,
-            .i16 => mlir.DenseIntOrFPElementsAttribute(.i16).init(ranked_type_, bytes).as(mlir.Attribute).?,
-            .i32 => mlir.DenseIntOrFPElementsAttribute(.i32).init(ranked_type_, bytes).as(mlir.Attribute).?,
-            .i64 => mlir.DenseIntOrFPElementsAttribute(.i64).init(ranked_type_, bytes).as(mlir.Attribute).?,
-            .u8 => mlir.DenseIntOrFPElementsAttribute(.u8).init(ranked_type_, bytes).as(mlir.Attribute).?,
-            .u16 => mlir.DenseIntOrFPElementsAttribute(.u16).init(ranked_type_, bytes).as(mlir.Attribute).?,
-            .u32 => mlir.DenseIntOrFPElementsAttribute(.u32).init(ranked_type_, bytes).as(mlir.Attribute).?,
-            .u64 => mlir.DenseIntOrFPElementsAttribute(.u64).init(ranked_type_, bytes).as(mlir.Attribute).?,
-            .bf16 => mlir.DenseIntOrFPElementsAttribute(.bf16).init(ranked_type_, bytes).as(mlir.Attribute).?,
-            .f16 => mlir.DenseIntOrFPElementsAttribute(.f16).init(ranked_type_, bytes).as(mlir.Attribute).?,
-            .f32 => mlir.DenseIntOrFPElementsAttribute(.f32).init(ranked_type_, bytes).as(mlir.Attribute).?,
-            .f64 => mlir.DenseIntOrFPElementsAttribute(.f64).init(ranked_type_, bytes).as(mlir.Attribute).?,
+            .bool => mlir.DenseElementsAttribute(.bool).fromRaw(ranked_type_, bytes).as(mlir.Attribute).?,
+            .i8 => mlir.DenseElementsAttribute(.i8).fromRaw(ranked_type_, bytes).as(mlir.Attribute).?,
+            .i16 => mlir.DenseElementsAttribute(.i16).fromRaw(ranked_type_, bytes).as(mlir.Attribute).?,
+            .i32 => mlir.DenseElementsAttribute(.i32).fromRaw(ranked_type_, bytes).as(mlir.Attribute).?,
+            .i64 => mlir.DenseElementsAttribute(.i64).fromRaw(ranked_type_, bytes).as(mlir.Attribute).?,
+            .u8 => mlir.DenseElementsAttribute(.u8).fromRaw(ranked_type_, bytes).as(mlir.Attribute).?,
+            .u16 => mlir.DenseElementsAttribute(.u16).fromRaw(ranked_type_, bytes).as(mlir.Attribute).?,
+            .u32 => mlir.DenseElementsAttribute(.u32).fromRaw(ranked_type_, bytes).as(mlir.Attribute).?,
+            .u64 => mlir.DenseElementsAttribute(.u64).fromRaw(ranked_type_, bytes).as(mlir.Attribute).?,
+            .bf16 => mlir.DenseElementsAttribute(.bf16).fromRaw(ranked_type_, bytes).as(mlir.Attribute).?,
+            .f16 => mlir.DenseElementsAttribute(.f16).fromRaw(ranked_type_, bytes).as(mlir.Attribute).?,
+            .f32 => mlir.DenseElementsAttribute(.f32).fromRaw(ranked_type_, bytes).as(mlir.Attribute).?,
+            .f64 => mlir.DenseElementsAttribute(.f64).fromRaw(ranked_type_, bytes).as(mlir.Attribute).?,
             inline else => |tag| @panic("Unsupported data type: " ++ @tagName(tag)),
         };
     }
@@ -153,22 +153,22 @@ pub const ext = struct {
         }
     };
 
-    pub const DenseIntOrFPElementsAttribute = struct {
+    pub const DenseElementsAttribute = struct {
         pub fn fromData(data: dtype.Data, result_type: mlir.Type) mlir.Attribute {
             return switch (data.dtype()) {
-                .bool => mlir.DenseIntOrFPElementsAttribute(.bool).init(result_type, data.constSlice()).as(mlir.Attribute).?,
-                .i8 => mlir.DenseIntOrFPElementsAttribute(.i8).init(result_type, data.constSlice()).as(mlir.Attribute).?,
-                .i16 => mlir.DenseIntOrFPElementsAttribute(.i16).init(result_type, data.constSlice()).as(mlir.Attribute).?,
-                .i32 => mlir.DenseIntOrFPElementsAttribute(.i32).init(result_type, data.constSlice()).as(mlir.Attribute).?,
-                .i64 => mlir.DenseIntOrFPElementsAttribute(.i64).init(result_type, data.constSlice()).as(mlir.Attribute).?,
-                .u8 => mlir.DenseIntOrFPElementsAttribute(.u8).init(result_type, data.constSlice()).as(mlir.Attribute).?,
-                .u16 => mlir.DenseIntOrFPElementsAttribute(.u16).init(result_type, data.constSlice()).as(mlir.Attribute).?,
-                .u32 => mlir.DenseIntOrFPElementsAttribute(.u32).init(result_type, data.constSlice()).as(mlir.Attribute).?,
-                .u64 => mlir.DenseIntOrFPElementsAttribute(.u64).init(result_type, data.constSlice()).as(mlir.Attribute).?,
-                .bf16 => mlir.DenseIntOrFPElementsAttribute(.bf16).init(result_type, data.constSlice()).as(mlir.Attribute).?,
-                .f16 => mlir.DenseIntOrFPElementsAttribute(.f16).init(result_type, data.constSlice()).as(mlir.Attribute).?,
-                .f32 => mlir.DenseIntOrFPElementsAttribute(.f32).init(result_type, data.constSlice()).as(mlir.Attribute).?,
-                .f64 => mlir.DenseIntOrFPElementsAttribute(.f64).init(result_type, data.constSlice()).as(mlir.Attribute).?,
+                .bool => mlir.DenseElementsAttribute(.bool).fromRaw(result_type, data.constSlice()).as(mlir.Attribute).?,
+                .i8 => mlir.DenseElementsAttribute(.i8).fromRaw(result_type, data.constSlice()).as(mlir.Attribute).?,
+                .i16 => mlir.DenseElementsAttribute(.i16).fromRaw(result_type, data.constSlice()).as(mlir.Attribute).?,
+                .i32 => mlir.DenseElementsAttribute(.i32).fromRaw(result_type, data.constSlice()).as(mlir.Attribute).?,
+                .i64 => mlir.DenseElementsAttribute(.i64).fromRaw(result_type, data.constSlice()).as(mlir.Attribute).?,
+                .u8 => mlir.DenseElementsAttribute(.u8).fromRaw(result_type, data.constSlice()).as(mlir.Attribute).?,
+                .u16 => mlir.DenseElementsAttribute(.u16).fromRaw(result_type, data.constSlice()).as(mlir.Attribute).?,
+                .u32 => mlir.DenseElementsAttribute(.u32).fromRaw(result_type, data.constSlice()).as(mlir.Attribute).?,
+                .u64 => mlir.DenseElementsAttribute(.u64).fromRaw(result_type, data.constSlice()).as(mlir.Attribute).?,
+                .bf16 => mlir.DenseElementsAttribute(.bf16).fromRaw(result_type, data.constSlice()).as(mlir.Attribute).?,
+                .f16 => mlir.DenseElementsAttribute(.f16).fromRaw(result_type, data.constSlice()).as(mlir.Attribute).?,
+                .f32 => mlir.DenseElementsAttribute(.f32).fromRaw(result_type, data.constSlice()).as(mlir.Attribute).?,
+                .f64 => mlir.DenseElementsAttribute(.f64).fromRaw(result_type, data.constSlice()).as(mlir.Attribute).?,
                 inline else => |tag| stdx.debug.panic("Unsupported data type: {any}", .{tag}),
             };
         }
