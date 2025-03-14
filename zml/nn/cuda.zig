@@ -51,8 +51,7 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
     var fba = std.heap.FixedBufferAllocator.init(&buffer);
     const allocator = fba.allocator();
 
-    const backend_config =
-        std.fmt.allocPrintZ(
+    const backend_config = std.fmt.allocPrintZ(
         allocator,
         \\{{
         \\  "operation_queue_id":"0",

@@ -26,7 +26,7 @@ def _bytecode_select_impl(ctx):
         DefaultInfo(
             files = depset([
                 file
-                for file in ctx.files.bytecodes
+                for file in ctx.files.srcs
                 if _is_file_enabled(file, enabled_gfx)
             ]),
         ),
@@ -35,7 +35,7 @@ def _bytecode_select_impl(ctx):
 bytecode_select = rule(
     implementation = _bytecode_select_impl,
     attrs = {
-        "bytecodes": attr.label_list(allow_files = True),
+        "srcs": attr.label_list(allow_files = True),
         "enabled_gfx": attr.label(mandatory = True),
     },
 )

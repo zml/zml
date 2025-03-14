@@ -1,0 +1,4 @@
+exports_files(
+    ["packages.lock.json"],
+    visibility = ["//runtimes:__subpackages__"],
+)

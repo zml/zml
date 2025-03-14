@@ -9,7 +9,7 @@ const stdx = @import("stdx");
 const zml = @import("zml");
 const Tensor = zml.Tensor;
 
-pub const std_options = .{
+pub const std_options: std.Options = .{
     .log_level = .info,
     .log_scope_levels = &[_]std.log.ScopeLevel{
         .{ .scope = .modernbert, .level = .info },
