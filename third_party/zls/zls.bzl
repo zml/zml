@@ -128,7 +128,7 @@ cat <<EOF > ${{json_config}}
 }}
 EOF
 
-exec {zls} --config-path "${{json_config}}" "${{@}}"
+exec {zls} "${{@}}" --config-path "${{json_config}}"
 """.format(
         zig_lib_path = zig_lib_path,
         zig_exe_path = zig_exe_path,
