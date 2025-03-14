@@ -732,12 +732,32 @@ pub fn convolution(
     });
 }
 
+pub const BackendConfig = union(enum) {
+    string: [:0]const u8,
+    dict: mlir.DictionaryAttribute,
+
+    pub fn getApiVersion(self: BackendConfig) i32 {
+        return switch (self) {
+            .string => 1,
+            .dict => 4,
+        };
+    }
+
+    pub fn asAttr(self: BackendConfig, ctx: mlir.Context) mlir.Attribute {
+        return switch (self) {
+            .string => mlir.StringAttribute.init(ctx, self.string).as(mlir.Attribute).?,
+            .dict => self.dict.as(mlir.Attribute).?,
+        };
+    }
+};
+
 pub const CustomCallOpts = struct {
     call_target_name: [:0]const u8,
     has_side_effect: bool,
-    backend_config: [:0]const u8 = &.{},
-    api_version: i32,
-    output_operand_aliases: []const i64,
+    backend_config: BackendConfig = .{ .string = &.{} },
+    output_operand_aliases: []const i64 = &.{},
+    addional_attributes: []const mlir.AttrTuple = &.{},
+    api_version: ?i32 = null,
 };
 
 pub fn custom_call(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCallOpts, res_types: []const mlir.Type, location: mlir.Location) mlir.Operation {
@@ -750,36 +770,26 @@ pub fn custom_call(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCa
         output_operand_aliases[i] = OutputOperandAliasAttribute.init(ctx, &.{}, alias, &.{}).as(mlir.Attribute);
     }
 
+    var attrs = std.ArrayList(mlir.AttrTuple).init(allocator);
+    defer attrs.deinit();
+    attrs.appendSlice(&[_]mlir.AttrTuple{
+        .{ "api_version", mlir.IntegerAttribute(.i32).init(ctx, opts.api_version orelse opts.backend_config.getApiVersion()).as(mlir.Attribute).? },
+        .{ "call_target_name", mlir.StringAttribute.init(ctx, opts.call_target_name).as(mlir.Attribute).? },
+        .{ "has_side_effect", mlir.BoolAttribute.init(ctx, opts.has_side_effect).as(mlir.Attribute).? },
+        .{ "backend_config", opts.backend_config.asAttr(ctx) },
+        .{ "output_operand_aliases", mlir.ArrayAttribute.init(ctx, output_operand_aliases).as(mlir.Attribute).? },
+    }) catch unreachable;
+    attrs.appendSlice(opts.addional_attributes) catch unreachable;
+
     return mlir.Operation.make(ctx, "stablehlo.custom_call", .{
         .operands = inputs,
         .results = res_types,
-        .attributes = &.{
-            .{ "api_version", mlir.IntegerAttribute(.i32).init(ctx, opts.api_version).as(mlir.Attribute) },
-            .{ "call_target_name", mlir.StringAttribute.init(ctx, opts.call_target_name).as(mlir.Attribute) },
-            .{ "has_side_effect", mlir.BoolAttribute.init(ctx, opts.has_side_effect).as(mlir.Attribute) },
-            .{ "backend_config", mlir.StringAttribute.init(ctx, opts.backend_config).as(mlir.Attribute) },
-            .{ "output_operand_aliases", mlir.ArrayAttribute.init(ctx, output_operand_aliases).as(mlir.Attribute) },
-        },
+        .attributes = attrs.items,
         .location = location,
     });
 }
 
-pub fn sharding(ctx: mlir.Context, inputs: []const mlir.Value, sharding_spec: mlir.StringAttribute, res_types: []const mlir.Type, location: mlir.Location) mlir.Operation {
-    return mlir.Operation.make(ctx, "stablehlo.custom_call", .{
-        .operands = inputs,
-        .results = res_types,
-        .attributes = &.{
-            .{ "api_version", mlir.IntegerAttribute(.i32).init(ctx, 1).asAttr() },
-            .{ "call_target_name", mlir.StringAttribute.init(ctx, "Sharding").asAttr() },
-            .{ "has_side_effect", mlir.BoolAttribute.init(ctx, false).asAttr() },
-            .{ "backend_config", mlir.StringAttribute.init(ctx, &.{}).asAttr() },
-            .{ "output_operand_aliases", mlir.ArrayAttribute.init(ctx, &.{}).asAttr() },
-            .{ "mhlo.sharding", sharding_spec.asAttr() },
-        },
-        .location = location,
-    });
-}
-
+// todo: move out of stablehlo.zig when we start to implement the frontend
 pub fn annotate_device_placement(ctx: mlir.Context, inputs: []const mlir.Value, memory_kind: mlir.StringAttribute, res_types: []const mlir.Type, location: mlir.Location) mlir.Operation {
     const frontend_attributes = mlir.DictionaryAttribute.init(
         ctx,
@@ -787,19 +797,13 @@ pub fn annotate_device_placement(ctx: mlir.Context, inputs: []const mlir.Value, 
             mlir.NamedAttribute.init(mlir.Identifier.get(ctx, "_xla_buffer_placement"), memory_kind.asAttr()),
         },
     ).asAttr();
-    return mlir.Operation.make(ctx, "stablehlo.custom_call", .{
-        .operands = inputs,
-        .results = res_types,
-        .attributes = &.{
-            .{ "api_version", mlir.IntegerAttribute(.i32).init(ctx, 1).asAttr() },
-            .{ "call_target_name", mlir.StringAttribute.init(ctx, "annotate_device_placement").asAttr() },
-            .{ "has_side_effect", mlir.BoolAttribute.init(ctx, true).asAttr() },
-            .{ "backend_config", mlir.StringAttribute.init(ctx, &.{}).asAttr() },
-            .{ "output_operand_aliases", mlir.ArrayAttribute.init(ctx, &.{}).asAttr() },
-            .{ "mhlo.frontend_attributes", frontend_attributes },
-        },
-        .location = location,
-    });
+
+    return custom_call(ctx, inputs, .{
+        .call_target_name = "annotate_device_placement",
+        .has_side_effect = true,
+        .backend_config = .{ .string = &.{} },
+        .addional_attributes = &.{.{ "mhlo.frontend_attributes", frontend_attributes }},
+    }, res_types, location);
 }
 
 pub const DotDimensionNumbersAttribute = struct {

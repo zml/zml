@@ -789,10 +789,9 @@ pub fn identityCustomCall(name: [:0]const u8, input: Tensor, context: *anyopaque
         ctx.mlirCtx(),
         &.{input.value()},
         .{
-            .api_version = 1,
             .has_side_effect = false,
             .call_target_name = name,
-            .backend_config = backend_config[0..],
+            .backend_config = .{ .string = backend_config[0..] },
             .output_operand_aliases = &.{0},
         },
         &.{input.value().getType()},
@@ -835,16 +834,111 @@ pub fn addHostCallback(
         ctx.mlirCtx(),
         &.{input.value()},
         .{
-            .api_version = 1,
             .has_side_effect = false,
             .call_target_name = "zmlHostBufferCallback",
-            .backend_config = @ptrCast(std.mem.sliceAsBytes(&backend_config)),
+            .backend_config = .{ .string = @ptrCast(std.mem.sliceAsBytes(&backend_config)) },
             .output_operand_aliases = &.{0},
         },
         &.{input.value().getType()},
         loc,
     );
     return Tensor._result(input.shape(), op.result(0));
+}
+
+pub const TritonOps = struct {
+    debug: bool = false,
+    name: [:0]const u8,
+    ir: [:0]const u8,
+    grid: [3]i32,
+    num_stages: i32,
+    num_warps: i32,
+};
+
+/// Generate an MLIR call to the given member function with the given tensors.
+pub fn triton(inputs: anytype, ouputs: anytype, opts: TritonOps) [ouputs.len]Tensor {
+    const ctx = CompilationContext.current();
+
+    var values: [inputs.len]mlir.Value = undefined;
+    ctx.extractValues(&inputs, &values);
+
+    var res_types: [ouputs.len]mlir.Type = undefined;
+    var outputs: [ouputs.len]Tensor = undefined;
+
+    inline for (ouputs, 0..) |output, i| {
+        res_types[i] = mlir.ext.mlirType(ctx.mlirCtx(), output);
+    }
+
+    const attrs = mlir.DictionaryAttribute.init(ctx.mlirCtx(), &.{
+        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "name"), mlir.StringAttribute.init(ctx.mlirCtx(), opts.name).as(mlir.Attribute).?),
+        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "ir"), mlir.StringAttribute.init(ctx.mlirCtx(), opts.ir).as(mlir.Attribute).?),
+        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "grid_x"), mlir.IntegerAttribute(.i32).init(ctx.mlirCtx(), @intCast(opts.grid[0])).as(mlir.Attribute).?),
+        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "grid_y"), mlir.IntegerAttribute(.i32).init(ctx.mlirCtx(), @intCast(opts.grid[1])).as(mlir.Attribute).?),
+        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "grid_z"), mlir.IntegerAttribute(.i32).init(ctx.mlirCtx(), @intCast(opts.grid[2])).as(mlir.Attribute).?),
+        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "num_stages"), mlir.IntegerAttribute(.i32).init(ctx.mlirCtx(), @intCast(opts.num_stages)).as(mlir.Attribute).?),
+        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "num_warps"), mlir.IntegerAttribute(.i32).init(ctx.mlirCtx(), @intCast(opts.num_warps)).as(mlir.Attribute).?),
+    });
+
+    const op = dialect.stablehlo.custom_call(
+        ctx.mlirCtx(),
+        &values,
+        .{
+            .call_target_name = "__gpu$xla.gpu.triton",
+            .backend_config = .{ .dict = attrs },
+            .has_side_effect = false,
+        },
+        &res_types,
+        ctx.mlirCtx().location(@src()),
+    );
+
+    inline for (ouputs, 0..) |output, i| {
+        outputs[i] = Tensor._result(output, op.result(i));
+    }
+
+    return outputs;
+}
+
+test "triton" {
+    const zml = @import("zml.zig");
+    const platform = zml.testing.env();
+
+    const ir =
+        \\#triton_kernel = "#triton.kernel<grid({}, {}, {}) args({} *f32, {} *f32) -> ()>"
+        \\
+        \\module {
+        \\    tt.func @test(%a : *f32 {tt.divisibility = 16 : i32}, %b : *f32 {tt.divisibility = 16 : i32}) {
+        \\        attributes {{noinline = false}} {{
+        \\        %c0 = arith.constant 0 : i32
+        \\        %c1 = arith.constant 1 : i32
+        \\
+        \\        %data_a = tt.load %a[%c0] {cache = 1 : i32, evict = 1 : i32, isVolatile = false} : f32
+        \\        %data_b = tt.load %b[%c0] {cache = 1 : i32, evict = 1 : i32, isVolatile = false} : f32
+        \\        tt.store %a[%c0], %data_a : f32
+        \\        tt.store %b[%c0], %data_b : f32
+        \\
+        \\        tt.return
+        \\    }
+        \\}
+    ;
+
+    const TritonMod = struct {
+        pub fn forward(a: Tensor, b: Tensor) [2]Tensor {
+            return triton(.{ a, b }, .{ a.shape(), b.shape() }, .{
+                .debug = false,
+                .name = "test",
+                .ir = ir,
+                .grid = .{ 1, 1, 1 },
+                .num_stages = 1,
+                .num_warps = 1,
+            });
+        }
+    };
+
+    {
+        const a = try zml.Buffer.fromSlice(platform, .{ 2, 2 }, &[4]f32{ 1, 1, 2, 2 });
+        const b = try zml.Buffer.fromSlice(platform, .{ 2, 2 }, &[4]f32{ 1, 1, 1, 1 });
+        const results = try zml.testing.compileAndCall(platform, TritonMod.forward, .{ a, b });
+        try zml.testing.expectEqual(a, results[0]);
+    }
 }
 
 /// Generalized version of scatter to many inputs.
