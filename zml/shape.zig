@@ -149,7 +149,7 @@ pub const Shape = struct {
 
     pub fn rank(self: Shape) u4 {
         self.ensureDimsAndTagsAreSync();
-        return self._dims.len;
+        return @intCast(self._dims.len);
     }
 
     pub fn dim(self: Shape, ax: anytype) i64 {
