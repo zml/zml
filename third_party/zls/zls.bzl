@@ -1,17 +1,17 @@
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
-_VERSION = "0.13.0"
+_VERSION = "0.14.0"
 
 _ARCH = {
     "x86_64-linux": struct(
-        sha256 = "ec4c1b45caf88e2bcb9ebb16c670603cc596e4f621b96184dfbe837b39cd8410",
+        sha256 = "661f8d402ba3dc9b04b6e9bc3026495be7b838d2f18d148db2bd98bd699c1360",
         exec_compatible_with = [
             "@platforms//os:linux",
             "@platforms//cpu:x86_64",
         ],
     ),
     "aarch64-macos": struct(
-        sha256 = "9848514524f5e5d33997ac280b7d92388407209d4b8d4be3866dc3cf30ca6ca8",
+        sha256 = "dfb627e1f9603583678f552d8035a12dce878215c0a507b32d6f1b9d074d6c4d",
         exec_compatible_with = [
             "@platforms//os:macos",
             "@platforms//cpu:aarch64",
