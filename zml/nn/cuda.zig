@@ -125,8 +125,7 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
         &.{ q.value(), k.value(), v.value(), bias.value() },
         .{
             .call_target_name = "__cudnn$fmhaScaleBiasSoftmax",
-            .backend_config = backend_config,
-            .api_version = 2,
+            .backend_config = .{ .string = backend_config },
             .has_side_effect = false,
             .output_operand_aliases = &.{},
         },
