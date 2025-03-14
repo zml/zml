@@ -90,7 +90,7 @@ common_apt_packages = use_extension("//runtimes/common:packages.bzl", "common_ap
 use_repo(common_apt_packages, "libdrm-amdgpu1", "libdrm2", "libelf1", "libnuma1", "libtinfo6", "libzstd1", "zlib1g")
 
 cpu = use_extension("//runtimes/cpu:cpu.bzl", "cpu_pjrt_plugin")
-use_repo(cpu, "libpjrt_cpu_darwin_arm64", "libpjrt_cpu_linux_amd64")
+use_repo(cpu, "libpjrt_cpu_darwin_arm64", "libpjrt_cpu_darwin_amd64", "libpjrt_cpu_linux_amd64")
 
 cuda = use_extension("//runtimes/cuda:cuda.bzl", "cuda_packages")
 use_repo(cuda, "libpjrt_cuda")
@@ -108,7 +108,7 @@ neuron = use_extension("//runtimes/neuron:neuron.bzl", "neuron_packages")
 use_repo(neuron, "aws-neuronx-collectives", "aws-neuronx-runtime-lib")
 
 zls = use_extension("//third_party/zls:zls.bzl", "repo")
-use_repo(zls, "zls_aarch64-macos", "zls_x86_64-linux")
+use_repo(zls, "zls_aarch64-macos", "zls_x86_64-macos", "zls_x86_64-linux")
 
 register_toolchains("//third_party/zls:all")
 
@@ -138,6 +138,7 @@ rust.toolchain(
     edition = "2021",
     extra_target_triples = [
         "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
         "aarch64-unknown-linux-gnu",
         "x86_64-unknown-linux-gnu",
     ],
@@ -154,6 +155,7 @@ crate.from_cargo(
     manifests = ["//zml/tokenizer/hftokenizers:Cargo.toml"],
     supported_platform_triples = [
         "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
         "aarch64-unknown-linux-gnu",
         "x86_64-unknown-linux-gnu",
     ],
