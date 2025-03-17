@@ -862,7 +862,6 @@ pub const DotDimensionNumbersAttribute = struct {
 
     pub usingnamespace mlir.MlirHelpers(DotDimensionNumbersAttribute, .{
         .is_a_fn = c.stablehloAttributeIsADotDimensionNumbers,
-        .dump_fn = c.mlirAttributeDump,
     });
     const Self = DotDimensionNumbersAttribute;
     pub const asAttr = mlir.Attribute.fromAnyAttribute(Self);
@@ -927,7 +926,6 @@ pub const GatherDimensionNumbersAttribute = struct {
 
     pub usingnamespace mlir.MlirHelpers(GatherDimensionNumbersAttribute, .{
         .is_a_fn = c.stablehloAttributeIsAGatherDimensionNumbers,
-        .dump_fn = c.mlirAttributeDump,
     });
     const Self = GatherDimensionNumbersAttribute;
     pub const asAttr = mlir.Attribute.fromAnyAttribute(Self);
@@ -1010,7 +1008,6 @@ pub const ConvDimensionNumbersAttribute = struct {
 
     pub usingnamespace mlir.MlirHelpers(ConvDimensionNumbersAttribute, .{
         .is_a_fn = c.stablehloAttributeIsAConvDimensionNumbers,
-        .dump_fn = c.mlirAttributeDump,
     });
     const Self = ConvDimensionNumbersAttribute;
     pub const asAttr = mlir.Attribute.fromAnyAttribute(Self);
@@ -1100,7 +1097,6 @@ pub const OutputOperandAliasAttribute = struct {
 
     pub usingnamespace mlir.MlirHelpers(OutputOperandAliasAttribute, .{
         .is_a_fn = c.stablehloAttributeIsAOutputOperandAlias,
-        .dump_fn = c.mlirAttributeDump,
     });
     pub const asAttr = mlir.Attribute.fromAnyAttribute(OutputOperandAliasAttribute);
     pub const eql = mlir.Attribute.eqlAny(OutputOperandAliasAttribute);
@@ -1127,7 +1123,6 @@ pub const PrecisionAttribute = struct {
 
     pub usingnamespace mlir.MlirHelpers(PrecisionAttribute, .{
         .is_a_fn = c.stablehloAttributeIsAPrecisionAttr,
-        .dump_fn = c.mlirAttributeDump,
     });
     const Self = PrecisionAttribute;
     pub const asAttr = mlir.Attribute.fromAnyAttribute(Self);
@@ -1154,7 +1149,6 @@ pub const ComparisonDirection = struct {
 
     pub usingnamespace mlir.MlirHelpers(ComparisonDirection, .{
         .is_a_fn = c.stablehloAttributeIsAComparisonDirectionAttr,
-        .dump_fn = c.mlirAttributeDump,
     });
     const Self = ComparisonDirection;
     pub const asAttr = mlir.Attribute.fromAnyAttribute(Self);
@@ -1184,7 +1178,6 @@ pub const CompareType = struct {
 
     pub usingnamespace mlir.MlirHelpers(CompareType, .{
         .is_a_fn = c.stablehloAttributeIsAComparisonTypeAttr,
-        .dump_fn = c.mlirAttributeDump,
     });
     const Self = CompareType;
     pub const asAttr = mlir.Attribute.fromAnyAttribute(Self);
@@ -1212,7 +1205,6 @@ pub const Transpose = struct {
 
     pub usingnamespace mlir.MlirHelpers(Transpose, .{
         .is_a_fn = c.stablehloAttributeIsATransposeAttr,
-        .dump_fn = c.mlirAttributeDump,
     });
     const Self = Transpose;
     pub const asAttr = mlir.Attribute.fromAnyAttribute(Self);
@@ -1239,7 +1231,6 @@ pub const FftType = struct {
 
     pub usingnamespace mlir.MlirHelpers(FftType, .{
         .is_a_fn = c.stablehloAttributeIsAFftTypeAttr,
-        .dump_fn = c.mlirAttributeDump,
     });
     const Self = FftType;
     pub const asAttr = mlir.Attribute.fromAnyAttribute(Self);
@@ -1267,7 +1258,6 @@ pub const RngDistribution = struct {
 
     pub usingnamespace mlir.MlirHelpers(RngDistribution, .{
         .is_a_fn = c.stablehloAttributeIsARngDistributionAttr,
-        .dump_fn = c.mlirAttributeDump,
     });
     const Self = RngDistribution;
     pub const asAttr = mlir.Attribute.fromAnyAttribute(Self);
@@ -1293,7 +1283,6 @@ pub const RngAlgorithm = struct {
 
     pub usingnamespace mlir.MlirHelpers(RngAlgorithm, .{
         .is_a_fn = c.stablehloAttributeIsARngAlgorithmAttr,
-        .dump_fn = c.mlirAttributeDump,
     });
     const Self = RngAlgorithm;
     pub const asAttr = mlir.Attribute.fromAnyAttribute(Self);
