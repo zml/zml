@@ -36,16 +36,6 @@ pub fn successOr(res: c.MlirLogicalResult, err: anytype) !void {
     return if (res.value == 0) err;
 }
 
-pub fn MlirTypeMethods(comptime InnerT: type) type {
-    return struct {
-        is_null_fn: ?fn (InnerT) callconv(.C) bool = null,
-        is_a_fn: ?fn (InnerT) callconv(.C) bool = null,
-        equal_fn: ?fn (InnerT, InnerT) callconv(.C) bool = null,
-        dump_fn: ?fn (InnerT) callconv(.C) void = null,
-        deinit_fn: ?fn (InnerT) callconv(.C) void = null,
-    };
-}
-
 /// Alternative to MlirWrapperType
 pub const MlirStrCallback = fn (c.MlirStringRef, ?*anyopaque) callconv(.C) void;
 
@@ -65,7 +55,6 @@ fn MlirHelpersMethods(OuterT: type) type {
 
         is_null_fn: ?fn (InnerT) callconv(.C) bool = null,
         is_a_fn: ?fn (InnerT) callconv(.C) bool = null,
-        deinit_fn: ?fn (InnerT) callconv(.C) void = null,
         dump_fn: ?fn (InnerT) callconv(.C) void = null,
     };
 }
@@ -92,13 +81,6 @@ pub fn MlirHelpers(comptime OuterT: type, comptime methods: MlirHelpersMethods(O
                 return if (is_null(raw)) null else OuterT.wrap(raw);
             }
         } else struct {};
-
-        pub usingnamespace if (Methods.deinit_fn) |_deinit| struct {
-            pub inline fn deinit(self: *OuterT) void {
-                _deinit(self.inner());
-                self.* = undefined;
-            }
-        } else struct {};
     };
 }
 
@@ -106,9 +88,9 @@ pub const Registry = struct {
     _inner: c.MlirDialectRegistry,
     pub usingnamespace MlirHelpers(Registry, .{
         .is_null_fn = c.mlirDialectRegistryIsNull,
-        .deinit_fn = c.mlirDialectRegistryDestroy,
     });
     const Self = Registry;
+    pub const deinit = deinitHelper(Registry, c.mlirDialectRegistryDestroy);
 
     pub fn init() !Self {
         return Self.wrapOr(c.mlirDialectRegistryCreate()) orelse Error.MlirUnexpected;
@@ -119,9 +101,9 @@ pub const Context = struct {
     _inner: c.MlirContext,
     pub usingnamespace MlirHelpers(Context, .{
         .is_null_fn = c.mlirContextIsNull,
-        .deinit_fn = c.mlirContextDestroy,
     });
     const Self = Context;
+    pub const deinit = deinitHelper(Context, c.mlirContextDestroy);
 
     pub fn init() !Self {
         return Self.wrapOr(c.mlirContextCreate()) orelse Error.MlirUnexpected;
@@ -166,9 +148,10 @@ pub const Module = struct {
     _inner: c.MlirModule,
     pub usingnamespace MlirHelpers(Module, .{
         .is_null_fn = c.mlirModuleIsNull,
-        .deinit_fn = c.mlirModuleDestroy,
     });
+
     const Self = Module;
+    pub const deinit = deinitHelper(Module, c.mlirModuleDestroy);
 
     pub fn init(loc: Location) Self {
         return Self.wrap(c.mlirModuleCreateEmpty(loc.inner()));
@@ -202,8 +185,9 @@ pub const PassManager = struct {
 
     pub usingnamespace MlirHelpers(PassManager, .{
         .is_null_fn = c.mlirPassManagerIsNull,
-        .deinit_fn = c.mlirPassManagerDestroy,
     });
+
+    pub const deinit = deinitHelper(PassManager, c.mlirPassManagerDestroy);
     const Self = PassManager;
 
     pub fn init(ctx: Context) !Self {
@@ -764,10 +748,11 @@ pub const Operation = struct {
         Operation,
         .{
             .is_null_fn = c.mlirOperationIsNull,
-            .deinit_fn = c.mlirOperationDestroy,
             .dump_fn = c.mlirOperationDump,
         },
     );
+
+    pub const deinit = deinitHelper(Operation, c.mlirOperationDestroy);
 
     pub const eql = Attribute.eqlAny(Self);
 
@@ -1098,8 +1083,9 @@ pub const Region = struct {
     _inner: c.MlirRegion,
     pub usingnamespace MlirHelpers(Region, .{
         .is_null_fn = c.mlirRegionIsNull,
-        .deinit_fn = c.mlirRegionDestroy,
     });
+
+    pub const deinit = deinitHelper(Region, c.mlirRegionDestroy);
 
     const Self = Region;
 
@@ -1672,8 +1658,9 @@ pub const Block = struct {
     _inner: c.MlirBlock,
     pub usingnamespace MlirHelpers(Block, .{
         .is_null_fn = c.mlirBlockIsNull,
-        .deinit_fn = c.mlirBlockDestroy,
     });
+
+    pub const deinit = deinitHelper(Block, c.mlirBlockDestroy);
 
     pub const eql = eqlHelper(Block, c.mlirBlockEqual);
 
@@ -1760,4 +1747,13 @@ pub fn eqlHelper(T: type, equal_fn: fn (@FieldType(T, "_inner"), @FieldType(T, "
             return equal_fn(a._inner, b._inner);
         }
     }.eql;
+}
+
+pub fn deinitHelper(T: type, deinit_fn: fn (@FieldType(T, "_inner")) callconv(.C) void) fn (*T) void {
+    return struct {
+        fn deinit(a: *T) void {
+            deinit_fn(a._inner);
+            a.* = undefined;
+        }
+    }.deinit;
 }
