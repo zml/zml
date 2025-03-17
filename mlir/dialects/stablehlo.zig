@@ -160,10 +160,10 @@ pub const DotAlgorithm = struct {
         const elem_type = tensor_type.getElementType();
 
         return mlir.Attribute.wrap(c.stablehloDotAlgorithmGet(
-            ctx.inner(),
-            elem_type.inner(),
-            elem_type.inner(),
-            self.accumulation.asType(ctx).inner(),
+            ctx._inner,
+            elem_type._inner,
+            elem_type._inner,
+            self.accumulation.asType(ctx)._inner,
             self.component_count,
             self.component_count,
             self.num_primitive_operations,
@@ -359,7 +359,7 @@ pub const ScatterArgs = struct {
     pub fn getScatterDimensionNumbers(self: ScatterArgs, ctx: mlir.Context) mlir.Attribute {
         return mlir.Attribute.wrap(
             c.stablehloScatterDimensionNumbersGet(
-                ctx.inner(),
+                ctx._inner,
                 @intCast(self.update_window_dims.len),
                 self.update_window_dims.ptr,
                 @intCast(self.inserted_window_dims.len),
@@ -876,7 +876,7 @@ pub const DotDimensionNumbersAttribute = struct {
     }) Self {
         return Self.wrap(
             c.stablehloDotDimensionNumbersGet(
-                ctx.inner(),
+                ctx._inner,
                 @intCast(args.lhs_batching_dimensions.len),
                 args.lhs_batching_dimensions.ptr,
                 @intCast(args.rhs_batching_dimensions.len),
@@ -890,35 +890,35 @@ pub const DotDimensionNumbersAttribute = struct {
     }
 
     pub fn getLhsBatchingDimensionsSize(self: Self) usize {
-        return @intCast(c.stablehloDotDimensionNumbersGetLhsBatchingDimensionsSize(self.inner()));
+        return @intCast(c.stablehloDotDimensionNumbersGetLhsBatchingDimensionsSize(self._inner));
     }
 
     pub fn getLhsBatchingDimensionsElem(self: Self, pos: usize) i64 {
-        return c.stablehloDotDimensionNumbersGetLhsBatchingDimensionsElem(self.inner(), @intCast(pos));
+        return c.stablehloDotDimensionNumbersGetLhsBatchingDimensionsElem(self._inner, @intCast(pos));
     }
 
     pub fn getRhsBatchingDimensionsSize(self: Self) usize {
-        return @intCast(c.stablehloDotDimensionNumbersGetRhsBatchingDimensionsSize(self.inner()));
+        return @intCast(c.stablehloDotDimensionNumbersGetRhsBatchingDimensionsSize(self._inner));
     }
 
     pub fn getRhsBatchingDimensionsElem(self: Self, pos: usize) i64 {
-        return c.stablehloDotDimensionNumbersGetRhsBatchingDimensionsElem(self.inner(), @intCast(pos));
+        return c.stablehloDotDimensionNumbersGetRhsBatchingDimensionsElem(self._inner, @intCast(pos));
     }
 
     pub fn getLhsContractingDimensionsSize(self: Self) usize {
-        return @intCast(c.stablehloDotDimensionNumbersGetLhsContractingDimensionsSize(self.inner()));
+        return @intCast(c.stablehloDotDimensionNumbersGetLhsContractingDimensionsSize(self._inner));
     }
 
     pub fn getLhsContractingDimensionsElem(self: Self, pos: usize) i64 {
-        return c.stablehloDotDimensionNumbersGetLhsContractingDimensionsElem(self.inner(), @intCast(pos));
+        return c.stablehloDotDimensionNumbersGetLhsContractingDimensionsElem(self._inner, @intCast(pos));
     }
 
     pub fn getRhsContractingDimensionsSize(self: Self) usize {
-        return @intCast(c.stablehloDotDimensionNumbersGetRhsContractingDimensionsSize(self.inner()));
+        return @intCast(c.stablehloDotDimensionNumbersGetRhsContractingDimensionsSize(self._inner));
     }
 
     pub fn getRhsContractingDimensionsElem(self: Self, pos: usize) i64 {
-        return c.stablehloDotDimensionNumbersGetRhsContractingDimensionsElem(self.inner(), @intCast(pos));
+        return c.stablehloDotDimensionNumbersGetRhsContractingDimensionsElem(self._inner, @intCast(pos));
     }
 };
 
@@ -944,7 +944,7 @@ pub const GatherDimensionNumbersAttribute = struct {
     ) Self {
         return Self.wrap(
             c.stablehloGatherDimensionNumbersGet(
-                ctx.inner(),
+                ctx._inner,
                 @intCast(offset_dims.len),
                 offset_dims.ptr,
                 @intCast(collapsed_slice_dims.len),
@@ -961,47 +961,47 @@ pub const GatherDimensionNumbersAttribute = struct {
     }
 
     pub fn getOffsetDimsSize(self: Self) usize {
-        return @intCast(c.stablehloGatherDimensionNumbersGetOffsetDimsSize(self.inner()));
+        return @intCast(c.stablehloGatherDimensionNumbersGetOffsetDimsSize(self._inner));
     }
 
     pub fn getOffsetDimsElem(self: Self, pos: usize) i64 {
-        return c.stablehloGatherDimensionNumbersGetOffsetDimsElem(self.inner(), @intCast(pos));
+        return c.stablehloGatherDimensionNumbersGetOffsetDimsElem(self._inner, @intCast(pos));
     }
 
     pub fn getCollapsedSliceDimsSize(self: Self) usize {
-        return @intCast(c.stablehloGatherDimensionNumbersGetCollapsedSliceDimsSize(self.inner()));
+        return @intCast(c.stablehloGatherDimensionNumbersGetCollapsedSliceDimsSize(self._inner));
     }
 
     pub fn getCollapsedSliceDimsElem(self: Self, pos: usize) i64 {
-        return c.stablehloGatherDimensionNumbersGetCollapsedSliceDimsElem(self.inner(), @intCast(pos));
+        return c.stablehloGatherDimensionNumbersGetCollapsedSliceDimsElem(self._inner, @intCast(pos));
     }
 
     pub fn getStartIndexMapSize(self: Self) usize {
-        return @intCast(c.stablehloGatherDimensionNumbersGetStartIndexMapSize(self.inner()));
+        return @intCast(c.stablehloGatherDimensionNumbersGetStartIndexMapSize(self._inner));
     }
 
     pub fn getOperandBatchingDimsSize(self: Self) usize {
-        return @intCast(c.stablehloGatherDimensionNumbersGetOperandBatchingDimsSize(self.inner()));
+        return @intCast(c.stablehloGatherDimensionNumbersGetOperandBatchingDimsSize(self._inner));
     }
 
     pub fn getOperandBatchingDimsElem(self: Self, pos: usize) i64 {
-        return c.stablehloGatherDimensionNumbersGetOperandBatchingDimsElem(self.inner(), @intCast(pos));
+        return c.stablehloGatherDimensionNumbersGetOperandBatchingDimsElem(self._inner, @intCast(pos));
     }
 
     pub fn getStartIndicesBatchingDimsSize(self: Self) usize {
-        return @intCast(c.stablehloGatherDimensionNumbersGetStartIndicesBatchingDimsSize(self.inner()));
+        return @intCast(c.stablehloGatherDimensionNumbersGetStartIndicesBatchingDimsSize(self._inner));
     }
 
     pub fn getStartIndicesBatchingDimsElem(self: Self, pos: usize) i64 {
-        return c.stablehloGatherDimensionNumbersGetStartIndicesBatchingDimsElem(self.inner(), @intCast(pos));
+        return c.stablehloGatherDimensionNumbersGetStartIndicesBatchingDimsElem(self._inner, @intCast(pos));
     }
 
     pub fn getStartIndexMapElem(self: Self, pos: usize) i64 {
-        return c.stablehloGatherDimensionNumbersGetStartIndexMapElem(self.inner(), @intCast(pos));
+        return c.stablehloGatherDimensionNumbersGetStartIndexMapElem(self._inner, @intCast(pos));
     }
 
     pub fn getIndexVectorDim(self: Self) usize {
-        return @intCast(c.stablehloGatherDimensionNumbersGetIndexVectorDim(self.inner()));
+        return @intCast(c.stablehloGatherDimensionNumbersGetIndexVectorDim(self._inner));
     }
 };
 
@@ -1029,7 +1029,7 @@ pub const ConvDimensionNumbersAttribute = struct {
     }) Self {
         return Self.wrap(
             c.stablehloConvDimensionNumbersGet(
-                ctx.inner(),
+                ctx._inner,
                 args.input_batch_dimension,
                 args.input_feature_dimension,
                 @intCast(args.input_spatial_dimensions.len),
@@ -1047,51 +1047,51 @@ pub const ConvDimensionNumbersAttribute = struct {
     }
 
     pub fn getInputBatchDimension(self: Self) i64 {
-        return c.stablehloConvDimensionNumbersGetInputBatchDimension(self.inner());
+        return c.stablehloConvDimensionNumbersGetInputBatchDimension(self._inner);
     }
 
     pub fn getInputFeatureDimension(self: Self) i64 {
-        return c.stablehloConvDimensionNumbersGetInputFeatureDimension(self.inner());
+        return c.stablehloConvDimensionNumbersGetInputFeatureDimension(self._inner);
     }
 
     pub fn getInputSpatialDimensionsSize(self: Self) usize {
-        return @intCast(c.stablehloConvDimensionNumbersGetInputSpatialDimensionsSize(self.inner()));
+        return @intCast(c.stablehloConvDimensionNumbersGetInputSpatialDimensionsSize(self._inner));
     }
 
     pub fn getInputSpatialDimensionsElem(self: Self, pos: usize) i64 {
-        return c.stablehloConvDimensionNumbersGetInputSpatialDimensionsElem(self.inner(), @intCast(pos));
+        return c.stablehloConvDimensionNumbersGetInputSpatialDimensionsElem(self._inner, @intCast(pos));
     }
 
     pub fn getKernelInputFeatureDimension(self: Self) i64 {
-        return c.stablehloConvDimensionNumbersGetKernelInputFeatureDimension(self.inner());
+        return c.stablehloConvDimensionNumbersGetKernelInputFeatureDimension(self._inner);
     }
 
     pub fn getKernelOutputFeatureDimension(self: Self) i64 {
-        return c.stablehloConvDimensionNumbersGetKernelOutputFeatureDimension(self.inner());
+        return c.stablehloConvDimensionNumbersGetKernelOutputFeatureDimension(self._inner);
     }
 
     pub fn getKernelSpatialDimensionsSize(self: Self) usize {
-        return @intCast(c.stablehloConvDimensionNumbersGetKernelSpatialDimensionsSize(self.inner()));
+        return @intCast(c.stablehloConvDimensionNumbersGetKernelSpatialDimensionsSize(self._inner));
     }
 
     pub fn getKernelSpatialDimensionsElem(self: Self, pos: usize) i64 {
-        return c.stablehloConvDimensionNumbersGetKernelSpatialDimensionsElem(self.inner(), @intCast(pos));
+        return c.stablehloConvDimensionNumbersGetKernelSpatialDimensionsElem(self._inner, @intCast(pos));
     }
 
     pub fn getOutputBatchDimension(self: Self) i64 {
-        return c.stablehloConvDimensionNumbersGetOutputBatchDimension(self.inner());
+        return c.stablehloConvDimensionNumbersGetOutputBatchDimension(self._inner);
     }
 
     pub fn getOutputFeatureDimension(self: Self) i64 {
-        return c.stablehloConvDimensionNumbersGetOutputFeatureDimension(self.inner());
+        return c.stablehloConvDimensionNumbersGetOutputFeatureDimension(self._inner);
     }
 
     pub fn getOutputSpatialDimensionsSize(self: Self) usize {
-        return @intCast(c.stablehloConvDimensionNumbersGetOutputSpatialDimensionsSize(self.inner()));
+        return @intCast(c.stablehloConvDimensionNumbersGetOutputSpatialDimensionsSize(self._inner));
     }
 
     pub fn getOutputSpatialDimensionsElem(self: Self, pos: usize) i64 {
-        return c.stablehloConvDimensionNumbersGetOutputSpatialDimensionsElem(self.inner(), @intCast(pos));
+        return c.stablehloConvDimensionNumbersGetOutputSpatialDimensionsElem(self._inner, @intCast(pos));
     }
 };
 
@@ -1112,7 +1112,7 @@ pub const OutputOperandAliasAttribute = struct {
         operand_tuple_indices: []const i64,
     ) OutputOperandAliasAttribute {
         return OutputOperandAliasAttribute.wrap(c.stablehloOutputOperandAliasGet(
-            ctx.inner(),
+            ctx._inner,
             @intCast(output_tuple_indices.len),
             output_tuple_indices.ptr,
             @intCast(operand_index),
@@ -1140,11 +1140,11 @@ pub const PrecisionAttribute = struct {
     };
 
     pub fn init(ctx: mlir.Context, value: Precision) Self {
-        return Self.wrap(c.stablehloPrecisionAttrGet(ctx.inner(), mlir.stringRef(@tagName(value))));
+        return Self.wrap(c.stablehloPrecisionAttrGet(ctx._inner, mlir.stringRef(@tagName(value))));
     }
 
     pub fn getValue(self: Self) Precision {
-        const value = mlir.fromStringRef(c.stablehloPrecisionAttrGetValue(self.inner()));
+        const value = mlir.fromStringRef(c.stablehloPrecisionAttrGetValue(self._inner));
         return std.meta.stringToEnum(Precision, value) orelse unreachable;
     }
 };
@@ -1170,11 +1170,11 @@ pub const ComparisonDirection = struct {
     };
 
     pub fn init(ctx: mlir.Context, value: Direction) Self {
-        return Self.wrap(c.stablehloComparisonDirectionAttrGet(ctx.inner(), mlir.stringRef(@tagName(value))));
+        return Self.wrap(c.stablehloComparisonDirectionAttrGet(ctx._inner, mlir.stringRef(@tagName(value))));
     }
 
     pub fn getValue(self: Self) Direction {
-        const value = mlir.fromStringRef(c.stablehloComparisonDirectionAttrGetValue(self.inner()));
+        const value = mlir.fromStringRef(c.stablehloComparisonDirectionAttrGetValue(self._inner));
         return std.meta.stringToEnum(Direction, value) orelse unreachable;
     }
 };
@@ -1198,11 +1198,11 @@ pub const CompareType = struct {
     };
 
     pub fn init(ctx: mlir.Context, value: Type) Self {
-        return Self.wrap(c.stablehloComparisonTypeAttrGet(ctx.inner(), mlir.stringRef(@tagName(value))));
+        return Self.wrap(c.stablehloComparisonTypeAttrGet(ctx._inner, mlir.stringRef(@tagName(value))));
     }
 
     pub fn getValue(self: Self) Type {
-        const value = mlir.fromStringRef(c.stablehloComparisonTypeAttrGetValue(self.inner()));
+        const value = mlir.fromStringRef(c.stablehloComparisonTypeAttrGetValue(self._inner));
         return std.meta.stringToEnum(Type, value) orelse unreachable;
     }
 };
@@ -1225,11 +1225,11 @@ pub const Transpose = struct {
     };
 
     pub fn init(ctx: mlir.Context, value: Type) Self {
-        return Self.wrap(c.stablehloTransposeAttrGet(ctx.inner(), mlir.stringRef(@tagName(value))));
+        return Self.wrap(c.stablehloTransposeAttrGet(ctx._inner, mlir.stringRef(@tagName(value))));
     }
 
     pub fn getValue(self: Self) Type {
-        const value = mlir.fromStringRef(c.stablehloTransposeAttrGetValue(self.inner()));
+        const value = mlir.fromStringRef(c.stablehloTransposeAttrGetValue(self._inner));
         return std.meta.stringToEnum(Type, value) orelse unreachable;
     }
 };
@@ -1253,11 +1253,11 @@ pub const FftType = struct {
     };
 
     pub fn init(ctx: mlir.Context, value: Type) Self {
-        return Self.wrap(c.stablehloFftTypeAttrGet(ctx.inner(), mlir.stringRef(@tagName(value))));
+        return Self.wrap(c.stablehloFftTypeAttrGet(ctx._inner, mlir.stringRef(@tagName(value))));
     }
 
     pub fn getValue(self: Self) Type {
-        const value = mlir.fromStringRef(c.stablehloFftTypeAttrGetValue(self.inner()));
+        const value = mlir.fromStringRef(c.stablehloFftTypeAttrGetValue(self._inner));
         return std.meta.stringToEnum(Type, value) orelse unreachable;
     }
 };
@@ -1279,11 +1279,11 @@ pub const RngDistribution = struct {
     };
 
     pub fn init(ctx: mlir.Context, value: Type) Self {
-        return Self.wrap(c.stablehloRngDistributionAttrGet(ctx.inner(), mlir.stringRef(@tagName(value))));
+        return Self.wrap(c.stablehloRngDistributionAttrGet(ctx._inner, mlir.stringRef(@tagName(value))));
     }
 
     pub fn getValue(self: Self) Type {
-        const value = mlir.fromStringRef(c.stablehloRngDistributionAttrGetValue(self.inner()));
+        const value = mlir.fromStringRef(c.stablehloRngDistributionAttrGetValue(self._inner));
         return std.meta.stringToEnum(Type, value) orelse unreachable;
     }
 };
@@ -1306,11 +1306,11 @@ pub const RngAlgorithm = struct {
     };
 
     pub fn init(ctx: mlir.Context, value: Type) Self {
-        return Self.wrap(c.stablehloRngAlgorithmAttrGet(ctx.inner(), mlir.stringRef(@tagName(value))));
+        return Self.wrap(c.stablehloRngAlgorithmAttrGet(ctx._inner, mlir.stringRef(@tagName(value))));
     }
 
     pub fn getValue(self: Self) Type {
-        const value = mlir.fromStringRef(c.stablehloRngAlgorithmAttrGetValue(self.inner()));
+        const value = mlir.fromStringRef(c.stablehloRngAlgorithmAttrGetValue(self._inner));
         return std.meta.stringToEnum(Type, value) orelse unreachable;
     }
 };
