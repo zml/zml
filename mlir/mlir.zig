@@ -89,22 +89,6 @@ pub fn MlirHelpers(comptime OuterT: type, comptime methods: MlirHelpersMethods(O
             return &self._inner;
         }
 
-        pub inline fn is_a(self: OuterT, comptime otherT: type) bool {
-            if (otherT.Methods.is_a_fn) |is_a_fn| {
-                return is_a_fn(self.inner());
-            }
-            return false;
-        }
-
-        pub inline fn as(self: OuterT, comptime OtherT: type) OtherT {
-            if (OtherT.Methods.is_a_fn) |is_a_fn| {
-                stdx.debug.assert(is_a_fn(self.inner()), "Wrongly tried to cast {} into {}", .{ OuterT, OtherT });
-                return OtherT.wrap(self.inner());
-            }
-            // if the other type doesn't have an is_a_fn, try.
-            return OtherT.wrap(self.inner());
-        }
-
         pub usingnamespace if (Methods.is_null_fn) |is_null| struct {
             pub inline fn wrapOr(raw: InnerT) ?OuterT {
                 return if (is_null(raw)) null else OuterT.wrap(raw);
@@ -339,12 +323,12 @@ pub const AttrTuple = struct { [:0]const u8, Attribute };
 
 pub const Attribute = struct {
     _inner: c.MlirAttribute,
+
     pub usingnamespace MlirHelpers(Attribute, .{
         .is_null_fn = c.mlirAttributeIsNull,
         .dump_fn = c.mlirAttributeDump,
         .equal_fn = c.mlirAttributeEqual,
     });
-    const Self = Attribute;
 
     pub fn parse(ctx: Context, attr: [:0]const u8) !Attribute {
         return Attribute.wrapOr(
@@ -352,8 +336,23 @@ pub const Attribute = struct {
         ) orelse Error.InvalidMlir;
     }
 
-    pub fn getNull() Self {
-        return Self.wrap(c.mlirAttributeGetNull());
+    pub fn getNull() Attribute {
+        return Attribute.wrap(c.mlirAttributeGetNull());
+    }
+
+    pub fn as(generic: Type, SpecificAttr: type) ?SpecificAttr {
+        if (SpecificAttr.Methods.is_a_fn) |is_a_fn| {
+            return if (is_a_fn(generic._inner)) .{ ._inner = generic._inner } else null;
+        }
+        @compileError("Mlir subclass of attribute need `is_a_fn` attribute: " ++ @typeName(SpecificAttr));
+    }
+
+    pub fn fromAnyAttribute(SpecificAttr: type) fn (x: SpecificAttr) Attribute {
+        return struct {
+            fn cast(x: SpecificAttr) Attribute {
+                return .{ ._inner = x._inner };
+            }
+        }.cast;
     }
 };
 
@@ -368,6 +367,8 @@ pub const NamedAttribute = struct {
             .attribute = attr.inner(),
         });
     }
+
+    pub const asAttr = Attribute.fromAnyAttribute(Self);
 };
 
 pub const StringAttribute = struct {
@@ -388,9 +389,7 @@ pub const StringAttribute = struct {
         return fromStringRef(c.mlirStringAttrGetValue(self.inner()));
     }
 
-    pub fn asAttr(self: StringAttribute) Attribute {
-        return .{ ._inner = self._inner };
-    }
+    pub const asAttr = Attribute.fromAnyAttribute(Self);
 };
 
 pub const UnitAttribute = struct {
@@ -406,6 +405,8 @@ pub const UnitAttribute = struct {
     pub fn init(ctx: Context) Self {
         return Self.wrap(c.mlirUnitAttrGet(ctx.inner()));
     }
+
+    pub const asAttr = Attribute.fromAnyAttribute(Self);
 };
 
 pub const BoolAttribute = struct {
@@ -426,9 +427,7 @@ pub const BoolAttribute = struct {
         return c.mlirBoolAttrGetValue(self.inner());
     }
 
-    pub fn asAttr(self: Self) Attribute {
-        return self.as(Attribute);
-    }
+    pub const asAttr = Attribute.fromAnyAttribute(Self);
 };
 
 pub const TypeAttribute = struct {
@@ -447,9 +446,7 @@ pub const TypeAttribute = struct {
         return Type.wrap(c.mlirAttributeGetType(self.inner()));
     }
 
-    pub fn asAttr(self: TypeAttribute) Attribute {
-        return self.as(Attribute);
-    }
+    pub const asAttr = Attribute.fromAnyAttribute(TypeAttribute);
 };
 
 pub const ArrayAttribute = struct {
@@ -596,6 +593,8 @@ pub fn DenseArrayAttribute(comptime dt: DenseArrayTypes) type {
             },
             else => struct {},
         };
+
+        pub const asAttr = Attribute.fromAnyAttribute(Attr);
     };
 }
 
@@ -670,6 +669,8 @@ pub fn DenseElementsAttribute(comptime dt: DenseElementsAttributeTypes) type {
         pub fn data(self: Attr) []const u8 {
             return std.mem.sliceAsBytes(self.constSlice());
         }
+
+        pub const asAttr = Attribute.fromAnyAttribute(Attr);
     };
 }
 
@@ -691,6 +692,8 @@ pub const FlatSymbolRefAttribute = struct {
     pub fn value(self: Self) []const u8 {
         return fromStringRef(c.mlirFlatSymbolRefAttrGetValue(self.inner()));
     }
+
+    pub const asAttr = Attribute.fromAnyAttribute(Self);
 };
 
 pub const OperationState = struct {
@@ -1255,6 +1258,21 @@ pub const Type = struct {
             c.mlirTypeParseGet(ctx.inner(), stringRef(str)),
         ) orelse Error.InvalidMlir;
     }
+
+    pub fn as(generic: Type, SpecificType: type) ?SpecificType {
+        if (SpecificType.Methods.is_a_fn) |is_a_fn| {
+            return if (is_a_fn(generic._inner)) .{ ._inner = generic._inner } else null;
+        }
+        @compileError("Mlir subclass of type need `is_a_fn` attribute: " ++ @typeName(SpecificType));
+    }
+
+    pub fn fromAnyType(SpecificType: type) fn (x: SpecificType) Type {
+        return struct {
+            fn cast(x: SpecificType) Type {
+                return .{ ._inner = x._inner };
+            }
+        }.cast;
+    }
 };
 
 pub const IndexType = struct {
@@ -1270,6 +1288,8 @@ pub const IndexType = struct {
     pub fn init(ctx: Context) IndexType {
         return IndexType.wrap(c.mlirIndexTypeGet(ctx.inner()));
     }
+
+    pub const asType = Type.fromAnyType(IndexType);
 };
 
 pub const IntegerTypes = enum {
@@ -1327,6 +1347,7 @@ pub fn IntegerType(comptime it: IntegerTypes) type {
             .dump_fn = c.mlirTypeDump,
             .equal_fn = c.mlirTypeEqual,
         });
+        pub const asType = Type.fromAnyType(Int);
         const IntegerTypeType = it;
 
         fn typeIsAIntegerExact(typ: c.MlirType) callconv(.C) bool {
@@ -1334,14 +1355,15 @@ pub fn IntegerType(comptime it: IntegerTypes) type {
             const is_sign = Config[2];
             return c.mlirTypeIsAInteger(typ) and (c.mlirIntegerTypeGetWidth(typ) == bit_width) and is_sign(typ);
         }
-        pub usingnamespace if (it != .unknown) struct {
-            pub const BitWidth = Config[0];
 
+        pub const BitWidth = Config[0];
+
+        pub const init = if (it != .unknown) struct {
             pub fn init(ctx: Context) Int {
                 const type_get = Config[1];
                 return Int.wrap(type_get(ctx.inner(), BitWidth));
             }
-        } else struct {};
+        }.init else {};
     };
 }
 
@@ -1358,7 +1380,7 @@ pub const FloatTypes = enum {
 
     pub fn asType(self: FloatTypes, ctx: Context) Type {
         return switch (self) {
-            inline else => |ft| FloatType(ft).init(ctx).as(Type),
+            inline else => |ft| FloatType(ft).init(ctx).asType(),
         };
     }
 };
@@ -1392,6 +1414,8 @@ pub fn FloatType(comptime ft: FloatTypes) type {
             const type_get = Config[1];
             return Self.wrap(type_get(ctx.inner()));
         }
+
+        pub const asType = Type.fromAnyType(Self);
     };
 }
 
@@ -1450,6 +1474,8 @@ pub fn ComplexType(comptime ct: ComplexTypes) type {
                 return Complex.wrap(type_get(ctx.inner()));
             }
         } else struct {};
+
+        pub const asType = Type.fromAnyType(Complex);
     };
 }
 
@@ -1479,6 +1505,8 @@ pub const TupleType = struct {
     pub fn getElementType(self: Self, index: usize) Type {
         return Type.wrap(c.mlirTupleTypeGetType(self.inner(), @intCast(index)));
     }
+
+    pub const asType = Type.fromAnyType(Self);
 };
 
 pub const FunctionType = struct {
@@ -1501,6 +1529,8 @@ pub const FunctionType = struct {
             @ptrCast(results.ptr),
         )) orelse Error.InvalidMlir;
     }
+
+    pub const asType = Type.fromAnyType(Self);
 };
 
 pub const RankedTensorType = struct {
@@ -1535,6 +1565,8 @@ pub const RankedTensorType = struct {
     pub fn getDimension(self: RankedTensorType, dim: usize) i64 {
         return c.mlirShapedTypeGetDimSize(self.inner(), @intCast(dim));
     }
+
+    pub const asType = Type.fromAnyType(RankedTensorType);
 };
 
 pub const Dialect = struct {
@@ -1709,3 +1741,11 @@ pub const Block = struct {
         }
     }
 };
+
+pub fn isA(MlirObject: type, Other: type) fn (MlirObject) bool {
+    return struct {
+        fn isA(x: MlirObject) bool {
+            return if (Other.Methods.is_a_fn) |is_a_fn| is_a_fn(x._inner) else false;
+        }
+    }.isA;
+}

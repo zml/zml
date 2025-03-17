@@ -123,7 +123,7 @@ pub const CompilationContext = struct {
 
         const loc = mlir_ctx.location(@src()).named(mlir_ctx, "main");
         const module = mlir.Module.init(loc);
-        module.op().setAttributeByName("sym_name", mlir.StringAttribute.init(mlir_ctx, "zml").as(mlir.Attribute));
+        module.op().setAttributeByName("sym_name", mlir.StringAttribute.init(mlir_ctx, "zml").asAttr());
 
         var canonicalizer = try mlir.PassManager.init(mlir_ctx);
         {
@@ -492,7 +492,7 @@ pub const CompilationContext = struct {
                     attributes[a].appendAssumeCapacity(
                         mlir.NamedAttribute.init(
                             mlir.Identifier.get(self.mlirCtx(), "tf.aliasing_output"),
-                            mlir.IntegerAttribute(.i32).init(self.mlirCtx(), @intCast(index)).as(mlir.Attribute),
+                            mlir.IntegerAttribute(.i32).init(self.mlirCtx(), @intCast(index)).asAttr(),
                         ),
                     );
                     // log.debug("attribute: {}", .{attributes[a].constSlice()});
