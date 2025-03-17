@@ -860,7 +860,7 @@ pub const DotDimensionNumbersAttribute = struct {
 
     pub const is_a_fn = c.stablehloAttributeIsADotDimensionNumbers;
     const Self = DotDimensionNumbersAttribute;
-    pub const asAttr = mlir.Attribute.fromAnyAttribute(Self);
+    pub const asAttr = mlir.Attribute.fromAny(Self);
     pub const eql = mlir.Attribute.eqlAny(Self);
 
     pub fn init(ctx: mlir.Context, args: struct {
@@ -922,7 +922,7 @@ pub const GatherDimensionNumbersAttribute = struct {
 
     pub const is_a_fn = c.stablehloAttributeIsAGatherDimensionNumbers;
     const Self = GatherDimensionNumbersAttribute;
-    pub const asAttr = mlir.Attribute.fromAnyAttribute(Self);
+    pub const asAttr = mlir.Attribute.fromAny(Self);
     pub const eql = mlir.Attribute.eqlAny(Self);
 
     pub fn init(
@@ -1002,7 +1002,7 @@ pub const ConvDimensionNumbersAttribute = struct {
 
     pub const is_a_fn = c.stablehloAttributeIsAConvDimensionNumbers;
     const Self = ConvDimensionNumbersAttribute;
-    pub const asAttr = mlir.Attribute.fromAnyAttribute(Self);
+    pub const asAttr = mlir.Attribute.fromAny(Self);
     pub const eql = mlir.Attribute.eqlAny(Self);
 
     pub fn init(ctx: mlir.Context, args: struct {
@@ -1088,7 +1088,7 @@ pub const OutputOperandAliasAttribute = struct {
     _inner: c.MlirAttribute,
 
     pub const is_a_fn = c.stablehloAttributeIsAOutputOperandAlias;
-    pub const asAttr = mlir.Attribute.fromAnyAttribute(OutputOperandAliasAttribute);
+    pub const asAttr = mlir.Attribute.fromAny(OutputOperandAliasAttribute);
     pub const eql = mlir.Attribute.eqlAny(OutputOperandAliasAttribute);
 
     pub fn init(
@@ -1113,7 +1113,7 @@ pub const PrecisionAttribute = struct {
 
     pub const is_a_fn = c.stablehloAttributeIsAPrecisionAttr;
     const Self = PrecisionAttribute;
-    pub const asAttr = mlir.Attribute.fromAnyAttribute(Self);
+    pub const asAttr = mlir.Attribute.fromAny(Self);
     pub const eql = mlir.Attribute.eqlAny(Self);
 
     pub const Precision = enum {
@@ -1137,7 +1137,7 @@ pub const ComparisonDirection = struct {
 
     pub const is_a_fn = c.stablehloAttributeIsAComparisonDirectionAttr;
     const Self = ComparisonDirection;
-    pub const asAttr = mlir.Attribute.fromAnyAttribute(Self);
+    pub const asAttr = mlir.Attribute.fromAny(Self);
     pub const eql = mlir.Attribute.eqlAny(Self);
 
     pub const Direction = enum {
@@ -1164,7 +1164,7 @@ pub const CompareType = struct {
 
     pub const is_a_fn = c.stablehloAttributeIsAComparisonTypeAttr;
     const Self = CompareType;
-    pub const asAttr = mlir.Attribute.fromAnyAttribute(Self);
+    pub const asAttr = mlir.Attribute.fromAny(Self);
     pub const eql = mlir.Attribute.eqlAny(Self);
 
     pub const Type = enum {
@@ -1189,7 +1189,7 @@ pub const Transpose = struct {
 
     pub const is_a_fn = c.stablehloAttributeIsATransposeAttr;
     const Self = Transpose;
-    pub const asAttr = mlir.Attribute.fromAnyAttribute(Self);
+    pub const asAttr = mlir.Attribute.fromAny(Self);
     pub const eql = mlir.Attribute.eqlAny(Self);
 
     pub const Type = enum {
@@ -1213,7 +1213,7 @@ pub const FftType = struct {
 
     pub const is_a_fn = c.stablehloAttributeIsAFftTypeAttr;
     const Self = FftType;
-    pub const asAttr = mlir.Attribute.fromAnyAttribute(Self);
+    pub const asAttr = mlir.Attribute.fromAny(Self);
     pub const eql = mlir.Attribute.eqlAny(Self);
 
     pub const Type = enum {
@@ -1238,7 +1238,7 @@ pub const RngDistribution = struct {
 
     pub const is_a_fn = c.stablehloAttributeIsARngDistributionAttr;
     const Self = RngDistribution;
-    pub const asAttr = mlir.Attribute.fromAnyAttribute(Self);
+    pub const asAttr = mlir.Attribute.fromAny(Self);
     pub const eql = mlir.Attribute.eqlAny(Self);
 
     pub const Type = enum {
@@ -1261,7 +1261,7 @@ pub const RngAlgorithm = struct {
 
     pub const is_a_fn = c.stablehloAttributeIsARngAlgorithmAttr;
     const Self = RngAlgorithm;
-    pub const asAttr = mlir.Attribute.fromAnyAttribute(Self);
+    pub const asAttr = mlir.Attribute.fromAny(Self);
     pub const eql = mlir.Attribute.eqlAny(Self);
 
     pub const Type = enum {

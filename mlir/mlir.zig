@@ -226,13 +226,15 @@ pub const Attribute = struct {
     }
 
     pub fn as(generic: Type, SpecificAttr: type) ?SpecificAttr {
-        if (SpecificAttr.Methods.is_a_fn) |is_a_fn| {
-            return if (is_a_fn(generic._inner)) .{ ._inner = generic._inner } else null;
-        }
-        @compileError("Mlir subclass of attribute need `is_a_fn` attribute: " ++ @typeName(SpecificAttr));
+        stdx.debug.assertComptime(@hasDecl(SpecificAttr, "is_a_fn"), "Mlir subclass of attribute need `is_a_fn` attribute: {}", .{SpecificAttr});
+        return if (SpecificAttr.is_a_fn(generic._inner))
+            .{ ._inner = generic._inner }
+        else
+            null;
     }
 
-    pub fn fromAnyAttribute(SpecificAttr: type) fn (x: SpecificAttr) Attribute {
+    pub fn fromAny(SpecificAttr: type) fn (x: SpecificAttr) Attribute {
+        stdx.debug.assertComptime(@hasDecl(SpecificAttr, "asAttr"), "Attribute.fromAny expects an attribute subclass, got: {}. Missing `asAttr` declaration.", .{SpecificAttr});
         return struct {
             fn cast(x: SpecificAttr) Attribute {
                 return .{ ._inner = x._inner };
@@ -247,6 +249,14 @@ pub const Attribute = struct {
             }
         }.eql;
     }
+
+    pub fn formatAny(SpecificType: type) fn (SpecificType, SpecificType) type {
+        return struct {
+            pub fn format(self: SpecificType, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+                return try Attribute.format(self.asAttr(), fmt, options, writer);
+            }
+        };
+    }
 };
 
 pub const NamedAttribute = struct {
@@ -260,7 +270,7 @@ pub const NamedAttribute = struct {
         } };
     }
 
-    pub const asAttr = Attribute.fromAnyAttribute(Self);
+    pub const asAttr = Attribute.fromAny(Self);
 };
 
 pub const StringAttribute = struct {
@@ -277,7 +287,7 @@ pub const StringAttribute = struct {
         return fromStringRef(c.mlirStringAttrGetValue(self._inner));
     }
 
-    pub const asAttr = Attribute.fromAnyAttribute(Self);
+    pub const asAttr = Attribute.fromAny(Self);
 };
 
 pub const UnitAttribute = struct {
@@ -289,14 +299,14 @@ pub const UnitAttribute = struct {
         return .{ ._inner = c.mlirUnitAttrGet(ctx._inner) };
     }
 
-    pub const asAttr = Attribute.fromAnyAttribute(Self);
+    pub const asAttr = Attribute.fromAny(Self);
 };
 
 pub const BoolAttribute = struct {
     _inner: c.MlirAttribute,
     pub const is_a_fn = c.mlirAttributeIsABool;
     const Self = BoolAttribute;
-    pub const asAttr = Attribute.fromAnyAttribute(Self);
+    pub const asAttr = Attribute.fromAny(Self);
     pub const eql = Attribute.eqlAny(Self);
 
     pub fn init(ctx: Context, value_: bool) Self {
@@ -321,14 +331,14 @@ pub const TypeAttribute = struct {
         return .{ ._inner = c.mlirAttributeGetType(self._inner) };
     }
 
-    pub const asAttr = Attribute.fromAnyAttribute(TypeAttribute);
+    pub const asAttr = Attribute.fromAny(TypeAttribute);
 };
 
 pub const ArrayAttribute = struct {
     _inner: c.MlirAttribute,
     pub const is_a_fn = c.mlirAttributeIsAArray;
     const Self = ArrayAttribute;
-    pub const asAttr = Attribute.fromAnyAttribute(Self);
+    pub const asAttr = Attribute.fromAny(Self);
     pub const eql = Attribute.eqlAny(Self);
 
     pub fn init(ctx: Context, attrs: []const Attribute) Self {
@@ -359,7 +369,7 @@ pub fn IntegerAttribute(comptime it: IntegerTypes) type {
         pub const IntegerTypeType = IntegerType(it);
         const IntAttr = @This();
 
-        pub const asAttr = Attribute.fromAnyAttribute(IntAttr);
+        pub const asAttr = Attribute.fromAny(IntAttr);
         pub const eql = Attribute.eqlAny(IntAttr);
 
         pub fn init(ctx: Context, value: i64) IntAttr {
@@ -438,18 +448,7 @@ pub fn DenseArrayAttribute(comptime dt: DenseArrayTypes) type {
             return @intCast(c.mlirDenseArrayGetNumElements(self._inner));
         }
 
-        pub usingnamespace switch (dt) {
-            .bool, .i64 => struct {
-                const DenseArray = DenseArrayAttribute(switch (dt) {
-                    .bool => .bool,
-                    .i64 => .i64,
-                    else => @compileError("DenseArrayAttribute: unreachable"),
-                });
-            },
-            else => struct {},
-        };
-
-        pub const asAttr = Attribute.fromAnyAttribute(Attr);
+        pub const asAttr = Attribute.fromAny(Attr);
     };
 }
 
@@ -521,7 +520,7 @@ pub fn DenseElementsAttribute(comptime dt: DenseElementsAttributeTypes) type {
             return std.mem.sliceAsBytes(self.constSlice());
         }
 
-        pub const asAttr = Attribute.fromAnyAttribute(Attr);
+        pub const asAttr = Attribute.fromAny(Attr);
     };
 }
 
@@ -539,7 +538,7 @@ pub const FlatSymbolRefAttribute = struct {
         return fromStringRef(c.mlirFlatSymbolRefAttrGetValue(self._inner));
     }
 
-    pub const asAttr = Attribute.fromAnyAttribute(Self);
+    pub const asAttr = Attribute.fromAny(Self);
 };
 
 pub const OperationState = struct {
@@ -1091,7 +1090,8 @@ pub const Type = struct {
         @compileError("Mlir subclass of type need `is_a_fn` attribute: " ++ @typeName(SpecificType));
     }
 
-    pub fn fromAnyType(SpecificType: type) fn (x: SpecificType) Type {
+    pub fn fromAny(SpecificType: type) fn (x: SpecificType) Type {
+        stdx.debug.assertComptime(@hasDecl(SpecificType, "asType"), "Type.fromAny expects a type subclass, got: {}. Missing `asAttr` declaration.", .{SpecificType});
         return struct {
             fn cast(x: SpecificType) Type {
                 return .{ ._inner = x._inner };
@@ -1106,19 +1106,26 @@ pub const Type = struct {
             }
         }.eql;
     }
+
+    pub fn formatAny(SpecificType: type) fn (SpecificType, SpecificType) type {
+        return struct {
+            pub fn format(self: SpecificType, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+                return try Type.format(self.asType(), fmt, options, writer);
+            }
+        };
+    }
 };
 
 pub const IndexType = struct {
     _inner: c.MlirType,
 
+    pub const asType = Type.fromAny(IndexType);
     pub const eql = Type.eqlAny(IndexType);
-    pub const format = helpers.format(IndexType, c.mlirTypePrint);
+    pub const format = Type.formatAny(IndexType).format;
 
     pub fn init(ctx: Context) IndexType {
         return .{ ._inner = c.mlirIndexTypeGet(ctx._inner) };
     }
-
-    pub const asType = Type.fromAnyType(IndexType);
 };
 
 pub const IntegerTypes = enum {
@@ -1172,7 +1179,7 @@ pub fn IntegerType(comptime it: IntegerTypes) type {
             else => typeIsAIntegerExact,
         };
 
-        pub const asType = Type.fromAnyType(Int);
+        pub const asType = Type.fromAny(Int);
         pub const eql = Type.eqlAny(Int);
         pub const format = helpers.format(Int, c.mlirTypePrint);
 
@@ -1231,7 +1238,7 @@ pub fn FloatType(comptime ft: FloatTypes) type {
 
         pub const is_a_fn = Config[0];
 
-        pub const asType = Type.fromAnyType(Self);
+        pub const asType = Type.fromAny(Self);
         pub const eql = Type.eqlAny(Self);
         pub const format = helpers.format(Self, c.mlirTypePrint);
 
@@ -1284,18 +1291,17 @@ pub fn ComplexType(comptime ct: ComplexTypes) type {
 
         pub const is_a_fn = Config[0];
 
-        pub const asType = Type.fromAnyType(Complex);
+        pub const asType = Type.fromAny(Complex);
         pub const eql = Type.eqlAny(Complex);
-        pub const format = Type.print(Complex, c.mlirTypePrint);
+        pub const format = Type.formatAny(Complex).format;
+        pub const ComplexTypeType: ComplexTypes = ct;
 
-        pub usingnamespace if (ct != .unknown) struct {
-            pub const ComplexTypeType = ct;
-
+        pub const init = if (ct != .unknown) struct {
             pub fn init(ctx: Context) Complex {
                 const type_get = Config[1];
                 return .{ ._inner = type_get(ctx._inner) };
             }
-        } else struct {};
+        }.init else {};
     };
 }
 
@@ -1321,14 +1327,14 @@ pub const TupleType = struct {
         return .{ ._inner = c.mlirTupleTypeGetType(self._inner, @intCast(index)) };
     }
 
-    pub const asType = Type.fromAnyType(Self);
+    pub const asType = Type.fromAny(Self);
 };
 
 pub const FunctionType = struct {
     _inner: c.MlirType,
     pub const is_a_fn = c.mlirTypeIsAFunction;
     const Self = FunctionType;
-    pub const asType = Type.fromAnyType(Self);
+    pub const asType = Type.fromAny(Self);
     pub const eql = Type.eqlAny(IndexType);
 
     pub fn init(ctx: Context, args: []const Type, results: []const Type) !Self {
@@ -1370,7 +1376,7 @@ pub const RankedTensorType = struct {
         return c.mlirShapedTypeGetDimSize(self._inner, @intCast(dim));
     }
 
-    pub const asType = Type.fromAnyType(RankedTensorType);
+    pub const asType = Type.fromAny(RankedTensorType);
 };
 
 pub const Dialect = struct {
