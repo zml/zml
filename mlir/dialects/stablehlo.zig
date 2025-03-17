@@ -98,7 +98,7 @@ pub fn cholesky(ctx: mlir.Context, value: mlir.Value, lower: bool, location: mli
         .operands = &.{value},
         .result_type_inference = true,
         .attributes = &.{
-            .{ "lower", mlir.IntegerAttribute(.i1).init(ctx, @intCast(@intFromBool(lower))).as(mlir.Attribute).? },
+            .{ "lower", mlir.IntegerAttribute(.i1).init(ctx, @intCast(@intFromBool(lower))).as(mlir.Attribute) },
         },
         .location = location,
     });
@@ -126,7 +126,7 @@ pub const DotPrecision = union(enum) {
             // When we specify the dot algorithm, we should not specify the precision.
             .algorithm => .DEFAULT,
         });
-        return precision.as(mlir.Attribute).?;
+        return precision.as(mlir.Attribute);
     }
 
     pub fn algorithmAttr(self: DotPrecision, ctx: mlir.Context, operand_type: mlir.Type) ?mlir.Attribute {
@@ -156,14 +156,14 @@ pub const DotAlgorithm = struct {
     };
 
     pub fn asAttr(self: DotAlgorithm, ctx: mlir.Context, operand_type: mlir.Type) mlir.Attribute {
-        const tensor_type = operand_type.as(mlir.RankedTensorType) orelse @panic("dot_general expects RankedTensor as input");
+        const tensor_type = operand_type.as(mlir.RankedTensorType);
         const elem_type = tensor_type.getElementType();
 
         return mlir.Attribute.wrap(c.stablehloDotAlgorithmGet(
             ctx.inner(),
             elem_type.inner(),
             elem_type.inner(),
-            self.accumulation.asType(ctx).?.inner(),
+            self.accumulation.asType(ctx).inner(),
             self.component_count,
             self.component_count,
             self.num_primitive_operations,
@@ -196,7 +196,7 @@ pub fn dot_general(
                 .rhs_batching_dimensions = opts.rhs_batching_dimensions,
                 .lhs_contracting_dimensions = opts.lhs_contracting_dimensions,
                 .rhs_contracting_dimensions = opts.rhs_contracting_dimensions,
-            }).as(mlir.Attribute).?,
+            }).as(mlir.Attribute),
         },
         .{ "precision_config", mlir.ArrayAttribute.init(ctx, &precisions).asAttr() },
         // keep algorithm as the last attribute so we can omit it when it's not set.
@@ -219,12 +219,12 @@ pub fn constant(
     location: mlir.Location,
 ) mlir.Operation {
     const attribute = switch (elem_type) {
-        inline else => |dt| mlir.DenseElementsAttribute(dt).fromRaw(result_type.as(mlir.Type).?, raw_bytes).as(mlir.Attribute).?,
+        inline else => |dt| mlir.DenseElementsAttribute(dt).init(result_type.as(mlir.Type), raw_bytes).as(mlir.Attribute),
     };
 
     return mlir.Operation.make(ctx, "stablehlo.constant", .{
         .operands = &.{},
-        .results = &.{result_type.as(mlir.Type).?},
+        .results = &.{result_type.as(mlir.Type)},
         .attributes = &.{.{ "value", attribute }},
         .location = location,
     });
@@ -243,7 +243,7 @@ pub fn broadcast_in_dim(ctx: mlir.Context, operand: mlir.Value, dims: []const i6
         .operands = &.{operand},
         .results = &.{result_type},
         .attributes = &.{
-            .{ "broadcast_dimensions", mlir.DenseArrayAttribute(.i64).init(ctx, dims).as(mlir.Attribute).? },
+            .{ "broadcast_dimensions", mlir.DenseArrayAttribute(.i64).init(ctx, dims).as(mlir.Attribute) },
         },
         .location = location,
     });
@@ -254,7 +254,7 @@ pub fn transpose(ctx: mlir.Context, value: mlir.Value, result_type: mlir.Type, l
         .operands = &.{value},
         .results = &.{result_type},
         .attributes = &.{
-            .{ "permutation", mlir.DenseArrayAttribute(.i64).init(ctx, opts.permutation).as(mlir.Attribute).? },
+            .{ "permutation", mlir.DenseArrayAttribute(.i64).init(ctx, opts.permutation).as(mlir.Attribute) },
         },
         .location = location,
     });
@@ -265,9 +265,9 @@ pub fn slice(ctx: mlir.Context, operand: mlir.Value, start_indices: []const i64,
         .operands = &.{operand},
         .results = &.{result_type},
         .attributes = &.{
-            .{ "start_indices", mlir.DenseArrayAttribute(.i64).init(ctx, start_indices).as(mlir.Attribute).? },
-            .{ "limit_indices", mlir.DenseArrayAttribute(.i64).init(ctx, limit_indices).as(mlir.Attribute).? },
-            .{ "strides", mlir.DenseArrayAttribute(.i64).init(ctx, strides).as(mlir.Attribute).? },
+            .{ "start_indices", mlir.DenseArrayAttribute(.i64).init(ctx, start_indices).as(mlir.Attribute) },
+            .{ "limit_indices", mlir.DenseArrayAttribute(.i64).init(ctx, limit_indices).as(mlir.Attribute) },
+            .{ "strides", mlir.DenseArrayAttribute(.i64).init(ctx, strides).as(mlir.Attribute) },
         },
         .location = location,
     });
@@ -278,7 +278,7 @@ pub fn concatenate(ctx: mlir.Context, inputs: []const mlir.Value, dimension: i64
         .operands = inputs,
         .result_type_inference = true,
         .attributes = &.{
-            .{ "dimension", mlir.IntegerAttribute(.i64).init(ctx, dimension).as(mlir.Attribute).? },
+            .{ "dimension", mlir.IntegerAttribute(.i64).init(ctx, dimension).as(mlir.Attribute) },
         },
         .location = location,
     });
@@ -287,7 +287,7 @@ pub fn concatenate(ctx: mlir.Context, inputs: []const mlir.Value, dimension: i64
 pub fn reshape(ctx: mlir.Context, value: mlir.Value, result_type: mlir.RankedTensorType, location: mlir.Location) mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.reshape", .{
         .operands = &.{value},
-        .results = &.{result_type.as(mlir.Type).?},
+        .results = &.{result_type.as(mlir.Type)},
         .location = location,
     });
 }
@@ -331,9 +331,9 @@ pub fn gather(
                     args.start_indices_batching_dims,
                     args.start_index_map,
                     args.index_vector_dim,
-                ).as(mlir.Attribute).? },
-                .{ "slice_sizes", mlir.DenseArrayAttribute(.i64).init(ctx, slice_sizes).as(mlir.Attribute).? },
-                .{ "indices_are_sorted", mlir.BoolAttribute.init(ctx, args.indices_are_sorted).as(mlir.Attribute).? },
+                ).as(mlir.Attribute) },
+                .{ "slice_sizes", mlir.DenseArrayAttribute(.i64).init(ctx, slice_sizes).as(mlir.Attribute) },
+                .{ "indices_are_sorted", mlir.BoolAttribute.init(ctx, args.indices_are_sorted).as(mlir.Attribute) },
             },
             .location = location,
         },
@@ -393,8 +393,8 @@ pub fn scatter(
             .blocks = &.{update_block},
             .attributes = &.{
                 .{ "scatter_dimension_numbers", args.getScatterDimensionNumbers(ctx) },
-                .{ "indices_are_sorted", mlir.BoolAttribute.init(ctx, args.indices_are_sorted).as(mlir.Attribute).? },
-                .{ "unique_indices", mlir.BoolAttribute.init(ctx, args.unique_indices).as(mlir.Attribute).? },
+                .{ "indices_are_sorted", mlir.BoolAttribute.init(ctx, args.indices_are_sorted).as(mlir.Attribute) },
+                .{ "unique_indices", mlir.BoolAttribute.init(ctx, args.unique_indices).as(mlir.Attribute) },
             },
             .result_type_inference = true,
             .location = location,
@@ -407,7 +407,7 @@ pub fn iota(ctx: mlir.Context, dimension: i64, result_type: mlir.Type, location:
         .operands = &.{},
         .results = &.{result_type},
         .attributes = &.{
-            .{ "iota_dimension", mlir.IntegerAttribute(.i64).init(ctx, dimension).as(mlir.Attribute).? },
+            .{ "iota_dimension", mlir.IntegerAttribute(.i64).init(ctx, dimension).as(mlir.Attribute) },
         },
         .location = location,
     });
@@ -419,7 +419,7 @@ pub fn reverse(ctx: mlir.Context, operand: mlir.Value, dimensions: []const i64, 
         .operands = &.{operand},
         .results = &.{result_type},
         .attributes = &.{
-            .{ "dimensions", mlir.DenseArrayAttribute(.i64).init(ctx, dimensions).as(mlir.Attribute).? },
+            .{ "dimensions", mlir.DenseArrayAttribute(.i64).init(ctx, dimensions).as(mlir.Attribute) },
         },
         .location = location,
     });
@@ -430,8 +430,8 @@ pub fn compare(ctx: mlir.Context, lhs: mlir.Value, rhs: mlir.Value, comparison_d
         .operands = &.{ lhs, rhs },
         .result_type_inference = true,
         .attributes = &.{
-            .{ "comparison_direction", comparison_direction.as(mlir.Attribute).? },
-            .{ "compare_type", compare_type.as(mlir.Attribute).? },
+            .{ "comparison_direction", comparison_direction.as(mlir.Attribute) },
+            .{ "compare_type", compare_type.as(mlir.Attribute) },
         },
         .location = location,
     });
@@ -452,7 +452,7 @@ pub fn reduce(
     const locations = ([_]mlir.Location{mlir.Location.unknown(ctx)} ** MaxBlockArguments)[0..block_n_args];
     var reduce_elem_types: [MaxBlockArguments]mlir.Type = undefined;
     for (inputs, 0..) |input, i| {
-        const arg_type = mlir.RankedTensorType.init(&.{}, elementTypeOrSelf(input.getType())).as(mlir.Type).?;
+        const arg_type = mlir.RankedTensorType.init(&.{}, elementTypeOrSelf(input.getType())).as(mlir.Type);
         reduce_elem_types[i] = arg_type;
         reduce_elem_types[inputs.len + i] = arg_type;
     }
@@ -474,7 +474,7 @@ pub fn reduce(
         .result_type_inference = true,
         .block = block,
         .attributes = &.{
-            .{ "dimensions", mlir.DenseArrayAttribute(.i64).init(ctx, dimensions).as(mlir.Attribute).? },
+            .{ "dimensions", mlir.DenseArrayAttribute(.i64).init(ctx, dimensions).as(mlir.Attribute) },
         },
         .location = location,
     });
@@ -494,7 +494,7 @@ pub fn sort(
     const locations = ([_]mlir.Location{mlir.Location.unknown(ctx)} ** MaxBlockArguments)[0 .. inputs.len * 2];
     var sort_elem_types: [MaxBlockArguments]mlir.Type = undefined;
     for (inputs, 0..) |input, i| {
-        const arg_type = mlir.RankedTensorType.init(&.{}, elementTypeOrSelf(input.getType())).as(mlir.Type).?;
+        const arg_type = mlir.RankedTensorType.init(&.{}, elementTypeOrSelf(input.getType())).as(mlir.Type);
         sort_elem_types[i * 2] = arg_type;
         sort_elem_types[i * 2 + 1] = arg_type;
     }
@@ -511,8 +511,8 @@ pub fn sort(
         .result_type_inference = true,
         .block = block,
         .attributes = &.{
-            .{ "dimension", mlir.IntegerAttribute(.i64).init(ctx, dimension).as(mlir.Attribute).? },
-            .{ "is_stable", mlir.BoolAttribute.init(ctx, is_stable).as(mlir.Attribute).? },
+            .{ "dimension", mlir.IntegerAttribute(.i64).init(ctx, dimension).as(mlir.Attribute) },
+            .{ "is_stable", mlir.BoolAttribute.init(ctx, is_stable).as(mlir.Attribute) },
         },
         .location = location,
     });
@@ -523,7 +523,7 @@ pub fn dynamicSlice(ctx: mlir.Context, operand: mlir.Value, new_dims: []const i6
         .variadic_operands = &.{ &.{operand}, start_indices },
         .result_type_inference = true,
         .attributes = &.{
-            .{ "slice_sizes", mlir.DenseArrayAttribute(.i64).init(ctx, new_dims).as(mlir.Attribute).? },
+            .{ "slice_sizes", mlir.DenseArrayAttribute(.i64).init(ctx, new_dims).as(mlir.Attribute) },
         },
         .location = location,
     });
@@ -556,9 +556,9 @@ pub fn pad(ctx: mlir.Context, value: mlir.Value, padding_value: mlir.Value, opts
         .operands = &.{ value, padding_value },
         .result_type_inference = true,
         .attributes = &.{
-            .{ "edge_padding_low", mlir.DenseArrayAttribute(.i64).init(ctx, opts.low).as(mlir.Attribute).? },
-            .{ "edge_padding_high", mlir.DenseArrayAttribute(.i64).init(ctx, opts.high).as(mlir.Attribute).? },
-            .{ "interior_padding", mlir.DenseArrayAttribute(.i64).init(ctx, opts.interior).as(mlir.Attribute).? },
+            .{ "edge_padding_low", mlir.DenseArrayAttribute(.i64).init(ctx, opts.low).as(mlir.Attribute) },
+            .{ "edge_padding_high", mlir.DenseArrayAttribute(.i64).init(ctx, opts.high).as(mlir.Attribute) },
+            .{ "interior_padding", mlir.DenseArrayAttribute(.i64).init(ctx, opts.interior).as(mlir.Attribute) },
         },
         .location = location,
     });
@@ -576,10 +576,10 @@ pub fn triangular_solve(ctx: mlir.Context, value: mlir.Value, other: mlir.Value,
         .operands = &.{ value, other },
         .result_type_inference = true,
         .attributes = &.{
-            .{ "left_side", mlir.IntegerAttribute(.i1).init(ctx, @intCast(@intFromBool(opts.left_side))).as(mlir.Attribute).? },
-            .{ "lower", mlir.IntegerAttribute(.i1).init(ctx, @intCast(@intFromBool(opts.lower))).as(mlir.Attribute).? },
-            .{ "unit_diagonal", mlir.IntegerAttribute(.i1).init(ctx, @intCast(@intFromBool(opts.unit_diagonal))).as(mlir.Attribute).? },
-            .{ "transpose_a", Transpose.init(ctx, opts.transpose_a).as(mlir.Attribute).? },
+            .{ "left_side", mlir.IntegerAttribute(.i1).init(ctx, @intCast(@intFromBool(opts.left_side))).as(mlir.Attribute) },
+            .{ "lower", mlir.IntegerAttribute(.i1).init(ctx, @intCast(@intFromBool(opts.lower))).as(mlir.Attribute) },
+            .{ "unit_diagonal", mlir.IntegerAttribute(.i1).init(ctx, @intCast(@intFromBool(opts.unit_diagonal))).as(mlir.Attribute) },
+            .{ "transpose_a", Transpose.init(ctx, opts.transpose_a).as(mlir.Attribute) },
         },
         .location = location,
     });
@@ -595,8 +595,8 @@ pub fn fft(ctx: mlir.Context, value: mlir.Value, location: mlir.Location, opts: 
         .operands = &.{value},
         .result_type_inference = true,
         .attributes = &.{
-            .{ "fft_type", FftType.init(ctx, opts.kind).as(mlir.Attribute).? },
-            .{ "fft_length", mlir.DenseArrayAttribute(.i64).init(ctx, opts.length).as(mlir.Attribute).? },
+            .{ "fft_type", FftType.init(ctx, opts.kind).as(mlir.Attribute) },
+            .{ "fft_length", mlir.DenseArrayAttribute(.i64).init(ctx, opts.length).as(mlir.Attribute) },
         },
         .location = location,
     });
@@ -607,7 +607,7 @@ pub fn rng(ctx: mlir.Context, a: mlir.Value, b: mlir.Value, shape: mlir.Value, r
         .operands = &.{ a, b, shape },
         .result_type_inference = true,
         .attributes = &.{
-            .{ "rng_distribution", RngDistribution.init(ctx, rng_distribution).as(mlir.Attribute).? },
+            .{ "rng_distribution", RngDistribution.init(ctx, rng_distribution).as(mlir.Attribute) },
         },
         .location = location,
     });
@@ -618,7 +618,7 @@ pub fn rng_bit_generator(ctx: mlir.Context, rng_algorithm: RngAlgorithm.Type, in
         .operands = &.{initial_state},
         .results = &.{ res_state_type, res_type },
         .attributes = &.{
-            .{ "rng_algorithm", RngAlgorithm.init(ctx, rng_algorithm).as(mlir.Attribute).? },
+            .{ "rng_algorithm", RngAlgorithm.init(ctx, rng_algorithm).as(mlir.Attribute) },
         },
         .location = location,
     });
@@ -629,8 +629,8 @@ pub fn reduce_precision(ctx: mlir.Context, value: mlir.Value, exponent_bits: i32
         .operands = &.{value},
         .result_type_inference = true,
         .attributes = &.{
-            .{ "exponent_bits", mlir.IntegerAttribute(.i32).init(ctx, exponent_bits).as(mlir.Attribute).? },
-            .{ "mantissa_bits", mlir.IntegerAttribute(.i32).init(ctx, mantissa_bits).as(mlir.Attribute).? },
+            .{ "exponent_bits", mlir.IntegerAttribute(.i32).init(ctx, exponent_bits).as(mlir.Attribute) },
+            .{ "mantissa_bits", mlir.IntegerAttribute(.i32).init(ctx, mantissa_bits).as(mlir.Attribute) },
         },
         .location = location,
     });
@@ -657,7 +657,7 @@ pub fn get_tuple_element(ctx: mlir.Context, tuple_value: mlir.Value, index: i64,
         .operands = &.{tuple_value},
         .result_type_inference = true,
         .attributes = &.{
-            .{ "index", mlir.IntegerAttribute(.i32).init(ctx, index).as(mlir.Attribute).? },
+            .{ "index", mlir.IntegerAttribute(.i32).init(ctx, index).as(mlir.Attribute) },
         },
         .location = location,
     });
@@ -694,23 +694,23 @@ pub fn convolution(
 ) mlir.Operation {
     var max_precisions: [2]mlir.Attribute = undefined;
     for (opts.precision_config, 0..) |p, i| {
-        max_precisions[i] = PrecisionAttribute.init(ctx, p).as(mlir.Attribute).?;
+        max_precisions[i] = PrecisionAttribute.init(ctx, p).as(mlir.Attribute);
     }
     var window_reversal: [3]i32 = undefined;
     for (opts.window_reversal, 0..) |w, i| {
         window_reversal[i] = @intCast(@intFromBool(w));
     }
-    const pad_type = mlir.IntegerType(.i64).init(ctx).as(mlir.Type).?;
-    const pad_shape = mlir.RankedTensorType.init(opts.pad_shape, pad_type).as(mlir.Type).?;
+    const pad_type = mlir.IntegerType(.i64).init(ctx).as(mlir.Type);
+    const pad_shape = mlir.RankedTensorType.init(opts.pad_shape, pad_type).as(mlir.Type);
     return mlir.Operation.make(ctx, "stablehlo.convolution", .{
         .operands = &.{ lhs, rhs },
         .results = &.{res_type},
         .attributes = &.{
-            .{ "window_strides", mlir.DenseArrayAttribute(.i64).init(ctx, opts.window_strides).as(mlir.Attribute).? },
-            .{ "padding", mlir.DenseElementsAttribute(.i64).init(pad_shape, opts.pad_value).as(mlir.Attribute).? },
-            .{ "lhs_dilation", mlir.DenseArrayAttribute(.i64).init(ctx, opts.lhs_dilation).as(mlir.Attribute).? },
-            .{ "rhs_dilation", mlir.DenseArrayAttribute(.i64).init(ctx, opts.rhs_dilation).as(mlir.Attribute).? },
-            .{ "window_reversal", mlir.DenseArrayAttribute(.bool).init(ctx, window_reversal[0..opts.window_reversal.len]).as(mlir.Attribute).? },
+            .{ "window_strides", mlir.DenseArrayAttribute(.i64).init(ctx, opts.window_strides).as(mlir.Attribute) },
+            .{ "padding", mlir.DenseElementsAttribute(.i64).init(pad_shape, opts.pad_value).as(mlir.Attribute) },
+            .{ "lhs_dilation", mlir.DenseArrayAttribute(.i64).init(ctx, opts.lhs_dilation).as(mlir.Attribute) },
+            .{ "rhs_dilation", mlir.DenseArrayAttribute(.i64).init(ctx, opts.rhs_dilation).as(mlir.Attribute) },
+            .{ "window_reversal", mlir.DenseArrayAttribute(.bool).init(ctx, window_reversal[0..opts.window_reversal.len]).as(mlir.Attribute) },
             .{
                 "dimension_numbers", ConvDimensionNumbersAttribute.init(ctx, .{
                     .input_batch_dimension = opts.input_batch_dimension,
@@ -722,11 +722,11 @@ pub fn convolution(
                     .output_batch_dimension = opts.output_batch_dimension,
                     .output_feature_dimension = opts.output_feature_dimension,
                     .output_spatial_dimensions = opts.output_spatial_dimensions,
-                }).as(mlir.Attribute).?,
+                }).as(mlir.Attribute),
             },
-            .{ "feature_group_count", mlir.IntegerAttribute(.i64).init(ctx, opts.feature_group_count).as(mlir.Attribute).? },
-            .{ "batch_group_count", mlir.IntegerAttribute(.i64).init(ctx, opts.batch_group_count).as(mlir.Attribute).? },
-            .{ "precision_config", mlir.ArrayAttribute.init(ctx, &max_precisions).as(mlir.Attribute).? },
+            .{ "feature_group_count", mlir.IntegerAttribute(.i64).init(ctx, opts.feature_group_count).as(mlir.Attribute) },
+            .{ "batch_group_count", mlir.IntegerAttribute(.i64).init(ctx, opts.batch_group_count).as(mlir.Attribute) },
+            .{ "precision_config", mlir.ArrayAttribute.init(ctx, &max_precisions).as(mlir.Attribute) },
         },
         .location = location,
     });
@@ -747,18 +747,18 @@ pub fn custom_call(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCa
 
     const output_operand_aliases = allocator.alloc(mlir.Attribute, opts.output_operand_aliases.len) catch unreachable;
     for (opts.output_operand_aliases, 0..) |alias, i| {
-        output_operand_aliases[i] = OutputOperandAliasAttribute.init(ctx, &.{}, alias, &.{}).as(mlir.Attribute).?;
+        output_operand_aliases[i] = OutputOperandAliasAttribute.init(ctx, &.{}, alias, &.{}).as(mlir.Attribute);
     }
 
     return mlir.Operation.make(ctx, "stablehlo.custom_call", .{
         .operands = inputs,
         .results = res_types,
         .attributes = &.{
-            .{ "api_version", mlir.IntegerAttribute(.i32).init(ctx, opts.api_version).as(mlir.Attribute).? },
-            .{ "call_target_name", mlir.StringAttribute.init(ctx, opts.call_target_name).as(mlir.Attribute).? },
-            .{ "has_side_effect", mlir.BoolAttribute.init(ctx, opts.has_side_effect).as(mlir.Attribute).? },
-            .{ "backend_config", mlir.StringAttribute.init(ctx, opts.backend_config).as(mlir.Attribute).? },
-            .{ "output_operand_aliases", mlir.ArrayAttribute.init(ctx, output_operand_aliases).as(mlir.Attribute).? },
+            .{ "api_version", mlir.IntegerAttribute(.i32).init(ctx, opts.api_version).as(mlir.Attribute) },
+            .{ "call_target_name", mlir.StringAttribute.init(ctx, opts.call_target_name).as(mlir.Attribute) },
+            .{ "has_side_effect", mlir.BoolAttribute.init(ctx, opts.has_side_effect).as(mlir.Attribute) },
+            .{ "backend_config", mlir.StringAttribute.init(ctx, opts.backend_config).as(mlir.Attribute) },
+            .{ "output_operand_aliases", mlir.ArrayAttribute.init(ctx, output_operand_aliases).as(mlir.Attribute) },
         },
         .location = location,
     });

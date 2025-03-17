@@ -148,7 +148,7 @@ pub fn reduce(
         .result_type_inference = true,
         .blocks = &.{body_block},
         .attributes = &.{
-            .{ "dimensions", mlir.DenseArrayAttribute(.i64).init(ctx.mlirCtx(), axes).as(mlir.Attribute).? },
+            .{ "dimensions", mlir.DenseArrayAttribute(.i64).init(ctx.mlirCtx(), axes).as(mlir.Attribute) },
         },
         // We can't verify right away, cause the weights captured by the reduce haven't been added yet.
         .verify = false,
@@ -197,7 +197,7 @@ pub fn reduce(
                 mlir_ctx,
                 val,
                 inner_ctx.broadcasting_axes[0 .. tensor.rank() - inner_ctx.n_reduced],
-                mlir.ext.RankedTensorType.fromShape(mlir_ctx, reduced_shape).as(mlir.Type).?,
+                mlir.ext.RankedTensorType.fromShape(mlir_ctx, reduced_shape).as(mlir.Type),
                 inner_ctx.loc,
             );
             tensor.* = Tensor._result(reduced_shape, broad_val.result(0));
@@ -240,17 +240,17 @@ pub fn reduceWindow(
     const pad_shape = mlir.RankedTensorType.init(
         &.{ @intCast(opts.padding.len), 2 },
         mlir.ext.Type.fromDType(ctx.mlirCtx(), .i64),
-    ).as(mlir.Type).?;
+    ).as(mlir.Type);
     const op = mlir.Operation.make(ctx.mlirCtx(), "stablehlo.reduce_window", .{
         .variadic_operands = &.{ input_values[0..], init_values[0..] },
         .result_type_inference = true,
         .blocks = &.{body_block},
         .attributes = &.{
-            .{ "window_dimensions", mlir.DenseArrayAttribute(.i64).init(ctx.mlirCtx(), opts.window_dimensions).as(mlir.Attribute).? },
-            .{ "window_strides", mlir.DenseArrayAttribute(.i64).init(ctx.mlirCtx(), opts.window_strides).as(mlir.Attribute).? },
-            .{ "base_dilations", mlir.DenseArrayAttribute(.i64).init(ctx.mlirCtx(), opts.base_dilations).as(mlir.Attribute).? },
-            .{ "window_dilations", mlir.DenseArrayAttribute(.i64).init(ctx.mlirCtx(), opts.window_dilations).as(mlir.Attribute).? },
-            .{ "padding", mlir.DenseElementsAttribute(.i64).init(pad_shape, opts.padding).as(mlir.Attribute).? },
+            .{ "window_dimensions", mlir.DenseArrayAttribute(.i64).init(ctx.mlirCtx(), opts.window_dimensions).as(mlir.Attribute) },
+            .{ "window_strides", mlir.DenseArrayAttribute(.i64).init(ctx.mlirCtx(), opts.window_strides).as(mlir.Attribute) },
+            .{ "base_dilations", mlir.DenseArrayAttribute(.i64).init(ctx.mlirCtx(), opts.base_dilations).as(mlir.Attribute) },
+            .{ "window_dilations", mlir.DenseArrayAttribute(.i64).init(ctx.mlirCtx(), opts.window_dilations).as(mlir.Attribute) },
+            .{ "padding", mlir.DenseElementsAttribute(.i64).init(pad_shape, opts.padding).as(mlir.Attribute) },
         },
         .location = loc,
     });
@@ -611,8 +611,8 @@ pub fn sort(
         .result_type_inference = true,
         .blocks = &.{block},
         .attributes = &.{
-            .{ "dimension", mlir.IntegerAttribute(.i64).init(ctx.mlirCtx(), dimension).as(mlir.Attribute).? },
-            .{ "is_stable", mlir.BoolAttribute.init(ctx.mlirCtx(), is_stable).as(mlir.Attribute).? },
+            .{ "dimension", mlir.IntegerAttribute(.i64).init(ctx.mlirCtx(), dimension).as(mlir.Attribute) },
+            .{ "is_stable", mlir.BoolAttribute.init(ctx.mlirCtx(), is_stable).as(mlir.Attribute) },
         },
         .location = loc,
     });

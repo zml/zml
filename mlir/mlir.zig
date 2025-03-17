@@ -96,9 +96,10 @@ pub fn MlirHelpers(comptime OuterT: type, comptime methods: MlirHelpersMethods(O
             return false;
         }
 
-        pub inline fn as(self: OuterT, comptime OtherT: type) ?OtherT {
+        pub inline fn as(self: OuterT, comptime OtherT: type) OtherT {
             if (OtherT.Methods.is_a_fn) |is_a_fn| {
-                return if (is_a_fn(self.inner())) OtherT.wrap(self.inner()) else null;
+                stdx.debug.assert(is_a_fn(self.inner()), "Wrongly tried to cast {} into {}", .{ OuterT, OtherT });
+                return OtherT.wrap(self.inner());
             }
             // if the other type doesn't have an is_a_fn, try.
             return OtherT.wrap(self.inner());
@@ -426,7 +427,7 @@ pub const BoolAttribute = struct {
     }
 
     pub fn asAttr(self: Self) Attribute {
-        return self.as(Attribute).?;
+        return self.as(Attribute);
     }
 };
 
@@ -447,7 +448,7 @@ pub const TypeAttribute = struct {
     }
 
     pub fn asAttr(self: TypeAttribute) Attribute {
-        return self.as(Attribute).?;
+        return self.as(Attribute);
     }
 };
 
@@ -645,18 +646,16 @@ pub fn DenseElementsAttribute(comptime dt: DenseElementsAttributeTypes) type {
             .equal_fn = c.mlirAttributeEqual,
         });
 
-        pub fn init(shaped_type: Type, values: anytype) Attr {
-            return fromRaw(shaped_type, std.mem.sliceAsBytes(values));
-        }
-
-        pub fn fromRaw(shaped_type: Type, values: []const u8) Attr {
-            return Attr.wrapOr(
+        pub fn init(shaped_type: Type, slice: anytype) Attr {
+            const bytes = std.mem.sliceAsBytes(slice);
+            const v = Attr.wrapOr(
                 c.mlirDenseElementsAttrRawBufferGet(
                     shaped_type.inner(),
-                    @intCast(values.len),
-                    @ptrCast(values.ptr),
+                    @intCast(bytes.len),
+                    @ptrCast(bytes.ptr),
                 ),
             ) orelse unreachable;
+            return v;
         }
 
         pub fn len(self: Attr) usize {
@@ -1357,12 +1356,9 @@ pub const FloatTypes = enum {
     f32,
     f64,
 
-    unknown,
-
-    pub fn asType(self: FloatTypes, ctx: Context) ?Type {
+    pub fn asType(self: FloatTypes, ctx: Context) Type {
         return switch (self) {
-            .unknown => null,
-            inline else => |ft| FloatType(ft).init(ctx).asType(),
+            inline else => |ft| FloatType(ft).init(ctx).as(Type),
         };
     }
 };
@@ -1378,48 +1374,23 @@ pub fn FloatType(comptime ft: FloatTypes) type {
         .f16 => .{ c.mlirTypeIsAF16, c.mlirF16TypeGet },
         .f32 => .{ c.mlirTypeIsAF32, c.mlirF32TypeGet },
         .f64 => .{ c.mlirTypeIsAF64, c.mlirF64TypeGet },
-        .unknown => .{ null, null },
     };
 
     return struct {
         _inner: c.MlirType,
-        const Float = @This();
-        pub usingnamespace MlirHelpers(Float, .{
-            .is_a_fn = switch (ft) {
-                .unknown => typeIsAUnknownFloat,
-                else => Config[0],
-            },
+
+        const Self = @This();
+
+        pub usingnamespace MlirHelpers(Self, .{
+            .is_a_fn = Config[0],
             .is_null_fn = c.mlirTypeIsNull,
             .dump_fn = c.mlirTypeDump,
             .equal_fn = c.mlirTypeEqual,
         });
 
-        pub usingnamespace if (ft != .unknown) struct {
-            pub const FloatTypeType = ft;
-
-            pub fn init(ctx: Context) Float {
-                const type_get = Config[1];
-                return Float.wrap(type_get(ctx.inner()));
-            }
-        } else struct {};
-
-        fn typeIsAUnknownFloat(typ: c.MlirType) callconv(.C) bool {
-            const is_a_fns = .{
-                c.mlirTypeIsABF16,
-                c.mlirTypeIsAF16,
-                c.mlirTypeIsAF32,
-                c.mlirTypeIsF64,
-            };
-            inline for (is_a_fns) |is_a_fn| {
-                if (is_a_fn(typ)) {
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        pub fn asType(self: Float) Type {
-            return self.as(Type).?;
+        pub fn init(ctx: Context) Self {
+            const type_get = Config[1];
+            return Self.wrap(type_get(ctx.inner()));
         }
     };
 }
@@ -1563,10 +1534,6 @@ pub const RankedTensorType = struct {
 
     pub fn getDimension(self: RankedTensorType, dim: usize) i64 {
         return c.mlirShapedTypeGetDimSize(self.inner(), @intCast(dim));
-    }
-
-    pub fn asType(self: RankedTensorType) Type {
-        return self.as(Type).?;
     }
 };
 
