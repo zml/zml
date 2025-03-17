@@ -42,19 +42,18 @@ pub const MlirStrCallback = fn (c.MlirStringRef, ?*anyopaque) callconv(.C) void;
 pub const Registry = struct {
     _inner: c.MlirDialectRegistry,
 
-    pub const deinit = deinitHelper(Registry, c.mlirDialectRegistryDestroy);
-    pub const wrapOr = wrapOrHelper(Registry, c.mlirDialectRegistryIsNull);
+    pub const deinit = helpers.deinit(Registry, c.mlirDialectRegistryDestroy);
 
     pub fn init() !Registry {
-        return wrapOr(c.mlirDialectRegistryCreate()) orelse Error.MlirUnexpected;
+        return helpers.init(Registry, c.mlirDialectRegistryCreate(), c.mlirDialectRegistryIsNull) orelse Error.MlirUnexpected;
     }
 };
 
 pub const Context = struct {
     _inner: c.MlirContext,
     const Self = Context;
-    pub const deinit = deinitHelper(Context, c.mlirContextDestroy);
-    pub const wrapOr = wrapOrHelper(Context, c.mlirContextIsNull);
+    pub const deinit = helpers.deinit(Context, c.mlirContextDestroy);
+    pub const wrapOr = helpers.wrapOr(Context, c.mlirContextIsNull);
 
     pub fn init() !Self {
         return Self.wrapOr(c.mlirContextCreate()) orelse Error.MlirUnexpected;
@@ -98,8 +97,8 @@ pub const Context = struct {
 pub const Module = struct {
     _inner: c.MlirModule,
 
-    pub const deinit = deinitHelper(Module, c.mlirModuleDestroy);
-    pub const wrapOr = wrapOrHelper(Module, c.mlirModuleIsNull);
+    pub const deinit = helpers.deinit(Module, c.mlirModuleDestroy);
+    pub const wrapOr = helpers.wrapOr(Module, c.mlirModuleIsNull);
 
     const Self = Module;
 
@@ -118,7 +117,7 @@ pub const Module = struct {
     }
 
     pub fn context(self: Module) Context {
-        return Context.wrap(c.mlirModuleGetContext(self._inner));
+        return .{ ._inner = c.mlirModuleGetContext(self._inner) };
     }
 
     pub fn getBody(self: Module) Block {
@@ -133,8 +132,8 @@ pub const Module = struct {
 pub const PassManager = struct {
     _inner: c.MlirPassManager,
 
-    pub const deinit = deinitHelper(PassManager, c.mlirPassManagerDestroy);
-    pub const wrapOr = wrapOrHelper(PassManager, c.mlirPassManagerIsNull);
+    pub const deinit = helpers.deinit(PassManager, c.mlirPassManagerDestroy);
+    pub const wrapOr = helpers.wrapOr(PassManager, c.mlirPassManagerIsNull);
 
     const Self = PassManager;
 
@@ -194,7 +193,7 @@ pub const Identifier = struct {
     }
 
     pub fn context(self: Self) Context {
-        return Context.wrap(c.mlirIdentifierGetContext(self._inner));
+        return .{ ._inner = c.mlirIdentifierGetContext(self._inner) };
     }
 
     pub fn str(self: Self) []const u8 {
@@ -211,10 +210,10 @@ pub const AttrTuple = struct { [:0]const u8, Attribute };
 pub const Attribute = struct {
     _inner: c.MlirAttribute,
 
-    pub const dump = dumpHelper(Attribute, c.mlirAttributeDump);
-    pub const eql = eqlHelper(Attribute, c.mlirAttributeEqual);
-    pub const format = print(Attribute, c.mlirAttributePrint);
-    pub const wrapOr = wrapOrHelper(Attribute, c.mlirAttributeIsNull);
+    pub const dump = helpers.dump(Attribute, c.mlirAttributeDump);
+    pub const eql = helpers.eql(Attribute, c.mlirAttributeEqual);
+    pub const format = helpers.format(Attribute, c.mlirAttributePrint);
+    pub const wrapOr = helpers.wrapOr(Attribute, c.mlirAttributeIsNull);
 
     pub fn parse(ctx: Context, attr: [:0]const u8) !Attribute {
         return Attribute.wrapOr(
@@ -223,7 +222,7 @@ pub const Attribute = struct {
     }
 
     pub fn getNull() Attribute {
-        return Attribute.wrap(c.mlirAttributeGetNull());
+        return .{ ._inner = c.mlirAttributeGetNull() };
     }
 
     pub fn as(generic: Type, SpecificAttr: type) ?SpecificAttr {
@@ -638,9 +637,9 @@ pub const Operation = struct {
     const Self = Operation;
     _inner: c.MlirOperation,
 
-    pub const dump = dumpHelper(Operation, c.mlirOperationDestroy);
-    pub const deinit = deinitHelper(Operation, c.mlirOperationDestroy);
-    pub const wrapOr = wrapOrHelper(Operation, c.mlirOperationIsNull);
+    pub const dump = helpers.dump(Operation, c.mlirOperationDestroy);
+    pub const deinit = helpers.deinit(Operation, c.mlirOperationDestroy);
+    pub const wrapOr = helpers.wrapOr(Operation, c.mlirOperationIsNull);
 
     pub const eql = Attribute.eqlAny(Self);
 
@@ -727,7 +726,7 @@ pub const Operation = struct {
     }
 
     pub fn name(self: Self) Identifier {
-        return Identifier.wrap(c.mlirOperationGetName(self._inner));
+        return .{ ._inner = c.mlirOperationGetName(self._inner) };
     }
 
     pub fn removeFromParent(self: *Self) void {
@@ -867,7 +866,7 @@ pub const Operation = struct {
     }
 
     pub fn getLocation(self: Self) Location {
-        return Location.wrap(c.mlirOperationGetLocation(self._inner));
+        return .{ ._inner = c.mlirOperationGetLocation(self._inner) };
     }
 
     pub const WalkOrder = enum(c.MlirWalkOrder) {
@@ -890,7 +889,7 @@ pub const Operation = struct {
             (struct {
                 pub fn callback(op: c.MlirOperation, ctx_: ?*anyopaque) callconv(.C) c.MlirWalkResult {
                     const inner_ctx_: *ContextType = @ptrCast(@alignCast(ctx_));
-                    return @intFromEnum(walkfn(inner_ctx_.ctx, Operation.wrap(op)));
+                    return @intFromEnum(walkfn(inner_ctx_.ctx, .{ ._inner = op }));
                 }
             }).callback,
             &inner_ctx,
@@ -899,7 +898,7 @@ pub const Operation = struct {
     }
 
     pub fn getAttribute(self: Self, pos: usize) NamedAttribute {
-        return NamedAttribute.wrap(c.mlirOperationGetAttribute(self._inner, @intCast(pos)));
+        return .{ ._inner = c.mlirOperationGetAttribute(self._inner, @intCast(pos)) };
     }
 
     pub fn getAttributeByName(self: Self, name_: [:0]const u8) ?Attribute {
@@ -947,7 +946,7 @@ pub const OpOperand = struct {
     const Self = OpOperand;
 
     pub fn owner(self: Self) Operation {
-        return Operation.wrap(c.mlirOpOperandGetOwner(self._inner));
+        return .{ ._inner = c.mlirOpOperandGetOwner(self._inner) };
     }
 
     pub fn number(self: Self) usize {
@@ -964,18 +963,15 @@ pub const OpOperand = struct {
 pub const Region = struct {
     _inner: c.MlirRegion,
 
-    pub const deinit = deinitHelper(Region, c.mlirRegionDestroy);
-    pub const wrapOr = wrapOrHelper(Region, c.mlirRegionIsNull);
+    pub const eql = helpers.eql(Region, c.mlirBlockEqual);
+    pub const deinit = helpers.deinit(Region, c.mlirRegionDestroy);
+    pub const wrapOr = helpers.wrapOr(Region, c.mlirRegionIsNull);
 
     const Self = Region;
 
     pub fn init() !Self {
-        return Self.wrapOr(
-            c.mlirRegionCreate(),
-        ) orelse Error.InvalidMlir;
+        return Self.wrapOr(c.mlirRegionCreate()) orelse Error.InvalidMlir;
     }
-
-    pub const eql = eqlHelper(Region, c.mlirBlockEqual);
 
     pub fn appendBlock(self: *Self, block: Block) void {
         c.mlirRegionAppendOwnedBlock(self._inner, block._inner);
@@ -994,17 +990,17 @@ pub const Region = struct {
     }
 
     pub fn firstBlock(self: Self) Block {
-        return Block.wrap(c.mlirRegionGetFirstBlock(self._inner));
+        return .{ ._inner = c.mlirRegionGetFirstBlock(self._inner) };
     }
 };
 
 pub const Value = struct {
     _inner: c.MlirValue,
 
-    pub const dump = dumpHelper(Value, c.mlirValueDump);
-    pub const eql = eqlHelper(Value, c.mlirValueEqual);
-    pub const format = print(Value, c.mlirValuePrint).format;
-    pub const wrapOr = wrapOrHelper(Value, c.mlirValueIsNull);
+    pub const dump = helpers.dump(Value, c.mlirValueDump);
+    pub const eql = helpers.eql(Value, c.mlirValueEqual);
+    pub const format = helpers.format(Value, c.mlirValuePrint).format;
+    pub const wrapOr = helpers.wrapOr(Value, c.mlirValueIsNull);
 
     pub fn getType(val: Value) Type {
         return .{ ._inner = c.mlirValueGetType(val._inner) };
@@ -1074,10 +1070,10 @@ pub const BlockArgument = struct {
 pub const Type = struct {
     _inner: c.MlirType,
 
-    pub const dump = eqlHelper(Type, c.mlirTypeDump);
-    pub const eql = eqlHelper(Type, c.mlirTypeEqual);
-    pub const format = print(Type, c.mlirTypePrint);
-    pub const wrapOr = wrapOrHelper(Type, c.mlirTypeIsNull);
+    pub const dump = helpers.eql(Type, c.mlirTypeDump);
+    pub const eql = helpers.eql(Type, c.mlirTypeEqual);
+    pub const format = helpers.format(Type, c.mlirTypePrint);
+    pub const wrapOr = helpers.wrapOr(Type, c.mlirTypeIsNull);
 
     pub fn parse(ctx: Context, str: [:0]const u8) !Type {
         return Type.wrapOr(
@@ -1116,7 +1112,7 @@ pub const IndexType = struct {
     _inner: c.MlirType,
 
     pub const eql = Type.eqlAny(IndexType);
-    pub const format = print(IndexType, c.mlirTypePrint);
+    pub const format = helpers.format(IndexType, c.mlirTypePrint);
 
     pub fn init(ctx: Context) IndexType {
         return .{ ._inner = c.mlirIndexTypeGet(ctx._inner) };
@@ -1178,7 +1174,7 @@ pub fn IntegerType(comptime it: IntegerTypes) type {
 
         pub const asType = Type.fromAnyType(Int);
         pub const eql = Type.eqlAny(Int);
-        pub const format = print(Int, c.mlirTypePrint);
+        pub const format = helpers.format(Int, c.mlirTypePrint);
 
         fn typeIsAIntegerExact(typ: c.MlirType) callconv(.C) bool {
             const bit_width = Config[0];
@@ -1237,7 +1233,7 @@ pub fn FloatType(comptime ft: FloatTypes) type {
 
         pub const asType = Type.fromAnyType(Self);
         pub const eql = Type.eqlAny(Self);
-        pub const format = print(Self, c.mlirTypePrint);
+        pub const format = helpers.format(Self, c.mlirTypePrint);
 
         pub fn init(ctx: Context) Self {
             const type_get = Config[1];
@@ -1351,7 +1347,7 @@ pub const RankedTensorType = struct {
     _inner: c.MlirType,
     pub const is_a_fn = c.mlirTypeIsARankedTensor;
     pub const eql = Type.eqlAny(RankedTensorType);
-    pub const format = print(Type, c.mlirTypePrint);
+    pub const format = helpers.format(Type, c.mlirTypePrint);
 
     pub fn init(dimensions: []const i64, elemType: Type) RankedTensorType {
         return .{ ._inner = c.mlirRankedTensorTypeGet(
@@ -1418,8 +1414,8 @@ pub const DialectHandle = struct {
 pub const Location = struct {
     _inner: c.MlirLocation,
 
-    pub const eql = eqlHelper(Type, c.mlirLocationEqual);
-    pub const format = print(Location, c.mlirLocationPrint);
+    pub const eql = helpers.eql(Type, c.mlirLocationEqual);
+    pub const format = helpers.format(Location, c.mlirLocationPrint);
 
     pub fn fromSrc(ctx: Context, src: std.builtin.SourceLocation) Location {
         return .{ ._inner = c.mlirLocationFileLineColGet(
@@ -1473,10 +1469,10 @@ pub const Location = struct {
 pub const Block = struct {
     _inner: c.MlirBlock,
 
-    pub const wrapOr = wrapOrHelper(Block, c.mlirBlockIsNull);
-    pub const deinit = deinitHelper(Block, c.mlirBlockDestroy);
+    pub const wrapOr = helpers.wrapOr(Block, c.mlirBlockIsNull);
+    pub const deinit = helpers.deinit(Block, c.mlirBlockDestroy);
 
-    pub const eql = eqlHelper(Block, c.mlirBlockEqual);
+    pub const eql = helpers.eql(Block, c.mlirBlockEqual);
 
     pub fn init(args: []const Type, locs: []const Location) !Block {
         const block = Block.wrapOr(
@@ -1516,75 +1512,82 @@ pub const Block = struct {
     }
 };
 
-pub fn print(Any: type, print_fn: fn (@FieldType(Any, "_inner"), ?*const MlirStrCallback, ?*anyopaque) callconv(.C) void) type {
-    return struct {
-        pub fn format(
-            self: Any,
-            comptime fmt: []const u8,
-            options: std.fmt.FormatOptions,
-            writer: anytype,
-        ) !void {
-            _ = fmt;
-            _ = options;
+pub const helpers = struct {
+    pub fn eql(T: type, equal_fn: fn (@FieldType(T, "_inner"), @FieldType(T, "_inner")) callconv(.C) bool) fn (T, T) bool {
+        return struct {
+            fn eql(a: T, b: T) bool {
+                return equal_fn(a._inner, b._inner);
+            }
+        }.eql;
+    }
 
-            const Writer = struct {
-                writer: @TypeOf(writer),
-                err: ?@TypeOf(writer).Error = null,
-                fn printCallback(mlir_str: c.MlirStringRef, opaque_ctx: ?*anyopaque) callconv(.C) void {
-                    var ctx: *@This() = @alignCast(@ptrCast(opaque_ctx));
-                    if (ctx.err) |_| return;
-                    _ = ctx.writer.write(mlir_str.data[0..mlir_str.length]) catch |err| {
-                        ctx.err = err;
-                        return;
-                    };
-                }
-            };
+    pub fn deinit(T: type, deinit_fn: fn (@FieldType(T, "_inner")) callconv(.C) void) fn (*T) void {
+        return struct {
+            fn deinit(a: *T) void {
+                deinit_fn(a._inner);
+                a.* = undefined;
+            }
+        }.deinit;
+    }
 
-            var context: Writer = .{ .writer = writer };
-            print_fn(self._inner, &Writer.printCallback, &context);
-            if (context.err) |err| return err;
-        }
-    };
-}
+    pub fn dump(T: type, dump_fn: fn (@FieldType(T, "_inner")) callconv(.C) void) fn (T) void {
+        return struct {
+            fn dump(a: T) void {
+                return dump_fn(a._inner);
+            }
+        }.dump;
+    }
 
-pub fn eqlHelper(T: type, equal_fn: fn (@FieldType(T, "_inner"), @FieldType(T, "_inner")) callconv(.C) bool) fn (T, T) bool {
-    return struct {
-        fn eql(a: T, b: T) bool {
-            return equal_fn(a._inner, b._inner);
-        }
-    }.eql;
-}
+    pub fn isNull(T: type, is_null_fn: fn (@FieldType(T, "_inner")) callconv(.C) bool) fn (T) bool {
+        return struct {
+            fn isNull(a: T) bool {
+                return is_null_fn(a._inner);
+            }
+        }.isNull;
+    }
 
-pub fn deinitHelper(T: type, deinit_fn: fn (@FieldType(T, "_inner")) callconv(.C) void) fn (*T) void {
-    return struct {
-        fn deinit(a: *T) void {
-            deinit_fn(a._inner);
-            a.* = undefined;
-        }
-    }.deinit;
-}
+    pub fn format(Any: type, print_fn: fn (@FieldType(Any, "_inner"), ?*const MlirStrCallback, ?*anyopaque) callconv(.C) void) type {
+        return struct {
+            pub fn format(
+                self: Any,
+                comptime fmt: []const u8,
+                options: std.fmt.FormatOptions,
+                writer: anytype,
+            ) !void {
+                _ = fmt;
+                _ = options;
 
-pub fn dumpHelper(T: type, dump_fn: fn (@FieldType(T, "_inner")) callconv(.C) void) fn (T) void {
-    return struct {
-        fn dump(a: T) void {
-            return dump_fn(a._inner);
-        }
-    }.dump;
-}
+                const Writer = struct {
+                    writer: @TypeOf(writer),
+                    err: ?@TypeOf(writer).Error = null,
+                    fn printCallback(mlir_str: c.MlirStringRef, opaque_ctx: ?*anyopaque) callconv(.C) void {
+                        var ctx: *@This() = @alignCast(@ptrCast(opaque_ctx));
+                        if (ctx.err) |_| return;
+                        _ = ctx.writer.write(mlir_str.data[0..mlir_str.length]) catch |err| {
+                            ctx.err = err;
+                            return;
+                        };
+                    }
+                };
 
-pub fn isNullHelper(T: type, is_null_fn: fn (@FieldType(T, "_inner")) callconv(.C) bool) fn (T) bool {
-    return struct {
-        fn isNull(a: T) bool {
-            return is_null_fn(a._inner);
-        }
-    }.isNull;
-}
+                var context: Writer = .{ .writer = writer };
+                print_fn(self._inner, &Writer.printCallback, &context);
+                if (context.err) |err| return err;
+            }
+        };
+    }
 
-pub fn wrapOrHelper(T: type, is_null_fn: fn (@FieldType(T, "_inner")) callconv(.C) bool) fn (@FieldType(T, "_inner")) ?T {
-    return struct {
-        fn wrapOr(inner: @FieldType(T, "_inner")) ?T {
-            if (is_null_fn(inner)) return null;
-            return .{ ._inner = inner };
-        }
-    }.wrapOr;
-}
+    pub fn wrapOr(T: type, is_null_fn: fn (@FieldType(T, "_inner")) callconv(.C) bool) fn (@FieldType(T, "_inner")) ?T {
+        return struct {
+            fn wrapOr(inner: @FieldType(T, "_inner")) ?T {
+                if (is_null_fn(inner)) return null;
+                return .{ ._inner = inner };
+            }
+        }.wrapOr;
+    }
+
+    pub fn init(T: type, inner: @FieldType(T, "_inner"), is_null_fn: fn (@FieldType(T, "_inner")) callconv(.C) bool) ?T {
+        if (is_null_fn(inner)) return null;
+        return .{ ._inner = inner };
+    }
+};
