@@ -115,10 +115,10 @@ pub const TCP = struct {
     exec: *Executor,
     tcp: xev.TCP,
 
-    pub usingnamespace Closeable(Self, xev.TCP);
-    pub usingnamespace Pollable(Self, xev.TCP);
-    pub usingnamespace Readable(Self, xev.TCP);
-    pub usingnamespace Writeable(Self, xev.TCP);
+    pub const close = Closeable(Self, xev.TCP);
+    pub const poll = Pollable(Self, xev.TCP);
+    pub const read = Readable(Self, xev.TCP);
+    pub const write = Writeable(Self, xev.TCP);
 
     pub fn init(exec: *Executor, tcp: xev.TCP) Self {
         return .{ .exec = exec, .tcp = tcp };
@@ -213,11 +213,20 @@ pub const TCP = struct {
     }
 };
 
-fn Closeable(comptime T: type, comptime StreamT: type) type {
+pub const AsyncError = error{
+    AccessDenied,
+    EventNotFound,
+    SystemResources,
+    ProcessNotFound,
+    Overflow,
+    NestedRunsNotAllowed,
+};
+
+fn Closeable(comptime T: type, comptime StreamT: type) fn (T) anyerror!void {
     return struct {
         const Self = T;
         const CloseResult = xev.CloseError!void;
-        pub fn close(self: Self) !void {
+        pub fn close(self: Self) anyerror!void {
             const ResultT = CloseResult;
             const Data = struct {
                 result: ResultT = undefined,
@@ -250,14 +259,13 @@ fn Closeable(comptime T: type, comptime StreamT: type) type {
 
             return data.result;
         }
-    };
+    }.close;
 }
 
-fn Pollable(comptime T: type, comptime StreamT: type) type {
+fn Pollable(comptime T: type, comptime StreamT: type) fn (T) anyerror!void {
     return struct {
-        const Self = T;
         const PollResult = xev.PollError!void;
-        pub fn poll(self: Self) !void {
+        pub fn poll(self: T) anyerror!void {
             const ResultT = PollResult;
             const Data = struct {
                 result: ResultT = undefined,
@@ -290,14 +298,14 @@ fn Pollable(comptime T: type, comptime StreamT: type) type {
 
             return data.result;
         }
-    };
+    }.poll;
 }
 
-fn Readable(comptime T: type, comptime StreamT: type) type {
+fn Readable(comptime T: type, comptime StreamT: type) fn (T, xev.ReadBuffer) anyerror!usize {
     return struct {
         const Self = T;
         const ReadResult = xev.ReadError!usize;
-        pub fn read(self: Self, buf: xev.ReadBuffer) !usize {
+        pub fn read(self: Self, buf: xev.ReadBuffer) anyerror!usize {
             const ResultT = ReadResult;
             const Data = struct {
                 result: ResultT = undefined,
@@ -332,10 +340,10 @@ fn Readable(comptime T: type, comptime StreamT: type) type {
 
             return data.result;
         }
-    };
+    }.read;
 }
 
-fn Writeable(comptime T: type, comptime StreamT: type) type {
+fn Writeable(comptime T: type, comptime StreamT: type) fn (T, xev.WriteBuffer) anyerror!usize {
     return struct {
         const Self = T;
         const WriteResult = xev.WriteError!usize;
@@ -373,7 +381,7 @@ fn Writeable(comptime T: type, comptime StreamT: type) type {
             try waitForCompletion(self.exec, &c);
             return data.result;
         }
-    };
+    }.write;
 }
 
 pub const File = struct {
@@ -382,10 +390,10 @@ pub const File = struct {
     exec: *Executor,
     file: xev.File,
 
-    pub usingnamespace Closeable(Self, xev.File);
-    pub usingnamespace Pollable(Self, xev.File);
-    pub usingnamespace Readable(Self, xev.File);
-    pub usingnamespace Writeable(Self, xev.File);
+    pub const close = Closeable(Self, xev.File);
+    pub const poll = Pollable(Self, xev.File);
+    pub const read = Readable(Self, xev.File);
+    pub const write = Writeable(Self, xev.File);
 
     pub fn init(exec: *Executor, file: xev.File) Self {
         return .{ .exec = exec, .file = file };
@@ -526,10 +534,8 @@ pub const UDP = struct {
     exec: *Executor,
     udp: xev.UDP,
 
-    pub usingnamespace Closeable(Self, xev.TCP);
-    pub usingnamespace Pollable(Self, xev.TCP);
-    pub usingnamespace Readable(Self, xev.TCP);
-    pub usingnamespace Writeable(Self, xev.TCP);
+    pub const close = Closeable(Self, xev.UDP);
+    pub const poll = Pollable(Self, xev.UDP);
 
     pub fn init(exec: *Executor, udp: xev.UDP) Self {
         return .{ .exec = exec, .udp = udp };
@@ -540,7 +546,7 @@ pub const UDP = struct {
     }
 
     const ReadResult = xev.ReadError!usize;
-    pub fn read(self: Self, buf: xev.ReadBuffer) !usize {
+    pub fn read(self: Self, buf: xev.ReadBuffer) anyerror!usize {
         const ResultT = ReadResult;
         const Data = struct {
             result: ResultT = undefined,
@@ -581,7 +587,7 @@ pub const UDP = struct {
     }
 
     const WriteResult = xev.WriteError!usize;
-    pub fn write(self: Self, addr: std.net.Address, buf: xev.WriteBuffer) !usize {
+    pub fn write(self: Self, addr: std.net.Address, buf: xev.WriteBuffer) anyerror!usize {
         const ResultT = WriteResult;
         const Data = struct {
             result: ResultT = undefined,
