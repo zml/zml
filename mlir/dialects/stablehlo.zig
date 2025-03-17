@@ -765,6 +765,23 @@ pub fn custom_call(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCa
     var fba = std.heap.FixedBufferAllocator.init(&buffer);
     const allocator = fba.allocator();
 
+    const operand_layouts = blk: {
+        var input_types = allocator.alloc(mlir.Type, inputs.len) catch unreachable;
+        defer allocator.free(input_types);
+        for (inputs, 0..) |input, i| {
+            input_types[i] = input.getType();
+        }
+        const layouts = computedLayouts(allocator, ctx, input_types) catch unreachable;
+        defer layouts.deinit();
+        break :blk mlir.ArrayAttribute.init(ctx, layouts.items).as(mlir.Attribute).?;
+    };
+
+    const result_layouts = blk: {
+        const layouts = computedLayouts(allocator, ctx, res_types) catch unreachable;
+        defer layouts.deinit();
+        break :blk mlir.ArrayAttribute.init(ctx, layouts.items).as(mlir.Attribute).?;
+    };
+
     const output_operand_aliases = allocator.alloc(mlir.Attribute, opts.output_operand_aliases.len) catch unreachable;
     for (opts.output_operand_aliases, 0..) |alias, i| {
         output_operand_aliases[i] = OutputOperandAliasAttribute.init(ctx, &.{}, alias, &.{}).as(mlir.Attribute);
@@ -778,6 +795,8 @@ pub fn custom_call(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCa
         .{ "has_side_effect", mlir.BoolAttribute.init(ctx, opts.has_side_effect).as(mlir.Attribute).? },
         .{ "backend_config", opts.backend_config.asAttr(ctx) },
         .{ "output_operand_aliases", mlir.ArrayAttribute.init(ctx, output_operand_aliases).as(mlir.Attribute).? },
+        .{ "operand_layouts", operand_layouts },
+        .{ "result_layouts", result_layouts },
     }) catch unreachable;
     attrs.appendSlice(opts.addional_attributes) catch unreachable;
 
@@ -787,6 +806,27 @@ pub fn custom_call(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCa
         .attributes = attrs.items,
         .location = location,
     });
+}
+
+fn computedLayouts(alloc: std.mem.Allocator, context: mlir.Context, types: []const mlir.Type) !std.ArrayList(mlir.Attribute) {
+    const MINOR_TO_MAJOR = [8]i64{ 7, 6, 5, 4, 3, 2, 1, 0 };
+    var layouts = try alloc.alloc(mlir.Attribute, types.len);
+    errdefer alloc.free(layouts);
+
+    for (types, 0..) |t, i| {
+        const input_type = t.as(mlir.ShapedType).?;
+        const rank = input_type.rank();
+        const layout = MINOR_TO_MAJOR[MINOR_TO_MAJOR.len - rank ..];
+
+        const layout_type = mlir.IndexType.init(context).as(mlir.Type).?;
+        const layout_shape = mlir.RankedTensorType.init(&.{@intCast(layout.len)}, layout_type).as(mlir.Type).?;
+
+        layouts[i] = mlir.DenseIntOrFPElementsAttribute(.i64)
+            .fromRaw(layout_shape, std.mem.sliceAsBytes(layout))
+            .as(mlir.Attribute).?;
+    }
+
+    return std.ArrayList(mlir.Attribute).fromOwnedSlice(alloc, layouts);
 }
 
 // todo: move out of stablehlo.zig when we start to implement the frontend
