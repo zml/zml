@@ -70,10 +70,6 @@ pub fn MlirHelpers(comptime OuterT: type, comptime methods: MlirHelpersMethods(O
         pub inline fn inner(self: OuterT) InnerT {
             return self._inner;
         }
-
-        pub inline fn innerPtr(self: *OuterT) *InnerT {
-            return &self._inner;
-        }
     };
 }
 
@@ -635,31 +631,31 @@ pub const OperationState = struct {
     }
 
     pub fn addResult(self: *Self, type_: Type) void {
-        c.mlirOperationStateAddResults(self.innerPtr(), 1, &[_]c.MlirType{type_.inner()});
+        c.mlirOperationStateAddResults(&self._inner, 1, &[_]c.MlirType{type_.inner()});
     }
 
     pub fn addResults(self: *Self, types: []const Type) void {
-        c.mlirOperationStateAddResults(self.innerPtr(), @intCast(types.len), @ptrCast(types.ptr));
+        c.mlirOperationStateAddResults(&self._inner, @intCast(types.len), @ptrCast(types.ptr));
     }
 
     pub fn addOperand(self: *Self, value: Value) void {
-        c.mlirOperationStateAddOperands(self.innerPtr(), 1, &[_]c.MlirValue{value.inner()});
+        c.mlirOperationStateAddOperands(&self._inner, 1, &[_]c.MlirValue{value.inner()});
     }
 
     pub fn addOperands(self: *Self, values: []const Value) void {
-        c.mlirOperationStateAddOperands(self.innerPtr(), @intCast(values.len), @ptrCast(values.ptr));
+        c.mlirOperationStateAddOperands(&self._inner, @intCast(values.len), @ptrCast(values.ptr));
     }
 
     pub fn addRegion(self: *Self, region: *Region) void {
-        c.mlirOperationStateAddOwnedRegions(self.innerPtr(), 1, &[_]c.MlirRegion{region.inner()});
+        c.mlirOperationStateAddOwnedRegions(&self._inner, 1, &[_]c.MlirRegion{region.inner()});
     }
 
     pub fn addRegions(self: *Self, regions: []const Region) void {
-        c.mlirOperationStateAddOwnedRegions(self.innerPtr(), @intCast(regions.len), @ptrCast(regions.ptr));
+        c.mlirOperationStateAddOwnedRegions(&self._inner, @intCast(regions.len), @ptrCast(regions.ptr));
     }
 
     pub fn addAttribute(self: *Self, ctx: Context, name: [:0]const u8, attr: Attribute) void {
-        c.mlirOperationStateAddAttributes(self.innerPtr(), 1, @ptrCast(&.{
+        c.mlirOperationStateAddAttributes(&self._inner, 1, @ptrCast(&.{
             .{
                 .name = Identifier.get(ctx, name).inner(),
                 .attribute = attr.inner(),
@@ -668,7 +664,7 @@ pub const OperationState = struct {
     }
 
     pub fn addAttributeRaw(self: *Self, name: Identifier, attr: Attribute) void {
-        c.mlirOperationStateAddAttributes(self.innerPtr(), 1, @ptrCast(&.{
+        c.mlirOperationStateAddAttributes(&self._inner, 1, @ptrCast(&.{
             .{
                 .name = name.inner(),
                 .attribute = attr.inner(),
@@ -677,11 +673,11 @@ pub const OperationState = struct {
     }
 
     pub fn addAttributes(self: *Self, attributes: []const NamedAttribute) void {
-        c.mlirOperationStateAddAttributes(self.innerPtr(), @intCast(attributes.len), @ptrCast(attributes.ptr));
+        c.mlirOperationStateAddAttributes(&self._inner, @intCast(attributes.len), @ptrCast(attributes.ptr));
     }
 
     pub fn resultTypeInference(self: *Self, enabled: bool) void {
-        self.innerPtr().enableResultTypeInference = enabled;
+        self._inner.enableResultTypeInference = enabled;
     }
 };
 
@@ -736,9 +732,7 @@ pub const Operation = struct {
     pub const eql = Attribute.eqlAny(Self);
 
     pub fn init(state: *OperationState) !Self {
-        return Self.wrapOr(
-            c.mlirOperationCreate(state.innerPtr()),
-        ) orelse Error.InvalidMlir;
+        return Self.wrapOr(c.mlirOperationCreate(&state._inner)) orelse Error.InvalidMlir;
     }
 
     pub fn make(ctx: Context, op_name: [:0]const u8, args: struct {
