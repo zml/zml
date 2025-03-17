@@ -159,7 +159,7 @@ pub const DotAlgorithm = struct {
     pub fn asAttr(self: DotAlgorithm, ctx: mlir.Context, tensor_type: mlir.RankedTensorType) mlir.Attribute {
         const elem_type = tensor_type.getElementType();
 
-        return mlir.Attribute.wrap(c.stablehloDotAlgorithmGet(
+        return .{ ._inner = c.stablehloDotAlgorithmGet(
             ctx._inner,
             elem_type._inner,
             elem_type._inner,
@@ -168,7 +168,7 @@ pub const DotAlgorithm = struct {
             self.component_count,
             self.num_primitive_operations,
             self.allow_imprecise_accumulation,
-        ));
+        ) };
     }
 };
 
@@ -357,22 +357,20 @@ pub const ScatterArgs = struct {
     unique_indices: bool = false,
 
     pub fn getScatterDimensionNumbers(self: ScatterArgs, ctx: mlir.Context) mlir.Attribute {
-        return mlir.Attribute.wrap(
-            c.stablehloScatterDimensionNumbersGet(
-                ctx._inner,
-                @intCast(self.update_window_dims.len),
-                self.update_window_dims.ptr,
-                @intCast(self.inserted_window_dims.len),
-                self.inserted_window_dims.ptr,
-                @intCast(self.input_batching_dims.len),
-                self.input_batching_dims.ptr,
-                @intCast(self.scatter_indices_batching_dims.len),
-                self.scatter_indices_batching_dims.ptr,
-                @intCast(self.scatter_dims_to_operand_dims.len),
-                self.scatter_dims_to_operand_dims.ptr,
-                self.index_vector_dim,
-            ),
-        );
+        return .{ ._inner = c.stablehloScatterDimensionNumbersGet(
+            ctx._inner,
+            @intCast(self.update_window_dims.len),
+            self.update_window_dims.ptr,
+            @intCast(self.inserted_window_dims.len),
+            self.inserted_window_dims.ptr,
+            @intCast(self.input_batching_dims.len),
+            self.input_batching_dims.ptr,
+            @intCast(self.scatter_indices_batching_dims.len),
+            self.scatter_indices_batching_dims.ptr,
+            @intCast(self.scatter_dims_to_operand_dims.len),
+            self.scatter_dims_to_operand_dims.ptr,
+            self.index_vector_dim,
+        ) };
     }
 };
 
@@ -873,8 +871,8 @@ pub const DotDimensionNumbersAttribute = struct {
         lhs_contracting_dimensions: []const i64,
         rhs_contracting_dimensions: []const i64,
     }) Self {
-        return Self.wrap(
-            c.stablehloDotDimensionNumbersGet(
+        return .{
+            ._inner = c.stablehloDotDimensionNumbersGet(
                 ctx._inner,
                 @intCast(args.lhs_batching_dimensions.len),
                 args.lhs_batching_dimensions.ptr,
@@ -885,7 +883,7 @@ pub const DotDimensionNumbersAttribute = struct {
                 @intCast(args.rhs_contracting_dimensions.len),
                 args.rhs_contracting_dimensions.ptr,
             ),
-        );
+        };
     }
 
     pub fn getLhsBatchingDimensionsSize(self: Self) usize {
@@ -940,8 +938,8 @@ pub const GatherDimensionNumbersAttribute = struct {
         start_index_map: []const i64,
         index_vector_dim: i64,
     ) Self {
-        return Self.wrap(
-            c.stablehloGatherDimensionNumbersGet(
+        return .{
+            ._inner = c.stablehloGatherDimensionNumbersGet(
                 ctx._inner,
                 @intCast(offset_dims.len),
                 offset_dims.ptr,
@@ -955,7 +953,7 @@ pub const GatherDimensionNumbersAttribute = struct {
                 start_index_map.ptr,
                 index_vector_dim,
             ),
-        );
+        };
     }
 
     pub fn getOffsetDimsSize(self: Self) usize {
@@ -1024,8 +1022,8 @@ pub const ConvDimensionNumbersAttribute = struct {
         output_feature_dimension: i64,
         output_spatial_dimensions: []const i64,
     }) Self {
-        return Self.wrap(
-            c.stablehloConvDimensionNumbersGet(
+        return .{
+            ._inner = c.stablehloConvDimensionNumbersGet(
                 ctx._inner,
                 args.input_batch_dimension,
                 args.input_feature_dimension,
@@ -1040,7 +1038,7 @@ pub const ConvDimensionNumbersAttribute = struct {
                 @intCast(args.output_spatial_dimensions.len),
                 args.output_spatial_dimensions.ptr,
             ),
-        );
+        };
     }
 
     pub fn getInputBatchDimension(self: Self) i64 {
@@ -1107,14 +1105,14 @@ pub const OutputOperandAliasAttribute = struct {
         operand_index: i64,
         operand_tuple_indices: []const i64,
     ) OutputOperandAliasAttribute {
-        return OutputOperandAliasAttribute.wrap(c.stablehloOutputOperandAliasGet(
+        return .{ ._inner = c.stablehloOutputOperandAliasGet(
             ctx._inner,
             @intCast(output_tuple_indices.len),
             output_tuple_indices.ptr,
             @intCast(operand_index),
             @intCast(operand_tuple_indices.len),
             operand_tuple_indices.ptr,
-        ));
+        ) };
     }
 };
 
@@ -1135,7 +1133,7 @@ pub const PrecisionAttribute = struct {
     };
 
     pub fn init(ctx: mlir.Context, value: Precision) Self {
-        return Self.wrap(c.stablehloPrecisionAttrGet(ctx._inner, mlir.stringRef(@tagName(value))));
+        return .{ ._inner = c.stablehloPrecisionAttrGet(ctx._inner, mlir.stringRef(@tagName(value))) };
     }
 
     pub fn getValue(self: Self) Precision {
@@ -1164,7 +1162,7 @@ pub const ComparisonDirection = struct {
     };
 
     pub fn init(ctx: mlir.Context, value: Direction) Self {
-        return Self.wrap(c.stablehloComparisonDirectionAttrGet(ctx._inner, mlir.stringRef(@tagName(value))));
+        return .{ ._inner = c.stablehloComparisonDirectionAttrGet(ctx._inner, mlir.stringRef(@tagName(value))) };
     }
 
     pub fn getValue(self: Self) Direction {
@@ -1191,7 +1189,7 @@ pub const CompareType = struct {
     };
 
     pub fn init(ctx: mlir.Context, value: Type) Self {
-        return Self.wrap(c.stablehloComparisonTypeAttrGet(ctx._inner, mlir.stringRef(@tagName(value))));
+        return .{ ._inner = c.stablehloComparisonTypeAttrGet(ctx._inner, mlir.stringRef(@tagName(value))) };
     }
 
     pub fn getValue(self: Self) Type {
@@ -1217,7 +1215,7 @@ pub const Transpose = struct {
     };
 
     pub fn init(ctx: mlir.Context, value: Type) Self {
-        return Self.wrap(c.stablehloTransposeAttrGet(ctx._inner, mlir.stringRef(@tagName(value))));
+        return .{ ._inner = c.stablehloTransposeAttrGet(ctx._inner, mlir.stringRef(@tagName(value))) };
     }
 
     pub fn getValue(self: Self) Type {
@@ -1244,7 +1242,7 @@ pub const FftType = struct {
     };
 
     pub fn init(ctx: mlir.Context, value: Type) Self {
-        return Self.wrap(c.stablehloFftTypeAttrGet(ctx._inner, mlir.stringRef(@tagName(value))));
+        return .{ ._inner = c.stablehloFftTypeAttrGet(ctx._inner, mlir.stringRef(@tagName(value))) };
     }
 
     pub fn getValue(self: Self) Type {
@@ -1269,7 +1267,7 @@ pub const RngDistribution = struct {
     };
 
     pub fn init(ctx: mlir.Context, value: Type) Self {
-        return Self.wrap(c.stablehloRngDistributionAttrGet(ctx._inner, mlir.stringRef(@tagName(value))));
+        return .{ ._inner = c.stablehloRngDistributionAttrGet(ctx._inner, mlir.stringRef(@tagName(value))) };
     }
 
     pub fn getValue(self: Self) Type {
@@ -1295,7 +1293,7 @@ pub const RngAlgorithm = struct {
     };
 
     pub fn init(ctx: mlir.Context, value: Type) Self {
-        return Self.wrap(c.stablehloRngAlgorithmAttrGet(ctx._inner, mlir.stringRef(@tagName(value))));
+        return .{ ._inner = c.stablehloRngAlgorithmAttrGet(ctx._inner, mlir.stringRef(@tagName(value))) };
     }
 
     pub fn getValue(self: Self) Type {

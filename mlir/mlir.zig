@@ -58,13 +58,8 @@ fn MlirHelpersMethods(OuterT: type) type {
 }
 
 pub fn MlirHelpers(comptime OuterT: type, comptime methods: MlirHelpersMethods(OuterT)) type {
-    const InnerT = @TypeOf(methods).InnerT;
     return struct {
         pub const Methods = methods;
-
-        pub inline fn wrap(raw: InnerT) OuterT {
-            return .{ ._inner = raw };
-        }
     };
 }
 
@@ -136,7 +131,7 @@ pub const Module = struct {
     const Self = Module;
 
     pub fn init(loc: Location) Self {
-        return Self.wrap(c.mlirModuleCreateEmpty(loc._inner));
+        return .{ ._inner = c.mlirModuleCreateEmpty(loc._inner) };
     }
 
     pub fn parse(ctx: Context, source: [:0]const u8) !Module {
@@ -146,7 +141,7 @@ pub const Module = struct {
     }
 
     pub fn fromOperation(operation: Operation) Module {
-        return Module.wrap(c.mlirModuleFromOperation(operation._inner));
+        return .{ ._inner = c.mlirModuleFromOperation(operation._inner) };
     }
 
     pub fn context(self: Module) Context {
@@ -154,11 +149,11 @@ pub const Module = struct {
     }
 
     pub fn getBody(self: Module) Block {
-        return Block.wrap(c.mlirModuleGetBody(self._inner));
+        return .{ ._inner = c.mlirModuleGetBody(self._inner) };
     }
 
     pub fn op(self: Module) Operation {
-        return Operation.wrap(c.mlirModuleGetOperation(self._inner));
+        return .{ ._inner = c.mlirModuleGetOperation(self._inner) };
     }
 };
 
@@ -184,7 +179,7 @@ pub const PassManager = struct {
     }
 
     pub fn asOpPassManager(self: Self) OpPassManager {
-        return OpPassManager.wrap(c.mlirPassManagerGetAsOpPassManager(self._inner));
+        return .{ ._inner = c.mlirPassManagerGetAsOpPassManager(self._inner) };
     }
 
     pub fn enableIRPrinting(self: *Self) void {
@@ -225,7 +220,7 @@ pub const Identifier = struct {
     const Self = Identifier;
 
     pub fn get(ctx: Context, str_: [:0]const u8) Self {
-        return Self.wrap(c.mlirIdentifierGet(ctx._inner, stringRef(str_)));
+        return .{ ._inner = c.mlirIdentifierGet(ctx._inner, stringRef(str_)) };
     }
 
     pub fn context(self: Self) Context {
@@ -293,10 +288,10 @@ pub const NamedAttribute = struct {
     const Self = NamedAttribute;
 
     pub fn init(name: Identifier, attr: Attribute) Self {
-        return Self.wrap(.{
+        return .{ ._inner = .{
             .name = name._inner,
             .attribute = attr._inner,
-        });
+        } };
     }
 
     pub const asAttr = Attribute.fromAnyAttribute(Self);
@@ -311,7 +306,7 @@ pub const StringAttribute = struct {
     pub const eql = Attribute.eqlAny(Self);
 
     pub fn init(ctx: Context, str: []const u8) Self {
-        return Self.wrap(c.mlirStringAttrGet(ctx._inner, stringRef(str)));
+        return .{ ._inner = c.mlirStringAttrGet(ctx._inner, stringRef(str)) };
     }
 
     pub fn value(self: Self) []const u8 {
@@ -330,7 +325,7 @@ pub const UnitAttribute = struct {
     const Self = UnitAttribute;
 
     pub fn init(ctx: Context) Self {
-        return Self.wrap(c.mlirUnitAttrGet(ctx._inner));
+        return .{ ._inner = c.mlirUnitAttrGet(ctx._inner) };
     }
 
     pub const asAttr = Attribute.fromAnyAttribute(Self);
@@ -346,7 +341,7 @@ pub const BoolAttribute = struct {
     pub const eql = Attribute.eqlAny(Self);
 
     pub fn init(ctx: Context, value_: bool) Self {
-        return Self.wrap(c.mlirBoolAttrGet(ctx._inner, if (value_) 1 else 0));
+        return .{ ._inner = c.mlirBoolAttrGet(ctx._inner, if (value_) 1 else 0) };
     }
 
     pub fn value(self: Self) bool {
@@ -362,11 +357,11 @@ pub const TypeAttribute = struct {
     pub const eql = Attribute.eqlAny(TypeAttribute);
 
     pub fn init(type_: Type) TypeAttribute {
-        return TypeAttribute.wrap(c.mlirTypeAttrGet(type_._inner));
+        return .{ ._inner = c.mlirTypeAttrGet(type_._inner) };
     }
 
     pub fn typ(self: TypeAttribute) Type {
-        return Type.wrap(c.mlirAttributeGetType(self._inner));
+        return .{ ._inner = c.mlirAttributeGetType(self._inner) };
     }
 
     pub const asAttr = Attribute.fromAnyAttribute(TypeAttribute);
@@ -382,7 +377,7 @@ pub const ArrayAttribute = struct {
     pub const eql = Attribute.eqlAny(Self);
 
     pub fn init(ctx: Context, attrs: []const Attribute) Self {
-        return Self.wrap(c.mlirArrayAttrGet(ctx._inner, @intCast(attrs.len), @ptrCast(attrs.ptr)));
+        return .{ ._inner = c.mlirArrayAttrGet(ctx._inner, @intCast(attrs.len), @ptrCast(attrs.ptr)) };
     }
 
     pub fn size(self: Self) usize {
@@ -390,7 +385,7 @@ pub const ArrayAttribute = struct {
     }
 
     pub fn get(self: Self, index: usize) Attribute {
-        return Attribute.wrap(c.mlirArrayAttrGetElement(self._inner, @intCast(index)));
+        return .{ ._inner = c.mlirArrayAttrGetElement(self._inner, @intCast(index)) };
     }
 };
 
@@ -414,10 +409,10 @@ pub fn IntegerAttribute(comptime it: IntegerTypes) type {
         pub const eql = Attribute.eqlAny(IntAttr);
 
         pub fn init(ctx: Context, value: i64) IntAttr {
-            return IntAttr.wrap(c.mlirIntegerAttrGet(
+            return .{ ._inner = c.mlirIntegerAttrGet(
                 IntegerType(it).init(ctx)._inner,
                 value,
-            ));
+            ) };
         }
 
         pub fn get(value: IntAttr) ZigType {
@@ -436,11 +431,11 @@ pub fn FloatAttribute(comptime ft: FloatTypes) type {
         });
         const FloatAttr = @This();
         pub fn init(ctx: Context, value: f64) FloatAttr {
-            return FloatAttr.wrap(c.mlirFloatAttrDoubleGet(
+            return .{ ._inner = c.mlirFloatAttrDoubleGet(
                 ctx._inner,
                 FloatType(ft).init(ctx)._inner,
                 value,
-            ));
+            ) };
         }
 
         pub fn get(value: FloatAttr) f64 {
@@ -482,7 +477,7 @@ pub fn DenseArrayAttribute(comptime dt: DenseArrayTypes) type {
 
         pub fn init(ctx: Context, values: []const ElementTypeZig) Attr {
             const get_fn = Config[2];
-            return Attr.wrap(get_fn(ctx._inner, @intCast(values.len), @ptrCast(values.ptr)));
+            return .{ ._inner = get_fn(ctx._inner, @intCast(values.len), @ptrCast(values.ptr)) };
         }
 
         pub fn get(self: Attr, pos: usize) ElementTypeZig {
@@ -592,7 +587,7 @@ pub const FlatSymbolRefAttribute = struct {
     pub const eql = Attribute.eqlAny(Self);
 
     pub fn init(ctx: Context, str: [:0]const u8) Self {
-        return Self.wrap(c.mlirFlatSymbolRefAttrGet(ctx._inner, stringRef(str)));
+        return .{ ._inner = c.mlirFlatSymbolRefAttrGet(ctx._inner, stringRef(str)) };
     }
 
     pub fn value(self: Self) []const u8 {
@@ -612,7 +607,7 @@ pub const OperationState = struct {
     const Self = OperationState;
 
     pub fn init(name: [:0]const u8, loc: Location) Self {
-        return Self.wrap(c.mlirOperationStateGet(stringRef(name), loc._inner));
+        return .{ ._inner = c.mlirOperationStateGet(stringRef(name), loc._inner) };
     }
 
     pub fn addResult(self: *Self, type_: Type) void {
@@ -675,11 +670,11 @@ pub const DictionaryAttribute = struct {
     pub const eql = Attribute.eqlAny(DictionaryAttribute);
 
     pub fn init(ctx: Context, attributes: []const NamedAttribute) DictionaryAttribute {
-        return DictionaryAttribute.wrap(c.mlirDictionaryAttrGet(
+        return .{ ._inner = c.mlirDictionaryAttrGet(
             ctx._inner,
             @intCast(attributes.len),
             @ptrCast(attributes.ptr),
-        ));
+        ) };
     }
 
     pub fn size(self: DictionaryAttribute) usize {
@@ -687,7 +682,7 @@ pub const DictionaryAttribute = struct {
     }
 
     pub fn get(self: DictionaryAttribute, pos: usize) NamedAttribute {
-        return NamedAttribute.wrap(c.mlirDictionaryAttrGetElement(self._inner, @intCast(pos)));
+        return .{ ._inner = c.mlirDictionaryAttrGetElement(self._inner, @intCast(pos)) };
     }
 
     pub fn getByName(self: DictionaryAttribute, name: [:0]const u8) ?NamedAttribute {
@@ -806,7 +801,7 @@ pub const Operation = struct {
     }
 
     pub fn operand(self: Self, index: usize) Value {
-        return Value.wrap(c.mlirOperationGetOperand(self._inner, @intCast(index)));
+        return .{ ._inner = c.mlirOperationGetOperand(self._inner, @intCast(index)) };
     }
 
     pub fn setOperand(self: *Self, index: usize, value: Value) void {
@@ -818,15 +813,15 @@ pub const Operation = struct {
     }
 
     pub fn result(self: Self, index: usize) Value {
-        return Value.wrap(c.mlirOperationGetResult(self._inner, @intCast(index)));
+        return .{ ._inner = c.mlirOperationGetResult(self._inner, @intCast(index)) };
     }
 
     pub fn nextInBlock(self: Self) Self {
-        return Self.wrap(c.mlirOperationGetNextInBlock(self._inner));
+        return .{ ._inner = c.mlirOperationGetNextInBlock(self._inner) };
     }
 
     // pub fn previousInBlock(self: Self) Self {
-    //     return Self.wrap(c.mlirOperationGetPrevInBlock(self._inner));
+    //     return .{ ._inner = c.mlirOperationGetPrevInBlock(self._inner) };
     // }
 
     pub fn block(self: Self) ?Block {
@@ -838,11 +833,11 @@ pub const Operation = struct {
     }
 
     pub fn region(self: Self, index: usize) Region {
-        return Region.wrap(c.mlirOperationGetRegion(self._inner, @intCast(index)));
+        return .{ ._inner = c.mlirOperationGetRegion(self._inner, @intCast(index)) };
     }
 
     pub fn context(self: Self) Context {
-        return Context.wrap(c.mlirOperationGetContext(self._inner));
+        return .{ ._inner = c.mlirOperationGetContext(self._inner) };
     }
 
     pub fn writeBytecode(self: Self, writer: anytype) void {
@@ -1080,7 +1075,7 @@ pub const Value = struct {
     pub const wrapOr = wrapOrHelper(Value, c.mlirValueIsNull);
 
     pub fn getType(val: Value) Type {
-        return Type.wrap(c.mlirValueGetType(val._inner));
+        return .{ ._inner = c.mlirValueGetType(val._inner) };
     }
 
     pub fn setType(val: *Value, typ: Type) void {
@@ -1088,7 +1083,7 @@ pub const Value = struct {
     }
 
     pub fn firstUse(val: Value) OpOperand {
-        return OpOperand.wrap(c.mlirValueGetFirstUse(val._inner));
+        return .{ ._inner = c.mlirValueGetFirstUse(val._inner) };
     }
 
     pub fn replaceAllUsesWith(val: Value, with: Value) void {
@@ -1096,7 +1091,7 @@ pub const Value = struct {
     }
 
     pub fn owner(val: Value) Operation {
-        return Operation.wrap(c.mlirOpResultGetOwner(val._inner));
+        return .{ ._inner = c.mlirOpResultGetOwner(val._inner) };
     }
 
     pub fn isABlockArgument(val: Value) bool {
@@ -1131,7 +1126,7 @@ pub const BlockArgument = struct {
     _inner: c.MlirValue,
 
     pub fn block(arg: BlockArgument) Block {
-        return Block.wrap(c.mlirBlockArgumentGetOwner(arg._inner));
+        return .{ ._inner = c.mlirBlockArgumentGetOwner(arg._inner) };
     }
 
     pub fn number(arg: BlockArgument) usize {
@@ -1192,7 +1187,7 @@ pub const IndexType = struct {
     pub const format = print(IndexType, c.mlirTypePrint);
 
     pub fn init(ctx: Context) IndexType {
-        return IndexType.wrap(c.mlirIndexTypeGet(ctx._inner));
+        return .{ ._inner = c.mlirIndexTypeGet(ctx._inner) };
     }
 
     pub const asType = Type.fromAnyType(IndexType);
@@ -1266,7 +1261,7 @@ pub fn IntegerType(comptime it: IntegerTypes) type {
         pub const init = if (it != .unknown) struct {
             pub fn init(ctx: Context) Int {
                 const type_get = Config[1];
-                return Int.wrap(type_get(ctx._inner, BitWidth));
+                return .{ ._inner = type_get(ctx._inner, BitWidth) };
             }
         }.init else {};
     };
@@ -1317,7 +1312,7 @@ pub fn FloatType(comptime ft: FloatTypes) type {
 
         pub fn init(ctx: Context) Self {
             const type_get = Config[1];
-            return Self.wrap(type_get(ctx._inner));
+            return .{ ._inner = type_get(ctx._inner) };
         }
     };
 }
@@ -1374,7 +1369,7 @@ pub fn ComplexType(comptime ct: ComplexTypes) type {
 
             pub fn init(ctx: Context) Complex {
                 const type_get = Config[1];
-                return Complex.wrap(type_get(ctx._inner));
+                return .{ ._inner = type_get(ctx._inner) };
             }
         } else struct {};
     };
@@ -1403,7 +1398,7 @@ pub const TupleType = struct {
     }
 
     pub fn getElementType(self: Self, index: usize) Type {
-        return Type.wrap(c.mlirTupleTypeGetType(self._inner, @intCast(index)));
+        return .{ ._inner = c.mlirTupleTypeGetType(self._inner, @intCast(index)) };
     }
 
     pub const asType = Type.fromAnyType(Self);
@@ -1439,18 +1434,16 @@ pub const RankedTensorType = struct {
     pub const format = print(Type, c.mlirTypePrint);
 
     pub fn init(dimensions: []const i64, elemType: Type) RankedTensorType {
-        return RankedTensorType.wrap(
-            c.mlirRankedTensorTypeGet(
-                @intCast(dimensions.len),
-                @ptrCast(dimensions.ptr),
-                elemType._inner,
-                c.mlirAttributeGetNull(),
-            ),
-        );
+        return .{ ._inner = c.mlirRankedTensorTypeGet(
+            @intCast(dimensions.len),
+            @ptrCast(dimensions.ptr),
+            elemType._inner,
+            c.mlirAttributeGetNull(),
+        ) };
     }
 
     pub fn getElementType(self: RankedTensorType) Type {
-        return Type.wrap(c.mlirShapedTypeGetElementType(self._inner));
+        return .{ ._inner = c.mlirShapedTypeGetElementType(self._inner) };
     }
 
     pub fn getRank(self: RankedTensorType) usize {
@@ -1474,7 +1467,7 @@ pub const Dialect = struct {
     const Self = Dialect;
 
     pub fn getContext(self: Self) Context {
-        return Context.wrap(c.mlirDialectGetContext(self._inner));
+        return .{ ._inner = c.mlirDialectGetContext(self._inner) };
     }
 
     pub fn getNamespace(self: Self) []const u8 {
@@ -1502,11 +1495,11 @@ pub const DialectHandle = struct {
     }
 
     pub fn loadDialect(self: DialectHandle, ctx: Context) Dialect {
-        return Dialect.wrap(c.mlirDialectHandleLoadDialect(self._inner, ctx._inner));
+        return .{ ._inner = c.mlirDialectHandleLoadDialect(self._inner, ctx._inner) };
     }
 
     pub fn fromString(comptime namespace: []const u8) DialectHandle {
-        return DialectHandle.wrap(@field(c, "mlirGetDialectHandle__" ++ namespace ++ "__")());
+        return .{ ._inner = @field(c, "mlirGetDialectHandle__" ++ namespace ++ "__")() };
     }
 };
 
@@ -1536,20 +1529,20 @@ pub const Location = struct {
     }
 
     pub fn callSite(callee: Location, caller: Location) Location {
-        return Location.wrap(c.mlirLocationCallSiteGet(callee._inner, caller._inner));
+        return .{ ._inner = c.mlirLocationCallSiteGet(callee._inner, caller._inner) };
     }
 
     pub fn fused(ctx: Context, locations: []const Location, metadata: Attribute) Location {
-        return Location.wrap(c.mlirLocationFusedGet(
+        return .{ ._inner = c.mlirLocationFusedGet(
             ctx._inner,
             @intCast(locations.len),
             @ptrCast(locations.ptr),
             metadata._inner,
-        ));
+        ) };
     }
 
     pub fn named(loc: Location, ctx: Context, loc_name: [:0]const u8) Location {
-        return Location.wrap(c.mlirLocationNameGet(ctx._inner, stringRef(loc_name), loc._inner));
+        return .{ ._inner = c.mlirLocationNameGet(ctx._inner, stringRef(loc_name), loc._inner) };
     }
 
     pub fn namedFmt(loc: Location, ctx: Context, comptime fmt: [:0]const u8, args: anytype) Location {
@@ -1562,7 +1555,7 @@ pub const Location = struct {
     }
 
     pub fn unknown(ctx: Context) Location {
-        return Location.wrap(c.mlirLocationUnknownGet(ctx._inner));
+        return .{ ._inner = c.mlirLocationUnknownGet(ctx._inner) };
     }
 };
 
@@ -1583,7 +1576,7 @@ pub const Block = struct {
     }
 
     pub fn argument(self: Block, index: usize) Value {
-        return Value.wrap(c.mlirBlockGetArgument(self._inner, @intCast(index)));
+        return .{ ._inner = c.mlirBlockGetArgument(self._inner, @intCast(index)) };
     }
 
     pub fn numArguments(self: Block) usize {
@@ -1591,11 +1584,11 @@ pub const Block = struct {
     }
 
     pub fn addArgument(self: *Block, typ: Type, loc: Location) Value {
-        return Value.wrap(c.mlirBlockAddArgument(self._inner, typ._inner, loc._inner));
+        return .{ ._inner = c.mlirBlockAddArgument(self._inner, typ._inner, loc._inner) };
     }
 
     pub fn insertArgument(self: *Block, index: usize, typ: Type, loc: Location) Value {
-        return Value.wrap(c.mlirBlockInsertArgument(self._inner, @intCast(index), typ._inner, loc._inner));
+        return .{ ._inner = c.mlirBlockInsertArgument(self._inner, @intCast(index), typ._inner, loc._inner) };
     }
 
     pub fn equals(self: Block, other: Block) bool {
