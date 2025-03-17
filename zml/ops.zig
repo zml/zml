@@ -773,33 +773,6 @@ pub fn fromMlirOperationWithTags(op: mlir.Operation, base: anytype) @TypeOf(base
     return res;
 }
 
-/// Produces a custom call to `name` that takes a tensor and returns it.
-///
-/// For example, this can be used to extract tokens quickly if they run on a loop on the
-/// GPU.
-pub fn identityCustomCall(name: [:0]const u8, input: Tensor, context: *anyopaque) Tensor {
-    const address: [8]u8 = @bitCast(@intFromPtr(context));
-    var backend_config: [8:0]u8 = undefined;
-    @memcpy(backend_config[0..8], address[0..8]);
-    const ctx = CompilationContext.current();
-
-    const loc = ctx.mlirCtx().location(@src()).namedFmt(ctx.mlirCtx(), "custom_call({s})", .{name});
-
-    const op = dialect.stablehlo.custom_call(
-        ctx.mlirCtx(),
-        &.{input.value()},
-        .{
-            .has_side_effect = false,
-            .call_target_name = name,
-            .backend_config = .{ .string = backend_config[0..] },
-            .output_operand_aliases = &.{0},
-        },
-        &.{input.value().getType()},
-        loc,
-    );
-    return Tensor._result(input.shape(), op.result(0));
-}
-
 /// At runtime the given tensor will be materialized and copied to host,
 /// and the callback will be called on it.
 pub fn addHostCallback(
@@ -838,6 +811,7 @@ pub fn addHostCallback(
             .call_target_name = "zmlHostBufferCallback",
             .backend_config = .{ .string = @ptrCast(std.mem.sliceAsBytes(&backend_config)) },
             .output_operand_aliases = &.{0},
+            .api_version = .original,
         },
         &.{input.value().getType()},
         loc,
@@ -855,28 +829,50 @@ pub const TritonOps = struct {
 };
 
 /// Generate an MLIR call to the given member function with the given tensors.
-pub fn triton(inputs: anytype, ouputs: anytype, opts: TritonOps) [ouputs.len]Tensor {
+pub fn triton(inputs: anytype, outputs: anytype, opts: TritonOps) [outputs.len]Tensor {
     const ctx = CompilationContext.current();
 
     var values: [inputs.len]mlir.Value = undefined;
     ctx.extractValues(&inputs, &values);
 
-    var res_types: [ouputs.len]mlir.Type = undefined;
-    var outputs: [ouputs.len]Tensor = undefined;
-
-    inline for (ouputs, 0..) |output, i| {
+    var res_types: [outputs.len]mlir.Type = undefined;
+    inline for (outputs, 0..) |output, i| {
         res_types[i] = mlir.ext.mlirType(ctx.mlirCtx(), output);
     }
 
     const attrs = mlir.DictionaryAttribute.init(ctx.mlirCtx(), &.{
-        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "name"), mlir.StringAttribute.init(ctx.mlirCtx(), opts.name).as(mlir.Attribute).?),
-        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "ir"), mlir.StringAttribute.init(ctx.mlirCtx(), opts.ir).as(mlir.Attribute).?),
-        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "grid_x"), mlir.IntegerAttribute(.i32).init(ctx.mlirCtx(), @intCast(opts.grid[0])).as(mlir.Attribute).?),
-        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "grid_y"), mlir.IntegerAttribute(.i32).init(ctx.mlirCtx(), @intCast(opts.grid[1])).as(mlir.Attribute).?),
-        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "grid_z"), mlir.IntegerAttribute(.i32).init(ctx.mlirCtx(), @intCast(opts.grid[2])).as(mlir.Attribute).?),
-        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "num_stages"), mlir.IntegerAttribute(.i32).init(ctx.mlirCtx(), @intCast(opts.num_stages)).as(mlir.Attribute).?),
-        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "num_warps"), mlir.IntegerAttribute(.i32).init(ctx.mlirCtx(), @intCast(opts.num_warps)).as(mlir.Attribute).?),
+        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "name"), mlir.StringAttribute.init(ctx.mlirCtx(), opts.name).as(mlir.Attribute)),
+        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "ir"), mlir.StringAttribute.init(ctx.mlirCtx(), opts.ir).as(mlir.Attribute)),
+        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "grid_x"), mlir.IntegerAttribute(.i32).init(ctx.mlirCtx(), @intCast(opts.grid[0])).as(mlir.Attribute)),
+        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "grid_y"), mlir.IntegerAttribute(.i32).init(ctx.mlirCtx(), @intCast(opts.grid[1])).as(mlir.Attribute)),
+        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "grid_z"), mlir.IntegerAttribute(.i32).init(ctx.mlirCtx(), @intCast(opts.grid[2])).as(mlir.Attribute)),
+        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "num_stages"), mlir.IntegerAttribute(.i32).init(ctx.mlirCtx(), @intCast(opts.num_stages)).as(mlir.Attribute)),
+        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "num_warps"), mlir.IntegerAttribute(.i32).init(ctx.mlirCtx(), @intCast(opts.num_warps)).as(mlir.Attribute)),
     });
+
+    const MINOR_TO_MAJOR = blk: {
+        var ret: [Shape.MAX_RANK]u8 = undefined;
+        for (0..Shape.MAX_RANK) |i| {
+            ret[i] = @intCast(Shape.MAX_RANK - i - 1);
+        }
+        break :blk ret;
+    };
+
+    const operands_layouts = blk: {
+        var ret: [inputs.len][]const u8 = undefined;
+        inline for (inputs, 0..) |input, i| {
+            ret[i] = MINOR_TO_MAJOR[MINOR_TO_MAJOR.len - input.rank() ..];
+        }
+        break :blk ret;
+    };
+
+    const results_layouts = blk: {
+        var ret: [outputs.len][]const u8 = undefined;
+        inline for (outputs, 0..) |output, i| {
+            ret[i] = MINOR_TO_MAJOR[MINOR_TO_MAJOR.len - output.rank() ..];
+        }
+        break :blk ret;
+    };
 
     const op = dialect.stablehlo.custom_call(
         ctx.mlirCtx(),
@@ -885,16 +881,20 @@ pub fn triton(inputs: anytype, ouputs: anytype, opts: TritonOps) [ouputs.len]Ten
             .call_target_name = "__gpu$xla.gpu.triton",
             .backend_config = .{ .dict = attrs },
             .has_side_effect = false,
+            .api_version = .typed_ffi,
+            .operand_layouts = &operands_layouts,
+            .result_layouts = &results_layouts,
         },
         &res_types,
         ctx.mlirCtx().location(@src()),
     );
 
-    inline for (ouputs, 0..) |output, i| {
-        outputs[i] = Tensor._result(output, op.result(i));
+    var outputs_: [outputs.len]Tensor = undefined;
+    inline for (outputs, 0..) |output, i| {
+        outputs_[i] = Tensor._result(output, op.result(i));
     }
 
-    return outputs;
+    return outputs_;
 }
 
 test "triton" {

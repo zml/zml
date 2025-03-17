@@ -127,7 +127,7 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
             .call_target_name = "__cudnn$fmhaScaleBiasSoftmax",
             .backend_config = .{ .string = backend_config },
             .has_side_effect = false,
-            .output_operand_aliases = &.{},
+            .api_version = .original,
         },
         &.{
             mlir.ext.mlirType(mlir_ctx, q.shape()),

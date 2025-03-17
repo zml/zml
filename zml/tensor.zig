@@ -181,8 +181,8 @@ pub const Tensor = struct {
                     .{
                         .call_target_name = "Sharding",
                         .has_side_effect = false,
-                        .output_operand_aliases = &.{},
                         .addional_attributes = &.{.{ "mhlo.sharding", sharding.asAttr() }},
+                        .api_version = .original,
                     },
                     &.{self.value().getType()},
                     ctx.mlirCtx().location(@src()),
