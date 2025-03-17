@@ -260,8 +260,8 @@ pub const CompilationContext = struct {
             break :blk loaded_executable;
         };
 
-        log.warn("******** ZML generated MLIR ********", .{});
-        log.warn("{}", .{module.op().mlirFormatter(.{})});
+        log.debug("******** ZML generated MLIR ********", .{});
+        log.debug("{}", .{module.op().mlirFormatter(.{})});
 
         if (timer) |*t| {
             const time_ms = @divFloor(t.lap(), std.time.ns_per_ms);
