@@ -52,15 +52,11 @@ fn MlirHelpersMethods(OuterT: type) type {
         comptime {
             std.debug.assert(@sizeOf(InnerT) == @sizeOf(OuterT));
         }
-
-        is_a_fn: ?fn (InnerT) callconv(.C) bool = null,
     };
 }
 
-pub fn MlirHelpers(comptime OuterT: type, comptime methods: MlirHelpersMethods(OuterT)) type {
-    return struct {
-        pub const Methods = methods;
-    };
+pub fn MlirHelpers(comptime OuterT: type, comptime _: MlirHelpersMethods(OuterT)) type {
+    return struct {};
 }
 
 pub const Registry = struct {
@@ -299,9 +295,8 @@ pub const NamedAttribute = struct {
 
 pub const StringAttribute = struct {
     _inner: c.MlirAttribute,
-    pub usingnamespace MlirHelpers(StringAttribute, .{
-        .is_a_fn = c.mlirAttributeIsAString,
-    });
+    pub const is_a_fn = c.mlirAttributeIsAString;
+    pub usingnamespace MlirHelpers(StringAttribute, .{});
     const Self = StringAttribute;
     pub const eql = Attribute.eqlAny(Self);
 
@@ -318,8 +313,8 @@ pub const StringAttribute = struct {
 
 pub const UnitAttribute = struct {
     _inner: c.MlirAttribute,
+    pub const is_a_fn = c.mlirAttributeIsAUnit;
     pub usingnamespace MlirHelpers(UnitAttribute, .{
-        .is_a_fn = c.mlirAttributeIsAUnit,
         .equal_fn = c.mlirAttributeEqual,
     });
     const Self = UnitAttribute;
@@ -333,9 +328,8 @@ pub const UnitAttribute = struct {
 
 pub const BoolAttribute = struct {
     _inner: c.MlirAttribute,
-    pub usingnamespace MlirHelpers(BoolAttribute, .{
-        .is_a_fn = c.mlirAttributeIsABool,
-    });
+    pub const is_a_fn = c.mlirAttributeIsABool;
+    pub usingnamespace MlirHelpers(BoolAttribute, .{});
     const Self = BoolAttribute;
     pub const asAttr = Attribute.fromAnyAttribute(Self);
     pub const eql = Attribute.eqlAny(Self);
@@ -351,9 +345,8 @@ pub const BoolAttribute = struct {
 
 pub const TypeAttribute = struct {
     _inner: c.MlirAttribute,
-    pub usingnamespace MlirHelpers(TypeAttribute, .{
-        .is_a_fn = c.mlirAttributeIsAType,
-    });
+    pub const is_a_fn = c.mlirAttributeIsAType;
+    pub usingnamespace MlirHelpers(TypeAttribute, .{});
     pub const eql = Attribute.eqlAny(TypeAttribute);
 
     pub fn init(type_: Type) TypeAttribute {
@@ -369,9 +362,8 @@ pub const TypeAttribute = struct {
 
 pub const ArrayAttribute = struct {
     _inner: c.MlirAttribute,
-    pub usingnamespace MlirHelpers(ArrayAttribute, .{
-        .is_a_fn = c.mlirAttributeIsAArray,
-    });
+    pub const is_a_fn = c.mlirAttributeIsAArray;
+    pub usingnamespace MlirHelpers(ArrayAttribute, .{});
     const Self = ArrayAttribute;
     pub const asAttr = Attribute.fromAnyAttribute(Self);
     pub const eql = Attribute.eqlAny(Self);
@@ -399,9 +391,8 @@ pub fn IntegerAttribute(comptime it: IntegerTypes) type {
 
     return struct {
         _inner: c.MlirAttribute,
-        pub usingnamespace MlirHelpers(@This(), .{
-            .is_a_fn = c.mlirAttributeIsAInteger,
-        });
+        pub const is_a_fn = c.mlirAttributeIsAInteger;
+        pub usingnamespace MlirHelpers(@This(), .{});
         pub const IntegerTypeType = IntegerType(it);
         const IntAttr = @This();
 
@@ -424,8 +415,8 @@ pub fn IntegerAttribute(comptime it: IntegerTypes) type {
 pub fn FloatAttribute(comptime ft: FloatTypes) type {
     return struct {
         _inner: c.MlirAttribute,
+        pub const is_a_fn = c.mlirAttributeIsAFloat;
         pub usingnamespace MlirHelpers(@This(), .{
-            .is_a_fn = c.mlirAttributeIsAFloat,
             .is_null_fn = c.mlirAttributeIsNull,
             .equal_fn = c.mlirAttributeEqual,
         });
@@ -467,9 +458,8 @@ pub fn DenseArrayAttribute(comptime dt: DenseArrayTypes) type {
 
     return struct {
         _inner: c.MlirAttribute,
-        pub usingnamespace MlirHelpers(@This(), .{
-            .is_a_fn = Config[1],
-        });
+        pub const is_a_fn = Config[1];
+        pub usingnamespace MlirHelpers(@This(), .{});
         const Attr = @This();
         const ElementType = dt;
         const ElementTypeZig = Config[0];
@@ -544,9 +534,8 @@ pub fn DenseElementsAttribute(comptime dt: DenseElementsAttributeTypes) type {
 
         const Attr = @This();
 
-        pub usingnamespace MlirHelpers(Attr, .{
-            .is_a_fn = c.mlirAttributeIsADenseElements,
-        });
+        pub const is_a_fn = c.mlirAttributeIsADenseElements;
+        pub usingnamespace MlirHelpers(Attr, .{});
 
         pub const eql = Attribute.eqlAny(Attr);
 
@@ -580,9 +569,8 @@ pub fn DenseElementsAttribute(comptime dt: DenseElementsAttributeTypes) type {
 
 pub const FlatSymbolRefAttribute = struct {
     _inner: c.MlirAttribute,
-    pub usingnamespace MlirHelpers(FlatSymbolRefAttribute, .{
-        .is_a_fn = c.mlirAttributeIsAFlatSymbolRef,
-    });
+    pub const is_a_fn = c.mlirAttributeIsAFlatSymbolRef;
+    pub usingnamespace MlirHelpers(FlatSymbolRefAttribute, .{});
     const Self = FlatSymbolRefAttribute;
     pub const eql = Attribute.eqlAny(Self);
 
@@ -663,9 +651,8 @@ pub const OperationState = struct {
 
 pub const DictionaryAttribute = struct {
     _inner: c.MlirAttribute,
-    pub usingnamespace MlirHelpers(DictionaryAttribute, .{
-        .is_a_fn = c.mlirAttributeIsADictionary,
-    });
+    pub const is_a_fn = c.mlirAttributeIsADictionary;
+    pub usingnamespace MlirHelpers(DictionaryAttribute, .{});
 
     pub const eql = Attribute.eqlAny(DictionaryAttribute);
 
@@ -1156,8 +1143,11 @@ pub const Type = struct {
     }
 
     pub fn as(generic: Type, SpecificType: type) ?SpecificType {
-        if (SpecificType.Methods.is_a_fn) |is_a_fn| {
-            return if (is_a_fn(generic._inner)) .{ ._inner = generic._inner } else null;
+        if (@hasDecl(SpecificType, "is_a_fn")) {
+            return if (SpecificType.is_a_fn(generic._inner))
+                .{ ._inner = generic._inner }
+            else
+                null;
         }
         @compileError("Mlir subclass of type need `is_a_fn` attribute: " ++ @typeName(SpecificType));
     }
@@ -1239,16 +1229,14 @@ pub fn IntegerType(comptime it: IntegerTypes) type {
         _inner: c.MlirType,
 
         const Int = @This();
-        pub usingnamespace MlirHelpers(Int, .{
-            .is_a_fn = switch (it) {
-                .unknown => c.mlirTypeIsAInteger,
-                else => typeIsAIntegerExact,
-            },
-        });
+        pub const is_a_fn = switch (it) {
+            .unknown => c.mlirTypeIsAInteger,
+            else => typeIsAIntegerExact,
+        };
+
         pub const asType = Type.fromAnyType(Int);
         pub const eql = Type.eqlAny(Int);
         pub const format = print(Int, c.mlirTypePrint);
-        const IntegerTypeType = it;
 
         fn typeIsAIntegerExact(typ: c.MlirType) callconv(.C) bool {
             const bit_width = Config[0];
@@ -1303,9 +1291,8 @@ pub fn FloatType(comptime ft: FloatTypes) type {
 
         const Self = @This();
 
-        pub usingnamespace MlirHelpers(Self, .{
-            .is_a_fn = Config[0],
-        });
+        pub const is_a_fn = Config[0];
+        pub usingnamespace MlirHelpers(Self, .{});
         pub const asType = Type.fromAnyType(Self);
         pub const eql = Type.eqlAny(Self);
         pub const format = print(Self, c.mlirTypePrint);
@@ -1357,9 +1344,8 @@ pub fn ComplexType(comptime ct: ComplexTypes) type {
             return c.mlirTypeIsAComplex(typ);
         }
 
-        pub usingnamespace MlirHelpers(@This(), .{
-            .is_a_fn = Config[0],
-        });
+        pub const is_a_fn = Config[0];
+        pub usingnamespace MlirHelpers(@This(), .{});
         pub const asType = Type.fromAnyType(Complex);
         pub const eql = Type.eqlAny(Complex);
         pub const format = Type.print(Complex, c.mlirTypePrint);
@@ -1377,8 +1363,8 @@ pub fn ComplexType(comptime ct: ComplexTypes) type {
 
 pub const TupleType = struct {
     _inner: c.MlirType,
+    pub const is_a_fn = c.mlirTypeIsATuple;
     pub usingnamespace MlirHelpers(TupleType, .{
-        .is_a_fn = c.mlirTypeIsATuple,
         .is_null_fn = c.mlirTypeIsNull,
         .equal_fn = c.mlirTypeEqual,
     });
@@ -1406,9 +1392,8 @@ pub const TupleType = struct {
 
 pub const FunctionType = struct {
     _inner: c.MlirType,
-    pub usingnamespace MlirHelpers(FunctionType, .{
-        .is_a_fn = c.mlirTypeIsAFunction,
-    });
+    pub const is_a_fn = c.mlirTypeIsAFunction;
+    pub usingnamespace MlirHelpers(FunctionType, .{});
     const Self = FunctionType;
     pub const asType = Type.fromAnyType(Self);
     pub const eql = Type.eqlAny(IndexType);
@@ -1427,9 +1412,8 @@ pub const FunctionType = struct {
 
 pub const RankedTensorType = struct {
     _inner: c.MlirType,
-    pub usingnamespace MlirHelpers(RankedTensorType, .{
-        .is_a_fn = c.mlirTypeIsARankedTensor,
-    });
+    pub const is_a_fn = c.mlirTypeIsARankedTensor;
+    pub usingnamespace MlirHelpers(RankedTensorType, .{});
     pub const eql = Type.eqlAny(RankedTensorType);
     pub const format = print(Type, c.mlirTypePrint);
 
@@ -1605,14 +1589,6 @@ pub const Block = struct {
         }
     }
 };
-
-pub fn isA(MlirObject: type, Other: type) fn (MlirObject) bool {
-    return struct {
-        fn isA(x: MlirObject) bool {
-            return if (Other.Methods.is_a_fn) |is_a_fn| is_a_fn(x._inner) else false;
-        }
-    }.isA;
-}
 
 pub fn print(Any: type, print_fn: fn (@FieldType(Any, "_inner"), ?*const MlirStrCallback, ?*anyopaque) callconv(.C) void) type {
     return struct {

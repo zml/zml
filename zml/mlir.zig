@@ -123,7 +123,7 @@ pub const ext = struct {
 
             inline for (mapping) |entry| {
                 const dt, const mlirT = entry;
-                if (mlirT.Methods.is_a_fn.?(mlir_type._inner)) {
+                if (mlirT.is_a_fn(mlir_type._inner)) {
                     return dt;
                 }
             }
