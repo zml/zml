@@ -110,7 +110,7 @@ pub const Tensor = struct {
     ///
     /// The shape is derived from the type of the mlir.Value.
     pub fn fromMlirValue(val: mlir.Value) Tensor {
-        const ranked_tensor = val.getType().as(mlir.RankedTensorType).?;
+        const ranked_tensor = val.getType().as(mlir.RankedTensorType);
         const n = ranked_tensor.getRank();
 
         stdx.debug.assert(n <= MAX_RANK, "Can't represent MLIR tensor of rank {}, max supported rank is {}.", .{ n, MAX_RANK });
@@ -281,7 +281,7 @@ pub const Tensor = struct {
         const op = dialect.stablehlo.bitcast_convert(
             self.getContext().mlirCtx(),
             self.value(),
-            mlir.ext.RankedTensorType.fromShape(self.getContext().mlirCtx(), res_shape).as(mlir.Type).?,
+            mlir.ext.RankedTensorType.fromShape(self.getContext().mlirCtx(), res_shape).as(mlir.Type),
             loc,
         );
 
@@ -830,7 +830,7 @@ pub const Tensor = struct {
             self.value(),
             other.value(),
             used_opts,
-            mlir.ext.RankedTensorType.fromShape(self.getContext().mlirCtx(), new_shape).as(mlir.Type).?,
+            mlir.ext.RankedTensorType.fromShape(self.getContext().mlirCtx(), new_shape).as(mlir.Type),
             loc,
         );
 
@@ -1010,7 +1010,7 @@ pub const Tensor = struct {
             return self;
         }
 
-        const res_type = mlir.RankedTensorType.init(self.dims(), mlir.ext.Type.fromDType(self.getContext().mlirCtx(), to)).as(mlir.Type).?;
+        const res_type = mlir.RankedTensorType.init(self.dims(), mlir.ext.Type.fromDType(self.getContext().mlirCtx(), to)).as(mlir.Type);
         const loc = self.getContext().location(@src(), "convert({_},to={s})", .{ self, @tagName(to) });
 
         const op = dialect.stablehlo.convert(self.getContext().mlirCtx(), self.value(), res_type, loc);
@@ -1520,7 +1520,7 @@ pub const Tensor = struct {
 
         const mlir_ctx = self.getContext().mlirCtx();
         const loc = mlir_ctx.location(@src()).namedFmt(mlir_ctx, "slices={any}", .{slices});
-        const result_type = mlir.ext.RankedTensorType.fromShape(mlir_ctx, res_shape).as(mlir.Type).?;
+        const result_type = mlir.ext.RankedTensorType.fromShape(mlir_ctx, res_shape).as(mlir.Type);
         const slice_op = dialect.stablehlo.slice(
             mlir_ctx,
             self.value(),
@@ -1785,7 +1785,12 @@ pub const Tensor = struct {
         const loc = ctx.location(@src(), "iota({_}, {})", .{ res_shape, a });
 
         const mlir_ctx = ctx.mlirCtx();
-        var op = dialect.stablehlo.iota(mlir_ctx, a, mlir.ext.RankedTensorType.fromShape(mlir_ctx, res_shape).asType(), loc);
+        var op = dialect.stablehlo.iota(
+            mlir_ctx,
+            a,
+            mlir.ext.RankedTensorType.fromShape(mlir_ctx, res_shape).as(mlir.Type),
+            loc,
+        );
         return _result(res_shape, op.result(0));
     }
 
@@ -1857,7 +1862,7 @@ pub const Tensor = struct {
         };
 
         if (sh.rank() > 0) {
-            constant_op = dialect.stablehlo.broadcast_in_dim(ctx, constant_op.result(0), &.{}, mlir.ext.RankedTensorType.fromShape(ctx, sh).as(mlir.Type).?, loc);
+            constant_op = dialect.stablehlo.broadcast_in_dim(ctx, constant_op.result(0), &.{}, mlir.ext.RankedTensorType.fromShape(ctx, sh).as(mlir.Type), loc);
         }
         return _result(sh, constant_op.result(0)).convert(val.dtype());
     }
@@ -1904,7 +1909,7 @@ pub const Tensor = struct {
             return _result(res_shape, self.value());
         }
         const ctx = self.getContext();
-        const result_type = mlir.ext.RankedTensorType.fromShape(ctx.mlirCtx(), res_shape).as(mlir.Type).?;
+        const result_type = mlir.ext.RankedTensorType.fromShape(ctx.mlirCtx(), res_shape).as(mlir.Type);
         const loc = ctx.location(@src(), "broadcast({_}, {_}, axes={d})", .{ self, res_shape, axes_ });
         const broadcast_op = dialect.stablehlo.broadcast_in_dim(ctx.mlirCtx(), self.value(), axes_, result_type, loc);
 

@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const stdx = @import("stdx");
 const log = std.log.scoped(.mlir);
 
 const c = @import("c");
@@ -95,9 +96,10 @@ pub fn MlirHelpers(comptime OuterT: type, comptime methods: MlirHelpersMethods(O
             return false;
         }
 
-        pub inline fn as(self: OuterT, comptime OtherT: type) ?OtherT {
+        pub inline fn as(self: OuterT, comptime OtherT: type) OtherT {
             if (OtherT.Methods.is_a_fn) |is_a_fn| {
-                return if (is_a_fn(self.inner())) OtherT.wrap(self.inner()) else null;
+                stdx.debug.assert(is_a_fn(self.inner()), "Wrongly tried to cast {} into {}", .{ OuterT, OtherT });
+                return OtherT.wrap(self.inner());
             }
             // if the other type doesn't have an is_a_fn, try.
             return OtherT.wrap(self.inner());
@@ -425,7 +427,7 @@ pub const BoolAttribute = struct {
     }
 
     pub fn asAttr(self: Self) Attribute {
-        return self.as(Attribute).?;
+        return self.as(Attribute);
     }
 };
 
@@ -446,7 +448,7 @@ pub const TypeAttribute = struct {
     }
 
     pub fn asAttr(self: TypeAttribute) Attribute {
-        return self.as(Attribute).?;
+        return self.as(Attribute);
     }
 };
 
@@ -591,10 +593,6 @@ pub fn DenseArrayAttribute(comptime dt: DenseArrayTypes) type {
                     .i64 => .i64,
                     else => @compileError("DenseArrayAttribute: unreachable"),
                 });
-
-                pub fn toElements(self: Attr) DenseArray {
-                    return DenseArray.wrap(c.mlirDenseArrayToElements(self.inner()));
-                }
             },
             else => struct {},
         };
@@ -615,28 +613,32 @@ pub const DenseElementsAttributeTypes = enum {
     f16,
     f32,
     f64,
+    index,
 };
 
-pub fn DenseIntOrFPElementsAttribute(comptime dt: DenseElementsAttributeTypes) type {
-    const ZigInDataType, const ZigOutDataType, const initFn, const getValue = switch (dt) {
-        .bool => .{ bool, bool, c.mlirDenseElementsAttrBoolGet, c.mlirDenseElementsAttrGetBoolValue },
-        .i8 => .{ i8, i8, c.mlirDenseElementsAttrInt8Get, c.mlirDenseElementsAttrGetInt8Value },
-        .i16 => .{ i16, i16, c.mlirDenseElementsAttrInt16Get, c.mlirDenseElementsAttrGetInt16Value },
-        .i32 => .{ i32, i32, c.mlirDenseElementsAttrInt32Get, c.mlirDenseElementsAttrGetInt32Value },
-        .i64 => .{ i64, i64, c.mlirDenseElementsAttrInt64Get, c.mlirDenseElementsAttrGetInt64Value },
-        .u8 => .{ u8, u8, c.mlirDenseElementsAttrUInt8Get, c.mlirDenseElementsAttrGetUInt8Value },
-        .u16 => .{ u16, u16, c.mlirDenseElementsAttrUInt16Get, c.mlirDenseElementsAttrGetUInt16Value },
-        .u32 => .{ u32, u32, c.mlirDenseElementsAttrUInt32Get, c.mlirDenseElementsAttrGetUInt32Value },
-        .u64 => .{ u64, u64, c.mlirDenseElementsAttrUInt64Get, c.mlirDenseElementsAttrGetUInt64Value },
-        .bf16 => .{ u16, f32, c.mlirDenseElementsAttrBFloat16Get, c.mlirDenseElementsAttrGetFloatValue },
-        .f16 => .{ f16, f32, c.mlirDenseElementsAttrFloat16Get, c.mlirDenseElementsAttrGetFloatValue },
-        .f32 => .{ f32, f32, c.mlirDenseElementsAttrFloatGet, c.mlirDenseElementsAttrGetFloatValue },
-        .f64 => .{ f64, f64, c.mlirDenseElementsAttrDoubleGet, c.mlirDenseElementsAttrGetDoubleValue },
+pub fn DenseElementsAttribute(comptime dt: DenseElementsAttributeTypes) type {
+    const ZigType = switch (dt) {
+        .bool => bool,
+        .i8 => i8,
+        .i16 => i16,
+        .i32 => i32,
+        .i64 => i64,
+        .u8 => u8,
+        .u16 => u16,
+        .u32 => u32,
+        .u64 => u64,
+        .bf16 => u16,
+        .f16 => f16,
+        .f32 => f32,
+        .f64 => f64,
+        .index => usize,
     };
 
     return struct {
         _inner: c.MlirAttribute,
+
         const Attr = @This();
+
         pub usingnamespace MlirHelpers(Attr, .{
             .is_a_fn = c.mlirAttributeIsADenseElements,
             .is_null_fn = c.mlirAttributeIsNull,
@@ -644,13 +646,29 @@ pub fn DenseIntOrFPElementsAttribute(comptime dt: DenseElementsAttributeTypes) t
             .equal_fn = c.mlirAttributeEqual,
         });
 
-        pub fn init(shaped_type: Type, raw_values: []const u8) Attr {
-            const values = std.mem.bytesAsSlice(ZigInDataType, raw_values);
-            return Attr.wrap(initFn(shaped_type.inner(), @intCast(values.len), @ptrCast(@alignCast(values.ptr))));
+        pub fn init(shaped_type: Type, slice: anytype) Attr {
+            const bytes = std.mem.sliceAsBytes(slice);
+            const v = Attr.wrapOr(
+                c.mlirDenseElementsAttrRawBufferGet(
+                    shaped_type.inner(),
+                    @intCast(bytes.len),
+                    @ptrCast(bytes.ptr),
+                ),
+            ) orelse unreachable;
+            return v;
         }
 
-        pub fn get(self: Attr, pos: usize) ZigOutDataType {
-            return getValue(self.inner(), @intCast(pos));
+        pub fn len(self: Attr) usize {
+            return @intCast(c.mlirElementsAttrGetNumElements(self.inner()));
+        }
+
+        pub fn constSlice(self: Attr) []const ZigType {
+            const ptr: [*]const ZigType = @constCast(@ptrCast(@alignCast(c.mlirDenseElementsAttrGetRawData(self.inner()) orelse unreachable)));
+            return ptr[0..self.len()];
+        }
+
+        pub fn data(self: Attr) []const u8 {
+            return std.mem.sliceAsBytes(self.constSlice());
         }
     };
 }
@@ -1338,12 +1356,9 @@ pub const FloatTypes = enum {
     f32,
     f64,
 
-    unknown,
-
-    pub fn asType(self: FloatTypes, ctx: Context) ?Type {
+    pub fn asType(self: FloatTypes, ctx: Context) Type {
         return switch (self) {
-            .unknown => null,
-            inline else => |ft| FloatType(ft).init(ctx).asType(),
+            inline else => |ft| FloatType(ft).init(ctx).as(Type),
         };
     }
 };
@@ -1359,48 +1374,23 @@ pub fn FloatType(comptime ft: FloatTypes) type {
         .f16 => .{ c.mlirTypeIsAF16, c.mlirF16TypeGet },
         .f32 => .{ c.mlirTypeIsAF32, c.mlirF32TypeGet },
         .f64 => .{ c.mlirTypeIsAF64, c.mlirF64TypeGet },
-        .unknown => .{ null, null },
     };
 
     return struct {
         _inner: c.MlirType,
-        const Float = @This();
-        pub usingnamespace MlirHelpers(Float, .{
-            .is_a_fn = switch (ft) {
-                .unknown => typeIsAUnknownFloat,
-                else => Config[0],
-            },
+
+        const Self = @This();
+
+        pub usingnamespace MlirHelpers(Self, .{
+            .is_a_fn = Config[0],
             .is_null_fn = c.mlirTypeIsNull,
             .dump_fn = c.mlirTypeDump,
             .equal_fn = c.mlirTypeEqual,
         });
 
-        pub usingnamespace if (ft != .unknown) struct {
-            pub const FloatTypeType = ft;
-
-            pub fn init(ctx: Context) Float {
-                const type_get = Config[1];
-                return Float.wrap(type_get(ctx.inner()));
-            }
-        } else struct {};
-
-        fn typeIsAUnknownFloat(typ: c.MlirType) callconv(.C) bool {
-            const is_a_fns = .{
-                c.mlirTypeIsABF16,
-                c.mlirTypeIsAF16,
-                c.mlirTypeIsAF32,
-                c.mlirTypeIsF64,
-            };
-            inline for (is_a_fns) |is_a_fn| {
-                if (is_a_fn(typ)) {
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        pub fn asType(self: Float) Type {
-            return self.as(Type).?;
+        pub fn init(ctx: Context) Self {
+            const type_get = Config[1];
+            return Self.wrap(type_get(ctx.inner()));
         }
     };
 }
@@ -1544,10 +1534,6 @@ pub const RankedTensorType = struct {
 
     pub fn getDimension(self: RankedTensorType, dim: usize) i64 {
         return c.mlirShapedTypeGetDimSize(self.inner(), @intCast(dim));
-    }
-
-    pub fn asType(self: RankedTensorType) Type {
-        return self.as(Type).?;
     }
 };
 
