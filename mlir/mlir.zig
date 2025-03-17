@@ -53,7 +53,6 @@ fn MlirHelpersMethods(OuterT: type) type {
             std.debug.assert(@sizeOf(InnerT) == @sizeOf(OuterT));
         }
 
-        is_null_fn: ?fn (InnerT) callconv(.C) bool = null,
         is_a_fn: ?fn (InnerT) callconv(.C) bool = null,
         dump_fn: ?fn (InnerT) callconv(.C) void = null,
     };
@@ -75,35 +74,27 @@ pub fn MlirHelpers(comptime OuterT: type, comptime methods: MlirHelpersMethods(O
         pub inline fn innerPtr(self: *OuterT) *InnerT {
             return &self._inner;
         }
-
-        pub usingnamespace if (Methods.is_null_fn) |is_null| struct {
-            pub inline fn wrapOr(raw: InnerT) ?OuterT {
-                return if (is_null(raw)) null else OuterT.wrap(raw);
-            }
-        } else struct {};
     };
 }
 
 pub const Registry = struct {
     _inner: c.MlirDialectRegistry,
-    pub usingnamespace MlirHelpers(Registry, .{
-        .is_null_fn = c.mlirDialectRegistryIsNull,
-    });
+    pub usingnamespace MlirHelpers(Registry, .{});
     const Self = Registry;
     pub const deinit = deinitHelper(Registry, c.mlirDialectRegistryDestroy);
+    pub const wrapOr = wrapOrHelper(Registry, c.mlirDialectRegistryIsNull);
 
     pub fn init() !Self {
-        return Self.wrapOr(c.mlirDialectRegistryCreate()) orelse Error.MlirUnexpected;
+        return wrapOr(c.mlirDialectRegistryCreate()) orelse Error.MlirUnexpected;
     }
 };
 
 pub const Context = struct {
     _inner: c.MlirContext,
-    pub usingnamespace MlirHelpers(Context, .{
-        .is_null_fn = c.mlirContextIsNull,
-    });
+    pub usingnamespace MlirHelpers(Context, .{});
     const Self = Context;
     pub const deinit = deinitHelper(Context, c.mlirContextDestroy);
+    pub const wrapOr = wrapOrHelper(Context, c.mlirContextIsNull);
 
     pub fn init() !Self {
         return Self.wrapOr(c.mlirContextCreate()) orelse Error.MlirUnexpected;
@@ -146,12 +137,12 @@ pub const Context = struct {
 
 pub const Module = struct {
     _inner: c.MlirModule,
-    pub usingnamespace MlirHelpers(Module, .{
-        .is_null_fn = c.mlirModuleIsNull,
-    });
+    pub usingnamespace MlirHelpers(Module, .{});
+
+    pub const deinit = deinitHelper(Module, c.mlirModuleDestroy);
+    pub const wrapOr = wrapOrHelper(Module, c.mlirModuleIsNull);
 
     const Self = Module;
-    pub const deinit = deinitHelper(Module, c.mlirModuleDestroy);
 
     pub fn init(loc: Location) Self {
         return Self.wrap(c.mlirModuleCreateEmpty(loc.inner()));
@@ -183,11 +174,10 @@ pub const Module = struct {
 pub const PassManager = struct {
     _inner: c.MlirPassManager,
 
-    pub usingnamespace MlirHelpers(PassManager, .{
-        .is_null_fn = c.mlirPassManagerIsNull,
-    });
-
+    pub usingnamespace MlirHelpers(PassManager, .{});
     pub const deinit = deinitHelper(PassManager, c.mlirPassManagerDestroy);
+    pub const wrapOr = wrapOrHelper(PassManager, c.mlirPassManagerIsNull);
+
     const Self = PassManager;
 
     pub fn init(ctx: Context) !Self {
@@ -266,10 +256,10 @@ pub const Attribute = struct {
     _inner: c.MlirAttribute,
 
     pub usingnamespace MlirHelpers(Attribute, .{
-        .is_null_fn = c.mlirAttributeIsNull,
         .dump_fn = c.mlirAttributeDump,
     });
 
+    pub const wrapOr = wrapOrHelper(Attribute, c.mlirAttributeIsNull);
     pub const eql = eqlHelper(Attribute, c.mlirAttributeEqual);
 
     pub fn parse(ctx: Context, attr: [:0]const u8) !Attribute {
@@ -325,7 +315,6 @@ pub const StringAttribute = struct {
     _inner: c.MlirAttribute,
     pub usingnamespace MlirHelpers(StringAttribute, .{
         .is_a_fn = c.mlirAttributeIsAString,
-        .is_null_fn = c.mlirAttributeIsNull,
         .dump_fn = c.mlirAttributeDump,
     });
     const Self = StringAttribute;
@@ -346,7 +335,6 @@ pub const UnitAttribute = struct {
     _inner: c.MlirAttribute,
     pub usingnamespace MlirHelpers(UnitAttribute, .{
         .is_a_fn = c.mlirAttributeIsAUnit,
-        .is_null_fn = c.mlirAttributeIsNull,
         .dump_fn = c.mlirAttributeDump,
         .equal_fn = c.mlirAttributeEqual,
     });
@@ -363,7 +351,6 @@ pub const BoolAttribute = struct {
     _inner: c.MlirAttribute,
     pub usingnamespace MlirHelpers(BoolAttribute, .{
         .is_a_fn = c.mlirAttributeIsABool,
-        .is_null_fn = c.mlirAttributeIsNull,
         .dump_fn = c.mlirAttributeDump,
     });
     const Self = BoolAttribute;
@@ -383,7 +370,6 @@ pub const TypeAttribute = struct {
     _inner: c.MlirAttribute,
     pub usingnamespace MlirHelpers(TypeAttribute, .{
         .is_a_fn = c.mlirAttributeIsAType,
-        .is_null_fn = c.mlirAttributeIsNull,
         .dump_fn = c.mlirAttributeDump,
     });
     pub const eql = Attribute.eqlAny(TypeAttribute);
@@ -403,7 +389,6 @@ pub const ArrayAttribute = struct {
     _inner: c.MlirAttribute,
     pub usingnamespace MlirHelpers(ArrayAttribute, .{
         .is_a_fn = c.mlirAttributeIsAArray,
-        .is_null_fn = c.mlirAttributeIsNull,
         .dump_fn = c.mlirAttributeDump,
     });
     const Self = ArrayAttribute;
@@ -435,7 +420,6 @@ pub fn IntegerAttribute(comptime it: IntegerTypes) type {
         _inner: c.MlirAttribute,
         pub usingnamespace MlirHelpers(@This(), .{
             .is_a_fn = c.mlirAttributeIsAInteger,
-            .is_null_fn = c.mlirAttributeIsNull,
             .dump_fn = c.mlirAttributeDump,
         });
         pub const IntegerTypeType = IntegerType(it);
@@ -506,7 +490,6 @@ pub fn DenseArrayAttribute(comptime dt: DenseArrayTypes) type {
         _inner: c.MlirAttribute,
         pub usingnamespace MlirHelpers(@This(), .{
             .is_a_fn = Config[1],
-            .is_null_fn = c.mlirAttributeIsNull,
             .dump_fn = c.mlirAttributeDump,
         });
         const Attr = @This();
@@ -585,7 +568,6 @@ pub fn DenseElementsAttribute(comptime dt: DenseElementsAttributeTypes) type {
 
         pub usingnamespace MlirHelpers(Attr, .{
             .is_a_fn = c.mlirAttributeIsADenseElements,
-            .is_null_fn = c.mlirAttributeIsNull,
             .dump_fn = c.mlirAttributeDump,
         });
 
@@ -593,14 +575,13 @@ pub fn DenseElementsAttribute(comptime dt: DenseElementsAttributeTypes) type {
 
         pub fn init(shaped_type: Type, slice: anytype) Attr {
             const bytes = std.mem.sliceAsBytes(slice);
-            const v = Attr.wrapOr(
-                c.mlirDenseElementsAttrRawBufferGet(
-                    shaped_type.inner(),
-                    @intCast(bytes.len),
-                    @ptrCast(bytes.ptr),
-                ),
-            ) orelse unreachable;
-            return v;
+            const res: Attr = .{ ._inner = c.mlirDenseElementsAttrRawBufferGet(
+                shaped_type.inner(),
+                @intCast(bytes.len),
+                @ptrCast(bytes.ptr),
+            ) };
+            std.debug.assert(Attribute.wrapOr(res._inner) != null);
+            return res;
         }
 
         pub fn len(self: Attr) usize {
@@ -624,7 +605,6 @@ pub const FlatSymbolRefAttribute = struct {
     _inner: c.MlirAttribute,
     pub usingnamespace MlirHelpers(FlatSymbolRefAttribute, .{
         .is_a_fn = c.mlirAttributeIsAFlatSymbolRef,
-        .is_null_fn = c.mlirAttributeIsNull,
         .dump_fn = c.mlirAttributeDump,
     });
     const Self = FlatSymbolRefAttribute;
@@ -709,7 +689,6 @@ pub const DictionaryAttribute = struct {
     _inner: c.MlirAttribute,
     pub usingnamespace MlirHelpers(DictionaryAttribute, .{
         .is_a_fn = c.mlirAttributeIsADictionary,
-        .is_null_fn = c.mlirAttributeIsNull,
         .dump_fn = c.mlirAttributeDump,
     });
 
@@ -747,12 +726,12 @@ pub const Operation = struct {
     pub usingnamespace MlirHelpers(
         Operation,
         .{
-            .is_null_fn = c.mlirOperationIsNull,
             .dump_fn = c.mlirOperationDump,
         },
     );
 
     pub const deinit = deinitHelper(Operation, c.mlirOperationDestroy);
+    pub const wrapOr = wrapOrHelper(Operation, c.mlirOperationIsNull);
 
     pub const eql = Attribute.eqlAny(Self);
 
@@ -1081,11 +1060,10 @@ pub const OpOperand = struct {
 
 pub const Region = struct {
     _inner: c.MlirRegion,
-    pub usingnamespace MlirHelpers(Region, .{
-        .is_null_fn = c.mlirRegionIsNull,
-    });
+    pub usingnamespace MlirHelpers(Region, .{});
 
     pub const deinit = deinitHelper(Region, c.mlirRegionDestroy);
+    pub const wrapOr = wrapOrHelper(Region, c.mlirRegionIsNull);
 
     const Self = Region;
 
@@ -1120,14 +1098,14 @@ pub const Region = struct {
 
 pub const Value = struct {
     _inner: c.MlirValue,
-
     pub usingnamespace MlirHelpers(Value, .{
-        .is_null_fn = c.mlirValueIsNull,
         .dump_fn = c.mlirValueDump,
     });
-    pub const eql = eqlHelper(Value, c.mlirValueEqual);
+
     pub const format = print(Value, c.mlirValuePrint).format;
 
+    pub const wrapOr = wrapOrHelper(Value, c.mlirValueIsNull);
+    pub const eql = eqlHelper(Value, c.mlirValueEqual);
     pub fn getType(val: Value) Type {
         return Type.wrap(c.mlirValueGetType(val.inner()));
     }
@@ -1197,12 +1175,12 @@ pub const Type = struct {
     _inner: c.MlirType,
 
     pub usingnamespace MlirHelpers(Type, .{
-        .is_null_fn = c.mlirTypeIsNull,
         .dump_fn = c.mlirTypeDump,
     });
 
     pub const eql = eqlHelper(Type, c.mlirTypeEqual);
     pub const format = print(Type, c.mlirTypePrint);
+    pub const wrapOr = wrapOrHelper(Type, c.mlirTypeIsNull);
 
     pub fn parse(ctx: Context, str: [:0]const u8) !Type {
         return Type.wrapOr(
@@ -1238,7 +1216,6 @@ pub const IndexType = struct {
     _inner: c.MlirType,
 
     pub usingnamespace MlirHelpers(IndexType, .{
-        .is_null_fn = c.mlirTypeIsNull,
         .dump_fn = c.mlirTypeDump,
     });
     pub const eql = Type.eqlAny(IndexType);
@@ -1302,7 +1279,6 @@ pub fn IntegerType(comptime it: IntegerTypes) type {
                 .unknown => c.mlirTypeIsAInteger,
                 else => typeIsAIntegerExact,
             },
-            .is_null_fn = c.mlirTypeIsNull,
             .dump_fn = c.mlirTypeDump,
         });
         pub const asType = Type.fromAnyType(Int);
@@ -1365,7 +1341,6 @@ pub fn FloatType(comptime ft: FloatTypes) type {
 
         pub usingnamespace MlirHelpers(Self, .{
             .is_a_fn = Config[0],
-            .is_null_fn = c.mlirTypeIsNull,
             .dump_fn = c.mlirTypeDump,
         });
         pub const asType = Type.fromAnyType(Self);
@@ -1421,7 +1396,6 @@ pub fn ComplexType(comptime ct: ComplexTypes) type {
 
         pub usingnamespace MlirHelpers(@This(), .{
             .is_a_fn = Config[0],
-            .is_null_fn = c.mlirTypeIsNull,
             .dump_fn = c.mlirTypeDump,
         });
         pub const asType = Type.fromAnyType(Complex);
@@ -1473,7 +1447,6 @@ pub const FunctionType = struct {
     _inner: c.MlirType,
     pub usingnamespace MlirHelpers(FunctionType, .{
         .is_a_fn = c.mlirTypeIsAFunction,
-        .is_null_fn = c.mlirTypeIsNull,
         .dump_fn = c.mlirTypeDump,
     });
     const Self = FunctionType;
@@ -1481,13 +1454,14 @@ pub const FunctionType = struct {
     pub const eql = Type.eqlAny(IndexType);
 
     pub fn init(ctx: Context, args: []const Type, results: []const Type) !Self {
-        return Self.wrapOr(c.mlirFunctionTypeGet(
+        const func = Type.wrapOr(c.mlirFunctionTypeGet(
             ctx.inner(),
             @intCast(args.len),
             @ptrCast(args.ptr),
             @intCast(results.len),
             @ptrCast(results.ptr),
-        )) orelse Error.InvalidMlir;
+        )) orelse return Error.InvalidMlir;
+        return func.as(Self).?;
     }
 };
 
@@ -1495,7 +1469,6 @@ pub const RankedTensorType = struct {
     _inner: c.MlirType,
     pub usingnamespace MlirHelpers(RankedTensorType, .{
         .is_a_fn = c.mlirTypeIsARankedTensor,
-        .is_null_fn = c.mlirTypeIsNull,
         .dump_fn = c.mlirTypeDump,
     });
     pub const eql = Type.eqlAny(RankedTensorType);
@@ -1573,54 +1546,29 @@ pub const DialectHandle = struct {
     }
 };
 
-pub const ShapedType = struct {
-    _inner: c.MlirType,
-    pub usingnamespace MlirHelpers(ShapedType, .{
-        .is_a_fn = c.mlirTypeIsAShaped,
-        .is_null_fn = c.mlirTypeIsNull,
-        .dump_fn = c.mlirTypeDump,
-        .equal_fn = c.mlirTypeEqual,
-    });
-    const Self = ShapedType;
-
-    pub fn rank(self: Self) usize {
-        return @intCast(c.mlirShapedTypeGetRank(self.inner()));
-    }
-
-    pub fn elementType(self: Self) Type {
-        return Type.wrap(c.mlirShapedTypeGetElementType(self.inner()));
-    }
-
-    pub fn dimension(self: Self, dim: usize) usize {
-        return @intCast(c.mlirShapedTypeGetDimSize(self.inner(), @intCast(dim)));
-    }
-};
-
 pub const Location = struct {
     _inner: c.MlirLocation,
 
-    pub usingnamespace MlirHelpers(Location, .{
-        .is_null_fn = c.mlirLocationIsNull,
-    });
+    pub usingnamespace MlirHelpers(Location, .{});
     pub const eql = eqlHelper(Type, c.mlirLocationEqual);
     pub const format = print(Location, c.mlirLocationPrint);
 
     pub fn fromSrc(ctx: Context, src: std.builtin.SourceLocation) Location {
-        return Location.wrap(c.mlirLocationFileLineColGet(
+        return .{ ._inner = c.mlirLocationFileLineColGet(
             ctx.inner(),
             stringRef(src.file),
             @intCast(src.line),
             @intCast(src.column),
-        ));
+        ) };
     }
 
     pub fn fileLineCol(ctx: Context, file: []const u8, line: usize, column: usize) Location {
-        return Location.wrap(c.mlirLocationFileLineColGet(
+        return .{ ._inner = c.mlirLocationFileLineColGet(
             ctx.inner(),
             stringRef(file),
             @intCast(line),
             @intCast(column),
-        ));
+        ) };
     }
 
     pub fn callSite(callee: Location, caller: Location) Location {
@@ -1656,10 +1604,9 @@ pub const Location = struct {
 
 pub const Block = struct {
     _inner: c.MlirBlock,
-    pub usingnamespace MlirHelpers(Block, .{
-        .is_null_fn = c.mlirBlockIsNull,
-    });
+    pub usingnamespace MlirHelpers(Block, .{});
 
+    pub const wrapOr = wrapOrHelper(Block, c.mlirBlockIsNull);
     pub const deinit = deinitHelper(Block, c.mlirBlockDestroy);
 
     pub const eql = eqlHelper(Block, c.mlirBlockEqual);
@@ -1756,4 +1703,21 @@ pub fn deinitHelper(T: type, deinit_fn: fn (@FieldType(T, "_inner")) callconv(.C
             a.* = undefined;
         }
     }.deinit;
+}
+
+pub fn isNullHelper(T: type, is_null_fn: fn (@FieldType(T, "_inner")) callconv(.C) bool) fn (T) bool {
+    return struct {
+        fn isNull(a: T) bool {
+            return is_null_fn(a._inner);
+        }
+    }.isNull;
+}
+
+pub fn wrapOrHelper(T: type, is_null_fn: fn (@FieldType(T, "_inner")) callconv(.C) bool) fn (@FieldType(T, "_inner")) ?T {
+    return struct {
+        fn wrapOr(inner: @FieldType(T, "_inner")) ?T {
+            if (is_null_fn(inner)) return null;
+            return .{ ._inner = inner };
+        }
+    }.wrapOr;
 }
