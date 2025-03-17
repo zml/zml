@@ -792,7 +792,7 @@ pub fn identityCustomCall(name: [:0]const u8, input: Tensor, context: *anyopaque
             .api_version = 1,
             .has_side_effect = false,
             .call_target_name = name,
-            .backend_config = backend_config[0..],
+            .backend_config = .{ .str = backend_config[0..] },
             .output_operand_aliases = &.{0},
         },
         &.{input.value().getType()},
