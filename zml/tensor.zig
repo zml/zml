@@ -175,10 +175,15 @@ pub const Tensor = struct {
 
                 const sharding = ctx.getShardingAttr(res._shape);
 
-                const op = dialect.stablehlo.sharding(
+                const op = dialect.stablehlo.custom_call(
                     ctx.mlirCtx(),
                     &.{self.value()},
-                    sharding,
+                    .{
+                        .call_target_name = "Sharding",
+                        .has_side_effect = false,
+                        .addional_attributes = &.{.{ "mhlo.sharding", sharding.asAttr() }},
+                        .api_version = .original,
+                    },
                     &.{self.value().getType()},
                     ctx.mlirCtx().location(@src()),
                 );

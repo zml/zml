@@ -773,34 +773,6 @@ pub fn fromMlirOperationWithTags(op: mlir.Operation, base: anytype) @TypeOf(base
     return res;
 }
 
-/// Produces a custom call to `name` that takes a tensor and returns it.
-///
-/// For example, this can be used to extract tokens quickly if they run on a loop on the
-/// GPU.
-pub fn identityCustomCall(name: [:0]const u8, input: Tensor, context: *anyopaque) Tensor {
-    const address: [8]u8 = @bitCast(@intFromPtr(context));
-    var backend_config: [8:0]u8 = undefined;
-    @memcpy(backend_config[0..8], address[0..8]);
-    const ctx = CompilationContext.current();
-
-    const loc = ctx.mlirCtx().location(@src()).namedFmt(ctx.mlirCtx(), "custom_call({s})", .{name});
-
-    const op = dialect.stablehlo.custom_call(
-        ctx.mlirCtx(),
-        &.{input.value()},
-        .{
-            .api_version = 1,
-            .has_side_effect = false,
-            .call_target_name = name,
-            .backend_config = backend_config[0..],
-            .output_operand_aliases = &.{0},
-        },
-        &.{input.value().getType()},
-        loc,
-    );
-    return Tensor._result(input.shape(), op.result(0));
-}
-
 /// At runtime the given tensor will be materialized and copied to host,
 /// and the callback will be called on it.
 pub fn addHostCallback(
@@ -835,16 +807,145 @@ pub fn addHostCallback(
         ctx.mlirCtx(),
         &.{input.value()},
         .{
-            .api_version = 1,
             .has_side_effect = false,
             .call_target_name = "zmlHostBufferCallback",
-            .backend_config = @ptrCast(std.mem.sliceAsBytes(&backend_config)),
+            .backend_config = .{ .string = @ptrCast(std.mem.sliceAsBytes(&backend_config)) },
             .output_operand_aliases = &.{0},
+            .api_version = .original,
         },
         &.{input.value().getType()},
         loc,
     );
     return Tensor._result(input.shape(), op.result(0));
+}
+
+pub const TritonOps = struct {
+    debug: bool = false,
+    name: [:0]const u8,
+    ir: [:0]const u8,
+    grid: [3]i32,
+    num_stages: i32,
+    num_warps: i32,
+};
+
+/// Generate an MLIR call to the given member function with the given tensors.
+pub fn triton(inputs: anytype, outputs: anytype, opts: TritonOps) [outputs.len]Tensor {
+    const ctx = CompilationContext.current();
+
+    var values: [inputs.len]mlir.Value = undefined;
+    ctx.extractValues(&inputs, &values);
+
+    var res_types: [outputs.len]mlir.Type = undefined;
+    inline for (outputs, 0..) |output, i| {
+        res_types[i] = mlir.ext.mlirType(ctx.mlirCtx(), output);
+    }
+
+    const attrs = mlir.DictionaryAttribute.init(ctx.mlirCtx(), &.{
+        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "name"), mlir.StringAttribute.init(ctx.mlirCtx(), opts.name).as(mlir.Attribute)),
+        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "ir"), mlir.StringAttribute.init(ctx.mlirCtx(), opts.ir).as(mlir.Attribute)),
+        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "grid_x"), mlir.IntegerAttribute(.i32).init(ctx.mlirCtx(), @intCast(opts.grid[0])).as(mlir.Attribute)),
+        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "grid_y"), mlir.IntegerAttribute(.i32).init(ctx.mlirCtx(), @intCast(opts.grid[1])).as(mlir.Attribute)),
+        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "grid_z"), mlir.IntegerAttribute(.i32).init(ctx.mlirCtx(), @intCast(opts.grid[2])).as(mlir.Attribute)),
+        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "num_stages"), mlir.IntegerAttribute(.i32).init(ctx.mlirCtx(), @intCast(opts.num_stages)).as(mlir.Attribute)),
+        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "num_warps"), mlir.IntegerAttribute(.i32).init(ctx.mlirCtx(), @intCast(opts.num_warps)).as(mlir.Attribute)),
+    });
+
+    const MINOR_TO_MAJOR = blk: {
+        var ret: [Shape.MAX_RANK]usize = undefined;
+        for (0..Shape.MAX_RANK) |i| {
+            ret[i] = @intCast(Shape.MAX_RANK - i - 1);
+        }
+        break :blk ret;
+    };
+
+    const operands_layouts = blk: {
+        var ret: [inputs.len][]const usize = undefined;
+        inline for (inputs, 0..) |input, i| {
+            ret[i] = MINOR_TO_MAJOR[MINOR_TO_MAJOR.len - input.rank() ..];
+        }
+        break :blk ret;
+    };
+
+    const results_layouts = blk: {
+        var ret: [outputs.len][]const usize = undefined;
+        inline for (outputs, 0..) |output, i| {
+            ret[i] = MINOR_TO_MAJOR[MINOR_TO_MAJOR.len - output.rank() ..];
+        }
+        break :blk ret;
+    };
+
+    const op = dialect.stablehlo.custom_call(
+        ctx.mlirCtx(),
+        &values,
+        .{
+            .call_target_name = "__gpu$xla.gpu.triton",
+            .backend_config = .{ .dict = attrs },
+            .has_side_effect = false,
+            .api_version = .typed_ffi,
+            .operand_layouts = &operands_layouts,
+            .result_layouts = &results_layouts,
+        },
+        &res_types,
+        ctx.mlirCtx().location(@src()),
+    );
+
+    var outputs_: [outputs.len]Tensor = undefined;
+    inline for (outputs, 0..) |output, i| {
+        outputs_[i] = Tensor._result(output, op.result(i));
+    }
+
+    return outputs_;
+}
+
+test "triton" {
+    const zml = @import("zml.zig");
+    const platform = zml.testing.env();
+
+    if (platform.target != .cuda and platform.target != .rocm) return error.SkipZigTest;
+
+    const ir =
+        \\ module {
+        \\   tt.func public @add_one(%arg0: !tt.ptr<f32, 1> {tt.divisibility = 32 : i32}, %arg1: !tt.ptr<f32, 1> {tt.divisibility = 32 : i32}, %arg2: !tt.ptr<f32, 1> {tt.divisibility = 32 : i32}, %arg3: !tt.ptr<f32, 1> {tt.divisibility = 32 : i32}) {
+        \\     %0 = tt.get_program_id x : i32
+        \\     %1 = tt.load %arg0 {cache = 1 : i32, evict = 1 : i32, isVolatile = false} : !tt.ptr<f32>
+        \\     %2 = tt.load %arg1 {cache = 1 : i32, evict = 1 : i32, isVolatile = false} : !tt.ptr<f32>
+        \\     %cst = arith.constant 1.000000e+00 : f32
+        \\     %3 = arith.addf %1, %cst : f32
+        \\     tt.store %arg2, %3 {cache = 1 : i32, evict = 1 : i32} : !tt.ptr<f32>
+        \\     tt.store %arg3, %2 {cache = 1 : i32, evict = 1 : i32} : !tt.ptr<f32>
+        \\     tt.return
+        \\   }
+        \\ }
+    ;
+
+    const TritonMod = struct {
+        pub fn forward(a: Tensor, b: Tensor) [2]Tensor {
+            return triton(.{ a, b }, .{ a.shape(), b.shape() }, .{
+                .debug = false,
+                .name = "add_one",
+                .ir = ir,
+                .grid = .{ 1, 1, 1 },
+                .num_stages = 1,
+                .num_warps = 1,
+            });
+        }
+    };
+
+    const a = try zml.Buffer.fromSlice(platform, .{}, &[1]f32{1});
+    const b = try zml.Buffer.fromSlice(platform, .{}, &[1]f32{3});
+
+    const results = try zml.testing.compileAndCall(platform, TritonMod.forward, .{ a, b });
+
+    var cpu_result_0 = try results[0].toHostAlloc(std.testing.allocator);
+    defer cpu_result_0.deinit(std.testing.allocator);
+    var cpu_result_1 = try results[1].toHostAlloc(std.testing.allocator);
+    defer cpu_result_1.deinit(std.testing.allocator);
+
+    const expected_result_a: f32 = 2.0;
+    const expected_result_b: f32 = 3.0;
+
+    try std.testing.expectEqual(expected_result_a, cpu_result_0.items(f32)[0]);
+    try std.testing.expectEqual(expected_result_b, cpu_result_1.items(f32)[0]);
 }
 
 /// Generalized version of scatter to many inputs.

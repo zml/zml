@@ -2,6 +2,7 @@ const std = @import("std");
 
 const c = @import("c");
 const mlir = @import("mlir");
+const stdx = @import("stdx");
 
 pub const abs = functors.unary_fn("stablehlo.abs").call;
 pub const cosine = functors.unary_fn("stablehlo.cosine").call;
@@ -733,53 +734,113 @@ pub fn convolution(
 }
 
 pub const CustomCallOpts = struct {
+    pub const ApiVersion = enum(i32) {
+        original = 1,
+        status_returning = 2,
+        status_returning_unified = 3,
+        typed_ffi = 4,
+    };
+
+    pub const BackendConfig = union(enum) {
+        string: [:0]const u8,
+        dict: mlir.DictionaryAttribute,
+    };
+
     call_target_name: [:0]const u8,
     has_side_effect: bool,
-    backend_config: [:0]const u8 = &.{},
-    api_version: i32,
-    output_operand_aliases: []const i64,
+    backend_config: BackendConfig = .{ .string = &.{} },
+    operand_layouts: []const []const usize = &.{},
+    result_layouts: []const []const usize = &.{},
+    output_operand_aliases: []const i64 = &.{},
+    addional_attributes: []const mlir.AttrTuple = &.{},
+    api_version: ApiVersion,
 };
 
 pub fn custom_call(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCallOpts, res_types: []const mlir.Type, location: mlir.Location) mlir.Operation {
-    var buffer: [1024]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&buffer);
-    const allocator = fba.allocator();
+    const MAX_OPERANDS = 64;
+    const MAX_RESULTS = 16;
 
-    const output_operand_aliases = allocator.alloc(mlir.Attribute, opts.output_operand_aliases.len) catch unreachable;
-    for (opts.output_operand_aliases, 0..) |alias, i| {
-        output_operand_aliases[i] = OutputOperandAliasAttribute.init(ctx, &.{}, alias, &.{}).as(mlir.Attribute);
-    }
+    const operand_layouts = blk: {
+        var ret: std.BoundedArray(mlir.Attribute, MAX_OPERANDS) = .{};
+        for (opts.operand_layouts) |ol| {
+            const tensor_type = mlir.RankedTensorType.init(
+                &.{@intCast(ol.len)},
+                mlir.IndexType.init(ctx).as(mlir.Type),
+            ).as(mlir.Type);
+            const layout_attr = mlir.DenseElementsAttribute(.index).init(tensor_type, ol);
+            ret.appendAssumeCapacity(layout_attr.as(mlir.Attribute));
+        }
+        break :blk ret;
+    };
+
+    const result_layouts = blk: {
+        var ret: std.BoundedArray(mlir.Attribute, MAX_RESULTS) = .{};
+        for (opts.result_layouts) |rl| {
+            const tensor_type = mlir.RankedTensorType.init(
+                &.{@intCast(rl.len)},
+                mlir.IndexType.init(ctx).as(mlir.Type),
+            ).as(mlir.Type);
+            const layout_attr = mlir.DenseElementsAttribute(.index).init(tensor_type, rl);
+            ret.appendAssumeCapacity(layout_attr.as(mlir.Attribute));
+        }
+        break :blk ret;
+    };
+
+    const output_operand_aliases = blk: {
+        var ret: std.BoundedArray(mlir.Attribute, MAX_RESULTS) = .{};
+        for (opts.output_operand_aliases) |alias| {
+            ret.appendAssumeCapacity(
+                OutputOperandAliasAttribute.init(
+                    ctx,
+                    &.{},
+                    alias,
+                    &.{},
+                ).as(mlir.Attribute),
+            );
+        }
+        break :blk ret;
+    };
+
+    const backend_config = switch (opts.backend_config) {
+        .string => blk: {
+            stdx.debug.assert(
+                @intFromEnum(opts.api_version) < @intFromEnum(CustomCallOpts.ApiVersion.typed_ffi),
+                "Only API version of less than 4 is supported for backend_config as string",
+                .{},
+            );
+            break :blk mlir.StringAttribute.init(ctx, opts.backend_config.string).as(mlir.Attribute);
+        },
+        .dict => blk: {
+            stdx.debug.assert(
+                opts.api_version == .typed_ffi,
+                "Only API version 4 is supported for backend_config as dictionary",
+                .{},
+            );
+            break :blk opts.backend_config.dict.as(mlir.Attribute);
+        },
+    };
+
+    var attrs: std.BoundedArray(mlir.AttrTuple, 32) = .{};
+    attrs.appendSliceAssumeCapacity(&[_]mlir.AttrTuple{
+        .{ "api_version", mlir.IntegerAttribute(.i32).init(ctx, @intFromEnum(opts.api_version)).as(mlir.Attribute) },
+        .{ "call_target_name", mlir.StringAttribute.init(ctx, opts.call_target_name).as(mlir.Attribute) },
+        .{ "has_side_effect", mlir.BoolAttribute.init(ctx, opts.has_side_effect).as(mlir.Attribute) },
+        .{ "backend_config", backend_config },
+        .{ "output_operand_aliases", mlir.ArrayAttribute.init(ctx, output_operand_aliases.constSlice()).as(mlir.Attribute) },
+        .{ "operand_layouts", mlir.ArrayAttribute.init(ctx, operand_layouts.constSlice()).as(mlir.Attribute) },
+        .{ "result_layouts", mlir.ArrayAttribute.init(ctx, result_layouts.constSlice()).as(mlir.Attribute) },
+    });
+    attrs.appendSliceAssumeCapacity(opts.addional_attributes);
 
     return mlir.Operation.make(ctx, "stablehlo.custom_call", .{
         .operands = inputs,
         .results = res_types,
-        .attributes = &.{
-            .{ "api_version", mlir.IntegerAttribute(.i32).init(ctx, opts.api_version).as(mlir.Attribute) },
-            .{ "call_target_name", mlir.StringAttribute.init(ctx, opts.call_target_name).as(mlir.Attribute) },
-            .{ "has_side_effect", mlir.BoolAttribute.init(ctx, opts.has_side_effect).as(mlir.Attribute) },
-            .{ "backend_config", mlir.StringAttribute.init(ctx, opts.backend_config).as(mlir.Attribute) },
-            .{ "output_operand_aliases", mlir.ArrayAttribute.init(ctx, output_operand_aliases).as(mlir.Attribute) },
-        },
+        .attributes = attrs.constSlice(),
         .location = location,
     });
 }
 
-pub fn sharding(ctx: mlir.Context, inputs: []const mlir.Value, sharding_spec: mlir.StringAttribute, res_types: []const mlir.Type, location: mlir.Location) mlir.Operation {
-    return mlir.Operation.make(ctx, "stablehlo.custom_call", .{
-        .operands = inputs,
-        .results = res_types,
-        .attributes = &.{
-            .{ "api_version", mlir.IntegerAttribute(.i32).init(ctx, 1).asAttr() },
-            .{ "call_target_name", mlir.StringAttribute.init(ctx, "Sharding").asAttr() },
-            .{ "has_side_effect", mlir.BoolAttribute.init(ctx, false).asAttr() },
-            .{ "backend_config", mlir.StringAttribute.init(ctx, &.{}).asAttr() },
-            .{ "output_operand_aliases", mlir.ArrayAttribute.init(ctx, &.{}).asAttr() },
-            .{ "mhlo.sharding", sharding_spec.asAttr() },
-        },
-        .location = location,
-    });
-}
-
+// todo: move out of stablehlo.zig when we start to implement the frontend
 pub fn annotate_device_placement(ctx: mlir.Context, inputs: []const mlir.Value, memory_kind: mlir.StringAttribute, res_types: []const mlir.Type, location: mlir.Location) mlir.Operation {
     const frontend_attributes = mlir.DictionaryAttribute.init(
         ctx,
@@ -787,19 +848,14 @@ pub fn annotate_device_placement(ctx: mlir.Context, inputs: []const mlir.Value, 
             mlir.NamedAttribute.init(mlir.Identifier.get(ctx, "_xla_buffer_placement"), memory_kind.asAttr()),
         },
     ).asAttr();
-    return mlir.Operation.make(ctx, "stablehlo.custom_call", .{
-        .operands = inputs,
-        .results = res_types,
-        .attributes = &.{
-            .{ "api_version", mlir.IntegerAttribute(.i32).init(ctx, 1).asAttr() },
-            .{ "call_target_name", mlir.StringAttribute.init(ctx, "annotate_device_placement").asAttr() },
-            .{ "has_side_effect", mlir.BoolAttribute.init(ctx, true).asAttr() },
-            .{ "backend_config", mlir.StringAttribute.init(ctx, &.{}).asAttr() },
-            .{ "output_operand_aliases", mlir.ArrayAttribute.init(ctx, &.{}).asAttr() },
-            .{ "mhlo.frontend_attributes", frontend_attributes },
-        },
-        .location = location,
-    });
+
+    return custom_call(ctx, inputs, .{
+        .call_target_name = "annotate_device_placement",
+        .has_side_effect = true,
+        .backend_config = .{ .string = &.{} },
+        .addional_attributes = &.{.{ "mhlo.frontend_attributes", frontend_attributes }},
+        .api_version = .original,
+    }, res_types, location);
 }
 
 pub const DotDimensionNumbersAttribute = struct {
