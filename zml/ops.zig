@@ -1,10 +1,12 @@
 const std = @import("std");
+
+const mlir = @import("mlir");
 const stdx = @import("stdx");
 
 const buffer = @import("buffer.zig");
 const helpers = @import("helpers.zig");
 const meta = @import("meta.zig");
-const mlir = @import("mlir.zig");
+const mlir_ext = @import("mlir.zig").ext;
 const module = @import("module.zig");
 
 const Buffer = buffer.Buffer;
@@ -197,7 +199,7 @@ pub fn reduce(
                 mlir_ctx,
                 val,
                 inner_ctx.broadcasting_axes[0 .. tensor.rank() - inner_ctx.n_reduced],
-                mlir.ext.RankedTensorType.fromShape(mlir_ctx, reduced_shape).asType(),
+                mlir_ext.RankedTensorType.fromShape(mlir_ctx, reduced_shape).asType(),
                 inner_ctx.loc,
             );
             tensor.* = Tensor._result(reduced_shape, broad_val.result(0));
@@ -239,7 +241,7 @@ pub fn reduceWindow(
 
     const pad_shape = mlir.RankedTensorType.init(
         &.{ @intCast(opts.padding.len), 2 },
-        mlir.ext.Type.fromDType(ctx.mlirCtx(), .i64),
+        mlir_ext.Type.fromDType(ctx.mlirCtx(), .i64),
     ).asType();
     const op = mlir.Operation.make(ctx.mlirCtx(), "stablehlo.reduce_window", .{
         .variadic_operands = &.{ input_values[0..], init_values[0..] },
@@ -837,7 +839,7 @@ pub fn triton(inputs: anytype, outputs: anytype, opts: TritonOps) [outputs.len]T
 
     var res_types: [outputs.len]mlir.Type = undefined;
     inline for (outputs, 0..) |output, i| {
-        res_types[i] = mlir.ext.mlirType(ctx.mlirCtx(), output);
+        res_types[i] = mlir_ext.mlirType(ctx.mlirCtx(), output);
     }
 
     const attrs = mlir.DictionaryAttribute.init(ctx.mlirCtx(), &.{

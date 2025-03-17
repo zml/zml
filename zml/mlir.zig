@@ -1,7 +1,7 @@
-const mlir = @This();
-
 const builtin = @import("builtin");
 const std = @import("std");
+
+const mlir = @import("mlir");
 const stdx = @import("stdx");
 
 const dtype = @import("dtype.zig");
@@ -11,11 +11,9 @@ const Tensor = @import("tensor.zig").Tensor;
 
 const log = std.log.scoped(.@"zml/mlir");
 
-pub usingnamespace @import("mlir");
-
 pub const ext = struct {
     pub fn mlirType(ctx: mlir.Context, sh: Shape) mlir.Type {
-        return mlir.RankedTensorType.init(sh.dims(), mlir.ext.Type.fromDType(ctx, sh.dtype())).asType();
+        return mlir.RankedTensorType.init(sh.dims(), ext.Type.fromDType(ctx, sh.dtype())).asType();
     }
 
     pub fn denseElementAttrType(dt: dtype.DataType) ?mlir.DenseElementsAttributeTypes {
@@ -59,7 +57,7 @@ pub const ext = struct {
 
     pub const RankedTensorType = struct {
         pub fn fromShape(ctx: mlir.Context, sh: Shape) mlir.RankedTensorType {
-            return mlir.RankedTensorType.init(sh.dims(), mlir.ext.Type.fromDType(ctx, sh.dtype()));
+            return mlir.RankedTensorType.init(sh.dims(), ext.Type.fromDType(ctx, sh.dtype()));
         }
     };
 

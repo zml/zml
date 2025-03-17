@@ -1,8 +1,10 @@
 const std = @import("std");
 
+const mlir = @import("mlir");
+
 const Context = @import("../context.zig").Context;
 const module = @import("../module.zig");
-const mlir = @import("../mlir.zig");
+const mlir_ext = @import("../mlir.zig").ext;
 const dialect = @import("mlir/dialects");
 
 const Tensor = @import("../tensor.zig").Tensor;
@@ -130,7 +132,7 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
             .api_version = .original,
         },
         &.{
-            mlir.ext.mlirType(mlir_ctx, q.shape()),
+            mlir_ext.mlirType(mlir_ctx, q.shape()),
             mlir.RankedTensorType.init(&.{0}, mlir.IntegerType(.u8).init(mlir_ctx).asType()).asType(),
         },
         loc,
