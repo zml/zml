@@ -68,7 +68,6 @@ fn MlirHelpersMethods(OuterT: type) type {
         equal_fn: ?fn (InnerT, InnerT) callconv(.C) bool = null,
         deinit_fn: ?fn (InnerT) callconv(.C) void = null,
         dump_fn: ?fn (InnerT) callconv(.C) void = null,
-        print_fn: ?fn (InnerT, ?*const MlirStrCallback, ?*anyopaque) callconv(.C) void = null,
     };
 }
 
@@ -105,41 +104,6 @@ pub fn MlirHelpers(comptime OuterT: type, comptime methods: MlirHelpersMethods(O
             pub inline fn deinit(self: *OuterT) void {
                 _deinit(self.inner());
                 self.* = undefined;
-            }
-        } else struct {};
-
-        pub usingnamespace if (Methods.dump_fn) |_dump| struct {
-            pub inline fn dump(self: OuterT) void {
-                return _dump(self.inner());
-            }
-        } else struct {};
-
-        pub usingnamespace if (Methods.print_fn) |print| struct {
-            pub fn format(
-                self: OuterT,
-                comptime fmt: []const u8,
-                options: std.fmt.FormatOptions,
-                writer: anytype,
-            ) !void {
-                _ = fmt;
-                _ = options;
-
-                const Writer = struct {
-                    writer: @TypeOf(writer),
-                    err: ?@TypeOf(writer).Error = null,
-                    fn printCallback(mlir_str: c.MlirStringRef, opaque_ctx: ?*anyopaque) callconv(.C) void {
-                        var ctx: *@This() = @alignCast(@ptrCast(opaque_ctx));
-                        if (ctx.err) |_| return;
-                        _ = ctx.writer.write(mlir_str.data[0..mlir_str.length]) catch |err| {
-                            ctx.err = err;
-                            return;
-                        };
-                    }
-                };
-
-                var context: Writer = .{ .writer = writer };
-                print(self.inner(), &Writer.printCallback, &context);
-                if (context.err) |err| return err;
             }
         } else struct {};
     };
@@ -1175,8 +1139,9 @@ pub const Value = struct {
         .is_null_fn = c.mlirValueIsNull,
         .equal_fn = c.mlirValueEqual,
         .dump_fn = c.mlirValueDump,
-        .print_fn = c.mlirValuePrint,
     });
+
+    pub const format = print(Value, c.mlirValuePrint).format;
 
     pub fn getType(val: Value) Type {
         return Type.wrap(c.mlirValueGetType(val.inner()));
@@ -1250,8 +1215,9 @@ pub const Type = struct {
         .is_null_fn = c.mlirTypeIsNull,
         .dump_fn = c.mlirTypeDump,
         .equal_fn = c.mlirTypeEqual,
-        .print_fn = c.mlirTypePrint,
     });
+
+    pub const format = print(Type, c.mlirTypePrint);
 
     pub fn parse(ctx: Context, str: [:0]const u8) !Type {
         return Type.wrapOr(
@@ -1282,8 +1248,8 @@ pub const IndexType = struct {
         .is_null_fn = c.mlirTypeIsNull,
         .dump_fn = c.mlirTypeDump,
         .equal_fn = c.mlirTypeEqual,
-        .print_fn = c.mlirTypePrint,
     });
+    pub const format = print(IndexType, c.mlirTypePrint);
 
     pub fn init(ctx: Context) IndexType {
         return IndexType.wrap(c.mlirIndexTypeGet(ctx.inner()));
@@ -1348,6 +1314,7 @@ pub fn IntegerType(comptime it: IntegerTypes) type {
             .equal_fn = c.mlirTypeEqual,
         });
         pub const asType = Type.fromAnyType(Int);
+        pub const format = print(Int, c.mlirTypePrint);
         const IntegerTypeType = it;
 
         fn typeIsAIntegerExact(typ: c.MlirType) callconv(.C) bool {
@@ -1409,13 +1376,13 @@ pub fn FloatType(comptime ft: FloatTypes) type {
             .dump_fn = c.mlirTypeDump,
             .equal_fn = c.mlirTypeEqual,
         });
+        pub const asType = Type.fromAnyType(Self);
+        pub const format = print(Self, c.mlirTypePrint);
 
         pub fn init(ctx: Context) Self {
             const type_get = Config[1];
             return Self.wrap(type_get(ctx.inner()));
         }
-
-        pub const asType = Type.fromAnyType(Self);
     };
 }
 
@@ -1465,6 +1432,8 @@ pub fn ComplexType(comptime ct: ComplexTypes) type {
             .dump_fn = c.mlirTypeDump,
             .equal_fn = c.mlirTypeEqual,
         });
+        pub const asType = Type.fromAnyType(Complex);
+        pub const format = Type.print(Complex, c.mlirTypePrint);
 
         pub usingnamespace if (ct != .unknown) struct {
             pub const ComplexTypeType = ct;
@@ -1474,8 +1443,6 @@ pub fn ComplexType(comptime ct: ComplexTypes) type {
                 return Complex.wrap(type_get(ctx.inner()));
             }
         } else struct {};
-
-        pub const asType = Type.fromAnyType(Complex);
     };
 }
 
@@ -1540,8 +1507,8 @@ pub const RankedTensorType = struct {
         .is_null_fn = c.mlirTypeIsNull,
         .dump_fn = c.mlirTypeDump,
         .equal_fn = c.mlirTypeEqual,
-        .print_fn = c.mlirTypePrint,
     });
+    pub const format = print(Type, c.mlirTypePrint);
 
     pub fn init(dimensions: []const i64, elemType: Type) RankedTensorType {
         return RankedTensorType.wrap(
@@ -1644,8 +1611,9 @@ pub const Location = struct {
     pub usingnamespace MlirHelpers(Location, .{
         .is_null_fn = c.mlirLocationIsNull,
         .equal_fn = c.mlirLocationEqual,
-        .print_fn = c.mlirLocationPrint,
     });
+
+    pub const format = print(Location, c.mlirLocationPrint);
 
     pub fn fromSrc(ctx: Context, src: std.builtin.SourceLocation) Location {
         return Location.wrap(c.mlirLocationFileLineColGet(
@@ -1748,4 +1716,35 @@ pub fn isA(MlirObject: type, Other: type) fn (MlirObject) bool {
             return if (Other.Methods.is_a_fn) |is_a_fn| is_a_fn(x._inner) else false;
         }
     }.isA;
+}
+
+pub fn print(Any: type, print_fn: fn (@FieldType(Any, "_inner"), ?*const MlirStrCallback, ?*anyopaque) callconv(.C) void) type {
+    return struct {
+        pub fn format(
+            self: Any,
+            comptime fmt: []const u8,
+            options: std.fmt.FormatOptions,
+            writer: anytype,
+        ) !void {
+            _ = fmt;
+            _ = options;
+
+            const Writer = struct {
+                writer: @TypeOf(writer),
+                err: ?@TypeOf(writer).Error = null,
+                fn printCallback(mlir_str: c.MlirStringRef, opaque_ctx: ?*anyopaque) callconv(.C) void {
+                    var ctx: *@This() = @alignCast(@ptrCast(opaque_ctx));
+                    if (ctx.err) |_| return;
+                    _ = ctx.writer.write(mlir_str.data[0..mlir_str.length]) catch |err| {
+                        ctx.err = err;
+                        return;
+                    };
+                }
+            };
+
+            var context: Writer = .{ .writer = writer };
+            print_fn(self._inner, &Writer.printCallback, &context);
+            if (context.err) |err| return err;
+        }
+    };
 }
