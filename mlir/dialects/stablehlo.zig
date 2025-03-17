@@ -864,10 +864,10 @@ pub const DotDimensionNumbersAttribute = struct {
         .is_a_fn = c.stablehloAttributeIsADotDimensionNumbers,
         .is_null_fn = c.mlirAttributeIsNull,
         .dump_fn = c.mlirAttributeDump,
-        .equal_fn = c.mlirAttributeEqual,
     });
     const Self = DotDimensionNumbersAttribute;
     pub const asAttr = mlir.Attribute.fromAnyAttribute(Self);
+    pub const eql = mlir.Attribute.eqlAny(Self);
 
     pub fn init(ctx: mlir.Context, args: struct {
         lhs_batching_dimensions: []const i64,
@@ -930,10 +930,10 @@ pub const GatherDimensionNumbersAttribute = struct {
         .is_a_fn = c.stablehloAttributeIsAGatherDimensionNumbers,
         .is_null_fn = c.mlirAttributeIsNull,
         .dump_fn = c.mlirAttributeDump,
-        .equal_fn = c.mlirAttributeEqual,
     });
     const Self = GatherDimensionNumbersAttribute;
     pub const asAttr = mlir.Attribute.fromAnyAttribute(Self);
+    pub const eql = mlir.Attribute.eqlAny(Self);
 
     pub fn init(
         ctx: mlir.Context,
@@ -1014,10 +1014,10 @@ pub const ConvDimensionNumbersAttribute = struct {
         .is_a_fn = c.stablehloAttributeIsAConvDimensionNumbers,
         .is_null_fn = c.mlirAttributeIsNull,
         .dump_fn = c.mlirAttributeDump,
-        .equal_fn = c.mlirAttributeEqual,
     });
     const Self = ConvDimensionNumbersAttribute;
     pub const asAttr = mlir.Attribute.fromAnyAttribute(Self);
+    pub const eql = mlir.Attribute.eqlAny(Self);
 
     pub fn init(ctx: mlir.Context, args: struct {
         input_batch_dimension: i64,
@@ -1105,9 +1105,9 @@ pub const OutputOperandAliasAttribute = struct {
         .is_a_fn = c.stablehloAttributeIsAOutputOperandAlias,
         .is_null_fn = c.mlirAttributeIsNull,
         .dump_fn = c.mlirAttributeDump,
-        .equal_fn = c.mlirAttributeEqual,
     });
     pub const asAttr = mlir.Attribute.fromAnyAttribute(OutputOperandAliasAttribute);
+    pub const eql = mlir.Attribute.eqlAny(OutputOperandAliasAttribute);
 
     pub fn init(
         ctx: mlir.Context,
@@ -1133,10 +1133,10 @@ pub const PrecisionAttribute = struct {
         .is_a_fn = c.stablehloAttributeIsAPrecisionAttr,
         .is_null_fn = c.mlirAttributeIsNull,
         .dump_fn = c.mlirAttributeDump,
-        .equal_fn = c.mlirAttributeEqual,
     });
     const Self = PrecisionAttribute;
     pub const asAttr = mlir.Attribute.fromAnyAttribute(Self);
+    pub const eql = mlir.Attribute.eqlAny(Self);
 
     pub const Precision = enum {
         DEFAULT,
@@ -1161,10 +1161,10 @@ pub const ComparisonDirection = struct {
         .is_a_fn = c.stablehloAttributeIsAComparisonDirectionAttr,
         .is_null_fn = c.mlirAttributeIsNull,
         .dump_fn = c.mlirAttributeDump,
-        .equal_fn = c.mlirAttributeEqual,
     });
     const Self = ComparisonDirection;
     pub const asAttr = mlir.Attribute.fromAnyAttribute(Self);
+    pub const eql = mlir.Attribute.eqlAny(Self);
 
     pub const Direction = enum {
         EQ,
@@ -1192,10 +1192,10 @@ pub const CompareType = struct {
         .is_a_fn = c.stablehloAttributeIsAComparisonTypeAttr,
         .is_null_fn = c.mlirAttributeIsNull,
         .dump_fn = c.mlirAttributeDump,
-        .equal_fn = c.mlirAttributeEqual,
     });
     const Self = CompareType;
     pub const asAttr = mlir.Attribute.fromAnyAttribute(Self);
+    pub const eql = mlir.Attribute.eqlAny(Self);
 
     pub const Type = enum {
         SIGNED,
@@ -1221,10 +1221,10 @@ pub const Transpose = struct {
         .is_a_fn = c.stablehloAttributeIsATransposeAttr,
         .is_null_fn = c.mlirAttributeIsNull,
         .dump_fn = c.mlirAttributeDump,
-        .equal_fn = c.mlirAttributeEqual,
     });
     const Self = Transpose;
     pub const asAttr = mlir.Attribute.fromAnyAttribute(Self);
+    pub const eql = mlir.Attribute.eqlAny(Self);
 
     pub const Type = enum {
         NO_TRANSPOSE,
@@ -1249,10 +1249,10 @@ pub const FftType = struct {
         .is_a_fn = c.stablehloAttributeIsAFftTypeAttr,
         .is_null_fn = c.mlirAttributeIsNull,
         .dump_fn = c.mlirAttributeDump,
-        .equal_fn = c.mlirAttributeEqual,
     });
     const Self = FftType;
     pub const asAttr = mlir.Attribute.fromAnyAttribute(Self);
+    pub const eql = mlir.Attribute.eqlAny(Self);
 
     pub const Type = enum {
         FFT,
@@ -1278,10 +1278,10 @@ pub const RngDistribution = struct {
         .is_a_fn = c.stablehloAttributeIsARngDistributionAttr,
         .is_null_fn = c.mlirAttributeIsNull,
         .dump_fn = c.mlirAttributeDump,
-        .equal_fn = c.mlirAttributeEqual,
     });
     const Self = RngDistribution;
     pub const asAttr = mlir.Attribute.fromAnyAttribute(Self);
+    pub const eql = mlir.Attribute.eqlAny(Self);
 
     pub const Type = enum {
         UNIFORM,
@@ -1305,10 +1305,10 @@ pub const RngAlgorithm = struct {
         .is_a_fn = c.stablehloAttributeIsARngAlgorithmAttr,
         .is_null_fn = c.mlirAttributeIsNull,
         .dump_fn = c.mlirAttributeDump,
-        .equal_fn = c.mlirAttributeEqual,
     });
     const Self = RngAlgorithm;
     pub const asAttr = mlir.Attribute.fromAnyAttribute(Self);
+    pub const eql = mlir.Attribute.eqlAny(Self);
 
     pub const Type = enum {
         DEFAULT,

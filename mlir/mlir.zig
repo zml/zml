@@ -65,7 +65,6 @@ fn MlirHelpersMethods(OuterT: type) type {
 
         is_null_fn: ?fn (InnerT) callconv(.C) bool = null,
         is_a_fn: ?fn (InnerT) callconv(.C) bool = null,
-        equal_fn: ?fn (InnerT, InnerT) callconv(.C) bool = null,
         deinit_fn: ?fn (InnerT) callconv(.C) void = null,
         dump_fn: ?fn (InnerT) callconv(.C) void = null,
     };
@@ -91,12 +90,6 @@ pub fn MlirHelpers(comptime OuterT: type, comptime methods: MlirHelpersMethods(O
         pub usingnamespace if (Methods.is_null_fn) |is_null| struct {
             pub inline fn wrapOr(raw: InnerT) ?OuterT {
                 return if (is_null(raw)) null else OuterT.wrap(raw);
-            }
-        } else struct {};
-
-        pub usingnamespace if (Methods.equal_fn) |equal| struct {
-            pub inline fn eql(self: OuterT, other: OuterT) bool {
-                return equal(self.inner(), other.inner());
             }
         } else struct {};
 
@@ -291,8 +284,9 @@ pub const Attribute = struct {
     pub usingnamespace MlirHelpers(Attribute, .{
         .is_null_fn = c.mlirAttributeIsNull,
         .dump_fn = c.mlirAttributeDump,
-        .equal_fn = c.mlirAttributeEqual,
     });
+
+    pub const eql = eqlHelper(Attribute, c.mlirAttributeEqual);
 
     pub fn parse(ctx: Context, attr: [:0]const u8) !Attribute {
         return Attribute.wrapOr(
@@ -318,6 +312,14 @@ pub const Attribute = struct {
             }
         }.cast;
     }
+
+    pub fn eqlAny(SpecificType: type) fn (SpecificType, SpecificType) bool {
+        return struct {
+            fn eql(a: SpecificType, b: SpecificType) bool {
+                return a.asAttr().eql(b.asAttr());
+            }
+        }.eql;
+    }
 };
 
 pub const NamedAttribute = struct {
@@ -341,9 +343,9 @@ pub const StringAttribute = struct {
         .is_a_fn = c.mlirAttributeIsAString,
         .is_null_fn = c.mlirAttributeIsNull,
         .dump_fn = c.mlirAttributeDump,
-        .equal_fn = c.mlirAttributeEqual,
     });
     const Self = StringAttribute;
+    pub const eql = Attribute.eqlAny(Self);
 
     pub fn init(ctx: Context, str: []const u8) Self {
         return Self.wrap(c.mlirStringAttrGet(ctx.inner(), stringRef(str)));
@@ -379,9 +381,10 @@ pub const BoolAttribute = struct {
         .is_a_fn = c.mlirAttributeIsABool,
         .is_null_fn = c.mlirAttributeIsNull,
         .dump_fn = c.mlirAttributeDump,
-        .equal_fn = c.mlirAttributeEqual,
     });
     const Self = BoolAttribute;
+    pub const asAttr = Attribute.fromAnyAttribute(Self);
+    pub const eql = Attribute.eqlAny(Self);
 
     pub fn init(ctx: Context, value_: bool) Self {
         return Self.wrap(c.mlirBoolAttrGet(ctx.inner(), if (value_) 1 else 0));
@@ -390,8 +393,6 @@ pub const BoolAttribute = struct {
     pub fn value(self: Self) bool {
         return c.mlirBoolAttrGetValue(self.inner());
     }
-
-    pub const asAttr = Attribute.fromAnyAttribute(Self);
 };
 
 pub const TypeAttribute = struct {
@@ -400,8 +401,9 @@ pub const TypeAttribute = struct {
         .is_a_fn = c.mlirAttributeIsAType,
         .is_null_fn = c.mlirAttributeIsNull,
         .dump_fn = c.mlirAttributeDump,
-        .equal_fn = c.mlirAttributeEqual,
     });
+    pub const eql = Attribute.eqlAny(TypeAttribute);
+
     pub fn init(type_: Type) TypeAttribute {
         return TypeAttribute.wrap(c.mlirTypeAttrGet(type_.inner()));
     }
@@ -419,9 +421,10 @@ pub const ArrayAttribute = struct {
         .is_a_fn = c.mlirAttributeIsAArray,
         .is_null_fn = c.mlirAttributeIsNull,
         .dump_fn = c.mlirAttributeDump,
-        .equal_fn = c.mlirAttributeEqual,
     });
     const Self = ArrayAttribute;
+    pub const asAttr = Attribute.fromAnyAttribute(Self);
+    pub const eql = Attribute.eqlAny(Self);
 
     pub fn init(ctx: Context, attrs: []const Attribute) Self {
         return Self.wrap(c.mlirArrayAttrGet(ctx.inner(), @intCast(attrs.len), @ptrCast(attrs.ptr)));
@@ -433,10 +436,6 @@ pub const ArrayAttribute = struct {
 
     pub fn get(self: Self, index: usize) Attribute {
         return Attribute.wrap(c.mlirArrayAttrGetElement(self.inner(), @intCast(index)));
-    }
-
-    pub fn asAttr(self: Self) Attribute {
-        return .{ ._inner = self._inner };
     }
 };
 
@@ -454,10 +453,12 @@ pub fn IntegerAttribute(comptime it: IntegerTypes) type {
             .is_a_fn = c.mlirAttributeIsAInteger,
             .is_null_fn = c.mlirAttributeIsNull,
             .dump_fn = c.mlirAttributeDump,
-            .equal_fn = c.mlirAttributeEqual,
         });
         pub const IntegerTypeType = IntegerType(it);
         const IntAttr = @This();
+
+        pub const asAttr = Attribute.fromAnyAttribute(IntAttr);
+        pub const eql = Attribute.eqlAny(IntAttr);
 
         pub fn init(ctx: Context, value: i64) IntAttr {
             return IntAttr.wrap(c.mlirIntegerAttrGet(
@@ -468,10 +469,6 @@ pub fn IntegerAttribute(comptime it: IntegerTypes) type {
 
         pub fn get(value: IntAttr) ZigType {
             return @intCast(getter(value.inner()));
-        }
-
-        pub fn asAttr(self: IntAttr) Attribute {
-            return .{ ._inner = self._inner };
         }
     };
 }
@@ -527,11 +524,11 @@ pub fn DenseArrayAttribute(comptime dt: DenseArrayTypes) type {
             .is_a_fn = Config[1],
             .is_null_fn = c.mlirAttributeIsNull,
             .dump_fn = c.mlirAttributeDump,
-            .equal_fn = c.mlirAttributeEqual,
         });
         const Attr = @This();
         const ElementType = dt;
         const ElementTypeZig = Config[0];
+        pub const eql = Attribute.eqlAny(Attr);
 
         pub fn init(ctx: Context, values: []const ElementTypeZig) Attr {
             const get_fn = Config[2];
@@ -606,8 +603,9 @@ pub fn DenseElementsAttribute(comptime dt: DenseElementsAttributeTypes) type {
             .is_a_fn = c.mlirAttributeIsADenseElements,
             .is_null_fn = c.mlirAttributeIsNull,
             .dump_fn = c.mlirAttributeDump,
-            .equal_fn = c.mlirAttributeEqual,
         });
+
+        pub const eql = Attribute.eqlAny(Attr);
 
         pub fn init(shaped_type: Type, slice: anytype) Attr {
             const bytes = std.mem.sliceAsBytes(slice);
@@ -644,10 +642,9 @@ pub const FlatSymbolRefAttribute = struct {
         .is_a_fn = c.mlirAttributeIsAFlatSymbolRef,
         .is_null_fn = c.mlirAttributeIsNull,
         .dump_fn = c.mlirAttributeDump,
-        .equal_fn = c.mlirAttributeEqual,
     });
-
     const Self = FlatSymbolRefAttribute;
+    pub const eql = Attribute.eqlAny(Self);
 
     pub fn init(ctx: Context, str: [:0]const u8) Self {
         return Self.wrap(c.mlirFlatSymbolRefAttrGet(ctx.inner(), stringRef(str)));
@@ -730,8 +727,9 @@ pub const DictionaryAttribute = struct {
         .is_a_fn = c.mlirAttributeIsADictionary,
         .is_null_fn = c.mlirAttributeIsNull,
         .dump_fn = c.mlirAttributeDump,
-        .equal_fn = c.mlirAttributeEqual,
     });
+
+    pub const eql = Attribute.eqlAny(DictionaryAttribute);
 
     pub fn init(ctx: Context, attributes: []const NamedAttribute) DictionaryAttribute {
         return DictionaryAttribute.wrap(c.mlirDictionaryAttrGet(
@@ -768,9 +766,10 @@ pub const Operation = struct {
             .is_null_fn = c.mlirOperationIsNull,
             .deinit_fn = c.mlirOperationDestroy,
             .dump_fn = c.mlirOperationDump,
-            .equal_fn = c.mlirOperationEqual,
         },
     );
+
+    pub const eql = Attribute.eqlAny(Self);
 
     pub fn init(state: *OperationState) !Self {
         return Self.wrapOr(
@@ -1100,7 +1099,6 @@ pub const Region = struct {
     pub usingnamespace MlirHelpers(Region, .{
         .is_null_fn = c.mlirRegionIsNull,
         .deinit_fn = c.mlirRegionDestroy,
-        .equal_fn = c.mlirRegionEqual,
     });
 
     const Self = Region;
@@ -1110,6 +1108,8 @@ pub const Region = struct {
             c.mlirRegionCreate(),
         ) orelse Error.InvalidMlir;
     }
+
+    pub const eql = eqlHelper(Region, c.mlirBlockEqual);
 
     pub fn appendBlock(self: *Self, block: Block) void {
         c.mlirRegionAppendOwnedBlock(self.inner(), block.inner());
@@ -1137,10 +1137,9 @@ pub const Value = struct {
 
     pub usingnamespace MlirHelpers(Value, .{
         .is_null_fn = c.mlirValueIsNull,
-        .equal_fn = c.mlirValueEqual,
         .dump_fn = c.mlirValueDump,
     });
-
+    pub const eql = eqlHelper(Value, c.mlirValueEqual);
     pub const format = print(Value, c.mlirValuePrint).format;
 
     pub fn getType(val: Value) Type {
@@ -1214,9 +1213,9 @@ pub const Type = struct {
     pub usingnamespace MlirHelpers(Type, .{
         .is_null_fn = c.mlirTypeIsNull,
         .dump_fn = c.mlirTypeDump,
-        .equal_fn = c.mlirTypeEqual,
     });
 
+    pub const eql = eqlHelper(Type, c.mlirTypeEqual);
     pub const format = print(Type, c.mlirTypePrint);
 
     pub fn parse(ctx: Context, str: [:0]const u8) !Type {
@@ -1239,6 +1238,14 @@ pub const Type = struct {
             }
         }.cast;
     }
+
+    pub fn eqlAny(SpecificType: type) fn (SpecificType, SpecificType) bool {
+        return struct {
+            fn eql(a: SpecificType, b: SpecificType) bool {
+                return a.asType().eql(b.asType());
+            }
+        }.eql;
+    }
 };
 
 pub const IndexType = struct {
@@ -1247,8 +1254,8 @@ pub const IndexType = struct {
     pub usingnamespace MlirHelpers(IndexType, .{
         .is_null_fn = c.mlirTypeIsNull,
         .dump_fn = c.mlirTypeDump,
-        .equal_fn = c.mlirTypeEqual,
     });
+    pub const eql = Type.eqlAny(IndexType);
     pub const format = print(IndexType, c.mlirTypePrint);
 
     pub fn init(ctx: Context) IndexType {
@@ -1311,9 +1318,9 @@ pub fn IntegerType(comptime it: IntegerTypes) type {
             },
             .is_null_fn = c.mlirTypeIsNull,
             .dump_fn = c.mlirTypeDump,
-            .equal_fn = c.mlirTypeEqual,
         });
         pub const asType = Type.fromAnyType(Int);
+        pub const eql = Type.eqlAny(Int);
         pub const format = print(Int, c.mlirTypePrint);
         const IntegerTypeType = it;
 
@@ -1374,9 +1381,9 @@ pub fn FloatType(comptime ft: FloatTypes) type {
             .is_a_fn = Config[0],
             .is_null_fn = c.mlirTypeIsNull,
             .dump_fn = c.mlirTypeDump,
-            .equal_fn = c.mlirTypeEqual,
         });
         pub const asType = Type.fromAnyType(Self);
+        pub const eql = Type.eqlAny(Self);
         pub const format = print(Self, c.mlirTypePrint);
 
         pub fn init(ctx: Context) Self {
@@ -1430,9 +1437,9 @@ pub fn ComplexType(comptime ct: ComplexTypes) type {
             .is_a_fn = Config[0],
             .is_null_fn = c.mlirTypeIsNull,
             .dump_fn = c.mlirTypeDump,
-            .equal_fn = c.mlirTypeEqual,
         });
         pub const asType = Type.fromAnyType(Complex);
+        pub const eql = Type.eqlAny(Complex);
         pub const format = Type.print(Complex, c.mlirTypePrint);
 
         pub usingnamespace if (ct != .unknown) struct {
@@ -1482,10 +1489,10 @@ pub const FunctionType = struct {
         .is_a_fn = c.mlirTypeIsAFunction,
         .is_null_fn = c.mlirTypeIsNull,
         .dump_fn = c.mlirTypeDump,
-        .equal_fn = c.mlirTypeEqual,
     });
-
     const Self = FunctionType;
+    pub const asType = Type.fromAnyType(Self);
+    pub const eql = Type.eqlAny(IndexType);
 
     pub fn init(ctx: Context, args: []const Type, results: []const Type) !Self {
         return Self.wrapOr(c.mlirFunctionTypeGet(
@@ -1496,8 +1503,6 @@ pub const FunctionType = struct {
             @ptrCast(results.ptr),
         )) orelse Error.InvalidMlir;
     }
-
-    pub const asType = Type.fromAnyType(Self);
 };
 
 pub const RankedTensorType = struct {
@@ -1506,8 +1511,8 @@ pub const RankedTensorType = struct {
         .is_a_fn = c.mlirTypeIsARankedTensor,
         .is_null_fn = c.mlirTypeIsNull,
         .dump_fn = c.mlirTypeDump,
-        .equal_fn = c.mlirTypeEqual,
     });
+    pub const eql = Type.eqlAny(RankedTensorType);
     pub const format = print(Type, c.mlirTypePrint);
 
     pub fn init(dimensions: []const i64, elemType: Type) RankedTensorType {
@@ -1610,9 +1615,8 @@ pub const Location = struct {
 
     pub usingnamespace MlirHelpers(Location, .{
         .is_null_fn = c.mlirLocationIsNull,
-        .equal_fn = c.mlirLocationEqual,
     });
-
+    pub const eql = eqlHelper(Type, c.mlirLocationEqual);
     pub const format = print(Location, c.mlirLocationPrint);
 
     pub fn fromSrc(ctx: Context, src: std.builtin.SourceLocation) Location {
@@ -1669,8 +1673,9 @@ pub const Block = struct {
     pub usingnamespace MlirHelpers(Block, .{
         .is_null_fn = c.mlirBlockIsNull,
         .deinit_fn = c.mlirBlockDestroy,
-        .equal_fn = c.mlirBlockEqual,
     });
+
+    pub const eql = eqlHelper(Block, c.mlirBlockEqual);
 
     pub fn init(args: []const Type, locs: []const Location) !Block {
         const block = Block.wrapOr(
@@ -1747,4 +1752,12 @@ pub fn print(Any: type, print_fn: fn (@FieldType(Any, "_inner"), ?*const MlirStr
             if (context.err) |err| return err;
         }
     };
+}
+
+pub fn eqlHelper(T: type, equal_fn: fn (@FieldType(T, "_inner"), @FieldType(T, "_inner")) callconv(.C) bool) fn (T, T) bool {
+    return struct {
+        fn eql(a: T, b: T) bool {
+            return equal_fn(a._inner, b._inner);
+        }
+    }.eql;
 }
