@@ -749,8 +749,8 @@ pub const CustomCallOpts = struct {
     call_target_name: [:0]const u8,
     has_side_effect: bool,
     backend_config: BackendConfig = .{ .string = &.{} },
-    operand_layouts: []const []const u8 = &.{},
-    result_layouts: []const []const u8 = &.{},
+    operand_layouts: []const []const usize = &.{},
+    result_layouts: []const []const usize = &.{},
     output_operand_aliases: []const i64 = &.{},
     addional_attributes: []const mlir.AttrTuple = &.{},
     api_version: ApiVersion,
@@ -765,9 +765,9 @@ pub fn custom_call(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCa
         for (opts.operand_layouts) |ol| {
             const tensor_type = mlir.RankedTensorType.init(
                 &.{@intCast(ol.len)},
-                mlir.IntegerType(.u8).init(ctx).as(mlir.Type),
+                mlir.IndexType.init(ctx).as(mlir.Type),
             ).as(mlir.Type);
-            const layout_attr = mlir.DenseElementsAttribute(.u8).init(tensor_type, ol);
+            const layout_attr = mlir.DenseElementsAttribute(.index).init(tensor_type, ol);
             ret.appendAssumeCapacity(layout_attr.as(mlir.Attribute));
         }
         break :blk ret;
@@ -778,9 +778,9 @@ pub fn custom_call(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCa
         for (opts.result_layouts) |rl| {
             const tensor_type = mlir.RankedTensorType.init(
                 &.{@intCast(rl.len)},
-                mlir.IntegerType(.u8).init(ctx).as(mlir.Type),
+                mlir.IndexType.init(ctx).as(mlir.Type),
             ).as(mlir.Type);
-            const layout_attr = mlir.DenseElementsAttribute(.u8).init(tensor_type, rl);
+            const layout_attr = mlir.DenseElementsAttribute(.index).init(tensor_type, rl);
             ret.appendAssumeCapacity(layout_attr.as(mlir.Attribute));
         }
         break :blk ret;

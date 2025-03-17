@@ -851,7 +851,7 @@ pub fn triton(inputs: anytype, outputs: anytype, opts: TritonOps) [outputs.len]T
     });
 
     const MINOR_TO_MAJOR = blk: {
-        var ret: [Shape.MAX_RANK]u8 = undefined;
+        var ret: [Shape.MAX_RANK]usize = undefined;
         for (0..Shape.MAX_RANK) |i| {
             ret[i] = @intCast(Shape.MAX_RANK - i - 1);
         }
@@ -859,7 +859,7 @@ pub fn triton(inputs: anytype, outputs: anytype, opts: TritonOps) [outputs.len]T
     };
 
     const operands_layouts = blk: {
-        var ret: [inputs.len][]const u8 = undefined;
+        var ret: [inputs.len][]const usize = undefined;
         inline for (inputs, 0..) |input, i| {
             ret[i] = MINOR_TO_MAJOR[MINOR_TO_MAJOR.len - input.rank() ..];
         }
@@ -867,7 +867,7 @@ pub fn triton(inputs: anytype, outputs: anytype, opts: TritonOps) [outputs.len]T
     };
 
     const results_layouts = blk: {
-        var ret: [outputs.len][]const u8 = undefined;
+        var ret: [outputs.len][]const usize = undefined;
         inline for (outputs, 0..) |output, i| {
             ret[i] = MINOR_TO_MAJOR[MINOR_TO_MAJOR.len - output.rank() ..];
         }
