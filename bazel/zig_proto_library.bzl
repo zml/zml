@@ -38,7 +38,6 @@ def zig_proto_library_aspect_impl(target, ctx):
     pb_zig_name = proto_src.basename[:-len(".proto")] + ".pb.zig"
     zig_src = ctx.actions.declare_file(pb_zig_name, sibling = proto_src)
 
-    ctx.actions.run
     proto_common.compile(
         ctx.actions,
         proto_info = proto_info,

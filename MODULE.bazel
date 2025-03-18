@@ -5,12 +5,11 @@ module(
 new_git_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:git.bzl", "new_git_repository")
 
 bazel_dep(name = "abseil-cpp", version = "20240722.0.bcr.2")
-bazel_dep(name = "aspect_bazel_lib", version = "2.11.0")
+bazel_dep(name = "aspect_bazel_lib", version = "2.14.0")
 bazel_dep(name = "aspect_rules_py", version = "1.3.1")
 bazel_dep(name = "bazel_skylib", version = "1.7.1")
-bazel_dep(name = "hermetic_cc_toolchain", version = "3.1.1")
+bazel_dep(name = "hermetic_cc_toolchain", version = "3.2.0")
 bazel_dep(name = "libxev", version = "20250313.0-5773f46")
-bazel_dep(name = "llvm-raw", version = "20250217.0-0e779ad")
 bazel_dep(name = "patchelf", version = "0.18.0")
 bazel_dep(name = "pcre2", version = "10.43")
 bazel_dep(name = "platforms", version = "0.0.11")
@@ -23,14 +22,13 @@ bazel_dep(name = "rules_rust", version = "0.57.1")
 bazel_dep(name = "rules_uv", version = "0.53.0")
 bazel_dep(name = "rules_zig", version = "20250314.0-b9739c6")
 bazel_dep(name = "sentencepiece", version = "20240618.0-d7ace0a")
-bazel_dep(name = "stablehlo", version = "20250217.0-4598975")
 bazel_dep(name = "toolchains_protoc", version = "0.3.7")
-bazel_dep(name = "with_cfg.bzl", version = "0.8.0")
-bazel_dep(name = "xla", version = "20250204.1-6789523")
-bazel_dep(name = "zig-protobuf", version = "20250213.0-5304067")
+bazel_dep(name = "with_cfg.bzl", version = "0.9.1")
+bazel_dep(name = "xla", version = "20250317.0-71c67e2")
+bazel_dep(name = "zig-protobuf", version = "20250318.0-930153e")
 bazel_dep(name = "zig-yaml", version = "20240903.0-83d5fdf")
 
-bazel_dep(name = "buildifier_prebuilt", version = "7.3.1", dev_dependency = True)
+bazel_dep(name = "buildifier_prebuilt", version = "8.0.1", dev_dependency = True)
 
 # Optional: choose a version of protoc rather than the latest.
 protoc = use_extension("@toolchains_protoc//protoc:extensions.bzl", "protoc")
@@ -93,13 +91,12 @@ cpu = use_extension("//runtimes/cpu:cpu.bzl", "cpu_pjrt_plugin")
 use_repo(cpu, "libpjrt_cpu_darwin_arm64", "libpjrt_cpu_darwin_amd64", "libpjrt_cpu_linux_amd64")
 
 cuda = use_extension("//runtimes/cuda:cuda.bzl", "cuda_packages")
-use_repo(cuda, "libpjrt_cuda")
 inject_repo(cuda, "zlib1g")
+use_repo(cuda, "libpjrt_cuda")
 
 rocm = use_extension("//runtimes/rocm:rocm.bzl", "rocm_packages")
-use_repo(rocm, "hipblaslt", "libpjrt_rocm", "rocblas")
-
 inject_repo(rocm, "libdrm-amdgpu1", "libdrm2", "libelf1", "libnuma1", "libtinfo6", "libzstd1", "zlib1g")
+use_repo(rocm, "hipblaslt", "libpjrt_rocm", "rocblas")
 
 tpu = use_extension("//runtimes/tpu:tpu.bzl", "tpu_packages")
 use_repo(tpu, "libpjrt_tpu")
@@ -112,18 +109,25 @@ use_repo(zls, "zls_aarch64-macos", "zls_x86_64-macos", "zls_x86_64-linux")
 
 register_toolchains("//third_party/zls:all")
 
-llvm = use_extension("@llvm-raw//utils/bazel:extension.bzl", "llvm")
-llvm.configure(
-    targets = [
-        "AArch64",
-        "X86",
-        "NVPTX",
-    ],
-)
-use_repo(llvm, "llvm-project")
-
 tsl = use_extension("@xla//:tsl.bzl", "tsl")
-use_repo(tsl, "tsl")
+use_repo(tsl, "tsl", "python_version_repo")
+
+xla = use_extension("@xla//:workspace.bzl", "xla_workspace")
+use_repo(xla, "llvm-raw")
+llvm_configure = use_repo_rule("@llvm-raw//utils/bazel:configure.bzl", "llvm_configure")
+llvm_configure(name = "llvm-project")
+inject_repo(xla, "llvm-project")
+use_repo(
+    xla,
+    "com_github_grpc_grpc",
+    "local_config_cuda",
+    "local_config_remote_execution",
+    "local_config_rocm",
+    "local_config_tensorrt",
+    "pybind11_bazel",
+    "stablehlo",
+    "triton",
+)
 
 apt = use_extension("@rules_distroless//apt:extensions.bzl", "apt")
 apt.install(
@@ -163,6 +167,7 @@ crate.from_cargo(
 use_repo(crate, "crates")
 
 non_module_deps = use_extension("//:third_party/non_module_deps.bzl", "non_module_deps")
+inject_repo(non_module_deps, "python_version_repo", "xla", "tsl")
 use_repo(non_module_deps, "com_google_sentencepiece", "org_swig_swig")
 
 apt.install(
