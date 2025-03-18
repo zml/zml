@@ -182,8 +182,8 @@ pub const DataType = enum(u8) {
     pub fn minValue(dtype: DataType) Data {
         return switch (dtype) {
             .bool => .{ .bool = false },
-            inline .f8e4m3b11fnuz, .f8e4m3fn, .f8e4m3fnuz, .f8e5m2fnuz => |tag| @unionInit(Data, @tagName(tag), @FieldType(Data, @tagName(tag)).zero()),
-            inline .f8e5m2, .bf16 => |tag| @unionInit(Data, @tagName(tag), @FieldType(Data, @tagName(tag)).minusInf()),
+            inline .f8e4m3b11fnuz, .f8e4m3fn, .f8e4m3fnuz, .f8e5m2fnuz => |tag| @unionInit(Data, @tagName(tag), @FieldType(Data, @tagName(tag)).zero),
+            inline .f8e5m2, .bf16 => |tag| @unionInit(Data, @tagName(tag), @FieldType(Data, @tagName(tag)).minus_inf),
             inline .f16, .f32, .f64 => |tag| @unionInit(Data, @tagName(tag), -std.math.inf(@FieldType(Data, @tagName(tag)))),
             inline .i4, .i8, .i16, .i32, .i64, .u4, .u8, .u16, .u32, .u64 => |tag| @unionInit(Data, @tagName(tag), std.math.minInt(@FieldType(Data, @tagName(tag)))),
             inline else => |tag| @panic("Unsupported type: " ++ @tagName(tag)),
@@ -194,7 +194,7 @@ pub const DataType = enum(u8) {
         return switch (dtype) {
             .bool => .{ .bool = true },
             inline .f8e4m3b11fnuz, .f8e4m3fn, .f8e4m3fnuz, .f8e5m2fnuz => |tag| @panic("DataType doesn't have a max value: " ++ @tagName(tag)),
-            inline .f8e5m2, .bf16 => |tag| @unionInit(Data, @tagName(tag), @FieldType(Data, @tagName(tag)).inf()),
+            inline .f8e5m2, .bf16 => |tag| @unionInit(Data, @tagName(tag), @FieldType(Data, @tagName(tag)).inf),
             inline .f16, .f32, .f64 => |tag| @unionInit(Data, @tagName(tag), std.math.inf(@FieldType(Data, @tagName(tag)))),
             inline .i4, .i8, .i16, .i32, .i64, .u4, .u8, .u16, .u32, .u64 => |tag| @unionInit(Data, @tagName(tag), std.math.maxInt(@FieldType(Data, @tagName(tag)))),
             inline .c64, .c128 => |tag| @panic("DataType doesn't have a max value: " ++ @tagName(tag)),
