@@ -778,7 +778,7 @@
     "@@rules_rust+//crate_universe:extensions.bzl%crate": {
       "general": {
         "bzlTransitiveDigest": "44uznjgbAHlcMMWZ+dbcY2+c6APQe9Gy7EKe1Y0/l0U=",
-        "usagesDigest": "LRFoDTnUPiFo9Sf1CJ7R6NZDugjywFLeLDfqQzz9zEA=",
+        "usagesDigest": "mup6mgSFatk34Q0znMZPpIEOFZyk9v3xf6jRIXEFTxc=",
         "recordedFileInputs": {
           "@@//zml/tokenizer/hftokenizers/Cargo.toml": "b0b28872bb74e13aec7ef0ef8dfd5ec99a8573bc12085c0f36711f2a87912061"
         },
