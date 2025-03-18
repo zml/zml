@@ -275,7 +275,7 @@ pub fn sdpaPaged(q_: Tensor, k_: Tensor, v_: Tensor, sequence_length_q: Tensor, 
         &.{ q.value(), k.value(), v.value(), sequence_length_q.value(), sequence_length_kv.value(), page_table.value(), page_table.value(), seq_offset.value() },
         .{
             .call_target_name = "__cudnn$fmhaScaleBiasSoftmax",
-            .backend_config = backend_config,
+            .backend_config = .{ .str = backend_config },
             .api_version = 2,
             .has_side_effect = false,
             .output_operand_aliases = &.{},
