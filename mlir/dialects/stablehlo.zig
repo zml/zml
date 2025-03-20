@@ -519,7 +519,7 @@ pub fn sort(
     });
 }
 
-pub fn dynamicSlice(ctx: mlir.Context, operand: mlir.Value, new_dims: []const i64, start_indices: []const mlir.Value, location: mlir.Location) mlir.Operation {
+pub fn dynamic_slice(ctx: mlir.Context, operand: mlir.Value, new_dims: []const i64, start_indices: []const mlir.Value, location: mlir.Location) mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.dynamic_slice", .{
         .variadic_operands = &.{ &.{operand}, start_indices },
         .result_type_inference = true,

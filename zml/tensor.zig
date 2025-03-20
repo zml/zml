@@ -3105,7 +3105,7 @@ pub const Tensor = struct {
         var start_indices = [_]mlir.Value{constant(.{}, slice_.start.dtype().zero()).value()} ** MAX_RANK;
         start_indices[a] = slice_.start.value();
 
-        const op = dialect.stablehlo.dynamicSlice(
+        const op = dialect.stablehlo.dynamic_slice(
             self.getContext().mlirCtx(),
             self.value(),
             new_shape.dims(),
@@ -3166,7 +3166,7 @@ pub const Tensor = struct {
                 res_shape._dims.set(a, len);
             }
         }
-        const op = dialect.stablehlo.dynamicSlice(self.getContext().mlirCtx(), self.value(), res_shape.dims(), offset_values[0..self.rank()], loc);
+        const op = dialect.stablehlo.dynamic_slice(self.getContext().mlirCtx(), self.value(), res_shape.dims(), offset_values[0..self.rank()], loc);
         return _result(res_shape, op.result(0));
     }
 

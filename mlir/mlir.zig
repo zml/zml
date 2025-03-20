@@ -908,9 +908,14 @@ pub const Operation = struct {
         if (args.operands) |operands| {
             state.addOperands(operands);
         } else if (args.variadic_operands) |operands_segments| {
+            const MAX_SEGMENTS = 32;
+            var segments: std.BoundedArray(i32, MAX_SEGMENTS) = .{};
+
             for (operands_segments) |operands| {
                 state.addOperands(operands);
+                segments.appendAssumeCapacity(@intCast(operands.len));
             }
+            state.addAttribute(ctx, "operand_segment_sizes", .denseElements(ctx, &.{@intCast(segments.len)}, .i32, segments.constSlice()));
         }
         if (args.result_type_inference) |enable| {
             state.resultTypeInference(enable);
