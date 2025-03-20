@@ -173,15 +173,13 @@ pub const Tensor = struct {
                 var res = self;
                 res._shape = self._shape.withSharding(axes_);
 
-                const sharding = ctx.getShardingAttr(res._shape);
-
                 const op = dialect.stablehlo.custom_call(
                     ctx.mlirCtx(),
                     &.{self.value()},
                     .{
                         .call_target_name = "Sharding",
                         .has_side_effect = false,
-                        .addional_attributes = &.{.{ "mhlo.sharding", sharding.asAttr() }},
+                        .addional_attributes = &.{.{ "mhlo.sharding", ctx.getShardingAttr(res._shape) }},
                         .api_version = .original,
                     },
                     &.{self.value().getType()},
@@ -1014,11 +1012,11 @@ pub const Tensor = struct {
         if (to == self.dtype()) {
             return self;
         }
-
-        const res_type = mlir.RankedTensorType.init(self.dims(), mlir.ext.Type.fromDType(self.getContext().mlirCtx(), to)).as(mlir.Type);
         const loc = self.getContext().location(@src(), "convert({_},to={s})", .{ self, @tagName(to) });
 
-        const op = dialect.stablehlo.convert(self.getContext().mlirCtx(), self.value(), res_type, loc);
+        const mlir_ctx = self.getContext().mlirCtx();
+        const res_type = mlir.ext.mlirType(mlir_ctx, self.shape().withDtype(to));
+        const op = dialect.stablehlo.convert(mlir_ctx, self.value(), res_type, loc);
         return _result(self._shape.withDtype(to), op.result(0));
     }
 

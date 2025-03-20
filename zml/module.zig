@@ -123,7 +123,7 @@ pub const CompilationContext = struct {
 
         const loc = mlir_ctx.location(@src()).named(mlir_ctx, "main");
         const module = mlir.Module.init(loc);
-        module.op().setAttributeByName("sym_name", mlir.StringAttribute.init(mlir_ctx, "zml").as(mlir.Attribute));
+        module.op().setAttributeByName("sym_name", .string(mlir_ctx, "zml"));
 
         var canonicalizer = try mlir.PassManager.init(mlir_ctx);
         {
@@ -475,6 +475,7 @@ pub const CompilationContext = struct {
     /// Given a list of donations mapping output buffers to input buffers,
     /// generate donation attribute for each `n_args` input argument.
     fn addDonationsAttributes(self: CompilationContext, attributes: []AttributeList, donations: []const Tensor._Donation) void {
+        const ctx = self.mlirCtx();
         var n_donations: usize = 0;
         for (donations, 0..) |donation, index| {
             switch (donation) {
@@ -489,12 +490,7 @@ pub const CompilationContext = struct {
                     // When the time come, do a more fancy lookup here to check if an argument
                     // is donated twice.
                     stdx.debug.assert(attributes[a].len == 0, "Donation error ! Argument {} has been donated twice ! To {} and to {}", .{ a, index, attributes[a].buffer[0] });
-                    attributes[a].appendAssumeCapacity(
-                        mlir.NamedAttribute.init(
-                            mlir.Identifier.get(self.mlirCtx(), "tf.aliasing_output"),
-                            mlir.IntegerAttribute(.i32).init(self.mlirCtx(), @intCast(index)).as(mlir.Attribute),
-                        ),
-                    );
+                    attributes[a].appendAssumeCapacity(.named(ctx, "tf.aliasing_output", .int(ctx, .i32, @intCast(index))));
                     // log.debug("attribute: {}", .{attributes[a].constSlice()});
                 },
             }
@@ -552,44 +548,27 @@ pub const CompilationContext = struct {
         }
     }
 
-    pub fn getShardingAttr(self: CompilationContext, shape: Shape) mlir.StringAttribute {
-        const mlir_ctx = self.mlirCtx();
-
-        const num_partitions = self._platform.sharding().num_partitions;
-        var sharding_str: std.BoundedArray(u8, 128) = .{};
-
-        writeShardingRepresentation(shape, num_partitions, sharding_str.writer()) catch unreachable;
-        return mlir.StringAttribute.init(mlir_ctx, sharding_str.constSlice());
-    }
-
     fn addShardingAttributes(self: CompilationContext, arg_attrs: []AttributeList, res_attrs: []AttributeList, input_shapes: []const Shape, output_shapes: []const Shape) void {
-        const mlir_ctx = self.mlirCtx();
+        const ctx = self.mlirCtx();
         if (!self._platform.compilation_options.sharding_enabled) return;
-
-        const mhlo_default_layout = mlir.NamedAttribute.init(
-            mlir.Identifier.get(mlir_ctx, "mhlo.layout_mode"),
-            mlir.StringAttribute.init(mlir_ctx, "default").asAttr(),
-        );
+        const default_layout = mlir.NamedAttribute.named(ctx, "mhlo.layout_mode", .string(ctx, "default"));
         for (arg_attrs, input_shapes) |*attr, shape| {
-            attr.appendAssumeCapacity(mhlo_default_layout);
-
-            const sharding_attr = self.getShardingAttr(shape);
-            attr.appendAssumeCapacity(mlir.NamedAttribute.init(
-                mlir.Identifier.get(mlir_ctx, "mhlo.sharding"),
-                sharding_attr.asAttr(),
-            ));
+            attr.appendAssumeCapacity(default_layout);
+            attr.appendAssumeCapacity(.named(ctx, "mhlo.sharding", self.getShardingAttr(shape)));
         }
 
         for (res_attrs, output_shapes) |*attr, shape| {
-            attr.appendAssumeCapacity(mhlo_default_layout);
-
-            const sharding_attr = self.getShardingAttr(shape);
-
-            attr.appendAssumeCapacity(mlir.NamedAttribute.init(
-                mlir.Identifier.get(mlir_ctx, "mhlo.sharding"),
-                sharding_attr.asAttr(),
-            ));
+            attr.appendAssumeCapacity(default_layout);
+            attr.appendAssumeCapacity(.named(ctx, "mhlo.sharding", self.getShardingAttr(shape)));
         }
+    }
+
+    pub fn getShardingAttr(self: CompilationContext, shape: Shape) mlir.Attribute {
+        const ctx = self.mlirCtx();
+        const num_partitions = self._platform.sharding().num_partitions;
+        var sharding_str: std.BoundedArray(u8, 128) = .{};
+        writeShardingRepresentation(shape, num_partitions, sharding_str.writer()) catch unreachable;
+        return mlir.Attribute.string(ctx, sharding_str.constSlice());
     }
 
     fn writeShardingRepresentation(shape: Shape, num_partitions: u8, writer: anytype) @TypeOf(writer).Error!void {
