@@ -1828,4 +1828,29 @@ pub const Block = struct {
             c.mlirBlockAppendOwnedOperation(self.inner(), op.inner());
         }
     }
+
+    pub const RecursiveOpts = enum { open, hermetic };
+
+    pub fn appendValueRecursive(self: Block, value: Value, opt: RecursiveOpts) void {
+        switch (value.kind()) {
+            .op_result => |parent_op| self.appendOperationRecursive(parent_op, opt),
+            .block_argument => |arg| {
+                // Hermetic blocks are not allowed to use arguments from other blocks.
+                stdx.debug.assert(opt == .open or self.eql(arg.block()), "Can't add {} from {?x} block to {?x} block", .{ arg, arg.block()._inner.ptr, self._inner.ptr });
+            },
+            .null => @panic("InvalidMlir"),
+        }
+    }
+
+    pub fn appendOperationRecursive(self: Block, op: Operation, opt: RecursiveOpts) void {
+        if (op.block()) |prev_block| {
+            // Hermetic blocks are not allowed to reference values from other blocks.
+            std.debug.assert(opt == .open or prev_block.equals(self));
+            return;
+        }
+        for (0..op.numOperands()) |i| {
+            self.appendValueRecursive(op.operand(i), opt);
+        }
+        self.appendOperation(op);
+    }
 };
