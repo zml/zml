@@ -894,6 +894,7 @@ pub const Operation = struct {
     pub fn make(ctx: Context, op_name: [:0]const u8, args: struct {
         operands: ?[]const Value = null,
         variadic_operands: ?[]const []const Value = null,
+        tt_variadic_operands: ?[]const []const Value = null,
         results: ?[]const Type = null,
         variadic_results: ?[]const []const Type = null,
         result_type_inference: ?bool = null,
@@ -915,7 +916,17 @@ pub const Operation = struct {
                 state.addOperands(operands);
                 segments.appendAssumeCapacity(@intCast(operands.len));
             }
-            state.addAttribute(ctx, "operand_segment_sizes", .denseElements(ctx, &.{@intCast(segments.len)}, .i32, segments.constSlice()));
+            state.addAttribute(ctx, "operandSegmentSizes", .denseElements(ctx, &.{@intCast(segments.len)}, .i32, segments.constSlice()));
+        } else if (args.tt_variadic_operands) |operands_segments| {
+            // stablehlo and triton seems to disagree on the expected type of operandSegmentSizes, let's fix that.
+            const MAX_SEGMENTS = 32;
+            var segments: std.BoundedArray(i32, MAX_SEGMENTS) = .{};
+
+            for (operands_segments) |operands| {
+                state.addOperands(operands);
+                segments.appendAssumeCapacity(@intCast(operands.len));
+            }
+            state.addAttribute(ctx, "operandSegmentSizes", .dense(ctx, .i32, segments.constSlice()));
         }
         if (args.result_type_inference) |enable| {
             state.resultTypeInference(enable);
