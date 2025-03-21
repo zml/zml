@@ -147,9 +147,7 @@ pub fn reduce(
         .variadic_operands = &.{ &input_values, &init_values },
         .result_type_inference = true,
         .blocks = &.{body_block},
-        .attributes = &.{
-            .{ "dimensions", mlir.DenseArrayAttribute(.i64).init(ctx.mlirCtx(), axes).as(mlir.Attribute) },
-        },
+        .attributes = &.{.{ "dimensions", .dense(ctx.mlirCtx(), .i64, axes) }},
         // We can't verify right away, cause the weights captured by the reduce haven't been added yet.
         .verify = false,
         .location = loc,
@@ -236,21 +234,16 @@ pub fn reduceWindow(
     ctx.extractValues(&inits, &init_values);
 
     const loc = ctx.mlirCtx().location(@src());
-
-    const pad_shape = mlir.RankedTensorType.init(
-        &.{ @intCast(opts.padding.len), 2 },
-        mlir.ext.Type.fromDType(ctx.mlirCtx(), .i64),
-    ).as(mlir.Type);
     const op = mlir.Operation.make(ctx.mlirCtx(), "stablehlo.reduce_window", .{
         .variadic_operands = &.{ input_values[0..], init_values[0..] },
         .result_type_inference = true,
         .blocks = &.{body_block},
         .attributes = &.{
-            .{ "window_dimensions", mlir.DenseArrayAttribute(.i64).init(ctx.mlirCtx(), opts.window_dimensions).as(mlir.Attribute) },
-            .{ "window_strides", mlir.DenseArrayAttribute(.i64).init(ctx.mlirCtx(), opts.window_strides).as(mlir.Attribute) },
-            .{ "base_dilations", mlir.DenseArrayAttribute(.i64).init(ctx.mlirCtx(), opts.base_dilations).as(mlir.Attribute) },
-            .{ "window_dilations", mlir.DenseArrayAttribute(.i64).init(ctx.mlirCtx(), opts.window_dilations).as(mlir.Attribute) },
-            .{ "padding", mlir.DenseElementsAttribute(.i64).init(pad_shape, opts.padding).as(mlir.Attribute) },
+            .{ "window_dimensions", .dense(ctx.mlirCtx(), .i64, opts.window_dimensions) },
+            .{ "window_strides", .dense(ctx.mlirCtx(), .i64, opts.window_strides) },
+            .{ "base_dilations", .dense(ctx.mlirCtx(), .i64, opts.base_dilations) },
+            .{ "window_dilations", .dense(ctx.mlirCtx(), .i64, opts.window_dilations) },
+            .{ "padding", .denseElements(ctx.mlirCtx(), &.{ @intCast(opts.padding.len), 2 }, .i64, opts.padding) },
         },
         .location = loc,
     });
@@ -841,13 +834,13 @@ pub fn triton(inputs: anytype, outputs: anytype, opts: TritonOps) [outputs.len]T
     }
 
     const attrs = mlir.DictionaryAttribute.init(ctx.mlirCtx(), &.{
-        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "name"), mlir.StringAttribute.init(ctx.mlirCtx(), opts.name).as(mlir.Attribute)),
-        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "ir"), mlir.StringAttribute.init(ctx.mlirCtx(), opts.ir).as(mlir.Attribute)),
-        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "grid_x"), mlir.IntegerAttribute(.i32).init(ctx.mlirCtx(), @intCast(opts.grid[0])).as(mlir.Attribute)),
-        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "grid_y"), mlir.IntegerAttribute(.i32).init(ctx.mlirCtx(), @intCast(opts.grid[1])).as(mlir.Attribute)),
-        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "grid_z"), mlir.IntegerAttribute(.i32).init(ctx.mlirCtx(), @intCast(opts.grid[2])).as(mlir.Attribute)),
-        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "num_stages"), mlir.IntegerAttribute(.i32).init(ctx.mlirCtx(), @intCast(opts.num_stages)).as(mlir.Attribute)),
-        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "num_warps"), mlir.IntegerAttribute(.i32).init(ctx.mlirCtx(), @intCast(opts.num_warps)).as(mlir.Attribute)),
+        .named(ctx.mlirCtx(), "name", .string(ctx.mlirCtx(), opts.name)),
+        .named(ctx.mlirCtx(), "ir", .string(ctx.mlirCtx(), opts.ir)),
+        .named(ctx.mlirCtx(), "grid_x", .int(ctx.mlirCtx(), .i32, opts.grid[0])),
+        .named(ctx.mlirCtx(), "grid_y", .int(ctx.mlirCtx(), .i32, opts.grid[1])),
+        .named(ctx.mlirCtx(), "grid_z", .int(ctx.mlirCtx(), .i32, opts.grid[2])),
+        .named(ctx.mlirCtx(), "num_stages", .int(ctx.mlirCtx(), .i32, opts.num_stages)),
+        .named(ctx.mlirCtx(), "num_warps", .int(ctx.mlirCtx(), .i32, opts.num_warps)),
     });
 
     const MINOR_TO_MAJOR = blk: {

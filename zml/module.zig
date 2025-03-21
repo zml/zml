@@ -28,46 +28,6 @@ test {
     std.testing.refAllDecls(@This());
 }
 
-pub const BlockKind = enum { open, hermetic };
-
-const Block = union(BlockKind) {
-    open: mlir.Block,
-    hermetic: mlir.Block,
-
-    pub fn block(self: Block) mlir.Block {
-        return switch (self) {
-            inline .open, .hermetic => |t| t,
-        };
-    }
-
-    fn appendTensorRecursive(self: Block, x: *const Tensor) void {
-        self.appendValueRecursive(x.value());
-    }
-
-    fn appendValueRecursive(self: Block, value: mlir.Value) void {
-        switch (value.kind()) {
-            .op_result => |parent_op| self.appendOperationRecursive(parent_op),
-            .block_argument => |arg| {
-                // Hermetic blocks are not allowed to use arguments from other blocks.
-                stdx.debug.assert(self == .open or self.block().eql(arg.block()), "Can't add {} from {?x} block to {?x} block", .{ arg, arg.block()._inner.ptr, self.block()._inner.ptr });
-            },
-            .null => @panic("InvalidMlir"),
-        }
-    }
-
-    fn appendOperationRecursive(self: Block, op: mlir.Operation) void {
-        if (op.block()) |prev_block| {
-            // Hermetic blocks are not allowed to reference values from other blocks.
-            std.debug.assert(self == .open or prev_block.equals(self.block()));
-            return;
-        }
-        for (0..op.numOperands()) |i| {
-            self.appendValueRecursive(op.operand(i));
-        }
-        self.block().appendOperation(op);
-    }
-};
-
 pub const MlirFn = struct {
     name: []const u8,
     num_args: u32,
@@ -94,7 +54,7 @@ pub const CompilationContext = struct {
 
     _module: mlir.Module,
 
-    _blocks: std.BoundedArray(Block, 64) = .{},
+    _blocks: std.BoundedArray(TaggedBlock, 64) = .{},
     _fn_cache: FnCache = .{},
 
     _block_args: TensorToBlockArg = .{},
@@ -104,6 +64,7 @@ pub const CompilationContext = struct {
     _previous: ?*CompilationContext = null,
     threadlocal var _current: ?*CompilationContext = null;
 
+    const TaggedBlock = struct { mlir.Block, mlir.Block.RecursiveOpts };
     const TensorToBlockArg = std.AutoHashMapUnmanaged(Tensor._Id, struct { mlir.Value, Tensor._Donation });
     const AttributeList = std.BoundedArray(mlir.NamedAttribute, 3);
 
@@ -123,7 +84,7 @@ pub const CompilationContext = struct {
 
         const loc = mlir_ctx.location(@src()).named(mlir_ctx, "main");
         const module = mlir.Module.init(loc);
-        module.op().setAttributeByName("sym_name", mlir.StringAttribute.init(mlir_ctx, "zml").as(mlir.Attribute));
+        module.op().setAttributeByName("sym_name", .string(mlir_ctx, "zml"));
 
         var canonicalizer = try mlir.PassManager.init(mlir_ctx);
         {
@@ -280,26 +241,22 @@ pub const CompilationContext = struct {
         );
     }
 
-    fn currentBlock(self: *const CompilationContext) ?Block {
+    fn currentBlock(self: *const CompilationContext) ?TaggedBlock {
         return if (self._blocks.len > 0) self._blocks.get(self._blocks.len - 1) else null;
     }
 
-    pub fn openBlock(self: *CompilationContext, kind: BlockKind, args: []const mlir.Type, locs: []const mlir.Location) !Block {
-        const mlir_block = try mlir.Block.init(args, locs);
-        const block: Block = switch (kind) {
-            .open => .{ .open = mlir_block },
-            .hermetic => .{ .hermetic = mlir_block },
-        };
+    pub fn openBlock(self: *CompilationContext, kind: mlir.Block.RecursiveOpts, args: []const mlir.Type, locs: []const mlir.Location) !TaggedBlock {
+        const block: TaggedBlock = .{ try mlir.Block.init(args, locs), kind };
         self.pushBlock(block);
         return block;
     }
 
-    pub fn closeBlock(self: *CompilationContext, block: Block) void {
+    pub fn closeBlock(self: *CompilationContext, block: TaggedBlock) void {
         const popped = self._blocks.pop();
-        std.debug.assert(block.block().eql(popped.?.block()));
+        std.debug.assert(block[0].eql(popped.?[0]));
     }
 
-    fn pushBlock(self: *CompilationContext, block: Block) void {
+    fn pushBlock(self: *CompilationContext, block: TaggedBlock) void {
         self._blocks.appendAssumeCapacity(block);
     }
 
@@ -311,7 +268,7 @@ pub const CompilationContext = struct {
     /// But their shapes/tags can be safely propagated further.
     pub fn makeBlock(
         self: *CompilationContext,
-        kind: BlockKind,
+        kind: mlir.Block.RecursiveOpts,
         comptime S: ops.BlockSignature,
         func: *const S.Fn,
         blkctx: S.BlkCtx,
@@ -326,7 +283,7 @@ pub const CompilationContext = struct {
         // Before creating a new block, assign all received values to previous block,
         // otherwise they will be assign to this block
         if (self.currentBlock()) |prev_block| {
-            meta.visit(Block.appendTensorRecursive, prev_block, &blkctx);
+            meta.visit(_appendTensorRecursive, prev_block, &blkctx);
         }
 
         const block = self.openBlock(kind, &input_types, &locations) catch unreachable;
@@ -337,15 +294,20 @@ pub const CompilationContext = struct {
         // So we create a copy of the arguments, and replace values
         // by the block arguments.
         var blk_args = args;
-        std.debug.assert(assignBlockArguments(&blk_args, block.block(), 0) == N);
+        std.debug.assert(assignBlockArguments(&blk_args, block[0], 0) == N);
 
         const block_res = @call(.auto, func, S.blkArgs(blkctx, blk_args));
         var block_res_values: [S.nOut]mlir.Value = undefined;
         self.extractValues(&block_res, &block_res_values);
         const block_ret = dialect.stablehlo.returns_(self.mlirCtx(), &block_res_values, loc);
-        block.appendOperationRecursive(block_ret);
+        block[0].appendOperationRecursive(block_ret, block[1]);
 
-        return .{ block.block(), block_res };
+        return .{ block[0], block_res };
+    }
+
+    fn _appendTensorRecursive(tagged_block: TaggedBlock, x: *const Tensor) void {
+        const block, const tag = tagged_block;
+        block.appendValueRecursive(x.value(), tag);
     }
 
     pub const EmitMlirOpts = struct {
@@ -411,7 +373,7 @@ pub const CompilationContext = struct {
             defer self.closeBlock(fn_body);
 
             try self._block_args.ensureUnusedCapacity(self.allocator(), @intCast(tensor_count));
-            const assigned_args_count = self.mapBlockArguments(args, fn_body.block(), 0);
+            const assigned_args_count = self.mapBlockArguments(args, fn_body[0], 0);
             std.debug.assert(assigned_args_count == tensor_count);
 
             fn_res.* = forward: {
@@ -424,7 +386,7 @@ pub const CompilationContext = struct {
             self.extractValuesAndTypes(fn_res, &fn_res_values, fn_res_types, fn_res_shapes, fn_res_donations);
 
             const fn_ret = dialect.func.return_(mlir_ctx, &fn_res_values, loc);
-            fn_body.appendOperationRecursive(fn_ret);
+            fn_body[0].appendOperationRecursive(fn_ret, fn_body[1]);
         }
 
         const arg_attrs = try arena.alloc(AttributeList, tensor_count);
@@ -446,7 +408,7 @@ pub const CompilationContext = struct {
             .arg_attrs = try finalizeAttributeList(arena, mlir_ctx, arg_attrs),
             .results = fn_res_types,
             .res_attrs = try finalizeAttributeList(arena, mlir_ctx, res_attrs),
-            .block = fn_body.block(),
+            .block = fn_body[0],
             .location = loc,
         });
 
@@ -475,6 +437,7 @@ pub const CompilationContext = struct {
     /// Given a list of donations mapping output buffers to input buffers,
     /// generate donation attribute for each `n_args` input argument.
     fn addDonationsAttributes(self: CompilationContext, attributes: []AttributeList, donations: []const Tensor._Donation) void {
+        const ctx = self.mlirCtx();
         var n_donations: usize = 0;
         for (donations, 0..) |donation, index| {
             switch (donation) {
@@ -489,12 +452,7 @@ pub const CompilationContext = struct {
                     // When the time come, do a more fancy lookup here to check if an argument
                     // is donated twice.
                     stdx.debug.assert(attributes[a].len == 0, "Donation error ! Argument {} has been donated twice ! To {} and to {}", .{ a, index, attributes[a].buffer[0] });
-                    attributes[a].appendAssumeCapacity(
-                        mlir.NamedAttribute.init(
-                            mlir.Identifier.get(self.mlirCtx(), "tf.aliasing_output"),
-                            mlir.IntegerAttribute(.i32).init(self.mlirCtx(), @intCast(index)).as(mlir.Attribute),
-                        ),
-                    );
+                    attributes[a].appendAssumeCapacity(.named(ctx, "tf.aliasing_output", .int(ctx, .i32, @intCast(index))));
                     // log.debug("attribute: {}", .{attributes[a].constSlice()});
                 },
             }
@@ -552,44 +510,27 @@ pub const CompilationContext = struct {
         }
     }
 
-    pub fn getShardingAttr(self: CompilationContext, shape: Shape) mlir.StringAttribute {
-        const mlir_ctx = self.mlirCtx();
-
-        const num_partitions = self._platform.sharding().num_partitions;
-        var sharding_str: std.BoundedArray(u8, 128) = .{};
-
-        writeShardingRepresentation(shape, num_partitions, sharding_str.writer()) catch unreachable;
-        return mlir.StringAttribute.init(mlir_ctx, sharding_str.constSlice());
-    }
-
     fn addShardingAttributes(self: CompilationContext, arg_attrs: []AttributeList, res_attrs: []AttributeList, input_shapes: []const Shape, output_shapes: []const Shape) void {
-        const mlir_ctx = self.mlirCtx();
+        const ctx = self.mlirCtx();
         if (!self._platform.compilation_options.sharding_enabled) return;
-
-        const mhlo_default_layout = mlir.NamedAttribute.init(
-            mlir.Identifier.get(mlir_ctx, "mhlo.layout_mode"),
-            mlir.StringAttribute.init(mlir_ctx, "default").asAttr(),
-        );
+        const default_layout = mlir.NamedAttribute.named(ctx, "mhlo.layout_mode", .string(ctx, "default"));
         for (arg_attrs, input_shapes) |*attr, shape| {
-            attr.appendAssumeCapacity(mhlo_default_layout);
-
-            const sharding_attr = self.getShardingAttr(shape);
-            attr.appendAssumeCapacity(mlir.NamedAttribute.init(
-                mlir.Identifier.get(mlir_ctx, "mhlo.sharding"),
-                sharding_attr.asAttr(),
-            ));
+            attr.appendAssumeCapacity(default_layout);
+            attr.appendAssumeCapacity(.named(ctx, "mhlo.sharding", self.getShardingAttr(shape)));
         }
 
         for (res_attrs, output_shapes) |*attr, shape| {
-            attr.appendAssumeCapacity(mhlo_default_layout);
-
-            const sharding_attr = self.getShardingAttr(shape);
-
-            attr.appendAssumeCapacity(mlir.NamedAttribute.init(
-                mlir.Identifier.get(mlir_ctx, "mhlo.sharding"),
-                sharding_attr.asAttr(),
-            ));
+            attr.appendAssumeCapacity(default_layout);
+            attr.appendAssumeCapacity(.named(ctx, "mhlo.sharding", self.getShardingAttr(shape)));
         }
+    }
+
+    pub fn getShardingAttr(self: CompilationContext, shape: Shape) mlir.Attribute {
+        const ctx = self.mlirCtx();
+        const num_partitions = self._platform.sharding().num_partitions;
+        var sharding_str: std.BoundedArray(u8, 128) = .{};
+        writeShardingRepresentation(shape, num_partitions, sharding_str.writer()) catch unreachable;
+        return mlir.Attribute.string(ctx, sharding_str.constSlice());
     }
 
     fn writeShardingRepresentation(shape: Shape, num_partitions: u8, writer: anytype) @TypeOf(writer).Error!void {
