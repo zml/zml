@@ -384,8 +384,8 @@ pub const Attribute = struct {
         return IntegerAttribute(int_type).init(ctx, value).asAttr();
     }
 
-    pub fn float(ctx: Context, comptime float_type: IntegerTypes, value: f64) Attribute {
-        return FloatAttribute(float_type).init(ctx, value).asAttr();
+    pub fn float(ctx: Context, comptime float_type: FloatTypes, value: f64) Attribute {
+        return .wrap(FloatAttribute(float_type).init(ctx, value)._inner);
     }
 
     pub fn array(ctx: Context, attrs: []const Attribute) Attribute {
