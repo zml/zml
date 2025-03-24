@@ -6,15 +6,14 @@ const runfiles = @import("runfiles");
 const stdx = @import("stdx");
 const xla_pb = @import("//xla:xla_proto");
 
-const meta = @import("meta.zig");
-const mlir = @import("mlir.zig");
-const ops = @import("ops.zig");
-const pjrt = @import("pjrtx.zig");
-
 const BaseExe = @import("exe.zig").BaseExe;
 const Buffer = @import("buffer.zig").Buffer;
 const Bufferized = @import("tensor.zig").Bufferized;
+const meta = @import("meta.zig");
+const mlir = @import("mlir.zig");
 const Location = mlir.Location;
+const ops = @import("ops.zig");
+const pjrt = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
 const ShapeOf = @import("tensor.zig").ShapeOf;
@@ -760,20 +759,11 @@ pub const CompilationContext = struct {
 
 fn computeModuleHash(platform: Platform, module: mlir.Module) u64 {
     var hasher = std.hash.XxHash64.init(0);
-    var hasher_writer = xxHash64Writer(&hasher);
-    const writer = hasher_writer.writer();
+    module.hash(&hasher);
 
-    // Hash the canonicalized IR, without debug information that can change across builds.
-    module.op().print(writer, .{ .debug_info = false });
-    // Note: before we where using module.op().writeBytecode(writer),
-    // but it crashes on some inputs, notably for unused variables.
-    // So we use the text representation of the mlir.
-    // See https://github.com/zml/zml/issues/97.
-    // Writes can't fail because we are writing to a hasher.
-    writer.writeAll(platform.pjrt_client.getPlatformName(platform.pjrt_api)) catch unreachable;
+    hasher.update(platform.pjrt_client.getPlatformName(platform.pjrt_api));
     const api_version = platform.pjrt_api.version();
-    writer.writeInt(i64, api_version.major, .little) catch unreachable;
-    writer.writeInt(i64, api_version.minor, .little) catch unreachable;
+    hasher.update(std.mem.sliceAsBytes(&[_]i64{ api_version.major, api_version.minor }));
 
     return hasher.final();
 }
@@ -943,26 +933,6 @@ fn assignBlockArguments(v: anytype, block: mlir.Block, start: usize) usize {
     return context.index;
 }
 
-pub const XxHash64Writer = struct {
-    hasher: *std.hash.XxHash64,
-
-    pub const Error = error{};
-    pub const Writer = std.io.Writer(*XxHash64Writer, Error, write);
-
-    pub fn writer(self: *XxHash64Writer) Writer {
-        return .{ .context = self };
-    }
-
-    pub fn write(self: *XxHash64Writer, bytes: []const u8) Error!usize {
-        self.hasher.update(bytes);
-        return bytes.len;
-    }
-};
-
-pub fn xxHash64Writer(hasher: *std.hash.XxHash64) XxHash64Writer {
-    return .{ .hasher = hasher };
-}
-
 pub const FnCache = std.AutoHashMapUnmanaged(FnKey, MlirFn);
 pub const FnKey = struct { fn_ptr: *const anyopaque, input_hash: u64 };
 
@@ -1106,12 +1076,11 @@ pub fn hashShape(hasher: *std.hash.Wyhash, shape: Shape) void {
     }
 }
 
-const HashStrategy = std.hash.Strategy;
 const tensorAwareHash = hash; // alias for when "hash" is ambiguous
 
 /// Provides generic hashing for any eligible type.
 /// Strategy is provided to determine if pointers should be followed or not.
-pub fn hash(hasher: *std.hash.Wyhash, key: anytype, comptime strat: HashStrategy) void {
+pub fn hash(hasher: *std.hash.Wyhash, key: anytype, comptime strat: std.hash.Strategy) void {
     const Key = @TypeOf(key);
     if (Key == Tensor) return hashShape(hasher, key.shape());
     if (Key == Shape) return hashShape(hasher, key);
@@ -1228,7 +1197,7 @@ pub fn hash(hasher: *std.hash.Wyhash, key: anytype, comptime strat: HashStrategy
     }
 }
 
-fn hashArray(hasher: anytype, key: anytype, comptime strat: HashStrategy) void {
+fn hashArray(hasher: anytype, key: anytype, comptime strat: std.hash.Strategy) void {
     for (key) |element| {
         hash(hasher, element, strat);
     }
