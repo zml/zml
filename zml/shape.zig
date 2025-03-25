@@ -1,10 +1,11 @@
-const builtin = @import("builtin");
 const std = @import("std");
+const testing = std.testing;
+const builtin = @import("builtin");
+
 const stdx = @import("stdx");
 
-const testing = std.testing;
-
 const DataType = @import("dtype.zig").DataType;
+
 const EnumLiteral = @TypeOf(.enum_literal);
 
 const log = std.log.scoped(.shape);
@@ -129,6 +130,10 @@ pub const Shape = struct {
         var res: Shape = .{ ._dtype = dt };
         res._dims, res._tags = parseDimensions(dimz);
         return res;
+    }
+
+    pub fn scalar(dt: DataType) Shape {
+        return .{ ._dtype = dt };
     }
 
     /// Creates a Shape with dims set to `.{0, 1, 2, ..., rank-1}`.
