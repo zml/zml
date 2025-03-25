@@ -177,6 +177,7 @@ pub const AsyncThread = struct {
     }
 
     pub fn main(allocator: std.mem.Allocator, comptime mainFunc: fn () anyerror!void) !void {
+        try xev.detect();
         var thread_pool = XevThreadPool.init(.{});
         defer {
             thread_pool.shutdown();
