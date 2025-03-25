@@ -256,24 +256,8 @@ pub const Module = struct {
         return Operation.wrap(c.mlirModuleGetOperation(self.inner()));
     }
 
-    pub fn hash(module: Module, hasher: *std.hash.XxHash64) void {
-        const NoError = error{};
-        const write = struct {
-            fn write(hasher_: *std.hash.XxHash64, bytes: []const u8) NoError!usize {
-                hasher_.update(bytes);
-                return bytes.len;
-            }
-        }.write;
-        const HashWriter = std.io.Writer(*std.hash.XxHash64, NoError, write);
-        const writer: HashWriter = .{ .context = hasher };
-
-        // Hash the canonicalized IR, without debug information that can change across builds.
-        // Note: before we where using module.op().writeBytecode(writer),
-        // but it crashes on some inputs, notably for unused variables.
-        // So we use the text representation of the mlir.
-        // See https://github.com/zml/zml/issues/97.
-        // Writes can't fail because we are writing to a hasher.
-        module.op().print(writer, .{ .debug_info = false });
+    pub fn hash(self: Module, hasher: *std.hash.XxHash64) void {
+        return self.op().hash(hasher);
     }
 };
 
@@ -1192,6 +1176,26 @@ pub const Operation = struct {
 
     pub fn removeAttributeByName(self: Self, name_: [:0]const u8) bool {
         return c.mlirOperationRemoveAttributeByName(self.inner(), stringRef(name_));
+    }
+
+    pub fn hash(op: Operation, hasher: *std.hash.XxHash64) void {
+        const NoError = error{};
+        const write = struct {
+            fn write(hasher_: *std.hash.XxHash64, bytes: []const u8) NoError!usize {
+                hasher_.update(bytes);
+                return bytes.len;
+            }
+        }.write;
+        const HashWriter = std.io.Writer(*std.hash.XxHash64, NoError, write);
+        const writer: HashWriter = .{ .context = hasher };
+
+        // Hash the canonicalized IR, without debug information that can change across builds.
+        // Note: before we where using op.writeBytecode(writer),
+        // but it crashes on some inputs, notably for unused variables.
+        // So we use the text representation of the mlir.
+        // See https://github.com/zml/zml/issues/97.
+        // Writes can't fail because we are writing to a hasher.
+        op.print(writer, .{ .debug_info = false });
     }
 };
 
