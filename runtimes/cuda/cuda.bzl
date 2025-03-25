@@ -85,6 +85,11 @@ CUDA_PACKAGES = {
             deps = [":cublasLt"],
         ),
     ]),
+    "cuda_nvtx": packages.cc_import_with_glob(
+        name = "nvtx",
+        hdrs_glob = "include/nvtx3/**/*.h",
+        shared_library = "lib/libnvToolsExt.so.1",
+    ),
 }
 
 CUDNN_PACKAGES = {

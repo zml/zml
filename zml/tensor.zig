@@ -976,6 +976,10 @@ pub const Tensor = struct {
         return self.add(Tensor.scalar(b, self.dtype()));
     }
 
+    pub fn subConstant(self: Tensor, b: anytype) Tensor {
+        return self.sub(Tensor.scalar(b, self.dtype()));
+    }
+
     /// Returns a Tensor containing the element-wise division of the input Tensor by a constant.
     pub fn divByConst(self: Tensor, b: anytype) Tensor {
         return self.div(Tensor.scalar(b, self.dtype()));

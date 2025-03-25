@@ -16,6 +16,22 @@ def _filegroup(**kwargs):
 def _load(bzl, name):
     return """load({}, {})""".format(repr(bzl), repr(name))
 
+def _cc_import_with_glob(name, hdrs_glob, shared_library, deps = []):
+    return """\
+filegroup(
+    name = "{name}_files",
+    srcs = glob(["{hdrs_glob}"]),
+    visibility = ["//visibility:public"],
+)
+cc_import(
+    name = "{name}",
+    shared_library = {shared_library},
+    hdrs = [":{name}_files"],
+    deps = {deps},
+    visibility = ["//visibility:public"],
+)
+""".format(name = name, hdrs_glob = hdrs_glob, shared_library = repr(shared_library), deps = repr(deps))
+
 def _read(mctx, labels):
     ret = {}
     for label in labels:
@@ -59,6 +75,7 @@ common_apt_packages = module_extension(
 packages = struct(
     read = _read,
     cc_import = _cc_import,
+    cc_import_with_glob = _cc_import_with_glob,
     filegroup = _filegroup,
     load_ = _load,
 )

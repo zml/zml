@@ -35,6 +35,7 @@ cc_import(
         ":zmlxcuda",
         "@cuda_cudart//:cudart",
         "@cuda_cupti//:cupti",
+        "@cuda_nvtx//:nvtx",
         "@cuda_nvcc//:nvptxcompiler",
         "@cuda_nvcc//:nvvm",
         "@cuda_nvrtc//:nvrtc",
