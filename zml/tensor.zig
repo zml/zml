@@ -1,28 +1,29 @@
-const builtin = @import("builtin");
 const std = @import("std");
+const assert = std.debug.assert;
+const testing = std.testing;
+const builtin = @import("builtin");
+
 const stdx = @import("stdx");
 
-const meta = @import("meta.zig");
-const mlir = @import("mlir.zig");
-const ops = @import("ops.zig");
-const module = @import("module.zig");
-
-const Location = mlir.Location;
-const CompilationContext = module.CompilationContext;
-const Shape = @import("shape.zig").Shape;
 const Buffer = @import("buffer.zig").Buffer;
-const HostBuffer = @import("hostbuffer.zig").HostBuffer;
 const Data = @import("dtype.zig").Data;
 const DataType = @import("dtype.zig").DataType;
+const HostBuffer = @import("hostbuffer.zig").HostBuffer;
+const meta = @import("meta.zig");
+const mlir = @import("mlir.zig");
+const Location = mlir.Location;
+const module = @import("module.zig");
+const CompilationContext = module.CompilationContext;
+const ops = @import("ops.zig");
 const Platform = @import("platform.zig").Platform;
+const Shape = @import("shape.zig").Shape;
+
 const EnumLiteral = @TypeOf(.enum_literal);
 
 const dialect = struct {
     const stablehlo = @import("mlir/dialects").stablehlo;
 };
 
-const assert = std.debug.assert;
-const testing = std.testing;
 const scoped_log = std.log.scoped(.@"zml/tensor");
 
 test {
@@ -1453,7 +1454,7 @@ pub const Tensor = struct {
     /// .{ .a, .b, .c }.mergeTranspose(.{ .a, .c }, .ac) -> .{ .b, .ac }
     pub fn mergeTranspose(self: Tensor, axes_: anytype, merged: EnumLiteral) Tensor {
         const cont = self.contiguous(axes_);
-        return cont.reshape(cont._shape.mergeAxis(axes_, merged));
+        return cont.reshape(cont._shape.mergeAxis(merged, axes_));
     }
 
     /// Transposes the input Tensor, such has the given axes end up in contiguous position.

@@ -531,8 +531,8 @@ pub const ArrayAttribute = struct {
 
 pub fn IntegerAttribute(comptime it: IntegerTypes) type {
     const ZigType, const getter = comptime switch (it) {
-        .i1, .i4, .i8, .i16, .i32, .i64 => .{ u64, c.mlirIntegerAttrGetValueInt },
-        .si4, .si8, .si16, .si32, .si64 => .{ u64, c.mlirIntegerAttrGetValueSInt },
+        .i1, .i4, .i8, .i16, .i32, .i64 => .{ i64, c.mlirIntegerAttrGetValueInt },
+        .si4, .si8, .si16, .si32, .si64 => .{ i64, c.mlirIntegerAttrGetValueSInt },
         .u4, .u8, .u16, .u32, .u64 => .{ u64, c.mlirIntegerAttrGetValueUInt },
         .unknown => @compileError("IntegerAttribute(unknown)"),
     };
@@ -1836,7 +1836,9 @@ pub const Block = struct {
     }
 
     pub fn argument(self: Block, index: usize) Value {
-        return Value.wrap(c.mlirBlockGetArgument(self.inner(), @intCast(index)));
+        const arg = c.mlirBlockGetArgument(self.inner(), @intCast(index));
+        stdx.debug.assert(!Value.Methods.is_null_fn.?(arg), "Block doesn't have argument {}, only got {}", .{ index, self.numArguments() });
+        return Value.wrap(arg);
     }
 
     pub fn numArguments(self: Block) usize {
@@ -1881,7 +1883,7 @@ pub const Block = struct {
     pub fn appendOperationRecursive(self: Block, op: Operation, opt: RecursiveOpts) void {
         if (op.block()) |prev_block| {
             // Hermetic blocks are not allowed to reference values from other blocks.
-            std.debug.assert(opt == .open or prev_block.equals(self));
+            stdx.debug.assert(opt == .open or self.equals(prev_block), "Can't add {} from {?x} block to {?x} block", .{ op, prev_block._inner.ptr, self._inner.ptr });
             return;
         }
         for (0..op.numOperands()) |i| {

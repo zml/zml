@@ -1,11 +1,10 @@
 const std = @import("std");
+
 const mlir = @import("mlir");
 
 pub fn constant(ctx: mlir.Context, value: mlir.Attribute, location: mlir.Location) mlir.Operation {
     return mlir.Operation.make(ctx, "arith.constant", .{
-        .attributes = &.{
-            .{ "value", value },
-        },
+        .attributes = &.{.{ "value", value }},
         .result_type_inference = true,
         .location = location,
     });
