@@ -11,7 +11,7 @@ _ARCH = {
         ],
     ),
     "x86_64-macos": struct(
-        sha256 = "4b63854d6b76810abd2563706e7d768efc7111e44dd8b371d49198e627697a13",
+        sha256 = "baee69e4645deeccb42970b4a01f573592209dc1cf72e32893c59ca06af511dc",
         exec_compatible_with = [
             "@platforms//os:macos",
             "@platforms//cpu:x86_64",
