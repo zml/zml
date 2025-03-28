@@ -799,19 +799,23 @@ pub fn addHostCallback(
         .host = HostBuffer.fromBytes(input.shape(), full_data[0..len]),
     };
 
-    const backend_config: [2:null]?*const anyopaque = .{ callback, stable_ctx_ptr };
     const ctx = CompilationContext.current();
+
+    const attrs = mlir.DictionaryAttribute.init(ctx.mlirCtx(), &.{
+        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "callback"), mlir.IntegerAttribute(.i64).init(ctx.mlirCtx(), @bitCast(@intFromPtr(callback))).as(mlir.Attribute)),
+        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "context"), mlir.IntegerAttribute(.i64).init(ctx.mlirCtx(), @bitCast(@intFromPtr(stable_ctx_ptr))).as(mlir.Attribute)),
+    });
 
     const loc = ctx.mlirCtx().location(@src());
     const op = dialect.stablehlo.custom_call(
         ctx.mlirCtx(),
         &.{input.value()},
         .{
-            .has_side_effect = false,
             .call_target_name = "zmlHostBufferCallback",
-            .backend_config = .{ .string = @ptrCast(std.mem.sliceAsBytes(&backend_config)) },
+            .backend_config = .{ .dict = attrs },
+            .has_side_effect = false,
             .output_operand_aliases = &.{0},
-            .api_version = .original,
+            .api_version = .typed_ffi,
         },
         &.{input.value().getType()},
         loc,

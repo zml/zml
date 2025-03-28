@@ -8,6 +8,7 @@ const stdx = @import("stdx");
 
 const zml_platform = @import("platform.zig");
 const pjrt = @import("pjrtx.zig");
+const ffi = @import("xlaffi");
 
 const HostBuffer = @import("hostbuffer.zig").HostBuffer;
 const PjrtApiMap = std.EnumArray(Target, ?*const pjrt.Api);
@@ -223,12 +224,17 @@ pub const Context = struct {
 const cuda = struct {
     var runtime: Runtime = undefined;
 
-    pub fn registerZmlCustomCalls(cuda_platform: Platform) !void {
-        std.debug.assert(cuda_platform.target == .cuda);
+    pub fn registerZmlCustomCalls(platform: Platform) !void {
+        std.debug.assert(platform.target == .cuda);
 
         cuda.runtime = try Runtime.init();
-        const registry = cuda_platform.pjrt_api.customCallRegistry().?;
-        try registry.register(cuda_platform.pjrt_api, 0, "zmlHostBufferCallback", &hostBufferCallback);
+        const registry = platform.pjrt_api.customCallRegistry();
+
+        if (registry) |reg| {
+            try reg.registerFfi(platform.pjrt_api, "zmlHostBufferCallback", @tagName(platform.target), &hostBufferCallback);
+        } else {
+            stdx.debug.panic("Registering custom calls failed", .{});
+        }
     }
 
     pub const Stream = opaque {};
@@ -258,26 +264,33 @@ const cuda = struct {
         }
     };
 
-    fn getContext(args: [*]const u8, args_len: usize) struct { *const Context.HostCallback, *Context.HostCallbackCtx } {
-        std.debug.assert(args_len == @sizeOf(*anyopaque) * 2);
+    fn getContext(attrs: ffi.Attrs) struct { *const Context.HostCallback, *Context.HostCallbackCtx } {
+        const context_scalar = attrs.getAttrByNameAs(ffi.Scalar, "context") orelse unreachable;
+        std.debug.assert(context_scalar.dtype == .s64);
+        const ctx: *Context.HostCallbackCtx = @ptrFromInt(@as(usize, @bitCast(@as(*i64, @ptrCast(@alignCast(context_scalar.value))).*)));
 
-        const raw_fn_ptr: usize = @bitCast(args[0..@sizeOf(*anyopaque)].*);
-        const fn_ptr: *const Context.HostCallback = @ptrFromInt(raw_fn_ptr);
+        const callback_scalar = attrs.getAttrByNameAs(ffi.Scalar, "callback") orelse unreachable;
+        std.debug.assert(callback_scalar.dtype == .s64);
+        const callback: *const Context.HostCallback = @ptrFromInt(@as(usize, @bitCast(@as(*i64, @ptrCast(@alignCast(callback_scalar.value))).*)));
 
-        const raw_ctx_ptr: usize = @bitCast(args[@sizeOf(*anyopaque)..][0..@sizeOf(*anyopaque)].*);
-        const ctx_ptr: *Context.HostCallbackCtx = @ptrFromInt(raw_ctx_ptr);
-        return .{ fn_ptr, ctx_ptr };
+        return .{ callback, ctx };
     }
 
-    fn hostBufferCallback(opaque_stream: *anyopaque, buffers: [*]*anyopaque, args: [*]const u8, args_len: usize) callconv(.C) void {
-        const stream: *Stream = @ptrCast(opaque_stream);
-        const src: *anyopaque = buffers[0];
-        const callback, const ctx = getContext(args, args_len);
+    fn hostBufferCallback(call_frame: *ffi.CallFrame) callconv(.C) ?*ffi.Error {
+        if (call_frame.extension_start != null and call_frame.extension_start.?.type == .metadata) {
+            const metadata_extension: *ffi.MetadataExtension = @fieldParentPtr("extension_base", call_frame.extension_start.?);
+            metadata_extension.metadata.?.api_version.major_version = ffi.ApiVersion.major;
+            metadata_extension.metadata.?.api_version.minor_version = ffi.ApiVersion.minor;
+            return null;
+        }
+
+        const stream: *Stream = @ptrCast(call_frame.api.?.getStream(call_frame.ctx.?) catch unreachable);
+        const src: *anyopaque = call_frame.args.getArgAs(ffi.Buffer, 0).data.?;
+        const callback, const ctx = getContext(call_frame.attrs);
 
         // Add synchronization because this is called from the device driver.
         ctx.mutex.lock();
         defer ctx.mutex.unlock();
-
         const host_dst: []u8 = @constCast(ctx.host.data);
         const memcpy_result = cuda.runtime.memcpyAsync(host_dst.ptr, src, host_dst.len, .device_to_host, stream);
         _ = memcpy_result;
@@ -285,5 +298,6 @@ const cuda = struct {
         _ = synchronize_result;
 
         callback(ctx.host);
+        return null;
     }
 };

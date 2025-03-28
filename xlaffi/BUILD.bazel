@@ -1,0 +1,11 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "xlaffi",
+    main = "ffi.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//stdx",
+        "@xla//xla/ffi/api:c_api",
+    ],
+)
