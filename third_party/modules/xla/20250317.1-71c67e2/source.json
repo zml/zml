@@ -1,0 +1,15 @@
+{
+    "strip_prefix": "xla-71c67e2a4f40267115a0d4ea7c36748bbe7e750e",
+    "url": "https://github.com/openxla/xla/archive/71c67e2a4f40267115a0d4ea7c36748bbe7e750e.tar.gz",
+    "integrity": "sha256-j6D1MC7+WsbZ+Ve3hPmDlCzZX1yV6RIP2BWDgQcbcYc=",
+    "overlay": {
+        "tsl.bzl": "",
+        "workspace.bzl": "",
+        "MODULE.bazel": ""
+    },
+    "patch_strip": 1,
+    "patches": {
+        "0001-bazel-migration-to-bazel-8.1.1.patch": "",
+        "0002-Added-FFI-handler-registration-API-to-the-FFI-PjRt.patch": ""
+    }
+}
