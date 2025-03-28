@@ -2,6 +2,8 @@ const std = @import("std");
 const stdx = @import("stdx");
 const c = @import("c");
 
+pub const frame_info = @import("frame_info.zig");
+
 const log = std.log.scoped(.ffi);
 
 fn ffiStructSize(comptime T: type) usize {
