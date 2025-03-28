@@ -8,7 +8,7 @@ fn unary_fn(comptime op_name: [:0]const u8) type {
         pub fn call(ctx: mlir.Context, value: mlir.Value, location: mlir.Location) mlir.Operation {
             return mlir.Operation.make(ctx, namespace ++ "." ++ op_name, .{
                 .operands = &.{value},
-                .results = &.{},
+                .results = &.{value.getType()},
                 .location = location,
             });
         }
@@ -32,4 +32,5 @@ pub const fpowi = binary_fn("fpowi").call;
 pub const tanh = unary_fn("tanh").call;
 pub const sqrt = unary_fn("sqrt").call;
 pub const exp = unary_fn("exp").call;
+pub const exp2 = unary_fn("exp2").call;
 pub const log = unary_fn("log").call;

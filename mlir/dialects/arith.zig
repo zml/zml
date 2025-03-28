@@ -1,11 +1,10 @@
 const std = @import("std");
+
 const mlir = @import("mlir");
 
 pub fn constant(ctx: mlir.Context, value: mlir.Attribute, location: mlir.Location) mlir.Operation {
     return mlir.Operation.make(ctx, "arith.constant", .{
-        .attributes = &.{
-            .{ "value", value },
-        },
+        .attributes = &.{.{ "value", value }},
         .result_type_inference = true,
         .location = location,
     });
@@ -44,6 +43,8 @@ pub const mulf = binary_fn("arith.mulf");
 pub const divsi = binary_fn("arith.divsi");
 pub const divui = binary_fn("arith.divui");
 pub const divf = binary_fn("arith.divf");
+pub const maxnumf = binary_fn("arith.maxnumf");
+pub const maxnumi = binary_fn("arith.maxnumi");
 pub const extsi = cast_fn("arith.extsi");
 pub const extui = cast_fn("arith.extui");
 pub const extf = cast_fn("arith.extf");
