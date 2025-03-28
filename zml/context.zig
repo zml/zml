@@ -9,6 +9,7 @@ const stdx = @import("stdx");
 const zml_platform = @import("platform.zig");
 const pjrt = @import("pjrtx.zig");
 const ffi = @import("xlaffi");
+const frame_info = ffi.frame_info;
 
 const HostBuffer = @import("hostbuffer.zig").HostBuffer;
 const PjrtApiMap = std.EnumArray(Target, ?*const pjrt.Api);
@@ -283,6 +284,13 @@ const cuda = struct {
             metadata_extension.metadata.?.api_version.minor_version = ffi.ApiVersion.minor;
             return null;
         }
+
+        // Print frame info to stderr
+        frame_info.printCallFrameInfo(call_frame, std.io.getStdErr().writer()) catch {};
+
+        // If you have a buffer argument:
+        const buffer = call_frame.args.getArgAs(ffi.Buffer, 0);
+        frame_info.getBufferInfo(buffer, std.io.getStdErr().writer()) catch {};
 
         const stream: *Stream = @ptrCast(call_frame.api.?.getStream(call_frame.ctx.?) catch unreachable);
         const src: *anyopaque = call_frame.args.getArgAs(ffi.Buffer, 0).data.?;
