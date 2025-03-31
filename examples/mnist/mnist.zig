@@ -20,7 +20,7 @@ const Mnist = struct {
         bias: zml.Tensor,
 
         pub fn forward(self: Layer, input: zml.Tensor) zml.Tensor {
-            return self.weight.matmul(input).add(self.bias).relu();
+            return self.weight.matmul(input.print()).add(self.bias).relu();
         }
     };
 

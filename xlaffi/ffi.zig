@@ -181,8 +181,8 @@ pub const ExecutionContext = opaque {
 
         if (result) |ffi_error| {
             const err = Error.fromInner(ffi_error);
-            defer err.destroy(self);
-            log.err("[ExecutionContext.get] {s}", .{err.getMessage(self)});
+            defer err.destroy(api);
+            log.err("[ExecutionContext.get] {s}", .{err.getMessage(api)});
 
             // TODO(Corentin): Retrieve error code from Error when implemented in XLA.
             return error.Unknown;
