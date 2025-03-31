@@ -632,8 +632,11 @@ fn findSimilarBufferKeys(original_key: []const u8, store: BufferStore, temp_allo
 
 /// deinit all buffers in the given struct
 pub fn awaitAll(buffers: anytype) !void {
-    // TODO: implement once we have async buffers.
-    _ = buffers;
+    zml.meta.visit((struct {
+        fn cb(_: void, buffer: *zml.Buffer) void {
+            buffer.* = buffer.awaitt() catch unreachable;
+        }
+    }).cb, {}, buffers);
 }
 
 fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *PrefixBuilder, buffer_store: BufferStore, obj: anytype, platform: zml.Platform) !void {
