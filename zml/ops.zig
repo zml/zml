@@ -826,6 +826,7 @@ pub const TritonOps = struct {
     grid: [3]i32,
     num_stages: i32,
     num_warps: i32,
+    output_operand_aliases: []const i64 = &.{},
 };
 
 /// Generate an MLIR call to the given member function with the given tensors.
@@ -884,6 +885,7 @@ pub fn triton(inputs: anytype, outputs: anytype, opts: TritonOps) [outputs.len]T
             .api_version = .typed_ffi,
             .operand_layouts = &operands_layouts,
             .result_layouts = &results_layouts,
+            .output_operand_aliases = opts.output_operand_aliases,
         },
         &res_types,
         ctx.mlirCtx().location(@src()),
