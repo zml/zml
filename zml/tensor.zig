@@ -40,9 +40,11 @@ pub const Tensor = struct {
     _shape: Shape,
     _id: _Id,
     _donation: _Donation = .no_buffer,
+    _output_memory_kind: _MemoryKind = null,
 
     pub const _Donation = union(enum) { no_buffer, input_buffer, arg: u16 };
     pub const _Id = union(enum) { mlir: mlir.Value, buffer_id: u64, arg_id: u64 };
+    pub const _MemoryKind = ?Buffer.Memory;
 
     pub const MAX_RANK = Shape.MAX_RANK;
 
@@ -193,6 +195,33 @@ pub const Tensor = struct {
             .buffer_id => {
                 var res = self;
                 res._shape = self._shape.withSharding(axes_);
+                return res;
+            },
+        };
+    }
+
+    pub fn toMemory(self: Tensor, kind: Buffer.Memory) Tensor {
+        return switch (self._id) {
+            .arg_id, .mlir => {
+                const ctx = self.getContext();
+                var res = self;
+                res._output_memory_kind = kind;
+
+                const memory_kind = mlir.StringAttribute.init(ctx.mlirCtx(), @tagName(kind.toPjrtMemory()));
+
+                const op = dialect.stablehlo.annotate_device_placement(
+                    ctx.mlirCtx(),
+                    &.{self.value()},
+                    memory_kind,
+                    &.{self.value().getType()},
+                    ctx.mlirCtx().location(@src()),
+                );
+
+                return _result(res._shape, op.result(0));
+            },
+            .buffer_id => {
+                var res = self;
+                res._output_memory_kind = kind;
                 return res;
             },
         };
@@ -3749,13 +3778,12 @@ pub const Tensor = struct {
 
     /// Insert code that will print the content of the given buffer at runtime.
     /// Only for debug purpose, it has the following limitations:
-    /// * only supported on Cuda atm
     /// * only prints the first 1024 values
     /// * pre allocates a buffer on the host to copy the content of the device buffer,
     /// this buffer won't be freed. You will have one buffer per "print" call in the IR.
     /// * does device to host synchronization so it will slow down the program execution.
     pub fn print(input: Tensor) Tensor {
-        return ops.addHostCallback(&printCallback, input);
+        return ops.addHostCallback(&printCallback, input.toMemory(.host_pinned)).toMemory(.device);
     }
 
     fn printCallback(host_buffer: HostBuffer) void {

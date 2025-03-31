@@ -172,6 +172,32 @@ pub const ExecutionStage = enum(c.XLA_FFI_ExecutionStage) {
 pub const ExecutionContext = opaque {
     pub const inner = TransmuteMixin(ExecutionContext, c.XLA_FFI_ExecutionContext).to;
 
+    // pub fn attach(self: *ExecutionContext, api: *const Api, value: anytype) ApiError!void {
+    //     // register type id ==> typeid
+    //     const typename_ = "zml." ++ @typeName(@TypeOf(value));
+
+    //     var ret = ffiStruct(c.XLA_FFI_ExecutionContext_Register_Args{
+    //         .ctx = self.inner(),
+    //         .handler = @ptrCast(@alignCast(handler)),
+    //     });
+    //     const result = api.inner().XLA_FFI_ExecutionContext_Register.?(&ret);
+
+    //     var ret = ffiStruct(c.XLA_FFI_ExecutionContext_Register_Args{
+    //         .ctx = self.inner(),
+    //         .handler = @ptrCast(@alignCast(handler)),
+    //     });
+    //     const result = api.inner().XLA_FFI_ExecutionContext_Register.?(&ret);
+
+    //     if (result) |ffi_error| {
+    //         const err = Error.fromInner(ffi_error);
+    //         defer err.destroy(api);
+    //         log.err("[ExecutionContext.register] {s}", .{err.getMessage(api)});
+
+    //         // TODO(Corentin): Retrieve error code from Error when implemented in XLA.
+    //         return error.Unknown;
+    //     }
+    // }
+
     pub fn get(self: *ExecutionContext, api: *const Api, type_id: *TypeId) ApiError!*anyopaque {
         var ret = ffiStruct(c.XLA_FFI_ExecutionContext_Get_Args{
             .ctx = self.inner(),

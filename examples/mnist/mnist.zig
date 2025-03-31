@@ -106,6 +106,7 @@ pub fn asyncMain() !void {
 
         printDigit(sample);
         var result: zml.Buffer = mnist.call(.{input});
+        log.warn("memory kind: {s}", .{result.getMemory().debugString(platform.pjrt_api)});
         defer result.deinit();
 
         log.info(
