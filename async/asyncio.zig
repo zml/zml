@@ -144,7 +144,8 @@ pub const TCP = struct {
         return .{ .exec = self.exec, .tcp = result };
     }
 
-    const ConnectResult = xev.TCP.ConnectError!void;
+    const ConnectResult = xev.ConnectError!void;
+
     pub fn connect(self: Self, addr: std.net.Address) !void {
         const ResultT = ConnectResult;
         const Data = struct {
