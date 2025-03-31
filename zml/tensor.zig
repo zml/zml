@@ -1,28 +1,29 @@
-const builtin = @import("builtin");
 const std = @import("std");
+const assert = std.debug.assert;
+const testing = std.testing;
+const builtin = @import("builtin");
+
 const stdx = @import("stdx");
 
-const meta = @import("meta.zig");
-const mlir = @import("mlir.zig");
-const ops = @import("ops.zig");
-const module = @import("module.zig");
-
-const Location = mlir.Location;
-const CompilationContext = module.CompilationContext;
-const Shape = @import("shape.zig").Shape;
 const Buffer = @import("buffer.zig").Buffer;
-const HostBuffer = @import("hostbuffer.zig").HostBuffer;
 const Data = @import("dtype.zig").Data;
 const DataType = @import("dtype.zig").DataType;
+const HostBuffer = @import("hostbuffer.zig").HostBuffer;
+const meta = @import("meta.zig");
+const mlir = @import("mlir.zig");
+const Location = mlir.Location;
+const module = @import("module.zig");
+const CompilationContext = module.CompilationContext;
+const ops = @import("ops.zig");
 const Platform = @import("platform.zig").Platform;
+const Shape = @import("shape.zig").Shape;
+
 const EnumLiteral = @TypeOf(.enum_literal);
 
 const dialect = struct {
     const stablehlo = @import("mlir/dialects").stablehlo;
 };
 
-const assert = std.debug.assert;
-const testing = std.testing;
 const scoped_log = std.log.scoped(.@"zml/tensor");
 
 test {
@@ -173,15 +174,13 @@ pub const Tensor = struct {
                 var res = self;
                 res._shape = self._shape.withSharding(axes_);
 
-                const sharding = ctx.getShardingAttr(res._shape);
-
                 const op = dialect.stablehlo.custom_call(
                     ctx.mlirCtx(),
                     &.{self.value()},
                     .{
                         .call_target_name = "Sharding",
                         .has_side_effect = false,
-                        .addional_attributes = &.{.{ "mhlo.sharding", sharding.asAttr() }},
+                        .addional_attributes = &.{.{ "mhlo.sharding", ctx.getShardingAttr(res._shape) }},
                         .api_version = .original,
                     },
                     &.{self.value().getType()},
@@ -1014,11 +1013,11 @@ pub const Tensor = struct {
         if (to == self.dtype()) {
             return self;
         }
-
-        const res_type = mlir.RankedTensorType.init(self.dims(), mlir.ext.Type.fromDType(self.getContext().mlirCtx(), to)).as(mlir.Type);
         const loc = self.getContext().location(@src(), "convert({_},to={s})", .{ self, @tagName(to) });
 
-        const op = dialect.stablehlo.convert(self.getContext().mlirCtx(), self.value(), res_type, loc);
+        const mlir_ctx = self.getContext().mlirCtx();
+        const res_type = mlir.ext.mlirType(mlir_ctx, self.shape().withDtype(to));
+        const op = dialect.stablehlo.convert(mlir_ctx, self.value(), res_type, loc);
         return _result(self._shape.withDtype(to), op.result(0));
     }
 
@@ -1455,7 +1454,7 @@ pub const Tensor = struct {
     /// .{ .a, .b, .c }.mergeTranspose(.{ .a, .c }, .ac) -> .{ .b, .ac }
     pub fn mergeTranspose(self: Tensor, axes_: anytype, merged: EnumLiteral) Tensor {
         const cont = self.contiguous(axes_);
-        return cont.reshape(cont._shape.mergeAxis(axes_, merged));
+        return cont.reshape(cont._shape.mergeAxis(merged, axes_));
     }
 
     /// Transposes the input Tensor, such has the given axes end up in contiguous position.
@@ -3107,7 +3106,7 @@ pub const Tensor = struct {
         var start_indices = [_]mlir.Value{constant(.{}, slice_.start.dtype().zero()).value()} ** MAX_RANK;
         start_indices[a] = slice_.start.value();
 
-        const op = dialect.stablehlo.dynamicSlice(
+        const op = dialect.stablehlo.dynamic_slice(
             self.getContext().mlirCtx(),
             self.value(),
             new_shape.dims(),
@@ -3168,7 +3167,7 @@ pub const Tensor = struct {
                 res_shape._dims.set(a, len);
             }
         }
-        const op = dialect.stablehlo.dynamicSlice(self.getContext().mlirCtx(), self.value(), res_shape.dims(), offset_values[0..self.rank()], loc);
+        const op = dialect.stablehlo.dynamic_slice(self.getContext().mlirCtx(), self.value(), res_shape.dims(), offset_values[0..self.rank()], loc);
         return _result(res_shape, op.result(0));
     }
 
