@@ -8,6 +8,8 @@ const stdx = @import("stdx");
 
 const zml_platform = @import("platform.zig");
 const pjrt = @import("pjrtx.zig");
+const ffi = @import("xlaffi");
+const frame_info = ffi.frame_info;
 
 const HostBuffer = @import("hostbuffer.zig").HostBuffer;
 const PjrtApiMap = std.EnumArray(Target, ?*const pjrt.Api);
@@ -174,10 +176,8 @@ pub const Context = struct {
             log.err("No device found for platform {} !", .{target});
             return error.NoDevicesFound;
         }
-        // TODO: should this be moved to platform.zig ?
-        if (target == .cuda) {
-            try cuda.registerZmlCustomCalls(p);
-        }
+
+        try CustomCall.registerZmlCustomCalls(p);
 
         self.platforms.set(target, p);
         return p;
@@ -215,75 +215,89 @@ pub const Context = struct {
 
     pub const HostCallbackCtx = struct {
         host: HostBuffer,
+        platform: Platform,
         mutex: std.Thread.Mutex = std.Thread.Mutex{},
     };
     pub const HostCallback = fn (HostBuffer) void;
 };
 
-const cuda = struct {
-    var runtime: Runtime = undefined;
+const CustomCall = struct {
+    pub fn registerZmlCustomCalls(platform: Platform) !void {
+        const registry = platform.pjrt_api.customCallRegistry();
 
-    pub fn registerZmlCustomCalls(cuda_platform: Platform) !void {
-        std.debug.assert(cuda_platform.target == .cuda);
-
-        cuda.runtime = try Runtime.init();
-        const registry = cuda_platform.pjrt_api.customCallRegistry().?;
-        try registry.register(cuda_platform.pjrt_api, 0, "zmlHostBufferCallback", &hostBufferCallback);
-    }
-
-    pub const Stream = opaque {};
-    pub const MemcpyKind = enum(c_int) {
-        host_to_host = 0,
-        host_to_device = 1,
-        device_to_host = 2,
-        device_to_device = 3,
-        default = 4,
-    };
-
-    pub const Runtime = struct {
-        memcpyAsync: MemcpyAsync,
-        streamSynchronize: StreamSynchronize,
-
-        const MemcpyAsync = *const fn (dst: *anyopaque, src: *const anyopaque, count: usize, kind: MemcpyKind, stream: *Stream) callconv(.C) c_int;
-        const StreamSynchronize = *const fn (stream: *Stream) callconv(.C) c_int;
-
-        pub fn init() !Runtime {
-            var cudart = try std.DynLib.open("libcudart.so.12");
-            defer cudart.close();
-
-            return .{
-                .memcpyAsync = cudart.lookup(Runtime.MemcpyAsync, "cudaMemcpyAsync") orelse return error.NotFound,
-                .streamSynchronize = cudart.lookup(Runtime.StreamSynchronize, "cudaStreamSynchronize") orelse return error.NotFound,
-            };
+        if (registry) |reg| {
+            try reg.registerFfi(platform.pjrt_api, "zmlHostBufferCallback", @tagName(platform.target), &hostBufferCallback);
+        } else {
+            stdx.debug.panic("Registering custom calls failed", .{});
         }
-    };
-
-    fn getContext(args: [*]const u8, args_len: usize) struct { *const Context.HostCallback, *Context.HostCallbackCtx } {
-        std.debug.assert(args_len == @sizeOf(*anyopaque) * 2);
-
-        const raw_fn_ptr: usize = @bitCast(args[0..@sizeOf(*anyopaque)].*);
-        const fn_ptr: *const Context.HostCallback = @ptrFromInt(raw_fn_ptr);
-
-        const raw_ctx_ptr: usize = @bitCast(args[@sizeOf(*anyopaque)..][0..@sizeOf(*anyopaque)].*);
-        const ctx_ptr: *Context.HostCallbackCtx = @ptrFromInt(raw_ctx_ptr);
-        return .{ fn_ptr, ctx_ptr };
     }
 
-    fn hostBufferCallback(opaque_stream: *anyopaque, buffers: [*]*anyopaque, args: [*]const u8, args_len: usize) callconv(.C) void {
-        const stream: *Stream = @ptrCast(opaque_stream);
-        const src: *anyopaque = buffers[0];
-        const callback, const ctx = getContext(args, args_len);
+    fn getContext(attrs: ffi.Attrs) struct { *const Context.HostCallback, *Context.HostCallbackCtx } {
+        const context_scalar = attrs.getAttrByNameAs(ffi.Scalar, "context") orelse unreachable;
+        std.debug.assert(context_scalar.dtype == .s64);
+        const ctx: *Context.HostCallbackCtx = @ptrFromInt(@as(usize, @bitCast(@as(*i64, @ptrCast(@alignCast(context_scalar.value))).*)));
 
+        const callback_scalar = attrs.getAttrByNameAs(ffi.Scalar, "callback") orelse unreachable;
+        std.debug.assert(callback_scalar.dtype == .s64);
+        const callback: *const Context.HostCallback = @ptrFromInt(@as(usize, @bitCast(@as(*i64, @ptrCast(@alignCast(callback_scalar.value))).*)));
+
+        return .{ callback, ctx };
+    }
+
+    fn hostBufferCallback(call_frame: *ffi.CallFrame) callconv(.C) ?*ffi.Error {
+        if (call_frame.extension_start != null and call_frame.extension_start.?.type == .metadata) {
+            const metadata_extension: *ffi.MetadataExtension = @fieldParentPtr("extension_base", call_frame.extension_start.?);
+            metadata_extension.metadata.?.api_version.major_version = ffi.ApiVersion.major;
+            metadata_extension.metadata.?.api_version.minor_version = ffi.ApiVersion.minor;
+            return null;
+        }
+
+        // Print frame info to stderr
+        frame_info.printCallFrameInfo(call_frame, std.io.getStdErr().writer()) catch {};
+
+        // If you have a buffer argument:
+        const buffer = call_frame.args.getArgAs(ffi.Buffer, 0);
+        frame_info.getBufferInfo(buffer, std.io.getStdErr().writer()) catch {};
+
+        const callback, const ctx = getContext(call_frame.attrs);
         // Add synchronization because this is called from the device driver.
         ctx.mutex.lock();
         defer ctx.mutex.unlock();
+        const ffi_buffer = call_frame.args.getArgAs(ffi.Buffer, 0);
 
-        const host_dst: []u8 = @constCast(ctx.host.data);
-        const memcpy_result = cuda.runtime.memcpyAsync(host_dst.ptr, src, host_dst.len, .device_to_host, stream);
-        _ = memcpy_result;
-        const synchronize_result = cuda.runtime.streamSynchronize(stream);
-        _ = synchronize_result;
+        const MAX_RANK: u8 = 8;
+
+        const minor_to_major: [MAX_RANK]i64 = comptime blk: {
+            var res: [MAX_RANK]i64 = undefined;
+            for (0..MAX_RANK) |i| {
+                res[i] = @intCast(MAX_RANK - i - 1);
+            }
+            break :blk res;
+        };
+
+        const pjrt_buffer = ctx.platform.pjrt_client.createViewOfDeviceBuffer2(ctx.platform.pjrt_api, .{
+            .device_buffer_ptr = ffi_buffer.data,
+            .element_type = .F32,
+            .dims = ffi_buffer.dims[0..@as(usize, @intCast(ffi_buffer.rank))],
+            .device = ctx.platform.getDevices()[0],
+            .layout = .{
+                .tiled = .{
+                    .minor_to_major = minor_to_major[@as(usize, MAX_RANK - @as(usize, @intCast(ffi_buffer.rank)))..],
+                    .tile_dims = &.{},
+                    .tile_dims_sizes = &.{},
+                },
+            },
+        }) catch unreachable;
+
+        const event = pjrt_buffer.toHostBuffer(ctx.platform.pjrt_api, @constCast(ctx.host.data)) catch |err| {
+            log.err("Failed to copy buffer to host: {}", .{err});
+            return null;
+        };
+        _ = event; // autofix
+
+        std.debug.print("data: {any}\n", .{ctx.host.data[0..512]});
 
         callback(ctx.host);
+        return null;
     }
 };

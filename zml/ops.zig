@@ -773,7 +773,8 @@ pub fn addHostCallback(
     input: Tensor,
 ) Tensor {
     // TODO: implement addCallback that exposes a pjrt.Buffer, so that the user can decide if they need to copy.
-    if (input.getContext().target() != .cuda) return input;
+    const ctx = input.getContext();
+    // if (ctx.target() != .cuda or ctx.target() != .rocm) return input;
 
     const len = input.byteSize();
     // Reserve memory to be able to log the runtime Buffer later during the computation.
@@ -790,21 +791,24 @@ pub fn addHostCallback(
     const stable_ctx_ptr = fba.allocator().create(HostCallbackCtx) catch unreachable;
     stable_ctx_ptr.* = .{
         .host = HostBuffer.fromBytes(input.shape(), full_data[0..len]),
+        .platform = ctx._platform,
     };
 
-    const backend_config: [2:null]?*const anyopaque = .{ callback, stable_ctx_ptr };
-    const ctx = CompilationContext.current();
+    const attrs = mlir.DictionaryAttribute.init(ctx.mlirCtx(), &.{
+        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "callback"), mlir.IntegerAttribute(.i64).init(ctx.mlirCtx(), @bitCast(@intFromPtr(callback))).as(mlir.Attribute)),
+        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "context"), mlir.IntegerAttribute(.i64).init(ctx.mlirCtx(), @bitCast(@intFromPtr(stable_ctx_ptr))).as(mlir.Attribute)),
+    });
 
     const loc = ctx.mlirCtx().location(@src());
     const op = dialect.stablehlo.custom_call(
         ctx.mlirCtx(),
         &.{input.value()},
         .{
-            .has_side_effect = false,
             .call_target_name = "zmlHostBufferCallback",
-            .backend_config = .{ .string = @ptrCast(std.mem.sliceAsBytes(&backend_config)) },
+            .backend_config = .{ .dict = attrs },
+            .has_side_effect = true,
             .output_operand_aliases = &.{0},
-            .api_version = .original,
+            .api_version = .typed_ffi,
         },
         &.{input.value().getType()},
         loc,

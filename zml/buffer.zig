@@ -27,10 +27,18 @@ const log = std.log.scoped(.zml);
 /// * loading weights from disk directly to the `device zml.aio.loadBuffers`
 /// * can be created by calling `HostBuffer.toDevice(platform)`.
 pub const Buffer = struct {
-    pub const Memory = enum(@typeInfo(pjrt.Memory.Kind).@"enum".tag_type) {
-        host = @intFromEnum(pjrt.Memory.Kind.unpinned_host),
-        host_pinned = @intFromEnum(pjrt.Memory.Kind.pinned_host),
-        device = @intFromEnum(pjrt.Memory.Kind.device),
+    pub const Memory = enum {
+        host,
+        host_pinned,
+        device,
+
+        pub fn toPjrtMemory(self: Memory) pjrt.Memory.Kind {
+            return switch (self) {
+                .host => .unpinned_host,
+                .host_pinned => .pinned_host,
+                .device => .device,
+            };
+        }
     };
 
     pub const Shard = struct {
@@ -340,6 +348,11 @@ pub const Buffer = struct {
         _ = fmt;
         _ = options;
         try writer.print("Buffer({_})", .{self._shape});
+    }
+
+    pub fn getMemory(self: Buffer) *const pjrt.Memory {
+        const shard = self._shards.get(0);
+        return shard.memory(self._api);
     }
 
     fn hasShardedAxis(self: Buffer) bool {

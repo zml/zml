@@ -81,6 +81,11 @@ pub const Client = opaque {
         return @ptrCast(try self.inner().createViewOfDeviceBuffer(api, args));
     }
 
+    pub const CreateViewOfDeviceBufferArgs2 = pjrt.Client.CreateViewOfDeviceBufferArgs2;
+    pub fn createViewOfDeviceBuffer2(self: *const Client, api: *const Api, args: CreateViewOfDeviceBufferArgs2) ApiError!*Buffer {
+        return @ptrCast(try self.inner().createViewOfDeviceBuffer2(api, args));
+    }
+
     fn compileSync(self: *const Client, api: *const Api, allocator: std.mem.Allocator, module: mlir.Module, compile_options_pb: []const u8) CompileError!*LoadedExecutable {
         var bytecode = std.ArrayList(u8).init(allocator);
         defer bytecode.deinit();
@@ -159,6 +164,10 @@ pub const Buffer = opaque {
         return self.inner().isOnCpu(api);
     }
 
+    pub fn memory(self: *const Buffer, api: *const Api) *const Memory {
+        return self.inner().memory(api);
+    }
+
     pub fn toHostBuffer(self: *const Buffer, api: *const Api, dst: []u8) ApiError!?*Event {
         return @ptrCast(try self.inner().toHostBuffer(api, dst));
     }
@@ -183,8 +192,8 @@ pub const Buffer = opaque {
         return @ptrCast(self.inner().copyToDevice(api, device));
     }
 
-    pub fn copyToMemory(self: *const Buffer, api: *const Api, memory: *const Memory) ApiError!*Buffer {
-        return @ptrCast(self.inner().copyToMemory(api, memory));
+    pub fn copyToMemory(self: *const Buffer, api: *const Api, memory_: *const Memory) ApiError!*Buffer {
+        return @ptrCast(self.inner().copyToMemory(api, memory_));
     }
 
     pub fn getReadyEvent(self: *const Buffer, api: *const Api) ?*Event {

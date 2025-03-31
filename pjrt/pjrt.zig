@@ -1,6 +1,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const stdx = @import("stdx");
+const ffi = @import("xlaffi");
 
 const c = @import("c");
 
@@ -160,10 +161,9 @@ pub const Api = struct {
     }
 
     pub fn customCallRegistry(api: *const Api) ?CustomCallRegistry {
-        if (api.lookupExtension(c.PJRT_Gpu_Custom_Call, c.PJRT_Extension_Type_Gpu_Custom_Call)) |ext| {
-            return .{ .inner = ext.custom_call.? };
+        if (api.lookupExtension(c.PJRT_FFI_Extension, c.PJRT_Extension_Type_FFI)) |ext| {
+            return .{ .inner = ext.register_handler.? };
         }
-        // log.warn("No Custom Call registry found for platform: {}", .{self});
         return null;
     }
 
@@ -422,6 +422,36 @@ pub const Client = opaque {
         const ret = try api.call(.PJRT_Client_CreateViewOfDeviceBuffer, .{
             .client = self.inner(),
             .device_buffer_ptr = @ptrCast(@constCast(args.data.ptr)),
+            .dims = args.dims.ptr,
+            .num_dims = args.dims.len,
+            .element_type = @intFromEnum(args.element_type),
+            .layout = @ptrCast(@constCast(&layout)),
+            .device = @ptrCast(@constCast(args.device)),
+            .on_delete_callback = args.on_delete_callback,
+            .on_delete_callback_arg = args.on_delete_callback_arg,
+            .stream = if (args.stream) |stream| stream else 0,
+        });
+        return @ptrCast(ret.buffer.?);
+    }
+
+    pub const CreateViewOfDeviceBufferArgs2 = struct {
+        device_buffer_ptr: ?*anyopaque,
+        dims: []const i64,
+        element_type: BufferType,
+        layout: MemoryLayout,
+        device: *const Device,
+        on_delete_callback: *const fn (device_buffer_ptr: ?*anyopaque, ctx: ?*anyopaque) callconv(.C) void = &struct {
+            fn call(_: ?*anyopaque, _: ?*anyopaque) callconv(.C) void {}
+        }.call,
+        on_delete_callback_arg: ?*anyopaque = null,
+        stream: ?isize = null,
+    };
+
+    pub fn createViewOfDeviceBuffer2(self: *const Client, api: *const Api, args: CreateViewOfDeviceBufferArgs2) ApiError!*Buffer {
+        const layout = args.layout.toCStruct();
+        const ret = try api.call(.PJRT_Client_CreateViewOfDeviceBuffer, .{
+            .client = self.inner(),
+            .device_buffer_ptr = args.device_buffer_ptr,
             .dims = args.dims.ptr,
             .num_dims = args.dims.len,
             .element_type = @intFromEnum(args.element_type),
@@ -1161,23 +1191,25 @@ pub const NamedValue = extern struct {
     }
 };
 
-/// Custom call signature arguments are:
-/// * a pointer to a platform specific stream handle
-/// * a pointer to an unspecified list of platform specific buffer handle
-/// * a context struct passed as a slice of bytes
-pub const CustomCall = fn (*anyopaque, [*]*anyopaque, [*]const u8, usize) callconv(.C) void;
-
 // todo : support all missing handlers available in GPU plugin extension: handler_instantiate, handler_prepare, handler_initialize
 // introduced by https://github.com/openxla/xla/commit/ef85a7bcc308313492ebc50295a8a08b4e51b8f5
 pub const CustomCallRegistry = extern struct {
-    inner: *const c.PJRT_Gpu_Register_Custom_Call,
+    inner: *const c.PJRT_FFI_Register_Handler,
 
-    pub fn register(self: *const CustomCallRegistry, api: *const Api, api_version: usize, name: []const u8, func: *const CustomCall) ApiError!void {
-        var ret = pjrtStruct(c.PJRT_Gpu_Register_Custom_Call_Args{
-            .function_name = name.ptr,
-            .function_name_size = name.len,
-            .api_version = @intCast(api_version),
-            .handler_execute = @ptrCast(@constCast(func)),
+    pub fn registerFfi(
+        self: *const CustomCallRegistry,
+        api: *const Api,
+        target_name: []const u8,
+        platform_name: []const u8,
+        func: *const ffi.Handler,
+    ) ApiError!void {
+        var ret = pjrtStruct(c.PJRT_FFI_Register_Handler_Args{
+            .api_version = 1,
+            .target_name = target_name.ptr,
+            .target_name_size = target_name.len,
+            .handler = @ptrCast(@constCast(func)),
+            .platform_name = platform_name.ptr,
+            .platform_name_size = platform_name.len,
         });
         const result = self.inner(&ret);
         if (result) |pjrt_c_error| {

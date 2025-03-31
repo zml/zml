@@ -1,3 +1,4 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
 load("@rules_zig//zig:defs.bzl", "zig_library")
 load("@zml//bazel:zig.bzl", "zig_cc_binary")
 load("//bazel:zig_proto_library.bzl", "zig_proto_library")
@@ -20,9 +21,12 @@ zig_library(
         ":trace_events_proto",
         ":xplane_proto",
         "//stdx",
+        "//xlaffi",
+        "@xla//xla/pjrt/c:pjrt_c_api_ffi_extension_hdrs",
         "@xla//xla/pjrt/c:pjrt_c_api_gpu_extension_hdrs",
         "@xla//xla/pjrt/c:pjrt_c_api_hdrs",
         "@xla//xla/pjrt/c:pjrt_c_api_profiler_extension_hdrs",
+        "@xla//xla/pjrt/c:pjrt_c_api_triton_extension_hdrs",
     ] + select({
         "@platforms//os:linux": [":dlfcn"],
         "//conditions:default": [],
