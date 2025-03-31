@@ -260,11 +260,9 @@ const CustomCall = struct {
         frame_info.getBufferInfo(buffer, std.io.getStdErr().writer()) catch {};
 
         const callback, const ctx = getContext(call_frame.attrs);
-
         // Add synchronization because this is called from the device driver.
         ctx.mutex.lock();
         defer ctx.mutex.unlock();
-
         const ffi_buffer = call_frame.args.getArgAs(ffi.Buffer, 0);
 
         const MAX_RANK: u8 = 8;

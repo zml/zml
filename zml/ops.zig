@@ -806,7 +806,7 @@ pub fn addHostCallback(
         .{
             .call_target_name = "zmlHostBufferCallback",
             .backend_config = .{ .dict = attrs },
-            .has_side_effect = false,
+            .has_side_effect = true,
             .output_operand_aliases = &.{0},
             .api_version = .typed_ffi,
         },

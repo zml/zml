@@ -164,6 +164,10 @@ pub const Buffer = opaque {
         return self.inner().isOnCpu(api);
     }
 
+    pub fn memory(self: *const Buffer, api: *const Api) *const Memory {
+        return self.inner().memory(api);
+    }
+
     pub fn toHostBuffer(self: *const Buffer, api: *const Api, dst: []u8) ApiError!?*Event {
         return @ptrCast(try self.inner().toHostBuffer(api, dst));
     }
@@ -188,8 +192,8 @@ pub const Buffer = opaque {
         return @ptrCast(self.inner().copyToDevice(api, device));
     }
 
-    pub fn copyToMemory(self: *const Buffer, api: *const Api, memory: *const Memory) ApiError!*Buffer {
-        return @ptrCast(self.inner().copyToMemory(api, memory));
+    pub fn copyToMemory(self: *const Buffer, api: *const Api, memory_: *const Memory) ApiError!*Buffer {
+        return @ptrCast(self.inner().copyToMemory(api, memory_));
     }
 
     pub fn getReadyEvent(self: *const Buffer, api: *const Api) ?*Event {
