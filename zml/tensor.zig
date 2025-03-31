@@ -20,9 +20,7 @@ const Shape = @import("shape.zig").Shape;
 
 const EnumLiteral = @TypeOf(.enum_literal);
 
-const dialect = struct {
-    const stablehlo = @import("mlir/dialects").stablehlo;
-};
+const dialect = @import("mlir/dialects");
 
 const scoped_log = std.log.scoped(.@"zml/tensor");
 
