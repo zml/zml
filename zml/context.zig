@@ -176,10 +176,8 @@ pub const Context = struct {
             log.err("No device found for platform {} !", .{target});
             return error.NoDevicesFound;
         }
-        // TODO: should this be moved to platform.zig ?
-        if (target == .cuda) {
-            try cuda.registerZmlCustomCalls(p);
-        }
+
+        try CustomCall.registerZmlCustomCalls(p);
 
         self.platforms.set(target, p);
         return p;
@@ -217,18 +215,14 @@ pub const Context = struct {
 
     pub const HostCallbackCtx = struct {
         host: HostBuffer,
+        platform: Platform,
         mutex: std.Thread.Mutex = std.Thread.Mutex{},
     };
     pub const HostCallback = fn (HostBuffer) void;
 };
 
-const cuda = struct {
-    var runtime: Runtime = undefined;
-
+const CustomCall = struct {
     pub fn registerZmlCustomCalls(platform: Platform) !void {
-        std.debug.assert(platform.target == .cuda);
-
-        cuda.runtime = try Runtime.init();
         const registry = platform.pjrt_api.customCallRegistry();
 
         if (registry) |reg| {
@@ -237,33 +231,6 @@ const cuda = struct {
             stdx.debug.panic("Registering custom calls failed", .{});
         }
     }
-
-    pub const Stream = opaque {};
-    pub const MemcpyKind = enum(c_int) {
-        host_to_host = 0,
-        host_to_device = 1,
-        device_to_host = 2,
-        device_to_device = 3,
-        default = 4,
-    };
-
-    pub const Runtime = struct {
-        memcpyAsync: MemcpyAsync,
-        streamSynchronize: StreamSynchronize,
-
-        const MemcpyAsync = *const fn (dst: *anyopaque, src: *const anyopaque, count: usize, kind: MemcpyKind, stream: *Stream) callconv(.C) c_int;
-        const StreamSynchronize = *const fn (stream: *Stream) callconv(.C) c_int;
-
-        pub fn init() !Runtime {
-            var cudart = try std.DynLib.open("libcudart.so.12");
-            defer cudart.close();
-
-            return .{
-                .memcpyAsync = cudart.lookup(Runtime.MemcpyAsync, "cudaMemcpyAsync") orelse return error.NotFound,
-                .streamSynchronize = cudart.lookup(Runtime.StreamSynchronize, "cudaStreamSynchronize") orelse return error.NotFound,
-            };
-        }
-    };
 
     fn getContext(attrs: ffi.Attrs) struct { *const Context.HostCallback, *Context.HostCallbackCtx } {
         const context_scalar = attrs.getAttrByNameAs(ffi.Scalar, "context") orelse unreachable;
@@ -292,18 +259,45 @@ const cuda = struct {
         const buffer = call_frame.args.getArgAs(ffi.Buffer, 0);
         frame_info.getBufferInfo(buffer, std.io.getStdErr().writer()) catch {};
 
-        const stream: *Stream = @ptrCast(call_frame.api.?.getStream(call_frame.ctx.?) catch unreachable);
-        const src: *anyopaque = call_frame.args.getArgAs(ffi.Buffer, 0).data.?;
         const callback, const ctx = getContext(call_frame.attrs);
 
         // Add synchronization because this is called from the device driver.
         ctx.mutex.lock();
         defer ctx.mutex.unlock();
-        const host_dst: []u8 = @constCast(ctx.host.data);
-        const memcpy_result = cuda.runtime.memcpyAsync(host_dst.ptr, src, host_dst.len, .device_to_host, stream);
-        _ = memcpy_result;
-        const synchronize_result = cuda.runtime.streamSynchronize(stream);
-        _ = synchronize_result;
+
+        const ffi_buffer = call_frame.args.getArgAs(ffi.Buffer, 0);
+
+        const MAX_RANK: u8 = 8;
+
+        const minor_to_major: [MAX_RANK]i64 = comptime blk: {
+            var res: [MAX_RANK]i64 = undefined;
+            for (0..MAX_RANK) |i| {
+                res[i] = @intCast(MAX_RANK - i - 1);
+            }
+            break :blk res;
+        };
+
+        const pjrt_buffer = ctx.platform.pjrt_client.createViewOfDeviceBuffer2(ctx.platform.pjrt_api, .{
+            .device_buffer_ptr = ffi_buffer.data,
+            .element_type = .F32,
+            .dims = ffi_buffer.dims[0..@as(usize, @intCast(ffi_buffer.rank))],
+            .device = ctx.platform.getDevices()[0],
+            .layout = .{
+                .tiled = .{
+                    .minor_to_major = minor_to_major[@as(usize, MAX_RANK - @as(usize, @intCast(ffi_buffer.rank)))..],
+                    .tile_dims = &.{},
+                    .tile_dims_sizes = &.{},
+                },
+            },
+        }) catch unreachable;
+
+        const event = pjrt_buffer.toHostBuffer(ctx.platform.pjrt_api, @constCast(ctx.host.data)) catch |err| {
+            log.err("Failed to copy buffer to host: {}", .{err});
+            return null;
+        };
+        _ = event; // autofix
+
+        std.debug.print("data: {any}\n", .{ctx.host.data[0..512]});
 
         callback(ctx.host);
         return null;

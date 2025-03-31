@@ -773,7 +773,8 @@ pub fn addHostCallback(
     input: Tensor,
 ) Tensor {
     // TODO: implement addCallback that exposes a pjrt.Buffer, so that the user can decide if they need to copy.
-    if (input.getContext().target() != .cuda) return input;
+    const ctx = input.getContext();
+    // if (ctx.target() != .cuda or ctx.target() != .rocm) return input;
 
     const len = input.byteSize();
     // Reserve memory to be able to log the runtime Buffer later during the computation.
@@ -790,9 +791,8 @@ pub fn addHostCallback(
     const stable_ctx_ptr = fba.allocator().create(HostCallbackCtx) catch unreachable;
     stable_ctx_ptr.* = .{
         .host = HostBuffer.fromBytes(input.shape(), full_data[0..len]),
+        .platform = ctx._platform,
     };
-
-    const ctx = CompilationContext.current();
 
     const attrs = mlir.DictionaryAttribute.init(ctx.mlirCtx(), &.{
         mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "callback"), mlir.IntegerAttribute(.i64).init(ctx.mlirCtx(), @bitCast(@intFromPtr(callback))).as(mlir.Attribute)),
