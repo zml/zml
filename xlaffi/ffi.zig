@@ -1,6 +1,7 @@
 const std = @import("std");
-const stdx = @import("stdx");
+
 const c = @import("c");
+const stdx = @import("stdx");
 
 pub const frame_info = @import("frame_info.zig");
 
@@ -269,9 +270,25 @@ pub const Buffer = extern struct {
     struct_size: usize,
     extension_start: ?*c.XLA_FFI_Extension_Base,
     dtype: DataType,
-    data: ?*anyopaque,
-    rank: i64,
-    dims: [*]i64,
+    data: *anyopaque,
+    rank: u64,
+    _dims: [*]const i64,
+
+    pub fn dims(self: Buffer) []const i64 {
+        return self._dims[0..self.rank];
+    }
+
+    pub fn format(
+        buffer: Buffer,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        _ = options;
+
+        try writer.print("FfiBuffer({d}, .{s})@0x{x}", .{ buffer.dims(), @tagName(buffer.dtype), @intFromPtr(buffer.data) });
+    }
 };
 
 pub const Args = extern struct {
@@ -290,7 +307,7 @@ pub const Args = extern struct {
 pub const Rets = extern struct {
     struct_size: usize,
     extension_start: ?*c.XLA_FFI_Extension_Base,
-    size: i64,
+    size: u64,
     types: [*]ArgType,
     rets: [*]?*anyopaque,
 
@@ -319,6 +336,11 @@ pub const ByteSpan = extern struct {
 pub const Scalar = extern struct {
     dtype: DataType,
     value: *anyopaque,
+
+    pub fn get(self: Scalar, T: type) T {
+        const ptr: *const T = @alignCast(@ptrCast(self.value));
+        return ptr.*;
+    }
 };
 
 pub const Array = extern struct {
@@ -394,7 +416,7 @@ pub const ErrorCode = enum(c.XLA_FFI_Error_Code) {
             .unknown => error.Unknown,
             .invalid_argument => error.InvalidArgument,
             .deadline_exceeded => error.DeadlineExceeded,
-            .not_found => error.NotFound,
+            .not_found => error.FfiNotFound,
             .already_exists => error.AlreadyExists,
             .permission_denied => error.PermissionDenied,
             .resource_exhausted => error.ResourceExhausted,

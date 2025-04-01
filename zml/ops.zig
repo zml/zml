@@ -1,28 +1,31 @@
 const std = @import("std");
+const assert = std.debug.assert;
+
 const stdx = @import("stdx");
 
+const _collectAxes = @import("tensor.zig")._collectAxes;
 const buffer = @import("buffer.zig");
-const helpers = @import("helpers.zig");
-const meta = @import("meta.zig");
-const mlir = @import("mlir.zig");
-const module = @import("module.zig");
-
 const Buffer = buffer.Buffer;
-const CompilationContext = module.CompilationContext;
+const Bufferized = @import("tensor.zig").Bufferized;
 const Context = @import("context.zig").Context;
 const Data = @import("dtype.zig").Data;
 const DataType = @import("dtype.zig").DataType;
-const EnumLiteral = @TypeOf(.enum_literal);
+const helpers = @import("helpers.zig");
 const HostBuffer = @import("hostbuffer.zig").HostBuffer;
+const meta = @import("meta.zig");
+const mlir = @import("mlir.zig");
+const module = @import("module.zig");
+const CompilationContext = module.CompilationContext;
+const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
+const ShapeOf = @import("tensor.zig").ShapeOf;
 const Tensor = @import("tensor.zig").Tensor;
-const _collectAxes = @import("tensor.zig")._collectAxes;
 
+const EnumLiteral = @TypeOf(.enum_literal);
 const dialect = struct {
     const stablehlo = @import("mlir/dialects").stablehlo;
 };
 
-const assert = std.debug.assert;
 const log = std.log.scoped(.@"zml/tensor");
 
 test {
@@ -814,6 +817,57 @@ pub fn addHostCallback(
         loc,
     );
     return Tensor._result(input.shape(), op.result(0));
+}
+
+pub fn addDeviceCallback(
+    comptime callback: Context.DeviceCallback,
+    blkctx: *anyopaque,
+    inputs: []const Tensor,
+    output_shapes: []const Shape,
+) []Tensor {
+    const ctx = CompilationContext.current();
+
+    // Note: this is a bit annoying.
+    // we could serialize the full Platform into the attributes.
+    // Will revisit once we have a better understanding of how device callback should be used.
+    const leaked_platform = std.heap.page_allocator.create(Platform) catch @panic("OOM");
+    leaked_platform.* = ctx._platform;
+    const mlir_ctx = ctx.mlirCtx();
+    const attrs = mlir.DictionaryAttribute.init(ctx.mlirCtx(), &.{
+        .named(mlir_ctx, "callback", .int(mlir_ctx, .u64, @bitCast(@intFromPtr(&callback)))),
+        .named(mlir_ctx, "platform_ptr", .int(mlir_ctx, .u64, @bitCast(@intFromPtr(leaked_platform)))),
+        .named(mlir_ctx, "user_context", .int(mlir_ctx, .u64, @bitCast(@intFromPtr(blkctx)))),
+    });
+
+    const values = stdx.stackSlice(8, mlir.Value, inputs.len);
+    for (inputs, values) |i, *v| {
+        v.* = ctx.getValue(i);
+    }
+    const res_types = stdx.stackSlice(8, mlir.Type, output_shapes.len);
+    for (res_types, output_shapes) |*r, o| {
+        r.* = mlir.ext.RankedTensorType.fromShape(mlir_ctx, o).as(mlir.Type);
+    }
+
+    const loc = ctx.mlirCtx().location(@src());
+    const op = dialect.stablehlo.custom_call(
+        ctx.mlirCtx(),
+        values,
+        .{
+            .call_target_name = "zmlDeviceBufferCallback",
+            .backend_config = .{ .dict = attrs },
+            .has_side_effect = false,
+            .api_version = .typed_ffi,
+        },
+        res_types,
+        loc,
+    );
+
+    const res = ctx.allocator().alloc(Tensor, output_shapes.len) catch @panic("OOM");
+    for (res, output_shapes, 0..) |*r, o, i| {
+        r.* = Tensor._result(o, op.result(i));
+    }
+
+    return res;
 }
 
 pub const TritonOps = struct {

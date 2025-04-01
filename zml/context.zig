@@ -1,23 +1,26 @@
+const std = @import("std");
 const builtin = @import("builtin");
+
 const c = @import("c");
+const ffi = @import("xlaffi");
+const frame_info = ffi.frame_info;
 const mlir = @import("mlir");
 const runfiles = @import("runfiles");
 const runtimes = @import("runtimes");
-const std = @import("std");
 const stdx = @import("stdx");
 
-const zml_platform = @import("platform.zig");
-const pjrt = @import("pjrtx.zig");
-const ffi = @import("xlaffi");
-const frame_info = ffi.frame_info;
-
-const HostBuffer = @import("hostbuffer.zig").HostBuffer;
-const PjrtApiMap = std.EnumArray(Target, ?*const pjrt.Api);
-const Platform = @import("platform.zig").Platform;
-const PlatformsMap = std.EnumArray(Target, ?Platform);
-const Target = @import("platform.zig").Target;
-
 const available_targets = @import("platform.zig").available_targets;
+const Buffer = @import("buffer.zig").Buffer;
+const DataType = @import("dtype.zig").DataType;
+const HostBuffer = @import("hostbuffer.zig").HostBuffer;
+const pjrt = @import("pjrtx.zig");
+const Platform = @import("platform.zig").Platform;
+const Shape = @import("shape.zig").Shape;
+const Target = @import("platform.zig").Target;
+const zml_platform = @import("platform.zig");
+
+const PjrtApiMap = std.EnumArray(Target, ?*const pjrt.Api);
+const PlatformsMap = std.EnumArray(Target, ?Platform);
 const log = std.log.scoped(.@"zml/context");
 
 test {
@@ -219,6 +222,7 @@ pub const Context = struct {
         mutex: std.Thread.Mutex = std.Thread.Mutex{},
     };
     pub const HostCallback = fn (HostBuffer) void;
+    pub const DeviceCallback = fn (Platform, ?*anyopaque, []const Buffer, []Buffer) void;
 };
 
 const CustomCall = struct {
@@ -226,6 +230,7 @@ const CustomCall = struct {
         const registry = platform.pjrt_api.customCallRegistry();
 
         if (registry) |reg| {
+            try reg.registerFfi(platform.pjrt_api, "zmlDeviceBufferCallback", @tagName(platform.target), &deviceBufferCallback);
             try reg.registerFfi(platform.pjrt_api, "zmlHostBufferCallback", @tagName(platform.target), &hostBufferCallback);
         } else {
             stdx.debug.panic("Registering custom calls failed", .{});
@@ -278,7 +283,7 @@ const CustomCall = struct {
         const pjrt_buffer = ctx.platform.pjrt_client.createViewOfDeviceBuffer2(ctx.platform.pjrt_api, .{
             .device_buffer_ptr = ffi_buffer.data,
             .element_type = .F32,
-            .dims = ffi_buffer.dims[0..@as(usize, @intCast(ffi_buffer.rank))],
+            .dims = ffi_buffer.dims(),
             .device = ctx.platform.getDevices()[0],
             .layout = .{
                 .tiled = .{
@@ -298,6 +303,59 @@ const CustomCall = struct {
         std.debug.print("data: {any}\n", .{ctx.host.data[0..512]});
 
         callback(ctx.host);
+        return null;
+    }
+
+    fn deviceBufferCallback(call_frame: *ffi.CallFrame) callconv(.C) ?*ffi.Error {
+        if (call_frame.extension_start != null and call_frame.extension_start.?.type == .metadata) {
+            const metadata_extension: *ffi.MetadataExtension = @fieldParentPtr("extension_base", call_frame.extension_start.?);
+            metadata_extension.metadata.?.api_version.major_version = ffi.ApiVersion.major;
+            metadata_extension.metadata.?.api_version.minor_version = ffi.ApiVersion.minor;
+            return null;
+        }
+
+        // frame_info.printCallFrameInfo(call_frame, std.io.getStdErr().writer()) catch {};
+
+        const callback_scalar = call_frame.attrs.getAttrByNameAs(ffi.Scalar, "callback") orelse unreachable;
+        std.debug.assert(callback_scalar.dtype == .u64);
+        const callback: *const Context.DeviceCallback = @ptrFromInt(callback_scalar.get(usize));
+
+        const platform_ptr = call_frame.attrs.getAttrByNameAs(ffi.Scalar, "platform_ptr") orelse unreachable;
+        std.debug.assert(platform_ptr.dtype == .u64);
+        const platform: *const Platform = @ptrFromInt(platform_ptr.get(usize));
+
+        const user_ctx_ptr = call_frame.attrs.getAttrByNameAs(ffi.Scalar, "user_context") orelse unreachable;
+        std.debug.assert(user_ctx_ptr.dtype == .u64);
+        const user_ctx: ?*anyopaque = @ptrFromInt(user_ctx_ptr.get(usize));
+
+        const n_args: usize = @intCast(call_frame.args.size);
+        const input_buffers = stdx.stackSlice(8, Buffer, n_args);
+        for (input_buffers, 0..) |*b, i| {
+            const buffer_desc = call_frame.args.getArgAs(ffi.Buffer, i);
+            // log.warn("received buffer {}", .{buffer_desc});
+            const dt: DataType = switch (buffer_desc.dtype) {
+                .invalid => @panic("invalid ffi"),
+                .pred => .bool,
+                .s8 => .i8,
+                .s16 => .i16,
+                .s32 => .i32,
+                .s64 => .i64,
+                .token, .f8e4m3, .f8e3m4 => @panic("Unsupported ffi type"),
+                inline else => |t| @field(DataType, @tagName(t)),
+            };
+            const buffer_shape = Shape.init(buffer_desc.dims(), dt);
+
+            b.* = Buffer.asViewOfDeviceBuffer(platform.*, buffer_shape, null, buffer_desc.data);
+        }
+
+        const n_ret = call_frame.rets.size;
+        const output_buffers = stdx.stackSlice(8, Buffer, n_ret);
+        callback(platform.*, user_ctx, input_buffers, output_buffers);
+        for (output_buffers, 0..) |res, i| {
+            const result_ptr = call_frame.rets.getRetAs(ffi.Buffer, i);
+            // log.warn("writing {} to {}", .{ res, result_ptr.* });
+            result_ptr.data = res._shards.get(0).getOpaqueDeviceMemoryDataPointer(res._api) catch @panic("pjrt error");
+        }
         return null;
     }
 };

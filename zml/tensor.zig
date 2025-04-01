@@ -203,6 +203,7 @@ pub const Tensor = struct {
         return switch (self._id) {
             .arg_id, .mlir => {
                 const ctx = self.getContext();
+                if (ctx.target() == .cpu) return self;
                 var res = self;
                 res._output_memory_kind = kind;
 

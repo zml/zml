@@ -47,7 +47,7 @@ pub fn getBufferInfo(buffer: *ffi.Buffer, writer: anytype) !void {
         try writer.print("Dimensions: [", .{});
         for (0..@intCast(buffer.rank)) |i| {
             if (i > 0) try writer.print(", ", .{});
-            try writer.print("{d}", .{buffer.dims[i]});
+            try writer.print("{d}", .{buffer._dims[i]});
         }
         try writer.print("]\n", .{});
     }
