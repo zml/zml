@@ -821,7 +821,7 @@ pub fn addHostCallback(
 
 pub fn addDeviceCallback(
     comptime callback: Context.DeviceCallback,
-    blkctx: *anyopaque,
+    blkctx: ?*anyopaque,
     inputs: []const Tensor,
     output_shapes: []const Shape,
 ) []Tensor {

@@ -1,4 +1,5 @@
 const std = @import("std");
+
 const stdx = @import("stdx");
 
 const Buffer = @import("buffer.zig").Buffer;
@@ -238,6 +239,11 @@ pub const HostBuffer = struct {
             ._strides = if (ax == 0) self._strides else _strides,
             ._memory = .unmanaged,
         };
+    }
+
+    pub fn choose1d(self: HostBuffer, axis_: anytype, start: i64) HostBuffer {
+        const ax = self.axis(axis_);
+        return self.slice1d(ax, .{ .start = start, .end = start + 1 }).squeeze(ax);
     }
 
     pub fn squeeze(self: HostBuffer, axis_: anytype) HostBuffer {

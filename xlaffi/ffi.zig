@@ -270,7 +270,7 @@ pub const Buffer = extern struct {
     struct_size: usize,
     extension_start: ?*c.XLA_FFI_Extension_Base,
     dtype: DataType,
-    data: *anyopaque,
+    data: [*]u8,
     rank: u64,
     _dims: [*]const i64,
 

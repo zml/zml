@@ -222,7 +222,7 @@ pub const Context = struct {
         mutex: std.Thread.Mutex = std.Thread.Mutex{},
     };
     pub const HostCallback = fn (HostBuffer) void;
-    pub const DeviceCallback = fn (Platform, ?*anyopaque, []const Buffer, []Buffer) void;
+    pub const DeviceCallback = fn (Platform, ?*anyopaque, []const HostBuffer, []Buffer) void;
 };
 
 const CustomCall = struct {
@@ -329,7 +329,7 @@ const CustomCall = struct {
         const user_ctx: ?*anyopaque = @ptrFromInt(user_ctx_ptr.get(usize));
 
         const n_args: usize = @intCast(call_frame.args.size);
-        const input_buffers = stdx.stackSlice(8, Buffer, n_args);
+        const input_buffers = stdx.stackSlice(8, HostBuffer, n_args);
         for (input_buffers, 0..) |*b, i| {
             const buffer_desc = call_frame.args.getArgAs(ffi.Buffer, i);
             // log.warn("received buffer {}", .{buffer_desc});
@@ -345,7 +345,7 @@ const CustomCall = struct {
             };
             const buffer_shape = Shape.init(buffer_desc.dims(), dt);
 
-            b.* = Buffer.asViewOfDeviceBuffer(platform.*, buffer_shape, null, buffer_desc.data);
+            b.* = HostBuffer.fromBytes(buffer_shape, buffer_desc.data[0..buffer_shape.byteSize()]);
         }
 
         const n_ret = call_frame.rets.size;
@@ -354,7 +354,7 @@ const CustomCall = struct {
         for (output_buffers, 0..) |res, i| {
             const result_ptr = call_frame.rets.getRetAs(ffi.Buffer, i);
             // log.warn("writing {} to {}", .{ res, result_ptr.* });
-            result_ptr.data = res._shards.get(0).getOpaqueDeviceMemoryDataPointer(res._api) catch @panic("pjrt error");
+            result_ptr.data = @ptrCast(res._shards.get(0).getOpaqueDeviceMemoryDataPointer(res._api) catch @panic("pjrt error"));
         }
         return null;
     }
