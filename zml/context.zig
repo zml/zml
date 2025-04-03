@@ -257,13 +257,6 @@ const CustomCall = struct {
             return null;
         }
 
-        // Print frame info to stderr
-        frame_info.printCallFrameInfo(call_frame, std.io.getStdErr().writer()) catch {};
-
-        // If you have a buffer argument:
-        const buffer = call_frame.args.getArgAs(ffi.Buffer, 0);
-        frame_info.getBufferInfo(buffer, std.io.getStdErr().writer()) catch {};
-
         const callback, const ctx = getContext(call_frame.attrs);
         // Add synchronization because this is called from the device driver.
         ctx.mutex.lock();
@@ -299,8 +292,6 @@ const CustomCall = struct {
             return null;
         };
         _ = event; // autofix
-
-        std.debug.print("data: {any}\n", .{ctx.host.data[0..512]});
 
         callback(ctx.host);
         return null;
