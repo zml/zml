@@ -182,7 +182,8 @@ pub const Tensor = struct {
                     .{
                         .call_target_name = "Sharding",
                         .has_side_effect = false,
-                        .addional_attributes = &.{.{ "mhlo.sharding", ctx.getShardingAttr(res._shape) }},
+                        .backend_config = null,
+                        .additional_attributes = &.{.{ "mhlo.sharding", ctx.getShardingAttr(res._shape) }},
                         .api_version = .original,
                     },
                     &.{self.value().getType()},
@@ -207,7 +208,7 @@ pub const Tensor = struct {
                 var res = self;
                 res._output_memory_kind = kind;
 
-                const memory_kind = mlir.StringAttribute.init(ctx.mlirCtx(), @tagName(kind.toPjrtMemory()));
+                const memory_kind = @tagName(kind.toPjrtMemory());
 
                 const op = dialect.stablehlo.annotate_device_placement(
                     ctx.mlirCtx(),

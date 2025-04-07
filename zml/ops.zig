@@ -777,20 +777,19 @@ pub fn addHostCallback(
 ) Tensor {
     // TODO: implement addCallback that exposes a pjrt.Buffer, so that the user can decide if they need to copy.
     const ctx = input.getContext();
+    const mlir_ctx = ctx.mlirCtx();
     // if (ctx.target() != .cuda or ctx.target() != .rocm) return input;
-
-    const attrs = mlir.DictionaryAttribute.init(ctx.mlirCtx(), &.{
-        .named(ctx.mlirCtx(), "callback", .int(ctx.mlirCtx(), .u64, @bitCast(@intFromPtr(callback)))),
-    });
 
     const loc = ctx.location(@src(), "addHostCallback({_})", .{input});
     const op = dialect.stablehlo.custom_call(
-        ctx.mlirCtx(),
+        mlir_ctx,
         // Put the tensor in pinned memory so that we can directly read it from the host.
         &.{input.toMemory(.host_pinned).value()},
         .{
             .call_target_name = "zmlHostBufferCallback",
-            .backend_config = .{ .dict = attrs },
+            .backend_config = .dict(mlir_ctx, &.{
+                .{ "callback", .int(mlir_ctx, .u64, @bitCast(@intFromPtr(callback))) },
+            }),
             .has_side_effect = true,
             .output_operand_aliases = &.{0},
             .api_version = .typed_ffi,
@@ -815,10 +814,10 @@ pub fn addDeviceCallback(
     const leaked_platform = std.heap.page_allocator.create(Platform) catch @panic("OOM");
     leaked_platform.* = ctx._platform;
     const mlir_ctx = ctx.mlirCtx();
-    const attrs = mlir.DictionaryAttribute.init(ctx.mlirCtx(), &.{
-        .named(mlir_ctx, "callback", .int(mlir_ctx, .u64, @bitCast(@intFromPtr(&callback)))),
-        .named(mlir_ctx, "platform_ptr", .int(mlir_ctx, .u64, @bitCast(@intFromPtr(leaked_platform)))),
-        .named(mlir_ctx, "user_context", .int(mlir_ctx, .u64, @bitCast(@intFromPtr(blkctx)))),
+    const backend_config = mlir.Attribute.dict(mlir_ctx, &.{
+        .{ "callback", .int(mlir_ctx, .u64, @bitCast(@intFromPtr(&callback))) },
+        .{ "platform_ptr", .int(mlir_ctx, .u64, @bitCast(@intFromPtr(leaked_platform))) },
+        .{ "user_context", .int(mlir_ctx, .u64, @bitCast(@intFromPtr(blkctx))) },
     });
 
     const values = stdx.stackSlice(8, mlir.Value, inputs.len);
@@ -836,7 +835,7 @@ pub fn addDeviceCallback(
         values,
         .{
             .call_target_name = "zmlDeviceBufferCallback",
-            .backend_config = .{ .dict = attrs },
+            .backend_config = backend_config,
             .has_side_effect = false,
             .api_version = .typed_ffi,
         },
@@ -873,46 +872,32 @@ pub fn triton(inputs: anytype, outputs: anytype, opts: TritonOps) [outputs.len]T
         res_types[i] = mlir.ext.mlirType(ctx.mlirCtx(), output);
     }
 
-    const attrs = mlir.DictionaryAttribute.init(ctx.mlirCtx(), &.{
-        .named(ctx.mlirCtx(), "name", .string(ctx.mlirCtx(), opts.name)),
-        .named(ctx.mlirCtx(), "ir", .string(ctx.mlirCtx(), opts.ir)),
-        .named(ctx.mlirCtx(), "grid_x", .int(ctx.mlirCtx(), .i32, opts.grid[0])),
-        .named(ctx.mlirCtx(), "grid_y", .int(ctx.mlirCtx(), .i32, opts.grid[1])),
-        .named(ctx.mlirCtx(), "grid_z", .int(ctx.mlirCtx(), .i32, opts.grid[2])),
-        .named(ctx.mlirCtx(), "num_stages", .int(ctx.mlirCtx(), .i32, opts.num_stages)),
-        .named(ctx.mlirCtx(), "num_warps", .int(ctx.mlirCtx(), .i32, opts.num_warps)),
+    const backend_config = mlir.Attribute.dict(ctx.mlirCtx(), &.{
+        .{ "name", .string(ctx.mlirCtx(), opts.name) },
+        .{ "ir", .string(ctx.mlirCtx(), opts.ir) },
+        .{ "grid_x", .int(ctx.mlirCtx(), .i32, opts.grid[0]) },
+        .{ "grid_y", .int(ctx.mlirCtx(), .i32, opts.grid[1]) },
+        .{ "grid_z", .int(ctx.mlirCtx(), .i32, opts.grid[2]) },
+        .{ "num_stages", .int(ctx.mlirCtx(), .i32, opts.num_stages) },
+        .{ "num_warps", .int(ctx.mlirCtx(), .i32, opts.num_warps) },
     });
 
-    const MINOR_TO_MAJOR = blk: {
-        var ret: [Shape.MAX_RANK]usize = undefined;
-        for (0..Shape.MAX_RANK) |i| {
-            ret[i] = @intCast(Shape.MAX_RANK - i - 1);
-        }
-        break :blk ret;
-    };
+    var operands_layouts: [inputs.len][]const usize = undefined;
+    inline for (inputs, 0..) |input, i| {
+        operands_layouts[i] = minorToMajor(input.rank());
+    }
 
-    const operands_layouts = blk: {
-        var ret: [inputs.len][]const usize = undefined;
-        inline for (inputs, 0..) |input, i| {
-            ret[i] = MINOR_TO_MAJOR[MINOR_TO_MAJOR.len - input.rank() ..];
-        }
-        break :blk ret;
-    };
-
-    const results_layouts = blk: {
-        var ret: [outputs.len][]const usize = undefined;
-        inline for (outputs, 0..) |output, i| {
-            ret[i] = MINOR_TO_MAJOR[MINOR_TO_MAJOR.len - output.rank() ..];
-        }
-        break :blk ret;
-    };
+    var results_layouts: [outputs.len][]const usize = undefined;
+    inline for (outputs, 0..) |output, i| {
+        results_layouts[i] = minorToMajor(output.rank());
+    }
 
     const op = dialect.stablehlo.custom_call(
         ctx.mlirCtx(),
         &values,
         .{
             .call_target_name = "__gpu$xla.gpu.triton",
-            .backend_config = .{ .dict = attrs },
+            .backend_config = backend_config,
             .has_side_effect = false,
             .api_version = .typed_ffi,
             .operand_layouts = &operands_layouts,
@@ -1293,4 +1278,16 @@ inline fn toI64(values: anytype) []i64 {
     var res: [Tensor.MAX_RANK]i64 = undefined;
     for (values, 0..) |val, i| res[i] = @intCast(val);
     return res[0..values.len];
+}
+
+const _MINOR_TO_MAJOR = blk: {
+    var ret: [Shape.MAX_RANK]usize = undefined;
+    for (0..Shape.MAX_RANK) |i| {
+        ret[i] = @intCast(Shape.MAX_RANK - i - 1);
+    }
+    break :blk ret;
+};
+
+fn minorToMajor(rank: u8) []const usize {
+    return _MINOR_TO_MAJOR[_MINOR_TO_MAJOR.len - rank ..];
 }
