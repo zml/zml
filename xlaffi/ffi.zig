@@ -7,22 +7,6 @@ pub const frame_info = @import("frame_info.zig");
 
 const log = std.log.scoped(.ffi);
 
-fn ffiStructSize(comptime T: type) usize {
-    // unsafe on purpose, we want this to fail if that ever changes
-    const typedef_name = comptime blk: {
-        const needle = ".struct_";
-        const idx = std.mem.indexOf(u8, @typeName(T), needle).?;
-        break :blk @typeName(T)[idx + needle.len ..];
-    };
-    return @field(c, typedef_name ++ "_STRUCT_SIZE");
-}
-
-pub inline fn ffiStruct(v: anytype) @TypeOf(v) {
-    var ret = v;
-    ret.struct_size = ffiStructSize(@TypeOf(v));
-    return ret;
-}
-
 pub const ApiVersion = extern struct {
     pub const major = c.XLA_FFI_API_MAJOR;
     pub const minor = c.XLA_FFI_API_MINOR;
@@ -100,7 +84,7 @@ pub const Api = opaque {
     pub const inner = TransmuteMixin(Api, c.XLA_FFI_Api).to;
 
     pub fn getStream(self: *const Api, context: ?*ExecutionContext) ApiError!*anyopaque {
-        var ret = ffiStruct(c.XLA_FFI_Stream_Get_Args{
+        var ret = ffiStruct(c.XLA_FFI_Stream_Get_Args, .{
             .ctx = if (context) |ctx| ctx.inner() else null,
         });
         const result = self.inner().XLA_FFI_Stream_Get.?(&ret);
@@ -118,7 +102,7 @@ pub const Api = opaque {
     }
 
     pub fn allocateDeviceMemory(self: *const Api, context: ?*ExecutionContext, size: usize, alignment: usize) ApiError!*anyopaque {
-        var ret = ffiStruct(c.XLA_FFI_DeviceMemory_Allocate_Args{
+        var ret = ffiStruct(c.XLA_FFI_DeviceMemory_Allocate_Args, .{
             .ctx = if (context) |ctx| ctx.inner() else null,
             .size = size,
             .alignment = alignment,
@@ -138,7 +122,7 @@ pub const Api = opaque {
     }
 
     pub fn freeDeviceMemory(self: *const Api, context: ?*ExecutionContext, data: *anyopaque, size: usize) ApiError!void {
-        var ret = ffiStruct(c.XLA_FFI_DeviceMemory_Free_Args{
+        var ret = ffiStruct(c.XLA_FFI_DeviceMemory_Free_Args, .{
             .ctx = if (context) |ctx| ctx.inner() else null,
             .size = size,
             .data = data,
@@ -177,13 +161,13 @@ pub const ExecutionContext = opaque {
     //     // register type id ==> typeid
     //     const typename_ = "zml." ++ @typeName(@TypeOf(value));
 
-    //     var ret = ffiStruct(c.XLA_FFI_ExecutionContext_Register_Args{
+    //     var ret = ffiStruct(c.XLA_FFI_ExecutionContext_Register_Args, .{
     //         .ctx = self.inner(),
     //         .handler = @ptrCast(@alignCast(handler)),
     //     });
     //     const result = api.inner().XLA_FFI_ExecutionContext_Register.?(&ret);
 
-    //     var ret = ffiStruct(c.XLA_FFI_ExecutionContext_Register_Args{
+    //     var ret = ffiStruct(c.XLA_FFI_ExecutionContext_Register_Args, .{
     //         .ctx = self.inner(),
     //         .handler = @ptrCast(@alignCast(handler)),
     //     });
@@ -200,7 +184,7 @@ pub const ExecutionContext = opaque {
     // }
 
     pub fn get(self: *ExecutionContext, api: *const Api, type_id: *TypeId) ApiError!*anyopaque {
-        var ret = ffiStruct(c.XLA_FFI_ExecutionContext_Get_Args{
+        var ret = ffiStruct(c.XLA_FFI_ExecutionContext_Get_Args, .{
             .ctx = self.inner(),
             .type_id = @ptrCast(@alignCast(type_id)),
         });
@@ -223,22 +207,6 @@ pub const ExecutionContext = opaque {
 
 pub const TypeId = extern struct {
     type_id: i64,
-};
-
-pub const ArgType = enum(c.XLA_FFI_ArgType) {
-    buffer = c.XLA_FFI_ArgType_BUFFER,
-};
-
-pub const RetType = enum(c.XLA_FFI_RetType) {
-    buffer = c.XLA_FFI_RetType_BUFFER,
-};
-
-pub const Arg = union(ArgType) {
-    buffer: Buffer,
-};
-
-pub const Ret = union(ArgType) {
-    buffer: Buffer,
 };
 
 pub const DataType = enum(c.XLA_FFI_DataType) {
@@ -296,26 +264,34 @@ pub const Buffer = extern struct {
 pub const Args = extern struct {
     struct_size: usize,
     extension_start: ?*const c.XLA_FFI_Extension_Base,
-    size: i64,
-    types: [*]const ArgType,
-    args: [*]?*const anyopaque,
+    len: u64,
+    types: [*]const Type,
+    ptr: [*]*const Buffer,
 
-    pub fn getArgAs(self: Args, comptime T: type, index: usize) *const T {
-        if (index > @as(usize, @intCast(self.size))) @panic("Index out of bound");
-        return @ptrCast(@alignCast(self.args[index].?));
+    pub const Type = enum(c.XLA_FFI_ArgType) {
+        buffer = c.XLA_FFI_ArgType_BUFFER,
+    };
+
+    pub fn get(self: Args, i: usize) *const Buffer {
+        std.debug.assert(self.types[0..self.len][i] == .buffer);
+        return self.ptr[0..self.len][i];
     }
 };
 
 pub const Rets = extern struct {
     struct_size: usize,
     extension_start: ?*const c.XLA_FFI_Extension_Base,
-    size: u64,
-    types: [*]const ArgType,
-    rets: [*]?*const anyopaque,
+    len: u64,
+    types: [*]const Type,
+    ptr: [*]*const Buffer,
 
-    pub fn getRetAs(self: Rets, comptime T: type, index: usize) *const T {
-        if (index > @as(usize, @intCast(self.size))) @panic("Index out of bound");
-        return @ptrCast(@alignCast(self.rets[index].?));
+    pub const Type = enum(c.XLA_FFI_RetType) {
+        buffer = c.XLA_FFI_RetType_BUFFER,
+    };
+
+    pub fn get(self: Rets, i: usize) *const Buffer {
+        std.debug.assert(self.types[0..self.len][i] == .buffer);
+        return self.ptr[0..self.len][i];
     }
 };
 
@@ -326,57 +302,60 @@ pub const AttrType = enum(c.XLA_FFI_AttrType) {
     string = c.XLA_FFI_AttrType_STRING,
 };
 
-pub const ByteSpan = extern struct {
-    ptr: [*]const u8,
-    len: usize,
-
-    pub fn slice(self: ByteSpan) []const u8 {
-        return self.ptr[0..self.len];
-    }
-};
-
-pub const Scalar = extern struct {
-    dtype: DataType,
-    value: *anyopaque,
-
-    pub fn get(self: Scalar, T: type) T {
-        const ptr: *const T = @alignCast(@ptrCast(self.value));
-        return ptr.*;
-    }
-};
-
-pub const Array = extern struct {
-    dtype: DataType,
-    size: usize,
-    data: [*]anyopaque,
-};
-
 pub const Attrs = extern struct {
     struct_size: usize,
     extension_start: ?*ExtensionBase,
-    size: i64,
+    len: u64,
     types: [*]AttrType,
-    names: [*]*ByteSpan,
-    attrs: [*]?*anyopaque,
+    names: [*]*ByteSlice,
+    ptr: [*]*Attr,
 
-    pub fn getAttrAs(self: Attrs, comptime T: type, index: usize) *T {
-        if (index > @as(usize, @intCast(self.size))) @panic("Index out of bound");
-        return @ptrCast(@alignCast(self.attrs[index].?));
+    const Attr = extern union {
+        scalar: Scalar,
+        array: Array,
+    };
+
+    pub const Scalar = extern struct {
+        dtype: DataType,
+        value: *anyopaque,
+
+        pub fn get(self: Scalar, T: type) T {
+            const ptr: *const T = @alignCast(@ptrCast(self.value));
+            return ptr.*;
+        }
+    };
+
+    pub const Array = extern struct {
+        dtype: DataType,
+        len: usize,
+        data: [*]const u8,
+    };
+
+    const ByteSlice = extern struct {
+        ptr: [*]const u8,
+        len: usize,
+
+        pub fn slice(self: ByteSlice) []const u8 {
+            return self.ptr[0..self.len];
+        }
+    };
+
+    pub fn getByIndex(self: Attrs, comptime attr_type: AttrType, index: usize) ?*const @FieldType(Attr, @tagName(attr_type)) {
+        const attr = self.ptr[0..self.len][index];
+        const actual_type = self.types[index];
+        if (actual_type != attr_type) return null;
+        return @ptrCast(attr);
     }
 
-    pub fn getName(self: Attrs, index: usize) []const u8 {
-        if (index > @as(usize, @intCast(self.size))) @panic("Index out of bound");
-        const span = self.names[index].*;
-        return span.ptr[0..span.len];
-    }
+    pub fn getByName(self: Attrs, comptime attr_type: AttrType, name: []const u8) ?*const @FieldType(Attr, @tagName(attr_type)) {
+        const names = self.names[0..self.len];
+        for (0.., names) |i, attr_name| {
+            if (std.mem.eql(u8, attr_name.slice(), name)) {
+                return self.getByIndex(attr_type, i);
+            }
+        }
 
-    pub fn getAttrByNameAs(self: Attrs, comptime T: type, name: []const u8) ?*T {
-        const index: usize = for (0..@intCast(self.size)) |index| {
-            const attr_name = self.names[index].slice();
-            if (std.mem.eql(u8, attr_name, name)) break index;
-        } else return null;
-
-        return self.getAttrAs(T, index);
+        return null;
     }
 };
 
@@ -387,9 +366,22 @@ pub const CallFrame = extern struct {
     ctx: ?*const ExecutionContext,
     stage: ExecutionStage,
     args: Args,
-    rets: Rets,
+    results: Rets,
     attrs: Attrs,
     future: ?*Future,
+
+    /// The registery mechanism will first call the custom call in registration mode,
+    /// and expects us to indicate which version of XLA we have been compiled against.
+    /// Returns true if we registered ourselves and if the caller custom call should return early.
+    pub fn registeringHook(call_frame: *CallFrame) bool {
+        if (call_frame.extension_start != null and call_frame.extension_start.?.type == .metadata) {
+            const metadata_extension: *MetadataExtension = @fieldParentPtr("extension_base", call_frame.extension_start.?);
+            metadata_extension.metadata.?.api_version.major_version = ApiVersion.major;
+            metadata_extension.metadata.?.api_version.minor_version = ApiVersion.minor;
+            return true;
+        }
+        return false;
+    }
 };
 
 pub const Handler = fn (*CallFrame) callconv(.C) ?*Error;
@@ -439,7 +431,7 @@ pub const Error = opaque {
     pub const fromInner = TransmuteMixin(Error, c.XLA_FFI_Error).from;
 
     pub fn create(api: *const Api, error_code: ErrorCode, message: [:0]const u8) *Error {
-        var ret = ffiStruct(c.XLA_FFI_Error_Create_Args{
+        var ret = ffiStruct(c.XLA_FFI_Error_Create_Args, .{
             .message = message.ptr,
             .errc = @intFromEnum(error_code),
         });
@@ -447,12 +439,12 @@ pub const Error = opaque {
     }
 
     pub fn destroy(err: *Error, api: *const Api) void {
-        var ret = ffiStruct(c.XLA_FFI_Error_Destroy_Args{ .@"error" = err.inner() });
+        var ret = ffiStruct(c.XLA_FFI_Error_Destroy_Args, .{ .@"error" = err.inner() });
         api.inner().XLA_FFI_Error_Destroy.?(&ret);
     }
 
     pub fn getMessage(err: *Error, api: *const Api) [:0]const u8 {
-        var ret = ffiStruct(c.XLA_FFI_Error_GetMessage_Args{
+        var ret = ffiStruct(c.XLA_FFI_Error_GetMessage_Args, .{
             .@"error" = err.inner(),
         });
         api.inner().XLA_FFI_Error_GetMessage.?(&ret);
@@ -465,7 +457,7 @@ pub const Future = opaque {
     pub const fromInner = TransmuteMixin(Future, c.XLA_FFI_Future).from;
 
     pub fn create(api: *const Api) ApiError!*Future {
-        var ret = ffiStruct(c.XLA_FFI_Future_Create_Args{});
+        var ret = ffiStruct(c.XLA_FFI_Future_Create_Args, .{});
         const result = api.inner().XLA_FFI_Future_Create.?(&ret);
 
         if (result) |ffi_error| {
@@ -481,7 +473,7 @@ pub const Future = opaque {
     }
 
     pub fn setAvailable(self: *Future, api: *const Api) ApiError!void {
-        var ret = ffiStruct(c.XLA_FFI_Future_SetAvailable_Args{
+        var ret = ffiStruct(c.XLA_FFI_Future_SetAvailable_Args, .{
             .future = self.inner(),
         });
 
@@ -498,7 +490,7 @@ pub const Future = opaque {
     }
 
     pub fn setError(self: *Future, api: *const Api, err: *Error) ApiError!void {
-        var ret = ffiStruct(c.XLA_FFI_Future_SetError_Args{
+        var ret = ffiStruct(c.XLA_FFI_Future_SetError_Args, .{
             .future = self.inner(),
             .@"error" = err.inner(),
         });
@@ -515,3 +507,19 @@ pub const Future = opaque {
         }
     }
 };
+
+fn ffiStructSize(comptime T: type) usize {
+    // unsafe on purpose, we want this to fail if that ever changes
+    const typedef_name = comptime blk: {
+        const needle = ".struct_";
+        const idx = std.mem.indexOf(u8, @typeName(T), needle).?;
+        break :blk @typeName(T)[idx + needle.len ..];
+    };
+    return @field(c, typedef_name ++ "_STRUCT_SIZE");
+}
+
+pub fn ffiStruct(T: type, v: anytype) T {
+    var ret = v;
+    ret.struct_size = ffiStructSize(T);
+    return ret;
+}

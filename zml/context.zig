@@ -233,16 +233,10 @@ const CustomCall = struct {
     }
 
     fn hostBufferCallback(call_frame: *ffi.CallFrame) callconv(.C) ?*ffi.Error {
-        if (call_frame.extension_start != null and call_frame.extension_start.?.type == .metadata) {
-            const metadata_extension: *ffi.MetadataExtension = @fieldParentPtr("extension_base", call_frame.extension_start.?);
-            metadata_extension.metadata.?.api_version.major_version = ffi.ApiVersion.major;
-            metadata_extension.metadata.?.api_version.minor_version = ffi.ApiVersion.minor;
-            return null;
-        }
+        if (call_frame.registeringHook()) return null;
 
-        const ffi_buffer = call_frame.args.getArgAs(ffi.Buffer, 0);
-
-        const callback_scalar = call_frame.attrs.getAttrByNameAs(ffi.Scalar, "callback") orelse unreachable;
+        const ffi_buffer = call_frame.args.get(0);
+        const callback_scalar = call_frame.attrs.getByName(.scalar, "callback") orelse unreachable;
         std.debug.assert(callback_scalar.dtype == .u64);
         const callback: *const Context.HostCallback = @ptrFromInt(callback_scalar.get(usize));
 
@@ -251,33 +245,24 @@ const CustomCall = struct {
     }
 
     fn deviceBufferCallback(call_frame: *ffi.CallFrame) callconv(.C) ?*ffi.Error {
-        if (call_frame.extension_start != null and call_frame.extension_start.?.type == .metadata) {
-            const metadata_extension: *ffi.MetadataExtension = @fieldParentPtr("extension_base", call_frame.extension_start.?);
-            metadata_extension.metadata.?.api_version.major_version = ffi.ApiVersion.major;
-            metadata_extension.metadata.?.api_version.minor_version = ffi.ApiVersion.minor;
-            return null;
-        }
+        if (call_frame.registeringHook()) return null;
 
-        const callback_attr = call_frame.attrs.getAttrByNameAs(ffi.Scalar, "callback") orelse unreachable;
+        const callback_attr = call_frame.attrs.getByName(.scalar, "callback") orelse unreachable;
         std.debug.assert(callback_attr.dtype == .u64);
         const callback: *const Context.DeviceCallback = @ptrFromInt(callback_attr.get(usize));
 
-        const user_ctx_ptr = call_frame.attrs.getAttrByNameAs(ffi.Scalar, "user_context") orelse unreachable;
+        const user_ctx_ptr = call_frame.attrs.getByName(.scalar, "user_context") orelse unreachable;
         std.debug.assert(user_ctx_ptr.dtype == .u64);
         const user_ctx: ?*anyopaque = @ptrFromInt(user_ctx_ptr.get(usize));
 
-        const n_args: usize = @intCast(call_frame.args.size);
-        const input_buffers = stdx.stackSlice(8, HostBuffer, n_args);
+        const input_buffers = stdx.stackSlice(8, HostBuffer, call_frame.args.len);
         for (input_buffers, 0..) |*b, i| {
-            const buffer_desc = call_frame.args.getArgAs(ffi.Buffer, i);
-            b.* = hostBufferFromPinnedBuffer(buffer_desc);
+            b.* = hostBufferFromPinnedBuffer(call_frame.args.get(i));
         }
 
-        const n_ret = call_frame.rets.size;
-        const output_buffers = stdx.stackSlice(8, HostBuffer, n_ret);
+        const output_buffers = stdx.stackSlice(8, HostBuffer, call_frame.results.len);
         for (output_buffers, 0..) |*b, i| {
-            const buffer_desc = call_frame.rets.getRetAs(ffi.Buffer, i);
-            b.* = hostBufferFromPinnedBuffer(buffer_desc);
+            b.* = hostBufferFromPinnedBuffer(call_frame.results.get(i));
         }
 
         callback(user_ctx, input_buffers, output_buffers);
