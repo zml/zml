@@ -217,6 +217,8 @@ pub const ExecutionContext = opaque {
 
         return ret.data.?;
     }
+
+    // TODO getDeviceOrdinal()
 };
 
 pub const TypeId = extern struct {
@@ -293,12 +295,12 @@ pub const Buffer = extern struct {
 
 pub const Args = extern struct {
     struct_size: usize,
-    extension_start: ?*c.XLA_FFI_Extension_Base,
+    extension_start: ?*const c.XLA_FFI_Extension_Base,
     size: i64,
-    types: [*]ArgType,
-    args: [*]?*anyopaque,
+    types: [*]const ArgType,
+    args: [*]?*const anyopaque,
 
-    pub fn getArgAs(self: Args, comptime T: type, index: usize) *T {
+    pub fn getArgAs(self: Args, comptime T: type, index: usize) *const T {
         if (index > @as(usize, @intCast(self.size))) @panic("Index out of bound");
         return @ptrCast(@alignCast(self.args[index].?));
     }
@@ -306,12 +308,12 @@ pub const Args = extern struct {
 
 pub const Rets = extern struct {
     struct_size: usize,
-    extension_start: ?*c.XLA_FFI_Extension_Base,
+    extension_start: ?*const c.XLA_FFI_Extension_Base,
     size: u64,
-    types: [*]ArgType,
-    rets: [*]?*anyopaque,
+    types: [*]const ArgType,
+    rets: [*]?*const anyopaque,
 
-    pub fn getRetAs(self: Rets, comptime T: type, index: usize) *T {
+    pub fn getRetAs(self: Rets, comptime T: type, index: usize) *const T {
         if (index > @as(usize, @intCast(self.size))) @panic("Index out of bound");
         return @ptrCast(@alignCast(self.rets[index].?));
     }
@@ -382,7 +384,7 @@ pub const CallFrame = extern struct {
     struct_size: usize,
     extension_start: ?*ExtensionBase,
     api: ?*const Api,
-    ctx: ?*ExecutionContext,
+    ctx: ?*const ExecutionContext,
     stage: ExecutionStage,
     args: Args,
     rets: Rets,

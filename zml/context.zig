@@ -217,7 +217,7 @@ pub const Context = struct {
     }
 
     pub const HostCallback = fn (HostBuffer) void;
-    pub const DeviceCallback = fn (Platform, ?*anyopaque, []const HostBuffer, []Buffer) void;
+    pub const DeviceCallback = fn (?*anyopaque, []const HostBuffer, []const HostBuffer) void;
 };
 
 const CustomCall = struct {
@@ -258,15 +258,9 @@ const CustomCall = struct {
             return null;
         }
 
-        // frame_info.printCallFrameInfo(call_frame, std.io.getStdErr().writer()) catch {};
-
-        const callback_scalar = call_frame.attrs.getAttrByNameAs(ffi.Scalar, "callback") orelse unreachable;
-        std.debug.assert(callback_scalar.dtype == .u64);
-        const callback: *const Context.DeviceCallback = @ptrFromInt(callback_scalar.get(usize));
-
-        const platform_ptr = call_frame.attrs.getAttrByNameAs(ffi.Scalar, "platform_ptr") orelse unreachable;
-        std.debug.assert(platform_ptr.dtype == .u64);
-        const platform: *const Platform = @ptrFromInt(platform_ptr.get(usize));
+        const callback_attr = call_frame.attrs.getAttrByNameAs(ffi.Scalar, "callback") orelse unreachable;
+        std.debug.assert(callback_attr.dtype == .u64);
+        const callback: *const Context.DeviceCallback = @ptrFromInt(callback_attr.get(usize));
 
         const user_ctx_ptr = call_frame.attrs.getAttrByNameAs(ffi.Scalar, "user_context") orelse unreachable;
         std.debug.assert(user_ctx_ptr.dtype == .u64);
@@ -280,16 +274,13 @@ const CustomCall = struct {
         }
 
         const n_ret = call_frame.rets.size;
-        const output_buffers = stdx.stackSlice(8, Buffer, n_ret);
-
-        callback(platform.*, user_ctx, input_buffers, output_buffers);
-        for (output_buffers, 0..) |res, i| {
-            const result_ptr = call_frame.rets.getRetAs(ffi.Buffer, i);
-            const expected = getShape(result_ptr);
-            stdx.debug.assert(expected.eql(res.shape()), "User defined callback return tensors of shape different than the registered shape. Expected {}, got {}", .{ expected, res });
-            // log.warn("writing {} to {}", .{ res, result_ptr.* });
-            result_ptr.data = @ptrCast(res._shards.get(0).getOpaqueDeviceMemoryDataPointer(res._api) catch @panic("pjrt error"));
+        const output_buffers = stdx.stackSlice(8, HostBuffer, n_ret);
+        for (output_buffers, 0..) |*b, i| {
+            const buffer_desc = call_frame.rets.getRetAs(ffi.Buffer, i);
+            b.* = hostBufferFromPinnedBuffer(buffer_desc);
         }
+
+        callback(user_ctx, input_buffers, output_buffers);
         return null;
     }
 };

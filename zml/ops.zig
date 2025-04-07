@@ -808,15 +808,9 @@ pub fn addDeviceCallback(
 ) []Tensor {
     const ctx = CompilationContext.current();
 
-    // Note: this is a bit annoying.
-    // we could serialize the full Platform into the attributes.
-    // Will revisit once we have a better understanding of how device callback should be used.
-    const leaked_platform = std.heap.page_allocator.create(Platform) catch @panic("OOM");
-    leaked_platform.* = ctx._platform;
     const mlir_ctx = ctx.mlirCtx();
     const backend_config = mlir.Attribute.dict(mlir_ctx, &.{
         .{ "callback", .int(mlir_ctx, .u64, @bitCast(@intFromPtr(&callback))) },
-        .{ "platform_ptr", .int(mlir_ctx, .u64, @bitCast(@intFromPtr(leaked_platform))) },
         .{ "user_context", .int(mlir_ctx, .u64, @bitCast(@intFromPtr(blkctx))) },
     });
 

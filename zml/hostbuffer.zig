@@ -99,6 +99,13 @@ pub const HostBuffer = struct {
         };
     }
 
+    /// Returns a HostBuffer tagged with the tags in 'tagz'.
+    pub fn withTags(self: HostBuffer, tagz: anytype) HostBuffer {
+        var res = self;
+        res._shape = self._shape.withTags(tagz);
+        return res;
+    }
+
     pub const ArangeArgs = struct {
         start: i64 = 0,
         end: i64,

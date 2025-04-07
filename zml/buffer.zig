@@ -223,7 +223,7 @@ pub const Buffer = struct {
     /// and it might not work on all platforms,
     /// could lead to crashes and operations on the buffer will be slower.
     /// Tested on Cuda 12.4.
-    pub fn asViewOfHostBuffer(platform: Platform, buf: HostBuffer) !Buffer {
+    pub fn asViewOfHostBuffer(platform: Platform, buf: HostBuffer) Buffer {
         return asViewOfDeviceBuffer(platform, buf.shape(), null, @constCast(@ptrCast(buf.data.ptr)));
     }
 
