@@ -1,3 +1,4 @@
+/// Bindings for PJRT custom call declaration / execution.
 const std = @import("std");
 
 const c = @import("c");
@@ -212,6 +213,15 @@ pub const ExecutionContext = opaque {
     // TODO getDeviceOrdinal()
 };
 
+const ByteSpan = extern struct {
+    ptr: [*]const u8,
+    len: usize,
+
+    pub fn slice(self: ByteSpan) []const u8 {
+        return self.ptr[0..self.len];
+    }
+};
+
 pub const TypeId = extern struct {
     type_id: i64,
 };
@@ -313,9 +323,9 @@ pub const Attrs = extern struct {
     struct_size: usize,
     extension_start: ?*ExtensionBase,
     len: u64,
-    types: [*]AttrType,
-    names: [*]*ByteSlice,
-    ptr: [*]*Attr,
+    types: [*]const AttrType,
+    names: [*]const *const ByteSpan,
+    ptr: [*]const *const Attr,
 
     const Attr = extern union {
         scalar: Scalar,
@@ -324,7 +334,7 @@ pub const Attrs = extern struct {
 
     pub const Scalar = extern struct {
         dtype: DataType,
-        value: *anyopaque,
+        value: *const anyopaque,
 
         pub fn get(self: Scalar, T: type) T {
             const ptr: *const T = @alignCast(@ptrCast(self.value));
@@ -336,15 +346,6 @@ pub const Attrs = extern struct {
         dtype: DataType,
         len: usize,
         data: [*]const u8,
-    };
-
-    const ByteSlice = extern struct {
-        ptr: [*]const u8,
-        len: usize,
-
-        pub fn slice(self: ByteSlice) []const u8 {
-            return self.ptr[0..self.len];
-        }
     };
 
     pub fn getByIndex(self: Attrs, comptime attr_type: AttrType, index: usize) ?*const @FieldType(Attr, @tagName(attr_type)) {
