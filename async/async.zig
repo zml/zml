@@ -395,7 +395,7 @@ pub const Socket = struct {
             var self: TCP = .{
                 .inner = aio.TCP.init(AsyncThread.current.executor, try xev.TCP.init(addr)),
             };
-             try self.inner.connect(addr);
+            try self.inner.connect(addr);
             return self;
         }
 
