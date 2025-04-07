@@ -2,8 +2,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const c = @import("c");
-const ffi = @import("xlaffi");
-const frame_info = ffi.frame_info;
 const mlir = @import("mlir");
 const runfiles = @import("runfiles");
 const runtimes = @import("runtimes");
@@ -232,7 +230,7 @@ const CustomCall = struct {
         }
     }
 
-    fn hostBufferCallback(call_frame: *ffi.CallFrame) callconv(.C) ?*ffi.Error {
+    fn hostBufferCallback(call_frame: *pjrt.ffi.CallFrame) callconv(.C) ?*pjrt.ffi.Error {
         if (call_frame.registeringHook()) return null;
 
         const ffi_buffer = call_frame.args.get(0);
@@ -244,7 +242,7 @@ const CustomCall = struct {
         return null;
     }
 
-    fn deviceBufferCallback(call_frame: *ffi.CallFrame) callconv(.C) ?*ffi.Error {
+    fn deviceBufferCallback(call_frame: *pjrt.ffi.CallFrame) callconv(.C) ?*pjrt.ffi.Error {
         if (call_frame.registeringHook()) return null;
 
         const callback_attr = call_frame.attrs.getByName(.scalar, "callback") orelse unreachable;
@@ -270,7 +268,7 @@ const CustomCall = struct {
     }
 };
 
-fn getShape(buffer_desc: *const ffi.Buffer) Shape {
+fn getShape(buffer_desc: *const pjrt.ffi.Buffer) Shape {
     // log.warn("received buffer {}", .{buffer_desc});
     const dt: DataType = switch (buffer_desc.dtype) {
         .invalid => @panic("invalid ffi"),
@@ -288,7 +286,7 @@ fn getShape(buffer_desc: *const ffi.Buffer) Shape {
 /// Create a HostBuffer from a ffi description of a buffer.
 /// Normally the ffi describe device buffer but we assume they are located in pinned memory,
 /// and therefore the data pointer is readable both from host and from device.
-fn hostBufferFromPinnedBuffer(buffer_desc: *const ffi.Buffer) HostBuffer {
+fn hostBufferFromPinnedBuffer(buffer_desc: *const pjrt.ffi.Buffer) HostBuffer {
     const buffer_shape = getShape(buffer_desc);
     return HostBuffer.fromBytes(
         buffer_shape,

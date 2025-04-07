@@ -3,9 +3,9 @@ const std = @import("std");
 const c = @import("c");
 const stdx = @import("stdx");
 
-pub const frame_info = @import("frame_info.zig");
+const pjrtStruct = @import("pjrt.zig").pjrtStruct;
 
-const log = std.log.scoped(.ffi);
+const log = std.log.scoped(.pjrt);
 
 pub const ApiVersion = extern struct {
     pub const major = c.XLA_FFI_API_MAJOR;
@@ -27,8 +27,15 @@ pub const ExtensionBase = extern struct {
     next: ?*ExtensionBase,
 };
 
-// TODO(Corentin): This is actually a bit set.
-pub const HandlerTraits = u32;
+// Based of https://github.com/openxla/xla/blob/145f836bd5175dc5dd262f716a0c59af2b0297a0/xla/ffi/api/c_api.h#L449
+pub const HandlerTraits = packed struct(u32) {
+    /// Calls to FFI handler are safe to trace into the command buffer.
+    /// It means that calls to FFI handler always launch exactly the same device operations (can depend on attribute values)
+    /// that can be captured and then replayed.
+    command_buffer_compatible: u1,
+
+    __unassigned__: u31,
+};
 
 pub const Metadata = extern struct {
     struct_size: usize,
@@ -84,7 +91,7 @@ pub const Api = opaque {
     pub const inner = TransmuteMixin(Api, c.XLA_FFI_Api).to;
 
     pub fn getStream(self: *const Api, context: ?*ExecutionContext) ApiError!*anyopaque {
-        var ret = ffiStruct(c.XLA_FFI_Stream_Get_Args, .{
+        var ret = pjrtStruct(c.XLA_FFI_Stream_Get_Args{
             .ctx = if (context) |ctx| ctx.inner() else null,
         });
         const result = self.inner().XLA_FFI_Stream_Get.?(&ret);
@@ -102,7 +109,7 @@ pub const Api = opaque {
     }
 
     pub fn allocateDeviceMemory(self: *const Api, context: ?*ExecutionContext, size: usize, alignment: usize) ApiError!*anyopaque {
-        var ret = ffiStruct(c.XLA_FFI_DeviceMemory_Allocate_Args, .{
+        var ret = pjrtStruct(c.XLA_FFI_DeviceMemory_Allocate_Args{
             .ctx = if (context) |ctx| ctx.inner() else null,
             .size = size,
             .alignment = alignment,
@@ -122,7 +129,7 @@ pub const Api = opaque {
     }
 
     pub fn freeDeviceMemory(self: *const Api, context: ?*ExecutionContext, data: *anyopaque, size: usize) ApiError!void {
-        var ret = ffiStruct(c.XLA_FFI_DeviceMemory_Free_Args, .{
+        var ret = pjrtStruct(c.XLA_FFI_DeviceMemory_Free_Args{
             .ctx = if (context) |ctx| ctx.inner() else null,
             .size = size,
             .data = data,
@@ -161,13 +168,13 @@ pub const ExecutionContext = opaque {
     //     // register type id ==> typeid
     //     const typename_ = "zml." ++ @typeName(@TypeOf(value));
 
-    //     var ret = ffiStruct(c.XLA_FFI_ExecutionContext_Register_Args, .{
+    //     var ret = pjrtStruct(c.XLA_FFI_ExecutionContext_Register_Args{
     //         .ctx = self.inner(),
     //         .handler = @ptrCast(@alignCast(handler)),
     //     });
     //     const result = api.inner().XLA_FFI_ExecutionContext_Register.?(&ret);
 
-    //     var ret = ffiStruct(c.XLA_FFI_ExecutionContext_Register_Args, .{
+    //     var ret = pjrtStruct(c.XLA_FFI_ExecutionContext_Register_Args{
     //         .ctx = self.inner(),
     //         .handler = @ptrCast(@alignCast(handler)),
     //     });
@@ -184,7 +191,7 @@ pub const ExecutionContext = opaque {
     // }
 
     pub fn get(self: *ExecutionContext, api: *const Api, type_id: *TypeId) ApiError!*anyopaque {
-        var ret = ffiStruct(c.XLA_FFI_ExecutionContext_Get_Args, .{
+        var ret = pjrtStruct(c.XLA_FFI_ExecutionContext_Get_Args{
             .ctx = self.inner(),
             .type_id = @ptrCast(@alignCast(type_id)),
         });
@@ -431,7 +438,7 @@ pub const Error = opaque {
     pub const fromInner = TransmuteMixin(Error, c.XLA_FFI_Error).from;
 
     pub fn create(api: *const Api, error_code: ErrorCode, message: [:0]const u8) *Error {
-        var ret = ffiStruct(c.XLA_FFI_Error_Create_Args, .{
+        var ret = pjrtStruct(c.XLA_FFI_Error_Create_Args{
             .message = message.ptr,
             .errc = @intFromEnum(error_code),
         });
@@ -439,12 +446,12 @@ pub const Error = opaque {
     }
 
     pub fn destroy(err: *Error, api: *const Api) void {
-        var ret = ffiStruct(c.XLA_FFI_Error_Destroy_Args, .{ .@"error" = err.inner() });
+        var ret = pjrtStruct(c.XLA_FFI_Error_Destroy_Args{ .@"error" = err.inner() });
         api.inner().XLA_FFI_Error_Destroy.?(&ret);
     }
 
     pub fn getMessage(err: *Error, api: *const Api) [:0]const u8 {
-        var ret = ffiStruct(c.XLA_FFI_Error_GetMessage_Args, .{
+        var ret = pjrtStruct(c.XLA_FFI_Error_GetMessage_Args{
             .@"error" = err.inner(),
         });
         api.inner().XLA_FFI_Error_GetMessage.?(&ret);
@@ -457,7 +464,7 @@ pub const Future = opaque {
     pub const fromInner = TransmuteMixin(Future, c.XLA_FFI_Future).from;
 
     pub fn create(api: *const Api) ApiError!*Future {
-        var ret = ffiStruct(c.XLA_FFI_Future_Create_Args, .{});
+        var ret = pjrtStruct(c.XLA_FFI_Future_Create_Args{});
         const result = api.inner().XLA_FFI_Future_Create.?(&ret);
 
         if (result) |ffi_error| {
@@ -473,7 +480,7 @@ pub const Future = opaque {
     }
 
     pub fn setAvailable(self: *Future, api: *const Api) ApiError!void {
-        var ret = ffiStruct(c.XLA_FFI_Future_SetAvailable_Args, .{
+        var ret = pjrtStruct(c.XLA_FFI_Future_SetAvailable_Args{
             .future = self.inner(),
         });
 
@@ -490,7 +497,7 @@ pub const Future = opaque {
     }
 
     pub fn setError(self: *Future, api: *const Api, err: *Error) ApiError!void {
-        var ret = ffiStruct(c.XLA_FFI_Future_SetError_Args, .{
+        var ret = pjrtStruct(c.XLA_FFI_Future_SetError_Args{
             .future = self.inner(),
             .@"error" = err.inner(),
         });
@@ -507,19 +514,3 @@ pub const Future = opaque {
         }
     }
 };
-
-fn ffiStructSize(comptime T: type) usize {
-    // unsafe on purpose, we want this to fail if that ever changes
-    const typedef_name = comptime blk: {
-        const needle = ".struct_";
-        const idx = std.mem.indexOf(u8, @typeName(T), needle).?;
-        break :blk @typeName(T)[idx + needle.len ..];
-    };
-    return @field(c, typedef_name ++ "_STRUCT_SIZE");
-}
-
-pub fn ffiStruct(T: type, v: anytype) T {
-    var ret = v;
-    ret.struct_size = ffiStructSize(T);
-    return ret;
-}

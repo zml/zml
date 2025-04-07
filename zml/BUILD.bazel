@@ -33,7 +33,6 @@ zig_library(
         "//pjrt",
         "//runtimes",
         "//stdx",
-        "//xlaffi",
         "//zml/tokenizer",
         "//zml/tools",
         "@rules_zig//zig/lib:libc",

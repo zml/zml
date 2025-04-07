@@ -1,13 +1,13 @@
-const builtin = @import("builtin");
 const std = @import("std");
-const stdx = @import("stdx");
-const ffi = @import("xlaffi");
+const builtin = @import("builtin");
 
 const c = @import("c");
+const stdx = @import("stdx");
+
+pub const ffi = @import("ffi.zig");
+pub const Profiler = @import("profiler.zig").Profiler;
 
 const log = std.log.scoped(.pjrt);
-
-pub const Profiler = @import("profiler.zig").Profiler;
 
 test {
     std.testing.refAllDecls(@This());
