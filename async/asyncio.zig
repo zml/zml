@@ -526,10 +526,10 @@ pub const UDP = struct {
     exec: *Executor,
     udp: xev.UDP,
 
-    pub usingnamespace Closeable(Self, xev.TCP);
-    pub usingnamespace Pollable(Self, xev.TCP);
-    pub usingnamespace Readable(Self, xev.TCP);
-    pub usingnamespace Writeable(Self, xev.TCP);
+    pub usingnamespace Closeable(Self, xev.UDP);
+    pub usingnamespace Pollable(Self, xev.UDP);
+    pub usingnamespace Readable(Self, xev.UDP);
+    pub usingnamespace Writeable(Self, xev.UDP);
 
     pub fn init(exec: *Executor, udp: xev.UDP) Self {
         return .{ .exec = exec, .udp = udp };
@@ -540,11 +540,13 @@ pub const UDP = struct {
     }
 
     const ReadResult = xev.ReadError!usize;
-    pub fn read(self: Self, buf: xev.ReadBuffer) !usize {
+
+    pub fn read_addr(self: Self, buf: xev.ReadBuffer) !struct { usize, std.net.Address } {
         const ResultT = ReadResult;
         const Data = struct {
             result: ResultT = undefined,
             frame: ?Frame = null,
+            addr: std.net.Address,
 
             fn callback(
                 userdata: ?*@This(),
@@ -559,11 +561,12 @@ pub const UDP = struct {
                 _ = l;
                 _ = c;
                 _ = s;
-                _ = addr;
                 _ = udp;
                 _ = b;
                 const data = userdata.?;
                 data.result = result;
+                data.addr = addr;
+
                 if (data.frame != null) libcoro.xresume(data.frame.?);
                 return .disarm;
             }
@@ -572,16 +575,15 @@ pub const UDP = struct {
         const loop = self.exec.loop;
         var s: xev.UDP.State = undefined;
         var c: xev.Completion = .{};
-        var data: Data = .{ .frame = libcoro.xframe() };
+        var data: Data = .{ .frame = libcoro.xframe(), .addr = undefined };
         self.udp.read(loop, &c, &s, buf, Data, &data, &Data.callback);
 
         try waitForCompletion(self.exec, &c);
-
-        return data.result;
+        return .{ try data.result, data.addr };
     }
 
     const WriteResult = xev.WriteError!usize;
-    pub fn write(self: Self, addr: std.net.Address, buf: xev.WriteBuffer) !usize {
+    pub fn write_addr(self: Self, addr: std.net.Address, buf: xev.WriteBuffer) !usize {
         const ResultT = WriteResult;
         const Data = struct {
             result: ResultT = undefined,

@@ -418,7 +418,7 @@ pub const Socket = struct {
     };
 
     pub const UDP = struct {
-        const Inner = aio.TCP;
+        const Inner = aio.UDP;
 
         pub const Reader = std.io.GenericReader(UDP, stdx.meta.FnSignature(UDP.read, null).ReturnErrorSet.?, UDP.read);
         pub const WriterContext = struct {
@@ -433,21 +433,19 @@ pub const Socket = struct {
 
         inner: aio.UDP,
 
-        pub fn listen(addr: std.net.Address) !Listener(UDP) {
-            var self: Listener(UDP) = .{
-                .inner = aio.UDP.init(AsyncThread.current.executor, try xev.UDP.init(addr)),
-            };
+        pub fn listen(addr: std.net.Address) !UDP {
+            var self: UDP = .{ .inner = aio.UDP.init(AsyncThread.current.executor, try xev.UDP.init(addr)) };
             try self.inner.udp.bind(addr);
-            try self.inner.udp.listen(1024);
+            // try self.inner.udp.listen(1024);
             return self;
         }
 
-        pub fn read(self: UDP, buf: []u8) !usize {
-            return self.inner.read(.{ .slice = buf });
+        pub fn read(self: UDP, buf: []u8) !struct { usize, std.net.Address } {
+            return self.inner.read_addr(.{ .slice = buf });
         }
 
         pub fn write(self: UDP, addr: std.net.Address, buf: []const u8) !usize {
-            return self.inner.write(addr, .{ .slice = buf });
+            return self.inner.write_addr(addr, .{ .slice = buf });
         }
 
         pub fn close(self: *UDP) !void {
@@ -455,11 +453,11 @@ pub const Socket = struct {
             return self.inner.close();
         }
 
-        pub fn reader(self: File) Reader {
+        pub fn reader(self: UDP) Reader {
             return .{ .context = self };
         }
 
-        pub fn writer(self: File, addr: std.net.Address) Writer {
+        pub fn writer(self: UDP, addr: std.net.Address) Writer {
             return .{
                 .context = .{
                     .file = self,
