@@ -779,33 +779,15 @@ pub fn addHostCallback(
     const ctx = input.getContext();
     // if (ctx.target() != .cuda or ctx.target() != .rocm) return input;
 
-    const len = input.byteSize();
-    // Reserve memory to be able to log the runtime Buffer later during the computation.
-    // This memory is leaked, we currently have no way to tie this lifetime to the lifetime of the module being compiled.
-    const HostCallbackCtx = Context.HostCallbackCtx;
-    const full_data = std.heap.page_allocator.alignedAlloc(u8, 32, len + 2 * @sizeOf(HostCallbackCtx)) catch {
-        log.err("Failed to pre-allocate buffer to print {}.", .{input});
-        return input;
-    };
-
-    // Save the HostBuffer inside the same memory slice, so that it's still present at runtime.
-    // Use an fba to have the stable buffer at an aligned offset.
-    var fba = std.heap.FixedBufferAllocator.init(full_data[len..]);
-    const stable_ctx_ptr = fba.allocator().create(HostCallbackCtx) catch unreachable;
-    stable_ctx_ptr.* = .{
-        .host = HostBuffer.fromBytes(input.shape(), full_data[0..len]),
-        .platform = ctx._platform,
-    };
-
     const attrs = mlir.DictionaryAttribute.init(ctx.mlirCtx(), &.{
-        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "callback"), mlir.IntegerAttribute(.i64).init(ctx.mlirCtx(), @bitCast(@intFromPtr(callback))).as(mlir.Attribute)),
-        mlir.NamedAttribute.init(mlir.Identifier.get(ctx.mlirCtx(), "context"), mlir.IntegerAttribute(.i64).init(ctx.mlirCtx(), @bitCast(@intFromPtr(stable_ctx_ptr))).as(mlir.Attribute)),
+        .named(ctx.mlirCtx(), "callback", .int(ctx.mlirCtx(), .u64, @bitCast(@intFromPtr(callback)))),
     });
 
-    const loc = ctx.mlirCtx().location(@src());
+    const loc = ctx.location(@src(), "addHostCallback({_})", .{input});
     const op = dialect.stablehlo.custom_call(
         ctx.mlirCtx(),
-        &.{input.value()},
+        // Put the tensor in pinned memory so that we can directly read it from the host.
+        &.{input.toMemory(.host_pinned).value()},
         .{
             .call_target_name = "zmlHostBufferCallback",
             .backend_config = .{ .dict = attrs },

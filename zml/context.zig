@@ -216,11 +216,6 @@ pub const Context = struct {
         }
     }
 
-    pub const HostCallbackCtx = struct {
-        host: HostBuffer,
-        platform: Platform,
-        mutex: std.Thread.Mutex = std.Thread.Mutex{},
-    };
     pub const HostCallback = fn (HostBuffer) void;
     pub const DeviceCallback = fn (Platform, ?*anyopaque, []const HostBuffer, []Buffer) void;
 };
@@ -237,18 +232,6 @@ const CustomCall = struct {
         }
     }
 
-    fn getContext(attrs: ffi.Attrs) struct { *const Context.HostCallback, *Context.HostCallbackCtx } {
-        const context_scalar = attrs.getAttrByNameAs(ffi.Scalar, "context") orelse unreachable;
-        std.debug.assert(context_scalar.dtype == .s64);
-        const ctx: *Context.HostCallbackCtx = @ptrFromInt(@as(usize, @bitCast(@as(*i64, @ptrCast(@alignCast(context_scalar.value))).*)));
-
-        const callback_scalar = attrs.getAttrByNameAs(ffi.Scalar, "callback") orelse unreachable;
-        std.debug.assert(callback_scalar.dtype == .s64);
-        const callback: *const Context.HostCallback = @ptrFromInt(@as(usize, @bitCast(@as(*i64, @ptrCast(@alignCast(callback_scalar.value))).*)));
-
-        return .{ callback, ctx };
-    }
-
     fn hostBufferCallback(call_frame: *ffi.CallFrame) callconv(.C) ?*ffi.Error {
         if (call_frame.extension_start != null and call_frame.extension_start.?.type == .metadata) {
             const metadata_extension: *ffi.MetadataExtension = @fieldParentPtr("extension_base", call_frame.extension_start.?);
@@ -257,43 +240,13 @@ const CustomCall = struct {
             return null;
         }
 
-        const callback, const ctx = getContext(call_frame.attrs);
-        // Add synchronization because this is called from the device driver.
-        ctx.mutex.lock();
-        defer ctx.mutex.unlock();
         const ffi_buffer = call_frame.args.getArgAs(ffi.Buffer, 0);
 
-        const MAX_RANK: u8 = 8;
+        const callback_scalar = call_frame.attrs.getAttrByNameAs(ffi.Scalar, "callback") orelse unreachable;
+        std.debug.assert(callback_scalar.dtype == .u64);
+        const callback: *const Context.HostCallback = @ptrFromInt(callback_scalar.get(usize));
 
-        const minor_to_major: [MAX_RANK]i64 = comptime blk: {
-            var res: [MAX_RANK]i64 = undefined;
-            for (0..MAX_RANK) |i| {
-                res[i] = @intCast(MAX_RANK - i - 1);
-            }
-            break :blk res;
-        };
-
-        const pjrt_buffer = ctx.platform.pjrt_client.createViewOfDeviceBuffer2(ctx.platform.pjrt_api, .{
-            .device_buffer_ptr = ffi_buffer.data,
-            .element_type = .F32,
-            .dims = ffi_buffer.dims(),
-            .device = ctx.platform.getDevices()[0],
-            .layout = .{
-                .tiled = .{
-                    .minor_to_major = minor_to_major[@as(usize, MAX_RANK - @as(usize, @intCast(ffi_buffer.rank)))..],
-                    .tile_dims = &.{},
-                    .tile_dims_sizes = &.{},
-                },
-            },
-        }) catch unreachable;
-
-        const event = pjrt_buffer.toHostBuffer(ctx.platform.pjrt_api, @constCast(ctx.host.data)) catch |err| {
-            log.err("Failed to copy buffer to host: {}", .{err});
-            return null;
-        };
-        _ = event; // autofix
-
-        callback(ctx.host);
+        callback(hostBufferFromPinnedBuffer(ffi_buffer));
         return null;
     }
 
@@ -323,30 +276,46 @@ const CustomCall = struct {
         const input_buffers = stdx.stackSlice(8, HostBuffer, n_args);
         for (input_buffers, 0..) |*b, i| {
             const buffer_desc = call_frame.args.getArgAs(ffi.Buffer, i);
-            // log.warn("received buffer {}", .{buffer_desc});
-            const dt: DataType = switch (buffer_desc.dtype) {
-                .invalid => @panic("invalid ffi"),
-                .pred => .bool,
-                .s8 => .i8,
-                .s16 => .i16,
-                .s32 => .i32,
-                .s64 => .i64,
-                .token, .f8e4m3, .f8e3m4 => @panic("Unsupported ffi type"),
-                inline else => |t| @field(DataType, @tagName(t)),
-            };
-            const buffer_shape = Shape.init(buffer_desc.dims(), dt);
-
-            b.* = HostBuffer.fromBytes(buffer_shape, buffer_desc.data[0..buffer_shape.byteSize()]);
+            b.* = hostBufferFromPinnedBuffer(buffer_desc);
         }
 
         const n_ret = call_frame.rets.size;
         const output_buffers = stdx.stackSlice(8, Buffer, n_ret);
+
         callback(platform.*, user_ctx, input_buffers, output_buffers);
         for (output_buffers, 0..) |res, i| {
             const result_ptr = call_frame.rets.getRetAs(ffi.Buffer, i);
+            const expected = getShape(result_ptr);
+            stdx.debug.assert(expected.eql(res.shape()), "User defined callback return tensors of shape different than the registered shape. Expected {}, got {}", .{ expected, res });
             // log.warn("writing {} to {}", .{ res, result_ptr.* });
             result_ptr.data = @ptrCast(res._shards.get(0).getOpaqueDeviceMemoryDataPointer(res._api) catch @panic("pjrt error"));
         }
         return null;
     }
 };
+
+fn getShape(buffer_desc: *const ffi.Buffer) Shape {
+    // log.warn("received buffer {}", .{buffer_desc});
+    const dt: DataType = switch (buffer_desc.dtype) {
+        .invalid => @panic("invalid ffi"),
+        .pred => .bool,
+        .s8 => .i8,
+        .s16 => .i16,
+        .s32 => .i32,
+        .s64 => .i64,
+        .token, .f8e4m3, .f8e3m4 => @panic("Unsupported ffi type"),
+        inline else => |t| @field(DataType, @tagName(t)),
+    };
+    return Shape.init(buffer_desc.dims(), dt);
+}
+
+/// Create a HostBuffer from a ffi description of a buffer.
+/// Normally the ffi describe device buffer but we assume they are located in pinned memory,
+/// and therefore the data pointer is readable both from host and from device.
+fn hostBufferFromPinnedBuffer(buffer_desc: *const ffi.Buffer) HostBuffer {
+    const buffer_shape = getShape(buffer_desc);
+    return HostBuffer.fromBytes(
+        buffer_shape,
+        buffer_desc.data[0..buffer_shape.byteSize()],
+    );
+}
