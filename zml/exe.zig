@@ -31,12 +31,30 @@ pub fn compile(
     buffer_store: aio.BufferStore,
     platform: Platform,
 ) !FnExe(func) {
+    return compileWithPrefix(allocator, func, init_args, args_shapes, buffer_store, platform, "");
+}
+
+/// Compiles a Model struct with the given configuration and shapes, for the given platform.
+/// Uses a prefix for looking up model weights in the buffer store.
+/// The steps are:
+/// * lookup at tensors available in the store and create a `model: Model` struct with them
+/// * call `model.init(init_args)` to fields of the model that aren't Tensor, ie hyperparemeters/config
+/// * generate MLIR by calling `model.forward` with tensor of the given shapes and other arguments
+pub fn compileWithPrefix(
+    allocator: std.mem.Allocator,
+    comptime func: anytype,
+    init_args: anytype,
+    args_shapes: ShapeOf(ModuleSignature(func).ArgsT),
+    buffer_store: aio.BufferStore,
+    platform: Platform,
+    prefix: []const u8,
+) !FnExe(func) {
     const ModelT = ModuleSignature(func).ModelT;
 
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    var model = try aio.populateModel(ModelT, arena, buffer_store);
+    var model = try aio.populateModelWithPrefix(ModelT, arena, buffer_store, prefix);
 
     // If the Model has a "init" function, call it with the given parameters.
     if (@hasDecl(ModelT, "init")) {
