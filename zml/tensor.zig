@@ -172,11 +172,12 @@ pub const Tensor = struct {
         return switch (self._id) {
             .arg_id, .mlir => {
                 const ctx = self.getContext();
+                const mlir_ctx = ctx.mlirCtx();
                 var res = self;
                 res._shape = self._shape.withSharding(axes_);
 
                 const op = dialect.stablehlo.custom_call(
-                    ctx.mlirCtx(),
+                    mlir_ctx,
                     &.{self.value()},
                     .{
                         .call_target_name = "Sharding",
@@ -186,7 +187,7 @@ pub const Tensor = struct {
                         .api_version = .original,
                     },
                     &.{self.value().getType()},
-                    ctx.mlirCtx().location(@src()),
+                    mlir_ctx.location(@src()),
                 );
 
                 return _result(res._shape, op.result(0));
@@ -203,19 +204,24 @@ pub const Tensor = struct {
         return switch (self._id) {
             .arg_id, .mlir => {
                 const ctx = self.getContext();
+                const mlir_ctx = ctx.mlirCtx();
                 if (ctx.target() == .cpu) return self;
                 var res = self;
                 res._output_memory_kind = kind;
 
                 const memory_kind = @tagName(kind.toPjrtMemory());
 
-                const op = dialect.stablehlo.annotate_device_placement(
-                    ctx.mlirCtx(),
-                    &.{self.value()},
-                    memory_kind,
-                    &.{self.value().getType()},
-                    ctx.mlirCtx().location(@src()),
-                );
+                const frontend_attributes = mlir.Attribute.dict(mlir_ctx, &.{
+                    .{ "_xla_buffer_placement", .string(mlir_ctx, memory_kind) },
+                });
+
+                const op = dialect.stablehlo.custom_call(mlir_ctx, &.{self.value()}, .{
+                    .call_target_name = "annotate_device_placement",
+                    .has_side_effect = true,
+                    .backend_config = null,
+                    .additional_attributes = &.{.{ "mhlo.frontend_attributes", frontend_attributes }},
+                    .api_version = .original,
+                }, &.{self.value().getType()}, mlir_ctx.location(@src()));
 
                 return _result(res._shape, op.result(0));
             },

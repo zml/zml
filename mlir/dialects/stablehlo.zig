@@ -812,26 +812,6 @@ pub fn custom_call(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCa
     });
 }
 
-// todo: move out of stablehlo.zig when we start to implement the frontend
-pub fn annotate_device_placement(
-    ctx: mlir.Context,
-    inputs: []const mlir.Value,
-    memory_kind: []const u8,
-    res_types: []const mlir.Type,
-    location: mlir.Location,
-) mlir.Operation {
-    const frontend_attributes = mlir.Attribute.dict(ctx, &.{
-        .{ "_xla_buffer_placement", .string(ctx, memory_kind) },
-    });
-    return custom_call(ctx, inputs, .{
-        .call_target_name = "annotate_device_placement",
-        .has_side_effect = true,
-        .backend_config = null,
-        .additional_attributes = &.{.{ "mhlo.frontend_attributes", frontend_attributes }},
-        .api_version = .original,
-    }, res_types, location);
-}
-
 pub const DotDimensionNumbersAttribute = struct {
     _inner: c.MlirAttribute,
 
