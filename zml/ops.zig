@@ -815,7 +815,7 @@ pub fn addHostCallback(
 
     const res = ctx.allocator().alloc(Tensor, output_shapes.len) catch @panic("OOM");
     for (res, output_shapes, 0..) |*r, o, i| {
-        r.* = Tensor._result(o, op.result(i));
+        r.* = Tensor._result(o, op.result(i)).toMemory(.device);
     }
 
     return res;
