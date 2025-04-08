@@ -391,8 +391,12 @@ pub const Socket = struct {
             return .{ .inner = try self.inner.accept() };
         }
 
-        pub fn connect(self: *TCP, addr: std.net.Address) !void {
-            return self.inner.connect(addr);
+        pub fn connect(addr: std.net.Address) !TCP {
+            var self: TCP = .{
+                .inner = aio.TCP.init(AsyncThread.current.executor, try xev.TCP.init(addr)),
+            };
+            try self.inner.connect(addr);
+            return self;
         }
 
         pub fn read(self: TCP, buf: []u8) !usize {
