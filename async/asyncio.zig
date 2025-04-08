@@ -78,7 +78,7 @@ pub fn sleep(exec: *Executor, ms: u64) !void {
     const Data = XCallback(SleepResult);
 
     var data = Data.init();
-    const w = try xev.Timer.init();
+    var w = try xev.Timer.init();
     defer w.deinit();
     var c: xev.Completion = .{};
     w.run(loop, &c, ms, Data, &data, &Data.callback);
@@ -129,7 +129,7 @@ pub const TCP = struct {
     }
 
     pub fn accept(self: Self) !Self {
-        const AcceptResult = xev.TCP.AcceptError!xev.TCP;
+        const AcceptResult = xev.AcceptError!xev.TCP;
         const Data = XCallback(AcceptResult);
 
         const loop = self.exec.loop;
