@@ -9,6 +9,7 @@ const Buffer = @import("buffer.zig").Buffer;
 const Data = @import("dtype.zig").Data;
 const DataType = @import("dtype.zig").DataType;
 const HostBuffer = @import("hostbuffer.zig").HostBuffer;
+const Memory = @import("buffer.zig").Buffer.Memory;
 const meta = @import("meta.zig");
 const mlir = @import("mlir.zig");
 const Location = mlir.Location;
@@ -41,10 +42,10 @@ pub const Tensor = struct {
     _shape: Shape,
     _id: _Id,
     _donation: _Donation = .no_buffer,
+    _output_memory_kind: Memory = .device,
 
     pub const _Donation = union(enum) { no_buffer, input_buffer, arg: u16 };
     pub const _Id = union(enum) { mlir: mlir.Value, buffer_id: u64, arg_id: u64 };
-
     pub const MAX_RANK = Shape.MAX_RANK;
 
     /// Returns the current compilation context.
@@ -171,20 +172,22 @@ pub const Tensor = struct {
         return switch (self._id) {
             .arg_id, .mlir => {
                 const ctx = self.getContext();
+                const mlir_ctx = ctx.mlirCtx();
                 var res = self;
                 res._shape = self._shape.withSharding(axes_);
 
                 const op = dialect.stablehlo.custom_call(
-                    ctx.mlirCtx(),
+                    mlir_ctx,
                     &.{self.value()},
                     .{
                         .call_target_name = "Sharding",
                         .has_side_effect = false,
-                        .addional_attributes = &.{.{ "mhlo.sharding", ctx.getShardingAttr(res._shape) }},
+                        .backend_config = null,
+                        .additional_attributes = &.{.{ "mhlo.sharding", ctx.getShardingAttr(res._shape) }},
                         .api_version = .original,
                     },
                     &.{self.value().getType()},
-                    ctx.mlirCtx().location(@src()),
+                    mlir_ctx.location(@src()),
                 );
 
                 return _result(res._shape, op.result(0));
@@ -192,6 +195,39 @@ pub const Tensor = struct {
             .buffer_id => {
                 var res = self;
                 res._shape = self._shape.withSharding(axes_);
+                return res;
+            },
+        };
+    }
+
+    pub fn toMemory(self: Tensor, kind: Memory) Tensor {
+        return switch (self._id) {
+            .arg_id, .mlir => {
+                const ctx = self.getContext();
+                const mlir_ctx = ctx.mlirCtx();
+                if (ctx.target() == .cpu) return self;
+                var res = self;
+                res._output_memory_kind = kind;
+
+                const memory_kind = @tagName(kind.toPjrtMemory());
+
+                const frontend_attributes = mlir.Attribute.dict(mlir_ctx, &.{
+                    .{ "_xla_buffer_placement", .string(mlir_ctx, memory_kind) },
+                });
+
+                const op = dialect.stablehlo.custom_call(mlir_ctx, &.{self.value()}, .{
+                    .call_target_name = "annotate_device_placement",
+                    .has_side_effect = true,
+                    .backend_config = null,
+                    .additional_attributes = &.{.{ "mhlo.frontend_attributes", frontend_attributes }},
+                    .api_version = .original,
+                }, &.{self.value().getType()}, mlir_ctx.location(@src()));
+
+                return _result(res._shape, op.result(0));
+            },
+            .buffer_id => {
+                var res = self;
+                res._output_memory_kind = kind;
                 return res;
             },
         };
@@ -3747,18 +3783,22 @@ pub const Tensor = struct {
     }
 
     /// Insert code that will print the content of the given buffer at runtime.
-    /// Only for debug purpose, it has the following limitations:
-    /// * only supported on Cuda atm
-    /// * only prints the first 1024 values
-    /// * pre allocates a buffer on the host to copy the content of the device buffer,
-    /// this buffer won't be freed. You will have one buffer per "print" call in the IR.
-    /// * does device to host synchronization so it will slow down the program execution.
+    /// Only for debug purpose, it inserts device to host synchronization
+    /// so it will slow down the program execution.
     pub fn print(input: Tensor) Tensor {
-        return ops.addHostCallback(&printCallback, input);
+        return ops.addHostCallback(
+            &printCallback,
+            null,
+            &.{input},
+            &.{input.shape()},
+            .{ .output_operand_aliases = &.{0} },
+        )[0];
     }
 
-    fn printCallback(host_buffer: HostBuffer) void {
+    fn printCallback(_: ?*anyopaque, inputs: []const HostBuffer, outputs: []const HostBuffer) void {
+        const host_buffer = inputs[0];
         std.debug.print("Device buffer: {}: {}", .{ host_buffer.shape(), host_buffer.pretty() });
+        std.debug.assert(host_buffer.data.ptr == outputs[0].data.ptr);
     }
 };
 

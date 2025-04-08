@@ -1,16 +1,15 @@
-const asynk = @import("async");
 const std = @import("std");
-const stdx = @import("stdx");
-
-const meta = @import("meta.zig");
-const pjrt = @import("pjrtx.zig");
-
 const testing = std.testing;
+
+const asynk = @import("async");
+const stdx = @import("stdx");
 
 const Context = @import("context.zig").Context;
 const Data = @import("dtype.zig").Data;
 const DataType = @import("dtype.zig").DataType;
 const HostBuffer = @import("hostbuffer.zig").HostBuffer;
+const meta = @import("meta.zig");
+const pjrt = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
 
@@ -27,10 +26,22 @@ const log = std.log.scoped(.zml);
 /// * loading weights from disk directly to the `device zml.aio.loadBuffers`
 /// * can be created by calling `HostBuffer.toDevice(platform)`.
 pub const Buffer = struct {
-    pub const Memory = enum(@typeInfo(pjrt.Memory.Kind).@"enum".tag_type) {
-        host = @intFromEnum(pjrt.Memory.Kind.unpinned_host),
-        host_pinned = @intFromEnum(pjrt.Memory.Kind.pinned_host),
-        device = @intFromEnum(pjrt.Memory.Kind.device),
+    pub const Memory = enum {
+        host,
+        host_pinned,
+        device,
+
+        pub fn toPjrtMemory(self: Memory) pjrt.Memory.Kind {
+            return switch (self) {
+                .host => .unpinned_host,
+                .host_pinned => .pinned_host,
+                .device => .device,
+            };
+        }
+
+        pub fn pjrtName(self: Memory) []const u8 {
+            return @tagName(self.toPjrtMemory());
+        }
     };
 
     pub const Shard = struct {
@@ -216,13 +227,13 @@ pub const Buffer = struct {
     /// and it might not work on all platforms,
     /// could lead to crashes and operations on the buffer will be slower.
     /// Tested on Cuda 12.4.
-    pub fn asViewOfHostBuffer(platform: Platform, buf: HostBuffer) !Buffer {
+    pub fn asViewOfHostBuffer(platform: Platform, buf: HostBuffer) Buffer {
         return asViewOfDeviceBuffer(platform, buf.shape(), null, @constCast(@ptrCast(buf.data.ptr)));
     }
 
     /// Creates a Buffer from a pointer into device memory.
     /// This allows to interface with other libraries producing buffers.
-    pub fn asViewOfDeviceBuffer(platform: Platform, shape_: Shape, stream: ?*const anyopaque, device_data: *anyopaque) !Buffer {
+    pub fn asViewOfDeviceBuffer(platform: Platform, shape_: Shape, stream: ?*const anyopaque, device_data: *anyopaque) Buffer {
         const minor_to_major: [Shape.MAX_RANK]i64 = comptime blk: {
             var res: [Shape.MAX_RANK]i64 = undefined;
             for (0..Shape.MAX_RANK) |i| {
@@ -231,9 +242,8 @@ pub const Buffer = struct {
             break :blk res;
         };
 
-        const device_bytes: [*]u8 = @ptrCast(device_data);
-        const pjrt_buffer = try platform.pjrt_client.createViewOfDeviceBuffer(platform.pjrt_api, .{
-            .data = device_bytes[0..shape_.byteSize()],
+        const pjrt_buffer = platform.pjrt_client.createViewOfDeviceBuffer(platform.pjrt_api, .{
+            .data = device_data,
             .element_type = bufferTypeFromDtype(shape_.dtype()),
             .dims = shape_.dims(),
             // TODO: exposes sharding in the API.
@@ -246,7 +256,7 @@ pub const Buffer = struct {
                 },
             },
             .stream = @bitCast(@as(usize, @intFromPtr(stream))),
-        });
+        }) catch @panic("failed to createViewOfDeviceBuffer");
 
         var shards: Shards = .{};
         shards.appendAssumeCapacity(pjrt_buffer);
@@ -340,6 +350,11 @@ pub const Buffer = struct {
         _ = fmt;
         _ = options;
         try writer.print("Buffer({_})", .{self._shape});
+    }
+
+    pub fn getMemory(self: Buffer) *const pjrt.Memory {
+        const shard = self._shards.get(0);
+        return shard.memory(self._api);
     }
 
     fn hasShardedAxis(self: Buffer) bool {

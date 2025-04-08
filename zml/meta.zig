@@ -1,10 +1,9 @@
 const std = @import("std");
-const stdx = @import("stdx");
+const testing = std.testing;
 
+const stdx = @import("stdx");
 const FnParam = stdx.meta.FnParam;
 const asSlice = stdx.meta.asSlice;
-
-const testing = std.testing;
 
 test {
     std.testing.refAllDecls(@This());

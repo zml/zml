@@ -414,6 +414,18 @@ pub const Attribute = struct {
     pub fn named(attr: Attribute, ctx: Context, name: [:0]const u8) NamedAttribute {
         return NamedAttribute.init(Identifier.get(ctx, name), attr);
     }
+
+    pub fn dict(ctx: Context, named_attrs: []const AttrTuple) Attribute {
+        var attr_buf: [32]NamedAttribute = undefined;
+        stdx.debug.assert(named_attrs.len <= attr_buf.len, ".dict helper only support up to {} attribute, got {}. You will need to call mlir.DictionaryAttribute directly", .{ attr_buf.len, named_attrs.len });
+
+        const attrs = attr_buf[0..named_attrs.len];
+        for (attrs, named_attrs) |*attr, tuple| {
+            attr.* = .named(ctx, tuple[0], tuple[1]);
+        }
+
+        return DictionaryAttribute.init(ctx, attrs).asAttr();
+    }
 };
 
 pub const NamedAttribute = extern struct {

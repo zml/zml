@@ -1,28 +1,31 @@
 const std = @import("std");
+const assert = std.debug.assert;
+
 const stdx = @import("stdx");
 
+const _collectAxes = @import("tensor.zig")._collectAxes;
 const buffer = @import("buffer.zig");
-const helpers = @import("helpers.zig");
-const meta = @import("meta.zig");
-const mlir = @import("mlir.zig");
-const module = @import("module.zig");
-
 const Buffer = buffer.Buffer;
-const CompilationContext = module.CompilationContext;
+const Bufferized = @import("tensor.zig").Bufferized;
 const Context = @import("context.zig").Context;
 const Data = @import("dtype.zig").Data;
 const DataType = @import("dtype.zig").DataType;
-const EnumLiteral = @TypeOf(.enum_literal);
+const helpers = @import("helpers.zig");
 const HostBuffer = @import("hostbuffer.zig").HostBuffer;
+const meta = @import("meta.zig");
+const mlir = @import("mlir.zig");
+const module = @import("module.zig");
+const CompilationContext = module.CompilationContext;
+const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
+const ShapeOf = @import("tensor.zig").ShapeOf;
 const Tensor = @import("tensor.zig").Tensor;
-const _collectAxes = @import("tensor.zig")._collectAxes;
 
+const EnumLiteral = @TypeOf(.enum_literal);
 const dialect = struct {
     const stablehlo = @import("mlir/dialects").stablehlo;
 };
 
-const assert = std.debug.assert;
 const log = std.log.scoped(.@"zml/tensor");
 
 test {
@@ -766,50 +769,56 @@ pub fn fromMlirOperationWithTags(op: mlir.Operation, base: anytype) @TypeOf(base
     return res;
 }
 
-/// At runtime the given tensor will be materialized and copied to host,
-/// and the callback will be called on it.
+pub const HostCallbackOpt = struct {
+    has_side_effect: bool = false,
+    output_operand_aliases: []const i64 = &.{},
+};
+
 pub fn addHostCallback(
-    callback: *const fn (HostBuffer) void,
-    input: Tensor,
-) Tensor {
-    // TODO: implement addCallback that exposes a pjrt.Buffer, so that the user can decide if they need to copy.
-    if (input.getContext().target() != .cuda) return input;
-
-    const len = input.byteSize();
-    // Reserve memory to be able to log the runtime Buffer later during the computation.
-    // This memory is leaked, we currently have no way to tie this lifetime to the lifetime of the module being compiled.
-    const HostCallbackCtx = Context.HostCallbackCtx;
-    const full_data = std.heap.page_allocator.alignedAlloc(u8, 32, len + 2 * @sizeOf(HostCallbackCtx)) catch {
-        log.err("Failed to pre-allocate buffer to print {}.", .{input});
-        return input;
-    };
-
-    // Save the HostBuffer inside the same memory slice, so that it's still present at runtime.
-    // Use an fba to have the stable buffer at an aligned offset.
-    var fba = std.heap.FixedBufferAllocator.init(full_data[len..]);
-    const stable_ctx_ptr = fba.allocator().create(HostCallbackCtx) catch unreachable;
-    stable_ctx_ptr.* = .{
-        .host = HostBuffer.fromBytes(input.shape(), full_data[0..len]),
-    };
-
-    const backend_config: [2:null]?*const anyopaque = .{ callback, stable_ctx_ptr };
+    callback: *const Context.HostCallback,
+    blkctx: ?*anyopaque,
+    inputs: []const Tensor,
+    output_shapes: []const Shape,
+    opts: HostCallbackOpt,
+) []Tensor {
     const ctx = CompilationContext.current();
+
+    const mlir_ctx = ctx.mlirCtx();
+    const backend_config = mlir.Attribute.dict(mlir_ctx, &.{
+        .{ "callback", .int(mlir_ctx, .u64, @bitCast(@intFromPtr(callback))) },
+        .{ "user_context", .int(mlir_ctx, .u64, @bitCast(@intFromPtr(blkctx))) },
+    });
+
+    const values = stdx.stackSlice(8, mlir.Value, inputs.len);
+    for (inputs, values) |i, *v| {
+        v.* = ctx.getValue(i.toMemory(.host_pinned));
+    }
+    const res_types = stdx.stackSlice(8, mlir.Type, output_shapes.len);
+    for (res_types, output_shapes) |*r, o| {
+        r.* = mlir.ext.RankedTensorType.fromShape(mlir_ctx, o).as(mlir.Type);
+    }
 
     const loc = ctx.mlirCtx().location(@src());
     const op = dialect.stablehlo.custom_call(
         ctx.mlirCtx(),
-        &.{input.value()},
+        values,
         .{
-            .has_side_effect = false,
             .call_target_name = "zmlHostBufferCallback",
-            .backend_config = .{ .string = @ptrCast(std.mem.sliceAsBytes(&backend_config)) },
-            .output_operand_aliases = &.{0},
-            .api_version = .original,
+            .api_version = .typed_ffi,
+            .backend_config = backend_config,
+            .has_side_effect = opts.has_side_effect,
+            .output_operand_aliases = opts.output_operand_aliases,
         },
-        &.{input.value().getType()},
+        res_types,
         loc,
     );
-    return Tensor._result(input.shape(), op.result(0));
+
+    const res = ctx.allocator().alloc(Tensor, output_shapes.len) catch @panic("OOM");
+    for (res, output_shapes, 0..) |*r, o, i| {
+        r.* = Tensor._result(o, op.result(i)).toMemory(.device);
+    }
+
+    return res;
 }
 
 pub const TritonOps = struct {
@@ -834,46 +843,32 @@ pub fn triton(inputs: anytype, outputs: anytype, opts: TritonOps) [outputs.len]T
         res_types[i] = mlir.ext.mlirType(ctx.mlirCtx(), output);
     }
 
-    const attrs = mlir.DictionaryAttribute.init(ctx.mlirCtx(), &.{
-        .named(ctx.mlirCtx(), "name", .string(ctx.mlirCtx(), opts.name)),
-        .named(ctx.mlirCtx(), "ir", .string(ctx.mlirCtx(), opts.ir)),
-        .named(ctx.mlirCtx(), "grid_x", .int(ctx.mlirCtx(), .i32, opts.grid[0])),
-        .named(ctx.mlirCtx(), "grid_y", .int(ctx.mlirCtx(), .i32, opts.grid[1])),
-        .named(ctx.mlirCtx(), "grid_z", .int(ctx.mlirCtx(), .i32, opts.grid[2])),
-        .named(ctx.mlirCtx(), "num_stages", .int(ctx.mlirCtx(), .i32, opts.num_stages)),
-        .named(ctx.mlirCtx(), "num_warps", .int(ctx.mlirCtx(), .i32, opts.num_warps)),
+    const backend_config = mlir.Attribute.dict(ctx.mlirCtx(), &.{
+        .{ "name", .string(ctx.mlirCtx(), opts.name) },
+        .{ "ir", .string(ctx.mlirCtx(), opts.ir) },
+        .{ "grid_x", .int(ctx.mlirCtx(), .i32, opts.grid[0]) },
+        .{ "grid_y", .int(ctx.mlirCtx(), .i32, opts.grid[1]) },
+        .{ "grid_z", .int(ctx.mlirCtx(), .i32, opts.grid[2]) },
+        .{ "num_stages", .int(ctx.mlirCtx(), .i32, opts.num_stages) },
+        .{ "num_warps", .int(ctx.mlirCtx(), .i32, opts.num_warps) },
     });
 
-    const MINOR_TO_MAJOR = blk: {
-        var ret: [Shape.MAX_RANK]usize = undefined;
-        for (0..Shape.MAX_RANK) |i| {
-            ret[i] = @intCast(Shape.MAX_RANK - i - 1);
-        }
-        break :blk ret;
-    };
+    var operands_layouts: [inputs.len][]const usize = undefined;
+    inline for (inputs, 0..) |input, i| {
+        operands_layouts[i] = minorToMajor(input.rank());
+    }
 
-    const operands_layouts = blk: {
-        var ret: [inputs.len][]const usize = undefined;
-        inline for (inputs, 0..) |input, i| {
-            ret[i] = MINOR_TO_MAJOR[MINOR_TO_MAJOR.len - input.rank() ..];
-        }
-        break :blk ret;
-    };
-
-    const results_layouts = blk: {
-        var ret: [outputs.len][]const usize = undefined;
-        inline for (outputs, 0..) |output, i| {
-            ret[i] = MINOR_TO_MAJOR[MINOR_TO_MAJOR.len - output.rank() ..];
-        }
-        break :blk ret;
-    };
+    var results_layouts: [outputs.len][]const usize = undefined;
+    inline for (outputs, 0..) |output, i| {
+        results_layouts[i] = minorToMajor(output.rank());
+    }
 
     const op = dialect.stablehlo.custom_call(
         ctx.mlirCtx(),
         &values,
         .{
             .call_target_name = "__gpu$xla.gpu.triton",
-            .backend_config = .{ .dict = attrs },
+            .backend_config = backend_config,
             .has_side_effect = false,
             .api_version = .typed_ffi,
             .operand_layouts = &operands_layouts,
@@ -1255,4 +1250,16 @@ inline fn toI64(values: anytype) []i64 {
     var res: [Tensor.MAX_RANK]i64 = undefined;
     for (values, 0..) |val, i| res[i] = @intCast(val);
     return res[0..values.len];
+}
+
+const _MINOR_TO_MAJOR = blk: {
+    var ret: [Shape.MAX_RANK]usize = undefined;
+    for (0..Shape.MAX_RANK) |i| {
+        ret[i] = @intCast(Shape.MAX_RANK - i - 1);
+    }
+    break :blk ret;
+};
+
+fn minorToMajor(rank: u8) []const usize {
+    return _MINOR_TO_MAJOR[_MINOR_TO_MAJOR.len - rank ..];
 }

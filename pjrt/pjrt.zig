@@ -1,12 +1,13 @@
-const builtin = @import("builtin");
 const std = @import("std");
-const stdx = @import("stdx");
+const builtin = @import("builtin");
 
 const c = @import("c");
+const stdx = @import("stdx");
+
+pub const ffi = @import("ffi.zig");
+pub const Profiler = @import("profiler.zig").Profiler;
 
 const log = std.log.scoped(.pjrt);
-
-pub const Profiler = @import("profiler.zig").Profiler;
 
 test {
     std.testing.refAllDecls(@This());
@@ -160,10 +161,9 @@ pub const Api = struct {
     }
 
     pub fn customCallRegistry(api: *const Api) ?CustomCallRegistry {
-        if (api.lookupExtension(c.PJRT_Gpu_Custom_Call, c.PJRT_Extension_Type_Gpu_Custom_Call)) |ext| {
-            return .{ .inner = ext.custom_call.? };
+        if (api.lookupExtension(c.PJRT_FFI_Extension, c.PJRT_Extension_Type_FFI)) |ext| {
+            return .{ .inner = ext.register_handler.? };
         }
-        // log.warn("No Custom Call registry found for platform: {}", .{self});
         return null;
     }
 
@@ -405,7 +405,7 @@ pub const Client = opaque {
     }
 
     pub const CreateViewOfDeviceBufferArgs = struct {
-        data: []const u8,
+        data: *anyopaque,
         dims: []const i64,
         element_type: BufferType,
         layout: MemoryLayout,
@@ -421,7 +421,7 @@ pub const Client = opaque {
         const layout = args.layout.toCStruct();
         const ret = try api.call(.PJRT_Client_CreateViewOfDeviceBuffer, .{
             .client = self.inner(),
-            .device_buffer_ptr = @ptrCast(@constCast(args.data.ptr)),
+            .device_buffer_ptr = @ptrCast(@constCast(args.data)),
             .dims = args.dims.ptr,
             .num_dims = args.dims.len,
             .element_type = @intFromEnum(args.element_type),
@@ -919,18 +919,14 @@ pub const Memory = opaque {
     const inner = InnerMixin(c.PJRT_Memory).inner;
 
     pub fn id(self: *const Memory, api: *const Api) usize {
-        const ret = api.call(.PJRT_Memory_Id, .{
-            .memory = self.inner(),
-        }) catch unreachable;
+        const ret = api.call(.PJRT_Memory_Id, .{ .memory = self.inner() }) catch unreachable;
         return @intCast(ret.id);
     }
 
     pub fn kind(self: *const Memory, api: *const Api) Kind {
-        const ret = api.call(.PJRT_Memory_Kind, .{
-            .memory = self.inner(),
-        }) catch unreachable;
-        const kind_ = ret.kind orelse unreachable;
-        return std.meta.stringToEnum(Kind, kind_[0..ret.kind_size]) orelse unreachable;
+        const ret = api.call(.PJRT_Memory_Kind, .{ .memory = self.inner() }) catch unreachable;
+        const kind_ = ret.kind orelse unreachable[0..ret.kind_size];
+        return std.meta.stringToEnum(Kind, kind_) orelse unreachable;
     }
 
     pub fn kindId(self: *const Memory, api: *const Api) u32 {
@@ -1161,23 +1157,25 @@ pub const NamedValue = extern struct {
     }
 };
 
-/// Custom call signature arguments are:
-/// * a pointer to a platform specific stream handle
-/// * a pointer to an unspecified list of platform specific buffer handle
-/// * a context struct passed as a slice of bytes
-pub const CustomCall = fn (*anyopaque, [*]*anyopaque, [*]const u8, usize) callconv(.C) void;
-
 // todo : support all missing handlers available in GPU plugin extension: handler_instantiate, handler_prepare, handler_initialize
 // introduced by https://github.com/openxla/xla/commit/ef85a7bcc308313492ebc50295a8a08b4e51b8f5
 pub const CustomCallRegistry = extern struct {
-    inner: *const c.PJRT_Gpu_Register_Custom_Call,
+    inner: *const c.PJRT_FFI_Register_Handler,
 
-    pub fn register(self: *const CustomCallRegistry, api: *const Api, api_version: usize, name: []const u8, func: *const CustomCall) ApiError!void {
-        var ret = pjrtStruct(c.PJRT_Gpu_Register_Custom_Call_Args{
-            .function_name = name.ptr,
-            .function_name_size = name.len,
-            .api_version = @intCast(api_version),
-            .handler_execute = @ptrCast(@constCast(func)),
+    pub fn registerFfi(
+        self: *const CustomCallRegistry,
+        api: *const Api,
+        target_name: []const u8,
+        platform_name: []const u8,
+        func: *const ffi.Handler,
+    ) ApiError!void {
+        var ret = pjrtStruct(c.PJRT_FFI_Register_Handler_Args{
+            .api_version = 1,
+            .target_name = target_name.ptr,
+            .target_name_size = target_name.len,
+            .handler = @ptrCast(@constCast(func)),
+            .platform_name = platform_name.ptr,
+            .platform_name_size = platform_name.len,
         });
         const result = self.inner(&ret);
         if (result) |pjrt_c_error| {

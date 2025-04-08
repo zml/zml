@@ -739,18 +739,13 @@ pub const CustomCallOpts = struct {
         typed_ffi = 4,
     };
 
-    pub const BackendConfig = union(enum) {
-        string: [:0]const u8,
-        dict: mlir.DictionaryAttribute,
-    };
-
     call_target_name: [:0]const u8,
     has_side_effect: bool,
-    backend_config: BackendConfig = .{ .string = &.{} },
+    backend_config: ?mlir.Attribute,
     operand_layouts: ?[]const []const usize = null,
     result_layouts: ?[]const []const usize = null,
     output_operand_aliases: []const i64 = &.{},
-    addional_attributes: []const mlir.AttrTuple = &.{},
+    additional_attributes: []const mlir.AttrTuple = &.{},
     api_version: ApiVersion,
 };
 
@@ -758,68 +753,56 @@ pub fn custom_call(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCa
     const MAX_OPERANDS = 64;
     const MAX_RESULTS = 16;
 
-    const output_operand_aliases = blk: {
-        var ret: std.BoundedArray(mlir.Attribute, MAX_RESULTS) = .{};
-        for (opts.output_operand_aliases) |alias| {
-            ret.appendAssumeCapacity(
-                OutputOperandAliasAttribute.init(ctx, &.{}, alias, &.{}).as(mlir.Attribute),
-            );
-        }
-        break :blk ret;
-    };
-
-    const backend_config: mlir.Attribute = switch (opts.backend_config) {
-        .string => blk: {
-            stdx.debug.assert(
-                @intFromEnum(opts.api_version) < @intFromEnum(CustomCallOpts.ApiVersion.typed_ffi),
-                "Only API version of less than 4 is supported for backend_config as string",
-                .{},
-            );
-            break :blk .string(ctx, opts.backend_config.string);
-        },
-        .dict => blk: {
-            stdx.debug.assert(
-                opts.api_version == .typed_ffi,
-                "Only API version 4 is supported for backend_config as dictionary",
-                .{},
-            );
-            break :blk opts.backend_config.dict.as(mlir.Attribute);
-        },
-    };
+    const backend_config = opts.backend_config orelse mlir.Attribute.string(ctx, "");
+    if (@intFromEnum(opts.api_version) < @intFromEnum(CustomCallOpts.ApiVersion.typed_ffi)) {
+        stdx.debug.assert(
+            backend_config.is_a(mlir.StringAttribute),
+            "API version < 4 requires a string as backend_config, got {}",
+            .{backend_config},
+        );
+    } else {
+        stdx.debug.assert(
+            backend_config.is_a(mlir.DictionaryAttribute),
+            "API version >= 4 requires a dictionary as backend_config, got {}",
+            .{backend_config},
+        );
+    }
 
     var attrs: std.BoundedArray(mlir.AttrTuple, 32) = .{};
-
     attrs.appendSliceAssumeCapacity(&[_]mlir.AttrTuple{
         .{ "api_version", .int(ctx, .i32, @intFromEnum(opts.api_version)) },
         .{ "call_target_name", .string(ctx, opts.call_target_name) },
         .{ "has_side_effect", .boolean(ctx, opts.has_side_effect) },
         .{ "backend_config", backend_config },
-        .{ "output_operand_aliases", .array(ctx, output_operand_aliases.constSlice()) },
     });
 
+    {
+        var output_operand_aliases: std.BoundedArray(mlir.Attribute, MAX_RESULTS) = .{};
+        for (opts.output_operand_aliases) |alias| {
+            output_operand_aliases.appendAssumeCapacity(
+                OutputOperandAliasAttribute.init(ctx, &.{}, alias, &.{}).as(mlir.Attribute),
+            );
+        }
+        attrs.appendAssumeCapacity(.{ "output_operand_aliases", .array(ctx, output_operand_aliases.constSlice()) });
+    }
+
     if (opts.operand_layouts) |layouts| {
-        const operand_layouts = blk: {
-            var ret: std.BoundedArray(mlir.Attribute, MAX_OPERANDS) = .{};
-            for (layouts) |ol| {
-                ret.appendAssumeCapacity(.denseElements(ctx, &.{@intCast(ol.len)}, .index, ol));
-            }
-            break :blk ret;
-        };
+        var operand_layouts: std.BoundedArray(mlir.Attribute, MAX_OPERANDS) = .{};
+        for (layouts) |ol| {
+            operand_layouts.appendAssumeCapacity(.denseElements(ctx, &.{@intCast(ol.len)}, .index, ol));
+        }
         attrs.appendAssumeCapacity(.{ "operand_layouts", .array(ctx, operand_layouts.constSlice()) });
     }
 
     if (opts.result_layouts) |layouts| {
-        const result_layouts = blk: {
-            var ret: std.BoundedArray(mlir.Attribute, MAX_RESULTS) = .{};
-            for (layouts) |rl| {
-                ret.appendAssumeCapacity(.denseElements(ctx, &.{@intCast(rl.len)}, .index, rl));
-            }
-            break :blk ret;
-        };
+        var result_layouts: std.BoundedArray(mlir.Attribute, MAX_RESULTS) = .{};
+        for (layouts) |rl| {
+            result_layouts.appendAssumeCapacity(.denseElements(ctx, &.{@intCast(rl.len)}, .index, rl));
+        }
         attrs.appendAssumeCapacity(.{ "result_layouts", .array(ctx, result_layouts.constSlice()) });
     }
 
-    attrs.appendSliceAssumeCapacity(opts.addional_attributes);
+    attrs.appendSlice(opts.additional_attributes) catch @panic("Too many additional_attributes");
 
     return mlir.Operation.make(ctx, "stablehlo.custom_call", .{
         .operands = inputs,
@@ -827,22 +810,6 @@ pub fn custom_call(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCa
         .attributes = attrs.constSlice(),
         .location = location,
     });
-}
-
-// todo: move out of stablehlo.zig when we start to implement the frontend
-pub fn annotate_device_placement(ctx: mlir.Context, inputs: []const mlir.Value, memory_kind: mlir.StringAttribute, res_types: []const mlir.Type, location: mlir.Location) mlir.Operation {
-    const frontend_attributes = mlir.DictionaryAttribute.init(
-        ctx,
-        &.{.named(ctx, "_xla_buffer_placement", memory_kind.asAttr())},
-    ).asAttr();
-
-    return custom_call(ctx, inputs, .{
-        .call_target_name = "annotate_device_placement",
-        .has_side_effect = true,
-        .backend_config = .{ .string = &.{} },
-        .addional_attributes = &.{.{ "mhlo.frontend_attributes", frontend_attributes }},
-        .api_version = .original,
-    }, res_types, location);
 }
 
 pub const DotDimensionNumbersAttribute = struct {
