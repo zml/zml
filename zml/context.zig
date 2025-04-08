@@ -7,7 +7,6 @@ const runfiles = @import("runfiles");
 const runtimes = @import("runtimes");
 const stdx = @import("stdx");
 
-const available_targets = @import("platform.zig").available_targets;
 const Buffer = @import("buffer.zig").Buffer;
 const DataType = @import("dtype.zig").DataType;
 const HostBuffer = @import("hostbuffer.zig").HostBuffer;
@@ -214,8 +213,7 @@ pub const Context = struct {
         }
     }
 
-    pub const HostCallback = fn (HostBuffer) void;
-    pub const DeviceCallback = fn (?*anyopaque, []const HostBuffer, []const HostBuffer) void;
+    pub const HostCallback = fn (?*anyopaque, []const HostBuffer, []const HostBuffer) void;
 };
 
 const CustomCall = struct {
@@ -223,7 +221,6 @@ const CustomCall = struct {
         const registry = platform.pjrt_api.customCallRegistry();
 
         if (registry) |reg| {
-            try reg.registerFfi(platform.pjrt_api, "zmlDeviceBufferCallback", @tagName(platform.target), &deviceBufferCallback);
             try reg.registerFfi(platform.pjrt_api, "zmlHostBufferCallback", @tagName(platform.target), &hostBufferCallback);
         } else {
             stdx.debug.panic("Registering custom calls failed", .{});
@@ -233,21 +230,9 @@ const CustomCall = struct {
     fn hostBufferCallback(call_frame: *pjrt.ffi.CallFrame) callconv(.C) ?*pjrt.ffi.Error {
         if (call_frame.registeringHook()) return null;
 
-        const ffi_buffer = call_frame.args.get(0);
-        const callback_scalar = call_frame.attrs.getByName(.scalar, "callback") orelse unreachable;
-        std.debug.assert(callback_scalar.dtype == .u64);
-        const callback: *const Context.HostCallback = @ptrFromInt(callback_scalar.get(usize));
-
-        callback(hostBufferFromPinnedBuffer(ffi_buffer));
-        return null;
-    }
-
-    fn deviceBufferCallback(call_frame: *pjrt.ffi.CallFrame) callconv(.C) ?*pjrt.ffi.Error {
-        if (call_frame.registeringHook()) return null;
-
         const callback_attr = call_frame.attrs.getByName(.scalar, "callback") orelse unreachable;
         std.debug.assert(callback_attr.dtype == .u64);
-        const callback: *const Context.DeviceCallback = @ptrFromInt(callback_attr.get(usize));
+        const callback: *const Context.HostCallback = @ptrFromInt(callback_attr.get(usize));
 
         const user_ctx_ptr = call_frame.attrs.getByName(.scalar, "user_context") orelse unreachable;
         std.debug.assert(user_ctx_ptr.dtype == .u64);

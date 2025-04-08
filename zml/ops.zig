@@ -769,54 +769,29 @@ pub fn fromMlirOperationWithTags(op: mlir.Operation, base: anytype) @TypeOf(base
     return res;
 }
 
-/// At runtime the given tensor will be materialized and copied to host,
-/// and the callback will be called on it.
+pub const HostCallbackOpt = struct {
+    has_side_effect: bool = false,
+    output_operand_aliases: []const i64 = &.{},
+};
+
 pub fn addHostCallback(
-    callback: *const fn (HostBuffer) void,
-    input: Tensor,
-) Tensor {
-    // TODO: implement addCallback that exposes a pjrt.Buffer, so that the user can decide if they need to copy.
-    const ctx = input.getContext();
-    const mlir_ctx = ctx.mlirCtx();
-    // if (ctx.target() != .cuda or ctx.target() != .rocm) return input;
-
-    const loc = ctx.location(@src(), "addHostCallback({_})", .{input});
-    const op = dialect.stablehlo.custom_call(
-        mlir_ctx,
-        // Put the tensor in pinned memory so that we can directly read it from the host.
-        &.{input.toMemory(.host_pinned).value()},
-        .{
-            .call_target_name = "zmlHostBufferCallback",
-            .backend_config = .dict(mlir_ctx, &.{
-                .{ "callback", .int(mlir_ctx, .u64, @bitCast(@intFromPtr(callback))) },
-            }),
-            .has_side_effect = true,
-            .output_operand_aliases = &.{0},
-            .api_version = .typed_ffi,
-        },
-        &.{input.value().getType()},
-        loc,
-    );
-    return Tensor._result(input.shape(), op.result(0));
-}
-
-pub fn addDeviceCallback(
-    comptime callback: Context.DeviceCallback,
+    callback: *const Context.HostCallback,
     blkctx: ?*anyopaque,
     inputs: []const Tensor,
     output_shapes: []const Shape,
+    opts: HostCallbackOpt,
 ) []Tensor {
     const ctx = CompilationContext.current();
 
     const mlir_ctx = ctx.mlirCtx();
     const backend_config = mlir.Attribute.dict(mlir_ctx, &.{
-        .{ "callback", .int(mlir_ctx, .u64, @bitCast(@intFromPtr(&callback))) },
+        .{ "callback", .int(mlir_ctx, .u64, @bitCast(@intFromPtr(callback))) },
         .{ "user_context", .int(mlir_ctx, .u64, @bitCast(@intFromPtr(blkctx))) },
     });
 
     const values = stdx.stackSlice(8, mlir.Value, inputs.len);
     for (inputs, values) |i, *v| {
-        v.* = ctx.getValue(i);
+        v.* = ctx.getValue(i.toMemory(.host_pinned));
     }
     const res_types = stdx.stackSlice(8, mlir.Type, output_shapes.len);
     for (res_types, output_shapes) |*r, o| {
@@ -828,10 +803,11 @@ pub fn addDeviceCallback(
         ctx.mlirCtx(),
         values,
         .{
-            .call_target_name = "zmlDeviceBufferCallback",
-            .backend_config = backend_config,
-            .has_side_effect = false,
+            .call_target_name = "zmlHostBufferCallback",
             .api_version = .typed_ffi,
+            .backend_config = backend_config,
+            .has_side_effect = opts.has_side_effect,
+            .output_operand_aliases = opts.output_operand_aliases,
         },
         res_types,
         loc,

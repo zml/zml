@@ -3778,17 +3778,22 @@ pub const Tensor = struct {
     }
 
     /// Insert code that will print the content of the given buffer at runtime.
-    /// Only for debug purpose, it has the following limitations:
-    /// * only prints the first 1024 values
-    /// * pre allocates a buffer on the host to copy the content of the device buffer,
-    /// this buffer won't be freed. You will have one buffer per "print" call in the IR.
-    /// * does device to host synchronization so it will slow down the program execution.
+    /// Only for debug purpose, it inserts device to host synchronization
+    /// so it will slow down the program execution.
     pub fn print(input: Tensor) Tensor {
-        return ops.addHostCallback(&printCallback, input);
+        return ops.addHostCallback(
+            &printCallback,
+            null,
+            &.{input},
+            &.{input.shape()},
+            .{ .output_operand_aliases = &.{0} },
+        )[0];
     }
 
-    fn printCallback(host_buffer: HostBuffer) void {
+    fn printCallback(_: ?*anyopaque, inputs: []const HostBuffer, outputs: []const HostBuffer) void {
+        const host_buffer = inputs[0];
         std.debug.print("Device buffer: {}: {}", .{ host_buffer.shape(), host_buffer.pretty() });
+        std.debug.assert(host_buffer.data.ptr == outputs[0].data.ptr);
     }
 };
 
