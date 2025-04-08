@@ -405,7 +405,7 @@ pub const Client = opaque {
     }
 
     pub const CreateViewOfDeviceBufferArgs = struct {
-        data: []const u8,
+        data: *anyopaque,
         dims: []const i64,
         element_type: BufferType,
         layout: MemoryLayout,
@@ -421,37 +421,7 @@ pub const Client = opaque {
         const layout = args.layout.toCStruct();
         const ret = try api.call(.PJRT_Client_CreateViewOfDeviceBuffer, .{
             .client = self.inner(),
-            .device_buffer_ptr = @ptrCast(@constCast(args.data.ptr)),
-            .dims = args.dims.ptr,
-            .num_dims = args.dims.len,
-            .element_type = @intFromEnum(args.element_type),
-            .layout = @ptrCast(@constCast(&layout)),
-            .device = @ptrCast(@constCast(args.device)),
-            .on_delete_callback = args.on_delete_callback,
-            .on_delete_callback_arg = args.on_delete_callback_arg,
-            .stream = if (args.stream) |stream| stream else 0,
-        });
-        return @ptrCast(ret.buffer.?);
-    }
-
-    pub const CreateViewOfDeviceBufferArgs2 = struct {
-        device_buffer_ptr: ?*anyopaque,
-        dims: []const i64,
-        element_type: BufferType,
-        layout: MemoryLayout,
-        device: *const Device,
-        on_delete_callback: *const fn (device_buffer_ptr: ?*anyopaque, ctx: ?*anyopaque) callconv(.C) void = &struct {
-            fn call(_: ?*anyopaque, _: ?*anyopaque) callconv(.C) void {}
-        }.call,
-        on_delete_callback_arg: ?*anyopaque = null,
-        stream: ?isize = null,
-    };
-
-    pub fn createViewOfDeviceBuffer2(self: *const Client, api: *const Api, args: CreateViewOfDeviceBufferArgs2) ApiError!*Buffer {
-        const layout = args.layout.toCStruct();
-        const ret = try api.call(.PJRT_Client_CreateViewOfDeviceBuffer, .{
-            .client = self.inner(),
-            .device_buffer_ptr = args.device_buffer_ptr,
+            .device_buffer_ptr = @ptrCast(@constCast(args.data)),
             .dims = args.dims.ptr,
             .num_dims = args.dims.len,
             .element_type = @intFromEnum(args.element_type),

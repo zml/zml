@@ -238,9 +238,8 @@ pub const Buffer = struct {
             break :blk res;
         };
 
-        const device_bytes: [*]u8 = @ptrCast(device_data);
         const pjrt_buffer = platform.pjrt_client.createViewOfDeviceBuffer(platform.pjrt_api, .{
-            .data = device_bytes[0..shape_.byteSize()],
+            .data = device_data,
             .element_type = bufferTypeFromDtype(shape_.dtype()),
             .dims = shape_.dims(),
             // TODO: exposes sharding in the API.

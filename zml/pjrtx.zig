@@ -76,11 +76,6 @@ pub const Client = opaque {
         return @ptrCast(try self.inner().createViewOfDeviceBuffer(api, args));
     }
 
-    pub const CreateViewOfDeviceBufferArgs2 = pjrt.Client.CreateViewOfDeviceBufferArgs2;
-    pub fn createViewOfDeviceBuffer2(self: *const Client, api: *const Api, args: CreateViewOfDeviceBufferArgs2) ApiError!*Buffer {
-        return @ptrCast(try self.inner().createViewOfDeviceBuffer2(api, args));
-    }
-
     fn compileSync(self: *const Client, api: *const Api, allocator: std.mem.Allocator, module: mlir.Module, compile_options_pb: []const u8) CompileError!*LoadedExecutable {
         var bytecode = std.ArrayList(u8).init(allocator);
         defer bytecode.deinit();
@@ -320,8 +315,3 @@ pub const AsyncHostToDeviceTransferManager = opaque {
         return self.inner().addMetadata(api, transfer_metadata);
     }
 };
-
-test "HandlerTraits" {
-    const x: ffi.HandlerTraits = @bitCast(@as(u32, 1));
-    try std.testing.expectEqual(1, x.command_buffer_compatible);
-}
