@@ -919,18 +919,14 @@ pub const Memory = opaque {
     const inner = InnerMixin(c.PJRT_Memory).inner;
 
     pub fn id(self: *const Memory, api: *const Api) usize {
-        const ret = api.call(.PJRT_Memory_Id, .{
-            .memory = self.inner(),
-        }) catch unreachable;
+        const ret = api.call(.PJRT_Memory_Id, .{ .memory = self.inner() }) catch unreachable;
         return @intCast(ret.id);
     }
 
     pub fn kind(self: *const Memory, api: *const Api) Kind {
-        const ret = api.call(.PJRT_Memory_Kind, .{
-            .memory = self.inner(),
-        }) catch unreachable;
-        const kind_ = ret.kind orelse unreachable;
-        return std.meta.stringToEnum(Kind, kind_[0..ret.kind_size]) orelse unreachable;
+        const ret = api.call(.PJRT_Memory_Kind, .{ .memory = self.inner() }) catch unreachable;
+        const kind_ = ret.kind orelse unreachable[0..ret.kind_size];
+        return std.meta.stringToEnum(Kind, kind_) orelse unreachable;
     }
 
     pub fn kindId(self: *const Memory, api: *const Api) u32 {

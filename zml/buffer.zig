@@ -38,6 +38,10 @@ pub const Buffer = struct {
                 .device => .device,
             };
         }
+
+        pub fn pjrtName(self: Memory) []const u8 {
+            return @tagName(self.toPjrtMemory());
+        }
     };
 
     pub const Shard = struct {

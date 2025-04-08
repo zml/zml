@@ -367,7 +367,7 @@ pub const CompilationContext = struct {
         const fn_res_types = try res_allocator.alloc(mlir.Type, out_tensor_count);
         const fn_res_shapes = try res_allocator.alloc(Shape, out_tensor_count);
         const fn_res_donations = try res_allocator.alloc(Tensor._Donation, out_tensor_count);
-        const fn_res_output_memory_kind = try res_allocator.alloc(Tensor._MemoryKind, out_tensor_count);
+        const fn_res_output_memory_kind = try res_allocator.alloc(Buffer.Memory, out_tensor_count);
         var fn_body = self.openBlock(.hermetic, input_types, locations) catch unreachable;
         {
             defer self.closeBlock(fn_body);
@@ -435,15 +435,17 @@ pub const CompilationContext = struct {
         };
     }
 
-    fn addOutputMemoryKindAttributes(self: CompilationContext, attributes: []AttributeList, output_memory_kind: []const Tensor._MemoryKind) void {
+    fn addOutputMemoryKindAttributes(self: CompilationContext, attributes: []AttributeList, output_memory_kind: []const Buffer.Memory) void {
         const mlir_ctx = self.mlirCtx();
         for (attributes, output_memory_kind) |*attr, memory_kind| {
-            if (memory_kind) |mk| {
-                attr.appendAssumeCapacity(mlir.NamedAttribute.init(
-                    mlir.Identifier.get(mlir_ctx, "mhlo.memory_kind"),
-                    mlir.StringAttribute.init(mlir_ctx, @tagName(mk.toPjrtMemory())).as(mlir.Attribute),
-                ));
-            }
+            // .device is the default output, don't explicitly emit the attribute
+            if (memory_kind == .device) continue;
+
+            attr.appendAssumeCapacity(.named(
+                mlir_ctx,
+                "mhlo.memory_kind",
+                .string(mlir_ctx, memory_kind.pjrtName()),
+            ));
         }
     }
 
@@ -733,7 +735,7 @@ pub const CompilationContext = struct {
         types: []mlir.Type,
         shapes: []Shape,
         donations: []Tensor._Donation,
-        output_memory_kind: []Tensor._MemoryKind,
+        output_memory_kind: []Buffer.Memory,
     ) void {
         std.debug.assert(values.len == types.len);
         const LocalContext = struct {
@@ -743,7 +745,7 @@ pub const CompilationContext = struct {
             types: []mlir.Type,
             shapes: []Shape,
             donations: []Tensor._Donation,
-            output_memory_kind: []Tensor._MemoryKind,
+            output_memory_kind: []Buffer.Memory,
         };
         var context = LocalContext{
             .self = self,
@@ -760,9 +762,6 @@ pub const CompilationContext = struct {
                 ctx.types[ctx.index] = value.getType();
                 ctx.shapes[ctx.index] = tensor._shape;
                 ctx.donations[ctx.index] = donation;
-                if (tensor._output_memory_kind) |mk| {
-                    ctx.output_memory_kind[ctx.index] = mk;
-                }
                 ctx.output_memory_kind[ctx.index] = tensor._output_memory_kind;
                 ctx.index += 1;
             }

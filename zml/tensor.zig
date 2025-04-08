@@ -9,6 +9,7 @@ const Buffer = @import("buffer.zig").Buffer;
 const Data = @import("dtype.zig").Data;
 const DataType = @import("dtype.zig").DataType;
 const HostBuffer = @import("hostbuffer.zig").HostBuffer;
+const Memory = @import("buffer.zig").Buffer.Memory;
 const meta = @import("meta.zig");
 const mlir = @import("mlir.zig");
 const Location = mlir.Location;
@@ -41,12 +42,10 @@ pub const Tensor = struct {
     _shape: Shape,
     _id: _Id,
     _donation: _Donation = .no_buffer,
-    _output_memory_kind: _MemoryKind = null,
+    _output_memory_kind: Memory = .device,
 
     pub const _Donation = union(enum) { no_buffer, input_buffer, arg: u16 };
     pub const _Id = union(enum) { mlir: mlir.Value, buffer_id: u64, arg_id: u64 };
-    pub const _MemoryKind = ?Buffer.Memory;
-
     pub const MAX_RANK = Shape.MAX_RANK;
 
     /// Returns the current compilation context.
@@ -200,7 +199,7 @@ pub const Tensor = struct {
         };
     }
 
-    pub fn toMemory(self: Tensor, kind: Buffer.Memory) Tensor {
+    pub fn toMemory(self: Tensor, kind: Memory) Tensor {
         return switch (self._id) {
             .arg_id, .mlir => {
                 const ctx = self.getContext();
