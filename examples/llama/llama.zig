@@ -6,8 +6,6 @@ const zml = @import("zml");
 const Buffer = zml.Buffer;
 const Tensor = zml.Tensor;
 const ShapeOf = zml.ShapeOf;
-const gguf = zml.io.gguf;
-const expectClose = zml.testing.expectClose;
 
 const log = std.log.scoped(.llama);
 
@@ -223,12 +221,7 @@ const RmsNorm = struct {
     /// L2 normalization of input tensor along `.d` axis.
     pub fn forward(self: RmsNorm, input: Tensor) Tensor {
         const x = if (input.shape().isFullyTagged()) input else input.withPartialTags(.{.d});
-        // upcast to improve precision
-        const xf32 = x.convert(.f32);
-        const mean = xf32.mul(xf32).mean(.d);
-        const rsqrt = Tensor.rsqrt(mean.addConstant(self.eps)).convert(x.dtype());
-        const normalized = x.mul(rsqrt.broad(x.shape()));
-
+        const normalized = zml.nn.rmsNorm(x, .d, self.eps);
         return normalized.mul(self.weight.convert(x.dtype()).withTags(.{.d}).broad(x.shape()));
     }
 };
