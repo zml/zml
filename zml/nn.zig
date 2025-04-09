@@ -107,6 +107,15 @@ pub const LayerNorm = struct {
     }
 };
 
+pub fn rmsNorm(x: Tensor, axis: anytype, eps: f32) Tensor {
+    const ax = x.axis(axis);
+    // upcast to improve precision
+    const xf32 = x.convert(.f32);
+    const mean = xf32.mul(xf32).mean(ax);
+    const rsqrt = Tensor.rsqrt(mean.addConstant(eps)).convert(x.dtype());
+    return x.mul(rsqrt.broad(x.shape()));
+}
+
 /// Center and scale by the variance.
 /// normalize(x, eps) = (x - mean(x)) / sqrt(var(x) + eps)
 /// Work on the last axis.
