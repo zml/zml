@@ -502,6 +502,16 @@ pub const Device = opaque {
         }) catch unreachable;
         return @intCast(ret.local_hardware_id);
     }
+
+    pub fn addressableMemories(self: *const Device, api: *const Api) []*const Memory {
+        const ret = api.call(.PJRT_Device_AddressableMemories, .{
+            .device = self.inner(),
+        }) catch unreachable;
+        if (ret.memories) |memories| {
+            return @constCast(@ptrCast(memories[0..ret.num_memories]));
+        }
+        return &.{};
+    }
 };
 
 pub const DeviceDescription = opaque {
@@ -843,7 +853,7 @@ pub const Buffer = opaque {
         return @ptrCast(ret.event);
     }
 
-    pub fn copyToMemory(self: *const Buffer, api: *const Api, dst_memory: *const Memory) ApiError!?*Buffer {
+    pub fn copyToMemory(self: *const Buffer, api: *const Api, dst_memory: *const Memory) ApiError!*Buffer {
         const ret = try api.call(.PJRT_Buffer_CopyToMemory, .{
             .buffer = self.inner(),
             .dst_memory = @ptrCast(@constCast(dst_memory)),
@@ -925,8 +935,8 @@ pub const Memory = opaque {
 
     pub fn kind(self: *const Memory, api: *const Api) Kind {
         const ret = api.call(.PJRT_Memory_Kind, .{ .memory = self.inner() }) catch unreachable;
-        const kind_ = ret.kind orelse unreachable[0..ret.kind_size];
-        return std.meta.stringToEnum(Kind, kind_) orelse unreachable;
+        const kind_ = ret.kind orelse unreachable;
+        return std.meta.stringToEnum(Kind, kind_[0..ret.kind_size]) orelse unreachable;
     }
 
     pub fn kindId(self: *const Memory, api: *const Api) u32 {

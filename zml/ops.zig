@@ -821,6 +821,58 @@ pub fn addHostCallback(
     return res;
 }
 
+pub const HostCallOpt = struct {
+    has_side_effect: bool = true,
+};
+
+pub fn addHostCall(
+    callback: *const Context.HostCall,
+    blkctx: ?*anyopaque,
+    inputs: []const Tensor,
+    opts: HostCallOpt,
+) []Tensor {
+    const ctx = CompilationContext.current();
+
+    const mlir_ctx = ctx.mlirCtx();
+    const backend_config = mlir.Attribute.dict(mlir_ctx, &.{
+        .{ "callback", .int(mlir_ctx, .u64, @bitCast(@intFromPtr(callback))) },
+        .{ "user_context", .int(mlir_ctx, .u64, @bitCast(@intFromPtr(blkctx))) },
+        .{ "pjrt_api", .int(mlir_ctx, .u64, @bitCast(@intFromPtr(ctx._platform.pjrt_api))) },
+        .{ "pjrt_client", .int(mlir_ctx, .u64, @bitCast(@intFromPtr(ctx._platform.pjrt_client))) },
+    });
+
+    const values = stdx.stackSlice(8, mlir.Value, inputs.len);
+    for (inputs, values) |i, *v| {
+        v.* = ctx.getValue(i);
+    }
+    const res_types = stdx.stackSlice(8, mlir.Type, inputs.len);
+    for (res_types, inputs) |*r, i| {
+        r.* = mlir.ext.RankedTensorType.fromShape(mlir_ctx, i.shape()).as(mlir.Type);
+    }
+
+    const loc = ctx.mlirCtx().location(@src());
+    const op = dialect.stablehlo.custom_call(
+        ctx.mlirCtx(),
+        values,
+        .{
+            .call_target_name = "zmlHostBufferCall",
+            .api_version = .typed_ffi,
+            .backend_config = backend_config,
+            .has_side_effect = opts.has_side_effect,
+            .output_operand_aliases = &.{},
+        },
+        res_types,
+        loc,
+    );
+
+    const res = ctx.allocator().alloc(Tensor, inputs.len) catch @panic("OOM");
+    for (res, inputs, 0..) |*r, input, i| {
+        r.* = Tensor._result(input.shape(), op.result(i));
+    }
+
+    return res;
+}
+
 pub const TritonOps = struct {
     debug: bool = false,
     name: [:0]const u8,

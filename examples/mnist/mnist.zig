@@ -20,7 +20,7 @@ const Mnist = struct {
         bias: zml.Tensor,
 
         pub fn forward(self: Layer, input: zml.Tensor) zml.Tensor {
-            return self.weight.matmul(input).add(self.bias).relu();
+            return self.weight.matmul(input.print2()).add(self.bias).relu();
         }
     };
 
@@ -97,6 +97,25 @@ pub fn asyncMain() !void {
     var rng = std.Random.Xoshiro256.init(@intCast(std.time.timestamp()));
 
     // inference - can be looped
+    {
+        const idx = rng.random().intRangeAtMost(u64, 0, 10000 - 1);
+        var sample: [28 * 28]u8 align(16) = undefined;
+        _ = try dataset.pread(&sample, 16 + (idx * 28 * 28));
+        var input = try zml.Buffer.from(platform, zml.HostBuffer.fromBytes(zml.Shape.init(.{ 28, 28 }, .u8), &sample));
+        defer input.deinit();
+
+        printDigit(sample);
+        var result: zml.Buffer = mnist.call(.{input});
+        defer result.deinit();
+
+        log.info(
+            \\✅ RECOGNIZED DIGIT:
+            \\                       +-------------+
+            \\{s}
+            \\                       +-------------+
+            \\
+        , .{digits[try result.getValue(u8)]});
+    }
     {
         const idx = rng.random().intRangeAtMost(u64, 0, 10000 - 1);
         var sample: [28 * 28]u8 align(16) = undefined;

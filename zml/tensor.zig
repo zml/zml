@@ -3800,6 +3800,20 @@ pub const Tensor = struct {
         std.debug.print("Device buffer: {}: {}", .{ host_buffer.shape(), host_buffer.pretty() });
         std.debug.assert(host_buffer.data.ptr == outputs[0].data.ptr);
     }
+
+    pub fn print2(input: Tensor) Tensor {
+        return ops.addHostCall(
+            &printCallback2,
+            null,
+            &.{input},
+            .{ .has_side_effect = true },
+        )[0];
+    }
+
+    fn printCallback2(_: ?*anyopaque, inputs: []const HostBuffer) void {
+        const host_buffer = inputs[0];
+        std.debug.print("Device buffer: {}: {}", .{ host_buffer.shape(), host_buffer.pretty() });
+    }
 };
 
 fn initPoolArg(rank: usize, data: []const i64) [Tensor.MAX_RANK]i64 {
