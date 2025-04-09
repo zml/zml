@@ -1,3 +1,4 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
 load(":fwd.bzl", "include_fwd")
 
 include_fwd(
@@ -36,3 +37,21 @@ cc_library(
         "@abseil-cpp//absl/strings:string_view",
     ],
 )
+
+# include_fwd(
+#     name = "protobuf_hdrs",
+#     includes = [
+#         "@protobuf//src/google/protobuf:message_lite.h",
+#     ],
+# )
+
+# cc_library(
+#     name = "protobuf",
+#     hdrs = [":protobuf_hdrs"],
+#     # include_prefix = "google/protobuf",
+#     includes = ["."],
+#     visibility = ["//visibility:public"],
+#     deps = [
+#         "@protobuf//:protobuf_lite",
+#     ],
+# )
