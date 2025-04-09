@@ -91,5 +91,7 @@ cc_library(
         ":sentencepiece_cc_proto",
         ":sentencepiece_model_cc_proto",
         "@zml//third_party/com_google_sentencepiece:absl",
+        # "@zml//third_party/com_google_sentencepiece:protobuf",
+        # "@com_google_protobuf//:protobuf_lite",
     ],
 )
