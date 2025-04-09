@@ -31,7 +31,7 @@ fn pjrtStructSize(comptime T: type) usize {
     return @field(c, typedef_name ++ "_STRUCT_SIZE");
 }
 
-inline fn pjrtStruct(v: anytype) @TypeOf(v) {
+pub inline fn pjrtStruct(v: anytype) @TypeOf(v) {
     var ret = v;
     ret.struct_size = pjrtStructSize(@TypeOf(v));
     return ret;
@@ -414,7 +414,7 @@ pub const Client = opaque {
             fn call(_: ?*anyopaque, _: ?*anyopaque) callconv(.C) void {}
         }.call,
         on_delete_callback_arg: ?*anyopaque = null,
-        stream: ?isize = null,
+        stream: ?*const ffi.Stream = null,
     };
 
     pub fn createViewOfDeviceBuffer(self: *const Client, api: *const Api, args: CreateViewOfDeviceBufferArgs) ApiError!*Buffer {
@@ -429,7 +429,7 @@ pub const Client = opaque {
             .device = @ptrCast(@constCast(args.device)),
             .on_delete_callback = args.on_delete_callback,
             .on_delete_callback_arg = args.on_delete_callback_arg,
-            .stream = if (args.stream) |stream| stream else 0,
+            .stream = @bitCast(@intFromPtr(args.stream)),
         });
         return @ptrCast(ret.buffer.?);
     }
@@ -653,7 +653,7 @@ pub const LoadedExecutable = opaque {
         });
     }
 
-    pub fn getExecutable(self: *LoadedExecutable, api: *const Api) ApiError!*Executable {
+    pub fn getExecutable(self: *const LoadedExecutable, api: *const Api) ApiError!*Executable {
         const ret = try api.call(.PJRT_LoadedExecutable_GetExecutable, .{
             .loaded_executable = self.inner(),
         });

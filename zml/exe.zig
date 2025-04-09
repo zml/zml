@@ -1,13 +1,13 @@
 const std = @import("std");
+
 const stdx = @import("stdx");
 
 const aio = @import("aio.zig");
-const meta = @import("meta.zig");
-const pjrt = @import("pjrtx.zig");
-
 const Buffer = @import("buffer.zig").Buffer;
 const Bufferized = @import("tensor.zig").Bufferized;
 const CompilationContext = @import("module.zig").CompilationContext;
+const meta = @import("meta.zig");
+const pjrt = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
 const ShapeOf = @import("tensor.zig").ShapeOf;
@@ -243,6 +243,14 @@ pub const BaseExe = struct {
         }
 
         return Buffer.fromPjrtBuffers(self.platform, self.result_shapes[i], shards.constSlice());
+    }
+
+    pub fn clone(self: BaseExe, parent_allocator: std.mem.Allocator) !BaseExe {
+        return .init(parent_allocator, self.platform, self.exe, .{
+            .n_in = self.input_buffer_count,
+            .result_shapes = self.result_shapes,
+            .n_devices = self.num_devices,
+        });
     }
 };
 

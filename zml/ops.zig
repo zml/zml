@@ -782,20 +782,56 @@ pub fn addHostCallback(
     opts: HostCallbackOpt,
 ) []Tensor {
     const ctx = CompilationContext.current();
+    var tags = std.ArrayListUnmanaged(i64).initCapacity(ctx.allocator(), (inputs.len + output_shapes.len) * Shape.MAX_RANK) catch @panic("OOM");
+    defer tags.deinit(ctx.allocator());
+
+    var readable_tags = std.ArrayList(u8).initCapacity(ctx.allocator(), (inputs.len + output_shapes.len) * 32) catch @panic("OOM");
+    defer readable_tags.deinit();
+
+    readable_tags.appendSlice("(") catch {};
+    for (inputs) |input| {
+        readable_tags.appendSlice(".{") catch {};
+        for (input.shape().tags()) |t| {
+            const ptr: u64 = @intFromPtr(t);
+            tags.appendAssumeCapacity(@bitCast(ptr));
+            readable_tags.appendSlice(std.mem.span(t)) catch {};
+            readable_tags.append(',') catch {};
+        }
+        readable_tags.appendSlice("},") catch {};
+    }
+    readable_tags.appendSlice(") -> (") catch {};
+    for (output_shapes) |output| {
+        readable_tags.appendSlice(".{") catch {};
+        for (output.tags()) |t| {
+            const ptr: u64 = @intFromPtr(t);
+            tags.appendAssumeCapacity(@bitCast(ptr));
+            readable_tags.appendSlice(std.mem.span(t)) catch {};
+            readable_tags.append(',') catch {};
+        }
+        readable_tags.appendSlice("},") catch {};
+    }
+    readable_tags.appendSlice(")") catch {};
 
     const mlir_ctx = ctx.mlirCtx();
     const backend_config = mlir.Attribute.dict(mlir_ctx, &.{
         .{ "callback", .int(mlir_ctx, .u64, @bitCast(@intFromPtr(callback))) },
         .{ "user_context", .int(mlir_ctx, .u64, @bitCast(@intFromPtr(blkctx))) },
+        .{ "tags", .string(mlir_ctx, readable_tags.items) },
+        .{ "__tags", .dense(mlir_ctx, .i64, tags.items) },
     });
 
     const values = stdx.stackSlice(8, mlir.Value, inputs.len);
-    for (inputs, values) |i, *v| {
-        v.* = ctx.getValue(i.toMemory(.host_pinned));
+    const operands_layouts = stdx.stackSlice(8, []const usize, inputs.len);
+    for (inputs, 0..) |input, i| {
+        values[i] = ctx.getValue(input);
+        operands_layouts[i] = minorToMajor(input.rank());
     }
+
     const res_types = stdx.stackSlice(8, mlir.Type, output_shapes.len);
-    for (res_types, output_shapes) |*r, o| {
-        r.* = mlir.ext.RankedTensorType.fromShape(mlir_ctx, o).as(mlir.Type);
+    const results_layouts = stdx.stackSlice(8, []const usize, output_shapes.len);
+    for (output_shapes, 0..) |o, i| {
+        res_types[i] = mlir.ext.RankedTensorType.fromShape(mlir_ctx, o).as(mlir.Type);
+        results_layouts[i] = minorToMajor(o.rank());
     }
 
     const loc = ctx.mlirCtx().location(@src());
@@ -807,6 +843,8 @@ pub fn addHostCallback(
             .api_version = .typed_ffi,
             .backend_config = backend_config,
             .has_side_effect = opts.has_side_effect,
+            .operand_layouts = operands_layouts,
+            .result_layouts = results_layouts,
             .output_operand_aliases = opts.output_operand_aliases,
         },
         res_types,
@@ -815,7 +853,7 @@ pub fn addHostCallback(
 
     const res = ctx.allocator().alloc(Tensor, output_shapes.len) catch @panic("OOM");
     for (res, output_shapes, 0..) |*r, o, i| {
-        r.* = Tensor._result(o, op.result(i)).toMemory(.device);
+        r.* = Tensor._result(o, op.result(i)); //.toMemory(.device);
     }
 
     return res;
