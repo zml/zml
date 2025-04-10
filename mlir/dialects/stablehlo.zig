@@ -159,7 +159,7 @@ pub const DotAlgorithm = struct {
     pub fn asAttr(self: DotAlgorithm, ctx: mlir.Context, tensor_type: mlir.RankedTensorType) mlir.Attribute {
         const elem_type = tensor_type.getElementType();
 
-        return .{ ._inner = c.stablehloDotAlgorithmGet(
+        return mlir.Attribute.wrap(c.stablehloDotAlgorithmGet(
             ctx._inner,
             elem_type._inner,
             elem_type._inner,
@@ -168,7 +168,7 @@ pub const DotAlgorithm = struct {
             self.component_count,
             self.num_primitive_operations,
             self.allow_imprecise_accumulation,
-        ) };
+        ));
     }
 };
 

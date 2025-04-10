@@ -297,7 +297,7 @@ pub const Attribute = struct {
     }
 
     pub fn named(attr: Attribute, ctx: Context, name: [:0]const u8) NamedAttribute {
-        return NamedAttribute.init(Identifier.get(ctx, name), attr);
+        return NamedAttribute.named(ctx, name, attr);
     }
 
     pub fn dict(ctx: Context, named_attrs: []const AttrTuple) Attribute {
@@ -314,21 +314,24 @@ pub const Attribute = struct {
 };
 
 pub const NamedAttribute = extern struct {
-    name: c.MlirIdentifier,
-    attribute: c.MlirAttribute,
+    _inner: c.MlirNamedAttribute,
+
+    pub fn wrap(c_named_attribute: c.MlirNamedAttribute) NamedAttribute {
+        return @bitCast(c_named_attribute);
+    }
 
     pub fn named(ctx: Context, name: [:0]const u8, attr: Attribute) NamedAttribute {
-        return .{
+        return .{ ._inner = .{
             .name = c.mlirIdentifierGet(ctx._inner, stringRef(name)),
             .attribute = attr._inner,
-        };
+        } };
     }
 
     pub fn init(name: Identifier, attr: Attribute) NamedAttribute {
-        return .{
+        return .{ ._inner = .{
             .name = name._inner,
             .attribute = attr._inner,
-        };
+        } };
     }
 };
 
@@ -336,6 +339,7 @@ pub const StringAttribute = struct {
     _inner: c.MlirAttribute,
     pub const is_a_fn = c.mlirAttributeIsAString;
     const Self = StringAttribute;
+    pub const asAttr = Attribute.fromAny(Self);
     pub const eql = Attribute.eqlAny(Self);
 
     pub fn init(ctx: Context, str: []const u8) Self {
@@ -345,8 +349,6 @@ pub const StringAttribute = struct {
     pub fn value(self: Self) []const u8 {
         return fromStringRef(c.mlirStringAttrGetValue(self._inner));
     }
-
-    pub const asAttr = Attribute.fromAny(Self);
 };
 
 pub const BoolAttribute = struct {
@@ -681,7 +683,7 @@ pub const OperationState = struct {
 pub const DictionaryAttribute = struct {
     _inner: c.MlirAttribute,
     pub const is_a_fn = c.mlirAttributeIsADictionary;
-
+    pub const asAttr = Attribute.fromAny(DictionaryAttribute);
     pub const eql = Attribute.eqlAny(DictionaryAttribute);
 
     pub fn init(ctx: Context, attributes: []const NamedAttribute) DictionaryAttribute {
@@ -697,15 +699,11 @@ pub const DictionaryAttribute = struct {
     }
 
     pub fn get(self: DictionaryAttribute, pos: usize) NamedAttribute {
-        return .{ ._inner = c.mlirDictionaryAttrGetElement(self._inner, @intCast(pos)) };
+        return .wrap(c.mlirDictionaryAttrGetElement(self._inner, @bitCast(pos)));
     }
 
-    pub fn getByName(self: DictionaryAttribute, name: [:0]const u8) ?NamedAttribute {
-        return NamedAttribute.wrapOr(c.mlirDictionaryAttrGetElementByName(self._inner, name));
-    }
-
-    pub fn asAttr(self: DictionaryAttribute) Attribute {
-        return .{ ._inner = self._inner };
+    pub fn getByName(self: DictionaryAttribute, name: [:0]const u8) ?Attribute {
+        return Attribute.wrapOr(c.mlirDictionaryAttrGetElementByName(self._inner, name));
     }
 };
 

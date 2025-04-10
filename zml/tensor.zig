@@ -1,5 +1,5 @@
-const builtin = @import("builtin");
 const std = @import("std");
+const builtin = @import("builtin");
 
 const mlir = @import("mlir");
 const stdx = @import("stdx");
@@ -11,7 +11,6 @@ const HostBuffer = @import("hostbuffer.zig").HostBuffer;
 const Memory = @import("buffer.zig").Buffer.Memory;
 const meta = @import("meta.zig");
 const mlir_ext = @import("mlir.zig").ext;
-const Location = mlir.Location;
 const module = @import("module.zig");
 const CompilationContext = module.CompilationContext;
 const ops = @import("ops.zig");
