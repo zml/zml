@@ -169,6 +169,10 @@ pub const HostBuffer = struct {
         return ptr[0..self._shape.count()];
     }
 
+    pub fn mutItems(self: HostBuffer, comptime T: type) []T {
+        return @constCast(self.items(T));
+    }
+
     pub fn shape(self: HostBuffer) Shape {
         return self._shape;
     }
