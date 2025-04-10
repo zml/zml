@@ -116,7 +116,7 @@ pub const Client = opaque {
         return self.inner().addressableMemories(api);
     }
 
-    pub fn memoryByKind(self: *const Client, api: *const Api, kind: Memory.Kind) ?*Memory {
+    pub fn memoryByKind(self: *const Client, api: *const Api, kind: Memory.Kind) ?*const Memory {
         for (self.addressableMemories(api)) |mem| {
             if (mem.kind(api) == kind) {
                 return mem;
@@ -178,7 +178,7 @@ pub const Buffer = opaque {
     }
 
     pub fn copyToMemory(self: *const Buffer, api: *const Api, memory_: *const Memory) ApiError!*Buffer {
-        return @ptrCast(self.inner().copyToMemory(api, memory_));
+        return @ptrCast(try self.inner().copyToMemory(api, memory_));
     }
 
     pub fn getReadyEvent(self: *const Buffer, api: *const Api) ?*Event {

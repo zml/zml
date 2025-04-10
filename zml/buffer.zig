@@ -394,6 +394,16 @@ pub const Buffer = struct {
         if (self._shards.len == 1) return false;
         return @reduce(.Or, self._shape._sharding_info);
     }
+
+    pub fn copyToMemory(self: Buffer, memory: *const pjrt.Memory) !Buffer {
+        var new_shards: Buffer.Shards = .{};
+        for (self._shards.slice()) |shard| {
+            const new_shard = try shard.copyToMemory(self._api, memory);
+            new_shards.appendAssumeCapacity(new_shard);
+        }
+
+        return Buffer{ ._shape = self._shape, ._shards = new_shards, ._api = self._api };
+    }
 };
 
 pub fn bufferTypeFromDtype(dt: DataType) pjrt.BufferType {

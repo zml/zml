@@ -31,7 +31,7 @@ fn pjrtStructSize(comptime T: type) usize {
     return @field(c, typedef_name ++ "_STRUCT_SIZE");
 }
 
-inline fn pjrtStruct(v: anytype) @TypeOf(v) {
+pub inline fn pjrtStruct(v: anytype) @TypeOf(v) {
     var ret = v;
     ret.struct_size = pjrtStructSize(@TypeOf(v));
     return ret;
@@ -925,7 +925,7 @@ pub const Memory = opaque {
 
     pub fn kind(self: *const Memory, api: *const Api) Kind {
         const ret = api.call(.PJRT_Memory_Kind, .{ .memory = self.inner() }) catch unreachable;
-        const kind_ = ret.kind orelse unreachable[0..ret.kind_size];
+        const kind_ = ret.kind[0..ret.kind_size];
         return std.meta.stringToEnum(Kind, kind_) orelse unreachable;
     }
 
