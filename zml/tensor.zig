@@ -3796,8 +3796,11 @@ pub const Tensor = struct {
     }
 
     fn printCallback(_: ?*anyopaque, inputs: []const HostBuffer, outputs: []const HostBuffer) void {
+        // TODO: find a way of doing print that doesn't involve a H2D copy.
         const host_buffer = inputs[0];
-        std.debug.print("Device buffer: {}: {}", .{ host_buffer.shape(), host_buffer.pretty() });
+        std.log.defaultLog(.info, .zml, "Device buffer: {}: {}", .{ host_buffer.shape(), host_buffer.pretty() });
+        // This is true because of the operand aliases.
+        // Since the result is already pointing to the input we don't need to modify the buffer.
         std.debug.assert(host_buffer.data.ptr == outputs[0].data.ptr);
     }
 };
