@@ -1,9 +1,9 @@
 const std = @import("std");
-const stdx = @import("stdx");
-const libcoro = @import("coro.zig");
-const libcoro_options = @import("libcoro_options");
 
-const log = std.log.scoped(.@"zml/async");
+const libcoro_options = @import("libcoro_options");
+const stdx = @import("stdx");
+
+const libcoro = @import("coro.zig");
 
 pub const Executor = struct {
     const Self = @This();
@@ -43,14 +43,14 @@ pub const Executor = struct {
         var now = self.readyq;
         self.readyq = .{};
 
-        log.debug("Executor.tick readyq_len={d}", .{now.len()});
+        libcoro.log(.debug, "Executor.tick readyq.len={d}", .{now.len()});
 
         var count: usize = 0;
         while (now.pop()) |func| : (count += 1) {
             func.run();
         }
 
-        log.debug("Executor.tick done", .{});
+        libcoro.log(.debug, "Executor.tick done", .{});
 
         return count > 0;
     }
