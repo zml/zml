@@ -1,6 +1,6 @@
 const std = @import("std");
-const assert = std.debug.assert;
 
+const mlir = @import("mlir");
 const stdx = @import("stdx");
 
 const _collectAxes = @import("tensor.zig")._collectAxes;
@@ -13,7 +13,7 @@ const DataType = @import("dtype.zig").DataType;
 const helpers = @import("helpers.zig");
 const HostBuffer = @import("hostbuffer.zig").HostBuffer;
 const meta = @import("meta.zig");
-const mlir = @import("mlir.zig");
+const mlir_ext = @import("mlir.zig").ext;
 const module = @import("module.zig");
 const CompilationContext = module.CompilationContext;
 const Platform = @import("platform.zig").Platform;
@@ -198,14 +198,14 @@ pub fn reduce(
                 mlir_ctx,
                 val,
                 inner_ctx.broadcasting_axes[0 .. tensor.rank() - inner_ctx.n_reduced],
-                mlir.ext.RankedTensorType.fromShape(mlir_ctx, reduced_shape).as(mlir.Type),
+                mlir_ext.RankedTensorType.fromShape(mlir_ctx, reduced_shape).asType(),
                 inner_ctx.loc,
             );
             tensor.* = Tensor._result(reduced_shape, broad_val.result(0));
             inner_ctx.index += 1;
         }
     }).cb, &local_context, &res);
-    assert(local_context.index == op.numResults());
+    std.debug.assert(local_context.index == op.numResults());
     return res;
 }
 
@@ -607,8 +607,8 @@ pub fn sort(
         .result_type_inference = true,
         .blocks = &.{block},
         .attributes = &.{
-            .{ "dimension", mlir.IntegerAttribute(.i64).init(ctx.mlirCtx(), dimension).as(mlir.Attribute) },
-            .{ "is_stable", mlir.BoolAttribute.init(ctx.mlirCtx(), is_stable).as(mlir.Attribute) },
+            .{ "dimension", mlir.IntegerAttribute(.i64).init(ctx.mlirCtx(), dimension).asAttr() },
+            .{ "is_stable", mlir.BoolAttribute.init(ctx.mlirCtx(), is_stable).asAttr() },
         },
         .location = loc,
     });
@@ -765,7 +765,7 @@ pub fn fromMlirOperationWithTags(op: mlir.Operation, base: anytype) @TypeOf(base
             inner_ctx.index += 1;
         }
     }).cb, &context, &res);
-    assert(context.index == op.numResults());
+    std.debug.assert(context.index == op.numResults());
     return res;
 }
 
@@ -795,7 +795,7 @@ pub fn addHostCallback(
     }
     const res_types = stdx.stackSlice(8, mlir.Type, output_shapes.len);
     for (res_types, output_shapes) |*r, o| {
-        r.* = mlir.ext.RankedTensorType.fromShape(mlir_ctx, o).as(mlir.Type);
+        r.* = mlir_ext.mlirType(mlir_ctx, o);
     }
 
     const loc = ctx.mlirCtx().location(@src());
@@ -840,7 +840,7 @@ pub fn triton(inputs: anytype, outputs: anytype, opts: TritonOps) [outputs.len]T
 
     var res_types: [outputs.len]mlir.Type = undefined;
     inline for (outputs, 0..) |output, i| {
-        res_types[i] = mlir.ext.mlirType(ctx.mlirCtx(), output);
+        res_types[i] = mlir_ext.mlirType(ctx.mlirCtx(), output);
     }
 
     const backend_config = mlir.Attribute.dict(ctx.mlirCtx(), &.{
@@ -1054,7 +1054,7 @@ pub fn scatter(
             inner_ctx.index += 1;
         }
     }).cb, &local_context, &res);
-    assert(local_context.index == op.numResults());
+    std.debug.assert(local_context.index == op.numResults());
     return res;
 }
 
