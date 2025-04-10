@@ -229,10 +229,10 @@ pub const TypeId = extern struct {
 pub const DataType = enum(c.XLA_FFI_DataType) {
     invalid = c.XLA_FFI_DataType_INVALID,
     pred = c.XLA_FFI_DataType_PRED,
-    s8 = c.XLA_FFI_DataType_S8,
-    s16 = c.XLA_FFI_DataType_S16,
-    s32 = c.XLA_FFI_DataType_S32,
-    s64 = c.XLA_FFI_DataType_S64,
+    i8 = c.XLA_FFI_DataType_S8,
+    i16 = c.XLA_FFI_DataType_S16,
+    i32 = c.XLA_FFI_DataType_S32,
+    i64 = c.XLA_FFI_DataType_S64,
     u8 = c.XLA_FFI_DataType_U8,
     u16 = c.XLA_FFI_DataType_U16,
     u32 = c.XLA_FFI_DataType_U32,
@@ -346,6 +346,11 @@ pub const Attrs = extern struct {
         dtype: DataType,
         len: usize,
         data: [*]const u8,
+
+        pub fn slice(self: Array, T: type) []const T {
+            const ptr: [*]const T = @alignCast(@ptrCast(self.data));
+            return ptr[0..self.len];
+        }
     };
 
     pub fn getByIndex(self: Attrs, comptime attr_type: AttrType, index: usize) ?*const @FieldType(Attr, @tagName(attr_type)) {
