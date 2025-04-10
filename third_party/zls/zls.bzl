@@ -10,6 +10,13 @@ _ARCH = {
             "@platforms//cpu:x86_64",
         ],
     ),
+    "x86_64-macos": struct(
+        sha256 = "baee69e4645deeccb42970b4a01f573592209dc1cf72e32893c59ca06af511dc",
+        exec_compatible_with = [
+            "@platforms//os:macos",
+            "@platforms//cpu:x86_64",
+        ],
+    ),
     "aarch64-macos": struct(
         sha256 = "dfb627e1f9603583678f552d8035a12dce878215c0a507b32d6f1b9d074d6c4d",
         exec_compatible_with = [

@@ -90,3 +90,6 @@ common          --registry=https://bcr.bazel.build
 
 # Enable resolving proto compiler from toolchains
 common          --incompatible_enable_proto_toolchain_resolution
+
+
+common          --incompatible_disallow_empty_glob=false

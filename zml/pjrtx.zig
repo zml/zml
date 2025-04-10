@@ -1,19 +1,10 @@
+const std = @import("std");
+
 const asynk = @import("async");
-const builtin = @import("builtin");
 const dialects = @import("mlir/dialects");
 const mlir = @import("mlir");
 const pjrt = @import("pjrt");
-const std = @import("std");
-const stdx = @import("stdx");
-const c = @import("c");
-
-const dtype = @import("dtype.zig");
-const meta = @import("meta.zig");
-
-const Target = @import("platform.zig").Target;
-
-const log = std.log.scoped(.zml);
-
+pub const ffi = pjrt.ffi;
 pub const Profiler = pjrt.Profiler;
 pub const ApiError = pjrt.ApiError;
 pub const ErrorCode = pjrt.ErrorCode;
@@ -23,13 +14,16 @@ pub const DeviceDescription = pjrt.DeviceDescription;
 pub const Api = pjrt.Api;
 pub const NamedValue = pjrt.NamedValue;
 pub const ClientInitError = pjrt.ClientInitError;
-pub const CompileError = std.mem.Allocator.Error || error{InvalidMlirBytecodeVersion} || ApiError;
 pub const Error = pjrt.Error;
 pub const GetCostAnalysisError = pjrt.GetCostAnalysisError;
 pub const SerializeResult = pjrt.SerializeResult;
 pub const Executable = pjrt.Executable;
 pub const ExecuteError = ApiError;
 pub const Memory = pjrt.Memory;
+
+const log = std.log.scoped(.zml);
+
+pub const CompileError = std.mem.Allocator.Error || error{InvalidMlirBytecodeVersion} || ApiError;
 
 fn InnerMixin(comptime innerT: type) type {
     return struct {
@@ -159,6 +153,10 @@ pub const Buffer = opaque {
         return self.inner().isOnCpu(api);
     }
 
+    pub fn memory(self: *const Buffer, api: *const Api) *const Memory {
+        return self.inner().memory(api);
+    }
+
     pub fn toHostBuffer(self: *const Buffer, api: *const Api, dst: []u8) ApiError!?*Event {
         return @ptrCast(try self.inner().toHostBuffer(api, dst));
     }
@@ -183,8 +181,8 @@ pub const Buffer = opaque {
         return @ptrCast(self.inner().copyToDevice(api, device));
     }
 
-    pub fn copyToMemory(self: *const Buffer, api: *const Api, memory: *const Memory) ApiError!*Buffer {
-        return @ptrCast(self.inner().copyToMemory(api, memory));
+    pub fn copyToMemory(self: *const Buffer, api: *const Api, memory_: *const Memory) ApiError!*Buffer {
+        return @ptrCast(self.inner().copyToMemory(api, memory_));
     }
 
     pub fn getReadyEvent(self: *const Buffer, api: *const Api) ?*Event {

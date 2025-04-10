@@ -1,4 +1,5 @@
 const std = @import("std");
+
 const stdx = @import("stdx");
 
 const Buffer = @import("buffer.zig").Buffer;
@@ -96,6 +97,13 @@ pub const HostBuffer = struct {
             // Array are typically stack allocated and don't need to be freed.
             ._memory = .unmanaged,
         };
+    }
+
+    /// Returns a HostBuffer tagged with the tags in 'tagz'.
+    pub fn withTags(self: HostBuffer, tagz: anytype) HostBuffer {
+        var res = self;
+        res._shape = self._shape.withTags(tagz);
+        return res;
     }
 
     pub const ArangeArgs = struct {
@@ -238,6 +246,11 @@ pub const HostBuffer = struct {
             ._strides = if (ax == 0) self._strides else _strides,
             ._memory = .unmanaged,
         };
+    }
+
+    pub fn choose1d(self: HostBuffer, axis_: anytype, start: i64) HostBuffer {
+        const ax = self.axis(axis_);
+        return self.slice1d(ax, .{ .start = start, .end = start + 1 }).squeeze(ax);
     }
 
     pub fn squeeze(self: HostBuffer, axis_: anytype) HostBuffer {

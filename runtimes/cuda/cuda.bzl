@@ -25,6 +25,11 @@ CUDA_PACKAGES = {
         name = "cupti",
         shared_library = "lib/libcupti.so.12",
     ),
+    "cuda_nvtx": packages.cc_import_glob_hdrs(
+        name = "nvtx",
+        hdrs_glob = "include/nvtx3/**/*.h",
+        shared_library = "lib/libnvToolsExt.so.1",
+    ),
     "libcufft": packages.cc_import(
         name = "cufft",
         shared_library = "lib/libcufft.so.11",

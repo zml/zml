@@ -1,3 +1,4 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
 load("@rules_zig//zig:defs.bzl", "zig_library")
 load("@zml//bazel:zig.bzl", "zig_cc_binary")
 load("//bazel:zig_proto_library.bzl", "zig_proto_library")
@@ -12,7 +13,12 @@ cc_library(
 
 zig_library(
     name = "pjrt",
-    srcs = ["profiler.zig"] + glob(["convert/*.zig"]),
+    srcs = [
+        "ffi.zig",
+        "profiler.zig",
+        "convert/trace_container.zig",
+        "convert/xplane_schema.zig"
+    ],
     main = "pjrt.zig",
     visibility = ["//visibility:public"],
     deps = [
@@ -20,9 +26,12 @@ zig_library(
         ":trace_events_proto",
         ":xplane_proto",
         "//stdx",
+        "@xla//xla/ffi/api:c_api",
+        "@xla//xla/pjrt/c:pjrt_c_api_ffi_extension_hdrs",
         "@xla//xla/pjrt/c:pjrt_c_api_gpu_extension_hdrs",
         "@xla//xla/pjrt/c:pjrt_c_api_hdrs",
         "@xla//xla/pjrt/c:pjrt_c_api_profiler_extension_hdrs",
+        "@xla//xla/pjrt/c:pjrt_c_api_triton_extension_hdrs",
     ] + select({
         "@platforms//os:linux": [":dlfcn"],
         "//conditions:default": [],
@@ -49,7 +58,7 @@ zig_proto_library(
 
 zig_cc_binary(
     name = "xspace_to_json",
-    srcs = glob(["convert/*.zig"]),
+    srcs = ["convert/trace_container.zig", "convert/xplane_schema.zig"],
     main = "xspace_to_json.zig",
     visibility = ["//visibility:public"],
     deps = [

@@ -10,6 +10,22 @@ def _kwargs(**kwargs):
 def _cc_import(**kwargs):
     return """cc_import({})""".format(_kwargs(**kwargs))
 
+def _cc_import_glob_hdrs(name, hdrs_glob, shared_library, deps = []):
+    return """\
+filegroup(
+    name = "{name}_files",
+    srcs = glob(["{hdrs_glob}"]),
+    visibility = ["//visibility:public"],
+)
+cc_import(
+    name = "{name}",
+    shared_library = {shared_library},
+    hdrs = [":{name}_files"],
+    deps = {deps},
+    visibility = ["//visibility:public"],
+)
+""".format(name = name, hdrs_glob = hdrs_glob, shared_library = repr(shared_library), deps = repr(deps))
+
 def _filegroup(**kwargs):
     return """filegroup({})""".format(_kwargs(**kwargs))
 
@@ -59,6 +75,7 @@ common_apt_packages = module_extension(
 packages = struct(
     read = _read,
     cc_import = _cc_import,
+    cc_import_glob_hdrs = _cc_import_glob_hdrs,
     filegroup = _filegroup,
     load_ = _load,
 )

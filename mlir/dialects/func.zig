@@ -1,4 +1,5 @@
 const std = @import("std");
+
 const mlir = @import("mlir");
 
 pub fn func(
@@ -14,14 +15,14 @@ pub fn func(
     },
 ) mlir.Operation {
     var attrs_tuple_buffer = std.BoundedArray(mlir.AttrTuple, 4){};
-    attrs_tuple_buffer.appendAssumeCapacity(.{ "sym_name", mlir.StringAttribute.init(ctx, args.sym_name).asAttr() });
-    attrs_tuple_buffer.appendAssumeCapacity(.{ "function_type", mlir.TypeAttribute.init((mlir.FunctionType.init(ctx, args.args, args.results) catch unreachable).asType()).asAttr() });
+    attrs_tuple_buffer.appendAssumeCapacity(.{ "sym_name", .string(ctx, args.sym_name) });
+    attrs_tuple_buffer.appendAssumeCapacity(.{ "function_type", .type_(.function(ctx, args.args, args.results)) });
     if (args.arg_attrs.len > 0) {
-        attrs_tuple_buffer.appendAssumeCapacity(.{ "arg_attrs", mlir.ArrayAttribute.init(ctx, args.arg_attrs).asAttr() });
+        attrs_tuple_buffer.appendAssumeCapacity(.{ "arg_attrs", .array(ctx, args.arg_attrs) });
     }
 
     if (args.res_attrs.len > 0) {
-        attrs_tuple_buffer.appendAssumeCapacity(.{ "res_attrs", mlir.ArrayAttribute.init(ctx, args.res_attrs).asAttr() });
+        attrs_tuple_buffer.appendAssumeCapacity(.{ "res_attrs", .array(ctx, args.res_attrs) });
     }
 
     return mlir.Operation.make(ctx, "func.func", .{
@@ -36,7 +37,7 @@ pub fn call(ctx: mlir.Context, name: [:0]const u8, values: []const mlir.Value, r
         .variadic_operands = &.{values},
         .results = results,
         .verify = true,
-        .attributes = &.{.{ "callee", mlir.FlatSymbolRefAttribute.init(ctx, name).asAttr() }},
+        .attributes = &.{.{ "callee", .symbol(ctx, name) }},
         .location = loc,
     });
 }

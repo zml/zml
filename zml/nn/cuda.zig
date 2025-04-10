@@ -1,18 +1,16 @@
 const std = @import("std");
 
-const mlir = @import("mlir");
-
-const Context = @import("../context.zig").Context;
-const module = @import("../module.zig");
-const mlir_ext = @import("../mlir.zig").ext;
 const dialect = @import("mlir/dialects");
 
-const Tensor = @import("../tensor.zig").Tensor;
-const Shape = @import("../shape.zig").Shape;
-const SdpaOpts = @import("../nn.zig").SdpaOpts;
+const Context = @import("../context.zig").Context;
 const DataType = @import("../dtype.zig").DataType;
 const Data = @import("../dtype.zig").Data;
+const mlir_ext = @import("../mlir.zig").ext;
+const module = @import("../module.zig");
 const CompilationContext = module.CompilationContext;
+const SdpaOpts = @import("../nn.zig").SdpaOpts;
+const Shape = @import("../shape.zig").Shape;
+const Tensor = @import("../tensor.zig").Tensor;
 
 pub fn canUseCudnnSdpa(q_shape: Shape) bool {
     const ctx = CompilationContext.current();
@@ -127,13 +125,13 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
         &.{ q.value(), k.value(), v.value(), bias.value() },
         .{
             .call_target_name = "__cudnn$fmhaScaleBiasSoftmax",
-            .backend_config = .{ .string = backend_config },
+            .backend_config = .string(mlir_ctx, backend_config),
             .has_side_effect = false,
             .api_version = .original,
         },
         &.{
             mlir_ext.mlirType(mlir_ctx, q.shape()),
-            mlir.RankedTensorType.init(&.{0}, mlir.IntegerType(.u8).init(mlir_ctx).asType()).asType(),
+            .tensor(&.{0}, .int(mlir_ctx, .u8)),
         },
         loc,
     );

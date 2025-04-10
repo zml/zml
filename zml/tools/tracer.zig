@@ -1,13 +1,50 @@
 const builtin = @import("builtin");
+const c = @import("c");
 
 pub const Tracer = switch (builtin.os.tag) {
     .macos => MacOsTracer,
+    .linux => if (@hasDecl(c, "ZML_RUNTIME_CUDA")) CudaTracer else FakeTracer,
     else => FakeTracer,
 };
 
-const MacOsTracer = struct {
-    const c = @import("c");
+const CudaTracer = struct {
+    extern fn cudaProfilerStart() c_int;
+    extern fn cudaProfilerStop() c_int;
 
+    extern fn nvtxMarkA(message: [*:0]const u8) void;
+    extern fn nvtxRangeStartA(message: [*:0]const u8) c_int;
+    extern fn nvtxRangeEnd(id: c_int) void;
+
+    pub fn init(name: [:0]const u8) CudaTracer {
+        _ = name;
+        _ = cudaProfilerStart();
+        return .{};
+    }
+
+    pub fn deinit(self: *const CudaTracer) void {
+        _ = self;
+        _ = cudaProfilerStop();
+    }
+
+    pub fn event(self: *const CudaTracer, message: [:0]const u8) void {
+        _ = self;
+        nvtxMarkA(message.ptr);
+    }
+
+    pub fn frameStart(self: *const CudaTracer, message: [:0]const u8) u64 {
+        _ = self;
+        return @intCast(nvtxRangeStartA(message.ptr));
+    }
+
+    pub fn frameEnd(self: *const CudaTracer, interval_id: u64, message: [:0]const u8) void {
+        _ = self;
+        _ = message;
+        nvtxRangeEnd(@intCast(interval_id));
+        return;
+    }
+};
+
+const MacOsTracer = struct {
     logger: c.os_log_t,
 
     pub fn init(name: [:0]const u8) MacOsTracer {
@@ -40,7 +77,7 @@ const FakeTracer = struct {
         return .{};
     }
 
-    pub fn event(self: *const MacOsTracer, message: [:0]const u8) void {
+    pub fn event(self: *const FakeTracer, message: [:0]const u8) void {
         _ = self;
         _ = message;
         return;

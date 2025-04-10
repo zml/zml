@@ -1,9 +1,10 @@
-const builtin = @import("builtin");
 const std = @import("std");
-const stdx = @import("stdx");
-const log = std.log.scoped(.mlir);
+const builtin = @import("builtin");
 
 const c = @import("c");
+const stdx = @import("stdx");
+
+const log = std.log.scoped(.mlir);
 
 test {
     std.testing.refAllDecls(@This());
@@ -127,6 +128,10 @@ pub const Module = struct {
     pub fn op(self: Module) Operation {
         return .{ ._inner = c.mlirModuleGetOperation(self._inner) };
     }
+
+    pub fn hash(self: Module, hasher: *std.hash.XxHash64) void {
+        return self.op().hash(hasher);
+    }
 };
 
 pub const PassManager = struct {
@@ -215,26 +220,17 @@ pub const Attribute = struct {
     pub const format = helpers.format(Attribute, c.mlirAttributePrint);
     pub const wrapOr = helpers.wrapOr(Attribute, c.mlirAttributeIsNull);
 
+    pub fn wrap(c_attr: c.MlirAttribute) Attribute {
+        return .{ ._inner = c_attr };
+    }
+
     pub fn parse(ctx: Context, attr: [:0]const u8) !Attribute {
         return Attribute.wrapOr(
             c.mlirAttributeParseGet(ctx._inner, stringRef(attr)),
         ) orelse Error.InvalidMlir;
     }
 
-    pub fn getNull() Attribute {
-        return .{ ._inner = c.mlirAttributeGetNull() };
-    }
-
-    pub fn as(generic: Type, SpecificAttr: type) ?SpecificAttr {
-        stdx.debug.assertComptime(@hasDecl(SpecificAttr, "is_a_fn"), "Mlir subclass of attribute need `is_a_fn` attribute: {}", .{SpecificAttr});
-        return if (SpecificAttr.is_a_fn(generic._inner))
-            .{ ._inner = generic._inner }
-        else
-            null;
-    }
-
     pub fn fromAny(SpecificAttr: type) fn (x: SpecificAttr) Attribute {
-        stdx.debug.assertComptime(@hasDecl(SpecificAttr, "asAttr"), "Attribute.fromAny expects an attribute subclass, got: {}. Missing `asAttr` declaration.", .{SpecificAttr});
         return struct {
             fn cast(x: SpecificAttr) Attribute {
                 return .{ ._inner = x._inner };
@@ -242,35 +238,98 @@ pub const Attribute = struct {
         }.cast;
     }
 
-    pub fn eqlAny(SpecificType: type) fn (SpecificType, SpecificType) bool {
-        return struct {
-            fn eql(a: SpecificType, b: SpecificType) bool {
-                return a.asAttr().eql(b.asAttr());
-            }
-        }.eql;
+    pub fn isA(self: Attribute, SpecificAttr: type) bool {
+        return SpecificAttr.is_a_fn(self._inner);
     }
 
-    pub fn formatAny(SpecificType: type) fn (SpecificType, SpecificType) type {
-        return struct {
-            pub fn format(self: SpecificType, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-                return try Attribute.format(self.asAttr(), fmt, options, writer);
-            }
-        };
+    // utilities function to built common attributes.
+    // All attributes are upcasted to the Attribute type, making it easier to chain construct,
+    // but losing type information.
+
+    pub fn null_() Attribute {
+        return .wrap(c.mlirAttributeGetNull());
+    }
+
+    pub fn string(ctx: Context, str: []const u8) Attribute {
+        return StringAttribute.init(ctx, str).asAttr();
+    }
+
+    pub fn type_(t: Type) Attribute {
+        return TypeAttribute.init(t).asAttr();
+    }
+
+    pub fn unit(ctx: Context) Attribute {
+        return .wrap(c.mlirUnitAttrGet(ctx._inner));
+    }
+
+    pub fn boolean(ctx: Context, value: bool) Attribute {
+        return BoolAttribute.init(ctx, value).asAttr();
+    }
+
+    pub fn i1FromBool(ctx: Context, value: bool) Attribute {
+        return IntegerAttribute(.i1).init(ctx, @intFromBool(value)).asAttr();
+    }
+
+    pub fn int(ctx: Context, comptime int_type: IntegerTypes, value: i64) Attribute {
+        return IntegerAttribute(int_type).init(ctx, value).asAttr();
+    }
+
+    pub fn float(ctx: Context, comptime float_type: FloatTypes, value: f64) Attribute {
+        return FloatAttribute(float_type).init(ctx, value).asAttr();
+    }
+
+    pub fn array(ctx: Context, attrs: []const Attribute) Attribute {
+        return ArrayAttribute.init(ctx, attrs).asAttr();
+    }
+
+    pub fn dense(ctx: Context, comptime dt: DenseArrayTypes, values: []const dt.ZigType()) Attribute {
+        return DenseArrayAttribute(dt).init(ctx, values).asAttr();
+    }
+
+    /// Use a tensor as an attribute.
+    /// The tensor is specified by dims, dtype and a flat slice of values.
+    pub fn denseElements(ctx: Context, dims: []const i64, comptime dt: DenseElementsAttributeTypes, values: anytype) Attribute {
+        return DenseElementsAttribute(dt).init(.tensor(dims, dt.mlirType(ctx)), values).asAttr();
+    }
+
+    pub fn symbol(ctx: Context, flat_name: [:0]const u8) Attribute {
+        return FlatSymbolRefAttribute.init(ctx, flat_name).asAttr();
+    }
+
+    pub fn named(attr: Attribute, ctx: Context, name: [:0]const u8) NamedAttribute {
+        return NamedAttribute.init(Identifier.get(ctx, name), attr);
+    }
+
+    pub fn dict(ctx: Context, named_attrs: []const AttrTuple) Attribute {
+        var attr_buf: [32]NamedAttribute = undefined;
+        stdx.debug.assert(named_attrs.len <= attr_buf.len, ".dict helper only support up to {} attribute, got {}. You will need to call mlir.DictionaryAttribute directly", .{ attr_buf.len, named_attrs.len });
+
+        const attrs = attr_buf[0..named_attrs.len];
+        for (attrs, named_attrs) |*attr, tuple| {
+            attr.* = .named(ctx, tuple[0], tuple[1]);
+        }
+
+        return DictionaryAttribute.init(ctx, attrs).asAttr();
     }
 };
 
-pub const NamedAttribute = struct {
-    _inner: c.MlirNamedAttribute,
-    const Self = NamedAttribute;
+pub const NamedAttribute = extern struct {
+    name: c.MlirIdentifier,
+    attribute: c.MlirAttribute,
 
-    pub fn init(name: Identifier, attr: Attribute) Self {
-        return .{ ._inner = .{
-            .name = name._inner,
+    pub fn named(ctx: Context, name: [:0]const u8, attr: Attribute) NamedAttribute {
+        return .{
+            .name = c.mlirIdentifierGet(ctx._inner, stringRef(name)),
             .attribute = attr._inner,
-        } };
+        };
     }
 
-    pub const asAttr = Attribute.fromAny(Self);
+    pub fn init(name: Identifier, attr: Attribute) NamedAttribute {
+        return .{
+            .name = name._inner,
+            .attribute = attr._inner,
+        };
+    }
 };
 
 pub const StringAttribute = struct {
@@ -285,18 +344,6 @@ pub const StringAttribute = struct {
 
     pub fn value(self: Self) []const u8 {
         return fromStringRef(c.mlirStringAttrGetValue(self._inner));
-    }
-
-    pub const asAttr = Attribute.fromAny(Self);
-};
-
-pub const UnitAttribute = struct {
-    _inner: c.MlirAttribute,
-    pub const is_a_fn = c.mlirAttributeIsAUnit;
-    const Self = UnitAttribute;
-
-    pub fn init(ctx: Context) Self {
-        return .{ ._inner = c.mlirUnitAttrGet(ctx._inner) };
     }
 
     pub const asAttr = Attribute.fromAny(Self);
@@ -356,8 +403,8 @@ pub const ArrayAttribute = struct {
 
 pub fn IntegerAttribute(comptime it: IntegerTypes) type {
     const ZigType, const getter = comptime switch (it) {
-        .i1, .i4, .i8, .i16, .i32, .i64 => .{ u64, c.mlirIntegerAttrGetValueInt },
-        .si4, .si8, .si16, .si32, .si64 => .{ u64, c.mlirIntegerAttrGetValueSInt },
+        .i1, .i4, .i8, .i16, .i32, .i64 => .{ i64, c.mlirIntegerAttrGetValueInt },
+        .si4, .si8, .si16, .si32, .si64 => .{ i64, c.mlirIntegerAttrGetValueSInt },
         .u4, .u8, .u16, .u32, .u64 => .{ u64, c.mlirIntegerAttrGetValueUInt },
         .unknown => @compileError("IntegerAttribute(unknown)"),
     };
@@ -390,6 +437,8 @@ pub fn FloatAttribute(comptime ft: FloatTypes) type {
         _inner: c.MlirAttribute,
         pub const is_a_fn = c.mlirAttributeIsAFloat;
         const FloatAttr = @This();
+        pub const asAttr = Attribute.fromAny(FloatAttr);
+
         pub fn init(ctx: Context, value: f64) FloatAttr {
             return .{ ._inner = c.mlirFloatAttrDoubleGet(
                 ctx._inner,
@@ -412,43 +461,52 @@ pub const DenseArrayTypes = enum {
     i64,
     f32,
     f64,
+
+    pub fn ZigType(comptime dt: DenseArrayTypes) type {
+        return switch (dt) {
+            .bool => i32,
+            .i8 => i8,
+            .i16 => i16,
+            .i32 => i32,
+            .i64 => i64,
+            .f32 => f32,
+            .f64 => f64,
+        };
+    }
 };
 
 pub fn DenseArrayAttribute(comptime dt: DenseArrayTypes) type {
-    const Config = switch (dt) {
-        .bool => .{ i32, c.mlirAttributeIsADenseBoolArray, c.mlirDenseBoolArrayGet, c.mlirDenseBoolArrayGetElement },
-        .i8 => .{ i8, c.mlirAttributeIsADenseI8Array, c.mlirDenseI8ArrayGet, c.mlirDenseI8ArrayGetElement },
-        .i16 => .{ i16, c.mlirAttributeIsADenseI16Array, c.mlirDenseI16ArrayGet, c.mlirDenseI16ArrayGetElement },
-        .i32 => .{ i32, c.mlirAttributeIsADenseI32Array, c.mlirDenseI32ArrayGet, c.mlirDenseI32ArrayGetElement },
-        .i64 => .{ i64, c.mlirAttributeIsADenseI64Array, c.mlirDenseI64ArrayGet, c.mlirDenseI64ArrayGetElement },
-        .f32 => .{ f32, c.mlirAttributeIsADenseF32Array, c.mlirDenseF32ArrayGet, c.mlirDenseF32ArrayGetElement },
-        .f64 => .{ f64, c.mlirAttributeIsADenseF64Array, c.mlirDenseF64ArrayGet, c.mlirDenseF64ArrayGetElement },
+    const _is_a_fn, const get_fn, const get_element_fn = switch (dt) {
+        .bool => .{ c.mlirAttributeIsADenseBoolArray, c.mlirDenseBoolArrayGet, c.mlirDenseBoolArrayGetElement },
+        .i8 => .{ c.mlirAttributeIsADenseI8Array, c.mlirDenseI8ArrayGet, c.mlirDenseI8ArrayGetElement },
+        .i16 => .{ c.mlirAttributeIsADenseI16Array, c.mlirDenseI16ArrayGet, c.mlirDenseI16ArrayGetElement },
+        .i32 => .{ c.mlirAttributeIsADenseI32Array, c.mlirDenseI32ArrayGet, c.mlirDenseI32ArrayGetElement },
+        .i64 => .{ c.mlirAttributeIsADenseI64Array, c.mlirDenseI64ArrayGet, c.mlirDenseI64ArrayGetElement },
+        .f32 => .{ c.mlirAttributeIsADenseF32Array, c.mlirDenseF32ArrayGet, c.mlirDenseF32ArrayGetElement },
+        .f64 => .{ c.mlirAttributeIsADenseF64Array, c.mlirDenseF64ArrayGet, c.mlirDenseF64ArrayGetElement },
     };
 
     return struct {
         _inner: c.MlirAttribute,
-        pub const is_a_fn = Config[1];
-
         const Attr = @This();
         const ElementType = dt;
-        const ElementTypeZig = Config[0];
+        const ElementTypeZig = dt.ZigType();
+
+        pub const asAttr = Attribute.fromAny(Attr);
         pub const eql = Attribute.eqlAny(Attr);
+        pub const is_a_fn = _is_a_fn;
 
         pub fn init(ctx: Context, values: []const ElementTypeZig) Attr {
-            const get_fn = Config[2];
             return .{ ._inner = get_fn(ctx._inner, @intCast(values.len), @ptrCast(values.ptr)) };
         }
 
         pub fn get(self: Attr, pos: usize) ElementTypeZig {
-            const get_element_fn = Config[3];
             return get_element_fn(self._inner, @intCast(pos));
         }
 
         pub fn len(self: Attr) usize {
             return @intCast(c.mlirDenseArrayGetNumElements(self._inner));
         }
-
-        pub const asAttr = Attribute.fromAny(Attr);
     };
 }
 
@@ -467,33 +525,54 @@ pub const DenseElementsAttributeTypes = enum {
     f32,
     f64,
     index,
+
+    pub fn ZigType(comptime dt: DenseElementsAttributeTypes) type {
+        return switch (dt) {
+            .bool => bool,
+            .i8 => i8,
+            .i16 => i16,
+            .i32 => i32,
+            .i64 => i64,
+            .u8 => u8,
+            .u16 => u16,
+            .u32 => u32,
+            .u64 => u64,
+            .bf16 => u16,
+            .f16 => f16,
+            .f32 => f32,
+            .f64 => f64,
+            .index => usize,
+        };
+    }
+
+    pub fn mlirType(dt: DenseElementsAttributeTypes, ctx: Context) Type {
+        return switch (dt) {
+            .bool => .int(ctx, .i1),
+            .i8 => .int(ctx, .i8),
+            .i16 => .int(ctx, .i16),
+            .i32 => .int(ctx, .i32),
+            .i64 => .int(ctx, .i64),
+            .u8 => .int(ctx, .u8),
+            .u16 => .int(ctx, .u16),
+            .u32 => .int(ctx, .u32),
+            .u64 => .int(ctx, .u64),
+            .bf16 => .float(ctx, .bf16),
+            .f16 => .float(ctx, .f16),
+            .f32 => .float(ctx, .f32),
+            .f64 => .float(ctx, .f64),
+            .index => .index(ctx),
+        };
+    }
 };
 
 pub fn DenseElementsAttribute(comptime dt: DenseElementsAttributeTypes) type {
-    const ZigType = switch (dt) {
-        .bool => bool,
-        .i8 => i8,
-        .i16 => i16,
-        .i32 => i32,
-        .i64 => i64,
-        .u8 => u8,
-        .u16 => u16,
-        .u32 => u32,
-        .u64 => u64,
-        .bf16 => u16,
-        .f16 => f16,
-        .f32 => f32,
-        .f64 => f64,
-        .index => usize,
-    };
-
     return struct {
         _inner: c.MlirAttribute,
 
         const Attr = @This();
 
         pub const is_a_fn = c.mlirAttributeIsADenseElements;
-
+        pub const asAttr = Attribute.fromAny(Attr);
         pub const eql = Attribute.eqlAny(Attr);
 
         pub fn init(shaped_type: Type, slice: anytype) Attr {
@@ -511,16 +590,14 @@ pub fn DenseElementsAttribute(comptime dt: DenseElementsAttributeTypes) type {
             return @intCast(c.mlirElementsAttrGetNumElements(self._inner));
         }
 
-        pub fn constSlice(self: Attr) []const ZigType {
-            const ptr: [*]const ZigType = @constCast(@ptrCast(@alignCast(c.mlirDenseElementsAttrGetRawData(self._inner) orelse unreachable)));
+        pub fn constSlice(self: Attr) []const dt.ZigType() {
+            const ptr: [*]const dt.ZigType() = @alignCast(@ptrCast(c.mlirDenseElementsAttrGetRawData(self._inner) orelse unreachable));
             return ptr[0..self.len()];
         }
 
         pub fn data(self: Attr) []const u8 {
             return std.mem.sliceAsBytes(self.constSlice());
         }
-
-        pub const asAttr = Attribute.fromAny(Attr);
     };
 }
 
@@ -649,6 +726,7 @@ pub const Operation = struct {
     pub fn make(ctx: Context, op_name: [:0]const u8, args: struct {
         operands: ?[]const Value = null,
         variadic_operands: ?[]const []const Value = null,
+        tt_variadic_operands: ?[]const []const Value = null,
         results: ?[]const Type = null,
         variadic_results: ?[]const []const Type = null,
         result_type_inference: ?bool = null,
@@ -663,9 +741,24 @@ pub const Operation = struct {
         if (args.operands) |operands| {
             state.addOperands(operands);
         } else if (args.variadic_operands) |operands_segments| {
+            const MAX_SEGMENTS = 32;
+            var segments: std.BoundedArray(i32, MAX_SEGMENTS) = .{};
+
             for (operands_segments) |operands| {
                 state.addOperands(operands);
+                segments.appendAssumeCapacity(@intCast(operands.len));
             }
+            state.addAttribute(ctx, "operandSegmentSizes", .denseElements(ctx, &.{@intCast(segments.len)}, .i32, segments.constSlice()));
+        } else if (args.tt_variadic_operands) |operands_segments| {
+            // stablehlo and triton seems to disagree on the expected type of operandSegmentSizes, let's fix that.
+            const MAX_SEGMENTS = 32;
+            var segments: std.BoundedArray(i32, MAX_SEGMENTS) = .{};
+
+            for (operands_segments) |operands| {
+                state.addOperands(operands);
+                segments.appendAssumeCapacity(@intCast(operands.len));
+            }
+            state.addAttribute(ctx, "operandSegmentSizes", .dense(ctx, .i32, segments.constSlice()));
         }
         if (args.result_type_inference) |enable| {
             state.resultTypeInference(enable);
@@ -911,6 +1004,26 @@ pub const Operation = struct {
     pub fn removeAttributeByName(self: Self, name_: [:0]const u8) bool {
         return c.mlirOperationRemoveAttributeByName(self._inner, stringRef(name_));
     }
+
+    pub fn hash(op: Operation, hasher: *std.hash.XxHash64) void {
+        const NoError = error{};
+        const write = struct {
+            fn write(hasher_: *std.hash.XxHash64, bytes: []const u8) NoError!usize {
+                hasher_.update(bytes);
+                return bytes.len;
+            }
+        }.write;
+        const HashWriter = std.io.Writer(*std.hash.XxHash64, NoError, write);
+        const writer: HashWriter = .{ .context = hasher };
+
+        // Hash the canonicalized IR, without debug information that can change across builds.
+        // Note: before we where using op.writeBytecode(writer),
+        // but it crashes on some inputs, notably for unused variables.
+        // So we use the text representation of the mlir.
+        // See https://github.com/zml/zml/issues/97.
+        // Writes can't fail because we are writing to a hasher.
+        op.print(writer, .{ .debug_info = false });
+    }
 };
 
 pub const OpPrintingFlags = struct {
@@ -1113,6 +1226,41 @@ pub const Type = struct {
                 return try Type.format(self.asType(), fmt, options, writer);
             }
         };
+    }
+
+    pub fn index(ctx: Context) Type {
+        return IndexType.init(ctx).asType();
+    }
+
+    pub fn int(ctx: Context, int_type: IntegerTypes) Type {
+        return switch (int_type) {
+            .unknown => @panic("Unknown integer type"),
+            inline else => |t| IntegerType(t).init(ctx).asType(),
+        };
+    }
+
+    pub fn float(ctx: Context, float_type: FloatTypes) Type {
+        return switch (float_type) {
+            inline else => |t| FloatType(t).init(ctx).asType(),
+        };
+    }
+
+    pub fn complex(ctx: Context, complex_type: ComplexTypes) Type {
+        return switch (complex_type) {
+            inline else => |t| ComplexType(t).init(ctx).asType(),
+        };
+    }
+
+    pub fn tuple(ctx: Context, types: []const Type) Type {
+        return (TupleType.init(ctx, types) catch unreachable).asType();
+    }
+
+    pub fn function(ctx: Context, args: []const Type, results: []const Type) Type {
+        return (FunctionType.init(ctx, args, results) catch unreachable).asType();
+    }
+
+    pub fn tensor(dimensions: []const i64, elem_type: Type) Type {
+        return RankedTensorType.init(dimensions, elem_type).asType();
     }
 };
 
@@ -1515,6 +1663,31 @@ pub const Block = struct {
         for (ops) |op| {
             c.mlirBlockAppendOwnedOperation(self._inner, op._inner);
         }
+    }
+
+    pub const RecursiveOpts = enum { open, hermetic };
+
+    pub fn appendValueRecursive(self: Block, value: Value, opt: RecursiveOpts) void {
+        switch (value.kind()) {
+            .op_result => |parent_op| self.appendOperationRecursive(parent_op, opt),
+            .block_argument => |arg| {
+                // Hermetic blocks are not allowed to use arguments from other blocks.
+                stdx.debug.assert(opt == .open or self.eql(arg.block()), "Can't add {} from {?x} block to {?x} block", .{ arg, arg.block()._inner.ptr, self._inner.ptr });
+            },
+            .null => @panic("InvalidMlir"),
+        }
+    }
+
+    pub fn appendOperationRecursive(self: Block, op: Operation, opt: RecursiveOpts) void {
+        if (op.block()) |prev_block| {
+            // Hermetic blocks are not allowed to reference values from other blocks.
+            stdx.debug.assert(opt == .open or self.equals(prev_block), "Can't add {} from {?x} block to {?x} block", .{ op, prev_block._inner.ptr, self._inner.ptr });
+            return;
+        }
+        for (0..op.numOperands()) |i| {
+            self.appendValueRecursive(op.operand(i), opt);
+        }
+        self.appendOperation(op);
     }
 };
 

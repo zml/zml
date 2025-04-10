@@ -1,0 +1,9 @@
+{
+    "strip_prefix": "zig-protobuf-930153ec955853ff9fcf8a55ba632b2b8051f731",
+    "url": "https://github.com/zml/zig-protobuf/archive/930153ec955853ff9fcf8a55ba632b2b8051f731.tar.gz",
+    "integrity": "sha256-ORRDxK/cLQ2E+c9l2lcj8FgIUHH+uEk/+qWVWuHZMEY=",
+    "overlay": {
+        "MODULE.bazel": "",
+        "BUILD.bazel": ""
+    }
+}

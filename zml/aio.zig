@@ -427,6 +427,10 @@ fn _populateStruct(
         },
         .void => true,
         .@"union" => true,
+        .bool => {
+            obj.* = undefined;
+            return true;
+        },
         else => if (required) {
             log.err("{s}: {s} type not supported", .{ prefix, @typeName(T) });
             return error.UnsupportedMetadataType;

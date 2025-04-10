@@ -1,5 +1,21 @@
 load("@rules_zig//zig:defs.bzl", "zig_library")
 
+config_setting(
+    name = "darwin_arm64",
+    constraint_values = [
+        "@platforms//os:macos",
+        "@platforms//cpu:aarch64",
+    ],
+)
+
+config_setting(
+    name = "darwin_amd64",
+    constraint_values = [
+        "@platforms//os:macos",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
 cc_library(
     name = "empty",
 )
@@ -8,7 +24,8 @@ cc_library(
     name = "libpjrt_cpu",
     defines = ["ZML_RUNTIME_CPU"],
     deps = select({
-        "@platforms//os:macos": ["@libpjrt_cpu_darwin_arm64//:libpjrt_cpu"],
+        ":darwin_arm64": ["@libpjrt_cpu_darwin_arm64//:libpjrt_cpu"],
+        ":darwin_amd64": ["@libpjrt_cpu_darwin_amd64//:libpjrt_cpu"],
         "@platforms//os:linux": ["@libpjrt_cpu_linux_amd64//:libpjrt_cpu"],
     }),
 )
