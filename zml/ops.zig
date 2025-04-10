@@ -782,11 +782,42 @@ pub fn addHostCallback(
     opts: HostCallbackOpt,
 ) []Tensor {
     const ctx = CompilationContext.current();
+    var tags = std.ArrayListUnmanaged(i64).initCapacity(ctx.allocator(), (inputs.len + output_shapes.len) * Shape.MAX_RANK) catch @panic("OOM");
+    defer tags.deinit(ctx.allocator());
+
+    var readable_tags = std.ArrayList(u8).initCapacity(ctx.allocator(), (inputs.len + output_shapes.len) * 32) catch @panic("OOM");
+    defer readable_tags.deinit();
+
+    readable_tags.appendSlice("(") catch {};
+    for (inputs) |input| {
+        readable_tags.appendSlice(".{") catch {};
+        for (input.shape().tags()) |t| {
+            const ptr: u64 = @intFromPtr(t);
+            tags.appendAssumeCapacity(@bitCast(ptr));
+            readable_tags.appendSlice(std.mem.span(t)) catch {};
+            readable_tags.append(',') catch {};
+        }
+        readable_tags.appendSlice("},") catch {};
+    }
+    readable_tags.appendSlice(") -> (") catch {};
+    for (output_shapes) |output| {
+        readable_tags.appendSlice(".{") catch {};
+        for (output.tags()) |t| {
+            const ptr: u64 = @intFromPtr(t);
+            tags.appendAssumeCapacity(@bitCast(ptr));
+            readable_tags.appendSlice(std.mem.span(t)) catch {};
+            readable_tags.append(',') catch {};
+        }
+        readable_tags.appendSlice("},") catch {};
+    }
+    readable_tags.appendSlice(")") catch {};
 
     const mlir_ctx = ctx.mlirCtx();
     const backend_config = mlir.Attribute.dict(mlir_ctx, &.{
         .{ "callback", .int(mlir_ctx, .u64, @bitCast(@intFromPtr(callback))) },
         .{ "user_context", .int(mlir_ctx, .u64, @bitCast(@intFromPtr(blkctx))) },
+        .{ "tags", .string(mlir_ctx, readable_tags.items) },
+        .{ "__tags", .dense(mlir_ctx, .i64, tags.items) },
     });
 
     const values = stdx.stackSlice(8, mlir.Value, inputs.len);
