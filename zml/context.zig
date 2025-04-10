@@ -230,22 +230,35 @@ const CustomCall = struct {
     fn hostBufferCallback(call_frame: *pjrt.ffi.CallFrame) callconv(.C) ?*pjrt.ffi.Error {
         if (call_frame.registeringHook()) return null;
 
-        const callback_attr = call_frame.attrs.getByName(.scalar, "callback") orelse unreachable;
+        const err = "malformed zmlHostBufferCallback custom call";
+        const callback_attr = call_frame.attrs.getByName(.scalar, "callback") orelse @panic(err);
         std.debug.assert(callback_attr.dtype == .u64);
         const callback: *const Context.HostCallback = @ptrFromInt(callback_attr.get(usize));
 
-        const user_ctx_ptr = call_frame.attrs.getByName(.scalar, "user_context") orelse unreachable;
+        const user_ctx_ptr = call_frame.attrs.getByName(.scalar, "user_context") orelse @panic(err);
         std.debug.assert(user_ctx_ptr.dtype == .u64);
         const user_ctx: ?*anyopaque = @ptrFromInt(user_ctx_ptr.get(usize));
+
+        const tags_arr = call_frame.attrs.getByName(.array, "__tags") orelse @panic(err);
+        std.debug.assert(tags_arr.dtype == .i64);
+        var tags = tags_arr.slice([*:0]const u8);
 
         const input_buffers = stdx.stackSlice(8, HostBuffer, call_frame.args.len);
         for (input_buffers, 0..) |*b, i| {
             b.* = hostBufferFromPinnedBuffer(call_frame.args.get(i));
+            for (b._shape._tags.slice()) |*t| {
+                t.* = tags[0];
+                tags = tags[1..];
+            }
         }
 
         const output_buffers = stdx.stackSlice(8, HostBuffer, call_frame.results.len);
         for (output_buffers, 0..) |*b, i| {
             b.* = hostBufferFromPinnedBuffer(call_frame.results.get(i));
+            for (b._shape._tags.slice()) |*t| {
+                t.* = tags[0];
+                tags = tags[1..];
+            }
         }
 
         callback(user_ctx, input_buffers, output_buffers);
@@ -258,10 +271,6 @@ fn getShape(buffer_desc: *const pjrt.ffi.Buffer) Shape {
     const dt: DataType = switch (buffer_desc.dtype) {
         .invalid => @panic("invalid ffi"),
         .pred => .bool,
-        .s8 => .i8,
-        .s16 => .i16,
-        .s32 => .i32,
-        .s64 => .i64,
         .token, .f8e4m3, .f8e3m4 => @panic("Unsupported ffi type"),
         inline else => |t| @field(DataType, @tagName(t)),
     };
