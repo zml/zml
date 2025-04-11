@@ -357,6 +357,28 @@ pub const Buffer = struct {
         return shard.memory(self._api);
     }
 
+    pub fn copyToMemory(self: Buffer, platform: Platform, kind: Memory) !Buffer {
+        const memories = platform.pjrt_client.addressableMemories(platform.pjrt_api); // todo : adresse via device
+        var selected_mem: *const pjrt.Memory = undefined;
+        for (memories) |mem| {
+            if (mem.kind(platform.pjrt_api) == kind.toPjrtMemory()) {
+                selected_mem = mem;
+            }
+        }
+
+        var shards: Shards = .{};
+        for (self._shards.constSlice()) |shard| {
+            const pjrt_buffer = try shard.copyToMemory(self._api, selected_mem);
+            shards.appendAssumeCapacity(pjrt_buffer);
+        }
+
+        return .{
+            ._api = platform.pjrt_api,
+            ._shape = self._shape,
+            ._shards = shards,
+        };
+    }
+
     fn hasShardedAxis(self: Buffer) bool {
         if (self._shards.len == 1) return false;
         return @reduce(.Or, self._shape._sharding_info);

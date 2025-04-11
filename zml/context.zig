@@ -9,11 +9,12 @@ const runtimes = @import("runtimes");
 const stdx = @import("stdx");
 
 const Buffer = @import("buffer.zig").Buffer;
-const bufferTypeFromDtype = @import("buffer.zig").bufferTypeFromDtype;
+const Tensor = @import("tensor.zig").Tensor;
 const DataType = @import("dtype.zig").DataType;
 const HostBuffer = @import("hostbuffer.zig").HostBuffer;
 const pjrt = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
+const CompilationOptions = @import("platform.zig").CompilationOptions;
 const Shape = @import("shape.zig").Shape;
 const Target = @import("platform.zig").Target;
 const zml_platform = @import("platform.zig");
@@ -179,8 +180,6 @@ pub const Context = struct {
             return error.NoDevicesFound;
         }
 
-        try CustomCall.registerZmlCustomCalls(p);
-
         self.platforms.set(target, p);
         return p;
     }
@@ -214,150 +213,4 @@ pub const Context = struct {
             }
         }
     }
-
-    pub const HostCallback = fn (?*anyopaque, []const HostBuffer, []const HostBuffer) void;
-    pub const HostCall = fn (?*anyopaque, []const HostBuffer) void;
 };
-
-const CustomCall = struct {
-    pub fn registerZmlCustomCalls(platform: Platform) !void {
-        const registry = platform.pjrt_api.customCallRegistry();
-
-        if (registry) |reg| {
-            try reg.registerFfi(platform.pjrt_api, "zmlHostBufferCallback", @tagName(platform.target), &hostBufferCallback);
-            try reg.registerFfi(platform.pjrt_api, "zmlHostBufferCall", @tagName(platform.target), &hostBufferCall);
-        } else {
-            stdx.debug.panic("Registering custom calls failed", .{});
-        }
-    }
-
-    fn hostBufferCallback(call_frame: *pjrt.ffi.CallFrame) callconv(.C) ?*pjrt.ffi.Error {
-        if (call_frame.registeringHook()) return null;
-
-        const callback_attr = call_frame.attrs.getByName(.scalar, "callback") orelse unreachable;
-        std.debug.assert(callback_attr.dtype == .u64);
-        const callback: *const Context.HostCallback = @ptrFromInt(callback_attr.get(usize));
-
-        const user_ctx_ptr = call_frame.attrs.getByName(.scalar, "user_context") orelse unreachable;
-        std.debug.assert(user_ctx_ptr.dtype == .u64);
-        const user_ctx: ?*anyopaque = @ptrFromInt(user_ctx_ptr.get(usize));
-
-        const input_buffers = stdx.stackSlice(8, HostBuffer, call_frame.args.len);
-        for (input_buffers, 0..) |*b, i| {
-            b.* = hostBufferFromPinnedBuffer(call_frame.args.get(i));
-        }
-
-        const output_buffers = stdx.stackSlice(8, HostBuffer, call_frame.results.len);
-        for (output_buffers, 0..) |*b, i| {
-            b.* = hostBufferFromPinnedBuffer(call_frame.results.get(i));
-        }
-
-        callback(user_ctx, input_buffers, output_buffers);
-        return null;
-    }
-
-    fn hostBufferCall(call_frame: *pjrt.ffi.CallFrame) callconv(.C) ?*pjrt.ffi.Error {
-        if (call_frame.registeringHook()) return null;
-
-        const callback_attr = call_frame.attrs.getByName(.scalar, "callback") orelse unreachable;
-        std.debug.assert(callback_attr.dtype == .u64);
-        const callback: *const Context.HostCall = @ptrFromInt(callback_attr.get(usize));
-
-        const user_ctx_ptr = call_frame.attrs.getByName(.scalar, "user_context") orelse unreachable;
-        std.debug.assert(user_ctx_ptr.dtype == .u64);
-        const user_ctx: ?*anyopaque = @ptrFromInt(user_ctx_ptr.get(usize));
-
-        const pjrt_api_ptr = call_frame.attrs.getByName(.scalar, "pjrt_api") orelse unreachable;
-        std.debug.assert(pjrt_api_ptr.dtype == .u64);
-        const pjrt_api: *const pjrt.Api = @ptrFromInt(pjrt_api_ptr.get(usize));
-
-        const pjrt_client_ptr = call_frame.attrs.getByName(.scalar, "pjrt_client") orelse unreachable;
-        std.debug.assert(pjrt_client_ptr.dtype == .u64);
-        const pjrt_client: *pjrt.Client = @ptrFromInt(pjrt_client_ptr.get(usize));
-
-        const input_buffers = stdx.stackSlice(8, HostBuffer, call_frame.args.len);
-        for (input_buffers, 0..) |*b, i| {
-            b.* = copyBuffer(pjrt_api, pjrt_client, call_frame.args.get(i));
-        }
-
-        callback(user_ctx, input_buffers);
-        // asynk.callBlocking(callback, .{ user_ctx, input_buffers });
-        return null;
-    }
-};
-
-fn getShape(buffer_desc: *const pjrt.ffi.Buffer) Shape {
-    // log.warn("received buffer {}", .{buffer_desc});
-    const dt: DataType = switch (buffer_desc.dtype) {
-        .invalid => @panic("invalid ffi"),
-        .pred => .bool,
-        .s8 => .i8,
-        .s16 => .i16,
-        .s32 => .i32,
-        .s64 => .i64,
-        .token, .f8e4m3, .f8e3m4 => @panic("Unsupported ffi type"),
-        inline else => |t| @field(DataType, @tagName(t)),
-    };
-    return Shape.init(buffer_desc.dims(), dt);
-}
-
-/// Create a HostBuffer from a ffi description of a buffer.
-/// Normally the ffi describe device buffer but we assume they are located in pinned memory,
-/// and therefore the data pointer is readable both from host and from device.
-fn hostBufferFromPinnedBuffer(buffer_desc: *const pjrt.ffi.Buffer) HostBuffer {
-    const buffer_shape = getShape(buffer_desc);
-    return HostBuffer.fromBytes(
-        buffer_shape,
-        buffer_desc.data[0..buffer_shape.byteSize()],
-    );
-}
-
-fn copyBuffer(pjrt_api: *const pjrt.Api, pjrt_client: *pjrt.Client, buffer_desc: *const pjrt.ffi.Buffer) HostBuffer {
-    const buffer_shape = getShape(buffer_desc);
-
-    const minor_to_major: [Shape.MAX_RANK]i64 = comptime blk: {
-        var res: [Shape.MAX_RANK]i64 = undefined;
-        for (0..Shape.MAX_RANK) |i| {
-            res[i] = @intCast(Shape.MAX_RANK - i - 1);
-        }
-        break :blk res;
-    };
-
-    const device = pjrt_client.getAddressableDevices(pjrt_api)[0];
-    const memories = pjrt_client.addressableMemories(pjrt_api);
-
-    var selected_mem: *const pjrt.Memory = undefined;
-    for (memories) |mem| {
-        if (mem.kind(pjrt_api) == pjrt.Memory.Kind.pinned_host) {
-            selected_mem = mem;
-        }
-    }
-
-    const pjrt_buffer = pjrt_client.createViewOfDeviceBuffer(pjrt_api, .{
-        .data = buffer_desc.data,
-        .element_type = bufferTypeFromDtype(buffer_shape.dtype()),
-        .dims = buffer_shape.dims(),
-        // TODO: exposes sharding in the API.
-        .device = device,
-        .layout = .{
-            .tiled = .{
-                .minor_to_major = minor_to_major[Shape.MAX_RANK - buffer_shape.rank() ..],
-                .tile_dims = &.{},
-                .tile_dims_sizes = &.{},
-            },
-        },
-        .stream = null,
-    }) catch @panic("failed to createViewOfDeviceBuffer");
-
-    const copied_buffer = pjrt_buffer.copyToMemory(pjrt_api, selected_mem) catch unreachable;
-
-    const opaqueDataPointer = copied_buffer.getOpaqueDeviceMemoryDataPointer(pjrt_api) catch unreachable;
-    const sizeInbytes = copied_buffer.getOnDeviceSizeInBytes(pjrt_api) catch unreachable;
-    const data = @as([*]const u8, @ptrFromInt(@intFromPtr(opaqueDataPointer)));
-    const end: usize = @intCast(sizeInbytes);
-
-    return HostBuffer.fromBytes(
-        buffer_shape,
-        data[0..end],
-    );
-}

@@ -31,7 +31,7 @@ fn pjrtStructSize(comptime T: type) usize {
     return @field(c, typedef_name ++ "_STRUCT_SIZE");
 }
 
-inline fn pjrtStruct(v: anytype) @TypeOf(v) {
+pub inline fn pjrtStruct(v: anytype) @TypeOf(v) {
     var ret = v;
     ret.struct_size = pjrtStructSize(@TypeOf(v));
     return ret;
@@ -160,9 +160,14 @@ pub const Api = struct {
         return state.str;
     }
 
-    pub fn customCallRegistry(api: *const Api) ?CustomCallRegistry {
+    pub fn createExecuteContext(api: *const Api) ApiError!*ExecuteContext {
+        const ret = try api.call(.PJRT_ExecuteContext_Create, .{});
+        return @ptrCast(ret.context.?);
+    }
+
+    pub fn ffi(api: *const Api) ?FFI {
         if (api.lookupExtension(c.PJRT_FFI_Extension, c.PJRT_Extension_Type_FFI)) |ext| {
-            return .{ .inner = ext.register_handler.? };
+            return .{ .inner = ext };
         }
         return null;
     }
@@ -567,6 +572,14 @@ pub const SerializeResult = struct {
     }
 };
 
+pub const ExecuteContext = opaque {
+    pub fn deinit(self: *ExecuteContext, api: *const Api) void {
+        _ = api.call(.PJRT_ExecuteContext_Destroy, .{
+            .context = @ptrCast(self),
+        }) catch {};
+    }
+};
+
 pub const Executable = opaque {
     const inner = InnerMixin(c.PJRT_Executable).inner;
 
@@ -633,6 +646,7 @@ pub const LoadedExecutable = opaque {
         results: []const [*]*Buffer,
         events: []?*Event,
         non_donatable_input_indices: []const i64 = &.{},
+        context: ?*ExecuteContext,
     };
     pub fn execute(self: *const LoadedExecutable, api: *const Api, args: ExecuteArgs) ApiError!void {
         var options = pjrtStruct(c.PJRT_ExecuteOptions{
@@ -643,6 +657,7 @@ pub const LoadedExecutable = opaque {
             .launch_id = 0,
             .non_donatable_input_indices = @ptrCast(args.non_donatable_input_indices.ptr),
             .num_non_donatable_input_indices = args.non_donatable_input_indices.len,
+            .context = @ptrCast(args.context),
         });
         _ = try api.call(.PJRT_LoadedExecutable_Execute, .{
             .executable = self.inner(),
@@ -1047,21 +1062,6 @@ pub const AsyncHostToDeviceTransferManager = opaque {
     }
 };
 
-pub const ExecutionContext = opaque {
-    const inner = InnerMixin(c.PJRT_ExecutionContext).inner;
-
-    pub fn init(api: *const Api) ApiError!*ExecutionContext {
-        const ret = try api.call(.PJRT_ExecutionContext_Create, .{});
-        return @ptrCast(ret.context.?);
-    }
-
-    pub fn deinit(self: *ExecutionContext, api: *const Api) void {
-        _ = api.call(.PJRT_ExecutionContext_Destroy, .{
-            .context = self.inner(),
-        }) catch unreachable;
-    }
-};
-
 pub const NamedValue = extern struct {
     comptime {
         std.debug.assert(@sizeOf(NamedValue) == @sizeOf(c.PJRT_NamedValue));
@@ -1164,6 +1164,59 @@ pub const NamedValue = extern struct {
             .bool => try writer.print(" .bool = {} ", .{u.bool_value}),
         }
         try writer.writeAll("}");
+    }
+};
+
+pub const FFI = extern struct {
+    inner: *const c.PJRT_FFI,
+
+    pub const UserData = extern struct {
+        type_id: i64,
+        user_data: *anyopaque,
+
+        fn toCStruct(self: UserData) c.PJRT_FFI_UserData {
+            return .{
+                .type_id = self.type_id,
+                .data = self.user_data,
+            };
+        }
+    };
+
+    pub fn customCallRegistry(self: *const FFI) ?CustomCallRegistry {
+        return .{ .inner = self.inner.register_handler.? };
+    }
+
+    pub fn registerTypeId(self: *const FFI, api: *const Api, type_name: []const u8) ApiError!i64 {
+        var ret = pjrtStruct(c.PJRT_FFI_TypeID_Register_Args{
+            .type_name = type_name.ptr,
+            .type_name_size = type_name.len,
+            .type_id = getTypeId(type_name),
+        });
+        const result = self.inner.type_id_register.?(&ret);
+        if (result) |pjrt_c_error| {
+            const pjrt_error: *Error = @ptrCast(pjrt_c_error);
+            return pjrt_error.getCode(api).toApiError();
+        }
+
+        return ret.type_id;
+    }
+
+    pub fn addUserData(self: *const FFI, api: *const Api, context: *ExecuteContext, user_data: UserData) ApiError!void {
+        var ret = pjrtStruct(c.PJRT_FFI_UserData_Add_Args{
+            .context = @ptrCast(context),
+            .user_data = user_data.toCStruct(),
+        });
+        const result = self.inner.user_data_add.?(&ret);
+        if (result) |pjrt_c_error| {
+            const pjrt_error: *Error = @ptrCast(pjrt_c_error);
+            log.err("[addUserData] {s}", .{pjrt_error.getMessage(api)});
+            return pjrt_error.getCode(api).toApiError();
+        }
+    }
+
+    pub fn getTypeId(type_name: []const u8) i64 {
+        // Use FNV-1a 64-bit hash algorithm
+        return @bitCast(std.hash.Fnv1a_64.hash(type_name));
     }
 };
 

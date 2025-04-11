@@ -2,12 +2,35 @@ const std = @import("std");
 
 const asynk = @import("async");
 const zml = @import("zml");
-
+const pjrt = zml.pjrt;
 const log = std.log.scoped(.mnist);
 
 pub const std_options: std.Options = .{
     .log_level = .info,
     .logFn = asynk.logFn(std.log.defaultLog),
+};
+
+pub const PrintOp = struct {
+    const Self = @This();
+
+    _platform: *const zml.Platform,
+
+    pub fn beforeCustomCall(input: zml.Tensor, another_input: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
+        log.info("Compiling PrintOp for target: {s}", .{@tagName(input.getContext().target())});
+        return .{ input, another_input.add(another_input) };
+    }
+
+    pub fn call(self: *Self, input: zml.Buffer, another_input: zml.Buffer) !struct { zml.Buffer, zml.Buffer } {
+        var output = input;
+        log.info("Input 0: {any}", .{output.getMemory().kind(self._platform.pjrt_api)});
+        output = try output.copyToMemory(self.getPlatform(), .host_pinned);
+        log.info("After copy 0: {any}", .{output.getMemory().kind(self._platform.pjrt_api)});
+        return .{ try output.copyToMemory(self.getPlatform(), .device), another_input };
+    }
+
+    fn getPlatform(self: *Self) zml.Platform {
+        return self._platform.*;
+    }
 };
 
 /// Model definition
@@ -20,19 +43,20 @@ const Mnist = struct {
         bias: zml.Tensor,
 
         pub fn forward(self: Layer, input: zml.Tensor) zml.Tensor {
-            return self.weight.matmul(input.print2()).add(self.bias).relu();
+            return self.weight.matmul(input).add(self.bias).relu();
         }
     };
 
     /// just two linear layers + relu activation
     pub fn forward(self: Mnist, input: zml.Tensor) zml.Tensor {
-        // std.log.info("Compiling for target: {s}", .{@tagName(input.getContext().target())});
+        log.info("Compiling for target: {s}", .{@tagName(input.getContext().target())});
         var x = input.flattenAll().convert(.f32);
         const layers: []const Layer = &.{ self.fc1, self.fc2 };
         for (layers) |layer| {
             x = zml.call(layer, .forward, .{x});
         }
-        return x.argMax(0).indices.convert(.u8);
+        const r = x.argMax(0).indices.convert(.u8).print(PrintOp, x);
+        return r[0];
     }
 };
 
@@ -49,7 +73,7 @@ pub fn asyncMain() !void {
 
     // log.info("\n===========================\n==   ZML MNIST Example   ==\n===========================\n\n", .{});
 
-    // // Auto-select platform
+    // Auto-select platform
     const platform = context.autoPlatform(.{});
     context.printAvailablePlatforms(platform);
 
@@ -85,7 +109,7 @@ pub fn asyncMain() !void {
     const compiled_mnist = try compilation.awaitt();
     log.info("✅ Compiled model in {d}ms", .{start_time.read() / std.time.ns_per_ms});
 
-    const mnist = compiled_mnist.prepare(model_weights);
+    const mnist = compiled_mnist.prepare(model_weights).withExecutionContext();
     defer mnist.deinit();
     log.info("✅ Weights transferred in {d}ms", .{start_time.read() / std.time.ns_per_ms});
 
@@ -98,25 +122,10 @@ pub fn asyncMain() !void {
 
     // inference - can be looped
     {
-        const idx = rng.random().intRangeAtMost(u64, 0, 10000 - 1);
-        var sample: [28 * 28]u8 align(16) = undefined;
-        _ = try dataset.pread(&sample, 16 + (idx * 28 * 28));
-        var input = try zml.Buffer.from(platform, zml.HostBuffer.fromBytes(zml.Shape.init(.{ 28, 28 }, .u8), &sample));
-        defer input.deinit();
+        const print_op_ctx: PrintOp = .{ ._platform = &platform };
+        try mnist.attach(&print_op_ctx);
+        std.debug.print("Attached print op to model: {}\n", .{print_op_ctx});
 
-        printDigit(sample);
-        var result: zml.Buffer = mnist.call(.{input});
-        defer result.deinit();
-
-        log.info(
-            \\✅ RECOGNIZED DIGIT:
-            \\                       +-------------+
-            \\{s}
-            \\                       +-------------+
-            \\
-        , .{digits[try result.getValue(u8)]});
-    }
-    {
         const idx = rng.random().intRangeAtMost(u64, 0, 10000 - 1);
         var sample: [28 * 28]u8 align(16) = undefined;
         _ = try dataset.pread(&sample, 16 + (idx * 28 * 28));

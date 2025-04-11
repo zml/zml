@@ -8,8 +8,10 @@ const stdx = @import("stdx");
 const Buffer = @import("buffer.zig").Buffer;
 const Data = @import("dtype.zig").Data;
 const DataType = @import("dtype.zig").DataType;
+const custom_call = @import("ffi.zig").custom_call;
 const HostBuffer = @import("hostbuffer.zig").HostBuffer;
 const Memory = @import("buffer.zig").Buffer.Memory;
+const ffi = @import("ffi.zig");
 const meta = @import("meta.zig");
 const mlir = @import("mlir.zig");
 const Location = mlir.Location;
@@ -3782,37 +3784,8 @@ pub const Tensor = struct {
         }.binaryOpHelper;
     }
 
-    /// Insert code that will print the content of the given buffer at runtime.
-    /// Only for debug purpose, it inserts device to host synchronization
-    /// so it will slow down the program execution.
-    pub fn print(input: Tensor) Tensor {
-        return ops.addHostCallback(
-            &printCallback,
-            null,
-            &.{input},
-            &.{input.shape()},
-            .{ .output_operand_aliases = &.{0} },
-        )[0];
-    }
-
-    fn printCallback(_: ?*anyopaque, inputs: []const HostBuffer, outputs: []const HostBuffer) void {
-        const host_buffer = inputs[0];
-        std.debug.print("Device buffer: {}: {}", .{ host_buffer.shape(), host_buffer.pretty() });
-        std.debug.assert(host_buffer.data.ptr == outputs[0].data.ptr);
-    }
-
-    pub fn print2(input: Tensor) Tensor {
-        return ops.addHostCall(
-            &printCallback2,
-            null,
-            &.{input},
-            .{ .has_side_effect = true },
-        )[0];
-    }
-
-    fn printCallback2(_: ?*anyopaque, inputs: []const HostBuffer) void {
-        const host_buffer = inputs[0];
-        std.debug.print("Device buffer: {}: {}", .{ host_buffer.shape(), host_buffer.pretty() });
+    pub fn print(self: Tensor, print_op: type, another_tensor: Tensor) ffi.CustomCallOutputType(print_op) {
+        return custom_call(print_op, .{ self, another_tensor });
     }
 };
 

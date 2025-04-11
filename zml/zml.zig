@@ -5,6 +5,7 @@
 
 pub const Buffer = @import("buffer.zig").Buffer;
 pub const Bufferized = @import("tensor.zig").Bufferized;
+pub const CompilationContext = @import("module.zig").CompilationContext;
 pub const CompilationOptions = @import("platform.zig").CompilationOptions;
 pub const Context = @import("context.zig").Context;
 pub const Data = @import("dtype.zig").Data;
@@ -18,6 +19,7 @@ pub const Tensor = @import("tensor.zig").Tensor;
 
 // Namespaces
 pub const context = @import("context.zig");
+pub const ffi = @import("ffi.zig");
 pub const exe = @import("exe.zig");
 pub const floats = @import("floats.zig");
 pub const helpers = @import("helpers.zig");
@@ -34,6 +36,7 @@ pub const torch = @import("torch.zig");
 pub const tokenizer = @import("zml/tokenizer");
 
 pub const call = ops.call;
+pub const custom_call = ffi.custom_call;
 pub const compile = exe.compile;
 pub const compileFn = exe.compileFn;
 pub const compileModel = exe.compileModel;

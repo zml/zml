@@ -8,6 +8,7 @@ pub const ffi = pjrt.ffi;
 pub const Profiler = pjrt.Profiler;
 pub const ApiError = pjrt.ApiError;
 pub const ErrorCode = pjrt.ErrorCode;
+pub const ExecuteContext = pjrt.ExecuteContext;
 pub const BufferType = pjrt.BufferType;
 pub const Device = pjrt.Device;
 pub const DeviceDescription = pjrt.DeviceDescription;
@@ -262,6 +263,7 @@ pub const LoadedExecutable = opaque {
         results: []const [*]*Buffer,
         events: []?*Event,
         non_donatable_input_indices: []const i64 = &.{},
+        context: ?*ExecuteContext,
     };
 
     pub fn execute(self: *const LoadedExecutable, api: *const Api, args: ExecuteArgs) ExecuteError!void {
@@ -271,6 +273,7 @@ pub const LoadedExecutable = opaque {
             .results = @ptrCast(args.results),
             .events = @ptrCast(args.events),
             .non_donatable_input_indices = args.non_donatable_input_indices,
+            .context = args.context,
         } });
     }
 

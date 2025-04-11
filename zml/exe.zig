@@ -155,6 +155,8 @@ pub const BaseExe = struct {
     /// Allocator backing memory
     _arena: std.heap.ArenaAllocator,
 
+    _context: ?*pjrt.ExecuteContext = null,
+
     pub fn init(parent_allocator: std.mem.Allocator, platform: Platform, exe: *pjrt.LoadedExecutable, args: struct { n_in: u32, result_shapes: []const Shape, n_devices: u8 }) !BaseExe {
         var arena = std.heap.ArenaAllocator.init(parent_allocator);
         errdefer arena.deinit();
@@ -188,6 +190,9 @@ pub const BaseExe = struct {
     }
 
     pub fn deinit(self: BaseExe) void {
+        if (self._context) |ctx| {
+            ctx.deinit(self.platform.pjrt_api);
+        }
         self._arena.deinit();
     }
 
@@ -209,6 +214,7 @@ pub const BaseExe = struct {
             // even if it has been marked as "can be donated" during compilation.
             // TODO: expose it ?
             .non_donatable_input_indices = &.{},
+            .context = if (self._context) |ctx| ctx else null,
         }) catch unreachable;
 
         for (events[0..sharding.num_partitions]) |e| {
@@ -269,6 +275,32 @@ pub fn Exe(ArgsT: type, ReturnT: type) type {
             var new: Exe(stdx.meta.Tail(ArgsT), ReturnT) = .{ .inner = self.inner };
             new.inner.prepare(first_arg);
             return new;
+        }
+
+        pub fn withExecutionContext(self: Self) Self {
+            stdx.debug.assert(self.inner._context == null, "Exe already has an execution context", .{});
+            var new: Self = .{ .inner = self.inner };
+            const pjrt_execute_context = self.inner.platform.pjrt_api.createExecuteContext() catch unreachable;
+            new.inner._context = pjrt_execute_context;
+            log.info("[FFI] Created {*} for {*}", .{ pjrt_execute_context, self.inner.exe });
+            return new;
+        }
+
+        pub fn attach(self: Self, value: anytype) !void {
+            stdx.debug.assert(self.inner._context != null, "Exe doesn't have an execution context", .{});
+            const pjrt_api = self.inner.platform.pjrt_api;
+            const ffi = pjrt_api.ffi().?;
+            const ValueT = @TypeOf(value);
+            const type_name = switch (@typeInfo(ValueT)) {
+                .pointer => @typeName(std.meta.Child(ValueT)),
+                else => @typeName(ValueT), // todo error
+            };
+
+            const type_id = try ffi.registerTypeId(pjrt_api, type_name);
+
+            const user_data: *anyopaque = @ptrCast(@constCast(value));
+            log.info("[FFI] Attach {any}@{x} of type {d} on {any}\n", .{ value, user_data, type_id, self.inner._context.? });
+            try ffi.addUserData(pjrt_api, self.inner._context.?, .{ .type_id = type_id, .user_data = user_data });
         }
 
         pub fn serialize(self: Self, writer: anytype) !void {
