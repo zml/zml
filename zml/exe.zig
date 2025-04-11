@@ -8,6 +8,7 @@ const pjrt = @import("pjrtx.zig");
 const Buffer = @import("buffer.zig").Buffer;
 const Bufferized = @import("tensor.zig").Bufferized;
 const CompilationContext = @import("module.zig").CompilationContext;
+const ExecuteContext = @import("context.zig").ExecuteContext;
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
 const ShapeOf = @import("tensor.zig").ShapeOf;
@@ -191,12 +192,12 @@ pub const BaseExe = struct {
         self._arena.deinit();
     }
 
-    pub fn call(self: BaseExe) void {
+    pub fn call(self: BaseExe, execute_context: *ExecuteContext) void {
         stdx.debug.assert(self.input_buffer_count == self.ready_buffer_count, "BaseExe isn't ready to be called, expected {} buffer inputs got {}", .{ self.input_buffer_count, self.ready_buffer_count });
-        return self._unsafeCall();
+        return self._unsafeCall(execute_context);
     }
 
-    pub fn _unsafeCall(self: BaseExe) void {
+    pub fn _unsafeCall(self: BaseExe, execute_context: *ExecuteContext) void {
         var events = [_]?*pjrt.Event{null} ** Platform.MAX_NUM_DEVICES;
         const sharding = self.platform.sharding();
 
@@ -209,6 +210,7 @@ pub const BaseExe = struct {
             // even if it has been marked as "can be donated" during compilation.
             // TODO: expose it ?
             .non_donatable_input_indices = &.{},
+            .context = execute_context.execute_ctx,
         }) catch unreachable;
 
         for (events[0..sharding.num_partitions]) |e| {
@@ -279,10 +281,10 @@ pub fn Exe(ArgsT: type, ReturnT: type) type {
             return self.inner.platform;
         }
 
-        pub fn call(self: Self, args: Bufferized(ArgsT)) Bufferized(ReturnT) {
+        pub fn call(self: Self, args: Bufferized(ArgsT), execute_context: *ExecuteContext) Bufferized(ReturnT) {
             const total_ready = fillBuffers(&args, self.inner.input_per_device, self.inner.ready_buffer_count);
             std.debug.assert(total_ready == self.inner.input_buffer_count);
-            self.inner._unsafeCall();
+            self.inner._unsafeCall(execute_context);
             var result: Bufferized(ReturnT) = undefined;
             assignRawBuffers(&result, self.inner.platform, self.inner.output_per_device, self.inner.result_shapes);
             return result;

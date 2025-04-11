@@ -10,6 +10,15 @@ pub const std_options: std.Options = .{
     .logFn = asynk.logFn(std.log.defaultLog),
 };
 
+pub fn Pouet(comptime T: type) type {
+    _ = T; // autofix
+    return struct {
+        const Self = @This();
+
+        pub fn pouet() callconv(.C) void {}
+    };
+}
+
 /// Model definition
 const Mnist = struct {
     fc1: Layer,
@@ -20,7 +29,7 @@ const Mnist = struct {
         bias: zml.Tensor,
 
         pub fn forward(self: Layer, input: zml.Tensor) zml.Tensor {
-            return self.weight.matmul(input.print2()).add(self.bias).relu();
+            return self.weight.matmul(input.print()).add(self.bias).relu();
         }
     };
 
@@ -28,6 +37,11 @@ const Mnist = struct {
     pub fn forward(self: Mnist, input: zml.Tensor) zml.Tensor {
         // std.log.info("Compiling for target: {s}", .{@tagName(input.getContext().target())});
         var x = input.flattenAll().convert(.f32);
+        // const t = zml.custom_call(struct {
+        //     pub fn call(self: *const Mnist, input: zml.Buffer) zml.Buffer {
+        //         return pure zig
+        //     }
+        // }.call, .{self}, .{input}, .{});
         const layers: []const Layer = &.{ self.fc1, self.fc2 };
         for (layers) |layer| {
             x = zml.call(layer, .forward, .{x});
@@ -49,8 +63,12 @@ pub fn asyncMain() !void {
 
     // log.info("\n===========================\n==   ZML MNIST Example   ==\n===========================\n\n", .{});
 
+    const compilation_options = zml.CompilationOptions{
+        .xla_dump_to = "/tmp/zml/hugo",
+    };
+
     // // Auto-select platform
-    const platform = context.autoPlatform(.{});
+    const platform = context.autoPlatform(.{}).withCompilationOptions(compilation_options);
     context.printAvailablePlatforms(platform);
 
     // Parse program args
@@ -98,6 +116,12 @@ pub fn asyncMain() !void {
 
     // inference - can be looped
     {
+        var execution_context = try context.getExecutionCtx(platform);
+        const attached_value_id = try execution_context.attach("toto", platform.compilation_options);
+        // std.debug.print("Attached value ptr: {*}\n", .{platform.compilation_options});
+        std.debug.print("Attached value id: {s}\n", .{attached_value_id});
+        defer execution_context.deinit();
+
         const idx = rng.random().intRangeAtMost(u64, 0, 10000 - 1);
         var sample: [28 * 28]u8 align(16) = undefined;
         _ = try dataset.pread(&sample, 16 + (idx * 28 * 28));
@@ -105,7 +129,7 @@ pub fn asyncMain() !void {
         defer input.deinit();
 
         printDigit(sample);
-        var result: zml.Buffer = mnist.call(.{input});
+        var result: zml.Buffer = mnist.call(.{input}, &execution_context);
         defer result.deinit();
 
         log.info(
@@ -116,25 +140,28 @@ pub fn asyncMain() !void {
             \\
         , .{digits[try result.getValue(u8)]});
     }
-    {
-        const idx = rng.random().intRangeAtMost(u64, 0, 10000 - 1);
-        var sample: [28 * 28]u8 align(16) = undefined;
-        _ = try dataset.pread(&sample, 16 + (idx * 28 * 28));
-        var input = try zml.Buffer.from(platform, zml.HostBuffer.fromBytes(zml.Shape.init(.{ 28, 28 }, .u8), &sample));
-        defer input.deinit();
+    // {
+    //     const execution_context = try zml.ExecuteContext.init(platform);
+    //     defer execution_context.deinit();
 
-        printDigit(sample);
-        var result: zml.Buffer = mnist.call(.{input});
-        defer result.deinit();
+    //     const idx = rng.random().intRangeAtMost(u64, 0, 10000 - 1);
+    //     var sample: [28 * 28]u8 align(16) = undefined;
+    //     _ = try dataset.pread(&sample, 16 + (idx * 28 * 28));
+    //     var input = try zml.Buffer.from(platform, zml.HostBuffer.fromBytes(zml.Shape.init(.{ 28, 28 }, .u8), &sample));
+    //     defer input.deinit();
 
-        log.info(
-            \\✅ RECOGNIZED DIGIT:
-            \\                       +-------------+
-            \\{s}
-            \\                       +-------------+
-            \\
-        , .{digits[try result.getValue(u8)]});
-    }
+    //     printDigit(sample);
+    //     var result: zml.Buffer = mnist.call(.{input}, execution_context);
+    //     defer result.deinit();
+
+    //     log.info(
+    //         \\✅ RECOGNIZED DIGIT:
+    //         \\                       +-------------+
+    //         \\{s}
+    //         \\                       +-------------+
+    //         \\
+    //     , .{digits[try result.getValue(u8)]});
+    // }
 }
 
 fn printDigit(digit: [28 * 28]u8) void {

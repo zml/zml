@@ -191,10 +191,12 @@ pub const ExecutionContext = opaque {
     //     }
     // }
 
-    pub fn get(self: *ExecutionContext, api: *const Api, type_id: *TypeId) ApiError!*anyopaque {
+    pub fn get(self: *const ExecutionContext, api: *const Api, type_name: []const u8) ApiError!*anyopaque {
+        const type_id = getTypeId(type_name);
+        std.debug.print("get {s} with type_id: {d} from {any}\n", .{ type_name, type_id.type_id, @constCast(self.inner()) });
         var ret = pjrtStruct(c.XLA_FFI_ExecutionContext_Get_Args{
-            .ctx = self.inner(),
-            .type_id = @ptrCast(@alignCast(type_id)),
+            .ctx = @constCast(self.inner()),
+            .type_id = @constCast(&type_id.toCStruct()),
         });
         const result = api.inner().XLA_FFI_ExecutionContext_Get.?(&ret);
 
@@ -210,8 +212,48 @@ pub const ExecutionContext = opaque {
         return ret.data.?;
     }
 
+    pub fn scheduleTask(self: *const ExecutionContext, api: *const Api, task: *const Task, data: *anyopaque) ApiError!void {
+        var ret = pjrtStruct(c.XLA_FFI_ThreadPool_Schedule_Args{
+            .ctx = @constCast(self.inner()),
+            .task = @ptrCast(@alignCast(task)),
+            .data = @ptrCast(@alignCast(data)),
+        });
+
+        const result = api.inner().XLA_FFI_ThreadPool_Schedule.?(&ret);
+
+        if (result) |ffi_error| {
+            const err = Error.fromInner(ffi_error);
+            defer err.destroy(api);
+            std.debug.print("error: {any} \n", .{err});
+            log.err("[ExecutionContext.get] {s}", .{err.getMessage(api)});
+
+            // TODO(Corentin): Retrieve error code from Error when implemented in XLA.
+            return error.Unknown;
+        }
+    }
+
+    fn getTypeId(type_name: []const u8) TypeId {
+        const id: i64 = @bitCast(std.hash.Fnv1a_64.hash(type_name));
+
+        return .{
+            .type_id = id,
+        };
+    }
+
     // TODO getDeviceOrdinal()
 };
+
+const TypeId = extern struct {
+    type_id: i64,
+
+    pub fn toCStruct(self: TypeId) c.XLA_FFI_TypeId {
+        return c.XLA_FFI_TypeId{
+            .type_id = self.type_id,
+        };
+    }
+};
+
+const Task = fn (*anyopaque) void;
 
 const ByteSpan = extern struct {
     ptr: [*]const u8,
@@ -220,10 +262,6 @@ const ByteSpan = extern struct {
     pub fn slice(self: ByteSpan) []const u8 {
         return self.ptr[0..self.len];
     }
-};
-
-pub const TypeId = extern struct {
-    type_id: i64,
 };
 
 pub const DataType = enum(c.XLA_FFI_DataType) {

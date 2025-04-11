@@ -7,6 +7,7 @@ pub const Buffer = @import("buffer.zig").Buffer;
 pub const Bufferized = @import("tensor.zig").Bufferized;
 pub const CompilationOptions = @import("platform.zig").CompilationOptions;
 pub const Context = @import("context.zig").Context;
+pub const ExecuteContext = @import("context.zig").ExecuteContext;
 pub const Data = @import("dtype.zig").Data;
 pub const DataType = @import("dtype.zig").DataType;
 pub const HostBuffer = @import("hostbuffer.zig").HostBuffer;

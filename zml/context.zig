@@ -9,11 +9,13 @@ const runtimes = @import("runtimes");
 const stdx = @import("stdx");
 
 const Buffer = @import("buffer.zig").Buffer;
+const Tensor = @import("tensor.zig").Tensor;
 const bufferTypeFromDtype = @import("buffer.zig").bufferTypeFromDtype;
 const DataType = @import("dtype.zig").DataType;
 const HostBuffer = @import("hostbuffer.zig").HostBuffer;
 const pjrt = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
+const CompilationOptions = @import("platform.zig").CompilationOptions;
 const Shape = @import("shape.zig").Shape;
 const Target = @import("platform.zig").Target;
 const zml_platform = @import("platform.zig");
@@ -39,6 +41,7 @@ pub const Context = struct {
             inline for (comptime std.enums.values(runtimes.Platform)) |t| {
                 if (runtimes.load(t)) |api| {
                     Context.apis.set(t, api);
+                    CustomCall.registerZmlCustomCalls(api, t) catch unreachable;
                 } else |_| {}
             }
         }
@@ -179,10 +182,14 @@ pub const Context = struct {
             return error.NoDevicesFound;
         }
 
-        try CustomCall.registerZmlCustomCalls(p);
-
         self.platforms.set(target, p);
         return p;
+    }
+
+    pub fn getExecutionCtx(self: *Context, platform_: Platform) !ExecuteContext {
+        _ = self; // autofix
+
+        return try ExecuteContext.init(platform_);
     }
 
     pub fn printAvailablePlatforms(self: Context, selected: Platform) void {
@@ -219,13 +226,60 @@ pub const Context = struct {
     pub const HostCall = fn (?*anyopaque, []const HostBuffer) void;
 };
 
+pub const ExecuteContext = struct {
+    pub const ValueId = []const u8;
+
+    execute_ctx: *pjrt.ExecuteContext,
+    _pjrt_api: *const pjrt.Api,
+
+    pub fn init(platform: Platform) !ExecuteContext {
+        const pjrt_api = platform.pjrt_api;
+        const execute_ctx = try pjrt_api.createExecuteContext();
+
+        const ffi = pjrt_api.ffi().?;
+
+        const type_id = try ffi.registerTypeId(pjrt_api, "platform");
+
+        try ffi.addUserData(pjrt_api, execute_ctx, .{ .type_id = type_id, .user_data = @constCast(&platform.target) });
+
+        return .{
+            .execute_ctx = execute_ctx,
+            ._pjrt_api = pjrt_api,
+        };
+    }
+
+    pub inline fn attach(self: *ExecuteContext, name: []const u8, value: anytype) !ValueId {
+        const ffi = self._pjrt_api.ffi().?;
+        const type_name = name;
+        const type_id = try ffi.registerTypeId(self._pjrt_api, type_name);
+        std.debug.print("Registered type id: {d}\n", .{type_id});
+
+        const user_data = @constCast(&value);
+        std.debug.print("User data: {*} {any}\n", .{ user_data, user_data });
+        try ffi.addUserData(self._pjrt_api, self.execute_ctx, .{ .type_id = type_id, .user_data = user_data });
+        return type_name;
+    }
+
+    pub fn deinit(self: *ExecuteContext) void {
+        self.execute_ctx.deinit(self._pjrt_api);
+    }
+};
+
 const CustomCall = struct {
-    pub fn registerZmlCustomCalls(platform: Platform) !void {
-        const registry = platform.pjrt_api.customCallRegistry();
+    pub fn registerZmlCustomCalls(pjrt_api: *const pjrt.Api, target: Target) !void {
+        const ffi = pjrt_api.ffi();
+
+        if (ffi == null) {
+            std.debug.print("No FFI available for platform: {s}\n", .{@tagName(target)});
+            return error.NoFfiAvailable;
+        }
+
+        const registry = ffi.?.customCallRegistry();
 
         if (registry) |reg| {
-            try reg.registerFfi(platform.pjrt_api, "zmlHostBufferCallback", @tagName(platform.target), &hostBufferCallback);
-            try reg.registerFfi(platform.pjrt_api, "zmlHostBufferCall", @tagName(platform.target), &hostBufferCall);
+            std.debug.print("Registering custom calls for platform: {s}\n", .{@tagName(target)});
+            try reg.registerFfi(pjrt_api, "zmlHostBufferCallback", @tagName(target), &hostBufferCallback);
+            try reg.registerFfi(pjrt_api, "zmlHostBufferCall", @tagName(target), &hostBufferCall);
         } else {
             stdx.debug.panic("Registering custom calls failed", .{});
         }
@@ -233,6 +287,14 @@ const CustomCall = struct {
 
     fn hostBufferCallback(call_frame: *pjrt.ffi.CallFrame) callconv(.C) ?*pjrt.ffi.Error {
         if (call_frame.registeringHook()) return null;
+
+        const execution_context = call_frame.ctx.?;
+        const toto_pq = execution_context.get(call_frame.api.?, "toto") catch unreachable;
+        std.debug.print("platform_pq: {any}\n", .{toto_pq});
+
+        const toto: *CompilationOptions = @ptrCast(@alignCast(toto_pq));
+        // execution_context.scheduleTask(call_frame.api.?, my_task, lastone) catch unreachable;
+        std.debug.print("toto : {s}\n", .{toto.xla_dump_to.?});
 
         const callback_attr = call_frame.attrs.getByName(.scalar, "callback") orelse unreachable;
         std.debug.assert(callback_attr.dtype == .u64);
@@ -276,15 +338,37 @@ const CustomCall = struct {
         const pjrt_client: *pjrt.Client = @ptrFromInt(pjrt_client_ptr.get(usize));
 
         const input_buffers = stdx.stackSlice(8, HostBuffer, call_frame.args.len);
+        var lastone: *pjrt.Buffer = undefined;
         for (input_buffers, 0..) |*b, i| {
             b.* = copyBuffer(pjrt_api, pjrt_client, call_frame.args.get(i));
+            lastone = copyBuffer2(pjrt_api, pjrt_client, call_frame.args.get(i));
         }
 
+        const execution_context = call_frame.ctx.?;
+        const platform_pq = execution_context.get(call_frame.api.?, "toto") catch unreachable;
+        std.debug.print("platform_pq: {any}\n", .{platform_pq});
+
+        const platform = @as(*CompilationOptions, @ptrCast(@alignCast(platform_pq)));
+        // execution_context.scheduleTask(call_frame.api.?, my_task, lastone) catch unreachable;
+        std.debug.print("platform: {any}\n", .{platform.xla_dump_to});
         callback(user_ctx, input_buffers);
-        // asynk.callBlocking(callback, .{ user_ctx, input_buffers });
         return null;
     }
 };
+
+fn my_task(data: *anyopaque) void {
+    for (0..10) |i| {
+        _ = i; // autofix
+        std.debug.print("Hello from my_task: {any}\n", .{data});
+    }
+}
+
+pub fn printCallback2(pjrt_api: *const pjrt.Api, buf: *pjrt.Buffer) void {
+    for (0..10) |i| {
+        _ = i; // autofix
+        std.debug.print("Device buffer: {any}: {any}", .{ buf.getDimensions(pjrt_api), buf.getElementType(pjrt_api) });
+    }
+}
 
 fn getShape(buffer_desc: *const pjrt.ffi.Buffer) Shape {
     // log.warn("received buffer {}", .{buffer_desc});
@@ -333,6 +417,8 @@ fn copyBuffer(pjrt_api: *const pjrt.Api, pjrt_client: *pjrt.Client, buffer_desc:
         }
     }
 
+    std.debug.print("selected memory: {s}\n", .{selected_mem});
+
     const pjrt_buffer = pjrt_client.createViewOfDeviceBuffer(pjrt_api, .{
         .data = buffer_desc.data,
         .element_type = bufferTypeFromDtype(buffer_shape.dtype()),
@@ -360,4 +446,52 @@ fn copyBuffer(pjrt_api: *const pjrt.Api, pjrt_client: *pjrt.Client, buffer_desc:
         buffer_shape,
         data[0..end],
     );
+}
+
+fn copyBuffer2(pjrt_api: *const pjrt.Api, pjrt_client: *pjrt.Client, buffer_desc: *const pjrt.ffi.Buffer) *pjrt.Buffer {
+    const buffer_shape = getShape(buffer_desc);
+
+    const minor_to_major: [Shape.MAX_RANK]i64 = comptime blk: {
+        var res: [Shape.MAX_RANK]i64 = undefined;
+        for (0..Shape.MAX_RANK) |i| {
+            res[i] = @intCast(Shape.MAX_RANK - i - 1);
+        }
+        break :blk res;
+    };
+
+    const device = pjrt_client.getAddressableDevices(pjrt_api)[0];
+    const memories = pjrt_client.addressableMemories(pjrt_api);
+
+    var selected_mem: *const pjrt.Memory = undefined;
+    for (memories) |mem| {
+        if (mem.kind(pjrt_api) == pjrt.Memory.Kind.pinned_host) {
+            selected_mem = mem;
+        }
+    }
+
+    std.debug.print("selected memory: {s}\n", .{selected_mem});
+
+    const pjrt_buffer = pjrt_client.createViewOfDeviceBuffer(pjrt_api, .{
+        .data = buffer_desc.data,
+        .element_type = bufferTypeFromDtype(buffer_shape.dtype()),
+        .dims = buffer_shape.dims(),
+        // TODO: exposes sharding in the API.
+        .device = device,
+        .layout = .{
+            .tiled = .{
+                .minor_to_major = minor_to_major[Shape.MAX_RANK - buffer_shape.rank() ..],
+                .tile_dims = &.{},
+                .tile_dims_sizes = &.{},
+            },
+        },
+        .stream = null,
+    }) catch @panic("failed to createViewOfDeviceBuffer");
+
+    // if (@hasDecl(c, "ZML_RUNTIME_CPU")) {
+    //     return pjrt_buffer;
+    // }
+
+    const copied_buffer = pjrt_buffer.copyToMemory(pjrt_api, selected_mem) catch unreachable;
+
+    return copied_buffer;
 }
