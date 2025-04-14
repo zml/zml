@@ -259,6 +259,17 @@ const CustomCall = struct {
                 t.* = tags[0];
                 tags = tags[1..];
             }
+            // Note: this seems to be a bug in XLA.
+            // The pinned memory is created in one thread, and the callback is called on another thread.
+            // It seems the memory protection information is not correctly propagated through all threads.
+            // So we need to explicitly enable writing here.
+            // TODO: fix this, we don't want to do syscalls on every callback call.
+            const data_ptr: usize = @intFromPtr(b.data.ptr);
+            const page_off = data_ptr % std.heap.page_size_min;
+            const page_start: [*]align(std.heap.page_size_min) u8 = @ptrFromInt(data_ptr - page_off);
+            std.posix.mprotect(page_start[0 .. b.data.len + page_off], std.posix.PROT.WRITE) catch |e| {
+                log.err("Failed to protect memory of buffer {}: {}", .{ b, e });
+            };
         }
 
         callback(user_ctx, input_buffers, output_buffers);
