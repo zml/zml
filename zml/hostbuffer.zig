@@ -257,6 +257,31 @@ pub const HostBuffer = struct {
         return self.slice1d(ax, .{ .start = start, .end = start + 1 }).squeeze(ax);
     }
 
+    pub fn choose(self: HostBuffer, offsets: anytype) HostBuffer {
+        const off, const tags = Shape.parseDimensions(offsets);
+
+        var sh = self._shape;
+        var _strides: std.BoundedArray(i64, Shape.MAX_RANK) = if (self._strides) |s|
+            .{ .buffer = s, .len = self.rank() }
+        else
+            self._shape.computeStrides();
+
+        var offset: i64 = 0;
+
+        for (off.constSlice(), tags.constSlice()) |o, t| {
+            const ax = sh.axis(t);
+            offset += o * _strides.orderedRemove(ax);
+            sh = sh.remove(ax);
+        }
+
+        return .{
+            ._shape = sh,
+            .data = self.data[@intCast(offset)..],
+            ._strides = _strides.buffer,
+            ._memory = .unmanaged,
+        };
+    }
+
     pub fn squeeze(self: HostBuffer, axis_: anytype) HostBuffer {
         const ax = self._shape.axis(axis_);
         stdx.debug.assert(self.dim(ax) == 1, "squeeze expects a 1-d axis got {} in {}", .{ ax, self });
@@ -309,15 +334,20 @@ pub const HostBuffer = struct {
             try writer.writeByteNTimes(' ', indent_level);
             return switch (self.dtype()) {
                 inline else => |dt| {
+                    const fmt = comptime switch (dt.class()) {
+                        .integer => "{d}",
+                        .float => "{e:.3}",
+                        .bool, .complex => "{any}",
+                    };
                     const values = self.items(dt.toZigType());
                     // Write first rows
                     const num_cols: u32 = 12;
                     const n: u64 = @intCast(self.dim(0));
                     if (n <= num_cols) {
-                        try writer.print("{any},\n", .{values[0..n]});
+                        try writer.print(fmt ++ ",\n", .{values[0..n]});
                     } else {
                         const half = @divExact(num_cols, 2);
-                        try writer.print("{any}, ..., {any},\n", .{ values[0..half], values[n - half ..] });
+                        try writer.print(fmt ++ ", ..., " ++ fmt ++ ",\n", .{ values[0..half], values[n - half ..] });
                     }
                 },
             };

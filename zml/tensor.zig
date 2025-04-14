@@ -1526,8 +1526,15 @@ pub const Tensor = struct {
 
     pub const Slice = struct {
         start: i64 = 0,
-        end: ?i64 = null,
-        step: i64 = 1,
+        end: i64 = to_the_end,
+        step: i32 = 1,
+        singleton: bool = false,
+
+        pub fn single(offset: i64) Slice {
+            return .{ .start = offset, .end = offset + 1, .singleton = true };
+        }
+
+        const to_the_end = std.math.maxInt(i64);
     };
 
     /// Slices the input Tensor over the given axis using the given parameters.
@@ -1549,13 +1556,13 @@ pub const Tensor = struct {
 
             const args: Slice = .{
                 .start = self.wrapIndex(a, s.start),
-                .end = if (s.end) |end| self.wrapIndex(a, end) else self.dim(a),
+                .end = if (s.end == Slice.to_the_end) self.dim(a) else self.wrapIndex(a, s.end),
                 .step = s.step,
             };
             start_indices[a] = args.start;
-            limit_indices[a] = args.end.?;
+            limit_indices[a] = args.end;
             strides[a] = args.step;
-            res_shape = res_shape.setDim(a, std.math.divCeil(i64, args.end.? - args.start, args.step) catch unreachable);
+            res_shape = res_shape.setDim(a, std.math.divCeil(i64, args.end - args.start, args.step) catch unreachable);
         }
 
         const mlir_ctx = self.getContext().mlirCtx();
@@ -1571,7 +1578,11 @@ pub const Tensor = struct {
             loc,
         );
 
-        return _result(res_shape, slice_op.result(0));
+        var res = _result(res_shape, slice_op.result(0));
+        for (slices, 0..) |s, a| {
+            if (s.singleton) res_shape = res_shape.remove(a);
+        }
+        return res.reshape(res_shape);
     }
 
     test slice {
@@ -1606,8 +1617,17 @@ pub const Tensor = struct {
     }
 
     pub fn choose1d(self: Tensor, axis_: anytype, i: i64) Tensor {
-        // TODO: this use case could be handled directly by slice if we added a .single field
-        return self.slice1d(axis_, .{ .start = i, .end = i + 1 }).squeeze(axis_);
+        return self.slice1d(axis_, .single(i));
+    }
+
+    pub fn choose(self: Tensor, offsets: anytype) Tensor {
+        const off, const tags = Shape.parseDimensions(offsets);
+        var slices = [_]Slice{.{}} ** MAX_RANK;
+        for (off, tags) |o, t| {
+            const ax = self.axis(t);
+            slices[ax] = .single(o);
+        }
+        return self.slice(slices[0..self.rank()]);
     }
 
     /// Concatenates the input Tensors along the given axis.
@@ -1913,7 +1933,7 @@ pub const Tensor = struct {
         const result_type = mlir.ext.RankedTensorType.fromShape(ctx, val.shape());
         const loc = ctx.location(@src());
         const elem_type = mlir.ext.denseElementAttrType(val.dtype()) orelse std.debug.panic("constantTensor expects a dtype that can be serialized to MLIR, like f32 or i32, got {}", .{val.shape()});
-        const constant_op = dialect.stablehlo.constant(ctx, result_type, elem_type, val.data, loc);
+        const constant_op = dialect.stablehlo.constant(ctx, result_type, elem_type, val.data[0..val.shape().byteSize()], loc);
         return _result(val.shape(), constant_op.result(0));
     }
 
