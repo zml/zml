@@ -1,13 +1,14 @@
 const std = @import("std");
+
 const stdx = @import("stdx");
 const xev = @import("xev").Dynamic;
+const XevThreadPool = @import("xev").ThreadPool;
+
+const aio = @import("asyncio.zig");
+const channel_mod = @import("channel.zig");
 const coro = @import("coro.zig");
 const executor = @import("executor.zig");
-const channel_mod = @import("channel.zig");
-const aio = @import("asyncio.zig");
 const stack = @import("stack.zig");
-
-const XevThreadPool = @import("xev").ThreadPool;
 
 pub const Condition = struct {
     inner: executor.Condition,
@@ -64,6 +65,64 @@ pub fn asyncc(comptime func: anytype, args: anytype) !FrameEx(func, @TypeOf(args
     const new_stack = try AsyncThread.current.stack_allocator.create();
     return .{
         .inner = try aio.xasync(func, @as(Signature.ArgsT, args), new_stack),
+    };
+}
+
+pub fn Queue(comptime func: anytype) type {
+    const Args = stdx.meta.FnArgs(func);
+    const Ret = stdx.meta.FnResult(func);
+
+    stdx.debug.assertComptime(@sizeOf(Args) <= @sizeOf(stack.Stack.Data), "Queue expects arguments to fit inside {} bytes, got {}", .{ @sizeOf(stack.Stack.Data), @sizeOf(Args) });
+    stdx.debug.assertComptime(Ret == void or @typeInfo(Ret) == .error_union, "Queue expects a function returning void or an error, got {}", .{func});
+    const Task = struct {
+        const T = @This();
+
+        _task: XevThreadPool.Task = .{ .callback = &T.run },
+        active: bool = false,
+        args: Args,
+        res: ?Ret = null,
+
+        pub fn run(task_: *XevThreadPool.Task) void {
+            const task: *T = @alignCast(@fieldParentPtr("_task", task_));
+            task.res = @call(.auto, func, task.args);
+            @atomicStore(bool, &task.active, false, .monotonic);
+        }
+    };
+
+    return struct {
+        data: []Task = &.{},
+        next: usize = 0,
+
+        const Q = @This();
+
+        pub fn initCapacity(allocator: std.mem.Allocator, capacity: usize) !Q {
+            const data = try allocator.alloc(Task, capacity);
+            for (data) |*d| d.active = false;
+            return .{ .data = data };
+        }
+
+        pub fn push(q: *Q, args: stdx.meta.FnArgs(func)) void {
+            const next = q.next;
+            const task: *Task = &q.data[next];
+            while (@atomicLoad(bool, &task.active, .acquire)) {}
+
+            task.* = .{ .active = true, .args = args };
+            AsyncThread.current.thread_pool.schedule(XevThreadPool.Batch.from(&task._task));
+            q.next = (next + 1) % q.data.len;
+        }
+
+        /// Busy wait.
+        pub fn waitSync(q: *Q) Ret {
+            for (q.data) |*task| {
+                while (@atomicLoad(bool, &task.active, .acquire)) {}
+                if (Ret != void) if (task.res) |res| try res;
+            }
+        }
+
+        pub fn deinit(q: *Q, allocator: std.mem.Allocator) void {
+            allocator.free(q.data);
+            q.data = &.{};
+        }
     };
 }
 
@@ -156,7 +215,7 @@ pub const threading = struct {
 };
 
 pub const AsyncThread = struct {
-    threadlocal var current: *AsyncThread = undefined;
+    var current: *AsyncThread = undefined;
 
     executor: *aio.Executor,
     stack_allocator: *stack.StackAllocator,
