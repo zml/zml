@@ -88,7 +88,7 @@ pub const Buffer = struct {
         } else 0;
 
         const buffer_type = bufferTypeFromDtype(host_buffer.shape().dtype());
-        const byte_strides = host_buffer.strides() orelse host_buffer.shape().computeStrides().constSlice();
+        const byte_strides = host_buffer.strides();
 
         var frames: std.BoundedArray(asynk.Frame(pjrt.Client.bufferFromHostBuffer), MAX_NUM_SHARDS) = .{};
         const devices = platform.getDevices();

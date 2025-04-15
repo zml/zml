@@ -749,15 +749,20 @@ pub const Shape = struct {
     }
 
     pub fn computeStrides(self: Shape) std.BoundedArray(i64, MAX_RANK) {
-        const base_stride = self.dtype().sizeOf();
         const rk = self.rank();
-        var strides: std.BoundedArray(i64, MAX_RANK) = .{ .len = @intCast(self.rank()) };
+        var strides: std.BoundedArray(i64, MAX_RANK) = .{ .len = rk };
         if (rk == 0) return strides;
-        strides.buffer[rk - 1] = base_stride;
-        for (1..rk) |i| {
-            const j = @as(usize, rk) - 1 - i;
-            strides.buffer[j] = self._dims.get(j + 1) * strides.buffer[j + 1];
-        }
+
+        const V = @Vector(MAX_RANK, i64);
+        const rank_mask = std.simd.iota(u8, MAX_RANK) < @as(@Vector(MAX_RANK, u8), @splat(rk));
+        // For each axis compute the product of all following dimensions
+        // and the element size in bytes.
+        var d: V = @bitCast(self._dims.buffer);
+        d = @select(i64, rank_mask, d, @as(V, @splat(1)));
+        d = std.simd.shiftElementsLeft(d, 1, self.dtype().sizeOf());
+        d = std.simd.prefixScan(.Mul, -1, d);
+
+        strides.buffer = @bitCast(d);
         return strides;
     }
 
