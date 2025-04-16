@@ -3,6 +3,7 @@ const assert = std.debug.assert;
 const testing = std.testing;
 const builtin = @import("builtin");
 
+const asynk = @import("asynk");
 const stdx = @import("stdx");
 
 const dialect = struct {
@@ -11,12 +12,14 @@ const dialect = struct {
 const dtype = @import("dtype.zig");
 const pjrt = @import("pjrtx.zig");
 const buffer = @import("buffer.zig");
+const hostbuffer = @import("hostbuffer.zig");
 const mlir = @import("mlir.zig");
 const module = @import("module.zig");
 const ops = @import("ops.zig");
 const tensor = @import("tensor.zig");
 const shape = @import("shape.zig");
 const Buffer = buffer.Buffer;
+const HostBuffer = hostbuffer.HostBuffer;
 const CompilationContext = module.CompilationContext;
 const DataType = dtype.DataType;
 const Tensor = tensor.Tensor;
@@ -24,41 +27,40 @@ const Shape = shape.Shape;
 
 const log = std.log.scoped(.@"zml/custom_call");
 
-fn nbInputTensors(comptime args: type) u32 {
-    if (@typeInfo(args) != .@"struct") {
-        @compileError("Expected struct type");
-    }
-    return @typeInfo(args).@"struct".fields.len - 1;
-}
+pub const std_options: std.Options = .{
+    .log_level = .info,
+    .logFn = asynk.logFn(std.log.defaultLog),
+};
 
-fn nbOutputTensors(comptime args: type) u32 {
-    if (@typeInfo(args) != .@"struct") {
-        @compileError("Expected struct type");
-    }
-    return @typeInfo(args).@"struct".fields.len;
-}
-
-fn isCustomCallContainer(custom_op: type) bool {
-    return @hasDecl(custom_op, "call");
-}
-
-fn hasBeforeCustomCallHook(custom_op: type) bool {
-    return @hasDecl(custom_op, "beforeCustomCall");
-}
+const CallbackT = HostBuffer;
 
 pub fn CustomCallInputType(custom_op: type) type {
-    return [nbInputTensors(stdx.meta.FnArgs(custom_op.call))]Tensor;
+    const ArgsT = stdx.meta.FnArgs(custom_op.call);
+    if (@typeInfo(ArgsT) != .@"struct") {
+        @compileError("Expected struct type");
+    }
+    return [@typeInfo(ArgsT).@"struct".fields.len - 1]Tensor;
 }
 
 pub fn CustomCallOutputType(custom_op: type) type {
-    return [nbOutputTensors(stdx.meta.FnReturnNoError(custom_op.call))]Tensor;
+    const ReturnT = stdx.meta.FnReturnNoError(custom_op.call);
+
+    if (@typeInfo(ReturnT) != .@"struct") {
+        @compileError("Expected struct type");
+    }
+
+    if (ReturnT == CallbackT) {
+        return Tensor;
+    }
+
+    return [@typeInfo(ReturnT).@"struct".fields.len]Tensor;
 }
 
 pub fn custom_call(
     comptime custom_op: type,
     inputs: CustomCallInputType(custom_op),
 ) CustomCallOutputType(custom_op) {
-    stdx.debug.assert(isCustomCallContainer(custom_op), "custom_op must have a call method", .{});
+    stdx.debug.assert(@hasDecl(custom_op, "call"), "custom_op must have a call method", .{});
 
     const ctx = inputs[0].getContext();
     const mlir_ctx = ctx.mlirCtx();
@@ -75,7 +77,7 @@ pub fn custom_call(
     var res_shapes: []Shape = undefined;
     var res_types: []mlir.Type = undefined;
 
-    if (hasBeforeCustomCallHook(custom_op)) {
+    if (@hasDecl(custom_op, "beforeCustomCall")) {
         const before_custom_call = custom_op.beforeCustomCall;
         if (@typeInfo(@TypeOf(before_custom_call)) != .@"fn") {
             stdx.debug.panic("beforeCustomCall must be a function");
@@ -89,15 +91,27 @@ pub fn custom_call(
         const before_custom_call_outputs = ctx.callFunc(@typeName(custom_op), before_custom_call, args) catch |err| {
             std.debug.panic("Error in {any} beforeCustomCall func: {any}\n", .{ @typeName(custom_op), err });
         };
-        std.debug.print("beforeCustomCall outputs: {any}\n", .{before_custom_call_outputs});
-        res_shapes = stdx.stackSlice(8, Shape, before_custom_call_outputs.len);
-        res_types = stdx.stackSlice(8, mlir.Type, before_custom_call_outputs.len);
-        inline for (before_custom_call_outputs, 0..) |o, i| {
+        var before_custom_call_outputs_array: []Tensor = undefined;
+
+        if (@TypeOf(before_custom_call_outputs) == Tensor) {
+            before_custom_call_outputs_array = stdx.stackSlice(8, Tensor, 1);
+            before_custom_call_outputs_array[0] = before_custom_call_outputs;
+        } else {
+            before_custom_call_outputs_array = stdx.stackSlice(8, Tensor, @typeInfo(@TypeOf(before_custom_call_outputs)).@"struct".fields.len);
+            inline for (@typeInfo(@TypeOf(before_custom_call_outputs)).@"struct".fields, 0..) |field, i| {
+                before_custom_call_outputs_array[i] = @field(before_custom_call_outputs, field.name);
+            }
+        }
+
+        res_shapes = stdx.stackSlice(8, Shape, before_custom_call_outputs_array.len);
+        res_types = stdx.stackSlice(8, mlir.Type, before_custom_call_outputs_array.len);
+
+        for (before_custom_call_outputs_array, 0..) |o, i| {
             res_shapes[i] = o.shape();
             res_types[i] = mlir.ext.RankedTensorType.fromShape(mlir_ctx, o.shape()).as(mlir.Type);
         }
 
-        inline for (before_custom_call_outputs, 0..) |output, i| {
+        for (before_custom_call_outputs_array, 0..) |output, i| {
             custom_call_inputs[i] = output.value();
         }
     } else {
@@ -128,15 +142,24 @@ pub fn custom_call(
         mlir_ctx.location(@src()),
     );
 
+    // if (CustomCallOutputType(custom_op) == void) {
+    //     return;
+    // }
+
+    if (CustomCallOutputType(custom_op) == Tensor) {
+        return Tensor._result(res_shapes[0], op.result(0));
+    }
+
     var custom_call_outputs: CustomCallOutputType(custom_op) = undefined;
+
     for (&custom_call_outputs, res_shapes, 0..) |*r, shape_, i| {
-        r.* = Tensor._result(shape_, op.result(i));
+        r.* = Tensor._result(shape_, op.result(i)).toMemory(.device);
     }
 
     return custom_call_outputs;
 }
 
-fn view_buf(pjrt_api: *const pjrt.Api, pjrt_client: *const pjrt.Client, buffer_desc: *const pjrt.ffi.Buffer) Buffer {
+fn view_buf(pjrt_api: *const pjrt.Api, pjrt_client: *const pjrt.Client, buffer_desc: *const pjrt.ffi.Buffer) CallbackT {
     const buffer_shape = getShape(buffer_desc);
     const device = pjrt_client.getAddressableDevices(pjrt_api)[0];
 
@@ -183,22 +206,26 @@ fn proxy(comptime custom_op: type) pjrt.ffi.Handler {
             const user_ctx: *custom_op = pjrt.ffi.ExecutionContext.Context(custom_op).get(execution_context, call_frame.api.?) catch unreachable;
             const platform = user_ctx._platform;
             const pjrt_api = platform.pjrt_api;
+            _ = pjrt_api; // autofix
             const pjrt_client = platform.pjrt_client;
-
-            const input_buffers = stdx.stackSlice(8, Buffer, call_frame.args.len);
-            for (input_buffers, 0..) |*b, i| {
-                b.* = view_buf(pjrt_api, pjrt_client, call_frame.args.get(i));
-            }
-
-            const output_buffers = stdx.stackSlice(8, Buffer, call_frame.results.len);
-            for (output_buffers, 0..) |*b, i| {
-                b.* = view_buf(pjrt_api, pjrt_client, call_frame.results.get(i));
-            }
+            _ = pjrt_client; // autofix
 
             var args: std.meta.ArgsTuple(@TypeOf(custom_op.call)) = undefined;
             args[0] = user_ctx;
             inline for (1..args.len) |i| {
-                args[i] = input_buffers[i - 1];
+                const buffer_desc = call_frame.args.get(i - 1);
+                const buffer_shape = getShape(buffer_desc);
+                const b = HostBuffer.fromBytes(buffer_shape, buffer_desc.data[0..buffer_shape.byteSize()]);
+
+                const data_ptr: usize = @intFromPtr(b.data.ptr);
+                const page_off = data_ptr % std.heap.page_size_min;
+                const page_start: [*]align(std.heap.page_size_min) u8 = @ptrFromInt(data_ptr - page_off);
+                std.posix.mprotect(page_start[0 .. b.data.len + page_off], std.posix.PROT.WRITE | std.posix.PROT.READ) catch |e| {
+                    log.err("Failed to protect memory of buffer {}: {}", .{ b, e });
+                };
+
+                args[i] = b;
+                std.debug.print("input buffer {any}: {any}\n", .{ i, b.data });
             }
 
             const outputs = @call(.auto, custom_op.call, args) catch |err| {
@@ -207,12 +234,27 @@ fn proxy(comptime custom_op: type) pjrt.ffi.Handler {
                 return ffi_error;
             };
 
-            if (@typeInfo(@TypeOf(outputs)) == .array) {
-                for (outputs, 0..) |output, i| {
-                    std.debug.print("output {any}: {any}\n", .{ i, output });
-                }
-            } else {
-                std.debug.print("output: {any}\n", .{outputs});
+            std.debug.print("output: {any}\n", .{outputs});
+
+            // const output_buffers = stdx.stackSlice(8, CallbackT, call_frame.results.len);
+            // for (output_buffers, 0..) |*b, i| {
+            //     b.* = view_buf2(pjrt_api, pjrt_client, call_frame.results.get(i));
+            // }
+
+            const output_buffers = stdx.stackSlice(8, CallbackT, call_frame.results.len);
+            for (output_buffers, 0..) |*b, i| {
+                const buffer_desc = call_frame.results.get(i);
+                const buffer_shape = getShape(buffer_desc);
+                b.* = HostBuffer.fromBytes(buffer_shape, buffer_desc.data[0..buffer_shape.byteSize()]);
+
+                const data_ptr: usize = @intFromPtr(b.data.ptr);
+                const page_off = data_ptr % std.heap.page_size_min;
+                const page_start: [*]align(std.heap.page_size_min) u8 = @ptrFromInt(data_ptr - page_off);
+                std.posix.mprotect(page_start[0 .. b.data.len + page_off], std.posix.PROT.WRITE | std.posix.PROT.READ) catch |e| {
+                    log.err("Failed to protect memory of buffer {}: {}", .{ b, e });
+                };
+
+                std.debug.print("output buffer {any}: {any}\n", .{ i, b.data });
             }
 
             return null;

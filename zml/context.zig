@@ -1,7 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const asynk = @import("async");
 const c = @import("c");
 const mlir = @import("mlir");
 const runfiles = @import("runfiles");
@@ -9,12 +8,10 @@ const runtimes = @import("runtimes");
 const stdx = @import("stdx");
 
 const Buffer = @import("buffer.zig").Buffer;
-const Tensor = @import("tensor.zig").Tensor;
 const DataType = @import("dtype.zig").DataType;
 const HostBuffer = @import("hostbuffer.zig").HostBuffer;
 const pjrt = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
-const CompilationOptions = @import("platform.zig").CompilationOptions;
 const Shape = @import("shape.zig").Shape;
 const Target = @import("platform.zig").Target;
 const zml_platform = @import("platform.zig");

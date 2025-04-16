@@ -7,6 +7,9 @@ const log = std.log.scoped(.mnist);
 
 pub const std_options: std.Options = .{
     .log_level = .info,
+    .log_scope_levels = &[_]std.log.ScopeLevel{
+        .{ .scope = .@"zml/module", .level = .debug },
+    },
     .logFn = asynk.logFn(std.log.defaultLog),
 };
 
