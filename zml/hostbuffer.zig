@@ -5,6 +5,7 @@ const stdx = @import("stdx");
 const Buffer = @import("buffer.zig").Buffer;
 const Data = @import("dtype.zig").Data;
 const DataType = @import("dtype.zig").DataType;
+const floats = @import("floats.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
 
@@ -290,34 +291,52 @@ pub const HostBuffer = struct {
         x: HostBuffer,
 
         pub fn format(self: PrettyPrinter, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-            _ = fmt;
-            _ = options;
-            try prettyPrint(self.x, writer);
+            const fmt_: stdx.fmt.Fmt = switch (self.x.dtype().class()) {
+                .integer => .parse(i32, fmt),
+                .float => .parse(f32, fmt),
+                else => .parse(void, fmt),
+            };
+            try prettyPrint(self.x, writer, .{ .fmt = fmt_, .options = options });
         }
     };
 
-    pub fn prettyPrint(self: HostBuffer, writer: anytype) !void {
-        return self.prettyPrintIndented(4, 0, writer);
+    pub fn prettyPrint(self: HostBuffer, writer: anytype, options: stdx.fmt.FullFormatOptions) !void {
+        return self.prettyPrintIndented(writer, 4, 0, options);
     }
 
-    fn prettyPrintIndented(self: HostBuffer, num_rows: u8, indent_level: u8, writer: anytype) !void {
-        if (self.rank() == 1) {
-            try writer.writeByteNTimes(' ', indent_level);
+    fn prettyPrintIndented(self: HostBuffer, writer: anytype, num_rows: u8, indent_level: u8, options: stdx.fmt.FullFormatOptions) !void {
+        if (self.rank() == 0) {
+            // Special case input tensor is a scalar
             return switch (self.dtype()) {
                 inline else => |dt| {
-                    const values = self.items(dt.toZigType());
-                    // Write first rows
-                    const num_cols: u32 = 12;
-                    const n: u64 = @intCast(self.dim(0));
-                    if (n <= num_cols) {
-                        try writer.print("{any},\n", .{values[0..n]});
-                    } else {
-                        const half = @divExact(num_cols, 2);
-                        try writer.print("{any}, ..., {any},\n", .{ values[0..half], values[n - half ..] });
-                    }
+                    const val: dt.toZigType() = self.items(dt.toZigType())[0];
+                    return switch (comptime dt.class()) {
+                        // Since we have custom floats, we need to explicitly convert to float32 ourselves.
+                        .float => stdx.fmt.formatFloatValue(floats.floatCast(f32, val), options, writer),
+                        .integer => stdx.fmt.formatIntValue(val, options, writer),
+                        .bool, .complex => stdx.fmt.formatAnyValue(val, options, writer),
+                    };
                 },
             };
         }
+        if (self.rank() == 1) {
+            // Print a contiguous slice of items from the buffer in one line.
+            // The number of items printed is controlled by the user through format syntax.
+            try writer.writeByteNTimes(' ', indent_level);
+            switch (self.dtype()) {
+                inline else => |dt| {
+                    const values = self.items(dt.toZigType());
+                    switch (comptime dt.class()) {
+                        .float => try stdx.fmt.formatFloatSlice(values, options, writer),
+                        .integer => try stdx.fmt.formatIntSlice(values, options, writer),
+                        .bool, .complex => try stdx.fmt.formatAnySlice(values, options, writer),
+                    }
+                },
+            }
+            try writer.writeByte('\n');
+            return;
+        }
+        // TODO: consider removing the \n if dim is 1 for this axis.
         try writer.writeByteNTimes(' ', indent_level);
         _ = try writer.write("{\n");
         defer {
@@ -330,7 +349,7 @@ pub const HostBuffer = struct {
         for (0..@min(num_rows, n)) |d| {
             const di: i64 = @intCast(d);
             const sliced_self = self.slice1d(0, .{ .start = di, .end = di + 1 }).squeeze(0);
-            try sliced_self.prettyPrintIndented(num_rows, indent_level + 2, writer);
+            try sliced_self.prettyPrintIndented(writer, num_rows, indent_level + 2, options);
         }
 
         if (n < num_rows) return;
@@ -343,7 +362,7 @@ pub const HostBuffer = struct {
         for (@max(n - num_rows, num_rows)..n) |d| {
             const di: i64 = @intCast(d);
             const sliced_self = self.slice1d(0, .{ .start = di, .end = di + 1 }).squeeze(0);
-            try sliced_self.prettyPrintIndented(num_rows, indent_level + 2, writer);
+            try sliced_self.prettyPrintIndented(writer, num_rows, indent_level + 2, options);
         }
     }
 };
