@@ -176,6 +176,7 @@ pub const Tensor = struct {
                 var res = self;
                 res._shape = self._shape.withSharding(axes_);
 
+                if (ctx.numPartitions() <= 1) return self;
                 const op = dialect.stablehlo.custom_call(
                     mlir_ctx,
                     &.{self.value()},
@@ -1535,6 +1536,25 @@ pub const Tensor = struct {
         }
 
         const to_the_end = std.math.maxInt(i64);
+
+        pub fn format(
+            self: Slice,
+            comptime fmt: []const u8,
+            options: std.fmt.FormatOptions,
+            writer: anytype,
+        ) !void {
+            _ = fmt;
+            _ = options;
+            if (self.singleton) {
+                try writer.print("[{}]", .{self.start});
+            } else if (self.end == to_the_end and self.step == 1) {
+                try writer.print("[{}..]", .{self.start});
+            } else if (self.step == 1) {
+                try writer.print("[{}..{}]", .{ self.start, self.end });
+            } else {
+                try writer.print("[{}..{}:{}]", .{ self.start, self.end, self.step });
+            }
+        }
     };
 
     /// Slices the input Tensor over the given axis using the given parameters.

@@ -24,6 +24,8 @@ test {
     std.testing.refAllDecls(Context);
 }
 
+var _active_platform: Platform = undefined;
+
 /// Every program using ZML must start with a `zml.Context.init(.{});`
 /// The ZML context contains global state to interact with the different
 /// devices available on your system.
@@ -38,6 +40,7 @@ pub const Context = struct {
                 if (runtimes.load(t)) |api| {
                     Context.apis.set(t, api);
                 } else |_| {}
+                if (t == .cuda) cuda.init();
             }
         }
     }.call);
@@ -128,7 +131,10 @@ pub const Context = struct {
     pub fn autoPlatform(self: *Context, opts: Platform.CreateOptions) Platform {
         stdx.debug.assert(prefered_targets.len == apis.values.len, "New target need to be inserted inside `zml.Context.preferred_targets`", .{});
 
-        return self.platformByPreferences(opts, &prefered_targets);
+        const p = self.platformByPreferences(opts, &prefered_targets);
+        // TODO properly propagate the platform to the callbacks
+        _active_platform = p;
+        return p;
     }
 
     /// Given a list of preferred targets to select the best Platform
@@ -230,6 +236,7 @@ const CustomCall = struct {
     fn hostBufferCallback(call_frame: *pjrt.ffi.CallFrame) callconv(.C) ?*pjrt.ffi.Error {
         if (call_frame.registeringHook()) return null;
 
+        // TODO correctly pass the callback w/o embedding ptr in MLIR
         const err = "malformed zmlHostBufferCallback custom call";
         const callback_attr = call_frame.attrs.getByName(.scalar, "callback") orelse @panic(err);
         std.debug.assert(callback_attr.dtype == .u64);
@@ -241,39 +248,87 @@ const CustomCall = struct {
 
         const tags_arr = call_frame.attrs.getByName(.array, "__tags") orelse @panic(err);
         std.debug.assert(tags_arr.dtype == .i64);
-        var tags = tags_arr.slice([*:0]const u8);
+        const tags = tags_arr.slice([*:0]const u8);
 
         const input_buffers = stdx.stackSlice(8, HostBuffer, call_frame.args.len);
-        for (input_buffers, 0..) |*b, i| {
-            b.* = hostBufferFromPinnedBuffer(call_frame.args.get(i));
-            for (b._shape._tags.slice()) |*t| {
-                t.* = tags[0];
-                tags = tags[1..];
-            }
-        }
-
         const output_buffers = stdx.stackSlice(8, HostBuffer, call_frame.results.len);
-        for (output_buffers, 0..) |*b, i| {
-            b.* = hostBufferFromPinnedBuffer(call_frame.results.get(i));
-            for (b._shape._tags.slice()) |*t| {
-                t.* = tags[0];
-                tags = tags[1..];
+
+        // TODO correctly pass the platform w/o global
+        const platform = _active_platform;
+        if (platform.target == .cpu) {
+            for (input_buffers, 0..) |*b, i| {
+                b.* = hostViewOfDeviceBuffer(call_frame.args.get(i));
             }
-            // Note: this seems to be a bug in XLA.
-            // The pinned memory is created in one thread, and the callback is called on another thread.
-            // It seems the memory protection information is not correctly propagated through all threads.
-            // So we need to explicitly enable writing here.
-            // TODO: fix this, we don't want to do syscalls on every callback call.
-            const data_ptr: usize = @intFromPtr(b.data.ptr);
-            const page_off = data_ptr % std.heap.page_size_min;
-            const page_start: [*]align(std.heap.page_size_min) u8 = @ptrFromInt(data_ptr - page_off);
-            std.posix.mprotect(page_start[0 .. b.data.len + page_off], std.posix.PROT.WRITE) catch |e| {
-                log.err("Failed to protect memory of buffer {}: {}", .{ b, e });
-            };
+            for (output_buffers, 0..) |*b, i| {
+                b.* = hostViewOfDeviceBuffer(call_frame.results.get(i));
+            }
+            applyTags(tags, input_buffers, output_buffers);
+
+            callback(user_ctx, input_buffers, output_buffers);
+            return null;
         }
 
+        if (platform.target != .cuda) @panic("hostBufferCallback are only supported on cpu and cuda for now");
+        const stream = call_frame.*.api.stream(call_frame.ctx);
+        for (input_buffers, 0..) |*b, i| {
+            const d = call_frame.args.get(i);
+            b.* = HostBuffer.empty(std.heap.smp_allocator, getShape(d)) catch @panic("OOM");
+            const memcpy_err = cuda.memcpyAsync(@constCast(b.data.ptr), d.data, b.shape().byteSize(), .device_to_host, stream);
+            std.debug.assert(memcpy_err == 0);
+        }
+        for (output_buffers, 0..) |*b, i| {
+            const d = call_frame.results.get(i);
+            b.* = HostBuffer.empty(std.heap.smp_allocator, getShape(d)) catch @panic("OOM");
+        }
+        applyTags(tags, input_buffers, output_buffers);
+
+        const d2h_err = cuda.streamSynchronize(stream);
+        std.debug.assert(d2h_err == 0);
         callback(user_ctx, input_buffers, output_buffers);
+
+        for (output_buffers, 0..) |*b, i| {
+            const d = call_frame.args.get(i);
+            b.deinit(std.heap.smp_allocator);
+            const memcpy_err = cuda.memcpyAsync(d.data, b.data.ptr, b.shape().byteSize(), .host_to_device, stream);
+            std.debug.assert(memcpy_err == 0);
+        }
+        for (input_buffers) |*b| {
+            b.deinit(std.heap.smp_allocator);
+        }
+        const h2d_err = cuda.streamSynchronize(stream);
+        std.debug.assert(h2d_err == 0);
+
         return null;
+    }
+};
+
+const cuda = struct {
+    var memcpyAsync: MemcpyAsync = @ptrFromInt(0xdeadc00da00);
+    var streamSynchronize: StreamSynchronize = @ptrFromInt(0xdeadc00da00);
+
+    pub const MemcpyKind = enum(c_int) {
+        host_to_host = 0,
+        host_to_device = 1,
+        device_to_host = 2,
+        device_to_device = 3,
+    };
+
+    const MemcpyAsync = *const fn (dst: *anyopaque, src: *const anyopaque, count: usize, kind: MemcpyKind, stream: ?*pjrt.ffi.Stream) callconv(.C) c_int;
+    const StreamSynchronize = *const fn (stream: ?*pjrt.ffi.Stream) callconv(.C) c_int;
+
+    pub fn init() void {
+        var cudart = std.DynLib.open("libcudart.so.12") catch {
+            log.err("cudart not found, callback will segfault", .{});
+            return;
+        };
+        defer cudart.close();
+
+        memcpyAsync = cudart.lookup(MemcpyAsync, "cudaMemcpyAsync") orelse {
+            @panic("cudaMemcpyAsync not found");
+        };
+        streamSynchronize = cudart.lookup(StreamSynchronize, "cudaStreamSynchronize") orelse {
+            @panic("cudaStreamSynchronize not found");
+        };
     }
 };
 
@@ -288,13 +343,36 @@ fn getShape(buffer_desc: *const pjrt.ffi.Buffer) Shape {
     return Shape.init(buffer_desc.dims(), dt);
 }
 
-/// Create a HostBuffer from a ffi description of a buffer.
-/// Normally the ffi describe device buffer but we assume they are located in pinned memory,
-/// and therefore the data pointer is readable both from host and from device.
-fn hostBufferFromPinnedBuffer(buffer_desc: *const pjrt.ffi.Buffer) HostBuffer {
+/// Create a Device from a ffi description of a buffer.
+/// Normally the ffi describe device buffer but when platform == cpu it's the same addresspace
+fn hostViewOfDeviceBuffer(buffer_desc: *const pjrt.ffi.Buffer) HostBuffer {
     const buffer_shape = getShape(buffer_desc);
     return HostBuffer.fromBytes(
         buffer_shape,
         buffer_desc.data[0..buffer_shape.byteSize()],
     );
+}
+
+fn deviceBuffer(platform: Platform, buffer_desc: *const pjrt.ffi.Buffer, stream: *const pjrt.ffi.Stream) Buffer {
+    const buffer_shape = getShape(buffer_desc);
+    return Buffer.asViewOfDeviceBuffer(platform, buffer_shape, stream, buffer_desc.data);
+}
+
+fn applyTags(flat_tags: []const [*:0]const u8, in: []HostBuffer, out: []HostBuffer) void {
+    var tags = flat_tags;
+    for (in) |*b| {
+        for (b._shape._tags.slice()) |*t| {
+            t.* = tags[0];
+            tags = tags[1..];
+        }
+    }
+
+    for (out) |*b| {
+        for (b._shape._tags.slice()) |*t| {
+            t.* = tags[0];
+            tags = tags[1..];
+        }
+    }
+
+    std.debug.assert(tags.len == 0);
 }
