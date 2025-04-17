@@ -190,6 +190,24 @@ pub const ExecutionContext = opaque {
         };
     }
 
+    pub fn getDeviceOrdinal(self: *const ExecutionContext, api: *const Api) ApiError!i32 {
+        var ret = pjrtStruct(c.XLA_FFI_DeviceOrdinal_Get_Args{
+            .ctx = @constCast(self.inner()),
+        });
+        const result = api.inner().XLA_FFI_DeviceOrdinal_Get.?(&ret);
+
+        if (result) |ffi_error| {
+            const err = Error.fromInner(ffi_error);
+            defer err.destroy(api);
+            log.err("[ExecutionContext.getDeviceOrdinal] {s}", .{err.getMessage(api)});
+
+            // TODO(Corentin): Retrieve error code from Error when implemented in XLA.
+            return error.Unknown;
+        }
+
+        return ret.device_ordinal;
+    }
+
     pub fn scheduleTask(self: *const ExecutionContext, api: *const Api, task: *const Task, data: *anyopaque) ApiError!void {
         var ret = pjrtStruct(c.XLA_FFI_ThreadPool_Schedule_Args{
             .ctx = @constCast(self.inner()),
@@ -217,8 +235,6 @@ pub const ExecutionContext = opaque {
             .type_id = id,
         };
     }
-
-    // TODO getDeviceOrdinal()
 };
 
 const TypeId = extern struct {

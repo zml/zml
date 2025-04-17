@@ -44,23 +44,6 @@ pub const Buffer = struct {
         }
     };
 
-    pub const Shard = struct {
-        api: *const pjrt.Api,
-        buffer: *pjrt.Buffer,
-        ready_event: ?*pjrt.Event = null,
-        ready: bool = false,
-
-        pub fn awaitt(self: *Shard) !void {
-            if (self.ready) {
-                return;
-            }
-            if (self.ready_event orelse self.buffer.getReadyEvent(self.api)) |ev| {
-                try ev.awaitt(self.api);
-            }
-            self.ready = true;
-        }
-    };
-
     _shape: Shape,
     _api: *const pjrt.Api,
     _shards: Shards,
@@ -279,6 +262,22 @@ pub const Buffer = struct {
         return res;
     }
 
+    pub fn getValueFromDataInMemory(self: Buffer, T: type) !T {
+        stdx.debug.assert(self._shape.byteSize() == @sizeOf(T), "Buffer {} has {d} bytes of data, can't load it to a {s} with {d} bytes", .{ self, self._shape.byteSize(), @typeName(T), @sizeOf(T) });
+        const data = try self.dataInMemory();
+        const value = std.mem.bytesAsValue(T, @constCast(data));
+        return value.*;
+    }
+
+    pub fn dataInMemory(self: Buffer) ![]const u8 {
+        const shard_buffer = self._shards.get(0);
+        const opaqueDataPointer = try shard_buffer.getOpaqueDeviceMemoryDataPointer(self._api);
+        const sizeInbytes = try shard_buffer.getOnDeviceSizeInBytes(self._api);
+        const data = @as([*]const u8, @ptrFromInt(@intFromPtr(opaqueDataPointer)));
+        const end: usize = @intCast(sizeInbytes);
+        return data[0..end];
+    }
+
     /// Copies the content of the Buffer back to host, in the given buffer,
     /// and return a new `HostBuffer` object with the same shape.
     /// The returned `HostBuffer` doesn't own the memory.
@@ -358,7 +357,8 @@ pub const Buffer = struct {
     }
 
     pub fn copyToMemory(self: Buffer, platform: Platform, kind: Memory) !Buffer {
-        const memories = platform.pjrt_client.addressableMemories(platform.pjrt_api); // todo : adresse via device
+        const device = try self._shards.get(0).getDevice(self._api);
+        const memories = device.addressableMemories(self._api);
         var selected_mem: *const pjrt.Memory = undefined;
         for (memories) |mem| {
             if (mem.kind(platform.pjrt_api) == kind.toPjrtMemory()) {

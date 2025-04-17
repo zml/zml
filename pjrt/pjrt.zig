@@ -414,7 +414,7 @@ pub const Client = opaque {
         dims: []const i64,
         element_type: BufferType,
         layout: MemoryLayout,
-        device: *const Device,
+        memory: *const Memory,
         on_delete_callback: *const fn (device_buffer_ptr: ?*anyopaque, ctx: ?*anyopaque) callconv(.C) void = &struct {
             fn call(_: ?*anyopaque, _: ?*anyopaque) callconv(.C) void {}
         }.call,
@@ -431,7 +431,7 @@ pub const Client = opaque {
             .num_dims = args.dims.len,
             .element_type = @intFromEnum(args.element_type),
             .layout = @ptrCast(@constCast(&layout)),
-            .device = @ptrCast(@constCast(args.device)),
+            .memory = @ptrCast(@constCast(args.memory)),
             .on_delete_callback = args.on_delete_callback,
             .on_delete_callback_arg = args.on_delete_callback_arg,
             .stream = if (args.stream) |stream| stream else 0,
@@ -852,10 +852,10 @@ pub const Buffer = opaque {
     }
 
     pub fn getOpaqueDeviceMemoryDataPointer(self: *const Buffer, api: *const Api) ApiError!*anyopaque {
-        const ret = try api.call(.PJRT_Buffer_OpaqueDeviceMemoryDataPointer, .{
+        const ret = try api.call(.PJRT_Buffer_UnsafePointer, .{
             .buffer = self.inner(),
         });
-        return ret.device_memory_ptr.?;
+        return @ptrFromInt(ret.buffer_pointer);
     }
 
     pub fn copyRawToHost(self: *const Buffer, api: *const Api, dst: []u8, offset: i64) ApiError!?*Event {

@@ -299,7 +299,7 @@ pub fn Exe(ArgsT: type, ReturnT: type) type {
             const type_id = try ffi.registerTypeId(pjrt_api, type_name);
 
             const user_data: *anyopaque = @ptrCast(@constCast(value));
-            log.info("[FFI] Attach {any}@{x} of type {d} on {any}\n", .{ value, user_data, type_id, self.inner._context.? });
+            log.info("[FFI] Attach {any}@{x} of type {d} on {any}", .{ value, user_data, type_id, self.inner._context.? });
             try ffi.addUserData(pjrt_api, self.inner._context.?, .{ .type_id = type_id, .user_data = user_data });
         }
 

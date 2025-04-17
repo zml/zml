@@ -25,7 +25,7 @@ copy_to_directory(
 cc_import(
     name = "libpjrt_cuda",
     data = [":sandbox"],
-    shared_library = "@zml//runtimes/cuda:libpjrt_cuda.so",
+    shared_library = "libpjrt_cuda.so",
     add_needed = ["libzmlxcuda.so.0"],
     rename_dynamic_symbols = {
         "dlopen": "zmlxcuda_dlopen",

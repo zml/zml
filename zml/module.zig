@@ -196,6 +196,9 @@ pub const CompilationContext = struct {
             pjrt_location = try std.fs.path.joinZ(arena, &.{ module_dir.?, "module.pjrt" });
         }
 
+        log.info("******** ZML generated MLIR ********", .{});
+        log.info("{}", .{module.op().mlirFormatter(.{})});
+
         const loaded_executable: *pjrt.LoadedExecutable = blk: {
             if (pjrt_location) |pjrt_loc| {
                 if (loadPjrtExecutable(arena, self._platform, pjrt_loc)) |exe| {
@@ -219,9 +222,6 @@ pub const CompilationContext = struct {
             }
             break :blk loaded_executable;
         };
-
-        log.warn("******** ZML generated MLIR ********", .{});
-        log.warn("{}", .{module.op().mlirFormatter(.{})});
 
         if (timer) |*t| {
             const time_ms = @divFloor(t.lap(), std.time.ns_per_ms);

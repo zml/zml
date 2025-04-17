@@ -18,7 +18,7 @@ pub const AddOp = struct {
         return .{ a, b };
     }
 
-    pub fn call(self: *Self, a: zml.HostBuffer, _: zml.HostBuffer) !zml.HostBuffer {
+    pub fn call(self: *Self, a: zml.Buffer, _: zml.Buffer) !zml.Buffer {
         _ = self; // autofix
         log.info("mem a: {any}", .{a.items(f32)});
         return a;
@@ -34,13 +34,12 @@ pub const LogResultOp = struct {
 
     _platform: *const zml.Platform,
 
-    pub fn beforeCustomCall(result: zml.Tensor) zml.Tensor {
-        return result;
-    }
+    // pub fn beforeCustomCall(result: zml.Tensor) zml.Tensor {
+    //     return result;
+    // }
 
-    pub fn call(self: *Self, result: zml.HostBuffer) !zml.HostBuffer {
-        _ = self; // autofix
-        log.info("LogResultOp mem r: {any}", .{result.items(f32)[0]});
+    pub fn call(self: *Self, result: zml.Buffer) !zml.Buffer {
+        log.info("LogResultOp result: {*}", .{try result._shards.get(0).getOpaqueDeviceMemoryDataPointer(self._platform.pjrt_api)});
         return result;
     }
 
@@ -70,9 +69,19 @@ pub const LogValuesVoidOp = struct {
 const Layer = struct {
     pub fn forward(_: Layer, a: zml.Tensor, b: zml.Tensor) zml.Tensor {
         // const result = zml.custom_call(AddOp, .{ a.toMemory(.host_pinned), b.toMemory(.host_pinned) });
-        const result = a.add(b);
+        // const a_ = a.toMemory(.host_pinned);
+        // const b_ = b.toMemory(.host_pinned);
+        const a_ = a.toMemory(.host_pinned);
+        const b_ = b.toMemory(.host_pinned);
+        const c = a_.clamp(b_, a_);
+        const d = c.toMemory(.device);
+        const on_device = a.add(d).toMemory(.host_pinned);
+        // var result = zml.custom_call(LogResultOp, .{on_device});
+        // const result = on_device.toMemory(.device).add(b);
         // zml.custom_call(LogValuesVoidOp, .{ result, a, b });
-        return zml.custom_call(LogResultOp, .{result});
+        // var result = a.add(b).toMemory(.host_pinned);
+        var result = zml.custom_call(LogResultOp, .{on_device});
+        return result.add(zml.Tensor.scalar(5, .f32));
     }
 };
 
@@ -147,6 +156,8 @@ pub fn asyncMain() !void {
 
     // call our executable module
     var result: zml.Buffer = executable.call(.{ input_buffer_a, input_buffer_b });
+    const result_mem = result.getMemory();
+    std.debug.print("<<< Result memory: {any}\n", .{result_mem.kind(platform.pjrt_api)});
     defer result.deinit();
 
     // fetch the result to CPU memory
