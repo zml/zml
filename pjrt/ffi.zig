@@ -88,10 +88,12 @@ fn TransmuteMixin(comptime T: type, comptime InnerT: type) type {
     };
 }
 
+pub const Stream = opaque {};
+
 pub const Api = opaque {
     pub const inner = TransmuteMixin(Api, c.XLA_FFI_Api).to;
 
-    pub fn getStream(self: *const Api, context: ?*ExecutionContext) ApiError!*anyopaque {
+    pub fn stream(self: *const Api, context: ?*ExecutionContext) *Stream {
         var ret = pjrtStruct(c.XLA_FFI_Stream_Get_Args{
             .ctx = if (context) |ctx| ctx.inner() else null,
         });
@@ -102,11 +104,10 @@ pub const Api = opaque {
             defer err.destroy(self);
             log.err("[Api.getStream] {s}", .{err.getMessage(self)});
 
-            // TODO(Corentin): Retrieve error code from Error when implemented in XLA.
-            return error.Unknown;
+            @panic("failed to get stream");
         }
 
-        return ret.stream.?;
+        return @ptrCast(ret.stream.?);
     }
 
     pub fn allocateDeviceMemory(self: *const Api, context: ?*ExecutionContext, size: usize, alignment: usize) ApiError!*anyopaque {
@@ -375,8 +376,8 @@ pub const Attrs = extern struct {
 pub const CallFrame = extern struct {
     struct_size: usize,
     extension_start: ?*ExtensionBase,
-    api: ?*const Api,
-    ctx: ?*const ExecutionContext,
+    api: *const Api,
+    ctx: ?*ExecutionContext,
     stage: ExecutionStage,
     args: Args,
     results: Rets,

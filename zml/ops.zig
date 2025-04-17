@@ -822,7 +822,7 @@ pub fn addHostCallback(
 
     const values = stdx.stackSlice(8, mlir.Value, inputs.len);
     for (inputs, values) |i, *v| {
-        v.* = ctx.getValue(i.toMemory(.host_pinned));
+        v.* = ctx.getValue(i);
     }
     const res_types = stdx.stackSlice(8, mlir.Type, output_shapes.len);
     for (res_types, output_shapes) |*r, o| {
@@ -846,7 +846,7 @@ pub fn addHostCallback(
 
     const res = ctx.allocator().alloc(Tensor, output_shapes.len) catch @panic("OOM");
     for (res, output_shapes, 0..) |*r, o, i| {
-        r.* = Tensor._result(o, op.result(i)).toMemory(.device);
+        r.* = Tensor._result(o, op.result(i));
     }
 
     return res;
