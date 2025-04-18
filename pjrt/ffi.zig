@@ -254,11 +254,19 @@ pub const DataType = enum(c.XLA_FFI_DataType) {
     f8e4m3fnuz = c.XLA_FFI_DataType_F8E4M3FNUZ,
 };
 
+pub const DevicePtr = enum(usize) {
+    _,
+
+    pub fn asPtr(ptr: DevicePtr) [*]u8 {
+        return @ptrFromInt(@intFromEnum(ptr));
+    }
+};
+
 pub const Buffer = extern struct {
     struct_size: usize,
     extension_start: ?*c.XLA_FFI_Extension_Base,
     dtype: DataType,
-    data: [*]u8,
+    data: DevicePtr,
     rank: u64,
     _dims: [*]const i64,
 
@@ -290,9 +298,8 @@ pub const Args = extern struct {
         buffer = c.XLA_FFI_ArgType_BUFFER,
     };
 
-    pub fn get(self: Args, i: usize) *const Buffer {
-        std.debug.assert(self.types[0..self.len][i] == .buffer);
-        return self.ptr[0..self.len][i];
+    pub fn buffers(self: Args) []*const Buffer {
+        return self.ptr[0..self.len];
     }
 };
 
@@ -307,9 +314,8 @@ pub const Rets = extern struct {
         buffer = c.XLA_FFI_RetType_BUFFER,
     };
 
-    pub fn get(self: Rets, i: usize) *const Buffer {
-        std.debug.assert(self.types[0..self.len][i] == .buffer);
-        return self.ptr[0..self.len][i];
+    pub fn buffers(self: Rets) []*const Buffer {
+        return self.ptr[0..self.len];
     }
 };
 

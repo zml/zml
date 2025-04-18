@@ -250,60 +250,66 @@ const CustomCall = struct {
         std.debug.assert(tags_arr.dtype == .i64);
         const tags = tags_arr.slice([*:0]const u8);
 
-        const input_buffers = stdx.stackSlice(8, HostBuffer, call_frame.args.len);
-        const output_buffers = stdx.stackSlice(8, HostBuffer, call_frame.results.len);
+        const host_inputs = stdx.stackSlice(8, HostBuffer, call_frame.args.len);
+        const host_outputs = stdx.stackSlice(8, HostBuffer, call_frame.results.len);
 
         // TODO correctly pass the platform w/o global
         const platform = _active_platform;
         if (platform.target == .cpu) {
-            for (input_buffers, 0..) |*b, i| {
-                b.* = hostViewOfDeviceBuffer(call_frame.args.get(i));
+            for (host_inputs, call_frame.args.buffers()) |*host, device| {
+                host.* = hostViewOfDeviceBuffer(device);
             }
-            for (output_buffers, 0..) |*b, i| {
-                b.* = hostViewOfDeviceBuffer(call_frame.results.get(i));
+            for (host_outputs, call_frame.results.buffers()) |*host, device| {
+                host.* = hostViewOfDeviceBuffer(device);
             }
-            applyTags(tags, input_buffers, output_buffers);
+            applyTags(tags, host_inputs, host_outputs);
 
-            callback(user_ctx, input_buffers, output_buffers);
+            callback(user_ctx, host_inputs, host_outputs);
             return null;
         }
 
         if (platform.target != .cuda) @panic("hostBufferCallback are only supported on cpu and cuda for now");
         const stream = call_frame.*.api.stream(call_frame.ctx);
-        for (input_buffers, 0..) |*b, i| {
-            const d = call_frame.args.get(i);
-            b.* = HostBuffer.empty(std.heap.smp_allocator, getShape(d)) catch @panic("OOM");
-            const memcpy_err = cuda.memcpyAsync(@constCast(b.data.ptr), d.data, b.shape().byteSize(), .device_to_host, stream);
-            std.debug.assert(memcpy_err == 0);
-        }
-        for (output_buffers, 0..) |*b, i| {
-            const d = call_frame.results.get(i);
-            b.* = HostBuffer.empty(std.heap.smp_allocator, getShape(d)) catch @panic("OOM");
-        }
-        applyTags(tags, input_buffers, output_buffers);
-
         const d2h_err = cuda.streamSynchronize(stream);
         std.debug.assert(d2h_err == 0);
-        callback(user_ctx, input_buffers, output_buffers);
+        for (host_inputs, call_frame.args.buffers()) |*host, device| {
+            host.* = HostBuffer.empty(std.heap.smp_allocator, getShape(device)) catch @panic("OOM");
+            // log.warn("Readind device memory from {*} to {*}", .{ device.data.asPtr(), b.data });
+            cuda.memcpyToHostBlocking(@constCast(host.data), device.data);
+            // log.info("input {} {}: {}", .{ i, b.shape(), b.pretty() });
+        }
 
-        for (output_buffers, 0..) |*b, i| {
-            const d = call_frame.args.get(i);
-            b.deinit(std.heap.smp_allocator);
-            const memcpy_err = cuda.memcpyAsync(d.data, b.data.ptr, b.shape().byteSize(), .host_to_device, stream);
-            std.debug.assert(memcpy_err == 0);
+        init_host_outputs: for (host_outputs, call_frame.results.buffers()) |*host, device| {
+            // TODO: in case of input/output aliasing we don't need to allocate here.
+            // This information can be inferred from the data pointers of the inputs.
+            for (host_inputs, call_frame.args.buffers()) |host_input, device_input| {
+                if (device_input.data == device.data) {
+                    host.* = host_input;
+                    log.warn("Aliased host buffer for output: {*}", .{host.data});
+                    continue :init_host_outputs;
+                }
+            }
+            host.* = HostBuffer.empty(std.heap.smp_allocator, getShape(device)) catch @panic("OOM");
+            // log.warn("Allocated host buffer for output: {*}", .{host.data});
         }
-        for (input_buffers) |*b| {
-            b.deinit(std.heap.smp_allocator);
+        applyTags(tags, host_inputs, host_outputs);
+
+        callback(user_ctx, host_inputs, host_outputs);
+
+        for (host_outputs, call_frame.results.buffers()) |host, device| {
+            // log.warn("Writing from {*} to device memory {*}", .{ device.data, host.data.asPtr() });
+            cuda.memcpyToDeviceBlocking(device.data, host.data);
         }
-        const h2d_err = cuda.streamSynchronize(stream);
-        std.debug.assert(h2d_err == 0);
+        for (host_inputs) |*b| b.deinit(std.heap.smp_allocator);
+        for (host_outputs) |*b| b.deinit(std.heap.smp_allocator);
 
         return null;
     }
 };
 
 const cuda = struct {
-    var memcpyAsync: MemcpyAsync = @ptrFromInt(0xdeadc00da00);
+    var _memcpyAsync: MemcpyAsync = @ptrFromInt(0xdeadc00da00);
+    var _memcpyBlocking: MemcpyBlocking = @ptrFromInt(0xdeadc00da00);
     var streamSynchronize: StreamSynchronize = @ptrFromInt(0xdeadc00da00);
 
     pub const MemcpyKind = enum(c_int) {
@@ -311,9 +317,11 @@ const cuda = struct {
         host_to_device = 1,
         device_to_host = 2,
         device_to_device = 3,
+        inferred = 4,
     };
 
     const MemcpyAsync = *const fn (dst: *anyopaque, src: *const anyopaque, count: usize, kind: MemcpyKind, stream: ?*pjrt.ffi.Stream) callconv(.C) c_int;
+    const MemcpyBlocking = *const fn (dst: *anyopaque, src: *const anyopaque, count: usize, kind: MemcpyKind) callconv(.C) c_int;
     const StreamSynchronize = *const fn (stream: ?*pjrt.ffi.Stream) callconv(.C) c_int;
 
     pub fn init() void {
@@ -323,12 +331,36 @@ const cuda = struct {
         };
         defer cudart.close();
 
-        memcpyAsync = cudart.lookup(MemcpyAsync, "cudaMemcpyAsync") orelse {
+        _memcpyAsync = cudart.lookup(MemcpyAsync, "cudaMemcpyAsync") orelse {
             @panic("cudaMemcpyAsync not found");
+        };
+        _memcpyBlocking = cudart.lookup(MemcpyBlocking, "cudaMemcpy") orelse {
+            @panic("cudaMemcpy not found");
         };
         streamSynchronize = cudart.lookup(StreamSynchronize, "cudaStreamSynchronize") orelse {
             @panic("cudaStreamSynchronize not found");
         };
+    }
+
+    pub fn memcpyToHostBlocking(dst: []u8, src: pjrt.ffi.DevicePtr) void {
+        const err = _memcpyBlocking(dst.ptr, src.asPtr(), dst.len, .device_to_host);
+        check(err);
+    }
+
+    pub fn memcpyToDeviceBlocking(dst: pjrt.ffi.DevicePtr, src: []const u8) void {
+        const err = _memcpyBlocking(dst.asPtr(), src.ptr, src.len, .host_to_device);
+        check(err);
+    }
+
+    pub fn memcpyToDeviceAsync(dst: pjrt.ffi.DevicePtr, src: []const u8, stream: ?*pjrt.ffi.Stream) void {
+        const err = _memcpyAsync(dst.asPtr(), src.ptr, src.len, .host_to_device, stream);
+        check(err);
+    }
+
+    pub fn check(err: c_int) void {
+        if (err == 0) return;
+        log.err("CUDA ERROR {d}", .{err});
+        @panic("CUDA error");
     }
 };
 
@@ -349,7 +381,7 @@ fn hostViewOfDeviceBuffer(buffer_desc: *const pjrt.ffi.Buffer) HostBuffer {
     const buffer_shape = getShape(buffer_desc);
     return HostBuffer.fromBytes(
         buffer_shape,
-        buffer_desc.data[0..buffer_shape.byteSize()],
+        buffer_desc.data.asPtr()[0..buffer_shape.byteSize()],
     );
 }
 
