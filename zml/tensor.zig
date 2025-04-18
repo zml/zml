@@ -3826,6 +3826,7 @@ pub const Tensor = struct {
     /// Only for debug purpose, it inserts device to host synchronization
     /// so it will slow down the program execution.
     pub fn print(input: Tensor) Tensor {
+        // TODO: find a way of doing print that doesn't involve a H2D copy.
         return ops.addHostCallback(
             &printCallback,
             null,
@@ -3836,7 +3837,6 @@ pub const Tensor = struct {
     }
 
     fn printCallback(_: ?*anyopaque, inputs: []const HostBuffer, outputs: []const HostBuffer) void {
-        // TODO: find a way of doing print that doesn't involve a H2D copy.
         const host_buffer = inputs[0];
         std.log.defaultLog(.info, .zml, "Device buffer: {}: {}", .{ host_buffer.shape(), host_buffer.pretty() });
         // This is true because of the operand aliases.

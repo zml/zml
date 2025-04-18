@@ -821,12 +821,17 @@ pub fn addHostCallback(
     });
 
     const values = stdx.stackSlice(8, mlir.Value, inputs.len);
-    for (inputs, values) |i, *v| {
-        v.* = ctx.getValue(i);
+    const operands_layouts = stdx.stackSlice(8, []const usize, inputs.len);
+    for (inputs, 0..) |input, i| {
+        values[i] = ctx.getValue(input);
+        operands_layouts[i] = minorToMajor(input.rank());
     }
+
     const res_types = stdx.stackSlice(8, mlir.Type, output_shapes.len);
-    for (res_types, output_shapes) |*r, o| {
-        r.* = mlir.ext.RankedTensorType.fromShape(mlir_ctx, o).as(mlir.Type);
+    const results_layouts = stdx.stackSlice(8, []const usize, output_shapes.len);
+    for (output_shapes, 0..) |o, i| {
+        res_types[i] = mlir.ext.RankedTensorType.fromShape(mlir_ctx, o).as(mlir.Type);
+        results_layouts[i] = minorToMajor(o.rank());
     }
 
     const loc = ctx.mlirCtx().location(@src());
@@ -838,6 +843,8 @@ pub fn addHostCallback(
             .api_version = .typed_ffi,
             .backend_config = backend_config,
             .has_side_effect = opts.has_side_effect,
+            .operand_layouts = operands_layouts,
+            .result_layouts = results_layouts,
             .output_operand_aliases = opts.output_operand_aliases,
         },
         res_types,
@@ -846,7 +853,7 @@ pub fn addHostCallback(
 
     const res = ctx.allocator().alloc(Tensor, output_shapes.len) catch @panic("OOM");
     for (res, output_shapes, 0..) |*r, o, i| {
-        r.* = Tensor._result(o, op.result(i));
+        r.* = Tensor._result(o, op.result(i)); //.toMemory(.device);
     }
 
     return res;
