@@ -262,7 +262,7 @@ const CustomCall = struct {
             for (host_outputs, call_frame.results.buffers()) |*host, device| {
                 host.* = hostViewOfDeviceBuffer(device);
             }
-            applyTags(tags, host_inputs, host_outputs);
+            copyTags(tags, host_inputs, host_outputs);
 
             callback(user_ctx, host_inputs, host_outputs);
             return null;
@@ -274,9 +274,9 @@ const CustomCall = struct {
         std.debug.assert(d2h_err == 0);
         for (host_inputs, call_frame.args.buffers()) |*host, device| {
             host.* = HostBuffer.empty(std.heap.smp_allocator, getShape(device)) catch @panic("OOM");
-            // log.warn("Readind device memory from {*} to {*}", .{ device.data.asPtr(), b.data });
+            // log.warn("Readind device memory from {*} to {*}", .{ device.data.asPtr(), host.data });
             cuda.memcpyToHostBlocking(@constCast(host.data), device.data);
-            // log.info("input {} {}: {}", .{ i, b.shape(), b.pretty() });
+            // log.info("input {} {}: {}", .{ i, host.shape(), host.pretty() });
         }
 
         init_host_outputs: for (host_outputs, call_frame.results.buffers()) |*host, device| {
@@ -285,14 +285,15 @@ const CustomCall = struct {
             for (host_inputs, call_frame.args.buffers()) |host_input, device_input| {
                 if (device_input.data == device.data) {
                     host.* = host_input;
-                    log.warn("Aliased host buffer for output: {*}", .{host.data});
+                    std.debug.assert(host_input.shape().eql(getShape(device)));
+                    // log.warn("Aliased host buffer for output: {*}", .{host.data});
                     continue :init_host_outputs;
                 }
             }
             host.* = HostBuffer.empty(std.heap.smp_allocator, getShape(device)) catch @panic("OOM");
             // log.warn("Allocated host buffer for output: {*}", .{host.data});
         }
-        applyTags(tags, host_inputs, host_outputs);
+        copyTags(tags, host_inputs, host_outputs);
 
         callback(user_ctx, host_inputs, host_outputs);
 
@@ -390,21 +391,19 @@ fn deviceBuffer(platform: Platform, buffer_desc: *const pjrt.ffi.Buffer, stream:
     return Buffer.asViewOfDeviceBuffer(platform, buffer_shape, stream, buffer_desc.data);
 }
 
-fn applyTags(flat_tags: []const [*:0]const u8, in: []HostBuffer, out: []HostBuffer) void {
-    var tags = flat_tags;
+fn copyTags(flat_tags: []const [*:0]const u8, in: []HostBuffer, out: []HostBuffer) void {
+    var tags = flat_tags.ptr;
+    var num_read: usize = 0;
     for (in) |*b| {
-        for (b._shape._tags.slice()) |*t| {
-            t.* = tags[0];
-            tags = tags[1..];
-        }
+        const r = b.rank();
+        b._shape._tags.buffer = tags[0..8].*;
+        tags = tags[r..];
+        num_read += r;
     }
-
     for (out) |*b| {
-        for (b._shape._tags.slice()) |*t| {
-            t.* = tags[0];
-            tags = tags[1..];
-        }
+        const r = b.rank();
+        b._shape._tags.buffer = tags[0..8].*;
+        tags = tags[r..];
+        num_read += r;
     }
-
-    std.debug.assert(tags.len == 0);
 }
