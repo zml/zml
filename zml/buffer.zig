@@ -70,16 +70,20 @@ pub const Buffer = struct {
 
     /// Copies the content of the given buffer from host memory to the accelerator memory.
     pub fn from(platform: Platform, host_buffer: HostBuffer) !Buffer {
+        return fromHostWithPadding(platform, host_buffer, host_buffer.shape());
+    }
+
+    pub fn fromHostWithPadding(platform: Platform, host_buffer: HostBuffer, padded_shape: Shape) !Buffer {
         var res: Buffer = .{
             ._api = platform.pjrt_api,
-            ._shape = host_buffer.shape(),
+            ._shape = padded_shape,
             ._shards = .{},
         };
 
         // We shard only on the first axis so that the chunks are still contiguous.
         // TODO: support more advanced sharding specs
         stdx.debug.assert(platform.sharding().num_replicas == 1, "ZML doesn't support num_replicas > 1 for now, got: {}", .{platform.sharding()});
-        const sharding_ax: ?u3 = std.simd.firstTrue(host_buffer.shape()._sharding_info);
+        const sharding_ax: ?u3 = std.simd.firstTrue(padded_shape._sharding_info);
         const n_partitions = platform.sharding().num_partitions;
         const chunk_size = if (sharding_ax) |ax| cs: {
             // This kind of sharding error should be detected earlier on.
@@ -87,7 +91,7 @@ pub const Buffer = struct {
             break :cs @divExact(host_buffer.dim(ax), n_partitions);
         } else 0;
 
-        const buffer_type = bufferTypeFromDtype(host_buffer.shape().dtype());
+        const buffer_type = bufferTypeFromDtype(padded_shape.dtype());
         const byte_strides = host_buffer.strides();
 
         var frames: std.BoundedArray(asynk.Frame(pjrt.Client.bufferFromHostBuffer), MAX_NUM_SHARDS) = .{};
@@ -105,7 +109,7 @@ pub const Buffer = struct {
                 pjrt.Client.BufferFromHostBufferArgs{
                     .data = buf.data,
                     .buffer_type = buffer_type,
-                    .dims = buf.shape().dims(),
+                    .dims = padded_shape.dims(),
                     .byte_strides = byte_strides,
                     .device = devices[i],
                     .host_buffer_semantics = .ImmutableOnlyDuringCall,
@@ -363,7 +367,7 @@ pub const Buffer = struct {
     }
 };
 
-pub fn bufferTypeFromDtype(dt: DataType) pjrt.BufferType {
+fn bufferTypeFromDtype(dt: DataType) pjrt.BufferType {
     return switch (dt) {
         .bool => .PRED,
         .f8e4m3b11fnuz => .F8E4M3B11FNUZ,
