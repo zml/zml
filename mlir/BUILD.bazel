@@ -1,3 +1,4 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
 load("@rules_zig//zig:defs.bzl", "zig_library")
 load("//bazel:zig.bzl", "zig_cc_test")
 

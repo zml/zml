@@ -5,6 +5,7 @@ try-import      %workspace%/.bazelrc-zml
 # Faster hash function
 startup         --digest_function=blake3
 
+# Disable WORKSPACE
 common          --enable_workspace=false
 
 # Don't need for now
@@ -33,16 +34,12 @@ build           --enable_runfiles
 build           --incompatible_strict_action_env
 
 # We don't to check the built files in the sandbox or repositories
-build           --noexperimental_check_output_files
-fetch           --noexperimental_check_output_files
-query           --noexperimental_check_output_files
-# build           --noexperimental_check_external_repository_files
-# fetch           --noexperimental_check_external_repository_files
-# query           --noexperimental_check_external_repository_files
+build           --experimental_check_output_files=false
+fetch           --experimental_check_output_files=false
+query           --experimental_check_output_files=false
 
 # Performance
-build           --reuse_sandbox_directories
-build           --nolegacy_external_runfiles
+build           --legacy_external_runfiles=false
 
 build           --experimental_output_directory_naming_scheme=diff_against_dynamic_baseline
 # Mount the zig cache into the sandboxes
@@ -58,17 +55,32 @@ build           --experimental_inprocess_symlink_creation
 # Build in debug for now, by default
 build           --compilation_mode=dbg
 
-build           --experimental_cc_shared_library
-build           --incompatible_use_cc_configure_from_rules_cc
-build           --experimental_starlark_cc_import
+# Various cc options
+common          --experimental_cc_static_library
+common          --experimental_cc_shared_library
+common          --incompatible_use_cc_configure_from_rules_cc
+common          --experimental_starlark_cc_import
 
+
+common          --experimental_platform_in_output_dir
+
+# Faster sandbox speeds
+build           --experimental_inmemory_sandbox_stashes
+
+# clang by default
 build           --compiler=clang
+
+# Enable resolving proto compiler from toolchains
+common          --incompatible_enable_proto_toolchain_resolution
+
+# Allow empty globs since some legacy rules
+common          --incompatible_disallow_empty_glob=false
 
 build:macos     --action_env=MACOSX_DEPLOYMENT_TARGET=13.0
 build:macos     --macos_sdk_version=13.0
 
 # Used by the tsl overlay in python_init_repositories for the bazelified xla module 20241025.0-4663f04 and later
-build           --repo_env HERMETIC_PYTHON_VERSION=3.11
+build           --repo_env=HERMETIC_PYTHON_VERSION=3.11
 
 # Print test errors in the console
 test            --test_output=errors
@@ -87,9 +99,3 @@ common:silent   --logging=0
 
 common          --registry=https://bazel-registry.zml.ai
 common          --registry=https://bcr.bazel.build
-
-# Enable resolving proto compiler from toolchains
-common          --incompatible_enable_proto_toolchain_resolution
-
-
-common          --incompatible_disallow_empty_glob=false
