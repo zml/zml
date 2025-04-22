@@ -270,13 +270,14 @@ const CustomCall = struct {
 
         if (platform.target != .cuda) @panic("hostBufferCallback are only supported on cpu and cuda for now");
         const stream = call_frame.*.api.stream(call_frame.ctx);
-        const d2h_err = cuda.streamSynchronize(stream);
-        std.debug.assert(d2h_err == 0);
         for (host_inputs, call_frame.args.buffers()) |*host, device| {
+            // Note: we are using the smp allocator here.
+            // Typically a given custom call will be called a lot of times with the same shape
+            // So having a per custom call arena would be great.
+            // We do need to be careful for the case where two callbacks are called at the same time though.
             host.* = HostBuffer.empty(std.heap.smp_allocator, getShape(device)) catch @panic("OOM");
             // log.warn("Readind device memory from {*} to {*}", .{ device.data.asPtr(), host.data });
-            cuda.memcpyToHostBlocking(@constCast(host.data), device.data);
-            // log.info("input {} {}: {}", .{ i, host.shape(), host.pretty() });
+            cuda.memcpyToHostAsync(@constCast(host.data), device.data, stream);
         }
 
         init_host_outputs: for (host_outputs, call_frame.results.buffers()) |*host, device| {
@@ -295,13 +296,19 @@ const CustomCall = struct {
         }
         copyTags(tags, host_inputs, host_outputs);
 
+        cuda.streamSynchronize(stream);
+
+        // TODO we should return an pjrt.ffi.Future to allow the pjrt thread to schedule more work.
         callback(user_ctx, host_inputs, host_outputs);
 
         for (host_outputs, call_frame.results.buffers()) |host, device| {
             // log.warn("Writing from {*} to device memory {*}", .{ device.data, host.data.asPtr() });
-            cuda.memcpyToDeviceBlocking(device.data, host.data);
+            cuda.memcpyToDeviceAsync(device.data, host.data, stream);
         }
+
         for (host_inputs) |*b| b.deinit(std.heap.smp_allocator);
+        // TODO we could return here and schedule the sync/free in another task.
+        cuda.streamSynchronize(stream);
         for (host_outputs) |*b| b.deinit(std.heap.smp_allocator);
 
         return null;
@@ -311,7 +318,7 @@ const CustomCall = struct {
 const cuda = struct {
     var _memcpyAsync: MemcpyAsync = @ptrFromInt(0xdeadc00da00);
     var _memcpyBlocking: MemcpyBlocking = @ptrFromInt(0xdeadc00da00);
-    var streamSynchronize: StreamSynchronize = @ptrFromInt(0xdeadc00da00);
+    var _streamSynchronize: StreamSynchronize = @ptrFromInt(0xdeadc00da00);
 
     pub const MemcpyKind = enum(c_int) {
         host_to_host = 0,
@@ -338,7 +345,7 @@ const cuda = struct {
         _memcpyBlocking = cudart.lookup(MemcpyBlocking, "cudaMemcpy") orelse {
             @panic("cudaMemcpy not found");
         };
-        streamSynchronize = cudart.lookup(StreamSynchronize, "cudaStreamSynchronize") orelse {
+        _streamSynchronize = cudart.lookup(StreamSynchronize, "cudaStreamSynchronize") orelse {
             @panic("cudaStreamSynchronize not found");
         };
     }
@@ -348,13 +355,23 @@ const cuda = struct {
         check(err);
     }
 
+    pub fn memcpyToHostAsync(dst: []u8, src: pjrt.ffi.DevicePtr, stream: *pjrt.ffi.Stream) void {
+        const err = _memcpyAsync(dst.ptr, src.asPtr(), dst.len, .device_to_host, stream);
+        check(err);
+    }
+
     pub fn memcpyToDeviceBlocking(dst: pjrt.ffi.DevicePtr, src: []const u8) void {
         const err = _memcpyBlocking(dst.asPtr(), src.ptr, src.len, .host_to_device);
         check(err);
     }
 
-    pub fn memcpyToDeviceAsync(dst: pjrt.ffi.DevicePtr, src: []const u8, stream: ?*pjrt.ffi.Stream) void {
+    pub fn memcpyToDeviceAsync(dst: pjrt.ffi.DevicePtr, src: []const u8, stream: *pjrt.ffi.Stream) void {
         const err = _memcpyAsync(dst.asPtr(), src.ptr, src.len, .host_to_device, stream);
+        check(err);
+    }
+
+    pub fn streamSynchronize(stream: *pjrt.ffi.Stream) void {
+        const err = _streamSynchronize(stream);
         check(err);
     }
 
