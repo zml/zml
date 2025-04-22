@@ -1,7 +1,11 @@
 const std = @import("std");
 
 pub const Duration = struct {
-    ns: u64,
+    ns: u64 = 0,
+
+    pub fn div(self: Duration, rhs: u64) Duration {
+        return .{ .ns = self.ns / rhs };
+    }
 
     pub fn format(
         self: Duration,
