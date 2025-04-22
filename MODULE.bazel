@@ -146,7 +146,7 @@ rust.toolchain(
         "aarch64-unknown-linux-gnu",
         "x86_64-unknown-linux-gnu",
     ],
-    versions = ["1.84.0"],
+    versions = ["1.86.0"],
 )
 use_repo(rust, "rust_toolchains")
 
