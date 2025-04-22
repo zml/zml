@@ -21,7 +21,7 @@ pub const Timer = struct {
     }
 
     pub fn lap(self: *Timer) Duration {
-        return .{ .ns = try self.inner.lap() };
+        return .{ .ns = self.inner.lap() };
     }
 
     pub fn read(self: *Timer) Duration {
