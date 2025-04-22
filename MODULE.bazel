@@ -24,7 +24,7 @@ bazel_dep(name = "rules_zig", version = "20250314.0-b9739c6")
 bazel_dep(name = "sentencepiece", version = "20240618.0-d7ace0a")
 bazel_dep(name = "toolchains_protoc", version = "0.3.7")
 bazel_dep(name = "with_cfg.bzl", version = "0.9.1")
-bazel_dep(name = "xla", version = "20250317.1-71c67e2")
+bazel_dep(name = "xla", version = "20250317.2-71c67e2")
 bazel_dep(name = "zig-protobuf", version = "20250318.0-930153e")
 bazel_dep(name = "zig-yaml", version = "20240903.0-83d5fdf")
 
@@ -113,10 +113,6 @@ tsl = use_extension("@xla//:tsl.bzl", "tsl")
 use_repo(tsl, "tsl", "python_version_repo")
 
 xla = use_extension("@xla//:workspace.bzl", "xla_workspace")
-use_repo(xla, "llvm-raw")
-llvm_configure = use_repo_rule("@llvm-raw//utils/bazel:configure.bzl", "llvm_configure")
-llvm_configure(name = "llvm-project")
-inject_repo(xla, "llvm-project")
 use_repo(
     xla,
     "com_github_grpc_grpc",
@@ -128,6 +124,8 @@ use_repo(
     "stablehlo",
     "triton",
 )
+llvm_configure = use_extension("@xla//:llvm.bzl", "llvm_configure")
+use_repo(llvm_configure, "llvm-project")
 
 apt = use_extension("@rules_distroless//apt:extensions.bzl", "apt")
 apt.install(
