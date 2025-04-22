@@ -91,22 +91,20 @@ fn TransmuteMixin(comptime T: type, comptime InnerT: type) type {
 pub const Api = opaque {
     pub const inner = TransmuteMixin(Api, c.XLA_FFI_Api).to;
 
-    pub fn getStream(self: *const Api, context: ?*ExecutionContext) ApiError!*anyopaque {
+    pub fn stream(self: *const Api, context: ?*ExecutionContext) *Stream {
         var ret = pjrtStruct(c.XLA_FFI_Stream_Get_Args{
             .ctx = if (context) |ctx| ctx.inner() else null,
         });
         const result = self.inner().XLA_FFI_Stream_Get.?(&ret);
-
         if (result) |ffi_error| {
             const err = Error.fromInner(ffi_error);
             defer err.destroy(self);
             log.err("[Api.getStream] {s}", .{err.getMessage(self)});
 
-            // TODO(Corentin): Retrieve error code from Error when implemented in XLA.
-            return error.Unknown;
+            @panic("failed to get stream");
         }
 
-        return ret.stream.?;
+        return @ptrCast(ret.stream.?);
     }
 
     pub fn allocateDeviceMemory(self: *const Api, context: ?*ExecutionContext, size: usize, alignment: usize) ApiError!*anyopaque {
@@ -249,6 +247,8 @@ const TypeId = extern struct {
 
 const Task = fn (*anyopaque) void;
 
+pub const Stream = opaque {};
+
 const ByteSpan = extern struct {
     ptr: [*]const u8,
     len: usize,
@@ -285,11 +285,19 @@ pub const DataType = enum(c.XLA_FFI_DataType) {
     f8e4m3fnuz = c.XLA_FFI_DataType_F8E4M3FNUZ,
 };
 
+pub const DevicePtr = enum(usize) {
+    _,
+
+    pub fn asPtr(ptr: DevicePtr) [*]u8 {
+        return @ptrFromInt(@intFromEnum(ptr));
+    }
+};
+
 pub const Buffer = extern struct {
     struct_size: usize,
     extension_start: ?*c.XLA_FFI_Extension_Base,
     dtype: DataType,
-    data: [*]u8,
+    data: DevicePtr,
     rank: u64,
     _dims: [*]const i64,
 
@@ -306,7 +314,7 @@ pub const Buffer = extern struct {
         _ = fmt;
         _ = options;
 
-        try writer.print("FfiBuffer({d}, .{s})@0x{x}", .{ buffer.dims(), @tagName(buffer.dtype), @intFromPtr(buffer.data) });
+        try writer.print("FfiBuffer({d}, .{s})@0x{x}", .{ buffer.dims(), @tagName(buffer.dtype), @intFromPtr(buffer.data.asPtr()) });
     }
 };
 
@@ -321,9 +329,8 @@ pub const Args = extern struct {
         buffer = c.XLA_FFI_ArgType_BUFFER,
     };
 
-    pub fn get(self: Args, i: usize) *const Buffer {
-        std.debug.assert(self.types[0..self.len][i] == .buffer);
-        return self.ptr[0..self.len][i];
+    pub fn buffers(self: Args) []*const Buffer {
+        return self.ptr[0..self.len];
     }
 };
 
@@ -338,9 +345,8 @@ pub const Rets = extern struct {
         buffer = c.XLA_FFI_RetType_BUFFER,
     };
 
-    pub fn get(self: Rets, i: usize) *const Buffer {
-        std.debug.assert(self.types[0..self.len][i] == .buffer);
-        return self.ptr[0..self.len][i];
+    pub fn buffers(self: Rets) []*const Buffer {
+        return self.ptr[0..self.len];
     }
 };
 
@@ -379,6 +385,11 @@ pub const Attrs = extern struct {
         len: usize,
         data: [*]const u8,
     };
+
+    pub fn slice(self: Array, T: type) []const T {
+        const ptr: [*]const T = @alignCast(@ptrCast(self.data));
+        return ptr[0..self.len];
+    }
 
     pub fn getByIndex(self: Attrs, comptime attr_type: AttrType, index: usize) ?*const @FieldType(Attr, @tagName(attr_type)) {
         const attr = self.ptr[0..self.len][index];

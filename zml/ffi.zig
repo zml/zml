@@ -1,11 +1,11 @@
 const std = @import("std");
-const assert = std.debug.assert;
 const testing = std.testing;
 const builtin = @import("builtin");
 
-const asynk = @import("asynk");
+const asynk = @import("async");
 const stdx = @import("stdx");
 
+const context = @import("context.zig");
 const dialect = struct {
     const stablehlo = @import("mlir/dialects").stablehlo;
 };
@@ -19,6 +19,7 @@ const ops = @import("ops.zig");
 const platform = @import("platform.zig");
 const tensor = @import("tensor.zig");
 const shape = @import("shape.zig");
+const cuda = context.cuda;
 const Buffer = buffer.Buffer;
 const HostBuffer = hostbuffer.HostBuffer;
 const CompilationContext = module.CompilationContext;
@@ -34,28 +35,41 @@ pub const std_options: std.Options = .{
     .logFn = asynk.logFn(std.log.defaultLog),
 };
 
-const CallbackT = Buffer;
+// todo: check deallocs
 
 pub fn CustomCallInputType(custom_op: type) type {
-    const ArgsT = stdx.meta.FnArgs(custom_op.call);
+    const ArgsT = stdx.meta.FnArgs(custom_op.beforeCustomCall);
     if (@typeInfo(ArgsT) != .@"struct") {
         @compileError("Expected struct type");
     }
-    return [@typeInfo(ArgsT).@"struct".fields.len - 1]Tensor;
+    // todo check typeof first input then others args
+    return [@typeInfo(ArgsT).@"struct".fields.len]Tensor;
 }
 
 pub fn CustomCallOutputType(custom_op: type) type {
-    const ReturnT = stdx.meta.FnReturnNoError(custom_op.call);
+    const ReturnT = stdx.meta.FnResultNoError(custom_op.call);
 
     if (@typeInfo(ReturnT) != .@"struct") {
         @compileError("Expected struct type");
     }
 
-    if (ReturnT == CallbackT) {
+    if (ReturnT == Buffer) {
         return Tensor;
     }
-
     return [@typeInfo(ReturnT).@"struct".fields.len]Tensor;
+}
+
+pub fn lenOutputBeforeCustomCall(custom_op: type) usize {
+    const ReturnT = stdx.meta.FnResultNoError(custom_op.beforeCustomCall);
+
+    if (@typeInfo(ReturnT) != .@"struct") {
+        @compileError("Expected struct type");
+    }
+
+    if (ReturnT == Tensor) {
+        return 1;
+    }
+    return @typeInfo(ReturnT).@"struct".fields.len;
 }
 
 pub fn custom_call(
@@ -63,6 +77,7 @@ pub fn custom_call(
     inputs: CustomCallInputType(custom_op),
 ) CustomCallOutputType(custom_op) {
     stdx.debug.assert(@hasDecl(custom_op, "call"), "custom_op must have a call method", .{});
+    const op_name = @typeName(custom_op);
 
     const ctx = inputs[0].getContext();
     const mlir_ctx = ctx.mlirCtx();
@@ -71,11 +86,12 @@ pub fn custom_call(
     const ffi = pjrt_api.ffi().?;
     const registry = ffi.customCallRegistry().?;
     const ffi_func = proxy(custom_op);
-    const target_name = "callback_" ++ @typeName(custom_op);
-    registry.registerFfi(pjrt_api, target_name, @tagName(ctx._platform.target), &ffi_func) catch unreachable;
-    log.info("Registered custom call {s} for {s} with proxy func {*}", .{ target_name, @typeName(custom_op), &ffi_func });
+    const target_name = "callback_" ++ op_name;
 
-    const custom_call_inputs = stdx.stackSlice(8, mlir.Value, inputs.len);
+    registry.registerFfi(pjrt_api, target_name, @tagName(platform_.target), &ffi_func) catch unreachable;
+    log.info("{s} / Registered custom call with target_name \"{s}\" with proxy func {*}", .{ op_name, target_name, &ffi_func });
+
+    var custom_call_inputs: []mlir.Value = undefined;
     var res_shapes: []Shape = undefined;
     var res_types: []mlir.Type = undefined;
 
@@ -91,7 +107,7 @@ pub fn custom_call(
         }
 
         const before_custom_call_outputs = ctx.callFunc(@typeName(custom_op), before_custom_call, args) catch |err| {
-            std.debug.panic("Error in {any} beforeCustomCall func: {any}\n", .{ @typeName(custom_op), err });
+            stdx.debug.panic("Error in {any} beforeCustomCall func: {any}\n", .{ @typeName(custom_op), err });
         };
         var before_custom_call_outputs_array: []Tensor = undefined;
 
@@ -105,19 +121,20 @@ pub fn custom_call(
             }
         }
 
+        custom_call_inputs = stdx.stackSlice(8, mlir.Value, lenOutputBeforeCustomCall(custom_op));
         res_shapes = stdx.stackSlice(8, Shape, before_custom_call_outputs_array.len);
         res_types = stdx.stackSlice(8, mlir.Type, before_custom_call_outputs_array.len);
 
         for (before_custom_call_outputs_array, 0..) |o, i| {
             res_shapes[i] = o.shape();
+            custom_call_inputs[i] = o.value();
             res_types[i] = mlir.ext.RankedTensorType.fromShape(mlir_ctx, o.shape()).as(mlir.Type);
         }
-
-        for (before_custom_call_outputs_array, 0..) |output, i| {
-            custom_call_inputs[i] = output.value();
-        }
     } else {
-        log.warn("No beforeCustomCall function found for {s}, expecting return type to be args type", .{@typeName(custom_op)});
+        // todo : check if args len != outputs len
+        log.warn("{s} / No beforeCustomCall function found, we will expect that the return type of call func will be like args type", .{op_name});
+        custom_call_inputs = stdx.stackSlice(8, mlir.Value, inputs.len);
+
         for (custom_call_inputs, inputs) |*input, tensor_| {
             input.* = tensor_.value();
         }
@@ -131,6 +148,7 @@ pub fn custom_call(
     }
 
     const frontend_attributes = mlir.Attribute.dict(mlir_ctx, &.{
+        .{ "_xla_compute_type", .string(mlir_ctx, "host") },
         .{ "_xla_buffer_placement", .string(mlir_ctx, @tagName(Buffer.Memory.host_pinned.toPjrtMemory())) },
     });
 
@@ -149,14 +167,8 @@ pub fn custom_call(
         mlir_ctx.location(@src()),
     );
 
-    // if (CustomCallOutputType(custom_op) == void) {
-    //     return;
-    // }
-
     if (CustomCallOutputType(custom_op) == Tensor) {
-        var ret = Tensor._result(res_shapes[0], op.result(0));
-        ret._output_memory_kind = .host_pinned;
-        return ret;
+        return Tensor._result(res_shapes[0], op.result(0));
     }
 
     var custom_call_outputs: CustomCallOutputType(custom_op) = undefined;
@@ -168,59 +180,10 @@ pub fn custom_call(
     return custom_call_outputs;
 }
 
-fn view_buf(
-    platform_: *const Platform,
-    device: *const pjrt.Device,
-    buffer_desc: *const pjrt.ffi.Buffer,
-) Buffer {
-    const pjrt_api = platform_.pjrt_api;
-    const pjrt_client = platform_.pjrt_client;
-    const buffer_shape = getShape(buffer_desc);
-
-    const kind: Buffer.Memory = .device;
-    const memories = device.addressableMemories(pjrt_api);
-    var selected_mem: *const pjrt.Memory = undefined;
-    for (memories) |mem| {
-        if (mem.kind(platform_.pjrt_api) == kind.toPjrtMemory()) {
-            selected_mem = mem;
-        }
-    }
-
-    const minor_to_major: [Shape.MAX_RANK]i64 = comptime blk: {
-        var res: [Shape.MAX_RANK]i64 = undefined;
-        for (0..Shape.MAX_RANK) |i| {
-            res[i] = @intCast(Shape.MAX_RANK - i - 1);
-        }
-        break :blk res;
-    };
-
-    std.debug.print("view_buf: {any} {any} {any}\n", .{ buffer_desc, buffer_shape, selected_mem.kind(pjrt_api) });
-    const pjrt_buffer = pjrt_client.createViewOfDeviceBuffer(pjrt_api, .{
-        .data = buffer_desc.data,
-        .element_type = buffer.bufferTypeFromDtype(buffer_shape.dtype()),
-        .dims = buffer_shape.dims(),
-        .memory = selected_mem,
-        .layout = .{
-            .tiled = .{
-                .minor_to_major = minor_to_major[Shape.MAX_RANK - buffer_shape.rank() ..],
-                .tile_dims = &.{},
-                .tile_dims_sizes = &.{},
-            },
-        },
-        .stream = null,
-    }) catch @panic("failed to createViewOfDeviceBuffer");
-
-    var shards: Buffer.Shards = .{};
-    shards.appendAssumeCapacity(pjrt_buffer);
-
-    return .{
-        ._api = pjrt_api,
-        ._shape = buffer_shape,
-        ._shards = shards,
-    };
-}
-
 fn proxy(comptime custom_op: type) pjrt.ffi.Handler {
+    const op_name = @typeName(custom_op);
+    _ = op_name; // autofix
+
     return struct {
         const Self = @This();
 
@@ -235,77 +198,62 @@ fn proxy(comptime custom_op: type) pjrt.ffi.Handler {
             const pjrt_client = platform_.pjrt_client;
 
             const device = pjrt_client.getAddressableDevices(pjrt_api)[@as(u32, @intCast(device_id))];
-            log.info("Proxy call_frame {*} on device {} (ordinal: {d})", .{ call_frame, device, device_id });
+            _ = device; // autofix
+            const ffi_buffer = call_frame.args.buffers()[0];
+            // const buffer_on_device = Buffer.asViewOfDeviceBuffer(platform_.*, getShape(ffi_buffer), null, ffi_buffer.data.asPtr());
+            // const buffer_pinned = buffer_on_device.copyToMemory(platform_.*, .host_pinned) catch unreachable;
+            // _ = buffer_pinned; // autofix
 
-            var args: std.meta.ArgsTuple(@TypeOf(custom_op.call)) = undefined;
-            args[0] = user_ctx;
-            inline for (1..args.len) |i| {
-                const buffer_desc = call_frame.args.get(i - 1);
+            const ctx = call_frame.ctx;
+            const stream = call_frame.api.?.stream(@constCast(ctx));
+            _ = stream; // autofix
+            const host = HostBuffer.empty(std.heap.smp_allocator, getShape(ffi_buffer)) catch unreachable;
+            cuda.memcpyToHostAsync(@constCast(host.data), ffi_buffer.data, null);
+            _ = cuda.streamSynchronize(null);
+            // log.info("{s} / Proxy call_frame {*} on device {} (ordinal: {d})", .{ op_name, call_frame, device, device_id });
 
-                log.info("FFI Buffer {} ({d}/{d})", .{ buffer_desc, i, call_frame.args.len });
-                // log.info("Pouet >>>>>>>>>> {d}", .{buffer_desc.data[0..1]});
-                const buffer_shape = getShape(buffer_desc);
-                _ = buffer_shape; // autofix
+            // var callback_args: std.meta.ArgsTuple(@TypeOf(custom_op.call)) = undefined;
+            // callback_args[0] = user_ctx;
 
-                // const host_buffer = HostBuffer.fromBytes(buffer_shape, buffer_desc.data[0..buffer_shape.byteSize()]);
-                // log.info("Host buffer {any}", .{host_buffer.items(f32)});
-                const zml_buf = view_buf(platform_, device, buffer_desc);
-                log.info(">> zml_buf {any}", .{zml_buf.getMemory().kind(pjrt_api)});
-                // std.debug.print("zml_buf YAYA {any}: {any}\n", .{ i, zml_buf.getValueFromDataInMemory(f32) catch unreachable });
-                // const zml_buf_mem = zml_buf.copyToMemory(platform_.*, .host_pinned) catch unreachable;
-                // const event = zml_buf_mem._shards.get(0).getReadyEvent(pjrt_api);
-                // _ = event; // autofix
-                // std.debug.print(" >> is ready : {any}\n", .{event.?.isReady(pjrt_api)});
-                // std.time.sleep(std.time.ns_per_s);
-                // event.?.await_(pjrt_api) catch unreachable;
-                // std.debug.print(" >> is ready2 : {any}\n", .{event.?.isReady(pjrt_api)});
-                // const dd = zml_buf_mem.getValueFromDataInMemory(f32) catch unreachable;
-                // std.debug.print("zml_buf YOYO {any}: {any}\n", .{ i, dd });
-                // log.info("zml_buf mem {any}", .{zml_buf_mem.getMemory().kind(pjrt_api)});
+            // inline for (1..callback_args.len) |i| {
+            //     const ffi_buffer = call_frame.args.buffers()[i - 1];
+            //     log.info("{s} / FFI Buffer arg: {} ({d}/{d})", .{ op_name, ffi_buffer, i, call_frame.args.len });
 
-                // defer zml_buf.deinit();
+            //     const buffer_on_device = Buffer.asViewOfDeviceBuffer(platform_.*, getShape(ffi_buffer), null, ffi_buffer.data.asPtr());
+            //     const buffer_device_pjrt_buffer = buffer_on_device._shards.get(0).getOpaqueDeviceMemoryDataPointer(pjrt_api);
+            //     log.info("{s} / ZML Buffer on device: {} {any} ({d}/{d})", .{ op_name, buffer_on_device, buffer_device_pjrt_buffer, i, call_frame.args.len });
 
-                // const buffer_shape = getShape(buffer_desc);
-                // const b = HostBuffer.fromBytes(buffer_shape, buffer_desc.data[0..buffer_shape.byteSize()]);
+            //     const buffer_pinned = buffer_on_device.copyToMemory(platform_.*, .host_pinned) catch unreachable;
+            //     const buffer_pinned_pjrt_buffer = buffer_pinned._shards.get(0).getOpaqueDeviceMemoryDataPointer(pjrt_api);
+            //     log.info("{s} / ZML Buffer pinned: {} {any} ({d}/{d})", .{ op_name, buffer_pinned, buffer_pinned_pjrt_buffer, i, call_frame.args.len });
 
-                // const data_ptr: usize = @intFromPtr(b.data.ptr);
-                // const page_off = data_ptr % std.heap.page_size_min;
-                // const page_start: [*]align(std.heap.page_size_min) u8 = @ptrFromInt(data_ptr - page_off);
-                // std.posix.mprotect(page_start[0 .. b.data.len + page_off], std.posix.PROT.WRITE | std.posix.PROT.READ) catch |e| {
-                //     log.err("Failed to protect memory of buffer {}: {}", .{ b, e });
-                // };
-
-                args[i] = zml_buf;
-                // std.debug.print("input buffer {any}: {any}\n", .{ i, b.data });
-            }
-
-            const outputs = @call(.auto, custom_op.call, args) catch |err| {
-                std.debug.print("Error on custom call {any}: {any}\n", .{ @typeName(custom_op), err });
-                const ffi_error = pjrt.ffi.Error.create(call_frame.api.?, pjrt.ffi.ErrorCode.unknown, @errorName(err));
-                return ffi_error;
-            };
-
-            std.debug.print("output: {any}\n", .{outputs});
-
-            // const output_buffers = stdx.stackSlice(8, CallbackT, call_frame.results.len);
-            // for (output_buffers, 0..) |*b, i| {
-            //     b.* = view_buf2(pjrt_api, pjrt_client, call_frame.results.get(i));
+            //     callback_args[i] = buffer_pinned;
             // }
 
-            // const output_buffers = stdx.stackSlice(8, CallbackT, call_frame.results.len);
-            // for (output_buffers, 0..) |*b, i| {
-            //     const buffer_desc = call_frame.results.get(i);
-            //     const buffer_shape = getShape(buffer_desc);
-            //     b.* = HostBuffer.fromBytes(buffer_shape, buffer_desc.data[0..buffer_shape.byteSize()]);
+            // const zml_results = @call(.auto, custom_op.call, callback_args) catch |err| {
+            //     stdx.debug.panic("Error while calling {any} call func: {any}\n", .{ @typeName(custom_op), err });
+            // };
 
-            //     const data_ptr: usize = @intFromPtr(b.data.ptr);
-            //     const page_off = data_ptr % std.heap.page_size_min;
-            //     const page_start: [*]align(std.heap.page_size_min) u8 = @ptrFromInt(data_ptr - page_off);
-            //     std.posix.mprotect(page_start[0 .. b.data.len + page_off], std.posix.PROT.WRITE | std.posix.PROT.READ) catch |e| {
-            //         log.err("Failed to protect memory of buffer {}: {}", .{ b, e });
-            //     };
+            // var results_array: []Buffer = undefined;
+            // if (@TypeOf(zml_results) == Buffer) {
+            //     results_array = stdx.stackSlice(8, Buffer, 1);
+            //     results_array[0] = zml_results;
+            // } else {
+            //     results_array = stdx.stackSlice(8, Buffer, @typeInfo(@TypeOf(zml_results)).@"struct".fields.len);
+            //     inline for (@typeInfo(@TypeOf(zml_results)).@"struct".fields, 0..) |field, i| {
+            //         results_array[i] = @field(zml_results, field.name);
+            //     }
+            // }
 
-            //     std.debug.print("output buffer {any}: {any}\n", .{ i, b.data });
+            // for (results_array, 0..) |zml_buffer, i| {
+            //     const ffi_buffer = call_frame.results.buffers()[i];
+            //     _ = ffi_buffer; // autofix
+            //     log.info("{s} / FFI Buffer result ptr: {} ({d}/{d})", .{ op_name, call_frame.results.ptr[i], i + 1, call_frame.results.len });
+
+            //     const zml_buffer_pjrt_buffer = zml_buffer._shards.get(0).getOpaqueDeviceMemoryDataPointer(pjrt_api) catch unreachable;
+            //     log.info("{s} / ZML Buffer result: {} {any} ({d}/{d})", .{ op_name, zml_buffer, zml_buffer_pjrt_buffer, i + 1, call_frame.results.len });
+
+            //     // cuda.memcpyToDeviceBlocking(ffi_buffer.data, zml_buffer.dataInMemory() catch unreachable);
             // }
 
             return null;

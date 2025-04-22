@@ -3,7 +3,7 @@ const zml = @import("zml");
 const asynk = @import("async");
 
 pub const std_options: std.Options = .{
-    .log_level = .info,
+    .log_level = .warn,
     .logFn = asynk.logFn(std.log.defaultLog),
 };
 
@@ -14,14 +14,23 @@ pub const AddOp = struct {
 
     _platform: *const zml.Platform,
 
-    pub fn beforeCustomCall(a: zml.Tensor, b: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
-        return .{ a, b };
+    pub fn beforeCustomCall(a: zml.Tensor, b: zml.Tensor) struct { zml.Tensor, zml.Tensor, zml.Tensor } {
+        return .{ a, b, zml.Tensor.scalar(0, .f32) };
     }
 
-    pub fn call(self: *Self, a: zml.Buffer, _: zml.Buffer) !zml.Buffer {
+    pub fn call(self: *Self, a: zml.Buffer, b: zml.Buffer, result: zml.Buffer) !struct { zml.Buffer, zml.Buffer, zml.Buffer } {
         _ = self; // autofix
-        log.info("mem a: {any}", .{a.items(f32)});
-        return a;
+        // const a_ = try a.getValue(f32);
+        // const b_ = try b.getValue(f32);
+
+        // log.warn("{s}@{*} a value: {d}", .{ @typeName(Self), self, a_ });
+        // log.warn("{s}@{*} b value: {d}", .{ @typeName(Self), self, b_ });
+
+        // const add_result = a_ + b_;
+        // try result.setValue(f32, add_result);
+        // log.warn("{s}@{*} result value: {d}", .{ @typeName(Self), self, try result.getValue(f32) });
+
+        return .{ a, b, result };
     }
 
     fn getPlatform(self: *Self) zml.Platform {
@@ -34,13 +43,14 @@ pub const LogResultOp = struct {
 
     _platform: *const zml.Platform,
 
-    // pub fn beforeCustomCall(result: zml.Tensor) zml.Tensor {
-    //     return result;
-    // }
+    pub fn beforeCustomCall(value: zml.Tensor) zml.Tensor {
+        return value;
+    }
 
-    pub fn call(self: *Self, result: zml.Buffer) !zml.Buffer {
-        log.info("LogResultOp result: {*}", .{try result._shards.get(0).getOpaqueDeviceMemoryDataPointer(self._platform.pjrt_api)});
-        return result;
+    pub fn call(self: *Self, value: zml.Buffer) !zml.Buffer {
+        _ = self; // autofix
+        // log.warn("{s}@{*} value: {d}", .{ @typeName(Self), self, try value.getValue(f32) });
+        return value;
     }
 
     fn getPlatform(self: *Self) zml.Platform {
@@ -67,21 +77,13 @@ pub const LogValuesVoidOp = struct {
 
 /// Model definition
 const Layer = struct {
+    // a = 40x128 bf16 ou f32
     pub fn forward(_: Layer, a: zml.Tensor, b: zml.Tensor) zml.Tensor {
-        // const result = zml.custom_call(AddOp, .{ a.toMemory(.host_pinned), b.toMemory(.host_pinned) });
-        // const a_ = a.toMemory(.host_pinned);
-        // const b_ = b.toMemory(.host_pinned);
-        const a_ = a.toMemory(.host_pinned);
-        const b_ = b.toMemory(.host_pinned);
-        const c = a_.clamp(b_, a_);
-        const d = c.toMemory(.device);
-        const on_device = a.add(d).toMemory(.host_pinned);
-        // var result = zml.custom_call(LogResultOp, .{on_device});
-        // const result = on_device.toMemory(.device).add(b);
-        // zml.custom_call(LogValuesVoidOp, .{ result, a, b });
-        // var result = a.add(b).toMemory(.host_pinned);
-        var result = zml.custom_call(LogResultOp, .{on_device});
-        return result.add(zml.Tensor.scalar(5, .f32));
+        var result = a.add(b);
+        // const results = zml.custom_call(AddOp, .{ a, b });
+        // result = results[0].mul(results[1]);
+        result = zml.custom_call(LogResultOp, .{result});
+        return result.add(a);
     }
 };
 
@@ -106,7 +108,7 @@ pub fn asyncMain() !void {
     const platform = context.autoPlatform(.{});
     context.printAvailablePlatforms(platform);
 
-    const shape = zml.Shape.init(.{1}, .f32);
+    const shape = zml.Shape.init(.{ 40, 128 }, .bf16);
 
     // We manually produce a BufferStore. You would not normally do that.
     // A BufferStore is usually created by loading model data from a file.
@@ -146,24 +148,61 @@ pub fn asyncMain() !void {
     // const log_values_op_ctx: LogValuesVoidOp = .{ ._platform = &platform };
     // try executable.attach(&log_values_op_ctx);
 
-    // prepare input buffers
-    var input_a = [1]f32{1.0};
-    var input_buffer_a = try zml.Buffer.from(platform, zml.HostBuffer.fromSlice(shape, &input_a));
-    defer input_buffer_a.deinit();
-    var input_b = [1]f32{1.0};
-    var input_buffer_b = try zml.Buffer.from(platform, zml.HostBuffer.fromSlice(shape, &input_b));
-    defer input_buffer_b.deinit();
+    var rng = std.Random.DefaultPrng.init(0);
+    const random = rng.random();
 
-    // call our executable module
-    var result: zml.Buffer = executable.call(.{ input_buffer_a, input_buffer_b });
-    const result_mem = result.getMemory();
-    std.debug.print("<<< Result memory: {any}\n", .{result_mem.kind(platform.pjrt_api)});
-    defer result.deinit();
+    for (0..2) |i| {
+        log.warn("Iteration {d}", .{i});
 
-    // fetch the result to CPU memory
-    const cpu_result = try result.toHostAlloc(arena);
-    std.debug.print(
-        "\nThe result of {d} + {d} = {d}\n",
-        .{ &input_a, &input_b, cpu_result.items(f32) },
-    );
+        // prepare input buffers
+        var input_buffer_a = try createRandomBuffer(allocator, platform, shape, random);
+        defer input_buffer_a.deinit();
+        var input_buffer_b = try createRandomBuffer(allocator, platform, shape, random);
+        defer input_buffer_b.deinit();
+
+        var result: zml.Buffer = executable.call(.{ input_buffer_a, input_buffer_b });
+        defer result.deinit();
+
+        // fetch the result to CPU memory
+        // const cpu_result = try result.toHostAlloc(arena);
+        // log.warn(
+        //     "\nThe result of {d} + {d} = {d}\n",
+        //     .{ &input_a, &input_b, cpu_result.items(f32) },
+        // );
+
+        std.time.sleep(1 * std.time.ns_per_s);
+    }
+}
+
+fn createRandomBuffer(allocator: std.mem.Allocator, platform: zml.Platform, shape: zml.Shape, random: std.Random) !zml.Buffer {
+    const data = try allocator.alloc(u8, shape.byteSize());
+    defer allocator.free(data);
+
+    switch (shape.dtype()) {
+        inline else => |v| {
+            const ZigType = v.toZigType();
+            switch (comptime v.class()) {
+                .bool => unreachable,
+                .integer => {
+                    for (std.mem.bytesAsSlice(ZigType, data)) |*e| e.* = random.int(ZigType);
+                },
+                .float => {
+                    const value = random.float(f64);
+                    for (std.mem.bytesAsSlice(ZigType, data)) |*e| e.* = if (ZigType == f64)
+                        value
+                    else if (ZigType == f32)
+                        @floatCast(value)
+                    else if (ZigType == f16)
+                        @floatCast(value)
+                    else
+                        @bitCast(random.int(std.meta.Int(.unsigned, @bitSizeOf(ZigType))));
+                },
+                .complex => unreachable,
+            }
+        },
+    }
+
+    var host_buffer = zml.HostBuffer.fromBytes(shape, data);
+    errdefer host_buffer.deinit(allocator);
+    return zml.Buffer.from(platform, host_buffer);
 }

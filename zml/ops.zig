@@ -1201,13 +1201,13 @@ inline fn toI64(values: anytype) []i64 {
 }
 
 const _MINOR_TO_MAJOR = blk: {
-    var ret: [Shape.MAX_RANK]usize = undefined;
+    var ret: [Shape.MAX_RANK]i64 = undefined;
     for (0..Shape.MAX_RANK) |i| {
         ret[i] = @intCast(Shape.MAX_RANK - i - 1);
     }
     break :blk ret;
 };
 
-fn minorToMajor(rank: u8) []const usize {
+pub fn minorToMajor(rank: u8) []const i64 {
     return _MINOR_TO_MAJOR[_MINOR_TO_MAJOR.len - rank ..];
 }

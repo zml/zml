@@ -125,6 +125,7 @@ const _CreateOptions = struct {
         };
 
         pub fn writeNamedValues(self: Cuda, values: *std.ArrayListUnmanaged(pjrt.NamedValue)) void {
+            values.appendAssumeCapacity(pjrt.NamedValue.fromBool("should_stage_host_to_device_transfers", false));
             switch (self.allocator) {
                 .platform => {
                     values.appendAssumeCapacity(pjrt.NamedValue.fromString("allocator", "platform"));

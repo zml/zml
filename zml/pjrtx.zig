@@ -67,6 +67,13 @@ pub const Client = opaque {
         return @ptrCast(buffer);
     }
 
+    pub fn dmaMap(self: *const Client, api: *const Api, data: []const u8) ApiError!void {
+        try self.inner().dmaMap(api, data);
+    }
+    pub fn dmaUnmap(self: *const Client, api: *const Api, data: []const u8) ApiError!void {
+        try self.inner().dmaUnmap(api, data);
+    }
+
     pub fn deserializeAndLoad(self: *const Client, api: *const Api, bytes: []const u8) ApiError!*LoadedExecutable {
         return @ptrCast(try asynk.callBlocking(pjrt.Client.deserializeAndLoad, .{ self.inner(), api, bytes }));
     }

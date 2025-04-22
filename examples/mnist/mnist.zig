@@ -58,8 +58,30 @@ const Mnist = struct {
         for (layers) |layer| {
             x = zml.call(layer, .forward, .{x});
         }
-        const r = x.argMax(0).indices.convert(.u8).print(PrintOp, x);
-        return r[0];
+        return relu(x).argMax(0).indices.convert(.u8);
+    }
+
+    pub fn relu(input: zml.Tensor) zml.Tensor {
+        return zml.ops.addHostCallback(
+            &reluCallback,
+            null,
+            &.{input},
+            &.{input.shape()},
+            .{},
+        )[0];
+    }
+
+    fn reluCallback(_: ?*anyopaque, inputs: []const zml.HostBuffer, outputs: []const zml.HostBuffer) void {
+        const in = inputs[0].items(f32);
+        const out = outputs[0].mutItems(f32);
+        std.log.defaultLog(.info, .zml, "in: {*}[0..{}] = {e:.3}", .{ in.ptr, in.len, in });
+
+        var i: usize = 0;
+        for (in) |x| {
+            out[i] = @max(x, 0);
+            i += 1;
+        }
+        std.log.defaultLog(.info, .zml, "out: {*}[0..{}] = {e:.3}", .{ out.ptr, out.len, out });
     }
 };
 

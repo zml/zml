@@ -4,6 +4,7 @@ const testing = std.testing;
 const asynk = @import("async");
 const stdx = @import("stdx");
 
+const ops = @import("ops.zig");
 const Context = @import("context.zig").Context;
 const Data = @import("dtype.zig").Data;
 const DataType = @import("dtype.zig").DataType;
@@ -91,7 +92,7 @@ pub const Buffer = struct {
                     .dims = buf.shape().dims(),
                     .byte_strides = byte_strides,
                     .device = devices[i],
-                    .host_buffer_semantics = .ImmutableOnlyDuringCall,
+                    .host_buffer_semantics = .MutableZeroCopy,
                 },
             });
 
@@ -217,23 +218,17 @@ pub const Buffer = struct {
     /// Creates a Buffer from a pointer into device memory.
     /// This allows to interface with other libraries producing buffers.
     pub fn asViewOfDeviceBuffer(platform: Platform, shape_: Shape, stream: ?*const anyopaque, device_data: *anyopaque) Buffer {
-        const minor_to_major: [Shape.MAX_RANK]i64 = comptime blk: {
-            var res: [Shape.MAX_RANK]i64 = undefined;
-            for (0..Shape.MAX_RANK) |i| {
-                res[i] = @intCast(Shape.MAX_RANK - i - 1);
-            }
-            break :blk res;
-        };
-
         const pjrt_buffer = platform.pjrt_client.createViewOfDeviceBuffer(platform.pjrt_api, .{
             .data = device_data,
             .element_type = bufferTypeFromDtype(shape_.dtype()),
             .dims = shape_.dims(),
             // TODO: exposes sharding in the API.
             .device = platform.getDevices()[0],
+            // TODO: expose memory in the API.
+            .memory_kind = null,
             .layout = .{
                 .tiled = .{
-                    .minor_to_major = minor_to_major[Shape.MAX_RANK - shape_.rank() ..],
+                    .minor_to_major = ops.minorToMajor(shape_.rank()),
                     .tile_dims = &.{},
                     .tile_dims_sizes = &.{},
                 },
@@ -262,6 +257,16 @@ pub const Buffer = struct {
         return res;
     }
 
+    pub fn setValue(self: Buffer, T: type, value: anytype) !void {
+        stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
+        const shard_buffer = self._shards.get(0);
+        const opaqueDataPointer = try shard_buffer.getOpaqueDeviceMemoryDataPointer(self._api);
+        const sizeInBytes = try shard_buffer.getOnDeviceSizeInBytes(self._api);
+        stdx.debug.assert(sizeInBytes == @sizeOf(T), "Buffer size {d} does not match type size {d}", .{ sizeInBytes, @sizeOf(T) });
+        const data = @as(*T, @ptrFromInt(@intFromPtr(opaqueDataPointer)));
+        data.* = value;
+    }
+
     pub fn getValueFromDataInMemory(self: Buffer, T: type) !T {
         stdx.debug.assert(self._shape.byteSize() == @sizeOf(T), "Buffer {} has {d} bytes of data, can't load it to a {s} with {d} bytes", .{ self, self._shape.byteSize(), @typeName(T), @sizeOf(T) });
         const data = try self.dataInMemory();
@@ -277,7 +282,6 @@ pub const Buffer = struct {
         const end: usize = @intCast(sizeInbytes);
         return data[0..end];
     }
-
     /// Copies the content of the Buffer back to host, in the given buffer,
     /// and return a new `HostBuffer` object with the same shape.
     /// The returned `HostBuffer` doesn't own the memory.

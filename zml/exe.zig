@@ -12,7 +12,7 @@ const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
 const ShapeOf = @import("tensor.zig").ShapeOf;
 
-const log = std.log.scoped(.zml);
+const log = std.log.scoped(.@"zml/exe");
 
 test {
     std.testing.refAllDecls(@This());
@@ -282,7 +282,7 @@ pub fn Exe(ArgsT: type, ReturnT: type) type {
             var new: Self = .{ .inner = self.inner };
             const pjrt_execute_context = self.inner.platform.pjrt_api.createExecuteContext() catch unreachable;
             new.inner._context = pjrt_execute_context;
-            log.info("[FFI] Created {*} for {*}", .{ pjrt_execute_context, self.inner.exe });
+            log.info("Created context execution {*} for {*}", .{ pjrt_execute_context, self.inner.exe });
             return new;
         }
 
@@ -299,7 +299,7 @@ pub fn Exe(ArgsT: type, ReturnT: type) type {
             const type_id = try ffi.registerTypeId(pjrt_api, type_name);
 
             const user_data: *anyopaque = @ptrCast(@constCast(value));
-            log.info("[FFI] Attach {any}@{x} of type {d} on {any}", .{ value, user_data, type_id, self.inner._context.? });
+            log.info("Attached {s}@{x} with type id {d} on {any}", .{ type_name, user_data, type_id, self.inner._context.? });
             try ffi.addUserData(pjrt_api, self.inner._context.?, .{ .type_id = type_id, .user_data = user_data });
         }
 

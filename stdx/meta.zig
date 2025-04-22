@@ -164,7 +164,7 @@ pub fn FnResult(comptime func: anytype) type {
     return @typeInfo(@TypeOf(func)).@"fn".return_type orelse @compileError("anytype is not supported");
 }
 
-pub fn FnReturnNoError(comptime func: anytype) type {
+pub fn FnResultNoError(comptime func: anytype) type {
     const ReturnT = @typeInfo(@TypeOf(func)).@"fn".return_type orelse @compileError("anytype is not supported");
     return switch (@typeInfo(ReturnT)) {
         .error_union => |info| info.payload,

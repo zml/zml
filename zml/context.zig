@@ -37,6 +37,7 @@ pub const Context = struct {
             inline for (comptime std.enums.values(runtimes.Platform)) |t| {
                 if (runtimes.load(t)) |api| {
                     Context.apis.set(t, api);
+                    if (t == .cuda) cuda.init();
                 } else |_| {}
             }
         }
@@ -209,5 +210,67 @@ pub const Context = struct {
                 }
             }
         }
+    }
+};
+
+pub const cuda = struct {
+    var _memcpyAsync: MemcpyAsync = @ptrFromInt(0xdeadc00da00);
+    var _memcpyBlocking: MemcpyBlocking = @ptrFromInt(0xdeadc00da00);
+    pub var streamSynchronize: StreamSynchronize = @ptrFromInt(0xdeadc00da00);
+
+    pub const MemcpyKind = enum(c_int) {
+        host_to_host = 0,
+        host_to_device = 1,
+        device_to_host = 2,
+        device_to_device = 3,
+        inferred = 4,
+    };
+
+    const MemcpyAsync = *const fn (dst: *anyopaque, src: *const anyopaque, count: usize, kind: MemcpyKind, stream: ?*pjrt.ffi.Stream) callconv(.C) c_int;
+    const MemcpyBlocking = *const fn (dst: *anyopaque, src: *const anyopaque, count: usize, kind: MemcpyKind) callconv(.C) c_int;
+    const StreamSynchronize = *const fn (stream: ?*pjrt.ffi.Stream) callconv(.C) c_int;
+
+    pub fn init() void {
+        var cudart = std.DynLib.open("libcudart.so.12") catch {
+            log.err("cudart not found, callback will segfault", .{});
+            return;
+        };
+        defer cudart.close();
+
+        _memcpyAsync = cudart.lookup(MemcpyAsync, "cudaMemcpyAsync") orelse {
+            @panic("cudaMemcpyAsync not found");
+        };
+        _memcpyBlocking = cudart.lookup(MemcpyBlocking, "cudaMemcpy") orelse {
+            @panic("cudaMemcpy not found");
+        };
+        streamSynchronize = cudart.lookup(StreamSynchronize, "cudaStreamSynchronize") orelse {
+            @panic("cudaStreamSynchronize not found");
+        };
+    }
+
+    pub fn memcpyToHostBlocking(dst: []u8, src: pjrt.ffi.DevicePtr) void {
+        const err = _memcpyBlocking(dst.ptr, src.asPtr(), dst.len, .device_to_host);
+        check(err);
+    }
+
+    pub fn memcpyToDeviceBlocking(dst: pjrt.ffi.DevicePtr, src: []const u8) void {
+        const err = _memcpyBlocking(dst.asPtr(), src.ptr, src.len, .host_to_device);
+        check(err);
+    }
+
+    pub fn memcpyToDeviceAsync(dst: pjrt.ffi.DevicePtr, src: []const u8, stream: ?*pjrt.ffi.Stream) void {
+        const err = _memcpyAsync(dst.asPtr(), src.ptr, src.len, .host_to_device, stream);
+        check(err);
+    }
+
+    pub fn memcpyToHostAsync(dst: []u8, src: pjrt.ffi.DevicePtr, stream: ?*pjrt.ffi.Stream) void {
+        const err = _memcpyAsync(dst.ptr, src.asPtr(), dst.len, .device_to_host, stream);
+        check(err);
+    }
+
+    pub fn check(err: c_int) void {
+        if (err == 0) return;
+        log.err("CUDA ERROR {d}", .{err});
+        @panic("CUDA error");
     }
 };

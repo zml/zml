@@ -414,7 +414,8 @@ pub const Client = opaque {
         dims: []const i64,
         element_type: BufferType,
         layout: MemoryLayout,
-        memory: *const Memory,
+        device: *const Device,
+        memory_kind: ?Memory.Kind,
         on_delete_callback: *const fn (device_buffer_ptr: ?*anyopaque, ctx: ?*anyopaque) callconv(.C) void = &struct {
             fn call(_: ?*anyopaque, _: ?*anyopaque) callconv(.C) void {}
         }.call,
@@ -424,6 +425,16 @@ pub const Client = opaque {
 
     pub fn createViewOfDeviceBuffer(self: *const Client, api: *const Api, args: CreateViewOfDeviceBufferArgs) ApiError!*Buffer {
         const layout = args.layout.toCStruct();
+        var memory: ?*const Memory = null;
+
+        if (args.memory_kind) |kind| {
+            for (args.device.addressableMemories(api)) |m| {
+                if (m.kind(api) == kind) {
+                    memory = m;
+                }
+            }
+        }
+
         const ret = try api.call(.PJRT_Client_CreateViewOfDeviceBuffer, .{
             .client = self.inner(),
             .device_buffer_ptr = @ptrCast(@constCast(args.data)),
@@ -431,7 +442,8 @@ pub const Client = opaque {
             .num_dims = args.dims.len,
             .element_type = @intFromEnum(args.element_type),
             .layout = @ptrCast(@constCast(&layout)),
-            .memory = @ptrCast(@constCast(args.memory)),
+            .device = @ptrCast(@constCast(args.device)),
+            .memory = if (memory) |m| @ptrCast(@constCast(m)) else null,
             .on_delete_callback = args.on_delete_callback,
             .on_delete_callback_arg = args.on_delete_callback_arg,
             .stream = if (args.stream) |stream| stream else 0,
@@ -449,20 +461,21 @@ pub const Client = opaque {
         return &.{};
     }
 
-    pub fn dmaMap(self: *const Client, api: *const Api, data: []const u8) ApiError!*Buffer {
-        const ret = try api.call(.PJRT_Client_DMA_Map, .{
+    pub fn dmaMap(self: *const Client, api: *const Api, data: []const u8) ApiError!void {
+        const args: Api.CallFnArgType(.PJRT_Client_DmaMap) = .{
             .client = self.inner(),
             .data = @ptrCast(@constCast(data.ptr)),
             .size = @intCast(data.len),
-        });
-        return @ptrCast(ret.buffer.?);
+        };
+        std.debug.print("DMA map {any} \n", .{args});
+        _ = try api.call(.PJRT_Client_DmaMap, args);
     }
 
-    pub fn dmaUnmap(self: *const Client, api: *const Api, data: []const u8) void {
-        _ = api.call(.PJRT_Client_DMA_Unmap, .{
+    pub fn dmaUnmap(self: *const Client, api: *const Api, data: []const u8) ApiError!void {
+        _ = try api.call(.PJRT_Client_DmaUnmap, .{
             .client = self.inner(),
             .data = @ptrCast(@constCast(data.ptr)),
-        }) catch unreachable;
+        });
     }
 
     pub const CreateBuffersForAsyncHostToDeviceArgs = struct {
@@ -852,10 +865,10 @@ pub const Buffer = opaque {
     }
 
     pub fn getOpaqueDeviceMemoryDataPointer(self: *const Buffer, api: *const Api) ApiError!*anyopaque {
-        const ret = try api.call(.PJRT_Buffer_UnsafePointer, .{
+        const ret = try api.call(.PJRT_Buffer_OpaqueDeviceMemoryDataPointer, .{
             .buffer = self.inner(),
         });
-        return @ptrFromInt(ret.buffer_pointer);
+        return ret.device_memory_ptr.?;
     }
 
     pub fn copyRawToHost(self: *const Buffer, api: *const Api, dst: []u8, offset: i64) ApiError!?*Event {
