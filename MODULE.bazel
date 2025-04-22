@@ -175,9 +175,11 @@ apt.install(
     lock = "//runtimes/rocm:packages.lock.json",
     manifest = "//runtimes/rocm:packages.yaml",
 )
+use_repo(apt, "apt_rocm")
+
 apt.install(
     name = "apt_common",
-    lock = "//runtimes/rocm:packages.lock.json",
+    lock = "//runtimes/common:packages.lock.json",
     manifest = "//runtimes/common:packages.yaml",
 )
-use_repo(apt, "apt_common", "apt_rocm")
+use_repo(apt, "apt_common")
