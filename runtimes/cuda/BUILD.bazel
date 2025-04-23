@@ -34,6 +34,11 @@ zig_library(
     }),
 )
 
+exports_files(
+    ["libpjrt_cuda.so"],
+    visibility = ["//visibility:public"],
+)
+
 filegroup(
     name = "layers",
     srcs = [],
