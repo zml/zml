@@ -70,6 +70,7 @@ pub const Buffer = struct {
 
     pub const FromOptions = struct {
         wait: bool = true,
+        memory: ?pjrt.Memory.Kind = null,
     };
 
     /// Copies the content of the given buffer from host memory to the accelerator memory.
@@ -102,14 +103,25 @@ pub const Buffer = struct {
                 break :buf host_buffer.slice1d(ax, .{ .start = start, .end = start + chunk_size });
             } else host_buffer;
 
-            const pjrt_buffer, const event = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, pjrt.Client.BufferFromHostBufferArgs{
+            var args = pjrt.Client.BufferFromHostBufferArgs{
                 .data = buf.data,
                 .buffer_type = buffer_type,
                 .dims = buf.shape().dims(),
                 .byte_strides = byte_strides,
-                .device = devices[i],
                 .host_buffer_semantics = .ImmutableUntilTransferCompletes,
-            });
+            };
+            if (opts.memory) |memory_kind| {
+                const memories = try devices[i].addressableMemories(platform.pjrt_api);
+                const memory = for (memories) |m| {
+                    const kind = m.kind(platform.pjrt_api);
+                    if (kind == memory_kind) break m;
+                } else return error.NotFound;
+                args.memory = memory;
+            } else {
+                args.device = devices[i];
+            }
+
+            const pjrt_buffer, const event = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, args);
 
             if (event) |ev| {
                 ev.deinit(platform.pjrt_api);
