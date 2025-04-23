@@ -11,6 +11,7 @@ pub const aio = @import("aio.zig");
 pub const sentencepiece = @import("aio/sentencepiece.zig");
 pub const Buffer = @import("buffer.zig").Buffer;
 pub const Bufferized = @import("tensor.zig").Bufferized;
+pub const bufferTypeFromDtype = @import("buffer.zig").bufferTypeFromDtype;
 pub const CompilationOptions = @import("platform.zig").CompilationOptions;
 pub const Context = @import("context.zig").Context;
 pub const context = @import("context.zig");
