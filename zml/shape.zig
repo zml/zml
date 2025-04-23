@@ -58,10 +58,10 @@ pub const Shape = struct {
                 const fv = @field(v, field.name);
                 if (comptime stdx.meta.isInteger(field.type)) {
                     dims_.appendAssumeCapacity(@intCast(fv));
-                } else if (comptime isAutoDim(fv)) {
+                } else if (@TypeOf(fv) == EnumLiteral and comptime isAutoDim(fv)) {
                     dims_.appendAssumeCapacity(-1);
                 } else {
-                    stdx.debug.compileError("Field {s} should be an integer or an auto dimension", .{field.name});
+                    stdx.debug.compileError("Field {s} should be an integer or an auto dimension, got {}", .{ field.name, field.type });
                 }
                 if (comptime stdx.meta.isTuple(T)) {
                     tags_.appendAssumeCapacity(TagUnknown);
