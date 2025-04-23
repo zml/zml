@@ -164,9 +164,8 @@ pub const HostBuffer = struct {
     /// WARNING: It's only valid if the buffer is contiguous.
     /// Strided buffers can't use this method.
     pub fn items(self: HostBuffer, comptime T: type) []const T {
-        if (DataType.fromZigType(T) != self.dtype()) {
-            std.debug.panic("Can't reinterpret {} as {s}", .{ self, @typeName(T) });
-        }
+        // TODO we should allow interpreting the output as @Vector(8, f32) when the tensor is f32.
+        stdx.debug.assert(DataType.fromZigType(T) == self.dtype(), "Can't reinterpret {} as {s}", .{ self, @typeName(T) });
         if (!self.isContiguous()) {
             std.debug.panic("{} isn't contiguous", .{self});
         }
@@ -265,6 +264,7 @@ pub const HostBuffer = struct {
         // TODO: this is a bit too restrictive, choosing slice could extract a contiguous
         // slice out of a non-contiguous tensor.
         std.debug.assert(self.isContiguous());
+        stdx.debug.assert(DataType.fromZigType(T) == self.dtype(), "Can't reinterpret {} as {s}", .{ self, @typeName(T) });
 
         var sh = self._shape;
         var offset: i64 = 0;
