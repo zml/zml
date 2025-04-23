@@ -167,8 +167,10 @@ pub const HostBuffer = struct {
     pub fn items(self: HostBuffer, comptime T: type) []const T {
         // TODO we should allow interpreting the output as @Vector(8, f32) when the tensor is f32.
         stdx.debug.assert(DataType.fromZigType(T) == self.dtype(), "Can't reinterpret {} as {s}", .{ self, @typeName(T) });
-        stdx.debug.assert(self.isContiguous(), "{} isn't contiguous, can't interpret as []const u8", .{self});
-        const ptr: [*]const T = @alignCast(@ptrCast(self._data));
+        if (!self.isContiguous()) {
+            std.debug.panic("{} isn't contiguous", .{self});
+        }
+        const ptr: [*]const T = @alignCast(@ptrCast(self.data.ptr));
         return ptr[0..self._shape.count()];
     }
 
@@ -269,6 +271,12 @@ pub const HostBuffer = struct {
 
     pub fn choose(self: HostBuffer, offsets: anytype) HostBuffer {
         const off, const tags = Shape.parseDimensions(offsets);
+
+        // TODO: this is a bit too restrictive, choosing slice could extract a contiguous
+        // slice out of a non-contiguous tensor.
+        std.debug.assert(self.isContiguous());
+        stdx.debug.assert(DataType.fromZigType(T) == self.dtype(), "Can't reinterpret {} as {s}", .{ self, @typeName(T) });
+
         var sh = self._shape;
         var offset: i64 = 0;
         for (off.constSlice(), tags.constSlice()) |o, t| {
