@@ -305,11 +305,23 @@ pub const BFloat16 = packed struct(u16) {
     pub fn isInf(self: BFloat16) bool {
         return allBitsOne(self.exponent) and self.mantissa == 0;
     }
+
+    pub fn toF32(self: BFloat16) f32 {
+        // Pad the BF16 with zeros 0
+        return @bitCast([2]u16{ 0, @bitCast(self) });
+    }
+
+    pub fn fromF32(float32: f32) BFloat16 {
+        var int: u32 = @bitCast(float32);
+        // Round up if needed.
+        int += 0x8000;
+        const parts: [2]u16 = @bitCast(int);
+        return @bitCast(parts[1]);
+    }
+
     const Helpers = FloatHelpers(@This());
     pub const zero = Helpers.zero;
     pub const neg = Helpers.neg;
-    pub const fromF32 = Helpers.fromF32;
-    pub const toF32 = Helpers.toF32;
     pub const format = Helpers.format;
 };
 
@@ -317,7 +329,7 @@ test BFloat16 {
     // From https://en.wikipedia.org/wiki/Bfloat16_floating-point_format#Examples
     try std.testing.expectEqual(BFloat16.fromF32(0), BFloat16{ .sign = 0, .exponent = 0, .mantissa = 0 });
     try std.testing.expectEqual(BFloat16.fromF32(-2), BFloat16{ .sign = 1, .exponent = 127 + 1, .mantissa = 0 });
-    try std.testing.expectEqual(BFloat16.fromF32(3.02344107628), BFloat16{ .sign = 0, .exponent = 127 + 1, .mantissa = 65 });
+    try std.testing.expectEqual(BFloat16.fromF32(3.02344107628), BFloat16{ .sign = 0, .exponent = 127 + 1, .mantissa = 66 });
     try std.testing.expectEqual(BFloat16.fromF32(1.0 / 128.0), BFloat16{ .sign = 0, .exponent = 127 - 7, .mantissa = 0 });
     try std.testing.expectEqual(std.mem.toBytes(BFloat16.inf.neg()), [_]u8{ 0x80, 0xff });
     try std.testing.expectEqual(BFloat16.inf, BFloat16.fromF32(std.math.inf(f32)));
