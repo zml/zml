@@ -277,6 +277,7 @@ pub const HostBuffer = struct {
         }
 
         if (last_sliced_ax > 0) {
+            // TODO better error message
             for (0..@intCast(last_sliced_ax)) |ax|
                 std.debug.assert(sh._dims.buffer[ax] == 1);
         }

@@ -39,8 +39,8 @@ pub const Context = struct {
             inline for (comptime std.enums.values(runtimes.Platform)) |t| {
                 if (runtimes.load(t)) |api| {
                     Context.apis.set(t, api);
+                    if (t == .cuda) cuda.init();
                 } else |_| {}
-                if (t == .cuda) cuda.init();
             }
         }
     }.call);
