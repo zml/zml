@@ -260,7 +260,7 @@ pub const BaseExe = struct {
 
     pub fn clone(self: BaseExe, parent_allocator: std.mem.Allocator) !BaseExe {
         return .init(parent_allocator, self.platform, self.exe, .{
-            .input_shapes = self.input_shapes,
+            .n_in = self.input_buffer_count,
             .result_shapes = self.result_shapes,
             .n_devices = self.num_devices,
         });

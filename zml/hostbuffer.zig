@@ -285,7 +285,11 @@ pub const HostBuffer = struct {
             sh._dims.buffer[ax] = 0;
         }
 
-        var new_strides: [Shape.MAX_RANK]i64 = @splat(self.dtype().sizeOf());
+        if (last_sliced_ax > 0) {
+            // TODO better error message
+            for (0..@intCast(last_sliced_ax)) |ax|
+                std.debug.assert(sh._dims.buffer[ax] == 1);
+        }
 
         // TODO rewrite with simd. This is a pshuf, but it's not supported by @shuffle.
         var res_ax: u32 = 0;

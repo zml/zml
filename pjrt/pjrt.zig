@@ -653,7 +653,7 @@ pub const LoadedExecutable = opaque {
         });
     }
 
-    pub fn getExecutable(self: *LoadedExecutable, api: *const Api) ApiError!*Executable {
+    pub fn getExecutable(self: *const LoadedExecutable, api: *const Api) ApiError!*Executable {
         const ret = try api.call(.PJRT_LoadedExecutable_GetExecutable, .{
             .loaded_executable = self.inner(),
         });
