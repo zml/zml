@@ -1,4 +1,5 @@
 const std = @import("std");
+const stdx = @import("stdx");
 
 const asynk = @import("async");
 const dialects = @import("mlir/dialects");
@@ -261,13 +262,13 @@ pub const LoadedExecutable = opaque {
     };
 
     pub fn execute(self: *const LoadedExecutable, api: *const Api, args: ExecuteArgs) ExecuteError!void {
-        try self.inner().execute(api, pjrt.LoadedExecutable.ExecuteArgs{
+        try asynk.callBlocking(pjrt.LoadedExecutable.execute, .{self.inner(), api, pjrt.LoadedExecutable.ExecuteArgs{
             .num_args = args.num_args,
             .arguments = @ptrCast(args.arguments),
             .results = @ptrCast(args.results),
             .events = @ptrCast(args.events),
             .non_donatable_input_indices = args.non_donatable_input_indices,
-        });
+        }});
     }
 
     pub fn getExecutable(self: *LoadedExecutable, api: *const Api) ApiError!*Executable {
