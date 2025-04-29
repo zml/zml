@@ -31,10 +31,14 @@ diff --git a/xla/pjrt/c/pjrt_c_api_ffi_extension.h b/xla/pjrt/c/pjrt_c_api_ffi_e
 index a33bd4aa9c..3309194538 100644
 --- a/xla/pjrt/c/pjrt_c_api_ffi_extension.h
 +++ b/xla/pjrt/c/pjrt_c_api_ffi_extension.h
-@@ -66,12 +66,28 @@ PJRT_DEFINE_STRUCT_TRAITS(PJRT_FFI_UserData_Add_Args, user_data);
+@@ -66,12 +66,33 @@ PJRT_DEFINE_STRUCT_TRAITS(PJRT_FFI_UserData_Add_Args, user_data);
  // Adds a user data to the execute context.
  typedef PJRT_Error* PJRT_FFI_UserData_Add(PJRT_FFI_UserData_Add_Args* args);
  
++ typedef enum PJRT_FFI_Handler_TraitsBits {
++  PJRT_FFI_HANDLER_TRAITS_COMMAND_BUFFER_COMPATIBLE = 1u << 0,
++} PJRT_FFI_Handler_TraitsBits;
++
 +struct PJRT_FFI_Register_Handler_Args {
 +  size_t struct_size;
 +  const char* target_name;
@@ -43,8 +47,9 @@ index a33bd4aa9c..3309194538 100644
 +  void* handler;
 +  const char* platform_name;
 +  size_t platform_name_size;
++  PJRT_FFI_Handler_TraitsBits traits;
 +};
-+PJRT_DEFINE_STRUCT_TRAITS(PJRT_FFI_Register_Handler_Args, handler);
++PJRT_DEFINE_STRUCT_TRAITS(PJRT_FFI_Register_Handler_Args, traits);
 +
 +// Registers an FFI call handler for a specific platform.
 +typedef PJRT_Error* PJRT_FFI_Register_Handler(

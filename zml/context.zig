@@ -221,7 +221,7 @@ const CustomCall = struct {
         const registry = platform.pjrt_api.customCallRegistry();
 
         if (registry) |reg| {
-            try reg.registerFfi(platform.pjrt_api, "zmlHostBufferCallback", @tagName(platform.target), &hostBufferCallback);
+            try reg.registerFfi(platform.pjrt_api, "zmlHostBufferCallback", @tagName(platform.target), &hostBufferCallback, .{});
         } else {
             stdx.debug.panic("Registering custom calls failed", .{});
         }

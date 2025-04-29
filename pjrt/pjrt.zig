@@ -1164,10 +1164,19 @@ pub const NamedValue = extern struct {
     }
 };
 
+pub const RegisterHandlerTraits = enum(c.PJRT_FFI_Handler_TraitsBits) {
+    command_buffer_compatible = c.PJRT_FFI_HANDLER_TRAITS_COMMAND_BUFFER_COMPATIBLE,
+    _,
+};
+
 // todo : support all missing handlers available in GPU plugin extension: handler_instantiate, handler_prepare, handler_initialize
 // introduced by https://github.com/openxla/xla/commit/ef85a7bcc308313492ebc50295a8a08b4e51b8f5
 pub const CustomCallRegistry = extern struct {
     inner: *const c.PJRT_FFI_Register_Handler,
+
+    pub const RegisterFfiOptions = struct {
+        traits: RegisterHandlerTraits = @enumFromInt(0),
+    };
 
     pub fn registerFfi(
         self: *const CustomCallRegistry,
@@ -1175,6 +1184,7 @@ pub const CustomCallRegistry = extern struct {
         target_name: []const u8,
         platform_name: []const u8,
         func: *const ffi.Handler,
+        options: RegisterFfiOptions,
     ) ApiError!void {
         var ret = pjrtStruct(c.PJRT_FFI_Register_Handler_Args{
             .api_version = 1,
@@ -1183,6 +1193,7 @@ pub const CustomCallRegistry = extern struct {
             .handler = @ptrCast(@constCast(func)),
             .platform_name = platform_name.ptr,
             .platform_name_size = platform_name.len,
+            .traits = @intFromEnum(options.traits),
         });
         const result = self.inner(&ret);
         if (result) |pjrt_c_error| {
