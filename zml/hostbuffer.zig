@@ -162,6 +162,8 @@ pub const HostBuffer = struct {
 
     /// Copies this HostBuffer to the given accelerator.
     pub fn toDevice(self: HostBuffer, platform_: Platform) !Buffer {
+        const frame = platform_.tracer.frameStart("HostBuffer toDevice");
+        defer platform_.tracer.frameEnd(frame, "HostBuffer toDevice");
         return try Buffer.from(platform_, self);
     }
 
