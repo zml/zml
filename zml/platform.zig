@@ -7,6 +7,7 @@ const stdx = @import("stdx");
 const meta = @import("meta.zig");
 const module = @import("module.zig");
 const pjrt = @import("pjrtx.zig");
+const Tracer = @import("tools/tracer.zig").Tracer;
 
 const log = std.log.scoped(.zml);
 
@@ -27,6 +28,7 @@ pub const Platform = struct {
     pjrt_api: *const pjrt.Api,
     pjrt_client: *pjrt.Client,
     compilation_options: CompilationOptions = .{},
+    tracer: Tracer,
 
     pub const MAX_NUM_DEVICES: u8 = 32;
     pub const CreateOptions = _CreateOptions;
@@ -43,6 +45,7 @@ pub const Platform = struct {
             .pjrt_api = api,
             .pjrt_client = pjrt_client,
             .compilation_options = .{},
+            .tracer = Tracer.init("ai.zml.platform"),
         };
     }
 

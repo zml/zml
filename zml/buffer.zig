@@ -270,6 +270,29 @@ pub const Buffer = struct {
         return res;
     }
 
+    pub fn copyToMemory(self: Buffer, platform: Platform, kind: Memory) !Buffer {
+        const device = try self._shards.get(0).getDevice(self._api);
+        const memories = try device.addressableMemories(self._api);
+        var selected_mem: *const pjrt.Memory = undefined;
+        for (memories) |mem| {
+            if (mem.kind(platform.pjrt_api) == kind.toPjrtMemory()) {
+                selected_mem = mem;
+            }
+        }
+
+        var shards: Shards = .{};
+        for (self._shards.constSlice()) |shard| {
+            const pjrt_buffer = try shard.copyToMemory(self._api, selected_mem);
+            shards.appendAssumeCapacity(pjrt_buffer);
+        }
+
+        return .{
+            ._api = platform.pjrt_api,
+            ._shape = self._shape,
+            ._shards = shards,
+        };
+    }
+
     /// Copies the content of the Buffer back to host, in the given buffer,
     /// and return a new `HostBuffer` object with the same shape.
     /// The returned `HostBuffer` doesn't own the memory.

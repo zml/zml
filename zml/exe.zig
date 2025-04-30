@@ -211,6 +211,7 @@ pub const BaseExe = struct {
         var events = [_]?*pjrt.Event{null} ** Platform.MAX_NUM_DEVICES;
         const sharding = self.platform.sharding();
 
+        const trace = self.platform.tracer.frameStart("_unsafeCall execute");
         self.exe.execute(self.platform.pjrt_api, .{
             .arguments = self.input_per_device,
             .num_args = self.input_buffer_count,
@@ -220,15 +221,16 @@ pub const BaseExe = struct {
             // even if it has been marked as "can be donated" during compilation.
             // TODO: expose it ?
             .non_donatable_input_indices = &.{},
-        }) catch |err| {
-            std.debug.panic("PJRT_LoadedExecutable_Execute failed with: {}", .{err});
-        };
+        }) catch unreachable;
+        self.platform.tracer.frameEnd(trace, "_unsafeCall execute");
 
+        const trace_events_await = self.platform.tracer.frameStart("_unsafeCall await events");
         for (events[0..sharding.num_partitions]) |e| {
             if (e) |ev| {
                 ev.await_(self.platform.pjrt_api) catch unreachable;
             }
         }
+        self.platform.tracer.frameEnd(trace_events_await, "_unsafeCall await events");
     }
 
     pub fn serialize(self: BaseExe, writer: anytype) !void {
@@ -245,7 +247,7 @@ pub const BaseExe = struct {
     // }
 
     pub fn prepare(self: *BaseExe, x: anytype) void {
-        const n = fillBuffers(&x, self.input_shapes, self.input_per_device, self.ready_buffer_count);
+        const n = fillBuffers(&x, self.platform, self.input_per_device, self.ready_buffer_count);
         self.ready_buffer_count += n;
     }
 
@@ -301,7 +303,7 @@ pub fn Exe(ArgsT: type, ReturnT: type) type {
         }
 
         pub fn call(self: Self, args: Bufferized(ArgsT)) Bufferized(ReturnT) {
-            const total_ready = fillBuffers(&args, self.inner.input_shapes, self.inner.input_per_device, self.inner.ready_buffer_count);
+            const total_ready = fillBuffers(&args, self.inner.platform, self.inner.input_per_device, self.inner.ready_buffer_count);
             std.debug.assert(total_ready == self.inner.input_buffer_count);
             self.inner._unsafeCall();
             var result: Bufferized(ReturnT) = undefined;
@@ -323,7 +325,10 @@ fn splitBuffer(T: type, buffer: []T, lengths: anytype) [lengths.len][]T {
 }
 
 /// Visit the given struct and fill the `buffers` slice with the buffer associated with encountered Tensor.
-fn fillBuffers(v: anytype, shapes: []const Shape, buffers: []const [*]*pjrt.Buffer, start: u32) u32 {
+fn fillBuffers(v: anytype, platform: Platform, buffers: []const [*]*pjrt.Buffer, start: u32) u32 {
+    const trace = platform.tracer.frameStart("fillBuffers_" ++ @typeName(@TypeOf(v)));
+    defer platform.tracer.frameEnd(trace, "fillBuffers_" ++ @typeName(@TypeOf(v)));
+
     const LocalContext = struct {
         index: u32,
         buffers: []const [*]*pjrt.Buffer,
@@ -351,6 +356,9 @@ fn fillBuffers(v: anytype, shapes: []const Shape, buffers: []const [*]*pjrt.Buff
 
 /// Visit the given struct and override tensors by creating a new one using the provided PJRT buffers.
 fn assignRawBuffers(v: anytype, platform: Platform, buffers: []const [*]*pjrt.Buffer, buffer_shapes: []Shape) void {
+    const trace = platform.tracer.frameStart("assignRawBuffers_" ++ @typeName(@TypeOf(v)));
+    defer platform.tracer.frameEnd(trace, "assignRawBuffers_" ++ @typeName(@TypeOf(v)));
+
     const LocalContext = struct {
         index: u32,
         platform: Platform,
