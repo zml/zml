@@ -1,11 +1,9 @@
-const asynk = @import("async");
-const builtin = @import("builtin");
-const c = @import("c");
 const std = @import("std");
-const stdx = @import("stdx");
+const builtin = @import("builtin");
 
-const zml = @import("zml.zig");
-const posix = @import("posix.zig");
+const asynk = @import("async");
+const c = @import("c");
+const stdx = @import("stdx");
 
 pub const gguf = @import("aio/gguf.zig");
 pub const nemo = @import("aio/nemo.zig");
@@ -13,10 +11,11 @@ pub const safetensors = @import("aio/safetensors.zig");
 pub const tinyllama = @import("aio/tinyllama.zig");
 pub const torch = @import("aio/torch.zig");
 pub const yaml = @import("aio/yaml.zig");
+const HostBuffer = @import("hostbuffer.zig").HostBuffer;
+const posix = @import("posix.zig");
+const zml = @import("zml.zig");
 
 pub const log = std.log.scoped(.@"zml/aio");
-const HostBuffer = @import("hostbuffer.zig").HostBuffer;
-
 test {
     std.testing.refAllDecls(@This());
     std.testing.refAllDecls(gguf);
@@ -450,7 +449,7 @@ test populateModel {
 
         // Create a fake HostBuffer, we use the given integer to identify the created buffer.
         fn _newHostBuffer(n: u32) zml.HostBuffer {
-            return .{ ._shape = zml.Shape.init(.{n}, .f16), .data = undefined };
+            return .{ ._shape = zml.Shape.init(.{n}, .f16), ._strides = undefined, .data = undefined };
         }
     };
 
