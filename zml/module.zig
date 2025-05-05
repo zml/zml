@@ -540,9 +540,13 @@ pub const CompilationContext = struct {
         }
     }
 
+    pub fn numPartitions(self: CompilationContext) u8 {
+        return self._platform.sharding().num_partitions;
+    }
+
     pub fn getShardingAttr(self: CompilationContext, shape: Shape) mlir.Attribute {
         const ctx = self.mlirCtx();
-        const num_partitions = self._platform.sharding().num_partitions;
+        const num_partitions = self.numPartitions();
         var sharding_str: std.BoundedArray(u8, 128) = .{};
         writeShardingRepresentation(shape, num_partitions, sharding_str.writer()) catch unreachable;
         return mlir.Attribute.string(ctx, sharding_str.constSlice());
