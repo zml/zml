@@ -97,6 +97,39 @@ pub const Buffer = struct {
         return res;
     }
 
+    pub const FromExOpts = struct {
+        memory: Memory = .device,
+    };
+    pub fn fromEx(platform: Platform, host_buffer: HostBuffer, opts: FromExOpts) !Buffer {
+        var res: Buffer = .{
+            ._api = platform.pjrt_api,
+            ._shape = host_buffer.shape(),
+            ._shards = .{},
+        };
+
+        const buffer_type = bufferTypeFromDtype(host_buffer.shape().dtype());
+        const byte_strides = host_buffer.strides();
+
+        const devices = platform.getDevices();
+        for (devices) |device| {
+            const pjrt_buffer, const event = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, .{
+                .data = host_buffer.data,
+                .buffer_type = buffer_type,
+                .dims = host_buffer.shape().dims(),
+                .byte_strides = byte_strides,
+                .device = device,
+                .host_buffer_semantics = .ImmutableUntilTransferCompletes,
+                .memory = @constCast(platform.pjrt_client.memoryByKind(platform.pjrt_api, opts.memory.toPjrtMemory())),
+            });
+            if (event) |ev| {
+                ev.deinit(platform.pjrt_api);
+            }
+            res._shards.appendAssumeCapacity(pjrt_buffer);
+        }
+
+        return res;
+    }
+
     pub fn awaitt(self: Buffer) !Buffer {
         for (self._shards.constSlice()) |buffer| {
             if (buffer.getReadyEvent(self._api)) |ev| {
