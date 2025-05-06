@@ -243,6 +243,7 @@ pub fn visit(comptime cb: anytype, ctx: FnParam(cb, 0), v: anytype) void {
         .pointer => |info| info.child,
         else => stdx.debug.compileError("zml.meta.visit is expecting a callback with a pointer as second argument but found {}", .{FnParam(cb, 1)}),
     };
+    if (!Contains(T, K)) return;
 
     if (type_info_v != .pointer) {
         const Callback = @TypeOf(cb);
@@ -532,4 +533,36 @@ fn _CollectCtx(func: anytype) type {
 fn _CollectArg(func: anytype) type {
     const params = @typeInfo(@TypeOf(func)).@"fn".params;
     return params[params.len - 1].type orelse @compileError("anytype not supported in collect");
+}
+
+pub fn Contains(Haystack: type, T: type) bool {
+    switch (Haystack) {
+        T, ?T => return true,
+        *T, ?*T => return true,
+        *const T, ?*const T => return true,
+        []const T, ?[]const T => return true,
+        else => {},
+    }
+
+    return switch (@typeInfo(Haystack)) {
+        .@"struct" => |info| {
+            inline for (info.fields) |field| {
+                if (Contains(field.type, T))
+                    return true;
+            }
+            return false;
+        },
+        .@"union" => |info| {
+            inline for (info.fields) |field| {
+                if (Contains(field.type, T))
+                    return true;
+            }
+            return false;
+        },
+        .array => |info| Contains(info.child, T),
+        .pointer => |info| Contains(info.child, T),
+        .optional => |info| Contains(info.child, T),
+        .vector => |info| Contains(info.child, T),
+        else => false,
+    };
 }
