@@ -1,0 +1,15 @@
+{
+  "strip_prefix": "mlx-af1b725fdaa55c969aa409257c929854521997c7",
+  "url": "https://github.com/ml-explore/mlx/archive/af1b725fdaa55c969aa409257c929854521997c7.tar.gz",
+  "integrity": "sha256-RPItpIb9XRRpxSv6vNygf52lZ5IP165OyZShKaEr8xU=",
+  "overlay": {
+    "define_metal_path.sh": "",
+    "metal_cpp.bzl": "",
+    "MODULE.bazel": "",
+    "BUILD.bazel": ""
+  },
+  "patch_strip": 1,
+  "patches": {
+    "0001-pregen-Metal-kernels-and-path.patch": ""
+  }
+}

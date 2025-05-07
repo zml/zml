@@ -1,0 +1,2279 @@
+diff --git a/mlx/backend/metal/device.cpp b/mlx/backend/metal/device.cpp
+index 9379733..9701e1a 100644
+--- a/mlx/backend/metal/device.cpp
++++ b/mlx/backend/metal/device.cpp
+@@ -11,6 +11,7 @@
+ 
+ #include "mlx/backend/metal/device.h"
+ #include "mlx/backend/metal/metal.h"
++#include "mlx/backend/metal/metal_path.h"
+ #include "mlx/backend/metal/metal_impl.h"
+ #include "mlx/backend/metal/utils.h"
+ 
+diff --git a/mlx/backend/metal/jit/binary_ops.cpp b/mlx/backend/metal/jit/binary_ops.cpp
+new file mode 100644
+index 0000000..d178ec9
+--- /dev/null
++++ b/mlx/backend/metal/jit/binary_ops.cpp
+@@ -0,0 +1,266 @@
++namespace mlx::core::metal {
++
++const char* binary_ops() {
++  return R"preamble(
++struct Add {
++  template <typename T>
++  T operator()(T x, T y) {
++    return x + y;
++  }
++};
++struct FloorDivide {
++  template <typename T>
++  T operator()(T x, T y) {
++    return x / y;
++  }
++  template <>
++  float operator()(float x, float y) {
++    return trunc(x / y);
++  }
++  template <>
++  half operator()(half x, half y) {
++    return trunc(x / y);
++  }
++  template <>
++  bfloat16_t operator()(bfloat16_t x, bfloat16_t y) {
++    return trunc(x / y);
++  }
++};
++struct Divide {
++  template <typename T>
++  T operator()(T x, T y) {
++    return x / y;
++  }
++};
++struct Remainder {
++  template <typename T>
++  metal::enable_if_t<metal::is_integral_v<T> & !metal::is_signed_v<T>, T>
++  operator()(T x, T y) {
++    return x % y;
++  }
++  template <typename T>
++  metal::enable_if_t<metal::is_integral_v<T> & metal::is_signed_v<T>, T>
++  operator()(T x, T y) {
++    auto r = x % y;
++    if (r != 0 && (r < 0 != y < 0)) {
++      r += y;
++    }
++    return r;
++  }
++  template <typename T>
++  metal::enable_if_t<!metal::is_integral_v<T>, T> operator()(T x, T y) {
++    T r = fmod(x, y);
++    if (r != 0 && (r < 0 != y < 0)) {
++      r += y;
++    }
++    return r;
++  }
++  template <>
++  complex64_t operator()(complex64_t x, complex64_t y) {
++    return x % y;
++  }
++};
++struct Equal {
++  template <typename T>
++  bool operator()(T x, T y) {
++    return x == y;
++  }
++};
++struct NaNEqual {
++  template <typename T>
++  bool operator()(T x, T y) {
++    return x == y || (metal::isnan(x) && metal::isnan(y));
++  }
++  template <>
++  bool operator()(complex64_t x, complex64_t y) {
++    return x == y ||
++        (metal::isnan(x.real) && metal::isnan(y.real) && metal::isnan(x.imag) &&
++         metal::isnan(y.imag)) ||
++        (x.real == y.real && metal::isnan(x.imag) && metal::isnan(y.imag)) ||
++        (metal::isnan(x.real) && metal::isnan(y.real) && x.imag == y.imag);
++  }
++};
++struct Greater {
++  template <typename T>
++  bool operator()(T x, T y) {
++    return x > y;
++  }
++};
++struct GreaterEqual {
++  template <typename T>
++  bool operator()(T x, T y) {
++    return x >= y;
++  }
++};
++struct Less {
++  template <typename T>
++  bool operator()(T x, T y) {
++    return x < y;
++  }
++};
++struct LessEqual {
++  template <typename T>
++  bool operator()(T x, T y) {
++    return x <= y;
++  }
++};
++struct LogAddExp {
++  template <typename T>
++  T operator()(T x, T y) {
++    if (metal::isnan(x) || metal::isnan(y)) {
++      return metal::numeric_limits<T>::quiet_NaN();
++    }
++    constexpr T inf = metal::numeric_limits<T>::infinity();
++    T maxval = metal::max(x, y);
++    T minval = metal::min(x, y);
++    return (minval == -inf || maxval == inf)
++        ? maxval
++        : (maxval + log1p(metal::exp(minval - maxval)));
++  };
++};
++struct Maximum {
++  template <typename T>
++  metal::enable_if_t<metal::is_integral_v<T>, T> operator()(T x, T y) {
++    return metal::max(x, y);
++  }
++  template <typename T>
++  metal::enable_if_t<!metal::is_integral_v<T>, T> operator()(T x, T y) {
++    if (metal::isnan(x)) {
++      return x;
++    }
++    return x > y ? x : y;
++  }
++  template <>
++  complex64_t operator()(complex64_t x, complex64_t y) {
++    if (metal::isnan(x.real) || metal::isnan(x.imag)) {
++      return x;
++    }
++    return x > y ? x : y;
++  }
++};
++struct Minimum {
++  template <typename T>
++  metal::enable_if_t<metal::is_integral_v<T>, T> operator()(T x, T y) {
++    return metal::min(x, y);
++  }
++  template <typename T>
++  metal::enable_if_t<!metal::is_integral_v<T>, T> operator()(T x, T y) {
++    if (metal::isnan(x)) {
++      return x;
++    }
++    return x < y ? x : y;
++  }
++  template <>
++  complex64_t operator()(complex64_t x, complex64_t y) {
++    if (metal::isnan(x.real) || metal::isnan(x.imag)) {
++      return x;
++    }
++    return x < y ? x : y;
++  }
++};
++struct Multiply {
++  template <typename T>
++  T operator()(T x, T y) {
++    return x * y;
++  }
++};
++struct NotEqual {
++  template <typename T>
++  bool operator()(T x, T y) {
++    return x != y;
++  }
++  template <>
++  bool operator()(complex64_t x, complex64_t y) {
++    return x.real != y.real || x.imag != y.imag;
++  }
++};
++struct Power {
++  template <typename T>
++  metal::enable_if_t<!metal::is_integral_v<T>, T> operator()(T base, T exp) {
++    return metal::pow(base, exp);
++  }
++  template <typename T>
++  metal::enable_if_t<metal::is_integral_v<T>, T> operator()(T base, T exp) {
++    T res = 1;
++    while (exp) {
++      if (exp & 1) {
++        res *= base;
++      }
++      exp >>= 1;
++      base *= base;
++    }
++    return res;
++  }
++  template <>
++  complex64_t operator()(complex64_t x, complex64_t y) {
++    auto x_theta = metal::atan2(x.imag, x.real);
++    auto x_ln_r = 0.5 * metal::log(x.real * x.real + x.imag * x.imag);
++    auto mag = metal::exp(y.real * x_ln_r - y.imag * x_theta);
++    auto phase = y.imag * x_ln_r + y.real * x_theta;
++    return {mag * metal::cos(phase), mag * metal::sin(phase)};
++  }
++};
++struct Subtract {
++  template <typename T>
++  T operator()(T x, T y) {
++    return x - y;
++  }
++};
++struct LogicalAnd {
++  template <typename T>
++  T operator()(T x, T y) {
++    return x && y;
++  };
++};
++struct LogicalOr {
++  template <typename T>
++  T operator()(T x, T y) {
++    return x || y;
++  };
++};
++struct BitwiseAnd {
++  template <typename T>
++  T operator()(T x, T y) {
++    return x & y;
++  };
++};
++struct BitwiseOr {
++  template <typename T>
++  T operator()(T x, T y) {
++    return x | y;
++  };
++};
++struct BitwiseXor {
++  template <typename T>
++  T operator()(T x, T y) {
++    return x ^ y;
++  };
++};
++struct LeftShift {
++  template <typename T>
++  T operator()(T x, T y) {
++    return x << y;
++  };
++};
++struct RightShift {
++  template <typename T>
++  T operator()(T x, T y) {
++    return x >> y;
++  };
++};
++struct ArcTan2 {
++  template <typename T>
++  T operator()(T y, T x) {
++    return metal::precise::atan2(y, x);
++  }
++};
++struct DivMod {
++  template <typename T>
++  metal::array<T, 2> operator()(T x, T y) {
++    return {FloorDivide{}(x, y), Remainder{}(x, y)};
++  };
++};
++)preamble";
++}
++
++} // namespace mlx::core::metal
+diff --git a/mlx/backend/metal/jit/gather.cpp b/mlx/backend/metal/jit/gather.cpp
+new file mode 100644
+index 0000000..374311e
+--- /dev/null
++++ b/mlx/backend/metal/jit/gather.cpp
+@@ -0,0 +1,68 @@
++namespace mlx::core::metal {
++
++const char* gather() {
++  return R"preamble(
++template <typename IdxT, int NIDX>
++struct Indices {
++  const array<const device IdxT*, NIDX> buffers;
++  const constant int* shapes;
++  const constant int64_t* strides;
++  const constant bool* row_contiguous;
++  const int ndim;
++};
++template <typename IdxT>
++METAL_FUNC size_t offset_neg_idx(IdxT idx, int size) {
++  if (is_unsigned_v<IdxT>) {
++    return idx;
++  } else {
++    return (idx < 0) ? idx + size : idx;
++  }
++}
++
++template <typename T, typename IdxT, int NIDX, int IDX_NDIM, typename LocT>
++METAL_FUNC void gather_impl(
++    const device T* src [[buffer(0)]],
++    device T* out [[buffer(1)]],
++    const constant int* src_shape [[buffer(2)]],
++    const constant int64_t* src_strides [[buffer(3)]],
++    const constant size_t& src_ndim [[buffer(4)]],
++    const constant int* slice_sizes [[buffer(5)]],
++    const constant int* axes [[buffer(6)]],
++    const thread Indices<IdxT, NIDX>& indices,
++    uint3 index [[thread_position_in_grid]],
++    uint3 grid_dim [[threads_per_grid]]) {
++  LocT src_idx = 0;
++  for (int i = 0; i < NIDX; ++i) {
++    LocT idx_loc;
++    if (IDX_NDIM == 0) {
++      idx_loc = 0;
++    } else if (IDX_NDIM == 1) {
++      idx_loc = index.x * static_cast<LocT>(indices.strides[indices.ndim * i]);
++    } else {
++      idx_loc = index.x * static_cast<LocT>(indices.strides[indices.ndim * i]);
++      idx_loc += indices.row_contiguous[i]
++          ? index.y
++          : elem_to_loc<LocT>(
++                index.y,
++                &indices.shapes[indices.ndim * i + 1],
++                &indices.strides[indices.ndim * i + 1],
++                indices.ndim - 1);
++    }
++    auto ax = axes[i];
++    auto idx_val = offset_neg_idx(indices.buffers[i][idx_loc], src_shape[ax]);
++    src_idx += static_cast<LocT>(idx_val) * static_cast<LocT>(src_strides[ax]);
++  }
++  auto src_offset =
++      elem_to_loc<LocT>(index.z, slice_sizes, src_strides, src_ndim);
++  LocT out_idx = index.z;
++  if (IDX_NDIM == 1) {
++    out_idx += static_cast<LocT>(grid_dim.z) * index.x;
++  } else if (IDX_NDIM >= 2) {
++    out_idx += grid_dim.z * (index.x * static_cast<LocT>(grid_dim.y) + index.y);
++  }
++  out[out_idx] = src[src_offset + src_idx];
++}
++)preamble";
++}
++
++} // namespace mlx::core::metal
+diff --git a/mlx/backend/metal/jit/gather_axis.cpp b/mlx/backend/metal/jit/gather_axis.cpp
+new file mode 100644
+index 0000000..396fad3
+--- /dev/null
++++ b/mlx/backend/metal/jit/gather_axis.cpp
+@@ -0,0 +1,44 @@
++namespace mlx::core::metal {
++
++const char* gather_axis() {
++  return R"preamble(
++template <typename T, typename IdxT, typename LocT, bool SrcC, bool IdxC>
++[[kernel]] void gather_axis(
++    const device T* src [[buffer(0)]],
++    const device IdxT* indices [[buffer(1)]],
++    device T* out [[buffer(2)]],
++    const constant int* shape [[buffer(3)]],
++    const constant int64_t* src_strides [[buffer(4)]],
++    const constant int64_t* idx_strides [[buffer(5)]],
++    const constant size_t& ndim [[buffer(6)]],
++    const constant int& axis [[buffer(7)]],
++    const constant int& axis_size [[buffer(8)]],
++    const constant size_t& src_ax_stride [[buffer(9)]],
++    const constant size_t& idx_ax_stride [[buffer(10)]],
++    uint3 index [[thread_position_in_grid]],
++    uint3 grid_dim [[threads_per_grid]]) {
++  LocT elem_idx = index.z * static_cast<LocT>(grid_dim.x);
++  LocT out_idx = elem_idx * grid_dim.y + index.x;
++  LocT idx_loc = index.y * static_cast<LocT>(idx_ax_stride);
++  if (IdxC) {
++    idx_loc += out_idx;
++  } else {
++    idx_loc += elem_to_loc<LocT>(elem_idx + index.x, shape, idx_strides, ndim);
++  }
++  auto idx_val = indices[idx_loc];
++  if (is_signed_v<IdxT>) {
++    idx_val = (idx_val < 0) ? idx_val + axis_size : idx_val;
++  }
++  LocT src_idx = idx_val * static_cast<LocT>(src_ax_stride);
++  if (SrcC) {
++    src_idx += elem_idx * axis_size + index.x;
++  } else {
++    src_idx += elem_to_loc<LocT>(elem_idx + index.x, shape, src_strides, ndim);
++  }
++  out_idx += index.y * static_cast<LocT>(grid_dim.x);
++  out[out_idx] = src[src_idx];
++}
++)preamble";
++}
++
++} // namespace mlx::core::metal
+diff --git a/mlx/backend/metal/jit/hadamard.cpp b/mlx/backend/metal/jit/hadamard.cpp
+new file mode 100644
+index 0000000..b0839df
+--- /dev/null
++++ b/mlx/backend/metal/jit/hadamard.cpp
+@@ -0,0 +1,128 @@
++namespace mlx::core::metal {
++
++const char* hadamard() {
++  return R"preamble(
++
++using namespace metal;
++template <short R>
++METAL_FUNC void radix_func(thread float* x) {
++  constexpr short logR = __builtin_ctz(R);
++  short h = 1;
++#pragma clang loop unroll(full)
++  for (short s = 0; s < logR; s++) {
++#pragma clang loop unroll(full)
++    for (short i = 0; i < R / 2; i++) {
++      short k = i & (h - 1);
++      short j = ((i - k) << 1) + k;
++      float a = x[j];
++      float b = x[j + h];
++      x[j] = a + b;
++      x[j + h] = a - b;
++    }
++    h <<= 1;
++  }
++}
++template <typename T, int N, int max_radix, int read_width>
++[[kernel]] void hadamard_n(
++    const device T* in [[buffer(0)]],
++    device T* out [[buffer(1)]],
++    constant const float& scale,
++    uint3 elem [[thread_position_in_grid]],
++    uint3 grid [[threads_per_grid]]) {
++  constexpr short num_threads = N / max_radix;
++  constexpr short logN = __builtin_ctz(N);
++  constexpr short logR = __builtin_ctz(max_radix);
++  constexpr short num_steps = logN / logR;
++  constexpr short logFinal = logN % logR;
++  constexpr short final_radix = 1 << (logFinal);
++  int batch_idx = elem.x * N;
++  short i = elem.y;
++  threadgroup T buf[N];
++#pragma clang loop unroll(full)
++  for (short j = 0; j < max_radix / read_width; j++) {
++    short index = j * read_width * num_threads + i * read_width;
++#pragma clang loop unroll(full)
++    for (short r = 0; r < read_width; r++) {
++      buf[index + r] = in[batch_idx + index + r];
++    }
++  }
++  threadgroup_barrier(mem_flags::mem_threadgroup);
++  float x[max_radix];
++  short h = 1;
++#pragma clang loop unroll(full)
++  for (short s = 0; s < num_steps; s++) {
++    short k = i & (h - 1);
++    short j = ((i - k) << logR) + k;
++#pragma clang loop unroll(full)
++    for (short r = 0; r < max_radix; r++) {
++      x[r] = buf[j + h * r];
++    }
++    radix_func<max_radix>(x);
++#pragma clang loop unroll(full)
++    for (short r = 0; r < max_radix; r++) {
++      buf[j + h * r] = T(x[r]);
++    }
++    h <<= logR;
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++  }
++  if (final_radix > 1) {
++#pragma clang loop unroll(full)
++    for (int t = 0; t < max_radix / final_radix; t++) {
++      short index = i + t * num_threads;
++      short k = index & (h - 1);
++      short j = ((index - k) << logFinal) + k;
++#pragma clang loop unroll(full)
++      for (short r = 0; r < final_radix; r++) {
++        x[r] = buf[j + h * r];
++      }
++      radix_func<final_radix>(x);
++#pragma clang loop unroll(full)
++      for (short r = 0; r < final_radix; r++) {
++        buf[j + h * r] = T(x[r]);
++      }
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++  }
++#pragma clang loop unroll(full)
++  for (short j = 0; j < max_radix / read_width; j++) {
++    short index = j * read_width * num_threads + i * read_width;
++#pragma clang loop unroll(full)
++    for (short r = 0; r < read_width; r++) {
++      out[batch_idx + index + r] = T(buf[index + r] * scale);
++    }
++  }
++}
++template <typename T, int N, int M, int read_width>
++[[kernel]] void hadamard_m(
++    const device T* in [[buffer(0)]],
++    device T* out [[buffer(1)]],
++    constant const float& scale,
++    uint3 elem [[thread_position_in_grid]],
++    uint3 grid [[threads_per_grid]]) {
++  int index = elem.x * grid.y + elem.y;
++  short i = index % (N / read_width);
++  int batch_idx = index / (N / read_width) * M * N;
++  float x[read_width][M];
++#pragma clang loop unroll(full)
++  for (short c = 0; c < M; c++) {
++#pragma clang loop unroll(full)
++    for (short r = 0; r < read_width; r++) {
++      x[r][c] = in[batch_idx + c * N + i * read_width + r];
++    }
++  }
++#pragma clang loop unroll(full)
++  for (short r = 0; r < read_width; r++) {
++    hadamard_radix_m(x[r]);
++  }
++#pragma clang loop unroll(full)
++  for (short c = 0; c < M; c++) {
++#pragma clang loop unroll(full)
++    for (short r = 0; r < read_width; r++) {
++      out[batch_idx + c * N + i * read_width + r] = T(x[r][c] * scale);
++    }
++  }
++}
++)preamble";
++}
++
++} // namespace mlx::core::metal
+diff --git a/mlx/backend/metal/jit/reduce_utils.cpp b/mlx/backend/metal/jit/reduce_utils.cpp
+new file mode 100644
+index 0000000..de28f91
+--- /dev/null
++++ b/mlx/backend/metal/jit/reduce_utils.cpp
+@@ -0,0 +1,427 @@
++namespace mlx::core::metal {
++
++const char* reduce_utils() {
++  return R"preamble(
++using namespace metal;
++#pragma METAL internals : enable
++template <typename T>
++constexpr constant bool is_metal_atomic = _disjunction<
++    is_same<T, int>,
++    is_same<T, uint>,
++    is_same<T, ulong>,
++    is_same<T, float>>::value;
++#pragma METAL internals : disable
++template <typename T, typename = void>
++struct mlx_atomic {
++  atomic<uint> val;
++};
++template <typename T>
++struct mlx_atomic<T, enable_if_t<is_metal_atomic<T>>> {
++  atomic<T> val;
++};
++template <typename T, enable_if_t<is_metal_atomic<T>, bool> = true>
++METAL_FUNC T
++mlx_atomic_load_explicit(device mlx_atomic<T>* object, size_t offset) {
++  return atomic_load_explicit(&(object[offset].val), memory_order_relaxed);
++}
++template <typename T, enable_if_t<is_metal_atomic<T>, bool> = true>
++METAL_FUNC void
++mlx_atomic_store_explicit(device mlx_atomic<T>* object, T val, size_t offset) {
++  atomic_store_explicit(&(object[offset].val), val, memory_order_relaxed);
++}
++template <typename T, enable_if_t<is_metal_atomic<T>, bool> = true>
++METAL_FUNC void mlx_atomic_fetch_and_explicit(
++    device mlx_atomic<T>* object,
++    T val,
++    size_t offset) {
++  atomic_fetch_and_explicit(&(object[offset].val), val, memory_order_relaxed);
++}
++template <typename T, enable_if_t<is_metal_atomic<T>, bool> = true>
++METAL_FUNC void mlx_atomic_fetch_or_explicit(
++    device mlx_atomic<T>* object,
++    T val,
++    size_t offset) {
++  atomic_fetch_or_explicit(&(object[offset].val), val, memory_order_relaxed);
++}
++template <typename T, enable_if_t<is_metal_atomic<T>, bool> = true>
++METAL_FUNC void mlx_atomic_fetch_min_explicit(
++    device mlx_atomic<T>* object,
++    T val,
++    size_t offset) {
++  atomic_fetch_min_explicit(&(object[offset].val), val, memory_order_relaxed);
++}
++template <typename T, enable_if_t<is_metal_atomic<T>, bool> = true>
++METAL_FUNC void mlx_atomic_fetch_max_explicit(
++    device mlx_atomic<T>* object,
++    T val,
++    size_t offset) {
++  atomic_fetch_max_explicit(&(object[offset].val), val, memory_order_relaxed);
++}
++template <typename T, enable_if_t<is_metal_atomic<T>, bool> = true>
++METAL_FUNC void mlx_atomic_fetch_add_explicit(
++    device mlx_atomic<T>* object,
++    T val,
++    size_t offset) {
++  atomic_fetch_add_explicit(&(object[offset].val), val, memory_order_relaxed);
++}
++template <typename T, enable_if_t<is_metal_atomic<T>, bool> = true>
++METAL_FUNC void mlx_atomic_fetch_mul_explicit(
++    device mlx_atomic<T>* object,
++    T val,
++    size_t offset) {
++  T expected = mlx_atomic_load_explicit(object, offset);
++  while (!mlx_atomic_compare_exchange_weak_explicit(
++      object, &expected, val * expected, offset)) {
++  }
++}
++template <typename T, enable_if_t<is_metal_atomic<T>, bool> = true>
++METAL_FUNC bool mlx_atomic_compare_exchange_weak_explicit(
++    device mlx_atomic<T>* object,
++    thread T* expected,
++    T val,
++    size_t offset) {
++  return atomic_compare_exchange_weak_explicit(
++      &(object[offset].val),
++      expected,
++      val,
++      memory_order_relaxed,
++      memory_order_relaxed);
++}
++template <>
++METAL_FUNC void mlx_atomic_fetch_min_explicit<float>(
++    device mlx_atomic<float>* object,
++    float val,
++    size_t offset) {
++  float expected = mlx_atomic_load_explicit(object, offset);
++  while (val < expected) {
++    if (mlx_atomic_compare_exchange_weak_explicit(
++            object, &expected, val, offset)) {
++      return;
++    }
++  }
++}
++template <>
++METAL_FUNC void mlx_atomic_fetch_max_explicit<float>(
++    device mlx_atomic<float>* object,
++    float val,
++    size_t offset) {
++  float expected = mlx_atomic_load_explicit(object, offset);
++  while (val > expected) {
++    if (mlx_atomic_compare_exchange_weak_explicit(
++            object, &expected, val, offset)) {
++      return;
++    }
++  }
++}
++namespace {
++template <typename T>
++constexpr constant uint packing_size = sizeof(uint) / sizeof(T);
++template <typename T>
++union uint_or_packed {
++  T val[packing_size<T>];
++  uint bits;
++};
++template <typename T, typename Op>
++struct mlx_atomic_update_helper {
++  uint operator()(uint_or_packed<T> init, T update, size_t elem_offset) {
++    Op op;
++    init.val[elem_offset] = op(update, init.val[elem_offset]);
++    return init.bits;
++  }
++};
++template <typename T, typename Op>
++METAL_FUNC void mlx_atomic_update_and_store(
++    device mlx_atomic<T>* object,
++    T update,
++    size_t offset) {
++  size_t pack_offset = offset / packing_size<T>;
++  size_t elem_offset = offset % packing_size<T>;
++  mlx_atomic_update_helper<T, Op> helper;
++  uint_or_packed<T> expected;
++  expected.bits =
++      atomic_load_explicit(&(object[pack_offset].val), memory_order_relaxed);
++  while (Op::condition(update, expected.val[elem_offset]) &&
++         !mlx_atomic_compare_exchange_weak_explicit(
++             object,
++             &(expected.bits),
++             helper(expected, update, elem_offset),
++             pack_offset)) {
++  }
++}
++template <typename T>
++struct __None {
++  static bool condition(T a, T b) {
++#pragma unused(a)
++#pragma unused(b)
++    return true;
++  }
++  T operator()(T a, T b) {
++#pragma unused(b)
++    return a;
++  }
++};
++template <typename T>
++struct __Add {
++  static bool condition(T a, T b) {
++#pragma unused(a)
++#pragma unused(b)
++    return true;
++  }
++  T operator()(T a, T b) {
++    return a + b;
++  }
++};
++template <typename T>
++struct __Mul {
++  static bool condition(T a, T b) {
++#pragma unused(a)
++    return b != 0;
++  }
++  T operator()(T a, T b) {
++    return a * b;
++  }
++};
++template <typename T>
++struct __Max {
++  static bool condition(T a, T b) {
++    return a > b;
++  }
++  T operator()(T a, T b) {
++    return max(a, b);
++  }
++};
++template <typename T>
++struct __Min {
++  static bool condition(T a, T b) {
++    return a < b;
++  }
++  T operator()(T a, T b) {
++    return min(a, b);
++  }
++};
++}
++template <typename T, enable_if_t<!is_metal_atomic<T>, bool> = true>
++METAL_FUNC T
++mlx_atomic_load_explicit(device mlx_atomic<T>* object, size_t offset) {
++  size_t pack_offset = offset / sizeof(T);
++  size_t elem_offset = offset % sizeof(T);
++  uint_or_packed<T> packed_val;
++  packed_val.bits =
++      atomic_load_explicit(&(object[pack_offset].val), memory_order_relaxed);
++  return packed_val.val[elem_offset];
++}
++template <typename T, enable_if_t<!is_metal_atomic<T>, bool> = true>
++METAL_FUNC void
++mlx_atomic_store_explicit(device mlx_atomic<T>* object, T val, size_t offset) {
++  mlx_atomic_update_and_store<T, __None<T>>(object, val, offset);
++}
++template <typename T, enable_if_t<!is_metal_atomic<T>, bool> = true>
++METAL_FUNC void mlx_atomic_fetch_and_explicit(
++    device mlx_atomic<T>* object,
++    T val,
++    size_t offset) {
++  size_t pack_offset = offset / packing_size<T>;
++  size_t elem_offset = offset % packing_size<T>;
++  uint_or_packed<T> identity;
++  identity.bits = 4294967295U;
++  identity.val[elem_offset] = val;
++  atomic_fetch_and_explicit(
++      &(object[pack_offset].val), identity.bits, memory_order_relaxed);
++}
++template <typename T, enable_if_t<!is_metal_atomic<T>, bool> = true>
++METAL_FUNC void mlx_atomic_fetch_or_explicit(
++    device mlx_atomic<T>* object,
++    T val,
++    size_t offset) {
++  size_t pack_offset = offset / packing_size<T>;
++  size_t elem_offset = offset % packing_size<T>;
++  uint_or_packed<T> identity;
++  identity.bits = 0;
++  identity.val[elem_offset] = val;
++  atomic_fetch_or_explicit(
++      &(object[pack_offset].val), identity.bits, memory_order_relaxed);
++}
++template <typename T, enable_if_t<!is_metal_atomic<T>, bool> = true>
++METAL_FUNC void mlx_atomic_fetch_min_explicit(
++    device mlx_atomic<T>* object,
++    T val,
++    size_t offset) {
++  mlx_atomic_update_and_store<T, __Min<T>>(object, val, offset);
++}
++template <typename T, enable_if_t<!is_metal_atomic<T>, bool> = true>
++METAL_FUNC void mlx_atomic_fetch_max_explicit(
++    device mlx_atomic<T>* object,
++    T val,
++    size_t offset) {
++  mlx_atomic_update_and_store<T, __Max<T>>(object, val, offset);
++}
++template <typename T, enable_if_t<!is_metal_atomic<T>, bool> = true>
++METAL_FUNC void mlx_atomic_fetch_add_explicit(
++    device mlx_atomic<T>* object,
++    T val,
++    size_t offset) {
++  mlx_atomic_update_and_store<T, __Add<T>>(object, val, offset);
++}
++template <typename T, enable_if_t<!is_metal_atomic<T>, bool> = true>
++METAL_FUNC void mlx_atomic_fetch_mul_explicit(
++    device mlx_atomic<T>* object,
++    T val,
++    size_t offset) {
++  mlx_atomic_update_and_store<T, __Mul<T>>(object, val, offset);
++}
++template <typename T, enable_if_t<!is_metal_atomic<T>, bool> = true>
++METAL_FUNC bool mlx_atomic_compare_exchange_weak_explicit(
++    device mlx_atomic<T>* object,
++    thread uint* expected,
++    uint val,
++    size_t offset) {
++  return atomic_compare_exchange_weak_explicit(
++      &(object[offset].val),
++      expected,
++      val,
++      memory_order_relaxed,
++      memory_order_relaxed);
++}
++static constant constexpr const uint8_t simd_size = 32;
++union bool4_or_uint {
++  bool4 b;
++  unsigned int i;
++};
++struct None {
++  template <typename T>
++  void atomic_update(device mlx_atomic<T>* out, T val, size_t offset = 0) {
++    mlx_atomic_store_explicit(out, val, offset);
++  }
++};
++template <typename U = bool>
++struct And {
++  template <typename T, metal::enable_if_t<sizeof(T) < 8, bool> = true> T simd_reduce(T val) { return simd_reduce_impl(val); } template <typename T, metal::enable_if_t<sizeof(T) == 8, bool> = true> T simd_reduce(T val) { for (short i = simd_size / 2; i > 0; i /= 2) { val = operator()(val, simd_shuffle_down(val, i)); } return val; }
++  bool simd_reduce_impl(bool val) {
++    return simd_all(val);
++  }
++  static constexpr constant bool init = true;
++  void atomic_update(
++      device mlx_atomic<unsigned int>* out,
++      bool val,
++      int elem_idx,
++      size_t offset = 0) {
++    if (!val) {
++      bool4_or_uint update;
++      update.b = {true, true, true, true};
++      update.b[elem_idx] = false;
++      mlx_atomic_fetch_and_explicit(out, update.i, offset);
++    }
++  }
++  void
++  atomic_update(device mlx_atomic<bool>* out, bool val, size_t offset = 0) {
++    if (!val) {
++      mlx_atomic_store_explicit(out, val, offset);
++    }
++  }
++  void update(device bool* out, bool val) {
++    *out &= val;
++  }
++  bool operator()(bool a, bool b) {
++    return a && b;
++  }
++};
++template <typename U = bool>
++struct Or {
++  template <typename T, metal::enable_if_t<sizeof(T) < 8, bool> = true> T simd_reduce(T val) { return simd_reduce_impl(val); } template <typename T, metal::enable_if_t<sizeof(T) == 8, bool> = true> T simd_reduce(T val) { for (short i = simd_size / 2; i > 0; i /= 2) { val = operator()(val, simd_shuffle_down(val, i)); } return val; }
++  bool simd_reduce_impl(bool val) {
++    return simd_any(val);
++  }
++  static constexpr constant bool init = false;
++  void atomic_update(
++      device mlx_atomic<unsigned int>* out,
++      bool val,
++      int elem_idx,
++      size_t offset = 0) {
++    if (val) {
++      bool4_or_uint update;
++      update.b = {false, false, false, false};
++      update.b[elem_idx] = true;
++      mlx_atomic_fetch_or_explicit(out, update.i, offset);
++    }
++  }
++  void
++  atomic_update(device mlx_atomic<bool>* out, bool val, size_t offset = 0) {
++    if (val) {
++      mlx_atomic_store_explicit(out, val, offset);
++    }
++  }
++  void update(device bool* out, bool val) {
++    *out |= val;
++  }
++  bool operator()(bool a, bool b) {
++    return a || b;
++  }
++};
++template <typename U>
++struct Sum {
++  template <typename T, metal::enable_if_t<sizeof(T) < 8, bool> = true> T simd_reduce(T val) { return simd_reduce_impl(val); } template <typename T, metal::enable_if_t<sizeof(T) == 8, bool> = true> T simd_reduce(T val) { for (short i = simd_size / 2; i > 0; i /= 2) { val = operator()(val, simd_shuffle_down(val, i)); } return val; }
++  template <typename T>
++  T simd_reduce_impl(T val) {
++    return simd_sum(val);
++  }
++  static constexpr constant U init = U(0);
++  template <typename T>
++  void atomic_update(device mlx_atomic<T>* out, T val, size_t offset = 0) {
++    mlx_atomic_fetch_add_explicit(out, val, offset);
++  }
++  U operator()(U a, U b) {
++    return a + b;
++  }
++};
++template <typename U>
++struct Prod {
++  template <typename T, metal::enable_if_t<sizeof(T) < 8, bool> = true> T simd_reduce(T val) { return simd_reduce_impl(val); } template <typename T, metal::enable_if_t<sizeof(T) == 8, bool> = true> T simd_reduce(T val) { for (short i = simd_size / 2; i > 0; i /= 2) { val = operator()(val, simd_shuffle_down(val, i)); } return val; }
++  template <typename T>
++  T simd_reduce_impl(T val) {
++    return simd_product(val);
++  }
++  static constexpr constant U init = U(1);
++  template <typename T>
++  void atomic_update(device mlx_atomic<T>* out, T val, size_t offset = 0) {
++    mlx_atomic_fetch_mul_explicit(out, val, offset);
++  }
++  U operator()(U a, U b) {
++    return a * b;
++  }
++};
++template <typename U>
++struct Min {
++  template <typename T, metal::enable_if_t<sizeof(T) < 8, bool> = true> T simd_reduce(T val) { return simd_reduce_impl(val); } template <typename T, metal::enable_if_t<sizeof(T) == 8, bool> = true> T simd_reduce(T val) { for (short i = simd_size / 2; i > 0; i /= 2) { val = operator()(val, simd_shuffle_down(val, i)); } return val; }
++  template <typename T>
++  T simd_reduce_impl(T val) {
++    return simd_min(val);
++  }
++  static constexpr constant U init = Limits<U>::max;
++  template <typename T>
++  void atomic_update(device mlx_atomic<T>* out, T val, size_t offset = 0) {
++    mlx_atomic_fetch_min_explicit(out, val, offset);
++  }
++  U operator()(U a, U b) {
++    return a < b ? a : b;
++  }
++};
++template <typename U>
++struct Max {
++  template <typename T, metal::enable_if_t<sizeof(T) < 8, bool> = true> T simd_reduce(T val) { return simd_reduce_impl(val); } template <typename T, metal::enable_if_t<sizeof(T) == 8, bool> = true> T simd_reduce(T val) { for (short i = simd_size / 2; i > 0; i /= 2) { val = operator()(val, simd_shuffle_down(val, i)); } return val; }
++  template <typename T>
++  T simd_reduce_impl(T val) {
++    return simd_max(val);
++  }
++  static constexpr constant U init = Limits<U>::min;
++  template <typename T>
++  void atomic_update(device mlx_atomic<T>* out, T val, size_t offset = 0) {
++    mlx_atomic_fetch_max_explicit(out, val, offset);
++  }
++  U operator()(U a, U b) {
++    return a > b ? a : b;
++  }
++};
++)preamble";
++}
++
++} // namespace mlx::core::metal
+diff --git a/mlx/backend/metal/jit/scatter.cpp b/mlx/backend/metal/jit/scatter.cpp
+new file mode 100644
+index 0000000..633b6db
+--- /dev/null
++++ b/mlx/backend/metal/jit/scatter.cpp
+@@ -0,0 +1,76 @@
++namespace mlx::core::metal {
++
++const char* scatter() {
++  return R"preamble(
++template <typename IdxT, int NIDX>
++struct Indices {
++  const array<const device IdxT*, NIDX> buffers;
++  const constant int* shapes;
++  const constant int64_t* strides;
++  const constant bool* row_contiguous;
++  const int ndim;
++};
++template <typename IdxT>
++METAL_FUNC size_t offset_neg_idx(IdxT idx, int size) {
++  if (is_unsigned_v<IdxT>) {
++    return idx;
++  } else {
++    return (idx < 0) ? idx + size : idx;
++  }
++}
++
++template <
++    typename T,
++    typename IdxT,
++    typename Op,
++    int NIDX,
++    bool UPD_ROW_CONTIG,
++    int NWORK,
++    typename LocT>
++METAL_FUNC void scatter_impl(
++    const device T* updates,
++    device mlx_atomic<T>* out,
++    const constant int* upd_shape,
++    const constant int64_t* upd_strides,
++    const constant size_t& upd_ndim,
++    const constant size_t& upd_size,
++    const constant int* out_shape,
++    const constant int64_t* out_strides,
++    const constant size_t& out_ndim,
++    const constant int* axes,
++    const constant size_t& idx_size,
++    const thread Indices<IdxT, NIDX>& indices,
++    uint2 gid [[thread_position_in_grid]]) {
++  Op op;
++  auto ind_idx = gid.y * NWORK;
++  LocT out_offset = 0;
++  if (upd_size > 1) {
++    out_offset = elem_to_loc<LocT>(
++        gid.x, upd_shape + indices.ndim, out_strides, out_ndim);
++  }
++  for (int j = 0; j < NWORK && ind_idx < idx_size; ++j, ind_idx++) {
++    LocT out_idx = out_offset;
++    for (int i = 0; i < NIDX; ++i) {
++      auto idx_loc = indices.row_contiguous[i]
++          ? ind_idx
++          : elem_to_loc<LocT>(
++                ind_idx,
++                &indices.shapes[indices.ndim * i],
++                &indices.strides[indices.ndim * i],
++                indices.ndim);
++      auto ax = axes[i];
++      auto idx_val = offset_neg_idx(indices.buffers[i][idx_loc], out_shape[ax]);
++      out_idx +=
++          static_cast<LocT>(idx_val) * static_cast<LocT>(out_strides[ax]);
++    }
++    auto upd_idx = ind_idx * static_cast<LocT>(upd_size) + gid.x;
++    if constexpr (!UPD_ROW_CONTIG) {
++      upd_idx = elem_to_loc<LocT>(upd_idx, upd_shape, upd_strides, upd_ndim);
++    }
++    op.atomic_update(out, updates[upd_idx], out_idx);
++  }
++}
++)preamble";
++}
++
++} // namespace mlx::core::metal
+diff --git a/mlx/backend/metal/jit/scatter_axis.cpp b/mlx/backend/metal/jit/scatter_axis.cpp
+new file mode 100644
+index 0000000..92619f1
+--- /dev/null
++++ b/mlx/backend/metal/jit/scatter_axis.cpp
+@@ -0,0 +1,51 @@
++namespace mlx::core::metal {
++
++const char* scatter_axis() {
++  return R"preamble(
++template <
++    typename T,
++    typename IdxT,
++    typename LocT,
++    typename Op,
++    bool UpdC,
++    bool IdxC>
++[[kernel]] void scatter_axis(
++    const device T* upd [[buffer(0)]],
++    const device IdxT* indices [[buffer(1)]],
++    device mlx_atomic<T>* out [[buffer(2)]],
++    const constant int* shape [[buffer(3)]],
++    const constant int64_t* upd_strides [[buffer(4)]],
++    const constant int64_t* idx_strides [[buffer(5)]],
++    const constant size_t& ndim [[buffer(6)]],
++    const constant int& axis [[buffer(7)]],
++    const constant int& out_axis_size [[buffer(8)]],
++    const constant size_t& upd_ax_stride [[buffer(9)]],
++    const constant size_t& idx_ax_stride [[buffer(10)]],
++    uint3 index [[thread_position_in_grid]],
++    uint3 grid_dim [[threads_per_grid]]) {
++  Op op;
++  LocT elem_idx = index.z * static_cast<LocT>(grid_dim.x);
++  LocT idx_loc = index.y * static_cast<LocT>(idx_ax_stride);
++  if (IdxC) {
++    idx_loc += elem_idx * grid_dim.y + index.x;
++  } else {
++    idx_loc += elem_to_loc<LocT>(elem_idx + index.x, shape, idx_strides, ndim);
++  }
++  auto idx_val = indices[idx_loc];
++  if (is_signed_v<IdxT>) {
++    idx_val = (idx_val < 0) ? idx_val + out_axis_size : idx_val;
++  }
++  LocT upd_idx = index.y * static_cast<LocT>(upd_ax_stride);
++  if (UpdC) {
++    upd_idx += elem_idx * grid_dim.y + index.x;
++  } else {
++    upd_idx += elem_to_loc<LocT>(elem_idx + index.x, shape, upd_strides, ndim);
++  }
++  LocT out_idx = elem_idx * static_cast<LocT>(out_axis_size) +
++      idx_val * grid_dim.x + index.x;
++  op.atomic_update(out, upd[upd_idx], out_idx);
++}
++)preamble";
++}
++
++} // namespace mlx::core::metal
+diff --git a/mlx/backend/metal/jit/ternary_ops.cpp b/mlx/backend/metal/jit/ternary_ops.cpp
+new file mode 100644
+index 0000000..4aa98f7
+--- /dev/null
++++ b/mlx/backend/metal/jit/ternary_ops.cpp
+@@ -0,0 +1,14 @@
++namespace mlx::core::metal {
++
++const char* ternary_ops() {
++  return R"preamble(
++struct Select {
++  template <typename T>
++  T operator()(bool condition, T x, T y) {
++    return condition ? x : y;
++  }
++};
++)preamble";
++}
++
++} // namespace mlx::core::metal
+diff --git a/mlx/backend/metal/jit/unary_ops.cpp b/mlx/backend/metal/jit/unary_ops.cpp
+new file mode 100644
+index 0000000..0d30a14
+--- /dev/null
++++ b/mlx/backend/metal/jit/unary_ops.cpp
+@@ -0,0 +1,467 @@
++namespace mlx::core::metal {
++
++const char* unary_ops() {
++  return R"preamble(
++float erf(float a) {
++  float r, s, t, u;
++  t = metal::abs(a);
++  s = a * a;
++  if (t > 0.927734375f) {
++    r = metal::fma(
++        -1.72853470e-5f, t, 3.83197126e-4f);
++    u = metal::fma(
++        -3.88396438e-3f, t, 2.42546219e-2f);
++    r = metal::fma(r, s, u);
++    r = metal::fma(r, t, -1.06777877e-1f);
++    r = metal::fma(r, t, -6.34846687e-1f);
++    r = metal::fma(r, t, -1.28717512e-1f);
++    r = metal::fma(r, t, -t);
++    r = 1.0f - metal::exp(r);
++    r = metal::copysign(r, a);
++  } else {
++    r = -5.96761703e-4f;
++    r = metal::fma(r, s, 4.99119423e-3f);
++    r = metal::fma(r, s, -2.67681349e-2f);
++    r = metal::fma(r, s, 1.12819925e-1f);
++    r = metal::fma(r, s, -3.76125336e-1f);
++    r = metal::fma(r, s, 1.28379166e-1f);
++    r = metal::fma(r, a, a);
++  }
++  return r;
++}
++float erfinv(float a) {
++  auto t = metal::fma(a, 0.0f - a, 1.0f);
++  t = metal::log(t);
++  float p;
++  if (metal::abs(t) > 6.125f) {
++    p = 3.03697567e-10f;
++    p = metal::fma(p, t, 2.93243101e-8f);
++    p = metal::fma(p, t, 1.22150334e-6f);
++    p = metal::fma(p, t, 2.84108955e-5f);
++    p = metal::fma(p, t, 3.93552968e-4f);
++    p = metal::fma(p, t, 3.02698812e-3f);
++    p = metal::fma(p, t, 4.83185798e-3f);
++    p = metal::fma(p, t, -2.64646143e-1f);
++    p = metal::fma(p, t, 8.40016484e-1f);
++  } else {
++    p = 5.43877832e-9f;
++    p = metal::fma(p, t, 1.43285448e-7f);
++    p = metal::fma(p, t, 1.22774793e-6f);
++    p = metal::fma(p, t, 1.12963626e-7f);
++    p = metal::fma(p, t, -5.61530760e-5f);
++    p = metal::fma(p, t, -1.47697632e-4f);
++    p = metal::fma(p, t, 2.31468678e-3f);
++    p = metal::fma(p, t, 1.15392581e-2f);
++    p = metal::fma(p, t, -2.32015476e-1f);
++    p = metal::fma(p, t, 8.86226892e-1f);
++  }
++  return a * p;
++}
++float expm1f_scaled_unchecked(float a, float b) {
++  float f, j, r, s, t, u, v, x, y;
++  int i;
++  j = fma(1.442695f, a, 12582912.f);
++  j = j - 12582912.0f;
++  i = (int)j;
++  f = fma(j, -6.93145752e-1f, a);
++  s = f * f;
++  if (a == 0.0f)
++    s = a;
++  r = 1.97350979e-4f;
++  r = fma(r, f, 1.39309070e-3f);
++  r = fma(r, f, 8.33343994e-3f);
++  r = fma(r, f, 4.16668020e-2f);
++  r = fma(r, f, 1.66666716e-1f);
++  r = fma(r, f, 4.99999970e-1f);
++  u = (j == 1) ? (f + 0.5f) : f;
++  v = fma(r, s, u);
++  s = 0.5f * b;
++  t = ldexp(s, i);
++  y = t - s;
++  x = (t - y) - s;
++  r = fma(v, t, x) + y;
++  r = r + r;
++  if (j == 0)
++    r = v;
++  if (j == 1)
++    r = v + v;
++  return r;
++}
++float expm1f(float a) {
++  float r;
++  r = expm1f_scaled_unchecked(a, 1.0f);
++  if (abs(a - 1.0f) > 88.0f) {
++    r = pow(2, a);
++    r = fma(r, r, -1.0f);
++  }
++  return r;
++}
++
++namespace {
++constant float inf = metal::numeric_limits<float>::infinity();
++}
++struct Abs {
++  template <typename T>
++  T operator()(T x) {
++    return metal::abs(x);
++  };
++  template <>
++  uint8_t operator()(uint8_t x) {
++    return x;
++  };
++  template <>
++  uint16_t operator()(uint16_t x) {
++    return x;
++  };
++  template <>
++  uint32_t operator()(uint32_t x) {
++    return x;
++  };
++  template <>
++  uint64_t operator()(uint64_t x) {
++    return x;
++  };
++  template <>
++  bool operator()(bool x) {
++    return x;
++  };
++  template <>
++  complex64_t operator()(complex64_t x) {
++    return {metal::precise::sqrt(x.real * x.real + x.imag * x.imag), 0};
++  };
++};
++struct ArcCos {
++  template <typename T>
++  T operator()(T x) {
++    return metal::precise::acos(x);
++  };
++};
++struct ArcCosh {
++  template <typename T>
++  T operator()(T x) {
++    return metal::precise::acosh(x);
++  };
++};
++struct ArcSin {
++  template <typename T>
++  T operator()(T x) {
++    return metal::precise::asin(x);
++  };
++};
++struct ArcSinh {
++  template <typename T>
++  T operator()(T x) {
++    return metal::precise::asinh(x);
++  };
++};
++struct ArcTan {
++  template <typename T>
++  T operator()(T x) {
++    return metal::precise::atan(x);
++  };
++};
++struct ArcTanh {
++  template <typename T>
++  T operator()(T x) {
++    return metal::precise::atanh(x);
++  };
++};
++struct Ceil {
++  template <typename T>
++  T operator()(T x) {
++    return metal::ceil(x);
++  };
++  template <>
++  int8_t operator()(int8_t x) {
++    return x;
++  };
++  template <>
++  int16_t operator()(int16_t x) {
++    return x;
++  };
++  template <>
++  int32_t operator()(int32_t x) {
++    return x;
++  };
++  template <>
++  int64_t operator()(int64_t x) {
++    return x;
++  };
++  template <>
++  uint8_t operator()(uint8_t x) {
++    return x;
++  };
++  template <>
++  uint16_t operator()(uint16_t x) {
++    return x;
++  };
++  template <>
++  uint32_t operator()(uint32_t x) {
++    return x;
++  };
++  template <>
++  uint64_t operator()(uint64_t x) {
++    return x;
++  };
++  template <>
++  bool operator()(bool x) {
++    return x;
++  };
++};
++struct Cos {
++  template <typename T>
++  T operator()(T x) {
++    return metal::precise::cos(x);
++  };
++  template <>
++  complex64_t operator()(complex64_t x) {
++    return {
++        metal::precise::cos(x.real) * metal::precise::cosh(x.imag),
++        -metal::precise::sin(x.real) * metal::precise::sinh(x.imag)};
++  };
++};
++struct Cosh {
++  template <typename T>
++  T operator()(T x) {
++    return metal::precise::cosh(x);
++  };
++  template <>
++  complex64_t operator()(complex64_t x) {
++    return {
++        metal::precise::cosh(x.real) * metal::precise::cos(x.imag),
++        metal::precise::sinh(x.real) * metal::precise::sin(x.imag)};
++  };
++};
++struct Conjugate {
++  complex64_t operator()(complex64_t x) {
++    return complex64_t{x.real, -x.imag};
++  }
++};
++struct Erf {
++  template <typename T>
++  T operator()(T x) {
++    return static_cast<T>(erf(static_cast<float>(x)));
++  };
++};
++struct ErfInv {
++  template <typename T>
++  T operator()(T x) {
++    return static_cast<T>(erfinv(static_cast<float>(x)));
++  };
++};
++struct Exp {
++  template <typename T>
++  T operator()(T x) {
++    return metal::precise::exp(x);
++  };
++  template <>
++  complex64_t operator()(complex64_t x) {
++    auto m = metal::precise::exp(x.real);
++    return {m * metal::precise::cos(x.imag), m * metal::precise::sin(x.imag)};
++  }
++};
++struct Expm1 {
++  template <typename T>
++  T operator()(T x) {
++    return static_cast<T>(expm1f(static_cast<float>(x)));
++  };
++};
++struct Floor {
++  template <typename T>
++  T operator()(T x) {
++    return metal::floor(x);
++  };
++  template <>
++  int8_t operator()(int8_t x) {
++    return x;
++  };
++  template <>
++  int16_t operator()(int16_t x) {
++    return x;
++  };
++  template <>
++  int32_t operator()(int32_t x) {
++    return x;
++  };
++  template <>
++  int64_t operator()(int64_t x) {
++    return x;
++  };
++  template <>
++  uint8_t operator()(uint8_t x) {
++    return x;
++  };
++  template <>
++  uint16_t operator()(uint16_t x) {
++    return x;
++  };
++  template <>
++  uint32_t operator()(uint32_t x) {
++    return x;
++  };
++  template <>
++  uint64_t operator()(uint64_t x) {
++    return x;
++  };
++  template <>
++  bool operator()(bool x) {
++    return x;
++  };
++};
++struct Imag {
++  template <typename T>
++  T operator()(T x) {
++    return x.imag;
++  };
++};
++struct Log {
++  template <typename T>
++  T operator()(T x) {
++    return metal::precise::log(x);
++  };
++};
++struct Log2 {
++  template <typename T>
++  T operator()(T x) {
++    return metal::precise::log2(x);
++  };
++};
++struct Log10 {
++  template <typename T>
++  T operator()(T x) {
++    return metal::precise::log10(x);
++  };
++};
++struct Log1p {
++  template <typename T>
++  T operator()(T x) {
++    return log1p(x);
++  };
++};
++struct LogicalNot {
++  template <typename T>
++  T operator()(T x) {
++    return !x;
++  };
++};
++struct Negative {
++  template <typename T>
++  T operator()(T x) {
++    return -x;
++  };
++};
++struct Real {
++  template <typename T>
++  T operator()(T x) {
++    return x.real;
++  };
++};
++struct Round {
++  template <typename T>
++  T operator()(T x) {
++    return metal::rint(x);
++  };
++  template <>
++  complex64_t operator()(complex64_t x) {
++    return {metal::rint(x.real), metal::rint(x.imag)};
++  };
++};
++struct Sigmoid {
++  template <typename T>
++  T operator()(T x) {
++    auto y = 1 / (1 + metal::exp(-metal::abs(x)));
++    return (x < 0) ? 1 - y : y;
++  }
++};
++struct Sign {
++  template <typename T>
++  T operator()(T x) {
++    return (x > T(0)) - (x < T(0));
++  };
++  template <>
++  uint32_t operator()(uint32_t x) {
++    return x != 0;
++  };
++  template <>
++  complex64_t operator()(complex64_t x) {
++    if (x == complex64_t(0)) {
++      return x;
++    }
++    return x /
++        (complex64_t)metal::precise::sqrt(x.real * x.real + x.imag * x.imag);
++  };
++};
++struct Sin {
++  template <typename T>
++  T operator()(T x) {
++    return metal::precise::sin(x);
++  };
++  template <>
++  complex64_t operator()(complex64_t x) {
++    return {
++        metal::precise::sin(x.real) * metal::precise::cosh(x.imag),
++        metal::precise::cos(x.real) * metal::precise::sinh(x.imag)};
++  };
++};
++struct Sinh {
++  template <typename T>
++  T operator()(T x) {
++    return metal::precise::sinh(x);
++  };
++  template <>
++  complex64_t operator()(complex64_t x) {
++    return {
++        metal::precise::sinh(x.real) * metal::precise::cos(x.imag),
++        metal::precise::cosh(x.real) * metal::precise::sin(x.imag)};
++  };
++};
++struct Square {
++  template <typename T>
++  T operator()(T x) {
++    return x * x;
++  };
++};
++struct Sqrt {
++  template <typename T>
++  T operator()(T x) {
++    return metal::precise::sqrt(x);
++  };
++};
++struct Rsqrt {
++  template <typename T>
++  T operator()(T x) {
++    return metal::precise::rsqrt(x);
++  };
++};
++struct Tan {
++  template <typename T>
++  T operator()(T x) {
++    return metal::precise::tan(x);
++  };
++  template <>
++  complex64_t operator()(complex64_t x) {
++    float tan_a = metal::precise::tan(x.real);
++    float tanh_b = metal::precise::tanh(x.imag);
++    float t1 = tan_a * tanh_b;
++    float denom = 1. + t1 * t1;
++    return {(tan_a - tanh_b * t1) / denom, (tanh_b + tan_a * t1) / denom};
++  };
++};
++struct Tanh {
++  template <typename T>
++  T operator()(T x) {
++    return metal::precise::tanh(x);
++  };
++  template <>
++  complex64_t operator()(complex64_t x) {
++    float tanh_a = metal::precise::tanh(x.real);
++    float tan_b = metal::precise::tan(x.imag);
++    float t1 = tanh_a * tan_b;
++    float denom = 1. + t1 * t1;
++    return {(tanh_a + tan_b * t1) / denom, (tan_b - tanh_a * t1) / denom};
++  };
++};
++)preamble";
++}
++
++} // namespace mlx::core::metal
+diff --git a/mlx/backend/metal/jit/utils.cpp b/mlx/backend/metal/jit/utils.cpp
+new file mode 100644
+index 0000000..4a04116
+--- /dev/null
++++ b/mlx/backend/metal/jit/utils.cpp
+@@ -0,0 +1,594 @@
++namespace mlx::core::metal {
++
++const char* utils() {
++  return R"preamble(
++#if (__METAL_VERSION__ >= 310)
++using namespace metal;
++typedef bfloat bfloat16_t;
++inline uint16_t bfloat16_to_uint16(const bfloat16_t x) {
++  return as_type<uint16_t>(x);
++}
++inline bfloat16_t uint16_to_bfloat16(const uint16_t x) {
++  return as_type<bfloat16_t>(x);
++}
++
++ #else
++using namespace metal;
++constexpr METAL_FUNC uint16_t float_to_bfloat_bits(float x) {
++  if ((as_type<uint32_t>(x) & ~_fp_encoding_traits<float>::sign_mask) >
++      _fp_encoding_traits<float>::inf_mask) {
++    return uint16_t(as_type<uint32_t>(0x7FC0));
++  }
++  uint32_t float_bits = as_type<uint32_t>(x);
++  float_bits += ((float_bits >> 16) & 1) + as_type<uint32_t>(0x7FFF);
++  return float_bits >> 16;
++}
++constexpr METAL_FUNC float bfloat_bits_to_float(uint16_t x) {
++  return as_type<float>((uint32_t)x << 16);
++}
++struct _MLX_BFloat16;
++template <typename T>
++static constexpr constant bool can_convert_to_bfloat =
++    !is_same_v<T, _MLX_BFloat16> && is_convertible_v<T, float>;
++template <typename T>
++static constexpr constant bool can_convert_from_bfloat =
++    !is_same_v<T, _MLX_BFloat16> && is_convertible_v<float, T>;
++struct _MLX_BFloat16 {
++  uint16_t bits_;
++  _MLX_BFloat16() thread = default;
++  _MLX_BFloat16() threadgroup = default;
++  _MLX_BFloat16() device = default;
++  _MLX_BFloat16() constant = default;
++  struct bits_to_bfloat_struct {};
++  static constexpr METAL_FUNC bits_to_bfloat_struct bits_to_bfloat() {
++    return bits_to_bfloat_struct();
++  }
++  constexpr METAL_FUNC _MLX_BFloat16(uint16_t bits, bits_to_bfloat_struct)
++      : bits_(bits) {}
++  template <
++      typename T,
++      typename = typename enable_if<can_convert_to_bfloat<T>>::type>
++  constexpr METAL_FUNC _MLX_BFloat16(T x) thread
++      : bits_(float_to_bfloat_bits(static_cast<float>(x))) {}
++  template <
++      typename T,
++      typename = typename enable_if<can_convert_to_bfloat<T>>::type>
++  constexpr METAL_FUNC _MLX_BFloat16(T x) threadgroup
++      : bits_(float_to_bfloat_bits(static_cast<float>(x))) {}
++  template <
++      typename T,
++      typename = typename enable_if<can_convert_to_bfloat<T>>::type>
++  constexpr METAL_FUNC _MLX_BFloat16(T x) device
++      : bits_(float_to_bfloat_bits(static_cast<float>(x))) {}
++  template <
++      typename T,
++      typename = typename enable_if<can_convert_to_bfloat<T>>::type>
++  constexpr METAL_FUNC _MLX_BFloat16(T x) constant
++      : bits_(float_to_bfloat_bits(static_cast<float>(x))) {}
++  template <
++      typename T,
++      typename = typename enable_if<can_convert_from_bfloat<T>>::type>
++  constexpr METAL_FUNC operator T() const thread {
++    return static_cast<T>(bfloat_bits_to_float(bits_));
++  }
++  template <
++      typename T,
++      typename = typename enable_if<can_convert_from_bfloat<T>>::type>
++  constexpr METAL_FUNC operator T() const threadgroup {
++    return static_cast<T>(bfloat_bits_to_float(bits_));
++  }
++  template <
++      typename T,
++      typename = typename enable_if<can_convert_from_bfloat<T>>::type>
++  constexpr METAL_FUNC operator T() const device {
++    return static_cast<T>(bfloat_bits_to_float(bits_));
++  }
++  template <
++      typename T,
++      typename = typename enable_if<can_convert_from_bfloat<T>>::type>
++  constexpr METAL_FUNC operator T() const constant {
++    return static_cast<T>(bfloat_bits_to_float(bits_));
++  }
++};
++constexpr METAL_FUNC _MLX_BFloat16 operator-(_MLX_BFloat16 x) {
++  return -static_cast<float>(x);
++}
++constexpr METAL_FUNC _MLX_BFloat16 operator+(_MLX_BFloat16 lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) + static_cast<float>(rhs); }; constexpr METAL_FUNC float operator+(_MLX_BFloat16 lhs, float rhs) { return static_cast<float>(lhs) + static_cast<float>(rhs); } constexpr METAL_FUNC float operator+(float lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) + static_cast<float>(rhs); }; constexpr METAL_FUNC float operator+(_MLX_BFloat16 lhs, half rhs) { return static_cast<float>(lhs) + static_cast<float>(rhs); } constexpr METAL_FUNC float operator+(half lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) + static_cast<float>(rhs); }; constexpr METAL_FUNC _MLX_BFloat16 operator+(_MLX_BFloat16 lhs, int32_t rhs) { return static_cast<float>(lhs) + static_cast<float>(rhs); } constexpr METAL_FUNC _MLX_BFloat16 operator+(int32_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) + static_cast<float>(rhs); }; constexpr METAL_FUNC _MLX_BFloat16 operator+(_MLX_BFloat16 lhs, uint32_t rhs) { return static_cast<float>(lhs) + static_cast<float>(rhs); } constexpr METAL_FUNC _MLX_BFloat16 operator+(uint32_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) + static_cast<float>(rhs); }; constexpr METAL_FUNC _MLX_BFloat16 operator+(_MLX_BFloat16 lhs, int64_t rhs) { return static_cast<float>(lhs) + static_cast<float>(rhs); } constexpr METAL_FUNC _MLX_BFloat16 operator+(int64_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) + static_cast<float>(rhs); }; constexpr METAL_FUNC _MLX_BFloat16 operator+(_MLX_BFloat16 lhs, uint64_t rhs) { return static_cast<float>(lhs) + static_cast<float>(rhs); } constexpr METAL_FUNC _MLX_BFloat16 operator+(uint64_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) + static_cast<float>(rhs); };;
++constexpr METAL_FUNC _MLX_BFloat16 operator-(_MLX_BFloat16 lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) - static_cast<float>(rhs); }; constexpr METAL_FUNC float operator-(_MLX_BFloat16 lhs, float rhs) { return static_cast<float>(lhs) - static_cast<float>(rhs); } constexpr METAL_FUNC float operator-(float lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) - static_cast<float>(rhs); }; constexpr METAL_FUNC float operator-(_MLX_BFloat16 lhs, half rhs) { return static_cast<float>(lhs) - static_cast<float>(rhs); } constexpr METAL_FUNC float operator-(half lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) - static_cast<float>(rhs); }; constexpr METAL_FUNC _MLX_BFloat16 operator-(_MLX_BFloat16 lhs, int32_t rhs) { return static_cast<float>(lhs) - static_cast<float>(rhs); } constexpr METAL_FUNC _MLX_BFloat16 operator-(int32_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) - static_cast<float>(rhs); }; constexpr METAL_FUNC _MLX_BFloat16 operator-(_MLX_BFloat16 lhs, uint32_t rhs) { return static_cast<float>(lhs) - static_cast<float>(rhs); } constexpr METAL_FUNC _MLX_BFloat16 operator-(uint32_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) - static_cast<float>(rhs); }; constexpr METAL_FUNC _MLX_BFloat16 operator-(_MLX_BFloat16 lhs, int64_t rhs) { return static_cast<float>(lhs) - static_cast<float>(rhs); } constexpr METAL_FUNC _MLX_BFloat16 operator-(int64_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) - static_cast<float>(rhs); }; constexpr METAL_FUNC _MLX_BFloat16 operator-(_MLX_BFloat16 lhs, uint64_t rhs) { return static_cast<float>(lhs) - static_cast<float>(rhs); } constexpr METAL_FUNC _MLX_BFloat16 operator-(uint64_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) - static_cast<float>(rhs); };;
++constexpr METAL_FUNC _MLX_BFloat16 operator*(_MLX_BFloat16 lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) * static_cast<float>(rhs); }; constexpr METAL_FUNC float operator*(_MLX_BFloat16 lhs, float rhs) { return static_cast<float>(lhs) * static_cast<float>(rhs); } constexpr METAL_FUNC float operator*(float lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) * static_cast<float>(rhs); }; constexpr METAL_FUNC float operator*(_MLX_BFloat16 lhs, half rhs) { return static_cast<float>(lhs) * static_cast<float>(rhs); } constexpr METAL_FUNC float operator*(half lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) * static_cast<float>(rhs); }; constexpr METAL_FUNC _MLX_BFloat16 operator*(_MLX_BFloat16 lhs, int32_t rhs) { return static_cast<float>(lhs) * static_cast<float>(rhs); } constexpr METAL_FUNC _MLX_BFloat16 operator*(int32_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) * static_cast<float>(rhs); }; constexpr METAL_FUNC _MLX_BFloat16 operator*(_MLX_BFloat16 lhs, uint32_t rhs) { return static_cast<float>(lhs) * static_cast<float>(rhs); } constexpr METAL_FUNC _MLX_BFloat16 operator*(uint32_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) * static_cast<float>(rhs); }; constexpr METAL_FUNC _MLX_BFloat16 operator*(_MLX_BFloat16 lhs, int64_t rhs) { return static_cast<float>(lhs) * static_cast<float>(rhs); } constexpr METAL_FUNC _MLX_BFloat16 operator*(int64_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) * static_cast<float>(rhs); }; constexpr METAL_FUNC _MLX_BFloat16 operator*(_MLX_BFloat16 lhs, uint64_t rhs) { return static_cast<float>(lhs) * static_cast<float>(rhs); } constexpr METAL_FUNC _MLX_BFloat16 operator*(uint64_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) * static_cast<float>(rhs); };;
++constexpr METAL_FUNC _MLX_BFloat16 operator/(_MLX_BFloat16 lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) / static_cast<float>(rhs); }; constexpr METAL_FUNC float operator/(_MLX_BFloat16 lhs, float rhs) { return static_cast<float>(lhs) / static_cast<float>(rhs); } constexpr METAL_FUNC float operator/(float lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) / static_cast<float>(rhs); }; constexpr METAL_FUNC float operator/(_MLX_BFloat16 lhs, half rhs) { return static_cast<float>(lhs) / static_cast<float>(rhs); } constexpr METAL_FUNC float operator/(half lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) / static_cast<float>(rhs); }; constexpr METAL_FUNC _MLX_BFloat16 operator/(_MLX_BFloat16 lhs, int32_t rhs) { return static_cast<float>(lhs) / static_cast<float>(rhs); } constexpr METAL_FUNC _MLX_BFloat16 operator/(int32_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) / static_cast<float>(rhs); }; constexpr METAL_FUNC _MLX_BFloat16 operator/(_MLX_BFloat16 lhs, uint32_t rhs) { return static_cast<float>(lhs) / static_cast<float>(rhs); } constexpr METAL_FUNC _MLX_BFloat16 operator/(uint32_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) / static_cast<float>(rhs); }; constexpr METAL_FUNC _MLX_BFloat16 operator/(_MLX_BFloat16 lhs, int64_t rhs) { return static_cast<float>(lhs) / static_cast<float>(rhs); } constexpr METAL_FUNC _MLX_BFloat16 operator/(int64_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) / static_cast<float>(rhs); }; constexpr METAL_FUNC _MLX_BFloat16 operator/(_MLX_BFloat16 lhs, uint64_t rhs) { return static_cast<float>(lhs) / static_cast<float>(rhs); } constexpr METAL_FUNC _MLX_BFloat16 operator/(uint64_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) / static_cast<float>(rhs); };;
++constexpr METAL_FUNC bool operator>(_MLX_BFloat16 lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) > static_cast<float>(rhs); }; constexpr METAL_FUNC bool operator>(_MLX_BFloat16 lhs, float rhs) { return static_cast<float>(lhs) > static_cast<float>(rhs); } constexpr METAL_FUNC bool operator>(float lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) > static_cast<float>(rhs); }; constexpr METAL_FUNC bool operator>(_MLX_BFloat16 lhs, half rhs) { return static_cast<float>(lhs) > static_cast<float>(rhs); } constexpr METAL_FUNC bool operator>(half lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) > static_cast<float>(rhs); }; constexpr METAL_FUNC bool operator>(_MLX_BFloat16 lhs, int32_t rhs) { return static_cast<float>(lhs) > static_cast<float>(rhs); } constexpr METAL_FUNC bool operator>(int32_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) > static_cast<float>(rhs); }; constexpr METAL_FUNC bool operator>(_MLX_BFloat16 lhs, uint32_t rhs) { return static_cast<float>(lhs) > static_cast<float>(rhs); } constexpr METAL_FUNC bool operator>(uint32_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) > static_cast<float>(rhs); }; constexpr METAL_FUNC bool operator>(_MLX_BFloat16 lhs, int64_t rhs) { return static_cast<float>(lhs) > static_cast<float>(rhs); } constexpr METAL_FUNC bool operator>(int64_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) > static_cast<float>(rhs); }; constexpr METAL_FUNC bool operator>(_MLX_BFloat16 lhs, uint64_t rhs) { return static_cast<float>(lhs) > static_cast<float>(rhs); } constexpr METAL_FUNC bool operator>(uint64_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) > static_cast<float>(rhs); };;
++constexpr METAL_FUNC bool operator<(_MLX_BFloat16 lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) < static_cast<float>(rhs); }; constexpr METAL_FUNC bool operator<(_MLX_BFloat16 lhs, float rhs) { return static_cast<float>(lhs) < static_cast<float>(rhs); } constexpr METAL_FUNC bool operator<(float lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) < static_cast<float>(rhs); }; constexpr METAL_FUNC bool operator<(_MLX_BFloat16 lhs, half rhs) { return static_cast<float>(lhs) < static_cast<float>(rhs); } constexpr METAL_FUNC bool operator<(half lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) < static_cast<float>(rhs); }; constexpr METAL_FUNC bool operator<(_MLX_BFloat16 lhs, int32_t rhs) { return static_cast<float>(lhs) < static_cast<float>(rhs); } constexpr METAL_FUNC bool operator<(int32_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) < static_cast<float>(rhs); }; constexpr METAL_FUNC bool operator<(_MLX_BFloat16 lhs, uint32_t rhs) { return static_cast<float>(lhs) < static_cast<float>(rhs); } constexpr METAL_FUNC bool operator<(uint32_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) < static_cast<float>(rhs); }; constexpr METAL_FUNC bool operator<(_MLX_BFloat16 lhs, int64_t rhs) { return static_cast<float>(lhs) < static_cast<float>(rhs); } constexpr METAL_FUNC bool operator<(int64_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) < static_cast<float>(rhs); }; constexpr METAL_FUNC bool operator<(_MLX_BFloat16 lhs, uint64_t rhs) { return static_cast<float>(lhs) < static_cast<float>(rhs); } constexpr METAL_FUNC bool operator<(uint64_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) < static_cast<float>(rhs); };;
++constexpr METAL_FUNC bool operator>=(_MLX_BFloat16 lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) >= static_cast<float>(rhs); }; constexpr METAL_FUNC bool operator>=(_MLX_BFloat16 lhs, float rhs) { return static_cast<float>(lhs) >= static_cast<float>(rhs); } constexpr METAL_FUNC bool operator>=(float lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) >= static_cast<float>(rhs); }; constexpr METAL_FUNC bool operator>=(_MLX_BFloat16 lhs, half rhs) { return static_cast<float>(lhs) >= static_cast<float>(rhs); } constexpr METAL_FUNC bool operator>=(half lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) >= static_cast<float>(rhs); }; constexpr METAL_FUNC bool operator>=(_MLX_BFloat16 lhs, int32_t rhs) { return static_cast<float>(lhs) >= static_cast<float>(rhs); } constexpr METAL_FUNC bool operator>=(int32_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) >= static_cast<float>(rhs); }; constexpr METAL_FUNC bool operator>=(_MLX_BFloat16 lhs, uint32_t rhs) { return static_cast<float>(lhs) >= static_cast<float>(rhs); } constexpr METAL_FUNC bool operator>=(uint32_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) >= static_cast<float>(rhs); }; constexpr METAL_FUNC bool operator>=(_MLX_BFloat16 lhs, int64_t rhs) { return static_cast<float>(lhs) >= static_cast<float>(rhs); } constexpr METAL_FUNC bool operator>=(int64_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) >= static_cast<float>(rhs); }; constexpr METAL_FUNC bool operator>=(_MLX_BFloat16 lhs, uint64_t rhs) { return static_cast<float>(lhs) >= static_cast<float>(rhs); } constexpr METAL_FUNC bool operator>=(uint64_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) >= static_cast<float>(rhs); };;
++constexpr METAL_FUNC bool operator<=(_MLX_BFloat16 lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) <= static_cast<float>(rhs); }; constexpr METAL_FUNC bool operator<=(_MLX_BFloat16 lhs, float rhs) { return static_cast<float>(lhs) <= static_cast<float>(rhs); } constexpr METAL_FUNC bool operator<=(float lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) <= static_cast<float>(rhs); }; constexpr METAL_FUNC bool operator<=(_MLX_BFloat16 lhs, half rhs) { return static_cast<float>(lhs) <= static_cast<float>(rhs); } constexpr METAL_FUNC bool operator<=(half lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) <= static_cast<float>(rhs); }; constexpr METAL_FUNC bool operator<=(_MLX_BFloat16 lhs, int32_t rhs) { return static_cast<float>(lhs) <= static_cast<float>(rhs); } constexpr METAL_FUNC bool operator<=(int32_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) <= static_cast<float>(rhs); }; constexpr METAL_FUNC bool operator<=(_MLX_BFloat16 lhs, uint32_t rhs) { return static_cast<float>(lhs) <= static_cast<float>(rhs); } constexpr METAL_FUNC bool operator<=(uint32_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) <= static_cast<float>(rhs); }; constexpr METAL_FUNC bool operator<=(_MLX_BFloat16 lhs, int64_t rhs) { return static_cast<float>(lhs) <= static_cast<float>(rhs); } constexpr METAL_FUNC bool operator<=(int64_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) <= static_cast<float>(rhs); }; constexpr METAL_FUNC bool operator<=(_MLX_BFloat16 lhs, uint64_t rhs) { return static_cast<float>(lhs) <= static_cast<float>(rhs); } constexpr METAL_FUNC bool operator<=(uint64_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) <= static_cast<float>(rhs); };;
++constexpr METAL_FUNC bool operator==(_MLX_BFloat16 lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) == static_cast<float>(rhs); }; constexpr METAL_FUNC bool operator==(_MLX_BFloat16 lhs, float rhs) { return static_cast<float>(lhs) == static_cast<float>(rhs); } constexpr METAL_FUNC bool operator==(float lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) == static_cast<float>(rhs); }; constexpr METAL_FUNC bool operator==(_MLX_BFloat16 lhs, half rhs) { return static_cast<float>(lhs) == static_cast<float>(rhs); } constexpr METAL_FUNC bool operator==(half lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) == static_cast<float>(rhs); }; constexpr METAL_FUNC bool operator==(_MLX_BFloat16 lhs, int32_t rhs) { return static_cast<float>(lhs) == static_cast<float>(rhs); } constexpr METAL_FUNC bool operator==(int32_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) == static_cast<float>(rhs); }; constexpr METAL_FUNC bool operator==(_MLX_BFloat16 lhs, uint32_t rhs) { return static_cast<float>(lhs) == static_cast<float>(rhs); } constexpr METAL_FUNC bool operator==(uint32_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) == static_cast<float>(rhs); }; constexpr METAL_FUNC bool operator==(_MLX_BFloat16 lhs, int64_t rhs) { return static_cast<float>(lhs) == static_cast<float>(rhs); } constexpr METAL_FUNC bool operator==(int64_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) == static_cast<float>(rhs); }; constexpr METAL_FUNC bool operator==(_MLX_BFloat16 lhs, uint64_t rhs) { return static_cast<float>(lhs) == static_cast<float>(rhs); } constexpr METAL_FUNC bool operator==(uint64_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) == static_cast<float>(rhs); };;
++constexpr METAL_FUNC bool operator!=(_MLX_BFloat16 lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) != static_cast<float>(rhs); }; constexpr METAL_FUNC bool operator!=(_MLX_BFloat16 lhs, float rhs) { return static_cast<float>(lhs) != static_cast<float>(rhs); } constexpr METAL_FUNC bool operator!=(float lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) != static_cast<float>(rhs); }; constexpr METAL_FUNC bool operator!=(_MLX_BFloat16 lhs, half rhs) { return static_cast<float>(lhs) != static_cast<float>(rhs); } constexpr METAL_FUNC bool operator!=(half lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) != static_cast<float>(rhs); }; constexpr METAL_FUNC bool operator!=(_MLX_BFloat16 lhs, int32_t rhs) { return static_cast<float>(lhs) != static_cast<float>(rhs); } constexpr METAL_FUNC bool operator!=(int32_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) != static_cast<float>(rhs); }; constexpr METAL_FUNC bool operator!=(_MLX_BFloat16 lhs, uint32_t rhs) { return static_cast<float>(lhs) != static_cast<float>(rhs); } constexpr METAL_FUNC bool operator!=(uint32_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) != static_cast<float>(rhs); }; constexpr METAL_FUNC bool operator!=(_MLX_BFloat16 lhs, int64_t rhs) { return static_cast<float>(lhs) != static_cast<float>(rhs); } constexpr METAL_FUNC bool operator!=(int64_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) != static_cast<float>(rhs); }; constexpr METAL_FUNC bool operator!=(_MLX_BFloat16 lhs, uint64_t rhs) { return static_cast<float>(lhs) != static_cast<float>(rhs); } constexpr METAL_FUNC bool operator!=(uint64_t lhs, _MLX_BFloat16 rhs) { return static_cast<float>(lhs) != static_cast<float>(rhs); };;
++constexpr METAL_FUNC device _MLX_BFloat16& operator+=( device _MLX_BFloat16& lhs, float rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC device float& operator+=( device float& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC thread _MLX_BFloat16& operator+=( thread _MLX_BFloat16& lhs, float rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC thread float& operator+=( thread float& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC threadgroup _MLX_BFloat16& operator+=( threadgroup _MLX_BFloat16& lhs, float rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC threadgroup float& operator+=( threadgroup float& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; };; constexpr METAL_FUNC device _MLX_BFloat16& operator-=( device _MLX_BFloat16& lhs, float rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC device float& operator-=( device float& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC thread _MLX_BFloat16& operator-=( thread _MLX_BFloat16& lhs, float rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC thread float& operator-=( thread float& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC threadgroup _MLX_BFloat16& operator-=( threadgroup _MLX_BFloat16& lhs, float rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC threadgroup float& operator-=( threadgroup float& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; };; constexpr METAL_FUNC device _MLX_BFloat16& operator*=( device _MLX_BFloat16& lhs, float rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC device float& operator*=( device float& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC thread _MLX_BFloat16& operator*=( thread _MLX_BFloat16& lhs, float rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC thread float& operator*=( thread float& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC threadgroup _MLX_BFloat16& operator*=( threadgroup _MLX_BFloat16& lhs, float rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC threadgroup float& operator*=( threadgroup float& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; };; constexpr METAL_FUNC device _MLX_BFloat16& operator/=( device _MLX_BFloat16& lhs, float rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC device float& operator/=( device float& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC thread _MLX_BFloat16& operator/=( thread _MLX_BFloat16& lhs, float rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC thread float& operator/=( thread float& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC threadgroup _MLX_BFloat16& operator/=( threadgroup _MLX_BFloat16& lhs, float rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC threadgroup float& operator/=( threadgroup float& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; };;;
++constexpr METAL_FUNC device _MLX_BFloat16& operator+=( device _MLX_BFloat16& lhs, half rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC device half& operator+=( device half& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC thread _MLX_BFloat16& operator+=( thread _MLX_BFloat16& lhs, half rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC thread half& operator+=( thread half& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC threadgroup _MLX_BFloat16& operator+=( threadgroup _MLX_BFloat16& lhs, half rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC threadgroup half& operator+=( threadgroup half& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; };; constexpr METAL_FUNC device _MLX_BFloat16& operator-=( device _MLX_BFloat16& lhs, half rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC device half& operator-=( device half& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC thread _MLX_BFloat16& operator-=( thread _MLX_BFloat16& lhs, half rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC thread half& operator-=( thread half& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC threadgroup _MLX_BFloat16& operator-=( threadgroup _MLX_BFloat16& lhs, half rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC threadgroup half& operator-=( threadgroup half& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; };; constexpr METAL_FUNC device _MLX_BFloat16& operator*=( device _MLX_BFloat16& lhs, half rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC device half& operator*=( device half& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC thread _MLX_BFloat16& operator*=( thread _MLX_BFloat16& lhs, half rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC thread half& operator*=( thread half& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC threadgroup _MLX_BFloat16& operator*=( threadgroup _MLX_BFloat16& lhs, half rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC threadgroup half& operator*=( threadgroup half& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; };; constexpr METAL_FUNC device _MLX_BFloat16& operator/=( device _MLX_BFloat16& lhs, half rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC device half& operator/=( device half& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC thread _MLX_BFloat16& operator/=( thread _MLX_BFloat16& lhs, half rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC thread half& operator/=( thread half& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC threadgroup _MLX_BFloat16& operator/=( threadgroup _MLX_BFloat16& lhs, half rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC threadgroup half& operator/=( threadgroup half& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; };;;
++constexpr METAL_FUNC device _MLX_BFloat16& operator+=( device _MLX_BFloat16& lhs, int16_t rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC device int16_t& operator+=( device int16_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC thread _MLX_BFloat16& operator+=( thread _MLX_BFloat16& lhs, int16_t rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC thread int16_t& operator+=( thread int16_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC threadgroup _MLX_BFloat16& operator+=( threadgroup _MLX_BFloat16& lhs, int16_t rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC threadgroup int16_t& operator+=( threadgroup int16_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; };; constexpr METAL_FUNC device _MLX_BFloat16& operator-=( device _MLX_BFloat16& lhs, int16_t rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC device int16_t& operator-=( device int16_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC thread _MLX_BFloat16& operator-=( thread _MLX_BFloat16& lhs, int16_t rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC thread int16_t& operator-=( thread int16_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC threadgroup _MLX_BFloat16& operator-=( threadgroup _MLX_BFloat16& lhs, int16_t rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC threadgroup int16_t& operator-=( threadgroup int16_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; };; constexpr METAL_FUNC device _MLX_BFloat16& operator*=( device _MLX_BFloat16& lhs, int16_t rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC device int16_t& operator*=( device int16_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC thread _MLX_BFloat16& operator*=( thread _MLX_BFloat16& lhs, int16_t rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC thread int16_t& operator*=( thread int16_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC threadgroup _MLX_BFloat16& operator*=( threadgroup _MLX_BFloat16& lhs, int16_t rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC threadgroup int16_t& operator*=( threadgroup int16_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; };; constexpr METAL_FUNC device _MLX_BFloat16& operator/=( device _MLX_BFloat16& lhs, int16_t rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC device int16_t& operator/=( device int16_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC thread _MLX_BFloat16& operator/=( thread _MLX_BFloat16& lhs, int16_t rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC thread int16_t& operator/=( thread int16_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC threadgroup _MLX_BFloat16& operator/=( threadgroup _MLX_BFloat16& lhs, int16_t rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC threadgroup int16_t& operator/=( threadgroup int16_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; };;;
++constexpr METAL_FUNC device _MLX_BFloat16& operator+=( device _MLX_BFloat16& lhs, int32_t rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC device int32_t& operator+=( device int32_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC thread _MLX_BFloat16& operator+=( thread _MLX_BFloat16& lhs, int32_t rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC thread int32_t& operator+=( thread int32_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC threadgroup _MLX_BFloat16& operator+=( threadgroup _MLX_BFloat16& lhs, int32_t rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC threadgroup int32_t& operator+=( threadgroup int32_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; };; constexpr METAL_FUNC device _MLX_BFloat16& operator-=( device _MLX_BFloat16& lhs, int32_t rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC device int32_t& operator-=( device int32_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC thread _MLX_BFloat16& operator-=( thread _MLX_BFloat16& lhs, int32_t rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC thread int32_t& operator-=( thread int32_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC threadgroup _MLX_BFloat16& operator-=( threadgroup _MLX_BFloat16& lhs, int32_t rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC threadgroup int32_t& operator-=( threadgroup int32_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; };; constexpr METAL_FUNC device _MLX_BFloat16& operator*=( device _MLX_BFloat16& lhs, int32_t rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC device int32_t& operator*=( device int32_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC thread _MLX_BFloat16& operator*=( thread _MLX_BFloat16& lhs, int32_t rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC thread int32_t& operator*=( thread int32_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC threadgroup _MLX_BFloat16& operator*=( threadgroup _MLX_BFloat16& lhs, int32_t rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC threadgroup int32_t& operator*=( threadgroup int32_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; };; constexpr METAL_FUNC device _MLX_BFloat16& operator/=( device _MLX_BFloat16& lhs, int32_t rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC device int32_t& operator/=( device int32_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC thread _MLX_BFloat16& operator/=( thread _MLX_BFloat16& lhs, int32_t rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC thread int32_t& operator/=( thread int32_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC threadgroup _MLX_BFloat16& operator/=( threadgroup _MLX_BFloat16& lhs, int32_t rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC threadgroup int32_t& operator/=( threadgroup int32_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; };;;
++constexpr METAL_FUNC device _MLX_BFloat16& operator+=( device _MLX_BFloat16& lhs, int64_t rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC device int64_t& operator+=( device int64_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC thread _MLX_BFloat16& operator+=( thread _MLX_BFloat16& lhs, int64_t rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC thread int64_t& operator+=( thread int64_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC threadgroup _MLX_BFloat16& operator+=( threadgroup _MLX_BFloat16& lhs, int64_t rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC threadgroup int64_t& operator+=( threadgroup int64_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; };; constexpr METAL_FUNC device _MLX_BFloat16& operator-=( device _MLX_BFloat16& lhs, int64_t rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC device int64_t& operator-=( device int64_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC thread _MLX_BFloat16& operator-=( thread _MLX_BFloat16& lhs, int64_t rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC thread int64_t& operator-=( thread int64_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC threadgroup _MLX_BFloat16& operator-=( threadgroup _MLX_BFloat16& lhs, int64_t rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC threadgroup int64_t& operator-=( threadgroup int64_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; };; constexpr METAL_FUNC device _MLX_BFloat16& operator*=( device _MLX_BFloat16& lhs, int64_t rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC device int64_t& operator*=( device int64_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC thread _MLX_BFloat16& operator*=( thread _MLX_BFloat16& lhs, int64_t rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC thread int64_t& operator*=( thread int64_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC threadgroup _MLX_BFloat16& operator*=( threadgroup _MLX_BFloat16& lhs, int64_t rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC threadgroup int64_t& operator*=( threadgroup int64_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; };; constexpr METAL_FUNC device _MLX_BFloat16& operator/=( device _MLX_BFloat16& lhs, int64_t rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC device int64_t& operator/=( device int64_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC thread _MLX_BFloat16& operator/=( thread _MLX_BFloat16& lhs, int64_t rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC thread int64_t& operator/=( thread int64_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC threadgroup _MLX_BFloat16& operator/=( threadgroup _MLX_BFloat16& lhs, int64_t rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC threadgroup int64_t& operator/=( threadgroup int64_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; };;;
++constexpr METAL_FUNC device _MLX_BFloat16& operator+=( device _MLX_BFloat16& lhs, uint16_t rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC device uint16_t& operator+=( device uint16_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC thread _MLX_BFloat16& operator+=( thread _MLX_BFloat16& lhs, uint16_t rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC thread uint16_t& operator+=( thread uint16_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC threadgroup _MLX_BFloat16& operator+=( threadgroup _MLX_BFloat16& lhs, uint16_t rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC threadgroup uint16_t& operator+=( threadgroup uint16_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; };; constexpr METAL_FUNC device _MLX_BFloat16& operator-=( device _MLX_BFloat16& lhs, uint16_t rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC device uint16_t& operator-=( device uint16_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC thread _MLX_BFloat16& operator-=( thread _MLX_BFloat16& lhs, uint16_t rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC thread uint16_t& operator-=( thread uint16_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC threadgroup _MLX_BFloat16& operator-=( threadgroup _MLX_BFloat16& lhs, uint16_t rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC threadgroup uint16_t& operator-=( threadgroup uint16_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; };; constexpr METAL_FUNC device _MLX_BFloat16& operator*=( device _MLX_BFloat16& lhs, uint16_t rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC device uint16_t& operator*=( device uint16_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC thread _MLX_BFloat16& operator*=( thread _MLX_BFloat16& lhs, uint16_t rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC thread uint16_t& operator*=( thread uint16_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC threadgroup _MLX_BFloat16& operator*=( threadgroup _MLX_BFloat16& lhs, uint16_t rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC threadgroup uint16_t& operator*=( threadgroup uint16_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; };; constexpr METAL_FUNC device _MLX_BFloat16& operator/=( device _MLX_BFloat16& lhs, uint16_t rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC device uint16_t& operator/=( device uint16_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC thread _MLX_BFloat16& operator/=( thread _MLX_BFloat16& lhs, uint16_t rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC thread uint16_t& operator/=( thread uint16_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC threadgroup _MLX_BFloat16& operator/=( threadgroup _MLX_BFloat16& lhs, uint16_t rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC threadgroup uint16_t& operator/=( threadgroup uint16_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; };;;
++constexpr METAL_FUNC device _MLX_BFloat16& operator+=( device _MLX_BFloat16& lhs, uint32_t rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC device uint32_t& operator+=( device uint32_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC thread _MLX_BFloat16& operator+=( thread _MLX_BFloat16& lhs, uint32_t rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC thread uint32_t& operator+=( thread uint32_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC threadgroup _MLX_BFloat16& operator+=( threadgroup _MLX_BFloat16& lhs, uint32_t rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC threadgroup uint32_t& operator+=( threadgroup uint32_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; };; constexpr METAL_FUNC device _MLX_BFloat16& operator-=( device _MLX_BFloat16& lhs, uint32_t rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC device uint32_t& operator-=( device uint32_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC thread _MLX_BFloat16& operator-=( thread _MLX_BFloat16& lhs, uint32_t rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC thread uint32_t& operator-=( thread uint32_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC threadgroup _MLX_BFloat16& operator-=( threadgroup _MLX_BFloat16& lhs, uint32_t rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC threadgroup uint32_t& operator-=( threadgroup uint32_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; };; constexpr METAL_FUNC device _MLX_BFloat16& operator*=( device _MLX_BFloat16& lhs, uint32_t rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC device uint32_t& operator*=( device uint32_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC thread _MLX_BFloat16& operator*=( thread _MLX_BFloat16& lhs, uint32_t rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC thread uint32_t& operator*=( thread uint32_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC threadgroup _MLX_BFloat16& operator*=( threadgroup _MLX_BFloat16& lhs, uint32_t rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC threadgroup uint32_t& operator*=( threadgroup uint32_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; };; constexpr METAL_FUNC device _MLX_BFloat16& operator/=( device _MLX_BFloat16& lhs, uint32_t rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC device uint32_t& operator/=( device uint32_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC thread _MLX_BFloat16& operator/=( thread _MLX_BFloat16& lhs, uint32_t rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC thread uint32_t& operator/=( thread uint32_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC threadgroup _MLX_BFloat16& operator/=( threadgroup _MLX_BFloat16& lhs, uint32_t rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC threadgroup uint32_t& operator/=( threadgroup uint32_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; };;;
++constexpr METAL_FUNC device _MLX_BFloat16& operator+=( device _MLX_BFloat16& lhs, uint64_t rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC device uint64_t& operator+=( device uint64_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC thread _MLX_BFloat16& operator+=( thread _MLX_BFloat16& lhs, uint64_t rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC thread uint64_t& operator+=( thread uint64_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC threadgroup _MLX_BFloat16& operator+=( threadgroup _MLX_BFloat16& lhs, uint64_t rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC threadgroup uint64_t& operator+=( threadgroup uint64_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; };; constexpr METAL_FUNC device _MLX_BFloat16& operator-=( device _MLX_BFloat16& lhs, uint64_t rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC device uint64_t& operator-=( device uint64_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC thread _MLX_BFloat16& operator-=( thread _MLX_BFloat16& lhs, uint64_t rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC thread uint64_t& operator-=( thread uint64_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC threadgroup _MLX_BFloat16& operator-=( threadgroup _MLX_BFloat16& lhs, uint64_t rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC threadgroup uint64_t& operator-=( threadgroup uint64_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; };; constexpr METAL_FUNC device _MLX_BFloat16& operator*=( device _MLX_BFloat16& lhs, uint64_t rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC device uint64_t& operator*=( device uint64_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC thread _MLX_BFloat16& operator*=( thread _MLX_BFloat16& lhs, uint64_t rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC thread uint64_t& operator*=( thread uint64_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC threadgroup _MLX_BFloat16& operator*=( threadgroup _MLX_BFloat16& lhs, uint64_t rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC threadgroup uint64_t& operator*=( threadgroup uint64_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; };; constexpr METAL_FUNC device _MLX_BFloat16& operator/=( device _MLX_BFloat16& lhs, uint64_t rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC device uint64_t& operator/=( device uint64_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC thread _MLX_BFloat16& operator/=( thread _MLX_BFloat16& lhs, uint64_t rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC thread uint64_t& operator/=( thread uint64_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC threadgroup _MLX_BFloat16& operator/=( threadgroup _MLX_BFloat16& lhs, uint64_t rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; } constexpr METAL_FUNC threadgroup uint64_t& operator/=( threadgroup uint64_t& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; };;;
++constexpr METAL_FUNC device _MLX_BFloat16& operator+=( device _MLX_BFloat16& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC thread _MLX_BFloat16& operator+=( thread _MLX_BFloat16& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC threadgroup _MLX_BFloat16& operator+=( threadgroup _MLX_BFloat16& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) + static_cast<float>(rhs); return lhs; };;
++constexpr METAL_FUNC device _MLX_BFloat16& operator-=( device _MLX_BFloat16& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC thread _MLX_BFloat16& operator-=( thread _MLX_BFloat16& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC threadgroup _MLX_BFloat16& operator-=( threadgroup _MLX_BFloat16& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) - static_cast<float>(rhs); return lhs; };;
++constexpr METAL_FUNC device _MLX_BFloat16& operator*=( device _MLX_BFloat16& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC thread _MLX_BFloat16& operator*=( thread _MLX_BFloat16& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC threadgroup _MLX_BFloat16& operator*=( threadgroup _MLX_BFloat16& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) * static_cast<float>(rhs); return lhs; };;
++constexpr METAL_FUNC device _MLX_BFloat16& operator/=( device _MLX_BFloat16& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC thread _MLX_BFloat16& operator/=( thread _MLX_BFloat16& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; }; constexpr METAL_FUNC threadgroup _MLX_BFloat16& operator/=( threadgroup _MLX_BFloat16& lhs, _MLX_BFloat16 rhs) { lhs = static_cast<float>(lhs) / static_cast<float>(rhs); return lhs; };;
++typedef struct _MLX_BFloat16 bfloat16_t;
++#pragma METAL internals : enable
++namespace metal {
++template <>
++struct _numeric_limits_impl<bfloat16_t> : _fp_numeric_limits_impl_base {
++  static constexpr constant int digits = 8;
++  static constexpr constant int digits10 = 2;
++  static constexpr constant int max_digits10 = 4;
++  static constexpr constant int radix = 2;
++  static constexpr constant int min_exponent = -125;
++  static constexpr constant int min_exponent10 = -37;
++  static constexpr constant int max_exponent = 128;
++  static constexpr constant int max_exponent10 = 38;
++  static constexpr bfloat16_t min() {
++    return _MLX_BFloat16(0x0080, _MLX_BFloat16::bits_to_bfloat());
++  }
++  static constexpr bfloat16_t lowest() {
++    return _MLX_BFloat16(0xFF7F, _MLX_BFloat16::bits_to_bfloat());
++  }
++  static constexpr bfloat16_t max() {
++    return _MLX_BFloat16(0x7F7F, _MLX_BFloat16::bits_to_bfloat());
++  }
++  static constexpr bfloat16_t epsilon() {
++    return _MLX_BFloat16(0x3C00, _MLX_BFloat16::bits_to_bfloat());
++  }
++  static constexpr bfloat16_t round_error() {
++    return _MLX_BFloat16(0x3F00, _MLX_BFloat16::bits_to_bfloat());
++  }
++  static constexpr bfloat16_t infinity() {
++    return _MLX_BFloat16(0x7F80, _MLX_BFloat16::bits_to_bfloat());
++  }
++  static constexpr bfloat16_t quiet_NaN() {
++    return _MLX_BFloat16(0x7FC0, _MLX_BFloat16::bits_to_bfloat());
++  }
++  static constexpr bfloat16_t signaling_NaN() {
++    return _MLX_BFloat16(0x7F80, _MLX_BFloat16::bits_to_bfloat());
++  }
++  static constexpr bfloat16_t denorm_min() {
++    return _MLX_BFloat16(0x0001, _MLX_BFloat16::bits_to_bfloat());
++  }
++};
++METAL_FUNC bool isnan(_MLX_BFloat16 x) {
++  return x != x;
++}
++}
++#pragma METAL internals : disable
++inline uint16_t bfloat16_to_uint16(const bfloat16_t x) {
++  return x.bits_;
++}
++inline bfloat16_t uint16_to_bfloat16(const uint16_t x) {
++  return _MLX_BFloat16(x, _MLX_BFloat16::bits_to_bfloat());
++}
++
++ #endif
++
++namespace metal {
++METAL_FUNC bfloat16_t abs(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_fabs(static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t acos(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_acos(static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t acosh(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_acosh(static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t asin(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_asin(static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t asinh(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_asinh(static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t atan(bfloat16_t y_over_x) { return static_cast<bfloat16_t>( __metal_atan(static_cast<float>(y_over_x), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t atan2(bfloat16_t y, bfloat16_t x) { return static_cast<bfloat16_t>( __metal_atan2(static_cast<float>(y), static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t atanh(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_atanh(static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t ceil(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_ceil(static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t cos(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_cos(static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t cosh(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_cosh(static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t cospi(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_cospi(static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t divide(bfloat16_t x, bfloat16_t y) { return static_cast<bfloat16_t>( __metal_divide(static_cast<float>(x), static_cast<float>(y), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t exp(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_exp(static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t exp10(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_exp10(static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t exp2(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_exp2(static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t fabs(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_fabs(static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t fdim(bfloat16_t x, bfloat16_t y) { float t = static_cast<float>(x - y); return static_cast<bfloat16_t>(select(t, float(0), t < float(0) || x == y)); } METAL_FUNC bfloat16_t floor(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_floor(static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t fma(bfloat16_t x, bfloat16_t y, bfloat16_t z) { return static_cast<bfloat16_t>(__metal_fma( static_cast<float>(x), static_cast<float>(y), static_cast<float>(z))); } METAL_FUNC bfloat16_t fmax(bfloat16_t x, bfloat16_t y) { return static_cast<bfloat16_t>( __metal_fmax(static_cast<float>(x), static_cast<float>(y), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t fmax3(bfloat16_t x, bfloat16_t y, bfloat16_t z) { return static_cast<bfloat16_t>(__metal_fmax3( static_cast<float>(x), static_cast<float>(y), static_cast<float>(z), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t fmedian3(bfloat16_t x, bfloat16_t y, bfloat16_t z) { return static_cast<bfloat16_t>(__metal_fmedian3( static_cast<float>(x), static_cast<float>(y), static_cast<float>(z), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t fmin(bfloat16_t x, bfloat16_t y) { return static_cast<bfloat16_t>( __metal_fmin(static_cast<float>(x), static_cast<float>(y), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t fmin3(bfloat16_t x, bfloat16_t y, bfloat16_t z) { return static_cast<bfloat16_t>(__metal_fmin3( static_cast<float>(x), static_cast<float>(y), static_cast<float>(z), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t fmod(bfloat16_t x, bfloat16_t y) { return static_cast<bfloat16_t>( __metal_fmod(static_cast<float>(x), static_cast<float>(y), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t fract(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_fract(static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t frexp(bfloat16_t x, thread int& exp) { return static_cast<bfloat16_t>(__metal_frexp(static_cast<float>(x), &exp)); } METAL_FUNC bfloat16_t ldexp(bfloat16_t x, int k) { return static_cast<bfloat16_t>(__metal_ldexp(static_cast<float>(x), k, __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t log(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_log(static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t log10(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_log10(static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t log2(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_log2(static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t max(bfloat16_t x, bfloat16_t y) { return static_cast<bfloat16_t>( __metal_fmax(static_cast<float>(x), static_cast<float>(y), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t max3(bfloat16_t x, bfloat16_t y, bfloat16_t z) { return static_cast<bfloat16_t>(__metal_fmax3( static_cast<float>(x), static_cast<float>(y), static_cast<float>(z), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t median3(bfloat16_t x, bfloat16_t y, bfloat16_t z) { return static_cast<bfloat16_t>(__metal_fmedian3( static_cast<float>(x), static_cast<float>(y), static_cast<float>(z), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t min(bfloat16_t x, bfloat16_t y) { return static_cast<bfloat16_t>( __metal_fmin(static_cast<float>(x), static_cast<float>(y), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t min3(bfloat16_t x, bfloat16_t y, bfloat16_t z) { return static_cast<bfloat16_t>(__metal_fmin3( static_cast<float>(x), static_cast<float>(y), static_cast<float>(z), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t nextafter(bfloat16_t x, bfloat16_t y) { return static_cast<bfloat16_t>( __metal_nextafter(static_cast<float>(x), static_cast<float>(y))); } METAL_FUNC bfloat16_t pow(bfloat16_t x, bfloat16_t y) { return static_cast<bfloat16_t>( __metal_pow(static_cast<float>(x), static_cast<float>(y), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t powr(bfloat16_t x, bfloat16_t y) { return static_cast<bfloat16_t>( __metal_powr(static_cast<float>(x), static_cast<float>(y), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t rint(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_rint(static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t round(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_round(static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t rsqrt(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_rsqrt(static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t sin(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_sin(static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t sinh(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_sinh(static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t sinpi(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_sinpi(static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t sqrt(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_sqrt(static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t tan(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_tan(static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t tanh(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_tanh(static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t tanpi(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_tanpi(static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); } METAL_FUNC bfloat16_t trunc(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_trunc(static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); };
++namespace fast {
++METAL_FUNC bfloat16_t abs(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_fabs(static_cast<float>(x), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t acos(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_acos(static_cast<float>(x), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t acosh(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_acosh(static_cast<float>(x), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t asin(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_asin(static_cast<float>(x), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t asinh(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_asinh(static_cast<float>(x), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t atan(bfloat16_t y_over_x) { return static_cast<bfloat16_t>( __metal_atan(static_cast<float>(y_over_x), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t atan2(bfloat16_t y, bfloat16_t x) { return static_cast<bfloat16_t>( __metal_atan2(static_cast<float>(y), static_cast<float>(x), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t atanh(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_atanh(static_cast<float>(x), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t ceil(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_ceil(static_cast<float>(x), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t cos(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_cos(static_cast<float>(x), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t cosh(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_cosh(static_cast<float>(x), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t cospi(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_cospi(static_cast<float>(x), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t divide(bfloat16_t x, bfloat16_t y) { return static_cast<bfloat16_t>( __metal_divide(static_cast<float>(x), static_cast<float>(y), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t exp(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_exp(static_cast<float>(x), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t exp10(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_exp10(static_cast<float>(x), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t exp2(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_exp2(static_cast<float>(x), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t fabs(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_fabs(static_cast<float>(x), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t fdim(bfloat16_t x, bfloat16_t y) { float t = static_cast<float>(x - y); return static_cast<bfloat16_t>(select(t, float(0), t < float(0) || x == y)); } METAL_FUNC bfloat16_t floor(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_floor(static_cast<float>(x), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t fma(bfloat16_t x, bfloat16_t y, bfloat16_t z) { return static_cast<bfloat16_t>(__metal_fma( static_cast<float>(x), static_cast<float>(y), static_cast<float>(z))); } METAL_FUNC bfloat16_t fmax(bfloat16_t x, bfloat16_t y) { return static_cast<bfloat16_t>( __metal_fmax(static_cast<float>(x), static_cast<float>(y), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t fmax3(bfloat16_t x, bfloat16_t y, bfloat16_t z) { return static_cast<bfloat16_t>(__metal_fmax3( static_cast<float>(x), static_cast<float>(y), static_cast<float>(z), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t fmedian3(bfloat16_t x, bfloat16_t y, bfloat16_t z) { return static_cast<bfloat16_t>(__metal_fmedian3( static_cast<float>(x), static_cast<float>(y), static_cast<float>(z), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t fmin(bfloat16_t x, bfloat16_t y) { return static_cast<bfloat16_t>( __metal_fmin(static_cast<float>(x), static_cast<float>(y), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t fmin3(bfloat16_t x, bfloat16_t y, bfloat16_t z) { return static_cast<bfloat16_t>(__metal_fmin3( static_cast<float>(x), static_cast<float>(y), static_cast<float>(z), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t fmod(bfloat16_t x, bfloat16_t y) { return static_cast<bfloat16_t>( __metal_fmod(static_cast<float>(x), static_cast<float>(y), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t fract(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_fract(static_cast<float>(x), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t frexp(bfloat16_t x, thread int& exp) { return static_cast<bfloat16_t>(__metal_frexp(static_cast<float>(x), &exp)); } METAL_FUNC bfloat16_t ldexp(bfloat16_t x, int k) { return static_cast<bfloat16_t>(__metal_ldexp(static_cast<float>(x), k, __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t log(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_log(static_cast<float>(x), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t log10(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_log10(static_cast<float>(x), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t log2(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_log2(static_cast<float>(x), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t max(bfloat16_t x, bfloat16_t y) { return static_cast<bfloat16_t>( __metal_fmax(static_cast<float>(x), static_cast<float>(y), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t max3(bfloat16_t x, bfloat16_t y, bfloat16_t z) { return static_cast<bfloat16_t>(__metal_fmax3( static_cast<float>(x), static_cast<float>(y), static_cast<float>(z), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t median3(bfloat16_t x, bfloat16_t y, bfloat16_t z) { return static_cast<bfloat16_t>(__metal_fmedian3( static_cast<float>(x), static_cast<float>(y), static_cast<float>(z), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t min(bfloat16_t x, bfloat16_t y) { return static_cast<bfloat16_t>( __metal_fmin(static_cast<float>(x), static_cast<float>(y), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t min3(bfloat16_t x, bfloat16_t y, bfloat16_t z) { return static_cast<bfloat16_t>(__metal_fmin3( static_cast<float>(x), static_cast<float>(y), static_cast<float>(z), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t nextafter(bfloat16_t x, bfloat16_t y) { return static_cast<bfloat16_t>( __metal_nextafter(static_cast<float>(x), static_cast<float>(y))); } METAL_FUNC bfloat16_t pow(bfloat16_t x, bfloat16_t y) { return static_cast<bfloat16_t>( __metal_pow(static_cast<float>(x), static_cast<float>(y), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t powr(bfloat16_t x, bfloat16_t y) { return static_cast<bfloat16_t>( __metal_powr(static_cast<float>(x), static_cast<float>(y), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t rint(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_rint(static_cast<float>(x), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t round(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_round(static_cast<float>(x), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t rsqrt(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_rsqrt(static_cast<float>(x), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t sin(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_sin(static_cast<float>(x), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t sinh(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_sinh(static_cast<float>(x), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t sinpi(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_sinpi(static_cast<float>(x), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t sqrt(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_sqrt(static_cast<float>(x), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t tan(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_tan(static_cast<float>(x), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t tanh(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_tanh(static_cast<float>(x), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t tanpi(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_tanpi(static_cast<float>(x), __METAL_FAST_MATH__)); } METAL_FUNC bfloat16_t trunc(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_trunc(static_cast<float>(x), __METAL_FAST_MATH__)); };
++}
++namespace precise {
++METAL_FUNC bfloat16_t abs(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_fabs(static_cast<float>(x), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t acos(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_acos(static_cast<float>(x), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t acosh(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_acosh(static_cast<float>(x), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t asin(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_asin(static_cast<float>(x), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t asinh(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_asinh(static_cast<float>(x), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t atan(bfloat16_t y_over_x) { return static_cast<bfloat16_t>( __metal_atan(static_cast<float>(y_over_x), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t atan2(bfloat16_t y, bfloat16_t x) { return static_cast<bfloat16_t>( __metal_atan2(static_cast<float>(y), static_cast<float>(x), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t atanh(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_atanh(static_cast<float>(x), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t ceil(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_ceil(static_cast<float>(x), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t cos(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_cos(static_cast<float>(x), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t cosh(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_cosh(static_cast<float>(x), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t cospi(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_cospi(static_cast<float>(x), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t divide(bfloat16_t x, bfloat16_t y) { return static_cast<bfloat16_t>( __metal_divide(static_cast<float>(x), static_cast<float>(y), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t exp(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_exp(static_cast<float>(x), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t exp10(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_exp10(static_cast<float>(x), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t exp2(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_exp2(static_cast<float>(x), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t fabs(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_fabs(static_cast<float>(x), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t fdim(bfloat16_t x, bfloat16_t y) { float t = static_cast<float>(x - y); return static_cast<bfloat16_t>(select(t, float(0), t < float(0) || x == y)); } METAL_FUNC bfloat16_t floor(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_floor(static_cast<float>(x), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t fma(bfloat16_t x, bfloat16_t y, bfloat16_t z) { return static_cast<bfloat16_t>(__metal_fma( static_cast<float>(x), static_cast<float>(y), static_cast<float>(z))); } METAL_FUNC bfloat16_t fmax(bfloat16_t x, bfloat16_t y) { return static_cast<bfloat16_t>( __metal_fmax(static_cast<float>(x), static_cast<float>(y), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t fmax3(bfloat16_t x, bfloat16_t y, bfloat16_t z) { return static_cast<bfloat16_t>(__metal_fmax3( static_cast<float>(x), static_cast<float>(y), static_cast<float>(z), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t fmedian3(bfloat16_t x, bfloat16_t y, bfloat16_t z) { return static_cast<bfloat16_t>(__metal_fmedian3( static_cast<float>(x), static_cast<float>(y), static_cast<float>(z), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t fmin(bfloat16_t x, bfloat16_t y) { return static_cast<bfloat16_t>( __metal_fmin(static_cast<float>(x), static_cast<float>(y), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t fmin3(bfloat16_t x, bfloat16_t y, bfloat16_t z) { return static_cast<bfloat16_t>(__metal_fmin3( static_cast<float>(x), static_cast<float>(y), static_cast<float>(z), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t fmod(bfloat16_t x, bfloat16_t y) { return static_cast<bfloat16_t>( __metal_fmod(static_cast<float>(x), static_cast<float>(y), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t fract(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_fract(static_cast<float>(x), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t frexp(bfloat16_t x, thread int& exp) { return static_cast<bfloat16_t>(__metal_frexp(static_cast<float>(x), &exp)); } METAL_FUNC bfloat16_t ldexp(bfloat16_t x, int k) { return static_cast<bfloat16_t>(__metal_ldexp(static_cast<float>(x), k, __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t log(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_log(static_cast<float>(x), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t log10(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_log10(static_cast<float>(x), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t log2(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_log2(static_cast<float>(x), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t max(bfloat16_t x, bfloat16_t y) { return static_cast<bfloat16_t>( __metal_fmax(static_cast<float>(x), static_cast<float>(y), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t max3(bfloat16_t x, bfloat16_t y, bfloat16_t z) { return static_cast<bfloat16_t>(__metal_fmax3( static_cast<float>(x), static_cast<float>(y), static_cast<float>(z), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t median3(bfloat16_t x, bfloat16_t y, bfloat16_t z) { return static_cast<bfloat16_t>(__metal_fmedian3( static_cast<float>(x), static_cast<float>(y), static_cast<float>(z), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t min(bfloat16_t x, bfloat16_t y) { return static_cast<bfloat16_t>( __metal_fmin(static_cast<float>(x), static_cast<float>(y), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t min3(bfloat16_t x, bfloat16_t y, bfloat16_t z) { return static_cast<bfloat16_t>(__metal_fmin3( static_cast<float>(x), static_cast<float>(y), static_cast<float>(z), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t nextafter(bfloat16_t x, bfloat16_t y) { return static_cast<bfloat16_t>( __metal_nextafter(static_cast<float>(x), static_cast<float>(y))); } METAL_FUNC bfloat16_t pow(bfloat16_t x, bfloat16_t y) { return static_cast<bfloat16_t>( __metal_pow(static_cast<float>(x), static_cast<float>(y), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t powr(bfloat16_t x, bfloat16_t y) { return static_cast<bfloat16_t>( __metal_powr(static_cast<float>(x), static_cast<float>(y), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t rint(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_rint(static_cast<float>(x), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t round(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_round(static_cast<float>(x), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t rsqrt(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_rsqrt(static_cast<float>(x), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t sin(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_sin(static_cast<float>(x), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t sinh(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_sinh(static_cast<float>(x), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t sinpi(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_sinpi(static_cast<float>(x), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t sqrt(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_sqrt(static_cast<float>(x), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t tan(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_tan(static_cast<float>(x), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t tanh(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_tanh(static_cast<float>(x), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t tanpi(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_tanpi(static_cast<float>(x), __METAL_PRECISE_MATH__)); } METAL_FUNC bfloat16_t trunc(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_trunc(static_cast<float>(x), __METAL_PRECISE_MATH__)); };
++}
++}
++namespace metal {
++METAL_FUNC bfloat16_t simd_broadcast(bfloat16_t data, ushort broadcast_lane_id) { return uint16_to_bfloat16( __metal_simd_broadcast(bfloat16_to_uint16(data), broadcast_lane_id)); } METAL_FUNC bfloat16_t simd_shuffle(bfloat16_t data, ushort simd_lane_id) { return uint16_to_bfloat16( __metal_simd_shuffle(bfloat16_to_uint16(data), simd_lane_id)); } METAL_FUNC bfloat16_t simd_shuffle_and_fill_down( bfloat16_t data, bfloat16_t filling_data, ushort delta, ushort modulo) { return uint16_to_bfloat16(__metal_simd_shuffle_and_fill_down( bfloat16_to_uint16(data), bfloat16_to_uint16(filling_data), delta, modulo)); } METAL_FUNC bfloat16_t simd_shuffle_and_fill_down( bfloat16_t data, bfloat16_t filling_data, ushort delta) { return uint16_to_bfloat16(__metal_simd_shuffle_and_fill_down( bfloat16_to_uint16(data), bfloat16_to_uint16(filling_data), delta, __metal_get_simdgroup_size(ushort()))); } METAL_FUNC bfloat16_t simd_shuffle_and_fill_up( bfloat16_t data, bfloat16_t filling_data, ushort delta, ushort modulo) { return uint16_to_bfloat16(__metal_simd_shuffle_and_fill_up( bfloat16_to_uint16(data), bfloat16_to_uint16(filling_data), delta, modulo)); } METAL_FUNC bfloat16_t simd_shuffle_and_fill_up( bfloat16_t data, bfloat16_t filling_data, ushort delta) { return uint16_to_bfloat16(__metal_simd_shuffle_and_fill_up( bfloat16_to_uint16(data), bfloat16_to_uint16(filling_data), delta, __metal_get_simdgroup_size(ushort()))); } METAL_FUNC bfloat16_t simd_shuffle_down(bfloat16_t data, ushort delta) { return uint16_to_bfloat16( __metal_simd_shuffle_down(bfloat16_to_uint16(data), delta)); } METAL_FUNC bfloat16_t simd_shuffle_rotate_down(bfloat16_t data, ushort delta) { return uint16_to_bfloat16( __metal_simd_shuffle_rotate_down(bfloat16_to_uint16(data), delta)); } METAL_FUNC bfloat16_t simd_shuffle_rotate_up(bfloat16_t data, ushort delta) { return uint16_to_bfloat16( __metal_simd_shuffle_rotate_up(bfloat16_to_uint16(data), delta)); } METAL_FUNC bfloat16_t simd_shuffle_up(bfloat16_t data, ushort delta) { return uint16_to_bfloat16( __metal_simd_shuffle_up(bfloat16_to_uint16(data), delta)); } METAL_FUNC bfloat16_t simd_shuffle_xor(bfloat16_t data, ushort mask) { return uint16_to_bfloat16( __metal_simd_shuffle_xor(bfloat16_to_uint16(data), mask)); };
++METAL_FUNC bfloat16_t simd_max(bfloat16_t data) { return static_cast<bfloat16_t>(__metal_simd_max(static_cast<float>(data))); } METAL_FUNC bfloat16_t simd_min(bfloat16_t data) { return static_cast<bfloat16_t>(__metal_simd_min(static_cast<float>(data))); } METAL_FUNC bfloat16_t simd_prefix_exclusive_product(bfloat16_t data) { return static_cast<bfloat16_t>( __metal_simd_prefix_exclusive_product(static_cast<float>(data))); } METAL_FUNC bfloat16_t simd_prefix_exclusive_sum(bfloat16_t data) { return static_cast<bfloat16_t>( __metal_simd_prefix_exclusive_sum(static_cast<float>(data))); } METAL_FUNC bfloat16_t simd_prefix_inclusive_product(bfloat16_t data) { return static_cast<bfloat16_t>( __metal_simd_prefix_inclusive_product(static_cast<float>(data))); } METAL_FUNC bfloat16_t simd_prefix_inclusive_sum(bfloat16_t data) { return static_cast<bfloat16_t>( __metal_simd_prefix_inclusive_sum(static_cast<float>(data))); } METAL_FUNC bfloat16_t simd_product(bfloat16_t data) { return static_cast<bfloat16_t>(__metal_simd_product(static_cast<float>(data))); } METAL_FUNC bfloat16_t simd_sum(bfloat16_t data) { return static_cast<bfloat16_t>(__metal_simd_sum(static_cast<float>(data))); } METAL_FUNC bfloat16_t simd_xor(bfloat16_t data) { return static_cast<bfloat16_t>(__metal_simd_xor(static_cast<float>(data))); };
++}
++using namespace metal;
++struct complex64_t;
++template <typename T>
++static constexpr constant bool can_convert_to_complex64 =
++    !is_same_v<T, complex64_t> && is_convertible_v<T, float>;
++template <typename T>
++static constexpr constant bool can_convert_from_complex64 =
++    !is_same_v<T, complex64_t> &&
++    (is_convertible_v<float, T> || is_convertible_v<bfloat16_t, T>);
++struct complex64_t {
++  float real;
++  float imag;
++  constexpr complex64_t(float real, float imag) : real(real), imag(imag) {};
++  constexpr complex64_t() : real(0), imag(0) {};
++  constexpr complex64_t() threadgroup : real(0), imag(0) {};
++  template <
++      typename T,
++      typename = typename enable_if<can_convert_to_complex64<T>>::type>
++  constexpr complex64_t(T x) thread : real(x), imag(0) {}
++  template <
++      typename T,
++      typename = typename enable_if<can_convert_to_complex64<T>>::type>
++  constexpr complex64_t(T x) threadgroup : real(x), imag(0) {}
++  template <
++      typename T,
++      typename = typename enable_if<can_convert_to_complex64<T>>::type>
++  constexpr complex64_t(T x) device : real(x), imag(0) {}
++  template <
++      typename T,
++      typename = typename enable_if<can_convert_to_complex64<T>>::type>
++  constexpr complex64_t(T x) constant : real(x), imag(0) {}
++  template <
++      typename T,
++      typename = typename enable_if<can_convert_from_complex64<T>>::type>
++  constexpr operator T() const thread {
++    return static_cast<T>(real);
++  }
++  template <
++      typename T,
++      typename = typename enable_if<can_convert_from_complex64<T>>::type>
++  constexpr operator T() const threadgroup {
++    return static_cast<T>(real);
++  }
++  template <
++      typename T,
++      typename = typename enable_if<can_convert_from_complex64<T>>::type>
++  constexpr operator T() const device {
++    return static_cast<T>(real);
++  }
++  template <
++      typename T,
++      typename = typename enable_if<can_convert_from_complex64<T>>::type>
++  constexpr operator T() const constant {
++    return static_cast<T>(real);
++  }
++};
++constexpr complex64_t operator-(complex64_t x) {
++  return {-x.real, -x.imag};
++}
++constexpr bool operator>=(complex64_t a, complex64_t b) {
++  return (a.real > b.real) || (a.real == b.real && a.imag >= b.imag);
++}
++constexpr bool operator>(complex64_t a, complex64_t b) {
++  return (a.real > b.real) || (a.real == b.real && a.imag > b.imag);
++}
++constexpr bool operator<=(complex64_t a, complex64_t b) {
++  return operator>=(b, a);
++}
++constexpr bool operator<(complex64_t a, complex64_t b) {
++  return operator>(b, a);
++}
++constexpr bool operator==(complex64_t a, complex64_t b) {
++  return a.real == b.real && a.imag == b.imag;
++}
++constexpr complex64_t operator+(complex64_t a, complex64_t b) {
++  return {a.real + b.real, a.imag + b.imag};
++}
++constexpr complex64_t operator-(complex64_t a, complex64_t b) {
++  return {a.real - b.real, a.imag - b.imag};
++}
++constexpr complex64_t operator*(complex64_t a, complex64_t b) {
++  return {a.real * b.real - a.imag * b.imag, a.real * b.imag + a.imag * b.real};
++}
++constexpr complex64_t operator/(complex64_t a, complex64_t b) {
++  auto denom = b.real * b.real + b.imag * b.imag;
++  auto x = a.real * b.real + a.imag * b.imag;
++  auto y = a.imag * b.real - a.real * b.imag;
++  return {x / denom, y / denom};
++}
++constexpr complex64_t operator%(complex64_t a, complex64_t b) {
++  auto real = a.real - (b.real * static_cast<int64_t>(a.real / b.real));
++  auto imag = a.imag - (b.imag * static_cast<int64_t>(a.imag / b.imag));
++  if (real != 0 && (real < 0 != b.real < 0)) {
++    real += b.real;
++  }
++  if (imag != 0 && (imag < 0 != b.imag < 0)) {
++    imag += b.imag;
++  }
++  return {real, imag};
++}
++static constant constexpr int MAX_REDUCE_SPECIALIZED_DIMS = 4;
++static constant constexpr int REDUCE_N_READS = 4;
++static constant constexpr int REDUCE_N_WRITES = 4;
++static constant constexpr int SOFTMAX_N_READS = 4;
++static constant constexpr int RMS_N_READS = 4;
++static constant constexpr int RMS_LOOPED_LIMIT = 4096;
++
++typedef half float16_t;
++template <typename U>
++struct Limits {
++  static const constant U max = metal::numeric_limits<U>::max();
++  static const constant U min = metal::numeric_limits<U>::min();
++  static const constant U finite_max = metal::numeric_limits<U>::max();
++  static const constant U finite_min = metal::numeric_limits<U>::min();
++};
++template <> struct Limits<uint8_t> { static constexpr constant uint8_t max = metal::numeric_limits<uint8_t>::max(); static constexpr constant uint8_t min = metal::numeric_limits<uint8_t>::min(); static constexpr constant uint8_t finite_max = metal::numeric_limits<uint8_t>::max(); static constexpr constant uint8_t finite_min = metal::numeric_limits<uint8_t>::min(); };;
++template <> struct Limits<uint16_t> { static constexpr constant uint16_t max = metal::numeric_limits<uint16_t>::max(); static constexpr constant uint16_t min = metal::numeric_limits<uint16_t>::min(); static constexpr constant uint16_t finite_max = metal::numeric_limits<uint16_t>::max(); static constexpr constant uint16_t finite_min = metal::numeric_limits<uint16_t>::min(); };;
++template <> struct Limits<uint32_t> { static constexpr constant uint32_t max = metal::numeric_limits<uint32_t>::max(); static constexpr constant uint32_t min = metal::numeric_limits<uint32_t>::min(); static constexpr constant uint32_t finite_max = metal::numeric_limits<uint32_t>::max(); static constexpr constant uint32_t finite_min = metal::numeric_limits<uint32_t>::min(); };;
++template <> struct Limits<uint64_t> { static constexpr constant uint64_t max = metal::numeric_limits<uint64_t>::max(); static constexpr constant uint64_t min = metal::numeric_limits<uint64_t>::min(); static constexpr constant uint64_t finite_max = metal::numeric_limits<uint64_t>::max(); static constexpr constant uint64_t finite_min = metal::numeric_limits<uint64_t>::min(); };;
++template <> struct Limits<int8_t> { static constexpr constant int8_t max = metal::numeric_limits<int8_t>::max(); static constexpr constant int8_t min = metal::numeric_limits<int8_t>::min(); static constexpr constant int8_t finite_max = metal::numeric_limits<int8_t>::max(); static constexpr constant int8_t finite_min = metal::numeric_limits<int8_t>::min(); };;
++template <> struct Limits<int16_t> { static constexpr constant int16_t max = metal::numeric_limits<int16_t>::max(); static constexpr constant int16_t min = metal::numeric_limits<int16_t>::min(); static constexpr constant int16_t finite_max = metal::numeric_limits<int16_t>::max(); static constexpr constant int16_t finite_min = metal::numeric_limits<int16_t>::min(); };;
++template <> struct Limits<int32_t> { static constexpr constant int32_t max = metal::numeric_limits<int32_t>::max(); static constexpr constant int32_t min = metal::numeric_limits<int32_t>::min(); static constexpr constant int32_t finite_max = metal::numeric_limits<int32_t>::max(); static constexpr constant int32_t finite_min = metal::numeric_limits<int32_t>::min(); };;
++template <> struct Limits<int64_t> { static constexpr constant int64_t max = metal::numeric_limits<int64_t>::max(); static constexpr constant int64_t min = metal::numeric_limits<int64_t>::min(); static constexpr constant int64_t finite_max = metal::numeric_limits<int64_t>::max(); static constexpr constant int64_t finite_min = metal::numeric_limits<int64_t>::min(); };;
++template <> struct Limits<half> { static constexpr constant half max = metal::numeric_limits<half>::infinity(); static constexpr constant half min = -metal::numeric_limits<half>::infinity(); static constexpr constant half finite_max = metal::numeric_limits<half>::max(); static constexpr constant half finite_min = -metal::numeric_limits<half>::max(); };;
++template <> struct Limits<float> { static constexpr constant float max = metal::numeric_limits<float>::infinity(); static constexpr constant float min = -metal::numeric_limits<float>::infinity(); static constexpr constant float finite_max = metal::numeric_limits<float>::max(); static constexpr constant float finite_min = -metal::numeric_limits<float>::max(); };;
++template <> struct Limits<bfloat16_t> { static constexpr constant bfloat16_t max = metal::numeric_limits<bfloat16_t>::infinity(); static constexpr constant bfloat16_t min = -metal::numeric_limits<bfloat16_t>::infinity(); static constexpr constant bfloat16_t finite_max = metal::numeric_limits<bfloat16_t>::max(); static constexpr constant bfloat16_t finite_min = -metal::numeric_limits<bfloat16_t>::max(); };;
++template <>
++struct Limits<bool> {
++  static constexpr constant bool max = true;
++  static constexpr constant bool min = false;
++};
++template <>
++struct Limits<complex64_t> {
++  static constexpr constant complex64_t max = complex64_t(
++      metal::numeric_limits<float>::infinity(),
++      metal::numeric_limits<float>::infinity());
++  static constexpr constant complex64_t min = complex64_t(
++      -metal::numeric_limits<float>::infinity(),
++      -metal::numeric_limits<float>::infinity());
++};
++template <typename IdxT = int64_t>
++METAL_FUNC IdxT elem_to_loc(
++    IdxT elem,
++    constant const int* shape,
++    constant const int64_t* strides,
++    int ndim) {
++  IdxT loc = 0;
++  for (int i = ndim - 1; i >= 0 && elem > 0; --i) {
++    loc += (elem % shape[i]) * IdxT(strides[i]);
++    elem /= shape[i];
++  }
++  return loc;
++}
++template <typename IdxT = int64_t>
++METAL_FUNC IdxT elem_to_loc(
++    uint3 elem,
++    constant const int* shape,
++    constant const int64_t* strides,
++    int ndim) {
++  IdxT loc =
++      elem.x * IdxT(strides[ndim - 1]) + elem.y * IdxT(strides[ndim - 2]);
++  for (int d = ndim - 3; d >= 0; --d) {
++    loc += (elem.z % shape[d]) * IdxT(strides[d]);
++    elem.z /= shape[d];
++  }
++  return loc;
++}
++template <typename IdxT = int64_t>
++METAL_FUNC IdxT elem_to_loc_1(uint elem, constant const int64_t& stride) {
++  return elem * IdxT(stride);
++}
++template <typename IdxT = int64_t>
++METAL_FUNC IdxT elem_to_loc_2(uint2 elem, constant const int64_t strides[2]) {
++  return elem.x * IdxT(strides[1]) + elem.y * IdxT(strides[0]);
++}
++template <typename IdxT = int64_t>
++METAL_FUNC IdxT elem_to_loc_3(uint3 elem, constant const int64_t strides[3]) {
++  return elem.x * IdxT(strides[2]) + elem.y * IdxT(strides[1]) +
++      elem.z * IdxT(strides[0]);
++}
++template <typename IdxT = int64_t>
++METAL_FUNC vec<IdxT, 2> elem_to_loc_2_nd(
++    uint3 elem,
++    constant const int* shape,
++    constant const int64_t* a_strides,
++    constant const int64_t* b_strides,
++    int ndim) {
++  vec<IdxT, 2> loc = {
++      IdxT(
++          elem.x * IdxT(a_strides[ndim - 1]) +
++          IdxT(elem.y) * IdxT(a_strides[ndim - 2])),
++      IdxT(
++          elem.x * IdxT(b_strides[ndim - 1]) +
++          elem.y * IdxT(b_strides[ndim - 2]))};
++  for (int d = ndim - 3; d >= 0; --d) {
++    uint l = elem.z % shape[d];
++    loc.x += l * IdxT(a_strides[d]);
++    loc.y += l * IdxT(b_strides[d]);
++    elem.z /= shape[d];
++  }
++  return loc;
++}
++template <typename IdxT = int64_t>
++METAL_FUNC vec<IdxT, 3> elem_to_loc_3_nd(
++    uint3 elem,
++    constant const int* shape,
++    constant const int64_t* a_strides,
++    constant const int64_t* b_strides,
++    constant const int64_t* c_strides,
++    int ndim) {
++  vec<IdxT, 3> loc = {
++      IdxT(elem.x * IdxT(a_strides[ndim - 1])) +
++          IdxT(elem.y * IdxT(a_strides[ndim - 2])),
++      IdxT(elem.x * IdxT(b_strides[ndim - 1])) +
++          IdxT(elem.y * IdxT(b_strides[ndim - 2])),
++      IdxT(elem.x * IdxT(c_strides[ndim - 1])) +
++          IdxT(elem.y * IdxT(c_strides[ndim - 2]))};
++  for (int d = ndim - 3; d >= 0; --d) {
++    uint l = elem.z % shape[d];
++    loc.x += l * IdxT(a_strides[d]);
++    loc.y += l * IdxT(b_strides[d]);
++    loc.z += l * IdxT(c_strides[d]);
++    elem.z /= shape[d];
++  }
++  return loc;
++}
++template <int DIM, typename OffsetT = size_t, bool General = true>
++struct LoopedElemToLoc {
++  int dim;
++  LoopedElemToLoc<DIM - 1, OffsetT, General> inner_looper;
++  OffsetT offset{0};
++  int index{0};
++  LoopedElemToLoc(int dim) : dim(dim), inner_looper(dim - 1) {}
++  void next(const constant int* shape, const constant int64_t* strides) {
++    if (dim == 0) {
++      return;
++    }
++    index++;
++    offset += OffsetT(strides[dim - 1]);
++    if (index >= shape[dim - 1]) {
++      index = 0;
++      inner_looper.next(shape, strides);
++      offset = inner_looper.offset;
++    }
++  }
++  void next(int n, const constant int* shape, const constant int64_t* strides) {
++    if (dim == 0) {
++      return;
++    }
++    index += n;
++    offset += n * OffsetT(strides[dim - 1]);
++    if (index >= shape[dim - 1]) {
++      int extra = index - shape[dim - 1];
++      if (extra >= shape[dim - 1]) {
++        inner_looper.next(1 + extra / shape[dim - 1], shape, strides);
++        extra = extra % shape[dim - 1];
++      } else {
++        inner_looper.next(shape, strides);
++      }
++      index = 0;
++      offset = inner_looper.offset;
++      if (extra > 0) {
++        next(extra, shape, strides);
++      }
++    }
++  }
++  OffsetT location() {
++    return offset;
++  }
++};
++template <typename OffsetT>
++struct LoopedElemToLoc<1, OffsetT, true> {
++  int dim;
++  OffsetT offset{0};
++  uint index{0};
++  LoopedElemToLoc(int dim) : dim(dim) {}
++  void next(const constant int* shape, const constant int64_t* strides) {
++    index++;
++    if (dim > 1) {
++      offset = elem_to_loc<OffsetT>(index, shape, strides, dim);
++    } else {
++      offset += OffsetT(strides[0]);
++    }
++  }
++  void next(int n, const constant int* shape, const constant int64_t* strides) {
++    index += n;
++    if (dim > 1) {
++      offset = elem_to_loc<OffsetT>(index, shape, strides, dim);
++    } else {
++      offset = index * OffsetT(strides[0]);
++    }
++  }
++  OffsetT location() {
++    return offset;
++  }
++};
++template <typename OffsetT>
++struct LoopedElemToLoc<1, OffsetT, false> {
++  OffsetT offset{0};
++  LoopedElemToLoc(int) {}
++  void next(const constant int*, const constant int64_t* strides) {
++    offset += OffsetT(strides[0]);
++  }
++  void next(int n, const constant int*, const constant int64_t* strides) {
++    offset += n * OffsetT(strides[0]);
++  }
++  OffsetT location() {
++    return offset;
++  }
++};
++template <typename T, typename U>
++inline T ceildiv(T N, U M) {
++  return (N + M - 1) / M;
++}
++inline float log1p(float x) {
++  float xp1 = 1.0f + x;
++  if (xp1 == Limits<float>::max) {
++    return Limits<float>::max;
++  }
++  if (xp1 == 1.0f) {
++    return x;
++  }
++  return x * (metal::log(xp1) / (xp1 - 1.0f));
++}
++inline bfloat16_t log1p(bfloat16_t x) {
++  float xp1 = 1.0f + static_cast<float>(x);
++  if (xp1 == Limits<float>::max) {
++    return Limits<bfloat16_t>::max;
++  }
++  if (xp1 == 1.0f) {
++    return x;
++  }
++  return bfloat16_t(x * (metal::log(xp1) / (xp1 - 1.0f)));
++}
++inline uint64_t simd_shuffle_down(uint64_t data, uint16_t delta) {
++  return as_type<uint64_t>(
++      metal::simd_shuffle_down(as_type<uint2>(data), delta));
++}
++inline int64_t simd_shuffle_down(int64_t data, uint16_t delta) {
++  return as_type<int64_t>(
++      metal::simd_shuffle_down(as_type<uint2>(data), delta));
++}
++inline bool simd_shuffle_down(bool data, uint16_t delta) {
++  return simd_shuffle_down(static_cast<uint32_t>(data), delta);
++}
++inline complex64_t simd_shuffle_down(complex64_t data, uint16_t delta) {
++  return complex64_t(
++      simd_shuffle_down(data.real, delta), simd_shuffle_down(data.imag, delta));
++}
++inline uint64_t simd_shuffle_up(uint64_t data, uint16_t delta) {
++  return as_type<uint64_t>(metal::simd_shuffle_up(as_type<uint2>(data), delta));
++}
++inline int64_t simd_shuffle_up(int64_t data, uint16_t delta) {
++  return as_type<int64_t>(metal::simd_shuffle_up(as_type<uint2>(data), delta));
++}
++inline bool simd_shuffle_up(bool data, uint16_t delta) {
++  return simd_shuffle_up(static_cast<uint32_t>(data), delta);
++}
++inline complex64_t simd_shuffle_up(complex64_t data, uint16_t delta) {
++  return complex64_t(
++      simd_shuffle_up(data.real, delta), simd_shuffle_up(data.imag, delta));
++}
++inline uint64_t
++simd_shuffle_and_fill_up(uint64_t data, uint64_t filling, uint16_t delta) {
++  return as_type<uint64_t>(metal::simd_shuffle_and_fill_up(
++      as_type<uint2>(data), as_type<uint2>(filling), delta));
++}
++inline int64_t
++simd_shuffle_and_fill_up(int64_t data, int64_t filling, uint16_t delta) {
++  return as_type<int64_t>(metal::simd_shuffle_and_fill_up(
++      as_type<uint2>(data), as_type<uint2>(filling), delta));
++}
++inline bool simd_shuffle_and_fill_up(bool data, bool filling, uint16_t delta) {
++  return simd_shuffle_and_fill_up(
++      static_cast<uint32_t>(data), static_cast<uint32_t>(filling), delta);
++}
++inline complex64_t simd_shuffle_and_fill_up(
++    complex64_t data,
++    complex64_t filling,
++    uint16_t delta) {
++  return complex64_t(
++      simd_shuffle_and_fill_up(data.real, filling.real, delta),
++      simd_shuffle_and_fill_up(data.imag, filling.imag, delta));
++}
++inline uint64_t simd_shuffle(uint64_t data, uint16_t lane) {
++  return as_type<uint64_t>(metal::simd_shuffle(as_type<uint2>(data), lane));
++}
++inline int64_t simd_shuffle(int64_t data, uint16_t lane) {
++  return as_type<int64_t>(metal::simd_shuffle(as_type<uint2>(data), lane));
++}
++inline bool simd_shuffle(bool data, uint16_t lane) {
++  return simd_shuffle(static_cast<uint32_t>(data), lane);
++}
++inline complex64_t simd_shuffle(complex64_t data, uint16_t lane) {
++  return complex64_t(
++      simd_shuffle(data.real, lane), simd_shuffle(data.imag, lane));
++}
++template <bool condition, typename T, typename U>
++struct ConditionalType {
++  using type = U;
++};
++template <typename T, typename U>
++struct ConditionalType<true, T, U> {
++  using type = T;
++};
++)preamble";
++}
++
++} // namespace mlx::core::metal
+diff --git a/mlx/backend/metal/kernels/binary_ops.h b/mlx/backend/metal/kernels/binary_ops.h
+index 8f961c2..96489a6 100644
+--- a/mlx/backend/metal/kernels/binary_ops.h
++++ b/mlx/backend/metal/kernels/binary_ops.h
+@@ -39,9 +39,9 @@ struct Divide {
+ };
+ 
+ struct Remainder {
++  /* Modified to match `stablehlo` implementation semantics */
+   template <typename T>
+-  metal::enable_if_t<metal::is_integral_v<T> & !metal::is_signed_v<T>, T>
+-  operator()(T x, T y) {
++  metal::enable_if_t<metal::is_integral_v<T>, T> operator()(T x, T y) {
+     return x % y;
+   }
+   template <typename T>
+@@ -55,11 +55,7 @@ struct Remainder {
+   }
+   template <typename T>
+   metal::enable_if_t<!metal::is_integral_v<T>, T> operator()(T x, T y) {
+-    T r = fmod(x, y);
+-    if (r != 0 && (r < 0 != y < 0)) {
+-      r += y;
+-    }
+-    return r;
++    return fmod(x, y);
+   }
+   template <>
+   complex64_t operator()(complex64_t x, complex64_t y) {
+diff --git a/mlx/backend/metal/kernels/complex.h b/mlx/backend/metal/kernels/complex.h
+index fe8ec5c..29c10ee 100644
+--- a/mlx/backend/metal/kernels/complex.h
++++ b/mlx/backend/metal/kernels/complex.h
+@@ -123,11 +123,12 @@ constexpr complex64_t operator/(complex64_t a, complex64_t b) {
+ constexpr complex64_t operator%(complex64_t a, complex64_t b) {
+   auto real = a.real - (b.real * static_cast<int64_t>(a.real / b.real));
+   auto imag = a.imag - (b.imag * static_cast<int64_t>(a.imag / b.imag));
+-  if (real != 0 && (real < 0 != b.real < 0)) {
+-    real += b.real;
+-  }
+-  if (imag != 0 && (imag < 0 != b.imag < 0)) {
+-    imag += b.imag;
+-  }
++  /* Disable to match `stablehlo` implementation semantics */
++  // if (real != 0 && (real < 0 != b.real < 0)) {
++  //   real += b.real;
++  // }
++  // if (imag != 0 && (imag < 0 != b.imag < 0)) {
++  //   imag += b.imag;
++  // }
+   return {real, imag};
+ }
+diff --git a/mlx/types/complex.h b/mlx/types/complex.h
+index 51101cc..344d80f 100644
+--- a/mlx/types/complex.h
++++ b/mlx/types/complex.h
+@@ -59,10 +59,11 @@ inline bool operator>(const complex64_t& a, const complex64_t& b) {
+ inline complex64_t operator%(complex64_t a, complex64_t b) {
+   auto real = a.real() - (b.real() * static_cast<int64_t>(a.real() / b.real()));
+   auto imag = a.imag() - (b.imag() * static_cast<int64_t>(a.imag() / b.imag()));
+-  if (real != 0 && ((real < 0) != (b.real() < 0)))
+-    real += b.real();
+-  if (imag != 0 && ((imag < 0) != (b.imag() < 0)))
+-    imag += b.imag();
++  /* Disable to match `stablehlo` implementation semantics */
++  // if (real != 0 && ((real < 0) != (b.real() < 0)))
++  //   real += b.real();
++  // if (imag != 0 && ((imag < 0) != (b.imag() < 0)))
++  //   imag += b.imag();
+   return {real, imag};
+ }
+ 

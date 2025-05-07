@@ -1,0 +1,10 @@
+module(
+    name = "mlx",
+    version = "20250205.0-af1b725",
+    compatibility_level = 1,
+)
+
+bazel_dep(name = "rules_apple", version = "3.16.1", repo_name = "build_bazel_rules_apple")
+bazel_dep(name = "fmt", version = "11.0.2")
+metal_cpp = use_extension("//:metal_cpp.bzl", "metal_cpp")
+use_repo(metal_cpp, "metal_cpp")

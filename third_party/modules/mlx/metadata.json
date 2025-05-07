@@ -1,0 +1,18 @@
+{
+  "homepage": "https://github.com/ml-explore/mlx",
+  "maintainers": [
+    {
+      "email": "bzlmod@zml.ai",
+      "github": "zml",
+      "name": "ZML Engineering Team"
+    }
+  ],
+  "repository": [
+    "github:ml-explore/mlx"
+  ],
+  "versions": [
+    "20250205.0-af1b725",
+    "20241224.0-935c8c4"
+  ],
+  "yanked_versions": {}
+}

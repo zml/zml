@@ -4,6 +4,16 @@ module(
 
 new_git_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:git.bzl", "new_git_repository")
 
+local_path_override(
+    module_name = "xla",
+    path = "../xla_master",
+)
+
+local_path_override(
+    module_name = "mlx",
+    path = "../mlx_master",
+)
+
 bazel_dep(name = "abseil-cpp", version = "20240722.0.bcr.2")
 bazel_dep(name = "aspect_bazel_lib", version = "2.14.0")
 bazel_dep(name = "aspect_rules_py", version = "1.3.2")
@@ -25,6 +35,7 @@ bazel_dep(name = "sentencepiece", version = "20240618.0-d7ace0a")
 bazel_dep(name = "toolchains_protoc", version = "0.3.7")
 bazel_dep(name = "with_cfg.bzl", version = "0.9.1")
 bazel_dep(name = "xla", version = "20250317.2-71c67e2")
+bazel_dep(name = "mlx", version = "20250205.0-af1b725")
 bazel_dep(name = "zig-protobuf", version = "20250318.0-930153e")
 bazel_dep(name = "zig-yaml", version = "20240903.0-83d5fdf")
 

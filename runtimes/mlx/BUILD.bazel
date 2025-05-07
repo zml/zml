@@ -1,0 +1,36 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+cc_import(
+    name = "libpjrt_mlx_bindings",
+    shared_library = "@xla//xla/pjrt/plugin/mlx:stablehlo_mlx_plugin.so",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "empty",
+)
+
+cc_library(
+    name = "libpjrt_mlx",
+    defines = ["ZML_RUNTIME_MLX"],
+    deps = [":libpjrt_mlx_bindings"],
+)
+
+zig_library(
+    name = "mlx",
+    import_name = "runtimes/mlx",
+    main = "mlx.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pjrt",
+    ] + select({
+        "//runtimes:mlx.enabled": [":libpjrt_mlx"],
+        "//conditions:default": [":empty"],
+    }),
+)
+
+filegroup(
+    name = "layers",
+    srcs = [],
+    visibility = ["//visibility:public"],
+)
