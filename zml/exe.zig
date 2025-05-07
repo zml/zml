@@ -216,7 +216,7 @@ pub const BaseExe = struct {
         const trace_events_await = self.platform.tracer.frameStart("_unsafeCall await events");
         for (events[0..sharding.num_partitions]) |e| {
             if (e) |ev| {
-                ev.await_(self.platform.pjrt_api) catch unreachable;
+                ev.awaitt2(self.platform.pjrt_api) catch unreachable;
             }
         }
         self.platform.tracer.frameEnd(trace_events_await, "_unsafeCall await events");

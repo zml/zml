@@ -201,6 +201,10 @@ pub const Event = opaque {
         return self.inner().getEventError(api);
     }
 
+    pub fn awaitt2(self: *Event, api: *const Api) !void {
+        return self.inner().await_(api);
+    }
+
     pub const await_ = awaitt;
     pub fn awaitt(self: *Event, api: *const Api) !void {
         defer self.deinit(api);
