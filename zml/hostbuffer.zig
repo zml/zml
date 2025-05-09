@@ -245,9 +245,10 @@ pub const HostBuffer = struct {
         stdx.debug.assert(start < end, "slice1d({}, {}) expects the slice start ({}) to be smaller than the end ({}), got: {}", .{ self, ax, start, end, s });
 
         const offset: usize = @intCast(start * self._strides[ax]);
+        const new_shape = self.shape().set(ax, end - start);
         return .{
-            ._shape = self.shape().set(ax, end - start),
-            .data = self.data[offset..],
+            ._shape = new_shape,
+            .data = self.data[offset..][0..new_shape.byteSize()],
             ._strides = self._strides,
             ._memory = .unmanaged,
         };
@@ -259,13 +260,9 @@ pub const HostBuffer = struct {
     }
 
     pub fn chooseItems(self: HostBuffer, T: type, offsets: anytype) []const T {
-        const off, const tags = Shape.parseDimensions(offsets);
-
-        // TODO: this is a bit too restrictive, choosing slice could extract a contiguous
-        // slice out of a non-contiguous tensor.
-        std.debug.assert(self.isContiguous());
         stdx.debug.assert(DataType.fromZigType(T) == self.dtype(), "Can't reinterpret {} as {s}", .{ self, @typeName(T) });
 
+        const off, const tags = Shape.parseDimensions(offsets);
         var sh = self._shape;
         var offset: i64 = 0;
         var last_sliced_ax: i8 = -1;
@@ -274,6 +271,14 @@ pub const HostBuffer = struct {
             offset += o * self._strides[ax];
             sh._dims.buffer[ax] = 1;
             last_sliced_ax = @max(ax, last_sliced_ax);
+        }
+
+        {
+            const _strides = self._strides;
+            const cont_strides = sh.computeStrides();
+            for (sh.dims(), _strides[0..self.rank()], cont_strides.constSlice()) |d, stride, cont_stride| {
+                stdx.debug.assert(d == 1 or stride == cont_stride, "Can't {}.chooseItems({s}, {d}) because of strides: {d}", .{ self, tags.constSlice(), off.constSlice(), _strides });
+            }
         }
 
         if (last_sliced_ax > 0) {
