@@ -1,11 +1,11 @@
 const std = @import("std");
-const log = std.log.scoped(.modernbert);
 
 const asynk = @import("async");
 const stdx = @import("stdx");
 const zml = @import("zml");
-
 const Tensor = zml.Tensor;
+
+const log = std.log.scoped(.modernbert);
 
 pub const ModernBertOptions = struct {
     num_attention_heads: i64,
@@ -222,7 +222,7 @@ pub const ModernBertAttention = struct {
         // Layer 0, 3, 6, 9, 12 ... use global RoPE
         // Layer 1, 2, 4, 5, 7, 8, 10, 11 ... use local RoPE
         const rope_opts = zml.nn.RopeOpts{
-            .impl = .sequential,
+            .layout = .sequential,
             .freq_base = if (self.is_global_attention) 160_000 else 10_000,
         };
 
