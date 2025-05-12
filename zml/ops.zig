@@ -769,96 +769,6 @@ pub fn fromMlirOperationWithTags(op: mlir.Operation, base: anytype) @TypeOf(base
     return res;
 }
 
-pub const HostCallbackOpt = struct {
-    has_side_effect: bool = false,
-    output_operand_aliases: []const i64 = &.{},
-};
-
-pub fn addHostCallback(
-    callback: *const Context.HostCallback,
-    blkctx: ?*anyopaque,
-    inputs: []const Tensor,
-    output_shapes: []const Shape,
-    opts: HostCallbackOpt,
-) []Tensor {
-    const ctx = CompilationContext.current();
-    var tags = std.ArrayListUnmanaged(i64).initCapacity(ctx.allocator(), (inputs.len + output_shapes.len) * Shape.MAX_RANK) catch @panic("OOM");
-    defer tags.deinit(ctx.allocator());
-
-    var readable_tags = std.ArrayList(u8).initCapacity(ctx.allocator(), (inputs.len + output_shapes.len) * 32) catch @panic("OOM");
-    defer readable_tags.deinit();
-
-    readable_tags.appendSlice("(") catch {};
-    for (inputs) |input| {
-        readable_tags.appendSlice(".{") catch {};
-        for (input.shape().tags()) |t| {
-            const ptr: u64 = @intFromPtr(t);
-            tags.appendAssumeCapacity(@bitCast(ptr));
-            readable_tags.appendSlice(std.mem.span(t)) catch {};
-            readable_tags.append(',') catch {};
-        }
-        readable_tags.appendSlice("},") catch {};
-    }
-    readable_tags.appendSlice(") -> (") catch {};
-    for (output_shapes) |output| {
-        readable_tags.appendSlice(".{") catch {};
-        for (output.tags()) |t| {
-            const ptr: u64 = @intFromPtr(t);
-            tags.appendAssumeCapacity(@bitCast(ptr));
-            readable_tags.appendSlice(std.mem.span(t)) catch {};
-            readable_tags.append(',') catch {};
-        }
-        readable_tags.appendSlice("},") catch {};
-    }
-    readable_tags.appendSlice(")") catch {};
-
-    const mlir_ctx = ctx.mlirCtx();
-    const backend_config = mlir.Attribute.dict(mlir_ctx, &.{
-        .{ "callback", .int(mlir_ctx, .u64, @bitCast(@intFromPtr(callback))) },
-        .{ "user_context", .int(mlir_ctx, .u64, @bitCast(@intFromPtr(blkctx))) },
-        .{ "tags", .string(mlir_ctx, readable_tags.items) },
-        .{ "__tags", .dense(mlir_ctx, .i64, tags.items) },
-    });
-
-    const values = stdx.stackSlice(8, mlir.Value, inputs.len);
-    const operands_layouts = stdx.stackSlice(8, []const usize, inputs.len);
-    for (inputs, 0..) |input, i| {
-        values[i] = ctx.getValue(input);
-        operands_layouts[i] = minorToMajor(input.rank());
-    }
-
-    const res_types = stdx.stackSlice(8, mlir.Type, output_shapes.len);
-    const results_layouts = stdx.stackSlice(8, []const usize, output_shapes.len);
-    for (output_shapes, 0..) |o, i| {
-        res_types[i] = mlir.ext.RankedTensorType.fromShape(mlir_ctx, o).as(mlir.Type);
-        results_layouts[i] = minorToMajor(o.rank());
-    }
-
-    const loc = ctx.mlirCtx().location(@src());
-    const op = dialect.stablehlo.custom_call(
-        ctx.mlirCtx(),
-        values,
-        .{
-            .call_target_name = "zmlHostBufferCallback",
-            .api_version = .typed_ffi,
-            .backend_config = backend_config,
-            .has_side_effect = opts.has_side_effect,
-            .operand_layouts = operands_layouts,
-            .result_layouts = results_layouts,
-            .output_operand_aliases = opts.output_operand_aliases,
-        },
-        res_types,
-        loc,
-    );
-
-    const res = ctx.allocator().alloc(Tensor, output_shapes.len) catch @panic("OOM");
-    for (res, output_shapes, 0..) |*r, o, i| {
-        r.* = Tensor._result(o, op.result(i)); //.toMemory(.device);
-    }
-
-    return res;
-}
-
 pub const TritonOps = struct {
     debug: bool = false,
     name: [:0]const u8,
@@ -1291,13 +1201,13 @@ inline fn toI64(values: anytype) []i64 {
 }
 
 const _MINOR_TO_MAJOR = blk: {
-    var ret: [Shape.MAX_RANK]usize = undefined;
+    var ret: [Shape.MAX_RANK]i64 = undefined;
     for (0..Shape.MAX_RANK) |i| {
         ret[i] = @intCast(Shape.MAX_RANK - i - 1);
     }
     break :blk ret;
 };
 
-fn minorToMajor(rank: u8) []const usize {
+pub fn minorToMajor(rank: u8) []const i64 {
     return _MINOR_TO_MAJOR[_MINOR_TO_MAJOR.len - rank ..];
 }

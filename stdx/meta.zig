@@ -164,6 +164,14 @@ pub fn FnResult(comptime func: anytype) type {
     return @typeInfo(@TypeOf(func)).@"fn".return_type orelse @compileError("anytype is not supported");
 }
 
+pub fn FnResultNoError(comptime func: anytype) type {
+    const ReturnT = @typeInfo(@TypeOf(func)).@"fn".return_type orelse @compileError("anytype is not supported");
+    return switch (@typeInfo(ReturnT)) {
+        .error_union => |info| info.payload,
+        else => ReturnT,
+    };
+}
+
 pub fn Head(Tuple: type) type {
     return switch (@typeInfo(Tuple)) {
         .@"struct" => |struct_info| {
