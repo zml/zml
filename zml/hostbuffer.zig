@@ -259,36 +259,38 @@ pub const HostBuffer = struct {
         return self.slice1d(ax, .{ .start = start, .end = start + 1 }).squeeze(ax);
     }
 
-    pub fn chooseItems(self: HostBuffer, T: type, offsets: anytype) []const T {
-        stdx.debug.assert(DataType.fromZigType(T) == self.dtype(), "Can't reinterpret {} as {s}", .{ self, @typeName(T) });
-
+    pub fn choose(self: HostBuffer, offsets: anytype) HostBuffer {
         const off, const tags = Shape.parseDimensions(offsets);
         var sh = self._shape;
         var offset: i64 = 0;
-        var last_sliced_ax: i8 = -1;
         for (off.constSlice(), tags.constSlice()) |o, t| {
             const ax = sh.axis(t);
             offset += o * self._strides[ax];
-            sh._dims.buffer[ax] = 1;
-            last_sliced_ax = @max(ax, last_sliced_ax);
+            sh._dims.buffer[ax] = 0;
         }
 
-        {
-            const _strides = self._strides;
-            const cont_strides = sh.computeStrides();
-            for (sh.dims(), _strides[0..self.rank()], cont_strides.constSlice()) |d, stride, cont_stride| {
-                stdx.debug.assert(d == 1 or stride == cont_stride, "Can't {}.chooseItems({s}, {d}) because of strides: {d}", .{ self, tags.constSlice(), off.constSlice(), _strides });
+        var new_strides: [Shape.MAX_RANK]i64 = @splat(self.dtype().sizeOf());
+
+        // TODO rewrite with simd. This is a pshuf, but it's not supported by @shuffle.
+        var res_ax: u32 = 0;
+        for (0..self._shape.rank()) |ax| {
+            if (sh._dims.buffer[ax] == 0) {
+                continue;
             }
-        }
 
-        if (last_sliced_ax > 0) {
-            // TODO better error message
-            for (0..@intCast(last_sliced_ax)) |ax|
-                std.debug.assert(sh._dims.buffer[ax] == 1);
+            sh._dims.buffer[res_ax] = self._shape._dims.buffer[ax];
+            sh._tags.buffer[res_ax] = self._shape._tags.buffer[ax];
+            new_strides[res_ax] = self._strides[ax];
+            res_ax += 1;
         }
+        sh._dims.len -= off.len;
+        sh._tags.len -= off.len;
 
-        const ptr: [*]const T = @alignCast(@ptrCast(self.data.ptr[@bitCast(offset)..]));
-        return ptr[0..sh.count()];
+        return HostBuffer{
+            ._shape = sh,
+            ._strides = new_strides,
+            .data = self.data[@intCast(offset)..][0..sh.byteSize()],
+        };
     }
 
     pub fn squeeze(self: HostBuffer, axis_: anytype) HostBuffer {
