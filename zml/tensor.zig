@@ -1953,7 +1953,7 @@ pub const Tensor = struct {
         const result_type = mlir.ext.RankedTensorType.fromShape(ctx, val.shape());
         const loc = ctx.location(@src());
         const elem_type = mlir.ext.denseElementAttrType(val.dtype()) orelse std.debug.panic("constantTensor expects a dtype that can be serialized to MLIR, like f32 or i32, got {}", .{val.shape()});
-        const constant_op = dialect.stablehlo.constant(ctx, result_type, elem_type, val.data[0..val.shape().byteSize()], loc);
+        const constant_op = dialect.stablehlo.constant(ctx, result_type, elem_type, val.data, loc);
         return _result(val.shape(), constant_op.result(0));
     }
 
