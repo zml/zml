@@ -2,6 +2,9 @@
 try-import      %workspace%/../.bazelrc-examples
 try-import      %workspace%/.bazelrc-zml
 
+
+common --incompatible_disallow_struct_provider_syntax=false
+
 # Faster hash function
 startup         --digest_function=blake3
 

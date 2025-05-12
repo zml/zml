@@ -8,8 +8,8 @@ apple_metal_library(
         "-fno-fast-math",
         # hack required as `apple_metal_library` doesn't 
         # respect `includes` attr
-        "-Iexternal/mlx~",
-        "-Iexternal/mlx~/mlx/backend/metal/kernels/metal_3_1",
+        "-Iexternal/mlx+",
+        "-Iexternal/mlx+/mlx/backend/metal/kernels/metal_3_1",
     ],
     srcs = [
         "mlx/backend/metal/kernels/arg_reduce.metal",
