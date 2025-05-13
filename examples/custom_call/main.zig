@@ -2,6 +2,9 @@ const std = @import("std");
 const zml = @import("zml");
 const asynk = @import("async");
 
+const cuda = zml.context.cuda;
+const ffi = zml.ffi;
+
 pub const std_options: std.Options = .{
     .log_level = .info,
     .logFn = asynk.logFn(std.log.defaultLog),
@@ -12,47 +15,47 @@ const log = std.log.scoped(.@"examples/custom_call");
 pub const AddOp = struct {
     const Self = @This();
 
-    _platform: *const zml.Platform,
+    platform: zml.Platform,
 
-    pub fn beforeCustomCall(a: zml.Tensor, b: zml.Tensor) struct { zml.Tensor, zml.Tensor, zml.Tensor } {
-        return .{ a, b, zml.Tensor.scalar(0, .f32) };
-    }
+    buffers: []*const ffi.FFIBuffer = undefined,
+    stream: *ffi.FFIStream = undefined,
 
-    pub fn call(self: *Self, a: zml.Buffer, b: zml.Buffer, result: zml.Buffer) !struct { zml.Buffer, zml.Buffer, zml.Buffer } {
-        const a_ = try a.getValue(f32);
-        const b_ = try b.getValue(f32);
+    pub fn call(self: *Self, a_: *const ffi.FFIBuffer, b_: *const ffi.FFIBuffer) !void {
+        const a_device = zml.Buffer.asViewOfDeviceBuffer(self.platform, ffi.getShape(a_), null, a_.data.asPtr());
+        const a = a_device.copyToMemory(self.platform, .host_pinned) catch unreachable;
 
-        log.warn("{s}@{*} a value: {d}", .{ @typeName(Self), self, a_ });
-        log.warn("{s}@{*} b value: {d}", .{ @typeName(Self), self, b_ });
+        const b_device = zml.Buffer.asViewOfDeviceBuffer(self.platform, ffi.getShape(b_), null, b_.data.asPtr());
+        const b = b_device.copyToMemory(self.platform, .host_pinned) catch unreachable;
 
-        const add_result = a_ + b_;
-        try result.setValue(f32, add_result);
-        log.warn("{s}@{*} result value: {d}", .{ @typeName(Self), self, try result.getValue(f32) });
+        _ = a.awaitt() catch unreachable;
+        _ = b.awaitt() catch unreachable;
 
-        return .{ a, b, result };
-    }
+        const a_value = try a.getValue(f32);
+        const b_value = try b.getValue(f32);
 
-    fn getPlatform(self: *Self) zml.Platform {
-        return self._platform.*;
+        const result: f32 = a_value + b_value;
+        const result_hb = zml.HostBuffer.fromBytes(a_device.shape(), std.mem.asBytes(&result));
+
+        cuda.memcpyToDeviceAsync(self.buffers[0].data, result_hb.data, self.stream);
     }
 };
 
 pub const LogResultOp = struct {
     const Self = @This();
 
-    _platform: *const zml.Platform,
+    platform: zml.Platform,
 
-    pub fn beforeCustomCall(value: zml.Tensor) zml.Tensor {
-        return value;
-    }
+    buffers: []*const ffi.FFIBuffer = undefined,
+    stream: *ffi.FFIStream = undefined,
 
-    pub fn call(self: *Self, value: zml.Buffer) !zml.Buffer {
-        log.warn("{s}@{*} value: {d}", .{ @typeName(Self), self, try value.getValue(f32) });
-        return value;
-    }
+    pub fn call(self: *Self, value: *const ffi.FFIBuffer) !void {
+        const value_device = zml.Buffer.asViewOfDeviceBuffer(self.platform, ffi.getShape(value), null, value.data.asPtr());
+        const value_pinned = value_device.copyToMemory(self.platform, .host_pinned) catch unreachable;
 
-    fn getPlatform(self: *Self) zml.Platform {
-        return self._platform.*;
+        log.warn("{s}@{*} value: {d}", .{ @typeName(Self), self, try value_pinned.getValue(f32) });
+
+        const data = try value_pinned.dataInMemory();
+        cuda.memcpyToDeviceAsync(self.buffers[0].data, data, self.stream);
     }
 };
 
@@ -77,9 +80,10 @@ pub const LogValuesVoidOp = struct {
 const Layer = struct {
     // a = 40x128 bf16 ou f32
     pub fn forward(_: Layer, a: zml.Tensor, b: zml.Tensor) zml.Tensor {
-        const a_ = zml.custom_call(LogResultOp, .{a});
-        const results = zml.custom_call(AddOp, .{ a_, b });
-        return zml.custom_call(LogResultOp, .{results[2]});
+        const a_ = zml.custom_call(LogResultOp, .{a}, &[_]zml.Shape{a.shape()});
+        const results = zml.custom_call(AddOp, .{ a_[0], b }, &[_]zml.Shape{a.shape()});
+        return results[0];
+        // return zml.custom_call(LogResultOp, .{results[2]}, &[_]zml.Shape{a.shape()});
     }
 };
 
@@ -138,10 +142,10 @@ pub fn asyncMain() !void {
     var executable = compiled.prepare(model_weights).withExecutionContext();
     defer executable.deinit();
 
-    const add_op_ctx: AddOp = .{ ._platform = &platform };
-    try executable.attach(&add_op_ctx);
-    const log_result_op_ctx: LogResultOp = .{ ._platform = &platform };
-    try executable.attach(&log_result_op_ctx);
+    const add_op_ctx: AddOp = .{ .platform = platform };
+    try executable.inner.attach(&add_op_ctx);
+    const log_result_op_ctx: LogResultOp = .{ .platform = platform };
+    try executable.inner.attach(&log_result_op_ctx);
     // const log_values_op_ctx: LogValuesVoidOp = .{ ._platform = &platform };
     // try executable.attach(&log_values_op_ctx);
 
