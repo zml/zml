@@ -19,7 +19,7 @@ test {
 pub const HostBuffer = struct {
     _shape: Shape,
     _strides: [Shape.MAX_RANK]i64,
-    data: []const u8,
+    _data: [*]const u8,
     _memory: union(enum) {
         managed: std.mem.Alignment,
         unmanaged,
@@ -28,11 +28,11 @@ pub const HostBuffer = struct {
     /// Allocates a HostBuffer with the given shape.
     /// The memory is left undefined.
     /// The caller owns the memory, and need to call `deinit()`.
-    pub fn empty(allocator: std.mem.Allocator, sh: Shape) !HostBuffer {
+    pub fn empty(allocator: std.mem.Allocator, sh: Shape) error{OutOfMemory}!HostBuffer {
         return .{
             ._shape = sh,
             ._strides = sh.computeStrides().buffer,
-            .data = try allocator.alignedAlloc(u8, 64, sh.byteSize()),
+            ._data = (try allocator.alignedAlloc(u8, 64, sh.byteSize())).ptr,
             ._memory = .{ .managed = .@"64" },
         };
     }
@@ -45,7 +45,7 @@ pub const HostBuffer = struct {
         return .{
             ._shape = shape_,
             ._strides = shape_.computeStrides().buffer,
-            .data = data_,
+            ._data = data_.ptr,
             ._memory = .unmanaged,
         };
     }
@@ -55,7 +55,7 @@ pub const HostBuffer = struct {
         // This means we don't own the data.
         if (self._memory == .unmanaged) return;
         const log2_align = self._memory.managed;
-        allocator.rawFree(@constCast(self.data), log2_align, @returnAddress());
+        allocator.rawFree(self.mutBytes(), log2_align, @returnAddress());
     }
 
     /// Wraps an exisiting slice into a HostBuffer.
@@ -64,11 +64,12 @@ pub const HostBuffer = struct {
     /// that will still need to be deallocated.
     pub fn fromSlice(sh: anytype, s: anytype) HostBuffer {
         const shape_ = Shape.init(sh, DataType.fromSliceElementType(s));
-        std.debug.assert(shape_.count() == s.len);
+        const raw_bytes = std.mem.sliceAsBytes(s);
+        std.debug.assert(shape_.byteSize() == raw_bytes.len);
         return .{
             ._shape = shape_,
             ._strides = shape_.computeStrides().buffer,
-            .data = @alignCast(std.mem.sliceAsBytes(s)),
+            ._data = raw_bytes.ptr,
             ._memory = .unmanaged,
         };
     }
@@ -84,7 +85,7 @@ pub const HostBuffer = struct {
         @memcpy(tmp[0..strides_.len], strides_);
         return .{
             ._shape = sh,
-            .data = @alignCast(std.mem.sliceAsBytes(s)),
+            ._data = @alignCast(std.mem.sliceAsBytes(s).ptr),
             ._strides = tmp,
             ._memory = .unmanaged,
         };
@@ -92,14 +93,15 @@ pub const HostBuffer = struct {
 
     /// Creates a tensor from a **pointer** to a "multi dimension" array.
     /// Note this doesn't copy, the pointee array need to survive the `HostBuffer` object.
+    /// Typically this is use with constant arrays.
     pub fn fromArray(arr_ptr: anytype) HostBuffer {
         const T = @TypeOf(arr_ptr.*);
         const sh = parseArrayInfo(T);
+        std.debug.assert(sh.byteSize() == @sizeOf(T));
         return .{
             ._shape = sh,
             ._strides = sh.computeStrides().buffer,
-            .data = @alignCast(std.mem.sliceAsBytes(arr_ptr)),
-            // Array are typically stack allocated and don't need to be freed.
+            ._data = @ptrCast(arr_ptr),
             ._memory = .unmanaged,
         };
     }
@@ -125,16 +127,15 @@ pub const HostBuffer = struct {
         stdx.debug.assert(args.step > 0, "arange expects 'args.step' to be positive, got {}", .{args.step});
 
         const n_steps = std.math.divCeil(i64, args.end - args.start, args.step) catch unreachable;
-        const b = dt.sizeOf();
         const res = try empty(allocator, Shape.init(.{n_steps}, dt));
-        stdx.debug.assert(dt.class() == .integer, "arange expects type to be integer, got {} instead.", .{dt});
-        var data_ = @constCast(res.data);
         switch (dt) {
-            inline else => {
+            inline else => |d| if (comptime d.class() != .integer) {
+                stdx.debug.assert(dt.class() == .integer, "arange expects type to be integer, got {} instead.", .{dt});
+            } else {
+                const Zt = d.toZigType();
                 var j: i64 = args.start;
-                for (0..@intCast(n_steps)) |i| {
-                    var v = Data.init(dt, j);
-                    @memcpy(data_[i * b .. (i + 1) * b], v.constSlice());
+                for (res.mutItems(Zt)) |*val| {
+                    val.* = @intCast(j);
                     j +%= args.step;
                 }
             },
@@ -166,15 +167,22 @@ pub const HostBuffer = struct {
     pub fn items(self: HostBuffer, comptime T: type) []const T {
         // TODO we should allow interpreting the output as @Vector(8, f32) when the tensor is f32.
         stdx.debug.assert(DataType.fromZigType(T) == self.dtype(), "Can't reinterpret {} as {s}", .{ self, @typeName(T) });
-        if (!self.isContiguous()) {
-            std.debug.panic("{} isn't contiguous", .{self});
-        }
-        const ptr: [*]const T = @alignCast(@ptrCast(self.data.ptr));
+        stdx.debug.assert(self.isContiguous(), "{} isn't contiguous, can't interpret as []const u8", .{self});
+        const ptr: [*]const T = @alignCast(@ptrCast(self._data));
         return ptr[0..self._shape.count()];
     }
 
     pub fn mutItems(self: HostBuffer, comptime T: type) []T {
         return @constCast(self.items(T));
+    }
+
+    pub fn bytes(self: HostBuffer) []const u8 {
+        stdx.debug.assert(self.isContiguous(), "{} isn't contiguous, can't interpret as []const u8", .{self});
+        return self._data[0..self._shape.byteSize()];
+    }
+
+    pub fn mutBytes(self: HostBuffer) []u8 {
+        return @constCast(self.bytes());
     }
 
     pub fn shape(self: HostBuffer) Shape {
@@ -248,7 +256,7 @@ pub const HostBuffer = struct {
         const new_shape = self.shape().set(ax, end - start);
         return .{
             ._shape = new_shape,
-            .data = self.data[offset..][0..new_shape.byteSize()],
+            ._data = self._data[offset..],
             ._strides = self._strides,
             ._memory = .unmanaged,
         };
@@ -289,7 +297,8 @@ pub const HostBuffer = struct {
         return HostBuffer{
             ._shape = sh,
             ._strides = new_strides,
-            .data = self.data[@intCast(offset)..][0..sh.byteSize()],
+            ._data = self._data[@intCast(offset)..],
+            ._memory = .unmanaged,
         };
     }
 
@@ -302,7 +311,7 @@ pub const HostBuffer = struct {
 
         return .{
             ._shape = self.shape().drop(ax),
-            .data = self.data,
+            ._data = self._data,
             ._strides = strd.buffer,
             ._memory = self._memory,
         };
@@ -316,7 +325,7 @@ pub const HostBuffer = struct {
     ) !void {
         _ = options;
         if (std.mem.eql(u8, fmt, "v")) {
-            try writer.print("HostBuffer(.{_})@0x{x}", .{ self._shape, @intFromPtr(self.data.ptr) });
+            try writer.print("HostBuffer(.{_})@0x{x}", .{ self._shape, @intFromPtr(self._data) });
         } else {
             try writer.print("HostBuffer(.{_})", .{self._shape});
         }
