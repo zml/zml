@@ -88,11 +88,12 @@ pub fn custom_call(
     comptime custom_op: type,
     inputs: CustomCallInputsType(custom_op),
     res_shapes_: []const Shape,
+    ctx: *CompilationContext,
 ) []Tensor {
     stdx.debug.assert(@hasDecl(custom_op, "call"), "custom_op must have a call method", .{});
     const op_name = @typeName(custom_op);
 
-    const ctx = inputs[0].getContext();
+    // const ctx = inputs[0].getContext();
     const allocator = ctx.allocator();
     const mlir_ctx = ctx.mlirCtx();
     const platform_ = ctx._platform;

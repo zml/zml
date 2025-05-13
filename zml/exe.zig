@@ -219,13 +219,13 @@ pub const BaseExe = struct {
         }) catch unreachable;
         self.platform.tracer.frameEnd(trace, "_unsafeCall execute");
 
-        const trace_events_await = self.platform.tracer.frameStart("_unsafeCall await events");
-        for (events[0..sharding.num_partitions]) |e| {
-            if (e) |ev| {
-                ev.awaitt(self.platform.pjrt_api) catch unreachable;
-            }
-        }
-        self.platform.tracer.frameEnd(trace_events_await, "_unsafeCall await events");
+        // const trace_events_await = self.platform.tracer.frameStart("_unsafeCall await events");
+        // for (events[0..sharding.num_partitions]) |e| {
+        //     if (e) |ev| {
+        //         ev.awaitt(self.platform.pjrt_api) catch unreachable;
+        //     }
+        // }
+        // self.platform.tracer.frameEnd(trace_events_await, "_unsafeCall await events");
     }
 
     pub fn serialize(self: BaseExe, writer: anytype) !void {
