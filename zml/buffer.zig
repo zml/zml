@@ -86,7 +86,7 @@ pub const Buffer = struct {
                 platform.pjrt_client,
                 platform.pjrt_api,
                 pjrt.Client.BufferFromHostBufferArgs{
-                    .data = buf.data,
+                    .data = buf._data,
                     .buffer_type = buffer_type,
                     .dims = buf.shape().dims(),
                     .byte_strides = byte_strides,
@@ -173,8 +173,8 @@ pub const Buffer = struct {
         if (shape_.rank() < 1 or byte_size * shape_.dim(-1) > max_bytes) {
             const host_buffer: HostBuffer = .{
                 ._shape = shape_,
-                ._strides = [1]i64{0} ** Shape.MAX_RANK,
-                .data = x.constSlice(),
+                ._strides = @splat(0),
+                ._data = x.constSlice().ptr,
             };
             return try from(platform, host_buffer);
         }
@@ -198,7 +198,7 @@ pub const Buffer = struct {
             },
             else => unreachable,
         }
-        const host_buffer: HostBuffer = .{ ._shape = shape_, ._strides = strides, .data = &bytes };
+        const host_buffer: HostBuffer = .{ ._shape = shape_, ._strides = strides, ._data = &bytes };
         return try from(platform, host_buffer);
     }
 
@@ -219,7 +219,7 @@ pub const Buffer = struct {
     /// could lead to crashes and operations on the buffer will be slower.
     /// Tested on Cuda 12.4.
     pub fn asViewOfHostBuffer(platform: Platform, buf: HostBuffer) Buffer {
-        return asViewOfDeviceBuffer(platform, buf.shape(), null, @constCast(@ptrCast(buf.data.ptr)));
+        return asViewOfDeviceBuffer(platform, buf.shape(), null, @constCast(buf._data));
     }
 
     /// Creates a Buffer from a pointer into device memory.
@@ -287,7 +287,7 @@ pub const Buffer = struct {
     pub fn toHostAlloc(self: Buffer, allocator: std.mem.Allocator) !HostBuffer {
         const output = try HostBuffer.empty(allocator, self.shape());
         stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
-        const maybe_event = try self._shards.get(0).toHostBuffer(self._api, @constCast(output.data));
+        const maybe_event = try self._shards.get(0).toHostBuffer(self._api, @constCast(output.bytes()));
         if (maybe_event) |event| {
             try event.await_(self._api);
         }

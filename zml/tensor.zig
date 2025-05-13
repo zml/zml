@@ -1280,9 +1280,9 @@ pub const Tensor = struct {
     /// see: https://paperswithcode.com/method/gelu
     pub fn gelu(x: Tensor) Tensor {
         const scaled_x_cube = x.mul(x).mul(x).scale(0.044715);
-        const one = Tensor.constant(x._shape, x.dtype().one());
-        const one_plus_tanh = Tensor.add(x, scaled_x_cube).scale(std.math.sqrt(2.0 / std.math.pi)).tanh().add(one);
-        return one_plus_tanh.mul(x).scale(0.5);
+        const beta = std.math.sqrt(2.0 / std.math.pi);
+        const tanh_ = x.add(scaled_x_cube).scale(beta).tanh();
+        return tanh_.addConstant(1).mul(x).scale(0.5);
     }
 
     /// Returns a Tensor containing an approximation of the Gaussian Error Linear Units (GeLU) activation function applied to each element of the input Tensor.
@@ -1953,7 +1953,7 @@ pub const Tensor = struct {
         const result_type = mlir.ext.RankedTensorType.fromShape(ctx, val.shape());
         const loc = ctx.location(@src());
         const elem_type = mlir.ext.denseElementAttrType(val.dtype()) orelse std.debug.panic("constantTensor expects a dtype that can be serialized to MLIR, like f32 or i32, got {}", .{val.shape()});
-        const constant_op = dialect.stablehlo.constant(ctx, result_type, elem_type, val.data, loc);
+        const constant_op = dialect.stablehlo.constant(ctx, result_type, elem_type, val.bytes(), loc);
         return _result(val.shape(), constant_op.result(0));
     }
 
@@ -3841,7 +3841,7 @@ pub const Tensor = struct {
         std.log.defaultLog(.info, .zml, "Device buffer: {}: {}", .{ host_buffer.shape(), host_buffer.pretty() });
         // This is true because of the operand aliases.
         // Since the result is already pointing to the input we don't need to modify the buffer.
-        std.debug.assert(host_buffer.data.ptr == outputs[0].data.ptr);
+        std.debug.assert(host_buffer._data == outputs[0]._data);
     }
 };
 

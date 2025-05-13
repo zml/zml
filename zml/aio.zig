@@ -449,7 +449,7 @@ test populateModel {
 
         // Create a fake HostBuffer, we use the given integer to identify the created buffer.
         fn _newHostBuffer(n: u32) zml.HostBuffer {
-            return .{ ._shape = zml.Shape.init(.{n}, .f16), ._strides = undefined, .data = undefined };
+            return .{ ._shape = zml.Shape.init(.{n}, .f16), ._strides = undefined, ._data = undefined };
         }
     };
 
@@ -512,8 +512,6 @@ pub fn loadBuffers(
     // If the Model has a "init" function, call it with the given parameters.
     if (@hasDecl(Model, "init")) {
         @call(.auto, Model.init, .{&model} ++ init_args);
-    } else {
-        stdx.debug.assertComptime(@TypeOf(init_args) == void or @TypeOf(init_args) == @TypeOf(.{}), "Model of type {} has no init function, so `loadBuffers` should be call with init_args set to {{}} (void)", .{Model});
     }
 
     return loadModelBuffersWithPrefix(Model, model, buffer_store, allocator, platform, "");
