@@ -25,6 +25,8 @@ test {
     std.testing.refAllDecls(yaml);
 }
 
+// TODO error set for weight loading
+
 /// Detects the format of the model file (base on filename) and open it.
 pub fn detectFormatAndOpen(allocator: std.mem.Allocator, model_path: []const u8) !BufferStore {
     return if (std.mem.endsWith(u8, model_path, ".safetensors"))
@@ -499,7 +501,7 @@ test populateModel {
 /// The `init_args` are used to initialize the non Buffer fields, using `Model.init` function.
 pub fn loadBuffers(
     comptime Model: type,
-    init_args: anytype,
+    init_args: if (@hasDecl(Model, "init")) stdx.meta.Tail(stdx.meta.FnArgs(Model.init)) else void,
     buffer_store: BufferStore,
     allocator: std.mem.Allocator,
     platform: zml.Platform,
