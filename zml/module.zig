@@ -29,7 +29,7 @@ test {
 
 pub const MlirFn = struct {
     name: []const u8,
-    num_args: u32,
+    args_shapes: []Shape,
     res_tensors: *const anyopaque,
     res_types: []mlir.Type,
     res_shapes: []Shape,
@@ -233,7 +233,7 @@ pub const CompilationContext = struct {
             self._platform,
             loaded_executable,
             .{
-                .n_in = f.num_args,
+                .input_shapes = f.args_shapes,
                 .result_shapes = f.res_shapes,
                 .n_devices = sharding.num_replicas * sharding.num_partitions,
             },
@@ -341,7 +341,7 @@ pub const CompilationContext = struct {
         const locations = try arena.alloc(mlir.Location, tensor_count);
         @memset(locations, mlir.Location.unknown(mlir_ctx));
 
-        var input_shapes = try std.ArrayList(Shape).initCapacity(arena, tensor_count);
+        var input_shapes = try std.ArrayList(Shape).initCapacity(res_allocator, tensor_count);
         meta.collect(Tensor.shape, {}, &input_shapes, args) catch unreachable;
         stdx.debug.internalAssert(input_shapes.items.len == tensor_count, "args have changed ?", .{});
 
@@ -427,7 +427,7 @@ pub const CompilationContext = struct {
         return .{
             .mlir_fn = mlir_fn,
             .name = opts.name,
-            .num_args = @intCast(tensor_count),
+            .args_shapes = input_shapes.items,
             .res_tensors = fn_res,
             .res_types = fn_res_types,
             .res_shapes = fn_res_shapes,
@@ -512,7 +512,7 @@ pub const CompilationContext = struct {
 
         // Check that the `x` input argument gives its buffer to the result tensor.
         // `%arg0` is the bias of the model, `%arg1` is `x`, `%arg2` is `y`.
-        try std.testing.expectEqual(3, f.num_args);
+        try std.testing.expectEqual(3, f.args_shapes.len);
         // We should have two buffers being donated.
         const template = "tf.aliasing_output = {d} : i32";
         var buf = template.*;
@@ -649,10 +649,11 @@ pub const CompilationContext = struct {
 
         const loc = self.mlirCtx().location(@src());
 
-        const values = try arena.alloc(mlir.Value, function.num_args);
+        const num_args = function.args_shapes.len;
+        const values = try arena.alloc(mlir.Value, num_args);
         self.extractValues(&args, values);
 
-        const donations = try arena.alloc(Tensor._Donation, function.num_args);
+        const donations = try arena.alloc(Tensor._Donation, num_args);
         meta.collectBuf(struct {
             pub fn cb(ctx: *const CompilationContext, x: Tensor) Tensor._Donation {
                 return ctx.getValueAndDonation(x)[1];
