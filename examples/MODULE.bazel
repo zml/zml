@@ -7,6 +7,7 @@ bazel_dep(name = "rules_oci", version = "2.2.6")
 bazel_dep(name = "rules_rust", version = "0.60.0")
 bazel_dep(name = "rules_zig", version = "20250314.0-b9739c6")
 bazel_dep(name = "zml", version = "0.1.0")
+bazel_dep(name = "mimalloc", version = "2.1.7-bcr.alpha.1")
 
 non_module_deps = use_extension("//:third_party/non_module_deps.bzl", "non_module_deps")
 use_repo(non_module_deps, "com_github_hejsil_clap")

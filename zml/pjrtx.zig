@@ -4,6 +4,9 @@ const asynk = @import("async");
 const dialects = @import("mlir/dialects");
 const mlir = @import("mlir");
 const pjrt = @import("pjrt");
+const stdx = @import("stdx");
+const tracer = @import("tools/tracer.zig");
+
 pub const ffi = pjrt.ffi;
 pub const Profiler = pjrt.Profiler;
 pub const ApiError = pjrt.ApiError;
@@ -20,6 +23,7 @@ pub const SerializeResult = pjrt.SerializeResult;
 pub const Executable = pjrt.Executable;
 pub const ExecuteError = ApiError;
 pub const Memory = pjrt.Memory;
+pub const TopologyDescription = pjrt.TopologyDescription;
 
 const log = std.log.scoped(.zml);
 
@@ -60,6 +64,13 @@ pub const Client = opaque {
     pub fn bufferFromHostBuffer(self: *const Client, api: *const Api, args: BufferFromHostBufferArgs) !struct { *Buffer, ?*Event } {
         const buffer, const event_ = try self.inner().bufferFromHostBuffer(api, args);
         return .{ @ptrCast(buffer), @ptrCast(event_) };
+    }
+
+    pub fn dmaMap(self: *const Client, api: *const Api, data: []const u8) ApiError!void {
+        try self.inner().dmaMap(api, data);
+    }
+    pub fn dmaUnmap(self: *const Client, api: *const Api, data: []const u8) ApiError!void {
+        try self.inner().dmaUnmap(api, data);
     }
 
     pub fn deserializeAndLoad(self: *const Client, api: *const Api, bytes: []const u8) ApiError!*LoadedExecutable {
@@ -116,13 +127,13 @@ pub const Client = opaque {
         return self.inner().addressableMemories(api);
     }
 
-    pub fn memoryByKind(self: *const Client, api: *const Api, kind: Memory.Kind) ?*Memory {
-        for (self.addressableMemories(api)) |mem| {
-            if (mem.kind(api) == kind) {
-                return mem;
-            }
-        }
-        return null;
+    pub const CreateBuffersForAsyncHostToDeviceArgs = pjrt.Client.CreateBuffersForAsyncHostToDeviceArgs;
+    pub fn createBuffersForAsyncHostToDevice(self: *const Client, api: *const Api, args: CreateBuffersForAsyncHostToDeviceArgs) ApiError!*AsyncHostToDeviceTransferManager {
+        return self.inner().createBuffersForAsyncHostToDevice(api, args);
+    }
+
+    pub fn topologyDescription(self: *const Client, api: *const Api) *const TopologyDescription {
+        return self.inner().topology_description(api);
     }
 };
 
@@ -149,6 +160,10 @@ pub const Buffer = opaque {
         return self.inner().isOnCpu(api);
     }
 
+    pub fn memory(self: *const Buffer, api: *const Api) *const Memory {
+        return self.inner().memory(api);
+    }
+
     pub fn toHostBuffer(self: *const Buffer, api: *const Api, dst: []u8) ApiError!?*Event {
         return @ptrCast(try self.inner().toHostBuffer(api, dst));
     }
@@ -171,6 +186,10 @@ pub const Buffer = opaque {
 
     pub fn copyToDevice(self: *const Buffer, api: *const Api, device: Device) ApiError!*Buffer {
         return @ptrCast(self.inner().copyToDevice(api, device));
+    }
+
+    pub fn copyToMemory(self: *const Buffer, api: *const Api, memory_: *const Memory) ApiError!*Buffer {
+        return @ptrCast(try self.inner().copyToMemory(api, memory_));
     }
 
     pub fn getReadyEvent(self: *const Buffer, api: *const Api) ?*Event {

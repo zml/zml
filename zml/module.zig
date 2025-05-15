@@ -444,7 +444,7 @@ pub const CompilationContext = struct {
             attr.appendAssumeCapacity(.named(
                 mlir_ctx,
                 "mhlo.memory_kind",
-                .string(mlir_ctx, memory_kind.pjrtName()),
+                .string(mlir_ctx, @tagName(memory_kind.toPjrt())),
             ));
         }
     }

@@ -31,7 +31,7 @@ pub const Buffer = struct {
         host_pinned,
         device,
 
-        pub fn toPjrtMemory(self: Memory) pjrt.Memory.Kind {
+        pub fn toPjrt(self: Memory) pjrt.Memory.Kind {
             return switch (self) {
                 .host => .unpinned_host,
                 .host_pinned => .pinned_host,
@@ -39,8 +39,12 @@ pub const Buffer = struct {
             };
         }
 
-        pub fn pjrtName(self: Memory) []const u8 {
-            return @tagName(self.toPjrtMemory());
+        pub fn fromPjrt(m: pjrt.Memory.Kind) Memory {
+            return switch (m) {
+                .unpinned_host => .host,
+                .pinned_host => .host_pinned,
+                .device => .device,
+            };
         }
     };
 
@@ -88,7 +92,6 @@ pub const Buffer = struct {
         } else 0;
 
         const buffer_type = bufferTypeFromDtype(host_buffer.shape().dtype());
-        const byte_strides = host_buffer.strides() orelse host_buffer.shape().computeStrides().constSlice();
 
         const devices = platform.getDevices();
         for (0..n_partitions) |i| {
@@ -101,9 +104,15 @@ pub const Buffer = struct {
                 .data = buf.data,
                 .buffer_type = buffer_type,
                 .dims = buf.shape().dims(),
-                .byte_strides = byte_strides,
                 .device = devices[i],
                 .host_buffer_semantics = .ImmutableUntilTransferCompletes,
+                .device_layout = .{
+                    .tiled = .{
+                        .minor_to_major = host_buffer.shape().minor_to_major(),
+                        .tile_dims = &.{},
+                        .tile_dims_sizes = &.{},
+                    },
+                },
             });
             if (event) |ev| {
                 ev.deinit(platform.pjrt_api);
@@ -114,7 +123,7 @@ pub const Buffer = struct {
         return res;
     }
 
-    pub fn awaitt(self: Buffer) !Buffer {
+    pub fn awaitt(self: *Buffer) !*Buffer {
         for (self._shards.constSlice()) |buffer| {
             if (buffer.getReadyEvent(self._api)) |ev| {
                 try ev.awaitt(self._api);
@@ -243,12 +252,14 @@ pub const Buffer = struct {
             break :blk res;
         };
 
+        const device = platform.getDevices()[0];
+        const memory = device.addressableMemory(platform.pjrt_api, .pinned_host) orelse unreachable;
+
         const pjrt_buffer = platform.pjrt_client.createViewOfDeviceBuffer(platform.pjrt_api, .{
             .data = device_data,
             .element_type = bufferTypeFromDtype(shape_.dtype()),
             .dims = shape_.dims(),
             // TODO: exposes sharding in the API.
-            .device = platform.getDevices()[0],
             .layout = .{
                 .tiled = .{
                     .minor_to_major = minor_to_major[Shape.MAX_RANK - shape_.rank() ..],
@@ -257,7 +268,8 @@ pub const Buffer = struct {
                 },
             },
             .stream = @bitCast(@as(usize, @intFromPtr(stream))),
-        }) catch @panic("failed to createViewOfDeviceBuffer");
+            .memory = memory,
+        }) catch stdx.debug.panic("failed to createViewOfDeviceBuffer", .{});
 
         var shards: Shards = .{};
         shards.appendAssumeCapacity(pjrt_buffer);
@@ -280,6 +292,16 @@ pub const Buffer = struct {
         return res;
     }
 
+    pub fn toMemory(self: *Buffer, memory: Memory) !Buffer {
+        var new_buffer = self.*;
+        const api = self._api;
+        for (self._shards.slice(), new_buffer._shards.slice()) |old_shard, *new_shard| {
+            const device = try old_shard.getDevice(api);
+            new_shard.* = try old_shard.copyToMemory(api, device.addressableMemory(api, memory.toPjrt()) orelse unreachable);
+        }
+        return new_buffer;
+    }
+
     /// Copies the content of the Buffer back to host, in the given buffer,
     /// and return a new `HostBuffer` object with the same shape.
     /// The returned `HostBuffer` doesn't own the memory.
@@ -296,7 +318,7 @@ pub const Buffer = struct {
     /// Copies the content of the Buffer to the host.
     /// The returned `HostBuffer` does own the memory.
     pub fn toHostAlloc(self: Buffer, allocator: std.mem.Allocator) !HostBuffer {
-        const output = try HostBuffer.empty(allocator, self.shape());
+        var output = try HostBuffer.empty(allocator, self.shape());
         stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
         const maybe_event = try self._shards.get(0).toHostBuffer(self._api, @constCast(output.data));
         output._event = maybe_event;
@@ -354,9 +376,9 @@ pub const Buffer = struct {
         try writer.print("Buffer({_})", .{self._shape});
     }
 
-    pub fn getMemory(self: Buffer) *const pjrt.Memory {
+    pub fn getMemory(self: Buffer) Memory {
         const shard = self._shards.get(0);
-        return shard.memory(self._api);
+        return .fromPjrt(shard.memory(self._api).kind(self._api));
     }
 
     fn hasShardedAxis(self: Buffer) bool {

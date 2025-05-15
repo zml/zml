@@ -197,25 +197,16 @@ pub const BaseExe = struct {
     }
 
     pub fn _unsafeCall(self: BaseExe) void {
-        var events = [_]?*pjrt.Event{null} ** Platform.MAX_NUM_DEVICES;
-        const sharding = self.platform.sharding();
-
         self.exe.execute(self.platform.pjrt_api, .{
             .arguments = self.input_per_device,
             .num_args = self.input_buffer_count,
             .results = self.output_per_device,
-            .events = events[0..sharding.num_partitions],
+            .events = &.{},
             // this allows to tell a specific buffer shouldn't be donated,
             // even if it has been marked as "can be donated" during compilation.
             // TODO: expose it ?
             .non_donatable_input_indices = &.{},
         }) catch unreachable;
-
-        for (events[0..sharding.num_partitions]) |e| {
-            if (e) |ev| {
-                ev.await_(self.platform.pjrt_api) catch unreachable;
-            }
-        }
     }
 
     pub fn serialize(self: BaseExe, writer: anytype) !void {

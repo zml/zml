@@ -96,25 +96,30 @@ pub fn asyncMain() !void {
     defer dataset.close() catch unreachable;
     var rng = std.Random.Xoshiro256.init(@intCast(std.time.timestamp()));
 
+    const idx = rng.random().intRangeAtMost(u64, 0, 10000 - 1);
+    const sample = try std.heap.c_allocator.alloc(u8, 28 * 28);
+    _ = try dataset.pread(sample, 16 + (idx * 28 * 28));
+    var input = try zml.Buffer.from(platform, zml.HostBuffer.fromBytes(zml.Shape.init(.{ 28, 28 }, .u8), sample));
+    defer input.deinit();
+
+    for (0..10) |_|
     // inference - can be looped
     {
-        const idx = rng.random().intRangeAtMost(u64, 0, 10000 - 1);
-        var sample: [28 * 28]u8 align(16) = undefined;
-        _ = try dataset.pread(&sample, 16 + (idx * 28 * 28));
-        var input = try zml.Buffer.from(platform, zml.HostBuffer.fromBytes(zml.Shape.init(.{ 28, 28 }, .u8), &sample));
-        defer input.deinit();
 
-        printDigit(sample);
-        var result: zml.Buffer = mnist.call(.{try input.awaitt()});
-        defer result.deinit();
+        // var sample: [28 * 28]u8 align(32) = undefined;
 
-        log.info(
-            \\✅ RECOGNIZED DIGIT:
-            \\                       +-------------+
-            \\{s}
-            \\                       +-------------+
-            \\
-        , .{digits[try result.getValue(u8)]});
+        // printDigit(sample[0 .. 28 * 28].*);
+        var result: zml.Buffer = mnist.call(.{input});
+        result = result; // autofix
+        // defer result.deinit();
+
+        // log.info(
+        //     \\✅ RECOGNIZED DIGIT:
+        //     \\                       +-------------+
+        //     \\{s}
+        //     \\                       +-------------+
+        //     \\
+        // , .{digits[try result.getValue(u8)]});
     }
 }
 

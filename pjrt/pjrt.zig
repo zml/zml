@@ -108,7 +108,7 @@ pub const Api = struct {
         return arg_array_type_info.pointer.child;
     }
 
-    inline fn call(self: *const Api, comptime method: Funcs, arg: CallFnArgType(method)) ApiError!@TypeOf(arg) {
+    fn call(self: *const Api, comptime method: Funcs, arg: CallFnArgType(method)) ApiError!@TypeOf(arg) {
         var ret = pjrtStruct(arg);
         const fn_ptr = @field(&self.inner, @tagName(method)).?;
         const result = fn_ptr(&ret);
@@ -227,6 +227,27 @@ pub const ErrorCode = enum(c.PJRT_Error_Code) {
             .unauthenticated => ApiError.Unauthenticated,
         };
     }
+
+    pub fn fromApiError(err: ApiError) ErrorCode {
+        return switch (err) {
+            ApiError.Cancelled => .cancelled,
+            ApiError.Unknown => .unknown,
+            ApiError.InvalidArgument => .invalid_argument,
+            ApiError.DeadlineExceeded => .deadline_exceeded,
+            ApiError.NotFound => .not_found,
+            ApiError.AlreadyExists => .already_exists,
+            ApiError.PermissionDenied => .permission_denied,
+            ApiError.ResourceExhausted => .resource_exhausted,
+            ApiError.FailedPrecondition => .failed_precondition,
+            ApiError.Aborted => .aborted,
+            ApiError.OutOfRange => .out_of_range,
+            ApiError.Unimplemented => .unimplemented,
+            ApiError.Internal => .internal,
+            ApiError.Unavailable => .unavailable,
+            ApiError.DataLoss => .data_loss,
+            ApiError.Unauthenticated => .unauthenticated,
+        };
+    }
 };
 
 pub const Error = opaque {
@@ -336,6 +357,7 @@ pub const Client = opaque {
     pub fn compile(self: *const Client, api: *const Api, args: CompileArgs) ApiError!*LoadedExecutable {
         const bytecode_format_ = @tagName(args.bytecode_format);
         const ret = try api.call(.PJRT_Client_Compile, .{
+            .client = self.inner(),
             .program = &pjrtStruct(c.PJRT_Program{
                 .code = @ptrCast(@constCast(args.bytecode.ptr)),
                 .code_size = args.bytecode.len,
@@ -344,7 +366,6 @@ pub const Client = opaque {
             }),
             .compile_options = @ptrCast(@constCast(args.compile_options_pb.ptr)),
             .compile_options_size = args.compile_options_pb.len,
-            .client = self.inner(),
         });
         return @ptrCast(ret.executable.?);
     }
@@ -353,31 +374,31 @@ pub const Client = opaque {
         data: []const u8,
         buffer_type: BufferType,
         dims: []const i64,
-        byte_strides: ?[]const i64,
+        byte_strides: []const i64 = &.{},
         device: ?*const Device = null,
         host_buffer_semantics: HostBufferSemantics,
         memory: ?*const Memory = null,
+        device_layout: MemoryLayout,
     };
 
     pub fn bufferFromHostBuffer(self: *const Client, api: *const Api, args: BufferFromHostBufferArgs) ApiError!struct { *Buffer, ?*Event } {
+        const layout = args.device_layout.to_c();
         const ret = try api.call(.PJRT_Client_BufferFromHostBuffer, .{
             .client = self.inner(),
             .data = @ptrCast(@constCast(args.data.ptr)),
             .type = @intFromEnum(args.buffer_type),
             .dims = @ptrCast(@constCast(args.dims.ptr)),
             .num_dims = args.dims.len,
-            .byte_strides = if (args.byte_strides) |bs| @ptrCast(@constCast(bs.ptr)) else null,
-            .num_byte_strides = if (args.byte_strides) |bs| bs.len else 0,
+            .byte_strides = if (args.byte_strides.len > 0) @ptrCast(@constCast(args.byte_strides.ptr)) else null,
+            .num_byte_strides = args.byte_strides.len,
             .host_buffer_semantics = @intFromEnum(args.host_buffer_semantics),
             .device = @ptrCast(@constCast(args.device)),
             .memory = @ptrCast(@constCast(args.memory)),
-            .device_layout = null, // TODO
-            .done_with_host_buffer = null,
-            .buffer = null,
+            .device_layout = @ptrCast(@constCast(&layout)),
         });
 
         return .{
-            @ptrCast(ret.buffer.?),
+            @ptrCast(ret.buffer),
             @ptrCast(ret.done_with_host_buffer),
         };
     }
@@ -409,16 +430,16 @@ pub const Client = opaque {
         dims: []const i64,
         element_type: BufferType,
         layout: MemoryLayout,
-        device: *const Device,
         on_delete_callback: *const fn (device_buffer_ptr: ?*anyopaque, ctx: ?*anyopaque) callconv(.C) void = &struct {
             fn call(_: ?*anyopaque, _: ?*anyopaque) callconv(.C) void {}
         }.call,
         on_delete_callback_arg: ?*anyopaque = null,
         stream: ?isize = null,
+        memory: ?*const Memory = null,
     };
 
     pub fn createViewOfDeviceBuffer(self: *const Client, api: *const Api, args: CreateViewOfDeviceBufferArgs) ApiError!*Buffer {
-        const layout = args.layout.toCStruct();
+        const layout = args.layout.to_c();
         const ret = try api.call(.PJRT_Client_CreateViewOfDeviceBuffer, .{
             .client = self.inner(),
             .device_buffer_ptr = @ptrCast(@constCast(args.data)),
@@ -426,10 +447,10 @@ pub const Client = opaque {
             .num_dims = args.dims.len,
             .element_type = @intFromEnum(args.element_type),
             .layout = @ptrCast(@constCast(&layout)),
-            .device = @ptrCast(@constCast(args.device)),
             .on_delete_callback = args.on_delete_callback,
             .on_delete_callback_arg = args.on_delete_callback_arg,
             .stream = if (args.stream) |stream| stream else 0,
+            .memory = @ptrCast(@constCast(args.memory)),
         });
         return @ptrCast(ret.buffer.?);
     }
@@ -444,25 +465,26 @@ pub const Client = opaque {
         return &.{};
     }
 
-    pub fn dmaMap(self: *const Client, api: *const Api, data: []const u8) ApiError!*Buffer {
-        const ret = try api.call(.PJRT_Client_DMA_Map, .{
+    pub fn dmaMap(self: *const Client, api: *const Api, data: []const u8) ApiError!void {
+        const args: Api.CallFnArgType(.PJRT_Client_DmaMap) = .{
             .client = self.inner(),
             .data = @ptrCast(@constCast(data.ptr)),
             .size = @intCast(data.len),
-        });
-        return @ptrCast(ret.buffer.?);
+        };
+        std.debug.print("DMA map {any} \n", .{args});
+        _ = try api.call(.PJRT_Client_DmaMap, args);
     }
 
-    pub fn dmaUnmap(self: *const Client, api: *const Api, data: []const u8) void {
-        _ = api.call(.PJRT_Client_DMA_Unmap, .{
+    pub fn dmaUnmap(self: *const Client, api: *const Api, data: []const u8) ApiError!void {
+        _ = try api.call(.PJRT_Client_DmaUnmap, .{
             .client = self.inner(),
             .data = @ptrCast(@constCast(data.ptr)),
-        }) catch unreachable;
+        });
     }
 
     pub const CreateBuffersForAsyncHostToDeviceArgs = struct {
         shape_specs: []const ShapeSpec,
-        device_layouts: ?[]*const MemoryLayout = null,
+        device_layouts: []*const MemoryLayout = &.{},
         memory: *const Memory,
     };
 
@@ -471,11 +493,18 @@ pub const Client = opaque {
             .client = self.inner(),
             .shape_specs = @ptrCast(args.shape_specs.ptr),
             .num_shape_specs = args.shape_specs.len,
-            .device_layouts = if (args.device_layouts) |layouts| @ptrCast(@constCast(layouts.ptr)) else null,
-            .num_device_layouts = if (args.device_layouts) |layouts| @intCast(layouts.len) else 0,
+            .device_layouts = if (args.device_layouts.len > 0) @ptrCast(@constCast(args.device_layouts)) else null,
+            .num_device_layouts = @intCast(args.device_layouts.len),
             .memory = @ptrCast(@constCast(args.memory)),
         });
-        return @ptrCast(ret.transfer_manager.?);
+        return @ptrCast(ret.transfer_manager);
+    }
+
+    pub fn topologyDescription(self: *const Client, api: *const Api) *const TopologyDescription {
+        const ret = api.call(.PJRT_Client_TopologyDescription, .{
+            .client = self.inner(),
+        }) catch unreachable;
+        return @ptrCast(ret.topology);
     }
 };
 
@@ -503,11 +532,20 @@ pub const Device = opaque {
         return @intCast(ret.local_hardware_id);
     }
 
-    pub fn addressableMemories(self: *const Device, api: *const Api) ApiError![]const *Memory {
-        const ret = try api.call(.PJRT_Device_AddressableMemories, .{
+    pub fn addressableMemories(self: *const Device, api: *const Api) []const *Memory {
+        const ret = api.call(.PJRT_Device_AddressableMemories, .{
             .device = self.inner(),
-        });
+        }) catch unreachable;
         return @ptrCast(ret.memories[0..ret.num_memories]);
+    }
+
+    pub fn addressableMemory(self: *const Device, api: *const Api, kind: Memory.Kind) ?*const Memory {
+        for (self.addressableMemories(api)) |mem| {
+            if (std.mem.eql(u8, mem.kindStr(api), @tagName(kind))) {
+                return @ptrCast(mem);
+            }
+        }
+        return null;
     }
 };
 
@@ -546,7 +584,14 @@ pub const DeviceDescription = opaque {
         const ret = api.call(.PJRT_DeviceDescription_ToString, .{
             .device_description = self.inner(),
         }) catch unreachable;
-        return ret.to_string[0..ret.to_string_size];
+        return ret.to_string[0..ret.num_attributes];
+    }
+
+    pub fn attributes(self: *const DeviceDescription, api: *const Api) []const NamedValue {
+        const ret = api.call(.PJRT_DeviceDescription_Attributes, .{
+            .device_description = self.inner(),
+        }) catch unreachable;
+        return @ptrCast(ret.attributes[0..ret.num_attributes]);
     }
 };
 
@@ -648,7 +693,7 @@ pub const LoadedExecutable = opaque {
             .num_devices = @intCast(args.arguments.len),
             .num_args = args.num_args,
             .output_lists = @ptrCast(args.results.ptr),
-            .device_complete_events = @ptrCast(args.events.ptr),
+            .device_complete_events = if (args.events.len > 0) @ptrCast(args.events.ptr) else null,
             .execute_device = null,
         });
     }
@@ -708,7 +753,7 @@ pub const MemoryLayout = union(MemoryLayoutType) {
     tiled: Tiled,
     strides: Strides,
 
-    fn toCStruct(self: MemoryLayout) c.PJRT_Buffer_MemoryLayout {
+    fn to_c(self: MemoryLayout) c.PJRT_Buffer_MemoryLayout {
         return pjrtStruct(switch (self) {
             .tiled => |v| c.PJRT_Buffer_MemoryLayout{
                 .type = c.PJRT_Buffer_MemoryLayout_Type_Tiled,
@@ -818,7 +863,7 @@ pub const Buffer = opaque {
         return ret.on_device_size_in_bytes;
     }
 
-    pub fn copyToDevice(self: *const Buffer, api: *const Api, device: Device) ApiError!*Buffer {
+    pub fn copyToDevice(self: *const Buffer, api: *const Api, device: Device) ApiError!Buffer {
         const ret = try api.call(.PJRT_Buffer_CopyToDevice, .{
             .buffer = self.inner(),
             .dst_device = device.inner,
@@ -931,9 +976,12 @@ pub const Memory = opaque {
     }
 
     pub fn kind(self: *const Memory, api: *const Api) Kind {
+        return std.meta.stringToEnum(Kind, self.kindStr(api)) orelse unreachable;
+    }
+
+    fn kindStr(self: *const Memory, api: *const Api) []const u8 {
         const ret = api.call(.PJRT_Memory_Kind, .{ .memory = self.inner() }) catch unreachable;
-        const kind_ = ret.kind orelse unreachable[0..ret.kind_size];
-        return std.meta.stringToEnum(Kind, kind_) orelse unreachable;
+        return ret.kind[0..ret.kind_size];
     }
 
     pub fn kindId(self: *const Memory, api: *const Api) u32 {
@@ -992,7 +1040,7 @@ pub const AsyncHostToDeviceTransferManager = opaque {
             .transfer_size = @intCast(data.len),
             .is_last_transfer = is_last_transfer,
         });
-        return @ptrCast(ret.done_with_h2d_transfer.?);
+        return @ptrCast(ret.done_with_h2d_transfer);
     }
 
     pub fn retrieveBuffer(self: *AsyncHostToDeviceTransferManager, api: *const Api, buffer_index: usize) ApiError!*Buffer {
@@ -1000,20 +1048,20 @@ pub const AsyncHostToDeviceTransferManager = opaque {
             .transfer_manager = self.inner(),
             .buffer_index = @intCast(buffer_index),
         });
-        return @ptrCast(ret.buffer_out.?);
+        return @ptrCast(ret.buffer_out);
     }
 
-    pub fn device(self: *AsyncHostToDeviceTransferManager, api: *const Api) ApiError!*Device {
+    pub fn device(self: *AsyncHostToDeviceTransferManager, api: *const Api) *Device {
         const ret = try api.call(.PJRT_AsyncHostToDeviceTransferManager_Device, .{
             .transfer_manager = self.inner(),
-        });
-        return @ptrCast(ret.device_out.?);
+        }) catch unreachable;
+        return @ptrCast(ret.device_out);
     }
 
-    pub fn bufferCount(self: *AsyncHostToDeviceTransferManager, api: *const Api) ApiError!usize {
+    pub fn bufferCount(self: *AsyncHostToDeviceTransferManager, api: *const Api) usize {
         const ret = try api.call(.PJRT_AsyncHostToDeviceTransferManager_BufferCount, .{
             .transfer_manager = self.inner(),
-        });
+        }) catch unreachable;
         return ret.buffer_count;
     }
 
@@ -1025,22 +1073,22 @@ pub const AsyncHostToDeviceTransferManager = opaque {
         return ret.buffer_size;
     }
 
-    pub fn setBufferError(self: *AsyncHostToDeviceTransferManager, api: *const Api, buffer_index: usize, error_code: c.PJRT_Error_Code, error_message: []const u8) ApiError!void {
+    pub fn setBufferError(self: *AsyncHostToDeviceTransferManager, api: *const Api, buffer_index: usize, err: ApiError, error_message: []const u8) ApiError!void {
         _ = try api.call(.PJRT_AsyncHostToDeviceTransferManager_SetBufferError, .{
             .transfer_manager = self.inner(),
             .buffer_index = @intCast(buffer_index),
-            .error_code = error_code,
-            .error_message = error_message.ptr,
+            .error_code = ErrorCode.fromApiError(err),
+            .error_message = @ptrCast(error_message),
             .error_message_size = error_message.len,
         });
     }
 
-    pub fn addMetadata(self: *AsyncHostToDeviceTransferManager, api: *const Api, transfer_metadata: []const NamedValue) ApiError!void {
+    pub fn addMetadata(self: *AsyncHostToDeviceTransferManager, api: *const Api, transfer_metadata: []const NamedValue) void {
         _ = try api.call(.PJRT_AsyncHostToDeviceTransferManager_AddMetadata, .{
             .transfer_manager = self.inner(),
-            .transfer_metadata = transfer_metadata.ptr,
+            .transfer_metadata = @ptrCast(transfer_metadata),
             .num_metadata = transfer_metadata.len,
-        });
+        }) catch unreachable;
     }
 };
 
@@ -1083,64 +1131,91 @@ pub const NamedValue = extern struct {
     }
 
     pub fn from(name_: []const u8, value: anytype) NamedValue {
-        return switch (@TypeOf(value)) {
+        const T = @TypeOf(value);
+        return switch (T) {
             []u8, []const u8 => fromString(name_, value),
-            i64 => fromInt64(name_, value),
-            []i64, []const i64 => fromInt64List(name_, value),
-            f32 => fromFloat(name_, value),
             bool => fromBool(name_, value),
-            else => fromString(name_, @tagName(value)),
+            f32 => fromFloat(name_, value),
+            []i64, []const i64 => fromInt64List(name_, value),
+            @TypeOf(.enum_literal) => fromString(name_, @tagName(value)),
+            else => switch (@typeInfo(T)) {
+                .int, .comptime_int => fromInt64(name_, @intCast(value)),
+                .@"enum", .@"union" => fromString(name_, @tagName(value)),
+                else => unreachable,
+            },
         };
     }
 
-    pub fn fromString(name_: []const u8, value: []const u8) NamedValue {
+    pub fn fromString(name_: []const u8, value_: []const u8) NamedValue {
         return .{ .inner = pjrtStruct(c.PJRT_NamedValue{
             .name = @ptrCast(@constCast(name_.ptr)),
             .name_size = name_.len,
             .type = c.PJRT_NamedValue_kString,
-            .unnamed_0 = .{ .string_value = @ptrCast(@constCast(value.ptr)) },
-            .value_size = value.len,
+            .unnamed_0 = .{ .string_value = @ptrCast(@constCast(value_.ptr)) },
+            .value_size = value_.len,
         }) };
     }
 
-    pub fn fromInt64(name_: []const u8, value: i64) NamedValue {
+    pub fn fromInt64(name_: []const u8, value_: i64) NamedValue {
         return .{ .inner = pjrtStruct(c.PJRT_NamedValue{
             .name = @ptrCast(@constCast(name_.ptr)),
             .name_size = name_.len,
             .type = c.PJRT_NamedValue_kInt64,
-            .unnamed_0 = .{ .int64_value = value },
+            .unnamed_0 = .{ .int64_value = value_ },
             .value_size = 1,
         }) };
     }
 
-    pub fn fromInt64List(name_: []const u8, value: []const i64) NamedValue {
+    pub fn fromInt64List(name_: []const u8, value_: []const i64) NamedValue {
         return .{ .inner = pjrtStruct(c.PJRT_NamedValue{
             .name = @ptrCast(@constCast(name_.ptr)),
             .name_size = name_.len,
             .type = c.PJRT_NamedValue_kInt64List,
-            .unnamed_0 = .{ .int64_array_value = @ptrCast(@constCast(value.ptr)) },
-            .value_size = value.len,
+            .unnamed_0 = .{ .int64_array_value = @ptrCast(@constCast(value_.ptr)) },
+            .value_size = value_.len,
         }) };
     }
 
-    pub fn fromFloat(name_: []const u8, value: f32) NamedValue {
+    pub fn fromFloat(name_: []const u8, value_: f32) NamedValue {
         return .{ .inner = pjrtStruct(c.PJRT_NamedValue{
             .name = @ptrCast(@constCast(name_.ptr)),
             .name_size = name_.len,
             .type = c.PJRT_NamedValue_kFloat,
-            .unnamed_0 = .{ .float_value = value },
+            .unnamed_0 = .{ .float_value = value_ },
             .value_size = 1,
         }) };
     }
 
-    pub fn fromBool(name_: []const u8, value: bool) NamedValue {
+    pub fn fromBool(name_: []const u8, value_: bool) NamedValue {
         return .{ .inner = pjrtStruct(c.PJRT_NamedValue{
             .name = @ptrCast(@constCast(name_.ptr)),
             .name_size = name_.len,
             .type = c.PJRT_NamedValue_kBool,
-            .unnamed_0 = .{ .bool_value = value },
+            .unnamed_0 = .{ .bool_value = value_ },
             .value_size = 1,
         }) };
+    }
+
+    pub fn string(self: NamedValue) []const u8 {
+        const u = self.inner.unnamed_0;
+        return u.string_value[0..self.inner.value_size];
+    }
+
+    pub fn int64list(self: NamedValue) []const i64 {
+        const u = self.inner.unnamed_0;
+        return u.int64_array_value[0..self.inner.value_size];
+    }
+
+    pub fn int64(self: NamedValue) i64 {
+        return self.inner.unnamed_0.int64_value;
+    }
+
+    pub fn float(self: NamedValue) f32 {
+        return self.inner.unnamed_0.float_value;
+    }
+
+    pub fn bool_(self: NamedValue) bool {
+        return self.inner.unnamed_0.bool_value;
     }
 
     pub fn format(
@@ -1151,16 +1226,15 @@ pub const NamedValue = extern struct {
     ) !void {
         _ = fmt;
         _ = options;
-        try writer.print("{s}{{ .name = {s},", .{ @typeName(NamedValue), self.inner.name[0..self.inner.name_size] });
-        const u = self.inner.unnamed_0;
+        try writer.print("{}{{ .name = {s}, .{s} = ", .{ NamedValue, self.name(), @tagName(self.kind()) });
         switch (self.kind()) {
-            .string => try writer.print(" .string = {s} ", .{u.string_value[0..self.inner.value_size]}),
-            .int64 => try writer.print(" .int64 = {d} ", .{u.int64_value}),
-            .int64list => try writer.print(" .int64list = {d} ", .{u.int64_array_value[0..self.inner.value_size]}),
-            .float => try writer.print(" .float = {d} ", .{u.float_value}),
-            .bool => try writer.print(" .bool = {} ", .{u.bool_value}),
+            .string => try writer.print("\"{s}\"", .{self.string()}),
+            .int64 => try writer.print("{d}", .{self.int64()}),
+            .int64list => try writer.print("{d}", .{self.int64list()}),
+            .float => try writer.print("{d}", .{self.float()}),
+            .bool => try writer.print("{}", .{self.bool_()}),
         }
-        try writer.writeAll("}");
+        try writer.writeAll(" }");
     }
 };
 
@@ -1190,5 +1264,56 @@ pub const CustomCallRegistry = extern struct {
             log.err("[GpuRegisterCustomCall] {s}", .{pjrt_error.getMessage(api)});
             return pjrt_error.getCode(api).toApiError();
         }
+    }
+};
+
+pub const TopologyDescription = opaque {
+    const inner = InnerMixin(c.PJRT_TopologyDescription).inner;
+
+    pub const InitArgs = struct {
+        topology_name: []const u8,
+        create_options: []const NamedValue,
+    };
+
+    pub fn init(api: *const Api, args: InitArgs) !*const TopologyDescription {
+        const ret = api.call(.PJRT_TopologyDescription_Create, .{
+            .topology_name = @ptrCast(args.topology_name),
+            .topology_name_size = args.topology_name.len,
+            .create_options = @ptrCast(args.create_options),
+            .num_options = args.create_options.len,
+        });
+        return @ptrCast(ret.topology);
+    }
+
+    pub fn deinit(self: *TopologyDescription, api: *const Api) void {
+        _ = api.call(.PJRT_TopologyDescription_Destroy, .{
+            .topology = self.inner(),
+        }) catch unreachable;
+    }
+
+    pub fn platformVersion(self: *const TopologyDescription, api: *const Api) []const u8 {
+        const ret = api.call(.PJRT_TopologyDescription_PlatformVersion, .{ .topology = self.inner() }) catch unreachable;
+        return @ptrCast(ret.platform_version[0..ret.platform_version_size]);
+    }
+
+    pub fn platformName(self: *const TopologyDescription, api: *const Api) []const u8 {
+        const ret = api.call(.PJRT_TopologyDescription_PlatformName, .{ .topology = self.inner() }) catch unreachable;
+        return @ptrCast(ret.platform_name[0..ret.platform_name_size]);
+    }
+
+    pub fn getDeviceDescriptions(self: *const TopologyDescription, api: *const Api) []const DeviceDescription {
+        const ret = api.call(.PJRT_TopologyDescription_GetDeviceDescriptions, .{ .topology = self.inner() }) catch unreachable;
+        if (ret.num_descriptions == 0) {
+            return &.{};
+        }
+        return @ptrCast(ret.descriptions[0..ret.num_descriptions]);
+    }
+
+    pub fn attributes(self: *const TopologyDescription, api: *const Api) []const NamedValue {
+        const ret = api.call(.PJRT_TopologyDescription_Attributes, .{ .topology = self.inner() }) catch unreachable;
+        if (ret.num_attributes == 0) {
+            return &.{};
+        }
+        return @ptrCast(@constCast(ret.attributes[0..ret.num_attributes]));
     }
 };

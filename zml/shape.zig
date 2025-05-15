@@ -17,6 +17,8 @@ test {
 /// Represent the shape of a tensor.
 pub const Shape = struct {
     pub const MAX_RANK: u8 = 8;
+    pub const MINOR_TO_MAJOR: [MAX_RANK]i64 = std.simd.reverseOrder(std.simd.iota(i64, MAX_RANK));
+    pub const MAJOR_TO_MINOR: [MAX_RANK]i64 = std.simd.iota(i64, MAX_RANK);
 
     pub const Tag = [*:0]const u8;
     pub const TagUnknown = "_".ptr;
@@ -1050,5 +1052,13 @@ pub const Shape = struct {
             res_shape = res_shape.appendDim(other.dim(ax), other.tag(ax));
         }
         return res_shape;
+    }
+
+    pub fn minor_to_major(self: Shape) []const i64 {
+        return MINOR_TO_MAJOR[MAX_RANK - self.rank() ..];
+    }
+
+    pub fn major_to_minor(self: Shape) []const i64 {
+        return MAJOR_TO_MINOR[0..self.rank()];
     }
 };

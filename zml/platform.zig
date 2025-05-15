@@ -127,7 +127,7 @@ const _CreateOptions = struct {
         pub fn writeNamedValues(self: Cuda, values: *std.ArrayListUnmanaged(pjrt.NamedValue)) void {
             switch (self.allocator) {
                 .platform => {
-                    values.appendAssumeCapacity(pjrt.NamedValue.fromString("allocator", "platform"));
+                    values.appendAssumeCapacity(pjrt.NamedValue.from("allocator", "platform"));
                 },
                 .bfc, .@"async" => |opt| {
                     values.appendAssumeCapacity(pjrt.NamedValue.from("allocator", self.allocator));
@@ -136,7 +136,7 @@ const _CreateOptions = struct {
                         values.appendAssumeCapacity(pjrt.NamedValue.from("memory_fraction", opt.memory_fraction));
                     }
                     if (opt.collective_memory_size_mb > 0) {
-                        const collective = @as(i64, opt.collective_memory_size_mb) * 1024 * 1024;
+                        const collective = opt.collective_memory_size_mb * 1024 * 1024;
                         values.appendAssumeCapacity(pjrt.NamedValue.from("collective_memory_size", collective));
                     }
                 },

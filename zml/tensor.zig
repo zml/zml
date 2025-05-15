@@ -207,7 +207,7 @@ pub const Tensor = struct {
                 const mlir_ctx = ctx.mlirCtx();
                 if (ctx.target() == .cpu) return self;
 
-                const memory_kind = @tagName(kind.toPjrtMemory());
+                const memory_kind = @tagName(kind.toPjrt());
 
                 const frontend_attributes = mlir.Attribute.dict(mlir_ctx, &.{
                     .{ "_xla_buffer_placement", .string(mlir_ctx, memory_kind) },
