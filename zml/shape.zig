@@ -186,7 +186,7 @@ pub const Shape = struct {
             EnumLiteral => @tagName(v).ptr,
             std.builtin.Type.StructField => v.name.ptr,
             Tag => v,
-            else => stdx.debug.compileError("Value should be an EnumLiteral, a Shape.Tag or a StructField, got {}", .{T}),
+            else => stdx.debug.compileError("Shape tag should be an EnumLiteral, a Shape.Tag or a StructField, got {}", .{T}),
         };
     }
 
@@ -581,6 +581,41 @@ pub const Shape = struct {
         try std.testing.expectEqualSlices(i64, &.{ 10, 11, 12 }, Shape.init(.{ 10, 11, 12, 13 }, .f32).remove(-1).dims());
     }
 
+    pub fn removeMany(self: Shape, axes_: anytype) Shape {
+        var to_remove = self.axes(axes_);
+        if (to_remove.len == 0) return self;
+        std.mem.sort(u3, to_remove.slice(), {}, std.sort.asc(u3));
+
+        var sh: Shape = self;
+        const rk = self.rank();
+        var res_ax: u32 = 0;
+        for (0..rk) |ax| {
+            if (std.mem.indexOfScalar(u3, to_remove.constSlice(), @intCast(ax))) |_| {
+                continue;
+            }
+
+            sh._dims.buffer[res_ax] = self._dims.buffer[ax];
+            sh._tags.buffer[res_ax] = self._tags.buffer[ax];
+            res_ax += 1;
+        }
+        sh._dims.len = rk - to_remove.len;
+        sh._tags.len = rk - to_remove.len;
+        return sh;
+    }
+
+    test removeMany {
+        try std.testing.expectEqualSlices(
+            i64,
+            &.{12},
+            Shape.init(.{ 10, 11, 12 }, .f32).removeMany(.{ 0, 1 }).dims(),
+        );
+        try std.testing.expectEqualSlices(
+            i64,
+            &.{ 10, 11 },
+            Shape.init(.{ 10, 11, 12, 13 }, .f32).removeMany(.{ -1, -2 }).dims(),
+        );
+    }
+
     pub fn transpose(self: Shape, permutations: anytype) Shape {
         std.debug.assert(self.rank() == permutations.len);
         const permutations_ = self.axes(permutations);
@@ -729,7 +764,9 @@ pub const Shape = struct {
         stdx.debug.assertComptime(stdx.meta.isStructOfAny(T, isAxisConvertible), "Must pass a struct of enum literals. Passed: {any}", .{T});
         var res = self;
         inline for (std.meta.fields(T)) |field| {
-            res._tags.set(self.axis(field), toTag(@field(renames, field.name)));
+            const new_field = @field(renames, field.name);
+            stdx.debug.assert(self.hasTag(new_field) == null, "{}.rename({any}) failed because of duplicated axis {}", .{ self, renames, new_field });
+            res._tags.set(self.axis(field), toTag(new_field));
         }
         return res;
     }
