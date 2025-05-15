@@ -8,3 +8,13 @@ zig_cc_binary(
         "@zml//zml",
     ],
 )
+
+zig_cc_binary(
+    name = "playground",
+    copts = ["-mcpu=native"],
+    main = "playground.zig",
+    deps = [
+        "@zml//async",
+        "@zml//zml",
+    ],
+)

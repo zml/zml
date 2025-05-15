@@ -236,6 +236,39 @@ pub const Tensor = struct {
         };
     }
 
+    pub fn optimizationBarrier(tensors: []const Tensor) []Tensor {
+        const ctx = CompilationContext.current();
+        const mlir_ctx = ctx.mlirCtx();
+        const allocator = ctx.allocator();
+
+        var inputs: [16]mlir.Value = undefined;
+        var res_types: [16]mlir.Type = undefined;
+
+        for (tensors, 0..) |t, i| {
+            inputs[i] = t.value();
+        }
+
+        for (tensors, 0..) |t, i| {
+            res_types[i] = mlir.ext.RankedTensorType.fromShape(mlir_ctx, t.shape()).as(mlir.Type);
+        }
+
+        const res = allocator.alloc(Tensor, tensors.len) catch @panic("OOM");
+        errdefer allocator.dealloc(res);
+
+        const op = dialect.stablehlo.optimization_barrier(
+            mlir_ctx,
+            inputs[0..tensors.len],
+            res_types[0..tensors.len],
+            mlir_ctx.location(@src()),
+        );
+
+        for (res, 0..) |*t, i| {
+            t.* = _result(tensors[i]._shape, op.result(i));
+        }
+
+        return res;
+    }
+
     /// Returns a Tensor with new tag names.
     pub fn rename(self: Tensor, renames: anytype) Tensor {
         var res = self;

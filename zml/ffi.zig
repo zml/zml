@@ -89,6 +89,7 @@ pub fn custom_call(
     inputs: CustomCallInputsType(custom_op),
     res_shapes_: []const Shape,
     ctx: *CompilationContext,
+    output_operand_aliases: []const i64,
 ) []Tensor {
     stdx.debug.assert(@hasDecl(custom_op, "call"), "custom_op must have a call method", .{});
     const op_name = @typeName(custom_op);
@@ -155,8 +156,10 @@ pub fn custom_call(
         res_types[i] = mlir.ext.RankedTensorType.fromShape(mlir_ctx, sh).as(mlir.Type);
     }
 
-    const frontend_attributes = mlir.Attribute.dict(mlir_ctx, &.{});
-
+    const frontend_attributes = mlir.Attribute.dict(mlir_ctx, &.{
+        .{ "_xla_compute_type", .string(mlir_ctx, "host") },
+        .{ "_xla_buffer_placement", .string(mlir_ctx, @tagName(Buffer.Memory.host_pinned.toPjrtMemory())) },
+    });
     const op = dialect.stablehlo.custom_call(
         mlir_ctx,
         custom_call_inputs[0..inputs.len],
@@ -166,7 +169,7 @@ pub fn custom_call(
             .backend_config = mlir.Attribute.dict(mlir_ctx, &.{}),
             .additional_attributes = &.{.{ "mhlo.frontend_attributes", frontend_attributes }},
             .has_side_effect = true,
-            .output_operand_aliases = &.{},
+            .output_operand_aliases = output_operand_aliases,
         },
         res_types[0..res_shapes_.len],
         mlir_ctx.location(@src()),

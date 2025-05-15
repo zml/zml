@@ -80,8 +80,8 @@ pub const LogValuesVoidOp = struct {
 const Layer = struct {
     // a = 40x128 bf16 ou f32
     pub fn forward(_: Layer, a: zml.Tensor, b: zml.Tensor) zml.Tensor {
-        const a_ = zml.custom_call(LogResultOp, .{a}, &[_]zml.Shape{a.shape()});
-        const results = zml.custom_call(AddOp, .{ a_[0], b }, &[_]zml.Shape{a.shape()});
+        const a_ = zml.custom_call(LogResultOp, .{a}, &[_]zml.Shape{a.shape()}, a.getContext(), &.{0});
+        const results = zml.custom_call(AddOp, .{ a_[0], b }, &[_]zml.Shape{a.shape()}, a.getContext(), &.{0});
         return results[0];
         // return zml.custom_call(LogResultOp, .{results[2]}, &[_]zml.Shape{a.shape()});
     }
