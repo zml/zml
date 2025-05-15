@@ -1599,10 +1599,11 @@ pub const Tensor = struct {
         );
 
         var res = _result(res_shape, slice_op.result(0));
+        var to_remove: Shape.AxesArray = .{};
         for (slices, 0..) |s, a| {
-            if (s.singleton) res_shape = res_shape.remove(a);
+            if (s.singleton) to_remove.appendAssumeCapacity(@intCast(a));
         }
-        return res.reshape(res_shape);
+        return res.reshape(res_shape.removeMany(to_remove.constSlice()));
     }
 
     test slice {
@@ -1643,7 +1644,7 @@ pub const Tensor = struct {
     pub fn choose(self: Tensor, offsets: anytype) Tensor {
         const off, const tags = Shape.parseDimensions(offsets);
         var slices = [_]Slice{.{}} ** MAX_RANK;
-        for (off, tags) |o, t| {
+        for (off.constSlice(), tags.constSlice()) |o, t| {
             const ax = self.axis(t);
             slices[ax] = .single(o);
         }
