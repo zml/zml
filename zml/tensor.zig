@@ -3962,6 +3962,10 @@ test "Tensor.maxPool2d" {
 
 /// Returns a mirrored version of T where each Tensor has been replaced by a Buffer.
 pub fn Bufferized(comptime T: type) type {
+    // TODO: we should strip out the non-buffer fields.
+    // Currently it's confusing cause the Bufferized struct contains field that are never read.
+    // Also it will simplify the layout of the Bufferized struct.
+    // accelerating the calls to execute.
     return meta.MapType(Tensor, Buffer).map(T);
 }
 
