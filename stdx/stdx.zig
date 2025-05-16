@@ -1,5 +1,6 @@
 pub const debug = @import("debug.zig");
 pub const flags = @import("flags.zig");
+pub const fmt = @import("fmt.zig");
 pub const io = @import("io.zig");
 pub const json = @import("json.zig");
 pub const math = @import("math.zig");

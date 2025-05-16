@@ -5,6 +5,7 @@ zig_library(
     srcs = [
         "debug.zig",
         "flags.zig",
+        "fmt.zig",
         "io.zig",
         "json.zig",
         "math.zig",
