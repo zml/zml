@@ -24,7 +24,7 @@ pub fn asyncMain() !void {
         break :blk path;
     } else {
         std.debug.print("Missing file path argument\n", .{});
-        std.debug.print("Try: bazel run -c opt //loader:safetensors -- /path/to/mymodel.safetensors or /path/to/model.safetensors.index.json \n", .{});
+        std.debug.print("Try: bazel run --config=release //loader:safetensors -- /path/to/mymodel.safetensors or /path/to/model.safetensors.index.json \n", .{});
         std.process.exit(0);
     };
 
