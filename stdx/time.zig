@@ -7,6 +7,10 @@ pub const Duration = struct {
         return .{ .ns = self.ns / rhs };
     }
 
+    pub fn hz(self: Duration) u64 {
+        return (1 * std.time.ns_per_s) / self.ns;
+    }
+
     pub fn format(
         self: Duration,
         comptime fmt: []const u8,
