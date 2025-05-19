@@ -219,11 +219,11 @@ fn proxy(comptime custom_op: type) pjrt.ffi.Handler {
                 callback_args[i] = ffi_buffer;
             }
 
-            user_ctx.*.buffers = call_frame.results.buffers();
+            user_ctx.*.results = call_frame.results.buffers();
             user_ctx.*.stream = stream;
 
             @call(.auto, custom_op.call, callback_args) catch |err| {
-                stdx.debug.panic("Error while calling {any} call func: {any}\n", .{ @typeName(custom_op), err });
+                stdx.debug.panic("Error while calling {s} call func: {any}\n", .{ @typeName(custom_op), err });
             };
 
             return null;

@@ -12,6 +12,10 @@ zig_cc_binary(
 zig_cc_binary(
     name = "playground",
     copts = ["-mcpu=native"],
+    extra_srcs = glob([
+        "*.ptx",
+        "*.cubin",
+    ]),
     main = "playground.zig",
     deps = [
         "@zml//async",
