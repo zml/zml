@@ -85,13 +85,6 @@ build           --repo_env=HERMETIC_PYTHON_VERSION=3.11
 # Print test errors in the console
 test            --test_output=errors
 
-# --config=debug will used optmized backend, but all the frontend zig code will be compiled in debug mode.
-build:debug     --compilation_mode=opt
-build:debug     --@rules_zig//zig/settings:mode=debug
-build:debug     --strategy=ZigBuildLib=local
-build:debug     --strategy=ZigBuildObj=local
-build:debug     --strategy=ZigBuildTestLib=local
-
 common:silent   --noshow_progress
 common:silent   --ui_event_filters=,+error,+fail
 common:silent   --show_result=0
@@ -99,3 +92,23 @@ common:silent   --logging=0
 
 common          --registry=https://bazel-registry.zml.ai
 common          --registry=https://bcr.bazel.build
+
+# --config=debug will used optmized backend, but all the frontend zig code will be compiled in debug mode.
+common:debug    --compilation_mode=opt
+common:debug    --@rules_zig//zig/settings:mode=debug
+common:debug    --strategy=ZigBuildLib=local
+common:debug    --strategy=ZigBuildObj=local
+common:debug    --strategy=ZigBuildTestLib=local
+
+# --config=alldebug build everything in debug mode, including the backend.
+common:alldebug --compilation_mode=dbg
+common:alldebug --@rules_zig//zig/settings:mode=debug
+common:alldebug --strategy=local
+
+common:release  --compilation_mode=opt
+common:release  --copt=-Ofast
+common:release  --copt=-march=native
+common:release  --copt=-mcpu=native
+common:release  --@rules_zig//zig/settings:mode=release_fast
+common:release  --@rules_zig//zig/settings:copt=-mcpu=native
+common:release  --@rules_zig//zig/settings:copt=-fomit-frame-pointer

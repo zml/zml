@@ -134,7 +134,7 @@ And that's almost it! You can already build the image:
 
 ```
 # cd examples
-bazel build -c opt //simple_layer:image
+bazel build --config=release //simple_layer:image
 
 INFO: Analyzed target //simple_layer:image (1 packages loaded, 8 targets configured).
 INFO: Found 1 target...
@@ -169,7 +169,7 @@ oci_load(
 ... then we can load the image and run it with the following commands:
 
 ```
-bazel run -c opt //simple_layer:load
+bazel run --config=release //simple_layer:load
 docker run --rm distroless/simple_layer:latest
 ```
 
@@ -194,7 +194,7 @@ This will push the `simple_layer` image with the tag `latest` (you can add more)
 to the docker registry:
 
 ```
-bazel run -c opt //simple_layer:push
+bazel run --config=release //simple_layer:push
 ```
 
 When dealing with maybe a public and a private container registry - or if you
@@ -202,7 +202,7 @@ just want to try it out **right now**, you can always override the repository on
 the command line:
 
 ```
-bazel run -c opt //simple_layer:push -- --repository my.server.com/org/image
+bazel run --config=release //simple_layer:push -- --repository my.server.com/org/image
 ```
 
 
@@ -216,7 +216,7 @@ We'll use the [MNIST
 example](https://github.com/zml/zml/tree/master/examples/mnist) to illustrate
 how to build Docker images that also contain data files.
 
-You can `bazel run -c opt //mnist:push -- --repository
+You can `bazel run --config=release //mnist:push -- --repository
 index.docker.io/my_org/zml_mnist` in the `./examples` folder if you want to try
 it out.
 
@@ -232,7 +232,7 @@ platforms your containerized model should support.**
 **Example:**
 
 ```
-bazel run //mnist:push -c opt --@zml//runtimes:cuda=true -- --repository index.docker.io/my_org/zml_mnist
+bazel run //mnist:push --config=release --@zml//runtimes:cuda=true -- --repository index.docker.io/my_org/zml_mnist
 ```
 
 

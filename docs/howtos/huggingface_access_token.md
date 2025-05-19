@@ -34,8 +34,8 @@ Now you're ready to download a gated model like `Meta-Llama-3-8b`!
 # requires token in $HOME/.cache/huggingface/token, as created by the
 # `huggingface-cli login` command, or the `HUGGINGFACE_TOKEN` environment variable.
 cd examples
-bazel run -c opt //llama:Meta-Llama-3-8b
-bazel run -c opt //llama:Meta-Llama-3-8b -- --promt="Once upon a time,"
+bazel run --config=release //llama:Meta-Llama-3-8b
+bazel run --config=release //llama:Meta-Llama-3-8b -- --promt="Once upon a time,"
 ```
 
 
