@@ -1,10 +1,11 @@
-const builtin = @import("builtin");
 const std = @import("std");
+const builtin = @import("builtin");
+
 const stdx = @import("stdx");
 
-const zml = @import("zml.zig");
 const meta = @import("meta.zig");
 const shapesOf = @import("tensor.zig").shapesOf;
+const zml = @import("zml.zig");
 
 const log = std.log.scoped(.@"zml/testing");
 
@@ -35,7 +36,7 @@ pub fn approxEq(comptime Float: type, l: Float, r: Float, tolerance: Float) bool
 /// Testing utility. Accepts both Tensor and HostBuffer but Tensor will be copied to the
 /// host for comparison !
 pub fn expectClose(left_: anytype, right_: anytype, tolerance: f32) !void {
-    const allocator = if (builtin.is_test) std.testing.allocator else std.heap.page_allocator;
+    const allocator = if (builtin.is_test) std.testing.allocator else std.heap.smp_allocator;
     var left: zml.HostBuffer, const should_free_left = if (@TypeOf(left_) == zml.Buffer)
         .{ try left_.toHostAlloc(allocator), true }
     else

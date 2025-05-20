@@ -199,7 +199,7 @@ pub const CompilationContext = struct {
         const loaded_executable: *pjrt.LoadedExecutable = blk: {
             if (pjrt_location) |pjrt_loc| {
                 if (loadPjrtExecutable(arena, self._platform, pjrt_loc)) |exe| {
-                    log.info("Loaded pre-compiled module from {s}", .{pjrt_loc});
+                    log.info("Loaded pre-compiled module from {s} (generated from {s}/module.mlir)", .{ pjrt_loc, module_dir.? });
                     break :blk exe;
                 } else |err| {
                     if (err != error.FileNotFound) log.warn("Failed to load pre-compiled module: {} at {s}", .{ err, pjrt_loc });
