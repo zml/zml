@@ -1,7 +1,7 @@
 const std = @import("std");
 const coro_base = @import("coro_base.zig");
 
-pub const stack_size = 1 * 1024 * 1024;
+pub const stack_size = 2 * 1024 * 1024;
 
 pub const Stack = struct {
     pub const Data = struct {
