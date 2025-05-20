@@ -423,7 +423,7 @@ fn _populateStruct(
             return true;
         },
         .float => {
-            obj.* = undefined;
+            obj.* = std.math.nan(@TypeOf(obj.*));
             return true;
         },
         .void => true,
