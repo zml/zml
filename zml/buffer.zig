@@ -44,23 +44,6 @@ pub const Buffer = struct {
         }
     };
 
-    pub const Shard = struct {
-        api: *const pjrt.Api,
-        buffer: *pjrt.Buffer,
-        ready_event: ?*pjrt.Event = null,
-        ready: bool = false,
-
-        pub fn awaitt(self: *Shard) !void {
-            if (self.ready) {
-                return;
-            }
-            if (self.ready_event orelse self.buffer.getReadyEvent(self.api)) |ev| {
-                try ev.awaitt(self.api);
-            }
-            self.ready = true;
-        }
-    };
-
     _shape: Shape,
     _api: *const pjrt.Api,
     _shards: Shards,
@@ -88,7 +71,7 @@ pub const Buffer = struct {
         } else 0;
 
         const buffer_type = bufferTypeFromDtype(host_buffer.shape().dtype());
-        const byte_strides = host_buffer.strides() orelse host_buffer.shape().computeStrides().constSlice();
+        const byte_strides = host_buffer.strides();
 
         var frames: std.BoundedArray(asynk.Frame(pjrt.Client.bufferFromHostBuffer), MAX_NUM_SHARDS) = .{};
         const devices = platform.getDevices();
@@ -103,7 +86,7 @@ pub const Buffer = struct {
                 platform.pjrt_client,
                 platform.pjrt_api,
                 pjrt.Client.BufferFromHostBufferArgs{
-                    .data = buf.data,
+                    .data = buf._data,
                     .buffer_type = buffer_type,
                     .dims = buf.shape().dims(),
                     .byte_strides = byte_strides,
@@ -155,6 +138,14 @@ pub const Buffer = struct {
         return try from(platform, host_buffer);
     }
 
+    pub fn asPinnedHostBuffer(self: Buffer) HostBuffer {
+        // TODO restore assert
+        // const memory = self.getMemory().kind(self._api);
+        // stdx.debug.assert(memory == .pinned_host, "asPinnedHostBuffer({}) expects a buffer allocated on host memory, got {}. see `toMemory`", .{ self, memory });
+        const ptr: [*]u8 = @ptrCast(self._shards.get(0).getOpaqueDeviceMemoryDataPointer(self._api) catch unreachable);
+        return HostBuffer.fromBytes(self._shape, ptr[0..self._shape.byteSize()]);
+    }
+
     /// Creates a Buffer with a single element.
     pub fn scalar(platform: Platform, val: anytype, dtype_: DataType) !Buffer {
         const x = dtype_.constant(val);
@@ -182,8 +173,8 @@ pub const Buffer = struct {
         if (shape_.rank() < 1 or byte_size * shape_.dim(-1) > max_bytes) {
             const host_buffer: HostBuffer = .{
                 ._shape = shape_,
-                ._strides = [1]i64{0} ** Shape.MAX_RANK,
-                .data = x.constSlice(),
+                ._strides = @splat(0),
+                ._data = x.constSlice().ptr,
             };
             return try from(platform, host_buffer);
         }
@@ -207,7 +198,7 @@ pub const Buffer = struct {
             },
             else => unreachable,
         }
-        const host_buffer: HostBuffer = .{ ._shape = shape_, ._strides = strides, .data = &bytes };
+        const host_buffer: HostBuffer = .{ ._shape = shape_, ._strides = strides, ._data = &bytes };
         return try from(platform, host_buffer);
     }
 
@@ -228,12 +219,12 @@ pub const Buffer = struct {
     /// could lead to crashes and operations on the buffer will be slower.
     /// Tested on Cuda 12.4.
     pub fn asViewOfHostBuffer(platform: Platform, buf: HostBuffer) Buffer {
-        return asViewOfDeviceBuffer(platform, buf.shape(), null, @constCast(@ptrCast(buf.data.ptr)));
+        return asViewOfDeviceBuffer(platform, buf.shape(), null, @constCast(buf._data));
     }
 
     /// Creates a Buffer from a pointer into device memory.
     /// This allows to interface with other libraries producing buffers.
-    pub fn asViewOfDeviceBuffer(platform: Platform, shape_: Shape, stream: ?*const anyopaque, device_data: *anyopaque) Buffer {
+    pub fn asViewOfDeviceBuffer(platform: Platform, shape_: Shape, stream: ?isize, device_data: *anyopaque) Buffer {
         const minor_to_major: [Shape.MAX_RANK]i64 = comptime blk: {
             var res: [Shape.MAX_RANK]i64 = undefined;
             for (0..Shape.MAX_RANK) |i| {
@@ -255,7 +246,7 @@ pub const Buffer = struct {
                     .tile_dims_sizes = &.{},
                 },
             },
-            .stream = @bitCast(@as(usize, @intFromPtr(stream))),
+            .stream = stream,
         }) catch @panic("failed to createViewOfDeviceBuffer");
 
         var shards: Shards = .{};
@@ -296,7 +287,7 @@ pub const Buffer = struct {
     pub fn toHostAlloc(self: Buffer, allocator: std.mem.Allocator) !HostBuffer {
         const output = try HostBuffer.empty(allocator, self.shape());
         stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
-        const maybe_event = try self._shards.get(0).toHostBuffer(self._api, @constCast(output.data));
+        const maybe_event = try self._shards.get(0).toHostBuffer(self._api, @constCast(output.bytes()));
         if (maybe_event) |event| {
             try event.await_(self._api);
         }

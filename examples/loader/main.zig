@@ -1,9 +1,8 @@
 const std = @import("std");
+
+const asynk = @import("async");
 const stdx = @import("stdx");
 const zml = @import("zml");
-const asynk = @import("async");
-
-const asyncc = asynk.asyncc;
 
 pub fn main() !void {
     try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain);
@@ -39,9 +38,8 @@ pub fn asyncMain() !void {
 
     var buffers = try gpa.allocator().alloc(zml.Buffer, buffer_store.buffers.count());
     defer {
-        for (buffers) |*buf| {
-            buf.deinit();
-        }
+        // Note we don't pass an allocator to buf.deinit() cause its allocated on the device.
+        for (buffers) |*buf| buf.deinit();
         gpa.allocator().free(buffers);
     }
 
@@ -54,7 +52,7 @@ pub fn asyncMain() !void {
 
     while (it.next()) |entry| : (i += 1) {
         const host_buffer = entry.value_ptr.*;
-        total_bytes += host_buffer.data.len;
+        total_bytes += host_buffer.shape().byteSize();
         std.debug.print("Buffer: {s} ({any} / {any})\n", .{ entry.key_ptr.*, i + 1, buffer_store.buffers.count() });
         buffers[i] = try zml.Buffer.from(platform, host_buffer);
     }

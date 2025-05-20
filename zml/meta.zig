@@ -237,42 +237,48 @@ test mapAlloc {
 /// Recursively visit the given struct and calls the callback for each K found.
 /// The `v` parameter must me a pointer, and tensor data need to be mutable if callbacks needs it.
 pub fn visit(comptime cb: anytype, ctx: FnParam(cb, 0), v: anytype) void {
-    const T = @TypeOf(v);
-    const type_info_v = @typeInfo(T);
-    const K = switch (@typeInfo(FnParam(cb, 1))) {
-        .pointer => |info| info.child,
-        else => stdx.debug.compileError("zml.meta.visit is expecting a callback with a pointer as second argument but found {}", .{FnParam(cb, 1)}),
-    };
-
+    const Callback = @TypeOf(cb);
+    const Ptr = @TypeOf(v);
+    const type_info_v = @typeInfo(Ptr);
     if (type_info_v != .pointer) {
-        const Callback = @TypeOf(cb);
-        stdx.debug.compileError("zml.meta.visit is expecting a pointer input to go with following callback signature: {} but received: {}", .{ Callback, T });
+        stdx.debug.compileError("zml.meta.visit({}) is expecting a pointer/slice input, but received: {}", .{ Callback, Ptr });
     }
     const ptr_info = type_info_v.pointer;
-    if (@typeInfo(ptr_info.child) == .@"fn") return;
-    if (ptr_info.child == anyopaque) return;
-    // This is important, because with trivial types like void,
-    // Zig sometimes decide to call `visit` at comptime, but can't do
-    // the pointer wrangling logic at comptime.
-    // So we detect early this case and return.
-    if (@sizeOf(ptr_info.child) == 0) return;
+    const Child = ptr_info.child;
 
+    const K, const mutating_cb = switch (@typeInfo(FnParam(cb, 1))) {
+        .pointer => |info| .{ info.child, !info.is_const },
+        else => stdx.debug.compileError("zml.meta.visit is expecting a callback with a pointer as second argument but found {}", .{FnParam(cb, 1)}),
+    };
+    // Abort if v doesnt' contain any K.
+    if (comptime !Contains(Ptr, K)) return;
+
+    // Handle simple cases.
+    switch (Ptr) {
+        *const K, *K => return cb(ctx, v),
+        *const ?K, *?K => return if (v.*) |*val| cb(ctx, val) else {},
+        []const K, []K => {
+            for (v) |*v_elem| cb(ctx, v_elem);
+            return;
+        },
+        else => {},
+    }
+
+    // Handle std.BoundedArray that contains uninitalized data.
+    if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "constSlice") and @hasDecl(Child, "slice")) {
+        return visit(cb, ctx, if (mutating_cb) v.slice() else v.constSlice());
+    }
+
+    // Recursively visit fields of v.
     switch (ptr_info.size) {
-        // If we have a single pointer, two cases:
-        // * It's a pointer to K, in which case we call the callback.
-        // * It's a pointer to something else, in which case, we explore and recurse if needed.
-        .one => if (ptr_info.child == K) {
-            cb(ctx, v);
-        } else if (ptr_info.child == ?K) {
-            if (v.*) |*val| cb(ctx, val);
-        } else switch (@typeInfo(ptr_info.child)) {
-            .@"struct" => |s| inline for (s.fields) |field_info| {
-                if (field_info.is_comptime) continue;
-                const field_type_info = @typeInfo(field_info.type);
+        .one => switch (@typeInfo(Child)) {
+            .@"struct" => |s| inline for (s.fields) |field| {
+                if (field.is_comptime or comptime !Contains(field.type, K)) continue;
+                const field_type_info = @typeInfo(field.type);
                 // If the field is already a pointer, we recurse with it directly, otherwise, we recurse with a pointer to the field.
                 switch (field_type_info) {
-                    .pointer => visit(cb, ctx, @field(v, field_info.name)),
-                    .array, .optional, .@"union", .@"struct" => visit(cb, ctx, &@field(v, field_info.name)),
+                    .pointer => visit(cb, ctx, @field(v, field.name)),
+                    .array, .optional, .@"union", .@"struct" => visit(cb, ctx, &@field(v, field.name)),
                     else => {},
                 }
             },
@@ -281,23 +287,19 @@ pub fn visit(comptime cb: anytype, ctx: FnParam(cb, 0), v: anytype) void {
             .@"union" => switch (v.*) {
                 inline else => |*v_field| visit(cb, ctx, v_field),
             },
-            else => {},
+            else => stdx.debug.compileError("zml.meta.visit({}) doesn't support fields of type: {}", .{ Callback, Child }),
         },
-        // If we have a slice, two cases also:
-        // * It's a slice of K, in which case we call the callback for each element of the slice.
-        // * It's a slice to something else, in which case, for each element we explore and recurse if needed.
         .slice => {
             for (v) |*v_elem| {
-                if (ptr_info.child == K) {
-                    cb(ctx, v_elem);
-                } else switch (@typeInfo(ptr_info.child)) {
-                    .@"struct" => |s| inline for (s.fields) |field_info| {
-                        const field_type_info = @typeInfo(field_info.type);
+                switch (@typeInfo(Child)) {
+                    .@"struct" => |s| inline for (s.fields) |field| {
+                        if (field.is_comptime or comptime !Contains(field.type, K)) continue;
+                        const field_type_info = @typeInfo(field.type);
                         // If the field is already a pointer, we recurse with it directly, otherwise, we recurse with a pointer to the field.
                         if (field_type_info == .pointer) {
-                            visit(cb, ctx, @field(v_elem, field_info.name));
+                            visit(cb, ctx, @field(v_elem, field.name));
                         } else {
-                            visit(cb, ctx, &@field(v_elem, field_info.name));
+                            visit(cb, ctx, &@field(v_elem, field.name));
                         }
                     },
                     .array => |_| for (v) |*elem| visit(cb, ctx, elem),
@@ -305,11 +307,11 @@ pub fn visit(comptime cb: anytype, ctx: FnParam(cb, 0), v: anytype) void {
                     .@"union" => switch (v_elem.*) {
                         inline else => |*v_field| visit(cb, ctx, v_field),
                     },
-                    else => {},
+                    else => stdx.debug.compileError("zml.meta.visit({}) doesn't support fields of type: {}", .{ Callback, Child }),
                 }
             }
         },
-        else => {},
+        .many, .c => stdx.debug.compileError("zml.meta.visit({}) doesn't support [*] style pointers, got: {}", .{ Callback, Ptr }),
     }
 }
 
@@ -320,7 +322,7 @@ test visit {
     const NestedAttrOptional = struct { nested: ?Attr };
     const SimpleStruct = struct { prop: Attr };
     const MultipleTypesStruct = struct { prop1: Attr, prop2: OtherAttr, prop3: ?Attr };
-    const NestedTypesStruct = struct { prop1: Attr, prop2: OtherAttr, prop3: NestedAttr, prop4: NestedAttrOptional };
+    const NestedTypesStruct = struct { prop1: Attr, prop2: OtherAttr, prop3: NestedAttr, prop4: NestedAttrOptional, prop5: std.BoundedArray(Attr, 8) };
 
     const LocalContext = struct { result: usize };
 
@@ -374,11 +376,16 @@ test visit {
     }
     {
         var context: LocalContext = .{ .result = 0 };
+        const prop5: std.BoundedArray(Attr, 8) = .{
+            .buffer = @splat(.{ .data = 4 }),
+            .len = 2,
+        };
         const container: NestedTypesStruct = .{
             .prop1 = .{ .data = 1 },
             .prop2 = .{ .other = "hello" },
             .prop3 = .{ .nested = .{ .data = 2 } },
             .prop4 = .{ .nested = .{ .data = 3 } },
+            .prop5 = prop5, // 4 will be counted twice.
         };
 
         visit((struct {
@@ -387,7 +394,7 @@ test visit {
             }
         }).cb, &context, &container);
 
-        try std.testing.expectEqual(6, context.result);
+        try std.testing.expectEqual(14, context.result);
     }
 }
 
@@ -532,4 +539,37 @@ fn _CollectCtx(func: anytype) type {
 fn _CollectArg(func: anytype) type {
     const params = @typeInfo(@TypeOf(func)).@"fn".params;
     return params[params.len - 1].type orelse @compileError("anytype not supported in collect");
+}
+
+pub fn Contains(Haystack: type, T: type) bool {
+    switch (Haystack) {
+        T, ?T => return true,
+        *T, ?*T => return true,
+        *const T, ?*const T => return true,
+        []const T, ?[]const T => return true,
+        anyopaque => return false,
+        else => {},
+    }
+
+    return switch (@typeInfo(Haystack)) {
+        .@"struct" => |info| {
+            inline for (info.fields) |field| {
+                if (Contains(field.type, T))
+                    return true;
+            }
+            return false;
+        },
+        .@"union" => |info| {
+            inline for (info.fields) |field| {
+                if (Contains(field.type, T))
+                    return true;
+            }
+            return false;
+        },
+        .array => |info| Contains(info.child, T),
+        .pointer => |info| Contains(info.child, T),
+        .optional => |info| Contains(info.child, T),
+        .vector => |info| Contains(info.child, T),
+        else => false,
+    };
 }

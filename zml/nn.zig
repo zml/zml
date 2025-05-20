@@ -176,6 +176,8 @@ pub const RopeOpts = struct {
         /// Read a Rope scaling config from HF config.json format.
         pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !Scaling {
             const content = try std.json.Value.jsonParse(allocator, source, options);
+            if (content == .null) return .default;
+
             if (content != .object) return error.InvalidEnumTag;
 
             const obj = content.object;

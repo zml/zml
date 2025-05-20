@@ -18,8 +18,8 @@ test {
 /// If the memory is `.unmanaged` it doesn't need to be freed (eg memory mapped, or tracked elsewhere).
 pub const HostBuffer = struct {
     _shape: Shape,
-    _strides: ?[Shape.MAX_RANK]i64 = null,
-    data: []const u8,
+    _strides: [Shape.MAX_RANK]i64,
+    _data: [*]const u8,
     _memory: union(enum) {
         managed: std.mem.Alignment,
         unmanaged,
@@ -28,10 +28,11 @@ pub const HostBuffer = struct {
     /// Allocates a HostBuffer with the given shape.
     /// The memory is left undefined.
     /// The caller owns the memory, and need to call `deinit()`.
-    pub fn empty(allocator: std.mem.Allocator, sh: Shape) !HostBuffer {
+    pub fn empty(allocator: std.mem.Allocator, sh: Shape) error{OutOfMemory}!HostBuffer {
         return .{
             ._shape = sh,
-            .data = try allocator.alignedAlloc(u8, 64, sh.byteSize()),
+            ._strides = sh.computeStrides().buffer,
+            ._data = (try allocator.alignedAlloc(u8, 64, sh.byteSize())).ptr,
             ._memory = .{ .managed = .@"64" },
         };
     }
@@ -43,7 +44,8 @@ pub const HostBuffer = struct {
         stdx.debug.assert(shape_.byteSize() == data_.len, "shape {} and data {} don't match", .{ shape_.byteSize(), data_.len });
         return .{
             ._shape = shape_,
-            .data = data_,
+            ._strides = shape_.computeStrides().buffer,
+            ._data = data_.ptr,
             ._memory = .unmanaged,
         };
     }
@@ -53,7 +55,7 @@ pub const HostBuffer = struct {
         // This means we don't own the data.
         if (self._memory == .unmanaged) return;
         const log2_align = self._memory.managed;
-        allocator.rawFree(@constCast(self.data), log2_align, @returnAddress());
+        allocator.rawFree(self.mutBytes(), log2_align, @returnAddress());
     }
 
     /// Wraps an exisiting slice into a HostBuffer.
@@ -62,10 +64,12 @@ pub const HostBuffer = struct {
     /// that will still need to be deallocated.
     pub fn fromSlice(sh: anytype, s: anytype) HostBuffer {
         const shape_ = Shape.init(sh, DataType.fromSliceElementType(s));
-        std.debug.assert(shape_.count() == s.len);
+        const raw_bytes = std.mem.sliceAsBytes(s);
+        std.debug.assert(shape_.byteSize() == raw_bytes.len);
         return .{
             ._shape = shape_,
-            .data = @alignCast(std.mem.sliceAsBytes(s)),
+            ._strides = shape_.computeStrides().buffer,
+            ._data = raw_bytes.ptr,
             ._memory = .unmanaged,
         };
     }
@@ -81,7 +85,7 @@ pub const HostBuffer = struct {
         @memcpy(tmp[0..strides_.len], strides_);
         return .{
             ._shape = sh,
-            .data = @alignCast(std.mem.sliceAsBytes(s)),
+            ._data = @alignCast(std.mem.sliceAsBytes(s).ptr),
             ._strides = tmp,
             ._memory = .unmanaged,
         };
@@ -89,13 +93,15 @@ pub const HostBuffer = struct {
 
     /// Creates a tensor from a **pointer** to a "multi dimension" array.
     /// Note this doesn't copy, the pointee array need to survive the `HostBuffer` object.
+    /// Typically this is use with constant arrays.
     pub fn fromArray(arr_ptr: anytype) HostBuffer {
         const T = @TypeOf(arr_ptr.*);
         const sh = parseArrayInfo(T);
+        std.debug.assert(sh.byteSize() == @sizeOf(T));
         return .{
             ._shape = sh,
-            .data = @alignCast(std.mem.sliceAsBytes(arr_ptr)),
-            // Array are typically stack allocated and don't need to be freed.
+            ._strides = sh.computeStrides().buffer,
+            ._data = @ptrCast(arr_ptr),
             ._memory = .unmanaged,
         };
     }
@@ -121,16 +127,15 @@ pub const HostBuffer = struct {
         stdx.debug.assert(args.step > 0, "arange expects 'args.step' to be positive, got {}", .{args.step});
 
         const n_steps = std.math.divCeil(i64, args.end - args.start, args.step) catch unreachable;
-        const b = dt.sizeOf();
         const res = try empty(allocator, Shape.init(.{n_steps}, dt));
-        stdx.debug.assert(dt.class() == .integer, "arange expects type to be integer, got {} instead.", .{dt});
-        var data_ = @constCast(res.data);
         switch (dt) {
-            inline else => {
+            inline else => |d| if (comptime d.class() != .integer) {
+                stdx.debug.assert(dt.class() == .integer, "arange expects type to be integer, got {} instead.", .{dt});
+            } else {
+                const Zt = d.toZigType();
                 var j: i64 = args.start;
-                for (0..@intCast(n_steps)) |i| {
-                    var v = Data.init(dt, j);
-                    @memcpy(data_[i * b .. (i + 1) * b], v.constSlice());
+                for (res.mutItems(Zt)) |*val| {
+                    val.* = @intCast(j);
                     j +%= args.step;
                 }
             },
@@ -160,14 +165,24 @@ pub const HostBuffer = struct {
     /// WARNING: It's only valid if the buffer is contiguous.
     /// Strided buffers can't use this method.
     pub fn items(self: HostBuffer, comptime T: type) []const T {
-        if (DataType.fromZigType(T) != self.dtype()) {
-            std.debug.panic("Can't reinterpret {} as {s}", .{ self, @typeName(T) });
-        }
-        if (!self.isContiguous()) {
-            std.debug.panic("{} isn't contiguous", .{self});
-        }
-        const ptr: [*]const T = @alignCast(@ptrCast(self.data.ptr));
+        // TODO we should allow interpreting the output as @Vector(8, f32) when the tensor is f32.
+        stdx.debug.assert(DataType.fromZigType(T) == self.dtype(), "Can't reinterpret {} as {s}", .{ self, @typeName(T) });
+        stdx.debug.assert(self.isContiguous(), "{} isn't contiguous, can't interpret as []const u8", .{self});
+        const ptr: [*]const T = @alignCast(@ptrCast(self._data));
         return ptr[0..self._shape.count()];
+    }
+
+    pub fn mutItems(self: HostBuffer, comptime T: type) []T {
+        return @constCast(self.items(T));
+    }
+
+    pub fn bytes(self: HostBuffer) []const u8 {
+        stdx.debug.assert(self.isContiguous(), "{} isn't contiguous, can't interpret as []const u8", .{self});
+        return self._data[0..self._shape.byteSize()];
+    }
+
+    pub fn mutBytes(self: HostBuffer) []u8 {
+        return @constCast(self.bytes());
     }
 
     pub fn shape(self: HostBuffer) Shape {
@@ -178,9 +193,9 @@ pub const HostBuffer = struct {
         return self._shape.dtype();
     }
 
-    pub fn strides(self: *const HostBuffer) ?[]const i64 {
+    pub fn strides(self: *const HostBuffer) []const i64 {
         // Pass strides per pointer otherwise we return a pointer to this stack frame.
-        return if (self._strides) |*strd| strd[0..self.rank()] else null;
+        return self._strides[0..self._shape.rank()];
     }
 
     // TODO: rename .data into ._data and make it a [*]u8
@@ -205,7 +220,7 @@ pub const HostBuffer = struct {
     }
 
     pub fn isContiguous(self: HostBuffer) bool {
-        const _strides = self._strides orelse return true;
+        const _strides = self._strides;
         const cont_strides = self._shape.computeStrides();
         for (self._shape.dims(), _strides[0..self.rank()], cont_strides.constSlice()) |d, stride, cont_stride| {
             if (d != 1 and stride != cont_stride) return false;
@@ -217,6 +232,7 @@ pub const HostBuffer = struct {
         stdx.debug.assert(self.isContiguous(), "reshape expects a contiguous tensor, got: {}", .{self});
         var res = self;
         res._shape = self._shape.reshape(shape_);
+        res._strides = res._shape.computeStrides().buffer;
         return res;
     }
 
@@ -236,15 +252,12 @@ pub const HostBuffer = struct {
         stdx.debug.assert(end >= 1 and end <= d, "slice1d({}, {}) expects the slice end to be between 1 and {} got: {}", .{ self, ax, d, s });
         stdx.debug.assert(start < end, "slice1d({}, {}) expects the slice start ({}) to be smaller than the end ({}), got: {}", .{ self, ax, start, end, s });
 
-        // If strides weren't set it means original buffer is contiguous.
-        // But it won't be anymore after slicing. The strides don't change though.
-        const _strides = self._strides orelse self._shape.computeStrides().buffer;
-        const offset: usize = @intCast(start * _strides[ax]);
+        const offset: usize = @intCast(start * self._strides[ax]);
+        const new_shape = self.shape().set(ax, end - start);
         return .{
-            ._shape = self.shape().set(ax, end - start),
-            .data = self.data[offset..],
-            // When axis is 0, we stay contiguous.
-            ._strides = if (ax == 0) self._strides else _strides,
+            ._shape = new_shape,
+            ._data = self._data[offset..],
+            ._strides = self._strides,
             ._memory = .unmanaged,
         };
     }
@@ -254,18 +267,52 @@ pub const HostBuffer = struct {
         return self.slice1d(ax, .{ .start = start, .end = start + 1 }).squeeze(ax);
     }
 
+    pub fn choose(self: HostBuffer, offsets: anytype) HostBuffer {
+        const off, const tags = Shape.parseDimensions(offsets);
+        var sh = self._shape;
+        var offset: i64 = 0;
+        for (off.constSlice(), tags.constSlice()) |o, t| {
+            const ax = sh.axis(t);
+            offset += o * self._strides[ax];
+            sh._dims.buffer[ax] = 0;
+        }
+
+        var new_strides: [Shape.MAX_RANK]i64 = @splat(self.dtype().sizeOf());
+
+        // TODO rewrite with simd. This is a pshuf, but it's not supported by @shuffle.
+        var res_ax: u32 = 0;
+        for (0..self._shape.rank()) |ax| {
+            if (sh._dims.buffer[ax] == 0) {
+                continue;
+            }
+
+            sh._dims.buffer[res_ax] = self._shape._dims.buffer[ax];
+            sh._tags.buffer[res_ax] = self._shape._tags.buffer[ax];
+            new_strides[res_ax] = self._strides[ax];
+            res_ax += 1;
+        }
+        sh._dims.len -= off.len;
+        sh._tags.len -= off.len;
+
+        return HostBuffer{
+            ._shape = sh,
+            ._strides = new_strides,
+            ._data = self._data[@intCast(offset)..],
+            ._memory = .unmanaged,
+        };
+    }
+
     pub fn squeeze(self: HostBuffer, axis_: anytype) HostBuffer {
         const ax = self._shape.axis(axis_);
         stdx.debug.assert(self.dim(ax) == 1, "squeeze expects a 1-d axis got {} in {}", .{ ax, self });
 
-        var _strides: ?[Shape.MAX_RANK]i64 = self._strides;
-        if (self._strides) |strydes| {
-            std.mem.copyForwards(i64, _strides.?[0 .. Shape.MAX_RANK - 1], strydes[1..]);
-        }
+        var strd: std.BoundedArray(i64, Shape.MAX_RANK) = .{ .buffer = self._strides, .len = self.rank() };
+        _ = strd.orderedRemove(ax);
+
         return .{
             ._shape = self.shape().drop(ax),
-            .data = self.data,
-            ._strides = _strides,
+            ._data = self._data,
+            ._strides = strd.buffer,
             ._memory = self._memory,
         };
     }
@@ -276,9 +323,12 @@ pub const HostBuffer = struct {
         options: std.fmt.FormatOptions,
         writer: anytype,
     ) !void {
-        _ = fmt;
         _ = options;
-        try writer.print("HostBuffer(.{_})", .{self._shape});
+        if (std.mem.eql(u8, fmt, "v")) {
+            try writer.print("HostBuffer(.{_})@0x{x}", .{ self._shape, @intFromPtr(self._data) });
+        } else {
+            try writer.print("HostBuffer(.{_})", .{self._shape});
+        }
     }
 
     /// Formatter for a HostBuffer that also print the values not just the shape.

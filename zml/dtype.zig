@@ -1,4 +1,5 @@
 const std = @import("std");
+
 const floats = @import("floats.zig");
 
 const C64 = std.math.Complex(f32);
@@ -111,9 +112,7 @@ pub const DataType = enum(u8) {
     }
 
     pub fn toZigType(comptime dtype: DataType) type {
-        return switch (dtype) {
-            inline else => |tag| std.meta.TagPayload(Data, tag),
-        };
+        return @FieldType(Data, @tagName(dtype));
     }
 
     pub fn isSignedInt(dtype: DataType) bool {
@@ -125,19 +124,19 @@ pub const DataType = enum(u8) {
 
     pub fn sizeOf(self: DataType) u16 {
         return switch (self) {
-            inline else => |tag| @sizeOf(std.meta.TagPayload(Data, tag)),
+            inline else => |tag| @sizeOf(tag.toZigType()),
         };
     }
 
     pub fn bitSizeOf(self: DataType) u16 {
         return switch (self) {
-            inline else => |tag| @bitSizeOf(std.meta.TagPayload(Data, tag)),
+            inline else => |tag| @bitSizeOf(tag.toZigType()),
         };
     }
 
     pub fn alignOf(self: DataType) u29 {
         return switch (self) {
-            inline else => |tag| @alignOf(std.meta.TagPayload(Data, tag)),
+            inline else => |tag| @alignOf(tag.toZigType()),
         };
     }
 
