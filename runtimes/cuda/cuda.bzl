@@ -17,10 +17,22 @@ CUDNN_VERSION = "9.8.0"
 CUDNN_REDIST_JSON_SHA256 = "a1599fa1f8dcb81235157be5de5ab7d3936e75dfc4e1e442d07970afad3c4843"
 
 CUDA_PACKAGES = {
-    "cuda_cudart": packages.cc_import(
-        name = "cudart",
-        shared_library = "lib/libcudart.so.12",
-    ),
+    "cuda_cudart": "\n".join([
+        packages.cc_library(
+            name = "cudart",
+            hdrs = ["include/cuda.h"],
+            includes = ["include"],
+            deps = [":cudart_so", ":cuda_so"],
+        ),
+        packages.cc_import(
+            name = "cudart_so",
+            shared_library = "lib/libcudart.so.12",
+        ),
+        packages.cc_import(
+            name = "cuda_so",
+            shared_library = "lib/stubs/libcuda.so",
+        ),
+    ]),
     "cuda_cupti": packages.cc_import(
         name = "cupti",
         shared_library = "lib/libcupti.so.12",
