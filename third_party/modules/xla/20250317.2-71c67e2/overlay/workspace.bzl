@@ -1,9 +1,11 @@
 load("//third_party:repo.bzl", "tf_http_archive", "tf_mirror_urls")
 load("//third_party/gpus:cuda_configure.bzl", "cuda_configure")
 load("//third_party/gpus:rocm_configure.bzl", "rocm_configure")
+load("//third_party/gpus:sycl_configure.bzl", "sycl_configure")
 load("//third_party/llvm:workspace.bzl", llvm = "repo")
 load("//third_party/pybind11_bazel:workspace.bzl", pybind11_bazel = "repo")
 load("//third_party/stablehlo:workspace.bzl", stablehlo = "repo")
+load("//third_party/shardy:workspace.bzl", shardy = "repo")
 load("//third_party/tensorrt:tensorrt_configure.bzl", "tensorrt_configure")
 load("//third_party/triton:workspace.bzl", triton = "repo")
 load("//tools/toolchains/remote:configure.bzl", "remote_execution_configure")
@@ -12,11 +14,45 @@ def _xla_workspace_impl(mctx):
     cuda_configure(name = "local_config_cuda")
     remote_execution_configure(name = "local_config_remote_execution")
     rocm_configure(name = "local_config_rocm")
+    sycl_configure(name = "local_config_sycl")
     tensorrt_configure(name = "local_config_tensorrt")
     pybind11_bazel()
     triton()
     llvm("llvm-raw")
     stablehlo()
+    shardy()
+    tf_http_archive(
+        name = "eigen_archive",
+        build_file = "//third_party/eigen3:eigen_archive.BUILD",
+        sha256 = "1a432ccbd597ea7b9faa1557b1752328d6adc1a3db8969f6fe793ff704be3bf0",
+        strip_prefix = "eigen-4c38131a16803130b66266a912029504f2cf23cd",
+        urls = tf_mirror_urls("https://gitlab.com/libeigen/eigen/-/archive/4c38131a16803130b66266a912029504f2cf23cd/eigen-4c38131a16803130b66266a912029504f2cf23cd.tar.gz"),
+    )
+    tf_http_archive(
+        name = "farmhash_archive",
+        build_file = "//third_party/farmhash:farmhash.BUILD",
+        sha256 = "18392cf0736e1d62ecbb8d695c31496b6507859e8c75541d7ad0ba092dc52115",
+        strip_prefix = "farmhash-0d859a811870d10f53a594927d0d0b97573ad06d",
+        urls = tf_mirror_urls("https://github.com/google/farmhash/archive/0d859a811870d10f53a594927d0d0b97573ad06d.tar.gz"),
+    )
+    tf_http_archive(
+        name = "ml_dtypes_py",
+        build_file = "//third_party/py/ml_dtypes:ml_dtypes_py.BUILD",
+        link_files = {
+            "//third_party/py/ml_dtypes:ml_dtypes.BUILD": "ml_dtypes/BUILD.bazel",
+        },
+        sha256 = "f6e5880666661351e6cd084ac4178ddc4dabcde7e9a73722981c0d1500cf5937",
+        strip_prefix = "ml_dtypes-00d98cd92ade342fef589c0470379abb27baebe9",
+        urls = tf_mirror_urls("https://github.com/jax-ml/ml_dtypes/archive/00d98cd92ade342fef589c0470379abb27baebe9/ml_dtypes-00d98cd92ade342fef589c0470379abb27baebe9.tar.gz"),
+    )
+    tf_http_archive(
+        name = "snappy",
+        build_file = "//third_party:snappy.BUILD",
+        sha256 = "2e458b7017cd58dcf1469ab315389e85e7f445bd035188f2983f81fb19ecfb29",
+        strip_prefix = "snappy-984b191f0fefdeb17050b42a90b7625999c13b8d",
+        system_build_file = "//third_party/systemlibs:snappy.BUILD",
+        urls = tf_mirror_urls("https://github.com/google/snappy/archive/984b191f0fefdeb17050b42a90b7625999c13b8d.tar.gz"),
+    )
     tf_http_archive(
         name = "com_github_grpc_grpc",
         sha256 = "b956598d8cbe168b5ee717b5dafa56563eb5201a947856a6688bbeac9cac4e1f",
