@@ -17,6 +17,10 @@ bazel_dep(name = "zlib", version = "1.2.13")
 bazel_dep(name = "re2", version = "2024-07-02.bcr.1", repo_name = "com_googlesource_code_re2")
 bazel_dep(name = "rules_license", version = "0.0.8")
 
+# MLX PjRt Plugin Dependencies
+bazel_dep(name = "mlx", version = "20250518.0-eebe730")
+bazel_dep(name = "range-v3", version = "0.12.0")
+
 tsl = use_extension("//:tsl.bzl", "tsl")
 use_repo(tsl, "tsl", "python_version_repo")
 
@@ -28,9 +32,15 @@ use_repo(
     "local_config_cuda",
     "local_config_remote_execution",
     "local_config_rocm",
+    "local_config_sycl",
     "local_config_tensorrt",
+    "eigen_archive",
+    "farmhash_archive",
+    "ml_dtypes_py",
     "llvm-raw",
     "stablehlo",
+    "shardy",
+    "snappy",
 )
 
 llvm_configure = use_extension("//:llvm.bzl", "llvm_configure")

@@ -6,6 +6,7 @@ load("@rules_zig//zig:defs.bzl", "zig_library")
 RUNTIMES = {
     "cpu": True,
     "cuda": False,
+    "mlx": False,
     "rocm": False,
     "tpu": False,
     "neuron": False,
@@ -47,6 +48,9 @@ filegroup(
         "//conditions:default": [],
     }) + select({
         ":cuda.enabled": ["//runtimes/cuda:layers"],
+        "//conditions:default": [],
+    }) + select({
+        ":mlx.enabled": ["//runtimes/mlx:layers"],
         "//conditions:default": [],
     }) + select({
         ":neuron.enabled": ["//runtimes/neuron:layers"],

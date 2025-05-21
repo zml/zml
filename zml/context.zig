@@ -120,7 +120,7 @@ pub const Context = struct {
         self.* = undefined;
     }
 
-    const prefered_targets = [_]Target{ .tpu, .neuron, .cuda, .rocm, .cpu };
+    const prefered_targets = [_]Target{ .tpu, .neuron, .cuda, .rocm, .cpu, .mlx };
 
     /// Automatically selects the best Platform loaded in the current Context.
     ///
