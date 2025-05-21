@@ -112,13 +112,30 @@ pub fn expectEqualShapes(expected: zml.Shape, actual: zml.Shape) error{TestExpec
     return error.TestExpectedEqual;
 }
 
+/// Returns a mirrored version of T where each Tensor has been replaced by a Buffer.
+/// This is similar to zml.Bufferized,
+/// but also keep every other fields that could be used during compilation.
+///
+/// see `compileAndCall`.
+pub fn BufferizedWithArgs(comptime T: type) type {
+    // TODO: we should strip out the non-buffer fields.
+    // Currently it's confusing cause the Bufferized struct contains field that are never read.
+    // Also it will simplify the layout of the Bufferized struct.
+    // accelerating the calls to execute.
+    return meta.MapType(zml.Tensor, zml.Buffer).map(T);
+}
+
 /// Compile a function and immediatly call it with the given buffers.
 /// The compiled module is discarded after the call.
 /// Useful during testing when a module is typically called only once.
 ///
 /// Note: `func` needs explicit types on all parameters.
 /// To test a function with `anytype` (typically for tagged API), you need to create a specialized version of it with specific types.
-pub fn compileAndCall(platform: zml.Platform, func: anytype, buffer_args: zml.Bufferized(stdx.meta.FnArgs(func))) !zml.Bufferized(stdx.meta.FnResult(func)) {
+pub fn compileAndCall(
+    platform: zml.Platform,
+    func: anytype,
+    buffer_and_args: BufferizedWithArgs(stdx.meta.FnArgs(func)),
+) !zml.Bufferized(stdx.meta.FnResult(func)) {
     // This simplify test API and also ensure this fn isn't used outside of tests.
     const allocator = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -128,20 +145,36 @@ pub fn compileAndCall(platform: zml.Platform, func: anytype, buffer_args: zml.Bu
         pub fn bufferToShape(_: void, x: zml.Buffer) zml.Shape {
             return x.shape();
         }
+
+        pub fn justBuffers(_: void, x: zml.Buffer) zml.Buffer {
+            return x;
+        }
     };
     var shape_args: zml.ShapeOf(stdx.meta.FnArgs(func)) = undefined;
-    try meta.mapAlloc(Local.bufferToShape, arena.allocator(), {}, buffer_args, &shape_args);
+    try meta.mapAlloc(Local.bufferToShape, arena.allocator(), {}, buffer_and_args, &shape_args);
 
-    const mod = try zml.compileFn(allocator, func, shape_args, platform);
+    var mod = try zml.compileFn(allocator, func, shape_args, platform);
     defer mod.deinit();
 
-    return mod.call(buffer_args);
+    // Note: we dont't use the type safe API of mod,
+    // cause mod.call expects a `zml.Bufferized` while we have `BufferizedWithArgs`.
+    mod.inner.prepare(buffer_and_args);
+    mod.inner._unsafeCall();
+
+    var result: zml.Bufferized(stdx.meta.FnResult(func)) = undefined;
+    mod.inner._unsafeAssignResults(@TypeOf(result), &result);
+    return result;
 }
 
 /// Compile a function and immediatly call it with the given buffers.
 /// The compiled module is discarded after the call.
 /// Useful during testing when a module is typically called only once.
-pub fn compileAndCallWithTensors(platform: zml.Platform, func: anytype, shape_args: zml.ShapeOf(stdx.meta.FnArgs(func)), buffer_args: zml.Bufferized(stdx.meta.FnArgs(func))) !zml.Bufferized(stdx.meta.FnResult(func)) {
+pub fn compileAndCallWithTensors(
+    platform: zml.Platform,
+    func: anytype,
+    shape_args: zml.ShapeOf(stdx.meta.FnArgs(func)),
+    buffer_args: zml.Bufferized(stdx.meta.FnArgs(func)),
+) !zml.Bufferized(stdx.meta.FnResult(func)) {
     // This simplify test API and also ensure this fn isn't used outside of tests.
     const allocator = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(allocator);

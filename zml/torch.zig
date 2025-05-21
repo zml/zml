@@ -149,7 +149,7 @@ test pixelShuffle {
         platform,
         pixelShuffle,
         .{ zml.Shape.init(.{ .batch_size = 1, .c = 9, .h = 4, .w = 4 }, .i32), upscale_factor },
-        .{ input, upscale_factor },
+        .{input},
     );
 
     const exp = zml.HostBuffer.fromArray(&[1][1][12][12]i32{.{.{
