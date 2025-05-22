@@ -11,6 +11,12 @@ const log = std.log.scoped(.@"zml/testing");
 
 var _platform: ?zml.Platform = null;
 
+pub fn mlxSkipTest(platform: zml.Platform) !void {
+    if (platform.target == .mlx) {
+        return error.SkipZigTest;
+    }
+}
+
 pub fn env() zml.Platform {
     if (!builtin.is_test) @compileError("Cannot use zml.testing.env outside of a test block");
     if (_platform == null) {
