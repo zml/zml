@@ -10,6 +10,7 @@ zig_library(
         "json.zig",
         "math.zig",
         "meta.zig",
+        "posix.zig",
         "queue.zig",
         "signature.zig",
         "time.zig",

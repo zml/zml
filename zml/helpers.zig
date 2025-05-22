@@ -17,6 +17,7 @@ const NOT_SET: i64 = -2;
 const DIM_MISMATCH: i64 = -1;
 
 /// Collect the given dimensions inside a struct containing tagged tensors.
+/// `collectDims(.{ .b, .d }, &.{x, y}, .strict)`
 pub fn collectDims(
     comptime dims: anytype,
     v: anytype,
