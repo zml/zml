@@ -1011,21 +1011,21 @@ test FnCache {
         }
     };
 
-    const x = try zml.Buffer.fromSlice(platform, .{2}, &[_]f16{ -1, 1 });
-    const nn: zml.Bufferized(NN) = .{
+    const x = try zml.Buffer.fromArray(platform, [2]f16{ -1, 1 });
+    const nn: zml.testing.BufferizedWithArgs(NN) = .{
         .layers = .{
             .{
-                .w = try zml.Buffer.fromSlice(platform, .{ 2, 2 }, &[_]f16{ 1, -1, 0, 1 }),
-                .b = try zml.Buffer.fromSlice(platform, .{2}, &[_]f16{ 0, 0 }),
+                .w = try .fromArray(platform, [2][2]f16{ .{ 1, -1 }, .{ 0, 1 } }),
+                .b = try .fromArray(platform, [2]f16{ 0, 0 }),
             },
             .{
-                .w = try zml.Buffer.fromSlice(platform, .{ 2, 2 }, &[_]f16{ 1, 2, 1, -1 }),
-                .b = try zml.Buffer.fromSlice(platform, .{2}, &[_]f16{ 10, 10 }),
+                .w = try .fromArray(platform, [2][2]f16{ .{ 1, 2 }, .{ 1, -1 } }),
+                .b = try .fromArray(platform, [2]f16{ 10, 10 }),
             },
             // third layer is different
             .{
-                .w = try zml.Buffer.fromSlice(platform, .{ 3, 2 }, &[_]f16{ 1, 2, 0, 1, -1, 0 }),
-                .b = try zml.Buffer.fromSlice(platform, .{3}, &[_]f16{ -10, -10, -10 }),
+                .w = try .fromArray(platform, [3][2]f16{ .{ 1, 2 }, .{ 0, 1 }, .{ -1, 0 } }),
+                .b = try .fromArray(platform, [3]f16{ -10, -10, -10 }),
             },
         },
     };
@@ -1084,13 +1084,13 @@ test "FnCache with mixed integer/tensor" {
         }
     };
 
-    const x = try zml.Buffer.fromSlice(platform, .{2}, &[_]f16{ -1, 1 });
-    const nn: zml.Bufferized(NN) = .{
+    const x = try zml.Buffer.fromArray(platform, [2]f16{ -1, 1 });
+    const nn: zml.testing.BufferizedWithArgs(NN) = .{
         .layers = .{
-            .{ .w = try zml.Buffer.fromSlice(platform, .{ 2, 2 }, &[_]f16{ 1, -1, 0, 1 }) },
-            .{ .w = try zml.Buffer.fromSlice(platform, .{ 2, 2 }, &[_]f16{ 1, 2, 1, -1 }) },
+            .{ .w = try .fromArray(platform, [2][2]f16{ .{ 1, -1 }, .{ 0, 1 } }) },
+            .{ .w = try .fromArray(platform, [2][2]f16{ .{ 1, 2 }, .{ 1, -1 } }) },
             // third layer has different shape
-            .{ .w = try zml.Buffer.fromSlice(platform, .{ 3, 2 }, &[_]f16{ 1, 2, 0, 1, -1, 0 }) },
+            .{ .w = try .fromArray(platform, [3][2]f16{ .{ 1, 2 }, .{ 0, 1 }, .{ -1, 0 } }) },
         },
     };
     const res = try zml.testing.compileAndCall(platform, NN._fwd, .{ nn, x });
