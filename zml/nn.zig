@@ -163,8 +163,12 @@ pub const RopeOpts = struct {
     /// There are several ways to init the scaling aka "inv_freq"
     pub const Scaling = union(enum) {
         default: void,
-        custom: []const f32,
+        custom: Custom,
         llama3: Llama3,
+        linear: Scaling.Linear,
+
+        pub const Custom = struct { inv_freq: []const f32 };
+        pub const Linear = struct { factor: f32 };
 
         pub const Llama3 = struct {
             factor: f32,
@@ -173,24 +177,9 @@ pub const RopeOpts = struct {
             original_max_position_embeddings: u32,
         };
 
-        /// Read a Rope scaling config from HF config.json format.
-        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !Scaling {
-            const content = try std.json.Value.jsonParse(allocator, source, options);
-            if (content == .null) return .default;
-
-            if (content != .object) return error.InvalidEnumTag;
-
-            const obj = content.object;
-            const impl = obj.get("rope_type") orelse return error.MissingField;
-            if (impl != .string) return error.InvalidEnumTag;
-            if (std.mem.eql(u8, impl.string, "llama3")) {
-                // Note: leaky is fine here cause Llama3 struct don't need to allocate memory.
-                return .{ .llama3 = try std.json.parseFromValueLeaky(Llama3, undefined, content, .{ .ignore_unknown_fields = true }) };
-            } else {
-                log.warn("Unsupported Rope implementation: {s}, will use the default one which will produce altered results", .{impl.string});
-                return .{ .default = {} };
-            }
-        }
+        pub const Helpers = stdx.json.TaggedUnion(@This(), "rope_type");
+        pub const jsonParse = Helpers.jsonParse;
+        pub const jsonParseFromValue = Helpers.jsonParseFromValue;
     };
 };
 
@@ -272,9 +261,9 @@ fn _invFreq(opts: RopeOpts, inv_freq: []f32) void {
 
     switch (opts.scaling) {
         .default => {},
-        .custom => {
-            stdx.debug.assert(opts.scaling.custom.len == N, "rope expected custom inv_freq to match half head dimension {}, got {}", .{ N, opts.scaling.custom.len });
-            @memcpy(inv_freq, opts.scaling.custom);
+        .custom => |c| {
+            stdx.debug.assert(c.inv_freq.len == N, "rope expected custom inv_freq to match half head dimension {}, got {}", .{ N, c.inv_freq.len });
+            @memcpy(inv_freq, c.inv_freq);
         },
         .llama3 => |s| {
             // https://arxiv.org/pdf/2309.16039
@@ -298,6 +287,9 @@ fn _invFreq(opts: RopeOpts, inv_freq: []f32) void {
                     inv_freq[n] *= @floatCast(lerp + (1 - lerp) * downscaling);
                 }
             }
+        },
+        .linear => |s| {
+            for (inv_freq) |*f| f.* /= s.factor;
         },
     }
 }

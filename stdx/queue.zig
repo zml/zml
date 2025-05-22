@@ -91,7 +91,7 @@ test SPSC {
     try testing.expect(q.empty());
 
     // Elems
-    var elems: [10]Elem = .{.{}} ** 10;
+    var elems: [10]Elem = @splat(.{});
 
     // One
     try testing.expect(q.pop() == null);
@@ -207,7 +207,7 @@ test MPSC {
     q.init();
 
     // Elems
-    var elems: [10]Elem = .{.{}} ** 10;
+    var elems: [10]Elem = @splat(.{});
 
     // One
     try testing.expect(q.pop() == null);

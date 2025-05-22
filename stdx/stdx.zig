@@ -9,6 +9,12 @@ pub const posix = @import("posix.zig");
 pub const queue = @import("queue.zig");
 pub const time = @import("time.zig");
 
+test {
+    const std = @import("std");
+
+    std.testing.refAllDecls(@This());
+}
+
 pub inline fn stackSlice(comptime max_len: usize, T: type, len: usize) []T {
     debug.assert(len <= max_len, "stackSlice can only create a slice of up to {} elements, got: {}", .{ max_len, len });
     var storage: [max_len]T = undefined;

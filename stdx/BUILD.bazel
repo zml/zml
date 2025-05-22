@@ -1,4 +1,6 @@
 load("@rules_zig//zig:defs.bzl", "zig_library")
+load("//bazel:zig.bzl", "zig_cc_test")
+
 
 zig_library(
     name = "stdx",
@@ -17,4 +19,10 @@ zig_library(
     ],
     main = "stdx.zig",
     visibility = ["//visibility:public"],
+)
+
+
+zig_cc_test(
+    name = "test",
+    deps = [":stdx"],
 )
