@@ -208,10 +208,10 @@ index 0000000000..ca86b466bf
 \ No newline at end of file
 diff --git a/xla/pjrt/plugin/mlx/buffer.cc b/xla/pjrt/plugin/mlx/buffer.cc
 new file mode 100644
-index 0000000000..8bb2a335fe
+index 0000000000..c4e7d410ac
 --- /dev/null
 +++ b/xla/pjrt/plugin/mlx/buffer.cc
-@@ -0,0 +1,372 @@
+@@ -0,0 +1,371 @@
 +/* Copyright 2024 The OpenXLA Authors.
 +Licensed under the Apache License, Version 2.0 (the "License");
 +you may not use this file except in compliance with the License.
@@ -283,7 +283,7 @@ index 0000000000..8bb2a335fe
 +        array_(array),
 +        shape_(shape),
 +        memory_space_(memory_space) {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +  }
 +
 +  class MlirClonedExternalReference : public ExternalReference {
@@ -291,7 +291,7 @@ index 0000000000..8bb2a335fe
 +    explicit MlirClonedExternalReference(PjRtBuffer* buffer,
 +                                         PjRtMemorySpace* memory_space)
 +        : buffer_() {
-+      TRACE_ME_MEMBER;
++      // TRACE_ME_MEMBER;
 +      auto mlir_buffer = GetAttributeFromBuffer(buffer);
 +      if (!mlir_buffer.ok()) {
 +        LOG(ERROR) << "Could not get attribute from buffer: "
@@ -353,51 +353,51 @@ index 0000000000..8bb2a335fe
 +  }
 +
 +  const Shape& on_device_shape() const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return shape_;
 +  }
 +  absl::StatusOr<Shape> logical_on_device_shape() override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return shape_;
 +  }
 +
 +  PjRtPlatformId platform_id() const {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return client()->platform_id();
 +  }
 +  absl::string_view platform_name() const {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return client()->platform_name();
 +  }
 +
 +  bool IsEmptyTuple() const {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return shape_.IsTuple() && shape_.tuple_shapes().empty();
 +  }
 +
 +  // Buffer knows device + client per older design, should only need
 +  // memory_space.
 +  PjRtMemorySpace* memory_space() const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return memory_space_;
 +  }
 +  PjRtDevice* device() const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return memory_space_->devices().front();
 +  }
 +  PjRtClient* client() const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return memory_space_->client();
 +  }
 +
 +  absl::StatusOr<std::unique_ptr<xla::PjRtBuffer::ExternalReference>>
 +  AcquireExternalReference() override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return std::make_unique<MlirClonedExternalReference>(this, memory_space_);
 +  }
 +
 +  xla::PjRtFuture<> ToLiteral(xla::MutableLiteralBase* literal) override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    if (IsEmptyTuple()) {
 +      return PjRtFuture<>(
 +          xla::InvalidArgument("ToLiteral called on empty tuple"));
@@ -417,7 +417,7 @@ index 0000000000..8bb2a335fe
 +  PjRtFuture<> LazyToLiteral(
 +      absl::AnyInvocable<absl::StatusOr<MutableLiteralBase*>() &&> generator)
 +      override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    auto buffer = std::move(generator)();
 +    if (!buffer.ok()) return PjRtFuture<>(buffer.status());
 +    return ToLiteral(buffer.value());
@@ -426,20 +426,20 @@ index 0000000000..8bb2a335fe
 +  absl::StatusOr<size_t> GetOnDeviceSizeInBytes() const override {
 +    // This is needed by AcquireExternalReference, for framework figuring out
 +    // how to read the underlying buffer data.
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    if (!buffer_) return 0;
 +    return buffer_.getRawData().size();
 +  }
 +
 +  PjRtFuture<> CopyRawToHost(void* dst, int64_t offset,
 +                             int64_t transfer_size) override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return PjRtFuture<>(UNIMPLEMENTED(CopyRawToHost));
 +  }
 +
 +  absl::StatusOr<std::unique_ptr<ExternalReference>>
 +  ReleaseDeviceMemoryOwnership(bool wait_for_operations_to_complete) override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    auto external_ref = AcquireExternalReference();
 +    Delete();
 +    return external_ref;
@@ -449,38 +449,37 @@ index 0000000000..8bb2a335fe
 +  // Note: deleted and uninitialized appear the same in this scenario.
 +  // Consider changing to mlir::NoneType when deleted.
 +  void Delete() override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    buffer_ = {};
 +  }
 +
 +  bool IsDeleted() override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return !buffer_;
 +  }
 +
 +  absl::StatusOr<std::unique_ptr<xla::PjRtBuffer>> CopyToDevice(
 +      xla::PjRtDevice* dst_device) {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return CopyToMemorySpace(
 +        dst_device->default_memory_space().value_or(nullptr));
 +  }
 +
 +  absl::StatusOr<std::unique_ptr<xla::PjRtBuffer>> CopyToMemorySpace(
 +      xla::PjRtMemorySpace* dst_memory_space) override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return CreateMlirBufferFromAttribute(array_, buffer_, dst_memory_space);
 +  }
 +
 +  void CopyToRemoteDevice(
 +      xla::PjRtFuture<std::string> serialized_descriptor,
 +      xla::PjRtBuffer::RemoteSendCallback on_done) override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    on_done(UNIMPLEMENTED(CopyToRemoteDevice), false);
 +  }
 +
-+
 +  xla::PjRtFuture<> GetReadyFuture() override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    LOG(INFO) << "GetReadyFuture(" << (void*)this << ")\n";
 +    // Synchronous! To make async, have the device make a buffer with a ready
 +    // future that is ready when the computation is done / buffer is ready.
@@ -492,7 +491,7 @@ index 0000000000..8bb2a335fe
 +    // GetExternalReference, lse it is copied back to host.
 +    // Since we are using reference interpreter, we are running on CPU in a
 +    // shared memory space.
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return false;
 +  }
 +
@@ -747,10 +746,10 @@ index 0000000000..cc56626953
 \ No newline at end of file
 diff --git a/xla/pjrt/plugin/mlx/client_cpp_pjrt.cc b/xla/pjrt/plugin/mlx/client_cpp_pjrt.cc
 new file mode 100644
-index 0000000000..93a6705d99
+index 0000000000..9bdf4095b5
 --- /dev/null
 +++ b/xla/pjrt/plugin/mlx/client_cpp_pjrt.cc
-@@ -0,0 +1,302 @@
+@@ -0,0 +1,298 @@
 +/* Copyright 2024 The OpenXLA Authors.
 +Licensed under the Apache License, Version 2.0 (the "License");
 +you may not use this file except in compliance with the License.
@@ -811,7 +810,7 @@ index 0000000000..93a6705d99
 +        owned_memory_space_(),
 +        memory_space_(nullptr) {
 +    // Init device and memory space.
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    owned_devices_.push_back(GetStablehloMlxDevice(this));
 +    devices_.push_back(owned_devices_.back().get());
 +    owned_memory_space_ = std::make_unique<xla::UnpinnedHostMemorySpace>(
@@ -825,48 +824,48 @@ index 0000000000..93a6705d99
 +  };
 +
 +  absl::string_view platform_name() const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return kStablehloMlxBackendName;
 +  }
 +  int process_index() const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return 0;
 +  }
 +
 +  int device_count() const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return devices_.size();
 +  }
 +
 +  int addressable_device_count() const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return devices_.size();
 +  }
 +
 +  absl::Span<xla::PjRtDevice* const> devices() const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return devices_;
 +  }
 +  absl::Span<xla::PjRtDevice* const> addressable_devices() const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return devices_;
 +  }
 +
 +  absl::Span<xla::PjRtMemorySpace* const> memory_spaces() const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return absl::MakeSpan(&memory_space_, 1);
 +  }
 +
 +  // Return an ID that identifies the platform via tsl fingerprint.
 +  xla::PjRtPlatformId platform_id() const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return kStablehloMlxBackendId;
 +  }
 +
 +  // Returns a string containing human-readable, platform-specific version
 +  // info (e.g. the CUDA version on GPU or libtpu version on Cloud TPU).
 +  absl::string_view platform_version() const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return "StableHLO MLX v0.1";
 +  }
 +
@@ -879,7 +878,7 @@ index 0000000000..93a6705d99
 +  // a vector a device pointers?
 +  absl::StatusOr<xla::PjRtDevice*> LookupDevice(
 +      xla::PjRtGlobalDeviceId global_device_id) const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    for (auto device : devices_) {
 +      if (device->global_device_id() == global_device_id) {
 +        return device;
@@ -892,7 +891,7 @@ index 0000000000..93a6705d99
 +
 +  absl::StatusOr<xla::PjRtDevice*> LookupAddressableDevice(
 +      xla::PjRtLocalDeviceId local_device_id) const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +
 +    for (auto* device : addressable_devices()) {
 +      if (local_device_id == device->local_device_id()) {
@@ -906,7 +905,7 @@ index 0000000000..93a6705d99
 +
 +  absl::StatusOr<xla::DeviceAssignment> GetDefaultDeviceAssignment(
 +      int num_replicas, int num_partitions) const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    xla::DeviceAssignment assignment(num_replicas, num_partitions);
 +    for (int64_t i = 0; i < num_replicas; ++i) {
 +      for (int64_t j = 0; j < num_partitions; ++j) {
@@ -922,8 +921,7 @@ index 0000000000..93a6705d99
 +  /////////////////
 +
 +  absl::StatusOr<std::unique_ptr<xla::PjRtBuffer>> CreateErrorBuffer(
-+      absl::Status error, const xla::Shape& shape,
-+      xla::PjRtDevice* device) {
++      absl::Status error, const xla::Shape& shape, xla::PjRtDevice* device) {
 +    // Prefer memory space implementation, device holding buffer is
 +    // deprecated.
 +    return CreateErrorBuffer(error, shape,
@@ -938,7 +936,7 @@ index 0000000000..93a6705d99
 +
 +  absl::StatusOr<std::unique_ptr<xla::PjRtBuffer>> CreateUninitializedBuffer(
 +      const xla::Shape& shape, xla::PjRtDevice* device) {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return CreateMlirBufferUninitialized(
 +        shape, device->default_memory_space().value_or(nullptr));
 +  }
@@ -946,16 +944,15 @@ index 0000000000..93a6705d99
 +  absl::StatusOr<std::unique_ptr<PjRtClient::AsyncHostToDeviceTransferManager>>
 +  CreateBuffersForAsyncHostToDevice(absl::Span<const xla::Shape> shapes,
 +                                    xla::PjRtDevice* device) {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return CreateBuffersForAsyncHostToDevice(
 +        shapes, device->default_memory_space().value_or(nullptr));
 +  }
 +
 +  absl::StatusOr<std::unique_ptr<PjRtClient::AsyncHostToDeviceTransferManager>>
-+  CreateBuffersForAsyncHostToDevice(
-+      absl::Span<const xla::Shape> shapes,
-+      xla::PjRtMemorySpace* memory_space) {
-+    TRACE_ME_MEMBER;
++  CreateBuffersForAsyncHostToDevice(absl::Span<const xla::Shape> shapes,
++                                    xla::PjRtMemorySpace* memory_space) {
++    // TRACE_ME_MEMBER;
 +    return UNIMPLEMENTED(CreateBuffersForAsyncHostToDevice);
 +  }
 +
@@ -965,7 +962,7 @@ index 0000000000..93a6705d99
 +      HostBufferSemantics host_buffer_semantics,
 +      absl::AnyInvocable<void() &&> on_done_with_host_buffer,
 +      xla::PjRtDevice* device) {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return BufferFromHostBuffer(
 +        data, type, dims, byte_strides, host_buffer_semantics,
 +        std::move(on_done_with_host_buffer),
@@ -978,7 +975,7 @@ index 0000000000..93a6705d99
 +      HostBufferSemantics host_buffer_semantics,
 +      absl::AnyInvocable<void() &&> on_done_with_host_buffer,
 +      xla::PjRtDevice* device, const xla::Layout* device_layout) {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return BufferFromHostBuffer(
 +        data, type, dims, byte_strides, host_buffer_semantics,
 +        std::move(on_done_with_host_buffer),
@@ -990,9 +987,8 @@ index 0000000000..93a6705d99
 +      std::optional<absl::Span<int64_t const>> byte_strides,
 +      HostBufferSemantics host_buffer_semantics,
 +      absl::AnyInvocable<void() &&> on_done_with_host_buffer,
-+      xla::PjRtMemorySpace* memory_space,
-+      const xla::Layout* device_layout) {
-+    TRACE_ME_MEMBER;
++      xla::PjRtMemorySpace* memory_space, const xla::Layout* device_layout) {
++    // TRACE_ME_MEMBER;
 +    TF_ASSIGN_OR_RETURN(
 +        mx::array array_buffer,
 +        utils::array::fromHostBuffer(data, dims, byte_strides, type));
@@ -1007,15 +1003,14 @@ index 0000000000..93a6705d99
 +
 +  absl::StatusOr<std::unique_ptr<xla::PjRtBuffer>> BufferFromHostLiteral(
 +      const xla::LiteralSlice& literal, xla::PjRtDevice* device) {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return CreateMlirBufferFromLiteral(
 +        literal, device->default_memory_space().value_or(nullptr));
 +  }
 +
 +  absl::StatusOr<std::unique_ptr<xla::PjRtBuffer>> BufferFromHostLiteral(
-+      const xla::LiteralSlice& literal,
-+      xla::PjRtMemorySpace* memory_space) {
-+    TRACE_ME_MEMBER;
++      const xla::LiteralSlice& literal, xla::PjRtMemorySpace* memory_space) {
++    // TRACE_ME_MEMBER;
 +    return CreateMlirBufferFromLiteral(literal, memory_space);
 +  }
 +
@@ -1024,7 +1019,7 @@ index 0000000000..93a6705d99
 +  ///////////
 +  absl::StatusOr<std::unique_ptr<xla::PjRtLoadedExecutable>> Compile(
 +      mlir::ModuleOp module, xla::CompileOptions options) override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return mlir::stablehlo::StablehloMlxCompile(
 +        module, GetDefaultDeviceAssignment(1, devices_.size()).value(), this);
 +  }
@@ -1033,7 +1028,7 @@ index 0000000000..93a6705d99
 +  absl::StatusOr<std::unique_ptr<xla::PjRtLoadedExecutable>> Compile(
 +      const xla::XlaComputation& computation,
 +      xla::CompileOptions options) override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return mlir::stablehlo::StablehloMlxCompile(
 +        computation.proto(),
 +        GetDefaultDeviceAssignment(1, devices_.size()).value(), this);
@@ -1093,7 +1088,7 @@ index 0000000000..8c90942f0c
 \ No newline at end of file
 diff --git a/xla/pjrt/plugin/mlx/device.cc b/xla/pjrt/plugin/mlx/device.cc
 new file mode 100644
-index 0000000000..816ef734bf
+index 0000000000..6984da5b7f
 --- /dev/null
 +++ b/xla/pjrt/plugin/mlx/device.cc
 @@ -0,0 +1,213 @@
@@ -1161,40 +1156,40 @@ index 0000000000..816ef734bf
 +        debug_string_(mlxDeviceToString(mx::default_device())),
 +        to_string_(absl::StrFormat("%s(id=%d,pid=%d)", debug_string_,
 +                                   id_.value(), process_index_)) {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +  }
 +
 +  int id() const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return id_.value();
 +  }
 +  int process_index() const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return process_index_;
 +  }
 +  int local_hardware_id() const {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return local_hardware_id_;
 +  }
 +
 +  absl::string_view device_kind() const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return DebugString();
 +  }
 +
 +  absl::string_view DebugString() const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return debug_string_;
 +  }
 +
 +  absl::string_view ToString() const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return to_string_;
 +  }
 +
 +  const absl::flat_hash_map<std::string, PjRtDeviceAttribute>& Attributes()
 +      const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return attributes_;
 +  }
 +
@@ -1212,56 +1207,56 @@ index 0000000000..816ef734bf
 + public:
 +  explicit StablehloMlxDevice(PjRtClient* client)
 +      : PjRtDevice(), client_(client), description_(0, 0) {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +  }
 +
 +  absl::string_view DebugString() const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return "StablehloMlxDevice";
 +  }
 +
 +  PjRtLocalDeviceId local_device_id() const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return PjRtLocalDeviceId(local_hardware_id().value());
 +  }
 +
 +  PjRtLocalHardwareId local_hardware_id() const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return PjRtLocalHardwareId(description_.local_hardware_id());
 +  }
 +
 +  PjRtClient* client() const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return client_;
 +  }
 +
 +  bool IsAddressable() const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return process_index() == client()->process_index();
 +  }
 +
 +  absl::Status TransferToInfeed(const LiteralSlice& literal) override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return UNIMPLEMENTED(TransferToInfeed);
 +  }
 +
 +  absl::Status TransferFromOutfeed(MutableBorrowingLiteral literal) override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return UNIMPLEMENTED(TransferFromOutfeed);
 +  }
 +
 +  void AttachDefaultMemorySpace(PjRtMemorySpace* memory_space) {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    memory_space_ = memory_space;
 +  }
 +
 +  absl::Span<PjRtMemorySpace* const> memory_spaces() const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return absl::MakeSpan(&memory_space_, 1);
 +  }
 +
 +  absl::StatusOr<PjRtMemorySpace*> default_memory_space() const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    if (!memory_space_)
 +      return absl::InternalError("Plugin memory space unset.");
 +
@@ -1270,13 +1265,13 @@ index 0000000000..816ef734bf
 +
 +  std::unique_ptr<ScopedAsyncTrackingEvent> CreateAsyncTrackingEvent(
 +      absl::string_view description) const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    LOG(FATAL) << "Plugin does not implement CreateAsyncTrackingEvent.";
 +    return nullptr;
 +  }
 +
 +  const PjRtDeviceDescription& description() const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return description_;
 +  }
 +
@@ -1356,10 +1351,10 @@ index 0000000000..ef42968a3a
 \ No newline at end of file
 diff --git a/xla/pjrt/plugin/mlx/executable.cc b/xla/pjrt/plugin/mlx/executable.cc
 new file mode 100644
-index 0000000000..8823b98305
+index 0000000000..1305486a0d
 --- /dev/null
 +++ b/xla/pjrt/plugin/mlx/executable.cc
-@@ -0,0 +1,2431 @@
+@@ -0,0 +1,2437 @@
 +/* Copyright 2024 The OpenXLA Authors.
 +Licensed under the Apache License, Version 2.0 (the "License");
 +you may not use this file except in compliance with the License.
@@ -1661,10 +1656,10 @@ index 0000000000..8823b98305
 +  switch (dtype) {
 +    case mx::bfloat16:
 +      return RankedTensorType::get(ArrayRef<int64_t>(shape),
-+      BFloat16Type::get(module.getContext()));
++                                   BFloat16Type::get(module.getContext()));
 +    case mx::float16:
 +      return RankedTensorType::get(ArrayRef<int64_t>(shape),
-+      Float16Type::get(module.getContext()));
++                                   Float16Type::get(module.getContext()));
 +    case mx::int8:
 +      return RankedTensorType::get(
 +          ArrayRef<int64_t>(shape),
@@ -2181,7 +2176,8 @@ index 0000000000..8823b98305
 +  CallOpInfo call_op_info = getCallOpInfo(mod, o);
 +  if (auto search = op_lookup.call.find(call_op_info);
 +      search == op_lookup.call.end()) {
-+    std::cout << "Compiling CallOp: " << o.getName().str().c_str() << std::endl;
++    // std::cout << "Compiling CallOp: " << o.getName().str().c_str() <<
++    // std::endl;
 +    auto& block = o.front();
 +    auto call_op_func = [&op_lookup, &block, mod,
 +                         call_op_info](const std::vector<mx::array>& inputs) {
@@ -2829,7 +2825,7 @@ index 0000000000..8823b98305
 +  auto shape = std::get<3>(iota_op_info.captures);
 +  if (auto search = op_lookup.iota.find(iota_op_info);
 +      search == op_lookup.iota.end()) {
-+    std::cout << "Compiling IotaOp" << std::endl;
++    // std::cout << "Compiling IotaOp" << std::endl;
 +    auto iota_func = [dimensions, dtype, iota_dim,
 +                      shape](const std::vector<mx::array>& inputs) {
 +      auto init_arange =
@@ -2847,7 +2843,7 @@ index 0000000000..8823b98305
 +  CbrtOpInfo cbrt_op_info = getCbrtOpInfo(o);
 +  if (auto search = op_lookup.cbrt.find(cbrt_op_info);
 +      search == op_lookup.cbrt.end()) {
-+    std::cout << "Compiling CbrtOp" << std::endl;
++    // std::cout << "Compiling CbrtOp" << std::endl;
 +
 +    auto cbrt_func = [](const std::vector<mx::array>& inputs) {
 +      return std::vector<mx::array>{mx::power(
@@ -2865,7 +2861,7 @@ index 0000000000..8823b98305
 +  auto target_shape = std::get<1>(broadcast_in_dim_op_info.captures);
 +  if (auto search = op_lookup.broadcast_in_dim.find(broadcast_in_dim_op_info);
 +      search == op_lookup.broadcast_in_dim.end()) {
-+    std::cout << "Compiling BroadcastInDimOp" << std::endl;
++    // std::cout << "Compiling BroadcastInDimOp" << std::endl;
 +
 +    auto broadcast_in_dim_func = [broadcast_dims, target_shape](
 +                                     const std::vector<mx::array>& inputs) {
@@ -2900,7 +2896,7 @@ index 0000000000..8823b98305
 +  auto rhs_contract_dims = std::get<3>(dot_general_op_info.captures);
 +  if (auto search = op_lookup.dot_general.find(dot_general_op_info);
 +      search == op_lookup.dot_general.end()) {
-+    std::cout << "Compiling DotGeneralOp" << std::endl;
++    // std::cout << "Compiling DotGeneralOp" << std::endl;
 +
 +    auto dot_general_func = [lhs_batch_dims, rhs_batch_dims, lhs_contract_dims,
 +                             rhs_contract_dims](
@@ -2979,7 +2975,7 @@ index 0000000000..8823b98305
 +
 +  if (auto search = op_lookup.gather.find(gather_op_info);
 +      search == op_lookup.gather.end()) {
-+    std::cout << "Compiling GatherOp" << std::endl;
++    // std::cout << "Compiling GatherOp" << std::endl;
 +    auto gather_func = [collapsed_slice_dims, index_vector_dim, offset_dims,
 +                        operand_batching_dims, result_shape, slice_sizes,
 +                        start_index_map, start_indices_batching_dims](
@@ -3099,57 +3095,62 @@ index 0000000000..8823b98305
 +}
 +
 +int32_t computeProduct(const std::vector<int32_t>& dims) {
-+    return std::accumulate(dims.begin(), dims.end(), 1, std::multiplies<int32_t>());
++  return std::accumulate(dims.begin(), dims.end(), 1,
++                         std::multiplies<int32_t>());
 +}
 +
-+
 +mx::array computeGatherIndices(
-+    const mx::array& start_indices,
-+    const std::vector<int32_t>& start_index_map,
++    const mx::array& start_indices, const std::vector<int32_t>& start_index_map,
 +    const std::vector<int32_t>& operand_shape,
 +    const std::vector<int32_t>& slice_sizes,
 +    const std::vector<int32_t>& operand_batching_dims,
 +    const std::vector<int32_t>& start_indices_batching_dims,
 +    int64_t index_vector_dim) {
++  // Validate input dimensions
++  if (start_indices.ndim() == 0) {
++    throw std::invalid_argument(
++        "start_indices must have at least one dimension.");
++  }
 +
-+    // Validate input dimensions
-+    if (start_indices.ndim() == 0) {
-+        throw std::invalid_argument("start_indices must have at least one dimension.");
-+    }
++  // Compute the shape of start_indices
++  std::vector<int32_t> start_indices_shape = start_indices.shape();
 +
-+    // Compute the shape of start_indices
-+    std::vector<int32_t> start_indices_shape = start_indices.shape();
++  // Compute the number of index vectors
++  int32_t index_vector_size =
++      static_cast<int32_t>(start_indices_shape[index_vector_dim]);
++  std::vector<int32_t> outer_shape = start_indices_shape;
++  outer_shape.erase(outer_shape.begin() + index_vector_dim);
++  int32_t num_index_vectors = computeProduct(outer_shape);
 +
-+    // Compute the number of index vectors
-+    int32_t index_vector_size = static_cast<int32_t>(start_indices_shape[index_vector_dim]);
-+    std::vector<int32_t> outer_shape = start_indices_shape;
-+    outer_shape.erase(outer_shape.begin() + index_vector_dim);
-+    int32_t num_index_vectors = computeProduct(outer_shape);
++  // Reshape start_indices to a 2D tensor: [num_index_vectors,
++  // index_vector_size]
++  mx::array reshaped_start_indices =
++      mx::reshape(start_indices, {num_index_vectors, index_vector_size});
 +
-+    // Reshape start_indices to a 2D tensor: [num_index_vectors, index_vector_size]
-+    mx::array reshaped_start_indices = mx::reshape(start_indices, {num_index_vectors, index_vector_size});
++  // Initialize full_start_indices with zeros: [num_index_vectors, operand_rank]
++  int32_t operand_rank = static_cast<int32_t>(operand_shape.size());
++  mx::array full_start_indices =
++      mx::zeros({num_index_vectors, operand_rank}, mx::int32);
 +
-+    // Initialize full_start_indices with zeros: [num_index_vectors, operand_rank]
-+    int32_t operand_rank = static_cast<int32_t>(operand_shape.size());
-+    mx::array full_start_indices = mx::zeros({num_index_vectors, operand_rank}, mx::int32);
++  // Populate full_start_indices using start_index_map
++  for (size_t i = 0; i < start_index_map.size(); ++i) {
++    int32_t operand_dim = start_index_map[i];
++    // Extract the i-th column from reshaped_start_indices
++    mx::array indices_column =
++        mx::slice(reshaped_start_indices, {0, static_cast<int32_t>(i)},
++                  {num_index_vectors, static_cast<int32_t>(i + 1)});
++    // Clip indices to ensure they are within bounds
++    int32_t max_index = operand_shape[operand_dim] - slice_sizes[operand_dim];
++    mx::array clipped_indices =
++        mx::clip(indices_column, mx::array({0}, mx::int32),
++                 mx::array({max_index}, mx::int32));
++    // Update the corresponding column in full_start_indices
++    full_start_indices =
++        mx::slice_update(full_start_indices, clipped_indices, {0, operand_dim},
++                         {num_index_vectors, operand_dim + 1});
++  }
 +
-+    // Populate full_start_indices using start_index_map
-+    for (size_t i = 0; i < start_index_map.size(); ++i) {
-+        int32_t operand_dim = start_index_map[i];
-+        // Extract the i-th column from reshaped_start_indices
-+        mx::array indices_column = mx::slice(reshaped_start_indices, {0, static_cast<int32_t>(i)},
-+                                             {num_index_vectors, static_cast<int32_t>(i + 1)});
-+        // Clip indices to ensure they are within bounds
-+        int32_t max_index = operand_shape[operand_dim] - slice_sizes[operand_dim];
-+        mx::array clipped_indices = mx::clip(indices_column, mx::array({0}, mx::int32),
-+                                             mx::array({max_index}, mx::int32));
-+        // Update the corresponding column in full_start_indices
-+        full_start_indices = mx::slice_update(full_start_indices, clipped_indices,
-+                                              {0, operand_dim},
-+                                              {num_index_vectors, operand_dim + 1});
-+    }
-+
-+    return full_start_indices;
++  return full_start_indices;
 +}
 +
 +void _compileGatherOp(OpLookup& op_lookup, stablehlo::GatherOp o) {
@@ -3165,7 +3166,7 @@ index 0000000000..8823b98305
 +
 +  if (auto search = op_lookup.gather.find(gather_op_info);
 +      search == op_lookup.gather.end()) {
-+    std::cout << "Compiling GatherOp" << std::endl;
++    // std::cout << "Compiling GatherOp" << std::endl;
 +    auto gather_func =
 +        [collapsed_slice_dims, index_vector_dim, offset_dims,
 +         operand_batching_dims, result_shape, slice_sizes, start_index_map,
@@ -3207,7 +3208,7 @@ index 0000000000..8823b98305
 +  auto update_window_dims = std::get<6>(scatter_op_info.captures);
 +  if (auto search = op_lookup.scatter.find(scatter_op_info);
 +      search == op_lookup.scatter.end()) {
-+    std::cout << "Compiling ScatterOp" << std::endl;
++    // std::cout << "Compiling ScatterOp" << std::endl;
 +    auto scatter_func = [index_vector_dim, input_batching_dims,
 +                         inserted_window_dims, scatter_dims_to_operand_dims,
 +                         scatter_indices_batching_dims, scatter_type,
@@ -3380,7 +3381,7 @@ index 0000000000..8823b98305
 +  auto interior_pad = std::get<2>(pad_op_info.captures);
 +  if (auto search = op_lookup.pad.find(pad_op_info);
 +      search == op_lookup.pad.end()) {
-+    std::cout << "Compiling PadOp" << std::endl;
++    // std::cout << "Compiling PadOp" << std::endl;
 +    auto pad_func = [result_shape, edge_pad_low,
 +                     interior_pad](const std::vector<mx::array>& inputs) {
 +      auto operand = inputs[0];
@@ -3471,7 +3472,7 @@ index 0000000000..8823b98305
 +      break;
 +    }
 +    for (auto fn_name : compilable_fns) {
-+      std::cout << fn_name.c_str() << std::endl;
++      // std::cout << fn_name.c_str() << std::endl;
 +      auto func = mod.lookupSymbol<mlir::func::FuncOp>(fn_name);
 +      compileCallOp(op_lookup, mod, func);
 +      dep_tree.remove(fn_name);
@@ -3491,9 +3492,9 @@ index 0000000000..8823b98305
 +        client_(client),
 +        context_(),
 +        module_(cloneIntoContext(module, context_)) {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    auto main = module.lookupSymbol<mlir::func::FuncOp>("main");
-+    std::cout << "Started call to `mlx::compile`" << std::endl << std::endl;
++    // std::cout << "Started call to `mlx::compile`" << std::endl << std::endl;
 +    compileModule(module, op_lookup_);
 +    // try {
 +    auto& main_block = main.front();
@@ -3510,7 +3511,7 @@ index 0000000000..8823b98305
 +                    *utils::dtype::fromMlirType(shaped_type.getElementType())));
 +    }
 +    compiled_module_(tmp_inputs);
-+    std::cout << "Finished call to `mlx::compile`" << std::endl << std::endl;
++    // std::cout << "Finished call to `mlx::compile`" << std::endl << std::endl;
 +    // } catch (std::exception& e) {
 +    //   std::cout << "Error in `mlx::compile`" << std::endl;
 +    // }
@@ -3545,30 +3546,30 @@ index 0000000000..8823b98305
 +  }
 +
 +  PjRtClient* client() const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return client_;
 +  }
 +
 +  const DeviceAssignment& device_assignment() const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return assignment_;
 +  }
 +
 +  absl::Span<const PjRtLoadedExecutable::LogicalDeviceIds>
 +  addressable_device_logical_ids() const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    LOG_UNIMPLEMENTED(addressable_device_logical_ids);
 +    return {};
 +  }
 +
 +  absl::Span<PjRtDevice* const> addressable_devices() const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return devices_;
 +  }
 +
 +  // Helper function to get default mem from device.
 +  PjRtMemorySpace* get_default_memory_space() const {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return devices_[0]->default_memory_space().value_or(nullptr);
 +  }
 +
@@ -3604,7 +3605,7 @@ index 0000000000..8823b98305
 +  absl::StatusOr<PjRtLoadedExecutable::Result> ExecuteWithMlxInterpreter(
 +      absl::Span<PjRtBuffer* const> argument_handles, ModuleOp module,
 +      PjRtDevice* device, bool fill_future) {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    SmallVector<DenseElementsAttr> input_attrs;
 +    for (auto* arg : argument_handles) {
 +      TF_ASSIGN_OR_RETURN(auto mlirArg, GetAttributeFromBuffer(arg));
@@ -3650,7 +3651,7 @@ index 0000000000..8823b98305
 +      absl::Span<const std::vector<PjRtBuffer*>> argument_handles,
 +      const xla::ExecuteOptions& options,
 +      std::optional<std::vector<PjRtFuture<>>>& returned_futures) override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    if (argument_handles.size() != 1) {
 +      // One arg handle per device.
 +      return absl::InvalidArgumentError(
@@ -3677,7 +3678,7 @@ index 0000000000..8823b98305
 +      absl::Span<PjRtBuffer* const> argument_handles, PjRtDevice* device,
 +      const xla::ExecuteOptions& options,
 +      std::optional<PjRtFuture<>>& returned_future, bool fill_future) override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    // Synchronous! To make async, have the device make a buffer with a ready
 +    // future that is ready when the computation is done / buffer is ready.
 +    TF_ASSIGN_OR_RETURN(
@@ -3694,7 +3695,7 @@ index 0000000000..8823b98305
 +      absl::Span<PjRtBuffer* const> argument_handles, PjRtDevice* device,
 +      const xla::ExecuteOptions& options,
 +      std::optional<PjRtFuture<>>& returned_future, bool fill_future) override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    // Synchronous! To make async, have the device make a buffer with a ready
 +    // future that is ready when the computation is done / buffer is ready.
 +    TF_ASSIGN_OR_RETURN(
@@ -3708,31 +3709,31 @@ index 0000000000..8823b98305
 +  }
 +
 +  void Delete() override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    module_.release();
 +    module_ = nullptr;
 +  }
 +  bool IsDeleted() override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return !module_;
 +  }
 +
 +  // PjRtExecutable API.
 +  int num_replicas() const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return assignment_.replica_count();
 +  }
 +  int num_partitions() const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return assignment_.computation_count();
 +  }
 +  int64_t SizeOfGeneratedCodeInBytes() const override {
 +    // No generated code.. so just return 1.
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return 1;
 +  }
 +  absl::string_view name() const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return name_;
 +  }
 +
@@ -3741,7 +3742,7 @@ index 0000000000..8823b98305
 +    // TODO: This shouldn't be needed for an MLIR plugin, its only used in the
 +    // JAX layer for determining output sharding, which exists on the mlir
 +    // module.
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    auto moduleClone = llvm::cast<ModuleOp>(module_.get()->clone());
 +    TF_ASSIGN_OR_RETURN(auto hlo_module,
 +                        xla::ConvertStablehloToHlo(moduleClone));
@@ -3750,12 +3751,12 @@ index 0000000000..8823b98305
 +
 +  absl::StatusOr<std::vector<std::vector<absl::string_view>>>
 +  GetOutputMemoryKinds() const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return UNIMPLEMENTED(GetOutputMemoryKinds);
 +  }
 +
 +  absl::StatusOr<std::string> FingerprintExecutable() const override {
-+    TRACE_ME_MEMBER;
++    // TRACE_ME_MEMBER;
 +    return UNIMPLEMENTED(FingerprintExecutable);
 +  }
 +

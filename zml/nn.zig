@@ -1095,6 +1095,7 @@ pub fn sdpaChunk(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) PartialSoft
 }
 
 test sdpaMemEfficient {
+    // TODO(@cryptodeal): MLX PjRt plugin implement `stablehlo::RngOp`
     const platform = zml.testing.env();
     const allocator = std.testing.allocator;
 
@@ -1153,6 +1154,7 @@ test sdpaMemEfficient {
 }
 
 test "sdpaMemEfficient transposed" {
+    // TODO(@cryptodeal): MLX PjRt plugin implement `stablehlo::RngOp`
     const platform = zml.testing.env();
     const allocator = std.testing.allocator;
 
@@ -1248,6 +1250,7 @@ pub fn sampleTokens(activations: Tensor, opts: SamplingStrategy, rng: Tensor.Rng
 }
 
 test sampleTokens {
+    // TODO(@cryptodeal): MLX PjRt plugin implement `stablehlo::RandomBitGeneratorOp`
     const platform = zml.testing.env();
     const allocator = std.testing.allocator;
 
@@ -1371,6 +1374,7 @@ fn fixupLogits(logits: Tensor, opts: DynamicSamplingStrategy) [2]Tensor {
 }
 
 test sampleTokensDynamic {
+    // TODO(@cryptodeal): MLX PjRt plugin implement `stablehlo::ReduceWindowOp`
     const platform = zml.testing.env();
     const allocator = std.testing.allocator;
 

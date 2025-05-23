@@ -615,6 +615,7 @@ pub const Tensor = struct {
         }
 
         test uniform {
+            // TODO(@cryptodeal): MLX PjRt plugin implement `stablehlo::RandomBitGeneratorOp`
             const zml = @import("zml.zig");
             const Stats = struct {
                 const Stats = @This();
@@ -708,6 +709,7 @@ pub const Tensor = struct {
         }
 
         test gumbel {
+            // TODO(@cryptodeal): MLX PjRt plugin implement `stablehlo::RandomBitGeneratorOp`
             const zml = @import("zml.zig");
             const Stats = struct {
                 const Stats = @This();
@@ -1375,6 +1377,7 @@ pub const Tensor = struct {
     }
 
     test cumulativeSum {
+        // TODO(@cryptodeal): MLX PjRt plugin implement `stablehlo::ReduceWindowOp`
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
 
@@ -1607,6 +1610,7 @@ pub const Tensor = struct {
     }
 
     test slice {
+        // TODO(@cryptodeal): fix test case for MLX PjRt plugin
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
 
@@ -2426,6 +2430,7 @@ pub const Tensor = struct {
     test gatherSlices {
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
+        // TODO(@cryptodeal): MLX PjRt plugin calculate gather indices in batches
         try zml.testing.mlxSkipTest(platform);
 
         const Local = struct {
@@ -2831,6 +2836,7 @@ pub const Tensor = struct {
     }
 
     test argMax {
+        // TODO(@cryptodeal): fix test case for MLX PjRt plugin
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
         const allocator = std.testing.allocator;
@@ -2894,7 +2900,7 @@ pub const Tensor = struct {
     test argsort {
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
-        // TODO (@cryptodeal): Fix this for MLX PjRt Plugin Implementation.
+        // TODO(@cryptodeal): Fix this for MLX PjRt Plugin Implementation.
         // Currently segfaults; worked prior to rebase on latest XLA, MLX, and ZML.
         try zml.testing.mlxSkipTest(platform);
 
@@ -3726,6 +3732,7 @@ pub const Tensor = struct {
     }
 
     test cartesianProduct {
+        // TODO(@cryptodeal): fix test case for MLX PjRt plugin
         const zml = @import("zml.zig");
         const client = zml.testing.env();
 
@@ -3897,6 +3904,7 @@ fn getComparisonType(ctx: mlir.Context, dtype: DataType) dialect.stablehlo.Compa
 }
 
 test "Tensor.maxPool1d" {
+    // TODO(@cryptodeal): MLX PjRt plugin implement `stablehlo::ReduceWindowOp`
     const zml = @import("zml.zig");
     const platform = zml.testing.env();
 
@@ -3933,6 +3941,7 @@ test "Tensor.maxPool1d" {
 }
 
 test "Tensor.maxPool2d" {
+    // TODO(@cryptodeal): MLX PjRt plugin implement `stablehlo::ReduceWindowOp`
     const zml = @import("zml.zig");
     const platform = zml.testing.env();
 

@@ -975,6 +975,7 @@ pub const FnCache = std.AutoHashMapUnmanaged(FnKey, MlirFn);
 pub const FnKey = struct { fn_ptr: *const anyopaque, input_hash: u64 };
 
 test FnCache {
+    // TODO(@cryptodeal): Passing; need to implement MLX PjRt plugin cache
     const zml = @import("zml.zig");
     const platform = zml.testing.env();
 
@@ -1035,6 +1036,7 @@ test FnCache {
 }
 
 test "FnCache with mixed integer/tensor" {
+    // TODO(@cryptodeal): Passing; need to implement MLX PjRt plugin cache
     const zml = @import("zml.zig");
     const platform = zml.testing.env();
 
