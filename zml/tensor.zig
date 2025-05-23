@@ -386,14 +386,62 @@ pub const Tensor = struct {
         return binaryOp(@src(), "shiftLeft", dialect.stablehlo.shift_left)(self, other);
     }
 
+    test shiftLeft {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        const lhs: [3]i64 = .{ -1, 0, 1 };
+        const rhs: [3]i64 = .{ 1, 2, 3 };
+        const expected: [3]i64 = .{ -2, 0, 8 };
+
+        const input = try zml.Buffer.fromSlice(platform, .{3}, &lhs);
+        const shift_by = try zml.Buffer.fromSlice(platform, .{3}, &rhs);
+
+        const output = try zml.testing.compileAndCall(platform, Tensor.shiftLeft, .{ input, shift_by });
+
+        try zml.testing.expectClose(zml.HostBuffer.fromSlice(.{3}, &expected), output, 1e-4);
+    }
+
     /// Returns a Tensor containing the element-wise arithmetic right-shift operation of 'self' by 'other'.
     pub fn shiftRightArithmetic(self: Tensor, other: Tensor) Tensor {
         return binaryOp(@src(), "shiftRightArithmetic", dialect.stablehlo.shift_right_arithmetic)(self, other);
     }
 
+    test shiftRightArithmetic {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        const lhs: [3]i64 = .{ -1, 0, 8 };
+        const rhs: [3]i64 = .{ 1, 2, 3 };
+        const expected: [3]i64 = .{ -1, 0, 1 };
+
+        const input = try zml.Buffer.fromSlice(platform, .{3}, &lhs);
+        const shift_by = try zml.Buffer.fromSlice(platform, .{3}, &rhs);
+
+        const output = try zml.testing.compileAndCall(platform, Tensor.shiftRightArithmetic, .{ input, shift_by });
+
+        try zml.testing.expectClose(zml.HostBuffer.fromSlice(.{3}, &expected), output, 1e-4);
+    }
+
     /// Returns a Tensor containing the element-wise logical right-shift operation of 'self' by 'other'.
     pub fn shiftRightLogical(self: Tensor, other: Tensor) Tensor {
         return binaryOp(@src(), "shiftRightLogical", dialect.stablehlo.shift_right_logical)(self, other);
+    }
+
+    test shiftRightLogical {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        const lhs: [3]i64 = .{ -1, 0, 8 };
+        const rhs: [3]i64 = .{ 1, 2, 3 };
+        const expected: [3]i64 = .{ 9223372036854775807, 0, 1 };
+
+        const input = try zml.Buffer.fromSlice(platform, .{3}, &lhs);
+        const shift_by = try zml.Buffer.fromSlice(platform, .{3}, &rhs);
+
+        const output = try zml.testing.compileAndCall(platform, Tensor.shiftRightLogical, .{ input, shift_by });
+
+        try zml.testing.expectClose(zml.HostBuffer.fromSlice(.{3}, &expected), output, 1e-4);
     }
 
     /// Returns the Cholesky decomposition of the input Tensor.
@@ -1033,6 +1081,39 @@ pub const Tensor = struct {
             .XOR => binaryOp(@src(), "xor", dialect.stablehlo.xor)(self, other),
             .AND => binaryOp(@src(), "and", dialect.stablehlo.and_)(self, other),
         };
+    }
+
+    test logical {
+        const zml = @import("zml.zig");
+        const Local = struct {
+            pub fn call(comptime logical_op: LogicalOp) type {
+                return struct {
+                    fn _logical(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
+                        return a.logical(logical_op, b);
+                    }
+
+                    pub fn testCase(comptime T: type, platform: zml.Platform, lhs: [3]T, rhs: [3]T, expected: [3]T) !void {
+                        const actual = try zml.testing.compileAndCall(platform, _logical, .{ try zml.Buffer.fromSlice(platform, .{3}, &lhs), try zml.Buffer.fromSlice(platform, .{3}, &rhs) });
+                        return zml.testing.expectClose(zml.HostBuffer.fromArray(&expected), actual, 1e-4);
+                    }
+                };
+            }
+        }.call;
+
+        const platform = zml.testing.env();
+        inline for (.{
+            .{ i8, .{ 127, -128, -128 }, .{ 0, 127, -128 }, .{ 127, -1, -128 } },
+            .{ u8, .{ 0, 127, 255 }, .{ 255, 255, 255 }, .{ 255, 255, 255 } },
+            .{ i16, .{ 32767, -32768, -32768 }, .{ 0, 32767, -32768 }, .{ 32767, -1, -32768 } },
+            .{ u16, .{ 0, 32767, 65535 }, .{ 65535, 65535, 65535 }, .{ 65535, 65535, 65535 } },
+            .{ i32, .{ 2147483647, -2147483648, -2147483648 }, .{ 0, 2147483647, -2147483648 }, .{ 2147483647, -1, -2147483648 } },
+            .{ u32, .{ 0, 2147483647, 4294967295 }, .{ 4294967295, 4294967295, 4294967295 }, .{ 4294967295, 4294967295, 4294967295 } },
+            .{ i64, .{ 9223372036854775807, -9223372036854775808, -9223372036854775808 }, .{ 0, 9223372036854775807, -9223372036854775808 }, .{ 9223372036854775807, -1, -9223372036854775808 } },
+            .{ u64, .{ 0, 9223372036854775807, 18446744073709551615 }, .{ 18446744073709551615, 18446744073709551615, 18446744073709551615 }, .{ 18446744073709551615, 18446744073709551615, 18446744073709551615 } },
+        }) |testcase| {
+            const T, const lhs, const rhs, const expected = testcase;
+            try Local(.OR).testCase(T, platform, lhs, rhs, expected);
+        }
     }
 
     /// Returns a Tensor containing the element-wise floor operation of the input Tensor.
