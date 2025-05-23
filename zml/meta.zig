@@ -659,7 +659,6 @@ pub fn Contains(Haystack: type, T: type) bool {
 }
 
 test Contains {
-    try std.testing.expect(!comptime Contains([]const u8, u8));
     try std.testing.expect(comptime Contains([]const u8, u8));
     try std.testing.expect(!comptime Contains([]const u32, u8));
 }
