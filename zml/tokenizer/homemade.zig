@@ -2,10 +2,9 @@
 //! Disclaimer this is not a very robust implementation:
 //! In particular the normalization is pretty minimalist, only works with ascii, and don't do unicode normalization.
 //! Mostly used for testing models that don't have an official HF/sentencepiece tokenizer.
-const builtin = @import("builtin");
 const std = @import("std");
-
 const testing = std.testing;
+const builtin = @import("builtin");
 
 const log = std.log.scoped(.@"zml/tokenizer");
 
@@ -610,7 +609,7 @@ pub const Normalizer = struct {
         split_on_punct_ascii: bool,
     },
 
-    pub fn init(flags: std.meta.FieldType(Normalizer, .flags), escaped_whitespace: ?[]const u8) Normalizer {
+    pub fn init(flags: @FieldType(Normalizer, "flags"), escaped_whitespace: ?[]const u8) Normalizer {
         var res: Normalizer = .{ .flags = flags };
         if (escaped_whitespace) |escaped| {
             res._whitespace.appendSliceAssumeCapacity(escaped);
@@ -1175,7 +1174,7 @@ fn objectGet(
     object: std.json.ObjectMap,
     comptime kind: std.meta.FieldEnum(std.json.Value),
     key: []const u8,
-) ?std.meta.FieldType(std.json.Value, kind) {
+) ?@FieldType(std.json.Value, @tagName(kind)) {
     const val = object.get(key) orelse return null;
     if (val != kind) return null;
     return @field(val, @tagName(kind));

@@ -101,7 +101,7 @@ pub const Api = struct {
     }
 
     fn CallFnArgType(comptime func: Funcs) type {
-        const fti = @typeInfo(std.meta.FieldType(c.PJRT_Api, func));
+        const fti = @typeInfo(@FieldType(c.PJRT_Api, @tagName(func)));
         const fn_ptr = @typeInfo(fti.optional.child);
         const fn_type_info = @typeInfo(fn_ptr.pointer.child);
         const arg_array_type_info = @typeInfo(fn_type_info.@"fn".params[0].type.?);
