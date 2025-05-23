@@ -72,6 +72,7 @@ pub fn while_(
 }
 
 test "simple while" {
+    // TODO(@cryptodeal): MLX PjRt plugin implement `stablehlo::WhileOp`
     const CountInts = struct {
         step: Tensor,
         end: Tensor,
@@ -349,6 +350,7 @@ pub fn for_(comptime func: anytype, blk_ctx: BlockSign(func).BlkCtx, num_steps_:
 }
 
 test for_ {
+    // TODO(@cryptodeal): MLX PjRt plugin implement `stablehlo::WhileOp`
     const Squares = struct {
         const Squares = @This();
 
@@ -389,6 +391,7 @@ test for_ {
 }
 
 test "nested for" {
+    // TODO(@cryptodeal): MLX PjRt plugin implement `stablehlo::WhileOp`
     const OuterProd = struct {
         const OuterProd = @This();
 
@@ -482,6 +485,7 @@ pub fn if_(
 }
 
 test "if" {
+    // TODO(@cryptodeal): MLX PjRt plugin implement `stablehlo::IfOp`
     const zml = @import("zml.zig");
     const platform = zml.testing.env();
     const allocator = std.testing.allocator;
@@ -544,6 +548,7 @@ pub fn case(
 }
 
 test "case" {
+    // TODO(@cryptodeal): MLX PjRt plugin implement `stablehlo::CaseOp`
     const zml = @import("zml.zig");
     const platform = zml.testing.env();
 
