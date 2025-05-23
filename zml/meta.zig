@@ -254,23 +254,22 @@ pub fn MapRestrict(From: type, To: type) type {
                 else => {},
             }
 
-            if (!Contains(T, From)) return void;
-
+            if (!comptime Contains(T, From)) return void;
             return switch (@typeInfo(T)) {
                 .@"struct" => |struct_infos| {
                     const fields = struct_infos.fields;
                     var same: bool = true;
                     var num_fields: usize = 0;
 
-                    var struct_fields: [fields.len]std.builtin.Type.StructField = undefined;
+                    var new_fields: [fields.len]std.builtin.Type.StructField = undefined;
                     for (fields) |field| {
                         if (!field.is_comptime and Contains(field.type, From)) {
                             const R = map(field.type);
                             if (R == field.type) {
-                                struct_fields[num_fields] = field;
+                                new_fields[num_fields] = field;
                             } else {
                                 const name = if (struct_infos.is_tuple) struct_infos.fields[num_fields].name else field.name;
-                                struct_fields[num_fields] = .{
+                                new_fields[num_fields] = .{
                                     .name = name,
                                     .type = R,
                                     .default_value_ptr = null,
@@ -279,10 +278,9 @@ pub fn MapRestrict(From: type, To: type) type {
                                 };
                                 same = false;
                                 // Handle the case `field: ?Tensor = null`
-                                // Generic handling of default value is complicated,
-                                // it would require to call the callback at comptime.
+                                // Generic handling of default value is complicated.
                                 if (R == ?To) {
-                                    struct_fields[num_fields].default_value_ptr = &@as(R, null);
+                                    new_fields[num_fields].default_value_ptr = &@as(R, null);
                                 }
                             }
                             num_fields += 1;
@@ -292,7 +290,7 @@ pub fn MapRestrict(From: type, To: type) type {
                     if (same) return T;
                     return @Type(.{ .@"struct" = .{
                         .layout = .auto,
-                        .fields = struct_fields[0..num_fields],
+                        .fields = new_fields[0..num_fields],
                         .decls = &.{},
                         .is_tuple = struct_infos.is_tuple,
                     } });
@@ -631,34 +629,37 @@ fn _CollectArg(func: anytype) type {
 }
 
 pub fn Contains(Haystack: type, T: type) bool {
-    switch (Haystack) {
-        T, ?T => return true,
-        *T, ?*T => return true,
-        *const T, ?*const T => return true,
-        []const T, ?[]const T => return true,
-        anyopaque => return false,
-        else => {},
-    }
-
-    return switch (@typeInfo(Haystack)) {
-        .@"struct" => |info| {
-            inline for (info.fields) |field| {
-                if (Contains(field.type, T))
-                    return true;
-            }
-            return false;
+    // This function can be expensive, since it may fully enroll a type that don't Contains the target struct.
+    // But it avoid generating code so it pays back.
+    @setEvalBranchQuota(5000);
+    // Force the function to be called at comptime.
+    comptime return switch (Haystack) {
+        T, ?T => true,
+        *T, ?*T => true,
+        *const T, ?*const T => true,
+        []const T, ?[]const T => true,
+        anyopaque, type, void, bool, comptime_float, comptime_int => false,
+        else => switch (@typeInfo(Haystack)) {
+            inline .@"struct", .@"union" => |info| {
+                // Avoid uneeded recursion into small struct, eg bit flags.
+                if (@sizeOf(Haystack) < @sizeOf(usize) and @sizeOf(Haystack) < @sizeOf(T)) return false;
+                for (info.fields) |field| {
+                    if (Contains(field.type, T))
+                        return true;
+                }
+                return false;
+            },
+            .array => |info| Contains(info.child, T),
+            .pointer => |info| Contains(info.child, T),
+            .optional => |info| Contains(info.child, T),
+            .vector => |info| Contains(info.child, T),
+            else => false,
         },
-        .@"union" => |info| {
-            inline for (info.fields) |field| {
-                if (Contains(field.type, T))
-                    return true;
-            }
-            return false;
-        },
-        .array => |info| Contains(info.child, T),
-        .pointer => |info| Contains(info.child, T),
-        .optional => |info| Contains(info.child, T),
-        .vector => |info| Contains(info.child, T),
-        else => false,
     };
+}
+
+test Contains {
+    try std.testing.expect(!comptime Contains([]const u8, u8));
+    try std.testing.expect(comptime Contains([]const u8, u8));
+    try std.testing.expect(!comptime Contains([]const u32, u8));
 }
