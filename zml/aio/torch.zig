@@ -1,10 +1,11 @@
-const asynk = @import("async");
 const std = @import("std");
-const zml = @import("../zml.zig");
 
+const asynk = @import("async");
+
+const zml = @import("../zml.zig");
 const eval = @import("torch/eval.zig");
-const py = @import("torch/py.zig");
 const File = @import("torch/file.zig").File;
+const py = @import("torch/py.zig");
 
 const StringBuilder = std.ArrayListUnmanaged(u8);
 const log = std.log.scoped(.@"zml/aio");
@@ -38,5 +39,6 @@ pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore
     // file ownership is transferred to the BufferStore
     var res = try zml.aio.BufferStore.init(allocator, &.{torch_file.buffer_file});
     try torch_file.parseModel(py_values, &res);
+    res.lock();
     return res;
 }

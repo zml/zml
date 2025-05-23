@@ -1,12 +1,12 @@
-const asynk = @import("async");
-const core = @import("gguf/core.zig");
 const std = @import("std");
-const zml = @import("../zml.zig");
-
-const HostBuffer = @import("../hostbuffer.zig").HostBuffer;
-
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
+
+const asynk = @import("async");
+
+const HostBuffer = @import("../hostbuffer.zig").HostBuffer;
+const zml = @import("../zml.zig");
+const core = @import("gguf/core.zig");
 
 const log = std.log.scoped(.@"zml/io");
 
@@ -28,6 +28,7 @@ pub fn open(allocator: Allocator, path: []const u8) !zml.aio.BufferStore {
     if (res.buffers.count() != file.header.tensor_count) {
         log.warn("Expected to find {d} tensors in {s}, only found {d}", .{ file.header.tensor_count, path, res.buffers.count() });
     }
+    res.lock();
     return res;
 }
 

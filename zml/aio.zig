@@ -67,10 +67,9 @@ pub fn populateModelWithPrefix(comptime Model: type, allocator: std.mem.Allocato
     var model: Model = undefined;
 
     var prefix_builder: PrefixBuilder = .{};
-    try prefix_builder.push(allocator, prefix);
-    defer prefix_builder.deinit(allocator);
+    try prefix_builder.push(prefix);
 
-    const unique_id = zml.Tensor._reserveIdRange(@intCast(store.buffers.count()));
+    const unique_id = store.handle_start orelse @panic("The given BufferStore hasn't been locked. You need to lock a BufferStore before calling populate, because it will bind the tensor object created with actual HostBuffer in the store.");
     const ok = _populateStruct(allocator, &prefix_builder, unique_id, store, &model, true) catch |err| {
         std.debug.panic("Can't populate model of type {s}: {s}", .{ @typeName(type), @errorName(err) });
     };
@@ -87,6 +86,9 @@ pub const BufferStore = struct {
     files: []MemoryMappedFile = &.{},
     buffers: Buffers = .{},
     _metadata: Metadatas = .{},
+    handle_start: ?u64 = 0,
+
+    var _global_tensor_counter: u64 = 0;
 
     /// Create an empty BufferStore. Takes owneship of the given files.
     pub fn init(allocator: std.mem.Allocator, files: []const MemoryMappedFile) error{OutOfMemory}!BufferStore {
@@ -106,6 +108,10 @@ pub const BufferStore = struct {
 
     pub fn get(self: BufferStore, key: []const u8) ?HostBuffer {
         return self.buffers.get(key);
+    }
+
+    pub fn lock(self: *BufferStore) void {
+        self.handle_start = @atomicRmw(u64, &_global_tensor_counter, .Add, self.buffers.count(), .seq_cst);
     }
 
     /// Count layers starting with the given prefix.
@@ -129,7 +135,7 @@ pub const BufferStore = struct {
         return if (maybe_max_index) |index| index + 1 else 0;
     }
 
-    pub fn metadata(self: BufferStore, key: []const u8, comptime tag: std.meta.FieldEnum(Metadata)) ?std.meta.FieldType(Metadata, tag) {
+    pub fn metadata(self: BufferStore, key: []const u8, comptime tag: std.meta.FieldEnum(Metadata)) ?@FieldType(Metadata, tag) {
         const wrapped_value = self._metadata.get(key) orelse return null;
 
         if (wrapped_value != tag) {
@@ -270,44 +276,43 @@ pub const MemoryMappedFile = struct {
 /// This allows to easily push/pop prefixes and handles the generation of the string with the correct format.
 const PrefixBuilder = struct {
     /// Stores the computed prefix.
-    data: std.ArrayListUnmanaged(u8) = .{},
+    data: std.BoundedArray(u8, 4096) = .{},
     /// Stack storing the size of the intermediary prefix.
-    subprefixes: std.ArrayListUnmanaged(u32) = .{},
+    subprefixes: std.BoundedArray(u16, 32) = .{},
 
-    pub fn deinit(self: *PrefixBuilder, allocator: std.mem.Allocator) void {
-        self.data.deinit(allocator);
-        self.subprefixes.deinit(allocator);
+    pub fn prefix(self: *const PrefixBuilder) []const u8 {
+        return self.data.constSlice();
     }
 
-    pub fn push(self: *PrefixBuilder, allocator: std.mem.Allocator, prefix: []const u8) !void {
-        const old_len: u32 = @intCast(self.data.items.len);
-        try self.subprefixes.append(allocator, old_len);
+    pub fn push(self: *PrefixBuilder, part: []const u8) !void {
+        const old_len: u16 = @truncate(self.data.len);
+        try self.subprefixes.append(old_len);
         errdefer _ = self.subprefixes.pop();
 
         if (old_len == 0) {
-            try self.data.appendSlice(allocator, prefix);
+            try self.data.appendSlice(part);
         } else {
-            try self.data.ensureUnusedCapacity(allocator, prefix.len + 1);
+            try self.data.ensureUnusedCapacity(part.len + 1);
             self.data.appendAssumeCapacity('.');
-            self.data.appendSliceAssumeCapacity(prefix);
+            self.data.appendSliceAssumeCapacity(part);
         }
     }
 
-    pub fn pushDigit(self: *PrefixBuilder, allocator: std.mem.Allocator, idx: usize) !void {
-        const old_len: u32 = @intCast(self.data.items.len);
-        try self.subprefixes.append(allocator, old_len);
+    pub fn pushDigit(self: *PrefixBuilder, idx: usize) !void {
+        const old_len: u16 = @truncate(self.data.len);
+        try self.subprefixes.append(old_len);
         errdefer _ = self.subprefixes.pop();
 
-        try self.data.ensureUnusedCapacity(allocator, 16);
+        try self.data.ensureUnusedCapacity(16);
         if (old_len > 0) {
             self.data.appendAssumeCapacity('.');
         }
-        try self.data.writer(allocator).print("{d}", .{idx});
+        try self.data.writer().print("{d}", .{idx});
     }
 
     pub fn pop(self: *PrefixBuilder) void {
-        const last_prefix_len = self.subprefixes.pop() orelse unreachable;
-        self.data.shrinkRetainingCapacity(last_prefix_len);
+        const last_prefix_len = self.subprefixes.pop() orelse @panic("more pop than push");
+        self.data.len = last_prefix_len;
     }
 };
 
@@ -328,10 +333,10 @@ fn _populateStruct(
         else => @compileError(err_msg ++ @typeName(@TypeOf(obj))),
     };
 
-    const prefix = prefix_builder.data.items;
+    const prefix = prefix_builder.prefix();
     if (T == zml.Tensor) {
         return if (buffer_store.buffers.getIndex(prefix)) |entry_idx| {
-            const buffer = buffer_store.get(prefix).?;
+            const buffer = buffer_store.buffers.values()[entry_idx];
             obj.* = zml.Tensor{
                 ._shape = buffer.shape(),
                 ._id = .{ .buffer_id = unique_id + entry_idx },
@@ -341,6 +346,7 @@ fn _populateStruct(
         } else {
             if (required) {
                 log.err("Tensor not found: {s} ({d})", .{ prefix, buffer_store.buffers.count() });
+                findSimilarBufferKeys(prefix, buffer_store, allocator);
             }
             return false;
         };
@@ -356,11 +362,11 @@ fn _populateStruct(
                     obj.* = try allocator.alloc(ptr_info.child, len);
 
                     for (obj.*, 0..) |*value, i| {
-                        try prefix_builder.pushDigit(allocator, i);
+                        try prefix_builder.pushDigit(i);
                         defer prefix_builder.pop();
                         const found = try _populateStruct(allocator, prefix_builder, unique_id, buffer_store, value, required);
                         if (!found) {
-                            log.err("Not able to load {s} as {s}", .{ prefix_builder.data.items, @typeName(ptr_info.child) });
+                            log.err("Not able to load {s} as {s}", .{ prefix_builder.prefix(), @typeName(ptr_info.child) });
                             return false;
                         }
                     }
@@ -375,11 +381,11 @@ fn _populateStruct(
         },
         .array => |arr_info| {
             for (obj, 0..) |*value, i| {
-                try prefix_builder.pushDigit(allocator, i);
+                try prefix_builder.pushDigit(i);
                 defer prefix_builder.pop();
                 const found = try _populateStruct(allocator, prefix_builder, unique_id, buffer_store, value, required);
                 if (!found) {
-                    log.err("Not able to load {s} as {s}", .{ prefix_builder.data.items, @typeName(arr_info.child) });
+                    log.err("Not able to load {s} as {s}", .{ prefix_builder.prefix(), @typeName(arr_info.child) });
                     return false;
                 }
             }
@@ -389,7 +395,7 @@ fn _populateStruct(
             var partial_struct = false;
             inline for (struct_info.fields) |field| {
                 if (field.is_comptime or @sizeOf(field.type) == 0) continue;
-                try prefix_builder.push(allocator, field.name);
+                try prefix_builder.push(field.name);
                 defer prefix_builder.pop();
 
                 var has_default = false;
@@ -549,21 +555,30 @@ pub fn loadModelBuffersWithPrefix(
     platform: zml.Platform,
     prefix: []const u8,
 ) !zml.Bufferized(Model) {
+    _ = prefix; // autofix
     // Allocate the bufferized version.
     // We copy the shape, and let visitStructAndLoadBuffer write the other fields.
     // to write them just afterward.
     var res: zml.Bufferized(Model) = undefined;
+    const Ctx = struct { store: BufferStore, platform: zml.Platform, err: ?anyerror };
+    var local_ctx: Ctx = .{ .store = buffer_store, .platform = platform, .err = null };
     try zml.meta.mapAlloc(struct {
-        pub fn initBuffer(_: void, tensor: zml.Tensor) zml.Buffer {
-            return .{ ._shape = tensor.shape(), ._api = undefined, ._shards = undefined };
+        pub fn initBuffer(ctx: *Ctx, tensor: zml.Tensor) zml.Buffer {
+            const buffer_id = tensor._id.buffer_id;
+            const offset = ctx.store.handle_start.?;
+            const host_buffer = ctx.store.buffers.values()[buffer_id - offset];
+
+            return host_buffer.toDevice(ctx.platform) catch |err| {
+                ctx.err = err;
+                return undefined;
+            };
         }
-    }.initBuffer, allocator, {}, model, &res);
+    }.initBuffer, allocator, &local_ctx, model, &res);
 
-    var prefix_builder: PrefixBuilder = .{};
-    try prefix_builder.push(allocator, prefix);
-    defer prefix_builder.deinit(allocator);
-
-    try visitStructAndLoadBuffer(allocator, &prefix_builder, buffer_store, &res, platform);
+    // // TODO it's pretty annoying to have to build prefixes here and to resort again to string based programming.
+    // // We should already have collected all information needed inside the model.
+    // try visitStructAndLoadBuffer(allocator, &prefix_builder, buffer_store, &res, platform);
+    if (local_ctx.err) |err| return err;
     return res;
 }
 
@@ -645,7 +660,7 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
         else => @compileError(err_msg ++ @typeName(@TypeOf(obj))),
     };
 
-    const prefix = prefix_builder.data.items;
+    const prefix = prefix_builder.prefix();
     if (T == zml.Buffer) {
         return if (buffer_store.get(prefix)) |host_buffer| {
             // obj._shape has been set inside `loadModelBuffersWithPrefix`, before calling us.
@@ -667,7 +682,7 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
         .pointer => |ptr_info| {
             if (ptr_info.size == .slice) {
                 for (obj.*, 0..) |*value, i| {
-                    try prefix_builder.pushDigit(allocator, i);
+                    try prefix_builder.pushDigit(i);
                     defer prefix_builder.pop();
 
                     try visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, value, platform);
@@ -676,7 +691,7 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
         },
         .array => {
             for (obj, 0..) |*value, i| {
-                try prefix_builder.pushDigit(allocator, i);
+                try prefix_builder.pushDigit(i);
                 defer prefix_builder.pop();
                 try visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, value, platform);
             }
@@ -685,7 +700,7 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
         .@"struct" => |struct_info| {
             inline for (struct_info.fields) |field| {
                 if (field.is_comptime or @sizeOf(field.type) == 0) continue;
-                try prefix_builder.push(allocator, field.name);
+                try prefix_builder.push(field.name);
                 defer prefix_builder.pop();
 
                 try visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, &@field(obj, field.name), platform);

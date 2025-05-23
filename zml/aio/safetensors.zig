@@ -1,12 +1,14 @@
-const asynk = @import("async");
 const std = @import("std");
-const zml = @import("../zml.zig");
-const json = @import("json.zig");
-const HostBuffer = zml.HostBuffer;
+const Allocator = std.mem.Allocator;
+
+const asynk = @import("async");
+
 const MemoryMappedFile = @import("../aio.zig").MemoryMappedFile;
+const zml = @import("../zml.zig");
+const HostBuffer = zml.HostBuffer;
+const json = @import("json.zig");
 
 const StringBuilder = std.ArrayListUnmanaged(u8);
-const Allocator = std.mem.Allocator;
 const log = std.log.scoped(.@"zml/io");
 
 pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore {
@@ -25,6 +27,7 @@ pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore
         try loadFile(arena, &res, &files, path);
     }
     res.files = try files.toOwnedSlice();
+    res.lock();
     return res;
 }
 

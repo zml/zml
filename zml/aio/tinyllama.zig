@@ -1,7 +1,8 @@
+const std = @import("std");
+
 /// Tools to load models from https://huggingface.co/karpathy/tinyllamas/
 /// Originally made to be run with https://github.com/karpathy/llama2.c
 const asynk = @import("async");
-const std = @import("std");
 const stdx = @import("stdx");
 
 const zml = @import("../zml.zig");
@@ -104,6 +105,7 @@ pub fn open(allocator: std.mem.Allocator, model_path: []const u8) !zml.aio.Buffe
         res._metadata.putAssumeCapacityNoClobber("rms_norm_eps", .{ .float = 1e-6 });
     }
 
+    res.lock();
     return res;
 }
 
