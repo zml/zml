@@ -1351,10 +1351,10 @@ index 0000000000..ef42968a3a
 \ No newline at end of file
 diff --git a/xla/pjrt/plugin/mlx/executable.cc b/xla/pjrt/plugin/mlx/executable.cc
 new file mode 100644
-index 0000000000..1305486a0d
+index 0000000000..c45e9a2e14
 --- /dev/null
 +++ b/xla/pjrt/plugin/mlx/executable.cc
-@@ -0,0 +1,2437 @@
+@@ -0,0 +1,2450 @@
 +/* Copyright 2024 The OpenXLA Authors.
 +Licensed under the Apache License, Version 2.0 (the "License");
 +you may not use this file except in compliance with the License.
@@ -3495,6 +3495,8 @@ index 0000000000..1305486a0d
 +    // TRACE_ME_MEMBER;
 +    auto main = module.lookupSymbol<mlir::func::FuncOp>("main");
 +    // std::cout << "Started call to `mlx::compile`" << std::endl << std::endl;
++    // module.dump();
++    // std::cout << std::endl;
 +    compileModule(module, op_lookup_);
 +    // try {
 +    auto& main_block = main.front();
@@ -3618,14 +3620,25 @@ index 0000000000..1305486a0d
 +    // TF_ASSIGN_OR_RETURN(auto mlx_res, evalModule(module, inputs));
 +
 +    std::vector<mx::array> inputs;
++    unsigned in_count = 0;
 +    for (auto& attr : input_attrs) {
-+      TF_ASSIGN_OR_RETURN(auto input,
++      TF_ASSIGN_OR_RETURN(mx::array input,
 +                          utils::array::fromDenseElementsAttr(attr));
++      // std::cout << "inputs[" << std::to_string(in_count++) << "]: " << input
++      //           << std::endl;
 +      inputs.push_back(input);
 +    }
 +
 +    auto mlx_res = compiled_module_(inputs);
++    for (auto& a : mlx_res) {
++      a = mx::contiguous(a);
++    }
 +    mx::eval(mlx_res);
++    // unsigned out_count = 0;
++    // for (auto& a : mlx_res) {
++    //   std::cout << "outputs[" << std::to_string(out_count++) << "]: " << a
++    //             << std::endl;
++    // }
 +
 +    // LOG(INFO) << "Results: " << ToString(result.value()) << "\n";
 +
