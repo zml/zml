@@ -241,7 +241,6 @@ pub fn meshgrid(comptime N: u3, vectors: [N]Tensor, indexing: MeshgridIndexing) 
 }
 
 test meshgrid {
-    // TODO(@cryptodeal): fix test case for MLX PjRt plugin
     const platform = zml.testing.env();
 
     const x = try zml.Buffer.fromSlice(platform, .{6}, &[_]i32{ 0, 1, 2, 3, 4, 5 });

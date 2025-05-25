@@ -1691,7 +1691,6 @@ pub const Tensor = struct {
     }
 
     test slice {
-        // TODO(@cryptodeal): fix test case for MLX PjRt plugin
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
 
@@ -3813,7 +3812,6 @@ pub const Tensor = struct {
     }
 
     test cartesianProduct {
-        // TODO(@cryptodeal): fix test case for MLX PjRt plugin
         const zml = @import("zml.zig");
         const client = zml.testing.env();
 
