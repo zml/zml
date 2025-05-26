@@ -2,6 +2,7 @@ const std = @import("std");
 
 const asynk = @import("async");
 const zml = @import("zml");
+
 const log = std.log.scoped(.mnist);
 
 pub const std_options: std.Options = .{
@@ -25,7 +26,7 @@ const Mnist = struct {
 
     /// just two linear layers + relu activation
     pub fn forward(self: Mnist, input: zml.Tensor) zml.Tensor {
-        // log.info("Compiling for target: {s}", .{@tagName(input.getContext().target())});
+        // std.log.info("Compiling for target: {s}", .{@tagName(input.getContext().target())});
         var x = input.flattenAll().convert(.f32);
         const layers: []const Layer = &.{ self.fc1, self.fc2 };
         for (layers) |layer| {
@@ -48,7 +49,7 @@ pub fn asyncMain() !void {
 
     // log.info("\n===========================\n==   ZML MNIST Example   ==\n===========================\n\n", .{});
 
-    // Auto-select platform
+    // // Auto-select platform
     const platform = context.autoPlatform(.{});
     context.printAvailablePlatforms(platform);
 

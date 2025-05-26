@@ -300,31 +300,6 @@ pub const Buffer = struct {
         return res;
     }
 
-    pub fn setValue(self: Buffer, T: type, value: anytype) !void {
-        stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
-        const shard_buffer = self._shards.get(0);
-        const opaqueDataPointer = try shard_buffer.getOpaqueDeviceMemoryDataPointer(self._api);
-        const sizeInBytes = try shard_buffer.getOnDeviceSizeInBytes(self._api);
-        stdx.debug.assert(sizeInBytes == @sizeOf(T), "Buffer size {d} does not match type size {d}", .{ sizeInBytes, @sizeOf(T) });
-        const data = @as(*T, @ptrFromInt(@intFromPtr(opaqueDataPointer)));
-        data.* = value;
-    }
-
-    pub fn getValueFromDataInMemory(self: Buffer, T: type) !T {
-        stdx.debug.assert(self._shape.byteSize() == @sizeOf(T), "Buffer {} has {d} bytes of data, can't load it to a {s} with {d} bytes", .{ self, self._shape.byteSize(), @typeName(T), @sizeOf(T) });
-        const data = try self.dataInMemory();
-        const value = std.mem.bytesAsValue(T, @constCast(data));
-        return value.*;
-    }
-
-    pub fn dataInMemory(self: Buffer) ![]const u8 {
-        const shard_buffer = self._shards.get(0);
-        const opaqueDataPointer = try shard_buffer.getOpaqueDeviceMemoryDataPointer(self._api);
-        const sizeInbytes = try shard_buffer.getOnDeviceSizeInBytes(self._api);
-        const data = @as([*]const u8, @ptrFromInt(@intFromPtr(opaqueDataPointer)));
-        const end: usize = @intCast(sizeInbytes);
-        return data[0..end];
-    }
     /// Copies the content of the Buffer back to host, in the given buffer,
     /// and return a new `HostBuffer` object with the same shape.
     /// The returned `HostBuffer` doesn't own the memory.
