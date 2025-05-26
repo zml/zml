@@ -248,6 +248,8 @@ pub fn invFreq(N: i64, opts: RopeOpts) Tensor {
     const allocator = zml.module.CompilationContext.current().allocator();
     const N_half: usize = @intCast(@divExact(N, 2));
     const inv_freq = allocator.alloc(f32, N_half) catch @panic("OOM");
+    defer allocator.free(inv_freq);
+
     _invFreq(opts, inv_freq);
     return zml.Tensor.constantTensor(.fromSlice(.{@divExact(N, 2)}, inv_freq));
 }
