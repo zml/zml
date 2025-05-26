@@ -1196,7 +1196,7 @@ pub const FFI = extern struct {
         return .{ .inner = self.inner.register_handler.? };
     }
 
-    pub fn registerTypeId(self: *const FFI, api: *const Api, user_type: anytype) ApiError!i64 {
+    pub fn registerTypeId(self: *const FFI, api: *const Api, user_type: anytype) ApiError!void {
         const type_name = @typeName(user_type);
         var ret = pjrtStruct(c.PJRT_FFI_TypeID_Register_Args{
             .type_name = type_name.ptr,
@@ -1210,8 +1210,6 @@ pub const FFI = extern struct {
         }
 
         user_type.type_id = ret.type_id;
-
-        return ret.type_id;
     }
 
     pub fn addUserData(self: *const FFI, api: *const Api, context: *ExecuteContext, user_data: UserData) ApiError!void {

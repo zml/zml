@@ -3862,10 +3862,6 @@ pub const Tensor = struct {
             }
         }.binaryOpHelper;
     }
-
-    pub fn print(self: Tensor, print_op: type, another_tensor: Tensor) ffi.CustomCallOutputType(print_op) {
-        return custom_call(print_op, .{ self, another_tensor });
-    }
 };
 
 fn initPoolArg(rank: usize, data: []const i64) [Tensor.MAX_RANK]i64 {

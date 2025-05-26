@@ -257,21 +257,23 @@ pub const BaseExe = struct {
         self.ready_buffer_count += n;
     }
 
-    pub fn attach(self: BaseExe, type_id: i64, value: anytype) !void {
+    pub fn register(self: BaseExe, comptime T: type) !void {
         stdx.debug.assert(self._context != null, "Exe doesn't have an execution context", .{});
         const pjrt_api = self.platform.pjrt_api;
         const ffi = pjrt_api.ffi().?;
-        const ValueT = @TypeOf(value);
-        const type_name = switch (@typeInfo(ValueT)) {
-            .pointer => @typeName(std.meta.Child(ValueT)),
-            else => @typeName(ValueT), // todo error
-        };
+        try ffi.registerTypeId(pjrt_api, T);
+        log.info("Registered type id {d} for {s}", .{ T.type_id, @typeName(T) });
+    }
 
-        // const type_id = try ffi.registerTypeId(pjrt_api, type_name);
-
+    pub fn bind(self: BaseExe, comptime T: type, value: *T) !void {
+        stdx.debug.assert(self._context != null, "Exe doesn't have an execution context", .{});
+        const pjrt_api = self.platform.pjrt_api;
+        const ffi = pjrt_api.ffi().?;
+        const type_id = T.type_id;
         const user_data: *anyopaque = @ptrCast(@constCast(value));
-        log.info("Attached {s}@{x} with type id {d} on {any}", .{ type_name, user_data, type_id, self._context.? });
+
         try ffi.addUserData(pjrt_api, self._context.?, .{ .type_id = type_id, .user_data = user_data });
+        log.info("Attached {s}@{x} with type id {d} on {any}", .{ @typeName(T), user_data, T.type_id, self._context.? });
     }
 
     pub fn getOutputBuffer(self: BaseExe, i: usize) Buffer {
@@ -317,6 +319,14 @@ pub fn Exe(ArgsT: type, ReturnT: type) type {
             var new: Exe(stdx.meta.Tail(ArgsT), ReturnT) = .{ .inner = self.inner };
             new.inner.prepare(first_arg);
             return new;
+        }
+
+        pub fn register(self: Self, comptime T: type) !void {
+            try self.inner.register(T);
+        }
+
+        pub fn bind(self: Self, comptime T: type, value: *T) !void {
+            try self.inner.bind(T, value);
         }
 
         pub fn withExecutionContext(self: Self) Self {

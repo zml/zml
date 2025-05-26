@@ -50,13 +50,13 @@ pub fn CustomCallCompilationInputType(custom_op: type) type {
 }
 
 pub fn CustomCallCompilationOutputType(custom_op: type) type {
-    const ReturnT = stdx.meta.FnResultNoError(custom_op.compile);
+    const ReturnT = stdx.meta.FnResultNoError(custom_op.call);
 
     if (@typeInfo(ReturnT) != .@"struct") {
         @compileError("Expected struct type");
     }
 
-    if (ReturnT == Buffer) {
+    if (ReturnT == Shape) {
         return Tensor;
     }
     return [@typeInfo(ReturnT).@"struct".fields.len]Tensor;
@@ -154,10 +154,8 @@ pub fn custom_call(
         res_types[i] = mlir.ext.RankedTensorType.fromShape(mlir_ctx, sh).as(mlir.Type);
     }
 
-    const frontend_attributes = mlir.Attribute.dict(mlir_ctx, &.{
-        .{ "_xla_compute_type", .string(mlir_ctx, "host") },
-        .{ "_xla_buffer_placement", .string(mlir_ctx, @tagName(Buffer.Memory.host_pinned.toPjrtMemory())) },
-    });
+    const frontend_attributes = mlir.Attribute.dict(mlir_ctx, &.{});
+
     const op = dialect.stablehlo.custom_call(
         mlir_ctx,
         custom_call_inputs[0..inputs.len],

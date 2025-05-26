@@ -12,78 +12,77 @@ pub const std_options: std.Options = .{
 
 const log = std.log.scoped(.@"examples/custom_call");
 
+pub const AddOpHostFuncCtx = struct {
+    a: zml.Buffer,
+    b: zml.Buffer,
+    result: zml.Buffer,
+};
+
+fn add_op_host_func(data: *const anyopaque) callconv(.c) void {
+    const ctx = @as(*const AddOpHostFuncCtx, @alignCast(@ptrCast(data)));
+
+    const a_ptr = std.mem.bytesAsValue(f32, ctx.a.asPinnedHostBuffer().bytes());
+    const b_ptr = std.mem.bytesAsValue(f32, ctx.b.asPinnedHostBuffer().bytes());
+    const result_ptr = std.mem.bytesAsValue(f32, ctx.result.asPinnedHostBuffer().mutBytes());
+    result_ptr.* = a_ptr.* + b_ptr.*;
+}
+
 pub const AddOp = struct {
+    pub var type_id: i64 = undefined;
     const Self = @This();
+
+    a: zml.Buffer,
+    b: zml.Buffer,
+    result: zml.Buffer,
+
+    host_func_ctx: AddOpHostFuncCtx = undefined,
 
     platform: zml.Platform,
-
-    buffers: []*const ffi.FFIBuffer = undefined,
+    results: []*const ffi.FFIBuffer = undefined,
     stream: *ffi.FFIStream = undefined,
 
-    pub fn call(self: *Self, a_: *const ffi.FFIBuffer, b_: *const ffi.FFIBuffer) !void {
-        const a_device = zml.Buffer.asViewOfDeviceBuffer(self.platform, ffi.getShape(a_), null, a_.data.asPtr());
-        const a = a_device.copyToMemory(self.platform, .host_pinned) catch unreachable;
+    pub fn init(
+        platform: zml.Platform,
+        host_buffer: zml.HostBuffer,
+    ) !AddOp {
+        const a = try zml.Buffer.fromEx(platform, host_buffer, .{ .memory = .host_pinned });
+        _ = try a.awaitt();
 
-        const b_device = zml.Buffer.asViewOfDeviceBuffer(self.platform, ffi.getShape(b_), null, b_.data.asPtr());
-        const b = b_device.copyToMemory(self.platform, .host_pinned) catch unreachable;
+        const b = try zml.Buffer.fromEx(platform, host_buffer, .{ .memory = .host_pinned });
+        _ = try b.awaitt();
 
-        _ = a.awaitt() catch unreachable;
-        _ = b.awaitt() catch unreachable;
+        const result = try zml.Buffer.fromEx(platform, host_buffer, .{ .memory = .host_pinned });
+        _ = try result.awaitt();
 
-        const a_value = try a.getValue(f32);
-        const b_value = try b.getValue(f32);
-
-        const result: f32 = a_value + b_value;
-        const result_hb = zml.HostBuffer.fromBytes(a_device.shape(), std.mem.asBytes(&result));
-
-        cuda.memcpyToDeviceAsync(self.buffers[0].data, result_hb.data, self.stream);
-    }
-};
-
-pub const LogResultOp = struct {
-    const Self = @This();
-
-    platform: zml.Platform,
-
-    buffers: []*const ffi.FFIBuffer = undefined,
-    stream: *ffi.FFIStream = undefined,
-
-    pub fn call(self: *Self, value: *const ffi.FFIBuffer) !void {
-        const value_device = zml.Buffer.asViewOfDeviceBuffer(self.platform, ffi.getShape(value), null, value.data.asPtr());
-        const value_pinned = value_device.copyToMemory(self.platform, .host_pinned) catch unreachable;
-
-        log.warn("{s}@{*} value: {d}", .{ @typeName(Self), self, try value_pinned.getValue(f32) });
-
-        const data = try value_pinned.dataInMemory();
-        cuda.memcpyToDeviceAsync(self.buffers[0].data, data, self.stream);
-    }
-};
-
-pub const LogValuesVoidOp = struct {
-    const Self = @This();
-
-    _platform: *const zml.Platform,
-
-    pub fn call(self: *Self, result: zml.HostBuffer, a: zml.HostBuffer, b: zml.HostBuffer) !void {
-        _ = self; // autofix
-        log.info("LogValuesVoidOp mem result: {any}", .{result.items(f32)});
-        log.info("LogValuesVoidOp mem a: {any}", .{a.items(f32)});
-        log.info("LogValuesVoidOp mem b: {any}", .{b.items(f32)});
+        return .{
+            .a = a,
+            .b = b,
+            .result = result,
+            .platform = platform,
+        };
     }
 
-    fn getPlatform(self: *Self) zml.Platform {
-        return self._platform.*;
+    pub fn call(self: *Self, a: *const ffi.FFIBuffer, b: *const ffi.FFIBuffer) !void {
+        cuda.memcpyToHostAsync(self.a.asPinnedHostBuffer().mutBytes(), a.data, self.stream);
+        cuda.memcpyToHostAsync(self.b.asPinnedHostBuffer().mutBytes(), b.data, self.stream);
+
+        self.host_func_ctx = .{
+            .a = self.a,
+            .b = self.b,
+            .result = self.result,
+        };
+
+        _ = cuda.cuLaunchHostFunc(self.stream, @ptrCast(&add_op_host_func), @ptrCast(&self.host_func_ctx));
+
+        cuda.memcpyToDeviceAsync(self.results[0].data, self.result.asPinnedHostBuffer().bytes(), self.stream);
     }
 };
 
 /// Model definition
 const Layer = struct {
-    // a = 40x128 bf16 ou f32
     pub fn forward(_: Layer, a: zml.Tensor, b: zml.Tensor) zml.Tensor {
-        const a_ = zml.custom_call(LogResultOp, .{a}, &[_]zml.Shape{a.shape()}, a.getContext(), &.{0});
-        const results = zml.custom_call(AddOp, .{ a_[0], b }, &[_]zml.Shape{a.shape()}, a.getContext(), &.{0});
-        return results[0];
-        // return zml.custom_call(LogResultOp, .{results[2]}, &[_]zml.Shape{a.shape()});
+        const result = zml.custom_call(AddOp, .{ a, b }, &[_]zml.Shape{a.shape()});
+        return result[0];
     }
 };
 
@@ -142,87 +141,33 @@ pub fn asyncMain() !void {
     var executable = compiled.prepare(model_weights).withExecutionContext();
     defer executable.deinit();
 
-    const add_op_ctx: AddOp = .{ .platform = platform };
-    try executable.inner.attach(&add_op_ctx);
-    const log_result_op_ctx: LogResultOp = .{ .platform = platform };
-    try executable.inner.attach(&log_result_op_ctx);
-    // const log_values_op_ctx: LogValuesVoidOp = .{ ._platform = &platform };
-    // try executable.attach(&log_values_op_ctx);
+    try executable.registerInContext(AddOp);
 
-    var rng = std.Random.DefaultPrng.init(0);
-    const random = rng.random();
-    _ = random; // autofix
+    const result_hb = try zml.HostBuffer.empty(allocator, shape);
+    defer result_hb.deinit(allocator);
 
-    for (0..2) |i| {
-        log.warn("Iteration {d}", .{i});
+    var add_op: AddOp = try .init(platform, result_hb);
+    try executable.bindToContext(AddOp, &add_op);
 
-        // prepare input buffers
-        // var input_buffer_a = try createRandomBuffer(allocator, platform, shape, random);
-        // _ = try input_buffer_a.awaitt();
-        // defer input_buffer_a.deinit();
-        // var input_buffer_b = try createRandomBuffer(allocator, platform, shape, random);
-        // _ = try input_buffer_b.awaitt();
-        // defer input_buffer_b.deinit();
+    var input_a = [1]f32{1.0};
+    var input_buffer_a = try zml.Buffer.from(platform, zml.HostBuffer.fromSlice(shape, &input_a));
+    _ = try input_buffer_a.awaitt();
+    defer input_buffer_a.deinit();
 
-        var input_a = [1]f32{1.0};
-        var input_buffer_a = try zml.Buffer.from(platform, zml.HostBuffer.fromSlice(shape, &input_a));
-        _ = try input_buffer_a.awaitt();
-        defer input_buffer_a.deinit();
-        var input_b = [1]f32{1.0};
-        var input_buffer_b = try zml.Buffer.from(platform, zml.HostBuffer.fromSlice(shape, &input_b));
-        _ = try input_buffer_b.awaitt();
-        defer input_buffer_b.deinit();
+    var input_b = [1]f32{1.0};
+    var input_buffer_b = try zml.Buffer.from(platform, zml.HostBuffer.fromSlice(shape, &input_b));
+    _ = try input_buffer_b.awaitt();
+    defer input_buffer_b.deinit();
 
-        var result: zml.Buffer = executable.call(.{ input_buffer_a, input_buffer_b });
-        defer result.deinit();
+    var result: zml.Buffer = executable.call(.{ input_buffer_a, input_buffer_b });
+    defer result.deinit();
 
-        // fetch the result to CPU memory
-        // const cpu_result = try result.toHostAlloc(arena);
-        // log.warn(
-        //     "\nThe result of {d} + {d} = {d}\n",
-        //     .{ &input_a, &input_b, cpu_result.items(f32) },
-        // );
+    // fetch the result to CPU memory
+    var cpu_result = try result.toHostAlloc(arena);
+    _ = try cpu_result.awaitt();
 
-        var cpu_result = try result.toHostAlloc(arena);
-        _ = try cpu_result.awaitt();
-        log.warn(
-            "\nThe result is {d}\n",
-            .{cpu_result.items(f32)},
-        );
-
-        std.time.sleep(1 * std.time.ns_per_s);
-    }
-}
-
-fn createRandomBuffer(allocator: std.mem.Allocator, platform: zml.Platform, shape: zml.Shape, random: std.Random) !zml.Buffer {
-    const data = try allocator.alloc(u8, shape.byteSize());
-    defer allocator.free(data);
-
-    switch (shape.dtype()) {
-        inline else => |v| {
-            const ZigType = v.toZigType();
-            switch (comptime v.class()) {
-                .bool => unreachable,
-                .integer => {
-                    for (std.mem.bytesAsSlice(ZigType, data)) |*e| e.* = random.int(ZigType);
-                },
-                .float => {
-                    const value = random.float(f64);
-                    for (std.mem.bytesAsSlice(ZigType, data)) |*e| e.* = if (ZigType == f64)
-                        value
-                    else if (ZigType == f32)
-                        @floatCast(value)
-                    else if (ZigType == f16)
-                        @floatCast(value)
-                    else
-                        @bitCast(random.int(std.meta.Int(.unsigned, @bitSizeOf(ZigType))));
-                },
-                .complex => unreachable,
-            }
-        },
-    }
-
-    var host_buffer = zml.HostBuffer.fromBytes(shape, data);
-    errdefer host_buffer.deinit(allocator);
-    return zml.Buffer.from(platform, host_buffer);
+    log.warn(
+        "\nThe result of {d} + {d} = {d}\n",
+        .{ &input_a, &input_b, cpu_result.items(f32) },
+    );
 }
