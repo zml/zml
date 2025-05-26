@@ -183,8 +183,6 @@ pub const Context = struct {
             return error.NoDevicesFound;
         }
 
-        try CustomCall.registerZmlCustomCalls(p);
-
         self.platforms.set(target, p);
         return p;
     }
@@ -218,107 +216,13 @@ pub const Context = struct {
             }
         }
     }
-
-    pub const HostCallback = fn (?*anyopaque, []const HostBuffer, []const HostBuffer) void;
 };
 
-const CustomCall = struct {
-    pub fn registerZmlCustomCalls(platform: Platform) !void {
-        const registry = platform.pjrt_api.customCallRegistry();
-
-        if (registry) |reg| {
-            try reg.registerFfi(platform.pjrt_api, "zmlHostBufferCallback", @tagName(platform.target), &hostBufferCallback);
-        } else {
-            stdx.debug.panic("Registering custom calls failed", .{});
-        }
-    }
-
-    fn hostBufferCallback(call_frame: *pjrt.ffi.CallFrame) callconv(.C) ?*pjrt.ffi.Error {
-        if (call_frame.registeringHook()) return null;
-
-        // TODO correctly pass the callback w/o embedding ptr in MLIR
-        const err = "malformed zmlHostBufferCallback custom call";
-        const callback_attr = call_frame.attrs.getByName(.scalar, "callback") orelse @panic(err);
-        std.debug.assert(callback_attr.dtype == .u64);
-        const callback: *const Context.HostCallback = @ptrFromInt(callback_attr.get(usize));
-
-        const user_ctx_ptr = call_frame.attrs.getByName(.scalar, "user_context") orelse @panic(err);
-        std.debug.assert(user_ctx_ptr.dtype == .u64);
-        const user_ctx: ?*anyopaque = @ptrFromInt(user_ctx_ptr.get(usize));
-
-        const tags_arr = call_frame.attrs.getByName(.array, "__tags") orelse @panic(err);
-        std.debug.assert(tags_arr.dtype == .i64);
-        const tags = tags_arr.slice([*:0]const u8);
-
-        const host_inputs = stdx.stackSlice(8, HostBuffer, call_frame.args.len);
-        const host_outputs = stdx.stackSlice(8, HostBuffer, call_frame.results.len);
-
-        // TODO correctly pass the platform w/o global
-        const platform = _active_platform;
-        if (platform.target == .cpu) {
-            for (host_inputs, call_frame.args.buffers()) |*host, device| {
-                host.* = hostViewOfDeviceBuffer(device);
-            }
-            for (host_outputs, call_frame.results.buffers()) |*host, device| {
-                host.* = hostViewOfDeviceBuffer(device);
-            }
-            copyTags(tags, host_inputs, host_outputs);
-
-            callback(user_ctx, host_inputs, host_outputs);
-            return null;
-        }
-
-        if (platform.target != .cuda) @panic("hostBufferCallback are only supported on cpu and cuda for now");
-        const stream = call_frame.*.api.stream(call_frame.ctx);
-        for (host_inputs, call_frame.args.buffers()) |*host, device| {
-            // Note: we are using the smp allocator here.
-            // Typically a given custom call will be called a lot of times with the same shape
-            // So having a per custom call arena would be great.
-            // We do need to be careful for the case where two callbacks are called at the same time though.
-            host.* = HostBuffer.empty(std.heap.smp_allocator, getShape(device)) catch @panic("OOM");
-            // log.warn("Readind device memory from {*} to {*}", .{ device.data.asPtr(), host.data });
-            cuda.memcpyToHostAsync(@constCast(host.data), device.data, stream);
-        }
-
-        init_host_outputs: for (host_outputs, call_frame.results.buffers()) |*host, device| {
-            // TODO: in case of input/output aliasing we don't need to allocate here.
-            // This information can be inferred from the data pointers of the inputs.
-            for (host_inputs, call_frame.args.buffers()) |host_input, device_input| {
-                if (device_input.data == device.data) {
-                    host.* = host_input;
-                    std.debug.assert(host_input.shape().eql(getShape(device)));
-                    // log.warn("Aliased host buffer for output: {*}", .{host.data});
-                    continue :init_host_outputs;
-                }
-            }
-            host.* = HostBuffer.empty(std.heap.smp_allocator, getShape(device)) catch @panic("OOM");
-            // log.warn("Allocated host buffer for output: {*}", .{host.data});
-        }
-        copyTags(tags, host_inputs, host_outputs);
-
-        cuda.streamSynchronize(stream);
-
-        // TODO we should return an pjrt.ffi.Future to allow the pjrt thread to schedule more work.
-        callback(user_ctx, host_inputs, host_outputs);
-
-        for (host_outputs, call_frame.results.buffers()) |host, device| {
-            // log.warn("Writing from {*} to device memory {*}", .{ device.data, host.data.asPtr() });
-            cuda.memcpyToDeviceAsync(device.data, host.data, stream);
-        }
-
-        for (host_inputs) |*b| b.deinit(std.heap.smp_allocator);
-        // TODO we could return here and schedule the sync/free in another task.
-        cuda.streamSynchronize(stream);
-        for (host_outputs) |*b| b.deinit(std.heap.smp_allocator);
-
-        return null;
-    }
-};
-
-const cuda = struct {
+pub const cuda = struct {
     var _memcpyAsync: MemcpyAsync = @ptrFromInt(0xdeadc00da00);
     var _memcpyBlocking: MemcpyBlocking = @ptrFromInt(0xdeadc00da00);
-    var _streamSynchronize: StreamSynchronize = @ptrFromInt(0xdeadc00da00);
+    pub var streamSynchronize: StreamSynchronize = @ptrFromInt(0xdeadc00da00);
+    pub var cuLaunchHostFunc: CuLaunchHostFunc = @ptrFromInt(0xdeadc00da00);
 
     pub const MemcpyKind = enum(c_int) {
         host_to_host = 0,
@@ -331,6 +235,7 @@ const cuda = struct {
     const MemcpyAsync = *const fn (dst: *anyopaque, src: *const anyopaque, count: usize, kind: MemcpyKind, stream: ?*pjrt.ffi.Stream) callconv(.C) c_int;
     const MemcpyBlocking = *const fn (dst: *anyopaque, src: *const anyopaque, count: usize, kind: MemcpyKind) callconv(.C) c_int;
     const StreamSynchronize = *const fn (stream: ?*pjrt.ffi.Stream) callconv(.C) c_int;
+    const CuLaunchHostFunc = *const fn (stream: *anyopaque, host_func: *const fn (user_data: *const anyopaque) callconv(.c) void, user_data: *anyopaque) callconv(.c) c_int;
 
     pub fn init() void {
         var cudart = std.DynLib.open("libcudart.so.12") catch {
@@ -345,8 +250,11 @@ const cuda = struct {
         _memcpyBlocking = cudart.lookup(MemcpyBlocking, "cudaMemcpy") orelse {
             @panic("cudaMemcpy not found");
         };
-        _streamSynchronize = cudart.lookup(StreamSynchronize, "cudaStreamSynchronize") orelse {
+        streamSynchronize = cudart.lookup(StreamSynchronize, "cudaStreamSynchronize") orelse {
             @panic("cudaStreamSynchronize not found");
+        };
+        cuLaunchHostFunc = cudart.lookup(CuLaunchHostFunc, "cudaLaunchHostFunc") orelse {
+            @panic("cudaLaunchHostFunc not found");
         };
     }
 
@@ -355,23 +263,18 @@ const cuda = struct {
         check(err);
     }
 
-    pub fn memcpyToHostAsync(dst: []u8, src: pjrt.ffi.DevicePtr, stream: *pjrt.ffi.Stream) void {
-        const err = _memcpyAsync(dst.ptr, src.asPtr(), dst.len, .device_to_host, stream);
-        check(err);
-    }
-
     pub fn memcpyToDeviceBlocking(dst: pjrt.ffi.DevicePtr, src: []const u8) void {
         const err = _memcpyBlocking(dst.asPtr(), src.ptr, src.len, .host_to_device);
         check(err);
     }
 
-    pub fn memcpyToDeviceAsync(dst: pjrt.ffi.DevicePtr, src: []const u8, stream: *pjrt.ffi.Stream) void {
+    pub fn memcpyToDeviceAsync(dst: pjrt.ffi.DevicePtr, src: []const u8, stream: ?*pjrt.ffi.Stream) void {
         const err = _memcpyAsync(dst.asPtr(), src.ptr, src.len, .host_to_device, stream);
         check(err);
     }
 
-    pub fn streamSynchronize(stream: *pjrt.ffi.Stream) void {
-        const err = _streamSynchronize(stream);
+    pub fn memcpyToHostAsync(dst: []u8, src: pjrt.ffi.DevicePtr, stream: ?*pjrt.ffi.Stream) void {
+        const err = _memcpyAsync(dst.ptr, src.asPtr(), dst.len, .device_to_host, stream);
         check(err);
     }
 
@@ -381,46 +284,3 @@ const cuda = struct {
         @panic("CUDA error");
     }
 };
-
-fn getShape(buffer_desc: *const pjrt.ffi.Buffer) Shape {
-    // log.warn("received buffer {}", .{buffer_desc});
-    const dt: DataType = switch (buffer_desc.dtype) {
-        .invalid => @panic("invalid ffi"),
-        .pred => .bool,
-        .token, .f8e4m3, .f8e3m4 => @panic("Unsupported ffi type"),
-        inline else => |t| @field(DataType, @tagName(t)),
-    };
-    return Shape.init(buffer_desc.dims(), dt);
-}
-
-/// Create a Device from a ffi description of a buffer.
-/// Normally the ffi describe device buffer but when platform == cpu it's the same addresspace
-fn hostViewOfDeviceBuffer(buffer_desc: *const pjrt.ffi.Buffer) HostBuffer {
-    const buffer_shape = getShape(buffer_desc);
-    return HostBuffer.fromBytes(
-        buffer_shape,
-        buffer_desc.data.asPtr()[0..buffer_shape.byteSize()],
-    );
-}
-
-fn deviceBuffer(platform: Platform, buffer_desc: *const pjrt.ffi.Buffer, stream: *const pjrt.ffi.Stream) Buffer {
-    const buffer_shape = getShape(buffer_desc);
-    return Buffer.asViewOfDeviceBuffer(platform, buffer_shape, stream, buffer_desc.data);
-}
-
-fn copyTags(flat_tags: []const [*:0]const u8, in: []HostBuffer, out: []HostBuffer) void {
-    var tags = flat_tags.ptr;
-    var num_read: usize = 0;
-    for (in) |*b| {
-        const r = b.rank();
-        b._shape._tags.buffer = tags[0..8].*;
-        tags = tags[r..];
-        num_read += r;
-    }
-    for (out) |*b| {
-        const r = b.rank();
-        b._shape._tags.buffer = tags[0..8].*;
-        tags = tags[r..];
-        num_read += r;
-    }
-}

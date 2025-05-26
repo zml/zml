@@ -8,8 +8,10 @@ const stdx = @import("stdx");
 const Buffer = @import("buffer.zig").Buffer;
 const Data = @import("dtype.zig").Data;
 const DataType = @import("dtype.zig").DataType;
+const custom_call = @import("ffi.zig").custom_call;
 const HostBuffer = @import("hostbuffer.zig").HostBuffer;
 const Memory = @import("buffer.zig").Buffer.Memory;
+const ffi = @import("ffi.zig");
 const meta = @import("meta.zig");
 const mlir = @import("mlir.zig");
 const Location = mlir.Location;
@@ -232,6 +234,39 @@ pub const Tensor = struct {
                 return res;
             },
         };
+    }
+
+    pub fn optimizationBarrier(tensors: []const Tensor) []Tensor {
+        const ctx = CompilationContext.current();
+        const mlir_ctx = ctx.mlirCtx();
+        const allocator = ctx.allocator();
+
+        var inputs: [16]mlir.Value = undefined;
+        var res_types: [16]mlir.Type = undefined;
+
+        for (tensors, 0..) |t, i| {
+            inputs[i] = t.value();
+        }
+
+        for (tensors, 0..) |t, i| {
+            res_types[i] = mlir.ext.RankedTensorType.fromShape(mlir_ctx, t.shape()).as(mlir.Type);
+        }
+
+        const res = allocator.alloc(Tensor, tensors.len) catch @panic("OOM");
+        errdefer allocator.dealloc(res);
+
+        const op = dialect.stablehlo.optimization_barrier(
+            mlir_ctx,
+            inputs[0..tensors.len],
+            res_types[0..tensors.len],
+            mlir_ctx.location(@src()),
+        );
+
+        for (res, 0..) |*t, i| {
+            t.* = _result(tensors[i]._shape, op.result(i));
+        }
+
+        return res;
     }
 
     /// Returns a Tensor with new tag names.
@@ -3822,26 +3857,8 @@ pub const Tensor = struct {
         }.binaryOpHelper;
     }
 
-    /// Insert code that will print the content of the given buffer at runtime.
-    /// Only for debug purpose, it inserts device to host synchronization
-    /// so it will slow down the program execution.
-    pub fn print(input: Tensor) Tensor {
-        // TODO: find a way of doing print that doesn't involve a H2D copy.
-        return ops.addHostCallback(
-            &printCallback,
-            null,
-            &.{input},
-            &.{input.shape()},
-            .{ .output_operand_aliases = &.{0} },
-        )[0];
-    }
-
-    fn printCallback(_: ?*anyopaque, inputs: []const HostBuffer, outputs: []const HostBuffer) void {
-        const host_buffer = inputs[0];
-        std.log.defaultLog(.info, .zml, "Device buffer: {}: {}", .{ host_buffer.shape(), host_buffer.pretty() });
-        // This is true because of the operand aliases.
-        // Since the result is already pointing to the input we don't need to modify the buffer.
-        std.debug.assert(host_buffer.data.ptr == outputs[0].data.ptr);
+    pub fn print(self: Tensor, print_op: type, another_tensor: Tensor) ffi.CustomCallOutputType(print_op) {
+        return custom_call(print_op, .{ self, another_tensor });
     }
 };
 
