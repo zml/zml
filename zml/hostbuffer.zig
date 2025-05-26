@@ -168,13 +168,6 @@ pub const HostBuffer = struct {
         return try Buffer.from(platform_, self);
     }
 
-    pub const ToExOpts = Buffer.FromExOpts;
-    pub fn toEx(self: HostBuffer, platform_: Platform, opts: ToExOpts) !Buffer {
-        const frame = platform_.tracer.frameStart("HostBuffer toEx");
-        defer platform_.tracer.frameEnd(frame, "HostBuffer toEx");
-        return try Buffer.fromEx(platform_, self, opts);
-    }
-
     /// Interpret the underlying data as a contiguous slice.
     /// WARNING: It's only valid if the buffer is contiguous.
     /// Strided buffers can't use this method.
@@ -183,7 +176,6 @@ pub const HostBuffer = struct {
         stdx.debug.assert(DataType.fromZigType(T) == self.dtype(), "Can't reinterpret {} as {s}", .{ self, @typeName(T) });
         stdx.debug.assert(self.isContiguous(), "{} isn't contiguous, can't interpret as []const u8", .{self});
         const ptr: [*]const T = @alignCast(@ptrCast(self._data));
-
         return ptr[0..self._shape.count()];
     }
 
