@@ -215,7 +215,7 @@ pub const threading = struct {
 };
 
 pub const AsyncThread = struct {
-    var current: *AsyncThread = undefined;
+    threadlocal var current: *AsyncThread = undefined;
 
     executor: *aio.Executor,
     stack_allocator: *stack.StackAllocator,
@@ -277,50 +277,6 @@ pub const AsyncThread = struct {
         const mainStack = stack.Stack.init(&mainStackData);
 
         return try aio.run(&executor_, mainFunc, .{}, mainStack);
-    }
-
-    pub fn mainWithArgs(allocator: std.mem.Allocator, comptime mainFunc: anytype, args: anytype) !stdx.meta.FnResultNoError(mainFunc) {
-        if (xev.dynamic) try xev.detect();
-        var thread_pool = XevThreadPool.init(.{});
-        defer {
-            thread_pool.shutdown();
-            thread_pool.deinit();
-        }
-
-        var loop = try xev.Loop.init(.{
-            .thread_pool = &thread_pool,
-        });
-        defer loop.deinit();
-
-        var executor_ = aio.Executor.init(&loop);
-
-        var async_notifier = try xev.Async.init();
-        defer async_notifier.deinit();
-
-        var waiters_queue: threading.WaiterQueue = undefined;
-        waiters_queue.init();
-
-        var stack_allocator = stack.StackAllocator.init(allocator);
-        defer stack_allocator.deinit();
-
-        var asyncThread: AsyncThread = .{
-            .executor = &executor_,
-            .stack_allocator = &stack_allocator,
-            .loop = &loop,
-            .thread_pool = &thread_pool,
-            .async_notifier = &async_notifier,
-            .waiters_queue = &waiters_queue,
-        };
-        AsyncThread.current = &asyncThread;
-
-        var c2: xev.Completion = undefined;
-        async_notifier.wait(AsyncThread.current.loop, &c2, AsyncThread, AsyncThread.current, &AsyncThread.wakerCallback);
-
-        // allocate the main coroutine stack, on the current thread's stack!
-        var mainStackData: stack.Stack.Data = undefined;
-        const mainStack = stack.Stack.init(&mainStackData);
-
-        return try aio.run(&executor_, mainFunc, args, mainStack);
     }
 };
 
