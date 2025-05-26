@@ -789,8 +789,6 @@ pub fn custom_call(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCa
         for (opts.output_operand_aliases) |alias| {
             output_operand_aliases.appendAssumeCapacity(
                 OutputOperandAliasAttribute.init(ctx, &.{}, alias, &.{}).as(mlir.Attribute),
-                //                 OutputOperandAliasAttribute.init(ctx, &.{0}, 0, &.{}).as(mlir.Attribute),
-
             );
         }
         attrs.appendAssumeCapacity(.{ "output_operand_aliases", .array(ctx, output_operand_aliases.constSlice()) });

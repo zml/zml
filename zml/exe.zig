@@ -158,7 +158,12 @@ pub const BaseExe = struct {
 
     _context: ?*pjrt.ExecuteContext = null,
 
-    pub fn init(parent_allocator: std.mem.Allocator, platform: Platform, exe: *pjrt.LoadedExecutable, args: struct { n_in: u32, result_shapes: []const Shape, n_devices: u8 }) !BaseExe {
+    pub fn init(
+        parent_allocator: std.mem.Allocator,
+        platform: Platform,
+        exe: *pjrt.LoadedExecutable,
+        args: struct { input_shapes: []const Shape, result_shapes: []const Shape, n_devices: u8 },
+    ) !BaseExe {
         var arena = std.heap.ArenaAllocator.init(parent_allocator);
         errdefer arena.deinit();
         const allocator = arena.allocator();
@@ -248,7 +253,7 @@ pub const BaseExe = struct {
     // }
 
     pub fn prepare(self: *BaseExe, x: anytype) void {
-        const n = fillBuffers(&x, self.platform, self.input_per_device, self.ready_buffer_count);
+        const n = fillBuffers(&x, self.input_shapes, self.platform, self.input_per_device, self.ready_buffer_count);
         self.ready_buffer_count += n;
     }
 
@@ -280,7 +285,7 @@ pub const BaseExe = struct {
 
     pub fn clone(self: BaseExe, parent_allocator: std.mem.Allocator) !BaseExe {
         var exe: BaseExe = try .init(parent_allocator, self.platform, self.exe, .{
-            .n_in = self.input_buffer_count,
+            .input_shapes = self.input_shapes,
             .result_shapes = self.result_shapes,
             .n_devices = self.num_devices,
         });
@@ -332,7 +337,7 @@ pub fn Exe(ArgsT: type, ReturnT: type) type {
         }
 
         pub fn call(self: Self, args: Bufferized(ArgsT)) Bufferized(ReturnT) {
-            const total_ready = fillBuffers(&args, self.inner.platform, self.inner.input_per_device, self.inner.ready_buffer_count);
+            const total_ready = fillBuffers(&args, self.inner.input_shapes, self.inner.platform, self.inner.input_per_device, self.inner.ready_buffer_count);
             std.debug.assert(total_ready == self.inner.input_buffer_count);
             self.inner._unsafeCall();
             var result: Bufferized(ReturnT) = undefined;
@@ -354,9 +359,9 @@ fn splitBuffer(T: type, buffer: []T, lengths: anytype) [lengths.len][]T {
 }
 
 /// Visit the given struct and fill the `buffers` slice with the buffer associated with encountered Tensor.
-fn fillBuffers(v: anytype, platform: Platform, buffers: []const [*]*pjrt.Buffer, start: u32) u32 {
-    const trace = platform.tracer.frameStart("fillBuffers_" ++ @typeName(@TypeOf(v)));
-    defer platform.tracer.frameEnd(trace, "fillBuffers_" ++ @typeName(@TypeOf(v)));
+fn fillBuffers(v: anytype, shapes: []const Shape, platform: Platform, buffers: []const [*]*pjrt.Buffer, start: u32) u32 {
+    const trace = platform.tracer.frameStart("fillBuffers");
+    defer platform.tracer.frameEnd(trace, "fillBuffers");
 
     const LocalContext = struct {
         index: u32,
@@ -385,8 +390,8 @@ fn fillBuffers(v: anytype, platform: Platform, buffers: []const [*]*pjrt.Buffer,
 
 /// Visit the given struct and override tensors by creating a new one using the provided PJRT buffers.
 fn assignRawBuffers(v: anytype, platform: Platform, buffers: []const [*]*pjrt.Buffer, buffer_shapes: []Shape) void {
-    const trace = platform.tracer.frameStart("assignRawBuffers_" ++ @typeName(@TypeOf(v)));
-    defer platform.tracer.frameEnd(trace, "assignRawBuffers_" ++ @typeName(@TypeOf(v)));
+    const trace = platform.tracer.frameStart("assignRawBuffers");
+    defer platform.tracer.frameEnd(trace, "assignRawBuffers");
 
     const LocalContext = struct {
         index: u32,

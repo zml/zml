@@ -83,7 +83,7 @@ pub const Buffer = struct {
             } else host_buffer;
 
             const pjrt_buffer, const event = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, .{
-                .data = buf.data,
+                .data = buf._data,
                 .buffer_type = buffer_type,
                 .dims = buf.shape().dims(),
                 .byte_strides = byte_strides,
@@ -115,7 +115,7 @@ pub const Buffer = struct {
         const devices = platform.getDevices();
         for (devices) |device| {
             const pjrt_buffer, const event = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, .{
-                .data = host_buffer.data,
+                .data = host_buffer._data,
                 .buffer_type = buffer_type,
                 .dims = host_buffer.shape().dims(),
                 .byte_strides = byte_strides,
@@ -343,7 +343,7 @@ pub const Buffer = struct {
     pub fn toHostAlloc(self: Buffer, allocator: std.mem.Allocator) !HostBuffer {
         var output = try HostBuffer.empty(allocator, self.shape());
         stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
-        const maybe_event = try self._shards.get(0).toHostBuffer(self._api, @constCast(output.data));
+        const maybe_event = try self._shards.get(0).toHostBuffer(self._api, @constCast(output.bytes()));
         output._event = maybe_event;
         output._api = self._api;
         output._ready = if (maybe_event) |ev| ev.isReady(self._api) else true;

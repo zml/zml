@@ -181,10 +181,9 @@ pub const HostBuffer = struct {
     pub fn items(self: HostBuffer, comptime T: type) []const T {
         // TODO we should allow interpreting the output as @Vector(8, f32) when the tensor is f32.
         stdx.debug.assert(DataType.fromZigType(T) == self.dtype(), "Can't reinterpret {} as {s}", .{ self, @typeName(T) });
-        if (!self.isContiguous()) {
-            std.debug.panic("{} isn't contiguous", .{self});
-        }
-        const ptr: [*]const T = @alignCast(@ptrCast(self.data.ptr));
+        stdx.debug.assert(self.isContiguous(), "{} isn't contiguous, can't interpret as []const u8", .{self});
+        const ptr: [*]const T = @alignCast(@ptrCast(self._data));
+
         return ptr[0..self._shape.count()];
     }
 
@@ -285,12 +284,6 @@ pub const HostBuffer = struct {
 
     pub fn choose(self: HostBuffer, offsets: anytype) HostBuffer {
         const off, const tags = Shape.parseDimensions(offsets);
-
-        // TODO: this is a bit too restrictive, choosing slice could extract a contiguous
-        // slice out of a non-contiguous tensor.
-        std.debug.assert(self.isContiguous());
-        stdx.debug.assert(DataType.fromZigType(T) == self.dtype(), "Can't reinterpret {} as {s}", .{ self, @typeName(T) });
-
         var sh = self._shape;
         var offset: i64 = 0;
         for (off.constSlice(), tags.constSlice()) |o, t| {
@@ -299,11 +292,7 @@ pub const HostBuffer = struct {
             sh._dims.buffer[ax] = 0;
         }
 
-        if (last_sliced_ax > 0) {
-            // TODO better error message
-            for (0..@intCast(last_sliced_ax)) |ax|
-                std.debug.assert(sh._dims.buffer[ax] == 1);
-        }
+        var new_strides: [Shape.MAX_RANK]i64 = @splat(self.dtype().sizeOf());
 
         // TODO rewrite with simd. This is a pshuf, but it's not supported by @shuffle.
         var res_ax: u32 = 0;
