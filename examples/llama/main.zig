@@ -314,7 +314,10 @@ pub fn asyncMain() !void {
 
     const seed = res.args.seed orelse @as(u128, @bitCast(std.time.nanoTimestamp()));
     const skip_llama3_encoding = res.args.@"no-llama3" orelse false;
-    const generated_text = try generateText(config, model_instance, llama_module_prefill, llama_module, kv_cache, tokenizer, allocator, seed, prompt[0..], skip_llama3_encoding);
-    // generated text will be printed token by token.
-    defer allocator.free(generated_text);
+    for (0..2) |i| {
+        _ = i; // autofix
+        const generated_text = try generateText(config, model_instance, llama_module_prefill, llama_module, kv_cache, tokenizer, allocator, seed, prompt[0..], skip_llama3_encoding);
+        // generated text will be printed token by token.
+        defer allocator.free(generated_text);
+    }
 }

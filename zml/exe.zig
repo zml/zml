@@ -12,7 +12,7 @@ const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
 const ShapeOf = @import("tensor.zig").ShapeOf;
 
-const log = std.log.scoped(.zml);
+const log = std.log.scoped(.@"zml/exe");
 
 test {
     std.testing.refAllDecls(@This());
@@ -156,12 +156,9 @@ pub const BaseExe = struct {
     /// Allocator backing memory
     _arena: std.heap.ArenaAllocator,
 
-    pub fn init(
-        parent_allocator: std.mem.Allocator,
-        platform: Platform,
-        exe: *pjrt.LoadedExecutable,
-        args: struct { input_shapes: []const Shape, result_shapes: []const Shape, n_devices: u8 },
-    ) !BaseExe {
+    _context: ?*pjrt.ExecuteContext = null,
+
+    pub fn init(parent_allocator: std.mem.Allocator, platform: Platform, exe: *pjrt.LoadedExecutable, args: struct { n_in: u32, result_shapes: []const Shape, n_devices: u8 }) !BaseExe {
         var arena = std.heap.ArenaAllocator.init(parent_allocator);
         errdefer arena.deinit();
         const allocator = arena.allocator();
@@ -199,6 +196,9 @@ pub const BaseExe = struct {
     }
 
     pub fn deinit(self: BaseExe) void {
+        if (self._context) |ctx| {
+            ctx.deinit(self.platform.pjrt_api);
+        }
         self._arena.deinit();
     }
 
@@ -221,16 +221,17 @@ pub const BaseExe = struct {
             // even if it has been marked as "can be donated" during compilation.
             // TODO: expose it ?
             .non_donatable_input_indices = &.{},
+            .context = if (self._context) |ctx| ctx else null,
         }) catch unreachable;
         self.platform.tracer.frameEnd(trace, "_unsafeCall execute");
 
-        const trace_events_await = self.platform.tracer.frameStart("_unsafeCall await events");
-        for (events[0..sharding.num_partitions]) |e| {
-            if (e) |ev| {
-                ev.await_(self.platform.pjrt_api) catch unreachable;
-            }
-        }
-        self.platform.tracer.frameEnd(trace_events_await, "_unsafeCall await events");
+        // const trace_events_await = self.platform.tracer.frameStart("_unsafeCall await events");
+        // for (events[0..sharding.num_partitions]) |e| {
+        //     if (e) |ev| {
+        //         ev.awaitt(self.platform.pjrt_api) catch unreachable;
+        //     }
+        // }
+        // self.platform.tracer.frameEnd(trace_events_await, "_unsafeCall await events");
     }
 
     pub fn serialize(self: BaseExe, writer: anytype) !void {
@@ -251,6 +252,23 @@ pub const BaseExe = struct {
         self.ready_buffer_count += n;
     }
 
+    pub fn attach(self: BaseExe, type_id: i64, value: anytype) !void {
+        stdx.debug.assert(self._context != null, "Exe doesn't have an execution context", .{});
+        const pjrt_api = self.platform.pjrt_api;
+        const ffi = pjrt_api.ffi().?;
+        const ValueT = @TypeOf(value);
+        const type_name = switch (@typeInfo(ValueT)) {
+            .pointer => @typeName(std.meta.Child(ValueT)),
+            else => @typeName(ValueT), // todo error
+        };
+
+        // const type_id = try ffi.registerTypeId(pjrt_api, type_name);
+
+        const user_data: *anyopaque = @ptrCast(@constCast(value));
+        log.info("Attached {s}@{x} with type id {d} on {any}", .{ type_name, user_data, type_id, self._context.? });
+        try ffi.addUserData(pjrt_api, self._context.?, .{ .type_id = type_id, .user_data = user_data });
+    }
+
     pub fn getOutputBuffer(self: BaseExe, i: usize) Buffer {
         var shards: Buffer.Shards = .{};
         for (self.output_per_device) |dev_out| {
@@ -261,11 +279,13 @@ pub const BaseExe = struct {
     }
 
     pub fn clone(self: BaseExe, parent_allocator: std.mem.Allocator) !BaseExe {
-        return .init(parent_allocator, self.platform, self.exe, .{
+        var exe: BaseExe = try .init(parent_allocator, self.platform, self.exe, .{
             .n_in = self.input_buffer_count,
             .result_shapes = self.result_shapes,
             .n_devices = self.num_devices,
         });
+        exe._context = self._context;
+        return exe;
     }
 };
 
@@ -291,6 +311,15 @@ pub fn Exe(ArgsT: type, ReturnT: type) type {
         pub fn prepare(self: Self, first_arg: Bufferized(stdx.meta.Head(ArgsT))) Exe(stdx.meta.Tail(ArgsT), ReturnT) {
             var new: Exe(stdx.meta.Tail(ArgsT), ReturnT) = .{ .inner = self.inner };
             new.inner.prepare(first_arg);
+            return new;
+        }
+
+        pub fn withExecutionContext(self: Self) Self {
+            stdx.debug.assert(self.inner._context == null, "Exe already has an execution context", .{});
+            var new: Self = .{ .inner = self.inner };
+            const pjrt_execute_context = self.inner.platform.pjrt_api.createExecuteContext() catch unreachable;
+            new.inner._context = pjrt_execute_context;
+            log.info("Created context execution {*} for {*}", .{ pjrt_execute_context, self.inner.exe });
             return new;
         }
 

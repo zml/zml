@@ -196,6 +196,9 @@ pub const CompilationContext = struct {
             pjrt_location = try std.fs.path.joinZ(arena, &.{ module_dir.?, "module.pjrt" });
         }
 
+        log.info("******** ZML generated MLIR ********", .{});
+        log.info("{}", .{module.op().mlirFormatter(.{})});
+
         const loaded_executable: *pjrt.LoadedExecutable = blk: {
             if (pjrt_location) |pjrt_loc| {
                 if (loadPjrtExecutable(arena, self._platform, pjrt_loc)) |exe| {
@@ -219,9 +222,6 @@ pub const CompilationContext = struct {
             }
             break :blk loaded_executable;
         };
-
-        log.debug("******** ZML generated MLIR ********", .{});
-        log.debug("{}", .{module.op().mlirFormatter(.{})});
 
         if (timer) |*t| {
             const time_ms = @divFloor(t.lap(), std.time.ns_per_ms);
@@ -396,6 +396,7 @@ pub const CompilationContext = struct {
         @memset(res_attrs, .{});
 
         if (opts.kind == .main) {
+            self.addInputsMemoryKindAttributes(arg_attrs, res_attrs, input_shapes.items, fn_res_shapes);
             self.addDonationsAttributes(arg_attrs, fn_res_donations);
             self.addOutputMemoryKindAttributes(res_attrs, fn_res_output_memory_kind);
             if (self._platform.sharding().num_partitions > 1) {
@@ -522,6 +523,27 @@ pub const CompilationContext = struct {
                 log.warn("Didn't produced the expected IR:\n{s}", .{mlir_bytecode.items});
                 return err;
             };
+        }
+    }
+
+    fn addInputsMemoryKindAttributes(self: CompilationContext, arg_attrs: []AttributeList, res_attrs: []AttributeList, input_shapes: []const Shape, output_shapes: []const Shape) void {
+        _ = res_attrs; // autofix
+        _ = output_shapes; // autofix
+        const ctx = self.mlirCtx();
+        _ = ctx; // autofix
+
+        const memory_kind = Buffer.Memory.host_pinned;
+        _ = memory_kind; // autofix
+        for (arg_attrs, input_shapes, 0..) |*attr, shape, i| {
+            _ = attr; // autofix
+            _ = shape; // autofix
+            if (i == 0) {
+                // attr.appendAssumeCapacity(.named(
+                //     ctx,
+                //     "mhlo.memory_kind",
+                //     .string(ctx, memory_kind.pjrtName()),
+                // ));
+            }
         }
     }
 
@@ -724,6 +746,7 @@ pub const CompilationContext = struct {
                     ._shape = shape,
                     ._id = .{ .arg_id = arg_id.* },
                     ._donation = .input_buffer,
+                    // ._output_memory_kind = .host_pinned,
                 };
             }
         };
@@ -1159,9 +1182,9 @@ pub fn hash(hasher: *std.hash.Wyhash, key: anytype, comptime strat: std.hash.Str
         .@"anyframe", .@"fn" => hash(hasher, @intFromPtr(key), strat),
         .pointer => |info| switch (info.size) {
             .one => switch (strat) {
-                .shallow => hash(hasher, @intFromPtr(key), .Shallow),
-                .deep => hash(hasher, key.*, .Shallow),
-                .deeprecursive => switch (@typeInfo(info.child)) {
+                .Shallow => hash(hasher, @intFromPtr(key), .Shallow),
+                .Deep => hash(hasher, key.*, .Shallow),
+                .DeepRecursive => switch (@typeInfo(info.child)) {
                     .@"opaque", .@"fn" => hash(hasher, @intFromPtr(key), .Shallow),
                     else => hash(hasher, key.*, .DeepRecursive),
                 },
@@ -1177,7 +1200,7 @@ pub fn hash(hasher: *std.hash.Wyhash, key: anytype, comptime strat: std.hash.Str
             .many,
             .c,
             => switch (strat) {
-                .shallow => hash(hasher, @intFromPtr(key), .Shallow),
+                .Shallow => hash(hasher, @intFromPtr(key), .Shallow),
                 else => @compileError(
                     \\ unknown-length pointers and C pointers cannot be hashed deeply.
                     \\ Consider providing your own hash function.

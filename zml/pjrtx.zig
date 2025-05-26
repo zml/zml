@@ -8,6 +8,7 @@ pub const ffi = pjrt.ffi;
 pub const Profiler = pjrt.Profiler;
 pub const ApiError = pjrt.ApiError;
 pub const ErrorCode = pjrt.ErrorCode;
+pub const ExecuteContext = pjrt.ExecuteContext;
 pub const BufferType = pjrt.BufferType;
 pub const Device = pjrt.Device;
 pub const DeviceDescription = pjrt.DeviceDescription;
@@ -60,6 +61,13 @@ pub const Client = opaque {
     pub fn bufferFromHostBuffer(self: *const Client, api: *const Api, args: BufferFromHostBufferArgs) !struct { *Buffer, ?*Event } {
         const buffer, const event_ = try self.inner().bufferFromHostBuffer(api, args);
         return .{ @ptrCast(buffer), @ptrCast(event_) };
+    }
+
+    pub fn dmaMap(self: *const Client, api: *const Api, data: []const u8) ApiError!void {
+        try self.inner().dmaMap(api, data);
+    }
+    pub fn dmaUnmap(self: *const Client, api: *const Api, data: []const u8) ApiError!void {
+        try self.inner().dmaUnmap(api, data);
     }
 
     pub fn deserializeAndLoad(self: *const Client, api: *const Api, bytes: []const u8) ApiError!*LoadedExecutable {
@@ -116,7 +124,7 @@ pub const Client = opaque {
         return self.inner().addressableMemories(api);
     }
 
-    pub fn memoryByKind(self: *const Client, api: *const Api, kind: Memory.Kind) ?*Memory {
+    pub fn memoryByKind(self: *const Client, api: *const Api, kind: Memory.Kind) ?*const Memory {
         for (self.addressableMemories(api)) |mem| {
             if (mem.kind(api) == kind) {
                 return mem;
@@ -201,6 +209,10 @@ pub const Event = opaque {
         return self.inner().getEventError(api);
     }
 
+    pub fn awaitt2(self: *Event, api: *const Api) !void {
+        return self.inner().await_(api);
+    }
+
     pub const await_ = awaitt;
     pub fn awaitt(self: *Event, api: *const Api) !void {
         defer self.deinit(api);
@@ -255,6 +267,7 @@ pub const LoadedExecutable = opaque {
         results: []const [*]*Buffer,
         events: []?*Event,
         non_donatable_input_indices: []const i64 = &.{},
+        context: ?*ExecuteContext,
     };
 
     pub fn execute(self: *const LoadedExecutable, api: *const Api, args: ExecuteArgs) ExecuteError!void {
@@ -264,6 +277,7 @@ pub const LoadedExecutable = opaque {
             .results = @ptrCast(args.results),
             .events = @ptrCast(args.events),
             .non_donatable_input_indices = args.non_donatable_input_indices,
+            .context = args.context,
         });
     }
 
