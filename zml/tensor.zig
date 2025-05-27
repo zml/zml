@@ -3136,7 +3136,7 @@ pub const Tensor = struct {
     /// Slices the input Tensor along a specific axis, with a start offset known at runtime.
     /// Note: this doesn't support tagging, if you have tags,
     /// you should use `dynamicSlice` directly.
-    pub fn dynamicSlice1d(self: Tensor, axis_: i8, slice_: DynSlice) Tensor {
+    pub fn dynamicSlice1d(self: Tensor, axis_: anytype, slice_: DynSlice) Tensor {
         stdx.debug.assert(slice_.start.rank() == 0, "dynamicSlice1d expects 'slice_.start' tensor rank to be a scalar, got {}", .{slice_.start});
 
         const a = self.axis(axis_);
