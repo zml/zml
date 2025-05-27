@@ -1943,10 +1943,10 @@ pub const Tensor = struct {
     /// Returns a 0-rank Tensor with the given value.
     pub fn scalar(val: anytype, dt: DataType) Tensor {
         const data = Data.init(dt, val);
-        // switch (dt.class()) {
-        //     .float => stdx.debug.assert(!std.math.isNan(val), "scalar(NaN) is probably due to compiling a model with an uninitialized field", .{}),
-        //     else => {},
-        // }
+        switch (dt.class()) {
+            .float => stdx.debug.assert(!std.math.isNan(val), "scalar(NaN) is probably due to compiling a model with an uninitialized field", .{}),
+            else => {},
+        }
         return Tensor.constant(.{}, data);
     }
 

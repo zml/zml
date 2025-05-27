@@ -88,7 +88,7 @@ pub const Buffer = struct {
                 .dims = buf.shape().dims(),
                 .byte_strides = byte_strides,
                 .device = devices[i],
-                .host_buffer_semantics = .ImmutableUntilTransferCompletes,
+                .host_buffer_semantics = .ImmutableOnlyDuringCall,
             });
             if (event) |ev| {
                 ev.deinit(platform.pjrt_api);
@@ -120,7 +120,7 @@ pub const Buffer = struct {
                 .dims = host_buffer.shape().dims(),
                 .byte_strides = byte_strides,
                 .device = device,
-                .host_buffer_semantics = .ImmutableUntilTransferCompletes,
+                .host_buffer_semantics = .ImmutableOnlyDuringCall,
                 .memory = @constCast(platform.pjrt_client.memoryByKind(platform.pjrt_api, opts.memory.toPjrtMemory())),
             });
             if (event) |ev| {

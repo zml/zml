@@ -141,13 +141,13 @@ pub fn asyncMain() !void {
     var executable = compiled.prepare(model_weights).withExecutionContext();
     defer executable.deinit();
 
-    try executable.registerInContext(AddOp);
+    try executable.register(AddOp);
 
     const result_hb = try zml.HostBuffer.empty(allocator, shape);
     defer result_hb.deinit(allocator);
 
     var add_op: AddOp = try .init(platform, result_hb);
-    try executable.bindToContext(AddOp, &add_op);
+    try executable.bind(AddOp, &add_op);
 
     var input_a = [1]f32{1.0};
     var input_buffer_a = try zml.Buffer.from(platform, zml.HostBuffer.fromSlice(shape, &input_a));
