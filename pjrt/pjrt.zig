@@ -1178,7 +1178,7 @@ pub const FFI = extern struct {
         }
     };
 
-    pub const RegisterFfiOptions = struct {
+    pub const RegisterOptions = struct {
         traits: RegisterHandlerTraits = @enumFromInt(0),
     };
 
@@ -1190,7 +1190,7 @@ pub const FFI = extern struct {
         target_name: []const u8,
         platform_name: []const u8,
         func: *const ffi.Handler,
-        options: RegisterFfiOptions,
+        options: RegisterOptions,
     ) ApiError!void {
         var ret = pjrtStruct(c.PJRT_FFI_Register_Handler_Args{
             .api_version = 1,
@@ -1242,8 +1242,4 @@ pub const FFI = extern struct {
 pub const RegisterHandlerTraits = enum(c.PJRT_FFI_Handler_TraitsBits) {
     command_buffer_compatible = c.PJRT_FFI_HANDLER_TRAITS_COMMAND_BUFFER_COMPATIBLE,
     _,
-};
-
-pub const CustomCallRegistry = extern struct {
-    inner: *const c.PJRT_FFI_Register_Handler,
 };

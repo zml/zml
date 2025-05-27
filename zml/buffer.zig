@@ -53,6 +53,15 @@ pub const Buffer = struct {
 
     /// Copies the content of the given buffer from host memory to the accelerator memory.
     pub fn from(platform: Platform, host_buffer: HostBuffer) !Buffer {
+        return fromWithOptions(platform, host_buffer, .{});
+    }
+
+    pub const FromWithOptions = struct {
+        /// The memory kind to use for the buffer.
+        memory: Memory = .device,
+    };
+
+    pub fn fromWithOptions(platform: Platform, host_buffer: HostBuffer, opts: FromWithOptions) !Buffer {
         var res: Buffer = .{
             ._api = platform.pjrt_api,
             ._shape = host_buffer.shape(),
@@ -82,6 +91,18 @@ pub const Buffer = struct {
                 break :buf host_buffer.slice1d(ax, .{ .start = start, .end = start + chunk_size });
             } else host_buffer;
 
+            const device = devices[i];
+            const device_memories = try device.addressableMemories(platform.pjrt_api);
+            var memory: ?*const pjrt.Memory = null;
+
+            if (platform.target != .cpu) {
+                for (device_memories) |mem| {
+                    if (mem.kind(platform.pjrt_api) == opts.memory.toPjrtMemory()) {
+                        memory = mem;
+                    }
+                }
+            }
+
             const frame = try asynk.asyncc(pjrt.Client.bufferFromHostBuffer, .{
                 platform.pjrt_client,
                 platform.pjrt_api,
@@ -90,8 +111,9 @@ pub const Buffer = struct {
                     .buffer_type = buffer_type,
                     .dims = buf.shape().dims(),
                     .byte_strides = byte_strides,
-                    .device = devices[i],
+                    .device = device,
                     .host_buffer_semantics = .ImmutableOnlyDuringCall,
+                    .memory = memory,
                 },
             });
 
@@ -138,10 +160,9 @@ pub const Buffer = struct {
         return try from(platform, host_buffer);
     }
 
-    pub fn asPinnedHostBuffer(self: Buffer) HostBuffer {
-        // TODO restore assert
-        // const memory = self.getMemory().kind(self._api);
-        // stdx.debug.assert(memory == .pinned_host, "asPinnedHostBuffer({}) expects a buffer allocated on host memory, got {}. see `toMemory`", .{ self, memory });
+    pub fn asHostBuffer(self: Buffer) HostBuffer {
+        const memory = self.getMemory().kind(self._api);
+        stdx.debug.assert((memory == .pinned_host) or (memory == .unpinned_host), "asHostBuffer({}) expects a buffer allocated on host memory, got {}. see `copyToMemory`", .{ self, memory });
         const ptr: [*]u8 = @ptrCast(self._shards.get(0).getOpaqueDeviceMemoryDataPointer(self._api) catch unreachable);
         return HostBuffer.fromBytes(self._shape, ptr[0..self._shape.byteSize()]);
     }
@@ -258,6 +279,11 @@ pub const Buffer = struct {
         };
     }
 
+    pub fn opaqueDeviceMemoryDataPointer(self: Buffer) *anyopaque {
+        stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer", .{});
+        return self._shards.get(0).getOpaqueDeviceMemoryDataPointer(self._api) catch unreachable;
+    }
+
     /// Fetches the content of the given buffer into a stack variable of the given type.
     pub fn getValue(self: Buffer, T: type) !T {
         stdx.debug.assert(self._shape.byteSize() == @sizeOf(T), "Buffer {} has {d} bytes of data, can't load it to a {s} with {d} bytes", .{ self, self._shape.byteSize(), @typeName(T), @sizeOf(T) });
@@ -268,6 +294,36 @@ pub const Buffer = struct {
             try event.await_(self._api);
         }
         return res;
+    }
+
+    pub const CopyToMemoryOpts = struct {
+        should_await_blocking: bool = false,
+    };
+    pub fn copyToMemory(self: Buffer, platform: Platform, kind: Memory, opts: CopyToMemoryOpts) !Buffer {
+        stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer", .{});
+        const memory_dest = platform.pjrt_client.memoryByKind(self._api, kind.toPjrtMemory());
+
+        if (memory_dest == null) {
+            stdx.debug.panic("Memory destination `{s}` for {}", .{ kind.pjrtName(), self });
+        }
+
+        const buffer_copy = try self._shards.get(0).copyToMemory(self._api, memory_dest.?);
+
+        if (opts.should_await_blocking) {
+            const event = buffer_copy.getReadyEvent(self._api);
+            if (event) |e| {
+                try e.awaitBlocking(self._api);
+            }
+        }
+
+        var shards: Shards = .{};
+        shards.appendAssumeCapacity(buffer_copy);
+
+        return .{
+            ._api = platform.pjrt_api,
+            ._shape = self._shape,
+            ._shards = shards,
+        };
     }
 
     /// Copies the content of the Buffer back to host, in the given buffer,

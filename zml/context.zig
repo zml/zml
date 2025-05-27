@@ -14,6 +14,7 @@ const pjrt = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
 const Target = @import("platform.zig").Target;
+const custom_call = @import("custom_call.zig");
 const zml_platform = @import("platform.zig");
 
 const PjrtApiMap = std.EnumArray(Target, ?*const pjrt.Api);
@@ -178,9 +179,9 @@ pub const Context = struct {
             return error.NoDevicesFound;
         }
 
-        try CustomCall.registerZmlCustomCalls(p);
-
         self.platforms.set(target, p);
+        try custom_call.registerInternalCustomCalls(p);
+
         return p;
     }
 
@@ -213,72 +214,7 @@ pub const Context = struct {
             }
         }
     }
-
-    pub const HostCallback = fn (?*anyopaque, []const HostBuffer, []const HostBuffer) void;
 };
-
-const CustomCall = struct {
-    pub fn registerZmlCustomCalls(platform: Platform) !void {
-        const maybe_ffi = platform.pjrt_api.ffi();
-
-        if (maybe_ffi) |ffi| {
-            try ffi.register(platform.pjrt_api, "zmlHostBufferCallback", @tagName(platform.target), &hostBufferCallback, .{});
-        } else {
-            stdx.debug.panic("Registering custom calls failed", .{});
-        }
-    }
-
-    fn hostBufferCallback(call_frame: *pjrt.ffi.CallFrame) callconv(.C) ?*pjrt.ffi.Error {
-        if (call_frame.registeringHook()) return null;
-
-        const callback_attr = call_frame.attrs.getByName(.scalar, "callback") orelse unreachable;
-        std.debug.assert(callback_attr.dtype == .u64);
-        const callback: *const Context.HostCallback = @ptrFromInt(callback_attr.get(usize));
-
-        const user_ctx_ptr = call_frame.attrs.getByName(.scalar, "user_context") orelse unreachable;
-        std.debug.assert(user_ctx_ptr.dtype == .u64);
-        const user_ctx: ?*anyopaque = @ptrFromInt(user_ctx_ptr.get(usize));
-
-        const input_buffers = stdx.stackSlice(8, HostBuffer, call_frame.args.len);
-        for (input_buffers, 0..) |*b, i| {
-            b.* = hostBufferFromPinnedBuffer(call_frame.args.buffers()[i]);
-        }
-
-        const output_buffers = stdx.stackSlice(8, HostBuffer, call_frame.results.len);
-        for (output_buffers, 0..) |*b, i| {
-            b.* = hostBufferFromPinnedBuffer(call_frame.results.buffers()[i]);
-        }
-
-        callback(user_ctx, input_buffers, output_buffers);
-        return null;
-    }
-};
-
-fn getShape(buffer_desc: *const pjrt.ffi.Buffer) Shape {
-    // log.warn("received buffer {}", .{buffer_desc});
-    const dt: DataType = switch (buffer_desc.dtype) {
-        .invalid => @panic("invalid ffi"),
-        .pred => .bool,
-        .i8 => .i8,
-        .i16 => .i16,
-        .i32 => .i32,
-        .i64 => .i64,
-        .token, .f8e4m3, .f8e3m4 => @panic("Unsupported ffi type"),
-        inline else => |t| @field(DataType, @tagName(t)),
-    };
-    return Shape.init(buffer_desc.dims(), dt);
-}
-
-/// Create a HostBuffer from a ffi description of a buffer.
-/// Normally the ffi describe device buffer but we assume they are located in pinned memory,
-/// and therefore the data pointer is readable both from host and from device.
-fn hostBufferFromPinnedBuffer(buffer_desc: *const pjrt.ffi.Buffer) HostBuffer {
-    const buffer_shape = getShape(buffer_desc);
-    return HostBuffer.fromBytes(
-        buffer_shape,
-        buffer_desc.data[0..buffer_shape.byteSize()],
-    );
-}
 
 pub const cuda = struct {
     pub var streamSynchronize: StreamSynchronize = @ptrFromInt(0xdeadc00da00);
