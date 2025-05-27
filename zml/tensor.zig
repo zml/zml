@@ -13,6 +13,8 @@ const Memory = @import("buffer.zig").Buffer.Memory;
 const meta = @import("meta.zig");
 const mlirx = @import("mlirx.zig");
 const ops = @import("ops.zig");
+const custom_call_ = @import("custom_call.zig");
+const custom_call = custom_call_.custom_call;
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
 
@@ -3824,22 +3826,7 @@ pub const Tensor = struct {
     /// Only for debug purpose, it inserts device to host synchronization
     /// so it will slow down the program execution.
     pub fn print(input: Tensor) Tensor {
-        // TODO: find a way of doing print that doesn't involve a H2D copy.
-        return ops.addHostCallback(
-            &printCallback,
-            null,
-            &.{input},
-            &.{input.shape()},
-            .{ .output_operand_aliases = &.{0} },
-        )[0];
-    }
-
-    fn printCallback(_: ?*anyopaque, inputs: []const HostBuffer, outputs: []const HostBuffer) void {
-        const host_buffer = inputs[0];
-        std.log.defaultLog(.info, .zml, "Device buffer: {f}: {f}", .{ host_buffer.shape(), host_buffer.pretty() });
-        // This is true because of the operand aliases.
-        // Since the result is already pointing to the input we don't need to modify the buffer.
-        std.debug.assert(host_buffer._data == outputs[0]._data);
+        return custom_call(custom_call_.Print, .{input}, &[_]Shape{input.shape()}, .{ .output_operand_aliases = &.{0}, .copy_inputs_to_host_pinned = true })[0];
     }
 };
 

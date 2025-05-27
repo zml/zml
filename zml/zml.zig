@@ -17,6 +17,7 @@ pub const Context = @import("context.zig").Context;
 pub const Data = @import("dtype.zig").Data;
 pub const DataType = @import("dtype.zig").DataType;
 pub const exe = @import("exe.zig");
+pub const custom_call = @import("custom_call.zig").custom_call;
 pub const compile = exe.compile;
 pub const compileWithPrefix = exe.compileWithPrefix;
 pub const compileFn = exe.compileFn;

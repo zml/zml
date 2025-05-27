@@ -1,0 +1,11 @@
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+
+zig_binary(
+    name = "custom_call",
+    copts = ["-freference-trace=30"],
+    main = "main.zig",
+    deps = [
+        "@zml//async",
+        "@zml//zml",
+    ],
+)

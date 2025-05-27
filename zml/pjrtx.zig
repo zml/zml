@@ -207,6 +207,13 @@ pub const Event = opaque {
         return self.inner().getEventError(api);
     }
 
+    pub fn awaitBlocking(self: *Event, api: *const Api) ApiError!void {
+        if (self.isReady(api)) {
+            return;
+        }
+        try self.inner().await_(api);
+    }
+
     pub fn await_(self: *Event, api: *const Api) ApiError!void {
         defer self.deinit(api);
 
