@@ -8,6 +8,7 @@ const Bufferized = @import("tensor.zig").Bufferized;
 const CompilationContext = @import("module.zig").CompilationContext;
 const meta = @import("meta.zig");
 const pjrt = @import("pjrtx.zig");
+const custom_call = @import("custom_call.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
 const ShapeOf = @import("tensor.zig").ShapeOf;
@@ -285,6 +286,21 @@ pub const BaseExe = struct {
         stdx.debug.internalAssert(local_ctx.index == self.result_shapes.len, "Pjrt call returned {} tensors, but the return type {s}, contains {} Buffers. Note that modules need to have a comptime know number of returned tensors.", .{ self.output_per_device.len, @typeName(T), local_ctx.index });
     }
 
+    pub fn bind(self: BaseExe, comptime T: type, value: *T) !void {
+        stdx.debug.assert(self.context != null, "Exe doesn't have an execution context", .{});
+        const pjrt_api = self.platform.pjrt_api;
+
+        if (pjrt_api.ffi()) |ffi| {
+            const type_id = T.type_id;
+            const user_data: *anyopaque = @ptrCast(@constCast(value));
+
+            try ffi.addUserData(pjrt_api, self.context.?, .{ .type_id = type_id, .user_data = user_data });
+            log.info("Bound {s}@{x} with type id {d} on {any}", .{ @typeName(T), user_data, T.type_id, self.context.? });
+        } else {
+            stdx.debug.panic("Custom calls are not supported for target {s}", .{@tagName(self.platform.target)});
+        }
+    }
+
     pub fn serialize(self: BaseExe, writer: anytype) !void {
         var executable = try self.exe.getExecutable(self.platform.pjrt_api);
         var serialize_result = try executable.serialize(self.platform.pjrt_api);
@@ -346,6 +362,28 @@ pub fn Exe(ArgsT: type, ReturnT: type) type {
             var new: Exe(stdx.meta.Tail(ArgsT), ReturnT) = .{ .inner = self.inner };
             new.inner.prepare(first_arg);
             return new;
+        }
+
+        pub fn withExecutionContext(self: Self) !Self {
+            stdx.debug.assert(self.inner.context == null, "Exe already has an execution context", .{});
+            var new: Self = .{ .inner = self.inner };
+            var arena = &new.inner._arena;
+            var allocator = arena.allocator();
+
+            const pjrt_execute_context = try new.inner.platform.pjrt_api.createExecuteContext();
+            new.inner.context = pjrt_execute_context;
+            inline for (custom_call.custom_call_internal_types) |custom_call_internal_type| {
+                const value_ptr = try allocator.create(custom_call_internal_type);
+                value_ptr.* = try .init(allocator, new.platform());
+                try new.inner.bind(custom_call_internal_type, value_ptr);
+            }
+            log.info("Created context execution {*} for {*}", .{ pjrt_execute_context, self.inner.exe });
+
+            return new;
+        }
+
+        pub fn bind(self: Self, comptime T: type, value: *T) !void {
+            try self.inner.bind(T, value);
         }
 
         pub fn serialize(self: Self, writer: anytype) !void {

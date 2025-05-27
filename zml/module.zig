@@ -1157,9 +1157,9 @@ pub fn hash(hasher: *std.hash.Wyhash, key: anytype, comptime strat: std.hash.Str
         .@"anyframe", .@"fn" => hash(hasher, @intFromPtr(key), strat),
         .pointer => |info| switch (info.size) {
             .one => switch (strat) {
-                .shallow => hash(hasher, @intFromPtr(key), .Shallow),
-                .deep => hash(hasher, key.*, .Shallow),
-                .deeprecursive => switch (@typeInfo(info.child)) {
+                .Shallow => hash(hasher, @intFromPtr(key), .Shallow),
+                .Deep => hash(hasher, key.*, .Shallow),
+                .DeepRecursive => switch (@typeInfo(info.child)) {
                     .@"opaque", .@"fn" => hash(hasher, @intFromPtr(key), .Shallow),
                     else => hash(hasher, key.*, .DeepRecursive),
                 },
@@ -1175,7 +1175,7 @@ pub fn hash(hasher: *std.hash.Wyhash, key: anytype, comptime strat: std.hash.Str
             .many,
             .c,
             => switch (strat) {
-                .shallow => hash(hasher, @intFromPtr(key), .Shallow),
+                .Shallow => hash(hasher, @intFromPtr(key), .Shallow),
                 else => @compileError(
                     \\ unknown-length pointers and C pointers cannot be hashed deeply.
                     \\ Consider providing your own hash function.
