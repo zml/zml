@@ -1351,10 +1351,10 @@ index 0000000000..ef42968a3a
 \ No newline at end of file
 diff --git a/xla/pjrt/plugin/mlx/executable.cc b/xla/pjrt/plugin/mlx/executable.cc
 new file mode 100644
-index 0000000000..c45e9a2e14
+index 0000000000..3c36b94b82
 --- /dev/null
 +++ b/xla/pjrt/plugin/mlx/executable.cc
-@@ -0,0 +1,2450 @@
+@@ -0,0 +1,2377 @@
 +/* Copyright 2024 The OpenXLA Authors.
 +Licensed under the Apache License, Version 2.0 (the "License");
 +you may not use this file except in compliance with the License.
@@ -2984,222 +2984,149 @@ index 0000000000..c45e9a2e14
 +      auto start_indices = inputs[1];
 +
 +      // Calculate batch dims
-+      std::vector<int32_t> batch_dims;
++      std::vector<int32_t> batch_dims_vec;
 +      for (int64_t i = 0; i < result_shape.size(); i++) {
 +        if (std::find(offset_dims.begin(), offset_dims.end(), i) ==
 +            offset_dims.end()) {
-+          batch_dims.emplace_back(static_cast<int32_t>(i));
++          batch_dims_vec.emplace_back(static_cast<int32_t>(i));
 +        }
 +      }
++      mx::array batch_dims = mx::array(
++          batch_dims_vec.data(), {static_cast<int32_t>(batch_dims_vec.size())});
++      mx::array start_idx_map =
++          mx::array(start_index_map.data(),
++                    {static_cast<int32_t>(start_index_map.size())});
++      mx::array op_batching_dims =
++          mx::array(operand_batching_dims.data(),
++                    {static_cast<int32_t>(operand_batching_dims.size())});
 +
-+      std::vector<mx::array> operand_indices;
++      // Calculate result indices
++      std::vector<mx::array> meshgrid_arrays;
++      for (const auto& dim : result_shape) {
++        meshgrid_arrays.push_back(mx::arange(dim));
++      }
++      mx::array result_indices =
++          mx::reshape(mx::stack(mx::meshgrid(meshgrid_arrays, false, "ij"), -1),
++                      {-1, static_cast<int>(result_shape.size())});
 +
-+      // Iterate over result index space, populating result
-+      for (const auto result_index_tuple : index_space(result_shape)) {
-+        std::vector<int32_t> result_index =
-+            to_vector(result_index_tuple, result_shape.size());
++      // Initialize operand indices with zeros
++      mx::array operand_indices = mx::zeros(
++          {result_indices.shape(0), static_cast<int32_t>(operand.ndim())},
++          mx::int32);
 +
-+        std::vector<int32_t> batch_index(batch_dims.size());
-+        for (unsigned i = 0; i < batch_dims.size(); i++) {
-+          batch_index[i] = result_index[batch_dims[i]];
++      // Slice batch indices
++      mx::array batch_indices = mx::take(result_indices, batch_dims, 1);
++      if (batch_indices.size()) {
++        // Calculate start indices
++        std::vector<mx::array> tmp_indices =
++            mx::split(batch_indices, batch_indices.shape(1), 1);
++        for (auto& idx : tmp_indices) {
++          idx = mx::flatten(idx);
 +        }
 +
-+        // Slice start index for the current batch
-+        std::vector<int32_t> sin_start(start_indices.ndim());
-+        std::vector<int32_t> sin_stop(start_indices.ndim());
-+        unsigned batch_idx_count = 0;
-+
-+        for (auto i = 0; i < start_indices.ndim(); i++) {
-+          if (index_vector_dim == static_cast<int64_t>(i)) {
-+            sin_start[i] = 0;
-+            sin_stop[i] = start_indices.shape(i) + 1;
-+            continue;
-+          }
-+          sin_start[i] = batch_index[batch_idx_count++];
-+          sin_stop[i] = sin_start[i] + 1;
++        std::vector<int> tmp_axes;
++        for (auto i = 0; i < start_indices.ndim(); ++i) {
++          if (i == index_vector_dim) continue;
++          tmp_axes.push_back(i);
 +        }
-+        mx::array start_index =
-+            mx::flatten(mx::slice(start_indices, sin_start, sin_stop));
++        std::vector<int32_t> tmp_slice_sizes(start_indices.ndim(), 1);
++        if (index_vector_dim < tmp_slice_sizes.size()) {
++          tmp_slice_sizes[index_vector_dim] =
++              start_indices.shape(index_vector_dim);
++        }
 +
-+        // Compute full start index
-+        mx::array full_start_index =
-+            mx::zeros({static_cast<int32_t>(operand.ndim())}, mx::int32);
-+        for (auto d_start = 0; d_start < start_index_map.size(); d_start++) {
++        mx::array batch_start_indices = mx::reshape(
++            mx::gather(start_indices, tmp_indices, tmp_axes, tmp_slice_sizes),
++            {result_indices.shape(0), -1});
++
++        // Seed with full start indices
++        std::vector<int32_t> max;
++        for (auto d_start = 0; d_start < start_index_map.size(); ++d_start) {
 +          int d_operand = start_index_map[d_start];
-+          auto index_scalar = mx::slice(start_index, {d_start}, {d_start + 1});
-+          full_start_index = mx::slice_update(
-+              full_start_index,
-+              mx::clip(index_scalar, mx::array({0}, mx::int32),
-+                       mx::array({operand.shape(d_operand) -
-+                                  static_cast<int32_t>(slice_sizes[d_operand])},
-+                                 mx::int32)),
-+              {d_operand}, {d_operand + 1});
++          max.push_back(operand.shape(d_operand) - slice_sizes[d_operand]);
 +        }
 +
-+        // Compute full batching index
-+        std::vector<int32_t> full_batching_index(operand.ndim(), 0);
-+        for (auto i_batching = 0; i_batching < operand_batching_dims.size();
-+             i_batching++) {
-+          auto d_operand =
-+              static_cast<int32_t>(operand_batching_dims[i_batching]);
-+          auto d_start =
-+              static_cast<int32_t>(start_indices_batching_dims[i_batching]);
-+          full_batching_index[d_operand] = batch_index
-+              [d_start -
-+               (static_cast<int64_t>(d_start) < index_vector_dim ? 0 : 1)];
-+        }
-+
-+        // Compute offset index
-+        std::vector<int32_t> offset_index(offset_dims.size());
-+        for (unsigned i = 0; i < offset_dims.size(); i++) {
-+          offset_index[i] = result_index[offset_dims[i]];
-+        }
-+
-+        // Compute full offset index
-+        std::vector<int32_t> full_offset_index(operand.ndim(), 0);
-+        unsigned offset_index_count = 0;
-+        for (unsigned i = 0; i < full_offset_index.size(); i++) {
-+          if (std::find(operand_batching_dims.begin(),
-+                        operand_batching_dims.end(), static_cast<int64_t>(i)) !=
-+                  operand_batching_dims.end() ||
-+              std::find(collapsed_slice_dims.begin(),
-+                        collapsed_slice_dims.end(), static_cast<int64_t>(i)) !=
-+                  collapsed_slice_dims.end()) {
-+            continue;
-+          }
-+          full_offset_index[i] = offset_index[offset_index_count++];
-+        }
-+
-+        operand_indices.emplace_back(
-+            full_start_index +
-+            mx::array(full_batching_index.data(),
-+                      {static_cast<int32_t>(full_batching_index.size())},
-+                      mx::int32) +
-+            mx::array(full_offset_index.data(),
-+                      {static_cast<int32_t>(full_offset_index.size())},
-+                      mx::int32));
++        operand_indices = mx::put_along_axis(
++            operand_indices,
++            mx::broadcast_to(start_idx_map,
++                             {operand_indices.shape(0),
++                              static_cast<int32_t>(start_index_map.size())}),
++            mx::clip(
++                mx::take(batch_start_indices,
++                         mx::arange(static_cast<int>(start_index_map.size())),
++                         1),
++                mx::zeros(batch_start_indices.shape(), mx::int32),
++                mx::array(max.data(), {static_cast<int32_t>(max.size())})),
++            1);
 +      }
-+      std::vector<int32_t> gather_slice_sizes(operand.ndim(), 1);
++
++      // Calculate full batching indices
++      mx::array i_batching =
++          mx::arange(static_cast<int>(operand_batching_dims.size()));
++      mx::array d_operands = mx::take(op_batching_dims, i_batching);
++      mx::array d_starts = mx::take(
++          mx::array(start_indices_batching_dims.data(),
++                    {static_cast<int32_t>(start_indices_batching_dims.size())}),
++          i_batching);
++      auto tmp_batch_start_indices = mx::subtract(
++          d_starts, mx::where(mx::less(d_starts, mx::full(d_starts.shape(),
++                                                          index_vector_dim)),
++                              mx::zeros(d_starts.shape(), mx::int32),
++                              mx::ones(d_starts.shape(), mx::int32)));
++
++      // Add batching indices
++      operand_indices = mx::scatter_add_axis(
++          operand_indices,
++          mx::broadcast_to(d_operands,
++                           {operand_indices.shape(0), d_operands.shape(0)}),
++          mx::take(batch_indices, tmp_batch_start_indices, 1), 1);
++
++      // Calculate offset indices
++      mx::array offset_indices =
++          mx::take(result_indices,
++                   mx::array(offset_dims.data(),
++                             {static_cast<int32_t>(offset_dims.size())}),
++                   1);
++
++      std::vector<int32_t> result_offset_idx;
++      for (unsigned i = 0; i < operand_indices.shape(1); i++) {
++        if (std::find(operand_batching_dims.begin(),
++                      operand_batching_dims.end(),
++                      static_cast<int64_t>(i)) != operand_batching_dims.end() ||
++            std::find(collapsed_slice_dims.begin(), collapsed_slice_dims.end(),
++                      static_cast<int64_t>(i)) != collapsed_slice_dims.end()) {
++          continue;
++        }
++        result_offset_idx.push_back(i);
++      }
++
++      // Add offset indices
++      operand_indices = mx::scatter_add_axis(
++          operand_indices,
++          mx::broadcast_to(
++              mx::array(result_offset_idx.data(),
++                        {static_cast<int32_t>(result_offset_idx.size())}),
++              {operand_indices.shape(0),
++               static_cast<int32_t>(result_offset_idx.size())}),
++          offset_indices, 1);
++
 +      std::vector<int32_t> gather_axes(operand.ndim());
 +      std::iota(gather_axes.begin(), gather_axes.end(), 0);
-+      return std::vector<mx::array>{
-+          mx::reshape(mx::gather(operand,
-+                                 mx::split(mx::stack(operand_indices, 1),
-+                                           operand_indices[0].shape(0), 0),
-+                                 gather_axes, gather_slice_sizes),
-+                      result_shape)};
++      return std::vector<mx::array>{mx::reshape(
++          mx::gather(operand,
++                     mx::split(operand_indices, operand_indices.shape(1), 1),
++                     gather_axes, std::vector<int32_t>(operand.ndim(), 1)),
++          result_shape)};
 +    };
 +
 +    op_lookup.gather.emplace(gather_op_info, mx::compile(gather_func));
 +  }
 +}
 +
-+int32_t computeProduct(const std::vector<int32_t>& dims) {
-+  return std::accumulate(dims.begin(), dims.end(), 1,
-+                         std::multiplies<int32_t>());
-+}
-+
-+mx::array computeGatherIndices(
-+    const mx::array& start_indices, const std::vector<int32_t>& start_index_map,
-+    const std::vector<int32_t>& operand_shape,
-+    const std::vector<int32_t>& slice_sizes,
-+    const std::vector<int32_t>& operand_batching_dims,
-+    const std::vector<int32_t>& start_indices_batching_dims,
-+    int64_t index_vector_dim) {
-+  // Validate input dimensions
-+  if (start_indices.ndim() == 0) {
-+    throw std::invalid_argument(
-+        "start_indices must have at least one dimension.");
-+  }
-+
-+  // Compute the shape of start_indices
-+  std::vector<int32_t> start_indices_shape = start_indices.shape();
-+
-+  // Compute the number of index vectors
-+  int32_t index_vector_size =
-+      static_cast<int32_t>(start_indices_shape[index_vector_dim]);
-+  std::vector<int32_t> outer_shape = start_indices_shape;
-+  outer_shape.erase(outer_shape.begin() + index_vector_dim);
-+  int32_t num_index_vectors = computeProduct(outer_shape);
-+
-+  // Reshape start_indices to a 2D tensor: [num_index_vectors,
-+  // index_vector_size]
-+  mx::array reshaped_start_indices =
-+      mx::reshape(start_indices, {num_index_vectors, index_vector_size});
-+
-+  // Initialize full_start_indices with zeros: [num_index_vectors, operand_rank]
-+  int32_t operand_rank = static_cast<int32_t>(operand_shape.size());
-+  mx::array full_start_indices =
-+      mx::zeros({num_index_vectors, operand_rank}, mx::int32);
-+
-+  // Populate full_start_indices using start_index_map
-+  for (size_t i = 0; i < start_index_map.size(); ++i) {
-+    int32_t operand_dim = start_index_map[i];
-+    // Extract the i-th column from reshaped_start_indices
-+    mx::array indices_column =
-+        mx::slice(reshaped_start_indices, {0, static_cast<int32_t>(i)},
-+                  {num_index_vectors, static_cast<int32_t>(i + 1)});
-+    // Clip indices to ensure they are within bounds
-+    int32_t max_index = operand_shape[operand_dim] - slice_sizes[operand_dim];
-+    mx::array clipped_indices =
-+        mx::clip(indices_column, mx::array({0}, mx::int32),
-+                 mx::array({max_index}, mx::int32));
-+    // Update the corresponding column in full_start_indices
-+    full_start_indices =
-+        mx::slice_update(full_start_indices, clipped_indices, {0, operand_dim},
-+                         {num_index_vectors, operand_dim + 1});
-+  }
-+
-+  return full_start_indices;
-+}
-+
-+void _compileGatherOp(OpLookup& op_lookup, stablehlo::GatherOp o) {
-+  GatherOpInfo gather_op_info = getGatherOpInfo(o);
-+  auto collapsed_slice_dims = std::get<0>(gather_op_info.captures);
-+  auto index_vector_dim = std::get<1>(gather_op_info.captures);
-+  auto offset_dims = std::get<2>(gather_op_info.captures);
-+  auto operand_batching_dims = std::get<3>(gather_op_info.captures);
-+  auto result_shape = std::get<4>(gather_op_info.captures);
-+  auto slice_sizes = std::get<5>(gather_op_info.captures);
-+  auto start_index_map = std::get<6>(gather_op_info.captures);
-+  auto start_indices_batching_dims = std::get<7>(gather_op_info.captures);
-+
-+  if (auto search = op_lookup.gather.find(gather_op_info);
-+      search == op_lookup.gather.end()) {
-+    // std::cout << "Compiling GatherOp" << std::endl;
-+    auto gather_func =
-+        [collapsed_slice_dims, index_vector_dim, offset_dims,
-+         operand_batching_dims, result_shape, slice_sizes, start_index_map,
-+         start_indices_batching_dims](const std::vector<mx::array>& inputs) {
-+          auto operand = inputs[0];
-+          auto start_indices = inputs[1];
-+
-+          // Calculate batch dims
-+          std::vector<int32_t> batch_dims;
-+          for (int64_t i = 0; i < result_shape.size(); i++) {
-+            if (std::find(offset_dims.begin(), offset_dims.end(), i) ==
-+                offset_dims.end()) {
-+              batch_dims.emplace_back(static_cast<int32_t>(i));
-+            }
-+          }
-+
-+          // Iterate over result index space, populating result
-+          for (const auto result_index_tuple : index_space(result_shape)) {
-+            std::vector<int32_t> result_index =
-+                to_vector(result_index_tuple, result_shape.size());
-+
-+            std::vector<int32_t> batch_index(batch_dims.size());
-+            for (unsigned i = 0; i < batch_dims.size(); i++) {
-+              batch_index[i] = result_index[batch_dims[i]];
-+            }
-+          }
-+        };
-+  }
-+}
-+
 +void compileScatterOp(OpLookup& op_lookup, stablehlo::ScatterOp o) {
 +  ScatterOpInfo scatter_op_info = getScatterOpInfo(o);
-+  auto index_vector_dim = std::get<0>(scatter_op_info.captures);
++  auto index_vector_dim =
++      static_cast<int32_t>(std::get<0>(scatter_op_info.captures));
 +  auto input_batching_dims = std::get<1>(scatter_op_info.captures);
 +  auto inserted_window_dims = std::get<2>(scatter_op_info.captures);
 +  auto scatter_dims_to_operand_dims = std::get<3>(scatter_op_info.captures);

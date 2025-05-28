@@ -2510,8 +2510,6 @@ pub const Tensor = struct {
     test gatherSlices {
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
-        // TODO(@cryptodeal): MLX PjRt plugin calculate gather indices in batches
-        try zml.testing.mlxSkipTest(platform);
 
         const Local = struct {
             pub fn _gatherSlices(self: Tensor, slice_shape: Shape, indices: Tensor, opts: GatherOpts) Tensor {
