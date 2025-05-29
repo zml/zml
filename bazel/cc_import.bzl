@@ -42,7 +42,7 @@ def cc_import(
         shared_library = None,
         interface_library = None,
         data = None,
-        deps = None,
+        deps = [],
         visibility = None,
         soname = None,
         add_needed = None,
@@ -62,31 +62,18 @@ def cc_import(
             rename_dynamic_symbols = rename_dynamic_symbols,
         )
         shared_library = ":" + patched_name
-    if data:
-        _cc_import(
-            name = name + ".norunfiles",
-            static_library = static_library,
-            pic_static_library = pic_static_library,
-            shared_library = shared_library,
-            interface_library = interface_library,
-            data = data,
-            deps = deps,
-            **kwargs
-        )
-        native.cc_library(
-            name = name,
-            data = data,
-            deps = [name + ".norunfiles"],
-            visibility = visibility,
-        )
-    else:
-        _cc_import(
-            name = name,
-            static_library = static_library,
-            pic_static_library = pic_static_library,
-            shared_library = shared_library,
-            interface_library = interface_library,
-            deps = deps,
-            visibility = visibility,
-            **kwargs
-        )
+    _cc_import(
+        name = name + ".cc_import",
+        static_library = static_library,
+        pic_static_library = pic_static_library,
+        shared_library = shared_library,
+        interface_library = interface_library,
+        visibility = visibility,
+    )
+    native.cc_library(
+        name = name,
+        data = data,
+        deps = deps + [name + ".cc_import"],
+        visibility = visibility,
+        **kwargs
+    )

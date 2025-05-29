@@ -124,6 +124,7 @@ cc_library(
 
 cc_library(
     name = "libpjrt_neuron",
+    hdrs = ["libpjrt_neuron.h"],
     defines = ["ZML_RUNTIME_NEURON"],
     deps = [":libpjrt_neuron_"],
 )
@@ -150,9 +151,9 @@ zig_library(
 filegroup(
     name = "layers",
     srcs = [
-        "@neuron_bookworm//bash/amd64",
-        "@neuron_bookworm//libxml2/amd64",
-        "@neuron_bookworm//zlib1g/amd64",
+        "@apt_neuron//bash/amd64",
+        "@apt_neuron//libxml2/amd64",
+        "@apt_neuron//zlib1g/amd64",
     ],
     visibility = ["//visibility:public"],
 )
