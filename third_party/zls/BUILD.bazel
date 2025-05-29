@@ -1,10 +1,5 @@
-load(":zls.bzl", "targets", "zls_runner")
+load(":zls.bzl", "targets")
 
 toolchain_type(name = "toolchain_type")
 
 targets()
-
-zls_runner(
-    name = "zls",
-    target = "//:completion",
-)
