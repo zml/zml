@@ -39,7 +39,7 @@ CUDA_PACKAGES = {
     ),
     "cuda_nvtx": packages.cc_import_glob_hdrs(
         name = "nvtx",
-        hdrs_glob = "include/nvtx3/**/*.h",
+        hdrs_glob = ["include/nvtx3/**/*.h"],
         shared_library = "lib/libnvToolsExt.so.1",
     ),
     "libcufft": packages.cc_import(

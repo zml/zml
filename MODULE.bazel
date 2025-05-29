@@ -127,14 +127,6 @@ use_repo(
 llvm_configure = use_extension("@xla//:llvm.bzl", "llvm_configure")
 use_repo(llvm_configure, "llvm-project")
 
-apt = use_extension("@rules_distroless//apt:extensions.bzl", "apt")
-apt.install(
-    name = "neuron_bookworm",
-    lock = "//runtimes/neuron:packages.lock.json",
-    manifest = "//runtimes/neuron:packages.yaml",
-)
-use_repo(apt, "neuron_bookworm")
-
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(
     edition = "2021",
@@ -168,6 +160,14 @@ non_module_deps = use_extension("//:third_party/non_module_deps.bzl", "non_modul
 inject_repo(non_module_deps, "python_version_repo", "xla", "tsl")
 use_repo(non_module_deps, "com_google_sentencepiece", "org_swig_swig")
 
+apt = use_extension("@rules_distroless//apt:extensions.bzl", "apt")
+apt.install(
+    name = "apt_common",
+    lock = "//runtimes/common:packages.lock.json",
+    manifest = "//runtimes/common:packages.yaml",
+)
+use_repo(apt, "apt_common")
+
 apt.install(
     name = "apt_rocm",
     lock = "//runtimes/rocm:packages.lock.json",
@@ -176,8 +176,8 @@ apt.install(
 use_repo(apt, "apt_rocm")
 
 apt.install(
-    name = "apt_common",
-    lock = "//runtimes/common:packages.lock.json",
-    manifest = "//runtimes/common:packages.yaml",
+    name = "apt_neuron",
+    lock = "//runtimes/neuron:packages.lock.json",
+    manifest = "//runtimes/neuron:packages.yaml",
 )
-use_repo(apt, "apt_common")
+use_repo(apt, "apt_neuron")

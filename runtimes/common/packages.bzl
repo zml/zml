@@ -18,11 +18,11 @@ def _cc_import_glob_hdrs(name, hdrs_glob, shared_library, deps = [], **kwargs):
 cc_import(
     name = "{name}",
     shared_library = {shared_library},
-    hdrs = glob(["{hdrs_glob}"]),
+    hdrs = glob({hdrs_glob}),
     deps = {deps},
     {kwargs}
 )
-""".format(name = name, hdrs_glob = hdrs_glob, shared_library = repr(shared_library), deps = repr(deps), kwargs = _kwargs(**kwargs))
+""".format(name = name, hdrs_glob = repr(hdrs_glob), shared_library = repr(shared_library), deps = repr(deps), kwargs = _kwargs(**kwargs))
 
 def _filegroup(**kwargs):
     return """filegroup({})""".format(_kwargs(**kwargs))
