@@ -1,5 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
+const builtin = @import("builtin");
 
 const stdx = @import("stdx");
 const FnParam = stdx.meta.FnParam;
@@ -9,6 +10,7 @@ test {
     std.testing.refAllDecls(@This());
 }
 
+/// Visit a given type `T` and replace all fields containing `From` by fields containing `To`.
 pub fn MapType(From: type, To: type) type {
     return struct {
         pub fn map(T: type) type {
@@ -136,10 +138,10 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
                         @field(from, field.name),
                         &@field(to, field.name),
                     );
-                } else if (field.default_value) |_| {
+                } else if (field.default_value_ptr) |_| {
                     @field(to, field.name) = null;
                 } else {
-                    stdx.debug.compileError("Mapping {} to {} failed. Missing field {s}", .{ FromStruct, ToStruct, field.name });
+                    stdx.debug.compileError("Mapping {} -> {} inside {} failed. Missing field {s} in {}", .{ From, To, FromStruct, field.name, ToStruct });
                 },
                 else => @field(to, field.name) = @field(from, field.name),
             }
@@ -232,6 +234,93 @@ test mapAlloc {
     try testing.expectEqual(10, bb.slice[1].b);
     try testing.expectEqual(11, bb.static_slice[0].b);
     try testing.expectEqual(12, bb.static_slice[1].b);
+}
+
+/// Visit a given type `T` and:
+/// * replace all fields containing `From` by fields containing `To`
+/// * drop all fields not containing any `From`.
+/// The returned type will contains only `To` making it easy for the compiler to produce compact layout.
+/// Used by `zml.Bufferized` to strip compile time arguments from a model struct.
+pub fn MapRestrict(From: type, To: type) type {
+    return struct {
+        pub fn map(T: type) type {
+            switch (T) {
+                From => return To,
+                ?From => return ?To,
+                *From => return *To,
+                *const From => return *const To,
+                []From => return []To,
+                []const From => return []const To,
+                else => {},
+            }
+
+            if (!Contains(T, From)) return void;
+
+            return switch (@typeInfo(T)) {
+                .@"struct" => |struct_infos| {
+                    const fields = struct_infos.fields;
+                    var same: bool = true;
+                    var num_fields: usize = 0;
+
+                    var struct_fields: [fields.len]std.builtin.Type.StructField = undefined;
+                    for (fields) |field| {
+                        if (!field.is_comptime and Contains(field.type, From)) {
+                            const R = map(field.type);
+                            if (R == field.type) {
+                                struct_fields[num_fields] = field;
+                            } else {
+                                const name = if (struct_infos.is_tuple) struct_infos.fields[num_fields].name else field.name;
+                                struct_fields[num_fields] = .{
+                                    .name = name,
+                                    .type = R,
+                                    .default_value_ptr = null,
+                                    .is_comptime = field.is_comptime,
+                                    .alignment = @alignOf(R),
+                                };
+                                same = false;
+                                // Handle the case `field: ?Tensor = null`
+                                // Generic handling of default value is complicated,
+                                // it would require to call the callback at comptime.
+                                if (R == ?To) {
+                                    struct_fields[num_fields].default_value_ptr = &@as(R, null);
+                                }
+                            }
+                            num_fields += 1;
+                        }
+                    }
+                    if (num_fields == 0) return void;
+                    if (same) return T;
+                    return @Type(.{ .@"struct" = .{
+                        .layout = .auto,
+                        .fields = struct_fields[0..num_fields],
+                        .decls = &.{},
+                        .is_tuple = struct_infos.is_tuple,
+                    } });
+                },
+                .array => |arr_info| [arr_info.len]map(arr_info.child),
+                .pointer => |ptr_info| switch (ptr_info.size) {
+                    .slice => if (ptr_info.is_const)
+                        []const map(ptr_info.child)
+                    else
+                        []map(ptr_info.child),
+                    .one => if (ptr_info.is_const)
+                        *const map(ptr_info.child)
+                    else
+                        *map(ptr_info.child),
+                    .many => if (ptr_info.is_const)
+                        [*]const map(ptr_info.child)
+                    else
+                        [*]map(ptr_info.child),
+                    .c => if (ptr_info.is_const)
+                        [*c]map(ptr_info.child)
+                    else
+                        [*c]map(ptr_info.child),
+                },
+                .optional => |opt_info| ?map(opt_info.child),
+                else => T,
+            };
+        }
+    };
 }
 
 /// Recursively visit the given struct and calls the callback for each K found.

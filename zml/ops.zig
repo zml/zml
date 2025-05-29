@@ -108,13 +108,15 @@ test "simple while" {
     const zml = @import("zml.zig");
     const platform = zml.testing.env();
 
-    const init_i = try zml.Buffer.fromSlice(platform, .{}, &[_]i64{0});
-    const init_sum = try zml.Buffer.fromSlice(platform, .{}, &[_]i64{0});
-    const counter: zml.Bufferized(CountInts) = .{
-        .step = try zml.Buffer.fromSlice(platform, .{}, &[_]i64{1}),
-        .end = try zml.Buffer.fromSlice(platform, .{}, &[_]i64{10}),
-    };
-    const res0, const res1 = try zml.testing.compileAndCall(platform, CountInts._fwd, .{ counter, init_i, init_sum });
+    const res0, const res1 = try zml.testing.compileAndCall(
+        platform,
+        CountInts._fwd,
+        .{
+            .{ .step = try .scalar(platform, 1, .i64), .end = try .scalar(platform, 10, .i64) },
+            try .scalar(platform, 0, .i64),
+            try .scalar(platform, 0, .i64),
+        },
+    );
     const last_i = try res0.getValue(i64);
     const sum = try res1.getValue(i64);
 

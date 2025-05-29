@@ -231,6 +231,35 @@ pub const BaseExe = struct {
         }
     }
 
+    pub fn _unsafeAssignResults(self: BaseExe, T: type, result: *T) void {
+        const LocalContext = struct {
+            index: u32,
+            platform: Platform,
+            outputs: []const [*]*pjrt.Buffer,
+            output_shapes: []Shape,
+        };
+        var local_ctx: LocalContext = .{
+            .index = 0,
+            .platform = self.platform,
+            .outputs = self.output_per_device,
+            .output_shapes = self.result_shapes,
+        };
+        meta.visit((struct {
+            fn cb(ctx: *LocalContext, buffer: *Buffer) void {
+                const i = ctx.index;
+                ctx.index += 1;
+                if (i >= ctx.output_shapes.len) return;
+
+                var shards: Buffer.Shards = .{};
+                for (ctx.outputs) |buff| {
+                    shards.appendAssumeCapacity(buff[i]);
+                }
+                buffer.* = Buffer.fromPjrtBuffers(ctx.platform, ctx.output_shapes[i], shards.constSlice());
+            }
+        }).cb, &local_ctx, result);
+        stdx.debug.internalAssert(local_ctx.index == self.result_shapes.len, "Pjrt call returned {} tensors, but the return type {s}, contains {} Buffers. Note that modules need to have a comptime know number of returned tensors.", .{ self.output_per_device.len, @typeName(T), local_ctx.index });
+    }
+
     pub fn serialize(self: BaseExe, writer: anytype) !void {
         var executable = try self.exe.getExecutable(self.platform.pjrt_api);
         var serialize_result = try executable.serialize(self.platform.pjrt_api);
@@ -305,7 +334,7 @@ pub fn Exe(ArgsT: type, ReturnT: type) type {
             std.debug.assert(total_ready == self.inner.input_buffer_count);
             self.inner._unsafeCall();
             var result: Bufferized(ReturnT) = undefined;
-            assignRawBuffers(&result, self.inner.platform, self.inner.output_per_device, self.inner.result_shapes);
+            self.inner._unsafeAssignResults(Bufferized(ReturnT), &result);
             return result;
         }
     };
@@ -347,36 +376,6 @@ fn fillBuffers(v: anytype, shapes: []const Shape, buffers: []const [*]*pjrt.Buff
         }
     }).cb, &context, v);
     return context.index;
-}
-
-/// Visit the given struct and override tensors by creating a new one using the provided PJRT buffers.
-fn assignRawBuffers(v: anytype, platform: Platform, buffers: []const [*]*pjrt.Buffer, buffer_shapes: []Shape) void {
-    const LocalContext = struct {
-        index: u32,
-        platform: Platform,
-        buffers: []const [*]*pjrt.Buffer,
-        buffer_shapes: []Shape,
-    };
-    var local_ctx: LocalContext = .{
-        .index = 0,
-        .platform = platform,
-        .buffers = buffers,
-        .buffer_shapes = buffer_shapes,
-    };
-    meta.visit((struct {
-        fn cb(ctx: *LocalContext, buffer: *Buffer) void {
-            const i = ctx.index;
-            ctx.index += 1;
-            if (i >= ctx.buffer_shapes.len) return;
-
-            var shards: Buffer.Shards = .{};
-            for (ctx.buffers) |buff| {
-                shards.appendAssumeCapacity(buff[i]);
-            }
-            buffer.* = Buffer.fromPjrtBuffers(ctx.platform, ctx.buffer_shapes[i], shards.constSlice());
-        }
-    }).cb, &local_ctx, v);
-    stdx.debug.internalAssert(local_ctx.index == buffer_shapes.len, "Pjrt call returned {} tensors, but the return type {s}, contains {} Buffers. Note that modules need to have a comptime know number of returned tensors.", .{ buffers.len, @typeName(@TypeOf(v)), local_ctx.index });
 }
 
 fn prettyFnName(

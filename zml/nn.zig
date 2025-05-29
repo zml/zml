@@ -401,7 +401,7 @@ test "real/img" {
     {
         const mod = try zml.compileFn(std.testing.allocator, Fns.testSplitSeq, .{}, platform);
         defer mod.deinit();
-        const ret = mod.call(.{});
+        const ret = mod.call({});
         try testing.expectEqual(20, ret.getValue(i32));
     }
     const d_split_interleaved = try zml.testing.compileAndCall(platform, Fns.testSplitInterleaved, .{});
@@ -1106,11 +1106,11 @@ test sdpaMemEfficient {
     const rng_mask = try zml.compileFn(allocator, Tensor.Rng.normal, .{ Shape.init(.{ 512, 512 }, .f32), .{ .mean = 0, .stddev = 1 } }, platform);
     defer rng_mask.deinit();
 
-    // Note: it's fine to pass undefined here, cause the arguments have already been backed into the executable.
-    const q = rng.call(undefined).withTags(.{ .b, .h, .q, .hd });
-    const k = rng.call(undefined).withTags(.{ .b, .h, .k, .hd });
-    const v = rng.call(undefined).withTags(.{ .b, .h, .k, .hd });
-    const mask = rng_mask.call(undefined).withTags(.{ .q, .k });
+    // Note: we pass void here, cause Rng.normal doesn't take any runtime inputs.
+    const q = rng.call({}).withTags(.{ .b, .h, .q, .hd });
+    const k = rng.call({}).withTags(.{ .b, .h, .k, .hd });
+    const v = rng.call({}).withTags(.{ .b, .h, .k, .hd });
+    const mask = rng_mask.call({}).withTags(.{ .q, .k });
 
     const ref_res = try zml.testing.compileAndCall(
         platform,
@@ -1164,11 +1164,11 @@ test "sdpaMemEfficient transposed" {
     const rng_mask = try zml.compileFn(allocator, Tensor.Rng.normal, .{ Shape.init(.{ 512, 512 }, .f32), .{ .mean = 0, .stddev = 1 } }, platform);
     defer rng_mask.deinit();
 
-    // Note: it's fine to pass undefined here, cause the arguments have already been backed into the executable.
-    const q = rng.call(undefined).withTags(.{ .b, .q, .h, .hd });
-    const k = rng.call(undefined).withTags(.{ .b, .k, .h, .hd });
-    const v = rng.call(undefined).withTags(.{ .b, .k, .h, .hd });
-    const mask = rng_mask.call(undefined).withTags(.{ .q, .k });
+    // Note: we pass void here, cause Rng.normal doesn't take any runtime inputs.
+    const q = rng.call({}).withTags(.{ .b, .q, .h, .hd });
+    const k = rng.call({}).withTags(.{ .b, .k, .h, .hd });
+    const v = rng.call({}).withTags(.{ .b, .k, .h, .hd });
+    const mask = rng_mask.call({}).withTags(.{ .q, .k });
 
     const ref_res = try zml.testing.compileAndCall(
         platform,
@@ -1266,7 +1266,7 @@ test sampleTokens {
         const logits, const expected: i32 = logits_expected;
         var logits_buff = try zml.Buffer.fromArray(platform, logits);
         defer logits_buff.deinit();
-        var sampled, rng_buff = mod.call(.{ logits_buff, undefined, rng_buff });
+        var sampled, rng_buff = mod.call(.{ logits_buff, rng_buff });
         defer sampled.deinit();
         try zml.testing.expectEqual(expected, try sampled.getValue(i32));
     }
@@ -1304,7 +1304,6 @@ pub const DynamicSamplingStrategy = struct {
         opts: Opts,
     ) !zml.Bufferized(DynamicSamplingStrategy) {
         return .{
-            .max_top_k = 0,
             .top_k = try zml.Buffer.scalar(platform, opts.top_k, .i32),
             .temperature = try zml.Buffer.scalar(platform, opts.temperature, dtype),
             .top_p = try zml.Buffer.scalar(platform, opts.top_p, dtype),
