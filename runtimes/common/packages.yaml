@@ -4,17 +4,17 @@
 version: 1
 
 sources:
-  - channel: bookworm main
-    url: https://snapshot-cloudflare.debian.org/archive/debian/20241127T143620Z/
+    - channel: bookworm main
+      url: https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/
 
 archs:
-  - "amd64"
+    - "amd64"
 
 packages:
-  - "libdrm2"
-  - "libelf1"
-  - "libnuma1"
-  - "libzstd1"
-  - "libdrm-amdgpu1"
-  - "libtinfo6"
-  - "zlib1g"
+    - "libdrm2"
+    - "libelf1"
+    - "libnuma1"
+    - "libzstd1"
+    - "libdrm-amdgpu1"
+    - "libtinfo6"
+    - "zlib1g"
