@@ -4,19 +4,19 @@
 			"arch": "amd64",
 			"dependencies": [
 				{
-					"key": "libc6_2.36-9-p-deb12u9_amd64",
+					"key": "libc6_2.36-9-p-deb12u10_amd64",
 					"name": "libc6",
-					"version": "2.36-9+deb12u9"
+					"version": "2.36-9+deb12u10"
 				},
 				{
-					"key": "libgcc-s1_12.2.0-14_amd64",
+					"key": "libgcc-s1_12.2.0-14-p-deb12u1_amd64",
 					"name": "libgcc-s1",
-					"version": "12.2.0-14"
+					"version": "12.2.0-14+deb12u1"
 				},
 				{
-					"key": "gcc-12-base_12.2.0-14_amd64",
+					"key": "gcc-12-base_12.2.0-14-p-deb12u1_amd64",
 					"name": "gcc-12-base",
-					"version": "12.2.0-14"
+					"version": "12.2.0-14+deb12u1"
 				},
 				{
 					"key": "libdrm-common_2.4.114-1_amd64",
@@ -28,42 +28,42 @@
 			"name": "libdrm2",
 			"sha256": "be18fb670797ba32da9628cf3e8acd83160d8db8c8dd842501dd8e401c3b5371",
 			"urls": [
-				"https://snapshot-cloudflare.debian.org/archive/debian/20241127T143620Z/pool/main/libd/libdrm/libdrm2_2.4.114-1+b1_amd64.deb"
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/libd/libdrm/libdrm2_2.4.114-1+b1_amd64.deb"
 			],
 			"version": "2.4.114-1+b1"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "libc6_2.36-9-p-deb12u9_amd64",
+			"key": "libc6_2.36-9-p-deb12u10_amd64",
 			"name": "libc6",
-			"sha256": "3a043b9dbf1a8c8b5a9e2268253e6dca8c7d431bd7a202fea96364abf374fea9",
+			"sha256": "5dc83256f10ca4d0f2a53dd6583ffd0d0e319af30074ea6c82fb0ae77bd16365",
 			"urls": [
-				"https://snapshot-cloudflare.debian.org/archive/debian/20241127T143620Z/pool/main/g/glibc/libc6_2.36-9+deb12u9_amd64.deb"
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/g/glibc/libc6_2.36-9+deb12u10_amd64.deb"
 			],
-			"version": "2.36-9+deb12u9"
+			"version": "2.36-9+deb12u10"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "libgcc-s1_12.2.0-14_amd64",
+			"key": "libgcc-s1_12.2.0-14-p-deb12u1_amd64",
 			"name": "libgcc-s1",
-			"sha256": "f3d1d48c0599aea85b7f2077a01d285badc42998c1a1e7473935d5cf995c8141",
+			"sha256": "3016e62cb4b7cd8038822870601f5ed131befe942774d0f745622cc77d8a88f7",
 			"urls": [
-				"https://snapshot-cloudflare.debian.org/archive/debian/20241127T143620Z/pool/main/g/gcc-12/libgcc-s1_12.2.0-14_amd64.deb"
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/g/gcc-12/libgcc-s1_12.2.0-14+deb12u1_amd64.deb"
 			],
-			"version": "12.2.0-14"
+			"version": "12.2.0-14+deb12u1"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "gcc-12-base_12.2.0-14_amd64",
+			"key": "gcc-12-base_12.2.0-14-p-deb12u1_amd64",
 			"name": "gcc-12-base",
-			"sha256": "1a03df5a57833d65b5bb08cfa19d50e76f29088dc9e64fb934af42d9023a0807",
+			"sha256": "1896a2aacf4ad681ff5eacc24a5b0ca4d5d9c9b9c9e4b6de5197bc1e116ea619",
 			"urls": [
-				"https://snapshot-cloudflare.debian.org/archive/debian/20241127T143620Z/pool/main/g/gcc-12/gcc-12-base_12.2.0-14_amd64.deb"
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/g/gcc-12/gcc-12-base_12.2.0-14+deb12u1_amd64.deb"
 			],
-			"version": "12.2.0-14"
+			"version": "12.2.0-14+deb12u1"
 		},
 		{
 			"arch": "amd64",
@@ -72,7 +72,7 @@
 			"name": "libdrm-common",
 			"sha256": "32f9664138b38b224383c6986457d5ad2ec8efd559b1a0ce7749405f7a451aad",
 			"urls": [
-				"https://snapshot-cloudflare.debian.org/archive/debian/20241127T143620Z/pool/main/libd/libdrm/libdrm-common_2.4.114-1_all.deb"
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/libd/libdrm/libdrm-common_2.4.114-1_all.deb"
 			],
 			"version": "2.4.114-1"
 		},
@@ -85,26 +85,26 @@
 					"version": "1:1.2.13.dfsg-1"
 				},
 				{
-					"key": "libc6_2.36-9-p-deb12u9_amd64",
+					"key": "libc6_2.36-9-p-deb12u10_amd64",
 					"name": "libc6",
-					"version": "2.36-9+deb12u9"
+					"version": "2.36-9+deb12u10"
 				},
 				{
-					"key": "libgcc-s1_12.2.0-14_amd64",
+					"key": "libgcc-s1_12.2.0-14-p-deb12u1_amd64",
 					"name": "libgcc-s1",
-					"version": "12.2.0-14"
+					"version": "12.2.0-14+deb12u1"
 				},
 				{
-					"key": "gcc-12-base_12.2.0-14_amd64",
+					"key": "gcc-12-base_12.2.0-14-p-deb12u1_amd64",
 					"name": "gcc-12-base",
-					"version": "12.2.0-14"
+					"version": "12.2.0-14+deb12u1"
 				}
 			],
 			"key": "libelf1_0.188-2.1_amd64",
 			"name": "libelf1",
 			"sha256": "619add379c606b3ac6c1a175853b918e6939598a83d8ebadf3bdfd50d10b3c8c",
 			"urls": [
-				"https://snapshot-cloudflare.debian.org/archive/debian/20241127T143620Z/pool/main/e/elfutils/libelf1_0.188-2.1_amd64.deb"
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/e/elfutils/libelf1_0.188-2.1_amd64.deb"
 			],
 			"version": "0.188-2.1"
 		},
@@ -112,26 +112,26 @@
 			"arch": "amd64",
 			"dependencies": [
 				{
-					"key": "libc6_2.36-9-p-deb12u9_amd64",
+					"key": "libc6_2.36-9-p-deb12u10_amd64",
 					"name": "libc6",
-					"version": "2.36-9+deb12u9"
+					"version": "2.36-9+deb12u10"
 				},
 				{
-					"key": "libgcc-s1_12.2.0-14_amd64",
+					"key": "libgcc-s1_12.2.0-14-p-deb12u1_amd64",
 					"name": "libgcc-s1",
-					"version": "12.2.0-14"
+					"version": "12.2.0-14+deb12u1"
 				},
 				{
-					"key": "gcc-12-base_12.2.0-14_amd64",
+					"key": "gcc-12-base_12.2.0-14-p-deb12u1_amd64",
 					"name": "gcc-12-base",
-					"version": "12.2.0-14"
+					"version": "12.2.0-14+deb12u1"
 				}
 			],
 			"key": "zlib1g_1-1.2.13.dfsg-1_amd64",
 			"name": "zlib1g",
 			"sha256": "d7dd1d1411fedf27f5e27650a6eff20ef294077b568f4c8c5e51466dc7c08ce4",
 			"urls": [
-				"https://snapshot-cloudflare.debian.org/archive/debian/20241127T143620Z/pool/main/z/zlib/zlib1g_1.2.13.dfsg-1_amd64.deb"
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/z/zlib/zlib1g_1.2.13.dfsg-1_amd64.deb"
 			],
 			"version": "1:1.2.13.dfsg-1"
 		},
@@ -139,26 +139,26 @@
 			"arch": "amd64",
 			"dependencies": [
 				{
-					"key": "libc6_2.36-9-p-deb12u9_amd64",
+					"key": "libc6_2.36-9-p-deb12u10_amd64",
 					"name": "libc6",
-					"version": "2.36-9+deb12u9"
+					"version": "2.36-9+deb12u10"
 				},
 				{
-					"key": "libgcc-s1_12.2.0-14_amd64",
+					"key": "libgcc-s1_12.2.0-14-p-deb12u1_amd64",
 					"name": "libgcc-s1",
-					"version": "12.2.0-14"
+					"version": "12.2.0-14+deb12u1"
 				},
 				{
-					"key": "gcc-12-base_12.2.0-14_amd64",
+					"key": "gcc-12-base_12.2.0-14-p-deb12u1_amd64",
 					"name": "gcc-12-base",
-					"version": "12.2.0-14"
+					"version": "12.2.0-14+deb12u1"
 				}
 			],
 			"key": "libnuma1_2.0.16-1_amd64",
 			"name": "libnuma1",
 			"sha256": "639e1ab6bd66ead40db8a22c332d7199679fa22db261cac34444eb8eb4c17dda",
 			"urls": [
-				"https://snapshot-cloudflare.debian.org/archive/debian/20241127T143620Z/pool/main/n/numactl/libnuma1_2.0.16-1_amd64.deb"
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/n/numactl/libnuma1_2.0.16-1_amd64.deb"
 			],
 			"version": "2.0.16-1"
 		},
@@ -166,26 +166,26 @@
 			"arch": "amd64",
 			"dependencies": [
 				{
-					"key": "libc6_2.36-9-p-deb12u9_amd64",
+					"key": "libc6_2.36-9-p-deb12u10_amd64",
 					"name": "libc6",
-					"version": "2.36-9+deb12u9"
+					"version": "2.36-9+deb12u10"
 				},
 				{
-					"key": "libgcc-s1_12.2.0-14_amd64",
+					"key": "libgcc-s1_12.2.0-14-p-deb12u1_amd64",
 					"name": "libgcc-s1",
-					"version": "12.2.0-14"
+					"version": "12.2.0-14+deb12u1"
 				},
 				{
-					"key": "gcc-12-base_12.2.0-14_amd64",
+					"key": "gcc-12-base_12.2.0-14-p-deb12u1_amd64",
 					"name": "gcc-12-base",
-					"version": "12.2.0-14"
+					"version": "12.2.0-14+deb12u1"
 				}
 			],
 			"key": "libzstd1_1.5.4-p-dfsg2-5_amd64",
 			"name": "libzstd1",
 			"sha256": "6315b5ac38b724a710fb96bf1042019398cb656718b1522279a5185ed39318fa",
 			"urls": [
-				"https://snapshot-cloudflare.debian.org/archive/debian/20241127T143620Z/pool/main/libz/libzstd/libzstd1_1.5.4+dfsg2-5_amd64.deb"
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/libz/libzstd/libzstd1_1.5.4+dfsg2-5_amd64.deb"
 			],
 			"version": "1.5.4+dfsg2-5"
 		},
@@ -198,19 +198,19 @@
 					"version": "2.4.114-1+b1"
 				},
 				{
-					"key": "libc6_2.36-9-p-deb12u9_amd64",
+					"key": "libc6_2.36-9-p-deb12u10_amd64",
 					"name": "libc6",
-					"version": "2.36-9+deb12u9"
+					"version": "2.36-9+deb12u10"
 				},
 				{
-					"key": "libgcc-s1_12.2.0-14_amd64",
+					"key": "libgcc-s1_12.2.0-14-p-deb12u1_amd64",
 					"name": "libgcc-s1",
-					"version": "12.2.0-14"
+					"version": "12.2.0-14+deb12u1"
 				},
 				{
-					"key": "gcc-12-base_12.2.0-14_amd64",
+					"key": "gcc-12-base_12.2.0-14-p-deb12u1_amd64",
 					"name": "gcc-12-base",
-					"version": "12.2.0-14"
+					"version": "12.2.0-14+deb12u1"
 				},
 				{
 					"key": "libdrm-common_2.4.114-1_amd64",
@@ -222,7 +222,7 @@
 			"name": "libdrm-amdgpu1",
 			"sha256": "b75a71e96f1faac0f131ac657e09efcbe8968eef62cc34b8abfcff2ff9f0cccd",
 			"urls": [
-				"https://snapshot-cloudflare.debian.org/archive/debian/20241127T143620Z/pool/main/libd/libdrm/libdrm-amdgpu1_2.4.114-1+b1_amd64.deb"
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/libd/libdrm/libdrm-amdgpu1_2.4.114-1+b1_amd64.deb"
 			],
 			"version": "2.4.114-1+b1"
 		},
@@ -230,26 +230,26 @@
 			"arch": "amd64",
 			"dependencies": [
 				{
-					"key": "libc6_2.36-9-p-deb12u9_amd64",
+					"key": "libc6_2.36-9-p-deb12u10_amd64",
 					"name": "libc6",
-					"version": "2.36-9+deb12u9"
+					"version": "2.36-9+deb12u10"
 				},
 				{
-					"key": "libgcc-s1_12.2.0-14_amd64",
+					"key": "libgcc-s1_12.2.0-14-p-deb12u1_amd64",
 					"name": "libgcc-s1",
-					"version": "12.2.0-14"
+					"version": "12.2.0-14+deb12u1"
 				},
 				{
-					"key": "gcc-12-base_12.2.0-14_amd64",
+					"key": "gcc-12-base_12.2.0-14-p-deb12u1_amd64",
 					"name": "gcc-12-base",
-					"version": "12.2.0-14"
+					"version": "12.2.0-14+deb12u1"
 				}
 			],
 			"key": "libtinfo6_6.4-4_amd64",
 			"name": "libtinfo6",
 			"sha256": "072d908f38f51090ca28ca5afa3b46b2957dc61fe35094c0b851426859a49a51",
 			"urls": [
-				"https://snapshot-cloudflare.debian.org/archive/debian/20241127T143620Z/pool/main/n/ncurses/libtinfo6_6.4-4_amd64.deb"
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/n/ncurses/libtinfo6_6.4-4_amd64.deb"
 			],
 			"version": "6.4-4"
 		}
