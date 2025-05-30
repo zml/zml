@@ -75,6 +75,17 @@ pub const Platform = struct {
         return res;
     }
 
+    pub fn registerFFIType(self: Platform, comptime T: type) !void {
+        if (self.pjrt_api.ffi()) |ffi| {
+            if (!@hasDecl(T, "type_id")) {
+                stdx.debug.panic("registerFFIType requires type {s} to have a `type_id` i64 field ", .{@typeName(T)});
+            }
+            try ffi.registerTypeId(self.pjrt_api, T);
+        } else {
+            stdx.debug.panic("registerFFIType is not available for target {s}", .{@tagName(self.target)});
+        }
+    }
+
     pub fn deinit(self: *Platform) void {
         self.pjrt_client.deinit(self.pjrt_api);
     }

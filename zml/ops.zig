@@ -769,58 +769,6 @@ pub fn fromMlirOperationWithTags(op: mlir.Operation, base: anytype) @TypeOf(base
     return res;
 }
 
-pub const HostCallbackOpt = struct {
-    has_side_effect: bool = false,
-    output_operand_aliases: []const i64 = &.{},
-};
-
-pub fn addHostCallback(
-    callback: *const Context.HostCallback,
-    blkctx: ?*anyopaque,
-    inputs: []const Tensor,
-    output_shapes: []const Shape,
-    opts: HostCallbackOpt,
-) []Tensor {
-    const ctx = CompilationContext.current();
-
-    const mlir_ctx = ctx.mlirCtx();
-    const backend_config = mlir.Attribute.dict(mlir_ctx, &.{
-        .{ "callback", .int(mlir_ctx, .u64, @bitCast(@intFromPtr(callback))) },
-        .{ "user_context", .int(mlir_ctx, .u64, @bitCast(@intFromPtr(blkctx))) },
-    });
-
-    const values = stdx.stackSlice(8, mlir.Value, inputs.len);
-    for (inputs, values) |i, *v| {
-        v.* = ctx.getValue(i.toMemory(.host_pinned));
-    }
-    const res_types = stdx.stackSlice(8, mlir.Type, output_shapes.len);
-    for (res_types, output_shapes) |*r, o| {
-        r.* = mlir.ext.RankedTensorType.fromShape(mlir_ctx, o).as(mlir.Type);
-    }
-
-    const loc = ctx.mlirCtx().location(@src());
-    const op = dialect.stablehlo.custom_call(
-        ctx.mlirCtx(),
-        values,
-        .{
-            .call_target_name = "zmlHostBufferCallback",
-            .api_version = .typed_ffi,
-            .backend_config = backend_config,
-            .has_side_effect = opts.has_side_effect,
-            .output_operand_aliases = opts.output_operand_aliases,
-        },
-        res_types,
-        loc,
-    );
-
-    const res = ctx.allocator().alloc(Tensor, output_shapes.len) catch @panic("OOM");
-    for (res, output_shapes, 0..) |*r, o, i| {
-        r.* = Tensor._result(o, op.result(i)).toMemory(.device);
-    }
-
-    return res;
-}
-
 pub const TritonOps = struct {
     debug: bool = false,
     name: [:0]const u8,
