@@ -93,6 +93,9 @@ common:silent   --logging=0
 common          --registry=https://bazel-registry.zml.ai
 common          --registry=https://bcr.bazel.build
 
+common          --@rules_zig//zig/settings:copt=-fPIC
+common          --@rules_zig//zig/settings:copt=-fPIE
+
 # --config=debug will used optmized backend, but all the frontend zig code will be compiled in debug mode.
 common:debug    --compilation_mode=opt
 common:debug    --@rules_zig//zig/settings:mode=debug
@@ -107,8 +110,5 @@ common:alldebug --strategy=local
 
 common:release  --compilation_mode=opt
 common:release  --copt=-Ofast
-common:release  --copt=-march=native
-common:release  --copt=-mcpu=native
 common:release  --@rules_zig//zig/settings:mode=release_fast
-common:release  --@rules_zig//zig/settings:copt=-mcpu=native
 common:release  --@rules_zig//zig/settings:copt=-fomit-frame-pointer
