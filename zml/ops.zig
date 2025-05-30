@@ -1269,6 +1269,7 @@ fn TensorOrTensorArray(comptime T: type) type {
 
 pub const CustomCallOptions = struct {
     output_operand_aliases: ?[]const i64 = null,
+    sharding: ?[]const u8 = null,
 };
 
 pub fn customCall(target_name: [:0]const u8, inputs: anytype, outputs: anytype, metadata: anytype, opts: CustomCallOptions) TensorOrTensorArray(@TypeOf(outputs)) {
@@ -1318,6 +1319,7 @@ pub fn customCall(target_name: [:0]const u8, inputs: anytype, outputs: anytype, 
             .operand_layouts = &operands_layouts,
             .result_layouts = &results_layouts,
             .output_operand_aliases = opts.output_operand_aliases orelse &.{},
+            .sharding = opts.sharding,
         },
         &res_types,
         ctx.mlirCtx().location(@src()),
@@ -1362,4 +1364,61 @@ const _MINOR_TO_MAJOR = blk: {
 
 fn minorToMajor(rank: u8) []const usize {
     return _MINOR_TO_MAJOR[_MINOR_TO_MAJOR.len - rank ..];
+}
+
+pub fn fullToShard(tensor: Tensor, output_shape: Shape) Tensor {
+    const ctx = module.CompilationContext.current();
+
+    const op = dialect.stablehlo.custom_call(
+        ctx.mlirCtx(),
+        &.{tensor.value()},
+        .{
+            .call_target_name = "SPMDFullToShardShape",
+            .backend_config = mlir.Attribute.string(ctx.mlirCtx(), ""),
+            .has_side_effect = false,
+            .api_version = .original,
+            .sharding = "{manual}",
+        },
+        &.{mlir.ext.mlirType(ctx.mlirCtx(), output_shape)},
+        ctx.mlirCtx().location(@src()),
+    );
+    return Tensor._result(output_shape, op.result(0));
+}
+
+pub fn shardToFull(tensor: Tensor, output_shape: Shape, sharding_: []const u8) Tensor {
+    const ctx = module.CompilationContext.current();
+
+    const op = dialect.stablehlo.custom_call(
+        ctx.mlirCtx(),
+        &.{tensor.value()},
+        .{
+            .call_target_name = "SPMDShardToFullShape",
+            .backend_config = mlir.Attribute.string(ctx.mlirCtx(), ""),
+            .has_side_effect = false,
+            .api_version = .original,
+            .sharding = sharding_,
+        },
+        &.{mlir.ext.mlirType(ctx.mlirCtx(), output_shape)},
+        ctx.mlirCtx().location(@src()),
+    );
+    return Tensor._result(output_shape, op.result(0));
+}
+
+pub fn sharding(tensor: Tensor, output_shape: Shape, sharding_: []const u8) Tensor {
+    const ctx = module.CompilationContext.current();
+
+    const op = dialect.stablehlo.custom_call(
+        ctx.mlirCtx(),
+        &.{tensor.value()},
+        .{
+            .call_target_name = "Sharding",
+            .backend_config = mlir.Attribute.string(ctx.mlirCtx(), ""),
+            .has_side_effect = false,
+            .api_version = .original,
+            .sharding = sharding_,
+        },
+        &.{mlir.ext.mlirType(ctx.mlirCtx(), output_shape)},
+        ctx.mlirCtx().location(@src()),
+    );
+    return Tensor._result(output_shape, op.result(0));
 }

@@ -747,6 +747,7 @@ pub const CustomCallOpts = struct {
     output_operand_aliases: []const i64 = &.{},
     additional_attributes: []const mlir.AttrTuple = &.{},
     api_version: ApiVersion,
+    sharding: ?[]const u8 = null,
 };
 
 pub fn custom_call(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCallOpts, res_types: []const mlir.Type, location: mlir.Location) mlir.Operation {
@@ -775,6 +776,9 @@ pub fn custom_call(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCa
         .{ "has_side_effect", .boolean(ctx, opts.has_side_effect) },
         .{ "backend_config", backend_config },
     });
+    if (opts.sharding) |sharding| {
+        attrs.appendAssumeCapacity(mlir.AttrTuple{ "mhlo.sharding", .string(ctx, sharding) });
+    }
 
     {
         var output_operand_aliases: std.BoundedArray(mlir.Attribute, MAX_RESULTS) = .{};

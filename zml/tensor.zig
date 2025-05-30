@@ -200,6 +200,38 @@ pub const Tensor = struct {
         };
     }
 
+    pub fn withShardingFromShape(self: Tensor, shape_: Shape) Tensor {
+        return switch (self._id) {
+            .arg_id, .mlir => {
+                const ctx = self.getContext();
+                const mlir_ctx = ctx.mlirCtx();
+                var res = self;
+                res._shape = shape_;
+
+                const op = dialect.stablehlo.custom_call(
+                    mlir_ctx,
+                    &.{self.value()},
+                    .{
+                        .call_target_name = "Sharding",
+                        .has_side_effect = false,
+                        .backend_config = null,
+                        .additional_attributes = &.{.{ "mhlo.sharding", ctx.getShardingAttr(res._shape) }},
+                        .api_version = .original,
+                    },
+                    &.{self.value().getType()},
+                    mlir_ctx.location(@src()),
+                );
+
+                return _result(res._shape, op.result(0));
+            },
+            .buffer_id => {
+                var res = self;
+                res._shape = shape_;
+                return res;
+            },
+        };
+    }
+
     pub fn toMemory(self: Tensor, kind: Memory) Tensor {
         return switch (self._id) {
             .arg_id, .mlir => {
