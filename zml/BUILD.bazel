@@ -44,7 +44,7 @@ zig_library(
 zig_proto_library(
     name = "xla_proto",
     import_name = "//xla:xla_proto",
-    deps = ["@xla//xla/pjrt:compile_options_proto"],
+    deps = ["@xla//xla/pjrt/proto:compile_options_proto"],
 )
 
 zig_proto_library(

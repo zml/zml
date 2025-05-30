@@ -1,0 +1,41 @@
+From 6cf475b500521c1b8be06f590fdbc1818f0dc44b Mon Sep 17 00:00:00 2001
+From: Jean-Baptiste Dalido <jb@zml.ai>
+Date: Mon, 6 Jan 2025 13:33:13 +0100
+Subject: [PATCH] bazel: migration to bazel 8.0.1
+
+---
+ .bazelversion                                       | 2 +-
+ third_party/tsl/third_party/gpus/cuda_configure.bzl | 4 ++--
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/.bazelversion b/.bazelversion
+index f22d756da3..fa5fce04b3 100644
+--- a/.bazelversion
++++ b/.bazelversion
+@@ -1 +1 @@
+-7.4.1
++8.1.1
+\ No newline at end of file
+diff --git a/third_party/gpus/cuda_configure.bzl b/third_party/gpus/cuda_configure.bzl
+index d62531152d..71d80a5a99 100644
+--- a/third_party/gpus/cuda_configure.bzl
++++ b/third_party/gpus/cuda_configure.bzl
+@@ -33,14 +33,14 @@ NB: DEPRECATED! Use `hermetic/cuda_configure` rule instead.
+ load(
+     "@bazel_tools//tools/cpp:lib_cc_configure.bzl",
+     "escape_string",
+-    "get_env_var",
+ )
+ load(
+     "@bazel_tools//tools/cpp:windows_cc_configure.bzl",
+-    "find_msvc_tool",
+     "find_vc_path",
+     "setup_vc_env_vars",
+ )
++load("@rules_cc//cc/private/toolchain:windows_cc_configure.bzl", "find_msvc_tool")
++load("@rules_cc//cc/private/toolchain:lib_cc_configure.bzl", "get_env_var")
+ load("//third_party/clang_toolchain:download_clang.bzl", "download_clang")
+ load(
+     "//third_party/remote_config:common.bzl",
+--
+2.39.3 (Apple Git-146)
