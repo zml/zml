@@ -2978,9 +2978,6 @@ pub const Tensor = struct {
     test argsort {
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
-        // TODO(@cryptodeal): Fix this for MLX PjRt Plugin Implementation.
-        // Currently segfaults; worked prior to rebase on latest XLA, MLX, and ZML.
-        try zml.testing.mlxSkipTest(platform);
 
         const Local = struct {
             pub fn _argsort(x: Tensor, axis_: u3, opts: ArgSortOpts) Tensor {

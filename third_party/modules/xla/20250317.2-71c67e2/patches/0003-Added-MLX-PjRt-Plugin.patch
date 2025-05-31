@@ -1351,10 +1351,10 @@ index 0000000000..ef42968a3a
 \ No newline at end of file
 diff --git a/xla/pjrt/plugin/mlx/executable.cc b/xla/pjrt/plugin/mlx/executable.cc
 new file mode 100644
-index 0000000000..3c36b94b82
+index 0000000000..cf551b2dc7
 --- /dev/null
 +++ b/xla/pjrt/plugin/mlx/executable.cc
-@@ -0,0 +1,2377 @@
+@@ -0,0 +1,2370 @@
 +/* Copyright 2024 The OpenXLA Authors.
 +Licensed under the Apache License, Version 2.0 (the "License");
 +you may not use this file except in compliance with the License.
@@ -2713,9 +2713,9 @@ index 0000000000..3c36b94b82
 +                // .Case<stablehlo::SelectAndScatterOp>([](auto o) {})
 +                // .Case<stablehlo::SetDimensionSizeOp>([](auto o) {})
 +                .Case<stablehlo::SortOp>([&block_ctx, &inputs](auto o) {
-+                  std::vector<mx::array> inputs;
++                  std::vector<mx::array> tmp_inputs;
 +                  for (auto val : o.getInputs()) {
-+                    inputs.emplace_back(
++                    tmp_inputs.emplace_back(
 +                        getOperandArray(val, block_ctx, inputs));
 +                  }
 +                  int dim = static_cast<int>(o.getDimension());
@@ -2723,10 +2723,11 @@ index 0000000000..3c36b94b82
 +                  mlir::Block& comparator = o.getComparator().front();
 +                  auto [index, comparator_type] = *getSortInfo(comparator);
 +                  auto indices =
-+                      mx::argsort(inputs[index], dim, comparator_type);
++                      mx::argsort(tmp_inputs[index], dim, comparator_type);
 +                  std::vector<mx::array> res;
-+                  for (auto in : inputs) {
-+                    res.push_back(mx::gather(in, indices, {dim}, {1}));
++                  mx::Shape slice_sizes(tmp_inputs[0].ndim(), 1);
++                  for (auto in : tmp_inputs) {
++                    res.push_back(mx::gather(in, indices, dim, slice_sizes));
 +                  }
 +                  return res;
 +                })
@@ -3144,154 +3145,158 @@ index 0000000000..3c36b94b82
 +      std::vector<mx::array> inputs(in.begin(), in.begin() + input_count);
 +      std::vector<mx::array> updates(in.begin() + input_count, in.end() - 1);
 +      auto scatter_indices = in[in.size() - 1];
-+
-+      std::vector<mx::array> input_indices;
-+      std::vector<mx::array> update_indices;
-+
-+      // iterate over updates[0] index space
-+      for (const auto update_index_tuple : index_space(updates[0].shape())) {
-+        std::vector<int32_t> update_index = to_vector(
-+            update_index_tuple, static_cast<size_t>(updates[0].ndim()));
-+
-+        // Calculate update scatter dims
-+        std::vector<int32_t> update_scatter_dims;
-+        for (auto i = 0; i < updates[0].ndim(); i++) {
-+          if (std::find(update_window_dims.begin(), update_window_dims.end(),
-+                        static_cast<int64_t>(i)) == update_window_dims.end()) {
-+            update_scatter_dims.emplace_back(static_cast<int32_t>(i));
-+          }
++      // Calculate update scatter dims
++      std::vector<int32_t> update_scatter_dims;
++      for (auto i = 0; i < updates[0].ndim(); i++) {
++        if (std::find(update_window_dims.begin(), update_window_dims.end(),
++                      static_cast<int64_t>(i)) == update_window_dims.end()) {
++          update_scatter_dims.emplace_back(static_cast<int32_t>(i));
 +        }
++      }
 +
-+        // Calculate update scatter index
-+        std::vector<int32_t> update_scatter_index(update_scatter_dims.size());
-+        for (auto i = 0; i < update_scatter_dims.size(); i++) {
-+          update_scatter_index[i] = update_index[update_scatter_dims[i]];
-+        }
++      // Calculate update indices
++      std::vector<mx::array> meshgrid_arrays;
++      for (const auto& dim : updates[0].shape()) {
++        meshgrid_arrays.push_back(mx::arange(dim));
++      }
++      mx::array update_indices =
++          mx::reshape(mx::stack(mx::meshgrid(meshgrid_arrays, false, "ij"), -1),
++                      {-1, static_cast<int>(updates[0].ndim())});
 +
-+        // Slice start index
-+        std::vector<int32_t> sin_start = update_scatter_index;
-+        std::vector<int32_t> sin_stop = update_scatter_index;
-+        if (index_vector_dim < scatter_indices.ndim()) {
-+          sin_start.insert(sin_start.begin() + index_vector_dim, 0);
-+          sin_stop.insert(sin_stop.begin() + index_vector_dim,
-+                          scatter_indices.shape(index_vector_dim));
-+        }
-+        for (auto& d : sin_stop) d += 1;
-+        mx::array start_index =
-+            mx::flatten(mx::slice(scatter_indices, sin_start, sin_stop));
++      // Calculate update scatter index
++      mx::array update_scatter_indices = mx::take(
++          update_indices,
++          mx::array(update_scatter_dims.data(),
++                    {static_cast<int32_t>(update_scatter_dims.size())}),
++          1);
 +
-+        // Compute full start index
-+        mx::array full_start_index =
-+            mx::zeros({static_cast<int>(inputs[0].ndim())}, mx::int32);
-+        for (auto i = 0; i < scatter_dims_to_operand_dims.size(); i++) {
-+          auto d_input = static_cast<int32_t>(scatter_dims_to_operand_dims[i]);
-+          full_start_index = mx::slice_update(
-+              full_start_index, mx::slice(start_index, {i}, {i + 1}), {d_input},
-+              {d_input + 1});
-+        }
++      // Initialize result indices with zeros
++      auto result_indices = mx::zeros(
++          {update_indices.shape(0), static_cast<int32_t>(inputs[0].ndim())},
++          mx::int32);
 +
-+        // Compute full batching index
-+        mx::array full_batching_index =
-+            mx::zeros({static_cast<int>(inputs[0].ndim())}, mx::int32);
-+        for (auto i = 0; i < input_batching_dims.size(); i++) {
-+          int32_t d_input = input_batching_dims[i];
-+          int32_t d_start = scatter_indices_batching_dims[i];
-+          full_batching_index = mx::slice_update(
-+              full_batching_index,
++      // Gather start indices; populating the corresponding
++      // result indices.
++      auto gather_dim_count = index_vector_dim < scatter_indices.ndim()
++                                  ? update_scatter_dims.size() + 1
++                                  : update_scatter_dims.size();
++      std::vector<int32_t> tmp_gather_axes(update_scatter_dims.size());
++      std::iota(tmp_gather_axes.begin(), tmp_gather_axes.end(), 0);
++      std::vector<int32_t> gather_slice_sizes(gather_dim_count, 1);
++      if (index_vector_dim < scatter_indices.ndim()) {
++        gather_slice_sizes[index_vector_dim] =
++            scatter_indices.shape(index_vector_dim);
++      }
++      mx::array start_indices =
++          mx::reshape(mx::gather(scatter_indices,
++                                 mx::split(update_scatter_indices,
++                                           update_scatter_indices.shape(1), 1),
++                                 tmp_gather_axes, gather_slice_sizes),
++                      {update_indices.shape(0), -1});
++
++      // Seed with full start indices
++      result_indices = mx::put_along_axis(
++          result_indices,
++          mx::broadcast_to(
 +              mx::array(
-+                  {update_scatter_index[d_start -
-+                                        (d_start < index_vector_dim ? 0 : 1)]}),
-+              {d_input}, {d_input + 1});
++                  scatter_dims_to_operand_dims.data(),
++                  {static_cast<int32_t>(scatter_dims_to_operand_dims.size())}),
++              {result_indices.shape(0),
++               static_cast<int32_t>(scatter_dims_to_operand_dims.size())}),
++          start_indices, 1);
++
++      // Calculate full batching indices; accumulating to the
++      // corresponding result indices.
++      auto d_input =
++          mx::array(input_batching_dims.data(),
++                    {static_cast<int32_t>(input_batching_dims.size())});
++      auto d_start = mx::array(
++          scatter_indices_batching_dims.data(),
++          {static_cast<int32_t>(scatter_indices_batching_dims.size())});
++      result_indices = mx::scatter_add_axis(
++          result_indices,
++          mx::broadcast_to(d_input,
++                           {result_indices.shape(0), d_input.shape(0)}),
++          mx::take(update_scatter_indices,
++                   mx::subtract(
++                       d_start,
++                       mx::where(mx::less(d_start, mx::full(d_start.shape(),
++                                                            index_vector_dim)),
++                                 mx::zeros(d_start.shape(), mx::int32),
++                                 mx::ones(d_start.shape(), mx::int32))),
++                   1),
++          1);
++
++      // Calculate update window indices
++      auto update_window_indices =
++          mx::take(update_indices,
++                   mx::array(update_window_dims.data(),
++                             {static_cast<int32_t>(update_window_dims.size())}),
++                   1);
++
++      // Calculate full window indices; accumulating to the
++      // corresponding result indices.
++      std::vector<int32_t> tmp_indices;
++      auto full_window_idx_count = static_cast<int32_t>(
++          update_window_indices.shape(1) + inserted_window_dims.size() +
++          input_batching_dims.size());
++      for (auto i = 0; i < full_window_idx_count; ++i) {
++        if (std::find(inserted_window_dims.begin(), inserted_window_dims.end(),
++                      i) != inserted_window_dims.end() ||
++            std::find(input_batching_dims.begin(), input_batching_dims.end(),
++                      i) != input_batching_dims.end()) {
++          continue;
 +        }
-+
-+        // Compute update window index
-+        std::vector<int32_t> update_window_index(update_window_dims.size());
-+        for (auto i = 0; i < update_window_dims.size(); i++) {
-+          update_window_index[i] = update_index[update_window_dims[i]];
-+        }
-+
-+        // Compute full window index
-+        mx::array full_window_index =
-+            mx::zeros({static_cast<int32_t>(update_window_index.size() +
-+                                            inserted_window_dims.size() +
-+                                            input_batching_dims.size())},
-+                      mx::int32);
-+        unsigned update_window_index_count = 0;
-+        for (int32_t i = 0; i < full_window_index.size(); i++) {
-+          if (std::find(inserted_window_dims.begin(),
-+                        inserted_window_dims.end(),
-+                        i) != inserted_window_dims.end() ||
-+              std::find(input_batching_dims.begin(), input_batching_dims.end(),
-+                        i) != input_batching_dims.end()) {
-+            continue;
-+          }
-+          full_window_index = mx::slice_update(
-+              full_window_index,
-+              mx::array({update_window_index[update_window_index_count++]}),
-+              {i}, {i + 1});
-+        }
-+
-+        // Compute result index
-+        mx::array result_index =
-+            full_start_index + full_batching_index + full_window_index;
-+
-+        // TODO (@cryptodeal): rework this so we can still leverage
-+        // `mx::compile` OR ensure this cannot happen.
-+        // if (mx::sum(
-+        //         result_index >=
-+        //         mx::array(reinterpret_cast<const int32_t*>(
-+        //                       result_shape.data()),
-+        //                   {static_cast<int32_t>(result_shape.size())}))
-+        //         .item<int32_t>()) {
-+        //   continue;
-+        // }
-+
-+        input_indices.push_back(result_index);
-+        update_indices.push_back(mx::array(
-+            update_index.data(), {static_cast<int>(updates[0].ndim())}));
++        tmp_indices.push_back(i);
 +      }
-+      if (update_indices.empty()) {
-+        return inputs;
-+      }
++      result_indices = mx::scatter_add_axis(
++          result_indices,
++          mx::broadcast_to(
++              mx::array(tmp_indices.data(),
++                        {static_cast<int32_t>(tmp_indices.size())}),
++              {result_indices.shape(0),
++               static_cast<int32_t>(tmp_indices.size())}),
++          update_window_indices, 1);
++
 +      std::vector<int32_t> scatter_axes(inputs[0].ndim());
 +      std::iota(scatter_axes.begin(), scatter_axes.end(), 0);
 +      std::vector<int32_t> gather_axes(updates[0].ndim());
 +      std::iota(gather_axes.begin(), gather_axes.end(), 0);
-+      std::vector<int32_t> gather_slice_sizes(updates[0].ndim(), 1);
 +      std::vector<mx::array> res;
-+      auto result_indices =
-+          mx::split(mx::stack(input_indices, 1), input_indices[0].shape(0), 0);
-+      auto gather_indices = mx::split(mx::stack(update_indices, 1),
-+                                      update_indices[0].shape(0), 0);
-+      auto idx_shape = gather_indices[0].shape();
-+      std::vector<int32_t> update_shape(inputs[0].ndim() + idx_shape.size(), 1);
-+      for (auto i = 0; i < idx_shape.size(); ++i) {
-+        update_shape[i] = idx_shape[i];
-+      }
++
++      auto tmp_gather_indices =
++          mx::split(update_indices, update_indices.shape(1), 1);
++      auto tmp_scatter_indices =
++          mx::split(result_indices, result_indices.shape(1), 1);
++
++      std::vector<int32_t> update_shape(
++          inputs[0].ndim() + tmp_scatter_indices[0].ndim(), 1);
++      update_shape[0] = update_indices.shape(0);
++      std::vector<int32_t> tmp_gather_slice_sizes(updates[0].ndim(), 1);
 +      for (auto i = 0; i < inputs.size(); ++i) {
 +        auto update_vals =
-+            mx::reshape(mx::gather(updates[i], gather_indices, gather_axes,
-+                                   gather_slice_sizes),
++            mx::reshape(mx::gather(updates[i], tmp_gather_indices, gather_axes,
++                                   tmp_gather_slice_sizes),
 +                        update_shape);
 +        switch (scatter_type) {
 +          case utils::ScatterType::Replace:
-+            res.push_back(mx::scatter(inputs[i], result_indices, update_vals,
-+                                      scatter_axes));
++            res.push_back(mx::scatter(inputs[i], tmp_scatter_indices,
++                                      update_vals, scatter_axes));
 +            break;
 +          case utils::ScatterType::Add:
-+            res.push_back(mx::scatter_add(inputs[i], result_indices,
++            res.push_back(mx::scatter_add(inputs[i], tmp_scatter_indices,
 +                                          update_vals, scatter_axes));
 +            break;
 +          case utils::ScatterType::Prod:
-+            res.push_back(mx::scatter_prod(inputs[i], result_indices,
++            res.push_back(mx::scatter_prod(inputs[i], tmp_scatter_indices,
 +                                           update_vals, scatter_axes));
 +            break;
 +          case utils::ScatterType::Max:
-+            res.push_back(mx::scatter_max(inputs[i], result_indices,
++            res.push_back(mx::scatter_max(inputs[i], tmp_scatter_indices,
 +                                          update_vals, scatter_axes));
 +            break;
 +          case utils::ScatterType::Min:
-+            res.push_back(mx::scatter_min(inputs[i], result_indices,
++            res.push_back(mx::scatter_min(inputs[i], tmp_scatter_indices,
 +                                          update_vals, scatter_axes));
 +            break;
 +        }
@@ -3301,6 +3306,7 @@ index 0000000000..3c36b94b82
 +    op_lookup.scatter.emplace(scatter_op_info, mx::compile(scatter_func));
 +  }
 +}
++
 +void compilePadOp(OpLookup& op_lookup, stablehlo::PadOp o) {
 +  PadOpInfo pad_op_info = getPadOpInfo(o);
 +  auto result_shape = std::get<0>(pad_op_info.captures);
@@ -3320,42 +3326,29 @@ index 0000000000..3c36b94b82
 +          mx::array(interior_pad.data(),
 +                    {static_cast<int32_t>(edge_pad_low.size())}, mx::int32);
 +
++      // Calculate operand indices
++      std::vector<mx::array> meshgrid_arrays;
++      for (const auto& dim : operand.shape()) {
++        meshgrid_arrays.push_back(mx::arange(dim));
++      }
++      mx::array operand_indices =
++          mx::reshape(mx::stack(mx::meshgrid(meshgrid_arrays, false, "ij"), -1),
++                      {-1, static_cast<int>(operand.ndim())});
++
++      mx::array result_indices =
++          edge_padding_low +
++          operand_indices * (interior_padding + mx::array(1, mx::int32));
++
 +      // initialize array full of padding values
 +      mx::array result = mx::full(result_shape, padding_value);
-+      std::vector<mx::array> scatter_indices;
-+      std::vector<mx::array> gather_indices;
-+      // assign values to correct indices in result
-+      for (const auto operand_index_tuple : index_space(operand.shape())) {
-+        std::vector<int32_t> operand_index =
-+            to_vector(operand_index_tuple, static_cast<size_t>(operand.ndim()));
-+        mx::array result_index =
-+            edge_padding_low +
-+            mx::array(operand_index.data(),
-+                      {static_cast<int32_t>(operand_index.size())}, mx::int32) *
-+                (interior_padding +
-+                 mx::full<int32_t>(interior_padding.shape(), 1));
-+        scatter_indices.push_back(result_index);
-+        gather_indices.push_back(mx::array(
-+            operand_index.data(), {static_cast<int32_t>(operand.ndim())}));
-+      }
 +      std::vector<int32_t> axes(operand.ndim());
 +      std::iota(axes.begin(), axes.end(), 0);
-+      std::vector<int32_t> gather_slice_sizes(operand.ndim(), 1);
-+      auto target_indices = mx::split(mx::stack(scatter_indices, 1),
-+                                      scatter_indices[0].shape(0), 0);
-+      auto input_indices = mx::split(mx::stack(gather_indices, 1),
-+                                     gather_indices[0].shape(0), 0);
-+      auto idx_shape = input_indices[0].shape();
-+      std::vector<int32_t> update_shape(operand.ndim() + idx_shape.size(), 1);
-+      for (auto i = 0; i < idx_shape.size(); ++i) {
-+        update_shape[i] = idx_shape[i];
-+      }
-+      auto update_vals =
-+          mx::reshape(mx::gather(operand, input_indices, axes,
-+                                 std::vector<int32_t>(operand.ndim(), 1)),
-+                      update_shape);
-+      return std::vector<mx::array>{
-+          mx::scatter(result, target_indices, update_vals, axes)};
++      return std::vector<mx::array>{mx::scatter(
++          result, mx::split(result_indices, result_indices.shape(1), 1),
++          mx::gather(operand,
++                     mx::split(operand_indices, operand_indices.shape(1), 1),
++                     axes, std::vector<int32_t>(operand.ndim(), 1)),
++          axes)};
 +    };
 +    op_lookup.pad.emplace(pad_op_info, mx::compile(pad_func));
 +  }
