@@ -19,6 +19,7 @@ pub const Error = pjrt.Error;
 pub const GetCostAnalysisError = pjrt.GetCostAnalysisError;
 pub const SerializeResult = pjrt.SerializeResult;
 pub const Executable = pjrt.Executable;
+pub const CompiledMemoryStats = pjrt.CompiledMemoryStats;
 pub const ExecuteError = ApiError;
 pub const Memory = pjrt.Memory;
 
@@ -60,7 +61,7 @@ pub const Client = opaque {
     pub const BufferFromHostBufferArgs = pjrt.Client.BufferFromHostBufferArgs;
     pub fn bufferFromHostBuffer(self: *const Client, api: *const Api, args: BufferFromHostBufferArgs) ApiError!struct { *Buffer, ?*Event } {
         const buffer, const event_ = try self.inner().bufferFromHostBuffer(api, args);
-        return .{ @ptrCast(buffer), @ptrCast(event_)};
+        return .{ @ptrCast(buffer), @ptrCast(event_) };
     }
 
     pub fn deserializeAndLoad(self: *const Client, api: *const Api, bytes: []const u8) ApiError!*LoadedExecutable {
