@@ -3178,7 +3178,7 @@ pub const Tensor = struct {
     /// Slices the input Tensor along a specific axis, with a start offset known at runtime.
     /// Note: this doesn't support tagging, if you have tags,
     /// you should use `dynamicSlice` directly.
-    pub fn dynamicSlice1d(self: Tensor, axis_: i8, slice_: DynSlice) Tensor {
+    pub fn dynamicSlice1d(self: Tensor, axis_: anytype, slice_: DynSlice) Tensor {
         stdx.debug.assert(slice_.start.rank() == 0, "dynamicSlice1d expects 'slice_.start' tensor rank to be a scalar, got {}", .{slice_.start});
 
         const a = self.axis(axis_);
@@ -3258,10 +3258,15 @@ pub const Tensor = struct {
         const platform = zml.testing.env();
         const T = f32;
 
+        const localDynamicSlice1d = (struct {
+            pub fn func(self: Tensor, axis_: i8, slice_: DynSlice) Tensor {
+                return self.dynamicSlice1d(axis_, slice_);
+            }
+        }).func;
         {
             const x = try zml.Buffer.fromArray(platform, [10]T{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 });
             const z = try zml.Buffer.scalar(platform, 4, .i32);
-            const res = try zml.testing.compileAndCall(platform, Tensor.dynamicSlice1d, .{ x, 0, .{ .len = 2, .start = z } });
+            const res = try zml.testing.compileAndCall(platform, localDynamicSlice1d, .{ x, 0, .{ .len = 2, .start = z } });
 
             try testing.expectEqual([2]T{ 4, 5 }, try res.getValue([2]T));
         }
@@ -3271,7 +3276,7 @@ pub const Tensor = struct {
             const x = try zml.Buffer.fromArray(platform, [2][5]T{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } });
             const z = try zml.Buffer.scalar(platform, 3, .i32);
 
-            const res = try zml.testing.compileAndCall(platform, Tensor.dynamicSlice1d, .{ x, 1, .{ .len = 2, .start = z } });
+            const res = try zml.testing.compileAndCall(platform, localDynamicSlice1d, .{ x, 1, .{ .len = 2, .start = z } });
             try testing.expectEqual([4]T{ 3, 4, 8, 9 }, res.getValue([4]T));
         }
     }
