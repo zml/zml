@@ -33,6 +33,9 @@ pip_compile(
     python_platform = "x86_64-unknown-linux-gnu",
     requirements_in = "requirements.in",
     requirements_txt = "requirements.lock.txt",
+    tags = [
+        "no_ci",
+    ],
 )
 
 py_console_script_binary(
@@ -67,6 +70,9 @@ compile_pip_requirements(
     src = "requirements.in",
     py_binary = py_binary_with_script,
     requirements_txt = "requirements.lock.txt",
+    tags = [
+        "no_ci",
+    ],
 )
 
 runfiles_to_default(

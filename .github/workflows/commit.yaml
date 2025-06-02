@@ -8,6 +8,7 @@ on:
   pull_request:
 
 env:
+  USE_REMOTE_CACHE: 'false'
   ZIG_VERSION: 0.14.0
   BAZELISK_VERSION: 1.25.0
 
@@ -26,6 +27,7 @@ jobs:
         uses: goto-bus-stop/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
+          cache: ${{ env.USE_REMOTE_CACHE }}
 
       - name: Zig Format
         run: zig fmt --check  $(git ls-files --exclude-standard -- '*.zig' | xargs)
@@ -43,7 +45,7 @@ jobs:
           wget https://github.com/bazelbuild/bazelisk/releases/download/v1.19.0/bazelisk-linux-amd64
           chmod +x bazelisk-linux-amd64
           mv bazelisk-linux-amd64 $HOME/bin/bazel
-      
+
       - name: ZML / bazel mod explain
         run: bazel mod explain
 
@@ -51,14 +53,13 @@ jobs:
         run: bazel mod graph
 
       - name: ZML / bazel query //...
-        # Neuron is currently broken cf https://github.com/zml/zml/pull/111 so we skip it until it's fixed
-        run: bazel query --remote_cache=grpc://127.0.0.1:15501 //... -- -//runtimes/neuron/...
+        run: bazel query //...
 
       - name: ZML / bazel build //...
-        run: bazel build --config=debug --verbose_failures --remote_cache=grpc://127.0.0.1:15501 //... -- -//runtimes/neuron/...
+        run: bazel build --config=debug --verbose_failures //...
 
       - name: ZML / bazel test //...
-        run: bazel test --config=debug --verbose_failures --remote_cache=grpc://127.0.0.1:15501 --keep_going --test_output=streamed --test_tag_filters=-no_ci //... -- -//runtimes/neuron/...
+        run: bazel test --config=debug --verbose_failures --keep_going --test_output=streamed --test_tag_filters=-no_ci //...
 
       - name: Examples / bazel mod explain
         working-directory: examples/
@@ -70,13 +71,13 @@ jobs:
 
       - name: Examples / bazel query //...
         working-directory: examples/
-        run: bazel query --remote_cache=grpc://127.0.0.1:15501 //...
+        run: bazel query //...
 
       - name: Examples / bazel build //...
         working-directory: examples/
-        run: bazel build --config=debug --verbose_failures --remote_cache=grpc://127.0.0.1:15501 --build_tag_filters=-no_ci //...
+        run: bazel build --config=debug --verbose_failures --build_tag_filters=-no_ci //...
 
       # Todo: uncomment when we have our first tests in examples, Bazel return code is not 0 if there are no tests
       # - name: Examples / bazel test //...
       #   working-directory: examples/
-      #   run: bazel test --config=debug --verbose_failures --remote_cache=grpc://127.0.0.1:15501 --keep_going --test_output=streamed --build_tag_filters=-no_ci --test_tag_filters=-no_ci //...
+      #   run: bazel test --config=debug --verbose_failures --keep_going --test_output=streamed --build_tag_filters=-no_ci --test_tag_filters=-no_ci //...
