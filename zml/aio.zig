@@ -631,8 +631,11 @@ fn findSimilarBufferKeys(original_key: []const u8, store: BufferStore, temp_allo
 
 /// deinit all buffers in the given struct
 pub fn awaitAll(buffers: anytype) !void {
-    // TODO: implement once we have async buffers.
-    _ = buffers;
+    zml.meta.visit((struct {
+        fn cb(_: void, buffer: *zml.Buffer) void {
+            buffer.* = buffer.awaitt() catch unreachable;
+        }
+    }).cb, {}, buffers);
 }
 
 fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *PrefixBuilder, buffer_store: BufferStore, obj: anytype, platform: zml.Platform) !void {
@@ -653,7 +656,7 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
             log.debug("Loading buffer {s} ({})", .{ prefix, obj._shape });
             stdx.debug.assert(host_buffer.shape().eql(obj._shape), "loadModelBuffers expects to find the same shapes in the model and in the buffer store, got {} and {} for tensor {s}", .{ obj._shape, host_buffer, prefix });
             buf_with_metadata._shape = obj._shape;
-            obj.* = try zml.Buffer.from(platform, buf_with_metadata);
+            obj.* = try zml.Buffer.from(platform, buf_with_metadata, .{});
         } else {
             log.err("Buffer not found: {s}", .{prefix});
 
