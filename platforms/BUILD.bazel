@@ -1,3 +1,27 @@
+alias(
+    name = "host",
+    actual = select({
+        "@platforms//os:linux": ":host_linux",
+        "//conditions:default": ":host_other",
+    }),
+)
+
+platform(
+    name = "host_other",
+    parents = ["@platforms//host"],
+    visibility = ["//visibility:public"],
+)
+
+
+platform(
+    name = "host_linux",
+    parents = ["@platforms//host"],
+    constraint_values = [
+        "@toolchains_llvm_bootstrapped//constraints/libc:gnu.2.31",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 platform(
     name = "linux_amd64",
     constraint_values = [
