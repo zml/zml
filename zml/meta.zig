@@ -59,6 +59,31 @@ pub fn MapType(From: type, To: type) type {
                         .is_tuple = struct_infos.is_tuple,
                     } });
                 },
+                .@"union" => |union_info| {
+                    const fields = union_info.fields;
+                    var same: bool = true;
+                    var union_fields: [fields.len]std.builtin.Type.UnionField = undefined;
+                    for (union_fields[0..], fields) |*union_field, field| {
+                        const R = map(field.type);
+                        if (R == field.type) {
+                            union_field.* = field;
+                        } else {
+                            union_field.* = .{
+                                .name = field.name,
+                                .type = R,
+                                .alignment = @alignOf(R),
+                            };
+                            same = false;
+                        }
+                    }
+                    if (same) return T;
+                    return @Type(.{ .@"union" = .{
+                        .layout = .auto,
+                        .tag_type = union_info.tag_type,
+                        .fields = union_fields[0..],
+                        .decls = &.{},
+                    } });
+                },
                 .array => |arr_info| [arr_info.len]map(arr_info.child),
                 .pointer => |ptr_info| switch (ptr_info.size) {
                     .slice => if (ptr_info.is_const)
@@ -144,6 +169,14 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
                 else => @field(to, field.name) = @field(from, field.name),
             }
         },
+        .@"union" => {
+            switch (from) {
+                inline else => |_, tag| {
+                    to.* = @unionInit(ToStruct, @tagName(tag), undefined);
+                    try mapAlloc(cb, allocator, ctx, @field(from, @tagName(tag)), &@field(to, @tagName(tag)));
+                },
+            }
+        },
         .array => for (from, to) |f, *t| {
             try mapAlloc(cb, allocator, ctx, f, t);
         },
@@ -174,7 +207,7 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
         } else {
             to.* = null;
         },
-        .int, .float, .@"enum", .@"union" => to.* = from,
+        .int, .float, .@"enum" => to.* = from,
         else => stdx.debug.compileError("zml.meta.mapAlloc doesn't support: {}", .{FromStruct}),
     }
 }
