@@ -8,9 +8,9 @@ on:
   pull_request:
 
 env:
+  USE_REMOTE_CACHE: 'false'
   ZIG_VERSION: 0.14.0
   BAZELISK_VERSION: 1.25.0
-  ZIG_CACHE: 'false'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -27,7 +27,7 @@ jobs:
         uses: goto-bus-stop/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
-          cache: ${{ env.ZIG_CACHE }}
+          cache: ${{ env.USE_REMOTE_CACHE }}
 
       - name: Zig Format
         run: zig fmt --check  $(git ls-files --exclude-standard -- '*.zig' | xargs)
@@ -45,7 +45,7 @@ jobs:
           wget https://github.com/bazelbuild/bazelisk/releases/download/v1.19.0/bazelisk-linux-amd64
           chmod +x bazelisk-linux-amd64
           mv bazelisk-linux-amd64 $HOME/bin/bazel
-      
+
       - name: ZML / bazel mod explain
         run: bazel mod explain
 
@@ -53,14 +53,13 @@ jobs:
         run: bazel mod graph
 
       - name: ZML / bazel query //...
-        # Neuron is currently broken cf https://github.com/zml/zml/pull/111 so we skip it until it's fixed
-        run: bazel query //... -- -//runtimes/neuron/...
+        run: bazel query //...
 
       - name: ZML / bazel build //...
-        run: bazel build --config=debug --verbose_failures //... -- -//runtimes/neuron/...
+        run: bazel build --config=debug --verbose_failures //...
 
       - name: ZML / bazel test //...
-        run: bazel test --config=debug --verbose_failures --keep_going --test_output=streamed --test_tag_filters=-no_ci //... -- -//runtimes/neuron/...
+        run: bazel test --config=debug --verbose_failures --keep_going --test_output=streamed --test_tag_filters=-no_ci //...
 
       - name: Examples / bazel mod explain
         working-directory: examples/

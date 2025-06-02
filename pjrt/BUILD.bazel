@@ -1,5 +1,7 @@
 load("@rules_cc//cc:defs.bzl", "cc_library")
 load("@rules_zig//zig:defs.bzl", "zig_library")
+load("@zml//bazel:zig.bzl", "zig_cc_binary")
+load("//bazel:zig_proto_library.bzl", "zig_proto_library")
 
 cc_library(
     name = "dlfcn",
@@ -12,17 +14,17 @@ cc_library(
 zig_library(
     name = "pjrt",
     srcs = [
+        "convert/trace_container.zig",
+        "convert/xplane_schema.zig",
         "ffi.zig",
-        # "profiler.zig",
-        # "convert/trace_container.zig",
-        # "convert/xplane_schema.zig"
+        "profiler.zig",
     ],
     main = "pjrt.zig",
     visibility = ["//visibility:public"],
     deps = [
-        # ":profiler_options_proto",
-        # ":trace_events_proto",
-        # ":xplane_proto",
+        ":profiler_options_proto",
+        ":trace_events_proto",
+        ":xplane_proto",
         "//stdx",
         "@xla//xla/ffi/api:c_api",
         "@xla//xla/pjrt/c:pjrt_c_api_ffi_extension_hdrs",
@@ -36,35 +38,35 @@ zig_library(
     }),
 )
 
-# zig_proto_library(
-#     name = "profiler_options_proto",
-#     import_name = "//tsl:profiler_options_proto",
-#     deps = ["@tsl//tsl/profiler/protobuf:profiler_options_proto"],
-# )
+zig_proto_library(
+    name = "profiler_options_proto",
+    import_name = "//tsl:profiler_options_proto",
+    deps = ["@xla//third_party/tsl/tsl/profiler/protobuf:profiler_options_proto"],
+)
 
-# zig_proto_library(
-#     name = "xplane_proto",
-#     import_name = "//tsl:xplane_proto",
-#     deps = ["@tsl//tsl/profiler/protobuf:xplane_proto"],
-# )
+zig_proto_library(
+    name = "xplane_proto",
+    import_name = "//tsl:xplane_proto",
+    deps = ["@xla//third_party/tsl/tsl/profiler/protobuf:xplane_proto"],
+)
 
-# zig_proto_library(
-#     name = "trace_events_proto",
-#     import_name = "//tsl:trace_events_proto",
-#     deps = ["@tsl//tsl/profiler/protobuf:trace_events_proto"],
-# )
+zig_proto_library(
+    name = "trace_events_proto",
+    import_name = "//tsl:trace_events_proto",
+    deps = ["@xla//third_party/tsl/tsl/profiler/protobuf:trace_events_proto"],
+)
 
-# zig_cc_binary(
-#     name = "xspace_to_json",
-#     srcs = [
-#         "convert/trace_container.zig",
-#         "convert/xplane_schema.zig",
-#     ],
-#     main = "xspace_to_json.zig",
-#     visibility = ["//visibility:public"],
-#     deps = [
-#         ":trace_events_proto",
-#         ":xplane_proto",
-#         "//stdx",
-#     ],
-# )
+zig_cc_binary(
+    name = "xspace_to_json",
+    srcs = [
+        "convert/trace_container.zig",
+        "convert/xplane_schema.zig",
+    ],
+    main = "xspace_to_json.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":trace_events_proto",
+        ":xplane_proto",
+        "//stdx",
+    ],
+)

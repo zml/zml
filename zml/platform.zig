@@ -79,12 +79,12 @@ pub const Platform = struct {
         self.pjrt_client.deinit(self.pjrt_api);
     }
 
-    // Returns the Profiler for this API.
-    // Not all platform have a profiling api, for those the profiler object will do nothing.
-    // Platforms with known profiler extensions: cuda, xpu
-    // pub fn getProfiler(self: Platform, options: ?pjrt.Profiler.Options) pjrt.Profiler {
-    //     return self.pjrt_client.getProfiler(self.pjrt_api, options orelse pjrt.Profiler.default_options);
-    // }
+    /// Returns the Profiler for this API.
+    /// Not all platform have a profiling api, for those the profiler object will do nothing.
+    /// Platforms with known profiler extensions: cuda, xpu
+    pub fn getProfiler(self: Platform, options: ?pjrt.Profiler.Options) pjrt.Profiler {
+        return self.pjrt_client.getProfiler(self.pjrt_api, options orelse pjrt.Profiler.default_options);
+    }
 };
 
 const _CreateOptions = struct {
