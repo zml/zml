@@ -932,8 +932,8 @@ pub const Memory = opaque {
 
     pub fn kind(self: *const Memory, api: *const Api) Kind {
         const ret = api.call(.PJRT_Memory_Kind, .{ .memory = self.inner() }) catch unreachable;
-        const kind_ = ret.kind orelse unreachable[0..ret.kind_size];
-        return std.meta.stringToEnum(Kind, kind_) orelse unreachable;
+        const kind_ = ret.kind orelse unreachable;
+        return std.meta.stringToEnum(Kind, kind_[0..ret.kind_size]) orelse unreachable;
     }
 
     pub fn kindId(self: *const Memory, api: *const Api) u32 {

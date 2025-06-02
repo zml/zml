@@ -158,7 +158,7 @@ pub const HostBuffer = struct {
 
     /// Copies this HostBuffer to the given accelerator.
     pub fn toDevice(self: HostBuffer, platform_: Platform) !Buffer {
-        return try Buffer.from(platform_, self);
+        return try Buffer.from(platform_, self, .{});
     }
 
     /// Interpret the underlying data as a contiguous slice.

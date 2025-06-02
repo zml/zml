@@ -101,7 +101,7 @@ pub fn asyncMain() !void {
         const idx = rng.random().intRangeAtMost(u64, 0, 10000 - 1);
         var sample: [28 * 28]u8 align(16) = undefined;
         _ = try dataset.pread(&sample, 16 + (idx * 28 * 28));
-        var input = try zml.Buffer.from(platform, zml.HostBuffer.fromBytes(zml.Shape.init(.{ 28, 28 }, .u8), &sample));
+        var input = try zml.Buffer.from(platform, zml.HostBuffer.fromBytes(zml.Shape.init(.{ 28, 28 }, .u8), &sample), .{});
         defer input.deinit();
 
         printDigit(sample);

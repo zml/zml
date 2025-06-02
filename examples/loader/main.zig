@@ -54,7 +54,7 @@ pub fn asyncMain() !void {
         const host_buffer = entry.value_ptr.*;
         total_bytes += host_buffer.shape().byteSize();
         std.debug.print("Buffer: {s} ({any} / {any})\n", .{ entry.key_ptr.*, i + 1, buffer_store.buffers.count() });
-        buffers[i] = try zml.Buffer.from(platform, host_buffer);
+        buffers[i] = try zml.Buffer.from(platform, host_buffer, .{});
     }
 
     const stop = timer.read();
