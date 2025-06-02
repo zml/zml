@@ -5,8 +5,8 @@
     "overlay": {
         "llvm.bzl": "",
         "MODULE.bazel": "",
-        "tsl.bzl": "",
-        "workspace.bzl": ""
+        "workspace_private.bzl": "",
+        "xla.bzl": ""
     },
     "patch_strip": 1,
     "patches": {

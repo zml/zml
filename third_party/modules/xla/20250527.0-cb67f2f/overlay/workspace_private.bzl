@@ -1,22 +1,22 @@
-load("//third_party:repo.bzl", "tf_http_archive", "tf_mirror_urls")
 load("//third_party/gpus:cuda_configure.bzl", "cuda_configure")
 load("//third_party/gpus:rocm_configure.bzl", "rocm_configure")
 load("//third_party/llvm:workspace.bzl", llvm = "repo")
+load("//third_party/py:python_repo.bzl", "python_repository")
 load("//third_party/pybind11_bazel:workspace.bzl", pybind11_bazel = "repo")
 load("//third_party/stablehlo:workspace.bzl", stablehlo = "repo")
 load("//third_party/tensorrt:tensorrt_configure.bzl", "tensorrt_configure")
 load("//third_party/triton:workspace.bzl", triton = "repo")
+load("//third_party:repo.bzl", "tf_http_archive", "tf_mirror_urls")
+load("//third_party:repo.bzl", "tf_vendored")
 load("//tools/toolchains/remote:configure.bzl", "remote_execution_configure")
 
-def _xla_workspace_impl(mctx):
+def _workspace_private_impl(mctx):
     cuda_configure(name = "local_config_cuda")
     remote_execution_configure(name = "local_config_remote_execution")
     rocm_configure(name = "local_config_rocm")
     tensorrt_configure(name = "local_config_tensorrt")
+    tf_vendored(name = "tsl", relpath = "third_party/tsl")
     pybind11_bazel()
-    triton()
-    llvm("llvm-raw")
-    stablehlo()
     tf_http_archive(
         name = "com_github_grpc_grpc",
         sha256 = "b956598d8cbe168b5ee717b5dafa56563eb5201a947856a6688bbeac9cac4e1f",
@@ -49,12 +49,23 @@ def _xla_workspace_impl(mctx):
         },
         urls = tf_mirror_urls("https://github.com/protocolbuffers/protobuf/archive/v3.21.9.zip"),
     )
+    python_repository(
+        name = "python_version_repo",
+        requirements_versions = ["3.11"],
+        requirements_locks = ["//:requirements_lock_3_11.txt"],
+        local_wheel_workspaces = [],
+        local_wheel_dist_folder = None,
+        default_python_version = None,
+        local_wheel_inclusion_list = ["*"],
+        local_wheel_exclusion_list = [],
+    )
+
     return mctx.extension_metadata(
         reproducible = True,
         root_module_direct_deps = "all",
         root_module_direct_dev_deps = [],
     )
 
-xla_workspace = module_extension(
-    implementation = _xla_workspace_impl,
+workspace_private = module_extension(
+    implementation = _workspace_private_impl,
 )

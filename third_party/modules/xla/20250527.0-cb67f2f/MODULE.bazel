@@ -19,21 +19,34 @@ bazel_dep(name = "rules_license", version = "0.0.8")
 bazel_dep(name = "rules_shell", version = "0.4.1")
 bazel_dep(name = "bazel_features", version = "1.25.0", repo_name = "proto_bazel_features")
 
-tsl = use_extension("//:tsl.bzl", "tsl")
-use_repo(tsl, "tsl", "python_version_repo")
-
-xla_workspace = use_extension("//:workspace.bzl", "xla_workspace")
+workspace_private = use_extension("//:workspace_private.bzl", "workspace_private")
 use_repo(
-    xla_workspace,
+    workspace_private,
     "com_github_grpc_grpc",
     "com_google_protobuf",
     "local_config_cuda",
     "local_config_remote_execution",
     "local_config_rocm",
     "local_config_tensorrt",
-    "llvm-raw",
-    "stablehlo",
+    "python_version_repo",
+    "tsl",
 )
 
-llvm_configure = use_extension("//:llvm.bzl", "llvm_configure")
-use_repo(llvm_configure, "llvm-project")
+workspace_public = use_extension("//:xla.bzl", "xla")
+use_repo(
+    workspace_public,
+    "llvm-raw",
+    "stablehlo",
+    "triton",
+)
+
+llvm = use_extension("//:llvm.bzl", "llvm")
+llvm.configure(
+    targets = [
+        "AArch64",
+        "AMDGPU",
+        "NVPTX",
+        "X86",
+    ],
+)
+use_repo(llvm, "llvm-project")
