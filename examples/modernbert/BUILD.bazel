@@ -25,6 +25,9 @@ cc_binary(
         "@ModernBERT-base//:model.safetensors",
         "@ModernBERT-base//:tokenizer",
     ],
+    tags = [
+        "manual",
+    ],
     deps = [":modernbert_lib"],
 )
 
@@ -39,6 +42,9 @@ cc_binary(
     data = [
         "@ModernBERT-large//:model.safetensors",
         "@ModernBERT-large//:tokenizer",
+    ],
+    tags = [
+        "manual",
     ],
     deps = [":modernbert_lib"],
 )
