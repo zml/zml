@@ -33,6 +33,7 @@ jobs:
       - uses: bazel-contrib/setup-bazel@0.15.0
         with:
           bazelisk-cache: true
+          cache-version: 2
           disk-cache: ${{ github.workflow }}
           repository-cache: true
           external-cache: true
@@ -43,6 +44,22 @@ jobs:
             common --test_output=streamed
             common --color=yes
             common --show_timestamps
+
+      - name: Debug - Find bazelisk installation
+        run: |
+          echo "=== PATH ==="
+          echo $PATH
+          echo "=== Looking for bazel/bazelisk binaries ==="
+          which bazel || echo "bazel not found in PATH"
+          which bazelisk || echo "bazelisk not found in PATH"
+          echo "=== Searching filesystem for bazel* ==="
+          find /usr /opt /home -name "bazel*" 2>/dev/null || true
+          find $HOME -name "bazel*" 2>/dev/null || true
+          echo "=== Checking common locations ==="
+          ls -la /usr/local/bin/bazel* 2>/dev/null || echo "No bazel* in /usr/local/bin/"
+          ls -la /usr/bin/bazel* 2>/dev/null || echo "No bazel* in /usr/bin/"
+          ls -la ~/.local/bin/bazel* 2>/dev/null || echo "No bazel* in ~/.local/bin/"
+
 
       - name: ZML / bazel mod explain
         run: bazelisk mod explain
