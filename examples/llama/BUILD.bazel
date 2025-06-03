@@ -3,6 +3,7 @@ load("@aspect_bazel_lib//lib:tar.bzl", "mtree_spec", "tar")
 load("@aspect_bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
 load("@bazel_skylib//rules:native_binary.bzl", "native_test")
 load("@bazel_skylib//rules:write_file.bzl", "write_file")
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
 load("@zml//bazel:zig.bzl", "zig_cc_binary")
 
@@ -34,7 +35,7 @@ cc_binary(
         "@Meta-Llama-3.1-8B-Instruct//:tokenizer.json",
     ],
     tags = [
-        "no_ci",
+        "manual",
     ],
     deps = [":llama_lib"],
 )
@@ -53,7 +54,7 @@ cc_binary(
         "@Meta-Llama-3.1-70B-Instruct//:tokenizer.json",
     ],
     tags = [
-        "no_ci",
+        "manual",
     ],
     deps = [":llama_lib"],
 )
@@ -72,7 +73,7 @@ cc_binary(
         "@Meta-Llama-3.2-1B-Instruct//:tokenizer.json",
     ],
     tags = [
-        "no_ci",
+        "manual",
     ],
     deps = [":llama_lib"],
 )
@@ -91,7 +92,7 @@ cc_binary(
         "@Meta-Llama-3.2-3B-Instruct//:tokenizer.json",
     ],
     tags = [
-        "no_ci",
+        "manual",
     ],
     deps = [":llama_lib"],
 )
@@ -133,7 +134,7 @@ zig_cc_binary(
     ],
     main = "test.zig",
     tags = [
-        "no_ci",
+        "manual",
     ],
     deps = [
         "@zml//async",
@@ -162,7 +163,7 @@ Artificial Intelligence in Healthcare
     ],
     data = ["@Meta-Llama-3.2-1B-Instruct//:tokenizer.json"],
     tags = [
-        "no_ci",
+        "manual",
     ],
 )
 
@@ -170,7 +171,7 @@ mtree_spec(
     name = "mtree",
     srcs = [":Llama-3.2-1B-Instruct"],
     tags = [
-        "no_ci",
+        "manual",
     ],
 )
 
@@ -184,7 +185,7 @@ tar(
     compress = "zstd",
     mtree = ":mtree",
     tags = [
-        "no_ci",
+        "manual",
     ],
 )
 
@@ -203,7 +204,7 @@ expand_template(
         ":tokenizer": "$(rlocationpath @Meta-Llama-3.2-1B-Instruct//:tokenizer.json)",
     },
     tags = [
-        "no_ci",
+        "manual",
     ],
     template = [
         "./{}/Llama-3.2-1B-Instruct".format(package_name()),
@@ -219,7 +220,7 @@ oci_image(
     # entrypoint = ["./{}/Llama-3.2-1B-Instruct".format(package_name())],
     entrypoint = ":entrypoint",
     tags = [
-        "no_ci",
+        "manual",
     ],
     tars = [
         "@zml//runtimes:layers",
@@ -231,7 +232,7 @@ platform_transition_filegroup(
     name = "image",
     srcs = [":image_"],
     tags = [
-        "no_ci",
+        "manual",
     ],
     target_platform = "@zml//platforms:linux_amd64",
 )
@@ -243,7 +244,7 @@ oci_load(
         "distroless/llama-3.2-1b-instruct:latest",
     ],
     tags = [
-        "no_ci",
+        "manual",
     ],
 )
 
@@ -253,6 +254,6 @@ oci_push(
     remote_tags = ["latest"],
     repository = "index.docker.io/steeve/llama-3.2-1b-instruct",
     tags = [
-        "no_ci",
+        "manual",
     ],
 )

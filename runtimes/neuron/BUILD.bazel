@@ -34,7 +34,7 @@ pip_compile(
     requirements_in = "requirements.in",
     requirements_txt = "requirements.lock.txt",
     tags = [
-        "no_ci",
+        "manual",
     ],
 )
 
@@ -71,7 +71,7 @@ compile_pip_requirements(
     py_binary = py_binary_with_script,
     requirements_txt = "requirements.lock.txt",
     tags = [
-        "no_ci",
+        "manual",
     ],
 )
 
