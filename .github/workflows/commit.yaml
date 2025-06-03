@@ -46,56 +46,38 @@ jobs:
             common --color=yes
             common --show_timestamps
 
-      - name: Debug - Find bazelisk installation
-        run: |
-          echo "=== PATH ==="
-          echo $PATH
-          echo "=== Looking for bazel/bazelisk binaries ==="
-          which bazel || echo "bazel not found in PATH"
-          which bazelisk || echo "bazelisk not found in PATH"
-          echo "=== Searching filesystem for bazel* ==="
-          find /usr /opt /home -name "bazel*" 2>/dev/null || true
-          find $HOME -name "bazel*" 2>/dev/null || true
-          echo "=== Checking common locations ==="
-          sudo /home/runner/.cache/bazelisk --version || echo "No bazelisk in ~/.cache/bazelisk"
-          echo "=== Checking common bazel locations 2 ==="
-          ls -la /usr/local/bin/bazel* 2>/dev/null || echo "No bazel* in /usr/local/bin/"
-          ls -la /usr/bin/bazel* 2>/dev/null || echo "No bazel* in /usr/bin/"
-          ls -la ~/.local/bin/bazel* 2>/dev/null || echo "No bazel* in ~/.local/bin/"
-
-
       - name: ZML / bazel mod explain
-        run: bazelisk mod explain
+        run: bazel mod explain
 
       - name: ZML / bazel mod graph
-        run: bazelisk mod graph
+        run: bazel mod graph
 
       - name: ZML / bazel query //...
-        run: bazelisk query //...
+        run: bazel query //...
 
       - name: ZML / bazel build //...
-        run: bazelisk build //...
+        run: bazel build //...
 
       - name: ZML / bazel test //...
-        run: bazelisk test //...
+        run: bazel test //...
 
       - name: Examples / bazel mod explain
         working-directory: examples/
-        run: bazelisk mod explain
+        run: bazel mod explain
 
       - name: Examples / bazel mod graph
         working-directory: examples/
-        run: bazelisk mod graph
+        run: bazel mod graph
 
       - name: Examples / bazel query //...
         working-directory: examples/
-        run: bazelisk query //...
+        run: bazel query //...
 
       - name: Examples / bazel build //...
         working-directory: examples/
-        run: bazelisk build //...
+        run: bazel build //...
 
       # Todo: uncomment when we have our first tests in examples, Bazel return code is not 0 if there are no tests
       # - name: Examples / bazel test //...
       #   working-directory: examples/
-      #   run: bazelisk test //...
+      #   run: bazel test //...
