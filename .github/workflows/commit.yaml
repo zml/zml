@@ -56,6 +56,8 @@ jobs:
           find /usr /opt /home -name "bazel*" 2>/dev/null || true
           find $HOME -name "bazel*" 2>/dev/null || true
           echo "=== Checking common locations ==="
+          /home/runner/.cache/bazelisk --version || echo "No bazelisk in ~/.cache/bazelisk"
+          echo "=== Checking common bazel locations 2 ==="
           ls -la /usr/local/bin/bazel* 2>/dev/null || echo "No bazel* in /usr/local/bin/"
           ls -la /usr/bin/bazel* 2>/dev/null || echo "No bazel* in /usr/bin/"
           ls -la ~/.local/bin/bazel* 2>/dev/null || echo "No bazel* in ~/.local/bin/"
