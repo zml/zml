@@ -1248,6 +1248,106 @@ fn scatterPrepareIndices(
     return Tensor.stack(indices.constSlice(), .last, .coord);
 }
 
+fn TensorOrTensorArray(comptime T: type) type {
+    const type_info = @typeInfo(T);
+    return switch (type_info) {
+        .@"struct" => |struct_info| b: {
+            if (T == Tensor) break :b Tensor;
+            if (!struct_info.is_tuple) @compileError("Expected tuple");
+            break :b if (struct_info.fields.len == 1)
+                Tensor
+            else
+                [struct_info.fields.len]Tensor;
+        },
+        .array => |array_info| b: {
+            break :b if (array_info.len == 1)
+                Tensor
+            else
+                [array_info.len]Tensor;
+        },
+        else => @compileError("Unsupported type: " ++ @typeName(T)),
+    };
+}
+
+pub const CustomCallOptions = struct {
+    output_operand_aliases: ?[]const i64 = null,
+};
+
+pub fn customCall(target_name: [:0]const u8, inputs: anytype, outputs: anytype, metadata: anytype, opts: CustomCallOptions) TensorOrTensorArray(@TypeOf(outputs)) {
+    const ctx = module.CompilationContext.current();
+
+    var values: [inputs.len]mlir.Value = undefined;
+    ctx.extractValues(&inputs, &values);
+
+    var res_types: [outputs.len]mlir.Type = undefined;
+    inline for (outputs, 0..) |output, i| {
+        res_types[i] = mlir.ext.mlirType(ctx.mlirCtx(), output);
+    }
+
+    const metadata_type_info = @typeInfo(@TypeOf(metadata));
+    var metadata_attributes_tuple: [metadata_type_info.@"struct".fields.len]mlir.AttrTuple = undefined;
+    inline for (metadata_type_info.@"struct".fields, 0..) |field, i| {
+        const attribute: mlir.Attribute = switch (@typeInfo(field.type)) {
+            .int, .comptime_int => mlir.Attribute.int(ctx.mlirCtx(), .i64, @intCast(@field(metadata, field.name))),
+            else => @compileError("Unsupported metadata type: " ++ @typeName(field.type)),
+        };
+        metadata_attributes_tuple[i] = .{ field.name, attribute };
+    }
+
+    const backend_config = mlir.Attribute.dict(ctx.mlirCtx(), &(.{
+        .{ "pjrt_api", mlir.Attribute.int(ctx.mlirCtx(), .u64, @bitCast(@intFromPtr(ctx._platform.pjrt_api))) },
+        .{ "pjrt_client", mlir.Attribute.int(ctx.mlirCtx(), .u64, @bitCast(@intFromPtr(ctx._platform.pjrt_client))) },
+    } ++ metadata_attributes_tuple));
+
+    var operands_layouts: [inputs.len][]const usize = undefined;
+    inline for (inputs, 0..) |input, i| {
+        operands_layouts[i] = minorToMajor(input.rank());
+    }
+
+    var results_layouts: [outputs.len][]const usize = undefined;
+    inline for (outputs, 0..) |output, i| {
+        results_layouts[i] = minorToMajor(output.rank());
+    }
+
+    const op = dialect.stablehlo.custom_call(
+        ctx.mlirCtx(),
+        &values,
+        .{
+            .call_target_name = target_name,
+            .backend_config = backend_config,
+            .has_side_effect = true,
+            .api_version = .typed_ffi,
+            .operand_layouts = &operands_layouts,
+            .result_layouts = &results_layouts,
+            .output_operand_aliases = opts.output_operand_aliases orelse &.{},
+        },
+        &res_types,
+        ctx.mlirCtx().location(@src()),
+    );
+
+    var outputs_: [outputs.len]Tensor = undefined;
+    inline for (outputs, 0..) |output, i| {
+        outputs_[i] = Tensor._result(output, op.result(i));
+    }
+
+    return switch (@typeInfo(@TypeOf(outputs))) {
+        .@"struct" => |struct_info| b: {
+            if (!struct_info.is_tuple) @compileError("Expected tuple");
+            break :b if (struct_info.fields.len == 1)
+                outputs_[0]
+            else
+                outputs_;
+        },
+        .array => |array_info| b: {
+            break :b if (array_info.len == 1)
+                outputs_[0]
+            else
+                outputs_;
+        },
+        else => @compileError("Unsupported type: " ++ @typeName(@TypeOf(outputs))),
+    };
+}
+
 inline fn toI64(values: anytype) []i64 {
     var res: [Tensor.MAX_RANK]i64 = undefined;
     for (values, 0..) |val, i| res[i] = @intCast(val);
