@@ -14,6 +14,7 @@ const pjrt = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
 const Target = @import("platform.zig").Target;
+const custom_call = @import("custom_call.zig");
 const zml_platform = @import("platform.zig");
 
 const PjrtApiMap = std.EnumArray(Target, ?*const pjrt.Api);
@@ -37,6 +38,7 @@ pub const Context = struct {
             inline for (comptime std.enums.values(runtimes.Platform)) |t| {
                 if (runtimes.load(t)) |api| {
                     Context.apis.set(t, api);
+                    if (t == .cuda) cuda.init();
                 } else |_| {}
             }
         }
@@ -177,9 +179,9 @@ pub const Context = struct {
             return error.NoDevicesFound;
         }
 
-        try CustomCall.registerZmlCustomCalls(p);
-
         self.platforms.set(target, p);
+        try custom_call.registerInternalCustomCalls(p);
+
         return p;
     }
 
@@ -212,69 +214,70 @@ pub const Context = struct {
             }
         }
     }
-
-    pub const HostCallback = fn (?*anyopaque, []const HostBuffer, []const HostBuffer) void;
 };
 
-const CustomCall = struct {
-    pub fn registerZmlCustomCalls(platform: Platform) !void {
-        const registry = platform.pjrt_api.customCallRegistry();
+pub const cuda = struct {
+    pub var streamSynchronize: StreamSynchronize = @ptrFromInt(0xdeadc00da00);
+    pub var cuLaunchHostFunc: CuLaunchHostFunc = @ptrFromInt(0xdeadc00da00);
+    var _memcpyAsync: MemcpyAsync = @ptrFromInt(0xdeadc00da00);
+    var _memcpyBlocking: MemcpyBlocking = @ptrFromInt(0xdeadc00da00);
 
-        if (registry) |reg| {
-            try reg.registerFfi(platform.pjrt_api, "zmlHostBufferCallback", @tagName(platform.target), &hostBufferCallback);
-        } else {
-            stdx.debug.panic("Registering custom calls failed", .{});
-        }
-    }
-
-    fn hostBufferCallback(call_frame: *pjrt.ffi.CallFrame) callconv(.C) ?*pjrt.ffi.Error {
-        if (call_frame.registeringHook()) return null;
-
-        const callback_attr = call_frame.attrs.getByName(.scalar, "callback") orelse unreachable;
-        std.debug.assert(callback_attr.dtype == .u64);
-        const callback: *const Context.HostCallback = @ptrFromInt(callback_attr.get(usize));
-
-        const user_ctx_ptr = call_frame.attrs.getByName(.scalar, "user_context") orelse unreachable;
-        std.debug.assert(user_ctx_ptr.dtype == .u64);
-        const user_ctx: ?*anyopaque = @ptrFromInt(user_ctx_ptr.get(usize));
-
-        const input_buffers = stdx.stackSlice(8, HostBuffer, call_frame.args.len);
-        for (input_buffers, 0..) |*b, i| {
-            b.* = hostBufferFromPinnedBuffer(call_frame.args.get(i));
-        }
-
-        const output_buffers = stdx.stackSlice(8, HostBuffer, call_frame.results.len);
-        for (output_buffers, 0..) |*b, i| {
-            b.* = hostBufferFromPinnedBuffer(call_frame.results.get(i));
-        }
-
-        callback(user_ctx, input_buffers, output_buffers);
-        return null;
-    }
-};
-
-fn getShape(buffer_desc: *const pjrt.ffi.Buffer) Shape {
-    // log.warn("received buffer {}", .{buffer_desc});
-    const dt: DataType = switch (buffer_desc.dtype) {
-        .invalid => @panic("invalid ffi"),
-        .pred => .bool,
-        .s8 => .i8,
-        .s16 => .i16,
-        .s32 => .i32,
-        .s64 => .i64,
-        .token, .f8e4m3, .f8e3m4 => @panic("Unsupported ffi type"),
-        inline else => |t| @field(DataType, @tagName(t)),
+    pub const MemcpyKind = enum(c_int) {
+        host_to_host = 0,
+        host_to_device = 1,
+        device_to_host = 2,
+        device_to_device = 3,
+        inferred = 4,
     };
-    return Shape.init(buffer_desc.dims(), dt);
-}
 
-/// Create a HostBuffer from a ffi description of a buffer.
-/// Normally the ffi describe device buffer but we assume they are located in pinned memory,
-/// and therefore the data pointer is readable both from host and from device.
-fn hostBufferFromPinnedBuffer(buffer_desc: *const pjrt.ffi.Buffer) HostBuffer {
-    const buffer_shape = getShape(buffer_desc);
-    return HostBuffer.fromBytes(
-        buffer_shape,
-        buffer_desc.data[0..buffer_shape.byteSize()],
-    );
-}
+    const MemcpyAsync = *const fn (dst: *anyopaque, src: *const anyopaque, count: usize, kind: MemcpyKind, stream: ?*anyopaque) callconv(.C) c_int;
+    const MemcpyBlocking = *const fn (dst: *anyopaque, src: *const anyopaque, count: usize, kind: MemcpyKind) callconv(.C) c_int;
+    const StreamSynchronize = *const fn (stream: *anyopaque) callconv(.C) c_int;
+    const CuLaunchHostFunc = *const fn (stream: *anyopaque, host_func: *const fn (user_data: *const anyopaque) callconv(.c) void, user_data: *const anyopaque) callconv(.c) c_int;
+
+    pub fn init() void {
+        var cudart = std.DynLib.open("libcudart.so.12") catch {
+            log.err("cudart not found, callback will segfault", .{});
+            return;
+        };
+        defer cudart.close();
+
+        _memcpyAsync = cudart.lookup(MemcpyAsync, "cudaMemcpyAsync") orelse {
+            @panic("cudaMemcpyAsync not found");
+        };
+        _memcpyBlocking = cudart.lookup(MemcpyBlocking, "cudaMemcpy") orelse {
+            @panic("cudaMemcpy not found");
+        };
+        streamSynchronize = cudart.lookup(StreamSynchronize, "cudaStreamSynchronize") orelse {
+            @panic("cudaStreamSynchronize not found");
+        };
+        cuLaunchHostFunc = cudart.lookup(CuLaunchHostFunc, "cudaLaunchHostFunc") orelse {
+            @panic("cudaLaunchHostFunc not found");
+        };
+    }
+
+    pub fn memcpyToHostBlocking(dst: []u8, src: *const anyopaque) void {
+        const err = _memcpyBlocking(dst.ptr, src, dst.len, .device_to_host);
+        check(err);
+    }
+
+    pub fn memcpyToDeviceBlocking(dst: *anyopaque, src: []const u8) void {
+        const err = _memcpyBlocking(dst, src.ptr, src.len, .host_to_device);
+        check(err);
+    }
+
+    pub fn memcpyToDeviceAsync(dst: *anyopaque, src: []const u8, stream: ?*anyopaque) void {
+        const err = _memcpyAsync(dst, src.ptr, src.len, .host_to_device, stream);
+        check(err);
+    }
+
+    pub fn memcpyToHostAsync(dst: []u8, src: *const anyopaque, stream: ?*anyopaque) void {
+        const err = _memcpyAsync(dst.ptr, src, dst.len, .device_to_host, stream);
+        check(err);
+    }
+
+    pub fn check(err: c_int) void {
+        if (err == 0) return;
+        stdx.debug.panic("CUDA error: {d}", .{err});
+    }
+};

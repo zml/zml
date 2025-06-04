@@ -8,11 +8,12 @@ const Bufferized = @import("tensor.zig").Bufferized;
 const CompilationContext = @import("module.zig").CompilationContext;
 const meta = @import("meta.zig");
 const pjrt = @import("pjrtx.zig");
+const custom_call = @import("custom_call.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
 const ShapeOf = @import("tensor.zig").ShapeOf;
 
-const log = std.log.scoped(.zml);
+const log = std.log.scoped(.@"zml/exe");
 
 test {
     std.testing.refAllDecls(@This());
@@ -135,6 +136,9 @@ pub const BaseExe = struct {
     /// The PJRT executable representing the compiled module.
     exe: *pjrt.LoadedExecutable,
 
+    /// The execution context for this executable.
+    context: ?*pjrt.ExecuteContext = null,
+
     /// Pre-allocated slice of buffers to use as inputs when the module is called.
     input_per_device: []const [*]*pjrt.Buffer,
 
@@ -199,6 +203,9 @@ pub const BaseExe = struct {
     }
 
     pub fn deinit(self: BaseExe) void {
+        if (self.context) |ctx| {
+            ctx.deinit(self.platform.pjrt_api);
+        }
         self._arena.deinit();
     }
 
@@ -220,6 +227,7 @@ pub const BaseExe = struct {
             // even if it has been marked as "can be donated" during compilation.
             // TODO: expose it ?
             .non_donatable_input_indices = &.{},
+            .context = self.context,
         }) catch |err| {
             std.debug.panic("PJRT_LoadedExecutable_Execute failed with: {}", .{err});
         };
@@ -228,6 +236,21 @@ pub const BaseExe = struct {
             if (e) |ev| {
                 ev.await_(self.platform.pjrt_api) catch unreachable;
             }
+        }
+    }
+
+    pub fn bind(self: BaseExe, comptime T: type, value: *T) !void {
+        stdx.debug.assert(self.context != null, "Exe doesn't have an execution context", .{});
+        const pjrt_api = self.platform.pjrt_api;
+
+        if (pjrt_api.ffi()) |ffi| {
+            const type_id = T.type_id;
+            const user_data: *anyopaque = @ptrCast(@constCast(value));
+
+            try ffi.addUserData(pjrt_api, self.context.?, .{ .type_id = type_id, .user_data = user_data });
+            log.info("Bound {s}@{x} with type id {d} on {any}", .{ @typeName(T), user_data, T.type_id, self.context.? });
+        } else {
+            stdx.debug.panic("Custom calls are not supported for target {s}", .{@tagName(self.platform.target)});
         }
     }
 
@@ -259,11 +282,13 @@ pub const BaseExe = struct {
     }
 
     pub fn clone(self: BaseExe, parent_allocator: std.mem.Allocator) !BaseExe {
-        return .init(parent_allocator, self.platform, self.exe, .{
-            .input_shapes = self.input_shapes,
+        var exe: BaseExe = try .init(parent_allocator, self.platform, self.exe, .{
+            .n_in = self.input_buffer_count,
             .result_shapes = self.result_shapes,
             .n_devices = self.num_devices,
         });
+        exe.context = self.context;
+        return exe;
     }
 };
 
@@ -290,6 +315,28 @@ pub fn Exe(ArgsT: type, ReturnT: type) type {
             var new: Exe(stdx.meta.Tail(ArgsT), ReturnT) = .{ .inner = self.inner };
             new.inner.prepare(first_arg);
             return new;
+        }
+
+        pub fn withExecutionContext(self: Self) !Self {
+            stdx.debug.assert(self.inner.context == null, "Exe already has an execution context", .{});
+            var new: Self = .{ .inner = self.inner };
+            var arena = &new.inner._arena;
+            var allocator = arena.allocator();
+
+            const pjrt_execute_context = try new.inner.platform.pjrt_api.createExecuteContext();
+            new.inner.context = pjrt_execute_context;
+            inline for (custom_call.custom_call_internal_types) |custom_call_internal_type| {
+                const value_ptr = try allocator.create(custom_call_internal_type);
+                value_ptr.* = try .init(allocator, new.platform());
+                try new.inner.bind(custom_call_internal_type, value_ptr);
+            }
+            log.info("Created context execution {*} for {*}", .{ pjrt_execute_context, self.inner.exe });
+
+            return new;
+        }
+
+        pub fn bind(self: Self, comptime T: type, value: *T) !void {
+            try self.inner.bind(T, value);
         }
 
         pub fn serialize(self: Self, writer: anytype) !void {
