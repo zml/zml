@@ -230,12 +230,6 @@ pub const BaseExe = struct {
         }) catch |err| {
             std.debug.panic("PJRT_LoadedExecutable_Execute failed with: {}", .{err});
         };
-
-        for (events[0..sharding.num_partitions]) |e| {
-            if (e) |ev| {
-                ev.await_(self.platform.pjrt_api) catch unreachable;
-            }
-        }
     }
 
     pub fn serialize(self: BaseExe, writer: anytype) !void {
