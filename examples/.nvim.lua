@@ -6,17 +6,31 @@ local f, err = loadfile(".nvim.local.lua")
 if not err then
 	f()
 else
-	-- Prepend CWD to relative paths
-	local zls_cmd = cwd .. "/tools/zls.sh"
-	local zig_exe_path = cwd .. "/tools/zig.sh"
+    local capabilities = vim.lsp.protocol.make_client_capabilities()
 
-	require("lspconfig")["zls"].setup({
+	-- Prepend CWD to relative paths
+	local zls_cmd = cwd .. "/../zml/tools/zls.sh"
+
+	vim.lsp.config["zls"] = {
+        capabilities = capabilities,
 		cmd = { zls_cmd },
-		settings = {
-			zls = {
-				enable_autofix = true,
-				zig_exe_path = zig_exe_path,
-			},
-		},
-	})
+        root_marker = { "build.zig" },
+        filetypes = {"zig"},
+	}
+    vim.lsp.enable('zls')
+
+    vim.api.nvim_create_autocmd('BufWritePre',{
+      pattern = {"*.zig", "*.zon"},
+      callback = function(ev)
+        vim.lsp.buf.code_action({
+          context = { only = { "source.organizeImports" } },
+          apply = true,
+        })
+        vim.lsp.buf.code_action({
+          context = { only = { "source.fixAll" } },
+          apply = true,
+        })
+        vim.loop.sleep(100)
+      end
+    })
 end
