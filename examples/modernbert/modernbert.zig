@@ -56,6 +56,7 @@ pub const ModernBertModel = struct {
     pub fn init(self: *ModernBertModel, options: ModernBertOptions) void {
         self.options = options;
         self.final_norm.eps = 1e-5;
+        self.embeddings.norm.eps = 1e-5;
         for (self.layers, 0..) |*encoder_layer, layer_idx| {
             encoder_layer.attn.Wqkv.weight = encoder_layer.attn.Wqkv.weight.withSharding(.{0});
             encoder_layer.attn.Wo.weight = encoder_layer.attn.Wo.weight.withSharding(.{1});
