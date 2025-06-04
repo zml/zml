@@ -1956,6 +1956,10 @@ pub const Tensor = struct {
         return _result(val.shape(), constant_op.result(0));
     }
 
+    pub fn zeroLike(other: Tensor) Tensor {
+        return Tensor.constant(other.shape(), other.dtype().zero());
+    }
+
     /// Returns a Tensor containing the result of the outer product between the input Tensors.
     pub fn outer(self: Tensor, other: Tensor) Tensor {
         if (self.rank() + other.rank() == 1) {
