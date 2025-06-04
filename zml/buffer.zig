@@ -224,7 +224,7 @@ pub const Buffer = struct {
 
     /// Creates a Buffer from a pointer into device memory.
     /// This allows to interface with other libraries producing buffers.
-    pub fn asViewOfDeviceBuffer(platform: Platform, shape_: Shape, stream: ?isize, device_data: *anyopaque) Buffer {
+    pub fn asViewOfDeviceBuffer(platform: Platform, shape_: Shape, stream: ?*const anyopaque, device_data: *anyopaque) Buffer {
         const minor_to_major: [Shape.MAX_RANK]i64 = comptime blk: {
             var res: [Shape.MAX_RANK]i64 = undefined;
             for (0..Shape.MAX_RANK) |i| {
