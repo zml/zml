@@ -216,16 +216,19 @@ pub fn asyncMain() !void {
     var context = try zml.Context.init();
     defer context.deinit();
 
-    const compilation_options = zml.CompilationOptions{
-        .xla_dump_to = "/tmp/zml/llama",
-        .sharding_enabled = res.args.sharding orelse true,
-    };
-
     // initialize ZML platform with optional create options
     // eg: --create-options='{"cuda":{"allocator":{"bfc":{"memory_fraction": 0.99}}}}'
     const create_opts_json = res.args.@"create-options" orelse "{}";
     const create_opts = try std.json.parseFromSlice(zml.Platform.CreateOptions, allocator, create_opts_json, .{});
-    const platform = context.autoPlatform(create_opts.value).withCompilationOptions(compilation_options);
+
+    const platform = blk: {
+        var auto_platform = context.autoPlatform(create_opts.value);
+        const compilation_options: zml.CompilationOptions = if (auto_platform.target == .mlx) .{} else .{
+            .xla_dump_to = "/tmp/zml/llama",
+            .sharding_enabled = res.args.sharding orelse true,
+        };
+        break :blk auto_platform.withCompilationOptions(compilation_options);
+    };
     create_opts.deinit();
     context.printAvailablePlatforms(platform);
 

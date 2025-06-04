@@ -21,7 +21,8 @@ pub fn env() zml.Platform {
     if (!builtin.is_test) @compileError("Cannot use zml.testing.env outside of a test block");
     if (_platform == null) {
         var ctx = zml.Context.init() catch unreachable;
-        _platform = ctx.autoPlatform(.{}).withCompilationOptions(.{
+        var auto_platform = ctx.autoPlatform(.{});
+        _platform = auto_platform.withCompilationOptions(if (auto_platform.target == .mlx) .{} else .{
             .xla_dump_to = "/tmp/zml/tests/",
             .sharding_enabled = true,
         });

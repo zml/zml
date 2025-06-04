@@ -1,22 +1,41 @@
+load("//third_party/absl:workspace.bzl", absl = "repo")
 load("//third_party/gpus:cuda_configure.bzl", "cuda_configure")
 load("//third_party/gpus:rocm_configure.bzl", "rocm_configure")
-load("//third_party/llvm:workspace.bzl", llvm = "repo")
+load("//third_party/gpus:sycl_configure.bzl", "sycl_configure")
+load("//third_party/eigen3:workspace.bzl", eigen3 = "repo")
+load("//third_party/farmhash:workspace.bzl", farmhash = "repo")
+load("//third_party/highwayhash:workspace.bzl", highwayhash = "repo")
+load("//third_party/py/ml_dtypes:workspace.bzl", ml_dtypes = "repo")
 load("//third_party/py:python_repo.bzl", "python_repository")
 load("//third_party/pybind11_bazel:workspace.bzl", pybind11_bazel = "repo")
-load("//third_party/stablehlo:workspace.bzl", stablehlo = "repo")
+load("//third_party/shardy:workspace.bzl", shardy = "repo")
 load("//third_party/tensorrt:tensorrt_configure.bzl", "tensorrt_configure")
-load("//third_party/triton:workspace.bzl", triton = "repo")
 load("//third_party:repo.bzl", "tf_http_archive", "tf_mirror_urls")
 load("//third_party:repo.bzl", "tf_vendored")
 load("//tools/toolchains/remote:configure.bzl", "remote_execution_configure")
 
 def _workspace_private_impl(mctx):
+    absl()
     cuda_configure(name = "local_config_cuda")
     remote_execution_configure(name = "local_config_remote_execution")
     rocm_configure(name = "local_config_rocm")
+    sycl_configure(name = "local_config_sycl")
+    shardy()
     tensorrt_configure(name = "local_config_tensorrt")
     tf_vendored(name = "tsl", relpath = "third_party/tsl")
     pybind11_bazel()
+    eigen3()
+    farmhash()
+    highwayhash()
+    ml_dtypes()
+    tf_http_archive(
+        name = "snappy",
+        build_file = "//third_party:snappy.BUILD",
+        sha256 = "2e458b7017cd58dcf1469ab315389e85e7f445bd035188f2983f81fb19ecfb29",
+        strip_prefix = "snappy-984b191f0fefdeb17050b42a90b7625999c13b8d",
+        system_build_file = "//third_party/systemlibs:snappy.BUILD",
+        urls = tf_mirror_urls("https://github.com/google/snappy/archive/984b191f0fefdeb17050b42a90b7625999c13b8d.tar.gz"),
+    )
     tf_http_archive(
         name = "com_github_grpc_grpc",
         sha256 = "b956598d8cbe168b5ee717b5dafa56563eb5201a947856a6688bbeac9cac4e1f",

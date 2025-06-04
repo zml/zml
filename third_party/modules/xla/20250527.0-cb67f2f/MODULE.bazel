@@ -8,7 +8,6 @@ bazel_dep(name = "platforms", version = "0.0.8")
 bazel_dep(name = "bazel_skylib", version = "1.5.0")
 bazel_dep(name = "rules_cc", version = "0.0.17")
 bazel_dep(name = "rules_apple", version = "3.22.0", repo_name = "build_bazel_rules_apple")
-bazel_dep(name = "abseil-cpp", version = "20240116.0", repo_name = "com_google_absl")
 bazel_dep(name = "rules_python", version = "0.39.0")
 bazel_dep(name = "rules_proto", version = "6.0.0-rc1")
 bazel_dep(name = "rules_java", version = "7.3.2")
@@ -19,17 +18,28 @@ bazel_dep(name = "rules_license", version = "0.0.8")
 bazel_dep(name = "rules_shell", version = "0.4.1")
 bazel_dep(name = "bazel_features", version = "1.25.0", repo_name = "proto_bazel_features")
 
+# MLX PjRt Plugin Dependencies
+bazel_dep(name = "mlx", version = "20250518.0-eebe730")
+
 workspace_private = use_extension("//:workspace_private.bzl", "workspace_private")
 use_repo(
     workspace_private,
     "com_github_grpc_grpc",
     "com_google_protobuf",
+    "com_google_absl",
     "local_config_cuda",
     "local_config_remote_execution",
     "local_config_rocm",
+    "local_config_sycl",
     "local_config_tensorrt",
     "python_version_repo",
     "tsl",
+    "eigen_archive",
+    "farmhash_archive",
+    "highwayhash",
+    "ml_dtypes_py",
+    "shardy",
+    "snappy",
 )
 
 workspace_public = use_extension("//:xla.bzl", "xla")
