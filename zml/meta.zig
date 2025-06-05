@@ -1,5 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
+const builtin = @import("builtin");
 
 const stdx = @import("stdx");
 const FnParam = stdx.meta.FnParam;
@@ -9,6 +10,7 @@ test {
     std.testing.refAllDecls(@This());
 }
 
+/// Visit a given type `T` and replace all fields containing `From` by fields containing `To`.
 pub fn MapType(From: type, To: type) type {
     return struct {
         pub fn map(T: type) type {
@@ -78,6 +80,32 @@ pub fn MapType(From: type, To: type) type {
     };
 }
 
+test MapType {
+    const A = struct { a: u32 };
+    const B = struct { b: u32 };
+
+    const A2B = MapType(A, B);
+
+    const StructA = struct { some: []const A, one: A, maybe: ?A, other: u32 };
+    const struct_b = A2B.map(StructA){
+        .some = &[2]B{ .{ .b = 0 }, .{ .b = 1 } },
+        .maybe = null,
+        .one = .{ .b = 2 },
+        .other = 43,
+    };
+    _ = struct_b;
+
+    // TODO(corendos) fixme, union_b should contains Bs not As.
+    const UnionA = union { some: []const A, one: A, maybe: ?A, other: u32 };
+    const union_b = [_]A2B.map(UnionA){
+        .{ .some = &[2]A{ .{ .a = 0 }, .{ .a = 1 } } },
+        .{ .one = .{ .a = 2 } },
+        .{ .maybe = null },
+        .{ .other = 43 },
+    };
+    _ = union_b;
+}
+
 /// Given a callback: `fn(Ctx, From) To`, recursively visits the given `from` struct
 /// and calls the callback when it finds a `From` element, and writes it to the `to` struct.
 /// The `to` parameter must be passed with mutable pointer, and tensor data need to be mutable if callback needs it.
@@ -136,10 +164,10 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
                         @field(from, field.name),
                         &@field(to, field.name),
                     );
-                } else if (field.default_value) |_| {
+                } else if (field.default_value_ptr) |_| {
                     @field(to, field.name) = null;
                 } else {
-                    stdx.debug.compileError("Mapping {} to {} failed. Missing field {s}", .{ FromStruct, ToStruct, field.name });
+                    stdx.debug.compileError("Mapping {} -> {} inside {} failed. Missing field {s} in {}", .{ From, To, FromStruct, field.name, ToStruct });
                 },
                 else => @field(to, field.name) = @field(from, field.name),
             }
@@ -232,6 +260,136 @@ test mapAlloc {
     try testing.expectEqual(10, bb.slice[1].b);
     try testing.expectEqual(11, bb.static_slice[0].b);
     try testing.expectEqual(12, bb.static_slice[1].b);
+}
+
+/// Visit a given type `T` and:
+/// * replace all fields containing `From` by fields containing `To`
+/// * drop all fields not containing any `From`.
+/// The returned type will contains only `To` making it easy for the compiler to produce compact layout.
+/// Used by `zml.Bufferized` to strip compile time arguments from a model struct.
+pub fn MapRestrict(From: type, To: type) type {
+    return struct {
+        pub fn map(T: type) type {
+            switch (T) {
+                From => return To,
+                ?From => return ?To,
+                *From => return *To,
+                *const From => return *const To,
+                []From => return []To,
+                []const From => return []const To,
+                else => {},
+            }
+
+            if (!Contains(T, From)) return void;
+
+            return switch (@typeInfo(T)) {
+                .@"struct" => |struct_infos| {
+                    // We know that at least one of the struct field contains a From.
+                    // We map each field individually. Fields without From and comptime fields are removed.
+                    const fields = struct_infos.fields;
+                    var num_fields: usize = 0;
+
+                    var struct_fields: [fields.len]std.builtin.Type.StructField = undefined;
+                    for (fields) |field| {
+                        if (!field.is_comptime and Contains(field.type, From)) {
+                            const R = map(field.type);
+                            if (R == field.type) {
+                                struct_fields[num_fields] = field;
+                            } else {
+                                const name = if (struct_infos.is_tuple) struct_infos.fields[num_fields].name else field.name;
+                                struct_fields[num_fields] = .{
+                                    .name = name,
+                                    .type = R,
+                                    .default_value_ptr = null,
+                                    .is_comptime = false,
+                                    .alignment = @alignOf(R),
+                                };
+                                // Handle the case `field: ?Tensor = null`
+                                // Generic handling of default value is not possible.
+                                if (R == ?To) {
+                                    struct_fields[num_fields].default_value_ptr = &@as(R, null);
+                                }
+                            }
+                            num_fields += 1;
+                        }
+                    }
+                    if (num_fields == 0) return void;
+                    return @Type(.{ .@"struct" = .{
+                        .layout = .auto,
+                        .fields = struct_fields[0..num_fields],
+                        .decls = &.{},
+                        .is_tuple = struct_infos.is_tuple,
+                    } });
+                },
+                .@"union" => |union_info| {
+                    // We know that at least one of the union field contains a From.
+                    // We map each field individually. Fields without From, are replaced by "void".
+                    const fields = union_info.fields;
+                    var union_fields: [fields.len]std.builtin.Type.UnionField = undefined;
+                    for (0.., fields) |i, field| {
+                        union_fields[i] = .{
+                            .name = field.name,
+                            .type = map(field.type),
+                            .alignment = 0,
+                        };
+                    }
+                    return @Type(.{ .@"union" = .{
+                        .layout = .auto,
+                        .tag_type = union_info.tag_type,
+                        .fields = union_fields[0..],
+                        .decls = &.{},
+                    } });
+                },
+                .array => |arr_info| [arr_info.len]map(arr_info.child),
+                .pointer => |ptr_info| switch (ptr_info.size) {
+                    .slice => if (ptr_info.is_const)
+                        []const map(ptr_info.child)
+                    else
+                        []map(ptr_info.child),
+                    .one => if (ptr_info.is_const)
+                        *const map(ptr_info.child)
+                    else
+                        *map(ptr_info.child),
+                    .many => if (ptr_info.is_const)
+                        [*]const map(ptr_info.child)
+                    else
+                        [*]map(ptr_info.child),
+                    .c => if (ptr_info.is_const)
+                        [*c]map(ptr_info.child)
+                    else
+                        [*c]map(ptr_info.child),
+                },
+                .optional => |opt_info| ?map(opt_info.child),
+                else => T,
+            };
+        }
+    };
+}
+
+test MapRestrict {
+    const A = struct { a: u32 };
+    const B = struct { b: u32 };
+
+    const A2B = MapRestrict(A, B);
+
+    const StructA = struct { some: []const A, one: A, maybe: ?A, other: u32 };
+    const struct_b = A2B.map(StructA){
+        .some = &[2]B{ .{ .b = 0 }, .{ .b = 1 } },
+        .maybe = null,
+        .one = .{ .b = 2 },
+        // Note how struct_b doesn't even have a .other field now.
+    };
+    _ = struct_b;
+
+    const UnionA = union { some: []const A, one: A, maybe: ?A, other: u32 };
+    const union_b = [_]A2B.map(UnionA){
+        .{ .some = &[2]B{ .{ .b = 0 }, .{ .b = 1 } } },
+        .{ .one = .{ .b = 2 } },
+        .{ .maybe = null },
+        // Note how union_b.other is void now.
+        .{ .other = {} },
+    };
+    _ = union_b;
 }
 
 /// Recursively visit the given struct and calls the callback for each K found.
@@ -554,7 +712,7 @@ pub fn Contains(Haystack: type, T: type) bool {
     return switch (@typeInfo(Haystack)) {
         .@"struct" => |info| {
             inline for (info.fields) |field| {
-                if (Contains(field.type, T))
+                if (!field.is_comptime and Contains(field.type, T))
                     return true;
             }
             return false;

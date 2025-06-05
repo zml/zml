@@ -1,8 +1,8 @@
 const std = @import("std");
+
 const stdx = @import("stdx");
 
 const zml = @import("zml.zig");
-
 const Tensor = zml.Tensor;
 
 const log = std.log.scoped(.zml_torch);
@@ -141,16 +141,14 @@ test pixelShuffle {
     const platform = zml.testing.env();
 
     const upscale_factor = 3;
-    var digits: [9 * 4 * 4]i32 = undefined;
-    for (&digits, 0..) |*d, i| d.* = @intCast(i);
-    // TODO should we have tags in buffers ?
-    const input = try zml.Buffer.fromSlice(platform, .{ 1, 9, 4, 4 }, &digits);
-    const output = try zml.testing.compileAndCallWithTensors(
-        platform,
-        pixelShuffle,
-        .{ zml.Shape.init(.{ .batch_size = 1, .c = 9, .h = 4, .w = 4 }, .i32), upscale_factor },
-        .{ input, upscale_factor },
-    );
+    const shape = zml.Shape.init(.{ .b = 1, .c = 9, .h = 4, .w = 4 }, .i32);
+    const input = input: {
+        var digits: [9 * 4 * 4]i32 = undefined;
+        for (&digits, 0..) |*d, i| d.* = @intCast(i);
+        break :input try zml.Buffer.fromSlice(platform, shape, &digits);
+    };
+
+    const output = try zml.testing.compileAndCall(platform, pixelShuffle, .{ input, upscale_factor });
 
     const exp = zml.HostBuffer.fromArray(&[1][1][12][12]i32{.{.{
         .{ 0, 16, 32, 1, 17, 33, 2, 18, 34, 3, 19, 35 },

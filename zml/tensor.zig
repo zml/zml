@@ -532,7 +532,7 @@ pub const Tensor = struct {
     }
 
     pub const Rng = struct {
-        _state: Tensor,
+        _state: Tensor = .{ ._shape = .init(.{2}, .u64), ._id = .{ .buffer_id = 0 } },
         algorithm: dialect.stablehlo.RngAlgorithm.Type = .DEFAULT,
 
         pub fn shape() ShapeOf(Rng) {
@@ -542,10 +542,8 @@ pub const Tensor = struct {
         }
 
         pub fn init(platform: Platform, seed: u128) !Bufferized(Rng) {
-            const bits: [2]u64 = @bitCast(seed);
             return .{
-                ._state = try Buffer.fromSlice(platform, Shape.init(.{2}, .u64), &bits),
-                .algorithm = undefined,
+                ._state = try Buffer.fromBytes(platform, Rng.shape()._state, std.mem.asBytes(&seed)),
             };
         }
 
@@ -643,17 +641,15 @@ pub const Tensor = struct {
 
             const platform = zml.testing.env();
             // Compute stats over a uniform distribution on [-2, 10].
-            const rand, const stats = try zml.testing.compileAndCall(
+            const rand, const stats = try zml.testing.compileAndCallWithTensors(
                 platform,
                 Stats.uniformStats,
-                .{
-                    try Rng.init(platform, 1234),
-                    Shape.init(.{1024}, .f32),
-                    .{ .min = -2, .max = 10 },
-                },
+                .{ Rng.shape(), zml.Shape.init(.{1024}, .f32), .{ .min = -2, .max = 10 } },
+                .{try Rng.init(platform, 1234)},
             );
+
             // Check the Rng state has been modified.
-            try std.testing.expect(try rand._state.getValue(i128) != 1234);
+            try std.testing.expect(try rand._state.getValue(u128) != 1234);
 
             // Check the mean and variance are close to theoritical values.
             const mean_ = try stats.mean.getValue(f32);
@@ -746,9 +742,12 @@ pub const Tensor = struct {
 
             const platform = zml.testing.env();
             const tgt_dist = [_]f32{ 2.0, 1.0, 4.0, 3.0 };
-            const rand, const stats = try zml.testing.compileAndCall(platform, Stats.gumbelStats, .{
-                try Rng.init(platform, 1234), try HostBuffer.fromArray(&tgt_dist).toDevice(platform),
-            });
+            const rand, const stats = try zml.testing.compileAndCallWithTensors(
+                platform,
+                Stats.gumbelStats,
+                .{ Rng.shape(), zml.Shape.init(.{tgt_dist.len}, .f32) },
+                .{ try Rng.init(platform, 1234), try .fromArray(platform, tgt_dist) },
+            );
             // Check the Rng state has been modified.
             try std.testing.expect(try rand._state.getValue(i128) != 1234);
 
@@ -1620,15 +1619,15 @@ pub const Tensor = struct {
         };
 
         {
-            const res = try zml.testing.compileAndCallWithTensors(platform, Local._slice1dAxis, .{ x.shape(), 0, .{ .end = 1 } }, .{ x, 0, .{ .end = 1 } });
+            const res = try zml.testing.compileAndCall(platform, Local._slice1dAxis, .{ x, 0, .{ .end = 1 } });
             try testing.expectEqual([5]f32{ 0, 1, 2, 3, 4 }, try res.getValue([5]f32));
         }
         {
-            const res = try zml.testing.compileAndCallWithTensors(platform, Local._slice1dAxis, .{ x.shape(), 1, .{ .start = 1, .step = 2 } }, .{ x, 0, .{ .start = 1, .step = 2 } });
+            const res = try zml.testing.compileAndCall(platform, Local._slice1dAxis, .{ x, 1, .{ .start = 1, .step = 2 } });
             try testing.expectEqual([4]f32{ 1, 3, 6, 8 }, try res.getValue([4]f32));
         }
         {
-            const res = try zml.testing.compileAndCallWithTensors(platform, Local._slice1dAxis, .{ x.shape(), -1, .{ .start = -2 } }, .{ x, 0, .{ .start = -2 } });
+            const res = try zml.testing.compileAndCall(platform, Local._slice1dAxis, .{ x, -1, .{ .start = -2 } });
             try testing.expectEqual([4]f32{ 3, 4, 8, 9 }, try res.getValue([4]f32));
         }
     }
@@ -3965,13 +3964,12 @@ test "Tensor.maxPool2d" {
     );
 }
 
-/// Returns a mirrored version of T where each Tensor has been replaced by a Buffer.
 pub fn Bufferized(comptime T: type) type {
     // TODO: we should strip out the non-buffer fields.
     // Currently it's confusing cause the Bufferized struct contains field that are never read.
     // Also it will simplify the layout of the Bufferized struct.
     // accelerating the calls to execute.
-    return meta.MapType(Tensor, Buffer).map(T);
+    return meta.MapRestrict(Tensor, Buffer).map(T);
 }
 
 /// Return a clone of a type with Tensors replaced by Shapes.
