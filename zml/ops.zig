@@ -755,7 +755,7 @@ pub fn fromMlirOperationWithTags(op: mlir.Operation, base: anytype) @TypeOf(base
             // copy tags and sharding info over
             // some ops can change dims eg reduceWindow, so we trust mlir here.
             new._shape._tags = tensor._shape._tags;
-            new._shape._sharding_info = tensor._shape._sharding_info;
+            new._shape._partitioning = tensor._shape._partitioning;
             tensor.* = new;
             inner_ctx.index += 1;
         }
