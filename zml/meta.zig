@@ -187,7 +187,7 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
                         @field(from, field.name),
                         &@field(to, field.name),
                     );
-                } else if (field.default_value_ptr) |_| {
+                } else if (field.defaultValue()) |_| {
                     @field(to, field.name) = null;
                 } else {
                     stdx.debug.compileError("Mapping {} -> {} inside {} failed. Missing field {s} in {}", .{ From, To, FromStruct, field.name, ToStruct });

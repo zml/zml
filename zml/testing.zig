@@ -38,12 +38,12 @@ pub fn approxEq(comptime Float: type, l: Float, r: Float, tolerance: Float) bool
 pub fn expectClose(left_: anytype, right_: anytype, tolerance: f32) !void {
     const allocator = if (builtin.is_test) std.testing.allocator else std.heap.smp_allocator;
     var left: zml.HostBuffer, const should_free_left = if (@TypeOf(left_) == zml.Buffer)
-        .{ try left_.toHostAlloc(allocator), true }
+        .{ try left_.toHostBuffer(.init(zml.Mesh.single(), left_.shape()), allocator), true }
     else
         .{ left_, false };
 
     var right: zml.HostBuffer, const should_free_right = if (@TypeOf(right_) == zml.Buffer)
-        .{ try right_.toHostAlloc(allocator), true }
+        .{ try right_.toHostBuffer(.init(zml.Mesh.single(), right_.shape()), allocator), true }
     else
         .{ right_, false };
 
@@ -149,7 +149,7 @@ pub fn compileAndCall(
     var shape_args: zml.ShapeOf(stdx.meta.FnArgs(func)) = undefined;
     try meta.mapAlloc(Local.bufferToShape, arena.allocator(), {}, buffer_and_args, &shape_args);
 
-    var mod = try zml.compileFn(allocator, func, shape_args, platform);
+    var mod = try zml.compileFn(allocator, func, shape_args, zml.Mesh.single(), platform);
     defer mod.deinit();
 
     // Note: we don't use the type safe API of mod,
@@ -176,7 +176,7 @@ pub fn compileAndCallWithTensors(
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    const mod = try zml.compileFn(allocator, func, shape_args, platform);
+    const mod = try zml.compileFn(allocator, func, shape_args, zml.Mesh.single(), platform);
     defer mod.deinit();
 
     return mod.call(buffer_args);
@@ -219,7 +219,7 @@ pub fn testLayerOut(
         log.warn("Reference models uses {d} inputs, but implementation uses {d}", .{ n_in_exp, n_in });
     }
 
-    const exe = try zml.compileModel(alloc, fwd, layer, input_shapes, platform);
+    const exe = try zml.compileModel(alloc, fwd, layer, input_shapes, zml.Mesh.single(), platform);
 
     const n_out_exp = activations.countLayers(out_name);
     if (exe.inner.result_shapes.len != n_out_exp) {
@@ -243,7 +243,7 @@ pub fn testLayerOut(
                 log.err("Didn't find test input: {s}", .{full_prefix.items});
                 @panic("Missing test input");
             };
-            return host.toDevice(ctx.platform) catch unreachable;
+            return host.toDevice(ctx.platform, zml.Mesh.single()) catch unreachable;
         }
     };
 

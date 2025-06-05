@@ -3,12 +3,15 @@ const std = @import("std");
 const stdx = @import("stdx");
 
 const aio = @import("aio.zig");
+const partitioning = @import("partitioning.zig");
 const Buffer = @import("buffer.zig").Buffer;
 const Bufferized = @import("tensor.zig").Bufferized;
 const CompilationContext = @import("module.zig").CompilationContext;
 const meta = @import("meta.zig");
 const pjrt = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
+const Mesh = partitioning.Mesh;
+const Sharding = partitioning.Sharding;
 const Shape = @import("shape.zig").Shape;
 const ShapeOf = @import("tensor.zig").ShapeOf;
 
@@ -30,8 +33,9 @@ pub fn compile(
     args_shapes: ShapeOf(ModuleSignature(func).ArgsT),
     buffer_store: aio.BufferStore,
     platform: Platform,
+    mesh: Mesh,
 ) !FnExe(func) {
-    return compileWithPrefix(allocator, func, init_args, args_shapes, buffer_store, platform, "");
+    return compileWithPrefix(allocator, func, init_args, args_shapes, buffer_store, platform, mesh, "");
 }
 
 /// Compiles a Model struct with the given configuration and shapes, for the given platform.
@@ -47,6 +51,7 @@ pub fn compileWithPrefix(
     args_shapes: ShapeOf(ModuleSignature(func).ArgsT),
     buffer_store: aio.BufferStore,
     platform: Platform,
+    mesh: Mesh,
     prefix: []const u8,
 ) !FnExe(func) {
     const ModelT = ModuleSignature(func).ModelT;
@@ -62,7 +67,7 @@ pub fn compileWithPrefix(
         @call(.auto, ModelT.init, .{@as(*ModelT, &model)} ++ init_args);
     }
 
-    return compileModel(allocator, func, model, args_shapes, platform);
+    return compileModel(allocator, func, model, args_shapes, mesh, platform);
 }
 
 /// Compiles a Model struct with the given configuration and shapes, for the given platform.
@@ -72,16 +77,17 @@ pub fn compileModel(
     comptime func: anytype,
     model: ModuleSignature(func).ModelT,
     args_shapes: ShapeOf(ModuleSignature(func).ArgsT),
+    mesh: Mesh,
     platform: Platform,
 ) !FnExe(func) {
     const ModelT = ModuleSignature(func).ModelT;
     const name = @typeName(ModelT) ++ ".forward";
     log.info("Compiling {s} with {}", .{ name, args_shapes });
 
-    var context = try CompilationContext.init(allocator, name, platform);
+    var context = try CompilationContext.init(allocator, name, mesh, platform);
     defer context.deinit();
 
-    return .{ .inner = try context.compileInternal(allocator, func, .{model} ++ args_shapes) };
+    return .{ .inner = try context.compileInternal(allocator, func, .{model} ++ args_shapes, mesh) };
 }
 
 /// Compiles a function with the given configuration and shapes, for the given platform.
@@ -90,14 +96,15 @@ pub fn compileFn(
     allocator: std.mem.Allocator,
     comptime func: anytype,
     args: ShapeOf(stdx.meta.FnArgs(func)),
+    mesh: Mesh,
     platform: Platform,
 ) !FnExe(func) {
     var pretty_name = try prettyFnName(func, allocator);
     defer pretty_name.deinit(allocator);
-    var context = try CompilationContext.init(allocator, pretty_name.items, platform);
+    var context = try CompilationContext.init(allocator, pretty_name.items, mesh, platform);
     defer context.deinit();
 
-    return .{ .inner = try context.compileInternal(allocator, func, args) };
+    return .{ .inner = try context.compileInternal(allocator, func, args, mesh) };
 }
 
 pub fn FnExe(comptime func: anytype) type {
@@ -174,12 +181,15 @@ pub const BaseExe = struct {
     /// Num devices used (>1 for sharded executable)
     num_devices: u8,
 
+    mesh: Mesh,
+
     /// Allocator backing memory
     _arena: std.heap.ArenaAllocator,
 
     pub fn init(
         parent_allocator: std.mem.Allocator,
         platform: Platform,
+        mesh: Mesh,
         exe: *pjrt.LoadedExecutable,
         args: struct { input_shapes: []const Shape, result_shapes: []const Shape, n_devices: u8 },
     ) !BaseExe {
@@ -215,6 +225,7 @@ pub const BaseExe = struct {
             .output_per_device = output_per_device,
             .input_shapes = all_shapes[0..n_in],
             .result_shapes = all_shapes[n_in..],
+            .mesh = mesh,
             ._arena = arena,
         };
     }
@@ -233,13 +244,12 @@ pub const BaseExe = struct {
 
     pub fn _unsafeCall(self: BaseExe) void {
         var events = [_]?*pjrt.Event{null} ** Platform.MAX_NUM_DEVICES;
-        const sharding = self.platform.sharding();
 
         self.exe.execute(self.platform.pjrt_api, .{
             .arguments = self.input_per_device,
             .num_args = self.input_buffer_count,
             .results = self.output_per_device,
-            .events = events[0..sharding.num_partitions],
+            .events = events[0..@intCast(self.mesh.numPartitions())],
             // this allows to tell a specific buffer shouldn't be donated,
             // even if it has been marked as "can be donated" during compilation.
             // TODO: expose it ?
@@ -249,7 +259,7 @@ pub const BaseExe = struct {
             std.debug.panic("PJRT_LoadedExecutable_Execute failed with: {}", .{err});
         };
 
-        for (events[0..sharding.num_partitions]) |e| {
+        for (events[0..@intCast(self.mesh.numPartitions())]) |e| {
             if (e) |ev| {
                 ev.await_(self.platform.pjrt_api) catch unreachable;
             }
@@ -260,12 +270,14 @@ pub const BaseExe = struct {
         const LocalContext = struct {
             index: u32,
             platform: Platform,
+            mesh: Mesh,
             outputs: []const [*]*pjrt.Buffer,
             output_shapes: []Shape,
         };
         var local_ctx: LocalContext = .{
             .index = 0,
             .platform = self.platform,
+            .mesh = self.mesh,
             .outputs = self.output_per_device,
             .output_shapes = self.result_shapes,
         };
@@ -279,7 +291,8 @@ pub const BaseExe = struct {
                 for (ctx.outputs) |buff| {
                     shards.appendAssumeCapacity(buff[i]);
                 }
-                buffer.* = Buffer.fromPjrtBuffers(ctx.platform, ctx.output_shapes[i], shards.constSlice());
+                const sharding: Sharding = .init(ctx.mesh, ctx.output_shapes[i]);
+                buffer.* = Buffer.fromPjrtBuffers(ctx.platform, sharding, shards.constSlice());
             }
         }).cb, &local_ctx, result);
         stdx.debug.internalAssert(local_ctx.index == self.result_shapes.len, "Pjrt call returned {} tensors, but the return type {s}, contains {} Buffers. Note that modules need to have a comptime know number of returned tensors.", .{ self.output_per_device.len, @typeName(T), local_ctx.index });
@@ -309,7 +322,8 @@ pub const BaseExe = struct {
             shards.appendAssumeCapacity(dev_out[i]);
         }
 
-        return Buffer.fromPjrtBuffers(self.platform, self.result_shapes[i], shards.constSlice());
+        const sharding: Sharding = .init(self.mesh, self.result_shapes[i]);
+        return Buffer.fromPjrtBuffers(self.platform, sharding, shards.constSlice());
     }
 
     pub fn clone(self: BaseExe, parent_allocator: std.mem.Allocator) !BaseExe {

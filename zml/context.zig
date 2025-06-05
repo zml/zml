@@ -176,7 +176,7 @@ pub const Context = struct {
             return error.NoDevicesFound;
         }
 
-        try CustomCall.registerZmlCustomCalls(p);
+        // try CustomCall.registerZmlCustomCalls(p);
 
         self.platforms.set(target, p);
         return p;
@@ -206,7 +206,7 @@ pub const Context = struct {
                         deviceKind,
                     });
                     // we only list 1 CPU device
-                    if (target == .cpu) break;
+                    // if (target == .cpu) break;
                 }
             }
         }

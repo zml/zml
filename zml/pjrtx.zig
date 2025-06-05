@@ -163,8 +163,9 @@ pub const Buffer = opaque {
         return self.inner().memory(api);
     }
 
-    pub fn toHostBuffer(self: *const Buffer, api: *const Api, dst: []u8) ApiError!?*Event {
-        return @ptrCast(try self.inner().toHostBuffer(api, dst));
+    pub const ToHostBufferOpts = pjrt.Buffer.ToHostBufferOpts;
+    pub fn toHostBuffer(self: *const Buffer, api: *const Api, dst: []u8, opts: ToHostBufferOpts) ApiError!?*Event {
+        return @ptrCast(try self.inner().toHostBuffer(api, dst, opts));
     }
 
     pub fn getElementType(self: *const Buffer, api: *const Api) BufferType {

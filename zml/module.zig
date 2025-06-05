@@ -13,6 +13,10 @@ const mlirx = @import("mlirx.zig");
 const ops = @import("ops.zig");
 const pjrt = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
+const partitioning = @import("partitioning.zig");
+const Mesh = partitioning.Mesh;
+const Partition = partitioning.Partition;
+const Sharding = partitioning.Sharding;
 const Shape = @import("shape.zig").Shape;
 const Target = @import("platform.zig").Target;
 const Tensor = @import("tensor.zig").Tensor;
@@ -24,8 +28,40 @@ test {
     std.testing.refAllDecls(@This());
 }
 
+pub fn pushMesh(mesh: Mesh) void {
+    const ctx = CompilationContext.current();
+
+    if (ctx._current_mesh) |m| {
+        if (m.eql(mesh)) {
+            stdx.debug.panic("Mesh already pushed: {}", .{m});
+        }
+
+        stdx.debug.panic("Mesh already exists: {}", .{m});
+    }
+
+    ctx._current_mesh = mesh;
+    log.info("Pushed mesh: {}", .{mesh});
+}
+
+pub fn popMesh() void {
+    const ctx = CompilationContext.current();
+
+    if (ctx._current_mesh) |m| {
+        ctx._current_mesh = null;
+        log.info("Poped mesh: {}", .{m});
+    } else {
+        stdx.debug.panic("No mesh to pop, main mesh: {}", .{ctx._main_mesh});
+    }
+}
+
+pub fn currentMesh() Mesh {
+    const ctx = CompilationContext.current();
+    return ctx._current_mesh orelse ctx._main_mesh;
+}
+
 pub const MlirFn = struct {
     name: []const u8,
+    mesh: Mesh,
     args_shapes: []Shape,
     res_tensors: *const anyopaque,
     res_types: []mlir.Type,
@@ -49,6 +85,8 @@ pub const CompilationContext = struct {
     _mlir_canonicalizer: mlir.PassManager,
 
     _module: mlir.Module,
+    _main_mesh: Mesh,
+    _current_mesh: ?Mesh,
 
     _blocks: std.BoundedArray(TaggedBlock, 64) = .{},
     _fn_cache: FnCache = .{},
@@ -64,7 +102,7 @@ pub const CompilationContext = struct {
     const TensorToBlockArg = std.AutoHashMapUnmanaged(Tensor._Id, struct { mlir.Value, Tensor._Donation });
     const AttributeList = std.BoundedArray(mlir.NamedAttribute, 3);
 
-    pub fn init(allocator_: std.mem.Allocator, full_name: []const u8, platform: Platform) !CompilationContext {
+    pub fn init(allocator_: std.mem.Allocator, full_name: []const u8, mesh: Mesh, platform: Platform) !CompilationContext {
         const mlir_registry = mlir.Registry.init() catch unreachable;
         inline for (.{ "func", "stablehlo" }) |d| {
             mlir.DialectHandle.fromString(d).insertDialect(mlir_registry);
@@ -97,6 +135,8 @@ pub const CompilationContext = struct {
         return .{
             ._platform = platform,
             ._name = try arena.allocator().dupe(u8, name),
+            ._main_mesh = mesh,
+            ._current_mesh = null,
             ._mlir_ctx = mlir_ctx,
             ._mlir_registry = mlir_registry,
             ._mlir_canonicalizer = canonicalizer,
@@ -133,6 +173,10 @@ pub const CompilationContext = struct {
         return _current.?;
     }
 
+    pub fn currentMesh(self: *const CompilationContext) Mesh {
+        return self._current_mesh orelse self._main_mesh;
+    }
+
     pub fn target(self: *const CompilationContext) Target {
         return self._platform.target;
     }
@@ -155,20 +199,20 @@ pub const CompilationContext = struct {
         allocator_: std.mem.Allocator,
         comptime func: anytype,
         args: anytype,
+        mesh: Mesh,
     ) !BaseExe {
         const arena = self.allocator();
 
         var timer = std.time.Timer.start() catch null;
-        const tensor_args = try self.tensorFromShapes(stdx.meta.FnArgs(func), arena, args);
+        const tensor_args = try self.tensorFromArgs(stdx.meta.FnArgs(func), arena, args);
         // Run in a dedicated thread because compilation relies on `threadlocal`.
         const f = try asynk.callBlocking(CompilationContext.emitMlir, .{ self, func, &tensor_args, CompilationContext.EmitMlirOpts{ .name = "main", .kind = .main } });
         const module = self._module;
         module.getBody().appendOperation(f.mlir_fn);
 
-        const sharding = self._platform.sharding();
         const mlir_ctx = self._mlir_ctx;
-        module.op().setAttributeByName("mhlo.num_replicas", .int(mlir_ctx, .i32, sharding.num_replicas));
-        module.op().setAttributeByName("mhlo.num_partitions", .int(mlir_ctx, .i32, sharding.num_partitions));
+        module.op().setAttributeByName("mhlo.num_replicas", mlir.IntegerAttribute(.i32).init(mlir_ctx, mesh.numReplicas()).asAttr());
+        module.op().setAttributeByName("mhlo.num_partitions", mlir.IntegerAttribute(.i32).init(mlir_ctx, mesh.numPartitions()).asAttr());
 
         const module_hash = computeModuleHash(self._platform, module);
         var module_dir: ?[]const u8 = null;
@@ -203,7 +247,7 @@ pub const CompilationContext = struct {
                 }
             }
 
-            const loaded_executable = compileModuleToPjrtExecutable(arena, self._platform, module, module_dir) catch |err| {
+            const loaded_executable = compileModuleToPjrtExecutable(arena, self._platform, mesh, module, module_dir) catch |err| {
                 log.err("pjrt-{s} failed to compile: {}", .{ @tagName(self._platform.target), err });
                 if (module_dir) |dir| log.err("mlir can be found at {s}/module.mlir", .{dir});
                 return err;
@@ -228,11 +272,12 @@ pub const CompilationContext = struct {
         return BaseExe.init(
             allocator_,
             self._platform,
+            mesh,
             loaded_executable,
             .{
                 .input_shapes = f.args_shapes,
                 .result_shapes = f.res_shapes,
-                .n_devices = sharding.num_replicas * sharding.num_partitions,
+                .n_devices = @intCast(mesh.numDevices()),
             },
         );
     }
@@ -339,7 +384,17 @@ pub const CompilationContext = struct {
         @memset(locations, mlir.Location.unknown(mlir_ctx));
 
         var input_shapes = try std.ArrayList(Shape).initCapacity(res_allocator, tensor_count);
-        meta.collect(Tensor.shape, {}, &input_shapes, args) catch unreachable;
+        var input_meshes = try std.ArrayList(?Mesh).initCapacity(res_allocator, tensor_count);
+        meta.collect(struct {
+            pub fn shape(tensor: Tensor) Shape {
+                return tensor.shape();
+            }
+        }.shape, {}, &input_shapes, args) catch unreachable;
+        meta.collect(struct {
+            pub fn mesh(tensor: Tensor) ?Mesh {
+                return tensor._mesh;
+            }
+        }.mesh, {}, &input_meshes, args) catch unreachable;
         stdx.debug.internalAssert(input_shapes.items.len == tensor_count, "args have changed ?", .{});
 
         const input_types = try arena.alloc(mlir.Type, tensor_count);
@@ -392,13 +447,15 @@ pub const CompilationContext = struct {
         const res_attrs = try arena.alloc(AttributeList, out_tensor_count);
         @memset(res_attrs, .{});
 
+        const mesh = self.currentMesh();
+
         if (opts.kind == .main) {
             self.addDonationsAttributes(arg_attrs, fn_res_donations);
             self.addOutputMemoryKindAttributes(res_attrs, fn_res_output_memory_kind);
-            if (self._platform.sharding().num_partitions > 1) {
-                self.addShardingAttributes(arg_attrs, res_attrs, input_shapes.items, fn_res_shapes);
-            }
         }
+
+        log.warn("{s} add sharding attributes: {} {any}", .{ opts.name, mesh, input_shapes.items });
+        self.addShardingAttributes(mesh, arg_attrs, res_attrs, input_shapes.items, input_meshes.items, fn_res_shapes);
 
         const mlir_fn = dialect.func.func(self.mlirCtx(), .{
             .sym_name = opts.name,
@@ -423,6 +480,7 @@ pub const CompilationContext = struct {
 
         return .{
             .mlir_fn = mlir_fn,
+            .mesh = mesh,
             .name = opts.name,
             .args_shapes = input_shapes.items,
             .res_tensors = fn_res,
@@ -498,7 +556,7 @@ pub const CompilationContext = struct {
             .bias = zml.Tensor{ ._shape = s, ._id = .{ .buffer_id = 0 } },
         };
 
-        var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
+        var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", zml.Mesh.single(), platform);
         defer comp.deinit();
         var tensor_args = .{ model, Tensor{ ._shape = s, ._id = .{ .buffer_id = 1234 } }, Tensor{ ._shape = s, ._id = .{ .buffer_id = 1235 } } };
         const f = try comp.emitMlir(Local._fwd, &tensor_args, .{ .name = "test.emitMlir.Local.forward", .kind = .main });
@@ -522,69 +580,42 @@ pub const CompilationContext = struct {
         }
     }
 
-    fn addShardingAttributes(self: CompilationContext, arg_attrs: []AttributeList, res_attrs: []AttributeList, input_shapes: []const Shape, output_shapes: []const Shape) void {
+    fn addShardingAttributes(
+        self: CompilationContext,
+        mesh: Mesh,
+        arg_attrs: []AttributeList,
+        res_attrs: []AttributeList,
+        input_shapes: []const Shape,
+        input_meshes: []const ?Mesh,
+        output_shapes: []const Shape,
+    ) void {
+        if (mesh.isSinglePartition()) return; // No sharding attributes for single partition.
+
         const ctx = self.mlirCtx();
         if (!self._platform.compilation_options.sharding_enabled) return;
         const default_layout = mlir.NamedAttribute.named(ctx, "mhlo.layout_mode", .string(ctx, "default"));
-        for (arg_attrs, input_shapes) |*attr, shape| {
+        for (arg_attrs, input_shapes, input_meshes) |*attr, shape, input_mesh| {
             attr.appendAssumeCapacity(default_layout);
-            attr.appendAssumeCapacity(.named(ctx, "mhlo.sharding", self.getShardingAttr(shape)));
+            if (input_mesh) |m| {
+                // log.warn("addShardingAttributes for {} with input mesh: {}", .{ shape, m });
+                attr.appendAssumeCapacity(.named(ctx, "mhlo.sharding", self.getShardingAttr(Sharding.init(m, shape))));
+            } else {
+                // log.warn("addShardingAttributes for {} with progran mesh: {}", .{ shape, mesh });
+                attr.appendAssumeCapacity(.named(ctx, "mhlo.sharding", self.getShardingAttr(Sharding.init(mesh, shape))));
+            }
         }
 
         for (res_attrs, output_shapes) |*attr, shape| {
             attr.appendAssumeCapacity(default_layout);
-            attr.appendAssumeCapacity(.named(ctx, "mhlo.sharding", self.getShardingAttr(shape)));
+            attr.appendAssumeCapacity(.named(ctx, "mhlo.sharding", self.getShardingAttr(Sharding.init(mesh, shape))));
         }
     }
 
-    pub fn numPartitions(self: CompilationContext) u8 {
-        return self._platform.sharding().num_partitions;
-    }
-
-    pub fn getShardingAttr(self: CompilationContext, shape: Shape) mlir.Attribute {
+    pub fn getShardingAttr(self: CompilationContext, sharding: Sharding) mlir.Attribute {
         const ctx = self.mlirCtx();
-        const num_partitions = self.numPartitions();
         var sharding_str: std.BoundedArray(u8, 128) = .{};
-        writeShardingRepresentation(shape, num_partitions, sharding_str.writer()) catch unreachable;
+        sharding.writeShardingRepresentation(sharding_str.writer()) catch unreachable;
         return mlir.Attribute.string(ctx, sharding_str.constSlice());
-    }
-
-    fn writeShardingRepresentation(shape: Shape, num_partitions: u8, writer: anytype) @TypeOf(writer).Error!void {
-        const n_sharded: u8 = @popCount(@as(u8, @bitCast(shape._sharding_info)));
-        if (n_sharded == 0 or num_partitions == 1) {
-            try writer.writeAll("{replicated}");
-            return;
-        }
-        try writer.writeAll("{devices=[");
-        for (0..shape.rank()) |i| {
-            try writer.print("{d}", .{if (shape._sharding_info[i]) num_partitions else 1});
-            if (i < shape.rank() - 1) try writer.writeByte(',');
-        }
-        try writer.print("]<=[{d}]}}", .{num_partitions});
-    }
-
-    test writeShardingRepresentation {
-        var rule: [64]u8 = undefined;
-        const x = Shape.init(.{ 16, 8 }, .f32);
-
-        // By default tensors are replicated.
-        {
-            var fbs = std.io.fixedBufferStream(&rule);
-            try writeShardingRepresentation(x, 4, fbs.writer());
-            try std.testing.expectEqualStrings("{replicated}", fbs.getWritten());
-        }
-        // Shard along first axis.
-        {
-            var fbs = std.io.fixedBufferStream(&rule);
-            try writeShardingRepresentation(x.withSharding(.{0}), 4, fbs.writer());
-            try std.testing.expectEqualStrings("{devices=[4,1]<=[4]}", fbs.getWritten());
-        }
-        // Also shard along second axis.
-        {
-            var fbs = std.io.fixedBufferStream(&rule);
-            try writeShardingRepresentation(x.withSharding(.{ 0, 1 }), 2, fbs.writer());
-            try std.testing.expectEqualStrings("{devices=[2,2]<=[2]}", fbs.getWritten());
-        }
     }
 
     fn finalizeAttributeList(allocator_: std.mem.Allocator, mlir_ctx: mlir.Context, attributes: []AttributeList) ![]mlir.Attribute {
@@ -614,7 +645,8 @@ pub const CompilationContext = struct {
 
         // first, do the "compile" and check the bytecode
         // the result of this will also have the correct tags of the result shapes
-        const args_hash = hashArgs(args);
+        const mesh = self.currentMesh();
+        const args_hash = hashArgs(args) % hashArgs(mesh);
         const key: FnKey = .{ .fn_ptr = &func, .input_hash = args_hash };
 
         const function = self._fn_cache.get(key) orelse b: {
@@ -629,7 +661,7 @@ pub const CompilationContext = struct {
                 fn cb(arg_id_: *u16, x: Tensor) Tensor {
                     const a = arg_id_.*;
                     arg_id_.* += 1;
-                    return Tensor{ ._shape = x._shape, ._id = .{ .arg_id = a }, ._donation = .{ .arg = a } };
+                    return Tensor{ ._shape = x._shape, ._id = .{ .arg_id = a }, ._donation = .{ .arg = a }, ._mesh = x._mesh };
                 }
             }.cb, arena, &arg_id, args, &tensor_args);
 
@@ -713,9 +745,9 @@ pub const CompilationContext = struct {
 
     /// Create tensor from the given shapes.
     /// Each created tensor will receive a unique id, local to this CompilationContext.
-    pub fn tensorFromShapes(self: *CompilationContext, ArgsT: type, allocator_: std.mem.Allocator, args_shapes: anytype) !ArgsT {
+    pub fn tensorFromArgs(self: *CompilationContext, ArgsT: type, allocator_: std.mem.Allocator, args: anytype) !ArgsT {
         const Local = struct {
-            fn tensorFromShape(arg_id: *u64, shape: Shape) Tensor {
+            fn tensorFromArg(arg_id: *u64, shape: Shape) Tensor {
                 defer arg_id.* += 1;
                 return Tensor{
                     ._shape = shape,
@@ -725,7 +757,7 @@ pub const CompilationContext = struct {
             }
         };
         var tensor_args: ArgsT = undefined;
-        try meta.mapAlloc(Local.tensorFromShape, allocator_, &self._unique_id, args_shapes, &tensor_args);
+        try meta.mapAlloc(Local.tensorFromArg, allocator_, &self._unique_id, args, &tensor_args);
         return tensor_args;
     }
 
@@ -834,31 +866,30 @@ fn storePjrtExecutable(platform: Platform, loaded_executable: *pjrt.LoadedExecut
     try loaded_executable_file.writeAll(serialize_result.bytes);
 }
 
-fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, module: mlir.Module, xla_dump_to_: ?[]const u8) !*pjrt.LoadedExecutable {
+fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, mesh: Mesh, module: mlir.Module, xla_dump_to_: ?[]const u8) !*pjrt.LoadedExecutable {
     const tracer = Tracer.init("ai.zml.compilation");
     const compile_frame = tracer.frameStart("pjrt compilation");
     defer tracer.frameEnd(compile_frame, "pjrt compilation");
 
-    const sharding = platform.sharding();
-
     var options: xla_pb.CompileOptionsProto = .{
         .executable_build_options = .{
             .device_ordinal = -1,
-            .num_replicas = sharding.num_replicas,
-            .num_partitions = sharding.num_partitions,
-            .use_spmd_partitioning = sharding.num_partitions > 1 or sharding.num_replicas > 1,
+            .num_replicas = @intCast(mesh.numReplicas()),
+            .num_partitions = @intCast(mesh.numPartitions()),
+            .use_spmd_partitioning = !mesh.isSinglePartition(),
             .device_assignment = .{
-                .replica_count = sharding.num_replicas,
-                .computation_count = sharding.num_partitions,
+                .replica_count = @intCast(mesh.numReplicas()),
+                .computation_count = mesh.numPartitions(),
                 // Filled below.
                 .computation_devices = .{},
             },
         },
     };
+
     const computation_devices = &options.executable_build_options.?.device_assignment.?.computation_devices;
-    try computation_devices.ensureTotalCapacity(arena, sharding.num_partitions);
-    const replica_device_ids = try arena.alloc(i64, sharding.num_partitions);
-    for (0..sharding.num_partitions) |i| {
+    try computation_devices.ensureTotalCapacity(arena, @intCast(mesh.numPartitions()));
+    const replica_device_ids = try arena.alloc(i64, @intCast(mesh.numPartitions()));
+    for (0..@intCast(mesh.numPartitions())) |i| {
         replica_device_ids[i] = @intCast(i);
         computation_devices.appendAssumeCapacity(.{ .replica_device_ids = .fromOwnedSlice(replica_device_ids[i .. i + 1]) });
     }
@@ -1106,7 +1137,7 @@ pub fn hashShape(hasher: *std.hash.Wyhash, shape: Shape) void {
     // Note: if we enforced 0-init dims then we could hash dims instead.
     hashArray(hasher, shape.dims(), .Shallow);
     hash(hasher, shape._dtype, .Shallow);
-    hash(hasher, shape._sharding_info, .Shallow);
+    hash(hasher, shape._partitioning, .Shallow);
     for (shape.tags()) |tag| {
         hash(hasher, @intFromPtr(tag), .Shallow);
     }
@@ -1120,6 +1151,7 @@ pub fn hash(hasher: *std.hash.Wyhash, key: anytype, comptime strat: std.hash.Str
     const Key = @TypeOf(key);
     if (Key == Tensor) return hashShape(hasher, key.shape());
     if (Key == Shape) return hashShape(hasher, key);
+    if (Key == Mesh) return hashShape(hasher, key.topology);
 
     if (strat == .Shallow and std.meta.hasUniqueRepresentation(Key)) {
         hasher.update(std.mem.asBytes(&key));

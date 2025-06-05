@@ -6,6 +6,7 @@ const Buffer = @import("buffer.zig").Buffer;
 const DataType = @import("dtype.zig").DataType;
 const floats = @import("floats.zig");
 const Platform = @import("platform.zig").Platform;
+const Mesh = @import("partitioning.zig").Mesh;
 const Shape = @import("shape.zig").Shape;
 
 test {
@@ -30,7 +31,7 @@ pub const HostBuffer = struct {
     pub fn empty(allocator: std.mem.Allocator, sh: Shape) error{OutOfMemory}!HostBuffer {
         return .{
             ._shape = sh,
-            ._strides = sh.computeStrides().buffer,
+            ._strides = sh.computeByteStrides().buffer,
             ._data = (try allocator.alignedAlloc(u8, 64, sh.byteSize())).ptr,
             ._memory = .{ .managed = .@"64" },
         };
@@ -43,7 +44,7 @@ pub const HostBuffer = struct {
         stdx.debug.assert(shape_.byteSize() == data_.len, "shape {} and data {} don't match", .{ shape_.byteSize(), data_.len });
         return .{
             ._shape = shape_,
-            ._strides = shape_.computeStrides().buffer,
+            ._strides = shape_.computeByteStrides().buffer,
             ._data = data_.ptr,
             ._memory = .unmanaged,
         };
@@ -67,7 +68,7 @@ pub const HostBuffer = struct {
         std.debug.assert(shape_.byteSize() == raw_bytes.len);
         return .{
             ._shape = shape_,
-            ._strides = shape_.computeStrides().buffer,
+            ._strides = shape_.computeByteStrides().buffer,
             ._data = raw_bytes.ptr,
             ._memory = .unmanaged,
         };
@@ -99,7 +100,7 @@ pub const HostBuffer = struct {
         std.debug.assert(sh.byteSize() == @sizeOf(T));
         return .{
             ._shape = sh,
-            ._strides = sh.computeStrides().buffer,
+            ._strides = sh.computeByteStrides().buffer,
             ._data = @ptrCast(arr_ptr),
             ._memory = .unmanaged,
         };
@@ -156,13 +157,13 @@ pub const HostBuffer = struct {
     }
 
     /// Copies this HostBuffer to the given accelerator.
-    pub fn toDevice(self: HostBuffer, platform_: Platform) !Buffer {
-        return try self.toDeviceOpts(platform_, .{});
+    pub fn toDevice(self: HostBuffer, platform_: Platform, mesh: Mesh) !Buffer {
+        return try Buffer.from(platform_, .init(mesh, self.shape()), self.bytes(), .{});
     }
 
     /// Copies this HostBuffer to the given accelerator (with options).
-    pub fn toDeviceOpts(self: HostBuffer, platform_: Platform, opts: Buffer.FromOptions) !Buffer {
-        return try Buffer.from(platform_, self, opts);
+    pub fn toDeviceOpts(self: HostBuffer, platform_: Platform, mesh: Mesh, opts: Buffer.FromOptions) !Buffer {
+        return try Buffer.from(platform_, .init(mesh, self.shape()), self.bytes(), opts);
     }
 
     /// Interpret the underlying data as a contiguous slice.
@@ -225,7 +226,7 @@ pub const HostBuffer = struct {
 
     pub fn isContiguous(self: HostBuffer) bool {
         const _strides = self._strides;
-        const cont_strides = self._shape.computeStrides();
+        const cont_strides = self._shape.computeByteStrides();
         for (self._shape.dims(), _strides[0..self.rank()], cont_strides.constSlice()) |d, stride, cont_stride| {
             if (d != 1 and stride != cont_stride) return false;
         }
@@ -236,7 +237,7 @@ pub const HostBuffer = struct {
         stdx.debug.assert(self.isContiguous(), "reshape expects a contiguous tensor, got: {}", .{self});
         var res = self;
         res._shape = self._shape.reshape(shape_);
-        res._strides = res._shape.computeStrides().buffer;
+        res._strides = res._shape.computeByteStrides().buffer;
         return res;
     }
 

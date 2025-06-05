@@ -45,7 +45,7 @@ pub fn matmul(lhs: Tensor, rhs: Tensor) Tensor {
 test matmul {
     const platform = zml.testing.env();
 
-    var comp = try zml.module.CompilationContext.init(std.heap.page_allocator, "test", platform);
+    var comp = try zml.module.CompilationContext.init(std.heap.page_allocator, "test", zml.Mesh.single(), platform);
     defer comp.deinit();
 
     comp.activate();

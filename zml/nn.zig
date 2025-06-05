@@ -399,7 +399,7 @@ test "real/img" {
 
     // now try compiling and calling ourselves
     {
-        const mod = try zml.compileFn(std.testing.allocator, Fns.testSplitSeq, .{}, platform);
+        const mod = try zml.compileFn(std.testing.allocator, Fns.testSplitSeq, .{}, zml.Mesh.single(), platform);
         defer mod.deinit();
         const ret = mod.call({});
         try testing.expectEqual(20, ret.getValue(i32));
@@ -651,7 +651,7 @@ test resizeBilinear {
     const platform = zml.testing.env();
 
     // Only test shapes
-    var comp = try zml.module.CompilationContext.init(std.heap.page_allocator, "test", platform);
+    var comp = try zml.module.CompilationContext.init(std.heap.page_allocator, "test", zml.Mesh.single(), platform);
     defer comp.deinit();
     comp.activate();
     defer comp.deactivate();
@@ -713,7 +713,7 @@ test resizeBicubic {
     const platform = zml.testing.env();
 
     // Only test shapes
-    var comp = try zml.module.CompilationContext.init(std.heap.page_allocator, "test", platform);
+    var comp = try zml.module.CompilationContext.init(std.heap.page_allocator, "test", zml.Mesh.single(), platform);
     defer comp.deinit();
     comp.activate();
     defer comp.deactivate();
@@ -1100,10 +1100,10 @@ test sdpaMemEfficient {
 
     // Note we use small input vectors to have the tests run reasonably fast,
     // but don't expect speed ups with this small sizes.
-    const rng = try zml.compileFn(allocator, Tensor.Rng.normal, .{ Shape.init(.{ 1, 10, 512, 64 }, .f32), .{ .mean = 0, .stddev = 1 } }, platform);
+    const rng = try zml.compileFn(allocator, Tensor.Rng.normal, .{ Shape.init(.{ 1, 10, 512, 64 }, .f32), .{ .mean = 0, .stddev = 1 } }, zml.Mesh.single(), platform);
     defer rng.deinit();
 
-    const rng_mask = try zml.compileFn(allocator, Tensor.Rng.normal, .{ Shape.init(.{ 512, 512 }, .f32), .{ .mean = 0, .stddev = 1 } }, platform);
+    const rng_mask = try zml.compileFn(allocator, Tensor.Rng.normal, .{ Shape.init(.{ 512, 512 }, .f32), .{ .mean = 0, .stddev = 1 } }, zml.Mesh.single(), platform);
     defer rng_mask.deinit();
 
     // Note: we pass void here, cause Rng.normal doesn't take any runtime inputs.
@@ -1158,10 +1158,10 @@ test "sdpaMemEfficient transposed" {
 
     // Note we use small input vectors to have the tests run reasonably fast,
     // but don't expect speed ups with this small sizes.
-    const rng = try zml.compileFn(allocator, Tensor.Rng.normal, .{ Shape.init(.{ 1, 512, 10, 64 }, .f32), .{ .mean = 0, .stddev = 1 } }, platform);
+    const rng = try zml.compileFn(allocator, Tensor.Rng.normal, .{ Shape.init(.{ 1, 512, 10, 64 }, .f32), .{ .mean = 0, .stddev = 1 } }, zml.Mesh.single(), platform);
     defer rng.deinit();
 
-    const rng_mask = try zml.compileFn(allocator, Tensor.Rng.normal, .{ Shape.init(.{ 512, 512 }, .f32), .{ .mean = 0, .stddev = 1 } }, platform);
+    const rng_mask = try zml.compileFn(allocator, Tensor.Rng.normal, .{ Shape.init(.{ 512, 512 }, .f32), .{ .mean = 0, .stddev = 1 } }, zml.Mesh.single(), platform);
     defer rng_mask.deinit();
 
     // Note: we pass void here, cause Rng.normal doesn't take any runtime inputs.
@@ -1252,10 +1252,10 @@ test sampleTokens {
     const allocator = std.testing.allocator;
 
     const inf = std.math.inf(f32);
-    var rng_buff = try zml.Tensor.Rng.init(platform, 0xdeadbeef);
+    var rng_buff = try zml.Tensor.Rng.init(platform, zml.Mesh.single(), 0xdeadbeef);
     defer rng_buff._state.deinit();
 
-    const mod = try zml.compileFn(allocator, sampleTokens, .{ Shape.init(.{ .voc = 4 }, .f32), .{ .topk = 4, .temperature = 2.0 }, zml.Tensor.Rng.shape() }, platform);
+    const mod = try zml.compileFn(allocator, sampleTokens, .{ Shape.init(.{ .voc = 4 }, .f32), .{ .topk = 4, .temperature = 2.0 }, zml.Tensor.Rng.shape() }, zml.Mesh.single(), platform);
     defer mod.deinit();
 
     inline for (.{
@@ -1377,7 +1377,7 @@ test sampleTokensDynamic {
     const logits = [_]f32{ @log(2.0), @log(1.0), @log(4.0), @log(3.0) };
     const top_k_indices = [_]i32{ 2, 3, 0, 1 };
     const logits_buff = try zml.Buffer.fromArray(platform, logits);
-    const mod = try zml.compileFn(allocator, fixupLogits, .{ Shape.init(.{ .voc = logits.len }, .f32), DynamicSamplingStrategy.shapes(.f32, 0) }, platform);
+    const mod = try zml.compileFn(allocator, fixupLogits, .{ Shape.init(.{ .voc = logits.len }, .f32), DynamicSamplingStrategy.shapes(.f32, 0) }, zml.Mesh.single(), platform);
     defer mod.deinit();
 
     const Args = struct { DynamicSamplingStrategy.Opts, [4]f32 };
@@ -1405,7 +1405,7 @@ test sampleTokensDynamic {
         // Similar but use bf16, and uses infinity to trigger nans after the softmax.
         const bf16 = zml.floats.BFloat16;
 
-        const mod_bf16 = try zml.compileFn(allocator, fixupLogits, .{ Shape.init(.{ .voc = logits.len }, .bf16), DynamicSamplingStrategy.shapes(.bf16, 0) }, platform);
+        const mod_bf16 = try zml.compileFn(allocator, fixupLogits, .{ Shape.init(.{ .voc = logits.len }, .bf16), DynamicSamplingStrategy.shapes(.bf16, 0) }, zml.Mesh.single(), platform);
         defer mod_bf16.deinit();
         const boost = bf16.inf;
         const nerf = bf16.minus_inf;

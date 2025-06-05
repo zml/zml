@@ -57,6 +57,90 @@ zig_cc_test(
     deps = [":zml"],
 )
 
+zig_cc_test(
+    name = "test_partitioning",
+    data = [
+        "aio/torch/simple.pt",
+        "aio/torch/simple_test_4.pickle",
+    ],
+    test_runner = ":test_runner",
+    deps = [":zml_partitioning"],
+)
+
+zig_library(
+    name = "zml_partitioning",
+    srcs = [
+        "dtype.zig",
+        "partitioning.zig",
+        "shape.zig",
+        "slice.zig",
+        "test_runner.zig",
+    ],
+    copts = ["-lc"],
+    main = "partitioning.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":posix",
+        ":sentencepiece_model_proto",
+        ":xla_proto",
+        "//async",
+        "//mlir",
+        "//mlir/dialects",
+        "//pjrt",
+        "//runtimes",
+        "//stdx",
+        "//zml/tokenizer",
+        "//zml/tools",
+        "@rules_zig//zig/lib:libc",
+        "@rules_zig//zig/runfiles",
+        "@zig-yaml//:zig-yaml",
+    ],
+)
+
+# zig_cc_test(
+#     name = "test_partitioning",
+#     data = [
+#         "aio/torch/simple.pt",
+#         "aio/torch/simple_test_4.pickle",
+#     ],
+#     test_runner = ":test_runner",
+#     deps = [":zml_partitioning"],
+# )
+
+# zig_library(
+#     name = "zml_partitioning",
+#     srcs = [
+#         "context.zig",
+#         "dtype.zig",
+#         "floats.zig",
+#         "meta.zig",
+#         "partitioning.zig",
+#         "pjrtx.zig",
+#         "platform.zig",
+#         "shape.zig",
+#         "test_runner.zig",
+#     ],
+#     copts = ["-lc"],
+#     main = "partitioning.zig",
+#     visibility = ["//visibility:public"],
+#     deps = [
+#         ":posix",
+#         ":sentencepiece_model_proto",
+#         ":xla_proto",
+#         "//async",
+#         "//mlir",
+#         "//mlir/dialects",
+#         "//pjrt",
+#         "//runtimes",
+#         "//stdx",
+#         "//zml/tokenizer",
+#         "//zml/tools",
+#         "@rules_zig//zig/lib:libc",
+#         "@rules_zig//zig/runfiles",
+#         "@zig-yaml//:zig-yaml",
+#     ],
+# )
+
 filegroup(
     name = "test_runner",
     srcs = ["test_runner.zig"],

@@ -393,6 +393,7 @@ pub const Client = opaque {
     /// Not all platform have a profiling api, for those the profiler object will do nothing.
     /// Platforms with known profiler extensions: cuda, xpu
     pub fn getProfiler(self: *const Client, api: *const Api, options: Profiler.Options) Profiler {
+        log.warn(">>>>>>>>>>>>>>>> getProfiler version: {d}\n", .{api.version().minor});
         if (api.version().minor >= 45) {
             if (api.lookupExtension(c.PJRT_Profiler_Extension, c.PJRT_Extension_Type_Profiler)) |ext| {
                 return Profiler.init(ext.profiler_api.*, options);
@@ -921,11 +922,51 @@ pub const Buffer = opaque {
         return ret.is_on_cpu;
     }
 
-    pub fn toHostBuffer(self: *const Buffer, api: *const Api, dst: []u8) ApiError!?*Event {
+    // pub const struct_PJRT_Buffer_ToHostBuffer_Args = extern struct {
+    //     struct_size: usize = @import("std").mem.zeroes(usize),
+    //     extension_start: [*c]PJRT_Extension_Base = @import("std").mem.zeroes([*c]PJRT_Extension_Base),
+    //     src: ?*PJRT_Buffer = @import("std").mem.zeroes(?*PJRT_Buffer),
+    //     host_layout: [*c]PJRT_Buffer_MemoryLayout = @import("std").mem.zeroes([*c]PJRT_Buffer_MemoryLayout),
+    //     dst: ?*anyopaque = @import("std").mem.zeroes(?*anyopaque),
+    //     dst_size: usize = @import("std").mem.zeroes(usize),
+    //     event: ?*PJRT_Event = @import("std").mem.zeroes(?*PJRT_Event),
+    // };
+
+    // struct PJRT_Buffer_ToHostBuffer_Args {
+    //   size_t struct_size;
+    //   PJRT_Extension_Base* extension_start;
+    //   PJRT_Buffer* src;
+
+    //   // The caller can specify an optional host layout. If nullptr, the layout of
+    //   // the src buffer will be used. The caller is responsible to keep the data
+    //   // (tiled or strides) in the host_layout alive during the call.
+    //   PJRT_Buffer_MemoryLayout* host_layout;
+    //   // `dst` can be nullptr to query required size which will be set into
+    //   // `dst_size`.
+    //   void* dst;  // in/out
+    //   // Size of `dst` in bytes. If `dst` is nullptr, then `dst_size` is set to the
+    //   // size needed. Otherwise, `dst_size` must be greater than or equal to the
+    //   // needed size.
+    //   size_t dst_size;  // in/out
+
+    //   // Event that signals when the copy has completed.
+    //   PJRT_Event* event;  // out
+    // };
+
+    pub const ToHostBufferOpts = struct {
+        host_layout: ?MemoryLayout = null,
+        dst_size: ?usize = null,
+    };
+
+    pub fn toHostBuffer(self: *const Buffer, api: *const Api, dst: []u8, opts: ToHostBufferOpts) ApiError!?*Event {
+        if (opts.host_layout) |l| {
+            std.debug.print(">> layout: {any}", .{l});
+        }
         const ret = try api.call(.PJRT_Buffer_ToHostBuffer, .{
             .src = self.inner(),
+            .host_layout = if (opts.host_layout) |layout| @ptrCast(@constCast(&layout.toCStruct())) else null,
             .dst = @ptrCast(dst.ptr),
-            .dst_size = dst.len,
+            .dst_size = if (opts.dst_size) |size| size else dst.len,
         });
         return @ptrCast(ret.event);
     }
