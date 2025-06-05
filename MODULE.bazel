@@ -6,7 +6,6 @@ bazel_dep(name = "abseil-cpp", version = "20240722.0.bcr.2")
 bazel_dep(name = "aspect_bazel_lib", version = "2.14.0")
 bazel_dep(name = "aspect_rules_py", version = "1.3.2")
 bazel_dep(name = "bazel_skylib", version = "1.7.1")
-bazel_dep(name = "hermetic_cc_toolchain", version = "3.2.0")
 bazel_dep(name = "libxev", version = "20250313.0-5773f46")
 bazel_dep(name = "patchelf", version = "0.18.0")
 bazel_dep(name = "pcre2", version = "10.43")
@@ -18,8 +17,9 @@ bazel_dep(name = "rules_proto", version = "7.1.0")
 bazel_dep(name = "rules_python", version = "0.40.0")
 bazel_dep(name = "rules_rust", version = "0.60.0")
 bazel_dep(name = "rules_uv", version = "0.65.0")
-bazel_dep(name = "rules_zig", version = "20250519.0-233b207")
+bazel_dep(name = "rules_zig", version = "20250530.0-5084f1f")
 bazel_dep(name = "sentencepiece", version = "20240618.0-d7ace0a")
+bazel_dep(name = "toolchains_llvm_bootstrapped", version = "0.2.3")
 bazel_dep(name = "toolchains_protoc", version = "0.4.1")
 bazel_dep(name = "with_cfg.bzl", version = "0.9.1")
 bazel_dep(name = "xla", version = "20250527.0-cb67f2f")
@@ -54,12 +54,9 @@ register_toolchains("@rules_zig//zig/target:all")
 
 register_toolchains("@zig_toolchains//:all")
 
-toolchains = use_extension("@hermetic_cc_toolchain//toolchain:ext.bzl", "toolchains")
-use_repo(toolchains, "zig_sdk", "zig_sdk-linux-amd64", "zig_sdk-linux-arm64", "zig_sdk-macos-amd64", "zig_sdk-macos-arm64", "zig_sdk-windows-amd64")
-
 register_toolchains(
-    "@zig_sdk//toolchain:linux_amd64_gnu.2.31",
-    "@zig_sdk//toolchain:linux_arm64_gnu.2.31",
+    "@toolchains_llvm_bootstrapped//toolchain:linux_amd64",
+    "@toolchains_llvm_bootstrapped//toolchain:linux_aarch64",
 )
 
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
