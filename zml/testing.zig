@@ -156,7 +156,7 @@ pub fn compileAndCall(
     var mod = try zml.compileFn(allocator, func, shape_args, platform);
     defer mod.deinit();
 
-    // Note: we dont't use the type safe API of mod,
+    // Note: we don't use the type safe API of mod,
     // cause mod.call expects a `zml.Bufferized` while we have `BufferizedWithArgs`.
     mod.inner.prepare(buffer_and_args);
     mod.inner._unsafeCall();
