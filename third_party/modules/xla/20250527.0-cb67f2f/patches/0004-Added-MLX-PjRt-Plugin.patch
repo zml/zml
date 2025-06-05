@@ -1,9 +1,9 @@
 diff --git a/xla/pjrt/plugin/mlx/BUILD b/xla/pjrt/plugin/mlx/BUILD
 new file mode 100644
-index 0000000000..f7417e1e4b
+index 0000000000..94bc83ea41
 --- /dev/null
 +++ b/xla/pjrt/plugin/mlx/BUILD
-@@ -0,0 +1,201 @@
+@@ -0,0 +1,205 @@
 +load("//xla:xla.default.bzl", "xla_cc_binary", "xla_cc_test")
 +
 +package(
@@ -54,8 +54,8 @@ index 0000000000..f7417e1e4b
 +        "//xla/mlir/utils:error_util",
 +        "//xla/mlir_hlo:mhlo_passes",
 +        "//xla/mlir_hlo:stablehlo_extension_passes",
-+        # "//xla/mlir/utils:type_util",
-+        "//xla/pjrt:mlir_to_hlo",
++        "//xla/mlir/utils:type_util",
++        # "//xla/pjrt:mlir_to_hlo",
 +        "//xla/pjrt:pjrt_client",
 +        "//xla/pjrt:pjrt_executable",
 +        "//xla/pjrt:pjrt_future",
@@ -201,6 +201,10 @@ index 0000000000..f7417e1e4b
 +xla_cc_binary(
 +    name = "stablehlo_mlx_plugin.so",
 +    linkshared = True,
++    linkopts = [
++        "-Wl,-exported_symbol,_GetPjrtApi",
++        "-Wl,-undefined,error",
++    ],
 +    deps = [
 +        ":client_c_pjrt",
 +    ],
