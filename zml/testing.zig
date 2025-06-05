@@ -145,10 +145,6 @@ pub fn compileAndCall(
         pub fn bufferToShape(_: void, x: zml.Buffer) zml.Shape {
             return x.shape();
         }
-
-        pub fn justBuffers(_: void, x: zml.Buffer) zml.Buffer {
-            return x;
-        }
     };
     var shape_args: zml.ShapeOf(stdx.meta.FnArgs(func)) = undefined;
     try meta.mapAlloc(Local.bufferToShape, arena.allocator(), {}, buffer_and_args, &shape_args);

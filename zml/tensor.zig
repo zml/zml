@@ -640,19 +640,16 @@ pub const Tensor = struct {
             };
 
             const platform = zml.testing.env();
-            const seed: i128 = 1234;
             // Compute stats over a uniform distribution on [-2, 10].
-            const rand, const stats = try zml.testing.compileAndCall(
+            const rand, const stats = try zml.testing.compileAndCallWithTensors(
                 platform,
                 Stats.uniformStats,
-                .{
-                    .{ ._state = try Buffer.fromBytes(platform, Rng.shape()._state, std.mem.asBytes(&seed)) },
-                    Shape.init(.{1024}, .f32),
-                    .{ .min = -2, .max = 10 },
-                },
+                .{ Rng.shape(), zml.Shape.init(.{1024}, .f32), .{ .min = -2, .max = 10 } },
+                .{try Rng.init(platform, 1234)},
             );
+
             // Check the Rng state has been modified.
-            try std.testing.expect(try rand._state.getValue(i128) != 1234);
+            try std.testing.expect(try rand._state.getValue(u128) != 1234);
 
             // Check the mean and variance are close to theoritical values.
             const mean_ = try stats.mean.getValue(f32);
