@@ -115,11 +115,8 @@ common:debug    --strategy=ZigBuildTestLib=local
 common:alldebug --compilation_mode=dbg
 common:alldebug --@rules_zig//zig/settings:mode=debug
 common:alldebug --strategy=local
-common:alldebug --@toolchains_llvm_bootstrapped//config:stage2_optimization_mode=debug
 
 common:release  --compilation_mode=opt
 common:release  --copt=-Ofast
 common:release  --@rules_zig//zig/settings:mode=release_fast
 common:release  --@rules_zig//zig/settings:copt=-fomit-frame-pointer
-
-common --override_module=toolchains_llvm_bootstrapped=/home/corentin/toolchains_llvm_bootstrapped
