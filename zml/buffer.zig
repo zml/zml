@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const asynk = @import("async");
+const runtimes = @import("runtimes");
 const stdx = @import("stdx");
 
 const DataType = @import("dtype.zig").DataType;
@@ -8,6 +9,9 @@ const HostBuffer = @import("hostbuffer.zig").HostBuffer;
 const pjrt = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
+const partitioning = @import("partitioning.zig");
+const Mesh = partitioning.Mesh;
+const Sharding = partitioning.Sharding;
 
 test {
     std.testing.refAllDecls(@This());
@@ -49,56 +53,41 @@ pub const Buffer = struct {
 
     pub const FromOptions = struct {
         wait: bool = true,
-        memory: ?pjrt.Memory.Kind = null,
+        memory: ?Memory = null,
     };
 
     /// Copies the content of the given buffer from host memory to the accelerator memory.
-    pub fn from(platform: Platform, host_buffer: HostBuffer, opts: FromOptions) !Buffer {
+    pub fn from(platform: Platform, sharding: Sharding, data: []const u8, opts: FromOptions) !Buffer {
+        var sharding_devices = sharding.iterator(platform);
+
         var res: Buffer = .{
             ._api = platform.pjrt_api,
-            ._shape = host_buffer.shape(),
+            ._shape = sharding.shape,
             ._shards = .{},
         };
 
-        // We shard only on the first axis so that the chunks are still contiguous.
-        // TODO: support more advanced sharding specs
-        stdx.debug.assert(platform.sharding().num_replicas == 1, "ZML doesn't support num_replicas > 1 for now, got: {}", .{platform.sharding()});
-        const sharding_ax: ?u3 = std.simd.firstTrue(host_buffer.shape()._sharding_info);
-        const n_partitions = platform.sharding().num_partitions;
-        const chunk_size = if (sharding_ax) |ax| cs: {
-            // This kind of sharding error should be detected earlier on.
-            stdx.debug.assert(@rem(host_buffer.dim(ax), n_partitions) == 0, "Buffer.from({}) expects the sharding axis {} to have a dimension divisble by the number of devices ({}).", .{ host_buffer, ax, n_partitions });
-            break :cs @divExact(host_buffer.dim(ax), n_partitions);
-        } else 0;
-
-        const buffer_type = bufferTypeFromDtype(host_buffer.shape().dtype());
-        const byte_strides = host_buffer.strides();
-
-        const devices = platform.getDevices();
-        for (0..n_partitions) |i| {
-            // If no sharding if found, the given buffer is replicated on all devices.
-            const buf = if (sharding_ax) |ax| buf: {
-                const start: i64 = @as(i64, @intCast(i)) * chunk_size;
-                break :buf host_buffer.slice1d(ax, .{ .start = start, .end = start + chunk_size });
-            } else host_buffer;
-
+        while (sharding_devices.next()) |shard| {
             var args = pjrt.Client.BufferFromHostBufferArgs{
-                .data = buf._data,
-                .buffer_type = buffer_type,
-                .dims = buf.shape().dims(),
-                .byte_strides = byte_strides,
+                .data = shard.data(data).ptr,
+                .buffer_type = bufferTypeFromDtype(shard.shard.dtype()),
+                .dims = shard.shard.dims(),
+                .byte_strides = shard.strides.constSlice(),
+                .device = shard.device,
                 .host_buffer_semantics = .ImmutableUntilTransferCompletes,
             };
+
             if (opts.memory) |memory_kind| {
-                const memories = try devices[i].addressableMemories(platform.pjrt_api);
+                const memories = try shard.device.addressableMemories(platform.pjrt_api);
                 const memory = for (memories) |m| {
                     const kind = m.kind(platform.pjrt_api);
-                    if (kind == memory_kind) break m;
+                    if (kind == memory_kind.toPjrtMemory()) break m;
                 } else return error.NotFound;
                 args.memory = memory;
             } else {
-                args.device = devices[i];
+                args.device = shard.device;
             }
+
+            log.debug("Creating buffer on device {any} with args {any}", .{ res, args });
 
             const pjrt_buffer, const event = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, args);
 
@@ -391,7 +380,7 @@ pub const Buffer = struct {
 
     fn hasShardedAxis(self: Buffer) bool {
         if (self._shards.len == 1) return false;
-        return @reduce(.Or, self._shape._sharding_info);
+        return self._shape.hasAtLeastOnePartitionedAxis();
     }
 
     pub fn copyToMemory(self: Buffer, memory: *const pjrt.Memory) !Buffer {

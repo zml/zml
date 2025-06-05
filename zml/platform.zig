@@ -95,10 +95,7 @@ pub const Platform = struct {
 };
 
 const _CreateOptions = struct {
-    // XLA CPU client doesn't read options
-    // https://github.com/openxla/xla/blob/42496a28c374bd35f493cc5dbde74805407245dc/xla/pjrt/c/pjrt_c_api_cpu_internal.cc#L33-L46
-    cpu: struct {} = .{},
-
+    cpu: Cpu = .{},
     // bump memory fraction from XLA defaults of 75% to 90%.
     // Even on a 8GB GPU it should leave enough space for the Cuda driver
     // https://github.com/openxla/xla/blob/3e87afa11a865cf91137522492918ad18bfe5b7c/xla/pjrt/plugin/xla_gpu/xla_gpu_allocator_config.h#L25-L60
@@ -106,6 +103,14 @@ const _CreateOptions = struct {
     rocm: struct {} = .{},
     tpu: struct {} = .{},
     neuron: struct {} = .{},
+
+    pub const Cpu = struct {
+        cpu_device_count: i64 = 4,
+
+        pub fn writeNamedValues(self: Cpu, values: *std.ArrayListUnmanaged(pjrt.NamedValue)) void {
+            values.appendAssumeCapacity(pjrt.NamedValue.from("cpu_device_count", self.cpu_device_count));
+        }
+    };
 
     pub const Cuda = struct {
         allocator: Allocator = .{ .bfc = .{} },
@@ -155,6 +160,7 @@ const _CreateOptions = struct {
         var values = std.ArrayListUnmanaged(pjrt.NamedValue).fromOwnedSlice(out);
         values.shrinkRetainingCapacity(0);
         switch (target) {
+            .cpu => self.cpu.writeNamedValues(&values),
             .cuda => self.cuda.writeNamedValues(&values),
             inline else => |t| {
                 stdx.debug.assertComptime(@hasField(_CreateOptions, @tagName(t)), "zml.platform.CreateOptions doesn't list target {s}", .{@tagName(t)});

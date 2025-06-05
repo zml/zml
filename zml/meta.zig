@@ -187,7 +187,7 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
                         @field(from, field.name),
                         &@field(to, field.name),
                     );
-                } else if (field.default_value_ptr) |_| {
+                } else if (field.defaultValue()) |_| {
                     @field(to, field.name) = null;
                 } else {
                     stdx.debug.compileError("Mapping {} -> {} inside {} failed. Missing field {s} in {}", .{ From, To, FromStruct, field.name, ToStruct });
@@ -225,7 +225,9 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
                 }
                 to.* = items;
             },
-            else => stdx.debug.compileError("zml.meta.mapAlloc doesn't support: {}", .{FromStruct}),
+            else => {
+                stdx.debug.compileError("zml.meta.mapAlloc doesn't support: {}", .{FromStruct});
+            },
         },
         .optional => if (from) |f| {
             to.* = @as(@typeInfo(type_info_to_ptr.pointer.child).optional.child, undefined);
