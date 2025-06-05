@@ -504,8 +504,9 @@ pub fn loadBuffers(
     buffer_store: BufferStore,
     allocator: std.mem.Allocator,
     platform: zml.Platform,
+    mesh: zml.Mesh,
 ) !zml.Bufferized(Model) {
-    return loadBuffersWithPrefix(Model, init_args, buffer_store, allocator, platform, "");
+    return loadBuffersWithPrefix(Model, init_args, buffer_store, allocator, platform, mesh, "");
 }
 
 /// Creates a bufferized version of a Model from the given BufferStore with a specified prefix.
@@ -522,6 +523,7 @@ pub fn loadBuffersWithPrefix(
     buffer_store: BufferStore,
     allocator: std.mem.Allocator,
     platform: zml.Platform,
+    mesh: zml.Mesh,
     prefix: []const u8,
 ) !zml.Bufferized(Model) {
     var arena_state = std.heap.ArenaAllocator.init(allocator);
@@ -536,7 +538,7 @@ pub fn loadBuffersWithPrefix(
         @call(.auto, Model.init, .{&model} ++ init_args);
     }
 
-    return loadModelBuffersWithPrefix(Model, model, buffer_store, allocator, platform, prefix);
+    return loadModelBuffersWithPrefix(Model, model, buffer_store, allocator, platform, mesh, prefix);
 }
 
 /// Creates a bufferized version of a Model from the given BufferStore. For details about
@@ -551,8 +553,9 @@ pub fn loadModelBuffers(
     buffer_store: BufferStore,
     allocator: std.mem.Allocator,
     platform: zml.Platform,
+    mesh: zml.Mesh,
 ) !zml.Bufferized(Model) {
-    return try loadModelBuffersWithPrefix(Model, model, buffer_store, allocator, platform, "");
+    return try loadModelBuffersWithPrefix(Model, model, buffer_store, allocator, platform, mesh, "");
 }
 
 /// Creates a bufferized version of a Model from the given BufferStore and the given prefix.
@@ -567,6 +570,7 @@ pub fn loadModelBuffersWithPrefix(
     buffer_store: BufferStore,
     allocator: std.mem.Allocator,
     platform: zml.Platform,
+    mesh: zml.Mesh,
     prefix: []const u8,
 ) !zml.Bufferized(Model) {
     // Allocate the bufferized version.
@@ -575,7 +579,7 @@ pub fn loadModelBuffersWithPrefix(
     var res: zml.Bufferized(Model) = undefined;
     try zml.meta.mapAlloc(struct {
         pub fn initBuffer(_: void, tensor: zml.Tensor) zml.Buffer {
-            return .{ ._shape = tensor.shape(), ._api = undefined, ._shards = undefined };
+            return .{ ._shape = tensor.shape(), ._mesh = tensor._mesh, ._api = undefined, ._shards = undefined };
         }
     }.initBuffer, allocator, {}, model, &res);
 
@@ -583,7 +587,7 @@ pub fn loadModelBuffersWithPrefix(
     try prefix_builder.push(allocator, prefix);
     defer prefix_builder.deinit(allocator);
 
-    try visitStructAndLoadBuffer(allocator, &prefix_builder, buffer_store, &res, platform);
+    try visitStructAndLoadBuffer(allocator, &prefix_builder, buffer_store, &res, platform, mesh);
     return res;
 }
 
@@ -658,7 +662,14 @@ pub fn awaitAll(buffers: anytype) !void {
     }).cb, {}, buffers);
 }
 
-fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *PrefixBuilder, buffer_store: BufferStore, obj: anytype, platform: zml.Platform) !void {
+fn visitStructAndLoadBuffer(
+    allocator: std.mem.Allocator,
+    prefix_builder: *PrefixBuilder,
+    buffer_store: BufferStore,
+    obj: anytype,
+    platform: zml.Platform,
+    mesh: zml.Mesh,
+) !void {
     const err_msg = "visitStructAndLoadBuffer must be called with a pointer to type. Received ";
     const type_info, const T = switch (@typeInfo(@TypeOf(obj))) {
         .pointer => |ptr_info| switch (ptr_info.size) {
@@ -676,7 +687,13 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
             log.debug("Loading buffer {s} ({})", .{ prefix, obj._shape });
             stdx.debug.assert(host_buffer.shape().eql(obj._shape), "loadModelBuffers expects to find the same shapes in the model and in the buffer store, got {} and {} for tensor {s}", .{ obj._shape, host_buffer, prefix });
             buf_with_metadata._shape = obj._shape;
-            obj.* = try zml.Buffer.from(platform, buf_with_metadata, .{});
+            const m = obj._mesh orelse mesh;
+            const sharding: zml.Sharding = .init(m, obj._shape);
+            // log.warn("load {} with sharding: {}", .{ obj, sharding });
+            log.warn("  - {s} - sharding: {any} - {s}", .{ prefix, sharding, sharding.getShardingAttr().constSlice() });
+
+            const data_slice = buf_with_metadata._data[0..buf_with_metadata.shape().byteSize()];
+            obj.* = try zml.Buffer.from(platform, sharding, data_slice, .{});
         } else {
             log.err("Buffer not found: {s}", .{prefix});
 
@@ -693,7 +710,7 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
                     try prefix_builder.pushDigit(allocator, i);
                     defer prefix_builder.pop();
 
-                    try visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, value, platform);
+                    try visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, value, platform, mesh);
                 }
             } else stdx.debug.compileError("type not supported by visitStructAndLoadBuffer: {}", .{T});
         },
@@ -701,7 +718,7 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
             for (obj, 0..) |*value, i| {
                 try prefix_builder.pushDigit(allocator, i);
                 defer prefix_builder.pop();
-                try visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, value, platform);
+                try visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, value, platform, mesh);
             }
         },
 
@@ -711,12 +728,12 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
                 try prefix_builder.push(allocator, field.name);
                 defer prefix_builder.pop();
 
-                try visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, &@field(obj, field.name), platform);
+                try visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, &@field(obj, field.name), platform, mesh);
             }
         },
         .optional => {
             if (obj.*) |*obj_val| {
-                try visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, obj_val, platform);
+                try visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, obj_val, platform, mesh);
             }
         },
         else => {},

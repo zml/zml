@@ -36,7 +36,7 @@ pub const Context = struct {
             inline for (comptime std.enums.values(runtimes.Platform)) |t| {
                 if (runtimes.load(t)) |api| {
                     Context.apis.set(t, api);
-                    if (t == .cuda) cuda.init();
+                    // if (t == .cuda) cuda.init();
                 } else |_| {}
             }
         }
@@ -177,7 +177,7 @@ pub const Context = struct {
             return error.NoDevicesFound;
         }
 
-        try CustomCall.registerZmlCustomCalls(p);
+        // try CustomCall.registerZmlCustomCalls(p);
 
         self.platforms.set(target, p);
         return p;
@@ -207,7 +207,7 @@ pub const Context = struct {
                         deviceKind,
                     });
                     // we only list 1 CPU device
-                    if (target == .cpu) break;
+                    // if (target == .cpu) break;
                 }
             }
         }

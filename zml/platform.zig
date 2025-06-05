@@ -15,7 +15,6 @@ pub const CompilationOptions = struct {
     xla_dump_fusion_visualization: bool = false,
     xla_dump_hlo_pass_re: ?[]const u8 = null,
     sharding_enabled: bool = false,
-    sharding_axes: std.BoundedArray([*:0]const u8, 8) = .{},
 };
 
 pub const Platform = struct {
@@ -50,21 +49,6 @@ pub const Platform = struct {
         return all_devices;
     }
 
-    pub const Sharding = struct { num_replicas: u8, num_partitions: u8 };
-
-    pub fn sharding(self: Platform) Sharding {
-        // replicas run the same function but with different inputs,
-        // while partitions contribute to one evaluation over a shared input.
-        // Inside an inference process, we generally don't want replicas,
-        // as it's best to fully isolate replicas on different processes.
-        // For now we hardcode num_replicas = 1.
-        const num_devices: u8 = @intCast(self.getDevices().len);
-        return if (self.compilation_options.sharding_enabled)
-            .{ .num_replicas = 1, .num_partitions = num_devices }
-        else
-            .{ .num_replicas = 1, .num_partitions = 1 };
-    }
-
     pub fn withCompilationOptions(self: Platform, opts: CompilationOptions) Platform {
         var res = self;
         res.compilation_options = opts;
@@ -95,10 +79,7 @@ pub const Platform = struct {
 };
 
 const _CreateOptions = struct {
-    // XLA CPU client doesn't read options
-    // https://github.com/openxla/xla/blob/42496a28c374bd35f493cc5dbde74805407245dc/xla/pjrt/c/pjrt_c_api_cpu_internal.cc#L33-L46
-    cpu: struct {} = .{},
-
+    cpu: Cpu = .{},
     // bump memory fraction from XLA defaults of 75% to 90%.
     // Even on a 8GB GPU it should leave enough space for the Cuda driver
     // https://github.com/openxla/xla/blob/3e87afa11a865cf91137522492918ad18bfe5b7c/xla/pjrt/plugin/xla_gpu/xla_gpu_allocator_config.h#L25-L60
@@ -106,6 +87,14 @@ const _CreateOptions = struct {
     rocm: struct {} = .{},
     tpu: struct {} = .{},
     neuron: struct {} = .{},
+
+    pub const Cpu = struct {
+        cpu_device_count: i64 = 4,
+
+        pub fn writeNamedValues(self: Cpu, values: *std.ArrayListUnmanaged(pjrt.NamedValue)) void {
+            values.appendAssumeCapacity(pjrt.NamedValue.from("cpu_device_count", self.cpu_device_count));
+        }
+    };
 
     pub const Cuda = struct {
         allocator: Allocator = .{ .bfc = .{} },
@@ -155,6 +144,7 @@ const _CreateOptions = struct {
         var values = std.ArrayListUnmanaged(pjrt.NamedValue).fromOwnedSlice(out);
         values.shrinkRetainingCapacity(0);
         switch (target) {
+            .cpu => self.cpu.writeNamedValues(&values),
             .cuda => self.cuda.writeNamedValues(&values),
             inline else => |t| {
                 stdx.debug.assertComptime(@hasField(_CreateOptions, @tagName(t)), "zml.platform.CreateOptions doesn't list target {s}", .{@tagName(t)});
