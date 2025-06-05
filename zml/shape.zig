@@ -25,14 +25,15 @@ pub const Shape = struct {
     pub const DimsArray = std.BoundedArray(i64, MAX_RANK);
     pub const TagsArray = std.BoundedArray(Tag, MAX_RANK);
     pub const AxesArray = std.BoundedArray(u3, MAX_RANK);
-    pub const ShardingInfo = @Vector(MAX_RANK, bool);
+    pub const PartitionArray = std.BoundedArray(Tag, MAX_RANK);
 
     const UnknownTags: TagsArray = .{ .len = 0, .buffer = [_]Tag{TagUnknown} ** MAX_RANK };
+    const UnknownPartitioning: PartitionArray = .{ .len = MAX_RANK, .buffer = [_]Tag{TagUnknown} ** MAX_RANK };
 
     _dtype: DataType,
     _dims: DimsArray = .{},
     _tags: TagsArray = UnknownTags,
-    _sharding_info: ShardingInfo = @splat(false),
+    _partitioning: PartitionArray = UnknownPartitioning,
 
     pub fn parseDimensions(v: anytype) struct { DimsArray, TagsArray } {
         const T = @TypeOf(v);
@@ -400,13 +401,14 @@ pub const Shape = struct {
         for (self.dims(), 0..) |d, i| {
             if (need_comma) try writer.writeByte(',');
             const t = self.tag(i);
+            const part = self._partitioning.get(i);
             if (t != TagUnknown) {
                 try writer.print("{s}={d}", .{ t, d });
             } else {
                 try writer.print("{d}", .{d});
             }
-            if (self._sharding_info[i]) {
-                try writer.writeByte('!');
+            if (part != TagUnknown) {
+                try writer.print("/{s}", .{part});
             }
             need_comma = true;
         }
@@ -747,14 +749,50 @@ pub const Shape = struct {
         return res;
     }
 
-    pub fn withSharding(self: Shape, axes_: anytype) Shape {
+    pub fn withPartitionning(self: Shape, bound_axis: anytype) Shape {
+        // todo : check that bound_axis is a struct of enum literals.
         var res = self;
-        // Reset sharding.
-        res._sharding_info = @splat(false);
-        for (self.axes(axes_).constSlice()) |ax| {
-            res._sharding_info[ax] = true;
+
+        inline for (std.meta.fields(@TypeOf(bound_axis))) |field| {
+            const value = @field(bound_axis, field.name);
+            const ValueType = @TypeOf(value);
+            if (@typeInfo(ValueType) == .enum_literal) {
+                const axis_ = self.axisFromTagMaybe(toTag(value));
+
+                if (axis_) |i| {
+                    res._partitioning.set(i, toTag(field));
+                } else {
+                    stdx.debug.panic("Axis {s} is not present in the shape: {s}", .{ field.name, self });
+                }
+            } else {
+                stdx.debug.compileError("Wrong type for bound axis: {any}, expecting enum literal", .{ValueType});
+            }
         }
+
         return res;
+    }
+
+    pub fn partition(self: Shape, ax: anytype) Tag {
+        return self._partitioning.get(self.axis(ax));
+    }
+
+    pub fn hasAtLeastOnePartitionedAxis(self: Shape) bool {
+        for (self._partitioning.constSlice()) |part| {
+            if (part != TagUnknown) return true;
+        }
+        return false;
+    }
+
+    pub fn advance(indices: Shape, value: Shape) Shape {
+        var new_incides: Shape = indices;
+        for (0..indices.rank()) |i| {
+            const d = indices.dim(i);
+            if (d <= value.dim(i)) {
+                new_incides = indices.setDim(i, d + 1);
+                break;
+            }
+        }
+        return new_incides;
     }
 
     /// Renames some of the tags in this shape.

@@ -6,12 +6,14 @@ const flags = stdx.flags;
 
 // set log level to debug to print the generated IR
 pub const std_options: std.Options = .{
-    .log_level = .warn,
+    .log_level = .info,
     .logFn = asynk.logFn(std.log.defaultLog),
 };
 
+const mesh: zml.Mesh = .init(.{ .y = 4 });
+
 pub fn benchmark(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
-    return a.withSharding(.{.k}).dot(b.withSharding(.{.k}), .{.k}).withSharding(.{.m});
+    return a.dot(b, .{.k}); //.withSharding(mesh, .{ .y = .m }).
 }
 
 pub fn main() !void {
@@ -35,17 +37,23 @@ pub fn asyncMain() !void {
     var context = try zml.Context.init();
     defer context.deinit();
 
+    var args = std.process.args();
+    const cli_args = flags.parse(&args, CliArgs);
+
     // Auto-select platform
-    const platform = context.autoPlatform(.{}).withCompilationOptions(.{
+    const platform = context.autoPlatform(.{ .cpu = .{ .cpu_device_count = mesh.numRequiredDevices() } }).withCompilationOptions(.{
         .sharding_enabled = true,
     });
     context.printAvailablePlatforms(platform);
 
-    var args = std.process.args();
-    const cli_args = flags.parse(&args, CliArgs);
+    const shape: zml.Shape = .init(.{ cli_args.size, cli_args.size }, cli_args.dtype);
+    const a_shape = shape.withTags(.{ .m, .k }).withPartitionning(.{ .y = .k });
+    const b_shape = shape.withTags(.{ .k, .n }).withPartitionning(.{ .y = .k });
 
-    const a_shape = zml.Shape.init(.{ cli_args.size, cli_args.size }, cli_args.dtype).withTags(.{ .m, .k }).withSharding(.{.k});
-    const b_shape = a_shape.withTags(.{ .k, .n }).withSharding(.{.k});
+    const sharding: zml.Sharding = .init(mesh, a_shape);
+    const a_small = sharding.shard();
+    std.debug.print("{}\n", .{a_small});
+
     var timer = try std.time.Timer.start();
 
     std.debug.print("\nCompiling model to MLIR....\n", .{});
@@ -53,7 +61,7 @@ pub fn asyncMain() !void {
     // Start compiling.
     // The shape of the input tensor, we have to pass in manually.
     timer.reset();
-    var compilation = try asynk.asyncc(zml.compileFn, .{ allocator, benchmark, .{ a_shape, b_shape }, platform });
+    var compilation = try asynk.asyncc(zml.compileFn, .{ allocator, benchmark, .{ a_shape, b_shape }, mesh, platform });
 
     // Wait for compilation to finish
     const executable = try compilation.awaitt();
@@ -95,6 +103,7 @@ pub fn asyncMain() !void {
 
 fn createRandomBuffer(allocator: std.mem.Allocator, platform: zml.Platform, shape: zml.Shape, random: std.Random) !zml.Buffer {
     const data = try allocator.alloc(u8, shape.byteSize());
+    std.debug.print("Creating random buffer of size {d} ptr {*} bytes for shape: {s}\n", .{ data.len, data.ptr, shape });
     defer allocator.free(data);
 
     switch (shape.dtype()) {
@@ -123,5 +132,5 @@ fn createRandomBuffer(allocator: std.mem.Allocator, platform: zml.Platform, shap
 
     var host_buffer = zml.HostBuffer.fromBytes(shape, data);
     errdefer host_buffer.deinit(allocator);
-    return zml.Buffer.from(platform, host_buffer);
+    return zml.Buffer.from(platform, mesh, host_buffer);
 }

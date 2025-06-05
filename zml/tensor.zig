@@ -17,6 +17,9 @@ const module = @import("module.zig");
 const CompilationContext = module.CompilationContext;
 const ops = @import("ops.zig");
 const Platform = @import("platform.zig").Platform;
+const Mesh = @import("partitioning.zig").Mesh;
+const Partition = @import("partitioning.zig").Partition;
+const Sharding = @import("partitioning.zig").Sharding;
 const Shape = @import("shape.zig").Shape;
 
 const EnumLiteral = @TypeOf(.enum_literal);
@@ -41,9 +44,11 @@ test {
 pub const Tensor = struct {
     _shape: Shape,
     _id: _Id,
+    _mesh: _Mesh = .no_mesh,
     _donation: _Donation = .no_buffer,
     _output_memory_kind: Memory = .device,
 
+    pub const _Mesh = union(enum) { no_mesh, mesh: Mesh };
     pub const _Donation = union(enum) { no_buffer, input_buffer, arg: u16 };
     pub const _Id = union(enum) { mlir: mlir.Value, buffer_id: u64, arg_id: u64 };
     pub const MAX_RANK = Shape.MAX_RANK;
@@ -168,15 +173,18 @@ pub const Tensor = struct {
         return res;
     }
 
-    pub fn withSharding(self: Tensor, axes_: anytype) Tensor {
+    pub fn withSharding(self: Tensor, mesh: Mesh, axes_: anytype) Tensor {
+        const partitioned_shape = self._shape.withPartitionning(axes_);
+
         return switch (self._id) {
             .arg_id, .mlir => {
                 const ctx = self.getContext();
                 const mlir_ctx = ctx.mlirCtx();
-                var res = self;
-                res._shape = self._shape.withSharding(axes_);
 
-                if (ctx.numPartitions() <= 1) return self;
+                if (mesh.isSinglePartition()) return self;
+
+                const sharding: Sharding = .init(mesh, partitioned_shape);
+
                 const op = dialect.stablehlo.custom_call(
                     mlir_ctx,
                     &.{self.value()},
@@ -184,19 +192,17 @@ pub const Tensor = struct {
                         .call_target_name = "Sharding",
                         .has_side_effect = false,
                         .backend_config = null,
-                        .additional_attributes = &.{.{ "mhlo.sharding", ctx.getShardingAttr(res._shape) }},
+                        .additional_attributes = &.{.{ "mhlo.sharding", ctx.getShardingAttr(sharding) }},
                         .api_version = .original,
                     },
                     &.{self.value().getType()},
                     mlir_ctx.location(@src()),
                 );
 
-                return _result(res._shape, op.result(0));
+                return _result(partitioned_shape, op.result(0));
             },
             .buffer_id => {
-                var res = self;
-                res._shape = self._shape.withSharding(axes_);
-                return res;
+                return _result(partitioned_shape, self.value());
             },
         };
     }

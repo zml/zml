@@ -3,12 +3,15 @@ const std = @import("std");
 const stdx = @import("stdx");
 
 const aio = @import("aio.zig");
+const partitioning = @import("partitioning.zig");
 const Buffer = @import("buffer.zig").Buffer;
 const Bufferized = @import("tensor.zig").Bufferized;
 const CompilationContext = @import("module.zig").CompilationContext;
 const meta = @import("meta.zig");
 const pjrt = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
+const Mesh = partitioning.Mesh;
+const Partition = partitioning.Partition;
 const Shape = @import("shape.zig").Shape;
 const ShapeOf = @import("tensor.zig").ShapeOf;
 
@@ -72,6 +75,7 @@ pub fn compileFn(
     allocator: std.mem.Allocator,
     comptime func: anytype,
     args: ShapeOf(stdx.meta.FnArgs(func)),
+    mesh: Mesh,
     platform: Platform,
 ) !FnExe(func) {
     var pretty_name = try prettyFnName(func, allocator);
@@ -79,7 +83,7 @@ pub fn compileFn(
     var context = try CompilationContext.init(allocator, pretty_name.items, platform);
     defer context.deinit();
 
-    return .{ .inner = try context.compileInternal(allocator, func, args) };
+    return .{ .inner = try context.compileInternal(allocator, func, args, mesh) };
 }
 
 pub fn FnExe(comptime func: anytype) type {
@@ -153,12 +157,15 @@ pub const BaseExe = struct {
     /// Num devices used (>1 for sharded executable)
     num_devices: u8,
 
+    mesh: Mesh,
+
     /// Allocator backing memory
     _arena: std.heap.ArenaAllocator,
 
     pub fn init(
         parent_allocator: std.mem.Allocator,
         platform: Platform,
+        mesh: Mesh,
         exe: *pjrt.LoadedExecutable,
         args: struct { input_shapes: []const Shape, result_shapes: []const Shape, n_devices: u8 },
     ) !BaseExe {
@@ -194,6 +201,7 @@ pub const BaseExe = struct {
             .output_per_device = output_per_device,
             .input_shapes = all_shapes[0..n_in],
             .result_shapes = all_shapes[n_in..],
+            .mesh = mesh,
             ._arena = arena,
         };
     }
@@ -209,13 +217,12 @@ pub const BaseExe = struct {
 
     pub fn _unsafeCall(self: BaseExe) void {
         var events = [_]?*pjrt.Event{null} ** Platform.MAX_NUM_DEVICES;
-        const sharding = self.platform.sharding();
 
         self.exe.execute(self.platform.pjrt_api, .{
             .arguments = self.input_per_device,
             .num_args = self.input_buffer_count,
             .results = self.output_per_device,
-            .events = events[0..sharding.num_partitions],
+            .events = events[0..@intCast(self.mesh.numPartitions())],
             // this allows to tell a specific buffer shouldn't be donated,
             // even if it has been marked as "can be donated" during compilation.
             // TODO: expose it ?
@@ -224,7 +231,7 @@ pub const BaseExe = struct {
             std.debug.panic("PJRT_LoadedExecutable_Execute failed with: {}", .{err});
         };
 
-        for (events[0..sharding.num_partitions]) |e| {
+        for (events[0..@intCast(self.mesh.numPartitions())]) |e| {
             if (e) |ev| {
                 ev.await_(self.platform.pjrt_api) catch unreachable;
             }

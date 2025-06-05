@@ -207,7 +207,7 @@ pub const Context = struct {
                         deviceKind,
                     });
                     // we only list 1 CPU device
-                    if (target == .cpu) break;
+                    // if (target == .cpu) break;
                 }
             }
         }
