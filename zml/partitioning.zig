@@ -109,16 +109,6 @@ pub const DeviceShardIterator = struct {
             self.indices = self.indices.advance(self.sharding.shape);
         }
 
-        //     const mesh_axis = self.sharding.shape.partition(dim);
-        //     if (mesh_axis == Shape.TagUnknown) {
-        //         indices = indices.appendDim(self.sharding.shape.dim(dim), self.sharding.shape.tag(dim));
-        //     } else {
-        //         const mesh_dim = self.sharding.mesh.topology.dim(mesh_axis);
-        //         const d = @divExact(self.sharding.shape.dim(dim), mesh_dim);
-        //         indices = indices.setDim(d, self.sharding.shape.tag(dim));
-        //     }
-        // }
-
         log.warn("<<< indices: {}", .{self.indices});
 
         return .{
@@ -189,14 +179,8 @@ pub const Sharding = struct {
 
     pub fn iterator(self: Sharding, platform: Platform) DeviceShardIterator {
         var indices = self.mesh.topology;
-        log.warn(">> indices: {}", .{indices});
-        log.warn(">> shape: {}", .{self.shape});
-        log.warn(">> shard: {}", .{self.shard()});
 
         for (0..indices.rank()) |dim| {
-            // const mesh_axis = self.mesh.topology.partition(dim);
-            // _ = mesh_axis; // autofix
-
             indices = indices.setDim(dim, 0);
         }
 
