@@ -59,13 +59,9 @@ pub const Client = opaque {
     }
 
     pub const BufferFromHostBufferArgs = pjrt.Client.BufferFromHostBufferArgs;
-    pub fn bufferFromHostBuffer(self: *const Client, api: *const Api, args: BufferFromHostBufferArgs) ApiError!*Buffer {
-        const buffer, const event_ = try asynk.callBlocking(pjrt.Client.bufferFromHostBuffer, .{ self.inner(), api, args });
-        if (event_) |event__| {
-            const event: *Event = @ptrCast(event__);
-            try event.await_(api);
-        }
-        return @ptrCast(buffer);
+    pub fn bufferFromHostBuffer(self: *const Client, api: *const Api, args: BufferFromHostBufferArgs) ApiError!struct { *Buffer, ?*Event } {
+        const buffer, const event_ = try self.inner().bufferFromHostBuffer(api, args);
+        return .{ @ptrCast(buffer), @ptrCast(event_) };
     }
 
     pub fn deserializeAndLoad(self: *const Client, api: *const Api, bytes: []const u8) ApiError!*LoadedExecutable {
