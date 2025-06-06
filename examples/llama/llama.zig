@@ -51,6 +51,7 @@ pub const LlamaLM = struct {
             .freq_base = config.rope_theta,
             .scaling = config.rope_scaling,
         };
+        self.model.norm.eps = config.rms_norm_eps;
         for (self.model.layers) |*layer| {
             layer.self_attn.num_heads = self.model.num_heads;
             layer.self_attn.num_kv_heads = self.model.num_kv_heads;
