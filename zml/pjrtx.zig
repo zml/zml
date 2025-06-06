@@ -19,6 +19,7 @@ pub const Error = pjrt.Error;
 pub const GetCostAnalysisError = pjrt.GetCostAnalysisError;
 pub const SerializeResult = pjrt.SerializeResult;
 pub const Executable = pjrt.Executable;
+pub const CompiledMemoryStats = pjrt.CompiledMemoryStats;
 pub const ExecuteError = ApiError;
 pub const Memory = pjrt.Memory;
 pub const Stream = pjrt.Stream;
