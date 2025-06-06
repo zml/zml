@@ -31,7 +31,7 @@ fn pjrtStructSize(comptime T: type) usize {
     return @field(c, typedef_name ++ "_STRUCT_SIZE");
 }
 
-inline fn pjrtStruct(v: anytype) @TypeOf(v) {
+pub inline fn pjrtStruct(v: anytype) @TypeOf(v) {
     var ret = v;
     ret.struct_size = pjrtStructSize(@TypeOf(v));
     return ret;
@@ -160,9 +160,14 @@ pub const Api = struct {
         return state.str;
     }
 
-    pub fn customCallRegistry(api: *const Api) ?CustomCallRegistry {
+    pub fn createExecuteContext(api: *const Api) ApiError!*ExecuteContext {
+        const ret = try api.call(.PJRT_ExecuteContext_Create, .{});
+        return @ptrCast(ret.context.?);
+    }
+
+    pub fn ffi(api: *const Api) ?FFI {
         if (api.lookupExtension(c.PJRT_FFI_Extension, c.PJRT_Extension_Type_FFI)) |ext| {
-            return .{ .inner = ext.register_handler.? };
+            return .{ .inner = ext };
         }
         return null;
     }
@@ -278,6 +283,8 @@ pub const ShapeSpec = extern struct {
         return @enumFromInt(self.inner.buffer_type);
     }
 };
+
+pub const Stream = opaque {};
 
 pub const Client = opaque {
     const inner = InnerMixin(c.PJRT_Client).inner;
@@ -414,7 +421,7 @@ pub const Client = opaque {
             fn call(_: ?*anyopaque, _: ?*anyopaque) callconv(.C) void {}
         }.call,
         on_delete_callback_arg: ?*anyopaque = null,
-        stream: ?isize = null,
+        stream: ?*const Stream = null,
     };
 
     pub fn createViewOfDeviceBuffer(self: *const Client, api: *const Api, args: CreateViewOfDeviceBufferArgs) ApiError!*Buffer {
@@ -429,7 +436,7 @@ pub const Client = opaque {
             .device = @ptrCast(@constCast(args.device)),
             .on_delete_callback = args.on_delete_callback,
             .on_delete_callback_arg = args.on_delete_callback_arg,
-            .stream = if (args.stream) |stream| stream else 0,
+            .stream = @bitCast(@intFromPtr(args.stream)),
         });
         return @ptrCast(ret.buffer.?);
     }
@@ -444,20 +451,19 @@ pub const Client = opaque {
         return &.{};
     }
 
-    pub fn dmaMap(self: *const Client, api: *const Api, data: []const u8) ApiError!*Buffer {
-        const ret = try api.call(.PJRT_Client_DMA_Map, .{
+    pub fn dmaMap(self: *const Client, api: *const Api, data: []const u8) ApiError!void {
+        try api.call(.PJRT_Client_DmaMap, .{
             .client = self.inner(),
             .data = @ptrCast(@constCast(data.ptr)),
             .size = @intCast(data.len),
         });
-        return @ptrCast(ret.buffer.?);
     }
 
-    pub fn dmaUnmap(self: *const Client, api: *const Api, data: []const u8) void {
-        _ = api.call(.PJRT_Client_DMA_Unmap, .{
+    pub fn dmaUnmap(self: *const Client, api: *const Api, data: []const u8) ApiError!void {
+        try api.call(.PJRT_Client_DmaUnmap, .{
             .client = self.inner(),
             .data = @ptrCast(@constCast(data.ptr)),
-        }) catch unreachable;
+        });
     }
 
     pub const CreateBuffersForAsyncHostToDeviceArgs = struct {
@@ -564,6 +570,14 @@ pub const SerializeResult = struct {
     }
 };
 
+pub const ExecuteContext = opaque {
+    pub fn deinit(self: *ExecuteContext, api: *const Api) void {
+        _ = api.call(.PJRT_ExecuteContext_Destroy, .{
+            .context = @ptrCast(self),
+        }) catch {};
+    }
+};
+
 pub const Executable = opaque {
     const inner = InnerMixin(c.PJRT_Executable).inner;
 
@@ -630,6 +644,7 @@ pub const LoadedExecutable = opaque {
         results: []const [*]*Buffer,
         events: []?*Event,
         non_donatable_input_indices: []const i64 = &.{},
+        context: ?*ExecuteContext,
     };
     pub fn execute(self: *const LoadedExecutable, api: *const Api, args: ExecuteArgs) ApiError!void {
         var options = pjrtStruct(c.PJRT_ExecuteOptions{
@@ -640,6 +655,7 @@ pub const LoadedExecutable = opaque {
             .launch_id = 0,
             .non_donatable_input_indices = @ptrCast(args.non_donatable_input_indices.ptr),
             .num_non_donatable_input_indices = args.non_donatable_input_indices.len,
+            .context = @ptrCast(args.context),
         });
         _ = try api.call(.PJRT_LoadedExecutable_Execute, .{
             .executable = self.inner(),
@@ -653,7 +669,7 @@ pub const LoadedExecutable = opaque {
         });
     }
 
-    pub fn getExecutable(self: *LoadedExecutable, api: *const Api) ApiError!*Executable {
+    pub fn getExecutable(self: *const LoadedExecutable, api: *const Api) ApiError!*Executable {
         const ret = try api.call(.PJRT_LoadedExecutable_GetExecutable, .{
             .loaded_executable = self.inner(),
         });
@@ -818,7 +834,7 @@ pub const Buffer = opaque {
         return ret.on_device_size_in_bytes;
     }
 
-    pub fn copyToDevice(self: *const Buffer, api: *const Api, device: Device) ApiError!Buffer {
+    pub fn copyToDevice(self: *const Buffer, api: *const Api, device: Device) ApiError!*Buffer {
         const ret = try api.call(.PJRT_Buffer_CopyToDevice, .{
             .buffer = self.inner(),
             .dst_device = device.inner,
@@ -850,7 +866,7 @@ pub const Buffer = opaque {
         return @ptrCast(ret.event);
     }
 
-    pub fn copyToMemory(self: *const Buffer, api: *const Api, dst_memory: *const Memory) ApiError!?*Buffer {
+    pub fn copyToMemory(self: *const Buffer, api: *const Api, dst_memory: *const Memory) ApiError!*Buffer {
         const ret = try api.call(.PJRT_Buffer_CopyToMemory, .{
             .buffer = self.inner(),
             .dst_memory = @ptrCast(@constCast(dst_memory)),
@@ -932,8 +948,8 @@ pub const Memory = opaque {
 
     pub fn kind(self: *const Memory, api: *const Api) Kind {
         const ret = api.call(.PJRT_Memory_Kind, .{ .memory = self.inner() }) catch unreachable;
-        const kind_ = ret.kind orelse unreachable[0..ret.kind_size];
-        return std.meta.stringToEnum(Kind, kind_) orelse unreachable;
+        const kind_ = ret.kind orelse unreachable;
+        return std.meta.stringToEnum(Kind, kind_[0..ret.kind_size]) orelse unreachable;
     }
 
     pub fn kindId(self: *const Memory, api: *const Api) u32 {
@@ -1044,21 +1060,6 @@ pub const AsyncHostToDeviceTransferManager = opaque {
     }
 };
 
-pub const ExecutionContext = opaque {
-    const inner = InnerMixin(c.PJRT_ExecutionContext).inner;
-
-    pub fn init(api: *const Api) ApiError!*ExecutionContext {
-        const ret = try api.call(.PJRT_ExecutionContext_Create, .{});
-        return @ptrCast(ret.context.?);
-    }
-
-    pub fn deinit(self: *ExecutionContext, api: *const Api) void {
-        _ = api.call(.PJRT_ExecutionContext_Destroy, .{
-            .context = self.inner(),
-        }) catch unreachable;
-    }
-};
-
 pub const NamedValue = extern struct {
     comptime {
         std.debug.assert(@sizeOf(NamedValue) == @sizeOf(c.PJRT_NamedValue));
@@ -1164,17 +1165,34 @@ pub const NamedValue = extern struct {
     }
 };
 
-// todo : support all missing handlers available in GPU plugin extension: handler_instantiate, handler_prepare, handler_initialize
-// introduced by https://github.com/openxla/xla/commit/ef85a7bcc308313492ebc50295a8a08b4e51b8f5
-pub const CustomCallRegistry = extern struct {
-    inner: *const c.PJRT_FFI_Register_Handler,
+pub const FFI = extern struct {
+    inner: *const c.PJRT_FFI,
 
-    pub fn registerFfi(
-        self: *const CustomCallRegistry,
+    pub const UserData = extern struct {
+        type_id: i64,
+        user_data: *anyopaque,
+
+        fn toCStruct(self: UserData) c.PJRT_FFI_UserData {
+            return .{
+                .type_id = self.type_id,
+                .data = self.user_data,
+            };
+        }
+    };
+
+    pub const RegisterFfiOptions = struct {
+        traits: RegisterHandlerTraits = @enumFromInt(0),
+    };
+
+    // todo : support all missing handlers available in GPU plugin extension: handler_instantiate, handler_prepare, handler_initialize
+    // introduced by https://github.com/openxla/xla/commit/ef85a7bcc308313492ebc50295a8a08b4e51b8f5
+    pub fn register(
+        self: *const FFI,
         api: *const Api,
         target_name: []const u8,
         platform_name: []const u8,
         func: *const ffi.Handler,
+        options: RegisterFfiOptions,
     ) ApiError!void {
         var ret = pjrtStruct(c.PJRT_FFI_Register_Handler_Args{
             .api_version = 1,
@@ -1183,12 +1201,51 @@ pub const CustomCallRegistry = extern struct {
             .handler = @ptrCast(@constCast(func)),
             .platform_name = platform_name.ptr,
             .platform_name_size = platform_name.len,
+            .traits = @intFromEnum(options.traits),
         });
-        const result = self.inner(&ret);
+        const result = self.inner.register_handler.?(&ret);
         if (result) |pjrt_c_error| {
             const pjrt_error: *Error = @ptrCast(pjrt_c_error);
-            log.err("[GpuRegisterCustomCall] {s}", .{pjrt_error.getMessage(api)});
+            log.err("registerFfi error: {s}", .{pjrt_error.getMessage(api)});
             return pjrt_error.getCode(api).toApiError();
         }
     }
+
+    pub fn registerTypeId(self: *const FFI, api: *const Api, T: type) ApiError!void {
+        const type_name = @typeName(T);
+        var ret = pjrtStruct(c.PJRT_FFI_TypeID_Register_Args{
+            .type_name = type_name.ptr,
+            .type_name_size = type_name.len,
+            .type_id = 0, // let the plugin assign a unique type ID
+        });
+        const result = self.inner.type_id_register.?(&ret);
+        if (result) |pjrt_c_error| {
+            const pjrt_error: *Error = @ptrCast(pjrt_c_error);
+            return pjrt_error.getCode(api).toApiError();
+        }
+
+        T.type_id = ret.type_id;
+    }
+
+    pub fn addUserData(self: *const FFI, api: *const Api, context: *ExecuteContext, user_data: UserData) ApiError!void {
+        var ret = pjrtStruct(c.PJRT_FFI_UserData_Add_Args{
+            .context = @ptrCast(context),
+            .user_data = user_data.toCStruct(),
+        });
+        const result = self.inner.user_data_add.?(&ret);
+        if (result) |pjrt_c_error| {
+            const pjrt_error: *Error = @ptrCast(pjrt_c_error);
+            log.err("addUserData error: {s}", .{pjrt_error.getMessage(api)});
+            return pjrt_error.getCode(api).toApiError();
+        }
+    }
+};
+
+pub const RegisterHandlerTraits = enum(c.PJRT_FFI_Handler_TraitsBits) {
+    command_buffer_compatible = c.PJRT_FFI_HANDLER_TRAITS_COMMAND_BUFFER_COMPATIBLE,
+    _,
+};
+
+pub const CustomCallRegistry = extern struct {
+    inner: *const c.PJRT_FFI_Register_Handler,
 };

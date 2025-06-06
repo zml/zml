@@ -8,6 +8,7 @@ pub const ffi = pjrt.ffi;
 pub const Profiler = pjrt.Profiler;
 pub const ApiError = pjrt.ApiError;
 pub const ErrorCode = pjrt.ErrorCode;
+pub const ExecuteContext = pjrt.ExecuteContext;
 pub const BufferType = pjrt.BufferType;
 pub const Device = pjrt.Device;
 pub const DeviceDescription = pjrt.DeviceDescription;
@@ -20,6 +21,7 @@ pub const SerializeResult = pjrt.SerializeResult;
 pub const Executable = pjrt.Executable;
 pub const ExecuteError = ApiError;
 pub const Memory = pjrt.Memory;
+pub const Stream = pjrt.Stream;
 
 const log = std.log.scoped(.zml);
 
@@ -120,7 +122,7 @@ pub const Client = opaque {
         return self.inner().addressableMemories(api);
     }
 
-    pub fn memoryByKind(self: *const Client, api: *const Api, kind: Memory.Kind) ?*Memory {
+    pub fn memoryByKind(self: *const Client, api: *const Api, kind: Memory.Kind) ?*const Memory {
         for (self.addressableMemories(api)) |mem| {
             if (mem.kind(api) == kind) {
                 return mem;
@@ -182,7 +184,7 @@ pub const Buffer = opaque {
     }
 
     pub fn copyToMemory(self: *const Buffer, api: *const Api, memory_: *const Memory) ApiError!*Buffer {
-        return @ptrCast(self.inner().copyToMemory(api, memory_));
+        return @ptrCast(try self.inner().copyToMemory(api, memory_));
     }
 
     pub fn getReadyEvent(self: *const Buffer, api: *const Api) ?*Event {
@@ -262,6 +264,7 @@ pub const LoadedExecutable = opaque {
         results: []const [*]*Buffer,
         events: []?*Event,
         non_donatable_input_indices: []const i64 = &.{},
+        context: ?*ExecuteContext,
     };
 
     pub fn execute(self: *const LoadedExecutable, api: *const Api, args: ExecuteArgs) ExecuteError!void {
@@ -271,6 +274,7 @@ pub const LoadedExecutable = opaque {
             .results = @ptrCast(args.results),
             .events = @ptrCast(args.events),
             .non_donatable_input_indices = args.non_donatable_input_indices,
+            .context = args.context,
         } });
     }
 
