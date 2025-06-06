@@ -599,16 +599,16 @@ pub const Executable = opaque {
         });
 
         return .{
-            .generated_code_size_in_bytes = ret.generated_code_size_in_bytes,
-            .argument_size_in_bytes = ret.argument_size_in_bytes,
-            .output_size_in_bytes = ret.output_size_in_bytes,
-            .alias_size_in_bytes = ret.alias_size_in_bytes,
-            .temp_size_in_bytes = ret.temp_size_in_bytes,
-            .host_generated_code_size_in_bytes = ret.host_generated_code_size_in_bytes,
-            .host_argument_size_in_bytes = ret.host_argument_size_in_bytes,
-            .host_output_size_in_bytes = ret.host_output_size_in_bytes,
-            .host_alias_size_in_bytes = ret.host_alias_size_in_bytes,
-            .host_temp_size_in_bytes = ret.host_temp_size_in_bytes,
+            .generated_code_size_in_bytes = @intCast(ret.generated_code_size_in_bytes),
+            .argument_size_in_bytes = @intCast(ret.argument_size_in_bytes),
+            .output_size_in_bytes = @intCast(ret.output_size_in_bytes),
+            .alias_size_in_bytes = @intCast(ret.alias_size_in_bytes),
+            .temp_size_in_bytes = @intCast(ret.temp_size_in_bytes),
+            .host_generated_code_size_in_bytes = @intCast(ret.host_generated_code_size_in_bytes),
+            .host_argument_size_in_bytes = @intCast(ret.host_argument_size_in_bytes),
+            .host_output_size_in_bytes = @intCast(ret.host_output_size_in_bytes),
+            .host_alias_size_in_bytes = @intCast(ret.host_alias_size_in_bytes),
+            .host_temp_size_in_bytes = @intCast(ret.host_temp_size_in_bytes),
         };
     }
 };
@@ -616,19 +616,19 @@ pub const Executable = opaque {
 pub const CompiledMemoryStats = struct {
     // Mirrors xla::CompiledMemoryStats.
     // Device default memory (e.g., HBM for GPU/TPU) usage stats.
-    generated_code_size_in_bytes: i64,
-    argument_size_in_bytes: i64,
-    output_size_in_bytes: i64,
+    generated_code_size_in_bytes: u64,
+    argument_size_in_bytes: u64,
+    output_size_in_bytes: u64,
     // much: How argument is reused for output.
-    alias_size_in_bytes: i64,
-    temp_size_in_bytes: i64,
+    alias_size_in_bytes: u64,
+    temp_size_in_bytes: u64,
 
     // memory: Host usage stats.
-    host_generated_code_size_in_bytes: i64,
-    host_argument_size_in_bytes: i64,
-    host_output_size_in_bytes: i64,
-    host_alias_size_in_bytes: i64,
-    host_temp_size_in_bytes: i64,
+    host_generated_code_size_in_bytes: u64,
+    host_argument_size_in_bytes: u64,
+    host_output_size_in_bytes: u64,
+    host_alias_size_in_bytes: u64,
+    host_temp_size_in_bytes: u64,
 };
 
 pub const LoadedExecutable = opaque {
