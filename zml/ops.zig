@@ -610,8 +610,8 @@ pub fn sort(
         .result_type_inference = true,
         .blocks = &.{block},
         .attributes = &.{
-            .{ "dimension", mlir.IntegerAttribute(.i64).init(ctx.mlirCtx(), dimension).asAttr() },
-            .{ "is_stable", mlir.BoolAttribute.init(ctx.mlirCtx(), is_stable).asAttr() },
+            .{ "dimension", .int(ctx.mlirCtx(), .i64, dimension) },
+            .{ "is_stable", .boolean(ctx.mlirCtx(), is_stable) },
         },
         .location = loc,
     });

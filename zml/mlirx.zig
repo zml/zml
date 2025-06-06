@@ -107,21 +107,11 @@ pub const Type = struct {
 
 pub const Attribute = struct {
     pub fn fromData(data: dtype.Data, ctx: mlir.Context) mlir.Attribute {
-        switch (data) {
-            .bool => |val| {
-                return mlir.IntegerAttribute(.i1).init(ctx, @intFromBool(val)).asAttr();
-            },
-            inline .f8e4m3b11fnuz, .f8e4m3fn, .f8e4m3fnuz, .f8e5m2, .f8e5m2fnuz => |val, tag| {
-                const float_type = @field(mlir.FloatTypes, @tagName(tag));
-                const float_attr = mlir.FloatAttribute(float_type).init(ctx, val.toF32());
-                return float_attr.asAttr();
-            },
-            inline .i4, .i8, .i16, .i32, .i64, .u4, .u8, .u16, .u32, .u64 => |val, tag| {
-                const int_type = @field(mlir.IntegerTypes, @tagName(tag));
-                const int_attr = mlir.IntegerAttribute(int_type).init(ctx, @intCast(val));
-                return int_attr.asAttr();
-            },
+        return switch (data) {
+            .bool => |val| .i1FromBool(ctx, val),
+            inline .f8e4m3b11fnuz, .f8e4m3fn, .f8e4m3fnuz, .f8e5m2, .f8e5m2fnuz => |val, tag| .float(ctx, @field(mlir.FloatTypes, @tagName(tag)), val.toF32()),
+            inline .i4, .i8, .i16, .i32, .i64, .u4, .u8, .u16, .u32, .u64 => |val, tag| .int(ctx, @field(mlir.IntegerTypes, @tagName(tag)), val),
             inline else => |_, tag| stdx.debug.panic("Unsupported data type: {any}", .{tag}),
-        }
+        };
     }
 };

@@ -1,8 +1,9 @@
 const std = @import("std");
 
 const asynk = @import("async");
-const mlir = @import("mlir");
 const dialect = @import("mlir/dialects");
+const mlir = @import("mlir");
+const Location = mlir.Location;
 const runfiles = @import("runfiles");
 const stdx = @import("stdx");
 const xla_pb = @import("//xla:xla_proto");
@@ -12,7 +13,6 @@ const Buffer = @import("buffer.zig").Buffer;
 const Bufferized = @import("tensor.zig").Bufferized;
 const meta = @import("meta.zig");
 const mlir_ext = @import("mlirx.zig");
-const Location = mlir.Location;
 const ops = @import("ops.zig");
 const pjrt = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
@@ -171,8 +171,8 @@ pub const CompilationContext = struct {
 
         const sharding = self._platform.sharding();
         const mlir_ctx = self._mlir_ctx;
-        module.op().setAttributeByName("mhlo.num_replicas", mlir.IntegerAttribute(.i32).init(mlir_ctx, sharding.num_replicas).asAttr());
-        module.op().setAttributeByName("mhlo.num_partitions", mlir.IntegerAttribute(.i32).init(mlir_ctx, sharding.num_partitions).asAttr());
+        module.op().setAttributeByName("mhlo.num_replicas", .int(mlir_ctx, .i32, sharding.num_replicas));
+        module.op().setAttributeByName("mhlo.num_partitions", .int(mlir_ctx, .i32, sharding.num_partitions));
 
         const module_hash = computeModuleHash(self._platform, module);
         var module_dir: ?[]const u8 = null;
