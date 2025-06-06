@@ -1,11 +1,10 @@
-const builtin = @import("builtin");
 const std = @import("std");
+const builtin = @import("builtin");
 
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
 const dtype = @import("dtype.zig");
-
 const Shape = @import("shape.zig").Shape;
 const Tensor = @import("tensor.zig").Tensor;
 
@@ -32,26 +31,6 @@ pub const ext = struct {
             .f32 => .f32,
             .f64 => .f64,
             else => null,
-        };
-    }
-
-    pub fn denseElementsAttr(dt: dtype.DataType, _: usize, bytes: []const u8, ranked_type: mlir.RankedTensorType) mlir.Attribute {
-        const ranked_type_ = ranked_type.asType();
-        return switch (dt) {
-            .bool => mlir.DenseElementsAttribute(.bool).init(ranked_type_, bytes).asAttr(),
-            .i8 => mlir.DenseElementsAttribute(.i8).init(ranked_type_, bytes).asAttr(),
-            .i16 => mlir.DenseElementsAttribute(.i16).init(ranked_type_, bytes).asAttr(),
-            .i32 => mlir.DenseElementsAttribute(.i32).init(ranked_type_, bytes).asAttr(),
-            .i64 => mlir.DenseElementsAttribute(.i64).init(ranked_type_, bytes).asAttr(),
-            .u8 => mlir.DenseElementsAttribute(.u8).init(ranked_type_, bytes).asAttr(),
-            .u16 => mlir.DenseElementsAttribute(.u16).init(ranked_type_, bytes).asAttr(),
-            .u32 => mlir.DenseElementsAttribute(.u32).init(ranked_type_, bytes).asAttr(),
-            .u64 => mlir.DenseElementsAttribute(.u64).init(ranked_type_, bytes).asAttr(),
-            .bf16 => mlir.DenseElementsAttribute(.bf16).init(ranked_type_, bytes).asAttr(),
-            .f16 => mlir.DenseElementsAttribute(.f16).init(ranked_type_, bytes).asAttr(),
-            .f32 => mlir.DenseElementsAttribute(.f32).init(ranked_type_, bytes).asAttr(),
-            .f64 => mlir.DenseElementsAttribute(.f64).init(ranked_type_, bytes).asAttr(),
-            inline else => |tag| @panic("Unsupported data type: " ++ @tagName(tag)),
         };
     }
 
@@ -148,27 +127,6 @@ pub const ext = struct {
                 },
                 inline else => |_, tag| stdx.debug.panic("Unsupported data type: {any}", .{tag}),
             }
-        }
-    };
-
-    pub const DenseElementsAttribute = struct {
-        pub fn fromData(data: dtype.Data, result_type: mlir.Type) mlir.Attribute {
-            return switch (data.dtype()) {
-                .bool => mlir.DenseElementsAttribute(.bool).init(result_type, data.constSlice()).asAttr(),
-                .i8 => mlir.DenseElementsAttribute(.i8).init(result_type, data.constSlice()).asAttr(),
-                .i16 => mlir.DenseElementsAttribute(.i16).init(result_type, data.constSlice()).asAttr(),
-                .i32 => mlir.DenseElementsAttribute(.i32).init(result_type, data.constSlice()).asAttr(),
-                .i64 => mlir.DenseElementsAttribute(.i64).init(result_type, data.constSlice()).asAttr(),
-                .u8 => mlir.DenseElementsAttribute(.u8).init(result_type, data.constSlice()).asAttr(),
-                .u16 => mlir.DenseElementsAttribute(.u16).init(result_type, data.constSlice()).asAttr(),
-                .u32 => mlir.DenseElementsAttribute(.u32).init(result_type, data.constSlice()).asAttr(),
-                .u64 => mlir.DenseElementsAttribute(.u64).init(result_type, data.constSlice()).asAttr(),
-                .bf16 => mlir.DenseElementsAttribute(.bf16).init(result_type, data.constSlice()).asAttr(),
-                .f16 => mlir.DenseElementsAttribute(.f16).init(result_type, data.constSlice()).asAttr(),
-                .f32 => mlir.DenseElementsAttribute(.f32).init(result_type, data.constSlice()).asAttr(),
-                .f64 => mlir.DenseElementsAttribute(.f64).init(result_type, data.constSlice()).asAttr(),
-                inline else => |tag| stdx.debug.panic("Unsupported data type: {any}", .{tag}),
-            };
         }
     };
 };
