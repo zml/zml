@@ -160,7 +160,7 @@ pub const Buffer = struct {
     /// return a Buffer using the array shape.
     pub fn fromArray(platform: Platform, arr: anytype) !Buffer {
         const host_buffer = HostBuffer.fromArray(&arr);
-        return try from(platform, host_buffer, .{});
+        return try from(platform, host_buffer, .{ .wait = true });
     }
 
     /// Copies the given Zig slice to the accelerator memory and
@@ -195,7 +195,7 @@ pub const Buffer = struct {
     pub fn scalar(platform: Platform, val: anytype, dtype_: DataType) !Buffer {
         const x = dtype_.constant(val);
         const host_buffer = HostBuffer.fromBytes(Shape.init(.{}, dtype_), x.constSlice());
-        return try from(platform, host_buffer, .{});
+        return try from(platform, host_buffer, .{ .wait = true });
     }
 
     /// Creates a Buffer with a single element repeated manytime.
@@ -221,7 +221,7 @@ pub const Buffer = struct {
                 ._strides = @splat(0),
                 ._data = x.constSlice().ptr,
             };
-            return try from(platform, host_buffer, .{});
+            return try from(platform, host_buffer, .{ .wait = true });
         }
 
         // To speed up copies, duplicate the scalar value into a vector,
@@ -244,7 +244,7 @@ pub const Buffer = struct {
             else => unreachable,
         }
         const host_buffer: HostBuffer = .{ ._shape = shape_, ._strides = strides, ._data = &bytes };
-        return try from(platform, host_buffer, .{});
+        return try from(platform, host_buffer, .{ .wait = true });
     }
 
     test constant {
