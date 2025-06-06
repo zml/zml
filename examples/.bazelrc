@@ -18,6 +18,9 @@ common          --experimental_remote_cache_eviction_retries=5
 # Self explanatory
 common          --enable_platform_specific_config
 
+# Setup host platform
+common          --host_platform=@zml//platforms:host
+
 # Ensure host tools are built optimized
 build           --host_compilation_mode=opt
 
@@ -120,3 +123,8 @@ common:release  --compilation_mode=opt
 common:release  --copt=-Ofast
 common:release  --@rules_zig//zig/settings:mode=release_fast
 common:release  --@rules_zig//zig/settings:copt=-fomit-frame-pointer
+
+build:lto       --copt=-flto
+build:lto       --@rules_zig//zig/settings:copt=-flto
+build:lto       --@rules_zig//zig/settings:copt=-flld
+build:lto       --@rules_rust//rust/settings:extra_rustc_flag=-Clto=fat

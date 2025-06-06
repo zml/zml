@@ -1,44 +1,30 @@
-alias(
+load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
+
+GLIBC = "@toolchains_llvm_bootstrapped//constraints/libc:gnu.2.34"
+IS_LINUX = "@platforms//os:linux" in HOST_CONSTRAINTS
+
+platform(
     name = "host",
-    actual = select({
-        "@platforms//os:linux": ":host_linux",
-        "//conditions:default": ":host_other",
-    }),
-)
-
-platform(
-    name = "host_other",
     parents = ["@platforms//host"],
-    visibility = ["//visibility:public"],
-)
-
-
-platform(
-    name = "host_linux",
-    parents = ["@platforms//host"],
-    constraint_values = [
-        "@toolchains_llvm_bootstrapped//constraints/libc:gnu.2.31",
-    ],
+    constraint_values = [GLIBC] if IS_LINUX else [],
     visibility = ["//visibility:public"],
 )
 
 platform(
     name = "linux_amd64",
     constraint_values = [
-        "@platforms//cpu:x86_64",
         "@platforms//os:linux",
-        "@toolchains_llvm_bootstrapped//constraints/libc:gnu.2.31",
-    ],
+        "@platforms//cpu:x86_64",
+    ] + [GLIBC] if IS_LINUX else [],
     visibility = ["//visibility:public"],
 )
 
 platform(
     name = "linux_arm64",
     constraint_values = [
-        "@platforms//cpu:aarch64",
         "@platforms//os:linux",
-        "@toolchains_llvm_bootstrapped//constraints/libc:gnu.2.31",
-    ],
+        "@platforms//cpu:aarch64",
+    ] + [GLIBC] if IS_LINUX else [],
     visibility = ["//visibility:public"],
 )
 
