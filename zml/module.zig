@@ -2,6 +2,8 @@ const std = @import("std");
 
 const asynk = @import("async");
 const dialect = @import("mlir/dialects");
+const mlir = @import("mlir");
+const Location = mlir.Location;
 const runfiles = @import("runfiles");
 const stdx = @import("stdx");
 const xla_pb = @import("//xla:xla_proto");
@@ -10,8 +12,7 @@ const BaseExe = @import("exe.zig").BaseExe;
 const Buffer = @import("buffer.zig").Buffer;
 const Bufferized = @import("tensor.zig").Bufferized;
 const meta = @import("meta.zig");
-const mlir = @import("mlir.zig");
-const Location = mlir.Location;
+const mlir_ext = @import("mlirx.zig");
 const ops = @import("ops.zig");
 const pjrt = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
@@ -170,8 +171,8 @@ pub const CompilationContext = struct {
 
         const sharding = self._platform.sharding();
         const mlir_ctx = self._mlir_ctx;
-        module.op().setAttributeByName("mhlo.num_replicas", mlir.IntegerAttribute(.i32).init(mlir_ctx, sharding.num_replicas).asAttr());
-        module.op().setAttributeByName("mhlo.num_partitions", mlir.IntegerAttribute(.i32).init(mlir_ctx, sharding.num_partitions).asAttr());
+        module.op().setAttributeByName("mhlo.num_replicas", .int(mlir_ctx, .i32, sharding.num_replicas));
+        module.op().setAttributeByName("mhlo.num_partitions", .int(mlir_ctx, .i32, sharding.num_partitions));
 
         const module_hash = computeModuleHash(self._platform, module);
         var module_dir: ?[]const u8 = null;
@@ -346,7 +347,7 @@ pub const CompilationContext = struct {
         stdx.debug.internalAssert(input_shapes.items.len == tensor_count, "args have changed ?", .{});
 
         const input_types = try arena.alloc(mlir.Type, tensor_count);
-        for (input_types, input_shapes.items) |*t, sh| t.* = mlir.ext.mlirType(mlir_ctx, sh);
+        for (input_types, input_shapes.items) |*t, sh| t.* = mlir_ext.tensorType(mlir_ctx, sh);
 
         const og_block_args = self._block_args;
         defer {
@@ -947,7 +948,7 @@ pub fn fillMlirTypes(v: anytype, mlir_ctx: mlir.Context, types: []mlir.Type) voi
     var context = LocalContext{ .mlir_ctx = mlir_ctx, .types = types };
     meta.visit((struct {
         fn cb(inner_context: *LocalContext, tensor: *const Tensor) void {
-            inner_context.types[inner_context.index] = mlir.ext.mlirType(inner_context.mlir_ctx, tensor.shape());
+            inner_context.types[inner_context.index] = mlir_ext.tensorType(inner_context.mlir_ctx, tensor.shape());
             inner_context.index += 1;
         }
     }).cb, &context, v);

@@ -5,7 +5,7 @@ const dialect = @import("mlir/dialects");
 const Context = @import("../context.zig").Context;
 const DataType = @import("../dtype.zig").DataType;
 const Data = @import("../dtype.zig").Data;
-const mlir = @import("../mlir.zig");
+const mlirx = @import("../mlirx.zig");
 const module = @import("../module.zig");
 const CompilationContext = module.CompilationContext;
 const SdpaOpts = @import("../nn.zig").SdpaOpts;
@@ -130,7 +130,7 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
             .api_version = .original,
         },
         &.{
-            mlir.ext.mlirType(mlir_ctx, q.shape()),
+            mlirx.tensorType(mlir_ctx, q.shape()),
             .tensor(&.{0}, .int(mlir_ctx, .u8)),
         },
         loc,
