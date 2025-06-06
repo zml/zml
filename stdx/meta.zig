@@ -1,8 +1,7 @@
 const std = @import("std");
+
 const debug = @import("debug.zig");
-
 const compileError = debug.compileError;
-
 pub const FnSignature = @import("signature.zig").FnSignature;
 pub const Signature = @import("signature.zig").Signature;
 
@@ -80,7 +79,11 @@ pub fn isInteger(comptime T: type) bool {
 
 pub fn isSliceOfAny(comptime T: type, comptime f: fn (comptime type) bool) bool {
     return switch (@typeInfo(T)) {
-        .pointer => |info| info.size == .slice and f(info.child),
+        .pointer => |info| switch (info.size) {
+            .one => info.child == @TypeOf(.{}),
+            .slice => f(info.child),
+            else => false,
+        },
         else => false,
     };
 }

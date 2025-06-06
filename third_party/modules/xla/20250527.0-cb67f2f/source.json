@@ -1,0 +1,17 @@
+{
+    "strip_prefix": "xla-cb67f2f7ce4787f63f5fc80dc5c30cd3dee8f4e3",
+    "url": "https://github.com/openxla/xla/archive/cb67f2f7ce4787f63f5fc80dc5c30cd3dee8f4e3.tar.gz",
+    "integrity": "sha256-SDAAOY6cjcCQ5e1JMob5G4+BYHk7spDb5zZEDrVeA4I=",
+    "overlay": {
+        "llvm.bzl": "",
+        "MODULE.bazel": "",
+        "workspace_private.bzl": "",
+        "xla.bzl": ""
+    },
+    "patch_strip": 1,
+    "patches": {
+        "0001-bazel-migration-to-bazel-8.1.1.patch": "",
+        "0002-Added-FFI-handler-registration-API-to-the-FFI-PjRt.patch": "",
+        "0003-Revert-Add-optional-allowOtherDialects-field-to-stab.patch": ""
+    }
+}

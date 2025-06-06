@@ -5,6 +5,7 @@ try-import      %workspace%/.bazelrc-zml
 # Faster hash function
 startup         --digest_function=blake3
 
+# Disable WORKSPACE
 common          --enable_workspace=false
 
 # Don't need for now
@@ -33,16 +34,12 @@ build           --enable_runfiles
 build           --incompatible_strict_action_env
 
 # We don't to check the built files in the sandbox or repositories
-build           --noexperimental_check_output_files
-fetch           --noexperimental_check_output_files
-query           --noexperimental_check_output_files
-# build           --noexperimental_check_external_repository_files
-# fetch           --noexperimental_check_external_repository_files
-# query           --noexperimental_check_external_repository_files
+build           --experimental_check_output_files=false
+fetch           --experimental_check_output_files=false
+query           --experimental_check_output_files=false
 
 # Performance
-build           --reuse_sandbox_directories
-build           --nolegacy_external_runfiles
+build           --legacy_external_runfiles=false
 
 build           --experimental_output_directory_naming_scheme=diff_against_dynamic_baseline
 # Mount the zig cache into the sandboxes
@@ -58,27 +55,39 @@ build           --experimental_inprocess_symlink_creation
 # Build in debug for now, by default
 build           --compilation_mode=dbg
 
-build           --experimental_cc_shared_library
-build           --incompatible_use_cc_configure_from_rules_cc
-build           --experimental_starlark_cc_import
+# Various cc options
+common          --experimental_cc_static_library
+common          --experimental_cc_shared_library
+common          --incompatible_use_cc_configure_from_rules_cc
+common          --experimental_starlark_cc_import
 
+
+common          --experimental_platform_in_output_dir
+
+# Faster sandbox speeds
+build           --experimental_inmemory_sandbox_stashes
+
+# clang by default
 build           --compiler=clang
+
+# Enable resolving proto compiler from toolchains
+common          --incompatible_enable_proto_toolchain_resolution
+
+# Allow empty globs since some legacy rules
+common          --incompatible_disallow_empty_glob=false
 
 build:macos     --action_env=MACOSX_DEPLOYMENT_TARGET=13.0
 build:macos     --macos_sdk_version=13.0
 
 # Used by the tsl overlay in python_init_repositories for the bazelified xla module 20241025.0-4663f04 and later
-build           --repo_env HERMETIC_PYTHON_VERSION=3.11
+build           --repo_env=HERMETIC_PYTHON_VERSION=3.11
+
+# Don't detect the local C++ toolchain, be fully hermetic
+# This is done only on Linux for now since we use the local toolchain on macOS
+build:linux     --repo_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
 
 # Print test errors in the console
 test            --test_output=errors
-
-# --config=debug will used optmized backend, but all the frontend zig code will be compiled in debug mode.
-build:debug     --compilation_mode=opt
-build:debug     --@rules_zig//zig/settings:mode=debug
-build:debug     --strategy=ZigBuildLib=local
-build:debug     --strategy=ZigBuildObj=local
-build:debug     --strategy=ZigBuildTestLib=local
 
 common:silent   --noshow_progress
 common:silent   --ui_event_filters=,+error,+fail
@@ -88,8 +97,26 @@ common:silent   --logging=0
 common          --registry=https://bazel-registry.zml.ai
 common          --registry=https://bcr.bazel.build
 
-# Enable resolving proto compiler from toolchains
-common          --incompatible_enable_proto_toolchain_resolution
+common          --@rules_zig//zig/settings:copt=-fPIC
+common          --@rules_zig//zig/settings:copt=-fPIE
+common          --@rules_zig//zig/settings:copt=-mcpu=baseline
+common          --@rules_zig//zig/settings:copt=-fcompiler-rt
 
+common          --@toolchains_llvm_bootstrapped//config:experimental_stub_libgcc_s=True
 
-common          --incompatible_disallow_empty_glob=false
+# --config=debug will used optmized backend, but all the frontend zig code will be compiled in debug mode.
+common:debug    --compilation_mode=opt
+common:debug    --@rules_zig//zig/settings:mode=debug
+common:debug    --strategy=ZigBuildLib=local
+common:debug    --strategy=ZigBuildObj=local
+common:debug    --strategy=ZigBuildTestLib=local
+
+# --config=alldebug build everything in debug mode, including the backend.
+common:alldebug --compilation_mode=dbg
+common:alldebug --@rules_zig//zig/settings:mode=debug
+common:alldebug --strategy=local
+
+common:release  --compilation_mode=opt
+common:release  --copt=-Ofast
+common:release  --@rules_zig//zig/settings:mode=release_fast
+common:release  --@rules_zig//zig/settings:copt=-fomit-frame-pointer

@@ -380,9 +380,9 @@ const asynk = @import("async");
 With everything in place now, running the model is easy:
 
 ```
-# run release (-c opt)
+# run release (--config=release)
 cd examples
-bazel run -c opt //simple_layer
+bazel run --config=release //simple_layer
 
 # compile and run debug version
 bazel run //simple_layer
@@ -391,7 +391,7 @@ bazel run //simple_layer
 And voila! Here's the output:
 
 ```
-bazel run -c opt //simple_layer
+bazel run --config=release //simple_layer
 INFO: Analyzed target //simple_layer:simple_layer (0 packages loaded, 0 targets configured).
 INFO: Found 1 target...
 Target //simple_layer:simple_layer up-to-date:

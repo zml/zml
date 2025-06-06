@@ -1,9 +1,9 @@
-load("@bazel_tools//tools/build_defs/repo:git.bzl", "new_git_repository")
+load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
 
 def repo():
-    new_git_repository(
+    git_repository(
         name = "com_google_sentencepiece",
         remote = "https://github.com/google/sentencepiece.git",
-        commit = "d8f741853847553169444afc12c00f4bbff3e9ce",
+        commit = "273449044caa593c2fd7eb7550cb3ab2cff93f1a",
         build_file = "//third_party/com_google_sentencepiece:sentencepiece.bazel",
     )

@@ -15,3 +15,9 @@ pub inline fn intCast(comptime T: type, x: anytype) T {
         else => @intFromFloat(x),
     };
 }
+
+pub inline fn roundeven(x: anytype) @TypeOf(x) {
+    return struct {
+        extern fn @"llvm.roundeven"(@TypeOf(x)) @TypeOf(x);
+    }.@"llvm.roundeven"(x);
+}

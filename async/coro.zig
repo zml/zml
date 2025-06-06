@@ -10,13 +10,14 @@
 //!     * Done: set in runcoro
 //!   * id.invocation: incremented in ThreadState.switchTo
 const std = @import("std");
-const stdx = @import("stdx");
 const builtin = @import("builtin");
-const base = @import("coro_base.zig");
-const stack = @import("stack.zig");
-const Executor = @import("executor.zig").Executor;
 
-const log = std.log.scoped(.@"zml/async");
+const stdx = @import("stdx");
+
+const base = @import("coro_base.zig");
+const Executor = @import("executor.zig").Executor;
+const stack = @import("stack.zig");
+pub const StackT = stack.Stack;
 
 // Public API
 // ============================================================================
@@ -25,8 +26,6 @@ pub const Error = error{
     StackOverflow,
     SuspendFromMain,
 };
-pub const StackT = stack.Stack;
-
 pub const Frame = *Coro;
 
 /// Await the coroutine(s).
@@ -76,7 +75,7 @@ pub fn xresume(frame: anytype) void {
 /// Must be called from within a coroutine (i.e. not the top level).
 pub fn xsuspend() void {
     xsuspendSafe() catch |e| {
-        log.err("{any}", .{e});
+        log(.err, "{any}", .{e});
         @panic("xsuspend");
     };
 }
@@ -160,10 +159,9 @@ const Coro = struct {
     fn runcoro(from: *base.Coro, this: *base.Coro) callconv(.C) noreturn {
         const from_coro: *Coro = @fieldParentPtr("impl", from);
         const this_coro: *Coro = @fieldParentPtr("impl", this);
-        log.debug("coro start {any}", .{this_coro.id});
+        log(.debug, "coro start {any}", .{this_coro.id});
         @call(.auto, this_coro.func, .{});
         this_coro.status = .Done;
-        log.debug("coro done {any}", .{this_coro.id});
         thread_state.switchOut(from_coro);
 
         // Never returns
@@ -317,7 +315,7 @@ const ThreadState = struct {
 
     /// Called from resume
     fn switchIn(self: *ThreadState, target: Frame) void {
-        log.debug("coro resume {any} from {any}", .{ target.id, self.current().id });
+        log(.debug, "coro resume {any} from {any}", .{ target.id, self.current().id });
 
         // Switch to target, setting this coro as the resumer.
         self.switchTo(target, true);
@@ -332,7 +330,7 @@ const ThreadState = struct {
 
     /// Called from suspend
     fn switchOut(self: *ThreadState, target: Frame) void {
-        log.debug("coro suspend {any} to {any}", .{ self.current().id, target.id });
+        log(.debug, "coro suspend {any} to {any}", .{ self.current().id, target.id });
         self.switchTo(target, false);
     }
 
@@ -552,4 +550,11 @@ test "with CoroT" {
 test "resume self" {
     xresume(xframe());
     try std.testing.expectEqual(1, 1);
+}
+
+pub fn log(comptime level: std.log.Level, comptime fmt: []const u8, args: anytype) void {
+    if (comptime !std.log.logEnabled(level, .@"zml/async")) return;
+
+    // Since this logs are to debug the async runtime, we want it to happen synchronously.
+    std.log.defaultLog(level, .@"zml/async", fmt, args);
 }

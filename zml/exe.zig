@@ -1,13 +1,13 @@
 const std = @import("std");
+
 const stdx = @import("stdx");
 
 const aio = @import("aio.zig");
-const meta = @import("meta.zig");
-const pjrt = @import("pjrtx.zig");
-
 const Buffer = @import("buffer.zig").Buffer;
 const Bufferized = @import("tensor.zig").Bufferized;
 const CompilationContext = @import("module.zig").CompilationContext;
+const meta = @import("meta.zig");
+const pjrt = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
 const ShapeOf = @import("tensor.zig").ShapeOf;
@@ -147,6 +147,7 @@ pub const BaseExe = struct {
     /// Total number of buffers needed by this executable.
     input_buffer_count: u32,
 
+    input_shapes: []Shape,
     result_shapes: []Shape,
 
     /// Num devices used (>1 for sharded executable)
@@ -155,34 +156,44 @@ pub const BaseExe = struct {
     /// Allocator backing memory
     _arena: std.heap.ArenaAllocator,
 
-    pub fn init(parent_allocator: std.mem.Allocator, platform: Platform, exe: *pjrt.LoadedExecutable, args: struct { n_in: u32, result_shapes: []const Shape, n_devices: u8 }) !BaseExe {
+    pub fn init(
+        parent_allocator: std.mem.Allocator,
+        platform: Platform,
+        exe: *pjrt.LoadedExecutable,
+        args: struct { input_shapes: []const Shape, result_shapes: []const Shape, n_devices: u8 },
+    ) !BaseExe {
         var arena = std.heap.ArenaAllocator.init(parent_allocator);
         errdefer arena.deinit();
         const allocator = arena.allocator();
+        const n_in = args.input_shapes.len;
         const n_out = args.result_shapes.len;
         const n_devices = args.n_devices;
         // Allocate once for all the *pjrt.Buffer we need to store ...
-        const all_buffers = try allocator.alloc(*pjrt.Buffer, (args.n_in + n_out) * n_devices);
-        const all_input_buffers, const all_output_buffers = splitBuffer(*pjrt.Buffer, all_buffers, .{ args.n_in * n_devices, n_out * n_devices });
+        const all_buffers = try allocator.alloc(*pjrt.Buffer, (n_in + n_out) * n_devices);
+        const all_input_buffers, const all_output_buffers = splitBuffer(*pjrt.Buffer, all_buffers, .{ n_in * n_devices, n_out * n_devices });
 
         // ... and once for all the [*]*pjrt.Buffer.
         const all_per_device = try allocator.alloc([*]*pjrt.Buffer, 2 * n_devices);
         const input_per_device, const output_per_device = splitBuffer([*]*pjrt.Buffer, all_per_device, .{ n_devices, n_devices });
 
         for (0..n_devices) |i| {
-            input_per_device[i] = all_input_buffers[i * args.n_in ..].ptr;
+            input_per_device[i] = all_input_buffers[i * n_in ..].ptr;
             output_per_device[i] = all_output_buffers[i * n_out ..].ptr;
         }
 
+        const all_shapes = try allocator.alloc(Shape, n_in + n_out);
+        @memcpy(all_shapes[0..n_in], args.input_shapes);
+        @memcpy(all_shapes[n_in..], args.result_shapes);
         return .{
             .platform = platform,
             .exe = exe,
             .ready_buffer_count = 0,
-            .input_buffer_count = args.n_in,
+            .input_buffer_count = @intCast(n_in),
             .num_devices = args.n_devices,
             .input_per_device = input_per_device,
             .output_per_device = output_per_device,
-            .result_shapes = try allocator.dupe(Shape, args.result_shapes),
+            .input_shapes = all_shapes[0..n_in],
+            .result_shapes = all_shapes[n_in..],
             ._arena = arena,
         };
     }
@@ -209,13 +220,44 @@ pub const BaseExe = struct {
             // even if it has been marked as "can be donated" during compilation.
             // TODO: expose it ?
             .non_donatable_input_indices = &.{},
-        }) catch unreachable;
+        }) catch |err| {
+            std.debug.panic("PJRT_LoadedExecutable_Execute failed with: {}", .{err});
+        };
 
         for (events[0..sharding.num_partitions]) |e| {
             if (e) |ev| {
                 ev.await_(self.platform.pjrt_api) catch unreachable;
             }
         }
+    }
+
+    pub fn _unsafeAssignResults(self: BaseExe, T: type, result: *T) void {
+        const LocalContext = struct {
+            index: u32,
+            platform: Platform,
+            outputs: []const [*]*pjrt.Buffer,
+            output_shapes: []Shape,
+        };
+        var local_ctx: LocalContext = .{
+            .index = 0,
+            .platform = self.platform,
+            .outputs = self.output_per_device,
+            .output_shapes = self.result_shapes,
+        };
+        meta.visit((struct {
+            fn cb(ctx: *LocalContext, buffer: *Buffer) void {
+                const i = ctx.index;
+                ctx.index += 1;
+                if (i >= ctx.output_shapes.len) return;
+
+                var shards: Buffer.Shards = .{};
+                for (ctx.outputs) |buff| {
+                    shards.appendAssumeCapacity(buff[i]);
+                }
+                buffer.* = Buffer.fromPjrtBuffers(ctx.platform, ctx.output_shapes[i], shards.constSlice());
+            }
+        }).cb, &local_ctx, result);
+        stdx.debug.internalAssert(local_ctx.index == self.result_shapes.len, "Pjrt call returned {} tensors, but the return type {s}, contains {} Buffers. Note that modules need to have a comptime know number of returned tensors.", .{ self.output_per_device.len, @typeName(T), local_ctx.index });
     }
 
     pub fn serialize(self: BaseExe, writer: anytype) !void {
@@ -232,7 +274,7 @@ pub const BaseExe = struct {
     // }
 
     pub fn prepare(self: *BaseExe, x: anytype) void {
-        const n = fillBuffers(&x, self.input_per_device, self.ready_buffer_count);
+        const n = fillBuffers(&x, self.input_shapes, self.input_per_device, self.ready_buffer_count);
         self.ready_buffer_count += n;
     }
 
@@ -243,6 +285,14 @@ pub const BaseExe = struct {
         }
 
         return Buffer.fromPjrtBuffers(self.platform, self.result_shapes[i], shards.constSlice());
+    }
+
+    pub fn clone(self: BaseExe, parent_allocator: std.mem.Allocator) !BaseExe {
+        return .init(parent_allocator, self.platform, self.exe, .{
+            .input_shapes = self.input_shapes,
+            .result_shapes = self.result_shapes,
+            .n_devices = self.num_devices,
+        });
     }
 };
 
@@ -280,11 +330,11 @@ pub fn Exe(ArgsT: type, ReturnT: type) type {
         }
 
         pub fn call(self: Self, args: Bufferized(ArgsT)) Bufferized(ReturnT) {
-            const total_ready = fillBuffers(&args, self.inner.input_per_device, self.inner.ready_buffer_count);
+            const total_ready = fillBuffers(&args, self.inner.input_shapes, self.inner.input_per_device, self.inner.ready_buffer_count);
             std.debug.assert(total_ready == self.inner.input_buffer_count);
             self.inner._unsafeCall();
             var result: Bufferized(ReturnT) = undefined;
-            assignRawBuffers(&result, self.inner.platform, self.inner.output_per_device, self.inner.result_shapes);
+            self.inner._unsafeAssignResults(Bufferized(ReturnT), &result);
             return result;
         }
     };
@@ -302,20 +352,23 @@ fn splitBuffer(T: type, buffer: []T, lengths: anytype) [lengths.len][]T {
 }
 
 /// Visit the given struct and fill the `buffers` slice with the buffer associated with encountered Tensor.
-fn fillBuffers(v: anytype, buffers: []const [*]*pjrt.Buffer, start: u32) u32 {
+fn fillBuffers(v: anytype, shapes: []const Shape, buffers: []const [*]*pjrt.Buffer, start: u32) u32 {
     const LocalContext = struct {
         index: u32,
         buffers: []const [*]*pjrt.Buffer,
+        shapes: []const Shape,
     };
     var context: LocalContext = .{
         .index = start,
         .buffers = buffers,
+        .shapes = shapes,
     };
     meta.visit((struct {
         fn cb(ctx: *LocalContext, buffer: *const Buffer) void {
             // stdx.debug.assert(!buffer._data.isDeleted(), "Can't use {} (argument buffer {}) because its pjrt buffer has been donated", .{ buffer, ctx.index });
             const model_sharding = ctx.buffers.len;
             stdx.debug.assert(buffer._shards.len == model_sharding, "Can't feed a {}-sharded tensor into a {}-sharded model", .{ buffer._shards.len, ctx.buffers.len });
+            stdx.debug.assert(ctx.shapes[ctx.index].eql(buffer.shape()), "Executable expected argument {} to have shape {}, got {}", .{ ctx.index, ctx.shapes[ctx.index], buffer.shape() });
             for (buffer._shards.constSlice(), 0..) |shard, d| {
                 ctx.buffers[d][ctx.index] = shard;
             }
@@ -323,36 +376,6 @@ fn fillBuffers(v: anytype, buffers: []const [*]*pjrt.Buffer, start: u32) u32 {
         }
     }).cb, &context, v);
     return context.index;
-}
-
-/// Visit the given struct and override tensors by creating a new one using the provided PJRT buffers.
-fn assignRawBuffers(v: anytype, platform: Platform, buffers: []const [*]*pjrt.Buffer, buffer_shapes: []Shape) void {
-    const LocalContext = struct {
-        index: u32,
-        platform: Platform,
-        buffers: []const [*]*pjrt.Buffer,
-        buffer_shapes: []Shape,
-    };
-    var local_ctx: LocalContext = .{
-        .index = 0,
-        .platform = platform,
-        .buffers = buffers,
-        .buffer_shapes = buffer_shapes,
-    };
-    meta.visit((struct {
-        fn cb(ctx: *LocalContext, buffer: *Buffer) void {
-            const i = ctx.index;
-            ctx.index += 1;
-            if (i >= ctx.buffer_shapes.len) return;
-
-            var shards: Buffer.Shards = .{};
-            for (ctx.buffers) |buff| {
-                shards.appendAssumeCapacity(buff[i]);
-            }
-            buffer.* = Buffer.fromPjrtBuffers(ctx.platform, ctx.buffer_shapes[i], shards.constSlice());
-        }
-    }).cb, &local_ctx, v);
-    stdx.debug.internalAssert(local_ctx.index == buffer_shapes.len, "Pjrt call returned {} tensors, but the return type {s}, contains {} Buffers. Note that modules need to have a comptime know number of returned tensors.", .{ buffers.len, @typeName(@TypeOf(v)), local_ctx.index });
 }
 
 fn prettyFnName(

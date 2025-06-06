@@ -350,7 +350,7 @@ pub const Client = opaque {
     }
 
     pub const BufferFromHostBufferArgs = struct {
-        data: []const u8,
+        data: [*]const u8,
         buffer_type: BufferType,
         dims: []const i64,
         byte_strides: ?[]const i64,
@@ -362,7 +362,7 @@ pub const Client = opaque {
     pub fn bufferFromHostBuffer(self: *const Client, api: *const Api, args: BufferFromHostBufferArgs) ApiError!struct { *Buffer, ?*Event } {
         const ret = try api.call(.PJRT_Client_BufferFromHostBuffer, .{
             .client = self.inner(),
-            .data = @ptrCast(@constCast(args.data.ptr)),
+            .data = @constCast(args.data),
             .type = @intFromEnum(args.buffer_type),
             .dims = @ptrCast(@constCast(args.dims.ptr)),
             .num_dims = args.dims.len,
@@ -501,6 +501,13 @@ pub const Device = opaque {
             .device = self.inner(),
         }) catch unreachable;
         return @intCast(ret.local_hardware_id);
+    }
+
+    pub fn addressableMemories(self: *const Device, api: *const Api) ApiError![]const *Memory {
+        const ret = try api.call(.PJRT_Device_AddressableMemories, .{
+            .device = self.inner(),
+        });
+        return @ptrCast(ret.memories[0..ret.num_memories]);
     }
 };
 

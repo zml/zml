@@ -58,10 +58,10 @@ pub const Shape = struct {
                 const fv = @field(v, field.name);
                 if (comptime stdx.meta.isInteger(field.type)) {
                     dims_.appendAssumeCapacity(@intCast(fv));
-                } else if (comptime isAutoDim(fv)) {
+                } else if (@TypeOf(fv) == EnumLiteral and comptime isAutoDim(fv)) {
                     dims_.appendAssumeCapacity(-1);
                 } else {
-                    stdx.debug.compileError("Field {s} should be an integer or an auto dimension", .{field.name});
+                    stdx.debug.compileError("Field {s} should be an integer or an auto dimension, got {}", .{ field.name, field.type });
                 }
                 if (comptime stdx.meta.isTuple(T)) {
                     tags_.appendAssumeCapacity(TagUnknown);
@@ -186,7 +186,7 @@ pub const Shape = struct {
             EnumLiteral => @tagName(v).ptr,
             std.builtin.Type.StructField => v.name.ptr,
             Tag => v,
-            else => stdx.debug.compileError("Value should be an EnumLiteral, a Shape.Tag or a StructField, got {}", .{T}),
+            else => stdx.debug.compileError("Shape tag should be an EnumLiteral, a Shape.Tag or a StructField, got {}", .{T}),
         };
     }
 
@@ -581,6 +581,41 @@ pub const Shape = struct {
         try std.testing.expectEqualSlices(i64, &.{ 10, 11, 12 }, Shape.init(.{ 10, 11, 12, 13 }, .f32).remove(-1).dims());
     }
 
+    pub fn removeMany(self: Shape, axes_: anytype) Shape {
+        var to_remove = self.axes(axes_);
+        if (to_remove.len == 0) return self;
+        std.mem.sort(u3, to_remove.slice(), {}, std.sort.asc(u3));
+
+        var sh: Shape = self;
+        const rk = self.rank();
+        var res_ax: u32 = 0;
+        for (0..rk) |ax| {
+            if (std.mem.indexOfScalar(u3, to_remove.constSlice(), @intCast(ax))) |_| {
+                continue;
+            }
+
+            sh._dims.buffer[res_ax] = self._dims.buffer[ax];
+            sh._tags.buffer[res_ax] = self._tags.buffer[ax];
+            res_ax += 1;
+        }
+        sh._dims.len = rk - to_remove.len;
+        sh._tags.len = rk - to_remove.len;
+        return sh;
+    }
+
+    test removeMany {
+        try std.testing.expectEqualSlices(
+            i64,
+            &.{12},
+            Shape.init(.{ 10, 11, 12 }, .f32).removeMany(.{ 0, 1 }).dims(),
+        );
+        try std.testing.expectEqualSlices(
+            i64,
+            &.{ 10, 11 },
+            Shape.init(.{ 10, 11, 12, 13 }, .f32).removeMany(.{ -1, -2 }).dims(),
+        );
+    }
+
     pub fn transpose(self: Shape, permutations: anytype) Shape {
         std.debug.assert(self.rank() == permutations.len);
         const permutations_ = self.axes(permutations);
@@ -729,7 +764,9 @@ pub const Shape = struct {
         stdx.debug.assertComptime(stdx.meta.isStructOfAny(T, isAxisConvertible), "Must pass a struct of enum literals. Passed: {any}", .{T});
         var res = self;
         inline for (std.meta.fields(T)) |field| {
-            res._tags.set(self.axis(field), toTag(@field(renames, field.name)));
+            const new_field = @field(renames, field.name);
+            stdx.debug.assert(self.hasTag(new_field) == null, "{}.rename({any}) failed because of duplicated axis {}", .{ self, renames, new_field });
+            res._tags.set(self.axis(field), toTag(new_field));
         }
         return res;
     }
@@ -749,15 +786,20 @@ pub const Shape = struct {
     }
 
     pub fn computeStrides(self: Shape) std.BoundedArray(i64, MAX_RANK) {
-        const base_stride = self.dtype().sizeOf();
         const rk = self.rank();
-        var strides: std.BoundedArray(i64, MAX_RANK) = .{ .len = @intCast(self.rank()) };
+        var strides: std.BoundedArray(i64, MAX_RANK) = .{ .len = rk };
         if (rk == 0) return strides;
-        strides.buffer[rk - 1] = base_stride;
-        for (1..rk) |i| {
-            const j = @as(usize, rk) - 1 - i;
-            strides.buffer[j] = self._dims.get(j + 1) * strides.buffer[j + 1];
-        }
+
+        const V = @Vector(MAX_RANK, i64);
+        const rank_mask = std.simd.iota(u8, MAX_RANK) < @as(@Vector(MAX_RANK, u8), @splat(rk));
+        // For each axis compute the product of all following dimensions
+        // and the element size in bytes.
+        var d: V = @bitCast(self._dims.buffer);
+        d = @select(i64, rank_mask, d, @as(V, @splat(1)));
+        d = std.simd.shiftElementsLeft(d, 1, self.dtype().sizeOf());
+        d = std.simd.prefixScan(.Mul, -1, d);
+
+        strides.buffer = @bitCast(d);
         return strides;
     }
 

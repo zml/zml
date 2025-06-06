@@ -4,22 +4,22 @@
 #
 #  To generate the ubuntu_base.lock.json run the following command
 #
-#     bazel run @neuron_bookworm//:lock
+#     bazel run @apt_neuron//:lock
 #
 version: 1
 
 sources:
-  - channel: bookworm main
-    url: https://deb.debian.org/debian
-  - channel: jammy main
-    url: https://apt.repos.neuron.amazonaws.com
+    - channel: bookworm main
+      url: https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/
+    - channel: jammy main
+      url: https://apt.repos.neuron.amazonaws.com
 
 archs:
-  - "amd64"
+    - "amd64"
 
 packages:
-  - "bash"
-  - "zlib1g"
-  - "libxml2"
-  - "aws-neuronx-runtime-lib"
-  - "aws-neuronx-collectives"
+    - "bash"
+    - "zlib1g"
+    - "libxml2"
+    - "aws-neuronx-runtime-lib"
+    - "aws-neuronx-collectives"

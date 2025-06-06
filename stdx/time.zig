@@ -1,7 +1,15 @@
 const std = @import("std");
 
 pub const Duration = struct {
-    ns: u64,
+    ns: u64 = 0,
+
+    pub fn div(self: Duration, rhs: u64) Duration {
+        return .{ .ns = self.ns / rhs };
+    }
+
+    pub fn hz(self: Duration) u64 {
+        return (1 * std.time.ns_per_s) / self.ns;
+    }
 
     pub fn format(
         self: Duration,
@@ -21,7 +29,7 @@ pub const Timer = struct {
     }
 
     pub fn lap(self: *Timer) Duration {
-        return .{ .ns = try self.inner.lap() };
+        return .{ .ns = self.inner.lap() };
     }
 
     pub fn read(self: *Timer) Duration {

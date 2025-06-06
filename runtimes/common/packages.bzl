@@ -10,21 +10,19 @@ def _kwargs(**kwargs):
 def _cc_import(**kwargs):
     return """cc_import({})""".format(_kwargs(**kwargs))
 
-def _cc_import_glob_hdrs(name, hdrs_glob, shared_library, deps = []):
+def _cc_library(**kwargs):
+    return """cc_library({})""".format(_kwargs(**kwargs))
+
+def _cc_import_glob_hdrs(name, hdrs_glob, shared_library, deps = [], **kwargs):
     return """\
-filegroup(
-    name = "{name}_files",
-    srcs = glob(["{hdrs_glob}"]),
-    visibility = ["//visibility:public"],
-)
 cc_import(
     name = "{name}",
     shared_library = {shared_library},
-    hdrs = [":{name}_files"],
+    hdrs = glob({hdrs_glob}),
     deps = {deps},
-    visibility = ["//visibility:public"],
+    {kwargs}
 )
-""".format(name = name, hdrs_glob = hdrs_glob, shared_library = repr(shared_library), deps = repr(deps))
+""".format(name = name, hdrs_glob = repr(hdrs_glob), shared_library = repr(shared_library), deps = repr(deps), kwargs = _kwargs(**kwargs))
 
 def _filegroup(**kwargs):
     return """filegroup({})""".format(_kwargs(**kwargs))
@@ -76,6 +74,7 @@ packages = struct(
     read = _read,
     cc_import = _cc_import,
     cc_import_glob_hdrs = _cc_import_glob_hdrs,
+    cc_library = _cc_library,
     filegroup = _filegroup,
     load_ = _load,
 )

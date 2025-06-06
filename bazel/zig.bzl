@@ -1,3 +1,5 @@
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("@rules_zig//zig:defs.bzl", "BINARY_KIND", "zig_binary")
 
 def zig_cc_binary(
@@ -13,13 +15,12 @@ def zig_cc_binary(
     zig_binary(
         name = "{}_lib".format(name),
         kind = BINARY_KIND.static_lib,
-        copts = copts + ["-lc", "-fcompiler-rt"],
-        deps = deps + [
-            "@rules_zig//zig/lib:libc",
-        ],
+        copts = copts + ["-lc"],
+        deps = deps,
+        visibility = visibility,
         **kwargs
     )
-    native.cc_binary(
+    cc_binary(
         name = name,
         args = args,
         env = env,
@@ -44,13 +45,14 @@ def zig_cc_test(
         kind = BINARY_KIND.test_lib,
         test_runner = test_runner,
         tags = tags,
-        copts = copts + ["-lc", "-fcompiler-rt"],
+        copts = copts + ["-lc"],
         deps = deps + [
             "@rules_zig//zig/lib:libc",
         ],
+        visibility = visibility,
         **kwargs
     )
-    native.cc_test(
+    cc_test(
         name = name,
         env = env,
         data = data,

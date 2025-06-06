@@ -25,7 +25,7 @@ housing an NVIDIA GPU, run the following:
 
 ```
 cd examples
-bazel run -c opt //llama:OpenLLaMA-3B --@zml//runtimes:cuda=true
+bazel run --config=release //llama:OpenLLaMA-3B --@zml//runtimes:cuda=true
 ```
 
 
@@ -42,7 +42,7 @@ As an example, here is how you build above OpenLLama for CUDA on Linux X86_64:
 
 ```
 cd examples
-bazel build -c opt //llama:OpenLLaMA-3B               \
+bazel build --config=release //llama:OpenLLaMA-3B               \
             --@zml//runtimes:cuda=true                \
             --@zml//runtimes:cpu=false                \
             --platforms=@zml//platforms:linux_amd64
@@ -84,7 +84,7 @@ tar(
 
 ```
 # cd examples
-bazel build -c opt //mnist:archive                    \
+bazel build --config=release //mnist:archive                    \
             --@zml//runtimes:cuda=true                \
             --@zml//runtimes:cpu=false                \
             --platforms=@zml//platforms:linux_amd64
