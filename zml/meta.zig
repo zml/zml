@@ -120,11 +120,10 @@ test MapType {
     };
     _ = struct_b;
 
-    // TODO(corendos) fixme, union_b should contains Bs not As.
     const UnionA = union { some: []const A, one: A, maybe: ?A, other: u32 };
     const union_b = [_]A2B.map(UnionA){
-        .{ .some = &[2]A{ .{ .a = 0 }, .{ .a = 1 } } },
-        .{ .one = .{ .a = 2 } },
+        .{ .some = &[2]B{ .{ .b = 0 }, .{ .b = 1 } } },
+        .{ .one = .{ .b = 2 } },
         .{ .maybe = null },
         .{ .other = 43 },
     };
