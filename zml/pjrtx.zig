@@ -21,6 +21,7 @@ pub const SerializeResult = pjrt.SerializeResult;
 pub const Executable = pjrt.Executable;
 pub const ExecuteError = ApiError;
 pub const Memory = pjrt.Memory;
+pub const Stream = pjrt.Stream;
 
 const log = std.log.scoped(.zml);
 

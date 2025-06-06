@@ -239,7 +239,7 @@ const TypeId = c.XLA_FFI_TypeId;
 
 const Task = fn (*anyopaque) void;
 
-pub const Stream = opaque {};
+const Stream = @import("pjrt.zig").Stream;
 
 const ByteSpan = extern struct {
     ptr: [*]const u8,

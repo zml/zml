@@ -284,6 +284,8 @@ pub const ShapeSpec = extern struct {
     }
 };
 
+pub const Stream = opaque {};
+
 pub const Client = opaque {
     const inner = InnerMixin(c.PJRT_Client).inner;
 
@@ -419,7 +421,7 @@ pub const Client = opaque {
             fn call(_: ?*anyopaque, _: ?*anyopaque) callconv(.C) void {}
         }.call,
         on_delete_callback_arg: ?*anyopaque = null,
-        stream: ?*const anyopaque = null,
+        stream: ?*const Stream = null,
     };
 
     pub fn createViewOfDeviceBuffer(self: *const Client, api: *const Api, args: CreateViewOfDeviceBufferArgs) ApiError!*Buffer {
