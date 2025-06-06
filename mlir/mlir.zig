@@ -1257,6 +1257,7 @@ pub const Type = struct {
 
     pub fn complex(ctx: Context, complex_type: ComplexTypes) Type {
         return switch (complex_type) {
+            .unknown => @panic("Unknown complex type can't be created like this"), // What's the point ?
             inline else => |t| ComplexType(t).init(ctx).asType(),
         };
     }
