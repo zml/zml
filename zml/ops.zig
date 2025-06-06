@@ -1261,13 +1261,13 @@ pub fn customCall(target_name: [:0]const u8, inputs: anytype, outputs: anytype, 
                 break :b &[1]Tensor{inputs};
             }
             if (!struct_info.is_tuple) @compileError("Expected tuple");
-            const inputs_: [struct_info.fields.len]Tensor = undefined;
+            var inputs_: [struct_info.fields.len]Tensor = undefined;
             meta.collectBuf((struct {
                 pub fn func(t: Tensor) Tensor {
                     return t;
                 }
-            }).func, {}, inputs, &inputs_);
-            break :b inputs_;
+            }).func, {}, &inputs, &inputs_);
+            break :b &inputs_;
         },
         .array => &inputs,
         .pointer => |pointer_info| b: {
@@ -1284,13 +1284,13 @@ pub fn customCall(target_name: [:0]const u8, inputs: anytype, outputs: anytype, 
                 break :b &[1]Shape{outputs};
             }
             if (!struct_info.is_tuple) @compileError("Expected tuple");
-            const output_shapes: [struct_info.fields.len]Shape = undefined;
+            var output_shapes: [struct_info.fields.len]Shape = undefined;
             meta.collectBuf((struct {
                 pub fn func(t: Shape) Shape {
                     return t;
                 }
-            }).func, {}, outputs, &output_shapes);
-            break :b output_shapes;
+            }).func, {}, &outputs, &output_shapes);
+            break :b &output_shapes;
         },
         .array => &outputs,
         .pointer => |pointer_info| b: {
@@ -1303,9 +1303,9 @@ pub fn customCall(target_name: [:0]const u8, inputs: anytype, outputs: anytype, 
     const outputs_flat = customCallInternal(target_name, inputs_, output_shapes, metadata, opts);
 
     // Transform flat slice to generic outputs.
-    return switch (@typeInfo(@TypeOf(outputs_flat))) {
+    return switch (@typeInfo(@TypeOf(outputs))) {
         .@"struct" => |struct_info| b: {
-            if (@TypeOf(outputs_flat) == Shape) break :b outputs_flat[0];
+            if (@TypeOf(outputs) == Shape) break :b outputs_flat[0];
             if (!struct_info.is_tuple) @compileError("Expected tuple");
             if (struct_info.fields.len == 1) break :b outputs_flat[0];
             var outputs_: [struct_info.fields.len]Tensor = undefined;
