@@ -91,27 +91,25 @@ fn TransmuteMixin(comptime T: type, comptime InnerT: type) type {
 pub const Api = opaque {
     pub const inner = TransmuteMixin(Api, c.XLA_FFI_Api).to;
 
-    pub fn getStream(self: *const Api, context: ?*ExecutionContext) ApiError!*anyopaque {
+    pub fn stream(self: *const Api, context: *const ExecutionContext) *Stream {
         var ret = pjrtStruct(c.XLA_FFI_Stream_Get_Args{
-            .ctx = if (context) |ctx| ctx.inner() else null,
+            .ctx = @constCast(context.inner()),
         });
         const result = self.inner().XLA_FFI_Stream_Get.?(&ret);
-
         if (result) |ffi_error| {
             const err = Error.fromInner(ffi_error);
             defer err.destroy(self);
             log.err("[Api.getStream] {s}", .{err.getMessage(self)});
 
-            // TODO(Corentin): Retrieve error code from Error when implemented in XLA.
-            return error.Unknown;
+            @panic("failed to get stream");
         }
 
-        return ret.stream.?;
+        return @ptrCast(ret.stream.?);
     }
 
-    pub fn allocateDeviceMemory(self: *const Api, context: ?*ExecutionContext, size: usize, alignment: usize) ApiError!*anyopaque {
+    pub fn allocateDeviceMemory(self: *const Api, context: *const ExecutionContext, size: usize, alignment: usize) ApiError!*anyopaque {
         var ret = pjrtStruct(c.XLA_FFI_DeviceMemory_Allocate_Args{
-            .ctx = if (context) |ctx| ctx.inner() else null,
+            .ctx = @constCast(context.inner()),
             .size = size,
             .alignment = alignment,
         });
@@ -129,9 +127,9 @@ pub const Api = opaque {
         return ret.data.?;
     }
 
-    pub fn freeDeviceMemory(self: *const Api, context: ?*ExecutionContext, data: *anyopaque, size: usize) ApiError!void {
+    pub fn freeDeviceMemory(self: *const Api, context: *const ExecutionContext, data: *anyopaque, size: usize) ApiError!void {
         var ret = pjrtStruct(c.XLA_FFI_DeviceMemory_Free_Args{
-            .ctx = if (context) |ctx| ctx.inner() else null,
+            .ctx = @constCast(context.inner()),
             .size = size,
             .data = data,
         });
@@ -165,53 +163,83 @@ pub const ExecutionStage = enum(c.XLA_FFI_ExecutionStage) {
 pub const ExecutionContext = opaque {
     pub const inner = TransmuteMixin(ExecutionContext, c.XLA_FFI_ExecutionContext).to;
 
-    // pub fn attach(self: *ExecutionContext, api: *const Api, value: anytype) ApiError!void {
-    //     // register type id ==> typeid
-    //     const typename_ = "zml." ++ @typeName(@TypeOf(value));
+    pub fn Context(comptime T: type) type {
+        return struct {
+            pub fn get(self: *const ExecutionContext, api: *const Api) ApiError!*T {
+                const type_id: TypeId = .{ .type_id = T.type_id };
+                var ret = pjrtStruct(c.XLA_FFI_ExecutionContext_Get_Args{
+                    .ctx = @constCast(self.inner()),
+                    .type_id = @constCast(&type_id.toCStruct()),
+                });
+                const result = api.inner().XLA_FFI_ExecutionContext_Get.?(&ret);
 
-    //     var ret = pjrtStruct(c.XLA_FFI_ExecutionContext_Register_Args{
-    //         .ctx = self.inner(),
-    //         .handler = @ptrCast(@alignCast(handler)),
-    //     });
-    //     const result = api.inner().XLA_FFI_ExecutionContext_Register.?(&ret);
+                if (result) |ffi_error| {
+                    const err = Error.fromInner(ffi_error);
+                    defer err.destroy(api);
+                    log.err("[ExecutionContext.get] {s}", .{err.getMessage(api)});
 
-    //     var ret = pjrtStruct(c.XLA_FFI_ExecutionContext_Register_Args{
-    //         .ctx = self.inner(),
-    //         .handler = @ptrCast(@alignCast(handler)),
-    //     });
-    //     const result = api.inner().XLA_FFI_ExecutionContext_Register.?(&ret);
+                    // TODO(Corentin): Retrieve error code from Error when implemented in XLA.
+                    return error.Unknown;
+                }
 
-    //     if (result) |ffi_error| {
-    //         const err = Error.fromInner(ffi_error);
-    //         defer err.destroy(api);
-    //         log.err("[ExecutionContext.register] {s}", .{err.getMessage(api)});
+                if (ret.data == null) return error.NotFound;
+                return @ptrCast(@alignCast(ret.data.?));
+            }
+        };
+    }
 
-    //         // TODO(Corentin): Retrieve error code from Error when implemented in XLA.
-    //         return error.Unknown;
-    //     }
-    // }
-
-    pub fn get(self: *ExecutionContext, api: *const Api, type_id: *TypeId) ApiError!*anyopaque {
-        var ret = pjrtStruct(c.XLA_FFI_ExecutionContext_Get_Args{
-            .ctx = self.inner(),
-            .type_id = @ptrCast(@alignCast(type_id)),
+    pub fn getDeviceOrdinal(self: *const ExecutionContext, api: *const Api) ApiError!i32 {
+        var ret = pjrtStruct(c.XLA_FFI_DeviceOrdinal_Get_Args{
+            .ctx = @constCast(self.inner()),
         });
-        const result = api.inner().XLA_FFI_ExecutionContext_Get.?(&ret);
+        const result = api.inner().XLA_FFI_DeviceOrdinal_Get.?(&ret);
 
         if (result) |ffi_error| {
             const err = Error.fromInner(ffi_error);
             defer err.destroy(api);
-            log.err("[ExecutionContext.get] {s}", .{err.getMessage(api)});
+            log.err("[ExecutionContext.getDeviceOrdinal] {s}", .{err.getMessage(api)});
 
             // TODO(Corentin): Retrieve error code from Error when implemented in XLA.
             return error.Unknown;
         }
 
-        return ret.data.?;
+        return ret.device_ordinal;
     }
 
-    // TODO getDeviceOrdinal()
+    pub fn scheduleTask(self: *const ExecutionContext, api: *const Api, task: *const Task, data: *anyopaque) ApiError!void {
+        var ret = pjrtStruct(c.XLA_FFI_ThreadPool_Schedule_Args{
+            .ctx = @constCast(self.inner()),
+            .task = @ptrCast(@alignCast(task)),
+            .data = @ptrCast(@alignCast(data)),
+        });
+
+        const result = api.inner().XLA_FFI_ThreadPool_Schedule.?(&ret);
+
+        if (result) |ffi_error| {
+            const err = Error.fromInner(ffi_error);
+            defer err.destroy(api);
+            std.debug.print("error: {any} \n", .{err});
+            log.err("[ExecutionContext.get] {s}", .{err.getMessage(api)});
+
+            // TODO(Corentin): Retrieve error code from Error when implemented in XLA.
+            return error.Unknown;
+        }
+    }
+
+    fn getTypeId(type_name: []const u8) TypeId {
+        const id: i64 = @bitCast(std.hash.Fnv1a_64.hash(type_name));
+
+        return .{
+            .type_id = id,
+        };
+    }
 };
+
+const TypeId = c.XLA_FFI_TypeId;
+
+const Task = fn (*anyopaque) void;
+
+const Stream = @import("pjrt.zig").Stream;
 
 const ByteSpan = extern struct {
     ptr: [*]const u8,
@@ -222,17 +250,13 @@ const ByteSpan = extern struct {
     }
 };
 
-pub const TypeId = extern struct {
-    type_id: i64,
-};
-
 pub const DataType = enum(c.XLA_FFI_DataType) {
     invalid = c.XLA_FFI_DataType_INVALID,
     pred = c.XLA_FFI_DataType_PRED,
-    s8 = c.XLA_FFI_DataType_S8,
-    s16 = c.XLA_FFI_DataType_S16,
-    s32 = c.XLA_FFI_DataType_S32,
-    s64 = c.XLA_FFI_DataType_S64,
+    i8 = c.XLA_FFI_DataType_S8,
+    i16 = c.XLA_FFI_DataType_S16,
+    i32 = c.XLA_FFI_DataType_S32,
+    i64 = c.XLA_FFI_DataType_S64,
     u8 = c.XLA_FFI_DataType_U8,
     u16 = c.XLA_FFI_DataType_U16,
     u32 = c.XLA_FFI_DataType_U32,
@@ -289,9 +313,8 @@ pub const Args = extern struct {
         buffer = c.XLA_FFI_ArgType_BUFFER,
     };
 
-    pub fn get(self: Args, i: usize) *const Buffer {
-        std.debug.assert(self.types[0..self.len][i] == .buffer);
-        return self.ptr[0..self.len][i];
+    pub fn buffers(self: Args) []*const Buffer {
+        return self.ptr[0..self.len];
     }
 };
 
@@ -306,9 +329,8 @@ pub const Rets = extern struct {
         buffer = c.XLA_FFI_RetType_BUFFER,
     };
 
-    pub fn get(self: Rets, i: usize) *const Buffer {
-        std.debug.assert(self.types[0..self.len][i] == .buffer);
-        return self.ptr[0..self.len][i];
+    pub fn buffers(self: Rets) []*const Buffer {
+        return self.ptr[0..self.len];
     }
 };
 
@@ -346,7 +368,17 @@ pub const Attrs = extern struct {
         dtype: DataType,
         len: usize,
         data: [*]const u8,
+
+        pub fn slice(self: Array, T: type) []const T {
+            const ptr: [*]const T = @alignCast(@ptrCast(self.data));
+            return ptr[0..self.len];
+        }
     };
+
+    pub fn slice(self: Array, T: type) []const T {
+        const ptr: [*]const T = @alignCast(@ptrCast(self.data));
+        return ptr[0..self.len];
+    }
 
     pub fn getByIndex(self: Attrs, comptime attr_type: AttrType, index: usize) ?*const @FieldType(Attr, @tagName(attr_type)) {
         const attr = self.ptr[0..self.len][index];
@@ -370,8 +402,8 @@ pub const Attrs = extern struct {
 pub const CallFrame = extern struct {
     struct_size: usize,
     extension_start: ?*ExtensionBase,
-    api: ?*const Api,
-    ctx: ?*const ExecutionContext,
+    api: *const Api,
+    ctx: *const ExecutionContext,
     stage: ExecutionStage,
     args: Args,
     results: Rets,
@@ -438,7 +470,7 @@ pub const Error = opaque {
     pub const inner = TransmuteMixin(Error, c.XLA_FFI_Error).to;
     pub const fromInner = TransmuteMixin(Error, c.XLA_FFI_Error).from;
 
-    pub fn create(api: *const Api, error_code: ErrorCode, message: [:0]const u8) *Error {
+    pub fn create(api: *const Api, error_code: ErrorCode, message: []const u8) *Error {
         var ret = pjrtStruct(c.XLA_FFI_Error_Create_Args{
             .message = message.ptr,
             .errc = @intFromEnum(error_code),

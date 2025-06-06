@@ -12,7 +12,7 @@ const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
 const ShapeOf = @import("tensor.zig").ShapeOf;
 
-const log = std.log.scoped(.zml);
+const log = std.log.scoped(.@"zml/exe");
 
 test {
     std.testing.refAllDecls(@This());
@@ -135,6 +135,9 @@ pub const BaseExe = struct {
     /// The PJRT executable representing the compiled module.
     exe: *pjrt.LoadedExecutable,
 
+    /// The execution context for this executable.
+    context: ?*pjrt.ExecuteContext = null,
+
     /// Pre-allocated slice of buffers to use as inputs when the module is called.
     input_per_device: []const [*]*pjrt.Buffer,
 
@@ -199,6 +202,9 @@ pub const BaseExe = struct {
     }
 
     pub fn deinit(self: BaseExe) void {
+        if (self.context) |ctx| {
+            ctx.deinit(self.platform.pjrt_api);
+        }
         self._arena.deinit();
     }
 
@@ -220,6 +226,7 @@ pub const BaseExe = struct {
             // even if it has been marked as "can be donated" during compilation.
             // TODO: expose it ?
             .non_donatable_input_indices = &.{},
+            .context = self.context,
         }) catch |err| {
             std.debug.panic("PJRT_LoadedExecutable_Execute failed with: {}", .{err});
         };
@@ -288,11 +295,13 @@ pub const BaseExe = struct {
     }
 
     pub fn clone(self: BaseExe, parent_allocator: std.mem.Allocator) !BaseExe {
-        return .init(parent_allocator, self.platform, self.exe, .{
-            .input_shapes = self.input_shapes,
+        var exe: BaseExe = try .init(parent_allocator, self.platform, self.exe, .{
+            .n_in = self.input_buffer_count,
             .result_shapes = self.result_shapes,
             .n_devices = self.num_devices,
         });
+        exe.context = self.context;
+        return exe;
     }
 };
 
