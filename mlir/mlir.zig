@@ -288,8 +288,17 @@ pub const Attribute = struct {
 
     /// Use a tensor as an attribute.
     /// The tensor is specified by dims, dtype and a flat slice of values.
-    pub fn denseElements(ctx: Context, dims: []const i64, comptime dt: DenseElementsAttributeTypes, values: anytype) Attribute {
+    pub fn denseElements(ctx: Context, dims: []const i64, comptime dt: DenseElementsAttributeTypes, values: []const dt.ZigType()) Attribute {
         return DenseElementsAttribute(dt).init(.tensor(dims, dt.mlirType(ctx)), values).asAttr();
+    }
+
+    pub fn denseElementsFromBytes(ctx: Context, dims: []const i64, dt: DenseElementsAttributeTypes, raw_bytes: []const u8) Attribute {
+        const shape: Type = .tensor(dims, dt.mlirType(ctx));
+        return .{ ._inner = c.mlirDenseElementsAttrRawBufferGet(
+            shape._inner,
+            @intCast(raw_bytes.len),
+            raw_bytes.ptr,
+        ) };
     }
 
     pub fn symbol(ctx: Context, flat_name: [:0]const u8) Attribute {
@@ -577,12 +586,12 @@ pub fn DenseElementsAttribute(comptime dt: DenseElementsAttributeTypes) type {
         pub const asAttr = Attribute.fromAny(Attr);
         pub const eql = Attribute.eqlAny(Attr);
 
-        pub fn init(shaped_type: Type, slice: anytype) Attr {
-            const bytes = std.mem.sliceAsBytes(slice);
+        pub fn init(shaped_type: Type, slice: []const dt.ZigType()) Attr {
+            const raw_bytes = std.mem.sliceAsBytes(slice);
             const res: Attr = .{ ._inner = c.mlirDenseElementsAttrRawBufferGet(
                 shaped_type._inner,
-                @intCast(bytes.len),
-                @ptrCast(bytes.ptr),
+                @intCast(raw_bytes.len),
+                @ptrCast(raw_bytes.ptr),
             ) };
             std.debug.assert(Attribute.wrapOr(res._inner) != null);
             return res;
@@ -592,13 +601,16 @@ pub fn DenseElementsAttribute(comptime dt: DenseElementsAttributeTypes) type {
             return @intCast(c.mlirElementsAttrGetNumElements(self._inner));
         }
 
-        pub fn constSlice(self: Attr) []const dt.ZigType() {
-            const ptr: [*]const dt.ZigType() = @alignCast(@ptrCast(c.mlirDenseElementsAttrGetRawData(self._inner) orelse unreachable));
+        pub fn items(self: Attr) []const dt.ZigType() {
+            const raw_bytes: [*]const u8 = c.mlirDenseElementsAttrGetRawData(self._inner) orelse unreachable;
+            const ptr: [*]const dt.ZigType() = @alignCast(@ptrCast(raw_bytes));
+            // Note the mlir API returns us the number of elements, not the number of bytes,
+            // that's why we track the element type at comptime to allow items to work.
             return ptr[0..self.len()];
         }
 
-        pub fn data(self: Attr) []const u8 {
-            return std.mem.sliceAsBytes(self.constSlice());
+        pub fn bytes(self: Attr) []const u8 {
+            return std.mem.sliceAsBytes(self.items());
         }
     };
 }

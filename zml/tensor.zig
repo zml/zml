@@ -1931,17 +1931,15 @@ pub const Tensor = struct {
     /// Returns a constant Tensor with the given value.
     pub fn constant(dimz: anytype, val: Data) Tensor {
         const sh = Shape.init(dimz, val.dtype());
-        const singleton_sh = Shape.init(.{}, val.dtype());
         const ctx = CompilationContext.current().mlirCtx();
         const loc = CompilationContext.current().location(@src(), "dims={d}, value={}", .{ sh, val });
-        const res_type = mlir_ext.RankedTensorType.fromShape(ctx, singleton_sh);
 
         var constant_op = if (mlir_ext.denseElementAttrType(val.dtype())) |elem_type|
-            dialect.stablehlo.constant(ctx, res_type, elem_type, val.constSlice(), loc)
+            dialect.stablehlo.constant(ctx, &.{}, elem_type, val.constSlice(), loc)
         else blk: {
             // Not all dtype can be serialized in the IR. If that's not possible, use f32.
             const val_f32 = val.as(f32);
-            break :blk dialect.stablehlo.constant(ctx, res_type, .f32, std.mem.asBytes(&val_f32), loc);
+            break :blk dialect.stablehlo.constant(ctx, &.{}, .f32, std.mem.asBytes(&val_f32), loc);
         };
 
         if (sh.rank() > 0) {
@@ -1953,10 +1951,9 @@ pub const Tensor = struct {
     /// Embeds a buffer with concrete values into an Mlir program.
     pub fn constantTensor(val: HostBuffer) Tensor {
         const ctx = CompilationContext.current().mlirCtx();
-        const result_type = mlir_ext.RankedTensorType.fromShape(ctx, val.shape());
         const loc = ctx.location(@src());
         const elem_type = mlir_ext.denseElementAttrType(val.dtype()) orelse std.debug.panic("constantTensor expects a dtype that can be serialized to MLIR, like f32 or i32, got {}", .{val.shape()});
-        const constant_op = dialect.stablehlo.constant(ctx, result_type, elem_type, val.bytes(), loc);
+        const constant_op = dialect.stablehlo.constant(ctx, val.shape().dims(), elem_type, val.bytes(), loc);
         return _result(val.shape(), constant_op.result(0));
     }
 

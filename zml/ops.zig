@@ -248,7 +248,8 @@ pub fn reduceWindow(
             .{ "window_strides", .dense(ctx.mlirCtx(), .i64, opts.window_strides) },
             .{ "base_dilations", .dense(ctx.mlirCtx(), .i64, opts.base_dilations) },
             .{ "window_dilations", .dense(ctx.mlirCtx(), .i64, opts.window_dilations) },
-            .{ "padding", .denseElements(ctx.mlirCtx(), &.{ @intCast(opts.padding.len), 2 }, .i64, opts.padding) },
+            // Cast the [][2]i64 to []i64 (safe)
+            .{ "padding", .denseElements(ctx.mlirCtx(), &.{ @intCast(opts.padding.len), 2 }, .i64, @ptrCast(opts.padding)) },
         },
         .location = loc,
     });

@@ -213,19 +213,15 @@ pub fn dot_general(
 
 pub fn constant(
     ctx: mlir.Context,
-    result_type: mlir.RankedTensorType,
+    dims: []const i64,
     elem_type: mlir.DenseElementsAttributeTypes,
     raw_bytes: []const u8,
     location: mlir.Location,
 ) mlir.Operation {
-    const attribute = switch (elem_type) {
-        inline else => |dt| mlir.DenseElementsAttribute(dt).init(result_type.asType(), raw_bytes).asAttr(),
-    };
-
     return mlir.Operation.make(ctx, "stablehlo.constant", .{
         .operands = &.{},
-        .results = &.{result_type.asType()},
-        .attributes = &.{.{ "value", attribute }},
+        .results = &.{.tensor(dims, elem_type.mlirType(ctx))},
+        .attributes = &.{.{ "value", .denseElementsFromBytes(ctx, dims, elem_type, raw_bytes) }},
         .location = location,
     });
 }
