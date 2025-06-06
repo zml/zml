@@ -280,10 +280,10 @@ pub fn concatenate(ctx: mlir.Context, inputs: []const mlir.Value, dimension: i64
     });
 }
 
-pub fn reshape(ctx: mlir.Context, value: mlir.Value, result_type: mlir.RankedTensorType, location: mlir.Location) mlir.Operation {
+pub fn reshape(ctx: mlir.Context, value: mlir.Value, result_type: mlir.Type, location: mlir.Location) mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.reshape", .{
         .operands = &.{value},
-        .results = &.{result_type.asType()},
+        .results = &.{result_type},
         .location = location,
     });
 }
