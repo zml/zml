@@ -13,7 +13,7 @@ const DataType = @import("dtype.zig").DataType;
 const helpers = @import("helpers.zig");
 const HostBuffer = @import("hostbuffer.zig").HostBuffer;
 const meta = @import("meta.zig");
-const mlir_ext = @import("mlirx.zig");
+const mlirx = @import("mlirx.zig");
 const module = @import("module.zig");
 const CompilationContext = module.CompilationContext;
 const Platform = @import("platform.zig").Platform;
@@ -200,7 +200,7 @@ pub fn reduce(
                 mlir_ctx,
                 val,
                 inner_ctx.broadcasting_axes[0 .. tensor.rank() - inner_ctx.n_reduced],
-                mlir_ext.tensorType(mlir_ctx, reduced_shape),
+                mlirx.tensorType(mlir_ctx, reduced_shape),
                 inner_ctx.loc,
             );
             tensor.* = Tensor._result(reduced_shape, broad_val.result(0));
@@ -798,7 +798,7 @@ pub fn addHostCallback(
     }
     const res_types = stdx.stackSlice(8, mlir.Type, output_shapes.len);
     for (res_types, output_shapes) |*r, o| {
-        r.* = mlir_ext.tensorType(mlir_ctx, o);
+        r.* = mlirx.tensorType(mlir_ctx, o);
     }
 
     const loc = ctx.mlirCtx().location(@src());
@@ -843,7 +843,7 @@ pub fn triton(inputs: anytype, outputs: anytype, opts: TritonOps) [outputs.len]T
 
     var res_types: [outputs.len]mlir.Type = undefined;
     inline for (outputs, 0..) |output, i| {
-        res_types[i] = mlir_ext.tensorType(ctx.mlirCtx(), output);
+        res_types[i] = mlirx.tensorType(ctx.mlirCtx(), output);
     }
 
     const backend_config = mlir.Attribute.dict(ctx.mlirCtx(), &.{

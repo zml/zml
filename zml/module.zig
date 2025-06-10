@@ -3,21 +3,17 @@ const std = @import("std");
 const asynk = @import("async");
 const dialect = @import("mlir/dialects");
 const mlir = @import("mlir");
-const Location = mlir.Location;
-const runfiles = @import("runfiles");
 const stdx = @import("stdx");
 const xla_pb = @import("//xla:xla_proto");
 
 const BaseExe = @import("exe.zig").BaseExe;
 const Buffer = @import("buffer.zig").Buffer;
-const Bufferized = @import("tensor.zig").Bufferized;
 const meta = @import("meta.zig");
-const mlir_ext = @import("mlirx.zig");
+const mlirx = @import("mlirx.zig");
 const ops = @import("ops.zig");
 const pjrt = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
-const ShapeOf = @import("tensor.zig").ShapeOf;
 const Target = @import("platform.zig").Target;
 const Tensor = @import("tensor.zig").Tensor;
 const Tracer = @import("tools/tracer.zig").Tracer;
@@ -347,7 +343,7 @@ pub const CompilationContext = struct {
         stdx.debug.internalAssert(input_shapes.items.len == tensor_count, "args have changed ?", .{});
 
         const input_types = try arena.alloc(mlir.Type, tensor_count);
-        for (input_types, input_shapes.items) |*t, sh| t.* = mlir_ext.tensorType(mlir_ctx, sh);
+        for (input_types, input_shapes.items) |*t, sh| t.* = mlirx.tensorType(mlir_ctx, sh);
 
         const og_block_args = self._block_args;
         defer {
@@ -948,7 +944,7 @@ pub fn fillMlirTypes(v: anytype, mlir_ctx: mlir.Context, types: []mlir.Type) voi
     var context = LocalContext{ .mlir_ctx = mlir_ctx, .types = types };
     meta.visit((struct {
         fn cb(inner_context: *LocalContext, tensor: *const Tensor) void {
-            inner_context.types[inner_context.index] = mlir_ext.tensorType(inner_context.mlir_ctx, tensor.shape());
+            inner_context.types[inner_context.index] = mlirx.tensorType(inner_context.mlir_ctx, tensor.shape());
             inner_context.index += 1;
         }
     }).cb, &context, v);
