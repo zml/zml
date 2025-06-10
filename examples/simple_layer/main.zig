@@ -82,7 +82,7 @@ pub fn asyncMain() !void {
     // with a specific shape from an array.
     // For situations where e.g. you have an [4]f16 array but need a .{2, 2} input shape.
     var input = [4]f16{ 5.0, 5.0, 5.0, 5.0 };
-    var input_buffer = try zml.Buffer.from(platform, zml.HostBuffer.fromSlice(input_shape, &input));
+    var input_buffer = try zml.Buffer.from(platform, zml.HostBuffer.fromSlice(input_shape, &input), .{});
     defer input_buffer.deinit();
 
     // call our executable module

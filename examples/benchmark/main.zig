@@ -123,5 +123,5 @@ fn createRandomBuffer(allocator: std.mem.Allocator, platform: zml.Platform, shap
 
     var host_buffer = zml.HostBuffer.fromBytes(shape, data);
     errdefer host_buffer.deinit(allocator);
-    return zml.Buffer.from(platform, host_buffer);
+    return zml.Buffer.from(platform, host_buffer, .{});
 }

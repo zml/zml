@@ -2668,7 +2668,7 @@ pub const Tensor = struct {
         // Test with actual values, no batching.
         {
             const a_host = try zml.HostBuffer.arange(std.testing.allocator, .{ .end = 9 }, .i32);
-            const a = (try zml.Buffer.from(platform, a_host.reshape(.{ 3, 3 }))).withTags(.{ .a, .b });
+            const a = (try zml.Buffer.from(platform, a_host.reshape(.{ 3, 3 }), .{})).withTags(.{ .a, .b });
             defer a.deinit();
             a_host.deinit(std.testing.allocator);
 
@@ -2687,7 +2687,7 @@ pub const Tensor = struct {
         // Test with setting individual values (no batching)
         {
             const a_host = try zml.HostBuffer.arange(std.testing.allocator, .{ .end = 9 }, .i32);
-            const a = try zml.Buffer.from(platform, a_host);
+            const a = try zml.Buffer.from(platform, a_host, .{});
             defer a.deinit();
             a_host.deinit(std.testing.allocator);
 

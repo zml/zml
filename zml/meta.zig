@@ -61,6 +61,31 @@ pub fn MapType(From: type, To: type) type {
                         .is_tuple = struct_infos.is_tuple,
                     } });
                 },
+                .@"union" => |union_info| {
+                    const fields = union_info.fields;
+                    var same: bool = true;
+                    var union_fields: [fields.len]std.builtin.Type.UnionField = undefined;
+                    for (union_fields[0..], fields) |*union_field, field| {
+                        const R = map(field.type);
+                        if (R == field.type) {
+                            union_field.* = field;
+                        } else {
+                            union_field.* = .{
+                                .name = field.name,
+                                .type = R,
+                                .alignment = @alignOf(R),
+                            };
+                            same = false;
+                        }
+                    }
+                    if (same) return T;
+                    return @Type(.{ .@"union" = .{
+                        .layout = .auto,
+                        .tag_type = union_info.tag_type,
+                        .fields = union_fields[0..],
+                        .decls = &.{},
+                    } });
+                },
                 .array => |arr_info| [arr_info.len]map(arr_info.child),
                 .pointer => |ptr_info| switch (ptr_info.size) {
                     .slice => if (ptr_info.is_const)
@@ -95,11 +120,10 @@ test MapType {
     };
     _ = struct_b;
 
-    // TODO(corendos) fixme, union_b should contains Bs not As.
     const UnionA = union { some: []const A, one: A, maybe: ?A, other: u32 };
     const union_b = [_]A2B.map(UnionA){
-        .{ .some = &[2]A{ .{ .a = 0 }, .{ .a = 1 } } },
-        .{ .one = .{ .a = 2 } },
+        .{ .some = &[2]B{ .{ .b = 0 }, .{ .b = 1 } } },
+        .{ .one = .{ .b = 2 } },
         .{ .maybe = null },
         .{ .other = 43 },
     };
@@ -172,6 +196,14 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
                 else => @field(to, field.name) = @field(from, field.name),
             }
         },
+        .@"union" => {
+            switch (from) {
+                inline else => |_, tag| {
+                    to.* = @unionInit(ToStruct, @tagName(tag), undefined);
+                    try mapAlloc(cb, allocator, ctx, @field(from, @tagName(tag)), &@field(to, @tagName(tag)));
+                },
+            }
+        },
         .array => for (from, to) |f, *t| {
             try mapAlloc(cb, allocator, ctx, f, t);
         },
@@ -202,7 +234,7 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
         } else {
             to.* = null;
         },
-        .int, .float, .@"enum", .@"union" => to.* = from,
+        .int, .float, .@"enum" => to.* = from,
         else => stdx.debug.compileError("zml.meta.mapAlloc doesn't support: {}", .{FromStruct}),
     }
 }
