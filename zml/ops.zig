@@ -1368,7 +1368,7 @@ fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs
         .{
             .call_target_name = target_name,
             .backend_config = backend_config,
-            .has_side_effect = true,
+            .has_side_effect = opts.has_side_effect,
             .api_version = .typed_ffi,
             .operand_layouts = operands_layouts,
             .result_layouts = results_layouts,
