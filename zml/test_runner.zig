@@ -1,11 +1,9 @@
 //! Test runner for unit test based on https://github.com/ziglang/zig/blob/master/lib/compiler/test_runner.zig with async
-const asynk = @import("async");
-const builtin = @import("builtin");
 const std = @import("std");
-
-const io = std.io;
 const testing = std.testing;
-const assert = std.debug.assert;
+const builtin = @import("builtin");
+
+const asynk = @import("async");
 
 // note: std_options.log_level does not respect testing.log_level
 // ref: https://github.com/ziglang/zig/issues/5738
