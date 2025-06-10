@@ -1,6 +1,5 @@
 const std = @import("std");
 const testing = std.testing;
-const builtin = @import("builtin");
 
 const stdx = @import("stdx");
 const FnParam = stdx.meta.FnParam;

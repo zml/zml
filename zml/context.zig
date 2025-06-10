@@ -7,7 +7,6 @@ const runfiles = @import("runfiles");
 const runtimes = @import("runtimes");
 const stdx = @import("stdx");
 
-const Buffer = @import("buffer.zig").Buffer;
 const DataType = @import("dtype.zig").DataType;
 const HostBuffer = @import("hostbuffer.zig").HostBuffer;
 const pjrt = @import("pjrtx.zig");

@@ -3,7 +3,6 @@ const std = @import("std");
 const stdx = @import("stdx");
 
 const Buffer = @import("buffer.zig").Buffer;
-const Data = @import("dtype.zig").Data;
 const DataType = @import("dtype.zig").DataType;
 const floats = @import("floats.zig");
 const Platform = @import("platform.zig").Platform;

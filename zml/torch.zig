@@ -5,8 +5,6 @@ const stdx = @import("stdx");
 const zml = @import("zml.zig");
 const Tensor = zml.Tensor;
 
-const log = std.log.scoped(.zml_torch);
-
 /// Multiplies a matrix or a vector with a tensor,
 /// following the semantic of pytorch `@` operator.
 /// When both sides are matrices, it's the textbook matrix multiplication :

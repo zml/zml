@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 
 const asynk = @import("async");
 const c = @import("c");
