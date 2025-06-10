@@ -411,56 +411,14 @@ pub const Buffer = struct {
 
 pub fn bufferTypeFromDtype(dt: DataType) pjrt.BufferType {
     return switch (dt) {
-        .bool => .PRED,
-        .f8e4m3b11fnuz => .F8E4M3B11FNUZ,
-        .f8e4m3fn => .F8E4M3FN,
-        .f8e4m3fnuz => .F8E4M3FNUZ,
-        .f8e5m2 => .F8E5M2,
-        .f8e5m2fnuz => .F8E5M2FNUZ,
-        .bf16 => .BF16,
-        .f16 => .F16,
-        .f32 => .F32,
-        .f64 => .F64,
-        .i8 => .S8,
-        .i4 => .S4,
-        .i16 => .S16,
-        .i32 => .S32,
-        .i64 => .S64,
-        .u4 => .U4,
-        .u8 => .U8,
-        .u16 => .U16,
-        .u32 => .U32,
-        .u64 => .U64,
-        .c64 => .C64,
-        .c128 => .C128,
+        inline else => |tag| @field(pjrt.BufferType, @tagName(tag)),
     };
 }
 
 pub fn dtypeFromBufferType(pjrt_type: pjrt.BufferType) DataType {
     return switch (pjrt_type) {
-        .PRED => .bool,
-        .F8E4M3B11FNUZ => .f8e4m3b11fnuz,
-        .F8E4M3FN => .f8e4m3fn,
-        .F8E4M3FNUZ => .f8e4m3fnuz,
-        .F8E5M2 => .f8e5m2,
-        .F8E5M2FNUZ => .f8e5m2fnuz,
-        .BF16 => .bf16,
-        .F16 => .f16,
-        .F32 => .f32,
-        .F64 => .f64,
-        .S8 => .i8,
-        .S4 => .i4,
-        .S16 => .i16,
-        .S32 => .i32,
-        .S64 => .i64,
-        .U4 => .u4,
-        .U8 => .u8,
-        .U16 => .u16,
-        .U32 => .u32,
-        .U64 => .u64,
-        .C64 => .c64,
-        .C128 => .c128,
-        .INVALID => @panic("Found an invalid pjrt buffer"),
+        .invalid => @panic("Found an invalid pjrt buffer"),
+        inline else => |tag| @field(DataType, @tagName(tag)),
     };
 }
 
@@ -472,7 +430,7 @@ test bufferTypeFromDtype {
 
     inline for (@typeInfo(pjrt.BufferType).@"enum".fields) |field| {
         const dt: pjrt.BufferType = @enumFromInt(field.value);
-        if (dt == .INVALID) continue;
+        if (dt == .invalid) continue;
         try std.testing.expectEqual(dt, bufferTypeFromDtype(dtypeFromBufferType(dt)));
     }
 }
