@@ -73,7 +73,7 @@ pub fn cmpi(ctx: mlir.Context, predicate: CmpIPredicate, lhs: mlir.Value, rhs: m
         .operands = &.{ lhs, rhs },
         .result_type_inference = true,
         .attributes = &.{
-            .{ "predicate", mlir.IntegerAttribute(.i64).init(ctx, @intFromEnum(predicate)).as(mlir.Attribute) },
+            .{ "predicate", .int(ctx, .i64, @intFromEnum(predicate)) },
         },
         .location = location,
     });
@@ -103,7 +103,7 @@ pub fn cmpf(ctx: mlir.Context, predicate: CmpFPredicate, lhs: mlir.Value, rhs: m
         .operands = &.{ lhs, rhs },
         .result_type_inference = true,
         .attributes = &.{
-            .{ "predicate", mlir.IntegerAttribute(.i64).init(ctx, @intFromEnum(predicate)).as(mlir.Attribute) },
+            .{ "predicate", .int(ctx, .i64, @intFromEnum(predicate)) },
         },
         .location = location,
     });

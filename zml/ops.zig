@@ -1,24 +1,16 @@
 const std = @import("std");
-const assert = std.debug.assert;
 
+const mlir = @import("mlir");
 const stdx = @import("stdx");
 
 const _collectAxes = @import("tensor.zig")._collectAxes;
-const buffer = @import("buffer.zig");
-const Buffer = buffer.Buffer;
-const Bufferized = @import("tensor.zig").Bufferized;
+const Buffer = @import("buffer.zig").Buffer;
+const CompilationContext = @import("module.zig").CompilationContext;
 const Context = @import("context.zig").Context;
-const Data = @import("dtype.zig").Data;
-const DataType = @import("dtype.zig").DataType;
-const helpers = @import("helpers.zig");
-const HostBuffer = @import("hostbuffer.zig").HostBuffer;
 const meta = @import("meta.zig");
-const mlir = @import("mlir.zig");
-const module = @import("module.zig");
-const CompilationContext = module.CompilationContext;
+const mlirx = @import("mlirx.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
-const ShapeOf = @import("tensor.zig").ShapeOf;
 const Tensor = @import("tensor.zig").Tensor;
 
 const EnumLiteral = @TypeOf(.enum_literal);
@@ -200,14 +192,14 @@ pub fn reduce(
                 mlir_ctx,
                 val,
                 inner_ctx.broadcasting_axes[0 .. tensor.rank() - inner_ctx.n_reduced],
-                mlir.ext.RankedTensorType.fromShape(mlir_ctx, reduced_shape).as(mlir.Type),
+                mlirx.tensorType(mlir_ctx, reduced_shape),
                 inner_ctx.loc,
             );
             tensor.* = Tensor._result(reduced_shape, broad_val.result(0));
             inner_ctx.index += 1;
         }
     }).cb, &local_context, &res);
-    assert(local_context.index == op.numResults());
+    std.debug.assert(local_context.index == op.numResults());
     return res;
 }
 
@@ -248,7 +240,8 @@ pub fn reduceWindow(
             .{ "window_strides", .dense(ctx.mlirCtx(), .i64, opts.window_strides) },
             .{ "base_dilations", .dense(ctx.mlirCtx(), .i64, opts.base_dilations) },
             .{ "window_dilations", .dense(ctx.mlirCtx(), .i64, opts.window_dilations) },
-            .{ "padding", .denseElements(ctx.mlirCtx(), &.{ @intCast(opts.padding.len), 2 }, .i64, opts.padding) },
+            // Cast the [][2]i64 to []i64 (safe)
+            .{ "padding", .denseElements(ctx.mlirCtx(), &.{ @intCast(opts.padding.len), 2 }, .i64, @ptrCast(opts.padding)) },
         },
         .location = loc,
     });
@@ -609,8 +602,8 @@ pub fn sort(
         .result_type_inference = true,
         .blocks = &.{block},
         .attributes = &.{
-            .{ "dimension", mlir.IntegerAttribute(.i64).init(ctx.mlirCtx(), dimension).as(mlir.Attribute) },
-            .{ "is_stable", mlir.BoolAttribute.init(ctx.mlirCtx(), is_stable).as(mlir.Attribute) },
+            .{ "dimension", .int(ctx.mlirCtx(), .i64, dimension) },
+            .{ "is_stable", .boolean(ctx.mlirCtx(), is_stable) },
         },
         .location = loc,
     });
@@ -767,7 +760,7 @@ pub fn fromMlirOperationWithTags(op: mlir.Operation, base: anytype) @TypeOf(base
             inner_ctx.index += 1;
         }
     }).cb, &context, &res);
-    assert(context.index == op.numResults());
+    std.debug.assert(context.index == op.numResults());
     return res;
 }
 
@@ -817,7 +810,7 @@ pub fn triton(inputs: anytype, outputs: anytype, opts: TritonOps) [outputs.len]T
 
     var res_types: [outputs.len]mlir.Type = undefined;
     inline for (outputs, 0..) |output, i| {
-        res_types[i] = mlir.ext.mlirType(ctx.mlirCtx(), output);
+        res_types[i] = mlirx.tensorType(ctx.mlirCtx(), output);
     }
 
     const backend_config = mlir.Attribute.dict(ctx.mlirCtx(), &.{
@@ -1031,7 +1024,7 @@ pub fn scatter(
             inner_ctx.index += 1;
         }
     }).cb, &local_context, &res);
-    assert(local_context.index == op.numResults());
+    std.debug.assert(local_context.index == op.numResults());
     return res;
 }
 
@@ -1327,30 +1320,30 @@ pub fn customCall(target_name: [:0]const u8, inputs: anytype, outputs: anytype, 
 }
 
 fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs: []const Shape, metadata: anytype, opts: CustomCallOptions) []Tensor {
-    const ctx = module.CompilationContext.current();
+    const ctx = CompilationContext.current();
 
     const values = ctx.allocator().alloc(mlir.Value, inputs.len) catch unreachable;
     ctx.extractValues(inputs, values);
 
     const res_types = ctx.allocator().alloc(mlir.Type, outputs.len) catch unreachable;
     for (outputs, 0..) |output, i| {
-        res_types[i] = mlir.ext.mlirType(ctx.mlirCtx(), output);
+        res_types[i] = mlirx.tensorType(ctx.mlirCtx(), output);
     }
 
     const metadata_type_info = @typeInfo(@TypeOf(metadata));
     var metadata_attributes_tuple: [metadata_type_info.@"struct".fields.len]mlir.AttrTuple = undefined;
     inline for (metadata_type_info.@"struct".fields, 0..) |field, i| {
         const attribute: mlir.Attribute = switch (@typeInfo(field.type)) {
-            .int, .comptime_int => mlir.Attribute.int(ctx.mlirCtx(), .u64, @bitCast(@field(metadata, field.name))),
+            .int, .comptime_int => .int(ctx.mlirCtx(), .u64, @bitCast(@field(metadata, field.name))),
             else => @compileError("Unsupported metadata type: " ++ @typeName(field.type)),
         };
         metadata_attributes_tuple[i] = .{ field.name, attribute };
     }
 
-    const backend_config = mlir.Attribute.dict(ctx.mlirCtx(), &(.{
-        .{ "pjrt_api", mlir.Attribute.int(ctx.mlirCtx(), .u64, @bitCast(@intFromPtr(ctx._platform.pjrt_api))) },
-        .{ "pjrt_client", mlir.Attribute.int(ctx.mlirCtx(), .u64, @bitCast(@intFromPtr(ctx._platform.pjrt_client))) },
-    } ++ metadata_attributes_tuple));
+    const backend_config = mlir.Attribute.dict(ctx.mlirCtx(), &(metadata_attributes_tuple ++ [_]mlir.AttrTuple{
+        .{ "pjrt_api", .int(ctx.mlirCtx(), .u64, @bitCast(@intFromPtr(ctx._platform.pjrt_api))) },
+        .{ "pjrt_client", .int(ctx.mlirCtx(), .u64, @bitCast(@intFromPtr(ctx._platform.pjrt_client))) },
+    }));
 
     const operands_layouts = ctx.allocator().alloc([]const usize, inputs.len) catch unreachable;
     for (inputs, 0..) |input, i| {
