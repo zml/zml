@@ -5,14 +5,13 @@ const mlir = @import("mlir");
 const stdx = @import("stdx");
 
 const Buffer = @import("buffer.zig").Buffer;
+const CompilationContext = @import("module.zig").CompilationContext;
 const Data = @import("dtype.zig").Data;
 const DataType = @import("dtype.zig").DataType;
 const HostBuffer = @import("hostbuffer.zig").HostBuffer;
 const Memory = @import("buffer.zig").Buffer.Memory;
 const meta = @import("meta.zig");
 const mlirx = @import("mlirx.zig");
-const module = @import("module.zig");
-const CompilationContext = module.CompilationContext;
 const ops = @import("ops.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;

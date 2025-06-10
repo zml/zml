@@ -1,14 +1,9 @@
 const std = @import("std");
-const builtin = @import("builtin");
 
 const mlir = @import("mlir");
-const stdx = @import("stdx");
 
 const dtype = @import("dtype.zig");
 const Shape = @import("shape.zig").Shape;
-const Tensor = @import("tensor.zig").Tensor;
-
-const log = std.log.scoped(.@"zml/mlir");
 
 const mlirx = @This();
 
@@ -101,6 +96,6 @@ pub const Type = struct {
             }
         }
 
-        stdx.debug.panic("Could not convert mlir.Type to DataType: {}", .{mlir_type});
+        std.debug.panic("Could not convert mlir.Type to DataType: {}", .{mlir_type});
     }
 };

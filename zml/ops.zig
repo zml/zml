@@ -4,21 +4,13 @@ const mlir = @import("mlir");
 const stdx = @import("stdx");
 
 const _collectAxes = @import("tensor.zig")._collectAxes;
-const buffer = @import("buffer.zig");
-const Buffer = buffer.Buffer;
-const Bufferized = @import("tensor.zig").Bufferized;
+const Buffer = @import("buffer.zig").Buffer;
+const CompilationContext = @import("module.zig").CompilationContext;
 const Context = @import("context.zig").Context;
-const Data = @import("dtype.zig").Data;
-const DataType = @import("dtype.zig").DataType;
-const helpers = @import("helpers.zig");
-const HostBuffer = @import("hostbuffer.zig").HostBuffer;
 const meta = @import("meta.zig");
 const mlirx = @import("mlirx.zig");
-const module = @import("module.zig");
-const CompilationContext = module.CompilationContext;
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
-const ShapeOf = @import("tensor.zig").ShapeOf;
 const Tensor = @import("tensor.zig").Tensor;
 
 const EnumLiteral = @TypeOf(.enum_literal);
