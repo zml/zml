@@ -250,11 +250,11 @@ pub const BaseExe = struct {
             std.debug.panic("PJRT_LoadedExecutable_Execute failed with: {}", .{err});
         };
 
-        for (events[0..sharding.num_partitions]) |e| {
-            if (e) |ev| {
-                ev.await_(self.platform.pjrt_api) catch unreachable;
-            }
-        }
+        // for (events[0..sharding.num_partitions]) |e| {
+        //     if (e) |ev| {
+        //         ev.await_(self.platform.pjrt_api) catch unreachable;
+        //     }
+        // }
     }
 
     pub fn _unsafeAssignResults(self: BaseExe, T: type, result: *T) void {
@@ -330,7 +330,7 @@ pub const BaseExe = struct {
 
     pub fn clone(self: BaseExe, parent_allocator: std.mem.Allocator) !BaseExe {
         var exe: BaseExe = try .init(parent_allocator, self.platform, self.exe, .{
-            .n_in = self.input_buffer_count,
+            .input_shapes = self.input_shapes,
             .result_shapes = self.result_shapes,
             .n_devices = self.num_devices,
         });
