@@ -1,3 +1,4 @@
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 load("@zml//bazel:zig.bzl", "zig_cc_binary")
 
 zig_cc_binary(
@@ -24,6 +25,9 @@ cc_binary(
         "@ModernBERT-base//:model.safetensors",
         "@ModernBERT-base//:tokenizer",
     ],
+    tags = [
+        "manual",
+    ],
     deps = [":modernbert_lib"],
 )
 
@@ -39,6 +43,9 @@ cc_binary(
         "@ModernBERT-large//:model.safetensors",
         "@ModernBERT-large//:tokenizer",
     ],
+    tags = [
+        "manual",
+    ],
     deps = [":modernbert_lib"],
 )
 
@@ -53,7 +60,7 @@ zig_cc_binary(
     ],
     main = "test.zig",
     tags = [
-        "no_ci",
+        "manual",
     ],
     deps = [
         "@com_github_hejsil_clap//:clap",

@@ -7,27 +7,23 @@ on:
     - '*'
   pull_request:
 
-env:
-  USE_REMOTE_CACHE: 'false'
-  ZIG_VERSION: 0.14.0
-  BAZELISK_VERSION: 1.25.0
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ !contains(github.ref, 'master')}}
 
 jobs:
   test:
-    runs-on: ["runs-on","runner=4cpu-linux-x64", "image=ubuntu24-amd64", "run-id=${{ github.run_id }}"]
+    runs-on: ["runs-on","runner=4cpu-linux-x64", "image=ubuntu24-amd64", "run-id=${{ github.run_id }}", "extras=s3-cache"]
     steps:
+      - uses: runs-on/action@v1
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Zig
-        uses: goto-bus-stop/setup-zig@v2
+        uses: mlugg/setup-zig@v2
         with:
-          version: ${{ env.ZIG_VERSION }}
-          cache: ${{ env.USE_REMOTE_CACHE }}
+          version: 0.14.1
+          mirror: https://mirror.zml.ai/zig
 
       - name: Zig Format
         run: zig fmt --check  $(git ls-files --exclude-standard -- '*.zig' | xargs)
@@ -35,16 +31,20 @@ jobs:
       - name: No autofix in Zig code
         run: bash -c "! git grep -l '// autofix' -- '*.zig'"
 
-      - name: Setup bin directory
-        run: |
-          mkdir -p $HOME/bin
-          echo "$HOME/bin" >> $GITHUB_PATH
-
-      - name: Setup Bazel
-        run: |
-          wget https://github.com/bazelbuild/bazelisk/releases/download/v1.19.0/bazelisk-linux-amd64
-          chmod +x bazelisk-linux-amd64
-          mv bazelisk-linux-amd64 $HOME/bin/bazel
+      - uses: bazel-contrib/setup-bazel@0.15.0
+        with:
+          bazelisk-version: 1.26.0
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}
+          repository-cache: true
+          external-cache: true
+          bazelrc: |
+            common --config=debug
+            common --verbose_failures
+            common --keep_going
+            common --test_output=streamed
+            common --color=yes
+            common --show_timestamps
 
       - name: ZML / bazel mod explain
         run: bazel mod explain
@@ -56,10 +56,10 @@ jobs:
         run: bazel query //...
 
       - name: ZML / bazel build //...
-        run: bazel build --config=debug --verbose_failures //...
+        run: bazel build //...
 
       - name: ZML / bazel test //...
-        run: bazel test --config=debug --verbose_failures --keep_going --test_output=streamed --test_tag_filters=-no_ci //...
+        run: bazel test //...
 
       - name: Examples / bazel mod explain
         working-directory: examples/
@@ -75,9 +75,9 @@ jobs:
 
       - name: Examples / bazel build //...
         working-directory: examples/
-        run: bazel build --config=debug --verbose_failures --build_tag_filters=-no_ci //...
+        run: bazel build //...
 
       # Todo: uncomment when we have our first tests in examples, Bazel return code is not 0 if there are no tests
       # - name: Examples / bazel test //...
       #   working-directory: examples/
-      #   run: bazel test --config=debug --verbose_failures --keep_going --test_output=streamed --build_tag_filters=-no_ci --test_tag_filters=-no_ci //...
+      #   run: bazel test //...
