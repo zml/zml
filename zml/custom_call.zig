@@ -1,25 +1,25 @@
 const std = @import("std");
 
 const asynk = @import("async");
+const mlir = @import("mlir");
+const pjrt = @import("pjrt");
 const stdx = @import("stdx");
 
-const dialect = struct {
-    const stablehlo = @import("mlir/dialects").stablehlo;
-};
-const mlir = @import("mlir");
+const Buffer = @import("buffer.zig").Buffer;
+const CompilationContext = @import("module.zig").CompilationContext;
+const cuda = @import("context.zig").cuda;
+const DataType = @import("dtype.zig").DataType;
+const HostBuffer = @import("hostbuffer.zig").HostBuffer;
 const mlirx = @import("mlirx.zig");
-const pjrt = @import("pjrt");
 const pjrtx = @import("pjrtx.zig");
 const ffi = pjrtx.ffi;
-const cuda = @import("context.zig").cuda;
-const Buffer = @import("buffer.zig").Buffer;
-const HostBuffer = @import("hostbuffer.zig").HostBuffer;
-const CompilationContext = @import("module.zig").CompilationContext;
-const DataType = @import("dtype.zig").DataType;
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
 const Tensor = @import("tensor.zig").Tensor;
 
+const dialect = struct {
+    const stablehlo = @import("mlir/dialects").stablehlo;
+};
 const log = std.log.scoped(.@"zml/custom_call");
 
 pub const std_options: std.Options = .{
