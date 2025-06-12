@@ -4,6 +4,9 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const test_step = b.step("test", "Run unit tests");
+
+    // MLIR
     const mlir_c_deps = moduleFromBazelSrcs(
         b,
         "//mlir:sources",
@@ -23,11 +26,30 @@ pub fn build(b: *std.Build) void {
     });
 
     const mlir_test = b.addTest(.{ .root_module = mlir_mod });
-
     const run_mlir_tests = b.addRunArtifact(mlir_test);
-
-    const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_mlir_tests.step);
+
+    // PJRT
+    const pjrt_c_deps = moduleFromBazelSrcs(
+        b,
+        "//pjrt:sources",
+        "pjrt/sources.tar",
+        "pjrt/test_test_lib_c.zig",
+        .{ .link_libcpp = true },
+    );
+
+    const pjrt_mod = b.addModule("pjrt", .{
+        .root_source_file = b.path("pjrt/pjrt.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "c", .module = pjrt_c_deps },
+        },
+    });
+
+    const pjrt_test = b.addTest(.{ .root_module = pjrt_mod });
+    const run_pjrt_tests = b.addRunArtifact(pjrt_test);
+    test_step.dependOn(&run_pjrt_tests.step);
 }
 
 /// Take the name of a Bazel `cc_static_library` and add it to the given module.
@@ -36,6 +58,7 @@ fn addObjectFromBazel(module: *std.Build.Module, name: []const u8, output: []con
     // TODO: consider parsing bazel name to generate output name.
     const cmd = b.addSystemCommand(&.{ "bazel", "build", "-c", "opt", name });
     const obj = b.path(b.pathJoin(&.{ "bazel-bin", output }));
+    // TODO: fix me this isn't working ! The dep is not added.
     obj.addStepDependencies(&cmd.step);
     module.addObjectFile(obj);
 }
@@ -50,6 +73,7 @@ fn moduleFromBazelSrcs(
     // TODO: consider parsing bazel name to generate output name.
     const bazel_cmd = b.addSystemCommand(&.{ "bazel", "build", name });
     const srcs_tar = b.path(b.pathJoin(&.{ "bazel-bin", output }));
+    // TODO: fix me this isn't working ! The dep is not added.
     srcs_tar.addStepDependencies(&bazel_cmd.step);
 
     const tar_cmd = b.addSystemCommand(&.{ "tar", "-xf" });
