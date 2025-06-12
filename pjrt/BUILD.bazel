@@ -1,6 +1,8 @@
 load("@rules_cc//cc:defs.bzl", "cc_library")
 load("@rules_zig//zig:defs.bzl", "zig_library")
-load("@zml//bazel:zig.bzl", "zig_cc_binary")
+load("@aspect_bazel_lib//lib:tar.bzl", "mtree_spec", "tar")
+
+load("@zml//bazel:zig.bzl", "zig_cc_binary", "zig_cc_test")
 load("//bazel:zig_proto_library.bzl", "zig_proto_library")
 
 cc_library(
@@ -36,6 +38,29 @@ zig_library(
         "@platforms//os:linux": [":dlfcn"],
         "//conditions:default": [],
     }),
+)
+
+zig_cc_test(
+    name = "test",
+    deps = [":pjrt"],
+)
+
+filegroup(
+    name = "srcs",
+    srcs = [":test_test_lib"],
+    output_group = "srcs",
+)
+
+mtree_spec(
+    name = "mtree",
+    srcs = [":srcs"],
+)
+
+tar(
+    name = "sources",
+    srcs = [":srcs"],
+    args = [],
+    mtree = ":mtree",
 )
 
 zig_proto_library(
