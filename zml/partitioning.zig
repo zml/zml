@@ -191,8 +191,13 @@ pub const DeviceShard = struct {
 
         // Row-major: first axis is outermost, last axis is innermost
         for (0..self.topology.rank()) |dim| {
-            offset_ += self.indices.dims()[dim] * stride;
-            stride *= self.topology.dim(dim);
+            const mesh_axis = self.shape.partition(dim);
+            if (mesh_axis == Shape.TagUnknown) {
+                offset_ = offset_;
+            } else {
+                offset_ += self.indices.dims()[dim] * stride;
+                stride *= self.topology.dim(dim);
+            }
         }
 
         offset_ = offset_ * shard_elems * element_size;
@@ -358,13 +363,7 @@ test Sharding {
         var iter = sharding_fully_partitioned.iterator(env(.{ .cpu = .{ .cpu_device_count = mesh.numRequiredDevices() } }));
 
         while (iter.next()) |device_shard| {
-            std.debug.print("{}\n", .{device_shard});
-        }
-
-        std.debug.print("same with topology mesh:\n", .{});
-        var iter_mesh = mesh.iterator();
-        while (iter_mesh.next()) |i| {
-            std.debug.print("{}\n", .{i});
+            std.debug.print("Fully partitioned >> {}\n", .{device_shard});
         }
         // var device_shard = iter.next().?;
         // std.debug.print("Device shard: {}\n", .{device_shard});
@@ -390,6 +389,12 @@ test Sharding {
         try std.testing.expect(sharding_partially_partitioned.getType() == .manual);
         try std.testing.expect(sharding_partially_partitioned.shard().eql(Shape.init(.{ .m = 4, .k = 2 }, .f16)));
         try std.testing.expectEqualStrings(sharding_partially_partitioned.shardingString(), "{devices=[1,3]<=[6]}");
+
+        var iter = sharding_partially_partitioned.iterator(env(.{ .cpu = .{ .cpu_device_count = mesh.numRequiredDevices() } }));
+
+        while (iter.next()) |device_shard| {
+            std.debug.print("Partially partitioned >> {}\n", .{device_shard});
+        }
     }
 
     {
@@ -399,6 +404,12 @@ test Sharding {
         try std.testing.expect(sharding_replicated.getType() == .replicated);
         try std.testing.expect(sharding_replicated.shard().eql(shape_replicated));
         try std.testing.expectEqualStrings(sharding_replicated.shardingString(), "{replicated}");
+
+        var iter = sharding_replicated.iterator(env(.{ .cpu = .{ .cpu_device_count = mesh.numRequiredDevices() } }));
+
+        while (iter.next()) |device_shard| {
+            std.debug.print("Replicated >> {}\n", .{device_shard});
+        }
     }
 }
 
