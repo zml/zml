@@ -37,6 +37,7 @@ pub const call = ops.call;
 pub const compile = exe.compile;
 pub const compileFn = exe.compileFn;
 pub const compileModel = exe.compileModel;
+pub const compileWithPrefix = exe.compileWithPrefix;
 pub const FnExe = exe.FnExe;
 pub const ModuleExe = exe.ModuleExe;
 pub const ModuleSignature = exe.ModuleSignature;
