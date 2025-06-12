@@ -71,7 +71,7 @@ pub const Buffer = struct {
                 .data = shard.data(data).ptr,
                 .buffer_type = bufferTypeFromDtype(shard.shard.dtype()),
                 .dims = shard.shard.dims(),
-                .byte_strides = shard.strides.constSlice(),
+                .byte_strides = shard.strides,
                 .device = shard.device,
                 .host_buffer_semantics = .ImmutableUntilTransferCompletes,
             };
