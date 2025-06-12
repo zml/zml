@@ -18,72 +18,38 @@ test {
 pub const MaxMeshSize: u8 = 64;
 pub const MaxMeshAxes: u8 = 8;
 
-pub const TopologyIterator = struct {
+pub const TopologyIndicesIterator = struct {
+    index: i64 = 0,
+    len: i64,
     topology: Shape,
     indices: Shape,
 
-    pub fn next(self: *TopologyIterator) ?Shape {
-        if (self.isComplete()) {
-            return null;
-        }
+    pub fn next(self: *TopologyIndicesIterator) ?Shape {
+        if (self.index >= self.len) return null;
 
         defer {
-            self.indices = advanceBig(self.indices, self.topology);
-            // self.advance();
+            self.index += 1;
+            self.computeNextIndices();
         }
 
         return self.indices;
     }
 
-    fn advance2(indices: Shape, topology: Shape) Shape {
-        var new_indices = indices;
+    fn computeNextIndices(self: *TopologyIndicesIterator) void {
+        var next_indices = self.indices;
 
-        // Start from the rightmost dimension (least significant in row-major order)
-        var dim: usize = 0;
-        while (dim < topology.rank()) : (dim += 1) {
-            const current_value = new_indices.dim(dim);
-            if (current_value < topology.dim(dim) - 1) {
-                // If we can increment this dimension, do so and we're done
-                return new_indices.setDim(dim, current_value + 1);
-            } else {
-                // Reset this dimension to 0 and carry over to next dimension
-                new_indices = new_indices.setDim(dim, 0);
-            }
-        }
-
-        return new_indices;
-    }
-
-    fn advance(self: *TopologyIterator) void {
-        var new_indices = self.indices;
-
-        // Start from the rightmost dimension (least significant in row-major order)
         var dim: usize = 0;
         while (dim < self.topology.rank()) : (dim += 1) {
-            const current_value = new_indices.dim(dim);
+            const current_value = next_indices.dim(dim);
             if (current_value < self.topology.dim(dim) - 1) {
-                // If we can increment this dimension, do so and we're done
-                self.indices = new_indices.setDim(dim, current_value + 1);
+                self.indices = next_indices.setDim(dim, current_value + 1);
                 return;
             } else {
-                // Reset this dimension to 0 and carry over to next dimension
-                new_indices = new_indices.setDim(dim, 0);
+                next_indices = next_indices.setDim(dim, 0);
             }
         }
 
-        self.indices = new_indices;
-    }
-
-    fn isComplete(self: TopologyIterator) bool {
-        for (0..self.topology.rank()) |dim| {
-            if (self.indices.dim(dim) != self.topology.dim(dim) - 1) {
-                return false;
-            }
-        }
-
-        std.debug.print("TopologyIterator is complete: {} {}\n", .{ self.indices, self.topology });
-
-        return true;
+        self.indices = next_indices;
     }
 };
 
@@ -122,14 +88,18 @@ pub const Mesh = struct {
         return self.numPartitions() == 1;
     }
 
-    pub fn iterator(self: Mesh) TopologyIterator {
+    pub fn iterator(self: Mesh) TopologyIndicesIterator {
         var indices = self.topology;
 
         for (0..indices.rank()) |dim| {
             indices = indices.setDim(dim, 0);
         }
 
-        return .{ .topology = self.topology, .indices = indices };
+        return .{
+            .len = self.numPartitions(),
+            .topology = self.topology,
+            .indices = indices,
+        };
     }
 
     pub fn numPartitions(self: Mesh) i64 {
@@ -199,10 +169,12 @@ test Mesh {
 
 pub const DeviceShard = struct {
     index: i64,
+    len: i64,
     shape: Shape,
     strides: []const i64,
     shard: Shape,
     indices: Shape,
+    topology: Shape,
     device: *const Device,
 
     pub fn data(self: DeviceShard, slice: []const u8) []const u8 {
@@ -210,21 +182,21 @@ pub const DeviceShard = struct {
     }
 
     pub fn offset(self: DeviceShard) i64 {
-        // log.warn(">>> data index: {d} shape: {} strides: {} shard: {} indices: {}", .{ self.index, self.shape, self.strides, self.shard, self.indices });
-        // >>> data index: 0 shape: Shape({m=4096,k=4096/y,f16}) strides: bounded_array.BoundedArrayAligned(i64,8,8){ .buffer = { 8192, 2, 2, 2, 2, 2, 2, 2 }, .len = 2 } shard: Shape({m=4096,k=1024,f16}) indices: Shape({y=0,u8})
+        // Compute offset in row-major order (last axis changes fastest)
+        const element_size: i64 = @intCast(self.shape.dtype().sizeOf());
+        const shard_elems: i64 = @intCast(self.shard.count());
 
         var offset_: i64 = 0;
-        for (0..self.shape.rank()) |dim| {
-            const mesh_axis = self.shape.partition(dim);
-            if (mesh_axis == Shape.TagUnknown) continue;
+        var stride: i64 = 1;
 
-            const mesh_dim = self.shard.dim(dim);
-            const mesh_index = self.indices.dim(mesh_axis);
-            const stride = self.strides[dim];
-
-            offset_ += @intCast(mesh_index * mesh_dim * stride);
+        // Row-major: first axis is outermost, last axis is innermost
+        for (0..self.topology.rank()) |dim| {
+            offset_ += self.indices.dims()[dim] * stride;
+            stride *= self.topology.dim(dim);
         }
-        // log.warn(">>> data offset: {d} index: {d}", .{ offset_, self.index });
+
+        offset_ = offset_ * shard_elems * element_size;
+
         return offset_;
     }
 
@@ -236,49 +208,30 @@ pub const DeviceShard = struct {
     ) !void {
         _ = fmt; // autofix
         _ = options;
-        try writer.print("DeviceShard(index={d} indices={} shard={} shape={} offset={d} device={})", .{ self.index, self.indices, self.shard, self.shape, self.offset(), self.device });
+        try writer.print("DeviceShard(index={d}/{d} topology={} indices={} shard={} ({d}B) shape={} ({d}B) offset={d} device={})", .{ self.index + 1, self.len, self.topology, self.indices, self.shard, self.shard.byteSize(), self.shape, self.shape.byteSize(), self.offset(), self.device });
     }
 };
 
-pub fn advanceBig(indices: Shape, topology: Shape) Shape {
-    var new_indices = indices;
-
-    // Start from the rightmost dimension (least significant in row-major order)
-    var dim: usize = 0;
-    while (dim < topology.rank()) : (dim += 1) {
-        const current_value = new_indices.dim(dim);
-        if (current_value < topology.dim(dim) - 1) {
-            // If we can increment this dimension, do so and we're done
-            return new_indices.setDim(dim, current_value + 1);
-        } else {
-            // Reset this dimension to 0 and carry over to next dimension
-            new_indices = new_indices.setDim(dim, 0);
-        }
-    }
-
-    return new_indices;
-}
-
 pub const DeviceShardIterator = struct {
     index: i64 = 0,
+    len: i64,
     platform: Platform,
+    indices_iterator: TopologyIndicesIterator,
     sharding: Sharding,
-    indices: Shape,
 
     pub fn next(self: *DeviceShardIterator) ?DeviceShard {
         if (self.index >= self.sharding.mesh.numPartitions()) return null;
 
-        defer {
-            self.index += 1;
-            self.indices = advanceBig(self.indices, self.sharding.mesh.topology);
-        }
+        defer self.index += 1;
 
         return .{
             .index = self.index,
+            .len = self.len,
             .shape = self.sharding.shape,
             .strides = self.sharding.strides,
             .shard = self.sharding.shard(),
-            .indices = self.indices,
+            .indices = self.indices_iterator.next().?,
+            .topology = self.sharding.mesh.topology,
             .device = self.platform.getDevices()[@intCast(self.index)],
         };
     }
@@ -340,13 +293,14 @@ pub const Sharding = struct {
     }
 
     pub fn iterator(self: Sharding, platform: Platform) DeviceShardIterator {
-        var indices = self.mesh.topology;
+        const indices_iterator = self.mesh.iterator();
 
-        for (0..indices.rank()) |dim| {
-            indices = indices.setDim(dim, 0);
-        }
-
-        return .{ .platform = platform, .sharding = self, .indices = indices };
+        return .{
+            .len = indices_iterator.len,
+            .platform = platform,
+            .indices_iterator = indices_iterator,
+            .sharding = self,
+        };
     }
 
     pub fn shardingString(self: Sharding) []const u8 {
