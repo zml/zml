@@ -32,7 +32,6 @@ pub fn build(b: *std.Build) void {
         .canonical(b.allocator, "mlir", "test_test_lib_c.zig"),
         .{ .link_libcpp = true },
     );
-    addObjectFromBazel(mlir_c_deps, "//mlir:mlir_static", "mlir/libmlir_static.a");
 
     const mlir = b.addModule("mlir", .{
         .root_source_file = b.path("mlir/mlir.zig"),
@@ -44,6 +43,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const mlir_test = b.addTest(.{ .root_module = mlir });
+    addObjectFromBazel(mlir_test, "//mlir:mlir_static", "mlir/libmlir_static.a");
     const run_mlir_tests = b.addRunArtifact(mlir_test);
     test_step.dependOn(&run_mlir_tests.step);
 
@@ -130,11 +130,69 @@ pub fn build(b: *std.Build) void {
     const ffi_test = b.addTest(.{ .root_module = ffi });
     const run_ffi_tests = b.addRunArtifact(ffi_test);
     test_step.dependOn(&run_ffi_tests.step);
+
+    // hftokenizers
+    const hftokenizers = moduleFromBazelSrcs(
+        b,
+        "//zml/tokenizer/hftokenizers",
+        .fromZml("zml/tokenizer/hftokenizers", "hftokenizers.zig"),
+        .{ .target = target, .optimize = optimize },
+    );
+
+    // sentencepiece
+    const sentencepiece_c_deps = moduleFromBazelSrcs(
+        b,
+        null,
+        .canonical(b.allocator, "zml/tokenizer/sentencepiece", "test_test_lib_c.zig"),
+        .{ .link_libcpp = true },
+    );
+    const sentencepiece = moduleFromBazelSrcs(
+        b,
+        "//zml/tokenizer/sentencepiece",
+        .fromZml("zml/tokenizer/sentencepiece", "sentencepiece.zig"),
+        .{
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "c", .module = sentencepiece_c_deps },
+            },
+        },
+    );
+
+    // tokenizer
+    const tokenizer = moduleFromBazelSrcs(
+        b,
+        "tokenizer",
+        .fromZml("zml/tokenizer", "tokenizer.zig"),
+        .{
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "async", .module = async_mod },
+                .{ .name = "ffi", .module = ffi },
+                // Note: even though we import sentencepiece and hftokenizers,
+                // we don't link the corresponding .a cause there is no tests
+                // for them directly.
+                .{ .name = "hftokenizers", .module = hftokenizers },
+                .{ .name = "sentencepiece", .module = sentencepiece },
+            },
+        },
+    );
+
+    const tokenizer_test = b.addTest(.{ .root_module = tokenizer });
+    const run_tokenizer_tests = b.addRunArtifact(tokenizer_test);
+    test_step.dependOn(&run_tokenizer_tests.step);
 }
 
 /// Take the name of a Bazel `cc_static_library` and add it to the given module.
-fn addObjectFromBazel(module: *std.Build.Module, name: []const u8, output: []const u8) void {
-    const b = module.owner;
+fn addObjectFromBazel(entry: *std.Build.Step.Compile, name: []const u8, output: []const u8) void {
+    // TODO: I'm not sure what's the best idea: add the object to the compile step or directly to the module.
+    const b = switch (@TypeOf(entry)) {
+        *std.Build.Module => entry.owner,
+        *std.Build.Step.Compile => entry.step.owner,
+        else => @compileError("addObjectFromBazel takes a Module or a Compile Step"),
+    };
+
     // TODO: consider parsing bazel name to generate output name.
     const bazel_cmd = b.addSystemCommand(&.{ "bazel", "build", "-c", "opt", name });
     const obj_path = b.pathJoin(&.{ "bazel-bin", output });
@@ -145,7 +203,7 @@ fn addObjectFromBazel(module: *std.Build.Module, name: []const u8, output: []con
     const obj = cp.addCopyFile(b.path(obj_path), output);
 
     // Module depends on the copied object.
-    module.addObjectFile(obj);
+    entry.addObjectFile(obj);
 }
 
 const BazelSrcs = struct {
