@@ -7,7 +7,6 @@ cc_library(
     target_compatible_with = [
         "@platforms//os:macos",
     ],
-    visibility = ["//zml/tools:__subpackages__"],
 )
 
 zig_library(
@@ -21,4 +20,9 @@ zig_library(
         ],
         "//conditions:default": [],
     }),
+)
+
+cc_static_library(
+    name = "macos_static_tools",
+    deps = ["macos_c"]
 )
