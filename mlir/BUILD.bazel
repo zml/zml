@@ -1,7 +1,7 @@
 load("@rules_cc//cc:defs.bzl", "cc_library")
-load("@aspect_bazel_lib//lib:tar.bzl", "mtree_spec", "tar")
 
 load("@rules_zig//zig:defs.bzl", "zig_library")
+load("//bazel:zig_srcs.bzl", "zig_srcs")
 load("//bazel:zig.bzl", "zig_cc_test")
 
 cc_library(
@@ -38,20 +38,7 @@ cc_static_library(
     deps = ["c"]
 )
 
-filegroup(
-    name = "srcs",
-    srcs = [":test_test_lib"],
-    output_group = "srcs",
-)
-
-mtree_spec(
-    name = "mtree",
-    srcs = [":srcs"],
-)
-
-tar(
+zig_srcs(
     name = "sources",
-    srcs = [":srcs"],
-    args = [],
-    mtree = ":mtree",
+    zig_bin = ":test_test_lib",
 )
