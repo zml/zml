@@ -28,3 +28,11 @@ zig_library(
         "//ffi:zig",
     ],
 )
+
+cc_static_library(
+    name="hftokenizer_static",
+    deps = [
+        ":hftokenizers_rs",
+        "//ffi:cc",
+    ]
+)
