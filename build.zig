@@ -101,6 +101,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "c", .module = pjrt_c_deps },
+            .{ .name = "stdx", .module = stdx },
         },
     });
 
@@ -212,6 +213,50 @@ pub fn build(b: *std.Build) void {
     const run_tokenizer_tests = b.addRunArtifact(tokenizer_test);
     test_step.dependOn(&run_tokenizer_tests.step);
 
+    // proto
+    const protobuf = moduleFromBazelSrcs(b, "protobuf", .fromZml("src", "protobuf.zig"), .{});
+    const xla_compile_proto = xla_proto: {
+        const empty: *std.Build.Module = empty: {
+            const write = b.addWriteFiles();
+            const root = write.add("root.zig", "//! empty module");
+            break :empty b.createModule(.{ .root_source_file = root });
+        };
+        const opts: std.Build.Module.CreateOptions = .{ .imports = &.{.{ .name = "protobuf", .module = protobuf }} };
+
+        const duration = moduleFromBazelSrcs(b, null, .fromZml("_virtual_imports/duration_proto/google/protobuf", "duration.pb.zig"), opts);
+        const any = moduleFromBazelSrcs(b, null, .fromZml("_virtual_imports/any_proto/google/protobuf", "any.pb.zig"), opts);
+        const wrappers = moduleFromBazelSrcs(b, null, .fromZml("_virtual_imports/wrappers_proto/google/protobuf", "wrappers.pb.zig"), opts);
+
+        const data = moduleFromBazelSrcs(b, null, .fromZml("xla", "xla_data.pb.zig"), opts);
+        const service_hlo = moduleFromBazelSrcs(b, null, .fromZml("xla/service", "hlo.pb.zig"), opts);
+        const xla = moduleFromBazelSrcs(b, null, .fromZml("xla", "xla.pb.zig"), opts);
+        xla.addImport("google_protobuf_any_proto", any);
+        xla.addImport("xla_xla_data_proto", data);
+        xla.addImport("xla_service_hlo_proto", service_hlo);
+        xla.addImport("xla_autotune_results_proto", empty);
+
+        const tsl_dnn = moduleFromBazelSrcs(b, null, .fromZml("xla/tsl/protobuf", "dnn.pb.zig"), opts);
+        tsl_dnn.addImport("google_protobuf_wrappers_proto", wrappers);
+
+        const autotuning = moduleFromBazelSrcs(b, null, .fromZml("xla", "autotuning.pb.zig"), opts);
+        autotuning.addImport("google_protobuf_duration_proto", duration);
+        autotuning.addImport("xla_tsl_protobuf_dnn_proto", tsl_dnn);
+        const autotune = moduleFromBazelSrcs(b, null, .fromZml("xla", "autotune_results.pb.zig"), opts);
+        autotune.addImport("xla_autotuning_proto", autotuning);
+
+        const stream_executor_cuda_cuda_compute_capability = moduleFromBazelSrcs(b, null, .fromZml("xla/stream_executor/cuda", "cuda_compute_capability.pb.zig"), opts);
+        const stream_executor_device_description = moduleFromBazelSrcs(b, null, .fromZml("xla/stream_executor", "device_description.pb.zig"), opts);
+        stream_executor_device_description.addImport("xla_autotune_results_proto", autotune);
+        stream_executor_device_description.addImport("xla_stream_executor_cuda_cuda_compute_capability_proto", stream_executor_cuda_cuda_compute_capability);
+
+        const compile = moduleFromBazelSrcs(b, null, .fromZml("xla/pjrt/proto", "compile_options.pb.zig"), opts);
+        compile.addImport("xla_xla_proto", xla);
+        compile.addImport("xla_xla_data_proto", data);
+        compile.addImport("xla_stream_executor_device_description_proto", stream_executor_device_description);
+
+        break :xla_proto compile;
+    };
+
     // zml c deps
     const zml_c_deps = moduleFromBazelSrcs(
         b,
@@ -284,6 +329,7 @@ pub fn build(b: *std.Build) void {
             .link_libcpp = true,
             .imports = &.{
                 .{ .name = "c", .module = zml_c_deps },
+                .{ .name = "//xla:xla_proto", .module = xla_compile_proto },
                 .{ .name = "async", .module = async_mod },
                 .{ .name = "mlir", .module = mlir },
                 .{ .name = "mlir/dialects", .module = mlir_dialects },
@@ -340,6 +386,8 @@ const BazelSrcs = struct {
     }
 };
 
+var zml_srcs_tar: ?*std.Build.Step.Run = null;
+
 /// Ask bazel for the full sources of a zig module.
 /// This is needed for module that have generated zig sources,
 /// like the output of zig translate-c or protobuf generated sources.
@@ -349,7 +397,15 @@ fn moduleFromBazelSrcs(
     srcs: BazelSrcs,
     options: std.Build.Module.CreateOptions,
 ) *std.Build.Module {
-    const bazel_cmd = b.addSystemCommand(&.{ "bazel", "build", srcs.target });
+    const bazel_cmd: *std.Build.Step.Run = cmd: {
+        if (std.mem.eql(u8, srcs.target, "//zml:sources")) {
+            if (zml_srcs_tar == null) {
+                zml_srcs_tar = b.addSystemCommand(&.{ "bazel", "build", srcs.target });
+            }
+            break :cmd zml_srcs_tar.?;
+        }
+        break :cmd b.addSystemCommand(&.{ "bazel", "build", srcs.target });
+    };
     const srcs_tar = b.path(b.pathJoin(&.{ "bazel-bin", srcs.tar_path }));
 
     const tar_cmd = b.addSystemCommand(&.{ "tar", "-xf" });
