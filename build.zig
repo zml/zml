@@ -1,6 +1,6 @@
 const std = @import("std");
 
-/// !!! This build.zig is work in progress. !!!
+/// !!! This build.zig is experimental !!!
 ///
 /// It shows how to bridge Bazel and build.zig.
 /// It requires the user to have `bazel` and `tar` installed on their machine.
@@ -18,8 +18,14 @@ const std = @import("std");
 /// * creating "zig modules" visible to other build.zig.
 ///
 /// `zig build test --summary all` will run a lot of tests
-/// `zig build test-zml` will stick to zml test suite
-/// but not yet ZML itself.
+/// `zig build test-zml` will stick to ZML test suite
+///
+/// Caveats:
+///
+/// * requires a local bazel installed and tar utility
+/// * requires to have the CPU pjrt plugin visible in the path when running the executables
+/// you can do so eg by find -L ./bazel-out -name libpjrt_cpu.dylib then cp ./bazel-out/.../libpjt_cpu.dylib .
+/// * only tested with CPU plugins
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
