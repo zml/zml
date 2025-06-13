@@ -265,29 +265,6 @@ const CoroT = struct {
     }
 };
 
-/// Estimates the remaining stack size in the currently running coroutine
-pub noinline fn remainingStackSize() usize {
-    var dummy: usize = 0;
-    dummy += 1;
-    const addr = @intFromPtr(&dummy);
-
-    // Check if the stack was already overflowed
-    const current = xframe();
-    StackOverflow.check(current) catch return 0;
-
-    // Check if the stack is currently overflowed
-    const bottom = @intFromPtr(current.stack.ptr);
-    if (addr < bottom) {
-        return 0;
-    }
-
-    // Debug check that we're actually in the stack
-    const top = @intFromPtr(current.stack.ptr + current.stack.len);
-    std.debug.assert(addr < top); // should never have popped beyond the top
-
-    return addr - bottom;
-}
-
 // ============================================================================
 
 /// Thread-local coroutine runtime
@@ -450,7 +427,9 @@ fn testSetIdx(val: usize) void {
 }
 
 fn testFn() void {
-    std.debug.assert(remainingStackSize() > 2048);
+    // Check if the stack was already overflowed
+    const current = xframe();
+    std.debug.assert(current.stack.remaining().len > 2048);
     testSetIdx(2);
     xsuspend();
     testSetIdx(4);
