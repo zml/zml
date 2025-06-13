@@ -17,7 +17,7 @@ pub fn build(b: *std.Build) void {
     );
     addObjectFromBazel(mlir_c_deps, "//mlir:mlir_static", "mlir/libmlir_static.a");
 
-    const mlir_mod = b.addModule("mlir", .{
+    const mlir = b.addModule("mlir", .{
         .root_source_file = b.path("mlir/mlir.zig"),
         .target = target,
         .optimize = optimize,
@@ -26,7 +26,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    const mlir_test = b.addTest(.{ .root_module = mlir_mod });
+    const mlir_test = b.addTest(.{ .root_module = mlir });
     const run_mlir_tests = b.addRunArtifact(mlir_test);
     test_step.dependOn(&run_mlir_tests.step);
 
@@ -40,7 +40,7 @@ pub fn build(b: *std.Build) void {
         .{ .link_libcpp = true },
     );
 
-    const pjrt_mod = b.addModule("pjrt", .{
+    const pjrt = b.addModule("pjrt", .{
         .root_source_file = b.path("pjrt/pjrt.zig"),
         .target = target,
         .optimize = optimize,
@@ -49,12 +49,12 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    const pjrt_test = b.addTest(.{ .root_module = pjrt_mod });
+    const pjrt_test = b.addTest(.{ .root_module = pjrt });
     const run_pjrt_tests = b.addRunArtifact(pjrt_test);
     test_step.dependOn(&run_pjrt_tests.step);
 
     // stdx
-    const stdx_mod = moduleFromBazelSrcs(
+    const stdx = moduleFromBazelSrcs(
         b,
         "stdx",
         "//stdx:sources",
@@ -66,9 +66,26 @@ pub fn build(b: *std.Build) void {
         },
     );
 
-    const stdx_test = b.addTest(.{ .root_module = stdx_mod });
+    const stdx_test = b.addTest(.{ .root_module = stdx });
     const run_stdx_tests = b.addRunArtifact(stdx_test);
     test_step.dependOn(&run_stdx_tests.step);
+
+    // xev
+    const xev = moduleFromBazelSrcs(
+        b,
+        "xev",
+        "//async:sources",
+        "async/sources.tar",
+        "src/main.zig",
+        .{
+            .target = target,
+            .optimize = optimize,
+        },
+    );
+
+    const xev_test = b.addTest(.{ .root_module = xev });
+    const run_xev_tests = b.addRunArtifact(xev_test);
+    test_step.dependOn(&run_xev_tests.step);
 
     // async
     const async_mod = moduleFromBazelSrcs(
@@ -80,6 +97,10 @@ pub fn build(b: *std.Build) void {
         .{
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "xev", .module = xev },
+                .{ .name = "stdx", .module = stdx },
+            },
         },
     );
 
@@ -92,13 +113,16 @@ pub fn build(b: *std.Build) void {
 fn addObjectFromBazel(module: *std.Build.Module, name: []const u8, output: []const u8) void {
     const b = module.owner;
     // TODO: consider parsing bazel name to generate output name.
-    const cmd = b.addSystemCommand(&.{ "bazel", "build", "-c", "opt", name });
+    const bazel_cmd = b.addSystemCommand(&.{ "bazel", "build", "-c", "opt", name });
     const obj_path = b.pathJoin(&.{ "bazel-bin", output });
-    const generated_file = b.allocator.create(std.Build.GeneratedFile) catch @panic("OOM");
-    generated_file.* = .{ .step = &cmd.step, .path = obj_path };
-    const obj: std.Build.LazyPath = .{ .generated = .{ .file = generated_file } };
 
-    module.link_objects.append(b.allocator, .{ .static_path = obj }) catch @panic("OOM");
+    // Copy bazel output into zig-cache, cause bazel may remove the file later.
+    const cp = b.addWriteFiles();
+    cp.step.dependOn(&bazel_cmd.step);
+    const obj = cp.addCopyFile(b.path(obj_path), output);
+
+    // Module depends on the copied object.
+    module.addObjectFile(obj);
 }
 
 fn moduleFromBazelSrcs(
