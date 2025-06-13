@@ -118,6 +118,18 @@ pub fn build(b: *std.Build) void {
     const async_test = b.addTest(.{ .root_module = async_mod });
     const run_async_tests = b.addRunArtifact(async_test);
     test_step.dependOn(&run_async_tests.step);
+
+    // ffi
+    const ffi = moduleFromBazelSrcs(
+        b,
+        "ffi",
+        .fromZml("ffi", "ffi.zig"),
+        .{ .target = target, .optimize = optimize },
+    );
+
+    const ffi_test = b.addTest(.{ .root_module = ffi });
+    const run_ffi_tests = b.addRunArtifact(ffi_test);
+    test_step.dependOn(&run_ffi_tests.step);
 }
 
 /// Take the name of a Bazel `cc_static_library` and add it to the given module.
@@ -146,6 +158,15 @@ const BazelSrcs = struct {
         return .{
             .target = std.mem.concat(allocator, u8, &.{ "//", name, ":sources" }) catch @panic("OOM"),
             .tar_path = std.fs.path.join(allocator, &.{ name, "sources.tar" }) catch @panic("OOM"),
+            .directory = name,
+            .root = root,
+        };
+    }
+
+    pub fn fromZml(name: []const u8, root: []const u8) BazelSrcs {
+        return .{
+            .target = "//zml:sources",
+            .tar_path = "zml/sources.tar",
             .directory = name,
             .root = root,
         };
