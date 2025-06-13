@@ -15,7 +15,7 @@ pub fn build(b: *std.Build) void {
         "mlir/test_test_lib_c.zig",
         .{ .link_libcpp = true },
     );
-    addObjectFromBazel(mlir_c_deps, "//mlir:static_c", "mlir/libstatic_c.a");
+    addObjectFromBazel(mlir_c_deps, "//mlir:mlir_static", "mlir/libmlir_static.a");
 
     const mlir_mod = b.addModule("mlir", .{
         .root_source_file = b.path("mlir/mlir.zig"),
@@ -69,6 +69,23 @@ pub fn build(b: *std.Build) void {
     const stdx_test = b.addTest(.{ .root_module = stdx_mod });
     const run_stdx_tests = b.addRunArtifact(stdx_test);
     test_step.dependOn(&run_stdx_tests.step);
+
+    // async
+    const async_mod = moduleFromBazelSrcs(
+        b,
+        "async",
+        "//async:sources",
+        "async/sources.tar",
+        "async/async.zig",
+        .{
+            .target = target,
+            .optimize = optimize,
+        },
+    );
+
+    const async_test = b.addTest(.{ .root_module = async_mod });
+    const run_async_tests = b.addRunArtifact(async_test);
+    test_step.dependOn(&run_async_tests.step);
 }
 
 /// Take the name of a Bazel `cc_static_library` and add it to the given module.
@@ -76,10 +93,12 @@ fn addObjectFromBazel(module: *std.Build.Module, name: []const u8, output: []con
     const b = module.owner;
     // TODO: consider parsing bazel name to generate output name.
     const cmd = b.addSystemCommand(&.{ "bazel", "build", "-c", "opt", name });
-    const obj = b.path(b.pathJoin(&.{ "bazel-bin", output }));
-    // TODO: fix me this isn't working ! The dep is not added.
-    obj.addStepDependencies(&cmd.step);
-    module.addObjectFile(obj);
+    const obj_path = b.pathJoin(&.{ "bazel-bin", output });
+    const generated_file = b.allocator.create(std.Build.GeneratedFile) catch @panic("OOM");
+    generated_file.* = .{ .step = &cmd.step, .path = obj_path };
+    const obj: std.Build.LazyPath = .{ .generated = .{ .file = generated_file } };
+
+    module.link_objects.append(b.allocator, .{ .static_path = obj }) catch @panic("OOM");
 }
 
 fn moduleFromBazelSrcs(
@@ -93,10 +112,9 @@ fn moduleFromBazelSrcs(
     // TODO: consider parsing bazel name to generate output name.
     const bazel_cmd = b.addSystemCommand(&.{ "bazel", "build", sources_target });
     const srcs_tar = b.path(b.pathJoin(&.{ "bazel-bin", sources_tar_path }));
-    // TODO: fix me this isn't working ! The dep is not added.
-    srcs_tar.addStepDependencies(&bazel_cmd.step);
 
     const tar_cmd = b.addSystemCommand(&.{ "tar", "-xf" });
+    tar_cmd.step.dependOn(&bazel_cmd.step);
     tar_cmd.addFileArg(srcs_tar);
     tar_cmd.addArg("-C");
     const out_dir = tar_cmd.addOutputDirectoryArg("untarred_sources");
