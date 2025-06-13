@@ -51,6 +51,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "c", .module = mlir_c_deps },
+            .{ .name = "stdx", .module = stdx },
         },
     });
 
@@ -210,6 +211,95 @@ pub fn build(b: *std.Build) void {
     const tokenizer_test = b.addTest(.{ .root_module = tokenizer });
     const run_tokenizer_tests = b.addRunArtifact(tokenizer_test);
     test_step.dependOn(&run_tokenizer_tests.step);
+
+    // zml c deps
+    const zml_c_deps = moduleFromBazelSrcs(
+        b,
+        null,
+        .fromZml("zml", "test_test_lib_c.zig"),
+        .{ .link_libcpp = true },
+    );
+
+    // runfiles
+    const runfiles = moduleFromBazelSrcs(
+        b,
+        "runfiles",
+        .fromZml("zig/runfiles", "runfiles.zig"),
+        .{},
+    );
+
+    // runtimes
+    const runtimes = moduleFromBazelSrcs(
+        b,
+        "runtimes",
+        .fromZml("runtimes", "runtimes.zig"),
+        .{
+            .imports = &.{
+                .{ .name = "c", .module = zml_c_deps },
+                .{ .name = "pjrt", .module = pjrt },
+            },
+        },
+    );
+    const PLATFORMS = [_][]const u8{ "cpu", "cuda", "rocm", "tpu", "neuron" };
+
+    for (&PLATFORMS) |platform| {
+        const runtime_path = b.pathJoin(&.{ "runtimes", platform });
+        const zig_file = std.mem.concat(b.allocator, u8, &.{ platform, ".zig" }) catch @panic("OOM");
+        const platform_runtime = moduleFromBazelSrcs(
+            b,
+            runtime_path,
+            .fromZml(runtime_path, zig_file),
+            .{
+                .imports = &.{
+                    .{ .name = "c", .module = zml_c_deps },
+                    .{ .name = "runfiles", .module = runfiles },
+                    .{ .name = "pjrt", .module = pjrt },
+                    .{ .name = "async", .module = async_mod },
+                },
+            },
+        );
+        const import_name = std.mem.concat(b.allocator, u8, &.{ "runtimes/", platform }) catch @panic("OOM");
+        runtimes.addImport(import_name, platform_runtime);
+    }
+
+    // zml/tools
+    const zml_tools = moduleFromBazelSrcs(
+        b,
+        "zml/tools",
+        .fromZml("zml/tools", "tools.zig"),
+        .{
+            .link_libcpp = target.query.os_tag == .macos,
+            .imports = &.{.{ .name = "c", .module = zml_c_deps }},
+        },
+    );
+
+    // zml
+    const zml = moduleFromBazelSrcs(
+        b,
+        "zml",
+        .fromZml("zml", "zml.zig"),
+        .{
+            .target = target,
+            .optimize = optimize,
+            .link_libcpp = true,
+            .imports = &.{
+                .{ .name = "c", .module = zml_c_deps },
+                .{ .name = "async", .module = async_mod },
+                .{ .name = "mlir", .module = mlir },
+                .{ .name = "mlir/dialects", .module = mlir_dialects },
+                .{ .name = "pjrt", .module = pjrt },
+                .{ .name = "runtimes", .module = runtimes },
+                .{ .name = "stdx", .module = stdx },
+                .{ .name = "zml/tokenizer", .module = tokenizer },
+                .{ .name = "zml/tools", .module = zml_tools },
+                .{ .name = "runfiles", .module = runfiles },
+            },
+        },
+    );
+    const zml_test = b.addTest(.{ .root_module = zml });
+    const run_zml_tests = b.addRunArtifact(zml_test);
+    const zml_test_step = b.step("test-zml", "Run ZML tests (broken)");
+    zml_test_step.dependOn(&run_zml_tests.step);
 }
 
 /// Take the name of a Bazel `cc_static_library` and create a object LazyPath from it.
