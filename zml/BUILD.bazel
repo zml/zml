@@ -25,7 +25,6 @@ zig_library(
     visibility = ["//visibility:public"],
     deps = [
         ":posix",
-        ":sentencepiece_model_proto",
         ":xla_proto",
         "//async",
         "//mlir",
@@ -45,11 +44,6 @@ zig_proto_library(
     deps = ["@xla//xla/pjrt/proto:compile_options_proto"],
 )
 
-zig_proto_library(
-    name = "sentencepiece_model_proto",
-    import_name = "//sentencepiece:model_proto",
-    deps = ["@sentencepiece//:sentencepiece_model_proto"],
-)
 
 # All ZML Tests
 
