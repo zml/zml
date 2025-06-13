@@ -6,9 +6,10 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run unit tests");
 
-    // MLIR
+    // mlir
     const mlir_c_deps = moduleFromBazelSrcs(
         b,
+        null,
         "//mlir:sources",
         "mlir/sources.tar",
         "mlir/test_test_lib_c.zig",
@@ -29,9 +30,10 @@ pub fn build(b: *std.Build) void {
     const run_mlir_tests = b.addRunArtifact(mlir_test);
     test_step.dependOn(&run_mlir_tests.step);
 
-    // PJRT
+    // pjrt
     const pjrt_c_deps = moduleFromBazelSrcs(
         b,
+        null,
         "//pjrt:sources",
         "pjrt/sources.tar",
         "pjrt/test_test_lib_c.zig",
@@ -50,6 +52,23 @@ pub fn build(b: *std.Build) void {
     const pjrt_test = b.addTest(.{ .root_module = pjrt_mod });
     const run_pjrt_tests = b.addRunArtifact(pjrt_test);
     test_step.dependOn(&run_pjrt_tests.step);
+
+    // stdx
+    const stdx_mod = moduleFromBazelSrcs(
+        b,
+        "stdx",
+        "//stdx:sources",
+        "stdx/sources.tar",
+        "stdx/stdx.zig",
+        .{
+            .target = target,
+            .optimize = optimize,
+        },
+    );
+
+    const stdx_test = b.addTest(.{ .root_module = stdx_mod });
+    const run_stdx_tests = b.addRunArtifact(stdx_test);
+    test_step.dependOn(&run_stdx_tests.step);
 }
 
 /// Take the name of a Bazel `cc_static_library` and add it to the given module.
@@ -65,14 +84,15 @@ fn addObjectFromBazel(module: *std.Build.Module, name: []const u8, output: []con
 
 fn moduleFromBazelSrcs(
     b: *std.Build,
-    name: []const u8,
-    output: []const u8,
+    module_name: ?[]const u8,
+    sources_target: []const u8,
+    sources_tar_path: []const u8,
     root: []const u8,
     options: std.Build.Module.CreateOptions,
 ) *std.Build.Module {
     // TODO: consider parsing bazel name to generate output name.
-    const bazel_cmd = b.addSystemCommand(&.{ "bazel", "build", name });
-    const srcs_tar = b.path(b.pathJoin(&.{ "bazel-bin", output }));
+    const bazel_cmd = b.addSystemCommand(&.{ "bazel", "build", sources_target });
+    const srcs_tar = b.path(b.pathJoin(&.{ "bazel-bin", sources_tar_path }));
     // TODO: fix me this isn't working ! The dep is not added.
     srcs_tar.addStepDependencies(&bazel_cmd.step);
 
@@ -84,5 +104,8 @@ fn moduleFromBazelSrcs(
     var opts = options;
     if (opts.root_source_file != null) @panic("moduleFromBazelSrcs is already setting the root_source_file option");
     opts.root_source_file = out_dir.path(b, root);
-    return b.addModule(name, opts);
+    return if (module_name) |name|
+        b.addModule(name, opts)
+    else
+        b.createModule(opts);
 }
