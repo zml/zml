@@ -317,6 +317,10 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "c", .module = zml_c_deps }},
         },
     );
+    const macos_tools_obj = objectFromBazel(b, "//zml/tools:macos_static_tools", "zml/tools/libmacos_static_tools.a");
+    if (target.result.os.tag == .macos) {
+        zml_tools.addObjectFile(macos_tools_obj);
+    }
 
     // zml
     const zml = moduleFromBazelSrcs(
