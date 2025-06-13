@@ -25,13 +25,25 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run unit tests");
 
+    // stdx
+    const stdx = b.addModule("stdx", .{
+        .root_source_file = b.path("stdx/stdx.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const stdx_test = b.addTest(.{ .root_module = stdx });
+    const run_stdx_tests = b.addRunArtifact(stdx_test);
+    test_step.dependOn(&run_stdx_tests.step);
+
     // mlir
     const mlir_c_deps = moduleFromBazelSrcs(
         b,
         null,
-        .canonical(b.allocator, "mlir", "test_test_lib_c.zig"),
+        .canonical(b.allocator, "mlir/dialects", "test_test_lib_c.zig"),
         .{ .link_libcpp = true },
     );
+    const mlir_obj = objectFromBazel(b, "//mlir/dialects:mlir_static", "mlir/dialects/libmlir_static.a");
 
     const mlir = b.addModule("mlir", .{
         .root_source_file = b.path("mlir/mlir.zig"),
@@ -43,9 +55,36 @@ pub fn build(b: *std.Build) void {
     });
 
     const mlir_test = b.addTest(.{ .root_module = mlir });
-    addObjectFromBazel(mlir_test, "//mlir:mlir_static", "mlir/libmlir_static.a");
+    // TODO: I'm not sure what's the best idea: add the object to the compile step or directly to the module.
+    mlir_test.addObjectFile(mlir_obj);
     const run_mlir_tests = b.addRunArtifact(mlir_test);
     test_step.dependOn(&run_mlir_tests.step);
+
+    const stablehlo = b.addModule("mlir/dialects/stablehlo", .{
+        .root_source_file = b.path("mlir/dialects/stablehlo.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "c", .module = mlir_c_deps },
+            .{ .name = "mlir", .module = mlir },
+            .{ .name = "stdx", .module = stdx },
+        },
+    });
+
+    const mlir_dialects = b.addModule("mlir/dialects", .{
+        .root_source_file = b.path("mlir/dialects/dialects.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "mlir", .module = mlir },
+            .{ .name = "mlir/dialects/stablehlo", .module = stablehlo },
+        },
+    });
+
+    const mlir_dialects_test = b.addTest(.{ .root_module = mlir_dialects });
+    mlir_dialects_test.addObjectFile(mlir_obj);
+    const run_mlir_dialects_tests = b.addRunArtifact(mlir_dialects_test);
+    test_step.dependOn(&run_mlir_dialects_tests.step);
 
     // pjrt
     const pjrt_c_deps = moduleFromBazelSrcs(
@@ -67,17 +106,6 @@ pub fn build(b: *std.Build) void {
     const pjrt_test = b.addTest(.{ .root_module = pjrt });
     const run_pjrt_tests = b.addRunArtifact(pjrt_test);
     test_step.dependOn(&run_pjrt_tests.step);
-
-    // stdx
-    const stdx = b.addModule("stdx", .{
-        .root_source_file = b.path("stdx/stdx.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const stdx_test = b.addTest(.{ .root_module = stdx });
-    const run_stdx_tests = b.addRunArtifact(stdx_test);
-    test_step.dependOn(&run_stdx_tests.step);
 
     // xev
     const xev = moduleFromBazelSrcs(
@@ -184,26 +212,17 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_tokenizer_tests.step);
 }
 
-/// Take the name of a Bazel `cc_static_library` and add it to the given module.
-fn addObjectFromBazel(entry: *std.Build.Step.Compile, name: []const u8, output: []const u8) void {
-    // TODO: I'm not sure what's the best idea: add the object to the compile step or directly to the module.
-    const b = switch (@TypeOf(entry)) {
-        *std.Build.Module => entry.owner,
-        *std.Build.Step.Compile => entry.step.owner,
-        else => @compileError("addObjectFromBazel takes a Module or a Compile Step"),
-    };
-
-    // TODO: consider parsing bazel name to generate output name.
-    const bazel_cmd = b.addSystemCommand(&.{ "bazel", "build", "-c", "opt", name });
+/// Take the name of a Bazel `cc_static_library` and create a object LazyPath from it.
+/// The object need to be added to a Compile step with `step.addObjectFile(obj)`.
+fn objectFromBazel(b: *std.Build, target: []const u8, output: []const u8) std.Build.LazyPath {
+    // TODO: consider parsing bazel target to generate output path.
+    const bazel_cmd = b.addSystemCommand(&.{ "bazel", "build", "-c", "opt", target });
     const obj_path = b.pathJoin(&.{ "bazel-bin", output });
 
     // Copy bazel output into zig-cache, cause bazel may remove the file later.
     const cp = b.addWriteFiles();
     cp.step.dependOn(&bazel_cmd.step);
-    const obj = cp.addCopyFile(b.path(obj_path), output);
-
-    // Module depends on the copied object.
-    entry.addObjectFile(obj);
+    return cp.addCopyFile(b.path(obj_path), output);
 }
 
 const BazelSrcs = struct {
