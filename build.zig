@@ -1,5 +1,24 @@
 const std = @import("std");
 
+/// !!! This build.zig is work in progress. !!!
+///
+/// It shows how to bridge Bazel and build.zig.
+/// It requires the user to have `bazel` and `tar` installed on their machine.
+///
+/// Bazel is used to:
+///
+/// * compile C and C++ deps into .a files.
+/// * call zig-translate C
+/// * generating Zig files
+/// * tarring Zig sources
+///
+/// build.zig finishes the work by:
+/// * untarring Zig sources
+/// * copying .a files into zig-cache
+/// * creating "zig modules" visible to other build.zig.
+///
+/// `zig build test --summary all` will run tests for several ZML deps,
+/// but not yet ZML itself.
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -10,9 +29,7 @@ pub fn build(b: *std.Build) void {
     const mlir_c_deps = moduleFromBazelSrcs(
         b,
         null,
-        "//mlir:sources",
-        "mlir/sources.tar",
-        "mlir/test_test_lib_c.zig",
+        .canonical(b.allocator, "mlir", "test_test_lib_c.zig"),
         .{ .link_libcpp = true },
     );
     addObjectFromBazel(mlir_c_deps, "//mlir:mlir_static", "mlir/libmlir_static.a");
@@ -34,9 +51,7 @@ pub fn build(b: *std.Build) void {
     const pjrt_c_deps = moduleFromBazelSrcs(
         b,
         null,
-        "//pjrt:sources",
-        "pjrt/sources.tar",
-        "pjrt/test_test_lib_c.zig",
+        .canonical(b.allocator, "pjrt", "test_test_lib_c.zig"),
         .{ .link_libcpp = true },
     );
 
@@ -54,17 +69,11 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_pjrt_tests.step);
 
     // stdx
-    const stdx = moduleFromBazelSrcs(
-        b,
-        "stdx",
-        "//stdx:sources",
-        "stdx/sources.tar",
-        "stdx/stdx.zig",
-        .{
-            .target = target,
-            .optimize = optimize,
-        },
-    );
+    const stdx = b.addModule("stdx", .{
+        .root_source_file = b.path("stdx/stdx.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 
     const stdx_test = b.addTest(.{ .root_module = stdx });
     const run_stdx_tests = b.addRunArtifact(stdx_test);
@@ -74,9 +83,13 @@ pub fn build(b: *std.Build) void {
     const xev = moduleFromBazelSrcs(
         b,
         "xev",
-        "//async:sources",
-        "async/sources.tar",
-        "src/main.zig",
+        .{
+            // xev sources can be find inside async sources cause it's a dependency.
+            .target = "//async:sources",
+            .tar_path = "async/sources.tar",
+            .directory = "src",
+            .root = "main.zig",
+        },
         .{
             .target = target,
             .optimize = optimize,
@@ -91,9 +104,7 @@ pub fn build(b: *std.Build) void {
     const async_mod = moduleFromBazelSrcs(
         b,
         "async",
-        "//async:sources",
-        "async/sources.tar",
-        "async/async.zig",
+        .canonical(b.allocator, "async", "async.zig"),
         .{
             .target = target,
             .optimize = optimize,
@@ -125,27 +136,44 @@ fn addObjectFromBazel(module: *std.Build.Module, name: []const u8, output: []con
     module.addObjectFile(obj);
 }
 
+const BazelSrcs = struct {
+    target: []const u8,
+    tar_path: []const u8,
+    directory: []const u8,
+    root: []const u8,
+
+    pub fn canonical(allocator: std.mem.Allocator, name: []const u8, root: []const u8) BazelSrcs {
+        return .{
+            .target = std.mem.concat(allocator, u8, &.{ "//", name, ":sources" }) catch @panic("OOM"),
+            .tar_path = std.fs.path.join(allocator, &.{ name, "sources.tar" }) catch @panic("OOM"),
+            .directory = name,
+            .root = root,
+        };
+    }
+};
+
+/// Ask bazel for the full sources of a zig module.
+/// This is needed for module that have generated zig sources,
+/// like the output of zig translate-c or protobuf generated sources.
 fn moduleFromBazelSrcs(
     b: *std.Build,
     module_name: ?[]const u8,
-    sources_target: []const u8,
-    sources_tar_path: []const u8,
-    root: []const u8,
+    srcs: BazelSrcs,
     options: std.Build.Module.CreateOptions,
 ) *std.Build.Module {
-    // TODO: consider parsing bazel name to generate output name.
-    const bazel_cmd = b.addSystemCommand(&.{ "bazel", "build", sources_target });
-    const srcs_tar = b.path(b.pathJoin(&.{ "bazel-bin", sources_tar_path }));
+    const bazel_cmd = b.addSystemCommand(&.{ "bazel", "build", srcs.target });
+    const srcs_tar = b.path(b.pathJoin(&.{ "bazel-bin", srcs.tar_path }));
 
     const tar_cmd = b.addSystemCommand(&.{ "tar", "-xf" });
     tar_cmd.step.dependOn(&bazel_cmd.step);
     tar_cmd.addFileArg(srcs_tar);
     tar_cmd.addArg("-C");
-    const out_dir = tar_cmd.addOutputDirectoryArg("untarred_sources");
+    const out_dir = tar_cmd.addOutputDirectoryArg("sources");
+    tar_cmd.addArg(srcs.directory);
 
     var opts = options;
     if (opts.root_source_file != null) @panic("moduleFromBazelSrcs is already setting the root_source_file option");
-    opts.root_source_file = out_dir.path(b, root);
+    opts.root_source_file = out_dir.path(b, b.pathJoin(&.{ srcs.directory, srcs.root }));
     return if (module_name) |name|
         b.addModule(name, opts)
     else
