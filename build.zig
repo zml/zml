@@ -17,13 +17,14 @@ const std = @import("std");
 /// * copying .a files into zig-cache
 /// * creating "zig modules" visible to other build.zig.
 ///
-/// `zig build test --summary all` will run tests for several ZML deps,
+/// `zig build test --summary all` will run a lot of tests
+/// `zig build test-zml` will stick to zml test suite
 /// but not yet ZML itself.
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const test_step = b.step("test", "Run unit tests");
+    const test_step = b.step("test", "Run all tests across ZML and deps");
 
     // stdx
     const stdx = b.addModule("stdx", .{
@@ -216,6 +217,7 @@ pub fn build(b: *std.Build) void {
     // proto
     const protobuf = moduleFromBazelSrcs(b, "protobuf", .fromZml("src", "protobuf.zig"), .{});
     const xla_compile_proto = xla_proto: {
+        // this is horrible, look away.
         const empty: *std.Build.Module = empty: {
             const write = b.addWriteFiles();
             const root = write.add("root.zig", "//! empty module");
@@ -265,13 +267,8 @@ pub fn build(b: *std.Build) void {
         .{ .link_libcpp = true },
     );
 
-    // runfiles
-    const runfiles = moduleFromBazelSrcs(
-        b,
-        "runfiles",
-        .fromZml("zig/runfiles", "runfiles.zig"),
-        .{},
-    );
+    // bazel runfiles
+    const runfiles = moduleFromBazelSrcs(b, "runfiles", .fromZml("zig/runfiles", "runfiles.zig"), .{});
 
     // runtimes
     const runtimes = moduleFromBazelSrcs(
@@ -346,10 +343,16 @@ pub fn build(b: *std.Build) void {
             },
         },
     );
-    const zml_test = b.addTest(.{ .root_module = zml });
+
+    const zml_test = b.addTest(.{
+        .root_module = zml,
+        .test_runner = .{ .mode = .simple, .path = b.path("zml/test_runner.zig") },
+    });
     const run_zml_tests = b.addRunArtifact(zml_test);
-    const zml_test_step = b.step("test-zml", "Run ZML tests (broken)");
+    // TODO let copy the pjrt dylib somewhere Zig can see them.
+    const zml_test_step = b.step("test-zml", "Run ZML tests (assumes pjrt.dylib are in the path)");
     zml_test_step.dependOn(&run_zml_tests.step);
+    test_step.dependOn(&run_zml_tests.step);
 }
 
 /// Take the name of a Bazel `cc_static_library` and create a object LazyPath from it.
