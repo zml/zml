@@ -127,4 +127,8 @@ common:release  --@rules_zig//zig/settings:copt=-fomit-frame-pointer
 build:lto       --copt=-flto
 build:lto       --@rules_zig//zig/settings:copt=-flto
 build:lto       --@rules_zig//zig/settings:copt=-flld
-build:lto       --@rules_rust//rust/settings:extra_rustc_flag=-Clto=fat
+build:lto       --@rules_rust//rust/settings:lto=fat
+
+build:native    --copt=-march=native
+build:native    --@rules_zig//zig/settings:copt=-mcpu=native
+build:native    --@rules_rust//rust/settings:extra_rustc_flag=-Ctarget-cpu=native
