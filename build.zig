@@ -130,6 +130,7 @@ pub fn build(b: *std.Build) void {
         .{
             .target = target,
             .optimize = optimize,
+            .link_libc = target.result.os.tag == .linux,
         },
     );
 
@@ -293,6 +294,9 @@ pub fn build(b: *std.Build) void {
     for (&PLATFORMS) |platform| {
         const runtime_path = b.pathJoin(&.{ "runtimes", platform });
         const zig_file = std.mem.concat(b.allocator, u8, &.{ platform, ".zig" }) catch @panic("OOM");
+        const builtin_name = std.fmt.allocPrint(b.allocator, "bazel_builtin_A_S_Sruntimes_S{0s}_C{0s}.zig", .{platform}) catch @panic("OOM");
+        const bazel_builtin = moduleFromBazelSrcs(b, null, .fromZml(runtime_path, builtin_name), .{});
+
         const platform_runtime = moduleFromBazelSrcs(
             b,
             runtime_path,
@@ -301,8 +305,10 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{
                     .{ .name = "c", .module = zml_c_deps },
                     .{ .name = "runfiles", .module = runfiles },
+                    .{ .name = "stdx", .module = stdx },
                     .{ .name = "pjrt", .module = pjrt },
                     .{ .name = "async", .module = async_mod },
+                    .{ .name = "bazel_builtin", .module = bazel_builtin },
                 },
             },
         );
@@ -316,7 +322,7 @@ pub fn build(b: *std.Build) void {
         "zml/tools",
         .fromZml("zml/tools", "tools.zig"),
         .{
-            .link_libcpp = target.query.os_tag == .macos,
+            .link_libcpp = target.result.os.tag == .macos,
             .imports = &.{.{ .name = "c", .module = zml_c_deps }},
         },
     );
@@ -413,7 +419,13 @@ fn moduleFromBazelSrcs(
     const bazel_cmd: *std.Build.Step.Run = cmd: {
         if (std.mem.eql(u8, srcs.target, "//zml:sources")) {
             if (zml_srcs_tar == null) {
-                zml_srcs_tar = b.addSystemCommand(&.{ "bazel", "build", srcs.target });
+                zml_srcs_tar = b.addSystemCommand(&.{
+                    "bazel",
+                    "build",
+                    // "--@zml//runtimes:cuda=true",
+                    "--@zml//runtimes:cpu=true",
+                    srcs.target,
+                });
             }
             break :cmd zml_srcs_tar.?;
         }
