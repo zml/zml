@@ -1,13 +1,19 @@
 const std = @import("std");
+
 const stdx = @import("stdx");
 const xev = @import("xev").Dynamic;
+const XevThreadPool = @import("xev").ThreadPool;
+
+const aio = @import("asyncio.zig");
+const channel_mod = @import("channel.zig");
 const coro = @import("coro.zig");
 const executor = @import("executor.zig");
-const channel_mod = @import("channel.zig");
-const aio = @import("asyncio.zig");
 const stack = @import("stack.zig");
 
-const XevThreadPool = @import("xev").ThreadPool;
+test {
+    std.testing.refAllDecls(@This());
+    std.testing.refAllDecls(coro);
+}
 
 pub const Condition = struct {
     inner: executor.Condition,

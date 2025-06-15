@@ -1,4 +1,6 @@
-load("@rules_zig//zig:defs.bzl", "zig_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+load("@zml//bazel:zig_srcs.bzl", "zig_srcs")
+
 
 zig_library(
     name = "async",
@@ -17,4 +19,15 @@ zig_library(
         "//stdx",
         "@libxev//:xev",
     ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":async"],
+    testonly = False,
+)
+
+zig_srcs(
+    name = "sources",
+    zig_bin = ":test",
 )
