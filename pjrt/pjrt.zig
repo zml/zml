@@ -87,7 +87,10 @@ pub const Api = struct {
                     },
                 };
             },
-            else => try std.DynLib.open(library),
+            else => std.DynLib.open(library) catch |err| {
+                log.warn("Failed to load {s}", .{library});
+                return err;
+            },
         };
         const DynGetPjrtApi = lib.lookup(*const fn () callconv(.C) *const Api, "GetPjrtApi") orelse {
             std.debug.panic("Unable to find GetPjrtApi symbol in library: {s}", .{library});
