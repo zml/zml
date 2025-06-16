@@ -1,0 +1,49 @@
+.{
+    .name = .zml,
+    .version = "0.0.0",
+
+    .fingerprint = 0x32700c0d288fdb37, // Changing this has security and trust implications.
+
+    .minimum_zig_version = "0.14.0",
+
+    // This field is optional.
+    // Each dependency must either provide a `url` and `hash`, or a `path`.
+    // `zig build --fetch` can be used to fetch all dependencies of a package, recursively.
+    // Once all dependencies are fetched, `zig build` no longer requires
+    // internet connectivity.
+    .dependencies = .{
+        .pjrt_cpu_darwin_arm64 = .{
+            .url = "https://github.com/zml/pjrt-artifacts/releases/download/v10.0.0/pjrt-cpu_darwin-arm64.tar.gz",
+            .hash = "N-V-__8AADBK6gU12pCj6Yo3Q5zYgUefD3uH5kShV2pHGyOS",
+            .lazy = true,
+        },
+        .pjrt_cuda_linux_amd64 = .{
+            .url = "https://github.com/zml/pjrt-artifacts/releases/download/v10.0.0/pjrt-cuda_linux-amd64.tar.gz",
+            .hash = "N-V-__8AAJASFhgOL6MRfJwNEy7Y6vRUmu5OPlIE0hYXKVTc",
+            .lazy = true,
+        },
+    },
+
+    // Specifies the set of files and directories that are included in this package.
+    // Only files and directories listed here are included in the `hash` that
+    // is computed for this package. Only files listed here will remain on disk
+    // when using the zig package manager. As a rule of thumb, one should list
+    // files required for compilation plus any license(s).
+    // Paths are relative to the build root. Use the empty string (`""`) to refer to
+    // the build root itself.
+    // A directory listed here means that all files within, recursively, are included.
+    .paths = .{
+        "async",
+        "bazel",
+        "ffi",
+        "mlir",
+        "pjrt",
+        "platforms",
+        "runtimes",
+        "stdx",
+        "third_party",
+        "zml",
+        "build.zig",
+        "build.zig.zon",
+    },
+}
