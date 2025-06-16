@@ -518,7 +518,7 @@ pub fn loadBuffers(
 /// The `init_args` are used to initialize the non Buffer fields, using `Model.init` function.
 pub fn loadBuffersWithPrefix(
     comptime Model: type,
-    init_args: anytype,
+    init_args: if (@hasDecl(Model, "init")) stdx.meta.Tail(stdx.meta.FnArgs(Model.init)) else void,
     buffer_store: BufferStore,
     allocator: std.mem.Allocator,
     platform: zml.Platform,
