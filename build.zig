@@ -116,6 +116,20 @@ pub fn build(b: *std.Build) void {
     const run_pjrt_tests = b.addRunArtifact(pjrt_test);
     test_step.dependOn(&run_pjrt_tests.step);
 
+    const pjrt_plugin_so = plugin: {
+        switch (target.result.os.tag) {
+            .macos => {
+                const dep = b.lazyDependency("pjrt_cpu_darwin_arm64", .{}).?;
+                break :plugin b.addInstallLibFile(dep.path("libpjrt_cpu.dylib"), "libpjrt_cpu.dylib");
+            },
+            .linux => {
+                const dep = b.lazyDependency("pjrt_cuda_linux_amd64", .{}).?;
+                break :plugin b.addInstallLibFile(dep.path("libpjrt_cuda.so"), "libpjrt_cuda.so");
+            },
+            else => |os| std.debug.panic("Target not supported: {s}", .{@tagName(os)}),
+        }
+    };
+
     // xev
     const xev = moduleFromBazelSrcs(
         b,
@@ -360,8 +374,11 @@ pub fn build(b: *std.Build) void {
         .root_module = zml,
         .test_runner = .{ .mode = .simple, .path = b.path("zml/test_runner.zig") },
     });
+    // Note: I failed to make rpath work, so I'm using the "dlpreload" trick.
+    // zml_test.addRPath(pjrt_plugin_so.source);
     const run_zml_tests = b.addRunArtifact(zml_test);
-    // TODO let copy the pjrt dylib somewhere Zig can see them.
+    dlPreload(target, run_zml_tests, pjrt_plugin_so);
+
     const zml_test_step = b.step("test-zml", "Run ZML tests (assumes pjrt.dylib are in the path)");
     zml_test_step.dependOn(&run_zml_tests.step);
     test_step.dependOn(&run_zml_tests.step);
@@ -422,7 +439,8 @@ fn moduleFromBazelSrcs(
                 zml_srcs_tar = b.addSystemCommand(&.{
                     "bazel",
                     "build",
-                    // "--@zml//runtimes:cuda=true",
+                    // TODO parse this from build.zig flags.
+                    "--@zml//runtimes:cuda=true",
                     "--@zml//runtimes:cpu=true",
                     srcs.target,
                 });
@@ -447,4 +465,17 @@ fn moduleFromBazelSrcs(
         b.addModule(name, opts)
     else
         b.createModule(opts);
+}
+
+fn dlPreload(target: std.Build.ResolvedTarget, run_step: *std.Build.Step.Run, lib: *std.Build.Step.InstallFile) void {
+    const env_key = switch (target.result.os.tag) {
+        .macos => "DYLD_INSERT_LIBRARIES",
+        .linux => "LD_PRELOAD",
+        else => |os| std.debug.panic("Target not supported: {s}", .{@tagName(os)}),
+    };
+
+    run_step.step.dependOn(&lib.step);
+    const b = run_step.step.owner;
+    const lib_path = b.getInstallPath(lib.dir, lib.dest_rel_path);
+    run_step.setEnvironmentVariable(env_key, lib_path);
 }
