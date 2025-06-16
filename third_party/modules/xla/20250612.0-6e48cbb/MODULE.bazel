@@ -1,0 +1,52 @@
+module(
+    name = "xla",
+    version = "20250612.0-6e48cbb",
+    compatibility_level = 1,
+)
+
+bazel_dep(name = "platforms", version = "0.0.8")
+bazel_dep(name = "bazel_skylib", version = "1.5.0")
+bazel_dep(name = "rules_cc", version = "0.0.17")
+bazel_dep(name = "rules_apple", version = "3.22.0", repo_name = "build_bazel_rules_apple")
+bazel_dep(name = "abseil-cpp", version = "20240116.0", repo_name = "com_google_absl")
+bazel_dep(name = "rules_python", version = "0.39.0")
+bazel_dep(name = "rules_proto", version = "6.0.0-rc1")
+bazel_dep(name = "rules_java", version = "7.3.2")
+bazel_dep(name = "rules_pkg", version = "0.9.1")
+bazel_dep(name = "zlib", version = "1.2.13")
+bazel_dep(name = "re2", version = "2024-07-02.bcr.1", repo_name = "com_googlesource_code_re2")
+bazel_dep(name = "rules_license", version = "0.0.8")
+bazel_dep(name = "rules_shell", version = "0.4.1")
+bazel_dep(name = "bazel_features", version = "1.25.0", repo_name = "proto_bazel_features")
+
+workspace_private = use_extension("//:workspace_private.bzl", "workspace_private")
+use_repo(
+    workspace_private,
+    "com_github_grpc_grpc",
+    "com_google_protobuf",
+    "local_config_cuda",
+    "local_config_remote_execution",
+    "local_config_rocm",
+    "local_config_tensorrt",
+    "python_version_repo",
+    "tsl",
+)
+
+workspace_public = use_extension("//:xla.bzl", "xla")
+use_repo(
+    workspace_public,
+    "llvm-raw",
+    "stablehlo",
+    "triton",
+)
+
+llvm = use_extension("//:llvm.bzl", "llvm")
+llvm.configure(
+    targets = [
+        "AArch64",
+        "AMDGPU",
+        "NVPTX",
+        "X86",
+    ],
+)
+use_repo(llvm, "llvm-project")
