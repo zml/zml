@@ -11,6 +11,7 @@ pub const ErrorCode = pjrt.ErrorCode;
 pub const ExecuteContext = pjrt.ExecuteContext;
 pub const BufferType = pjrt.BufferType;
 pub const Device = pjrt.Device;
+pub const MemoryStats = pjrt.MemoryStats;
 pub const DeviceDescription = pjrt.DeviceDescription;
 pub const Api = pjrt.Api;
 pub const NamedValue = pjrt.NamedValue;
