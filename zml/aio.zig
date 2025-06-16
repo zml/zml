@@ -505,17 +505,38 @@ pub fn loadBuffers(
     allocator: std.mem.Allocator,
     platform: zml.Platform,
 ) !zml.Bufferized(Model) {
+    return loadBuffersWithPrefix(Model, init_args, buffer_store, allocator, platform, "");
+}
+
+/// Creates a bufferized version of a Model from the given BufferStore with a specified prefix.
+/// For details about bufferization, see the documentation of Bufferized(T).
+///
+/// This will represent the weights of the model, loaded on a specific platform.
+/// It can be used with a `module.Exe` (a compiled version of the same Model), to make a
+/// `module.ExeWithWeights` ready to be called.
+///
+/// The `init_args` are used to initialize the non Buffer fields, using `Model.init` function.
+pub fn loadBuffersWithPrefix(
+    comptime Model: type,
+    init_args: anytype,
+    buffer_store: BufferStore,
+    allocator: std.mem.Allocator,
+    platform: zml.Platform,
+    prefix: []const u8,
+) !zml.Bufferized(Model) {
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    var model: Model = try zml.aio.populateModel(Model, arena, buffer_store);
+
+    // Get model structure with tensor shapes from the buffer store with prefix
+    var model: Model = try zml.aio.populateModelWithPrefix(Model, arena, buffer_store, prefix);
 
     // If the Model has a "init" function, call it with the given parameters.
     if (@hasDecl(Model, "init")) {
         @call(.auto, Model.init, .{&model} ++ init_args);
     }
 
-    return loadModelBuffersWithPrefix(Model, model, buffer_store, allocator, platform, "");
+    return loadModelBuffersWithPrefix(Model, model, buffer_store, allocator, platform, prefix);
 }
 
 /// Creates a bufferized version of a Model from the given BufferStore. For details about
