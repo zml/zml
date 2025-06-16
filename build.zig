@@ -19,13 +19,25 @@ const std = @import("std");
 ///
 /// `zig build test --summary all` will run a lot of tests
 /// `zig build test-zml` will stick to ZML test suite
+/// `zig build -Druntimes:cpu=true -Druntimes:cuda=false test` will enable/disable runtimes
 ///
 /// Caveats:
 ///
 /// * requires a local bazel installed and tar utility
-/// * requires to have the CPU pjrt plugin visible in the path when running the executables
-/// you can do so eg by find -L ./bazel-out -name libpjrt_cpu.dylib then cp ./bazel-out/.../libpjt_cpu.dylib .
-/// * only tested with CPU plugins
+/// * only work for the CPU plugins
+/// * pjrt_cuda.so fails to load
+/// * requires a build of zig with the following patch:
+/// https://github.com/ziglang/zig/commit/8eb58132eb02c843a54ec7baa6337f54dd024648
+/// this works around https://github.com/ziglang/zig/issues/23152
+///
+/// Potential follow ups:
+/// * The main missing is that Bazel takes care of sandboxing
+/// ZML executables and the PJRT runtimes and all the dependencies.
+/// This part has not been added to build.zig beyond mininal rPath for the the libpjrt_xxx.so,
+/// but for cuda you have more depedencies that would need to be sandboxed.
+///
+/// * The module graph of the various protobuffers is alson a bit big,
+/// and if it changes it will be tedious to update. Ideally bazel should generate this graph of deps for us.
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -455,7 +467,7 @@ const Tarball = struct {
         tar_cmd.addArg(directory);
 
         var opts = options;
-        if (opts.root_source_file != null) @panic("moduleFromBazelSrcs is already setting the root_source_file option");
+        if (opts.root_source_file != null) @panic("extractModule is already setting the root_source_file option");
         opts.root_source_file = out_dir.path(b, b.pathJoin(&.{ directory, root }));
         return if (module_name) |name|
             b.addModule(name, opts)
