@@ -116,15 +116,25 @@ pub fn build(b: *std.Build) void {
     const run_pjrt_tests = b.addRunArtifact(pjrt_test);
     test_step.dependOn(&run_pjrt_tests.step);
 
-    const pjrt_plugin_so = plugin: {
+    const pjrt_dynamic_deps: []const *std.Build.Step.InstallFile = deps: {
         switch (target.result.os.tag) {
             .macos => {
-                const dep = b.lazyDependency("pjrt_cpu_darwin_arm64", .{}).?;
-                break :plugin b.addInstallLibFile(dep.path("libpjrt_cpu.dylib"), "libpjrt_cpu.dylib");
+                const dep = b.lazyDependency("pjrt_cpu_darwin_arm64", .{}) orelse break :deps &.{};
+                break :deps &.{b.addInstallLibFile(dep.path("libpjrt_cpu.dylib"), "libpjrt_cpu.dylib")};
             },
             .linux => {
-                const dep = b.lazyDependency("pjrt_cuda_linux_amd64", .{}).?;
-                break :plugin b.addInstallLibFile(dep.path("libpjrt_cuda.so"), "libpjrt_cuda.so");
+                const dep = b.lazyDependency("pjrt_cpu_linux_amd64", .{}) orelse break :deps &.{};
+                break :deps &.{b.addInstallLibFile(dep.path("libpjrt_cpu.so"), "libpjrt_cpu.so")};
+            },
+            .cuda => {
+                // TODO: this is not enough for libpjrt_cuda, there are a lot more deps needed.
+                const zmlxcuda = objectFromBazel(b, "@libpjrt_cuda//:zmlxcuda_so", "external/+cuda_packages+libpjrt_cuda/libzmlxcuda.so.0");
+                const plugin = objectFromBazel(b, "//runtimes/cuda:libpjrt_cuda", "runtimes/cuda/libpjrt_cuda.so");
+
+                break :deps &.{
+                    b.addInstallLibFile(zmlxcuda, "libzmlxcuda.so.0"),
+                    b.addInstallLibFile(plugin, "libpjrt_cuda.so"),
+                };
             },
             else => |os| std.debug.panic("Target not supported: {s}", .{@tagName(os)}),
         }
@@ -303,7 +313,6 @@ pub fn build(b: *std.Build) void {
             },
         },
     );
-    const PLATFORMS = [_][]const u8{ "cpu", "cuda", "rocm", "tpu", "neuron" };
 
     for (&PLATFORMS) |platform| {
         const runtime_path = b.pathJoin(&.{ "runtimes", platform });
@@ -374,10 +383,11 @@ pub fn build(b: *std.Build) void {
         .root_module = zml,
         .test_runner = .{ .mode = .simple, .path = b.path("zml/test_runner.zig") },
     });
-    // Note: I failed to make rpath work, so I'm using the "dlpreload" trick.
-    // zml_test.addRPath(pjrt_plugin_so.source);
+    // This is where we will put all the .so needed.
+    zml_test.addRPath(.{ .cwd_relative = b.lib_dir });
+
     const run_zml_tests = b.addRunArtifact(zml_test);
-    dlPreload(target, run_zml_tests, pjrt_plugin_so);
+    addRuntimeDeps(run_zml_tests, pjrt_dynamic_deps);
 
     const zml_test_step = b.step("test-zml", "Run ZML tests (assumes pjrt.dylib are in the path)");
     zml_test_step.dependOn(&run_zml_tests.step);
@@ -467,15 +477,8 @@ fn moduleFromBazelSrcs(
         b.createModule(opts);
 }
 
-fn dlPreload(target: std.Build.ResolvedTarget, run_step: *std.Build.Step.Run, lib: *std.Build.Step.InstallFile) void {
-    const env_key = switch (target.result.os.tag) {
-        .macos => "DYLD_INSERT_LIBRARIES",
-        .linux => "LD_PRELOAD",
-        else => |os| std.debug.panic("Target not supported: {s}", .{@tagName(os)}),
-    };
-
-    run_step.step.dependOn(&lib.step);
-    const b = run_step.step.owner;
-    const lib_path = b.getInstallPath(lib.dir, lib.dest_rel_path);
-    run_step.setEnvironmentVariable(env_key, lib_path);
+fn addRuntimeDeps(run_step: *std.Build.Step.Run, libs: []const *std.Build.Step.InstallFile) void {
+    for (libs) |lib| {
+        run_step.step.dependOn(&lib.step);
+    }
 }

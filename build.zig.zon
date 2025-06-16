@@ -17,6 +17,11 @@
             .hash = "N-V-__8AADBK6gU12pCj6Yo3Q5zYgUefD3uH5kShV2pHGyOS",
             .lazy = true,
         },
+        .pjrt_cpu_linux_amd64 = .{
+            .url = "https://github.com/zml/pjrt-artifacts/releases/download/v10.0.0/pjrt-cpu_linux-amd64.tar.gz",
+            .hash = "N-V-__8AAAjaOQyQKeieiaG2csxnfXzIkaPNN4aX7p247PLE",
+            .lazy = true,
+        },
         .pjrt_cuda_linux_amd64 = .{
             .url = "https://github.com/zml/pjrt-artifacts/releases/download/v10.0.0/pjrt-cuda_linux-amd64.tar.gz",
             .hash = "N-V-__8AAJASFhgOL6MRfJwNEy7Y6vRUmu5OPlIE0hYXKVTc",
