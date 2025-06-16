@@ -22,11 +22,6 @@
             .hash = "N-V-__8AAAjaOQyQKeieiaG2csxnfXzIkaPNN4aX7p247PLE",
             .lazy = true,
         },
-        .pjrt_cuda_linux_amd64 = .{
-            .url = "https://github.com/zml/pjrt-artifacts/releases/download/v10.0.0/pjrt-cuda_linux-amd64.tar.gz",
-            .hash = "N-V-__8AAJASFhgOL6MRfJwNEy7Y6vRUmu5OPlIE0hYXKVTc",
-            .lazy = true,
-        },
     },
 
     // Specifies the set of files and directories that are included in this package.
