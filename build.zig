@@ -29,6 +29,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const platforms = Platforms.parse(b);
 
     const test_step = b.step("test", "Run all tests across ZML and deps");
 
@@ -44,10 +45,11 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_stdx_tests.step);
 
     // mlir
-    const mlir_c_deps = moduleFromBazelSrcs(
-        b,
-        null,
-        .canonical(b.allocator, "mlir/dialects", "test_test_lib_c.zig"),
+    const mlir_srcs = Tarball.sources(b, "mlir/dialects");
+    const mlir_c_deps = mlir_srcs.extractModule(
+        "mlir/dialects",
+        "mlir/dialects",
+        "test_test_lib_c.zig",
         .{ .link_libcpp = true },
     );
     const mlir_obj = objectFromBazel(b, "//mlir/dialects:mlir_static", "mlir/dialects/libmlir_static.a");
@@ -95,10 +97,11 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mlir_dialects_tests.step);
 
     // pjrt
-    const pjrt_c_deps = moduleFromBazelSrcs(
-        b,
-        null,
-        .canonical(b.allocator, "pjrt", "test_test_lib_c.zig"),
+    const pjrt_srcs = Tarball.sources(b, "pjrt");
+    const pjrt_c_deps = pjrt_srcs.extractModule(
+        "pjrt",
+        "pjrt",
+        "test_test_lib_c.zig",
         .{ .link_libcpp = true },
     );
 
@@ -116,41 +119,43 @@ pub fn build(b: *std.Build) void {
     const run_pjrt_tests = b.addRunArtifact(pjrt_test);
     test_step.dependOn(&run_pjrt_tests.step);
 
-    const pjrt_dynamic_deps: []const *std.Build.Step.InstallFile = deps: {
+    var _d: std.BoundedArray(*std.Build.Step.InstallFile, 8) = .{};
+    deps: {
         switch (target.result.os.tag) {
             .macos => {
-                const dep = b.lazyDependency("pjrt_cpu_darwin_arm64", .{}) orelse break :deps &.{};
-                break :deps &.{b.addInstallLibFile(dep.path("libpjrt_cpu.dylib"), "libpjrt_cpu.dylib")};
+                if (platforms.cpu) {
+                    const dep = b.lazyDependency("pjrt_cpu_darwin_arm64", .{}) orelse break :deps;
+                    const pjrt_cpu = b.addInstallLibFile(dep.path("libpjrt_cpu.dylib"), "libpjrt_cpu.dylib");
+                    _d.appendAssumeCapacity(pjrt_cpu);
+                }
             },
             .linux => {
-                const dep = b.lazyDependency("pjrt_cpu_linux_amd64", .{}) orelse break :deps &.{};
-                break :deps &.{b.addInstallLibFile(dep.path("libpjrt_cpu.so"), "libpjrt_cpu.so")};
-            },
-            .cuda => {
-                // TODO: this is not enough for libpjrt_cuda, there are a lot more deps needed.
-                const zmlxcuda = objectFromBazel(b, "@libpjrt_cuda//:zmlxcuda_so", "external/+cuda_packages+libpjrt_cuda/libzmlxcuda.so.0");
-                const plugin = objectFromBazel(b, "//runtimes/cuda:libpjrt_cuda", "runtimes/cuda/libpjrt_cuda.so");
+                if (platforms.cpu) {
+                    const dep = b.lazyDependency("pjrt_cpu_linux_amd64", .{}) orelse break :deps;
+                    const pjrt_cpu = b.addInstallLibFile(dep.path("libpjrt_cpu.so"), "libpjrt_cpu.so");
+                    _d.appendAssumeCapacity(pjrt_cpu);
+                }
 
-                break :deps &.{
-                    b.addInstallLibFile(zmlxcuda, "libzmlxcuda.so.0"),
-                    b.addInstallLibFile(plugin, "libpjrt_cuda.so"),
-                };
+                if (platforms.cuda) {
+                    // TODO: this is not enough for libpjrt_cuda, there are a lot more deps needed.
+                    const zmlxcuda = objectFromBazel(b, "@libpjrt_cuda//:zmlxcuda_so", "external/+cuda_packages+libpjrt_cuda/libzmlxcuda.so.0");
+                    const plugin = objectFromBazel(b, "//runtimes/cuda:libpjrt_cuda", "runtimes/cuda/libpjrt_cuda.so");
+
+                    _d.appendAssumeCapacity(b.addInstallLibFile(zmlxcuda, "libzmlxcuda.so.0"));
+                    _d.appendAssumeCapacity(b.addInstallLibFile(plugin, "libpjrt_cuda.so"));
+                }
             },
             else => |os| std.debug.panic("Target not supported: {s}", .{@tagName(os)}),
         }
-    };
+    }
+    const pjrt_dynamic_deps = _d.constSlice();
 
     // xev
-    const xev = moduleFromBazelSrcs(
-        b,
+    const async_srcs = Tarball.sources(b, "async");
+    const xev = async_srcs.extractModule(
         "xev",
-        .{
-            // xev sources can be find inside async sources cause it's a dependency.
-            .target = "//async:sources",
-            .tar_path = "async/sources.tar",
-            .directory = "src",
-            .root = "main.zig",
-        },
+        "src",
+        "main.zig",
         .{
             .target = target,
             .optimize = optimize,
@@ -163,10 +168,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_xev_tests.step);
 
     // async
-    const async_mod = moduleFromBazelSrcs(
-        b,
+    const async_mod = async_srcs.extractModule(
         "async",
-        .canonical(b.allocator, "async", "async.zig"),
+        "async",
+        "async.zig",
         .{
             .target = target,
             .optimize = optimize,
@@ -181,11 +186,12 @@ pub fn build(b: *std.Build) void {
     const run_async_tests = b.addRunArtifact(async_test);
     test_step.dependOn(&run_async_tests.step);
 
+    const zml_srcs = Tarball.zml(b, platforms);
     // ffi
-    const ffi = moduleFromBazelSrcs(
-        b,
+    const ffi = zml_srcs.extractModule(
         "ffi",
-        .fromZml("ffi", "ffi.zig"),
+        "ffi",
+        "ffi.zig",
         .{ .target = target, .optimize = optimize },
     );
 
@@ -194,24 +200,25 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_ffi_tests.step);
 
     // hftokenizers
-    const hftokenizers = moduleFromBazelSrcs(
-        b,
+    const hftokenizers = zml_srcs.extractModule(
         "//zml/tokenizer/hftokenizers",
-        .fromZml("zml/tokenizer/hftokenizers", "hftokenizers.zig"),
+        "zml/tokenizer/hftokenizers",
+        "hftokenizers.zig",
         .{ .target = target, .optimize = optimize },
     );
 
     // sentencepiece
-    const sentencepiece_c_deps = moduleFromBazelSrcs(
-        b,
+    const sentencepiece_c_deps_srcs = Tarball.sources(b, "zml/tokenizer/sentencepiece");
+    const sentencepiece_c_deps = sentencepiece_c_deps_srcs.extractModule(
         null,
-        .canonical(b.allocator, "zml/tokenizer/sentencepiece", "test_test_lib_c.zig"),
+        "zml/tokenizer/sentencepiece",
+        "test_test_lib_c.zig",
         .{ .link_libcpp = true },
     );
-    const sentencepiece = moduleFromBazelSrcs(
-        b,
+    const sentencepiece = zml_srcs.extractModule(
         "//zml/tokenizer/sentencepiece",
-        .fromZml("zml/tokenizer/sentencepiece", "sentencepiece.zig"),
+        "zml/tokenizer/sentencepiece",
+        "sentencepiece.zig",
         .{
             .target = target,
             .optimize = optimize,
@@ -222,10 +229,10 @@ pub fn build(b: *std.Build) void {
     );
 
     // tokenizer
-    const tokenizer = moduleFromBazelSrcs(
-        b,
+    const tokenizer = zml_srcs.extractModule(
         "tokenizer",
-        .fromZml("zml/tokenizer", "tokenizer.zig"),
+        "zml/tokenizer",
+        "tokenizer.zig",
         .{
             .target = target,
             .optimize = optimize,
@@ -246,9 +253,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_tokenizer_tests.step);
 
     // proto
-    const protobuf = moduleFromBazelSrcs(b, "protobuf", .fromZml("src", "protobuf.zig"), .{});
+    const protobuf = zml_srcs.extractModule("protobuf", "src", "protobuf.zig", .{});
     const xla_compile_proto = xla_proto: {
-        // this is horrible, look away.
+        // Ideally we should ask bazel to generate this graph of dependencies between the different proto files.
         const empty: *std.Build.Module = empty: {
             const write = b.addWriteFiles();
             const root = write.add("root.zig", "//! empty module");
@@ -256,33 +263,33 @@ pub fn build(b: *std.Build) void {
         };
         const opts: std.Build.Module.CreateOptions = .{ .imports = &.{.{ .name = "protobuf", .module = protobuf }} };
 
-        const duration = moduleFromBazelSrcs(b, null, .fromZml("_virtual_imports/duration_proto/google/protobuf", "duration.pb.zig"), opts);
-        const any = moduleFromBazelSrcs(b, null, .fromZml("_virtual_imports/any_proto/google/protobuf", "any.pb.zig"), opts);
-        const wrappers = moduleFromBazelSrcs(b, null, .fromZml("_virtual_imports/wrappers_proto/google/protobuf", "wrappers.pb.zig"), opts);
+        const duration = zml_srcs.extractModule(null, "_virtual_imports/duration_proto/google/protobuf", "duration.pb.zig", opts);
+        const any = zml_srcs.extractModule(null, "_virtual_imports/any_proto/google/protobuf", "any.pb.zig", opts);
+        const wrappers = zml_srcs.extractModule(null, "_virtual_imports/wrappers_proto/google/protobuf", "wrappers.pb.zig", opts);
 
-        const data = moduleFromBazelSrcs(b, null, .fromZml("xla", "xla_data.pb.zig"), opts);
-        const service_hlo = moduleFromBazelSrcs(b, null, .fromZml("xla/service", "hlo.pb.zig"), opts);
-        const xla = moduleFromBazelSrcs(b, null, .fromZml("xla", "xla.pb.zig"), opts);
+        const data = zml_srcs.extractModule(null, "xla", "xla_data.pb.zig", opts);
+        const service_hlo = zml_srcs.extractModule(null, "xla/service", "hlo.pb.zig", opts);
+        const xla = zml_srcs.extractModule(null, "xla", "xla.pb.zig", opts);
         xla.addImport("google_protobuf_any_proto", any);
         xla.addImport("xla_xla_data_proto", data);
         xla.addImport("xla_service_hlo_proto", service_hlo);
         xla.addImport("xla_autotune_results_proto", empty);
 
-        const tsl_dnn = moduleFromBazelSrcs(b, null, .fromZml("xla/tsl/protobuf", "dnn.pb.zig"), opts);
+        const tsl_dnn = zml_srcs.extractModule(null, "xla/tsl/protobuf", "dnn.pb.zig", opts);
         tsl_dnn.addImport("google_protobuf_wrappers_proto", wrappers);
 
-        const autotuning = moduleFromBazelSrcs(b, null, .fromZml("xla", "autotuning.pb.zig"), opts);
+        const autotuning = zml_srcs.extractModule(null, "xla", "autotuning.pb.zig", opts);
         autotuning.addImport("google_protobuf_duration_proto", duration);
         autotuning.addImport("xla_tsl_protobuf_dnn_proto", tsl_dnn);
-        const autotune = moduleFromBazelSrcs(b, null, .fromZml("xla", "autotune_results.pb.zig"), opts);
+        const autotune = zml_srcs.extractModule(null, "xla", "autotune_results.pb.zig", opts);
         autotune.addImport("xla_autotuning_proto", autotuning);
 
-        const stream_executor_cuda_cuda_compute_capability = moduleFromBazelSrcs(b, null, .fromZml("xla/stream_executor/cuda", "cuda_compute_capability.pb.zig"), opts);
-        const stream_executor_device_description = moduleFromBazelSrcs(b, null, .fromZml("xla/stream_executor", "device_description.pb.zig"), opts);
+        const stream_executor_cuda_cuda_compute_capability = zml_srcs.extractModule(null, "xla/stream_executor/cuda", "cuda_compute_capability.pb.zig", opts);
+        const stream_executor_device_description = zml_srcs.extractModule(null, "xla/stream_executor", "device_description.pb.zig", opts);
         stream_executor_device_description.addImport("xla_autotune_results_proto", autotune);
         stream_executor_device_description.addImport("xla_stream_executor_cuda_cuda_compute_capability_proto", stream_executor_cuda_cuda_compute_capability);
 
-        const compile = moduleFromBazelSrcs(b, null, .fromZml("xla/pjrt/proto", "compile_options.pb.zig"), opts);
+        const compile = zml_srcs.extractModule(null, "xla/pjrt/proto", "compile_options.pb.zig", opts);
         compile.addImport("xla_xla_proto", xla);
         compile.addImport("xla_xla_data_proto", data);
         compile.addImport("xla_stream_executor_device_description_proto", stream_executor_device_description);
@@ -291,21 +298,21 @@ pub fn build(b: *std.Build) void {
     };
 
     // zml c deps
-    const zml_c_deps = moduleFromBazelSrcs(
-        b,
+    const zml_c_deps = zml_srcs.extractModule(
         null,
-        .fromZml("zml", "test_test_lib_c.zig"),
+        "zml",
+        "test_test_lib_c.zig",
         .{ .link_libcpp = true },
     );
 
     // bazel runfiles
-    const runfiles = moduleFromBazelSrcs(b, "runfiles", .fromZml("zig/runfiles", "runfiles.zig"), .{});
+    const runfiles = zml_srcs.extractModule("runfiles", "zig/runfiles", "runfiles.zig", .{});
 
     // runtimes
-    const runtimes = moduleFromBazelSrcs(
-        b,
+    const runtimes = zml_srcs.extractModule(
         "runtimes",
-        .fromZml("runtimes", "runtimes.zig"),
+        "runtimes",
+        "runtimes.zig",
         .{
             .imports = &.{
                 .{ .name = "c", .module = zml_c_deps },
@@ -314,16 +321,17 @@ pub fn build(b: *std.Build) void {
         },
     );
 
-    for (&PLATFORMS) |platform| {
+    inline for (@typeInfo(Platforms).@"struct".fields) |field| {
+        const platform = field.name;
         const runtime_path = b.pathJoin(&.{ "runtimes", platform });
         const zig_file = std.mem.concat(b.allocator, u8, &.{ platform, ".zig" }) catch @panic("OOM");
         const builtin_name = std.fmt.allocPrint(b.allocator, "bazel_builtin_A_S_Sruntimes_S{0s}_C{0s}.zig", .{platform}) catch @panic("OOM");
-        const bazel_builtin = moduleFromBazelSrcs(b, null, .fromZml(runtime_path, builtin_name), .{});
+        const bazel_builtin = zml_srcs.extractModule(null, runtime_path, builtin_name, .{});
 
-        const platform_runtime = moduleFromBazelSrcs(
-            b,
+        const platform_runtime = zml_srcs.extractModule(
             runtime_path,
-            .fromZml(runtime_path, zig_file),
+            runtime_path,
+            zig_file,
             .{
                 .imports = &.{
                     .{ .name = "c", .module = zml_c_deps },
@@ -340,10 +348,10 @@ pub fn build(b: *std.Build) void {
     }
 
     // zml/tools
-    const zml_tools = moduleFromBazelSrcs(
-        b,
+    const zml_tools = zml_srcs.extractModule(
         "zml/tools",
-        .fromZml("zml/tools", "tools.zig"),
+        "zml/tools",
+        "tools.zig",
         .{
             .link_libcpp = target.result.os.tag == .macos,
             .imports = &.{.{ .name = "c", .module = zml_c_deps }},
@@ -355,10 +363,13 @@ pub fn build(b: *std.Build) void {
     }
 
     // zml
-    const zml = moduleFromBazelSrcs(
-        b,
+    const zml_srcs_tar = b.addSystemCommand(&.{ "bazel", "build", "//zml:sources" });
+    if (platforms.cpu) zml_srcs_tar.addArg("--@zml//runtimes:cpu=true");
+    if (platforms.cuda) zml_srcs_tar.addArg("--@zml//runtimes:cuda=true");
+    const zml = zml_srcs.extractModule(
         "zml",
-        .fromZml("zml", "zml.zig"),
+        "zml",
+        "zml.zig",
         .{
             .target = target,
             .optimize = optimize,
@@ -407,78 +418,69 @@ fn objectFromBazel(b: *std.Build, target: []const u8, output: []const u8) std.Bu
     return cp.addCopyFile(b.path(obj_path), output);
 }
 
-const BazelSrcs = struct {
-    target: []const u8,
-    tar_path: []const u8,
-    directory: []const u8,
-    root: []const u8,
+const Tarball = struct {
+    create_cmd: *std.Build.Step.Run,
+    path: std.Build.LazyPath,
 
-    pub fn canonical(allocator: std.mem.Allocator, name: []const u8, root: []const u8) BazelSrcs {
-        return .{
-            .target = std.mem.concat(allocator, u8, &.{ "//", name, ":sources" }) catch @panic("OOM"),
-            .tar_path = std.fs.path.join(allocator, &.{ name, "sources.tar" }) catch @panic("OOM"),
-            .directory = name,
-            .root = root,
-        };
+    /// Ask bazel for the full sources of a zig module.
+    /// This is needed for module that have generated zig sources,
+    /// like the output of zig translate-c or protobuf generated sources.
+    pub fn sources(b: *std.Build, name: []const u8) Tarball {
+        const allocator = b.allocator;
+        const target = std.mem.concat(allocator, u8, &.{ "//", name, ":sources" }) catch @panic("OOM");
+        const bazel_cmd: *std.Build.Step.Run = b.addSystemCommand(&.{ "bazel", "build", target });
+
+        const srcs_tar = b.path(b.pathJoin(&.{ "bazel-bin", name, "sources.tar" }));
+        return .{ .create_cmd = bazel_cmd, .path = srcs_tar };
     }
 
-    pub fn fromZml(name: []const u8, root: []const u8) BazelSrcs {
-        return .{
-            .target = "//zml:sources",
-            .tar_path = "zml/sources.tar",
-            .directory = name,
-            .root = root,
-        };
+    /// Zml is a bit different from other targets cause the code of the "runtimes/**.zig"
+    /// will change based on the platforms selected.
+    pub fn zml(b: *std.Build, platforms: Platforms) Tarball {
+        const bazel_cmd: *std.Build.Step.Run = b.addSystemCommand(&.{ "bazel", "build", "//zml:sources" });
+        bazel_cmd.addArg(if (platforms.cpu) "--@zml//runtimes:cpu=true" else "--@zml//runtimes:cpu=false");
+        bazel_cmd.addArg(if (platforms.cuda) "--@zml//runtimes:cuda=true" else "--@zml//runtimes:cuda=false");
+
+        const srcs_tar = b.path(b.pathJoin(&.{ "bazel-bin", "zml", "sources.tar" }));
+        return .{ .create_cmd = bazel_cmd, .path = srcs_tar };
+    }
+
+    pub fn extractModule(self: Tarball, module_name: ?[]const u8, directory: []const u8, root: []const u8, options: std.Build.Module.CreateOptions) *std.Build.Module {
+        const b = self.create_cmd.step.owner;
+        const tar_cmd = b.addSystemCommand(&.{ "tar", "-xf" });
+        tar_cmd.step.dependOn(&self.create_cmd.step);
+        tar_cmd.addFileArg(self.path);
+        tar_cmd.addArg("-C");
+        const out_dir = tar_cmd.addOutputDirectoryArg("sources");
+        tar_cmd.addArg(directory);
+
+        var opts = options;
+        if (opts.root_source_file != null) @panic("moduleFromBazelSrcs is already setting the root_source_file option");
+        opts.root_source_file = out_dir.path(b, b.pathJoin(&.{ directory, root }));
+        return if (module_name) |name|
+            b.addModule(name, opts)
+        else
+            b.createModule(opts);
     }
 };
-
-var zml_srcs_tar: ?*std.Build.Step.Run = null;
-
-/// Ask bazel for the full sources of a zig module.
-/// This is needed for module that have generated zig sources,
-/// like the output of zig translate-c or protobuf generated sources.
-fn moduleFromBazelSrcs(
-    b: *std.Build,
-    module_name: ?[]const u8,
-    srcs: BazelSrcs,
-    options: std.Build.Module.CreateOptions,
-) *std.Build.Module {
-    const bazel_cmd: *std.Build.Step.Run = cmd: {
-        if (std.mem.eql(u8, srcs.target, "//zml:sources")) {
-            if (zml_srcs_tar == null) {
-                zml_srcs_tar = b.addSystemCommand(&.{
-                    "bazel",
-                    "build",
-                    // TODO parse this from build.zig flags.
-                    "--@zml//runtimes:cuda=true",
-                    "--@zml//runtimes:cpu=true",
-                    srcs.target,
-                });
-            }
-            break :cmd zml_srcs_tar.?;
-        }
-        break :cmd b.addSystemCommand(&.{ "bazel", "build", srcs.target });
-    };
-    const srcs_tar = b.path(b.pathJoin(&.{ "bazel-bin", srcs.tar_path }));
-
-    const tar_cmd = b.addSystemCommand(&.{ "tar", "-xf" });
-    tar_cmd.step.dependOn(&bazel_cmd.step);
-    tar_cmd.addFileArg(srcs_tar);
-    tar_cmd.addArg("-C");
-    const out_dir = tar_cmd.addOutputDirectoryArg("sources");
-    tar_cmd.addArg(srcs.directory);
-
-    var opts = options;
-    if (opts.root_source_file != null) @panic("moduleFromBazelSrcs is already setting the root_source_file option");
-    opts.root_source_file = out_dir.path(b, b.pathJoin(&.{ srcs.directory, srcs.root }));
-    return if (module_name) |name|
-        b.addModule(name, opts)
-    else
-        b.createModule(opts);
-}
 
 fn addRuntimeDeps(run_step: *std.Build.Step.Run, libs: []const *std.Build.Step.InstallFile) void {
     for (libs) |lib| {
         run_step.step.dependOn(&lib.step);
     }
 }
+
+const Platforms = struct {
+    cpu: bool,
+    cuda: bool,
+    rocm: bool = false,
+    tpu: bool = false,
+    neuron: bool = false,
+
+    pub fn parse(b: *std.Build) Platforms {
+        return .{
+            .cpu = b.option(bool, "runtimes:cpu", "Enable cpu runtime (default: true)") orelse true,
+            .cuda = b.option(bool, "runtimes:cuda", "Enable cuda runtime") orelse false,
+        };
+    }
+};
