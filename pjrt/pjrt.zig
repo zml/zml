@@ -483,6 +483,28 @@ pub const Client = opaque {
         });
         return @ptrCast(ret.transfer_manager.?);
     }
+
+    pub const CreateUninitializedBufferArgs = struct {
+        dims: []const i64,
+        element_type: BufferType,
+        layout: MemoryLayout,
+        device: ?*const Device = null,
+        memory: ?*const Memory = null,
+    };
+
+    pub fn createUninitializedBuffer(self: *const Client, api: *const Api, args: CreateUninitializedBufferArgs) ApiError!*Buffer {
+        var layout = args.layout.toCStruct();
+        const ret = try api.call(.PJRT_Client_CreateUninitializedBuffer, .{
+            .client = self.inner(),
+            .shape_dims = args.dims.ptr,
+            .shape_num_dims = @intCast(args.dims.len),
+            .shape_element_type = @intFromEnum(args.element_type),
+            .shape_layout = @ptrCast(&layout),
+            .device = @ptrCast(@constCast(args.device)),
+            .memory = @ptrCast(@constCast(args.memory)),
+        });
+        return @ptrCast(ret.buffer.?);
+    }
 };
 
 pub const Device = opaque {
