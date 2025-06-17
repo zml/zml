@@ -121,15 +121,15 @@ pub const threading = struct {
         waiter: std.atomic.Value(*const State) = std.atomic.Value(*const State).init(&State.unset_state),
 
         pub fn isSet(self: *ResetEventSingle) bool {
-            return self.waiter.load(.monotonic) == &State.set_state;
+            return self.waiter.load(.seq_cst) == &State.set_state;
         }
 
         pub fn reset(self: *ResetEventSingle) void {
-            self.waiter.store(&State.unset_state, .monotonic);
+            self.waiter.store(&State.unset_state, .seq_cst);
         }
 
         pub fn set(self: *ResetEventSingle) void {
-            switch (self.waiter.swap(&State.set_state, .monotonic).*) {
+            switch (self.waiter.swap(&State.set_state, .seq_cst).*) {
                 .waiting => |waiter| {
                     waiter.thread.waiters_queue.push(waiter);
                     waiter.thread.wake();
@@ -146,7 +146,7 @@ pub const threading = struct {
             var new_state: State = .{
                 .waiting = &waiter,
             };
-            if (self.waiter.cmpxchgStrong(&State.unset_state, &new_state, .monotonic, .monotonic) == null) {
+            if (self.waiter.cmpxchgStrong(&State.unset_state, &new_state, .seq_cst, .seq_cst) == null) {
                 while (self.isSet() == false) {
                     coro.xsuspend();
                 }
