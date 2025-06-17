@@ -23,13 +23,12 @@ pub const MaxMeshSize: u8 = 64;
 pub const MaxMeshAxes: u8 = 8;
 
 pub const TopologyIndicesIterator = struct {
-    index: i64 = 0,
-    len: i64,
+    index: usize = 0,
     topology: Shape,
     indices: Shape,
 
     pub fn next(self: *TopologyIndicesIterator) ?Shape {
-        if (self.index >= self.len) return null;
+        if (self.index >= self.topology.count()) return null;
 
         defer {
             self.index += 1;
@@ -52,8 +51,6 @@ pub const TopologyIndicesIterator = struct {
                 self.indices = next_indices.setDim(dim, current_value + 1);
                 return;
             } else {
-                // This dimension has wrapped around. Reset it to 0 and let the
-                // loop continue to the next (more major) dimension.
                 next_indices = next_indices.setDim(dim, 0);
             }
         }
@@ -126,31 +123,29 @@ pub const Mesh = struct {
         }
 
         return .{
-            .len = self.numPartitions(),
             .topology = self.topology,
             .indices = indices,
         };
     }
 
-    pub fn numPartitions(self: Mesh) i64 {
+    pub fn numPartitions(self: Mesh) u8 {
         return @intCast(self.topology.count());
     }
 
-    pub fn numReplicas(_: Mesh) i64 {
+    pub fn numReplicas(_: Mesh) u8 {
         return 1;
     }
 
-    pub fn numRequiredDevices(self: Mesh) i64 {
+    pub fn numRequiredDevices(self: Mesh) u8 {
         return self.numPartitions() * self.numReplicas();
     }
 
     pub fn format(
         self: Mesh,
-        comptime fmt: []const u8,
+        comptime _: []const u8,
         options: std.fmt.FormatOptions,
         writer: anytype,
     ) !void {
-        _ = fmt; // autofix
         _ = options;
         try writer.print("Mesh(topology={} rank={d} numRequiredDevices={d})", .{ self.topology, self.rank(), self.numRequiredDevices() });
     }
@@ -216,17 +211,101 @@ test Mesh {
     try std.testing.expect(auto_mesh.numRequiredDevices() == 4);
 }
 
+test "Mesh.iterator" {
+    // 1D Mesh iterator
+    const mesh_1d = Mesh.init(.{ .x = 4 });
+    var iter_1d = mesh_1d.iterator();
+    var count_1d: u8 = 0;
+
+    while (iter_1d.next()) |indices| : (count_1d += 1) {
+        const expected_shape = Shape.init(.{ .x = count_1d }, .u8);
+        try std.testing.expect(indices.eqlWithTags(expected_shape));
+    }
+    try std.testing.expectEqual(4, count_1d);
+    try std.testing.expect(iter_1d.next() == null);
+
+    // 2D Mesh iterator
+    const mesh_2d = Mesh.init(.{ .x = 2, .y = 3 });
+    var iter_2d = mesh_2d.iterator();
+    var count_2d: u8 = 0;
+    const expected_indices_2d = [_]Shape{
+        .init(.{ .x = 0, .y = 0 }, .u8),
+        .init(.{ .x = 0, .y = 1 }, .u8),
+        .init(.{ .x = 0, .y = 2 }, .u8),
+        .init(.{ .x = 1, .y = 0 }, .u8),
+        .init(.{ .x = 1, .y = 1 }, .u8),
+        .init(.{ .x = 1, .y = 2 }, .u8),
+    };
+
+    while (iter_2d.next()) |indices| : (count_2d += 1) {
+        try std.testing.expect(indices.eqlWithTags(expected_indices_2d[count_2d]));
+    }
+
+    try std.testing.expectEqual(6, count_2d);
+    try std.testing.expect(iter_2d.next() == null);
+
+    // 3D Mesh iterator
+    const mesh_3d = Mesh.init(.{ .x = 2, .y = 2, .z = 2 });
+    var iter_3d = mesh_3d.iterator();
+    var count_3d: u8 = 0;
+    const expected_indices_3d = [_]Shape{
+        .init(.{ .x = 0, .y = 0, .z = 0 }, .u8),
+        .init(.{ .x = 0, .y = 0, .z = 1 }, .u8),
+        .init(.{ .x = 0, .y = 1, .z = 0 }, .u8),
+        .init(.{ .x = 0, .y = 1, .z = 1 }, .u8),
+        .init(.{ .x = 1, .y = 0, .z = 0 }, .u8),
+        .init(.{ .x = 1, .y = 0, .z = 1 }, .u8),
+        .init(.{ .x = 1, .y = 1, .z = 0 }, .u8),
+        .init(.{ .x = 1, .y = 1, .z = 1 }, .u8),
+    };
+
+    while (iter_3d.next()) |indices| : (count_3d += 1) {
+        try std.testing.expect(indices.eqlWithTags(expected_indices_3d[count_3d]));
+    }
+
+    try std.testing.expectEqual(8, count_3d);
+    try std.testing.expect(iter_3d.next() == null);
+
+    // Single device
+    const mesh_single = Mesh.init(.{ .x = 1 });
+    var iter_single = mesh_single.iterator();
+    var count_single: u8 = 0;
+
+    while (iter_single.next()) |indices| : (count_single += 1) {
+        const expected_shape = Shape.init(.{ .x = 0 }, .u8);
+        try std.testing.expect(indices.eqlWithTags(expected_shape));
+    }
+    try std.testing.expectEqual(1, count_single);
+    try std.testing.expect(iter_single.next() == null);
+
+    // Mesh with last dimension of size 1
+    const mesh_mixed_one = Mesh.init(.{ .x = 3, .y = 1 });
+    var iter_mixed = mesh_mixed_one.iterator();
+    var count_mixed: u8 = 0;
+    const expected_indices_mixed = [_]Shape{
+        .init(.{ .x = 0, .y = 0 }, .u8),
+        .init(.{ .x = 1, .y = 0 }, .u8),
+        .init(.{ .x = 2, .y = 0 }, .u8),
+    };
+
+    while (iter_mixed.next()) |indices| : (count_mixed += 1) {
+        try std.testing.expect(indices.eqlWithTags(expected_indices_mixed[count_mixed]));
+    }
+
+    try std.testing.expectEqual(3, count_mixed);
+    try std.testing.expect(iter_mixed.next() == null);
+}
+
 pub const DeviceShard = struct {
-    index: i64,
-    len: i64,
-    shape: Shape,
-    shard: Shape,
-    indices: Shape,
+    index: usize,
     topology: Shape,
+    global_shape: Shape,
+    indices: Shape,
+    shard: Shape,
     device: *const Device,
 
     /// Holds the layout information for a shard within a larger host buffer.
-    pub const PjRTArgs = struct {
+    pub const SliceSpec = struct {
         /// The byte offset from the start of the host buffer to this shard's data.
         /// The caller adds this to the host buffer's base address to get the final pointer.
         start_offset: usize,
@@ -245,11 +324,9 @@ pub const DeviceShard = struct {
         num_dims: u4,
     };
 
-    /// Calculates the necessary arguments for a PJRT_Client_BufferFromHostBuffer call.
-    pub fn pjrtArgs(self: DeviceShard) PjRTArgs {
-        const rank = self.shape.rank();
-        const element_size_bytes: i64 = @intCast(self.shape.dtype().sizeOf());
-        _ = element_size_bytes; // autofix
+    /// Calculates the necessary arguments for a PJRT call to transfer this shard's data
+    pub fn specs(self: DeviceShard) SliceSpec {
+        const rank = self.global_shape.rank();
 
         // Step 1: Calculate the byte strides for the GLOBAL host buffer.
         // These strides describe how to navigate the full, unpartitioned tensor in host memory.
@@ -257,16 +334,17 @@ pub const DeviceShard = struct {
         // Example: For a global shape {m=16, k=16} of i32 (4 bytes), the strides are:
         //   - stride for 'k' (dim 1): 4 bytes
         //   - stride for 'm' (dim 0): 16 (dim k) * 4 bytes = 64 bytes
-        const host_byte_strides_ba = self.shape.computeStrides();
+        const host_byte_strides_ba = self.global_shape.computeStrides();
         const host_byte_strides = host_byte_strides_ba.constSlice();
 
         // Step 2: Calculate the start offset for THIS specific shard.
         // We determine the starting coordinate of our shard's data slice within the global tensor
         // and use the global strides to find the byte offset.
         var shard_start_offset_bytes: i64 = 0;
+
         for (0..rank) |i| {
             // Check if the i-th dimension of the tensor is partitioned.
-            const mesh_axis_tag = self.shape.partition(i);
+            const mesh_axis_tag = self.global_shape.partition(i);
 
             if (mesh_axis_tag != Shape.TagUnknown) {
                 // This dimension IS partitioned. We need to calculate its contribution to the offset.
@@ -293,11 +371,11 @@ pub const DeviceShard = struct {
         // This is what PJRT will actually read, using the start_offset and host_byte_strides.
         var transfer_dims_buffer: [Shape.MAX_RANK]i64 = undefined;
         for (0..rank) |i| {
-            const mesh_axis_tag = self.shape.partition(i);
+            const mesh_axis_tag = self.global_shape.partition(i);
             if (mesh_axis_tag == Shape.TagUnknown) {
                 // This dimension is REPLICATED on this shard. The slice must span the
                 // entire global dimension.
-                transfer_dims_buffer[i] = self.shape.dim(i);
+                transfer_dims_buffer[i] = self.global_shape.dim(i);
             } else {
                 // This dimension is PARTITIONED. The slice is just the size of the
                 // smaller shard dimension.
@@ -305,7 +383,6 @@ pub const DeviceShard = struct {
             }
         }
 
-        // Step 4: Assemble and return the complete struct for the PJRT call.
         return .{
             .start_offset = @intCast(shard_start_offset_bytes),
             .byte_strides = host_byte_strides_ba.buffer,
@@ -322,57 +399,60 @@ pub const DeviceShard = struct {
     ) !void {
         _ = fmt; // autofix
         _ = options;
-        const pjrt_args = self.pjrtArgs();
-        try writer.print("DeviceShard(index={d}/{d} topology={} indices={} shard={} ({d}B) shape={} ({d}B) start_offset={d} byte_strides={any} device={})", .{
+        const specs_ = self.specs();
+        try writer.print("DeviceShard(index={d}/{d} topology={} indices={} shard={} ({d}B) global_shape={} ({d}B) start_offset={d} byte_strides={any} device={})", .{
             self.index + 1,
-            self.len,
+            self.topology.count(),
             self.topology,
             self.indices,
             self.shard,
             self.shard.byteSize(),
-            self.shape,
-            self.shape.byteSize(),
-            pjrt_args.start_offset,
-            pjrt_args.byte_strides[0..pjrt_args.num_dims],
+            self.global_shape,
+            self.global_shape.byteSize(),
+            specs_.start_offset,
+            specs_.byte_strides[0..specs_.num_dims],
             self.device,
         });
     }
 };
 
 pub const DeviceShardIterator = struct {
-    index: i64 = 0,
-    len: i64,
+    index: usize = 0,
     platform: Platform,
     indices_iterator: TopologyIndicesIterator,
     sharding: Sharding,
 
     pub fn next(self: *DeviceShardIterator) ?DeviceShard {
-        if (self.index >= self.sharding.mesh.numPartitions()) return null;
+        const num_partitions = self.sharding.mesh.numPartitions();
+
+        if (self.index >= num_partitions) return null;
 
         defer self.index += 1;
 
         return .{
             .index = self.index,
-            .len = self.len,
-            .shape = self.sharding.shape,
-            .shard = self.sharding.shard(),
-            .indices = self.indices_iterator.next().?,
             .topology = self.sharding.mesh.topology,
-            .device = self.platform.getDevices()[@intCast(self.index)],
+            .global_shape = self.sharding.global_shape,
+            .indices = self.indices_iterator.next().?,
+            .shard = self.sharding.shard(),
+            .device = self.device(self.index),
         };
     }
 
-    fn devices(self: DeviceShardIterator) []const *const Device {
-        // todo: compute mapping from indices to physical devices.
-        // For now, we just return the devices from the platform.
-        return self.platform.getDevices();
+    fn device(self: DeviceShardIterator, index: usize) *const Device {
+        const devices = self.platform.getDevices();
+
+        if (index < 0 or index >= devices.len) {
+            stdx.debug.panic("DeviceShardIterator: index out of bounds: {} for devices of length {}", .{ index, devices.len });
+        }
+
+        return devices[@intCast(index)];
     }
 };
 
 pub const Sharding = struct {
     mesh: Mesh,
-    shape: Shape,
-    strides: []const i64, // todo : check usage of strides, maybe remove?
+    global_shape: Shape,
 
     pub const Type = enum {
         replicated,
@@ -383,17 +463,16 @@ pub const Sharding = struct {
     pub fn init(mesh: Mesh, shape: Shape) Sharding {
         return .{
             .mesh = mesh,
-            .shape = shape,
-            .strides = shape.computeStrides().constSlice(),
+            .global_shape = shape,
         };
     }
 
     pub fn getType(self: Sharding) Type {
-        if (!self.shape.hasAtLeastOnePartitionedAxis()) {
+        if (!self.global_shape.hasAtLeastOnePartitionedAxis()) {
             return .replicated;
         }
 
-        if (self.shape.isFullyPartitioned()) {
+        if (self.global_shape.isFullyPartitioned()) {
             return .maximal;
         }
 
@@ -401,28 +480,27 @@ pub const Sharding = struct {
     }
 
     pub fn shard(self: Sharding) Shape {
-        var s: Shape = .init(.{}, self.shape.dtype());
+        var shard_: Shape = .init(.{}, self.global_shape.dtype());
 
-        for (0..self.shape.rank()) |dim| {
-            const mesh_axis = self.shape.partition(dim);
+        for (0..self.global_shape.rank()) |dim| {
+            const mesh_axis = self.global_shape.partition(dim);
 
             if (mesh_axis == Shape.TagUnknown) {
-                s = s.appendDim(self.shape.dim(dim), self.shape.tag(dim));
+                shard_ = shard_.appendDim(self.global_shape.dim(dim), self.global_shape.tag(dim));
             } else {
                 const mesh_dim = self.mesh.topology.dim(mesh_axis);
-                const d = @divExact(self.shape.dim(dim), mesh_dim);
-                s = s.appendDim(d, self.shape.tag(dim));
+                const d = @divExact(self.global_shape.dim(dim), mesh_dim);
+                shard_ = shard_.appendDim(d, self.global_shape.tag(dim));
             }
         }
 
-        return s;
+        return shard_;
     }
 
     pub fn iterator(self: Sharding, platform: Platform) DeviceShardIterator {
         const indices_iterator = self.mesh.iterator();
 
         return .{
-            .len = indices_iterator.len,
             .platform = platform,
             .indices_iterator = indices_iterator,
             .sharding = self,
@@ -458,12 +536,12 @@ pub const Sharding = struct {
                 // This logic is identical to your pjrtArgs calculation, which is correct.
                 // We are calculating the starting position of this shard's tile
                 // within the larger global tensor layout.
-                const global_strides_ba = self.sharding.shape.computeStrides();
+                const global_strides_ba = self.sharding.global_shape.computeStrides();
                 const global_strides = global_strides_ba.constSlice();
                 var offset_in_bytes: i64 = 0;
 
-                for (0..self.sharding.shape.rank()) |i| {
-                    const mesh_axis_tag = self.sharding.shape.partition(i);
+                for (0..self.sharding.global_shape.rank()) |i| {
+                    const mesh_axis_tag = self.sharding.global_shape.partition(i);
                     if (mesh_axis_tag != Shape.TagUnknown) {
                         const device_coord_on_mesh_axis = device_shard.indices.dim(mesh_axis_tag);
                         const shard_dim_size = device_shard.shard.dim(i);
@@ -514,9 +592,9 @@ pub const Sharding = struct {
         allocator: std.mem.Allocator,
     ) !void {
         stdx.debug.assert(pjrt_buffers.len == self.mesh.numPartitions(), "Expected {} PJRT buffers, got {}", .{ self.mesh.numPartitions(), pjrt_buffers.len });
-        stdx.debug.assert(dest_buffer.len == self.shape.byteSize(), "Destination buffer size mismatch: expected {} bytes, got {}", .{ self.shape.byteSize(), dest_buffer.len });
+        stdx.debug.assert(dest_buffer.len == self.global_shape.byteSize(), "Destination buffer size mismatch: expected {} bytes, got {}", .{ self.global_shape.byteSize(), dest_buffer.len });
 
-        const global_shape = self.shape;
+        const global_shape = self.global_shape;
         const element_size = global_shape.dtype().sizeOf(); // <-- DEFINED HERE
 
         // We need the GLOBAL strides in units of elements, not bytes.
@@ -551,7 +629,7 @@ pub const Sharding = struct {
                 // Calculate destination flat index from shard_coords
                 var dest_flat_index: usize = 0;
                 for (shard_coords, 0..) |shard_coord_val, dim_idx| {
-                    const mesh_axis_tag = self.shape.partition(dim_idx);
+                    const mesh_axis_tag = self.global_shape.partition(dim_idx);
                     const global_coord_for_dim = if (mesh_axis_tag == Shape.TagUnknown)
                         shard_coord_val
                     else blk: {
@@ -582,8 +660,8 @@ pub const Sharding = struct {
             return;
         }
         try writer.writeAll("{devices=[");
-        for (0..self.shape.rank()) |i| {
-            const mesh_axis = self.shape.partition(i);
+        for (0..self.global_shape.rank()) |i| {
+            const mesh_axis = self.global_shape.partition(i);
 
             var dim: i64 = 1;
 
@@ -593,7 +671,7 @@ pub const Sharding = struct {
             }
 
             try writer.print("{d}", .{dim});
-            if (i < self.shape.rank() - 1) try writer.writeByte(',');
+            if (i < self.global_shape.rank() - 1) try writer.writeByte(',');
         }
         try writer.print("]<=[{d}]}}", .{self.mesh.numPartitions()});
     }
@@ -606,13 +684,13 @@ pub const Sharding = struct {
     ) !void {
         _ = fmt; // autofix
         _ = options;
-        try writer.print("Sharding(shape={} mesh={})", .{ self.shape, self.mesh });
+        try writer.print("Sharding(global_shape={} mesh={})", .{ self.global_shape, self.mesh });
     }
 };
 
 test "Sharding All Cases" {
     const allocator = std.testing.allocator;
-    const verbose = true; // <<< SET THIS TO `true` FOR DETAILED LOGGING!
+    const verbose = false; // <<< SET THIS TO `true` FOR DETAILED LOGGING!
 
     // Case 1: Fully Replicated on 1D Mesh
     // Tensor {8, 8} is copied in its entirety to all 4 devices.
@@ -708,8 +786,9 @@ fn testShardingCase(
         device_shards_meta.items,
     );
     defer allocator.free(reassembled_slice);
+
     if (verbose) {
-        std.debug.print("Reassembled full slice of data: {any}\n\n", .{Shaped(i32, sharding.shape, reassembled_slice)});
+        std.debug.print("Reassembled full slice of data: {any}\n\n", .{Shaped(i32, sharding.global_shape, reassembled_slice)});
     }
 
     // 5. Verify correctness
@@ -739,7 +818,7 @@ pub const ShardOnDevice = struct {
     }
 
     pub fn shape(self: ShardOnDevice) Shape {
-        return Shape.init(self.dims, dtypeFromBufferType(self.buffer_type));
+        return .init(self.dims, dtypeFromBufferType(self.buffer_type));
     }
 
     pub fn deinit(self: ShardOnDevice) void {
@@ -747,13 +826,13 @@ pub const ShardOnDevice = struct {
     }
 };
 
-pub fn toDevice(platform: Platform, shard: DeviceShard, slice_: []u8) !ShardOnDevice {
-    const shard_pjrt = shard.pjrtArgs();
+pub fn toDevice(platform: Platform, shard: DeviceShard, data: []u8) !ShardOnDevice {
+    const specs = shard.specs();
     const args = pjrtx.Client.BufferFromHostBufferArgs{
-        .data = slice_[shard_pjrt.start_offset..].ptr,
+        .data = data[specs.start_offset..].ptr,
         .buffer_type = bufferTypeFromDtype(shard.shard.dtype()),
-        .dims = shard_pjrt.dims[0..shard_pjrt.num_dims], // Slice the fixed array
-        .byte_strides = shard_pjrt.byte_strides[0..shard_pjrt.num_dims], // Slice the fixed array
+        .dims = specs.dims[0..specs.num_dims], // Slice the fixed array
+        .byte_strides = specs.byte_strides[0..specs.num_dims], // Slice the fixed array
         .host_buffer_semantics = .ImmutableUntilTransferCompletes,
         .device = shard.device,
     };
@@ -811,7 +890,7 @@ pub fn reassembleFromShards(
         device_shards.len,
     });
 
-    const global_shape = sharding.shape;
+    const global_shape = sharding.global_shape;
     const global_rank = global_shape.rank();
     const element_size = global_shape.dtype().sizeOf();
 
@@ -878,7 +957,7 @@ pub fn reassembleFromShards(
 /// Iterates over all coordinates of a shape, yielding the multi-dimensional
 /// coordinates and the corresponding flat index for each element.
 const MultiDimIterator = struct {
-    shape: Shape,
+    global_shape: Shape,
     coords: [Shape.MAX_RANK]i64,
     flat_index: usize,
     is_done: bool,
@@ -894,7 +973,7 @@ const MultiDimIterator = struct {
     pub fn new(shape: Shape) MultiDimIterator {
         const initial_coords: [Shape.MAX_RANK]i64 = .{0} ** Shape.MAX_RANK;
         return .{
-            .shape = shape,
+            .global_shape = shape,
             .coords = initial_coords,
             .flat_index = 0,
             .is_done = (shape.count() == 0),
@@ -906,7 +985,7 @@ const MultiDimIterator = struct {
             return null;
         }
 
-        const rank = self.shape.rank();
+        const rank = self.global_shape.rank();
 
         // 1. Create the item to return. The assignment from one array (`self.coords`)
         // to another (`item_to_return.coords`) performs a full value copy.
@@ -923,7 +1002,7 @@ const MultiDimIterator = struct {
             i -= 1;
             self.coords[i] += 1;
 
-            if (self.coords[i] < self.shape.dim(i)) {
+            if (self.coords[i] < self.global_shape.dim(i)) {
                 // The state is advanced. Return the pristine copy we made earlier.
                 return item_to_return;
             }
@@ -935,8 +1014,7 @@ const MultiDimIterator = struct {
     }
 };
 
-// --- THE TEST IS ALSO UPDATED TO MATCH THE NEW NextItem STRUCT ---
-test "MultiDimIterator" {
+test MultiDimIterator {
     const shape_2d = Shape.init(.{ .rows = 2, .cols = 3 }, .f32);
     var iter_2d = MultiDimIterator.new(shape_2d);
 
@@ -967,6 +1045,7 @@ test "MultiDimIterator" {
     try std.testing.expect(iter_2d.next() == null);
 }
 
+// todo: temp
 pub fn bufferTypeFromDtype(dt: DataType) pjrtx.BufferType {
     return switch (dt) {
         inline else => |tag| @field(pjrtx.BufferType, @tagName(tag)),

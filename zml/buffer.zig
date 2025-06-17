@@ -62,18 +62,18 @@ pub const Buffer = struct {
 
         var res: Buffer = .{
             ._api = platform.pjrt_api,
-            ._shape = sharding.shape,
+            ._shape = sharding.global_shape,
             ._shards = .{},
         };
 
         while (sharding_devices.next()) |shard| {
-            const pjrt_args = shard.pjrtArgs();
+            const specs = shard.specs();
 
             var args = pjrt.Client.BufferFromHostBufferArgs{
-                .data = data[pjrt_args.start_offset..].ptr,
+                .data = data[specs.start_offset..].ptr,
                 .buffer_type = bufferTypeFromDtype(shard.shard.dtype()),
-                .dims = pjrt_args.dims[0..pjrt_args.num_dims],
-                .byte_strides = pjrt_args.byte_strides[0..pjrt_args.num_dims],
+                .dims = specs.dims[0..specs.num_dims],
+                .byte_strides = specs.byte_strides[0..specs.num_dims],
                 .device = shard.device,
                 .host_buffer_semantics = .ImmutableUntilTransferCompletes,
             };
@@ -88,8 +88,6 @@ pub const Buffer = struct {
             } else {
                 args.device = shard.device;
             }
-
-            log.debug("Creating buffer on device {any} with args {any}", .{ res, args });
 
             const pjrt_buffer, const event = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, args);
 

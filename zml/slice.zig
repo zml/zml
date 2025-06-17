@@ -3,6 +3,8 @@ pub const stdx = @import("stdx");
 
 const Shape = @import("shape.zig").Shape;
 
+const log = std.log.scoped(.@"zml/slice");
+
 /// Creates a slice of type `T` representing the specified `shape`.
 pub fn Shaped(T: type, shape: Shape, slice: []u8) []T {
     stdx.debug.assert(slice.len == shape.byteSize(), "Slice length does not match shape byte size: {} != {}", .{ slice.len, shape.byteSize() });
@@ -33,5 +35,6 @@ pub fn arange(allocator: std.mem.Allocator, shape: Shape, opts: ArangeOpts) ![]u
             }
         },
     }
+    log.debug("Created arange slice of size {d} ptr {*} bytes for {}", .{ slice.len, slice.ptr, shape });
     return slice;
 }
