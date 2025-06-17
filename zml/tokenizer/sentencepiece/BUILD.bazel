@@ -24,12 +24,7 @@ zig_library(
     ],
 )
 
-zig_cc_test(
-    name = "test",
-    deps = [":sentencepiece"],
-)
-
 zig_srcs(
     name = "sources",
-    zig_bin = ":test_test_lib",
+    zig_lib = ":sentencepiece",
 )
