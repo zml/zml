@@ -45,5 +45,17 @@
         "zml",
         "build.zig",
         "build.zig.zon",
+        // bazel files
+        "BUILD.bazel",
+        "MODULE.bazel",
+        "MODULE.bazel.lock",
+        // symlinks
+        ".bazelrc",
+        ".bazelrc-zml",
+        "examples/.bazelrc",
+        ".bazelignore",
+        "examples/.bazelignore",
+        ".bazelversion",
+        "examples/.bazelversion",
     },
 }

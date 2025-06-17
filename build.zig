@@ -375,9 +375,6 @@ pub fn build(b: *std.Build) void {
     }
 
     // zml
-    const zml_srcs_tar = b.addSystemCommand(&.{ "bazel", "build", "//zml:sources" });
-    if (platforms.cpu) zml_srcs_tar.addArg("--@zml//runtimes:cpu=true");
-    if (platforms.cuda) zml_srcs_tar.addArg("--@zml//runtimes:cuda=true");
     const zml = zml_srcs.extractModule(
         "zml",
         "zml",
