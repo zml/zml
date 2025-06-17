@@ -30,14 +30,9 @@ zig_library(
     ],
 )
 
-zig_cc_test(
-    name = "test",
-    deps = [":pjrt"],
-)
-
 zig_srcs(
     name = "sources",
-    zig_bin = ":test_test_lib",
+    zig_lib = ":pjrt",
 )
 
 zig_proto_library(

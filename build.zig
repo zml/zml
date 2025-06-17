@@ -111,9 +111,9 @@ pub fn build(b: *std.Build) void {
     // pjrt
     const pjrt_srcs = Tarball.sources(b, "pjrt");
     const pjrt_c_deps = pjrt_srcs.extractModule(
+        null,
         "pjrt",
-        "pjrt",
-        "test_test_lib_c.zig",
+        "sources_bin_c.zig",
         .{ .link_libcpp = true },
     );
 
@@ -224,7 +224,7 @@ pub fn build(b: *std.Build) void {
     const sentencepiece_c_deps = sentencepiece_c_deps_srcs.extractModule(
         null,
         "zml/tokenizer/sentencepiece",
-        "test_test_lib_c.zig",
+        "sources_bin_c.zig",
         .{ .link_libcpp = true },
     );
     const sentencepiece = zml_srcs.extractModule(
