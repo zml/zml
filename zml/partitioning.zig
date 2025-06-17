@@ -3,6 +3,8 @@ const std = @import("std");
 const stdx = @import("stdx");
 
 const pjrtx = @import("pjrtx.zig");
+const slice = @import("slice.zig");
+const Shaped = slice.Shaped;
 const Context = @import("context.zig").Context;
 const DataType = @import("dtype.zig").DataType;
 const Device = @import("pjrtx.zig").Device;
@@ -39,9 +41,8 @@ pub const TopologyIndicesIterator = struct {
 
     fn computeNextIndices(self: *TopologyIndicesIterator) void {
         var next_indices = self.indices;
-
-        // Change: Start from the last dimension and go to the first.
         var i: usize = self.topology.rank();
+
         while (i > 0) {
             i -= 1;
             const dim: u4 = @intCast(i);
@@ -49,7 +50,7 @@ pub const TopologyIndicesIterator = struct {
             const current_value = next_indices.dim(dim);
             if (current_value < self.topology.dim(dim) - 1) {
                 self.indices = next_indices.setDim(dim, current_value + 1);
-                return; // Found the dimension to increment, we are done.
+                return;
             } else {
                 // This dimension has wrapped around. Reset it to 0 and let the
                 // loop continue to the next (more major) dimension.
@@ -78,6 +79,27 @@ pub const Mesh = struct {
         }
 
         return self;
+    }
+
+    pub fn single() Mesh {
+        const topology: Shape = .init(.{ .x = 1 }, .u8);
+        return .init(topology);
+    }
+
+    pub fn auto(platform: Platform) Mesh {
+        const num_devices = platform.getDevices().len;
+
+        if (num_devices == 0) {
+            stdx.debug.panic("No devices available in the platform: {}", .{platform.target});
+        }
+
+        if (num_devices > MaxMeshSize) {
+            stdx.debug.panic("Too many devices ({}) for a mesh, max is {}", .{ num_devices, MaxMeshSize });
+        }
+
+        const topology: Shape = .init(.{ .x = num_devices }, .u8);
+
+        return .init(topology);
     }
 
     pub fn rank(self: Mesh) i64 {
@@ -173,6 +195,25 @@ test Mesh {
     try std.testing.expect(!mesh_3d.isSinglePartition());
     try std.testing.expect(mesh_3d.numPartitions() == 64);
     try std.testing.expect(mesh_3d.numRequiredDevices() == 64);
+
+    // single mesh
+    const single_mesh: Mesh = .single();
+    try std.testing.expect(single_mesh.rank() == 1);
+    try std.testing.expect(single_mesh.axis(.x) == 1);
+    try std.testing.expect(!single_mesh.isPartitioned());
+    try std.testing.expect(single_mesh.isSinglePartition());
+    try std.testing.expect(single_mesh.numPartitions() == 1);
+    try std.testing.expect(single_mesh.numRequiredDevices() == 1);
+
+    // auto mesh with 4 devices
+    const platform = env(.{ .cpu = .{ .cpu_device_count = 4 } });
+    const auto_mesh: Mesh = .auto(platform);
+    try std.testing.expect(auto_mesh.rank() == 1);
+    try std.testing.expect(auto_mesh.axis(.x) == 4);
+    try std.testing.expect(auto_mesh.isPartitioned());
+    try std.testing.expect(!auto_mesh.isSinglePartition());
+    try std.testing.expect(auto_mesh.numPartitions() == 4);
+    try std.testing.expect(auto_mesh.numRequiredDevices() == 4);
 }
 
 pub const DeviceShard = struct {
@@ -388,6 +429,147 @@ pub const Sharding = struct {
         };
     }
 
+    /// A "packet of instructions" for reassembling a single shard.
+    /// Contains all the dynamic information needed to construct the arguments for
+    /// a `PJRT_Buffer_ToHostBuffer` call for one shard.
+    pub const ReassemblyOp = struct {
+        /// The byte offset from the start of the global host buffer where this
+        /// shard's data begins. The caller adds this to the global buffer's base
+        /// address to get the `dst` pointer for the PJRT call.
+        start_offset_in_bytes: usize,
+
+        /// The dimensions of this specific shard (e.g., {16, 2}).
+        /// This is used to set the `dims` field in the `PJRT_Buffer_MemoryLayout`.
+        shard_dims: [Shape.MAX_RANK]i64,
+
+        /// Metadata about the shard this operation applies to. The `index` field
+        /// is crucial for selecting the correct source `pjrt.Buffer`.
+        shard_meta: DeviceShard,
+    };
+
+    /// An iterator that generates the necessary operations to reassemble a
+    /// global tensor from its shards.
+    pub const ReassemblyOpIterator = struct {
+        sharding: Sharding,
+        device_shard_iter: DeviceShardIterator,
+
+        pub fn next(self: *ReassemblyOpIterator) !?ReassemblyOp {
+            if (self.device_shard_iter.next()) |device_shard| {
+                // This logic is identical to your pjrtArgs calculation, which is correct.
+                // We are calculating the starting position of this shard's tile
+                // within the larger global tensor layout.
+                const global_strides_ba = self.sharding.shape.computeStrides();
+                const global_strides = global_strides_ba.constSlice();
+                var offset_in_bytes: i64 = 0;
+
+                for (0..self.sharding.shape.rank()) |i| {
+                    const mesh_axis_tag = self.sharding.shape.partition(i);
+                    if (mesh_axis_tag != Shape.TagUnknown) {
+                        const device_coord_on_mesh_axis = device_shard.indices.dim(mesh_axis_tag);
+                        const shard_dim_size = device_shard.shard.dim(i);
+                        const start_element_in_dim = device_coord_on_mesh_axis * shard_dim_size;
+                        offset_in_bytes += start_element_in_dim * global_strides[i];
+                    }
+                }
+
+                // The dimensions for the copy are simply the shard's dimensions.
+                var dims_buffer: [Shape.MAX_RANK]i64 = .{0} ** Shape.MAX_RANK;
+                const shard_dims = device_shard.shard.dims();
+                @memcpy(dims_buffer[0..shard_dims.len], shard_dims);
+
+                return ReassemblyOp{
+                    .start_offset_in_bytes = @intCast(offset_in_bytes),
+                    .shard_dims = dims_buffer,
+                    .shard_meta = device_shard,
+                };
+            } else {
+                return null;
+            }
+        }
+    };
+
+    /// Creates an iterator that yields the operations needed to reassemble the tensor.
+    pub fn reassemblyOps(self: Sharding, platform: Platform) !ReassemblyOpIterator {
+        return ReassemblyOpIterator{
+            .sharding = self,
+            .device_shard_iter = self.iterator(platform),
+        };
+    }
+
+    /// Reassembles the full tensor from a slice of PJRT buffers into a host buffer.
+    ///
+    /// This function is the high-level entry point for retrieving sharded data.
+    /// It orchestrates multiple asynchronous `PJRT_Buffer_ToHostBuffer` calls.
+    ///
+    /// - platform: The active platform containing the PJRT client and API pointers.
+    /// - pjrt_buffers: A slice of pointers to the source `pjrt.Buffer` objects on the devices.
+    ///   The order of these buffers MUST match the device order from the sharding iterator.
+    /// - dest_buffer: The pre-allocated host buffer to write the result into.
+    /// - allocator: Used to temporarily store PJRT_Event handles.
+    pub fn reassembleFromPjrtBuffers(
+        self: Sharding,
+        platform: Platform,
+        pjrt_buffers: []const *pjrtx.Buffer,
+        dest_buffer: []u8,
+        allocator: std.mem.Allocator,
+    ) !void {
+        stdx.debug.assert(pjrt_buffers.len == self.mesh.numPartitions(), "Expected {} PJRT buffers, got {}", .{ self.mesh.numPartitions(), pjrt_buffers.len });
+        stdx.debug.assert(dest_buffer.len == self.shape.byteSize(), "Destination buffer size mismatch: expected {} bytes, got {}", .{ self.shape.byteSize(), dest_buffer.len });
+
+        const global_shape = self.shape;
+        const element_size = global_shape.dtype().sizeOf(); // <-- DEFINED HERE
+
+        // We need the GLOBAL strides in units of elements, not bytes.
+        const global_element_strides = getGlobalElementStrides(global_shape);
+
+        // Allocate a temporary buffer on the host, large enough for one shard.
+        const temp_shard_buffer = try allocator.alloc(u8, self.shard().byteSize());
+        defer allocator.free(temp_shard_buffer);
+
+        // Get an iterator that provides metadata for each shard.
+        var sharding_iter = self.iterator(platform);
+
+        while (sharding_iter.next()) |device_shard| {
+            const shard_index: usize = @intCast(device_shard.index);
+            const src_buffer = pjrt_buffers[shard_index];
+            const shard_shape = device_shard.shard;
+            const shard_contiguous_slice = temp_shard_buffer[0..shard_shape.byteSize()];
+
+            // STEP A: Device -> Temp Host Buffer (this is correct)
+            const event = try src_buffer.toHostBuffer(platform.pjrt_api, shard_contiguous_slice, .{});
+            if (event) |e| {
+                try e.await_(platform.pjrt_api);
+                // e.deinit(platform.pjrt_api);
+            }
+
+            // STEP B: Manually copy using a generic N-dimensional approach.
+            // This replaces the flawed row-by-row copy.
+            var inner_iter = MultiDimIterator.new(shard_shape);
+            while (inner_iter.next()) |item| {
+                const shard_coords = item.coords[0..item.rank];
+
+                // Calculate destination flat index from shard_coords
+                var dest_flat_index: usize = 0;
+                for (shard_coords, 0..) |shard_coord_val, dim_idx| {
+                    const mesh_axis_tag = self.shape.partition(dim_idx);
+                    const global_coord_for_dim = if (mesh_axis_tag == Shape.TagUnknown)
+                        shard_coord_val
+                    else blk: {
+                        const device_coord_on_mesh_axis = device_shard.indices.dim(mesh_axis_tag);
+                        const shard_dim_size = shard_shape.dim(dim_idx);
+                        break :blk (device_coord_on_mesh_axis * shard_dim_size) + shard_coord_val;
+                    };
+                    dest_flat_index += @as(usize, @intCast(global_coord_for_dim)) * global_element_strides[dim_idx];
+                }
+
+                const src_byte_offset = item.flat_index * element_size;
+                const dest_byte_offset = dest_flat_index * element_size;
+
+                @memcpy(dest_buffer[dest_byte_offset..][0..element_size], shard_contiguous_slice[src_byte_offset..][0..element_size]);
+            }
+        }
+    }
+
     pub fn shardingString(self: Sharding) []const u8 {
         var sharding_str: std.BoundedArray(u8, 128) = .{};
         self.writeShardingRepresentation(sharding_str.writer()) catch unreachable;
@@ -428,44 +610,111 @@ pub const Sharding = struct {
     }
 };
 
-test "Sharding" {
-    {
-        // const mesh: Mesh = .init(.{ .x = 1 });
-        // var shape: Shape = .init(.{ .m = 2, .k = 6 }, .i32);
+test "Sharding All Cases" {
+    const allocator = std.testing.allocator;
+    const verbose = true; // <<< SET THIS TO `true` FOR DETAILED LOGGING!
 
-        // const mesh: Mesh = .init(.{ .x = 8 });
-        // var shape: Shape = .init(.{ .m = 16, .k = 16 }, .i32);
+    // Case 1: Fully Replicated on 1D Mesh
+    // Tensor {8, 8} is copied in its entirety to all 4 devices.
+    try testShardingCase(allocator, .init(.{ .x = 4 }), .init(.{ .m = 8, .k = 8 }, .i32), .{}, verbose);
 
-        const mesh: Mesh = .init(.{ .x = 2, .y = 3 });
-        var shape: Shape = .init(.{ .m = 2, .k = 6 }, .i32);
+    // Case 2: 1D Partitioning
+    // Tensor {16, 16} partitioned on 'k' across an 8-device mesh.
+    try testShardingCase(allocator, .init(.{ .x = 8 }), .init(.{ .m = 16, .k = 16 }, .i32), .{ .x = .k }, verbose);
 
-        // const mesh: Mesh = .init(.{ .x = 2, .y = 2 });
-        // var shape: Shape = .init(.{ .m = 2, .k = 2 }, .i32);
+    // Case 3: 2D Partitioning of 2D Tensor
+    // Tensor {8, 12} partitioned on 'm' by 'x' and 'k' by 'y'.
+    try testShardingCase(allocator, .init(.{ .x = 2, .y = 4 }), .init(.{ .m = 8, .k = 12 }, .i32), .{ .x = .m, .y = .k }, verbose);
 
-        const platform = env(.{ .cpu = .{ .cpu_device_count = mesh.numRequiredDevices() } });
+    // Case 4: Partial Partitioning (Mixed Replicated/Partitioned)
+    // 3D Tensor {4, 8, 6}. 'b' is replicated. 'h' and 'w' are partitioned.
+    try testShardingCase(allocator, .init(.{ .x = 2, .y = 2 }), .init(.{ .b = 4, .h = 8, .w = 6 }, .i32), .{ .x = .h, .y = .w }, verbose);
 
-        // Partially partitioned sharding
-        const shape_partitioned = shape.withPartitionning(.{ .y = .k });
-        // const shape_partitioned = shape.withPartitionning(.{});
-        const sharding: Sharding = .init(mesh, shape_partitioned);
+    // Case 5: Fully Partitioned 3D Tensor
+    // The complex case from your previous successful test.
+    try testShardingCase(allocator, .init(.{ .x = 2, .y = 4, .z = 3 }), .init(.{ .m = 4, .k = 8, .j = 6 }, .i32), .{ .x = .m, .y = .k, .z = .j }, verbose);
 
-        std.debug.print("Sharding: {}\n", .{sharding});
+    // --- NEW TEST CASES ---
 
-        var iter = sharding.iterator(platform);
+    // Case 6: 2D Tensor on 1D Mesh (Unused Mesh Axis)
+    // Partition 'k' using mesh axis 'x'. Mesh axis 'y' is unused by this sharding spec.
+    try testShardingCase(allocator, .init(.{ .x = 2, .y = 3 }), .init(.{ .m = 10, .k = 6 }, .i32), .{ .x = .k }, verbose);
 
-        const demo_slice = try allocateDemoSlice(std.testing.allocator, shape_partitioned);
-        defer std.testing.allocator.free(demo_slice);
+    // Case 7: Replicated on a 2D Mesh
+    // A sanity check. The logic should be identical to Case 1, but on a more complex mesh.
+    try testShardingCase(allocator, .init(.{ .x = 2, .y = 2 }), .init(.{ .m = 4, .k = 4 }, .i32), .{}, verbose);
 
-        std.debug.print("Full slice of data: {d}\n\n", .{items(demo_slice, shape_partitioned, i32)});
+    // Case 8: Non-Contiguous Partitioning
+    // Partitioning the first and third dimensions of a 3D tensor, while the middle one is replicated.
+    // This is a great test for the striding and offset logic.
+    try testShardingCase(allocator, .init(.{ .x = 2, .y = 2 }), .init(.{ .batch = 4, .seq_len = 10, .features = 8 }, .i32), .{ .x = .batch, .y = .features }, verbose);
 
-        while (iter.next()) |device_shard| {
+    // Case 9: Single Device "Partitioning"
+    // Partitioning a dimension by a mesh axis of size 1 should be a no-op.
+    try testShardingCase(allocator, .init(.{ .x = 1, .y = 4 }), .init(.{ .m = 8, .k = 8 }, .i32), .{ .x = .m, .y = .k }, verbose);
+}
+
+fn testShardingCase(
+    allocator: std.mem.Allocator,
+    mesh: Mesh,
+    shape: Shape,
+    partition_spec: anytype,
+    verbose: bool,
+) !void {
+    _platform = null; // Reset the global platform
+    const platform = env(.{ .cpu = .{ .cpu_device_count = mesh.numRequiredDevices() } });
+
+    // 1. Setup the sharding
+    const shape_partitioned = shape.withPartitionning(partition_spec);
+    const sharding = Sharding.init(mesh, shape_partitioned);
+    std.debug.print("\n--- Testing Case (verbose={any}) --- Sharding: {}\n", .{ verbose, sharding });
+
+    // 2. Create original host data
+    const demo_slice = try slice.arange(allocator, shape_partitioned, .{});
+    defer allocator.free(demo_slice);
+    if (verbose) {
+        std.debug.print("Original full slice of data: {any}\n\n", .{Shaped(i32, shape_partitioned, demo_slice)});
+    }
+
+    // 3. Simulate sending to devices and collecting shards
+    var shards_on_device = std.ArrayList(ShardOnDevice).init(allocator);
+    defer {
+        for (shards_on_device.items) |s| s.deinit();
+        shards_on_device.deinit();
+    }
+    var device_shards_meta = std.ArrayList(DeviceShard).init(allocator);
+    defer device_shards_meta.deinit();
+
+    var iter = sharding.iterator(platform);
+    while (iter.next()) |device_shard| {
+        const shard_on_device = try toDevice(platform, device_shard, demo_slice);
+        try shards_on_device.append(shard_on_device);
+        try device_shards_meta.append(device_shard);
+
+        if (verbose) {
             std.debug.print("{}\n", .{device_shard});
-
-            const shard_on_device = try toDevice(platform, device_shard, demo_slice);
-            defer shard_on_device.deinit();
-            std.debug.print("{any} - shard data slice: {any}\n\n", .{ shard_on_device, items(shard_on_device.data, shard_on_device.shape(), i32) });
+            std.debug.print("{any} - shard data slice: {any}\n\n", .{ shard_on_device, Shaped(i32, shard_on_device.shape(), shard_on_device.data) });
         }
     }
+
+    // 4. Reassemble the data
+    if (verbose) {
+        std.debug.print("--- Reassembling from shards ---\n", .{});
+    }
+    const reassembled_slice = try reassembleFromShards(
+        allocator,
+        sharding,
+        shards_on_device.items,
+        device_shards_meta.items,
+    );
+    defer allocator.free(reassembled_slice);
+    if (verbose) {
+        std.debug.print("Reassembled full slice of data: {any}\n\n", .{Shaped(i32, sharding.shape, reassembled_slice)});
+    }
+
+    // 5. Verify correctness
+    try std.testing.expectEqualSlices(u8, demo_slice, reassembled_slice);
+    std.debug.print("✅ Verification successful for: {}\n", .{sharding});
 }
 
 pub const ShardOnDevice = struct {
@@ -498,10 +747,10 @@ pub const ShardOnDevice = struct {
     }
 };
 
-pub fn toDevice(platform: Platform, shard: DeviceShard, slice: []u8) !ShardOnDevice {
+pub fn toDevice(platform: Platform, shard: DeviceShard, slice_: []u8) !ShardOnDevice {
     const shard_pjrt = shard.pjrtArgs();
     const args = pjrtx.Client.BufferFromHostBufferArgs{
-        .data = slice[shard_pjrt.start_offset..].ptr,
+        .data = slice_[shard_pjrt.start_offset..].ptr,
         .buffer_type = bufferTypeFromDtype(shard.shard.dtype()),
         .dims = shard_pjrt.dims[0..shard_pjrt.num_dims], // Slice the fixed array
         .byte_strides = shard_pjrt.byte_strides[0..shard_pjrt.num_dims], // Slice the fixed array
@@ -522,7 +771,7 @@ pub fn toDevice(platform: Platform, shard: DeviceShard, slice: []u8) !ShardOnDev
     const size = try pjrt_buffer.getOnDeviceSizeInBytes(platform.pjrt_api);
 
     const data_buffer = try std.testing.allocator.alloc(u8, size);
-    const to_host_event = try pjrt_buffer.toHostBuffer(platform.pjrt_api, data_buffer);
+    const to_host_event = try pjrt_buffer.toHostBuffer(platform.pjrt_api, data_buffer, .{});
 
     if (to_host_event) |ev| {
         try ev.await_(platform.pjrt_api);
@@ -539,30 +788,183 @@ pub fn toDevice(platform: Platform, shard: DeviceShard, slice: []u8) !ShardOnDev
     // pjrt_buffer.toHostBuffer(api: *const Api, dst: []u8)
 }
 
-pub fn allocateDemoSlice(allocator: std.mem.Allocator, shape: Shape) ![]u8 {
-    const start: i64 = 0;
-    const step: i64 = 1;
-    const slice = try allocator.alloc(u8, shape.byteSize());
+/// Reassembles a full global tensor on the host from a collection of device shards.
+///
+/// This version is hardened to ensure the rank of each shard matches the global rank,
+/// which is a requirement for this reassembly logic.
+///
+/// - allocator: The memory allocator to use for the new global buffer.
+/// - sharding: The Sharding object describing the global layout and mesh.
+/// - shards_on_device: A slice of ShardOnDevice objects, containing the actual data from each device.
+/// - device_shards: A slice of DeviceShard metadata, corresponding to each ShardOnDevice.
+///
+/// Returns a new `[]u8` slice containing the reassembled data, owned by the caller.
+pub fn reassembleFromShards(
+    allocator: std.mem.Allocator,
+    sharding: Sharding,
+    shards_on_device: []const ShardOnDevice,
+    device_shards: []const DeviceShard,
+) ![]u8 {
+    stdx.debug.assert(shards_on_device.len == device_shards.len and shards_on_device.len == sharding.mesh.numPartitions(), "Mismatch in number of shards: expected {d}, got {d} and {d}.", .{
+        sharding.mesh.numPartitions(),
+        shards_on_device.len,
+        device_shards.len,
+    });
 
-    switch (shape.dtype()) {
-        inline else => |d| if (comptime d.class() != .integer) {
-            stdx.debug.assert(shape.dtype().class() == .integer, "arange expects type to be integer, got {} instead.", .{shape.dtype()});
-        } else {
-            const Zt = d.toZigType();
-            var j: i64 = start;
-            for (items(slice, shape, Zt)) |*val| {
-                val.* = @intCast(j);
-                j +%= step;
-            }
-        },
+    const global_shape = sharding.shape;
+    const global_rank = global_shape.rank();
+    const element_size = global_shape.dtype().sizeOf();
+
+    const global_buffer = try allocator.alloc(u8, global_shape.byteSize());
+    errdefer allocator.free(global_buffer);
+
+    // Calculate the strides of the global tensor in *elements*.
+    var global_element_strides: [Shape.MAX_RANK]usize = undefined;
+    if (global_rank > 0) {
+        global_element_strides[global_rank - 1] = 1;
+        var i: usize = global_rank - 1;
+        while (i > 0) {
+            i -= 1;
+            global_element_strides[i] = global_element_strides[i + 1] * @as(usize, @intCast(global_shape.dim(i + 1)));
+        }
     }
 
-    return slice;
+    // Iterate over each shard and "paint" its data onto the global buffer.
+    for (shards_on_device, device_shards) |shard_on_device, device_shard| {
+        const shard_shape = device_shard.shard;
+
+        // --- HARDENED CHECK ---
+        // Add a clear panic if the fundamental assumption of this function is violated.
+        if (shard_shape.rank() != global_rank) {
+            stdx.debug.panic(
+                "Rank mismatch: Cannot reassemble shard with shape {} (rank={d}) into global shape {} (rank={d}). " ++
+                    "This can happen if sharding involves splitting axes, which this function does not support.",
+                .{ shard_shape, shard_shape.rank(), global_shape, global_rank },
+            );
+        }
+
+        var shard_iterator = MultiDimIterator.new(shard_shape);
+        while (shard_iterator.next()) |item| {
+            const shard_coords = item.coords[0..item.rank];
+            const src_flat_index = item.flat_index;
+
+            var dest_flat_index: usize = 0;
+            for (shard_coords, 0..) |shard_coord_val, dim_idx| {
+                var global_coord_for_dim: i64 = 0;
+
+                // This call is now safe because we've asserted that dim_idx will be in bounds.
+                const mesh_axis_tag = global_shape.partition(dim_idx);
+
+                if (mesh_axis_tag == Shape.TagUnknown) {
+                    global_coord_for_dim = shard_coord_val;
+                } else {
+                    const device_coord_on_mesh_axis = device_shard.indices.dim(mesh_axis_tag);
+                    const shard_dim_size = shard_shape.dim(dim_idx);
+                    global_coord_for_dim = (device_coord_on_mesh_axis * shard_dim_size) + shard_coord_val;
+                }
+
+                dest_flat_index += @as(usize, @intCast(global_coord_for_dim)) * global_element_strides[dim_idx];
+            }
+
+            const src_byte_offset = src_flat_index * element_size;
+            const dest_byte_offset = dest_flat_index * element_size;
+            @memcpy(global_buffer[dest_byte_offset .. dest_byte_offset + element_size], shard_on_device.data[src_byte_offset .. src_byte_offset + element_size]);
+        }
+    }
+
+    return global_buffer;
 }
 
-fn items(slice: []u8, shape: Shape, T: type) []T {
-    const ptr: [*]T = @alignCast(@constCast(@ptrCast(slice.ptr)));
-    return ptr[0..shape.count()];
+/// Iterates over all coordinates of a shape, yielding the multi-dimensional
+/// coordinates and the corresponding flat index for each element.
+const MultiDimIterator = struct {
+    shape: Shape,
+    coords: [Shape.MAX_RANK]i64,
+    flat_index: usize,
+    is_done: bool,
+
+    // --- THIS IS THE CRITICAL CHANGE ---
+    // The item now holds an ARRAY, not a slice. This ensures it owns a true copy.
+    pub const NextItem = struct {
+        coords: [Shape.MAX_RANK]i64,
+        rank: u4,
+        flat_index: usize,
+    };
+
+    pub fn new(shape: Shape) MultiDimIterator {
+        const initial_coords: [Shape.MAX_RANK]i64 = .{0} ** Shape.MAX_RANK;
+        return .{
+            .shape = shape,
+            .coords = initial_coords,
+            .flat_index = 0,
+            .is_done = (shape.count() == 0),
+        };
+    }
+
+    pub fn next(self: *MultiDimIterator) ?NextItem {
+        if (self.is_done) {
+            return null;
+        }
+
+        const rank = self.shape.rank();
+
+        // 1. Create the item to return. The assignment from one array (`self.coords`)
+        // to another (`item_to_return.coords`) performs a full value copy.
+        const item_to_return = NextItem{
+            .coords = self.coords, // This is now a value copy.
+            .rank = rank,
+            .flat_index = self.flat_index,
+        };
+
+        // 2. Now, we can safely advance the iterator's internal state.
+        self.flat_index += 1;
+        var i: usize = rank;
+        while (i > 0) {
+            i -= 1;
+            self.coords[i] += 1;
+
+            if (self.coords[i] < self.shape.dim(i)) {
+                // The state is advanced. Return the pristine copy we made earlier.
+                return item_to_return;
+            }
+            self.coords[i] = 0;
+        }
+
+        self.is_done = true;
+        return item_to_return;
+    }
+};
+
+// --- THE TEST IS ALSO UPDATED TO MATCH THE NEW NextItem STRUCT ---
+test "MultiDimIterator" {
+    const shape_2d = Shape.init(.{ .rows = 2, .cols = 3 }, .f32);
+    var iter_2d = MultiDimIterator.new(shape_2d);
+
+    var item = iter_2d.next().?;
+    try std.testing.expectEqualSlices(i64, &.{ 0, 0 }, item.coords[0..item.rank]);
+    try std.testing.expectEqual(@as(usize, 0), item.flat_index);
+
+    item = iter_2d.next().?;
+    try std.testing.expectEqualSlices(i64, &.{ 0, 1 }, item.coords[0..item.rank]);
+    try std.testing.expectEqual(@as(usize, 1), item.flat_index);
+
+    item = iter_2d.next().?;
+    try std.testing.expectEqualSlices(i64, &.{ 0, 2 }, item.coords[0..item.rank]);
+    try std.testing.expectEqual(@as(usize, 2), item.flat_index);
+
+    item = iter_2d.next().?;
+    try std.testing.expectEqualSlices(i64, &.{ 1, 0 }, item.coords[0..item.rank]);
+    try std.testing.expectEqual(@as(usize, 3), item.flat_index);
+
+    item = iter_2d.next().?;
+    try std.testing.expectEqualSlices(i64, &.{ 1, 1 }, item.coords[0..item.rank]);
+    try std.testing.expectEqual(@as(usize, 4), item.flat_index);
+
+    item = iter_2d.next().?;
+    try std.testing.expectEqualSlices(i64, &.{ 1, 2 }, item.coords[0..item.rank]);
+    try std.testing.expectEqual(@as(usize, 5), item.flat_index);
+
+    try std.testing.expect(iter_2d.next() == null);
 }
 
 pub fn bufferTypeFromDtype(dt: DataType) pjrtx.BufferType {
@@ -576,6 +978,34 @@ pub fn dtypeFromBufferType(pjrt_type: pjrtx.BufferType) DataType {
         .invalid => @panic("Found an invalid pjrt buffer"),
         inline else => |tag| @field(DataType, @tagName(tag)),
     };
+}
+
+/// Calculates the strides of a shape in units of elements.
+/// For a shape {d0, d1, d2}, the strides would be {d1*d2, d2, 1}.
+/// This is used to convert multi-dimensional coordinates to a flat 1D index.
+fn getGlobalElementStrides(shape: Shape) [Shape.MAX_RANK]usize {
+    const rank = shape.rank();
+    var strides: [Shape.MAX_RANK]usize = .{0} ** Shape.MAX_RANK;
+
+    if (rank == 0) {
+        // A scalar has no strides, but returning {1} can be useful sometimes.
+        // Let's stick to {0} for safety.
+        return strides;
+    }
+
+    // The stride for the innermost (last) dimension is always 1 element.
+    strides[rank - 1] = 1;
+
+    // Work backwards from the second-to-last dimension.
+    var i: usize = rank - 1;
+    while (i > 0) {
+        i -= 1;
+        // The stride for dimension `i` is the product of all dimensions after it.
+        // This is equivalent to `stride[i+1] * shape.dim(i+1)`.
+        strides[i] = strides[i + 1] * @as(usize, @intCast(shape.dim(i + 1)));
+    }
+
+    return strides;
 }
 
 // todo: temp (zig deps and compilation story...)

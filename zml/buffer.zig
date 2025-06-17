@@ -67,11 +67,13 @@ pub const Buffer = struct {
         };
 
         while (sharding_devices.next()) |shard| {
+            const pjrt_args = shard.pjrtArgs();
+
             var args = pjrt.Client.BufferFromHostBufferArgs{
-                .data = shard.data(data).ptr,
+                .data = data[pjrt_args.start_offset..].ptr,
                 .buffer_type = bufferTypeFromDtype(shard.shard.dtype()),
-                .dims = shard.shard.dims(),
-                .byte_strides = shard.strides,
+                .dims = pjrt_args.dims[0..pjrt_args.num_dims],
+                .byte_strides = pjrt_args.byte_strides[0..pjrt_args.num_dims],
                 .device = shard.device,
                 .host_buffer_semantics = .ImmutableUntilTransferCompletes,
             };
@@ -103,6 +105,16 @@ pub const Buffer = struct {
         }
 
         return res;
+    }
+
+    pub const ToHostOptions = struct {};
+    pub fn toHost3(self: Buffer, sharding: Sharding, data: []const u8, opts: ToHostOptions) ![]u8 {
+        _ = sharding; // autofix
+        _ = data; // autofix
+        _ = opts; // autofix
+        const shards_ = self._shards.constSlice();
+        _ = shards_; // autofix
+
     }
 
     pub fn awaitt(self: Buffer) !Buffer {
@@ -293,7 +305,7 @@ pub const Buffer = struct {
         stdx.debug.assert(self._shape.byteSize() == @sizeOf(T), "Buffer {} has {d} bytes of data, can't load it to a {s} with {d} bytes", .{ self, self._shape.byteSize(), @typeName(T), @sizeOf(T) });
         var res: T = undefined;
         stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
-        const maybe_event = try self._shards.get(0).toHostBuffer(self._api, std.mem.asBytes(&res));
+        const maybe_event = try self._shards.get(0).toHostBuffer(self._api, std.mem.asBytes(&res), .{});
         if (maybe_event) |event| {
             try event.await_(self._api);
         }
@@ -305,7 +317,7 @@ pub const Buffer = struct {
     /// The returned `HostBuffer` doesn't own the memory.
     pub fn toHost(self: Buffer, output: []u8) !HostBuffer {
         stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
-        const maybe_event = try self._shards.get(0).toHostBuffer(self._api, output);
+        const maybe_event = try self._shards.get(0).toHostBuffer(self._api, output, .{});
         if (maybe_event) |event| {
             try event.await_(self._api);
         }
@@ -317,7 +329,7 @@ pub const Buffer = struct {
     pub fn toHostAlloc(self: Buffer, allocator: std.mem.Allocator) !HostBuffer {
         const output = try HostBuffer.empty(allocator, self.shape());
         stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
-        const maybe_event = try self._shards.get(0).toHostBuffer(self._api, @constCast(output.bytes()));
+        const maybe_event = try self._shards.get(0).toHostBuffer(self._api, @constCast(output.bytes()), .{});
         if (maybe_event) |event| {
             try event.await_(self._api);
         }

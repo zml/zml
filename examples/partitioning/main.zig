@@ -19,7 +19,7 @@ const Model = struct {
     pub fn forward(self: Model, a: zml.Tensor, b: zml.Tensor) zml.Tensor {
         _ = self; // autofix
         // return a.add(b);
-        return a.dot(b, .{.k}); // .withSharding(mesh, .{ .y = .m });
+        return a.add(b); // .withSharding(mesh, .{ .y = .m });
     }
 };
 
@@ -30,10 +30,10 @@ pub fn main() !void {
 pub fn asyncMain() !void {
     const CliArgs = struct {
         pub const help =
-            \\ partitioning --size=4096 --dtype=f16
+            \\ partitioning --size=64 --dtype=i32
         ;
-        size: usize = 4096,
-        dtype: zml.DataType = .f16,
+        size: usize = 8,
+        dtype: zml.DataType = .i32,
     };
 
     // Short lived allocations
@@ -51,7 +51,7 @@ pub fn asyncMain() !void {
     var args = std.process.args();
     const cli_args = flags.parse(&args, CliArgs);
 
-    const mesh: zml.Mesh = .init(.{ .y = 4 });
+    const mesh: zml.Mesh = .init(.{ .x = 2, .y = 2 });
 
     const platform = context.autoPlatform(.{ .cpu = .{ .cpu_device_count = mesh.numRequiredDevices() } }).withCompilationOptions(.{
         .sharding_enabled = true,
@@ -60,8 +60,8 @@ pub fn asyncMain() !void {
 
     const shape: zml.Shape = .init(.{ cli_args.size, cli_args.size }, cli_args.dtype);
 
-    const a_shape = shape.withTags(.{ .m, .k }).withPartitionning(.{ .y = .k });
-    const b_shape = shape.withTags(.{ .k, .n }).withPartitionning(.{ .y = .k });
+    const a_shape = shape.withTags(.{ .m, .k }).withPartitionning(.{ .x = .m, .y = .k });
+    const b_shape = shape.withTags(.{ .k, .n }).withPartitionning(.{ .x = .k, .y = .n });
 
     const buffers: zml.aio.BufferStore.Buffers = .{};
 
@@ -86,30 +86,74 @@ pub fn asyncMain() !void {
     const sharding: zml.Sharding = .init(mesh, a_shape);
     log.info("Sharding: {}", .{sharding});
 
-    const a_buffer_alloc = try allocator.alloc(u8, a_shape.byteSize());
-    defer allocator.free(a_buffer_alloc);
-    const a_slice = std.mem.bytesAsSlice(f16, a_buffer_alloc);
-    @memset(a_slice, 1.0);
-    log.debug("Created buffer of size {d} ptr {*} bytes for shape: {s}", .{ a_buffer_alloc.len, a_buffer_alloc.ptr, a_shape });
+    const a_buffer_slice = try zml.slice.arange(allocator, a_shape, .{});
+    defer allocator.free(a_buffer_slice);
+    log.debug("Created arange slice of size {d} ptr {*} bytes for shape: {s}: {}", .{
+        a_buffer_slice.len,
+        a_buffer_slice.ptr,
+        a_shape,
+        zml.HostBuffer.fromBytes(a_shape, a_buffer_slice).pretty(),
+    });
 
-    const a_buffer = try zml.Buffer.from(platform, sharding, a_buffer_alloc, .{});
+    const a_buffer = try zml.Buffer.from(platform, sharding, a_buffer_slice, .{});
     defer a_buffer.deinit();
 
-    const b_buffer_alloc = try allocator.alloc(u8, b_shape.byteSize());
-    defer allocator.free(b_buffer_alloc);
-    const b_slice = std.mem.bytesAsSlice(f16, b_buffer_alloc);
-    @memset(b_slice, 1.0);
-    log.debug("Created buffer of size {d} ptr {*} bytes for shape: {s}", .{ b_buffer_alloc.len, b_buffer_alloc.ptr, b_shape });
+    const b_buffer_slice = try allocateArangeSlice(allocator, a_shape);
+    defer allocator.free(b_buffer_slice);
+    log.debug("Created arange slice of size {d} ptr {*} bytes for shape: {s}: {}", .{
+        b_buffer_slice.len,
+        b_buffer_slice.ptr,
+        a_shape,
+        zml.HostBuffer.fromBytes(a_shape, b_buffer_slice).pretty(),
+    });
 
-    const b_buffer = try zml.Buffer.from(platform, sharding, b_buffer_alloc, .{});
+    const b_buffer = try zml.Buffer.from(platform, sharding, b_buffer_slice, .{});
     defer b_buffer.deinit();
 
     log.info("✅ Running model....", .{});
     var result: zml.Buffer = executable.call(.{ a_buffer, b_buffer });
     defer result.deinit();
 
-    const cpu_result = try result.toHostAlloc(allocator);
-    defer cpu_result.deinit(allocator);
+    // --- 2. Call the high-level reassembly function ---
+    const reassembled_buffer = try allocator.alloc(u8, sharding.shape.byteSize());
+    defer allocator.free(reassembled_buffer);
 
-    log.info("Result: {any}", .{cpu_result.pretty()});
+    try sharding.reassembleFromPjrtBuffers(
+        platform,
+        result._shards.constSlice(),
+        reassembled_buffer,
+        allocator,
+    );
+
+    log.warn("Reassembled buffer: {any}", .{
+        // items(reassembled_buffer, sharding.shape, i32),
+        zml.HostBuffer.fromBytes(sharding.shape, reassembled_buffer).pretty(),
+    });
+
+    // const cpu_result = try result.toHostAlloc(allocator);
+    // defer cpu_result.deinit(allocator);
+
+    // log.info("Result: {any}", .{cpu_result.pretty()});
+}
+
+pub fn allocateArangeSlice(allocator: std.mem.Allocator, shape: zml.Shape) ![]u8 {
+    const start: i64 = 0;
+    const step: i64 = 1;
+    const slice = try allocator.alloc(u8, shape.byteSize());
+    errdefer allocator.free(slice);
+
+    switch (shape.dtype()) {
+        inline else => |d| if (comptime d.class() != .integer) {
+            stdx.debug.assert(shape.dtype().class() == .integer, "arange expects type to be integer, got {} instead.", .{shape.dtype()});
+        } else {
+            const Zt = d.toZigType();
+            var j: i64 = start;
+            for (zml.Shaped(Zt, shape, slice)) |*val| {
+                val.* = @intCast(j);
+                j += step;
+            }
+        },
+    }
+
+    return slice;
 }

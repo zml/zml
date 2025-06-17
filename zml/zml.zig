@@ -31,12 +31,13 @@ pub const partitioning = @import("partitioning.zig");
 pub const platform = @import("platform.zig");
 pub const mlir = @import("mlirx.zig");
 pub const pjrt = @import("pjrtx.zig");
+pub const slice = @import("slice.zig");
 pub const testing = @import("testing.zig");
 pub const torch = @import("torch.zig");
 
 // pub const tokenizer = @import("tokenizer.zig");
 pub const tokenizer = @import("zml/tokenizer");
-
+pub const Shaped = slice.Shaped;
 pub const call = ops.call;
 pub const compile = exe.compile;
 pub const compileWithPrefix = exe.compileWithPrefix;
