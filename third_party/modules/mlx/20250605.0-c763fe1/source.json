@@ -1,0 +1,15 @@
+{
+  "strip_prefix": "mlx-c763fe1be0f1158e0f53f6f6a28f56d69b1c7fe8",
+  "url": "https://github.com/ml-explore/mlx/archive/c763fe1be0f1158e0f53f6f6a28f56d69b1c7fe8.tar.gz",
+  "integrity": "sha256-vE091y6Qc9r0cw/dU2OCCDosZzCXZfTv0tp7Zi2YqYE=",
+  "overlay": {
+    "metal_cpp.bzl": "",
+    "jit.bzl": "",
+    "MODULE.bazel": "",
+    "BUILD.bazel": ""
+  },
+  "patch_strip": 1,
+  "patches": {
+    "0001-Modify-Sort-And-Comparison-Kernels.patch": ""
+  }
+}

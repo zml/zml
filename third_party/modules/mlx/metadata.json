@@ -11,7 +11,8 @@
     "github:ml-explore/mlx"
   ],
   "versions": [
-    "20250518.0-eebe730"
+    "20250518.0-eebe730",
+    "20250605.0-c763fe1"
   ],
   "yanked_versions": {}
 }

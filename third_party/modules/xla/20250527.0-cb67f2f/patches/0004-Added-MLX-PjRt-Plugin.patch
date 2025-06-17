@@ -212,10 +212,10 @@ index 0000000000..94bc83ea41
 \ No newline at end of file
 diff --git a/xla/pjrt/plugin/mlx/buffer.cc b/xla/pjrt/plugin/mlx/buffer.cc
 new file mode 100644
-index 0000000000..c4e7d410ac
+index 0000000000..750a793c1f
 --- /dev/null
 +++ b/xla/pjrt/plugin/mlx/buffer.cc
-@@ -0,0 +1,371 @@
+@@ -0,0 +1,366 @@
 +/* Copyright 2024 The OpenXLA Authors.
 +Licensed under the Apache License, Version 2.0 (the "License");
 +you may not use this file except in compliance with the License.
@@ -324,13 +324,11 @@ index 0000000000..c4e7d410ac
 +  MlxPjrtBuffer& operator=(MlxPjrtBuffer&&) = delete;
 +
 +  static std::unique_ptr<MlxPjrtBuffer> CreateFromLiteral(
-+      mx::array array, const xla::LiteralSlice& literal,
++      const mx::array& array, const xla::LiteralSlice& literal,
 +      xla::PjRtMemorySpace* memory_space) {
-+    // TRACE_ME;
-+    LOG(INFO) << "CreateFromLiteral: " << literal.ToString() << "\n";
++    TRACE_ME;
 +    auto buffer =
 +        std::make_unique<MlxPjrtBuffer>(array, literal.shape(), memory_space);
-+    LOG(INFO) << "CreateFromLiteral -> " << (void*)buffer.get() << "\n";
 +    mlir::Builder builder(&buffer->context_);
 +    auto attr = xla::CreateDenseElementsAttrFromLiteral(literal, builder);
 +    if (!attr.ok()) {
@@ -345,14 +343,12 @@ index 0000000000..c4e7d410ac
 +  static std::unique_ptr<MlxPjrtBuffer> CreateFromAttribute(
 +      mx::array array, DenseElementsAttr attr,
 +      xla::PjRtMemorySpace* memory_space) {
-+    // TRACE_ME;
++    TRACE_ME;
 +
 +    // MLIR type to xla shape:
 +    Shape shape = xla::TypeToShape(attr.getType());
 +    auto buffer = std::make_unique<MlxPjrtBuffer>(array, shape, memory_space);
 +    buffer->buffer_ = CloneIntoContext(attr, buffer->context_);
-+    LOG(INFO) << "CreateFromAttribute(" << ToString(attr) << ") -> "
-+              << (void*)buffer.get() << "\n";
 +    return buffer;
 +  }
 +
@@ -369,6 +365,7 @@ index 0000000000..c4e7d410ac
 +    // TRACE_ME_MEMBER;
 +    return client()->platform_id();
 +  }
++
 +  absl::string_view platform_name() const {
 +    // TRACE_ME_MEMBER;
 +    return client()->platform_name();
@@ -455,6 +452,7 @@ index 0000000000..c4e7d410ac
 +  void Delete() override {
 +    // TRACE_ME_MEMBER;
 +    buffer_ = {};
++    array_ = mx::array({});  // Reset the array to empty.
 +  }
 +
 +  bool IsDeleted() override {
@@ -484,7 +482,6 @@ index 0000000000..c4e7d410ac
 +
 +  xla::PjRtFuture<> GetReadyFuture() override {
 +    // TRACE_ME_MEMBER;
-+    LOG(INFO) << "GetReadyFuture(" << (void*)this << ")\n";
 +    // Synchronous! To make async, have the device make a buffer with a ready
 +    // future that is ready when the computation is done / buffer is ready.
 +    return PjRtFuture<>(absl::OkStatus());
@@ -501,7 +498,7 @@ index 0000000000..c4e7d410ac
 +
 +  mlir::DenseElementsAttr GetBufferAttribute() const { return buffer_; }
 +
-+  mx::array GetArray() const { return array_; }
++  mx::array& GetArray() { return array_; }
 +
 + private:
 +  MLIRContext context_;
@@ -513,8 +510,8 @@ index 0000000000..c4e7d410ac
 +};
 +
 +std::unique_ptr<xla::PjRtBuffer> CreateMlirBufferFromMlxArray(
-+    mx::array array, xla::PjRtMemorySpace* memory_space) {
-+  // TRACE_ME;
++    const mx::array& array, xla::PjRtMemorySpace* memory_space) {
++  TRACE_ME;
 +  std::vector<int64_t> span_shape(array.shape().begin(), array.shape().end());
 +  auto shape = xla::ShapeUtil::MakeShape(
 +      utils::dtype::asXlaPrimitiveType(array.dtype()),
@@ -526,7 +523,7 @@ index 0000000000..c4e7d410ac
 +
 +std::unique_ptr<PjRtBuffer> CreateMlirBufferFromLiteral(
 +    const xla::LiteralSlice& literal, xla::PjRtMemorySpace* memory_space) {
-+  // TRACE_ME;
++  TRACE_ME;
 +  auto maybe_array = utils::array::fromHostLiteral(literal);
 +  return MlxPjrtBuffer::CreateFromLiteral(maybe_array.value(), literal,
 +                                          memory_space);
@@ -535,13 +532,13 @@ index 0000000000..c4e7d410ac
 +std::unique_ptr<PjRtBuffer> CreateMlirBufferFromAttribute(
 +    mx::array array, DenseElementsAttr attr,
 +    xla::PjRtMemorySpace* memory_space) {
-+  // TRACE_ME;
++  TRACE_ME;
 +  return MlxPjrtBuffer::CreateFromAttribute(array, attr, memory_space);
 +}
 +
 +std::unique_ptr<PjRtBuffer> CreateMlirBufferUninitialized(
 +    const xla::Shape& shape, PjRtMemorySpace* memory_space) {
-+  // TRACE_ME;
++  TRACE_ME;
 +  // TODO (@cryptodeal): C API doesn't implement this, but
 +  // we'll want to ensure when the Buffer is initialized,
 +  // the resulting array is correct shape/dtype.
@@ -553,7 +550,7 @@ index 0000000000..c4e7d410ac
 +
 +absl::StatusOr<mlir::DenseElementsAttr> GetAttributeFromBuffer(
 +    xla::PjRtBuffer* buffer) {
-+  // TRACE_ME;
++  TRACE_ME;
 +  if (buffer == nullptr || buffer->IsDeleted()) {
 +    return xla::InvalidArgument("Buffer is null or deleted");
 +  }
@@ -561,13 +558,11 @@ index 0000000000..c4e7d410ac
 +  if (mlir_buffer == nullptr) {
 +    return xla::InvalidArgument("Buffer is not a MlxPjrtBuffer");
 +  }
-+  LOG(INFO) << "GetAttributeFromBuffer(" << (void*)buffer << ") -> "
-+            << ToString(mlir_buffer->GetBufferAttribute()) << "\n";
 +  return mlir_buffer->GetBufferAttribute();
 +}
 +
 +absl::StatusOr<mx::array> GetArrayFromBuffer(xla::PjRtBuffer* buffer) {
-+  // TRACE_ME;
++  TRACE_ME;
 +  if (buffer == nullptr || buffer->IsDeleted()) {
 +    return xla::InvalidArgument("Buffer is null or deleted");
 +  }
@@ -590,7 +585,7 @@ index 0000000000..c4e7d410ac
 \ No newline at end of file
 diff --git a/xla/pjrt/plugin/mlx/buffer.h b/xla/pjrt/plugin/mlx/buffer.h
 new file mode 100644
-index 0000000000..1740f3c779
+index 0000000000..da37e97645
 --- /dev/null
 +++ b/xla/pjrt/plugin/mlx/buffer.h
 @@ -0,0 +1,43 @@
@@ -620,7 +615,7 @@ index 0000000000..1740f3c779
 +
 +namespace mlir::stablehlo {
 +std::unique_ptr<xla::PjRtBuffer> CreateMlirBufferFromMlxArray(
-+    mx::array array, xla::PjRtMemorySpace* memory_space);
++    const mx::array& array, xla::PjRtMemorySpace* memory_space);
 +std::unique_ptr<xla::PjRtBuffer> CreateMlirBufferFromLiteral(
 +    const xla::LiteralSlice& literal, xla::PjRtMemorySpace* memory_space);
 +std::unique_ptr<xla::PjRtBuffer> CreateMlirBufferFromAttribute(
@@ -1349,10 +1344,10 @@ index 0000000000..ef42968a3a
 \ No newline at end of file
 diff --git a/xla/pjrt/plugin/mlx/executable.cc b/xla/pjrt/plugin/mlx/executable.cc
 new file mode 100644
-index 0000000000..c1ceac0c7c
+index 0000000000..02aaf61559
 --- /dev/null
 +++ b/xla/pjrt/plugin/mlx/executable.cc
-@@ -0,0 +1,2337 @@
+@@ -0,0 +1,2356 @@
 +/* Copyright 2024 The OpenXLA Authors.
 +Licensed under the Apache License, Version 2.0 (the "License");
 +you may not use this file except in compliance with the License.
@@ -3379,10 +3374,11 @@ index 0000000000..c1ceac0c7c
 +        module_(cloneIntoContext(module, context_)) {
 +    // TRACE_ME_MEMBER;
 +    auto main = module.lookupSymbol<mlir::func::FuncOp>("main");
++
 +    // std::cout << "Started call to `mlx::compile`" << std::endl << std::endl;
 +    // module.dump();
 +    // std::cout << std::endl;
-+    compileModule(module, op_lookup_);
++    compileModule(module_.get(), op_lookup_);
 +    // try {
 +    auto& main_block = main.front();
 +    compiled_module_ =
@@ -3407,7 +3403,7 @@ index 0000000000..c1ceac0c7c
 +  static absl::StatusOr<std::unique_ptr<PjRtLoadedExecutable>> CompileAndLoad(
 +      ModuleOp module, DeviceAssignment assignment,
 +      absl::Span<PjRtDevice* const> devices, PjRtClient* client) {
-+    // TRACE_ME;
++    TRACE_ME;
 +
 +    mlir::BaseScopedDiagnosticHandler diagnostic_handler(module->getContext());
 +    if (failed(decomposeChloToStablehlo(module))) {
@@ -3424,7 +3420,17 @@ index 0000000000..c1ceac0c7c
 +      return module_status;
 +    }
 +
-+    // std::cout << ToString(module).c_str() << std::endl << std::endl;
++    // auto device_info = mx::metal::device_info();
++    // for (const auto& [key, value] : device_info) {
++    //   std::cout << key << ": ";
++
++    //   std::visit([](const auto& v) { std::cout << v; }, value);
++
++    //   std::cout << std::endl;
++    // }
++
++    // std::cout << ToString(module).c_str() << std::endl << std::endl <<
++    // std::endl;
 +
 +    auto executable = std::make_unique<MlirLoadedExecutable>(module, assignment,
 +                                                             devices, client);
@@ -3493,32 +3499,31 @@ index 0000000000..c1ceac0c7c
 +      absl::Span<PjRtBuffer* const> argument_handles, ModuleOp module,
 +      PjRtDevice* device, bool fill_future) {
 +    // TRACE_ME_MEMBER;
-+    SmallVector<DenseElementsAttr> input_attrs;
-+    for (auto* arg : argument_handles) {
-+      TF_ASSIGN_OR_RETURN(auto mlirArg, GetAttributeFromBuffer(arg));
-+      auto mlirArgInModuleContext =
-+          CloneIntoContext(mlirArg, *module->getContext());
-+      input_attrs.push_back(mlirArgInModuleContext);
-+    }
++    // SmallVector<DenseElementsAttr> input_attrs;
++    // for (auto* arg : argument_handles) {
++    //   TF_ASSIGN_OR_RETURN(auto mlirArg, GetAttributeFromBuffer(arg));
++    //   auto mlirArgInModuleContext =
++    //       CloneIntoContext(mlirArg, *module->getContext());
++    //   input_attrs.push_back(mlirArgInModuleContext);
++    // }
 +    // LOG(INFO) << "EvalModule:\n" << ToString(module) << "\n";
 +    // LOG(INFO) << "Inputs: " << ToString(inputs) << "\n";
 +    // TF_ASSIGN_OR_RETURN(auto mlx_res, evalModule(module, inputs));
 +
 +    std::vector<mx::array> inputs;
 +    // unsigned in_count = 0;
-+    for (auto& attr : input_attrs) {
-+      TF_ASSIGN_OR_RETURN(mx::array input,
-+                          utils::array::fromDenseElementsAttr(attr));
++    for (auto& buffer : argument_handles) {
++      TF_ASSIGN_OR_RETURN(mx::array input, GetArrayFromBuffer(buffer));
 +      // std::cout << "inputs[" << std::to_string(in_count++) << "]: " << input
 +      //           << std::endl;
 +      inputs.push_back(input);
 +    }
-+
 +    auto mlx_res = compiled_module_(inputs);
 +    for (auto& a : mlx_res) {
 +      a = mx::contiguous(a);
 +    }
 +    mx::eval(mlx_res);
++
 +    // unsigned out_count = 0;
 +    // for (auto& a : mlx_res) {
 +    //   std::cout << "outputs[" << std::to_string(out_count++) << "]: " << a
@@ -3530,10 +3535,11 @@ index 0000000000..c1ceac0c7c
 +    // Naive memory space selection, only using CPU global memory.
 +    PjRtMemorySpace* memory_space =
 +        device->default_memory_space().value_or(nullptr);
-+    std::vector<std::unique_ptr<PjRtBuffer>> buffer_results;
++
++    std::vector<std::unique_ptr<PjRtBuffer>> buffer_results(mlx_res.size());
 +    for (auto i = 0; i < mlx_res.size(); i++) {
-+      buffer_results.push_back(
-+          CreateMlirBufferFromMlxArray(mlx_res[i], memory_space));
++      buffer_results[i] =
++          CreateMlirBufferFromMlxArray(mlx_res[i], memory_space);
 +    }
 +
 +    std::optional<PjRtFuture<>> future;
@@ -3542,6 +3548,7 @@ index 0000000000..c1ceac0c7c
 +      // is ready when the computation is done.
 +      future = PjRtFuture<>(absl::OkStatus());
 +    }
++
 +    return PjRtLoadedExecutable::Result{future, std::move(buffer_results)};
 +  }
 +
@@ -3606,11 +3613,15 @@ index 0000000000..c1ceac0c7c
 +    return std::move(result.buffers);
 +  }
 +
++  // TODO (@cryptodeal): Implement `SerializeExecutable`
++  // absl::StatusOr<std::string> SerializeExecutable() {}
++
 +  void Delete() override {
 +    // TRACE_ME_MEMBER;
 +    module_.release();
 +    module_ = nullptr;
 +  }
++
 +  bool IsDeleted() override {
 +    // TRACE_ME_MEMBER;
 +    return !module_;
@@ -3621,15 +3632,18 @@ index 0000000000..c1ceac0c7c
 +    // TRACE_ME_MEMBER;
 +    return assignment_.replica_count();
 +  }
++
 +  int num_partitions() const override {
 +    // TRACE_ME_MEMBER;
 +    return assignment_.computation_count();
 +  }
++
 +  int64_t SizeOfGeneratedCodeInBytes() const override {
 +    // No generated code.. so just return 1.
 +    // TRACE_ME_MEMBER;
 +    return 1;
 +  }
++
 +  absl::string_view name() const override {
 +    // TRACE_ME_MEMBER;
 +    return name_;
@@ -3674,7 +3688,7 @@ index 0000000000..c1ceac0c7c
 +
 +absl::StatusOr<std::unique_ptr<xla::PjRtLoadedExecutable>> StablehloMlxCompile(
 +    mlir::ModuleOp module, DeviceAssignment assignment, PjRtClient* client) {
-+  // TRACE_ME;
++  TRACE_ME;
 +  return MlirLoadedExecutable::CompileAndLoad(module, assignment,
 +                                              client->devices(), client);
 +}
@@ -3682,7 +3696,7 @@ index 0000000000..c1ceac0c7c
 +absl::StatusOr<std::unique_ptr<xla::PjRtLoadedExecutable>> StablehloMlxCompile(
 +    xla::XlaComputation const& computation, xla::DeviceAssignment assignment,
 +    xla::PjRtClient* client) {
-+  // TRACE_ME;
++  TRACE_ME;
 +  MLIRContext context;
 +  TF_ASSIGN_OR_RETURN(auto module,
 +                      ConvertHloToStablehlo(context, &computation.proto()));
@@ -4039,7 +4053,7 @@ index 0000000000..3f21f67baf
 \ No newline at end of file
 diff --git a/xla/pjrt/plugin/mlx/logging.h b/xla/pjrt/plugin/mlx/logging.h
 new file mode 100644
-index 0000000000..762dfabbcc
+index 0000000000..58f296ab2f
 --- /dev/null
 +++ b/xla/pjrt/plugin/mlx/logging.h
 @@ -0,0 +1,42 @@
@@ -4068,7 +4082,7 @@ index 0000000000..762dfabbcc
 +#define LOG_UNIMPLEMENTED(name) \
 +  LOG(ERROR) << "MlxPjRtBuffer::" #name " is not implemented"
 +
-+#define TRACE_ME LOG(INFO) << __func__;
++#define TRACE_ME LOG(INFO) << __func__ << "\n";
 +
 +#define TRACE_ME_MEMBER LOG(INFO) << __func__ << "(" << (void*)this << ")\n";
 +

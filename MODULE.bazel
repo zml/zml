@@ -1,6 +1,15 @@
 module(
     name = "zml",
 )
+# local_path_override(
+#     module_name = "xla",
+#     path = "../xla",
+# )
+
+# local_path_override(
+#     module_name = "mlx",
+#     path = "../mlx_master",
+# )
 
 bazel_dep(name = "abseil-cpp", version = "20240722.0.bcr.2")
 bazel_dep(name = "aspect_bazel_lib", version = "2.14.0")

@@ -19,7 +19,7 @@ bazel_dep(name = "rules_shell", version = "0.4.1")
 bazel_dep(name = "bazel_features", version = "1.25.0", repo_name = "proto_bazel_features")
 
 # MLX PjRt Plugin Dependencies
-bazel_dep(name = "mlx", version = "20250518.0-eebe730")
+bazel_dep(name = "mlx", version = "20250605.0-c763fe1")
 
 workspace_private = use_extension("//:workspace_private.bzl", "workspace_private")
 use_repo(
