@@ -74,21 +74,17 @@ pub const Api = struct {
 
     inner: c.PJRT_Api,
 
-    pub fn loadFrom(library: []const u8) !*const Api {
+    pub fn loadFrom(library: [:0]const u8) !*const Api {
         var lib: std.DynLib = switch (builtin.os.tag) {
             .linux => blk: {
-                const library_c = try std.posix.toPosixPath(library);
-                break :blk .{
-                    .inner = .{
-                        .handle = c.dlopen(&library_c, c.RTLD_LAZY | c.RTLD_LOCAL | c.RTLD_NODELETE) orelse {
-                            log.err("Unable to dlopen plugin: {s}", .{library});
-                            return error.FileNotFound;
-                        },
-                    },
+                const handle = std.c.dlopen(library, .{ .LAZY = true, .GLOBAL = false, .NODELETE = true }) orelse {
+                    log.err("Unable to dlopen plugin: {s}", .{library});
+                    return error.FileNotFound;
                 };
+                break :blk .{ .inner = .{ .handle = handle } };
             },
             else => std.DynLib.open(library) catch |err| {
-                log.warn("Failed to load {s}", .{library});
+                log.err("Unable to dlopen plugin: {s}", .{library});
                 return err;
             },
         };
