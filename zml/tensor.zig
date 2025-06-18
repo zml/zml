@@ -168,7 +168,7 @@ pub const Tensor = struct {
         return res;
     }
 
-    pub fn clearPartitioning(self: Tensor) Tensor {
+    pub fn replicated(self: Tensor) Tensor {
         var res = self;
         res._shape = self._shape.clearPartitioning();
         return res;
@@ -180,7 +180,7 @@ pub const Tensor = struct {
         return switch (self._id) {
             .arg_id, .mlir => {
                 const ctx = self.getContext();
-                const mesh_ = ctx._main_mesh;
+                const mesh_ = ctx.currentMesh();
                 const mlir_ctx = ctx.mlirCtx();
 
                 if (mesh_.isSinglePartition()) return self;

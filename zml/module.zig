@@ -166,6 +166,10 @@ pub const CompilationContext = struct {
         return _current.?;
     }
 
+    pub fn currentMesh(self: *const CompilationContext) Mesh {
+        return self._current_mesh orelse self._main_mesh;
+    }
+
     pub fn target(self: *const CompilationContext) Target {
         return self._platform.target;
     }
@@ -426,7 +430,7 @@ pub const CompilationContext = struct {
         const res_attrs = try arena.alloc(AttributeList, out_tensor_count);
         @memset(res_attrs, .{});
 
-        const mesh = self._current_mesh orelse self._main_mesh;
+        const mesh = self.currentMesh();
 
         log.warn("{s} / kind : {s} mesh : {} {any}", .{ opts.name, @tagName(opts.kind), mesh, input_shapes.items });
 
@@ -611,7 +615,7 @@ pub const CompilationContext = struct {
 
         // first, do the "compile" and check the bytecode
         // the result of this will also have the correct tags of the result shapes
-        const mesh = self._current_mesh orelse self._main_mesh;
+        const mesh = self.currentMesh();
         const args_hash = hashArgs(args) % hashArgs(mesh);
         const key: FnKey = .{ .fn_ptr = &func, .input_hash = args_hash };
 

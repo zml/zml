@@ -42,7 +42,7 @@ const Model = struct {
 
     pub fn forward(self: Model, a: zml.Tensor, b: zml.Tensor) zml.Tensor {
         const a_add_b = a.add(b);
-        const weighted_a: zml.Tensor = zml.call(self.module_with_weights, .forward, .{a.clearPartitioning()});
+        const weighted_a: zml.Tensor = zml.call(self.module_with_weights, .forward, .{a.replicated()});
         zml.pushMesh(self.mesh.?);
         const weighted_b: zml.Tensor = zml.call(self.module_with_weights, .forward, .{weighted_a.withPartitionning(.{ .grid_x = .m, .grid_y = .k })});
         zml.popMesh();
