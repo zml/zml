@@ -485,6 +485,45 @@ pub const Client = opaque {
     }
 };
 
+pub const MemoryStats = struct {
+    // Number of bytes in use.
+    bytes_in_use: u64, // out
+
+    // The peak bytes in use.
+    peak_bytes_in_use: u64, // out
+    peak_bytes_in_use_is_set: bool, // out
+    // Number of allocations.
+    num_allocs: u64, // out
+    num_allocs_is_set: bool, // out
+    // The largest single allocation seen.
+    largest_alloc_size: u64, // out
+    largest_alloc_size_is_set: bool, // out
+    // The upper limit of user-allocatable device memory in bytes.
+    bytes_limit: u64, // out
+    bytes_limit_is_set: bool, // out
+
+    // Number of bytes reserved.
+    bytes_reserved: u64, // out
+    bytes_reserved_is_set: bool, // out
+    // The peak number of bytes reserved.
+    peak_bytes_reserved: u64, // out
+    peak_bytes_reserved_is_set: bool, // out
+    // The upper limit on the number bytes of reservable memory.
+    bytes_reservable_limit: u64, // out
+    bytes_reservable_limit_is_set: bool, // out
+
+    // Largest free block size in bytes.
+    largest_free_block_bytes: u64, // out
+    largest_free_block_bytes_is_set: bool, // out
+
+    // Number of bytes of memory held by the allocator.  This may be higher than
+    // bytes_in_use if the allocator holds a pool of memory (e.g. BFCAllocator).
+    pool_bytes: u64, // out
+    pool_bytes_is_set: bool, // out
+    peak_pool_bytes: u64, // out
+    peak_pool_bytes_is_set: bool, // out
+};
+
 pub const Device = opaque {
     const inner = InnerMixin(c.PJRT_Device).inner;
 
@@ -514,6 +553,35 @@ pub const Device = opaque {
             .device = self.inner(),
         });
         return @ptrCast(ret.memories[0..ret.num_memories]);
+    }
+
+    pub fn memoryStats(self: *const Device, api: *const Api) ApiError!MemoryStats {
+        const ret = try api.call(.PJRT_Device_MemoryStats, .{
+            .device = self.inner(),
+        });
+        return .{
+            .bytes_in_use = @intCast(ret.bytes_in_use),
+            .peak_bytes_in_use = @intCast(ret.peak_bytes_in_use),
+            .peak_bytes_in_use_is_set = ret.peak_bytes_in_use_is_set,
+            .num_allocs = @intCast(ret.num_allocs),
+            .num_allocs_is_set = ret.num_allocs_is_set,
+            .largest_alloc_size = @intCast(ret.largest_alloc_size),
+            .largest_alloc_size_is_set = ret.largest_alloc_size_is_set,
+            .bytes_limit = @intCast(ret.bytes_limit),
+            .bytes_limit_is_set = ret.bytes_limit_is_set,
+            .bytes_reserved = @intCast(ret.bytes_reserved),
+            .bytes_reserved_is_set = ret.bytes_reserved_is_set,
+            .peak_bytes_reserved = @intCast(ret.peak_bytes_reserved),
+            .peak_bytes_reserved_is_set = ret.peak_bytes_reserved_is_set,
+            .bytes_reservable_limit = @intCast(ret.bytes_reservable_limit),
+            .bytes_reservable_limit_is_set = ret.bytes_reservable_limit_is_set,
+            .largest_free_block_bytes = @intCast(ret.largest_free_block_bytes),
+            .largest_free_block_bytes_is_set = ret.largest_free_block_bytes_is_set,
+            .pool_bytes = @intCast(ret.pool_bytes),
+            .pool_bytes_is_set = ret.pool_bytes_is_set,
+            .peak_pool_bytes = @intCast(ret.peak_pool_bytes),
+            .peak_pool_bytes_is_set = ret.peak_pool_bytes_is_set,
+        };
     }
 };
 
