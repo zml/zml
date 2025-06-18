@@ -749,6 +749,12 @@ pub const Shape = struct {
         return res;
     }
 
+    pub fn clearPartitioning(self: Shape) Shape {
+        var res = self;
+        res._partitioning = UnknownPartitioning;
+        return res;
+    }
+
     pub fn withPartitionning(self: Shape, bound_axis: anytype) Shape {
         // todo : check that bound_axis is a struct of enum literals.
         var res = self;

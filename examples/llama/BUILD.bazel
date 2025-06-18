@@ -105,7 +105,7 @@ cc_binary(
         "--tokenizer=$(location @Karpathy-TinyLlama-Tokenizer//file)",
         "--prompt='Once upon a time, there was a little girl named Lily.'",
         "--no-llama3=1",  # don't do template prompt encoding, I'm a simple model
-        "--sharding=false",  # don't shard me, I'm so small
+        "--sharding=true",  # don't shard me, I'm so small
     ],
     data = [
         ":tinyllama_stories15M_json",

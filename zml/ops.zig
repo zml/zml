@@ -9,6 +9,7 @@ const CompilationContext = @import("module.zig").CompilationContext;
 const Context = @import("context.zig").Context;
 const meta = @import("meta.zig");
 const mlirx = @import("mlirx.zig");
+const Mesh = @import("partitioning.zig").Mesh;
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
 const Tensor = @import("tensor.zig").Tensor;

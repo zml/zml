@@ -28,8 +28,33 @@ test {
     std.testing.refAllDecls(@This());
 }
 
+pub fn pushMesh(mesh: Mesh) void {
+    const ctx = CompilationContext.current();
+
+    if (ctx._current_mesh) |m| {
+        if (m.eql(mesh)) {
+            stdx.debug.panic("Mesh already pushed: {}", .{m});
+        }
+
+        stdx.debug.panic("Mesh already exists: {}", .{m});
+    }
+
+    ctx._current_mesh = mesh;
+}
+
+pub fn popMesh() void {
+    const ctx = CompilationContext.current();
+
+    if (ctx._current_mesh) |_| {
+        ctx._current_mesh = null;
+    } else {
+        stdx.debug.panic("No mesh to pop, main mesh: {}", .{ctx._main_mesh});
+    }
+}
+
 pub const MlirFn = struct {
     name: []const u8,
+    mesh: Mesh,
     args_shapes: []Shape,
     res_tensors: *const anyopaque,
     res_types: []mlir.Type,
@@ -53,6 +78,8 @@ pub const CompilationContext = struct {
     _mlir_canonicalizer: mlir.PassManager,
 
     _module: mlir.Module,
+    _main_mesh: Mesh,
+    _current_mesh: ?Mesh,
 
     _blocks: std.BoundedArray(TaggedBlock, 64) = .{},
     _fn_cache: FnCache = .{},
@@ -68,7 +95,7 @@ pub const CompilationContext = struct {
     const TensorToBlockArg = std.AutoHashMapUnmanaged(Tensor._Id, struct { mlir.Value, Tensor._Donation });
     const AttributeList = std.BoundedArray(mlir.NamedAttribute, 3);
 
-    pub fn init(allocator_: std.mem.Allocator, full_name: []const u8, platform: Platform) !CompilationContext {
+    pub fn init(allocator_: std.mem.Allocator, full_name: []const u8, mesh: Mesh, platform: Platform) !CompilationContext {
         const mlir_registry = mlir.Registry.init() catch unreachable;
         inline for (.{ "func", "stablehlo" }) |d| {
             mlir.DialectHandle.fromString(d).insertDialect(mlir_registry);
@@ -101,6 +128,8 @@ pub const CompilationContext = struct {
         return .{
             ._platform = platform,
             ._name = try arena.allocator().dupe(u8, name),
+            ._main_mesh = mesh,
+            ._current_mesh = null,
             ._mlir_ctx = mlir_ctx,
             ._mlir_registry = mlir_registry,
             ._mlir_canonicalizer = canonicalizer,
@@ -166,7 +195,7 @@ pub const CompilationContext = struct {
         var timer = std.time.Timer.start() catch null;
         const tensor_args = try self.tensorFromArgs(stdx.meta.FnArgs(func), arena, args);
         // Run in a dedicated thread because compilation relies on `threadlocal`.
-        const f = try asynk.callBlocking(CompilationContext.emitMlir, .{ self, func, &tensor_args, mesh, CompilationContext.EmitMlirOpts{ .name = "main", .kind = .main } });
+        const f = try asynk.callBlocking(CompilationContext.emitMlir, .{ self, func, &tensor_args, CompilationContext.EmitMlirOpts{ .name = "main", .kind = .main } });
         const module = self._module;
         module.getBody().appendOperation(f.mlir_fn);
 
@@ -323,7 +352,6 @@ pub const CompilationContext = struct {
         self: *CompilationContext,
         comptime func: anytype,
         args: *const stdx.meta.FnArgs(func),
-        mesh: Mesh,
         opts: EmitMlirOpts,
     ) error{OutOfMemory}!MlirFn {
         const frame = self._tracer.frameStart("emitMlir.emit");
@@ -398,11 +426,16 @@ pub const CompilationContext = struct {
         const res_attrs = try arena.alloc(AttributeList, out_tensor_count);
         @memset(res_attrs, .{});
 
+        const mesh = self._current_mesh orelse self._main_mesh;
+
+        log.warn("{s} / kind : {s} mesh : {} {any}", .{ opts.name, @tagName(opts.kind), mesh, input_shapes.items });
+
         if (opts.kind == .main) {
             self.addDonationsAttributes(arg_attrs, fn_res_donations);
             self.addOutputMemoryKindAttributes(res_attrs, fn_res_output_memory_kind);
-            self.addShardingAttributes(mesh, arg_attrs, res_attrs, input_shapes.items, fn_res_shapes);
         }
+
+        self.addShardingAttributes(mesh, arg_attrs, res_attrs, input_shapes.items, fn_res_shapes);
 
         const mlir_fn = dialect.func.func(self.mlirCtx(), .{
             .sym_name = opts.name,
@@ -427,6 +460,7 @@ pub const CompilationContext = struct {
 
         return .{
             .mlir_fn = mlir_fn,
+            .mesh = mesh,
             .name = opts.name,
             .args_shapes = input_shapes.items,
             .res_tensors = fn_res,
@@ -542,6 +576,7 @@ pub const CompilationContext = struct {
             attr.appendAssumeCapacity(.named(ctx, "mhlo.sharding", self.getShardingAttr(Sharding.init(mesh, shape))));
         }
     }
+
     pub fn getShardingAttr(self: CompilationContext, sharding: Sharding) mlir.Attribute {
         const ctx = self.mlirCtx();
         var sharding_str: std.BoundedArray(u8, 128) = .{};
@@ -567,7 +602,6 @@ pub const CompilationContext = struct {
         func_name: [:0]const u8,
         comptime func: anytype,
         args: stdx.meta.FnArgs(func),
-        mesh: Mesh,
     ) error{OutOfMemory}!stdx.meta.FnResult(func) {
         var arena_state = std.heap.ArenaAllocator.init(self._arena.child_allocator);
         defer arena_state.deinit();
@@ -577,7 +611,8 @@ pub const CompilationContext = struct {
 
         // first, do the "compile" and check the bytecode
         // the result of this will also have the correct tags of the result shapes
-        const args_hash = hashArgs(args);
+        const mesh = self._current_mesh orelse self._main_mesh;
+        const args_hash = hashArgs(args) % hashArgs(mesh);
         const key: FnKey = .{ .fn_ptr = &func, .input_hash = args_hash };
 
         const function = self._fn_cache.get(key) orelse b: {
@@ -599,7 +634,6 @@ pub const CompilationContext = struct {
             const f = try self.emitMlir(
                 func,
                 &tensor_args,
-                mesh,
                 .{ .name = full_name },
             );
             self._module.getBody().appendOperation(f.mlir_fn);
@@ -1081,6 +1115,7 @@ pub fn hash(hasher: *std.hash.Wyhash, key: anytype, comptime strat: std.hash.Str
     const Key = @TypeOf(key);
     if (Key == Tensor) return hashShape(hasher, key.shape());
     if (Key == Shape) return hashShape(hasher, key);
+    if (Key == Mesh) return hashShape(hasher, key.topology);
 
     if (strat == .Shallow and std.meta.hasUniqueRepresentation(Key)) {
         hasher.update(std.mem.asBytes(&key));

@@ -11,7 +11,7 @@ const meta = @import("meta.zig");
 const pjrt = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const Mesh = partitioning.Mesh;
-const Partition = partitioning.Partition;
+const Sharding = partitioning.Sharding;
 const Shape = @import("shape.zig").Shape;
 const ShapeOf = @import("tensor.zig").ShapeOf;
 
@@ -82,7 +82,7 @@ pub fn compileModel(
     const name = @typeName(ModelT) ++ ".forward";
     log.info("Compiling {s} with {}", .{ name, args_shapes });
 
-    var context = try CompilationContext.init(allocator, name, platform);
+    var context = try CompilationContext.init(allocator, name, mesh, platform);
     defer context.deinit();
 
     return .{ .inner = try context.compileInternal(allocator, func, .{model} ++ args_shapes, mesh) };
@@ -99,7 +99,7 @@ pub fn compileFn(
 ) !FnExe(func) {
     var pretty_name = try prettyFnName(func, allocator);
     defer pretty_name.deinit(allocator);
-    var context = try CompilationContext.init(allocator, pretty_name.items, platform);
+    var context = try CompilationContext.init(allocator, pretty_name.items, platform, mesh);
     defer context.deinit();
 
     return .{ .inner = try context.compileInternal(allocator, func, args, mesh) };
@@ -268,12 +268,14 @@ pub const BaseExe = struct {
         const LocalContext = struct {
             index: u32,
             platform: Platform,
+            mesh: Mesh,
             outputs: []const [*]*pjrt.Buffer,
             output_shapes: []Shape,
         };
         var local_ctx: LocalContext = .{
             .index = 0,
             .platform = self.platform,
+            .mesh = self.mesh,
             .outputs = self.output_per_device,
             .output_shapes = self.result_shapes,
         };
@@ -287,7 +289,8 @@ pub const BaseExe = struct {
                 for (ctx.outputs) |buff| {
                     shards.appendAssumeCapacity(buff[i]);
                 }
-                buffer.* = Buffer.fromPjrtBuffers(ctx.platform, ctx.output_shapes[i], shards.constSlice());
+                const sharding: Sharding = .init(ctx.mesh, ctx.output_shapes[i]);
+                buffer.* = Buffer.fromPjrtBuffers(ctx.platform, sharding, shards.constSlice());
             }
         }).cb, &local_ctx, result);
         stdx.debug.internalAssert(local_ctx.index == self.result_shapes.len, "Pjrt call returned {} tensors, but the return type {s}, contains {} Buffers. Note that modules need to have a comptime know number of returned tensors.", .{ self.output_per_device.len, @typeName(T), local_ctx.index });

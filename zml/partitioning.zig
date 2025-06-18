@@ -20,7 +20,7 @@ test {
 }
 
 pub const MaxMeshSize: u8 = 64;
-pub const MaxMeshAxes: u8 = 8;
+pub const MaxMeshAxes: u8 = Shape.MAX_RANK;
 
 pub const TopologyIndicesIterator = struct {
     index: usize = 0,
@@ -138,6 +138,10 @@ pub const Mesh = struct {
 
     pub fn numRequiredDevices(self: Mesh) u8 {
         return self.numPartitions() * self.numReplicas();
+    }
+
+    pub fn eql(self: Mesh, other: Mesh) bool {
+        return self.topology.eql(other.topology);
     }
 
     pub fn format(
@@ -594,6 +598,27 @@ pub const Sharding = struct {
         stdx.debug.assert(pjrt_buffers.len == self.mesh.numPartitions(), "Expected {} PJRT buffers, got {}", .{ self.mesh.numPartitions(), pjrt_buffers.len });
         stdx.debug.assert(dest_buffer.len == self.global_shape.byteSize(), "Destination buffer size mismatch: expected {} bytes, got {}", .{ self.global_shape.byteSize(), dest_buffer.len });
 
+        if (self.getType() == .replicated) {
+            // If the data is replicated, each shard holds the full tensor.
+            // We only need to copy the data from the first device.
+            if (pjrt_buffers.len == 0) {
+                // Nothing to do if there are no buffers.
+                return;
+            }
+
+            const first_shard_buffer = pjrt_buffers[0];
+
+            // The 'dest_buffer' is already allocated to the full global size.
+            // We can copy directly into it.
+            const event = try first_shard_buffer.toHostBuffer(platform.pjrt_api, dest_buffer, .{});
+            if (event) |e| {
+                // The pjrtx wrapper for await_ also handles deinit.
+                try e.await_(platform.pjrt_api);
+            }
+            // The reassembly is complete.
+            return;
+        }
+
         const global_shape = self.global_shape;
         const element_size = global_shape.dtype().sizeOf(); // <-- DEFINED HERE
 
@@ -622,7 +647,7 @@ pub const Sharding = struct {
 
             // STEP B: Manually copy using a generic N-dimensional approach.
             // This replaces the flawed row-by-row copy.
-            var inner_iter = MultiDimIterator.new(shard_shape);
+            var inner_iter = MultiDimIterator.init(shard_shape);
             while (inner_iter.next()) |item| {
                 const shard_coords = item.coords[0..item.rank];
 
@@ -648,7 +673,7 @@ pub const Sharding = struct {
         }
     }
 
-    pub fn shardingString(self: Sharding) []const u8 {
+    pub fn getShardingAttr(self: Sharding) []const u8 {
         var sharding_str: std.BoundedArray(u8, 128) = .{};
         self.writeShardingRepresentation(sharding_str.writer()) catch unreachable;
         return sharding_str.constSlice();
@@ -690,7 +715,7 @@ pub const Sharding = struct {
 
 test "Sharding All Cases" {
     const allocator = std.testing.allocator;
-    const verbose = false; // <<< SET THIS TO `true` FOR DETAILED LOGGING!
+    const verbose = true; // <<< SET THIS TO `true` FOR DETAILED LOGGING!
 
     // Case 1: Fully Replicated on 1D Mesh
     // Tensor {8, 8} is copied in its entirety to all 4 devices.
@@ -745,7 +770,7 @@ fn testShardingCase(
     // 1. Setup the sharding
     const shape_partitioned = shape.withPartitionning(partition_spec);
     const sharding = Sharding.init(mesh, shape_partitioned);
-    std.debug.print("\n--- Testing Case (verbose={any}) --- Sharding: {}\n", .{ verbose, sharding });
+    std.debug.print("\n--- Testing Case (verbose={any}) --- {}\n", .{ verbose, sharding });
 
     // 2. Create original host data
     const demo_slice = try slice.arange(allocator, shape_partitioned, .{});
@@ -760,14 +785,15 @@ fn testShardingCase(
         for (shards_on_device.items) |s| s.deinit();
         shards_on_device.deinit();
     }
-    var device_shards_meta = std.ArrayList(DeviceShard).init(allocator);
-    defer device_shards_meta.deinit();
+
+    var device_shards = std.ArrayList(DeviceShard).init(allocator);
+    defer device_shards.deinit();
 
     var iter = sharding.iterator(platform);
     while (iter.next()) |device_shard| {
-        const shard_on_device = try toDevice(platform, device_shard, demo_slice);
+        const shard_on_device = try transferAndFetch(platform, device_shard, demo_slice);
         try shards_on_device.append(shard_on_device);
-        try device_shards_meta.append(device_shard);
+        try device_shards.append(device_shard);
 
         if (verbose) {
             std.debug.print("{}\n", .{device_shard});
@@ -783,7 +809,7 @@ fn testShardingCase(
         allocator,
         sharding,
         shards_on_device.items,
-        device_shards_meta.items,
+        device_shards.items,
     );
     defer allocator.free(reassembled_slice);
 
@@ -793,7 +819,7 @@ fn testShardingCase(
 
     // 5. Verify correctness
     try std.testing.expectEqualSlices(u8, demo_slice, reassembled_slice);
-    std.debug.print("✅ Verification successful for: {}\n", .{sharding});
+    std.debug.print("✅ Verification successful for: {}\n\n", .{sharding});
 }
 
 pub const ShardOnDevice = struct {
@@ -826,7 +852,7 @@ pub const ShardOnDevice = struct {
     }
 };
 
-pub fn toDevice(platform: Platform, shard: DeviceShard, data: []u8) !ShardOnDevice {
+pub fn transferAndFetch(platform: Platform, shard: DeviceShard, data: []u8) !ShardOnDevice {
     const specs = shard.specs();
     const args = pjrtx.Client.BufferFromHostBufferArgs{
         .data = data[specs.start_offset..].ptr,
@@ -836,8 +862,6 @@ pub fn toDevice(platform: Platform, shard: DeviceShard, data: []u8) !ShardOnDevi
         .host_buffer_semantics = .ImmutableUntilTransferCompletes,
         .device = shard.device,
     };
-
-    // std.debug.print("Creating buffer on device {any} with args {any}\n", .{ shard.device, args });
 
     const pjrt_buffer, const event = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, args);
 
@@ -862,9 +886,6 @@ pub fn toDevice(platform: Platform, shard: DeviceShard, data: []u8) !ShardOnDevi
         .size = size,
         .data = data_buffer,
     };
-
-    // pjrt_buffer.deinit(platform.pjrt_api);
-    // pjrt_buffer.toHostBuffer(api: *const Api, dst: []u8)
 }
 
 /// Reassembles a full global tensor on the host from a collection of device shards.
@@ -922,7 +943,7 @@ pub fn reassembleFromShards(
             );
         }
 
-        var shard_iterator = MultiDimIterator.new(shard_shape);
+        var shard_iterator = MultiDimIterator.init(shard_shape);
         while (shard_iterator.next()) |item| {
             const shard_coords = item.coords[0..item.rank];
             const src_flat_index = item.flat_index;
@@ -931,7 +952,6 @@ pub fn reassembleFromShards(
             for (shard_coords, 0..) |shard_coord_val, dim_idx| {
                 var global_coord_for_dim: i64 = 0;
 
-                // This call is now safe because we've asserted that dim_idx will be in bounds.
                 const mesh_axis_tag = global_shape.partition(dim_idx);
 
                 if (mesh_axis_tag == Shape.TagUnknown) {
@@ -947,6 +967,7 @@ pub fn reassembleFromShards(
 
             const src_byte_offset = src_flat_index * element_size;
             const dest_byte_offset = dest_flat_index * element_size;
+
             @memcpy(global_buffer[dest_byte_offset .. dest_byte_offset + element_size], shard_on_device.data[src_byte_offset .. src_byte_offset + element_size]);
         }
     }
@@ -962,15 +983,13 @@ const MultiDimIterator = struct {
     flat_index: usize,
     is_done: bool,
 
-    // --- THIS IS THE CRITICAL CHANGE ---
-    // The item now holds an ARRAY, not a slice. This ensures it owns a true copy.
     pub const NextItem = struct {
         coords: [Shape.MAX_RANK]i64,
         rank: u4,
         flat_index: usize,
     };
 
-    pub fn new(shape: Shape) MultiDimIterator {
+    pub fn init(shape: Shape) MultiDimIterator {
         const initial_coords: [Shape.MAX_RANK]i64 = .{0} ** Shape.MAX_RANK;
         return .{
             .global_shape = shape,
@@ -1016,7 +1035,7 @@ const MultiDimIterator = struct {
 
 test MultiDimIterator {
     const shape_2d = Shape.init(.{ .rows = 2, .cols = 3 }, .f32);
-    var iter_2d = MultiDimIterator.new(shape_2d);
+    var iter_2d = MultiDimIterator.init(shape_2d);
 
     var item = iter_2d.next().?;
     try std.testing.expectEqualSlices(i64, &.{ 0, 0 }, item.coords[0..item.rank]);
