@@ -99,8 +99,25 @@ pub const Mesh = struct {
         return .init(topology);
     }
 
+    pub fn reshape(self: Mesh, new_shape: anytype) Mesh {
+        const new_topology = self.topology.reshape(new_shape);
+        return .init(new_topology);
+    }
+
     pub fn rank(self: Mesh) i64 {
         return @intCast(self.topology.rank());
+    }
+
+    pub fn is1D(self: Mesh) bool {
+        return self.rank() == 1;
+    }
+
+    pub fn is2D(self: Mesh) bool {
+        return self.rank() == 2;
+    }
+
+    pub fn is3D(self: Mesh) bool {
+        return self.rank() == 3;
     }
 
     pub fn axis(self: Mesh, ax: anytype) i64 {

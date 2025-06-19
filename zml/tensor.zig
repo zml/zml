@@ -43,6 +43,7 @@ pub const Tensor = struct {
     _id: _Id,
     _donation: _Donation = .no_buffer,
     _output_memory_kind: Memory = .device,
+    _mesh: ?Mesh = null,
 
     pub const _Donation = union(enum) { no_buffer, input_buffer, arg: u16 };
     pub const _Id = union(enum) { mlir: mlir.Value, buffer_id: u64, arg_id: u64 };
@@ -168,6 +169,10 @@ pub const Tensor = struct {
         return res;
     }
 
+    pub fn mesh(self: Tensor) Mesh {
+        return self._mesh.?;
+    }
+
     pub fn replicated(self: Tensor) Tensor {
         var res = self;
         res._shape = self._shape.clearPartitioning();
@@ -211,41 +216,10 @@ pub const Tensor = struct {
         };
     }
 
-    pub fn withSharding(self: Tensor, axes_: anytype) Tensor {
-        const partitioned_shape = self._shape.withPartitionning(axes_);
-
-        return switch (self._id) {
-            .arg_id, .mlir => {
-                const ctx = self.getContext();
-                const mesh_ = ctx._main_mesh;
-                const mlir_ctx = ctx.mlirCtx();
-
-                if (mesh_.isSinglePartition()) return self;
-
-                const sharding: Sharding = .init(mesh_, partitioned_shape);
-
-                const op = dialect.stablehlo.custom_call(
-                    mlir_ctx,
-                    &.{self.value()},
-                    .{
-                        .call_target_name = "Sharding",
-                        .has_side_effect = false,
-                        .backend_config = null,
-                        .additional_attributes = &.{.{ "mhlo.sharding", ctx.getShardingAttr(sharding) }},
-                        .api_version = .original,
-                    },
-                    &.{self.value().getType()},
-                    mlir_ctx.location(@src()),
-                );
-
-                return _result(partitioned_shape, op.result(0));
-            },
-            .buffer_id => {
-                var res = self;
-                res._shape = partitioned_shape;
-                return res;
-            },
-        };
+    pub fn withMesh(self: Tensor, mesh_: Mesh) Tensor {
+        var res = self;
+        res._mesh = mesh_;
+        return res;
     }
 
     pub fn toMemory(self: Tensor, kind: Memory) Tensor {
@@ -588,8 +562,8 @@ pub const Tensor = struct {
             };
         }
 
-        pub fn init(platform: Platform, mesh: Mesh, seed: u128) !Bufferized(Rng) {
-            const sharding: Sharding = .init(mesh, Rng.shape()._state);
+        pub fn init(platform: Platform, mesh_: Mesh, seed: u128) !Bufferized(Rng) {
+            const sharding: Sharding = .init(mesh_, Rng.shape()._state);
             return .{
                 ._state = try Buffer.from(platform, sharding, std.mem.asBytes(&seed), .{}),
             };

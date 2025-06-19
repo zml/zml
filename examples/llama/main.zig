@@ -231,7 +231,9 @@ pub fn asyncMain() !void {
     create_opts.deinit();
     context.printAvailablePlatforms(platform);
 
+    // const mesh: zml.Mesh = .single();
     const mesh: zml.Mesh = .auto(platform);
+    const mesh_mlp: zml.Mesh = if (mesh.isSinglePartition()) mesh else mesh.reshape(.{ .x = 2, .y = 4 });
 
     var ts = try zml.aio.detectFormatAndOpen(allocator, res.args.weights.?);
     defer ts.deinit();
@@ -246,7 +248,7 @@ pub fn asyncMain() !void {
             .temperature = 1.0,
         },
     };
-    model_instance.init(config, llama_options);
+    model_instance.init(mesh, mesh_mlp, config, llama_options);
 
     const dims = model_instance.model.shape();
     const dtype = model_instance.model.embed_tokens.weight.dtype();
@@ -262,7 +264,7 @@ pub fn asyncMain() !void {
 
     var start = try std.time.Timer.start();
     var fut_mod_prefill = try asynk.asyncc(zml.compile, .{
-        allocator, llama.LlamaLM.forward, .{ config, llama_options },
+        allocator, llama.LlamaLM.forward, .{ mesh, mesh_mlp, config, llama_options },
         .{
             tokens_shape_prefill,
             token_idx_shape,
@@ -272,9 +274,11 @@ pub fn asyncMain() !void {
         ts,        platform,
         mesh,
     });
+    const mod_prefill = try fut_mod_prefill.awaitt();
+    log.warn(">>>>>>>>>>>>>>> conmpiled mod_prefill", .{});
 
     var fut_mod = try asynk.asyncc(zml.compile, .{
-        allocator, llama.LlamaLM.forward, .{ config, llama_options },
+        allocator, llama.LlamaLM.forward, .{ mesh, mesh_mlp, config, llama_options },
         .{
             tokens_shape,
             token_idx_shape,
@@ -286,11 +290,11 @@ pub fn asyncMain() !void {
     });
 
     log.info("\tLoading Llama weights from {?s}...", .{res.args.weights});
-    var llama_weights = try zml.aio.loadBuffers(llama.LlamaLM, .{ config, llama_options }, ts, model_arena.allocator(), platform, mesh);
+    var llama_weights = try zml.aio.loadBuffers(llama.LlamaLM, .{ mesh, mesh_mlp, config, llama_options }, ts, model_arena.allocator(), platform, mesh);
     defer zml.aio.unloadBuffers(&llama_weights);
     log.info("✅\tLoaded weights in {}", .{std.fmt.fmtDuration(start.read())});
 
-    var llama_module_prefill = (try fut_mod_prefill.awaitt()).prepare(llama_weights);
+    var llama_module_prefill = mod_prefill.prepare(llama_weights);
     defer llama_module_prefill.deinit();
     var llama_module = (try fut_mod.awaitt()).prepare(llama_weights);
     defer llama_module.deinit();

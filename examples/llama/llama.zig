@@ -40,7 +40,8 @@ pub const LlamaLM = struct {
     gen_opts: zml.nn.SamplingStrategy = .{},
     config: Config,
 
-    pub fn init(self: *LlamaLM, config: Config, options: Options) void {
+    pub fn init(self: *LlamaLM, mesh: zml.Mesh, mesh_mlp: zml.Mesh, config: Config, options: Options) void {
+        _ = mesh; // autofix
         self.config = config;
         self.gen_opts = options.sampling_strategy orelse .{};
         self.model.max_seq_len = @intCast(options.max_seq_len);
@@ -58,9 +59,8 @@ pub const LlamaLM = struct {
             layer.self_attn.rope_opts = self.model.rope_opts;
             layer.input_layernorm.eps = config.rms_norm_eps;
             layer.post_attention_layernorm.eps = config.rms_norm_eps;
-            layer.mlp.up_proj.weight = layer.mlp.up_proj.weight.withTags(.{ .i, .voc }).withPartitionning(.{ .x = .i });
-            layer.mlp.gate_proj.weight = layer.mlp.gate_proj.weight.withTags(.{ .i, .d }).withPartitionning(.{ .x = .i });
-            layer.mlp.down_proj.weight = layer.mlp.down_proj.weight.withTags(.{ .d, .i }).withPartitionning(.{ .x = .d });
+
+            layer.mlp.init(mesh_mlp);
 
             layer.self_attn.q_proj.weight = layer.self_attn.q_proj.weight.withTags(.{ .d, .d2 }).withPartitionning(.{ .x = .d });
             layer.self_attn.k_proj.weight = layer.self_attn.k_proj.weight.withTags(.{ .d, .d2 }).withPartitionning(.{ .x = .d });
@@ -234,11 +234,42 @@ const Mlp = struct {
     gate_proj: zml.nn.Linear, // (dim -> hidden_dim)
     down_proj: zml.nn.Linear, // (hidden_dim -> dim)
 
-    pub fn forward(self: Mlp, x: Tensor) Tensor {
+    pub fn init(self: *Mlp, mesh: zml.Mesh) void {
+        self.up_proj.weight = self.up_proj.weight.withTags(.{ .d, .hd }).withMesh(mesh);
+        self.gate_proj.weight = self.gate_proj.weight.withTags(.{ .d, .hd }).withMesh(mesh);
+        self.down_proj.weight = self.down_proj.weight.withTags(.{ .d, .hd }).withMesh(mesh);
+
+        if (mesh.is1D()) {
+            self.up_proj.weight = self.up_proj.weight.withPartitionning(.{ .x = .d });
+            self.gate_proj.weight = self.gate_proj.weight.withPartitionning(.{ .x = .d });
+            self.down_proj.weight = self.down_proj.weight.withPartitionning(.{ .x = .d });
+        }
+
+        if (mesh.is2D()) {
+            self.up_proj.weight = self.up_proj.weight.withPartitionning(.{ .x = .d, .y = .hd });
+            self.gate_proj.weight = self.gate_proj.weight.withPartitionning(.{ .x = .d, .y = .hd });
+            self.down_proj.weight = self.down_proj.weight.withPartitionning(.{ .x = .d, .y = .hd });
+        }
+    }
+
+    pub fn forward(self: Mlp, x_: Tensor) Tensor {
+        const mlp_mesh = self.up_proj.weight.mesh();
+
+        var x = x_;
+
+        zml.pushMesh(mlp_mesh);
+        defer zml.popMesh();
+
+        if (mlp_mesh.is2D()) {
+            x = x_.withPartitionning(.{ .x = .s, .y = .d });
+        }
+
         const proj = zml.call(self.up_proj, .forward, .{x});
-        var output = zml.call(self.gate_proj, .forward, .{x});
+        var output: zml.Tensor = zml.call(self.gate_proj, .forward, .{x});
         output = output.silu().mul(proj);
-        return zml.call(self.down_proj, .forward, .{output});
+        output = zml.call(self.down_proj, .forward, .{output});
+
+        return output;
     }
 };
 
@@ -335,7 +366,6 @@ pub const KvCache = struct {
     }
 
     pub fn initBuffer(allocator: std.mem.Allocator, kv_shape: zml.Shape, platform: zml.Platform, mesh: zml.Mesh) !zml.Bufferized(KvCache) {
-        log.warn(">>>>>>>>>>>>>>>>>>>> KvCache.initBuffer({})", .{zml.Sharding.init(mesh, kv_shape)});
         const slice = try zml.slice.fill(f32, allocator, kv_shape, 1.0);
         defer allocator.free(slice);
         return .{

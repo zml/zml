@@ -579,7 +579,7 @@ pub fn loadModelBuffersWithPrefix(
     var res: zml.Bufferized(Model) = undefined;
     try zml.meta.mapAlloc(struct {
         pub fn initBuffer(_: void, tensor: zml.Tensor) zml.Buffer {
-            return .{ ._shape = tensor.shape(), ._api = undefined, ._shards = undefined };
+            return .{ ._shape = tensor.shape(), ._mesh = tensor._mesh, ._api = undefined, ._shards = undefined };
         }
     }.initBuffer, allocator, {}, model, &res);
 
@@ -687,7 +687,9 @@ fn visitStructAndLoadBuffer(
             log.debug("Loading buffer {s} ({})", .{ prefix, obj._shape });
             stdx.debug.assert(host_buffer.shape().eql(obj._shape), "loadModelBuffers expects to find the same shapes in the model and in the buffer store, got {} and {} for tensor {s}", .{ obj._shape, host_buffer, prefix });
             buf_with_metadata._shape = obj._shape;
-            const sharding: zml.Sharding = .init(mesh, obj._shape);
+            const m = if (obj._mesh) |obj_mesh| obj_mesh else mesh;
+            const sharding: zml.Sharding = .init(m, obj._shape);
+            // log.warn("load {} with sharding: {}", .{ obj, sharding });
             const data_slice = buf_with_metadata._data[0..buf_with_metadata.shape().byteSize()];
             obj.* = try zml.Buffer.from(platform, sharding, data_slice, .{});
         } else {

@@ -40,16 +40,23 @@ pub fn pushMesh(mesh: Mesh) void {
     }
 
     ctx._current_mesh = mesh;
+    log.info("Pushed mesh: {}", .{mesh});
 }
 
 pub fn popMesh() void {
     const ctx = CompilationContext.current();
 
-    if (ctx._current_mesh) |_| {
+    if (ctx._current_mesh) |m| {
         ctx._current_mesh = null;
+        log.info("Poped mesh: {}", .{m});
     } else {
         stdx.debug.panic("No mesh to pop, main mesh: {}", .{ctx._main_mesh});
     }
+}
+
+pub fn currentMesh() Mesh {
+    const ctx = CompilationContext.current();
+    return ctx._current_mesh orelse ctx._main_mesh;
 }
 
 pub const MlirFn = struct {
@@ -377,7 +384,17 @@ pub const CompilationContext = struct {
         @memset(locations, mlir.Location.unknown(mlir_ctx));
 
         var input_shapes = try std.ArrayList(Shape).initCapacity(res_allocator, tensor_count);
-        meta.collect(Tensor.shape, {}, &input_shapes, args) catch unreachable;
+        var input_meshes = try std.ArrayList(?Mesh).initCapacity(res_allocator, tensor_count);
+        meta.collect(struct {
+            pub fn shape(tensor: Tensor) Shape {
+                return tensor.shape();
+            }
+        }.shape, {}, &input_shapes, args) catch unreachable;
+        meta.collect(struct {
+            pub fn mesh(tensor: Tensor) ?Mesh {
+                return tensor._mesh;
+            }
+        }.mesh, {}, &input_meshes, args) catch unreachable;
         stdx.debug.internalAssert(input_shapes.items.len == tensor_count, "args have changed ?", .{});
 
         const input_types = try arena.alloc(mlir.Type, tensor_count);
@@ -437,7 +454,8 @@ pub const CompilationContext = struct {
             self.addOutputMemoryKindAttributes(res_attrs, fn_res_output_memory_kind);
         }
 
-        self.addShardingAttributes(mesh, arg_attrs, res_attrs, input_shapes.items, fn_res_shapes);
+        log.warn("{s} add sharding attributes: {} {any}", .{ opts.name, mesh, input_shapes.items });
+        self.addShardingAttributes(mesh, arg_attrs, res_attrs, input_shapes.items, input_meshes.items, fn_res_shapes);
 
         const mlir_fn = dialect.func.func(self.mlirCtx(), .{
             .sym_name = opts.name,
@@ -562,15 +580,29 @@ pub const CompilationContext = struct {
         }
     }
 
-    fn addShardingAttributes(self: CompilationContext, mesh: Mesh, arg_attrs: []AttributeList, res_attrs: []AttributeList, input_shapes: []const Shape, output_shapes: []const Shape) void {
+    fn addShardingAttributes(
+        self: CompilationContext,
+        mesh: Mesh,
+        arg_attrs: []AttributeList,
+        res_attrs: []AttributeList,
+        input_shapes: []const Shape,
+        input_meshes: []const ?Mesh,
+        output_shapes: []const Shape,
+    ) void {
         if (mesh.isSinglePartition()) return; // No sharding attributes for single partition.
 
         const ctx = self.mlirCtx();
         if (!self._platform.compilation_options.sharding_enabled) return;
         const default_layout = mlir.NamedAttribute.named(ctx, "mhlo.layout_mode", .string(ctx, "default"));
-        for (arg_attrs, input_shapes) |*attr, shape| {
+        for (arg_attrs, input_shapes, input_meshes) |*attr, shape, input_mesh| {
             attr.appendAssumeCapacity(default_layout);
-            attr.appendAssumeCapacity(.named(ctx, "mhlo.sharding", self.getShardingAttr(Sharding.init(mesh, shape))));
+            if (input_mesh) |m| {
+                log.warn("addShardingAttributes for {} with input mesh: {}", .{ shape, m });
+                attr.appendAssumeCapacity(.named(ctx, "mhlo.sharding", self.getShardingAttr(Sharding.init(m, shape))));
+            } else {
+                log.warn("addShardingAttributes for {} with progran mesh: {}", .{ shape, mesh });
+                attr.appendAssumeCapacity(.named(ctx, "mhlo.sharding", self.getShardingAttr(Sharding.init(mesh, shape))));
+            }
         }
 
         for (res_attrs, output_shapes) |*attr, shape| {
@@ -629,7 +661,7 @@ pub const CompilationContext = struct {
                 fn cb(arg_id_: *u16, x: Tensor) Tensor {
                     const a = arg_id_.*;
                     arg_id_.* += 1;
-                    return Tensor{ ._shape = x._shape, ._id = .{ .arg_id = a }, ._donation = .{ .arg = a } };
+                    return Tensor{ ._shape = x._shape, ._id = .{ .arg_id = a }, ._donation = .{ .arg = a }, ._mesh = x._mesh };
                 }
             }.cb, arena, &arg_id, args, &tensor_args);
 
