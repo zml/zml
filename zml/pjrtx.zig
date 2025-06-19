@@ -128,6 +128,12 @@ pub const Client = opaque {
         }
         return null;
     }
+
+    pub const CreateUninitializedBufferArgs = pjrt.Client.CreateUninitializedBufferArgs;
+
+    pub fn createUnitializedBuffer(self: *const Client, api: *const Api, args: CreateUninitializedBufferArgs) ApiError!*Buffer {
+        return @ptrCast(try self.inner().createUninitializedBuffer(api, args));
+    }
 };
 
 pub const Buffer = opaque {
