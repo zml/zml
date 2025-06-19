@@ -104,17 +104,6 @@ pub const Buffer = struct {
 
         return res;
     }
-
-    pub const ToHostOptions = struct {};
-    pub fn toHost3(self: Buffer, sharding: Sharding, data: []const u8, opts: ToHostOptions) ![]u8 {
-        _ = sharding; // autofix
-        _ = data; // autofix
-        _ = opts; // autofix
-        const shards_ = self._shards.constSlice();
-        _ = shards_; // autofix
-
-    }
-
     pub fn awaitt(self: Buffer) !Buffer {
         for (self._shards.constSlice()) |buffer| {
             if (buffer.getReadyEvent(self._api)) |ev| {
@@ -140,9 +129,9 @@ pub const Buffer = struct {
 
     /// Copies the given Zig slice to the accelerator memory and
     /// return a Buffer with the given dimensions.
-    pub fn fromSlice(platform: Platform, dimz: anytype, s: anytype) !Buffer {
-        const sh = Shape.init(dimz, DataType.fromSliceElementType(s));
-        return from(platform, HostBuffer.fromBytes(sh, std.mem.sliceAsBytes(s)), .{});
+    pub fn fromSlice(platform: Platform, mesh: Mesh, dimz: anytype, s: anytype) !Buffer {
+        const sharding: Sharding = .init(mesh, .init(dimz, DataType.fromSliceElementType(s)));
+        return from(platform, sharding, std.mem.sliceAsBytes(s), .{});
     }
 
     /// Copies the given Zig slice to the accelerator memory and
@@ -194,7 +183,8 @@ pub const Buffer = struct {
     }
 
     /// Creates a Buffer with a single element repeated manytime.
-    pub fn constant(platform: Platform, shape_: Shape, val: anytype) !Buffer {
+    pub fn constant(platform: Platform, sharding: Sharding, val: anytype) !Buffer {
+        const shape_ = sharding.global_shape;
         var start = try std.time.Timer.start();
         defer {
             const duration_ms = stdx.math.divFloat(f32, start.read(), std.time.ns_per_ms);
@@ -211,12 +201,7 @@ pub const Buffer = struct {
 
         // Naive version for scalars and buffers with long last axis.
         if (shape_.rank() < 1 or byte_size * shape_.dim(-1) > max_bytes) {
-            const host_buffer: HostBuffer = .{
-                ._shape = shape_,
-                ._strides = @splat(0),
-                ._data = x.constSlice().ptr,
-            };
-            return try from(platform, host_buffer, .{ .wait = true });
+            return try from(platform, sharding, x.constSlice(), .{ .wait = true });
         }
 
         // To speed up copies, duplicate the scalar value into a vector,
@@ -238,8 +223,8 @@ pub const Buffer = struct {
             },
             else => unreachable,
         }
-        const host_buffer: HostBuffer = .{ ._shape = shape_, ._strides = strides, ._data = &bytes };
-        return try from(platform, host_buffer, .{ .wait = true });
+        const data: []const u8 = bytes[0..max_bytes];
+        return try from(platform, sharding, data, .{ .wait = true });
     }
 
     test constant {

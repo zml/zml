@@ -432,8 +432,6 @@ pub const CompilationContext = struct {
 
         const mesh = self.currentMesh();
 
-        log.warn("{s} / kind : {s} mesh : {} {any}", .{ opts.name, @tagName(opts.kind), mesh, input_shapes.items });
-
         if (opts.kind == .main) {
             self.addDonationsAttributes(arg_attrs, fn_res_donations);
             self.addOutputMemoryKindAttributes(res_attrs, fn_res_output_memory_kind);

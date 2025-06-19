@@ -714,7 +714,7 @@ fn visitStructAndLoadBuffer(
             for (obj, 0..) |*value, i| {
                 try prefix_builder.pushDigit(allocator, i);
                 defer prefix_builder.pop();
-                try visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, value, platform);
+                try visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, value, platform, mesh);
             }
         },
 
@@ -729,7 +729,7 @@ fn visitStructAndLoadBuffer(
         },
         .optional => {
             if (obj.*) |*obj_val| {
-                try visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, obj_val, platform);
+                try visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, obj_val, platform, mesh);
             }
         },
         else => {},

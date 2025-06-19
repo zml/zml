@@ -588,9 +588,10 @@ pub const Tensor = struct {
             };
         }
 
-        pub fn init(platform: Platform, seed: u128) !Bufferized(Rng) {
+        pub fn init(platform: Platform, mesh: Mesh, seed: u128) !Bufferized(Rng) {
+            const sharding: Sharding = .init(mesh, Rng.shape()._state);
             return .{
-                ._state = try Buffer.fromBytes(platform, Rng.shape()._state, std.mem.asBytes(&seed)),
+                ._state = try Buffer.from(platform, sharding, std.mem.asBytes(&seed), .{}),
             };
         }
 

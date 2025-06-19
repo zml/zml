@@ -33,8 +33,9 @@ pub fn compile(
     args_shapes: ShapeOf(ModuleSignature(func).ArgsT),
     buffer_store: aio.BufferStore,
     platform: Platform,
+    mesh: Mesh,
 ) !FnExe(func) {
-    return compileWithPrefix(allocator, func, init_args, args_shapes, buffer_store, platform, "");
+    return compileWithPrefix(allocator, func, init_args, args_shapes, buffer_store, platform, mesh, "");
 }
 
 /// Compiles a Model struct with the given configuration and shapes, for the given platform.
@@ -50,6 +51,7 @@ pub fn compileWithPrefix(
     args_shapes: ShapeOf(ModuleSignature(func).ArgsT),
     buffer_store: aio.BufferStore,
     platform: Platform,
+    mesh: Mesh,
     prefix: []const u8,
 ) !FnExe(func) {
     const ModelT = ModuleSignature(func).ModelT;
@@ -65,7 +67,7 @@ pub fn compileWithPrefix(
         @call(.auto, ModelT.init, .{@as(*ModelT, &model)} ++ init_args);
     }
 
-    return compileModel(allocator, func, model, args_shapes, platform);
+    return compileModel(allocator, func, model, args_shapes, mesh, platform);
 }
 
 /// Compiles a Model struct with the given configuration and shapes, for the given platform.

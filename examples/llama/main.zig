@@ -61,6 +61,7 @@ pub fn generateText(
     kv_cache_: zml.Bufferized(llama.KvCache),
     tokenizer: zml.tokenizer.Tokenizer,
     allocator: std.mem.Allocator,
+    mesh: zml.Mesh,
     seed: u128,
     prompt: []const u8,
     skip_llama3_encoding: bool,
@@ -75,7 +76,7 @@ pub fn generateText(
     const max_seq_len = llama_.model.shape().s;
 
     // init RNG and buffers
-    var rng = try zml.Tensor.Rng.init(platform, seed);
+    var rng = try zml.Tensor.Rng.init(platform, mesh, seed);
     var generated_token_buffer = [_]u32{undefined};
 
     var kv_cache = prefill: {
@@ -83,9 +84,10 @@ pub fn generateText(
         const prefill_buffer = try allocator.alloc(u32, max_seq_len);
         @memcpy(prefill_buffer[0..prompt_tok.len], prompt_tok);
 
-        var prefill_tokens = try zml.Buffer.fromSlice(platform, .{max_seq_len}, prefill_buffer);
+        var prefill_tokens = try zml.Buffer.fromSlice(platform, mesh, .{max_seq_len}, prefill_buffer);
         defer prefill_tokens.deinit();
-        var prefill_token_pos = try zml.Buffer.constant(platform, zml.Shape.init(.{}, .u32), 0);
+        const sharding2: zml.Sharding = .init(mesh, zml.Shape.init(.{}, .u32));
+        var prefill_token_pos = try zml.Buffer.constant(platform, sharding2, 0);
         defer prefill_token_pos.deinit();
 
         const prefilled_tokens, const kv_cache, rng = mod_prefill.call(.{ prefill_tokens, prefill_token_pos, kv_cache_, rng });
@@ -97,7 +99,7 @@ pub fn generateText(
 
     // Prepare for token-by-token generation,
     // start with the token generated based on the full prompt.
-    var current_token = try zml.Buffer.fromSlice(platform, .{1}, &generated_token_buffer);
+    var current_token = try zml.Buffer.fromSlice(platform, mesh, .{1}, &generated_token_buffer);
     defer current_token.deinit();
 
     // Here we collect the generated text
@@ -131,7 +133,7 @@ pub fn generateText(
 
         // current token pos needs to go into a zml.Buffer
         const token_pos_buffer = &[_]u32{@intCast(prompt_tok.len + i)};
-        const token_pos = try zml.Buffer.fromSlice(platform, .{}, token_pos_buffer);
+        const token_pos = try zml.Buffer.fromSlice(platform, mesh, .{}, token_pos_buffer);
         defer token_pos.deinit();
 
         // call to generate the next token
@@ -225,9 +227,11 @@ pub fn asyncMain() !void {
     // eg: --create-options='{"cuda":{"allocator":{"bfc":{"memory_fraction": 0.99}}}}'
     const create_opts_json = res.args.@"create-options" orelse "{}";
     const create_opts = try std.json.parseFromSlice(zml.Platform.CreateOptions, allocator, create_opts_json, .{});
-    const platform = context.autoPlatform(create_opts.value).withCompilationOptions(compilation_options);
+    const platform = context.autoPlatform(.{ .cpu = .{ .cpu_device_count = 8 } }).withCompilationOptions(compilation_options);
     create_opts.deinit();
     context.printAvailablePlatforms(platform);
+
+    const mesh: zml.Mesh = .auto(platform);
 
     var ts = try zml.aio.detectFormatAndOpen(allocator, res.args.weights.?);
     defer ts.deinit();
@@ -251,7 +255,7 @@ pub fn asyncMain() !void {
     const tokens_shape = zml.Shape.init(.{ .s = 1 }, .u32);
     const token_idx_shape = zml.Shape.init(.{}, .u32);
 
-    const kv_shape = zml.Shape.init(.{ .layer = model_instance.model.layers.len, .k = dims.s, .h = dims.nkvh, .hd = dims.hd }, dtype).withSharding(.{.h});
+    const kv_shape = zml.Shape.init(.{ .layer = model_instance.model.layers.len, .k = dims.s, .h = dims.nkvh, .hd = dims.hd }, dtype).withPartitionning(.{ .x = .hd });
 
     const kv_cache_shape: zml.ShapeOf(llama.KvCache) = llama.KvCache.initShape(kv_shape);
     const rng_shape = zml.Tensor.Rng.shape();
@@ -265,8 +269,8 @@ pub fn asyncMain() !void {
             kv_cache_shape,
             rng_shape,
         },
-        ts,
-        platform,
+        ts,        platform,
+        mesh,
     });
 
     var fut_mod = try asynk.asyncc(zml.compile, .{
@@ -277,12 +281,12 @@ pub fn asyncMain() !void {
             kv_cache_shape,
             rng_shape,
         },
-        ts,
-        platform,
+        ts,        platform,
+        mesh,
     });
 
     log.info("\tLoading Llama weights from {?s}...", .{res.args.weights});
-    var llama_weights = try zml.aio.loadBuffers(llama.LlamaLM, .{ config, llama_options }, ts, model_arena.allocator(), platform);
+    var llama_weights = try zml.aio.loadBuffers(llama.LlamaLM, .{ config, llama_options }, ts, model_arena.allocator(), platform, mesh);
     defer zml.aio.unloadBuffers(&llama_weights);
     log.info("✅\tLoaded weights in {}", .{std.fmt.fmtDuration(start.read())});
 
@@ -293,7 +297,7 @@ pub fn asyncMain() !void {
     log.info("✅\tCompiled model in {}", .{std.fmt.fmtDuration(start.read())});
 
     log.info("Creating KvCache", .{});
-    const kv_cache = try llama.KvCache.initBuffer(kv_shape, platform);
+    const kv_cache = try llama.KvCache.initBuffer(allocator, kv_shape, platform, mesh);
 
     var tokenizer = blk: {
         if (res.args.tokenizer) |tok| {
@@ -314,7 +318,7 @@ pub fn asyncMain() !void {
 
     const seed = res.args.seed orelse @as(u128, @bitCast(std.time.nanoTimestamp()));
     const skip_llama3_encoding = res.args.@"no-llama3" orelse false;
-    const generated_text = try generateText(config, model_instance, llama_module_prefill, llama_module, kv_cache, tokenizer, allocator, seed, prompt[0..], skip_llama3_encoding);
+    const generated_text = try generateText(config, model_instance, llama_module_prefill, llama_module, kv_cache, tokenizer, allocator, mesh, seed, prompt[0..], skip_llama3_encoding);
     // generated text will be printed token by token.
     defer allocator.free(generated_text);
 }

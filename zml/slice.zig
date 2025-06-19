@@ -12,6 +12,17 @@ pub fn Shaped(T: type, shape: Shape, slice: []u8) []T {
     return ptr[0..shape.count()];
 }
 
+/// Creates a slice of type `T` representing the specified `shape` and fills it with the provided `value`.
+pub fn fill(T: type, allocator: std.mem.Allocator, shape: Shape, value: T) ![]u8 {
+    const slice = try allocator.alloc(u8, shape.byteSize());
+    errdefer allocator.free(slice);
+
+    @memset(Shaped(T, shape, slice), value);
+
+    log.debug("Created filled slice of size {d} ptr {*} bytes for {}", .{ slice.len, slice.ptr, shape });
+    return slice;
+}
+
 /// Creates a slice of integers in the specified shape, starting from `start`
 /// and incrementing by `step`. The slice is allocated using the provided allocator.
 /// TODO: Add support for other data types in the future.

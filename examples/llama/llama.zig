@@ -58,20 +58,20 @@ pub const LlamaLM = struct {
             layer.self_attn.rope_opts = self.model.rope_opts;
             layer.input_layernorm.eps = config.rms_norm_eps;
             layer.post_attention_layernorm.eps = config.rms_norm_eps;
-            layer.mlp.up_proj.weight = layer.mlp.up_proj.weight.withSharding(.{0});
-            layer.mlp.gate_proj.weight = layer.mlp.gate_proj.weight.withSharding(.{0});
-            layer.mlp.down_proj.weight = layer.mlp.down_proj.weight.withSharding(.{1});
+            layer.mlp.up_proj.weight = layer.mlp.up_proj.weight.withTags(.{ .i, .voc }).withPartitionning(.{ .x = .i });
+            layer.mlp.gate_proj.weight = layer.mlp.gate_proj.weight.withTags(.{ .i, .d }).withPartitionning(.{ .x = .i });
+            layer.mlp.down_proj.weight = layer.mlp.down_proj.weight.withTags(.{ .d, .i }).withPartitionning(.{ .x = .d });
 
-            layer.self_attn.q_proj.weight = layer.self_attn.q_proj.weight.withSharding(.{0});
-            layer.self_attn.k_proj.weight = layer.self_attn.k_proj.weight.withSharding(.{0});
-            layer.self_attn.v_proj.weight = layer.self_attn.v_proj.weight.withSharding(.{0});
-            layer.self_attn.o_proj.weight = layer.self_attn.o_proj.weight.withSharding(.{1});
+            layer.self_attn.q_proj.weight = layer.self_attn.q_proj.weight.withTags(.{ .d, .d2 }).withPartitionning(.{ .x = .d });
+            layer.self_attn.k_proj.weight = layer.self_attn.k_proj.weight.withTags(.{ .d, .d2 }).withPartitionning(.{ .x = .d });
+            layer.self_attn.v_proj.weight = layer.self_attn.v_proj.weight.withTags(.{ .d, .d2 }).withPartitionning(.{ .x = .d });
+            layer.self_attn.o_proj.weight = layer.self_attn.o_proj.weight.withTags(.{ .d2, .d }).withPartitionning(.{ .x = .d });
         }
 
         // TODO(Corentin): Fix lm_head sharding when top-k sampling is enabled.
         // It currently crashes/compilation fails
         if (self.gen_opts.topk == 1 and self.lm_head != null) {
-            self.lm_head.?.weight = self.lm_head.?.weight.withSharding(.{0});
+            self.lm_head.?.weight = self.lm_head.?.weight.withTags(.{ .d, .d2 }).withPartitionning(.{ .x = .d });
         }
     }
 
@@ -195,12 +195,13 @@ pub const TransformerLayer = struct {
 
     pub fn forward(
         self: TransformerLayer,
-        x0: Tensor,
+        x0_: Tensor,
         token_index: Tensor,
         kv_cache: KvCache,
     ) struct { Tensor, KvCache } {
         // Self Attention
         //log.debug("TransformerLayer({}) -> {}", .{ x0, self.input_layernorm.forward(x0) });
+        const x0 = x0_.withTags(.{ .s, .d });
         stdx.debug.assert(x0.rank() >= 2 and x0.shape().hasTags(.{ .s, .d }), "TransformerLayer expected input shape: {{..., .s, .d}}, received: {}", .{x0});
 
         const x0_normalized = zml.call(self.input_layernorm, .forward, .{x0});
@@ -222,6 +223,7 @@ const RmsNorm = struct {
     /// L2 normalization of input tensor along `.d` axis.
     pub fn forward(self: RmsNorm, input: Tensor) Tensor {
         const x = if (input.shape().isFullyTagged()) input else input.withPartialTags(.{.d});
+        log.warn("RmsNorm.forward({})", .{x});
         const normalized = zml.nn.rmsNorm(x, .d, self.eps);
         return normalized.mul(self.weight.convert(x.dtype()).withTags(.{.d}).broad(x.shape()));
     }
@@ -264,9 +266,9 @@ pub const SelfAttn = struct {
         kv_cache: KvCache,
     ) struct { Tensor, KvCache } {
         const num_kv_heads = if (self.num_kv_heads > 0) self.num_kv_heads else self.num_heads;
-        var q = zml.call(self.q_proj, .forward, .{x}).splitAxis(-1, .{ .h = self.num_heads, .hd = .auto }).withSharding(.{.h});
-        var k = zml.call(self.k_proj, .forward, .{x}).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto }).withSharding(.{.h});
-        var v = zml.call(self.v_proj, .forward, .{x}).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto }).withSharding(.{.h});
+        var q = zml.call(self.q_proj, .forward, .{x}).splitAxis(-1, .{ .h = self.num_heads, .hd = .auto }).withPartitionning(.{ .x = .h });
+        var k = zml.call(self.k_proj, .forward, .{x}).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto }).withPartitionning(.{ .x = .h });
+        var v = zml.call(self.v_proj, .forward, .{x}).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto }).withPartitionning(.{ .x = .h });
 
         // Generate the attention mask.
         const seq_len = kv_cache.k.dim(.k);
@@ -318,8 +320,8 @@ pub const KvCache = struct {
     pub fn init(kv_shape: zml.Shape) KvCache {
         // The KV-cache is initialized with ones to detect reads of uninitialized memory.
         return .{
-            .k = Tensor.constant(kv_shape, kv_shape.dtype().one()).withSharding(.{.h}),
-            .v = Tensor.constant(kv_shape, kv_shape.dtype().one()).withSharding(.{.h}),
+            .k = Tensor.constant(kv_shape, kv_shape.dtype().one()).withPartitionning(.{ .x = .h }),
+            .v = Tensor.constant(kv_shape, kv_shape.dtype().one()).withPartitionning(.{ .x = .h }),
             .layer_index = Tensor.scalar(-1, .u32),
         };
     }
@@ -332,11 +334,14 @@ pub const KvCache = struct {
         };
     }
 
-    pub fn initBuffer(kv_shape: zml.Shape, platform: zml.Platform) !zml.Bufferized(KvCache) {
+    pub fn initBuffer(allocator: std.mem.Allocator, kv_shape: zml.Shape, platform: zml.Platform, mesh: zml.Mesh) !zml.Bufferized(KvCache) {
+        log.warn(">>>>>>>>>>>>>>>>>>>> KvCache.initBuffer({})", .{zml.Sharding.init(mesh, kv_shape)});
+        const slice = try zml.slice.fill(f32, allocator, kv_shape, 1.0);
+        defer allocator.free(slice);
         return .{
-            .k = try zml.Buffer.constant(platform, kv_shape, 1),
-            .v = try zml.Buffer.constant(platform, kv_shape, 1),
-            .layer_index = try zml.Buffer.constant(platform, zml.Shape.init(.{}, .u32), 0),
+            .k = try zml.Buffer.from(platform, .init(mesh, kv_shape), slice, .{ .wait = true }),
+            .v = try zml.Buffer.from(platform, .init(mesh, kv_shape), slice, .{ .wait = true }),
+            .layer_index = try zml.Buffer.constant(platform, .init(mesh, zml.Shape.init(.{}, .u32)), 0),
         };
     }
 

@@ -393,6 +393,7 @@ pub const Client = opaque {
     /// Not all platform have a profiling api, for those the profiler object will do nothing.
     /// Platforms with known profiler extensions: cuda, xpu
     pub fn getProfiler(self: *const Client, api: *const Api, options: Profiler.Options) Profiler {
+        log.warn(">>>>>>>>>>>>>>>> getProfiler version: {d}\n", .{api.version().minor});
         if (api.version().minor >= 45) {
             if (api.lookupExtension(c.PJRT_Profiler_Extension, c.PJRT_Extension_Type_Profiler)) |ext| {
                 return Profiler.init(ext.profiler_api.*, options);
