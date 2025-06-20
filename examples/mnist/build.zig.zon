@@ -1,0 +1,25 @@
+.{
+    .name = .mnist,
+    .version = "0.0.0",
+
+    .fingerprint = 0x6805ab6e16b3f141, // Changing this has security and trust implications.
+
+    .minimum_zig_version = "0.14.0",
+    .dependencies = .{
+        .zml = .{
+            .url = "git+https://github.com/zml/zml#e6ec751e6e478c64113169c28aaed278d6ce13e9",
+            .hash = "zml-0.0.0-N9uPKHO8IgABeyC0QM0tqVA4wyL4lVr8vwCvGEQgrDqU",
+        },
+        // Get MNIST model and data from GGML repo.
+        .ggml = .{
+            .url = "git+https://github.com/ggerganov/ggml#18703ad600cc68dbdb04d57434c876989a841d12",
+            .hash = "N-V-__8AAGUBBAESVQ00NaQbKKLu9KDR54aQyFBxUmYvJLF4",
+        },
+    },
+
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "mnist.zig",
+    },
+}

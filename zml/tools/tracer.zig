@@ -1,9 +1,11 @@
 const builtin = @import("builtin");
+
 const c = @import("c");
 
 pub const Tracer = switch (builtin.os.tag) {
     .macos => MacOsTracer,
-    .linux => if (@hasDecl(c, "ZML_RUNTIME_CUDA")) CudaTracer else FakeTracer,
+    // .linux => if (@hasDecl(c, "ZML_RUNTIME_CUDA")) CudaTracer else FakeTracer,
+    .linux => FakeTracer,
     else => FakeTracer,
 };
 

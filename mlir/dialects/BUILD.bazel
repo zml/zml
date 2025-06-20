@@ -1,5 +1,6 @@
 load("@rules_zig//zig:defs.bzl", "zig_library")
 load("//bazel:zig.bzl", "zig_cc_test")
+load("//bazel:zig_srcs.bzl", "zig_srcs")
 
 zig_library(
     name = "dialects",
@@ -22,6 +23,19 @@ zig_library(
 zig_cc_test(
     name = "test",
     deps = [":dialects"],
+)
+
+zig_srcs(
+    name = "sources",
+    zig_bin = ":test_test_lib",
+)
+
+cc_static_library(
+    name="mlir_static",
+    deps = [
+        "//mlir:c",
+        "@stablehlo//:stablehlo_dialect_capi",
+    ]
 )
 
 zig_library(
