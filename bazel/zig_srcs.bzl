@@ -8,6 +8,10 @@ def zig_srcs(name, zig_bin="", zig_lib=""):
     It's also possible to pass zig_lib instead of zig_bin in which case,
     The rule takes care of creating an intermediary binary from the lib.
     """
+    # TODO: this forces to build the test target which isn't needed.
+    # The problem is we need the binary target to get the translate-c output.
+    # What is missing from rules_zig is a "translate_c" target that we could call directly
+    # without needing to build the corresponding binary.
     if zig_bin == "":
         zig_bin = "{}_bin".format(name)
         zig_binary(

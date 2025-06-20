@@ -131,36 +131,33 @@ pub fn build(b: *std.Build) void {
     const run_pjrt_tests = b.addRunArtifact(pjrt_test);
     test_step.dependOn(&run_pjrt_tests.step);
 
-    var _d: std.BoundedArray(*std.Build.Step.InstallFile, 8) = .{};
-    deps: {
-        switch (target.result.os.tag) {
-            .macos => {
-                if (platforms.cpu) {
-                    const dep = b.lazyDependency("pjrt_cpu_darwin_arm64", .{}) orelse break :deps;
-                    const pjrt_cpu = b.addInstallLibFile(dep.path("libpjrt_cpu.dylib"), "libpjrt_cpu.dylib");
-                    _d.appendAssumeCapacity(pjrt_cpu);
+    const zml_sandbox = b.addNamedWriteFiles("zml_sandbox");
+    switch (target.result.os.tag) {
+        .macos => {
+            if (platforms.cpu) {
+                if (b.lazyDependency("pjrt_cpu_darwin_arm64", .{})) |dep| {
+                    _ = zml_sandbox.addCopyFile(dep.path("libpjrt_cpu.dylib"), "libpjrt_cpu.dylib");
                 }
-            },
-            .linux => {
-                if (platforms.cpu) {
-                    const dep = b.lazyDependency("pjrt_cpu_linux_amd64", .{}) orelse break :deps;
-                    const pjrt_cpu = b.addInstallLibFile(dep.path("libpjrt_cpu.so"), "libpjrt_cpu.so");
-                    _d.appendAssumeCapacity(pjrt_cpu);
+            }
+        },
+        .linux => {
+            if (platforms.cpu) {
+                if (b.lazyDependency("pjrt_cpu_linux_amd64", .{})) |dep| {
+                    _ = zml_sandbox.addCopyFile(dep.path("libpjrt_cpu.so"), "libpjrt_cpu.so");
                 }
+            }
 
-                if (platforms.cuda) {
-                    // TODO: this is not enough for libpjrt_cuda, there are a lot more deps needed.
-                    const zmlxcuda = objectFromBazel(b, "@libpjrt_cuda//:zmlxcuda_so", "external/+cuda_packages+libpjrt_cuda/libzmlxcuda.so.0");
-                    const plugin = objectFromBazel(b, "//runtimes/cuda:libpjrt_cuda", "runtimes/cuda/libpjrt_cuda.so");
+            if (platforms.cuda) {
+                // TODO: this is not enough for libpjrt_cuda, there are a lot more deps needed.
+                const zmlxcuda = objectFromBazel(b, "@libpjrt_cuda//:zmlxcuda_so", "external/+cuda_packages+libpjrt_cuda/libzmlxcuda.so.0");
+                _ = zml_sandbox.addCopyFile(zmlxcuda, "libzmlxcuda.so.0");
 
-                    _d.appendAssumeCapacity(b.addInstallLibFile(zmlxcuda, "libzmlxcuda.so.0"));
-                    _d.appendAssumeCapacity(b.addInstallLibFile(plugin, "libpjrt_cuda.so"));
-                }
-            },
-            else => |os| std.debug.panic("Target not supported: {s}", .{@tagName(os)}),
-        }
+                const plugin = objectFromBazel(b, "//runtimes/cuda:libpjrt_cuda", "runtimes/cuda/libpjrt_cuda.so");
+                _ = zml_sandbox.addCopyFile(plugin, "libpjrt_cuda.so");
+            }
+        },
+        else => |os| std.debug.panic("Target not supported: {s}", .{@tagName(os)}),
     }
-    const pjrt_dynamic_deps = _d.constSlice();
 
     // xev
     const async_srcs = Tarball.sources(b, "async");
@@ -404,10 +401,9 @@ pub fn build(b: *std.Build) void {
         .test_runner = .{ .mode = .simple, .path = b.path("zml/test_runner.zig") },
     });
     // This is where we will put all the .so needed.
-    zml_test.addRPath(.{ .cwd_relative = b.lib_dir });
+    zml_test.addRPath(zml_sandbox.getDirectory());
 
     const run_zml_tests = b.addRunArtifact(zml_test);
-    addRuntimeDeps(run_zml_tests, pjrt_dynamic_deps);
 
     const zml_test_step = b.step("test-zml", "Run ZML tests (assumes pjrt.dylib are in the path)");
     zml_test_step.dependOn(&run_zml_tests.step);
