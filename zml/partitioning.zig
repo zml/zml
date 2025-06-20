@@ -19,8 +19,8 @@ test {
     std.testing.refAllDecls(Sharding);
 }
 
-pub const MaxMeshSize: u8 = 64;
-pub const MaxMeshAxes: u8 = Shape.MAX_RANK;
+pub const MaxMeshAxes: u8 = 3;
+pub const MaxMeshSize: u8 = MaxMeshAxes * Shape.MAX_RANK;
 
 pub const TopologyIndicesIterator = struct {
     index: usize = 0,
@@ -73,6 +73,10 @@ pub const Mesh = struct {
 
         if (!self.topology.isFullyTagged()) {
             stdx.debug.panic("Mesh must be fully tagged, got: {}", .{topology});
+        }
+
+        if (self.rank() > MaxMeshAxes) {
+            stdx.debug.panic("Mesh rank ({}) exceeds maximum allowed axes ({})", .{ self.rank(), MaxMeshAxes });
         }
 
         return self;
@@ -153,7 +157,7 @@ pub const Mesh = struct {
         return 1;
     }
 
-    pub fn numRequiredDevices(self: Mesh) u8 {
+    pub fn numDevices(self: Mesh) u8 {
         return self.numPartitions() * self.numReplicas();
     }
 
@@ -168,38 +172,75 @@ pub const Mesh = struct {
         writer: anytype,
     ) !void {
         _ = options;
-        try writer.print("Mesh(topology={} rank={d} numRequiredDevices={d})", .{ self.topology, self.rank(), self.numRequiredDevices() });
+        try writer.print("Mesh(topology={} rank={d} numDevices={d})", .{ self.topology, self.rank(), self.numDevices() });
     }
 };
 
-test Mesh {
-    // 1D mesh with no partitions
-    const mesh_1d_no_partitions: Mesh = .init(.{ .x = 1 });
-    try std.testing.expect(mesh_1d_no_partitions.rank() == 1);
-    try std.testing.expect(mesh_1d_no_partitions.axis(.x) == 1);
-    try std.testing.expect(!mesh_1d_no_partitions.isPartitioned());
-    try std.testing.expect(mesh_1d_no_partitions.isSinglePartition());
-    try std.testing.expect(mesh_1d_no_partitions.numPartitions() == 1);
-    try std.testing.expect(mesh_1d_no_partitions.numRequiredDevices() == 1);
+test "Mesh / 1D mesh with 1 partition" {
+    { // 1D mesh with 1 partition
+        const mesh_1d_no_partitions: Mesh = .init(.{ .x = 1 });
+        try std.testing.expect(mesh_1d_no_partitions.rank() == 1);
+        try std.testing.expect(mesh_1d_no_partitions.axis(.x) == 1);
+        try std.testing.expect(mesh_1d_no_partitions.is1D());
+        try std.testing.expect(!mesh_1d_no_partitions.is2D());
+        try std.testing.expect(!mesh_1d_no_partitions.is3D());
+        try std.testing.expect(!mesh_1d_no_partitions.isPartitioned());
+        try std.testing.expect(mesh_1d_no_partitions.isSinglePartition());
+        try std.testing.expect(mesh_1d_no_partitions.numPartitions() == 1);
+        try std.testing.expect(mesh_1d_no_partitions.numDevices() == 1);
+    }
 
     // 1D mesh with 8 partitions
     const mesh_1d_8_partitions: Mesh = .init(.{ .x = 8 });
     try std.testing.expect(mesh_1d_8_partitions.rank() == 1);
     try std.testing.expect(mesh_1d_8_partitions.axis(.x) == 8);
+    try std.testing.expect(mesh_1d_8_partitions.is1D());
+    try std.testing.expect(!mesh_1d_8_partitions.is2D());
+    try std.testing.expect(!mesh_1d_8_partitions.is3D());
     try std.testing.expect(mesh_1d_8_partitions.isPartitioned());
     try std.testing.expect(!mesh_1d_8_partitions.isSinglePartition());
     try std.testing.expect(mesh_1d_8_partitions.numPartitions() == 8);
-    try std.testing.expect(mesh_1d_8_partitions.numRequiredDevices() == 8);
+    try std.testing.expect(mesh_1d_8_partitions.numDevices() == 8);
+
+    // 2D mesh with 1 partition
+    const mesh_2d_no_partitions: Mesh = .init(.{ .x = 1, .y = 1 });
+    try std.testing.expect(mesh_2d_no_partitions.rank() == 2);
+    try std.testing.expect(mesh_2d_no_partitions.axis(.x) == 1);
+    try std.testing.expect(mesh_2d_no_partitions.axis(.y) == 1);
+    try std.testing.expect(!mesh_2d_no_partitions.is1D());
+    try std.testing.expect(mesh_2d_no_partitions.is2D());
+    try std.testing.expect(!mesh_2d_no_partitions.is3D());
+    try std.testing.expect(!mesh_2d_no_partitions.isPartitioned());
+    try std.testing.expect(mesh_2d_no_partitions.isSinglePartition());
+    try std.testing.expect(mesh_2d_no_partitions.numPartitions() == 1);
+    try std.testing.expect(mesh_2d_no_partitions.numDevices() == 1);
 
     // 2D mesh with 6 partitions
     const mesh_2d: Mesh = .init(.{ .x = 2, .y = 3 });
     try std.testing.expect(mesh_2d.rank() == 2);
     try std.testing.expect(mesh_2d.axis(.x) == 2);
     try std.testing.expect(mesh_2d.axis(.y) == 3);
+    try std.testing.expect(!mesh_2d.is1D());
+    try std.testing.expect(mesh_2d.is2D());
+    try std.testing.expect(!mesh_2d.is3D());
     try std.testing.expect(mesh_2d.isPartitioned());
     try std.testing.expect(!mesh_2d.isSinglePartition());
     try std.testing.expect(mesh_2d.numPartitions() == 6);
-    try std.testing.expect(mesh_2d.numRequiredDevices() == 6);
+    try std.testing.expect(mesh_2d.numDevices() == 6);
+
+    // 3D mesh with 1 partition
+    const mesh_3d_no_partitions: Mesh = .init(.{ .x = 1, .y = 1, .z = 1 });
+    try std.testing.expect(mesh_3d_no_partitions.rank() == 3);
+    try std.testing.expect(mesh_3d_no_partitions.axis(.x) == 1);
+    try std.testing.expect(mesh_3d_no_partitions.axis(.y) == 1);
+    try std.testing.expect(mesh_3d_no_partitions.axis(.z) == 1);
+    try std.testing.expect(!mesh_3d_no_partitions.is1D());
+    try std.testing.expect(!mesh_3d_no_partitions.is2D());
+    try std.testing.expect(mesh_3d_no_partitions.is3D());
+    try std.testing.expect(!mesh_3d_no_partitions.isPartitioned());
+    try std.testing.expect(mesh_3d_no_partitions.isSinglePartition());
+    try std.testing.expect(mesh_3d_no_partitions.numPartitions() == 1);
+    try std.testing.expect(mesh_3d_no_partitions.numDevices() == 1);
 
     // 3D mesh with 64 partitions
     const mesh_3d: Mesh = .init(.{ .x = 4, .y = 4, .z = 4 });
@@ -207,29 +248,38 @@ test Mesh {
     try std.testing.expect(mesh_3d.axis(.x) == 4);
     try std.testing.expect(mesh_3d.axis(.y) == 4);
     try std.testing.expect(mesh_3d.axis(.z) == 4);
+    try std.testing.expect(!mesh_3d.is1D());
+    try std.testing.expect(!mesh_3d.is2D());
+    try std.testing.expect(mesh_3d.is3D());
     try std.testing.expect(mesh_3d.isPartitioned());
     try std.testing.expect(!mesh_3d.isSinglePartition());
     try std.testing.expect(mesh_3d.numPartitions() == 64);
-    try std.testing.expect(mesh_3d.numRequiredDevices() == 64);
+    try std.testing.expect(mesh_3d.numDevices() == 64);
 
     // single mesh
     const single_mesh: Mesh = .single();
     try std.testing.expect(single_mesh.rank() == 1);
     try std.testing.expect(single_mesh.axis(.x) == 1);
+    try std.testing.expect(single_mesh.is1D());
+    try std.testing.expect(!single_mesh.is2D());
+    try std.testing.expect(!single_mesh.is3D());
     try std.testing.expect(!single_mesh.isPartitioned());
     try std.testing.expect(single_mesh.isSinglePartition());
     try std.testing.expect(single_mesh.numPartitions() == 1);
-    try std.testing.expect(single_mesh.numRequiredDevices() == 1);
+    try std.testing.expect(single_mesh.numDevices() == 1);
 
     // auto mesh with 4 devices
     const platform = env(.{ .cpu = .{ .cpu_device_count = 4 } });
     const auto_mesh: Mesh = .auto(platform);
     try std.testing.expect(auto_mesh.rank() == 1);
     try std.testing.expect(auto_mesh.axis(.x) == 4);
+    try std.testing.expect(single_mesh.is1D());
+    try std.testing.expect(!single_mesh.is2D());
+    try std.testing.expect(!single_mesh.is3D());
     try std.testing.expect(auto_mesh.isPartitioned());
     try std.testing.expect(!auto_mesh.isSinglePartition());
     try std.testing.expect(auto_mesh.numPartitions() == 4);
-    try std.testing.expect(auto_mesh.numRequiredDevices() == 4);
+    try std.testing.expect(auto_mesh.numDevices() == 4);
 }
 
 test "Mesh.iterator" {
@@ -782,7 +832,7 @@ fn testShardingCase(
     verbose: bool,
 ) !void {
     _platform = null; // Reset the global platform
-    const platform = env(.{ .cpu = .{ .cpu_device_count = mesh.numRequiredDevices() } });
+    const platform = env(.{ .cpu = .{ .cpu_device_count = mesh.numDevices() } });
 
     // 1. Setup the sharding
     const shape_partitioned = shape.withPartitionning(partition_spec);
@@ -1056,27 +1106,27 @@ test MultiDimIterator {
 
     var item = iter_2d.next().?;
     try std.testing.expectEqualSlices(i64, &.{ 0, 0 }, item.coords[0..item.rank]);
-    try std.testing.expectEqual(@as(usize, 0), item.flat_index);
+    try std.testing.expectEqual(0, item.flat_index);
 
     item = iter_2d.next().?;
     try std.testing.expectEqualSlices(i64, &.{ 0, 1 }, item.coords[0..item.rank]);
-    try std.testing.expectEqual(@as(usize, 1), item.flat_index);
+    try std.testing.expectEqual(1, item.flat_index);
 
     item = iter_2d.next().?;
     try std.testing.expectEqualSlices(i64, &.{ 0, 2 }, item.coords[0..item.rank]);
-    try std.testing.expectEqual(@as(usize, 2), item.flat_index);
+    try std.testing.expectEqual(2, item.flat_index);
 
     item = iter_2d.next().?;
     try std.testing.expectEqualSlices(i64, &.{ 1, 0 }, item.coords[0..item.rank]);
-    try std.testing.expectEqual(@as(usize, 3), item.flat_index);
+    try std.testing.expectEqual(3, item.flat_index);
 
     item = iter_2d.next().?;
     try std.testing.expectEqualSlices(i64, &.{ 1, 1 }, item.coords[0..item.rank]);
-    try std.testing.expectEqual(@as(usize, 4), item.flat_index);
+    try std.testing.expectEqual(4, item.flat_index);
 
     item = iter_2d.next().?;
     try std.testing.expectEqualSlices(i64, &.{ 1, 2 }, item.coords[0..item.rank]);
-    try std.testing.expectEqual(@as(usize, 5), item.flat_index);
+    try std.testing.expectEqual(5, item.flat_index);
 
     try std.testing.expect(iter_2d.next() == null);
 }

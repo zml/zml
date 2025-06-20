@@ -2,7 +2,6 @@ const std = @import("std");
 const zml = @import("zml");
 const stdx = @import("stdx");
 const asynk = @import("async");
-const flags = stdx.flags;
 
 // set log level to debug to print the generated IR
 pub const std_options: std.Options = .{
@@ -19,24 +18,23 @@ const log = std.log.scoped(.@"examples/partitioning");
 // return a.add(b);
 // return a.add(b).dot(b, .{.k}); // .withSharding(mesh, .{ .y = .m });
 
-const ModuleWithWeight = struct {
+const ThirdPartyModule = struct {
     weight: zml.Tensor,
 
-    pub fn init(self: *ModuleWithWeight) void {
-        self.weight = self.weight.withTags(.{ .rows, .cols });
+    pub fn init(self: *ThirdPartyModule, mesh: zml.Mesh) void {
+        self.weight = self.weight.withTags(.{ .rows, .cols }).withMesh(mesh);
     }
 
-    pub fn forward(self: ModuleWithWeight, a: zml.Tensor) zml.Tensor {
+    pub fn forward(self: ThirdPartyModule, a: zml.Tensor) zml.Tensor {
         return a.add(self.weight.withPartitionning(.{ .grid_x = .rows, .grid_y = .cols }));
     }
 };
 
 const Model = struct {
-    module_with_weights: ModuleWithWeight,
-    mesh: ?zml.Mesh,
+    module_with_weights: ThirdPartyModule,
 
-    pub fn init(self: *Model, mesh: zml.Mesh) void {
-        self.mesh = mesh;
+    pub fn init(self: *Model, main_mesh: zml.Mesh) void {
+        _ = main_mesh; // autofix
         self.module_with_weights.init();
     }
 
@@ -58,14 +56,6 @@ pub fn main() !void {
 }
 
 pub fn asyncMain() !void {
-    const CliArgs = struct {
-        pub const help =
-            \\ partitioning --size=64 --dtype=i32
-        ;
-        size: usize = 8,
-        dtype: zml.DataType = .i32,
-    };
-
     // Short lived allocations
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -78,21 +68,19 @@ pub fn asyncMain() !void {
     var context = try zml.Context.init();
     defer context.deinit();
 
-    var args = std.process.args();
-    const cli_args = flags.parse(&args, CliArgs);
+    const mesh: zml.Mesh = .init(.{ .grid_x = 4, .grid_y = 3 });
 
-    const mesh: zml.Mesh = .init(.{ .grid_x = 2, .grid_y = 2 });
-
-    const platform = context.autoPlatform(.{ .cpu = .{ .cpu_device_count = mesh.numRequiredDevices() } }).withCompilationOptions(.{
+    const platform = context.autoPlatform(.{ .cpu = .{ .cpu_device_count = mesh.numDevices() } }).withCompilationOptions(.{
         .sharding_enabled = true,
         .xla_dump_to = "/tmp/zml/partitioning",
     });
     context.printAvailablePlatforms(platform);
 
-    const shape: zml.Shape = .init(.{ cli_args.size, cli_args.size }, cli_args.dtype);
+    const shape: zml.Shape = .init(.{ 12, 6 }, i32).withTags(.{ .m, .n });
+    const shape: zml.Shape = .init(.{ 4, 3 }, i32).withTags(.{ .m, .n });
 
-    const a_shape = shape.withTags(.{ .m, .k }).withPartitionning(.{ .grid_x = .m, .grid_y = .k });
-    const b_shape = shape.withTags(.{ .k, .n }).withPartitionning(.{ .grid_x = .k, .grid_y = .n });
+    const a_shape = shape.withTags(.{ .m, .n }).withPartitionning(.{ .grid_x = .m, .grid_y = .k });
+    const b_shape = shape.withTags(.{ .n, .m }).withPartitionning(.{ .grid_x = .k, .grid_y = .n });
 
     var buffers: zml.aio.BufferStore.Buffers = .{};
     const weight = try zml.slice.arange(allocator, shape, .{});

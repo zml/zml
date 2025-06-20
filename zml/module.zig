@@ -277,7 +277,7 @@ pub const CompilationContext = struct {
             .{
                 .input_shapes = f.args_shapes,
                 .result_shapes = f.res_shapes,
-                .n_devices = @intCast(mesh.numRequiredDevices()),
+                .n_devices = @intCast(mesh.numDevices()),
             },
         );
     }
