@@ -22,3 +22,8 @@ zig_library(
         "//conditions:default": [],
     }),
 )
+
+cc_static_library(
+    name = "macos_static_tools",
+    deps = ["macos_c"]
+)

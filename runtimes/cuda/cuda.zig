@@ -36,7 +36,8 @@ fn setupXlaGpuCudaDirFlag() !void {
     defer arena.deinit();
 
     var r_ = try runfiles.Runfiles.create(.{ .allocator = arena.allocator() }) orelse {
-        stdx.debug.panic("Unable to find CUDA directory", .{});
+        log.warn("Unable to find CUDA directory. Using system defaults.", .{});
+        return;
     };
 
     const source_repo = bazel_builtin.current_repository;

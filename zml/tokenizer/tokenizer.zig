@@ -1,9 +1,17 @@
 const std = @import("std");
+
+const asynk = @import("async");
 const hftokenizers = @import("hftokenizers");
 const sentencepiece = @import("sentencepiece");
-const asynk = @import("async");
 
 const homemade = @import("homemade.zig");
+
+test {
+    std.testing.refAllDecls(@This());
+    std.testing.refAllDecls(hftokenizers);
+    std.testing.refAllDecls(sentencepiece);
+    std.testing.refAllDecls(homemade);
+}
 
 const Tokenizers = enum {
     hftokenizers,
