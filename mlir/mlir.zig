@@ -8,6 +8,8 @@ const log = std.log.scoped(.mlir);
 
 test {
     std.testing.refAllDecls(@This());
+
+    _ = try Context.init();
 }
 
 const Error = error{
