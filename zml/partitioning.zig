@@ -378,7 +378,7 @@ pub const DeviceShard = struct {
 
         // Step 1: Calculate the byte strides for the GLOBAL host buffer.
         // These strides describe how to navigate the full, unpartitioned tensor in host memory.
-        const host_byte_strides_ba = self.global_shape.computeStrides();
+        const host_byte_strides_ba = self.global_shape.computeByteStrides();
         const host_byte_strides = host_byte_strides_ba.constSlice();
 
         // Step 2: Calculate the start offset for THIS specific shard.
@@ -642,7 +642,7 @@ pub const Sharding = struct {
         defer allocator.free(temp_shard_buffer);
 
         const element_size = self.global_shape.dtype().sizeOf();
-        const global_element_strides = getGlobalElementStrides(self.global_shape);
+        const global_element_strides = self.global_shape.computeElementStrides();
 
         var sharding_iter = self.iterator(platform);
         while (sharding_iter.next()) |device_shard| {
@@ -654,11 +654,11 @@ pub const Sharding = struct {
             if (event) |e| try e.await_(platform.pjrt_api);
 
             // Step 2: Manually copy from the temp buffer to the final strided buffer.
-            var iter = MultiDimIterator.init(shard_shape);
+            var iter = shard_shape.iterator();
             while (iter.next()) |item| {
                 const src_byte_offset = item.flat_index * element_size;
 
-                var dest_flat_index: usize = 0;
+                var dest_flat_index: i64 = 0;
                 for (0..self.global_shape.rank()) |dim_idx| {
                     const global_coord_for_dim = blk: {
                         const part_spec = self.global_shape.partition(dim_idx);
@@ -667,9 +667,9 @@ pub const Sharding = struct {
                         const device_coord = device_shard.indices.dim(mesh_axis_tag);
                         break :blk (device_coord * shard_shape.dim(dim_idx)) + item.coords[dim_idx];
                     };
-                    dest_flat_index += @as(usize, @intCast(global_coord_for_dim)) * global_element_strides[dim_idx];
+                    dest_flat_index += global_coord_for_dim * global_element_strides.get(dim_idx);
                 }
-                const dest_byte_offset = dest_flat_index * element_size;
+                const dest_byte_offset = @as(usize, @intCast(dest_flat_index)) * element_size;
 
                 @memcpy(global_buffer[dest_byte_offset..][0..element_size], temp_shard_buffer[src_byte_offset..][0..element_size]);
             }
@@ -767,95 +767,6 @@ test "Sharding All Cases" {
     try testShardingCase(allocator, .init(.{ .x = 1 }), .init(.{ .m = 8, .k = 10 }, .i32), .{ .m = .x }, verbose);
 }
 
-/// Iterates over all coordinates of a shape, yielding the multi-dimensional
-/// coordinates and the corresponding flat index for each element.
-const MultiDimIterator = struct {
-    global_shape: Shape,
-    coords: [Shape.MAX_RANK]i64,
-    flat_index: usize,
-    is_done: bool,
-
-    pub const NextItem = struct {
-        coords: [Shape.MAX_RANK]i64,
-        rank: u4,
-        flat_index: usize,
-    };
-
-    pub fn init(shape: Shape) MultiDimIterator {
-        const initial_coords: [Shape.MAX_RANK]i64 = .{0} ** Shape.MAX_RANK;
-        return .{
-            .global_shape = shape,
-            .coords = initial_coords,
-            .flat_index = 0,
-            .is_done = (shape.count() == 0),
-        };
-    }
-
-    pub fn next(self: *MultiDimIterator) ?NextItem {
-        if (self.is_done) {
-            return null;
-        }
-
-        const rank = self.global_shape.rank();
-
-        // 1. Create the item to return. The assignment from one array (`self.coords`)
-        // to another (`item_to_return.coords`) performs a full value copy.
-        const item_to_return = NextItem{
-            .coords = self.coords, // This is now a value copy.
-            .rank = rank,
-            .flat_index = self.flat_index,
-        };
-
-        // 2. Now, we can safely advance the iterator's internal state.
-        self.flat_index += 1;
-        var i: usize = rank;
-        while (i > 0) {
-            i -= 1;
-            self.coords[i] += 1;
-
-            if (self.coords[i] < self.global_shape.dim(i)) {
-                // The state is advanced. Return the pristine copy we made earlier.
-                return item_to_return;
-            }
-            self.coords[i] = 0;
-        }
-
-        self.is_done = true;
-        return item_to_return;
-    }
-};
-
-test MultiDimIterator {
-    const shape_2d = Shape.init(.{ .rows = 2, .cols = 3 }, .f32);
-    var iter_2d = MultiDimIterator.init(shape_2d);
-
-    var item = iter_2d.next().?;
-    try std.testing.expectEqualSlices(i64, &.{ 0, 0 }, item.coords[0..item.rank]);
-    try std.testing.expectEqual(0, item.flat_index);
-
-    item = iter_2d.next().?;
-    try std.testing.expectEqualSlices(i64, &.{ 0, 1 }, item.coords[0..item.rank]);
-    try std.testing.expectEqual(1, item.flat_index);
-
-    item = iter_2d.next().?;
-    try std.testing.expectEqualSlices(i64, &.{ 0, 2 }, item.coords[0..item.rank]);
-    try std.testing.expectEqual(2, item.flat_index);
-
-    item = iter_2d.next().?;
-    try std.testing.expectEqualSlices(i64, &.{ 1, 0 }, item.coords[0..item.rank]);
-    try std.testing.expectEqual(3, item.flat_index);
-
-    item = iter_2d.next().?;
-    try std.testing.expectEqualSlices(i64, &.{ 1, 1 }, item.coords[0..item.rank]);
-    try std.testing.expectEqual(4, item.flat_index);
-
-    item = iter_2d.next().?;
-    try std.testing.expectEqualSlices(i64, &.{ 1, 2 }, item.coords[0..item.rank]);
-    try std.testing.expectEqual(5, item.flat_index);
-
-    try std.testing.expect(iter_2d.next() == null);
-}
-
 // todo: temp
 pub fn bufferTypeFromDtype(dt: DataType) pjrtx.BufferType {
     return switch (dt) {
@@ -868,34 +779,6 @@ pub fn dtypeFromBufferType(pjrt_type: pjrtx.BufferType) DataType {
         .invalid => @panic("Found an invalid pjrt buffer"),
         inline else => |tag| @field(DataType, @tagName(tag)),
     };
-}
-
-/// Calculates the strides of a shape in units of elements.
-/// For a shape {d0, d1, d2}, the strides would be {d1*d2, d2, 1}.
-/// This is used to convert multi-dimensional coordinates to a flat 1D index.
-fn getGlobalElementStrides(shape: Shape) [Shape.MAX_RANK]usize {
-    const rank = shape.rank();
-    var strides: [Shape.MAX_RANK]usize = .{0} ** Shape.MAX_RANK;
-
-    if (rank == 0) {
-        // A scalar has no strides, but returning {1} can be useful sometimes.
-        // Let's stick to {0} for safety.
-        return strides;
-    }
-
-    // The stride for the innermost (last) dimension is always 1 element.
-    strides[rank - 1] = 1;
-
-    // Work backwards from the second-to-last dimension.
-    var i: usize = rank - 1;
-    while (i > 0) {
-        i -= 1;
-        // The stride for dimension `i` is the product of all dimensions after it.
-        // This is equivalent to `stride[i+1] * shape.dim(i+1)`.
-        strides[i] = strides[i + 1] * @as(usize, @intCast(shape.dim(i + 1)));
-    }
-
-    return strides;
 }
 
 // todo: temp (zig deps and compilation story...)

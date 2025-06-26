@@ -1142,7 +1142,103 @@ pub const Shape = struct {
         }
     }
 
-    pub fn computeStrides(self: Shape) std.BoundedArray(i64, MAX_RANK) {
+    /// Computes the strides of the shape in units of elements.
+    /// For a shape {d0, d1, d2}, the strides would be {d1*d2, d2, 1}.
+    pub fn computeElementStrides(self: Shape) std.BoundedArray(i64, MAX_RANK) {
+        return self.computeStrides(1);
+    }
+
+    test computeElementStrides {
+        {
+            const s = Shape.init(.{ 4, 1024 }, .bf16);
+            const strides = s.computeElementStrides();
+            try std.testing.expectEqualSlices(i64, &.{ 1024, 1 }, strides.constSlice());
+        }
+
+        {
+            const s = Shape.init(.{ 2, 3, 4 }, .f32);
+            const strides = s.computeElementStrides();
+            try std.testing.expectEqualSlices(i64, &.{ 12, 4, 1 }, strides.constSlice());
+        }
+
+        {
+            const s = Shape.init(.{ 5, 6 }, .i16);
+            const strides = s.computeElementStrides();
+            try std.testing.expectEqualSlices(i64, &.{ 6, 1 }, strides.constSlice());
+        }
+
+        {
+            const s = Shape.init(.{10}, .u8);
+            const strides = s.computeElementStrides();
+            try std.testing.expectEqualSlices(i64, &.{1}, strides.constSlice());
+        }
+
+        {
+            const s = Shape.scalar(.f64);
+            const strides = s.computeElementStrides();
+            try std.testing.expectEqualSlices(i64, &.{}, strides.constSlice());
+        }
+
+        {
+            const s = Shape.init(.{ 4, 1, 5 }, .i32);
+            const strides = s.computeElementStrides();
+            try std.testing.expectEqualSlices(i64, &.{ 5, 5, 1 }, strides.constSlice());
+        }
+
+        {
+            const s = Shape.init(.{ .n = 8, .c = 3, .h = 224, .w = 224 }, .f32);
+            const strides = s.computeElementStrides();
+            try std.testing.expectEqualSlices(i64, &.{ 3 * 224 * 224, 224 * 224, 224, 1 }, strides.constSlice());
+        }
+    }
+
+    /// Computes the strides of the shape in units of bytes.
+    /// For a shape {d0, d1, d2} of type T, the strides would be
+    /// {(d1*d2)*sizeof(T), d2*sizeof(T), 1*sizeof(T)}.
+    pub fn computeByteStrides(self: Shape) std.BoundedArray(i64, MAX_RANK) {
+        return self.computeStrides(self.dtype().sizeOf());
+    }
+
+    test computeByteStrides {
+        {
+            const s = Shape.init(.{ 2, 3, 4 }, .f16); // 2 bytes
+            const strides = s.computeByteStrides();
+            try std.testing.expectEqualSlices(i64, &.{ 12 * 2, 4 * 2, 1 * 2 }, strides.constSlice());
+        }
+
+        {
+            const s = Shape.init(.{ 4, 1024 }, .bf16); // 2 bytes
+            const strides = s.computeByteStrides();
+            try std.testing.expectEqualSlices(i64, &.{ 1024 * 2, 1 * 2 }, strides.constSlice());
+        }
+
+        {
+            const s = Shape.init(.{ 5, 6 }, .c64); // 8 bytes (f32 + f32)
+            const strides = s.computeByteStrides();
+            try std.testing.expectEqual(@sizeOf(std.math.Complex(f32)), 8);
+            try std.testing.expectEqualSlices(i64, &.{ 6 * 8, 1 * 8 }, strides.constSlice());
+        }
+
+        {
+            const s = Shape.init(.{ 128, 512 }, .i8); // 1 byte
+            const strides = s.computeByteStrides();
+            try std.testing.expectEqualSlices(i64, &.{ 512, 1 }, strides.constSlice());
+        }
+
+        {
+            const s = Shape.init(.{ 1, 4096 }, .u32); // 4 bytes
+            const strides = s.computeByteStrides();
+            try std.testing.expectEqualSlices(i64, &.{ 4096 * 4, 1 * 4 }, strides.constSlice());
+        }
+
+        {
+            const s = Shape.scalar(.f64); // 8 bytes
+            const strides = s.computeByteStrides();
+            try std.testing.expectEqualSlices(i64, &.{}, strides.constSlice());
+        }
+    }
+
+    fn computeStrides(self: Shape, element_size: i64) std.BoundedArray(i64, MAX_RANK) {
         const rk = self.rank();
         var strides: std.BoundedArray(i64, MAX_RANK) = .{ .len = rk };
         if (rk == 0) return strides;
@@ -1153,7 +1249,7 @@ pub const Shape = struct {
         // and the element size in bytes.
         var d: V = @bitCast(self._dims.buffer);
         d = @select(i64, rank_mask, d, @as(V, @splat(1)));
-        d = std.simd.shiftElementsLeft(d, 1, self.dtype().sizeOf());
+        d = std.simd.shiftElementsLeft(d, 1, element_size);
         d = std.simd.prefixScan(.Mul, -1, d);
 
         strides.buffer = @bitCast(d);
@@ -1499,4 +1595,135 @@ pub const Shape = struct {
         }
         return res_shape;
     }
+
+    pub fn iterator(self: Shape) MultiDimIterator {
+        return .{
+            .shape = self,
+            .current_coords = .{0} ** Shape.MAX_RANK,
+            .flat_index = 0,
+        };
+    }
 };
+
+/// Iterates over all coordinates of a shape, yielding the multi-dimensional
+/// coordinates and the corresponding flat index for each element.
+pub const MultiDimIterator = struct {
+    shape: Shape,
+    current_coords: [Shape.MAX_RANK]i64,
+    flat_index: usize,
+
+    pub const Item = struct {
+        coords: [Shape.MAX_RANK]i64,
+        rank: u4,
+        flat_index: usize,
+    };
+
+    pub fn next(self: *MultiDimIterator) ?Item {
+        if (self.flat_index >= self.shape.count()) {
+            return null;
+        }
+
+        const rank = self.shape.rank();
+        const item = Item{
+            .coords = self.current_coords,
+            .rank = rank,
+            .flat_index = self.flat_index,
+        };
+
+        self.flat_index += 1;
+
+        var i: usize = rank;
+        while (i > 0) {
+            i -= 1;
+            self.current_coords[i] += 1;
+            if (self.current_coords[i] < self.shape.dim(i)) {
+                return item;
+            }
+            self.current_coords[i] = 0;
+        }
+
+        return item;
+    }
+};
+
+test "MultiDimIterator / Scalar" {
+    const shape = Shape.scalar(.f32);
+    var iter = shape.iterator();
+    const item = iter.next().?;
+
+    try std.testing.expectEqual(0, item.rank);
+    try std.testing.expectEqual(0, item.flat_index);
+    try std.testing.expect(iter.next() == null);
+}
+
+test "MultiDimIterator / Empty" {
+    const shape = Shape.init(.{ .x = 5, .y = 0, .z = 2 }, .f32);
+    var iter = shape.iterator();
+
+    try std.testing.expect(iter.next() == null);
+}
+
+test "MultiDimIterator / 1D shape" {
+    const shape = Shape.init(.{5}, .f32);
+    var iter = shape.iterator();
+    var count: i64 = 0;
+
+    while (iter.next()) |item| : (count += 1) {
+        try std.testing.expectEqual(count, item.coords[0]);
+    }
+    try std.testing.expectEqual(5, count);
+}
+
+test "MultiDimIterator / 2D shape" {
+    const shape = Shape.init(.{ .rows = 2, .cols = 3 }, .f32);
+    var iter = shape.iterator();
+    var items = std.ArrayList(MultiDimIterator.Item).init(std.testing.allocator);
+    defer items.deinit();
+
+    while (iter.next()) |item| {
+        try items.append(item);
+    }
+
+    try std.testing.expectEqual(6, items.items.len);
+    try std.testing.expectEqualSlices(i64, &.{ 0, 0 }, items.items[0].coords[0..2]);
+    try std.testing.expectEqualSlices(i64, &.{ 0, 1 }, items.items[1].coords[0..2]);
+    try std.testing.expectEqualSlices(i64, &.{ 0, 2 }, items.items[2].coords[0..2]);
+    try std.testing.expectEqualSlices(i64, &.{ 1, 0 }, items.items[3].coords[0..2]);
+    try std.testing.expectEqualSlices(i64, &.{ 1, 1 }, items.items[4].coords[0..2]);
+    try std.testing.expectEqualSlices(i64, &.{ 1, 2 }, items.items[5].coords[0..2]);
+    try std.testing.expectEqual(5, items.items[5].flat_index);
+}
+
+test "MultiDimIterator / 3D shape" {
+    const shape = Shape.init(.{ .d = 2, .h = 2, .w = 2 }, .f32);
+    var iter = shape.iterator();
+    const expected_coords = [_][3]i64{
+        .{ 0, 0, 0 },
+        .{ 0, 0, 1 },
+        .{ 0, 1, 0 },
+        .{ 0, 1, 1 },
+        .{ 1, 0, 0 },
+        .{ 1, 0, 1 },
+        .{ 1, 1, 0 },
+        .{ 1, 1, 1 },
+    };
+    var count: usize = 0;
+
+    while (iter.next()) |item| : (count += 1) {
+        try std.testing.expectEqual(count, item.flat_index);
+        try std.testing.expectEqualSlices(i64, &expected_coords[count], item.coords[0..3]);
+    }
+
+    try std.testing.expectEqual(8, count);
+}
+
+test "MultiDimIterator / Shape with dimension of size 1" {
+    const shape = Shape.init(.{ .a = 2, .b = 1, .c = 3 }, .f32);
+    var iter = shape.iterator();
+    var count: usize = 0;
+
+    while (iter.next()) |item| : (count += 1) {
+        try std.testing.expectEqual(0, item.coords[1]);
+    }
+    try std.testing.expectEqual(6, count);
+}

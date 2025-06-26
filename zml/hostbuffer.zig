@@ -30,7 +30,7 @@ pub const HostBuffer = struct {
     pub fn empty(allocator: std.mem.Allocator, sh: Shape) error{OutOfMemory}!HostBuffer {
         return .{
             ._shape = sh,
-            ._strides = sh.computeStrides().buffer,
+            ._strides = sh.computeByteStrides().buffer,
             ._data = (try allocator.alignedAlloc(u8, 64, sh.byteSize())).ptr,
             ._memory = .{ .managed = .@"64" },
         };
@@ -43,7 +43,7 @@ pub const HostBuffer = struct {
         stdx.debug.assert(shape_.byteSize() == data_.len, "shape {} and data {} don't match", .{ shape_.byteSize(), data_.len });
         return .{
             ._shape = shape_,
-            ._strides = shape_.computeStrides().buffer,
+            ._strides = shape_.computeByteStrides().buffer,
             ._data = data_.ptr,
             ._memory = .unmanaged,
         };
@@ -67,7 +67,7 @@ pub const HostBuffer = struct {
         std.debug.assert(shape_.byteSize() == raw_bytes.len);
         return .{
             ._shape = shape_,
-            ._strides = shape_.computeStrides().buffer,
+            ._strides = shape_.computeByteStrides().buffer,
             ._data = raw_bytes.ptr,
             ._memory = .unmanaged,
         };
@@ -99,7 +99,7 @@ pub const HostBuffer = struct {
         std.debug.assert(sh.byteSize() == @sizeOf(T));
         return .{
             ._shape = sh,
-            ._strides = sh.computeStrides().buffer,
+            ._strides = sh.computeByteStrides().buffer,
             ._data = @ptrCast(arr_ptr),
             ._memory = .unmanaged,
         };
@@ -225,7 +225,7 @@ pub const HostBuffer = struct {
 
     pub fn isContiguous(self: HostBuffer) bool {
         const _strides = self._strides;
-        const cont_strides = self._shape.computeStrides();
+        const cont_strides = self._shape.computeByteStrides();
         for (self._shape.dims(), _strides[0..self.rank()], cont_strides.constSlice()) |d, stride, cont_stride| {
             if (d != 1 and stride != cont_stride) return false;
         }
@@ -236,7 +236,7 @@ pub const HostBuffer = struct {
         stdx.debug.assert(self.isContiguous(), "reshape expects a contiguous tensor, got: {}", .{self});
         var res = self;
         res._shape = self._shape.reshape(shape_);
-        res._strides = res._shape.computeStrides().buffer;
+        res._strides = res._shape.computeByteStrides().buffer;
         return res;
     }
 
