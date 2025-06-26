@@ -1,4 +1,5 @@
 const builtin = @import("builtin");
+
 const c = @import("c");
 
 pub const Tracer = switch (builtin.os.tag) {
@@ -81,6 +82,10 @@ const FakeTracer = struct {
     pub fn init(name: [:0]const u8) FakeTracer {
         _ = name;
         return .{};
+    }
+
+    pub fn deinit(self: *const FakeTracer) void {
+        _ = self;
     }
 
     pub fn event(self: *const FakeTracer, message: [:0]const u8) void {
