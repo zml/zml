@@ -110,6 +110,45 @@ pub const Mesh = struct {
         return .init(new_topology);
     }
 
+    pub fn flatten(self: Mesh, new_axis_name: anytype) Mesh {
+        const total_devices = self.numDevices();
+
+        var new_topology = Shape.init(.{}, .u8);
+        new_topology = new_topology.appendDim(total_devices, @tagName(new_axis_name));
+        return Mesh.init(new_topology);
+    }
+
+    test flatten {
+        {
+            // Flatten a 2D mesh
+            const mesh = Mesh.init(.{ .x = 2, .y = 4 });
+            const flattened = mesh.flatten(.all);
+            const expected = Mesh.init(.{ .all = 8 });
+
+            try std.testing.expect(flattened.eql(expected));
+            try std.testing.expectEqual(1, flattened.rank());
+            try std.testing.expectEqual(8, flattened.numDevices());
+        }
+
+        {
+            // Flatten a 3D mesh
+            const mesh = Mesh.init(.{ .data = 2, .model = 3, .pipeline = 4 });
+            const flattened = mesh.flatten(.devices);
+            const expected = Mesh.init(.{ .devices = 24 });
+            try std.testing.expect(flattened.eql(expected));
+            try std.testing.expectEqual(1, flattened.rank());
+            try std.testing.expectEqual(24, flattened.numDevices());
+        }
+        {
+            // Flattening a 1D mesh should just rename the axis
+            const mesh = Mesh.init(.{ .x = 16 });
+            const flattened = mesh.flatten(.y);
+            const expected = Mesh.init(.{ .y = 16 });
+            try std.testing.expect(flattened.eql(expected));
+            try std.testing.expectEqual(1, expected.rank());
+        }
+    }
+
     pub fn rank(self: Mesh) i64 {
         return @intCast(self.topology.rank());
     }
@@ -552,12 +591,10 @@ pub const Sharding = struct {
 
     pub fn getShardingAttr(self: Sharding) std.BoundedArray(u8, 128) {
         var sharding_str: std.BoundedArray(u8, 128) = .{};
-        self.writeShardingRepresentation(sharding_str.writer()) catch unreachable; // Should not fail with 128-byte buffer
+        self.writeShardingRepresentation(sharding_str.writer()) catch unreachable;
         return sharding_str;
     }
 
-    /// Writes the MLIR/StableHLO string representation of this sharding to the given writer.
-    /// This is the low-level implementation for `getShardingAttr`.
     pub fn writeShardingRepresentation(self: Sharding, writer: anytype) !void {
         if (self.getType() == .replicated) {
             try writer.writeAll("{replicated}");
@@ -567,12 +604,10 @@ pub const Sharding = struct {
         try writer.writeAll("{devices=[");
         const rank = self.global_shape.rank();
         for (0..rank) |i| {
-            // Get the partition specification for the current tensor dimension.
             const part_spec = self.global_shape.partition(i);
 
             var dim: i64 = 1; // Default to 1 for replicated dimensions.
 
-            // If the dimension is partitioned on a mesh axis, get that axis's size.
             if (part_spec == .axis) {
                 const mesh_axis_tag = part_spec.toTag();
                 dim = self.mesh.topology.dim(mesh_axis_tag);

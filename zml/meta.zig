@@ -225,9 +225,7 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
                 }
                 to.* = items;
             },
-            else => {
-                stdx.debug.compileError("zml.meta.mapAlloc doesn't support: {}", .{FromStruct});
-            },
+            else => stdx.debug.compileError("zml.meta.mapAlloc doesn't support: {}", .{FromStruct}),
         },
         .optional => if (from) |f| {
             to.* = @as(@typeInfo(type_info_to_ptr.pointer.child).optional.child, undefined);
