@@ -899,6 +899,7 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, m
             // Use lld from libllvm instead of invoking the ld.lld binary.
             // This saves us from having to sandbox it.
             setFlag(&options, "xla_gpu_use_inprocess_lld", true);
+            setFlag(&options, "xla_gpu_autotune_level", 0);
         },
         else => {},
     }
