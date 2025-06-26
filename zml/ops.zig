@@ -764,33 +764,6 @@ pub fn fromMlirOperationWithTags(op: mlir.Operation, base: anytype) @TypeOf(base
     return res;
 }
 
-pub const HostCallbackOpt = struct {
-    has_side_effect: bool = false,
-    output_operand_aliases: []const i64 = &.{},
-};
-
-pub fn addHostCallback(
-    callback: *const Context.HostCallback,
-    blkctx: ?*anyopaque,
-    inputs: []const Tensor,
-    output_shapes: []const Shape,
-    opts: HostCallbackOpt,
-) []Tensor {
-    return customCall(
-        "zmlHostBufferCallback",
-        inputs,
-        output_shapes,
-        .{
-            .callback = @intFromPtr(callback),
-            .user_context = @intFromPtr(blkctx),
-        },
-        .{
-            .has_side_effect = opts.has_side_effect,
-            .output_operand_aliases = opts.output_operand_aliases,
-        },
-    );
-}
-
 pub const TritonOps = struct {
     debug: bool = false,
     name: [:0]const u8,
