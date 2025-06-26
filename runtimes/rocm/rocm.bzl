@@ -6,7 +6,7 @@ _BUILD_FILE_DEFAULT_VISIBILITY = """\
 package(default_visibility = ["//visibility:public"])
 """
 
-_ROCM_STRIP_PREFIX = "opt/rocm-6.3.4"
+_ROCM_STRIP_PREFIX = "opt/rocm-6.4.1"
 
 # def _kwargs(**kwargs):
 #     return repr(struct(**kwargs))[len("struct("):-1]
@@ -33,9 +33,19 @@ _ROCM_STRIP_PREFIX = "opt/rocm-6.3.4"
 _ROCM_PACKAGES = {
     "rocm-core": packages.cc_import(name = "rocm-core", shared_library = "lib/librocm-core.so.1"),
     "rocm-smi-lib": packages.cc_import(name = "rocm_smi", shared_library = "lib/librocm_smi64.so.7"),
-    "hsa-rocr": packages.cc_import(name = "hsa-runtime", shared_library = "lib/libhsa-runtime64.so.1"),
+    "hsa-rocr": "\n".join([
+        packages.load_("@zml//bazel:cc_import.bzl", "cc_import"),
+        packages.cc_import(
+            name = "hsa-runtime", 
+            shared_library = "lib/libhsa-runtime64.so.1",
+            add_needed = ["libzmlxrocm.so.0"],
+            rename_dynamic_symbols = {
+                "dlopen": "zmlxrocm_dlopen",
+            },
+        ),
+    ]),
     "hsa-amd-aqlprofile": packages.cc_import(name = "hsa-amd-aqlprofile", shared_library = "lib/libhsa-amd-aqlprofile64.so.1"),
-    "comgr": packages.cc_import(name = "amd_comgr", shared_library = "lib/libamd_comgr.so.2"),
+    "comgr": packages.cc_import(name = "amd_comgr", shared_library = "lib/libamd_comgr.so.3"),
     "rocprofiler-register": packages.cc_import(name = "rocprofiler-register", shared_library = "lib/librocprofiler-register.so.0"),
     "miopen-hip": "\n".join([
         packages.cc_import(name = "MIOpen", shared_library = "lib/libMIOpen.so.1"),
@@ -97,7 +107,6 @@ _ROCM_PACKAGES = {
             name = "runfiles",
             srcs = [
                 "lib/hipblaslt/library/hipblasltExtOpLibrary.dat",
-                "lib/hipblaslt/library/TensileManifest.txt",
                 ":bytecodes",
             ],
         ),

@@ -3,487 +3,518 @@
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "rocm-core_6.3.4.60304-76_22.04_amd64",
+			"key": "rocm-core_6.4.1.60401-83_22.04_amd64",
 			"name": "rocm-core",
-			"sha256": "80ec656c41290335df3609043b4ff52df25de82257d987d2e90a4d86cbc0d080",
+			"sha256": "221236cf665597beea8c6faeffa1569fc35a6ad4cab89d5c8931974120b42621",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/6.3.4/pool/main/r/rocm-core/rocm-core_6.3.4.60304-76~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/6.4.1/pool/main/r/rocm-core/rocm-core_6.4.1.60401-83~22.04_amd64.deb"
 			],
-			"version": "6.3.4.60304-76~22.04"
+			"version": "6.4.1.60401-83~22.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [
 				{
-					"key": "rocm-core_6.3.4.60304-76_22.04_amd64",
+					"key": "rocm-core_6.4.1.60401-83_22.04_amd64",
 					"name": "rocm-core",
-					"version": "6.3.4.60304-76~22.04"
+					"version": "6.4.1.60401-83~22.04"
 				}
 			],
-			"key": "rocm-smi-lib_7.4.0.60304-76_22.04_amd64",
+			"key": "rocm-smi-lib_7.5.0.60401-83_22.04_amd64",
 			"name": "rocm-smi-lib",
-			"sha256": "0aa35daa0b6336f7ff58720067e16e7b68efcf423d8be355e11c3a59e7b7bf71",
+			"sha256": "3db3358e0ae302b4589e586d6b9dae2ae183d521e61979723d9eb918c7bfbde1",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/6.3.4/pool/main/r/rocm-smi-lib/rocm-smi-lib_7.4.0.60304-76~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/6.4.1/pool/main/r/rocm-smi-lib/rocm-smi-lib_7.5.0.60401-83~22.04_amd64.deb"
 			],
-			"version": "7.4.0.60304-76~22.04"
+			"version": "7.5.0.60401-83~22.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [
 				{
-					"key": "rocprofiler-register_0.4.0.60304-76_22.04_amd64",
+					"key": "rocprofiler-register_0.4.0.60401-83_22.04_amd64",
 					"name": "rocprofiler-register",
-					"version": "0.4.0.60304-76~22.04"
+					"version": "0.4.0.60401-83~22.04"
 				},
 				{
-					"key": "rocm-core_6.3.4.60304-76_22.04_amd64",
+					"key": "rocm-core_6.4.1.60401-83_22.04_amd64",
 					"name": "rocm-core",
-					"version": "6.3.4.60304-76~22.04"
+					"version": "6.4.1.60401-83~22.04"
 				}
 			],
-			"key": "hsa-rocr_1.14.0.60304-76_22.04_amd64",
+			"key": "hsa-rocr_1.15.0.60401-83_22.04_amd64",
 			"name": "hsa-rocr",
-			"sha256": "c78622adcf567f88a22a2a167baf3675d08ebbfb5d98119a17c5a7ae50e14519",
+			"sha256": "07a37ac162acbc5f054b0ea9cfd4e37e1640adee367d31aad15d504c49999372",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/6.3.4/pool/main/h/hsa-rocr/hsa-rocr_1.14.0.60304-76~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/6.4.1/pool/main/h/hsa-rocr/hsa-rocr_1.15.0.60401-83~22.04_amd64.deb"
 			],
-			"version": "1.14.0.60304-76~22.04"
+			"version": "1.15.0.60401-83~22.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [
 				{
-					"key": "rocm-core_6.3.4.60304-76_22.04_amd64",
+					"key": "rocm-core_6.4.1.60401-83_22.04_amd64",
 					"name": "rocm-core",
-					"version": "6.3.4.60304-76~22.04"
+					"version": "6.4.1.60401-83~22.04"
 				}
 			],
-			"key": "rocprofiler-register_0.4.0.60304-76_22.04_amd64",
+			"key": "rocprofiler-register_0.4.0.60401-83_22.04_amd64",
 			"name": "rocprofiler-register",
-			"sha256": "6d4474295d47b73d88d1e3e67b3daa5a731ffb466de09cfcefa1746d653f738d",
+			"sha256": "da49a66ca3e6ee8b9491777c2b5170b6020e8308371e26b869d7af81bc50f571",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/6.3.4/pool/main/r/rocprofiler-register/rocprofiler-register_0.4.0.60304-76~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/6.4.1/pool/main/r/rocprofiler-register/rocprofiler-register_0.4.0.60401-83~22.04_amd64.deb"
 			],
-			"version": "0.4.0.60304-76~22.04"
+			"version": "0.4.0.60401-83~22.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [
 				{
-					"key": "rocm-core_6.3.4.60304-76_22.04_amd64",
+					"key": "rocm-core_6.4.1.60401-83_22.04_amd64",
 					"name": "rocm-core",
-					"version": "6.3.4.60304-76~22.04"
+					"version": "6.4.1.60401-83~22.04"
 				}
 			],
-			"key": "hsa-amd-aqlprofile_1.0.0.60304-76_22.04_amd64",
+			"key": "hsa-amd-aqlprofile_1.0.0.60401-83_22.04_amd64",
 			"name": "hsa-amd-aqlprofile",
-			"sha256": "9d6eefd1b5002eb15f0fe0a05d3a9936b216a5d63c45aefa6483e5bd122ec937",
+			"sha256": "9e0917b47d40318f73d4323bdc0fdaa27202931544bc4e89f706c4ddd9bd9428",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/6.3.4/pool/main/h/hsa-amd-aqlprofile/hsa-amd-aqlprofile_1.0.0.60304-76~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/6.4.1/pool/main/h/hsa-amd-aqlprofile/hsa-amd-aqlprofile_1.0.0.60401-83~22.04_amd64.deb"
 			],
-			"version": "1.0.0.60304-76~22.04"
+			"version": "1.0.0.60401-83~22.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [
 				{
-					"key": "rocm-core_6.3.4.60304-76_22.04_amd64",
+					"key": "rocm-core_6.4.1.60401-83_22.04_amd64",
 					"name": "rocm-core",
-					"version": "6.3.4.60304-76~22.04"
+					"version": "6.4.1.60401-83~22.04"
 				}
 			],
-			"key": "comgr_2.8.0.60304-76_22.04_amd64",
+			"key": "comgr_3.0.0.60401-83_22.04_amd64",
 			"name": "comgr",
-			"sha256": "d5473abde7ab958b6245b7eee4dd502e4b23876d7ac63ad0ff7308e21d774809",
+			"sha256": "ba02bdf830458668a39300ad082419f4bac3644bf5727c496846697e9fddf429",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/6.3.4/pool/main/c/comgr/comgr_2.8.0.60304-76~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/6.4.1/pool/main/c/comgr/comgr_3.0.0.60401-83~22.04_amd64.deb"
 			],
-			"version": "2.8.0.60304-76~22.04"
+			"version": "3.0.0.60401-83~22.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [
 				{
-					"key": "rocm-core_6.3.4.60304-76_22.04_amd64",
+					"key": "rocm-core_6.4.1.60401-83_22.04_amd64",
 					"name": "rocm-core",
-					"version": "6.3.4.60304-76~22.04"
+					"version": "6.4.1.60401-83~22.04"
 				},
 				{
-					"key": "rocrand_3.2.0.60304-76_22.04_amd64",
+					"key": "rocrand_3.3.0.60401-83_22.04_amd64",
 					"name": "rocrand",
-					"version": "3.2.0.60304-76~22.04"
+					"version": "3.3.0.60401-83~22.04"
 				},
 				{
-					"key": "hipblaslt_0.10.0.60304-76_22.04_amd64",
+					"key": "hipblaslt_0.12.1.60401-83_22.04_amd64",
 					"name": "hipblaslt",
-					"version": "0.10.0.60304-76~22.04"
+					"version": "0.12.1.60401-83~22.04"
 				},
 				{
-					"key": "rocblas_4.3.0.60304-76_22.04_amd64",
-					"name": "rocblas",
-					"version": "4.3.0.60304-76~22.04"
-				},
-				{
-					"key": "hip-runtime-amd_6.3.42134.60304-76_22.04_amd64",
-					"name": "hip-runtime-amd",
-					"version": "6.3.42134.60304-76~22.04"
-				},
-				{
-					"key": "rocprofiler-register_0.4.0.60304-76_22.04_amd64",
-					"name": "rocprofiler-register",
-					"version": "0.4.0.60304-76~22.04"
-				},
-				{
-					"key": "comgr_2.8.0.60304-76_22.04_amd64",
-					"name": "comgr",
-					"version": "2.8.0.60304-76~22.04"
-				},
-				{
-					"key": "rocminfo_1.0.0.60304-76_22.04_amd64",
-					"name": "rocminfo",
-					"version": "1.0.0.60304-76~22.04"
-				},
-				{
-					"key": "hsa-rocr_1.14.0.60304-76_22.04_amd64",
-					"name": "hsa-rocr",
-					"version": "1.14.0.60304-76~22.04"
-				},
-				{
-					"key": "roctracer_4.1.60304.60304-76_22.04_amd64",
+					"key": "roctracer_4.1.60401.60401-83_22.04_amd64",
 					"name": "roctracer",
-					"version": "4.1.60304.60304-76~22.04"
+					"version": "4.1.60401.60401-83~22.04"
+				},
+				{
+					"key": "rocblas_4.4.0.60401-83_22.04_amd64",
+					"name": "rocblas",
+					"version": "4.4.0.60401-83~22.04"
+				},
+				{
+					"key": "hip-runtime-amd_6.4.43483.60401-83_22.04_amd64",
+					"name": "hip-runtime-amd",
+					"version": "6.4.43483.60401-83~22.04"
+				},
+				{
+					"key": "rocprofiler-register_0.4.0.60401-83_22.04_amd64",
+					"name": "rocprofiler-register",
+					"version": "0.4.0.60401-83~22.04"
+				},
+				{
+					"key": "comgr_3.0.0.60401-83_22.04_amd64",
+					"name": "comgr",
+					"version": "3.0.0.60401-83~22.04"
+				},
+				{
+					"key": "rocminfo_1.0.0.60401-83_22.04_amd64",
+					"name": "rocminfo",
+					"version": "1.0.0.60401-83~22.04"
+				},
+				{
+					"key": "hsa-rocr_1.15.0.60401-83_22.04_amd64",
+					"name": "hsa-rocr",
+					"version": "1.15.0.60401-83~22.04"
 				}
 			],
-			"key": "miopen-hip_3.3.0.60304-76_22.04_amd64",
+			"key": "miopen-hip_3.4.0.60401-83_22.04_amd64",
 			"name": "miopen-hip",
-			"sha256": "4cd1c953cf456b9166f7eb935099c25300aed75b5d51665172d26776e09a0ab0",
+			"sha256": "584431b94f2809f553633a887a7f88d308391114cc9547da305d5ddcd84bd3e5",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/6.3.4/pool/main/m/miopen-hip/miopen-hip_3.3.0.60304-76~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/6.4.1/pool/main/m/miopen-hip/miopen-hip_3.4.0.60401-83~22.04_amd64.deb"
 			],
-			"version": "3.3.0.60304-76~22.04"
+			"version": "3.4.0.60401-83~22.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "rocrand_3.2.0.60304-76_22.04_amd64",
+			"key": "rocrand_3.3.0.60401-83_22.04_amd64",
 			"name": "rocrand",
-			"sha256": "8c29882110df41ba7fcfb95509093083b5956ad62c5d38a21dd053277a5d4ada",
+			"sha256": "8d77ce48dc4256bcdba122c9243febd083ffc9147c340ef793f362d8611e35d3",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/6.3.4/pool/main/r/rocrand/rocrand_3.2.0.60304-76~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/6.4.1/pool/main/r/rocrand/rocrand_3.3.0.60401-83~22.04_amd64.deb"
 			],
-			"version": "3.2.0.60304-76~22.04"
+			"version": "3.3.0.60401-83~22.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [
 				{
-					"key": "rocm-core_6.3.4.60304-76_22.04_amd64",
+					"key": "rocm-core_6.4.1.60401-83_22.04_amd64",
 					"name": "rocm-core",
-					"version": "6.3.4.60304-76~22.04"
+					"version": "6.4.1.60401-83~22.04"
+				},
+				{
+					"key": "roctracer_4.1.60401.60401-83_22.04_amd64",
+					"name": "roctracer",
+					"version": "4.1.60401.60401-83~22.04"
 				}
 			],
-			"key": "hipblaslt_0.10.0.60304-76_22.04_amd64",
+			"key": "hipblaslt_0.12.1.60401-83_22.04_amd64",
 			"name": "hipblaslt",
-			"sha256": "a7765f361fa078b4cb9847a4f9de7c0e3fe6dd079b61e02d3da8a817fd8e1e85",
+			"sha256": "23e6facad7bd1a17223761e06e9c6d1561c5a9e80f052e5f1589d21ab7167e9e",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/6.3.4/pool/main/h/hipblaslt/hipblaslt_0.10.0.60304-76~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/6.4.1/pool/main/h/hipblaslt/hipblaslt_0.12.1.60401-83~22.04_amd64.deb"
 			],
-			"version": "0.10.0.60304-76~22.04"
+			"version": "0.12.1.60401-83~22.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [
 				{
-					"key": "rocm-core_6.3.4.60304-76_22.04_amd64",
+					"key": "rocm-core_6.4.1.60401-83_22.04_amd64",
 					"name": "rocm-core",
-					"version": "6.3.4.60304-76~22.04"
-				},
-				{
-					"key": "hip-runtime-amd_6.3.42134.60304-76_22.04_amd64",
-					"name": "hip-runtime-amd",
-					"version": "6.3.42134.60304-76~22.04"
-				},
-				{
-					"key": "rocprofiler-register_0.4.0.60304-76_22.04_amd64",
-					"name": "rocprofiler-register",
-					"version": "0.4.0.60304-76~22.04"
-				},
-				{
-					"key": "comgr_2.8.0.60304-76_22.04_amd64",
-					"name": "comgr",
-					"version": "2.8.0.60304-76~22.04"
-				},
-				{
-					"key": "rocminfo_1.0.0.60304-76_22.04_amd64",
-					"name": "rocminfo",
-					"version": "1.0.0.60304-76~22.04"
-				},
-				{
-					"key": "hsa-rocr_1.14.0.60304-76_22.04_amd64",
-					"name": "hsa-rocr",
-					"version": "1.14.0.60304-76~22.04"
-				},
-				{
-					"key": "hipblaslt_0.10.0.60304-76_22.04_amd64",
-					"name": "hipblaslt",
-					"version": "0.10.0.60304-76~22.04"
+					"version": "6.4.1.60401-83~22.04"
 				}
 			],
-			"key": "rocblas_4.3.0.60304-76_22.04_amd64",
-			"name": "rocblas",
-			"sha256": "8f3ca6d113ffdc7f478326f243f23b9791b38f2b07fac36a329a34e67b6dc73e",
-			"urls": [
-				"https://repo.radeon.com/rocm/apt/6.3.4/pool/main/r/rocblas/rocblas_4.3.0.60304-76~22.04_amd64.deb"
-			],
-			"version": "4.3.0.60304-76~22.04"
-		},
-		{
-			"arch": "amd64",
-			"dependencies": [
-				{
-					"key": "rocprofiler-register_0.4.0.60304-76_22.04_amd64",
-					"name": "rocprofiler-register",
-					"version": "0.4.0.60304-76~22.04"
-				},
-				{
-					"key": "rocm-core_6.3.4.60304-76_22.04_amd64",
-					"name": "rocm-core",
-					"version": "6.3.4.60304-76~22.04"
-				},
-				{
-					"key": "comgr_2.8.0.60304-76_22.04_amd64",
-					"name": "comgr",
-					"version": "2.8.0.60304-76~22.04"
-				},
-				{
-					"key": "rocminfo_1.0.0.60304-76_22.04_amd64",
-					"name": "rocminfo",
-					"version": "1.0.0.60304-76~22.04"
-				},
-				{
-					"key": "hsa-rocr_1.14.0.60304-76_22.04_amd64",
-					"name": "hsa-rocr",
-					"version": "1.14.0.60304-76~22.04"
-				}
-			],
-			"key": "hip-runtime-amd_6.3.42134.60304-76_22.04_amd64",
-			"name": "hip-runtime-amd",
-			"sha256": "d122495575c47125f6a4b1aa53a61d834ce7ab8b429ff86c39751e13197e82d0",
-			"urls": [
-				"https://repo.radeon.com/rocm/apt/6.3.4/pool/main/h/hip-runtime-amd/hip-runtime-amd_6.3.42134.60304-76~22.04_amd64.deb"
-			],
-			"version": "6.3.42134.60304-76~22.04"
-		},
-		{
-			"arch": "amd64",
-			"dependencies": [],
-			"key": "rocminfo_1.0.0.60304-76_22.04_amd64",
-			"name": "rocminfo",
-			"sha256": "9a7d77959ec3cf4ae3134c2f5341fa0ea37309b083c1ed179aba932566b5a528",
-			"urls": [
-				"https://repo.radeon.com/rocm/apt/6.3.4/pool/main/r/rocminfo/rocminfo_1.0.0.60304-76~22.04_amd64.deb"
-			],
-			"version": "1.0.0.60304-76~22.04"
-		},
-		{
-			"arch": "amd64",
-			"dependencies": [
-				{
-					"key": "rocm-core_6.3.4.60304-76_22.04_amd64",
-					"name": "rocm-core",
-					"version": "6.3.4.60304-76~22.04"
-				}
-			],
-			"key": "roctracer_4.1.60304.60304-76_22.04_amd64",
+			"key": "roctracer_4.1.60401.60401-83_22.04_amd64",
 			"name": "roctracer",
-			"sha256": "b8398f10b5f27fe01fce891a64e27963687bb0e63e85bbc11801fe3fcbe30607",
+			"sha256": "58cead537cf07c8a8770bfe28346c3b3c92cc4297b51e307c9032b04434b187c",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/6.3.4/pool/main/r/roctracer/roctracer_4.1.60304.60304-76~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/6.4.1/pool/main/r/roctracer/roctracer_4.1.60401.60401-83~22.04_amd64.deb"
 			],
-			"version": "4.1.60304.60304-76~22.04"
+			"version": "4.1.60401.60401-83~22.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [
 				{
-					"key": "rocprofiler-register_0.4.0.60304-76_22.04_amd64",
-					"name": "rocprofiler-register",
-					"version": "0.4.0.60304-76~22.04"
-				},
-				{
-					"key": "rocm-core_6.3.4.60304-76_22.04_amd64",
+					"key": "rocm-core_6.4.1.60401-83_22.04_amd64",
 					"name": "rocm-core",
-					"version": "6.3.4.60304-76~22.04"
+					"version": "6.4.1.60401-83~22.04"
 				},
 				{
-					"key": "rocm-smi-lib_7.4.0.60304-76_22.04_amd64",
-					"name": "rocm-smi-lib",
-					"version": "7.4.0.60304-76~22.04"
-				},
-				{
-					"key": "hip-runtime-amd_6.3.42134.60304-76_22.04_amd64",
+					"key": "hip-runtime-amd_6.4.43483.60401-83_22.04_amd64",
 					"name": "hip-runtime-amd",
-					"version": "6.3.42134.60304-76~22.04"
+					"version": "6.4.43483.60401-83~22.04"
 				},
 				{
-					"key": "comgr_2.8.0.60304-76_22.04_amd64",
-					"name": "comgr",
-					"version": "2.8.0.60304-76~22.04"
-				},
-				{
-					"key": "rocminfo_1.0.0.60304-76_22.04_amd64",
-					"name": "rocminfo",
-					"version": "1.0.0.60304-76~22.04"
-				},
-				{
-					"key": "hsa-rocr_1.14.0.60304-76_22.04_amd64",
-					"name": "hsa-rocr",
-					"version": "1.14.0.60304-76~22.04"
-				}
-			],
-			"key": "rccl_2.21.5.60304-76_22.04_amd64",
-			"name": "rccl",
-			"sha256": "ee344582ef81140ed81508897ff1b1d096f7a82a489491d14ac5f4b3ae384bc8",
-			"urls": [
-				"https://repo.radeon.com/rocm/apt/6.3.4/pool/main/r/rccl/rccl_2.21.5.60304-76~22.04_amd64.deb"
-			],
-			"version": "2.21.5.60304-76~22.04"
-		},
-		{
-			"arch": "amd64",
-			"dependencies": [
-				{
-					"key": "rocm-core_6.3.4.60304-76_22.04_amd64",
-					"name": "rocm-core",
-					"version": "6.3.4.60304-76~22.04"
-				}
-			],
-			"key": "rocm-device-libs_1.0.0.60304-76_22.04_amd64",
-			"name": "rocm-device-libs",
-			"sha256": "060ef802fa7516fb1d50c971ceead8acaa1651a7119b75db8e6454d4a58b67d3",
-			"urls": [
-				"https://repo.radeon.com/rocm/apt/6.3.4/pool/main/r/rocm-device-libs/rocm-device-libs_1.0.0.60304-76~22.04_amd64.deb"
-			],
-			"version": "1.0.0.60304-76~22.04"
-		},
-		{
-			"arch": "amd64",
-			"dependencies": [
-				{
-					"key": "hsa-rocr-dev_1.14.0.60304-76_22.04_amd64",
-					"name": "hsa-rocr-dev",
-					"version": "1.14.0.60304-76~22.04"
-				},
-				{
-					"key": "hsa-rocr_1.14.0.60304-76_22.04_amd64",
-					"name": "hsa-rocr",
-					"version": "1.14.0.60304-76~22.04"
-				},
-				{
-					"key": "rocprofiler-register_0.4.0.60304-76_22.04_amd64",
+					"key": "rocprofiler-register_0.4.0.60401-83_22.04_amd64",
 					"name": "rocprofiler-register",
-					"version": "0.4.0.60304-76~22.04"
+					"version": "0.4.0.60401-83~22.04"
 				},
 				{
-					"key": "rocm-core_6.3.4.60304-76_22.04_amd64",
-					"name": "rocm-core",
-					"version": "6.3.4.60304-76~22.04"
-				},
-				{
-					"key": "rocm-llvm_18.0.0.25012.60304-76_22.04_amd64",
-					"name": "rocm-llvm",
-					"version": "18.0.0.25012.60304-76~22.04"
-				},
-				{
-					"key": "hip-runtime-amd_6.3.42134.60304-76_22.04_amd64",
-					"name": "hip-runtime-amd",
-					"version": "6.3.42134.60304-76~22.04"
-				},
-				{
-					"key": "comgr_2.8.0.60304-76_22.04_amd64",
+					"key": "comgr_3.0.0.60401-83_22.04_amd64",
 					"name": "comgr",
-					"version": "2.8.0.60304-76~22.04"
+					"version": "3.0.0.60401-83~22.04"
 				},
 				{
-					"key": "rocminfo_1.0.0.60304-76_22.04_amd64",
+					"key": "rocminfo_1.0.0.60401-83_22.04_amd64",
 					"name": "rocminfo",
-					"version": "1.0.0.60304-76~22.04"
-				}
-			],
-			"key": "hip-dev_6.3.42134.60304-76_22.04_amd64",
-			"name": "hip-dev",
-			"sha256": "7a1cb7cbfbc316bbb9dccc101a83ca2ebd6f5fff1a1d86d970f806e777624afd",
-			"urls": [
-				"https://repo.radeon.com/rocm/apt/6.3.4/pool/main/h/hip-dev/hip-dev_6.3.42134.60304-76~22.04_amd64.deb"
-			],
-			"version": "6.3.42134.60304-76~22.04"
-		},
-		{
-			"arch": "amd64",
-			"dependencies": [],
-			"key": "hsa-rocr-dev_1.14.0.60304-76_22.04_amd64",
-			"name": "hsa-rocr-dev",
-			"sha256": "4c6d435b47e87064a4478eb5b6c19de21a4b0e425a51dbe027a3cce2d1bfd048",
-			"urls": [
-				"https://repo.radeon.com/rocm/apt/6.3.4/pool/main/h/hsa-rocr-dev/hsa-rocr-dev_1.14.0.60304-76~22.04_amd64.deb"
-			],
-			"version": "1.14.0.60304-76~22.04"
-		},
-		{
-			"arch": "amd64",
-			"dependencies": [
+					"version": "1.0.0.60401-83~22.04"
+				},
 				{
-					"key": "rocm-core_6.3.4.60304-76_22.04_amd64",
-					"name": "rocm-core",
-					"version": "6.3.4.60304-76~22.04"
-				}
-			],
-			"key": "rocm-llvm_18.0.0.25012.60304-76_22.04_amd64",
-			"name": "rocm-llvm",
-			"sha256": "3de2e3b758b1fbe11d83915e0672f152cb0ecfab6b210b714fdbee8856030ba6",
-			"urls": [
-				"https://repo.radeon.com/rocm/apt/6.3.4/pool/main/r/rocm-llvm/rocm-llvm_18.0.0.25012.60304-76~22.04_amd64.deb"
-			],
-			"version": "18.0.0.25012.60304-76~22.04"
-		},
-		{
-			"arch": "amd64",
-			"dependencies": [
+					"key": "hsa-rocr_1.15.0.60401-83_22.04_amd64",
+					"name": "hsa-rocr",
+					"version": "1.15.0.60401-83~22.04"
+				},
 				{
-					"key": "hipblaslt_0.10.0.60304-76_22.04_amd64",
+					"key": "hipblaslt_0.12.1.60401-83_22.04_amd64",
 					"name": "hipblaslt",
-					"version": "0.10.0.60304-76~22.04"
+					"version": "0.12.1.60401-83~22.04"
 				},
 				{
-					"key": "rocm-core_6.3.4.60304-76_22.04_amd64",
-					"name": "rocm-core",
-					"version": "6.3.4.60304-76~22.04"
-				},
-				{
-					"key": "hipblas-common-dev_1.0.0.60304-76_22.04_amd64",
-					"name": "hipblas-common-dev",
-					"version": "1.0.0.60304-76~22.04"
+					"key": "roctracer_4.1.60401.60401-83_22.04_amd64",
+					"name": "roctracer",
+					"version": "4.1.60401.60401-83~22.04"
 				}
 			],
-			"key": "hipblaslt-dev_0.10.0.60304-76_22.04_amd64",
-			"name": "hipblaslt-dev",
-			"sha256": "5bbd7d19a05b389400732ecec5cc16df25a6c536c54de1d554ea1b74a64772ff",
+			"key": "rocblas_4.4.0.60401-83_22.04_amd64",
+			"name": "rocblas",
+			"sha256": "0f850a080c312d80c0b928b48efca4fb507c64e95536aaefe7f23c6fc0c1fe09",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/6.3.4/pool/main/h/hipblaslt-dev/hipblaslt-dev_0.10.0.60304-76~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/6.4.1/pool/main/r/rocblas/rocblas_4.4.0.60401-83~22.04_amd64.deb"
 			],
-			"version": "0.10.0.60304-76~22.04"
+			"version": "4.4.0.60401-83~22.04"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [
+				{
+					"key": "rocprofiler-register_0.4.0.60401-83_22.04_amd64",
+					"name": "rocprofiler-register",
+					"version": "0.4.0.60401-83~22.04"
+				},
+				{
+					"key": "rocm-core_6.4.1.60401-83_22.04_amd64",
+					"name": "rocm-core",
+					"version": "6.4.1.60401-83~22.04"
+				},
+				{
+					"key": "comgr_3.0.0.60401-83_22.04_amd64",
+					"name": "comgr",
+					"version": "3.0.0.60401-83~22.04"
+				},
+				{
+					"key": "rocminfo_1.0.0.60401-83_22.04_amd64",
+					"name": "rocminfo",
+					"version": "1.0.0.60401-83~22.04"
+				},
+				{
+					"key": "hsa-rocr_1.15.0.60401-83_22.04_amd64",
+					"name": "hsa-rocr",
+					"version": "1.15.0.60401-83~22.04"
+				}
+			],
+			"key": "hip-runtime-amd_6.4.43483.60401-83_22.04_amd64",
+			"name": "hip-runtime-amd",
+			"sha256": "dee21498aa4fd4dd267efad563b4cc7fc3363d60f46b626c23681631f5f0cf79",
+			"urls": [
+				"https://repo.radeon.com/rocm/apt/6.4.1/pool/main/h/hip-runtime-amd/hip-runtime-amd_6.4.43483.60401-83~22.04_amd64.deb"
+			],
+			"version": "6.4.43483.60401-83~22.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "hipblas-common-dev_1.0.0.60304-76_22.04_amd64",
-			"name": "hipblas-common-dev",
-			"sha256": "7a03e99f09cefaea9b13a59fc41def4214fff9a90cf05ab19be0f83ef9653b5e",
+			"key": "rocminfo_1.0.0.60401-83_22.04_amd64",
+			"name": "rocminfo",
+			"sha256": "55d19b59464dd444002d12bf1fe8c762c15f2ae79f9dccbbf38360b42e3156b6",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/6.3.4/pool/main/h/hipblas-common-dev/hipblas-common-dev_1.0.0.60304-76~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/6.4.1/pool/main/r/rocminfo/rocminfo_1.0.0.60401-83~22.04_amd64.deb"
 			],
-			"version": "1.0.0.60304-76~22.04"
+			"version": "1.0.0.60401-83~22.04"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [
+				{
+					"key": "rocm-core_6.4.1.60401-83_22.04_amd64",
+					"name": "rocm-core",
+					"version": "6.4.1.60401-83~22.04"
+				},
+				{
+					"key": "rocm-smi-lib_7.5.0.60401-83_22.04_amd64",
+					"name": "rocm-smi-lib",
+					"version": "7.5.0.60401-83~22.04"
+				},
+				{
+					"key": "hip-runtime-amd_6.4.43483.60401-83_22.04_amd64",
+					"name": "hip-runtime-amd",
+					"version": "6.4.43483.60401-83~22.04"
+				},
+				{
+					"key": "rocprofiler-register_0.4.0.60401-83_22.04_amd64",
+					"name": "rocprofiler-register",
+					"version": "0.4.0.60401-83~22.04"
+				},
+				{
+					"key": "comgr_3.0.0.60401-83_22.04_amd64",
+					"name": "comgr",
+					"version": "3.0.0.60401-83~22.04"
+				},
+				{
+					"key": "rocminfo_1.0.0.60401-83_22.04_amd64",
+					"name": "rocminfo",
+					"version": "1.0.0.60401-83~22.04"
+				},
+				{
+					"key": "hsa-rocr_1.15.0.60401-83_22.04_amd64",
+					"name": "hsa-rocr",
+					"version": "1.15.0.60401-83~22.04"
+				}
+			],
+			"key": "rccl_2.22.3.60401-83_22.04_amd64",
+			"name": "rccl",
+			"sha256": "6b5675f7bb81b03387a64478a896a671d10e83a5629e54a0c3a8bf503a7ac106",
+			"urls": [
+				"https://repo.radeon.com/rocm/apt/6.4.1/pool/main/r/rccl/rccl_2.22.3.60401-83~22.04_amd64.deb"
+			],
+			"version": "2.22.3.60401-83~22.04"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [
+				{
+					"key": "rocm-core_6.4.1.60401-83_22.04_amd64",
+					"name": "rocm-core",
+					"version": "6.4.1.60401-83~22.04"
+				}
+			],
+			"key": "rocm-device-libs_1.0.0.60401-83_22.04_amd64",
+			"name": "rocm-device-libs",
+			"sha256": "080c1cbcade5a22cea800256eccc993116ae05b60f11785fda76beffe68c38bf",
+			"urls": [
+				"https://repo.radeon.com/rocm/apt/6.4.1/pool/main/r/rocm-device-libs/rocm-device-libs_1.0.0.60401-83~22.04_amd64.deb"
+			],
+			"version": "1.0.0.60401-83~22.04"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [
+				{
+					"key": "hipcc_1.1.1.60401-83_22.04_amd64",
+					"name": "hipcc",
+					"version": "1.1.1.60401-83~22.04"
+				},
+				{
+					"key": "rocm-llvm_19.0.0.25184.60401-83_22.04_amd64",
+					"name": "rocm-llvm",
+					"version": "19.0.0.25184.60401-83~22.04"
+				},
+				{
+					"key": "rocm-core_6.4.1.60401-83_22.04_amd64",
+					"name": "rocm-core",
+					"version": "6.4.1.60401-83~22.04"
+				},
+				{
+					"key": "hsa-rocr-dev_1.15.0.60401-83_22.04_amd64",
+					"name": "hsa-rocr-dev",
+					"version": "1.15.0.60401-83~22.04"
+				},
+				{
+					"key": "hsa-rocr_1.15.0.60401-83_22.04_amd64",
+					"name": "hsa-rocr",
+					"version": "1.15.0.60401-83~22.04"
+				},
+				{
+					"key": "rocprofiler-register_0.4.0.60401-83_22.04_amd64",
+					"name": "rocprofiler-register",
+					"version": "0.4.0.60401-83~22.04"
+				},
+				{
+					"key": "hip-runtime-amd_6.4.43483.60401-83_22.04_amd64",
+					"name": "hip-runtime-amd",
+					"version": "6.4.43483.60401-83~22.04"
+				},
+				{
+					"key": "comgr_3.0.0.60401-83_22.04_amd64",
+					"name": "comgr",
+					"version": "3.0.0.60401-83~22.04"
+				},
+				{
+					"key": "rocminfo_1.0.0.60401-83_22.04_amd64",
+					"name": "rocminfo",
+					"version": "1.0.0.60401-83~22.04"
+				}
+			],
+			"key": "hip-dev_6.4.43483.60401-83_22.04_amd64",
+			"name": "hip-dev",
+			"sha256": "e10323a872b833c7846f7a6d204efa8126b2b6b1727f6da317b687ea4da8fb0e",
+			"urls": [
+				"https://repo.radeon.com/rocm/apt/6.4.1/pool/main/h/hip-dev/hip-dev_6.4.43483.60401-83~22.04_amd64.deb"
+			],
+			"version": "6.4.43483.60401-83~22.04"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "hipcc_1.1.1.60401-83_22.04_amd64",
+			"name": "hipcc",
+			"sha256": "71aabfdefdd126fe6145b0e21be6964371d550b4be1b955095db6cbb53f9e146",
+			"urls": [
+				"https://repo.radeon.com/rocm/apt/6.4.1/pool/main/h/hipcc/hipcc_1.1.1.60401-83~22.04_amd64.deb"
+			],
+			"version": "1.1.1.60401-83~22.04"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [
+				{
+					"key": "rocm-core_6.4.1.60401-83_22.04_amd64",
+					"name": "rocm-core",
+					"version": "6.4.1.60401-83~22.04"
+				}
+			],
+			"key": "rocm-llvm_19.0.0.25184.60401-83_22.04_amd64",
+			"name": "rocm-llvm",
+			"sha256": "1dec6406f10c8f2b8fa2baefd1b7a8af844908d7da1493fca407ea696f5b0877",
+			"urls": [
+				"https://repo.radeon.com/rocm/apt/6.4.1/pool/main/r/rocm-llvm/rocm-llvm_19.0.0.25184.60401-83~22.04_amd64.deb"
+			],
+			"version": "19.0.0.25184.60401-83~22.04"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "hsa-rocr-dev_1.15.0.60401-83_22.04_amd64",
+			"name": "hsa-rocr-dev",
+			"sha256": "e1221293f8a5501ef01324c381e61d76a5d2e0f11032e4d33766dc53efc75813",
+			"urls": [
+				"https://repo.radeon.com/rocm/apt/6.4.1/pool/main/h/hsa-rocr-dev/hsa-rocr-dev_1.15.0.60401-83~22.04_amd64.deb"
+			],
+			"version": "1.15.0.60401-83~22.04"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [
+				{
+					"key": "hipblaslt_0.12.1.60401-83_22.04_amd64",
+					"name": "hipblaslt",
+					"version": "0.12.1.60401-83~22.04"
+				},
+				{
+					"key": "rocm-core_6.4.1.60401-83_22.04_amd64",
+					"name": "rocm-core",
+					"version": "6.4.1.60401-83~22.04"
+				},
+				{
+					"key": "roctracer_4.1.60401.60401-83_22.04_amd64",
+					"name": "roctracer",
+					"version": "4.1.60401.60401-83~22.04"
+				},
+				{
+					"key": "hipblas-common-dev_1.0.0.60401-83_22.04_amd64",
+					"name": "hipblas-common-dev",
+					"version": "1.0.0.60401-83~22.04"
+				}
+			],
+			"key": "hipblaslt-dev_0.12.1.60401-83_22.04_amd64",
+			"name": "hipblaslt-dev",
+			"sha256": "46eb2285c76d246b162eb54cc7f9e5cb7bcdd0aa83d57ecaea440e57260f2f4a",
+			"urls": [
+				"https://repo.radeon.com/rocm/apt/6.4.1/pool/main/h/hipblaslt-dev/hipblaslt-dev_0.12.1.60401-83~22.04_amd64.deb"
+			],
+			"version": "0.12.1.60401-83~22.04"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "hipblas-common-dev_1.0.0.60401-83_22.04_amd64",
+			"name": "hipblas-common-dev",
+			"sha256": "5df3e4a8a1959cbf94106f7bf87d7fb71bf06e726cde00c6092ef29bbd8156f0",
+			"urls": [
+				"https://repo.radeon.com/rocm/apt/6.4.1/pool/main/h/hipblas-common-dev/hipblas-common-dev_1.0.0.60401-83~22.04_amd64.deb"
+			],
+			"version": "1.0.0.60401-83~22.04"
 		}
 	],
 	"version": 1
