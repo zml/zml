@@ -159,7 +159,6 @@ pub const Shape = struct {
     pub const PartitionArray = std.BoundedArray(PartitionSpec, MAX_RANK);
 
     const UnknownTags: TagsArray = .{ .len = 0, .buffer = [_]Tag{TagUnknown} ** MAX_RANK };
-    const DefaultPartitioning: PartitionArray = .{ .len = 0, .buffer = [_]PartitionSpec{.unknown} ** MAX_RANK }; // todo : check usage
 
     _dtype: DataType,
     _dims: DimsArray = .{},
@@ -1022,6 +1021,65 @@ pub const Shape = struct {
         shape = shape.withDefaultPartitioning();
         try testing.expectEqual(3, shape._partitioning.len);
         try testing.expectEqualSlices(PartitionSpec, &.{ .unknown, .unknown, .unknown }, shape._partitioning.constSlice());
+    }
+
+    pub fn hasAtLeastOnePartitionedAxis(self: Shape) bool {
+        for (self._partitioning.constSlice()) |spec| {
+            if (spec == .axis) return true;
+        }
+        return false;
+    }
+
+    test hasAtLeastOnePartitionedAxis {
+        var shape = Shape.init(.{ .a = 10, .b = 20 }, .f32).withPartitioning(.{ .a = .x, .b = .replicated });
+        try testing.expect(shape.hasAtLeastOnePartitionedAxis());
+
+        shape = shape.withPartitioning(.{ .a = .replicated, .b = .replicated });
+        try testing.expect(!shape.hasAtLeastOnePartitionedAxis());
+
+        shape = shape.withDefaultPartitioning();
+        try testing.expect(!shape.hasAtLeastOnePartitionedAxis());
+    }
+
+    pub fn isFullyPartitioned(self: Shape) bool {
+        for (self._partitioning.constSlice()) |spec| {
+            switch (spec) {
+                .replicated, .open, .unknown => return false,
+                .axis => {},
+            }
+        }
+        return true;
+    }
+
+    test isFullyPartitioned {
+        var shape = Shape.init(.{ .a = 10, .b = 20 }, .f32).withPartitioning(.{ .a = .x, .b = .y });
+        try testing.expect(shape.isFullyPartitioned());
+
+        shape = shape.withPartitioning(.{ .a = .x, .b = .replicated });
+        try testing.expect(!shape.isFullyPartitioned());
+
+        shape = shape.withDefaultPartitioning();
+        try testing.expect(!shape.isFullyPartitioned());
+    }
+
+    pub fn isFullyReplicated(self: Shape) bool {
+        for (self._partitioning.constSlice()) |spec| {
+            if (spec != .replicated and spec != .unknown) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    test isFullyReplicated {
+        var shape = Shape.init(.{ .a = 10, .b = 20 }, .f32).withPartitioning(.{ .a = .replicated, .b = .replicated });
+        try testing.expect(shape.isFullyReplicated());
+
+        shape = shape.withPartitioning(.{ .a = .replicated, .b = .unknown });
+        try testing.expect(shape.isFullyReplicated());
+
+        shape = shape.withPartitioning(.{ .a = .x, .b = .replicated });
+        try testing.expect(!shape.isFullyReplicated());
     }
 
     pub fn partition(self: Shape, ax: anytype) PartitionSpec {
