@@ -898,6 +898,7 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, m
             // Disable Triton GEMM on ROCM. For some reason it's much, much slower when
             // enabled on CDNA and it's used on RDNA. Disable it altogether.
             setFlag(&options, "xla_gpu_enable_triton_gemm", false);
+            setFlag(&options, "xla_gpu_autotune_level", 0);
         },
         else => {},
     }
