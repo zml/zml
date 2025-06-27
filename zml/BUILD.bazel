@@ -79,11 +79,13 @@ zig_library(
     name = "zml_partitioning",
     srcs = [
         "dtype.zig",
+        "partitioning.zig",
         "shape.zig",
+        "slice.zig",
         "test_runner.zig",
     ],
     copts = ["-lc"],
-    main = "shape.zig",
+    main = "partitioning.zig",
     visibility = ["//visibility:public"],
     deps = [
         ":posix",

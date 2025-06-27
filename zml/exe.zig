@@ -101,7 +101,7 @@ pub fn compileFn(
 ) !FnExe(func) {
     var pretty_name = try prettyFnName(func, allocator);
     defer pretty_name.deinit(allocator);
-    var context = try CompilationContext.init(allocator, pretty_name.items, platform, mesh);
+    var context = try CompilationContext.init(allocator, pretty_name.items, mesh, platform);
     defer context.deinit();
 
     return .{ .inner = try context.compileInternal(allocator, func, args, mesh) };
@@ -322,7 +322,8 @@ pub const BaseExe = struct {
             shards.appendAssumeCapacity(dev_out[i]);
         }
 
-        return Buffer.fromPjrtBuffers(self.platform, self.result_shapes[i], shards.constSlice());
+        const sharding: Sharding = .init(self.mesh, self.result_shapes[i]);
+        return Buffer.fromPjrtBuffers(self.platform, sharding, shards.constSlice());
     }
 
     pub fn clone(self: BaseExe, parent_allocator: std.mem.Allocator) !BaseExe {

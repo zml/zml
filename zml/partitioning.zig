@@ -5,6 +5,7 @@ const stdx = @import("stdx");
 const pjrtx = @import("pjrtx.zig");
 const slice = @import("slice.zig");
 const Shaped = slice.Shaped;
+const Buffer = @import("buffer.zig").Buffer;
 const Context = @import("context.zig").Context;
 const DataType = @import("dtype.zig").DataType;
 const Device = @import("pjrtx.zig").Device;
@@ -41,6 +42,7 @@ pub const TopologyIndicesIterator = struct {
         if (self.index < self.topology.count()) {
             const rank = self.topology.rank();
             var i: usize = rank;
+
             while (i > 0) {
                 i -= 1;
                 const dim: u4 = @intCast(i);
@@ -48,10 +50,8 @@ pub const TopologyIndicesIterator = struct {
                 const current_value = self.indices.dim(dim);
                 if (current_value < self.topology.dim(dim) - 1) {
                     self.indices = self.indices.setDim(dim, current_value + 1);
-                    // Found the dimension to increment, we are done.
                     return current_indices;
                 } else {
-                    // This dimension wrapped around, reset to 0 and carry over to the next.
                     self.indices = self.indices.setDim(dim, 0);
                 }
             }
@@ -393,62 +393,44 @@ pub const DeviceShard = struct {
     shard_shape: Shape,
     device: *const Device,
 
-    /// Holds the layout information for a shard within a larger host buffer.
     pub const SliceSpec = struct {
-        /// The byte offset from the start of the host buffer to this shard's data.
-        start_offset_bytes: usize,
-
-        /// The byte strides of the *global* tensor layout on the host.
-        /// This is a fixed-size array; the caller should slice it using `num_dims`
-        /// to get the `*const i64` and `size_t` for the PJRT C API.
-        host_byte_strides: [Shape.MAX_RANK]i64,
-
-        /// The dimensions of the data slice to be transferred from the host.
-        /// This describes the "view" into the host buffer.
-        dims_on_host: [Shape.MAX_RANK]i64,
-
-        /// The number of valid dimensions (and strides) for this layout.
+        start_offset: usize,
+        byte_strides: [Shape.MAX_RANK]i64,
+        dims: [Shape.MAX_RANK]i64,
         num_dims: u4,
     };
 
-    /// Calculates the necessary arguments for a PJRT call to transfer this shard's data
     pub fn specs(self: DeviceShard) SliceSpec {
         const rank = self.global_shape.rank();
 
-        // Step 1: Calculate the byte strides for the GLOBAL host buffer.
-        // These strides describe how to navigate the full, unpartitioned tensor in host memory.
         const host_byte_strides_ba = self.global_shape.computeByteStrides();
-        const host_byte_strides = host_byte_strides_ba.constSlice();
 
-        // Step 2: Calculate the start offset for THIS specific shard.
-        // We determine the starting coordinate of our shard's data slice within the global tensor
-        // and use the global strides to find the byte offset.
         var shard_start_offset_bytes: i64 = 0;
         for (0..rank) |i| {
             const part_spec = self.global_shape.partition(i);
             if (part_spec == .axis) {
                 const mesh_axis_tag = part_spec.toTag();
-                const device_coord_on_mesh_axis = self.indices.dim(mesh_axis_tag);
-                const shard_dim_size = self.shard_shape.dim(i);
-                const start_element_in_dim = device_coord_on_mesh_axis * shard_dim_size;
-                shard_start_offset_bytes += start_element_in_dim * host_byte_strides[i];
+
+                // Check if the device's indices actually have this axis.
+                // If not, this dimension is effectively replicated for this device.
+                if (self.indices.hasTag(mesh_axis_tag) != null) {
+                    const device_coord_on_mesh_axis = self.indices.dim(mesh_axis_tag);
+                    const shard_dim_size = self.shard_shape.dim(i);
+                    const start_element_in_dim = device_coord_on_mesh_axis * shard_dim_size;
+                    shard_start_offset_bytes += start_element_in_dim * host_byte_strides_ba.get(i);
+                }
             }
         }
 
-        // Step 3: Determine the dimensions of the SLICE to transfer.
-        // This is what PJRT will actually read from the host buffer.
-        // For a partitioned axis, we read a slice the size of the shard.
-        // For a replicated axis, the shard on the device contains the full dimension,
-        // so we must read the full dimension from the host.
         var transfer_dims_buffer: [Shape.MAX_RANK]i64 = undefined;
         for (0..rank) |i| {
             transfer_dims_buffer[i] = self.shard_shape.dim(i);
         }
 
         return .{
-            .start_offset_bytes = @intCast(shard_start_offset_bytes),
-            .host_byte_strides = host_byte_strides_ba.buffer,
-            .dims_on_host = transfer_dims_buffer,
+            .start_offset = @intCast(shard_start_offset_bytes),
+            .byte_strides = host_byte_strides_ba.buffer,
+            .dims = transfer_dims_buffer,
             .num_dims = rank,
         };
     }
@@ -461,7 +443,7 @@ pub const DeviceShard = struct {
     ) !void {
         _ = fmt;
         _ = options;
-        const specs_ = self.specs();
+        const slice_specs = self.specs();
         try writer.print("DeviceShard(index={d}/{d} topology={} indices={} shard_shape={} ({d}B) global_shape={} ({d}B) start_offset={d} byte_strides={any} device={})", .{
             self.index + 1,
             self.topology.count(),
@@ -471,8 +453,8 @@ pub const DeviceShard = struct {
             self.shard_shape.byteSize(),
             self.global_shape,
             self.global_shape.byteSize(),
-            specs_.start_offset_bytes,
-            specs_.host_byte_strides[0..specs_.num_dims],
+            slice_specs.start_offset,
+            slice_specs.byte_strides[0..slice_specs.num_dims],
             self.device,
         });
     }
@@ -480,9 +462,9 @@ pub const DeviceShard = struct {
 
 pub const DeviceShardIterator = struct {
     index: usize = 0,
-    platform: Platform,
     indices_iterator: TopologyIndicesIterator,
     sharding: Sharding,
+    devices: []const *const pjrtx.Device,
 
     pub fn next(self: *DeviceShardIterator) ?DeviceShard {
         const num_partitions = self.sharding.mesh.numPartitions(); // todo proxy numPartitions
@@ -497,18 +479,8 @@ pub const DeviceShardIterator = struct {
             .global_shape = self.sharding.global_shape,
             .indices = self.indices_iterator.next().?,
             .shard_shape = self.sharding.shardShape(),
-            .device = self.device(self.index),
+            .device = self.devices[self.index],
         };
-    }
-
-    fn device(self: DeviceShardIterator, index: usize) *const Device {
-        const devices = self.platform.getDevices();
-
-        if (index >= devices.len) {
-            stdx.debug.panic("DeviceShardIterator: index out of bounds: {} for devices of length {}", .{ index, devices.len });
-        }
-
-        return devices[index];
     }
 };
 
@@ -528,6 +500,18 @@ pub const Sharding = struct {
             const part_spec = shape.partition(dim_idx);
             if (part_spec == .axis) {
                 const mesh_axis_tag = part_spec.toTag();
+
+                if (mesh.topology.hasTag(mesh_axis_tag) == null) {
+                    // This partitioning is invalid for this mesh, so we skip the divisibility check.
+                    // The dimension will effectively be replicated.
+                    log.debug("Partitioning axis '{s}' not found in mesh {}. Treating dimension {s} as replicated.", .{
+                        std.mem.span(mesh_axis_tag),
+                        mesh,
+                        shape.debugTag(dim_idx),
+                    });
+                    continue;
+                }
+
                 const global_dim = shape.dim(dim_idx);
                 const mesh_dim = mesh.topology.dim(mesh_axis_tag);
                 if (@rem(global_dim, mesh_dim) != 0) {
@@ -538,10 +522,20 @@ pub const Sharding = struct {
                 }
             }
         }
+
         return .{
             .mesh = mesh,
             .global_shape = shape,
         };
+    }
+
+    test "init / non existent mesh axis" {
+        const mesh: Mesh = .init(.{ .x = 4 });
+        const shape: Shape = .init(.{ .m = 8, .n = 12 }, .i32);
+        const sharding = Sharding.init(mesh, shape.withPartitioning(.{ .m = .x, .n = .y }));
+        const shard_shape = sharding.shardShape();
+        try std.testing.expectEqual(2, shard_shape.dim(.m));
+        try std.testing.expectEqual(12, shard_shape.dim(.n));
     }
 
     pub fn getType(self: Sharding) Type {
@@ -549,7 +543,25 @@ pub const Sharding = struct {
             return .replicated;
         }
 
-        if (self.global_shape.isFullyPartitioned()) {
+        var is_fully_partitioned = true;
+
+        for (0..self.global_shape.rank()) |i| {
+            const part_spec = self.global_shape.partition(i);
+            switch (part_spec) {
+                .replicated, .open, .unknown => {
+                    is_fully_partitioned = false;
+                    break;
+                },
+                .axis => |tag| {
+                    if (self.mesh.topology.hasTag(tag) == null) {
+                        is_fully_partitioned = false;
+                        break;
+                    }
+                },
+            }
+        }
+
+        if (is_fully_partitioned) {
             return .maximal;
         }
 
@@ -567,9 +579,16 @@ pub const Sharding = struct {
 
             if (part_spec == .axis) {
                 const mesh_axis_tag = part_spec.toTag();
-                const mesh_dim = self.mesh.topology.dim(mesh_axis_tag);
-                const shard_dim_size = @divExact(global_dim_size, mesh_dim);
-                shard_ = shard_.appendDim(shard_dim_size, tag);
+
+                // If the specified mesh axis exists, partition. Otherwise, replicate.
+                if (self.mesh.topology.hasTag(mesh_axis_tag) != null) {
+                    const mesh_dim = self.mesh.topology.dim(mesh_axis_tag);
+                    const shard_dim_size = if (mesh_dim > 1) @divExact(global_dim_size, mesh_dim) else global_dim_size;
+                    shard_ = shard_.appendDim(shard_dim_size, tag);
+                } else {
+                    // Mesh axis does not exist, so this dimension is replicated.
+                    shard_ = shard_.appendDim(global_dim_size, tag);
+                }
             } else {
                 // For replicated, open, or unknown, the shard dimension is the full global dimension.
                 shard_ = shard_.appendDim(global_dim_size, tag);
@@ -579,14 +598,10 @@ pub const Sharding = struct {
         return shard_;
     }
 
-    pub fn iterator(self: Sharding, platform: Platform) DeviceShardIterator {
+    pub fn iterator(self: Sharding, devices: []const *const pjrtx.Device) DeviceShardIterator {
         const indices_iterator = self.mesh.iterator();
 
-        return .{
-            .platform = platform,
-            .indices_iterator = indices_iterator,
-            .sharding = self,
-        };
+        return .{ .indices_iterator = indices_iterator, .sharding = self, .devices = devices };
     }
 
     pub fn getShardingAttr(self: Sharding) std.BoundedArray(u8, 128) {
@@ -610,7 +625,10 @@ pub const Sharding = struct {
 
             if (part_spec == .axis) {
                 const mesh_axis_tag = part_spec.toTag();
-                dim = self.mesh.topology.dim(mesh_axis_tag);
+
+                if (self.mesh.topology.hasTag(mesh_axis_tag) != null) {
+                    dim = self.mesh.topology.dim(mesh_axis_tag);
+                }
             }
 
             try writer.print("{d}", .{dim});
@@ -654,65 +672,6 @@ pub const Sharding = struct {
         try std.testing.expectEqualStrings("{devices=[2,1,3]<=[12]}", attr_3d_ba.constSlice());
     }
 
-    /// Reassembles the full tensor from a slice of PJRT buffers into a host buffer.
-    /// This is the "production" implementation. It performs a D2H copy for each shard
-    /// into a temporary buffer, then copies that into the final destination.
-    /// Reassembles the full tensor from a slice of PJRT buffers into a host buffer.
-    pub fn reassembleFromPjrtBuffers(self: Sharding, platform: Platform, pjrt_buffers: []const *pjrtx.Buffer, allocator: std.mem.Allocator) ![]u8 {
-        stdx.debug.assert(pjrt_buffers.len == self.mesh.numPartitions(), "Expected {} PJRT buffers, got {}", .{ self.mesh.numPartitions(), pjrt_buffers.len });
-
-        const global_buffer = try allocator.alloc(u8, self.global_shape.byteSize());
-        errdefer allocator.free(global_buffer);
-
-        if (self.getType() == .replicated) {
-            if (pjrt_buffers.len > 0) {
-                const event = try pjrt_buffers[0].toHostBuffer(platform.pjrt_api, global_buffer, .{});
-                if (event) |e| try e.await_(platform.pjrt_api);
-            }
-            return global_buffer;
-        }
-
-        const shard_shape = self.shardShape();
-        const temp_shard_buffer = try allocator.alloc(u8, shard_shape.byteSize());
-        defer allocator.free(temp_shard_buffer);
-
-        const element_size = self.global_shape.dtype().sizeOf();
-        const global_element_strides = self.global_shape.computeElementStrides();
-
-        var sharding_iter = self.iterator(platform);
-        while (sharding_iter.next()) |device_shard| {
-            const shard_index: usize = @intCast(device_shard.index);
-            const src_buffer = pjrt_buffers[shard_index];
-
-            // Step 1: D2H copy of the contiguous shard to a temporary buffer.
-            const event = try src_buffer.toHostBuffer(platform.pjrt_api, temp_shard_buffer, .{});
-            if (event) |e| try e.await_(platform.pjrt_api);
-
-            // Step 2: Manually copy from the temp buffer to the final strided buffer.
-            var iter = shard_shape.iterator();
-            while (iter.next()) |item| {
-                const src_byte_offset = item.flat_index * element_size;
-
-                var dest_flat_index: i64 = 0;
-                for (0..self.global_shape.rank()) |dim_idx| {
-                    const global_coord_for_dim = blk: {
-                        const part_spec = self.global_shape.partition(dim_idx);
-                        if (part_spec != .axis) break :blk item.coords[dim_idx];
-                        const mesh_axis_tag = part_spec.toTag();
-                        const device_coord = device_shard.indices.dim(mesh_axis_tag);
-                        break :blk (device_coord * shard_shape.dim(dim_idx)) + item.coords[dim_idx];
-                    };
-                    dest_flat_index += global_coord_for_dim * global_element_strides.get(dim_idx);
-                }
-                const dest_byte_offset = @as(usize, @intCast(dest_flat_index)) * element_size;
-
-                @memcpy(global_buffer[dest_byte_offset..][0..element_size], temp_shard_buffer[src_byte_offset..][0..element_size]);
-            }
-        }
-
-        return global_buffer;
-    }
-
     pub fn format(
         self: Sharding,
         comptime fmt: []const u8,
@@ -741,20 +700,17 @@ fn testShardingCase(allocator: std.mem.Allocator, mesh: Mesh, shape: Shape, part
 
     // --- SCATTER (H2D) ---
     var pjrt_buffers = std.ArrayList(*pjrtx.Buffer).init(allocator);
-    defer {
-        for (pjrt_buffers.items) |b| b.deinit(platform.pjrt_api);
-        pjrt_buffers.deinit();
-    }
+    defer pjrt_buffers.deinit();
 
-    var sharding_iter = sharding.iterator(platform);
+    var sharding_iter = sharding.iterator(platform.getDevices());
     while (sharding_iter.next()) |device_shard| {
         if (verbose) std.debug.print("{}\n", .{device_shard});
         const specs = device_shard.specs();
         const args = pjrtx.Client.BufferFromHostBufferArgs{
-            .data = original_data[specs.start_offset_bytes..].ptr,
+            .data = original_data[specs.start_offset..].ptr,
             .buffer_type = bufferTypeFromDtype(device_shard.shard_shape.dtype()),
-            .dims = specs.dims_on_host[0..specs.num_dims],
-            .byte_strides = specs.host_byte_strides[0..specs.num_dims],
+            .dims = specs.dims[0..specs.num_dims],
+            .byte_strides = specs.byte_strides[0..specs.num_dims],
             .host_buffer_semantics = .ImmutableUntilTransferCompletes,
             .device = device_shard.device,
         };
@@ -775,7 +731,10 @@ fn testShardingCase(allocator: std.mem.Allocator, mesh: Mesh, shape: Shape, part
 
     // --- GATHER (D2H) ---
     if (verbose) std.debug.print("--- Reassembling from shards ---\n", .{});
-    const reassembled_data = try sharding.reassembleFromPjrtBuffers(platform, pjrt_buffers.items, allocator);
+    const sharded_buffer = Buffer.fromPjrtBuffers(platform, sharding, pjrt_buffers.items);
+    defer sharded_buffer.deinit(); // This will deinit all the underlying PJRT buffers.
+
+    const reassembled_data = try sharded_buffer.toHost(allocator);
     defer allocator.free(reassembled_data);
 
     if (verbose) std.debug.print("Reassembled full slice of data: {any}\n\n", .{Shaped(i32, sharding.global_shape, reassembled_data)});
@@ -789,17 +748,30 @@ test "Sharding All Cases" {
     const allocator = std.testing.allocator;
     const verbose = true;
 
+    // Fully replicated
     try testShardingCase(allocator, .init(.{ .x = 4 }), .init(.{ .m = 8, .k = 8 }, .i32), .{}, verbose);
+    // 1D sharding on a 1D mesh
     try testShardingCase(allocator, .init(.{ .x = 8 }), .init(.{ .m = 16, .k = 16 }, .i32), .{ .k = .x }, verbose);
+    // 2D sharding on a 2D mesh
     try testShardingCase(allocator, .init(.{ .x = 2, .y = 4 }), .init(.{ .m = 8, .k = 12 }, .i32), .{ .m = .x, .k = .y }, verbose);
-    try testShardingCase(allocator, .init(.{ .x = 2, .y = 2 }), .init(.{ .b = 4, .h = 8, .w = 6 }, .i32), .{ .h = .x, .w = .y }, verbose);
+    // 3D tensor on a 2D mesh, partitioned on non-contiguous dimensions
+    try testShardingCase(allocator, .init(.{ .x = 2, .y = 2 }), .init(.{ .b = 4, .h = 8, .w = 6 }, .i32), .{ .b = .x, .w = .y }, verbose);
+    // 3D sharding on a 3D mesh
     try testShardingCase(allocator, .init(.{ .x = 2, .y = 4, .z = 3 }), .init(.{ .m = 4, .k = 8, .j = 6 }, .i32), .{ .m = .x, .k = .y, .j = .z }, verbose);
+    // 2D tensor, 2D mesh, but only partitioned on one axis
     try testShardingCase(allocator, .init(.{ .x = 2, .y = 3 }), .init(.{ .m = 10, .k = 6 }, .i32), .{ .k = .x }, verbose);
+    // Replicated on a 2D mesh
     try testShardingCase(allocator, .init(.{ .x = 2, .y = 2 }), .init(.{ .m = 4, .k = 4 }, .i32), .{}, verbose);
+    // 3D tensor, 2D mesh, one replicated dimension in the middle
     try testShardingCase(allocator, .init(.{ .x = 2, .y = 2 }), .init(.{ .batch = 4, .seq_len = 10, .features = 8 }, .i32), .{ .batch = .x, .features = .y }, verbose);
+    // 2D mesh where one dimension is 1
     try testShardingCase(allocator, .init(.{ .x = 1, .y = 4 }), .init(.{ .m = 8, .k = 8 }, .i32), .{ .m = .x, .k = .y }, verbose);
+    // Partially partitioned, non-divisible on replicated axis
     try testShardingCase(allocator, .init(.{ .x = 2, .y = 3 }), .init(.{ .m = 8, .k = 10 }, .i32), .{ .m = .x }, verbose);
+    // Single device mesh
     try testShardingCase(allocator, .init(.{ .x = 1 }), .init(.{ .m = 8, .k = 10 }, .i32), .{ .m = .x }, verbose);
+    // NEW: 3D tensor, 2D mesh, partitioned on first two axes. Good test for new reassemble logic.
+    try testShardingCase(allocator, .init(.{ .x = 2, .y = 2 }), .init(.{ .b = 4, .h = 8, .w = 6 }, .i32), .{ .b = .x, .h = .y }, verbose);
 }
 
 // todo: temp

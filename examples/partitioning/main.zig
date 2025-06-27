@@ -14,40 +14,37 @@ pub const std_options: std.Options = .{
 
 const log = std.log.scoped(.@"examples/partitioning");
 
-// const ModuleMesh = zml.Mesh.init(.{ .a = 1, .b = 2 });
-// return a.add(b);
-// return a.add(b).dot(b, .{.k}); // .withSharding(mesh, .{ .y = .m });
-
 const ThirdPartyModule = struct {
     weight: zml.Tensor,
 
     pub fn init(self: *ThirdPartyModule, mesh: zml.Mesh) void {
-        self.weight = self.weight.withTags(.{ .rows, .cols }).withMesh(mesh);
+        self.weight = self.weight.withTags(.{ .rows, .cols }).withMesh(mesh).withSharding(.{ .rows = .x });
     }
 
     pub fn forward(self: ThirdPartyModule, a: zml.Tensor) zml.Tensor {
-        return a.add(self.weight.withPartitionning(.{ .grid_x = .rows, .grid_y = .cols }));
+        log.debug("Forwarding a: {} and weight: {}", .{ a, self.weight });
+
+        zml.pushMesh(a.mesh().flatten(.x));
+        const x = a.withSharding(.{ .m = .x }).add(self.weight.withSharding(.{ .rows = .x }));
+        zml.popMesh();
+
+        return x.withSharding(.{ .m = .x, .n = .y });
     }
 };
 
 const Model = struct {
     module_with_weights: ThirdPartyModule,
+    mesh: zml.Mesh = undefined,
 
-    pub fn init(self: *Model, main_mesh: zml.Mesh) void {
-        _ = main_mesh; // autofix
-        self.module_with_weights.init();
+    pub fn init(self: *Model, main_mesh: zml.Mesh, third_party_mesh: zml.Mesh) void {
+        self.mesh = main_mesh;
+        self.module_with_weights.init(third_party_mesh);
     }
 
     pub fn forward(self: Model, a: zml.Tensor, b: zml.Tensor) zml.Tensor {
         const a_add_b = a.add(b);
-        const weighted_a: zml.Tensor = zml.call(self.module_with_weights, .forward, .{a.replicated()});
-        zml.pushMesh(self.mesh.?);
-        const weighted_b: zml.Tensor = zml.call(self.module_with_weights, .forward, .{weighted_a.withPartitionning(.{ .grid_x = .m, .grid_y = .k })});
-        zml.popMesh();
-        zml.pushMesh(self.mesh.?);
-        const weighted_c: zml.Tensor = zml.call(self.module_with_weights, .forward, .{weighted_b.withPartitionning(.{ .grid_x = .m, .grid_y = .k })});
-        zml.popMesh();
-        return a_add_b.add(weighted_a).add(weighted_b).add(weighted_c).withPartitionning(.{ .grid_x = .m, .grid_y = .k });
+        const weighted_a: zml.Tensor = zml.call(self.module_with_weights, .forward, .{a});
+        return a_add_b.add(weighted_a);
     }
 };
 
@@ -68,19 +65,21 @@ pub fn asyncMain() !void {
     var context = try zml.Context.init();
     defer context.deinit();
 
-    const mesh: zml.Mesh = .init(.{ .grid_x = 4, .grid_y = 3 });
-
-    const platform = context.autoPlatform(.{ .cpu = .{ .cpu_device_count = mesh.numDevices() } }).withCompilationOptions(.{
+    const platform = context.autoPlatform(.{ .cpu = .{ .cpu_device_count = 12 } }).withCompilationOptions(.{
         .sharding_enabled = true,
         .xla_dump_to = "/tmp/zml/partitioning",
     });
     context.printAvailablePlatforms(platform);
 
-    const shape: zml.Shape = .init(.{ 12, 6 }, i32).withTags(.{ .m, .n });
-    const shape: zml.Shape = .init(.{ 4, 3 }, i32).withTags(.{ .m, .n });
+    // const mesh: zml.Mesh = .init(.{ .x = 4, .y = 3 });
+    const mesh: zml.Mesh = .auto(platform);
+    // const mesh: zml.Mesh = .single();
+    log.info("{}", .{mesh});
 
-    const a_shape = shape.withTags(.{ .m, .n }).withPartitionning(.{ .grid_x = .m, .grid_y = .k });
-    const b_shape = shape.withTags(.{ .n, .m }).withPartitionning(.{ .grid_x = .k, .grid_y = .n });
+    const shape = zml.Shape.init(.{ .m = 12, .n = 6 }, .i32);
+
+    const a_shape = shape.withTags(.{ .m, .n }).withPartitioning(.{ .m = .x, .n = .y });
+    const b_shape = shape.withTags(.{ .n, .m }).withPartitioning(.{ .n = .x, .m = .y });
 
     var buffers: zml.aio.BufferStore.Buffers = .{};
     const weight = try zml.slice.arange(allocator, shape, .{});
@@ -93,7 +92,7 @@ pub fn asyncMain() !void {
     };
 
     var model_shapes = try zml.aio.populateModel(Model, allocator, buffer_store);
-    model_shapes.init(mesh);
+    model_shapes.init(mesh, mesh.flatten(.x));
 
     var compilation = try asynk.asyncc(zml.compileModel, .{ allocator, Model.forward, model_shapes, .{ a_shape, b_shape }, mesh, platform });
 
@@ -111,7 +110,7 @@ pub fn asyncMain() !void {
 
     const a_buffer_slice = try zml.slice.arange(allocator, a_shape, .{});
     defer allocator.free(a_buffer_slice);
-    log.debug("a_buffer_slice: {}", .{zml.HostBuffer.fromBytes(a_shape, a_buffer_slice).pretty()});
+    log.debug("a_buffer_slice: {}", .{zml.slice.pretty(a_shape, a_buffer_slice)});
 
     const a_buffer = try zml.Buffer.from(platform, a_sharding, a_buffer_slice, .{});
     defer a_buffer.deinit();
@@ -121,32 +120,17 @@ pub fn asyncMain() !void {
 
     const b_buffer_slice = try zml.slice.arange(allocator, b_shape, .{});
     defer allocator.free(b_buffer_slice);
-    log.debug("b_buffer_slice: {}", .{zml.HostBuffer.fromBytes(b_shape, b_buffer_slice).pretty()});
+    log.debug("b_buffer_slice: {}", .{zml.slice.pretty(b_shape, b_buffer_slice)});
 
     const b_buffer = try zml.Buffer.from(platform, b_sharding, b_buffer_slice, .{});
     defer b_buffer.deinit();
 
     log.info("✅ Running model....", .{});
-    var result: zml.Buffer = executable.call(.{ a_buffer, b_buffer });
-    defer result.deinit();
+    var result_buffer: zml.Buffer = executable.call(.{ a_buffer, b_buffer });
+    defer result_buffer.deinit();
 
-    // --- 2. Call the high-level reassembly function ---
-    const reassembled_buffer = try allocator.alloc(u8, shape.byteSize());
-    defer allocator.free(reassembled_buffer);
+    const result = try result_buffer.toHost(allocator);
+    defer allocator.free(result);
 
-    log.warn("output shape: {any}", .{result.shape()});
-
-    const replicated_output_shape = result.shape().withTags(.{ .m, .n });
-    const output_sharding = zml.Sharding.init(mesh, replicated_output_shape);
-
-    try output_sharding.reassembleFromPjrtBuffers(
-        platform,
-        result._shards.constSlice(),
-        reassembled_buffer,
-        allocator,
-    );
-
-    log.warn("Reassembled buffer: {any}", .{
-        zml.HostBuffer.fromBytes(b_sharding.global_shape, reassembled_buffer).pretty(),
-    });
+    log.info("Result buffer: {}", .{zml.slice.pretty(result_buffer.shape(), result)});
 }

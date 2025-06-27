@@ -257,7 +257,7 @@ pub fn asyncMain() !void {
     const tokens_shape = zml.Shape.init(.{ .s = 1 }, .u32);
     const token_idx_shape = zml.Shape.init(.{}, .u32);
 
-    const kv_shape = zml.Shape.init(.{ .layer = model_instance.model.layers.len, .k = dims.s, .h = dims.nkvh, .hd = dims.hd }, dtype).withPartitionning(.{ .x = .hd });
+    const kv_shape = zml.Shape.init(.{ .layer = model_instance.model.layers.len, .k = dims.s, .h = dims.nkvh, .hd = dims.hd }, dtype).withPartitioning(.{ .x = .hd });
 
     const kv_cache_shape: zml.ShapeOf(llama.KvCache) = llama.KvCache.initShape(kv_shape);
     const rng_shape = zml.Tensor.Rng.shape();

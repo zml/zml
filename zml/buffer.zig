@@ -59,7 +59,7 @@ pub const Buffer = struct {
 
     /// Copies the content of the given buffer from host memory to the accelerator memory.
     pub fn from(platform: Platform, sharding: Sharding, data: []const u8, opts: FromOptions) !Buffer {
-        var sharding_devices = sharding.iterator(platform);
+        var sharding_devices = sharding.iterator(platform.getDevices());
 
         var res: Buffer = .{
             ._api = platform.pjrt_api,
@@ -72,7 +72,7 @@ pub const Buffer = struct {
 
             var args = pjrt.Client.BufferFromHostBufferArgs{
                 .data = data[specs.start_offset..].ptr,
-                .buffer_type = bufferTypeFromDtype(shard.shard.dtype()),
+                .buffer_type = bufferTypeFromDtype(shard.shard_shape.dtype()),
                 .dims = specs.dims[0..specs.num_dims],
                 .byte_strides = specs.byte_strides[0..specs.num_dims],
                 .device = shard.device,
@@ -125,12 +125,14 @@ pub const Buffer = struct {
             ._api = platform.pjrt_api,
             ._shape = sharding.global_shape,
             ._shards = shards,
+            ._mesh = sharding.mesh,
         };
     }
 
     /// Copies the given Zig slice to the accelerator memory and
     /// return a Buffer with the given dimensions.
-    pub fn fromSlice(platform: Platform, mesh: Mesh, dimz: anytype, s: anytype) !Buffer {
+    pub fn fromSlice(platform: Platform, dimz: anytype, s: anytype) !Buffer {
+        const mesh = Mesh.single();
         const sharding: Sharding = .init(mesh, .init(dimz, DataType.fromSliceElementType(s)));
         return from(platform, sharding, std.mem.sliceAsBytes(s), .{});
     }
@@ -138,14 +140,18 @@ pub const Buffer = struct {
     /// Copies the given Zig slice to the accelerator memory and
     /// return a Buffer with the given dimensions.
     pub fn fromBytes(platform: Platform, sh: Shape, data: []const u8) !Buffer {
-        return from(platform, HostBuffer.fromBytes(sh, data), .{});
+        const mesh = Mesh.single();
+        const sharding: Sharding = .init(mesh, sh);
+        return from(platform, sharding, data, .{});
     }
 
     /// Copies the given Zig array to the accelerator memory and
     /// return a Buffer using the array shape.
     pub fn fromArray(platform: Platform, arr: anytype) !Buffer {
         const host_buffer = HostBuffer.fromArray(&arr);
-        return try from(platform, host_buffer, .{ .wait = true });
+        const mesh = Mesh.single();
+        const sharding: Sharding = .init(mesh, host_buffer.shape());
+        return try from(platform, sharding, host_buffer.bytes(), .{ .wait = true });
     }
 
     /// Copies the given Zig slice to the accelerator memory and
@@ -158,7 +164,9 @@ pub const Buffer = struct {
     /// Copies the given Zig slice to the accelerator memory and
     /// return a Buffer with the given dimensions.
     pub fn fromBytesOpts(platform: Platform, sh: Shape, data: []const u8, opts: FromOptions) !Buffer {
-        return from(platform, HostBuffer.fromBytes(sh, data), opts);
+        const mesh = Mesh.single();
+        const sharding: Sharding = .init(mesh, sh);
+        return from(platform, sharding, data, opts);
     }
 
     /// Copies the given Zig array to the accelerator memory and
@@ -180,7 +188,7 @@ pub const Buffer = struct {
     pub fn scalar(platform: Platform, val: anytype, dtype_: DataType) !Buffer {
         const x = dtype_.constant(val);
         const host_buffer = HostBuffer.fromBytes(Shape.init(.{}, dtype_), x.constSlice());
-        return try from(platform, host_buffer, .{ .wait = true });
+        return try from(platform, .init(Mesh.single(), host_buffer.shape()), host_buffer.bytes(), .{ .wait = true });
     }
 
     /// Creates a Buffer with a single element repeated manytime.
@@ -232,7 +240,7 @@ pub const Buffer = struct {
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
 
-        const x = try constant(platform, Shape.init(.{ 4, 3, 2 }, .u16), 42);
+        const x = try constant(platform, .init(zml.Mesh.single(), Shape.init(.{ 4, 3, 2 }, .u16)), 42);
         const y = try x.getValue([4 * 3 * 2]u16);
         try std.testing.expectEqual([_]u16{42} ** (4 * 3 * 2), y);
     }
@@ -296,28 +304,99 @@ pub const Buffer = struct {
         return res;
     }
 
-    /// Copies the content of the Buffer back to host, in the given buffer,
-    /// and return a new `HostBuffer` object with the same shape.
-    /// The returned `HostBuffer` doesn't own the memory.
-    pub fn toHost(self: Buffer, output: []u8) !HostBuffer {
-        stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
-        const maybe_event = try self._shards.get(0).toHostBuffer(self._api, output, .{});
-        if (maybe_event) |event| {
-            try event.await_(self._api);
-        }
-        return HostBuffer.fromBytes(self.shape(), output);
-    }
-
     /// Copies the content of the Buffer to the host.
     /// The returned `HostBuffer` does own the memory.
-    pub fn toHostAlloc(self: Buffer, allocator: std.mem.Allocator) !HostBuffer {
-        const output = try HostBuffer.empty(allocator, self.shape());
-        stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
-        const maybe_event = try self._shards.get(0).toHostBuffer(self._api, @constCast(output.bytes()), .{});
-        if (maybe_event) |event| {
-            try event.await_(self._api);
+    pub fn toHostBuffer(self: Buffer, sharding: Sharding, allocator: std.mem.Allocator) !HostBuffer {
+        var self_with_mesh = self;
+        self_with_mesh._mesh = sharding.mesh;
+        const data = try self_with_mesh.toHost(allocator);
+        return HostBuffer.fromBytes(self_with_mesh.shape(), data);
+    }
+
+    pub fn toHost(self: Buffer, allocator: std.mem.Allocator) ![]u8 {
+        const sharding: Sharding = .init(self._mesh.?, self.shape());
+        stdx.debug.assert(self._shards.len == sharding.mesh.numPartitions(), "Expected {} PJRT buffers, got {}", .{ sharding.mesh.numPartitions(), self._shards.len });
+
+        const global_buffer = try allocator.alloc(u8, sharding.global_shape.byteSize());
+        errdefer allocator.free(global_buffer);
+
+        if (sharding.getType() == .replicated) {
+            if (self._shards.len > 0) {
+                const event = try self._shards.get(0).toHostBuffer(self._api, global_buffer, .{});
+                if (event) |e| try e.await_(self._api);
+            }
+            return global_buffer;
         }
-        return output;
+
+        const shard_shape = sharding.shardShape();
+        const temp_shard_buffer = try allocator.alloc(u8, shard_shape.byteSize());
+        defer allocator.free(temp_shard_buffer);
+
+        const element_size = sharding.global_shape.dtype().sizeOf();
+        const global_element_strides = sharding.global_shape.computeElementStrides();
+        const rk = sharding.global_shape.rank();
+
+        var devices: [MAX_NUM_SHARDS]*const pjrt.Device = undefined;
+        for (self._shards.constSlice(), 0..) |shard, i| {
+            devices[i] = try shard.getDevice(self._api);
+        }
+
+        var sharding_iter = sharding.iterator(devices[0..self._shards.len]);
+        while (sharding_iter.next()) |device_shard| {
+            const shard_index: usize = @intCast(device_shard.index);
+            const src_buffer = self._shards.get(shard_index);
+
+            const event = try src_buffer.toHostBuffer(self._api, temp_shard_buffer, .{});
+            if (event) |e| try e.await_(self._api);
+            if (rk == 0) {
+                if (global_buffer.len > 0) {
+                    @memcpy(global_buffer[0..element_size], temp_shard_buffer[0..element_size]);
+                }
+                continue;
+            }
+
+            const last_dim_size = shard_shape.dim(rk - 1);
+            const contiguous_row_bytes = @as(usize, @intCast(last_dim_size)) * element_size;
+            const outer_dims_shape = shard_shape.remove(rk - 1);
+
+            var iter = outer_dims_shape.iterator();
+
+            while (iter.next()) |item| {
+                const src_flat_index_start_of_row = item.flat_index * @as(usize, @intCast(last_dim_size));
+                const src_byte_offset = src_flat_index_start_of_row * element_size;
+
+                var dest_flat_index_start_of_row: i64 = 0;
+
+                for (0..rk) |dim_idx| {
+                    const shard_coord_in_dim = if (dim_idx < rk - 1) item.coords[dim_idx] else 0;
+
+                    const global_coord_for_dim = blk: {
+                        const part_spec = sharding.global_shape.partition(dim_idx);
+                        if (part_spec != .axis) break :blk shard_coord_in_dim; // Replicated axis
+                        const mesh_axis_tag = part_spec.toTag();
+                        if (device_shard.indices.hasTag(mesh_axis_tag) != null) {
+                            const coord = device_shard.indices.dim(mesh_axis_tag);
+                            break :blk (coord * shard_shape.dim(dim_idx)) + shard_coord_in_dim;
+                        } else {
+                            break :blk shard_coord_in_dim;
+                        }
+                    };
+
+                    dest_flat_index_start_of_row += global_coord_for_dim * global_element_strides.get(dim_idx);
+                }
+
+                const dest_byte_offset = @as(usize, @intCast(dest_flat_index_start_of_row)) * element_size;
+
+                if (contiguous_row_bytes > 0) {
+                    @memcpy(
+                        global_buffer[dest_byte_offset..][0..contiguous_row_bytes],
+                        temp_shard_buffer[src_byte_offset..][0..contiguous_row_bytes],
+                    );
+                }
+            }
+        }
+
+        return global_buffer;
     }
 
     /// Frees the accelerator memory.

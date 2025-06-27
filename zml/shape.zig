@@ -163,7 +163,7 @@ pub const Shape = struct {
     _dtype: DataType,
     _dims: DimsArray = .{},
     _tags: TagsArray = UnknownTags,
-    _partitioning: PartitionArray,
+    _partitioning: PartitionArray = .{},
 
     pub fn parseDimensions(v: anytype) struct { DimsArray, TagsArray } {
         const T = @TypeOf(v);
@@ -258,7 +258,7 @@ pub const Shape = struct {
     /// Shape.init(.{ .h = 1024, .w = 512, .c = 3 });
     /// Shape.init(.{ 1024, 512, 3 });
     pub fn init(dimz: anytype, dt: DataType) Shape {
-        var res: Shape = .{ ._dtype = dt, ._partitioning = .{} };
+        var res: Shape = .{ ._dtype = dt };
         res._dims, res._tags = parseDimensions(dimz);
         res._partitioning.appendNTimes(.unknown, res._dims.len) catch @panic("Rank too large");
 
@@ -266,12 +266,12 @@ pub const Shape = struct {
     }
 
     pub fn scalar(dt: DataType) Shape {
-        return .{ ._dtype = dt, ._partitioning = .{} };
+        return .{ ._dtype = dt };
     }
 
     /// Creates a Shape with dims set to `.{0, 1, 2, ..., rank-1}`.
     pub fn range(rank_: usize, dt: DataType) Shape {
-        var res: Shape = .{ ._dtype = dt, ._partitioning = .{} };
+        var res: Shape = .{ ._dtype = dt };
         for (0..rank_) |i| {
             res._dims.append(@intCast(i)) catch {
                 stdx.debug.panic("Too many dimensions! Max: {d}, passed: {d}", .{ res._dims.capacity(), rank_ });
@@ -325,7 +325,7 @@ pub const Shape = struct {
     }
 
     inline fn ensureAttributesAreSync(self: Shape) void {
-        stdx.debug.assert(self._dims.len == self._tags.len and self._dims.len == self._partitioning.len, "Tags and dims have diverged! dims={d} tags={d} partitioning={d}", .{ self._dims.len, self._tags.len, self._partitioning.len });
+        stdx.debug.assert(self._dims.len == self._tags.len and self._dims.len == self._partitioning.len, "Tags, dims and partitioning have diverged! dims={d} tags={d} partitioning={d}", .{ self._dims.len, self._tags.len, self._partitioning.len });
     }
 
     pub fn tag(self: Shape, ax: anytype) Tag {
@@ -575,7 +575,7 @@ pub const Shape = struct {
     }
 
     pub fn reshape(self: Shape, new_shape_: anytype) Shape {
-        var new_shape: Shape = .{ ._dtype = self.dtype(), ._partitioning = .{} };
+        var new_shape: Shape = .{ ._dtype = self.dtype() };
         new_shape._dims, new_shape._tags = parseDimensions(new_shape_);
         new_shape._partitioning.appendNTimes(.unknown, new_shape._dims.len) catch @panic("Rank too large");
         new_shape.inferMissingAxis(self.count());
@@ -910,7 +910,7 @@ pub const Shape = struct {
     pub fn withPartitioning(self: Shape, specs: anytype) Shape {
         const T = @TypeOf(specs);
 
-        var res = self;
+        var res = self.withDefaultPartitioning(); // todo add test for this new change
 
         if (stdx.meta.isStruct(T)) {
             inline for (std.meta.fields(T)) |field| {
@@ -1021,6 +1021,26 @@ pub const Shape = struct {
         shape = shape.withDefaultPartitioning();
         try testing.expectEqual(3, shape._partitioning.len);
         try testing.expectEqualSlices(PartitionSpec, &.{ .unknown, .unknown, .unknown }, shape._partitioning.constSlice());
+    }
+
+    pub fn withReplicatedPartitioning(self: Shape) Shape {
+        var res = self;
+        res._partitioning.clear();
+        res._partitioning.appendNTimes(.replicated, self._dims.len) catch stdx.debug.panic("Too many partitioning axes, max: {d}", .{MAX_RANK});
+        return res;
+    }
+
+    test withReplicatedPartitioning {
+        var shape = Shape.init(.{ 10, 20, 30 }, .f32);
+        try testing.expectEqual(3, shape._partitioning.len);
+        try testing.expectEqualSlices(PartitionSpec, &.{ .unknown, .unknown, .unknown }, shape._partitioning.constSlice());
+
+        shape = shape.withPartitioning(.{ ._1 = .batch });
+        try testing.expectEqualSlices(PartitionSpec, &.{ .unknown, .init(.batch), .unknown }, shape._partitioning.constSlice());
+
+        shape = shape.withReplicatedPartitioning();
+        try testing.expectEqual(3, shape._partitioning.len);
+        try testing.expectEqualSlices(PartitionSpec, &.{ .replicated, .replicated, .replicated }, shape._partitioning.constSlice());
     }
 
     pub fn hasAtLeastOnePartitionedAxis(self: Shape) bool {

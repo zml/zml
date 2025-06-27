@@ -261,8 +261,8 @@ pub const CompilationContext = struct {
             break :blk loaded_executable;
         };
 
-        log.info("******** ZML generated MLIR ********", .{});
-        log.info("{}", .{module.op().mlirFormatter(.{})});
+        log.warn("******** ZML generated MLIR ********", .{});
+        log.warn("{}", .{module.op().mlirFormatter(.{})});
 
         if (timer) |*t| {
             const time_ms = @divFloor(t.lap(), std.time.ns_per_ms);
@@ -556,7 +556,7 @@ pub const CompilationContext = struct {
             .bias = zml.Tensor{ ._shape = s, ._id = .{ .buffer_id = 0 } },
         };
 
-        var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
+        var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", zml.Mesh.single(), platform);
         defer comp.deinit();
         var tensor_args = .{ model, Tensor{ ._shape = s, ._id = .{ .buffer_id = 1234 } }, Tensor{ ._shape = s, ._id = .{ .buffer_id = 1235 } } };
         const f = try comp.emitMlir(Local._fwd, &tensor_args, .{ .name = "test.emitMlir.Local.forward", .kind = .main });

@@ -6,6 +6,7 @@ const Buffer = @import("buffer.zig").Buffer;
 const DataType = @import("dtype.zig").DataType;
 const floats = @import("floats.zig");
 const Platform = @import("platform.zig").Platform;
+const Mesh = @import("partitioning.zig").Mesh;
 const Shape = @import("shape.zig").Shape;
 
 test {
@@ -156,13 +157,13 @@ pub const HostBuffer = struct {
     }
 
     /// Copies this HostBuffer to the given accelerator.
-    pub fn toDevice(self: HostBuffer, platform_: Platform) !Buffer {
-        return try self.toDeviceOpts(platform_, .{});
+    pub fn toDevice(self: HostBuffer, platform_: Platform, mesh: Mesh) !Buffer {
+        return try Buffer.from(platform_, .init(mesh, self.shape()), self.bytes(), .{});
     }
 
     /// Copies this HostBuffer to the given accelerator (with options).
-    pub fn toDeviceOpts(self: HostBuffer, platform_: Platform, opts: Buffer.FromOptions) !Buffer {
-        return try Buffer.from(platform_, self, opts);
+    pub fn toDeviceOpts(self: HostBuffer, platform_: Platform, mesh: Mesh, opts: Buffer.FromOptions) !Buffer {
+        return try Buffer.from(platform_, .init(mesh, self.shape()), self.bytes(), opts);
     }
 
     /// Interpret the underlying data as a contiguous slice.
