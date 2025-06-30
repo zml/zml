@@ -345,7 +345,7 @@ pub fn asyncMain() !void {
     log.info("✅\tCompiled model in {}", .{std.fmt.fmtDuration(start.read())});
 
     log.info("Creating KvCache", .{});
-    const kv_cache = try llama.KvCache.initBuffer(allocator, kv_shape, mesh, platform);
+    const kv_cache = try llama.KvCache.initBuffer(kv_shape, mesh, platform);
 
     var tokenizer = blk: {
         if (res.args.tokenizer) |tok| {
