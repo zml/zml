@@ -115,6 +115,65 @@ pub const Buffer = struct {
         return self;
     }
 
+    pub const UnitializedOptions = struct {
+        memory: ?Memory = null,
+    };
+
+    pub fn uninitialized(platform: Platform, sharding: Sharding, opts: UnitializedOptions) !Buffer {
+        var sharding_devices = sharding.iterator(platform.getDevices());
+
+        var res: Buffer = .{
+            ._api = platform.pjrt_api,
+            ._shape = sharding.global_shape,
+            ._shards = .{},
+        };
+
+        errdefer for (res._shards.slice()) |shard| {
+            shard.deinit(platform.pjrt_api);
+        };
+
+        const minor_to_major: [Shape.MAX_RANK]i64 = comptime blk: {
+            var minor_to_major: [Shape.MAX_RANK]i64 = undefined;
+            for (0..Shape.MAX_RANK) |i| {
+                minor_to_major[i] = @intCast(Shape.MAX_RANK - i - 1);
+            }
+            break :blk minor_to_major;
+        };
+
+        while (sharding_devices.next()) |shard| {
+            const specs = shard.specs();
+
+            var args = pjrt.Client.CreateUninitializedBufferArgs{
+                .dims = specs.dims[0..specs.num_dims],
+                .element_type = bufferTypeFromDtype(shard.shard_shape.dtype()),
+                .layout = .{
+                    .tiled = .{
+                        .minor_to_major = minor_to_major[Shape.MAX_RANK - shard.shard_shape.rank() ..],
+                        .tile_dims = &.{},
+                        .tile_dims_sizes = &.{},
+                    },
+                },
+            };
+
+            if (opts.memory) |memory_kind| {
+                const memories = try shard.device.addressableMemories(platform.pjrt_api);
+                const memory = for (memories) |m| {
+                    const kind = m.kind(platform.pjrt_api);
+                    if (kind == memory_kind.toPjrtMemory()) break m;
+                } else return error.NotFound;
+                args.memory = memory;
+            } else {
+                args.device = shard.device;
+            }
+
+            const pjrt_buffer = try platform.pjrt_client.createUnitializedBuffer(platform.pjrt_api, args);
+
+            res._shards.appendAssumeCapacity(pjrt_buffer);
+        }
+
+        return res;
+    }
+
     /// Wraps pre-exisiting `pjrt.Buffer` shards into one `zml.Buffer`.
     pub fn fromPjrtBuffers(platform: Platform, sharding: Sharding, pjrt_buffers: []const *pjrt.Buffer) Buffer {
         stdx.debug.assert(pjrt_buffers.len <= MAX_NUM_SHARDS, "ZML doesn't support having more than {} shards. Received {} shards for one buffer.", .{ MAX_NUM_SHARDS, pjrt_buffers.len });
@@ -474,70 +533,70 @@ pub const Buffer = struct {
         return Buffer{ ._shape = self._shape, ._shards = new_shards, ._api = self._api };
     }
 
-    pub const UnitializedOptions = struct {
-        memory: ?pjrt.Memory.Kind = null,
-    };
+    // pub const UnitializedOptions = struct {
+    //     memory: ?pjrt.Memory.Kind = null,
+    // };
 
-    pub fn uninitialized(platform: Platform, shape_: Shape, opts: UnitializedOptions) !Buffer {
-        var res: Buffer = .{
-            ._api = platform.pjrt_api,
-            ._shape = shape_,
-            ._shards = .{},
-        };
-        errdefer for (res._shards.slice()) |shard| {
-            shard.deinit(platform.pjrt_api);
-        };
+    // pub fn uninitialized(platform: Platform, shape_: Shape, opts: UnitializedOptions) !Buffer {
+    //     var res: Buffer = .{
+    //         ._api = platform.pjrt_api,
+    //         ._shape = shape_,
+    //         ._shards = .{},
+    //     };
+    //     errdefer for (res._shards.slice()) |shard| {
+    //         shard.deinit(platform.pjrt_api);
+    //     };
 
-        const minor_to_major: [Shape.MAX_RANK]i64 = comptime blk: {
-            var minor_to_major: [Shape.MAX_RANK]i64 = undefined;
-            for (0..Shape.MAX_RANK) |i| {
-                minor_to_major[i] = @intCast(Shape.MAX_RANK - i - 1);
-            }
-            break :blk minor_to_major;
-        };
+    //     const minor_to_major: [Shape.MAX_RANK]i64 = comptime blk: {
+    //         var minor_to_major: [Shape.MAX_RANK]i64 = undefined;
+    //         for (0..Shape.MAX_RANK) |i| {
+    //             minor_to_major[i] = @intCast(Shape.MAX_RANK - i - 1);
+    //         }
+    //         break :blk minor_to_major;
+    //     };
 
-        // TODO: support more advanced sharding specs
-        stdx.debug.assert(platform.sharding().num_replicas == 1, "ZML doesn't support num_replicas > 1 for now, got: {}", .{platform.sharding()});
-        const sharding_ax: ?u3 = std.simd.firstTrue(shape_._sharding_info);
-        const n_partitions = platform.sharding().num_partitions;
-        const shard_shape = if (sharding_ax) |ax| s: {
-            // This kind of sharding error should be detected earlier on.
-            stdx.debug.assert(@rem(shape_.dim(ax), n_partitions) == 0, "Buffer.uninitialized() expects the sharding axis {} to have a dimension divisble by the number of devices ({}).", .{ ax, n_partitions });
-            const shard_shape = shape_.set(ax, @divExact(shape_.dim(ax), n_partitions));
-            break :s shard_shape;
-        } else shape_;
+    //     // TODO: support more advanced sharding specs
+    //     stdx.debug.assert(platform.sharding().num_replicas == 1, "ZML doesn't support num_replicas > 1 for now, got: {}", .{platform.sharding()});
+    //     const sharding_ax: ?u3 = std.simd.firstTrue(shape_._sharding_info);
+    //     const n_partitions = platform.sharding().num_partitions;
+    //     const shard_shape = if (sharding_ax) |ax| s: {
+    //         // This kind of sharding error should be detected earlier on.
+    //         stdx.debug.assert(@rem(shape_.dim(ax), n_partitions) == 0, "Buffer.uninitialized() expects the sharding axis {} to have a dimension divisble by the number of devices ({}).", .{ ax, n_partitions });
+    //         const shard_shape = shape_.set(ax, @divExact(shape_.dim(ax), n_partitions));
+    //         break :s shard_shape;
+    //     } else shape_;
 
-        const buffer_type = bufferTypeFromDtype(shape_.dtype());
-        const devices = platform.getDevices();
-        for (0..n_partitions) |i| {
-            var args = pjrt.Client.CreateUninitializedBufferArgs{
-                .dims = shard_shape.dims(),
-                .element_type = buffer_type,
-                .layout = .{
-                    .tiled = .{
-                        .minor_to_major = minor_to_major[Shape.MAX_RANK - shape_.rank() ..],
-                        .tile_dims = &.{},
-                        .tile_dims_sizes = &.{},
-                    },
-                },
-            };
-            if (opts.memory) |memory_kind| {
-                const memories = try devices[i].addressableMemories(platform.pjrt_api);
-                const memory = for (memories) |m| {
-                    const kind = m.kind(platform.pjrt_api);
-                    if (kind == memory_kind) break m;
-                } else return error.NotFound;
-                args.memory = memory;
-            } else {
-                args.device = devices[i];
-            }
-            const pjrt_buffer = try platform.pjrt_client.createUnitializedBuffer(platform.pjrt_api, args);
+    //     const buffer_type = bufferTypeFromDtype(shape_.dtype());
+    //     const devices = platform.getDevices();
+    //     for (0..n_partitions) |i| {
+    //         var args = pjrt.Client.CreateUninitializedBufferArgs{
+    //             .dims = shard_shape.dims(),
+    //             .element_type = buffer_type,
+    //             .layout = .{
+    //                 .tiled = .{
+    //                     .minor_to_major = minor_to_major[Shape.MAX_RANK - shape_.rank() ..],
+    //                     .tile_dims = &.{},
+    //                     .tile_dims_sizes = &.{},
+    //                 },
+    //             },
+    //         };
+    //         if (opts.memory) |memory_kind| {
+    //             const memories = try devices[i].addressableMemories(platform.pjrt_api);
+    //             const memory = for (memories) |m| {
+    //                 const kind = m.kind(platform.pjrt_api);
+    //                 if (kind == memory_kind) break m;
+    //             } else return error.NotFound;
+    //             args.memory = memory;
+    //         } else {
+    //             args.device = devices[i];
+    //         }
+    //         const pjrt_buffer = try platform.pjrt_client.createUnitializedBuffer(platform.pjrt_api, args);
 
-            res._shards.appendAssumeCapacity(pjrt_buffer);
-        }
+    //         res._shards.appendAssumeCapacity(pjrt_buffer);
+    //     }
 
-        return res;
-    }
+    //     return res;
+    // }
 };
 
 pub fn bufferTypeFromDtype(dt: DataType) pjrt.BufferType {

@@ -439,13 +439,12 @@ pub const KvCache = struct {
         };
     }
 
-    pub fn initBuffer(allocator: std.mem.Allocator, kv_shape: zml.Shape, mesh: zml.Mesh, platform: zml.Platform) !zml.Bufferized(KvCache) {
+    pub fn initBuffer(kv_shape: zml.Shape, mesh: zml.Mesh, platform: zml.Platform) !zml.Bufferized(KvCache) {
         const sharding = zml.Sharding.init(mesh, kv_shape.withPartitioning(.{ .k = .data, .h = .model }));
-        const slice = try zml.slice.fill(f32, allocator, kv_shape, 1.0);
-        defer allocator.free(slice);
+
         return .{
-            .k = try zml.Buffer.from(platform, sharding, slice, .{ .wait = true }),
-            .v = try zml.Buffer.from(platform, sharding, slice, .{ .wait = true }),
+            .k = try zml.Buffer.uninitialized(platform, sharding, .{}),
+            .v = try zml.Buffer.uninitialized(platform, sharding, .{}),
             .layer_index = try zml.Buffer.constant(platform, .init(mesh, zml.Shape.init(.{}, .u32)), 0),
         };
     }
