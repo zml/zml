@@ -69,7 +69,7 @@ pub const LlamaLM = struct {
     ) struct { Tensor, KvCache, Tensor.Rng } {
         stdx.debug.assert(tokens_.dtype() == .u32 and tokens_.rank() >= 1 and token_index.dtype() == .u32 and token_index.rank() <= 1, "Can't run Llama ! Expected >=1d tokens and 0d token_index, got: {} and {}", .{ tokens_, token_index });
         const tokens = tokens_.withPartialTags(.{.s});
-        const out, const updated_kv_cache = self.model.forward(tokens, token_index, kv_cache);
+        const out, const updated_kv_cache = zml.call(self.model, .forward, .{ tokens, token_index, kv_cache });
         const new_tokens, const new_rng = self.sampleTokens(self.lm_head, out, rng, self.gen_opts);
         return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache, new_rng };
     }
@@ -85,7 +85,7 @@ pub const LlamaLM = struct {
 
         var logits = blk: {
             if (lm_head_) |lm_head| {
-                break :blk lm_head.forward(out);
+                break :blk zml.call(lm_head, .forward, .{out});
             } else {
                 break :blk self.model.embed_tokens.weight.withTags(.{ .voc, .d }).dot(out, .{.d});
             }
@@ -184,9 +184,9 @@ pub const Llama = struct {
         var updated_kv_cache = kv_cache;
 
         for (self.layers, 0..) |layer, i| {
-            hidden, updated_kv_cache = layer.forward(hidden, token_index, updated_kv_cache.atLayer(i));
+            hidden, updated_kv_cache = zml.call(layer, .forward, .{ hidden, token_index, updated_kv_cache.atLayer(i) });
         }
-        const output = self.norm.forward(hidden);
+        const output = zml.call(self.norm, .forward, .{hidden});
 
         zml.popMesh();
 
@@ -194,7 +194,7 @@ pub const Llama = struct {
     }
 
     pub fn embed(embed_tokens_: zml.nn.TokenEmbedding, tokens_: Tensor) Tensor {
-        return embed_tokens_.forward(tokens_).withPartialTags(.{.d});
+        return zml.call(embed_tokens_, .forward, .{tokens_}).withPartialTags(.{.d});
     }
 
     fn initKvCache(self: Llama, embed_shape: zml.Shape) KvCache {
@@ -240,12 +240,8 @@ pub const TransformerLayer = struct {
         };
 
         // Self Attention
-        const x0_normalized = self.input_layernorm.forward(x0_replicated);
-        const delta0, const updated_kv_cache = self.self_attn.forward(
-            x0_normalized,
-            token_index,
-            kv_cache,
-        );
+        const x0_normalized = zml.call(self.input_layernorm, .forward, .{x0_replicated});
+        const delta0, const updated_kv_cache = zml.call(self.self_attn, .forward, .{ x0_normalized, token_index, kv_cache });
         log.warn("TransformerLayer.forward: delta0={}", .{delta0});
         const x1_replicated = x0_replicated.add(delta0);
 
@@ -255,8 +251,8 @@ pub const TransformerLayer = struct {
             x1_replicated;
 
         // Fully Connected
-        const x1_normalized = self.post_attention_layernorm.forward(x1);
-        const mlp_delta = self.mlp.forward(x1_normalized);
+        const x1_normalized = zml.call(self.post_attention_layernorm, .forward, .{x1});
+        const mlp_delta = zml.call(self.mlp, .forward, .{x1_normalized});
         const x2 = x1.add(mlp_delta);
 
         return .{ x2.reuseBuffer(x0), updated_kv_cache };
@@ -305,10 +301,10 @@ const Mlp = struct {
     }
 
     pub fn forward(self: Mlp, x: Tensor) Tensor {
-        const proj = self.up_proj.forward(x);
-        var output: zml.Tensor = self.gate_proj.forward(x);
+        const proj = zml.call(self.up_proj, .forward, .{x});
+        var output = zml.call(self.gate_proj, .forward, .{x});
         output = output.silu().mul(proj);
-        output = self.down_proj.forward(output);
+        output = zml.call(self.down_proj, .forward, .{output});
 
         const mesh = self.down_proj.weight.mesh();
         if (mesh.topology.hasTag(.model) != null) {
@@ -369,9 +365,10 @@ pub const SelfAttn = struct {
     ) struct { Tensor, KvCache } {
         const num_kv_heads = if (self.num_kv_heads > 0) self.num_kv_heads else self.num_heads;
 
-        const q_proj_out = self.q_proj.forward(x);
-        const k_proj_out = self.k_proj.forward(x);
-        const v_proj_out = self.v_proj.forward(x);
+        const q_proj_out = zml.call(self.q_proj, .forward, .{x});
+        const k_proj_out = zml.call(self.k_proj, .forward, .{x});
+        const v_proj_out = zml.call(self.v_proj, .forward, .{x});
+
         log.warn("SelfAttn.forward: q_proj_out={}, k_proj_out={}, v_proj_out={}", .{ q_proj_out, k_proj_out, v_proj_out });
         var q = q_proj_out.splitAxis(.d, .{ .h = self.num_heads, .hd = .auto });
         var k = k_proj_out.splitAxis(.d, .{ .h = num_kv_heads, .hd = .auto });
@@ -408,7 +405,7 @@ pub const SelfAttn = struct {
 
         const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
 
-        var output = self.o_proj.forward(attn).rename(.{ .o_hidden = .d });
+        var output = zml.call(self.o_proj, .forward, .{attn}).rename(.{ .o_hidden = .d });
 
         const mesh = self.o_proj.weight.mesh();
         if (mesh.topology.hasTag(.model) != null) {
