@@ -1,3 +1,4 @@
+// examples/llama/llama.zig
 const std = @import("std");
 const testing = std.testing;
 
@@ -81,17 +82,14 @@ pub const LlamaLM = struct {
         rng: Tensor.Rng,
         opts: zml.nn.SamplingStrategy,
     ) struct { Tensor, Tensor.Rng } {
-        // Output from the model body is on the compute_mesh.
-        // We need to switch to the vocab_mesh for the final projection.
         const vocab_mesh = if (lm_head_) |lm_head| lm_head.weight.mesh() else self.model.embed_tokens.weight.mesh();
         zml.pushMesh(vocab_mesh);
+        defer zml.popMesh();
 
         const out = out_.withPartialTags(.{ .s, .d });
 
         var logits = blk: {
             if (lm_head_) |lm_head| {
-                // The matmul with lm_head (sharded on vocab/model) is what matters. Since lm_head
-                // is on the vocab_mesh, this operation will execute on it.
                 break :blk zml.call(lm_head, .forward, .{out});
             } else {
                 break :blk self.model.embed_tokens.weight.withTags(.{ .voc, .d }).dot(out, .{.d});
@@ -105,7 +103,6 @@ pub const LlamaLM = struct {
         logits = zml.ops.allGather(logits, .model, vocab_mesh);
 
         const next_tokens, const new_rng = zml.nn.sampleTokens(logits, opts, rng);
-        zml.popMesh();
         return .{ next_tokens, new_rng };
     }
 };
@@ -114,8 +111,6 @@ pub const Llama = struct {
     embed_tokens: zml.nn.TokenEmbedding,
     norm: RmsNorm,
     layers: []TransformerLayer,
-
-    // No mesh stored here!
 
     max_seq_len: u32 = 0,
     num_heads: i64 = 32,
@@ -160,7 +155,8 @@ pub const Llama = struct {
 
         self.norm.init(config, compute_mesh);
 
-        // Input embeddings are replicated across all devices on the vocab_mesh.
+        // Input embeddings are replicated across all devices. This is crucial for the first
+        // layer to receive a replicated activation.
         self.embed_tokens.weight = self.embed_tokens.weight
             .withTags(.{ .vocab, .d })
             .withMesh(vocab_mesh)
@@ -172,14 +168,7 @@ pub const Llama = struct {
     }
 
     pub fn forward(self: Llama, tokens: Tensor, token_index: Tensor, kv_cache: KvCache) struct { Tensor, KvCache } {
-        // This function now assumes the correct mesh is already set in the context by its caller.
-        log.info(">>>>>>>>>>>>>>> Llama.forward(tokens={}, token_index={}, kv_cache={})", .{ tokens, token_index, kv_cache });
-
         var hidden = embed(self.embed_tokens, tokens);
-
-        // Re-shard activations for the compute mesh.
-        // `embeds` is on vocab_mesh (replicated), re-sharding for compute_mesh (model-parallel)
-        hidden = hidden.withSharding(.{ .d = .model });
 
         var updated_kv_cache = kv_cache;
 
@@ -192,7 +181,6 @@ pub const Llama = struct {
     }
 
     pub fn embed(embed_tokens_: zml.nn.TokenEmbedding, tokens_: Tensor) Tensor {
-        // Embeddings are replicated to all devices before entering the transformer blocks
         const embeddings = zml.call(embed_tokens_, .forward, .{tokens_});
         return embeddings.withPartialTags(.{.d});
     }
@@ -243,10 +231,7 @@ pub const RmsNorm = struct {
 
     pub fn forward(self: RmsNorm, input: Tensor) Tensor {
         const x = if (input.shape().isFullyTagged()) input else input.withPartialTags(.{.d});
-        log.warn("RmsNorm.forward({})", .{x});
-        // RMSNorm can be computed locally on the sharded `d` dimension.
         const normalized = zml.nn.rmsNorm(x, .d, self.eps);
-        // `weight` is replicated, so this multiplication is also local.
         return normalized.mul(self.weight.convert(x.dtype()).withTags(.{.d}).broad(x.shape()));
     }
 };
@@ -257,26 +242,16 @@ pub const Mlp = struct {
     down_proj: zml.nn.Linear,
 
     pub fn init(self: *Mlp, mesh: zml.Mesh) void {
-        // Shard weights along the `model` axis
         self.gate_proj.weight = self.gate_proj.weight.withTags(.{ .d, .hidden }).withMesh(mesh).withSharding(.{ .hidden = .model });
         self.up_proj.weight = self.up_proj.weight.withTags(.{ .d, .hidden }).withMesh(mesh).withSharding(.{ .hidden = .model });
         self.down_proj.weight = self.down_proj.weight.withTags(.{ .hidden, .d }).withMesh(mesh).withSharding(.{ .hidden = .model });
     }
 
     pub fn forward(self: Mlp, x: Tensor) Tensor {
-        // Get the current mesh from the context
-        const mesh = zml.currentMesh();
-        _ = mesh; // autofix
-
-        // Column-parallel part (local)
         const gate_out = zml.call(self.gate_proj, .forward, .{x});
         const up_out = zml.call(self.up_proj, .forward, .{x});
-        var output = gate_out.silu().mul(up_out);
-
-        // Row-parallel part (needs communication)
-        output = zml.call(self.down_proj, .forward, .{output});
-        return output;
-        // return zml.ops.allReduce(output, .model, mesh);
+        const output = gate_out.silu().mul(up_out);
+        return zml.call(self.down_proj, .forward, .{output});
     }
 };
 
@@ -298,12 +273,9 @@ pub const SelfAttn = struct {
             .scaling = config.rope_scaling,
         };
 
-        // Column-parallel layers. Shard the output dimension.
         self.q_proj.weight = self.q_proj.weight.withTags(.{ .d, .q_hidden }).withMesh(mesh).withSharding(.{ .q_hidden = .model });
         self.k_proj.weight = self.k_proj.weight.withTags(.{ .d, .kv_hidden }).withMesh(mesh).withSharding(.{ .kv_hidden = .model });
         self.v_proj.weight = self.v_proj.weight.withTags(.{ .d, .kv_hidden }).withMesh(mesh).withSharding(.{ .kv_hidden = .model });
-
-        // Row-parallel layer. Shard the input dimension.
         self.o_proj.weight = self.o_proj.weight.withTags(.{ .o_hidden, .d }).withMesh(mesh).withSharding(.{ .o_hidden = .model });
     }
 
@@ -313,9 +285,6 @@ pub const SelfAttn = struct {
         token_index: Tensor,
         kv_cache: KvCache,
     ) struct { Tensor, KvCache } {
-        const mesh = zml.currentMesh();
-        _ = mesh; // autofix
-
         const num_kv_heads = if (self.num_kv_heads > 0) self.num_kv_heads else self.num_heads;
 
         const q_proj_out = zml.call(self.q_proj, .forward, .{x});
@@ -347,7 +316,6 @@ pub const SelfAttn = struct {
 
         const attn_mask = if (x.dim(.s) > 1) blk: {
             var mask = zml.nn.causalAttnMask(.{ .q = k_transposed.dim(.k), .k = k_transposed.dim(.k) }, x.dtype(), null);
-            // The mask is replicated and broadcasted to all devices.
             break :blk mask.gatherSlices(.{ .q = x.dim(.s) }, token_index.reshape(.{ .coord = 1 }), .{});
         } else null;
 
@@ -355,10 +323,10 @@ pub const SelfAttn = struct {
 
         const attn = attn_output.merge(.{ .o_hidden = .{ .h, .hd } }).rename(.{ .q = .s });
 
+        // Row-parallel matmul. Output is a partial sum.
         const output = zml.call(self.o_proj, .forward, .{attn});
 
-        // output = zml.ops.allReduce(output, .model, mesh);
-
+        // The All-Reduce is now implicit, handled by the compiler.
         return .{ output, new_kv_cache };
     }
 };
