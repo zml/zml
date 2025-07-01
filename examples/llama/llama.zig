@@ -192,22 +192,28 @@ pub const TransformerLayer = struct {
         self.post_attention_layernorm.init(config, mesh);
         self.mlp.init(mesh);
     }
-
     pub fn forward(
         self: TransformerLayer,
-        x0_: Tensor,
+        x0: Tensor,
         token_index: Tensor,
         kv_cache: KvCache,
     ) struct { Tensor, KvCache } {
-        const x0 = x0_;
         stdx.debug.assert(x0.rank() >= 2 and x0.shape().hasTags(.{ .s, .d }), "TransformerLayer expected input shape: {{..., .s, .d}}, received: {}", .{x0});
 
-        const x0_normalized = zml.call(self.input_layernorm, .forward, .{x0});
-        const delta0, const updated_kv_cache = zml.call(self.self_attn, .forward, .{ x0_normalized, token_index, kv_cache });
+        // --- Self Attention Block ---
+        const x0_normalized = self.input_layernorm.forward(x0);
+        const delta0, const updated_kv_cache = self.self_attn.forward(x0_normalized, token_index, kv_cache);
         const x1 = x0.add(delta0);
 
-        const x1_normalized = zml.call(self.post_attention_layernorm, .forward, .{x1});
-        const delta1 = zml.call(self.mlp, .forward, .{x1_normalized});
+        // --- MLP Block ---
+        const x1_normalized = self.post_attention_layernorm.forward(x1);
+
+        // Inlined Mlp.forward
+        const gate_out = self.mlp.gate_proj.forward(x1_normalized);
+        const up_out = self.mlp.up_proj.forward(x1_normalized);
+        const mlp_hidden = gate_out.silu().mul(up_out);
+        const delta1 = self.mlp.down_proj.forward(mlp_hidden);
+
         const x2 = x1.add(delta1);
 
         return .{ x2.reuseBuffer(x0), updated_kv_cache };
