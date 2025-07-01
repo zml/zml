@@ -680,6 +680,40 @@ pub fn reduceScatter(input: Tensor, axis: anytype, mesh: Mesh) Tensor {
     return fromMlirOperationWithTags(op, input);
 }
 
+pub fn allReduce(input: Tensor, axis: anytype, mesh: Mesh) Tensor {
+    const ctx = CompilationContext.current();
+    const mlir_ctx = ctx.mlirCtx();
+
+    // The body of the reduce operation (summation)
+    const body_block, _ = ctx.makeBlock(.hermetic, BlockSignNoCtx(Tensor.add), &Tensor.add, {}, .{
+        Tensor.scalar(0, input.dtype()),
+        Tensor.scalar(0, input.dtype()),
+    });
+
+    // replica_groups defines which devices participate. For an All-Reduce across
+    // the 'model' axis, it's a 2D array of shape [num_model_devices, 1].
+    const replica_groups_shape: []const i64 = &.{ @intCast(mesh.axis(axis)), 1 };
+    var replica_groups_data: [mesh.numPartitions()]i64 = undefined;
+    for (0..mesh.numPartitions()) |i| {
+        replica_groups_data[i] = @intCast(i);
+    }
+
+    const op = mlir.Operation.make(mlir_ctx, "stablehlo.all_reduce", .{
+        .operands = &.{input.value()},
+        .results = &.{input.value().getType()},
+        .blocks = &.{body_block},
+        .attributes = &.{
+            .{ "replica_groups", .denseElements(mlir_ctx, replica_groups_shape, .i64, replica_groups_data[0..mesh.numPartitions()]) },
+            .{ "channel_id", .int(mlir_ctx, .i64, 0) }, // Use a default channel
+            .{ "use_global_device_ids", .boolean(mlir_ctx, false) },
+        },
+        .location = ctx.location(@src(), "allReduce({_}, {d})", .{ input, mesh.axis(axis) }),
+    });
+
+    // The shape of the output of all_reduce is the same as the input.
+    return fromMlirOperationWithTags(op, input);
+}
+
 pub const BlockSignature = struct {
     Fn: type,
     BlkCtx: type,

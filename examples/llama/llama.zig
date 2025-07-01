@@ -310,6 +310,11 @@ const Mlp = struct {
         output = output.silu().mul(proj);
         output = self.down_proj.forward(output);
 
+        const mesh = self.down_proj.weight.mesh();
+        if (mesh.topology.hasTag(.model) != null) {
+            output = zml.ops.allReduce(output, .model, mesh);
+        }
+
         return output;
     }
 };
@@ -403,6 +408,12 @@ pub const SelfAttn = struct {
         const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
 
         var output = self.o_proj.forward(attn).rename(.{ .o_hidden = .d });
+
+        const mesh = self.o_proj.weight.mesh();
+        if (mesh.topology.hasTag(.model) != null) {
+            output = zml.ops.allReduce(output, .model, mesh);
+        }
+
         log.warn("SelfAttn.forward: attn_output={}, output={}", .{ attn_output, output });
         if (x.dim(.s) > 1) {
             // Prefill phase: Shard the sequence dimension.
