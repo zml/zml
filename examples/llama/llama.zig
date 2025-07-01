@@ -36,30 +36,25 @@ pub const LlamaLM = struct {
     lm_head: ?zml.nn.Linear,
     model: Llama,
 
-    // Options controlling generation
+    // Runtime configuration, not part of the model's weights/arch
     gen_opts: zml.nn.SamplingStrategy = .{},
     config: Config,
 
-    pub fn init(self: *LlamaLM, mesh: zml.Mesh, config: Config, options: Options) void {
+    pub fn init(self: *LlamaLM, compute_mesh: zml.Mesh, vocab_mesh: zml.Mesh, config: Config, options: Options) void {
         self.config = config;
         self.gen_opts = options.sampling_strategy orelse .{};
 
-        const vocab_mesh = mesh.flatten(.all_devices);
+        self.model.init(config, options.max_seq_len, compute_mesh, vocab_mesh);
 
-        self.model.init(config, options.max_seq_len, mesh, vocab_mesh);
-
-        // TODO(Corentin): Fix lm_head sharding when top-k sampling is enabled.
-        // It currently crashes/compilation fails
-        if (self.gen_opts.topk == 1 and self.lm_head != null) {
-            self.lm_head.?.weight = self.lm_head.?.weight.withTags(.{ .d, .vocab }).withMesh(vocab_mesh).withSharding(.{ .vocab = .all_devices });
+        // Shard the final output layer across all devices
+        if (self.lm_head) |*lm_head| {
+            lm_head.weight = lm_head.weight
+                .withTags(.{ .d, .vocab })
+                .withMesh(vocab_mesh)
+                .withSharding(.{ .vocab = .model });
         }
     }
 
-    /// Predicts the token at `token_index` position.
-    /// Returns:
-    ///  - updated `tokens`,
-    ///  - updated KV cache
-    ///  - a Rng state to allow for probabilistic generation
     pub fn forward(
         self: LlamaLM,
         tokens_: Tensor,
@@ -69,7 +64,12 @@ pub const LlamaLM = struct {
     ) struct { Tensor, KvCache, Tensor.Rng } {
         stdx.debug.assert(tokens_.dtype() == .u32 and tokens_.rank() >= 1 and token_index.dtype() == .u32 and token_index.rank() <= 1, "Can't run Llama ! Expected >=1d tokens and 0d token_index, got: {} and {}", .{ tokens_, token_index });
         const tokens = tokens_.withPartialTags(.{.s});
+
+        // The model forward pass uses the compute_mesh
+        zml.pushMesh(self.model.layers[0].input_layernorm.weight.mesh());
         const out, const updated_kv_cache = zml.call(self.model, .forward, .{ tokens, token_index, kv_cache });
+        zml.popMesh();
+
         const new_tokens, const new_rng = self.sampleTokens(self.lm_head, out, rng, self.gen_opts);
         return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache, new_rng };
     }
@@ -81,10 +81,17 @@ pub const LlamaLM = struct {
         rng: Tensor.Rng,
         opts: zml.nn.SamplingStrategy,
     ) struct { Tensor, Tensor.Rng } {
+        // Output from the model body is on the compute_mesh.
+        // We need to switch to the vocab_mesh for the final projection.
+        const vocab_mesh = if (lm_head_) |lm_head| lm_head.weight.mesh() else self.model.embed_tokens.weight.mesh();
+        zml.pushMesh(vocab_mesh);
+
         const out = out_.withPartialTags(.{ .s, .d });
 
         var logits = blk: {
             if (lm_head_) |lm_head| {
+                // The matmul with lm_head (sharded on vocab/model) is what matters. Since lm_head
+                // is on the vocab_mesh, this operation will execute on it.
                 break :blk zml.call(lm_head, .forward, .{out});
             } else {
                 break :blk self.model.embed_tokens.weight.withTags(.{ .voc, .d }).dot(out, .{.d});
@@ -94,12 +101,12 @@ pub const LlamaLM = struct {
         if (logits.shape().hasTag(.voc) == null)
             logits = logits.rename(.{ .d = .voc });
 
-        const next_tokens, const new_rng = zml.nn.sampleTokens(logits, opts, rng);
-        return .{ next_tokens, new_rng };
-    }
+        // For sampling, we need the full distribution, so we all-gather across the model axis.
+        logits = zml.ops.allGather(logits, .model, vocab_mesh);
 
-    pub fn increment(_: u8, token_index: Tensor) Tensor {
-        return token_index.addConstant(1).reuseBuffer(token_index);
+        const next_tokens, const new_rng = zml.nn.sampleTokens(logits, opts, rng);
+        zml.popMesh();
+        return .{ next_tokens, new_rng };
     }
 };
 
@@ -108,13 +115,12 @@ pub const Llama = struct {
     norm: RmsNorm,
     layers: []TransformerLayer,
 
+    // No mesh stored here!
+
     max_seq_len: u32 = 0,
     num_heads: i64 = 32,
     num_kv_heads: i64 = 32,
-    rope_opts: zml.nn.RopeOpts = .{
-        .layout = .interleaved,
-        .freq_base = 10_000,
-    },
+    rope_opts: zml.nn.RopeOpts = .{},
 
     const Shape = struct {
         s: u32,
@@ -154,32 +160,26 @@ pub const Llama = struct {
 
         self.norm.init(config, compute_mesh);
 
+        // Input embeddings are replicated across all devices on the vocab_mesh.
         self.embed_tokens.weight = self.embed_tokens.weight
             .withTags(.{ .vocab, .d })
             .withMesh(vocab_mesh)
-            .withSharding(.{ .vocab = .all_devices });
+            .withSharding(.{ .vocab = .replicated, .d = .replicated });
 
         for (self.layers) |*layer| {
             layer.init(config, compute_mesh);
         }
     }
 
-    /// Forward one token, using KV cache for previous tokens.
-    /// Returns result and updated KV cache.
     pub fn forward(self: Llama, tokens: Tensor, token_index: Tensor, kv_cache: KvCache) struct { Tensor, KvCache } {
-        log.info(">>>>>>>>>>>>>>> Llama.forward(tokens={}, token_index={}, kv_cache={} vocab_mesh={any})", .{ tokens, token_index, kv_cache, self.embed_tokens.weight._mesh });
-        const vocab_mesh = self.embed_tokens.weight._mesh.?;
-        zml.pushMesh(vocab_mesh);
-        const embeds = embed(self.embed_tokens, tokens);
-        zml.popMesh();
+        // This function now assumes the correct mesh is already set in the context by its caller.
+        log.info(">>>>>>>>>>>>>>> Llama.forward(tokens={}, token_index={}, kv_cache={})", .{ tokens, token_index, kv_cache });
 
-        zml.pushMesh(self.layers[0].self_attn.q_proj.weight._mesh.?);
+        var hidden = embed(self.embed_tokens, tokens);
 
-        var hidden = embeds.withSharding(.{ .s = .replicated, .d = .model });
-
-        if (embeds.dim(.s) > 1) {
-            hidden = hidden.withSharding(.{ .s = .data, .d = .model });
-        }
+        // Re-shard activations for the compute mesh.
+        // `embeds` is on vocab_mesh (replicated), re-sharding for compute_mesh (model-parallel)
+        hidden = hidden.withSharding(.{ .d = .model });
 
         var updated_kv_cache = kv_cache;
 
@@ -188,21 +188,13 @@ pub const Llama = struct {
         }
         const output = zml.call(self.norm, .forward, .{hidden});
 
-        zml.popMesh();
-
         return .{ output, updated_kv_cache.reuseBuffer(kv_cache) };
     }
 
     pub fn embed(embed_tokens_: zml.nn.TokenEmbedding, tokens_: Tensor) Tensor {
-        return zml.call(embed_tokens_, .forward, .{tokens_}).withPartialTags(.{.d});
-    }
-
-    fn initKvCache(self: Llama, embed_shape: zml.Shape) KvCache {
-        const dims = self.shape();
-        var kv_shape = embed_shape.insert(0, .{ .layer = dims.layer }).rename(.{ .s = .k }).splitAxes(.{ .d = .{ .h = dims.nkvh, .hd = dims.hd } });
-        const perm = kv_shape.contiguousPerm(.{ .k, .h, .hd });
-        kv_shape = kv_shape.transpose(perm.constSlice());
-        return KvCache.init(kv_shape);
+        // Embeddings are replicated to all devices before entering the transformer blocks
+        const embeddings = zml.call(embed_tokens_, .forward, .{tokens_});
+        return embeddings.withPartialTags(.{.d});
     }
 };
 
@@ -225,94 +217,66 @@ pub const TransformerLayer = struct {
         token_index: Tensor,
         kv_cache: KvCache,
     ) struct { Tensor, KvCache } {
-        // const x0 = x0_.withTags(.{ .s, .d }).withSharding(.{ .s = .data, .d = .model });
         const x0 = x0_;
         stdx.debug.assert(x0.rank() >= 2 and x0.shape().hasTags(.{ .s, .d }), "TransformerLayer expected input shape: {{..., .s, .d}}, received: {}", .{x0});
 
-        const mesh = self.input_layernorm.weight.mesh();
-
-        const x0_replicated = if (mesh.topology.hasTag(.data) != null) blk: {
-            log.warn("<<<<<<<<<<<<<<<<<<< x0_replicated", .{});
-            break :blk zml.ops.allGather(x0, .data, mesh);
-        } else blk: {
-            log.warn("<<<<<<<<<<<<<<<<<<< x0", .{});
-            break :blk x0;
-        };
-
-        // Self Attention
-        const x0_normalized = zml.call(self.input_layernorm, .forward, .{x0_replicated});
+        const x0_normalized = zml.call(self.input_layernorm, .forward, .{x0});
         const delta0, const updated_kv_cache = zml.call(self.self_attn, .forward, .{ x0_normalized, token_index, kv_cache });
-        log.warn("TransformerLayer.forward: delta0={}", .{delta0});
-        const x1_replicated = x0_replicated.add(delta0);
+        const x1 = x0.add(delta0);
 
-        const x1 = if (mesh.topology.hasTag(.data) != null)
-            zml.ops.reduceScatter(x1_replicated, .data, mesh)
-        else
-            x1_replicated;
-
-        // Fully Connected
         const x1_normalized = zml.call(self.post_attention_layernorm, .forward, .{x1});
-        const mlp_delta = zml.call(self.mlp, .forward, .{x1_normalized});
-        const x2 = x1.add(mlp_delta);
+        const delta1 = zml.call(self.mlp, .forward, .{x1_normalized});
+        const x2 = x1.add(delta1);
 
         return .{ x2.reuseBuffer(x0), updated_kv_cache };
     }
 };
 
-const RmsNorm = struct {
+pub const RmsNorm = struct {
     weight: Tensor,
     eps: f32 = 1e-5,
 
     pub fn init(self: *RmsNorm, config: LlamaLM.Config, mesh: zml.Mesh) void {
         self.eps = config.rms_norm_eps;
-        self.weight = self.weight.withTags(.{.d}).withMesh(mesh);
-
-        if (mesh.topology.hasTag(.model) != null) {
-            self.weight = self.weight.withSharding(.{ .d = .model });
-        }
+        self.weight = self.weight.withTags(.{.d}).withMesh(mesh).withSharding(.{ .d = .replicated });
     }
 
-    /// L2 normalization of input tensor along `.d` axis.
     pub fn forward(self: RmsNorm, input: Tensor) Tensor {
         const x = if (input.shape().isFullyTagged()) input else input.withPartialTags(.{.d});
         log.warn("RmsNorm.forward({})", .{x});
+        // RMSNorm can be computed locally on the sharded `d` dimension.
         const normalized = zml.nn.rmsNorm(x, .d, self.eps);
+        // `weight` is replicated, so this multiplication is also local.
         return normalized.mul(self.weight.convert(x.dtype()).withTags(.{.d}).broad(x.shape()));
     }
 };
 
-const Mlp = struct {
-    up_proj: zml.nn.Linear, // (dim -> hidden_dim)
-    gate_proj: zml.nn.Linear, // (dim -> hidden_dim)
-    down_proj: zml.nn.Linear, // (hidden_dim -> dim)
+pub const Mlp = struct {
+    up_proj: zml.nn.Linear,
+    gate_proj: zml.nn.Linear,
+    down_proj: zml.nn.Linear,
 
     pub fn init(self: *Mlp, mesh: zml.Mesh) void {
-        const has_model_axis = mesh.topology.hasTag(.model) != null;
-
-        self.gate_proj.weight = self.gate_proj.weight.withTags(.{ .hidden_dim, .model_dim }).withMesh(mesh);
-        self.up_proj.weight = self.up_proj.weight.withTags(.{ .hidden_dim, .model_dim }).withMesh(mesh);
-        self.down_proj.weight = self.down_proj.weight.withTags(.{ .model_dim, .hidden_dim }).withMesh(mesh);
-
-        if (has_model_axis) {
-            self.gate_proj.weight = self.gate_proj.weight.withSharding(.{ .hidden_dim = .model });
-            self.up_proj.weight = self.up_proj.weight.withSharding(.{ .hidden_dim = .model });
-            self.down_proj.weight = self.down_proj.weight.withSharding(.{ .hidden_dim = .model });
-        }
+        // Shard weights along the `model` axis
+        self.gate_proj.weight = self.gate_proj.weight.withTags(.{ .d, .hidden }).withMesh(mesh).withSharding(.{ .hidden = .model });
+        self.up_proj.weight = self.up_proj.weight.withTags(.{ .d, .hidden }).withMesh(mesh).withSharding(.{ .hidden = .model });
+        self.down_proj.weight = self.down_proj.weight.withTags(.{ .hidden, .d }).withMesh(mesh).withSharding(.{ .hidden = .model });
     }
 
     pub fn forward(self: Mlp, x: Tensor) Tensor {
-        const proj = zml.call(self.up_proj, .forward, .{x});
-        var output = zml.call(self.gate_proj, .forward, .{x});
-        output = output.silu().mul(proj);
+        // Get the current mesh from the context
+        const mesh = zml.currentMesh();
+        _ = mesh; // autofix
+
+        // Column-parallel part (local)
+        const gate_out = zml.call(self.gate_proj, .forward, .{x});
+        const up_out = zml.call(self.up_proj, .forward, .{x});
+        var output = gate_out.silu().mul(up_out);
+
+        // Row-parallel part (needs communication)
         output = zml.call(self.down_proj, .forward, .{output});
-
-        const mesh = self.down_proj.weight.mesh();
-        if (mesh.topology.hasTag(.model) != null) {
-            log.warn("<<<<<<<<<<<<>>>>>>>>>> Mlp.forward: zml.ops.allReduce", .{});
-            output = zml.ops.allReduce(output, .model, mesh);
-        }
-
         return output;
+        // return zml.ops.allReduce(output, .model, mesh);
     }
 };
 
@@ -320,7 +284,6 @@ pub const SelfAttn = struct {
     q_proj: zml.nn.Linear,
     k_proj: zml.nn.Linear,
     v_proj: zml.nn.Linear,
-
     o_proj: zml.nn.Linear,
     num_heads: i64 = undefined,
     num_kv_heads: i64 = 0,
@@ -335,105 +298,68 @@ pub const SelfAttn = struct {
             .scaling = config.rope_scaling,
         };
 
-        const has_model_axis = mesh.topology.hasTag(.model) != null;
+        // Column-parallel layers. Shard the output dimension.
+        self.q_proj.weight = self.q_proj.weight.withTags(.{ .d, .q_hidden }).withMesh(mesh).withSharding(.{ .q_hidden = .model });
+        self.k_proj.weight = self.k_proj.weight.withTags(.{ .d, .kv_hidden }).withMesh(mesh).withSharding(.{ .kv_hidden = .model });
+        self.v_proj.weight = self.v_proj.weight.withTags(.{ .d, .kv_hidden }).withMesh(mesh).withSharding(.{ .kv_hidden = .model });
 
-        self.q_proj.weight = self.q_proj.weight.withTags(.{ .d, .q_hidden }).withMesh(mesh);
-        self.k_proj.weight = self.k_proj.weight.withTags(.{ .d, .kv_hidden }).withMesh(mesh);
-        self.v_proj.weight = self.v_proj.weight.withTags(.{ .d, .kv_hidden }).withMesh(mesh);
-        self.o_proj.weight = self.o_proj.weight.withTags(.{ .o_hidden, .d }).withMesh(mesh);
-
-        if (has_model_axis) {
-            self.q_proj.weight = self.q_proj.weight.withSharding(.{ .q_hidden = .model });
-            self.k_proj.weight = self.k_proj.weight.withSharding(.{ .kv_hidden = .model });
-            self.v_proj.weight = self.v_proj.weight.withSharding(.{ .kv_hidden = .model });
-            self.o_proj.weight = self.o_proj.weight.withSharding(.{ .o_hidden = .model });
-        }
+        // Row-parallel layer. Shard the input dimension.
+        self.o_proj.weight = self.o_proj.weight.withTags(.{ .o_hidden, .d }).withMesh(mesh).withSharding(.{ .o_hidden = .model });
     }
 
-    /// Self Attention.
-    ///   - If token_index is set, x is assumed to be the representation of one new token,
-    /// and kv_cache will be read for the previous tokens.
-    ///   - If token_index is not set, x is assumed to be the representation of all tokens
-    /// since the beginning of the sequence, and kv_cache won't be read.
-    /// In both case, kv_cache will be updated with the computed key and value.
-    /// x: {.b, .s, .d } -> .{.b, .s, .d}
     pub fn forward(
         self: SelfAttn,
         x: Tensor,
         token_index: Tensor,
         kv_cache: KvCache,
     ) struct { Tensor, KvCache } {
+        const mesh = zml.currentMesh();
+        _ = mesh; // autofix
+
         const num_kv_heads = if (self.num_kv_heads > 0) self.num_kv_heads else self.num_heads;
 
         const q_proj_out = zml.call(self.q_proj, .forward, .{x});
         const k_proj_out = zml.call(self.k_proj, .forward, .{x});
         const v_proj_out = zml.call(self.v_proj, .forward, .{x});
 
-        log.warn("SelfAttn.forward: q_proj_out={}, k_proj_out={}, v_proj_out={}", .{ q_proj_out, k_proj_out, v_proj_out });
-        var q = q_proj_out.splitAxis(.d, .{ .h = self.num_heads, .hd = .auto });
-        var k = k_proj_out.splitAxis(.d, .{ .h = num_kv_heads, .hd = .auto });
-        var v = v_proj_out.splitAxis(.d, .{ .h = num_kv_heads, .hd = .auto });
-
-        // Generate the attention mask.
-        const seq_len = kv_cache.k.dim(.k);
-        var attn_mask = zml.nn.causalAttnMask(.{ .q = seq_len, .k = seq_len }, x.dtype(), null);
-        attn_mask = attn_mask.gatherSlices(.{ .q = x.dim(.s) }, token_index.reshape(.{ .coord = 1 }), .{});
+        var q = q_proj_out.splitAxis(.d, .{ .h = self.num_heads, .hd = .auto }).withSharding(.{ .h = .model });
+        var k = k_proj_out.splitAxis(.d, .{ .h = num_kv_heads, .hd = .auto }).withSharding(.{ .h = .model });
+        var v = v_proj_out.splitAxis(.d, .{ .h = num_kv_heads, .hd = .auto }).withSharding(.{ .h = .model });
 
         const pos_index = blk: {
             const temp = Tensor.arange(.{ .end = x.dim(.s) }, token_index.dtype()).withTags(.{.s}).broad(zml.Shape.init(.{ .s = x.dim(.s) }, token_index.dtype()));
             break :blk temp.add(token_index.broad(temp.shape()));
         };
-
         q = zml.nn.rope(q, pos_index, self.rope_opts);
         k = zml.nn.rope(k, pos_index, self.rope_opts);
+
         q = q.rename(.{ .s = .q });
         k = k.rename(.{ .s = .k });
         v = v.rename(.{ .s = .k });
 
-        const dtype = q.dtype();
         const new_kv_cache = kv_cache.update(k, v, token_index);
-        var k_cached = new_kv_cache.keys().convert(dtype);
-        var v_cached = new_kv_cache.values().convert(dtype);
 
-        if (self.num_kv_heads > 0 and self.num_heads > self.num_kv_heads) {
-            const num_groups = @divExact(self.num_heads, self.num_kv_heads);
-            k_cached = k_cached.repeat1d(.h, @intCast(num_groups));
-            v_cached = v_cached.repeat1d(.h, @intCast(num_groups));
-        }
+        const k_cached = new_kv_cache.keys();
+        const v_cached = new_kv_cache.values();
 
-        const attn_output = zml.nn.sdpa(q, k_cached, v_cached, .{ .attn_mask = attn_mask, .allow_cudnn = true });
+        const k_transposed = k_cached.transpose(.{ .h, .k, .hd });
+        const v_transposed = v_cached.transpose(.{ .h, .k, .hd });
 
-        const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
+        const attn_mask = if (x.dim(.s) > 1) blk: {
+            var mask = zml.nn.causalAttnMask(.{ .q = k_transposed.dim(.k), .k = k_transposed.dim(.k) }, x.dtype(), null);
+            // The mask is replicated and broadcasted to all devices.
+            break :blk mask.gatherSlices(.{ .q = x.dim(.s) }, token_index.reshape(.{ .coord = 1 }), .{});
+        } else null;
 
-        var output = zml.call(self.o_proj, .forward, .{attn}).rename(.{ .o_hidden = .d });
+        const attn_output = zml.nn.sdpa(q, k_transposed, v_transposed, .{ .attn_mask = attn_mask, .allow_cudnn = true });
 
-        const mesh = self.o_proj.weight.mesh();
-        if (mesh.topology.hasTag(.model) != null) {
-            log.warn("<<<<<<<<<<<<>>>>>>>>>> SelfAttn.forward: zml.ops.allReduce", .{});
+        const attn = attn_output.merge(.{ .o_hidden = .{ .h, .hd } }).rename(.{ .q = .s });
 
-            output = zml.ops.allReduce(output, .model, mesh);
-        }
+        const output = zml.call(self.o_proj, .forward, .{attn});
 
-        log.warn("SelfAttn.forward: attn_output={}, output={}", .{ attn_output, output });
-        if (x.dim(.s) > 1) {
-            // Prefill phase: Shard the sequence dimension.
-            output = output.withSharding(.{ .s = .data, .d = .model });
-        } else {
-            // Generation phase (s=1): Replicate the sequence dimension.
-            output = output.withSharding(.{ .s = .replicated, .d = .model });
-        }
+        // output = zml.ops.allReduce(output, .model, mesh);
 
         return .{ output, new_kv_cache };
-    }
-
-    fn initKvCache(key_shape: zml.Shape) KvCache {
-        // When we call initKvCache, we haven't renamed .s to .k yet.
-        var kv_shape = key_shape.insert(0, .{ .layer = 1 }).rename(.{ .s = .k });
-        const perm = kv_shape.contiguousPerm(.{ .h, .k, .hd });
-        kv_shape = kv_shape.transpose(perm.constSlice());
-        var res = KvCache.init(kv_shape);
-        res.layer_index = Tensor.scalar(0, .u32);
-        return res;
     }
 };
 
@@ -442,21 +368,9 @@ pub const KvCache = struct {
     v: Tensor,
     layer_index: Tensor,
 
-    pub fn init(kv_shape: zml.Shape, mesh: zml.Mesh) KvCache {
-        const sharded_shape = kv_shape.withPartitioning(.{ .k = .data, .h = .model });
-
-        return .{
-            .k = Tensor.constant(sharded_shape, kv_shape.dtype().one()).withMesh(mesh),
-            .v = Tensor.constant(sharded_shape, kv_shape.dtype().one()).withMesh(mesh),
-            .layer_index = Tensor.scalar(-1, .u32),
-        };
-    }
-
-    pub fn initShape(
-        kv_shape: zml.Shape,
-    ) ShapeOf(KvCache) {
-        const sharded_shape = kv_shape.withPartitioning(.{ .k = .data, .h = .model });
-
+    pub fn initShape(kv_shape: zml.Shape) ShapeOf(KvCache) {
+        // Shard along the head dimension, replicate sequence dimension
+        const sharded_shape = kv_shape.withPartitioning(.{ .h = .model });
         return .{
             .k = sharded_shape,
             .v = sharded_shape,
@@ -465,7 +379,7 @@ pub const KvCache = struct {
     }
 
     pub fn initBuffer(kv_shape: zml.Shape, mesh: zml.Mesh, platform: zml.Platform) !zml.Bufferized(KvCache) {
-        const sharding = zml.Sharding.init(mesh, kv_shape.withPartitioning(.{ .k = .data, .h = .model }));
+        const sharding = zml.Sharding.init(mesh, kv_shape.withPartitioning(.{ .h = .model }));
 
         return .{
             .k = try zml.Buffer.uninitialized(platform, sharding, .{}),
@@ -474,6 +388,7 @@ pub const KvCache = struct {
         };
     }
 
+    //... rest of KvCache is unchanged
     pub fn keys(self: KvCache) Tensor {
         return self.k.dynamicSlice(.{ .layer = Tensor.DynSlice{ .start = self.layer_index, .len = 1 } }).squeeze(.layer);
     }
@@ -483,30 +398,32 @@ pub const KvCache = struct {
     }
 
     pub fn update(self: KvCache, new_k: Tensor, new_v: Tensor, token_index: ?Tensor) KvCache {
+        const k_shape = self.k.shape().drop(.layer);
+        _ = k_shape; // autofix
         var layer = self.layer_index;
         layer = if (token_index) |idx| layer.broad(idx.shape()) else layer;
 
         return if (token_index) |idx| .{
             .k = self.k.scatterSlices(
                 .{ .layer = layer, .k = idx },
-                new_k.convert(self.k.dtype()),
+                new_k.convert(self.k.dtype()), // .transpose(k_shape),
                 .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override },
             ).reuseBuffer(self.k),
             .v = self.v.scatterSlices(
                 .{ .layer = layer, .k = idx },
-                new_v.convert(self.v.dtype()),
+                new_v.convert(self.v.dtype()), // .transpose(k_shape),
                 .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override },
             ).reuseBuffer(self.v),
             .layer_index = self.layer_index,
         } else .{
             .k = self.k.scatterSlices(
                 .{ .layer = layer },
-                new_k.convert(self.k.dtype()),
+                new_k.convert(self.k.dtype()), // .transpose(k_shape),
                 .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override },
             ).reuseBuffer(self.k),
             .v = self.v.scatterSlices(
                 .{ .layer = layer },
-                new_v.convert(self.v.dtype()),
+                new_v.convert(self.v.dtype()), // .transpose(k_shape),
                 .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override },
             ).reuseBuffer(self.v),
             .layer_index = self.layer_index,
