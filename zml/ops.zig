@@ -693,7 +693,7 @@ pub fn allReduce(input: Tensor, axis: anytype, mesh: Mesh) Tensor {
     // replica_groups defines which devices participate. For an All-Reduce across
     // the 'model' axis, it's a 2D array of shape [num_model_devices, 1].
     const replica_groups_shape: []const i64 = &.{ @intCast(mesh.axis(axis)), 1 };
-    var replica_groups_data: [mesh.numPartitions()]i64 = undefined;
+    var replica_groups_data: [Shape.MAX_RANK]i64 = undefined;
     for (0..mesh.numPartitions()) |i| {
         replica_groups_data[i] = @intCast(i);
     }
