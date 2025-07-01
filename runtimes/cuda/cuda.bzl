@@ -18,45 +18,56 @@ CUDNN_REDIST_JSON_SHA256 = "a1599fa1f8dcb81235157be5de5ab7d3936e75dfc4e1e442d079
 
 CUDA_PACKAGES = {
     "cuda_cudart": "\n".join([
+        # Driver API only
         packages.cc_library(
-            name = "cudart",
+            name = "cuda",
             hdrs = ["include/cuda.h"],
             includes = ["include"],
-            deps = [":cudart_so", ":cuda_so"],
+            deps = [
+                # ":cudart_so",
+                ":so_stubs_files",
+            ],
         ),
         packages.cc_import(
-            name = "cudart_so",
-            shared_library = "lib/libcudart.so.12",
-        ),
-        packages.cc_import(
-            name = "cuda_so",
+            name = "so_stubs_files",
             shared_library = "lib/stubs/libcuda.so",
         ),
+        #TODO: Remove me as soon we use the Driver API in tracer.zig
+        packages.filegroup(
+            name = "so_files",
+            srcs = ["lib/libcudart.so.12"],
+        ),
     ]),
-    "cuda_cupti": packages.cc_import(
-        name = "cupti",
-        shared_library = "lib/libcupti.so.12",
+    "cuda_cupti": packages.filegroup(
+        name = "so_files",
+        srcs = ["lib/libcupti.so.12"],
     ),
-    "cuda_nvtx": packages.cc_import_glob_hdrs(
-        name = "nvtx",
-        hdrs_glob = ["include/nvtx3/**/*.h"],
-        shared_library = "lib/libnvToolsExt.so.1",
+    "cuda_nvtx": "\n".join([
+        # packages.cc_library(
+        #     name = "nvtx",
+        #     hdrs = glob(["include/nvtx3/**/*.h"]),
+        #     visibility = ["//visibility:public"],
+        # ),
+        packages.filegroup(
+            name = "so_files",
+            srcs = ["lib/libnvToolsExt.so.1"],
+        ),
+    ]),
+    "libcufft": packages.filegroup(
+        name = "so_files",
+        srcs = ["lib/libcufft.so.11"],
     ),
-    "libcufft": packages.cc_import(
-        name = "cufft",
-        shared_library = "lib/libcufft.so.11",
+    "libcusolver": packages.filegroup(
+        name = "so_files",
+        srcs = ["lib/libcusolver.so.11"],
     ),
-    "libcusolver": packages.cc_import(
-        name = "cusolver",
-        shared_library = "lib/libcusolver.so.11",
+    "libcusparse": packages.filegroup(
+        name = "so_files",
+        srcs = ["lib/libcusparse.so.12"],
     ),
-    "libcusparse": packages.cc_import(
-        name = "cusparse",
-        shared_library = "lib/libcusparse.so.12",
-    ),
-    "libnvjitlink": packages.cc_import(
-        name = "nvjitlink",
-        shared_library = "lib/libnvJitLink.so.12",
+    "libnvjitlink": packages.filegroup(
+        name = "so_files",
+        srcs = ["lib/libnvJitLink.so.12"],
     ),
     "cuda_nvcc": "\n".join([
         packages.filegroup(
@@ -71,9 +82,9 @@ CUDA_PACKAGES = {
             name = "libdevice",
             srcs = ["nvvm/libdevice/libdevice.10.bc"],
         ),
-        packages.cc_import(
-            name = "nvvm",
-            shared_library = "nvvm/lib64/libnvvm.so.4",
+        packages.filegroup(
+            name = "so_files",
+            srcs = ["nvvm/lib64/libnvvm.so.4"],
         ),
         packages.cc_import(
             name = "nvptxcompiler",
@@ -81,72 +92,39 @@ CUDA_PACKAGES = {
         ),
     ]),
     "cuda_nvrtc": "\n".join([
-        packages.cc_import(
-            name = "nvrtc",
-            shared_library = "lib/libnvrtc.so.12",
-            deps = [":nvrtc_builtins"],
-        ),
-        packages.cc_import(
-            name = "nvrtc_builtins",
-            shared_library = "lib/libnvrtc-builtins.so.12.8",
+        packages.filegroup(
+            name = "so_files",
+            srcs = [
+                "lib/libnvrtc.so.12",
+                "lib/libnvrtc-builtins.so.12.8",
+            ],
         ),
     ]),
     "libcublas": "\n".join([
-        packages.cc_import(
-            name = "cublasLt",
-            shared_library = "lib/libcublasLt.so.12",
-        ),
-        packages.cc_import(
-            name = "cublas",
-            shared_library = "lib/libcublas.so.12",
-            deps = [":cublasLt"],
+        packages.filegroup(
+            name = "so_files",
+            srcs = [
+                "lib/libcublasLt.so.12",
+                "lib/libcublas.so.12",
+            ],
         ),
     ]),
 }
 
 CUDNN_PACKAGES = {
     "cudnn": "\n".join([
-        packages.cc_import(
-            name = "cudnn",
-            shared_library = "lib/libcudnn.so.9",
-            deps = [
-                ":cudnn_adv",
-                ":cudnn_ops",
-                ":cudnn_cnn",
-                ":cudnn_graph",
-                ":cudnn_engines_precompiled",
-                ":cudnn_engines_runtime_compiled",
-                ":cudnn_heuristic",
+        packages.filegroup(
+            name = "so_files",
+            srcs = [
+                "lib/libcudnn.so.9",
+                "lib/libcudnn_adv.so.9",
+                "lib/libcudnn_ops.so.9",
+                "lib/libcudnn_cnn.so.9",
+                "lib/libcudnn_graph.so.9",
+                "lib/libcudnn_engines_precompiled.so.9",
+                "lib/libcudnn_engines_runtime_compiled.so.9",
+                "lib/libcudnn_heuristic.so.9",
             ],
-        ),
-        packages.cc_import(
-            name = "cudnn_adv",
-            shared_library = "lib/libcudnn_adv.so.9",
-        ),
-        packages.cc_import(
-            name = "cudnn_ops",
-            shared_library = "lib/libcudnn_ops.so.9",
-        ),
-        packages.cc_import(
-            name = "cudnn_cnn",
-            shared_library = "lib/libcudnn_cnn.so.9",
-            deps = [":cudnn_ops"],
-        ),
-        packages.cc_import(
-            name = "cudnn_graph",
-            shared_library = "lib/libcudnn_graph.so.9",
-        ),
-        packages.cc_import(
-            name = "cudnn_engines_precompiled",
-            shared_library = "lib/libcudnn_engines_precompiled.so.9",
-        ),
-        packages.cc_import(
-            name = "cudnn_engines_runtime_compiled",
-            shared_library = "lib/libcudnn_engines_runtime_compiled.so.9",
-        ),
-        packages.cc_import(
-            name = "cudnn_heuristic",
-            shared_library = "lib/libcudnn_heuristic.so.9",
         ),
     ]),
 }
@@ -205,9 +183,9 @@ def _cuda_impl(mctx):
         urls = ["https://files.pythonhosted.org/packages/11/0c/8c78b7603f4e685624a3ea944940f1e75f36d71bd6504330511f4a0e1557/nvidia_nccl_cu12-2.25.1-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl"],
         type = "zip",
         sha256 = "362aed5963fb9ea2ed2f264409baae30143498fd0e5c503aeaa1badd88cdc54a",
-        build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + packages.cc_import(
-            name = "nccl",
-            shared_library = "nvidia/nccl/lib/libnccl.so.2",
+        build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + packages.filegroup(
+            name = "so_files",
+            srcs = ["nvidia/nccl/lib/libnccl.so.2"],
         ),
     )
 

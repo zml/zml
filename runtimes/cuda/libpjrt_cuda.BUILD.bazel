@@ -1,9 +1,10 @@
 load("@aspect_bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@zml//bazel:cc_import.bzl", "cc_import")
+load("@zml//bazel:patchelf.bzl", "patchelf")
 
 cc_shared_library(
     name = "zmlxcuda_so",
-    shared_lib_name = "libzmlxcuda.so.0",
+    shared_lib_name = "lib/libzmlxcuda.so.0",
     deps = ["@zml//runtimes/cuda:zmlxcuda_lib"],
 )
 
@@ -12,40 +13,58 @@ cc_import(
     shared_library = ":zmlxcuda_so",
 )
 
-copy_to_directory(
-    name = "sandbox",
-    srcs = [
-        "@cuda_nvcc//:libdevice",
-        "@cuda_nvcc//:ptxas",
-        "@cuda_nvcc//:nvlink",
-    ],
-    include_external_repositories = ["**"],
-)
-
-cc_import(
-    name = "libpjrt_cuda",
-    data = [":sandbox"],
+patchelf(
+    name = "libpjrt_cuda.patchelf",
     shared_library = "libpjrt_cuda.so",
-    add_needed = ["libzmlxcuda.so.0"],
+    add_needed = [
+        "libzmlxcuda.so.0",
+    ],
     rename_dynamic_symbols = {
         "dlopen": "zmlxcuda_dlopen",
     },
-    visibility = ["@zml//runtimes/cuda:__subpackages__"],
-    deps = [
-        ":zmlxcuda",
-        "@cuda_cudart//:cudart",
-        "@cuda_cupti//:cupti",
-        "@cuda_nvtx//:nvtx",
-        "@cuda_nvcc//:nvptxcompiler",
-        "@cuda_nvcc//:nvvm",
-        "@cuda_nvrtc//:nvrtc",
-        "@cudnn//:cudnn",
-        "@libcublas//:cublas",
-        "@libcufft//:cufft",
-        "@libcusolver//:cusolver",
-        "@libcusparse//:cusparse",
-        "@libnvjitlink//:nvjitlink",
-        "@nccl",
+    set_rpath = "$ORIGIN",
+)
+
+copy_to_directory(
+    name = "sandbox",
+    srcs = [
+        ":zmlxcuda_so",
+        ":libpjrt_cuda.patchelf",
+        "@cuda_nvcc//:libdevice",
+        "@cuda_nvcc//:ptxas",
+        "@cuda_nvcc//:nvlink",
+        "@cuda_cupti//:so_files",
+        "@cuda_nvtx//:so_files",
+        "@cuda_nvcc//:so_files",
+        "@cuda_nvrtc//:so_files",
+        "@cuda_cudart//:so_files",
+        "@cudnn//:so_files",
+        "@libcublas//:so_files",
+        "@libcufft//:so_files",
+        "@libcusolver//:so_files",
+        "@libcusparse//:so_files",
+        "@libnvjitlink//:so_files",
+        "@nccl//:so_files",
         "@zlib1g",
     ],
+    replace_prefixes = {
+        "nvidia/nccl/lib": "lib",
+        "nvvm/lib64": "lib",
+        "libpjrt_cuda.patchelf": "lib",
+    },
+    add_directory_to_runfiles = False,
+    include_external_repositories = ["**"],
+    verbose = True,
+)
+
+cc_library(
+    name = "libpjrt_cuda",
+    data = [":sandbox"],
+    deps = [
+        "@cuda_cudart//:cuda",
+    ],
+    linkopts = [
+        "-Wl,--unresolved-symbols=ignore-all",
+    ],
+    visibility = ["@zml//runtimes/cuda:__subpackages__"],
 )
