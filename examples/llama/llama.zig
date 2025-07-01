@@ -236,9 +236,23 @@ pub const Mlp = struct {
     down_proj: zml.nn.Linear,
 
     pub fn init(self: *Mlp, mesh: zml.Mesh) void {
-        self.gate_proj.weight = self.gate_proj.weight.withTags(.{ .d, .hidden }).withMesh(mesh).withSharding(.{ .hidden = .model });
-        self.up_proj.weight = self.up_proj.weight.withTags(.{ .d, .hidden }).withMesh(mesh).withSharding(.{ .hidden = .model });
-        self.down_proj.weight = self.down_proj.weight.withTags(.{ .hidden, .d }).withMesh(mesh).withSharding(.{ .hidden = .model });
+        self.gate_proj.weight = self.gate_proj.weight
+            .withTags(.{ .hidden, .d }) // Shape is (hidden_dim, dim)
+            .withMesh(mesh)
+            .withSharding(.{ .hidden = .model }); // Shard along hidden_dim
+
+        self.up_proj.weight = self.up_proj.weight
+            .withTags(.{ .hidden, .d }) // Shape is (hidden_dim, dim)
+            .withMesh(mesh)
+            .withSharding(.{ .hidden = .model }); // Shard along hidden_dim
+
+        // Row-parallel layer: Shard the *input* dimension.
+        // The matmul is `x @ W.T`, so the input dimension of the operation
+        // corresponds to the first dimension of the weight matrix W.
+        self.down_proj.weight = self.down_proj.weight
+            .withTags(.{ .d, .hidden }) // Shape is (dim, hidden_dim)
+            .withMesh(mesh)
+            .withSharding(.{ .hidden = .model }); // Shard along hidden_dim
     }
 
     pub fn forward(self: Mlp, x: Tensor) Tensor {
