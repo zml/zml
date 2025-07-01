@@ -66,7 +66,6 @@ pub const LlamaLM = struct {
         stdx.debug.assert(tokens_.dtype() == .u32 and tokens_.rank() >= 1 and token_index.dtype() == .u32 and token_index.rank() <= 1, "Can't run Llama ! Expected >=1d tokens and 0d token_index, got: {} and {}", .{ tokens_, token_index });
         const tokens = tokens_.withPartialTags(.{.s});
 
-        // The model forward pass uses the compute_mesh
         zml.pushMesh(self.model.layers[0].input_layernorm.weight.mesh());
         const out, const updated_kv_cache = zml.call(self.model, .forward, .{ tokens, token_index, kv_cache });
         zml.popMesh();
@@ -99,7 +98,6 @@ pub const LlamaLM = struct {
         if (logits.shape().hasTag(.voc) == null)
             logits = logits.rename(.{ .d = .voc });
 
-        // For sampling, we need the full distribution, so we all-gather across the model axis.
         logits = zml.ops.allGather(logits, .model, vocab_mesh);
 
         const next_tokens, const new_rng = zml.nn.sampleTokens(logits, opts, rng);
@@ -130,7 +128,6 @@ pub const Llama = struct {
         const d_model = self.embed_tokens.weight.dim(1);
         const num_kv_heads = if (self.num_kv_heads > 0) self.num_kv_heads else self.num_heads;
         const num_q_heads = self.num_heads;
-
         const head_dim = @divExact(d_model, num_q_heads);
 
         return .{
@@ -155,8 +152,6 @@ pub const Llama = struct {
 
         self.norm.init(config, compute_mesh);
 
-        // Input embeddings are replicated across all devices. This is crucial for the first
-        // layer to receive a replicated activation.
         self.embed_tokens.weight = self.embed_tokens.weight
             .withTags(.{ .vocab, .d })
             .withMesh(vocab_mesh)
@@ -169,7 +164,6 @@ pub const Llama = struct {
 
     pub fn forward(self: Llama, tokens: Tensor, token_index: Tensor, kv_cache: KvCache) struct { Tensor, KvCache } {
         var hidden = embed(self.embed_tokens, tokens);
-
         var updated_kv_cache = kv_cache;
 
         for (self.layers, 0..) |layer, i| {
@@ -248,9 +242,13 @@ pub const Mlp = struct {
     }
 
     pub fn forward(self: Mlp, x: Tensor) Tensor {
+        // x is replicated.
         const gate_out = zml.call(self.gate_proj, .forward, .{x});
         const up_out = zml.call(self.up_proj, .forward, .{x});
-        const output = gate_out.silu().mul(up_out);
+        // gate_out and up_out are sharded.
+        const output = gate_out.silu().mul(up_out); // output is sharded.
+        // down_proj takes a sharded input and produces a partial result.
+        // The implicit all_reduce happens because of the residual connection in the parent layer.
         return zml.call(self.down_proj, .forward, .{output});
     }
 };
@@ -323,10 +321,10 @@ pub const SelfAttn = struct {
 
         const attn = attn_output.merge(.{ .o_hidden = .{ .h, .hd } }).rename(.{ .q = .s });
 
-        // Row-parallel matmul. Output is a partial sum.
+        // o_proj takes a sharded input and produces a partial result.
+        // The implicit all_reduce happens because of the residual connection in the parent layer.
         const output = zml.call(self.o_proj, .forward, .{attn});
 
-        // The All-Reduce is now implicit, handled by the compiler.
         return .{ output, new_kv_cache };
     }
 };
@@ -337,7 +335,6 @@ pub const KvCache = struct {
     layer_index: Tensor,
 
     pub fn initShape(kv_shape: zml.Shape) ShapeOf(KvCache) {
-        // Shard along the head dimension, replicate sequence dimension
         const sharded_shape = kv_shape.withPartitioning(.{ .h = .model });
         return .{
             .k = sharded_shape,
@@ -356,7 +353,6 @@ pub const KvCache = struct {
         };
     }
 
-    //... rest of KvCache is unchanged
     pub fn keys(self: KvCache) Tensor {
         return self.k.dynamicSlice(.{ .layer = Tensor.DynSlice{ .start = self.layer_index, .len = 1 } }).squeeze(.layer);
     }
@@ -374,24 +370,24 @@ pub const KvCache = struct {
         return if (token_index) |idx| .{
             .k = self.k.scatterSlices(
                 .{ .layer = layer, .k = idx },
-                new_k.convert(self.k.dtype()), // .transpose(k_shape),
+                new_k.convert(self.k.dtype()),
                 .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override },
             ).reuseBuffer(self.k),
             .v = self.v.scatterSlices(
                 .{ .layer = layer, .k = idx },
-                new_v.convert(self.v.dtype()), // .transpose(k_shape),
+                new_v.convert(self.v.dtype()),
                 .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override },
             ).reuseBuffer(self.v),
             .layer_index = self.layer_index,
         } else .{
             .k = self.k.scatterSlices(
                 .{ .layer = layer },
-                new_k.convert(self.k.dtype()), // .transpose(k_shape),
+                new_k.convert(self.k.dtype()),
                 .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override },
             ).reuseBuffer(self.k),
             .v = self.v.scatterSlices(
                 .{ .layer = layer },
-                new_v.convert(self.v.dtype()), // .transpose(k_shape),
+                new_v.convert(self.v.dtype()),
                 .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override },
             ).reuseBuffer(self.v),
             .layer_index = self.layer_index,
