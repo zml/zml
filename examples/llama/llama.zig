@@ -229,21 +229,32 @@ pub const TransformerLayer = struct {
         const x0 = x0_;
         stdx.debug.assert(x0.rank() >= 2 and x0.shape().hasTags(.{ .s, .d }), "TransformerLayer expected input shape: {{..., .s, .d}}, received: {}", .{x0});
 
+        const mesh = self.input_layernorm.weight.mesh();
+
+        const x0_replicated = if (mesh.topology.hasTag(.data) != null)
+            zml.ops.allGather(x0, .data, mesh)
+        else
+            x0;
+
         // Self Attention
-        const x0_normalized = self.input_layernorm.forward(x0);
+        const x0_normalized = self.input_layernorm.forward(x0_replicated);
         const delta0, const updated_kv_cache = self.self_attn.forward(
             x0_normalized,
             token_index,
             kv_cache,
         );
         log.warn("TransformerLayer.forward: delta0={}", .{delta0});
-        const x1 = x0.add(delta0);
+        const x1_replicated = x0_replicated.add(delta0);
+
+        const x1 = if (mesh.topology.hasTag(.data) != null)
+            zml.ops.reduceScatter(x1_replicated, .data, mesh)
+        else
+            x1_replicated;
 
         // Fully Connected
         const x1_normalized = self.post_attention_layernorm.forward(x1);
-        // FIX: Add the MLP output to the Attention output (x1).
-        const delta1 = self.mlp.forward(x1_normalized);
-        const x2 = x1.add(delta1);
+        const mlp_delta = self.mlp.forward(x1_normalized);
+        const x2 = x1.add(mlp_delta);
 
         return .{ x2.reuseBuffer(x0), updated_kv_cache };
     }

@@ -616,6 +616,70 @@ pub fn sort(
     return res;
 }
 
+fn collectiveOp(
+    name: [:0]const u8,
+    input: Tensor,
+    axis: i64,
+    mesh: Mesh,
+) Tensor {
+    _ = mesh; // autofix
+    const ctx = CompilationContext.current();
+    const mlir_ctx = ctx.mlirCtx();
+
+    const replica_groups = mlir.Attribute.denseElements(
+        mlir_ctx,
+        &.{ @intCast(axis), 1 },
+        .i64,
+        &[_]i64{0},
+    );
+
+    const op = mlir.Operation.make(ctx.mlirCtx(), name, .{
+        .operands = &.{input.value()},
+        .result_type_inference = true,
+        .attributes = &.{
+            .{ "replica_groups", replica_groups },
+            .{ "channel_id", .int(ctx.mlirCtx(), .i64, 0) },
+        },
+        .location = ctx.location(@src(), "{s}({_}, {d})", .{ name, input, axis }),
+    });
+
+    return fromMlirOperationWithTags(op, input);
+}
+
+pub fn allGather(input: Tensor, axis: anytype, mesh: Mesh) Tensor {
+    var res_shape = input.shape();
+
+    const axis_size = mesh.topology.dim(axis);
+    const mesh_axis_idx = mesh.topology.hasTag(axis).?;
+    for (0..res_shape.rank()) |i| {
+        const part_spec = res_shape.partition(i);
+        if (part_spec == .axis and part_spec.toTag() == mesh.topology.tag(mesh_axis_idx)) {
+            const current_dim = res_shape.dim(i);
+            res_shape = res_shape.setDim(i, current_dim * axis_size);
+        }
+    }
+
+    var res = collectiveOp("stablehlo.all_gather", input, mesh.topology.axis(axis), mesh);
+    res._shape._partitioning = input.shape()._partitioning;
+    return res;
+}
+
+pub fn reduceScatter(input: Tensor, axis: anytype, mesh: Mesh) Tensor {
+    _ = mesh; // autofix
+    // For now, only sum is supported.
+    const body_block, _ = CompilationContext.current().makeBlock(.hermetic, BlockSignNoCtx(Tensor.add), &Tensor.add, {}, .{ Tensor.scalar(0, input.dtype()), Tensor.scalar(0, input.dtype()) });
+    const op = mlir.Operation.make(input.getContext().mlirCtx(), "stablehlo.reduce_scatter", .{
+        .operands = &.{input.value()},
+        .result_type_inference = true,
+        .blocks = &.{body_block},
+        .attributes = &.{
+            .{ "scatter_dimension", .int(input.getContext().mlirCtx(), .i64, input.shape().axis(axis)) },
+        },
+        .location = input.getContext().location(@src(), "reduceScatter({_}, {d})", .{ input, input.shape().axis(axis) }),
+    });
+    return fromMlirOperationWithTags(op, input);
+}
+
 pub const BlockSignature = struct {
     Fn: type,
     BlkCtx: type,
