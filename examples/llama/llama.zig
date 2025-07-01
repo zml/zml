@@ -312,6 +312,7 @@ const Mlp = struct {
 
         const mesh = self.down_proj.weight.mesh();
         if (mesh.topology.hasTag(.model) != null) {
+            log.warn("<<<<<<<<<<<<>>>>>>>>>> Mlp.forward: zml.ops.allReduce", .{});
             output = zml.ops.allReduce(output, .model, mesh);
         }
 
@@ -411,6 +412,8 @@ pub const SelfAttn = struct {
 
         const mesh = self.o_proj.weight.mesh();
         if (mesh.topology.hasTag(.model) != null) {
+            log.warn("<<<<<<<<<<<<>>>>>>>>>> SelfAttn.forward: zml.ops.allReduce", .{});
+
             output = zml.ops.allReduce(output, .model, mesh);
         }
 
