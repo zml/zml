@@ -94,6 +94,7 @@ pub const CompilationContext = struct {
     _block_args: TensorToBlockArg = .{},
     _unique_id: u64 = 10000,
     _tracer: Tracer,
+    _next_channel_id: u64 = 1,
 
     _previous: ?*CompilationContext = null,
     threadlocal var _current: ?*CompilationContext = null;
@@ -261,8 +262,8 @@ pub const CompilationContext = struct {
             break :blk loaded_executable;
         };
 
-        log.debug("******** ZML generated MLIR ********", .{});
-        log.debug("{}", .{module.op().mlirFormatter(.{})});
+        log.warn("******** ZML generated MLIR ********", .{});
+        log.warn("{}", .{module.op().mlirFormatter(.{})});
 
         if (timer) |*t| {
             const time_ms = @divFloor(t.lap(), std.time.ns_per_ms);
@@ -280,6 +281,12 @@ pub const CompilationContext = struct {
                 .n_devices = @intCast(mesh.numDevices()),
             },
         );
+    }
+
+    pub fn getNextChannelId(self: *CompilationContext) u64 {
+        const id = self._next_channel_id;
+        self._next_channel_id += 1;
+        return id;
     }
 
     fn currentBlock(self: *const CompilationContext) ?TaggedBlock {
