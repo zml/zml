@@ -323,15 +323,15 @@ pub const SelfAttn = struct {
         const k_cached = new_kv_cache.keys();
         const v_cached = new_kv_cache.values();
 
-        const k_transposed = k_cached.transpose(.{ .h, .hd, .k });
-        const v_transposed = v_cached.transpose(.{ .h, .k, .hd });
+        // const k_transposed = k_cached.transpose(.{ .h, .hd, .k });
+        // const v_transposed = v_cached.transpose(.{ .h, .k, .hd });
 
         const attn_mask = if (x.dim(.s) > 1) blk: {
-            var mask = zml.nn.causalAttnMask(.{ .q = k_transposed.dim(.k), .k = k_transposed.dim(.k) }, x.dtype(), null);
+            var mask = zml.nn.causalAttnMask(.{ .q = k_cached.dim(.k), .k = k_cached.dim(.k) }, x.dtype(), null);
             break :blk mask.gatherSlices(.{ .q = x.dim(.s) }, token_index.reshape(.{ .coord = 1 }), .{});
         } else null;
 
-        const attn_output = zml.nn.sdpa(q, k_transposed, v_transposed, .{ .attn_mask = attn_mask, .allow_cudnn = true });
+        const attn_output = zml.nn.sdpa(q, k_cached, v_cached, .{ .attn_mask = attn_mask, .allow_cudnn = true });
 
         const attn = attn_output.merge(.{ .o_hidden = .{ .h, .hd } }).rename(.{ .q = .s });
 
@@ -377,31 +377,30 @@ pub const KvCache = struct {
 
     pub fn update(self: KvCache, new_k: Tensor, new_v: Tensor, token_index: ?Tensor) KvCache {
         const k_shape = self.k.shape().drop(.layer);
-        _ = k_shape; // autofix
         var layer = self.layer_index;
         layer = if (token_index) |idx| layer.broad(idx.shape()) else layer;
 
         return if (token_index) |idx| .{
             .k = self.k.scatterSlices(
                 .{ .layer = layer, .k = idx },
-                new_k.convert(self.k.dtype()),
+                new_k.convert(self.k.dtype()).transpose(k_shape),
                 .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override },
             ).reuseBuffer(self.k),
             .v = self.v.scatterSlices(
                 .{ .layer = layer, .k = idx },
-                new_v.convert(self.v.dtype()),
+                new_v.convert(self.v.dtype()).transpose(k_shape),
                 .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override },
             ).reuseBuffer(self.v),
             .layer_index = self.layer_index,
         } else .{
             .k = self.k.scatterSlices(
                 .{ .layer = layer },
-                new_k.convert(self.k.dtype()),
+                new_k.convert(self.k.dtype()).transpose(k_shape),
                 .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override },
             ).reuseBuffer(self.k),
             .v = self.v.scatterSlices(
                 .{ .layer = layer },
-                new_v.convert(self.v.dtype()),
+                new_v.convert(self.v.dtype()).transpose(k_shape),
                 .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override },
             ).reuseBuffer(self.v),
             .layer_index = self.layer_index,
