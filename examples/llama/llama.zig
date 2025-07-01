@@ -293,14 +293,14 @@ const Mlp = struct {
     pub fn init(self: *Mlp, mesh: zml.Mesh) void {
         const has_model_axis = mesh.topology.hasTag(.model) != null;
 
-        self.gate_proj.weight = self.gate_proj.weight.withTags(.{ .d, .hidden }).withMesh(mesh);
-        self.up_proj.weight = self.up_proj.weight.withTags(.{ .d, .hidden }).withMesh(mesh);
-        self.down_proj.weight = self.down_proj.weight.withTags(.{ .hidden, .d }).withMesh(mesh);
+        self.gate_proj.weight = self.gate_proj.weight.withTags(.{ .hidden_dim, .model_dim }).withMesh(mesh);
+        self.up_proj.weight = self.up_proj.weight.withTags(.{ .hidden_dim, .model_dim }).withMesh(mesh);
+        self.down_proj.weight = self.down_proj.weight.withTags(.{ .model_dim, .hidden_dim }).withMesh(mesh);
 
         if (has_model_axis) {
-            self.gate_proj.weight = self.gate_proj.weight.withSharding(.{ .hidden = .model });
-            self.up_proj.weight = self.up_proj.weight.withSharding(.{ .hidden = .model });
-            self.down_proj.weight = self.down_proj.weight.withSharding(.{ .d = .model });
+            self.gate_proj.weight = self.gate_proj.weight.withSharding(.{ .hidden_dim = .model });
+            self.up_proj.weight = self.up_proj.weight.withSharding(.{ .hidden_dim = .model });
+            self.down_proj.weight = self.down_proj.weight.withSharding(.{ .hidden_dim = .model });
         }
     }
 
