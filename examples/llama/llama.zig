@@ -231,10 +231,13 @@ pub const TransformerLayer = struct {
 
         const mesh = self.input_layernorm.weight.mesh();
 
-        const x0_replicated = if (mesh.topology.hasTag(.data) != null)
-            zml.ops.allGather(x0, .data, mesh)
-        else
-            x0;
+        const x0_replicated = if (mesh.topology.hasTag(.data) != null) blk: {
+            log.warn("<<<<<<<<<<<<<<<<<<< x0_replicated", .{});
+            break :blk zml.ops.allGather(x0, .data, mesh);
+        } else blk: {
+            log.warn("<<<<<<<<<<<<<<<<<<< x0", .{});
+            break :blk x0;
+        };
 
         // Self Attention
         const x0_normalized = self.input_layernorm.forward(x0_replicated);
