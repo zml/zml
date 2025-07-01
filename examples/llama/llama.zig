@@ -323,7 +323,7 @@ pub const SelfAttn = struct {
         const k_cached = new_kv_cache.keys();
         const v_cached = new_kv_cache.values();
 
-        const k_transposed = k_cached.transpose(.{ .h, .k, .hd });
+        const k_transposed = k_cached.transpose(.{ .h, .hd, .k });
         const v_transposed = v_cached.transpose(.{ .h, .k, .hd });
 
         const attn_mask = if (x.dim(.s) > 1) blk: {
