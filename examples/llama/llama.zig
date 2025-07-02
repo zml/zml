@@ -203,11 +203,16 @@ pub const TransformerLayer = struct {
         stdx.debug.assert(x0.rank() >= 2 and x0.shape().hasTags(.{ .s, .d }), "TransformerLayer expected input shape: {{..., .s, .d}}, received: {}", .{x0});
 
         const x0_normalized = zml.call(self.input_layernorm, .forward, .{x0});
-        const delta0, const updated_kv_cache = zml.call(self.self_attn, .forward, .{ x0_normalized, token_index, kv_cache });
-        const x1 = x0.add(delta0);
+        const partial_delta0, const updated_kv_cache = zml.call(self.self_attn, .forward, .{ x0_normalized, token_index, kv_cache });
 
-        const x1_normalized = zml.call(self.post_attention_layernorm, .forward, .{x1});
-        const delta1 = zml.call(self.mlp, .forward, .{x1_normalized});
+        const x1_unreduced = x0.add(partial_delta0);
+        const x1_normalized = zml.call(self.post_attention_layernorm, .forward, .{x1_unreduced});
+        const partial_delta1 = zml.call(self.mlp, .forward, .{x1_normalized});
+
+        const delta0 = zml.ops.allReduce(partial_delta0, .model, self.self_attn.o_proj.weight.mesh());
+        const delta1 = zml.ops.allReduce(partial_delta1, .model, self.mlp.down_proj.weight.mesh());
+
+        const x1 = x0.add(delta0);
         const x2 = x1.add(delta1);
 
         return .{ x2.reuseBuffer(x0), updated_kv_cache };
