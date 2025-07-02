@@ -236,33 +236,28 @@ pub const Mlp = struct {
     down_proj: zml.nn.Linear,
 
     pub fn init(self: *Mlp, mesh: zml.Mesh) void {
+        // Column-Parallel: Shard on the output/column dimension
         self.gate_proj.weight = self.gate_proj.weight
-            .withTags(.{ .hidden, .d }) // Shape is (hidden_dim, dim)
+            .withTags(.{ .hidden, .d })
             .withMesh(mesh)
-            .withSharding(.{ .hidden = .model }); // Shard along hidden_dim
+            .withSharding(.{ .hidden = .model });
 
         self.up_proj.weight = self.up_proj.weight
-            .withTags(.{ .hidden, .d }) // Shape is (hidden_dim, dim)
+            .withTags(.{ .hidden, .d })
             .withMesh(mesh)
-            .withSharding(.{ .hidden = .model }); // Shard along hidden_dim
+            .withSharding(.{ .hidden = .model });
 
-        // Row-parallel layer: Shard the *input* dimension.
-        // The matmul is `x @ W.T`, so the input dimension of the operation
-        // corresponds to the first dimension of the weight matrix W.
+        // Row-Parallel: Shard on the INPUT/column dimension
         self.down_proj.weight = self.down_proj.weight
-            .withTags(.{ .d, .hidden }) // Shape is (dim, hidden_dim)
+            .withTags(.{ .d, .hidden })
             .withMesh(mesh)
-            .withSharding(.{ .hidden = .model }); // Shard along hidden_dim
+            .withSharding(.{ .hidden = .model });
     }
 
     pub fn forward(self: Mlp, x: Tensor) Tensor {
-        // x is replicated.
         const gate_out = zml.call(self.gate_proj, .forward, .{x});
         const up_out = zml.call(self.up_proj, .forward, .{x});
-        // gate_out and up_out are sharded.
-        const output = gate_out.silu().mul(up_out); // output is sharded.
-        // down_proj takes a sharded input and produces a partial result.
-        // The implicit all_reduce happens because of the residual connection in the parent layer.
+        const output = gate_out.silu().mul(up_out);
         return zml.call(self.down_proj, .forward, .{output});
     }
 };
@@ -285,10 +280,10 @@ pub const SelfAttn = struct {
             .scaling = config.rope_scaling,
         };
 
-        self.q_proj.weight = self.q_proj.weight.withTags(.{ .d, .q_hidden }).withMesh(mesh).withSharding(.{ .q_hidden = .model });
-        self.k_proj.weight = self.k_proj.weight.withTags(.{ .d, .kv_hidden }).withMesh(mesh).withSharding(.{ .kv_hidden = .model });
-        self.v_proj.weight = self.v_proj.weight.withTags(.{ .d, .kv_hidden }).withMesh(mesh).withSharding(.{ .kv_hidden = .model });
-        self.o_proj.weight = self.o_proj.weight.withTags(.{ .o_hidden, .d }).withMesh(mesh).withSharding(.{ .o_hidden = .model });
+        self.q_proj.weight = self.q_proj.weight.withTags(.{ .q_hidden, .d }).withMesh(mesh).withSharding(.{ .q_hidden = .model });
+        self.k_proj.weight = self.k_proj.weight.withTags(.{ .kv_hidden, .d }).withMesh(mesh).withSharding(.{ .kv_hidden = .model });
+        self.v_proj.weight = self.v_proj.weight.withTags(.{ .kv_hidden, .d }).withMesh(mesh).withSharding(.{ .kv_hidden = .model });
+        self.o_proj.weight = self.o_proj.weight.withTags(.{ .d, .o_hidden }).withMesh(mesh).withSharding(.{ .o_hidden = .model });
     }
 
     pub fn forward(
@@ -303,9 +298,9 @@ pub const SelfAttn = struct {
         const k_proj_out = zml.call(self.k_proj, .forward, .{x});
         const v_proj_out = zml.call(self.v_proj, .forward, .{x});
 
-        var q = q_proj_out.splitAxis(.d, .{ .h = self.num_heads, .hd = .auto }).withSharding(.{ .h = .model });
-        var k = k_proj_out.splitAxis(.d, .{ .h = num_kv_heads, .hd = .auto }).withSharding(.{ .h = .model });
-        var v = v_proj_out.splitAxis(.d, .{ .h = num_kv_heads, .hd = .auto }).withSharding(.{ .h = .model });
+        var q = q_proj_out.withPartialTags(.{.q_hidden}).splitAxis(.q_hidden, .{ .h = self.num_heads, .hd = .auto }).withSharding(.{ .h = .model });
+        var k = k_proj_out.withPartialTags(.{.kv_hidden}).splitAxis(.kv_hidden, .{ .h = num_kv_heads, .hd = .auto }).withSharding(.{ .h = .model });
+        var v = v_proj_out.withPartialTags(.{.kv_hidden}).splitAxis(.kv_hidden, .{ .h = num_kv_heads, .hd = .auto }).withSharding(.{ .h = .model });
 
         const pos_index = blk: {
             const temp = Tensor.arange(.{ .end = x.dim(.s) }, token_index.dtype()).withTags(.{.s}).broad(zml.Shape.init(.{ .s = x.dim(.s) }, token_index.dtype()));
@@ -323,9 +318,6 @@ pub const SelfAttn = struct {
         const k_cached = new_kv_cache.keys();
         const v_cached = new_kv_cache.values();
 
-        // const k_transposed = k_cached.transpose(.{ .h, .hd, .k });
-        // const v_transposed = v_cached.transpose(.{ .h, .k, .hd });
-
         const attn_mask = if (x.dim(.s) > 1) blk: {
             var mask = zml.nn.causalAttnMask(.{ .q = k_cached.dim(.k), .k = k_cached.dim(.k) }, x.dtype(), null);
             break :blk mask.gatherSlices(.{ .q = x.dim(.s) }, token_index.reshape(.{ .coord = 1 }), .{});
@@ -335,11 +327,9 @@ pub const SelfAttn = struct {
 
         const attn = attn_output.merge(.{ .o_hidden = .{ .h, .hd } }).rename(.{ .q = .s });
 
-        // o_proj takes a sharded input and produces a partial result.
-        // The implicit all_reduce happens because of the residual connection in the parent layer.
-        const output = zml.call(self.o_proj, .forward, .{attn});
+        const partial_output = zml.call(self.o_proj, .forward, .{attn});
 
-        return .{ output, new_kv_cache };
+        return .{ partial_output, new_kv_cache };
     }
 };
 
