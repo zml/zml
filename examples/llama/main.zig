@@ -231,6 +231,16 @@ pub fn asyncMain() !void {
     create_opts.deinit();
     context.printAvailablePlatforms(platform);
 
+    const use_pjrt_profiler: bool = blk: {
+        const env = std.c.getenv("ZML_PJRT_PROFILER") orelse "0";
+        break :blk std.mem.eql(u8, std.mem.span(env), "1");
+    };
+
+    var profiler = if (use_pjrt_profiler) platform.getProfiler(null) else undefined;
+    if (use_pjrt_profiler) {
+        defer profiler.deinit();
+    }
+
     log.info("\n\n\n\n", .{});
 
     const num_devices = platform.getDevices().len;
@@ -323,6 +333,16 @@ pub fn asyncMain() !void {
 
     const seed = res.args.seed orelse @as(u128, @bitCast(std.time.nanoTimestamp()));
     const skip_llama3_encoding: bool = res.args.@"no-llama3" orelse false;
+
+    if (use_pjrt_profiler) {
+        profiler.start();
+    }
+
     const generated_text = try generateText(config, model_instance, llama_module_prefill, llama_module_decode, kv_cache, tokenizer, allocator, compute_mesh, seed, prompt, skip_llama3_encoding);
     defer allocator.free(generated_text);
+
+    if (use_pjrt_profiler) {
+        profiler.stop();
+        try profiler.dumpAsJsonTo(allocator, std.fs.cwd(), "llama-profile.json");
+    }
 }
