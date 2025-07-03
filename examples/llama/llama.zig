@@ -77,7 +77,7 @@ pub const LlamaLM = struct {
         max_seq_len: usize,
     };
 
-    lm_head: ?Linear,
+    lm_head: ?zml.nn.Linear,
     model: Llama,
 
     // Runtime configuration, not part of the model's weights/arch
@@ -119,7 +119,7 @@ pub const LlamaLM = struct {
 
     pub fn sampleTokens(
         self: LlamaLM,
-        lm_head_: ?Linear,
+        lm_head_: ?zml.nn.Linear,
         out_: Tensor,
         rng: Tensor.Rng,
         opts: zml.nn.SamplingStrategy,
@@ -280,9 +280,9 @@ pub const RmsNorm = struct {
 };
 
 pub const Mlp = struct {
-    up_proj: Linear,
-    gate_proj: Linear,
-    down_proj: Linear,
+    up_proj: zml.nn.Linear,
+    gate_proj: zml.nn.Linear,
+    down_proj: zml.nn.Linear,
 
     pub fn init(self: *Mlp, mesh: zml.Mesh) void {
         // Column-Parallel: output is sharded
@@ -312,10 +312,10 @@ pub const Mlp = struct {
 };
 
 pub const SelfAttn = struct {
-    q_proj: Linear,
-    k_proj: Linear,
-    v_proj: Linear,
-    o_proj: Linear,
+    q_proj: zml.nn.Linear,
+    k_proj: zml.nn.Linear,
+    v_proj: zml.nn.Linear,
+    o_proj: zml.nn.Linear,
     num_heads: i64 = undefined,
     num_kv_heads: i64 = 0,
     rope_opts: zml.nn.RopeOpts = undefined,
