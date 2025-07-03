@@ -195,24 +195,23 @@ pub const TransformerLayer = struct {
 
     pub fn forward(
         self: TransformerLayer,
-        x0_: Tensor,
+        x0: Tensor,
         token_index: Tensor,
         kv_cache: KvCache,
     ) struct { Tensor, KvCache } {
-        const x0 = x0_;
         stdx.debug.assert(x0.rank() >= 2 and x0.shape().hasTags(.{ .s, .d }), "TransformerLayer expected input shape: {{..., .s, .d}}, received: {}", .{x0});
 
         const x0_normalized = zml.call(self.input_layernorm, .forward, .{x0});
-        const partial_delta0, const updated_kv_cache = zml.call(self.self_attn, .forward, .{ x0_normalized, token_index, kv_cache });
 
-        const x1_unreduced = x0.add(partial_delta0);
-        const x1_normalized = zml.call(self.post_attention_layernorm, .forward, .{x1_unreduced});
-        const partial_delta1 = zml.call(self.mlp, .forward, .{x1_normalized});
+        const sharded_delta0, const updated_kv_cache = zml.call(self.self_attn, .forward, .{ x0_normalized, token_index, kv_cache });
 
-        const delta0 = zml.ops.allReduce(partial_delta0, .model, self.self_attn.o_proj.weight.mesh());
-        const delta1 = zml.ops.allReduce(partial_delta1, .model, self.mlp.down_proj.weight.mesh());
-
+        const delta0 = zml.ops.allGather(sharded_delta0, .model, self.self_attn.o_proj.weight.mesh());
         const x1 = x0.add(delta0);
+
+        const x1_normalized = zml.call(self.post_attention_layernorm, .forward, .{x1});
+        const sharded_delta1 = zml.call(self.mlp, .forward, .{x1_normalized});
+
+        const delta1 = zml.ops.allGather(sharded_delta1, .model, self.mlp.down_proj.weight.mesh());
         const x2 = x1.add(delta1);
 
         return .{ x2.reuseBuffer(x0), updated_kv_cache };
@@ -332,9 +331,9 @@ pub const SelfAttn = struct {
 
         const attn = attn_output.merge(.{ .o_hidden = .{ .h, .hd } }).rename(.{ .q = .s });
 
-        const partial_output = zml.call(self.o_proj, .forward, .{attn});
+        const sharded_output = zml.call(self.o_proj, .forward, .{attn});
 
-        return .{ partial_output, new_kv_cache };
+        return .{ sharded_output, new_kv_cache };
     }
 };
 
