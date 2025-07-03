@@ -740,6 +740,100 @@ pub fn reduceScatter(input: Tensor, axis: anytype, mesh: Mesh) Tensor {
     return Tensor._result(res_shape, op.result(0));
 }
 
+pub fn allGather2(input: Tensor, axis: anytype, mesh: Mesh) Tensor {
+    if (mesh.axis(axis) <= 1) return input;
+
+    const ctx = CompilationContext.current();
+    const mlir_ctx = ctx.mlirCtx();
+    const channel_id = ctx.getNextChannelId();
+    const mesh_axis_tag = mesh.topology.tag(axis);
+
+    var res_shape = input.shape();
+    const axis_size = mesh.axis(axis);
+
+    var gather_dim: ?u3 = null;
+    for (0..res_shape.rank()) |i| {
+        const part_spec = res_shape.partition(i);
+        if (part_spec == .axis and std.mem.eql(u8, std.mem.span(part_spec.toTag()), std.mem.span(mesh_axis_tag))) {
+            stdx.debug.assert(gather_dim == null, "Mesh axis '{s}' is used to partition multiple tensor dimensions.", .{mesh_axis_tag});
+            gather_dim = @intCast(i);
+        }
+    }
+
+    const gather_dim_unwrapped = gather_dim orelse {
+        // If the sharding axis is not found on the tensor, it's a no-op.
+        return input;
+    };
+
+    const old_dim_size = res_shape.dim(gather_dim_unwrapped);
+    res_shape = res_shape.set(gather_dim_unwrapped, old_dim_size * axis_size);
+    res_shape = res_shape.withReplicatedPartitioning();
+
+    const op = mlir.Operation.make(mlir_ctx, "stablehlo.all_gather", .{
+        .operands = &.{input.value()},
+        .results = &.{mlirx.tensorType(mlir_ctx, res_shape)},
+        .attributes = &.{
+            .{ "all_gather_dim", .int(mlir_ctx, .i64, gather_dim_unwrapped) },
+            .{ "replica_groups", getSpmdReplicaGroups(mlir_ctx, mesh) },
+            .{ "channel_handle", mlir.Attribute.wrap(c.stablehloChannelHandleGet(mlir_ctx._inner, @intCast(channel_id), 1)) },
+            .{ "use_global_device_ids", .unit(mlir_ctx) },
+        },
+        .location = ctx.location(@src(), "all_gather({_}, {any})", .{ input, axis }),
+        .verify = true,
+    });
+
+    return Tensor._result(res_shape, op.result(0));
+}
+
+pub fn reduceScatter2(input: Tensor, axis: anytype, mesh: Mesh) Tensor {
+    if (mesh.axis(axis) <= 1) return input;
+
+    const ctx = CompilationContext.current();
+    const mlir_ctx = ctx.mlirCtx();
+    const channel_id = ctx.getNextChannelId();
+    const mesh_axis_tag = mesh.topology.tag(axis);
+
+    var res_shape = input.shape();
+    const axis_size = mesh.axis(axis);
+
+    var scatter_dim: ?u3 = null;
+    for (0..res_shape.rank()) |i| {
+        if (input.shape().partition(i) == .replicated) {
+            if (@rem(res_shape.dim(i), axis_size) == 0) {
+                scatter_dim = @intCast(i);
+                break;
+            }
+        }
+    }
+    const scatter_dim_unwrapped = scatter_dim orelse stdx.debug.panic("Could not find a suitable replicated dimension to scatter on for tensor {}", .{input.shape()});
+
+    const old_dim_size = res_shape.dim(scatter_dim_unwrapped);
+    stdx.debug.assert(@rem(old_dim_size, axis_size) == 0, "Reduce-scatter dimension size {} must be divisible by mesh axis size {}", .{ old_dim_size, axis_size });
+
+    res_shape = res_shape.set(scatter_dim_unwrapped, @divExact(old_dim_size, axis_size));
+
+    const new_partition_spec: Shape.PartitionSpec = .{ .axis = mesh_axis_tag };
+    res_shape._partitioning.set(scatter_dim_unwrapped, new_partition_spec);
+
+    const body_block, _ = ctx.makeBlock(.hermetic, BlockSignNoCtx(Tensor.add), &Tensor.add, {}, .{ Tensor.scalar(0, input.dtype()), Tensor.scalar(0, input.dtype()) });
+
+    const op = mlir.Operation.make(mlir_ctx, "stablehlo.reduce_scatter", .{
+        .operands = &.{input.value()},
+        .results = &.{mlirx.tensorType(mlir_ctx, res_shape)},
+        .blocks = &.{body_block},
+        .attributes = &.{
+            .{ "scatter_dimension", .int(mlir_ctx, .i64, scatter_dim_unwrapped) },
+            .{ "replica_groups", getSpmdReplicaGroups(mlir_ctx, mesh) },
+            .{ "channel_handle", mlir.Attribute.wrap(c.stablehloChannelHandleGet(mlir_ctx._inner, @intCast(channel_id), 1)) },
+            .{ "use_global_device_ids", .unit(mlir_ctx) },
+        },
+        .location = ctx.location(@src(), "reduceScatter({_}, {any})", .{ input, axis }),
+        .verify = true,
+    });
+
+    return Tensor._result(res_shape, op.result(0));
+}
+
 fn getSpmdReplicaGroups(ctx: mlir.Context, mesh: Mesh) mlir.Attribute {
     const allocator = CompilationContext.current().allocator();
     var replica_group_data = std.ArrayList(i64).init(allocator);
