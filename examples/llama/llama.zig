@@ -248,22 +248,14 @@ pub const TransformerLayer = struct {
 
         const sharded_delta0, const updated_kv_cache = zml.call(self.self_attn, .forward, .{ x0_normalized, token_index, kv_cache });
 
-        // --- MODIFICATION 1: Replace allReduce with reduceScatter -> allGather for Attention Output ---
-        const attn_mesh = self.self_attn.o_proj.weight.mesh();
-        const scattered_delta0 = zml.ops.reduceScatter2(sharded_delta0, .model, attn_mesh);
-        const delta0 = zml.ops.allGather2(scattered_delta0, .model, attn_mesh);
-        // --- END MODIFICATION 1 ---
+        const delta0 = zml.ops.allGather(sharded_delta0, .model, self.self_attn.o_proj.weight.mesh());
 
         const x1 = x0.add(delta0);
 
         const x1_normalized = zml.call(self.post_attention_layernorm, .forward, .{x1});
         const sharded_delta1 = zml.call(self.mlp, .forward, .{x1_normalized});
 
-        // --- MODIFICATION 2: Replace allReduce with reduceScatter -> allGather for MLP Output ---
-        const mlp_mesh = self.mlp.down_proj.weight.mesh();
-        const scattered_delta1 = zml.ops.reduceScatter2(sharded_delta1, .model, mlp_mesh);
-        const delta1 = zml.ops.allGather2(scattered_delta1, .model, mlp_mesh);
-        // --- END MODIFICATION 2 ---
+        const delta1 = zml.ops.allGather(sharded_delta1, .model, self.mlp.down_proj.weight.mesh());
 
         const x2 = x1.add(delta1);
 
