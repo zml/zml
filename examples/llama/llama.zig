@@ -10,6 +10,49 @@ const ShapeOf = zml.ShapeOf;
 
 const log = std.log.scoped(.llama);
 
+pub const Linear = struct {
+    weight: Tensor,
+    bias: ?Tensor = null,
+
+    pub fn forward(self: Linear, x: Tensor) Tensor {
+        var y = x.dotGeneral(self.weight.convert(x.dtype()), &.{.{ -1, -1 }}, &.{});
+
+        // If self.weight doesn't have tags, preserve tags from x.
+        if (y.shape().tag(-1) == zml.Shape.TagUnknown) {
+            y._shape._tags.set(y.rank() - 1, x.shape().tag(-1));
+        }
+
+        // New sharding propagation logic
+        const weight_sharding = self.weight.shape()._partitioning;
+        const out_dim_idx = y.rank() - 1;
+
+        if (weight_sharding.get(out_dim_idx) != .replicated and weight_sharding.get(out_dim_idx) != .unknown) {
+            // This looks like row-parallelism (weight sharded on input dim).
+            // The input `x` should have been sharded.
+            // The output of the GEMM is partial and needs an All-Reduce.
+            // Let's assume the mesh for the all-reduce is the same as the weight's mesh.
+            const mesh = self.weight._mesh orelse zml.currentMesh();
+            // The axis to reduce over is the one the weight is sharded on.
+            const mesh_axis = weight_sharding.get(out_dim_idx).toTag();
+            y = zml.ops.allReduce(y, mesh_axis, mesh);
+        } else if (weight_sharding.get(0) != .replicated and weight_sharding.get(0) != .unknown) {
+            // This looks like column-parallelism (weight sharded on output dim).
+            // The output tensor `y` should be sharded along its feature dimension.
+            var new_sharding = zml.Shape.PartitionArray.init(0) catch unreachable;
+            new_sharding.appendNTimesAssumeCapacity(.replicated, y.rank());
+            new_sharding.set(out_dim_idx, weight_sharding.get(0));
+            y._shape._partitioning = new_sharding;
+        }
+
+        if (self.bias) |bias| {
+            // Bias is typically replicated and added after any communication.
+            return y.add(bias.broadcastLeft(y.shape()));
+        } else {
+            return y;
+        }
+    }
+};
+
 /// Llama architecture, using huggingface transformers naming.
 /// Dimensions of activations: {.b, .s, .d}
 pub const LlamaLM = struct {
@@ -34,7 +77,7 @@ pub const LlamaLM = struct {
         max_seq_len: usize,
     };
 
-    lm_head: ?zml.nn.Linear,
+    lm_head: ?Linear,
     model: Llama,
 
     // Runtime configuration, not part of the model's weights/arch
@@ -76,7 +119,7 @@ pub const LlamaLM = struct {
 
     pub fn sampleTokens(
         self: LlamaLM,
-        lm_head_: ?zml.nn.Linear,
+        lm_head_: ?Linear,
         out_: Tensor,
         rng: Tensor.Rng,
         opts: zml.nn.SamplingStrategy,
@@ -205,13 +248,23 @@ pub const TransformerLayer = struct {
 
         const sharded_delta0, const updated_kv_cache = zml.call(self.self_attn, .forward, .{ x0_normalized, token_index, kv_cache });
 
-        const delta0 = zml.ops.allGather(sharded_delta0, .model, self.self_attn.o_proj.weight.mesh());
+        // --- MODIFICATION 1: Replace allReduce with reduceScatter -> allGather for Attention Output ---
+        const attn_mesh = self.self_attn.o_proj.weight.mesh();
+        const scattered_delta0 = zml.ops.reduceScatter2(sharded_delta0, .model, attn_mesh);
+        const delta0 = zml.ops.allGather2(scattered_delta0, .model, attn_mesh);
+        // --- END MODIFICATION 1 ---
+
         const x1 = x0.add(delta0);
 
         const x1_normalized = zml.call(self.post_attention_layernorm, .forward, .{x1});
         const sharded_delta1 = zml.call(self.mlp, .forward, .{x1_normalized});
 
-        const delta1 = zml.ops.allGather(sharded_delta1, .model, self.mlp.down_proj.weight.mesh());
+        // --- MODIFICATION 2: Replace allReduce with reduceScatter -> allGather for MLP Output ---
+        const mlp_mesh = self.mlp.down_proj.weight.mesh();
+        const scattered_delta1 = zml.ops.reduceScatter2(sharded_delta1, .model, mlp_mesh);
+        const delta1 = zml.ops.allGather2(scattered_delta1, .model, mlp_mesh);
+        // --- END MODIFICATION 2 ---
+
         const x2 = x1.add(delta1);
 
         return .{ x2.reuseBuffer(x0), updated_kv_cache };
@@ -235,12 +288,12 @@ pub const RmsNorm = struct {
 };
 
 pub const Mlp = struct {
-    up_proj: zml.nn.Linear,
-    gate_proj: zml.nn.Linear,
-    down_proj: zml.nn.Linear,
+    up_proj: Linear,
+    gate_proj: Linear,
+    down_proj: Linear,
 
     pub fn init(self: *Mlp, mesh: zml.Mesh) void {
-        // Column-Parallel: Shard on the output/column dimension
+        // Column-Parallel: output is sharded
         self.gate_proj.weight = self.gate_proj.weight
             .withTags(.{ .hidden, .d })
             .withMesh(mesh)
@@ -251,7 +304,7 @@ pub const Mlp = struct {
             .withMesh(mesh)
             .withSharding(.{ .hidden = .model });
 
-        // Row-Parallel: Shard on the INPUT/column dimension
+        // Row-Parallel: input is sharded on .hidden, output is replicated after all-reduce
         self.down_proj.weight = self.down_proj.weight
             .withTags(.{ .d, .hidden })
             .withMesh(mesh)
@@ -267,10 +320,10 @@ pub const Mlp = struct {
 };
 
 pub const SelfAttn = struct {
-    q_proj: zml.nn.Linear,
-    k_proj: zml.nn.Linear,
-    v_proj: zml.nn.Linear,
-    o_proj: zml.nn.Linear,
+    q_proj: Linear,
+    k_proj: Linear,
+    v_proj: Linear,
+    o_proj: Linear,
     num_heads: i64 = undefined,
     num_kv_heads: i64 = 0,
     rope_opts: zml.nn.RopeOpts = undefined,
@@ -284,9 +337,12 @@ pub const SelfAttn = struct {
             .scaling = config.rope_scaling,
         };
 
+        // Column-parallel: output is sharded
         self.q_proj.weight = self.q_proj.weight.withTags(.{ .q_hidden, .d }).withMesh(mesh).withSharding(.{ .q_hidden = .model });
         self.k_proj.weight = self.k_proj.weight.withTags(.{ .kv_hidden, .d }).withMesh(mesh).withSharding(.{ .kv_hidden = .model });
         self.v_proj.weight = self.v_proj.weight.withTags(.{ .kv_hidden, .d }).withMesh(mesh).withSharding(.{ .kv_hidden = .model });
+
+        // Row-parallel: input is sharded on .o_hidden, output is replicated after all-reduce
         self.o_proj.weight = self.o_proj.weight.withTags(.{ .d, .o_hidden }).withMesh(mesh).withSharding(.{ .o_hidden = .model });
     }
 
