@@ -215,12 +215,8 @@ pub const Llama = struct {
         var tagged_embeddings = embeddings.withTags(.{ .s, .d });
 
         if (tokens_.dim(.s) > 1) {
-            // prefill: re-shard the replicated embedding output to be sharded along the sequence axis.
             return tagged_embeddings.withSharding(.{ .s = .s });
         } else {
-            // decode: the output of gather is already replicated. We just ensure the
-            // sharding annotation is explicitly set to replicated for clarity
-            // and correctness downstream.
             return tagged_embeddings.replicated();
         }
     }
@@ -293,7 +289,14 @@ pub const Mlp = struct {
         const gate_out = zml.call(self.gate_proj, .forward, .{x});
         const up_out = zml.call(self.up_proj, .forward, .{x});
         const output = gate_out.silu().mul(up_out);
-        return zml.call(self.down_proj, .forward, .{output});
+        const down_proj_partial = zml.call(self.down_proj, .forward, .{output});
+
+        const down_proj_final = if (x.dim(.s) > 1)
+            down_proj_partial.withSharding(.{ .s = .s })
+        else
+            down_proj_partial;
+
+        return down_proj_final;
     }
 };
 
@@ -360,12 +363,16 @@ pub const SelfAttn = struct {
         } else null;
 
         const attn_output = zml.nn.sdpa(q, k_cached, v_cached, .{ .attn_mask = attn_mask, .allow_cudnn = true });
-
         const attn = attn_output.merge(.{ .o_hidden = .{ .h, .hd } }).rename(.{ .q = .s });
 
         const sharded_output = zml.call(self.o_proj, .forward, .{attn});
 
-        return .{ sharded_output, new_kv_cache };
+        const output_final = if (x.dim(.s) > 1)
+            sharded_output.withSharding(.{ .s = .s })
+        else
+            sharded_output;
+
+        return .{ output_final, new_kv_cache };
     }
 };
 

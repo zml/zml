@@ -617,8 +617,10 @@ pub fn sort(
     return res;
 }
 
-pub fn allReduce(input: Tensor, axis: anytype, mesh: Mesh) Tensor {
-    if (mesh.axis(axis) <= 1) return input;
+pub fn allReduce(input: Tensor, reduce_axis_name: anytype, mesh: Mesh) Tensor {
+    const reduce_mesh_axis_tag = mesh.topology.tag(reduce_axis_name);
+
+    if (mesh.axis(reduce_axis_name) <= 1) return input;
 
     const ctx = CompilationContext.current();
     const mlir_ctx = ctx.mlirCtx();
@@ -638,12 +640,27 @@ pub fn allReduce(input: Tensor, axis: anytype, mesh: Mesh) Tensor {
             .{ "channel_handle", mlir.Attribute.wrap(c.stablehloChannelHandleGet(mlir_ctx._inner, @intCast(channel_id), 1)) },
             .{ "use_global_device_ids", .unit(mlir_ctx) },
         },
-        .location = ctx.location(@src(), "allReduce({_}, {any})", .{ input, axis }),
+        .location = ctx.location(@src(), "allReduce({_}, {any})", .{ input, reduce_mesh_axis_tag }),
         .verify = true,
     });
 
     var res = fromMlirOperationWithTags(op, input);
-    res._shape = res._shape.withReplicatedPartitioning();
+
+    var new_partitioning = input.shape()._partitioning;
+    var axis_was_sharded = false;
+
+    for (new_partitioning.slice(), 0..) |spec, i| {
+        _ = i; // autofix
+        if (spec.* == .axis and std.mem.eql(u8, std.mem.span(spec.*.toTag()), std.mem.span(reduce_mesh_axis_tag))) {
+            spec.* = .replicated; // This dimension is no longer sharded
+            axis_was_sharded = true;
+        }
+    }
+
+    if (axis_was_sharded) {
+        res._shape._partitioning = new_partitioning;
+    }
+
     return res;
 }
 
