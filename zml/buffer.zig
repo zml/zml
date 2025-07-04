@@ -191,7 +191,12 @@ pub const Buffer = struct {
     /// Copies the given Zig slice to the accelerator memory and
     /// return a Buffer with the given dimensions.
     pub fn fromSlice(platform: Platform, mesh: Mesh, dimz: anytype, s: anytype) !Buffer {
-        const sharding: Sharding = .init(mesh, .init(dimz, DataType.fromSliceElementType(s)));
+        const sh: Shape = if (comptime @TypeOf(dimz) == Shape)
+            dimz
+        else
+            Shape.init(dimz, DataType.fromSliceElementType(s));
+
+        const sharding: Sharding = .init(mesh, sh);
         return from(platform, sharding, std.mem.sliceAsBytes(s), .{});
     }
 
