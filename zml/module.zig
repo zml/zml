@@ -40,15 +40,16 @@ pub fn pushMesh(mesh: Mesh) void {
     }
 
     ctx._current_mesh = mesh;
-    log.info("Pushed mesh: {}", .{mesh});
+    // log.info("Pushed mesh: {}", .{mesh});
 }
 
 pub fn popMesh() void {
     const ctx = CompilationContext.current();
 
     if (ctx._current_mesh) |m| {
+        _ = m; // autofix
         ctx._current_mesh = null;
-        log.info("Poped mesh: {}", .{m});
+        // log.info("Poped mesh: {}", .{m});
     } else {
         stdx.debug.panic("No mesh to pop, main mesh: {}", .{ctx._main_mesh});
     }
@@ -461,7 +462,7 @@ pub const CompilationContext = struct {
             self.addOutputMemoryKindAttributes(res_attrs, fn_res_output_memory_kind);
         }
 
-        log.warn("{s} add sharding attributes: {} {any}", .{ opts.name, mesh, input_shapes.items });
+        // log.warn("{s} add sharding attributes: {} {any}", .{ opts.name, mesh, input_shapes.items });
         self.addShardingAttributes(mesh, arg_attrs, res_attrs, input_shapes.items, input_meshes.items, fn_res_shapes);
 
         const mlir_fn = dialect.func.func(self.mlirCtx(), .{

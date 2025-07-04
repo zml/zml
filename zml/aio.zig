@@ -689,8 +689,7 @@ fn visitStructAndLoadBuffer(
             buf_with_metadata._shape = obj._shape;
             const m = obj._mesh orelse mesh;
             const sharding: zml.Sharding = .init(m, obj._shape);
-            // log.warn("load {} with sharding: {}", .{ obj, sharding });
-            log.warn("  - {s} - sharding: {any} - {s}", .{ prefix, sharding, sharding.getShardingAttr().constSlice() });
+            // log.debug("  - {s} - sharding: {any} - {s}", .{ prefix, sharding, sharding.getShardingAttr().constSlice() });
 
             const data_slice = buf_with_metadata._data[0..buf_with_metadata.shape().byteSize()];
             obj.* = try zml.Buffer.from(platform, sharding, data_slice, .{});

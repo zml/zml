@@ -80,14 +80,16 @@ pub fn generateText(
     var generated_token_buffer = [_]u32{undefined};
 
     var kv_cache = prefill: {
-        // prepare device buffers for the prefill tokens and their positions
         const prefill_buffer = try allocator.alloc(u32, max_seq_len);
         @memcpy(prefill_buffer[0..prompt_tok.len], prompt_tok);
+        @memset(prefill_buffer[prompt_tok.len..], 0);
 
-        var prefill_tokens = try zml.Buffer.fromSlice(platform, mesh, .{max_seq_len}, prefill_buffer);
+        const prefill_shape = zml.Shape.init(.{ .s = max_seq_len }, .u32).withPartitioning(.{ .s = .s });
+        var prefill_tokens = try zml.Buffer.fromSlice(platform, mesh, prefill_shape, prefill_buffer);
         defer prefill_tokens.deinit();
-        const sharding2: zml.Sharding = .init(mesh, zml.Shape.init(.{}, .u32));
-        var prefill_token_pos = try zml.Buffer.constant(platform, sharding2, 0);
+
+        const token_pos_sharding: zml.Sharding = .init(mesh, zml.Shape.init(.{}, .u32));
+        var prefill_token_pos = try zml.Buffer.constant(platform, token_pos_sharding, 0);
         defer prefill_token_pos.deinit();
 
         const prefilled_tokens, const kv_cache, rng = mod_prefill.call(.{ prefill_tokens, prefill_token_pos, kv_cache_, rng });
@@ -95,6 +97,7 @@ pub fn generateText(
         generated_token_buffer[0] = prefill_buffer[prompt_tok.len - 1];
         break :prefill kv_cache;
     };
+
     defer zml.aio.unloadBuffers(&kv_cache);
 
     // Prepare for token-by-token generation,
@@ -133,7 +136,8 @@ pub fn generateText(
 
         // current token pos needs to go into a zml.Buffer
         const token_pos_buffer = &[_]u32{@intCast(prompt_tok.len + i)};
-        const token_pos = try zml.Buffer.fromSlice(platform, mesh, .{}, token_pos_buffer);
+        const token_pos_sharding = zml.Sharding.init(mesh, zml.Shape.init(.{}, .u32));
+        const token_pos = try zml.Buffer.from(platform, token_pos_sharding, std.mem.sliceAsBytes(token_pos_buffer), .{});
         defer token_pos.deinit();
 
         // call to generate the next token
@@ -241,18 +245,12 @@ pub fn asyncMain() !void {
         defer profiler.deinit();
     }
 
-    log.info("\n\n\n\n", .{});
-
     const num_devices = platform.getDevices().len;
-
-    stdx.debug.assert(config.num_attention_heads % num_devices == 0 and (config.num_key_value_heads % num_devices == 0 or config.num_key_value_heads == 0), "Number of heads ({d}) and KV heads ({d}) must be divisible by the number of devices ({d}) for this sharding strategy.", .{ config.num_attention_heads, config.num_key_value_heads, num_devices });
-    log.info("Using 1D Tensor Parallelism across {d} devices", .{num_devices});
-    const compute_mesh = zml.Mesh.init(.{ .model = num_devices });
-    // For pure 1D TP, the vocab mesh is the same as the compute mesh.
-    // It's sharded on 'model' (which is equivalent to 'all_devices' in this case).
-    const vocab_mesh = compute_mesh;
-    log.info("Constructed compute mesh: {}", .{compute_mesh});
-    log.info("Constructed vocab mesh: {}", .{vocab_mesh});
+    const compute_mesh = zml.Mesh.init(.{ .s = num_devices });
+    const vocab_mesh = zml.Mesh.init(.{ .model = num_devices });
+    log.info("Using Sequence Parallelism across {} devices.", .{num_devices});
+    log.info("Compute Mesh (for sequence): {}", .{compute_mesh});
+    log.info("Vocab/Weight Mesh: {}", .{vocab_mesh});
 
     var ts = try zml.aio.detectFormatAndOpen(allocator, res.args.weights.?);
     defer ts.deinit();
@@ -272,7 +270,7 @@ pub fn asyncMain() !void {
     const dims = model_instance.model.shape();
     const dtype = model_instance.model.embed_tokens.weight.dtype();
 
-    const tokens_shape_prefill = zml.Shape.init(.{ .s = llama_options.max_seq_len }, .u32).withPartitioning(.{ .s = .replicated });
+    const tokens_shape_prefill = zml.Shape.init(.{ .s = llama_options.max_seq_len }, .u32).withPartitioning(.{ .s = .s });
     const tokens_shape_decode = zml.Shape.init(.{ .s = 1 }, .u32).withPartitioning(.{ .s = .replicated });
     const token_idx_shape = zml.Shape.init(.{}, .u32);
     const kv_shape = zml.Shape.init(.{ .layer = model_instance.model.layers.len, .k = dims.s, .h = dims.nkvh, .hd = dims.hd }, dtype);
