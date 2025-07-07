@@ -66,7 +66,7 @@ pub const LlamaLM = struct {
         // Shard the final output layer across all devices
         if (self.lm_head) |*lm_head| {
             lm_head.weight = lm_head.weight
-                .withTags(.{ .d, .voc })
+                .withTags(.{ .voc, .d })
                 .withMesh(vocab_mesh)
                 .withSharding(.{ .voc = .model });
         }
@@ -108,7 +108,12 @@ pub const LlamaLM = struct {
 
         var logits = blk: {
             if (lm_head_) |lm_head| {
-                const partial_logits = zml.call(lm_head, .forward, .{out});
+                var partial_logits = zml.call(lm_head, .forward, .{out});
+
+                if (partial_logits.shape().hasTag(.voc) == null) {
+                    partial_logits = partial_logits.rename(.{ .d = .voc });
+                }
+
                 break :blk zml.ops.allGather(partial_logits, .model, vocab_mesh);
             } else {
                 const embed_table = self.model.embed_tokens.weight.withTags(.{ .voc, .d });
