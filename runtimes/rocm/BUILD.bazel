@@ -7,17 +7,6 @@ cc_library(
         "-lc",
         "-ldl",
     ],
-)
-
-cc_shared_library(
-    name = "zmlxrocm_so",
-    shared_lib_name = "libzmlxrocm.so.0",
-    deps = [":zmlxrocm_lib"],
-)
-
-cc_import(
-    name = "zmlxrocm",
-    shared_library = ":zmlxrocm_so",
     visibility = ["@libpjrt_rocm//:__subpackages__"],
 )
 

@@ -8,11 +8,6 @@ cc_shared_library(
     deps = ["@zml//runtimes/cuda:zmlxcuda_lib"],
 )
 
-cc_import(
-    name = "zmlxcuda",
-    shared_library = ":zmlxcuda_so",
-)
-
 patchelf(
     name = "libpjrt_cuda.patchelf",
     shared_library = "libpjrt_cuda.so",
