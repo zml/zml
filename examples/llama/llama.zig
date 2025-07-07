@@ -93,13 +93,11 @@ pub const LlamaLM = struct {
 
     pub fn sampleTokens(
         self: LlamaLM,
-        lm_head_: ?Linear,
+        lm_head_: ?Linear, // This should be the local `Linear`
         out_: Tensor,
         rng: Tensor.Rng,
         opts: zml.nn.SamplingStrategy,
     ) struct { Tensor, Tensor.Rng } {
-        // The body of this function from the previous step is correct.
-        // We only need to fix the signature.
         const vocab_mesh = if (lm_head_) |lm_head| lm_head.weight.mesh() else self.model.embed_tokens.weight.mesh();
         zml.pushMesh(vocab_mesh);
         defer zml.popMesh();
@@ -241,18 +239,29 @@ pub const TransformerLayer = struct {
     ) struct { Tensor, KvCache } {
         stdx.debug.assert(x0.rank() >= 2 and x0.shape().hasTags(.{ .s, .d }), "TransformerLayer expected input shape: {{..., .s, .d}}, received: {}", .{x0});
 
-        const x0_normalized = zml.call(self.input_layernorm, .forward, .{x0});
+        // --- Attention Block ---
+        const attn_input = zml.call(self.input_layernorm, .forward, .{x0});
+        // self_attn will do the q,k,v projections and return the PARTIAL o_proj result.
+        const attn_partial_output, const updated_kv_cache = zml.call(self.self_attn, .forward, .{ attn_input, token_index, kv_cache });
 
-        // self_attn now returns the final, reduced tensor.
-        const delta0, const updated_kv_cache = zml.call(self.self_attn, .forward, .{ x0_normalized, token_index, kv_cache });
-        const x1 = x0.add(delta0);
+        // Start the all_reduce for the attention block. XLA can schedule this to run in the background.
+        const attn_reduced_output = zml.ops.allReduce(attn_partial_output, .model, self.self_attn.o_proj.weight.mesh(), 1);
 
-        const x1_normalized = zml.call(self.post_attention_layernorm, .forward, .{x1});
-        // mlp now returns the final, reduced tensor.
-        const delta1 = zml.call(self.mlp, .forward, .{x1_normalized});
-        const x2 = x1.add(delta1);
+        // --- MLP Block (starts while attn_reduced_output is being computed) ---
+        // The input to the MLP block depends on the result of the attention block.
+        const mlp_input = x0.add(attn_reduced_output);
+        const mlp_norm_input = zml.call(self.post_attention_layernorm, .forward, .{mlp_input});
 
-        return .{ x2.reuseBuffer(x0), updated_kv_cache };
+        // The MLP forward pass computes the partial result.
+        const mlp_partial_output = zml.call(self.mlp, .forward, .{mlp_norm_input});
+
+        // Start the all_reduce for the MLP block.
+        const mlp_reduced_output = zml.ops.allReduce(mlp_partial_output, .model, self.mlp.down_proj.weight.mesh(), 2);
+
+        // Final residual connection
+        const x_final = mlp_input.add(mlp_reduced_output);
+
+        return .{ x_final.reuseBuffer(x0), updated_kv_cache };
     }
 };
 
@@ -290,14 +299,8 @@ pub const Mlp = struct {
         const gate_out = zml.call(self.gate_proj, .forward, .{x});
         const up_out = zml.call(self.up_proj, .forward, .{x});
         const output = gate_out.silu().mul(up_out);
-        const down_proj_partial = zml.call(self.down_proj, .forward, .{output});
-        const down_proj_reduced = zml.ops.allReduce(down_proj_partial, .model, self.down_proj.weight.mesh(), 1);
-
-        // FIX: Re-shard the replicated output to match the input's sharding scheme for the residual connection.
-        return if (x.dim(.s) > 1)
-            down_proj_reduced.withSharding(.{ .s = .s })
-        else
-            down_proj_reduced;
+        // Return the partial result. The all-reduce is now in TransformerLayer.
+        return zml.call(self.down_proj, .forward, .{output});
     }
 };
 
@@ -363,18 +366,11 @@ pub const SelfAttn = struct {
         } else null;
 
         const attn_output = zml.nn.sdpa(q, k_cached, v_cached, .{ .attn_mask = attn_mask, .allow_cudnn = true });
-
         const attn = attn_output.merge(.{ .o_hidden = .{ .h, .hd } }).rename(.{ .q = .s });
 
+        // Return the partial result. The all-reduce is now in TransformerLayer.
         const o_proj_partial = zml.call(self.o_proj, .forward, .{attn});
-        const sharded_output_reduced = zml.ops.allReduce(o_proj_partial, .model, self.o_proj.weight.mesh(), 2);
-
-        const sharded_output = if (x.dim(.s) > 1)
-            sharded_output_reduced.withSharding(.{ .s = .s })
-        else
-            sharded_output_reduced;
-
-        return .{ sharded_output, new_kv_cache };
+        return .{ o_proj_partial, new_kv_cache };
     }
 };
 
