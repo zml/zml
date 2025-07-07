@@ -64,7 +64,14 @@ cc_library(
         "@cuda_cudart//:cuda",
     ],
     linkopts = [
-        "-Wl,--unresolved-symbols=ignore-all",
+        # Defer function call resolution until the function is called
+        # (lazy loading) rather than at load time.
+        #
+        # This is required because we want to let downstream use weak CUDA symbols.
+        #
+        # We force it here because -z,now (which resolve all symbols at load time),
+        # is the default in most bazel CC toolchains as well as in certain linkers.
+        "-Wl,-z,lazy",
     ],
     visibility = ["@zml//runtimes/cuda:__subpackages__"],
 )
