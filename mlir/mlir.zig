@@ -1273,7 +1273,11 @@ pub const Type = struct {
     }
 
     pub fn tensor(dimensions: []const i64, elem_type: Type) Type {
-        return RankedTensorType.init(dimensions, elem_type).asType();
+        return RankedTensorType.init(dimensions, elem_type, null).asType();
+    }
+
+    pub fn tensorWithEncoding(dimensions: []const i64, elem_type: Type, encoding: ?Attribute) Type {
+        return RankedTensorType.init(dimensions, elem_type, encoding).asType();
     }
 };
 
@@ -1516,12 +1520,12 @@ pub const RankedTensorType = struct {
     pub const eql = Type.eqlAny(RankedTensorType);
     pub const format = helpers.format(Type, c.mlirTypePrint);
 
-    pub fn init(dimensions: []const i64, elemType: Type) RankedTensorType {
+    pub fn init(dimensions: []const i64, elemType: Type, encoding: ?Attribute) RankedTensorType {
         return .{ ._inner = c.mlirRankedTensorTypeGet(
             @intCast(dimensions.len),
             @ptrCast(dimensions.ptr),
             elemType._inner,
-            c.mlirAttributeGetNull(),
+            if (encoding) |e| e._inner else c.mlirAttributeGetNull(),
         ) };
     }
 

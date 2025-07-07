@@ -3,6 +3,9 @@ const std = @import("std");
 const mlir = @import("mlir");
 
 const dtype = @import("dtype.zig");
+const CompilationContext = @import("module.zig").CompilationContext;
+const Sharding = @import("partitioning.zig").Sharding;
+const Mesh = @import("partitioning.zig").Mesh;
 const Shape = @import("shape.zig").Shape;
 
 const mlirx = @This();
@@ -10,6 +13,34 @@ const mlirx = @This();
 /// Returns the mlir.Type corresponding to a given zml.Shape.
 pub fn tensorType(ctx: mlir.Context, sh: Shape) mlir.Type {
     return .tensor(sh.dims(), mlirx.Type.fromDType(ctx, sh.dtype()));
+}
+
+pub fn tensorWithEncoding(ctx: mlir.Context, sh: Shape, encoding: ?mlir.Attribute) mlir.Type {
+    return .tensorWithEncoding(sh.dims(), mlirx.Type.fromDType(ctx, sh.dtype()), encoding);
+}
+
+pub fn tensorTypeWithEncoding(ctx: mlir.Context, mesh: Mesh, sh: Shape, allocator: std.mem.Allocator) mlir.Type {
+    const sharding_attr = blk: {
+        // No sharding attribute needed for single-device computations.
+        if (mesh.isSinglePartition()) break :blk null;
+
+        var sharding_builder = std.ArrayList(u8).init(allocator);
+        defer sharding_builder.deinit();
+
+        const sharding = Sharding.init(mesh, sh);
+        sharding.writeShardingRepresentation(sharding_builder.writer()) catch unreachable;
+
+        var sharding_string: []const u8 = "{replicated}";
+        if (sharding_builder.items.len > 0) {
+            sharding_string = sharding_builder.items;
+        }
+
+        break :blk mlir.DictionaryAttribute.init(ctx, &.{
+            mlir.NamedAttribute.named(ctx, "sharding", mlir.Attribute.string(ctx, sharding_string)),
+        }).asAttr();
+    };
+
+    return tensorWithEncoding(ctx, sh, sharding_attr);
 }
 
 pub fn denseElementAttrType(dt: dtype.DataType) ?mlir.DenseElementsAttributeTypes {
