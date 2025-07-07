@@ -16,10 +16,10 @@ const ROCmEnvEntry = struct {
 };
 
 const rocm_env_entries: []const ROCmEnvEntry = &.{
-    .{ .name = "HIPBLASLT_EXT_OP_LIBRARY_PATH", .rpath = "hipblaslt/lib/hipblaslt/library/hipblasltExtOpLibrary.dat", .dirname = false, .mandatory = false },
-    .{ .name = "HIPBLASLT_TENSILE_LIBPATH", .rpath = "hipblaslt/lib/hipblaslt/library/TensileManifest.txt", .dirname = true, .mandatory = false },
-    .{ .name = "ROCBLAS_TENSILE_LIBPATH", .rpath = "rocblas/lib/rocblas/library/TensileManifest.txt", .dirname = true, .mandatory = true },
-    .{ .name = "ROCM_PATH", .rpath = "libpjrt_rocm/sandbox", .dirname = false, .mandatory = true },
+    .{ .name = "HIPBLASLT_EXT_OP_LIBRARY_PATH", .rpath = "/lib/hipblaslt/library/hipblasltExtOpLibrary.dat", .dirname = false, .mandatory = false },
+    .{ .name = "HIPBLASLT_TENSILE_LIBPATH", .rpath = "/lib/hipblaslt/library/TensileManifest.txt", .dirname = true, .mandatory = false },
+    .{ .name = "ROCBLAS_TENSILE_LIBPATH", .rpath = "/lib/rocblas/library/TensileManifest.txt", .dirname = true, .mandatory = true },
+    .{ .name = "ROCM_PATH", .rpath = "/", .dirname = false, .mandatory = true },
 };
 
 pub fn isEnabled() bool {
@@ -33,20 +33,9 @@ fn hasRocmDevices() bool {
     return true;
 }
 
-fn setupRocmEnv() !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
-    defer arena.deinit();
-
-    const r = blk: {
-        var r_ = try runfiles.Runfiles.create(.{ .allocator = arena.allocator() }) orelse {
-            stdx.debug.panic("Unable to find Runfiles directory", .{});
-        };
-        const source_repo = bazel_builtin.current_repository;
-        break :blk r_.withSourceRepo(source_repo);
-    };
-
+fn setupRocmEnv(allocator: std.mem.Allocator, rocm_data_dir: []const u8) !void {
     for (rocm_env_entries) |entry| {
-        var real_path = r.rlocationAlloc(arena.allocator(), entry.rpath) catch null orelse {
+        var real_path: []const u8 = std.fmt.allocPrintZ(allocator, "{s}/{s}", .{rocm_data_dir, entry.rpath}) catch null orelse {
             if (entry.mandatory) {
                 stdx.debug.panic("Unable to find {s} in {s}\n", .{ entry.name, bazel_builtin.current_repository });
             }
@@ -59,7 +48,7 @@ fn setupRocmEnv() !void {
             };
         }
 
-        _ = c.setenv(entry.name, try arena.allocator().dupeZ(u8, real_path), 1);
+        _ = c.setenv(entry.name, try allocator.dupeZ(u8, real_path), 1);
     }
 }
 
@@ -74,7 +63,22 @@ pub fn load() !*const pjrt.Api {
         return error.Unavailable;
     }
 
-    try setupRocmEnv();
 
-    return try asynk.callBlocking(pjrt.Api.loadFrom, .{"libpjrt_rocm.so"});
+    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    defer arena.deinit();
+
+    const r = blk: {
+        var r_ = try runfiles.Runfiles.create(.{ .allocator = arena.allocator() }) orelse {
+            stdx.debug.panic("Unable to find Runfiles directory", .{});
+        };
+        const source_repo = bazel_builtin.current_repository;
+        break :blk r_.withSourceRepo(source_repo);
+    };
+    const rocm_data_dir = (try r.rlocationAlloc(arena.allocator(), "libpjrt_rocm/sandbox")).?;
+    std.debug.print("found {s}\n", .{rocm_data_dir});
+
+    try setupRocmEnv(arena.allocator(), rocm_data_dir);
+
+    const library = try std.fmt.allocPrintZ(arena.allocator(), "{s}/lib/libpjrt_rocm.so", .{rocm_data_dir});
+    return try asynk.callBlocking(pjrt.Api.loadFrom, .{library});
 }
