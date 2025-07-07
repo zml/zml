@@ -114,7 +114,7 @@ pub const LlamaLM = struct {
                     partial_logits = partial_logits.rename(.{ .d = .voc });
                 }
 
-                break :blk zml.ops.allGather(partial_logits, .model, vocab_mesh);
+                break :blk zml.ops.allGather(partial_logits, .voc, vocab_mesh);
             } else {
                 const embed_table = self.model.embed_tokens.weight.withTags(.{ .voc, .d });
                 const partial_logits = out.dotGeneral(
