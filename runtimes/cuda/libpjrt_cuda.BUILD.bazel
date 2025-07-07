@@ -64,7 +64,7 @@ cc_library(
         "@cuda_cudart//:cuda",
     ],
     linkopts = [
-        "-Wl,--unresolved-symbols=ignore-all",
+        "-Wl,-z,lazy",
     ],
     visibility = ["@zml//runtimes/cuda:__subpackages__"],
 )
