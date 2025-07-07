@@ -54,7 +54,6 @@ copy_to_directory(
     },
     add_directory_to_runfiles = False,
     include_external_repositories = ["**"],
-    verbose = True,
 )
 
 cc_library(

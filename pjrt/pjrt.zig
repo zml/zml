@@ -80,7 +80,8 @@ pub const Api = struct {
                 const library_c = try std.posix.toPosixPath(library);
                 break :blk .{
                     .inner = .{
-                        .handle = c.dlopen(&library_c, c.RTLD_LAZY | c.RTLD_LOCAL | c.RTLD_NODELETE) orelse {
+                        // We use RTLD_GLOBAL so that symbols from NEEDED libraries are available in the global namespace.
+                        .handle = std.c.dlopen(&library_c, .{ .LAZY = true, .GLOBAL = true, .NODELETE = true }) orelse {
                             log.err("Unable to dlopen plugin: {s}", .{library});
                             return error.FileNotFound;
                         },
