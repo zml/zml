@@ -14,6 +14,7 @@ const Mesh = @import("partitioning.zig").Mesh;
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
 const Tensor = @import("tensor.zig").Tensor;
+const Sharding = @import("partitioning.zig").Sharding;
 
 const EnumLiteral = @TypeOf(.enum_literal);
 const dialect = struct {
@@ -617,51 +618,49 @@ pub fn sort(
     return res;
 }
 
-pub fn allReduce(input: Tensor, reduce_axis_name: anytype, mesh: Mesh) Tensor {
-    const reduce_mesh_axis_tag = mesh.topology.tag(reduce_axis_name);
+pub fn allReduce(input: Tensor, reduce_axis_name: anytype, mesh: Mesh, channel_id: ?u64) Tensor {
+    // The reduce_axis_name is implicitly handled by the mesh and replica_groups.
+    _ = reduce_axis_name;
 
-    if (mesh.axis(reduce_axis_name) <= 1) return input;
+    // On a single device, all_reduce is an identity operation.
+    if (mesh.isSinglePartition()) {
+        return input;
+    }
 
     const ctx = CompilationContext.current();
     const mlir_ctx = ctx.mlirCtx();
-    const channel_id = ctx.getNextChannelId();
+
+    // FIX: Use the optional channel ID or get a new one.
+    const actual_channel_id = if (channel_id) |id| id else ctx.getNextChannelId();
 
     const body_block, _ = ctx.makeBlock(.hermetic, BlockSignNoCtx(Tensor.add), &Tensor.add, {}, .{
         Tensor.scalar(0, input.dtype()),
         Tensor.scalar(0, input.dtype()),
     });
 
+    const result_shape = input.shape().withReplicatedPartitioning();
+    const result_sharding = Sharding.init(mesh, result_shape);
+    const sharding_attr = ctx.getShardingAttr(result_sharding);
+
+    const op_attrs: [4]mlir.AttrTuple = .{
+        .{ "replica_groups", getSpmdReplicaGroups(mlir_ctx, mesh) },
+        .{ "channel_handle", mlir.Attribute.wrap(c.stablehloChannelHandleGet(mlir_ctx._inner, @intCast(actual_channel_id), 1)) },
+        .{ "use_global_device_ids", .unit(mlir_ctx) },
+        .{ "mhlo.sharding", sharding_attr },
+    };
+
+    const result_type = mlirx.tensorType(mlir_ctx, result_shape);
+
     const op = mlir.Operation.make(mlir_ctx, "stablehlo.all_reduce", .{
         .operands = &.{input.value()},
-        .results = &.{input.value().getType()},
+        .results = &.{result_type},
         .blocks = &.{body_block},
-        .attributes = &.{
-            .{ "replica_groups", getSpmdReplicaGroups(mlir_ctx, mesh) },
-            .{ "channel_handle", mlir.Attribute.wrap(c.stablehloChannelHandleGet(mlir_ctx._inner, @intCast(channel_id), 1)) },
-            .{ "use_global_device_ids", .unit(mlir_ctx) },
-        },
-        .location = ctx.location(@src(), "allReduce({_}, {any})", .{ input, reduce_mesh_axis_tag }),
+        .attributes = &op_attrs,
+        .location = ctx.location(@src(), "allReduce({_})", .{input}),
         .verify = true,
     });
 
-    var res = fromMlirOperationWithTags(op, input);
-
-    var new_partitioning = input.shape()._partitioning;
-    var axis_was_sharded = false;
-
-    for (new_partitioning.slice(), 0..) |spec, i| {
-        _ = i; // autofix
-        if (spec.* == .axis and std.mem.eql(u8, std.mem.span(spec.*.toTag()), std.mem.span(reduce_mesh_axis_tag))) {
-            spec.* = .replicated; // This dimension is no longer sharded
-            axis_was_sharded = true;
-        }
-    }
-
-    if (axis_was_sharded) {
-        res._shape._partitioning = new_partitioning;
-    }
-
-    return res;
+    return Tensor._result(result_shape, op.result(0));
 }
 
 pub fn allGather(input: Tensor, gather_dim: anytype, mesh: Mesh) Tensor {

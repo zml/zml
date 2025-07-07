@@ -15,25 +15,8 @@ pub const Linear = struct {
     bias: ?Tensor = null,
 
     pub fn forward(self: Linear, x: Tensor) Tensor {
-        var y = x.dotGeneral(self.weight.convert(x.dtype()), &.{.{ -1, -1 }}, &.{});
-
-        if (y.shape().tag(-1) == zml.Shape.TagUnknown) {
-            y._shape._tags.set(y.rank() - 1, x.shape().tag(-1));
-        }
-
-        const weight_sharding = self.weight.shape()._partitioning;
-        const out_dim_idx = y.rank() - 1;
-
-        if (weight_sharding.get(out_dim_idx) != .replicated and weight_sharding.get(out_dim_idx) != .unknown) {
-            const mesh = self.weight._mesh orelse zml.currentMesh();
-            const mesh_axis = weight_sharding.get(out_dim_idx).toTag();
-            y = zml.ops.allReduce(y, mesh_axis, mesh);
-        } else if (weight_sharding.get(0) != .replicated and weight_sharding.get(0) != .unknown) {
-            var new_sharding = zml.Shape.PartitionArray.init(0) catch unreachable;
-            new_sharding.appendNTimesAssumeCapacity(.replicated, y.rank());
-            new_sharding.set(out_dim_idx, weight_sharding.get(0));
-            y._shape._partitioning = new_sharding;
-        }
+        const x_dtype = x.dtype();
+        var y = x.dotGeneral(self.weight.convert(x_dtype), &.{.{ -1, -1 }}, &.{});
 
         if (self.bias) |bias| {
             return y.add(bias.broadcastLeft(y.shape()));
@@ -67,7 +50,7 @@ pub const LlamaLM = struct {
         max_seq_len: usize,
     };
 
-    lm_head: ?zml.nn.Linear,
+    lm_head: ?Linear,
     model: Llama,
 
     // Runtime configuration, not part of the model's weights/arch
@@ -110,29 +93,36 @@ pub const LlamaLM = struct {
 
     pub fn sampleTokens(
         self: LlamaLM,
-        lm_head_: ?zml.nn.Linear,
+        lm_head_: ?Linear,
         out_: Tensor,
         rng: Tensor.Rng,
         opts: zml.nn.SamplingStrategy,
     ) struct { Tensor, Tensor.Rng } {
+        // The body of this function from the previous step is correct.
+        // We only need to fix the signature.
         const vocab_mesh = if (lm_head_) |lm_head| lm_head.weight.mesh() else self.model.embed_tokens.weight.mesh();
         zml.pushMesh(vocab_mesh);
         defer zml.popMesh();
 
         const out = out_.withPartialTags(.{ .s, .d });
 
-        var logits_sharded = blk: {
+        var logits = blk: {
             if (lm_head_) |lm_head| {
-                break :blk zml.call(lm_head, .forward, .{out});
+                const partial_logits = zml.call(lm_head, .forward, .{out});
+                break :blk zml.ops.allGather(partial_logits, .model, vocab_mesh);
             } else {
-                break :blk self.model.embed_tokens.weight.withTags(.{ .voc, .d }).dot(out, .{.d});
+                const embed_table = self.model.embed_tokens.weight.withTags(.{ .voc, .d });
+                const partial_logits = out.dotGeneral(
+                    embed_table.transpose(.{ .d, .voc }),
+                    &.{.{ 1, 0 }},
+                    &.{},
+                );
+                break :blk zml.ops.allReduce(partial_logits, .model, vocab_mesh, 3);
             }
         };
 
-        if (logits_sharded.shape().hasTag(.voc) == null)
-            logits_sharded = logits_sharded.rename(.{ .d = .voc });
-
-        const logits = zml.ops.allGather(logits_sharded, .voc, vocab_mesh);
+        if (logits.shape().hasTag(.voc) == null)
+            logits = logits.rename(.{ .d = .voc });
 
         const next_tokens, const new_rng = zml.nn.sampleTokens(logits, opts, rng);
         return .{ next_tokens, new_rng };
@@ -193,7 +183,7 @@ pub const Llama = struct {
             .withSharding(.{ .d = .replicated, .voc = .model });
 
         for (self.layers) |*layer| {
-            layer.init(config, compute_mesh, replicated_sharding);
+            layer.init(config, vocab_mesh);
         }
     }
 
@@ -212,11 +202,14 @@ pub const Llama = struct {
 
     pub fn embed(embed_tokens_: zml.nn.TokenEmbedding, tokens_: Tensor) Tensor {
         const embeddings = zml.call(embed_tokens_, .forward, .{tokens_});
-        var tagged_embeddings = embeddings.withTags(.{ .s, .d });
+        var tagged_embeddings = embeddings.withPartialTags(.{.d});
 
-        if (tokens_.dim(.s) > 1) {
-            return tagged_embeddings.withSharding(.{ .s = .s });
-        } else {
+        // Sequence parallelism shards this dimension.
+        // Tensor parallelism replicates it.
+        // We are doing Tensor Parallelism, so it should be replicated.
+        if (tokens_.dim(.s) > 1) { // Prefill
+            return tagged_embeddings.withSharding(.{ .s = .replicated });
+        } else { // Decode
             return tagged_embeddings.replicated();
         }
     }
@@ -228,11 +221,11 @@ pub const TransformerLayer = struct {
     post_attention_layernorm: RmsNorm,
     mlp: Mlp,
 
-    pub fn init(self: *TransformerLayer, config: LlamaLM.Config, mesh: zml.Mesh, sharding: anytype) void {
-        self.input_layernorm.init(config, mesh, sharding);
-        self.self_attn.init(config, mesh, sharding);
-        self.post_attention_layernorm.init(config, mesh, sharding);
-        self.mlp.init(mesh, sharding);
+    pub fn init(self: *TransformerLayer, config: LlamaLM.Config, mesh: zml.Mesh) void {
+        self.input_layernorm.init(config, mesh, .{ .d = .replicated });
+        self.self_attn.init(config, mesh);
+        self.post_attention_layernorm.init(config, mesh, .{ .d = .replicated });
+        self.mlp.init(mesh);
     }
 
     pub fn forward(
@@ -245,14 +238,14 @@ pub const TransformerLayer = struct {
 
         const x0_normalized = zml.call(self.input_layernorm, .forward, .{x0});
 
-        const sharded_delta0, const updated_kv_cache = zml.call(self.self_attn, .forward, .{ x0_normalized, token_index, kv_cache });
-
-        const x1 = x0.add(sharded_delta0);
+        // self_attn now returns the final, reduced tensor.
+        const delta0, const updated_kv_cache = zml.call(self.self_attn, .forward, .{ x0_normalized, token_index, kv_cache });
+        const x1 = x0.add(delta0);
 
         const x1_normalized = zml.call(self.post_attention_layernorm, .forward, .{x1});
-        const sharded_delta1 = zml.call(self.mlp, .forward, .{x1_normalized});
-
-        const x2 = x1.add(sharded_delta1);
+        // mlp now returns the final, reduced tensor.
+        const delta1 = zml.call(self.mlp, .forward, .{x1_normalized});
+        const x2 = x1.add(delta1);
 
         return .{ x2.reuseBuffer(x0), updated_kv_cache };
     }
@@ -275,14 +268,17 @@ pub const RmsNorm = struct {
 };
 
 pub const Mlp = struct {
-    up_proj: zml.nn.Linear,
-    gate_proj: zml.nn.Linear,
-    down_proj: zml.nn.Linear,
+    up_proj: Linear,
+    gate_proj: Linear,
+    down_proj: Linear,
 
-    pub fn init(self: *Mlp, mesh: zml.Mesh, sharding: anytype) void {
-        self.gate_proj.weight = self.gate_proj.weight.withTags(.{ .hidden, .d }).withMesh(mesh).withSharding(sharding);
-        self.up_proj.weight = self.up_proj.weight.withTags(.{ .hidden, .d }).withMesh(mesh).withSharding(sharding);
-        self.down_proj.weight = self.down_proj.weight.withTags(.{ .d, .hidden }).withMesh(mesh).withSharding(sharding);
+    pub fn init(self: *Mlp, mesh: zml.Mesh) void {
+        // Column-Parallel: Shard on the output/column dimension
+        self.gate_proj.weight = self.gate_proj.weight.withTags(.{ .hidden, .d }).withMesh(mesh).withSharding(.{ .hidden = .model });
+        self.up_proj.weight = self.up_proj.weight.withTags(.{ .hidden, .d }).withMesh(mesh).withSharding(.{ .hidden = .model });
+
+        // Row-Parallel: Shard on the INPUT/column dimension
+        self.down_proj.weight = self.down_proj.weight.withTags(.{ .d, .hidden }).withMesh(mesh).withSharding(.{ .hidden = .model });
     }
 
     pub fn forward(self: Mlp, x: Tensor) Tensor {
@@ -290,26 +286,26 @@ pub const Mlp = struct {
         const up_out = zml.call(self.up_proj, .forward, .{x});
         const output = gate_out.silu().mul(up_out);
         const down_proj_partial = zml.call(self.down_proj, .forward, .{output});
+        const down_proj_reduced = zml.ops.allReduce(down_proj_partial, .model, self.down_proj.weight.mesh(), 1);
 
-        const down_proj_final = if (x.dim(.s) > 1)
-            down_proj_partial.withSharding(.{ .s = .s })
+        // FIX: Re-shard the replicated output to match the input's sharding scheme for the residual connection.
+        return if (x.dim(.s) > 1)
+            down_proj_reduced.withSharding(.{ .s = .s })
         else
-            down_proj_partial;
-
-        return down_proj_final;
+            down_proj_reduced;
     }
 };
 
 pub const SelfAttn = struct {
-    q_proj: zml.nn.Linear,
-    k_proj: zml.nn.Linear,
-    v_proj: zml.nn.Linear,
-    o_proj: zml.nn.Linear,
+    q_proj: Linear,
+    k_proj: Linear,
+    v_proj: Linear,
+    o_proj: Linear,
     num_heads: i64 = undefined,
     num_kv_heads: i64 = 0,
     rope_opts: zml.nn.RopeOpts = undefined,
 
-    pub fn init(self: *SelfAttn, config: LlamaLM.Config, mesh: zml.Mesh, sharding: anytype) void {
+    pub fn init(self: *SelfAttn, config: LlamaLM.Config, mesh: zml.Mesh) void {
         self.num_heads = @intCast(config.num_attention_heads);
         self.num_kv_heads = @intCast(config.num_key_value_heads);
         self.rope_opts = .{
@@ -318,10 +314,10 @@ pub const SelfAttn = struct {
             .scaling = config.rope_scaling,
         };
 
-        self.q_proj.weight = self.q_proj.weight.withTags(.{ .q_hidden, .d }).withMesh(mesh).withSharding(sharding);
-        self.k_proj.weight = self.k_proj.weight.withTags(.{ .kv_hidden, .d }).withMesh(mesh).withSharding(sharding);
-        self.v_proj.weight = self.v_proj.weight.withTags(.{ .kv_hidden, .d }).withMesh(mesh).withSharding(sharding);
-        self.o_proj.weight = self.o_proj.weight.withTags(.{ .d, .o_hidden }).withMesh(mesh).withSharding(sharding);
+        self.q_proj.weight = self.q_proj.weight.withTags(.{ .q_hidden, .d }).withMesh(mesh).withSharding(.{ .q_hidden = .model });
+        self.k_proj.weight = self.k_proj.weight.withTags(.{ .kv_hidden, .d }).withMesh(mesh).withSharding(.{ .kv_hidden = .model });
+        self.v_proj.weight = self.v_proj.weight.withTags(.{ .kv_hidden, .d }).withMesh(mesh).withSharding(.{ .kv_hidden = .model });
+        self.o_proj.weight = self.o_proj.weight.withTags(.{ .d, .o_hidden }).withMesh(mesh).withSharding(.{ .o_hidden = .model });
     }
 
     pub fn forward(
@@ -331,15 +327,14 @@ pub const SelfAttn = struct {
         kv_cache: KvCache,
     ) struct { Tensor, KvCache } {
         const num_kv_heads = if (self.num_kv_heads > 0) self.num_kv_heads else self.num_heads;
-        const mesh = self.q_proj.weight.mesh();
 
         const q_proj_out = zml.call(self.q_proj, .forward, .{x});
         const k_proj_out = zml.call(self.k_proj, .forward, .{x});
         const v_proj_out = zml.call(self.v_proj, .forward, .{x});
 
-        var q = q_proj_out.withPartialTags(.{.q_hidden}).splitAxis(.q_hidden, .{ .h = self.num_heads, .hd = .auto });
-        var k = k_proj_out.withPartialTags(.{.kv_hidden}).splitAxis(.kv_hidden, .{ .h = num_kv_heads, .hd = .auto });
-        var v = v_proj_out.withPartialTags(.{.kv_hidden}).splitAxis(.kv_hidden, .{ .h = num_kv_heads, .hd = .auto });
+        var q = q_proj_out.withPartialTags(.{.q_hidden}).splitAxis(.q_hidden, .{ .h = self.num_heads, .hd = .auto }).withSharding(.{ .h = .model });
+        var k = k_proj_out.withPartialTags(.{.kv_hidden}).splitAxis(.kv_hidden, .{ .h = num_kv_heads, .hd = .auto }).withSharding(.{ .h = .model });
+        var v = v_proj_out.withPartialTags(.{.kv_hidden}).splitAxis(.kv_hidden, .{ .h = num_kv_heads, .hd = .auto }).withSharding(.{ .h = .model });
 
         const pos_index = blk: {
             const temp = Tensor.arange(.{ .end = x.dim(.s) }, token_index.dtype()).withTags(.{.s}).broad(zml.Shape.init(.{ .s = x.dim(.s) }, token_index.dtype()));
@@ -354,8 +349,8 @@ pub const SelfAttn = struct {
 
         const new_kv_cache = kv_cache.update(k, v, token_index);
 
-        const k_cached = zml.ops.allGather(new_kv_cache.keys(), .k, mesh);
-        const v_cached = zml.ops.allGather(new_kv_cache.values(), .k, mesh);
+        const k_cached = new_kv_cache.keys();
+        const v_cached = new_kv_cache.values();
 
         const attn_mask = if (x.dim(.s) > 1) blk: {
             var mask = zml.nn.causalAttnMask(.{ .q = k_cached.dim(.k), .k = k_cached.dim(.k) }, x.dtype(), null);
@@ -363,16 +358,18 @@ pub const SelfAttn = struct {
         } else null;
 
         const attn_output = zml.nn.sdpa(q, k_cached, v_cached, .{ .attn_mask = attn_mask, .allow_cudnn = true });
+
         const attn = attn_output.merge(.{ .o_hidden = .{ .h, .hd } }).rename(.{ .q = .s });
 
-        const sharded_output = zml.call(self.o_proj, .forward, .{attn});
+        const o_proj_partial = zml.call(self.o_proj, .forward, .{attn});
+        const sharded_output_reduced = zml.ops.allReduce(o_proj_partial, .model, self.o_proj.weight.mesh(), 2);
 
-        const output_final = if (x.dim(.s) > 1)
-            sharded_output.withSharding(.{ .s = .s })
+        const sharded_output = if (x.dim(.s) > 1)
+            sharded_output_reduced.withSharding(.{ .s = .s })
         else
-            sharded_output;
+            sharded_output_reduced;
 
-        return .{ output_final, new_kv_cache };
+        return .{ sharded_output, new_kv_cache };
     }
 };
 
