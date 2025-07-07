@@ -23,14 +23,6 @@ CUDA_PACKAGES = {
             name = "cuda",
             hdrs = ["include/cuda.h"],
             includes = ["include"],
-            deps = [
-                # ":cudart_so",
-                ":so_stubs_files",
-            ],
-        ),
-        packages.cc_import(
-            name = "so_stubs_files",
-            shared_library = "lib/stubs/libcuda.so",
         ),
         #TODO: Remove me as soon we use the Driver API in tracer.zig
         packages.filegroup(
