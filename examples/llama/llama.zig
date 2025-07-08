@@ -299,7 +299,6 @@ pub const Mlp = struct {
         const gate_out = zml.call(self.gate_proj, .forward, .{x});
         const up_out = zml.call(self.up_proj, .forward, .{x});
         const output = gate_out.silu().mul(up_out);
-        // Return the partial result. The all-reduce is now in TransformerLayer.
         return zml.call(self.down_proj, .forward, .{output});
     }
 };
@@ -368,7 +367,6 @@ pub const SelfAttn = struct {
         const attn_output = zml.nn.sdpa(q, k_cached, v_cached, .{ .attn_mask = attn_mask, .allow_cudnn = true });
         const attn = attn_output.merge(.{ .o_hidden = .{ .h, .hd } }).rename(.{ .q = .s });
 
-        // Return the partial result. The all-reduce is now in TransformerLayer.
         const o_proj_partial = zml.call(self.o_proj, .forward, .{attn});
         return .{ o_proj_partial, new_kv_cache };
     }
