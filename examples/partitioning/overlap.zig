@@ -106,9 +106,9 @@ pub fn asyncMain() !void {
     const mesh = zml.Mesh.init(.{ .x = num_devices });
     log.info("Using mesh: {}", .{mesh});
 
-    const M: i64 = 8192;
-    const N: i64 = 256;
-    const K: i64 = 1024;
+    const M: i64 = 16384;
+    const N: i64 = 16384;
+    const K: i64 = 16384;
 
     const shape_a = zml.Shape.init(.{ .m = M, .n = K }, .i32).withPartitioning(.{ .n = .x });
     const shape_b = zml.Shape.init(.{ .m = M, .n = N }, .i32).withPartitioning(.{ .n = .x });
