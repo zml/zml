@@ -21,3 +21,7 @@ pub inline fn roundeven(x: anytype) @TypeOf(x) {
         extern fn @"llvm.roundeven"(@TypeOf(x)) @TypeOf(x);
     }.@"llvm.roundeven"(x);
 }
+
+pub fn cdiv(numerator: anytype, denominator: anytype) @TypeOf(numerator) {
+    return (numerator + denominator - 1) / denominator;
+}
