@@ -60,6 +60,13 @@ pub const Coro = packed struct {
             return Error.StackTooSmall;
         }
         const register_space = stack[stack.len - register_bytes ..];
+
+        // Zero out the register space so that the initial stack swap
+        // of new coroutines doesn't poison ebp.
+        //
+        // A better solution would be to prepare the initial stack so that the
+        // stack is valid up to the caller.
+        @memset(register_space, 0);
         const jump_ptr: *Func = @ptrCast(@alignCast(&register_space[arch_info.jump_idx * 8]));
         jump_ptr.* = func;
         return .{ .stack_pointer = register_space.ptr };
