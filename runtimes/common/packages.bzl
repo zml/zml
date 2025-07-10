@@ -41,13 +41,13 @@ def _read(mctx, labels):
     return ret
 
 _DEBIAN_PACKAGES = {
-    "libdrm2": _cc_import(name = "libdrm2", shared_library = "usr/lib/x86_64-linux-gnu/libdrm.so.2"),
-    "libelf1": _cc_import(name = "libelf1", shared_library = "usr/lib/x86_64-linux-gnu/libelf.so.1"),
-    "libnuma1": _cc_import(name = "libnuma1", shared_library = "usr/lib/x86_64-linux-gnu/libnuma.so.1"),
-    "libzstd1": _cc_import(name = "libzstd1", shared_library = "usr/lib/x86_64-linux-gnu/libzstd.so.1"),
-    "libdrm-amdgpu1": _cc_import(name = "libdrm-amdgpu1", shared_library = "usr/lib/x86_64-linux-gnu/libdrm_amdgpu.so.1"),
-    "libtinfo6": _cc_import(name = "libtinfo6", shared_library = "lib/x86_64-linux-gnu/libtinfo.so.6"),
-    "zlib1g": _cc_import(name = "zlib1g", shared_library = "lib/x86_64-linux-gnu/libz.so.1"),
+    "libdrm2": _filegroup(name = "libdrm2", srcs = ["usr/lib/x86_64-linux-gnu/libdrm.so.2"]),
+    "libelf1": _filegroup(name = "libelf1", srcs = ["usr/lib/x86_64-linux-gnu/libelf.so.1"]),
+    "libnuma1": _filegroup(name = "libnuma1", srcs = ["usr/lib/x86_64-linux-gnu/libnuma.so.1"]),
+    "libzstd1": _filegroup(name = "libzstd1", srcs = ["usr/lib/x86_64-linux-gnu/libzstd.so.1"]),
+    "libdrm-amdgpu1": _filegroup(name = "libdrm-amdgpu1", srcs = ["usr/lib/x86_64-linux-gnu/libdrm_amdgpu.so.1"]),
+    "libtinfo6": _filegroup(name = "libtinfo6", srcs = ["lib/x86_64-linux-gnu/libtinfo.so.6"]),
+    "zlib1g": _filegroup(name = "zlib1g", srcs = ["lib/x86_64-linux-gnu/libz.so.1"]),
 }
 
 def _common_apt_packages_impl(mctx):
