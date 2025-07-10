@@ -80,5 +80,15 @@ pub fn load() !*const pjrt.Api {
     try setupRocmEnv(arena.allocator(), rocm_data_dir);
 
     const library = try std.fmt.allocPrintZ(arena.allocator(), "{s}/lib/libpjrt_rocm.so", .{rocm_data_dir});
-    return try asynk.callBlocking(pjrt.Api.loadFrom, .{library});
+
+    // We must load the PJRT plugin from the main thread.
+    //
+    // This is because libamdhip64.so use thread local storage as part of the static destructors...
+    //
+    // This destructor accesses a thread-local variable. If the destructor is
+    // executed in a different thread than the one that originally called dlopen()
+    // on the library, the thread-local storage (TLS) offset may be resolved
+    // relative to the TLS base of the main thread, rather than the thread actually
+    // executing the destructor. Accessing this variable results in a segmentation fault...
+    return try pjrt.Api.loadFrom(library);
 }
