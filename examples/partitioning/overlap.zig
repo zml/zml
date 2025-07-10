@@ -13,68 +13,76 @@ const log = std.log.scoped(.@"examples/overlap");
 
 /// This module simulates a compute-heavy workload.
 const ComputeIntensiveModule = struct {
-    iterations: zml.Tensor,
+    // By making this a compile-time constant, we allow the compiler to fully
+    // unroll the loop, creating a large, static computation graph that is ideal
+    // for optimization and overlapping.
+    comptime num_iterations: u32 = 300,
 
-    const LoopContext = struct {
-        iterations: zml.Tensor,
-    };
-
-    fn loopCond(ctx: LoopContext, work: zml.Tensor, i: zml.Tensor) zml.Tensor {
-        _ = work; // The `work` tensor is just a loop-carried variable.
-        return i.cmp(.LT, ctx.iterations);
-    }
-
-    fn loopBody(_: LoopContext, work: zml.Tensor, i: zml.Tensor) [2]zml.Tensor {
-        const prev_work = work; // Shape: {rows, cols}, {M, M}
-
-        // Standard matrix multiplication: work @ work
-        // Contracts axis 1 (.cols) of `work` with axis 0 (.rows) of `work`.
-        const work_squared = work.dotGeneral(work, &.{.{ 1, 0 }}, &.{});
-
-        // The output of dotGeneral is untagged, so we must add the tags back.
-        const work_squared_tagged = work_squared.withTags(.{ .rows, .cols });
-
-        const work_activated = work_squared_tagged.tanh();
-        const work_residual = work_activated.add(prev_work);
-
-        const next_i = i.addConstant(1);
-        return .{ work_residual, next_i };
-    }
-
-    /// Runs a loop of computations for a dynamic number of iterations.
+    /// Runs a loop of computations for a fixed number of iterations.
     pub fn forward(self: @This(), work_init: zml.Tensor) zml.Tensor {
-        const i_init = zml.Tensor.scalar(0, .i32);
-        const loop_context = LoopContext{ .iterations = self.iterations };
+        var work = work_init.withTags(.{ .rows, .cols });
 
-        // We tag `work_init` here to ensure the loop variable has the correct tags
-        // for the first iteration. The loop body is responsible for maintaining the tags.
-        const tagged_work_init = work_init.withTags(.{ .rows, .cols });
+        // A simple Zig `for` loop unrolls into a sequence of MLIR operations,
+        // which can be efficiently scheduled by the XLA compiler.
+        for (0..self.num_iterations) |_| {
+            const prev_work = work;
 
-        const final_loop_vars = zml.ops.while_(loopCond, loopBody, loop_context, .{ tagged_work_init, i_init });
+            // Standard matrix multiplication: work @ work
+            // Contracts axis 1 (.cols) of `work` with axis 0 (.rows) of `work`.
+            const work_squared = work.dotGeneral(work, &.{.{ 1, 0 }}, &.{});
 
-        // The result of the while loop is a tuple. We only care about the first
-        // element, which is the processed tensor.
-        return final_loop_vars[0];
+            // The output of dotGeneral is untagged, so we must add the tags back.
+            const work_squared_tagged = work_squared.withTags(.{ .rows, .cols });
+
+            const work_activated = work_squared_tagged.tanh();
+            work = work_activated.add(prev_work);
+        }
+        return work;
     }
 };
 
 const OverlapModel = struct {
+    // We simulate a model with multiple layers to create a pipeline.
+    var num_layers: u32 = 4;
+
     pub fn forward(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
         const mesh = a.mesh();
-        const a_reduced = zml.ops.allReduce(a, .x, mesh, null);
+        const compute_module: ComputeIntensiveModule = .{};
 
-        const b_f32 = b.convert(.f32);
+        var a_intermediate = a;
+        // The result of the b computation is carried over.
+        // It starts as the original `b` input tensor.
+        var b_result = b.convert(.f32);
 
-        const b_squared = b_f32.dotGeneral(b_f32.transpose(.{ .n, .m }), &.{.{ 1, 0 }}, &.{});
+        // --- Pipelined Execution Loop ---
+        for (0..OverlapModel.num_layers) |i| {
+            // Stage 1: Communication on the 'a' data path.
+            // The result of the previous layer's communication is reduced.
+            const a_reduced = zml.ops.allReduce(a_intermediate, .x, mesh, i + 1);
 
-        const num_iterations = a.choose(.{ .m = 0, .n = 0 }).convert(.i32);
-        const compute_module: ComputeIntensiveModule = .{ .iterations = num_iterations };
-        const b_processed = zml.call(compute_module, .forward, .{b_squared});
+            // Stage 2: Independent Heavy Computation on the 'b' data path.
+            // This is the heavy part that does not depend on `a_reduced`.
+            // The XLA compiler can schedule this to run while `allReduce` is in flight.
+            // The key fix is that the computation is now based on the *result* of the
+            // previous layer's `b` computation, maintaining a logical data flow.
+            const b_squared = b_result.dotGeneral(b_result.transpose(.{ .n, .m }), &.{.{ 1, 0 }}, &.{});
+            const b_squared_tagged = b_squared.withTags(.{ .rows, .cols });
+            const b_processed = zml.call(compute_module, .forward, .{b_squared_tagged});
 
-        const a_scalar = a_reduced.sum(0).sum(1).asScalar();
-        const result = b_processed.add(a_scalar.convert(.f32).broad(b_processed.shape()));
+            // Stage 3: Dependent Computation (Synchronization Point)
+            // Use the result of the all-reduce. This forces a wait on the communication.
+            const a_scalar = a_reduced.sum(0).sum(1).asScalar();
 
-        return result;
+            // --- Prepare inputs for the next iteration ---
+            // The result of the communication is the input for the next layer's communication.
+            a_intermediate = a_reduced;
+            // The result of this layer's computation is the input for the next layer's computation.
+            // We give it back the original tags so the next iteration's transpose works.
+            b_result = b_processed.add(a_scalar.convert(.f32).broad(b_processed.shape())).withTags(.{ .m, .n });
+        }
+
+        // Return the final result from the 'b' data path, converted to the original type.
+        return b_result.convert(.i32);
     }
 };
 
@@ -106,17 +114,19 @@ pub fn asyncMain() !void {
     const mesh = zml.Mesh.init(.{ .x = num_devices });
     log.info("Using mesh: {}", .{mesh});
 
-    const M: i64 = 16384;
-    const N: i64 = 16384;
-    const K: i64 = 16384;
+    // Increased matrix sizes for a more substantial workload.
+    const M: i64 = 8192;
+    const N: i64 = 8192;
+    const K: i64 = 8192;
 
     const shape_a = zml.Shape.init(.{ .m = M, .n = K }, .i32).withPartitioning(.{ .n = .x });
     const shape_b = zml.Shape.init(.{ .m = M, .n = N }, .i32).withPartitioning(.{ .n = .x });
 
     log.info("Compiling the OverlapModel...", .{});
+    var compile_timer = try std.time.Timer.start();
     const mod = try zml.compileFn(allocator, OverlapModel.forward, .{ shape_a, shape_b }, mesh, platform);
     defer mod.deinit();
-    log.info("Compilation complete.", .{});
+    log.info("Compilation complete in {d:.3}s.", .{@as(f32, @floatFromInt(compile_timer.read())) / 1e9});
 
     log.info("Preparing input data...", .{});
     const a_data_slice = try zml.slice.arange(allocator, shape_a, .{});
@@ -131,11 +141,12 @@ pub fn asyncMain() !void {
     log.info("Input data prepared and transferred to device.", .{});
 
     log.info("Executing the model...", .{});
-    var timer = try std.time.Timer.start();
+    var exec_timer = try std.time.Timer.start();
     const result_buffer = mod.call(.{ a_buffer, b_buffer });
     defer result_buffer.deinit();
     const result_data = try result_buffer.toHost(allocator); // Await completion for timing
     defer allocator.free(result_data);
-    log.info("Execution finished in {d:.3}ms.", .{@as(f32, @floatFromInt(timer.read())) / 1e6});
-    log.info("Result (first 8 elements): {any}", .{result_data[0..@min(result_data.len, 8)]});
+    log.info("✅ Execution finished in {d:.3}ms.", .{@as(f32, @floatFromInt(exec_timer.read())) / 1e6});
+
+    log.info("result: {}", .{zml.slice.pretty(result_buffer.shape(), result_data)});
 }
