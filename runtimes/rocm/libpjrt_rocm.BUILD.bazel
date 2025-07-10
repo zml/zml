@@ -83,6 +83,8 @@ copy_to_directory(
         "libpjrt_rocm.patchelf": "lib",
         "hipblaslt.patchelf": "lib",
         "rocblas.patchelf": "lib",
+        "lib/x86_64-linux-gnu": "lib",
+        "usr/lib/x86_64-linux-gnu": "lib",
     },
     add_directory_to_runfiles = True,
     include_external_repositories = ["**"],
