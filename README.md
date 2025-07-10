@@ -34,7 +34,7 @@ you, too, to build cool and exciting AI projects.
 
 To give you a glimpse of what you can do with ZML, here is an early demo:
 
-<div align="center"><img src="https://zml.ai/docs-assets/ZML.gif" style="width:75%"></div>
+<div align="center"><img src="https://raw.githubusercontent.com/zml/zml.github.io/refs/heads/main/docs-assets/ZML.gif" style="width:75%"></div>
 
 It shows a prototype running a LLaMA2 model sharded on 1 NVIDIA RTX 4090, 1 AMD
 6800XT, and 1 Google Cloud TPU v2.  All accelerators were hosted in different
@@ -118,18 +118,21 @@ This model has restrictions, see
 [here](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct). It **requires
 approval from Meta on Huggingface**, which can take a few hours to get granted.
 
-While waiting, you can already generate an access token to log into HuggingFace
-from `bazel`; see [here](./docs/huggingface-access-token.md).
-
 Once you've been granted access, you're ready to download a gated model like
-`Meta-Llama-3.1-8B-Instruct`!
+`Llama-3.1-8B-Instruct`!
+
+First, you need to download the model using the [huggingface-cli](https://huggingface.co/docs/huggingface_hub/en/guides/cli).
 
 ```
-# requires token in $HOME/.cache/huggingface/token, as created by the
-# `huggingface-cli login` command, or the `HUGGINGFACE_TOKEN` environment variable.
+huggingface-cli download meta-llama/Llama-3.1-8B-Instruct --local-dir $HOME/Llama-3.1-8B-Instruct
+```
+
+Then, you can run the model.
+
+```
 cd examples
-bazel run --config=release //llama:Llama-3.1-8B-Instruct
-bazel run --config=release //llama:Llama-3.1-8B-Instruct -- --prompt="What is the capital of France?"
+bazel run --config=release //llama -- --hf-model-path=$HOME/Llama-3.1-8B-Instruct
+bazel run --config=release //llama -- --hf-model-path=$HOME/Llama-3.1-8B-Instruct --prompt="What is the capital of France?"
 ```
 
 You can also try `Llama-3.1-70B-Instruct` if you have enough memory.
@@ -140,6 +143,7 @@ Like the 8B model above, this model also requires approval. See
 [here](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct) for access requirements.
 
 ```
+huggingface-cli download meta-llama/Llama-3.2-1B-Instruct --local-dir $HOME/Llama-3.2-1B-Instruct
 cd examples
 bazel run --config=release //llama:Llama-3.2-1B-Instruct
 bazel run --config=release //llama:Llama-3.2-1B-Instruct -- --prompt="What is the capital of France?"
@@ -160,14 +164,15 @@ following arguments to the command line when compiling / running a model:
 
 The latter, avoiding compilation for CPU, cuts down compilation time.
 
-So, to run the OpenLLama model from above on your host sporting an NVIDIA GPU,
+So, to run the Llama 3.1 8B model from above on your host sporting an NVIDIA GPU,
 run the following:
 
 ```
 cd examples
-bazel run --config=release //llama:Llama-3.2-1B-Instruct             \
-          --@zml//runtimes:cuda=true                       \
-          -- --prompt="What is the capital of France?"
+bazel run --config=release //llama                       \
+          --@zml//runtimes:cuda=true                     \
+          -- --hf-model-path=$HOME/Llama-3.1-8B-Instruct \
+          --prompt="What is the capital of France?"
 ```
 
 
