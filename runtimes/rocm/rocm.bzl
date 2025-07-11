@@ -45,9 +45,9 @@ _ROCM_PACKAGES = {
     "rocm-device-libs": """filegroup(name = "runfiles", srcs = glob(["amdgcn/**"]))""",
     "hip-dev": """filegroup(name = "runfiles", srcs = glob(["share/**"]))""",
     "rocblas": "\n".join([
-        packages.load_("@zml//bazel:cc_import.bzl", "cc_import"),
+        packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
         packages.load_("@zml//runtimes/rocm:gfx.bzl", "bytecode_select"),
-        packages.cc_import(
+        packages.patchelf(
             name = "rocblas",
             shared_library = "lib/librocblas.so.4",
             add_needed = ["libzmlxrocm.so.0"],
@@ -74,9 +74,9 @@ _ROCM_PACKAGES = {
         packages.filegroup(name = "roctx", srcs = ["lib/libroctx64.so.4"]),
     ]),
     "hipblaslt": "\n".join([
-        packages.load_("@zml//bazel:cc_import.bzl", "cc_import"),
+        packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
         packages.load_("@zml//runtimes/rocm:gfx.bzl", "bytecode_select"),
-        packages.cc_import(
+        packages.patchelf(
             name = "hipblaslt",
             shared_library = "lib/libhipblaslt.so.0",
             add_needed = ["libzmlxrocm.so.0"],
