@@ -1,5 +1,6 @@
 """Starlark implementation of zig_proto_library"""
 
+load("@protobuf//bazel/common:proto_info.bzl", "ProtoInfo")
 load("@rules_proto//proto:defs.bzl", "proto_common")
 load(
     "@rules_zig//zig/private/providers:zig_module_info.bzl",
@@ -70,10 +71,9 @@ def get_import_name(target, proto_src):
     name = str(target.label)
 
     # special handling of builtin types
-    if "com_google_protobuf//:" in name:
-        name = "google_protobuf_" + proto_src.basename
-    else:
-        name = name.rsplit("//")[-1]
+    if "com_google_protobuf" in name:
+        return "google_protobuf_" + proto_src.basename.replace(".", "_")
+
     name = name.rsplit("//")[-1]
     return name.replace(".", "_").replace(":", "_").replace("/", "_")
 

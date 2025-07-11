@@ -19,11 +19,21 @@ bazel_dep(name = "rules_license", version = "0.0.8")
 bazel_dep(name = "rules_shell", version = "0.4.1")
 bazel_dep(name = "bazel_features", version = "1.25.0", repo_name = "proto_bazel_features")
 
+toolchains_private = use_extension("//:toolchains_private.bzl", "toolchains_private")
+use_repo(
+    toolchains_private,
+    "rules_ml_toolchain",
+)
+
 workspace_private = use_extension("//:workspace_private.bzl", "workspace_private")
 use_repo(
     workspace_private,
     "com_github_grpc_grpc",
     "com_google_protobuf",
+    "local_config_cuda",
+    "local_config_remote_execution",
+    "local_config_rocm",
+    "local_config_tensorrt",
     "python_version_repo",
     "tsl",
 )

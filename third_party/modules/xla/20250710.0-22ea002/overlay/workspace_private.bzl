@@ -1,8 +1,25 @@
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 load("//third_party:repo.bzl", "tf_http_archive", "tf_mirror_urls", "tf_vendored")
+load("//third_party/gpus:cuda_configure.bzl", "cuda_configure")
+load("//third_party/gpus:rocm_configure.bzl", "rocm_configure")
 load("//third_party/py:python_repo.bzl", "python_repository")
 load("//third_party/pybind11_bazel:workspace.bzl", pybind11_bazel = "repo")
+load("//third_party/tensorrt:tensorrt_configure.bzl", "tensorrt_configure")
+load("//tools/toolchains/remote:configure.bzl", "remote_execution_configure")
 
 def _workspace_private_impl(mctx):
+    http_archive(
+        name = "rules_ml_toolchain",
+        sha256 = "fb78d09234528aef2be856820b69b76486829f65e4eb3c7ffaa5803b667fa441",
+        strip_prefix = "rules_ml_toolchain-f4ad89fa906be2c1374785a79335c8a7dcd49df7",
+        urls = [
+            "https://github.com/zml/rules_ml_toolchain/archive/f4ad89fa906be2c1374785a79335c8a7dcd49df7.tar.gz",
+        ],
+    )
+    cuda_configure(name = "local_config_cuda")
+    remote_execution_configure(name = "local_config_remote_execution")
+    rocm_configure(name = "local_config_rocm")
+    tensorrt_configure(name = "local_config_tensorrt")
     tf_vendored(name = "tsl", relpath = "third_party/tsl")
     pybind11_bazel()
     tf_http_archive(
