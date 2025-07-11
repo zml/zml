@@ -69,12 +69,15 @@ pub fn load() !*const pjrt.Api {
     // See https://github.com/openxla/xla/issues/21428
     try setupXlaGpuCudaDirFlag(arena.allocator(), cuda_data_dir);
 
-    const path = try std.posix.toPosixPath("libnvToolsExt.so.1");
-    _ = std.c.dlopen(&path, .{ .NOW = true, .GLOBAL = true }) orelse {
-        log.err("Unable to dlopen libnvToolsExt.so.1", .{});
-        return error.FileNotFound;
-    };
-    log.err("Successfuly dlopen libnvToolsExt.so.1", .{});
+
+    {
+        const library = try std.fmt.allocPrintZ(arena.allocator(), "{s}/lib/libnvToolsExt.so.1", .{cuda_data_dir});
+        const path = try std.posix.toPosixPath(library);
+        _ = std.c.dlopen(&path, .{ .NOW = true, .GLOBAL = true }) orelse {
+            log.err("Unable to dlopen libnvToolsExt.so.1", .{});
+            return error.FileNotFound;
+        };
+    }
 
     const library = try std.fmt.allocPrintZ(arena.allocator(), "{s}/lib/libpjrt_cuda.so", .{cuda_data_dir});
     const api = try asynk.callBlocking(pjrt.Api.loadFrom, .{library});
