@@ -4,61 +4,61 @@
 			"arch": "amd64",
 			"dependencies": [
 				{
-					"key": "libc6_2.41-6ubuntu1_amd64",
+					"key": "libc6_2.36-9-p-deb12u10_amd64",
 					"name": "libc6",
-					"version": "2.41-6ubuntu1"
+					"version": "2.36-9+deb12u10"
 				},
 				{
-					"key": "libgcc-s1_15-20250404-0ubuntu1_amd64",
+					"key": "libgcc-s1_12.2.0-14-p-deb12u1_amd64",
 					"name": "libgcc-s1",
-					"version": "15-20250404-0ubuntu1"
+					"version": "12.2.0-14+deb12u1"
 				},
 				{
-					"key": "gcc-15-base_15-20250404-0ubuntu1_amd64",
-					"name": "gcc-15-base",
-					"version": "15-20250404-0ubuntu1"
+					"key": "gcc-12-base_12.2.0-14-p-deb12u1_amd64",
+					"name": "gcc-12-base",
+					"version": "12.2.0-14+deb12u1"
 				}
 			],
-			"key": "zlib1g_1-1.3.dfsg-p-really1.3.1-1ubuntu1_amd64",
+			"key": "zlib1g_1-1.2.13.dfsg-1_amd64",
 			"name": "zlib1g",
-			"sha256": "bf8e492a5ee29396802e0c8f1608a9926df9fac0174388d174f1e2b919f79bfa",
+			"sha256": "d7dd1d1411fedf27f5e27650a6eff20ef294077b568f4c8c5e51466dc7c08ce4",
 			"urls": [
-				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/z/zlib/zlib1g_1.3.dfsg+really1.3.1-1ubuntu1_amd64.deb"
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250711T030400Z/pool/main/z/zlib/zlib1g_1.2.13.dfsg-1_amd64.deb"
 			],
-			"version": "1:1.3.dfsg+really1.3.1-1ubuntu1"
+			"version": "1:1.2.13.dfsg-1"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "libc6_2.41-6ubuntu1_amd64",
+			"key": "libc6_2.36-9-p-deb12u10_amd64",
 			"name": "libc6",
-			"sha256": "743a33da03555867b0ba70f6575e40d9c081fe724c44a7316c43f0530c8d9d0b",
+			"sha256": "5dc83256f10ca4d0f2a53dd6583ffd0d0e319af30074ea6c82fb0ae77bd16365",
 			"urls": [
-				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/g/glibc/libc6_2.41-6ubuntu1_amd64.deb"
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250711T030400Z/pool/main/g/glibc/libc6_2.36-9+deb12u10_amd64.deb"
 			],
-			"version": "2.41-6ubuntu1"
+			"version": "2.36-9+deb12u10"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "libgcc-s1_15-20250404-0ubuntu1_amd64",
+			"key": "libgcc-s1_12.2.0-14-p-deb12u1_amd64",
 			"name": "libgcc-s1",
-			"sha256": "0befdca610af390f03e87c0e63eac717425f8d33d570f99bd6197ecbe6f334a5",
+			"sha256": "3016e62cb4b7cd8038822870601f5ed131befe942774d0f745622cc77d8a88f7",
 			"urls": [
-				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/g/gcc-15/libgcc-s1_15-20250404-0ubuntu1_amd64.deb"
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250711T030400Z/pool/main/g/gcc-12/libgcc-s1_12.2.0-14+deb12u1_amd64.deb"
 			],
-			"version": "15-20250404-0ubuntu1"
+			"version": "12.2.0-14+deb12u1"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "gcc-15-base_15-20250404-0ubuntu1_amd64",
-			"name": "gcc-15-base",
-			"sha256": "5bad638f6288ab3fee0c7d11f37d47946c7b0d806dae257aeea968e2507deb1d",
+			"key": "gcc-12-base_12.2.0-14-p-deb12u1_amd64",
+			"name": "gcc-12-base",
+			"sha256": "1896a2aacf4ad681ff5eacc24a5b0ca4d5d9c9b9c9e4b6de5197bc1e116ea619",
 			"urls": [
-				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/g/gcc-15/gcc-15-base_15-20250404-0ubuntu1_amd64.deb"
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250711T030400Z/pool/main/g/gcc-12/gcc-12-base_12.2.0-14+deb12u1_amd64.deb"
 			],
-			"version": "15-20250404-0ubuntu1"
+			"version": "12.2.0-14+deb12u1"
 		}
 	],
 	"version": 1

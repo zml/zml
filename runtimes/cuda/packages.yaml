@@ -4,12 +4,8 @@
 version: 1
 
 sources:
-  - channel: plucky main
-    url: https://snapshot.ubuntu.com/ubuntu/20250711T030400Z
-  - channel: plucky-security main
-    url: https://snapshot.ubuntu.com/ubuntu/20250711T030400Z
-  - channel: plucky-updates main
-    url: https://snapshot.ubuntu.com/ubuntu/20250711T030400Z
+  - channel: bookworm main
+    url: https://snapshot-cloudflare.debian.org/archive/debian/20250711T030400Z
 
 archs:
     - "amd64"

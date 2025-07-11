@@ -18,7 +18,7 @@ CUDNN_VERSION = "9.8.0"
 CUDNN_REDIST_JSON_SHA256 = "a1599fa1f8dcb81235157be5de5ab7d3936e75dfc4e1e442d07970afad3c4843"
 
 _UBUNTU_PACKAGES = {
-     "zlib1g": packages.filegroup(name = "zlib1g", srcs = ["usr/lib/x86_64-linux-gnu/libz.so.1"]),
+     "zlib1g": packages.filegroup(name = "zlib1g", srcs = ["lib/x86_64-linux-gnu/libz.so.1"]),
 }
 
 CUDA_PACKAGES = {
