@@ -8,27 +8,38 @@ package(default_visibility = ["//visibility:public"])
 
 _ROCM_STRIP_PREFIX = "opt/rocm-6.3.4"
 
-# def _kwargs(**kwargs):
-#     return repr(struct(**kwargs))[len("struct("):-1]
-
-# def packages.cc_import(**kwargs):
-#     return """cc_import({})""".format(_kwargs(**kwargs))
-
-# def packages.filegroup(**kwargs):
-#     return """filegroup({})""".format(_kwargs(**kwargs))
-
-# def packages.load_(bzl, name):
-#     return """load({}, {})""".format(repr(bzl), repr(name))
-
-# _UBUNTU_PACKAGES = {
-#     "libdrm2": packages.cc_import(name = "libdrm2", shared_library = "usr/lib/x86_64-linux-gnu/libdrm.so.2"),
-#     "libelf1": packages.cc_import(name = "libelf1", shared_library = "usr/lib/x86_64-linux-gnu/libelf.so.1"),
-#     "libnuma1": packages.cc_import(name = "libnuma1", shared_library = "usr/lib/x86_64-linux-gnu/libnuma.so.1"),
-#     "libzstd1": packages.cc_import(name = "libzstd1", shared_library = "usr/lib/x86_64-linux-gnu/libzstd.so.1"),
-#     "libdrm-amdgpu1": packages.cc_import(name = "libdrm-amdgpu1", shared_library = "usr/lib/x86_64-linux-gnu/libdrm_amdgpu.so.1"),
-#     "libtinfo6": packages.cc_import(name = "libtinfo6", shared_library = "lib/x86_64-linux-gnu/libtinfo.so.6"),
-#     "zlib1g": packages.cc_import(name = "zlib1g", shared_library = "lib/x86_64-linux-gnu/libz.so.1"),
-# }
+_UBUNTU_PACKAGES = {
+    "libdrm2": packages.filegroup(name = "libdrm2", srcs = ["usr/lib/x86_64-linux-gnu/libdrm.so.2"]),
+    "libelf1t64": "\n".join([
+        packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
+        packages.patchelf(
+            name = "libelf1",
+            shared_library = "usr/lib/x86_64-linux-gnu/libelf.so.1",
+            set_rpath = '$ORIGIN',
+        ),
+    ]),
+    "libnuma1": packages.filegroup(name = "libnuma1", srcs = ["usr/lib/x86_64-linux-gnu/libnuma.so.1"]),
+    "libzstd1": packages.filegroup(name = "libzstd1", srcs = ["usr/lib/x86_64-linux-gnu/libzstd.so.1"]),
+    "libdrm-amdgpu1": "\n".join([
+        packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
+        packages.patchelf(
+            name = "libdrm-amdgpu1",
+            shared_library = "usr/lib/x86_64-linux-gnu/libdrm_amdgpu.so.1",
+            set_rpath = '$ORIGIN',
+        ),
+    ]),
+    "libtinfo6": packages.filegroup(name = "libtinfo6", srcs = ["usr/lib/x86_64-linux-gnu/libtinfo.so.6"]),
+    "zlib1g": packages.filegroup(name = "zlib1g", srcs = ["usr/lib/x86_64-linux-gnu/libz.so.1"]),
+    "liblzma5":  packages.filegroup(name = "liblzma5", srcs = ["usr/lib/x86_64-linux-gnu/liblzma.so.5"]),
+    "libxml2": "\n".join([
+        packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
+        packages.patchelf(
+            name = "libxml2",
+            shared_library = "usr/lib/x86_64-linux-gnu/libxml2.so.2",
+            set_rpath = '$ORIGIN',
+        ),
+    ]),
+}
 
 _ROCM_PACKAGES = {
     "rocm-core": packages.filegroup(name = "rocm-core", srcs = ["lib/librocm-core.so.1"]),
@@ -106,13 +117,30 @@ _ROCM_PACKAGES = {
         packages.filegroup(name = "amdhip", srcs = ["lib/libamdhip64.so.6"]),
         packages.filegroup(name = "hiprtc", srcs = ["lib/libhiprtc.so.6"]),
     ]),
-    "rocm-llvm": packages.filegroup(name = "lld", srcs = ["llvm/bin/ld.lld"], visibility = ["//visibility:public"]),
+    "rocm-llvm": "\n".join([
+        packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
+        packages.patchelf(
+            name = "lld",
+            #TODO: Rename attr to elf_file or file ?
+            shared_library = "llvm/bin/ld.lld",
+            set_rpath = '$ORIGIN/../../lib',
+        ),
+    ]),
 }
 
 def _rocm_impl(mctx):
     loaded_packages = packages.read(mctx, [
         "@zml//runtimes/rocm:packages.lock.json",
     ])
+
+    for pkg_name, build_file_content in _UBUNTU_PACKAGES.items():
+        pkg = loaded_packages[pkg_name]
+        http_deb_archive(
+            name = pkg_name,
+            urls = pkg["urls"],
+            sha256 = pkg["sha256"],
+            build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + build_file_content,
+        )
 
     for pkg_name, build_file_content in _ROCM_PACKAGES.items():
         pkg = loaded_packages[pkg_name]

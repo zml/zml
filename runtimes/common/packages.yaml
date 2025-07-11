@@ -1,5 +1,5 @@
 #
-#     bazel run @rocm_apt//:lock
+#     bazel run @apt_common//:lock
 #
 version: 1
 
@@ -11,10 +11,4 @@ archs:
     - "amd64"
 
 packages:
-    - "libdrm2"
-    - "libelf1"
-    - "libnuma1"
-    - "libzstd1"
-    - "libdrm-amdgpu1"
-    - "libtinfo6"
     - "zlib1g"

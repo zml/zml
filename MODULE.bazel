@@ -80,7 +80,7 @@ pip.parse(
 use_repo(pip, "neuron_py_deps")
 
 common_apt_packages = use_extension("//runtimes/common:packages.bzl", "common_apt_packages")
-use_repo(common_apt_packages, "libdrm-amdgpu1", "libdrm2", "libelf1", "libnuma1", "libtinfo6", "libzstd1", "zlib1g")
+use_repo(common_apt_packages, "zlib1g")
 
 cpu = use_extension("//runtimes/cpu:cpu.bzl", "cpu_pjrt_plugin")
 use_repo(cpu, "libpjrt_cpu_darwin_amd64", "libpjrt_cpu_darwin_arm64", "libpjrt_cpu_linux_amd64")
@@ -89,10 +89,7 @@ cuda = use_extension("//runtimes/cuda:cuda.bzl", "cuda_packages")
 use_repo(cuda, "libpjrt_cuda")
 
 rocm = use_extension("//runtimes/rocm:rocm.bzl", "rocm_packages")
-
-inject_repo(rocm, "libdrm-amdgpu1", "libdrm2", "libelf1", "libnuma1", "libtinfo6", "libzstd1", "zlib1g")
-
-use_repo(rocm, "hipblaslt", "libpjrt_rocm", "rocblas")
+use_repo(rocm, "libpjrt_rocm")
 
 tpu = use_extension("//runtimes/tpu:tpu.bzl", "tpu_packages")
 use_repo(tpu, "libpjrt_tpu")
