@@ -2,34 +2,6 @@
 	"packages": [
 		{
 			"arch": "amd64",
-			"dependencies": [],
-			"key": "rocm-core_6.3.4.60304-76_22.04_amd64",
-			"name": "rocm-core",
-			"sha256": "80ec656c41290335df3609043b4ff52df25de82257d987d2e90a4d86cbc0d080",
-			"urls": [
-				"https://repo.radeon.com/rocm/apt/6.3.4/pool/main/r/rocm-core/rocm-core_6.3.4.60304-76~22.04_amd64.deb"
-			],
-			"version": "6.3.4.60304-76~22.04"
-		},
-		{
-			"arch": "amd64",
-			"dependencies": [
-				{
-					"key": "rocm-core_6.3.4.60304-76_22.04_amd64",
-					"name": "rocm-core",
-					"version": "6.3.4.60304-76~22.04"
-				}
-			],
-			"key": "rocm-smi-lib_7.4.0.60304-76_22.04_amd64",
-			"name": "rocm-smi-lib",
-			"sha256": "0aa35daa0b6336f7ff58720067e16e7b68efcf423d8be355e11c3a59e7b7bf71",
-			"urls": [
-				"https://repo.radeon.com/rocm/apt/6.3.4/pool/main/r/rocm-smi-lib/rocm-smi-lib_7.4.0.60304-76~22.04_amd64.deb"
-			],
-			"version": "7.4.0.60304-76~22.04"
-		},
-		{
-			"arch": "amd64",
 			"dependencies": [
 				{
 					"key": "rocprofiler-register_0.4.0.60304-76_22.04_amd64",
@@ -37,9 +9,64 @@
 					"version": "0.4.0.60304-76~22.04"
 				},
 				{
+					"key": "libstdc-p--p-6_15-20250404-0ubuntu1_amd64",
+					"name": "libstdc++6",
+					"version": "15-20250404-0ubuntu1"
+				},
+				{
+					"key": "libgcc-s1_15-20250404-0ubuntu1_amd64",
+					"name": "libgcc-s1",
+					"version": "15-20250404-0ubuntu1"
+				},
+				{
+					"key": "libc6_2.41-6ubuntu1_amd64",
+					"name": "libc6",
+					"version": "2.41-6ubuntu1"
+				},
+				{
+					"key": "gcc-15-base_15-20250404-0ubuntu1_amd64",
+					"name": "gcc-15-base",
+					"version": "15-20250404-0ubuntu1"
+				},
+				{
 					"key": "rocm-core_6.3.4.60304-76_22.04_amd64",
 					"name": "rocm-core",
 					"version": "6.3.4.60304-76~22.04"
+				},
+				{
+					"key": "libelf1t64_0.192-4ubuntu1_amd64",
+					"name": "libelf1t64",
+					"version": "0.192-4ubuntu1"
+				},
+				{
+					"key": "zlib1g_1-1.3.dfsg-p-really1.3.1-1ubuntu1_amd64",
+					"name": "zlib1g",
+					"version": "1:1.3.dfsg+really1.3.1-1ubuntu1"
+				},
+				{
+					"key": "libzstd1_1.5.6-p-dfsg-2_amd64",
+					"name": "libzstd1",
+					"version": "1.5.6+dfsg-2"
+				},
+				{
+					"key": "libnuma1_2.0.18-1build1_amd64",
+					"name": "libnuma1",
+					"version": "2.0.18-1build1"
+				},
+				{
+					"key": "libdrm-amdgpu1_2.4.124-2_amd64",
+					"name": "libdrm-amdgpu1",
+					"version": "2.4.124-2"
+				},
+				{
+					"key": "libdrm2_2.4.124-2_amd64",
+					"name": "libdrm2",
+					"version": "2.4.124-2"
+				},
+				{
+					"key": "libdrm-common_2.4.124-2_amd64",
+					"name": "libdrm-common",
+					"version": "2.4.124-2"
 				}
 			],
 			"key": "hsa-rocr_1.14.0.60304-76_22.04_amd64",
@@ -54,6 +81,26 @@
 			"arch": "amd64",
 			"dependencies": [
 				{
+					"key": "libstdc-p--p-6_15-20250404-0ubuntu1_amd64",
+					"name": "libstdc++6",
+					"version": "15-20250404-0ubuntu1"
+				},
+				{
+					"key": "libgcc-s1_15-20250404-0ubuntu1_amd64",
+					"name": "libgcc-s1",
+					"version": "15-20250404-0ubuntu1"
+				},
+				{
+					"key": "libc6_2.41-6ubuntu1_amd64",
+					"name": "libc6",
+					"version": "2.41-6ubuntu1"
+				},
+				{
+					"key": "gcc-15-base_15-20250404-0ubuntu1_amd64",
+					"name": "gcc-15-base",
+					"version": "15-20250404-0ubuntu1"
+				},
+				{
 					"key": "rocm-core_6.3.4.60304-76_22.04_amd64",
 					"name": "rocm-core",
 					"version": "6.3.4.60304-76~22.04"
@@ -66,6 +113,138 @@
 				"https://repo.radeon.com/rocm/apt/6.3.4/pool/main/r/rocprofiler-register/rocprofiler-register_0.4.0.60304-76~22.04_amd64.deb"
 			],
 			"version": "0.4.0.60304-76~22.04"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libstdc-p--p-6_15-20250404-0ubuntu1_amd64",
+			"name": "libstdc++6",
+			"sha256": "c7f0149d8cb0ff366fb9529c9b49adca8ce758dbe3ba472b572b3d8949617090",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/g/gcc-15/libstdc++6_15-20250404-0ubuntu1_amd64.deb"
+			],
+			"version": "15-20250404-0ubuntu1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libgcc-s1_15-20250404-0ubuntu1_amd64",
+			"name": "libgcc-s1",
+			"sha256": "0befdca610af390f03e87c0e63eac717425f8d33d570f99bd6197ecbe6f334a5",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/g/gcc-15/libgcc-s1_15-20250404-0ubuntu1_amd64.deb"
+			],
+			"version": "15-20250404-0ubuntu1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libc6_2.41-6ubuntu1_amd64",
+			"name": "libc6",
+			"sha256": "743a33da03555867b0ba70f6575e40d9c081fe724c44a7316c43f0530c8d9d0b",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/g/glibc/libc6_2.41-6ubuntu1_amd64.deb"
+			],
+			"version": "2.41-6ubuntu1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "gcc-15-base_15-20250404-0ubuntu1_amd64",
+			"name": "gcc-15-base",
+			"sha256": "5bad638f6288ab3fee0c7d11f37d47946c7b0d806dae257aeea968e2507deb1d",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/g/gcc-15/gcc-15-base_15-20250404-0ubuntu1_amd64.deb"
+			],
+			"version": "15-20250404-0ubuntu1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "rocm-core_6.3.4.60304-76_22.04_amd64",
+			"name": "rocm-core",
+			"sha256": "80ec656c41290335df3609043b4ff52df25de82257d987d2e90a4d86cbc0d080",
+			"urls": [
+				"https://repo.radeon.com/rocm/apt/6.3.4/pool/main/r/rocm-core/rocm-core_6.3.4.60304-76~22.04_amd64.deb"
+			],
+			"version": "6.3.4.60304-76~22.04"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libelf1t64_0.192-4ubuntu1_amd64",
+			"name": "libelf1t64",
+			"sha256": "0d79517d2eff18c7fbcd9bec3f4adcbf54b68fc660c085e338803e4a46a31e7c",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/e/elfutils/libelf1t64_0.192-4ubuntu1_amd64.deb"
+			],
+			"version": "0.192-4ubuntu1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "zlib1g_1-1.3.dfsg-p-really1.3.1-1ubuntu1_amd64",
+			"name": "zlib1g",
+			"sha256": "bf8e492a5ee29396802e0c8f1608a9926df9fac0174388d174f1e2b919f79bfa",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/z/zlib/zlib1g_1.3.dfsg+really1.3.1-1ubuntu1_amd64.deb"
+			],
+			"version": "1:1.3.dfsg+really1.3.1-1ubuntu1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libzstd1_1.5.6-p-dfsg-2_amd64",
+			"name": "libzstd1",
+			"sha256": "53e48dd3634eb5e66ddd8fabd034e3760b93b816584d1d55a8966f0b12e145b9",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/libz/libzstd/libzstd1_1.5.6+dfsg-2_amd64.deb"
+			],
+			"version": "1.5.6+dfsg-2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libnuma1_2.0.18-1build1_amd64",
+			"name": "libnuma1",
+			"sha256": "508daa855e99959acaa945e6a89d218e0be6b5727fd28773580942ff37cf5805",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/n/numactl/libnuma1_2.0.18-1build1_amd64.deb"
+			],
+			"version": "2.0.18-1build1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libdrm-amdgpu1_2.4.124-2_amd64",
+			"name": "libdrm-amdgpu1",
+			"sha256": "49ae77876d8effa36289ffeb5e66c1b37fa401b94566d5c2cf77851be6c2dfd4",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/libd/libdrm/libdrm-amdgpu1_2.4.124-2_amd64.deb"
+			],
+			"version": "2.4.124-2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libdrm2_2.4.124-2_amd64",
+			"name": "libdrm2",
+			"sha256": "3df6d03857c1579aa2d58f6b56c7a38c19c0a623b91f37a59dfb2f036ed1a443",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/libd/libdrm/libdrm2_2.4.124-2_amd64.deb"
+			],
+			"version": "2.4.124-2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libdrm-common_2.4.124-2_amd64",
+			"name": "libdrm-common",
+			"sha256": "9d98a07d82ccad2d45659756bce1069ce1801a1ab385a9a669aa7b2dd632db2d",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/libd/libdrm/libdrm-common_2.4.124-2_all.deb"
+			],
+			"version": "2.4.124-2"
 		},
 		{
 			"arch": "amd64",
@@ -88,9 +267,89 @@
 			"arch": "amd64",
 			"dependencies": [
 				{
+					"key": "libgcc-s1_15-20250404-0ubuntu1_amd64",
+					"name": "libgcc-s1",
+					"version": "15-20250404-0ubuntu1"
+				},
+				{
+					"key": "libc6_2.41-6ubuntu1_amd64",
+					"name": "libc6",
+					"version": "2.41-6ubuntu1"
+				},
+				{
+					"key": "gcc-15-base_15-20250404-0ubuntu1_amd64",
+					"name": "gcc-15-base",
+					"version": "15-20250404-0ubuntu1"
+				},
+				{
+					"key": "libstdc-p--p-6_15-20250404-0ubuntu1_amd64",
+					"name": "libstdc++6",
+					"version": "15-20250404-0ubuntu1"
+				},
+				{
+					"key": "zlib1g_1-1.3.dfsg-p-really1.3.1-1ubuntu1_amd64",
+					"name": "zlib1g",
+					"version": "1:1.3.dfsg+really1.3.1-1ubuntu1"
+				},
+				{
+					"key": "libzstd1_1.5.6-p-dfsg-2_amd64",
+					"name": "libzstd1",
+					"version": "1.5.6+dfsg-2"
+				},
+				{
 					"key": "rocm-core_6.3.4.60304-76_22.04_amd64",
 					"name": "rocm-core",
 					"version": "6.3.4.60304-76~22.04"
+				},
+				{
+					"key": "libncurses-dev_6.5-p-20250216-2_amd64",
+					"name": "libncurses-dev",
+					"version": "6.5+20250216-2"
+				},
+				{
+					"key": "libc6-dev_2.41-6ubuntu1_amd64",
+					"name": "libc6-dev",
+					"version": "2.41-6ubuntu1"
+				},
+				{
+					"key": "rpcsvc-proto_1.4.2-0ubuntu7_amd64",
+					"name": "rpcsvc-proto",
+					"version": "1.4.2-0ubuntu7"
+				},
+				{
+					"key": "libcrypt-dev_1-4.4.38-1_amd64",
+					"name": "libcrypt-dev",
+					"version": "1:4.4.38-1"
+				},
+				{
+					"key": "libcrypt1_1-4.4.38-1_amd64",
+					"name": "libcrypt1",
+					"version": "1:4.4.38-1"
+				},
+				{
+					"key": "linux-libc-dev_6.14.0-23.23_amd64",
+					"name": "linux-libc-dev",
+					"version": "6.14.0-23.23"
+				},
+				{
+					"key": "libc-dev-bin_2.41-6ubuntu1_amd64",
+					"name": "libc-dev-bin",
+					"version": "2.41-6ubuntu1"
+				},
+				{
+					"key": "libncursesw6_6.5-p-20250216-2_amd64",
+					"name": "libncursesw6",
+					"version": "6.5+20250216-2"
+				},
+				{
+					"key": "libtinfo6_6.5-p-20250216-2_amd64",
+					"name": "libtinfo6",
+					"version": "6.5+20250216-2"
+				},
+				{
+					"key": "libncurses6_6.5-p-20250216-2_amd64",
+					"name": "libncurses6",
+					"version": "6.5+20250216-2"
 				}
 			],
 			"key": "comgr_2.8.0.60304-76_22.04_amd64",
@@ -100,6 +359,116 @@
 				"https://repo.radeon.com/rocm/apt/6.3.4/pool/main/c/comgr/comgr_2.8.0.60304-76~22.04_amd64.deb"
 			],
 			"version": "2.8.0.60304-76~22.04"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libncurses-dev_6.5-p-20250216-2_amd64",
+			"name": "libncurses-dev",
+			"sha256": "6d2041da1d5838443935c0e9b1501237e854a4d8ebf98a307a4a54613c0b1fcf",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/n/ncurses/libncurses-dev_6.5+20250216-2_amd64.deb"
+			],
+			"version": "6.5+20250216-2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libc6-dev_2.41-6ubuntu1_amd64",
+			"name": "libc6-dev",
+			"sha256": "7895c20931d110fcfc3f2aa936c1ecc7acb15dc1e07c7829b48a357617e50d41",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/g/glibc/libc6-dev_2.41-6ubuntu1_amd64.deb"
+			],
+			"version": "2.41-6ubuntu1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "rpcsvc-proto_1.4.2-0ubuntu7_amd64",
+			"name": "rpcsvc-proto",
+			"sha256": "7eb710fe148d224c159ddec1ceb0ba53ead52a80a6793dcdae1474acf20d8f71",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/r/rpcsvc-proto/rpcsvc-proto_1.4.2-0ubuntu7_amd64.deb"
+			],
+			"version": "1.4.2-0ubuntu7"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libcrypt-dev_1-4.4.38-1_amd64",
+			"name": "libcrypt-dev",
+			"sha256": "88a4ec0d8bf7b61600165896acbe55d888b54f317e9a5bc2fcb99fe9166b0427",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/libx/libxcrypt/libcrypt-dev_4.4.38-1_amd64.deb"
+			],
+			"version": "1:4.4.38-1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libcrypt1_1-4.4.38-1_amd64",
+			"name": "libcrypt1",
+			"sha256": "8c5fe434149b1697f0f82b2092ebdafcb93d28c954dde6d3f734112f7f0ecaee",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/libx/libxcrypt/libcrypt1_4.4.38-1_amd64.deb"
+			],
+			"version": "1:4.4.38-1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "linux-libc-dev_6.14.0-23.23_amd64",
+			"name": "linux-libc-dev",
+			"sha256": "f975777391aa5b87ba71145fa20d133cc3966180710b75a3b750503e6225beb9",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/l/linux/linux-libc-dev_6.14.0-23.23_amd64.deb"
+			],
+			"version": "6.14.0-23.23"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libc-dev-bin_2.41-6ubuntu1_amd64",
+			"name": "libc-dev-bin",
+			"sha256": "c68daa1d34d12502f56023a8f9a5e79fc911ad7906473187c8e064baff546e61",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/g/glibc/libc-dev-bin_2.41-6ubuntu1_amd64.deb"
+			],
+			"version": "2.41-6ubuntu1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libncursesw6_6.5-p-20250216-2_amd64",
+			"name": "libncursesw6",
+			"sha256": "ffdb4cd253e54c46e69ae39b24974cf45169d7dc377f5d78f911b7bc67ef621f",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/n/ncurses/libncursesw6_6.5+20250216-2_amd64.deb"
+			],
+			"version": "6.5+20250216-2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libtinfo6_6.5-p-20250216-2_amd64",
+			"name": "libtinfo6",
+			"sha256": "74a7f112d19374c9cc45989df018c4b160fe035d2f5df31cd9b5ac491535c041",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/n/ncurses/libtinfo6_6.5+20250216-2_amd64.deb"
+			],
+			"version": "6.5+20250216-2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libncurses6_6.5-p-20250216-2_amd64",
+			"name": "libncurses6",
+			"sha256": "06620fbf86a63e3266ab929dcd3dd5200f08a98396e56d2ea6874a66807878cf",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/n/ncurses/libncurses6_6.5+20250216-2_amd64.deb"
+			],
+			"version": "6.5+20250216-2"
 		},
 		{
 			"arch": "amd64",
@@ -130,6 +499,31 @@
 					"version": "6.3.42134.60304-76~22.04"
 				},
 				{
+					"key": "libc6_2.41-6ubuntu1_amd64",
+					"name": "libc6",
+					"version": "2.41-6ubuntu1"
+				},
+				{
+					"key": "libgcc-s1_15-20250404-0ubuntu1_amd64",
+					"name": "libgcc-s1",
+					"version": "15-20250404-0ubuntu1"
+				},
+				{
+					"key": "gcc-15-base_15-20250404-0ubuntu1_amd64",
+					"name": "gcc-15-base",
+					"version": "15-20250404-0ubuntu1"
+				},
+				{
+					"key": "libstdc-p--p-6_15-20250404-0ubuntu1_amd64",
+					"name": "libstdc++6",
+					"version": "15-20250404-0ubuntu1"
+				},
+				{
+					"key": "libnuma1_2.0.18-1build1_amd64",
+					"name": "libnuma1",
+					"version": "2.0.18-1build1"
+				},
+				{
 					"key": "rocprofiler-register_0.4.0.60304-76_22.04_amd64",
 					"name": "rocprofiler-register",
 					"version": "0.4.0.60304-76~22.04"
@@ -140,14 +534,264 @@
 					"version": "2.8.0.60304-76~22.04"
 				},
 				{
+					"key": "zlib1g_1-1.3.dfsg-p-really1.3.1-1ubuntu1_amd64",
+					"name": "zlib1g",
+					"version": "1:1.3.dfsg+really1.3.1-1ubuntu1"
+				},
+				{
+					"key": "libzstd1_1.5.6-p-dfsg-2_amd64",
+					"name": "libzstd1",
+					"version": "1.5.6+dfsg-2"
+				},
+				{
+					"key": "libncurses-dev_6.5-p-20250216-2_amd64",
+					"name": "libncurses-dev",
+					"version": "6.5+20250216-2"
+				},
+				{
+					"key": "libc6-dev_2.41-6ubuntu1_amd64",
+					"name": "libc6-dev",
+					"version": "2.41-6ubuntu1"
+				},
+				{
+					"key": "rpcsvc-proto_1.4.2-0ubuntu7_amd64",
+					"name": "rpcsvc-proto",
+					"version": "1.4.2-0ubuntu7"
+				},
+				{
+					"key": "libcrypt-dev_1-4.4.38-1_amd64",
+					"name": "libcrypt-dev",
+					"version": "1:4.4.38-1"
+				},
+				{
+					"key": "libcrypt1_1-4.4.38-1_amd64",
+					"name": "libcrypt1",
+					"version": "1:4.4.38-1"
+				},
+				{
+					"key": "linux-libc-dev_6.14.0-23.23_amd64",
+					"name": "linux-libc-dev",
+					"version": "6.14.0-23.23"
+				},
+				{
+					"key": "libc-dev-bin_2.41-6ubuntu1_amd64",
+					"name": "libc-dev-bin",
+					"version": "2.41-6ubuntu1"
+				},
+				{
+					"key": "libncursesw6_6.5-p-20250216-2_amd64",
+					"name": "libncursesw6",
+					"version": "6.5+20250216-2"
+				},
+				{
+					"key": "libtinfo6_6.5-p-20250216-2_amd64",
+					"name": "libtinfo6",
+					"version": "6.5+20250216-2"
+				},
+				{
+					"key": "libncurses6_6.5-p-20250216-2_amd64",
+					"name": "libncurses6",
+					"version": "6.5+20250216-2"
+				},
+				{
 					"key": "rocminfo_1.0.0.60304-76_22.04_amd64",
 					"name": "rocminfo",
 					"version": "1.0.0.60304-76~22.04"
 				},
 				{
+					"key": "python3_3.13.3-1_amd64",
+					"name": "python3",
+					"version": "3.13.3-1"
+				},
+				{
+					"key": "libpython3-stdlib_3.13.3-1_amd64",
+					"name": "libpython3-stdlib",
+					"version": "3.13.3-1"
+				},
+				{
+					"key": "libpython3.13-stdlib_3.13.3-1ubuntu0.2_amd64",
+					"name": "libpython3.13-stdlib",
+					"version": "3.13.3-1ubuntu0.2"
+				},
+				{
+					"key": "libuuid1_2.40.2-14ubuntu1.1_amd64",
+					"name": "libuuid1",
+					"version": "2.40.2-14ubuntu1.1"
+				},
+				{
+					"key": "libsqlite3-0_3.46.1-3ubuntu0.1_amd64",
+					"name": "libsqlite3-0",
+					"version": "3.46.1-3ubuntu0.1"
+				},
+				{
+					"key": "libreadline8t64_8.2-6_amd64",
+					"name": "libreadline8t64",
+					"version": "8.2-6"
+				},
+				{
+					"key": "readline-common_8.2-6_amd64",
+					"name": "readline-common",
+					"version": "8.2-6"
+				},
+				{
+					"key": "liblzma5_5.6.4-1ubuntu1_amd64",
+					"name": "liblzma5",
+					"version": "5.6.4-1ubuntu1"
+				},
+				{
+					"key": "libffi8_3.4.7-1_amd64",
+					"name": "libffi8",
+					"version": "3.4.7-1"
+				},
+				{
+					"key": "libdb5.3t64_5.3.28-p-dfsg2-9_amd64",
+					"name": "libdb5.3t64",
+					"version": "5.3.28+dfsg2-9"
+				},
+				{
+					"key": "libbz2-1.0_1.0.8-6_amd64",
+					"name": "libbz2-1.0",
+					"version": "1.0.8-6"
+				},
+				{
+					"key": "tzdata_2025b-1ubuntu1.1_amd64",
+					"name": "tzdata",
+					"version": "2025b-1ubuntu1.1"
+				},
+				{
+					"key": "debconf_1.5.87ubuntu1_amd64",
+					"name": "debconf",
+					"version": "1.5.87ubuntu1"
+				},
+				{
+					"key": "netbase_6.4_amd64",
+					"name": "netbase",
+					"version": "6.4"
+				},
+				{
+					"key": "media-types_13.0.0_amd64",
+					"name": "media-types",
+					"version": "13.0.0"
+				},
+				{
+					"key": "libpython3.13-minimal_3.13.3-1ubuntu0.2_amd64",
+					"name": "libpython3.13-minimal",
+					"version": "3.13.3-1ubuntu0.2"
+				},
+				{
+					"key": "libssl3t64_3.4.1-1ubuntu3_amd64",
+					"name": "libssl3t64",
+					"version": "3.4.1-1ubuntu3"
+				},
+				{
+					"key": "openssl-provider-legacy_3.4.1-1ubuntu3_amd64",
+					"name": "openssl-provider-legacy",
+					"version": "3.4.1-1ubuntu3"
+				},
+				{
+					"key": "python3.13_3.13.3-1ubuntu0.2_amd64",
+					"name": "python3.13",
+					"version": "3.13.3-1ubuntu0.2"
+				},
+				{
+					"key": "python3.13-minimal_3.13.3-1ubuntu0.2_amd64",
+					"name": "python3.13-minimal",
+					"version": "3.13.3-1ubuntu0.2"
+				},
+				{
+					"key": "libexpat1_2.7.1-1_amd64",
+					"name": "libexpat1",
+					"version": "2.7.1-1"
+				},
+				{
+					"key": "python3-minimal_3.13.3-1_amd64",
+					"name": "python3-minimal",
+					"version": "3.13.3-1"
+				},
+				{
+					"key": "dpkg_1.22.18ubuntu2_amd64",
+					"name": "dpkg",
+					"version": "1.22.18ubuntu2"
+				},
+				{
+					"key": "tar_1.35-p-dfsg-3.1_amd64",
+					"name": "tar",
+					"version": "1.35+dfsg-3.1"
+				},
+				{
+					"key": "libselinux1_3.7-3ubuntu3_amd64",
+					"name": "libselinux1",
+					"version": "3.7-3ubuntu3"
+				},
+				{
+					"key": "libpcre2-8-0_10.45-1_amd64",
+					"name": "libpcre2-8-0",
+					"version": "10.45-1"
+				},
+				{
+					"key": "libacl1_2.3.2-2_amd64",
+					"name": "libacl1",
+					"version": "2.3.2-2"
+				},
+				{
+					"key": "libmd0_1.1.0-2build2_amd64",
+					"name": "libmd0",
+					"version": "1.1.0-2build2"
+				},
+				{
+					"key": "pciutils_1-3.13.0-2_amd64",
+					"name": "pciutils",
+					"version": "1:3.13.0-2"
+				},
+				{
+					"key": "libpci3_1-3.13.0-2_amd64",
+					"name": "libpci3",
+					"version": "1:3.13.0-2"
+				},
+				{
+					"key": "pci.ids_0.0_2025.03.09-1_amd64",
+					"name": "pci.ids",
+					"version": "0.0~2025.03.09-1"
+				},
+				{
+					"key": "libudev1_257.4-1ubuntu3.1_amd64",
+					"name": "libudev1",
+					"version": "257.4-1ubuntu3.1"
+				},
+				{
+					"key": "libcap2_1-2.73-4ubuntu1_amd64",
+					"name": "libcap2",
+					"version": "1:2.73-4ubuntu1"
+				},
+				{
+					"key": "libkmod2_33-p-20240816-2ubuntu1_amd64",
+					"name": "libkmod2",
+					"version": "33+20240816-2ubuntu1"
+				},
+				{
 					"key": "hsa-rocr_1.14.0.60304-76_22.04_amd64",
 					"name": "hsa-rocr",
 					"version": "1.14.0.60304-76~22.04"
+				},
+				{
+					"key": "libelf1t64_0.192-4ubuntu1_amd64",
+					"name": "libelf1t64",
+					"version": "0.192-4ubuntu1"
+				},
+				{
+					"key": "libdrm-amdgpu1_2.4.124-2_amd64",
+					"name": "libdrm-amdgpu1",
+					"version": "2.4.124-2"
+				},
+				{
+					"key": "libdrm2_2.4.124-2_amd64",
+					"name": "libdrm2",
+					"version": "2.4.124-2"
+				},
+				{
+					"key": "libdrm-common_2.4.124-2_amd64",
+					"name": "libdrm-common",
+					"version": "2.4.124-2"
 				},
 				{
 					"key": "roctracer_4.1.60304.60304-76_22.04_amd64",
@@ -205,6 +849,31 @@
 					"version": "6.3.42134.60304-76~22.04"
 				},
 				{
+					"key": "libc6_2.41-6ubuntu1_amd64",
+					"name": "libc6",
+					"version": "2.41-6ubuntu1"
+				},
+				{
+					"key": "libgcc-s1_15-20250404-0ubuntu1_amd64",
+					"name": "libgcc-s1",
+					"version": "15-20250404-0ubuntu1"
+				},
+				{
+					"key": "gcc-15-base_15-20250404-0ubuntu1_amd64",
+					"name": "gcc-15-base",
+					"version": "15-20250404-0ubuntu1"
+				},
+				{
+					"key": "libstdc-p--p-6_15-20250404-0ubuntu1_amd64",
+					"name": "libstdc++6",
+					"version": "15-20250404-0ubuntu1"
+				},
+				{
+					"key": "libnuma1_2.0.18-1build1_amd64",
+					"name": "libnuma1",
+					"version": "2.0.18-1build1"
+				},
+				{
 					"key": "rocprofiler-register_0.4.0.60304-76_22.04_amd64",
 					"name": "rocprofiler-register",
 					"version": "0.4.0.60304-76~22.04"
@@ -215,14 +884,264 @@
 					"version": "2.8.0.60304-76~22.04"
 				},
 				{
+					"key": "zlib1g_1-1.3.dfsg-p-really1.3.1-1ubuntu1_amd64",
+					"name": "zlib1g",
+					"version": "1:1.3.dfsg+really1.3.1-1ubuntu1"
+				},
+				{
+					"key": "libzstd1_1.5.6-p-dfsg-2_amd64",
+					"name": "libzstd1",
+					"version": "1.5.6+dfsg-2"
+				},
+				{
+					"key": "libncurses-dev_6.5-p-20250216-2_amd64",
+					"name": "libncurses-dev",
+					"version": "6.5+20250216-2"
+				},
+				{
+					"key": "libc6-dev_2.41-6ubuntu1_amd64",
+					"name": "libc6-dev",
+					"version": "2.41-6ubuntu1"
+				},
+				{
+					"key": "rpcsvc-proto_1.4.2-0ubuntu7_amd64",
+					"name": "rpcsvc-proto",
+					"version": "1.4.2-0ubuntu7"
+				},
+				{
+					"key": "libcrypt-dev_1-4.4.38-1_amd64",
+					"name": "libcrypt-dev",
+					"version": "1:4.4.38-1"
+				},
+				{
+					"key": "libcrypt1_1-4.4.38-1_amd64",
+					"name": "libcrypt1",
+					"version": "1:4.4.38-1"
+				},
+				{
+					"key": "linux-libc-dev_6.14.0-23.23_amd64",
+					"name": "linux-libc-dev",
+					"version": "6.14.0-23.23"
+				},
+				{
+					"key": "libc-dev-bin_2.41-6ubuntu1_amd64",
+					"name": "libc-dev-bin",
+					"version": "2.41-6ubuntu1"
+				},
+				{
+					"key": "libncursesw6_6.5-p-20250216-2_amd64",
+					"name": "libncursesw6",
+					"version": "6.5+20250216-2"
+				},
+				{
+					"key": "libtinfo6_6.5-p-20250216-2_amd64",
+					"name": "libtinfo6",
+					"version": "6.5+20250216-2"
+				},
+				{
+					"key": "libncurses6_6.5-p-20250216-2_amd64",
+					"name": "libncurses6",
+					"version": "6.5+20250216-2"
+				},
+				{
 					"key": "rocminfo_1.0.0.60304-76_22.04_amd64",
 					"name": "rocminfo",
 					"version": "1.0.0.60304-76~22.04"
 				},
 				{
+					"key": "python3_3.13.3-1_amd64",
+					"name": "python3",
+					"version": "3.13.3-1"
+				},
+				{
+					"key": "libpython3-stdlib_3.13.3-1_amd64",
+					"name": "libpython3-stdlib",
+					"version": "3.13.3-1"
+				},
+				{
+					"key": "libpython3.13-stdlib_3.13.3-1ubuntu0.2_amd64",
+					"name": "libpython3.13-stdlib",
+					"version": "3.13.3-1ubuntu0.2"
+				},
+				{
+					"key": "libuuid1_2.40.2-14ubuntu1.1_amd64",
+					"name": "libuuid1",
+					"version": "2.40.2-14ubuntu1.1"
+				},
+				{
+					"key": "libsqlite3-0_3.46.1-3ubuntu0.1_amd64",
+					"name": "libsqlite3-0",
+					"version": "3.46.1-3ubuntu0.1"
+				},
+				{
+					"key": "libreadline8t64_8.2-6_amd64",
+					"name": "libreadline8t64",
+					"version": "8.2-6"
+				},
+				{
+					"key": "readline-common_8.2-6_amd64",
+					"name": "readline-common",
+					"version": "8.2-6"
+				},
+				{
+					"key": "liblzma5_5.6.4-1ubuntu1_amd64",
+					"name": "liblzma5",
+					"version": "5.6.4-1ubuntu1"
+				},
+				{
+					"key": "libffi8_3.4.7-1_amd64",
+					"name": "libffi8",
+					"version": "3.4.7-1"
+				},
+				{
+					"key": "libdb5.3t64_5.3.28-p-dfsg2-9_amd64",
+					"name": "libdb5.3t64",
+					"version": "5.3.28+dfsg2-9"
+				},
+				{
+					"key": "libbz2-1.0_1.0.8-6_amd64",
+					"name": "libbz2-1.0",
+					"version": "1.0.8-6"
+				},
+				{
+					"key": "tzdata_2025b-1ubuntu1.1_amd64",
+					"name": "tzdata",
+					"version": "2025b-1ubuntu1.1"
+				},
+				{
+					"key": "debconf_1.5.87ubuntu1_amd64",
+					"name": "debconf",
+					"version": "1.5.87ubuntu1"
+				},
+				{
+					"key": "netbase_6.4_amd64",
+					"name": "netbase",
+					"version": "6.4"
+				},
+				{
+					"key": "media-types_13.0.0_amd64",
+					"name": "media-types",
+					"version": "13.0.0"
+				},
+				{
+					"key": "libpython3.13-minimal_3.13.3-1ubuntu0.2_amd64",
+					"name": "libpython3.13-minimal",
+					"version": "3.13.3-1ubuntu0.2"
+				},
+				{
+					"key": "libssl3t64_3.4.1-1ubuntu3_amd64",
+					"name": "libssl3t64",
+					"version": "3.4.1-1ubuntu3"
+				},
+				{
+					"key": "openssl-provider-legacy_3.4.1-1ubuntu3_amd64",
+					"name": "openssl-provider-legacy",
+					"version": "3.4.1-1ubuntu3"
+				},
+				{
+					"key": "python3.13_3.13.3-1ubuntu0.2_amd64",
+					"name": "python3.13",
+					"version": "3.13.3-1ubuntu0.2"
+				},
+				{
+					"key": "python3.13-minimal_3.13.3-1ubuntu0.2_amd64",
+					"name": "python3.13-minimal",
+					"version": "3.13.3-1ubuntu0.2"
+				},
+				{
+					"key": "libexpat1_2.7.1-1_amd64",
+					"name": "libexpat1",
+					"version": "2.7.1-1"
+				},
+				{
+					"key": "python3-minimal_3.13.3-1_amd64",
+					"name": "python3-minimal",
+					"version": "3.13.3-1"
+				},
+				{
+					"key": "dpkg_1.22.18ubuntu2_amd64",
+					"name": "dpkg",
+					"version": "1.22.18ubuntu2"
+				},
+				{
+					"key": "tar_1.35-p-dfsg-3.1_amd64",
+					"name": "tar",
+					"version": "1.35+dfsg-3.1"
+				},
+				{
+					"key": "libselinux1_3.7-3ubuntu3_amd64",
+					"name": "libselinux1",
+					"version": "3.7-3ubuntu3"
+				},
+				{
+					"key": "libpcre2-8-0_10.45-1_amd64",
+					"name": "libpcre2-8-0",
+					"version": "10.45-1"
+				},
+				{
+					"key": "libacl1_2.3.2-2_amd64",
+					"name": "libacl1",
+					"version": "2.3.2-2"
+				},
+				{
+					"key": "libmd0_1.1.0-2build2_amd64",
+					"name": "libmd0",
+					"version": "1.1.0-2build2"
+				},
+				{
+					"key": "pciutils_1-3.13.0-2_amd64",
+					"name": "pciutils",
+					"version": "1:3.13.0-2"
+				},
+				{
+					"key": "libpci3_1-3.13.0-2_amd64",
+					"name": "libpci3",
+					"version": "1:3.13.0-2"
+				},
+				{
+					"key": "pci.ids_0.0_2025.03.09-1_amd64",
+					"name": "pci.ids",
+					"version": "0.0~2025.03.09-1"
+				},
+				{
+					"key": "libudev1_257.4-1ubuntu3.1_amd64",
+					"name": "libudev1",
+					"version": "257.4-1ubuntu3.1"
+				},
+				{
+					"key": "libcap2_1-2.73-4ubuntu1_amd64",
+					"name": "libcap2",
+					"version": "1:2.73-4ubuntu1"
+				},
+				{
+					"key": "libkmod2_33-p-20240816-2ubuntu1_amd64",
+					"name": "libkmod2",
+					"version": "33+20240816-2ubuntu1"
+				},
+				{
 					"key": "hsa-rocr_1.14.0.60304-76_22.04_amd64",
 					"name": "hsa-rocr",
 					"version": "1.14.0.60304-76~22.04"
+				},
+				{
+					"key": "libelf1t64_0.192-4ubuntu1_amd64",
+					"name": "libelf1t64",
+					"version": "0.192-4ubuntu1"
+				},
+				{
+					"key": "libdrm-amdgpu1_2.4.124-2_amd64",
+					"name": "libdrm-amdgpu1",
+					"version": "2.4.124-2"
+				},
+				{
+					"key": "libdrm2_2.4.124-2_amd64",
+					"name": "libdrm2",
+					"version": "2.4.124-2"
+				},
+				{
+					"key": "libdrm-common_2.4.124-2_amd64",
+					"name": "libdrm-common",
+					"version": "2.4.124-2"
 				},
 				{
 					"key": "hipblaslt_0.10.0.60304-76_22.04_amd64",
@@ -242,6 +1161,31 @@
 			"arch": "amd64",
 			"dependencies": [
 				{
+					"key": "libc6_2.41-6ubuntu1_amd64",
+					"name": "libc6",
+					"version": "2.41-6ubuntu1"
+				},
+				{
+					"key": "libgcc-s1_15-20250404-0ubuntu1_amd64",
+					"name": "libgcc-s1",
+					"version": "15-20250404-0ubuntu1"
+				},
+				{
+					"key": "gcc-15-base_15-20250404-0ubuntu1_amd64",
+					"name": "gcc-15-base",
+					"version": "15-20250404-0ubuntu1"
+				},
+				{
+					"key": "libstdc-p--p-6_15-20250404-0ubuntu1_amd64",
+					"name": "libstdc++6",
+					"version": "15-20250404-0ubuntu1"
+				},
+				{
+					"key": "libnuma1_2.0.18-1build1_amd64",
+					"name": "libnuma1",
+					"version": "2.0.18-1build1"
+				},
+				{
 					"key": "rocprofiler-register_0.4.0.60304-76_22.04_amd64",
 					"name": "rocprofiler-register",
 					"version": "0.4.0.60304-76~22.04"
@@ -257,14 +1201,264 @@
 					"version": "2.8.0.60304-76~22.04"
 				},
 				{
+					"key": "zlib1g_1-1.3.dfsg-p-really1.3.1-1ubuntu1_amd64",
+					"name": "zlib1g",
+					"version": "1:1.3.dfsg+really1.3.1-1ubuntu1"
+				},
+				{
+					"key": "libzstd1_1.5.6-p-dfsg-2_amd64",
+					"name": "libzstd1",
+					"version": "1.5.6+dfsg-2"
+				},
+				{
+					"key": "libncurses-dev_6.5-p-20250216-2_amd64",
+					"name": "libncurses-dev",
+					"version": "6.5+20250216-2"
+				},
+				{
+					"key": "libc6-dev_2.41-6ubuntu1_amd64",
+					"name": "libc6-dev",
+					"version": "2.41-6ubuntu1"
+				},
+				{
+					"key": "rpcsvc-proto_1.4.2-0ubuntu7_amd64",
+					"name": "rpcsvc-proto",
+					"version": "1.4.2-0ubuntu7"
+				},
+				{
+					"key": "libcrypt-dev_1-4.4.38-1_amd64",
+					"name": "libcrypt-dev",
+					"version": "1:4.4.38-1"
+				},
+				{
+					"key": "libcrypt1_1-4.4.38-1_amd64",
+					"name": "libcrypt1",
+					"version": "1:4.4.38-1"
+				},
+				{
+					"key": "linux-libc-dev_6.14.0-23.23_amd64",
+					"name": "linux-libc-dev",
+					"version": "6.14.0-23.23"
+				},
+				{
+					"key": "libc-dev-bin_2.41-6ubuntu1_amd64",
+					"name": "libc-dev-bin",
+					"version": "2.41-6ubuntu1"
+				},
+				{
+					"key": "libncursesw6_6.5-p-20250216-2_amd64",
+					"name": "libncursesw6",
+					"version": "6.5+20250216-2"
+				},
+				{
+					"key": "libtinfo6_6.5-p-20250216-2_amd64",
+					"name": "libtinfo6",
+					"version": "6.5+20250216-2"
+				},
+				{
+					"key": "libncurses6_6.5-p-20250216-2_amd64",
+					"name": "libncurses6",
+					"version": "6.5+20250216-2"
+				},
+				{
 					"key": "rocminfo_1.0.0.60304-76_22.04_amd64",
 					"name": "rocminfo",
 					"version": "1.0.0.60304-76~22.04"
 				},
 				{
+					"key": "python3_3.13.3-1_amd64",
+					"name": "python3",
+					"version": "3.13.3-1"
+				},
+				{
+					"key": "libpython3-stdlib_3.13.3-1_amd64",
+					"name": "libpython3-stdlib",
+					"version": "3.13.3-1"
+				},
+				{
+					"key": "libpython3.13-stdlib_3.13.3-1ubuntu0.2_amd64",
+					"name": "libpython3.13-stdlib",
+					"version": "3.13.3-1ubuntu0.2"
+				},
+				{
+					"key": "libuuid1_2.40.2-14ubuntu1.1_amd64",
+					"name": "libuuid1",
+					"version": "2.40.2-14ubuntu1.1"
+				},
+				{
+					"key": "libsqlite3-0_3.46.1-3ubuntu0.1_amd64",
+					"name": "libsqlite3-0",
+					"version": "3.46.1-3ubuntu0.1"
+				},
+				{
+					"key": "libreadline8t64_8.2-6_amd64",
+					"name": "libreadline8t64",
+					"version": "8.2-6"
+				},
+				{
+					"key": "readline-common_8.2-6_amd64",
+					"name": "readline-common",
+					"version": "8.2-6"
+				},
+				{
+					"key": "liblzma5_5.6.4-1ubuntu1_amd64",
+					"name": "liblzma5",
+					"version": "5.6.4-1ubuntu1"
+				},
+				{
+					"key": "libffi8_3.4.7-1_amd64",
+					"name": "libffi8",
+					"version": "3.4.7-1"
+				},
+				{
+					"key": "libdb5.3t64_5.3.28-p-dfsg2-9_amd64",
+					"name": "libdb5.3t64",
+					"version": "5.3.28+dfsg2-9"
+				},
+				{
+					"key": "libbz2-1.0_1.0.8-6_amd64",
+					"name": "libbz2-1.0",
+					"version": "1.0.8-6"
+				},
+				{
+					"key": "tzdata_2025b-1ubuntu1.1_amd64",
+					"name": "tzdata",
+					"version": "2025b-1ubuntu1.1"
+				},
+				{
+					"key": "debconf_1.5.87ubuntu1_amd64",
+					"name": "debconf",
+					"version": "1.5.87ubuntu1"
+				},
+				{
+					"key": "netbase_6.4_amd64",
+					"name": "netbase",
+					"version": "6.4"
+				},
+				{
+					"key": "media-types_13.0.0_amd64",
+					"name": "media-types",
+					"version": "13.0.0"
+				},
+				{
+					"key": "libpython3.13-minimal_3.13.3-1ubuntu0.2_amd64",
+					"name": "libpython3.13-minimal",
+					"version": "3.13.3-1ubuntu0.2"
+				},
+				{
+					"key": "libssl3t64_3.4.1-1ubuntu3_amd64",
+					"name": "libssl3t64",
+					"version": "3.4.1-1ubuntu3"
+				},
+				{
+					"key": "openssl-provider-legacy_3.4.1-1ubuntu3_amd64",
+					"name": "openssl-provider-legacy",
+					"version": "3.4.1-1ubuntu3"
+				},
+				{
+					"key": "python3.13_3.13.3-1ubuntu0.2_amd64",
+					"name": "python3.13",
+					"version": "3.13.3-1ubuntu0.2"
+				},
+				{
+					"key": "python3.13-minimal_3.13.3-1ubuntu0.2_amd64",
+					"name": "python3.13-minimal",
+					"version": "3.13.3-1ubuntu0.2"
+				},
+				{
+					"key": "libexpat1_2.7.1-1_amd64",
+					"name": "libexpat1",
+					"version": "2.7.1-1"
+				},
+				{
+					"key": "python3-minimal_3.13.3-1_amd64",
+					"name": "python3-minimal",
+					"version": "3.13.3-1"
+				},
+				{
+					"key": "dpkg_1.22.18ubuntu2_amd64",
+					"name": "dpkg",
+					"version": "1.22.18ubuntu2"
+				},
+				{
+					"key": "tar_1.35-p-dfsg-3.1_amd64",
+					"name": "tar",
+					"version": "1.35+dfsg-3.1"
+				},
+				{
+					"key": "libselinux1_3.7-3ubuntu3_amd64",
+					"name": "libselinux1",
+					"version": "3.7-3ubuntu3"
+				},
+				{
+					"key": "libpcre2-8-0_10.45-1_amd64",
+					"name": "libpcre2-8-0",
+					"version": "10.45-1"
+				},
+				{
+					"key": "libacl1_2.3.2-2_amd64",
+					"name": "libacl1",
+					"version": "2.3.2-2"
+				},
+				{
+					"key": "libmd0_1.1.0-2build2_amd64",
+					"name": "libmd0",
+					"version": "1.1.0-2build2"
+				},
+				{
+					"key": "pciutils_1-3.13.0-2_amd64",
+					"name": "pciutils",
+					"version": "1:3.13.0-2"
+				},
+				{
+					"key": "libpci3_1-3.13.0-2_amd64",
+					"name": "libpci3",
+					"version": "1:3.13.0-2"
+				},
+				{
+					"key": "pci.ids_0.0_2025.03.09-1_amd64",
+					"name": "pci.ids",
+					"version": "0.0~2025.03.09-1"
+				},
+				{
+					"key": "libudev1_257.4-1ubuntu3.1_amd64",
+					"name": "libudev1",
+					"version": "257.4-1ubuntu3.1"
+				},
+				{
+					"key": "libcap2_1-2.73-4ubuntu1_amd64",
+					"name": "libcap2",
+					"version": "1:2.73-4ubuntu1"
+				},
+				{
+					"key": "libkmod2_33-p-20240816-2ubuntu1_amd64",
+					"name": "libkmod2",
+					"version": "33+20240816-2ubuntu1"
+				},
+				{
 					"key": "hsa-rocr_1.14.0.60304-76_22.04_amd64",
 					"name": "hsa-rocr",
 					"version": "1.14.0.60304-76~22.04"
+				},
+				{
+					"key": "libelf1t64_0.192-4ubuntu1_amd64",
+					"name": "libelf1t64",
+					"version": "0.192-4ubuntu1"
+				},
+				{
+					"key": "libdrm-amdgpu1_2.4.124-2_amd64",
+					"name": "libdrm-amdgpu1",
+					"version": "2.4.124-2"
+				},
+				{
+					"key": "libdrm2_2.4.124-2_amd64",
+					"name": "libdrm2",
+					"version": "2.4.124-2"
+				},
+				{
+					"key": "libdrm-common_2.4.124-2_amd64",
+					"name": "libdrm-common",
+					"version": "2.4.124-2"
 				}
 			],
 			"key": "hip-runtime-amd_6.3.42134.60304-76_22.04_amd64",
@@ -288,13 +1482,381 @@
 		},
 		{
 			"arch": "amd64",
-			"dependencies": [
-				{
-					"key": "rocm-core_6.3.4.60304-76_22.04_amd64",
-					"name": "rocm-core",
-					"version": "6.3.4.60304-76~22.04"
-				}
+			"dependencies": [],
+			"key": "python3_3.13.3-1_amd64",
+			"name": "python3",
+			"sha256": "3d0bb01a63f3171d121e5a37132b981b00dbc2ded129e954f4e81ef210039cca",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/p/python3-defaults/python3_3.13.3-1_amd64.deb"
 			],
+			"version": "3.13.3-1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libpython3-stdlib_3.13.3-1_amd64",
+			"name": "libpython3-stdlib",
+			"sha256": "1e097d0b5b07552f1a27140536516265c061d6085a2fa4769e82c1b4cc280994",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/p/python3-defaults/libpython3-stdlib_3.13.3-1_amd64.deb"
+			],
+			"version": "3.13.3-1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libpython3.13-stdlib_3.13.3-1ubuntu0.2_amd64",
+			"name": "libpython3.13-stdlib",
+			"sha256": "ac30bdc91f434e9eaf9fedfa149b80c0785d3e7a5fa94ef3bf1f5bb8c88bc6ec",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/p/python3.13/libpython3.13-stdlib_3.13.3-1ubuntu0.2_amd64.deb"
+			],
+			"version": "3.13.3-1ubuntu0.2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libuuid1_2.40.2-14ubuntu1.1_amd64",
+			"name": "libuuid1",
+			"sha256": "feb5f5e09335e44daebf226a451ed11e61318f8815b1c6d5abd6940748e27f75",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/u/util-linux/libuuid1_2.40.2-14ubuntu1.1_amd64.deb"
+			],
+			"version": "2.40.2-14ubuntu1.1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libsqlite3-0_3.46.1-3ubuntu0.1_amd64",
+			"name": "libsqlite3-0",
+			"sha256": "84c1c09b40b211dc3924da8a73141c17c30990ce7c64626db2cac873864a53ba",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/s/sqlite3/libsqlite3-0_3.46.1-3ubuntu0.1_amd64.deb"
+			],
+			"version": "3.46.1-3ubuntu0.1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libreadline8t64_8.2-6_amd64",
+			"name": "libreadline8t64",
+			"sha256": "a5b586cf5e65dcdf59ed583b6bedcbbae43988e29bde542dee35d4aa3c641fc6",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/r/readline/libreadline8t64_8.2-6_amd64.deb"
+			],
+			"version": "8.2-6"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "readline-common_8.2-6_amd64",
+			"name": "readline-common",
+			"sha256": "6e90df3fef34a6e3f7f6fc20c391653473d64a08bf7389ecea3cd9c729614ce0",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/r/readline/readline-common_8.2-6_all.deb"
+			],
+			"version": "8.2-6"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "liblzma5_5.6.4-1ubuntu1_amd64",
+			"name": "liblzma5",
+			"sha256": "fa7e99a632c7ac55a3cb5f2d4fdf2252331cf9eaeba5138524a84fb696babc14",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/x/xz-utils/liblzma5_5.6.4-1ubuntu1_amd64.deb"
+			],
+			"version": "5.6.4-1ubuntu1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libffi8_3.4.7-1_amd64",
+			"name": "libffi8",
+			"sha256": "a370f832fa2b633bee3db54c8c23d88660dfbceb371fcb6d910483a9ebb54d8b",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/libf/libffi/libffi8_3.4.7-1_amd64.deb"
+			],
+			"version": "3.4.7-1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libdb5.3t64_5.3.28-p-dfsg2-9_amd64",
+			"name": "libdb5.3t64",
+			"sha256": "e5c56e85ceca6693ab040db58d21f4cd0c140b725f2b1740dfeac3e6b96f350f",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/d/db5.3/libdb5.3t64_5.3.28+dfsg2-9_amd64.deb"
+			],
+			"version": "5.3.28+dfsg2-9"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libbz2-1.0_1.0.8-6_amd64",
+			"name": "libbz2-1.0",
+			"sha256": "53b90eb1e37e0f51f28f2b77d29f7fd418e0df7e5dd2112d19526dad2d13fff2",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/b/bzip2/libbz2-1.0_1.0.8-6_amd64.deb"
+			],
+			"version": "1.0.8-6"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "tzdata_2025b-1ubuntu1.1_amd64",
+			"name": "tzdata",
+			"sha256": "2b43d53d06e9f540fa1c6be22a820aa5f1317ff62150595fa2f478bf70a1fcdb",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/t/tzdata/tzdata_2025b-1ubuntu1.1_all.deb"
+			],
+			"version": "2025b-1ubuntu1.1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "debconf_1.5.87ubuntu1_amd64",
+			"name": "debconf",
+			"sha256": "fa7c662338d41bf69b6704234453a67254457f8ccbd1a22df6952ad726c4c64e",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/d/debconf/debconf_1.5.87ubuntu1_all.deb"
+			],
+			"version": "1.5.87ubuntu1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "netbase_6.4_amd64",
+			"name": "netbase",
+			"sha256": "8cdbc9c3dca01e660759bf9d840f72e45ac72faf5d19ca1faecacaf6a60c1a87",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/n/netbase/netbase_6.4_all.deb"
+			],
+			"version": "6.4"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "media-types_13.0.0_amd64",
+			"name": "media-types",
+			"sha256": "f0ad237e90d592c84e7cca5b0ef868306ab8febe7ebc24a80e51aea6043f6a40",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/m/media-types/media-types_13.0.0_all.deb"
+			],
+			"version": "13.0.0"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libpython3.13-minimal_3.13.3-1ubuntu0.2_amd64",
+			"name": "libpython3.13-minimal",
+			"sha256": "6e40d4ab7cde649b058eeffb1317e6661fe35a778abb28782b7ffbf2520a95ba",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/p/python3.13/libpython3.13-minimal_3.13.3-1ubuntu0.2_amd64.deb"
+			],
+			"version": "3.13.3-1ubuntu0.2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libssl3t64_3.4.1-1ubuntu3_amd64",
+			"name": "libssl3t64",
+			"sha256": "e7955dc73771755405b2bb00678830dba60b6c1af388a43273559677e51cea23",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/o/openssl/libssl3t64_3.4.1-1ubuntu3_amd64.deb"
+			],
+			"version": "3.4.1-1ubuntu3"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "openssl-provider-legacy_3.4.1-1ubuntu3_amd64",
+			"name": "openssl-provider-legacy",
+			"sha256": "22e9c73dc234b51a1a9b0ec61e79ab19b8368259af7dd17b62255b5851eb0ef3",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/o/openssl/openssl-provider-legacy_3.4.1-1ubuntu3_amd64.deb"
+			],
+			"version": "3.4.1-1ubuntu3"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "python3.13_3.13.3-1ubuntu0.2_amd64",
+			"name": "python3.13",
+			"sha256": "e03f375b4e438ed7bb50813fd6233cc7ce948484b2bc76f66376a59480165ca1",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/p/python3.13/python3.13_3.13.3-1ubuntu0.2_amd64.deb"
+			],
+			"version": "3.13.3-1ubuntu0.2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "python3.13-minimal_3.13.3-1ubuntu0.2_amd64",
+			"name": "python3.13-minimal",
+			"sha256": "833010ec494635edcc55a8ecbbe3c3b6054934939c51b5e9ab43f916b139a596",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/p/python3.13/python3.13-minimal_3.13.3-1ubuntu0.2_amd64.deb"
+			],
+			"version": "3.13.3-1ubuntu0.2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libexpat1_2.7.1-1_amd64",
+			"name": "libexpat1",
+			"sha256": "1e7e386306ea1512e11ba308e3d6cda0e00774f9f6b0ffb29cab2a77d7dcff08",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/e/expat/libexpat1_2.7.1-1_amd64.deb"
+			],
+			"version": "2.7.1-1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "python3-minimal_3.13.3-1_amd64",
+			"name": "python3-minimal",
+			"sha256": "6463e01255928906ebeabf03fa224eaded8faf1ba830d235637721850d77b364",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/p/python3-defaults/python3-minimal_3.13.3-1_amd64.deb"
+			],
+			"version": "3.13.3-1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "dpkg_1.22.18ubuntu2_amd64",
+			"name": "dpkg",
+			"sha256": "54f20d219475d8632d9548b4956c1d8360241a24001e406473c725107871d8e2",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/d/dpkg/dpkg_1.22.18ubuntu2_amd64.deb"
+			],
+			"version": "1.22.18ubuntu2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "tar_1.35-p-dfsg-3.1_amd64",
+			"name": "tar",
+			"sha256": "491c813c2b94230de3253c6e05b8f54d62279d7d1e2ace05d7e4ee0ed09a6df0",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/t/tar/tar_1.35+dfsg-3.1_amd64.deb"
+			],
+			"version": "1.35+dfsg-3.1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libselinux1_3.7-3ubuntu3_amd64",
+			"name": "libselinux1",
+			"sha256": "b483c61b534ec5aec6ad338a4cdf1c4727f561833033e8aebee6442f2127c57b",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/libs/libselinux/libselinux1_3.7-3ubuntu3_amd64.deb"
+			],
+			"version": "3.7-3ubuntu3"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libpcre2-8-0_10.45-1_amd64",
+			"name": "libpcre2-8-0",
+			"sha256": "61289ca1b3284b2ce3a44f77bab377d757863e43f87529607ddbb678690e75d9",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/p/pcre2/libpcre2-8-0_10.45-1_amd64.deb"
+			],
+			"version": "10.45-1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libacl1_2.3.2-2_amd64",
+			"name": "libacl1",
+			"sha256": "77f8d49c031182bbd6c4fe4ec9ad49edb5d4607f2dac795fc6932dce0e8f541e",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/a/acl/libacl1_2.3.2-2_amd64.deb"
+			],
+			"version": "2.3.2-2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libmd0_1.1.0-2build2_amd64",
+			"name": "libmd0",
+			"sha256": "34c52d5ed312415f5ec9f9450f3a58cf78096074631113a3e886eda163a3e99d",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/libm/libmd/libmd0_1.1.0-2build2_amd64.deb"
+			],
+			"version": "1.1.0-2build2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "pciutils_1-3.13.0-2_amd64",
+			"name": "pciutils",
+			"sha256": "712ae71a20a02197902380388dac4af5d0986a526c85d9cbe638456b475ed849",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/p/pciutils/pciutils_3.13.0-2_amd64.deb"
+			],
+			"version": "1:3.13.0-2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libpci3_1-3.13.0-2_amd64",
+			"name": "libpci3",
+			"sha256": "beea46bcd7bb21da7605a28131114242f2d255a170e2583b83a4431385ed0337",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/p/pciutils/libpci3_3.13.0-2_amd64.deb"
+			],
+			"version": "1:3.13.0-2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "pci.ids_0.0_2025.03.09-1_amd64",
+			"name": "pci.ids",
+			"sha256": "50762fd34c8d1cd4a8e99df09ac35200cbf709d821358eb08697a688f39edca9",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/p/pci.ids/pci.ids_0.0~2025.03.09-1_all.deb"
+			],
+			"version": "0.0~2025.03.09-1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libudev1_257.4-1ubuntu3.1_amd64",
+			"name": "libudev1",
+			"sha256": "a2c2b48f0b237be3a0f37129dc4e7f61a2197f02a607986f06dae20a9b5f03d3",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/s/systemd/libudev1_257.4-1ubuntu3.1_amd64.deb"
+			],
+			"version": "257.4-1ubuntu3.1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libcap2_1-2.73-4ubuntu1_amd64",
+			"name": "libcap2",
+			"sha256": "e4bff5cdeb8b97b561ae2fc4b8a5037f7bb36f1751cda74eccfd47b443cf3705",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/libc/libcap2/libcap2_2.73-4ubuntu1_amd64.deb"
+			],
+			"version": "1:2.73-4ubuntu1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libkmod2_33-p-20240816-2ubuntu1_amd64",
+			"name": "libkmod2",
+			"sha256": "f1c94edc382de05488b6d340020d22399b8a2ac89af5302b4d6c3798a4952ab9",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/k/kmod/libkmod2_33+20240816-2ubuntu1_amd64.deb"
+			],
+			"version": "33+20240816-2ubuntu1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
 			"key": "roctracer_4.1.60304.60304-76_22.04_amd64",
 			"name": "roctracer",
 			"sha256": "b8398f10b5f27fe01fce891a64e27963687bb0e63e85bbc11801fe3fcbe30607",
@@ -312,6 +1874,26 @@
 					"version": "0.4.0.60304-76~22.04"
 				},
 				{
+					"key": "libstdc-p--p-6_15-20250404-0ubuntu1_amd64",
+					"name": "libstdc++6",
+					"version": "15-20250404-0ubuntu1"
+				},
+				{
+					"key": "libgcc-s1_15-20250404-0ubuntu1_amd64",
+					"name": "libgcc-s1",
+					"version": "15-20250404-0ubuntu1"
+				},
+				{
+					"key": "libc6_2.41-6ubuntu1_amd64",
+					"name": "libc6",
+					"version": "2.41-6ubuntu1"
+				},
+				{
+					"key": "gcc-15-base_15-20250404-0ubuntu1_amd64",
+					"name": "gcc-15-base",
+					"version": "15-20250404-0ubuntu1"
+				},
+				{
 					"key": "rocm-core_6.3.4.60304-76_22.04_amd64",
 					"name": "rocm-core",
 					"version": "6.3.4.60304-76~22.04"
@@ -322,9 +1904,174 @@
 					"version": "7.4.0.60304-76~22.04"
 				},
 				{
+					"key": "python3_3.13.3-1_amd64",
+					"name": "python3",
+					"version": "3.13.3-1"
+				},
+				{
+					"key": "libpython3-stdlib_3.13.3-1_amd64",
+					"name": "libpython3-stdlib",
+					"version": "3.13.3-1"
+				},
+				{
+					"key": "libpython3.13-stdlib_3.13.3-1ubuntu0.2_amd64",
+					"name": "libpython3.13-stdlib",
+					"version": "3.13.3-1ubuntu0.2"
+				},
+				{
+					"key": "libuuid1_2.40.2-14ubuntu1.1_amd64",
+					"name": "libuuid1",
+					"version": "2.40.2-14ubuntu1.1"
+				},
+				{
+					"key": "libtinfo6_6.5-p-20250216-2_amd64",
+					"name": "libtinfo6",
+					"version": "6.5+20250216-2"
+				},
+				{
+					"key": "libsqlite3-0_3.46.1-3ubuntu0.1_amd64",
+					"name": "libsqlite3-0",
+					"version": "3.46.1-3ubuntu0.1"
+				},
+				{
+					"key": "libreadline8t64_8.2-6_amd64",
+					"name": "libreadline8t64",
+					"version": "8.2-6"
+				},
+				{
+					"key": "readline-common_8.2-6_amd64",
+					"name": "readline-common",
+					"version": "8.2-6"
+				},
+				{
+					"key": "libncursesw6_6.5-p-20250216-2_amd64",
+					"name": "libncursesw6",
+					"version": "6.5+20250216-2"
+				},
+				{
+					"key": "liblzma5_5.6.4-1ubuntu1_amd64",
+					"name": "liblzma5",
+					"version": "5.6.4-1ubuntu1"
+				},
+				{
+					"key": "libffi8_3.4.7-1_amd64",
+					"name": "libffi8",
+					"version": "3.4.7-1"
+				},
+				{
+					"key": "libdb5.3t64_5.3.28-p-dfsg2-9_amd64",
+					"name": "libdb5.3t64",
+					"version": "5.3.28+dfsg2-9"
+				},
+				{
+					"key": "libbz2-1.0_1.0.8-6_amd64",
+					"name": "libbz2-1.0",
+					"version": "1.0.8-6"
+				},
+				{
+					"key": "tzdata_2025b-1ubuntu1.1_amd64",
+					"name": "tzdata",
+					"version": "2025b-1ubuntu1.1"
+				},
+				{
+					"key": "debconf_1.5.87ubuntu1_amd64",
+					"name": "debconf",
+					"version": "1.5.87ubuntu1"
+				},
+				{
+					"key": "netbase_6.4_amd64",
+					"name": "netbase",
+					"version": "6.4"
+				},
+				{
+					"key": "media-types_13.0.0_amd64",
+					"name": "media-types",
+					"version": "13.0.0"
+				},
+				{
+					"key": "libpython3.13-minimal_3.13.3-1ubuntu0.2_amd64",
+					"name": "libpython3.13-minimal",
+					"version": "3.13.3-1ubuntu0.2"
+				},
+				{
+					"key": "libssl3t64_3.4.1-1ubuntu3_amd64",
+					"name": "libssl3t64",
+					"version": "3.4.1-1ubuntu3"
+				},
+				{
+					"key": "openssl-provider-legacy_3.4.1-1ubuntu3_amd64",
+					"name": "openssl-provider-legacy",
+					"version": "3.4.1-1ubuntu3"
+				},
+				{
+					"key": "zlib1g_1-1.3.dfsg-p-really1.3.1-1ubuntu1_amd64",
+					"name": "zlib1g",
+					"version": "1:1.3.dfsg+really1.3.1-1ubuntu1"
+				},
+				{
+					"key": "libzstd1_1.5.6-p-dfsg-2_amd64",
+					"name": "libzstd1",
+					"version": "1.5.6+dfsg-2"
+				},
+				{
+					"key": "python3.13_3.13.3-1ubuntu0.2_amd64",
+					"name": "python3.13",
+					"version": "3.13.3-1ubuntu0.2"
+				},
+				{
+					"key": "python3.13-minimal_3.13.3-1ubuntu0.2_amd64",
+					"name": "python3.13-minimal",
+					"version": "3.13.3-1ubuntu0.2"
+				},
+				{
+					"key": "libexpat1_2.7.1-1_amd64",
+					"name": "libexpat1",
+					"version": "2.7.1-1"
+				},
+				{
+					"key": "python3-minimal_3.13.3-1_amd64",
+					"name": "python3-minimal",
+					"version": "3.13.3-1"
+				},
+				{
+					"key": "dpkg_1.22.18ubuntu2_amd64",
+					"name": "dpkg",
+					"version": "1.22.18ubuntu2"
+				},
+				{
+					"key": "tar_1.35-p-dfsg-3.1_amd64",
+					"name": "tar",
+					"version": "1.35+dfsg-3.1"
+				},
+				{
+					"key": "libselinux1_3.7-3ubuntu3_amd64",
+					"name": "libselinux1",
+					"version": "3.7-3ubuntu3"
+				},
+				{
+					"key": "libpcre2-8-0_10.45-1_amd64",
+					"name": "libpcre2-8-0",
+					"version": "10.45-1"
+				},
+				{
+					"key": "libacl1_2.3.2-2_amd64",
+					"name": "libacl1",
+					"version": "2.3.2-2"
+				},
+				{
+					"key": "libmd0_1.1.0-2build2_amd64",
+					"name": "libmd0",
+					"version": "1.1.0-2build2"
+				},
+				{
 					"key": "hip-runtime-amd_6.3.42134.60304-76_22.04_amd64",
 					"name": "hip-runtime-amd",
 					"version": "6.3.42134.60304-76~22.04"
+				},
+				{
+					"key": "libnuma1_2.0.18-1build1_amd64",
+					"name": "libnuma1",
+					"version": "2.0.18-1build1"
 				},
 				{
 					"key": "comgr_2.8.0.60304-76_22.04_amd64",
@@ -332,14 +2079,104 @@
 					"version": "2.8.0.60304-76~22.04"
 				},
 				{
+					"key": "libncurses-dev_6.5-p-20250216-2_amd64",
+					"name": "libncurses-dev",
+					"version": "6.5+20250216-2"
+				},
+				{
+					"key": "libc6-dev_2.41-6ubuntu1_amd64",
+					"name": "libc6-dev",
+					"version": "2.41-6ubuntu1"
+				},
+				{
+					"key": "rpcsvc-proto_1.4.2-0ubuntu7_amd64",
+					"name": "rpcsvc-proto",
+					"version": "1.4.2-0ubuntu7"
+				},
+				{
+					"key": "libcrypt-dev_1-4.4.38-1_amd64",
+					"name": "libcrypt-dev",
+					"version": "1:4.4.38-1"
+				},
+				{
+					"key": "libcrypt1_1-4.4.38-1_amd64",
+					"name": "libcrypt1",
+					"version": "1:4.4.38-1"
+				},
+				{
+					"key": "linux-libc-dev_6.14.0-23.23_amd64",
+					"name": "linux-libc-dev",
+					"version": "6.14.0-23.23"
+				},
+				{
+					"key": "libc-dev-bin_2.41-6ubuntu1_amd64",
+					"name": "libc-dev-bin",
+					"version": "2.41-6ubuntu1"
+				},
+				{
+					"key": "libncurses6_6.5-p-20250216-2_amd64",
+					"name": "libncurses6",
+					"version": "6.5+20250216-2"
+				},
+				{
 					"key": "rocminfo_1.0.0.60304-76_22.04_amd64",
 					"name": "rocminfo",
 					"version": "1.0.0.60304-76~22.04"
 				},
 				{
+					"key": "pciutils_1-3.13.0-2_amd64",
+					"name": "pciutils",
+					"version": "1:3.13.0-2"
+				},
+				{
+					"key": "libpci3_1-3.13.0-2_amd64",
+					"name": "libpci3",
+					"version": "1:3.13.0-2"
+				},
+				{
+					"key": "pci.ids_0.0_2025.03.09-1_amd64",
+					"name": "pci.ids",
+					"version": "0.0~2025.03.09-1"
+				},
+				{
+					"key": "libudev1_257.4-1ubuntu3.1_amd64",
+					"name": "libudev1",
+					"version": "257.4-1ubuntu3.1"
+				},
+				{
+					"key": "libcap2_1-2.73-4ubuntu1_amd64",
+					"name": "libcap2",
+					"version": "1:2.73-4ubuntu1"
+				},
+				{
+					"key": "libkmod2_33-p-20240816-2ubuntu1_amd64",
+					"name": "libkmod2",
+					"version": "33+20240816-2ubuntu1"
+				},
+				{
 					"key": "hsa-rocr_1.14.0.60304-76_22.04_amd64",
 					"name": "hsa-rocr",
 					"version": "1.14.0.60304-76~22.04"
+				},
+				{
+					"key": "libelf1t64_0.192-4ubuntu1_amd64",
+					"name": "libelf1t64",
+					"version": "0.192-4ubuntu1"
+				},
+				{
+					"key": "libdrm-amdgpu1_2.4.124-2_amd64",
+					"name": "libdrm-amdgpu1",
+					"version": "2.4.124-2"
+				},
+				{
+					"key": "libdrm2_2.4.124-2_amd64",
+					"name": "libdrm2",
+					"version": "2.4.124-2"
+				},
+				{
+					"key": "libdrm-common_2.4.124-2_amd64",
+					"name": "libdrm-common",
+					"version": "2.4.124-2"
 				}
 			],
 			"key": "rccl_2.21.5.60304-76_22.04_amd64",
@@ -349,6 +2186,17 @@
 				"https://repo.radeon.com/rocm/apt/6.3.4/pool/main/r/rccl/rccl_2.21.5.60304-76~22.04_amd64.deb"
 			],
 			"version": "2.21.5.60304-76~22.04"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "rocm-smi-lib_7.4.0.60304-76_22.04_amd64",
+			"name": "rocm-smi-lib",
+			"sha256": "0aa35daa0b6336f7ff58720067e16e7b68efcf423d8be355e11c3a59e7b7bf71",
+			"urls": [
+				"https://repo.radeon.com/rocm/apt/6.3.4/pool/main/r/rocm-smi-lib/rocm-smi-lib_7.4.0.60304-76~22.04_amd64.deb"
+			],
+			"version": "7.4.0.60304-76~22.04"
 		},
 		{
 			"arch": "amd64",
@@ -386,14 +2234,249 @@
 					"version": "0.4.0.60304-76~22.04"
 				},
 				{
+					"key": "libstdc-p--p-6_15-20250404-0ubuntu1_amd64",
+					"name": "libstdc++6",
+					"version": "15-20250404-0ubuntu1"
+				},
+				{
+					"key": "libgcc-s1_15-20250404-0ubuntu1_amd64",
+					"name": "libgcc-s1",
+					"version": "15-20250404-0ubuntu1"
+				},
+				{
+					"key": "libc6_2.41-6ubuntu1_amd64",
+					"name": "libc6",
+					"version": "2.41-6ubuntu1"
+				},
+				{
+					"key": "gcc-15-base_15-20250404-0ubuntu1_amd64",
+					"name": "gcc-15-base",
+					"version": "15-20250404-0ubuntu1"
+				},
+				{
 					"key": "rocm-core_6.3.4.60304-76_22.04_amd64",
 					"name": "rocm-core",
 					"version": "6.3.4.60304-76~22.04"
 				},
 				{
+					"key": "libelf1t64_0.192-4ubuntu1_amd64",
+					"name": "libelf1t64",
+					"version": "0.192-4ubuntu1"
+				},
+				{
+					"key": "zlib1g_1-1.3.dfsg-p-really1.3.1-1ubuntu1_amd64",
+					"name": "zlib1g",
+					"version": "1:1.3.dfsg+really1.3.1-1ubuntu1"
+				},
+				{
+					"key": "libzstd1_1.5.6-p-dfsg-2_amd64",
+					"name": "libzstd1",
+					"version": "1.5.6+dfsg-2"
+				},
+				{
+					"key": "libnuma1_2.0.18-1build1_amd64",
+					"name": "libnuma1",
+					"version": "2.0.18-1build1"
+				},
+				{
+					"key": "libdrm-amdgpu1_2.4.124-2_amd64",
+					"name": "libdrm-amdgpu1",
+					"version": "2.4.124-2"
+				},
+				{
+					"key": "libdrm2_2.4.124-2_amd64",
+					"name": "libdrm2",
+					"version": "2.4.124-2"
+				},
+				{
+					"key": "libdrm-common_2.4.124-2_amd64",
+					"name": "libdrm-common",
+					"version": "2.4.124-2"
+				},
+				{
+					"key": "libdrm-dev_2.4.124-2_amd64",
+					"name": "libdrm-dev",
+					"version": "2.4.124-2"
+				},
+				{
+					"key": "libpciaccess-dev_0.17-3ubuntu0.25.04.2_amd64",
+					"name": "libpciaccess-dev",
+					"version": "0.17-3ubuntu0.25.04.2"
+				},
+				{
+					"key": "libpciaccess0_0.17-3ubuntu0.25.04.2_amd64",
+					"name": "libpciaccess0",
+					"version": "0.17-3ubuntu0.25.04.2"
+				},
+				{
+					"key": "libdrm-nouveau2_2.4.124-2_amd64",
+					"name": "libdrm-nouveau2",
+					"version": "2.4.124-2"
+				},
+				{
+					"key": "libdrm-radeon1_2.4.124-2_amd64",
+					"name": "libdrm-radeon1",
+					"version": "2.4.124-2"
+				},
+				{
+					"key": "libdrm-intel1_2.4.124-2_amd64",
+					"name": "libdrm-intel1",
+					"version": "2.4.124-2"
+				},
+				{
 					"key": "rocm-llvm_18.0.0.25012.60304-76_22.04_amd64",
 					"name": "rocm-llvm",
 					"version": "18.0.0.25012.60304-76~22.04"
+				},
+				{
+					"key": "python3_3.13.3-1_amd64",
+					"name": "python3",
+					"version": "3.13.3-1"
+				},
+				{
+					"key": "libpython3-stdlib_3.13.3-1_amd64",
+					"name": "libpython3-stdlib",
+					"version": "3.13.3-1"
+				},
+				{
+					"key": "libpython3.13-stdlib_3.13.3-1ubuntu0.2_amd64",
+					"name": "libpython3.13-stdlib",
+					"version": "3.13.3-1ubuntu0.2"
+				},
+				{
+					"key": "libuuid1_2.40.2-14ubuntu1.1_amd64",
+					"name": "libuuid1",
+					"version": "2.40.2-14ubuntu1.1"
+				},
+				{
+					"key": "libtinfo6_6.5-p-20250216-2_amd64",
+					"name": "libtinfo6",
+					"version": "6.5+20250216-2"
+				},
+				{
+					"key": "libsqlite3-0_3.46.1-3ubuntu0.1_amd64",
+					"name": "libsqlite3-0",
+					"version": "3.46.1-3ubuntu0.1"
+				},
+				{
+					"key": "libreadline8t64_8.2-6_amd64",
+					"name": "libreadline8t64",
+					"version": "8.2-6"
+				},
+				{
+					"key": "readline-common_8.2-6_amd64",
+					"name": "readline-common",
+					"version": "8.2-6"
+				},
+				{
+					"key": "libncursesw6_6.5-p-20250216-2_amd64",
+					"name": "libncursesw6",
+					"version": "6.5+20250216-2"
+				},
+				{
+					"key": "liblzma5_5.6.4-1ubuntu1_amd64",
+					"name": "liblzma5",
+					"version": "5.6.4-1ubuntu1"
+				},
+				{
+					"key": "libffi8_3.4.7-1_amd64",
+					"name": "libffi8",
+					"version": "3.4.7-1"
+				},
+				{
+					"key": "libdb5.3t64_5.3.28-p-dfsg2-9_amd64",
+					"name": "libdb5.3t64",
+					"version": "5.3.28+dfsg2-9"
+				},
+				{
+					"key": "libbz2-1.0_1.0.8-6_amd64",
+					"name": "libbz2-1.0",
+					"version": "1.0.8-6"
+				},
+				{
+					"key": "tzdata_2025b-1ubuntu1.1_amd64",
+					"name": "tzdata",
+					"version": "2025b-1ubuntu1.1"
+				},
+				{
+					"key": "debconf_1.5.87ubuntu1_amd64",
+					"name": "debconf",
+					"version": "1.5.87ubuntu1"
+				},
+				{
+					"key": "netbase_6.4_amd64",
+					"name": "netbase",
+					"version": "6.4"
+				},
+				{
+					"key": "media-types_13.0.0_amd64",
+					"name": "media-types",
+					"version": "13.0.0"
+				},
+				{
+					"key": "libpython3.13-minimal_3.13.3-1ubuntu0.2_amd64",
+					"name": "libpython3.13-minimal",
+					"version": "3.13.3-1ubuntu0.2"
+				},
+				{
+					"key": "libssl3t64_3.4.1-1ubuntu3_amd64",
+					"name": "libssl3t64",
+					"version": "3.4.1-1ubuntu3"
+				},
+				{
+					"key": "openssl-provider-legacy_3.4.1-1ubuntu3_amd64",
+					"name": "openssl-provider-legacy",
+					"version": "3.4.1-1ubuntu3"
+				},
+				{
+					"key": "python3.13_3.13.3-1ubuntu0.2_amd64",
+					"name": "python3.13",
+					"version": "3.13.3-1ubuntu0.2"
+				},
+				{
+					"key": "python3.13-minimal_3.13.3-1ubuntu0.2_amd64",
+					"name": "python3.13-minimal",
+					"version": "3.13.3-1ubuntu0.2"
+				},
+				{
+					"key": "libexpat1_2.7.1-1_amd64",
+					"name": "libexpat1",
+					"version": "2.7.1-1"
+				},
+				{
+					"key": "python3-minimal_3.13.3-1_amd64",
+					"name": "python3-minimal",
+					"version": "3.13.3-1"
+				},
+				{
+					"key": "dpkg_1.22.18ubuntu2_amd64",
+					"name": "dpkg",
+					"version": "1.22.18ubuntu2"
+				},
+				{
+					"key": "tar_1.35-p-dfsg-3.1_amd64",
+					"name": "tar",
+					"version": "1.35+dfsg-3.1"
+				},
+				{
+					"key": "libselinux1_3.7-3ubuntu3_amd64",
+					"name": "libselinux1",
+					"version": "3.7-3ubuntu3"
+				},
+				{
+					"key": "libpcre2-8-0_10.45-1_amd64",
+					"name": "libpcre2-8-0",
+					"version": "10.45-1"
+				},
+				{
+					"key": "libacl1_2.3.2-2_amd64",
+					"name": "libacl1",
+					"version": "2.3.2-2"
+				},
+				{
+					"key": "libmd0_1.1.0-2build2_amd64",
+					"name": "libmd0",
+					"version": "1.1.0-2build2"
 				},
 				{
 					"key": "hip-runtime-amd_6.3.42134.60304-76_22.04_amd64",
@@ -406,9 +2489,149 @@
 					"version": "2.8.0.60304-76~22.04"
 				},
 				{
+					"key": "libncurses-dev_6.5-p-20250216-2_amd64",
+					"name": "libncurses-dev",
+					"version": "6.5+20250216-2"
+				},
+				{
+					"key": "libc6-dev_2.41-6ubuntu1_amd64",
+					"name": "libc6-dev",
+					"version": "2.41-6ubuntu1"
+				},
+				{
+					"key": "rpcsvc-proto_1.4.2-0ubuntu7_amd64",
+					"name": "rpcsvc-proto",
+					"version": "1.4.2-0ubuntu7"
+				},
+				{
+					"key": "libcrypt-dev_1-4.4.38-1_amd64",
+					"name": "libcrypt-dev",
+					"version": "1:4.4.38-1"
+				},
+				{
+					"key": "libcrypt1_1-4.4.38-1_amd64",
+					"name": "libcrypt1",
+					"version": "1:4.4.38-1"
+				},
+				{
+					"key": "linux-libc-dev_6.14.0-23.23_amd64",
+					"name": "linux-libc-dev",
+					"version": "6.14.0-23.23"
+				},
+				{
+					"key": "libc-dev-bin_2.41-6ubuntu1_amd64",
+					"name": "libc-dev-bin",
+					"version": "2.41-6ubuntu1"
+				},
+				{
+					"key": "libncurses6_6.5-p-20250216-2_amd64",
+					"name": "libncurses6",
+					"version": "6.5+20250216-2"
+				},
+				{
 					"key": "rocminfo_1.0.0.60304-76_22.04_amd64",
 					"name": "rocminfo",
 					"version": "1.0.0.60304-76~22.04"
+				},
+				{
+					"key": "pciutils_1-3.13.0-2_amd64",
+					"name": "pciutils",
+					"version": "1:3.13.0-2"
+				},
+				{
+					"key": "libpci3_1-3.13.0-2_amd64",
+					"name": "libpci3",
+					"version": "1:3.13.0-2"
+				},
+				{
+					"key": "pci.ids_0.0_2025.03.09-1_amd64",
+					"name": "pci.ids",
+					"version": "0.0~2025.03.09-1"
+				},
+				{
+					"key": "libudev1_257.4-1ubuntu3.1_amd64",
+					"name": "libudev1",
+					"version": "257.4-1ubuntu3.1"
+				},
+				{
+					"key": "libcap2_1-2.73-4ubuntu1_amd64",
+					"name": "libcap2",
+					"version": "1:2.73-4ubuntu1"
+				},
+				{
+					"key": "libkmod2_33-p-20240816-2ubuntu1_amd64",
+					"name": "libkmod2",
+					"version": "33+20240816-2ubuntu1"
+				},
+				{
+					"key": "file_1-5.45-3build1_amd64",
+					"name": "file",
+					"version": "1:5.45-3build1"
+				},
+				{
+					"key": "libmagic1t64_1-5.45-3build1_amd64",
+					"name": "libmagic1t64",
+					"version": "1:5.45-3build1"
+				},
+				{
+					"key": "libmagic-mgc_1-5.45-3build1_amd64",
+					"name": "libmagic-mgc",
+					"version": "1:5.45-3build1"
+				},
+				{
+					"key": "liburi-perl_5.30-1_amd64",
+					"name": "liburi-perl",
+					"version": "5.30-1"
+				},
+				{
+					"key": "perl-base_5.40.1-2_amd64",
+					"name": "perl-base",
+					"version": "5.40.1-2"
+				},
+				{
+					"key": "perl_5.40.1-2_amd64",
+					"name": "perl",
+					"version": "5.40.1-2"
+				},
+				{
+					"key": "libperl5.40_5.40.1-2_amd64",
+					"name": "libperl5.40",
+					"version": "5.40.1-2"
+				},
+				{
+					"key": "perl-modules-5.40_5.40.1-2ubuntu0.1_amd64",
+					"name": "perl-modules-5.40",
+					"version": "5.40.1-2ubuntu0.1"
+				},
+				{
+					"key": "libgdbm6t64_1.24-2_amd64",
+					"name": "libgdbm6t64",
+					"version": "1.24-2"
+				},
+				{
+					"key": "libgdbm-compat4t64_1.24-2_amd64",
+					"name": "libgdbm-compat4t64",
+					"version": "1.24-2"
+				},
+				{
+					"key": "libfile-which-perl_1.27-2_amd64",
+					"name": "libfile-which-perl",
+					"version": "1.27-2"
+				},
+				{
+					"key": "libfile-listing-perl_6.16-1_amd64",
+					"name": "libfile-listing-perl",
+					"version": "6.16-1"
+				},
+				{
+					"key": "libhttp-date-perl_6.06-1_amd64",
+					"name": "libhttp-date-perl",
+					"version": "6.06-1"
+				},
+				{
+					"key": "libtimedate-perl_2.3300-2_amd64",
+					"name": "libtimedate-perl",
+					"version": "2.3300-2"
 				}
 			],
 			"key": "hip-dev_6.3.42134.60304-76_22.04_amd64",
@@ -432,13 +2655,73 @@
 		},
 		{
 			"arch": "amd64",
-			"dependencies": [
-				{
-					"key": "rocm-core_6.3.4.60304-76_22.04_amd64",
-					"name": "rocm-core",
-					"version": "6.3.4.60304-76~22.04"
-				}
+			"dependencies": [],
+			"key": "libdrm-dev_2.4.124-2_amd64",
+			"name": "libdrm-dev",
+			"sha256": "1d8d69e8bfd242c0e46bd8910f889b45203ed57b501e81b41faf05e03730643f",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/libd/libdrm/libdrm-dev_2.4.124-2_amd64.deb"
 			],
+			"version": "2.4.124-2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libpciaccess-dev_0.17-3ubuntu0.25.04.2_amd64",
+			"name": "libpciaccess-dev",
+			"sha256": "345127a67e50bbb3db674e9051788737b8b2ddba4eab00cd316446d874f0732d",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/libp/libpciaccess/libpciaccess-dev_0.17-3ubuntu0.25.04.2_amd64.deb"
+			],
+			"version": "0.17-3ubuntu0.25.04.2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libpciaccess0_0.17-3ubuntu0.25.04.2_amd64",
+			"name": "libpciaccess0",
+			"sha256": "d1edf63e204863bbc95af8c32e4f1d09990f8236ba628f00ac1d08f73ce7b280",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/libp/libpciaccess/libpciaccess0_0.17-3ubuntu0.25.04.2_amd64.deb"
+			],
+			"version": "0.17-3ubuntu0.25.04.2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libdrm-nouveau2_2.4.124-2_amd64",
+			"name": "libdrm-nouveau2",
+			"sha256": "7eaf5ee5460175ef118dd0dbf246d5b72d19c70f113d0650e3a045aefd968c09",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/libd/libdrm/libdrm-nouveau2_2.4.124-2_amd64.deb"
+			],
+			"version": "2.4.124-2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libdrm-radeon1_2.4.124-2_amd64",
+			"name": "libdrm-radeon1",
+			"sha256": "e45997171485fbf22b3dd0d3d569aa0b7b923a945cba80a93717042da54b4d70",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/libd/libdrm/libdrm-radeon1_2.4.124-2_amd64.deb"
+			],
+			"version": "2.4.124-2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libdrm-intel1_2.4.124-2_amd64",
+			"name": "libdrm-intel1",
+			"sha256": "80409f227c8ae2b70d66228ab87e4654508cd848500b4dae861c1e78cd5667cb",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/libd/libdrm/libdrm-intel1_2.4.124-2_amd64.deb"
+			],
+			"version": "2.4.124-2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
 			"key": "rocm-llvm_18.0.0.25012.60304-76_22.04_amd64",
 			"name": "rocm-llvm",
 			"sha256": "3de2e3b758b1fbe11d83915e0672f152cb0ecfab6b210b714fdbee8856030ba6",
@@ -449,41 +2732,194 @@
 		},
 		{
 			"arch": "amd64",
-			"dependencies": [
-				{
-					"key": "hipblaslt_0.10.0.60304-76_22.04_amd64",
-					"name": "hipblaslt",
-					"version": "0.10.0.60304-76~22.04"
-				},
-				{
-					"key": "rocm-core_6.3.4.60304-76_22.04_amd64",
-					"name": "rocm-core",
-					"version": "6.3.4.60304-76~22.04"
-				},
-				{
-					"key": "hipblas-common-dev_1.0.0.60304-76_22.04_amd64",
-					"name": "hipblas-common-dev",
-					"version": "1.0.0.60304-76~22.04"
-				}
-			],
-			"key": "hipblaslt-dev_0.10.0.60304-76_22.04_amd64",
-			"name": "hipblaslt-dev",
-			"sha256": "5bbd7d19a05b389400732ecec5cc16df25a6c536c54de1d554ea1b74a64772ff",
+			"dependencies": [],
+			"key": "file_1-5.45-3build1_amd64",
+			"name": "file",
+			"sha256": "17dae1d6e803d0304e318f451c8abf62cbd5bb2a0068300cdeea77c62075b895",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/6.3.4/pool/main/h/hipblaslt-dev/hipblaslt-dev_0.10.0.60304-76~22.04_amd64.deb"
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/f/file/file_5.45-3build1_amd64.deb"
 			],
-			"version": "0.10.0.60304-76~22.04"
+			"version": "1:5.45-3build1"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "hipblas-common-dev_1.0.0.60304-76_22.04_amd64",
-			"name": "hipblas-common-dev",
-			"sha256": "7a03e99f09cefaea9b13a59fc41def4214fff9a90cf05ab19be0f83ef9653b5e",
+			"key": "libmagic1t64_1-5.45-3build1_amd64",
+			"name": "libmagic1t64",
+			"sha256": "fc2319f342c437e044ccf854e0c95bd472a7eb0b9363e1f76ad1524ab04df68e",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/6.3.4/pool/main/h/hipblas-common-dev/hipblas-common-dev_1.0.0.60304-76~22.04_amd64.deb"
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/f/file/libmagic1t64_5.45-3build1_amd64.deb"
 			],
-			"version": "1.0.0.60304-76~22.04"
+			"version": "1:5.45-3build1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libmagic-mgc_1-5.45-3build1_amd64",
+			"name": "libmagic-mgc",
+			"sha256": "f0ed0e314a63ae1b7e5403d7e43a26c6e0c0ee69e9a305babcf9c6775607377a",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/f/file/libmagic-mgc_5.45-3build1_amd64.deb"
+			],
+			"version": "1:5.45-3build1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "liburi-perl_5.30-1_amd64",
+			"name": "liburi-perl",
+			"sha256": "469bda132ad72233d115b2c83e49abd0843e33bce97594e5c7cd2d1f72441c67",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/libu/liburi-perl/liburi-perl_5.30-1_all.deb"
+			],
+			"version": "5.30-1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "perl-base_5.40.1-2_amd64",
+			"name": "perl-base",
+			"sha256": "cd166fa649f17ead2d29fb54ec140c60c4a00c96d61706b45de8603ec7dc1931",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/p/perl/perl-base_5.40.1-2_amd64.deb"
+			],
+			"version": "5.40.1-2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "perl_5.40.1-2_amd64",
+			"name": "perl",
+			"sha256": "5f0f747318f61ff05bd208cc3671dea7dffb554d25ec1d1935f57592474384fb",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/p/perl/perl_5.40.1-2_amd64.deb"
+			],
+			"version": "5.40.1-2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libperl5.40_5.40.1-2_amd64",
+			"name": "libperl5.40",
+			"sha256": "624eb23b69ed0ea1d189f8efaf8483f0aa5bd3b8569b4dc89777960377d91131",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/p/perl/libperl5.40_5.40.1-2_amd64.deb"
+			],
+			"version": "5.40.1-2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "perl-modules-5.40_5.40.1-2ubuntu0.1_amd64",
+			"name": "perl-modules-5.40",
+			"sha256": "87e3b29d1a26e932e9175b538fb201effa97de31fc627379e9862effa957647f",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/p/perl/perl-modules-5.40_5.40.1-2ubuntu0.1_all.deb"
+			],
+			"version": "5.40.1-2ubuntu0.1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libgdbm6t64_1.24-2_amd64",
+			"name": "libgdbm6t64",
+			"sha256": "1df38f4993f7f68cee81283af8963e0cb7c885be61be9a93326ab850af15e4f6",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/g/gdbm/libgdbm6t64_1.24-2_amd64.deb"
+			],
+			"version": "1.24-2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libgdbm-compat4t64_1.24-2_amd64",
+			"name": "libgdbm-compat4t64",
+			"sha256": "0693236e9baf295abb8f90a56f44282054a3c91c9946a47c4a095764c073d052",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/g/gdbm/libgdbm-compat4t64_1.24-2_amd64.deb"
+			],
+			"version": "1.24-2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libfile-which-perl_1.27-2_amd64",
+			"name": "libfile-which-perl",
+			"sha256": "b6739ffa79ccb68591baea7175297d554b47e77358368a6a8aa980335099d163",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/libf/libfile-which-perl/libfile-which-perl_1.27-2_all.deb"
+			],
+			"version": "1.27-2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libfile-listing-perl_6.16-1_amd64",
+			"name": "libfile-listing-perl",
+			"sha256": "d37a2a2f6998b3db159f469f04eff9d44fda75d49ebaeb824d047b235d827bbe",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/libf/libfile-listing-perl/libfile-listing-perl_6.16-1_all.deb"
+			],
+			"version": "6.16-1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libhttp-date-perl_6.06-1_amd64",
+			"name": "libhttp-date-perl",
+			"sha256": "310c5395f3c6c6a6d0901ea4a73f56c12e8f798d9288c0214f9deae7a32df3c3",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/libh/libhttp-date-perl/libhttp-date-perl_6.06-1_all.deb"
+			],
+			"version": "6.06-1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libtimedate-perl_2.3300-2_amd64",
+			"name": "libtimedate-perl",
+			"sha256": "71c8cf8da8e3f273070268f093cf7b418371be2c8a70566875d0fe6b5d119f89",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/libt/libtimedate-perl/libtimedate-perl_2.3300-2_all.deb"
+			],
+			"version": "2.3300-2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [
+				{
+					"key": "zlib1g_1-1.3.dfsg-p-really1.3.1-1ubuntu1_amd64",
+					"name": "zlib1g",
+					"version": "1:1.3.dfsg+really1.3.1-1ubuntu1"
+				},
+				{
+					"key": "libc6_2.41-6ubuntu1_amd64",
+					"name": "libc6",
+					"version": "2.41-6ubuntu1"
+				},
+				{
+					"key": "libgcc-s1_15-20250404-0ubuntu1_amd64",
+					"name": "libgcc-s1",
+					"version": "15-20250404-0ubuntu1"
+				},
+				{
+					"key": "gcc-15-base_15-20250404-0ubuntu1_amd64",
+					"name": "gcc-15-base",
+					"version": "15-20250404-0ubuntu1"
+				},
+				{
+					"key": "liblzma5_5.6.4-1ubuntu1_amd64",
+					"name": "liblzma5",
+					"version": "5.6.4-1ubuntu1"
+				}
+			],
+			"key": "libxml2_2.12.7-p-dfsg-p-really2.9.14-0.4ubuntu0.1_amd64",
+			"name": "libxml2",
+			"sha256": "50588c9a5c0e4ad0b9b8e457b7a7ff7770416cba1ab364f71939d5dcc00b9fbb",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/libx/libxml2/libxml2_2.12.7+dfsg+really2.9.14-0.4ubuntu0.1_amd64.deb"
+			],
+			"version": "2.12.7+dfsg+really2.9.14-0.4ubuntu0.1"
 		}
 	],
 	"version": 1

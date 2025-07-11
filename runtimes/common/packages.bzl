@@ -44,26 +44,6 @@ def _read(mctx, labels):
     return ret
 
 _DEBIAN_PACKAGES = {
-    "libdrm2": _filegroup(name = "libdrm2", srcs = ["usr/lib/x86_64-linux-gnu/libdrm.so.2"]),
-    "libelf1": "\n".join([
-        _load("@zml//bazel:patchelf.bzl", "patchelf"),
-        _patchelf(
-            name = "libelf1",
-            shared_library = "usr/lib/x86_64-linux-gnu/libelf.so.1",
-            set_rpath = '$ORIGIN',
-        ),
-    ]),
-    "libnuma1": _filegroup(name = "libnuma1", srcs = ["usr/lib/x86_64-linux-gnu/libnuma.so.1"]),
-    "libzstd1": _filegroup(name = "libzstd1", srcs = ["usr/lib/x86_64-linux-gnu/libzstd.so.1"]),
-    "libdrm-amdgpu1": "\n".join([
-        _load("@zml//bazel:patchelf.bzl", "patchelf"),
-        _patchelf(
-            name = "libdrm-amdgpu1",
-            shared_library = "usr/lib/x86_64-linux-gnu/libdrm_amdgpu.so.1",
-            set_rpath = '$ORIGIN',
-        ),
-    ]),
-    "libtinfo6": _filegroup(name = "libtinfo6", srcs = ["lib/x86_64-linux-gnu/libtinfo.so.6"]),
     "zlib1g": _filegroup(name = "zlib1g", srcs = ["lib/x86_64-linux-gnu/libz.so.1"]),
 }
 
