@@ -16,6 +16,18 @@ def _workspace_private_impl(mctx):
             "https://github.com/zml/rules_ml_toolchain/archive/f4ad89fa906be2c1374785a79335c8a7dcd49df7.tar.gz",
         ],
     )
+
+    # Use cuda_configure from XLA to make it work with bzlmod.
+    # A pure bzlmod solution for rules_ml_toolchain is impossible because of the legacy design.
+    # It relies on a "generate-then-load" pattern that creates a deadlock in Bazel's architecture:
+    # - Generate: First, it runs a rule to generate a .bzl file containing configuration data.
+    # - Load: Then, it requires a load() statement to load that same file to continue the setup.
+    # This fails in bzlmod because Bazel's Loading Phase (when load() statements are processed) happens before
+    # the Analysis Phase (when repository rules are run).
+    # This creates a fundamental chicken-and-egg problem: the build tries to load a file that has not been generated yet.
+    # Without using the official WORKSPACE.bzlmod escape hatch,
+    # this incompatibility cannot be resolved without modifying the upstream rules.
+
     cuda_configure(name = "local_config_cuda")
     remote_execution_configure(name = "local_config_remote_execution")
     rocm_configure(name = "local_config_rocm")
