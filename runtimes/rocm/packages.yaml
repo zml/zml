@@ -6,11 +6,11 @@ version: 1
 sources:
   - channel: jammy main
     url: https://repo.radeon.com/rocm/apt/6.3.4/
-  - channel: plucky main
+  - channel: jammy main
     url: https://snapshot.ubuntu.com/ubuntu/20250711T030400Z
-  - channel: plucky-security main
+  - channel: jammy-security main
     url: https://snapshot.ubuntu.com/ubuntu/20250711T030400Z
-  - channel: plucky-updates main
+  - channel: jammy-updates main
     url: https://snapshot.ubuntu.com/ubuntu/20250711T030400Z
 
 archs:

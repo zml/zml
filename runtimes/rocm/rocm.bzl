@@ -10,7 +10,7 @@ _ROCM_STRIP_PREFIX = "opt/rocm-6.3.4"
 
 _UBUNTU_PACKAGES = {
     "libdrm2": packages.filegroup(name = "libdrm2", srcs = ["usr/lib/x86_64-linux-gnu/libdrm.so.2"]),
-    "libelf1t64": "\n".join([
+    "libelf1": "\n".join([
         packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
         packages.patchelf(
             name = "libelf1",
@@ -28,9 +28,9 @@ _UBUNTU_PACKAGES = {
             set_rpath = '$ORIGIN',
         ),
     ]),
-    "libtinfo6": packages.filegroup(name = "libtinfo6", srcs = ["usr/lib/x86_64-linux-gnu/libtinfo.so.6"]),
-    "zlib1g": packages.filegroup(name = "zlib1g", srcs = ["usr/lib/x86_64-linux-gnu/libz.so.1"]),
-    "liblzma5":  packages.filegroup(name = "liblzma5", srcs = ["usr/lib/x86_64-linux-gnu/liblzma.so.5"]),
+    "libtinfo6": packages.filegroup(name = "libtinfo6", srcs = ["lib/x86_64-linux-gnu/libtinfo.so.6"]),
+    "zlib1g": packages.filegroup(name = "zlib1g", srcs = ["lib/x86_64-linux-gnu/libz.so.1"]),
+    "liblzma5":  packages.filegroup(name = "liblzma5", srcs = ["lib/x86_64-linux-gnu/liblzma.so.5"]),
     "libxml2": "\n".join([
         packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
         packages.patchelf(
@@ -38,6 +38,15 @@ _UBUNTU_PACKAGES = {
             shared_library = "usr/lib/x86_64-linux-gnu/libxml2.so.2",
             set_rpath = '$ORIGIN',
         ),
+    ]),
+    "libicu70": "\n".join([
+        packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
+        packages.patchelf(
+            name = "libicuuc70",
+            shared_library = "usr/lib/x86_64-linux-gnu/libicuuc.so.70",
+            set_rpath = '$ORIGIN',
+        ),
+        packages.filegroup(name = "libicudata70", srcs = ["usr/lib/x86_64-linux-gnu/libicudata.so.70"])
     ]),
 }
 
