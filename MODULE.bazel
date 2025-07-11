@@ -22,7 +22,7 @@ bazel_dep(name = "sentencepiece", version = "20240618.0-d7ace0a")
 bazel_dep(name = "toolchains_llvm_bootstrapped", version = "0.2.3")
 bazel_dep(name = "toolchains_protoc", version = "0.4.1")
 bazel_dep(name = "with_cfg.bzl", version = "0.9.1")
-bazel_dep(name = "xla", version = "20250612.0-6e48cbb")
+bazel_dep(name = "xla", version = "20250710.0-22ea002")
 bazel_dep(name = "zig-protobuf", version = "20250318.0-930153e")
 bazel_dep(name = "zig-yaml", version = "20240903.0-83d5fdf")
 
