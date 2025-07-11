@@ -20,3 +20,12 @@ We patch all ELF binaries and shared objects in the sandbox so that their `RPATH
 3.	Ensure `dlopen` visibility.
 
 Since `dlopen` only consults `RPATH` if the target library was listed as a `NEEDED` dependency at link time, we also explicitly add any dynamically-loaded libraries to the plugin’s `NEEDED` section.
+
+### Debug
+
+To ensure that all dependencies are loaded from the sandbox,
+run your bazel target with:
+- `--run_under="LD_DEBUG=files"`
+- or `--run_under="sudo -E LD_DEBUG=files"` for ROCm.
+
+And ensure that everything except glibc and libstdc++ are loaded from the sandbox.
