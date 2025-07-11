@@ -175,17 +175,23 @@ pub const RopeOpts = struct {
 
         /// Read a Rope scaling config from HF config.json format.
         pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !Scaling {
-            const content = try std.json.Value.jsonParse(allocator, source, options);
-            if (content == .null) return .default;
+            return jsonParseFromValue(
+                allocator,
+                try std.json.innerParse(std.json.Value, allocator, source, options),
+                options,
+            );
+        }
 
-            if (content != .object) return error.InvalidEnumTag;
+        pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) std.json.ParseFromValueError!Scaling {
+            if (source == .null) return .default;
 
-            const obj = content.object;
+            if (source != .object) return error.InvalidEnumTag;
+
+            const obj = source.object;
             const impl = obj.get("rope_type") orelse return error.MissingField;
             if (impl != .string) return error.InvalidEnumTag;
             if (std.mem.eql(u8, impl.string, "llama3")) {
-                // Note: leaky is fine here cause Llama3 struct don't need to allocate memory.
-                return .{ .llama3 = try std.json.parseFromValueLeaky(Llama3, undefined, content, .{ .ignore_unknown_fields = true }) };
+                return .{ .llama3 = try std.json.innerParseFromValue(Llama3, allocator, source, options) };
             } else {
                 log.warn("Unsupported Rope implementation: {s}, will use the default one which will produce altered results", .{impl.string});
                 return .{ .default = {} };
