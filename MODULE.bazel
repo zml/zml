@@ -79,16 +79,10 @@ pip.parse(
 )
 use_repo(pip, "neuron_py_deps")
 
-common_apt_packages = use_extension("//runtimes/common:packages.bzl", "common_apt_packages")
-use_repo(common_apt_packages, "zlib1g")
-
 cpu = use_extension("//runtimes/cpu:cpu.bzl", "cpu_pjrt_plugin")
 use_repo(cpu, "libpjrt_cpu_darwin_amd64", "libpjrt_cpu_darwin_arm64", "libpjrt_cpu_linux_amd64")
 
 cuda = use_extension("//runtimes/cuda:cuda.bzl", "cuda_packages")
-
-inject_repo(cuda, "zlib1g")
-
 use_repo(cuda, "libpjrt_cuda")
 
 rocm = use_extension("//runtimes/rocm:rocm.bzl", "rocm_packages")
@@ -151,11 +145,11 @@ use_repo(non_module_deps, "com_google_sentencepiece", "org_swig_swig")
 
 apt = use_extension("@rules_distroless//apt:extensions.bzl", "apt")
 apt.install(
-    name = "apt_common",
-    lock = "//runtimes/common:packages.lock.json",
-    manifest = "//runtimes/common:packages.yaml",
+    name = "apt_cuda",
+    lock = "//runtimes/cuda:packages.lock.json",
+    manifest = "//runtimes/cuda:packages.yaml",
 )
-use_repo(apt, "apt_common")
+use_repo(apt, "apt_cuda")
 apt.install(
     name = "apt_rocm",
     lock = "//runtimes/rocm:packages.lock.json",

@@ -1,5 +1,6 @@
 load("@bazel_skylib//lib:paths.bzl", "paths")
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+load("//bazel:http_deb_archive.bzl", "http_deb_archive")
 load("//runtimes/common:packages.bzl", "packages")
 
 _BUILD_FILE_DEFAULT_VISIBILITY = """\
@@ -15,6 +16,10 @@ CUDA_REDIST_JSON_SHA256 = "249e28a83008d711d5f72880541c8be6253f6d61608461de4fcb7
 CUDNN_REDIST_PREFIX = "https://developer.download.nvidia.com/compute/cudnn/redist/"
 CUDNN_VERSION = "9.8.0"
 CUDNN_REDIST_JSON_SHA256 = "a1599fa1f8dcb81235157be5de5ab7d3936e75dfc4e1e442d07970afad3c4843"
+
+_UBUNTU_PACKAGES = {
+     "zlib1g": packages.filegroup(name = "zlib1g", srcs = ["usr/lib/x86_64-linux-gnu/libz.so.1"]),
+}
 
 CUDA_PACKAGES = {
     "cuda_cudart": "\n".join([
@@ -131,6 +136,10 @@ def _read_redist_json(mctx, url, sha256):
     return json.decode(mctx.read(fname))
 
 def _cuda_impl(mctx):
+    loaded_packages = packages.read(mctx, [
+        "@zml//runtimes/cuda:packages.lock.json",
+    ])
+
     CUDA_REDIST = _read_redist_json(
         mctx,
         url = CUDA_REDIST_PREFIX + "redistrib_{}.json".format(CUDA_VERSION),
@@ -142,6 +151,16 @@ def _cuda_impl(mctx):
         url = CUDNN_REDIST_PREFIX + "redistrib_{}.json".format(CUDNN_VERSION),
         sha256 = CUDNN_REDIST_JSON_SHA256,
     )
+
+    for pkg_name, build_file_content in _UBUNTU_PACKAGES.items():
+        pkg = loaded_packages[pkg_name]
+        http_deb_archive(
+            name = pkg_name,
+            urls = pkg["urls"],
+            sha256 = pkg["sha256"],
+            build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + build_file_content,
+        )
+
 
     for pkg, build_file_content in CUDA_PACKAGES.items():
         pkg_data = CUDA_REDIST[pkg]

@@ -64,6 +64,7 @@ pub fn load() !*const pjrt.Api {
     const r = r_.withSourceRepo(source_repo);
     const cuda_data_dir = (try r.rlocationAlloc(arena.allocator(), "libpjrt_cuda/sandbox")).?;
 
+    std.debug.print("data_dir = {s}\n", .{cuda_data_dir});
     // CUDA path has to be set _before_ loading the PJRT plugin.
     // See https://github.com/openxla/xla/issues/21428
     try setupXlaGpuCudaDirFlag(arena.allocator(), cuda_data_dir);
