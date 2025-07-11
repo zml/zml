@@ -68,7 +68,7 @@ copy_to_directory(
         "@rocprofiler-register",
         "@roctracer",
         "@roctracer//:roctx",
-        "@libelf1t64//:libelf1",
+        "@libelf1",
         "@libdrm2",
         "@libnuma1",
         "@libzstd1",
@@ -78,6 +78,8 @@ copy_to_directory(
 
         # lld dependencies
         "@libxml2",
+        "@libicu70//:libicuuc70",
+        "@libicu70//:libicudata70",
         "@liblzma5",
     ] + select({
         ":_hipblaslt": ["@hipblaslt//:runfiles"],
@@ -92,6 +94,7 @@ copy_to_directory(
         "hipblaslt": "lib",
         "rocblas": "lib",
         "libxml2": "lib",
+        "libicuuc70": "lib",
         "liblzma5": "lib",
         "lld": "llvm/bin",
     },
