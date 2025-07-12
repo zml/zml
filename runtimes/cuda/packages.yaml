@@ -1,0 +1,14 @@
+#
+#     bazel run @apt_cuda//:lock
+#
+version: 1
+
+sources:
+  - channel: bookworm main
+    url: https://snapshot-cloudflare.debian.org/archive/debian/20250711T030400Z
+
+archs:
+    - "amd64"
+
+packages:
+    - "zlib1g"

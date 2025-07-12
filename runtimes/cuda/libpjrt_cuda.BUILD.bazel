@@ -51,6 +51,7 @@ copy_to_directory(
         "nvidia/nccl/lib": "lib",
         "nvvm/lib64": "lib",
         "libpjrt_cuda.patchelf": "lib",
+        "lib/x86_64-linux-gnu": "lib",
     },
     add_directory_to_runfiles = False,
     include_external_repositories = ["**"],
