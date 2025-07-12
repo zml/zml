@@ -11,17 +11,25 @@ def _patchelf_impl(ctx):
     ]
 
     if ctx.attr.soname:
-        commands.append('"$1" --set-soname "{}" "$3"'.format(ctx.attr.soname))
+        commands.append(""" "$1" --set-soname '{}' "$3" """.format(ctx.attr.soname))
     if ctx.attr.remove_needed:
         for v in ctx.attr.remove_needed:
-            commands.append('"$1" --remove-needed "{}" "$3"'.format(v))
+            commands.append(""" "$1" --remove-needed '{}' "$3" """.format(v))
     if ctx.attr.add_needed:
         for v in ctx.attr.add_needed:
-            commands.append('"$1" --add-needed "{}" "$3"'.format(v))
-
+            commands.append(""" "$1" --add-needed '{}' "$3" """.format(v))
     if ctx.attr.replace_needed:
         for k, v in ctx.attr.replace_needed.items():
-            commands.append('"$1" --replace-needed "{}" "{}" "$3"'.format(k, v))
+            commands.append(""" "$1" --replace-needed '{}' '{}' "$3" """.format(k, v))
+
+    if ctx.attr.set_rpath:
+        commands.append(""" "$1" --set-rpath '{}' "$3" """.format(ctx.attr.set_rpath))
+    if ctx.attr.add_rpath:
+        for path in ctx.attr.add_rpath:
+            commands.append(""" "$1" --add-rpath '{}' "$3" """.format(path))
+    if ctx.attr.remove_rpath:
+        for path in ctx.attr.remove_rpath:
+            commands.append(""" "$1" --remove-rpath '{}' "$3" """.format(path))
 
     renamed_syms = ctx.actions.declare_file("{}.rename.txt".format(ctx.label.name))
     if ctx.attr.rename_dynamic_symbols:
@@ -30,7 +38,7 @@ def _patchelf_impl(ctx):
             for k, v in ctx.attr.rename_dynamic_symbols.items()
         ])
         ctx.actions.write(renamed_syms, content)
-        commands.append('"$1" --rename-dynamic-symbols "{}" "$3"'.format(renamed_syms.path))
+        commands.append(""" "$1" --rename-dynamic-symbols '{}' "$3" """.format(renamed_syms.path))
     else:
         ctx.actions.write(renamed_syms, "")
 
@@ -57,6 +65,9 @@ patchelf = rule(
         "remove_needed": attr.string_list(),
         "replace_needed": attr.string_dict(),
         "rename_dynamic_symbols": attr.string_dict(),
+        "set_rpath": attr.string(),
+        "add_rpath": attr.string_list(),
+        "remove_rpath": attr.string_list(),
         "_patchelf": attr.label(
             default = "@patchelf",
             allow_single_file = True,
