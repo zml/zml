@@ -68,7 +68,6 @@ pub fn load() !*const pjrt.Api {
     // See https://github.com/openxla/xla/issues/21428
     try setupXlaGpuCudaDirFlag(arena.allocator(), cuda_data_dir);
 
-
     {
         const library = try std.fmt.allocPrintZ(arena.allocator(), "{s}/lib/libnvToolsExt.so.1", .{cuda_data_dir});
         const path = try std.posix.toPosixPath(library);

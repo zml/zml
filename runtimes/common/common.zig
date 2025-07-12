@@ -6,7 +6,6 @@ fn symbolPredicate(comptime decl_name: []const u8, comptime prefix: []const u8, 
 }
 
 pub fn weakifySymbols(module: type, prefix: []const u8) type {
-
     @setEvalBranchQuota(200000);
 
     var len = 0;
@@ -54,17 +53,17 @@ pub fn weakifySymbols(module: type, prefix: []const u8) type {
 }
 
 pub fn bindWeakSymbols(container: anytype, module: type, comptime prefix: []const u8) !void {
-    if (@typeInfo(@TypeOf(container)) != .@"pointer") {
+    if (@typeInfo(@TypeOf(container)) != .pointer) {
         @compileError("container must be a pointer type");
     }
     @setEvalBranchQuota(200000);
     inline for (@typeInfo(module).@"struct".decls) |decl| {
         if (comptime symbolPredicate(decl.name, prefix, module)) {
             const symb = std.c.dlsym(null, decl.name) orelse {
-                log.err("Unable to find symbol {s} in {s}", .{decl.name, @typeName(module)});
+                log.err("Unable to find symbol {s} in {s}", .{ decl.name, @typeName(module) });
                 return error.FileNotFound;
             };
-            
+
             @field(container.*, decl.name) = @ptrCast(symb);
         }
     }
