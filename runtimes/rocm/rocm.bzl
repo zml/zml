@@ -89,6 +89,8 @@ _ROCM_PACKAGES = {
             ],
         ),
     ]),
+    "rocfft": packages.filegroup(name = "rocfft", srcs = ["lib/librocfft.so.0"]),
+    "rocsolver": packages.filegroup(name = "rocsolver", srcs = ["lib/librocsolver.so.0"]),
     "roctracer": "\n".join([
         packages.filegroup(name = "roctracer", srcs = ["lib/libroctracer64.so.4"]),
         packages.filegroup(name = "roctx", srcs = ["lib/libroctx64.so.4"]),
@@ -122,10 +124,12 @@ _ROCM_PACKAGES = {
             ],
         ),
     ]),
+    "hipfft": packages.filegroup(name = "hipfft", srcs = ["lib/libhipfft.so.0"]),
     "hip-runtime-amd": "\n".join([
         packages.filegroup(name = "amdhip", srcs = ["lib/libamdhip64.so.6"]),
         packages.filegroup(name = "hiprtc", srcs = ["lib/libhiprtc.so.6"]),
     ]),
+    "hipsolver": packages.filegroup(name = "hipsolver", srcs = ["lib/libhipsolver.so.0"]),
     "rocm-llvm": "\n".join([
         packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
         packages.patchelf(
