@@ -35,7 +35,7 @@ fn hasRocmDevices() bool {
 
 fn setupRocmEnv(allocator: std.mem.Allocator, rocm_data_dir: []const u8) !void {
     for (rocm_env_entries) |entry| {
-        var real_path: []const u8 = std.fmt.allocPrintZ(allocator, "{s}/{s}", .{rocm_data_dir, entry.rpath}) catch null orelse {
+        var real_path: []const u8 = std.fmt.allocPrintZ(allocator, "{s}/{s}", .{ rocm_data_dir, entry.rpath }) catch null orelse {
             if (entry.mandatory) {
                 stdx.debug.panic("Unable to find {s} in {s}\n", .{ entry.name, bazel_builtin.current_repository });
             }
@@ -62,7 +62,6 @@ pub fn load() !*const pjrt.Api {
     if (!hasRocmDevices()) {
         return error.Unavailable;
     }
-
 
     var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
     defer arena.deinit();
