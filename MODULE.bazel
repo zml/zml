@@ -79,9 +79,6 @@ pip.parse(
 )
 use_repo(pip, "neuron_py_deps")
 
-common_apt_packages = use_extension("//runtimes/common:packages.bzl", "common_apt_packages")
-use_repo(common_apt_packages, "zlib1g")
-
 cpu = use_extension("//runtimes/cpu:cpu.bzl", "cpu_pjrt_plugin")
 use_repo(cpu, "libpjrt_cpu_darwin_amd64", "libpjrt_cpu_darwin_arm64", "libpjrt_cpu_linux_amd64")
 
@@ -147,12 +144,6 @@ non_module_deps = use_extension("//:third_party/non_module_deps.bzl", "non_modul
 use_repo(non_module_deps, "com_google_sentencepiece", "org_swig_swig")
 
 apt = use_extension("@rules_distroless//apt:extensions.bzl", "apt")
-apt.install(
-    name = "apt_common",
-    lock = "//runtimes/common:packages.lock.json",
-    manifest = "//runtimes/common:packages.yaml",
-)
-use_repo(apt, "apt_common")
 apt.install(
     name = "apt_cuda",
     lock = "//runtimes/cuda:packages.lock.json",
