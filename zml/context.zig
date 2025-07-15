@@ -218,13 +218,11 @@ pub const Context = struct {
 
 const CustomCall = struct {
     pub fn registerZmlCustomCalls(platform: Platform) !void {
-        const maybe_ffi = platform.pjrt_api.ffi();
-
-        if (maybe_ffi) |ffi| {
-            try ffi.register(platform.pjrt_api, "zmlHostBufferCallback", @tagName(platform.target), &hostBufferCallback, .{});
-        } else {
-            stdx.debug.panic("Registering custom calls failed", .{});
-        }
+        const ffi = platform.pjrt_api.ffi() orelse {
+            log.warn("Registering custom calls failed: No FFI Extension found in {s} PJRT Plugin.", .{@tagName(platform.target)});
+            return;
+        };
+        try ffi.register(platform.pjrt_api, "zmlHostBufferCallback", @tagName(platform.target), &hostBufferCallback, .{});
     }
 
     fn hostBufferCallback(call_frame: *pjrt.ffi.CallFrame) callconv(.C) ?*pjrt.ffi.Error {
