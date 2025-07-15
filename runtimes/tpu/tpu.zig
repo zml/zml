@@ -4,6 +4,9 @@ const std = @import("std");
 const asynk = @import("async");
 const pjrt = @import("pjrt");
 const c = @import("c");
+const stdx = @import("stdx");
+const bazel_builtin = @import("bazel_builtin");
+const runfiles = @import("runfiles");
 
 pub fn isEnabled() bool {
     return @hasDecl(c, "ZML_RUNTIME_TPU");
@@ -37,5 +40,18 @@ pub fn load() !*const pjrt.Api {
         return error.Unavailable;
     }
 
-    return try asynk.callBlocking(pjrt.Api.loadFrom, .{"libpjrt_tpu.so"});
+    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    defer arena.deinit();
+
+    var r_ = try runfiles.Runfiles.create(.{ .allocator = arena.allocator() }) orelse {
+        stdx.debug.panic("Unable to find CUDA directory", .{});
+    };
+
+    const source_repo = bazel_builtin.current_repository;
+    const r = r_.withSourceRepo(source_repo);
+    const cuda_data_dir = (try r.rlocationAlloc(arena.allocator(), "libpjrt_tpu/sandbox")).?;
+
+    const library = try std.fmt.allocPrintZ(arena.allocator(), "{s}/lib/libpjrt_tpu.so", .{cuda_data_dir});
+
+    return try asynk.callBlocking(pjrt.Api.loadFrom, .{library});
 }
