@@ -11,6 +11,7 @@ pub const ErrorCode = pjrt.ErrorCode;
 pub const ExecuteContext = pjrt.ExecuteContext;
 pub const BufferType = pjrt.BufferType;
 pub const Device = pjrt.Device;
+pub const MemoryStats = pjrt.MemoryStats;
 pub const DeviceDescription = pjrt.DeviceDescription;
 pub const Api = pjrt.Api;
 pub const NamedValue = pjrt.NamedValue;
@@ -126,6 +127,12 @@ pub const Client = opaque {
             }
         }
         return null;
+    }
+
+    pub const CreateUninitializedBufferArgs = pjrt.Client.CreateUninitializedBufferArgs;
+
+    pub fn createUnitializedBuffer(self: *const Client, api: *const Api, args: CreateUninitializedBufferArgs) ApiError!*Buffer {
+        return @ptrCast(try self.inner().createUninitializedBuffer(api, args));
     }
 };
 

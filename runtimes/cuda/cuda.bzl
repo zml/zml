@@ -9,12 +9,12 @@ package(default_visibility = ["//visibility:public"])
 ARCH = "linux-x86_64"
 
 CUDA_REDIST_PREFIX = "https://developer.download.nvidia.com/compute/cuda/redist/"
-CUDA_VERSION = "12.9.0"
-CUDA_REDIST_JSON_SHA256 = "4e4e17a12adcf8cac40b990e1618406cd7ad52da1817819166af28a9dfe21d4a"
+CUDA_VERSION = "12.8.1"
+CUDA_REDIST_JSON_SHA256 = "249e28a83008d711d5f72880541c8be6253f6d61608461de4fcb715554a6cf17"
 
 CUDNN_REDIST_PREFIX = "https://developer.download.nvidia.com/compute/cudnn/redist/"
-CUDNN_VERSION = "9.10.1"
-CUDNN_REDIST_JSON_SHA256 = "2ac8d48d3ab4de1acdce65fa3e8ecfb14750d4e101b05fe3307d2f95f2740563"
+CUDNN_VERSION = "9.8.0"
+CUDNN_REDIST_JSON_SHA256 = "a1599fa1f8dcb81235157be5de5ab7d3936e75dfc4e1e442d07970afad3c4843"
 
 CUDA_PACKAGES = {
     "cuda_cudart": "\n".join([
@@ -40,7 +40,7 @@ CUDA_PACKAGES = {
     "cuda_nvtx": packages.cc_import_glob_hdrs(
         name = "nvtx",
         hdrs_glob = ["include/nvtx3/**/*.h"],
-        shared_library = "lib/libnvtx3interop.so.1",
+        shared_library = "lib/libnvToolsExt.so.1",
     ),
     "libcufft": packages.cc_import(
         name = "cufft",
@@ -88,7 +88,7 @@ CUDA_PACKAGES = {
         ),
         packages.cc_import(
             name = "nvrtc_builtins",
-            shared_library = "lib/libnvrtc-builtins.so.12.9",
+            shared_library = "lib/libnvrtc-builtins.so.12.8",
         ),
     ]),
     "libcublas": "\n".join([
@@ -202,9 +202,9 @@ def _cuda_impl(mctx):
 
     http_archive(
         name = "nccl",
-        urls = ["https://files.pythonhosted.org/packages/48/fb/ec4ac065d9b0d56f72eaf1d9b0df601e33da28197b32ca351dc05b342611/nvidia_nccl_cu12-2.26.5-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl"],
+        urls = ["https://files.pythonhosted.org/packages/11/0c/8c78b7603f4e685624a3ea944940f1e75f36d71bd6504330511f4a0e1557/nvidia_nccl_cu12-2.25.1-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl"],
         type = "zip",
-        sha256 = "ea5ed3e053c735f16809bee7111deac62ac35b10128a8c102960a0462ce16cbe",
+        sha256 = "362aed5963fb9ea2ed2f264409baae30143498fd0e5c503aeaa1badd88cdc54a",
         build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + packages.cc_import(
             name = "nccl",
             shared_library = "nvidia/nccl/lib/libnccl.so.2",
@@ -214,8 +214,8 @@ def _cuda_impl(mctx):
     http_archive(
         name = "libpjrt_cuda",
         build_file = "libpjrt_cuda.BUILD.bazel",
-        url = "https://github.com/zml/pjrt-artifacts/releases/download/v9.0.1/pjrt-cuda_linux-amd64.tar.gz",
-        sha256 = "2ae18dacd9762e0ae89f223764b1793f8a4d7bd7238bfcd84d2342d7fb37a106",
+        url = "https://github.com/zml/pjrt-artifacts/releases/download/v11.0.0/pjrt-cuda_linux-amd64.tar.gz",
+        sha256 = "08fa022a6067ddfb5c951bdf11ddc398e63de21fdcacc9ffd07f70b1463482c2",
     )
 
     return mctx.extension_metadata(

@@ -35,6 +35,7 @@ pub const tokenizer = @import("zml/tokenizer");
 
 pub const call = ops.call;
 pub const compile = exe.compile;
+pub const compileWithPrefix = exe.compileWithPrefix;
 pub const compileFn = exe.compileFn;
 pub const compileModel = exe.compileModel;
 pub const FnExe = exe.FnExe;
