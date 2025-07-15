@@ -49,9 +49,9 @@ pub fn load() !*const pjrt.Api {
 
     const source_repo = bazel_builtin.current_repository;
     const r = r_.withSourceRepo(source_repo);
-    const cuda_data_dir = (try r.rlocationAlloc(arena.allocator(), "libpjrt_tpu/sandbox")).?;
+    const tpu_sandbox_dir = (try r.rlocationAlloc(arena.allocator(), "libpjrt_tpu/sandbox")).?;
 
-    const library = try std.fmt.allocPrintZ(arena.allocator(), "{s}/lib/libpjrt_tpu.so", .{cuda_data_dir});
+    const library = try std.fmt.allocPrintZ(arena.allocator(), "{s}/lib/libpjrt_tpu.so", .{tpu_sandbox_dir});
 
     return try asynk.callBlocking(pjrt.Api.loadFrom, .{library});
 }
