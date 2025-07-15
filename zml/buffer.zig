@@ -89,15 +89,20 @@ pub const Buffer = struct {
                 .byte_strides = byte_strides,
                 .host_buffer_semantics = .ImmutableUntilTransferCompletes,
             };
-            if (opts.memory) |memory| {
+            if (platform.target == .cpu or opts.memory == null) {
+                args.device = devices[i];
+            } else {
+                const memory = opts.memory.?;
                 const device_memories = try devices[i].addressableMemories(platform.pjrt_api);
+                // TODO measure the cost of this and consider caching on Zig side inside the platform.
                 const selected_memory = for (device_memories) |m| {
                     const kind = m.kind(platform.pjrt_api);
                     if (kind == memory.toPjrtMemory()) break m;
-                } else return error.NotFound;
+                } else {
+                    log.warn("Platform {s} doesn't have memory {s}", .{ @tagName(platform.target), @tagName(memory) });
+                    return error.NotFound;
+                };
                 args.memory = selected_memory;
-            } else {
-                args.device = devices[i];
             }
 
             const pjrt_buffer, const event = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, args);
