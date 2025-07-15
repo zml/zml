@@ -264,7 +264,8 @@ pub fn build(b: *std.Build) void {
     // proto
     const protobuf = zml_srcs.extractModule("protobuf", "src", "protobuf.zig", .{});
     const xla_compile_proto = xla_proto: {
-        // Ideally we should ask bazel to generate this graph of dependencies between the different proto files.
+        // Ideally we should ask bazel to generate this graph of dependencies between the different proto files,
+        // Or change altogether how protobuf are generated and only create one zig module for all protobuf stuff.
         const empty: *std.Build.Module = empty: {
             const write = b.addWriteFiles();
             const root = write.add("root.zig", "//! empty module");
@@ -272,9 +273,9 @@ pub fn build(b: *std.Build) void {
         };
         const opts: std.Build.Module.CreateOptions = .{ .imports = &.{.{ .name = "protobuf", .module = protobuf }} };
 
-        const duration = zml_srcs.extractModule(null, "_virtual_imports/duration_proto/google/protobuf", "duration.pb.zig", opts);
-        const any = zml_srcs.extractModule(null, "_virtual_imports/any_proto/google/protobuf", "any.pb.zig", opts);
-        const wrappers = zml_srcs.extractModule(null, "_virtual_imports/wrappers_proto/google/protobuf", "wrappers.pb.zig", opts);
+        const duration = zml_srcs.extractModule(null, googleProtobuf("duration"), "duration.pb.zig", opts);
+        const any = zml_srcs.extractModule(null, googleProtobuf("any"), "any.pb.zig", opts);
+        const wrappers = zml_srcs.extractModule(null, googleProtobuf("wrappers"), "wrappers.pb.zig", opts);
 
         const data = zml_srcs.extractModule(null, "xla", "xla_data.pb.zig", opts);
         const service_hlo = zml_srcs.extractModule(null, "xla/service", "hlo.pb.zig", opts);
@@ -473,6 +474,10 @@ fn addRuntimeDeps(run_step: *std.Build.Step.Run, libs: []const *std.Build.Step.I
     for (libs) |lib| {
         run_step.step.dependOn(&lib.step);
     }
+}
+
+fn googleProtobuf(comptime name: []const u8) []const u8 {
+    return "src/google/protobuf/_virtual_imports/" ++ name ++ "_proto/google/protobuf";
 }
 
 const Platforms = struct {
