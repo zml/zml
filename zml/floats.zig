@@ -334,9 +334,15 @@ test BFloat16 {
 }
 
 pub fn floatCast(T: type, x: anytype) T {
-    return switch (@TypeOf(x)) {
-        f64, f32, f16 => @floatCast(x),
-        else => @floatCast(x.toF32()),
+    return switch (T) {
+        f64, f32, f16 => switch (@TypeOf(x)) {
+            f64, f32, f16 => @floatCast(x),
+            else => @floatCast(x.toF32()),
+        },
+        else => switch (@TypeOf(x)) {
+            f64, f32, f16 => .fromF32(x),
+            else => .fromF32(x.toF32()),
+        },
     };
 }
 
