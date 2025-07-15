@@ -44,7 +44,7 @@ pub fn load() !*const pjrt.Api {
     defer arena.deinit();
 
     var r_ = try runfiles.Runfiles.create(.{ .allocator = arena.allocator() }) orelse {
-        stdx.debug.panic("Unable to find CUDA directory", .{});
+        stdx.debug.panic("Unable to find Runfiles directory", .{});
     };
 
     const source_repo = bazel_builtin.current_repository;
