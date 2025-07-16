@@ -54,6 +54,15 @@ fn setupRocmEnv(allocator: std.mem.Allocator, rocm_data_dir: []const u8) !void {
     }
 }
 
+fn setupXlaFlags(allocator: std.mem.Allocator) !void {
+    const xla_flags = std.process.getEnvVarOwned(allocator, "XLA_FLAGS") catch "";
+    // for AMD, use lld library from llvm instead of lld binary
+    // which saves us from having to sandbox it.
+    const new_xla_flagsZ = try std.fmt.allocPrintZ(allocator, "{s} --xla_gpu_use_inprocess_lld=true", .{xla_flags});
+
+    _ = c.setenv("XLA_FLAGS", new_xla_flagsZ, 1);
+}
+
 pub fn load() !*const pjrt.Api {
     if (comptime !isEnabled()) {
         return error.Unavailable;
@@ -82,6 +91,7 @@ pub fn load() !*const pjrt.Api {
     };
 
     try setupRocmEnv(arena.allocator(), sandbox_path);
+    try setupXlaFlags(arena.allocator());
 
     var lib_path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const lib_path = try stdx.fs.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_rocm.so" });
