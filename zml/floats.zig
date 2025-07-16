@@ -87,17 +87,10 @@ fn FloatHelpers(Float: type) type {
             return std.math.maxInt(std.meta.Int(.unsigned, exponent_bits - 1));
         }
 
-        pub fn format(
-            float: Float,
-            comptime fmt: []const u8,
-            options: std.fmt.FormatOptions,
-            writer: anytype,
-        ) !void {
-            _ = options;
-            if (fmt.len == 1 and fmt[0] == '_') {
-                try writer.print("{{ .sign={}, .exp={}, .mantissa={} }}", .{ float.sign, float.exponent, float.mantissa });
-            } else {
-                try writer.print("{" ++ fmt ++ "}", .{float.toF32()});
+        pub fn formatNumber(x: Float, writer: *std.io.Writer, n: std.fmt.Number) std.io.Writer.Error!void {
+            switch (n.mode) {
+                .binary, .octal, .hex => try writer.print("{{ .sign={}, .exp={}, .mantissa={} }}", .{ x.sign, x.exponent, x.mantissa }),
+                else => try writer.printFloat(x.toF32(), n),
             }
         }
     };
@@ -113,7 +106,7 @@ pub const Float32 = packed struct(u32) {
     pub const neg = Helpers.neg;
     pub const fromF32 = Helpers.fromF32;
     pub const toF32 = Helpers.toF32;
-    pub const format = Helpers.format;
+    pub const formatNumber = Helpers.formatNumber;
 };
 
 const f32_exp_bias = FloatHelpers(Float32).expBias();
@@ -128,7 +121,7 @@ pub const Float64 = packed struct(u64) {
     pub const neg = Helpers.neg;
     pub const fromF32 = Helpers.fromF32;
     pub const toF32 = Helpers.toF32;
-    pub const format = Helpers.format;
+    pub const formatNumber = Helpers.formatNumber;
 };
 
 pub const Float8E4M3B11FNUZ = packed struct(u8) {
@@ -151,7 +144,7 @@ pub const Float8E4M3B11FNUZ = packed struct(u8) {
     pub const neg = Helpers.neg;
     pub const fromF32 = Helpers.fromF32;
     pub const toF32 = Helpers.toF32;
-    pub const format = Helpers.format;
+    pub const formatNumber = Helpers.formatNumber;
 };
 
 pub const Float8E4M3FN = packed struct(u8) {
@@ -169,7 +162,7 @@ pub const Float8E4M3FN = packed struct(u8) {
     pub const neg = Helpers.neg;
     pub const fromF32 = Helpers.fromF32;
     pub const toF32 = Helpers.toF32;
-    pub const format = Helpers.format;
+    pub const formatNumber = Helpers.formatNumber;
 };
 
 pub const Float8E4M3FNUZ = packed struct(u8) {
@@ -192,7 +185,7 @@ pub const Float8E4M3FNUZ = packed struct(u8) {
     pub const neg = Helpers.neg;
     pub const fromF32 = Helpers.fromF32;
     pub const toF32 = Helpers.toF32;
-    pub const format = Helpers.format;
+    pub const formatNumber = Helpers.formatNumber;
 };
 
 test "Float8E4" {
@@ -247,7 +240,7 @@ pub const Float8E5M2 = packed struct(u8) {
     pub const neg = Helpers.neg;
     pub const fromF32 = Helpers.fromF32;
     pub const toF32 = Helpers.toF32;
-    pub const format = Helpers.format;
+    pub const formatNumber = Helpers.formatNumber;
 };
 
 pub const Float8E5M2FNUZ = packed struct(u8) {
@@ -266,7 +259,7 @@ pub const Float8E5M2FNUZ = packed struct(u8) {
     pub const neg = Helpers.neg;
     pub const fromF32 = Helpers.fromF32;
     pub const toF32 = Helpers.toF32;
-    pub const format = Helpers.format;
+    pub const formatNumber = Helpers.formatNumber;
 };
 
 test "Float8E5" {
@@ -322,7 +315,7 @@ pub const BFloat16 = packed struct(u16) {
     const Helpers = FloatHelpers(@This());
     pub const zero = Helpers.zero;
     pub const neg = Helpers.neg;
-    pub const format = Helpers.format;
+    pub const formatNumber = Helpers.formatNumber;
 };
 
 test BFloat16 {

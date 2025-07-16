@@ -96,15 +96,19 @@ pub const File = struct {
     }
 
     pub fn parsePickle(self: *File, allocator: std.mem.Allocator) ![]const pickle.Op {
+        // TODO remove the AdapatedReader once std lib supports the new std.Io.Reader for Zip and Tar files.
+        var read_buffer: [1024]u8 = undefined;
         return if (self.tar_file) |tar_file| {
             try tar_file.seekTo(self.pickle_subfile.start);
-            var buffered = std.io.bufferedReader(tar_file.reader());
-            return try pickle.parse(allocator, buffered.reader(), self.pickle_subfile.len);
+            const deprecated_reader = tar_file.reader();
+            var reader: AdaptedReader(@TypeOf(deprecated_reader)) = .init(deprecated_reader, &read_buffer);
+            return try pickle.parse(allocator, &reader.interface);
         } else {
             const file = self.buffer_file.file;
             try file.seekTo(self.pickle_subfile.start);
-            var buffered = std.io.bufferedReader(file.reader());
-            return try pickle.parse(allocator, buffered.reader(), self.pickle_subfile.len);
+            const deprecated_reader = file.reader();
+            var reader: AdaptedReader(@TypeOf(deprecated_reader)) = .init(deprecated_reader, &read_buffer);
+            return try pickle.parse(allocator, &reader.interface);
         };
     }
 
@@ -286,7 +290,7 @@ pub const File = struct {
                                         if (prefix.items.len > 0) {
                                             new_prefix.appendAssumeCapacity('.');
                                         }
-                                        new_prefix.items.len += std.fmt.formatIntBuf(new_prefix.unusedCapacitySlice(), i, 10, .lower, .{});
+                                        new_prefix.items.len += std.fmt.printInt(new_prefix.unusedCapacitySlice(), i, 10, .lower, .{});
                                         try self.parseValue(allocator, store, new_prefix, val);
                                     }
                                 }
@@ -303,7 +307,7 @@ pub const File = struct {
                                         if (prefix.items.len > 0) {
                                             new_prefix.appendAssumeCapacity('.');
                                         }
-                                        new_prefix.items.len += std.fmt.formatIntBuf(new_prefix.unusedCapacitySlice(), i, 10, .lower, .{});
+                                        new_prefix.items.len += std.fmt.printInt(new_prefix.unusedCapacitySlice(), i, 10, .lower, .{});
                                         const new_tag = switch (tag) {
                                             .int64 => "int",
                                             .float64 => "float",
@@ -321,7 +325,7 @@ pub const File = struct {
                                         if (prefix.items.len > 0) {
                                             new_prefix.appendAssumeCapacity('.');
                                         }
-                                        new_prefix.items.len += std.fmt.formatIntBuf(new_prefix.unusedCapacitySlice(), i, 10, .lower, .{});
+                                        new_prefix.items.len += std.fmt.printInt(new_prefix.unusedCapacitySlice(), i, 10, .lower, .{});
                                     }
                                     try self.parseValue(allocator, store, new_prefix, item);
                                 }
@@ -353,7 +357,7 @@ pub const File = struct {
                                     if (prefix.items.len > 0) {
                                         new_prefix.appendAssumeCapacity('.');
                                     }
-                                    new_prefix.items.len += std.fmt.formatIntBuf(new_prefix.unusedCapacitySlice(), int, 10, .lower, .{});
+                                    new_prefix.items.len += std.fmt.printInt(new_prefix.unusedCapacitySlice(), int, 10, .lower, .{});
                                     try self.parseValue(allocator, store, new_prefix, val);
                                 },
                                 inline else => |_, tag| {
@@ -547,6 +551,34 @@ pub const File = struct {
     }
 };
 
+fn AdaptedReader(GenericReader: type) type {
+    return struct {
+        const Adapted = @This();
+        interface: std.Io.Reader,
+        deprecated_reader: GenericReader,
+
+        pub fn init(deprecated_reader: GenericReader, buffer: []u8) Adapted {
+            return .{
+                .interface = .{
+                    .vtable = &.{ .stream = Adapted.stream },
+                    .buffer = buffer,
+                    .seek = 0,
+                    .end = 0,
+                },
+                .deprecated_reader = deprecated_reader,
+            };
+        }
+
+        pub fn stream(io_reader: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+            const r: *Adapted = @alignCast(@fieldParentPtr("interface", io_reader));
+            const dest = limit.slice(try w.writableSliceGreedy(1));
+            const n = r.deprecated_reader.readAll(dest) catch return error.ReadFailed;
+            if (n == 0) return error.EndOfStream;
+            return n;
+        }
+    };
+}
+
 /// Convert from a torch.<type>Storage to a `zml.DataType`.
 /// TODO: make this future proof, storage type are going to get replaced with torch.UntypedStorage
 /// See https://pytorch.org/docs/stable/storage.html
@@ -638,20 +670,19 @@ test "Read pickle (zipped)" {
     defer store.deinit();
 
     {
-        var tmp_arena = std.heap.ArenaAllocator.init(testing.allocator);
-        defer tmp_arena.deinit();
-        const tmp_alloc = tmp_arena.allocator();
-        var torch_file = try File.init(tmp_alloc, mmap_file);
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var torch_file = try File.init(arena.allocator(), mmap_file);
         // We don't close the file directly, it will be closed by the store.
 
-        const ops = try torch_file.parsePickle(tmp_alloc);
+        const ops = try torch_file.parsePickle(arena.allocator());
         try std.testing.expectEqual(302, ops.len);
 
-        const py_values = try eval.evaluate(tmp_alloc, ops, true);
+        const py_values = try eval.evaluate(arena.allocator(), ops, true);
         try torch_file.parseModel(py_values, &store);
     }
 
-    // now we have freed the tmp_arena.
+    // now we have freed the arena.
     // all data needed should have been copied into the store arena.
     try zml.testing.expectEqualShapes(
         zml.Shape.init(.{ 1, 4 }, .u8),

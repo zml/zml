@@ -358,8 +358,9 @@ test evaluate {
     defer arena.deinit();
     const allocator = arena.allocator();
     const file = try std.fs.cwd().openFile("zml/aio/torch/simple_test_4.pickle", .{ .mode = .read_only });
-    var buffered_reader = std.io.bufferedReader(file.reader());
-    const ops = try pickle.parse(allocator, buffered_reader.reader(), 4096);
+    var reader_buffer: [1024]u8 = undefined;
+    var reader = file.reader(&reader_buffer);
+    const ops = try pickle.parse(allocator, &reader.interface);
 
     const vals = try evaluate(allocator, ops, true);
     defer allocator.free(vals);

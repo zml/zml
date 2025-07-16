@@ -69,7 +69,7 @@ pub fn parseMetadata(allocator: Allocator, store: *zml.aio.BufferStore, prefix: 
                     var new_prefix = prefix;
                     if (prefix.items.len > 0)
                         new_prefix.appendAssumeCapacity('.');
-                    new_prefix.items.len += std.fmt.formatIntBuf(new_prefix.unusedCapacitySlice(), i, 10, .lower, .{});
+                    new_prefix.items.len += std.fmt.printInt(new_prefix.unusedCapacitySlice(), i, 10, .lower, .{});
                     try parseMetadata(allocator, store, new_prefix, item);
                 }
             };

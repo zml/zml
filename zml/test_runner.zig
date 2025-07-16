@@ -31,7 +31,7 @@ pub fn asyncMain() !void {
         .root_name = "Test",
         .estimated_total_items = test_fn_list.len,
     });
-    const have_tty = std.io.getStdErr().isTty();
+    const have_tty = std.fs.File.stderr().isTty();
 
     var args = std.process.args();
     // Skip executable path

@@ -228,15 +228,15 @@ pub const AsyncThread = struct {
 };
 
 pub fn getStdIn() !File {
-    return File.init(std.io.getStdIn()) catch @panic("Unable to open stdin");
+    return File.init(std.fs.File.stdin()) catch @panic("Unable to open stdin");
 }
 
 pub fn getStdOut() File {
-    return File.init(std.io.getStdOut()) catch @panic("Unable to open stdout");
+    return File.init(std.fs.File.stdout()) catch @panic("Unable to open stdout");
 }
 
 pub fn getStdErr() File {
-    return File.init(std.io.getStdErr()) catch @panic("Unable to open stderr");
+    return File.init(std.fs.File.stderr()) catch @panic("Unable to open stderr");
 }
 
 pub const File = struct {
@@ -257,7 +257,7 @@ pub const File = struct {
     _handle: std.fs.File.Handle,
     inner: aio.File,
 
-    fn asFile(self: File) std.fs.File {
+    pub fn asFile(self: File) std.fs.File {
         return .{ .handle = self._handle };
     }
 

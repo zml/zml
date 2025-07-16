@@ -31,7 +31,7 @@ pub const HostBuffer = struct {
         return .{
             ._shape = sh,
             ._strides = sh.computeStrides().buffer,
-            ._data = (try allocator.alignedAlloc(u8, 64, sh.byteSize())).ptr,
+            ._data = (try allocator.alignedAlloc(u8, .@"64", sh.byteSize())).ptr,
             ._memory = .{ .managed = .@"64" },
         };
     }
@@ -308,7 +308,7 @@ pub const HostBuffer = struct {
 
     pub fn squeeze(self: HostBuffer, axis_: anytype) HostBuffer {
         const ax = self._shape.axis(axis_);
-        stdx.debug.assert(self.dim(ax) == 1, "squeeze expects a 1-d axis got {} in {}", .{ ax, self });
+        stdx.debug.assert(self.dim(ax) == 1, "squeeze expects a 1-d axis got {} in {f}", .{ ax, self });
 
         var strd: std.BoundedArray(i64, Shape.MAX_RANK) = .{ .buffer = self._strides, .len = self.rank() };
         _ = strd.orderedRemove(ax);
@@ -351,11 +351,11 @@ pub const HostBuffer = struct {
         }
     };
 
-    pub fn prettyPrint(self: HostBuffer, writer: anytype, options: stdx.fmt.FullFormatOptions) !void {
+    pub fn prettyPrint(self: HostBuffer, writer: *std.Io.Writer, options: stdx.fmt.FullFormatOptions) !void {
         return self.prettyPrintIndented(writer, 4, 0, options);
     }
 
-    fn prettyPrintIndented(self: HostBuffer, writer: anytype, num_rows: u8, indent_level: u8, options: stdx.fmt.FullFormatOptions) !void {
+    fn prettyPrintIndented(self: HostBuffer, writer: *std.Io.Writer, num_rows: u8, indent_level: u8, options: stdx.fmt.FullFormatOptions) !void {
         if (self.rank() == 0) {
             // Special case input tensor is a scalar
             return switch (self.dtype()) {
@@ -373,7 +373,7 @@ pub const HostBuffer = struct {
         if (self.rank() == 1) {
             // Print a contiguous slice of items from the buffer in one line.
             // The number of items printed is controlled by the user through format syntax.
-            try writer.writeByteNTimes(' ', indent_level);
+            try writer.splatByteAll(' ', indent_level);
             switch (self.dtype()) {
                 inline else => |dt| {
                     const values = self.items(dt.toZigType());
@@ -388,10 +388,10 @@ pub const HostBuffer = struct {
             return;
         }
         // TODO: consider removing the \n if dim is 1 for this axis.
-        try writer.writeByteNTimes(' ', indent_level);
+        try writer.splatByteAll(' ', indent_level);
         _ = try writer.write("{\n");
         defer {
-            writer.writeByteNTimes(' ', indent_level) catch {};
+            writer.splatByteAll(' ', indent_level) catch {};
             _ = writer.write("},\n") catch {};
         }
 
@@ -406,7 +406,7 @@ pub const HostBuffer = struct {
         if (n < num_rows) return;
         // Skip middle rows
         if (n > 2 * num_rows) {
-            try writer.writeByteNTimes(' ', indent_level + 2);
+            try writer.splatByteAll(' ', indent_level + 2);
             _ = try writer.write("...\n");
         }
         // Write last rows

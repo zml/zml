@@ -29,5 +29,5 @@ zig_test(
 
 zig_srcs(
     name = "sources",
-    zig_bin = ":test",
+    zig_lib = "@libxev//:xev",
 )

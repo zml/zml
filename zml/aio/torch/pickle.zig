@@ -763,54 +763,54 @@ pub const Op = union(enum) {
 };
 
 /// Read a stream of bytes, and interpret it as a stream of Pickle operators.
-pub fn parse(allocator: std.mem.Allocator, reader: anytype, max_line_len: usize) ![]const Op {
-    var results = std.ArrayList(Op).init(allocator);
-    errdefer results.deinit();
-    const len = max_line_len;
-    var _buf: std.BoundedArray(u8, 12) = .{};
+/// The given allocator needs to be an arena cause we are not aligning allocations to avoid copies.
+pub fn parse(arena: std.mem.Allocator, reader: *std.Io.Reader) ![]const Op {
+    // It's not very efficient to interleave the results with the data copied from the stream,
+    // because growth event in the results ArrayList will lead to fragmentation.
+    // Trying to mitigate that by using a generous default size.
+    var results: std.ArrayListUnmanaged(Op) = try .initCapacity(arena, 512);
+    errdefer results.deinit(arena);
+    var alloc_writer = try std.Io.Writer.Allocating.initCapacity(arena, 512);
 
     while (true) {
-        const b = try reader.readByte();
-        const code: OpCode = @enumFromInt(b);
+        const code: OpCode = @enumFromInt(try reader.takeByte());
         const op: Op = switch (code) {
-            .int => blk: {
-                _buf.len = 0;
-                try reader.streamUntilDelimiter(_buf.writer(), '\n', _buf.capacity() + 1);
-                const buf = _buf.constSlice();
+            .int => int: {
+                const bytes = try reader.takeDelimiterExclusive('\n');
                 // Legacy hack, see OpCode.int documentation
                 // We do this parsing right away to simplify downstream code.
-                break :blk if (std.mem.eql(u8, "00", buf))
+                break :int if (bytes.len == 2 and bytes[0] == '0' and bytes[1] == '0')
                     .{ .bool = false }
-                else if (std.mem.eql(u8, "01", buf))
+                else if (bytes.len == 2 and bytes[0] == '0' and bytes[1] == '1')
                     .{ .bool = true }
                 else
-                    .{ .int = try std.fmt.parseInt(i32, buf, 10) };
+                    .{ .int = try std.fmt.parseInt(i32, bytes, 10) };
             },
-            .binint => .{ .int = try reader.readInt(i32, .little) },
-            .binint1 => .{ .int = try reader.readByte() },
-            .binint2 => .{ .int = try reader.readInt(u16, .little) },
+            .binint => .{ .int = try reader.takeInt(i32, .little) },
+            .binint1 => .{ .int = try reader.takeByte() },
+            .binint2 => .{ .int = try reader.takeInt(u16, .little) },
             // TODO: long should handle the trailing 'L' -> add a test.
-            .long => .{ .long = try reader.readUntilDelimiterAlloc(allocator, '\n', len) },
-            .long1 => .{ .binlong = try _readSlice(reader, allocator, 1) },
-            .long4 => .{ .binlong = try _readSlice(reader, allocator, 4) },
-            .string => .{ .string = try reader.readUntilDelimiterAlloc(allocator, '\n', len) },
-            .binstring => .{ .string = try _readSlice(reader, allocator, 4) },
-            .short_binstring => .{ .string = try _readSlice(reader, allocator, 1) },
-            .binbytes => .{ .bytes = try _readSlice(reader, allocator, 4) },
-            .binbytes8 => .{ .bytes = try _readSlice(reader, allocator, 8) },
-            .short_binbytes => .{ .bytes = try _readSlice(reader, allocator, 1) },
-            .bytearray8 => .{ .bytearray = try _readSlice(reader, allocator, 8) },
+            .long => .{ .long = try readLine(reader, &alloc_writer) },
+            .long1 => .{ .binlong = try _readSlice(reader, arena, 1) },
+            .long4 => .{ .binlong = try _readSlice(reader, arena, 4) },
+            .string => .{ .string = try readLine(reader, &alloc_writer) },
+            .binstring => .{ .string = try _readSlice(reader, arena, 4) },
+            .short_binstring => .{ .string = try _readSlice(reader, arena, 1) },
+            .binbytes => .{ .bytes = try _readSlice(reader, arena, 4) },
+            .binbytes8 => .{ .bytes = try _readSlice(reader, arena, 8) },
+            .short_binbytes => .{ .bytes = try _readSlice(reader, arena, 1) },
+            .bytearray8 => .{ .bytearray = try _readSlice(reader, arena, 8) },
             .next_buffer => .next_buffer,
             .readonly_buffer => .readonly_buffer,
             .none => .none,
             .newtrue => .{ .bool = true },
             .newfalse => .{ .bool = false },
-            .unicode => .{ .unicode = try reader.readUntilDelimiterAlloc(allocator, '\n', len) },
-            .short_binunicode => .{ .unicode = try _readSlice(reader, allocator, 1) },
-            .binunicode => .{ .unicode = try _readSlice(reader, allocator, 4) },
-            .binunicode8 => .{ .unicode = try _readSlice(reader, allocator, 8) },
-            .float => .{ .float = try reader.readUntilDelimiterAlloc(allocator, '\n', len) },
-            .binfloat => .{ .binfloat = @bitCast(try reader.readInt(u64, .big)) },
+            .unicode => .{ .unicode = try readLine(reader, &alloc_writer) },
+            .short_binunicode => .{ .unicode = try _readSlice(reader, arena, 1) },
+            .binunicode => .{ .unicode = try _readSlice(reader, arena, 4) },
+            .binunicode8 => .{ .unicode = try _readSlice(reader, arena, 8) },
+            .float => .{ .float = try readLine(reader, &alloc_writer) },
+            .binfloat => .{ .binfloat = @bitCast(try reader.takeInt(u64, .big)) },
             .empty_list => .empty_list,
             .append => .append,
             .appends => .appends,
@@ -832,74 +832,74 @@ pub fn parse(allocator: std.mem.Allocator, reader: anytype, max_line_len: usize)
             .mark => .mark,
             .pop_mark => .pop_mark,
             // If we fail to parse delay the error to the evaluation.
-            .get => .{
-                .get = _readDigits(u32, reader, &_buf) catch std.math.maxInt(u32),
+            .get => get: {
+                const digits = try reader.takeDelimiterExclusive('\n');
+                break :get .{ .get = std.fmt.parseInt(u32, digits, 10) catch std.math.maxInt(u32) };
             },
-            .binget => .{ .get = try reader.readByte() },
-            .long_binget => .{ .get = try reader.readInt(u32, .little) },
-            .put => blk: {
-                const buf = try reader.readUntilDelimiterAlloc(allocator, '\n', len);
-                defer allocator.free(buf);
-                const n = std.fmt.parseInt(u32, buf, 10) catch std.math.maxInt(u32);
-                break :blk .{ .put = n };
+            .binget => .{ .get = try reader.takeByte() },
+            .long_binget => .{ .get = try reader.takeInt(u32, .little) },
+            .put => put: {
+                const digits = try reader.takeDelimiterExclusive('\n');
+                break :put .{ .put = std.fmt.parseInt(u32, digits, 10) catch std.math.maxInt(u32) };
             },
-            .binput => .{ .put = try reader.readByte() },
-            .long_binput => .{ .put = try reader.readInt(u32, .little) },
+            .binput => .{ .put = try reader.takeByte() },
+            .long_binput => .{ .put = try reader.takeInt(u32, .little) },
             .memoize => .memoize,
-            .ext1 => .{ .ext1 = try reader.readByte() },
-            .ext2 => .{ .ext2 = try reader.readInt(i16, .little) },
-            .ext4 => .{ .ext4 = try reader.readInt(i32, .little) },
+            .ext1 => .{ .ext1 = try reader.takeByte() },
+            .ext2 => .{ .ext2 = try reader.takeInt(i16, .little) },
+            .ext4 => .{ .ext4 = try reader.takeInt(i32, .little) },
             .global => .{ .global = .{
-                .module = try reader.readUntilDelimiterAlloc(allocator, '\n', len),
-                .class = try reader.readUntilDelimiterAlloc(allocator, '\n', len),
+                .module = try readLine(reader, &alloc_writer),
+                .class = try readLine(reader, &alloc_writer),
             } },
             .stack_global => .stack_global,
             .reduce => .reduce,
             .build => .build,
             .inst => .{ .inst = .{
-                .module = try reader.readUntilDelimiterAlloc(allocator, '\n', len),
-                .class = try reader.readUntilDelimiterAlloc(allocator, '\n', len),
+                .module = try readLine(reader, &alloc_writer),
+                .class = try readLine(reader, &alloc_writer),
             } },
             .obj => .obj,
             .newobj => .newobj,
             .newobj_ex => .newobj_ex,
             .proto => blk: {
-                const version = try reader.readByte();
+                const version = try reader.takeByte();
                 if (version > 5) log.warn("zml.aio.torch.pickle.parse expects a Python pickle object of version <=5, got version {}. Will try to interpret anyway, but this may lead to more errors.", .{version});
                 break :blk .{ .proto = version };
             },
             .stop => .stop,
-            // This is not documented in pickletools but in https://peps.python.org/pep-3154/
-            // The frame size is stored right after the frame header.
-            // The loader is allowed to prefetch framesize from the underlying reader,
-            // and ops are not allowed to cross a frame boundary.
-            // We don't prefetch because we assume the reader is going to use some kind of buffered reader.
-            // We could try to enforce frame boundaries, but we would need to track
-            // how many bytes we are reading from the stream.
-            .frame => .{ .frame = try reader.readInt(u64, .little) },
-            .persid => .{ .persid = try reader.readUntilDelimiterAlloc(allocator, '\n', len) },
+            .frame => frame: {
+                // This is not documented in pickletools but in https://peps.python.org/pep-3154/
+                // The loader is allowed to prefetch framesize from the underlying reader,
+                // and ops are not allowed to cross a frame boundary.
+                const frame_size = try reader.takeInt(u64, .little);
+                reader.fill(@min(frame_size, reader.buffer.len)) catch |err| switch (err) {
+                    error.EndOfStream => {},
+                    else => return err,
+                };
+                break :frame .{ .frame = frame_size };
+            },
+            .persid => .{ .persid = try readLine(reader, &alloc_writer) },
             .binpersid => .binpersid,
             _ => |unk_tag| {
                 log.err("Unknow pickle operator {}, note we are only supporting pickle protocol up to version 5.", .{unk_tag});
                 return error.NotSupported;
             },
         };
-        try results.append(op);
+        try results.append(arena, op);
         if (op == .stop) break;
     }
-    return results.toOwnedSlice();
+    return results.items;
 }
 
 test "parse protocol 4" {
-    const allocator = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+
     const file = try std.fs.cwd().openFile("zml/aio/torch/simple_test_4.pickle", .{ .mode = .read_only });
-    var buffered_reader = std.io.bufferedReader(file.reader());
-    const ops = try parse(allocator, buffered_reader.reader(), 4096);
-    defer {
-        // Test we are correctly freeing every allocation.
-        for (ops) |op| op.deinit(allocator);
-        allocator.free(ops);
-    }
+    var read_buffer: [1024]u8 = undefined;
+    var reader = file.reader(&read_buffer);
+    const ops = try parse(arena.allocator(), &reader.interface);
 
     // this can be obtained by running: `python -m pickletools simple_test_4.pickle`
     var expected = [_]Op{
@@ -948,7 +948,9 @@ test "parse protocol 4" {
 
 test "parse protocol 0" {
     // We also test protocol 0, cause it's more text oriented.
-    const allocator = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+
     const pickle_0 =
         \\(dp0
         \\Vhello
@@ -982,13 +984,8 @@ test "parse protocol 0" {
         \\s.
     ;
 
-    var stream = std.io.fixedBufferStream(pickle_0);
-    const ops = try parse(allocator, stream.reader(), 4096);
-    defer {
-        // Test we are correctly freeing every allocation.
-        for (ops) |op| op.deinit(allocator);
-        allocator.free(ops);
-    }
+    var reader: std.Io.Reader = .fixed(pickle_0);
+    const ops = try parse(arena.allocator(), &reader);
 
     var expected = [_]Op{
         .mark,
@@ -1043,18 +1040,11 @@ test "parse protocol 0" {
     try std.testing.expectEqualDeep(&expected, ops);
 }
 
-fn _readDigits(comptime T: type, reader: anytype, buffer: *std.BoundedArray(u8, 12)) !T {
-    buffer.len = 0;
-    try reader.streamUntilDelimiter(buffer.writer(), '\n', 13);
-    return std.fmt.parseInt(T, buffer.constSlice(), 10);
-}
-
 fn _readSlice(reader: anytype, allocator: std.mem.Allocator, comptime len_bytes: u8) ![]u8 {
     const T = std.meta.Int(.unsigned, 8 * len_bytes);
-    const str_len: u64 = try reader.readInt(T, .little);
+    const str_len: u64 = try reader.takeInt(T, .little);
     const buf = try allocator.alloc(u8, str_len);
-    errdefer allocator.free(buf);
-    _ = try reader.read(buf);
+    _ = try reader.readSliceAll(buf);
     return buf;
 }
 
@@ -1062,4 +1052,15 @@ fn writeIntBuff(comptime T: type, value: T) [@divExact(@typeInfo(T).int.bits, 8)
     var res: [@divExact(@typeInfo(T).int.bits, 8)]u8 = undefined;
     std.mem.writeInt(T, &res, value, .little);
     return res;
+}
+
+fn readLine(reader: *std.Io.Reader, alloc_writer: *std.Io.Writer.Allocating) ![]const u8 {
+    const n = try reader.streamDelimiter(&alloc_writer.writer, '\n');
+    std.debug.assert(try reader.takeByte() == '\n');
+    const w = &alloc_writer.writer;
+    std.debug.assert(w.end == n);
+    const items = w.buffer[0..n];
+    w.buffer = w.buffer[n + 1 ..];
+    w.end = 0;
+    return items;
 }

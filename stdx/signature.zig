@@ -26,7 +26,7 @@ pub fn ArgsTuple(comptime funcT: anytype, comptime ArgsT: ?type) type {
         var num_buf: [8]u8 = undefined;
         tuple_fields[i] = .{
             .name = blk: {
-                const s = std.fmt.formatIntBuf(&num_buf, i, 10, .lower, .{});
+                const s = std.fmt.printInt(&num_buf, i, 10, .lower, .{});
                 num_buf[s] = 0;
                 break :blk num_buf[0..s :0];
             },
