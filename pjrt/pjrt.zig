@@ -77,7 +77,8 @@ pub const Api = struct {
     pub fn loadFrom(library: [:0]const u8) !*const Api {
         var lib: std.DynLib = switch (builtin.os.tag) {
             .linux => blk: {
-                const handle = std.c.dlopen(library, .{ .LAZY = true, .GLOBAL = false, .NODELETE = true }) orelse {
+                // We use RTLD_GLOBAL so that symbols from NEEDED libraries are available in the global namespace.
+                const handle = std.c.dlopen(library, .{ .LAZY = true, .GLOBAL = true, .NODELETE = true }) orelse {
                     log.err("Unable to dlopen plugin: {s}", .{library});
                     return error.FileNotFound;
                 };
