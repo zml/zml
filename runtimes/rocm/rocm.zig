@@ -8,6 +8,8 @@ const pjrt = @import("pjrt");
 const runfiles = @import("runfiles");
 const stdx = @import("stdx");
 
+const log = std.log.scoped(.@"zml/runtime/rocm");
+
 const ROCmEnvEntry = struct {
     name: [:0]const u8,
     rpath: []const u8,
@@ -66,19 +68,23 @@ pub fn load() !*const pjrt.Api {
     var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
     defer arena.deinit();
 
-    const r = blk: {
-        var r_ = try runfiles.Runfiles.create(.{ .allocator = arena.allocator() }) orelse {
-            stdx.debug.panic("Unable to find Runfiles directory", .{});
-        };
-        const source_repo = bazel_builtin.current_repository;
-        break :blk r_.withSourceRepo(source_repo);
+    var r_ = try runfiles.Runfiles.create(.{ .allocator = arena.allocator() }) orelse {
+        stdx.debug.panic("Unable to find runfiles", .{});
     };
-    const rocm_data_dir = (try r.rlocationAlloc(arena.allocator(), "libpjrt_rocm/sandbox")).?;
-    std.debug.print("found {s}\n", .{rocm_data_dir});
 
-    try setupRocmEnv(arena.allocator(), rocm_data_dir);
+    const source_repo = bazel_builtin.current_repository;
+    const r = r_.withSourceRepo(source_repo);
 
-    const library = try std.fmt.allocPrintZ(arena.allocator(), "{s}/lib/libpjrt_rocm.so", .{rocm_data_dir});
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const sandbox_path = try r.rlocation("libpjrt_rocm/sandbox", &path_buf) orelse {
+        log.err("Failed to find sandbox path for ROCm runtime", .{});
+        return error.FileNotFound;
+    };
+
+    try setupRocmEnv(arena.allocator(), sandbox_path);
+
+    var lib_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const lib_path = try stdx.fs.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_rocm.so" });
 
     // We must load the PJRT plugin from the main thread.
     //
@@ -89,5 +95,5 @@ pub fn load() !*const pjrt.Api {
     // on the library, the thread-local storage (TLS) offset may be resolved
     // relative to the TLS base of the main thread, rather than the thread actually
     // executing the destructor. Accessing this variable results in a segmentation fault...
-    return try pjrt.Api.loadFrom(library);
+    return try pjrt.Api.loadFrom(lib_path);
 }
