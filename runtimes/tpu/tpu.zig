@@ -8,6 +8,8 @@ const stdx = @import("stdx");
 const bazel_builtin = @import("bazel_builtin");
 const runfiles = @import("runfiles");
 
+const log = std.log.scoped(.@"zml/runtime/tpu");
+
 pub fn isEnabled() bool {
     return @hasDecl(c, "ZML_RUNTIME_TPU");
 }
@@ -44,14 +46,21 @@ pub fn load() !*const pjrt.Api {
     defer arena.deinit();
 
     var r_ = try runfiles.Runfiles.create(.{ .allocator = arena.allocator() }) orelse {
-        stdx.debug.panic("Unable to find Runfiles directory", .{});
+        stdx.debug.panic("Unable to find runfiles", .{});
     };
 
     const source_repo = bazel_builtin.current_repository;
     const r = r_.withSourceRepo(source_repo);
-    const tpu_sandbox_dir = (try r.rlocationAlloc(arena.allocator(), "libpjrt_tpu/sandbox")).?;
 
-    const library = try std.fmt.allocPrintZ(arena.allocator(), "{s}/lib/libpjrt_tpu.so", .{tpu_sandbox_dir});
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const sandbox_path = try r.rlocation("libpjrt_tpu/sandbox", &path_buf) orelse {
+        log.err("Failed to find sandbox path for TPU runtime", .{});
+        return error.FileNotFound;
+    };
 
-    return try asynk.callBlocking(pjrt.Api.loadFrom, .{library});
+    return blk: {
+        var lib_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = try stdx.fs.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_tpu.so" });
+        break :blk asynk.callBlocking(pjrt.Api.loadFrom, .{path});
+    };
 }
