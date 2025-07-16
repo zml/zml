@@ -1,27 +1,24 @@
 #
-#     bazel run @rocm_apt//:lock
+#     bazel run @apt_rocm//:lock
 #
 version: 1
 
 sources:
   - channel: jammy main
     url: https://repo.radeon.com/rocm/apt/6.3.4/
-  # - channel: bookworm main
-  #   url: https://snapshot-cloudflare.debian.org/archive/debian/20241127T143620Z/
+  - channel: jammy main
+    url: https://snapshot.ubuntu.com/ubuntu/20250711T030400Z
+  - channel: jammy-security main
+    url: https://snapshot.ubuntu.com/ubuntu/20250711T030400Z
+  - channel: jammy-updates main
+    url: https://snapshot.ubuntu.com/ubuntu/20250711T030400Z
 
 archs:
   - "amd64"
 
+# readelf -d libpjrt_rosm.so | grep NEEDED
 packages:
-  # - "libdrm2"
-  # - "libelf1"
-  # - "libnuma1"
-  # - "libzstd1"
-  # - "libdrm-amdgpu1"
-  # - "libtinfo6"
-  # - "zlib1g"
-  - "rocm-core"
-  - "rocm-smi-lib"
+  # - "rocm-smi-lib"
   - "hsa-rocr"
   - "hsa-amd-aqlprofile"
   - "comgr"
@@ -31,8 +28,13 @@ packages:
   - "rocm-device-libs"
   - "hip-dev"
   - "rocblas"
-  - "roctracer"
+  - "rocsolver"
+  - "hipsolver"
+  - "hipfft"
+  # - "roctracer"
   - "hipblaslt"
-  - "hipblaslt-dev"
+  # - "hipblaslt-dev"
   - "hip-runtime-amd"
-  - "rocm-llvm"
+  # - "rocm-llvm"
+  # rocm-llvm > ld.ldd missing dependency
+  - "libxml2"

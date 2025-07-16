@@ -1,5 +1,6 @@
 load("@aspect_bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@bazel_skylib//rules:common_settings.bzl", "bool_flag", "string_list_flag")
+load("@zml//bazel:patchelf.bzl", "patchelf")
 load("@zml//bazel:cc_import.bzl", "cc_import")
 
 string_list_flag(
@@ -19,65 +20,58 @@ config_setting(
     flag_values = {":hipblaslt": "True"},
 )
 
-copy_to_directory(
-    name = "sandbox",
-    srcs = [
-        "@rocm-device-libs//:runfiles",
-        "@rocm-llvm//:lld",
-    ],
-    include_external_repositories = ["*"],
-)
-
-cc_library(
-    name = "zmlxrocm_lib",
-    data = ["@rocblas//:runfiles"],
-    srcs = ["@zml//runtimes/rocm:zmlxrocm_srcs"],
-    linkopts = [
-        "-lc",
-        "-ldl",
-    ],
-)
-
 cc_shared_library(
     name = "zmlxrocm_so",
-    shared_lib_name = "libzmlxrocm.so.0",
-    deps = [":zmlxrocm_lib"],
+    shared_lib_name = "lib/libzmlxrocm.so.0",
+    deps = ["@zml//runtimes/rocm:zmlxrocm_lib"],
 )
 
-cc_import(
-    name = "zmlxrocm",
-    shared_library = ":zmlxrocm_so",
-)
-
-cc_import(
-    name = "libpjrt_rocm",
-    data = [
-        ":sandbox",
-        "@rocblas//:runfiles",
+patchelf(
+    name = "libpjrt_rocm.patchelf",
+    shared_library = "libpjrt_rocm.so",
+    add_needed = [
+        "libzmlxrocm.so.0",
+        # So that RPATH is taken into account.
+        "librocblas.so.4",
+        "libMIOpen.so.1",
     ] + select({
-        ":_hipblaslt": ["@hipblaslt//:runfiles"],
+        "_hipblaslt": [
+            "libhipblaslt.so.0",
+        ],
         "//conditions:default": [],
     }),
-    add_needed = ["libzmlxrocm.so.0"],
     rename_dynamic_symbols = {
         "dlopen": "zmlxrocm_dlopen",
     },
-    shared_library = "libpjrt_rocm.so",
-    soname = "libpjrt_rocm.so",
-    visibility = ["//visibility:public"],
-    deps = [
+    set_rpath = "$ORIGIN",
+)
+
+copy_to_directory(
+    name = "sandbox",
+    srcs = [
+        ":zmlxrocm_so",
+        ":libpjrt_rocm.patchelf",
         "@comgr//:amd_comgr",
         "@hip-runtime-amd//:amdhip",
-        "@hipblaslt",
+        "@hip-runtime-amd//:hiprtc",
+        "@hipblaslt//:hipblaslt",
+        "@hipfft",
+        "@hipsolver",
         "@hsa-amd-aqlprofile//:hsa-amd-aqlprofile",
         "@hsa-rocr//:hsa-runtime",
         "@miopen-hip//:MIOpen",
         "@rccl",
-        "@rocblas",
+        "@rocblas//:rocblas",
+        "@rocblas//:runfiles",
         "@rocm-core",
+        "@rocm-device-libs//:runfiles",
+        "@rocm-llvm//:lld",
         "@rocm-smi-lib//:rocm_smi",
         "@rocprofiler-register",
+        "@rocfft",
+        "@rocsolver",
         "@roctracer",
+        "@roctracer//:roctx",
         "@libelf1",
         "@libdrm2",
         "@libnuma1",
@@ -85,6 +79,35 @@ cc_import(
         "@libdrm-amdgpu1",
         "@libtinfo6",
         "@zlib1g",
-        "@zml//runtimes/rocm:zmlxrocm",
-    ],
+
+        # lld dependencies
+        "@libxml2",
+        "@libicu70//:libicuuc70",
+        "@libicu70//:libicudata70",
+        "@liblzma5",
+    ] + select({
+        ":_hipblaslt": ["@hipblaslt//:runfiles"],
+        "//conditions:default": [],
+    }),
+    replace_prefixes = {
+        "libpjrt_rocm.patchelf": "lib",
+        "lib/x86_64-linux-gnu": "lib",
+        "usr/lib/x86_64-linux-gnu": "lib",
+        "libdrm-amdgpu1": "lib",
+        "libelf1": "lib",
+        "hipblaslt": "lib",
+        "rocblas": "lib",
+        "libxml2": "lib",
+        "libicuuc70": "lib",
+        "liblzma5": "lib",
+        "lld": "llvm/bin",
+    },
+    add_directory_to_runfiles = True,
+    include_external_repositories = ["**"],
+)
+
+cc_library(
+    name = "libpjrt_rocm",
+    data = [":sandbox"],
+    visibility = ["@zml//runtimes/rocm:__subpackages__"],
 )
