@@ -3,6 +3,7 @@ images:
     platform: "linux"
     arch: "amd64"
     ami: "ami-04a92520784b93e73"
+    disk: large
     preinstall: |
       #!/bin/bash
       wget https://github.com/jbdalido/bazel-remote/releases/download/test/bazel-remote -O /usr/local/bin/bzlcache
