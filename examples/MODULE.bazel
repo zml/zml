@@ -6,7 +6,7 @@ bazel_dep(name = "platforms", version = "0.0.11")
 bazel_dep(name = "rules_cc", version = "0.1.1")
 bazel_dep(name = "rules_oci", version = "2.2.6")
 bazel_dep(name = "rules_rust", version = "0.60.0")
-bazel_dep(name = "rules_zig", version = "20250530.0-5084f1f")
+bazel_dep(name = "rules_zig", version = "20250714.0-b14a4f1")
 bazel_dep(name = "toolchains_llvm_bootstrapped", version = "0.2.4")
 bazel_dep(name = "zml", version = "0.1.0")
 
