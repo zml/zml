@@ -1,3 +1,5 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
 exports_files(
     ["packages.lock.json"],
     visibility = ["//runtimes:__subpackages__"],
