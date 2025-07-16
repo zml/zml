@@ -23,19 +23,27 @@ pub fn load() !*const pjrt.Api {
     defer arena.deinit();
 
     var r_ = try runfiles.Runfiles.create(.{ .allocator = arena.allocator() }) orelse {
-        std.debug.panic("Unable to create Runfiles isntance.", .{});
+        stdx.debug.panic("Unable to find runfiles", .{});
     };
+
     const source_repo = bazel_builtin.current_repository;
     const r = r_.withSourceRepo(source_repo);
-    const cpu_sandbox_dir = (try r.rlocationAlloc(arena.allocator(), "zml/runtimes/cpu/sandbox/lib")).?;
 
-    const ext = switch (builtin.os.tag) {
-        .windows => ".dll",
-        .macos, .ios, .watchos => ".dylib",
-        else => ".so",
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const sandbox_path = try r.rlocation("zml/runtimes/cpu/sandbox/lib", &path_buf) orelse {
+        log.err("Failed to find sandbox path for CPU runtime", .{});
+        return error.FileNotFound;
     };
 
-    const library = try std.fmt.allocPrintZ(arena.allocator(), "{s}/libpjrt_cpu{s}", .{ cpu_sandbox_dir, ext });
+    return blk: {
+        const ext = switch (builtin.os.tag) {
+            .windows => ".dll",
+            .macos, .ios, .watchos => ".dylib",
+            else => ".so",
+        };
 
-    return try asynk.callBlocking(pjrt.Api.loadFrom, .{library});
+        var lib_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = try stdx.fs.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "libpjrt_cpu" ++ ext });
+        break :blk asynk.callBlocking(pjrt.Api.loadFrom, .{path});
+    };
 }
