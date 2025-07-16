@@ -220,7 +220,7 @@ pub const Event = opaque {
         }{};
 
         try self.inner().onReady(api, &(struct {
-            fn call(err: ?*pjrt.Error, user_arg: ?*anyopaque) callconv(.C) void {
+            fn call(err: ?*pjrt.Error, user_arg: ?*anyopaque) callconv(.c) void {
                 const ctx_: *@TypeOf(ctx) = @ptrCast(@alignCast(user_arg.?));
                 ctx_.err = err;
                 ctx_.event.set();

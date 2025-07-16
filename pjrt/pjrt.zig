@@ -88,7 +88,7 @@ pub const Api = struct {
                 return err;
             },
         };
-        const DynGetPjrtApi = lib.lookup(*const fn () callconv(.C) *const Api, "GetPjrtApi") orelse {
+        const DynGetPjrtApi = lib.lookup(*const fn () callconv(.c) *const Api, "GetPjrtApi") orelse {
             std.debug.panic("Unable to find GetPjrtApi symbol in library: {s}", .{library});
         };
 
@@ -100,7 +100,7 @@ pub const Api = struct {
     }
 
     fn CallFnArgType(comptime func: Funcs) type {
-        const fti = @typeInfo(std.meta.FieldType(c.PJRT_Api, func));
+        const fti = @typeInfo(@FieldType(c.PJRT_Api, @tagName(func)));
         const fn_ptr = @typeInfo(fti.optional.child);
         const fn_type_info = @typeInfo(fn_ptr.pointer.child);
         const arg_array_type_info = @typeInfo(fn_type_info.@"fn".params[0].type.?);
@@ -403,8 +403,8 @@ pub const Client = opaque {
         element_type: BufferType,
         layout: MemoryLayout,
         device: *const Device,
-        on_delete_callback: *const fn (device_buffer_ptr: ?*anyopaque, ctx: ?*anyopaque) callconv(.C) void = &struct {
-            fn call(_: ?*anyopaque, _: ?*anyopaque) callconv(.C) void {}
+        on_delete_callback: *const fn (device_buffer_ptr: ?*anyopaque, ctx: ?*anyopaque) callconv(.c) void = &struct {
+            fn call(_: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {}
         }.call,
         on_delete_callback_arg: ?*anyopaque = null,
         stream: ?*const Stream = null,
@@ -637,7 +637,7 @@ pub const GetCostAnalysisError = std.mem.Allocator.Error || ApiError;
 pub const SerializeResult = struct {
     bytes: []const u8,
     handle: *anyopaque,
-    deleter: *const fn (?*anyopaque) callconv(.C) void,
+    deleter: *const fn (?*anyopaque) callconv(.c) void,
 
     pub fn deinit(self: *SerializeResult) void {
         self.deleter(self.handle);
@@ -1036,7 +1036,7 @@ pub const Event = opaque {
         });
     }
 
-    pub fn onReady(self: *Event, api: *const Api, func: *const fn (err: ?*Error, user_arg: ?*anyopaque) callconv(.C) void, user_arg: ?*anyopaque) ApiError!void {
+    pub fn onReady(self: *Event, api: *const Api, func: *const fn (err: ?*Error, user_arg: ?*anyopaque) callconv(.c) void, user_arg: ?*anyopaque) ApiError!void {
         _ = try api.call(.PJRT_Event_OnReady, .{
             .event = self.inner(),
             .callback = @ptrCast(func),

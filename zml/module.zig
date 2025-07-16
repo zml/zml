@@ -416,7 +416,7 @@ pub const CompilationContext = struct {
         defer self._tracer.frameEnd(canonicalize_frame, "emitMlir.canonicalize");
         self._mlir_canonicalizer.runOnOp(mlir_fn) catch |err| switch (err) {
             error.InvalidMlir => {
-                log.err("Failed to canonicalize invalid mlir: {}", .{mlir_fn.mlirFormatter(.{})});
+                log.err("Failed to canonicalize invalid mlir: {f}", .{mlir_fn.mlirFormatter(.{})});
                 // user errors should have triggered a panic before we reach this.
                 @panic("ZML generated invalid mlir. Please open a bug report");
             },
@@ -464,7 +464,7 @@ pub const CompilationContext = struct {
                     // This will break the day we writer another attribute before donation.
                     // When the time come, do a more fancy lookup here to check if an argument
                     // is donated twice.
-                    stdx.debug.assert(attributes[a].len == 0, "Donation error ! Argument {} has been donated twice ! To {} and to {}", .{ a, index, attributes[a].buffer[0] });
+                    stdx.debug.assert(attributes[a].len == 0, "Donation error ! Argument {d} has been donated twice ! To {d} and to {any}", .{ a, index, attributes[a].buffer[0] });
                     attributes[a].appendAssumeCapacity(.named(ctx, "tf.aliasing_output", .int(ctx, .i32, @intCast(index))));
                     // log.debug("attribute: {}", .{attributes[a].constSlice()});
                 },
@@ -506,7 +506,7 @@ pub const CompilationContext = struct {
 
         var mlir_bytecode = std.ArrayList(u8).init(std.testing.allocator);
         defer mlir_bytecode.deinit();
-        try mlir_bytecode.writer().print("{}", .{f.mlir_fn.mlirFormatter(.{})});
+        try mlir_bytecode.writer().print("{f}", .{f.mlir_fn.mlirFormatter(.{})});
 
         // Check that the `x` input argument gives its buffer to the result tensor.
         // `%arg0` is the bias of the model, `%arg1` is `x`, `%arg2` is `y`.
@@ -622,7 +622,7 @@ pub const CompilationContext = struct {
             const full_name: [:0]const u8 = if (std.mem.eql(u8, "main", func_name))
                 try self.allocator().dupeZ(u8, func_name)
             else
-                try std.fmt.allocPrintZ(self.allocator(), "{s}_{x}", .{ func_name, key.input_hash });
+                try std.fmt.allocPrintSentinel(self.allocator(), "{s}_{x}", .{ func_name, key.input_hash }, 0);
 
             var arg_id: u16 = 0;
             var tensor_args: @TypeOf(args) = args;
@@ -702,7 +702,7 @@ pub const CompilationContext = struct {
 
                 const res = ctx.self._block_args.getOrPutAssumeCapacity(tensor._id);
                 if (res.found_existing) {
-                    stdx.debug.panic("Failed compilation because received two tensors arguments with the same ID: {} and {} at index {} ({}).", .{ res.value_ptr.*[0], tensor, ctx.index, tensor._id });
+                    stdx.debug.panic("Failed compilation because received two tensors arguments with the same ID: {f} and {f} at index {} ({}).", .{ res.value_ptr.*[0], tensor, ctx.index, tensor._id });
                 } else {
                     res.value_ptr.* = .{ arg_value, .{ .arg = @intCast(ctx.index) } };
                 }
@@ -777,7 +777,7 @@ pub const CompilationContext = struct {
             .buffer_id, .arg_id => if (self._block_args.get(tensor._id)) |res|
                 .{ res[0], res[1] }
             else {
-                log.err("Found unknown tensor id {}({})", .{ tensor, tensor._id });
+                log.err("Found unknown tensor id {f}({})", .{ tensor, tensor._id });
                 @panic("Found unknown tensor id");
             },
             .mlir => |v| .{ v, tensor._donation },

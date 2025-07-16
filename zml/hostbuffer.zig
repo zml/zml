@@ -170,8 +170,8 @@ pub const HostBuffer = struct {
     /// Strided buffers can't use this method.
     pub fn items(self: HostBuffer, comptime T: type) []const T {
         // TODO we should allow interpreting the output as @Vector(8, f32) when the tensor is f32.
-        stdx.debug.assert(DataType.fromZigType(T) == self.dtype(), "Can't reinterpret {} as {s}", .{ self, @typeName(T) });
-        stdx.debug.assert(self.isContiguous(), "{} isn't contiguous, can't interpret as []const u8", .{self});
+        stdx.debug.assert(DataType.fromZigType(T) == self.dtype(), "Can't reinterpret {f} as {s}", .{ self, @typeName(T) });
+        stdx.debug.assert(self.isContiguous(), "{f} isn't contiguous, can't interpret as []const u8", .{self});
         const ptr: [*]const T = @alignCast(@ptrCast(self._data));
         return ptr[0..self._shape.count()];
     }
@@ -181,7 +181,7 @@ pub const HostBuffer = struct {
     }
 
     pub fn bytes(self: HostBuffer) []const u8 {
-        stdx.debug.assert(self.isContiguous(), "{} isn't contiguous, can't interpret as []const u8", .{self});
+        stdx.debug.assert(self.isContiguous(), "{f} isn't contiguous, can't interpret as []const u8", .{self});
         return self._data[0..self._shape.byteSize()];
     }
 
@@ -233,7 +233,7 @@ pub const HostBuffer = struct {
     }
 
     pub fn reshape(self: HostBuffer, shape_: anytype) HostBuffer {
-        stdx.debug.assert(self.isContiguous(), "reshape expects a contiguous tensor, got: {}", .{self});
+        stdx.debug.assert(self.isContiguous(), "reshape expects a contiguous tensor, got: {f}", .{self});
         var res = self;
         res._shape = self._shape.reshape(shape_);
         res._strides = res._shape.computeStrides().buffer;
@@ -252,9 +252,9 @@ pub const HostBuffer = struct {
         const start: i64 = if (s.start < 0) s.start + d else s.start;
         var end = s.end orelse d;
         if (end < 0) end += d;
-        stdx.debug.assert(start >= 0 and start < d, "slice1d({}, {}) expects the slice start to be between 0 and {} got: {}", .{ self, ax, d, s });
-        stdx.debug.assert(end >= 1 and end <= d, "slice1d({}, {}) expects the slice end to be between 1 and {} got: {}", .{ self, ax, d, s });
-        stdx.debug.assert(start < end, "slice1d({}, {}) expects the slice start ({}) to be smaller than the end ({}), got: {}", .{ self, ax, start, end, s });
+        stdx.debug.assert(start >= 0 and start < d, "slice1d({f}, {}) expects the slice start to be between 0 and {} got: {}", .{ self, ax, d, s });
+        stdx.debug.assert(end >= 1 and end <= d, "slice1d({f}, {}) expects the slice end to be between 1 and {} got: {}", .{ self, ax, d, s });
+        stdx.debug.assert(start < end, "slice1d({f}, {}) expects the slice start ({}) to be smaller than the end ({}), got: {}", .{ self, ax, start, end, s });
 
         const offset: usize = @intCast(start * self._strides[ax]);
         const new_shape = self.shape().set(ax, end - start);
@@ -323,16 +323,11 @@ pub const HostBuffer = struct {
 
     pub fn format(
         self: HostBuffer,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
         writer: anytype,
     ) !void {
-        _ = options;
-        if (std.mem.eql(u8, fmt, "v")) {
-            try writer.print("HostBuffer(.{_})@0x{x}", .{ self._shape, @intFromPtr(self._data) });
-        } else {
-            try writer.print("HostBuffer(.{_})", .{self._shape});
-        }
+        // TODO debug option
+        // try writer.print("HostBuffer(.{f})@0x{x}", .{ self._shape, @intFromPtr(self._data) });
+        try writer.print("HostBuffer(.{f})", .{self._shape});
     }
 
     /// Formatter for a HostBuffer that also print the values not just the shape.
@@ -344,12 +339,14 @@ pub const HostBuffer = struct {
     pub const PrettyPrinter = struct {
         x: HostBuffer,
 
-        pub fn format(self: PrettyPrinter, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        // TODO(0.15.0) revisit pretty printer
+        pub fn format(self: PrettyPrinter, writer: anytype) !void {
             const fmt_: stdx.fmt.Fmt = switch (self.x.dtype().class()) {
-                .integer => .parse(i32, fmt),
-                .float => .parse(f32, fmt),
-                else => .parse(void, fmt),
+                .integer => .parse(i32, "d"),
+                .float => .parse(f32, "d"),
+                else => .parse(void, ""),
             };
+            const options: std.fmt.FormatOptions = .{};
             try prettyPrint(self.x, writer, .{ .fmt = fmt_, .options = options });
         }
     };

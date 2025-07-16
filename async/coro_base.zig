@@ -49,7 +49,7 @@ pub const Coro = packed struct {
     const Func = *const fn (
         from: *Coro,
         self: *Coro,
-    ) callconv(.C) noreturn;
+    ) callconv(.c) noreturn;
 
     pub fn init(func: Func, stack: []align(stack_alignment) u8) !Self {
         stdx.debug.assertComptime(@sizeOf(usize) == 8, "usize expected to take 8 bytes", .{});

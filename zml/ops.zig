@@ -437,7 +437,7 @@ pub fn if_(
         @compileError("true_branch_fn and false_branch_fn return types don't match ! " ++ @typeName(TrueBlockSignature.Return) ++ " and " ++ @typeName(FalseBlockSignature.Return));
     }
 
-    stdx.debug.assert(pred.dtype() == .bool and pred.count() == 1, "zml.ops.if_ expects the condition to have exactly one element of dtype .bool, got {}", .{pred});
+    stdx.debug.assert(pred.dtype() == .bool and pred.count() == 1, "zml.ops.if_ expects the condition to have exactly one element of dtype .bool, got {f}", .{pred});
 
     const ctx = CompilationContext.current();
     const true_branch_block, const true_branch_res = ctx.makeBlock(.open, TrueBlockSignature, &true_branch_fn, blkctx, {});
@@ -456,9 +456,9 @@ pub fn if_(
         failed_to_collect = true;
     };
     if (!failed_to_collect) {
-        stdx.debug.assert(true_shapes.items.len == false_shapes.items.len, "zml.ops.if_ expects the true and false branch to produce the same number of tensors. Got: \n - true branch: {_}\n -false branch: {_}", .{ true_shapes.items, false_shapes.items });
+        stdx.debug.assert(true_shapes.items.len == false_shapes.items.len, "zml.ops.if_ expects the true and false branch to produce the same number of tensors. Got: \n - true branch: {any}\n -false branch: {any}", .{ true_shapes.items, false_shapes.items });
         for (true_shapes.items, false_shapes.items) |true_shape, false_shape| {
-            stdx.debug.assert(true_shape.eqlWithTags(false_shape), "zml.ops.if_ expects the true and false branch to produce tensors of the same shape. Got: \n - true branch: {_}\n -false branch: {_}", .{ true_shapes.items, false_shapes.items });
+            stdx.debug.assert(true_shape.eqlWithTags(false_shape), "zml.ops.if_ expects the true and false branch to produce tensors of the same shape. Got: \n - true branch: {any}\n -false branch: {any}", .{ true_shapes.items, false_shapes.items });
         }
     }
 
@@ -751,7 +751,7 @@ pub fn fromMlirOperationWithTags(op: mlir.Operation, base: anytype) @TypeOf(base
     meta.visit((struct {
         fn cb(inner_ctx: *LocalContext, tensor: *Tensor) void {
             var new = Tensor.fromMlirValue(inner_ctx.op.result(inner_ctx.index));
-            stdx.debug.internalAssert(new.rank() == tensor.rank(), "expected operand result to have rank {} but got {}", .{ tensor.rank(), new });
+            stdx.debug.internalAssert(new.rank() == tensor.rank(), "expected operand result to have rank {} but got {f}", .{ tensor.rank(), new });
             // copy tags and sharding info over
             // some ops can change dims eg reduceWindow, so we trust mlir here.
             new._shape._tags = tensor._shape._tags;
@@ -932,7 +932,7 @@ pub fn scatter(
 
     const n_inputs = meta.count(Tensor, &inputs);
     const n_updates = meta.count(Tensor, &updates);
-    stdx.debug.assert(n_inputs == n_updates, "zml.ops.scatter expects the same number of tensors in inputs and updates, got {} and {}", .{ n_inputs, n_updates });
+    stdx.debug.assert(n_inputs == n_updates, "zml.ops.scatter expects the same number of tensors in inputs and updates, got {d} and {d}", .{ n_inputs, n_updates });
 
     // Note: I was a bit lazy here, and I only look at tags on the first tensor.
     // we probably should check all of them.
@@ -944,7 +944,7 @@ pub fn scatter(
 
     // validate coord axes: all coord_axes should exist inside self
     for (indices_axes.constSlice()) |t| {
-        stdx.debug.assert(self._shape.hasTag(t) != null, "zml.ops.scatter expects axes of indices to be axes of inputs, got input={_} and indices={s}", .{ self, indices_axes.constSlice() });
+        stdx.debug.assert(self._shape.hasTag(t) != null, "zml.ops.scatter expects axes of indices to be axes of inputs, got input={f} and indices={any}", .{ self, indices_axes.constSlice() });
     }
 
     // Handle scalar indices by broadcasting them to the indices with the highest rank.
@@ -958,8 +958,8 @@ pub fn scatter(
         break :blk higher_rank;
     };
     for (indices_per_axis.slice()) |*idx| {
-        stdx.debug.assert(idx.shape().canBroadcastTo(indices_shape), "zml.ops.scatter expects all indices tensor to have the same shape, got {_}", .{indices_per_axis.slice()});
-        stdx.debug.assert(idx.dtype() == indices_shape.dtype(), "zml.ops.scatter expects all indices tensor to have the same dtype, got {_}", .{indices_per_axis.slice()});
+        stdx.debug.assert(idx.shape().canBroadcastTo(indices_shape), "zml.ops.scatter expects all indices tensor to have the same shape, got {any}", .{indices_per_axis.slice()});
+        stdx.debug.assert(idx.dtype() == indices_shape.dtype(), "zml.ops.scatter expects all indices tensor to have the same dtype, got {any}", .{indices_per_axis.slice()});
         idx.* = idx.broad(indices_shape);
     }
 
@@ -972,7 +972,7 @@ pub fn scatter(
     var config = scatterConfig(self.shape(), update.shape(), indices_per_axis, indices_axes);
     const indices = scatterPrepareIndices(&config, self.shape(), update.shape(), &indices_per_axis, &indices_axes);
     // const n_indices_axes = update.rank() - _collectAxes(AxisKind, up_kind, .update_window).len;
-    // stdx.debug.assert(n_indices_axe == indices_axes.len, "scatter({_}, {any}) expects 'updates' to contain all axes from 'indices', got indices={s}, updates={_}", .{ self, index_tensors, indices_axes.constSlice(), update });
+    // stdx.debug.assert(n_indices_axe == indices_axes.len, "scatter({f}, {any}) expects 'updates' to contain all axes from 'indices', got indices={s}, updates={f}", .{ self, index_tensors, indices_axes.constSlice(), update });
 
     const mlir_ctx = ctx.mlirCtx();
     var _scalar: T = inputs;
@@ -1058,7 +1058,7 @@ fn scatterConfig(
             scatter_to_operand_axes.appendAssumeCapacity(op.axis(t));
         }
         for (indices.tags()) |t| {
-            stdx.debug.assert(update.hasTag(t) != null, "scatter expects 'updates' to have all axes of 'indices', got self={_}, updates={_} and indices={_}", .{ op, update, indices });
+            stdx.debug.assert(update.hasTag(t) != null, "scatter expects 'updates' to have all axes of 'indices', got self={f}, updates={f} and indices={f}", .{ op, update, indices });
             updates_transpose.appendAssumeCapacity(update.axis(t));
         }
 
@@ -1094,11 +1094,11 @@ fn scatterConfig(
             if (indices.hasTag(t) != null) {
                 up_kind.appendAssumeCapacity(.window_id);
             } else if (op.hasTag(t)) |self_ax| {
-                stdx.debug.assert(update.dim(up_ax) <= op.dim(self_ax), "scatter expects the slices described in 'updates' to fit inside 'op', but along axis .{s} it doesn't. Got op={_}, updates={_}.", .{ t, op, update });
+                stdx.debug.assert(update.dim(up_ax) <= op.dim(self_ax), "scatter expects the slices described in 'updates' to fit inside 'op', but along axis .{s} it doesn't. Got op={f}, updates={f}.", .{ t, op, update });
                 up_kind.appendAssumeCapacity(.update_window);
             } else {
                 // TODO: consider accepting untagged update here.
-                std.debug.panic("scatter expects 'updates' to be made of axes from op={_} and from indices={s}, got unknown tag {s} in {_}", .{ op, indices_axes.constSlice(), t, update });
+                std.debug.panic("scatter expects 'updates' to be made of axes from op={f} and from indices={any}, got unknown tag {s} in {f}", .{ op, indices_axes.constSlice(), std.mem.sliceTo(t, 0), update });
             }
         }
     } else {
@@ -1209,7 +1209,7 @@ fn scatterPrepareIndices(
 
     for (scatter_to_op_axes.constSlice(), 0..) |sc_ax, i| {
         if (i != sc_ax) {
-            log.warn("Found a slow scatter pattern, which is going to generate a while loop: scatter({_}, {any}, {_}). Because the index axes aren't the major ones in the input tensor.", .{ op, scatter_to_op_axes.constSlice(), update });
+            log.warn("Found a slow scatter pattern, which is going to generate a while loop: scatter({f}, {any}, {f}). Because the index axes aren't the major ones in the input tensor.", .{ op, scatter_to_op_axes.constSlice(), update });
             break;
         }
     }

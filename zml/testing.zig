@@ -108,7 +108,7 @@ pub fn expectClose(left_: anytype, right_: anytype, tolerance: f32) !void {
 pub fn expectEqualShapes(expected: zml.Shape, actual: zml.Shape) error{TestExpectedEqual}!void {
     if (expected.eqlWithTags(actual)) return;
 
-    std.debug.print("Expected {}, got {}", .{ expected, actual });
+    std.debug.print("Expected {f}, got {f}", .{ expected, actual });
     return error.TestExpectedEqual;
 }
 
