@@ -1,4 +1,5 @@
-load("@rules_zig//zig:defs.bzl", "zig_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+load("@zml//bazel:zig_srcs.bzl", "zig_srcs")
 
 zig_library(
     name = "stdx",
@@ -17,4 +18,15 @@ zig_library(
     ],
     main = "stdx.zig",
     visibility = ["//visibility:public"],
+)
+
+zig_test(
+    name = "test",
+    deps = [":stdx"],
+    testonly = False,
+)
+
+zig_srcs(
+    name = "sources",
+    zig_bin = ":test",
 )
