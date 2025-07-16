@@ -31,19 +31,9 @@ fn hasCudaPathInLDPath() bool {
     return std.ascii.indexOfIgnoreCase(std.mem.span(ldLibraryPath), nvidiaLibsPath) != null;
 }
 
-fn setupXlaGpuCudaDirFlag() !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
-    defer arena.deinit();
-
-    var r_ = try runfiles.Runfiles.create(.{ .allocator = arena.allocator() }) orelse {
-        stdx.debug.panic("Unable to find CUDA directory", .{});
-    };
-
-    const source_repo = bazel_builtin.current_repository;
-    const r = r_.withSourceRepo(source_repo);
-    const cuda_data_dir = (try r.rlocationAlloc(arena.allocator(), "libpjrt_cuda/sandbox")).?;
-    const xla_flags = std.process.getEnvVarOwned(arena.allocator(), "XLA_FLAGS") catch "";
-    const new_xla_flagsZ = try std.fmt.allocPrintZ(arena.allocator(), "{s} --xla_gpu_cuda_data_dir={s}", .{ xla_flags, cuda_data_dir });
+fn setupXlaGpuCudaDirFlag(allocator: std.mem.Allocator, sandbox: []const u8) !void {
+    const xla_flags = std.process.getEnvVarOwned(allocator, "XLA_FLAGS") catch "";
+    const new_xla_flagsZ = try std.fmt.allocPrintZ(allocator, "{s} --xla_gpu_cuda_data_dir={s}", .{ xla_flags, sandbox });
 
     _ = c.setenv("XLA_FLAGS", new_xla_flagsZ, 1);
 }
@@ -62,9 +52,38 @@ pub fn load() !*const pjrt.Api {
         log.warn("Detected {s} in LD_LIBRARY_PATH. This can lead to undefined behaviors and crashes", .{nvidiaLibsPath});
     }
 
+    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    defer arena.deinit();
+
+    var r_ = try runfiles.Runfiles.create(.{ .allocator = arena.allocator() }) orelse {
+        stdx.debug.panic("Unable to find runfiles", .{});
+    };
+
+    const source_repo = bazel_builtin.current_repository;
+    const r = r_.withSourceRepo(source_repo);
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const sandbox_path = try r.rlocation("libpjrt_cuda/sandbox", &path_buf) orelse {
+        log.err("Failed to find sandbox path for CUDA runtime", .{});
+        return error.FileNotFound;
+    };
+
     // CUDA path has to be set _before_ loading the PJRT plugin.
     // See https://github.com/openxla/xla/issues/21428
-    try setupXlaGpuCudaDirFlag();
+    try setupXlaGpuCudaDirFlag(arena.allocator(), sandbox_path);
 
-    return try asynk.callBlocking(pjrt.Api.loadFrom, .{"libpjrt_cuda.so"});
+    {
+        var lib_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = try stdx.fs.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libnvToolsExt.so.1" });
+        _ = std.c.dlopen(path, .{ .NOW = true, .GLOBAL = true }) orelse {
+            log.err("Unable to dlopen libnvToolsExt.so.1: {s}", .{std.c.dlerror().?});
+            return error.DlError;
+        };
+    }
+
+    return blk: {
+        var lib_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = try stdx.fs.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_cuda.so" });
+        break :blk asynk.callBlocking(pjrt.Api.loadFrom, .{path});
+    };
 }

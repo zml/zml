@@ -8,22 +8,28 @@ pub const Tracer = switch (builtin.os.tag) {
 };
 
 const CudaTracer = struct {
-    extern fn cudaProfilerStart() c_int;
-    extern fn cudaProfilerStop() c_int;
 
-    extern fn nvtxMarkA(message: [*:0]const u8) void;
-    extern fn nvtxRangeStartA(message: [*:0]const u8) c_int;
-    extern fn nvtxRangeEnd(id: c_int) void;
+    // Those symbols are defined in cudaProfiler.h but their implementation is in libcuda.so
+    // They will be bound at call time after libcuda.so is loaded (as a needed dependency of libpjrt_cuda.so).
+    const cuProfilerStart = @extern(*const fn () callconv(.C) c_int, .{ .name = "cuProfilerStart", .linkage = .weak }) orelse unreachable;
+    const cuProfilerStop = @extern(*const fn () callconv(.C) c_int, .{ .name = "cuProfilerStop", .linkage = .weak }) orelse unreachable;
+
+    // Those symbols are defined in nvToolsExt.h which we don't want to provide.
+    // However, we link with libnvToolsExt.so which provides them.
+    // They will be bound at call time after libnvToolsExt.so is loaded (manually dlopen'ed by us).
+    const nvtxMarkA = @extern(*const fn ([*:0]const u8) callconv(.C) void, .{ .name = "nvtxMarkA", .linkage = .weak }) orelse unreachable;
+    const nvtxRangeStartA = @extern(*const fn ([*:0]const u8) callconv(.C) c_int, .{ .name = "nvtxRangeStartA", .linkage = .weak }) orelse unreachable;
+    const nvtxRangeEnd = @extern(*const fn (c_int) callconv(.C) void, .{ .name = "nvtxRangeEnd", .linkage = .weak }) orelse unreachable;
 
     pub fn init(name: [:0]const u8) CudaTracer {
         _ = name;
-        _ = cudaProfilerStart();
+        _ = cuProfilerStart();
         return .{};
     }
 
     pub fn deinit(self: *const CudaTracer) void {
         _ = self;
-        _ = cudaProfilerStop();
+        _ = cuProfilerStop();
     }
 
     pub fn event(self: *const CudaTracer, message: [:0]const u8) void {

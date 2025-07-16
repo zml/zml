@@ -74,20 +74,20 @@ pub const Api = struct {
 
     inner: c.PJRT_Api,
 
-    pub fn loadFrom(library: []const u8) !*const Api {
+    pub fn loadFrom(library: [:0]const u8) !*const Api {
         var lib: std.DynLib = switch (builtin.os.tag) {
             .linux => blk: {
-                const library_c = try std.posix.toPosixPath(library);
-                break :blk .{
-                    .inner = .{
-                        .handle = c.dlopen(&library_c, c.RTLD_LAZY | c.RTLD_LOCAL | c.RTLD_NODELETE) orelse {
-                            log.err("Unable to dlopen plugin: {s}", .{library});
-                            return error.FileNotFound;
-                        },
-                    },
+                // We use RTLD_GLOBAL so that symbols from NEEDED libraries are available in the global namespace.
+                const handle = std.c.dlopen(library, .{ .LAZY = true, .GLOBAL = true, .NODELETE = true }) orelse {
+                    log.err("Unable to dlopen plugin: {s}", .{library});
+                    return error.FileNotFound;
                 };
+                break :blk .{ .inner = .{ .handle = handle } };
             },
-            else => try std.DynLib.open(library),
+            else => std.DynLib.open(library) catch |err| {
+                log.err("Unable to dlopen plugin: {s}", .{library});
+                return err;
+            },
         };
         const DynGetPjrtApi = lib.lookup(*const fn () callconv(.C) *const Api, "GetPjrtApi") orelse {
             std.debug.panic("Unable to find GetPjrtApi symbol in library: {s}", .{library});

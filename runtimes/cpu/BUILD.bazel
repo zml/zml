@@ -1,3 +1,4 @@
+load("@aspect_bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@rules_zig//zig:defs.bzl", "zig_library")
 
 config_setting(
@@ -20,14 +21,21 @@ cc_library(
     name = "empty",
 )
 
-cc_library(
-    name = "libpjrt_cpu",
-    defines = ["ZML_RUNTIME_CPU"],
-    deps = select({
+copy_to_directory(
+    name = "sandbox",
+    out = "sandbox/lib",
+    srcs = select({
         ":darwin_arm64": ["@libpjrt_cpu_darwin_arm64//:libpjrt_cpu"],
         ":darwin_amd64": ["@libpjrt_cpu_darwin_amd64//:libpjrt_cpu"],
         "@platforms//os:linux": ["@libpjrt_cpu_linux_amd64//:libpjrt_cpu"],
     }),
+    include_external_repositories = ["**"],
+)
+
+cc_library(
+    name = "libpjrt_cpu",
+    defines = ["ZML_RUNTIME_CPU"],
+    data = [":sandbox"],
 )
 
 zig_library(
@@ -41,6 +49,8 @@ zig_library(
         "//runtimes:cpu.enabled": [
             ":libpjrt_cpu",
             "//async",
+            "//stdx",
+            "@rules_zig//zig/runfiles",
         ],
         "//conditions:default": [":empty"],
     }),
