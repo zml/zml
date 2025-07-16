@@ -185,7 +185,9 @@ pub const CompilationContext = struct {
             // Write the mlir to a file. All errors are discarded, since this is for debugging only.
             const mlir_name = "module.mlir";
             if (cache_dir.createFile(mlir_name, .{ .truncate = true })) |file| {
-                module.op().print(file.writer(), .{ .debug_info = true, .debug_info_pretty_form = false });
+                var write_buf: [4096]u8 = undefined;
+                var writer = file.writer(&write_buf);
+                module.op().print(&writer.interface, .{ .debug_info = true, .debug_info_pretty_form = false });
                 log.info("Wrote MLIR to {s}/{s}", .{ module_dir.?, mlir_name });
             } else |_| {
                 log.warn("Failed to open {s}", .{mlir_name});

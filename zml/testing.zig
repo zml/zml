@@ -51,10 +51,10 @@ pub fn expectClose(left_: anytype, right_: anytype, tolerance: f32) !void {
         if (should_free_left) left.deinit(allocator);
         if (should_free_right) right.deinit(allocator);
     }
-    errdefer log.err("\n--> Left: {}\n--> Right: {}", .{ left.pretty(), right.pretty() });
+    errdefer log.err("\n--> Left: {f}\n--> Right: {f}", .{ left.pretty(), right.pretty() });
 
     if (!std.mem.eql(i64, left.shape().dims(), right.shape().dims())) {
-        log.err("left.shape() {} != right.shape() {}", .{ left.shape(), right.shape() });
+        log.err("left.shape() {f} != right.shape() {f}", .{ left.shape(), right.shape() });
         return error.TestUnexpectedResult;
     }
     if (left.dtype() != right.dtype() and !(left.dtype() == .f16 and right.dtype() == .bf16)) {
@@ -89,7 +89,7 @@ pub fn expectClose(left_: anytype, right_: anytype, tolerance: f32) !void {
                     const right_data = right.items(R);
                     for (left_data, right_data, 0..) |l, r, i| {
                         if (!approxEq(f32, zml.floats.floatCast(f32, l), zml.floats.floatCast(f32, r), tolerance)) {
-                            log.err("left.data != right_data.\n < {d:.3} \n > {d:.3}\n  error at idx {d}: {d:.3} != {d:.3}", .{ center(left_data, i), center(right_data, i), i, left_data[i], right_data[i] });
+                            log.err("left.data != right_data.\n < {any:.3} \n > {any:.3}\n  error at idx {any}: {any:.3} != {any:.3}", .{ center(left_data, i), center(right_data, i), i, left_data[i], right_data[i] });
                             return error.TestUnexpectedResult;
                         }
                     }

@@ -944,22 +944,20 @@ pub const Operation = struct {
         }
     };
 
-    pub fn print(self: Self, writer: anytype, flags: OpPrintingFlags) void {
+    pub fn print(self: Self, writer: *std.Io.Writer, flags: OpPrintingFlags) void {
         const pflags = flags.create();
         defer c.mlirOpPrintingFlagsDestroy(pflags);
 
-        var writer_context = .{ .writer = writer };
-        const WriterContext = @TypeOf(writer_context);
         c.mlirOperationPrintWithFlags(
             self._inner,
             pflags,
             (struct {
                 pub fn callback(str: c.MlirStringRef, ctx_: ?*anyopaque) callconv(.c) void {
-                    const inner_writer_context: *WriterContext = @ptrCast(@alignCast(ctx_));
-                    _ = inner_writer_context.writer.write(str.data[0..str.length]) catch unreachable;
+                    const _writer: *std.Io.Writer = @ptrCast(@alignCast(ctx_));
+                    _writer.writeAll(str.data[0..str.length]) catch @panic("Mlir print failed");
                 }
             }).callback,
-            &writer_context,
+            writer,
         );
     }
 
@@ -1015,24 +1013,26 @@ pub const Operation = struct {
         return c.mlirOperationRemoveAttributeByName(self._inner, stringRef(name_));
     }
 
+    /// Hash the canonicalized IR, without debug information that can change across builds.
     pub fn hash(op: Operation, hasher: *std.hash.XxHash64) void {
-        const NoError = error{};
-        const write = struct {
-            fn write(hasher_: *std.hash.XxHash64, bytes: []const u8) NoError!usize {
-                hasher_.update(bytes);
-                return bytes.len;
-            }
-        }.write;
-        const HashWriter = std.io.Writer(*std.hash.XxHash64, NoError, write);
-        const writer: HashWriter = .{ .context = hasher };
-
-        // Hash the canonicalized IR, without debug information that can change across builds.
         // Note: before we where using op.writeBytecode(writer),
         // but it crashes on some inputs, notably for unused variables.
         // So we use the text representation of the mlir.
         // See https://github.com/zml/zml/issues/97.
-        // Writes can't fail because we are writing to a hasher.
-        op.print(writer, .{ .debug_info = false });
+        const flags = OpPrintingFlags.create(.{ .debug_info = false });
+        defer c.mlirOpPrintingFlagsDestroy(flags);
+
+        c.mlirOperationPrintWithFlags(
+            op._inner,
+            flags,
+            (struct {
+                pub fn callback(str: c.MlirStringRef, ctx_: ?*anyopaque) callconv(.c) void {
+                    const _hasher: *std.hash.XxHash64 = @ptrCast(@alignCast(ctx_));
+                    _hasher.update(str.data[0..str.length]);
+                }
+            }).callback,
+            hasher,
+        );
     }
 };
 
