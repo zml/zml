@@ -40,7 +40,7 @@ pub fn successOr(res: c.MlirLogicalResult, err: anytype) !void {
 }
 
 /// Alternative to MlirWrapperType
-pub const MlirStrCallback = fn (c.MlirStringRef, ?*anyopaque) callconv(.C) void;
+pub const MlirStrCallback = fn (c.MlirStringRef, ?*anyopaque) callconv(.c) void;
 
 pub const Registry = struct {
     _inner: c.MlirDialectRegistry,
@@ -171,7 +171,7 @@ pub const PassManager = struct {
     }
 };
 
-fn _mlir_passpipeline_error(err: c.MlirStringRef, ctx: ?*anyopaque) callconv(.C) void {
+fn _mlir_passpipeline_error(err: c.MlirStringRef, ctx: ?*anyopaque) callconv(.c) void {
     _ = ctx;
     std.debug.print(">>ERROR: {s}\n", .{err.data});
 }
@@ -811,7 +811,7 @@ pub const Operation = struct {
             @panic("Failed to create MLIR operation");
         };
         if (args.verify and new_op.verify() == false) {
-            log.err("Failed to verify MLIR operation:\n{}", .{new_op.mlirFormatter(.{ .debug_info = true })});
+            log.err("Failed to verify MLIR operation:\n{f}", .{new_op.mlirFormatter(.{ .debug_info = true })});
             @panic("Failed to verify MLIR operation");
         }
         return new_op;
@@ -888,7 +888,7 @@ pub const Operation = struct {
         c.mlirOperationWriteBytecode(
             self._inner,
             (struct {
-                pub fn callback(str: c.MlirStringRef, ctx_: ?*anyopaque) callconv(.C) void {
+                pub fn callback(str: c.MlirStringRef, ctx_: ?*anyopaque) callconv(.c) void {
                     const inner_writer_context: *WriterContext = @ptrCast(@alignCast(ctx_));
                     _ = inner_writer_context.writer.write(str.data[0..str.length]) catch unreachable;
                 }
@@ -916,7 +916,7 @@ pub const Operation = struct {
             self._inner,
             cfg,
             (struct {
-                pub fn callback(str: c.MlirStringRef, ctx_: ?*anyopaque) callconv(.C) void {
+                pub fn callback(str: c.MlirStringRef, ctx_: ?*anyopaque) callconv(.c) void {
                     const inner_writer_context: *WriterContext = @ptrCast(@alignCast(ctx_));
                     _ = inner_writer_context.writer.write(str.data[0..str.length]) catch |err| {
                         inner_writer_context.write_error = err;
@@ -939,9 +939,7 @@ pub const Operation = struct {
         op: Operation,
         flags: OpPrintingFlags,
 
-        pub fn format(self: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-            _ = fmt;
-            _ = options;
+        pub fn format(self: @This(), writer: anytype) !void {
             self.op.print(writer, self.flags);
         }
     };
@@ -956,7 +954,7 @@ pub const Operation = struct {
             self._inner,
             pflags,
             (struct {
-                pub fn callback(str: c.MlirStringRef, ctx_: ?*anyopaque) callconv(.C) void {
+                pub fn callback(str: c.MlirStringRef, ctx_: ?*anyopaque) callconv(.c) void {
                     const inner_writer_context: *WriterContext = @ptrCast(@alignCast(ctx_));
                     _ = inner_writer_context.writer.write(str.data[0..str.length]) catch unreachable;
                 }
@@ -991,7 +989,7 @@ pub const Operation = struct {
         c.mlirOperationWalk(
             self._inner,
             (struct {
-                pub fn callback(op: c.MlirOperation, ctx_: ?*anyopaque) callconv(.C) c.MlirWalkResult {
+                pub fn callback(op: c.MlirOperation, ctx_: ?*anyopaque) callconv(.c) c.MlirWalkResult {
                     const inner_ctx_: *ContextType = @ptrCast(@alignCast(ctx_));
                     return @intFromEnum(walkfn(inner_ctx_.ctx, .{ ._inner = op }));
                 }
@@ -1185,9 +1183,9 @@ pub const BlockArgument = struct {
         return @bitCast(c.mlirBlockArgumentGetArgNumber(arg._inner));
     }
 
-    pub fn format(self: BlockArgument, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(self: BlockArgument, writer: anytype) !void {
         const value = Value{ ._inner = self._inner };
-        return value.format(fmt, options, writer);
+        return value.format(writer);
     }
 };
 
@@ -1234,8 +1232,8 @@ pub const Type = struct {
 
     pub fn formatAny(SpecificType: type) fn (SpecificType, SpecificType) type {
         return struct {
-            pub fn format(self: SpecificType, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-                return try Type.format(self.asType(), fmt, options, writer);
+            pub fn format(self: SpecificType, writer: anytype) !void {
+                return try Type.format(self.asType(), writer);
             }
         };
     }
@@ -1344,7 +1342,7 @@ pub fn IntegerType(comptime it: IntegerTypes) type {
         pub const eql = Type.eqlAny(Int);
         pub const format = helpers.format(Int, c.mlirTypePrint);
 
-        fn typeIsAIntegerExact(typ: c.MlirType) callconv(.C) bool {
+        fn typeIsAIntegerExact(typ: c.MlirType) callconv(.c) bool {
             const bit_width = Config[0];
             const is_sign = Config[2];
             return c.mlirTypeIsAInteger(typ) and (c.mlirIntegerTypeGetWidth(typ) == bit_width) and is_sign(typ);
@@ -1422,20 +1420,20 @@ pub fn ComplexType(comptime ct: ComplexTypes) type {
         _inner: c.MlirType,
         const Complex = @This();
 
-        fn mlirC64TypeGet(ctx: c.MlirContext) callconv(.C) c.MlirType {
+        fn mlirC64TypeGet(ctx: c.MlirContext) callconv(.c) c.MlirType {
             return c.mlirComplexTypeGet(c.mlirF32TypeGet(ctx));
         }
 
-        fn mlirC128TypeGet(ctx: c.MlirContext) callconv(.C) c.MlirType {
+        fn mlirC128TypeGet(ctx: c.MlirContext) callconv(.c) c.MlirType {
             return c.mlirComplexTypeGet(c.mlirF64TypeGet(ctx));
         }
 
-        fn mlirTypeIsAC64(typ: c.MlirType) callconv(.C) bool {
+        fn mlirTypeIsAC64(typ: c.MlirType) callconv(.c) bool {
             const element_type: c.MlirType = c.mlirComplexTypeGetElementType(typ);
             return c.mlirTypeIsAF32(element_type);
         }
 
-        fn mlirTypeIsAC128(typ: c.MlirType) callconv(.C) bool {
+        fn mlirTypeIsAC128(typ: c.MlirType) callconv(.c) bool {
             const element_type: c.MlirType = c.mlirComplexTypeGetElementType(typ);
             return c.mlirTypeIsAF64(element_type);
         }
@@ -1446,7 +1444,7 @@ pub fn ComplexType(comptime ct: ComplexTypes) type {
             .unknown => .{ c.mlirTypeIsAComplex, null },
         };
 
-        fn typeIsAUnknownComplex(typ: c.MlirType) callconv(.C) bool {
+        fn typeIsAUnknownComplex(typ: c.MlirType) callconv(.c) bool {
             return c.mlirTypeIsAComplex(typ);
         }
 
@@ -1685,7 +1683,7 @@ pub const Block = struct {
             .op_result => |parent_op| self.appendOperationRecursive(parent_op, opt),
             .block_argument => |arg| {
                 // Hermetic blocks are not allowed to use arguments from other blocks.
-                stdx.debug.assert(opt == .open or self.eql(arg.block()), "Can't add {} from {?x} block to {?x} block", .{ arg, arg.block()._inner.ptr, self._inner.ptr });
+                stdx.debug.assert(opt == .open or self.eql(arg.block()), "Can't add {f} from {*} block to {*} block", .{ arg, arg.block()._inner.ptr, self._inner.ptr });
             },
             .null => @panic("InvalidMlir"),
         }
@@ -1694,7 +1692,7 @@ pub const Block = struct {
     pub fn appendOperationRecursive(self: Block, op: Operation, opt: RecursiveOpts) void {
         if (op.block()) |prev_block| {
             // Hermetic blocks are not allowed to reference values from other blocks.
-            stdx.debug.assert(opt == .open or self.equals(prev_block), "Can't add {} from {?x} block to {?x} block", .{ op, prev_block._inner.ptr, self._inner.ptr });
+            stdx.debug.assert(opt == .open or self.equals(prev_block), "Can't add {} from {*} block to {*} block", .{ op, prev_block._inner.ptr, self._inner.ptr });
             return;
         }
         for (0..op.numOperands()) |i| {
@@ -1705,7 +1703,7 @@ pub const Block = struct {
 };
 
 pub const helpers = struct {
-    pub fn eql(T: type, equal_fn: fn (@FieldType(T, "_inner"), @FieldType(T, "_inner")) callconv(.C) bool) fn (T, T) bool {
+    pub fn eql(T: type, equal_fn: fn (@FieldType(T, "_inner"), @FieldType(T, "_inner")) callconv(.c) bool) fn (T, T) bool {
         return struct {
             fn eql(a: T, b: T) bool {
                 return equal_fn(a._inner, b._inner);
@@ -1713,7 +1711,7 @@ pub const helpers = struct {
         }.eql;
     }
 
-    pub fn deinit(T: type, deinit_fn: fn (@FieldType(T, "_inner")) callconv(.C) void) fn (*T) void {
+    pub fn deinit(T: type, deinit_fn: fn (@FieldType(T, "_inner")) callconv(.c) void) fn (*T) void {
         return struct {
             fn deinit(a: *T) void {
                 deinit_fn(a._inner);
@@ -1722,7 +1720,7 @@ pub const helpers = struct {
         }.deinit;
     }
 
-    pub fn dump(T: type, dump_fn: fn (@FieldType(T, "_inner")) callconv(.C) void) fn (T) void {
+    pub fn dump(T: type, dump_fn: fn (@FieldType(T, "_inner")) callconv(.c) void) fn (T) void {
         return struct {
             fn dump(a: T) void {
                 return dump_fn(a._inner);
@@ -1730,7 +1728,7 @@ pub const helpers = struct {
         }.dump;
     }
 
-    pub fn isNull(T: type, is_null_fn: fn (@FieldType(T, "_inner")) callconv(.C) bool) fn (T) bool {
+    pub fn isNull(T: type, is_null_fn: fn (@FieldType(T, "_inner")) callconv(.c) bool) fn (T) bool {
         return struct {
             fn isNull(a: T) bool {
                 return is_null_fn(a._inner);
@@ -1738,21 +1736,13 @@ pub const helpers = struct {
         }.isNull;
     }
 
-    pub fn format(Any: type, print_fn: fn (@FieldType(Any, "_inner"), ?*const MlirStrCallback, ?*anyopaque) callconv(.C) void) type {
+    pub fn format(Any: type, print_fn: fn (@FieldType(Any, "_inner"), ?*const MlirStrCallback, ?*anyopaque) callconv(.c) void) type {
         return struct {
-            pub fn format(
-                self: Any,
-                comptime fmt: []const u8,
-                options: std.fmt.FormatOptions,
-                writer: anytype,
-            ) !void {
-                _ = fmt;
-                _ = options;
-
-                const Writer = struct {
-                    writer: @TypeOf(writer),
-                    err: ?@TypeOf(writer).Error = null,
-                    fn printCallback(mlir_str: c.MlirStringRef, opaque_ctx: ?*anyopaque) callconv(.C) void {
+            pub fn format(self: Any, writer: *std.Io.Writer) !void {
+                const WriterWithErr = struct {
+                    writer: *std.Io.Writer,
+                    err: ?std.Io.Writer.Error = null,
+                    fn printCallback(mlir_str: c.MlirStringRef, opaque_ctx: ?*anyopaque) callconv(.c) void {
                         var ctx: *@This() = @alignCast(@ptrCast(opaque_ctx));
                         if (ctx.err) |_| return;
                         _ = ctx.writer.write(mlir_str.data[0..mlir_str.length]) catch |err| {
@@ -1762,14 +1752,14 @@ pub const helpers = struct {
                     }
                 };
 
-                var context: Writer = .{ .writer = writer };
-                print_fn(self._inner, &Writer.printCallback, &context);
+                var context: WriterWithErr = .{ .writer = writer };
+                print_fn(self._inner, &WriterWithErr.printCallback, &context);
                 if (context.err) |err| return err;
             }
         };
     }
 
-    pub fn wrapOr(T: type, is_null_fn: fn (@FieldType(T, "_inner")) callconv(.C) bool) fn (@FieldType(T, "_inner")) ?T {
+    pub fn wrapOr(T: type, is_null_fn: fn (@FieldType(T, "_inner")) callconv(.c) bool) fn (@FieldType(T, "_inner")) ?T {
         return struct {
             fn wrapOr(inner: @FieldType(T, "_inner")) ?T {
                 if (is_null_fn(inner)) return null;
@@ -1778,7 +1768,7 @@ pub const helpers = struct {
         }.wrapOr;
     }
 
-    pub fn init(T: type, inner: @FieldType(T, "_inner"), is_null_fn: fn (@FieldType(T, "_inner")) callconv(.C) bool) ?T {
+    pub fn init(T: type, inner: @FieldType(T, "_inner"), is_null_fn: fn (@FieldType(T, "_inner")) callconv(.c) bool) ?T {
         if (is_null_fn(inner)) return null;
         return .{ ._inner = inner };
     }

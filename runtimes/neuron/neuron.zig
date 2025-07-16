@@ -85,7 +85,7 @@ fn initialize() !void {
         const neuronx_cc = (try r.rlocation("zml/runtimes/neuron/neuronx-cc/neuronx-cc", &buf)).?;
         const neuronx_cc_path = std.fs.path.dirname(neuronx_cc).?;
         const path = std.posix.getenv("PATH") orelse "";
-        const new_path = try std.fmt.allocPrintZ(allocator, "{s}:{s}", .{ neuronx_cc_path, path });
+        const new_path = try std.fmt.allocPrintSentinel(allocator, "{s}:{s}", .{ neuronx_cc_path, path }, 0);
         _ = c.setenv("PATH", new_path.ptr, 1);
     }
 

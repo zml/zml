@@ -424,7 +424,7 @@ pub const CallFrame = extern struct {
     }
 };
 
-pub const Handler = fn (*CallFrame) callconv(.C) ?*Error;
+pub const Handler = fn (*CallFrame) callconv(.c) ?*Error;
 
 pub const ErrorCode = enum(c.XLA_FFI_Error_Code) {
     cancelled = c.XLA_FFI_Error_Code_CANCELLED,

@@ -87,12 +87,11 @@ pub const Tokenizer = struct {
     }
 
     /// Reads a new word directly into the tokenizer arena.
-    pub fn readTokenInto(self: *Tokenizer, score: f32, len: usize, tok_reader: anytype) !void {
+    pub fn readTokenInto(self: *Tokenizer, score: f32, len: usize, tok_reader: *std.Io.Reader) !void {
         const arena = self.arena_state.allocator();
 
         const token = try arena.alloc(u8, len);
-        const n = try tok_reader.readAll(token);
-        std.debug.assert(n == len);
+        try tok_reader.readSliceAll(token);
         return self.addOwnedToken(score, token);
     }
 
@@ -192,7 +191,7 @@ pub const Tokenizer = struct {
                 var _debug_alloc = std.heap.FixedBufferAllocator.init(&_debug_buf);
                 var debug_progress = std.ArrayList(u8).init(_debug_alloc.allocator());
                 self.decodeWithOpts(&debug_progress, tok_buff[0..num_tokens], .{ .sep = "|" }) catch {};
-                log.debug("tokens: {d} -> {s}", .{ tok_buff[0..num_tokens], debug_progress.items });
+                log.debug("tokens: {any} -> {s}", .{ tok_buff[0..num_tokens], debug_progress.items });
             }
             var best_score: f32 = -1e10;
             var best_token: u32 = 0;
@@ -363,7 +362,8 @@ pub const Tokenizer = struct {
 
             // First lookup the byte fallback entry.
             // Note: we assume upper case, but we could try both upper and lower case if needed.
-            _ = std.fmt.bufPrintIntToSlice(byte_fallback_buf[3..5], c, 16, .upper, .{ .fill = '0', .width = 2 });
+            var writer: std.Io.Writer = .fixed(byte_fallback_buf[3..5]);
+            try writer.printInt(c, 16, .upper, .{ .fill = '0', .width = 2 });
             const entry = tokenizer.token_lookup.getEntry(&byte_fallback_buf) orelse {
                 log.err("Tokenizer has \"byte_fallback\" = true, but doesn't contains the byte fallback token {s}", .{byte_fallback_buf});
                 return error.InvalidInput;
@@ -610,7 +610,7 @@ pub const Normalizer = struct {
         split_on_punct_ascii: bool,
     },
 
-    pub fn init(flags: std.meta.FieldType(Normalizer, .flags), escaped_whitespace: ?[]const u8) Normalizer {
+    pub fn init(flags: @FieldType(Normalizer, "flags"), escaped_whitespace: ?[]const u8) Normalizer {
         var res: Normalizer = .{ .flags = flags };
         if (escaped_whitespace) |escaped| {
             res._whitespace.appendSliceAssumeCapacity(escaped);
@@ -982,7 +982,7 @@ pub const Gpt2TextDecoder = struct {
             var code: Code = .{ .buffer = .{ 0, 0 }, .len = 0 }; // 0-init
             const i: u8 = @intCast(index);
             if (isPrintableByte(i)) {
-                if (std.ascii.isASCII(i)) {
+                if (std.ascii.isAscii(i)) {
                     code.appendAssumeCapacity(i);
                 } else {
                     const codepoint: u21 = @as(u21, @intCast(i));
@@ -1175,7 +1175,7 @@ fn objectGet(
     object: std.json.ObjectMap,
     comptime kind: std.meta.FieldEnum(std.json.Value),
     key: []const u8,
-) ?std.meta.FieldType(std.json.Value, kind) {
+) ?@FieldType(std.json.Value, @tagName(kind)) {
     const val = object.get(key) orelse return null;
     if (val != kind) return null;
     return @field(val, @tagName(kind));
@@ -1184,10 +1184,11 @@ fn objectGet(
 pub fn fromTinyLlamaFile(allocator: std.mem.Allocator, tokenizer_path: []const u8, vocab_size: u32) !Tokenizer {
     const tokenizer_file = try std.fs.cwd().openFile(tokenizer_path, .{});
     defer tokenizer_file.close();
-    var tok_reader = std.io.bufferedReader(tokenizer_file.reader());
-    const r = tok_reader.reader();
+    var read_buff: [4096]u8 = undefined;
+    var tok_reader = tokenizer_file.reader(&read_buff);
+    const r: *std.Io.Reader = &tok_reader.interface;
 
-    const max_token_len = try r.readInt(u32, .little);
+    const max_token_len = try readValueLE(u32, r);
     const special_tokens: Tokenizer.SpecialTokens = .{
         .unk = 0,
         .bos = 1,
@@ -1195,11 +1196,11 @@ pub fn fromTinyLlamaFile(allocator: std.mem.Allocator, tokenizer_path: []const u
     };
     var tokenizer = try Tokenizer.init(allocator, vocab_size, max_token_len, null, special_tokens, true);
     var i: u32 = 0;
-    while (readToken(&tokenizer, &r)) : (i += 1) {
+    while (readToken(&tokenizer, r)) : (i += 1) {
         // Pass
     } else |_| {
         if (i < vocab_size) {
-            log.info("Read {d} words out of {?d}", .{ i, vocab_size });
+            log.info("Read {d} words out of {d}", .{ i, vocab_size });
         }
         tokenizer.vocab_size = i;
     }
@@ -1207,8 +1208,14 @@ pub fn fromTinyLlamaFile(allocator: std.mem.Allocator, tokenizer_path: []const u
     return tokenizer;
 }
 
-fn readToken(tokenizer: *Tokenizer, tok_reader: anytype) !void {
-    const score: f32 = @bitCast(try tok_reader.readInt(u32, .little));
-    const len: usize = @intCast(try tok_reader.readInt(u32, .little));
+fn readToken(tokenizer: *Tokenizer, tok_reader: *std.Io.Reader) !void {
+    const score: f32 = try readValueLE(f32, tok_reader);
+    const len: usize = try readValueLE(u32, tok_reader);
     try tokenizer.readTokenInto(score, len, tok_reader);
+}
+
+fn readValueLE(T: type, reader: *std.Io.Reader) !T {
+    var res: [1]T = undefined;
+    try reader.readSliceEndian(T, &res, .little);
+    return res[0];
 }

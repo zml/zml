@@ -51,7 +51,7 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
     var fba = std.heap.FixedBufferAllocator.init(&buffer);
     const allocator = fba.allocator();
 
-    const backend_config = std.fmt.allocPrintZ(
+    const backend_config = std.fmt.allocPrintSentinel(
         allocator,
         \\{{
         \\  "operation_queue_id":"0",
@@ -110,6 +110,7 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
             q.dim(.q),
             k.dim(.k),
         },
+        0,
     ) catch unreachable;
 
     var bias = Tensor.constant(Shape.init(.{ .b = q.dim(.b), .h = q.dim(.h), .q = q.dim(.q), .k = k.dim(.k) }, q.dtype()), Data.init(q.dtype(), 0));

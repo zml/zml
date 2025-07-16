@@ -156,7 +156,7 @@ const Coro = struct {
         return self;
     }
 
-    fn runcoro(from: *base.Coro, this: *base.Coro) callconv(.C) noreturn {
+    fn runcoro(from: *base.Coro, this: *base.Coro) callconv(.c) noreturn {
         const from_coro: *Coro = @fieldParentPtr("impl", from);
         const this_coro: *Coro = @fieldParentPtr("impl", this);
         log(.debug, "coro start {any}", .{this_coro.id});

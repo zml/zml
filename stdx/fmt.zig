@@ -43,8 +43,8 @@ pub const IntFmt = struct {
 };
 
 pub const FloatFmt = enum(u8) {
-    scientific = @intFromEnum(std.fmt.format_float.Format.scientific),
-    decimal = @intFromEnum(std.fmt.format_float.Format.decimal),
+    scientific = @intFromEnum(std.fmt.Number.Mode.scientific),
+    decimal = @intFromEnum(std.fmt.Number.Mode.decimal),
     hex,
 
     pub fn parseComptime(comptime fmt_: []const u8) FloatFmt {
@@ -71,44 +71,34 @@ pub fn formatValue(value: anytype, full: FullFormatOptions, writer: anytype) !vo
     };
 }
 
-pub fn formatFloatValue(value: anytype, full: FullFormatOptions, writer: anytype) !void {
-    const formatFloat = std.fmt.format_float.formatFloat;
-    var buf: [std.fmt.format_float.bufferSize(.decimal, f64)]u8 = undefined;
-
+pub fn formatFloatValue(value: anytype, full: FullFormatOptions, writer: *std.Io.Writer) !void {
     const x = switch (@typeInfo(@TypeOf(value))) {
         .@"struct" => value.toF32(),
         .float => value,
         else => @compileError("formatFloatValue expects a float, got: " ++ @typeName(@TypeOf(value))),
     };
-    const s_or_err = switch (full.fmt.float) {
-        .scientific => formatFloat(&buf, x, .{ .mode = .scientific, .precision = full.options.precision }),
-        .decimal => formatFloat(&buf, x, .{ .mode = .decimal, .precision = full.options.precision }),
-        .hex => hex: {
-            var buf_stream = std.io.fixedBufferStream(&buf);
-            std.fmt.formatFloatHexadecimal(x, full.options, buf_stream.writer()) catch unreachable;
-            break :hex buf_stream.getWritten();
-        },
+    try switch (full.fmt.float) {
+        .scientific => writer.printFloat(x, .{ .mode = .scientific, .precision = full.options.precision }),
+        .decimal => writer.printFloat(x, .{ .mode = .decimal, .precision = full.options.precision }),
+        .hex => writer.printFloatHexOptions(x, .{ .mode = .hex }),
     };
-
-    const s = s_or_err catch "(float)";
-    return std.fmt.formatBuf(s, full.options, writer);
 }
 
-pub fn formatIntValue(value: anytype, full: FullFormatOptions, writer: anytype) !void {
+pub fn formatIntValue(value: anytype, full: FullFormatOptions, writer: *std.Io.Writer) !void {
     switch (@typeInfo(@TypeOf(value))) {
         .int => {},
         else => @compileError("formatIntValue expects an int, got: " ++ @typeName(@TypeOf(value))),
     }
-    return std.fmt.formatInt(value, full.fmt.int.base, full.fmt.int.case, full.options, writer);
+    return writer.printInt(value, full.fmt.int.base, full.fmt.int.case, full.options);
 }
 
-pub fn formatAnyValue(value: anytype, full: FullFormatOptions, writer: anytype) !void {
+pub fn formatAnyValue(value: anytype, full: FullFormatOptions, writer: *std.Io.Writer) !void {
     var buf: [48]u8 = undefined;
     const s = std.fmt.bufPrint(&buf, "{any}", .{value}) catch blk: {
         buf[45..].* = "...".*;
         break :blk buf[0..];
     };
-    return std.fmt.formatBuf(s, full.options, writer);
+    return try writer.alignBufferOptions(s, full.options);
 }
 
 pub fn formatSliceCustom(fmt_func: anytype, values: anytype, full: FullFormatOptions, writer: anytype) !void {

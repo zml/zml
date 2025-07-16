@@ -10,13 +10,13 @@ pub const ZigAllocator = struct {
         };
     }
 
-    pub fn alloc(ctx: ?*const anyopaque, elem: usize, nelems: usize, alignment: usize) callconv(.C) ?*anyopaque {
+    pub fn alloc(ctx: ?*const anyopaque, elem: usize, nelems: usize, alignment: usize) callconv(.c) ?*anyopaque {
         const self: *const std.mem.Allocator = @ptrCast(@alignCast(ctx));
         const ret = self.rawAlloc(elem * nelems, std.math.log2_int(usize, alignment), @returnAddress()) orelse return null;
         return @ptrCast(ret);
     }
 
-    pub fn free(ctx: ?*const anyopaque, ptr: ?*anyopaque, elem: usize, nelems: usize, alignment: usize) callconv(.C) void {
+    pub fn free(ctx: ?*const anyopaque, ptr: ?*anyopaque, elem: usize, nelems: usize, alignment: usize) callconv(.c) void {
         const self: *const std.mem.Allocator = @ptrCast(@alignCast(ctx));
         const memory: [*c]u8 = @ptrCast(ptr);
         const size = elem * nelems;

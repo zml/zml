@@ -227,7 +227,7 @@ const CustomCall = struct {
         }
     }
 
-    fn hostBufferCallback(call_frame: *pjrt.ffi.CallFrame) callconv(.C) ?*pjrt.ffi.Error {
+    fn hostBufferCallback(call_frame: *pjrt.ffi.CallFrame) callconv(.c) ?*pjrt.ffi.Error {
         if (call_frame.registeringHook()) return null;
 
         const callback_attr = call_frame.attrs.getByName(.scalar, "callback") orelse unreachable;
@@ -293,9 +293,9 @@ pub const cuda = struct {
         inferred = 4,
     };
 
-    const MemcpyAsync = *const fn (dst: *anyopaque, src: *const anyopaque, count: usize, kind: MemcpyKind, stream: ?*anyopaque) callconv(.C) c_int;
-    const MemcpyBlocking = *const fn (dst: *anyopaque, src: *const anyopaque, count: usize, kind: MemcpyKind) callconv(.C) c_int;
-    const StreamSynchronize = *const fn (stream: *anyopaque) callconv(.C) c_int;
+    const MemcpyAsync = *const fn (dst: *anyopaque, src: *const anyopaque, count: usize, kind: MemcpyKind, stream: ?*anyopaque) callconv(.c) c_int;
+    const MemcpyBlocking = *const fn (dst: *anyopaque, src: *const anyopaque, count: usize, kind: MemcpyKind) callconv(.c) c_int;
+    const StreamSynchronize = *const fn (stream: *anyopaque) callconv(.c) c_int;
     const CuLaunchHostFunc = *const fn (stream: *anyopaque, host_func: *const fn (user_data: *const anyopaque) callconv(.c) void, user_data: *const anyopaque) callconv(.c) c_int;
 
     pub fn init() void {

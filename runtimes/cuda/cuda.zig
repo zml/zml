@@ -44,7 +44,7 @@ fn setupXlaGpuCudaDirFlag() !void {
     const r = r_.withSourceRepo(source_repo);
     const cuda_data_dir = (try r.rlocationAlloc(arena.allocator(), "libpjrt_cuda/sandbox")).?;
     const xla_flags = std.process.getEnvVarOwned(arena.allocator(), "XLA_FLAGS") catch "";
-    const new_xla_flagsZ = try std.fmt.allocPrintZ(arena.allocator(), "{s} --xla_gpu_cuda_data_dir={s}", .{ xla_flags, cuda_data_dir });
+    const new_xla_flagsZ = try std.fmt.allocPrintSentinel(arena.allocator(), "{s} --xla_gpu_cuda_data_dir={s}", .{ xla_flags, cuda_data_dir }, 0);
 
     _ = c.setenv("XLA_FLAGS", new_xla_flagsZ, 1);
 }
