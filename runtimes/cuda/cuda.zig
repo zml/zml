@@ -61,21 +61,29 @@ pub fn load() !*const pjrt.Api {
 
     const source_repo = bazel_builtin.current_repository;
     const r = r_.withSourceRepo(source_repo);
-    const cuda_data_dir = (try r.rlocationAlloc(arena.allocator(), "libpjrt_cuda/sandbox")).?;
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const sandbox_path = try r.rlocation("libpjrt_cuda/sandbox", &path_buf) orelse {
+        log.err("Failed to find sandbox path for CUDA runtime", .{});
+        return error.FileNotFound;
+    };
 
     // CUDA path has to be set _before_ loading the PJRT plugin.
     // See https://github.com/openxla/xla/issues/21428
-    try setupXlaGpuCudaDirFlag(arena.allocator(), cuda_data_dir);
+    try setupXlaGpuCudaDirFlag(arena.allocator(), sandbox_path);
 
     {
-        const library = try std.fmt.allocPrintZ(arena.allocator(), "{s}/lib/libnvToolsExt.so.1", .{cuda_data_dir});
-        const path = try std.posix.toPosixPath(library);
-        _ = std.c.dlopen(&path, .{ .NOW = true, .GLOBAL = true }) orelse {
-            log.err("Unable to dlopen libnvToolsExt.so.1", .{});
-            return error.FileNotFound;
+        var lib_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = try stdx.fs.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libnvToolsExt.so.1" });
+        _ = std.c.dlopen(path, .{ .NOW = true, .GLOBAL = true }) orelse {
+            log.err("Unable to dlopen libnvToolsExt.so.1: {s}", .{std.c.dlerror().?});
+            return error.DlError;
         };
     }
 
-    const library = try std.fmt.allocPrintZ(arena.allocator(), "{s}/lib/libpjrt_cuda.so", .{cuda_data_dir});
-    return try asynk.callBlocking(pjrt.Api.loadFrom, .{library});
+    return blk: {
+        var lib_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = try stdx.fs.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_cuda.so" });
+        break :blk asynk.callBlocking(pjrt.Api.loadFrom, .{path});
+    };
 }
