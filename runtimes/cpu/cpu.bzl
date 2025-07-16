@@ -6,18 +6,16 @@ package(default_visibility = ["//visibility:public"])
 """
 
 _BUILD_LINUX = "\n".join([
-    packages.load_("@zml//bazel:cc_import.bzl", "cc_import"),
-    packages.cc_import(
+    packages.filegroup(
         name = "libpjrt_cpu",
-        shared_library = "libpjrt_cpu.so",
-        soname = "libpjrt_cpu.so",
+        srcs = ["libpjrt_cpu.so"],
         visibility = ["@zml//runtimes/cpu:__subpackages__"],
     ),
 ])
 
-_BUILD_DARWIN = packages.cc_import(
+_BUILD_DARWIN = packages.filegroup(
     name = "libpjrt_cpu",
-    shared_library = "libpjrt_cpu.dylib",
+    srcs = ["libpjrt_cpu.dylib"],
     visibility = ["@zml//runtimes/cpu:__subpackages__"],
 )
 
