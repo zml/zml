@@ -7,7 +7,6 @@ const c = @import("c");
 const pjrt = @import("pjrt");
 const runfiles = @import("runfiles");
 const stdx = @import("stdx");
-pub const cudart = @import("cudart.zig");
 
 const nvidiaLibsPath = "/cuda/";
 
@@ -78,10 +77,5 @@ pub fn load() !*const pjrt.Api {
     }
 
     const library = try std.fmt.allocPrintZ(arena.allocator(), "{s}/lib/libpjrt_cuda.so", .{cuda_data_dir});
-    const api = try asynk.callBlocking(pjrt.Api.loadFrom, .{library});
-
-    // Must be done after loading the PJRT plugin, as it will dlsym symbols from libcuda.so
-    try cudart.load();
-
-    return api;
+    return try asynk.callBlocking(pjrt.Api.loadFrom, .{library});
 }

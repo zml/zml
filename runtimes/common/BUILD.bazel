@@ -4,10 +4,3 @@ exports_files(
     ["packages.lock.json"],
     visibility = ["//runtimes:__subpackages__"],
 )
-
-zig_library(
-    name = "common",
-    import_name = "runtimes/common",
-    main = "common.zig",
-    visibility = ["//visibility:public"],
-)

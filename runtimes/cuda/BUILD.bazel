@@ -23,12 +23,8 @@ zig_library(
     import_name = "runtimes/cuda",
     main = "cuda.zig",
     visibility = ["//visibility:public"],
-    srcs = [
-        "cudart.zig",
-    ],
     deps = [
         "//pjrt",
-        "//runtimes/common",
     ] + select({
         "//runtimes:cuda.enabled": [
             ":libpjrt_cuda",
