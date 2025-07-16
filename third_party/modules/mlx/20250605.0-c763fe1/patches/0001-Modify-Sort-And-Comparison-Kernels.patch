@@ -112,6 +112,106 @@ index ebc3cc77f..7bdca47d7 100644
  #include "mlx/backend/metal/utils.h"
  #include "mlx/utils.h"
  
+diff --git a/mlx/backend/metal/eval.cpp b/mlx/backend/metal/eval.cpp
+index 49783200a..fd9caf147 100644
+--- a/mlx/backend/metal/eval.cpp
++++ b/mlx/backend/metal/eval.cpp
+@@ -4,12 +4,15 @@
+ #include "mlx/backend/gpu/available.h"
+ #include "mlx/backend/gpu/eval.h"
+ #include "mlx/backend/metal/device.h"
++#include "mlx/backend/metal/thread_safety.h"
+ #include "mlx/backend/metal/utils.h"
+ #include "mlx/primitives.h"
+ #include "mlx/scheduler.h"
+ 
+ namespace mlx::core::gpu {
+ 
++std::mutex metal_operation_mutex;
++
+ bool is_available() {
+   return true;
+ }
+@@ -30,6 +33,7 @@ inline void check_error(MTL::CommandBuffer* cbuf) {
+ }
+ 
+ void eval(array& arr) {
++  std::lock_guard<std::mutex> lock(metal_operation_mutex);
+   auto pool = metal::new_scoped_memory_pool();
+   auto s = arr.primitive().stream();
+   auto& d = metal::device(s.device);
+@@ -78,6 +82,7 @@ void eval(array& arr) {
+ }
+ 
+ void finalize(Stream s) {
++  std::lock_guard<std::mutex> lock(metal_operation_mutex);
+   auto pool = metal::new_scoped_memory_pool();
+   auto& d = metal::device(s.device);
+   auto cb = d.get_command_buffer(s.index);
+@@ -88,6 +93,7 @@ void finalize(Stream s) {
+ }
+ 
+ void synchronize(Stream s) {
++  std::lock_guard<std::mutex> lock(metal_operation_mutex);
+   auto pool = metal::new_scoped_memory_pool();
+   auto& d = metal::device(s.device);
+   auto cb = d.get_command_buffer(s.index);
+diff --git a/mlx/backend/metal/event.cpp b/mlx/backend/metal/event.cpp
+index eb7f1b58a..5c9cc3808 100644
+--- a/mlx/backend/metal/event.cpp
++++ b/mlx/backend/metal/event.cpp
+@@ -2,6 +2,7 @@
+ 
+ #include "mlx/event.h"
+ #include "mlx/backend/metal/device.h"
++#include "mlx/backend/metal/thread_safety.h"
+ #include "mlx/scheduler.h"
+ 
+ namespace mlx::core {
+@@ -27,6 +28,7 @@ void Event::wait(Stream stream) {
+   if (stream.device == Device::cpu) {
+     scheduler::enqueue(stream, [*this]() mutable { wait(); });
+   } else {
++    std::lock_guard<std::mutex> lock(gpu::metal_operation_mutex);
+     auto& d = metal::device(stream.device);
+     d.end_encoding(stream.index);
+     auto command_buffer = d.get_command_buffer(stream.index);
+@@ -41,6 +43,7 @@ void Event::signal(Stream stream) {
+       static_cast<MTL::SharedEvent*>(event_.get())->setSignaledValue(value());
+     });
+   } else {
++    std::lock_guard<std::mutex> lock(gpu::metal_operation_mutex);
+     auto& d = metal::device(stream.device);
+     d.end_encoding(stream.index);
+     auto command_buffer = d.get_command_buffer(stream.index);
+diff --git a/mlx/backend/metal/fence.cpp b/mlx/backend/metal/fence.cpp
+index 5abdf7309..e1bfdaa9a 100644
+--- a/mlx/backend/metal/fence.cpp
++++ b/mlx/backend/metal/fence.cpp
+@@ -1,6 +1,7 @@
+ // Copyright © 2024 Apple Inc.
+ #include "mlx/fence.h"
+ #include "mlx/backend/metal/device.h"
++#include "mlx/backend/metal/thread_safety.h"
+ #include "mlx/scheduler.h"
+ #include "mlx/utils.h"
+ 
+@@ -68,6 +69,7 @@ void Fence::wait(Stream stream, const array& x) {
+     return;
+   }
+ 
++  std::lock_guard<std::mutex> lock(gpu::metal_operation_mutex);
+   auto& d = metal::device(stream.device);
+   auto idx = stream.index;
+ 
+@@ -116,6 +118,7 @@ void Fence::update(Stream stream, const array& x) {
+     return;
+   }
+ 
++  std::lock_guard<std::mutex> lock(gpu::metal_operation_mutex);
+   auto& d = metal::device(stream.device);
+   auto idx = stream.index;
+   if (!f.use_fast) {
 diff --git a/mlx/backend/metal/jit_kernels.cpp b/mlx/backend/metal/jit_kernels.cpp
 index 5206c9b54..6678e7acb 100644
 --- a/mlx/backend/metal/jit_kernels.cpp
@@ -719,6 +819,20 @@ index 3c84022f2..bca888f66 100644
  }
  
  } // namespace mlx::core
+diff --git a/mlx/backend/metal/thread_safety.h b/mlx/backend/metal/thread_safety.h
+new file mode 100644
+index 000000000..d4724a654
+--- /dev/null
++++ b/mlx/backend/metal/thread_safety.h
+@@ -0,0 +1,7 @@
++#pragma once
++
++#include <mutex>
++
++namespace mlx::core::gpu {
++extern std::mutex metal_operation_mutex;
++}
+\ No newline at end of file
 diff --git a/mlx/backend/no_gpu/primitives.cpp b/mlx/backend/no_gpu/primitives.cpp
 index 409aa2c89..6d49f1c60 100644
 --- a/mlx/backend/no_gpu/primitives.cpp
@@ -1219,3 +1333,1141 @@ index 51101cc97..344d80f87 100644
    return {real, imag};
  }
  
+diff --git a/test.patch b/test.patch
+new file mode 100644
+index 000000000..dae2293ba
+--- /dev/null
++++ b/test.patch
+@@ -0,0 +1,1132 @@
++diff --git a/.gitignore b/.gitignore
++index 43629548..0b74c60d 100644
++--- a/.gitignore
+++++ b/.gitignore
++@@ -1,3 +1,8 @@
+++# Bazel symlinks
+++bazel-*
+++
+++# macOS
+++.DS_Store
++ # Byte-compiled / optimized / DLL files
++ __pycache__/
++ *.py[cod]
++diff --git a/mlx/backend/metal/device.cpp b/mlx/backend/metal/device.cpp
++index ebc3cc77..7bdca47d 100644
++--- a/mlx/backend/metal/device.cpp
+++++ b/mlx/backend/metal/device.cpp
++@@ -10,6 +10,7 @@
++ 
++ #include "mlx/backend/metal/device.h"
++ #include "mlx/backend/metal/metal.h"
+++#include "mlx/backend/metal/metal_path.h"
++ #include "mlx/backend/metal/utils.h"
++ #include "mlx/utils.h"
++ 
++diff --git a/mlx/backend/metal/jit_kernels.cpp b/mlx/backend/metal/jit_kernels.cpp
++index 5206c9b5..6678e7ac 100644
++--- a/mlx/backend/metal/jit_kernels.cpp
+++++ b/mlx/backend/metal/jit_kernels.cpp
++@@ -328,7 +328,8 @@ MTL::ComputePipelineState* get_sort_kernel(
++     const array& in,
++     const array& out,
++     int bn,
++-    int tn) {
+++    int tn,
+++    const std::string& comparator) {
++   std::string lib_name = kernel_name.substr(kernel_name.find("_") + 1);
++   auto lib = d.get_library(lib_name, [&]() {
++     std::ostringstream kernel_source;
++@@ -345,7 +346,8 @@ MTL::ComputePipelineState* get_sort_kernel(
++           out_type,
++           bool_string,
++           bn,
++-          tn);
+++          tn,
+++          comparator);
++       kernel_source << get_template_definition(
++           "n" + func_string + lib_name,
++           "block_sort_nc",
++@@ -353,7 +355,8 @@ MTL::ComputePipelineState* get_sort_kernel(
++           out_type,
++           bool_string,
++           bn,
++-          tn);
+++          tn,
+++          comparator);
++     }
++     return kernel_source.str();
++   });
++@@ -366,7 +369,8 @@ MTL::ComputePipelineState* get_mb_sort_kernel(
++     const array& in,
++     const array& idx,
++     int bn,
++-    int tn) {
+++    int tn,
+++    const std::string& comparator) {
++   std::string lib_name = kernel_name.substr(kernel_name.find("_") + 1);
++   auto lib = d.get_library(lib_name, [&]() {
++     std::ostringstream kernel_source;
++@@ -383,7 +387,8 @@ MTL::ComputePipelineState* get_mb_sort_kernel(
++           get_type_string(idx.dtype()),
++           "true",
++           bn,
++-          tn);
+++          tn,
+++          comparator);
++     }
++     return kernel_source.str();
++   });
++diff --git a/mlx/backend/metal/kernels.h b/mlx/backend/metal/kernels.h
++index 6d886438..ff2dd14b 100644
++--- a/mlx/backend/metal/kernels.h
+++++ b/mlx/backend/metal/kernels.h
++@@ -79,7 +79,8 @@ MTL::ComputePipelineState* get_sort_kernel(
++     const array& in,
++     const array& out,
++     int bn,
++-    int tn);
+++    int tn,
+++    const std::string& comparator);
++ 
++ MTL::ComputePipelineState* get_mb_sort_kernel(
++     metal::Device& d,
++@@ -87,7 +88,8 @@ MTL::ComputePipelineState* get_mb_sort_kernel(
++     const array& in,
++     const array& idx,
++     int bn,
++-    int tn);
+++    int tn,
+++    const std::string& comparator);
++ 
++ MTL::ComputePipelineState* get_reduce_init_kernel(
++     metal::Device& d,
++diff --git a/mlx/backend/metal/kernels/binary_ops.h b/mlx/backend/metal/kernels/binary_ops.h
++index 4aaf2b4d..2c6e27b1 100644
++--- a/mlx/backend/metal/kernels/binary_ops.h
+++++ b/mlx/backend/metal/kernels/binary_ops.h
++@@ -37,29 +37,14 @@ struct Divide {
++     return x / y;
++   }
++ };
++-
++ struct Remainder {
++   template <typename T>
++-  metal::enable_if_t<metal::is_integral_v<T> & !metal::is_signed_v<T>, T>
++-  operator()(T x, T y) {
+++  metal::enable_if_t<metal::is_integral_v<T>, T> operator()(T x, T y) {
++     return x % y;
++   }
++   template <typename T>
++-  metal::enable_if_t<metal::is_integral_v<T> & metal::is_signed_v<T>, T>
++-  operator()(T x, T y) {
++-    auto r = x % y;
++-    if (r != 0 && (r < 0 != y < 0)) {
++-      r += y;
++-    }
++-    return r;
++-  }
++-  template <typename T>
++   metal::enable_if_t<!metal::is_integral_v<T>, T> operator()(T x, T y) {
++-    T r = fmod(x, y);
++-    if (r != 0 && (r < 0 != y < 0)) {
++-      r += y;
++-    }
++-    return r;
+++    return fmod(x, y);
++   }
++   template <>
++   complex64_t operator()(complex64_t x, complex64_t y) {
++diff --git a/mlx/backend/metal/kernels/complex.h b/mlx/backend/metal/kernels/complex.h
++index c88002cb..54fc8d52 100644
++--- a/mlx/backend/metal/kernels/complex.h
+++++ b/mlx/backend/metal/kernels/complex.h
++@@ -142,11 +142,12 @@ constexpr complex64_t operator/(float a, complex64_t b) {
++ constexpr complex64_t operator%(complex64_t a, complex64_t b) {
++   auto real = a.real - (b.real * static_cast<int64_t>(a.real / b.real));
++   auto imag = a.imag - (b.imag * static_cast<int64_t>(a.imag / b.imag));
++-  if (real != 0 && (real < 0 != b.real < 0)) {
++-    real += b.real;
++-  }
++-  if (imag != 0 && (imag < 0 != b.imag < 0)) {
++-    imag += b.imag;
++-  }
+++  /* Disable to match `stablehlo` implementation semantics */
+++  // if (real != 0 && (real < 0 != b.real < 0)) {
+++  //   real += b.real;
+++  // }
+++  // if (imag != 0 && (imag < 0 != b.imag < 0)) {
+++  //   imag += b.imag;
+++  // }
++   return {real, imag};
++ }
++diff --git a/mlx/backend/metal/kernels/sort.h b/mlx/backend/metal/kernels/sort.h
++index b067150d..a24e429f 100644
++--- a/mlx/backend/metal/kernels/sort.h
+++++ b/mlx/backend/metal/kernels/sort.h
++@@ -28,6 +28,15 @@ struct LessThan {
++   }
++ };
++ 
+++template <typename T>
+++struct GreaterThan {
+++  static constexpr constant T init = Limits<T>::min;
+++
+++  METAL_FUNC bool operator()(T a, T b) {
+++    return a > b;
+++  }
+++};
+++
++ template <
++     typename ValT,
++     typename IdxT,
++@@ -216,7 +225,7 @@ template <
++     bool ARG_SORT,
++     short BLOCK_THREADS,
++     short N_PER_THREAD,
++-    typename CompareOp = LessThan<T>>
+++    typename CompareOp>
++ struct KernelMergeSort {
++   using ValT = T;
++   using IdxT = uint;
++@@ -278,7 +287,8 @@ template <
++     typename U,
++     bool ARG_SORT,
++     short BLOCK_THREADS,
++-    short N_PER_THREAD>
+++    short N_PER_THREAD,
+++    typename CompareOp = LessThan<T>>
++ [[kernel, max_total_threads_per_threadgroup(BLOCK_THREADS)]] void block_sort(
++     const device T* inp [[buffer(0)]],
++     device U* out [[buffer(1)]],
++@@ -290,7 +300,7 @@ template <
++     uint3 tid [[threadgroup_position_in_grid]],
++     uint3 lid [[thread_position_in_threadgroup]]) {
++   using sort_kernel =
++-      KernelMergeSort<T, U, ARG_SORT, BLOCK_THREADS, N_PER_THREAD>;
+++      KernelMergeSort<T, U, ARG_SORT, BLOCK_THREADS, N_PER_THREAD, CompareOp>;
++   using ValT = typename sort_kernel::ValT;
++   using IdxT = typename sort_kernel::IdxT;
++ 
++@@ -333,7 +343,8 @@ template <
++     typename U,
++     bool ARG_SORT,
++     short BLOCK_THREADS,
++-    short N_PER_THREAD>
+++    short N_PER_THREAD,
+++    typename CompareOp>
++ [[kernel, max_total_threads_per_threadgroup(BLOCK_THREADS)]] void block_sort_nc(
++     const device T* inp [[buffer(0)]],
++     device U* out [[buffer(1)]],
++@@ -347,7 +358,7 @@ template <
++     uint3 tid [[threadgroup_position_in_grid]],
++     uint3 lid [[thread_position_in_threadgroup]]) {
++   using sort_kernel =
++-      KernelMergeSort<T, U, ARG_SORT, BLOCK_THREADS, N_PER_THREAD>;
+++      KernelMergeSort<T, U, ARG_SORT, BLOCK_THREADS, N_PER_THREAD, CompareOp>;
++   using ValT = typename sort_kernel::ValT;
++   using IdxT = typename sort_kernel::IdxT;
++ 
++@@ -394,7 +405,7 @@ template <
++     bool ARG_SORT,
++     short BLOCK_THREADS,
++     short N_PER_THREAD,
++-    typename CompareOp = LessThan<ValT>>
+++    typename CompareOp>
++ struct KernelMultiBlockMergeSort {
++   using block_merge_sort_t = BlockMergeSort<
++       ValT,
++@@ -476,7 +487,8 @@ template <
++     typename IdxT,
++     bool ARG_SORT,
++     short BLOCK_THREADS,
++-    short N_PER_THREAD>
+++    short N_PER_THREAD,
+++    typename CompareOp>
++ [[kernel, max_total_threads_per_threadgroup(BLOCK_THREADS)]] void mb_block_sort(
++     const device ValT* inp [[buffer(0)]],
++     device ValT* out_vals [[buffer(1)]],
++@@ -493,7 +505,8 @@ template <
++       IdxT,
++       ARG_SORT,
++       BLOCK_THREADS,
++-      N_PER_THREAD>;
+++      N_PER_THREAD,
+++      CompareOp>;
++ 
++   auto block_idx = elem_to_loc(tid.y, nc_shape, nc_strides, nc_dim);
++   inp += block_idx;
++@@ -520,7 +533,8 @@ template <
++     typename IdxT,
++     bool ARG_SORT,
++     short BLOCK_THREADS,
++-    short N_PER_THREAD>
+++    short N_PER_THREAD,
+++    typename CompareOp>
++ [[kernel]] void mb_block_partition(
++     device IdxT* block_partitions [[buffer(0)]],
++     const device ValT* dev_vals [[buffer(1)]],
++@@ -536,7 +550,8 @@ template <
++       IdxT,
++       ARG_SORT,
++       BLOCK_THREADS,
++-      N_PER_THREAD>;
+++      N_PER_THREAD,
+++      CompareOp>;
++ 
++   block_partitions += tid.y * tgp_dims.x;
++   dev_vals += tid.y * size_sorted_axis;
++@@ -573,7 +588,7 @@ template <
++     bool ARG_SORT,
++     short BLOCK_THREADS,
++     short N_PER_THREAD,
++-    typename CompareOp = LessThan<ValT>>
+++    typename CompareOp>
++ [[kernel, max_total_threads_per_threadgroup(BLOCK_THREADS)]] void
++ mb_block_merge(
++     const device IdxT* block_partitions [[buffer(0)]],
++diff --git a/mlx/backend/metal/kernels/sort.metal b/mlx/backend/metal/kernels/sort.metal
++index 7f198d55..f1ec796c 100644
++--- a/mlx/backend/metal/kernels/sort.metal
+++++ b/mlx/backend/metal/kernels/sort.metal
++@@ -6,24 +6,29 @@
++ #include "mlx/backend/metal/kernels/utils.h"
++ #include "mlx/backend/metal/kernels/sort.h"
++ 
+++#define instantiate_comparator(name, type) \
+++  name<type>
+++
++ #define instantiate_block_sort(                                          \
++-    name, itname, itype, otname, otype, arg_sort, bn, tn)                \
++-  instantiate_kernel("c" #name "_" #itname "_" #otname "_bn" #bn "_tn" #tn, \
++-                     block_sort, itype, otype, arg_sort, bn, tn) \
++-  instantiate_kernel("nc" #name "_" #itname "_" #otname "_bn" #bn "_tn" #tn, \
++-                     block_sort_nc, itype, otype, arg_sort, bn, tn)
+++    name, itname, itype, otname, otype, arg_sort, bn, tn, vcomparator)                \
+++  instantiate_kernel("c" #name "_" #itname "_" #otname "_bn" #bn "_tn" #tn "_comp" #vcomparator, \
+++                     block_sort, itype, otype, arg_sort, bn, tn, instantiate_comparator(vcomparator, itype)) \
+++  instantiate_kernel("nc" #name "_" #itname "_" #otname "_bn" #bn "_tn" #tn "_comp" #vcomparator, \
+++                     block_sort_nc, itype, otype, arg_sort, bn, tn, instantiate_comparator(vcomparator, itype))
++ 
++-#define instantiate_arg_block_sort_base(itname, itype, bn, tn) \
+++#define instantiate_arg_block_sort_base(itname, itype, bn, tn, comparator) \
++   instantiate_block_sort(                                      \
++-      arg_block_sort, itname, itype, uint32, uint32_t, true, bn, tn)
+++      arg_block_sort, itname, itype, uint32, uint32_t, true, bn, tn, comparator)
++ 
++-#define instantiate_block_sort_base(itname, itype, bn, tn) \
+++#define instantiate_block_sort_base(itname, itype, bn, tn, comparator) \
++   instantiate_block_sort(                                  \
++-      _block_sort, itname, itype, itname, itype, false, bn, tn)
+++      _block_sort, itname, itype, itname, itype, false, bn, tn, comparator)
++ 
++ #define instantiate_block_sort_tn(itname, itype, bn) \
++-  instantiate_block_sort_base(itname, itype, bn, 4)  \
++-  instantiate_arg_block_sort_base(itname, itype, bn, 4)
+++  instantiate_block_sort_base(itname, itype, bn, 4, LessThan)  \
+++  instantiate_block_sort_base(itname, itype, bn, 4, GreaterThan)  \
+++  instantiate_arg_block_sort_base(itname, itype, bn, 4, LessThan)  \
+++  instantiate_arg_block_sort_base(itname, itype, bn, 4, GreaterThan)
++ 
++ #define instantiate_block_sort_bn(itname, itype) \
++   instantiate_block_sort_tn(itname, itype, 32)  \
++@@ -52,16 +57,17 @@ instantiate_block_sort_long(uint64, uint64_t)
++ instantiate_block_sort_long(int64, int64_t)
++ 
++ #define instantiate_multi_block_sort(                                      \
++-    vtname, vtype, itname, itype, arg_sort, bn, tn)                        \
++-  instantiate_kernel("sort_mbsort_" #vtname "_" #itname "_bn" #bn "_tn" #tn, \
++-                     mb_block_sort, vtype, itype, arg_sort, bn, tn) \
++-  instantiate_kernel("partition_mbsort_" #vtname "_" #itname "_bn" #bn "_tn" #tn, \
++-                     mb_block_partition, vtype, itype, arg_sort, bn, tn) \
++-  instantiate_kernel("merge_mbsort_" #vtname "_" #itname "_bn" #bn "_tn" #tn, \
++-                     mb_block_merge, vtype, itype, arg_sort, bn, tn)
+++    vtname, vtype, itname, itype, arg_sort, bn, tn, vcomparator)                        \
+++  instantiate_kernel("sort_mbsort_" #vtname "_" #itname "_bn" #bn "_tn" #tn "_comp" #vcomparator, \
+++                     mb_block_sort, vtype, itype, arg_sort, bn, tn, instantiate_comparator(vcomparator, vtype)) \
+++  instantiate_kernel("partition_mbsort_" #vtname "_" #itname "_bn" #bn "_tn" #tn "_comp" #vcomparator, \
+++                     mb_block_partition, vtype, itype, arg_sort, bn, tn, instantiate_comparator(vcomparator, vtype)) \
+++  instantiate_kernel("merge_mbsort_" #vtname "_" #itname "_bn" #bn "_tn" #tn "_comp" #vcomparator, \
+++                     mb_block_merge, vtype, itype, arg_sort, bn, tn, instantiate_comparator(vcomparator, vtype))
++ 
++ #define instantiate_multi_block_sort_base(vtname, vtype) \
++-  instantiate_multi_block_sort(vtname, vtype, uint32, uint32_t, true, 512, 4)
+++  instantiate_multi_block_sort(vtname, vtype, uint32, uint32_t, true, 512, 4, LessThan) \
+++  instantiate_multi_block_sort(vtname, vtype, uint32, uint32_t, true, 512, 4, GreaterThan)
++ 
++ instantiate_multi_block_sort_base(uint8, uint8_t)
++ instantiate_multi_block_sort_base(uint16, uint16_t)
++@@ -74,7 +80,8 @@ instantiate_multi_block_sort_base(float32, float)
++ instantiate_multi_block_sort_base(bfloat16, bfloat16_t)
++ 
++ #define instantiate_multi_block_sort_long(vtname, vtype) \
++-  instantiate_multi_block_sort(vtname, vtype, uint32, uint32_t, true, 256, 4)
+++  instantiate_multi_block_sort(vtname, vtype, uint32, uint32_t, true, 256, 4, LessThan) \
+++  instantiate_multi_block_sort(vtname, vtype, uint32, uint32_t, true, 256, 4, GreaterThan)
++ 
++ instantiate_multi_block_sort_long(uint64, uint64_t)
++ instantiate_multi_block_sort_long(int64, int64_t) // clang-format on
++diff --git a/mlx/backend/metal/make_compiled_preamble.sh b/mlx/backend/metal/make_compiled_preamble.sh
++index 425cd8d7..a48d0080 100644
++--- a/mlx/backend/metal/make_compiled_preamble.sh
+++++ b/mlx/backend/metal/make_compiled_preamble.sh
++@@ -5,18 +5,21 @@
++ #
++ # Copyright © 2023-24 Apple Inc.
++ 
++-OUTPUT_DIR=$1
++-CC=$2
++-SRC_DIR=$3
++-SRC_FILE=$4
++-CFLAGS=$5
++-SRC_NAME=$(basename -- "${SRC_FILE}")
++-JIT_INCLUDES=${SRC_DIR}/mlx/backend/metal/kernels/jit
++-INPUT_FILE=${SRC_DIR}/mlx/backend/metal/kernels/${SRC_FILE}.h
++-OUTPUT_FILE=${OUTPUT_DIR}/${SRC_NAME}.cpp
+++OUTPUT_FILE=$1
+++INPUT_FILE=$2
+++CFLAGS=$3
++ 
++-mkdir -p "$OUTPUT_DIR"
++-CONTENT=$($CC -I"$SRC_DIR" -I"$JIT_INCLUDES" -DMLX_METAL_JIT -E -P "$INPUT_FILE" $CFLAGS 2>/dev/null)
+++KERNEL_DIR=$(dirname $(realpath $INPUT_FILE))
+++# echo "KERNEL_DIR: $KERNEL_DIR"
+++SRC_DIR=$(echo "$KERNEL_DIR" | cut -d'/' -f-$(($(echo "$KERNEL_DIR" | awk -F'/' '{print NF}')-4)))
+++# echo "SRC_DIR: $SRC_DIR"
+++JIT_INCLUDES="$KERNEL_DIR/jit"
+++# echo "JIT_INCLUDES: $JIT_INCLUDES"
+++
+++SRC_BASENAME=$(basename -- "${INPUT_FILE}")
+++SRC_NAME="${SRC_BASENAME%.*}"
+++
+++CONTENT=$(clang -I"$SRC_DIR" -I"$JIT_INCLUDES" -DMLX_METAL_JIT -E -P "$INPUT_FILE" $CFLAGS 2>/dev/null)
++ 
++ cat << EOF > "$OUTPUT_FILE"
++ namespace mlx::core::metal {
++diff --git a/mlx/backend/metal/nojit_kernels.cpp b/mlx/backend/metal/nojit_kernels.cpp
++index 8da14797..1098f918 100644
++--- a/mlx/backend/metal/nojit_kernels.cpp
+++++ b/mlx/backend/metal/nojit_kernels.cpp
++@@ -96,7 +96,8 @@ MTL::ComputePipelineState* get_sort_kernel(
++     const array&,
++     const array&,
++     int,
++-    int) {
+++    int,
+++    const std::string&) {
++   return d.get_kernel(kernel_name);
++ }
++ 
++@@ -106,7 +107,8 @@ MTL::ComputePipelineState* get_mb_sort_kernel(
++     const array&,
++     const array&,
++     int,
++-    int) {
+++    int,
+++    const std::string&) {
++   return d.get_kernel(kernel_name);
++ }
++ 
++diff --git a/mlx/backend/metal/sort.cpp b/mlx/backend/metal/sort.cpp
++index 3c84022f..bca888f6 100644
++--- a/mlx/backend/metal/sort.cpp
+++++ b/mlx/backend/metal/sort.cpp
++@@ -6,7 +6,9 @@
++ #include "mlx/backend/metal/device.h"
++ #include "mlx/backend/metal/kernels.h"
++ #include "mlx/backend/metal/utils.h"
+++#include "mlx/dtype_utils.h",
++ #include "mlx/primitives.h"
+++#include "mlx/sort.h"
++ 
++ namespace mlx::core {
++ 
++@@ -20,7 +22,8 @@ void single_block_sort(
++     int axis,
++     int bn,
++     int tn,
++-    bool argsort) {
+++    bool argsort,
+++    ComparatorType comparator_) {
++   // Prepare shapes
++   int n_rows = in.size() / in.shape(axis);
++ 
++@@ -58,9 +61,26 @@ void single_block_sort(
++     kname << "arg";
++   }
++ 
+++  std::string comparator;
+++  switch (comparator_) {
+++    case ComparatorType::LessThan:
+++      comparator = "LessThan";
+++      break;
+++    case ComparatorType::GreaterThan:
+++      comparator = "GreaterThan";
+++      break;
+++  }
+++
++   kname << "_block_sort_" << type_to_name(in) << "_" << type_to_name(out)
++-        << "_bn" << bn << "_tn" << tn;
++-  auto kernel = get_sort_kernel(d, kname.str(), in, out, bn, tn);
+++        << "_bn" << bn << "_tn" << tn << "_comp" << comparator;
+++  auto kernel = get_sort_kernel(
+++      d,
+++      kname.str(),
+++      in,
+++      out,
+++      bn,
+++      tn,
+++      comparator + "<" + dtype_to_string(in.dtype()) + ">");
++ 
++   // Prepare command encoder
++   auto& compute_encoder = d.get_command_encoder(s.index);
++@@ -120,7 +140,8 @@ void multi_block_sort(
++     int bn,
++     int tn,
++     int n_blocks,
++-    bool argsort) {
+++    bool argsort,
+++    ComparatorType comparator_) {
++   // Prepare shapes
++   int n_rows = in.size() / in.shape(axis);
++ 
++@@ -159,6 +180,16 @@ void multi_block_sort(
++   std::vector<array> copies = {
++       dev_vals_0, dev_vals_1, dev_idxs_0, dev_idxs_1, block_partitions};
++ 
+++  std::string comparator;
+++  switch (comparator_) {
+++    case ComparatorType::LessThan:
+++      comparator = "LessThan";
+++      break;
+++    case ComparatorType::GreaterThan:
+++      comparator = "GreaterThan";
+++      break;
+++  }
+++
++   // Prepare command encoder
++   auto& compute_encoder = d.get_command_encoder(s.index);
++ 
++@@ -166,9 +197,16 @@ void multi_block_sort(
++   {
++     std::ostringstream kname;
++     kname << "sort_mbsort_" << type_to_name(dev_vals_0) << "_"
++-          << type_to_name(dev_idxs_0) << "_bn" << bn << "_tn" << tn;
++-    auto kernel =
++-        get_mb_sort_kernel(d, kname.str(), dev_vals_0, dev_idxs_0, bn, tn);
+++          << type_to_name(dev_idxs_0) << "_bn" << bn << "_tn" << tn << "_comp"
+++          << comparator;
+++    auto kernel = get_mb_sort_kernel(
+++        d,
+++        kname.str(),
+++        dev_vals_0,
+++        dev_idxs_0,
+++        bn,
+++        tn,
+++        comparator + "<" + dtype_to_string(in.dtype()) + ">");
++     compute_encoder.set_compute_pipeline_state(kernel);
++ 
++     compute_encoder.set_input_array(in, 0);
++@@ -206,10 +244,17 @@ void multi_block_sort(
++     {
++       std::ostringstream kname;
++       kname << "partition_mbsort_" << type_to_name(dev_vals_in) << "_"
++-            << type_to_name(dev_idxs_in) << "_bn" << bn << "_tn" << tn;
++-
++-      auto kernel =
++-          get_mb_sort_kernel(d, kname.str(), dev_vals_0, dev_idxs_0, bn, tn);
+++            << type_to_name(dev_idxs_in) << "_bn" << bn << "_tn" << tn
+++            << "_comp" << comparator;
+++
+++      auto kernel = get_mb_sort_kernel(
+++          d,
+++          kname.str(),
+++          dev_vals_0,
+++          dev_idxs_0,
+++          bn,
+++          tn,
+++          comparator + "<" + dtype_to_string(in.dtype()) + ">");
++       compute_encoder.set_compute_pipeline_state(kernel);
++ 
++       compute_encoder.set_output_array(block_partitions, 0);
++@@ -229,10 +274,17 @@ void multi_block_sort(
++     {
++       std::ostringstream kname;
++       kname << "merge_mbsort_" << type_to_name(dev_vals_in) << "_"
++-            << type_to_name(dev_idxs_in) << "_bn" << bn << "_tn" << tn;
++-
++-      auto kernel =
++-          get_mb_sort_kernel(d, kname.str(), dev_vals_0, dev_idxs_0, bn, tn);
+++            << type_to_name(dev_idxs_in) << "_bn" << bn << "_tn" << tn
+++            << "_comp" << comparator;
+++
+++      auto kernel = get_mb_sort_kernel(
+++          d,
+++          kname.str(),
+++          dev_vals_0,
+++          dev_idxs_0,
+++          bn,
+++          tn,
+++          comparator + "<" + dtype_to_string(in.dtype()) + ">");
++       compute_encoder.set_compute_pipeline_state(kernel);
++ 
++       compute_encoder.set_input_array(block_partitions, 0);
++@@ -277,7 +329,8 @@ void gpu_merge_sort(
++     const array& in,
++     array& out,
++     int axis_,
++-    bool argsort) {
+++    bool argsort,
+++    ComparatorType comparator) {
++   // Get size info
++   int axis = axis_ < 0 ? axis_ + in.ndim() : axis_;
++   int size_sorted_axis = in.shape(axis);
++@@ -307,9 +360,10 @@ void gpu_merge_sort(
++   int n_blocks = (size_sorted_axis + n_per_block - 1) / n_per_block;
++ 
++   if (n_blocks > 1) {
++-    return multi_block_sort(s, d, in, out, axis, bn, tn, n_blocks, argsort);
+++    return multi_block_sort(
+++        s, d, in, out, axis, bn, tn, n_blocks, argsort, comparator);
++   } else {
++-    return single_block_sort(s, d, in, out, axis, bn, tn, argsort);
+++    return single_block_sort(s, d, in, out, axis, bn, tn, argsort, comparator);
++   }
++ }
++ 
++@@ -324,7 +378,7 @@ void ArgSort::eval_gpu(const std::vector<array>& inputs, array& out) {
++   auto& d = metal::device(s.device);
++   auto& in = inputs[0];
++ 
++-  gpu_merge_sort(s, d, in, out, axis_, true);
+++  gpu_merge_sort(s, d, in, out, axis_, true, comparator_);
++ }
++ 
++ void Sort::eval_gpu(const std::vector<array>& inputs, array& out) {
++@@ -336,7 +390,7 @@ void Sort::eval_gpu(const std::vector<array>& inputs, array& out) {
++   auto& d = metal::device(s.device);
++   auto& in = inputs[0];
++ 
++-  gpu_merge_sort(s, d, in, out, axis_, false);
+++  gpu_merge_sort(s, d, in, out, axis_, false, comparator_);
++ }
++ 
++ void ArgPartition::eval_gpu(const std::vector<array>& inputs, array& out) {
++@@ -349,7 +403,7 @@ void ArgPartition::eval_gpu(const std::vector<array>& inputs, array& out) {
++   auto& d = metal::device(s.device);
++   auto& in = inputs[0];
++ 
++-  gpu_merge_sort(s, d, in, out, axis_, true);
+++  gpu_merge_sort(s, d, in, out, axis_, true, comparator_);
++ }
++ 
++ void Partition::eval_gpu(const std::vector<array>& inputs, array& out) {
++@@ -362,7 +416,7 @@ void Partition::eval_gpu(const std::vector<array>& inputs, array& out) {
++   auto& d = metal::device(s.device);
++   auto& in = inputs[0];
++ 
++-  gpu_merge_sort(s, d, in, out, axis_, false);
+++  gpu_merge_sort(s, d, in, out, axis_, false, comparator_);
++ }
++ 
++ } // namespace mlx::core
++diff --git a/mlx/backend/no_gpu/primitives.cpp b/mlx/backend/no_gpu/primitives.cpp
++index 676a6e55..178eb23f 100644
++--- a/mlx/backend/no_gpu/primitives.cpp
+++++ b/mlx/backend/no_gpu/primitives.cpp
++@@ -95,7 +95,7 @@ NO_GPU(Partition)
++ NO_GPU(Power)
++ NO_GPU_MULTI(QRF)
++ NO_GPU(QuantizedMatmul)
++-NO_GPU(RandomBits)
+++NO_GPU()
++ NO_GPU(Real)
++ NO_GPU(Reduce)
++ NO_GPU(Reshape)
++diff --git a/mlx/mlx.h b/mlx/mlx.h
++index cef8d806..f8932873 100644
++--- a/mlx/mlx.h
+++++ b/mlx/mlx.h
++@@ -17,6 +17,7 @@
++ #include "mlx/memory.h"
++ #include "mlx/ops.h"
++ #include "mlx/random.h"
+++#include "mlx/sort.h"
++ #include "mlx/stream.h"
++ #include "mlx/transforms.h"
++ #include "mlx/utils.h"
++diff --git a/mlx/ops.cpp b/mlx/ops.cpp
++index a72c2bc8..04ac921f 100644
++--- a/mlx/ops.cpp
+++++ b/mlx/ops.cpp
++@@ -2205,13 +2205,20 @@ array argmax(
++ }
++ 
++ /** Returns a sorted copy of the flattened array. */
++-array sort(const array& a, StreamOrDevice s /* = {} */) {
+++array sort(
+++    const array& a,
+++    ComparatorType comparator,
+++    StreamOrDevice s /* = {} */) {
++   int size = a.size();
++-  return sort(reshape(a, {size}, s), 0, s);
+++  return sort(reshape(a, {size}, s), 0, comparator, s);
++ }
++ 
++ /** Returns a sorted copy of the array along a given axis. */
++-array sort(const array& a, int axis, StreamOrDevice s /* = {} */) {
+++array sort(
+++    const array& a,
+++    int axis,
+++    ComparatorType comparator,
+++    StreamOrDevice s /* = {} */) {
++   // Check for valid axis
++   if (axis + static_cast<int>(a.ndim()) < 0 ||
++       axis >= static_cast<int>(a.ndim())) {
++@@ -2222,17 +2229,27 @@ array sort(const array& a, int axis, StreamOrDevice s /* = {} */) {
++   }
++ 
++   return array(
++-      a.shape(), a.dtype(), std::make_shared<Sort>(to_stream(s), axis), {a});
+++      a.shape(),
+++      a.dtype(),
+++      std::make_shared<Sort>(to_stream(s), axis, comparator),
+++      {a});
++ }
++ 
++ /** Returns indices that sort the flattened array. */
++-array argsort(const array& a, StreamOrDevice s /* = {} */) {
+++array argsort(
+++    const array& a,
+++    ComparatorType comparator,
+++    StreamOrDevice s /* = {} */) {
++   int size = a.size();
++-  return argsort(reshape(a, {size}, s), 0, s);
+++  return argsort(reshape(a, {size}, s), 0, comparator, s);
++ }
++ 
++ /** Returns indices that sort the array along a given axis. */
++-array argsort(const array& a, int axis, StreamOrDevice s /* = {} */) {
+++array argsort(
+++    const array& a,
+++    int axis,
+++    ComparatorType comparator,
+++    StreamOrDevice s /* = {} */) {
++   // Check for valid axis
++   if (axis + static_cast<int>(a.ndim()) < 0 ||
++       axis >= static_cast<int>(a.ndim())) {
++@@ -2243,16 +2260,23 @@ array argsort(const array& a, int axis, StreamOrDevice s /* = {} */) {
++   }
++ 
++   return array(
++-      a.shape(), uint32, std::make_shared<ArgSort>(to_stream(s), axis), {a});
+++      a.shape(),
+++      uint32,
+++      std::make_shared<ArgSort>(to_stream(s), axis, comparator),
+++      {a});
++ }
++ 
++ /**
++  * Returns a partitioned copy of the flattened array
++  * such that the smaller kth elements are first.
++  **/
++-array partition(const array& a, int kth, StreamOrDevice s /* = {} */) {
+++array partition(
+++    const array& a,
+++    int kth,
+++    ComparatorType comparator,
+++    StreamOrDevice s /* = {} */) {
++   int size = a.size();
++-  return partition(reshape(a, {size}, s), kth, 0, s);
+++  return partition(reshape(a, {size}, s), kth, 0, comparator, s);
++ }
++ 
++ /**
++@@ -2263,6 +2287,7 @@ array partition(
++     const array& a,
++     int kth,
++     int axis,
+++    ComparatorType comparator,
++     StreamOrDevice s /* = {} */) {
++   // Check for valid axis
++   if (axis + static_cast<int>(a.ndim()) < 0 ||
++@@ -2283,7 +2308,7 @@ array partition(
++   return array(
++       a.shape(),
++       a.dtype(),
++-      std::make_shared<Partition>(to_stream(s), kth_, axis_),
+++      std::make_shared<Partition>(to_stream(s), kth_, axis_, comparator),
++       {a});
++ }
++ 
++@@ -2291,9 +2316,13 @@ array partition(
++  * Returns indices that partition the flattened array
++  * such that the smaller kth elements are first.
++  **/
++-array argpartition(const array& a, int kth, StreamOrDevice s /* = {} */) {
+++array argpartition(
+++    const array& a,
+++    int kth,
+++    ComparatorType comparator,
+++    StreamOrDevice s /* = {} */) {
++   int size = a.size();
++-  return argpartition(reshape(a, {size}, s), kth, 0, s);
+++  return argpartition(reshape(a, {size}, s), kth, 0, comparator, s);
++ }
++ 
++ /**
++@@ -2304,6 +2333,7 @@ array argpartition(
++     const array& a,
++     int kth,
++     int axis,
+++    ComparatorType comparator,
++     StreamOrDevice s /* = {} */) {
++   // Check for valid axis
++   if (axis + static_cast<int>(a.ndim()) < 0 ||
++@@ -2324,7 +2354,7 @@ array argpartition(
++   return array(
++       a.shape(),
++       uint32,
++-      std::make_shared<ArgPartition>(to_stream(s), kth_, axis_),
+++      std::make_shared<ArgPartition>(to_stream(s), kth_, axis_, comparator),
++       {a});
++ }
++ 
++diff --git a/mlx/ops.h b/mlx/ops.h
++index af3cdb5b..be762b8a 100644
++--- a/mlx/ops.h
+++++ b/mlx/ops.h
++@@ -6,6 +6,7 @@
++ 
++ #include "mlx/array.h"
++ #include "mlx/device.h"
+++#include "mlx/sort.h"
++ #include "mlx/stream.h"
++ #include "mlx/utils.h"
++ 
++@@ -674,40 +675,98 @@ array argmax(
++     StreamOrDevice s = {});
++ 
++ /** Returns a sorted copy of the flattened array. */
++-array sort(const array& a, StreamOrDevice s = {});
+++array sort(
+++    const array& a,
+++    ComparatorType comparator = ComparatorType::LessThan,
+++    StreamOrDevice s = {});
+++inline array sort(const array& a, StreamOrDevice s = {}) {
+++  return sort(a, ComparatorType::LessThan, s);
+++}
++ 
++ /** Returns a sorted copy of the array along a given axis. */
++-array sort(const array& a, int axis, StreamOrDevice s = {});
+++array sort(
+++    const array& a,
+++    int axis,
+++    ComparatorType comparator = ComparatorType::LessThan,
+++    StreamOrDevice s = {});
+++inline array sort(const array& a, int axis, StreamOrDevice s = {}) {
+++  return sort(a, axis, ComparatorType::LessThan, s);
+++}
++ 
++ /** Returns indices that sort the flattened array. */
++-array argsort(const array& a, StreamOrDevice s = {});
+++array argsort(
+++    const array& a,
+++    ComparatorType comparator = ComparatorType::LessThan,
+++    StreamOrDevice s = {});
+++inline array argsort(const array& a, StreamOrDevice s = {}) {
+++  return argsort(a, ComparatorType::LessThan, s);
+++}
++ 
++ /** Returns indices that sort the array along a given axis. */
++-array argsort(const array& a, int axis, StreamOrDevice s = {});
+++array argsort(
+++    const array& a,
+++    int axis,
+++    ComparatorType comparator = ComparatorType::LessThan,
+++    StreamOrDevice s = {});
+++inline array argsort(const array& a, int axis, StreamOrDevice s = {}) {
+++  return argsort(a, axis, ComparatorType::LessThan, s);
+++}
++ 
++ /**
++  * Returns a partitioned copy of the flattened array
++  * such that the smaller kth elements are first.
++  **/
++-array partition(const array& a, int kth, StreamOrDevice s = {});
+++array partition(
+++    const array& a,
+++    int kth,
+++    ComparatorType comparator = ComparatorType::LessThan,
+++    StreamOrDevice s = {});
+++inline array partition(const array& a, int kth, StreamOrDevice s = {}) {
+++  return partition(a, kth, ComparatorType::LessThan, s);
+++}
++ 
++ /**
++  * Returns a partitioned copy of the array along a given axis
++  * such that the smaller kth elements are first.
++  **/
++-array partition(const array& a, int kth, int axis, StreamOrDevice s = {});
+++array partition(
+++    const array& a,
+++    int kth,
+++    int axis,
+++    ComparatorType comparator = ComparatorType::LessThan,
+++    StreamOrDevice s = {});
+++inline array
+++partition(const array& a, int kth, int axis, StreamOrDevice s = {}) {
+++  return partition(a, kth, axis, ComparatorType::LessThan, s);
+++}
++ 
++ /**
++  * Returns indices that partition the flattened array
++  * such that the smaller kth elements are first.
++  **/
++-array argpartition(const array& a, int kth, StreamOrDevice s = {});
+++array argpartition(
+++    const array& a,
+++    int kth,
+++    ComparatorType comparator = ComparatorType::LessThan,
+++    StreamOrDevice s = {});
+++inline array argpartition(const array& a, int kth, StreamOrDevice s = {}) {
+++  return argpartition(a, kth, ComparatorType::LessThan, s);
+++}
++ 
++ /**
++  * Returns indices that partition the array along a given axis
++  * such that the smaller kth elements are first.
++  **/
++-array argpartition(const array& a, int kth, int axis, StreamOrDevice s = {});
+++array argpartition(
+++    const array& a,
+++    int kth,
+++    int axis,
+++    ComparatorType comparator = ComparatorType::LessThan,
+++    StreamOrDevice s = {});
+++inline array
+++argpartition(const array& a, int kth, int axis, StreamOrDevice s = {}) {
+++  return argpartition(a, kth, axis, ComparatorType::LessThan, s);
+++}
++ 
++ /** Returns topk elements of the flattened array. */
++ array topk(const array& a, int k, StreamOrDevice s = {});
++diff --git a/mlx/primitives.h b/mlx/primitives.h
++index c0fbfc84..13d67201 100644
++--- a/mlx/primitives.h
+++++ b/mlx/primitives.h
++@@ -7,6 +7,7 @@
++ #include "mlx/array.h"
++ #include "mlx/device.h"
++ #include "mlx/io/load.h"
+++#include "mlx/sort.h"
++ #include "mlx/stream.h"
++ 
++ #define DEFINE_VMAP()                                                 \
++@@ -322,8 +323,15 @@ class ArcTanh : public UnaryPrimitive {
++ 
++ class ArgPartition : public UnaryPrimitive {
++  public:
++-  explicit ArgPartition(Stream stream, int kth, int axis)
++-      : UnaryPrimitive(stream), kth_(kth), axis_(axis) {}
+++  explicit ArgPartition(
+++      Stream stream,
+++      int kth,
+++      int axis,
+++      ComparatorType comparator)
+++      : UnaryPrimitive(stream),
+++        kth_(kth),
+++        axis_(axis),
+++        comparator_(comparator) {}
++ 
++   void eval_cpu(const std::vector<array>& inputs, array& out) override;
++   void eval_gpu(const std::vector<array>& inputs, array& out) override;
++@@ -333,13 +341,14 @@ class ArgPartition : public UnaryPrimitive {
++   DEFINE_PRINT(ArgPartition)
++   DEFINE_INPUT_OUTPUT_SHAPE()
++   bool is_equivalent(const Primitive& other) const override;
++-  std::pair<int, int> state() const {
++-    return {kth_, axis_};
+++  auto state() const {
+++    return std::make_tuple(kth_, axis_, comparator_);
++   };
++ 
++  private:
++   int kth_;
++   int axis_;
+++  ComparatorType comparator_;
++ };
++ 
++ class ArgReduce : public UnaryPrimitive {
++@@ -371,8 +380,8 @@ class ArgReduce : public UnaryPrimitive {
++ 
++ class ArgSort : public UnaryPrimitive {
++  public:
++-  explicit ArgSort(Stream stream, int axis)
++-      : UnaryPrimitive(stream), axis_(axis) {}
+++  explicit ArgSort(Stream stream, int axis, ComparatorType comparator)
+++      : UnaryPrimitive(stream), axis_(axis), comparator_(comparator) {}
++ 
++   void eval_cpu(const std::vector<array>& inputs, array& out) override;
++   void eval_gpu(const std::vector<array>& inputs, array& out) override;
++@@ -381,12 +390,13 @@ class ArgSort : public UnaryPrimitive {
++   DEFINE_PRINT(ArgSort)
++   DEFINE_INPUT_OUTPUT_SHAPE()
++   bool is_equivalent(const Primitive& other) const override;
++-  int state() const {
++-    return axis_;
+++  auto state() const {
+++    return std::make_pair(axis_, comparator_);
++   };
++ 
++  private:
++   int axis_;
+++  ComparatorType comparator_;
++ };
++ 
++ class AsType : public UnaryPrimitive {
++@@ -1530,8 +1540,15 @@ class Pad : public UnaryPrimitive {
++ 
++ class Partition : public UnaryPrimitive {
++  public:
++-  explicit Partition(Stream stream, int kth, int axis)
++-      : UnaryPrimitive(stream), kth_(kth), axis_(axis) {}
+++  explicit Partition(
+++      Stream stream,
+++      int kth,
+++      int axis,
+++      ComparatorType comparator)
+++      : UnaryPrimitive(stream),
+++        kth_(kth),
+++        axis_(axis),
+++        comparator_(comparator) {}
++ 
++   void eval_cpu(const std::vector<array>& inputs, array& out) override;
++   void eval_gpu(const std::vector<array>& inputs, array& out) override;
++@@ -1542,12 +1559,13 @@ class Partition : public UnaryPrimitive {
++   DEFINE_INPUT_OUTPUT_SHAPE()
++   bool is_equivalent(const Primitive& other) const override;
++   auto state() const {
++-    return std::make_pair(kth_, axis_);
+++    return std::make_tuple(kth_, axis_, comparator_);
++   };
++ 
++  private:
++   int kth_;
++   int axis_;
+++  ComparatorType comparator_;
++ };
++ 
++ class Power : public UnaryPrimitive {
++@@ -2073,8 +2091,8 @@ class Softmax : public UnaryPrimitive {
++ 
++ class Sort : public UnaryPrimitive {
++  public:
++-  explicit Sort(Stream stream, int axis)
++-      : UnaryPrimitive(stream), axis_(axis) {}
+++  explicit Sort(Stream stream, int axis, ComparatorType comparator)
+++      : UnaryPrimitive(stream), axis_(axis), comparator_(comparator) {}
++ 
++   void eval_cpu(const std::vector<array>& inputs, array& out) override;
++   void eval_gpu(const std::vector<array>& inputs, array& out) override;
++@@ -2085,11 +2103,12 @@ class Sort : public UnaryPrimitive {
++   DEFINE_INPUT_OUTPUT_SHAPE()
++   bool is_equivalent(const Primitive& other) const override;
++   auto state() const {
++-    return axis_;
+++    return std::make_pair(axis_, comparator_);
++   }
++ 
++  private:
++   int axis_;
+++  ComparatorType comparator_;
++ };
++ 
++ class Split : public Primitive {
++diff --git a/mlx/random.cpp b/mlx/random.cpp
++index 6c6d1eb9..5a4745a5 100644
++--- a/mlx/random.cpp
+++++ b/mlx/random.cpp
++@@ -225,6 +225,23 @@ array normal(
++   return samples;
++ }
++ 
+++array normal(
+++    const Shape& shape,
+++    Dtype dtype,
+++    const array& loc,
+++    const array& scale,
+++    const std::optional<array>& key /*= nullopt */,
+++    StreamOrDevice s /* = {} */) {
+++  auto stream = to_stream(s);
+++  auto low = above_minus_one_with_default(dtype);
+++  auto high = array(1.0f, dtype);
+++  auto samples = uniform(low, high, shape, dtype, key, stream);
+++  samples = multiply(array(std::sqrt(2.0), dtype), erfinv(samples, stream), stream);
+++  samples = multiply(astype(scale, dtype), samples, stream);
+++  samples = add(astype(loc, dtype), samples, stream);
+++  return samples;
+++}
+++
++ array multivariate_normal(
++     const array& mean,
++     const array& cov,
++diff --git a/mlx/random.h b/mlx/random.h
++index 0dfdab7a..ebee726c 100644
++--- a/mlx/random.h
+++++ b/mlx/random.h
++@@ -134,6 +134,14 @@ inline array normal(
++   return normal(shape, float32, std::nullopt, std::nullopt, key, s);
++ }
++ 
+++array normal(
+++    const Shape& shape,
+++    Dtype dtype,
+++    const array& loc,
+++    const array& scale,
+++    const std::optional<array>& key = std::nullopt,
+++    StreamOrDevice s = {});
+++
++ /** Generate samples from a multivariate normal distribution. **/
++ array multivariate_normal(
++     const array& mean,
++diff --git a/mlx/sort.h b/mlx/sort.h
++new file mode 100644
++index 00000000..0afc6b62
++--- /dev/null
+++++ b/mlx/sort.h
++@@ -0,0 +1,14 @@
+++// Copyright © 2023-2024 Apple Inc.
+++
+++#pragma once
+++
+++#include "mlx/array.h"
+++
+++namespace mlx::core {
+++
+++enum class ComparatorType {
+++  LessThan,
+++  GreaterThan,
+++};
+++
+++} // namespace mlx::core
++diff --git a/mlx/types/complex.h b/mlx/types/complex.h
++index 51101cc9..344d80f8 100644
++--- a/mlx/types/complex.h
+++++ b/mlx/types/complex.h
++@@ -59,10 +59,11 @@ inline bool operator>(const complex64_t& a, const complex64_t& b) {
++ inline complex64_t operator%(complex64_t a, complex64_t b) {
++   auto real = a.real() - (b.real() * static_cast<int64_t>(a.real() / b.real()));
++   auto imag = a.imag() - (b.imag() * static_cast<int64_t>(a.imag() / b.imag()));
++-  if (real != 0 && ((real < 0) != (b.real() < 0)))
++-    real += b.real();
++-  if (imag != 0 && ((imag < 0) != (b.imag() < 0)))
++-    imag += b.imag();
+++  /* Disable to match `stablehlo` implementation semantics */
+++  // if (real != 0 && ((real < 0) != (b.real() < 0)))
+++  //   real += b.real();
+++  // if (imag != 0 && ((imag < 0) != (b.imag() < 0)))
+++  //   imag += b.imag();
++   return {real, imag};
++ }
++ 

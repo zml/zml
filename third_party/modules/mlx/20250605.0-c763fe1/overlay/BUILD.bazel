@@ -371,6 +371,7 @@ cc_library(
         "mlx/backend/metal/allocator.h",
         "mlx/backend/metal/binary.h",
         "mlx/backend/metal/device.h",
+        "mlx/backend/metal/thread_safety.h",
         "mlx/backend/metal/kernels.h",
         "mlx/backend/metal/matmul.h",
         "mlx/backend/metal/metal.h",
