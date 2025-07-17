@@ -81,3 +81,64 @@ jobs:
       # - name: Examples / bazel test //...
       #   working-directory: examples/
       #   run: bazel test //...
+
+      - name: Detailed Disk Usage Report
+        if: always() # failure
+        run: |
+          set -e
+          echo "### 📊 Bazel Disk Usage Analysis ###"
+
+          echo "::group::Gathering Bazel paths"
+          OUTPUT_BASE=$(bazel info output_base)
+          INSTALL_BASE=$(bazel info install_base)
+          EXECUTION_ROOT=$(bazel info execution_root)
+          # This might fail if not configured, so we handle the error
+          DISK_CACHE=$(bazel info disk_cache 2>/dev/null || echo "N/A")
+          EXTERNAL_REPOS="$OUTPUT_BASE/external"
+          PROJECT_SOURCE_DIR=$(pwd)
+          echo "::endgroup::"
+
+          # Calculates size and returns a formatted string. Returns "N/A" if dir doesn't exist.
+          get_size() {
+            if [ -d "$1" ]; then
+              du -sh "$1" | awk '{print $1}'
+            else
+              echo "N/A"
+            fi
+          }
+
+          echo "::group::Calculating directory sizes"
+          SIZE_OUTPUT_BASE=$(get_size "$OUTPUT_BASE")
+          SIZE_EXTERNAL=$(get_size "$EXTERNAL_REPOS")
+          SIZE_EXEC_ROOT=$(get_size "$EXECUTION_ROOT")
+          SIZE_PROJECT=$(get_size "$PROJECT_SOURCE_DIR")
+          SIZE_DISK_CACHE=$( [ "$DISK_CACHE" != "N/A" ] && get_size "$DISK_CACHE" || echo "N/A" )
+          echo "::endgroup::"
+
+          # This content will be written to the GitHub Action's summary page.
+          {
+            echo "## 📊 Bazel Disk Usage Report"
+            echo ""
+            echo "| Component                 | Size     | Path                                |"
+            echo "|---------------------------|----------|-------------------------------------|"
+            echo "| 📦 **Project Source**       | \`$SIZE_PROJECT\` | \`$PROJECT_SOURCE_DIR\`             |"
+            echo "| 🏠 **Total Output Base**    | \`$SIZE_OUTPUT_BASE\` | \`$OUTPUT_BASE\`                    |"
+            echo "| 🔗 External Repos         | \`$SIZE_EXTERNAL\` | \`$EXTERNAL_REPOS\`                 |"
+            echo "| ⚙️ Execution Root         | \`$SIZE_EXEC_ROOT\` | \`$EXECUTION_ROOT\`                 |"
+            echo "| 💾 **Disk Cache** (if any)  | \`$SIZE_DISK_CACHE\` | \`$DISK_CACHE\`                     |"
+            echo ""
+            echo "---"
+            echo ""
+            echo "### 💾 Overall Runner Disk Space"
+            echo '```'
+            df -h
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "::notice title=Bazel Disk Usage Summary::✅ Report generated. See the 'Summary' page for a detailed breakdown."
+          echo "Total Output Base: $SIZE_OUTPUT_BASE"
+          echo "External Repos: $SIZE_EXTERNAL"
+
+          echo "::group::Overall Runner Disk Space"
+          df -h
+          echo "::endgroup::"
