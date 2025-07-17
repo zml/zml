@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ["runs-on","runner=4cpu-linux-x64", "image=ubuntu24-amd64", "run-id=${{ github.run_id }}", "extras=s3-cache", "debug=true"]
+    runs-on: ["runs-on","runner=4cpu-linux-x64", "image=ubuntu24-amd64", "run-id=${{ github.run_id }}", "extras=s3-cache"]
     steps:
       - uses: runs-on/action@v1
       - name: Checkout
@@ -35,7 +35,7 @@ jobs:
         with:
           bazelisk-version: 1.26.0
           bazelisk-cache: true
-          disk-cache: ${{ github.workflow }}
+          disk-cache: ${{ github.ref }}
           repository-cache: true
           external-cache: true
           bazelrc: |
