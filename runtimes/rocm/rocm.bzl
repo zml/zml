@@ -9,7 +9,7 @@ package(default_visibility = ["//visibility:public"])
 _ROCM_STRIP_PREFIX = "opt/rocm-6.3.4"
 
 _UBUNTU_PACKAGES = {
-    "libdrm2": packages.filegroup(name = "libdrm2", srcs = ["usr/lib/x86_64-linux-gnu/libdrm.so.2"]),
+    "libdrm2-amdgpu": packages.filegroup(name = "libdrm2-amdgpu", srcs = ["opt/amdgpu/lib/x86_64-linux-gnu/libdrm.so.2"]),
     "libelf1": "\n".join([
         packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
         packages.patchelf(
@@ -18,13 +18,14 @@ _UBUNTU_PACKAGES = {
             set_rpath = '$ORIGIN',
         ),
     ]),
+    "libdrm-amdgpu-common": packages.filegroup(name = "amdgpu_ids", srcs = ["opt/amdgpu/share/libdrm/amdgpu.ids"]),
     "libnuma1": packages.filegroup(name = "libnuma1", srcs = ["usr/lib/x86_64-linux-gnu/libnuma.so.1"]),
     "libzstd1": packages.filegroup(name = "libzstd1", srcs = ["usr/lib/x86_64-linux-gnu/libzstd.so.1"]),
-    "libdrm-amdgpu1": "\n".join([
+    "libdrm-amdgpu-amdgpu1": "\n".join([
         packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
         packages.patchelf(
-            name = "libdrm-amdgpu1",
-            shared_library = "usr/lib/x86_64-linux-gnu/libdrm_amdgpu.so.1",
+            name = "libdrm-amdgpu-amdgpu1",
+            shared_library = "opt/amdgpu/lib/x86_64-linux-gnu/libdrm_amdgpu.so.1",
             set_rpath = '$ORIGIN',
         ),
     ]),

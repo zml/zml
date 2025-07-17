@@ -1,4 +1,5 @@
 load("@rules_zig//zig:defs.bzl", "zig_library")
+load("@aspect_bazel_lib//lib:tar.bzl", "mtree_spec", "tar")
 
 cc_library(
     name = "zmlxrocm_lib",
@@ -50,6 +51,6 @@ zig_library(
 
 filegroup(
     name = "layers",
-    srcs = [],
+    srcs = ["@libpjrt_rocm//:amdgpu_ids_layer"],
     visibility = ["//visibility:public"],
 )
