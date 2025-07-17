@@ -98,8 +98,6 @@ common          --registry=https://bazel-registry.zml.ai
 common          --registry=https://bcr.bazel.build
 
 common          --@rules_zig//zig/settings:copt=-fPIC
-common          --@rules_zig//zig/settings:copt=-fPIE
-common          --@rules_zig//zig/settings:copt=-mcpu=baseline
 common          --@rules_zig//zig/settings:copt=-fcompiler-rt
 
 common          --@toolchains_llvm_bootstrapped//config:experimental_stub_libgcc_s=True
@@ -118,5 +116,4 @@ common:alldebug --strategy=local
 
 common:release  --compilation_mode=opt
 common:release  --copt=-Ofast
-common:release  --@rules_zig//zig/settings:mode=release_fast
-common:release  --@rules_zig//zig/settings:copt=-fomit-frame-pointer
+common:release  --@rules_zig//zig/settings:mode=release_safe
