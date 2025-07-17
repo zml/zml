@@ -23,7 +23,7 @@ bazel_dep(name = "toolchains_llvm_bootstrapped", version = "0.2.3")
 bazel_dep(name = "toolchains_protoc", version = "0.4.1")
 bazel_dep(name = "with_cfg.bzl", version = "0.9.1")
 bazel_dep(name = "xla", version = "20250710.0-22ea002")
-bazel_dep(name = "zig-protobuf", version = "20250716.0-97f1e31")
+bazel_dep(name = "zig-protobuf", version = "20250716.0-7627e25")
 bazel_dep(name = "zig-yaml", version = "20240903.0-83d5fdf")
 
 bazel_dep(name = "buildifier_prebuilt", version = "8.0.3", dev_dependency = True)
