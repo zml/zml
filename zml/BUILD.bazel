@@ -1,5 +1,5 @@
 load("@rules_cc//cc:defs.bzl", "cc_library")
-load("@rules_zig//zig:defs.bzl", "zig_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 load("//bazel:zig.bzl", "zig_cc_test")
 load("//bazel:zig_proto_library.bzl", "zig_proto_library")
 load("//bazel:zig_srcs.bzl", "zig_srcs")

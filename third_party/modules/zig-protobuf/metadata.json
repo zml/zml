@@ -8,12 +8,13 @@
         }
     ],
     "repository": [
-        "gwenzek/zig-protobuf"
+        "zml/zig-protobuf"
     ],
     "versions": [
         "20240722.0-c644d11",
         "20250213.0-5304067",
-        "20250318.0-930153e"
+        "20250318.0-930153e",
+        "20250716.0-784e5d6",
     ],
     "yanked_versions": {}
 }
