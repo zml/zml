@@ -4315,69 +4315,6 @@
 				"https://repo.radeon.com/rocm/apt/6.3.4/pool/main/r/rocfft/rocfft_1.0.31.60304-76~22.04_amd64.deb"
 			],
 			"version": "1.0.31.60304-76~22.04"
-		},
-		{
-			"arch": "amd64",
-			"dependencies": [
-				{
-					"key": "zlib1g_1-1.2.11.dfsg-2ubuntu9.2_amd64",
-					"name": "zlib1g",
-					"version": "1:1.2.11.dfsg-2ubuntu9.2"
-				},
-				{
-					"key": "libc6_2.35-0ubuntu3.10_amd64",
-					"name": "libc6",
-					"version": "2.35-0ubuntu3.10"
-				},
-				{
-					"key": "libcrypt1_1-4.4.27-1_amd64",
-					"name": "libcrypt1",
-					"version": "1:4.4.27-1"
-				},
-				{
-					"key": "libgcc-s1_12.3.0-1ubuntu1_22.04_amd64",
-					"name": "libgcc-s1",
-					"version": "12.3.0-1ubuntu1~22.04"
-				},
-				{
-					"key": "gcc-12-base_12.3.0-1ubuntu1_22.04_amd64",
-					"name": "gcc-12-base",
-					"version": "12.3.0-1ubuntu1~22.04"
-				},
-				{
-					"key": "liblzma5_5.2.5-2ubuntu1_amd64",
-					"name": "liblzma5",
-					"version": "5.2.5-2ubuntu1"
-				},
-				{
-					"key": "libicu70_70.1-2_amd64",
-					"name": "libicu70",
-					"version": "70.1-2"
-				},
-				{
-					"key": "libstdc-p--p-6_12.3.0-1ubuntu1_22.04_amd64",
-					"name": "libstdc++6",
-					"version": "12.3.0-1ubuntu1~22.04"
-				}
-			],
-			"key": "libxml2_2.9.13-p-dfsg-1ubuntu0.7_amd64",
-			"name": "libxml2",
-			"sha256": "b53f47fa4ecdbab12b05250bb13b01b0bd42936323e6484b038298e45e2d5c10",
-			"urls": [
-				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/libx/libxml2/libxml2_2.9.13+dfsg-1ubuntu0.7_amd64.deb"
-			],
-			"version": "2.9.13+dfsg-1ubuntu0.7"
-		},
-		{
-			"arch": "amd64",
-			"dependencies": [],
-			"key": "libicu70_70.1-2_amd64",
-			"name": "libicu70",
-			"sha256": "58a154f6307289813da2276f900498ef536ae7c0522d2cf31a3c3c5cf62dfd9a",
-			"urls": [
-				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/i/icu/libicu70_70.1-2_amd64.deb"
-			],
-			"version": "70.1-2"
 		}
 	],
 	"version": 1

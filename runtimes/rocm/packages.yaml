@@ -35,6 +35,3 @@ packages:
   - "hipblaslt"
   # - "hipblaslt-dev"
   - "hip-runtime-amd"
-  # - "rocm-llvm"
-  # rocm-llvm > ld.ldd missing dependency
-  - "libxml2"

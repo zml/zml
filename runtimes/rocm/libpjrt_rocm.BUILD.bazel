@@ -65,7 +65,6 @@ copy_to_directory(
         "@rocblas//:runfiles",
         "@rocm-core",
         "@rocm-device-libs//:runfiles",
-        "@rocm-llvm//:lld",
         "@rocm-smi-lib//:rocm_smi",
         "@rocprofiler-register",
         "@rocfft",
@@ -79,12 +78,6 @@ copy_to_directory(
         "@libdrm-amdgpu1",
         "@libtinfo6",
         "@zlib1g",
-
-        # lld dependencies
-        "@libxml2",
-        "@libicu70//:libicuuc70",
-        "@libicu70//:libicudata70",
-        "@liblzma5",
     ] + select({
         ":_hipblaslt": ["@hipblaslt//:runfiles"],
         "//conditions:default": [],
@@ -97,10 +90,6 @@ copy_to_directory(
         "libelf1": "lib",
         "hipblaslt": "lib",
         "rocblas": "lib",
-        "libxml2": "lib",
-        "libicuuc70": "lib",
-        "liblzma5": "lib",
-        "lld": "llvm/bin",
     },
     add_directory_to_runfiles = True,
     include_external_repositories = ["**"],

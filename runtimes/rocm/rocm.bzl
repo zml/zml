@@ -30,24 +30,6 @@ _UBUNTU_PACKAGES = {
     ]),
     "libtinfo6": packages.filegroup(name = "libtinfo6", srcs = ["lib/x86_64-linux-gnu/libtinfo.so.6"]),
     "zlib1g": packages.filegroup(name = "zlib1g", srcs = ["lib/x86_64-linux-gnu/libz.so.1"]),
-    "liblzma5":  packages.filegroup(name = "liblzma5", srcs = ["lib/x86_64-linux-gnu/liblzma.so.5"]),
-    "libxml2": "\n".join([
-        packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
-        packages.patchelf(
-            name = "libxml2",
-            shared_library = "usr/lib/x86_64-linux-gnu/libxml2.so.2",
-            set_rpath = '$ORIGIN',
-        ),
-    ]),
-    "libicu70": "\n".join([
-        packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
-        packages.patchelf(
-            name = "libicuuc70",
-            shared_library = "usr/lib/x86_64-linux-gnu/libicuuc.so.70",
-            set_rpath = '$ORIGIN',
-        ),
-        packages.filegroup(name = "libicudata70", srcs = ["usr/lib/x86_64-linux-gnu/libicudata.so.70"])
-    ]),
 }
 
 _ROCM_PACKAGES = {
@@ -130,15 +112,6 @@ _ROCM_PACKAGES = {
         packages.filegroup(name = "hiprtc", srcs = ["lib/libhiprtc.so.6"]),
     ]),
     "hipsolver": packages.filegroup(name = "hipsolver", srcs = ["lib/libhipsolver.so.0"]),
-    "rocm-llvm": "\n".join([
-        packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
-        packages.patchelf(
-            name = "lld",
-            #TODO: Rename attr to elf_file or file ?
-            shared_library = "llvm/bin/ld.lld",
-            set_rpath = '$ORIGIN/../../lib',
-        ),
-    ]),
 }
 
 def _rocm_impl(mctx):
