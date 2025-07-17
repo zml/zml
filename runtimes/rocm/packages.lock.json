@@ -4,6 +4,34 @@
 			"arch": "amd64",
 			"dependencies": [
 				{
+					"key": "amdgpu-core_1-6.3.60304-2125197.22.04_amd64",
+					"name": "amdgpu-core",
+					"version": "1:6.3.60304-2125197.22.04"
+				}
+			],
+			"key": "libdrm-amdgpu-common_1.0.0.60304-2125197.22.04_amd64",
+			"name": "libdrm-amdgpu-common",
+			"sha256": "1a3967df29bfb0cd80a86088023c20dd5c1136a61f88fbb54cd71d1f92d4984e",
+			"urls": [
+				"https://repo.radeon.com/amdgpu/6.3.4/ubuntu/pool/main/libd/libdrm-amdgpu-common/libdrm-amdgpu-common_1.0.0.60304-2125197.22.04_all.deb"
+			],
+			"version": "1.0.0.60304-2125197.22.04"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "amdgpu-core_1-6.3.60304-2125197.22.04_amd64",
+			"name": "amdgpu-core",
+			"sha256": "d5e36d6626230c1ed3844615650cc6d213f38f23b00b8d98fa83b8b44e9f48f2",
+			"urls": [
+				"https://repo.radeon.com/amdgpu/6.3.4/ubuntu/pool/main/a/amdgpu-core/amdgpu-core_6.3.60304-2125197.22.04_all.deb"
+			],
+			"version": "1:6.3.60304-2125197.22.04"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [
+				{
 					"key": "rocprofiler-register_0.4.0.60304-76_22.04_amd64",
 					"name": "rocprofiler-register",
 					"version": "0.4.0.60304-76~22.04"
@@ -54,19 +82,24 @@
 					"version": "2.0.14-3ubuntu2"
 				},
 				{
-					"key": "libdrm-amdgpu1_2.4.113-2_ubuntu0.22.04.1_amd64",
-					"name": "libdrm-amdgpu1",
-					"version": "2.4.113-2~ubuntu0.22.04.1"
+					"key": "libdrm-amdgpu-amdgpu1_1-2.4.123.60304-2125197.22.04_amd64",
+					"name": "libdrm-amdgpu-amdgpu1",
+					"version": "1:2.4.123.60304-2125197.22.04"
 				},
 				{
-					"key": "libdrm2_2.4.113-2_ubuntu0.22.04.1_amd64",
-					"name": "libdrm2",
-					"version": "2.4.113-2~ubuntu0.22.04.1"
+					"key": "libdrm-amdgpu-common_1.0.0.60304-2125197.22.04_amd64",
+					"name": "libdrm-amdgpu-common",
+					"version": "1.0.0.60304-2125197.22.04"
 				},
 				{
-					"key": "libdrm-common_2.4.113-2_ubuntu0.22.04.1_amd64",
-					"name": "libdrm-common",
-					"version": "2.4.113-2~ubuntu0.22.04.1"
+					"key": "amdgpu-core_1-6.3.60304-2125197.22.04_amd64",
+					"name": "amdgpu-core",
+					"version": "1:6.3.60304-2125197.22.04"
+				},
+				{
+					"key": "libdrm2-amdgpu_1-2.4.123.60304-2125197.22.04_amd64",
+					"name": "libdrm2-amdgpu",
+					"version": "1:2.4.123.60304-2125197.22.04"
 				}
 			],
 			"key": "hsa-rocr_1.14.0.60304-76_22.04_amd64",
@@ -221,35 +254,24 @@
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "libdrm-amdgpu1_2.4.113-2_ubuntu0.22.04.1_amd64",
-			"name": "libdrm-amdgpu1",
-			"sha256": "a284d1d55956ed2f5f1ece4e2df9104ff87052a6c27a8150574c30c757ecd4b8",
+			"key": "libdrm-amdgpu-amdgpu1_1-2.4.123.60304-2125197.22.04_amd64",
+			"name": "libdrm-amdgpu-amdgpu1",
+			"sha256": "e86babdbdd468337f8afada8b293b8f8661ced3bc4a690bdc0aac76d7a1ec760",
 			"urls": [
-				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/libd/libdrm/libdrm-amdgpu1_2.4.113-2~ubuntu0.22.04.1_amd64.deb"
+				"https://repo.radeon.com/amdgpu/6.3.4/ubuntu/pool/main/libd/libdrm-amdgpu/libdrm-amdgpu-amdgpu1_2.4.123.60304-2125197.22.04_amd64.deb"
 			],
-			"version": "2.4.113-2~ubuntu0.22.04.1"
+			"version": "1:2.4.123.60304-2125197.22.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "libdrm2_2.4.113-2_ubuntu0.22.04.1_amd64",
-			"name": "libdrm2",
-			"sha256": "555925f1caedfd98d89bae3bc11b4fe3401c2c4817dbbafcab25e1144582e946",
+			"key": "libdrm2-amdgpu_1-2.4.123.60304-2125197.22.04_amd64",
+			"name": "libdrm2-amdgpu",
+			"sha256": "6bdcb573de62e3c539ad5e07bdcf66c0385cce809fb5c8e5f1eaba4858efb7c1",
 			"urls": [
-				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/libd/libdrm/libdrm2_2.4.113-2~ubuntu0.22.04.1_amd64.deb"
+				"https://repo.radeon.com/amdgpu/6.3.4/ubuntu/pool/main/libd/libdrm-amdgpu/libdrm2-amdgpu_2.4.123.60304-2125197.22.04_amd64.deb"
 			],
-			"version": "2.4.113-2~ubuntu0.22.04.1"
-		},
-		{
-			"arch": "amd64",
-			"dependencies": [],
-			"key": "libdrm-common_2.4.113-2_ubuntu0.22.04.1_amd64",
-			"name": "libdrm-common",
-			"sha256": "35a306712d8b15b30c42ecd73ec087813eb01c0b3125dc8f7ca2b5134e133522",
-			"urls": [
-				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/libd/libdrm/libdrm-common_2.4.113-2~ubuntu0.22.04.1_all.deb"
-			],
-			"version": "2.4.113-2~ubuntu0.22.04.1"
+			"version": "1:2.4.123.60304-2125197.22.04"
 		},
 		{
 			"arch": "amd64",
@@ -1192,29 +1214,19 @@
 					"version": "29-1ubuntu1"
 				},
 				{
-					"key": "hsa-rocr_1.14.0.60304-76_22.04_amd64",
-					"name": "hsa-rocr",
-					"version": "1.14.0.60304-76~22.04"
+					"key": "hsa-runtime-rocr4wsl-amdgpu_24.30-2127960.22.04_amd64",
+					"name": "hsa-runtime-rocr4wsl-amdgpu",
+					"version": "24.30-2127960.22.04"
+				},
+				{
+					"key": "amdgpu-core_1-6.3.60304-2125197.22.04_amd64",
+					"name": "amdgpu-core",
+					"version": "1:6.3.60304-2125197.22.04"
 				},
 				{
 					"key": "libelf1_0.186-1ubuntu0.1_amd64",
 					"name": "libelf1",
 					"version": "0.186-1ubuntu0.1"
-				},
-				{
-					"key": "libdrm-amdgpu1_2.4.113-2_ubuntu0.22.04.1_amd64",
-					"name": "libdrm-amdgpu1",
-					"version": "2.4.113-2~ubuntu0.22.04.1"
-				},
-				{
-					"key": "libdrm2_2.4.113-2_ubuntu0.22.04.1_amd64",
-					"name": "libdrm2",
-					"version": "2.4.113-2~ubuntu0.22.04.1"
-				},
-				{
-					"key": "libdrm-common_2.4.113-2_ubuntu0.22.04.1_amd64",
-					"name": "libdrm-common",
-					"version": "2.4.113-2~ubuntu0.22.04.1"
 				},
 				{
 					"key": "roctracer_4.1.60304.60304-76_22.04_amd64",
@@ -1592,29 +1604,19 @@
 					"version": "29-1ubuntu1"
 				},
 				{
-					"key": "hsa-rocr_1.14.0.60304-76_22.04_amd64",
-					"name": "hsa-rocr",
-					"version": "1.14.0.60304-76~22.04"
+					"key": "hsa-runtime-rocr4wsl-amdgpu_24.30-2127960.22.04_amd64",
+					"name": "hsa-runtime-rocr4wsl-amdgpu",
+					"version": "24.30-2127960.22.04"
+				},
+				{
+					"key": "amdgpu-core_1-6.3.60304-2125197.22.04_amd64",
+					"name": "amdgpu-core",
+					"version": "1:6.3.60304-2125197.22.04"
 				},
 				{
 					"key": "libelf1_0.186-1ubuntu0.1_amd64",
 					"name": "libelf1",
 					"version": "0.186-1ubuntu0.1"
-				},
-				{
-					"key": "libdrm-amdgpu1_2.4.113-2_ubuntu0.22.04.1_amd64",
-					"name": "libdrm-amdgpu1",
-					"version": "2.4.113-2~ubuntu0.22.04.1"
-				},
-				{
-					"key": "libdrm2_2.4.113-2_ubuntu0.22.04.1_amd64",
-					"name": "libdrm2",
-					"version": "2.4.113-2~ubuntu0.22.04.1"
-				},
-				{
-					"key": "libdrm-common_2.4.113-2_ubuntu0.22.04.1_amd64",
-					"name": "libdrm-common",
-					"version": "2.4.113-2~ubuntu0.22.04.1"
 				},
 				{
 					"key": "hipblaslt_0.10.0.60304-76_22.04_amd64",
@@ -1959,29 +1961,19 @@
 					"version": "29-1ubuntu1"
 				},
 				{
-					"key": "hsa-rocr_1.14.0.60304-76_22.04_amd64",
-					"name": "hsa-rocr",
-					"version": "1.14.0.60304-76~22.04"
+					"key": "hsa-runtime-rocr4wsl-amdgpu_24.30-2127960.22.04_amd64",
+					"name": "hsa-runtime-rocr4wsl-amdgpu",
+					"version": "24.30-2127960.22.04"
+				},
+				{
+					"key": "amdgpu-core_1-6.3.60304-2125197.22.04_amd64",
+					"name": "amdgpu-core",
+					"version": "1:6.3.60304-2125197.22.04"
 				},
 				{
 					"key": "libelf1_0.186-1ubuntu0.1_amd64",
 					"name": "libelf1",
 					"version": "0.186-1ubuntu0.1"
-				},
-				{
-					"key": "libdrm-amdgpu1_2.4.113-2_ubuntu0.22.04.1_amd64",
-					"name": "libdrm-amdgpu1",
-					"version": "2.4.113-2~ubuntu0.22.04.1"
-				},
-				{
-					"key": "libdrm2_2.4.113-2_ubuntu0.22.04.1_amd64",
-					"name": "libdrm2",
-					"version": "2.4.113-2~ubuntu0.22.04.1"
-				},
-				{
-					"key": "libdrm-common_2.4.113-2_ubuntu0.22.04.1_amd64",
-					"name": "libdrm-common",
-					"version": "2.4.113-2~ubuntu0.22.04.1"
 				}
 			],
 			"key": "hip-runtime-amd_6.3.42134.60304-76_22.04_amd64",
@@ -2233,6 +2225,17 @@
 				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/k/kmod/libkmod2_29-1ubuntu1_amd64.deb"
 			],
 			"version": "29-1ubuntu1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "hsa-runtime-rocr4wsl-amdgpu_24.30-2127960.22.04_amd64",
+			"name": "hsa-runtime-rocr4wsl-amdgpu",
+			"sha256": "14a7e9b6903b6716fe623feacb10f32cc2be00d6aa088096657ea5095884ab6c",
+			"urls": [
+				"https://repo.radeon.com/amdgpu/6.3.4/ubuntu/pool/main/h/hsa-runtime-rocr4wsl-amdgpu/hsa-runtime-rocr4wsl-amdgpu_24.30-2127960.22.04_amd64.deb"
+			],
+			"version": "24.30-2127960.22.04"
 		},
 		{
 			"arch": "amd64",
@@ -2584,29 +2587,19 @@
 					"version": "29-1ubuntu1"
 				},
 				{
-					"key": "hsa-rocr_1.14.0.60304-76_22.04_amd64",
-					"name": "hsa-rocr",
-					"version": "1.14.0.60304-76~22.04"
+					"key": "hsa-runtime-rocr4wsl-amdgpu_24.30-2127960.22.04_amd64",
+					"name": "hsa-runtime-rocr4wsl-amdgpu",
+					"version": "24.30-2127960.22.04"
+				},
+				{
+					"key": "amdgpu-core_1-6.3.60304-2125197.22.04_amd64",
+					"name": "amdgpu-core",
+					"version": "1:6.3.60304-2125197.22.04"
 				},
 				{
 					"key": "libelf1_0.186-1ubuntu0.1_amd64",
 					"name": "libelf1",
 					"version": "0.186-1ubuntu0.1"
-				},
-				{
-					"key": "libdrm-amdgpu1_2.4.113-2_ubuntu0.22.04.1_amd64",
-					"name": "libdrm-amdgpu1",
-					"version": "2.4.113-2~ubuntu0.22.04.1"
-				},
-				{
-					"key": "libdrm2_2.4.113-2_ubuntu0.22.04.1_amd64",
-					"name": "libdrm2",
-					"version": "2.4.113-2~ubuntu0.22.04.1"
-				},
-				{
-					"key": "libdrm-common_2.4.113-2_ubuntu0.22.04.1_amd64",
-					"name": "libdrm-common",
-					"version": "2.4.113-2~ubuntu0.22.04.1"
 				}
 			],
 			"key": "rccl_2.21.5.60304-76_22.04_amd64",
@@ -2654,14 +2647,14 @@
 					"version": "1.14.0.60304-76~22.04"
 				},
 				{
-					"key": "hsa-rocr_1.14.0.60304-76_22.04_amd64",
-					"name": "hsa-rocr",
-					"version": "1.14.0.60304-76~22.04"
+					"key": "hsa-runtime-rocr4wsl-amdgpu_24.30-2127960.22.04_amd64",
+					"name": "hsa-runtime-rocr4wsl-amdgpu",
+					"version": "24.30-2127960.22.04"
 				},
 				{
-					"key": "rocprofiler-register_0.4.0.60304-76_22.04_amd64",
-					"name": "rocprofiler-register",
-					"version": "0.4.0.60304-76~22.04"
+					"key": "amdgpu-core_1-6.3.60304-2125197.22.04_amd64",
+					"name": "amdgpu-core",
+					"version": "1:6.3.60304-2125197.22.04"
 				},
 				{
 					"key": "libstdc-p--p-6_12.3.0-1ubuntu1_22.04_amd64",
@@ -2689,11 +2682,6 @@
 					"version": "12.3.0-1ubuntu1~22.04"
 				},
 				{
-					"key": "rocm-core_6.3.4.60304-76_22.04_amd64",
-					"name": "rocm-core",
-					"version": "6.3.4.60304-76~22.04"
-				},
-				{
 					"key": "libelf1_0.186-1ubuntu0.1_amd64",
 					"name": "libelf1",
 					"version": "0.186-1ubuntu0.1"
@@ -2704,54 +2692,49 @@
 					"version": "1:1.2.11.dfsg-2ubuntu9.2"
 				},
 				{
-					"key": "libnuma1_2.0.14-3ubuntu2_amd64",
-					"name": "libnuma1",
-					"version": "2.0.14-3ubuntu2"
+					"key": "rocm-core_6.3.4.60304-76_22.04_amd64",
+					"name": "rocm-core",
+					"version": "6.3.4.60304-76~22.04"
 				},
 				{
-					"key": "libdrm-amdgpu1_2.4.113-2_ubuntu0.22.04.1_amd64",
-					"name": "libdrm-amdgpu1",
-					"version": "2.4.113-2~ubuntu0.22.04.1"
+					"key": "libdrm-amdgpu-dev_1-2.4.123.60304-2125197.22.04_amd64",
+					"name": "libdrm-amdgpu-dev",
+					"version": "1:2.4.123.60304-2125197.22.04"
 				},
 				{
-					"key": "libdrm2_2.4.113-2_ubuntu0.22.04.1_amd64",
-					"name": "libdrm2",
-					"version": "2.4.113-2~ubuntu0.22.04.1"
+					"key": "valgrind_1-3.18.1-1ubuntu2_amd64",
+					"name": "valgrind",
+					"version": "1:3.18.1-1ubuntu2"
 				},
 				{
-					"key": "libdrm-common_2.4.113-2_ubuntu0.22.04.1_amd64",
-					"name": "libdrm-common",
-					"version": "2.4.113-2~ubuntu0.22.04.1"
+					"key": "libc6-dbg_2.35-0ubuntu3.10_amd64",
+					"name": "libc6-dbg",
+					"version": "2.35-0ubuntu3.10"
 				},
 				{
-					"key": "libdrm-dev_2.4.113-2_ubuntu0.22.04.1_amd64",
-					"name": "libdrm-dev",
-					"version": "2.4.113-2~ubuntu0.22.04.1"
+					"key": "libc6-i386_2.35-0ubuntu3.10_amd64",
+					"name": "libc6-i386",
+					"version": "2.35-0ubuntu3.10"
 				},
 				{
-					"key": "libpciaccess-dev_0.16-3_amd64",
-					"name": "libpciaccess-dev",
-					"version": "0.16-3"
+					"key": "libdrm-amdgpu-radeon1_1-2.4.123.60304-2125197.22.04_amd64",
+					"name": "libdrm-amdgpu-radeon1",
+					"version": "1:2.4.123.60304-2125197.22.04"
 				},
 				{
-					"key": "libpciaccess0_0.16-3_amd64",
-					"name": "libpciaccess0",
-					"version": "0.16-3"
+					"key": "libdrm2-amdgpu_1-2.4.123.60304-2125197.22.04_amd64",
+					"name": "libdrm2-amdgpu",
+					"version": "1:2.4.123.60304-2125197.22.04"
 				},
 				{
-					"key": "libdrm-nouveau2_2.4.113-2_ubuntu0.22.04.1_amd64",
-					"name": "libdrm-nouveau2",
-					"version": "2.4.113-2~ubuntu0.22.04.1"
+					"key": "libdrm-amdgpu-amdgpu1_1-2.4.123.60304-2125197.22.04_amd64",
+					"name": "libdrm-amdgpu-amdgpu1",
+					"version": "1:2.4.123.60304-2125197.22.04"
 				},
 				{
-					"key": "libdrm-radeon1_2.4.113-2_ubuntu0.22.04.1_amd64",
-					"name": "libdrm-radeon1",
-					"version": "2.4.113-2~ubuntu0.22.04.1"
-				},
-				{
-					"key": "libdrm-intel1_2.4.113-2_ubuntu0.22.04.1_amd64",
-					"name": "libdrm-intel1",
-					"version": "2.4.113-2~ubuntu0.22.04.1"
+					"key": "libdrm-amdgpu-common_1.0.0.60304-2125197.22.04_amd64",
+					"name": "libdrm-amdgpu-common",
+					"version": "1.0.0.60304-2125197.22.04"
 				},
 				{
 					"key": "rocm-llvm_18.0.0.25012.60304-76_22.04_amd64",
@@ -3044,6 +3027,16 @@
 					"version": "6.3.42134.60304-76~22.04"
 				},
 				{
+					"key": "libnuma1_2.0.14-3ubuntu2_amd64",
+					"name": "libnuma1",
+					"version": "2.0.14-3ubuntu2"
+				},
+				{
+					"key": "rocprofiler-register_0.4.0.60304-76_22.04_amd64",
+					"name": "rocprofiler-register",
+					"version": "0.4.0.60304-76~22.04"
+				},
+				{
 					"key": "comgr_2.8.0.60304-76_22.04_amd64",
 					"name": "comgr",
 					"version": "2.8.0.60304-76~22.04"
@@ -3186,68 +3179,57 @@
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "libdrm-dev_2.4.113-2_ubuntu0.22.04.1_amd64",
-			"name": "libdrm-dev",
-			"sha256": "9e6d24b88a938a673e79426b47e0c3abbea8a00434926a5a84caa3bc70efa293",
+			"key": "libdrm-amdgpu-dev_1-2.4.123.60304-2125197.22.04_amd64",
+			"name": "libdrm-amdgpu-dev",
+			"sha256": "6d4f56ccbeaeab428139ef4e2647e0bf1bfbfe3ed49739c1ae74db1f79c0220d",
 			"urls": [
-				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/libd/libdrm/libdrm-dev_2.4.113-2~ubuntu0.22.04.1_amd64.deb"
+				"https://repo.radeon.com/amdgpu/6.3.4/ubuntu/pool/main/libd/libdrm-amdgpu/libdrm-amdgpu-dev_2.4.123.60304-2125197.22.04_amd64.deb"
 			],
-			"version": "2.4.113-2~ubuntu0.22.04.1"
+			"version": "1:2.4.123.60304-2125197.22.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "libpciaccess-dev_0.16-3_amd64",
-			"name": "libpciaccess-dev",
-			"sha256": "44cd5bb81b2536582ca1ff6b5b09d582d0645c73d21f31fc7f879ad38dc843a2",
+			"key": "valgrind_1-3.18.1-1ubuntu2_amd64",
+			"name": "valgrind",
+			"sha256": "8376c1524d187246eb09b15531c83d83567bdbc609880622a05bc8126558a221",
 			"urls": [
-				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/libp/libpciaccess/libpciaccess-dev_0.16-3_amd64.deb"
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/v/valgrind/valgrind_3.18.1-1ubuntu2_amd64.deb"
 			],
-			"version": "0.16-3"
+			"version": "1:3.18.1-1ubuntu2"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "libpciaccess0_0.16-3_amd64",
-			"name": "libpciaccess0",
-			"sha256": "0f3c826d6cd56b7b46550d952709b8ede9f2636b98698da40a2054768ebdcffc",
+			"key": "libc6-dbg_2.35-0ubuntu3.10_amd64",
+			"name": "libc6-dbg",
+			"sha256": "a69e6e8bf94a714b3a4686bb6161d0ce6fb1fc863e97c82b40dae83a650f0ade",
 			"urls": [
-				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/libp/libpciaccess/libpciaccess0_0.16-3_amd64.deb"
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/g/glibc/libc6-dbg_2.35-0ubuntu3.10_amd64.deb"
 			],
-			"version": "0.16-3"
+			"version": "2.35-0ubuntu3.10"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "libdrm-nouveau2_2.4.113-2_ubuntu0.22.04.1_amd64",
-			"name": "libdrm-nouveau2",
-			"sha256": "75ce233c7120443a15ab3e71829f7bf63258e6d2a025df366f54027d1d3e8d0c",
+			"key": "libc6-i386_2.35-0ubuntu3.10_amd64",
+			"name": "libc6-i386",
+			"sha256": "1a4822354c437e51d47cde7b3db268b3d68ccdc6c2dd340926cdc31c5d8f5e73",
 			"urls": [
-				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/libd/libdrm/libdrm-nouveau2_2.4.113-2~ubuntu0.22.04.1_amd64.deb"
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/g/glibc/libc6-i386_2.35-0ubuntu3.10_amd64.deb"
 			],
-			"version": "2.4.113-2~ubuntu0.22.04.1"
+			"version": "2.35-0ubuntu3.10"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "libdrm-radeon1_2.4.113-2_ubuntu0.22.04.1_amd64",
-			"name": "libdrm-radeon1",
-			"sha256": "579b0d2ccc7800309277fabe517b71a4160b7f26c4745db8e0df25f80576aef7",
+			"key": "libdrm-amdgpu-radeon1_1-2.4.123.60304-2125197.22.04_amd64",
+			"name": "libdrm-amdgpu-radeon1",
+			"sha256": "1979c584443ed70cbb6de3cb2a56bf1771aebf30155cef42c94ea6879072316a",
 			"urls": [
-				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/libd/libdrm/libdrm-radeon1_2.4.113-2~ubuntu0.22.04.1_amd64.deb"
+				"https://repo.radeon.com/amdgpu/6.3.4/ubuntu/pool/main/libd/libdrm-amdgpu/libdrm-amdgpu-radeon1_2.4.123.60304-2125197.22.04_amd64.deb"
 			],
-			"version": "2.4.113-2~ubuntu0.22.04.1"
-		},
-		{
-			"arch": "amd64",
-			"dependencies": [],
-			"key": "libdrm-intel1_2.4.113-2_ubuntu0.22.04.1_amd64",
-			"name": "libdrm-intel1",
-			"sha256": "465de8142e166a59d0c0d6857cd23b76d04ab2680b37fcd16cf4d2ce631f8f92",
-			"urls": [
-				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/libd/libdrm/libdrm-intel1_2.4.113-2~ubuntu0.22.04.1_amd64.deb"
-			],
-			"version": "2.4.113-2~ubuntu0.22.04.1"
+			"version": "1:2.4.123.60304-2125197.22.04"
 		},
 		{
 			"arch": "amd64",
@@ -3863,29 +3845,19 @@
 					"version": "29-1ubuntu1"
 				},
 				{
-					"key": "hsa-rocr_1.14.0.60304-76_22.04_amd64",
-					"name": "hsa-rocr",
-					"version": "1.14.0.60304-76~22.04"
+					"key": "hsa-runtime-rocr4wsl-amdgpu_24.30-2127960.22.04_amd64",
+					"name": "hsa-runtime-rocr4wsl-amdgpu",
+					"version": "24.30-2127960.22.04"
+				},
+				{
+					"key": "amdgpu-core_1-6.3.60304-2125197.22.04_amd64",
+					"name": "amdgpu-core",
+					"version": "1:6.3.60304-2125197.22.04"
 				},
 				{
 					"key": "libelf1_0.186-1ubuntu0.1_amd64",
 					"name": "libelf1",
 					"version": "0.186-1ubuntu0.1"
-				},
-				{
-					"key": "libdrm-amdgpu1_2.4.113-2_ubuntu0.22.04.1_amd64",
-					"name": "libdrm-amdgpu1",
-					"version": "2.4.113-2~ubuntu0.22.04.1"
-				},
-				{
-					"key": "libdrm2_2.4.113-2_ubuntu0.22.04.1_amd64",
-					"name": "libdrm2",
-					"version": "2.4.113-2~ubuntu0.22.04.1"
-				},
-				{
-					"key": "libdrm-common_2.4.113-2_ubuntu0.22.04.1_amd64",
-					"name": "libdrm-common",
-					"version": "2.4.113-2~ubuntu0.22.04.1"
 				},
 				{
 					"key": "hipblaslt_0.10.0.60304-76_22.04_amd64",
@@ -4245,29 +4217,19 @@
 					"version": "29-1ubuntu1"
 				},
 				{
-					"key": "hsa-rocr_1.14.0.60304-76_22.04_amd64",
-					"name": "hsa-rocr",
-					"version": "1.14.0.60304-76~22.04"
+					"key": "hsa-runtime-rocr4wsl-amdgpu_24.30-2127960.22.04_amd64",
+					"name": "hsa-runtime-rocr4wsl-amdgpu",
+					"version": "24.30-2127960.22.04"
+				},
+				{
+					"key": "amdgpu-core_1-6.3.60304-2125197.22.04_amd64",
+					"name": "amdgpu-core",
+					"version": "1:6.3.60304-2125197.22.04"
 				},
 				{
 					"key": "libelf1_0.186-1ubuntu0.1_amd64",
 					"name": "libelf1",
 					"version": "0.186-1ubuntu0.1"
-				},
-				{
-					"key": "libdrm-amdgpu1_2.4.113-2_ubuntu0.22.04.1_amd64",
-					"name": "libdrm-amdgpu1",
-					"version": "2.4.113-2~ubuntu0.22.04.1"
-				},
-				{
-					"key": "libdrm2_2.4.113-2_ubuntu0.22.04.1_amd64",
-					"name": "libdrm2",
-					"version": "2.4.113-2~ubuntu0.22.04.1"
-				},
-				{
-					"key": "libdrm-common_2.4.113-2_ubuntu0.22.04.1_amd64",
-					"name": "libdrm-common",
-					"version": "2.4.113-2~ubuntu0.22.04.1"
 				},
 				{
 					"key": "hipblaslt_0.10.0.60304-76_22.04_amd64",
