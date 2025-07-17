@@ -45,6 +45,7 @@ jobs:
             common --test_output=streamed
             common --color=yes
             common --show_timestamps
+            common --strip=always
 
       - name: ZML / bazel mod explain
         run: bazel mod explain
