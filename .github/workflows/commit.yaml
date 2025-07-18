@@ -39,16 +39,16 @@ jobs:
           repository-cache: true
           external-cache: true
           bazelrc: |
-            common --experimental_disk_cache_gc_max_age=7d
-            common --experimental_disk_cache_gc_max_size=10G
-            # No Bazel daemon so we do a GC during the build
-            common --experimental_disk_cache_gc_idle_delay=0
+            common --announce_rc=yes
             common --config=debug
             common --verbose_failures
             common --keep_going
             common --test_output=streamed
             common --color=yes
             common --show_timestamps
+            common --remote_cache=grpc://127.0.0.1:15501
+            common --experimental_remote_cache_compression
+            common --experimental_remote_cache_async
 
       - name: ZML / bazel mod explain
         run: bazel mod explain
