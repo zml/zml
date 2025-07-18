@@ -35,7 +35,7 @@ jobs:
         with:
           bazelisk-version: 1.26.0
           bazelisk-cache: true
-          disk-cache: ${{ github.ref }}
+          disk-cache: false
           repository-cache: true
           external-cache: true
           bazelrc: |
@@ -82,12 +82,10 @@ jobs:
       #   working-directory: examples/
       #   run: bazel test //...
 
-      - name: Detailed Disk Usage Report
+      - name: Detailed disk usage report
         if: always() # failure
         run: |
           set -e
-          echo "### 📊 Bazel Disk Usage Analysis ###"
-
           echo "::group::Gathering Bazel paths"
           OUTPUT_BASE=$(bazel info output_base)
           INSTALL_BASE=$(bazel info install_base)
