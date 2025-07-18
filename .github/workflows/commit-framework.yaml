@@ -1,4 +1,4 @@
-name: commit
+name: framework-tests
 on:
   push:
     branches:
@@ -12,12 +12,20 @@ concurrency:
   cancel-in-progress: ${{ !contains(github.ref, 'master')}}
 
 jobs:
-  test:
+  framework-tests:
     runs-on: ["runs-on","runner=4cpu-linux-x64", "image=ubuntu24-amd64", "run-id=${{ github.run_id }}", "extras=s3-cache"]
     steps:
       - uses: runs-on/action@v1
       - name: Checkout
         uses: actions/checkout@v4
+
+      - uses: runs-on/snapshot@v1
+        with:
+          path: /home/runner/.cache/bazel-disk
+          volume_size: 350
+
+      - name: TMP fix for the mount user
+        run: sudo chown -R runner:runner /home/runner/.cache/
 
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
@@ -34,10 +42,7 @@ jobs:
       - uses: bazel-contrib/setup-bazel@0.15.0
         with:
           bazelisk-version: 1.26.0
-          bazelisk-cache: true
-          disk-cache: ${{ github.workflow }}
-          repository-cache: true
-          external-cache: true
+          bazelisk-cache: false
           bazelrc: |
             common --config=debug
             common --verbose_failures
@@ -45,6 +50,7 @@ jobs:
             common --test_output=streamed
             common --color=yes
             common --show_timestamps
+            common --disk_cache=/home/runner/.cache/bazel-disk
 
       - name: ZML / bazel mod explain
         run: bazel mod explain
@@ -60,24 +66,3 @@ jobs:
 
       - name: ZML / bazel test //...
         run: bazel test //...
-
-      - name: Examples / bazel mod explain
-        working-directory: examples/
-        run: bazel mod explain
-
-      - name: Examples / bazel mod graph
-        working-directory: examples/
-        run: bazel mod graph
-
-      - name: Examples / bazel query //...
-        working-directory: examples/
-        run: bazel query //...
-
-      - name: Examples / bazel build //...
-        working-directory: examples/
-        run: bazel build //...
-
-      # Todo: uncomment when we have our first tests in examples, Bazel return code is not 0 if there are no tests
-      # - name: Examples / bazel test //...
-      #   working-directory: examples/
-      #   run: bazel test //...
