@@ -40,9 +40,6 @@ jobs:
         with:
           bazelisk-version: 1.26.0
           bazelisk-cache: true
-          disk-cache: ${{ github.workflow }}
-          repository-cache: true
-          external-cache: true
           bazelrc: |
             common --config=debug
             common --verbose_failures
@@ -50,6 +47,7 @@ jobs:
             common --test_output=streamed
             common --color=yes
             common --show_timestamps
+            common --disk-cache=/home/runner/.cache/bazel-disk
 
       - name: Examples / bazel mod explain
         working-directory: examples/
