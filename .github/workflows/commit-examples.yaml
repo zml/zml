@@ -39,7 +39,7 @@ jobs:
       - uses: bazel-contrib/setup-bazel@0.15.0
         with:
           bazelisk-version: 1.26.0
-          bazelisk-cache: true
+          bazelisk-cache: false
           bazelrc: |
             common --config=debug
             common --verbose_failures
