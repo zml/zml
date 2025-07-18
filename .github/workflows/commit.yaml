@@ -35,10 +35,14 @@ jobs:
         with:
           bazelisk-version: 1.26.0
           bazelisk-cache: true
-          disk-cache: false
+          disk-cache: ${{ github.workflow }}
           repository-cache: true
           external-cache: true
           bazelrc: |
+            common --experimental_disk_cache_gc_max_age=7d
+            common --experimental_disk_cache_gc_max_size=10G
+            # No Bazel daemon so we do a GC during the build
+            common --experimental_disk_cache_gc_idle_delay=0
             common --config=debug
             common --verbose_failures
             common --keep_going
