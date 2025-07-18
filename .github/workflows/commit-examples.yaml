@@ -50,7 +50,7 @@ jobs:
             common --test_output=streamed
             common --color=yes
             common --show_timestamps
-            common --disk-cache=/home/runner/.cache/bazel-disk
+            common --disk_cache=/home/runner/.cache/bazel-disk
 
       - name: Examples / bazel mod explain
         working-directory: examples/
