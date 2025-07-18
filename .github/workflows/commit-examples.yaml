@@ -25,7 +25,7 @@ jobs:
           volume_size: 350
 
       - name: TMP fix for the mount user
-        run: sudo chown runner:runner /home/runner/.cache/
+        run: sudo chown -R runner:runner /home/runner/.cache/
 
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
