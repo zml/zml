@@ -23,9 +23,10 @@ jobs:
         with:
           path: /home/runner/.cache/bazel-disk
           volume_size: 350
-      - name: debug
-        run: ls -alih /home/runner/.cache/
-        
+
+      - name: TMP fix for the mount user
+        run: sudo chown runner:runner /home/runner/.cache/
+
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
