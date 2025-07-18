@@ -35,7 +35,7 @@ jobs:
         with:
           bazelisk-version: 1.26.0
           bazelisk-cache: true
-          disk-cache: ${{ github.workflow }}
+          disk-cache: false
           repository-cache: true
           external-cache: true
           bazelrc: |
