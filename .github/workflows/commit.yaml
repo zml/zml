@@ -94,13 +94,11 @@ jobs:
           OUTPUT_BASE=$(bazel info output_base)
           INSTALL_BASE=$(bazel info install_base)
           EXECUTION_ROOT=$(bazel info execution_root)
-          # This might fail if not configured, so we handle the error
           DISK_CACHE=$(bazel info disk_cache 2>/dev/null || echo "N/A")
           EXTERNAL_REPOS="$OUTPUT_BASE/external"
           PROJECT_SOURCE_DIR=$(pwd)
           echo "::endgroup::"
 
-          # Calculates size and returns a formatted string. Returns "N/A" if dir doesn't exist.
           get_size() {
             if [ -d "$1" ]; then
               du -sh "$1" | awk '{print $1}'
