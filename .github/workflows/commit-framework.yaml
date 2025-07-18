@@ -1,4 +1,4 @@
-name: commit
+name: framework-tests
 on:
   push:
     branches:
