@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   framework-tests:
-    runs-on: ["runs-on","runner=4cpu-linux-x64", "image=ubuntu24-amd64", "run-id=${{ github.run_id }}", "extras=s3-cache"]
+    runs-on: ["runs-on","runner=4cpu-linux-x64", "image=ubuntu24-amd64", "run-id=${{ github.run_id }}", "extras=s3-cache", "debug=true"]
     steps:
       - uses: runs-on/action@v1
       - name: Checkout
@@ -51,6 +51,7 @@ jobs:
             common --color=yes
             common --show_timestamps
             common --disk_cache=/home/runner/.cache/bazel-disk
+            common --strip=always
 
       - name: ZML / bazel mod explain
         run: bazel mod explain

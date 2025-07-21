@@ -18,7 +18,7 @@ jobs:
       - uses: runs-on/action@v1
       - name: Checkout
         uses: actions/checkout@v4
-      
+
       - uses: runs-on/snapshot@v1
         with:
           path: /home/runner/.cache/bazel-disk
@@ -51,6 +51,7 @@ jobs:
             common --color=yes
             common --show_timestamps
             common --disk_cache=/home/runner/.cache/bazel-disk
+            common --strip=always
 
       - name: Examples / bazel mod explain
         working-directory: examples/
@@ -72,4 +73,3 @@ jobs:
       # - name: Examples / bazel test //...
       #   working-directory: examples/
       #   run: bazel test //...
- 
