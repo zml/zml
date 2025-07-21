@@ -126,121 +126,14 @@
 		},
 		{
 			"arch": "amd64",
-			"dependencies": [
-				{
-					"key": "libc6_2.36-9-p-deb12u10_amd64",
-					"name": "libc6",
-					"version": "2.36-9+deb12u10"
-				},
-				{
-					"key": "libgcc-s1_12.2.0-14-p-deb12u1_amd64",
-					"name": "libgcc-s1",
-					"version": "12.2.0-14+deb12u1"
-				},
-				{
-					"key": "gcc-12-base_12.2.0-14-p-deb12u1_amd64",
-					"name": "gcc-12-base",
-					"version": "12.2.0-14+deb12u1"
-				}
-			],
-			"key": "zlib1g_1-1.2.13.dfsg-1_amd64",
-			"name": "zlib1g",
-			"sha256": "d7dd1d1411fedf27f5e27650a6eff20ef294077b568f4c8c5e51466dc7c08ce4",
-			"urls": [
-				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/z/zlib/zlib1g_1.2.13.dfsg-1_amd64.deb"
-			],
-			"version": "1:1.2.13.dfsg-1"
-		},
-		{
-			"arch": "amd64",
-			"dependencies": [
-				{
-					"key": "zlib1g_1-1.2.13.dfsg-1_amd64",
-					"name": "zlib1g",
-					"version": "1:1.2.13.dfsg-1"
-				},
-				{
-					"key": "libc6_2.36-9-p-deb12u10_amd64",
-					"name": "libc6",
-					"version": "2.36-9+deb12u10"
-				},
-				{
-					"key": "libgcc-s1_12.2.0-14-p-deb12u1_amd64",
-					"name": "libgcc-s1",
-					"version": "12.2.0-14+deb12u1"
-				},
-				{
-					"key": "gcc-12-base_12.2.0-14-p-deb12u1_amd64",
-					"name": "gcc-12-base",
-					"version": "12.2.0-14+deb12u1"
-				},
-				{
-					"key": "liblzma5_5.4.1-1_amd64",
-					"name": "liblzma5",
-					"version": "5.4.1-1"
-				},
-				{
-					"key": "libicu72_72.1-3_amd64",
-					"name": "libicu72",
-					"version": "72.1-3"
-				},
-				{
-					"key": "libstdc-p--p-6_12.2.0-14-p-deb12u1_amd64",
-					"name": "libstdc++6",
-					"version": "12.2.0-14+deb12u1"
-				}
-			],
-			"key": "libxml2_2.9.14-p-dfsg-1.3_deb12u1_amd64",
-			"name": "libxml2",
-			"sha256": "35b76cb7038fc1c940204a4f05f33ffb79d027353ce469397d9adcf8f9b3e1a7",
-			"urls": [
-				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/libx/libxml2/libxml2_2.9.14+dfsg-1.3~deb12u1_amd64.deb"
-			],
-			"version": "2.9.14+dfsg-1.3~deb12u1"
-		},
-		{
-			"arch": "amd64",
 			"dependencies": [],
-			"key": "liblzma5_5.4.1-1_amd64",
-			"name": "liblzma5",
-			"sha256": "d321b9502b16aac534e1c691afbe3dc5e125e5091aa35bea026c59b25ebe82e7",
-			"urls": [
-				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/x/xz-utils/liblzma5_5.4.1-1_amd64.deb"
-			],
-			"version": "5.4.1-1"
-		},
-		{
-			"arch": "amd64",
-			"dependencies": [],
-			"key": "libicu72_72.1-3_amd64",
-			"name": "libicu72",
-			"sha256": "e239c1c9f52bee0ff627f291552d63691b765ec7c5cdf6de7c7ae4dec0275857",
-			"urls": [
-				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/i/icu/libicu72_72.1-3_amd64.deb"
-			],
-			"version": "72.1-3"
-		},
-		{
-			"arch": "amd64",
-			"dependencies": [],
-			"key": "libstdc-p--p-6_12.2.0-14-p-deb12u1_amd64",
-			"name": "libstdc++6",
-			"sha256": "5cd3171216d4ab0fc911cfe9c35509bf2dd8f47761c43b7f6a4296701551a24d",
-			"urls": [
-				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/g/gcc-12/libstdc++6_12.2.0-14+deb12u1_amd64.deb"
-			],
-			"version": "12.2.0-14+deb12u1"
-		},
-		{
-			"arch": "amd64",
-			"dependencies": [],
-			"key": "aws-neuronx-runtime-lib_2.25.57.0-166c7a468_amd64",
+			"key": "aws-neuronx-runtime-lib_2.26.42.0-2ff3b5c7d_amd64",
 			"name": "aws-neuronx-runtime-lib",
-			"sha256": "81613a0b86fc704acb5a4d1096a5bf2cce3aead04aeb5063d14a95195ca8ca39",
+			"sha256": "57f6fd8e850f4054c2d229cd41a83fe1489ec9d9ee55bedf33a14cd6e8beed16",
 			"urls": [
-				"https://apt.repos.neuron.amazonaws.com/pool/main/a/aws-neuronx-runtime-lib/aws-neuronx-runtime-lib_2.25.57.0-166c7a468_amd64.deb"
+				"https://apt.repos.neuron.amazonaws.com/pool/main/a/aws-neuronx-runtime-lib/aws-neuronx-runtime-lib_2.26.42.0-2ff3b5c7d_amd64.deb"
 			],
-			"version": "2.25.57.0-166c7a468"
+			"version": "2.26.42.0-2ff3b5c7d"
 		},
 		{
 			"arch": "amd64",
@@ -386,13 +279,13 @@
 					"version": "252.36-1~deb12u1"
 				}
 			],
-			"key": "aws-neuronx-collectives_2.25.65.0-9858ac9a1_amd64",
+			"key": "aws-neuronx-collectives_2.26.43.0-47cc904ea_amd64",
 			"name": "aws-neuronx-collectives",
-			"sha256": "41e2eb08433556b243bae12ea61a7417068374b674b5a4e3e88455d28b6ba345",
+			"sha256": "4886f5aeeea21e4d502d445654a838190e2174a52ffb757da2cc3a8bf09be3f8",
 			"urls": [
-				"https://apt.repos.neuron.amazonaws.com/pool/main/a/aws-neuronx-collectives/aws-neuronx-collectives_2.25.65.0-9858ac9a1_amd64.deb"
+				"https://apt.repos.neuron.amazonaws.com/pool/main/a/aws-neuronx-collectives/aws-neuronx-collectives_2.26.43.0-47cc904ea_amd64.deb"
 			],
-			"version": "2.25.65.0-9858ac9a1"
+			"version": "2.26.43.0-47cc904ea"
 		},
 		{
 			"arch": "amd64",

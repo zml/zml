@@ -2,39 +2,59 @@ load("@python_versions//3.11:defs.bzl", _py_binary = "py_binary")
 load("@rules_python//python:defs.bzl", "PyInfo")
 load("@with_cfg.bzl", "with_cfg")
 load("//bazel:http_deb_archive.bzl", "http_deb_archive")
+load("//bazel:patchelf.bzl", "patchelf")
 load("//runtimes/common:packages.bzl", "packages")
 
 BASE_URL = "https://apt.repos.neuron.amazonaws.com"
 STRIP_PREFIX = "opt/aws/neuron"
 
 BUILD_FILE_PRELUDE = """\
-load("@zml//bazel:cc_import.bzl", "cc_import")
 """
 
 _PACKAGES = {
-    "aws-neuronx-runtime-lib": packages.cc_import_glob_hdrs(
-        name = "aws-neuronx-runtime-lib",
-        hdrs_glob = [
-            "include/ndl/**/*.h",
-            "include/nrt/**/*.h",
-        ],
-        includes = ["include"],
-        shared_library = "lib/libnrt.so.1",
-        rename_dynamic_symbols = {
-            "dlopen": "zmlxneuron_dlopen",
-        },
-        visibility = ["@zml//runtimes/neuron:__subpackages__"],
-        deps = ["@aws-neuronx-collectives//:libnccom"],
-    ),
-    "aws-neuronx-collectives": "\n".join([
-        packages.cc_import(
-            name = "libnccom",
-            shared_library = "lib/libnccom.so.2",
-            visibility = ["@aws-neuronx-runtime-lib//:__subpackages__"],
+    "aws-neuronx-runtime-lib": "\n".join([
+        packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
+        packages.cc_library_hdrs_glob(
+            name = "libnrt_headers",
+            hdrs_glob = [
+                "include/ndl/**/*.h",
+                "include/nrt/**/*.h",
+            ],
+            includes = ["include"],
+            visibility = ["//visibility:public"],
         ),
-        packages.cc_import(
-            name = "libnccom-net",
-            shared_library = "lib/libnccom-net.so.0",
+        packages.patchelf(
+            name = "libnrt.patchelf",
+            shared_library = "lib/libnrt.so.1",
+            set_rpath = '$ORIGIN',
+            add_needed = [
+                # readelf -d ./opt/aws/neuron/libl/libncfw.so
+                "libncfw.so.2",
+            ],
+            rename_dynamic_symbols = {
+                "dlopen": "zmlxneuron_dlopen",
+            },
+            visibility = ["@zml//runtimes/neuron:__subpackages__"],
+        ),
+        packages.patchelf(
+            name = "libncfw.patchelf",
+            shared_library = "lib/libncfw.so",
+            soname = "libncfw.so.2",
+            visibility = ["@zml//runtimes/neuron:__subpackages__"],
+        ),
+    ]),
+    "aws-neuronx-collectives": "\n".join([
+        packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
+        packages.filegroup(
+            name = "libnccom",
+            srcs = ["lib/libnccom.so.2"],
+            visibility = ["@zml//runtimes/neuron:__subpackages__"],
+        ),
+        packages.patchelf(
+            name = "libnccom-net.patchelf",
+            shared_library = "lib/libnccom-net.so",
+            soname = "libnccom-net.so.0",
+            visibility = ["@zml//runtimes/neuron:__subpackages__"],
         ),
     ]),
 }

@@ -19,7 +19,5 @@ archs:
 
 packages:
     - "bash"
-    - "zlib1g"
-    - "libxml2"
     - "aws-neuronx-runtime-lib"
     - "aws-neuronx-collectives"

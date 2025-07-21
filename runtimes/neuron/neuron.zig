@@ -7,6 +7,9 @@ const c = @import("c");
 const libneuronxla_pyenv = @import("libneuronxla_pyenv");
 const pjrt = @import("pjrt");
 const runfiles = @import("runfiles");
+const stdx = @import("stdx");
+
+const log = std.log.scoped(.@"zml/runtime/neuron");
 
 pub fn isEnabled() bool {
     return @hasDecl(c, "ZML_RUNTIME_NEURON");
@@ -135,7 +138,29 @@ pub fn load() !*const pjrt.Api {
         return error.Unavailable;
     }
 
+    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    defer arena.deinit();
+
+    var r_ = try runfiles.Runfiles.create(.{ .allocator = arena.allocator() }) orelse {
+        stdx.debug.panic("Unable to find runfiles", .{});
+    };
+
+    const source_repo = bazel_builtin.current_repository;
+    const r = r_.withSourceRepo(source_repo);
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const sandbox_path = try r.rlocation("zml/runtimes/neuron/sandbox", &path_buf) orelse {
+        log.err("Failed to find sandbox path for NEURON runtime", .{});
+        return error.FileNotFound;
+    };
+
     setNeuronCCFlags();
     try initialize();
-    return try asynk.callBlocking(pjrt.Api.loadFrom, .{"libpjrt_neuron.so"});
+
+
+    return blk: {
+        var lib_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = try stdx.fs.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_neuron.so" });
+        break :blk asynk.callBlocking(pjrt.Api.loadFrom, .{path});
+    };
 }
