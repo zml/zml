@@ -51,6 +51,7 @@ jobs:
             common --color=yes
             common --show_timestamps
             common --disk_cache=/home/runner/.cache/bazel-disk
+            common --strip=always
 
       - name: ZML / bazel mod explain
         run: bazel mod explain
