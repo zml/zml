@@ -1,0 +1,13 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "xev",
+    srcs = glob([
+        "src/*.zig",
+        "src/backend/*.zig",
+        "src/linux/*.zig",
+        "src/watcher/*.zig",
+    ]),
+    main = "src/main.zig",
+    visibility = ["//visibility:public"],
+)

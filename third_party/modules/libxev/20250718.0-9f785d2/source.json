@@ -1,0 +1,11 @@
+{
+    "strip_prefix": "libxev-9f785d202ddccf7a625e799250579253977978b6",
+    "url": "https://github.com/mitchellh/libxev/archive/9f785d202ddccf7a625e799250579253977978b6.tar.gz",
+    "integrity": "sha256-HaExxsAsATjH/pCP9NMo/EjVrG2KVX3SiTtZzmS8R90=",
+    "overlay": {
+        "MODULE.bazel": "",
+        "BUILD.bazel": ""
+    },
+    "patch_strip": 1
+}
+
