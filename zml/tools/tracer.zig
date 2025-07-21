@@ -61,6 +61,10 @@ const MacOsTracer = struct {
         };
     }
 
+    pub fn deinit(self: *const MacOsTracer) void {
+        _ = self;
+    }
+
     pub fn event(self: *const MacOsTracer, message: [:0]const u8) void {
         const interval_id = c.os_signpost_id_generate(self.logger);
         c.zml_os_signpost_event(self.logger, interval_id, message);

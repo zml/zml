@@ -104,7 +104,7 @@ pub fn xsuspendSafe() Error!void {
     thread_state.switchOut(coro.resumer);
 }
 
-const Coro = struct {
+pub const Coro = struct {
     /// Coroutine status
     const Status = enum {
         Start,
@@ -137,7 +137,7 @@ const Coro = struct {
         // empty
     }
 
-    fn initFromStack(func: *const fn () void, stack_: stack.Stack, storage: ?*anyopaque) !Frame {
+    pub fn initFromStack(func: *const fn () void, stack_: stack.Stack, storage: ?*anyopaque) !Frame {
         // try StackOverflow.setMagicNumber(stack.full);
         var stack__ = stack_;
         const coro = try stack__.push(Coro);
@@ -179,6 +179,19 @@ const Coro = struct {
             self.id,
             @tagName(self.status),
         });
+    }
+
+    pub fn @"await"(self: *Coro) void {
+        while (self.status != .Done) xsuspend();
+        std.debug.assert(self.status == .Done);
+    }
+
+    pub fn switchIn(self: *Coro) void {
+        thread_state.switchIn(self);
+    }
+
+    pub fn current() *Coro {
+        return thread_state.current_coro.?;
     }
 };
 
@@ -260,6 +273,10 @@ const CoroT = struct {
                     Sig.Func.Value,
                     storage.args,
                 );
+                switch (@typeInfo(Sig.ReturnT)) {
+                    .error_union => _ = storage.retval catch unreachable,
+                    else => {},
+                }
             }
         };
     }

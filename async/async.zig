@@ -10,6 +10,8 @@ const coro = @import("coro.zig");
 const executor = @import("executor.zig");
 const stack = @import("stack.zig");
 
+pub const Coro = coro.Coro;
+
 test {
     std.testing.refAllDecls(@This());
     std.testing.refAllDecls(coro);
@@ -61,6 +63,46 @@ fn FrameExx(comptime func: anytype, comptime argsT: type, comptime returnT: type
                 self.* = undefined;
             }
             return coro.xawait(self.inner);
+        }
+    };
+}
+
+/// Create a Coro
+/// self and stack pointers must remain stable for the lifetime of
+/// the coroutine.
+pub fn async2(comptime func: anytype, args: anytype, result_dst: anytype) !*coro.Coro {
+    const Sig = stdx.meta.FnSignature(func, @TypeOf(args));
+    var new_stack = try AsyncThread.current.stack_allocator.create();
+    const result_dst_storage = try new_stack.push(*Sig.ReturnT);
+    result_dst_storage.* = @alignCast(@ptrCast(result_dst));
+    const args_storage = try new_stack.push(Sig.ArgsT);
+    args_storage.* = args;
+
+    const Helpers = Helpers_async2(Sig);
+    const frame = try Coro.initFromStack(Helpers.wrapfn, new_stack, args_storage);
+    frame.switchIn();
+    return frame;
+}
+
+pub fn awaitAll(futures: []const *coro.Coro) void {
+    for (futures) |fut| fut.@"await"();
+}
+
+fn Helpers_async2(comptime Sig: stdx.meta.Signature) type {
+    return struct {
+        pub fn wrapfn() void {
+            const storage = Coro.current().storage;
+            const res_dst_storage: *(*Sig.ReturnT) = @alignCast(@ptrCast(storage));
+            const res_dst = res_dst_storage.*;
+
+            const offset = @max(@sizeOf(usize), @alignOf(Sig.ArgsT));
+            const res_args_storage: *const Sig.ArgsT = @ptrFromInt(@intFromPtr(storage) + offset);
+
+            res_dst.* = @call(
+                .auto,
+                Sig.Func.Value,
+                res_args_storage.*,
+            );
         }
     };
 }
