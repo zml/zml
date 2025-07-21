@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   framework-tests:
-    runs-on: ["runs-on","runner=4cpu-linux-x64", "image=ubuntu24-amd64", "run-id=${{ github.run_id }}", "extras=s3-cache", "debug=true"]
+    runs-on: ["runs-on","runner=4cpu-linux-x64", "image=ubuntu24-amd64", "run-id=${{ github.run_id }}", "extras=s3-cache"]
     steps:
       - uses: runs-on/action@v1
       - name: Checkout
@@ -61,6 +61,9 @@ jobs:
 
       - name: ZML / bazel query //...
         run: bazel query //...
+
+      - name: sleep
+        run: sleep 8d
 
       - name: ZML / bazel build //...
         run: bazel build //...
