@@ -126,6 +126,60 @@
 		},
 		{
 			"arch": "amd64",
+			"dependencies": [
+				{
+					"key": "libc6_2.36-9-p-deb12u10_amd64",
+					"name": "libc6",
+					"version": "2.36-9+deb12u10"
+				},
+				{
+					"key": "libgcc-s1_12.2.0-14-p-deb12u1_amd64",
+					"name": "libgcc-s1",
+					"version": "12.2.0-14+deb12u1"
+				},
+				{
+					"key": "gcc-12-base_12.2.0-14-p-deb12u1_amd64",
+					"name": "gcc-12-base",
+					"version": "12.2.0-14+deb12u1"
+				}
+			],
+			"key": "libgomp1_12.2.0-14-p-deb12u1_amd64",
+			"name": "libgomp1",
+			"sha256": "48fec46bda7f5b1638b9e959889bfbc20491247d402d120bb152687eb48143d7",
+			"urls": [
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/g/gcc-12/libgomp1_12.2.0-14+deb12u1_amd64.deb"
+			],
+			"version": "12.2.0-14+deb12u1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [
+				{
+					"key": "libc6_2.36-9-p-deb12u10_amd64",
+					"name": "libc6",
+					"version": "2.36-9+deb12u10"
+				},
+				{
+					"key": "libgcc-s1_12.2.0-14-p-deb12u1_amd64",
+					"name": "libgcc-s1",
+					"version": "12.2.0-14+deb12u1"
+				},
+				{
+					"key": "gcc-12-base_12.2.0-14-p-deb12u1_amd64",
+					"name": "gcc-12-base",
+					"version": "12.2.0-14+deb12u1"
+				}
+			],
+			"key": "zlib1g_1-1.2.13.dfsg-1_amd64",
+			"name": "zlib1g",
+			"sha256": "d7dd1d1411fedf27f5e27650a6eff20ef294077b568f4c8c5e51466dc7c08ce4",
+			"urls": [
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/z/zlib/zlib1g_1.2.13.dfsg-1_amd64.deb"
+			],
+			"version": "1:1.2.13.dfsg-1"
+		},
+		{
+			"arch": "amd64",
 			"dependencies": [],
 			"key": "aws-neuronx-runtime-lib_2.26.42.0-2ff3b5c7d_amd64",
 			"name": "aws-neuronx-runtime-lib",

@@ -92,7 +92,7 @@ tpu = use_extension("//runtimes/tpu:tpu.bzl", "tpu_packages")
 use_repo(tpu, "libpjrt_tpu")
 
 neuron = use_extension("//runtimes/neuron:neuron.bzl", "neuron_packages")
-use_repo(neuron, "aws-neuronx-collectives", "aws-neuronx-runtime-lib")
+use_repo(neuron, "aws-neuronx-collectives", "aws-neuronx-runtime-lib", "zlib1g", "libgomp1")
 
 zls = use_extension("//third_party/zls:zls.bzl", "repo")
 use_repo(zls, "zls_aarch64-macos", "zls_x86_64-linux", "zls_x86_64-macos")

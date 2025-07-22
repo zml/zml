@@ -2,16 +2,21 @@ load("@python_versions//3.11:defs.bzl", _py_binary = "py_binary")
 load("@rules_python//python:defs.bzl", "PyInfo")
 load("@with_cfg.bzl", "with_cfg")
 load("//bazel:http_deb_archive.bzl", "http_deb_archive")
-load("//bazel:patchelf.bzl", "patchelf")
 load("//runtimes/common:packages.bzl", "packages")
 
 BASE_URL = "https://apt.repos.neuron.amazonaws.com"
 STRIP_PREFIX = "opt/aws/neuron"
 
-BUILD_FILE_PRELUDE = """\
+_BUILD_FILE_PRELUDE = """\
+package(default_visibility = ["@zml//runtimes/neuron:__subpackages__"])
 """
 
-_PACKAGES = {
+_UBUNTU_PACKAGES = {
+    "zlib1g": packages.filegroup(name = "zlib1g", srcs = ["lib/x86_64-linux-gnu/libz.so.1"]),
+    "libgomp1": packages.filegroup(name = "libgomp1", srcs = ["usr/lib/x86_64-linux-gnu/libgomp.so.1"]),
+}
+
+_NEURON_PACKAGES = {
     "aws-neuronx-runtime-lib": "\n".join([
         packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
         packages.cc_library_hdrs_glob(
@@ -34,13 +39,11 @@ _PACKAGES = {
             rename_dynamic_symbols = {
                 "dlopen": "zmlxneuron_dlopen",
             },
-            visibility = ["@zml//runtimes/neuron:__subpackages__"],
         ),
         packages.patchelf(
             name = "libncfw.patchelf",
             shared_library = "lib/libncfw.so",
             soname = "libncfw.so.2",
-            visibility = ["@zml//runtimes/neuron:__subpackages__"],
         ),
     ]),
     "aws-neuronx-collectives": "\n".join([
@@ -55,14 +58,24 @@ def _neuron_impl(mctx):
     loaded_packages = packages.read(mctx, [
         "@zml//runtimes/neuron:packages.lock.json",
     ])
-    for pkg_name, build_file_content in _PACKAGES.items():
+
+    for pkg_name, build_file_content in _UBUNTU_PACKAGES.items():
+        pkg = loaded_packages[pkg_name]
+        http_deb_archive(
+            name = pkg_name,
+            urls = pkg["urls"],
+            sha256 = pkg["sha256"],
+            build_file_content = _BUILD_FILE_PRELUDE + build_file_content,
+        )
+
+    for pkg_name, build_file_content in _NEURON_PACKAGES.items():
         pkg = loaded_packages[pkg_name]
         http_deb_archive(
             name = pkg_name,
             urls = pkg["urls"],
             sha256 = pkg["sha256"],
             strip_prefix = STRIP_PREFIX,
-            build_file_content = BUILD_FILE_PRELUDE + build_file_content,
+            build_file_content = _BUILD_FILE_PRELUDE + build_file_content,
         )
 
     return mctx.extension_metadata(

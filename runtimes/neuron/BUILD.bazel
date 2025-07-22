@@ -137,7 +137,8 @@ copy_to_directory(
         "@aws-neuronx-runtime-lib//:libnrt.patchelf",
         "@aws-neuronx-runtime-lib//:libncfw.patchelf",
         "@aws-neuronx-collectives//:libnccom",
-        # "@rules_python//python/cc:current_py_cc_libs",
+        "@zlib1g",
+        "@libgomp1",
     ],
     replace_prefixes = {
         "libpjrt_neuron.patchelf": "lib",
@@ -186,6 +187,8 @@ zig_library(
 
 filegroup(
     name = "layers",
-    srcs = [],
+    srcs = [
+        "@apt_neuron//bash/amd64",
+    ],
     visibility = ["//visibility:public"],
 )

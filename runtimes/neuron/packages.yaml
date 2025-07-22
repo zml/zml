@@ -18,6 +18,8 @@ archs:
     - "amd64"
 
 packages:
-    - "bash"
+    - "bash" # needed to launch neuronx-cc
+    - "libgomp1" # implicit dep of neuronx-cc
+    - "zlib1g" # implicit dep of libpython
     - "aws-neuronx-runtime-lib"
     - "aws-neuronx-collectives"
