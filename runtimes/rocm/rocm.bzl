@@ -6,7 +6,7 @@ _BUILD_FILE_DEFAULT_VISIBILITY = """\
 package(default_visibility = ["//visibility:public"])
 """
 
-_ROCM_STRIP_PREFIX = "opt/rocm-6.3.4"
+_ROCM_STRIP_PREFIX = "opt/rocm-6.4.1"
 
 _UBUNTU_PACKAGES = {
     "libdrm2-amdgpu": packages.filegroup(name = "libdrm2-amdgpu", srcs = ["opt/amdgpu/lib/x86_64-linux-gnu/libdrm.so.2"]),
@@ -15,7 +15,7 @@ _UBUNTU_PACKAGES = {
         packages.patchelf(
             name = "libelf1",
             shared_library = "usr/lib/x86_64-linux-gnu/libelf.so.1",
-            set_rpath = '$ORIGIN',
+            set_rpath = "$ORIGIN",
         ),
     ]),
     "libdrm-amdgpu-common": packages.filegroup(name = "amdgpu_ids", srcs = ["opt/amdgpu/share/libdrm/amdgpu.ids"]),
@@ -26,7 +26,7 @@ _UBUNTU_PACKAGES = {
         packages.patchelf(
             name = "libdrm-amdgpu-amdgpu1",
             shared_library = "opt/amdgpu/lib/x86_64-linux-gnu/libdrm_amdgpu.so.1",
-            set_rpath = '$ORIGIN',
+            set_rpath = "$ORIGIN",
         ),
     ]),
     "libtinfo6": packages.filegroup(name = "libtinfo6", srcs = ["lib/x86_64-linux-gnu/libtinfo.so.6"]),
@@ -38,7 +38,14 @@ _ROCM_PACKAGES = {
     "rocm-smi-lib": packages.filegroup(name = "rocm_smi", srcs = ["lib/librocm_smi64.so.7"]),
     "hsa-rocr": packages.filegroup(name = "hsa-runtime", srcs = ["lib/libhsa-runtime64.so.1"]),
     "hsa-amd-aqlprofile": packages.filegroup(name = "hsa-amd-aqlprofile", srcs = ["lib/libhsa-amd-aqlprofile64.so.1"]),
-    "comgr": packages.filegroup(name = "amd_comgr", srcs = ["lib/libamd_comgr.so.2"]),
+    "comgr": "\n".join([
+        packages.filegroup(
+            name = "amd_comgr",
+            srcs = [
+                "lib/libamd_comgr.so.3",
+            ],
+        ),
+    ]),
     "rocprofiler-register": packages.filegroup(name = "rocprofiler-register", srcs = ["lib/librocprofiler-register.so.0"]),
     "miopen-hip": "\n".join([
         packages.filegroup(name = "MIOpen", srcs = ["lib/libMIOpen.so.1"]),
@@ -102,14 +109,22 @@ _ROCM_PACKAGES = {
             name = "runfiles",
             srcs = [
                 "lib/hipblaslt/library/hipblasltExtOpLibrary.dat",
-                "lib/hipblaslt/library/TensileManifest.txt",
                 ":bytecodes",
             ],
         ),
     ]),
     "hipfft": packages.filegroup(name = "hipfft", srcs = ["lib/libhipfft.so.0"]),
     "hip-runtime-amd": "\n".join([
+        packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
         packages.filegroup(name = "amdhip", srcs = ["lib/libamdhip64.so.6"]),
+        packages.patchelf(
+            name = "amdhip_patched",
+            shared_library = ":amdhip",
+            add_needed = ["libzmlxrocm.so.0"],
+            rename_dynamic_symbols = {
+                "dlopen": "zmlxrocm_dlopen",
+            },
+        ),
         packages.filegroup(name = "hiprtc", srcs = ["lib/libhiprtc.so.6"]),
     ]),
     "hipsolver": packages.filegroup(name = "hipsolver", srcs = ["lib/libhipsolver.so.0"]),
@@ -142,8 +157,8 @@ def _rocm_impl(mctx):
     http_archive(
         name = "libpjrt_rocm",
         build_file = "libpjrt_rocm.BUILD.bazel",
-        url = "https://github.com/zml/pjrt-artifacts/releases/download/v11.0.0/pjrt-rocm_linux-amd64.tar.gz",
-        sha256 = "a6d8ef38ae4deda244856549271a1b1a6f46499e9efb64fb71a12fd6ae792d3b",
+        url = "https://github.com/zml/pjrt-artifacts/releases/download/v12.0.0/pjrt-rocm_linux-amd64.tar.gz",
+        sha256 = "709982b959595750545a01d125adf4893c42f05c60ec290425276bba8aa49f64",
     )
 
     return mctx.extension_metadata(

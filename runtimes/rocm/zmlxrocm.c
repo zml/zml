@@ -17,7 +17,7 @@ void *zmlxrocm_dlopen(const char *filename, int flags) __attribute__((visibility
             "libhsa-amd-aqlprofile64.so",
             "libhsa-amd-aqlprofile64.so.1",
             "libamd_comgr.so",
-            "libamd_comgr.so.2",
+            "libamd_comgr.so.3",
             "librocprofiler-register.so",
             "librocprofiler-register.so.0",
             "libMIOpen.so",
