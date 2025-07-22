@@ -27,7 +27,7 @@ const Mnist = struct {
     /// just two linear layers + relu activation
     pub fn forward(self: Mnist, input: zml.Tensor) zml.Tensor {
         // std.log.info("Compiling for target: {s}", .{@tagName(input.getContext().target())});
-        var x = input.flattenAll().convert(.f32);
+        var x = input.flatten().convert(.f32);
         const layers: []const Layer = &.{ self.fc1, self.fc2 };
         for (layers) |layer| {
             x = layer.forward(x);
