@@ -1,0 +1,18 @@
+{
+    "strip_prefix": "xla-6319f0d3bdfd3078e04bb984a759c890b7116484",
+    "url": "https://github.com/openxla/xla/archive/6319f0d3bdfd3078e04bb984a759c890b7116484.tar.gz",
+    "integrity": "sha256-0XAMbJ4tn5yFllPGVCSh8st7lgTOUoyeypoudCB8tsY=",
+    "overlay": {
+        "toolchains_private.bzl": "",
+        "llvm.bzl": "",
+        "MODULE.bazel": "",
+        "workspace_private.bzl": "",
+        "xla.bzl": ""
+    },
+    "patch_strip": 1,
+    "patches": {
+        "0001-bazel-migration-to-bazel-8.1.1.patch": "",
+        "0002-Added-FFI-handler-registration-API-to-the-FFI-PjRt.patch": "",
+        "0003-Remove-unconventional-C-code-in-headers.patch": ""
+    }
+}

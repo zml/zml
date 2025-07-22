@@ -1,7 +1,6 @@
 load("@aspect_bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
-load("@aspect_bazel_lib//lib:tar.bzl", "mtree_spec", "tar")
+load("@aspect_bazel_lib//lib:tar.bzl", "tar")
 load("@bazel_skylib//rules:common_settings.bzl", "bool_flag", "string_list_flag")
-load("@zml//bazel:cc_import.bzl", "cc_import")
 load("@zml//bazel:patchelf.bzl", "patchelf")
 
 string_list_flag(
@@ -53,7 +52,7 @@ copy_to_directory(
         ":zmlxrocm_so",
         ":libpjrt_rocm.patchelf",
         "@comgr//:amd_comgr",
-        "@hip-runtime-amd//:amdhip",
+        "@hip-runtime-amd//:amdhip_patched",
         "@hip-runtime-amd//:hiprtc",
         "@hipblaslt//:hipblaslt",
         "@hipfft",
@@ -92,6 +91,7 @@ copy_to_directory(
         "rocblas": "lib",
         "opt/amdgpu/lib/x86_64-linux-gnu": "lib",
         "libdrm-amdgpu-amdgpu1": "lib",
+        "amdhip_patched": "lib",
     },
     add_directory_to_runfiles = True,
     include_external_repositories = ["**"],
