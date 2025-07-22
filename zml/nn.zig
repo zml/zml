@@ -250,7 +250,7 @@ pub fn mergeRealImg(x_real: Tensor, x_imag: Tensor, layout: RopeOpts.Layout) Ten
         .interleaved => Tensor.concatenate(&.{
             x_real.appendAxes(.{.interleaved_real_img}),
             x_imag.appendAxes(.{.interleaved_real_img}),
-        }, -1).flatten(-2),
+        }, -1).reshape(x_imag.shape().setDim(-1, -1)),
     };
 }
 
@@ -332,8 +332,8 @@ test "real/img" {
             const real, const imag = splitRealImg(x, layout);
             const y = mergeRealImg(real, imag, layout);
             const real2, const imag2 = splitRealImg(y, layout);
-            return real.cmp(.EQ, real2).flatten(0).convert(.i32).sum(-1).add(
-                imag.cmp(.EQ, imag2).flatten(0).convert(.i32).sum(-1),
+            return real.cmp(.EQ, real2).flatten().convert(.i32).sum(-1).add(
+                imag.cmp(.EQ, imag2).flatten().convert(.i32).sum(-1),
             );
         }
 
@@ -349,8 +349,8 @@ test "real/img" {
                 Tensor.arange(.{ .start = 3, .end = 20, .step = 4 }, .f32).reshape(.{ 5, 1 }),
             }, 1);
 
-            return real.cmp(.EQ, x_real).flatten(0).convert(.i32).sum(-1).add(
-                imag.cmp(.EQ, x_imag).flatten(0).convert(.i32).sum(-1),
+            return real.cmp(.EQ, x_real).flatten().convert(.i32).sum(-1).add(
+                imag.cmp(.EQ, x_imag).flatten().convert(.i32).sum(-1),
             );
         }
 
@@ -366,8 +366,8 @@ test "real/img" {
                 Tensor.arange(.{ .start = 3, .end = 20, .step = 4 }, .f32).reshape(.{ 5, 1 }),
             }, 1);
 
-            return real.cmp(.EQ, x_real).flatten(0).convert(.i32).sum(-1).add(
-                imag.cmp(.EQ, x_imag).flatten(0).convert(.i32).sum(-1),
+            return real.cmp(.EQ, x_real).flatten().convert(.i32).sum(-1).add(
+                imag.cmp(.EQ, x_imag).flatten().convert(.i32).sum(-1),
             );
         }
 
@@ -377,8 +377,8 @@ test "real/img" {
             const x_real = Tensor.arange(.{ .start = 0, .end = 20, .step = 2 }, .f32).reshape(.{ 5, 2 });
             const x_imag = Tensor.arange(.{ .start = 1, .end = 20, .step = 2 }, .f32).reshape(.{ 5, 2 });
 
-            return real.cmp(.EQ, x_real).flatten(0).convert(.i32).sum(-1).add(
-                imag.cmp(.EQ, x_imag).flatten(0).convert(.i32).sum(-1),
+            return real.cmp(.EQ, x_real).flatten().convert(.i32).sum(-1).add(
+                imag.cmp(.EQ, x_imag).flatten().convert(.i32).sum(-1),
             );
         }
     };
