@@ -44,17 +44,9 @@ _PACKAGES = {
         ),
     ]),
     "aws-neuronx-collectives": "\n".join([
-        packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
         packages.filegroup(
             name = "libnccom",
             srcs = ["lib/libnccom.so.2"],
-            visibility = ["@zml//runtimes/neuron:__subpackages__"],
-        ),
-        packages.patchelf(
-            name = "libnccom-net.patchelf",
-            shared_library = "lib/libnccom-net.so",
-            soname = "libnccom-net.so.0",
-            visibility = ["@zml//runtimes/neuron:__subpackages__"],
         ),
     ]),
 }
