@@ -34,6 +34,7 @@ pub const torch = @import("torch.zig");
 pub const tokenizer = @import("zml/tokenizer");
 
 pub const call = ops.call;
+pub const custom_call = @import("custom_call.zig").custom_call;
 pub const compile = exe.compile;
 pub const compileWithPrefix = exe.compileWithPrefix;
 pub const compileFn = exe.compileFn;

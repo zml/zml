@@ -841,8 +841,6 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, m
 
     const sharding = platform.sharding();
 
-    // NOTE(Corendos): Hack needed because Protobuf struct are not public.
-    const DeviceAssignmentProto = @TypeOf(xla_pb.CompileOptionsProto.init().executable_build_options.?.device_assignment.?);
     var options: xla_pb.CompileOptionsProto = .{
         .executable_build_options = .{
             .device_ordinal = -1,
@@ -852,18 +850,18 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, m
             .device_assignment = .{
                 .replica_count = sharding.num_replicas,
                 .computation_count = sharding.num_partitions,
-                .computation_devices = blk: {
-                    var computation_devices = try std.ArrayListUnmanaged(DeviceAssignmentProto.ComputationDevice).initCapacity(arena, sharding.num_partitions);
-                    for (0..sharding.num_partitions) |i| {
-                        var replica_device_ids = std.ArrayListUnmanaged(i64).initCapacity(arena, 1) catch unreachable;
-                        replica_device_ids.appendAssumeCapacity(@intCast(i));
-                        computation_devices.appendAssumeCapacity(.{ .replica_device_ids = replica_device_ids });
-                    }
-                    break :blk computation_devices;
-                },
+                // Filled below.
+                .computation_devices = .{},
             },
         },
     };
+    const computation_devices = &options.executable_build_options.?.device_assignment.?.computation_devices;
+    try computation_devices.ensureTotalCapacity(arena, sharding.num_partitions);
+    const replica_device_ids = try arena.alloc(i64, sharding.num_partitions);
+    for (0..sharding.num_partitions) |i| {
+        replica_device_ids[i] = @intCast(i);
+        computation_devices.appendAssumeCapacity(.{ .replica_device_ids = .fromOwnedSlice(replica_device_ids[i .. i + 1]) });
+    }
 
     // Let the arena deinit, zig-protobuf deinit is very slow.
     try options.env_option_overrides.ensureUnusedCapacity(arena, 16);
@@ -1160,9 +1158,9 @@ pub fn hash(hasher: *std.hash.Wyhash, key: anytype, comptime strat: std.hash.Str
         .@"anyframe", .@"fn" => hash(hasher, @intFromPtr(key), strat),
         .pointer => |info| switch (info.size) {
             .one => switch (strat) {
-                .shallow => hash(hasher, @intFromPtr(key), .Shallow),
-                .deep => hash(hasher, key.*, .Shallow),
-                .deeprecursive => switch (@typeInfo(info.child)) {
+                .Shallow => hash(hasher, @intFromPtr(key), .Shallow),
+                .Deep => hash(hasher, key.*, .Shallow),
+                .DeepRecursive => switch (@typeInfo(info.child)) {
                     .@"opaque", .@"fn" => hash(hasher, @intFromPtr(key), .Shallow),
                     else => hash(hasher, key.*, .DeepRecursive),
                 },
@@ -1178,7 +1176,7 @@ pub fn hash(hasher: *std.hash.Wyhash, key: anytype, comptime strat: std.hash.Str
             .many,
             .c,
             => switch (strat) {
-                .shallow => hash(hasher, @intFromPtr(key), .Shallow),
+                .Shallow => hash(hasher, @intFromPtr(key), .Shallow),
                 else => @compileError(
                     \\ unknown-length pointers and C pointers cannot be hashed deeply.
                     \\ Consider providing your own hash function.

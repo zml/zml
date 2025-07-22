@@ -46,6 +46,7 @@ pub const LlamaLM = struct {
         self.model.max_seq_len = @intCast(options.max_seq_len);
         self.model.num_heads = @intCast(config.num_attention_heads);
         self.model.num_kv_heads = @intCast(config.num_key_value_heads);
+        self.model.norm.eps = config.rms_norm_eps;
         self.model.rope_opts = .{
             .layout = if (config.hf_rope_impl) .sequential else .interleaved,
             .freq_base = config.rope_theta,
