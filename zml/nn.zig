@@ -250,7 +250,7 @@ pub fn mergeRealImg(x_real: Tensor, x_imag: Tensor, layout: RopeOpts.Layout) Ten
         .interleaved => Tensor.concatenate(&.{
             x_real.appendAxes(.{.interleaved_real_img}),
             x_imag.appendAxes(.{.interleaved_real_img}),
-        }, -1).flatten(-2),
+        }, -1).reshape(x_imag.shape().setDim(-1, -1)),
     };
 }
 
@@ -332,8 +332,8 @@ test "real/img" {
             const real, const imag = splitRealImg(x, layout);
             const y = mergeRealImg(real, imag, layout);
             const real2, const imag2 = splitRealImg(y, layout);
-            return real.cmp(.EQ, real2).flatten(0).convert(.i32).sum(-1).add(
-                imag.cmp(.EQ, imag2).flatten(0).convert(.i32).sum(-1),
+            return real.cmp(.EQ, real2).flatten().convert(.i32).sum(-1).add(
+                imag.cmp(.EQ, imag2).flatten().convert(.i32).sum(-1),
             );
         }
 
@@ -349,8 +349,8 @@ test "real/img" {
                 Tensor.arange(.{ .start = 3, .end = 20, .step = 4 }, .f32).reshape(.{ 5, 1 }),
             }, 1);
 
-            return real.cmp(.EQ, x_real).flatten(0).convert(.i32).sum(-1).add(
-                imag.cmp(.EQ, x_imag).flatten(0).convert(.i32).sum(-1),
+            return real.cmp(.EQ, x_real).flatten().convert(.i32).sum(-1).add(
+                imag.cmp(.EQ, x_imag).flatten().convert(.i32).sum(-1),
             );
         }
 
@@ -366,8 +366,8 @@ test "real/img" {
                 Tensor.arange(.{ .start = 3, .end = 20, .step = 4 }, .f32).reshape(.{ 5, 1 }),
             }, 1);
 
-            return real.cmp(.EQ, x_real).flatten(0).convert(.i32).sum(-1).add(
-                imag.cmp(.EQ, x_imag).flatten(0).convert(.i32).sum(-1),
+            return real.cmp(.EQ, x_real).flatten().convert(.i32).sum(-1).add(
+                imag.cmp(.EQ, x_imag).flatten().convert(.i32).sum(-1),
             );
         }
 
@@ -377,8 +377,8 @@ test "real/img" {
             const x_real = Tensor.arange(.{ .start = 0, .end = 20, .step = 2 }, .f32).reshape(.{ 5, 2 });
             const x_imag = Tensor.arange(.{ .start = 1, .end = 20, .step = 2 }, .f32).reshape(.{ 5, 2 });
 
-            return real.cmp(.EQ, x_real).flatten(0).convert(.i32).sum(-1).add(
-                imag.cmp(.EQ, x_imag).flatten(0).convert(.i32).sum(-1),
+            return real.cmp(.EQ, x_real).flatten().convert(.i32).sum(-1).add(
+                imag.cmp(.EQ, x_imag).flatten().convert(.i32).sum(-1),
             );
         }
     };
@@ -853,13 +853,10 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
         return cuda.sdpa(q, k, v, opts);
     }
 
-    if (q.dim(.h) != k.dim(.h)) {
-        stdx.debug.assert(@mod(q.dim(.h), k.dim(.h)) == 0, err_template ++ "Different number of heads for keys and queries, but can't repeat keys.", err_args);
-        // Note: we don't try to repeat queries.
-        // Repeating keys is the interesting optimisation cause it reduces KV cache memory usage.
-        const num_rep: u63 = @intCast(@divExact(q.dim(.h), k.dim(.h)));
-        k, v = .{ k.repeat1d(.h, num_rep), v.repeat1d(.h, num_rep) };
-    }
+    // Handle different numbers of head by splitting q heads.
+    // This is a bit error prone in the sense that it depends of the layout of q heads.
+    // This is the Llama convention though.
+    q = q.splitAxis(.h, .{ .h = k.dim(.h), .hq = .auto });
     const attn_mask = if (opts.attn_mask) |m| m else null;
 
     const dims = helpers.collectDims(.{ .h, .q, .k, .hd }, &.{ q, k, v, attn_mask }, .strict) catch {
@@ -875,7 +872,7 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
     attn_weights = attn_weights.convert(.f32).softmax(.k).convert(q.dtype());
 
     var attn = attn_weights.dot(v, .{.k});
-    return attn.transpose(q.shape());
+    return attn.transpose(q.shape()).merge(.{ .h = .{ .h, .hq } });
 }
 
 /// Options controlling generation. The default values correspond to greedy decoding.
