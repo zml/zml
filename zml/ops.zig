@@ -462,7 +462,7 @@ pub fn if_(
         }
     }
 
-    const scalar_pred = if (pred.rank() == 0) pred else pred.flattenAll().squeeze(0);
+    const scalar_pred = if (pred.rank() == 0) pred else pred.flatten().squeeze(0);
     const loc = ctx.mlirCtx().location(@src());
     const op = mlir.Operation.make(ctx.mlirCtx(), "stablehlo.if", .{
         .operands = &.{scalar_pred.value()},
