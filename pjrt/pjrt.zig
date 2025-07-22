@@ -578,9 +578,12 @@ pub const Device = opaque {
     }
 
     pub fn memoryStats(self: *const Device, api: *const Api) ApiError!MemoryStats {
-        const ret = try api.call(.PJRT_Device_MemoryStats, .{
+        const ret = api.call(.PJRT_Device_MemoryStats, .{
             .device = self.inner(),
-        });
+        }) catch |err| switch (err) {
+            error.Unimplemented => return std.mem.zeroes(MemoryStats),
+            else => return err,
+        };
         return .{
             .bytes_in_use = @intCast(ret.bytes_in_use),
             .peak_bytes_in_use = @intCast(ret.peak_bytes_in_use),
