@@ -53,6 +53,7 @@ pub const Platform = struct {
     pub const Sharding = struct { num_replicas: u8, num_partitions: u8 };
 
     pub fn sharding(self: Platform) Sharding {
+        // TODO: store me inside the platform itself to avoid expensive ffi calls
         // replicas run the same function but with different inputs,
         // while partitions contribute to one evaluation over a shared input.
         // Inside an inference process, we generally don't want replicas,

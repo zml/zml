@@ -1298,15 +1298,14 @@ pub const NamedValue = extern struct {
 pub const FFI = extern struct {
     inner: *const c.PJRT_FFI,
 
+    // we clone the struct to force fields to be initialized by the caller.
     pub const UserData = extern struct {
         type_id: i64,
         user_data: *anyopaque,
+        deleter: ?*fn (*anyopaque) void = null,
 
         fn toCStruct(self: UserData) c.PJRT_FFI_UserData {
-            return .{
-                .type_id = self.type_id,
-                .data = self.user_data,
-            };
+            return @bitCast(self);
         }
     };
 

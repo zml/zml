@@ -49,6 +49,7 @@ pub const CompilationContext = struct {
     _mlir_canonicalizer: mlir.PassManager,
 
     _module: mlir.Module,
+    _num_custom_calls: u32 = 0,
 
     _blocks: std.BoundedArray(TaggedBlock, 64) = .{},
     _fn_cache: FnCache = .{},
@@ -233,6 +234,7 @@ pub const CompilationContext = struct {
                 .input_shapes = f.args_shapes,
                 .result_shapes = f.res_shapes,
                 .n_devices = sharding.num_replicas * sharding.num_partitions,
+                .need_execution_context = self._num_custom_calls > 0,
             },
         );
     }
