@@ -700,7 +700,7 @@ pub const Tensor = struct {
                 pub fn gumbelStats(rand: Rng, target_dist: Tensor) struct { Rng, Stats } {
                     const s = Shape.init(.{ .n = 1024, .d = 4 }, .f32);
                     const rng, const data = rand.gumbel(s);
-                    const flat = data.flattenAll();
+                    const flat = data.flatten();
                     const mean_ = flat.mean(0);
                     const variance = flat.sub(mean_.broad(flat.shape())).pow(Tensor.scalar(2, .f32)).mean(0);
 
@@ -1519,27 +1519,7 @@ pub const Tensor = struct {
         return self.transpose(perm.constSlice());
     }
 
-    /// Flattens the given axis and the next one, into one new axis.
-    pub fn flatten(self: Tensor, axis_: anytype) Tensor {
-        // TODO: move to torch.zig, this is equivalent to merge
-        const old_shape = self._shape;
-        const a = self.axis(axis_);
-        // stdx.debug.assert(a + 1 < self.rank(), "Can't flatten {} on the last axis {}.", .{ self, axis });
-        const new_shape = old_shape.remove(a + 1).set(a, old_shape.dim(a) * old_shape.dim(a + 1));
-
-        const loc = self.getContext().location(@src(), "flatten({f},{})", .{ self, axis_ });
-        const reshaped_val = dialect.stablehlo.reshape(
-            self.getContext().mlirCtx(),
-            self.value(),
-            mlirx.tensorType(self.getContext().mlirCtx(), new_shape),
-            loc,
-        );
-        // log.debug("flatten({d}, {d}) -> {d}", .{ self.dims(), axis_, new_shape[0 .. self.rank() - 1] });
-        return _result(new_shape, reshaped_val.result(0));
-    }
-
-    pub inline fn flattenAll(self: Tensor) Tensor {
-        // TODO: rename to just flatten, once flatten is moved to torch
+    pub inline fn flatten(self: Tensor) Tensor {
         return self.reshape(.{self.count()});
     }
 
@@ -1727,14 +1707,12 @@ pub const Tensor = struct {
         }
 
         const a = self.axis(axis_);
-        const broadshape = self._shape.insert(a + 1, .{n_rep});
-        const repeat_dims = Shape.range(self.rank() + 1, self.dtype()).remove(a + 1);
+        const res_shape = self._shape.setDim(a, self.dim(a) * n_rep);
 
-        var res = self.broadcast(broadshape, repeat_dims.dims()).flatten(a);
-        // Restor the tag that has been lost by flatten.
-        res._shape._tags.set(a, self._shape.tag(a));
+        const broadshape = self._shape.insert(a, .{n_rep});
+        const repeat_dims = Shape.range(self.rank() + 1, self.dtype()).remove(a);
 
-        return res;
+        return self.broadcast(broadshape, repeat_dims.dims()).reshape(res_shape);
     }
 
     /// Repeats a Tensor several times along the given axes.
@@ -1751,15 +1729,47 @@ pub const Tensor = struct {
         return res;
     }
 
+    test repeat1d {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        const Local = struct {
+            fn repeat1d(x: Tensor, axis_: u3, n_reps: u32) Tensor {
+                return x.repeat1d(axis_, n_reps);
+            }
+        };
+
+        {
+            const inputs: [3]u8 = .{ 1, 2, 3 };
+            const expectations: [6]u8 = .{ 1, 2, 3, 1, 2, 3 };
+
+            const input = try zml.Buffer.fromArray(platform, inputs);
+            const output = try zml.testing.compileAndCall(platform, Local.repeat1d, .{ input, 0, 2 });
+
+            try std.testing.expectEqual(expectations, output.getValue(@TypeOf(expectations)));
+        }
+        {
+            const inputs: [2][3]u8 = .{ .{ 1, 2, 3 }, .{ 4, 5, 6 } };
+            const expectations: [2][6]u8 = .{ .{ 1, 2, 3, 1, 2, 3 }, .{ 4, 5, 6, 4, 5, 6 } };
+
+            const input = try zml.Buffer.fromArray(platform, inputs);
+            const output = try zml.testing.compileAndCall(platform, Local.repeat1d, .{ input, 1, 2 });
+
+            try std.testing.expectEqual(expectations, output.getValue(@TypeOf(expectations)));
+        }
+    }
+
     /// Repeats in line each value along the given axis.
     ///
-    /// * stutter1d([0, 1, 2, 3], 0, 2) = [0, 0, 1, 1, 2, 2, 3, 3]
-    pub fn stutter1d(self: Tensor, axis_: i64, n_rep: u63) Tensor {
+    /// * stutter1d([0, 1, 2, 3], -1, 2) = [0, 0, 1, 1, 2, 2, 3, 3]
+    /// This is equivalent to repeat(ax+1) unless ax is the last axis.
+    pub fn stutter1d(self: Tensor, axis_: i8, n_rep: u63) Tensor {
         const a = self.axis(axis_);
         const broadshape = self._shape.insert(a + 1, .{n_rep});
-        const stutter_dims = Shape.range(self.rank() + 1, self.dtype()).remove(a + 1);
+        const res_shape = self._shape.setDim(a, self.dim(a) * n_rep);
 
-        return self.broadcast(broadshape, stutter_dims.dims()).flatten(a);
+        const stutter_dims = Shape.range(self.rank() + 1, self.dtype()).remove(a + 1);
+        return self.broadcast(broadshape, stutter_dims.dims()).reshape(res_shape);
     }
 
     /// Repeats in line each value along the given axes.
@@ -1773,6 +1783,45 @@ pub const Tensor = struct {
             res = res.stutter1d(@intCast(a), n_rep);
         }
         return res;
+    }
+
+    test stutter1d {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        const Local = struct {
+            fn stutter1d(x: Tensor, axis_: u3, n_reps: u32) Tensor {
+                return x.stutter1d(axis_, n_reps);
+            }
+        };
+
+        {
+            const inputs: [3]u8 = .{ 1, 2, 3 };
+            const expectations: [6]u8 = .{ 1, 1, 2, 2, 3, 3 };
+
+            const input = try zml.Buffer.fromArray(platform, inputs);
+            const output = try zml.testing.compileAndCall(platform, Local.stutter1d, .{ input, 0, 2 });
+
+            try std.testing.expectEqual(expectations, output.getValue(@TypeOf(expectations)));
+        }
+        {
+            const inputs: [2][3]u8 = .{ .{ 1, 2, 3 }, .{ 4, 5, 6 } };
+            const expectations: [2][6]u8 = .{ .{ 1, 1, 2, 2, 3, 3 }, .{ 4, 4, 5, 5, 6, 6 } };
+
+            const input = try zml.Buffer.fromArray(platform, inputs);
+            const output = try zml.testing.compileAndCall(platform, Local.stutter1d, .{ input, 1, 2 });
+
+            try std.testing.expectEqual(expectations, output.getValue(@TypeOf(expectations)));
+        }
+        {
+            const inputs: [2][3]u8 = .{ .{ 1, 2, 3 }, .{ 4, 5, 6 } };
+            const expectations: [2][6]u8 = .{ .{ 1, 2, 3, 1, 2, 3 }, .{ 4, 5, 6, 4, 5, 6 } };
+
+            const input = try zml.Buffer.fromArray(platform, inputs);
+            const output = try zml.testing.compileAndCall(platform, Local.stutter1d, .{ input, 0, 2 });
+
+            try std.testing.expectEqual(expectations, output.getValue(@TypeOf(expectations)));
+        }
     }
 
     /// Returns a Tensor containing the element-wise negation of the input Tensor.
@@ -2258,7 +2307,7 @@ pub const Tensor = struct {
         // Sometimes the backend recognize this pattern, but not always.
         // So let us handle that.
         if (indices.count() == 1) {
-            return self.dynamicSlice1d(coord_axes_.get(0), .{ .start = indices.flattenAll().squeeze(0), .len = 1 }).reshape(res_shape);
+            return self.dynamicSlice1d(coord_axes_.get(0), .{ .start = indices.flatten().squeeze(0), .len = 1 }).reshape(res_shape);
         }
 
         var slice_dims: Shape.DimsArray = .{};
