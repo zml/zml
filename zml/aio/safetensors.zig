@@ -1,7 +1,6 @@
 const asynk = @import("async");
 const std = @import("std");
 const zml = @import("../zml.zig");
-const json = @import("json.zig");
 const HostBuffer = zml.HostBuffer;
 const MemoryMappedFile = @import("../aio.zig").MemoryMappedFile;
 
@@ -56,9 +55,10 @@ fn loadFromIndex(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.
         try loadFile(allocator, store, files, full_filename);
     }
 
-    if (index.object.get("__metadata__")) |metadata| {
-        var prefix_buf: [1024]u8 = undefined;
-        try json.parseMetadata(allocator, store, StringBuilder.initBuffer(&prefix_buf), metadata);
+    if (index.object.get("__metadata__")) |metadata| meta: {
+        if (metadata == .string) {
+            store._metadata.put(allocator, "__metadata__", .{ .string = metadata.string }) catch break :meta;
+        }
     }
 }
 
@@ -89,10 +89,8 @@ fn loadFile(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.Array
     var it = metadata.object.iterator();
     while (it.next()) |entry| {
         const key = entry.key_ptr.*;
-        if (std.mem.eql(u8, key, "__metadata__")) {
-            var prefix_buf: [1024]u8 = undefined;
-            try json.parseMetadata(allocator, store, StringBuilder.initBuffer(&prefix_buf), entry.value_ptr.*);
-            continue;
+        if (std.mem.eql(u8, key, "__metadata__") and entry.value_ptr.* == .string) {
+            store._metadata.put(allocator, "__metadata__", .{ .string = entry.value_ptr.string }) catch continue;
         }
         const val = entry.value_ptr.*;
         const shape_field = val.object.get("shape").?.array;
