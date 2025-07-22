@@ -152,13 +152,9 @@ copy_to_directory(
 )
 
 cc_library(
-    name = "libpjrt_neuron",
+    name = "neuron_headers",
     hdrs = ["libpjrt_neuron.h"],
     defines = ["ZML_RUNTIME_NEURON"],
-    data = [
-        ":libneuronxla",
-        ":sandbox", 
-    ],
     deps = [
         "@aws-neuronx-runtime-lib//:libnrt_headers",
     ],
@@ -169,12 +165,16 @@ zig_library(
     import_name = "runtimes/neuron",
     main = "neuron.zig",
     visibility = ["//visibility:public"],
+    data = [
+        ":libneuronxla",
+        ":sandbox", 
+    ],
     deps = [
         "//pjrt",
     ] + select({
         "//runtimes:neuron.enabled": [
             ":libneuronxla_pyenv",
-            ":libpjrt_neuron",
+            ":neuron_headers",
             ":libpython",
             "//async",
             "//stdx",
