@@ -73,6 +73,10 @@ fn FrameExx(comptime func: anytype, comptime argsT: type, comptime returnT: type
 pub fn async2(comptime func: anytype, args: anytype, result_dst: anytype) !*coro.Coro {
     const Sig = stdx.meta.FnSignature(func, @TypeOf(args));
     var new_stack = try AsyncThread.current.stack_allocator.create();
+    if (@TypeOf(result_dst) != *Sig.ReturnPayloadT) {
+        stdx.debug.compileError("async2 expects result_dst to be a *{s} got {s}", .{ @typeName(Sig.ReturnPayloadT), @typeName(@TypeOf(result_dst)) });
+    }
+
     // Note: I'm not a big fan of this struct. It would be simpler if res_dst was part of the Coro itself.
     const storage = try new_stack.push(struct { res_dst: *anyopaque, args: Sig.ArgsT });
     storage.args = args;
@@ -94,11 +98,12 @@ fn Helpers_async2(comptime Sig: stdx.meta.Signature) type {
             const storage: *struct { res_dst: *anyopaque, args: Sig.ArgsT } = @alignCast(@ptrCast(storage_raw));
 
             const res_dst: *Sig.ReturnT = @alignCast(@ptrCast(storage.res_dst));
-            res_dst.* = @call(
-                .auto,
-                Sig.Func.Value,
-                storage.args,
-            );
+            const res = @call(.auto, Sig.Func.Value, storage.args);
+            if (Sig.ReturnErrorSet) |_| {
+                res_dst.* = res catch |err| std.debug.panic("coroutine failed: {} with {}", .{ Sig.Func, err });
+            } else {
+                res_dst.* = res;
+            }
         }
     };
 }
