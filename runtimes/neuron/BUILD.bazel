@@ -186,10 +186,6 @@ zig_library(
 
 filegroup(
     name = "layers",
-    srcs = [
-        "@apt_neuron//bash/amd64",
-        "@apt_neuron//libxml2/amd64",
-        "@apt_neuron//zlib1g/amd64",
-    ],
+    srcs = [],
     visibility = ["//visibility:public"],
 )
