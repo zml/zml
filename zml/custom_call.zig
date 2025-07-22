@@ -27,8 +27,8 @@ pub const std_options: std.Options = .{
     .logFn = asynk.logFn(std.log.defaultLog),
 };
 
-pub fn CustomCallInputsType(custom_op: type) type {
-    const ArgsT = stdx.meta.FnArgs(custom_op.call);
+pub fn CustomCallInputsType(CustomOp: type) type {
+    const ArgsT = stdx.meta.FnArgs(CustomOp.call);
     if (@typeInfo(ArgsT) != .@"struct") {
         @compileError("Expected struct type");
     }
@@ -53,15 +53,16 @@ pub const CustomCallOptions = struct {
 };
 
 pub fn custom_call(
-    comptime custom_op: type,
-    inputs: CustomCallInputsType(custom_op),
+    comptime CustomOp: type,
+    inputs: CustomCallInputsType(CustomOp),
     res_shapes_: []const Shape,
     comptime opts: CustomCallOptions,
 ) []Tensor {
-    stdx.debug.assert(@hasDecl(custom_op, "call"), "custom_op must have a call method", .{});
-    const op_name = @typeName(custom_op);
+    stdx.debug.assert(@hasDecl(CustomOp, "call"), "CustomOp must have a call method", .{});
+    const op_name = @typeName(CustomOp);
 
     const ctx = CompilationContext.current();
+    ctx._num_custom_calls += 1;
     const allocator = ctx.allocator();
     const mlir_ctx = ctx.mlirCtx();
     const platform = ctx._platform;
@@ -72,7 +73,7 @@ pub fn custom_call(
         stdx.debug.panic("Custom calls are not supported for target {s}", .{@tagName(platform.target)});
     }
 
-    const ffi_func = proxy(custom_op, opts);
+    const ffi_func = proxy(CustomOp, opts);
     const target_name = "callback_" ++ op_name;
 
     ffi_.?.register(pjrt_api, target_name, @tagName(platform.target), &ffi_func, opts.register_ffi_options) catch unreachable;
@@ -114,24 +115,28 @@ pub fn custom_call(
     return custom_call_outputs[0..res_shapes_.len];
 }
 
-fn proxy(comptime custom_op: type, opts: CustomCallOptions) ffi.Handler {
+fn proxy(comptime CustomOp: type, opts: CustomCallOptions) ffi.Handler {
+    stdx.debug.assertComptime(@hasField(CustomOp, "platform"), "CustomCall context struct needs to contain a 'platform: zml.Platform' field in struct {s}", .{@typeName(CustomOp)});
+
     return struct {
         const Self = @This();
 
         pub fn proxy(call_frame: *ffi.CallFrame) callconv(.C) ?*ffi.Error {
             if (call_frame.registeringHook()) return null;
             const execution_context = call_frame.ctx;
-            const user_ctx: *custom_op = ffi.ExecutionContext.Context(custom_op).get(execution_context, call_frame.api) catch unreachable;
+            const user_ctx: *CustomOp = execution_context.getUserData(CustomOp, call_frame.api) orelse
+                stdx.debug.panic("An exe was called but its execution context {s} was never bound", .{@typeName(CustomOp)});
             const platform: Platform = user_ctx.platform;
+            log.debug("Callback called with ffi api: {*} but pjrt_api: {*}", .{ call_frame.api, platform.pjrt_api });
 
-            if (@hasField(custom_op, "stream") and platform.target != .cpu) {
+            if (@hasField(CustomOp, "stream") and platform.target != .cpu) {
                 const stream = call_frame.api.stream(execution_context);
                 user_ctx.stream = stream;
             } else {
-                log.info("No stream field provided in container {s} for custom call", .{@typeName(custom_op)});
+                log.info("No stream field provided in container {s} for custom call", .{@typeName(CustomOp)});
             }
 
-            var callback_args: std.meta.ArgsTuple(@TypeOf(custom_op.call)) = undefined;
+            var callback_args: std.meta.ArgsTuple(@TypeOf(CustomOp.call)) = undefined;
             callback_args[0] = user_ctx;
 
             inline for (1..callback_args.len) |i| {
@@ -161,8 +166,8 @@ fn proxy(comptime custom_op: type, opts: CustomCallOptions) ffi.Handler {
                 }
             }
 
-            @call(.auto, custom_op.call, callback_args) catch |err| {
-                stdx.debug.panic("Error while calling {s} call func: {any}\n", .{ @typeName(custom_op), err });
+            @call(.auto, CustomOp.call, callback_args) catch |err| {
+                stdx.debug.panic("Error while calling {s} call func: {any}\n", .{ @typeName(CustomOp), err });
             };
 
             return null;
@@ -203,17 +208,13 @@ pub const Print = struct {
     pub var type_id: i64 = undefined;
     const Self = @This();
 
-    allocator: std.mem.Allocator,
+    // TODO: is this a good idea to use the platform to
     platform: Platform,
 
     results: [1]Buffer = undefined,
 
-    pub fn init(
-        allocator: std.mem.Allocator,
-        platform: Platform,
-    ) !Print {
+    pub fn init(platform: Platform) Print {
         return .{
-            .allocator = allocator,
             .platform = platform,
         };
     }

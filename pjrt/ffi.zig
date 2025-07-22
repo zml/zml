@@ -163,29 +163,26 @@ pub const ExecutionStage = enum(c.XLA_FFI_ExecutionStage) {
 pub const ExecutionContext = opaque {
     pub const inner = TransmuteMixin(ExecutionContext, c.XLA_FFI_ExecutionContext).to;
 
-    pub fn Context(comptime T: type) type {
-        return struct {
-            pub fn get(self: *const ExecutionContext, api: *const Api) ApiError!*T {
-                const type_id: TypeId = .{ .type_id = T.type_id };
-                var ret = pjrtStruct(c.XLA_FFI_ExecutionContext_Get_Args{
-                    .ctx = @constCast(self.inner()),
-                    .type_id = @constCast(&type_id),
-                });
-                const result = api.inner().XLA_FFI_ExecutionContext_Get.?(&ret);
+    pub fn getUserDataRaw(self: *const ExecutionContext, api: *const Api, type_id: i64) ?*anyopaque {
+        var type_id_struct: TypeId = .{ .type_id = type_id };
+        var ret = pjrtStruct(c.XLA_FFI_ExecutionContext_Get_Args{
+            .ctx = @constCast(self.inner()),
+            .type_id = &type_id_struct,
+        });
+        const result = api.inner().XLA_FFI_ExecutionContext_Get.?(&ret);
 
-                if (result) |ffi_error| {
-                    const err = Error.fromInner(ffi_error);
-                    defer err.destroy(api);
-                    log.err("[ExecutionContext.get] {s}", .{err.getMessage(api)});
+        if (result) |ffi_error| {
+            const err = Error.fromInner(ffi_error);
+            defer err.destroy(api);
+            log.err("[ExecutionContext.get] {s}", .{err.getMessage(api)});
 
-                    // TODO(Corentin): Retrieve error code from Error when implemented in XLA.
-                    return error.Unknown;
-                }
+            return null;
+        }
+        return ret.data;
+    }
 
-                if (ret.data == null) return error.NotFound;
-                return @ptrCast(@alignCast(ret.data.?));
-            }
-        };
+    pub fn getUserData(self: *const ExecutionContext, T: type, api: *const Api) ?*T {
+        return @alignCast(@ptrCast(self.getUserDataRaw(api, T.type_id)));
     }
 
     pub fn getDeviceOrdinal(self: *const ExecutionContext, api: *const Api) ApiError!i32 {
