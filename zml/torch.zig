@@ -274,3 +274,12 @@ test meshgrid {
         );
     }
 }
+
+/// Flattens the given axis and the next one, into one new axis.
+pub fn flatten(self: Tensor, axis_: anytype) Tensor {
+    const old_shape = self._shape;
+    const a = self.axis(axis_);
+    stdx.debug.assert(a + 1 < self.rank(), "Can't flatten {} on the last axis {}.", .{ self, axis_ });
+    const new_shape = old_shape.mergeAxis(a, .{ a, a + 1 });
+    return self.reshape(new_shape);
+}
