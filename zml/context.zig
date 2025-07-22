@@ -8,14 +8,18 @@ const runtimes = @import("runtimes");
 const stdx = @import("stdx");
 
 const pjrt = @import("pjrtx.zig");
-const Platform = @import("platform.zig").Platform;
-const Shape = @import("shape.zig").Shape;
-const Target = @import("platform.zig").Target;
-const custom_call = @import("custom_call.zig");
-const zml_platform = @import("platform.zig");
 
-const PjrtApiMap = std.EnumArray(Target, ?*const pjrt.Api);
-const PlatformsMap = std.EnumArray(Target, ?Platform);
+const zml = struct {
+    pub const Platform = @import("platform.zig").Platform;
+    pub const HostBuffer = @import("hostbuffer.zig").HostBuffer;
+    pub const Shape = @import("shape.zig").Shape;
+    pub const Target = @import("platform.zig").Target;
+    pub const custom_call = @import("custom_call.zig");
+    pub const platform = @import("platform.zig");
+};
+
+const PjrtApiMap = std.EnumArray(zml.Target, ?*const pjrt.Api);
+const PlatformsMap = std.EnumArray(zml.Target, ?zml.Platform);
 const log = std.log.scoped(.@"zml/context");
 
 test {
@@ -94,7 +98,7 @@ pub const Context = struct {
         return .{ .platforms = PlatformsMap.initFill(null) };
     }
 
-    fn platformToLibrary(comptime target: Target) []const u8 {
+    fn platformToLibrary(comptime target: zml.Target) []const u8 {
         const ext = switch (builtin.os.tag) {
             .windows => ".dll",
             .macos, .ios, .watchos => ".dylib",
@@ -105,7 +109,7 @@ pub const Context = struct {
         };
     }
 
-    pub fn pjrtApi(target: Target) *const pjrt.Api {
+    pub fn pjrtApi(target: zml.Target) *const pjrt.Api {
         return Context.apis.get(target).?;
     }
 
@@ -119,12 +123,12 @@ pub const Context = struct {
         self.* = undefined;
     }
 
-    const prefered_targets = [_]Target{ .tpu, .neuron, .cuda, .rocm, .cpu };
+    const prefered_targets = [_]zml.Target{ .tpu, .neuron, .cuda, .rocm, .cpu };
 
     /// Automatically selects the best Platform loaded in the current Context.
     ///
     /// For example, if supported, this will select a platform corresponding to an accelerator (GPU, TPU, ...).
-    pub fn autoPlatform(self: *Context, opts: Platform.CreateOptions) Platform {
+    pub fn autoPlatform(self: *Context, opts: zml.Platform.CreateOptions) zml.Platform {
         stdx.debug.assert(prefered_targets.len == apis.values.len, "New target need to be inserted inside `zml.Context.preferred_targets`", .{});
 
         return self.platformByPreferences(opts, &prefered_targets);
@@ -133,7 +137,7 @@ pub const Context = struct {
     /// Given a list of preferred targets to select the best Platform
     ///
     /// For example, if supported, this will select a platform corresponding to an accelerator (GPU, TPU, ...).
-    pub fn platformByPreferences(self: *Context, opts: Platform.CreateOptions, prefered: []const Target) Platform {
+    pub fn platformByPreferences(self: *Context, opts: zml.Platform.CreateOptions, prefered: []const zml.Target) zml.Platform {
         // Try prefered targets.
         for (prefered) |target| {
             if (apis.get(target) == null) continue;
@@ -150,7 +154,7 @@ pub const Context = struct {
             // CPU should only be use as fallback.
             if (target == .cpu) continue;
             if (entry.value.* == null) continue;
-            if (std.mem.indexOfScalar(Target, prefered, target) != null) continue;
+            if (std.mem.indexOfScalar(zml.Target, prefered, target) != null) continue;
             return self.platform(target, opts) catch |err| {
                 log.err("Failed to load platform .{s}: {}", .{ @tagName(target), err });
                 continue;
@@ -164,7 +168,7 @@ pub const Context = struct {
         };
     }
 
-    pub fn platform(self: *Context, target: Target, opts: Platform.CreateOptions) !Platform {
+    pub fn platform(self: *Context, target: zml.Target, opts: zml.Platform.CreateOptions) !Platform {
         if (self.platforms.get(target)) |p| {
             return p;
         }
@@ -182,7 +186,7 @@ pub const Context = struct {
         return p;
     }
 
-    pub fn printAvailablePlatforms(self: Context, selected: Platform) void {
+    pub fn printAvailablePlatforms(self: Context, selected: zml.Platform) void {
         // List available targets
         log.info("Available Platforms:", .{});
         const selected_prefix = "✅";
@@ -190,7 +194,7 @@ pub const Context = struct {
         const selected_postfix = "(AUTO-SELECTED)";
         const not_selected_postfix = "";
 
-        for (zml_platform.available_targets) |target| {
+        for (zml.platform.available_targets) |target| {
             log.info("  {s} {s} {s}", .{
                 if (target == selected.target) selected_prefix else not_selected_prefix,
                 @tagName(target),
