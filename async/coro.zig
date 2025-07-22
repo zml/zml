@@ -175,9 +175,12 @@ pub const Coro = struct {
     pub fn format(self: Coro, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
         _ = fmt;
         _ = options;
-        try writer.print("Coro{{.id = {any}, .status = {s}}}", .{
+        try writer.print("Coro{{.id = {any}, .status = {s}, .storage={x}, .stack_start={x}, .stack_used={x}}}", .{
             self.id,
             @tagName(self.status),
+            @intFromPtr(self.storage),
+            @intFromPtr(self.stack.full),
+            @intFromPtr(self.stack.used.ptr),
         });
     }
 

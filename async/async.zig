@@ -73,13 +73,12 @@ fn FrameExx(comptime func: anytype, comptime argsT: type, comptime returnT: type
 pub fn async2(comptime func: anytype, args: anytype, result_dst: anytype) !*coro.Coro {
     const Sig = stdx.meta.FnSignature(func, @TypeOf(args));
     var new_stack = try AsyncThread.current.stack_allocator.create();
-    const result_dst_storage = try new_stack.push(*Sig.ReturnT);
-    result_dst_storage.* = @alignCast(@ptrCast(result_dst));
-    const args_storage = try new_stack.push(Sig.ArgsT);
-    args_storage.* = args;
-
+    // Note: I'm not a big fan of this struct. It would be simpler if res_dst was part of the Coro itself.
+    const storage = try new_stack.push(struct { res_dst: *anyopaque, args: Sig.ArgsT });
+    storage.args = args;
+    storage.res_dst = result_dst;
     const Helpers = Helpers_async2(Sig);
-    const frame = try Coro.initFromStack(Helpers.wrapfn, new_stack, args_storage);
+    const frame = try Coro.initFromStack(Helpers.wrapfn, new_stack, storage);
     frame.switchIn();
     return frame;
 }
@@ -91,17 +90,14 @@ pub fn awaitAll(futures: []const *coro.Coro) void {
 fn Helpers_async2(comptime Sig: stdx.meta.Signature) type {
     return struct {
         pub fn wrapfn() void {
-            const storage = Coro.current().storage;
-            const res_dst_storage: *(*Sig.ReturnT) = @alignCast(@ptrCast(storage));
-            const res_dst = res_dst_storage.*;
+            const storage_raw = Coro.current().storage;
+            const storage: *struct { res_dst: *anyopaque, args: Sig.ArgsT } = @alignCast(@ptrCast(storage_raw));
 
-            const offset = @max(@sizeOf(usize), @alignOf(Sig.ArgsT));
-            const res_args_storage: *const Sig.ArgsT = @ptrFromInt(@intFromPtr(storage) + offset);
-
+            const res_dst: *Sig.ReturnT = @alignCast(@ptrCast(storage.res_dst));
             res_dst.* = @call(
                 .auto,
                 Sig.Func.Value,
-                res_args_storage.*,
+                storage.args,
             );
         }
     };
