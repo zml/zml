@@ -42,7 +42,7 @@ pub const TokenEmbedding = struct {
     pub fn forward(self: TokenEmbedding, idx: Tensor) Tensor {
         stdx.debug.assert(idx.dtype().isInteger(), "TokenEmbedding expects an integer input, received: {f}", .{idx});
         stdx.debug.assert(self.weight.rank() == 2, "TokenEmbedding expects it's weight Tensor to be a 2D matrix, got {f}", .{self.weight});
-        return self.weight.gatherValues(0, idx, .{});
+        return self.weight.withTags(.{ .voc, .d }).gather(.{ .voc = idx }, .{});
     }
 };
 
@@ -484,21 +484,21 @@ pub fn nearest(input: Tensor, scale_factor: []const f64) Tensor {
         out_shape._dims.set(i + 2, @intFromFloat(@floor(@as(f64, @floatFromInt(out_shape.dim(i + 2))) * sf)));
     }
     // TODO(james): remove this implicit two batching dims
-    var sd: [3]usize = undefined;
+    var sd: [3]u3 = undefined;
     var len_sd: usize = 0;
     for (2..input.rank()) |i| {
         if (input.dim(i) != out_shape.dim(i)) {
-            sd[len_sd] = i;
+            sd[len_sd] = @intCast(i);
             len_sd += 1;
         }
     }
-    const spatial_dims = sd[0..len_sd];
+    const spatial_axes = sd[0..len_sd];
     var res = input;
-    for (spatial_dims) |d| {
-        const n = out_shape.dim(d);
-        const ratio = stdx.math.divFloat(f32, input.dim(d), n);
+    for (spatial_axes) |ax| {
+        const n = out_shape.dim(ax);
+        const ratio = stdx.math.divFloat(f32, input.dim(ax), n);
         const offsets = Tensor.arange(.{ .end = n }, .f32).addConstant(0.5).scale(ratio).floor().convert(.i32);
-        res = res.gatherValues(d, offsets, .{ .indices_are_sorted = true });
+        res = res.gather_(&.{ax}, &.{offsets}, .{ .indices_are_sorted = true });
     }
     return res;
 }
@@ -670,10 +670,11 @@ test resizeBilinear {
 }
 
 pub fn resizeLinear1d(image: Tensor, axis: i8, new_len: u63, opt: ResizeOpts) Tensor {
-    const res_shape = image.shape().set(axis, new_len);
+    const ax = image.axis(axis);
+    const res_shape = image.shape().set(ax, new_len);
 
     const dtype = opt.precision orelse if (image.dtype().class() == .integer) .f32 else image.dtype();
-    const og_len = opt.original_len orelse Tensor.scalar(image.dim(axis), dtype);
+    const og_len = opt.original_len orelse Tensor.scalar(image.dim(ax), dtype);
     const ratio = og_len.convert(dtype).scale(stdx.math.divFloat(f32, 1, new_len));
     const scaled = Tensor.arange(.{ .end = new_len }, dtype).mul(ratio);
     const left = scaled.floor();
@@ -682,11 +683,11 @@ pub fn resizeLinear1d(image: Tensor, axis: i8, new_len: u63, opt: ResizeOpts) Te
     // TODO: check that two gather isn't too bad perf wise.
     // Normally we should use gatherSlices to collect the values 2 by 2,
     // but gatherSlices messes up with the order of axes.
-    const left_val = image.gatherValues(axis, left.convert(.i32), .{ .indices_are_sorted = true }).convert(dtype);
-    const right_val = image.gatherValues(axis, right.convert(.i32), .{ .indices_are_sorted = true }).convert(dtype);
+    const left_val = image.gather_(&.{ax}, &.{left.convert(.i32)}, .{ .indices_are_sorted = true }).convert(dtype);
+    const right_val = image.gather_(&.{ax}, &.{right.convert(.i32)}, .{ .indices_are_sorted = true }).convert(dtype);
 
-    const left_weight = right.sub(scaled).broadcast(res_shape, &.{axis});
-    const right_weight = scaled.sub(left).broadcast(res_shape, &.{axis});
+    const left_weight = right.sub(scaled).broadcast(res_shape, &.{ax});
+    const right_weight = scaled.sub(left).broadcast(res_shape, &.{ax});
 
     const res = left_val.mul(left_weight).add(right_val.mul(right_weight));
     return res.convert(image.dtype()).withTags(image.shape().tags());
@@ -907,7 +908,7 @@ pub fn sampleTokens(activations: Tensor, opts: SamplingStrategy, rng: Tensor.Rng
 
     // topk_idx is indices into topk.values ! so in the range [0, topk]
     // Convert for the original indices from the full [0, voc] range.
-    const next_tokens = topk.indices.gatherValues(.voc, topk_idx.squeeze(.topk), .{});
+    const next_tokens = topk.indices.gather(.{ .voc = topk_idx.squeeze(.topk) }, .{});
     // log.debug("sampleTokens({}) -> {} -> {} -> {}", .{ activations, topk.indices, topk_idx, next_tokens });
     return .{ next_tokens, next_rng };
 }
@@ -995,7 +996,7 @@ pub fn sampleTokensDynamic(logits: Tensor, opts: DynamicSamplingStrategy, rng: T
     x = x.add(gumbel_noise);
 
     const topk_idx = x.argMax(.topk).indices;
-    const next_tokens = topk_indices.gatherValues(.voc, topk_idx.squeeze(.topk), .{});
+    const next_tokens = topk_indices.gather(.{ .voc = topk_idx.squeeze(.topk) }, .{});
     return .{ next_tokens, next_rng };
 }
 
