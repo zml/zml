@@ -1126,10 +1126,10 @@ index 0000000000..8c90942f0c
 \ No newline at end of file
 diff --git a/xla/pjrt/plugin/mlx/compile.cc b/xla/pjrt/plugin/mlx/compile.cc
 new file mode 100644
-index 0000000000..889ad0fffe
+index 0000000000..70d9a620e1
 --- /dev/null
 +++ b/xla/pjrt/plugin/mlx/compile.cc
-@@ -0,0 +1,1297 @@
+@@ -0,0 +1,1305 @@
 +#include "xla/pjrt/plugin/mlx/compile.h"
 +
 +#include <iostream>
@@ -1199,9 +1199,9 @@ index 0000000000..889ad0fffe
 +                            bool recursive_compile) {
 +  auto& block = op.front();
 +  std::unordered_map<mlir::Operation*, std::vector<mx::array>> block_ctx;
-+  std::vector<mx::array> res;
++  mlir::Operation* last_op = nullptr;
 +  for (mlir::Operation& op : block.getOperations()) {
-+    res =
++    std::vector<mx::array> res =
 +        llvm::TypeSwitch<mlir::Operation*, std::vector<mx::array>>(&op)
 +            .Case<mlir::func::ReturnOp, mlir::stablehlo::ReturnOp>(
 +                [&block_ctx, &inputs](auto o) {
@@ -1885,9 +1885,10 @@ index 0000000000..889ad0fffe
 +              // empty vector.
 +              return std::vector<mx::array>{};
 +            });
-+    block_ctx.emplace(&op, res);
++    block_ctx.emplace(&op, std::move(res));
++    last_op = &op;
 +  }
-+  return res;
++  return block_ctx.find(last_op)->second;
 +}
 +}  // namespace detail
 +
@@ -2056,48 +2057,55 @@ index 0000000000..889ad0fffe
 +    // Slice batch indices
 +    mx::array batch_indices = mx::take(result_indices, batch_dims, 1);
 +
++    // Calculate start indices
++    std::vector<mx::array> tmp_indices;
 +    if (batch_indices.size()) {
-+      // Calculate start indices
-+      std::vector<mx::array> tmp_indices =
-+          mx::split(batch_indices, batch_indices.shape(1), 1);
-+      for (auto& idx : tmp_indices) {
-+        idx = mx::flatten(idx);
-+      }
++      tmp_indices = mx::split(batch_indices, batch_indices.shape(1), 1);
++    }
++    for (auto& idx : tmp_indices) {
++      idx = mx::flatten(idx);
++    }
 +
-+      std::vector<int> tmp_axes;
-+      for (auto i = 0; i < start_indices.ndim(); ++i) {
-+        if (i == index_vector_dim) continue;
-+        tmp_axes.push_back(i);
-+      }
-+      std::vector<int32_t> tmp_slice_sizes(start_indices.ndim(), 1);
-+      if (index_vector_dim < tmp_slice_sizes.size()) {
-+        tmp_slice_sizes[index_vector_dim] =
-+            start_indices.shape(index_vector_dim);
-+      }
++    std::vector<int> tmp_axes;
++    for (auto i = 0; i < start_indices.ndim(); ++i) {
++      if (i == index_vector_dim) continue;
++      tmp_axes.push_back(i);
++    }
++    std::vector<int32_t> tmp_slice_sizes(start_indices.ndim(), 1);
++    if (index_vector_dim < tmp_slice_sizes.size()) {
++      tmp_slice_sizes[index_vector_dim] = start_indices.shape(index_vector_dim);
++    }
 +
-+      mx::array batch_start_indices = mx::reshape(
++    mx::array batch_start_indices =
++        mx::gather(start_indices, tmp_indices, tmp_axes, tmp_slice_sizes);
++    if (tmp_axes.size()) {
++      batch_start_indices = mx::reshape(
 +          mx::gather(start_indices, tmp_indices, tmp_axes, tmp_slice_sizes),
 +          {result_indices.shape(0), -1});
-+
-+      // Seed with full start indices
-+      std::vector<int32_t> max;
-+      for (auto d_start = 0; d_start < start_index_map.size(); ++d_start) {
-+        int d_operand = start_index_map[d_start];
-+        max.push_back(operand.shape(d_operand) - slice_sizes[d_operand]);
-+      }
-+
-+      operand_indices = mx::put_along_axis(
-+          operand_indices,
-+          mx::broadcast_to(start_idx_map,
-+                           {operand_indices.shape(0),
-+                            static_cast<int32_t>(start_index_map.size())}),
-+          mx::clip(
-+              mx::take(batch_start_indices,
-+                       mx::arange(static_cast<int>(start_index_map.size())), 1),
-+              mx::zeros(batch_start_indices.shape(), mx::int32),
-+              mx::array(max.data(), {static_cast<int32_t>(max.size())})),
-+          1);
++    } else if (batch_start_indices.ndim() == 1) {
++      batch_start_indices = mx::broadcast_to(
++          mx::reshape(batch_start_indices, {1, batch_start_indices.shape(0)}),
++          {result_indices.shape(0), batch_start_indices.shape(0)});
 +    }
++
++    // Seed with full start indices
++    std::vector<int32_t> max;
++    for (auto d_start = 0; d_start < start_index_map.size(); ++d_start) {
++      int d_operand = start_index_map[d_start];
++      max.push_back(operand.shape(d_operand) - slice_sizes[d_operand]);
++    }
++
++    operand_indices = mx::put_along_axis(
++        operand_indices,
++        mx::broadcast_to(start_idx_map,
++                         {operand_indices.shape(0),
++                          static_cast<int32_t>(start_index_map.size())}),
++        mx::clip(
++            mx::take(batch_start_indices,
++                     mx::arange(static_cast<int>(start_index_map.size())), 1),
++            mx::zeros(batch_start_indices.shape(), mx::int32),
++            mx::array(max.data(), {static_cast<int32_t>(max.size())})),
++        1);
 +
 +    // Calculate full batching indices
 +    mx::array i_batching =
@@ -2730,7 +2738,7 @@ index 0000000000..ef42968a3a
 \ No newline at end of file
 diff --git a/xla/pjrt/plugin/mlx/executable.cc b/xla/pjrt/plugin/mlx/executable.cc
 new file mode 100644
-index 0000000000..dfdfb33f87
+index 0000000000..ec612eca89
 --- /dev/null
 +++ b/xla/pjrt/plugin/mlx/executable.cc
 @@ -0,0 +1,507 @@
@@ -2977,7 +2985,7 @@ index 0000000000..dfdfb33f87
 +    // std::cout << "Compiling module: " << std::to_string(getHashValue(main))
 +    //           << std::endl
 +    //           << std::endl;
-+    // std::cout << ToString(module).c_str() << std::endl << std::endl;
++    // std::cout << ToString(module_.get()).c_str() << std::endl << std::endl;
 +    compiled_module_ = compile::func(module_.get(), main);
 +
 +    auto& main_block = main.front();
@@ -3062,7 +3070,7 @@ index 0000000000..dfdfb33f87
 +    std::vector<mx::array> inputs;
 +    for (auto& buffer : argument_handles) {
 +      TF_ASSIGN_OR_RETURN(mx::array input, GetArrayFromBuffer(buffer));
-+      inputs.push_back(input);
++      inputs.push_back(std::move(input));
 +    }
 +    auto mlx_res = compiled_module_(inputs);
 +    for (auto i = 0; i < mlx_res.size(); ++i) {

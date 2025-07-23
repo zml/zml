@@ -408,7 +408,7 @@ apple_metal_library(
     visibility = ["//visibility:public"],
     copts = [
         "-target",
-        "air64-apple-macosx15.4.1",
+        "air64-apple-macosx15.5",
         "-Iexternal/mlx+",
         "-Iexternal/mlx+/mlx/backend/metal/kernels/metal_3_1",
         # "-I.",
