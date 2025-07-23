@@ -1,5 +1,6 @@
 load("@rules_zig//zig:defs.bzl", "zig_library")
 load("//bazel:swig.bzl", "swig_cc_library")
+load("//bazel:zig_srcs.bzl", "zig_srcs")
 
 swig_cc_library(
     name = "sentencepiece_swig",
@@ -21,4 +22,14 @@ zig_library(
         "//ffi:zig",
         "//stdx",
     ],
+)
+
+zig_srcs(
+    name = "sources",
+    zig_lib = ":sentencepiece",
+)
+
+cc_static_library(
+    name="sentencepiece_static",
+    deps = [":sentencepiece_swig"]
 )
