@@ -1,5 +1,6 @@
 load("@rules_zig//zig:defs.bzl", "zig_library")
 load("@zml//bazel:zig.bzl", "zig_cc_binary")
+load("@zml//bazel:zig_srcs.bzl", "zig_srcs")
 
 zig_library(
     name = "tokenizer",
@@ -8,7 +9,6 @@ zig_library(
     main = "tokenizer.zig",
     visibility = ["//visibility:public"],
     deps = [
-        "//async",
         "//ffi:zig",
         "//zml/tokenizer/hftokenizers",
         "//zml/tokenizer/sentencepiece",
@@ -24,4 +24,9 @@ zig_cc_binary(
         "//async",
         "//stdx",
     ],
+)
+
+zig_srcs(
+    name = "sources",
+    zig_lib = ":tokenizer",
 )
