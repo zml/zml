@@ -462,10 +462,9 @@ pub fn if_(
         }
     }
 
-    const scalar_pred = if (pred.rank() == 0) pred else pred.flatten().squeeze(0);
     const loc = ctx.mlirCtx().location(@src());
     const op = mlir.Operation.make(ctx.mlirCtx(), "stablehlo.if", .{
-        .operands = &.{scalar_pred.value()},
+        .operands = &.{pred.asScalar().value()},
         .result_type_inference = true,
         .blocks = &.{ true_branch_block, false_branch_block },
         // We can't verify right away, cause the weights captured by the if haven't been added yet.
