@@ -87,7 +87,7 @@ pub const LlamaLM = struct {
         kv_cache: KvCache,
         rng: Tensor.Rng,
     ) struct { Tensor, KvCache, Tensor.Rng } {
-        stdx.debug.assert(tokens_.dtype() == .u32 and tokens_.rank() >= 1 and token_index.dtype() == .u32 and token_index.rank() <= 1, "Can't run Llama ! Expected >=1d tokens and 0d token_index, got: {} and {}", .{ tokens_, token_index });
+        stdx.debug.assert(tokens_.dtype() == .u32 and tokens_.rank() >= 1 and token_index.dtype() == .u32 and token_index.rank() <= 1, "Can't run Llama ! Expected >=1d tokens and 0d token_index, got: {f} and {f}", .{ tokens_, token_index });
         const tokens = tokens_.withPartialTags(.{.s});
         const out, const updated_kv_cache = zml.call(self.model, .forward, .{ tokens, token_index, kv_cache });
         const new_tokens, const new_rng = self.sampleTokens(self.lm_head, out, rng, self.gen_opts);
@@ -200,8 +200,8 @@ pub const TransformerLayer = struct {
         kv_cache: KvCache,
     ) struct { Tensor, KvCache } {
         // Self Attention
-        //log.debug("TransformerLayer({}) -> {}", .{ x0, self.input_layernorm.forward(x0) });
-        stdx.debug.assert(x0.rank() >= 2 and x0.shape().hasTags(.{ .s, .d }), "TransformerLayer expected input shape: {{..., .s, .d}}, received: {}", .{x0});
+        //log.debug("TransformerLayer({f}) -> {f}", .{ x0, self.input_layernorm.forward(x0) });
+        stdx.debug.assert(x0.rank() >= 2 and x0.shape().hasTags(.{ .s, .d }), "TransformerLayer expected input shape: {{..., .s, .d}}, received: {f}", .{x0});
 
         const x0_normalized = zml.call(self.input_layernorm, .forward, .{x0});
         const delta0, const updated_kv_cache = zml.call(self.self_attn, .forward, .{ x0_normalized, token_index, kv_cache });
@@ -336,7 +336,7 @@ pub const KvCache = struct {
         return .{
             .k = try zml.Buffer.constant(platform, kv_shape, 1),
             .v = try zml.Buffer.constant(platform, kv_shape, 1),
-            .layer_index = try zml.Buffer.constant(platform, zml.Shape.init(.{}, .u32), 0),
+            .layer_index = try zml.Buffer.scalar(platform, 0, .u32),
         };
     }
 
