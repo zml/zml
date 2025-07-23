@@ -40,8 +40,8 @@ pub const TokenEmbedding = struct {
     weight: Tensor,
 
     pub fn forward(self: TokenEmbedding, idx: Tensor) Tensor {
-        stdx.debug.assert(idx.dtype().isInteger(), "TokenEmbedding expects an integer input, received: {}", .{idx});
-        stdx.debug.assert(self.weight.rank() == 2, "TokenEmbedding expects it's weight Tensor to be a 2D matrix, got {}", .{self.weight});
+        stdx.debug.assert(idx.dtype().isInteger(), "TokenEmbedding expects an integer input, received: {f}", .{idx});
+        stdx.debug.assert(self.weight.rank() == 2, "TokenEmbedding expects it's weight Tensor to be a 2D matrix, got {f}", .{self.weight});
         return self.weight.gatherValues(0, idx, .{});
     }
 };

@@ -201,7 +201,7 @@ pub const Buffer = struct {
             const duration_ms = stdx.math.divFloat(f32, start.read(), std.time.ns_per_ms);
             if (duration_ms > 100) {
                 const size_gb = stdx.math.divFloat(f32, shape_.byteSize(), 1024 * 1024 * 1024);
-                log.info("Wrote constant({_}) to device ({d:.2}Gb) in {d:.0}ms: {d:.2}Gb/s", .{ shape_, size_gb, duration_ms, size_gb / duration_ms * 1000 });
+                log.debug("Wrote constant({f}) to device ({d:.2}Gb) in {d:.0}ms: {d:.2}Gb/s", .{ shape_, size_gb, duration_ms, size_gb / duration_ms * 1000 });
             }
         }
 
