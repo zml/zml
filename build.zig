@@ -75,10 +75,9 @@ pub fn build(b: *std.Build) void {
             .{ .name = "stdx", .module = stdx },
         },
     });
+    mlir.addObjectFile(mlir_obj);
 
     const mlir_test = b.addTest(.{ .root_module = mlir });
-    // TODO: I'm not sure what's the best idea: add the object to the compile step or directly to the module.
-    mlir_test.addObjectFile(mlir_obj);
     const run_mlir_tests = b.addRunArtifact(mlir_test);
     test_step.dependOn(&run_mlir_tests.step);
 
@@ -104,7 +103,6 @@ pub fn build(b: *std.Build) void {
     });
 
     const mlir_dialects_test = b.addTest(.{ .root_module = mlir_dialects });
-    mlir_dialects_test.addObjectFile(mlir_obj);
     const run_mlir_dialects_tests = b.addRunArtifact(mlir_dialects_test);
     test_step.dependOn(&run_mlir_dialects_tests.step);
 
@@ -195,48 +193,60 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_async_tests.step);
 
     const zml_deps = Tarball.zmlDepsTarball(b, platforms);
-    // ffi
-    const ffi = zml_deps.extractModule(
-        "ffi",
-        "ffi",
-        "ffi.zig",
-        .{ .target = target, .optimize = optimize },
+
+    // tokenizer
+    const tokenizer_c_deps_srcs = Tarball.sources(b, "zml/tokenizer");
+    const tokenizer_c_deps = tokenizer_c_deps_srcs.extractModule(
+        null,
+        "zml/tokenizer",
+        "sources_bin_c.zig",
+        .{ .link_libcpp = true },
     );
 
+    const ffi = b.addModule(
+        "ffi",
+        .{ .root_source_file = b.path("ffi/ffi.zig"), .target = target, .optimize = optimize, .imports = &.{
+            .{ .name = "c", .module = tokenizer_c_deps },
+        } },
+    );
     const ffi_test = b.addTest(.{ .root_module = ffi });
     const run_ffi_tests = b.addRunArtifact(ffi_test);
     test_step.dependOn(&run_ffi_tests.step);
 
-    // hftokenizers
-    const hftokenizers = zml_deps.extractModule(
-        "//zml/tokenizer/hftokenizers",
-        "zml/tokenizer/hftokenizers",
-        "hftokenizers.zig",
-        .{ .target = target, .optimize = optimize },
-    );
-
-    // sentencepiece
-    const sentencepiece_c_deps_srcs = Tarball.sources(b, "zml/tokenizer/sentencepiece");
-    const sentencepiece_c_deps = sentencepiece_c_deps_srcs.extractModule(
-        null,
-        "zml/tokenizer/sentencepiece",
-        "sources_bin_c.zig",
-        .{ .link_libcpp = true },
-    );
-    const sentencepiece = zml_deps.extractModule(
-        "//zml/tokenizer/sentencepiece",
-        "zml/tokenizer/sentencepiece",
-        "sentencepiece.zig",
+    const hftokenizers = b.addModule(
+        "tokenizer/hftokenizers",
         .{
+            .root_source_file = b.path("zml/tokenizer/hftokenizers/hftokenizers.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "c", .module = sentencepiece_c_deps },
+                .{ .name = "c", .module = tokenizer_c_deps },
+                .{ .name = "ffi", .module = ffi },
             },
         },
     );
+    const hftokenizers_lib = objectFromBazel(b, "//zml/tokenizer/hftokenizers:hftokenizers_rs", "zml/tokenizer/hftokenizers/libzml_tokenizer_hftokenizers.a");
+    hftokenizers.addObjectFile(hftokenizers_lib);
 
-    // tokenizer
+    const sentencepiece = b.addModule(
+        "tokenizer/sentencepiece",
+        .{
+            .root_source_file = b.path("zml/tokenizer/sentencepiece/sentencepiece.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "c", .module = tokenizer_c_deps },
+                .{ .name = "ffi", .module = ffi },
+            },
+            .link_libcpp = true,
+        },
+    );
+    const sentencepiece_swig = objectFromBazel(b, "//zml/tokenizer/sentencepiece:sentencepiece_static", "zml/tokenizer/sentencepiece/libsentencepiece_static.a");
+    sentencepiece.addObjectFile(sentencepiece_swig);
+    if (target.result.os.tag == .macos) {
+        sentencepiece.linkFramework("CoreFoundation", .{});
+    }
+
     const tokenizer = b.addModule(
         "tokenizer",
         .{
@@ -245,9 +255,6 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "ffi", .module = ffi },
-                // Note: even though we import sentencepiece and hftokenizers,
-                // we don't link the corresponding .a cause there is no tests
-                // for them directly.
                 .{ .name = "hftokenizers", .module = hftokenizers },
                 .{ .name = "sentencepiece", .module = sentencepiece },
             },
@@ -362,8 +369,8 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "c", .module = zml_c_deps }},
         },
     );
-    const macos_tools_obj = objectFromBazel(b, "//zml/tools:macos_static_tools", "zml/tools/libmacos_static_tools.a");
     if (target.result.os.tag == .macos) {
+        const macos_tools_obj = objectFromBazel(b, "//zml/tools:macos_static_tools", "zml/tools/libmacos_static_tools.a");
         zml_tools.addObjectFile(macos_tools_obj);
     }
 
@@ -409,7 +416,8 @@ pub fn build(b: *std.Build) void {
 /// The object need to be added to a Compile step with `step.addObjectFile(obj)`.
 fn objectFromBazel(b: *std.Build, target: []const u8, output: []const u8) std.Build.LazyPath {
     // TODO: consider parsing bazel target to generate output path.
-    const bazel_cmd = b.addSystemCommand(&.{ "bazel", "build", "-c", "opt", target });
+    const bazel_cmd = b.addSystemCommand(&.{ "bazel", "build", "-c", "opt", target, "--verbose_failures" });
+    bazel_cmd.setCwd(b.path(""));
     const obj_path = b.pathJoin(&.{ "bazel-bin", output });
 
     // Copy bazel output into zig-cache, cause bazel may remove the file later.
@@ -429,7 +437,7 @@ const Tarball = struct {
         const allocator = b.allocator;
         const target = std.mem.concat(allocator, u8, &.{ "//", name, ":sources" }) catch @panic("OOM");
         const bazel_cmd: *std.Build.Step.Run = b.addSystemCommand(&.{ "bazel", "build", target });
-
+        bazel_cmd.setCwd(b.path(""));
         const srcs_tar = b.path(b.pathJoin(&.{ "bazel-bin", name, "sources.tar" }));
         return .{ .create_cmd = bazel_cmd, .path = srcs_tar };
     }
@@ -446,6 +454,7 @@ const Tarball = struct {
             const bazel_cmd: *std.Build.Step.Run = b.addSystemCommand(&.{ "bazel", "build", "//zml:sources" });
             bazel_cmd.addArg(if (platforms.cpu) "--@zml//runtimes:cpu=true" else "--@zml//runtimes:cpu=false");
             bazel_cmd.addArg(if (platforms.cuda) "--@zml//runtimes:cuda=true" else "--@zml//runtimes:cuda=false");
+            bazel_cmd.setCwd(b.path(""));
 
             const srcs_tar = b.path(b.pathJoin(&.{ "bazel-bin", "zml", "sources.tar" }));
             return .{ .create_cmd = bazel_cmd, .path = srcs_tar };

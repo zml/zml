@@ -1,0 +1,34 @@
+.{
+    .name = .zml_examples_llama,
+    .version = "0.0.0",
+    .fingerprint = 0x236db824b3ad49a7, // Changing this has security and trust implications.
+
+    // Tracks the earliest Zig version that the package considers to be a
+    // supported use case.
+    .minimum_zig_version = "0.15.0",
+
+    .dependencies = .{
+       .zml = .{
+            .path = "../../",
+        },
+        .clap = .{
+            .url = "https://github.com/Hejsil/zig-clap/archive/6f103922a8133ba11773e6ad9a52e26e1d99b3e7.tar.gz",
+            .hash = "clap-0.10.0-oBajB0nsAQAlef8ldBenH89XSJNc_x1rVNkpHK2Y2tHg",
+        },
+    },
+
+    // Specifies the set of files and directories that are included in this package.
+    // Only files and directories listed here are included in the `hash` that
+    // is computed for this package. Only files listed here will remain on disk
+    // when using the zig package manager. As a rule of thumb, one should list
+    // files required for compilation plus any license(s).
+    // Paths are relative to the build root. Use the empty string (`""`) to refer to
+    // the build root itself.
+    // A directory listed here means that all files within, recursively, are included.
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "main.zig",
+        "llama.zig",
+    },
+}
