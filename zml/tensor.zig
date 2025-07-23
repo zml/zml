@@ -532,9 +532,7 @@ pub const Tensor = struct {
         algorithm: dialect.stablehlo.RngAlgorithm.Type = .DEFAULT,
 
         pub fn shape() ShapeOf(Rng) {
-            return .{
-                ._state = Shape.init(.{2}, .u64),
-            };
+            return .{ ._state = .init(.{2}, .u64) };
         }
 
         pub fn init(platform: Platform, seed: u128) !Bufferized(Rng) {
@@ -3730,9 +3728,10 @@ pub const Tensor = struct {
     /// This is implemented with broadcasting, so typically it won't copy.
     /// In Pytorch/Numpy this is know as `meshgrid` with "ij" mode.
     /// See `zml.torch.meshgrid` for the "xy" mode.
-    pub fn cartesianProduct(comptime N: u3, vectors: [N]Tensor) [N]Tensor {
-        var out: @TypeOf(vectors) = undefined;
-        _cartesianProduct(&vectors, &out);
+    pub fn cartesianProduct(vectors: []const Tensor) []Tensor {
+        const ctx = CompilationContext.current();
+        const out = ctx.allocator().alloc(Tensor, vectors.len) catch @panic("OOM");
+        _cartesianProduct(vectors, out);
         return out;
     }
 
@@ -3767,7 +3766,7 @@ pub const Tensor = struct {
 
         const Local = struct {
             pub fn _cartesianProduct2(a: Tensor, b: Tensor) [2]Tensor {
-                return cartesianProduct(2, .{ a, b });
+                return cartesianProduct(&.{ a, b })[0..2].*;
             }
         };
 

@@ -216,21 +216,25 @@ pub const MeshgridIndexing = enum { xy, ij };
 /// - In the 3-D case with vectors of length M, N and P:
 ///   * for ‘ij’ indexing, outputs are of shape (M, N, P)
 ///   * for ‘xy’ indexing, outputs are of shape (N, M, P)
-pub fn meshgrid(comptime N: u3, vectors: [N]Tensor, indexing: MeshgridIndexing) [N]Tensor {
-    stdx.debug.assertComptime(vectors.len >= 1, "Invalid meshgrid. No input.", .{});
-    stdx.debug.assertComptime(vectors.len <= Tensor.MAX_RANK, "Invalid meshgrid(...). Too many inputs: {}", .{vectors.len});
+pub fn meshgrid(vectors: []Tensor, indexing: MeshgridIndexing) []Tensor {
+    stdx.debug.assert(vectors.len >= 1, "Invalid meshgrid. No input.", .{});
+    stdx.debug.assert(vectors.len <= Tensor.MAX_RANK, "Invalid meshgrid(...). Too many inputs: {}", .{vectors.len});
 
     if (vectors.len == 1) return vectors;
 
     return switch (indexing) {
-        .ij => zml.Tensor.cartesianProduct(N, vectors),
+        .ij => zml.Tensor.cartesianProduct(vectors),
         .xy => {
             const x, const y = vectors[0..2].*;
-            var new_vectors = vectors;
-            new_vectors[0..2].* = .{ y, x };
-            var res = zml.Tensor.cartesianProduct(N, new_vectors);
+            vectors[0] = y;
+            vectors[1] = x;
+
+            var res = zml.Tensor.cartesianProduct(vectors);
             const y_res, const x_res = res[0..2].*;
             res[0..2].* = .{ x_res, y_res };
+
+            vectors[0] = x;
+            vectors[1] = y;
             return res;
         },
     };
@@ -244,7 +248,9 @@ test meshgrid {
 
     const Local = struct {
         pub fn _meshgrid2(a: Tensor, b: Tensor, indexing: MeshgridIndexing) [2]Tensor {
-            return meshgrid(2, .{ a, b }, indexing);
+            var a_b: [2]Tensor = .{ a, b };
+            const res = meshgrid(&a_b, indexing)[0..2].*;
+            return res;
         }
     };
 

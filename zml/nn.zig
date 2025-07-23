@@ -433,8 +433,8 @@ test rope {
     // x is made such as the interleaved and sequential reps are the same.
     // So the two implementations should give the same results.
     const x = try zml.Buffer.fromSlice(platform, .{ .b = 1, .s = 5, .hd = 4 }, &[_]f32{ 1.0, 0.1, -1.0, -0.5 } ** 5);
-    const res1 = try zml.testing.compileAndCall(platform, Local._fwd, .{ x, RopeOpts{ .layout = .interleaved } });
-    const res2 = try zml.testing.compileAndCall(platform, Local._fwd, .{ x, RopeOpts{ .layout = .sequential } });
+    const res1 = try zml.testing.compileAndCall(platform, Local._fwd, .{ x, .{ .layout = .interleaved } });
+    const res2 = try zml.testing.compileAndCall(platform, Local._fwd, .{ x, .{ .layout = .sequential } });
     try zml.testing.expectClose(res1, res2, 1e-4);
 }
 
@@ -479,28 +479,30 @@ pub fn upsample(
 }
 
 pub fn nearest(input: Tensor, scale_factor: []const f64) Tensor {
+    // TODO: rewrite the API to match the rest of ZML
     var out_shape = input.shape();
     for (scale_factor, 0..) |sf, i| {
         out_shape._dims.set(i + 2, @intFromFloat(@floor(@as(f64, @floatFromInt(out_shape.dim(i + 2))) * sf)));
     }
     // TODO(james): remove this implicit two batching dims
-    var sd: [3]u3 = undefined;
-    var len_sd: usize = 0;
+    var resized_axes: [8]u3 = undefined;
+    var offsets: [8]Tensor = undefined;
+    var n: u8 = 0;
+
     for (2..input.rank()) |i| {
-        if (input.dim(i) != out_shape.dim(i)) {
-            sd[len_sd] = @intCast(i);
-            len_sd += 1;
-        }
+        const ax = input.axis(i);
+        const current_dim = input.dim(ax);
+        const target_dim = out_shape.dim(ax);
+        if (input.dim(ax) == out_shape.dim(ax)) continue;
+
+        const ratio = stdx.math.divFloat(f32, current_dim, target_dim);
+        offsets[n] = Tensor.arange(.{ .end = target_dim }, .f32).addConstant(0.5).scale(ratio).floor().convert(.i32);
+        resized_axes[n] = ax;
+        n += 1;
     }
-    const spatial_axes = sd[0..len_sd];
-    var res = input;
-    for (spatial_axes) |ax| {
-        const n = out_shape.dim(ax);
-        const ratio = stdx.math.divFloat(f32, input.dim(ax), n);
-        const offsets = Tensor.arange(.{ .end = n }, .f32).addConstant(0.5).scale(ratio).floor().convert(.i32);
-        res = res.gather_(&.{ax}, &.{offsets}, .{ .indices_are_sorted = true });
-    }
-    return res;
+
+    const offset_grid = Tensor.cartesianProduct(offsets[0..n]);
+    return input.gather_(resized_axes[0..n], offset_grid, .{ .indices_are_sorted = true });
 }
 
 test nearest {
