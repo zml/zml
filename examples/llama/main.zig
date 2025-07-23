@@ -179,21 +179,22 @@ pub fn asyncMain() !void {
         .PATH = clap.parsers.string,
     };
     var diag: clap.Diagnostic = .{};
-    const stderr = std.io.getStdErr().writer();
+    var stderr_buffer: [1024]u8 = undefined;
+    var stderr = std.fs.File.stderr().writer(&stderr_buffer);
     var res = clap.parse(clap.Help, &params, parsers, .{
         .diagnostic = &diag,
         .allocator = allocator,
     }) catch |err| {
-        diag.report(stderr, err) catch {};
-        stderr.print("usage: ", .{}) catch {};
-        clap.usage(stderr, clap.Help, &params) catch {};
-        stderr.print("\n", .{}) catch {};
+        diag.report(&stderr.interface, err) catch {};
+        stderr.interface.print("usage: ", .{}) catch {};
+        clap.usage(&stderr.interface, clap.Help, &params) catch {};
+        stderr.interface.print("\n", .{}) catch {};
         return;
     };
     defer res.deinit();
 
     if (res.args.help != 0) {
-        clap.help(std.io.getStdErr().writer(), clap.Help, &params, .{}) catch {};
+        clap.help(&stderr.interface, clap.Help, &params, .{}) catch {};
         return;
     }
 
@@ -301,13 +302,13 @@ pub fn asyncMain() !void {
     log.info("\tLoading Llama weights from {?s}...", .{model_weights_path});
     var llama_weights = try zml.aio.loadBuffers(llama.LlamaLM, .{ config, llama_options }, ts, model_arena.allocator(), platform);
     defer zml.aio.unloadBuffers(&llama_weights);
-    log.info("✅\tLoaded weights in {}", .{std.fmt.fmtDuration(start.read())});
+    log.info("✅\tLoaded weights in {D}", .{start.read()});
 
     var llama_module_prefill = (try fut_mod_prefill.awaitt()).prepare(llama_weights);
     defer llama_module_prefill.deinit();
     var llama_module = (try fut_mod.awaitt()).prepare(llama_weights);
     defer llama_module.deinit();
-    log.info("✅\tCompiled model in {}", .{std.fmt.fmtDuration(start.read())});
+    log.info("✅\tCompiled model in {D}", .{start.read()});
 
     log.info("Creating KvCache", .{});
     const kv_cache = try llama.KvCache.initBuffer(kv_shape, platform);
