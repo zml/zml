@@ -2,13 +2,14 @@ load("@python_versions//3.11:defs.bzl", _py_binary = "py_binary")
 load("@rules_python//python:defs.bzl", "PyInfo")
 load("@with_cfg.bzl", "with_cfg")
 load("//bazel:http_deb_archive.bzl", "http_deb_archive")
+load("//bazel:simple_repository.bzl", "simple_repository")
 load("//runtimes/common:packages.bzl", "packages")
 
 BASE_URL = "https://apt.repos.neuron.amazonaws.com"
 STRIP_PREFIX = "opt/aws/neuron"
 
 _BUILD_FILE_PRELUDE = """\
-package(default_visibility = ["@zml//runtimes/neuron:__subpackages__"])
+package(default_visibility = ["//visibility:public"])
 """
 
 _UBUNTU_PACKAGES = {
@@ -58,6 +59,11 @@ def _neuron_impl(mctx):
     loaded_packages = packages.read(mctx, [
         "@zml//runtimes/neuron:packages.lock.json",
     ])
+
+    simple_repository(
+        name = "libpjrt_neuron",
+        build_file = ":libpjrt_neuron.BUILD.bazel",
+    )
 
     for pkg_name, build_file_content in _UBUNTU_PACKAGES.items():
         pkg = loaded_packages[pkg_name]

@@ -149,14 +149,13 @@ pub fn load() !*const pjrt.Api {
     const r = r_.withSourceRepo(source_repo);
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const sandbox_path = try r.rlocation("zml/runtimes/neuron/sandbox", &path_buf) orelse {
+    const sandbox_path = try r.rlocation("libpjrt_neuron/sandbox", &path_buf) orelse {
         log.err("Failed to find sandbox path for NEURON runtime", .{});
         return error.FileNotFound;
     };
 
     setNeuronCCFlags();
     try initialize();
-
 
     return blk: {
         var lib_path_buf: [std.fs.max_path_bytes]u8 = undefined;
