@@ -47,11 +47,7 @@ fn pyErrorOrExit(status: c.PyStatus) void {
     }
 }
 
-fn initialize() !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
-    const allocator = arena.allocator();
-    defer arena.deinit();
-
+fn initialize(allocator: std.mem.Allocator, r_: *runfiles.Runfiles) !void {
     {
         var preconfig: c.PyPreConfig = undefined;
         c.PyPreConfig_InitIsolatedConfig(&preconfig);
@@ -63,7 +59,6 @@ fn initialize() !void {
     c.PyConfig_InitIsolatedConfig(&config);
     defer c.PyConfig_Clear(&config);
 
-    var r_ = try runfiles.Runfiles.create(.{ .allocator = allocator }) orelse return error.Unavailable;
     const r = r_.withSourceRepo(bazel_builtin.current_repository);
 
     var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -155,7 +150,7 @@ pub fn load() !*const pjrt.Api {
     };
 
     setNeuronCCFlags();
-    try initialize();
+    try initialize(arena.allocator(), &r_);
 
     return blk: {
         var lib_path_buf: [std.fs.max_path_bytes]u8 = undefined;
