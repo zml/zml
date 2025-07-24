@@ -34,10 +34,6 @@ fn pjrtStructSize(comptime T: type) usize {
 pub inline fn pjrtStruct(v: anytype) @TypeOf(v) {
     var ret = v;
     ret.struct_size = pjrtStructSize(@TypeOf(v));
-    if (@TypeOf(v) == c.PJRT_Plugin_Attributes_Args) {
-        std.debug.print("type is {any} and size is {}\n", .{ @TypeOf(v), ret.struct_size });
-        ret.struct_size = 0x18;
-    }
     return ret;
 }
 
@@ -100,8 +96,6 @@ pub const Api = struct {
         const api = DynGetPjrtApi();
         log.info("Loaded library: {s}", .{library});
         _ = api.call(.PJRT_Plugin_Initialize, .{}) catch unreachable;
-
-        log.info("PJRT Version is {any}\n", .{api.version()});
 
         return api;
     }
