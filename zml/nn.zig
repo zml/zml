@@ -46,6 +46,32 @@ pub const TokenEmbedding = struct {
     }
 };
 
+const MoeOpts = struct {
+    tokens_per_expert: u32,
+    // TODO: handle an upper-bound on the number of experts per token.
+    // There are basically two implementation of MoE.
+    // The original paper
+    // experts_per_token: u32,
+};
+
+/// - input: .{ .s, .d } per-entry vector
+/// - gating: .{ .s, .expert } per-entry expert-affinity
+/// - experts: .{ .expert, .d_out, .d } expert layer (need to have a .forward method).
+/// -> output: .{ .s, .d_out }
+pub fn mixtureOfExperts(Expert: type, experts: Expert, input: Tensor, gating: Tensor, opts: MoeOpts) Tensor {
+    log.warn("mixtureOfExperts({s}, {}, {f}, {f})", .{ @typeName(Expert), experts, input, gating });
+    const routing = gating.topK(opts.tokens_per_expert, .expert, .{});
+    const routing_score = routing.values.sum(.expert);
+
+    const input_per_expert = input.gather(.{ .s = routing.indices }, .{});
+    var output_per_expert = experts.forward(input_per_expert);
+    output_per_expert = output_per_expert.mul(routing.values.div(routing_score).broad(output_per_expert.shape()));
+    var output: Tensor = .constant(output_per_expert.shape().drop(.expert), input.dtype().zero());
+    output = output.scatterSlices(.{ .expert = routing.indices }, output_per_expert, .{ .update_fn = Tensor.ScatterOpts.increment });
+
+    return output;
+}
+
 pub const Activation = union(enum) {
     sigmoid,
     tanh,
