@@ -6,11 +6,10 @@ const stdx = @import("stdx");
 const log = std.log.scoped(.@"zml/runtimes/neuron");
 
 pub export fn GetPjrtApi() *anyopaque {
-
     var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
     defer arena.deinit();
 
-    var r_ = runfiles.Runfiles.create(.{ .allocator = arena.allocator() }) catch |err| { 
+    var r_ = runfiles.Runfiles.create(.{ .allocator = arena.allocator() }) catch |err| {
         stdx.debug.panic("Unable to find runfiles: {}", .{err});
     } orelse stdx.debug.panic("Runfiles not availeabwewefle", .{});
 
@@ -33,7 +32,7 @@ pub export fn GetPjrtApi() *anyopaque {
     };
 
     const sym = lib.lookup(*const fn () callconv(.C) *anyopaque, "GetPjrtApi") orelse {
-         stdx.debug.panic("Unable to find symbol GetPjrtApi in plugin: {s}", .{library});
+        stdx.debug.panic("Unable to find symbol GetPjrtApi in plugin: {s}", .{library});
     };
 
     return sym();
