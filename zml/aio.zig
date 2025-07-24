@@ -337,12 +337,14 @@ fn _populateStruct(
             return false;
         };
     }
+    log.debug("Populating {s} ({s})", .{ prefix, @typeName(T) });
 
     return switch (type_info) {
         .pointer => |ptr_info| {
             if (ptr_info.size == .slice) {
                 obj.* = &.{};
 
+                if (!zml.meta.Contains(ptr_info.child, zml.Tensor)) return false;
                 const len = buffer_store.countLayers(prefix);
                 if (len > 0) {
                     obj.* = try allocator.alloc(ptr_info.child, len);
@@ -386,19 +388,25 @@ fn _populateStruct(
 
                 var has_default = false;
                 if (field.default_value_ptr) |_| has_default = true;
-                const field_found = try _populateStruct(allocator, prefix_builder, unique_id, buffer_store, &@field(obj, field.name), required and !has_default);
-                partial_struct = partial_struct or field_found;
-                if (!field_found) {
-                    if (field.default_value_ptr) |v| {
-                        @field(obj, field.name) = @as(*const field.type, @ptrCast(@alignCast(v))).*;
-                    } else {
-                        if (partial_struct) {
-                            log.warn("Incomplete metadata '{0s}': {1s}. Missing field: '{2s}'. '{0s}' will be ignored.", .{ prefix, @typeName(T), field.name });
-                            obj.* = undefined;
+
+                if (zml.meta.Contains(field.type, zml.Tensor)) {
+                    const field_found = try _populateStruct(allocator, prefix_builder, unique_id, buffer_store, &@field(obj, field.name), required and !has_default);
+                    partial_struct = partial_struct or field_found;
+                    if (!field_found) {
+                        if (field.default_value_ptr) |v| {
+                            @field(obj, field.name) = @as(*const field.type, @ptrCast(@alignCast(v))).*;
+                        } else {
+                            if (partial_struct) {
+                                log.warn("Incomplete struct '{0s}': {1s}. Missing field: '{2s}'. '{0s}' will be ignored.", .{ prefix, @typeName(T), field.name });
+                                // if (required) {
+                                //     findSimilarBufferKeys(prefix, buffer_store, allocator);
+                                // }
+                                obj.* = undefined;
+                                return false;
+                            }
+
                             return false;
                         }
-
-                        return false;
                     }
                 }
             }
@@ -415,11 +423,22 @@ fn _populateStruct(
             return true;
         },
         .float => {
-            obj.* = std.math.nan(@TypeOf(obj.*));
+            // obj.* = std.math.nan(@TypeOf(obj.*));
             return true;
         },
         .void => true,
-        .@"union" => true,
+        .@"union" => |union_info| {
+            inline for (union_info.fields) |field| {
+                obj.* = @unionInit(T, field.name, undefined);
+                // @compileLog(T, field.name, field.type);
+                log.warn("Trying to init {s} as a {s}", .{ prefix, @typeName(field.type) });
+                const field_found = try _populateStruct(allocator, prefix_builder, unique_id, buffer_store, &@field(obj, field.name), true);
+                if (field_found) return true;
+            }
+            if (required) log.warn("Failed to init {s} as any of {s}", .{ prefix, @typeName(T) });
+            obj.* = undefined;
+            return false;
+        },
         .bool => {
             obj.* = undefined;
             return true;
