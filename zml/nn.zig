@@ -47,27 +47,58 @@ pub const TokenEmbedding = struct {
 };
 
 const MoeOpts = struct {
-    tokens_per_expert: u32,
-    // TODO: handle an upper-bound on the number of experts per token.
-    // There are basically two implementation of MoE.
-    // The original paper
-    // experts_per_token: u32,
+    experts_per_token: u32,
 };
 
+/// We have two algorithms,
+/// * one for non-sharded single-stream inference (naive),
+/// * one for sharded, batched inference (mixtral).
+///
+/// The preferred algorithm is the batched one,
+/// it is selected as soon there is enough tokens to guarantee that experts will be active most of the time.
+///
 /// - input: .{ .s, .d } per-entry vector
 /// - gating: .{ .s, .expert } per-entry expert-affinity
 /// - experts: .{ .expert, .d_out, .d } expert layer (need to have a .forward method).
 /// -> output: .{ .s, .d_out }
 pub fn mixtureOfExperts(Expert: type, experts: Expert, input: Tensor, gating: Tensor, opts: MoeOpts) Tensor {
     log.warn("mixtureOfExperts({s}, {}, {f}, {f})", .{ @typeName(Expert), experts, input, gating });
-    const routing = gating.topK(opts.tokens_per_expert, .expert, .{});
+    const num_tokens = input.dim(.s);
+    const num_experts = gating.dim(.expert);
+    const tokens_per_expert = std.math.divCeil(u32, num_tokens * opts.experts_per_token, num_experts) catch unreachable;
+
+    if (num_tokens * opts.experts_per_token < num_experts) {
+        // Few tokens: some experts will be unused.
+        // select active experts and compute with that.
+        const routing = gating.topK(opts.experts_per_token, .expert, .{});
+        const routing_score = routing.values.sum(.expert);
+        const routing_weight = routing.values.div(routing_score.broad(routing.values.shape()));
+
+        var sliced_expert: Expert = undefined;
+        zml.meta.mapAlloc(struct {
+            pub fn cb(routing_indices: Tensor, expert_weight: Tensor) Tensor {
+                return expert_weight.gather(.{ .expert = routing_indices }, .{});
+            }
+        }.cb, undefined, routing.indices, experts, &sliced_expert) catch unreachable;
+
+        const output_per_expert = sliced_expert.forward(input);
+        return output_per_expert.dot(routing_weight, .expert);
+    }
+
+    // Lot of tokens, each experts chose their tokens and compute on that.
+    // It means that not all tokens will receive the same number of experts,
+    // Each token will get assigned to at least one expert because we normalize gating to sum up to one.
+    const normed_gating = gating.div(gating.sum(.s).broad(gating.shape()));
+    const routing = normed_gating.topK(tokens_per_expert, .s, .{});
     const routing_score = routing.values.sum(.expert);
 
     const input_per_expert = input.gather(.{ .s = routing.indices }, .{});
     var output_per_expert = experts.forward(input_per_expert);
-    output_per_expert = output_per_expert.mul(routing.values.div(routing_score).broad(output_per_expert.shape()));
+    log.warn(" -> input_per_expert {f} -> output_per_expert {f}", .{ input_per_expert, output_per_expert });
+    output_per_expert = output_per_expert.mul(routing.values.div(routing_score.broad(routing.values.shape())).broad(output_per_expert.shape()));
     var output: Tensor = .constant(output_per_expert.shape().drop(.expert), input.dtype().zero());
     output = output.scatterSlices(.{ .expert = routing.indices }, output_per_expert, .{ .update_fn = Tensor.ScatterOpts.increment });
+    log.warn(" -> output {f} ->", .{output});
 
     return output;
 }

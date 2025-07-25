@@ -296,21 +296,23 @@ pub fn select(ctx: mlir.Context, condition: mlir.Value, then: mlir.Value, else_:
     });
 }
 
+pub const GatherArgs = struct {
+    offset_dims: []const i64,
+    collapsed_slice_dims: []const i64,
+    operand_batching_dims: []const i64,
+    start_indices_batching_dims: []const i64,
+    start_index_map: []const i64,
+    index_vector_dim: i64,
+    indices_are_sorted: bool = false,
+};
+
 pub fn gather(
     ctx: mlir.Context,
     value: mlir.Value,
     indices: mlir.Value,
     slice_sizes: []const i64,
     location: mlir.Location,
-    args: struct {
-        offset_dims: []const i64,
-        collapsed_slice_dims: []const i64,
-        operand_batching_dims: []const i64,
-        start_indices_batching_dims: []const i64,
-        start_index_map: []const i64,
-        index_vector_dim: i64,
-        indices_are_sorted: bool = false,
-    },
+    args: GatherArgs,
 ) mlir.Operation {
     return mlir.Operation.make(
         ctx,
