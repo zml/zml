@@ -151,9 +151,7 @@ pub fn generateText(
 const params = clap.parseParamsComptime(
     \\--help                      print this help
     \\--prompt         <STRING>   the prompt
-    \\--config         <PATH>     config.json path
-    \\--weights        <PATH>     model weights path
-    \\--tokenizer      <PATH>     tokenizer path
+    \\--hf-model-path  <STRING>   path to the directory containing model weights, config and tokenizer
     \\--seed           <UINT>     random seed (optional)
     \\--seq-len        <UINT>     sequence length
     \\--create-options <STRING>   platform creation options JSON, defaults to {}
@@ -199,18 +197,37 @@ pub fn asyncMain() !void {
         return;
     }
 
-    const config = blk: {
-        if (res.args.config) |config_json_path| {
-            var config_json_file = try asynk.File.open(config_json_path, .{ .mode = .read_only });
-            defer config_json_file.close() catch unreachable;
-            var reader = std.json.reader(allocator, config_json_file.reader());
-            defer reader.deinit();
-            const config_obj = try std.json.parseFromTokenSourceLeaky(llama.LlamaLM.Config, allocator, &reader, .{ .ignore_unknown_fields = true });
-            break :blk config_obj;
-        } else {
-            log.err("Missing --config", .{});
-            return;
+    const hf_model_path = res.args.@"hf-model-path" orelse {
+        log.err("Missing --hf-model-path", .{});
+        return;
+    };
+
+    const model_config_path = try std.fs.path.join(allocator, &.{ hf_model_path, "config.json" });
+    defer allocator.free(model_config_path);
+
+    const model_weights_path = b: {
+        const simple_path = try std.fs.path.join(allocator, &.{ hf_model_path, "model.safetensors" });
+        if (asynk.File.access(simple_path, .{})) {
+            break :b simple_path;
+        } else |_| {
+            allocator.free(simple_path);
         }
+
+        const sharded_path = try std.fs.path.join(allocator, &.{ hf_model_path, "model.safetensors.index.json" });
+        break :b sharded_path;
+    };
+    defer allocator.free(model_weights_path);
+
+    const model_tokenizer_path = try std.fs.path.join(allocator, &.{ hf_model_path, "tokenizer.json" });
+    defer allocator.free(model_tokenizer_path);
+
+    const config = blk: {
+        var config_json_file = try asynk.File.open(model_config_path, .{ .mode = .read_only });
+        defer config_json_file.close() catch unreachable;
+        var reader = std.json.reader(allocator, config_json_file.reader());
+        defer reader.deinit();
+        const config_obj = try std.json.parseFromTokenSourceLeaky(llama.LlamaLM.Config, allocator, &reader, .{ .ignore_unknown_fields = true });
+        break :blk config_obj;
     };
 
     var context = try zml.Context.init();
@@ -229,7 +246,7 @@ pub fn asyncMain() !void {
     create_opts.deinit();
     context.printAvailablePlatforms(platform);
 
-    var ts = try zml.aio.detectFormatAndOpen(allocator, res.args.weights.?);
+    var ts = try zml.aio.detectFormatAndOpen(allocator, model_weights_path);
     defer ts.deinit();
 
     var model_arena = std.heap.ArenaAllocator.init(allocator);
@@ -281,7 +298,7 @@ pub fn asyncMain() !void {
         platform,
     });
 
-    log.info("\tLoading Llama weights from {?s}...", .{res.args.weights});
+    log.info("\tLoading Llama weights from {?s}...", .{model_weights_path});
     var llama_weights = try zml.aio.loadBuffers(llama.LlamaLM, .{ config, llama_options }, ts, model_arena.allocator(), platform);
     defer zml.aio.unloadBuffers(&llama_weights);
     log.info("✅\tLoaded weights in {}", .{std.fmt.fmtDuration(start.read())});
@@ -296,16 +313,11 @@ pub fn asyncMain() !void {
     const kv_cache = try llama.KvCache.initBuffer(kv_shape, platform);
 
     var tokenizer = blk: {
-        if (res.args.tokenizer) |tok| {
-            log.info("Loading tokenizer from {s}", .{tok});
-            var timer = try stdx.time.Timer.start();
-            defer log.info("Loaded tokenizer from {s} [{}]", .{ tok, timer.read() });
+        log.info("Loading tokenizer from {s}", .{model_tokenizer_path});
+        var timer = try stdx.time.Timer.start();
+        defer log.info("Loaded tokenizer from {s} [{}]", .{ model_tokenizer_path, timer.read() });
 
-            break :blk try zml.tokenizer.Tokenizer.fromFile(model_arena.allocator(), tok);
-        } else {
-            log.err("Missing --tokenizer", .{});
-            return;
-        }
+        break :blk try zml.tokenizer.Tokenizer.fromFile(model_arena.allocator(), model_tokenizer_path);
     };
     errdefer tokenizer.deinit();
 
