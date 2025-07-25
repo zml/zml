@@ -13,5 +13,6 @@ zls_completion(
         "//async",
         "//stdx",
         "//zml",
+        "//runtimes/neuron:neuronx-cc_lib",
     ],
 )

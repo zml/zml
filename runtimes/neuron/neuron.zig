@@ -73,7 +73,9 @@ fn initialize(allocator: std.mem.Allocator, r_: *runfiles.Runfiles) !void {
     {
         config.module_search_paths_set = 1;
         for (libneuronxla_pyenv.modules) |module| {
+            std.debug.print("module in {s}\n", .{module});
             const path = (try r.rlocation(module, &buf)).?;
+            std.debug.print("path in {s}\n", .{path});
             const wline = toWchar(std.fs.path.dirname(path).?, &wbuf);
             pyErrorOrExit(c.PyWideStringList_Append(&config.module_search_paths, wline.ptr));
         }
