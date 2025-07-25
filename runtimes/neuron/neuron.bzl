@@ -32,7 +32,7 @@ _NEURON_PACKAGES = {
         packages.patchelf(
             name = "libnrt.patchelf",
             src = "lib/libnrt.so.1",
-            set_rpath = '$ORIGIN',
+            set_rpath = "$ORIGIN",
             add_needed = [
                 # readelf -d ./opt/aws/neuron/libl/libncfw.so
                 "libncfw.so.2",
