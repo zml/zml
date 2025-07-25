@@ -22,6 +22,158 @@ pub const std_options: std.Options = .{
     .logFn = asynk.logFn(std.log.defaultLog),
 };
 
+const cli_params = clap.parseParamsComptime(
+    \\--help                      print this help
+    \\--prompt         <STRING>   the prompt
+    \\--hf-model-path  <STRING>   path to the directory containing model weights, config and tokenizer
+    \\--seed           <UINT>     random seed (optional)
+    \\--seq-len        <UINT>     sequence length
+    \\--create-options <STRING>   platform creation options JSON, defaults to {}
+    \\--no-llama3      <BOOL>     skip prompt template
+    \\--sharding       <BOOL>     default: true: sharding on or off
+);
+
+pub fn main() !void {
+    try asynk.AsyncThread.main(std.heap.smp_allocator, asyncMain);
+}
+
+pub fn asyncMain() !void {
+    log.info("   mixtral was compiled with {}", .{@import("builtin").mode});
+
+    const allocator = std.heap.smp_allocator;
+    const cli = ClapBoilerplate.parseCli(allocator);
+    defer cli.deinit();
+
+    const hf_model_path = cli.args.@"hf-model-path" orelse {
+        log.err("Missing --hf-model-path", .{});
+        return;
+    };
+
+    const model_config_path = try std.fs.path.join(allocator, &.{ hf_model_path, "config.json" });
+    defer allocator.free(model_config_path);
+
+    const model_weights_path = b: {
+        const simple_path = try std.fs.path.join(allocator, &.{ hf_model_path, "model.safetensors" });
+        if (asynk.File.access(simple_path, .{})) {
+            break :b simple_path;
+        } else |_| {
+            allocator.free(simple_path);
+        }
+
+        const sharded_path = try std.fs.path.join(allocator, &.{ hf_model_path, "model.safetensors.index.json" });
+        break :b sharded_path;
+    };
+    defer allocator.free(model_weights_path);
+
+    const model_tokenizer_path = try std.fs.path.join(allocator, &.{ hf_model_path, "tokenizer.json" });
+    defer allocator.free(model_tokenizer_path);
+
+    const config = blk: {
+        var config_json_file = try asynk.File.open(model_config_path, .{ .mode = .read_only });
+        defer config_json_file.close() catch unreachable;
+        var reader = std.json.reader(allocator, config_json_file.reader());
+        defer reader.deinit();
+        const config_obj = try std.json.parseFromTokenSourceLeaky(mixtral.MixtralLM.Config, allocator, &reader, .{ .ignore_unknown_fields = true });
+        break :blk config_obj;
+    };
+
+    var context = try zml.Context.init();
+    defer context.deinit();
+
+    const compilation_options = zml.CompilationOptions{
+        .xla_dump_to = "/tmp/zml/mixtral",
+        .sharding_enabled = cli.args.sharding orelse true,
+    };
+
+    // initialize ZML platform with optional create options
+    // eg: --create-options='{"cuda":{"allocator":{"bfc":{"memory_fraction": 0.99}}}}'
+    const create_opts_json = cli.args.@"create-options" orelse "{}";
+    const create_opts = try std.json.parseFromSlice(zml.Platform.CreateOptions, allocator, create_opts_json, .{});
+    const platform = context.autoPlatform(create_opts.value).withCompilationOptions(compilation_options);
+    create_opts.deinit();
+    context.printAvailablePlatforms(platform);
+
+    var store = try zml.aio.detectFormatAndOpen(allocator, model_weights_path);
+    defer store.deinit();
+
+    var model_arena = std.heap.ArenaAllocator.init(allocator);
+    const llama_options: mixtral.MixtralLM.Options = .{
+        .max_seq_len = @intCast(cli.args.@"seq-len" orelse 256),
+        .sampling_strategy = .{
+            .topk = 1,
+            .temperature = 1.0,
+        },
+    };
+    const model_instance = try mixtral.MixtralLM.init(model_arena.allocator(), store, config, llama_options);
+
+    const dims = model_instance.model.shape();
+    const dtype = model_instance.model.embed_tokens.weight.dtype();
+
+    const tokens_shape_prefill = zml.Shape.init(.{ .s = llama_options.max_seq_len }, .u32);
+    const tokens_shape = zml.Shape.init(.{ .s = 1 }, .u32);
+    const token_idx_shape = zml.Shape.init(.{}, .u32);
+
+    const kv_shape = zml.Shape.init(.{ .layer = model_instance.model.layers.len, .k = dims.s, .h = dims.nkvh, .hd = dims.hd }, dtype).withSharding(.{.h});
+
+    const kv_cache_shape: zml.ShapeOf(mixtral.KvCache) = mixtral.KvCache.initShape(kv_shape);
+    const rng_shape = zml.Tensor.Rng.shape();
+
+    var start = try std.time.Timer.start();
+    var fut_mod_prefill = try asynk.asyncc(zml.compileModel, .{
+        allocator, mixtral.MixtralLM.forward, model_instance,
+        .{
+            tokens_shape_prefill,
+            token_idx_shape,
+            kv_cache_shape,
+            rng_shape,
+        },
+        platform,
+    });
+
+    var fut_mod = try asynk.asyncc(zml.compileModel, .{
+        allocator, mixtral.MixtralLM.forward, model_instance,
+        .{
+            tokens_shape,
+            token_idx_shape,
+            kv_cache_shape,
+            rng_shape,
+        },
+        platform,
+    });
+
+    log.info("\tLoading mixtral weights from {?s}...", .{model_weights_path});
+    var llama_weights = try zml.aio.loadModelBuffers(mixtral.MixtralLM, model_instance, store, model_arena.allocator(), platform);
+    defer zml.aio.unloadBuffers(&llama_weights);
+    log.info("✅\tLoaded weights in {}", .{std.fmt.fmtDuration(start.read())});
+
+    var llama_module_prefill = (try fut_mod_prefill.awaitt()).prepare(llama_weights);
+    defer llama_module_prefill.deinit();
+    var llama_module = (try fut_mod.awaitt()).prepare(llama_weights);
+    defer llama_module.deinit();
+    log.info("✅\tCompiled model in {}", .{std.fmt.fmtDuration(start.read())});
+
+    log.info("Creating KvCache", .{});
+    const kv_cache = try mixtral.KvCache.initBuffer(kv_shape, platform);
+
+    var tokenizer = blk: {
+        log.info("Loading tokenizer from {s}", .{model_tokenizer_path});
+        var timer = try stdx.time.Timer.start();
+        defer log.info("Loaded tokenizer from {s} [{}]", .{ model_tokenizer_path, timer.read() });
+
+        break :blk try zml.tokenizer.Tokenizer.fromFile(model_arena.allocator(), model_tokenizer_path);
+    };
+    errdefer tokenizer.deinit();
+
+    const prompt = cli.args.prompt orelse "What is the capital of France?";
+    log.info("✅\tPrompt: {s}", .{prompt});
+
+    const seed = cli.args.seed orelse @as(u128, @bitCast(std.time.nanoTimestamp()));
+    const skip_llama3_encoding = cli.args.@"no-llama3" orelse false;
+    const generated_text = try generateText(config, model_instance, llama_module_prefill, llama_module, kv_cache, tokenizer, allocator, seed, prompt[0..], skip_llama3_encoding);
+    // generated text will be printed token by token.
+    defer allocator.free(generated_text);
+}
+
 pub fn tokenizePrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, config: MixtralLM.Config, prompt: []const u8, skip_llama3_encoding: bool) ![]u32 {
     var tokens = std.ArrayList(u32).init(allocator);
     var encoder = try tokenizer.encoder();
@@ -148,185 +300,37 @@ pub fn generateText(
     return output.toOwnedSlice();
 }
 
-const params = clap.parseParamsComptime(
-    \\--help                      print this help
-    \\--prompt         <STRING>   the prompt
-    \\--hf-model-path  <STRING>   path to the directory containing model weights, config and tokenizer
-    \\--seed           <UINT>     random seed (optional)
-    \\--seq-len        <UINT>     sequence length
-    \\--create-options <STRING>   platform creation options JSON, defaults to {}
-    \\--no-llama3      <BOOL>     skip prompt template
-    \\--sharding       <BOOL>     default: true: sharding on or off
-);
+const ClapBoilerplate = struct {
+    pub const Cli = clap.Result(clap.Help, &cli_params, parsers);
 
-pub fn bool_parser(in: []const u8) error{}!bool {
-    return std.mem.indexOfScalar(u8, "tTyY1", in[0]) != null;
-}
+    fn bool_parser(in: []const u8) error{}!bool {
+        return std.mem.indexOfScalar(u8, "tTyY1", in[0]) != null;
+    }
 
-pub fn main() !void {
-    try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain);
-}
-
-pub fn asyncMain() !void {
-    log.info("   mixtral was compiled with {}", .{@import("builtin").mode});
-
-    const allocator = std.heap.c_allocator;
-
-    const parsers = comptime .{
+    const parsers = .{
         .BOOL = bool_parser,
         .UINT = clap.parsers.int(usize, 0),
         .STRING = clap.parsers.string,
         .PATH = clap.parsers.string,
     };
-    var diag: clap.Diagnostic = .{};
-    const stderr = std.io.getStdErr().writer();
-    var res = clap.parse(clap.Help, &params, parsers, .{
-        .diagnostic = &diag,
-        .allocator = allocator,
-    }) catch |err| {
-        diag.report(stderr, err) catch {};
-        stderr.print("usage: ", .{}) catch {};
-        clap.usage(stderr, clap.Help, &params) catch {};
-        stderr.print("\n", .{}) catch {};
-        return;
-    };
-    defer res.deinit();
 
-    if (res.args.help != 0) {
-        clap.help(std.io.getStdErr().writer(), clap.Help, &params, .{}) catch {};
-        return;
-    }
-
-    const hf_model_path = res.args.@"hf-model-path" orelse {
-        log.err("Missing --hf-model-path", .{});
-        return;
-    };
-
-    const model_config_path = try std.fs.path.join(allocator, &.{ hf_model_path, "config.json" });
-    defer allocator.free(model_config_path);
-
-    const model_weights_path = b: {
-        const simple_path = try std.fs.path.join(allocator, &.{ hf_model_path, "model.safetensors" });
-        if (asynk.File.access(simple_path, .{})) {
-            break :b simple_path;
-        } else |_| {
-            allocator.free(simple_path);
+    pub fn parseCli(allocator: std.mem.Allocator) Cli {
+        var diag: clap.Diagnostic = .{};
+        const stderr = std.io.getStdErr().writer();
+        const cli = clap.parse(clap.Help, &cli_params, parsers, .{
+            .diagnostic = &diag,
+            .allocator = allocator,
+        }) catch |err| {
+            diag.report(stderr, err) catch {};
+            stderr.print("usage: ", .{}) catch {};
+            clap.usage(stderr, clap.Help, &cli_params) catch {};
+            stderr.print("\n", .{}) catch {};
+            std.process.exit(1);
+        };
+        if (cli.args.help != 0) {
+            clap.help(std.io.getStdErr().writer(), clap.Help, &cli_params, .{}) catch {};
+            std.process.exit(0);
         }
-
-        const sharded_path = try std.fs.path.join(allocator, &.{ hf_model_path, "model.safetensors.index.json" });
-        break :b sharded_path;
-    };
-    defer allocator.free(model_weights_path);
-
-    const model_tokenizer_path = try std.fs.path.join(allocator, &.{ hf_model_path, "tokenizer.json" });
-    defer allocator.free(model_tokenizer_path);
-
-    const config = blk: {
-        var config_json_file = try asynk.File.open(model_config_path, .{ .mode = .read_only });
-        defer config_json_file.close() catch unreachable;
-        var reader = std.json.reader(allocator, config_json_file.reader());
-        defer reader.deinit();
-        const config_obj = try std.json.parseFromTokenSourceLeaky(mixtral.MixtralLM.Config, allocator, &reader, .{ .ignore_unknown_fields = true });
-        break :blk config_obj;
-    };
-
-    var context = try zml.Context.init();
-    defer context.deinit();
-
-    const compilation_options = zml.CompilationOptions{
-        .xla_dump_to = "/tmp/zml/mixtral",
-        .sharding_enabled = res.args.sharding orelse true,
-    };
-
-    // initialize ZML platform with optional create options
-    // eg: --create-options='{"cuda":{"allocator":{"bfc":{"memory_fraction": 0.99}}}}'
-    const create_opts_json = res.args.@"create-options" orelse "{}";
-    const create_opts = try std.json.parseFromSlice(zml.Platform.CreateOptions, allocator, create_opts_json, .{});
-    const platform = context.autoPlatform(create_opts.value).withCompilationOptions(compilation_options);
-    create_opts.deinit();
-    context.printAvailablePlatforms(platform);
-
-    var ts = try zml.aio.detectFormatAndOpen(allocator, model_weights_path);
-    defer ts.deinit();
-
-    var model_arena = std.heap.ArenaAllocator.init(allocator);
-    var model_instance = try zml.aio.populateModel(mixtral.MixtralLM, model_arena.allocator(), ts);
-
-    const llama_options: mixtral.MixtralLM.Options = .{
-        .max_seq_len = @intCast(res.args.@"seq-len" orelse 256),
-        .sampling_strategy = .{
-            .topk = 1,
-            .temperature = 1.0,
-        },
-    };
-    model_instance.init(config, llama_options);
-
-    const dims = model_instance.model.shape();
-    const dtype = model_instance.model.embed_tokens.weight.dtype();
-
-    const tokens_shape_prefill = zml.Shape.init(.{ .s = llama_options.max_seq_len }, .u32);
-    const tokens_shape = zml.Shape.init(.{ .s = 1 }, .u32);
-    const token_idx_shape = zml.Shape.init(.{}, .u32);
-
-    const kv_shape = zml.Shape.init(.{ .layer = model_instance.model.layers.len, .k = dims.s, .h = dims.nkvh, .hd = dims.hd }, dtype).withSharding(.{.h});
-
-    const kv_cache_shape: zml.ShapeOf(mixtral.KvCache) = mixtral.KvCache.initShape(kv_shape);
-    const rng_shape = zml.Tensor.Rng.shape();
-
-    var start = try std.time.Timer.start();
-    var fut_mod_prefill = try asynk.asyncc(zml.compile, .{
-        allocator, mixtral.MixtralLM.forward, .{ config, llama_options },
-        .{
-            tokens_shape_prefill,
-            token_idx_shape,
-            kv_cache_shape,
-            rng_shape,
-        },
-        ts,
-        platform,
-    });
-
-    var fut_mod = try asynk.asyncc(zml.compile, .{
-        allocator, mixtral.MixtralLM.forward, .{ config, llama_options },
-        .{
-            tokens_shape,
-            token_idx_shape,
-            kv_cache_shape,
-            rng_shape,
-        },
-        ts,
-        platform,
-    });
-
-    log.info("\tLoading mixtral weights from {?s}...", .{model_weights_path});
-    var llama_weights = try zml.aio.loadBuffers(mixtral.MixtralLM, .{ config, llama_options }, ts, model_arena.allocator(), platform);
-    defer zml.aio.unloadBuffers(&llama_weights);
-    log.info("✅\tLoaded weights in {}", .{std.fmt.fmtDuration(start.read())});
-
-    var llama_module_prefill = (try fut_mod_prefill.awaitt()).prepare(llama_weights);
-    defer llama_module_prefill.deinit();
-    var llama_module = (try fut_mod.awaitt()).prepare(llama_weights);
-    defer llama_module.deinit();
-    log.info("✅\tCompiled model in {}", .{std.fmt.fmtDuration(start.read())});
-
-    log.info("Creating KvCache", .{});
-    const kv_cache = try mixtral.KvCache.initBuffer(kv_shape, platform);
-
-    var tokenizer = blk: {
-        log.info("Loading tokenizer from {s}", .{model_tokenizer_path});
-        var timer = try stdx.time.Timer.start();
-        defer log.info("Loaded tokenizer from {s} [{}]", .{ model_tokenizer_path, timer.read() });
-
-        break :blk try zml.tokenizer.Tokenizer.fromFile(model_arena.allocator(), model_tokenizer_path);
-    };
-    errdefer tokenizer.deinit();
-
-    const prompt = res.args.prompt orelse "What is the capital of France?";
-    log.info("✅\tPrompt: {s}", .{prompt});
-
-    const seed = res.args.seed orelse @as(u128, @bitCast(std.time.nanoTimestamp()));
-    const skip_llama3_encoding = res.args.@"no-llama3" orelse false;
-    const generated_text = try generateText(config, model_instance, llama_module_prefill, llama_module, kv_cache, tokenizer, allocator, seed, prompt[0..], skip_llama3_encoding);
-    // generated text will be printed token by token.
-    defer allocator.free(generated_text);
-}
+        return cli;
+    }
+};
