@@ -13,6 +13,16 @@ def _cc_import(**kwargs):
 def _cc_library(**kwargs):
     return """cc_library({})""".format(_kwargs(**kwargs))
 
+def _cc_library_hdrs_glob(name, hdrs_glob, deps = [], **kwargs):
+    return """\
+cc_library(
+    name = "{name}",
+    hdrs = glob({hdrs_glob}),
+    deps = {deps},
+    {kwargs}
+)
+""".format(name = name, hdrs_glob = repr(hdrs_glob), deps = repr(deps), kwargs = _kwargs(**kwargs))
+
 def _cc_import_glob_hdrs(name, hdrs_glob, shared_library, deps = [], **kwargs):
     return """\
 cc_import(
@@ -48,6 +58,7 @@ packages = struct(
     cc_import = _cc_import,
     cc_import_glob_hdrs = _cc_import_glob_hdrs,
     cc_library = _cc_library,
+    cc_library_hdrs_glob = _cc_library_hdrs_glob,
     filegroup = _filegroup,
     load_ = _load,
     patchelf = _patchelf,

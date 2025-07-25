@@ -1,0 +1,96 @@
+load("@aspect_bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+load("@zml//bazel:patchelf.bzl", "patchelf")
+load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
+load("@bazel_skylib//rules:select_file.bzl", "select_file")
+load("@rules_cc//cc:cc_shared_library.bzl", "cc_shared_library")
+load("@zml//bazel:runfiles.bzl", "runfiles_to_default")
+
+cc_shared_library(
+    name = "zmlxneuron_so_",
+    shared_lib_name = "libzmlxneuron.so.0",
+    deps = ["@zml//runtimes/neuron:zmlxneuron_lib"],
+)
+
+copy_file(
+    name = "zmlxneuron_so",
+    src = ":zmlxneuron_so_",
+    out = "lib/libzmlxneuron.so.0",
+)
+
+runfiles_to_default(
+    name = "libneuronxla_files",
+    deps = ["@neuron_py_deps//libneuronxla:pkg"],
+)
+
+select_file(
+    name = "libneuronpjrt_so",
+    srcs = ":libneuronxla_files",
+    subpath = "site-packages/libneuronxla/libneuronpjrt.so",
+)
+
+patchelf(
+    name = "libneuronpjrt.patchelf",
+    add_needed = [
+        "libpython3.11.so.1.0",
+        "libzmlxneuron.so.0",
+        "libnccom.so.2",
+    ],
+    set_rpath = '$ORIGIN',
+    shared_library = ":libneuronpjrt_so",
+    soname = "libneuronpjrt.so",
+)
+
+patchelf(
+    name = "libpjrt_neuron_proxy.patchelf",
+    set_rpath = '$ORIGIN',
+    add_needed = [
+        "libz.so.1",
+        "libgomp.so.1",
+    ],
+    shared_library = "@zml//runtimes/neuron:libpjrt_neuron_proxy",
+    soname = "libpjrt_neuron.so",
+)
+
+copy_to_directory(
+    name = "sandbox",
+    srcs = [
+        ":zmlxneuron_so",
+        ":libneuronpjrt.patchelf",
+        ":libpjrt_neuron_proxy.patchelf",
+        "@aws-neuronx-runtime-lib//:libnrt.patchelf",
+        "@aws-neuronx-runtime-lib//:libncfw.patchelf",
+        "@aws-neuronx-collectives//:libnccom",
+        "@zlib1g",
+        "@libgomp1",
+    ],
+    replace_prefixes = {
+        "libneuronpjrt.patchelf": "lib",
+        "libpjrt_neuron_proxy.patchelf": "lib",
+        "libnrt.patchelf": "lib",
+        "libncfw.patchelf": "lib",
+        "lib/x86_64-linux-gnu": "lib",
+        "usr/lib/x86_64-linux-gnu": "lib",
+        "opt/neuron": "lib",
+    },
+    add_directory_to_runfiles = True,
+    include_external_repositories = ["**"],
+)
+
+cc_library(
+    name = "libpjrt_neuron",
+    data = [":sandbox"],
+    deps = [
+        "@aws-neuronx-runtime-lib//:libnrt_headers",
+    ],
+    linkopts = [
+        # Defer function call resolution until the function is called
+        # (lazy loading) rather than at load time.
+        #
+        # This is required because we want to let downstream use weak NRT symbols.
+        #
+        # We force it here because -z,now (which resolve all symbols at load time),
+        # is the default in most bazel CC toolchains as well as in certain linkers.
+        "-Wl,-z,lazy",
+    ],
+    visibility = ["@zml//runtimes/neuron:__subpackages__"],
+)

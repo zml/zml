@@ -7,6 +7,9 @@ const c = @import("c");
 const libneuronxla_pyenv = @import("libneuronxla_pyenv");
 const pjrt = @import("pjrt");
 const runfiles = @import("runfiles");
+const stdx = @import("stdx");
+
+const log = std.log.scoped(.@"zml/runtime/neuron");
 
 pub fn isEnabled() bool {
     return @hasDecl(c, "ZML_RUNTIME_NEURON");
@@ -44,11 +47,7 @@ fn pyErrorOrExit(status: c.PyStatus) void {
     }
 }
 
-fn initialize() !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
-    const allocator = arena.allocator();
-    defer arena.deinit();
-
+fn initialize(allocator: std.mem.Allocator, r_: *runfiles.Runfiles) !void {
     {
         var preconfig: c.PyPreConfig = undefined;
         c.PyPreConfig_InitIsolatedConfig(&preconfig);
@@ -60,7 +59,6 @@ fn initialize() !void {
     c.PyConfig_InitIsolatedConfig(&config);
     defer c.PyConfig_Clear(&config);
 
-    var r_ = try runfiles.Runfiles.create(.{ .allocator = allocator }) orelse return error.Unavailable;
     const r = r_.withSourceRepo(bazel_builtin.current_repository);
 
     var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -135,7 +133,28 @@ pub fn load() !*const pjrt.Api {
         return error.Unavailable;
     }
 
+    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    defer arena.deinit();
+
+    var r_ = try runfiles.Runfiles.create(.{ .allocator = arena.allocator() }) orelse {
+        stdx.debug.panic("Unable to find runfiles", .{});
+    };
+
+    const source_repo = bazel_builtin.current_repository;
+    const r = r_.withSourceRepo(source_repo);
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const sandbox_path = try r.rlocation("libpjrt_neuron/sandbox", &path_buf) orelse {
+        log.err("Failed to find sandbox path for NEURON runtime", .{});
+        return error.FileNotFound;
+    };
+
     setNeuronCCFlags();
-    try initialize();
-    return try asynk.callBlocking(pjrt.Api.loadFrom, .{"libpjrt_neuron.so"});
+    try initialize(arena.allocator(), &r_);
+
+    return blk: {
+        var lib_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = try stdx.fs.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_neuron.so" });
+        break :blk asynk.callBlocking(pjrt.Api.loadFrom, .{path});
+    };
 }
