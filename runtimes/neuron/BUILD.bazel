@@ -69,9 +69,10 @@ zig_binary(
     main = "libpjrt_neuron.zig",
     copts = ["-lc"],
     deps = [
+        ":libpython",
         "//stdx",
         "@rules_zig//zig/runfiles",
-        ":libpython",
+        "@xla//xla/pjrt/c:pjrt_c_api_hdrs",
     ],
     visibility = ["@libpjrt_neuron//:__subpackages__"],
 )
