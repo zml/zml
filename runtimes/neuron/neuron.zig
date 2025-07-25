@@ -82,7 +82,7 @@ fn initialize(allocator: std.mem.Allocator, r_: *runfiles.Runfiles) !void {
     }
 
     {
-        const neuronx_cc = (try r.rlocation("zml/runtimes/neuron/neuronx-cc/neuronx-cc", &buf)).?;
+        const neuronx_cc = (try r.rlocation("zml/runtimes/neuron/neuronx-cc", &buf)).?;
         const neuronx_cc_path = std.fs.path.dirname(neuronx_cc).?;
         const path = std.posix.getenv("PATH") orelse "";
         const new_path = try std.fmt.allocPrintZ(allocator, "{s}:{s}", .{ neuronx_cc_path, path });
