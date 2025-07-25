@@ -77,8 +77,7 @@ copy_to_directory(
 )
 
 cc_library(
-    name = "libpjrt_neuron",
-    data = [":sandbox"],
+    name = "libnrt_headers",
     deps = [
         "@aws-neuronx-runtime-lib//:libnrt_headers",
     ],
@@ -92,5 +91,11 @@ cc_library(
         # is the default in most bazel CC toolchains as well as in certain linkers.
         "-Wl,-z,lazy",
     ],
+    visibility = ["@zml//runtimes/neuron:__subpackages__"],
+)
+
+cc_library(
+    name = "libpjrt_neuron",
+    data = [":sandbox"],
     visibility = ["@zml//runtimes/neuron:__subpackages__"],
 )

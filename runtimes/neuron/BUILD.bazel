@@ -107,11 +107,15 @@ cc_library(
 )
 
 cc_library(
-    name = "libpjrt_neuron",
-    hdrs = ["libpjrt_neuron.h"],
+    name = "zmlxneuron",
     defines = ["ZML_RUNTIME_NEURON"],
+)
+
+cc_library(
+    name = "libnrt_headers",
+    hdrs = ["nrt.h"],
     deps = [
-        "@libpjrt_neuron",
+        "@libpjrt_neuron//:libnrt_headers",
     ],
 )
 
@@ -130,7 +134,9 @@ zig_library(
         "//pjrt",
     ] + select({
         "//runtimes:neuron.enabled": [
-            ":libpjrt_neuron",
+            "@libpjrt_neuron",
+            ":zmlxneuron",
+            ":libnrt_headers",
             ":libneuronxla_pyenv",
             ":libpython",
             "//async",
