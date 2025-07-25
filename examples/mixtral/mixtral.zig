@@ -253,9 +253,9 @@ const BlockMoe = union(enum) {
             .down_proj = on_disk.experts[0].w2,
             .gate_proj = on_disk.experts[0].w3,
         };
-        mlp.up_proj.weight._shape = mlp.up_proj.weight.shape().insert(0, .{ .expert = n });
-        mlp.down_proj.weight._shape = mlp.down_proj.weight.shape().insert(0, .{ .expert = n });
-        mlp.gate_proj.weight._shape = mlp.gate_proj.weight.shape().insert(0, .{ .expert = n });
+        mlp.up_proj.weight._shape = mlp.up_proj.weight.shape().insert(0, .{ .expert = n }).withTags(.{ .expert, .up, .d });
+        mlp.down_proj.weight._shape = mlp.down_proj.weight.shape().insert(0, .{ .expert = n }).withTags(.{ .expert, .d, .up });
+        mlp.gate_proj.weight._shape = mlp.gate_proj.weight.shape().insert(0, .{ .expert = n }).withTags(.{ .expert, .up, .d });
 
         var router = on_disk.gate;
         router.weight = router.weight.withTags(.{ .expert, .d });
@@ -268,7 +268,7 @@ const BlockMoe = union(enum) {
     pub fn forward(self_block: BlockMoe, input: zml.Tensor) zml.Tensor {
         const self = self_block.on_device;
         const gating = self.router.forward(input).softmax(.expert);
-        return zml.nn.mixtureOfExperts(Mlp, self.mlp_experts, input, gating, .{ .tokens_per_expert = 2 });
+        return zml.nn.mixtureOfExperts(Mlp, self.mlp_experts, input, gating, .{ .experts_per_token = 2 });
     }
 };
 
@@ -278,10 +278,12 @@ const Mlp = struct {
     down_proj: zml.nn.Linear, // (hidden_dim -> dim)
 
     pub fn forward(self: Mlp, x: Tensor) Tensor {
-        const proj = zml.call(self.up_proj, .forward, .{x});
-        var output = zml.call(self.gate_proj, .forward, .{x});
-        output = output.silu().mul(proj);
-        return zml.call(self.down_proj, .forward, .{output});
+        const up = self.up_proj.weight.dot(x, .d);
+        const gate = self.gate_proj.weight.dot(x, .d).silu();
+
+        const out = self.down_proj.weight.dot(gate.mul(up), .up);
+        log.warn("Mlp(x: {f}) -> up: {f} -> gate: {f} -> out: {f}", .{ x, up, gate, out });
+        return out;
     }
 };
 

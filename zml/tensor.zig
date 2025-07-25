@@ -126,8 +126,8 @@ pub const Tensor = struct {
     /// Returns the dimension of axis 'axis_'.
     ///
     /// 'axis_' can be an integer or a tag.
-    pub fn dim(self: Tensor, axis_: anytype) i64 {
-        return self._shape.dim(axis_);
+    pub fn dim(self: Tensor, axis_: anytype) u32 {
+        return @intCast(self._shape.dim(axis_));
     }
 
     /// Returns the dimensions of a Tensor as a slice.
@@ -1078,13 +1078,16 @@ pub const Tensor = struct {
     /// Axes with the same tag on both sides, and which aren't contracting,
     /// are considered "batching axes".
     pub fn dot(lhs: Tensor, rhs: Tensor, comptime contracting: anytype) Tensor {
-        var contracting_axes: [contracting.len][2]i8 = undefined;
-        inline for (contracting, 0..) |c, i| {
-            contracting_axes[i] = .{ lhs.axis(c), rhs.axis(c) };
+        var contracting_axes: std.BoundedArray([2]i8, MAX_RANK) = .{};
+        if (@TypeOf(contracting) == EnumLiteral) {
+            contracting_axes.appendAssumeCapacity(.{ lhs.axis(contracting), rhs.axis(contracting) });
+        } else {
+            inline for (contracting) |c| {
+                contracting_axes.appendAssumeCapacity(.{ lhs.axis(c), rhs.axis(c) });
+            }
         }
 
-        var batching_axes: [MAX_RANK][2]i8 = undefined;
-        var n_batching: u8 = 0;
+        var batching_axes: std.BoundedArray([2]i8, MAX_RANK) = .{};
         for (lhs._shape.tags(), 0..) |l, li| {
             stdx.debug.assert(l != Shape.TagUnknown, "Can't use `dot(..., {any})` on {any}, it need to be explictily tagged.", .{ contracting, lhs });
 
@@ -1092,20 +1095,19 @@ pub const Tensor = struct {
                 stdx.debug.assert(r != Shape.TagUnknown, "Can't use `dot(..., {any})` on {any}, it need to be explictily tagged.", .{ contracting, rhs });
 
                 if (l == r) {
-                    for (contracting_axes) |ct| {
+                    for (contracting_axes.slice()) |ct| {
                         if (l == lhs._shape.tag(ct[0])) {
                             break;
                         }
                     } else {
                         // tag is both in lhs and rhs but not in contracting -> it's a batching dim.
-                        batching_axes[n_batching] = .{ @intCast(li), @intCast(ri) };
-                        n_batching += 1;
+                        batching_axes.appendAssumeCapacity(.{ @intCast(li), @intCast(ri) });
                     }
                 }
             }
         }
 
-        return dotGeneral(lhs, rhs, contracting_axes[0..], batching_axes[0..n_batching]);
+        return dotGeneral(lhs, rhs, contracting_axes.slice(), batching_axes.slice());
     }
 
     test dot {
@@ -2206,6 +2208,7 @@ pub const Tensor = struct {
     }
 
     pub fn gather_(self: Tensor, idx_axes: []const u3, idx_per_axis: []const Tensor, opts: GatherOpts) Tensor {
+        scoped_log.warn("gather({f}, {d}, {f})", .{ self, idx_axes, idx_per_axis });
         stdx.debug.assert(idx_axes.len > 0, "gather expects 1 or more axes to operate one, received none. Example: `x.gather(.a, indices, .{{}})`", .{});
         for (idx_axes, 0..) |a, i| {
             if (i > 0) {
@@ -2228,14 +2231,16 @@ pub const Tensor = struct {
         var self_kind: std.BoundedArray(AxisKind, MAX_RANK) = .{ .buffer = @splat(.offset), .len = self.rank() };
 
         for (self._shape.tags(), 0..self.rank()) |t, self_ax| {
+            _ = t;
             const is_gather_axis = std.mem.containsAtLeastScalar(u3, idx_axes, 1, @intCast(self_ax));
-            if (indices_shape.hasTag(t)) |id_ax| {
-                // tag is both in self and indices -> it's a batching dim
-                // Note: tags are required for batching.
-                self_kind.buffer[self_ax] = .batching;
-                idx_batch_axes.appendAssumeCapacity(id_ax);
-                stdx.debug.assert(!is_gather_axis, "gather expects axes to appear at most twice. Axis {s} has been found both in 'self={f}', in 'idx_axes={any}' and in 'indices={f}'", .{ t, self, idx_axes, indices_shape });
-            } else if (is_gather_axis) {
+            // if (indices_shape.hasTag(t)) |id_ax| {
+            //     // tag is both in self and indices -> it's a batching dim
+            //     // Note: tags are required for batching.
+            //     self_kind.buffer[self_ax] = .batching;
+            //     idx_batch_axes.appendAssumeCapacity(id_ax);
+            //     // stdx.debug.assert(!is_gather_axis, "gather expects axes to appear at most twice. Axis {s} has been found both in 'self={f}', in 'idx_axes={any}' and in 'indices={f}'", .{ t, self, idx_axes, indices_shape });
+            // } else
+            if (is_gather_axis) {
                 // we collapsed all gathered axes
                 self_kind.buffer[self_ax] = .collapsed;
                 // idx_kind.buffer[id_ax] = .indices;
@@ -2289,21 +2294,24 @@ pub const Tensor = struct {
         const indices = Tensor.stack(idx_per_axis, .last, .coord);
         // scoped_log.debug("gather --> {} {any}", .{ res_shape, res_kind.constSlice() });
         const loc = self.getContext().mlirCtx().location(@src());
+        const args: dialect.stablehlo.GatherArgs = .{
+            .offset_dims = _collectAxes(AxisKind, res_kind, .offset).constSlice(),
+            .collapsed_slice_dims = _collectAxes(AxisKind, self_kind, .collapsed).constSlice(),
+            .operand_batching_dims = _collectAxes(AxisKind, self_kind, .batching).constSlice(),
+            .start_indices_batching_dims = idx_batch_axes.constSlice(),
+            .start_index_map = _collectAxes(AxisKind, self_kind, .collapsed).constSlice(),
+            .index_vector_dim = indices.axis(.coord),
+            .indices_are_sorted = opts.indices_are_sorted,
+        };
+        scoped_log.warn(" --> stablehlo.gather({f}, {f}, {d}, {})", .{ self, indices, slice_dims.slice(), args });
+
         const gather_op = dialect.stablehlo.gather(
             self.getContext().mlirCtx(),
             self.value(),
             indices.value(),
             slice_dims.constSlice(),
             loc,
-            .{
-                .offset_dims = _collectAxes(AxisKind, res_kind, .offset).constSlice(),
-                .collapsed_slice_dims = _collectAxes(AxisKind, self_kind, .collapsed).constSlice(),
-                .operand_batching_dims = _collectAxes(AxisKind, self_kind, .batching).constSlice(),
-                .start_indices_batching_dims = idx_batch_axes.constSlice(),
-                .start_index_map = _collectAxes(AxisKind, self_kind, .collapsed).constSlice(),
-                .index_vector_dim = indices.axis(.coord),
-                .indices_are_sorted = opts.indices_are_sorted,
-            },
+            args,
         );
 
         const mlir_shape = fromMlirValue(gather_op.result(0)).shape();
