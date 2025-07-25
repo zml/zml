@@ -181,12 +181,6 @@ zig_library(
     import_name = "runtimes/neuron",
     main = "neuron.zig",
     visibility = ["//visibility:public"],
-    data = select({
-        "//runtimes:neuron.enabled": [
-            ":libneuronxla",
-        ],
-        "//conditions:default": [],
-    }),
     deps = [
         "//pjrt",
     ] + select({
