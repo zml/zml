@@ -10,6 +10,7 @@ def zig_cc_binary(
         data = [],
         deps = [],
         tags = [],
+        linkopts = [],
         visibility = None,
         **kwargs):
     zig_binary(
@@ -25,6 +26,7 @@ def zig_cc_binary(
         args = args,
         env = env,
         data = data,
+        linkopts = linkopts,
         deps = [":{}_lib".format(name)],
         tags = tags,
         visibility = visibility,

@@ -7,6 +7,35 @@ load("@zml//bazel:zig.bzl", "zig_cc_binary")
 load(":neuron.bzl", "py_binary_with_script")
 load(":pyenv.bzl", "pyenv_zig")
 
+# load("@aspect_bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+# load("@zml//bazel:patchelf.bzl", "patchelf")
+# load("@zml//bazel:runfiles.bzl", "runfiles_to_default")
+
+
+# runfiles_to_default(
+#     name = "runfiles",
+#     deps = ["@neuron_py_deps//neuronx_cc"],
+# )
+
+# copy_to_directory(
+#     name = "pysandbox",
+#     srcs = [
+#         ":bin/neuronx-cc",
+#         "@rules_python//python:current_py_toolchain",
+#         ":runfiles",
+#     ],
+#     allow_overwrites = True,
+#     add_directory_to_runfiles = True,
+#     include_external_repositories = ["**"],
+#     include_srcs_patterns = [
+#         "bin/neuronx-cc",
+#         "lib/libpython3.11*/**",
+#         "lib/python*/**",
+#         "site-packages/**",
+#     ],
+#     hardlink = "on",
+# )
+
 pyenv_zig(
     name = "libneuronxla_pyenv_zig",
     deps = ["@neuron_py_deps//libneuronxla"],
@@ -29,7 +58,7 @@ zig_library(
 
 # A proxy PJRT Plugin that loads the Neuron PJRT Plugin
 # and returns the instance from nested GetPjrtApi.
-# 
+#
 # Additionally, it provides a way to load implicit transitive dependencies
 # of neuronx-cc (see add_needed of the patchelf target below).
 #
@@ -42,6 +71,7 @@ zig_binary(
     deps = [
         "//stdx",
         "@rules_zig//zig/runfiles",
+        ":libpython",
     ],
     visibility = ["@libpjrt_neuron//:__subpackages__"],
 )
@@ -67,12 +97,14 @@ pip_compile(
 zig_cc_binary(
     name = "neuronx-cc",
     main = "neuronx-cc.zig",
-    copts = ["-lc"],
     data = [
         "@neuron_py_deps//neuronx_cc",
     ],
+    linkopts = [
+        "-Wl,-rpath,$ORIGIN/../lib",
+    ],
     deps = [
-        ":neuronx_cc_pyenv",
+        # ":neuronx_cc_pyenv",
         ":libpython",
         "//async",
         "//stdx",

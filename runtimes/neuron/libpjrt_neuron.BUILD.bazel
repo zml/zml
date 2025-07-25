@@ -51,12 +51,23 @@ patchelf(
     soname = "libpjrt_neuron.so",
 )
 
+runfiles_to_default(
+    name = "neuronx_cc_runfiles",
+    deps = [
+        "@neuron_py_deps//libneuronxla",
+        "@neuron_py_deps//neuronx_cc",
+    ],
+)
+
 copy_to_directory(
     name = "sandbox",
     srcs = [
         ":zmlxneuron_so",
         ":libneuronpjrt.patchelf",
         ":libpjrt_neuron_proxy.patchelf",
+        ":neuronx_cc_runfiles",
+        "@rules_python//python:current_py_toolchain",
+        "@zml//runtimes/neuron:neuronx-cc",
         "@aws-neuronx-runtime-lib//:libnrt.patchelf",
         "@aws-neuronx-runtime-lib//:libncfw.patchelf",
         "@aws-neuronx-collectives//:libnccom",
@@ -64,6 +75,7 @@ copy_to_directory(
         "@libgomp1",
     ],
     replace_prefixes = {
+        "runtimes/neuron/neuronx-cc": "bin/neuronx-cc",
         "libneuronpjrt.patchelf": "lib",
         "libpjrt_neuron_proxy.patchelf": "lib",
         "libnrt.patchelf": "lib",
@@ -72,8 +84,16 @@ copy_to_directory(
         "usr/lib/x86_64-linux-gnu": "lib",
         "opt/neuron": "lib",
     },
+    # include_srcs_patterns = [
+    #     "bin/neuronx-cc",
+    #     "lib/libpython3.11*/**",
+    #     "lib/python*/**",
+    #     "site-packages/**",
+    # ],
+    allow_overwrites = True,
     add_directory_to_runfiles = True,
     include_external_repositories = ["**"],
+    hardlink = "on",
 )
 
 cc_library(
