@@ -62,7 +62,7 @@ const MoeOpts = struct {
 /// - experts: .{ .expert, .d_out, .d } expert layer (need to have a .forward method).
 /// -> output: .{ .s, .d_out }
 pub fn mixtureOfExperts(Expert: type, experts: Expert, input: Tensor, gating: Tensor, opts: MoeOpts) Tensor {
-    log.warn("mixtureOfExperts({s}, {}, {f}, {f})", .{ @typeName(Expert), experts, input, gating });
+    // log.warn("mixtureOfExperts({s}, {}, {f}, {f})", .{ @typeName(Expert), experts, input, gating });
     const num_tokens = input.dim(.s);
     const num_experts = gating.dim(.expert);
     const tokens_per_expert = std.math.divCeil(u32, num_tokens * opts.experts_per_token, num_experts) catch unreachable;
@@ -89,16 +89,21 @@ pub fn mixtureOfExperts(Expert: type, experts: Expert, input: Tensor, gating: Te
     // It means that not all tokens will receive the same number of experts,
     // Each token will get assigned to at least one expert because we normalize gating to sum up to one.
     const normed_gating = gating.div(gating.sum(.s).broad(gating.shape()));
-    const routing = normed_gating.topK(tokens_per_expert, .s, .{});
-    const routing_score = routing.values.sum(.expert);
-
-    const input_per_expert = input.gather(.{ .s = routing.indices }, .{});
+    // TODO: topK should always rename the operated axis.
+    const routing = normed_gating.rename(.{ .s = .expert_token }).topK(tokens_per_expert, .expert_token, .{});
+    const routing_score = routing.values.div(routing.values.sum(.expert).broad(routing.values.shape())).transpose(.{ .expert, .expert_token });
+    const routing_ids = routing.indices.transpose(.{ .expert, .expert_token });
+    const input_per_expert = input.gather(.{ .s = routing_ids }, .{});
     var output_per_expert = experts.forward(input_per_expert);
-    log.warn(" -> input_per_expert {f} -> output_per_expert {f}", .{ input_per_expert, output_per_expert });
-    output_per_expert = output_per_expert.mul(routing.values.div(routing_score.broad(routing.values.shape())).broad(output_per_expert.shape()));
-    var output: Tensor = .constant(output_per_expert.shape().drop(.expert), input.dtype().zero());
-    output = output.scatterSlices(.{ .expert = routing.indices }, output_per_expert, .{ .update_fn = Tensor.ScatterOpts.increment });
-    log.warn(" -> output {f} ->", .{output});
+    // log.warn(" -> input_per_expert {f} -> output_per_expert {f}", .{ input_per_expert, output_per_expert });
+    output_per_expert = output_per_expert.mul(routing_score.broad(output_per_expert.shape()));
+
+    // Reverse engineer the normal output shape that one-expert would have produced for all tokens.
+    // If this provide to not be enough we could use the "sliced_expert" strategy and call forward ourselves.
+    const output_shape = output_per_expert.shape().drop(.expert).rename(.{ .expert_token = .s }).setDim(.s, num_tokens);
+    var output: Tensor = .constant(output_shape, input.dtype().zero());
+    // log.warn(" -> output_per_expert {f}, routing: {f} -> output {f}", .{ output_per_expert, routing_ids, output });
+    output = output.scatterSlices(.{ .s = routing_ids }, output_per_expert, .{ .update_fn = Tensor.ScatterOpts.increment });
 
     return output;
 }
@@ -244,7 +249,7 @@ pub const RopeOpts = struct {
                 // Note: leaky is fine here cause Llama3 struct don't need to allocate memory.
                 return .{ .llama3 = try std.json.parseFromValueLeaky(Llama3, undefined, content, .{ .ignore_unknown_fields = true }) };
             } else {
-                log.warn("Unsupported Rope implementation: {s}, will use the default one which will produce altered results", .{impl.string});
+                // log.warn("Unsupported Rope implementation: {s}, will use the default one which will produce altered results", .{impl.string});
                 return .{ .default = {} };
             }
         }
