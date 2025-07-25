@@ -26,9 +26,8 @@ cc_library(
 )
 
 cc_library(
-    name = "libpjrt_rocm",
+    name = "zmlxrocm",
     defines = ["ZML_RUNTIME_ROCM"],
-    deps = ["@libpjrt_rocm"],
 )
 
 zig_library(
@@ -40,7 +39,8 @@ zig_library(
         "//pjrt",
     ] + select({
         "//runtimes:rocm.enabled": [
-            ":libpjrt_rocm",
+            "@libpjrt_rocm",
+            ":zmlxrocm",
             "//async",
             "//stdx",
             "@rules_zig//zig/runfiles",
