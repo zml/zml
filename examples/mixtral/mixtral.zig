@@ -40,25 +40,54 @@ pub const MixtralLM = struct {
     gen_opts: zml.nn.SamplingStrategy = .{},
     config: Config,
 
-    pub fn init(self: *MixtralLM, config: Config, options: Options) void {
-        self.config = config;
-        self.gen_opts = options.sampling_strategy orelse .{};
-        self.model.max_seq_len = @intCast(options.max_seq_len);
-        self.model.num_heads = @intCast(config.num_attention_heads);
-        self.model.num_kv_heads = @intCast(config.num_key_value_heads);
-        self.model.rope_opts = .{
-            .layout = if (config.hf_rope_impl) .sequential else .interleaved,
-            .freq_base = config.rope_theta,
-            .scaling = config.rope_scaling,
+    pub fn init(allocator: std.mem.Allocator, store: zml.aio.BufferStore, config: Config, options: Options) !MixtralLM {
+        var self: MixtralLM = .{
+            .config = config,
+            .gen_opts = options.sampling_strategy orelse .{},
+            .model = .{
+                .max_seq_len = @intCast(options.max_seq_len),
+                .num_heads = @intCast(config.num_attention_heads),
+                .num_kv_heads = @intCast(config.num_key_value_heads),
+                .rope_opts = .{
+                    .layout = if (config.hf_rope_impl) .sequential else .interleaved,
+                    .freq_base = config.rope_theta,
+                    .scaling = config.rope_scaling,
+                },
+
+                .embed_tokens = .{
+                    .weight = store.getTensor("model.embed_tokens.weight"),
+                },
+                .layers = try allocator.alloc(TransformerLayer, config.num_hidden_layers),
+                .norm = .{
+                    .weight = store.getTensor("model.norm.weight"),
+                    .eps = config.rms_norm_eps,
+                },
+            },
+            .lm_head = .{ .weight = store.getTensor("lm_head.weight") },
         };
-        self.model.norm.eps = config.rms_norm_eps;
-        for (self.model.layers) |*layer| {
+
+        var prefix: zml.aio.PrefixBuilder = .{};
+        try prefix.push(allocator, "model.layers");
+        for (self.model.layers, 0..) |*layer, i| {
+            try prefix.pushDigit(allocator, i);
+            defer prefix.pop();
+
+            // TODO: safer layer init
+            layer.self_attn = try zml.aio.populateModelWithPrefix(SelfAttn, allocator, store, prefix.concat(allocator, "self_attn"));
             layer.self_attn.num_heads = self.model.num_heads;
             layer.self_attn.num_kv_heads = self.model.num_kv_heads;
             layer.self_attn.rope_opts = self.model.rope_opts;
-            layer.input_layernorm.eps = config.rms_norm_eps;
-            layer.post_attention_layernorm.eps = config.rms_norm_eps;
 
+            layer.input_layernorm = .{
+                .weight = store.getTensor(prefix.concat(allocator, "input_layernorm.weight")),
+                .eps = config.rms_norm_eps,
+            };
+            layer.post_attention_layernorm = .{
+                .weight = store.getTensor(prefix.concat(allocator, "post_attention_layernorm.weight")),
+                .eps = config.rms_norm_eps,
+            };
+
+            // TODO: load moe
             // Rewrite to "on_device" layout.
             layer.block_sparse_moe.rewrite();
             const mlp: *Mlp = &layer.block_sparse_moe.on_device.mlp_experts;
@@ -77,6 +106,8 @@ pub const MixtralLM = struct {
         if (self.gen_opts.topk == 1 and self.lm_head != null) {
             self.lm_head.?.weight = self.lm_head.?.weight.withSharding(.{0});
         }
+
+        return self;
     }
 
     /// Predicts the token at `token_index` position.
