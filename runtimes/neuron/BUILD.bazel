@@ -205,3 +205,14 @@ filegroup(
     ],
     visibility = ["//visibility:public"],
 )
+
+zig_binary(
+    name = "neuronxla",
+    kind = BINARY_KIND.shared_lib,
+    main = "libneuronxla.zig",
+    copts = ["-lc"],
+    deps = [
+        ":libpython",
+    ],
+    visibility = ["@libpjrt_neuron//:__subpackages__"],
+)
