@@ -23,16 +23,10 @@ _UBUNTU_PACKAGES = {
 
 CUDA_PACKAGES = {
     "cuda_cudart": "\n".join([
-        # Driver API only
         packages.cc_library(
-            name = "cuda",
+            name = "cuda_headers",
             hdrs = ["include/cuda.h"],
             includes = ["include"],
-        ),
-        #TODO: Remove me as soon we use the Driver API in tracer.zig
-        packages.filegroup(
-            name = "so_files",
-            srcs = ["lib/libcudart.so.12"],
         ),
     ]),
     "cuda_cupti": packages.filegroup(

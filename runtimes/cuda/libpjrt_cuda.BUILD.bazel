@@ -1,5 +1,4 @@
 load("@aspect_bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
-load("@zml//bazel:cc_import.bzl", "cc_import")
 load("@zml//bazel:patchelf.bzl", "patchelf")
 
 cc_shared_library(
@@ -32,7 +31,6 @@ copy_to_directory(
         "@cuda_nvtx//:so_files",
         "@cuda_nvcc//:so_files",
         "@cuda_nvrtc//:so_files",
-        "@cuda_cudart//:so_files",
         "@cudnn//:so_files",
         "@libcublas//:so_files",
         "@libcufft//:so_files",
@@ -53,10 +51,9 @@ copy_to_directory(
 )
 
 cc_library(
-    name = "libpjrt_cuda",
-    data = [":sandbox"],
+    name = "libcuda_headers",
     deps = [
-        "@cuda_cudart//:cuda",
+        "@cuda_cudart//:cuda_headers",
     ],
     linkopts = [
         # Defer function call resolution until the function is called
@@ -68,5 +65,11 @@ cc_library(
         # is the default in most bazel CC toolchains as well as in certain linkers.
         "-Wl,-z,lazy",
     ],
+    visibility = ["@zml//runtimes/cuda:__subpackages__"],
+)
+
+cc_library(
+    name = "libpjrt_cuda",
+    data = [":sandbox"],
     visibility = ["@zml//runtimes/cuda:__subpackages__"],
 )

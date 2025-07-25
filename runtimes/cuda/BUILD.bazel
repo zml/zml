@@ -12,10 +12,16 @@ cc_library(
 )
 
 cc_library(
-    name = "libpjrt_cuda",
-    hdrs = ["libpjrt_cuda.h"],
+    name = "zmlxcuda",
     defines = ["ZML_RUNTIME_CUDA"],
-    deps = ["@libpjrt_cuda"],
+)
+
+cc_library(
+    name = "libcuda_headers",
+    hdrs = ["cuda.h"],
+    deps = [
+        "@libpjrt_cuda//:libcuda_headers",
+    ],
 )
 
 zig_library(
@@ -27,7 +33,9 @@ zig_library(
         "//pjrt",
     ] + select({
         "//runtimes:cuda.enabled": [
-            ":libpjrt_cuda",
+            "@libpjrt_cuda",
+            ":libcuda_headers",
+            ":zmlxcuda",
             "//async",
             "//stdx",
             "@rules_zig//zig/runfiles",
