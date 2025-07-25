@@ -25,9 +25,7 @@ const TinyLlamaConfig = extern struct {
 /// For convenience we use the same layer names
 /// than the one used by the Llama-3.1 models.
 pub fn open(allocator: std.mem.Allocator, model_path: []const u8) !zml.aio.BufferStore {
-    var res: zml.aio.BufferStore = .{
-        .arena = std.heap.ArenaAllocator.init(allocator),
-    };
+    var res: zml.aio.BufferStore = .init(allocator);
     errdefer res.arena.deinit();
     const arena = res.arena.allocator();
 
