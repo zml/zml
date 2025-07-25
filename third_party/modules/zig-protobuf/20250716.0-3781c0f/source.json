@@ -1,7 +1,7 @@
 {
-    "strip_prefix": "zig-protobuf-3781c0f7aaeb437bbe4d531b248a94f108347b14",
-    "url": "https://github.com/zml/zig-protobuf/archive/3781c0f7aaeb437bbe4d531b248a94f108347b14.tar.gz",
-    "integrity": "sha256-Lc4pU50ST7bofYQ8aDhF9qnc5mCHtiRB6jXCzbQXhoc=",
+    "strip_prefix": "zig-protobuf-370e5ddadddc7f719b560d8d0066b576cd317d64",
+    "url": "https://github.com/zml/zig-protobuf/archive/370e5ddadddc7f719b560d8d0066b576cd317d64.tar.gz",
+    "integrity": "sha256-RSzASmnkbpOwVBwJs8AsiXBLTDqw3P6W8Tv8dt2y9wk=",
     "overlay": {
         "MODULE.bazel": "",
         "BUILD.bazel": ""
