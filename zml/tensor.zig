@@ -2204,6 +2204,7 @@ pub const Tensor = struct {
         }
 
         // TODO: sort indices following self.shape instead of asking the user to do it.
+        // TODO: this doesn't handle batching axes.
         return self.gather_(idx_axes.slice(), idx_per_axis.slice(), opts);
     }
 
@@ -2343,7 +2344,6 @@ pub const Tensor = struct {
                 .{ .{ .a = 10 }, .{ .a = idx(.{ .n = 8 }) }, .{ .n = 8 } },
                 .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{}) }, .{ .b = 20 } },
                 .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{ .n = 8 }) }, .{ .n = 8, .b = 20 } },
-                // .{ .{ .a = 10, .b = 20 }, 0, idx(.{ .n = 8 }), .{ .n = 8, .b = 20 } },
                 // Favor val shape, instead of indices shape.
                 .{ .{ .a = 10, .b = 20 }, .{ .b = idx(.{ .n = 8 }) }, .{ .a = 10, .n = 8 } },
                 .{ .{ .a = 10, .b = 20, .c = 30 }, .{ .b = idx(.{ .n = 8 }) }, .{ .a = 10, .n = 8, .c = 30 } },
@@ -2708,6 +2708,11 @@ pub const Tensor = struct {
                 .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{ .n = 8 }) }, .{ .n = 8, .a = 2 } },
                 .{ .{ .a = 10, .b = 20 }, .{ .b = idx(.{ .n = 8 }), .a = idx(.{ .n = 8 }) }, .{ .n = 8, .a = 3, .b = 2 } },
                 .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{ .n = 8 }), .b = idx(.{ .n = 8 }) }, .{ .a = 3, .n = 8, .b = 2 } },
+                // 2-indices axes, m and n
+                .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{ .n = 8, .m = 9 }) }, .{ .n = 8, .m = 9, .b = 20 } },
+                // TODO: here update (m,n) doesn't match indices (n, m).
+                // We need to either handle this automatically or provide better errors.
+                // .{ .{. a = 10, .b=20 }, .{ .a = idx(.{.n=8,.m=9}) }, .{.m=9,.n=8,.b=20} },
             }) |testcase| {
                 const x_shape, const indices, const updates_shapes = testcase;
                 const x = Tensor.constant(x_shape, .{ .f16 = 0 });
@@ -3005,6 +3010,8 @@ pub const Tensor = struct {
 
     /// Returns a Tensor representing the result of Top-K over the given axis.
     pub fn topK(self: Tensor, k: u32, axis_: anytype, opts: struct { descending: bool = true }) SortRes {
+        // TODO: ask the user for a new name for the axis, this will simplify tagged code.
+        // See eg code in `sampleTokens` and `mixtureOfExpert`
         const a = self.axis(axis_);
         const result = self.sort(a, .{ .descending = opts.descending });
         return .{

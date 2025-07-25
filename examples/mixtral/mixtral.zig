@@ -278,10 +278,10 @@ const Mlp = struct {
     down_proj: zml.nn.Linear, // (hidden_dim -> dim)
 
     pub fn forward(self: Mlp, x: Tensor) Tensor {
-        const up = self.up_proj.weight.dot(x, .d);
-        const gate = self.gate_proj.weight.dot(x, .d).silu();
+        const up = x.dot(self.up_proj.weight, .d);
+        const gate = x.dot(self.gate_proj.weight, .d).silu();
 
-        const out = self.down_proj.weight.dot(gate.mul(up), .up);
+        const out = gate.mul(up).dot(self.down_proj.weight, .up);
         log.warn("Mlp(x: {f}) -> up: {f} -> gate: {f} -> out: {f}", .{ x, up, gate, out });
         return out;
     }
