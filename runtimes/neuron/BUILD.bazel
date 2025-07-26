@@ -213,6 +213,7 @@ zig_binary(
     copts = ["-lc"],
     deps = [
         ":libpython",
+        "//stdx",
     ],
     visibility = ["@libpjrt_neuron//:__subpackages__"],
 )
