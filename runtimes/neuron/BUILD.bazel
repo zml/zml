@@ -6,6 +6,13 @@ load("@rules_zig//zig:defs.bzl", "BINARY_KIND", "zig_binary", "zig_library")
 load("@zml//bazel:zig.bzl", "zig_cc_binary")
 load(":neuron.bzl", "py_binary_with_script")
 load(":pyenv.bzl", "pyenv_zig")
+load("@zml//bazel:zig_proto_library.bzl", "zig_proto_library")
+
+zig_proto_library(
+    name = "hlo_proto",
+    import_name = "hlo_proto",
+    deps = ["@xla//xla/service:hlo_proto"],
+)
 
 # load("@aspect_bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 # load("@zml//bazel:patchelf.bzl", "patchelf")
@@ -212,8 +219,9 @@ zig_binary(
     main = "libneuronxla.zig",
     copts = ["-lc"],
     deps = [
+        ":hlo_proto",
         ":libpython",
         "//stdx",
     ],
-    visibility = ["@libpjrt_neuron//:__subpackages__"],
+    visibility = ["//visibility:public"],
 )

@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const c = @import("c");
+const hlo_proto = @import("hlo_proto");
 const stdx = @import("stdx");
 
 const log = std.log.scoped(.@"zml/runtimes/neuron/libneuronxla");
@@ -67,6 +68,68 @@ pub fn PyBytes_AsStringAndSize(object: *c.PyObject) []u8 {
     return buf[0..@intCast(len)];
 }
 
+fn wrapNeffAsCustomCall(allocator: std.mem.Allocator, hlo_code: []const u8, neff_file_path: []const u8) ![]const u8 {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const hlo_module = try hlo_proto.HloModuleProto.decode(hlo_code, arena.allocator());
+    var entry = blk: {
+        for (hlo_module.computations.items) |*comp| {
+            if (comp.id == hlo_module.entry_computation_id) {
+                break :blk comp;
+            }
+        } else return error.ComputationNotFound;
+    };
+
+    var fused_root: hlo_proto.HloInstructionProto = blk: {
+        for (entry.instructions.items) |inst| {
+            if (inst.id == entry.root_id) {
+                break :blk try inst.dupe(arena.allocator());
+            }
+        } else return error.CustomCallNotFound;
+    };
+
+    fused_root.opcode = .{ .Const = "custom-call" };
+    fused_root.custom_call_target = .{ .Const = "AwsNeuronNeff" };
+    fused_root.backend_config = .{ .Owned = blk: {
+        const neff_file = try std.fs.openFileAbsolute(neff_file_path, .{});
+        defer neff_file.close();
+        const stat = try neff_file.stat();
+        const neff_buf = try arena.allocator().alloc(u8, @intCast(stat.size));
+        _ = try neff_file.readAll(neff_buf);
+        break :blk neff_buf;
+    } };
+
+    const parameters_len = entry.program_shape.?.parameters.items.len;
+    var new_entry_instructions: std.ArrayListUnmanaged(hlo_proto.HloInstructionProto) = try .initCapacity(
+        arena.allocator(),
+        parameters_len + 1, // params + fused_root
+    );
+
+    fused_root.operand_ids.clearRetainingCapacity();
+    for (entry.instructions.items) |inst| {
+        if (std.mem.eql(u8, inst.opcode.getSlice(), "parameter")) {
+            try fused_root.operand_ids.append(arena.allocator(), inst.id);
+            try new_entry_instructions.append(arena.allocator(), inst);
+        }
+    }
+
+    try fused_root.frontend_attributes.?.map.append(arena.allocator(), .{
+        .key = .{ .Const = "valid_inputs" },
+        .value = .{ .Owned = blk: {
+            const valid_inputs_value = try arena.allocator().alloc(u8, parameters_len * 2 - 1);
+            for (valid_inputs_value, 0..) |*char, i| {
+                char.* = if (i % 2 == 0) '1' else ',';
+            }
+            break :blk valid_inputs_value;
+        } },
+    });
+    try new_entry_instructions.append(arena.allocator(), fused_root);
+    entry.instructions = new_entry_instructions;
+
+    return hlo_module.encode(allocator);
+}
+
 fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t) !?*c.PyObject {
     var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
     defer arena.deinit();
@@ -77,17 +140,13 @@ fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t)
     const code = PyBytes_AsStringAndSize(args[0]);
     const platform_version = PyBytes_AsStringAndSize(args[2]);
 
-    const target: []const u8 = blk: {
-        if (std.mem.eql(u8, platform_version, "1.0")) {
-            break :blk "--target=inf1";
-        } else if (std.mem.eql(u8, platform_version, "2.0")) {
-            break :blk "--target=trn1";
-        } else if (std.mem.eql(u8, platform_version, "3.0")) {
-            break :blk "--target=trn2";
-        } else {
-            log.err("Unknown platform version: {s}\n", .{platform_version});
-            return null;
-        }
+    const target = std.StaticStringMap([]const u8).initComptime(.{
+        .{ "1.0", "inf1" },
+        .{ "2.0", "trn1" },
+        .{ "3.0", "trn2" },
+    }).get(platform_version) orelse {
+        log.err("Unknown platform version: {s}\n", .{platform_version});
+        return error.UnknownPlatformVersion;
     };
 
     var tmp_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -108,8 +167,9 @@ fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t)
         "neuronx-cc",
         "compile",
         "--framework=XLA",
+        "--target",
         target,
-        "--verbose=35",
+        "--verbose=debug",
         "--enable-internal-neff-wrapper",
         "--output",
         neff_file,
@@ -124,9 +184,15 @@ fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t)
     child.stdin_behavior = .Ignore;
     child.stdout_behavior = .Inherit;
     child.stderr_behavior = .Inherit;
+    child.cwd = tmp_dir;
     _ = try child.spawnAndWait();
 
     std.debug.print(">>>> {s}\n", .{tmp_dir});
+
+    const neff_hlo_bytes = wrapNeffAsCustomCall(arena.allocator(), code, neff_file) catch |err| {
+        log.err("Error wrapping NEFF as custom call: {}\n", .{err});
+        return err;
+    };
 
     const none = c.Py_None();
     c.Py_IncRef(none);
@@ -144,25 +210,11 @@ fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t)
 
     // std.debug.print("arg1: {s}\n", .{arg1});
 
-    const tuple = c.PyTuple_New(2) orelse {
-        c.Py_DecRef(none);
-        return null;
-    };
-    const empty_bytes = c.PyBytes_FromStringAndSize(null, 0) orelse {
-        c.Py_DecRef(none);
-        c.Py_DecRef(tuple);
-        return null;
-    };
-    const py_long = c.PyLong_FromLongLong(0) orelse {
-        c.Py_DecRef(none);
-        c.Py_DecRef(tuple);
-        return null;
-    };
-
-    _ = c.PyTuple_SetItem(tuple, 0, py_long);
-    _ = c.PyTuple_SetItem(tuple, 1, empty_bytes);
-
-    return tuple;
+    return c.PyTuple_Pack(
+        2,
+        c.PyLong_FromLongLong(0),
+        c.PyBytes_FromStringAndSize(@ptrCast(neff_hlo_bytes), @intCast(neff_hlo_bytes.len)),
+    );
 }
 
 fn neuronx_cc(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t) callconv(.c) ?*c.PyObject {
