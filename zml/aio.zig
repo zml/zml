@@ -75,6 +75,7 @@ pub const BufferStore = struct {
     pub const Buffers = std.StringArrayHashMapUnmanaged(HostBuffer);
     pub const Metadatas = std.StringArrayHashMapUnmanaged(Metadata);
     var _unique_store_id: std.atomic.Value(u64) = .init(0);
+    const _store_id_range: u64 = 1024 * 1024 * 1024;
 
     arena: std.heap.ArenaAllocator,
     files: []MemoryMappedFile = &.{},
@@ -87,7 +88,7 @@ pub const BufferStore = struct {
     pub fn init(allocator: std.mem.Allocator) BufferStore {
         return .{
             .arena = std.heap.ArenaAllocator.init(allocator),
-            ._unique_id = _unique_store_id.fetchAdd(1024 * 1024 * 1024, .monotonic),
+            ._unique_id = _unique_store_id.fetchAdd(_store_id_range, .monotonic),
         };
     }
 
@@ -108,6 +109,41 @@ pub const BufferStore = struct {
 
     pub fn get(self: BufferStore, key: []const u8) ?HostBuffer {
         return self.buffers.get(key);
+    }
+
+    pub fn loadBufferById(self: BufferStore, x: zml.Tensor, platform: zml.Platform) !zml.Buffer {
+        const host_buffer: zml.HostBuffer = switch (x._id) {
+            .buffer_id => |id| hb: {
+                if (id < self._unique_id or self._unique_id + _store_id_range <= id) {
+                    @panic("`store.loadBufferById()` only works on Tensor created by `store.getTensor()`, using the same store object.");
+                }
+                break :hb self.buffers.values()[id - self._unique_id];
+            },
+            else => @panic("`store.loadBufferById()` only works on Tensor created by `store.getTensor()`"),
+        };
+
+        // TODO use x shape
+        return try host_buffer.toDevice(platform);
+    }
+
+    /// Creates a bufferized version of a model from the given BufferStore.
+    ///
+    /// This will represent the weights of the model, loaded on a specific platform.
+    /// It can be used with a `module.Exe` (a compiled version of the same Model), to make a
+    /// `module.ExeWithWeights` ready to be called.
+    pub fn loadModelById(self: BufferStore, Model: type, allocator: std.mem.Allocator, model: Model, platform: zml.Platform) !zml.Bufferized(Model) {
+        const Ctx = struct {
+            platform: *const zml.Platform,
+            store: *const BufferStore,
+
+            pub fn cb(ctx: @This(), x: zml.Tensor) zml.Buffer {
+                return ctx.store.loadBufferById(x, ctx.platform.*) catch @panic("Failed to load buffer to device");
+            }
+        };
+
+        var res: zml.Bufferized(Model) = undefined;
+        try zml.meta.mapAlloc(Ctx.cb, allocator, .{ .platform = &platform, .store = &self }, model, &res);
+        return res;
     }
 
     pub fn getTensor(self: BufferStore, key: []const u8) zml.Tensor {
@@ -294,6 +330,14 @@ pub const PrefixBuilder = struct {
     /// Stack storing the size of the intermediary prefix.
     subprefixes: std.ArrayListUnmanaged(u32) = .{},
 
+    pub fn initCapacity(allocator: std.mem.Allocator, capacity: usize) !PrefixBuilder {
+        const data, const subprefixes = try stdx.mem.groupedAlloc(struct { []u8, []u32 }, allocator, .{ capacity, @divFloor(capacity, 4) });
+        return .{
+            .data = .initBuffer(data),
+            .subprefixes = .initBuffer(subprefixes),
+        };
+    }
+
     pub fn deinit(self: *PrefixBuilder, allocator: std.mem.Allocator) void {
         self.data.deinit(allocator);
         self.subprefixes.deinit(allocator);
@@ -303,8 +347,8 @@ pub const PrefixBuilder = struct {
         return self.data.items;
     }
 
-    pub fn concat(self: *PrefixBuilder, allocator: std.mem.Allocator, prefix: []const u8) []const u8 {
-        self.push(allocator, prefix) catch unreachable;
+    pub fn concat(self: *PrefixBuilder, prefix: []const u8) []const u8 {
+        self.push(stdx.noalloc, prefix) catch unreachable;
         const res = self.items();
         self.pop();
         return res;
@@ -339,6 +383,14 @@ pub const PrefixBuilder = struct {
     pub fn pop(self: *PrefixBuilder) void {
         const last_prefix_len = self.subprefixes.pop() orelse unreachable;
         self.data.shrinkRetainingCapacity(last_prefix_len);
+    }
+
+    pub fn checkpoint(self: PrefixBuilder) [2]usize {
+        return .{ self.data.items.len, self.subprefixes.items.len };
+    }
+
+    pub fn restore(self: *PrefixBuilder, ckpt: [2]usize) void {
+        self.data.items.len, self.subprefixes.items.len = ckpt;
     }
 };
 
