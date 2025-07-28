@@ -112,7 +112,7 @@ pub const BufferStore = struct {
     }
 
     pub fn loadBufferById(self: BufferStore, x: zml.Tensor, platform: zml.Platform) !zml.Buffer {
-        const host_buffer: zml.HostBuffer = switch (x._id) {
+        var host_buffer: zml.HostBuffer = switch (x._id) {
             .buffer_id => |id| hb: {
                 if (id < self._unique_id or self._unique_id + _store_id_range <= id) {
                     @panic("`store.loadBufferById()` only works on Tensor created by `store.getTensor()`, using the same store object.");
@@ -122,7 +122,9 @@ pub const BufferStore = struct {
             else => @panic("`store.loadBufferById()` only works on Tensor created by `store.getTensor()`"),
         };
 
-        // TODO use x shape
+        stdx.debug.assert(x.shape().eql(host_buffer.shape()), "Can't load buffer {f} for tensor {f}: shape mismatch", .{ host_buffer, x });
+        // Copy sharding info
+        host_buffer._shape = x._shape;
         return try host_buffer.toDevice(platform);
     }
 
@@ -148,7 +150,7 @@ pub const BufferStore = struct {
 
     pub fn getTensor(self: BufferStore, key: []const u8) zml.Tensor {
         return self.getTensorOrNull(key) orelse {
-            findSimilarBufferKeys(key, self, std.heap.smp_allocator);
+            self.findSimilarBufferKeys(std.heap.smp_allocator, key);
             @panic("Tensor not found");
         };
     }
@@ -203,6 +205,58 @@ pub const BufferStore = struct {
         }
 
         return null;
+    }
+
+    /// Assists in debuggigng `BufferNotFound` error
+    /// This is useful when a buffer key is not found and you want to identify possible alternatives (or typos)
+    pub fn findSimilarBufferKeys(store: BufferStore, tmp_alloc: std.mem.Allocator, original_key: []const u8) void {
+        const suffixes = [_][]const u8{ "", ".weight", ".bias" };
+        var shown_keys = std.StringHashMap(void).init(tmp_alloc);
+        defer shown_keys.deinit();
+
+        // remove suffix .weight and .bias
+        var base_key = original_key;
+        for (suffixes) |suffix| {
+            if (std.mem.endsWith(u8, original_key, suffix)) {
+                base_key = original_key[0 .. original_key.len - suffix.len];
+                break;
+            }
+        }
+
+        // first test: look for exact matches
+        var matches: usize = 0;
+        var it = store.buffers.iterator();
+        while (it.next()) |entry| {
+            const key = entry.key_ptr.*;
+            if (std.mem.startsWith(u8, key, base_key)) {
+                if (matches == 0) log.warn("Similar buffers found:", .{});
+                if (!shown_keys.contains(key)) {
+                    log.warn("  - {s}: {}", .{ key, entry.value_ptr.*.shape() });
+                    shown_keys.put(key, {}) catch continue;
+                    matches += 1;
+                }
+            }
+        }
+
+        // second test: progressive partial matches
+        if (matches == 0) {
+            var components = std.mem.splitScalar(u8, base_key, '.');
+            while (components.next()) |component| {
+                matches = 0;
+                it = store.buffers.iterator();
+                while (it.next()) |entry| {
+                    const key = entry.key_ptr.*;
+                    if (std.mem.indexOf(u8, key, component) != null and !shown_keys.contains(key)) {
+                        if (matches == 0) log.warn("Partial matches for '{s}':", .{component});
+                        log.warn("  - {s}: {f}", .{ key, entry.value_ptr.*.shape() });
+                        shown_keys.put(key, {}) catch continue;
+                        matches += 1;
+                        if (matches >= 5) break;
+                    }
+                }
+                if (matches > 0) break;
+            }
+        }
     }
 };
 
@@ -695,58 +749,6 @@ pub fn unloadBuffers(model: anytype) void {
     }).cb, {}, model);
 }
 
-/// Assists in debuggigng `BufferNotFound` error
-/// This is useful when a buffer key is not found and you want to identify possible alternatives (or typos)
-fn findSimilarBufferKeys(original_key: []const u8, store: BufferStore, temp_allocator: std.mem.Allocator) void {
-    const suffixes = [_][]const u8{ "", ".weight", ".bias" };
-    var shown_keys = std.StringHashMap(void).init(temp_allocator);
-    defer shown_keys.deinit();
-
-    // remove suffix .weight and .bias
-    var base_key = original_key;
-    for (suffixes) |suffix| {
-        if (std.mem.endsWith(u8, original_key, suffix)) {
-            base_key = original_key[0 .. original_key.len - suffix.len];
-            break;
-        }
-    }
-
-    // first test: look for exact matches
-    var matches: usize = 0;
-    var it = store.buffers.iterator();
-    while (it.next()) |entry| {
-        const key = entry.key_ptr.*;
-        if (std.mem.startsWith(u8, key, base_key)) {
-            if (matches == 0) log.warn("Similar buffers found:", .{});
-            if (!shown_keys.contains(key)) {
-                log.warn("  - {s}: {f}", .{ key, entry.value_ptr.*.shape() });
-                shown_keys.put(key, {}) catch continue;
-                matches += 1;
-            }
-        }
-    }
-
-    // second test: progressive partial matches
-    if (matches == 0) {
-        var components = std.mem.splitScalar(u8, base_key, '.');
-        while (components.next()) |component| {
-            matches = 0;
-            it = store.buffers.iterator();
-            while (it.next()) |entry| {
-                const key = entry.key_ptr.*;
-                if (std.mem.indexOf(u8, key, component) != null and !shown_keys.contains(key)) {
-                    if (matches == 0) log.warn("Partial matches for '{s}':", .{component});
-                    log.warn("  - {s}: {f}", .{ key, entry.value_ptr.*.shape() });
-                    shown_keys.put(key, {}) catch continue;
-                    matches += 1;
-                    if (matches >= 5) break;
-                }
-            }
-            if (matches > 0) break;
-        }
-    }
-}
-
 /// deinit all buffers in the given struct
 pub fn awaitAll(buffers: anytype) !void {
     zml.meta.visit((struct {
@@ -778,7 +780,7 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
         } else {
             log.err("Buffer not found: {s}", .{prefix});
 
-            findSimilarBufferKeys(prefix, buffer_store, allocator);
+            buffer_store.findSimilarBufferKeys(allocator, prefix);
 
             return error.BufferNotFound;
         };
