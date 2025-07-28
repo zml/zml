@@ -52,7 +52,7 @@ pub const MixtralLM = struct {
                 },
 
                 .embed_tokens = .{
-                    .weight = store.getTensor("model.embed_tokens.weight"),
+                    .weight = store.getTensor("model.embed_tokens.weight").withSharding(.{1}),
                 },
                 .layers = try allocator.alloc(TransformerLayer, config.num_hidden_layers),
                 .norm = .{
@@ -60,7 +60,7 @@ pub const MixtralLM = struct {
                     .eps = config.rms_norm_eps,
                 },
             },
-            .lm_head = .{ .weight = store.getTensor("lm_head.weight") },
+            .lm_head = .{ .weight = store.getTensor("lm_head.weight").withSharding(.{0}) },
         };
 
         var prefix: zml.aio.PrefixBuilder = try .initCapacity(allocator, 1024);
@@ -241,14 +241,6 @@ pub const Mixtral = struct {
     pub fn embed(embed_tokens_: zml.nn.TokenEmbedding, tokens_: zml.Tensor) zml.Tensor {
         return zml.call(embed_tokens_, .forward, .{tokens_}).withPartialTags(.{.d});
     }
-
-    fn initKvCache(self: Mixtral, embed_shape: zml.Shape) KvCache {
-        const dims = self.shape();
-        var kv_shape = embed_shape.insert(0, .{ .layer = dims.layer }).rename(.{ .s = .k }).splitAxes(.{ .d = .{ .h = dims.nkvh, .hd = dims.hd } });
-        const perm = kv_shape.contiguousPerm(.{ .k, .h, .hd });
-        kv_shape = kv_shape.transpose(perm.constSlice());
-        return KvCache.init(kv_shape);
-    }
 };
 
 pub const TransformerLayer = struct {
@@ -343,8 +335,6 @@ const MoE = struct {
         const devices = platform.getDevices();
         const num_experts = weight.dim(.expert);
         const num_shards = platform.sharding().num_partitions;
-        std.debug.assert(num_shards == num_experts);
-        std.debug.assert(devices.len == num_experts);
         // Note: this assumes num_devices == num_partitions, it's incorrect.
 
         const buffer_type: zml.pjrt.BufferType = switch (weight.shape().dtype()) {
@@ -357,32 +347,38 @@ const MoE = struct {
             ._shards = .{},
         };
 
-        // "model.layers.0.block_sparse_moe.experts.0.w1.weight" ... "model.layers.0.block_sparse_moe.experts.7.w1.weight"
-        for (0.., devices) |i, dev| {
-            const ckpt = prefix.checkpoint();
-            defer prefix.restore(ckpt);
-            try prefix.pushDigit(stdx.noalloc, i);
-            try prefix.push(stdx.noalloc, name);
-            try prefix.push(stdx.noalloc, "weight");
+        if (devices.len == num_experts and num_shards == num_experts) {
+            // "model.layers.0.block_sparse_moe.experts.0.w1.weight" ... "model.layers.0.block_sparse_moe.experts.7.w1.weight"
+            for (0.., devices) |i, dev| {
+                const ckpt = prefix.checkpoint();
+                defer prefix.restore(ckpt);
+                try prefix.pushDigit(stdx.noalloc, i);
+                try prefix.push(stdx.noalloc, name);
+                try prefix.push(stdx.noalloc, "weight");
 
-            const expert = store.get(prefix.items()) orelse {
-                log.err("Buffer not found: {s}", .{prefix.items()});
-                store.findSimilarBufferKeys(std.heap.smp_allocator, prefix.items());
-                @panic("Buffer not found");
-            };
-            const pjrt_buffer, const event = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, .{
-                .data = expert._data,
-                .buffer_type = buffer_type,
-                .dims = expert.shape().dims(),
-                .byte_strides = expert.strides(),
-                .host_buffer_semantics = .ImmutableUntilTransferCompletes,
-                .device = dev,
-            });
+                const expert = store.get(prefix.items()) orelse {
+                    log.err("Buffer not found: {s}", .{prefix.items()});
+                    store.findSimilarBufferKeys(std.heap.smp_allocator, prefix.items());
+                    @panic("Buffer not found");
+                };
+                const pjrt_buffer, const event = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, .{
+                    .data = expert._data,
+                    .buffer_type = buffer_type,
+                    .dims = expert.shape().dims(),
+                    .byte_strides = expert.strides(),
+                    .host_buffer_semantics = .ImmutableUntilTransferCompletes,
+                    .device = dev,
+                });
 
-            res._shards.appendAssumeCapacity(pjrt_buffer);
-            if (event) |ev| {
-                ev.deinit(platform.pjrt_api);
+                res._shards.appendAssumeCapacity(pjrt_buffer);
+                if (event) |ev| {
+                    ev.deinit(platform.pjrt_api);
+                }
             }
+        } else if (num_shards == 1) {
+            @panic("TODO");
+        } else {
+            @panic("TODO");
         }
 
         return res;
@@ -462,16 +458,6 @@ pub const SelfAttn = struct {
         const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
         return .{ zml.call(self.o_proj, .forward, .{attn}), new_kv_cache };
     }
-
-    fn initKvCache(key_shape: zml.Shape) KvCache {
-        // When we call initKvCache, we haven't renamed .s to .k yet.
-        var kv_shape = key_shape.insert(0, .{ .layer = 1 }).rename(.{ .s = .k });
-        const perm = kv_shape.contiguousPerm(.{ .h, .k, .hd });
-        kv_shape = kv_shape.transpose(perm.constSlice());
-        var res = KvCache.init(kv_shape);
-        res.layer_index = .scalar(0, .u32);
-        return res;
-    }
 };
 
 pub const KvCache = struct {
@@ -498,9 +484,9 @@ pub const KvCache = struct {
 
     pub fn initBuffer(kv_shape: zml.Shape, platform: zml.Platform) !zml.Bufferized(KvCache) {
         return .{
-            .k = try zml.Buffer.constant(platform, kv_shape, 1),
-            .v = try zml.Buffer.constant(platform, kv_shape, 1),
-            .layer_index = try zml.Buffer.constant(platform, zml.Shape.init(.{}, .u32), 0),
+            .k = try zml.Buffer.uninitialized(platform, kv_shape, .{}),
+            .v = try zml.Buffer.uninitialized(platform, kv_shape, .{}),
+            .layer_index = try zml.Buffer.uninitialized(platform, .scalar(.u32), .{}),
         };
     }
 
