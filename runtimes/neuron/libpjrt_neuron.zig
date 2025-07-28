@@ -10,12 +10,16 @@ const log = std.log.scoped(.@"zml/runtimes/neuron");
 var api_inner: *c.PJRT_Api = undefined;
 var api_proxy: c.PJRT_Api = undefined;
 
-fn comptimeStrJoin(comptime separator: [:0]const u8, comptime slices: []const [:0]const u8) [:0]const u8 {
-    comptime var ret = slices[0];
-    inline for (slices[1..]) |slice| {
-        ret = ret ++ separator ++ slice;
-    }
-    return ret;
+pub export fn zmlxneuron_dlopen(filename: [*c]const u8, flags: c_int) ?*anyopaque {
+    const replacements: std.StaticStringMap([:0]const u8) = .initComptime(.{
+        .{ "libnccom.so", "libnccom.so.2" },
+        .{ "libnrt.so", "libnrt.so.1" },
+        .{ "libncfw.so", "libncfw.so.2" },
+    });
+    return std.c.dlopen(
+        if (filename) |f| replacements.get(std.mem.span(f)) orelse filename else null,
+        @bitCast(flags),
+    );
 }
 
 fn pyErrorOrExit(status: c.PyStatus) void {
@@ -34,24 +38,6 @@ pub fn toPosixPathW(file_path: []const u8) error{NameTooLong}![std.posix.PATH_MA
     const len = c.mbstowcs(&path_with_null, file_path.ptr, file_path.len);
     path_with_null[len] = 0;
     return path_with_null;
-}
-
-pub fn setNeuronCCFlags() void {
-    // See neuronxcc reference:
-    // https://awsdocs-neuron.readthedocs-hosted.com/en/latest/compiler/neuronx-cc/api-reference-guide/neuron-compiler-cli-reference-guide.html#neuron-compiler-cli-reference-guide
-    _ = c.setenv("NEURON_CC_FLAGS", comptimeStrJoin(" ", &.{
-        // 30% faster, no visible speed difference on llama
-        "--optlevel=1",
-        // generic is the default, but it fails on transformers, force it
-        "--model-type=transformer",
-        // disable it, we do our own
-        "--auto-cast=none",
-        "--enable-fast-loading-neuron-binaries",
-    }), 1);
-
-    // Enable stochastic rounding
-    // https://awsdocs-neuron.readthedocs-hosted.com/en/latest/general/arch/neuron-features/rounding-modes.html
-    _ = c.setenv("NEURON_RT_STOCHASTIC_ROUNDING_EN", "1", 1);
 }
 
 fn setupPythonEnv(sandbox_path: []const u8) !void {
@@ -107,6 +93,8 @@ pub export fn GetPjrtApi() ?*c.PJRT_Api {
     var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
     defer arena.deinit();
 
+    std.debug.print("ONE\n", .{});
+
     var r_ = runfiles.Runfiles.create(.{ .allocator = arena.allocator() }) catch |err| {
         stdx.debug.panic("Unable to find runfiles: {}", .{err});
     } orelse stdx.debug.panic("Runfiles not availeabwewefle", .{});
@@ -119,8 +107,9 @@ pub export fn GetPjrtApi() ?*c.PJRT_Api {
         stdx.debug.panic("Failed to find sandbox path for NEURON runtime: {}", .{err});
     } orelse stdx.debug.panic("No NEURON sandbox path found", .{});
 
+    std.debug.print("TWO\n", .{});
+
     {
-        setNeuronCCFlags();
         setupBinPath(arena.allocator(), sandbox_path) catch |err| {
             log.err("Failed to setup bin path: {}", .{err});
             return null;
@@ -157,6 +146,8 @@ pub export fn GetPjrtApi() ?*c.PJRT_Api {
 
         break :blk GetPjrtApi_inner();
     };
+
+    std.debug.print("THREE\n", .{});
 
     api_proxy = blk: {
         var tmp: c.PJRT_Api = .{};

@@ -107,10 +107,11 @@ fn wrapNeffAsCustomCall(allocator: std.mem.Allocator, hlo_code: []const u8, neff
     );
 
     fused_root.operand_ids.clearRetainingCapacity();
+    try fused_root.operand_ids.ensureTotalCapacityPrecise(arena.allocator(), parameters_len);
     for (entry.instructions.items) |inst| {
         if (std.mem.eql(u8, inst.opcode.getSlice(), "parameter")) {
-            try fused_root.operand_ids.append(arena.allocator(), inst.id);
-            try new_entry_instructions.append(arena.allocator(), inst);
+            fused_root.operand_ids.appendAssumeCapacity(inst.id);
+            new_entry_instructions.appendAssumeCapacity(inst);
         }
     }
 
@@ -124,6 +125,7 @@ fn wrapNeffAsCustomCall(allocator: std.mem.Allocator, hlo_code: []const u8, neff
             break :blk valid_inputs_value;
         } },
     });
+
     try new_entry_instructions.append(arena.allocator(), fused_root);
     entry.instructions = new_entry_instructions;
 
@@ -131,10 +133,11 @@ fn wrapNeffAsCustomCall(allocator: std.mem.Allocator, hlo_code: []const u8, neff
 }
 
 fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t) !?*c.PyObject {
+    _ = self;
+
     var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
     defer arena.deinit();
 
-    _ = self;
     const args = args_[0..@intCast(nargs_)];
 
     const code = PyBytes_AsStringAndSize(args[0]);
@@ -151,6 +154,9 @@ fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t)
 
     var tmp_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
     const tmp_dir = try makeTempDir(&tmp_dir_buf, "zml-neuronxcc-");
+    defer std.fs.deleteTreeAbsolute(tmp_dir) catch |err| {
+        log.err("Error deleting temporary directory {s}: {}\n", .{ tmp_dir, err });
+    };
 
     const code_file = try std.fs.path.join(arena.allocator(), &.{ tmp_dir, "file.code" });
     {
@@ -159,8 +165,6 @@ fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t)
         try file.writeAll(code);
     }
 
-    const wrapped_neff_hlo_file = try std.fs.path.join(arena.allocator(), &.{ tmp_dir, "wrapped_neff.hlo" });
-    _ = wrapped_neff_hlo_file; // autofix
     const neff_file = try std.fs.path.join(arena.allocator(), &.{ tmp_dir, "file.neff" });
 
     var child = std.process.Child.init(&.{
@@ -169,7 +173,7 @@ fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t)
         "--framework=XLA",
         "--target",
         target,
-        "--verbose=debug",
+        "--verbose=info",
         "--enable-internal-neff-wrapper",
         "--output",
         neff_file,
@@ -193,22 +197,6 @@ fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t)
         log.err("Error wrapping NEFF as custom call: {}\n", .{err});
         return err;
     };
-
-    const none = c.Py_None();
-    c.Py_IncRef(none);
-
-    // var arg1: [*c]const u8 = undefined;
-    // var arg2: c_int = undefined;
-    // c.Py
-    // const arg_parse_result = c.PyArg_ParseTuple(args, "s:neuronx_cc", &arg1, &arg2);
-
-    // if (arg_parse_result == 0) {
-    //     std.debug.print("Error parsing arguments\n", .{});
-    //     c.Py_DecRef(none);
-    //     return null;
-    // }
-
-    // std.debug.print("arg1: {s}\n", .{arg1});
 
     return c.PyTuple_Pack(
         2,

@@ -5,18 +5,6 @@ load("@bazel_skylib//rules:select_file.bzl", "select_file")
 load("@rules_cc//cc:cc_shared_library.bzl", "cc_shared_library")
 load("@zml//bazel:runfiles.bzl", "runfiles_to_default")
 
-cc_shared_library(
-    name = "zmlxneuron_so_",
-    shared_lib_name = "libzmlxneuron.so.0",
-    deps = ["@zml//runtimes/neuron:zmlxneuron_lib"],
-)
-
-copy_file(
-    name = "zmlxneuron_so",
-    src = ":zmlxneuron_so_",
-    out = "lib/libzmlxneuron.so.0",
-)
-
 runfiles_to_default(
     name = "libneuronxla_files",
     deps = ["@neuron_py_deps//libneuronxla:pkg"],
@@ -30,11 +18,11 @@ select_file(
 
 patchelf(
     name = "libneuronpjrt.patchelf",
-    add_needed = [
-        "libpython3.11.so.1.0",
-        "libzmlxneuron.so.0",
-        "libnccom.so.2",
-    ],
+    # add_needed = [
+    #     "libpython3.11.so.1.0",
+    #     # "libzmlxneuron.so.0",
+    #     "libnccom.so.2",
+    # ],
     set_rpath = '$ORIGIN',
     shared_library = ":libneuronpjrt_so",
     soname = "libneuronpjrt.so",
@@ -54,7 +42,6 @@ patchelf(
 runfiles_to_default(
     name = "neuronx_cc_runfiles",
     deps = [
-        # "@neuron_py_deps//libneuronxla",
         "@neuron_py_deps//neuronx_cc",
     ],
 )
@@ -62,7 +49,7 @@ runfiles_to_default(
 copy_to_directory(
     name = "sandbox",
     srcs = [
-        ":zmlxneuron_so",
+        # ":zmlxneuron_so",
         ":libneuronpjrt.patchelf",
         ":libpjrt_neuron_proxy.patchelf",
         ":neuronx_cc_runfiles",
