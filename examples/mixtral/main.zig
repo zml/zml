@@ -87,8 +87,13 @@ pub fn asyncMain() !void {
 
     // initialize ZML platform with optional create options
     // eg: --create-options='{"cuda":{"allocator":{"bfc":{"memory_fraction": 0.99}}}}'
+    // or: --create-options='{"cpu":{"device_count":8}}'
     const create_opts_json = cli.args.@"create-options" orelse "{}";
-    const create_opts = try std.json.parseFromSlice(zml.Platform.CreateOptions, allocator, create_opts_json, .{});
+    const create_opts = std.json.parseFromSlice(zml.Platform.CreateOptions, allocator, create_opts_json, .{}) catch |err| {
+        log.err("Failed to parse --create-options as json ({}): {s}", .{ err, create_opts_json });
+        return err;
+    };
+
     const platform = context.autoPlatform(create_opts.value).withCompilationOptions(compilation_options);
     create_opts.deinit();
     context.printAvailablePlatforms(platform);

@@ -294,7 +294,6 @@ const RmsNorm = struct {
 const MoE = struct {
     router: zml.nn.Linear,
     mlp_experts: Mlp,
-    num_experts: u32,
 
     pub const OnDisk = struct {
         gate: zml.nn.Linear,
@@ -318,7 +317,7 @@ const MoE = struct {
             var router = on_disk.gate;
             router.weight = router.weight.withTags(.{ .expert, .d });
 
-            return .{ .router = router, .mlp_experts = mlp, .num_experts = n };
+            return .{ .router = router, .mlp_experts = mlp };
         }
     };
 
@@ -329,28 +328,64 @@ const MoE = struct {
 
     pub fn loadSharded(self: MoE, store: zml.aio.BufferStore, prefix: *zml.aio.PrefixBuilder, platform: zml.Platform) !zml.Bufferized(MoE) {
         prefix.push(stdx.noalloc, "block_sparse_moe.experts") catch unreachable;
-        var experts_buffers_buf: [16]zml.HostBuffer = undefined;
-        const experts_buffers = experts_buffers_buf[0..self.num_experts];
 
         return .{
             .router = try store.loadModelById(zml.nn.Linear, stdx.noalloc, self.router, platform),
             .mlp_experts = .{
-                .up_proj = .{ .weight = try loadShardedWeight(store, prefix, platform, self.mlp_experts.up_proj.weight, experts_buffers) },
+                .up_proj = .{ .weight = try loadShardedWeight(store, prefix, "w1", platform, self.mlp_experts.up_proj.weight) },
+                .down_proj = .{ .weight = try loadShardedWeight(store, prefix, "w2", platform, self.mlp_experts.down_proj.weight) },
+                .gate_proj = .{ .weight = try loadShardedWeight(store, prefix, "w3", platform, self.mlp_experts.gate_proj.weight) },
             },
         };
     }
 
-    fn loadShardedWeight(store: zml.aio.BufferStore, prefix: *zml.aio.PrefixBuilder, name: []const u8, platform: zml.Platform, weight: Tensor, experts_buffers: []zml.HostBuffer) !zml.Buffer {
+    fn loadShardedWeight(store: zml.aio.BufferStore, prefix: *zml.aio.PrefixBuilder, name: []const u8, platform: zml.Platform, weight: zml.Tensor) !zml.Buffer {
+        const devices = platform.getDevices();
+        const num_experts = weight.dim(.expert);
+        const num_shards = platform.sharding().num_partitions;
+        std.debug.assert(num_shards == num_experts);
+        std.debug.assert(devices.len == num_experts);
+        // Note: this assumes num_devices == num_partitions, it's incorrect.
+
+        const buffer_type: zml.pjrt.BufferType = switch (weight.shape().dtype()) {
+            inline else => |tag| @field(zml.pjrt.BufferType, @tagName(tag)),
+        };
+
+        var res: zml.Buffer = .{
+            ._shape = weight.shape(),
+            ._api = platform.pjrt_api,
+            ._shards = .{},
+        };
+
         // "model.layers.0.block_sparse_moe.experts.0.w1.weight" ... "model.layers.0.block_sparse_moe.experts.7.w1.weight"
-        for (0.., experts_buffers) |i, *expert_host_buffer| {
+        for (0.., devices) |i, dev| {
             const ckpt = prefix.checkpoint();
             defer prefix.restore(ckpt);
             try prefix.pushDigit(stdx.noalloc, i);
-            try prefix.push(name);
-            try prefix.push("weight");
+            try prefix.push(stdx.noalloc, name);
+            try prefix.push(stdx.noalloc, "weight");
 
-            expert_host_buffer.* = store.get(prefix.items()) orelse return error.BufferNotFound;
+            const expert = store.get(prefix.items()) orelse {
+                log.err("Buffer not found: {s}", .{prefix.items()});
+                store.findSimilarBufferKeys(std.heap.smp_allocator, prefix.items());
+                @panic("Buffer not found");
+            };
+            const pjrt_buffer, const event = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, .{
+                .data = expert._data,
+                .buffer_type = buffer_type,
+                .dims = expert.shape().dims(),
+                .byte_strides = expert.strides(),
+                .host_buffer_semantics = .ImmutableUntilTransferCompletes,
+                .device = dev,
+            });
+
+            res._shards.appendAssumeCapacity(pjrt_buffer);
+            if (event) |ev| {
+                ev.deinit(platform.pjrt_api);
+            }
         }
+
+        return res;
     }
 };
 
