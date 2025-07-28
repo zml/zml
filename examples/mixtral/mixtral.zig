@@ -3,9 +3,6 @@ const testing = std.testing;
 
 const stdx = @import("stdx");
 const zml = @import("zml");
-const Buffer = zml.Buffer;
-const Tensor = zml.Tensor;
-const ShapeOf = zml.ShapeOf;
 
 const log = std.log.scoped(.Mixtral);
 
@@ -66,39 +63,44 @@ pub const MixtralLM = struct {
             .lm_head = .{ .weight = store.getTensor("lm_head.weight") },
         };
 
-        var prefix: zml.aio.PrefixBuilder = .{};
-        try prefix.push(allocator, "model.layers");
+        var prefix: zml.aio.PrefixBuilder = try .initCapacity(allocator, 1024);
+        try prefix.push(stdx.noalloc, "model.layers");
         for (self.model.layers, 0..) |*layer, i| {
-            try prefix.pushDigit(allocator, i);
+            try prefix.pushDigit(stdx.noalloc, i);
             defer prefix.pop();
 
             // TODO: safer layer init
-            layer.self_attn = try zml.aio.populateModelWithPrefix(SelfAttn, allocator, store, prefix.concat(allocator, "self_attn"));
-            layer.self_attn.num_heads = self.model.num_heads;
-            layer.self_attn.num_kv_heads = self.model.num_kv_heads;
-            layer.self_attn.rope_opts = self.model.rope_opts;
+            var self_attn = try zml.aio.populateModelWithPrefix(SelfAttn, allocator, store, prefix.concat("self_attn"));
+            {
+                self_attn.num_heads = self.model.num_heads;
+                self_attn.num_kv_heads = self.model.num_kv_heads;
+                self_attn.rope_opts = self.model.rope_opts;
+                self_attn.q_proj.weight = self_attn.q_proj.weight.withSharding(.{0});
+                self_attn.k_proj.weight = self_attn.k_proj.weight.withSharding(.{0});
+                self_attn.v_proj.weight = self_attn.v_proj.weight.withSharding(.{0});
+                self_attn.o_proj.weight = self_attn.o_proj.weight.withSharding(.{1});
+            }
 
-            layer.input_layernorm = .{
-                .weight = store.getTensor(prefix.concat(allocator, "input_layernorm.weight")),
-                .eps = config.rms_norm_eps,
+            const on_disk_moe = try zml.aio.populateModelWithPrefix(MoE.OnDisk, allocator, store, prefix.concat("block_sparse_moe"));
+            var moe = on_disk_moe.rewrite();
+            {
+                moe.mlp_experts.up_proj.weight = moe.mlp_experts.up_proj.weight.withSharding(.{.expert});
+                moe.mlp_experts.gate_proj.weight = moe.mlp_experts.gate_proj.weight.withSharding(.{.expert});
+                moe.mlp_experts.down_proj.weight = moe.mlp_experts.down_proj.weight.withSharding(.{.expert});
+            }
+
+            layer.* = .{
+                .input_layernorm = .{
+                    .weight = store.getTensor(prefix.concat("input_layernorm.weight")),
+                    .eps = config.rms_norm_eps,
+                },
+                .post_attention_layernorm = .{
+                    .weight = store.getTensor(prefix.concat("post_attention_layernorm.weight")),
+                    .eps = config.rms_norm_eps,
+                },
+                .self_attn = self_attn,
+                .block_sparse_moe = moe,
             };
-            layer.post_attention_layernorm = .{
-                .weight = store.getTensor(prefix.concat(allocator, "post_attention_layernorm.weight")),
-                .eps = config.rms_norm_eps,
-            };
-
-            // TODO: load moe
-            // Rewrite to "on_device" layout.
-            layer.block_sparse_moe.rewrite();
-            const mlp: *Mlp = &layer.block_sparse_moe.on_device.mlp_experts;
-            mlp.up_proj.weight = mlp.up_proj.weight.withSharding(.{0});
-            mlp.gate_proj.weight = mlp.gate_proj.weight.withSharding(.{0});
-            mlp.down_proj.weight = mlp.down_proj.weight.withSharding(.{1});
-
-            layer.self_attn.q_proj.weight = layer.self_attn.q_proj.weight.withSharding(.{0});
-            layer.self_attn.k_proj.weight = layer.self_attn.k_proj.weight.withSharding(.{0});
-            layer.self_attn.v_proj.weight = layer.self_attn.v_proj.weight.withSharding(.{0});
-            layer.self_attn.o_proj.weight = layer.self_attn.o_proj.weight.withSharding(.{1});
         }
 
         // TODO(Corentin): Fix lm_head sharding when top-k sampling is enabled.
@@ -117,11 +119,11 @@ pub const MixtralLM = struct {
     ///  - a Rng state to allow for probabilistic generation
     pub fn forward(
         self: MixtralLM,
-        tokens_: Tensor,
-        token_index: Tensor,
+        tokens_: zml.Tensor,
+        token_index: zml.Tensor,
         kv_cache: KvCache,
-        rng: Tensor.Rng,
-    ) struct { Tensor, KvCache, Tensor.Rng } {
+        rng: zml.Tensor.Rng,
+    ) struct { zml.Tensor, KvCache, zml.Tensor.Rng } {
         stdx.debug.assert(tokens_.dtype() == .u32 and tokens_.rank() >= 1 and token_index.dtype() == .u32 and token_index.rank() <= 1, "Can't run Mixtral ! Expected >=1d tokens and 0d token_index, got: {} and {}", .{ tokens_, token_index });
         const tokens = tokens_.withPartialTags(.{.s});
         const out, const updated_kv_cache = zml.call(self.model, .forward, .{ tokens, token_index, kv_cache });
@@ -132,10 +134,10 @@ pub const MixtralLM = struct {
     pub fn sampleTokens(
         self: MixtralLM,
         lm_head_: ?zml.nn.Linear,
-        out_: Tensor,
-        rng: Tensor.Rng,
+        out_: zml.Tensor,
+        rng: zml.Tensor.Rng,
         opts: zml.nn.SamplingStrategy,
-    ) struct { Tensor, Tensor.Rng } {
+    ) struct { zml.Tensor, zml.Tensor.Rng } {
         const out = out_.withPartialTags(.{ .s, .d });
 
         var logits = blk: {
@@ -153,8 +155,35 @@ pub const MixtralLM = struct {
         return .{ next_tokens, new_rng };
     }
 
-    pub fn increment(_: u8, token_index: Tensor) Tensor {
-        return token_index.addConstant(1).reuseBuffer(token_index);
+    pub fn loadBuffers(self: MixtralLM, allocator: std.mem.Allocator, store: zml.aio.BufferStore, platform: zml.Platform) !zml.Bufferized(MixtralLM) {
+        var prefix: zml.aio.PrefixBuilder = try .initCapacity(allocator, 256);
+        defer prefix.deinit(allocator);
+
+        const noalloc = stdx.noalloc;
+        const loaded: zml.Bufferized(MixtralLM) = .{
+            .model = .{
+                .embed_tokens = try store.loadModelById(zml.nn.TokenEmbedding, noalloc, self.model.embed_tokens, platform),
+                .layers = try allocator.alloc(zml.Bufferized(TransformerLayer), self.model.layers.len),
+                .norm = try store.loadModelById(RmsNorm, noalloc, self.model.norm, platform),
+            },
+            .lm_head = try store.loadModelById(?zml.nn.Linear, noalloc, self.lm_head, platform),
+        };
+
+        prefix.push(noalloc, "model.layers") catch unreachable;
+        for (loaded.model.layers, self.model.layers, 0..) |*d_layer, layer, layer_id| {
+            const ckpt = prefix.checkpoint();
+            defer prefix.restore(ckpt);
+
+            prefix.pushDigit(noalloc, layer_id) catch unreachable;
+            d_layer.* = .{
+                .input_layernorm = try store.loadModelById(RmsNorm, noalloc, layer.input_layernorm, platform),
+                .self_attn = try store.loadModelById(SelfAttn, noalloc, layer.self_attn, platform),
+                .post_attention_layernorm = try store.loadModelById(RmsNorm, noalloc, layer.post_attention_layernorm, platform),
+                .block_sparse_moe = try layer.block_sparse_moe.loadSharded(store, &prefix, platform),
+            };
+        }
+
+        return loaded;
     }
 };
 
@@ -196,7 +225,7 @@ pub const Mixtral = struct {
 
     /// Forward one token, using KV cache for previous tokens.
     /// Returns result and updated KV cache.
-    pub fn forward(self: Mixtral, tokens: Tensor, token_index: Tensor, kv_cache: KvCache) struct { Tensor, KvCache } {
+    pub fn forward(self: Mixtral, tokens: zml.Tensor, token_index: zml.Tensor, kv_cache: KvCache) struct { zml.Tensor, KvCache } {
         const embeds = embed(self.embed_tokens, tokens);
         var hidden = embeds;
 
@@ -209,7 +238,7 @@ pub const Mixtral = struct {
         return .{ output, updated_kv_cache.reuseBuffer(kv_cache) };
     }
 
-    pub fn embed(embed_tokens_: zml.nn.TokenEmbedding, tokens_: Tensor) Tensor {
+    pub fn embed(embed_tokens_: zml.nn.TokenEmbedding, tokens_: zml.Tensor) zml.Tensor {
         return zml.call(embed_tokens_, .forward, .{tokens_}).withPartialTags(.{.d});
     }
 
@@ -226,14 +255,14 @@ pub const TransformerLayer = struct {
     input_layernorm: RmsNorm,
     self_attn: SelfAttn,
     post_attention_layernorm: RmsNorm,
-    block_sparse_moe: BlockMoe,
+    block_sparse_moe: MoE,
 
     pub fn forward(
         self: TransformerLayer,
-        x0: Tensor,
-        token_index: Tensor,
+        x0: zml.Tensor,
+        token_index: zml.Tensor,
         kv_cache: KvCache,
-    ) struct { Tensor, KvCache } {
+    ) struct { zml.Tensor, KvCache } {
         // Self Attention
         //log.debug("TransformerLayer({}) -> {}", .{ x0, self.input_layernorm.forward(x0) });
         stdx.debug.assert(x0.rank() >= 2 and x0.shape().hasTags(.{ .s, .d }), "TransformerLayer expected input shape: {{..., .s, .d}}, received: {}", .{x0});
@@ -251,55 +280,77 @@ pub const TransformerLayer = struct {
 };
 
 const RmsNorm = struct {
-    weight: Tensor,
+    weight: zml.Tensor,
     eps: f32 = 1e-5,
 
     /// L2 normalization of input tensor along `.d` axis.
-    pub fn forward(self: RmsNorm, input: Tensor) Tensor {
+    pub fn forward(self: RmsNorm, input: zml.Tensor) zml.Tensor {
         const x = if (input.shape().isFullyTagged()) input else input.withPartialTags(.{.d});
         const normalized = zml.nn.rmsNorm(x, .d, self.eps);
         return normalized.mul(self.weight.convert(x.dtype()).withTags(.{.d}).broad(x.shape()));
     }
 };
 
-const BlockMoe = union(enum) {
-    on_disk: struct {
+const MoE = struct {
+    router: zml.nn.Linear,
+    mlp_experts: Mlp,
+    num_experts: u32,
+
+    pub const OnDisk = struct {
         gate: zml.nn.Linear,
         experts: []struct {
             w1: zml.nn.Linear,
             w2: zml.nn.Linear,
             w3: zml.nn.Linear,
         },
-    },
-    on_device: struct {
-        router: zml.nn.Linear,
-        mlp_experts: Mlp,
-    },
 
-    pub fn rewrite(self: *BlockMoe) void {
-        const on_disk = self.on_disk;
-        const n = on_disk.experts.len;
-        var mlp: Mlp = .{
-            .up_proj = on_disk.experts[0].w1,
-            .down_proj = on_disk.experts[0].w2,
-            .gate_proj = on_disk.experts[0].w3,
-        };
-        mlp.up_proj.weight._shape = mlp.up_proj.weight.shape().insert(0, .{ .expert = n }).withTags(.{ .expert, .up, .d });
-        mlp.down_proj.weight._shape = mlp.down_proj.weight.shape().insert(0, .{ .expert = n }).withTags(.{ .expert, .d, .up });
-        mlp.gate_proj.weight._shape = mlp.gate_proj.weight.shape().insert(0, .{ .expert = n }).withTags(.{ .expert, .up, .d });
+        pub fn rewrite(on_disk: OnDisk) MoE {
+            const n = on_disk.experts.len;
+            var mlp: Mlp = .{
+                .up_proj = on_disk.experts[0].w1,
+                .down_proj = on_disk.experts[0].w2,
+                .gate_proj = on_disk.experts[0].w3,
+            };
+            mlp.up_proj.weight._shape = mlp.up_proj.weight.shape().insert(0, .{ .expert = n }).withTags(.{ .expert, .up, .d });
+            mlp.down_proj.weight._shape = mlp.down_proj.weight.shape().insert(0, .{ .expert = n }).withTags(.{ .expert, .d, .up });
+            mlp.gate_proj.weight._shape = mlp.gate_proj.weight.shape().insert(0, .{ .expert = n }).withTags(.{ .expert, .up, .d });
 
-        var router = on_disk.gate;
-        router.weight = router.weight.withTags(.{ .expert, .d });
+            var router = on_disk.gate;
+            router.weight = router.weight.withTags(.{ .expert, .d });
 
-        self.* = .{
-            .on_device = .{ .router = router, .mlp_experts = mlp },
+            return .{ .router = router, .mlp_experts = mlp, .num_experts = n };
+        }
+    };
+
+    pub fn forward(self: MoE, input: zml.Tensor) zml.Tensor {
+        const gating = self.router.forward(input).softmax(.expert);
+        return zml.nn.mixtureOfExperts(Mlp, self.mlp_experts, input, gating, .{ .experts_per_token = 2 });
+    }
+
+    pub fn loadSharded(self: MoE, store: zml.aio.BufferStore, prefix: *zml.aio.PrefixBuilder, platform: zml.Platform) !zml.Bufferized(MoE) {
+        prefix.push(stdx.noalloc, "block_sparse_moe.experts") catch unreachable;
+        var experts_buffers_buf: [16]zml.HostBuffer = undefined;
+        const experts_buffers = experts_buffers_buf[0..self.num_experts];
+
+        return .{
+            .router = try store.loadModelById(zml.nn.Linear, stdx.noalloc, self.router, platform),
+            .mlp_experts = .{
+                .up_proj = .{ .weight = try loadShardedWeight(store, prefix, platform, self.mlp_experts.up_proj.weight, experts_buffers) },
+            },
         };
     }
 
-    pub fn forward(self_block: BlockMoe, input: zml.Tensor) zml.Tensor {
-        const self = self_block.on_device;
-        const gating = self.router.forward(input).softmax(.expert);
-        return zml.nn.mixtureOfExperts(Mlp, self.mlp_experts, input, gating, .{ .experts_per_token = 2 });
+    fn loadShardedWeight(store: zml.aio.BufferStore, prefix: *zml.aio.PrefixBuilder, name: []const u8, platform: zml.Platform, weight: Tensor, experts_buffers: []zml.HostBuffer) !zml.Buffer {
+        // "model.layers.0.block_sparse_moe.experts.0.w1.weight" ... "model.layers.0.block_sparse_moe.experts.7.w1.weight"
+        for (0.., experts_buffers) |i, *expert_host_buffer| {
+            const ckpt = prefix.checkpoint();
+            defer prefix.restore(ckpt);
+            try prefix.pushDigit(stdx.noalloc, i);
+            try prefix.push(name);
+            try prefix.push("weight");
+
+            expert_host_buffer.* = store.get(prefix.items()) orelse return error.BufferNotFound;
+        }
     }
 };
 
@@ -308,7 +359,7 @@ const Mlp = struct {
     gate_proj: zml.nn.Linear, // (dim -> hidden_dim)
     down_proj: zml.nn.Linear, // (hidden_dim -> dim)
 
-    pub fn forward(self: Mlp, x: Tensor) Tensor {
+    pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
         const up = x.dot(self.up_proj.weight, .d);
         const gate = x.dot(self.gate_proj.weight, .d).silu();
 
@@ -337,10 +388,10 @@ pub const SelfAttn = struct {
     /// x: {.b, .s, .d } -> .{.b, .s, .d}
     pub fn forward(
         self: SelfAttn,
-        x: Tensor,
-        token_index: Tensor,
+        x: zml.Tensor,
+        token_index: zml.Tensor,
         kv_cache: KvCache,
-    ) struct { Tensor, KvCache } {
+    ) struct { zml.Tensor, KvCache } {
         const num_kv_heads = if (self.num_kv_heads > 0) self.num_kv_heads else self.num_heads;
         var q = zml.call(self.q_proj, .forward, .{x}).splitAxis(-1, .{ .h = self.num_heads, .hd = .auto }).withSharding(.{.h});
         var k = zml.call(self.k_proj, .forward, .{x}).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto }).withSharding(.{.h});
@@ -356,7 +407,7 @@ pub const SelfAttn = struct {
 
         // In self-attention, .s axis is used both for keys and queries.
         const pos_index = b: {
-            const temp = Tensor.arange(.{ .end = x.dim(.s) }, token_index.dtype()).withTags(.{.s}).broad(zml.Shape.init(.{ .s = x.dim(.s) }, token_index.dtype()));
+            const temp = zml.Tensor.arange(.{ .end = x.dim(.s) }, token_index.dtype()).withTags(.{.s}).broad(zml.Shape.init(.{ .s = x.dim(.s) }, token_index.dtype()));
             break :b temp.add(token_index.broad(temp.shape()));
         };
 
@@ -383,26 +434,26 @@ pub const SelfAttn = struct {
         const perm = kv_shape.contiguousPerm(.{ .h, .k, .hd });
         kv_shape = kv_shape.transpose(perm.constSlice());
         var res = KvCache.init(kv_shape);
-        res.layer_index = Tensor.scalar(0, .u32);
+        res.layer_index = .scalar(0, .u32);
         return res;
     }
 };
 
 pub const KvCache = struct {
-    k: Tensor,
-    v: Tensor,
-    layer_index: Tensor,
+    k: zml.Tensor,
+    v: zml.Tensor,
+    layer_index: zml.Tensor,
 
     pub fn init(kv_shape: zml.Shape) KvCache {
         // The KV-cache is initialized with ones to detect reads of uninitialized memory.
         return .{
-            .k = Tensor.constant(kv_shape, kv_shape.dtype().one()).withSharding(.{.h}),
-            .v = Tensor.constant(kv_shape, kv_shape.dtype().one()).withSharding(.{.h}),
-            .layer_index = Tensor.scalar(-1, .u32),
+            .k = .constant(kv_shape, kv_shape.dtype().one()).withSharding(.{.h}),
+            .v = .constant(kv_shape, kv_shape.dtype().one()).withSharding(.{.h}),
+            .layer_index = .scalar(-1, .u32),
         };
     }
 
-    pub fn initShape(kv_shape: zml.Shape) ShapeOf(KvCache) {
+    pub fn initShape(kv_shape: zml.Shape) zml.ShapeOf(KvCache) {
         return .{
             .k = kv_shape,
             .v = kv_shape,
@@ -418,15 +469,15 @@ pub const KvCache = struct {
         };
     }
 
-    pub fn keys(self: KvCache) Tensor {
-        return self.k.dynamicSlice(.{ .layer = Tensor.DynSlice{ .start = self.layer_index, .len = 1 } }).squeeze(.layer);
+    pub fn keys(self: KvCache) zml.Tensor {
+        return self.k.dynamicSlice(.{ .layer = zml.Tensor.DynSlice{ .start = self.layer_index, .len = 1 } }).squeeze(.layer);
     }
 
-    pub fn values(self: KvCache) Tensor {
-        return self.v.dynamicSlice(.{ .layer = Tensor.DynSlice{ .start = self.layer_index, .len = 1 } }).squeeze(.layer);
+    pub fn values(self: KvCache) zml.Tensor {
+        return self.v.dynamicSlice(.{ .layer = zml.Tensor.DynSlice{ .start = self.layer_index, .len = 1 } }).squeeze(.layer);
     }
 
-    pub fn update(self: KvCache, new_k: Tensor, new_v: Tensor, token_index: ?Tensor) KvCache {
+    pub fn update(self: KvCache, new_k: zml.Tensor, new_v: zml.Tensor, token_index: ?zml.Tensor) KvCache {
         const k_shape = self.k.shape().drop(.layer);
         var layer = self.layer_index;
         layer = if (token_index) |idx| layer.broad(idx.shape()) else layer;
@@ -462,7 +513,7 @@ pub const KvCache = struct {
         return .{
             .k = self.k,
             .v = self.v,
-            .layer_index = Tensor.scalar(layer_index, .u32),
+            .layer_index = .scalar(layer_index, .u32),
         };
     }
 
