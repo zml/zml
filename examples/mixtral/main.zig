@@ -142,14 +142,14 @@ pub fn asyncMain() !void {
     });
 
     log.info("\tLoading mixtral weights from {?s}...", .{model_weights_path});
-    var llama_weights = try zml.aio.loadModelBuffers(mixtral.MixtralLM, model_instance, store, model_arena.allocator(), platform);
-    defer zml.aio.unloadBuffers(&llama_weights);
+    var mixtral_weights = try model_instance.loadBuffers(model_arena.allocator(), store, platform);
+    defer zml.aio.unloadBuffers(&mixtral_weights);
     log.info("✅\tLoaded weights in {}", .{std.fmt.fmtDuration(start.read())});
 
-    var llama_module_prefill = (try fut_mod_prefill.awaitt()).prepare(llama_weights);
-    defer llama_module_prefill.deinit();
-    var llama_module = (try fut_mod.awaitt()).prepare(llama_weights);
-    defer llama_module.deinit();
+    var mixtral_module_prefill = (try fut_mod_prefill.awaitt()).prepare(mixtral_weights);
+    defer mixtral_module_prefill.deinit();
+    var mixtral_module = (try fut_mod.awaitt()).prepare(mixtral_weights);
+    defer mixtral_module.deinit();
     log.info("✅\tCompiled model in {}", .{std.fmt.fmtDuration(start.read())});
 
     log.info("Creating KvCache", .{});
@@ -169,7 +169,7 @@ pub fn asyncMain() !void {
 
     const seed = cli.args.seed orelse @as(u128, @bitCast(std.time.nanoTimestamp()));
     const skip_llama3_encoding = cli.args.@"no-llama3" orelse false;
-    const generated_text = try generateText(config, model_instance, llama_module_prefill, llama_module, kv_cache, tokenizer, allocator, seed, prompt[0..], skip_llama3_encoding);
+    const generated_text = try generateText(config, model_instance, mixtral_module_prefill, mixtral_module, kv_cache, tokenizer, allocator, seed, prompt[0..], skip_llama3_encoding);
     // generated text will be printed token by token.
     defer allocator.free(generated_text);
 }
