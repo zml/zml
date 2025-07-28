@@ -18,11 +18,12 @@ pub const LlamaLM = struct {
             int: u32,
             ints: []u32,
         }),
-        num_hidden_layers: usize,
-        num_attention_heads: usize,
-        num_key_value_heads: usize,
+        hidden_size: u32,
+        num_hidden_layers: u32,
+        num_attention_heads: u32,
+        num_key_value_heads: u32,
         rope_theta: f32,
-        max_position_embeddings: usize,
+        max_position_embeddings: u32,
         rms_norm_eps: f32,
         hf_rope_impl: bool = true,
         rope_scaling: zml.nn.RopeOpts.Scaling = .{ .default = {} },
@@ -30,7 +31,7 @@ pub const LlamaLM = struct {
 
     pub const Options = struct {
         sampling_strategy: ?zml.nn.SamplingStrategy,
-        max_seq_len: usize,
+        max_seq_len: u32,
     };
 
     lm_head: ?zml.nn.Linear,
@@ -136,29 +137,6 @@ pub const Llama = struct {
         .freq_base = 10_000,
     },
 
-    const Shape = struct {
-        s: u32,
-        layer: u16,
-        hd: u16,
-        nh: u16,
-        nkvh: u16,
-        dtype: zml.DataType,
-    };
-
-    pub fn shape(self: Llama) Shape {
-        const key_dim = self.layers[0].self_attn.k_proj.weight.dim(0);
-        const num_kv_heads = if (self.num_kv_heads > 0) self.num_kv_heads else self.num_heads;
-
-        return .{
-            .s = self.max_seq_len,
-            .layer = @intCast(self.layers.len),
-            .hd = @intCast(@divExact(key_dim, num_kv_heads)),
-            .nh = @intCast(self.num_heads),
-            .nkvh = @intCast(num_kv_heads),
-            .dtype = self.embed_tokens.weight.dtype(),
-        };
-    }
-
     /// Forward one token, using KV cache for previous tokens.
     /// Returns result and updated KV cache.
     pub fn forward(self: Llama, tokens: Tensor, token_index: Tensor, kv_cache: KvCache) struct { Tensor, KvCache } {
@@ -176,14 +154,6 @@ pub const Llama = struct {
 
     pub fn embed(embed_tokens_: zml.nn.TokenEmbedding, tokens_: Tensor) Tensor {
         return zml.call(embed_tokens_, .forward, .{tokens_}).withPartialTags(.{.d});
-    }
-
-    fn initKvCache(self: Llama, embed_shape: zml.Shape) KvCache {
-        const dims = self.shape();
-        var kv_shape = embed_shape.insert(0, .{ .layer = dims.layer }).rename(.{ .s = .k }).splitAxes(.{ .d = .{ .h = dims.nkvh, .hd = dims.hd } });
-        const perm = kv_shape.contiguousPerm(.{ .k, .h, .hd });
-        kv_shape = kv_shape.transpose(perm.constSlice());
-        return KvCache.init(kv_shape);
     }
 };
 
@@ -298,16 +268,6 @@ pub const SelfAttn = struct {
         const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
         return .{ zml.call(self.o_proj, .forward, .{attn}), new_kv_cache };
     }
-
-    fn initKvCache(key_shape: zml.Shape) KvCache {
-        // When we call initKvCache, we haven't renamed .s to .k yet.
-        var kv_shape = key_shape.insert(0, .{ .layer = 1 }).rename(.{ .s = .k });
-        const perm = kv_shape.contiguousPerm(.{ .h, .k, .hd });
-        kv_shape = kv_shape.transpose(perm.constSlice());
-        var res = KvCache.init(kv_shape);
-        res.layer_index = Tensor.scalar(0, .u32);
-        return res;
-    }
 };
 
 pub const KvCache = struct {
@@ -334,8 +294,8 @@ pub const KvCache = struct {
 
     pub fn initBuffer(kv_shape: zml.Shape, platform: zml.Platform) !zml.Bufferized(KvCache) {
         return .{
-            .k = try zml.Buffer.constant(platform, kv_shape, 1),
-            .v = try zml.Buffer.constant(platform, kv_shape, 1),
+            .k = try zml.Buffer.uninitialized(platform, kv_shape, .{}),
+            .v = try zml.Buffer.uninitialized(platform, kv_shape, .{}),
             .layer_index = try zml.Buffer.scalar(platform, 0, .u32),
         };
     }
