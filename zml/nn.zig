@@ -891,9 +891,9 @@ pub fn sampleTokens(activations: Tensor, opts: SamplingStrategy, rng: Tensor.Rng
         return .{ next_tokens, rng };
     }
 
-    const topk = activations.topK(opts.topk, .voc, .{});
-    // After the topk, we don't have .voc values, anymore, only topk.
-    var x = topk.values.rename(.{ .voc = .topk });
+    const topk = activations.topK(.{ .topk = .voc }, opts.topk, .{});
+    // After the topk, we don't have .voc values, anymore, only .topk.
+    var x = topk.values;
     if (opts.temperature != 1.0) {
         x = x.scale(1 / opts.temperature);
     }
@@ -908,7 +908,7 @@ pub fn sampleTokens(activations: Tensor, opts: SamplingStrategy, rng: Tensor.Rng
 
     // topk_idx is indices into topk.values ! so in the range [0, topk]
     // Convert for the original indices from the full [0, voc] range.
-    const next_tokens = topk.indices.gather(.{ .voc = topk_idx.squeeze(.topk) }, .{});
+    const next_tokens = topk.indices.gather(.{ .topk = topk_idx.squeeze(.topk) }, .{});
     // log.debug("sampleTokens({}) -> {} -> {} -> {}", .{ activations, topk.indices, topk_idx, next_tokens });
     return .{ next_tokens, next_rng };
 }
@@ -1005,7 +1005,7 @@ fn fixupLogits(logits: Tensor, opts: DynamicSamplingStrategy) [2]Tensor {
 
     // First reduce the vocab size to a reasonable sub set of candidate.
     const full_topk = if (opts.max_top_k > 0)
-        logits.topK(opts.max_top_k, .voc, .{ .descending = true })
+        logits.topK(.{ .voc = .voc }, opts.max_top_k, .{ .descending = true })
     else
         logits.sort(.voc, .{ .descending = true });
 
