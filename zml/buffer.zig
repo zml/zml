@@ -71,7 +71,7 @@ pub const Buffer = struct {
             break :cs @divExact(host_buffer.dim(ax), n_partitions);
         } else 0;
 
-        const buffer_type = bufferTypeFromDtype(host_buffer.shape().dtype());
+        const buffer_type = pjrt.bufferTypeFromDtype(host_buffer.shape().dtype());
         const byte_strides = host_buffer.strides();
 
         const devices = platform.getDevices();
@@ -281,7 +281,7 @@ pub const Buffer = struct {
 
         const pjrt_buffer = platform.pjrt_client.createViewOfDeviceBuffer(platform.pjrt_api, .{
             .data = device_data,
-            .element_type = bufferTypeFromDtype(shape_.dtype()),
+            .element_type = pjrt.bufferTypeFromDtype(shape_.dtype()),
             .dims = shape_.dims(),
             // TODO: exposes sharding in the API.
             .device = platform.getDevices()[0],
@@ -462,7 +462,7 @@ pub const Buffer = struct {
             break :s shard_shape;
         } else shape_;
 
-        const buffer_type = bufferTypeFromDtype(shape_.dtype());
+        const buffer_type = pjrt.bufferTypeFromDtype(shape_.dtype());
         const devices = platform.getDevices();
         for (0..n_partitions) |i| {
             var args = pjrt.Client.CreateUninitializedBufferArgs{
@@ -494,29 +494,3 @@ pub const Buffer = struct {
         return res;
     }
 };
-
-pub fn bufferTypeFromDtype(dt: DataType) pjrt.BufferType {
-    return switch (dt) {
-        inline else => |tag| @field(pjrt.BufferType, @tagName(tag)),
-    };
-}
-
-pub fn dtypeFromBufferType(pjrt_type: pjrt.BufferType) DataType {
-    return switch (pjrt_type) {
-        .invalid => @panic("Found an invalid pjrt buffer"),
-        inline else => |tag| @field(DataType, @tagName(tag)),
-    };
-}
-
-test bufferTypeFromDtype {
-    inline for (@typeInfo(DataType).@"enum".fields) |field| {
-        const dt: DataType = @enumFromInt(field.value);
-        try std.testing.expectEqual(dt, dtypeFromBufferType(bufferTypeFromDtype(dt)));
-    }
-
-    inline for (@typeInfo(pjrt.BufferType).@"enum".fields) |field| {
-        const dt: pjrt.BufferType = @enumFromInt(field.value);
-        if (dt == .invalid) continue;
-        try std.testing.expectEqual(dt, bufferTypeFromDtype(dtypeFromBufferType(dt)));
-    }
-}

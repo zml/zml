@@ -98,7 +98,7 @@ pub fn mixtureOfExperts(Expert: type, experts: Expert, input: Tensor, gating: Te
     // log.warn(" -> input_per_expert {f} -> output_per_expert {f}", .{ input_per_expert, output_per_expert });
     output_per_expert = output_per_expert.mul(routing_score.broad(output_per_expert.shape()));
 
-    // Reverse engineer the normal output shape that one-expert would have produced for all tokens.
+    // Reverse engineer the normal output shape that one expert would have produced for all tokens.
     // If this provide to not be enough we could use the "sliced_expert" strategy and call forward ourselves.
     const output_shape = output_per_expert.shape().drop(.expert).rename(.{ .expert_token = .s }).setDim(.s, num_tokens);
     var output: Tensor = .constant(output_shape, input.dtype().zero());
