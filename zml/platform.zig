@@ -247,7 +247,11 @@ pub const TransferManager = struct {
     }
 
     pub fn deinit(self: TransferManager, allocator: std.mem.Allocator) void {
-        stdx.mem.groupedFree(Layout, allocator, .{ self.buffers, self.managers[0..self.num_devices] });
+        const managers = self.managers[0..self.num_devices];
+        for (managers) |manager| {
+            manager.deinit(self.pjrt_api);
+        }
+        stdx.mem.groupedFree(Layout, allocator, .{ self.buffers, managers });
     }
 
     pub const Dest = struct { buffer_id: u32, device_id: u16, offset: u64 };
