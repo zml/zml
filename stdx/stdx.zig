@@ -1,3 +1,6 @@
+const std = @import("std");
+const builtin = @import("builtin");
+
 pub const debug = @import("debug.zig");
 pub const flags = @import("flags.zig");
 pub const fmt = @import("fmt.zig");
@@ -8,9 +11,6 @@ pub const math = @import("math.zig");
 pub const meta = @import("meta.zig");
 pub const queue = @import("queue.zig");
 pub const time = @import("time.zig");
-
-const std = @import("std");
-const builtin = @import("builtin");
 
 test {
     std.testing.refAllDecls(@This());
@@ -47,5 +47,20 @@ pub const mem = struct {
         }
 
         return res;
+    }
+
+    pub fn groupedFree(SliceTuple: type, allocator: std.mem.Allocator, slice_tuple: SliceTuple) void {
+        const SliceFields = @typeInfo(SliceTuple).@"struct".fields;
+
+        const slice_start: [*]u8 = @ptrCast(slice_tuple[0].ptr);
+        const N = SliceFields.len;
+        const first_type = std.meta.Child(SliceFields[0].type);
+        const last_type = std.meta.Child(SliceFields[N - 1].type);
+
+        const last_slice = slice_tuple[N - 1];
+        const slice_end: usize = @intFromPtr(last_slice.ptr) + @sizeOf(last_type) * last_slice.len;
+        const slice_len = slice_end - @intFromPtr(slice_start);
+
+        allocator.rawFree(slice_start[0..slice_len], .fromByteUnits(@alignOf(first_type)), @returnAddress());
     }
 };
