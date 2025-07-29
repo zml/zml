@@ -54,7 +54,7 @@ pub const Buffer = struct {
             break :cs @divExact(host_buffer.dim(ax), n_partitions);
         } else 0;
 
-        const buffer_type = bufferTypeFromDtype(host_buffer.shape().dtype());
+        const buffer_type = pjrt.bufferTypeFromDtype(host_buffer.shape().dtype());
         const byte_strides = host_buffer.strides();
 
         const devices = platform.getDevices();
@@ -256,7 +256,7 @@ pub const Buffer = struct {
     pub fn asViewOfDeviceBuffer(platform: Platform, shape_: Shape, stream: ?*const pjrt.Stream, device_data: *anyopaque) Buffer {
         const pjrt_buffer = platform.pjrt_client.createViewOfDeviceBuffer(platform.pjrt_api, .{
             .data = device_data,
-            .element_type = bufferTypeFromDtype(shape_.dtype()),
+            .element_type = pjrt.bufferTypeFromDtype(shape_.dtype()),
             .dims = shape_.dims(),
             // TODO: exposes sharding in the API.
             .device = platform.getDevices()[0],
@@ -437,7 +437,7 @@ pub const Buffer = struct {
 
         var args = pjrt.Client.CreateUninitializedBufferArgs{
             .dims = shard_shape.dims(),
-            .element_type = bufferTypeFromDtype(shape_.dtype()),
+            .element_type = pjrt.bufferTypeFromDtype(shape_.dtype()),
             .layout = .{
                 .tiled = .{
                     .minor_to_major = minorToMajor(shape_.rank()),
@@ -486,32 +486,6 @@ pub const Buffer = struct {
         return deleted;
     }
 };
-
-pub fn bufferTypeFromDtype(dt: DataType) pjrt.BufferType {
-    return switch (dt) {
-        inline else => |tag| @field(pjrt.BufferType, @tagName(tag)),
-    };
-}
-
-pub fn dtypeFromBufferType(pjrt_type: pjrt.BufferType) DataType {
-    return switch (pjrt_type) {
-        .invalid => @panic("Found an invalid pjrt buffer"),
-        inline else => |tag| @field(DataType, @tagName(tag)),
-    };
-}
-
-test bufferTypeFromDtype {
-    inline for (@typeInfo(DataType).@"enum".fields) |field| {
-        const dt: DataType = @enumFromInt(field.value);
-        try std.testing.expectEqual(dt, dtypeFromBufferType(bufferTypeFromDtype(dt)));
-    }
-
-    inline for (@typeInfo(pjrt.BufferType).@"enum".fields) |field| {
-        const dt: pjrt.BufferType = @enumFromInt(field.value);
-        if (dt == .invalid) continue;
-        try std.testing.expectEqual(dt, bufferTypeFromDtype(dtypeFromBufferType(dt)));
-    }
-}
 
 const _MINOR_TO_MAJOR = blk: {
     var ret: [Shape.MAX_RANK]i64 = undefined;
