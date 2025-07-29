@@ -70,10 +70,10 @@ pub fn mixtureOfExperts(Expert: type, experts: Expert, input: Tensor, gating: Te
     if (num_tokens * opts.experts_per_token < num_experts) {
         // Few tokens: some experts will be unused.
         // select active experts and compute with that.
-        const routing = gating.topK(opts.experts_per_token, .expert, .{});
-        const routing_score = routing.values.sum(.expert);
-        const routing_weight = routing.values.div(routing_score.broad(routing.values.shape()));
+        const routing = gating.topK(opts.experts_per_token, .expert, .{ .descending = true });
+        const routing_score = routing.values.div(routing.values.sum(.expert).broad(routing.values.shape()));
 
+        // TODO consider unrolling this on num_tokens * opts.experts_per_token to avoid gather of weights.
         var sliced_expert: Expert = undefined;
         zml.meta.mapAlloc(struct {
             pub fn cb(routing_indices: Tensor, expert_weight: Tensor) Tensor {
@@ -82,7 +82,8 @@ pub fn mixtureOfExperts(Expert: type, experts: Expert, input: Tensor, gating: Te
         }.cb, undefined, routing.indices, experts, &sliced_expert) catch unreachable;
 
         const output_per_expert = sliced_expert.forward(input);
-        return output_per_expert.dot(routing_weight, .expert);
+        // log.warn(" -> routing {f} -> sliced_expert {any} -> output_per_expert {f}", .{ routing_score, sliced_expert, output_per_expert });
+        return output_per_expert.dot(routing_score, .expert);
     }
 
     // Lot of tokens, each experts chose their tokens and compute on that.
@@ -95,14 +96,13 @@ pub fn mixtureOfExperts(Expert: type, experts: Expert, input: Tensor, gating: Te
     const routing_ids = routing.indices.transpose(.{ .expert, .expert_token });
     const input_per_expert = input.gather(.{ .s = routing_ids }, .{});
     var output_per_expert = experts.forward(input_per_expert);
-    // log.warn(" -> input_per_expert {f} -> output_per_expert {f}", .{ input_per_expert, output_per_expert });
     output_per_expert = output_per_expert.mul(routing_score.broad(output_per_expert.shape()));
 
     // Reverse engineer the normal output shape that one expert would have produced for all tokens.
     // If this provide to not be enough we could use the "sliced_expert" strategy and call forward ourselves.
     const output_shape = output_per_expert.shape().drop(.expert).rename(.{ .expert_token = .s }).setDim(.s, num_tokens);
     var output: Tensor = .constant(output_shape, input.dtype().zero());
-    // log.warn(" -> output_per_expert {f}, routing: {f} -> output {f}", .{ output_per_expert, routing_ids, output });
+    // log.warn(" -> input_per_expert {f} -> output_per_expert {f}, routing: {f} -> output {f}", .{ input_per_expert, output_per_expert, routing_ids, output });
     output = output.scatterSlices(.{ .s = routing_ids }, output_per_expert, .{ .update_fn = Tensor.ScatterOpts.increment });
 
     return output;
@@ -953,9 +953,9 @@ pub fn sampleTokens(activations: Tensor, opts: SamplingStrategy, rng: Tensor.Rng
         return .{ next_tokens, rng };
     }
 
-    const topk = activations.topK(opts.topk, .voc, .{});
-    // After the topk, we don't have .voc values, anymore, only topk.
-    var x = topk.values.rename(.{ .voc = .topk });
+    const topk = activations.topK(.{ .topk = .voc }, opts.topk, .{});
+    // After the topk, we don't have .voc values, anymore, only .topk.
+    var x = topk.values;
     if (opts.temperature != 1.0) {
         x = x.scale(1 / opts.temperature);
     }
@@ -970,7 +970,7 @@ pub fn sampleTokens(activations: Tensor, opts: SamplingStrategy, rng: Tensor.Rng
 
     // topk_idx is indices into topk.values ! so in the range [0, topk]
     // Convert for the original indices from the full [0, voc] range.
-    const next_tokens = topk.indices.gather(.{ .voc = topk_idx.squeeze(.topk) }, .{});
+    const next_tokens = topk.indices.gather(.{ .topk = topk_idx.squeeze(.topk) }, .{});
     // log.debug("sampleTokens({}) -> {} -> {} -> {}", .{ activations, topk.indices, topk_idx, next_tokens });
     return .{ next_tokens, next_rng };
 }
@@ -1067,7 +1067,7 @@ fn fixupLogits(logits: Tensor, opts: DynamicSamplingStrategy) [2]Tensor {
 
     // First reduce the vocab size to a reasonable sub set of candidate.
     const full_topk = if (opts.max_top_k > 0)
-        logits.topK(opts.max_top_k, .voc, .{ .descending = true })
+        logits.topK(.{ .voc = .voc }, opts.max_top_k, .{ .descending = true })
     else
         logits.sort(.voc, .{ .descending = true });
 
