@@ -337,9 +337,7 @@ const MoE = struct {
         const num_shards = platform.sharding().num_partitions;
         // Note: this assumes num_devices == num_partitions, it's incorrect.
 
-        const buffer_type: zml.pjrt.BufferType = switch (weight.shape().dtype()) {
-            inline else => |tag| @field(zml.pjrt.BufferType, @tagName(tag)),
-        };
+        const buffer_type = zml.pjrt.bufferTypeFromDtype(weight.shape().dtype());
 
         var res: zml.Buffer = .{
             ._shape = weight.shape(),
