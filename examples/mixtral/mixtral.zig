@@ -349,6 +349,8 @@ const MoE = struct {
 
         if (devices.len == num_experts and num_shards == num_experts) {
             // "model.layers.0.block_sparse_moe.experts.0.w1.weight" ... "model.layers.0.block_sparse_moe.experts.7.w1.weight"
+            const individual_shape = weight.shape().setDim(.expert, 1);
+            const individual_strides = individual_shape.computeStrides();
             for (0.., devices) |i, dev| {
                 const ckpt = prefix.checkpoint();
                 defer prefix.restore(ckpt);
@@ -361,11 +363,12 @@ const MoE = struct {
                     store.findSimilarBufferKeys(std.heap.smp_allocator, prefix.items());
                     @panic("Buffer not found");
                 };
+                std.debug.assert(individual_shape.drop(.expert).eql(expert.shape()));
                 const pjrt_buffer, const event = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, .{
                     .data = expert._data,
                     .buffer_type = buffer_type,
-                    .dims = expert.shape().dims(),
-                    .byte_strides = expert.strides(),
+                    .dims = individual_shape.dims(),
+                    .byte_strides = individual_strides.slice(),
                     .host_buffer_semantics = .ImmutableUntilTransferCompletes,
                     .device = dev,
                 });
