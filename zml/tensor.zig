@@ -2240,7 +2240,7 @@ pub const Tensor = struct {
         var idx_batch_axes: Shape.DimsArray = .{};
 
         const AxisKind = enum { batching, offset, collapsed, indices };
-        var self_kind: std.BoundedArray(AxisKind, MAX_RANK) = .{ .buffer = @splat(.offset), .len = self.rank() };
+        var self_kind: stdx.BoundedArray(AxisKind, MAX_RANK) = .{ .buffer = @splat(.offset), .len = self.rank() };
 
         for (self._shape.tags(), 0..self.rank()) |t, self_ax| {
             const is_gather_axis = std.mem.containsAtLeastScalar(u3, idx_axes, 1, @intCast(self_ax));
@@ -2261,7 +2261,7 @@ pub const Tensor = struct {
 
         // compute res shape
         var res_shape = Shape.init(.{}, self.dtype());
-        var res_kind: std.BoundedArray(AxisKind, MAX_RANK) = .{};
+        var res_kind: stdx.BoundedArray(AxisKind, MAX_RANK) = .{};
         for (self_kind.slice(), 0..) |kind, ax_usize| {
             const ax: u3 = @intCast(ax_usize);
             if (ax == idx_axes[0]) {
@@ -3012,13 +3012,24 @@ pub const Tensor = struct {
     }
 
     /// Returns a Tensor representing the result of Top-K over the given axis.
-    pub fn topK(self: Tensor, k: u32, axis_: anytype, opts: struct { descending: bool = true }) SortRes {
-        const a = self.axis(axis_);
-        const result = self.sort(a, .{ .descending = opts.descending });
-        return .{
-            .values = result.values.slice1d(a, .{ .end = k }),
-            .indices = result.indices.slice1d(a, .{ .end = k }),
+    pub fn topK(self: Tensor, named_axis_: anytype, k: u32, opts: struct { descending: bool = true }) SortRes {
+        const err_msg = "topK named axis should be an integer or a named axis, eg `x.topK(.{{ .best_token = .token }}, 16)` or `x.topK(-1, 16)`";
+        const has_name: ?[:0]const u8, const a = switch (@typeInfo(@TypeOf(named_axis_))) {
+            .int, .comptime_int => .{ null, self.axis(@as(i64, @intCast(named_axis_))) },
+            .@"struct" => |info| blk: {
+                stdx.debug.assertComptime(info.fields.len == 1, err_msg, .{});
+                break :blk .{ info.fields[0].name, self.axis(@field(named_axis_, info.fields[0].name)) };
+            },
+            else => stdx.debug.compileError(err_msg, .{}),
         };
+        var result = self.sort(a, .{ .descending = opts.descending });
+        result.values = result.values.slice1d(a, .{ .end = k });
+        result.indices = result.indices.slice1d(a, .{ .end = k });
+        if (has_name) |new_name| {
+            result.values._shape._tags.set(a, new_name.ptr);
+            result.indices._shape._tags.set(a, new_name.ptr);
+        }
+        return result;
     }
 
     pub const MaxPoolRes = ArgMaxRes;
