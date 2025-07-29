@@ -335,24 +335,23 @@ const MoE = struct {
         const devices = platform.getDevices();
         const num_experts = weight.dim(.expert);
         const num_shards = platform.sharding().num_partitions;
-        // Note: this assumes num_devices == num_partitions, it's incorrect.
 
-        const buffer_type = zml.pjrt.bufferTypeFromDtype(weight.shape().dtype());
+        // Note: this requires num_devices == num_partitions, this is overly restrictive.
+        if (devices.len == num_shards and num_experts % num_shards == 0 and num_experts >= num_shards) {
+            const num_experts_per_shard = @divExact(num_experts, num_shards);
+            const tmp_buf: []u8 = try std.heap.smp_allocator.alloc(u8, 4096);
+            defer std.heap.smp_allocator.free(tmp_buf);
+            var fba: std.heap.FixedBufferAllocator = .init(tmp_buf);
 
-        var res: zml.Buffer = .{
-            ._shape = weight.shape(),
-            ._api = platform.pjrt_api,
-            ._shards = .{},
-        };
+            const allocator = fba.allocator();
+            const transfer = try platform.batchedTransfer(allocator, &.{weight.shape()}, .device);
 
-        if (devices.len == num_experts and num_shards == num_experts) {
-            // "model.layers.0.block_sparse_moe.experts.0.w1.weight" ... "model.layers.0.block_sparse_moe.experts.7.w1.weight"
-            const individual_shape = weight.shape().setDim(.expert, 1);
-            const individual_strides = individual_shape.computeStrides();
-            for (0.., devices) |i, dev| {
+            for (0..num_experts) |expert_id| {
+                const part_id = expert_id % num_experts_per_shard;
+                const shard_id = @divFloor(expert_id, num_experts_per_shard);
                 const ckpt = prefix.checkpoint();
                 defer prefix.restore(ckpt);
-                try prefix.pushDigit(stdx.noalloc, i);
+                try prefix.pushDigit(stdx.noalloc, expert_id);
                 try prefix.push(stdx.noalloc, name);
                 try prefix.push(stdx.noalloc, "weight");
 
@@ -361,28 +360,18 @@ const MoE = struct {
                     store.findSimilarBufferKeys(std.heap.smp_allocator, prefix.items());
                     @panic("Buffer not found");
                 };
-                std.debug.assert(individual_shape.drop(.expert).eql(expert.shape()));
-                const pjrt_buffer, const event = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, .{
-                    .data = expert._data,
-                    .buffer_type = buffer_type,
-                    .dims = individual_shape.dims(),
-                    .byte_strides = individual_strides.slice(),
-                    .host_buffer_semantics = .ImmutableUntilTransferCompletes,
-                    .device = dev,
-                });
 
-                res._shards.appendAssumeCapacity(pjrt_buffer);
-                if (event) |ev| {
-                    ev.deinit(platform.pjrt_api);
-                }
+                const ev = transfer.transferData(
+                    .{ .buffer_id = 0, .device_id = @intCast(shard_id), .offset = expert.bytes().len * part_id },
+                    expert.bytes(),
+                    part_id + 1 == num_experts_per_shard,
+                );
+                _ = ev;
             }
-        } else if (num_shards == 1) {
-            @panic("TODO");
+            return transfer.buffers[0];
         } else {
             @panic("TODO");
         }
-
-        return res;
     }
 };
 
