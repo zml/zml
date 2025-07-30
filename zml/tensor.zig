@@ -3884,11 +3884,20 @@ pub const Tensor = struct {
                     return binaryOpHelper(self, other.broad(self._shape));
                 }
 
-                stdx.debug.assert(self._shape.eql(other._shape), "{s} expects tensor shapes to match, got {f} and {f}", .{ op_name, self._shape, other._shape });
+                var other_ = other;
+                var same_shape = self._shape.eql(other._shape);
+                if (!same_shape and std.mem.eql(Shape.Tag, self._shape.tags(), other._shape.tags()) and other._shape.canBroadcastTo(self._shape)) {
+                    // Only a restrictive version of broadcasting is allowed here, where all the tags matches already.
+                    // Typical use case: `x.div(x.sum(.a))`
+                    same_shape = true;
+                    other_ = other.broad(self._shape);
+                }
+
+                stdx.debug.assert(same_shape, "{s} expects tensor shapes to match, got {f} and {f}", .{ op_name, self._shape, other._shape });
 
                 const ctx = self.getContext();
-                const location = ctx.location(src, "{s}({f}, {f})", .{ op_name, self, other });
-                const ret = @call(.auto, op_fn, .{ ctx.mlirCtx(), self.value(), other.value(), location });
+                const location = ctx.location(src, "{s}({f}, {f})", .{ op_name, self, other_ });
+                const ret = @call(.auto, op_fn, .{ ctx.mlirCtx(), self.value(), other_.value(), location });
                 return _result(self._shape, ret.result(0));
             }
         }.binaryOpHelper;
@@ -3961,21 +3970,14 @@ test "Tensor.maxPool1d" {
 
     const x = try zml.Buffer.fromSlice(platform, .{ 2, 2, 5 }, &data);
     const result = try zml.testing.compileAndCall(platform, MaxPool._fwd, .{x});
-    try zml.testing.expectEqualShapes(Shape.init(.{ 2, 2, 2 }, .f32), result.values.shape());
-    try zml.testing.expectEqualShapes(Shape.init(.{ 2, 2, 2 }, .i32), result.indices.shape());
-    const buffer = result.values.getValue([2][2][2]f32);
+    try zml.testing.expectEqualShapes(.init(.{ 2, 2, 2 }, .f32), result.values.shape());
+    try zml.testing.expectEqualShapes(.init(.{ 2, 2, 2 }, .i32), result.indices.shape());
     try std.testing.expectEqualDeep(
         [2][2][2]f32{
-            [2][2]f32{
-                [2]f32{ 2, 4 },
-                [2]f32{ 7, 9 },
-            },
-            [2][2]f32{
-                [2]f32{ 12, 14 },
-                [2]f32{ 17, 19 },
-            },
+            .{ .{ 2, 4 }, .{ 7, 9 } },
+            .{ .{ 12, 14 }, .{ 17, 19 } },
         },
-        buffer,
+        result.values.getValue([2][2][2]f32),
     );
 }
 
