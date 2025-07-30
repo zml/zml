@@ -314,7 +314,7 @@ const MoE = struct {
     };
 
     pub fn forward(self: MoE, input: zml.Tensor) zml.Tensor {
-        const gating = self.router.forward(input).softmax(.expert);
+        const gating = self.router.forward(input).convert(.f32).softmax(.expert);
         return zml.nn.mixtureOfExperts(Mlp, self.mlp_experts, input, gating, .{ .experts_per_token = 2 });
     }
 
@@ -324,9 +324,9 @@ const MoE = struct {
         return .{
             .router = try store.loadModelById(zml.nn.Linear, stdx.noalloc, self.router, platform),
             .mlp_experts = .{
-                .up_proj = .{ .weight = try loadShardedWeight(store, prefix, "w1", platform, self.mlp_experts.up_proj.weight) },
+                .gate_proj = .{ .weight = try loadShardedWeight(store, prefix, "w1", platform, self.mlp_experts.gate_proj.weight) },
                 .down_proj = .{ .weight = try loadShardedWeight(store, prefix, "w2", platform, self.mlp_experts.down_proj.weight) },
-                .gate_proj = .{ .weight = try loadShardedWeight(store, prefix, "w3", platform, self.mlp_experts.gate_proj.weight) },
+                .up_proj = .{ .weight = try loadShardedWeight(store, prefix, "w3", platform, self.mlp_experts.up_proj.weight) },
             },
         };
     }
@@ -381,8 +381,8 @@ const Mlp = struct {
     down_proj: zml.nn.Linear, // (hidden_dim -> dim)
 
     pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
-        const up = x.dot(self.up_proj.weight, .d);
-        const gate = x.dot(self.gate_proj.weight, .d).silu();
+        const up = self.up_proj.weight.dot(x, .d);
+        const gate = self.gate_proj.weight.dot(x, .d).silu();
 
         const out = gate.mul(up).dot(self.down_proj.weight, .up);
         log.warn("Mlp(x: {f}) -> up: {f} -> gate: {f} -> out: {f}", .{ x, up, gate, out });
