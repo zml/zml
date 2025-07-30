@@ -33,7 +33,7 @@ pub fn approxEq(comptime Float: type, l: Float, r: Float, tolerance: Float) bool
     return closeRel or closeAbs;
 }
 
-/// Testing utility. Accepts both Tensor and HostBuffer but Tensor will be copied to the
+/// Testing utility. Accepts both zml.Buffer and zml.HostBuffer but zml.Buffer will be copied to the
 /// host for comparison !
 pub fn expectClose(left_: anytype, right_: anytype, tolerance: f32) !void {
     const allocator = if (builtin.is_test) std.testing.allocator else std.heap.smp_allocator;
