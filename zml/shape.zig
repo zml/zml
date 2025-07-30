@@ -419,6 +419,13 @@ pub const Shape = struct {
         // Already the right shape
         if (std.mem.eql(i64, self.dims(), other.dims())) return true;
 
+        if (std.mem.eql(Tag, self.tags(), other.tags())) {
+            for (0..self.rank()) |i| {
+                if (self.dim(i) != 1 and self.dim(i) != other.dim(i)) return false;
+            }
+            return true;
+        }
+
         // Non ambiguous broadcasting
         // TODO: broad is error prone because of this:
         // it will happily broadcast .{ .a = 10, .b = 1 } to .{ .b = 10, .a = 5 }
@@ -430,6 +437,7 @@ pub const Shape = struct {
         }
 
         for (self.dims(), self.tags()) |d, t| {
+            // TODO this is also wrong when the axes are in different order in the two shapes.
             const other_ax = other.hasTag(t) orelse return false;
             if (d != 1 and d != other.dim(other_ax)) return false;
         }

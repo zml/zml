@@ -231,7 +231,7 @@ pub const BufferStore = struct {
             if (std.mem.startsWith(u8, key, base_key)) {
                 if (matches == 0) log.warn("Similar buffers found:", .{});
                 if (!shown_keys.contains(key)) {
-                    log.warn("  - {s}: {}", .{ key, entry.value_ptr.*.shape() });
+                    log.warn("  - {s}: {f}", .{ key, entry.value_ptr.*.shape() });
                     shown_keys.put(key, {}) catch continue;
                     matches += 1;
                 }

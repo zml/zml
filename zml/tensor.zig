@@ -1078,7 +1078,7 @@ pub const Tensor = struct {
     /// Axes with the same tag on both sides, and which aren't contracting,
     /// are considered "batching axes".
     pub fn dot(lhs: Tensor, rhs: Tensor, comptime contracting: anytype) Tensor {
-        var contracting_axes: std.BoundedArray([2]i8, MAX_RANK) = .{};
+        var contracting_axes: stdx.BoundedArray([2]i8, MAX_RANK) = .{};
         if (@TypeOf(contracting) == EnumLiteral) {
             contracting_axes.appendAssumeCapacity(.{ lhs.axis(contracting), rhs.axis(contracting) });
         } else {
@@ -1087,7 +1087,7 @@ pub const Tensor = struct {
             }
         }
 
-        var batching_axes: std.BoundedArray([2]i8, MAX_RANK) = .{};
+        var batching_axes: stdx.BoundedArray([2]i8, MAX_RANK) = .{};
         for (lhs._shape.tags(), 0..) |l, li| {
             stdx.debug.assert(l != Shape.TagUnknown, "Can't use `dot(..., {any})` on {any}, it need to be explictily tagged.", .{ contracting, lhs });
 
@@ -2209,7 +2209,7 @@ pub const Tensor = struct {
     }
 
     pub fn gather_(self: Tensor, idx_axes: []const u3, idx_per_axis: []const Tensor, opts: GatherOpts) Tensor {
-        scoped_log.warn("gather({f}, {d}, {f})", .{ self, idx_axes, idx_per_axis });
+        scoped_log.warn("gather({f}, {any}, {any})", .{ self, idx_axes, idx_per_axis });
         stdx.debug.assert(idx_axes.len > 0, "gather expects 1 or more axes to operate one, received none. Example: `x.gather(.a, indices, .{{}})`", .{});
         for (idx_axes, 0..) |a, i| {
             if (i > 0) {
@@ -2229,7 +2229,7 @@ pub const Tensor = struct {
         var idx_batch_axes: Shape.DimsArray = .{};
 
         const AxisKind = enum { batching, offset, collapsed, indices };
-        var self_kind: std.BoundedArray(AxisKind, MAX_RANK) = .{ .buffer = @splat(.offset), .len = self.rank() };
+        var self_kind: stdx.BoundedArray(AxisKind, MAX_RANK) = .{ .buffer = @splat(.offset), .len = self.rank() };
 
         for (self._shape.tags(), 0..self.rank()) |t, self_ax| {
             const is_gather_axis = std.mem.containsAtLeastScalar(u3, idx_axes, 1, @intCast(self_ax));
@@ -2250,7 +2250,7 @@ pub const Tensor = struct {
 
         // compute res shape
         var res_shape = Shape.init(.{}, self.dtype());
-        var res_kind: std.BoundedArray(AxisKind, MAX_RANK) = .{};
+        var res_kind: stdx.BoundedArray(AxisKind, MAX_RANK) = .{};
         for (self_kind.slice(), 0..) |kind, ax_usize| {
             const ax: u3 = @intCast(ax_usize);
             if (ax == idx_axes[0]) {
@@ -2302,7 +2302,7 @@ pub const Tensor = struct {
             .index_vector_dim = indices.axis(.coord),
             .indices_are_sorted = opts.indices_are_sorted,
         };
-        scoped_log.warn(" --> stablehlo.gather({f}, {f}, {d}, {})", .{ self, indices, slice_dims.slice(), args });
+        scoped_log.warn(" --> stablehlo.gather({f}, {f}, {any}, {})", .{ self, indices, slice_dims.slice(), args });
 
         const gather_op = dialect.stablehlo.gather(
             self.getContext().mlirCtx(),
@@ -3881,11 +3881,20 @@ pub const Tensor = struct {
                     return binaryOpHelper(self, other.broad(self._shape));
                 }
 
-                stdx.debug.assert(self._shape.eql(other._shape), "{s} expects tensor shapes to match, got {f} and {f}", .{ op_name, self._shape, other._shape });
+                var other_ = other;
+                var same_shape = self._shape.eql(other._shape);
+                if (!same_shape and std.mem.eql(Shape.Tag, self._shape.tags(), other._shape.tags()) and other._shape.canBroadcastTo(self._shape)) {
+                    // Only a restrictive version of broadcasting is allowed here, where all the tags matches already.
+                    // Typical use case: `x.div(x.sum(.a))`
+                    same_shape = true;
+                    other_ = other.broad(self._shape);
+                }
+
+                stdx.debug.assert(same_shape, "{s} expects tensor shapes to match, got {f} and {f}", .{ op_name, self._shape, other._shape });
 
                 const ctx = self.getContext();
-                const location = ctx.location(src, "{s}({f}, {f})", .{ op_name, self, other });
-                const ret = @call(.auto, op_fn, .{ ctx.mlirCtx(), self.value(), other.value(), location });
+                const location = ctx.location(src, "{s}({f}, {f})", .{ op_name, self, other_ });
+                const ret = @call(.auto, op_fn, .{ ctx.mlirCtx(), self.value(), other_.value(), location });
                 return _result(self._shape, ret.result(0));
             }
         }.binaryOpHelper;
@@ -3958,21 +3967,14 @@ test "Tensor.maxPool1d" {
 
     const x = try zml.Buffer.fromSlice(platform, .{ 2, 2, 5 }, &data);
     const result = try zml.testing.compileAndCall(platform, MaxPool._fwd, .{x});
-    try zml.testing.expectEqualShapes(Shape.init(.{ 2, 2, 2 }, .f32), result.values.shape());
-    try zml.testing.expectEqualShapes(Shape.init(.{ 2, 2, 2 }, .i32), result.indices.shape());
-    const buffer = result.values.getValue([2][2][2]f32);
+    try zml.testing.expectEqualShapes(.init(.{ 2, 2, 2 }, .f32), result.values.shape());
+    try zml.testing.expectEqualShapes(.init(.{ 2, 2, 2 }, .i32), result.indices.shape());
     try std.testing.expectEqualDeep(
         [2][2][2]f32{
-            [2][2]f32{
-                [2]f32{ 2, 4 },
-                [2]f32{ 7, 9 },
-            },
-            [2][2]f32{
-                [2]f32{ 12, 14 },
-                [2]f32{ 17, 19 },
-            },
+            .{ .{ 2, 4 }, .{ 7, 9 } },
+            .{ .{ 12, 14 }, .{ 17, 19 } },
         },
-        buffer,
+        result.values.getValue([2][2][2]f32),
     );
 }
 
