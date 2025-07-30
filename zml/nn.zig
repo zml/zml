@@ -48,6 +48,7 @@ pub const TokenEmbedding = struct {
 
 const MoeOpts = struct {
     experts_per_token: u32,
+    tokens_per_expert_ratio: ?u32 = null,
 };
 
 /// We have two algorithms,
@@ -62,50 +63,132 @@ const MoeOpts = struct {
 /// - experts: .{ .expert, .d_out, .d } expert layer (need to have a .forward method).
 /// -> output: .{ .s, .d_out }
 pub fn mixtureOfExperts(Expert: type, experts: Expert, input: Tensor, gating: Tensor, opts: MoeOpts) Tensor {
-    // log.warn("mixtureOfExperts({s}, {}, {f}, {f})", .{ @typeName(Expert), experts, input, gating });
+    log.warn("mixtureOfExperts({s}, {}, {f}, {f})", .{ @typeName(Expert), experts, input, gating });
     const num_tokens = input.dim(.s);
     const num_experts = gating.dim(.expert);
-    const tokens_per_expert = std.math.divCeil(u32, num_tokens * opts.experts_per_token, num_experts) catch unreachable;
+    // const tokens_per_expert = std.math.divCeil(u32, num_tokens * opts.experts_per_token, num_experts) catch unreachable;
 
-    if (num_tokens * opts.experts_per_token < num_experts) {
-        // Few tokens: some experts will be unused.
-        // select active experts and compute with that.
-        const routing = gating.topK(opts.experts_per_token, .expert, .{ .descending = true });
-        const routing_score = routing.values.div(routing.values.sum(.expert).broad(routing.values.shape()));
+    // if (num_tokens == 1) {
+    //     // Few tokens: some experts will be unused.
+    //     // select active experts and compute with that.
+    //     const routing = gating.topK(.{ .top_expert = .expert }, opts.experts_per_token, .{});
+    //     const per_token_score = routing.values.div(routing.values.sum(.top_expert));
 
-        // TODO consider unrolling this on num_tokens * opts.experts_per_token to avoid gather of weights.
-        var sliced_expert: Expert = undefined;
-        zml.meta.mapAlloc(struct {
-            pub fn cb(routing_indices: Tensor, expert_weight: Tensor) Tensor {
-                return expert_weight.gather(.{ .expert = routing_indices }, .{});
-            }
-        }.cb, undefined, routing.indices, experts, &sliced_expert) catch unreachable;
+    //     // TODO unroll this on num_experts to avoid gather of weights.
+    //     for (0..num_experts) |expert| {
+    //         _ = expert; // autofix
+    //         var sliced_expert: Expert = undefined;
+    //         zml.meta.mapAlloc(struct {
+    //             pub fn cb(routing_indices: Tensor, expert_weight: Tensor) Tensor {
+    //                 return expert_weight.gather(.{ .expert = routing_indices }, .{});
+    //             }
+    //         }.cb, undefined, routing.indices, experts, &sliced_expert) catch unreachable;
+    //     }
 
-        const output_per_expert = sliced_expert.forward(input);
-        // log.warn(" -> routing {f} -> sliced_expert {any} -> output_per_expert {f}", .{ routing_score, sliced_expert, output_per_expert });
-        return output_per_expert.dot(routing_score, .expert);
+    //     const output_per_expert = sliced_expert.forward(input);
+    //     // log.warn(" -> routing {f} -> sliced_expert {any} -> output_per_expert {f}", .{ routing_score, sliced_expert, output_per_expert });
+    //     return output_per_expert.dot(per_token_score.convert(input.dtype()), .top_expert);
+    // }
+
+    const tokens_per_expert: u32 = if (opts.tokens_per_expert_ratio) |tokens_per_expert_ratio|
+        std.math.divCeil(u32, num_tokens * opts.experts_per_token * tokens_per_expert_ratio, num_experts) catch unreachable
+    else
+        num_tokens;
+
+    if (tokens_per_expert * 2 < num_tokens) {
+        // Lot of tokens, each experts chose their tokens and compute on that.
+        // It means that not all tokens will receive the same number of experts,
+        // Each token will get assigned to at least one expert because we normalize gating to sum up to one.
+        const normed_gating = gating.div(gating.sum(.expert));
+        // TODO the routing score is wrong here.
+        const routing = normed_gating.topK(.{ .token_expert = .s }, tokens_per_expert, .{});
+        const routing_score = routing.values.div(routing.values.sum(.expert)).transpose(.{ .expert, .token_expert });
+        const routing_ids = routing.indices.transpose(.{ .expert, .token_expert });
+        const input_per_expert = input.gather(.{ .s = routing_ids }, .{});
+        var output_per_expert = experts.forward(input_per_expert);
+        output_per_expert = output_per_expert.mul(routing_score.broad(output_per_expert.shape()));
+
+        // Reverse engineer the normal output shape that one expert would have produced for all tokens.
+        // If this provide to not be enough we could use the "sliced_expert" strategy and call forward ourselves.
+        const output_shape = output_per_expert.shape().drop(.expert).rename(.{ .token_expert = .s }).setDim(.s, num_tokens);
+        var output: Tensor = .constant(output_shape, input.dtype().zero());
+        log.warn(" -> input_per_expert {f} -> output_per_expert {f}, routing: {f} -> output {f}", .{ input_per_expert, output_per_expert, routing_ids, output });
+        output = output.scatterSlices(.{ .s = routing_ids }, output_per_expert, .{ .update_fn = Tensor.ScatterOpts.increment });
+
+        @panic("FIXME");
+    } else {
+        // We send all tokens to all experts, then discard result from non-topk experts using hard_gating.
+        const routing = gating.topK(.{ .top_expert = .expert }, opts.experts_per_token, .{});
+        const per_token_score = routing.values.div(routing.values.sum(.top_expert));
+
+        // hard_gating is eql to gating where only the top-2 experts have a non-zero score.
+        var hard_gating = zml.Tensor.constant(gating.shape(), gating.dtype().zero());
+        hard_gating = hard_gating.scatterSlices(.{ .expert = routing.indices }, per_token_score, .{ .indices_are_unique = true }).withSharding(.{.expert});
+
+        const output_per_expert = experts.forward(input);
+        return output_per_expert.dot(hard_gating.convert(input.dtype()), .expert);
+    }
+}
+
+test mixtureOfExperts {
+    const asynk = @import("async");
+
+    const MoE = struct {
+        router: Linear,
+        experts: Linear,
+
+        pub fn forward(self: @This(), x: zml.Tensor) zml.Tensor {
+            return mixtureOfExperts(Linear, self.experts, x, self.router.forward(x).convert(.f32).softmax(.expert), .{ .experts_per_token = 2 });
+        }
+    };
+
+    const platform = zml.testing.env();
+    const store = try zml.aio.detectFormatAndOpen(std.testing.allocator, "zml/test_data/moe.activations.pt");
+    defer store.deinit();
+
+    var model_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer model_arena.deinit();
+    var moe_model = try zml.aio.populateModel(MoE, model_arena.allocator(), store);
+    moe_model.router.weight = moe_model.router.weight.withTags(.{ .expert, .d });
+    moe_model.experts.weight = moe_model.experts.weight.withTags(.{ .expert, ._, .d });
+
+    var compilation_prefill = try asynk.asyncc(zml.compileModel, .{
+        std.testing.allocator,
+        MoE.forward,
+        moe_model,
+        .{zml.Shape.init(.{ .s = 24, .d = 64 }, .bf16)},
+        platform,
+    });
+    var compilation_gen = try asynk.asyncc(zml.compileModel, .{
+        std.testing.allocator,
+        MoE.forward,
+        moe_model,
+        .{zml.Shape.init(.{ .s = 1, .d = 64 }, .bf16)},
+        platform,
+    });
+
+    var moe_weights = try zml.aio.loadModelBuffers(MoE, moe_model, store, std.testing.allocator, platform);
+    defer zml.aio.unloadBuffers(&moe_weights);
+
+    {
+        const moe_prefill = (try compilation_prefill.awaitt()).prepare(moe_weights);
+        defer moe_prefill.deinit();
+
+        const x = try store.get("in").?.toDevice(platform);
+        const actual = moe_prefill.call(.{x});
+
+        try zml.testing.expectClose(store.get("out").?, actual, 1e-2);
     }
 
-    // Lot of tokens, each experts chose their tokens and compute on that.
-    // It means that not all tokens will receive the same number of experts,
-    // Each token will get assigned to at least one expert because we normalize gating to sum up to one.
-    const normed_gating = gating.div(gating.sum(.s).broad(gating.shape()));
-    // TODO: topK should always rename the operated axis.
-    const routing = normed_gating.rename(.{ .s = .expert_token }).topK(tokens_per_expert, .expert_token, .{});
-    const routing_score = routing.values.div(routing.values.sum(.expert).broad(routing.values.shape())).transpose(.{ .expert, .expert_token });
-    const routing_ids = routing.indices.transpose(.{ .expert, .expert_token });
-    const input_per_expert = input.gather(.{ .s = routing_ids }, .{});
-    var output_per_expert = experts.forward(input_per_expert);
-    output_per_expert = output_per_expert.mul(routing_score.broad(output_per_expert.shape()));
+    {
+        const moe_gen = (try compilation_gen.awaitt()).prepare(moe_weights);
+        defer moe_gen.deinit();
 
-    // Reverse engineer the normal output shape that one expert would have produced for all tokens.
-    // If this provide to not be enough we could use the "sliced_expert" strategy and call forward ourselves.
-    const output_shape = output_per_expert.shape().drop(.expert).rename(.{ .expert_token = .s }).setDim(.s, num_tokens);
-    var output: Tensor = .constant(output_shape, input.dtype().zero());
-    // log.warn(" -> input_per_expert {f} -> output_per_expert {f}, routing: {f} -> output {f}", .{ input_per_expert, output_per_expert, routing_ids, output });
-    output = output.scatterSlices(.{ .s = routing_ids }, output_per_expert, .{ .update_fn = Tensor.ScatterOpts.increment });
+        const x = try store.get("in").?.slice1d(0, .{ .start = 12, .end = 13 }).toDevice(platform);
+        const actual = moe_gen.call(.{x});
 
-    return output;
+        try zml.testing.expectClose(store.get("out").?.slice1d(0, .{ .start = 12, .end = 13 }), actual, 1e-2);
+    }
 }
 
 pub const Activation = union(enum) {
