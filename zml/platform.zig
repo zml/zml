@@ -14,7 +14,7 @@ pub const CompilationOptions = struct {
     xla_dump_to: ?[]const u8 = null,
     xla_dump_fusion_visualization: bool = false,
     xla_dump_hlo_pass_re: ?[]const u8 = null,
-    sharding_enabled: bool = false,
+    sharding_enabled: ?bool = false, // todo(hugo): remove this, it is only used in the old compilation path
 };
 
 pub const Platform = struct {

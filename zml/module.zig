@@ -600,7 +600,7 @@ pub const CompilationContext = struct {
         if (mesh.isSinglePartition()) return; // No sharding attributes for single partition.
 
         const ctx = self.mlirCtx();
-        if (!self._platform.compilation_options.sharding_enabled) return;
+
         const default_layout = mlir.NamedAttribute.named(ctx, "mhlo.layout_mode", .string(ctx, "default"));
         for (arg_attrs, input_shapes, input_meshes) |*attr, shape, input_mesh| {
             attr.appendAssumeCapacity(default_layout);
@@ -922,17 +922,17 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, m
             setFlag(&options, "xla_gpu_enable_latency_hiding_scheduler", true);
             setFlag(&options, "xla_gpu_enable_llvm_module_compilation_parallelism", true);
             setFlag(&options, "xla_gpu_enable_libnvptxcompiler", true);
-            setFlag(&options, "xla_gpu_nccl_async_execution", true);
-            setFlag(&options, "xla_gpu_nccl_blocking_communicators", false);
-            setFlag(&options, "xla_gpu_enable_nccl_user_buffers", true);
-            setFlag(&options, "xla_gpu_enable_pipelined_all_reduce", true);
-            setFlag(&options, "xla_gpu_enable_pipelined_reduce_scatter", true);
-            setFlag(&options, "xla_gpu_enable_pipelined_p2p", true);
-            setFlag(&options, "xla_gpu_enable_all_gather_combine_by_dim", true);
-            setFlag(&options, "xla_gpu_enable_reduce_scatter_combine_by_dim", true);
-            setFlag(&options, "xla_gpu_enable_approx_costly_collectives", true);
-            setFlag(&options, "xla_gpu_experimental_enable_nvshmem", true);
-            setFlag(&options, "xla_gpu_enable_nccl_comm_splitting", true);
+            // setFlag(&options, "xla_gpu_nccl_async_execution", true);
+            // setFlag(&options, "xla_gpu_nccl_blocking_communicators", false);
+            // setFlag(&options, "xla_gpu_enable_nccl_user_buffers", true);
+            // setFlag(&options, "xla_gpu_enable_pipelined_all_reduce", true);
+            // setFlag(&options, "xla_gpu_enable_pipelined_reduce_scatter", true);
+            // setFlag(&options, "xla_gpu_enable_pipelined_p2p", true);
+            // setFlag(&options, "xla_gpu_enable_all_gather_combine_by_dim", true);
+            // setFlag(&options, "xla_gpu_enable_reduce_scatter_combine_by_dim", true);
+            // setFlag(&options, "xla_gpu_enable_approx_costly_collectives", true);
+            // setFlag(&options, "xla_gpu_experimental_enable_nvshmem", true);
+            // setFlag(&options, "xla_gpu_enable_nccl_comm_splitting", true);
 
             //  setFlag(&options, "xla_gpu_enable_cudnn_fmha", true);
             //  setFlag(&options, "xla_gpu_fused_attention_use_cudnn_rng", true);
