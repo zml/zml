@@ -71,6 +71,47 @@ pub fn asyncMain() !void {
     });
     context.printAvailablePlatforms(platform);
 
+    const devices = platform.getDevices();
+
+    for (devices, 0..) |device, i| {
+        const desc = device.getDescription(platform.pjrt_api);
+        log.info("  Device #{d}:", .{i});
+        log.info("    - ID: {d}", .{desc.getId(platform.pjrt_api)});
+        log.info("    - Process Index: {d}", .{desc.getProcessIndex(platform.pjrt_api)});
+        log.info("    - Kind: {s}", .{desc.getKind(platform.pjrt_api)});
+        log.info("    - Debug String: {s}", .{desc.debugString(platform.pjrt_api)});
+        log.info("    - To String: {s}", .{desc.toString(platform.pjrt_api)});
+
+        const attributes = desc.getAttributes(platform.pjrt_api);
+        if (attributes.len > 0) {
+            log.info("    - Attributes:", .{});
+            for (attributes) |attr| {
+                log.info("      - {s}:", .{attr.name()});
+                switch (attr.kind()) {
+                    .string => log.info("        (string): {s}", .{attr.inner.unnamed_0.string_value[0..attr.inner.value_size]}),
+                    .int64 => {
+                        log.info("        (int64): {d}", .{attr.inner.unnamed_0.int64_value});
+                        if (std.mem.eql(u8, attr.name(), "memory_bandwidth")) {
+                            const bandwidth_gbps: f32 = @as(f32, @floatFromInt(attr.inner.unnamed_0.int64_value)) / (1024.0 * 1024.0 * 1024.0);
+                            log.info("          (Computed Bandwidth: {:.2} GB/s)", .{bandwidth_gbps});
+                        }
+                        if (std.mem.eql(u8, attr.name(), "core_count")) {
+                            log.info("          (Core Count: {d})", .{attr.inner.unnamed_0.int64_value});
+                        }
+                    },
+                    .int64list => {
+                        const list_slice = attr.inner.unnamed_0.int64_array_value[0..attr.inner.value_size];
+                        log.info("        (int64list): {d}", .{list_slice});
+                    },
+                    .float => log.info("        (float): {d}", .{attr.inner.unnamed_0.float_value}),
+                    .bool => log.info("        (bool): {any}", .{attr.inner.unnamed_0.bool_value}),
+                }
+            }
+        } else {
+            log.info("    - No specific attributes.", .{});
+        }
+    }
+
     // const mesh: zml.Mesh = .init(.{ .x = 4, .y = 3 });
     const mesh: zml.Mesh = .auto(platform);
     // const mesh: zml.Mesh = .single();

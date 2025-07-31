@@ -625,6 +625,18 @@ pub const DeviceDescription = opaque {
         return @intCast(ret.process_index);
     }
 
+    pub fn getAttributes(self: *const DeviceDescription, api: *const Api) []const NamedValue {
+        const ret = api.call(.PJRT_DeviceDescription_Attributes, .{
+            .device_description = self.inner(),
+        }) catch unreachable;
+
+        if (ret.attributes) |attrs| {
+            return @ptrCast(attrs[0..ret.num_attributes]);
+        }
+
+        return &.{};
+    }
+
     pub fn getKind(self: *const DeviceDescription, api: *const Api) []const u8 {
         const ret = api.call(.PJRT_DeviceDescription_Kind, .{
             .device_description = self.inner(),
