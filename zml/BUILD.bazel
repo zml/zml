@@ -81,7 +81,7 @@ zig_test(
     data = [
         "aio/torch/simple.pt",
         "aio/torch/simple_test_4.pickle",
-    ],
+    ] + glob(["test_data/**"]),
     test_runner = ":test_runner",
     deps = [":zml"],
 )
