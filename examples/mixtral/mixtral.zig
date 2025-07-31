@@ -315,7 +315,7 @@ const MoE = struct {
 
     pub fn forward(self: MoE, input: zml.Tensor) zml.Tensor {
         const gating = self.router.forward(input).convert(.f32).softmax(.expert);
-        return zml.nn.mixtureOfExperts(Mlp, self.mlp_experts, input, gating, .{ .experts_per_token = 2 });
+        return zml.nn.mixtureOfExperts(Mlp, self.mlp_experts, input, gating, .{ .experts_per_token = 2, .tokens_per_expert_ratio = 1.5 });
     }
 
     pub fn loadSharded(self: MoE, store: zml.aio.BufferStore, prefix: *zml.aio.PrefixBuilder, platform: zml.Platform) !zml.Bufferized(MoE) {

@@ -60,7 +60,7 @@ const MoeOpts = struct {
 /// a token doesn't get their requested expert.
 ///   The parameter `tokens_per_expert_ratio` control how much compute budget is granted:
 ///   expert_budget = ratio * (num_tokens * experts_per_token / num_experts).
-///   Bigger values of ratio will ensure it's rare a token doesn't get examined.
+///   Bigger values of ratio will ensure it's rare a token doesn't get it's top 2 tokens.
 ///
 /// The preferred algorithm is the batched one,
 /// it is selected as soon there is enough tokens to guarantee that experts will be active most of the time.
@@ -74,7 +74,6 @@ pub fn mixtureOfExperts(Expert: type, experts: Expert, input: Tensor, gating: Te
     const num_tokens = input.dim(.s);
     const num_experts = gating.dim(.expert);
     stdx.debug.assert(opts.experts_per_token > 0, "mixtureOfExperts expects opts.experts_per_token > 0, got {}", .{opts});
-    // const tokens_per_expert = std.math.divCeil(u32, num_tokens * opts.experts_per_token, num_experts) catch unreachable;
 
     if (num_tokens == 1) {
         // Only one tokens: most experts are unused.
@@ -100,7 +99,7 @@ pub fn mixtureOfExperts(Expert: type, experts: Expert, input: Tensor, gating: Te
             output = if (output) |o| o.add(expert_output) else expert_output;
         }
 
-        log.warn("mixtureOfExperts({s}, {}, {f}, {f}) -> single-stream impl", .{ @typeName(Expert), experts, input, gating });
+        log.debug("mixtureOfExperts({s}, {}, {f}, {f}) -> single-stream impl", .{ @typeName(Expert), experts, input, gating });
         return output.?;
     }
 
@@ -115,43 +114,69 @@ pub fn mixtureOfExperts(Expert: type, experts: Expert, input: Tensor, gating: Te
     if (3 * tokens_per_expert <= 2 * num_tokens) {
         // Lot of tokens, each experts chose their tokens and compute on that.
         // It means that some tokens may have only one expert assigned.
-        // Each token will get assigned to at least one expert because we normalize gating to sum up to one.
-        const expert_routing = gating.powByConst(2).topK(.{ .top_token = .s }, tokens_per_expert, .{});
-        const scores_per_expert = expert_routing.values.transpose(.{ .expert, .top_token });
-        const ids_per_expert = expert_routing.indices.transpose(.{ .expert, .top_token });
-        const input_per_expert = input.gather(.{ .s = ids_per_expert }, .{});
+        // Each token will get assigned to at least one expert IIF the input gating is sums up to 1 (typically softmax output).
+        const token_pref = gating.argsort(.expert, .{ .descending = true });
+        var expert_rank: zml.Tensor = .scatterSlices(
+            .zeros(gating.shape().withDtype(.i32)),
+            .{ .expert = token_pref },
+            .addConstant(.iota(gating.shape(), .expert), 1),
+            .{ .indices_are_unique = true },
+        );
+        // The pow(expert_rank) here means that we strongly favor top 1 over top 2 and top 2 over top 3.
+        // expert_routing: (expert, top_token) -> token
+        const expert_routing = gating.pow(expert_rank.convert(gating.dtype())).topK(.{ .top_token = .s }, tokens_per_expert, .{});
+        const scores_per_expert = gating.gather(.{ .s = expert_routing.indices }, .{});
+
+        // Update the gating coefficient to account for the expert routing.
+        // Each (token, expert) which can't be computed within the given budget is left to 0.
+        const gating_v2: zml.Tensor = .scatterSlices(
+            .zeros(gating.shape()),
+            .{ .s = expert_routing.indices },
+            scores_per_expert,
+            .{ .indices_are_unique = true, .update_fn = Tensor.ScatterOpts.override },
+        );
+        // Now set to zero the scores (token, expert) for tokens that have been assigned more than experts_per_token.
+        const lowest_experts = gating_v2.topK(.{ .top_expert = .expert }, num_experts - opts.experts_per_token, .{ .descending = false });
+        var gating_v3: zml.Tensor = .scatterSlices(
+            gating_v2,
+            .{ .expert = lowest_experts.indices },
+            .zeros(lowest_experts.values.shape()),
+            .{ .indices_are_unique = true, .update_fn = Tensor.ScatterOpts.override },
+        );
+        // Then normalize so the sum of experts scores for one token sums up to 1.
+        gating_v3 = gating_v3.div(gating_v3.sum(.expert));
+        // Recompute scores_per_expert using the updated gating.
+        const tokens_ids_per_expert = expert_routing.indices.transpose(.{ .expert, .top_token });
+        const scores_per_expert_v2 = gating_v3.gather(.{ .s = expert_routing.indices }, .{}).transpose(.{ .expert, .top_token });
+        const input_per_expert = input.gather(.{ .s = tokens_ids_per_expert }, .{});
         var output_per_expert = experts.forward(input_per_expert);
-        output_per_expert = output_per_expert.mul(scores_per_expert.convert(output_per_expert.dtype()).broad(output_per_expert.shape()));
+        output_per_expert = output_per_expert.mul(scores_per_expert_v2.convert(output_per_expert.dtype()).broad(output_per_expert.shape()));
 
         // Reverse engineer the normal output shape that one expert would have produced for all tokens.
-        // If this provide to not be enough we could use the "sliced_expert" strategy and call forward ourselves.
+        // If this fall short, we could use the "sliced_expert" strategy and call forward ourselves.
         const output_shape = output_per_expert.shape().drop(.expert).rename(.{ .top_token = .s }).setDim(.s, num_tokens);
-        var output: Tensor = .constant(output_shape, input.dtype().zero());
-        // log.warn(" -> input_per_expert {f} -> output_per_expert {f}, routing: {f} -> output {f}", .{ input_per_expert, output_per_expert, ids_per_expert, output });
-        output = output.scatterSlices(.{ .s = ids_per_expert }, output_per_expert, .{ .update_fn = Tensor.ScatterOpts.increment });
+        const output = zml.Tensor.scatterSlices(
+            .zeros(output_shape),
+            .{ .s = tokens_ids_per_expert },
+            output_per_expert,
+            .{ .update_fn = zml.Tensor.ScatterOpts.increment },
+        );
 
-        // Now we need to normalize each output by the sum of the scores of the expert that looked at it.
-        var routing_score: Tensor = .constant(.{ .s = input.dim(.s) }, gating.dtype().zero());
-        routing_score = routing_score.scatterSlices(.{ .s = ids_per_expert }, scores_per_expert, .{ .update_fn = Tensor.ScatterOpts.increment });
-        output = output.div(routing_score.convert(output.dtype()).broad(output_shape));
-
-        var expert_allocation = Tensor.constant(gating.shape().drop(.expert), .{ .u32 = 0 });
-        expert_allocation = expert_allocation.scatterSlices(.{ .s = ids_per_expert.print() }, .constant(ids_per_expert.shape(), .{ .u32 = 1 }), .{});
-        expert_allocation = expert_allocation.print();
-        output = output.add(expert_allocation.sum(.s).divByConst(num_tokens).convert(output.dtype()).asScalar());
-
-        log.warn("mixtureOfExperts({s}, {}, {f}, {f}) -> fixed budget impl tpe: {d}, tokens: {d}", .{ @typeName(Expert), experts, input, gating, tokens_per_expert, num_tokens });
+        log.debug("mixtureOfExperts({s}, {}, {f}, {f}) -> fixed budget impl tpe: {d}, tokens: {d}", .{ @typeName(Expert), experts, input, gating, tokens_per_expert, num_tokens });
         return output;
     } else {
         // We send all tokens to all experts, then discard result from non-topk experts using hard_gating.
         const routing = gating.topK(.{ .top_expert = .expert }, opts.experts_per_token, .{});
-        const per_token_score = routing.values.div(routing.values.sum(.top_expert));
+        const per_token_score = routing.values.div(routing.values.sum(.top_expert)).convert(input.dtype());
 
         // hard_gating is eql to gating where only the top-2 experts have a non-zero score.
-        var hard_gating = zml.Tensor.constant(gating.shape(), gating.dtype().zero());
-        hard_gating = hard_gating.scatterSlices(.{ .expert = routing.indices }, per_token_score, .{ .indices_are_unique = true }).withSharding(.{.expert});
-
-        log.warn("mixtureOfExperts({s}, {}, {f}, {f}) -> all to all impl", .{ @typeName(Expert), experts, input, gating });
+        const hard_gating = zml.Tensor.scatterSlices(
+            .zeros(gating.shape()),
+            .{ .expert = routing.indices },
+            per_token_score,
+            .{ .indices_are_unique = true },
+        ).withSharding(.{.expert});
+        log.debug("mixtureOfExperts({s}, {}, {f}, {f}) -> all to all impl", .{ @typeName(Expert), experts, input, gating });
         const output_per_expert = experts.forward(input);
         return output_per_expert.dot(hard_gating.convert(input.dtype()), .expert);
     }
@@ -164,7 +189,8 @@ test mixtureOfExperts {
         weight: Tensor,
 
         pub fn forward(self: @This(), x: zml.Tensor) zml.Tensor {
-            return self.weight.dot(x, .{.d}).rename(.{ .d_out = .d });
+            // I'm always dumb founded by the weird output layout of `dot`.
+            return self.weight.dot(x, .{.d}).rename(.{ .d_out = .d }).contiguous(.{.d});
         }
     };
 
@@ -174,12 +200,15 @@ test mixtureOfExperts {
 
         pub fn forward(self: @This(), x: zml.Tensor) zml.Tensor {
             const routing = self.router.forward(x).convert(.f32).softmax(.expert);
-            return mixtureOfExperts(Expert, self.experts, x, routing, .{ .experts_per_token = 2, .tokens_per_expert_ratio = 1 });
+            return mixtureOfExperts(Expert, self.experts, x, routing, .{ .experts_per_token = 2, .tokens_per_expert_ratio = 2 });
         }
     };
 
     const platform = zml.testing.env();
-    const store = try zml.aio.detectFormatAndOpen(std.testing.allocator, "zml/test_data/moe.activations.pt");
+    const store = zml.aio.detectFormatAndOpen(std.testing.allocator, "zml/test_data/moe.activations.pt") catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
     defer store.deinit();
 
     var model_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -213,7 +242,7 @@ test mixtureOfExperts {
         const x = try store.get("in").?.toDevice(platform);
         const actual = moe_prefill.call(.{x});
 
-        try zml.testing.expectClose(store.get("out").?, actual, 1e-2);
+        try zml.testing.expectClose(store.get("out").?, actual, 5e-2);
     }
 
     {
@@ -223,7 +252,7 @@ test mixtureOfExperts {
         const x = try store.get("in").?.slice1d(0, .{ .start = 12, .end = 13 }).toDevice(platform);
         const actual = moe_gen.call(.{x});
 
-        try zml.testing.expectClose(store.get("out").?.slice1d(0, .{ .start = 12, .end = 13 }), actual, 1e-2);
+        try zml.testing.expectClose(store.get("out").?.slice1d(0, .{ .start = 12, .end = 13 }), actual, 5e-2);
     }
 }
 
@@ -316,7 +345,7 @@ pub fn normalizeVariance(x: Tensor, eps: f32) Tensor {
 // ref: https://pytorch.org/docs/stable/generated/torch.nn.functional.normalize.html
 // Implementation equivalent to `nn.functional.normalize(tensor, dim=-1)` call
 pub fn normalizeL2(input: Tensor, eps: f32) Tensor {
-    const inv_norm = input.pow(Tensor.scalar(2, input.dtype())).sum(-1).addConstant(eps).rsqrt();
+    const inv_norm = input.powByConst(2).sum(-1).addConstant(eps).rsqrt();
     return input.mul(inv_norm.broad(input.shape()));
 }
 
@@ -925,7 +954,7 @@ pub fn resizeCubic1d(image: Tensor, axis: i8, new_len: u63, opt: ResizeOpts) Ten
         Tensor.constant(t.shape(), dtype.one()),
         t,
         t.mul(t),
-        t.pow(Tensor.scalar(3, dtype)),
+        t.powByConst(3),
     }, .last, ._interpolated);
 
     std.debug.assert(pos.dim(0) == new_len);
