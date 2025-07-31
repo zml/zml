@@ -397,8 +397,8 @@ pub const KvCache = struct {
         const layer_index_sharding = zml.Sharding.init(mesh, zml.Shape.init(.{}, .u32));
 
         return .{
-            .k = try zml.Buffer.constant(platform, kv_sharding, 1), // try zml.Buffer.uninitialized(platform, kv_sharding, .{}),
-            .v = try zml.Buffer.constant(platform, kv_sharding, 1), // try zml.Buffer.uninitialized(platform, kv_sharding, .{}),
+            .k = try zml.Buffer.uninitialized(platform, kv_sharding, .{}),
+            .v = try zml.Buffer.uninitialized(platform, kv_sharding, .{}),
             .layer_index = try zml.Buffer.constant(platform, layer_index_sharding, 0),
         };
     }

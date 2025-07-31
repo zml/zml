@@ -182,7 +182,7 @@ pub const HostBuffer = struct {
     }
 
     pub fn bytes(self: HostBuffer) []const u8 {
-        // stdx.debug.assert(self.isContiguous(), "{} isn't contiguous, can't interpret as []const u8", .{self});
+        stdx.debug.assert(self.isContiguous(), "{} isn't contiguous, can't interpret as []const u8", .{self});
         return self._data[0..self._shape.byteSize()];
     }
 
