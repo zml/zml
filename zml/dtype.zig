@@ -260,7 +260,7 @@ pub const Data = union(DataType) {
                     if (value >= std.math.minInt(OutT) and value <= std.math.maxInt(OutT)) {
                         break :blk @unionInit(Data, @tagName(tag), @intCast(value));
                     } else {
-                        @panic("Could not create Data of type " ++ @tagName(tag) ++ " from value of type " ++ @typeName(T));
+                        std.debug.panic("Could not create Data of type {s} from value: {d}", .{ @tagName(tag), value });
                     }
                 },
                 .int => @unionInit(Data, @tagName(tag), @intCast(value)),
