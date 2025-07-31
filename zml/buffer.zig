@@ -295,8 +295,8 @@ pub const Buffer = struct {
             },
             else => unreachable,
         }
-        const data: []const u8 = bytes[0..max_bytes];
-        return try from(platform, sharding, data, .{ .wait = true });
+        const host_buffer: HostBuffer = .{ ._shape = shape_, ._strides = strides, ._data = &bytes };
+        return try from(platform, sharding, host_buffer.bytes(), .{ .wait = true });
     }
 
     test constant {
