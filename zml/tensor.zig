@@ -1014,8 +1014,13 @@ pub const Tensor = struct {
     }
 
     /// Returns a Tensor containing the element-wise multiplication of the input Tensor by a constant.
-    pub inline fn scale(self: Tensor, val: anytype) Tensor {
+    pub fn scale(self: Tensor, val: anytype) Tensor {
         return self.mul(Tensor.scalar(val, self.dtype()));
+    }
+
+    /// Returns a Tensor containing the element-wise power of the input Tensor by a constant.
+    pub fn powByConst(self: Tensor, val: anytype) Tensor {
+        return self.pow(Tensor.scalar(val, self.dtype()));
     }
 
     pub const LogicalOp = enum { OR, XOR, AND };
