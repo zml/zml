@@ -269,18 +269,6 @@ pub const Tensor = struct {
         return res;
     }
 
-    var _global_tensor_counter: u64 = 0;
-
-    /// Internal use
-    pub fn _reserveIdRange(len: u32) u64 {
-        return @atomicRmw(u64, &_global_tensor_counter, .Add, len, .seq_cst);
-    }
-
-    /// Internal use
-    pub fn setUniqueId(self: *Tensor) void {
-        self._id = .{ .buffer_id = _reserveIdRange(1) };
-    }
-
     /// Returns a Tensor containing the absolute value of each element of the input Tensor.
     pub fn abs(self: Tensor) Tensor {
         const loc = self.getContext().mlirCtx().location(@src());

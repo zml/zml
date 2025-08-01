@@ -50,8 +50,8 @@ pub fn detectFormatAndOpen(allocator: std.mem.Allocator, model_path: []const u8)
 /// whose shape is read from the "a.b" tensor.
 /// * If `Model` contains a list of layers, then the field:
 /// `Model.layers[2].a.b` will be populated from the "layers.2.a.b" tensor.
-pub fn populateModel(comptime Model: type, allocator: std.mem.Allocator, buffer_store: BufferStore) !Model {
-    return populateModelWithPrefix(Model, allocator, buffer_store, "");
+pub fn populateModel(comptime Model: type, allocator: std.mem.Allocator, store: BufferStore) !Model {
+    return populateModelWithPrefix(Model, allocator, store, "");
 }
 
 /// Creates a Model struct with tensor shapes read from the given TensorStore,
@@ -69,8 +69,7 @@ pub fn populateModelWithPrefix(comptime Model: type, allocator: std.mem.Allocato
     try prefix_builder.push(allocator, prefix);
     defer prefix_builder.deinit(allocator);
 
-    const unique_id = zml.Tensor._reserveIdRange(@intCast(store.buffers.count()));
-    const ok = _populateStruct(allocator, &prefix_builder, unique_id, store, &model, true) catch |err| {
+    const ok = _populateStruct(allocator, &prefix_builder, store, &model, true) catch |err| {
         std.debug.panic("Can't populate model of type {s}: {s}", .{ @typeName(type), @errorName(err) });
     };
     if (!ok) return error.TensorNotFound;
@@ -458,8 +457,7 @@ pub const PrefixBuilder = struct {
 fn _populateStruct(
     allocator: std.mem.Allocator,
     prefix_builder: *PrefixBuilder,
-    unique_id: u64,
-    buffer_store: BufferStore,
+    store: BufferStore,
     obj: anytype,
     required: bool,
 ) !bool {
@@ -474,12 +472,12 @@ fn _populateStruct(
 
     const prefix = prefix_builder.data.items;
     if (T == zml.Tensor) {
-        return if (buffer_store.getTensorOrNull(prefix)) |tensor| {
+        return if (store.getTensorOrNull(prefix)) |tensor| {
             obj.* = tensor;
             return true;
         } else {
             if (required) {
-                log.err("Tensor not found: {s} ({d})", .{ prefix, buffer_store.buffers.count() });
+                log.err("Tensor not found: {s} ({d})", .{ prefix, store.buffers.count() });
             }
             return false;
         };
@@ -492,14 +490,14 @@ fn _populateStruct(
                 obj.* = &.{};
 
                 if (!zml.meta.Contains(ptr_info.child, zml.Tensor)) return false;
-                const len = buffer_store.countLayers(prefix);
+                const len = store.countLayers(prefix);
                 if (len > 0) {
                     obj.* = try allocator.alloc(ptr_info.child, len);
 
                     for (obj.*, 0..) |*value, i| {
                         try prefix_builder.pushDigit(allocator, i);
                         defer prefix_builder.pop();
-                        const found = try _populateStruct(allocator, prefix_builder, unique_id, buffer_store, value, required);
+                        const found = try _populateStruct(allocator, prefix_builder, store, value, required);
                         if (!found) {
                             log.err("Not able to load {s} as {s}", .{ prefix_builder.data.items, @typeName(ptr_info.child) });
                             return false;
@@ -518,7 +516,7 @@ fn _populateStruct(
             for (obj, 0..) |*value, i| {
                 try prefix_builder.pushDigit(allocator, i);
                 defer prefix_builder.pop();
-                const found = try _populateStruct(allocator, prefix_builder, unique_id, buffer_store, value, required);
+                const found = try _populateStruct(allocator, prefix_builder, store, value, required);
                 if (!found) {
                     log.err("Not able to load {s} as {s}", .{ prefix_builder.data.items, @typeName(arr_info.child) });
                     return false;
@@ -537,7 +535,7 @@ fn _populateStruct(
                 if (field.default_value_ptr) |_| has_default = true;
 
                 if (zml.meta.Contains(field.type, zml.Tensor)) {
-                    const field_found = try _populateStruct(allocator, prefix_builder, unique_id, buffer_store, &@field(obj, field.name), required and !has_default);
+                    const field_found = try _populateStruct(allocator, prefix_builder, store, &@field(obj, field.name), required and !has_default);
                     partial_struct = partial_struct or field_found;
                     if (!field_found) {
                         if (field.default_value_ptr) |v| {
@@ -546,7 +544,7 @@ fn _populateStruct(
                             if (partial_struct) {
                                 log.warn("Incomplete struct '{0s}': {1s}. Missing field: '{2s}'. '{0s}' will be ignored.", .{ prefix, @typeName(T), field.name });
                                 // if (required) {
-                                //     findSimilarBufferKeys(prefix, buffer_store, allocator);
+                                //     findSimilarBufferKeys(prefix, store, allocator);
                                 // }
                                 obj.* = undefined;
                                 return false;
@@ -561,7 +559,7 @@ fn _populateStruct(
         },
         .optional => |opt_info| {
             obj.* = @as(opt_info.child, undefined);
-            const found = try _populateStruct(allocator, prefix_builder, unique_id, buffer_store, &(obj.*.?), false);
+            const found = try _populateStruct(allocator, prefix_builder, store, &(obj.*.?), false);
             if (!found) obj.* = null;
             return true;
         },
@@ -579,7 +577,7 @@ fn _populateStruct(
                 obj.* = @unionInit(T, field.name, undefined);
                 // @compileLog(T, field.name, field.type);
                 log.warn("Trying to init {s} as a {s}", .{ prefix, @typeName(field.type) });
-                const field_found = try _populateStruct(allocator, prefix_builder, unique_id, buffer_store, &@field(obj, field.name), true);
+                const field_found = try _populateStruct(allocator, prefix_builder, store, &@field(obj, field.name), true);
                 if (field_found) return true;
             }
             if (required) log.warn("Failed to init {s} as any of {s}", .{ prefix, @typeName(T) });
@@ -660,11 +658,11 @@ test populateModel {
 pub fn loadBuffers(
     comptime Model: type,
     init_args: if (@hasDecl(Model, "init")) stdx.meta.Tail(stdx.meta.FnArgs(Model.init)) else void,
-    buffer_store: BufferStore,
+    store: BufferStore,
     allocator: std.mem.Allocator,
     platform: zml.Platform,
 ) !zml.Bufferized(Model) {
-    return loadBuffersWithPrefix(Model, init_args, buffer_store, allocator, platform, "");
+    return loadBuffersWithPrefix(Model, init_args, store, allocator, platform, "");
 }
 
 /// Creates a bufferized version of a Model from the given BufferStore with a specified prefix.
@@ -678,7 +676,7 @@ pub fn loadBuffers(
 pub fn loadBuffersWithPrefix(
     comptime Model: type,
     init_args: if (@hasDecl(Model, "init")) stdx.meta.Tail(stdx.meta.FnArgs(Model.init)) else void,
-    buffer_store: BufferStore,
+    store: BufferStore,
     allocator: std.mem.Allocator,
     platform: zml.Platform,
     prefix: []const u8,
@@ -688,14 +686,14 @@ pub fn loadBuffersWithPrefix(
     const arena = arena_state.allocator();
 
     // Get model structure with tensor shapes from the buffer store with prefix
-    var model: Model = try zml.aio.populateModelWithPrefix(Model, arena, buffer_store, prefix);
+    var model: Model = try zml.aio.populateModelWithPrefix(Model, arena, store, prefix);
 
     // If the Model has a "init" function, call it with the given parameters.
     if (@hasDecl(Model, "init")) {
         @call(.auto, Model.init, .{&model} ++ init_args);
     }
 
-    return loadModelBuffersWithPrefix(Model, model, buffer_store, allocator, platform, prefix);
+    return loadModelBuffersWithPrefix(Model, model, store, allocator, platform, prefix);
 }
 
 /// Creates a bufferized version of a Model from the given BufferStore. For details about
@@ -707,11 +705,11 @@ pub fn loadBuffersWithPrefix(
 pub fn loadModelBuffers(
     comptime Model: type,
     model: Model,
-    buffer_store: BufferStore,
+    store: BufferStore,
     allocator: std.mem.Allocator,
     platform: zml.Platform,
 ) !zml.Bufferized(Model) {
-    return try loadModelBuffersWithPrefix(Model, model, buffer_store, allocator, platform, "");
+    return try loadModelBuffersWithPrefix(Model, model, store, allocator, platform, "");
 }
 
 /// Creates a bufferized version of a Model from the given BufferStore and the given prefix.
@@ -723,7 +721,7 @@ pub fn loadModelBuffers(
 pub fn loadModelBuffersWithPrefix(
     comptime Model: type,
     model: Model,
-    buffer_store: BufferStore,
+    store: BufferStore,
     allocator: std.mem.Allocator,
     platform: zml.Platform,
     prefix: []const u8,
@@ -742,7 +740,7 @@ pub fn loadModelBuffersWithPrefix(
     try prefix_builder.push(allocator, prefix);
     defer prefix_builder.deinit(allocator);
 
-    try visitStructAndLoadBuffer(allocator, &prefix_builder, buffer_store, &res, platform);
+    try visitStructAndLoadBuffer(allocator, &prefix_builder, store, &res, platform);
     return res;
 }
 
@@ -765,7 +763,7 @@ pub fn awaitAll(buffers: anytype) !void {
     }).cb, {}, buffers);
 }
 
-fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *PrefixBuilder, buffer_store: BufferStore, obj: anytype, platform: zml.Platform) !void {
+fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *PrefixBuilder, store: BufferStore, obj: anytype, platform: zml.Platform) !void {
     const err_msg = "visitStructAndLoadBuffer must be called with a pointer to type. Received ";
     const type_info, const T = switch (@typeInfo(@TypeOf(obj))) {
         .pointer => |ptr_info| switch (ptr_info.size) {
@@ -777,7 +775,7 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
 
     const prefix = prefix_builder.data.items;
     if (T == zml.Buffer) {
-        return if (buffer_store.get(prefix)) |host_buffer| {
+        return if (store.get(prefix)) |host_buffer| {
             // obj._shape has been set inside `loadModelBuffersWithPrefix`, before calling us.
             var buf_with_metadata = host_buffer;
             log.debug("Loading buffer {s} ({})", .{ prefix, obj._shape });
@@ -787,7 +785,7 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
         } else {
             log.err("Buffer not found: {s}", .{prefix});
 
-            buffer_store.findSimilarBufferKeys(allocator, prefix);
+            store.findSimilarBufferKeys(allocator, prefix);
 
             return error.BufferNotFound;
         };
@@ -800,7 +798,7 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
                     try prefix_builder.pushDigit(allocator, i);
                     defer prefix_builder.pop();
 
-                    try visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, value, platform);
+                    try visitStructAndLoadBuffer(allocator, prefix_builder, store, value, platform);
                 }
             } else stdx.debug.compileError("type not supported by visitStructAndLoadBuffer: {}", .{T});
         },
@@ -808,7 +806,7 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
             for (obj, 0..) |*value, i| {
                 try prefix_builder.pushDigit(allocator, i);
                 defer prefix_builder.pop();
-                try visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, value, platform);
+                try visitStructAndLoadBuffer(allocator, prefix_builder, store, value, platform);
             }
         },
 
@@ -818,12 +816,12 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
                 try prefix_builder.push(allocator, field.name);
                 defer prefix_builder.pop();
 
-                try visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, &@field(obj, field.name), platform);
+                try visitStructAndLoadBuffer(allocator, prefix_builder, store, &@field(obj, field.name), platform);
             }
         },
         .optional => {
             if (obj.*) |*obj_val| {
-                try visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, obj_val, platform);
+                try visitStructAndLoadBuffer(allocator, prefix_builder, store, obj_val, platform);
             }
         },
         else => {},
