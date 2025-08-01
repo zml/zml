@@ -32,7 +32,8 @@ pub fn detectFormatAndOpen(allocator: std.mem.Allocator, model_path: []const u8)
         // else if (std.mem.endsWith(u8, model_path, ".tinyllama"))
         //     try tinyllama.open(allocator, model_path)
     else {
-        std.debug.panic("File extension not recognized: {s}", .{model_path});
+        log.err("File extension not recognized: {s}", .{model_path});
+        return error.NotSupported;
     };
 }
 

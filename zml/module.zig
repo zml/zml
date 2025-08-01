@@ -234,7 +234,7 @@ pub const CompilationContext = struct {
             loaded_executable,
             .{
                 .input_shapes = f.args_shapes,
-                .result_shapes = f.res_shapes,
+                .output_shapes = f.res_shapes,
                 .n_devices = sharding.num_replicas * sharding.num_partitions,
             },
         );
