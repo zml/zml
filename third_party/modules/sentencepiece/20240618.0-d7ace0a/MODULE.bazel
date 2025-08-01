@@ -4,4 +4,4 @@ module(
     compatibility_level = 1,
 )
 
-bazel_dep(name = "rules_proto", version = "6.0.0-rc1")
+bazel_dep(name = "rules_proto", version = "7.1.0")

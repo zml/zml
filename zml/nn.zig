@@ -40,11 +40,221 @@ pub const TokenEmbedding = struct {
     weight: Tensor,
 
     pub fn forward(self: TokenEmbedding, idx: Tensor) Tensor {
-        stdx.debug.assert(idx.dtype().isInteger(), "TokenEmbedding expects an integer input, received: {}", .{idx});
-        stdx.debug.assert(self.weight.rank() == 2, "TokenEmbedding expects it's weight Tensor to be a 2D matrix, got {}", .{self.weight});
-        return self.weight.gatherValues(0, idx, .{});
+        stdx.debug.assert(idx.dtype().isInteger(), "TokenEmbedding expects an integer input, received: {f}", .{idx});
+        stdx.debug.assert(self.weight.rank() == 2, "TokenEmbedding expects it's weight Tensor to be a 2D matrix, got {f}", .{self.weight});
+        return self.weight.withTags(.{ .voc, .d }).gather(.{ .voc = idx }, .{});
     }
 };
+
+const MoeOpts = struct {
+    experts_per_token: u32,
+    tokens_per_expert_ratio: ?f32 = 0.0,
+};
+
+/// We have three algorithms,
+/// * one for single-stream inference (naive),
+/// * one for small batch sized with exact precision that sends all tokens to all experts.
+///   this isn't too costly as long as the batch size is small and the experts are IO bound.
+/// * one for big batch size that assign a fixed compute budget per expert and
+/// experts chose the tokens they want to handle. This introduces noise since it's possible
+/// a token doesn't get their requested expert.
+///   The parameter `tokens_per_expert_ratio` control how much compute budget is granted:
+///   expert_budget = ratio * (num_tokens * experts_per_token / num_experts).
+///   Bigger values of ratio will ensure it's rare a token doesn't get it's top 2 tokens.
+///
+/// The preferred algorithm is the batched one,
+/// it is selected as soon there is enough tokens to guarantee that experts will be active most of the time.
+///
+/// - input: .{ .s, .d } per-entry vector
+/// - gating: .{ .s, .expert } per-entry expert-affinity
+/// - experts: .{ .expert, .d_out, .d } expert layer (need to have a .forward method).
+/// -> output: .{ .s, .d_out }
+pub fn mixtureOfExperts(Expert: type, experts: Expert, input: Tensor, gating: Tensor, opts: MoeOpts) Tensor {
+    log.warn("mixtureOfExperts({s}, {}, {f}, {f})", .{ @typeName(Expert), experts, input, gating });
+    const num_tokens = input.dim(.s);
+    const num_experts = gating.dim(.expert);
+    stdx.debug.assert(opts.experts_per_token > 0, "mixtureOfExperts expects opts.experts_per_token > 0, got {}", .{opts});
+
+    if (num_tokens == 1) {
+        // Only one tokens: most experts are unused.
+        // select active experts and compute with that.
+        const routing = gating.topK(.{ .top_expert = .expert }, opts.experts_per_token, .{});
+        const per_token_score = routing.values.div(routing.values.sum(.top_expert));
+
+        var output: ?Tensor = null;
+        for (0..opts.experts_per_token) |expert_rank| {
+            const expert_id = routing.indices.choose(.{ .top_expert = expert_rank }).asScalar();
+            const expert_score = per_token_score.choose(.{ .top_expert = expert_rank }).asScalar();
+
+            var sliced_expert: Expert = undefined;
+            zml.meta.mapAlloc(struct {
+                pub fn cb(expert_id_: Tensor, expert_weight: Tensor) Tensor {
+                    return expert_weight.gather(.{ .expert = expert_id_ }, .{});
+                }
+            }.cb, stdx.noalloc, expert_id, experts, &sliced_expert) catch unreachable;
+
+            // TODO how does this work when the two experts are on different gpus?
+            // does the compute overlap ?
+            const expert_output = sliced_expert.forward(input).mul(expert_score.convert(input.dtype()));
+            output = if (output) |o| o.add(expert_output) else expert_output;
+        }
+
+        log.debug("mixtureOfExperts({s}, {}, {f}, {f}) -> single-stream impl", .{ @typeName(Expert), experts, input, gating });
+        return output.?;
+    }
+
+    const tokens_per_expert: u32 = if (opts.tokens_per_expert_ratio) |ratio| tpe: {
+        const compute_budget = ratio * @as(f32, @floatFromInt(num_tokens * opts.experts_per_token));
+        var tpe: u32 = @intFromFloat(stdx.math.divFloat(f32, compute_budget, num_experts));
+        // Round to next multiple of 8 to avoid weird shapes.
+        tpe = tpe + 8 - (tpe % 8);
+        break :tpe tpe;
+    } else num_tokens;
+
+    if (3 * tokens_per_expert <= 2 * num_tokens) {
+        // Lot of tokens, each experts chose their tokens and compute on that.
+        // It means that some tokens may have only one expert assigned.
+        // Each token will get assigned to at least one expert IIF the input gating is sums up to 1 (typically softmax output).
+        const token_pref = gating.argsort(.expert, .{ .descending = true });
+        var expert_rank: zml.Tensor = .scatterSlices(
+            .zeros(gating.shape().withDtype(.i32)),
+            .{ .expert = token_pref },
+            .addConstant(.iota(gating.shape(), .expert), 1),
+            .{ .indices_are_unique = true },
+        );
+        // The pow(expert_rank) here means that we strongly favor top 1 over top 2 and top 2 over top 3.
+        // expert_routing: (expert, top_token) -> token
+        const expert_routing = gating.pow(expert_rank.convert(gating.dtype())).topK(.{ .top_token = .s }, tokens_per_expert, .{});
+        const scores_per_expert = gating.gather(.{ .s = expert_routing.indices }, .{});
+
+        // Update the gating coefficient to account for the expert routing.
+        // Each (token, expert) which can't be computed within the given budget is left to 0.
+        const gating_v2: zml.Tensor = .scatterSlices(
+            .zeros(gating.shape()),
+            .{ .s = expert_routing.indices },
+            scores_per_expert,
+            .{ .indices_are_unique = true, .update_fn = Tensor.ScatterOpts.override },
+        );
+        // Now set to zero the scores (token, expert) for tokens that have been assigned more than experts_per_token.
+        const lowest_experts = gating_v2.topK(.{ .top_expert = .expert }, num_experts - opts.experts_per_token, .{ .descending = false });
+        var gating_v3: zml.Tensor = .scatterSlices(
+            gating_v2,
+            .{ .expert = lowest_experts.indices },
+            .zeros(lowest_experts.values.shape()),
+            .{ .indices_are_unique = true, .update_fn = Tensor.ScatterOpts.override },
+        );
+        // Then normalize so the sum of experts scores for one token sums up to 1.
+        gating_v3 = gating_v3.div(gating_v3.sum(.expert));
+        // Recompute scores_per_expert using the updated gating.
+        const tokens_ids_per_expert = expert_routing.indices.transpose(.{ .expert, .top_token });
+        const scores_per_expert_v2 = gating_v3.gather(.{ .s = expert_routing.indices }, .{}).transpose(.{ .expert, .top_token });
+        const input_per_expert = input.gather(.{ .s = tokens_ids_per_expert }, .{});
+        var output_per_expert = experts.forward(input_per_expert);
+        output_per_expert = output_per_expert.mul(scores_per_expert_v2.convert(output_per_expert.dtype()).broad(output_per_expert.shape()));
+
+        // Reverse engineer the normal output shape that one expert would have produced for all tokens.
+        // If this fall short, we could use the "sliced_expert" strategy and call forward ourselves.
+        const output_shape = output_per_expert.shape().drop(.expert).rename(.{ .top_token = .s }).setDim(.s, num_tokens);
+        const output = zml.Tensor.scatterSlices(
+            .zeros(output_shape),
+            .{ .s = tokens_ids_per_expert },
+            output_per_expert,
+            .{ .update_fn = zml.Tensor.ScatterOpts.increment },
+        );
+
+        log.debug("mixtureOfExperts({s}, {}, {f}, {f}) -> fixed budget impl tpe: {d}, tokens: {d}", .{ @typeName(Expert), experts, input, gating, tokens_per_expert, num_tokens });
+        return output;
+    } else {
+        // We send all tokens to all experts, then discard result from non-topk experts using hard_gating.
+        const routing = gating.topK(.{ .top_expert = .expert }, opts.experts_per_token, .{});
+        const per_token_score = routing.values.div(routing.values.sum(.top_expert)).convert(input.dtype());
+
+        // hard_gating is eql to gating where only the top-2 experts have a non-zero score.
+        const hard_gating = zml.Tensor.scatterSlices(
+            .zeros(gating.shape()),
+            .{ .expert = routing.indices },
+            per_token_score,
+            .{ .indices_are_unique = true },
+        ).withSharding(.{.expert});
+        log.debug("mixtureOfExperts({s}, {}, {f}, {f}) -> all to all impl", .{ @typeName(Expert), experts, input, gating });
+        const output_per_expert = experts.forward(input);
+        return output_per_expert.dot(hard_gating.convert(input.dtype()), .expert);
+    }
+}
+
+test mixtureOfExperts {
+    const asynk = @import("async");
+
+    const Expert = struct {
+        weight: Tensor,
+
+        pub fn forward(self: @This(), x: zml.Tensor) zml.Tensor {
+            // I'm always dumb founded by the weird output layout of `dot`.
+            return self.weight.dot(x, .{.d}).rename(.{ .d_out = .d }).contiguous(.{.d});
+        }
+    };
+
+    const MoE = struct {
+        router: Linear,
+        experts: Expert,
+
+        pub fn forward(self: @This(), x: zml.Tensor) zml.Tensor {
+            const routing = self.router.forward(x).convert(.f32).softmax(.expert);
+            return mixtureOfExperts(Expert, self.experts, x, routing, .{ .experts_per_token = 2, .tokens_per_expert_ratio = 2 });
+        }
+    };
+
+    const platform = zml.testing.env();
+    const store = zml.aio.detectFormatAndOpen(std.testing.allocator, "zml/test_data/moe.activations.pt") catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+    defer store.deinit();
+
+    var model_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer model_arena.deinit();
+    var moe_model = try zml.aio.populateModel(MoE, model_arena.allocator(), store);
+    moe_model.router.weight = moe_model.router.weight.withTags(.{ .expert, .d });
+    moe_model.experts.weight = moe_model.experts.weight.withTags(.{ .expert, .d_out, .d });
+
+    var compilation_prefill = try asynk.asyncc(zml.compileModel, .{
+        std.testing.allocator,
+        MoE.forward,
+        moe_model,
+        .{zml.Shape.init(.{ .s = 24, .d = 64 }, .bf16)},
+        platform,
+    });
+    var compilation_gen = try asynk.asyncc(zml.compileModel, .{
+        std.testing.allocator,
+        MoE.forward,
+        moe_model,
+        .{zml.Shape.init(.{ .s = 1, .d = 64 }, .bf16)},
+        platform,
+    });
+
+    var moe_weights = try zml.aio.loadModelBuffers(MoE, moe_model, store, std.testing.allocator, platform);
+    defer zml.aio.unloadBuffers(&moe_weights);
+
+    {
+        const moe_prefill = (try compilation_prefill.awaitt()).prepare(moe_weights);
+        defer moe_prefill.deinit();
+
+        const x = try store.get("in").?.toDevice(platform);
+        const actual = moe_prefill.call(.{x});
+
+        try zml.testing.expectClose(store.get("out").?, actual, 5e-2);
+    }
+
+    {
+        const moe_gen = (try compilation_gen.awaitt()).prepare(moe_weights);
+        defer moe_gen.deinit();
+
+        const x = try store.get("in").?.slice1d(0, .{ .start = 12, .end = 13 }).toDevice(platform);
+        const actual = moe_gen.call(.{x});
+
+        try zml.testing.expectClose(store.get("out").?.slice1d(0, .{ .start = 12, .end = 13 }), actual, 5e-2);
+    }
+}
 
 pub const Activation = union(enum) {
     sigmoid,
@@ -135,7 +345,7 @@ pub fn normalizeVariance(x: Tensor, eps: f32) Tensor {
 // ref: https://pytorch.org/docs/stable/generated/torch.nn.functional.normalize.html
 // Implementation equivalent to `nn.functional.normalize(tensor, dim=-1)` call
 pub fn normalizeL2(input: Tensor, eps: f32) Tensor {
-    const inv_norm = input.pow(Tensor.scalar(2, input.dtype())).sum(-1).addConstant(eps).rsqrt();
+    const inv_norm = input.powByConst(2).sum(-1).addConstant(eps).rsqrt();
     return input.mul(inv_norm.broad(input.shape()));
 }
 
@@ -187,7 +397,7 @@ pub const RopeOpts = struct {
                 // Note: leaky is fine here cause Llama3 struct don't need to allocate memory.
                 return .{ .llama3 = try std.json.parseFromValueLeaky(Llama3, undefined, content, .{ .ignore_unknown_fields = true }) };
             } else {
-                log.warn("Unsupported Rope implementation: {s}, will use the default one which will produce altered results", .{impl.string});
+                // log.warn("Unsupported Rope implementation: {s}, will use the default one which will produce altered results", .{impl.string});
                 return .{ .default = {} };
             }
         }
@@ -250,7 +460,7 @@ pub fn mergeRealImg(x_real: Tensor, x_imag: Tensor, layout: RopeOpts.Layout) Ten
         .interleaved => Tensor.concatenate(&.{
             x_real.appendAxes(.{.interleaved_real_img}),
             x_imag.appendAxes(.{.interleaved_real_img}),
-        }, -1).flatten(-2),
+        }, -1).reshape(x_imag.shape().setDim(-1, -1)),
     };
 }
 
@@ -332,8 +542,8 @@ test "real/img" {
             const real, const imag = splitRealImg(x, layout);
             const y = mergeRealImg(real, imag, layout);
             const real2, const imag2 = splitRealImg(y, layout);
-            return real.cmp(.EQ, real2).flatten(0).convert(.i32).sum(-1).add(
-                imag.cmp(.EQ, imag2).flatten(0).convert(.i32).sum(-1),
+            return real.cmp(.EQ, real2).flatten().convert(.i32).sum(-1).add(
+                imag.cmp(.EQ, imag2).flatten().convert(.i32).sum(-1),
             );
         }
 
@@ -349,8 +559,8 @@ test "real/img" {
                 Tensor.arange(.{ .start = 3, .end = 20, .step = 4 }, .f32).reshape(.{ 5, 1 }),
             }, 1);
 
-            return real.cmp(.EQ, x_real).flatten(0).convert(.i32).sum(-1).add(
-                imag.cmp(.EQ, x_imag).flatten(0).convert(.i32).sum(-1),
+            return real.cmp(.EQ, x_real).flatten().convert(.i32).sum(-1).add(
+                imag.cmp(.EQ, x_imag).flatten().convert(.i32).sum(-1),
             );
         }
 
@@ -366,8 +576,8 @@ test "real/img" {
                 Tensor.arange(.{ .start = 3, .end = 20, .step = 4 }, .f32).reshape(.{ 5, 1 }),
             }, 1);
 
-            return real.cmp(.EQ, x_real).flatten(0).convert(.i32).sum(-1).add(
-                imag.cmp(.EQ, x_imag).flatten(0).convert(.i32).sum(-1),
+            return real.cmp(.EQ, x_real).flatten().convert(.i32).sum(-1).add(
+                imag.cmp(.EQ, x_imag).flatten().convert(.i32).sum(-1),
             );
         }
 
@@ -377,8 +587,8 @@ test "real/img" {
             const x_real = Tensor.arange(.{ .start = 0, .end = 20, .step = 2 }, .f32).reshape(.{ 5, 2 });
             const x_imag = Tensor.arange(.{ .start = 1, .end = 20, .step = 2 }, .f32).reshape(.{ 5, 2 });
 
-            return real.cmp(.EQ, x_real).flatten(0).convert(.i32).sum(-1).add(
-                imag.cmp(.EQ, x_imag).flatten(0).convert(.i32).sum(-1),
+            return real.cmp(.EQ, x_real).flatten().convert(.i32).sum(-1).add(
+                imag.cmp(.EQ, x_imag).flatten().convert(.i32).sum(-1),
             );
         }
     };
@@ -484,21 +694,21 @@ pub fn nearest(input: Tensor, scale_factor: []const f64) Tensor {
         out_shape._dims.set(i + 2, @intFromFloat(@floor(@as(f64, @floatFromInt(out_shape.dim(i + 2))) * sf)));
     }
     // TODO(james): remove this implicit two batching dims
-    var sd: [3]usize = undefined;
+    var sd: [3]u3 = undefined;
     var len_sd: usize = 0;
     for (2..input.rank()) |i| {
         if (input.dim(i) != out_shape.dim(i)) {
-            sd[len_sd] = i;
+            sd[len_sd] = @intCast(i);
             len_sd += 1;
         }
     }
-    const spatial_dims = sd[0..len_sd];
+    const spatial_axes = sd[0..len_sd];
     var res = input;
-    for (spatial_dims) |d| {
-        const n = out_shape.dim(d);
-        const ratio = stdx.math.divFloat(f32, input.dim(d), n);
+    for (spatial_axes) |ax| {
+        const n = out_shape.dim(ax);
+        const ratio = stdx.math.divFloat(f32, input.dim(ax), n);
         const offsets = Tensor.arange(.{ .end = n }, .f32).addConstant(0.5).scale(ratio).floor().convert(.i32);
-        res = res.gatherValues(d, offsets, .{ .indices_are_sorted = true });
+        res = res.gather_(&.{ax}, &.{offsets}, .{ .indices_are_sorted = true });
     }
     return res;
 }
@@ -670,10 +880,11 @@ test resizeBilinear {
 }
 
 pub fn resizeLinear1d(image: Tensor, axis: i8, new_len: u63, opt: ResizeOpts) Tensor {
-    const res_shape = image.shape().set(axis, new_len);
+    const ax = image.axis(axis);
+    const res_shape = image.shape().set(ax, new_len);
 
     const dtype = opt.precision orelse if (image.dtype().class() == .integer) .f32 else image.dtype();
-    const og_len = opt.original_len orelse Tensor.scalar(image.dim(axis), dtype);
+    const og_len = opt.original_len orelse Tensor.scalar(image.dim(ax), dtype);
     const ratio = og_len.convert(dtype).scale(stdx.math.divFloat(f32, 1, new_len));
     const scaled = Tensor.arange(.{ .end = new_len }, dtype).mul(ratio);
     const left = scaled.floor();
@@ -682,11 +893,11 @@ pub fn resizeLinear1d(image: Tensor, axis: i8, new_len: u63, opt: ResizeOpts) Te
     // TODO: check that two gather isn't too bad perf wise.
     // Normally we should use gatherSlices to collect the values 2 by 2,
     // but gatherSlices messes up with the order of axes.
-    const left_val = image.gatherValues(axis, left.convert(.i32), .{ .indices_are_sorted = true }).convert(dtype);
-    const right_val = image.gatherValues(axis, right.convert(.i32), .{ .indices_are_sorted = true }).convert(dtype);
+    const left_val = image.gather_(&.{ax}, &.{left.convert(.i32)}, .{ .indices_are_sorted = true }).convert(dtype);
+    const right_val = image.gather_(&.{ax}, &.{right.convert(.i32)}, .{ .indices_are_sorted = true }).convert(dtype);
 
-    const left_weight = right.sub(scaled).broadcast(res_shape, &.{axis});
-    const right_weight = scaled.sub(left).broadcast(res_shape, &.{axis});
+    const left_weight = right.sub(scaled).broadcast(res_shape, &.{ax});
+    const right_weight = scaled.sub(left).broadcast(res_shape, &.{ax});
 
     const res = left_val.mul(left_weight).add(right_val.mul(right_weight));
     return res.convert(image.dtype()).withTags(image.shape().tags());
@@ -743,7 +954,7 @@ pub fn resizeCubic1d(image: Tensor, axis: i8, new_len: u63, opt: ResizeOpts) Ten
         Tensor.constant(t.shape(), dtype.one()),
         t,
         t.mul(t),
-        t.pow(Tensor.scalar(3, dtype)),
+        t.powByConst(3),
     }, .last, ._interpolated);
 
     std.debug.assert(pos.dim(0) == new_len);
@@ -853,13 +1064,10 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
         return cuda.sdpa(q, k, v, opts);
     }
 
-    if (q.dim(.h) != k.dim(.h)) {
-        stdx.debug.assert(@mod(q.dim(.h), k.dim(.h)) == 0, err_template ++ "Different number of heads for keys and queries, but can't repeat keys.", err_args);
-        // Note: we don't try to repeat queries.
-        // Repeating keys is the interesting optimisation cause it reduces KV cache memory usage.
-        const num_rep: u63 = @intCast(@divExact(q.dim(.h), k.dim(.h)));
-        k, v = .{ k.repeat1d(.h, num_rep), v.repeat1d(.h, num_rep) };
-    }
+    // Handle different numbers of head by splitting q heads.
+    // This is a bit error prone in the sense that it depends of the layout of q heads.
+    // This is the Llama convention though.
+    q = q.splitAxis(.h, .{ .h = k.dim(.h), .hq = .auto });
     const attn_mask = if (opts.attn_mask) |m| m else null;
 
     const dims = helpers.collectDims(.{ .h, .q, .k, .hd }, &.{ q, k, v, attn_mask }, .strict) catch {
@@ -875,339 +1083,7 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
     attn_weights = attn_weights.convert(.f32).softmax(.k).convert(q.dtype());
 
     var attn = attn_weights.dot(v, .{.k});
-    return attn.transpose(q.shape());
-}
-
-pub const SdpaChunks = struct { q_chunk_size: u32, k_chunk_size: u32 };
-
-pub fn sdpaMemEfficient(
-    q: Tensor,
-    k: Tensor,
-    v: Tensor,
-    sdpa_opts: SdpaOpts,
-    chunking: SdpaChunks,
-) Tensor {
-    const sdpa_mem_efficient: SdpaMemEfficient = .{
-        .q = q,
-        .k = k,
-        .v = v,
-        .sdpa_opts = sdpa_opts,
-        .chunking = .{
-            .q_chunk_size = @intCast(@min(q.dim(.q), chunking.q_chunk_size)),
-            .k_chunk_size = @intCast(@min(k.dim(.k), chunking.k_chunk_size)),
-        },
-    };
-
-    return sdpa_mem_efficient.forward();
-}
-
-const SdpaMemEfficient = struct {
-    q: Tensor,
-    k: Tensor,
-    v: Tensor,
-    sdpa_opts: SdpaOpts,
-    chunking: SdpaChunks,
-
-    fn forward(self: SdpaMemEfficient) Tensor {
-        stdx.debug.assert(@mod(self.q.dim(.q), self.chunking.q_chunk_size) == 0, "sdpaMemEfficient expects the chunk_size to exactly divise the seq_len, got: sdpaMemEfficient({}, {})", .{ self.q, self.chunking });
-        stdx.debug.assert(@mod(self.k.dim(.k), self.chunking.k_chunk_size) == 0, "sdpaMemEfficient expects the chunk_size to exactly divise the seq_len, got: sdpaMemEfficient({}, {})", .{ self.k, self.chunking });
-        const n_q_chunks: u32 = @intCast(@divExact(self.q.dim(.q), self.chunking.q_chunk_size));
-
-        const ctx = zml.module.CompilationContext.current();
-        const q_chunks = ctx.allocator().alloc(zml.Tensor, n_q_chunks) catch unreachable;
-        defer ctx.allocator().free(q_chunks);
-        for (0..n_q_chunks) |i| {
-            const idx: u32 = @intCast(i);
-            const q_slice: zml.Tensor.DynSlice = .{
-                .start = Tensor.scalar(idx * self.chunking.q_chunk_size, .i32),
-                .len = self.chunking.q_chunk_size,
-            };
-            const q_chunk = self.q.dynamicSlice(.{ .q = q_slice });
-            const attn_chunk = if (self.sdpa_opts.attn_mask) |attn_mask| attn_mask.dynamicSlice(.{ .q = q_slice }) else null;
-
-            var chunk: SdpaMemEfficient = self;
-            chunk.q = q_chunk;
-            chunk.sdpa_opts.attn_mask = attn_chunk;
-            q_chunks[i] = chunk.scanKeyVal();
-        }
-
-        const res = zml.Tensor.concatenate(q_chunks, .q);
-        return res.transpose(self.q.shape());
-    }
-
-    fn nextQueriesChunk(self: SdpaMemEfficient, idx: Tensor) Tensor {
-        const q_slice: zml.Tensor.DynSlice = .{
-            .start = idx.scale(self.chunking.q_chunk_size),
-            .len = self.chunking.q_chunk_size,
-        };
-        const q_chunk = self.q.dynamicSlice(.{ .q = q_slice });
-        const attn_chunk = if (self.sdpa_opts.attn_mask) |attn_mask| attn_mask.dynamicSlice(.{ .q = q_slice }) else null;
-
-        var chunk: SdpaMemEfficient = self;
-        chunk.q = q_chunk;
-        chunk.sdpa_opts.attn_mask = attn_chunk;
-        return chunk.scanKeyVal();
-    }
-
-    fn scanKeyVal(self: SdpaMemEfficient) Tensor {
-        const n_chunks = @divExact(self.k.dim(.k), self.chunking.k_chunk_size);
-        return if (n_chunks <= 4) {
-            // Unrolled version
-            var partial_softmax: ?PartialSoftmax = null;
-            for (0..@intCast(n_chunks)) |idx| {
-                const next = self.nextKeyValChunk(Tensor.scalar(idx, .i32));
-                partial_softmax = if (partial_softmax) |prev| prev.merge(next) else next;
-            }
-            return partial_softmax.?.finalize();
-        } else {
-            // stablehlo.while version
-            const partial_softmax, _ = zml.ops.while_(hasNextKeyValChunk, nextKeyValChunkMerge, self, .{ PartialSoftmax.zeros(self.q.shape(), .f32), Tensor.scalar(0, .i32) });
-            return partial_softmax.finalize();
-        };
-    }
-
-    fn nextKeyValChunkMerge(self: SdpaMemEfficient, prev: PartialSoftmax, idx: Tensor) struct { PartialSoftmax, Tensor } {
-        const next = self.nextKeyValChunk(idx);
-        return .{ prev.merge(next), idx.addConstant(1) };
-    }
-
-    fn nextKeyValChunk(self: SdpaMemEfficient, idx: Tensor) PartialSoftmax {
-        const k_slice: zml.Tensor.DynSlice = .{
-            .start = idx.scale(self.chunking.k_chunk_size),
-            .len = self.chunking.k_chunk_size,
-        };
-
-        const k_chunk = self.k.dynamicSlice(.{ .k = k_slice });
-        const v_chunk = self.v.dynamicSlice(.{ .k = k_slice });
-        const attn_chunk = if (self.sdpa_opts.attn_mask) |mask| mask.dynamicSlice(.{ .k = k_slice }) else null;
-
-        return sdpaChunk(self.q, k_chunk, v_chunk, .{ .attn_mask = attn_chunk });
-    }
-
-    pub fn hasNextKeyValChunk(self: SdpaMemEfficient, _: PartialSoftmax, idx: Tensor) zml.Tensor {
-        const n_chunks = @divExact(self.k.dim(.k), self.chunking.k_chunk_size);
-        return idx.cmp(.LT, Tensor.scalar(n_chunks, idx.dtype()));
-    }
-};
-
-pub const PartialSoftmax = struct {
-    values: Tensor,
-    exp_sum: Tensor,
-    max_value: Tensor,
-
-    pub fn zeros(q_shape: Shape, exp_sum_precision: DataType) PartialSoftmax {
-        return .{
-            .values = Tensor.constant(q_shape, q_shape.dtype().zero()),
-            .exp_sum = Tensor.constant(q_shape.setDim(.hd, 1), exp_sum_precision.zero()),
-            .max_value = Tensor.constant(q_shape.setDim(.hd, 1), q_shape.dtype().minValue()),
-        };
-    }
-
-    pub fn merge(self: PartialSoftmax, other: PartialSoftmax) PartialSoftmax {
-        // Rescale self and other using the new global_max.
-        const global_max = self.max_value.maximum(other.max_value);
-        const new_self = self.rescale(global_max);
-        const new_other = other.rescale(global_max);
-
-        // Now that self and other are using the same scale, we can just add them:
-        return .{
-            .max_value = global_max,
-            .values = new_self.values.add(new_other.values),
-            .exp_sum = new_self.exp_sum.add(new_other.exp_sum),
-        };
-    }
-
-    /// Update max_value and rescale attn and exp_sum accordingly.
-    pub fn rescale(self: PartialSoftmax, max_value: Tensor) PartialSoftmax {
-        const max_diff_exp = self.max_value.sub(max_value).exp();
-        const sum_dtype = self.exp_sum.dtype();
-        return .{
-            .max_value = max_value,
-            .values = self.values.mul(max_diff_exp.broad(self.values.shape())),
-            .exp_sum = self.exp_sum.mul(max_diff_exp.convert(sum_dtype)),
-        };
-    }
-
-    /// Divides the intermediary results by the exp_sum to get the proper attention values.
-    pub fn finalize(self: PartialSoftmax) Tensor {
-        return self.values.div(self.exp_sum.broad(self.values.shape()).convert(self.values.dtype()));
-    }
-};
-
-/// Compute softmax over a chunk.
-/// Returns intermediary results to allow aggregating later.
-pub fn partialSoftmax(self: Tensor, axis: anytype) PartialSoftmax {
-    const a = self.axis(axis);
-    const max_val = self.max(a).maximum(Tensor.scalar(-1e16, self.dtype()));
-    const out = self.sub(max_val.broad(self.shape())).exp();
-    return .{
-        .values = out,
-        .exp_sum = out.convert(.f32).sum(a),
-        .max_value = max_val,
-    };
-}
-
-/// Compute sdpa on a chunk, and computes a partial softmax.
-/// q: (B, H, Sq, H_dim) ⊙ k: (B, H, Sk, H_dim) -> qk: (B, H, Sq, Sk)
-pub fn sdpaChunk(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) PartialSoftmax {
-    // this is a dupe of sdpa, but return the PartialSoftmax instead of true Attn.
-    // Consider implementing sdpa from sdpaChunk.
-    var q, var k, var v = .{ q_, k_, v_ };
-
-    const err_template = "sdpa(q: {}, k: {}, v: {}, attn: {?}) is invalid ! ";
-    const err_args = .{ q, k, v, opts.attn_mask };
-    stdx.debug.assert(q.shape().hasTags(.{ .h, .q, .hd }), err_template ++ "q is missing tags {{.h, .q, .hd}}", err_args);
-    stdx.debug.assert(k.shape().hasTags(.{ .h, .k, .hd }), err_template ++ "k is missing tags {{.h, .k, .hd}}", err_args);
-    stdx.debug.assert(v.shape().hasTags(.{ .h, .k, .hd }), err_template ++ "v is missing tags {{.h, .k, .hd}}", err_args);
-
-    if (q.dim(.h) != k.dim(.h)) {
-        stdx.debug.assert(@mod(q.dim(.h), k.dim(.h)) == 0, err_template ++ "Different number of heads for keys and queries, but can't repeat keys.", err_args);
-        // Note: we don't try to repeat queries.
-        // Repeating keys is the interesting optimisation cause it reduces KV cache memory usage.
-        const num_rep: u63 = @intCast(@divExact(q.dim(.h), k.dim(.h)));
-        k, v = .{ k.repeat1d(.h, num_rep), v.repeat1d(.h, num_rep) };
-    }
-    const attn_mask = if (opts.attn_mask) |m| m else null;
-
-    const dims = helpers.collectDims(.{ .h, .q, .k, .hd }, &.{ q, k, v, attn_mask }, .strict) catch {
-        stdx.debug.panic(err_template ++ "Inputs have incompatible shapes.", err_args);
-    };
-    const sqrtHeadDim: f32 = 1.0 / std.math.sqrt(@as(f32, @floatFromInt(dims.hd)));
-    const head_scaling = if (opts.scale) |s| s else Tensor.scalar(sqrtHeadDim, k.dtype());
-    k = k.mul(head_scaling.convert(k.dtype()));
-
-    var attn_weights = q.dot(k, .{.hd});
-    // log.debug("attn_weights : {}", .{attn_weights});
-    // log.debug("attn_mask : {?}", .{attn_mask});
-    if (attn_mask) |mask| attn_weights = attn_weights.add(mask.broad(attn_weights.shape()));
-
-    const partial = partialSoftmax(attn_weights, .k);
-    const attn = partial.values.dot(v, .{.k}).transpose(q.shape());
-
-    return .{
-        .values = attn,
-        // The renaming is because the above dot projected values.k into .hd,
-        // do the same thing on the other tensors.
-        // This work because dot is a linear operation, and commutes with `PartialSoftmax.finalize`
-        .exp_sum = partial.exp_sum.rename(.{ .k = .hd }).transpose(attn.shape()),
-        .max_value = partial.max_value.rename(.{ .k = .hd }).transpose(attn.shape()),
-    };
-}
-
-test sdpaMemEfficient {
-    const platform = zml.testing.env();
-    const allocator = std.testing.allocator;
-
-    // Note we use small input vectors to have the tests run reasonably fast,
-    // but don't expect speed ups with this small sizes.
-    const rng = try zml.compileFn(allocator, Tensor.Rng.normal, .{ Shape.init(.{ 1, 10, 512, 64 }, .f32), .{ .mean = 0, .stddev = 1 } }, platform);
-    defer rng.deinit();
-
-    const rng_mask = try zml.compileFn(allocator, Tensor.Rng.normal, .{ Shape.init(.{ 512, 512 }, .f32), .{ .mean = 0, .stddev = 1 } }, platform);
-    defer rng_mask.deinit();
-
-    // Note: we pass void here, cause Rng.normal doesn't take any runtime inputs.
-    const q = rng.call({}).withTags(.{ .b, .h, .q, .hd });
-    const k = rng.call({}).withTags(.{ .b, .h, .k, .hd });
-    const v = rng.call({}).withTags(.{ .b, .h, .k, .hd });
-    const mask = rng_mask.call({}).withTags(.{ .q, .k });
-
-    const ref_res = try zml.testing.compileAndCall(
-        platform,
-        sdpa,
-        .{ q, k, v, .{ .attn_mask = mask, .scale = null } },
-    );
-    try std.testing.expectEqualSlices(i64, q.shape().dims(), ref_res.shape().dims());
-    {
-        // 4 k_chunks
-        const res = try zml.testing.compileAndCall(
-            platform,
-            sdpaMemEfficient,
-            .{
-                q,
-                k,
-                v,
-                .{ .attn_mask = mask, .scale = null },
-                .{ .q_chunk_size = 256, .k_chunk_size = @divExact(512, 4) },
-            },
-        );
-
-        try zml.testing.expectClose(ref_res, res, 2e-3);
-    }
-    {
-        // 16 k_chunks
-        const res = try zml.testing.compileAndCall(
-            platform,
-            sdpaMemEfficient,
-            .{
-                q,
-                k,
-                v,
-                .{ .attn_mask = mask, .scale = null },
-                .{ .q_chunk_size = 256, .k_chunk_size = @divExact(512, 16) },
-            },
-        );
-
-        try zml.testing.expectClose(ref_res, res, 2e-3);
-    }
-}
-
-test "sdpaMemEfficient transposed" {
-    const platform = zml.testing.env();
-    const allocator = std.testing.allocator;
-
-    // Note we use small input vectors to have the tests run reasonably fast,
-    // but don't expect speed ups with this small sizes.
-    const rng = try zml.compileFn(allocator, Tensor.Rng.normal, .{ Shape.init(.{ 1, 512, 10, 64 }, .f32), .{ .mean = 0, .stddev = 1 } }, platform);
-    defer rng.deinit();
-
-    const rng_mask = try zml.compileFn(allocator, Tensor.Rng.normal, .{ Shape.init(.{ 512, 512 }, .f32), .{ .mean = 0, .stddev = 1 } }, platform);
-    defer rng_mask.deinit();
-
-    // Note: we pass void here, cause Rng.normal doesn't take any runtime inputs.
-    const q = rng.call({}).withTags(.{ .b, .q, .h, .hd });
-    const k = rng.call({}).withTags(.{ .b, .k, .h, .hd });
-    const v = rng.call({}).withTags(.{ .b, .k, .h, .hd });
-    const mask = rng_mask.call({}).withTags(.{ .q, .k });
-
-    const ref_res = try zml.testing.compileAndCall(
-        platform,
-        sdpa,
-        .{ q, k, v, .{ .attn_mask = mask, .scale = null } },
-    );
-    try std.testing.expectEqualSlices(i64, q.shape().dims(), ref_res.shape().dims());
-
-    {
-        const res = try zml.testing.compileAndCall(
-            platform,
-            sdpaMemEfficient,
-            .{
-                q,
-                k,
-                v,
-                .{ .attn_mask = mask, .scale = null },
-                .{ .q_chunk_size = @divExact(512, 2), .k_chunk_size = @divExact(512, 4) },
-            },
-        );
-
-        try zml.testing.expectClose(ref_res, res, 1e-3);
-    }
-
-    {
-        const res = try zml.testing.compileAndCall(
-            platform,
-            sdpaMemEfficient,
-            .{
-                q,
-                k,
-                v,
-                .{ .attn_mask = mask, .scale = null },
-                .{ .q_chunk_size = 512, .k_chunk_size = @divExact(512, 4) },
-            },
-        );
-
-        try zml.testing.expectClose(ref_res, res, 1e-3);
-    }
+    return attn.transpose(q.shape()).merge(.{ .h = .{ .h, .hq } });
 }
 
 /// Options controlling generation. The default values correspond to greedy decoding.
@@ -1225,9 +1101,9 @@ pub fn sampleTokens(activations: Tensor, opts: SamplingStrategy, rng: Tensor.Rng
         return .{ next_tokens, rng };
     }
 
-    const topk = activations.topK(opts.topk, .voc, .{});
-    // After the topk, we don't have .voc values, anymore, only topk.
-    var x = topk.values.rename(.{ .voc = .topk });
+    const topk = activations.topK(.{ .topk = .voc }, opts.topk, .{});
+    // After the topk, we don't have .voc values, anymore, only .topk.
+    var x = topk.values;
     if (opts.temperature != 1.0) {
         x = x.scale(1 / opts.temperature);
     }
@@ -1242,7 +1118,7 @@ pub fn sampleTokens(activations: Tensor, opts: SamplingStrategy, rng: Tensor.Rng
 
     // topk_idx is indices into topk.values ! so in the range [0, topk]
     // Convert for the original indices from the full [0, voc] range.
-    const next_tokens = topk.indices.gatherValues(.voc, topk_idx.squeeze(.topk), .{});
+    const next_tokens = topk.indices.gather(.{ .topk = topk_idx.squeeze(.topk) }, .{});
     // log.debug("sampleTokens({}) -> {} -> {} -> {}", .{ activations, topk.indices, topk_idx, next_tokens });
     return .{ next_tokens, next_rng };
 }
@@ -1330,7 +1206,7 @@ pub fn sampleTokensDynamic(logits: Tensor, opts: DynamicSamplingStrategy, rng: T
     x = x.add(gumbel_noise);
 
     const topk_idx = x.argMax(.topk).indices;
-    const next_tokens = topk_indices.gatherValues(.voc, topk_idx.squeeze(.topk), .{});
+    const next_tokens = topk_indices.gather(.{ .voc = topk_idx.squeeze(.topk) }, .{});
     return .{ next_tokens, next_rng };
 }
 
@@ -1339,7 +1215,7 @@ fn fixupLogits(logits: Tensor, opts: DynamicSamplingStrategy) [2]Tensor {
 
     // First reduce the vocab size to a reasonable sub set of candidate.
     const full_topk = if (opts.max_top_k > 0)
-        logits.topK(opts.max_top_k, .voc, .{ .descending = true })
+        logits.topK(.{ .voc = .voc }, opts.max_top_k, .{ .descending = true })
     else
         logits.sort(.voc, .{ .descending = true });
 

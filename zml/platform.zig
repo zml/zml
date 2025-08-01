@@ -4,7 +4,9 @@ const runtimes = @import("runtimes");
 pub const Target = runtimes.Platform;
 const stdx = @import("stdx");
 
+const Buffer = @import("buffer.zig").Buffer;
 const pjrt = @import("pjrtx.zig");
+const Shape = @import("shape.zig").Shape;
 
 const log = std.log.scoped(.zml);
 
@@ -92,12 +94,14 @@ pub const Platform = struct {
     pub fn getProfiler(self: Platform, options: ?pjrt.Profiler.Options) pjrt.Profiler {
         return self.pjrt_client.getProfiler(self.pjrt_api, options orelse pjrt.Profiler.default_options);
     }
+
+    pub fn batchedTransfer(platform: Platform, allocator: std.mem.Allocator, shapes: []const Shape, memory: pjrt.Memory.Kind) !TransferManager {
+        return try TransferManager.init(allocator, platform, shapes, memory);
+    }
 };
 
 const _CreateOptions = struct {
-    // XLA CPU client doesn't read options
-    // https://github.com/openxla/xla/blob/42496a28c374bd35f493cc5dbde74805407245dc/xla/pjrt/c/pjrt_c_api_cpu_internal.cc#L33-L46
-    cpu: struct {} = .{},
+    cpu: Cpu = .{ .device_count = 4 },
 
     // bump memory fraction from XLA defaults of 75% to 90%.
     // Even on a 8GB GPU it should leave enough space for the Cuda driver
@@ -106,6 +110,14 @@ const _CreateOptions = struct {
     rocm: struct {} = .{},
     tpu: struct {} = .{},
     neuron: struct {} = .{},
+
+    pub const Cpu = struct {
+        device_count: u32,
+
+        fn writeNamedValues(self: Cpu, values: *std.ArrayListUnmanaged(pjrt.NamedValue)) void {
+            values.appendAssumeCapacity(pjrt.NamedValue.from("cpu_device_count", @as(i64, self.device_count)));
+        }
+    };
 
     pub const Cuda = struct {
         allocator: Allocator = .{ .bfc = .{} },
@@ -131,7 +143,7 @@ const _CreateOptions = struct {
             };
         };
 
-        pub fn writeNamedValues(self: Cuda, values: *std.ArrayListUnmanaged(pjrt.NamedValue)) void {
+        fn writeNamedValues(self: Cuda, values: *std.ArrayListUnmanaged(pjrt.NamedValue)) void {
             switch (self.allocator) {
                 .platform => {
                     values.appendAssumeCapacity(pjrt.NamedValue.fromString("allocator", "platform"));
@@ -155,6 +167,7 @@ const _CreateOptions = struct {
         var values = std.ArrayListUnmanaged(pjrt.NamedValue).fromOwnedSlice(out);
         values.shrinkRetainingCapacity(0);
         switch (target) {
+            .cpu => self.cpu.writeNamedValues(&values),
             .cuda => self.cuda.writeNamedValues(&values),
             inline else => |t| {
                 stdx.debug.assertComptime(@hasField(_CreateOptions, @tagName(t)), "zml.platform.CreateOptions doesn't list target {s}", .{@tagName(t)});
@@ -165,3 +178,117 @@ const _CreateOptions = struct {
         return values.items;
     }
 };
+
+/// Allows to create Buffer and incrementally populate them.
+pub const TransferManager = struct {
+    // TODO: Consider providing a shape oriented API.
+    // TODO: Handle replication. If target buffer is replicated transferData should handle calling the different devices.
+
+    num_devices: u16,
+    pjrt_api: *const pjrt.Api,
+
+    buffers: []Buffer,
+    managers: [*]*pjrt.AsyncHostToDeviceTransferManager,
+
+    const Layout = struct { []Buffer, []*pjrt.AsyncHostToDeviceTransferManager };
+
+    pub fn init(allocator: std.mem.Allocator, platform: Platform, shapes: []const Shape, memory: pjrt.Memory.Kind) !TransferManager {
+        const devices = platform.getDevices();
+        const num_devices = devices.len;
+        const num_partitions = platform.sharding().num_partitions;
+
+        const buffers, const managers = try stdx.mem.groupedAlloc(Layout, allocator, .{ shapes.len, num_devices });
+
+        const tmp_allocator = pjrtArgsTmpAllocator();
+        const specs = try tmp_allocator.alloc(pjrt.ShapeSpec, shapes.len);
+
+        for (specs, buffers, shapes) |*s, *b, shape| {
+            const sharding_ax: ?u3 = std.simd.firstTrue(shape._sharding_info);
+            if (sharding_ax) |ax| {
+                stdx.debug.assert(@rem(shape.dim(ax), num_partitions) == 0, "Buffer.from({f}) expects the sharding axis {d} to have a dimension divisble by the number of devices ({d}).", .{ shape, ax, num_partitions });
+            }
+
+            const device_shape = if (sharding_ax) |ax|
+                shape.setDim(ax, @divExact(shape.dim(ax), num_partitions))
+            else
+                shape;
+            s.* = .init(device_shape.dims(), pjrt.bufferTypeFromDtype(shape.dtype()));
+            b.* = .{ ._shape = shape, ._api = platform.pjrt_api, ._shards = .{ .len = num_devices } };
+        }
+
+        for (0..num_devices, devices, managers) |device_id, dev, *manager| {
+            const memories = try dev.addressableMemories(platform.pjrt_api);
+            var mem = memories[0];
+            for (memories) |m| {
+                if (m.kind(platform.pjrt_api) == memory) {
+                    mem = m;
+                    break;
+                }
+            }
+            const mgr = try platform.pjrt_client.createBuffersForAsyncHostToDevice(
+                platform.pjrt_api,
+                .{ .shape_specs = specs, .memory = mem, .device_layouts = null },
+            );
+            manager.* = mgr;
+
+            for (0.., buffers) |buffer_id, *b| {
+                b._shards.buffer[device_id] = mgr.retrieveBuffer(platform.pjrt_api, buffer_id) catch @panic("PJRT plugin internal error");
+            }
+        }
+
+        return .{
+            .num_devices = @intCast(num_devices),
+            .pjrt_api = platform.pjrt_api,
+            .managers = managers.ptr,
+            .buffers = buffers,
+        };
+    }
+
+    pub fn deinit(self: TransferManager, allocator: std.mem.Allocator) void {
+        const managers = self.managers[0..self.num_devices];
+        for (managers) |manager| {
+            manager.deinit(self.pjrt_api);
+        }
+        stdx.mem.groupedFree(Layout, allocator, .{ self.buffers, managers });
+    }
+
+    pub const Dest = struct { buffer_id: u32, device_id: u16, offset: u64 };
+
+    pub fn transferData(self: TransferManager, dst: Dest, data: []const u8, is_last_transfer: bool) *pjrt.Event {
+        std.debug.assert(dst.buffer_id < self.buffers.len);
+        std.debug.assert(dst.device_id < self.num_devices);
+        return self.managers[dst.device_id].transferData(self.pjrt_api, dst.buffer_id, data, @bitCast(dst.offset), is_last_transfer) catch @panic("PJRT plugin internal error");
+    }
+};
+
+threadlocal var _pjrt_args_allocator: std.heap.StackFallbackAllocator(4096) = .{
+    .buffer = undefined,
+    .fallback_allocator = std.testing.failing_allocator,
+    .fixed_buffer_allocator = undefined,
+};
+
+/// Returns a scratch allocator where memory allocated is only guaranteed to leave until the next PJRT api call.
+/// This allows to have a scratch pad to convert arguments types between ZML/PJRT without allocating.
+fn pjrtArgsTmpAllocator() std.mem.Allocator {
+    // TODO: consider storing _pjrt_args_allocator inside the Platform struct itself.
+    if (std.debug.runtime_safety) _pjrt_args_allocator.get_called = false;
+    return _pjrt_args_allocator.get();
+}
+
+test TransferManager {
+    const zml = @import("zml.zig");
+    const platform = zml.testing.env();
+
+    const transfer = try platform.batchedTransfer(std.testing.allocator, &.{.init(.{ 2, 5 }, .u32)}, .device);
+    defer transfer.deinit(std.testing.allocator);
+    const ev0 = transfer.transferData(.{ .buffer_id = 0, .device_id = 0, .offset = 0 }, std.mem.asBytes(&[_]u32{ 0, 1, 2, 3, 4 }), false);
+    const ev1 = transfer.transferData(.{ .buffer_id = 0, .device_id = 0, .offset = 5 * @sizeOf(u32) }, std.mem.asBytes(&[_]u32{ 5, 6, 7, 8, 9 }), true);
+    _ = ev0;
+    _ = ev1;
+    const x = transfer.buffers[0];
+
+    try std.testing.expectEqual([2][5]u32{
+        .{ 0, 1, 2, 3, 4 },
+        .{ 5, 6, 7, 8, 9 },
+    }, x.getValue([2][5]u32));
+}

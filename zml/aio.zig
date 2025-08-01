@@ -5,15 +5,15 @@ const c = @import("c");
 const stdx = @import("stdx");
 
 pub const gguf = @import("aio/gguf.zig");
-// pub const nemo = @import("aio/nemo.zig");
 pub const safetensors = @import("aio/safetensors.zig");
 pub const tinyllama = @import("aio/tinyllama.zig");
 pub const torch = @import("aio/torch.zig");
-// pub const yaml = @import("aio/yaml.zig");
 const HostBuffer = @import("hostbuffer.zig").HostBuffer;
 const posix = @import("posix.zig");
 const zml = @import("zml.zig");
 
+// pub const nemo = @import("aio/nemo.zig");
+// pub const yaml = @import("aio/yaml.zig");
 pub const log = std.log.scoped(.@"zml/aio");
 test {
     std.testing.refAllDecls(@This());
@@ -50,8 +50,8 @@ pub fn detectFormatAndOpen(allocator: std.mem.Allocator, model_path: []const u8)
 /// whose shape is read from the "a.b" tensor.
 /// * If `Model` contains a list of layers, then the field:
 /// `Model.layers[2].a.b` will be populated from the "layers.2.a.b" tensor.
-pub fn populateModel(comptime Model: type, allocator: std.mem.Allocator, buffer_store: BufferStore) !Model {
-    return populateModelWithPrefix(Model, allocator, buffer_store, "");
+pub fn populateModel(comptime Model: type, allocator: std.mem.Allocator, store: BufferStore) !Model {
+    return populateModelWithPrefix(Model, allocator, store, "");
 }
 
 /// Creates a Model struct with tensor shapes read from the given TensorStore,
@@ -69,8 +69,7 @@ pub fn populateModelWithPrefix(comptime Model: type, allocator: std.mem.Allocato
     try prefix_builder.push(allocator, prefix);
     defer prefix_builder.deinit(allocator);
 
-    const unique_id = zml.Tensor._reserveIdRange(@intCast(store.buffers.count()));
-    const ok = _populateStruct(allocator, &prefix_builder, unique_id, store, &model, true) catch |err| {
+    const ok = _populateStruct(allocator, &prefix_builder, store, &model, true) catch |err| {
         std.debug.panic("Can't populate model of type {s}: {s}", .{ @typeName(type), @errorName(err) });
     };
     if (!ok) return error.TensorNotFound;
@@ -81,17 +80,28 @@ pub fn populateModelWithPrefix(comptime Model: type, allocator: std.mem.Allocato
 pub const BufferStore = struct {
     pub const Buffers = std.StringArrayHashMapUnmanaged(HostBuffer);
     pub const Metadatas = std.StringArrayHashMapUnmanaged(Metadata);
+    var _unique_store_id: std.atomic.Value(u64) = .init(0);
+    const _store_id_range: u64 = 1024 * 1024 * 1024;
 
     arena: std.heap.ArenaAllocator,
     files: []MemoryMappedFile = &.{},
     buffers: Buffers = .{},
     _metadata: Metadatas = .{},
+    _unique_id: u64,
 
-    /// Create an empty BufferStore. Takes owneship of the given files.
-    pub fn init(allocator: std.mem.Allocator, files: []const MemoryMappedFile) error{OutOfMemory}!BufferStore {
-        var self: zml.aio.BufferStore = .{
+    /// Create an empty BufferStore.
+    /// Takes owneship of the given files.
+    pub fn init(allocator: std.mem.Allocator) BufferStore {
+        return .{
             .arena = std.heap.ArenaAllocator.init(allocator),
+            ._unique_id = _unique_store_id.fetchAdd(_store_id_range, .monotonic),
         };
+    }
+
+    /// Create an empty BufferStore.
+    /// Takes owneship of the given files.
+    pub fn initWithFiles(allocator: std.mem.Allocator, files: []const MemoryMappedFile) error{OutOfMemory}!BufferStore {
+        var self: BufferStore = .init(allocator);
         self.files = try self.arena.allocator().dupe(MemoryMappedFile, files);
         return self;
     }
@@ -105,6 +115,61 @@ pub const BufferStore = struct {
 
     pub fn get(self: BufferStore, key: []const u8) ?HostBuffer {
         return self.buffers.get(key);
+    }
+
+    pub fn loadBufferById(self: BufferStore, x: zml.Tensor, platform: zml.Platform) !zml.Buffer {
+        var host_buffer: zml.HostBuffer = switch (x._id) {
+            .buffer_id => |id| hb: {
+                if (id < self._unique_id or self._unique_id + _store_id_range <= id) {
+                    @panic("`store.loadBufferById()` only works on Tensor created by `store.getTensor()`, using the same store object.");
+                }
+                break :hb self.buffers.values()[id - self._unique_id];
+            },
+            else => @panic("`store.loadBufferById()` only works on Tensor created by `store.getTensor()`"),
+        };
+
+        stdx.debug.assert(x.shape().eql(host_buffer.shape()), "Can't load buffer {f} for tensor {f}: shape mismatch", .{ host_buffer, x });
+        // Copy sharding info
+        host_buffer._shape = x._shape;
+        return try host_buffer.toDevice(platform);
+    }
+
+    /// Creates a bufferized version of a model from the given BufferStore.
+    ///
+    /// This will represent the weights of the model, loaded on a specific platform.
+    /// It can be used with a `module.Exe` (a compiled version of the same Model), to make a
+    /// `module.ExeWithWeights` ready to be called.
+    pub fn loadModelById(self: BufferStore, Model: type, allocator: std.mem.Allocator, model: Model, platform: zml.Platform) !zml.Bufferized(Model) {
+        const Ctx = struct {
+            platform: *const zml.Platform,
+            store: *const BufferStore,
+
+            pub fn cb(ctx: @This(), x: zml.Tensor) zml.Buffer {
+                return ctx.store.loadBufferById(x, ctx.platform.*) catch @panic("Failed to load buffer to device");
+            }
+        };
+
+        var res: zml.Bufferized(Model) = undefined;
+        try zml.meta.mapAlloc(Ctx.cb, allocator, .{ .platform = &platform, .store = &self }, model, &res);
+        return res;
+    }
+
+    pub fn getTensor(self: BufferStore, key: []const u8) zml.Tensor {
+        return self.getTensorOrNull(key) orelse {
+            self.findSimilarBufferKeys(std.heap.smp_allocator, key);
+            @panic("Tensor not found");
+        };
+    }
+
+    pub fn getTensorOrNull(self: BufferStore, key: []const u8) ?zml.Tensor {
+        return if (self.buffers.getIndex(key)) |entry_idx|
+            .{
+                ._shape = self.buffers.values()[entry_idx].shape(),
+                ._id = .{ .buffer_id = self._unique_id + entry_idx },
+                ._donation = .input_buffer,
+            }
+        else
+            return null;
     }
 
     /// Count layers starting with the given prefix.
@@ -146,6 +211,58 @@ pub const BufferStore = struct {
         }
 
         return null;
+    }
+
+    /// Assists in debuggigng `BufferNotFound` error
+    /// This is useful when a buffer key is not found and you want to identify possible alternatives (or typos)
+    pub fn findSimilarBufferKeys(store: BufferStore, tmp_alloc: std.mem.Allocator, original_key: []const u8) void {
+        const suffixes = [_][]const u8{ "", ".weight", ".bias" };
+        var shown_keys = std.StringHashMap(void).init(tmp_alloc);
+        defer shown_keys.deinit();
+
+        // remove suffix .weight and .bias
+        var base_key = original_key;
+        for (suffixes) |suffix| {
+            if (std.mem.endsWith(u8, original_key, suffix)) {
+                base_key = original_key[0 .. original_key.len - suffix.len];
+                break;
+            }
+        }
+
+        // first test: look for exact matches
+        var matches: usize = 0;
+        var it = store.buffers.iterator();
+        while (it.next()) |entry| {
+            const key = entry.key_ptr.*;
+            if (std.mem.startsWith(u8, key, base_key)) {
+                if (matches == 0) log.warn("Similar buffers found:", .{});
+                if (!shown_keys.contains(key)) {
+                    log.warn("  - {s}: {}", .{ key, entry.value_ptr.*.shape() });
+                    shown_keys.put(key, {}) catch continue;
+                    matches += 1;
+                }
+            }
+        }
+
+        // second test: progressive partial matches
+        if (matches == 0) {
+            var components = std.mem.splitScalar(u8, base_key, '.');
+            while (components.next()) |component| {
+                matches = 0;
+                it = store.buffers.iterator();
+                while (it.next()) |entry| {
+                    const key = entry.key_ptr.*;
+                    if (std.mem.indexOf(u8, key, component) != null and !shown_keys.contains(key)) {
+                        if (matches == 0) log.warn("Partial matches for '{s}':", .{component});
+                        log.warn("  - {s}: {}", .{ key, entry.value_ptr.*.shape() });
+                        shown_keys.put(key, {}) catch continue;
+                        matches += 1;
+                        if (matches >= 5) break;
+                    }
+                }
+                if (matches > 0) break;
+            }
+        }
     }
 };
 
@@ -267,15 +384,34 @@ pub const MemoryMappedFile = struct {
 /// Helper handling prefix building.
 ///
 /// This allows to easily push/pop prefixes and handles the generation of the string with the correct format.
-const PrefixBuilder = struct {
+pub const PrefixBuilder = struct {
     /// Stores the computed prefix.
     data: std.ArrayListUnmanaged(u8) = .{},
     /// Stack storing the size of the intermediary prefix.
     subprefixes: std.ArrayListUnmanaged(u32) = .{},
 
+    pub fn initCapacity(allocator: std.mem.Allocator, capacity: usize) !PrefixBuilder {
+        const data, const subprefixes = try stdx.mem.groupedAlloc(struct { []u8, []u32 }, allocator, .{ capacity, @divFloor(capacity, 4) });
+        return .{
+            .data = .initBuffer(data),
+            .subprefixes = .initBuffer(subprefixes),
+        };
+    }
+
     pub fn deinit(self: *PrefixBuilder, allocator: std.mem.Allocator) void {
         self.data.deinit(allocator);
         self.subprefixes.deinit(allocator);
+    }
+
+    pub fn items(self: PrefixBuilder) []const u8 {
+        return self.data.items;
+    }
+
+    pub fn concat(self: *PrefixBuilder, prefix: []const u8) []const u8 {
+        self.push(stdx.noalloc, prefix) catch unreachable;
+        const res = self.items();
+        self.pop();
+        return res;
     }
 
     pub fn push(self: *PrefixBuilder, allocator: std.mem.Allocator, prefix: []const u8) !void {
@@ -308,13 +444,20 @@ const PrefixBuilder = struct {
         const last_prefix_len = self.subprefixes.pop() orelse unreachable;
         self.data.shrinkRetainingCapacity(last_prefix_len);
     }
+
+    pub fn checkpoint(self: PrefixBuilder) [2]usize {
+        return .{ self.data.items.len, self.subprefixes.items.len };
+    }
+
+    pub fn restore(self: *PrefixBuilder, ckpt: [2]usize) void {
+        self.data.items.len, self.subprefixes.items.len = ckpt;
+    }
 };
 
 fn _populateStruct(
     allocator: std.mem.Allocator,
     prefix_builder: *PrefixBuilder,
-    unique_id: u64,
-    buffer_store: BufferStore,
+    store: BufferStore,
     obj: anytype,
     required: bool,
 ) !bool {
@@ -329,35 +472,32 @@ fn _populateStruct(
 
     const prefix = prefix_builder.data.items;
     if (T == zml.Tensor) {
-        return if (buffer_store.buffers.getIndex(prefix)) |entry_idx| {
-            const buffer = buffer_store.get(prefix).?;
-            obj.* = zml.Tensor{
-                ._shape = buffer.shape(),
-                ._id = .{ .buffer_id = unique_id + entry_idx },
-                ._donation = .input_buffer,
-            };
+        return if (store.getTensorOrNull(prefix)) |tensor| {
+            obj.* = tensor;
             return true;
         } else {
             if (required) {
-                log.err("Tensor not found: {s} ({d})", .{ prefix, buffer_store.buffers.count() });
+                log.err("Tensor not found: {s} ({d})", .{ prefix, store.buffers.count() });
             }
             return false;
         };
     }
+    log.debug("Populating {s} ({s})", .{ prefix, @typeName(T) });
 
     return switch (type_info) {
         .pointer => |ptr_info| {
             if (ptr_info.size == .slice) {
                 obj.* = &.{};
 
-                const len = buffer_store.countLayers(prefix);
+                if (!zml.meta.Contains(ptr_info.child, zml.Tensor)) return false;
+                const len = store.countLayers(prefix);
                 if (len > 0) {
                     obj.* = try allocator.alloc(ptr_info.child, len);
 
                     for (obj.*, 0..) |*value, i| {
                         try prefix_builder.pushDigit(allocator, i);
                         defer prefix_builder.pop();
-                        const found = try _populateStruct(allocator, prefix_builder, unique_id, buffer_store, value, required);
+                        const found = try _populateStruct(allocator, prefix_builder, store, value, required);
                         if (!found) {
                             log.err("Not able to load {s} as {s}", .{ prefix_builder.data.items, @typeName(ptr_info.child) });
                             return false;
@@ -376,7 +516,7 @@ fn _populateStruct(
             for (obj, 0..) |*value, i| {
                 try prefix_builder.pushDigit(allocator, i);
                 defer prefix_builder.pop();
-                const found = try _populateStruct(allocator, prefix_builder, unique_id, buffer_store, value, required);
+                const found = try _populateStruct(allocator, prefix_builder, store, value, required);
                 if (!found) {
                     log.err("Not able to load {s} as {s}", .{ prefix_builder.data.items, @typeName(arr_info.child) });
                     return false;
@@ -393,19 +533,25 @@ fn _populateStruct(
 
                 var has_default = false;
                 if (field.default_value_ptr) |_| has_default = true;
-                const field_found = try _populateStruct(allocator, prefix_builder, unique_id, buffer_store, &@field(obj, field.name), required and !has_default);
-                partial_struct = partial_struct or field_found;
-                if (!field_found) {
-                    if (field.default_value_ptr) |v| {
-                        @field(obj, field.name) = @as(*const field.type, @alignCast(@ptrCast(v))).*;
-                    } else {
-                        if (partial_struct) {
-                            log.warn("Incomplete metadata '{0s}': {1s}. Missing field: '{2s}'. '{0s}' will be ignored.", .{ prefix, @typeName(T), field.name });
-                            obj.* = undefined;
+
+                if (zml.meta.Contains(field.type, zml.Tensor)) {
+                    const field_found = try _populateStruct(allocator, prefix_builder, store, &@field(obj, field.name), required and !has_default);
+                    partial_struct = partial_struct or field_found;
+                    if (!field_found) {
+                        if (field.default_value_ptr) |v| {
+                            @field(obj, field.name) = @as(*const field.type, @alignCast(@ptrCast(v))).*;
+                        } else {
+                            if (partial_struct) {
+                                log.warn("Incomplete struct '{0s}': {1s}. Missing field: '{2s}'. '{0s}' will be ignored.", .{ prefix, @typeName(T), field.name });
+                                // if (required) {
+                                //     findSimilarBufferKeys(prefix, store, allocator);
+                                // }
+                                obj.* = undefined;
+                                return false;
+                            }
+
                             return false;
                         }
-
-                        return false;
                     }
                 }
             }
@@ -413,7 +559,7 @@ fn _populateStruct(
         },
         .optional => |opt_info| {
             obj.* = @as(opt_info.child, undefined);
-            const found = try _populateStruct(allocator, prefix_builder, unique_id, buffer_store, &(obj.*.?), false);
+            const found = try _populateStruct(allocator, prefix_builder, store, &(obj.*.?), false);
             if (!found) obj.* = null;
             return true;
         },
@@ -422,11 +568,22 @@ fn _populateStruct(
             return true;
         },
         .float => {
-            obj.* = std.math.nan(@TypeOf(obj.*));
+            // obj.* = std.math.nan(@TypeOf(obj.*));
             return true;
         },
         .void => true,
-        .@"union" => true,
+        .@"union" => |union_info| {
+            inline for (union_info.fields) |field| {
+                obj.* = @unionInit(T, field.name, undefined);
+                // @compileLog(T, field.name, field.type);
+                log.warn("Trying to init {s} as a {s}", .{ prefix, @typeName(field.type) });
+                const field_found = try _populateStruct(allocator, prefix_builder, store, &@field(obj, field.name), true);
+                if (field_found) return true;
+            }
+            if (required) log.warn("Failed to init {s} as any of {s}", .{ prefix, @typeName(T) });
+            obj.* = undefined;
+            return false;
+        },
         .bool => {
             obj.* = undefined;
             return true;
@@ -456,7 +613,7 @@ test populateModel {
 
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
-    var store: BufferStore = .{ .arena = arena_state };
+    var store: BufferStore = .init(arena_state.allocator());
     try store.buffers.ensureUnusedCapacity(arena_state.allocator(), 16);
     store.buffers.putAssumeCapacity("a", Model._newHostBuffer(10));
     store.buffers.putAssumeCapacity("b.a", Model._newHostBuffer(20));
@@ -501,11 +658,11 @@ test populateModel {
 pub fn loadBuffers(
     comptime Model: type,
     init_args: if (@hasDecl(Model, "init")) stdx.meta.Tail(stdx.meta.FnArgs(Model.init)) else void,
-    buffer_store: BufferStore,
+    store: BufferStore,
     allocator: std.mem.Allocator,
     platform: zml.Platform,
 ) !zml.Bufferized(Model) {
-    return loadBuffersWithPrefix(Model, init_args, buffer_store, allocator, platform, "");
+    return loadBuffersWithPrefix(Model, init_args, store, allocator, platform, "");
 }
 
 /// Creates a bufferized version of a Model from the given BufferStore with a specified prefix.
@@ -519,7 +676,7 @@ pub fn loadBuffers(
 pub fn loadBuffersWithPrefix(
     comptime Model: type,
     init_args: if (@hasDecl(Model, "init")) stdx.meta.Tail(stdx.meta.FnArgs(Model.init)) else void,
-    buffer_store: BufferStore,
+    store: BufferStore,
     allocator: std.mem.Allocator,
     platform: zml.Platform,
     prefix: []const u8,
@@ -529,14 +686,14 @@ pub fn loadBuffersWithPrefix(
     const arena = arena_state.allocator();
 
     // Get model structure with tensor shapes from the buffer store with prefix
-    var model: Model = try zml.aio.populateModelWithPrefix(Model, arena, buffer_store, prefix);
+    var model: Model = try zml.aio.populateModelWithPrefix(Model, arena, store, prefix);
 
     // If the Model has a "init" function, call it with the given parameters.
     if (@hasDecl(Model, "init")) {
         @call(.auto, Model.init, .{&model} ++ init_args);
     }
 
-    return loadModelBuffersWithPrefix(Model, model, buffer_store, allocator, platform, prefix);
+    return loadModelBuffersWithPrefix(Model, model, store, allocator, platform, prefix);
 }
 
 /// Creates a bufferized version of a Model from the given BufferStore. For details about
@@ -548,11 +705,11 @@ pub fn loadBuffersWithPrefix(
 pub fn loadModelBuffers(
     comptime Model: type,
     model: Model,
-    buffer_store: BufferStore,
+    store: BufferStore,
     allocator: std.mem.Allocator,
     platform: zml.Platform,
 ) !zml.Bufferized(Model) {
-    return try loadModelBuffersWithPrefix(Model, model, buffer_store, allocator, platform, "");
+    return try loadModelBuffersWithPrefix(Model, model, store, allocator, platform, "");
 }
 
 /// Creates a bufferized version of a Model from the given BufferStore and the given prefix.
@@ -564,7 +721,7 @@ pub fn loadModelBuffers(
 pub fn loadModelBuffersWithPrefix(
     comptime Model: type,
     model: Model,
-    buffer_store: BufferStore,
+    store: BufferStore,
     allocator: std.mem.Allocator,
     platform: zml.Platform,
     prefix: []const u8,
@@ -583,7 +740,7 @@ pub fn loadModelBuffersWithPrefix(
     try prefix_builder.push(allocator, prefix);
     defer prefix_builder.deinit(allocator);
 
-    try visitStructAndLoadBuffer(allocator, &prefix_builder, buffer_store, &res, platform);
+    try visitStructAndLoadBuffer(allocator, &prefix_builder, store, &res, platform);
     return res;
 }
 
@@ -597,58 +754,6 @@ pub fn unloadBuffers(model: anytype) void {
     }).cb, {}, model);
 }
 
-/// Assists in debuggigng `BufferNotFound` error
-/// This is useful when a buffer key is not found and you want to identify possible alternatives (or typos)
-fn findSimilarBufferKeys(original_key: []const u8, store: BufferStore, temp_allocator: std.mem.Allocator) void {
-    const suffixes = [_][]const u8{ "", ".weight", ".bias" };
-    var shown_keys = std.StringHashMap(void).init(temp_allocator);
-    defer shown_keys.deinit();
-
-    // remove suffix .weight and .bias
-    var base_key = original_key;
-    for (suffixes) |suffix| {
-        if (std.mem.endsWith(u8, original_key, suffix)) {
-            base_key = original_key[0 .. original_key.len - suffix.len];
-            break;
-        }
-    }
-
-    // first test: look for exact matches
-    var matches: usize = 0;
-    var it = store.buffers.iterator();
-    while (it.next()) |entry| {
-        const key = entry.key_ptr.*;
-        if (std.mem.startsWith(u8, key, base_key)) {
-            if (matches == 0) log.warn("Similar buffers found:", .{});
-            if (!shown_keys.contains(key)) {
-                log.warn("  - {s}: {}", .{ key, entry.value_ptr.*.shape() });
-                shown_keys.put(key, {}) catch continue;
-                matches += 1;
-            }
-        }
-    }
-
-    // second test: progressive partial matches
-    if (matches == 0) {
-        var components = std.mem.splitScalar(u8, base_key, '.');
-        while (components.next()) |component| {
-            matches = 0;
-            it = store.buffers.iterator();
-            while (it.next()) |entry| {
-                const key = entry.key_ptr.*;
-                if (std.mem.indexOf(u8, key, component) != null and !shown_keys.contains(key)) {
-                    if (matches == 0) log.warn("Partial matches for '{s}':", .{component});
-                    log.warn("  - {s}: {}", .{ key, entry.value_ptr.*.shape() });
-                    shown_keys.put(key, {}) catch continue;
-                    matches += 1;
-                    if (matches >= 5) break;
-                }
-            }
-            if (matches > 0) break;
-        }
-    }
-}
-
 /// deinit all buffers in the given struct
 pub fn awaitAll(buffers: anytype) !void {
     zml.meta.visit((struct {
@@ -658,7 +763,7 @@ pub fn awaitAll(buffers: anytype) !void {
     }).cb, {}, buffers);
 }
 
-fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *PrefixBuilder, buffer_store: BufferStore, obj: anytype, platform: zml.Platform) !void {
+fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *PrefixBuilder, store: BufferStore, obj: anytype, platform: zml.Platform) !void {
     const err_msg = "visitStructAndLoadBuffer must be called with a pointer to type. Received ";
     const type_info, const T = switch (@typeInfo(@TypeOf(obj))) {
         .pointer => |ptr_info| switch (ptr_info.size) {
@@ -670,7 +775,7 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
 
     const prefix = prefix_builder.data.items;
     if (T == zml.Buffer) {
-        return if (buffer_store.get(prefix)) |host_buffer| {
+        return if (store.get(prefix)) |host_buffer| {
             // obj._shape has been set inside `loadModelBuffersWithPrefix`, before calling us.
             var buf_with_metadata = host_buffer;
             log.debug("Loading buffer {s} ({})", .{ prefix, obj._shape });
@@ -680,7 +785,7 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
         } else {
             log.err("Buffer not found: {s}", .{prefix});
 
-            findSimilarBufferKeys(prefix, buffer_store, allocator);
+            store.findSimilarBufferKeys(allocator, prefix);
 
             return error.BufferNotFound;
         };
@@ -693,7 +798,7 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
                     try prefix_builder.pushDigit(allocator, i);
                     defer prefix_builder.pop();
 
-                    try visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, value, platform);
+                    try visitStructAndLoadBuffer(allocator, prefix_builder, store, value, platform);
                 }
             } else stdx.debug.compileError("type not supported by visitStructAndLoadBuffer: {}", .{T});
         },
@@ -701,7 +806,7 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
             for (obj, 0..) |*value, i| {
                 try prefix_builder.pushDigit(allocator, i);
                 defer prefix_builder.pop();
-                try visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, value, platform);
+                try visitStructAndLoadBuffer(allocator, prefix_builder, store, value, platform);
             }
         },
 
@@ -711,12 +816,12 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
                 try prefix_builder.push(allocator, field.name);
                 defer prefix_builder.pop();
 
-                try visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, &@field(obj, field.name), platform);
+                try visitStructAndLoadBuffer(allocator, prefix_builder, store, &@field(obj, field.name), platform);
             }
         },
         .optional => {
             if (obj.*) |*obj_val| {
-                try visitStructAndLoadBuffer(allocator, prefix_builder, buffer_store, obj_val, platform);
+                try visitStructAndLoadBuffer(allocator, prefix_builder, store, obj_val, platform);
             }
         },
         else => {},

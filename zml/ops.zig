@@ -462,10 +462,9 @@ pub fn if_(
         }
     }
 
-    const scalar_pred = if (pred.rank() == 0) pred else pred.flattenAll().squeeze(0);
     const loc = ctx.mlirCtx().location(@src());
     const op = mlir.Operation.make(ctx.mlirCtx(), "stablehlo.if", .{
-        .operands = &.{scalar_pred.value()},
+        .operands = &.{pred.asScalar().value()},
         .result_type_inference = true,
         .blocks = &.{ true_branch_block, false_branch_block },
         // We can't verify right away, cause the weights captured by the if haven't been added yet.
@@ -937,7 +936,6 @@ pub fn scatter(
     // Note: I was a bit lazy here, and I only look at tags on the first tensor.
     // we probably should check all of them.
     const self = meta.first(Tensor, inputs);
-    const update = meta.first(Tensor, updates);
     var indices_per_axis, var indices_axes = Shape.parseStruct(Tensor, index_tensors);
 
     if (indices_per_axis.len == 0) return inputs;
@@ -957,6 +955,7 @@ pub fn scatter(
         }
         break :blk higher_rank;
     };
+    stdx.debug.assert(indices_shape.dtype().isInteger(), "zml.ops.scatter expects all indices tensor to have an integer dtype, got {_}", .{indices_shape});
     for (indices_per_axis.slice()) |*idx| {
         stdx.debug.assert(idx.shape().canBroadcastTo(indices_shape), "zml.ops.scatter expects all indices tensor to have the same shape, got {_}", .{indices_per_axis.slice()});
         stdx.debug.assert(idx.dtype() == indices_shape.dtype(), "zml.ops.scatter expects all indices tensor to have the same dtype, got {_}", .{indices_per_axis.slice()});
@@ -967,6 +966,9 @@ pub fn scatter(
     if (T == Tensor and indices_shape.rank() == 0) {
         return self.dynamicUpdateSlice(index_tensors, updates);
     }
+
+    var update = meta.first(Tensor, updates);
+    if (update.rank() == 0) update = update.broadcast(indices_shape, &.{});
 
     // TODO: ideally we should catch all possible scatter errors and provide nice error messages.
     var config = scatterConfig(self.shape(), update.shape(), indices_per_axis, indices_axes);
@@ -1049,6 +1051,7 @@ fn scatterConfig(
     var indices_batch_axes: Shape.DimsArray = .{};
     var scatter_to_operand_axes: Shape.DimsArray = .{};
     var updates_transpose: Shape.AxesArray = .{};
+    // FIXME: updates_transpose is not correctly computed, so we can't transpose updates, and the user has to do it.
 
     const tagged_api = indices_axes.len > 0;
     const indices = indices_per_axis.get(0).shape();
