@@ -79,6 +79,16 @@ pip.parse(
 )
 use_repo(pip, "neuron_py_deps")
 
+# For downloading models
+pip.parse(
+    download_only = True,
+    hub_name = "huggingface_hub",
+    python_version = "3.11",
+    requirements_lock = "//tools:hf_requirements.lock.txt",
+)
+use_repo(pip, "huggingface_hub")
+
+
 cpu = use_extension("//runtimes/cpu:cpu.bzl", "cpu_pjrt_plugin")
 use_repo(cpu, "libpjrt_cpu_darwin_amd64", "libpjrt_cpu_darwin_arm64", "libpjrt_cpu_linux_amd64")
 

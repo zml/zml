@@ -36,7 +36,7 @@ To give you a glimpse of what you can do with ZML, here is an early demo:
 
 <div align="center"><img src="https://raw.githubusercontent.com/zml/zml.github.io/refs/heads/main/docs-assets/ZML.gif" style="width:75%"></div>
 
-It shows a prototype running a LLaMA2 model sharded on 1 NVIDIA RTX 4090, 1 AMD
+It shows a prototype running a LLama3 model sharded on 1 NVIDIA RTX 4090, 1 AMD
 6800XT, and 1 Google Cloud TPU v2.  All accelerators were hosted in different
 locations, with activations being passed over a VPN.
 
@@ -122,9 +122,11 @@ Once you've been granted access, you're ready to download a gated model like
 `Llama-3.1-8B-Instruct`!
 
 First, you need to download the model using the [huggingface-cli](https://huggingface.co/docs/huggingface_hub/en/guides/cli).
+Note you don't need to install it yourself,
+you can just use the packaged version `bazel run @zml//tools:hf --`.
 
 ```
-huggingface-cli download meta-llama/Llama-3.1-8B-Instruct --local-dir $HOME/Llama-3.1-8B-Instruct
+bazel run @zml//tools:hf -- download meta-llama/Llama-3.1-8B-Instruct --local-dir $HOME/Llama-3.1-8B-Instruct --exclude='*.pth'
 ```
 
 Then, you can run the model.
@@ -143,10 +145,10 @@ Like the 8B model above, this model also requires approval. See
 [here](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct) for access requirements.
 
 ```
-huggingface-cli download meta-llama/Llama-3.2-1B-Instruct --local-dir $HOME/Llama-3.2-1B-Instruct
+bazel run @zml//tools:hf -- download meta-llama/Llama-3.2-1B-Instruct --local-dir $HOME/Llama-3.2-1B-Instruct --exclude='*.pth'
 cd examples
-bazel run --config=release //llama:Llama-3.2-1B-Instruct
-bazel run --config=release //llama:Llama-3.2-1B-Instruct -- --prompt="What is the capital of France?"
+bazel run --config=release //llama -- --hf-model-path=$HOME/Llama-3.2-1B-Instruct
+bazel run --config=release //llama -- --hf-model-path=$HOME/Llama-3.2-1B-Instruct -- --prompt="What is the capital of France?"
 ```
 
 For a larger 3.2 model, you can also try `Llama-3.2-3B-Instruct`.
