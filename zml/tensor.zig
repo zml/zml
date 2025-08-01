@@ -2209,6 +2209,35 @@ pub const Tensor = struct {
 
     pub const GatherOpts = struct { indices_are_sorted: bool = false };
 
+    /// `gather` extracts slices from the given tensor at the specified offsets.
+    /// example: `values.gather(.{ .a = idx }, .{})`
+    ///
+    /// * indices is a named list of integer tensors: eg `.{ .a = idx }`.
+    /// Each names specify a gathering axis, it must refer to an axis of self,
+    /// and the corresponding idx Tensor must contains valid indices into axis .a.
+    /// All indices must have the same shape or broadcast to the same shape.
+    ///
+    /// * result is a tensor whose shape is similar to the input shape
+    /// where the gathered axes have been replaced by axes from 'indices'.
+    ///
+    /// Some example input for the base case where we work on one axis:
+    /// - gather(f:[a], .{ .a = idx:[n]})[n] == f[idx[n]]
+    /// - gather(f:[a, b], .a, idx:[n])[n, b] == f[idx[n], b]
+    /// - gather(f:[a,b,c], .{.b = idx:[n,m]})[a, n, m, c] == f[a, idx[n, m], c]
+    ///
+    /// If an axis in common between `self` and `indices`,
+    /// it is treated as a "batching" axis, meaning that semantically
+    /// the operator is doing a gather one time per dimension of this axis:
+    /// - gather(f: [a,b,c], .{.b=idx: [a,n]})[a, n] == f[a, idx[a, n]]
+    ///
+    /// It's possible to pass several indices:
+    /// - gather(f: [a,b,c], .{.b=idx_b[n], .c=idx_c[n]})[a, n] == f[a, idx_b[n], idx_c[n]]
+    /// - gather(f: [a,b,c,d], .{.b=idx_b[a,n], .c=idx_c[a, n]})[a, n, d] == f[a, idx_b[a, n], idx_c[a, n], d]
+    ///
+    /// If `self` isn't tagged, you can use `gather_` to specify gathered axis by their position but batching won't be available.
+    ///
+    /// For performance it's better to have batching and gathering axes of `self` be the first one,
+    /// so that gather can
     pub fn gather(self: Tensor, _indices: anytype, opts: GatherOpts) Tensor {
         const idx_per_axis, const idx_tags = Shape.parseStruct(Tensor, _indices);
         var idx_axes: Shape.AxesArray = .{};
