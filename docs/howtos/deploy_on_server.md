@@ -20,12 +20,12 @@ following arguments to the command line when compiling / running a model:
 - AWS Trainium/Inferentia 2: `--@zml//runtimes:neuron=true`
 - **AVOID CPU:** `--@zml//runtimes:cpu=false`
 
-So, to run the OpenLLama model from above **on your development machine**
+So, to run the Llama model from above **on your development machine**
 housing an NVIDIA GPU, run the following:
 
 ```
 cd examples
-bazel run --config=release //llama:OpenLLaMA-3B --@zml//runtimes:cuda=true
+bazel run --config=release //llama --@zml//runtimes:cuda=true -- --hf-model-path=$HOME/Llama-3.2-1B-Instruct
 ```
 
 
@@ -38,14 +38,14 @@ architectures:
 - Linux ARM64: `--platforms=@zml//platforms:linux_arm64`
 - MacOS ARM64: `--platforms=@zml//platforms:macos_arm64`
 
-As an example, here is how you build above OpenLLama for CUDA on Linux X86_64:
+As an example, here is how you build above Llama for CUDA on Linux X86_64:
 
 ```
 cd examples
-bazel build --config=release //llama:OpenLLaMA-3B               \
-            --@zml//runtimes:cuda=true                \
-            --@zml//runtimes:cpu=false                \
-            --platforms=@zml//platforms:linux_amd64
+bazel build --config=release //llama          \
+    --@zml//runtimes:cuda=true                \
+    --@zml//runtimes:cpu=false                \
+    --platforms=@zml//platforms:linux_amd64
 ```
 
 ### Creating the TAR

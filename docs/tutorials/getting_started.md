@@ -75,8 +75,9 @@ Once you've been granted access, you're ready to download a gated model like
 # requires token in $HOME/.cache/huggingface/token, as created by the
 # `huggingface-cli login` command, or the `HUGGINGFACE_TOKEN` environment variable.
 cd examples
-bazel run --config=release //llama:Llama-3.1-8B-Instruct
-bazel run --config=release //llama:Llama-3.1-8B-Instruct -- --prompt="What is the capital of France?"
+bazel run @zml//tools:hf -- download meta-llama/Llama-3.1-8B-Instruct --local-dir $HOME/Llama-3.1-8B-Instruct --exclude='*.pth'
+bazel run --config=release //llama -- --hf-model-path=$HOME/Llama-3.1-8B-Instruct
+bazel run --config=release //llama -- --hf-model-path=$HOME/Llama-3.1-8B-Instruct --prompt="What is the capital of France?"
 ```
 
 You can also try `Llama-3.1-70B-Instruct` if you have enough memory.
@@ -88,8 +89,9 @@ Like the 8B model above, this model also requires approval. See
 
 ```
 cd examples
-bazel run --config=release //llama:Llama-3.2-1B-Instruct
-bazel run --config=release //llama:Llama-3.2-1B-Instruct -- --prompt="What is the capital of France?"
+bazel run @zml//tools:hf -- download meta-llama/Llama-3.2-1B-Instruct --local-dir $HOME/Llama-3.2-1B-Instruct --exclude='*.pth'
+bazel run --config=release //llama -- --hf-model-path=$HOME/Llama-3.2-1B-Instruct
+bazel run --config=release //llama -- --hf-model-path=$HOME/Llama-3.2-1B-Instruct --prompt="What is the capital of France?"
 ```
 
 For a larger 3.2 model, you can also try `Llama-3.2-3B-Instruct`.
