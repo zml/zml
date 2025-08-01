@@ -167,10 +167,10 @@ pub const BaseExe = struct {
     ready_buffer_count: u32,
 
     /// Total number of buffers needed by this executable.
-    input_buffer_count: u32,
+    num_inputs: u32,
 
     input_shapes: []Shape,
-    result_shapes: []Shape,
+    output_shapes: []Shape,
 
     /// Num devices used (>1 for sharded executable)
     num_devices: u8,
@@ -182,30 +182,44 @@ pub const BaseExe = struct {
         parent_allocator: std.mem.Allocator,
         platform: Platform,
         exe: *pjrt.LoadedExecutable,
-        args: struct { input_shapes: []const Shape, result_shapes: []const Shape, n_devices: u8 },
+        args: struct { input_shapes: []const Shape, output_shapes: []const Shape, n_devices: u8 },
     ) !BaseExe {
+        // TODO: considere if we still need the arena since we only allocate once.
         var arena = std.heap.ArenaAllocator.init(parent_allocator);
         errdefer arena.deinit();
         const allocator = arena.allocator();
+
         const n_in = args.input_shapes.len;
-        const n_out = args.result_shapes.len;
+        const n_out = args.output_shapes.len;
         const n_devices = args.n_devices;
-        // Allocate once for all the *pjrt.Buffer we need to store ...
-        const all_buffers = try allocator.alloc(*pjrt.Buffer, (n_in + n_out) * n_devices);
-        const all_input_buffers, const all_output_buffers = splitBuffer(*pjrt.Buffer, all_buffers, .{ n_in * n_devices, n_out * n_devices });
 
-        // ... and once for all the [*]*pjrt.Buffer.
-        const all_per_device = try allocator.alloc([*]*pjrt.Buffer, 2 * n_devices);
-        const input_per_device, const output_per_device = splitBuffer([*]*pjrt.Buffer, all_per_device, .{ n_devices, n_devices });
+        const Slices = struct {
+            all_input_buffers: []*pjrt.Buffer,
+            all_output_buffers: []*pjrt.Buffer,
+            input_per_device: [][*]*pjrt.Buffer,
+            output_per_device: [][*]*pjrt.Buffer,
+            input_shapes: []Shape,
+            output_shapes: []Shape,
+        };
 
+        const slices = try stdx.mem.groupedAlloc(Slices, allocator, .{
+            n_in * n_devices,
+            n_out * n_devices,
+            n_devices,
+            n_devices,
+            n_in,
+            n_out,
+        });
+
+        // Init the slices.
+        // all_input_buffers is left uninitialized, will be fed by `prepare` and `call`
+        // all_output_buffers will be written to by pjrt.execute
         for (0..n_devices) |i| {
-            input_per_device[i] = all_input_buffers[i * n_in ..].ptr;
-            output_per_device[i] = all_output_buffers[i * n_out ..].ptr;
+            slices.input_per_device[i] = slices.all_input_buffers[i * n_in ..].ptr;
+            slices.output_per_device[i] = slices.all_output_buffers[i * n_out ..].ptr;
         }
-
-        const all_shapes = try allocator.alloc(Shape, n_in + n_out);
-        @memcpy(all_shapes[0..n_in], args.input_shapes);
-        @memcpy(all_shapes[n_in..], args.result_shapes);
+        @memcpy(slices.input_shapes, args.input_shapes);
+        @memcpy(slices.output_shapes, args.output_shapes);
 
         var execute_context: ?*pjrt.ExecuteContext = null;
         if (platform.pjrt_api.ffi()) |ffi| {
@@ -227,12 +241,12 @@ pub const BaseExe = struct {
             .exe = exe,
             .execute_context = execute_context,
             .ready_buffer_count = 0,
-            .input_buffer_count = @intCast(n_in),
+            .num_inputs = @intCast(n_in),
             .num_devices = args.n_devices,
-            .input_per_device = input_per_device,
-            .output_per_device = output_per_device,
-            .input_shapes = all_shapes[0..n_in],
-            .result_shapes = all_shapes[n_in..],
+            .input_per_device = slices.input_per_device,
+            .output_per_device = slices.output_per_device,
+            .input_shapes = slices.input_shapes,
+            .output_shapes = slices.output_shapes,
             ._arena = arena,
         };
     }
@@ -245,7 +259,7 @@ pub const BaseExe = struct {
     }
 
     pub fn call(self: BaseExe) void {
-        stdx.debug.assert(self.input_buffer_count == self.ready_buffer_count, "BaseExe isn't ready to be called, expected {} buffer inputs got {}", .{ self.input_buffer_count, self.ready_buffer_count });
+        stdx.debug.assert(self.num_inputs == self.ready_buffer_count, "BaseExe isn't ready to be called, expected {} buffer inputs got {}", .{ self.num_inputs, self.ready_buffer_count });
         return self._unsafeCall();
     }
 
@@ -255,7 +269,7 @@ pub const BaseExe = struct {
 
         self.exe.execute(self.platform.pjrt_api, .{
             .arguments = self.input_per_device,
-            .num_args = self.input_buffer_count,
+            .num_args = self.num_inputs,
             .results = self.output_per_device,
             .events = events[0..sharding.num_partitions],
             // this allows to tell a specific buffer shouldn't be donated,
@@ -285,7 +299,7 @@ pub const BaseExe = struct {
             .index = 0,
             .platform = self.platform,
             .outputs = self.output_per_device,
-            .output_shapes = self.result_shapes,
+            .output_shapes = self.output_shapes,
         };
         meta.visit((struct {
             fn cb(ctx: *LocalContext, buffer: *Buffer) void {
@@ -300,7 +314,7 @@ pub const BaseExe = struct {
                 buffer.* = Buffer.fromPjrtBuffers(ctx.platform, ctx.output_shapes[i], shards.constSlice());
             }
         }).cb, &local_ctx, result);
-        stdx.debug.internalAssert(local_ctx.index == self.result_shapes.len, "Pjrt call returned {} tensors, but the return type {s}, contains {} Buffers. Note that modules need to have a comptime know number of returned tensors.", .{ self.output_per_device.len, @typeName(T), local_ctx.index });
+        stdx.debug.internalAssert(local_ctx.index == self.output_shapes.len, "Pjrt call returned {} tensors, but the return type {s}, contains {} Buffers. Note that modules need to have a comptime know number of returned tensors.", .{ self.output_per_device.len, @typeName(T), local_ctx.index });
     }
 
     pub fn bind(exe: BaseExe, comptime CustomOp: type, op: *CustomOp) !void {
@@ -341,13 +355,13 @@ pub const BaseExe = struct {
             shards.appendAssumeCapacity(dev_out[i]);
         }
 
-        return Buffer.fromPjrtBuffers(self.platform, self.result_shapes[i], shards.constSlice());
+        return Buffer.fromPjrtBuffers(self.platform, self.output_shapes[i], shards.constSlice());
     }
 
-    pub fn clone(self: BaseExe, parent_allocator: std.mem.Allocator) !BaseExe {
+    pub fn clone(self: BaseExe, parent_allocator: std.mem.Allocator) error{OutOfMemory}!BaseExe {
         var exe: BaseExe = try .init(parent_allocator, self.platform, self.exe, .{
             .input_shapes = self.input_shapes,
-            .result_shapes = self.result_shapes,
+            .output_shapes = self.output_shapes,
             .n_devices = self.num_devices,
         });
         exe.execute_context = self.execute_context;
@@ -374,6 +388,7 @@ pub fn Exe(ArgsT: type, ReturnT: type) type {
         ///
         /// **Warning:** the new Exe reuses the underlying memory of the previous one.
         /// The caller is responsible to come up with a strategy to call `deinit` exactly once.
+        /// If needed, new executable with independent memory can be created with `clone`.
         pub fn prepare(self: Self, first_arg: Bufferized(stdx.meta.Head(ArgsT))) Exe(stdx.meta.Tail(ArgsT), ReturnT) {
             var new: Exe(stdx.meta.Tail(ArgsT), ReturnT) = .{ .inner = self.inner };
             new.inner.prepare(first_arg);
@@ -398,11 +413,15 @@ pub fn Exe(ArgsT: type, ReturnT: type) type {
 
         pub fn call(self: Self, args: Bufferized(ArgsT)) Bufferized(ReturnT) {
             const total_ready = fillBuffers(&args, self.inner.input_shapes, self.inner.input_per_device, self.inner.ready_buffer_count);
-            std.debug.assert(total_ready == self.inner.input_buffer_count);
+            std.debug.assert(total_ready == self.inner.num_inputs);
             self.inner._unsafeCall();
             var result: Bufferized(ReturnT) = undefined;
             self.inner._unsafeAssignResults(Bufferized(ReturnT), &result);
             return result;
+        }
+
+        pub fn clone(self: Self, allocator: std.mem.Allocator) error{OutOfMemory}!Self {
+            return .{ .inner = try self.inner.clone(allocator) };
         }
     };
 }
