@@ -222,8 +222,8 @@ pub fn testLayerOut(
     const exe = try zml.compileModel(alloc, fwd, layer, input_shapes, platform);
 
     const n_out_exp = activations.countLayers(out_name);
-    if (exe.inner.result_shapes.len != n_out_exp) {
-        log.warn("Reference models produces {d} outputs, but implementation produces {d}", .{ n_out_exp, exe.inner.result_shapes.len });
+    if (exe.inner.output_shapes.len != n_out_exp) {
+        log.warn("Reference models produces {d} outputs, but implementation produces {d}", .{ n_out_exp, exe.inner.output_shapes.len });
     }
     const mod = exe.prepare(layer_weights);
 
@@ -264,7 +264,7 @@ pub fn testLayerOut(
 
     var buf: [1024]u8 = undefined;
     var failed: bool = false;
-    for (0..mod.inner.result_shapes.len) |i| {
+    for (0..mod.inner.output_shapes.len) |i| {
         const full_name = std.fmt.bufPrint(&buf, "{s}.{d}", .{ out_name, i }) catch unreachable;
         const expected_out = activations.get(full_name) orelse {
             log.warn("Output buffer not found: {s}", .{full_name});
