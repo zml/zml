@@ -65,14 +65,10 @@ Module. For compilation, only the _Shapes_ of all tensors must be known. No
 actual tensor data is needed at this step. This is important for large models:
 we can compile them while the actual weight data is being fetched from disk.
 
-To accomplish this, ZML uses a _BufferStore_. The _BufferStore_ knows how to
-only load shapes and when to load actual tensor data. In our example, we will
-fake the _BufferStore_ a bit: we won't load from disk; we'll use float arrays
-instead.
-
-After compilation is done (and the _BufferStore_ has finished loading weights),
-we can send the weights from the _BufferStore_ to our computation device. That
-produces an _executable_ module which we can call with different _inputs_.
+To accomplish this, most ZML code uses a _BufferStore_.
+The _BufferStore_ knows how to only load shapes and when to load actual tensor data.
+In our example, we wont' use _BufferStore_ at all,
+and manually fill out the shapes first then the weights.
 
 In our example, we then copy the result from the computation device to CPU
 memory and print it.
@@ -80,11 +76,10 @@ memory and print it.
 **So the steps for us are:**
 
 - describe the computation as ZML _Module_, using tensor operations
-- create a _BufferStore_ that provides _Shapes_ and data of weights and bias
-  (ca. 5 lines of code).
+- describe the shapes of our model
 - compile the _Module_ **asynchronously**
-- make the compiled _Module_ send the weights (and bias) to the computation
-  device utilizing the _BufferStore_, producing an _executable_ module
+- send the weights of the model to the computation device
+- bind the model weights to the _Module_ producing an _executable_ module
 - prepare input tensor and call the _executable_ module.
 - get the result back to CPU memory and print it
 
@@ -100,9 +95,6 @@ Let's start by writing some Zig code, importing ZML and often-used modules:
 const std = @import("std");
 const zml = @import("zml");
 const asynk = @import("async");
-
-// shortcut to the asyncc function in the asynk module
-const asyncc = asynk.asyncc;
 ```
 
 You will use above lines probably in all ZML projects. Also, note that **ZML is
@@ -110,11 +102,10 @@ async** and comes with its own async runtime, thanks to
 [zigcoro](https://github.com/rsepassi/zigcoro).
 
 
-
 ### Defining our Model
 
-We will start with a very simple "Model". One that resembles a "multiply and
-add" operation.
+We will start with a very simple "Model".
+One that resembles a "multiply and add" operation.
 
 ```zig
 /// Model definition
@@ -151,6 +142,15 @@ ZML code is async. Hence, We need to provide an async main function. It works
 like this:
 
 ```zig
+pub const std_options: std.Options = .{
+    .log_level = .info,
+    .logFn = asynk.logFn(std.log.defaultLog),
+};
+
+pub fn main() !void {
+    try asynk.AsyncThread.main(std.heap.smp_allocator, asyncMain);
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -170,166 +170,143 @@ So, let's start with the async main function:
 
 ```zig
 pub fn asyncMain() !void {
-    // Short lived allocations
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    var gpa_state = std.heap.DebugAllocator(.{}){};
+    defer _ = gpa_state.deinit();
+    const gpa = gpa_state.allocator();
 
-    // Arena allocator for BufferStore etc.
-    var arena_state = std.heap.ArenaAllocator.init(allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    // Create ZML context
+    // Start ZML, detect available devices and chose a platform.
     var context = try zml.Context.init();
     defer context.deinit();
-
     const platform = context.autoPlatform(.{});
+    context.printAvailablePlatforms(platform);
+
     ...
 }
 ```
 
-This is boilerplate code that provides a general-purpose allocator and, for
-convenience, an arena allocator that we will use later. The advantage of arena
-allocators is that you don't need to deallocate individual allocations; you
-simply call `.deinit()` to deinitialize the entire arena instead!
-
-We also initialize the ZML context `context` and get our CPU `platform`
-automatically.
+This is boilerplate code that provides a debug allocator,
+initialize the ZML context `context`, discover available device
+and chose a `platform` to use.
+A `platform` is an homogenous set of devices that can work together,
+eg 2 Nivdia 4090 GPUs.
 
 
-### The BufferStore
+### Compilation
 
-Next, we need to set up the concrete weight and bias tensors for our model.
-Typically, we would load them from disk. But since our example works without
-stored weights, we are going to create a BufferStore manually, containing
-_HostBuffers_ (buffers on the CPU) for both the `weight` and the `bias` tensor.
+We already described the model logic, but we didn't specify any sizes.
+To compile an executable specialized to our usecase we are going to provide
+the shapes of the individual tensors in the model as well as input shapes.
 
-A BufferStore basically contains a dictionary with string keys that match the
-name of the struct fields of our `Layer` struct. So, let's create this
-dictionary:
+To do that we need to instantiate the `Layer` struct.
+Note that `zml.Shape` always takes the data type associated with the tensor. 
+In our example, we will use half-precision floats `f16`, expressed as the enum value `.f16`.
+
+We also set give a `.buffer_id` to each `Tensor` to let the compiler know those are different objects despite the same shape.
 
 ```zig
-// Our weights and bias to use
-var weights = [3]f16{ 2.0, 2.0, 2.0 };
-var bias = [3]f16{ 1.0, 2.0, 3.0 };
-const input_shape = zml.Shape.init(.{3}, .f16);
+    const model_shapes: Layer = .{
+        .bias = zml.Tensor{
+            ._shape = zml.Shape.init(.{4}, .f16).withSharding(.{-1}),
+            ._id = .{ .buffer_id = 0 },
+        },
+        .weight = zml.Tensor{
+            ._shape = zml.Shape.init(.{4}, .f16).withSharding(.{-1}),
+            ._id = .{ .buffer_id = 1 },
+        },
+    };
 
-// We manually produce a BufferStore. You would not normally do that.
-// A BufferStore is usually created by loading model data from a file.
-var buffers: zml.aio.BufferStore.Buffers = .{};
-try buffers.put(arena, "weight", zml.HostBuffer.fromArray(&weights));
-try buffers.put(arena, "bias", zml.HostBuffer.fromArray(&bias));
-
-// the actual BufferStore
-const bs: zml.aio.BufferStore = .{
-    .arena = arena_state,
-    .buffers = buffers,
-};
+    const input_shape = zml.Shape.init(.{4}, .f16);
 ```
 
-Our weights are `{2.0, 2.0, 2.0}`, and our bias is just `{1.0, 2.0, 3.0}`. The
-shape of the weight and bias tensors is `{3}`, and because of that, the **shape
-of the input tensor** is also going to be `{3}`!
+Note: for real models the shape are generally loaded from a config file or directly from the
+metadata of the weight file using `zml.aio.BufferStore`.
 
-Note that `zml.Shape` always takes the data type associated with the tensor. In
-our example, that is `f16`, expressed as the enum value `.f16`.
-
-
-
-### Compiling our Module for the accelerator
-
-We're only going to use the CPU for our simple model, but we need to compile the
-`forward()` function nonetheless. This compilation is usually done
-asynchronously. That means, we can continue doing other things while the module
-is compiling:
+Then we can compile the model asynchronously so we can do other things in parallel,
+typically loading the weights on the device.
 
 ```zig
-// A clone of our model, consisting of shapes. We only need shapes for compiling.
-// We use the BufferStore to infer the shapes.
-const model_shapes = try zml.aio.populateModel(Layer, allocator, bs);
-
-// Start compiling. This uses the inferred shapes from the BufferStore.
-// The shape of the input tensor, we have to pass in manually.
-var compilation = try asyncc(
+var compilation = try asynk.asyncc(
     zml.compileModel,
-    .{ allocator, Layer.forward, model_shapes, .{input_shape}, platform },
+    .{ gpa, Layer.forward, model_shapes, .{input_shape}, platform },
 );
-
-// Produce a bufferized weights struct from the fake BufferStore.
-// This is like the inferred shapes, but with actual values.
-// We will need to send those to the computation device later.
-var model_weights = try zml.aio.loadBuffers(Layer, .{}, bs, arena, platform);
-defer zml.aio.unloadBuffers(&model_weights);  // for good practice
-
-// Wait for compilation to finish
-const compiled = try compilation.awaitt();
 ```
 
 Compiling is happening in the background via the `asyncc` function. We call
 `asyncc` with the `zml.compileModel` function and its arguments
-separately. The arguments themselves are basically the shapes of the weights in
-the BufferStore, the `.forward` function name in order to compile
-`Layer.forward`, the shape of the input tensor(s), and the platform for which to
-compile (we used auto platform).
+separately.
+The arguments themselves are:
 
+- an allocator to allocate memory needed for the returned executable.
+- `Layer.forward`: the function to be compiled
+- the shapes of the model
+- the shape of the input tensors (`Layer.forward` only got one argument, so it's a 1-tuple)
+- the platform for which to compile
 
+### Loading the weights
 
-### Creating the Executable Model
+Now the model is compiling, we can load the model data to the GPU.
+To represent the loaded weights, we are going to instantiate a `zml.Bufferized(Layer)` struct.
+This is a struct that looks like our `Layer` struct,
+but where all `Tensor`s have been replaced by the `zml.Buffer` type,
+and where all non-`Tensor` fields have been straight up removed.
 
-Now that we have compiled the module utilizing the shapes, we turn it into an
-executable.
+```
+ // Now we need to create a model instance with actual weights.
+const weights = [4]f16{ 2.0, -2.0, 1.0, -1.0 };
+const bias = [4]f16{ 1.0, 2.0, 3.0, 4.0 };
+
+var model_weights: zml.Bufferized(Layer) = .{
+    .bias = try zml.Buffer.fromSlice(platform, .{4}, &bias),
+    .weight = try zml.Buffer.fromSlice(platform, .{4}, &weights),
+};
+defer zml.aio.unloadBuffers(&model_weights);
+```
+
+Since `zml.Bufferized(Layer)` is a normal struct we have type checking enabled,
+and the Zig compiler will tell us if we forget to load a struct.
+Here we hard-coded the weights in the code,
+but typically weights would be read from disk at this point using `BufferStore`.
+
+### Putting it all together
+
+Now we want to bind the weights we just loaded,
+with the executable we started to compile earlier on.
 
 ```zig
-// pass the model weights to the compiled module to create an executable module
-// all required memory has been allocated in `compile`.
-var executable = compiled.prepare(model_weights);
-defer executable.deinit();
+// Wait for compilation to finish
+const compiled = try compilation.awaitt();
+defer compiled.deinit();
+
+// pass the model weights to the compiled module to create an executable module.
+const executable = compiled.prepare(model_weights);
 ```
+
+`prepare` will check that the shapes of the buffers in `model_weights` match
+with the shapes given to the compiler.
+Also note we don't call `executable.deinit()` since it re-uses the memory of `compiled`.
 
 
 ### Calling / running the Model
 
 The executable can now be invoked with an input of our choice.
 
-To create the `input`, we directly use `zml.Buffer` by calling
-`zml.Buffer.fromArray()`. It's important to note that `Buffer`s reside in
-_accelerator_ (or _device_) memory, which is precisely where the input needs to
-be for the executable to process it on the device.
-
-For clarity, let's recap the distinction: `HostBuffer`s are located in standard
-_host_ memory, which is accessible by the CPU. When we initialized the weights,
-we used `HostBuffers` to set up the `BufferStore`. This is because the
-`BufferStore` typically loads weights from disk into `HostBuffer`s, and then
-converts them into `Buffer`s when we call `loadBuffers()`.
-
-However, for inputs, we bypass the `BufferStore` and create `Buffer`s directly
-in device memory.
-
-
 ```zig
-// prepare an input buffer
-// Here, we use zml.HostBuffer.fromSlice to show how you would create a
-// HostBuffer with a specific shape from an array.
-// For situations where e.g. you have an [4]f16 array but need a .{2, 2} input
-// shape.
-var input = [3]f16{ 5.0, 5.0, 5.0 };
-var input_buffer = try zml.Buffer.from(
-    platform,
-    zml.HostBuffer.fromSlice(input_shape, &input),
-);
-defer input_buffer.deinit();
+// prepare the input buffer
+    const input = [4]f16{ 5.0, 5.0, 5.0, 5.0 };
+    var input_buffer = try zml.Buffer.fromSlice(platform, input_shape, &input);
+    defer input_buffer.deinit();
 
-// call our executable module
-var result: zml.Buffer = executable.call(.{input_buffer});
-defer result.deinit();
+    // call our executable module, the result is still on the device.
+    var result: zml.Buffer = executable.call(.{input_buffer});
+    defer result.deinit();
 
-// fetch the result buffer to CPU memory
-const cpu_result = try result.toHostAlloc(arena);
-std.debug.print(
-    "\n\nThe result of {d} * {d} + {d} = {d}\n",
-    .{ &weights, &input, &bias, cpu_result.items(f16) },
-);
+    // copy the result to CPU memory
+    const cpu_result: zml.HostBuffer = try result.toHostAlloc(gpa);
+    defer cpu_result.deinit(gpa);
+    std.debug.print(
+        "\nThe result of {d} * {d} + {d} = {d}\n",
+        .{ &weights, &input, &bias, cpu_result.items(f16) },
+    );
 ```
 
 Note that the result of a computation is usually residing in the memory of the
@@ -342,8 +319,6 @@ items.
 
 And that's it! Now, let's have a look at building and actually running this
 example!
-
-
 
 
 ## Building it
@@ -417,10 +392,9 @@ You can access the complete source code of this walkthrough here:
 
 ```zig
 const std = @import("std");
-const zml = @import("zml");
-const asynk = @import("async");
 
-const asyncc = asynk.asyncc;
+const asynk = @import("async");
+const zml = @import("zml");
 
 /// Model definition
 const Layer = struct {
@@ -436,88 +410,84 @@ const Layer = struct {
     }
 };
 
+pub const std_options: std.Options = .{
+    .log_level = .info,
+    .logFn = asynk.logFn(std.log.defaultLog),
+};
+
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    try asynk.AsyncThread.main(gpa.allocator(), asyncMain);
+    try asynk.AsyncThread.main(std.heap.smp_allocator, asyncMain);
 }
 
 pub fn asyncMain() !void {
-    // Short lived allocations
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    var gpa_state = std.heap.DebugAllocator(.{}){};
+    defer _ = gpa_state.deinit();
+    const gpa = gpa_state.allocator();
 
-    // Arena allocator for BufferStore etc.
-    var arena_state = std.heap.ArenaAllocator.init(allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    // Create ZML context
+    // Start ZML, detect available devices and chose a platform.
     var context = try zml.Context.init();
     defer context.deinit();
-
     const platform = context.autoPlatform(.{});
+    context.printAvailablePlatforms(platform);
 
-    // Our weights and bias to use
-    var weights = [3]f16{ 2.0, 2.0, 2.0 };
-    var bias = [3]f16{ 1.0, 2.0, 3.0 };
-    const input_shape = zml.Shape.init(.{3}, .f16);
-
-    // We manually produce a BufferStore. You would not normally do that.
-    // A BufferStore is usually created by loading model data from a file.
-    var buffers: zml.aio.BufferStore.Buffers = .{};
-    try buffers.put(arena, "weight", zml.HostBuffer.fromArray(&weights));
-    try buffers.put(arena, "bias", zml.HostBuffer.fromArray(&bias));
-
-    // the actual BufferStore
-    const bs: zml.aio.BufferStore = .{
-        .arena = arena_state,
-        .buffers = buffers,
+    // Create a skeleton for our model with only the shapes.
+    // The `buffer_id` are typically not set manually
+    // but instead set by a zml.BufferStore
+    // to map abstract Tensors to actual part of the model weight file.
+    const model_shapes: Layer = .{
+        .bias = zml.Tensor{
+            ._shape = zml.Shape.init(.{4}, .f16).withSharding(.{-1}),
+            ._id = .{ .buffer_id = 0 },
+        },
+        .weight = zml.Tensor{
+            ._shape = zml.Shape.init(.{4}, .f16).withSharding(.{-1}),
+            ._id = .{ .buffer_id = 1 },
+        },
     };
 
-    // A clone of our model, consisting of shapes. We only need shapes for
-    // compiling. We use the BufferStore to infer the shapes.
-    const model_shapes = try zml.aio.populateModel(Layer, allocator, bs);
+    // Start compilation in a different thread.
+    // We already specified the shape of the model weights,
+    // but we still need to specifiy the shape of the input tensor.
+    const input_shape = zml.Shape.init(.{4}, .f16);
+    var compilation = try asynk.asyncc(
+        zml.compileModel,
+        .{ gpa, Layer.forward, model_shapes, .{input_shape}, platform },
+    );
 
-    // Start compiling. This uses the inferred shapes from the BufferStore.
-    // The shape of the input tensor, we have to pass in manually.
-    var compilation = try asyncc(zml.compileModel, .{ allocator, Layer.forward, model_shapes, .{input_shape}, platform });
+    // Now we need to create a model instance with actual weights.
+    const weights = [4]f16{ 2.0, -2.0, 1.0, -1.0 };
+    const bias = [4]f16{ 1.0, 2.0, 3.0, 4.0 };
 
-    // Produce a bufferized weights struct from the fake BufferStore.
-    // This is like the inferred shapes, but with actual values.
-    // We will need to send those to the computation device later.
-    var model_weights = try zml.aio.loadBuffers(Layer, .{}, bs, arena, platform);
-    defer zml.aio.unloadBuffers(&model_weights); // for good practice
+    var model_weights: zml.Bufferized(Layer) = .{
+        .bias = try zml.Buffer.fromSlice(platform, .{4}, &bias),
+        .weight = try zml.Buffer.fromSlice(platform, .{4}, &weights),
+    };
+    defer zml.aio.unloadBuffers(&model_weights);
 
     // Wait for compilation to finish
     const compiled = try compilation.awaitt();
+    defer compiled.deinit();
 
-    // pass the model weights to the compiled module to create an executable
-    // module
-    var executable = compiled.prepare(model_weights);
-    defer executable.deinit();
+    // pass the model weights to the compiled module to create an executable module.
+    // This is where the shapes of the buffers will be compared to the
+    // shape expected by the executable.
+    // Note: we don't call `executable.deinit()` since it uses the same memory than `compiled`.
+    const executable = compiled.prepare(model_weights);
 
-    // prepare an input buffer
-    // Here, we use zml.HostBuffer.fromSlice to show how you would create a
-    // HostBuffer with a specific shape from an array.
-    // For situations where e.g. you have an [4]f16 array but need a .{2, 2}
-    // input shape.
-    var input = [3]f16{ 5.0, 5.0, 5.0 };
-    var input_buffer = try zml.Buffer.from(
-        platform,
-        zml.HostBuffer.fromSlice(input_shape, &input),
-    );
+    // prepare the input buffer
+    const input = [4]f16{ 5.0, 5.0, 5.0, 5.0 };
+    var input_buffer = try zml.Buffer.fromSlice(platform, input_shape, &input);
     defer input_buffer.deinit();
 
-    // call our executable module
+    // call our executable module, the result is still on the device.
     var result: zml.Buffer = executable.call(.{input_buffer});
     defer result.deinit();
 
-    // fetch the result to CPU memory
-    const cpu_result = try result.toHostAlloc(arena);
+    // copy the result to CPU memory
+    const cpu_result: zml.HostBuffer = try result.toHostAlloc(gpa);
+    defer cpu_result.deinit(gpa);
     std.debug.print(
-        "\n\nThe result of {d} * {d} + {d} = {d}\n",
+        "\nThe result of {d} * {d} + {d} = {d}\n",
         .{ &weights, &input, &bias, cpu_result.items(f16) },
     );
 }
