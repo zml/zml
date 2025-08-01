@@ -22,6 +22,15 @@ const Layer = struct {
     }
 };
 
+pub const std_options: std.Options = .{
+    .log_level = .info,
+    .logFn = asynk.logFn(std.log.defaultLog),
+};
+
+pub fn main() !void {
+    try asynk.AsyncThread.main(std.heap.smp_allocator, asyncMain);
+}
+
 pub fn asyncMain() !void {
     var gpa_state = std.heap.DebugAllocator(.{}){};
     defer _ = gpa_state.deinit();
@@ -54,7 +63,7 @@ pub fn asyncMain() !void {
     const input_shape = zml.Shape.init(.{4}, .f16);
     var compilation = try asynk.asyncc(
         zml.compileModel,
-        .{ std.heap.page_allocator, Layer.forward, model_shapes, .{input_shape}, platform },
+        .{ gpa, Layer.forward, model_shapes, .{input_shape}, platform },
     );
 
     // Now we need to create a model instance with actual weights.
@@ -93,15 +102,4 @@ pub fn asyncMain() !void {
         "\nThe result of {any} * {any} + {any} = {any}\n",
         .{ &weights, &input, &bias, cpu_result.items(f32) },
     );
-}
-
-const log = std.log.scoped(.simple_layer);
-
-pub const std_options: std.Options = .{
-    .log_level = .info,
-    .logFn = asynk.logFn(std.log.defaultLog),
-};
-
-pub fn main() !void {
-    try asynk.AsyncThread.main(std.heap.smp_allocator, asyncMain);
 }
