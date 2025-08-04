@@ -54,7 +54,6 @@ const OverlapModel = struct {
         // It starts as the original `b` input tensor.
         var b_result = b.convert(.f32);
 
-        // --- Pipelined Execution Loop ---
         for (0..OverlapModel.num_layers) |i| {
             // Stage 1: Communication on the 'a' data path.
             // The result of the previous layer's communication is reduced.
@@ -73,7 +72,6 @@ const OverlapModel = struct {
             // Use the result of the all-reduce. This forces a wait on the communication.
             const a_scalar = a_reduced.sum(0).sum(1).asScalar();
 
-            // --- Prepare inputs for the next iteration ---
             // The result of the communication is the input for the next layer's communication.
             a_intermediate = a_reduced;
             // The result of this layer's computation is the input for the next layer's computation.
@@ -114,7 +112,6 @@ pub fn asyncMain() !void {
     const mesh = zml.Mesh.init(.{ .x = num_devices });
     log.info("Using mesh: {}", .{mesh});
 
-    // Increased matrix sizes for a more substantial workload.
     const M: i64 = 8192;
     const N: i64 = 8192;
     const K: i64 = 8192;

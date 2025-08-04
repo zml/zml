@@ -741,7 +741,7 @@ fn testShardingCase(allocator: std.mem.Allocator, mesh: Mesh, shape: Shape, part
         std.debug.print("Original full slice of data: {any}\n\n", .{Shaped(i32, shape_partitioned, original_data)});
     }
 
-    // --- SCATTER (H2D) ---
+    // Scatter
     var pjrt_buffers = std.ArrayList(*pjrtx.Buffer).init(allocator);
     defer pjrt_buffers.deinit();
 
@@ -772,7 +772,7 @@ fn testShardingCase(allocator: std.mem.Allocator, mesh: Mesh, shape: Shape, part
         }
     }
 
-    // --- GATHER (D2H) ---
+    // Gather
     if (verbose) std.debug.print("--- Reassembling from shards ---\n", .{});
     const sharded_buffer = Buffer.fromPjrtBuffers(platform, sharding, pjrt_buffers.items);
     defer sharded_buffer.deinit(); // This will deinit all the underlying PJRT buffers.
@@ -782,7 +782,7 @@ fn testShardingCase(allocator: std.mem.Allocator, mesh: Mesh, shape: Shape, part
 
     if (verbose) std.debug.print("Reassembled full slice of data: {any}\n\n", .{Shaped(i32, sharding.global_shape, reassembled_data)});
 
-    // --- VERIFY ---
+    // Verify
     try std.testing.expectEqualSlices(u8, original_data, reassembled_data);
     std.debug.print("✅ Verification successful for: {}\n\n", .{sharding});
 }

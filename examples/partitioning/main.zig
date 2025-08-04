@@ -3,7 +3,6 @@ const zml = @import("zml");
 const stdx = @import("stdx");
 const asynk = @import("async");
 
-// set log level to debug to print the generated IR
 pub const std_options: std.Options = .{
     .log_level = .debug,
     .logFn = asynk.logFn(std.log.defaultLog),
@@ -18,14 +17,14 @@ const ThirdPartyModule = struct {
     weight: zml.Tensor,
 
     pub fn init(self: *ThirdPartyModule, mesh: zml.Mesh) void {
-        self.weight = self.weight.withTags(.{ .rows, .cols }).withMesh(mesh).withSharding(.{ .rows = .x });
+        self.weight = self.weight.withTags(.{ .rows, .cols }).withMesh(mesh).withSharding(.{ .rows = .xoxo });
     }
 
     pub fn forward(self: ThirdPartyModule, a: zml.Tensor) zml.Tensor {
         log.debug("Forwarding a: {} and weight: {}", .{ a, self.weight });
 
-        zml.pushMesh(a.mesh().flatten(.x));
-        const x = a.withSharding(.{ .m = .x }).add(self.weight.withSharding(.{ .rows = .x }));
+        zml.pushMesh(a.mesh().flatten(.xoxo));
+        const x = a.withSharding(.{ .m = .xoxo }).add(self.weight.withSharding(.{ .rows = .x }));
         zml.popMesh();
 
         return x.withSharding(.{ .m = .x, .n = .y });
@@ -53,7 +52,6 @@ pub fn main() !void {
 }
 
 pub fn asyncMain() !void {
-    // Short lived allocations
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -119,7 +117,7 @@ pub fn asyncMain() !void {
 
     const shape = zml.Shape.init(.{ .m = 12, .n = 6 }, .i32);
 
-    const a_shape = shape.withTags(.{ .m, .n }).withPartitioning(.{ .m = .x, .n = .y });
+    const a_shape = shape.withPartitioning(.{ .m = .x, .n = .y });
     const b_shape = shape.withTags(.{ .n, .m }).withPartitioning(.{ .n = .x, .m = .y });
 
     var buffers: zml.aio.BufferStore.Buffers = .{};

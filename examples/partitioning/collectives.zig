@@ -15,7 +15,7 @@ const log = std.log.scoped(.@"examples/collectives");
 const AllReduceModel = struct {
     pub fn forward(x: zml.Tensor) zml.Tensor {
         const mesh = x.mesh();
-        const reduced = zml.ops.allReduce(x, .x, mesh);
+        const reduced = zml.ops.allReduce(x, .x, mesh, 1);
 
         const replicated = reduced.withSharding(.{});
         return replicated.add(zml.Tensor.constant(replicated.shape(), replicated.dtype().zero()));
@@ -25,7 +25,7 @@ const AllReduceModel = struct {
 const AllGatherModel = struct {
     pub fn forward(x_sharded: zml.Tensor) zml.Tensor {
         const mesh = x_sharded.mesh();
-        const gathered = zml.ops.allGather(x_sharded, .x, mesh);
+        const gathered = zml.ops.allGather(x_sharded, .m, mesh);
         const replicated = gathered.withSharding(.{});
         return replicated.add(zml.Tensor.constant(replicated.shape(), replicated.dtype().zero()));
     }

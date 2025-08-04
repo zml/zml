@@ -630,7 +630,6 @@ pub fn allReduce(input: Tensor, reduce_axis_name: anytype, mesh: Mesh, channel_i
     const ctx = CompilationContext.current();
     const mlir_ctx = ctx.mlirCtx();
 
-    // FIX: Use the optional channel ID or get a new one.
     const actual_channel_id = if (channel_id) |id| id else ctx.getNextChannelId();
 
     const body_block, _ = ctx.makeBlock(.hermetic, BlockSignNoCtx(Tensor.add), &Tensor.add, {}, .{
