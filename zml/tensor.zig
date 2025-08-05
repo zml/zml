@@ -262,6 +262,12 @@ pub const Tensor = struct {
         };
     }
 
+    pub fn partitionId() Tensor {
+        const ctx = CompilationContext.current();
+        const op = dialect.stablehlo.partition_id(ctx.mlirCtx(), ctx.mlirCtx().location(@src()));
+        return _result(Shape.init(.{}, .u32), op.result(0));
+    }
+
     /// Returns a Tensor with new tag names.
     pub fn rename(self: Tensor, renames: anytype) Tensor {
         var res = self;
@@ -2819,7 +2825,7 @@ pub const Tensor = struct {
         values: Tensor,
         indices: Tensor,
 
-        fn cmp(left: ArgMaxRes, right: ArgMaxRes) ArgMaxRes {
+        pub fn cmp(left: ArgMaxRes, right: ArgMaxRes) ArgMaxRes {
             const left_val = left.values;
             const right_val = right.values;
             const left_idx = left.indices;

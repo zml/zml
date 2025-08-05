@@ -70,6 +70,14 @@ const functors = struct {
     }
 };
 
+pub fn partition_id(ctx: mlir.Context, location: mlir.Location) mlir.Operation {
+    return mlir.Operation.make(ctx, "stablehlo.partition_id", .{
+        .operands = &.{},
+        .results = &.{mlir.Type.tensor(&.{}, mlir.Type.int(ctx, .u32))},
+        .location = location,
+    });
+}
+
 pub fn return_(ctx: mlir.Context, value: mlir.Value, location: mlir.Location) mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.return", .{
         .variadic_operands = &.{&.{value}},

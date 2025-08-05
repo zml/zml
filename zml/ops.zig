@@ -662,6 +662,165 @@ pub fn allReduce(input: Tensor, reduce_axis_name: anytype, mesh: Mesh, channel_i
     return Tensor._result(result_shape, op.result(0));
 }
 
+fn allReduceArgMax(inputs: Tensor.ArgMaxRes, mesh: Mesh, channel_id: ?u64) Tensor.ArgMaxRes {
+    const ctx = CompilationContext.current();
+    const mlir_ctx = ctx.mlirCtx();
+    const actual_channel_id = if (channel_id) |id| id else ctx.getNextChannelId();
+
+    // Create a reduction body that compares (value, index) pairs
+    // We'll encode this as: if lhs.value > rhs.value OR (lhs.value == rhs.value AND lhs.index < rhs.index)
+    // then return lhs, else return rhs
+
+    const element_type_values = inputs.values.value().getType().as(mlir.RankedTensorType).?.getElementType();
+    const element_type_indices = inputs.indices.value().getType().as(mlir.RankedTensorType).?.getElementType();
+
+    const scalar_type_values = mlir.Type.tensor(&.{}, element_type_values);
+    _ = scalar_type_values; // autofix
+    const scalar_type_indices = mlir.Type.tensor(&.{}, element_type_indices);
+    _ = scalar_type_indices; // autofix
+
+    const loc = ctx.location(@src(), "argmax_reducer", .{});
+
+    // Create a 2-parameter reduction by interleaving values and indices
+    // Pack them into a 2-element vector: [value, index_as_float]
+    const vector_type = mlir.Type.tensor(&.{2}, element_type_values);
+    const locs = [_]mlir.Location{loc} ** 2;
+    var body_block = mlir.Block.init(&.{ vector_type, vector_type }, &locs) catch unreachable;
+
+    const lhs_vec = Tensor.fromMlirValue(body_block.argument(0));
+    const rhs_vec = Tensor.fromMlirValue(body_block.argument(1));
+
+    ctx.activate();
+    // Extract components from vectors - use axis 0 for rank-1 tensors
+    const lhs_value = lhs_vec.slice1d(0, .{ .start = 0, .end = 1 }).squeeze(0);
+    const lhs_index_float = lhs_vec.slice1d(0, .{ .start = 1, .end = 2 }).squeeze(0);
+    const rhs_value = rhs_vec.slice1d(0, .{ .start = 0, .end = 1 }).squeeze(0);
+    const rhs_index_float = rhs_vec.slice1d(0, .{ .start = 1, .end = 2 }).squeeze(0);
+
+    // Implement argmax comparison logic
+    const lhs_greater = lhs_value.cmp(.GT, rhs_value);
+    const values_equal = lhs_value.cmp(.EQ, rhs_value);
+    const lhs_index_smaller = lhs_index_float.cmp(.LT, rhs_index_float);
+
+    const should_take_lhs = lhs_greater.logical(.OR, values_equal.logical(.AND, lhs_index_smaller));
+
+    const result_value = should_take_lhs.select(lhs_value, rhs_value);
+    const result_index_float = should_take_lhs.select(lhs_index_float, rhs_index_float);
+
+    // Pack result back into vector - use axis 0 and add a new axis for stacking
+    const result_vec = Tensor.stack(&.{ result_value, result_index_float }, 0, ._);
+    ctx.deactivate();
+
+    const return_op = dialect.stablehlo.returns_(mlir_ctx, &.{result_vec.value()}, loc);
+    body_block.appendOperationRecursive(return_op, .hermetic);
+
+    // Pack input into vectors - use axis 0 and add a new axis for stacking
+    const indices_as_float = inputs.indices.convert(inputs.values.dtype());
+    const input_vec = Tensor.stack(&.{ inputs.values, indices_as_float }, 0, ._);
+
+    const replicated_sharding = Sharding.init(mesh, Shape.init(.{}, .i32).withReplicatedPartitioning());
+    const sharding_attr = ctx.getShardingAttr(replicated_sharding);
+
+    const all_reduce_op = mlir.Operation.make(mlir_ctx, "stablehlo.all_reduce", .{
+        .operands = &.{input_vec.value()},
+        .results = &.{input_vec.value().getType()},
+        .blocks = &.{body_block},
+        .attributes = &.{
+            .{ "replica_groups", getSpmdReplicaGroups(mlir_ctx, mesh) },
+            .{ "channel_handle", mlir.Attribute.wrap(c.stablehloChannelHandleGet(mlir_ctx._inner, @intCast(actual_channel_id), 1)) },
+            .{ "use_global_device_ids", .unit(mlir_ctx) },
+            .{ "mhlo.sharding", sharding_attr },
+        },
+        .location = ctx.location(@src(), "allReduceTuple", .{}),
+    });
+
+    // Unpack result - use axis 0 for rank-1 tensors
+    const result_vec2 = Tensor.fromMlirValue(all_reduce_op.result(0));
+    const result_values = result_vec2.slice1d(0, .{ .start = 0, .end = 1 }).squeeze(0);
+    const result_indices_float = result_vec2.slice1d(0, .{ .start = 1, .end = 2 }).squeeze(0);
+    const result_indices = result_indices_float.convert(inputs.indices.dtype());
+
+    return Tensor.ArgMaxRes{
+        .values = result_values,
+        .indices = result_indices,
+    };
+}
+
+pub fn allReduceTuple(
+    inputs: anytype,
+    init_values: @TypeOf(inputs),
+    comptime reduce_fn: anytype,
+    mesh: Mesh,
+    channel_id: ?u64,
+) @TypeOf(inputs) {
+    _ = reduce_fn; // autofix
+    _ = init_values; // Not needed by the op, but useful for the caller to remember.
+    if (mesh.isSinglePartition()) {
+        return inputs;
+    }
+
+    // Special case for ArgMaxRes to handle the distributed argmax pattern
+    if (@TypeOf(inputs) == Tensor.ArgMaxRes) {
+        return allReduceArgMax(inputs, mesh, channel_id);
+    }
+
+    // Generic implementation for other types would go here
+    @compileError("allReduceTuple currently only supports ArgMaxRes");
+}
+
+// fn allReduceArgMax(inputs: Tensor.ArgMaxRes, mesh: Mesh, channel_id: ?u64) Tensor.ArgMaxRes {
+//     const ctx = CompilationContext.current();
+//     const mlir_ctx = ctx.mlirCtx();
+//     const actual_channel_id = if (channel_id) |id| id else ctx.getNextChannelId();
+
+//     // Create the reduction body for argmax
+//     const element_type_values = inputs.values.value().getType().as(mlir.RankedTensorType).?.getElementType();
+//     const element_type_indices = inputs.indices.value().getType().as(mlir.RankedTensorType).?.getElementType();
+
+//     const scalar_type_values = mlir.Type.tensor(&.{}, element_type_values);
+//     const scalar_type_indices = mlir.Type.tensor(&.{}, element_type_indices);
+
+//     const loc = ctx.location(@src(), "argmax_reducer", .{});
+//     const locs = [_]mlir.Location{loc} ** 4;
+//     var body_block = mlir.Block.init(&.{ scalar_type_values, scalar_type_indices, scalar_type_values, scalar_type_indices }, &locs) catch unreachable;
+
+//     // Extract block arguments
+//     const lhs_values = Tensor.fromMlirValue(body_block.argument(0));
+//     const lhs_indices = Tensor.fromMlirValue(body_block.argument(1));
+//     const rhs_values = Tensor.fromMlirValue(body_block.argument(2));
+//     const rhs_indices = Tensor.fromMlirValue(body_block.argument(3));
+
+//     ctx.activate();
+//     const lhs_struct = Tensor.ArgMaxRes{ .values = lhs_values, .indices = lhs_indices };
+//     const rhs_struct = Tensor.ArgMaxRes{ .values = rhs_values, .indices = rhs_indices };
+//     const result_struct = Tensor.ArgMaxRes.cmp(lhs_struct, rhs_struct);
+//     ctx.deactivate();
+
+//     const return_op = dialect.stablehlo.returns_(mlir_ctx, &.{ result_struct.values.value(), result_struct.indices.value() }, loc);
+//     body_block.appendOperationRecursive(return_op, .hermetic);
+
+//     const replicated_sharding = Sharding.init(mesh, Shape.init(.{}, .i32).withReplicatedPartitioning());
+//     const sharding_attr = ctx.getShardingAttr(replicated_sharding);
+
+//     const all_reduce_op = mlir.Operation.make(mlir_ctx, "stablehlo.all_reduce", .{
+//         .operands = &.{ inputs.values.value(), inputs.indices.value() },
+//         .results = &.{ inputs.values.value().getType(), inputs.indices.value().getType() },
+//         .blocks = &.{body_block},
+//         .attributes = &.{
+//             .{ "replica_groups", getSpmdReplicaGroups(mlir_ctx, mesh) },
+//             .{ "channel_handle", mlir.Attribute.wrap(c.stablehloChannelHandleGet(mlir_ctx._inner, @intCast(actual_channel_id), 1)) },
+//             .{ "use_global_device_ids", .unit(mlir_ctx) },
+//             .{ "mhlo.sharding", sharding_attr },
+//         },
+//         .location = ctx.location(@src(), "allReduceTuple", .{}),
+//     });
+
+//     return Tensor.ArgMaxRes{
+//         .values = Tensor.fromMlirValue(all_reduce_op.result(0)),
+//         .indices = Tensor.fromMlirValue(all_reduce_op.result(1)),
+//     };
+// }
+
 pub fn allGather(input: Tensor, gather_dim: anytype, mesh: Mesh) Tensor {
     const gather_ax = input.axis(gather_dim);
     const partition_spec = input.shape().partition(gather_ax);

@@ -47,7 +47,7 @@ pub const Buffer = struct {
     _shape: Shape,
     _api: *const pjrt.Api,
     _shards: Shards,
-    _mesh: ?Mesh = null,
+    _mesh: ?Mesh = null, // ? todo
 
     pub const MAX_NUM_SHARDS: u8 = Platform.MAX_NUM_DEVICES;
     pub const Shards = std.BoundedArray(*pjrt.Buffer, MAX_NUM_SHARDS);

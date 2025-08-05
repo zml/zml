@@ -67,8 +67,7 @@ pub const LlamaLM = struct {
         if (self.lm_head) |*lm_head| {
             lm_head.weight = lm_head.weight
                 .withTags(.{ .voc, .d })
-                .withMesh(vocab_mesh)
-                .withSharding(.{ .voc = .model });
+                .withMesh(vocab_mesh);
         }
     }
 
@@ -98,8 +97,6 @@ pub const LlamaLM = struct {
         rng: Tensor.Rng,
         opts: zml.nn.SamplingStrategy,
     ) struct { Tensor, Tensor.Rng } {
-        // The body of this function from the previous step is correct.
-        // We only need to fix the signature.
         const vocab_mesh = if (lm_head_) |lm_head| lm_head.weight.mesh() else self.model.embed_tokens.weight.mesh();
         zml.pushMesh(vocab_mesh);
         defer zml.popMesh();
@@ -109,26 +106,26 @@ pub const LlamaLM = struct {
         var logits = blk: {
             if (lm_head_) |lm_head| {
                 var partial_logits = zml.call(lm_head, .forward, .{out});
-
                 if (partial_logits.shape().hasTag(.voc) == null) {
                     partial_logits = partial_logits.rename(.{ .d = .voc });
                 }
-
-                break :blk zml.ops.allGather(partial_logits, .voc, vocab_mesh);
+                break :blk partial_logits;
             } else {
                 const embed_table = self.model.embed_tokens.weight.withTags(.{ .voc, .d });
                 const partial_logits = out.dotGeneral(
-                    embed_table.transpose(.{ .d, .voc }),
+                    embed_table.transpose(.{ .d = .voc, .voc = .d }),
                     &.{.{ 1, 0 }},
                     &.{},
                 );
-                break :blk zml.ops.allReduce(partial_logits, .model, vocab_mesh, 3);
+                break :blk partial_logits;
             }
         };
 
         if (logits.shape().hasTag(.voc) == null)
             logits = logits.rename(.{ .d = .voc });
 
+        // With replicated logits, sampleTokens becomes a simple local operation
+        // with no need for collectives.
         const next_tokens, const new_rng = zml.nn.sampleTokens(logits, opts, rng);
         return .{ next_tokens, new_rng };
     }
@@ -182,13 +179,13 @@ pub const Llama = struct {
         const replicated_sharding = .{ .d = .replicated };
         self.norm.init(config, compute_mesh, replicated_sharding);
 
+        // Replicate the embedding table across all devices in the vocab_mesh.
         self.embed_tokens.weight = self.embed_tokens.weight
             .withTags(.{ .voc, .d })
-            .withMesh(vocab_mesh)
-            .withSharding(.{ .d = .replicated, .voc = .model });
+            .withMesh(vocab_mesh);
 
         for (self.layers) |*layer| {
-            layer.init(config, vocab_mesh);
+            layer.init(config, compute_mesh);
         }
     }
 
@@ -289,15 +286,14 @@ pub const Mlp = struct {
     pub fn forward(self: Mlp, x: Tensor) Tensor {
         const gate_out = zml.call(self.gate_proj, .forward, .{x});
         const up_out = zml.call(self.up_proj, .forward, .{x});
-        const output = gate_out.silu().mul(up_out);
-        const down_proj_partial = zml.call(self.down_proj, .forward, .{output});
-        const down_proj_reduced = zml.ops.allReduce(down_proj_partial, .model, self.down_proj.weight.mesh(), 1);
+        const silu_out = gate_out.silu().mul(up_out);
+        const down_proj_out = zml.call(self.down_proj, .forward, .{silu_out});
 
-        // FIX: Re-shard the replicated output to match the input's sharding scheme for the residual connection.
-        return if (x.dim(.s) > 1)
-            down_proj_reduced.withSharding(.{ .s = .s })
-        else
-            down_proj_reduced;
+        // The output `down_proj_out` is sharded on the `.hidden` dimension along the
+        // `.model` mesh axis. The subsequent residual connection requires this tensor
+        // to be replicated. GSPMD will automatically insert an AllReduce(sum) here
+        // to satisfy the sharding constraint.
+        return down_proj_out;
     }
 };
 
@@ -366,15 +362,12 @@ pub const SelfAttn = struct {
 
         const attn = attn_output.merge(.{ .o_hidden = .{ .h, .hd } }).rename(.{ .q = .s });
 
-        const o_proj_partial = zml.call(self.o_proj, .forward, .{attn});
-        const sharded_output_reduced = zml.ops.allReduce(o_proj_partial, .model, self.o_proj.weight.mesh(), 2);
+        const o_proj_out = zml.call(self.o_proj, .forward, .{attn});
 
-        const sharded_output = if (x.dim(.s) > 1)
-            sharded_output_reduced.withSharding(.{ .s = .s })
-        else
-            sharded_output_reduced;
-
-        return .{ sharded_output, new_kv_cache };
+        // `o_proj_out` is sharded on the `.d` dimension (from `.o_hidden`) along
+        // the `.model` mesh axis. The subsequent residual connection requires this
+        // tensor to be replicated. GSPMD will automatically insert an AllReduce(sum) here.
+        return .{ o_proj_out, new_kv_cache };
     }
 };
 
