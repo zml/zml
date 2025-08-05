@@ -1325,7 +1325,7 @@ pub const Tensor = struct {
         const row_mask = max_val.cmp(.GT, Tensor.scalar(-std.math.inf(f64), self.dtype()));
 
         const exp_diff_max = self.sub(self.max(a).broad(self._shape)).exp();
-        const res = exp_diff_max.div(exp_diff_max.sum(a).broad(self._shape));
+        const res = exp_diff_max.div(exp_diff_max.sum(a));
 
         // If a row is full -inf return full 0 instead of full nan,
         // this fix attention when mask hides a full row.

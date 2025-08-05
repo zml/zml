@@ -32,7 +32,7 @@ pub const Linear = struct {
         }
 
         // log.debug("Linear({*}): {d} -> {d} -> {d}", .{ self, x.dims(), y.dims(), if (self.bias) |bias| y.add(bias).dims() else y.dims() });
-        return if (self.bias) |bias| y.add(bias.broadcastLeft(y.shape())) else y;
+        return if (self.bias) |bias| y.add(bias.broadcast(y.shape(), &.{y.axis(-1)})) else y;
     }
 };
 
@@ -125,18 +125,18 @@ pub fn normalizeVariance(x: Tensor, eps: f32) Tensor {
     // Upcast to improve precision
     const xf32 = x.convert(.f32);
     const mean = xf32.sum(-1).scale(1.0 / N);
-    const mean_dev = xf32.sub(mean.broadcastRight(xf32.shape()));
-    const variance = mean_dev.mul(mean_dev).sum(-1).scale(1.0 / N);
+    const mean_dev = xf32.sub(mean);
+    const variance = mean_dev.mul(mean_dev).sum(-1).divByConst(N);
     const rsqrt = Tensor.rsqrt(variance.addConstant(eps));
 
-    return mean_dev.mul(rsqrt.broadcastRight(mean_dev.shape())).convert(x.dtype());
+    return mean_dev.mul(rsqrt).convert(x.dtype());
 }
 
 // ref: https://pytorch.org/docs/stable/generated/torch.nn.functional.normalize.html
 // Implementation equivalent to `nn.functional.normalize(tensor, dim=-1)` call
 pub fn normalizeL2(input: Tensor, eps: f32) Tensor {
-    const inv_norm = input.pow(Tensor.scalar(2, input.dtype())).sum(-1).addConstant(eps).rsqrt();
-    return input.mul(inv_norm.broad(input.shape()));
+    const inv_norm = input.powByConst(2).sum(-1).addConstant(eps).rsqrt();
+    return input.mul(inv_norm);
 }
 
 test normalizeL2 {
