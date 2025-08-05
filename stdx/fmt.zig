@@ -115,23 +115,25 @@ pub fn formatSliceCustom(fmt_func: anytype, values: anytype, full: FullFormatOpt
 
     // Write first rows
     const num_cols: usize = full.options.width orelse 12;
+    var my_options = full;
+    my_options.options.width = null;
     const n: usize = values.len;
     _ = try writer.write("{");
     if (n <= num_cols) {
         for (values, 0..) |v, i| {
             // Force inlining so that the switch and the buffer can be done once.
-            try @call(.always_inline, fmt_func, .{ v, full, writer });
+            try @call(.always_inline, fmt_func, .{ v, my_options, writer });
             if (i < n - 1) _ = try writer.write(",");
         }
     } else {
         const half = @divFloor(num_cols, 2);
         for (values[0..half]) |v| {
-            try @call(.always_inline, fmt_func, .{ v, full, writer });
+            try @call(.always_inline, fmt_func, .{ v, my_options, writer });
             _ = try writer.write(",");
         }
         _ = try writer.write(" ..., ");
         for (values[n - half ..], 0..) |v, i| {
-            try @call(.always_inline, fmt_func, .{ v, full, writer });
+            try @call(.always_inline, fmt_func, .{ v, my_options, writer });
             if (i < half - 1) _ = try writer.write(",");
         }
     }

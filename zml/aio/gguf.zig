@@ -1,12 +1,12 @@
-const asynk = @import("async");
-const core = @import("gguf/core.zig");
 const std = @import("std");
-const zml = @import("../zml.zig");
-
-const HostBuffer = @import("../hostbuffer.zig").HostBuffer;
-
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
+
+const asynk = @import("async");
+
+const HostBuffer = @import("../hostbuffer.zig").HostBuffer;
+const zml = @import("../zml.zig");
+const core = @import("gguf/core.zig");
 
 const log = std.log.scoped(.@"zml/io");
 
@@ -14,9 +14,7 @@ pub fn open(allocator: Allocator, path: []const u8) !zml.aio.BufferStore {
     var file = try core.GgufFile.open(path);
     errdefer file.close();
 
-    var res: zml.aio.BufferStore = .{
-        .arena = std.heap.ArenaAllocator.init(allocator),
-    };
+    var res: zml.aio.BufferStore = .init(allocator);
     errdefer res.arena.deinit();
     const arena = res.arena.allocator();
 

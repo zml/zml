@@ -27,3 +27,8 @@ zig_srcs(
     name = "sources",
     zig_lib = ":sentencepiece",
 )
+
+cc_static_library(
+    name="sentencepiece_static",
+    deps = [":sentencepiece_swig"]
+)

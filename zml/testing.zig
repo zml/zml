@@ -33,7 +33,7 @@ pub fn approxEq(comptime Float: type, l: Float, r: Float, tolerance: Float) bool
     return closeRel or closeAbs;
 }
 
-/// Testing utility. Accepts both Tensor and HostBuffer but Tensor will be copied to the
+/// Testing utility. Accepts both zml.Buffer and zml.HostBuffer but zml.Buffer will be copied to the
 /// host for comparison !
 pub fn expectClose(left_: anytype, right_: anytype, tolerance: f32) !void {
     const allocator = if (builtin.is_test) std.testing.allocator else std.heap.smp_allocator;
@@ -222,8 +222,8 @@ pub fn testLayerOut(
     const exe = try zml.compileModel(alloc, fwd, layer, input_shapes, platform);
 
     const n_out_exp = activations.countLayers(out_name);
-    if (exe.inner.result_shapes.len != n_out_exp) {
-        log.warn("Reference models produces {d} outputs, but implementation produces {d}", .{ n_out_exp, exe.inner.result_shapes.len });
+    if (exe.inner.output_shapes.len != n_out_exp) {
+        log.warn("Reference models produces {d} outputs, but implementation produces {d}", .{ n_out_exp, exe.inner.output_shapes.len });
     }
     const mod = exe.prepare(layer_weights);
 
@@ -264,7 +264,7 @@ pub fn testLayerOut(
 
     var buf: [1024]u8 = undefined;
     var failed: bool = false;
-    for (0..mod.inner.result_shapes.len) |i| {
+    for (0..mod.inner.output_shapes.len) |i| {
         const full_name = std.fmt.bufPrint(&buf, "{s}.{d}", .{ out_name, i }) catch unreachable;
         const expected_out = activations.get(full_name) orelse {
             log.warn("Output buffer not found: {s}", .{full_name});
@@ -299,7 +299,7 @@ test testLayer {
     };
 
     // create a buffer store containing the activations:
-    var activations = try zml.aio.BufferStore.init(std.testing.allocator, &.{});
+    var activations = zml.aio.BufferStore.init(std.testing.allocator);
     defer activations.deinit();
     {
         const input = zml.HostBuffer.fromArray(&[2]f32{ 1, -1 });
