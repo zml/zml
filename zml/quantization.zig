@@ -1,8 +1,10 @@
 const std = @import("std");
-const zml = @import("zml.zig");
-
 const Allocator = std.mem.Allocator;
+
+const zml = @import("zml.zig");
 const module = zml.module;
+
+// TODO add tests, use modern zml
 
 pub fn Q4_0(comptime dtype: zml.DataType) type {
     return struct {
@@ -38,36 +40,10 @@ pub fn Q4_0(comptime dtype: zml.DataType) type {
             const scales = extractScales(block_count, input);
             const weights = extractWeights(block_count, input);
 
-            return scales.reshape(.{ block_count, 1 })
-                .broadcastLeft(zml.Shape.init(.{ block_count, 32 }, .f32))
+            return scales.broadcast(weights.shape(), &.{0})
                 .mul(weights)
                 .convert(dtype)
-                .reshape(.{block_count * 32})
                 .reshape(shape);
-        }
-
-        pub fn scaleIndices(block_count: u63) zml.Tensor {
-            // indices1 is the offsets of the scale bytes, repeated block_count times.
-            const indices1 = zml.Tensor.arange(.{ .start = 0, .end = 2 }, .i32).repeat1d(0, block_count);
-
-            // indices2 is the offsets of the blocks, repeated for each scale byte, repeated block_count times.
-            const indices2 = zml.Tensor.arange(.{ .start = 0, .end = block_stride * block_count, .step = block_stride }, .i32)
-                .reshape(.{ block_count, 1 }).broadcastLeft(zml.Shape.init(.{ block_count, 2 }, .i32)).reshape(.{2 * block_count});
-
-            // indices is the sum of the two, which is the offsets to all the bytes we are interested in.
-            return indices1.add(indices2);
-        }
-
-        pub fn weightIndices(block_count: u63) zml.Tensor {
-            // indices1 is the offsets of the data bytes, repeated block_count times.
-            const indices1 = zml.Tensor.arange(.{ .start = 2, .end = 18 }, .i32).repeat1d(0, block_count);
-
-            // indices2 is the offsets of the blocks, repeated for each data byte, repeated block_count times.
-            const indices2 = zml.Tensor.arange(.{ .start = 0, .end = block_stride * block_count, .step = block_stride }, .i32)
-                .reshape(.{ block_count, 1 }).broadcastLeft(zml.Shape.init(.{ block_count, 16 }, .i32)).reshape(.{16 * block_count});
-
-            // indices is the sum of the two, which is the offsets to all the bytes we are interested in.
-            return indices1.add(indices2);
         }
 
         pub fn extractScales(block_count: u63, input: zml.Tensor) zml.Tensor {
@@ -85,7 +61,7 @@ pub fn Q4_0(comptime dtype: zml.DataType) type {
             const indices = indices1.add(indices2);
 
             // We select the values we are interested in with the indices, group them by pair and bitcast them to f16, then convert them to f32.
-            const scales = input.gatherValues(0, indices, .{ .indices_are_sorted = true }).reshape(.{ block_count, 2 }).bitCast(.f16).convert(.f32);
+            const scales = input.gather_(&.{0}, &.{indices}, .{ .indices_are_sorted = true }).reshape(.{ block_count, 2 }).bitCast(.f16).convert(.f32);
 
             return scales;
         }
@@ -107,7 +83,7 @@ pub fn Q4_0(comptime dtype: zml.DataType) type {
             // NOTE(Corendos): i4 is not supported by bitcast convert, so we need the following workaround.
 
             // We select the values we are interested in with the indices, these are our quantized_weights.
-            const quantized_weights = input.gatherValues(0, indices, .{ .indices_are_sorted = true });
+            const quantized_weights = input.gather_(&.{0}, &.{indices}, .{ .indices_are_sorted = true });
             const lb_weights = quantized_weights
                 .logical(.And, zml.Tensor.constant(.{16 * block_count}, zml.Data.init(.u8, 0xf)))
                 .bitCast(.i8);
