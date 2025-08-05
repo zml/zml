@@ -246,17 +246,15 @@ pub fn asyncMain() !void {
     }
 
     const num_devices = platform.getDevices().len;
-    const compute_mesh = zml.Mesh.init(.{ .s = num_devices });
-    const vocab_mesh = zml.Mesh.init(.{ .model = num_devices });
-    log.info("Using Sequence Parallelism across {} devices.", .{num_devices});
-    log.info("Compute Mesh (for sequence): {}", .{compute_mesh});
-    log.info("Vocab/Weight Mesh: {}", .{vocab_mesh});
+    const mesh = zml.Mesh.init(.{ .model = num_devices });
+    log.info("Using Tensor Parallelism across {} devices.", .{num_devices});
+    log.info("Mesh: {}", .{mesh});
 
     var ts = try zml.aio.detectFormatAndOpen(allocator, res.args.weights.?);
     defer ts.deinit();
 
     var model_arena = std.heap.ArenaAllocator.init(allocator);
-    var model_instance = try zml.aio.populateModel(llama.LlamaLM, model_arena.allocator(), ts);
+    var model_instance = try zml.aio.populateModel(LlamaLM, model_arena.allocator(), ts);
 
     const llama_options: llama.LlamaLM.Options = .{
         .max_seq_len = @intCast(res.args.@"seq-len" orelse 256),
@@ -265,13 +263,17 @@ pub fn asyncMain() !void {
             .temperature = 1.0,
         },
     };
-    model_instance.init(compute_mesh, vocab_mesh, config, llama_options);
+    // Pass the single, correct mesh to the model initialization.
+    model_instance.init(mesh, config, llama_options);
 
     const dims = model_instance.model.shape();
     const dtype = model_instance.model.embed_tokens.weight.dtype();
 
-    const tokens_shape_prefill = zml.Shape.init(.{ .s = llama_options.max_seq_len }, .u32).withPartitioning(.{ .s = .s });
-    const tokens_shape_decode = zml.Shape.init(.{ .s = 1 }, .u32).withPartitioning(.{ .s = .replicated });
+    // The prefill stage can be sharded by sequence length if desired, but for simplicity
+    // and consistency, we'll keep it replicated. GSPMD will handle it.
+    const tokens_shape_prefill = zml.Shape.init(.{ .s = llama_options.max_seq_len }, .u32);
+    // Decode tokens are replicated across all devices.
+    const tokens_shape_decode = zml.Shape.init(.{ .s = 1 }, .u32);
     const token_idx_shape = zml.Shape.init(.{}, .u32);
     const kv_shape = zml.Shape.init(.{ .layer = model_instance.model.layers.len, .k = dims.s, .h = dims.nkvh, .hd = dims.hd }, dtype);
     const kv_cache_shape = llama.KvCache.initShape(kv_shape);
@@ -302,16 +304,16 @@ pub fn asyncMain() !void {
         token_idx_shape,
         kv_cache_shape,
         rng_shape,
-    }, compute_mesh, platform });
+    }, mesh, platform });
     var fut_mod_decode = try asynk.asyncc(zml.compileModel, .{ allocator, llama.LlamaLM.forward, model_instance, .{
         tokens_shape_decode,
         token_idx_shape,
         kv_cache_shape,
         rng_shape,
-    }, compute_mesh, platform });
+    }, mesh, platform });
 
     log.info("\tLoading Llama weights from {?s}...", .{res.args.weights});
-    var llama_weights = try zml.aio.loadModelBuffers(LlamaLM, model_instance, ts, model_arena.allocator(), platform, compute_mesh);
+    var llama_weights = try zml.aio.loadModelBuffers(LlamaLM, model_instance, ts, model_arena.allocator(), platform, mesh);
     defer zml.aio.unloadBuffers(&llama_weights);
     log.info("✅\tLoaded weights in {}", .{std.fmt.fmtDuration(start.read())});
 
@@ -325,7 +327,7 @@ pub fn asyncMain() !void {
     log.info("✅\tCompiled model in {}", .{std.fmt.fmtDuration(start.read())});
 
     log.info("Creating KvCache", .{});
-    const kv_cache = try llama.KvCache.initBuffer(kv_shape, compute_mesh, platform);
+    const kv_cache = try llama.KvCache.initBuffer(kv_shape, mesh, platform);
 
     log.info("✅\tPrompt: {s}", .{prompt});
 
@@ -336,7 +338,7 @@ pub fn asyncMain() !void {
         profiler.start();
     }
 
-    const generated_text = try generateText(config, model_instance, llama_module_prefill, llama_module_decode, kv_cache, tokenizer, allocator, compute_mesh, seed, prompt, skip_llama3_encoding);
+    const generated_text = try generateText(config, model_instance, llama_module_prefill, llama_module_decode, kv_cache, tokenizer, allocator, mesh, seed, prompt, skip_llama3_encoding);
     defer allocator.free(generated_text);
 
     if (use_pjrt_profiler) {

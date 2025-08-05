@@ -57,17 +57,18 @@ pub const LlamaLM = struct {
     gen_opts: zml.nn.SamplingStrategy = .{},
     config: Config,
 
-    pub fn init(self: *LlamaLM, compute_mesh: zml.Mesh, vocab_mesh: zml.Mesh, config: Config, options: Options) void {
+    pub fn init(self: *LlamaLM, mesh: zml.Mesh, config: Config, options: Options) void {
         self.config = config;
         self.gen_opts = options.sampling_strategy orelse .{};
 
-        self.model.init(config, options.max_seq_len, compute_mesh, vocab_mesh);
+        self.model.init(config, options.max_seq_len, mesh);
 
         // Shard the final output layer across all devices
         if (self.lm_head) |*lm_head| {
             lm_head.weight = lm_head.weight
                 .withTags(.{ .voc, .d })
-                .withMesh(vocab_mesh);
+                .withMesh(mesh)
+                .withSharding(.{ .voc = .model });
         }
     }
 
@@ -166,7 +167,7 @@ pub const Llama = struct {
         };
     }
 
-    pub fn init(self: *Llama, config: LlamaLM.Config, max_seq_len: usize, compute_mesh: zml.Mesh, vocab_mesh: zml.Mesh) void {
+    pub fn init(self: *Llama, config: LlamaLM.Config, max_seq_len: usize, mesh: zml.Mesh) void {
         self.num_heads = @intCast(config.num_attention_heads);
         self.num_kv_heads = @intCast(config.num_key_value_heads);
         self.max_seq_len = @intCast(max_seq_len);
@@ -177,15 +178,15 @@ pub const Llama = struct {
         };
 
         const replicated_sharding = .{ .d = .replicated };
-        self.norm.init(config, compute_mesh, replicated_sharding);
+        self.norm.init(config, mesh, replicated_sharding);
 
-        // Replicate the embedding table across all devices in the vocab_mesh.
+        // Replicate the embedding table across all devices to avoid gather-related slowdowns.
         self.embed_tokens.weight = self.embed_tokens.weight
             .withTags(.{ .voc, .d })
-            .withMesh(vocab_mesh);
+            .withMesh(mesh);
 
         for (self.layers) |*layer| {
-            layer.init(config, compute_mesh);
+            layer.init(config, mesh);
         }
     }
 
@@ -206,14 +207,7 @@ pub const Llama = struct {
         const embeddings = zml.call(embed_tokens_, .forward, .{tokens_});
         var tagged_embeddings = embeddings.withPartialTags(.{.d});
 
-        // Sequence parallelism shards this dimension.
-        // Tensor parallelism replicates it.
-        // We are doing Tensor Parallelism, so it should be replicated.
-        if (tokens_.dim(.s) > 1) { // Prefill
-            return tagged_embeddings.withSharding(.{ .s = .replicated });
-        } else { // Decode
-            return tagged_embeddings.replicated();
-        }
+        return tagged_embeddings.replicated();
     }
 };
 
