@@ -231,7 +231,7 @@ pub fn asyncMain() !void {
     // eg: --create-options='{"cuda":{"allocator":{"bfc":{"memory_fraction": 0.99}}}}'
     const create_opts_json = res.args.@"create-options" orelse "{}";
     const create_opts = try std.json.parseFromSlice(zml.Platform.CreateOptions, allocator, create_opts_json, .{});
-    const platform = context.autoPlatform(.{ .cpu = .{ .cpu_device_count = 8 } }).withCompilationOptions(compilation_options);
+    const platform = context.autoPlatform(create_opts.value).withCompilationOptions(compilation_options);
     create_opts.deinit();
     context.printAvailablePlatforms(platform);
 
@@ -246,9 +246,9 @@ pub fn asyncMain() !void {
     }
 
     const num_devices = platform.getDevices().len;
+    // Define the logical mesh for tensor parallelism.
     const mesh = zml.Mesh.init(.{ .model = num_devices });
-    log.info("Using Tensor Parallelism across {} devices.", .{num_devices});
-    log.info("Mesh: {}", .{mesh});
+    log.info("Using logical mesh for Tensor Parallelism: {}", .{mesh});
 
     var ts = try zml.aio.detectFormatAndOpen(allocator, res.args.weights.?);
     defer ts.deinit();

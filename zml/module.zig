@@ -13,6 +13,7 @@ const mlirx = @import("mlirx.zig");
 const ops = @import("ops.zig");
 const pjrt = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
+const createDeviceMesh = @import("platform.zig").createDeviceMesh;
 const partitioning = @import("partitioning.zig");
 const Mesh = partitioning.Mesh;
 const Partition = partitioning.Partition;
@@ -894,13 +895,24 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, m
         },
     };
 
+    // Create a device mesh that respects the physical hardware topology.
+    // This ordered list of devices is used to map logical partition IDs to physical device IDs.
+    const ordered_devices = try createDeviceMesh(arena, mesh, platform);
+    defer arena.free(ordered_devices);
+    stdx.debug.assert(ordered_devices.len == mesh.numPartitions(), "createDeviceMesh returned {d} devices, but mesh requires {d}", .{ ordered_devices.len, mesh.numPartitions() });
+
     const computation_devices = &options.executable_build_options.?.device_assignment.?.computation_devices;
     try computation_devices.ensureTotalCapacity(arena, @intCast(mesh.numPartitions()));
-    const replica_device_ids = try arena.alloc(i64, @intCast(mesh.numPartitions()));
-    for (0..@intCast(mesh.numPartitions())) |i| {
-        replica_device_ids[i] = @intCast(i);
-        computation_devices.appendAssumeCapacity(.{ .replica_device_ids = .fromOwnedSlice(replica_device_ids[i .. i + 1]) });
+
+    for (ordered_devices) |device| {
+        const device_id = @as(i64, @intCast(device.getDescription(platform.pjrt_api).getId(platform.pjrt_api)));
+        const replica_device_ids = try arena.alloc(i64, 1);
+        replica_device_ids[0] = device_id;
+
+        computation_devices.appendAssumeCapacity(.{ .replica_device_ids = .fromOwnedSlice(replica_device_ids) });
     }
+
+    stdx.debug.assert(computation_devices.items.len == mesh.numPartitions(), "computation_devices should have {d} items to match {d} partitions", .{ computation_devices.items.len, mesh.numPartitions() });
 
     // Let the arena deinit, zig-protobuf deinit is very slow.
     try options.env_option_overrides.ensureUnusedCapacity(arena, 16);
