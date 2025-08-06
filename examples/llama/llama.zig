@@ -207,7 +207,7 @@ pub const Llama = struct {
         const embeddings = zml.call(embed_tokens_, .forward, .{tokens_});
         var tagged_embeddings = embeddings.withPartialTags(.{.d});
 
-        return tagged_embeddings.replicated();
+        return tagged_embeddings.withSharding(.{ .s = .data });
     }
 };
 

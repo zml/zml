@@ -246,9 +246,13 @@ pub fn asyncMain() !void {
     }
 
     const num_devices = platform.getDevices().len;
-    // Define the logical mesh for tensor parallelism.
-    const mesh = zml.Mesh.init(.{ .model = num_devices });
-    log.info("Using logical mesh for Tensor Parallelism: {}", .{mesh});
+    const mesh: zml.Mesh = if (num_devices >= 4 and platform.target == .tpu)
+        // For 4 devices on TPU pod a 2x2 mesh is ideal
+        // for a hybrid data and tensor parallelism strategy.
+        zml.Mesh.init(.{ .data = 2, .model = num_devices / 2 })
+    else
+        zml.Mesh.init(.{ .model = num_devices });
+    log.info("Using logical mesh for Hybrid Parallelism: {}", .{mesh});
 
     var ts = try zml.aio.detectFormatAndOpen(allocator, res.args.weights.?);
     defer ts.deinit();
@@ -269,11 +273,11 @@ pub fn asyncMain() !void {
     const dims = model_instance.model.shape();
     const dtype = model_instance.model.embed_tokens.weight.dtype();
 
-    // The prefill stage can be sharded by sequence length if desired, but for simplicity
-    // and consistency, we'll keep it replicated. GSPMD will handle it.
-    const tokens_shape_prefill = zml.Shape.init(.{ .s = llama_options.max_seq_len }, .u32);
-    // Decode tokens are replicated across all devices.
-    const tokens_shape_decode = zml.Shape.init(.{ .s = 1 }, .u32);
+    const tokens_shape_prefill = zml.Shape.init(.{ .s = llama_options.max_seq_len }, .u32)
+        .withPartitioning(.{ .s = .data });
+    // Decode tokens are also sharded by the batch-like sequence dimension.
+    const tokens_shape_decode = zml.Shape.init(.{ .s = 1 }, .u32)
+        .withPartitioning(.{ .s = .data });
     const token_idx_shape = zml.Shape.init(.{}, .u32);
     const kv_shape = zml.Shape.init(.{ .layer = model_instance.model.layers.len, .k = dims.s, .h = dims.nkvh, .hd = dims.hd }, dtype);
     const kv_cache_shape = llama.KvCache.initShape(kv_shape);
