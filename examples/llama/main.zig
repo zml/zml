@@ -246,13 +246,16 @@ pub fn asyncMain() !void {
     }
 
     const num_devices = platform.getDevices().len;
-    const mesh: zml.Mesh = if (num_devices >= 4 and platform.target == .tpu)
-        // For 4 devices on TPU pod a 2x2 mesh is ideal
-        // for a hybrid data and tensor parallelism strategy.
-        zml.Mesh.init(.{ .data = 2, .model = num_devices / 2 })
-    else
-        zml.Mesh.init(.{ .model = num_devices });
-    log.info("Using logical mesh for Hybrid Parallelism: {}", .{mesh});
+    // Define the logical mesh for parallelism.
+    // Use 2D hybrid parallelism for 4+ devices, otherwise fallback to 1D tensor parallelism.
+    const mesh: zml.Mesh = if (num_devices >= 4 and @mod(num_devices, 2) == 0) blk: {
+        log.info("Using 2D mesh for Hybrid Data/Model Parallelism.", .{});
+        break :blk zml.Mesh.init(.{ .data = num_devices / 2, .model = 2 });
+    } else blk: {
+        log.info("Using 1D mesh for Tensor Parallelism.", .{});
+        break :blk zml.Mesh.init(.{ .model = num_devices });
+    };
+    log.info("Using logical mesh: {}", .{mesh});
 
     var ts = try zml.aio.detectFormatAndOpen(allocator, res.args.weights.?);
     defer ts.deinit();
@@ -273,9 +276,18 @@ pub fn asyncMain() !void {
     const dims = model_instance.model.shape();
     const dtype = model_instance.model.embed_tokens.weight.dtype();
 
-    const tokens_shape_prefill = zml.Shape.init(.{ .s = llama_options.max_seq_len }, .u32)
-        .withPartitioning(.{ .s = .data });
-    // Decode tokens are also sharded by the batch-like sequence dimension.
+    // The prefill stage is sharded by sequence length along the `.data` axis.
+    const is_2d_mesh = mesh.rank() > 1 and mesh.topology.hasTag(.data) != null;
+
+    // Prefill: Long sequence. Shard on `.data` if available, otherwise replicate.
+    var tokens_shape_prefill = zml.Shape.init(.{ .s = llama_options.max_seq_len }, .u32)
+        .withPartitioning(.{ .s = .replicated });
+
+    if (is_2d_mesh) {
+        tokens_shape_prefill = tokens_shape_prefill.withPartitioning(.{ .s = .data });
+    }
+
+    // Decode: Single token. Always replicate the sequence dimension.
     const tokens_shape_decode = zml.Shape.init(.{ .s = 1 }, .u32);
     const token_idx_shape = zml.Shape.init(.{}, .u32);
     const kv_shape = zml.Shape.init(.{ .layer = model_instance.model.layers.len, .k = dims.s, .h = dims.nkvh, .hd = dims.hd }, dtype);
