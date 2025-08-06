@@ -66,7 +66,7 @@ pub const LlamaLM = struct {
             lm_head.weight = lm_head.weight
                 .withTags(.{ .voc, .d })
                 .withMesh(mesh)
-                .withSharding(.{ .d = .model });
+                .withSharding(.{ .voc = .replicated, .d = .model });
         }
     }
 
@@ -174,7 +174,7 @@ pub const Llama = struct {
         self.embed_tokens.weight = self.embed_tokens.weight
             .withTags(.{ .voc, .d })
             .withMesh(mesh)
-            .withSharding(.{ .d = .model });
+            .withSharding(.{ .voc = .replicated, .d = .model });
 
         for (self.layers) |*layer| {
             layer.init(config, mesh);
@@ -195,12 +195,16 @@ pub const Llama = struct {
     }
 
     pub fn embed(embed_tokens_: zml.nn.TokenEmbedding, tokens_: Tensor) Tensor {
-        // This function is now incredibly simple. It just does the lookup.
-        // The input `tokens_` has the correct sharding annotation (.data or .replicated)
-        // and the `embed_tokens_.weight` is sharded on `.d`. GSPMD propagates this
-        // to make the output `embeddings` sharded on both `.s` (by `.data`) and `.d` (by `.model`).
         const embeddings = zml.call(embed_tokens_, .forward, .{tokens_});
-        return embeddings.withPartialTags(.{.d});
+        var tagged_embeddings = embeddings.withPartialTags(.{.d});
+
+        if (tokens_.shape().dim(.s) > 1) {
+            // Prefill phase: Input is sharded on `s` by `data`. Output is sharded on `s` by `data` and `d` by `model`.
+            return tagged_embeddings.withSharding(.{ .s = .data, .d = .model });
+        } else {
+            // Decode phase: Input is replicated. Output is sharded on `d` by `model`.
+            return tagged_embeddings.withSharding(.{ .s = .replicated, .d = .model });
+        }
     }
 };
 
@@ -211,7 +215,7 @@ pub const TransformerLayer = struct {
     mlp: Mlp,
 
     pub fn init(self: *TransformerLayer, config: LlamaLM.Config, mesh: zml.Mesh) void {
-        // RmsNorm weights are small and applied element-wise, so they are replicated.
+        // RMSNorm weights are small and applied element-wise. Replicate them everywhere.
         self.input_layernorm.init(config, mesh, .{ .d = .replicated });
         self.self_attn.init(config, mesh);
         self.post_attention_layernorm.init(config, mesh, .{ .d = .replicated });
@@ -294,10 +298,13 @@ pub const SelfAttn = struct {
             .scaling = config.rope_scaling,
         };
 
-        self.q_proj.weight = self.q_proj.weight.withTags(.{ .q_hidden, .d }).withMesh(mesh).withSharding(.{ .q_hidden = .model });
-        self.k_proj.weight = self.k_proj.weight.withTags(.{ .kv_hidden, .d }).withMesh(mesh).withSharding(.{ .kv_hidden = .model });
-        self.v_proj.weight = self.v_proj.weight.withTags(.{ .kv_hidden, .d }).withMesh(mesh).withSharding(.{ .kv_hidden = .model });
-        self.o_proj.weight = self.o_proj.weight.withTags(.{ .d, .o_hidden }).withMesh(mesh).withSharding(.{ .o_hidden = .model });
+        // Column-Parallel projections: shard output dim (.q_hidden, .kv_hidden) on model axis
+        self.q_proj.weight = self.q_proj.weight.withTags(.{ .q_hidden, .d }).withMesh(mesh).withSharding(.{ .q_hidden = .model, .d = .replicated });
+        self.k_proj.weight = self.k_proj.weight.withTags(.{ .kv_hidden, .d }).withMesh(mesh).withSharding(.{ .kv_hidden = .model, .d = .replicated });
+        self.v_proj.weight = self.v_proj.weight.withTags(.{ .kv_hidden, .d }).withMesh(mesh).withSharding(.{ .kv_hidden = .model, .d = .replicated });
+
+        // Row-Parallel projection: shard input dim (.o_hidden) on model axis
+        self.o_proj.weight = self.o_proj.weight.withTags(.{ .d, .o_hidden }).withMesh(mesh).withSharding(.{ .d = .replicated, .o_hidden = .model });
     }
 
     pub fn forward(
