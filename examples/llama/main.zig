@@ -276,8 +276,7 @@ pub fn asyncMain() !void {
     const tokens_shape_prefill = zml.Shape.init(.{ .s = llama_options.max_seq_len }, .u32)
         .withPartitioning(.{ .s = .data });
     // Decode tokens are also sharded by the batch-like sequence dimension.
-    const tokens_shape_decode = zml.Shape.init(.{ .s = 1 }, .u32)
-        .withPartitioning(.{ .s = .data });
+    const tokens_shape_decode = zml.Shape.init(.{ .s = 1 }, .u32);
     const token_idx_shape = zml.Shape.init(.{}, .u32);
     const kv_shape = zml.Shape.init(.{ .layer = model_instance.model.layers.len, .k = dims.s, .h = dims.nkvh, .hd = dims.hd }, dtype);
     const kv_cache_shape = llama.KvCache.initShape(kv_shape);

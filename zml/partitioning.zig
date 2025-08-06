@@ -626,7 +626,7 @@ pub const Sharding = struct {
             return;
         }
 
-        var partitioned_mesh_axis_indices: std.BoundedArray(u3, MaxMeshAxes) = .{};
+        var used_mesh_axes: std.BoundedArray(bool, MaxMeshAxes) = .{ .buffer = [_]bool{false} ** MaxMeshAxes, .len = @intCast(self.mesh.rank()) };
         var is_fully_replicated = true;
 
         for (0..self.global_shape.rank()) |i| {
@@ -635,9 +635,7 @@ pub const Sharding = struct {
                 const mesh_axis_tag = part_spec.toTag();
                 if (self.mesh.topology.hasTag(mesh_axis_tag)) |mesh_axis_idx| {
                     is_fully_replicated = false;
-                    if (std.mem.indexOfScalar(u3, partitioned_mesh_axis_indices.constSlice(), mesh_axis_idx) == null) {
-                        partitioned_mesh_axis_indices.appendAssumeCapacity(mesh_axis_idx);
-                    }
+                    used_mesh_axes.buffer[mesh_axis_idx] = true;
                 }
             }
         }
@@ -648,40 +646,38 @@ pub const Sharding = struct {
         }
 
         var tile_assignment_dims: Shape.DimsArray = .{};
-        var unassigned_mesh_partitions: i64 = 1;
-
-        var used_mesh_axes_mask: [MaxMeshAxes]bool = [_]bool{false} ** MaxMeshAxes;
-        for (partitioned_mesh_axis_indices.constSlice()) |idx| {
-            used_mesh_axes_mask[idx] = true;
-        }
-        for (0..@intCast(self.mesh.rank())) |i| {
-            if (!used_mesh_axes_mask[i]) {
-                unassigned_mesh_partitions *= self.mesh.topology.dim(i);
-            }
-        }
-
-        var assigned_replication = false;
         for (0..self.global_shape.rank()) |i| {
             const part_spec = self.global_shape.partition(i);
             var tile_dim: i64 = 1;
 
             if (part_spec == .axis) {
-                if (self.mesh.topology.hasTag(part_spec.toTag()) != null) {
-                    tile_dim = self.mesh.topology.dim(part_spec.toTag());
-                }
-            } else {
-                if (!assigned_replication and unassigned_mesh_partitions > 1) {
-                    tile_dim = unassigned_mesh_partitions;
-                    assigned_replication = true;
+                if (self.mesh.topology.hasTag(part_spec.toTag())) |mesh_axis_idx| {
+                    tile_dim = self.mesh.topology.dim(mesh_axis_idx);
                 }
             }
             tile_assignment_dims.appendAssumeCapacity(tile_dim);
         }
 
-        if (!assigned_replication and unassigned_mesh_partitions > 1) {
-            std.log.warn("Tensor shape {} on mesh {} is fully partitioned but does not use all mesh axes. Falling back to replicated.", .{ self.global_shape, self.mesh });
-            try writer.writeAll("{replicated}");
-            return;
+        var replication_factor: i64 = 1;
+        for (used_mesh_axes.constSlice(), 0..) |used, i| {
+            if (!used) {
+                replication_factor *= self.mesh.topology.dim(i);
+            }
+        }
+
+        // Find a dimension to apply the replication factor to.
+        // GSPMD prefers applying replication to an existing replicated dimension if possible.
+        var applied_replication = false;
+        for (0..self.global_shape.rank()) |i| {
+            if (self.global_shape.partition(i) == .replicated) {
+                tile_assignment_dims.buffer[i] *= replication_factor;
+                applied_replication = true;
+                break;
+            }
+        }
+        // If no dimension was marked as replicated, we add a new virtual tiling dimension for replication.
+        if (!applied_replication and replication_factor > 1) {
+            tile_assignment_dims.appendAssumeCapacity(replication_factor);
         }
 
         var product: u64 = 1;
