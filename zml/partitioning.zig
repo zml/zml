@@ -621,81 +621,65 @@ pub const Sharding = struct {
     }
 
     pub fn writeShardingRepresentation(self: Sharding, writer: anytype) !void {
-        if (self.mesh.isSinglePartition()) {
+        if (self.getType() == .replicated) {
             try writer.writeAll("{replicated}");
             return;
         }
 
-        var used_mesh_axes: std.BoundedArray(bool, MaxMeshAxes) = .{ .buffer = [_]bool{false} ** MaxMeshAxes, .len = @intCast(self.mesh.rank()) };
-        var is_fully_replicated = true;
+        var product_of_tensor_tiles: i64 = 1;
+        var num_partitioned_dims: u32 = 0;
 
+        // Calculate the product of explicitly defined tile dimensions
         for (0..self.global_shape.rank()) |i| {
             const part_spec = self.global_shape.partition(i);
             if (part_spec == .axis) {
                 const mesh_axis_tag = part_spec.toTag();
-                if (self.mesh.topology.hasTag(mesh_axis_tag)) |mesh_axis_idx| {
-                    is_fully_replicated = false;
-                    used_mesh_axes.buffer[mesh_axis_idx] = true;
+                if (self.mesh.topology.hasTag(mesh_axis_tag) != null) {
+                    product_of_tensor_tiles *= self.mesh.topology.dim(mesh_axis_tag);
+                    num_partitioned_dims += 1;
                 }
             }
         }
 
-        if (is_fully_replicated) {
-            try writer.writeAll("{replicated}");
-            return;
-        }
+        const is_fully_sharded_on_mesh = (product_of_tensor_tiles == self.mesh.numPartitions());
 
-        var tile_assignment_dims: Shape.DimsArray = .{};
-        for (0..self.global_shape.rank()) |i| {
-            const part_spec = self.global_shape.partition(i);
-            var tile_dim: i64 = 1;
-
-            if (part_spec == .axis) {
-                if (self.mesh.topology.hasTag(part_spec.toTag())) |mesh_axis_idx| {
-                    tile_dim = self.mesh.topology.dim(mesh_axis_idx);
+        if (is_fully_sharded_on_mesh) {
+            // This is the easy case. The tensor is partitioned across all mesh devices.
+            // The tile array must have the same rank as the tensor.
+            try writer.writeAll("{devices=[");
+            for (0..self.global_shape.rank()) |i| {
+                const part_spec = self.global_shape.partition(i);
+                var tile_dim: i64 = 1;
+                if (part_spec == .axis) {
+                    if (self.mesh.topology.hasTag(part_spec.toTag()) != null) {
+                        tile_dim = self.mesh.topology.dim(part_spec.toTag());
+                    }
+                }
+                try writer.print("{d}", .{tile_dim});
+                if (i < self.global_shape.rank() - 1) {
+                    try writer.writeByte(',');
                 }
             }
-            tile_assignment_dims.appendAssumeCapacity(tile_dim);
-        }
-
-        var replication_factor: i64 = 1;
-        for (used_mesh_axes.constSlice(), 0..) |used, i| {
-            if (!used) {
-                replication_factor *= self.mesh.topology.dim(i);
+            try writer.print("]<=[{d}]}}", .{self.mesh.numPartitions()});
+        } else {
+            // This is partial sharding. This is more complex.
+            // The `devices` array lists the tiling only for the *partitioned* dimensions.
+            // The remaining devices are handled by `last_tile_dim_replicate`.
+            try writer.writeAll("{devices=[");
+            var first = true;
+            for (0..self.global_shape.rank()) |i| {
+                const part_spec = self.global_shape.partition(i);
+                if (part_spec == .axis) {
+                    const mesh_axis_tag = part_spec.toTag();
+                    if (self.mesh.topology.hasTag(mesh_axis_tag) != null) {
+                        if (!first) try writer.writeByte(',');
+                        try writer.print("{d}", .{self.mesh.topology.dim(mesh_axis_tag)});
+                        first = false;
+                    }
+                }
             }
+            try writer.print("]<=[{d}] last_tile_dim_replicate}}", .{self.mesh.numPartitions()});
         }
-
-        // Find a dimension to apply the replication factor to.
-        // GSPMD prefers applying replication to an existing replicated dimension if possible.
-        var applied_replication = false;
-        for (0..self.global_shape.rank()) |i| {
-            if (self.global_shape.partition(i) == .replicated) {
-                tile_assignment_dims.buffer[i] *= replication_factor;
-                applied_replication = true;
-                break;
-            }
-        }
-        // If no dimension was marked as replicated, we add a new virtual tiling dimension for replication.
-        if (!applied_replication and replication_factor > 1) {
-            tile_assignment_dims.appendAssumeCapacity(replication_factor);
-        }
-
-        var product: u64 = 1;
-        for (tile_assignment_dims.constSlice()) |d| product *= @intCast(d);
-        stdx.debug.assert(
-            product == self.mesh.numDevices(),
-            "Internal error: tiling product {d} does not match mesh size {d} for shape {s} on mesh {s}",
-            .{ product, self.mesh.numDevices(), self.global_shape, self.mesh },
-        );
-
-        try writer.writeAll("{devices=[");
-        for (tile_assignment_dims.constSlice(), 0..) |dim, i| {
-            try writer.print("{d}", .{dim});
-            if (i < tile_assignment_dims.len - 1) {
-                try writer.writeByte(',');
-            }
-        }
-        try writer.print("]<=[{d}]}}", .{self.mesh.numDevices()});
     }
 
     test "Sharding MLIR representation" {
