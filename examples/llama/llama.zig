@@ -179,6 +179,8 @@ pub const Llama = struct {
         for (self.layers) |*layer| {
             layer.init(config, mesh);
         }
+
+        self.norm.init(config, mesh, .{ .d = .model });
     }
 
     pub fn forward(self: Llama, tokens: Tensor, token_index: Tensor, kv_cache: KvCache) struct { Tensor, KvCache } {
