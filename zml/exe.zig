@@ -6,6 +6,7 @@ const aio = @import("aio.zig");
 const Buffer = @import("buffer.zig").Buffer;
 const Bufferized = @import("tensor.zig").Bufferized;
 const CompilationContext = @import("module.zig").CompilationContext;
+const hashArgs = @import("module.zig").hashArgs;
 const meta = @import("meta.zig");
 const pjrt = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
@@ -94,7 +95,10 @@ pub fn compileFn(
 ) !FnExe(func) {
     var pretty_name = try prettyFnName(func, allocator);
     defer pretty_name.deinit(allocator);
-    var context = try CompilationContext.init(allocator, pretty_name.items, platform);
+    const args_hash = hashArgs(args);
+    const full_name = try std.fmt.allocPrintZ(allocator, "{s}_{x}", .{ pretty_name.items, args_hash });
+    defer allocator.free(full_name);
+    var context = try CompilationContext.init(allocator, full_name, platform);
     defer context.deinit();
 
     return .{ .inner = try context.compileInternal(allocator, func, args) };
