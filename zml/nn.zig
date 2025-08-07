@@ -323,7 +323,7 @@ test invFreq {
     }
 }
 
-test "real/img" {
+test splitRealImg {
     const platform = zml.testing.env();
 
     const Fns = struct {
@@ -383,18 +383,18 @@ test "real/img" {
         }
     };
 
-    const d_interleaved = try zml.testing.compileAndCall(platform, Fns.testSplitMergeIsId, .{.interleaved});
+    const d_interleaved = try zml.testing.compileAndCall(platform.withExeName("interleaved"), Fns.testSplitMergeIsId, .{.interleaved});
     try testing.expectEqual(20, d_interleaved.getValue(i32));
 
-    const d_sequential = try zml.testing.compileAndCall(platform, Fns.testSplitMergeIsId, .{.sequential});
+    const d_sequential = try zml.testing.compileAndCall(platform.withExeName("sequential"), Fns.testSplitMergeIsId, .{.sequential});
     try testing.expectEqual(20, d_sequential.getValue(i32));
 
     // test the function that accepts 1 void argument
-    const d_split_seq_void = try zml.testing.compileAndCall(platform, Fns.testSplitSeqVoid, .{{}});
+    const d_split_seq_void = try zml.testing.compileAndCall(platform.withExeName("split_seq_void"), Fns.testSplitSeqVoid, .{{}});
     try testing.expectEqual(20, d_split_seq_void.getValue(i32));
 
     // test the function that takes NO arguments
-    const d_split_seq = try zml.testing.compileAndCall(platform, Fns.testSplitSeq, .{});
+    const d_split_seq = try zml.testing.compileAndCall(platform.withExeName("split_seq"), Fns.testSplitSeq, .{});
     try testing.expectEqual(20, d_split_seq.getValue(i32));
 
     // now try compiling and calling ourselves
@@ -404,7 +404,7 @@ test "real/img" {
         const ret = mod.call({});
         try testing.expectEqual(20, ret.getValue(i32));
     }
-    const d_split_interleaved = try zml.testing.compileAndCall(platform, Fns.testSplitInterleaved, .{});
+    const d_split_interleaved = try zml.testing.compileAndCall(platform.withExeName("split_interleaved"), Fns.testSplitInterleaved, .{});
     try testing.expectEqual(20, d_split_interleaved.getValue(i32));
 }
 

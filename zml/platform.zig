@@ -16,6 +16,8 @@ pub const CompilationOptions = struct {
     xla_dump_hlo_pass_re: ?[]const u8 = null,
     sharding_enabled: bool = false,
     sharding_axes: std.BoundedArray([*:0]const u8, 8) = .{},
+
+    name: ?[]const u8 = null,
 };
 
 pub const Platform = struct {
@@ -68,6 +70,12 @@ pub const Platform = struct {
     pub fn withCompilationOptions(self: Platform, opts: CompilationOptions) Platform {
         var res = self;
         res.compilation_options = opts;
+        return res;
+    }
+
+    pub fn withExeName(self: Platform, name: []const u8) Platform {
+        var res = self;
+        res.compilation_options.name = name;
         return res;
     }
 

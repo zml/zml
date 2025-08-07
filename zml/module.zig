@@ -76,7 +76,7 @@ pub const CompilationContext = struct {
         // * leave half of the space for parent folder and XLA generated filename,
         // * leave 17 bytes for the module hash (16 + 1 for underscore).
         const max_name_len = @divFloor(std.fs.max_path_bytes, 2) - 17;
-        const name = full_name[0..@min(max_name_len, full_name.len)];
+        const name = platform.compilation_options.name orelse full_name[0..@min(max_name_len, full_name.len)];
 
         const loc = mlir_ctx.location(@src()).named(mlir_ctx, "main");
         const module = mlir.Module.init(loc);
@@ -173,6 +173,14 @@ pub const CompilationContext = struct {
         const module_hash = computeModuleHash(self._platform, module);
         var module_dir: ?[]const u8 = null;
         var pjrt_location: ?[:0]const u8 = null;
+
+        const root = @import("root");
+        if (@hasDecl(root, "snapshot_testing")) {
+            var module_ir: std.ArrayList(u8) = try .initCapacity(arena, 1024);
+            defer module_ir.deinit();
+            module.op().print(module_ir.writer(), .{ .debug_info = false, .debug_info_pretty_form = false });
+            try root.snapshot_testing.snapshot(try std.mem.join(arena, ".", &.{ self._name, "mlir" }), module_ir.items);
+        }
 
         if (self._platform.compilation_options.xla_dump_to) |xla_dump_to| {
             const sep = std.fs.path.sep_str;
@@ -1027,12 +1035,12 @@ test FnCache {
             },
         },
     };
-    const res = try zml.testing.compileAndCall(platform, NN._fwd, .{ nn, x });
-    const expected = try zml.testing.compileAndCall(platform, NN._forwardRefImpl, .{ nn, x });
+    const res = try zml.testing.compileAndCall(platform.withExeName("with_cache"), NN._fwd, .{ nn, x });
+    const expected = try zml.testing.compileAndCall(platform.withExeName("no_cache"), NN._forwardRefImpl, .{ nn, x });
     try zml.testing.expectClose(expected, res, 1e-4);
 }
 
-test "FnCache with mixed integer/tensor" {
+test "FnCache with mixed integer-tensor" {
     const zml = @import("zml.zig");
     const platform = zml.testing.env();
 
@@ -1091,8 +1099,8 @@ test "FnCache with mixed integer/tensor" {
             .{ .w = try .fromArray(platform, [3][2]f16{ .{ 1, 2 }, .{ 0, 1 }, .{ -1, 0 } }) },
         },
     };
-    const res = try zml.testing.compileAndCall(platform, NN._fwd, .{ nn, x });
-    const expected = try zml.testing.compileAndCall(platform, NN._forwardRefImpl, .{ nn, x });
+    const res = try zml.testing.compileAndCall(platform.withExeName("with_cache"), NN._fwd, .{ nn, x });
+    const expected = try zml.testing.compileAndCall(platform.withExeName("no_cache"), NN._forwardRefImpl, .{ nn, x });
     try zml.testing.expectClose(expected, res, 1e-4);
 }
 
@@ -1108,7 +1116,7 @@ pub fn hashShape(hasher: *std.hash.Wyhash, shape: Shape) void {
     hash(hasher, shape._dtype, .Shallow);
     hash(hasher, shape._sharding_info, .Shallow);
     for (shape.tags()) |tag| {
-        hash(hasher, @intFromPtr(tag), .Shallow);
+        hash(hasher, std.mem.sliceTo(tag, 0), .Deep);
     }
 }
 
@@ -1175,7 +1183,7 @@ pub fn hash(hasher: *std.hash.Wyhash, key: anytype, comptime strat: std.hash.Str
             .many,
             .c,
             => switch (strat) {
-                .shallow => hash(hasher, @intFromPtr(key), .Shallow),
+                .Shallow => hash(hasher, @intFromPtr(key), .Shallow),
                 else => @compileError(
                     \\ unknown-length pointers and C pointers cannot be hashed deeply.
                     \\ Consider providing your own hash function.
