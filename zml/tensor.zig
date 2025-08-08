@@ -171,6 +171,7 @@ pub const Tensor = struct {
     }
 
     pub fn mesh(self: Tensor) Mesh {
+        if (self._mesh) |m| return m;
         const ctx = self.getContext();
         return ctx.currentMesh();
     }

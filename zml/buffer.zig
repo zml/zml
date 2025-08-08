@@ -8,6 +8,7 @@ const DataType = @import("dtype.zig").DataType;
 const HostBuffer = @import("hostbuffer.zig").HostBuffer;
 const pjrt = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
+const createDeviceMesh = @import("platform.zig").createDeviceMesh;
 const Shape = @import("shape.zig").Shape;
 const partitioning = @import("partitioning.zig");
 const Mesh = partitioning.Mesh;
@@ -59,7 +60,11 @@ pub const Buffer = struct {
 
     /// Copies the content of the given buffer from host memory to the accelerator memory.
     pub fn from(platform: Platform, sharding: Sharding, data: []const u8, opts: FromOptions) !Buffer {
-        var sharding_devices = sharding.iterator(platform.getDevices());
+        var device_list_buffer: [1024]u8 = undefined; // todo remove allocator in createDeviceMesh
+        var fba = std.heap.FixedBufferAllocator.init(&device_list_buffer);
+        const ordered_devices = try createDeviceMesh(fba.allocator(), sharding.mesh, platform);
+
+        var sharding_devices = sharding.iterator(ordered_devices);
 
         var res: Buffer = .{
             ._api = platform.pjrt_api,

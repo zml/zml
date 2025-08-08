@@ -246,11 +246,10 @@ pub fn asyncMain() !void {
     }
 
     const num_devices = platform.getDevices().len;
-    // Define the logical mesh for parallelism.
-    // Use 2D hybrid parallelism for 4+ devices, otherwise fallback to 1D tensor parallelism.
-    const mesh: zml.Mesh = if (num_devices >= 4 and @mod(num_devices, 2) == 0) blk: {
+    const mesh: zml.Mesh = if (num_devices >= 8 and @mod(num_devices, 2) == 0 and platform.target == .tpu) blk: {
         log.info("Using 2D mesh for Hybrid Data/Model Parallelism.", .{});
-        break :blk zml.Mesh.init(.{ .data = num_devices / 2, .model = 2 });
+        // A common strategy: split batch over `data` and model layers over `model`.
+        break :blk zml.Mesh.init(.{ .data = @divExact(num_devices, 2), .model = @divExact(num_devices, 2) });
     } else blk: {
         log.info("Using 1D mesh for Tensor Parallelism.", .{});
         break :blk zml.Mesh.init(.{ .model = num_devices });

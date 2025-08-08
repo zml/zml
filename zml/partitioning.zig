@@ -627,7 +627,7 @@ pub const Sharding = struct {
         }
 
         var product_of_tensor_tiles: i64 = 1;
-        var num_partitioned_dims: u32 = 0;
+        var has_partitioned_axis = false;
 
         // Calculate the product of explicitly defined tile dimensions
         for (0..self.global_shape.rank()) |i| {
@@ -636,51 +636,111 @@ pub const Sharding = struct {
                 const mesh_axis_tag = part_spec.toTag();
                 if (self.mesh.topology.hasTag(mesh_axis_tag) != null) {
                     product_of_tensor_tiles *= self.mesh.topology.dim(mesh_axis_tag);
-                    num_partitioned_dims += 1;
+                    has_partitioned_axis = true;
                 }
             }
+        }
+
+        if (!has_partitioned_axis) {
+            try writer.writeAll("{replicated}");
+            return;
         }
 
         const is_fully_sharded_on_mesh = (product_of_tensor_tiles == self.mesh.numPartitions());
 
+        try writer.writeAll("{devices=[");
+        // The tile array must have the same rank as the tensor, for both partial and full sharding.
+        for (0..self.global_shape.rank()) |i| {
+            const part_spec = self.global_shape.partition(i);
+            var tile_dim: i64 = 1;
+            if (part_spec == .axis) {
+                if (self.mesh.topology.hasTag(part_spec.toTag()) != null) {
+                    tile_dim = self.mesh.topology.dim(part_spec.toTag());
+                }
+            }
+            try writer.print("{d}", .{tile_dim});
+            if (i < self.global_shape.rank() - 1) {
+                try writer.writeByte(',');
+            }
+        }
+
+        try writer.writeAll("]<=[");
+        const mesh_dims = self.mesh.topology.dims();
+        for (mesh_dims, 0..) |dim, i| {
+            try writer.print("{d}", .{dim});
+            if (i < mesh_dims.len - 1) {
+                try writer.writeByte(',');
+            }
+        }
+
         if (is_fully_sharded_on_mesh) {
-            // This is the easy case. The tensor is partitioned across all mesh devices.
-            // The tile array must have the same rank as the tensor.
-            try writer.writeAll("{devices=[");
-            for (0..self.global_shape.rank()) |i| {
-                const part_spec = self.global_shape.partition(i);
-                var tile_dim: i64 = 1;
-                if (part_spec == .axis) {
-                    if (self.mesh.topology.hasTag(part_spec.toTag()) != null) {
-                        tile_dim = self.mesh.topology.dim(part_spec.toTag());
-                    }
-                }
-                try writer.print("{d}", .{tile_dim});
-                if (i < self.global_shape.rank() - 1) {
-                    try writer.writeByte(',');
-                }
-            }
-            try writer.print("]<=[{d}]}}", .{self.mesh.numPartitions()});
+            try writer.writeAll("]}");
         } else {
-            // This is partial sharding. This is more complex.
-            // The `devices` array lists the tiling only for the *partitioned* dimensions.
-            // The remaining devices are handled by `last_tile_dim_replicate`.
-            try writer.writeAll("{devices=[");
-            var first = true;
-            for (0..self.global_shape.rank()) |i| {
-                const part_spec = self.global_shape.partition(i);
-                if (part_spec == .axis) {
-                    const mesh_axis_tag = part_spec.toTag();
-                    if (self.mesh.topology.hasTag(mesh_axis_tag) != null) {
-                        if (!first) try writer.writeByte(',');
-                        try writer.print("{d}", .{self.mesh.topology.dim(mesh_axis_tag)});
-                        first = false;
-                    }
-                }
-            }
-            try writer.print("]<=[{d}] last_tile_dim_replicate}}", .{self.mesh.numPartitions()});
+            try writer.writeAll("] last_tile_dim_replicate}");
         }
     }
+
+    // pub fn writeShardingRepresentation(self: Sharding, writer: anytype) !void {
+    //     if (self.getType() == .replicated) {
+    //         try writer.writeAll("{replicated}");
+    //         return;
+    //     }
+
+    //     var product_of_tensor_tiles: i64 = 1;
+    //     var num_partitioned_dims: u32 = 0;
+
+    //     // Calculate the product of explicitly defined tile dimensions
+    //     for (0..self.global_shape.rank()) |i| {
+    //         const part_spec = self.global_shape.partition(i);
+    //         if (part_spec == .axis) {
+    //             const mesh_axis_tag = part_spec.toTag();
+    //             if (self.mesh.topology.hasTag(mesh_axis_tag) != null) {
+    //                 product_of_tensor_tiles *= self.mesh.topology.dim(mesh_axis_tag);
+    //                 num_partitioned_dims += 1;
+    //             }
+    //         }
+    //     }
+
+    //     const is_fully_sharded_on_mesh = (product_of_tensor_tiles == self.mesh.numPartitions());
+
+    //     if (is_fully_sharded_on_mesh) {
+    //         // This is the easy case. The tensor is partitioned across all mesh devices.
+    //         // The tile array must have the same rank as the tensor.
+    //         try writer.writeAll("{devices=[");
+    //         for (0..self.global_shape.rank()) |i| {
+    //             const part_spec = self.global_shape.partition(i);
+    //             var tile_dim: i64 = 1;
+    //             if (part_spec == .axis) {
+    //                 if (self.mesh.topology.hasTag(part_spec.toTag()) != null) {
+    //                     tile_dim = self.mesh.topology.dim(part_spec.toTag());
+    //                 }
+    //             }
+    //             try writer.print("{d}", .{tile_dim});
+    //             if (i < self.global_shape.rank() - 1) {
+    //                 try writer.writeByte(',');
+    //             }
+    //         }
+    //         try writer.print("]<=[{d}]}}", .{self.mesh.numPartitions()});
+    //     } else {
+    //         // This is partial sharding. This is more complex.
+    //         // The `devices` array lists the tiling only for the *partitioned* dimensions.
+    //         // The remaining devices are handled by `last_tile_dim_replicate`.
+    //         try writer.writeAll("{devices=[");
+    //         var first = true;
+    //         for (0..self.global_shape.rank()) |i| {
+    //             const part_spec = self.global_shape.partition(i);
+    //             if (part_spec == .axis) {
+    //                 const mesh_axis_tag = part_spec.toTag();
+    //                 if (self.mesh.topology.hasTag(mesh_axis_tag) != null) {
+    //                     if (!first) try writer.writeByte(',');
+    //                     try writer.print("{d}", .{self.mesh.topology.dim(mesh_axis_tag)});
+    //                     first = false;
+    //                 }
+    //             }
+    //         }
+    //         try writer.print("]<=[{d}] last_tile_dim_replicate}}", .{self.mesh.numPartitions()});
+    //     }
+    // }
 
     test "Sharding MLIR representation" {
         // Case 1: Fully Replicated

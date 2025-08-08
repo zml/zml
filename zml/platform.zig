@@ -34,7 +34,6 @@ const tpu_tray_ring_order_8 = [_]u8{ 0, 1, 2, 3, 7, 6, 5, 4 };
 /// Sorts devices primarily by their coordinates (lexicographically, reversed) and then by core_on_chip.
 /// This matches JAX's z,y,x,core sorting for creating a physical mesh.
 /// This function is allocation-free.
-/// This is a `lessThan` function for `std.sort.sort`.
 fn sortDevicesForPhysicalMesh(context: *const pjrt.Api, lhs_dev: *const pjrt.Device, rhs_dev: *const pjrt.Device) bool {
     const api: *const pjrt.Api = context;
 
@@ -82,6 +81,17 @@ fn sortDevicesForPhysicalMesh(context: *const pjrt.Api, lhs_dev: *const pjrt.Dev
     return lhs_core < rhs_core;
 }
 
+/// Sorts devices topologically for consistent ordering across platforms.
+fn getTopologicallySortedDevices(
+    allocator: std.mem.Allocator,
+    devices: []const *const pjrt.Device,
+    api: *const pjrt.Api,
+) ![]*const pjrt.Device {
+    const sorted_devices = try allocator.dupe(*const pjrt.Device, devices);
+    std.sort.pdq(*const pjrt.Device, sorted_devices, api, sortDevicesForPhysicalMesh);
+    return sorted_devices;
+}
+
 /// Creates a device mesh that arranges devices for optimal collective performance,
 /// similar to `jax.experimental.mesh_utils.create_device_mesh`.
 pub fn createDeviceMesh(
@@ -98,30 +108,38 @@ pub fn createDeviceMesh(
 
     if (active_devices.len == 0) return &.{};
 
+    // Always sort devices topologically first to ensure a consistent base order
+    // for mapping logical devices to physical devices across all platforms.
+    const sequential_devices = try getTopologicallySortedDevices(allocator, active_devices, api);
+
+    // For TPUs, we might apply an additional reordering for performance.
+    // For other platforms, we will use the topologically sorted list directly.
     switch (platform.target) {
         .tpu => {
+            // Keep the TPU-specific reordering logic, but operate on the sorted list.
             const first_device_kind = active_devices[0].getDescription(api).getKind(api);
 
-            // The kind string is a reliable way to dispatch for TPUs.
             if (std.mem.eql(u8, first_device_kind, "TPU v5 lite") or std.mem.eql(u8, first_device_kind, "TPU v6 lite")) {
-                if (try createTpuV5LiteMesh(allocator, logical_mesh, active_devices, api)) |ordered_devices| {
+                if (try createTpuV5LiteMesh(allocator, logical_mesh, sequential_devices, api)) |ordered_devices| {
+                    allocator.free(sequential_devices); // Free the intermediate sorted list
                     return ordered_devices;
                 }
             } else if (std.mem.eql(u8, first_device_kind, "TPU7x")) {
-                if (try createTpu7xMesh(allocator, logical_mesh, active_devices, api)) |ordered_devices| {
+                if (try createTpu7xMesh(allocator, logical_mesh, sequential_devices, api)) |ordered_devices| {
+                    allocator.free(sequential_devices); // Free the intermediate sorted list
                     return ordered_devices;
                 }
             }
 
             // Fallback for other TPU kinds (e.g., v2, v3, v4, v5p).
             log.warn("Using generic TPU physical mesh creation for {s}. For optimal performance, a specific handler may be needed.", .{first_device_kind});
-            var physical_mesh = try getPhysicalTpuMesh(allocator, active_devices, api);
+            var physical_mesh = try getPhysicalTpuMesh(allocator, sequential_devices, api);
             defer physical_mesh.deinit();
             return try createDeviceMeshForNdTorus(allocator, physical_mesh, logical_mesh);
         },
         .cuda, .rocm, .cpu, .neuron => {
-            // Default for CPU, GPU, and Neuron: simple duplication of the device list.
-            return allocator.dupe(*const pjrt.Device, active_devices);
+            // For other platforms, the topologically sorted list is the final list.
+            return sequential_devices;
         },
     }
 }

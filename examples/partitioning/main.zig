@@ -17,14 +17,14 @@ const ThirdPartyModule = struct {
     weight: zml.Tensor,
 
     pub fn init(self: *ThirdPartyModule, mesh: zml.Mesh) void {
-        self.weight = self.weight.withTags(.{ .rows, .cols }).withMesh(mesh).withSharding(.{ .rows = .xoxo });
+        self.weight = self.weight.withTags(.{ .rows, .cols }).withMesh(mesh).withSharding(.{ .rows = .x });
     }
 
     pub fn forward(self: ThirdPartyModule, a: zml.Tensor) zml.Tensor {
         log.debug("Forwarding a: {} and weight: {}", .{ a, self.weight });
 
-        zml.pushMesh(a.mesh().flatten(.xoxo));
-        const x = a.withSharding(.{ .m = .xoxo }).add(self.weight.withSharding(.{ .rows = .x }));
+        zml.pushMesh(a.mesh().flatten(.x));
+        const x = a.withSharding(.{ .m = .x }).add(self.weight.withSharding(.{ .rows = .x }));
         zml.popMesh();
 
         return x.withSharding(.{ .m = .x, .n = .y });
@@ -110,15 +110,21 @@ pub fn asyncMain() !void {
         }
     }
 
-    // const mesh: zml.Mesh = .init(.{ .x = 4, .y = 3 });
-    const mesh: zml.Mesh = .auto(platform);
-    // const mesh: zml.Mesh = .single();
-    log.info("{}", .{mesh});
+    const num_devices = devices.len;
+    const mesh: zml.Mesh = if (platform.target == .tpu and num_devices >= 4 and @mod(num_devices, 2) == 0) blk: {
+        const mesh2d = zml.Mesh.init(.{ .x = @divExact(num_devices, 2), .y = 2 });
+        log.info("Using 2D mesh for TPU: {}", .{mesh2d});
+        break :blk mesh2d;
+    } else blk: {
+        const mesh1d = zml.Mesh.auto(platform);
+        log.info("Using 1D mesh: {}", .{mesh1d});
+        break :blk mesh1d;
+    };
 
-    const shape = zml.Shape.init(.{ .m = 12, .n = 6 }, .i32);
+    const shape = zml.Shape.init(.{ .m = 24, .n = 12 }, .i32);
 
     const a_shape = shape.withPartitioning(.{ .m = .x, .n = .y });
-    const b_shape = shape.withTags(.{ .n, .m }).withPartitioning(.{ .n = .x, .m = .y });
+    const b_shape = shape.withPartitioning(.{ .m = .y, .n = .x });
 
     var buffers: zml.aio.BufferStore.Buffers = .{};
     const weight = try zml.slice.arange(allocator, shape, .{});
@@ -154,7 +160,7 @@ pub fn asyncMain() !void {
     const a_buffer = try zml.Buffer.from(platform, a_sharding, a_buffer_slice, .{});
     defer a_buffer.deinit();
 
-    const b_sharding: zml.Sharding = .init(mesh, a_shape);
+    const b_sharding: zml.Sharding = .init(mesh, b_shape);
     log.info("b_sharding: {}", .{b_sharding});
 
     const b_buffer_slice = try zml.slice.arange(allocator, b_shape, .{});
