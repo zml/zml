@@ -333,6 +333,19 @@ test BFloat16 {
     });
 }
 
+pub const Float4E2M1 = packed struct(u4) {
+    mantissa: u1,
+    exponent: u2,
+    sign: u1,
+
+    const Helpers = FloatHelpers(@This());
+    pub const zero = Helpers.zero;
+    pub const neg = Helpers.neg;
+    pub const fromF32 = Helpers.fromF32;
+    pub const toF32 = Helpers.toF32;
+    pub const format = Helpers.format;
+};
+
 pub fn floatCast(T: type, x: anytype) T {
     return switch (T) {
         f64, f32, f16 => switch (@TypeOf(x)) {
