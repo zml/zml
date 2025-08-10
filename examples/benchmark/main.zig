@@ -1,8 +1,9 @@
 const std = @import("std");
-const zml = @import("zml");
-const stdx = @import("stdx");
+
 const asynk = @import("async");
+const stdx = @import("stdx");
 const flags = stdx.flags;
+const zml = @import("zml");
 
 // set log level to debug to print the generated IR
 pub const std_options: std.Options = .{
@@ -10,12 +11,27 @@ pub const std_options: std.Options = .{
     .logFn = asynk.logFn(std.log.defaultLog),
 };
 
-pub fn benchmark(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
-    return a.withSharding(.{.k}).dot(b.withSharding(.{.k}), .{.k}).withSharding(.{.m});
+pub fn benchmark(x: zml.Tensor, q_w: zml.Tensor, q_scale: zml.Tensor) zml.Tensor {
+    return x.dot(dequantize(q_w, q_scale), .{.d});
+}
+
+fn dequantize(quantized_weight: zml.Tensor, q_scale: zml.Tensor) zml.Tensor {
+    var fp4_encoding_buf: [16]zml.floats.BFloat16 = undefined;
+    for (0..16) |i| {
+        const i_u4: u4 = @truncate(i);
+        const f4: zml.floats.Float4E2M1 = @bitCast(i_u4);
+        fp4_encoding_buf[i] = .fromF32(f4.toF32());
+    }
+    std.log.warn("fp4: {d}", .{fp4_encoding_buf});
+    const fp4_encoding: zml.Tensor = .constantTensor(.fromSlice(.{ .fp4 = 16 }, &fp4_encoding_buf));
+
+    const scale: zml.Tensor = .pow(.constant(q_scale.shape(), .init(.bf16, 2)), q_scale.convert(.bf16));
+    const actual_weight = fp4_encoding.gatherValues(.fp4, quantized_weight, .{});
+    return actual_weight.mul(scale.broad(actual_weight.shape())).merge(.{ .d = .{ .block, .d } });
 }
 
 pub fn main() !void {
-    try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain);
+    try asynk.AsyncThread.main(std.heap.smp_allocator, asyncMain);
 }
 
 pub fn asyncMain() !void {
@@ -38,22 +54,25 @@ pub fn asyncMain() !void {
     // Auto-select platform
     const platform = context.autoPlatform(.{}).withCompilationOptions(.{
         .sharding_enabled = true,
+        .xla_dump_to = "/tmp/zml/benchmark",
+        .xla_dump_fusion_visualization = true,
     });
     context.printAvailablePlatforms(platform);
 
     var args = std.process.args();
     const cli_args = flags.parse(&args, CliArgs);
 
-    const a_shape = zml.Shape.init(.{ cli_args.size, cli_args.size }, cli_args.dtype).withTags(.{ .m, .k }).withSharding(.{.k});
-    const b_shape = a_shape.withTags(.{ .k, .n }).withSharding(.{.k});
-    var timer = try std.time.Timer.start();
+    const x_shape: zml.Shape = .init(.{ .b = 16, .d = cli_args.size }, .bf16);
+    const w_shape: zml.Shape = .init(.{ .d_out = cli_args.size, .block = @divExact(cli_args.size, 32), .d = 32 }, .i4);
+    const s_shape: zml.Shape = .init(.{ .d_out = cli_args.size, .block = @divExact(cli_args.size, 32) }, .i8);
 
+    var timer = try std.time.Timer.start();
     std.debug.print("\nCompiling model to MLIR....\n", .{});
     std.debug.print("-" ** 160 ++ "\n", .{});
     // Start compiling.
     // The shape of the input tensor, we have to pass in manually.
     timer.reset();
-    var compilation = try asynk.asyncc(zml.compileFn, .{ allocator, benchmark, .{ a_shape, b_shape }, platform });
+    var compilation = try asynk.asyncc(zml.compileFn, .{ allocator, benchmark, .{ x_shape, w_shape, s_shape }, platform });
 
     // Wait for compilation to finish
     const executable = try compilation.awaitt();
@@ -65,22 +84,24 @@ pub fn asyncMain() !void {
     var rng = std.Random.DefaultPrng.init(0);
     const random = rng.random();
 
-    var a_buffer = try createRandomBuffer(allocator, platform, a_shape, random);
-    defer a_buffer.deinit();
-    var b_buffer = try createRandomBuffer(allocator, platform, b_shape, random);
-    defer b_buffer.deinit();
+    var x = try createRandomBuffer(allocator, platform, x_shape, random);
+    defer x.deinit();
+    var w = try createRandomBuffer(allocator, platform, w_shape, random);
+    defer w.deinit();
+    var s = try createRandomBuffer(allocator, platform, s_shape, random);
+    defer s.deinit();
 
     std.debug.print("\nRunning benchmark....\n", .{});
 
     // Ignore first run
     {
-        var result: zml.Buffer = executable.call(.{ a_buffer, b_buffer });
+        var result: zml.Buffer = executable.call(.{ x, w, s });
         defer result.deinit();
     }
 
     // call our executable module
     timer.reset();
-    var result: zml.Buffer = executable.call(.{ a_buffer, b_buffer });
+    var result: zml.Buffer = executable.call(.{ x, w, s });
     defer result.deinit();
     const elapsed_ns = timer.lap();
     const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_ms;
