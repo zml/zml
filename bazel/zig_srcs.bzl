@@ -1,5 +1,5 @@
 load("@aspect_bazel_lib//lib:tar.bzl", "mtree_spec", "tar")
-load("@rules_zig//zig:defs.bzl", "zig_binary", "BINARY_KIND")
+load("@rules_zig//zig:defs.bzl", "zig_binary")
 
 def zig_srcs(name, zig_bin="", zig_lib=""):
     """For a given zig_library, recursively extract all zig sources into a tarball.
@@ -12,7 +12,6 @@ def zig_srcs(name, zig_bin="", zig_lib=""):
         zig_bin = "{}_bin".format(name)
         zig_binary(
             name = zig_bin,
-            kind = BINARY_KIND.bc,
             tags = ["manual", "@rules_zig//zig/lib:libc"],
             deps = [zig_lib],
         )

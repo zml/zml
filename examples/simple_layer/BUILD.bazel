@@ -1,9 +1,20 @@
 load("@aspect_bazel_lib//lib:tar.bzl", "mtree_spec", "tar")
 load("@aspect_bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
-load("@zml//bazel:zig.bzl", "zig_cc_binary")
+load("@rules_zig//zig:defs.bzl", "zig_asm_binary", "zig_binary")
 
-zig_cc_binary(
+zig_asm_binary(
+    name = "kernel",
+    main = "kernel.zig",
+    extension = ".ptx",
+    copts = [
+        "-target",
+        "nvptx64-cuda-none",
+        "-mcpu=sm_87",
+    ],
+)
+
+zig_binary(
     name = "simple_layer",
     main = "main.zig",
     deps = [

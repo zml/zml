@@ -1,9 +1,16 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("@rules_zig//zig:defs.bzl", "zig_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_shared_library")
 
 cc_library(
     name = "zmlxcuda_lib",
     srcs = ["zmlxcuda.c"],
+    visibility = ["@libpjrt_cuda//:__subpackages__"],
+)
+
+zig_shared_library(
+    name = "zmlxcuda",
+    main = "zmlxcuda.zig",
+    copts = ["-lc"],
     visibility = ["@libpjrt_cuda//:__subpackages__"],
 )
 

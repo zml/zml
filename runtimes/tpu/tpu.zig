@@ -1,12 +1,12 @@
-const builtin = @import("builtin");
 const std = @import("std");
+const builtin = @import("builtin");
 
 const asynk = @import("async");
-const pjrt = @import("pjrt");
-const c = @import("c");
-const stdx = @import("stdx");
 const bazel_builtin = @import("bazel_builtin");
+const c = @import("c");
+const pjrt = @import("pjrt");
 const runfiles = @import("runfiles");
+const stdx = @import("stdx");
 
 const log = std.log.scoped(.@"zml/runtime/tpu");
 
@@ -25,7 +25,7 @@ fn isOnGCP() !bool {
     var f = try asynk.File.open("/sys/devices/virtual/dmi/id/product_name", .{ .mode = .read_only });
     defer f.close() catch {};
 
-    var buf = [_]u8{0} ** GoogleComputeEngine.len;
+    var buf: [GoogleComputeEngine.len]u8 = undefined;
     _ = try f.reader().readAll(&buf);
 
     return std.mem.eql(u8, &buf, GoogleComputeEngine);

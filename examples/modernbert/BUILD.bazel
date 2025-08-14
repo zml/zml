@@ -1,7 +1,7 @@
 load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
-load("@zml//bazel:zig.bzl", "zig_cc_binary")
+load("@rules_zig//zig:defs.bzl", "zig_binary")
 
-zig_cc_binary(
+zig_binary(
     name = "modernbert",
     srcs = ["modernbert.zig"],
     main = "main.zig",
@@ -28,7 +28,7 @@ cc_binary(
     tags = [
         "manual",
     ],
-    deps = [":modernbert_lib"],
+    deps = [":modernbert"],
 )
 
 cc_binary(
@@ -46,10 +46,10 @@ cc_binary(
     tags = [
         "manual",
     ],
-    deps = [":modernbert_lib"],
+    deps = [":modernbert"],
 )
 
-zig_cc_binary(
+zig_binary(
     name = "test-implementation",
     srcs = ["modernbert.zig"],
     args = [

@@ -5,7 +5,7 @@ Our [first model](../tutorials/write_first_model.md) did not need any weights fi
 We just created weights and biases at runtime.
 
 But real-world models typically need weights files, and maybe some other
-supporting files. 
+supporting files.
 
 We recommend, for easy deployments, you upload those files. In many instances,
 you will use a site like [🤗 Hugging Face](https://huggingface.co).
@@ -51,7 +51,7 @@ Then, in your `BUILD.bazel`, you can refer to the files you defined above, in
 the following way:
 
 ```python
-zig_cc_binary(
+zig_binary(
     name = "mnist",
     args = [
         "$(location @com_github_zml_cdn_mnist//file)",
@@ -74,4 +74,3 @@ See how:
 - we use `data = [ ... ]` to reference the files in `weights.bzl`
 - we use `args = [ ... ]` to pass the files as command-line arguments to the
   MNIST executable at runtime, automatically.
-

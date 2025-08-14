@@ -1,5 +1,5 @@
-load("@rules_zig//zig:defs.bzl", "zig_library")
 load("@aspect_bazel_lib//lib:tar.bzl", "mtree_spec", "tar")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_shared_library")
 
 cc_library(
     name = "zmlxrocm_lib",
@@ -7,6 +7,16 @@ cc_library(
     linkopts = [
         "-lc",
         "-ldl",
+    ],
+    visibility = ["@libpjrt_rocm//:__subpackages__"],
+)
+
+zig_shared_library(
+    name = "zmlxrocm",
+    main = "zmlxrocm.zig",
+    copts = ["-lc"],
+    deps = [
+        "//stdx",
     ],
     visibility = ["@libpjrt_rocm//:__subpackages__"],
 )

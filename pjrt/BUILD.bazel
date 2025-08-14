@@ -1,7 +1,6 @@
-load("@rules_zig//zig:defs.bzl", "zig_library")
-load("@zml//bazel:zig.bzl", "zig_cc_binary")
-load("@zml//bazel:zig_srcs.bzl", "zig_srcs")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
 load("@zml//bazel:zig_proto_library.bzl", "zig_proto_library")
+load("@zml//bazel:zig_srcs.bzl", "zig_srcs")
 
 zig_library(
     name = "pjrt",
@@ -50,7 +49,7 @@ zig_proto_library(
     deps = ["@xla//third_party/tsl/tsl/profiler/protobuf:trace_events_proto"],
 )
 
-zig_cc_binary(
+zig_binary(
     name = "xspace_to_json",
     srcs = [
         "convert/trace_container.zig",

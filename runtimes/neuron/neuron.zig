@@ -1,5 +1,5 @@
-const builtin = @import("builtin");
 const std = @import("std");
+const builtin = @import("builtin");
 
 const asynk = @import("async");
 const bazel_builtin = @import("bazel_builtin");
@@ -23,7 +23,7 @@ fn isRunningOnEC2() !bool {
     var f = try asynk.File.open("/sys/devices/virtual/dmi/id/sys_vendor", .{ .mode = .read_only });
     defer f.close() catch {};
 
-    var buf = [_]u8{0} ** AmazonEC2.len;
+    var buf: [AmazonEC2.len]u8 = undefined;
     _ = try f.reader().readAll(&buf);
 
     return std.mem.eql(u8, &buf, AmazonEC2);

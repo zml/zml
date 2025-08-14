@@ -1,6 +1,7 @@
 const std = @import("std");
-const zml = @import("zml");
+
 const asynk = @import("async");
+const zml = @import("zml");
 
 /// Model definition
 const Layer = struct {

@@ -155,6 +155,7 @@
     "https://bazel-registry.zml.ai/modules/rules_python/0.40.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_python/1.3.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_rust/0.60.0/MODULE.bazel": "not found",
+    "https://bazel-registry.zml.ai/modules/rules_rust/0.62.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_shell/0.2.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_shell/0.3.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_shell/0.4.1/MODULE.bazel": "not found",
@@ -366,7 +367,8 @@
     "https://bcr.bazel.build/modules/rules_python/1.3.0/MODULE.bazel": "8361d57eafb67c09b75bf4bbe6be360e1b8f4f18118ab48037f2bd50aa2ccb13",
     "https://bcr.bazel.build/modules/rules_python/1.3.0/source.json": "25932f917cd279c7baefa6cb1d3fa8750a7a29de522024449b19af6eab51f4a0",
     "https://bcr.bazel.build/modules/rules_rust/0.60.0/MODULE.bazel": "911ff2a12d01ac574fd6dfec0b05fa976ff8693d8c2420db637a9f98f697b0ae",
-    "https://bcr.bazel.build/modules/rules_rust/0.60.0/source.json": "2b17f77e27489aa1b86b765a141642a1966a2a35fed0207277f3327fd09ef3d4",
+    "https://bcr.bazel.build/modules/rules_rust/0.62.0/MODULE.bazel": "6a15b57982e278793c684f426e19166e62e73f1bd45fe3b6bcedd0b901177b37",
+    "https://bcr.bazel.build/modules/rules_rust/0.62.0/source.json": "1b3a6551a585ee47cafa21550c5eb87c6f3a56bb9761f9e3421ff1102f220437",
     "https://bcr.bazel.build/modules/rules_shell/0.2.0/MODULE.bazel": "fda8a652ab3c7d8fee214de05e7a9916d8b28082234e8d2c0094505c5268ed3c",
     "https://bcr.bazel.build/modules/rules_shell/0.3.0/MODULE.bazel": "de4402cd12f4cc8fda2354fce179fdb068c0b9ca1ec2d2b17b3e21b24c1a937b",
     "https://bcr.bazel.build/modules/rules_shell/0.4.1/MODULE.bazel": "00e501db01bbf4e3e1dd1595959092c2fadf2087b2852d3f553b5370f5633592",
@@ -4681,7 +4683,7 @@
     },
     "@@rules_rust+//crate_universe:extensions.bzl%crate": {
       "general": {
-        "bzlTransitiveDigest": "w9dJZZyTXj/SlBYlitGslCqlLdGrS0oO0DngHjXtA7s=",
+        "bzlTransitiveDigest": "YWlcbEZ/1fdqy0HNBaFalAKz/RswQbhU7oDvWUZm7cQ=",
         "usagesDigest": "641905SjTVLGtibJNQNQklx/63ZDVAy9joJU2P7P4ho=",
         "recordedFileInputs": {
           "@@zml+//zml/tokenizer/hftokenizers/Cargo.lock": "93198160b29c4607994b405ffa0ad1c29b08df1ad22ec9a711874914bbaadbcb",
@@ -6086,11 +6088,6 @@
             "rules_rust+",
             "rules_rust",
             "rules_rust+"
-          ],
-          [
-            "rules_rust+",
-            "rust_host_tools",
-            "rules_rust++rust_host_tools+rust_host_tools"
           ]
         ]
       }

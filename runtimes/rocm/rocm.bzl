@@ -15,7 +15,7 @@ _UBUNTU_PACKAGES = {
         packages.patchelf(
             name = "libelf1",
             shared_library = "usr/lib/x86_64-linux-gnu/libelf.so.1",
-            set_rpath = '$ORIGIN',
+            set_rpath = "$ORIGIN",
         ),
     ]),
     "libdrm-amdgpu-common": packages.filegroup(name = "amdgpu_ids", srcs = ["opt/amdgpu/share/libdrm/amdgpu.ids"]),
@@ -26,7 +26,10 @@ _UBUNTU_PACKAGES = {
         packages.patchelf(
             name = "libdrm-amdgpu-amdgpu1",
             shared_library = "opt/amdgpu/lib/x86_64-linux-gnu/libdrm_amdgpu.so.1",
-            set_rpath = '$ORIGIN',
+            set_rpath = "$ORIGIN",
+            rename_dynamic_symbols = {
+                "open": "zmlxrocm_open",
+            },
         ),
     ]),
     "libtinfo6": packages.filegroup(name = "libtinfo6", srcs = ["lib/x86_64-linux-gnu/libtinfo.so.6"]),

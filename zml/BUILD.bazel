@@ -1,6 +1,5 @@
 load("@rules_cc//cc:defs.bzl", "cc_library")
-load("@rules_zig//zig:defs.bzl", "zig_library")
-load("//bazel:zig.bzl", "zig_cc_test")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 load("//bazel:zig_proto_library.bzl", "zig_proto_library")
 load("//bazel:zig_srcs.bzl", "zig_srcs")
 
@@ -44,10 +43,9 @@ zig_proto_library(
     deps = ["@xla//xla/pjrt/proto:compile_options_proto"],
 )
 
-
 # All ZML Tests
 
-zig_cc_test(
+zig_test(
     name = "test",
     data = [
         "aio/torch/simple.pt",
@@ -65,5 +63,5 @@ filegroup(
 
 zig_srcs(
     name = "sources",
-    zig_bin = ":test_test_lib",
+    zig_bin = ":test",
 )

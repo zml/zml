@@ -41,9 +41,9 @@ use their rules to define our 5 additional targets:
 load("@aspect_bazel_lib//lib:tar.bzl", "mtree_spec", "tar")
 load("@aspect_bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
-load("@zml//bazel:zig.bzl", "zig_cc_binary")
+load("@rules_zig//zig:defs.bzl", "zig_binary")
 
-zig_cc_binary(
+zig_binary(
     name = "simple_layer",
     main = "main.zig",
     deps = [
@@ -249,10 +249,10 @@ load("@aspect_bazel_lib//lib:expand_template.bzl", "expand_template")
 load("@aspect_bazel_lib//lib:tar.bzl", "mtree_spec", "tar")
 load("@aspect_bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
-load("@zml//bazel:zig.bzl", "zig_cc_binary")
+load("@rules_zig//zig:defs.bzl", "zig_binary")
 
 # The executable
-zig_cc_binary(
+zig_binary(
     name = "mnist",
     args = [
         "$(location @com_github_ggerganov_ggml_mnist//file)",
@@ -375,4 +375,3 @@ MNIST model, including weights and dataset, to the docker registry:
 ```
 bazel run //mnist:push --@zml//runtimes:cuda=true -- --repository index.docker.io/my_org/zml_mnist
 ```
-

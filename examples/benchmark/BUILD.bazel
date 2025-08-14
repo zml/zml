@@ -1,6 +1,6 @@
-load("@zml//bazel:zig.bzl", "zig_cc_binary")
+load("@rules_zig//zig:defs.bzl", "zig_binary")
 
-zig_cc_binary(
+zig_binary(
     name = "benchmark",
     main = "main.zig",
     deps = [

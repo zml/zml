@@ -5,9 +5,9 @@ load("@bazel_skylib//rules:native_binary.bzl", "native_test")
 load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
-load("@zml//bazel:zig.bzl", "zig_cc_binary")
+load("@rules_zig//zig:defs.bzl", "zig_binary")
 
-zig_cc_binary(
+zig_binary(
     name = "llama",
     srcs = [
         "llama.zig",
@@ -37,7 +37,7 @@ cc_binary(
     tags = [
         "manual",
     ],
-    deps = [":llama_lib"],
+    deps = [":llama"],
 )
 
 cc_binary(
@@ -56,7 +56,7 @@ cc_binary(
     tags = [
         "manual",
     ],
-    deps = [":llama_lib"],
+    deps = [":llama"],
 )
 
 cc_binary(
@@ -75,7 +75,7 @@ cc_binary(
     tags = [
         "manual",
     ],
-    deps = [":llama_lib"],
+    deps = [":llama"],
 )
 
 cc_binary(
@@ -94,7 +94,7 @@ cc_binary(
     tags = [
         "manual",
     ],
-    deps = [":llama_lib"],
+    deps = [":llama"],
 )
 
 cc_binary(
@@ -112,7 +112,7 @@ cc_binary(
         "@Karpathy-TinyLlama-Stories15M//file",
         "@Karpathy-TinyLlama-Tokenizer//file",
     ],
-    deps = [":llama_lib"],
+    deps = [":llama"],
 )
 
 write_file(
@@ -121,7 +121,7 @@ write_file(
     content = ['{"bos_token_id":1,"eos_token_id":2,"hidden_act":"silu","hidden_size":288,"intermediate_size":768,"max_position_embeddings":256,"model_type":"llama","num_attention_heads":6,"num_hidden_layers":6,"num_key_value_heads":6,"rms_norm_eps":1e-05,"hf_rope_impl":false,"rope_scaling":null,"rope_theta":10000.0}'],
 )
 
-zig_cc_binary(
+zig_binary(
     name = "test-implementation",
     srcs = ["llama.zig"],
     args = [

@@ -1,4 +1,3 @@
 #!/bin/bash
-cd "$(dirname "${BASH_SOURCE[0]}")"
-cd "$(bazel info workspace)"
-exec bazel run -- @buildifier_prebuilt//:buildifier "$@"
+cd "$(dirname "${BASH_SOURCE[0]}")"/..
+exec bazel run --experimental_convenience_symlinks=ignore -- @buildifier_prebuilt//:buildifier "$@"

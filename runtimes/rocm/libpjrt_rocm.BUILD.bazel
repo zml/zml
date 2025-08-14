@@ -92,6 +92,7 @@ copy_to_directory(
         "rocblas": "lib",
         "opt/amdgpu/lib/x86_64-linux-gnu": "lib",
         "libdrm-amdgpu-amdgpu1": "lib",
+        "opt/amdgpu/share": "share",
     },
     add_directory_to_runfiles = True,
     include_external_repositories = ["**"],

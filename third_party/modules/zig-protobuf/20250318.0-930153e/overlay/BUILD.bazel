@@ -1,5 +1,5 @@
 load("@rules_proto//proto:defs.bzl", "proto_lang_toolchain")
-load("@rules_zig//zig:defs.bzl", "BINARY_KIND", "zig_binary", "zig_library")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
 
 zig_library(
     name = "protobuf",
@@ -15,7 +15,6 @@ zig_binary(
         "bootstrapped-generator/google/protobuf/compiler/plugin.pb.zig",
         "bootstrapped-generator/google/protobuf/descriptor.pb.zig",
     ],
-    kind = BINARY_KIND.exe,
     main = "bootstrapped-generator/main.zig",
     visibility = ["//visibility:public"],
     deps = [":protobuf"],
