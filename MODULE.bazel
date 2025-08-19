@@ -45,6 +45,9 @@ register_toolchains(
     "@toolchains_llvm_bootstrapped//toolchain:linux_aarch64",
 )
 
+uv = use_extension("@rules_python//python/uv:uv.bzl", "uv", dev_dependency = True)
+uv.configure(version = "0.6.5")
+
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
 python.toolchain(python_version = "3.11")
 use_repo(python, "python_versions")

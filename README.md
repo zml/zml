@@ -122,10 +122,10 @@ Once you've been granted access, you're ready to download a gated model like
 
 First, you need to download the model using the [huggingface-cli](https://huggingface.co/docs/huggingface_hub/en/guides/cli).
 Note you don't need to install it yourself,
-you can just use the packaged version `bazel run @zml//tools:hf --`.
+you can just use the packaged version `bazel run //tools/hf --`.
 
 ```
-bazel run @zml//tools:hf -- download meta-llama/Llama-3.1-8B-Instruct --local-dir $HOME/Llama-3.1-8B-Instruct --exclude='*.pth'
+bazel run //tools/hf -- download meta-llama/Llama-3.1-8B-Instruct --local-dir $HOME/Llama-3.1-8B-Instruct --exclude='*.pth'
 ```
 
 Then, you can run the model.
@@ -143,7 +143,7 @@ Like the 8B model above, this model also requires approval. See
 [here](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct) for access requirements.
 
 ```
-bazel run @zml//tools:hf -- download meta-llama/Llama-3.2-1B-Instruct --local-dir $HOME/Llama-3.2-1B-Instruct --exclude='*.pth'
+bazel run //tools/hf -- download meta-llama/Llama-3.2-1B-Instruct --local-dir $HOME/Llama-3.2-1B-Instruct --exclude='*.pth'
 bazel run --config=release //examples/llama -- --hf-model-path=$HOME/Llama-3.2-1B-Instruct
 bazel run --config=release //examples/llama -- --hf-model-path=$HOME/Llama-3.2-1B-Instruct -- --prompt="What is the capital of France?"
 ```
