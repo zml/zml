@@ -1,8 +1,7 @@
 load("@rules_cc//cc:defs.bzl", "cc_library")
-
 load("@rules_zig//zig:defs.bzl", "zig_library")
-load("//bazel:zig_srcs.bzl", "zig_srcs")
 load("//bazel:zig.bzl", "zig_cc_test")
+load("//bazel:zig_srcs.bzl", "zig_srcs")
 
 cc_library(
     name = "c",
@@ -31,11 +30,6 @@ zig_library(
 zig_cc_test(
     name = "test",
     deps = [":mlir"],
-)
-
-cc_static_library(
-    name="mlir_static",
-    deps = ["c"]
 )
 
 zig_srcs(

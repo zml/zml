@@ -30,14 +30,6 @@ zig_srcs(
     zig_bin = ":test_test_lib",
 )
 
-cc_static_library(
-    name="mlir_static",
-    deps = [
-        "//mlir:c",
-        "@stablehlo//:stablehlo_dialect_capi",
-    ]
-)
-
 zig_library(
     name = "stablehlo",
     import_name = "mlir/dialects/stablehlo",
