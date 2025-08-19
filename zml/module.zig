@@ -1,10 +1,11 @@
 const std = @import("std");
 
 const asynk = @import("async");
+const c = @import("c");
 const dialect = @import("mlir/dialects");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
-const xla_pb = @import("//xla:xla_proto");
+const upb = @import("upb");
 
 const BaseExe = @import("exe.zig").BaseExe;
 const Buffer = @import("buffer.zig").Buffer;
@@ -834,6 +835,28 @@ fn storePjrtExecutable(platform: Platform, loaded_executable: *pjrt.LoadedExecut
     try loaded_executable_file.writeAll(serialize_result.bytes);
 }
 
+fn setXlaOverrideFlag(map: *c.upb_Map, flag: []const u8, value: anytype, upb_arena: *c.upb_Arena) !void {
+    const result = c.upb_Map_Set(
+        map,
+        .{ .str_val = upb.stringView(flag) },
+        .{ .msg_val = blk: {
+            const field = try upb.new(c.xla_OptionOverrideProto, upb_arena);
+            switch (@typeInfo(@TypeOf(value))) {
+                .bool => c.xla_OptionOverrideProto_set_bool_field(field, value),
+                .comptime_int, .int => c.xla_OptionOverrideProto_set_int_field(field, @intCast(value)),
+                .comptime_float, .float => c.xla_OptionOverrideProto_set_double_field(field, @floatCast(value)),
+                else => c.xla_OptionOverrideProto_set_string_field(field, upb.stringView(value)),
+            }
+            break :blk @ptrCast(field);
+        } },
+        upb_arena,
+    );
+
+    if (result == false) {
+        return std.mem.Allocator.Error.OutOfMemory;
+    }
+}
+
 fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, module: mlir.Module, xla_dump_to_: ?[]const u8) !*pjrt.LoadedExecutable {
     const tracer = Tracer.init("ai.zml.compilation");
     const compile_frame = tracer.frameStart("pjrt compilation");
@@ -841,84 +864,81 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, m
 
     const sharding = platform.sharding();
 
-    var options: xla_pb.CompileOptionsProto = .{
-        .executable_build_options = .{
-            .device_ordinal = -1,
-            .num_replicas = sharding.num_replicas,
-            .num_partitions = sharding.num_partitions,
-            .use_spmd_partitioning = sharding.num_partitions > 1 or sharding.num_replicas > 1,
-            .device_assignment = .{
-                .replica_count = sharding.num_replicas,
-                .computation_count = sharding.num_partitions,
-                // Filled below.
-                .computation_devices = .{},
+    var upb_alloc: upb.Allocator = .init(arena);
+    const upb_arena = c.upb_Arena_Init(null, 0, upb_alloc.inner());
+    defer c.upb_Arena_Free(upb_arena);
+
+    const options = blk: {
+        const options = try upb.new(c.xla_CompileOptionsProto, upb_arena);
+        c.xla_CompileOptionsProto_set_executable_build_options(options, executable_build_options_blk: {
+            const exec_build_options = try upb.new(c.xla_ExecutableBuildOptionsProto, upb_arena);
+
+            c.xla_ExecutableBuildOptionsProto_set_device_ordinal(exec_build_options, -1);
+            c.xla_ExecutableBuildOptionsProto_set_num_replicas(exec_build_options, sharding.num_replicas);
+            c.xla_ExecutableBuildOptionsProto_set_num_partitions(exec_build_options, sharding.num_partitions);
+            c.xla_ExecutableBuildOptionsProto_set_use_spmd_partitioning(exec_build_options, sharding.num_partitions > 1 or sharding.num_replicas > 1);
+
+            c.xla_ExecutableBuildOptionsProto_set_device_assignment(exec_build_options, device_assignment_blk: {
+                const device_assignment = try upb.new(c.xla_DeviceAssignmentProto, upb_arena);
+
+                c.xla_DeviceAssignmentProto_set_replica_count(device_assignment, sharding.num_replicas);
+                c.xla_DeviceAssignmentProto_set_computation_count(device_assignment, sharding.num_partitions);
+
+                const computation_devices = c.xla_DeviceAssignmentProto_resize_computation_devices(device_assignment, sharding.num_partitions, upb_arena);
+                for (computation_devices[0..sharding.num_partitions], 0..) |*computation_device, i| {
+                    computation_device.* = try upb.new(c.xla_DeviceAssignmentProto_ComputationDevice, upb_arena);
+                    _ = c.xla_DeviceAssignmentProto_ComputationDevice_add_replica_device_ids(computation_device.*, @intCast(i), upb_arena);
+                }
+                break :device_assignment_blk device_assignment;
+            });
+
+            break :executable_build_options_blk exec_build_options;
+        });
+
+        const overrides_map = c._xla_CompileOptionsProto_env_option_overrides_mutable_upb_map(options, upb_arena);
+        switch (platform.target) {
+            .cuda => {
+                // NVIDIA recommends these settings
+                // https://github.com/NVIDIA/JAX-Toolbox?tab=readme-ov-file#environment-variables
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_triton_gemm", false, upb_arena);
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_latency_hiding_scheduler", true, upb_arena);
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_llvm_module_compilation_parallelism", true, upb_arena);
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_libnvptxcompiler", true, upb_arena);
             },
-        },
+            .rocm => {
+                // Disable Triton GEMM on ROCM. For some reason it's much, much slower when
+                // enabled on CDNA and it's used on RDNA. Disable it altogether.
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_triton_gemm", false, upb_arena);
+                // Use lld from libllvm instead of invoking the ld.lld binary.
+                // This saves us from having to sandbox it.
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_use_inprocess_lld", true, upb_arena);
+            },
+            else => {},
+        }
+
+        if (xla_dump_to_ orelse platform.compilation_options.xla_dump_to) |xla_dump_to| {
+            try setXlaOverrideFlag(overrides_map, "xla_dump_to", xla_dump_to, upb_arena);
+            try setXlaOverrideFlag(overrides_map, "xla_dump_hlo_as_proto", true, upb_arena);
+            if (platform.compilation_options.xla_dump_fusion_visualization) {
+                try setXlaOverrideFlag(overrides_map, "xla_dump_fusion_visualization", true, upb_arena);
+            }
+            if (platform.compilation_options.xla_dump_hlo_pass_re) |re| {
+                try setXlaOverrideFlag(overrides_map, "xla_dump_hlo_pass_re", re, upb_arena);
+            }
+        }
+
+        break :blk options;
     };
-    const computation_devices = &options.executable_build_options.?.device_assignment.?.computation_devices;
-    try computation_devices.ensureTotalCapacity(arena, sharding.num_partitions);
-    const replica_device_ids = try arena.alloc(i64, sharding.num_partitions);
-    for (0..sharding.num_partitions) |i| {
-        replica_device_ids[i] = @intCast(i);
-        computation_devices.appendAssumeCapacity(.{ .replica_device_ids = .fromOwnedSlice(replica_device_ids[i .. i + 1]) });
-    }
 
-    // Let the arena deinit, zig-protobuf deinit is very slow.
-    try options.env_option_overrides.ensureUnusedCapacity(arena, 16);
-    if (xla_dump_to_ orelse platform.compilation_options.xla_dump_to) |xla_dump_to| {
-        setFlag(&options, "xla_dump_to", xla_dump_to);
-        setFlag(&options, "xla_dump_hlo_as_proto", true);
-        if (platform.compilation_options.xla_dump_fusion_visualization) {
-            setFlag(&options, "xla_dump_fusion_visualization", true);
-        }
-        if (platform.compilation_options.xla_dump_hlo_pass_re) |re| {
-            setFlag(&options, "xla_dump_hlo_pass_re", re);
-        }
-    }
-    switch (platform.target) {
-        .cuda => {
-            // NVIDIA recommends these settings
-            // https://github.com/NVIDIA/JAX-Toolbox?tab=readme-ov-file#environment-variables
-            setFlag(&options, "xla_gpu_enable_triton_gemm", false);
-            setFlag(&options, "xla_gpu_enable_latency_hiding_scheduler", true);
-            setFlag(&options, "xla_gpu_enable_llvm_module_compilation_parallelism", true);
-            setFlag(&options, "xla_gpu_enable_libnvptxcompiler", true);
-            //  setFlag(&options, "xla_gpu_enable_cudnn_fmha", true);
-            //  setFlag(&options, "xla_gpu_fused_attention_use_cudnn_rng", true);
-            //  setFlag(&options, "xla_gpu_enable_cudnn_layer_norm", true);
-            //  setFlag(&options, "xla_gpu_enable_custom_fusions", true);
-            //  setFlags(&options, "xla_gpu_enable_address_computation_fusion", true);
-            //  setFlag(&options, "xla_gpu_enable_dynamic_slice_fusion", true);
-            //  setFlag(&options, "xla_gpu_enable_while_loop_double_buffering", true);
-            //  setFlag(&options, "xla_gpu_use_runtime_fusion", true);
-        },
-        .rocm => {
-            // Disable Triton GEMM on ROCM. For some reason it's much, much slower when
-            // enabled on CDNA and it's used on RDNA. Disable it altogether.
-            setFlag(&options, "xla_gpu_enable_triton_gemm", false);
-            // Use lld from libllvm instead of invoking the ld.lld binary.
-            // This saves us from having to sandbox it.
-            setFlag(&options, "xla_gpu_use_inprocess_lld", true);
-        },
-        else => {},
-    }
-
-    const options_bytes = try options.encode(arena);
-
-    const loaded_executable = try platform.pjrt_client.compile(platform.pjrt_api, arena, module, options_bytes);
+    const loaded_executable = try platform.pjrt_client.compile(
+        platform.pjrt_api,
+        arena,
+        module,
+        try upb.serialize(options, upb_arena),
+    );
     errdefer loaded_executable.deinit();
 
     return loaded_executable;
-}
-
-fn setFlag(options: *xla_pb.CompileOptionsProto, comptime flag: [:0]const u8, value: anytype) void {
-    const option: xla_pb.OptionOverrideProto = switch (@typeInfo(@TypeOf(value))) {
-        .bool => .{ .value = .{ .bool_field = value } },
-        .comptime_int, .int => .{ .value = .{ .int_field = value } },
-        .comptime_float, .float => .{ .value = .{ .double_field = value } },
-        else => .{ .value = .{ .string_field = .{ .Const = value } } },
-    };
-    options.env_option_overrides.appendAssumeCapacity(.{ .key = .{ .Const = flag }, .value = option });
 }
 
 /// Visit the given struct and recursively counts the number of tensors found.
