@@ -735,16 +735,25 @@ pub const CustomCallOpts = struct {
     call_target_name: [:0]const u8,
     has_side_effect: bool,
     backend_config: ?mlir.Attribute,
-    operand_layouts: ?[]const []const usize = null,
-    result_layouts: ?[]const []const usize = null,
+    operand_layouts: ?[]const []const u64 = null,
+    result_layouts: ?[]const []const u64 = null,
     output_operand_aliases: []const i64 = &.{},
     additional_attributes: []const mlir.AttrTuple = &.{},
     api_version: ApiVersion,
 };
 
-pub fn custom_call(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCallOpts, res_types: []const mlir.Type, location: mlir.Location) mlir.Operation {
-    const MAX_OPERANDS = 64;
+pub fn custom_call(
+    ctx: mlir.Context,
+    inputs: []const mlir.Value,
+    opts: CustomCallOpts,
+    res_types: []const mlir.Type,
+    location: mlir.Location,
+) mlir.Operation {
+    // This constraints are a bit annoying. The main issue is that we don't have access
+    // to the memory allocator of the mlir context,
+    // so we allocate on the stack when we need to.
     const MAX_RESULTS = 16;
+    const MAX_OPERANDS = 64;
 
     const backend_config = opts.backend_config orelse mlir.Attribute.string(ctx, "");
     if (@intFromEnum(opts.api_version) < @intFromEnum(CustomCallOpts.ApiVersion.typed_ffi)) {
@@ -761,22 +770,20 @@ pub fn custom_call(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCa
         );
     }
 
-    var attrs: std.BoundedArray(mlir.AttrTuple, 32) = .{};
-    attrs.appendSliceAssumeCapacity(&[_]mlir.AttrTuple{
-        .{ "api_version", .int(ctx, .i32, @intFromEnum(opts.api_version)) },
-        .{ "call_target_name", .string(ctx, opts.call_target_name) },
-        .{ "has_side_effect", .boolean(ctx, opts.has_side_effect) },
-        .{ "backend_config", backend_config },
+    var op: mlir.OperationState = .init("stablehlo.custom_call", location);
+    op.addAttributes(&[_]mlir.NamedAttribute{
+        .named(ctx, "api_version", .int(ctx, .i32, @intFromEnum(opts.api_version))),
+        .named(ctx, "call_target_name", .string(ctx, opts.call_target_name)),
+        .named(ctx, "has_side_effect", .boolean(ctx, opts.has_side_effect)),
+        .named(ctx, "backend_config", backend_config),
     });
 
     {
-        var output_operand_aliases: std.BoundedArray(mlir.Attribute, MAX_RESULTS) = .{};
-        for (opts.output_operand_aliases) |alias| {
-            output_operand_aliases.appendAssumeCapacity(
-                OutputOperandAliasAttribute.init(ctx, &.{}, alias, &.{}).asAttr(),
-            );
+        var output_operand_aliases: [MAX_RESULTS]mlir.Attribute = undefined;
+        for (0.., opts.output_operand_aliases) |i, alias| {
+            output_operand_aliases[i] = OutputOperandAliasAttribute.init(ctx, &.{}, alias, &.{}).asAttr();
         }
-        attrs.appendAssumeCapacity(.{ "output_operand_aliases", .array(ctx, output_operand_aliases.constSlice()) });
+        op.addAttribute(ctx, "output_operand_aliases", .array(ctx, output_operand_aliases[0..opts.output_operand_aliases.len]));
     }
 
     const MINOR_TO_MAJOR = blk: {
@@ -788,52 +795,45 @@ pub fn custom_call(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCa
         break :blk ret;
     };
 
-    if (opts.operand_layouts) |layouts| {
-        var operand_layouts: std.BoundedArray(mlir.Attribute, MAX_OPERANDS) = .{};
-        for (layouts) |ol| {
-            operand_layouts.appendAssumeCapacity(.denseElements(ctx, &.{@intCast(ol.len)}, .index, ol));
+    var operand_layouts: [MAX_OPERANDS]mlir.Attribute = undefined;
+    if (opts.operand_layouts) |in_layouts| {
+        stdx.debug.assert(in_layouts.len == inputs.len, "Expected {} operand_layouts, got {}", .{ in_layouts.len, inputs.len });
+        for (0.., in_layouts) |i, il| {
+            operand_layouts[i] = .denseElements(ctx, &.{@intCast(il.len)}, .index, il);
         }
-        attrs.appendAssumeCapacity(.{ "operand_layouts", .array(ctx, operand_layouts.constSlice()) });
     } else {
-        const operand_layouts = blk: {
-            var ret: std.BoundedArray(mlir.Attribute, MAX_OPERANDS) = .{};
-            for (inputs) |input| {
-                const ranked_type = input.getType().as(mlir.RankedTensorType).?;
-                const ol = MINOR_TO_MAJOR[MINOR_TO_MAJOR.len - ranked_type.getRank() ..];
-                ret.appendAssumeCapacity(.denseElements(ctx, &.{@intCast(ol.len)}, .index, ol));
-            }
-            break :blk ret;
-        };
-        attrs.appendAssumeCapacity(.{ "operand_layouts", .array(ctx, operand_layouts.constSlice()) });
+        for (0.., inputs) |i, input| {
+            const ranked_type = input.getType().as(mlir.RankedTensorType).?;
+            const ol = MINOR_TO_MAJOR[MINOR_TO_MAJOR.len - ranked_type.getRank() ..];
+            operand_layouts[i] = .denseElements(ctx, &.{@intCast(ol.len)}, .index, ol);
+        }
     }
+    op.addAttribute(ctx, "operand_layouts", .array(ctx, operand_layouts[0..inputs.len]));
 
+    var result_layouts: [MAX_RESULTS]mlir.Attribute = undefined;
     if (opts.result_layouts) |layouts| {
-        var result_layouts: std.BoundedArray(mlir.Attribute, MAX_RESULTS) = .{};
-        for (layouts) |rl| {
-            result_layouts.appendAssumeCapacity(.denseElements(ctx, &.{@intCast(rl.len)}, .index, rl));
+        stdx.debug.assert(res_types.len == layouts.len, "Expected {} result_layouts, got {}", .{ res_types.len, layouts.len });
+        for (0.., layouts) |i, layout| {
+            result_layouts[i] = .denseElements(ctx, &.{@intCast(layout.len)}, .index, layout);
         }
-        attrs.appendAssumeCapacity(.{ "result_layouts", .array(ctx, result_layouts.constSlice()) });
     } else {
-        const result_layouts = blk: {
-            var ret: std.BoundedArray(mlir.Attribute, MAX_RESULTS) = .{};
-            for (res_types) |t| {
-                const ranked_t = t.as(mlir.RankedTensorType).?;
-                const rl = MINOR_TO_MAJOR[MINOR_TO_MAJOR.len - ranked_t.getRank() ..];
-                ret.appendAssumeCapacity(.denseElements(ctx, &.{@intCast(rl.len)}, .index, rl));
-            }
-            break :blk ret;
-        };
-        attrs.appendAssumeCapacity(.{ "result_layouts", .array(ctx, result_layouts.constSlice()) });
+        for (0.., res_types) |i, t| {
+            const ranked_t = t.as(mlir.RankedTensorType).?;
+            const rl = MINOR_TO_MAJOR[MINOR_TO_MAJOR.len - ranked_t.getRank() ..];
+            result_layouts[i] = .denseElements(ctx, &.{@intCast(rl.len)}, .index, rl);
+        }
+    }
+    op.addAttribute(ctx, "result_layouts", .array(ctx, result_layouts[0..res_types.len]));
+
+    for (opts.additional_attributes) |name_attr| {
+        const name, const attr = name_attr;
+        op.addAttribute(ctx, name, attr);
     }
 
-    attrs.appendSlice(opts.additional_attributes) catch @panic("Too many additional_attributes");
-
-    return mlir.Operation.make(ctx, "stablehlo.custom_call", .{
-        .operands = inputs,
-        .results = res_types,
-        .attributes = attrs.constSlice(),
-        .location = location,
-    });
+    const new_op = mlir.Operation.init(&op) catch {
+        @panic("Failed to create custom_call operation");
+    };
+    return new_op;
 }
 
 pub const DotDimensionNumbersAttribute = struct {

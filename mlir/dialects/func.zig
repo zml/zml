@@ -14,20 +14,22 @@ pub fn func(
         location: mlir.Location,
     },
 ) mlir.Operation {
-    var attrs_tuple_buffer = std.BoundedArray(mlir.AttrTuple, 4){};
-    attrs_tuple_buffer.appendAssumeCapacity(.{ "sym_name", .string(ctx, args.sym_name) });
-    attrs_tuple_buffer.appendAssumeCapacity(.{ "function_type", .type_(.function(ctx, args.args, args.results)) });
+    var attrs_buf: [4]mlir.AttrTuple = undefined;
+    // TODO(0.15.0): fromBuffer
+    var attrs: std.ArrayListUnmanaged(mlir.AttrTuple) = .{ .items = attrs_buf[0..0], .capacity = attrs_buf.len };
+    attrs.appendAssumeCapacity(.{ "sym_name", .string(ctx, args.sym_name) });
+    attrs.appendAssumeCapacity(.{ "function_type", .type_(.function(ctx, args.args, args.results)) });
     if (args.arg_attrs.len > 0) {
-        attrs_tuple_buffer.appendAssumeCapacity(.{ "arg_attrs", .array(ctx, args.arg_attrs) });
+        attrs.appendAssumeCapacity(.{ "arg_attrs", .array(ctx, args.arg_attrs) });
     }
 
     if (args.res_attrs.len > 0) {
-        attrs_tuple_buffer.appendAssumeCapacity(.{ "res_attrs", .array(ctx, args.res_attrs) });
+        attrs.appendAssumeCapacity(.{ "res_attrs", .array(ctx, args.res_attrs) });
     }
 
     return mlir.Operation.make(ctx, "func.func", .{
         .blocks = &.{args.block},
-        .attributes = attrs_tuple_buffer.constSlice(),
+        .attributes = attrs.items,
         .location = args.location,
     });
 }
