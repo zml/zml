@@ -754,23 +754,21 @@ pub const Operation = struct {
             state.addOperands(operands);
         } else if (args.variadic_operands) |operands_segments| {
             const MAX_SEGMENTS = 32;
-            var segments: std.BoundedArray(i32, MAX_SEGMENTS) = .{};
-
-            for (operands_segments) |operands| {
+            var segments: [MAX_SEGMENTS]i32 = undefined;
+            for (0.., operands_segments) |i, operands| {
                 state.addOperands(operands);
-                segments.appendAssumeCapacity(@intCast(operands.len));
+                segments[i] = @intCast(operands.len);
             }
-            state.addAttribute(ctx, "operandSegmentSizes", .denseElements(ctx, &.{@intCast(segments.len)}, .i32, segments.constSlice()));
+            state.addAttribute(ctx, "operandSegmentSizes", .denseElements(ctx, &.{@intCast(operands_segments.len)}, .i32, segments[0..operands_segments.len]));
         } else if (args.tt_variadic_operands) |operands_segments| {
             // stablehlo and triton seems to disagree on the expected type of operandSegmentSizes, let's fix that.
             const MAX_SEGMENTS = 32;
-            var segments: std.BoundedArray(i32, MAX_SEGMENTS) = .{};
-
-            for (operands_segments) |operands| {
+            var segments: [MAX_SEGMENTS]i32 = undefined;
+            for (0.., operands_segments) |i, operands| {
                 state.addOperands(operands);
-                segments.appendAssumeCapacity(@intCast(operands.len));
+                segments[i] = @intCast(operands.len);
             }
-            state.addAttribute(ctx, "operandSegmentSizes", .dense(ctx, .i32, segments.constSlice()));
+            state.addAttribute(ctx, "operandSegmentSizes", .dense(ctx, .i32, segments[0..operands_segments.len]));
         }
         if (args.result_type_inference) |enable| {
             state.resultTypeInference(enable);
