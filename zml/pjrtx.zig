@@ -5,7 +5,6 @@ const dialects = @import("mlir/dialects");
 const mlir = @import("mlir");
 const pjrt = @import("pjrt");
 pub const ffi = pjrt.ffi;
-pub const Profiler = pjrt.Profiler;
 pub const ApiError = pjrt.ApiError;
 pub const ErrorCode = pjrt.ErrorCode;
 pub const ExecuteContext = pjrt.ExecuteContext;
@@ -107,13 +106,6 @@ pub const Client = opaque {
 
     pub fn compile(self: *const Client, api: *const Api, allocator: std.mem.Allocator, module: mlir.Module, compile_options_pb: []const u8) CompileError!*LoadedExecutable {
         return try asynk.callBlocking(compileSync, .{ self, api, allocator, module, compile_options_pb });
-    }
-
-    /// Returns the Profiler for this API.
-    /// Not all platform have a profiling api, for those the profiler object will do nothing.
-    /// Platforms with known profiler extensions: cuda, xpu
-    pub fn getProfiler(self: *const Client, api: *const Api, options: pjrt.Profiler.Options) pjrt.Profiler {
-        return self.inner().getProfiler(api, options);
     }
 
     pub fn addressableMemories(self: *const Client, api: *const Api) []*const Memory {
