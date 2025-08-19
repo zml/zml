@@ -78,9 +78,6 @@ common          --incompatible_disallow_empty_glob=false
 common:macos    --action_env=MACOSX_DEPLOYMENT_TARGET=13.0
 common:macos    --macos_sdk_version=13.0
 
-# Used by the tsl overlay in python_init_repositories for the bazelified xla module 20241025.0-4663f04 and later
-common          --repo_env=HERMETIC_PYTHON_VERSION=3.11
-
 # Don't detect the local C++ toolchain, be fully hermetic
 # This is done only on Linux for now since we use the local toolchain on macOS
 common:linux    --repo_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
