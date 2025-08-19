@@ -126,6 +126,7 @@ pub const Allocator = struct {
     }
 
     fn alloc_impl(alloc: [*c]c.upb_alloc, ptr: ?*anyopaque, oldsize: usize, size: usize, actual_size: [*c]usize) callconv(.c) ?*anyopaque {
+        const PointerAlignedSlice = [*c]align(@alignOf(*anyopaque)) u8;
         const upb_alloc: *c.upb_alloc = alloc orelse return null;
         const self: *Allocator = @fieldParentPtr("upb_alloc", upb_alloc);
         defer {
@@ -134,7 +135,7 @@ pub const Allocator = struct {
             }
         }
         if (ptr) |ptr_| {
-            const ptr_as_slice: []u8 = @as([*c]u8, @ptrCast(ptr_))[0..oldsize];
+            const ptr_as_slice: []u8 = @as(PointerAlignedSlice, @ptrCast(@alignCast(ptr_)))[0..oldsize];
             if (size == 0) {
                 self.allocator.free(ptr_as_slice);
                 return null;
@@ -144,6 +145,6 @@ pub const Allocator = struct {
             @panic("Unsupported case");
         }
 
-        return (self.allocator.alloc(u8, size) catch return null).ptr;
+        return @ptrCast(self.allocator.alignedAlloc(u8, @alignOf(*anyopaque), size) catch return null);
     }
 };

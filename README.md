@@ -103,11 +103,10 @@ compile it, and classify a randomly picked example from the test dataset.
 On the command line:
 
 ```
-cd examples
-bazel run --config=release //mnist
+bazel run --config=release //examples/mnist
 
 # or
-./bazel.sh run --config=release //mnist
+./bazel.sh run --config=release //examples/mnist
 ```
 
 
@@ -132,9 +131,8 @@ bazel run @zml//tools:hf -- download meta-llama/Llama-3.1-8B-Instruct --local-di
 Then, you can run the model.
 
 ```
-cd examples
-bazel run --config=release //llama -- --hf-model-path=$HOME/Llama-3.1-8B-Instruct
-bazel run --config=release //llama -- --hf-model-path=$HOME/Llama-3.1-8B-Instruct --prompt="What is the capital of France?"
+bazel run --config=release //examples/llama -- --hf-model-path=$HOME/Llama-3.1-8B-Instruct
+bazel run --config=release //examples/llama -- --hf-model-path=$HOME/Llama-3.1-8B-Instruct --prompt="What is the capital of France?"
 ```
 
 You can also try `Llama-3.1-70B-Instruct` if you have enough memory.
@@ -146,9 +144,8 @@ Like the 8B model above, this model also requires approval. See
 
 ```
 bazel run @zml//tools:hf -- download meta-llama/Llama-3.2-1B-Instruct --local-dir $HOME/Llama-3.2-1B-Instruct --exclude='*.pth'
-cd examples
-bazel run --config=release //llama -- --hf-model-path=$HOME/Llama-3.2-1B-Instruct
-bazel run --config=release //llama -- --hf-model-path=$HOME/Llama-3.2-1B-Instruct -- --prompt="What is the capital of France?"
+bazel run --config=release //examples/llama -- --hf-model-path=$HOME/Llama-3.2-1B-Instruct
+bazel run --config=release //examples/llama -- --hf-model-path=$HOME/Llama-3.2-1B-Instruct -- --prompt="What is the capital of France?"
 ```
 
 For a larger 3.2 model, you can also try `Llama-3.2-3B-Instruct`.
@@ -170,8 +167,7 @@ So, to run the Llama 3.1 8B model from above on your host sporting an NVIDIA GPU
 run the following:
 
 ```
-cd examples
-bazel run --config=release //llama                       \
+bazel run --config=release //examples/llama                       \
           --@zml//runtimes:cuda=true                     \
           -- --hf-model-path=$HOME/Llama-3.1-8B-Instruct \
           --prompt="What is the capital of France?"

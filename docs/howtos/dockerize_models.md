@@ -133,8 +133,7 @@ platform_transition_filegroup(
 And that's almost it! You can already build the image:
 
 ```
-# cd examples
-bazel build --config=release //simple_layer:image
+bazel build --config=release //examples/simple_layer:image
 
 INFO: Analyzed target //simple_layer:image (1 packages loaded, 8 targets configured).
 INFO: Found 1 target...
@@ -375,4 +374,3 @@ MNIST model, including weights and dataset, to the docker registry:
 ```
 bazel run //mnist:push --@zml//runtimes:cuda=true -- --repository index.docker.io/my_org/zml_mnist
 ```
-

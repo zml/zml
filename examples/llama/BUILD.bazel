@@ -1,11 +1,8 @@
-load("@aspect_bazel_lib//lib:expand_template.bzl", "expand_template")
 load("@aspect_bazel_lib//lib:tar.bzl", "mtree_spec", "tar")
 load("@aspect_bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
-load("@bazel_skylib//rules:native_binary.bzl", "native_test")
-load("@bazel_skylib//rules:write_file.bzl", "write_file")
-load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
-load("@zml//bazel:zig.bzl", "zig_cc_binary")
+load("//bazel:zig.bzl", "zig_cc_binary")
 
 zig_cc_binary(
     name = "llama",
@@ -14,65 +11,58 @@ zig_cc_binary(
     ],
     main = "main.zig",
     deps = [
+        "//async",
+        "//stdx",
+        "//zml",
         "@com_github_hejsil_clap//:clap",
-        "@zml//async",
-        "@zml//stdx",
-        "@zml//zml",
     ],
 )
 
-zig_cc_binary(
-    name = "test-implementation",
-    srcs = ["llama.zig"],
-    args = [
-        "--weights=$(location @Meta-Llama-3.1-8B-Instruct//:model.safetensors.index.json)",
-        "--config=$(location @Meta-Llama-3.1-8B-Instruct//:config.json)",
-    ],
-    data = [
-        "@Meta-Llama-3.1-8B-Instruct//:config.json",
-        "@Meta-Llama-3.1-8B-Instruct//:model.safetensors.index.json",
-    ],
-    main = "test.zig",
-    tags = [
-        "manual",
-    ],
-    deps = [
-        "@zml//async",
-        "@zml//stdx",
-        "@zml//zml",
-    ],
-)
+# TODO(steeve): Re-enable when rules_zig linkmode is fixed.
+#
+# zig_cc_binary(
+#     name = "test-implementation",
+#     srcs = ["llama.zig"],
+#     args = [
+#         "--weights=$(location @Meta-Llama-3.1-8B-Instruct//:model.safetensors.index.json)",
+#         "--config=$(location @Meta-Llama-3.1-8B-Instruct//:config.json)",
+#     ],
+#     data = [
+#         "@Meta-Llama-3.1-8B-Instruct//:config.json",
+#         "@Meta-Llama-3.1-8B-Instruct//:model.safetensors.index.json",
+#     ],
+#     main = "test.zig",
+#     deps = [
+#         "//async",
+#         "//stdx",
+#         "//zml",
+#     ],
+# )
 
-native_test(
-    name = "test_tokenizer",
-    src = "@zml//zml/tokenizer:main",
-    # Note: all Llama-3.x tokenizers are the same,
-    # but using the 3.2-1B version because downloading the tokenizer triggers downloading the model.
-    args = [
-        "--tokenizer=$(location @Meta-Llama-3.2-1B-Instruct//:tokenizer.json)",
-        """--prompt='Examples of titles:
-📉 Stock Market Trends
-🍪 Perfect Chocolate Chip Recipe
-Evolution of Music Streaming
-Remote Work Productivity Tips
-Artificial Intelligence in Healthcare
-🎮 Video Game Development Insights
-'""",
-        # this correspond to encoding with HF tokenizers, with bos=False
-        "--expected=41481,315,15671,512,9468,241,231,12937,8152,50730,198,9468,235,103,24118,39520,32013,26371,198,35212,3294,315,10948,45910,198,25732,5664,5761,1968,26788,198,9470,16895,22107,304,39435,198,9468,236,106,8519,4140,11050,73137,198",
-    ],
-    data = ["@Meta-Llama-3.2-1B-Instruct//:tokenizer.json"],
-    tags = [
-        "manual",
-    ],
-)
+# native_test(
+#     name = "test_tokenizer",
+#     src = "//zml/tokenizer:main",
+#     # Note: all Llama-3.x tokenizers are the same,
+#     # but using the 3.2-1B version because downloading the tokenizer triggers downloading the model.
+#     args = [
+#         "--tokenizer=$(location @Meta-Llama-3.2-1B-Instruct//:tokenizer.json)",
+#         """--prompt='Examples of titles:
+# 📉 Stock Market Trends
+# 🍪 Perfect Chocolate Chip Recipe
+# Evolution of Music Streaming
+# Remote Work Productivity Tips
+# Artificial Intelligence in Healthcare
+# 🎮 Video Game Development Insights
+# '""",
+#         # this correspond to encoding with HF tokenizers, with bos=False
+#         "--expected=41481,315,15671,512,9468,241,231,12937,8152,50730,198,9468,235,103,24118,39520,32013,26371,198,35212,3294,315,10948,45910,198,25732,5664,5761,1968,26788,198,9470,16895,22107,304,39435,198,9468,236,106,8519,4140,11050,73137,198",
+#     ],
+#     data = ["@Meta-Llama-3.2-1B-Instruct//:tokenizer.json"],
+# )
 
 mtree_spec(
     name = "mtree",
     srcs = [":llama"],
-    tags = [
-        "manual",
-    ],
 )
 
 tar(
@@ -80,54 +70,48 @@ tar(
     srcs = [":llama"],
     args = [
         "--options",
-        "zstd:compression-level=9",
+        ",".join([
+            "zstd:compression-level=9",
+            "zstd:threads=16",
+        ]),
     ],
     compress = "zstd",
     mtree = ":mtree",
-    tags = [
-        "manual",
-    ],
 )
 
 oci_image(
     name = "image_",
-    base = "@distroless_cc_debian12_debug",
-    entrypoint = ["./{}/llama".format(package_name())],
-    tags = [
-        "manual",
+    base = "@distroless_cc_debian12",
+    entrypoint = ["/{}/llama".format(package_name())],
+    target_compatible_with = [
+        "@platforms//os:linux",
     ],
-    tars = [
-        "@zml//runtimes:layers",
-        ":archive",
-    ],
+    tars = [":archive"],
 )
 
 platform_transition_filegroup(
     name = "image",
     srcs = [":image_"],
-    tags = [
-        "manual",
-    ],
-    target_platform = "@zml//platforms:linux_amd64",
+    tags = ["manual"],
+    target_platform = "//platforms:linux_amd64",
 )
 
 oci_load(
     name = "load",
     image = ":image",
-    repo_tags = [
-        "distroless/llama:latest",
-    ],
-    tags = [
-        "manual",
-    ],
+    repo_tags = ["zmlai/llama:latest"],
+    tags = ["manual"],
 )
 
 oci_push(
     name = "push",
     image = ":image",
     remote_tags = ["latest"],
-    repository = "index.docker.io/steeve/llama",
-    tags = [
-        "manual",
-    ],
+    repository = "index.docker.io/zmlai/llama",
+    tags = ["manual"],
+)
+
+build_test(
+    name = "test",
+    targets = [":llama"],
 )

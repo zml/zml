@@ -2,25 +2,26 @@ module(
     name = "zml",
 )
 
-bazel_dep(name = "abseil-cpp", version = "20240722.0.bcr.2")
+bazel_dep(name = "abseil-cpp", version = "20250814.0")
 bazel_dep(name = "aspect_bazel_lib", version = "2.14.0")
 bazel_dep(name = "aspect_rules_py", version = "1.3.2")
-bazel_dep(name = "bazel_skylib", version = "1.7.1")
+bazel_dep(name = "bazel_skylib", version = "1.8.1")
 bazel_dep(name = "libxev", version = "20250718.0-9f785d2")
 bazel_dep(name = "patchelf", version = "0.18.0")
 bazel_dep(name = "pcre2", version = "10.43")
-bazel_dep(name = "platforms", version = "0.0.11")
+bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "protobuf", version = "32.0", repo_name = "com_google_protobuf")
-bazel_dep(name = "rules_cc", version = "0.1.1")
+bazel_dep(name = "rules_cc", version = "0.2.0")
 bazel_dep(name = "rules_distroless", version = "0.5.1")
 bazel_dep(name = "rules_proto", version = "7.1.0")
-bazel_dep(name = "rules_python", version = "0.40.0")
+bazel_dep(name = "rules_oci", version = "2.2.6")
+bazel_dep(name = "rules_python", version = "1.5.3")
 bazel_dep(name = "rules_rust", version = "0.62.0")
 bazel_dep(name = "rules_uv", version = "0.65.0")
 bazel_dep(name = "rules_zig", version = "20250714.0-b14a4f1")
 bazel_dep(name = "sentencepiece", version = "20240618.0-d7ace0a")
 bazel_dep(name = "toolchains_llvm_bootstrapped", version = "0.2.4")
-bazel_dep(name = "with_cfg.bzl", version = "0.9.1")
+bazel_dep(name = "with_cfg.bzl", version = "0.11.0")
 bazel_dep(name = "xla", version = "20250718.0-6319f0d")
 bazel_dep(name = "zig-yaml", version = "20240903.0-83d5fdf")
 
@@ -80,13 +81,13 @@ cuda = use_extension("//runtimes/cuda:cuda.bzl", "cuda_packages")
 use_repo(cuda, "libpjrt_cuda")
 
 rocm = use_extension("//runtimes/rocm:rocm.bzl", "rocm_packages")
-use_repo(rocm, "libpjrt_rocm")
+use_repo(rocm, "hipblaslt", "libpjrt_rocm", "rocblas")
 
 tpu = use_extension("//runtimes/tpu:tpu.bzl", "tpu_packages")
 use_repo(tpu, "libpjrt_tpu")
 
 neuron = use_extension("//runtimes/neuron:neuron.bzl", "neuron_packages")
-use_repo(neuron, "libpjrt_neuron")
+use_repo(neuron, "aws-neuronx-collectives", "aws-neuronx-runtime-lib", "libgomp1", "libpjrt_neuron", "zlib1g")
 
 zls = use_extension("//third_party/zls:zls.bzl", "repo")
 use_repo(zls, "zls_aarch64-macos", "zls_x86_64-linux", "zls_x86_64-macos")
@@ -135,7 +136,7 @@ crate.from_cargo(
 use_repo(crate, "crates")
 
 non_module_deps = use_extension("//:third_party/non_module_deps.bzl", "non_module_deps")
-use_repo(non_module_deps, "com_google_sentencepiece", "org_swig_swig")
+use_repo(non_module_deps, "com_github_hejsil_clap", "com_google_sentencepiece", "mnist", "org_swig_swig")
 
 apt = use_extension("@rules_distroless//apt:extensions.bzl", "apt")
 apt.install(
@@ -158,3 +159,39 @@ apt.install(
     manifest = "//runtimes/neuron:packages.yaml",
 )
 use_repo(apt, "apt_neuron")
+
+oci = use_extension("@rules_oci//oci:extensions.bzl", "oci")
+oci.pull(
+    name = "distroless_cc_debian12",
+    digest = "sha256:eccec5274132c1be0ce5d2c8e6fe41033e64af5e987ccee9007826e4c012069d",
+    image = "gcr.io/distroless/cc-debian12",
+    platforms = ["linux/amd64"],
+)
+use_repo(oci, "distroless_cc_debian12", "distroless_cc_debian12_linux_amd64")
+
+huggingface = use_extension("@zml//bazel:huggingface.bzl", "huggingface")
+
+################################################################################
+# ModernBERT
+huggingface.model(
+    name = "ModernBERT-base",
+    build_file_content = """exports_files(glob(["**"]), visibility = ["//visibility:public"])""",
+    commit = "94032bb66234a691cf6248265170006a7ced4970",
+    includes = [
+        "model.safetensors",
+        "tokenizer.json",
+    ],
+    model = "answerdotai/ModernBERT-base",
+)
+huggingface.model(
+    name = "ModernBERT-large",
+    build_file_content = """exports_files(glob(["**"]), visibility = ["//visibility:public"])""",
+    commit = "4bbcbf40bed02ce487125bcb3c897ea9bdc88340",
+    includes = [
+        "model.safetensors",
+        "tokenizer.json",
+    ],
+    model = "answerdotai/ModernBERT-large",
+)
+use_repo(huggingface, "ModernBERT-base", "ModernBERT-large")
+################################################################################

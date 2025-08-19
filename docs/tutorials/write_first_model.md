@@ -381,8 +381,7 @@ With everything in place now, running the model is easy:
 
 ```
 # run release (--config=release)
-cd examples
-bazel run --config=release //simple_layer
+bazel run --config=release //examples/simple_layer
 
 # compile and run debug version
 bazel run //simple_layer
