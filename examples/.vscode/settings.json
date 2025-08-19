@@ -1,0 +1,37 @@
+{
+    "editor.formatOnSave": true,
+    "files.exclude": {
+        "**/.git": true,
+        "**/.svn": true,
+        "**/.hg": true,
+        "**/CVS": true,
+        "**/.DS_Store": true,
+        "**/bazel-*": true
+    },
+    "files.watcherExclude": {
+        "**/bazel-*": true,
+    },
+    // "files.trimTrailingWhitespace": true,
+    "files.insertFinalNewline": true,
+    "bazel.buildifierFixOnFormat": true,
+    "bazel.queriesShareServer": true,
+    "bazel.pathsToIgnore": [
+        "."
+    ],
+    "bazel.buildifierExecutable": "@buildifier_prebuilt//:buildifier",
+    "C_Cpp.formatting": "clangFormat",
+    "C_Cpp.clang_format_style": "Microsoft",
+    "zig.formattingProvider": "zls",
+    "zig.path": "x",
+    "zig.zls.path": "${workspaceFolder}/tools/zls.sh",
+    "[zig]": {
+        "editor.suggest.insertMode": "replace",
+        "editor.stickyScroll.defaultModel": "foldingProviderModel",
+        "editor.codeActionsOnSave": {
+            "source.fixAll": "explicit",
+        }
+    },
+    "rust-analyzer.linkedProjects": [
+        "${workspaceFolder}/zml/tokenizer/hftokenizers/Cargo.toml"
+    ]
+}
