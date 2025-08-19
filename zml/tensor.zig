@@ -3969,11 +3969,11 @@ fn getPoolResDims(dt: DataType, in_dims: []const i64, base_dilations: @Vector(Te
 }
 
 fn getComparisonType(ctx: mlir.Context, dtype: DataType) dialect.stablehlo.CompareType {
-    return dialect.stablehlo.CompareType.init(ctx, switch (dtype) {
-        .i4, .i8, .i16, .i32, .i64 => .SIGNED,
-        .bool, .u4, .u8, .u16, .u32, .u64 => .UNSIGNED,
-        .f8e4m3b11fnuz, .f8e4m3fn, .f8e4m3fnuz, .f8e5m2, .f8e5m2fnuz, .bf16, .f16, .f32, .f64 => .FLOAT,
-        .c64, .c128 => @panic("Can't compare complex numbers"),
+    return dialect.stablehlo.CompareType.init(ctx, switch (dtype.class()) {
+        .bool => .UNSIGNED,
+        .integer => if (dtype.isSignedInt()) .SIGNED else .UNSIGNED,
+        .float => .FLOAT,
+        .complex => @panic("Can't compare complex numbers"),
     });
 }
 
