@@ -1,28 +1,17 @@
 load("@rules_zig//zig:defs.bzl", "zig_library")
-load("@zml//bazel:zig.bzl", "zig_cc_binary")
 load("@zml//bazel:zig_srcs.bzl", "zig_srcs")
-load("@zml//bazel:zig_proto_library.bzl", "zig_proto_library")
 
 zig_library(
     name = "pjrt",
-    srcs = [
-        "convert/trace_container.zig",
-        "convert/xplane_schema.zig",
-        "ffi.zig",
-        "profiler.zig",
-    ],
+    srcs = ["ffi.zig"],
     main = "pjrt.zig",
     visibility = ["//visibility:public"],
     deps = [
-        ":profiler_options_proto",
-        ":trace_events_proto",
-        ":xplane_proto",
         "//stdx",
         "@xla//xla/ffi/api:c_api",
         "@xla//xla/pjrt/c:pjrt_c_api_ffi_extension_hdrs",
         "@xla//xla/pjrt/c:pjrt_c_api_gpu_extension_hdrs",
         "@xla//xla/pjrt/c:pjrt_c_api_hdrs",
-        "@xla//xla/pjrt/c:pjrt_c_api_profiler_extension_hdrs",
         "@xla//xla/pjrt/c:pjrt_c_api_triton_extension_hdrs",
     ],
 )
@@ -30,37 +19,4 @@ zig_library(
 zig_srcs(
     name = "sources",
     zig_lib = ":pjrt",
-)
-
-zig_proto_library(
-    name = "profiler_options_proto",
-    import_name = "//tsl:profiler_options_proto",
-    deps = ["@xla//third_party/tsl/tsl/profiler/protobuf:profiler_options_proto"],
-)
-
-zig_proto_library(
-    name = "xplane_proto",
-    import_name = "//tsl:xplane_proto",
-    deps = ["@xla//third_party/tsl/tsl/profiler/protobuf:xplane_proto"],
-)
-
-zig_proto_library(
-    name = "trace_events_proto",
-    import_name = "//tsl:trace_events_proto",
-    deps = ["@xla//third_party/tsl/tsl/profiler/protobuf:trace_events_proto"],
-)
-
-zig_cc_binary(
-    name = "xspace_to_json",
-    srcs = [
-        "convert/trace_container.zig",
-        "convert/xplane_schema.zig",
-    ],
-    main = "xspace_to_json.zig",
-    visibility = ["//visibility:public"],
-    deps = [
-        ":trace_events_proto",
-        ":xplane_proto",
-        "//stdx",
-    ],
 )
