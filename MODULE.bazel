@@ -22,7 +22,6 @@ bazel_dep(name = "rules_uv", version = "0.87.0")
 bazel_dep(name = "rules_zig", version = "20250714.0-b14a4f1")
 bazel_dep(name = "toolchains_llvm_bootstrapped", version = "0.2.4")
 bazel_dep(name = "with_cfg.bzl", version = "0.11.0")
-bazel_dep(name = "zig-yaml", version = "20240903.0-83d5fdf")
 
 bazel_dep(name = "buildifier_prebuilt", version = "8.2.0.2", dev_dependency = True)
 
@@ -155,12 +154,14 @@ apt.install(
     manifest = "//runtimes/cuda:packages.yaml",
 )
 use_repo(apt, "apt_cuda")
+
 apt.install(
     name = "apt_rocm",
     lock = "//runtimes/rocm:packages.lock.json",
     manifest = "//runtimes/rocm:packages.yaml",
 )
 use_repo(apt, "apt_rocm")
+
 apt.install(
     name = "apt_neuron",
     lock = "//runtimes/neuron:packages.lock.json",
