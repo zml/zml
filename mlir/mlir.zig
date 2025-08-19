@@ -416,9 +416,9 @@ pub const ArrayAttribute = struct {
 
 pub fn IntegerAttribute(comptime it: IntegerTypes) type {
     const ZigType, const getter = comptime switch (it) {
-        .i1, .i4, .i8, .i16, .i32, .i64 => .{ i64, c.mlirIntegerAttrGetValueInt },
+        .i1, .i2, .i4, .i8, .i16, .i32, .i64 => .{ i64, c.mlirIntegerAttrGetValueInt },
         .si4, .si8, .si16, .si32, .si64 => .{ i64, c.mlirIntegerAttrGetValueSInt },
-        .u4, .u8, .u16, .u32, .u64 => .{ u64, c.mlirIntegerAttrGetValueUInt },
+        .u2, .u4, .u8, .u16, .u32, .u64 => .{ u64, c.mlirIntegerAttrGetValueUInt },
         .unknown => @compileError("IntegerAttribute(unknown)"),
     };
 
@@ -1291,6 +1291,7 @@ pub const IndexType = struct {
 
 pub const IntegerTypes = enum {
     i1,
+    i2,
     i4,
     i8,
     i16,
@@ -1301,6 +1302,7 @@ pub const IntegerTypes = enum {
     si16,
     si32,
     si64,
+    u2,
     u4,
     u8,
     u16,
@@ -1313,6 +1315,7 @@ pub const IntegerTypes = enum {
 pub fn IntegerType(comptime it: IntegerTypes) type {
     const Config = switch (it) {
         .i1 => .{ 1, c.mlirIntegerTypeGet, c.mlirIntegerTypeIsSignless },
+        .i2 => .{ 2, c.mlirIntegerTypeGet, c.mlirIntegerTypeIsSignless },
         .i4 => .{ 4, c.mlirIntegerTypeGet, c.mlirIntegerTypeIsSignless },
         .i8 => .{ 8, c.mlirIntegerTypeGet, c.mlirIntegerTypeIsSignless },
         .i16 => .{ 16, c.mlirIntegerTypeGet, c.mlirIntegerTypeIsSignless },
@@ -1323,6 +1326,7 @@ pub fn IntegerType(comptime it: IntegerTypes) type {
         .si16 => .{ 16, c.mlirIntegerTypeSignedGet, c.mlirIntegerTypeIsSigned },
         .si32 => .{ 32, c.mlirIntegerTypeSignedGet, c.mlirIntegerTypeIsSigned },
         .si64 => .{ 64, c.mlirIntegerTypeSignedGet, c.mlirIntegerTypeIsSigned },
+        .u2 => .{ 2, c.mlirIntegerTypeUnsignedGet, c.mlirIntegerTypeIsUnsigned },
         .u4 => .{ 4, c.mlirIntegerTypeUnsignedGet, c.mlirIntegerTypeIsUnsigned },
         .u8 => .{ 8, c.mlirIntegerTypeUnsignedGet, c.mlirIntegerTypeIsUnsigned },
         .u16 => .{ 16, c.mlirIntegerTypeUnsignedGet, c.mlirIntegerTypeIsUnsigned },
@@ -1362,11 +1366,15 @@ pub fn IntegerType(comptime it: IntegerTypes) type {
 }
 
 pub const FloatTypes = enum {
+    f4e2m1fn,
+    f8e3m4,
+    f8e4m3,
     f8e4m3b11fnuz,
     f8e4m3fn,
     f8e4m3fnuz,
     f8e5m2,
     f8e5m2fnuz,
+    f8e8m0fnu,
     bf16,
     f16,
     f32,
@@ -1381,11 +1389,15 @@ pub const FloatTypes = enum {
 
 pub fn FloatType(comptime ft: FloatTypes) type {
     const Config = switch (ft) {
+        .f4e2m1fn => .{ c.mlirTypeIsAFloat4E2M1FN, c.mlirFloat4E2M1FNTypeGet },
+        .f8e3m4 => .{ c.mlirTypeIsAFloat8E3M4, c.mlirFloat8E3M4TypeGet },
+        .f8e4m3 => .{ c.mlirTypeIsAFloat8E4M3, c.mlirFloat8E4M3TypeGet },
         .f8e4m3b11fnuz => .{ c.mlirTypeIsAFloat8E4M3B11FNUZ, c.mlirFloat8E4M3B11FNUZTypeGet },
         .f8e4m3fn => .{ c.mlirTypeIsAFloat8E4M3FN, c.mlirFloat8E4M3FNTypeGet },
         .f8e4m3fnuz => .{ c.mlirTypeIsAFloat8E4M3FNUZ, c.mlirFloat8E4M3FNUZTypeGet },
         .f8e5m2 => .{ c.mlirTypeIsAFloat8E5M2, c.mlirFloat8E5M2TypeGet },
         .f8e5m2fnuz => .{ c.mlirTypeIsAFloat8E5M2FNUZ, c.mlirFloat8E5M2FNUZTypeGet },
+        .f8e8m0fnu => .{ .cmlirTypeIsAFloat8E8M0FNU, c.mlirFloat8E8M0FNUTypeGet },
         .bf16 => .{ c.mlirTypeIsABF16, c.mlirBF16TypeGet },
         .f16 => .{ c.mlirTypeIsAF16, c.mlirF16TypeGet },
         .f32 => .{ c.mlirTypeIsAF32, c.mlirF32TypeGet },
