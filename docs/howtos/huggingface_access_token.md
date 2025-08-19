@@ -30,8 +30,6 @@ Now you're ready to download a gated model like `Meta-Llama-3.2-1b`!
 ```
 # requires token in $HOME/.cache/huggingface/token, as created by the
 # `huggingface-cli login` command, or the `HUGGINGFACE_TOKEN` environment variable.
-cd examples
 bazel run @zml//tools:hf -- download meta-llama/Llama-3.2-1B-Instruct --local-dir $HOME/Llama-3.2-1B-Instruct --exclude='*.pth'
-bazel run --config=release //llama -- --hf-model-path=$HOME/Llama-3.2-1B-Instruct --prompt="What is the capital of France?"
+bazel run --config=release //examples/llama -- --hf-model-path=$HOME/Llama-3.2-1B-Instruct --prompt="What is the capital of France?"
 ```
-

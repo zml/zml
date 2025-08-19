@@ -49,7 +49,6 @@ compile it, and classify a randomly picked example from the test dataset.
 On the command line:
 
 ```
-cd examples
 bazel run --config=release //mnist
 ```
 
@@ -74,9 +73,8 @@ Once you've been granted access, you're ready to download a gated model like
 ```
 # requires token in $HOME/.cache/huggingface/token, as created by the
 # `huggingface-cli login` command, or the `HUGGINGFACE_TOKEN` environment variable.
-cd examples
 bazel run @zml//tools:hf -- download meta-llama/Llama-3.1-8B-Instruct --local-dir $HOME/Llama-3.1-8B-Instruct --exclude='*.pth'
-bazel run --config=release //llama -- --hf-model-path=$HOME/Llama-3.1-8B-Instruct
+bazel run --config=release //examples/llama -- --hf-model-path=$HOME/Llama-3.1-8B-Instruct
 bazel run --config=release //llama -- --hf-model-path=$HOME/Llama-3.1-8B-Instruct --prompt="What is the capital of France?"
 ```
 
@@ -88,9 +86,8 @@ Like the 8B model above, this model also requires approval. See
 [here](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct) for access requirements.
 
 ```
-cd examples
 bazel run @zml//tools:hf -- download meta-llama/Llama-3.2-1B-Instruct --local-dir $HOME/Llama-3.2-1B-Instruct --exclude='*.pth'
-bazel run --config=release //llama -- --hf-model-path=$HOME/Llama-3.2-1B-Instruct
+bazel run --config=release //examples/llama -- --hf-model-path=$HOME/Llama-3.2-1B-Instruct
 bazel run --config=release //llama -- --hf-model-path=$HOME/Llama-3.2-1B-Instruct --prompt="What is the capital of France?"
 ```
 
@@ -121,9 +118,8 @@ So, to run the OpenLLama model from above on your host sporting an NVIDIA GPU,
 run the following:
 
 ```
-cd examples
-bazel run --config=release //llama:Llama-3.2-1B-Instruct            \
-          --@zml//runtimes:cuda=true                      \
+bazel run --config=release //examples/llama:Llama-3.2-1B-Instruct \
+          --@zml//runtimes:cuda=true                              \
           -- --prompt="What is the capital of France?"
 ```
 
@@ -140,4 +136,3 @@ You might also want to check out the
 [documentation](../README.md), start
 [writing your first model](../tutorials/write_first_model.md), or read about more
 high-level [ZML concepts](../learn/concepts.md).
-

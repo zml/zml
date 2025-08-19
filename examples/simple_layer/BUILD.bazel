@@ -1,14 +1,15 @@
 load("@aspect_bazel_lib//lib:tar.bzl", "mtree_spec", "tar")
 load("@aspect_bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
-load("@zml//bazel:zig.bzl", "zig_cc_binary")
+load("//bazel:zig.bzl", "zig_cc_binary")
 
 zig_cc_binary(
     name = "simple_layer",
     main = "main.zig",
     deps = [
-        "@zml//async",
-        "@zml//zml",
+        "//async",
+        "//zml",
     ],
 )
 
@@ -24,7 +25,10 @@ tar(
     srcs = [":simple_layer"],
     args = [
         "--options",
-        "zstd:compression-level=9",
+        ",".join([
+            "zstd:compression-level=9",
+            "zstd:threads=16",
+        ]),
     ],
     compress = "zstd",
     mtree = ":mtree",
@@ -34,7 +38,7 @@ tar(
 oci_image(
     name = "image_",
     base = "@distroless_cc_debian12",
-    entrypoint = ["./{}/simple_layer".format(package_name())],
+    entrypoint = ["/{}/simple_layer".format(package_name())],
     target_compatible_with = [
         "@platforms//os:linux",
     ],
@@ -45,10 +49,7 @@ oci_image(
 platform_transition_filegroup(
     name = "image",
     srcs = [":image_"],
-    target_compatible_with = [
-        "@platforms//os:linux",
-    ],
-    target_platform = "@zml//platforms:linux_amd64",
+    target_platform = "//platforms:linux_amd64",
 )
 
 # Load will immediatly load the image (eg: docker load)
@@ -58,9 +59,6 @@ oci_load(
     repo_tags = [
         "distroless/simple_layer:latest",
     ],
-    target_compatible_with = [
-        "@platforms//os:linux",
-    ],
 )
 
 # Bazel target for pushing the Linux image to the docker registry
@@ -69,8 +67,10 @@ oci_push(
     image = ":image",
     remote_tags = ["latest"],
     # override with -- --repository foo.bar/org/image
-    repository = "index.docker.io/renerocksai/simple_layer",
-    target_compatible_with = [
-        "@platforms//os:linux",
-    ],
+    repository = "index.docker.io/zmlai/simple_layer",
+)
+
+build_test(
+    name = "test",
+    targets = [":simple_layer"],
 )

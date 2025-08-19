@@ -1,11 +1,17 @@
-load("@zml//bazel:zig.bzl", "zig_cc_binary")
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load("//bazel:zig.bzl", "zig_cc_binary")
 
 zig_cc_binary(
     name = "benchmark",
     main = "main.zig",
     deps = [
-        "@zml//async",
-        "@zml//stdx",
-        "@zml//zml",
+        "//async",
+        "//stdx",
+        "//zml",
     ],
+)
+
+build_test(
+    name = "test",
+    targets = [":benchmark"],
 )

@@ -5,7 +5,7 @@ Our [first model](../tutorials/write_first_model.md) did not need any weights fi
 We just created weights and biases at runtime.
 
 But real-world models typically need weights files, and maybe some other
-supporting files. 
+supporting files.
 
 We recommend, for easy deployments, you upload those files. In many instances,
 you will use a site like [🤗 Hugging Face](https://huggingface.co).
@@ -14,21 +14,14 @@ We also recommend to add a `weights.bzl` file to your project root directory, so
 you don't "pollute" your build file with long URLs and SHAs:
 
 ```python
-load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
 def _weights_impl(mctx):
-    http_file(
-        name = "com_github_zml_cdn_mnist",
-        downloaded_file_path = "mnist.pt",
-        sha256 = "d8a25252e28915e147720c19223721f0f53e3317493727ca754a2dd672450ba9",
-        url = "https://github.com/ggerganov/ggml/raw/18703ad600cc68dbdb04d57434c876989a841d12/examples/mnist/models/mnist/mnist_model.state_dict",
-    )
-
-    http_file(
-        name = "com_github_zml_cdn_mnist_data",
-        downloaded_file_path = "mnist.ylc",
-        sha256 = "0fa7898d509279e482958e8ce81c8e77db3f2f8254e26661ceb7762c4d494ce7",
-        url = "https://github.com/ggerganov/ggml/raw/18703ad600cc68dbdb04d57434c876989a841d12/examples/mnist/models/mnist/t10k-images.idx3-ubyte",
+    http_archive(
+        name = "mnist",
+        sha256 = "075905e433ea0cce13c3fc08832448ab86225d089b5d412be67f59c29388fb19",
+        url = "https://mirror.zml.ai/data/mnist.tar.zst",
+        build_file_content = """exports_files(glob(["**"]), visibility = ["//visibility:public"])""",
     )
 
     return mctx.extension_metadata(
@@ -54,12 +47,12 @@ the following way:
 zig_cc_binary(
     name = "mnist",
     args = [
-        "$(location @com_github_zml_cdn_mnist//file)",
-        "$(location @com_github_zml_cdn_mnist_data//file)",
+        "$(location @mnist//:mnist.pt)",
+        "$(location @mnist//:t10k-images.idx3-ubyte)",
     ],
     data = [
-        "@com_github_zml_cdn_mnist//file",
-        "@com_github_zml_cdn_mnist_data//file",
+        "@mnist//:mnist.pt",
+        "@mnist//:t10k-images.idx3-ubyte",
     ],
     main = "mnist.zig",
     deps = [
@@ -74,4 +67,3 @@ See how:
 - we use `data = [ ... ]` to reference the files in `weights.bzl`
 - we use `args = [ ... ]` to pass the files as command-line arguments to the
   MNIST executable at runtime, automatically.
-

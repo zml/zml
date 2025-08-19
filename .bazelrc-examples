@@ -1,2 +1,0 @@
-common   --override_module=zml=%workspace%/../../
-common   --registry=file://%workspace%/../third_party/

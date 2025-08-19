@@ -18,21 +18,21 @@ zig_library(
 
 # A proxy PJRT Plugin that loads the Neuron PJRT Plugin
 # and returns the instance from nested GetPjrtApi.
-# 
+#
 # Additionally, it provides a way to load implicit transitive dependencies
 # of neuronx-cc (see add_needed of the patchelf target below).
 #
 # TODO(cerisier): Use a zig_cc_shared_library instead.
 zig_binary(
     name = "libpjrt_neuron_proxy",
+    copts = ["-lc"],
     kind = BINARY_KIND.shared_lib,
     main = "libpjrt_neuron.zig",
-    copts = ["-lc"],
+    visibility = ["@libpjrt_neuron//:__subpackages__"],
     deps = [
         "//stdx",
         "@rules_zig//zig/runfiles",
     ],
-    visibility = ["@libpjrt_neuron//:__subpackages__"],
 )
 
 pip_compile(
@@ -48,9 +48,6 @@ pip_compile(
     python_platform = "x86_64-unknown-linux-gnu",
     requirements_in = "requirements.in",
     requirements_txt = "requirements.lock.txt",
-    tags = [
-        "manual",
-    ],
 )
 
 py_console_script_binary(
@@ -117,21 +114,21 @@ cc_library(
 
 zig_library(
     name = "neuron",
-    import_name = "runtimes/neuron",
-    main = "neuron.zig",
-    visibility = ["//visibility:public"],
     data = select({
         "//runtimes:neuron.enabled": [
             ":libneuronxla",
         ],
         "//conditions:default": [],
     }),
+    import_name = "runtimes/neuron",
+    main = "neuron.zig",
+    visibility = ["//visibility:public"],
     deps = [
         "//pjrt",
     ] + select({
         "//runtimes:neuron.enabled": [
-            ":libpjrt_neuron",
             ":libneuronxla_pyenv",
+            ":libpjrt_neuron",
             ":libpython",
             "//async",
             "//stdx",

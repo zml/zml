@@ -24,8 +24,7 @@ So, to run the Llama model from above **on your development machine**
 housing an NVIDIA GPU, run the following:
 
 ```
-cd examples
-bazel run --config=release //llama --@zml//runtimes:cuda=true -- --hf-model-path=$HOME/Llama-3.2-1B-Instruct
+bazel run --config=release //examples/llama --@zml//runtimes:cuda=true -- --hf-model-path=$HOME/Llama-3.2-1B-Instruct
 ```
 
 
@@ -41,8 +40,7 @@ architectures:
 As an example, here is how you build above Llama for CUDA on Linux X86_64:
 
 ```
-cd examples
-bazel build --config=release //llama          \
+bazel build --config=release //examples/llama          \
     --@zml//runtimes:cuda=true                \
     --@zml//runtimes:cpu=false                \
     --platforms=@zml//platforms:linux_amd64
@@ -83,7 +81,6 @@ tar(
 ... and then build the TAR archive:
 
 ```
-# cd examples
 bazel build --config=release //mnist:archive                    \
             --@zml//runtimes:cuda=true                \
             --@zml//runtimes:cpu=false                \
@@ -134,4 +131,3 @@ INFO: Running command line: bazel-bin/mnist/mnist ../_main~_repo_rules~com_githu
 
 You see the command line right up there. On the server, you just need to replace
 `../` with the 'runfiles' directory of your TAR.
-
