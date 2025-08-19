@@ -49,6 +49,7 @@ oci_image(
 platform_transition_filegroup(
     name = "image",
     srcs = [":image_"],
+    tags = ["manual"],
     target_platform = "//platforms:linux_amd64",
 )
 
@@ -59,6 +60,7 @@ oci_load(
     repo_tags = [
         "distroless/simple_layer:latest",
     ],
+    tags = ["manual"],
 )
 
 # Bazel target for pushing the Linux image to the docker registry
@@ -68,6 +70,7 @@ oci_push(
     remote_tags = ["latest"],
     # override with -- --repository foo.bar/org/image
     repository = "index.docker.io/zmlai/simple_layer",
+    tags = ["manual"],
 )
 
 build_test(

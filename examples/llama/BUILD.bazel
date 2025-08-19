@@ -92,6 +92,7 @@ oci_image(
 platform_transition_filegroup(
     name = "image",
     srcs = [":image_"],
+    tags = ["manual"],
     target_platform = "//platforms:linux_amd64",
 )
 
@@ -99,6 +100,7 @@ oci_load(
     name = "load",
     image = ":image",
     repo_tags = ["zmlai/llama:latest"],
+    tags = ["manual"],
 )
 
 oci_push(
@@ -106,6 +108,7 @@ oci_push(
     image = ":image",
     remote_tags = ["latest"],
     repository = "index.docker.io/zmlai/llama",
+    tags = ["manual"],
 )
 
 build_test(
