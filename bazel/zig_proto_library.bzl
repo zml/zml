@@ -1,6 +1,6 @@
 """Starlark implementation of zig_proto_library"""
 
-load("@protobuf//bazel/common:proto_info.bzl", "ProtoInfo")
+load("@com_google_protobuf//bazel/common:proto_info.bzl", "ProtoInfo")
 load("@rules_proto//proto:defs.bzl", "proto_common")
 load(
     "@rules_zig//zig/private/providers:zig_module_info.bzl",

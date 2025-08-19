@@ -1,6 +1,6 @@
 load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
-load("@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
-load("@protobuf//bazel:proto_library.bzl", "proto_library")
+load("@com_google_protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
+load("@com_google_protobuf//bazel:proto_library.bzl", "proto_library")
 
 package(
     default_visibility = ["//visibility:public"],
@@ -90,7 +90,7 @@ cc_library(
         ":darts_clone",
         ":sentencepiece_cc_proto",
         ":sentencepiece_model_cc_proto",
-        "@protobuf//:protobuf_lite",
+        "@com_google_protobuf//:protobuf_lite",
         "@zml//third_party/com_google_sentencepiece:absl",
     ],
 )

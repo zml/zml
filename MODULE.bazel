@@ -10,7 +10,7 @@ bazel_dep(name = "libxev", version = "20250718.0-9f785d2")
 bazel_dep(name = "patchelf", version = "0.18.0")
 bazel_dep(name = "pcre2", version = "10.43")
 bazel_dep(name = "platforms", version = "0.0.11")
-bazel_dep(name = "protobuf", version = "29.2")
+bazel_dep(name = "protobuf", version = "32.0", repo_name = "com_google_protobuf")
 bazel_dep(name = "rules_cc", version = "0.1.1")
 bazel_dep(name = "rules_distroless", version = "0.5.1")
 bazel_dep(name = "rules_proto", version = "7.1.0")
@@ -20,26 +20,11 @@ bazel_dep(name = "rules_uv", version = "0.65.0")
 bazel_dep(name = "rules_zig", version = "20250714.0-b14a4f1")
 bazel_dep(name = "sentencepiece", version = "20240618.0-d7ace0a")
 bazel_dep(name = "toolchains_llvm_bootstrapped", version = "0.2.4")
-bazel_dep(name = "toolchains_protoc", version = "0.4.1")
 bazel_dep(name = "with_cfg.bzl", version = "0.9.1")
 bazel_dep(name = "xla", version = "20250718.0-6319f0d")
-bazel_dep(name = "zig-protobuf", version = "20250716.0-97f1e31")
 bazel_dep(name = "zig-yaml", version = "20240903.0-83d5fdf")
 
 bazel_dep(name = "buildifier_prebuilt", version = "8.0.3", dev_dependency = True)
-
-# Optional: choose a version of protoc rather than the latest.
-protoc = use_extension("@toolchains_protoc//protoc:extensions.bzl", "protoc")
-protoc.toolchain(
-    # Creates a repository to satisfy well-known-types dependencies such as
-    # deps=["@com_google_protobuf//:any_proto"]
-    google_protobuf = "com_google_protobuf",
-    # Pin to any version of protoc
-    version = "v29.2",
-)
-use_repo(protoc, "com_google_protobuf", "toolchains_protoc_hub")
-
-register_toolchains("@toolchains_protoc_hub//:all")
 
 zig = use_extension("@rules_zig//zig:extensions.bzl", "zig")
 zig.index(file = "//bazel:zig_index.json")
@@ -87,7 +72,6 @@ pip.parse(
     requirements_lock = "//tools:hf_requirements.lock.txt",
 )
 use_repo(pip, "huggingface_hub")
-
 
 cpu = use_extension("//runtimes/cpu:cpu.bzl", "cpu_pjrt_plugin")
 use_repo(cpu, "libpjrt_cpu_darwin_amd64", "libpjrt_cpu_darwin_arm64", "libpjrt_cpu_linux_amd64")
@@ -160,12 +144,14 @@ apt.install(
     manifest = "//runtimes/cuda:packages.yaml",
 )
 use_repo(apt, "apt_cuda")
+
 apt.install(
     name = "apt_rocm",
     lock = "//runtimes/rocm:packages.lock.json",
     manifest = "//runtimes/rocm:packages.yaml",
 )
 use_repo(apt, "apt_rocm")
+
 apt.install(
     name = "apt_neuron",
     lock = "//runtimes/neuron:packages.lock.json",

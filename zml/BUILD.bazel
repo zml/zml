@@ -1,8 +1,18 @@
+load("@com_google_protobuf//bazel:upb_proto_library.bzl", "upb_c_proto_library")
 load("@rules_cc//cc:defs.bzl", "cc_library")
 load("@rules_zig//zig:defs.bzl", "zig_library")
 load("//bazel:zig.bzl", "zig_cc_test")
-load("//bazel:zig_proto_library.bzl", "zig_proto_library")
 load("//bazel:zig_srcs.bzl", "zig_srcs")
+
+upb_c_proto_library(
+    name = "xla_data_upb",
+    deps = ["@xla//xla:xla_data_proto"],
+)
+
+upb_c_proto_library(
+    name = "xla_compile_options_upb",
+    deps = ["@xla//xla/pjrt/proto:compile_options_proto"],
+)
 
 cc_library(
     name = "posix",
@@ -25,25 +35,20 @@ zig_library(
     visibility = ["//visibility:public"],
     deps = [
         ":posix",
-        ":xla_proto",
+        ":xla_compile_options_upb",
+        ":xla_data_upb",
         "//async",
         "//mlir",
         "//mlir/dialects",
         "//pjrt",
         "//runtimes",
         "//stdx",
+        "//upb",
         "//zml/tokenizer",
         "//zml/tools",
         "@rules_zig//zig/runfiles",
     ],
 )
-
-zig_proto_library(
-    name = "xla_proto",
-    import_name = "//xla:xla_proto",
-    deps = ["@xla//xla/pjrt/proto:compile_options_proto"],
-)
-
 
 # All ZML Tests
 
