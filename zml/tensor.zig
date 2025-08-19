@@ -4099,22 +4099,22 @@ inline fn toI64(values: anytype) []i64 {
 }
 
 fn transposeIsJustAReshape(x: Shape, permutation: []const i64) bool {
-    var perm: std.BoundedArray(struct { u8, bool }, Tensor.MAX_RANK) = .{};
     // Don't rewrite on invalid inputs.
     if (permutation.len > x.rank()) return false;
-    for (permutation) |ax| {
+    var perm: [Tensor.MAX_RANK]struct { u8, bool } = undefined;
+    for (perm[0..permutation.len], permutation) |*p, ax| {
         const squeezable = x.dim(ax) == 1;
-        perm.appendAssumeCapacity(.{ @intCast(ax), squeezable });
+        p.* = .{ @intCast(ax), squeezable };
     }
 
     var effective_ax: u8 = 0;
-    for (0..perm.len) |i| {
-        const ax, const squeezable = perm.get(i);
+    for (0..permutation.len) |i| {
+        const ax, const squeezable = perm[i];
         if (squeezable) {
             // Effectively squeeze this axis by decrementing axes coming after by 1.
-            for (i..perm.len) |j| {
-                if (perm.buffer[j][0] > ax) {
-                    perm.buffer[j][0] -= 1;
+            for (i..permutation.len) |j| {
+                if (perm[j][0] > ax) {
+                    perm[j][0] -= 1;
                 }
             }
             continue;
