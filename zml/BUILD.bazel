@@ -1,8 +1,6 @@
 load("@com_google_protobuf//bazel:upb_proto_library.bzl", "upb_c_proto_library")
 load("@rules_cc//cc:defs.bzl", "cc_library")
-load("@rules_zig//zig:defs.bzl", "zig_library")
-load("//bazel:zig.bzl", "zig_cc_test")
-load("//bazel:zig_srcs.bzl", "zig_srcs")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 upb_c_proto_library(
     name = "xla_data_upb",
@@ -52,7 +50,7 @@ zig_library(
 
 # All ZML Tests
 
-zig_cc_test(
+zig_test(
     name = "test",
     data = [
         "aio/torch/simple.pt",
@@ -66,9 +64,4 @@ filegroup(
     name = "test_runner",
     srcs = ["test_runner.zig"],
     visibility = ["//visibility:public"],
-)
-
-zig_srcs(
-    name = "sources",
-    zig_bin = ":test_test_lib",
 )

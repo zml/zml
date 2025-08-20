@@ -75,6 +75,11 @@ common          --incompatible_enable_proto_toolchain_resolution
 # Allow empty globs since some legacy rules
 common          --incompatible_disallow_empty_glob=false
 
+# Use the C linker to link Zig code
+common          --@rules_zig//zig/settings:linkmode=cc
+
+common          --@toolchains_llvm_bootstrapped//config:experimental_stub_libgcc_s=True
+
 common:macos    --action_env=MACOSX_DEPLOYMENT_TARGET=13.0
 common:macos    --macos_sdk_version=13.0
 
@@ -89,11 +94,6 @@ common:silent   --noshow_progress
 common:silent   --ui_event_filters=,+error,+fail
 common:silent   --show_result=0
 common:silent   --logging=0
-
-common          --@rules_zig//zig/settings:copt=-fPIC
-common          --@rules_zig//zig/settings:copt=-fcompiler-rt
-
-common          --@toolchains_llvm_bootstrapped//config:experimental_stub_libgcc_s=True
 
 # --config=debug will used optmized backend, but all the frontend zig code will be compiled in debug mode.
 common:debug    --compilation_mode=opt

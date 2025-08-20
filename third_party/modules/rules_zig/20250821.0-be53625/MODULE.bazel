@@ -1,6 +1,6 @@
 module(
     name = "rules_zig",
-    version = "20250820.0-990b21a",
+    version = "20250821.0-be53625",
     compatibility_level = 1,
 )
 
@@ -67,3 +67,9 @@ use_repo(
 # rules_bazel_integration_test/tools/update_deleted_packages.sh when invoked
 # through the rules_multirun target //util:update.
 bazel_dep(name = "cgrindel_bazel_starlib", version = "0.21.0", dev_dependency = True)
+
+# Hack to get around a cc_common.link limitation.
+# See https://github.com/bazelbuild/bazel/pull/23838
+cc_common_link = use_repo_rule("//zig:extensions.bzl", "cc_common_link")
+
+cc_common_link(name = "build_bazel_rules_android")

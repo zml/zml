@@ -1,0 +1,19 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+zig_library(
+    name = "stablehlo",
+    import_name = "mlir/dialects/stablehlo",
+    main = "stablehlo.zig",
+    visibility = ["//mlir/dialects:__subpackages__"],
+    deps = [
+        "//mlir",
+        "//mlir:c",
+        "//stdx",
+        "@stablehlo//:stablehlo_dialect_capi",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":stablehlo"],
+)
