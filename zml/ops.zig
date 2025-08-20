@@ -1379,6 +1379,124 @@ fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs
     return outputs_;
 }
 
+pub fn customCall2(target_name: [:0]const u8, inputs: anytype, outputs: anytype, backend_config: []const u8, kernel_name: [:0]const u8) TensorOrTensorArray(@TypeOf(outputs)) {
+    // Transform generic inputs to flat slice.
+    const inputs_: []const Tensor = switch (@typeInfo(@TypeOf(inputs))) {
+        .@"struct" => |struct_info| b: {
+            if (@TypeOf(inputs) == Tensor) {
+                break :b &[1]Tensor{inputs};
+            }
+            if (!struct_info.is_tuple) @compileError("Expected tuple");
+            var inputs_: [struct_info.fields.len]Tensor = undefined;
+            meta.collectBuf((struct {
+                pub fn func(t: Tensor) Tensor {
+                    return t;
+                }
+            }).func, {}, &inputs, &inputs_);
+            break :b &inputs_;
+        },
+        .array => &inputs,
+        .pointer => |pointer_info| b: {
+            if (pointer_info.size != .slice) @compileError("Expected slice");
+            break :b inputs;
+        },
+        else => @compileError("Unsupported type: " ++ @typeName(@TypeOf(inputs))),
+    };
+
+    // Transform generic outputs to flat slice.
+    const output_shapes: []const Shape = switch (@typeInfo(@TypeOf(outputs))) {
+        .@"struct" => |struct_info| b: {
+            if (@TypeOf(outputs) == Shape) {
+                break :b &[1]Shape{outputs};
+            }
+            if (!struct_info.is_tuple) @compileError("Expected tuple");
+            var output_shapes: [struct_info.fields.len]Shape = undefined;
+            meta.collectBuf((struct {
+                pub fn func(t: Shape) Shape {
+                    return t;
+                }
+            }).func, {}, &outputs, &output_shapes);
+            break :b &output_shapes;
+        },
+        .array => &outputs,
+        .pointer => |pointer_info| b: {
+            if (pointer_info.size != .slice) @compileError("Expected slice");
+            break :b outputs;
+        },
+        else => @compileError("Unsupported type: " ++ @typeName(@TypeOf(outputs))),
+    };
+
+    const outputs_flat = customCallInternal2(target_name, inputs_, output_shapes, backend_config, kernel_name);
+
+    // Transform flat slice to generic outputs.
+    return switch (@typeInfo(@TypeOf(outputs))) {
+        .@"struct" => |struct_info| b: {
+            if (@TypeOf(outputs) == Shape) break :b outputs_flat[0];
+            if (!struct_info.is_tuple) @compileError("Expected tuple");
+            if (struct_info.fields.len == 1) break :b outputs_flat[0];
+            var outputs_: [struct_info.fields.len]Tensor = undefined;
+            @memcpy(&outputs_, outputs_flat);
+            break :b outputs_;
+        },
+        .array => |array_info| b: {
+            if (array_info.len == 1) break :b outputs_flat[0];
+            var outputs_: [array_info.fields.len]Tensor = undefined;
+            @memcpy(&outputs_, outputs_flat);
+            break :b outputs_;
+        },
+        .pointer => |pointer_info| b: {
+            if (pointer_info.size != .slice) @compileError("Expected slice");
+            break :b outputs_flat;
+        },
+        else => @compileError("Unsupported type: " ++ @typeName(@TypeOf(outputs))),
+    };
+}
+
+fn customCallInternal2(target_name: [:0]const u8, inputs: []const Tensor, outputs: []const Shape, backend_config: []const u8, kernel_name: [:0]const u8) []Tensor {
+    const ctx = CompilationContext.current();
+
+    const values = ctx.allocator().alloc(mlir.Value, inputs.len) catch unreachable;
+    ctx.extractValues(inputs, values);
+
+    const res_types = ctx.allocator().alloc(mlir.Type, outputs.len) catch unreachable;
+    for (outputs, 0..) |output, i| {
+        res_types[i] = mlirx.tensorType(ctx.mlirCtx(), output);
+    }
+
+    const backend_config_attr = mlir.Attribute.string(ctx.mlirCtx(), backend_config);
+
+    const operands_layouts = ctx.allocator().alloc([]const usize, inputs.len) catch unreachable;
+    for (inputs, 0..) |input, i| {
+        operands_layouts[i] = minorToMajor(input.rank());
+    }
+
+    const results_layouts = ctx.allocator().alloc([]const usize, outputs.len) catch unreachable;
+    for (outputs, 0..) |output, i| {
+        results_layouts[i] = minorToMajor(output.rank());
+    }
+
+    const op = dialect.stablehlo.custom_call_2(
+        ctx.mlirCtx(),
+        values,
+        .{
+            .call_target_name = target_name,
+            .kernel_name = kernel_name,
+            .backend_config = backend_config_attr,
+            .operand_layouts = operands_layouts,
+            .result_layouts = results_layouts,
+        },
+        res_types,
+        ctx.mlirCtx().location(@src()),
+    );
+
+    const outputs_ = ctx.allocator().alloc(Tensor, outputs.len) catch unreachable;
+    for (outputs, 0..) |output, i| {
+        outputs_[i] = Tensor._result(output, op.result(i));
+    }
+
+    return outputs_;
+}
+
 inline fn toI64(values: anytype) []i64 {
     var res: [Tensor.MAX_RANK]i64 = undefined;
     for (values, 0..) |val, i| res[i] = @intCast(val);

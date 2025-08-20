@@ -176,7 +176,9 @@ pub const Context = struct {
             return error.NoDevicesFound;
         }
 
-        try CustomCall.registerZmlCustomCalls(p);
+        if (target != .tpu) {
+            try CustomCall.registerZmlCustomCalls(p);
+        }
 
         self.platforms.set(target, p);
         return p;
