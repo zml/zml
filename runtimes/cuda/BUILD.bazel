@@ -1,9 +1,14 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("@rules_zig//zig:defs.bzl", "zig_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_shared_library")
 
-cc_library(
-    name = "zmlxcuda_lib",
-    srcs = ["zmlxcuda.c"],
+zig_shared_library(
+    name = "zmlxcuda",
+    main = "zmlxcuda.zig",
+    # Use Clang's compiler-rt, but disable stack checking
+    # to avoid requiring on the _zig_probe_stack symbol.
+    copts = ["-fno-stack-check"],
+    shared_lib_name = "libzmlxcuda.so.0",
+    deps = ["//stdx"],
     visibility = ["@libpjrt_cuda//:__subpackages__"],
 )
 

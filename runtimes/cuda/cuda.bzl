@@ -31,12 +31,12 @@ CUDA_PACKAGES = {
         ),
         #TODO: Remove me as soon we use the Driver API in tracer.zig
         packages.filegroup(
-            name = "so_files",
+            name = "cuda_cudart",
             srcs = ["lib/libcudart.so.12"],
         ),
     ]),
     "cuda_cupti": packages.filegroup(
-        name = "so_files",
+        name = "cuda_cupti",
         srcs = ["lib/libcupti.so.12"],
     ),
     "cuda_nvtx": "\n".join([
@@ -46,42 +46,35 @@ CUDA_PACKAGES = {
         #     visibility = ["//visibility:public"],
         # ),
         packages.filegroup(
-            name = "so_files",
+            name = "cuda_nvtx",
             srcs = ["lib/libnvToolsExt.so.1"],
         ),
     ]),
     "libcufft": packages.filegroup(
-        name = "so_files",
+        name = "libcufft",
         srcs = ["lib/libcufft.so.11"],
     ),
     "libcusolver": packages.filegroup(
-        name = "so_files",
+        name = "libcusolver",
         srcs = ["lib/libcusolver.so.11"],
     ),
     "libcusparse": packages.filegroup(
-        name = "so_files",
+        name = "libcusparse",
         srcs = ["lib/libcusparse.so.12"],
     ),
     "libnvjitlink": packages.filegroup(
-        name = "so_files",
+        name = "libnvjitlink",
         srcs = ["lib/libnvJitLink.so.12"],
     ),
     "cuda_nvcc": "\n".join([
         packages.filegroup(
-            name = "ptxas",
-            srcs = ["bin/ptxas"],
-        ),
-        packages.filegroup(
-            name = "nvlink",
-            srcs = ["bin/nvlink"],
-        ),
-        packages.filegroup(
-            name = "libdevice",
-            srcs = ["nvvm/libdevice/libdevice.10.bc"],
-        ),
-        packages.filegroup(
-            name = "so_files",
-            srcs = ["nvvm/lib64/libnvvm.so.4"],
+            name = "cuda_nvcc",
+            srcs = [
+                "bin/ptxas",
+                "bin/nvlink",
+                "nvvm/libdevice/libdevice.10.bc",
+                "nvvm/lib64/libnvvm.so.4",
+            ],
         ),
         packages.cc_import(
             name = "nvptxcompiler",
@@ -90,7 +83,7 @@ CUDA_PACKAGES = {
     ]),
     "cuda_nvrtc": "\n".join([
         packages.filegroup(
-            name = "so_files",
+            name = "cuda_nvrtc",
             srcs = [
                 "lib/libnvrtc.so.12",
                 "lib/libnvrtc-builtins.so.12.8",
@@ -99,7 +92,7 @@ CUDA_PACKAGES = {
     ]),
     "libcublas": "\n".join([
         packages.filegroup(
-            name = "so_files",
+            name = "libcublas",
             srcs = [
                 "lib/libcublasLt.so.12",
                 "lib/libcublas.so.12",
@@ -111,7 +104,7 @@ CUDA_PACKAGES = {
 CUDNN_PACKAGES = {
     "cudnn": "\n".join([
         packages.filegroup(
-            name = "so_files",
+            name = "cudnn",
             srcs = [
                 "lib/libcudnn.so.9",
                 "lib/libcudnn_adv.so.9",
@@ -193,7 +186,7 @@ def _cuda_impl(mctx):
         type = "zip",
         sha256 = "362aed5963fb9ea2ed2f264409baae30143498fd0e5c503aeaa1badd88cdc54a",
         build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + packages.filegroup(
-            name = "so_files",
+            name = "nccl",
             srcs = ["nvidia/nccl/lib/libnccl.so.2"],
         ),
     )
