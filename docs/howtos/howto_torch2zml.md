@@ -150,9 +150,9 @@ pub fn asyncMain() !void {
 And add a `zig_cc_binary` target in `my_project/BUILD.bazel`:
 
 ```python
-load("@zml//bazel:zig.bzl", "zig_cc_binary")
+load("@rules_zig//zig:defs.bzl", "zig_binary")
 
-zig_cc_binary(
+zig_binary(
     name = "torch2zml",
     main = "torch2zml.zig",
     deps = [
@@ -246,7 +246,7 @@ We can test the MLP layer with the `zml.testing.testLayer` utility:
 ```zig
 pub fn asyncMain() !void {
     ...
-    
+
     var ctx = try zml.Context.init();
     defer ctx.deinit();
     const platform = ctx.autoPlatform(.{});
@@ -293,5 +293,5 @@ During this phase, you have three kinds of errors that can appear:
   "C,W,H" of tensors, you can port this to actual tensor attributes using
   `x.withTags(.{.c, .w, .h})`, and use those tags (eg `.c`) to refer to axes
   instead of offsets. E.g. in Pytorch: `x.sum(0) # reduce over channel axis`
-  becomes `x.sum(.c)`. More on this topic in 
+  becomes `x.sum(.c)`. More on this topic in
   ["Working with tensors"](../tutorials/working_with_tensors.md).

@@ -1,7 +1,7 @@
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
-load("//bazel:zig.bzl", "zig_cc_binary")
+load("@rules_zig//zig:defs.bzl", "zig_binary")
 
-zig_cc_binary(
+zig_binary(
     name = "mnist",
     args = [
         "$(location @mnist//:mnist.pt)",

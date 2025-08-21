@@ -1,5 +1,5 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_zig//zig:defs.bzl", "zig_library")
-load("@aspect_bazel_lib//lib:tar.bzl", "mtree_spec", "tar")
 
 cc_library(
     name = "zmlxrocm_lib",

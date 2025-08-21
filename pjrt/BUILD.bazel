@@ -1,5 +1,4 @@
 load("@rules_zig//zig:defs.bzl", "zig_library")
-load("@zml//bazel:zig_srcs.bzl", "zig_srcs")
 
 zig_library(
     name = "pjrt",
@@ -14,9 +13,4 @@ zig_library(
         "@xla//xla/pjrt/c:pjrt_c_api_hdrs",
         "@xla//xla/pjrt/c:pjrt_c_api_triton_extension_hdrs",
     ],
-)
-
-zig_srcs(
-    name = "sources",
-    zig_lib = ":pjrt",
 )

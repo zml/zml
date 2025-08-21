@@ -1,7 +1,7 @@
 load("@aspect_bazel_lib//lib:tar.bzl", "mtree_spec", "tar")
-load("@rules_zig//zig:defs.bzl", "zig_binary", "BINARY_KIND")
+load("@rules_zig//zig:defs.bzl", "zig_static_library")
 
-def zig_srcs(name, zig_bin="", zig_lib=""):
+def zig_srcs(name, zig_bin = "", zig_lib = ""):
     """For a given zig_library, recursively extract all zig sources into a tarball.
 
     This also includes the files translated from C headers.
@@ -10,21 +10,22 @@ def zig_srcs(name, zig_bin="", zig_lib=""):
     """
     if zig_bin == "":
         zig_bin = "{}_bin".format(name)
-        zig_binary(
+        zig_static_library(
             name = zig_bin,
-            kind = BINARY_KIND.bc,
-            tags = ["manual", "@rules_zig//zig/lib:libc"],
+            tags = ["manual"],
             deps = [zig_lib],
         )
 
     native.filegroup(
         name = "{}_files".format(name),
         srcs = [zig_bin],
+        tags = ["manual"],
         output_group = "srcs",
     )
     mtree_spec(
         name = "{}_mtree".format(name),
         srcs = [":{}_files".format(name)],
+        tags = ["manual"],
     )
     tar(
         name = name,

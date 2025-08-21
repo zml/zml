@@ -1,11 +1,9 @@
 load("@rules_cc//cc:defs.bzl", "cc_library")
-load("@rules_zig//zig:defs.bzl", "zig_library")
-load("//bazel:zig.bzl", "zig_cc_test")
-load("//bazel:zig_srcs.bzl", "zig_srcs")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 cc_library(
     name = "c",
-    hdrs = ["c.h"],
+    hdrs = ["mlir.h"],
     visibility = ["//mlir:__subpackages__"],
     deps = [
         "@llvm-project//mlir:CAPIArith",
@@ -18,7 +16,6 @@ cc_library(
 
 zig_library(
     name = "mlir",
-    copts = ["-lc"],
     main = "mlir.zig",
     visibility = ["//visibility:public"],
     deps = [
@@ -27,12 +24,7 @@ zig_library(
     ],
 )
 
-zig_cc_test(
+zig_test(
     name = "test",
     deps = [":mlir"],
-)
-
-zig_srcs(
-    name = "sources",
-    zig_bin = ":test_test_lib",
 )

@@ -352,9 +352,9 @@ As mentioned already, ZML uses Bazel; so to build our model, we just need to
 create a simple `BUILD.bazel` file, next to the `main.zig` file, like this:
 
 ```python
-load("@zml//bazel:zig.bzl", "zig_cc_binary")
+load("@rules_zig//zig:defs.bzl", "zig_binary")
 
-zig_cc_binary(
+zig_binary(
     name = "simple_layer",
     main = "main.zig",
     deps = [
