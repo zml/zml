@@ -38,6 +38,14 @@ pub const ParseError = error{
     Unknown,
 } || std.mem.Allocator.Error;
 
+pub fn deepClone(comptime UpbType: type, arena: *c.upb_Arena, msg: *const UpbType) std.mem.Allocator.Error!*UpbType {
+    return @ptrCast(c.upb_Message_DeepClone(@ptrCast(msg), Minitable(UpbType), arena) orelse return std.mem.Allocator.Error.OutOfMemory);
+}
+
+pub fn shallowClone(comptime UpbType: type, arena: *c.upb_Arena, msg: *const UpbType) std.mem.Allocator.Error!*UpbType {
+    return @ptrCast(c.upb_Message_ShallowClone(@ptrCast(msg), Minitable(UpbType), arena) orelse return std.mem.Allocator.Error.OutOfMemory);
+}
+
 pub fn stringView(data: ?[]const u8) c.upb_StringView {
     return if (data) |d| c.upb_StringView_FromDataAndSize(d.ptr, d.len) else .{};
 }
@@ -100,7 +108,7 @@ pub fn parseEx(comptime UpbType: type, arena: *c.upb_Arena, data: []const u8, op
 }
 
 pub fn parse(comptime UpbType: type, arena: *c.upb_Arena, data: []const u8) ParseError!*UpbType {
-    return parseEx(arena, data, .{});
+    return parseEx(UpbType, arena, data, .{});
 }
 
 pub fn new(comptime UpbType: type, arena: *c.upb_Arena) std.mem.Allocator.Error!*UpbType {

@@ -1,12 +1,16 @@
 load("@rules_zig//zig:defs.bzl", "zig_library")
 
 cc_library(
-    name = "empty",
+    name = "upb_c",
+    hdrs = ["upb.h"],
+    deps = [
+        "@com_google_protobuf//upb/message:copy",
+    ],
 )
 
 zig_library(
     name = "upb",
     main = "upb.zig",
-    deps = [":empty"],
+    deps = [":upb_c"],
     visibility = ["//visibility:public"],
 )
