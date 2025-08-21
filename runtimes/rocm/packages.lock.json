@@ -1277,7 +1277,13 @@
 		},
 		{
 			"arch": "amd64",
-			"dependencies": [],
+			"dependencies": [
+				{
+					"key": "rocm-core_6.4.1.60401-83_22.04_amd64",
+					"name": "rocm-core",
+					"version": "6.4.1.60401-83~22.04"
+				}
+			],
 			"key": "roctracer_4.1.60401.60401-83_22.04_amd64",
 			"name": "roctracer",
 			"sha256": "58cead537cf07c8a8770bfe28346c3b3c92cc4297b51e307c9032b04434b187c",
@@ -4153,6 +4159,49 @@
 				"https://repo.radeon.com/rocm/apt/6.4.1/pool/main/r/rocfft/rocfft_1.0.32.60401-83~22.04_amd64.deb"
 			],
 			"version": "1.0.32.60401-83~22.04"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [
+				{
+					"key": "hipblaslt_0.12.1.60401-83_22.04_amd64",
+					"name": "hipblaslt",
+					"version": "0.12.1.60401-83~22.04"
+				},
+				{
+					"key": "rocm-core_6.4.1.60401-83_22.04_amd64",
+					"name": "rocm-core",
+					"version": "6.4.1.60401-83~22.04"
+				},
+				{
+					"key": "roctracer_4.1.60401.60401-83_22.04_amd64",
+					"name": "roctracer",
+					"version": "4.1.60401.60401-83~22.04"
+				},
+				{
+					"key": "hipblas-common-dev_1.0.0.60401-83_22.04_amd64",
+					"name": "hipblas-common-dev",
+					"version": "1.0.0.60401-83~22.04"
+				}
+			],
+			"key": "hipblaslt-dev_0.12.1.60401-83_22.04_amd64",
+			"name": "hipblaslt-dev",
+			"sha256": "46eb2285c76d246b162eb54cc7f9e5cb7bcdd0aa83d57ecaea440e57260f2f4a",
+			"urls": [
+				"https://repo.radeon.com/rocm/apt/6.4.1/pool/main/h/hipblaslt-dev/hipblaslt-dev_0.12.1.60401-83~22.04_amd64.deb"
+			],
+			"version": "0.12.1.60401-83~22.04"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "hipblas-common-dev_1.0.0.60401-83_22.04_amd64",
+			"name": "hipblas-common-dev",
+			"sha256": "5df3e4a8a1959cbf94106f7bf87d7fb71bf06e726cde00c6092ef29bbd8156f0",
+			"urls": [
+				"https://repo.radeon.com/rocm/apt/6.4.1/pool/main/h/hipblas-common-dev/hipblas-common-dev_1.0.0.60401-83~22.04_amd64.deb"
+			],
+			"version": "1.0.0.60401-83~22.04"
 		}
 	],
 	"version": 1

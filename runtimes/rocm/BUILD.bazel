@@ -1,13 +1,14 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("@rules_zig//zig:defs.bzl", "zig_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_shared_library")
 
-cc_library(
-    name = "zmlxrocm_lib",
-    srcs = ["zmlxrocm.c"],
-    linkopts = [
-        "-lc",
-        "-ldl",
-    ],
+zig_shared_library(
+    name = "zmlxrocm",
+    main = "zmlxrocm.zig",
+    # Use Clang's compiler-rt, but disable stack checking
+    # to avoid requiring on the _zig_probe_stack symbol.
+    copts = ["-fno-stack-check"],
+    shared_lib_name = "libzmlxrocm.so.0",
+    deps = ["//stdx"],
     visibility = ["@libpjrt_rocm//:__subpackages__"],
 )
 
@@ -51,6 +52,6 @@ zig_library(
 
 filegroup(
     name = "layers",
-    srcs = ["@libpjrt_rocm//:amdgpu_ids_layer"],
+    srcs = [],
     visibility = ["//visibility:public"],
 )

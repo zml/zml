@@ -54,7 +54,7 @@ def cc_import(
         patched_name = "{}.patchelf".format(name)
         patchelf(
             name = patched_name,
-            shared_library = shared_library,
+            src = shared_library,
             soname = soname,
             add_needed = add_needed,
             remove_needed = remove_needed,
