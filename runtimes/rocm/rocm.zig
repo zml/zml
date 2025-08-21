@@ -1,5 +1,5 @@
-const builtin = @import("builtin");
 const std = @import("std");
+const builtin = @import("builtin");
 
 const asynk = @import("async");
 const bazel_builtin = @import("bazel_builtin");
@@ -9,20 +9,6 @@ const runfiles = @import("runfiles");
 const stdx = @import("stdx");
 
 const log = std.log.scoped(.@"zml/runtime/rocm");
-
-const ROCmEnvEntry = struct {
-    name: [:0]const u8,
-    rpath: []const u8,
-    dirname: bool,
-    mandatory: bool,
-};
-
-const rocm_env_entries: []const ROCmEnvEntry = &.{
-    .{ .name = "HIPBLASLT_EXT_OP_LIBRARY_PATH", .rpath = "/lib/hipblaslt/library/hipblasltExtOpLibrary.dat", .dirname = false, .mandatory = false },
-    .{ .name = "HIPBLASLT_TENSILE_LIBPATH", .rpath = "/lib/hipblaslt/library/TensileManifest.txt", .dirname = true, .mandatory = false },
-    .{ .name = "ROCBLAS_TENSILE_LIBPATH", .rpath = "/lib/rocblas/library/TensileManifest.txt", .dirname = true, .mandatory = true },
-    .{ .name = "ROCM_PATH", .rpath = "/", .dirname = false, .mandatory = true },
-};
 
 pub fn isEnabled() bool {
     return @hasDecl(c, "ZML_RUNTIME_ROCM");
@@ -35,23 +21,9 @@ fn hasRocmDevices() bool {
     return true;
 }
 
-fn setupRocmEnv(allocator: std.mem.Allocator, rocm_data_dir: []const u8) !void {
-    for (rocm_env_entries) |entry| {
-        var real_path: []const u8 = std.fmt.allocPrintZ(allocator, "{s}/{s}", .{ rocm_data_dir, entry.rpath }) catch null orelse {
-            if (entry.mandatory) {
-                stdx.debug.panic("Unable to find {s} in {s}\n", .{ entry.name, bazel_builtin.current_repository });
-            }
-            continue;
-        };
-
-        if (entry.dirname) {
-            real_path = std.fs.path.dirname(real_path) orelse {
-                stdx.debug.panic("Unable to dirname on {s}", .{real_path});
-            };
-        }
-
-        _ = c.setenv(entry.name, try allocator.dupeZ(u8, real_path), 1);
-    }
+fn setupRocmEnv(rocm_data_dir: []const u8) !void {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    _ = c.setenv("ROCM_PATH", try stdx.fs.path.bufJoinZ(&buf, &.{rocm_data_dir}), 1); // must be zero terminated
 }
 
 pub fn load() !*const pjrt.Api {
@@ -81,7 +53,7 @@ pub fn load() !*const pjrt.Api {
         return error.FileNotFound;
     };
 
-    try setupRocmEnv(arena.allocator(), sandbox_path);
+    try setupRocmEnv(sandbox_path);
 
     var lib_path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const lib_path = try stdx.fs.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_rocm.so" });

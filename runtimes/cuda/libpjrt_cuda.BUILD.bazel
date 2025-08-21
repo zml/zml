@@ -10,7 +10,7 @@ cc_shared_library(
 
 patchelf(
     name = "libpjrt_cuda.patchelf",
-    shared_library = "libpjrt_cuda.so",
+    src = "libpjrt_cuda.so",
     add_needed = [
         "libzmlxcuda.so.0",
     ],

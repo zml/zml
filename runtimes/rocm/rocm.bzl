@@ -14,7 +14,7 @@ _UBUNTU_PACKAGES = {
         packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
         packages.patchelf(
             name = "libelf1",
-            shared_library = "usr/lib/x86_64-linux-gnu/libelf.so.1",
+            src = "usr/lib/x86_64-linux-gnu/libelf.so.1",
             set_rpath = "$ORIGIN",
         ),
     ]),
@@ -25,8 +25,12 @@ _UBUNTU_PACKAGES = {
         packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
         packages.patchelf(
             name = "libdrm-amdgpu-amdgpu1",
-            shared_library = "opt/amdgpu/lib/x86_64-linux-gnu/libdrm_amdgpu.so.1",
+            src = "opt/amdgpu/lib/x86_64-linux-gnu/libdrm_amdgpu.so.1",
+            add_needed = ["libzmlxrocm.so.0"],
             set_rpath = "$ORIGIN",
+            rename_dynamic_symbols = {
+                "fopen64": "zmlxrocm_fopen64",
+            },
         ),
     ]),
     "libtinfo6": packages.filegroup(name = "libtinfo6", srcs = ["lib/x86_64-linux-gnu/libtinfo.so.6"]),
@@ -38,14 +42,7 @@ _ROCM_PACKAGES = {
     "rocm-smi-lib": packages.filegroup(name = "rocm_smi", srcs = ["lib/librocm_smi64.so.7"]),
     "hsa-rocr": packages.filegroup(name = "hsa-runtime", srcs = ["lib/libhsa-runtime64.so.1"]),
     "hsa-amd-aqlprofile": packages.filegroup(name = "hsa-amd-aqlprofile", srcs = ["lib/libhsa-amd-aqlprofile64.so.1"]),
-    "comgr": "\n".join([
-        packages.filegroup(
-            name = "amd_comgr",
-            srcs = [
-                "lib/libamd_comgr.so.3",
-            ],
-        ),
-    ]),
+    "comgr": packages.filegroup(name = "amd_comgr", srcs = ["lib/libamd_comgr.so.3"]),
     "rocprofiler-register": packages.filegroup(name = "rocprofiler-register", srcs = ["lib/librocprofiler-register.so.0"]),
     "miopen-hip": "\n".join([
         packages.filegroup(name = "MIOpen", srcs = ["lib/libMIOpen.so.1"]),
@@ -59,7 +56,7 @@ _ROCM_PACKAGES = {
         packages.load_("@zml//runtimes/rocm:gfx.bzl", "bytecode_select"),
         packages.patchelf(
             name = "rocblas",
-            shared_library = "lib/librocblas.so.4",
+            src = "lib/librocblas.so.4",
             add_needed = ["libzmlxrocm.so.0"],
             rename_dynamic_symbols = {
                 "dlopen": "zmlxrocm_dlopen",
@@ -90,7 +87,7 @@ _ROCM_PACKAGES = {
         packages.load_("@zml//runtimes/rocm:gfx.bzl", "bytecode_select"),
         packages.patchelf(
             name = "hipblaslt",
-            shared_library = "lib/libhipblaslt.so.0",
+            src = "lib/libhipblaslt.so.0",
             add_needed = ["libzmlxrocm.so.0"],
             rename_dynamic_symbols = {
                 "dlopen": "zmlxrocm_dlopen",
@@ -116,10 +113,9 @@ _ROCM_PACKAGES = {
     "hipfft": packages.filegroup(name = "hipfft", srcs = ["lib/libhipfft.so.0"]),
     "hip-runtime-amd": "\n".join([
         packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
-        packages.filegroup(name = "amdhip", srcs = ["lib/libamdhip64.so.6"]),
         packages.patchelf(
-            name = "amdhip_patched",
-            shared_library = ":amdhip",
+            name = "amdhip",
+            src = "lib/libamdhip64.so.6",
             add_needed = ["libzmlxrocm.so.0"],
             rename_dynamic_symbols = {
                 "dlopen": "zmlxrocm_dlopen",

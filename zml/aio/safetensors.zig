@@ -1,13 +1,12 @@
-const std = @import("std");
-const Allocator = std.mem.Allocator;
-
 const asynk = @import("async");
-
-const MemoryMappedFile = @import("../aio.zig").MemoryMappedFile;
+const std = @import("std");
 const zml = @import("../zml.zig");
+const json = @import("json.zig");
 const HostBuffer = zml.HostBuffer;
+const MemoryMappedFile = @import("../aio.zig").MemoryMappedFile;
 
 const StringBuilder = std.ArrayListUnmanaged(u8);
+const Allocator = std.mem.Allocator;
 const log = std.log.scoped(.@"zml/io");
 
 pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore {
@@ -56,6 +55,11 @@ fn loadFromIndex(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.
         const full_filename = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(path).?, filename });
         try loadFile(allocator, store, files, full_filename);
     }
+
+    if (index.object.get("__metadata__")) |metadata| {
+        var prefix_buf: [1024]u8 = undefined;
+        try json.parseMetadata(allocator, store, StringBuilder.initBuffer(&prefix_buf), metadata);
+    }
 }
 
 fn loadFile(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.ArrayList(MemoryMappedFile), path: []const u8) !void {
@@ -85,6 +89,11 @@ fn loadFile(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.Array
     var it = metadata.object.iterator();
     while (it.next()) |entry| {
         const key = entry.key_ptr.*;
+        if (std.mem.eql(u8, key, "__metadata__")) {
+            var prefix_buf: [1024]u8 = undefined;
+            try json.parseMetadata(allocator, store, StringBuilder.initBuffer(&prefix_buf), entry.value_ptr.*);
+            continue;
+        }
         const val = entry.value_ptr.*;
         const shape_field = val.object.get("shape").?.array;
         if (shape_field.items.len > zml.Shape.MAX_RANK) {
