@@ -53,7 +53,6 @@
     "https://bazel-registry.zml.ai/modules/bazel_skylib/1.7.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/bazel_skylib/1.7.1/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/bazel_skylib/1.8.1/MODULE.bazel": "not found",
-    "https://bazel-registry.zml.ai/modules/buildifier_prebuilt/6.4.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/buildifier_prebuilt/8.2.0.2/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/buildozer/7.1.2/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/google_benchmark/1.8.2/MODULE.bazel": "not found",
@@ -80,8 +79,6 @@
     "https://bazel-registry.zml.ai/modules/platforms/0.0.9/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/platforms/1.0.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/protobuf/21.7/MODULE.bazel": "not found",
-    "https://bazel-registry.zml.ai/modules/protobuf/23.1/MODULE.bazel": "not found",
-    "https://bazel-registry.zml.ai/modules/protobuf/24.4/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/protobuf/27.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/protobuf/27.1/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/protobuf/29.0-rc2/MODULE.bazel": "not found",
@@ -119,7 +116,6 @@
     "https://bazel-registry.zml.ai/modules/rules_java/6.3.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_java/6.4.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_java/6.5.2/MODULE.bazel": "not found",
-    "https://bazel-registry.zml.ai/modules/rules_java/7.1.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_java/7.10.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_java/7.12.2/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_java/7.2.0/MODULE.bazel": "not found",
@@ -143,7 +139,6 @@
     "https://bazel-registry.zml.ai/modules/rules_license/0.0.3/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_license/0.0.7/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_license/1.0.0/MODULE.bazel": "not found",
-    "https://bazel-registry.zml.ai/modules/rules_multitool/0.11.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_oci/2.2.6/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_pkg/0.7.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_pkg/1.0.1/MODULE.bazel": "not found",
@@ -160,7 +155,6 @@
     "https://bazel-registry.zml.ai/modules/rules_python/0.29.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_python/0.31.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_python/0.33.2/MODULE.bazel": "not found",
-    "https://bazel-registry.zml.ai/modules/rules_python/0.34.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_python/0.4.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_python/0.40.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_python/1.4.1/MODULE.bazel": "not found",
@@ -171,7 +165,6 @@
     "https://bazel-registry.zml.ai/modules/rules_shell/0.4.1/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_swift/1.16.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_swift/2.1.1/MODULE.bazel": "not found",
-    "https://bazel-registry.zml.ai/modules/rules_uv/0.87.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/stardoc/0.5.1/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/stardoc/0.5.3/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/stardoc/0.5.4/MODULE.bazel": "not found",
@@ -184,7 +177,6 @@
     "https://bazel-registry.zml.ai/modules/tar.bzl/0.2.1/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/toolchains_llvm_bootstrapped/0.2.4/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/upb/0.0.0-20220923-a547704/MODULE.bazel": "not found",
-    "https://bazel-registry.zml.ai/modules/upb/0.0.0-20230516-61a97ef/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/with_cfg.bzl/0.11.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/with_cfg.bzl/0.9.2/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/yq.bzl/0.1.1/MODULE.bazel": "not found",
@@ -251,7 +243,6 @@
     "https://bcr.bazel.build/modules/bazel_skylib/1.7.1/MODULE.bazel": "3120d80c5861aa616222ec015332e5f8d3171e062e3e804a2a0253e1be26e59b",
     "https://bcr.bazel.build/modules/bazel_skylib/1.8.1/MODULE.bazel": "88ade7293becda963e0e3ea33e7d54d3425127e0a326e0d17da085a5f1f03ff6",
     "https://bcr.bazel.build/modules/bazel_skylib/1.8.1/source.json": "7ebaefba0b03efe59cac88ed5bbc67bcf59a3eff33af937345ede2a38b2d368a",
-    "https://bcr.bazel.build/modules/buildifier_prebuilt/6.4.0/MODULE.bazel": "37389c6b5a40c59410b4226d3bb54b08637f393d66e2fa57925c6fcf68e64bf4",
     "https://bcr.bazel.build/modules/buildifier_prebuilt/8.2.0.2/MODULE.bazel": "a9b689711d5b69f9db741649b218c119b9fdf82924ba390415037e09798edd03",
     "https://bcr.bazel.build/modules/buildifier_prebuilt/8.2.0.2/source.json": "51eb0a4b38aaaeab7fa64361576d616c4d8bfd0f17a0a10184aeab7084d79f8e",
     "https://bcr.bazel.build/modules/buildozer/7.1.2/MODULE.bazel": "2e8dd40ede9c454042645fd8d8d0cd1527966aa5c919de86661e62953cd73d84",
@@ -288,8 +279,6 @@
     "https://bcr.bazel.build/modules/platforms/1.0.0/MODULE.bazel": "f05feb42b48f1b3c225e4ccf351f367be0371411a803198ec34a389fb22aa580",
     "https://bcr.bazel.build/modules/platforms/1.0.0/source.json": "f4ff1fd412e0246fd38c82328eb209130ead81d62dcd5a9e40910f867f733d96",
     "https://bcr.bazel.build/modules/protobuf/21.7/MODULE.bazel": "a5a29bb89544f9b97edce05642fac225a808b5b7be74038ea3640fae2f8e66a7",
-    "https://bcr.bazel.build/modules/protobuf/23.1/MODULE.bazel": "88b393b3eb4101d18129e5db51847cd40a5517a53e81216144a8c32dfeeca52a",
-    "https://bcr.bazel.build/modules/protobuf/24.4/MODULE.bazel": "7bc7ce5f2abf36b3b7b7c8218d3acdebb9426aeb35c2257c96445756f970eb12",
     "https://bcr.bazel.build/modules/protobuf/27.0/MODULE.bazel": "7873b60be88844a0a1d8f80b9d5d20cfbd8495a689b8763e76c6372998d3f64c",
     "https://bcr.bazel.build/modules/protobuf/27.1/MODULE.bazel": "703a7b614728bb06647f965264967a8ef1c39e09e8f167b3ca0bb1fd80449c0d",
     "https://bcr.bazel.build/modules/protobuf/29.0-rc2/MODULE.bazel": "6241d35983510143049943fc0d57937937122baf1b287862f9dc8590fc4c37df",
@@ -334,7 +323,6 @@
     "https://bcr.bazel.build/modules/rules_java/6.3.0/MODULE.bazel": "a97c7678c19f236a956ad260d59c86e10a463badb7eb2eda787490f4c969b963",
     "https://bcr.bazel.build/modules/rules_java/6.4.0/MODULE.bazel": "e986a9fe25aeaa84ac17ca093ef13a4637f6107375f64667a15999f77db6c8f6",
     "https://bcr.bazel.build/modules/rules_java/6.5.2/MODULE.bazel": "1d440d262d0e08453fa0c4d8f699ba81609ed0e9a9a0f02cd10b3e7942e61e31",
-    "https://bcr.bazel.build/modules/rules_java/7.1.0/MODULE.bazel": "30d9135a2b6561c761bd67bd4990da591e6bdc128790ce3e7afd6a3558b2fb64",
     "https://bcr.bazel.build/modules/rules_java/7.10.0/MODULE.bazel": "530c3beb3067e870561739f1144329a21c851ff771cd752a49e06e3dc9c2e71a",
     "https://bcr.bazel.build/modules/rules_java/7.12.2/MODULE.bazel": "579c505165ee757a4280ef83cda0150eea193eed3bef50b1004ba88b99da6de6",
     "https://bcr.bazel.build/modules/rules_java/7.2.0/MODULE.bazel": "06c0334c9be61e6cef2c8c84a7800cef502063269a5af25ceb100b192453d4ab",
@@ -362,8 +350,6 @@
     "https://bcr.bazel.build/modules/rules_license/0.0.7/MODULE.bazel": "088fbeb0b6a419005b89cf93fe62d9517c0a2b8bb56af3244af65ecfe37e7d5d",
     "https://bcr.bazel.build/modules/rules_license/1.0.0/MODULE.bazel": "a7fda60eefdf3d8c827262ba499957e4df06f659330bbe6cdbdb975b768bb65c",
     "https://bcr.bazel.build/modules/rules_license/1.0.0/source.json": "a52c89e54cc311196e478f8382df91c15f7a2bfdf4c6cd0e2675cc2ff0b56efb",
-    "https://bcr.bazel.build/modules/rules_multitool/0.11.0/MODULE.bazel": "8d9dda78d2398e136300d3ef4fbcc89ede7c32c158d8c016fa7d032df41c4aaf",
-    "https://bcr.bazel.build/modules/rules_multitool/0.11.0/source.json": "0b86574a1eaff37c33aafaff095ea16d6ac846beb94ffc74c4fcf626f8f80681",
     "https://bcr.bazel.build/modules/rules_oci/2.2.6/MODULE.bazel": "2ba6ddd679269e00aeffe9ca04faa2d0ca4129650982c9246d0d459fe2da47d9",
     "https://bcr.bazel.build/modules/rules_oci/2.2.6/source.json": "94e7decb8f95d9465b0bbea71c65064cd16083be1350c7468f131818641dc4a5",
     "https://bcr.bazel.build/modules/rules_pkg/0.7.0/MODULE.bazel": "df99f03fc7934a4737122518bb87e667e62d780b610910f0447665a7e2be62dc",
@@ -383,7 +369,6 @@
     "https://bcr.bazel.build/modules/rules_python/0.29.0/MODULE.bazel": "2ac8cd70524b4b9ec49a0b8284c79e4cd86199296f82f6e0d5da3f783d660c82",
     "https://bcr.bazel.build/modules/rules_python/0.31.0/MODULE.bazel": "93a43dc47ee570e6ec9f5779b2e64c1476a6ce921c48cc9a1678a91dd5f8fd58",
     "https://bcr.bazel.build/modules/rules_python/0.33.2/MODULE.bazel": "3e036c4ad8d804a4dad897d333d8dce200d943df4827cb849840055be8d2e937",
-    "https://bcr.bazel.build/modules/rules_python/0.34.0/MODULE.bazel": "1d623d026e075b78c9fde483a889cda7996f5da4f36dffb24c246ab30f06513a",
     "https://bcr.bazel.build/modules/rules_python/0.4.0/MODULE.bazel": "9208ee05fd48bf09ac60ed269791cf17fb343db56c8226a720fbb1cdf467166c",
     "https://bcr.bazel.build/modules/rules_python/0.40.0/MODULE.bazel": "9d1a3cd88ed7d8e39583d9ffe56ae8a244f67783ae89b60caafc9f5cf318ada7",
     "https://bcr.bazel.build/modules/rules_python/1.4.1/MODULE.bazel": "8991ad45bdc25018301d6b7e1d3626afc3c8af8aaf4bc04f23d0b99c938b73a6",
@@ -398,8 +383,6 @@
     "https://bcr.bazel.build/modules/rules_swift/1.16.0/MODULE.bazel": "4a09f199545a60d09895e8281362b1ff3bb08bbde69c6fc87aff5b92fcc916ca",
     "https://bcr.bazel.build/modules/rules_swift/2.1.1/MODULE.bazel": "494900a80f944fc7aa61500c2073d9729dff0b764f0e89b824eb746959bc1046",
     "https://bcr.bazel.build/modules/rules_swift/2.1.1/source.json": "40fc69dfaac64deddbb75bd99cdac55f4427d9ca0afbe408576a65428427a186",
-    "https://bcr.bazel.build/modules/rules_uv/0.87.0/MODULE.bazel": "1f50b350458384f5c327ce04d943361435c772a80834536fc0eeebe92f3a7b95",
-    "https://bcr.bazel.build/modules/rules_uv/0.87.0/source.json": "2d75593d5c1126f6b7a014d14fb0771a24b7bd2e1de700f3e5e522ff0554b95c",
     "https://bcr.bazel.build/modules/stardoc/0.5.1/MODULE.bazel": "1a05d92974d0c122f5ccf09291442580317cdd859f07a8655f1db9a60374f9f8",
     "https://bcr.bazel.build/modules/stardoc/0.5.3/MODULE.bazel": "c7f6948dae6999bf0db32c1858ae345f112cacf98f174c7a8bb707e41b974f1c",
     "https://bcr.bazel.build/modules/stardoc/0.5.4/MODULE.bazel": "6569966df04610b8520957cb8e97cf2e9faac2c0309657c537ab51c16c18a2a4",
@@ -416,7 +399,6 @@
     "https://bcr.bazel.build/modules/toolchains_llvm_bootstrapped/0.2.4/MODULE.bazel": "859f02226bc313a622f56b816582fb55d5aaced4a1ecde7397dd4a9ebd24321e",
     "https://bcr.bazel.build/modules/toolchains_llvm_bootstrapped/0.2.4/source.json": "43c5fd6b585cbf0b642157b6843a25425d541fabe638acb7bc908846c4bda8ca",
     "https://bcr.bazel.build/modules/upb/0.0.0-20220923-a547704/MODULE.bazel": "7298990c00040a0e2f121f6c32544bab27d4452f80d9ce51349b1a28f3005c43",
-    "https://bcr.bazel.build/modules/upb/0.0.0-20230516-61a97ef/MODULE.bazel": "c0df5e35ad55e264160417fd0875932ee3c9dda63d9fccace35ac62f45e1b6f9",
     "https://bcr.bazel.build/modules/with_cfg.bzl/0.11.0/MODULE.bazel": "bcb1dba64b74542648a93d6313e160b2670f22395581edd8c4ffadb811618ef7",
     "https://bcr.bazel.build/modules/with_cfg.bzl/0.11.0/source.json": "19102ff7f611a7a821e11d866868ad541abb4f5757e37e1c40adb6834ebf6205",
     "https://bcr.bazel.build/modules/with_cfg.bzl/0.9.2/MODULE.bazel": "8008021cb802e87e22b3e2b6f403c0529d4b865703fdcd40e2f36c23a651291c",
@@ -812,102 +794,6 @@
             "rules_kotlin+",
             "bazel_tools",
             "bazel_tools"
-          ]
-        ]
-      }
-    },
-    "@@rules_multitool+//multitool:extension.bzl%multitool": {
-      "general": {
-        "bzlTransitiveDigest": "CxG1tSKAppSqmYJtpLgGpxrOvrd/xewKD0M2kCNfvOo=",
-        "usagesDigest": "kKFKsjNo1vbiSGlyYYHdSAj1Z8xtmvq8JBs56ZEpNS4=",
-        "recordedFileInputs": {},
-        "recordedDirentsInputs": {},
-        "envVariables": {},
-        "generatedRepoSpecs": {
-          "multitool.linux_arm64": {
-            "repoRuleId": "@@rules_multitool+//multitool/private:multitool.bzl%_env_specific_tools",
-            "attributes": {
-              "lockfiles": [
-                "@@rules_uv+//uv/private:uv.lock.json"
-              ],
-              "os": "linux",
-              "cpu": "arm64"
-            }
-          },
-          "multitool.linux_x86_64": {
-            "repoRuleId": "@@rules_multitool+//multitool/private:multitool.bzl%_env_specific_tools",
-            "attributes": {
-              "lockfiles": [
-                "@@rules_uv+//uv/private:uv.lock.json"
-              ],
-              "os": "linux",
-              "cpu": "x86_64"
-            }
-          },
-          "multitool.macos_arm64": {
-            "repoRuleId": "@@rules_multitool+//multitool/private:multitool.bzl%_env_specific_tools",
-            "attributes": {
-              "lockfiles": [
-                "@@rules_uv+//uv/private:uv.lock.json"
-              ],
-              "os": "macos",
-              "cpu": "arm64"
-            }
-          },
-          "multitool.macos_x86_64": {
-            "repoRuleId": "@@rules_multitool+//multitool/private:multitool.bzl%_env_specific_tools",
-            "attributes": {
-              "lockfiles": [
-                "@@rules_uv+//uv/private:uv.lock.json"
-              ],
-              "os": "macos",
-              "cpu": "x86_64"
-            }
-          },
-          "multitool.windows_arm64": {
-            "repoRuleId": "@@rules_multitool+//multitool/private:multitool.bzl%_env_specific_tools",
-            "attributes": {
-              "lockfiles": [
-                "@@rules_uv+//uv/private:uv.lock.json"
-              ],
-              "os": "windows",
-              "cpu": "arm64"
-            }
-          },
-          "multitool.windows_x86_64": {
-            "repoRuleId": "@@rules_multitool+//multitool/private:multitool.bzl%_env_specific_tools",
-            "attributes": {
-              "lockfiles": [
-                "@@rules_uv+//uv/private:uv.lock.json"
-              ],
-              "os": "windows",
-              "cpu": "x86_64"
-            }
-          },
-          "multitool": {
-            "repoRuleId": "@@rules_multitool+//multitool/private:multitool.bzl%_multitool_hub",
-            "attributes": {
-              "lockfiles": [
-                "@@rules_uv+//uv/private:uv.lock.json"
-              ]
-            }
-          }
-        },
-        "recordedRepoMappingEntries": [
-          [
-            "bazel_features+",
-            "bazel_features_globals",
-            "bazel_features++version_extension+bazel_features_globals"
-          ],
-          [
-            "bazel_features+",
-            "bazel_features_version",
-            "bazel_features++version_extension+bazel_features_version"
-          ],
-          [
-            "rules_multitool+",
-            "bazel_features",
-            "bazel_features+"
           ]
         ]
       }

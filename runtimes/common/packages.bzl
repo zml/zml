@@ -1,5 +1,3 @@
-load("//bazel:http_deb_archive.bzl", "http_deb_archive")
-
 _BUILD_FILE_DEFAULT_VISIBILITY = """\
 package(default_visibility = ["//visibility:public"])
 """

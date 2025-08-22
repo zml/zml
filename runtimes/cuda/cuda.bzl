@@ -130,7 +130,7 @@ def _read_redist_json(mctx, url, sha256):
 
 def _cuda_impl(mctx):
     loaded_packages = packages.read(mctx, [
-         "@zml//runtimes/cuda:packages.lock.json",
+        "@zml//runtimes/cuda:packages.lock.json",
     ])
     CUDA_REDIST = _read_redist_json(
         mctx,
