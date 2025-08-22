@@ -9,7 +9,7 @@ py_console_script_binary(
 
 uv_lock(
     name = "requirements",
-    srcs = ["pyproject.toml"],
+    srcs = ["requirements.in"],
     out = "requirements.lock.txt",
     args = ["--upgrade"],
     tags = ["manual"],
