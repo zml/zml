@@ -762,3 +762,193 @@ pub fn Contains(Haystack: type, T: type) bool {
         else => false,
     };
 }
+
+pub fn visitUnion(comptime cb: anytype, comptime K: type, ctx: FnParam(cb, 0), v: anytype) void {
+    const Callback = @TypeOf(cb);
+    const Ptr = @TypeOf(v);
+    const type_info_v = @typeInfo(Ptr);
+    if (type_info_v != .pointer) {
+        stdx.debug.compileError("zml.meta.visitEnum({}) is expecting a pointer/slice input, but received: {}", .{ Callback, Ptr });
+    }
+    const ptr_info = type_info_v.pointer;
+    const Child = ptr_info.child;
+
+    //const K, const mutating_cb = switch (@typeInfo(FnParam(cb, 1))) {
+    //    .pointer => |info| .{ info.child, !info.is_const },
+    //    else => stdx.debug.compileError("zml.meta.visit is expecting a callback with a pointer as second argument but found {}", .{FnParam(cb, 1)}),
+    //};
+    // Abort if v doesnt' contain any K.
+    if (comptime !Contains(Ptr, K)) return;
+
+    // Handle simple cases.
+    switch (Ptr) {
+        *const K, *K => return,
+        *const ?K, *?K => return,
+        []const K, []K => return,
+        else => {},
+    }
+
+    //// Handle std.BoundedArray that contains uninitalized data.
+    //if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "constSlice") and @hasDecl(Child, "slice")) {
+    //    return visit(cb, ctx, if (mutating_cb) v.slice() else v.constSlice());
+    //}
+
+    // Recursively visit fields of v.
+    switch (ptr_info.size) {
+        .one => switch (@typeInfo(Child)) {
+            .@"struct" => |s| inline for (s.fields) |field| {
+                if (field.is_comptime) continue;
+                const field_type_info = @typeInfo(field.type);
+                // If the field is already a pointer, we recurse with it directly, otherwise, we recurse with a pointer to the field.
+                switch (field_type_info) {
+                    .pointer => visitUnion(cb, K, ctx, @field(v, field.name)),
+                    .array, .optional, .@"union", .@"struct" => visitUnion(cb, K, ctx, &@field(v, field.name)),
+                    else => {},
+                }
+            },
+            .array => |_| for (v) |*elem| visitUnion(cb, K, ctx, elem),
+            .optional => if (v.* != null) visitUnion(cb, K, ctx, &v.*.?),
+            .@"union" => {
+                cb(ctx, @as(usize, @intFromEnum(v.*)));
+                switch (v.*) {
+                    inline else => |*v_field| visitUnion(cb, K, ctx, v_field),
+                }
+            },
+            else => {},
+        },
+        .slice => {
+            for (v) |*v_elem| {
+                switch (@typeInfo(Child)) {
+                    .@"struct" => |s| inline for (s.fields) |field| {
+                        if (field.is_comptime) continue;
+                        const field_type_info = @typeInfo(field.type);
+                        // If the field is already a pointer, we recurse with it directly, otherwise, we recurse with a pointer to the field.
+                        if (field_type_info == .pointer) {
+                            visitUnion(cb, K, ctx, @field(v_elem, field.name));
+                        } else {
+                            visitUnion(cb, K, ctx, &@field(v_elem, field.name));
+                        }
+                    },
+                    .array => |_| for (v) |*elem| visitUnion(cb, K, ctx, elem),
+                    .optional => if (v.* != null) visitUnion(cb, K, ctx, &v.*.?),
+                    .@"union" => {
+                        cb(ctx, @as(usize, @intFromEnum(v.*)));
+                        switch (v.*) {
+                            inline else => |*v_field| visitUnion(cb, K, ctx, v_field),
+                        }
+                    },
+                    else => {},
+                }
+            }
+        },
+        .many, .c => stdx.debug.compileError("zml.meta.visitEnum({}) doesn't support [*] style pointers, got: {}", .{ Callback, Ptr }),
+    }
+}
+
+pub fn assignUnionTags(comptime K: type, v: anytype, union_raw_tags: []const usize) void {
+    var index: usize = 0;
+    assignUnionTagsInner(K, v, union_raw_tags, &index);
+}
+
+pub fn assignUnionTagsInner(comptime K: type, v: anytype, union_raw_tags: []const usize, index: *usize) void {
+    const Ptr = @TypeOf(v);
+    const type_info_v = @typeInfo(Ptr);
+    if (type_info_v != .pointer) {
+        stdx.debug.compileError("zml.meta.assignUnionTags() is expecting a pointer/slice input, but received: {}", .{Ptr});
+    }
+    const ptr_info = type_info_v.pointer;
+    const Child = ptr_info.child;
+
+    //const K, const mutating_cb = switch (@typeInfo(FnParam(cb, 1))) {
+    //    .pointer => |info| .{ info.child, !info.is_const },
+    //    else => stdx.debug.compileError("zml.meta.visit is expecting a callback with a pointer as second argument but found {}", .{FnParam(cb, 1)}),
+    //};
+    // Abort if v doesnt' contain any K.
+    if (comptime !Contains(Ptr, K)) return;
+
+    // Handle simple cases.
+    switch (Ptr) {
+        *const K, *K => return,
+        *const ?K, *?K => return,
+        []const K, []K => return,
+        else => {},
+    }
+
+    //// Handle std.BoundedArray that contains uninitalized data.
+    //if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "constSlice") and @hasDecl(Child, "slice")) {
+    //    return visit(cb, ctx, if (mutating_cb) v.slice() else v.constSlice());
+    //}
+
+    // Recursively visit fields of v.
+    switch (ptr_info.size) {
+        .one => switch (@typeInfo(Child)) {
+            .@"struct" => |s| inline for (s.fields) |field| {
+                if (field.is_comptime) continue;
+                const field_type_info = @typeInfo(field.type);
+                // If the field is already a pointer, we recurse with it directly, otherwise, we recurse with a pointer to the field.
+                switch (field_type_info) {
+                    .pointer => assignUnionTagsInner(K, @field(v, field.name), union_raw_tags, index),
+                    .array, .optional, .@"union", .@"struct" => assignUnionTagsInner(K, &@field(v, field.name), union_raw_tags, index),
+                    else => {},
+                }
+            },
+            .array => |_| for (v) |*elem| assignUnionTagsInner(K, elem, union_raw_tags, index),
+            .optional => if (v.* != null) assignUnionTagsInner(K, &v.*.?, union_raw_tags, index),
+            .@"union" => {
+                const U = @TypeOf(v.*);
+                const E = std.meta.Tag(U);
+                var default_undefined_unions: [std.meta.tags(E).len]U = undefined;
+                {
+                    const type_info = @typeInfo(E);
+                    inline for (type_info.@"enum".fields, 0..) |tag, i| {
+                        default_undefined_unions[i] = @unionInit(U, tag.name, undefined);
+                    }
+                }
+                const union_raw_tag = union_raw_tags[index.*];
+                v.* = default_undefined_unions[union_raw_tag];
+                index.* += 1;
+                switch (v.*) {
+                    inline else => |*v_field| assignUnionTagsInner(K, v_field, union_raw_tags, index),
+                }
+            },
+            else => {},
+        },
+        .slice => {
+            for (v) |*v_elem| {
+                switch (@typeInfo(Child)) {
+                    .@"struct" => |s| inline for (s.fields) |field| {
+                        if (field.is_comptime) continue;
+                        const field_type_info = @typeInfo(field.type);
+                        // If the field is already a pointer, we recurse with it directly, otherwise, we recurse with a pointer to the field.
+                        if (field_type_info == .pointer) {
+                            assignUnionTagsInner(K, @field(v_elem, field.name), union_raw_tags, index);
+                        } else {
+                            assignUnionTagsInner(K, &@field(v_elem, field.name), union_raw_tags, index);
+                        }
+                    },
+                    .array => |_| for (v) |*elem| assignUnionTagsInner(K, elem, union_raw_tags, index),
+                    .optional => if (v.* != null) assignUnionTagsInner(K, &v.*.?, union_raw_tags, index),
+                    .@"union" => {
+                        const U = @TypeOf(v.*);
+                        const E = std.meta.Tag(U);
+                        var default_undefined_unions: [std.meta.tags(E).len]U = undefined;
+                        {
+                            const type_info = @typeInfo(E);
+                            inline for (type_info.@"enum".fields, 0..) |tag, i| {
+                                default_undefined_unions[i] = @unionInit(U, tag.name, undefined);
+                            }
+                        }
+                        const union_raw_tag = union_raw_tags[index.*];
+                        v.* = default_undefined_unions[union_raw_tag];
+                        index.* += 1;
+                        switch (v.*) {
+                            inline else => |*v_field| assignUnionTagsInner(K, v_field, union_raw_tags, index),
+                        }
+                    },
+                    else => {},
+                }
+            }
+        },
+        .many, .c => stdx.debug.compileError("zml.meta.assignUnionTags() doesn't support [*] style pointers, got: {}", .{Ptr}),
+    }
+}

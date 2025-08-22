@@ -170,6 +170,7 @@ pub const BaseExe = struct {
 
     input_shapes: []Shape,
     result_shapes: []Shape,
+    result_union_raw_tags: []usize,
 
     /// Num devices used (>1 for sharded executable)
     num_devices: u8,
@@ -181,7 +182,7 @@ pub const BaseExe = struct {
         parent_allocator: std.mem.Allocator,
         platform: Platform,
         exe: *pjrt.LoadedExecutable,
-        args: struct { input_shapes: []const Shape, result_shapes: []const Shape, n_devices: u8 },
+        args: struct { input_shapes: []const Shape, result_shapes: []const Shape, result_union_raw_tags: []usize, n_devices: u8 },
     ) !BaseExe {
         var arena = std.heap.ArenaAllocator.init(parent_allocator);
         errdefer arena.deinit();
@@ -205,6 +206,9 @@ pub const BaseExe = struct {
         const all_shapes = try allocator.alloc(Shape, n_in + n_out);
         @memcpy(all_shapes[0..n_in], args.input_shapes);
         @memcpy(all_shapes[n_in..], args.result_shapes);
+
+        const result_union_raw_tags = try arena.allocator().dupe(usize, args.result_union_raw_tags);
+
         return .{
             .platform = platform,
             .exe = exe,
@@ -215,6 +219,7 @@ pub const BaseExe = struct {
             .output_per_device = output_per_device,
             .input_shapes = all_shapes[0..n_in],
             .result_shapes = all_shapes[n_in..],
+            .result_union_raw_tags = result_union_raw_tags,
             ._arena = arena,
         };
     }
@@ -361,6 +366,7 @@ pub fn Exe(ArgsT: type, ReturnT: type) type {
             std.debug.assert(total_ready == self.inner.input_buffer_count);
             self.inner._unsafeCall();
             var result: Bufferized(ReturnT) = undefined;
+            meta.assignUnionTags(Buffer, &result, self.inner.result_union_raw_tags);
             self.inner._unsafeAssignResults(Bufferized(ReturnT), &result);
             return result;
         }

@@ -31,6 +31,7 @@ pub const MlirFn = struct {
     res_types: []mlir.Type,
     res_shapes: []Shape,
     res_donations: []Tensor._Donation,
+    res_union_raw_tags: []usize,
     mlir_fn: mlir.Operation,
 
     pub const Kind = enum {
@@ -233,6 +234,7 @@ pub const CompilationContext = struct {
                 .input_shapes = f.args_shapes,
                 .result_shapes = f.res_shapes,
                 .n_devices = sharding.num_replicas * sharding.num_partitions,
+                .result_union_raw_tags = f.res_union_raw_tags,
             },
         );
     }
@@ -357,16 +359,11 @@ pub const CompilationContext = struct {
         // Note: this isn't stricly necessary. We call `countTensor` on `fn_res`.
         // But it forces user to have simpler function.
         const ReturnT = stdx.meta.FnResult(func);
-        const out_tensor_count = comptime ops.staticCountTensors(ReturnT) orelse @compileError("Can't use " ++ @typeName(ReturnT) ++ " in an MLIR function, because it has a variable number of tensors");
 
         // Those are returned to caller so we don't put them in the arena, but in the module allocator.
         const fn_res = try res_allocator.create(ReturnT);
-        const fn_res_types = try res_allocator.alloc(mlir.Type, out_tensor_count);
-        const fn_res_shapes = try res_allocator.alloc(Shape, out_tensor_count);
-        const fn_res_donations = try res_allocator.alloc(Tensor._Donation, out_tensor_count);
-        const fn_res_output_memory_kind = try res_allocator.alloc(Buffer.Memory, out_tensor_count);
         var fn_body = self.openBlock(.hermetic, input_types, locations) catch unreachable;
-        {
+        const out_tensor_count, const fn_res_types, const fn_res_shapes, const fn_res_donations, const fn_res_output_memory_kind, const fn_res_union_raw_tags = b: {
             defer self.closeBlock(fn_body);
 
             try self._block_args.ensureUnusedCapacity(self.allocator(), @intCast(tensor_count));
@@ -379,12 +376,43 @@ pub const CompilationContext = struct {
                 break :forward @call(.auto, func, args.*);
             };
 
-            var fn_res_values: [out_tensor_count]mlir.Value = undefined;
-            self.extractValuesAndTypes(fn_res, &fn_res_values, fn_res_types, fn_res_shapes, fn_res_donations, fn_res_output_memory_kind);
+            const out_tensor_count = meta.count(Tensor, fn_res);
 
-            const fn_ret = dialect.func.return_(mlir_ctx, &fn_res_values, loc);
+            var enum_count: usize = 0;
+            meta.visitUnion(struct {
+                fn cb(inner_enum_count: *usize, _: usize) void {
+                    inner_enum_count.* += 1;
+                }
+            }.cb, Tensor, &enum_count, fn_res);
+
+            const fn_res_types = try res_allocator.alloc(mlir.Type, out_tensor_count);
+            const fn_res_shapes = try res_allocator.alloc(Shape, out_tensor_count);
+            const fn_res_donations = try res_allocator.alloc(Tensor._Donation, out_tensor_count);
+            const fn_res_output_memory_kind = try res_allocator.alloc(Buffer.Memory, out_tensor_count);
+            const fn_res_union_raw_tags = try res_allocator.alloc(usize, enum_count);
+            {
+                const Context = struct {
+                    index: usize = 0,
+                    tags: []usize,
+                };
+                var ctx: Context = .{ .tags = fn_res_union_raw_tags };
+                meta.visitUnion(struct {
+                    fn cb(inner_ctx: *Context, raw_enum_value: usize) void {
+                        inner_ctx.tags[inner_ctx.index] = raw_enum_value;
+                        inner_ctx.index += 1;
+                    }
+                }.cb, Tensor, &ctx, fn_res);
+            }
+
+            const fn_res_values = try arena.alloc(mlir.Value, out_tensor_count);
+
+            self.extractValuesAndTypes(fn_res, fn_res_values, fn_res_types, fn_res_shapes, fn_res_donations, fn_res_output_memory_kind);
+
+            const fn_ret = dialect.func.return_(mlir_ctx, fn_res_values, loc);
             fn_body[0].appendOperationRecursive(fn_ret, fn_body[1]);
-        }
+
+            break :b .{ out_tensor_count, fn_res_types, fn_res_shapes, fn_res_donations, fn_res_output_memory_kind, fn_res_union_raw_tags };
+        };
 
         const arg_attrs = try arena.alloc(AttributeList, tensor_count);
         @memset(arg_attrs, .{});
@@ -429,6 +457,7 @@ pub const CompilationContext = struct {
             .res_types = fn_res_types,
             .res_shapes = fn_res_shapes,
             .res_donations = fn_res_donations,
+            .res_union_raw_tags = fn_res_union_raw_tags,
         };
     }
 
