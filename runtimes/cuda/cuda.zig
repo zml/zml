@@ -1,5 +1,5 @@
-const builtin = @import("builtin");
 const std = @import("std");
+const builtin = @import("builtin");
 
 const asynk = @import("async");
 const bazel_builtin = @import("bazel_builtin");
@@ -22,12 +22,7 @@ fn hasNvidiaDevice() bool {
 }
 
 fn hasCudaPathInLDPath() bool {
-    const ldLibraryPath = c.getenv("LD_LIBRARY_PATH");
-
-    if (ldLibraryPath == null) {
-        return false;
-    }
-
+    const ldLibraryPath = std.c.getenv("LD_LIBRARY_PATH") orelse return false;
     return std.ascii.indexOfIgnoreCase(std.mem.span(ldLibraryPath), nvidiaLibsPath) != null;
 }
 
