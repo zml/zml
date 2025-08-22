@@ -1,20 +1,8 @@
+load("@com_google_protobuf//bazel:upb_proto_library.bzl", "upb_c_proto_library")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("@rules_python//python:pip.bzl", "compile_pip_requirements")
-load("@rules_python//python/entry_points:py_console_script_binary.bzl", "py_console_script_binary")
-load("@rules_uv//uv:pip.bzl", "pip_compile")
-load("@rules_zig//zig:defs.bzl", "zig_library", "zig_shared_library")
-load(":neuron.bzl", "py_binary_with_script")
-load(":pyenv.bzl", "pyenv_zig")
-
-pyenv_zig(
-    name = "libneuronxla_pyenv_zig",
-    deps = [":libneuronxla"],
-)
-
-zig_library(
-    name = "libneuronxla_pyenv",
-    main = ":libneuronxla_pyenv_zig",
-)
+load("@rules_python//python/uv:lock.bzl", uv_lock = "lock")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library", "zig_shared_library")
+load("@zml//bazel:runfiles.bzl", "runfiles_to_default")
 
 # A proxy PJRT Plugin that loads the Neuron PJRT Plugin
 # and returns the instance from nested GetPjrtApi.
@@ -22,78 +10,40 @@ zig_library(
 # Additionally, it provides a way to load implicit transitive dependencies
 # of neuronx-cc (see add_needed of the patchelf target below).
 zig_shared_library(
-    name = "libpjrt_neuron_proxy",
+    name = "libpjrt_neuron",
     copts = ["-fno-stack-check"],
     main = "libpjrt_neuron.zig",
     visibility = ["@libpjrt_neuron//:__subpackages__"],
     deps = [
+        ":libpython",
         "//stdx",
         "@rules_zig//zig/runfiles",
+        "@xla//xla/pjrt/c:pjrt_c_api_hdrs",
     ],
 )
 
-pip_compile(
-    name = "update_requirements",
-    args = [
-        "--generate-hashes",
-        "--emit-index-url",
-        "--emit-find-links",
-        "--no-strip-extras",
-        "--index-strategy=unsafe-best-match",
-        "--upgrade",
-    ],
-    python_platform = "x86_64-unknown-linux-gnu",
-    requirements_in = "requirements.in",
-    requirements_txt = "requirements.lock.txt",
-)
-
-py_console_script_binary(
+zig_binary(
     name = "neuronx-cc",
-    binary_rule = py_binary_with_script,
-    pkg = "@neuron_py_deps//neuronx_cc",
-    visibility = ["//visibility:public"],
+    data = ["@neuron_py_deps//neuronx_cc"],
+    linkopts = ["-Wl,-rpath,$ORIGIN/../lib"],
+    main = "neuronx-cc.zig",
+    tags = ["manual"],
+    deps = [":libpython"],
 )
 
-py_binary_with_script(
-    name = "libneuronxla",
-    srcs = ["empty.py"],
-    main = "empty.py",
-    deps = [
-        ":neuronx-cc",
-        "@neuron_py_deps//libneuronxla",
-    ],
+runfiles_to_default(
+    name = "neuronx-cc_files",
+    visibility = ["@libpjrt_neuron//:__subpackages__"],
+    deps = [":neuronx-cc"],
 )
 
 cc_library(
     name = "libpython",
     hdrs = ["libpython.h"],
-    visibility = ["//visibility:public"],
     deps = [
         "@rules_python//python/cc:current_py_cc_headers",
         "@rules_python//python/cc:current_py_cc_libs",
     ],
-)
-
-compile_pip_requirements(
-    name = "requirements",
-    src = "requirements.in",
-    py_binary = py_binary_with_script,
-    requirements_txt = "requirements.lock.txt",
-    tags = [
-        "manual",
-    ],
-)
-
-cc_library(
-    name = "zmlxneuron_lib",
-    srcs = ["zmlxneuron.c"],
-    linkopts = ["-ldl"],
-    visibility = ["@libpjrt_neuron//:__subpackages__"],
-)
-
-alias(
-    name = "bootstrap",
-    actual = "@rules_python//python/config_settings:bootstrap_impl",
 )
 
 cc_library(
@@ -101,22 +51,66 @@ cc_library(
 )
 
 cc_library(
-    name = "libpjrt_neuron",
-    hdrs = ["libpjrt_neuron.h"],
+    name = "zmlxneuron",
     defines = ["ZML_RUNTIME_NEURON"],
-    deps = [
-        "@libpjrt_neuron",
+)
+
+cc_library(
+    name = "libnrt_headers",
+    hdrs = ["nrt.h"],
+    deps = ["@libpjrt_neuron//:libnrt_headers"],
+)
+
+filegroup(
+    name = "layers",
+    srcs = [],
+    visibility = ["//visibility:public"],
+)
+
+upb_c_proto_library(
+    name = "xla_data_upb",
+    deps = ["@xla//xla:xla_data_proto"],
+)
+
+upb_c_proto_library(
+    name = "hlo_proto_upb",
+    deps = ["@xla//xla/service:hlo_proto"],
+)
+
+zig_shared_library(
+    name = "libneuronxla",
+    copts = [
+        "-fno-stack-check",
+        "-fPIC",
     ],
+    main = "libneuronxla.zig",
+    shared_lib_name = "libneuronxla.so",
+    visibility = ["@libpjrt_neuron//:__subpackages__"],
+    deps = [
+        ":hlo_proto_upb",
+        ":libpython",
+        ":xla_data_upb",
+        "//stdx",
+        "//upb",
+    ],
+)
+
+uv_lock(
+    name = "requirements",
+    srcs = ["requirements.in"],
+    out = "requirements.lock.txt",
+    args = [
+        "--emit-index-url",
+        "--emit-find-links",
+        "--index-strategy=unsafe-best-match",
+        "--upgrade",
+    ],
+    python_version = "3.11",
+    tags = ["manual"],
 )
 
 zig_library(
     name = "neuron",
-    data = select({
-        "//runtimes:neuron.enabled": [
-            ":libneuronxla",
-        ],
-        "//conditions:default": [],
-    }),
     import_name = "runtimes/neuron",
     main = "neuron.zig",
     visibility = ["//visibility:public"],
@@ -124,21 +118,14 @@ zig_library(
         "//pjrt",
     ] + select({
         "//runtimes:neuron.enabled": [
-            ":libneuronxla_pyenv",
-            ":libpjrt_neuron",
+            ":libnrt_headers",
             ":libpython",
+            ":zmlxneuron",
             "//async",
             "//stdx",
+            "@libpjrt_neuron",
             "@rules_zig//zig/runfiles",
         ],
         "//conditions:default": [":empty"],
     }),
-)
-
-filegroup(
-    name = "layers",
-    srcs = [
-        "@apt_neuron//bash/amd64",
-    ],
-    visibility = ["//visibility:public"],
 )
