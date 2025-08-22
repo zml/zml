@@ -1,6 +1,5 @@
 load("@rules_python//python:py_library.bzl", "py_library")
 load("@rules_python//python/entry_points:py_console_script_binary.bzl", "py_console_script_binary")
-load("@rules_python//python/uv:lock.bzl", uv_lock = "lock")
 load("@rules_uv//uv:pip.bzl", "pip_compile")
 
 py_library(
@@ -11,8 +10,8 @@ py_library(
 
 py_console_script_binary(
     name = "hf",
-    script = "hf",
     pkg = "@huggingface_hub//huggingface_hub:pkg",
+    script = "hf",
     visibility = ["//visibility:public"],
 )
 

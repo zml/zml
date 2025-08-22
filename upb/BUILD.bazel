@@ -1,3 +1,4 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_zig//zig:defs.bzl", "zig_library")
 
 cc_library(
@@ -11,6 +12,6 @@ cc_library(
 zig_library(
     name = "upb",
     main = "upb.zig",
-    deps = [":upb_c"],
     visibility = ["//visibility:public"],
+    deps = [":upb_c"],
 )
