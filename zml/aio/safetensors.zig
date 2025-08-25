@@ -1,12 +1,14 @@
-const asynk = @import("async");
 const std = @import("std");
-const zml = @import("../zml.zig");
-const json = @import("json.zig");
-const HostBuffer = zml.HostBuffer;
+const Allocator = std.mem.Allocator;
+
+const asynk = @import("async");
+
 const MemoryMappedFile = @import("../aio.zig").MemoryMappedFile;
+const zml = @import("../zml.zig");
+const HostBuffer = zml.HostBuffer;
+const json = @import("json.zig");
 
 const StringBuilder = std.ArrayListUnmanaged(u8);
-const Allocator = std.mem.Allocator;
 const log = std.log.scoped(.@"zml/io");
 
 pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore {
@@ -105,12 +107,12 @@ fn loadFile(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.Array
         const start: usize = @intCast(offset_field.array.items[0].integer);
         const end: usize = @intCast(offset_field.array.items[1].integer);
         const dtype = try stringToDtype(val.object.get("dtype").?.string);
-        var dims: std.BoundedArray(i64, zml.Shape.MAX_RANK) = .{};
-        for (shape_field.items) |d| {
-            dims.appendAssumeCapacity(d.integer);
+        var dims: [zml.Shape.MAX_RANK]i64 = undefined;
+        for (0.., shape_field.items) |i, d| {
+            dims[i] = d.integer;
         }
 
-        const out_shape = zml.Shape.init(dims.constSlice(), dtype);
+        const out_shape = zml.Shape.init(dims[0..shape_field.items.len], dtype);
         // We aren't storing 'end', so check we can infer it from the tensor shape.
         // This is fine cause safetensor only allow storing contiguous tensors.
         // https://github.com/huggingface/safetensors/blob/main/README.md#format

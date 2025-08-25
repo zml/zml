@@ -1,6 +1,8 @@
 const std = @import("std");
+
 const c = @import("c");
 const ffi = @import("ffi");
+const stdx = @import("stdx");
 
 const StringToTokenRatio = 3;
 
@@ -81,7 +83,7 @@ pub const Encoder = struct {
 
 pub const Decoder = struct {
     const StringBufferSize = 64;
-    const StringBuffer = std.BoundedArray(u8, StringBufferSize);
+    const StringBuffer = stdx.BoundedArray(u8, StringBufferSize);
     const TokenIdsBufferSize = 4;
 
     inner: *SentencePieceProcessor,

@@ -4,6 +4,7 @@ load("@zml//bazel:zig_srcs.bzl", "zig_srcs")
 zig_library(
     name = "stdx",
     srcs = [
+        "bounded_array.zig",
         "debug.zig",
         "flags.zig",
         "fmt.zig",

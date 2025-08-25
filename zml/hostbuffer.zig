@@ -310,7 +310,7 @@ pub const HostBuffer = struct {
         const ax = self._shape.axis(axis_);
         stdx.debug.assert(self.dim(ax) == 1, "squeeze expects a 1-d axis got {} in {f}", .{ ax, self });
 
-        var strd: std.BoundedArray(i64, Shape.MAX_RANK) = .{ .buffer = self._strides, .len = self.rank() };
+        var strd: stdx.BoundedArray(i64, Shape.MAX_RANK) = .{ .buffer = self._strides, .len = self.rank() };
         _ = strd.orderedRemove(ax);
 
         return .{

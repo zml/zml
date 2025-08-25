@@ -45,7 +45,7 @@ pub const Buffer = struct {
     _shards: Shards,
 
     pub const MAX_NUM_SHARDS: u8 = Platform.MAX_NUM_DEVICES;
-    pub const Shards = std.BoundedArray(*pjrt.Buffer, MAX_NUM_SHARDS);
+    pub const Shards = stdx.BoundedArray(*pjrt.Buffer, MAX_NUM_SHARDS);
 
     pub const FromOptions = struct {
         wait: bool = true,

@@ -10,6 +10,7 @@ zig_library(
     visibility = ["//visibility:public"],
     deps = [
         "//ffi:zig",
+        "//stdx",
         "//zml/tokenizer/hftokenizers",
         "//zml/tokenizer/sentencepiece",
     ],
