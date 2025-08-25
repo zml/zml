@@ -453,7 +453,7 @@ pub fn visit(comptime cb: anytype, ctx: FnParam(cb, 0), v: anytype) void {
         else => {},
     }
 
-    // Handle std.BoundedArray that contains uninitalized data.
+    // Handle stdx.BoundedArray that contains uninitalized data.
     if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "constSlice") and @hasDecl(Child, "slice")) {
         return visit(cb, ctx, if (mutating_cb) v.slice() else v.constSlice());
     }
@@ -511,7 +511,7 @@ test visit {
     const NestedAttrOptional = struct { nested: ?Attr };
     const SimpleStruct = struct { prop: Attr };
     const MultipleTypesStruct = struct { prop1: Attr, prop2: OtherAttr, prop3: ?Attr };
-    const NestedTypesStruct = struct { prop1: Attr, prop2: OtherAttr, prop3: NestedAttr, prop4: NestedAttrOptional, prop5: std.BoundedArray(Attr, 8) };
+    const NestedTypesStruct = struct { prop1: Attr, prop2: OtherAttr, prop3: NestedAttr, prop4: NestedAttrOptional, prop5: stdx.BoundedArray(Attr, 8) };
 
     const LocalContext = struct { result: usize };
 
@@ -565,7 +565,7 @@ test visit {
     }
     {
         var context: LocalContext = .{ .result = 0 };
-        const prop5: std.BoundedArray(Attr, 8) = .{
+        const prop5: stdx.BoundedArray(Attr, 8) = .{
             .buffer = @splat(.{ .data = 4 }),
             .len = 2,
         };

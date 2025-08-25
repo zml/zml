@@ -2,10 +2,11 @@
 //! Disclaimer this is not a very robust implementation:
 //! In particular the normalization is pretty minimalist, only works with ascii, and don't do unicode normalization.
 //! Mostly used for testing models that don't have an official HF/sentencepiece tokenizer.
-const builtin = @import("builtin");
 const std = @import("std");
-
 const testing = std.testing;
+const builtin = @import("builtin");
+
+const stdx = @import("stdx");
 
 const log = std.log.scoped(.@"zml/tokenizer");
 
@@ -443,8 +444,8 @@ pub const Encoder = struct {
 };
 
 pub const Decoder = struct {
-    const StringBuffer = std.BoundedArray(u8, 128);
-    const TokensIdsBuffer = std.BoundedArray(u32, 4);
+    const StringBuffer = stdx.BoundedArray(u8, 128);
+    const TokensIdsBuffer = stdx.BoundedArray(u32, 4);
 
     inner: *Tokenizer,
     arena: std.heap.ArenaAllocator,
@@ -571,7 +572,7 @@ test CharTokenIterator {
     {
         tokenizer.byte_fallback = false;
         var it: CharTokenIterator = .{ .input = "ζℳL" };
-        var res: std.BoundedArray(u32, 8) = .{};
+        var res: stdx.BoundedArray(u32, 8) = .{};
         while (try it.nextCodepointToken(&tokenizer)) |token| {
             res.appendAssumeCapacity(token);
         }
@@ -582,7 +583,7 @@ test CharTokenIterator {
     {
         tokenizer.byte_fallback = true;
         var it: CharTokenIterator = .{ .input = "ζℳL" };
-        var res: std.BoundedArray(u32, 8) = .{};
+        var res: stdx.BoundedArray(u32, 8) = .{};
         while (try it.nextCodepointToken(&tokenizer)) |token| {
             res.appendAssumeCapacity(token);
         }
@@ -596,7 +597,7 @@ pub const Normalizer = struct {
     /// Space token used by sentencepiece derived tokenizer.
     pub const sentencepiece_space = "▁"; // \xe2\x96\x81
 
-    _whitespace: std.BoundedArray(u8, 8) = .{},
+    _whitespace: stdx.BoundedArray(u8, 8) = .{},
 
     flags: packed struct {
         remove_extra_whitespaces: bool,
@@ -965,7 +966,7 @@ test Normalizer {
 /// This implementation precompupte a mapping between bytes encoded with GPT2 algorithm,
 /// into utf8 bytes, and do lookups at runtime.
 pub const Gpt2TextDecoder = struct {
-    const Code = std.BoundedArray(u8, 2);
+    const Code = stdx.BoundedArray(u8, 2);
 
     // TODO: benchmark this is more efficient than doing the conversion at runtime.
     code_to_byte: std.AutoArrayHashMap(Code, u8),

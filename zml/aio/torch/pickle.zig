@@ -767,24 +767,22 @@ pub fn parse(allocator: std.mem.Allocator, reader: anytype, max_line_len: usize)
     var results = std.ArrayList(Op).init(allocator);
     errdefer results.deinit();
     const len = max_line_len;
-    var _buf: std.BoundedArray(u8, 12) = .{};
+    var buf: [12]u8 = undefined;
 
     while (true) {
         const b = try reader.readByte();
         const code: OpCode = @enumFromInt(b);
         const op: Op = switch (code) {
             .int => blk: {
-                _buf.len = 0;
-                try reader.streamUntilDelimiter(_buf.writer(), '\n', _buf.capacity() + 1);
-                const buf = _buf.constSlice();
+                const int = try reader.readUntilDelimiter(&buf, '\n');
                 // Legacy hack, see OpCode.int documentation
                 // We do this parsing right away to simplify downstream code.
-                break :blk if (std.mem.eql(u8, "00", buf))
+                break :blk if (std.mem.eql(u8, "00", int))
                     .{ .bool = false }
-                else if (std.mem.eql(u8, "01", buf))
+                else if (std.mem.eql(u8, "01", int))
                     .{ .bool = true }
                 else
-                    .{ .int = try std.fmt.parseInt(i32, buf, 10) };
+                    .{ .int = try std.fmt.parseInt(i32, int, 10) };
             },
             .binint => .{ .int = try reader.readInt(i32, .little) },
             .binint1 => .{ .int = try reader.readByte() },
@@ -833,14 +831,14 @@ pub fn parse(allocator: std.mem.Allocator, reader: anytype, max_line_len: usize)
             .pop_mark => .pop_mark,
             // If we fail to parse delay the error to the evaluation.
             .get => .{
-                .get = _readDigits(u32, reader, &_buf) catch std.math.maxInt(u32),
+                .get = _readDigits(u32, reader, &buf) catch std.math.maxInt(u32),
             },
             .binget => .{ .get = try reader.readByte() },
             .long_binget => .{ .get = try reader.readInt(u32, .little) },
             .put => blk: {
-                const buf = try reader.readUntilDelimiterAlloc(allocator, '\n', len);
-                defer allocator.free(buf);
-                const n = std.fmt.parseInt(u32, buf, 10) catch std.math.maxInt(u32);
+                const put = try reader.readUntilDelimiterAlloc(allocator, '\n', len);
+                defer allocator.free(put);
+                const n = std.fmt.parseInt(u32, put, 10) catch std.math.maxInt(u32);
                 break :blk .{ .put = n };
             },
             .binput => .{ .put = try reader.readByte() },
@@ -1043,13 +1041,12 @@ test "parse protocol 0" {
     try std.testing.expectEqualDeep(&expected, ops);
 }
 
-fn _readDigits(comptime T: type, reader: anytype, buffer: *std.BoundedArray(u8, 12)) !T {
-    buffer.len = 0;
-    try reader.streamUntilDelimiter(buffer.writer(), '\n', 13);
-    return std.fmt.parseInt(T, buffer.constSlice(), 10);
+fn _readDigits(comptime T: type, reader: std.Io.Reader, buffer: []u8) !T {
+    const int = try reader.readUntilDelimiter(buffer, '\n');
+    return std.fmt.parseInt(T, int, 10);
 }
 
-fn _readSlice(reader: anytype, allocator: std.mem.Allocator, comptime len_bytes: u8) ![]u8 {
+fn _readSlice(reader: std.Io.Reader, allocator: std.mem.Allocator, comptime len_bytes: u8) ![]u8 {
     const T = std.meta.Int(.unsigned, 8 * len_bytes);
     const str_len: u64 = try reader.readInt(T, .little);
     const buf = try allocator.alloc(u8, str_len);
