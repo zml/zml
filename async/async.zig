@@ -228,22 +228,64 @@ pub const AsyncThread = struct {
 };
 
 pub fn getStdIn() !File {
-    return File.init(std.fs.File.stdin()) catch @panic("Unable to open stdin");
+    return File.initStreaming(std.fs.File.stdin()) catch @panic("Unable to open stdin");
 }
 
 pub fn getStdOut() File {
-    return File.init(std.fs.File.stdout()) catch @panic("Unable to open stdout");
+    return File.initStreaming(std.fs.File.stdout()) catch @panic("Unable to open stdout");
 }
 
 pub fn getStdErr() File {
-    return File.init(std.fs.File.stderr()) catch @panic("Unable to open stderr");
+    return File.initStreaming(std.fs.File.stderr()) catch @panic("Unable to open stderr");
 }
 
 pub const File = struct {
+    pub const Reader = struct {
+        interface: std.Io.Reader,
+        file: File,
+        mode: std.fs.File.Reader.Mode = .positional,
+        pos: u64 = 0,
+
+        fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.StreamError!usize {
+            const dest = limit.slice(try w.writableSliceGreedy(1));
+            const self: *Reader = @alignCast(@fieldParentPtr("interface", r));
+            const n = switch (self.mode) {
+                .streaming => self.file.read(dest),
+                .positional => self.file.pread(dest, self.pos),
+                else => @panic("UNSUPPORTED"),
+            } catch {
+                return std.Io.StreamError.ReadFailed;
+            };
+            self.pos += n;
+            w.advance(n);
+            return n;
+        }
+    };
+
+    pub const Writer = struct {
+        interface: std.Io.Writer,
+        file: File,
+        mode: std.fs.File.Writer.Mode = .positional,
+        pos: u64 = 0,
+
+        fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+            _ = data; // autofix
+            _ = splat; // autofix
+            const self: *Writer = @alignCast(@fieldParentPtr("interface", w));
+            const n = switch (self.mode) {
+                .streaming => self.file.write(w.buffered()),
+                .positional => self.file.pwrite(w.buffered(), self.pos),
+                else => @panic("UNSUPPORTED"),
+            } catch {
+                return std.Io.Writer.Error.WriteFailed;
+            };
+            self.pos += n;
+            return w.consume(n);
+        }
+    };
+
     pub const SeekError = stdx.meta.FnSignature(File.seekTo, null).ReturnErrorSet.? || stdx.meta.FnSignature(File.seekBy, null).ReturnErrorSet.?;
     pub const GetSeekPosError = SeekError || stdx.meta.FnSignature(File.stat, null).ReturnErrorSet.?;
-    pub const Reader = std.io.GenericReader(File, stdx.meta.FnSignature(File.read, null).ReturnErrorSet.?, File.read);
-    pub const Writer = std.io.GenericWriter(File, stdx.meta.FnSignature(File.write, null).ReturnErrorSet.?, File.write);
     pub const SeekableStream = std.io.SeekableStream(
         File,
         SeekError,
@@ -256,6 +298,7 @@ pub const File = struct {
 
     _handle: std.fs.File.Handle,
     inner: aio.File,
+    is_streaming: bool = false,
 
     pub fn asFile(self: File) std.fs.File {
         return .{ .handle = self._handle };
@@ -272,12 +315,49 @@ pub const File = struct {
         };
     }
 
+    pub fn initStreaming(file_: std.fs.File) !File {
+        return .{
+            ._handle = file_.handle,
+            .inner = aio.File.init(AsyncThread.current.executor, try xev.File.init(file_)),
+            .is_streaming = true,
+        };
+    }
+
     pub fn open(path: []const u8, flags: std.fs.File.OpenFlags) !File {
         return init(try callBlocking(std.fs.Dir.openFile, .{ std.fs.cwd(), path, flags }));
     }
 
     pub fn access(path: []const u8, flags: std.fs.File.OpenFlags) !void {
         return try callBlocking(std.fs.Dir.access, .{ std.fs.cwd(), path, flags });
+    }
+
+    fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.StreamError!usize {
+        const dest = limit.slice(try w.writableSliceGreedy(1));
+        const self: *Reader = @alignCast(@fieldParentPtr("interface", r));
+        const n = switch (self.mode) {
+            .streaming => self.file.read(dest),
+            .positional => self.file.pread(dest, r.seek),
+            else => @panic("UNSUPPORTED"),
+        } catch {
+            return std.Io.StreamError.ReadFailed;
+        };
+        w.advance(n);
+        return n;
+    }
+
+    pub fn reader(self: File, buffer: []u8) std.Io.Reader {
+        return .{
+            .file = self,
+            .interface = .{
+                .vtable = &.{
+                    .stream = Reader.stream,
+                },
+                .buffer = buffer,
+                .seek = 0,
+                .end = 0,
+            },
+            .mode = if (self.is_streaming) .streaming else .positional,
+        };
     }
 
     pub fn read(self: File, buf: []u8) !usize {
@@ -310,6 +390,19 @@ pub const File = struct {
         return self.inner.write(.{ .slice = buf });
     }
 
+    pub fn writer(self: File, buffer: []u8) Writer {
+        return .{
+            .file = self,
+            .interface = .{
+                .vtable = &.{
+                    .drain = Writer.drain,
+                },
+                .buffer = buffer,
+            },
+            .mode = if (self.is_streaming) .streaming else .positional,
+        };
+    }
+
     pub fn pwrite(self: File, buf: []const u8, offset: u64) !usize {
         return self.inner.pwrite(.{ .slice = buf }, offset);
     }
@@ -318,16 +411,8 @@ pub const File = struct {
         return self.inner.close();
     }
 
-    pub fn reader(self: File) Reader {
-        return .{ .context = self };
-    }
-
     pub fn seekableStream(file: File) SeekableStream {
         return .{ .context = file };
-    }
-
-    pub fn writer(self: File) Writer {
-        return .{ .context = self };
     }
 
     pub fn stat(self: File) !std.fs.File.Stat {
@@ -564,9 +649,8 @@ pub fn logFn(comptime fallbackLogFn: LogFn) LogFn {
 
             const level_txt = comptime message_level.asText();
             const prefix2 = if (scope == .default) ": " else "(" ++ @tagName(scope) ++ "): ";
-            const stderr = getStdErr().writer();
-            var bw = std.io.bufferedWriter(stderr);
-            const writer = bw.writer();
+            var buffer: [1024]u8 = undefined;
+            var stderr = getStdErr().writer(&buffer);
 
             var mutex = Self.mu orelse blk: {
                 Self.mu = Mutex.init();
@@ -575,8 +659,8 @@ pub fn logFn(comptime fallbackLogFn: LogFn) LogFn {
             mutex.lock();
             defer mutex.unlock();
             nosuspend {
-                writer.print(level_txt ++ prefix2 ++ format ++ "\n", args) catch return;
-                bw.flush() catch return;
+                stderr.interface.print(level_txt ++ prefix2 ++ format ++ "\n", args) catch return;
+                stderr.interface.flush() catch return;
             }
         }
     }.call;
