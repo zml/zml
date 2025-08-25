@@ -14,5 +14,9 @@ zls_completion(
         "//examples/llama",
         "//stdx",
         "//zml",
+        "//mlir:main",
+        # "//async",
+        # "//stdx",
+        # "//zml",
     ],
 )

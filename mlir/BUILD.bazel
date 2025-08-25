@@ -1,5 +1,5 @@
 load("@rules_cc//cc:defs.bzl", "cc_library")
-load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library", "zig_test")
 
 cc_library(
     name = "c",
@@ -27,4 +27,30 @@ zig_library(
 zig_test(
     name = "test",
     deps = [":mlir"],
+)
+
+zig_library(
+    name = "mlir2",
+    main = "registry.zig",
+    deps = [":c"],
+)
+
+zig_binary(
+    name = "main",
+    main = "main.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":mlir2",
+        # ":c",
+        # "//stdx",
+    ],
+)
+
+zig_test(
+    name = "test2",
+    deps = [
+        ":mlir2",
+        # ":c",
+        # "//stdx",
+    ],
 )
