@@ -1395,7 +1395,7 @@ pub fn FloatType(comptime ft: FloatTypes) type {
         .f8e4m3fnuz => .{ c.mlirTypeIsAFloat8E4M3FNUZ, c.mlirFloat8E4M3FNUZTypeGet },
         .f8e5m2 => .{ c.mlirTypeIsAFloat8E5M2, c.mlirFloat8E5M2TypeGet },
         .f8e5m2fnuz => .{ c.mlirTypeIsAFloat8E5M2FNUZ, c.mlirFloat8E5M2FNUZTypeGet },
-        .f8e8m0fnu => .{ .cmlirTypeIsAFloat8E8M0FNU, c.mlirFloat8E8M0FNUTypeGet },
+        .f8e8m0fnu => .{ c.mlirTypeIsAFloat8E8M0FNU, c.mlirFloat8E8M0FNUTypeGet },
         .bf16 => .{ c.mlirTypeIsABF16, c.mlirBF16TypeGet },
         .f16 => .{ c.mlirTypeIsAF16, c.mlirF16TypeGet },
         .f32 => .{ c.mlirTypeIsAF32, c.mlirF32TypeGet },

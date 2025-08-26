@@ -744,6 +744,7 @@ pub const CustomCallOpts = struct {
     api_version: ApiVersion,
 };
 
+// TODO move the call_target_name to second argument
 pub fn custom_call(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCallOpts, res_types: []const mlir.Type, location: mlir.Location) mlir.Operation {
     const MAX_OPERANDS = 64;
     const MAX_RESULTS = 16;
