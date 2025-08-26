@@ -30,7 +30,7 @@ const Mnist = struct {
         var x = input.flattenAll().convert(.f32);
         const layers: []const Layer = &.{ self.fc1, self.fc2 };
         for (layers) |layer| {
-            x = zml.call(layer, .forward, .{x});
+            x = layer.forward(x);
         }
         return x.argMax(0).indices.convert(.u8);
     }
@@ -66,7 +66,7 @@ pub fn asyncMain() !void {
 
     // Read model shapes.
     // Note this works because Mnist struct uses the same layer names as the pytorch model
-    var buffer_store = try zml.aio.torch.open(allocator, pt_model);
+    var buffer_store = try zml.aio.detectFormatAndOpen(allocator, pt_model);
     defer buffer_store.deinit();
 
     const mnist_model = try zml.aio.populateModel(Mnist, allocator, buffer_store);
