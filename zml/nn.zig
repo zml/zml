@@ -375,11 +375,21 @@ pub const RopeOpts = struct {
         default: void,
         custom: []const f32,
         llama3: Llama3,
+        yarn: Yarn,
 
         pub const Llama3 = struct {
             factor: f32,
             high_freq_factor: f32,
             low_freq_factor: f32,
+            original_max_position_embeddings: u32,
+            truncate: bool = true,
+        };
+
+        pub const Yarn = struct {
+            beta_fast: f32 = 32.0,
+            beta_slow: f32 = 1.0,
+            factor: f32,
+            truncate: bool = true,
             original_max_position_embeddings: u32,
         };
 
@@ -396,10 +406,19 @@ pub const RopeOpts = struct {
             if (std.mem.eql(u8, impl.string, "llama3")) {
                 // Note: leaky is fine here cause Llama3 struct don't need to allocate memory.
                 return .{ .llama3 = try std.json.parseFromValueLeaky(Llama3, undefined, content, .{ .ignore_unknown_fields = true }) };
+            } else if (std.mem.eql(u8, impl.string, "yarn")) {
+                return .{ .yarn = try std.json.parseFromValueLeaky(Yarn, undefined, content, .{ .ignore_unknown_fields = true }) };
             } else {
-                // log.warn("Unsupported Rope implementation: {s}, will use the default one which will produce altered results", .{impl.string});
+                log.warn("Unsupported Rope implementation: {s}, will use the default one which will produce altered results", .{impl.string});
                 return .{ .default = {} };
             }
+        }
+
+        pub fn attentionScaling(scaling: Scaling) f32 {
+            return switch (scaling) {
+                .yarn => |yarn| 0.1 * @log(yarn.factor) + 1.0,
+                else => 1.0,
+            };
         }
     };
 };
@@ -428,8 +447,9 @@ pub fn rope(x: Tensor, pos_idx: ?Tensor, opts: RopeOpts) Tensor {
     // compute sin and cos in f32 before downcasting to x type.
     const inv_freq = invFreq(x.dim(.hd), opts).withTags(.{.hd});
     const inv_freq_pos = Tensor.outer(idx.convert(.f32), inv_freq);
-    const cos = inv_freq_pos.cos().convert(x.dtype()).broad(x_real.shape());
-    const sin = inv_freq_pos.sin().convert(x.dtype()).broad(x_real.shape());
+    const scaling = opts.scaling.attentionScaling();
+    const cos = inv_freq_pos.cos().scale(scaling).convert(x.dtype()).broad(x_real.shape());
+    const sin = inv_freq_pos.sin().scale(scaling).convert(x.dtype()).broad(x_real.shape());
 
     // apply rotation
     const y_real = x_real.mul(cos).sub(x_imag.mul(sin));
@@ -469,6 +489,8 @@ pub fn invFreq(N: i64, opts: RopeOpts) Tensor {
     const allocator = zml.module.CompilationContext.current().allocator();
     const N_half: usize = @intCast(@divExact(N, 2));
     const inv_freq = allocator.alloc(f32, N_half) catch @panic("OOM");
+    defer allocator.free(inv_freq);
+
     _invFreq(opts, inv_freq);
     return zml.Tensor.constantTensor(.fromSlice(.{@divExact(N, 2)}, inv_freq));
 }
@@ -509,10 +531,38 @@ fn _invFreq(opts: RopeOpts, inv_freq: []f32) void {
                 }
             }
         },
+        .yarn => |s| {
+            const N_f: f64 = @floatFromInt(inv_freq.len);
+            const M: f64 = @floatFromInt(s.original_max_position_embeddings);
+            const f_high = s.beta_fast * (2 * std.math.pi) / M;
+            const f_low = s.beta_slow * (2 * std.math.pi) / M;
+            const downscaling = 1.0 / s.factor;
+
+            // This isn't a typo: low n have a high frequency, high n have a low frequency.
+            var n_low: f64 = -@log(f_high) / @log(opts.freq_base) * N_f;
+            var n_high: f64 = -@log(f_low) / @log(opts.freq_base) * N_f;
+            if (s.truncate) {
+                n_high = std.math.ceil(n_high);
+                n_low = std.math.floor(n_low);
+            }
+            std.debug.assert(n_high > n_low);
+            for (0..N, inv_freq) |n, f| {
+                if (f > f_high) {
+                    // High freq match default implem
+                } else if (f < f_low) {
+                    // Downscaling for low freq
+                    inv_freq[n] *= downscaling;
+                } else {
+                    // Yarn use lerp too but not in the frequency space, in the time space.
+                    const lerp: f64 = (n_high - @as(f64, @floatFromInt(n))) / (n_high - n_low);
+                    inv_freq[n] *= @floatCast(lerp + (1 - lerp) * downscaling);
+                }
+            }
+        },
     }
 }
 
-test invFreq {
+test "invFreq Llama3" {
     // Llama 3.2-1B config
     const llama_conf: RopeOpts = .{
         .freq_base = 500_000,
@@ -531,6 +581,28 @@ test invFreq {
         errdefer log.err("Mismatch at position {d}.\nExpected: {any}\nActual:   {any}", .{ i, llama_freq, inv_freq });
         try std.testing.expectApproxEqRel(expected, actual, 1e-5);
     }
+}
+
+test "invFreq Yarn" {
+    const yarn_conf: RopeOpts = .{
+        .freq_base = 150_000,
+        .scaling = .{ .yarn = .{
+            .factor = 32.0,
+            .beta_fast = 32.0,
+            .beta_slow = 1.0,
+            .original_max_position_embeddings = 4096,
+            .truncate = true,
+        } },
+    };
+    const yarn_freq = [_]f32{ 1.000000000000e+00, 6.890442967415e-01, 4.747820496559e-01, 3.271458745003e-01, 2.254180014133e-01, 1.553229838610e-01, 1.070244237781e-01, 7.374456524849e-02, 5.081327259541e-02, 3.162075206637e-02, 1.945096626878e-02, 1.179219130427e-02, 7.015713956207e-03, 4.069554619491e-03, 2.277272054926e-03, 1.206130953506e-03, 5.809474969283e-04, 2.279478358105e-04, 3.830881178146e-05, 2.639646845637e-05, 1.818833698053e-05, 1.253256959899e-05, 8.635495760245e-06, 5.950239483354e-06, 4.099978468730e-06, 2.825066758305e-06, 1.946596285052e-06, 1.341290953860e-06, 9.242089618056e-07, 6.368209142238e-07, 4.387978549403e-07, 3.023511396805e-07 };
+
+    var inv_freq: @TypeOf(yarn_freq) = undefined;
+    _invFreq(yarn_conf, &inv_freq);
+    for (yarn_freq, inv_freq, 0..) |expected, actual, i| {
+        errdefer log.err("Mismatch at position {d}.\nExpected: {d}\nActual:   {d}", .{ i, yarn_freq, inv_freq });
+        try std.testing.expectApproxEqRel(expected, actual, 1e-5);
+    }
+    try std.testing.expectApproxEqRel(1.3465735902799727, yarn_conf.scaling.attentionScaling(), 1e-5);
 }
 
 test "real/img" {
