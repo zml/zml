@@ -10,7 +10,7 @@ const log = std.log.scoped(.Mixtral);
 /// Dimensions of activations: {.b, .s, .d}
 pub const MixtralLM = struct {
     pub const Config = struct {
-        bos_token_id: u32,
+        bos_token_id: u32 = 0,
         eos_token_id: stdx.json.Union(union(enum) {
             int: u32,
             ints: []u32,
@@ -81,12 +81,11 @@ pub const MixtralLM = struct {
                 self_attn.o_proj.weight = self_attn.o_proj.weight.withSharding(.{1});
             }
 
-            const on_disk_moe = try zml.aio.populateModelWithPrefix(MoE.OnDisk, allocator, store, prefix.concat("block_sparse_moe"));
+            const on_disk_moe = try zml.aio.populateModelWithPrefix(MoE.OnDisk, allocator, store, prefix.concat("mlp"));
             var moe = on_disk_moe.rewrite();
             {
-                moe.mlp_experts.up_proj.weight = moe.mlp_experts.up_proj.weight.withSharding(.{.expert});
-                moe.mlp_experts.gate_proj.weight = moe.mlp_experts.gate_proj.weight.withSharding(.{.expert});
-                moe.mlp_experts.down_proj.weight = moe.mlp_experts.down_proj.weight.withSharding(.{.expert});
+                moe.experts.gate_up_proj.weight = moe.experts.gate_up_proj.weight.withSharding(.{.expert});
+                moe.experts.down_proj.weight = moe.experts.down_proj.weight.withSharding(.{.expert});
             }
 
             layer.* = .{
@@ -99,7 +98,7 @@ pub const MixtralLM = struct {
                     .eps = config.rms_norm_eps,
                 },
                 .self_attn = self_attn,
-                .block_sparse_moe = moe,
+                .mlp = moe,
             };
         }
 
@@ -179,7 +178,7 @@ pub const MixtralLM = struct {
                 .input_layernorm = try store.loadModelById(RmsNorm, noalloc, layer.input_layernorm, platform),
                 .self_attn = try store.loadModelById(SelfAttn, noalloc, layer.self_attn, platform),
                 .post_attention_layernorm = try store.loadModelById(RmsNorm, noalloc, layer.post_attention_layernorm, platform),
-                .block_sparse_moe = try layer.block_sparse_moe.loadSharded(store, &prefix, platform),
+                .mlp = try layer.mlp.loadSharded(store, &prefix, platform),
             };
         }
 
@@ -247,7 +246,7 @@ pub const TransformerLayer = struct {
     input_layernorm: RmsNorm,
     self_attn: SelfAttn,
     post_attention_layernorm: RmsNorm,
-    block_sparse_moe: MoE,
+    mlp: MoE,
 
     pub fn forward(
         self: TransformerLayer,
@@ -265,7 +264,7 @@ pub const TransformerLayer = struct {
 
         // Fully Connected
         const x1_normalized = zml.call(self.post_attention_layernorm, .forward, .{x1});
-        const x2 = zml.call(self.block_sparse_moe, .forward, .{x1_normalized}).add(x1);
+        const x2 = zml.call(self.mlp, .forward, .{x1_normalized}).add(x1);
 
         return .{ x2.reuseBuffer(x0), updated_kv_cache };
     }
@@ -285,37 +284,47 @@ const RmsNorm = struct {
 
 const MoE = struct {
     router: zml.nn.Linear,
-    mlp_experts: Mlp,
+    experts: Mlp,
 
     pub const OnDisk = struct {
-        gate: zml.nn.Linear,
-        experts: []struct {
-            w1: zml.nn.Linear,
-            w2: zml.nn.Linear,
-            w3: zml.nn.Linear,
+        router: zml.nn.Linear,
+        experts: struct {
+            down_proj_bias: zml.Tensor,
+            down_proj_blocks: zml.Tensor,
+            down_proj_scales: zml.Tensor,
+            gate_up_proj_bias: zml.Tensor,
+            gate_up_proj_blocks: zml.Tensor,
+            gate_up_proj_scales: zml.Tensor,
         },
 
         pub fn rewrite(on_disk: OnDisk) MoE {
-            const n = on_disk.experts.len;
             var mlp: Mlp = .{
-                .up_proj = on_disk.experts[0].w1,
-                .down_proj = on_disk.experts[0].w2,
-                .gate_proj = on_disk.experts[0].w3,
+                .gate_up_proj = .{
+                    .weight = on_disk.experts.gate_up_proj_blocks,
+                    .bias = on_disk.experts.gate_up_proj_bias,
+                },
+                .down_proj = .{
+                    .weight = on_disk.experts.down_proj_blocks,
+                    .bias = on_disk.experts.down_proj_bias,
+                },
             };
-            mlp.up_proj.weight._shape = mlp.up_proj.weight.shape().insert(0, .{ .expert = n }).withTags(.{ .expert, .up, .d });
-            mlp.down_proj.weight._shape = mlp.down_proj.weight.shape().insert(0, .{ .expert = n }).withTags(.{ .expert, .d, .up });
-            mlp.gate_proj.weight._shape = mlp.gate_proj.weight.shape().insert(0, .{ .expert = n }).withTags(.{ .expert, .up, .d });
+            mlp.gate_up_proj.weight._shape = mlp.gate_up_proj.weight.shape().withTags(.{ .expert, .up, .blocks, .d });
+            if (mlp.gate_up_proj.bias) |*bias| {
+                bias._shape = bias.shape().withTags(.{ .expert, .up });
+            }
+            mlp.down_proj.weight._shape = mlp.down_proj.weight.shape().withTags(.{ .expert, .d, .blocks, .up });
+            if (mlp.down_proj.bias) |*bias| bias._shape = bias.shape().withTags(.{ .expert, .d });
 
-            var router = on_disk.gate;
+            var router = on_disk.router;
             router.weight = router.weight.withTags(.{ .expert, .d });
 
-            return .{ .router = router, .mlp_experts = mlp };
+            return .{ .router = router, .experts = mlp };
         }
     };
 
     pub fn forward(self: MoE, input: zml.Tensor) zml.Tensor {
         const gating = self.router.forward(input).convert(.f32).softmax(.expert);
-        return zml.nn.mixtureOfExperts(Mlp, self.mlp_experts, input, gating, .{ .experts_per_token = 2, .tokens_per_expert_ratio = 1.5 });
+        return zml.nn.mixtureOfExperts(Mlp, self.experts, input, gating, .{ .experts_per_token = 2, .tokens_per_expert_ratio = 1.5 });
     }
 
     pub fn loadSharded(self: MoE, store: zml.aio.BufferStore, prefix: *zml.aio.PrefixBuilder, platform: zml.Platform) !zml.Bufferized(MoE) {
@@ -323,10 +332,9 @@ const MoE = struct {
 
         return .{
             .router = try store.loadModelById(zml.nn.Linear, stdx.noalloc, self.router, platform),
-            .mlp_experts = .{
-                .gate_proj = .{ .weight = try loadShardedWeight(store, prefix, "w1", platform, self.mlp_experts.gate_proj.weight) },
-                .down_proj = .{ .weight = try loadShardedWeight(store, prefix, "w2", platform, self.mlp_experts.down_proj.weight) },
-                .up_proj = .{ .weight = try loadShardedWeight(store, prefix, "w3", platform, self.mlp_experts.up_proj.weight) },
+            .experts = .{
+                .gate_up_proj = .{ .weight = try loadShardedWeight(store, prefix, "w1", platform, self.experts.gate_up_proj.weight) },
+                .down_proj = .{ .weight = try loadShardedWeight(store, prefix, "w2", platform, self.experts.down_proj.weight) },
             },
         };
     }
@@ -376,13 +384,11 @@ const MoE = struct {
 };
 
 const Mlp = struct {
-    up_proj: zml.nn.Linear, // (dim -> hidden_dim)
-    gate_proj: zml.nn.Linear, // (dim -> hidden_dim)
+    gate_up_proj: zml.nn.Linear, // (dim -> hidden_dim * 2)
     down_proj: zml.nn.Linear, // (hidden_dim -> dim)
 
     pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
-        const up = self.up_proj.weight.dot(x, .d);
-        const gate = self.gate_proj.weight.dot(x, .d).silu();
+        const gate, const up = self.gate_up_proj.weight.dot(x, .d).silu().chunkExact(.up, 2);
 
         const out = gate.mul(up).dot(self.down_proj.weight, .up);
         log.warn("Mlp(x: {f}) -> up: {f} -> gate: {f} -> out: {f}", .{ x, up, gate, out });
@@ -394,8 +400,10 @@ pub const SelfAttn = struct {
     q_proj: zml.nn.Linear,
     k_proj: zml.nn.Linear,
     v_proj: zml.nn.Linear,
+    sinks: zml.Tensor,
 
     o_proj: zml.nn.Linear,
+
     num_heads: i64 = undefined,
     num_kv_heads: i64 = 0,
     rope_opts: zml.nn.RopeOpts = undefined,
