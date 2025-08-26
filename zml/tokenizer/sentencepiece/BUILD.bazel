@@ -19,5 +19,6 @@ zig_library(
     deps = [
         ":sentencepiece_swig",
         "//ffi:zig",
+        "//stdx",
     ],
 )

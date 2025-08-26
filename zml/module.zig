@@ -51,7 +51,7 @@ pub const CompilationContext = struct {
 
     _module: mlir.Module,
 
-    _blocks: std.BoundedArray(TaggedBlock, 64) = .{},
+    _blocks: stdx.BoundedArray(TaggedBlock, 64) = .{},
     _fn_cache: FnCache = .{},
 
     _block_args: TensorToBlockArg = .{},
@@ -63,7 +63,7 @@ pub const CompilationContext = struct {
 
     const TaggedBlock = struct { mlir.Block, mlir.Block.RecursiveOpts };
     const TensorToBlockArg = std.AutoHashMapUnmanaged(Tensor._Id, struct { mlir.Value, Tensor._Donation });
-    const AttributeList = std.BoundedArray(mlir.NamedAttribute, 3);
+    const AttributeList = stdx.BoundedArray(mlir.NamedAttribute, 3);
 
     pub fn init(allocator_: std.mem.Allocator, full_name: []const u8, platform: Platform) !CompilationContext {
         const mlir_registry = mlir.Registry.init() catch unreachable;
@@ -221,7 +221,7 @@ pub const CompilationContext = struct {
         };
 
         log.debug("******** ZML generated MLIR ********", .{});
-        log.debug("{}", .{module.op().mlirFormatter(.{})});
+        log.debug("{f}", .{module.op().mlirFormatter(.{})});
 
         if (timer) |*t| {
             const time_ms = @divFloor(t.lap(), std.time.ns_per_ms);
@@ -341,7 +341,7 @@ pub const CompilationContext = struct {
         const locations = try arena.alloc(mlir.Location, tensor_count);
         @memset(locations, mlir.Location.unknown(mlir_ctx));
 
-        var input_shapes = try std.ArrayList(Shape).initCapacity(res_allocator, tensor_count);
+        var input_shapes: std.array_list.Managed(Shape) = try .initCapacity(res_allocator, tensor_count);
         meta.collect(Tensor.shape, {}, &input_shapes, args) catch unreachable;
         stdx.debug.internalAssert(input_shapes.items.len == tensor_count, "args have changed ?", .{});
 
@@ -547,7 +547,7 @@ pub const CompilationContext = struct {
     pub fn getShardingAttr(self: CompilationContext, shape: Shape) mlir.Attribute {
         const ctx = self.mlirCtx();
         const num_partitions = self.numPartitions();
-        var sharding_str: std.BoundedArray(u8, 128) = .{};
+        var sharding_str: stdx.BoundedArray(u8, 128) = .{};
         writeShardingRepresentation(shape, num_partitions, sharding_str.writer()) catch unreachable;
         return mlir.Attribute.string(ctx, sharding_str.constSlice());
     }

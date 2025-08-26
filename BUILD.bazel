@@ -11,6 +11,7 @@ zls_completion(
     visibility = ["//visibility:public"],
     deps = [
         "//async",
+        "//examples/llama",
         "//stdx",
         "//zml",
     ],

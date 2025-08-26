@@ -754,7 +754,7 @@ pub const Operation = struct {
             state.addOperands(operands);
         } else if (args.variadic_operands) |operands_segments| {
             const MAX_SEGMENTS = 32;
-            var segments: std.BoundedArray(i32, MAX_SEGMENTS) = .{};
+            var segments: stdx.BoundedArray(i32, MAX_SEGMENTS) = .{};
 
             for (operands_segments) |operands| {
                 state.addOperands(operands);
@@ -764,7 +764,7 @@ pub const Operation = struct {
         } else if (args.tt_variadic_operands) |operands_segments| {
             // stablehlo and triton seems to disagree on the expected type of operandSegmentSizes, let's fix that.
             const MAX_SEGMENTS = 32;
-            var segments: std.BoundedArray(i32, MAX_SEGMENTS) = .{};
+            var segments: stdx.BoundedArray(i32, MAX_SEGMENTS) = .{};
 
             for (operands_segments) |operands| {
                 state.addOperands(operands);

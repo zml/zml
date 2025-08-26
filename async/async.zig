@@ -246,7 +246,7 @@ pub const File = struct {
         mode: std.fs.File.Reader.Mode = .positional,
         pos: u64 = 0,
 
-        fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.StreamError!usize {
+        fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
             const dest = limit.slice(try w.writableSliceGreedy(1));
             const self: *Reader = @alignCast(@fieldParentPtr("interface", r));
             const n = switch (self.mode) {
@@ -254,8 +254,11 @@ pub const File = struct {
                 .positional => self.file.pread(dest, self.pos),
                 else => @panic("UNSUPPORTED"),
             } catch {
-                return std.Io.StreamError.ReadFailed;
+                return std.Io.Reader.StreamError.ReadFailed;
             };
+            if (n == 0) {
+                return std.Io.Reader.StreamError.EndOfStream;
+            }
             self.pos += n;
             w.advance(n);
             return n;
@@ -286,15 +289,6 @@ pub const File = struct {
 
     pub const SeekError = stdx.meta.FnSignature(File.seekTo, null).ReturnErrorSet.? || stdx.meta.FnSignature(File.seekBy, null).ReturnErrorSet.?;
     pub const GetSeekPosError = SeekError || stdx.meta.FnSignature(File.stat, null).ReturnErrorSet.?;
-    pub const SeekableStream = std.io.SeekableStream(
-        File,
-        SeekError,
-        GetSeekPosError,
-        seekTo,
-        seekBy,
-        getPos,
-        getEndPos,
-    );
 
     _handle: std.fs.File.Handle,
     inner: aio.File,
@@ -331,21 +325,7 @@ pub const File = struct {
         return try callBlocking(std.fs.Dir.access, .{ std.fs.cwd(), path, flags });
     }
 
-    fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.StreamError!usize {
-        const dest = limit.slice(try w.writableSliceGreedy(1));
-        const self: *Reader = @alignCast(@fieldParentPtr("interface", r));
-        const n = switch (self.mode) {
-            .streaming => self.file.read(dest),
-            .positional => self.file.pread(dest, r.seek),
-            else => @panic("UNSUPPORTED"),
-        } catch {
-            return std.Io.StreamError.ReadFailed;
-        };
-        w.advance(n);
-        return n;
-    }
-
-    pub fn reader(self: File, buffer: []u8) std.Io.Reader {
+    pub fn reader(self: File, buffer: []u8) Reader {
         return .{
             .file = self,
             .interface = .{
@@ -411,10 +391,6 @@ pub const File = struct {
         return self.inner.close();
     }
 
-    pub fn seekableStream(file: File) SeekableStream {
-        return .{ .context = file };
-    }
-
     pub fn stat(self: File) !std.fs.File.Stat {
         return try callBlocking(std.fs.File.stat, .{self.asFile()});
     }
@@ -460,8 +436,36 @@ pub const Socket = struct {
     pub const TCP = struct {
         const Inner = aio.TCP;
 
-        pub const Reader = std.io.GenericReader(TCP, stdx.meta.FnSignature(TCP.read, null).ReturnErrorSet.?, TCP.read);
-        pub const Writer = std.io.GenericWriter(TCP, stdx.meta.FnSignature(TCP.write, null).ReturnErrorSet.?, TCP.write);
+        pub const Reader = struct {
+            interface: std.Io.Reader,
+            socket: TCP,
+
+            fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+                const self: *Reader = @alignCast(@fieldParentPtr("interface", r));
+                const dest = limit.slice(try w.writableSliceGreedy(1));
+                const n = self.socket.read(dest) catch {
+                    return std.Io.Reader.StreamError.ReadFailed;
+                };
+                w.advance(n);
+                return n;
+            }
+        };
+
+        pub const Writer = struct {
+            interface: std.Io.Writer,
+            socket: TCP,
+
+            fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+                _ = data; // autofix
+                _ = splat; // autofix
+                const self: *Writer = @alignCast(@fieldParentPtr("interface", w));
+                const n = self.socket.write(w.buffered()) catch {
+                    return std.Io.Writer.Error.WriteFailed;
+                };
+                std.debug.print(">>>> {d}\n", .{n});
+                return w.consume(n);
+            }
+        };
 
         inner: aio.TCP,
 
@@ -503,12 +507,30 @@ pub const Socket = struct {
             return self.inner.close();
         }
 
-        pub fn reader(self: TCP) Reader {
-            return .{ .context = self };
+        pub fn reader(self: TCP, buffer: []u8) Reader {
+            return .{
+                .socket = self,
+                .interface = .{
+                    .vtable = &.{
+                        .stream = Reader.stream,
+                    },
+                    .buffer = buffer,
+                    .seek = 0,
+                    .end = 0,
+                },
+            };
         }
 
-        pub fn writer(self: TCP) Writer {
-            return .{ .context = self };
+        pub fn writer(self: TCP, buffer: []u8) Writer {
+            return .{
+                .socket = self,
+                .interface = .{
+                    .vtable = &.{
+                        .drain = Writer.drain,
+                    },
+                    .buffer = buffer,
+                },
+            };
         }
     };
 

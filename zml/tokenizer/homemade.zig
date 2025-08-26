@@ -2,10 +2,11 @@
 //! Disclaimer this is not a very robust implementation:
 //! In particular the normalization is pretty minimalist, only works with ascii, and don't do unicode normalization.
 //! Mostly used for testing models that don't have an official HF/sentencepiece tokenizer.
-const builtin = @import("builtin");
 const std = @import("std");
-
 const testing = std.testing;
+const builtin = @import("builtin");
+
+const stdx = @import("stdx");
 
 const log = std.log.scoped(.@"zml/tokenizer");
 
@@ -189,7 +190,7 @@ pub const Tokenizer = struct {
             if (options.debug) {
                 var _debug_buf: [256]u8 = undefined;
                 var _debug_alloc = std.heap.FixedBufferAllocator.init(&_debug_buf);
-                var debug_progress = std.ArrayList(u8).init(_debug_alloc.allocator());
+                var debug_progress = std.array_list.Managed(u8).init(_debug_alloc.allocator());
                 self.decodeWithOpts(&debug_progress, tok_buff[0..num_tokens], .{ .sep = "|" }) catch {};
                 log.debug("tokens: {any} -> {s}", .{ tok_buff[0..num_tokens], debug_progress.items });
             }
@@ -311,7 +312,7 @@ pub const Tokenizer = struct {
     /// Note that if the tokenizer allows sub-unicode bytes, it's possible
     /// the output is not valid utf8.
     pub fn decode(self: *const Tokenizer, allocator: std.mem.Allocator, input: []const u32) error{OutOfMemory}![]u8 {
-        var output = std.ArrayList(u8).init(allocator);
+        var output = std.array_list.Managed(u8).init(allocator);
         errdefer output.deinit();
 
         try self.decodeWithOpts(&output, input, .{});
@@ -320,7 +321,7 @@ pub const Tokenizer = struct {
 
     pub fn decodeWithOpts(
         self: *const Tokenizer,
-        output: *std.ArrayList(u8),
+        output: *std.array_list.Managed(u8),
         input: []const u32,
         opts: struct { sep: []const u8 = "" },
     ) error{OutOfMemory}!void {
@@ -443,8 +444,8 @@ pub const Encoder = struct {
 };
 
 pub const Decoder = struct {
-    const StringBuffer = std.BoundedArray(u8, 128);
-    const TokensIdsBuffer = std.BoundedArray(u32, 4);
+    const StringBuffer = stdx.BoundedArray(u8, 128);
+    const TokensIdsBuffer = stdx.BoundedArray(u32, 4);
 
     inner: *Tokenizer,
     arena: std.heap.ArenaAllocator,
@@ -571,7 +572,7 @@ test CharTokenIterator {
     {
         tokenizer.byte_fallback = false;
         var it: CharTokenIterator = .{ .input = "ζℳL" };
-        var res: std.BoundedArray(u32, 8) = .{};
+        var res: stdx.BoundedArray(u32, 8) = .{};
         while (try it.nextCodepointToken(&tokenizer)) |token| {
             res.appendAssumeCapacity(token);
         }
@@ -582,7 +583,7 @@ test CharTokenIterator {
     {
         tokenizer.byte_fallback = true;
         var it: CharTokenIterator = .{ .input = "ζℳL" };
-        var res: std.BoundedArray(u32, 8) = .{};
+        var res: stdx.BoundedArray(u32, 8) = .{};
         while (try it.nextCodepointToken(&tokenizer)) |token| {
             res.appendAssumeCapacity(token);
         }
@@ -596,7 +597,7 @@ pub const Normalizer = struct {
     /// Space token used by sentencepiece derived tokenizer.
     pub const sentencepiece_space = "▁"; // \xe2\x96\x81
 
-    _whitespace: std.BoundedArray(u8, 8) = .{},
+    _whitespace: stdx.BoundedArray(u8, 8) = .{},
 
     flags: packed struct {
         remove_extra_whitespaces: bool,
@@ -622,7 +623,7 @@ pub const Normalizer = struct {
         return if (self._whitespace.len > 1) self._whitespace.constSlice() else null;
     }
 
-    fn addSlice(data: []const u8, consumed: usize, normalized: *std.ArrayList(u8), normalized_to_origin: *std.ArrayList(usize)) !void {
+    fn addSlice(data: []const u8, consumed: usize, normalized: *std.array_list.Managed(u8), normalized_to_origin: *std.array_list.Managed(usize)) !void {
         try normalized.appendSlice(data);
         for (data) |_| try normalized_to_origin.append(consumed);
     }
@@ -672,9 +673,9 @@ pub const Normalizer = struct {
         // Pre-allocate outputs
         const space = self.escapedSpace() orelse " ";
         const overhead = if (self.flags.split_on_punct_ascii) space.len + 1 else space.len;
-        var normalized = try std.ArrayList(u8).initCapacity(allocator, trimmed_input.len * overhead + 2 * space.len);
+        var normalized = try std.array_list.Managed(u8).initCapacity(allocator, trimmed_input.len * overhead + 2 * space.len);
         errdefer normalized.deinit();
-        var normalized_to_origin = try std.ArrayList(usize).initCapacity(allocator, normalized.capacity);
+        var normalized_to_origin = try std.array_list.Managed(usize).initCapacity(allocator, normalized.capacity);
         errdefer normalized_to_origin.deinit();
 
         // If the spec asks for it, add a whitespace at the beginning.
@@ -965,7 +966,7 @@ test Normalizer {
 /// This implementation precompupte a mapping between bytes encoded with GPT2 algorithm,
 /// into utf8 bytes, and do lookups at runtime.
 pub const Gpt2TextDecoder = struct {
-    const Code = std.BoundedArray(u8, 2);
+    const Code = stdx.BoundedArray(u8, 2);
 
     // TODO: benchmark this is more efficient than doing the conversion at runtime.
     code_to_byte: std.AutoArrayHashMap(Code, u8),
@@ -1005,7 +1006,7 @@ pub const Gpt2TextDecoder = struct {
 
     /// Transform bytes representing text under the gpt2 encoding,
     /// and write to the `unicode` buffer utf-8 bytes.
-    pub fn decode(self: Gpt2TextDecoder, unicode: *std.ArrayList(u8), bytes: []const u8) ![]const u8 {
+    pub fn decode(self: Gpt2TextDecoder, unicode: *std.array_list.Managed(u8), bytes: []const u8) ![]const u8 {
         const start = unicode.items.len;
         var it = std.unicode.Utf8Iterator{ .i = 0, .bytes = bytes };
         while (it.nextCodepointSlice()) |codepoint| {
@@ -1029,7 +1030,7 @@ test Gpt2TextDecoder {
     var decoder = try Gpt2TextDecoder.init(testing.allocator);
     defer decoder.deinit();
 
-    var out = std.ArrayList(u8).init(testing.allocator);
+    var out = std.array_list.Managed(u8).init(testing.allocator);
     defer out.deinit();
 
     // Ascii is not changed.
@@ -1076,7 +1077,7 @@ pub fn fromHfJson(allocator: std.mem.Allocator, tokenizer_path: []const u8) !Tok
 
     // Buffer containing all concatenated tokens.
     // Reserve a big chunk, to avoid grow event, but release over-allocated memory.
-    var all_tokens = try std.ArrayList(u8).initCapacity(tokenizer.arena_state.allocator(), file_content.len);
+    var all_tokens = try std.array_list.Managed(u8).initCapacity(tokenizer.arena_state.allocator(), file_content.len);
     const original_alloc = all_tokens.items.ptr;
     // A re-alloc event here means we have invalidated all slices inside the tokenizer.
     // If this is too annoying we could switch to a custom type instead of slices.
@@ -1164,7 +1165,7 @@ pub fn fromHfJson(allocator: std.mem.Allocator, tokenizer_path: []const u8) !Tok
 }
 
 /// Returns a copy of the given string, stored inside the given ArrayList.
-fn dup(buffer: *std.ArrayList(u8), str: []const u8) ![]const u8 {
+fn dup(buffer: *std.array_list.Managed(u8), str: []const u8) ![]const u8 {
     const n = buffer.items.len;
     try buffer.appendSlice(str);
     return buffer.items[n..];

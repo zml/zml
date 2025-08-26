@@ -155,7 +155,7 @@ pub fn reduce(
     // To that order, we initialize `result` to `inputs`, then we use stdx.meta.visit,
     // to find the correct mlir.Value, but we first broadcast before creating the final
     // Tensor struct.
-    var broadcasting_axes: std.BoundedArray(i64, Tensor.MAX_RANK) = .{};
+    var broadcasting_axes: stdx.BoundedArray(i64, Tensor.MAX_RANK) = .{};
     for (0..Tensor.MAX_RANK) |i| {
         if (std.mem.indexOfScalar(i64, axes, @intCast(i)) == null) {
             broadcasting_axes.append(@intCast(i)) catch unreachable;
@@ -443,9 +443,9 @@ pub fn if_(
     const true_branch_block, const true_branch_res = ctx.makeBlock(.open, TrueBlockSignature, &true_branch_fn, blkctx, {});
     const false_branch_block, const false_branch_res = ctx.makeBlock(.open, TrueBlockSignature, &false_branch_fn, blkctx, {});
 
-    var true_shapes = std.ArrayList(Shape).init(ctx.allocator());
+    var true_shapes = std.array_list.Managed(Shape).init(ctx.allocator());
     defer true_shapes.deinit();
-    var false_shapes = std.ArrayList(Shape).init(ctx.allocator());
+    var false_shapes = std.array_list.Managed(Shape).init(ctx.allocator());
     defer false_shapes.deinit();
 
     var failed_to_collect = false;
@@ -985,10 +985,10 @@ pub fn scatter(
     const UpdateS = BlockSign(update_fn);
     const update_block, _ = ctx.makeBlock(.hermetic, UpdateS, update_fn, blkctx, .{ _scalar, _scalar });
 
-    var input_values = std.ArrayList(mlir.Value).initCapacity(ctx.allocator(), n_inputs) catch @panic("OOM");
+    var input_values = std.array_list.Managed(mlir.Value).initCapacity(ctx.allocator(), n_inputs) catch @panic("OOM");
     defer input_values.deinit();
     meta.collect(CompilationContext.getValue, ctx, &input_values, &inputs) catch unreachable;
-    var updates_values = std.ArrayList(mlir.Value).initCapacity(ctx.allocator(), n_updates) catch @panic("OOM");
+    var updates_values = std.array_list.Managed(mlir.Value).initCapacity(ctx.allocator(), n_updates) catch @panic("OOM");
     defer updates_values.deinit();
     meta.collect(CompilationContext.getValue, ctx, &updates_values, &updates) catch unreachable;
 
@@ -1029,8 +1029,8 @@ pub fn scatter(
 }
 
 const ScatterConfig = struct {
-    op_kind: std.BoundedArray(AxisKind, Tensor.MAX_RANK) = .{},
-    up_kind: std.BoundedArray(AxisKind, Tensor.MAX_RANK) = .{},
+    op_kind: stdx.BoundedArray(AxisKind, Tensor.MAX_RANK) = .{},
+    up_kind: stdx.BoundedArray(AxisKind, Tensor.MAX_RANK) = .{},
     indices_batch_axes: Shape.DimsArray = .{},
     scatter_to_operand_axes: Shape.DimsArray = .{},
     updates_transpose: Shape.AxesArray = .{},
@@ -1041,11 +1041,11 @@ const AxisKind = enum { batching, update_window, inserted_window, window_id };
 fn scatterConfig(
     op: Shape,
     update: Shape,
-    indices_per_axis: std.BoundedArray(Tensor, Tensor.MAX_RANK),
+    indices_per_axis: stdx.BoundedArray(Tensor, Tensor.MAX_RANK),
     indices_axes: Shape.TagsArray,
 ) ScatterConfig {
-    var op_kind: std.BoundedArray(AxisKind, Tensor.MAX_RANK) = .{};
-    var up_kind: std.BoundedArray(AxisKind, Tensor.MAX_RANK) = .{};
+    var op_kind: stdx.BoundedArray(AxisKind, Tensor.MAX_RANK) = .{};
+    var up_kind: stdx.BoundedArray(AxisKind, Tensor.MAX_RANK) = .{};
     var indices_batch_axes: Shape.DimsArray = .{};
     var scatter_to_operand_axes: Shape.DimsArray = .{};
     var updates_transpose: Shape.AxesArray = .{};
@@ -1174,7 +1174,7 @@ fn scatterPrepareIndices(
     cfg: *ScatterConfig,
     op: Shape,
     update: Shape,
-    indices_per_axis: *std.BoundedArray(Tensor, Tensor.MAX_RANK),
+    indices_per_axis: *stdx.BoundedArray(Tensor, Tensor.MAX_RANK),
     indices_axes: *Shape.TagsArray,
 ) Tensor {
     var old_scatter_to_op_axes = cfg.scatter_to_operand_axes;
@@ -1194,7 +1194,7 @@ fn scatterPrepareIndices(
 
     // Reorder the axes so that in indices_per_axis is ordered like in op if possible.
     // TODO: transpose updates if needed
-    var indices: std.BoundedArray(Tensor, Tensor.MAX_RANK) = .{};
+    var indices: stdx.BoundedArray(Tensor, Tensor.MAX_RANK) = .{};
     var scatter_to_op_axes: Shape.DimsArray = .{};
 
     while (old_scatter_to_op_axes.len > 0) {

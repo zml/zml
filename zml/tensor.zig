@@ -144,7 +144,7 @@ pub const Tensor = struct {
     /// Returns the indices of each of the given axes.
     ///
     /// 'axis_' can be an integer or a tag.
-    pub fn axes(self: Tensor, axes_: anytype) std.BoundedArray(u3, Tensor.MAX_RANK) {
+    pub fn axes(self: Tensor, axes_: anytype) stdx.BoundedArray(u3, Tensor.MAX_RANK) {
         return self._shape.axes(axes_);
     }
 
@@ -1159,7 +1159,7 @@ pub const Tensor = struct {
     ) Tensor {
         stdx.debug.assert(lhs.dtype() == rhs.dtype(), "dotGeneral expects tensors to be of the same type, got {} and {}", .{ lhs.dtype(), rhs.dtype() });
 
-        const Axes = std.BoundedArray(i64, MAX_RANK);
+        const Axes = stdx.BoundedArray(i64, MAX_RANK);
 
         var res_shape: Shape = .{ ._dtype = lhs.dtype() };
         // Validate batching axes
@@ -2035,7 +2035,7 @@ pub const Tensor = struct {
         }
 
         // check that each axis of self maps to an axis of other
-        var axes_: std.BoundedArray(i64, MAX_RANK) = .{};
+        var axes_: stdx.BoundedArray(i64, MAX_RANK) = .{};
         for (self._shape.tags()) |t| {
             axes_.appendAssumeCapacity(@intCast(other.axis(t)));
         }
@@ -2181,7 +2181,7 @@ pub const Tensor = struct {
         }
 
         const AxisKind = enum { batching, offset, collapsed, indices };
-        var self_kind: std.BoundedArray(AxisKind, MAX_RANK) = .{};
+        var self_kind: stdx.BoundedArray(AxisKind, MAX_RANK) = .{};
         var indices_batch_axes: Shape.DimsArray = .{};
         for (self._shape.tags(), 0..self.rank()) |t, self_ax| {
             const maybe_coord_ax = std.mem.indexOfScalar(u3, coord_axes_.constSlice(), @intCast(self_ax));
@@ -2213,7 +2213,7 @@ pub const Tensor = struct {
 
         // compute res shape
         var res_shape = Shape.init(.{}, self.dtype());
-        var res_kind: std.BoundedArray(AxisKind, MAX_RANK) = .{};
+        var res_kind: stdx.BoundedArray(AxisKind, MAX_RANK) = .{};
         for (self_kind.constSlice(), 0..) |kind, ax_usize| {
             const ax: u3 = @intCast(ax_usize);
             if (ax == coord_axes_.get(0)) {
@@ -2365,10 +2365,10 @@ pub const Tensor = struct {
         // Compute result shape
         var res_shape = indices._shape.remove(index_coord_axis).withDtype(self.dtype());
         var slice_dims = self._shape._dims;
-        var self_batch_axes: std.BoundedArray(i64, MAX_RANK) = .{};
-        var indices_batch_axes: std.BoundedArray(i64, MAX_RANK) = .{};
-        var start_index_map: std.BoundedArray(i64, MAX_RANK) = .{};
-        var self_offset_axes: std.BoundedArray(i64, MAX_RANK) = .{};
+        var self_batch_axes: stdx.BoundedArray(i64, MAX_RANK) = .{};
+        var indices_batch_axes: stdx.BoundedArray(i64, MAX_RANK) = .{};
+        var start_index_map: stdx.BoundedArray(i64, MAX_RANK) = .{};
+        var self_offset_axes: stdx.BoundedArray(i64, MAX_RANK) = .{};
         for (self._shape.tags(), 0..self.rank()) |t, self_ax| {
             const maybe_slice_ax: ?u3 = if (tagged_api) slice_shape.hasTag(t) else @intCast(self_ax);
 
@@ -3761,7 +3761,7 @@ pub const Tensor = struct {
     ///
     /// - res[a, b, c, d] == (A[a], B[b], C[c], D[d])
     pub fn cartesianProductStacked(vectors: []const Tensor) Tensor {
-        var out = std.BoundedArray(Tensor, Tensor.MAX_RANK).init(vectors.len) catch unreachable;
+        var out = stdx.BoundedArray(Tensor, Tensor.MAX_RANK).init(vectors.len) catch unreachable;
         _cartesianProduct(vectors, out.slice());
 
         return Tensor.stack(out.constSlice(), .last, .coord);
@@ -4059,8 +4059,8 @@ test shapesOf {
     }
 }
 
-pub fn _collectAxes(T: type, bounded_array: std.BoundedArray(T, Tensor.MAX_RANK), value: T) std.BoundedArray(i64, Tensor.MAX_RANK) {
-    var res: std.BoundedArray(i64, Tensor.MAX_RANK) = .{};
+pub fn _collectAxes(T: type, bounded_array: stdx.BoundedArray(T, Tensor.MAX_RANK), value: T) stdx.BoundedArray(i64, Tensor.MAX_RANK) {
+    var res: stdx.BoundedArray(i64, Tensor.MAX_RANK) = .{};
     for (bounded_array.constSlice(), 0..) |v, ax| {
         if (v == value) {
             res.appendAssumeCapacity(@intCast(ax));
@@ -4069,12 +4069,12 @@ pub fn _collectAxes(T: type, bounded_array: std.BoundedArray(T, Tensor.MAX_RANK)
     return res;
 }
 
-fn _parseGatherCoord(self: Tensor, axes_: anytype) struct { bool, std.BoundedArray(u3, Tensor.MAX_RANK) } {
+fn _parseGatherCoord(self: Tensor, axes_: anytype) struct { bool, stdx.BoundedArray(u3, Tensor.MAX_RANK) } {
     const AxesT = @TypeOf(axes_);
     const axes_is_scalar = AxesT == EnumLiteral or AxesT == comptime_int or @typeInfo(AxesT) == .int;
 
     const coord_axes = if (axes_is_scalar)
-        std.BoundedArray(u3, Tensor.MAX_RANK).fromSlice(&.{self.axis(axes_)}) catch unreachable
+        stdx.BoundedArray(u3, Tensor.MAX_RANK).fromSlice(&.{self.axis(axes_)}) catch unreachable
     else
         self.axes(axes_);
 
@@ -4098,7 +4098,7 @@ inline fn toI64(values: anytype) []i64 {
 }
 
 fn transposeIsJustAReshape(x: Shape, permutation: []const i64) bool {
-    var perm: std.BoundedArray(struct { u8, bool }, Tensor.MAX_RANK) = .{};
+    var perm: stdx.BoundedArray(struct { u8, bool }, Tensor.MAX_RANK) = .{};
     // Don't rewrite on invalid inputs.
     if (permutation.len > x.rank()) return false;
     for (permutation) |ax| {

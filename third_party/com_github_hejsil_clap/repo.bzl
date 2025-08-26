@@ -4,6 +4,6 @@ def repo():
     new_git_repository(
         name = "com_github_hejsil_clap",
         remote = "https://github.com/Hejsil/zig-clap.git",
-        commit = "068c38f89814079635692c7d0be9f58508c86173",
+        commit = "5289e0753cd274d65344bef1c114284c633536ea",
         build_file = "//:third_party/com_github_hejsil_clap/clap.bazel",
     )

@@ -22,9 +22,9 @@ pub const Shape = struct {
     pub const TagUnknown = "_".ptr;
     const TagLast = "last".ptr;
 
-    pub const DimsArray = std.BoundedArray(i64, MAX_RANK);
-    pub const TagsArray = std.BoundedArray(Tag, MAX_RANK);
-    pub const AxesArray = std.BoundedArray(u3, MAX_RANK);
+    pub const DimsArray = stdx.BoundedArray(i64, MAX_RANK);
+    pub const TagsArray = stdx.BoundedArray(Tag, MAX_RANK);
+    pub const AxesArray = stdx.BoundedArray(u3, MAX_RANK);
     pub const ShardingInfo = @Vector(MAX_RANK, bool);
 
     const UnknownTags: TagsArray = .{ .len = 0, .buffer = [_]Tag{TagUnknown} ** MAX_RANK };
@@ -784,9 +784,9 @@ pub const Shape = struct {
         }
     }
 
-    pub fn computeStrides(self: Shape) std.BoundedArray(i64, MAX_RANK) {
+    pub fn computeStrides(self: Shape) stdx.BoundedArray(i64, MAX_RANK) {
         const rk = self.rank();
-        var strides: std.BoundedArray(i64, MAX_RANK) = .{ .len = rk };
+        var strides: stdx.BoundedArray(i64, MAX_RANK) = .{ .len = rk };
         if (rk == 0) return strides;
 
         const V = @Vector(MAX_RANK, i64);
@@ -990,10 +990,10 @@ pub const Shape = struct {
         return res;
     }
 
-    pub fn parseStruct(T: type, v: anytype) struct { std.BoundedArray(T, MAX_RANK), TagsArray } {
+    pub fn parseStruct(T: type, v: anytype) struct { stdx.BoundedArray(T, MAX_RANK), TagsArray } {
         const V = @TypeOf(v);
 
-        var vals_: std.BoundedArray(T, MAX_RANK) = .{};
+        var vals_: stdx.BoundedArray(T, MAX_RANK) = .{};
         var tags_: TagsArray = .{};
 
         if (comptime stdx.meta.isSliceOf(V, T)) {
@@ -1028,10 +1028,10 @@ pub const Shape = struct {
     }
 
     /// Parses a struct literal into a list of options for each axes.
-    pub fn parseAxesOptions(self: Shape, T: type, options: anytype, default: T) std.BoundedArray(T, MAX_RANK) {
+    pub fn parseAxesOptions(self: Shape, T: type, options: anytype, default: T) stdx.BoundedArray(T, MAX_RANK) {
         const V = @TypeOf(options);
 
-        var res: std.BoundedArray(T, MAX_RANK) = .{};
+        var res: stdx.BoundedArray(T, MAX_RANK) = .{};
         if (comptime stdx.meta.isSliceOf(V, T)) {
             stdx.debug.assert(options.len == self.rank(), "expects exactly {} options in slice, for {} got {}", .{ self.rank(), self, options.len });
             for (options) |d| {

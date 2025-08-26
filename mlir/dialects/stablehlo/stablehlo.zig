@@ -761,7 +761,7 @@ pub fn custom_call(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCa
         );
     }
 
-    var attrs: std.BoundedArray(mlir.AttrTuple, 32) = .{};
+    var attrs: stdx.BoundedArray(mlir.AttrTuple, 32) = .{};
     attrs.appendSliceAssumeCapacity(&[_]mlir.AttrTuple{
         .{ "api_version", .int(ctx, .i32, @intFromEnum(opts.api_version)) },
         .{ "call_target_name", .string(ctx, opts.call_target_name) },
@@ -770,7 +770,7 @@ pub fn custom_call(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCa
     });
 
     {
-        var output_operand_aliases: std.BoundedArray(mlir.Attribute, MAX_RESULTS) = .{};
+        var output_operand_aliases: stdx.BoundedArray(mlir.Attribute, MAX_RESULTS) = .{};
         for (opts.output_operand_aliases) |alias| {
             output_operand_aliases.appendAssumeCapacity(
                 OutputOperandAliasAttribute.init(ctx, &.{}, alias, &.{}).asAttr(),
@@ -789,14 +789,14 @@ pub fn custom_call(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCa
     };
 
     if (opts.operand_layouts) |layouts| {
-        var operand_layouts: std.BoundedArray(mlir.Attribute, MAX_OPERANDS) = .{};
+        var operand_layouts: stdx.BoundedArray(mlir.Attribute, MAX_OPERANDS) = .{};
         for (layouts) |ol| {
             operand_layouts.appendAssumeCapacity(.denseElements(ctx, &.{@intCast(ol.len)}, .index, ol));
         }
         attrs.appendAssumeCapacity(.{ "operand_layouts", .array(ctx, operand_layouts.constSlice()) });
     } else {
         const operand_layouts = blk: {
-            var ret: std.BoundedArray(mlir.Attribute, MAX_OPERANDS) = .{};
+            var ret: stdx.BoundedArray(mlir.Attribute, MAX_OPERANDS) = .{};
             for (inputs) |input| {
                 const ranked_type = input.getType().as(mlir.RankedTensorType).?;
                 const ol = MINOR_TO_MAJOR[MINOR_TO_MAJOR.len - ranked_type.getRank() ..];
@@ -808,14 +808,14 @@ pub fn custom_call(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCa
     }
 
     if (opts.result_layouts) |layouts| {
-        var result_layouts: std.BoundedArray(mlir.Attribute, MAX_RESULTS) = .{};
+        var result_layouts: stdx.BoundedArray(mlir.Attribute, MAX_RESULTS) = .{};
         for (layouts) |rl| {
             result_layouts.appendAssumeCapacity(.denseElements(ctx, &.{@intCast(rl.len)}, .index, rl));
         }
         attrs.appendAssumeCapacity(.{ "result_layouts", .array(ctx, result_layouts.constSlice()) });
     } else {
         const result_layouts = blk: {
-            var ret: std.BoundedArray(mlir.Attribute, MAX_RESULTS) = .{};
+            var ret: stdx.BoundedArray(mlir.Attribute, MAX_RESULTS) = .{};
             for (res_types) |t| {
                 const ranked_t = t.as(mlir.RankedTensorType).?;
                 const rl = MINOR_TO_MAJOR[MINOR_TO_MAJOR.len - ranked_t.getRank() ..];

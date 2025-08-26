@@ -11,9 +11,11 @@ pub const Duration = struct {
         return (1 * std.time.ns_per_s) / self.ns;
     }
 
-    pub fn format(duration: Duration, writer: *std.io.Writer) std.io.Writer.Error!void {
+    pub fn formatDuration(duration: Duration, writer: *std.io.Writer) std.io.Writer.Error!void {
         try writer.printDuration(duration.ns, .{});
     }
+
+    pub const format = formatDuration;
 };
 
 pub const Timer = struct {

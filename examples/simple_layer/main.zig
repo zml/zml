@@ -1,6 +1,7 @@
 const std = @import("std");
-const zml = @import("zml");
+
 const asynk = @import("async");
+const zml = @import("zml");
 
 /// Model definition
 const Layer = struct {
@@ -38,9 +39,9 @@ pub fn asyncMain() !void {
     context.printAvailablePlatforms(platform);
 
     // Our weights and bias to use
-    var weights = [4]f16{ 2.0, 2.0, 2.0, 2.0 };
-    var bias = [4]f16{ 1.0, 2.0, 3.0, 4.0 };
-    const input_shape = zml.Shape.init(.{4}, .f16);
+    var weights = [4]f32{ 2.0, 2.0, 2.0, 2.0 };
+    var bias = [4]f32{ 1.0, 2.0, 3.0, 4.0 };
+    const input_shape = zml.Shape.init(.{4}, .f32);
 
     // We manually produce a BufferStore. You would not normally do that.
     // A BufferStore is usually created by loading model data from a file.
@@ -80,8 +81,8 @@ pub fn asyncMain() !void {
     // prepare an input buffer
     // Here, we use zml.HostBuffer.fromSlice to show how you would create a HostBuffer
     // with a specific shape from an array.
-    // For situations where e.g. you have an [4]f16 array but need a .{2, 2} input shape.
-    var input = [4]f16{ 5.0, 5.0, 5.0, 5.0 };
+    // For situations where e.g. you have an [4]f32 array but need a .{2, 2} input shape.
+    var input = [4]f32{ 5.0, 5.0, 5.0, 5.0 };
     var input_buffer = try zml.Buffer.from(platform, zml.HostBuffer.fromSlice(input_shape, &input), .{});
     defer input_buffer.deinit();
 
@@ -92,7 +93,7 @@ pub fn asyncMain() !void {
     // fetch the result to CPU memory
     const cpu_result = try result.toHostAlloc(arena);
     std.debug.print(
-        "\nThe result of {d} * {d} + {d} = {d}\n",
-        .{ &weights, &input, &bias, cpu_result.items(f16) },
+        "\nThe result of {any} * {any} + {any} = {any}\n",
+        .{ &weights, &input, &bias, cpu_result.items(f32) },
     );
 }

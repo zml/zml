@@ -1,19 +1,19 @@
+const std = @import("std");
+
 const asynk = @import("async");
 const clap = @import("clap");
-const std = @import("std");
 const stdx = @import("stdx");
 const zml = @import("zml");
+const Buffer = zml.Buffer;
+const Tensor = zml.Tensor;
+const ShapeOf = zml.ShapeOf;
 
 const llama = @import("llama.zig");
-
 const LlamaLM = llama.LlamaLM;
 const Llama = llama.Llama;
 const KvCache = llama.KvCache;
 const TransformerLayer = llama.TransformerLayer;
 const SelfAttn = llama.SelfAttn;
-const Buffer = zml.Buffer;
-const Tensor = zml.Tensor;
-const ShapeOf = zml.ShapeOf;
 
 const log = std.log.scoped(.llama);
 
@@ -23,7 +23,7 @@ pub const std_options: std.Options = .{
 };
 
 pub fn tokenizePrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, config: LlamaLM.Config, prompt: []const u8, skip_llama3_encoding: bool) ![]u32 {
-    var tokens = std.ArrayList(u32).init(allocator);
+    var tokens = std.array_list.Managed(u32).init(allocator);
     var encoder = try tokenizer.encoder();
     defer encoder.deinit();
 
@@ -101,7 +101,7 @@ pub fn generateText(
     defer current_token.deinit();
 
     // Here we collect the generated text
-    var output = std.ArrayList(u8).init(allocator);
+    var output = std.array_list.Managed(u8).init(allocator);
     defer output.deinit();
 
     const output_tokens_len = max_seq_len - prompt_tok.len - 1;
@@ -225,7 +225,9 @@ pub fn asyncMain() !void {
     const config = blk: {
         var config_json_file = try asynk.File.open(model_config_path, .{ .mode = .read_only });
         defer config_json_file.close() catch unreachable;
-        var reader = std.json.reader(allocator, config_json_file.reader());
+        var config_json_buffer: [256]u8 = undefined;
+        var config_reader = config_json_file.reader(&config_json_buffer);
+        var reader = std.json.Reader.init(allocator, &config_reader.interface);
         defer reader.deinit();
         const config_obj = try std.json.parseFromTokenSourceLeaky(llama.LlamaLM.Config, allocator, &reader, .{ .ignore_unknown_fields = true });
         break :blk config_obj;
@@ -299,7 +301,7 @@ pub fn asyncMain() !void {
         platform,
     });
 
-    log.info("\tLoading Llama weights from {?s}...", .{model_weights_path});
+    log.info("\tLoading Llama weights from {s}...", .{model_weights_path});
     var llama_weights = try zml.aio.loadBuffers(llama.LlamaLM, .{ config, llama_options }, ts, model_arena.allocator(), platform);
     defer zml.aio.unloadBuffers(&llama_weights);
     log.info("✅\tLoaded weights in {D}", .{start.read()});
@@ -316,7 +318,7 @@ pub fn asyncMain() !void {
     var tokenizer = blk: {
         log.info("Loading tokenizer from {s}", .{model_tokenizer_path});
         var timer = try stdx.time.Timer.start();
-        defer log.info("Loaded tokenizer from {s} [{}]", .{ model_tokenizer_path, timer.read() });
+        defer log.info("Loaded tokenizer from {s} [{D}]", .{ model_tokenizer_path, timer.read() });
 
         break :blk try zml.tokenizer.Tokenizer.fromFile(model_arena.allocator(), model_tokenizer_path);
     };

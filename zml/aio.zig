@@ -660,7 +660,7 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
         return if (buffer_store.get(prefix)) |host_buffer| {
             // obj._shape has been set inside `loadModelBuffersWithPrefix`, before calling us.
             var buf_with_metadata = host_buffer;
-            log.debug("Loading buffer {s} ({})", .{ prefix, obj._shape });
+            log.debug("Loading buffer {s} ({f})", .{ prefix, obj._shape });
             stdx.debug.assert(host_buffer.shape().eql(obj._shape), "loadModelBuffers expects to find the same shapes in the model and in the buffer store, got {f} and {f} for tensor {s}", .{ obj._shape, host_buffer, prefix });
             buf_with_metadata._shape = obj._shape;
             obj.* = try zml.Buffer.from(platform, buf_with_metadata, .{});
