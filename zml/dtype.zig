@@ -10,6 +10,7 @@ test {
 }
 
 pub const DataType = enum(u8) {
+    // TODO: Consider aligning the values to Pjrt buffer types to avoid conversions.
     bool,
     // Note: the support of the float8 is a bit spotty, f8e4m3b11fnuz seems to be the most supported one on Cuda.
     f4e2m1,

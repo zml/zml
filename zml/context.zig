@@ -254,12 +254,7 @@ fn getShape(buffer_desc: *const pjrt.ffi.Buffer) Shape {
     // log.warn("received buffer {}", .{buffer_desc});
     const dt: DataType = switch (buffer_desc.dtype) {
         .invalid => @panic("invalid ffi"),
-        .pred => .bool,
-        .i8 => .i8,
-        .i16 => .i16,
-        .i32 => .i32,
-        .i64 => .i64,
-        .token, .f8e4m3, .f8e3m4 => @panic("Unsupported ffi type"),
+        .i1, .u1, .token => @panic("Unsupported ffi type"),
         inline else => |t| @field(DataType, @tagName(t)),
     };
     return Shape.init(buffer_desc.dims(), dt);

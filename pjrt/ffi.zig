@@ -5,6 +5,7 @@ const c = @import("c");
 const stdx = @import("stdx");
 
 const pjrtStruct = @import("pjrt.zig").pjrtStruct;
+const Stream = @import("pjrt.zig").Stream;
 
 const log = std.log.scoped(.pjrt);
 
@@ -166,7 +167,7 @@ pub const ExecutionContext = opaque {
     pub fn Context(comptime T: type) type {
         return struct {
             pub fn get(self: *const ExecutionContext, api: *const Api) ApiError!*T {
-                const type_id: TypeId = .{ .type_id = T.type_id };
+                const type_id: c.TypeId = .{ .type_id = T.type_id };
                 var ret = pjrtStruct(c.XLA_FFI_ExecutionContext_Get_Args{
                     .ctx = @constCast(self.inner()),
                     .type_id = @constCast(&type_id.toCStruct()),
@@ -206,6 +207,8 @@ pub const ExecutionContext = opaque {
         return ret.device_ordinal;
     }
 
+    const Task = fn (*anyopaque) callconv(.c) void;
+
     pub fn scheduleTask(self: *const ExecutionContext, api: *const Api, task: *const Task, data: *anyopaque) ApiError!void {
         var ret = pjrtStruct(c.XLA_FFI_ThreadPool_Schedule_Args{
             .ctx = @constCast(self.inner()),
@@ -226,20 +229,11 @@ pub const ExecutionContext = opaque {
         }
     }
 
-    fn getTypeId(type_name: []const u8) TypeId {
+    fn getTypeId(type_name: []const u8) c.TypeId {
         const id: i64 = @bitCast(std.hash.Fnv1a_64.hash(type_name));
-
-        return .{
-            .type_id = id,
-        };
+        return .{ .type_id = id };
     }
 };
-
-const TypeId = c.XLA_FFI_TypeId;
-
-const Task = fn (*anyopaque) void;
-
-const Stream = @import("pjrt.zig").Stream;
 
 const ByteSpan = extern struct {
     ptr: [*]const u8,
@@ -252,11 +246,17 @@ const ByteSpan = extern struct {
 
 pub const DataType = enum(c.XLA_FFI_DataType) {
     invalid = c.XLA_FFI_DataType_INVALID,
-    pred = c.XLA_FFI_DataType_PRED,
+    bool = c.XLA_FFI_DataType_PRED,
+    i1 = c.XLA_FFI_DataType_S1,
+    i2 = c.XLA_FFI_DataType_S2,
+    i4 = c.XLA_FFI_DataType_S4,
     i8 = c.XLA_FFI_DataType_S8,
     i16 = c.XLA_FFI_DataType_S16,
     i32 = c.XLA_FFI_DataType_S32,
     i64 = c.XLA_FFI_DataType_S64,
+    u1 = c.XLA_FFI_DataType_U1,
+    u2 = c.XLA_FFI_DataType_U2,
+    u4 = c.XLA_FFI_DataType_U4,
     u8 = c.XLA_FFI_DataType_U8,
     u16 = c.XLA_FFI_DataType_U16,
     u32 = c.XLA_FFI_DataType_U32,
@@ -275,6 +275,8 @@ pub const DataType = enum(c.XLA_FFI_DataType) {
     f8e4m3b11fnuz = c.XLA_FFI_DataType_F8E4M3B11FNUZ,
     f8e5m2fnuz = c.XLA_FFI_DataType_F8E5M2FNUZ,
     f8e4m3fnuz = c.XLA_FFI_DataType_F8E4M3FNUZ,
+    f4e2m1 = c.XLA_FFI_DataType_F4E2M1FN,
+    f8e8m0 = c.XLA_FFI_DataType_F8E8M0FNU,
 };
 
 pub const Buffer = extern struct {
