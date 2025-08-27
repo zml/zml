@@ -48,6 +48,9 @@ fn FloatHelpers(Float: type) type {
                     return if (vf32.sign == 0) Float.inf else Float.minus_inf;
                 } else Float.nan;
             }
+            // TODO: This is too lossy.
+            // If exponent underflow, and the mantissa is zero we drop to 0,
+            // while we should set the mantissa to it's max value.
             return .{
                 .sign = vf32.sign,
                 .exponent = @intCast(exponent),
@@ -418,8 +421,35 @@ pub const Float4E2M1 = packed struct(u4) {
     pub const zero = Helpers.zero;
     pub const neg = Helpers.neg;
     pub const fromF32 = Helpers.fromF32;
-    pub const toF32 = Helpers.toF32;
     pub const format = Helpers.format;
+
+    pub const values = [_]f32{ 0.0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6 };
+
+    pub fn toF32(x: Float4E2M1) f32 {
+        // the baseline toF32 doesn't work correctly:
+        // 0b0001 and 0b1001 shoud map to ±0.5, but are mapped to ±epsilon
+        return values[@as(u4, @bitCast(x))];
+    }
+
+    test toF32 {
+        var to_f32_res: [16]f32 = undefined;
+        for (&to_f32_res, 0..) |*r, i| {
+            const x_f4: Float4E2M1 = @bitCast(@as(u4, @intCast(i)));
+            r.* = x_f4.toF32();
+        }
+        try std.testing.expectEqualSlices(f32, &Float4E2M1.values, &to_f32_res);
+    }
+
+    test fromF32 {
+        // the baseline fromF32 doesn't work correctly:
+        // ±0.5 should map to 0b0001/0b1001 but are map to ±0.0 instead.
+        // TODO: it probably affects other types.
+        var from_f32_res: [16]Float4E2M1 = undefined;
+        for (&from_f32_res, 0..) |*r, i| {
+            r.* = .fromF32(Float4E2M1.values[i]);
+        }
+        try std.testing.expectEqualSlices(u4, &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 }, @ptrCast(&from_f32_res));
+    }
 };
 
 pub fn floatCast(T: type, x: anytype) T {

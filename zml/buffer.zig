@@ -157,6 +157,32 @@ pub const Buffer = struct {
         return from(platform, HostBuffer.fromBytes(sh, data), .{});
     }
 
+    test fromBytes {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+        {
+            const data: [8]u32 = .{ 0, 9, 2, 11, 4, 13, 6, 15 };
+            const data_bytes: []const u8 = @ptrCast(&data);
+            try std.testing.expectEqual(@sizeOf(@TypeOf(data)), data_bytes.len);
+            const data_d = try zml.Buffer.fromBytes(platform, .init(.{8}, .u32), data_bytes);
+            const data_read = try data_d.toHostAlloc(std.testing.allocator);
+            defer data_read.deinit(std.testing.allocator);
+            try std.testing.expectEqualSlices(u32, &data, data_read.items(u32));
+        }
+
+        {
+            // We use u4 so that the bits are packed.
+            const data: [8]u4 = .{ 0, 9, 2, 11, 4, 13, 6, 15 };
+            const data_bytes: []const u8 = @ptrCast(&data);
+            try std.testing.expectEqual(@sizeOf(@TypeOf(data)), data_bytes.len);
+            const expect: [8]u4 = .{ 0, 9, 2, 11, 4, 13, 6, 15 };
+            const data_d = try zml.Buffer.fromBytes(platform, .init(.{8}, .u4), data_bytes);
+            const data_read = try data_d.toHostAlloc(std.testing.allocator);
+            defer data_read.deinit(std.testing.allocator);
+            try std.testing.expectEqualSlices(u8, std.mem.asBytes(&expect), data_read.bytes());
+        }
+    }
+
     /// Copies the given Zig array to the accelerator memory and
     /// return a Buffer using the array shape.
     pub fn fromArray(platform: Platform, arr: anytype) !Buffer {

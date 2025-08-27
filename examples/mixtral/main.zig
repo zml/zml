@@ -180,6 +180,7 @@ pub fn asyncMain() !void {
 }
 
 pub fn tokenizePrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, config: MixtralLM.Config, prompt: []const u8, skip_llama3_encoding: bool) ![]u32 {
+    _ = config; // autofix
     var tokens = std.ArrayList(u32).init(allocator);
     var encoder = try tokenizer.encoder();
     defer encoder.deinit();
@@ -190,22 +191,23 @@ pub fn tokenizePrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tok
         return tokens.toOwnedSlice();
     }
 
-    const start_header_id = tokenizer.tokenToId("<|start_header_id|>") orelse return error.NoSuchToken;
-    const end_header_id = tokenizer.tokenToId("<|end_header_id|>") orelse return error.NoSuchToken;
-    const eot_id = tokenizer.tokenToId("<|eot_id|>") orelse return error.NoSuchToken;
-    const newline_id = (try encoder.encode("\n"))[0];
+    const start_header = tokenizer.tokenToId("<|start|>") orelse return error.NoSuchToken;
+    const end_header_start_message = tokenizer.tokenToId("<|message|>") orelse return error.NoSuchToken;
+    const end_message = tokenizer.tokenToId("<|end|>") orelse return error.NoSuchToken;
 
-    try tokens.append(config.bos_token_id);
+    {
+        try tokens.appendSlice(&.{ start_header, tokenizer.tokenToId("system").?, end_header_start_message });
+        try tokens.appendSlice(try encoder.encode("You are ChatGPT, a large language model trained by OpenAI.\n"));
+        try tokens.append(end_message);
+    }
 
-    try tokens.append(start_header_id);
-    try tokens.appendSlice(try encoder.encode("user"));
-    try tokens.appendSlice(&.{ end_header_id, newline_id });
+    {
+        try tokens.appendSlice(&.{ start_header, tokenizer.tokenToId("user").?, end_header_start_message });
+        try tokens.appendSlice(try encoder.encode(prompt));
+        try tokens.append(end_message);
+    }
 
-    try tokens.appendSlice(try encoder.encode(prompt));
-    try tokens.appendSlice(&.{ eot_id, newline_id });
-    try tokens.append(start_header_id);
-    try tokens.appendSlice(try encoder.encode("assistant"));
-    try tokens.appendSlice(&.{ end_header_id, newline_id });
+    try tokens.appendSlice(&.{ start_header, tokenizer.tokenToId("assistant").?, end_header_start_message });
 
     return tokens.toOwnedSlice();
 }
@@ -223,6 +225,7 @@ pub fn generateText(
     skip_llama3_encoding: bool,
 ) ![]const u8 {
     const prompt_tok: []const u32 = try tokenizePrompt(allocator, tokenizer, config, prompt, skip_llama3_encoding);
+    log.info("\t Tokenized prompt: {d}", .{prompt_tok});
     defer allocator.free(prompt_tok);
 
     var tokenizer_decoder = try tokenizer.decoder();
@@ -271,9 +274,10 @@ pub fn generateText(
         // collect and print generated sequence
         num_tokens_generated += 1;
         const generated_token = generated_token_buffer[0];
-        const chunk = try tokenizer_decoder.next(generated_token) orelse unreachable;
-        try output.appendSlice(chunk);
-        std.debug.print("{s}", .{chunk});
+        if (try tokenizer_decoder.next(generated_token)) |chunk| {
+            try output.appendSlice(chunk);
+            std.debug.print("{s}", .{chunk});
+        }
 
         // check for eos
         if (i == output_tokens_len) break :generation;

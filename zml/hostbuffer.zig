@@ -40,7 +40,7 @@ pub const HostBuffer = struct {
     /// The returned HostBuffer doesn't take ownership of the slice
     /// that will still need to be deallocated.
     pub fn fromBytes(shape_: Shape, data_: []const u8) HostBuffer {
-        stdx.debug.assert(shape_.byteSize() == data_.len, "shape {} and data {} don't match", .{ shape_.byteSize(), data_.len });
+        stdx.debug.assert(shape_.byteSize() == data_.len, "shape ({} bytes) and data ({} bytes) don't match", .{ shape_.byteSize(), data_.len });
         return .{
             ._shape = shape_,
             ._strides = shape_.computeStrides().buffer,
@@ -96,7 +96,10 @@ pub const HostBuffer = struct {
     pub fn fromArray(arr_ptr: anytype) HostBuffer {
         const T = @TypeOf(arr_ptr.*);
         const sh = parseArrayInfo(T);
-        std.debug.assert(sh.byteSize() == @sizeOf(T));
+        if (sh.dtype().bitSizeOf() < 8) {
+            // Zig isn't correctly packing the sub byte types in arrays.
+            stdx.debug.assert(sh.byteSize() == @sizeOf(T), "fromArray doesn't work on {}, cause the pjrt layout ({d} bytes) doesn't match the Zig layout ({d} bytes)", .{ T, sh.byteSize(), @sizeOf(T) });
+        }
         return .{
             ._shape = sh,
             ._strides = sh.computeStrides().buffer,

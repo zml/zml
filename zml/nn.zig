@@ -3,11 +3,13 @@ const std = @import("std");
 const assert = std.debug.assert;
 const testing = std.testing;
 
+const dialect = @import("mlir/dialects");
 const stdx = @import("stdx");
 
 const DataType = @import("dtype.zig").DataType;
 const helpers = @import("helpers.zig");
 const meta = @import("meta.zig");
+const mlirx = @import("mlirx.zig");
 const cuda = @import("nn/cuda.zig");
 const ops = @import("ops.zig");
 const Shape = @import("shape.zig").Shape;
@@ -33,6 +35,61 @@ pub const Linear = struct {
 
         // log.debug("Linear({*}): {d} -> {d} -> {d}", .{ self, x.dims(), y.dims(), if (self.bias) |bias| y.add(bias).dims() else y.dims() });
         return if (self.bias) |bias| y.add(bias.broadcast(y.shape(), &.{y.axis(-1)})) else y;
+    }
+};
+
+pub const BlockScaledLinear = struct {
+    blocks: Tensor,
+    scale: Tensor,
+    bias: ?Tensor = null,
+    blocks_dtype: DataType,
+
+    pub fn forward(self: BlockScaledLinear, x: Tensor) Tensor {
+        const ctx = x.getContext();
+        const res_shape = x.shape().setDim(-1, self.blocks.dim(-3));
+
+        // Bitcast to our actual type. This allows to load weights in a packed layout.
+        const blocks = self.blocks.bitCast(self.blocks_dtype).merge(.{ .d_block = .{ .d_block, .bitcast } });
+
+        // log.warn("BlockScaledLinear({}): {f} -> {f}", .{ self, x, res_shape });
+        const y = switch (ctx._platform.target) {
+            .cuda, .rocm, .tpu => y: {
+                // Merge the .d and .d_block axes, the custom call takes care of dequant.
+                const weight = blocks.merge(.{ .d = .{ .d, .d_block } });
+                const scaled_dot_res_shape = weight.shape().dot(x.shape(), .{.d}).rename(.{ .out = .d }).withDtype(x.dtype());
+                const mlir_ctx = ctx.mlirCtx();
+                const loc = mlir_ctx.location(@src());
+                const op = dialect.stablehlo.custom_call(
+                    mlir_ctx,
+                    &.{
+                        weight.value(),
+                        x.value(),
+                        self.scale.value(),
+                    },
+                    .{
+                        .call_target_name = "__op$block_scaled_dot",
+                        .backend_config = null,
+                        .has_side_effect = false,
+                        .api_version = .original,
+                    },
+                    &.{mlirx.tensorType(mlir_ctx, scaled_dot_res_shape)},
+                    loc,
+                );
+                break :y Tensor._result(scaled_dot_res_shape, op.result(0)).transpose(res_shape);
+            },
+            else => y: {
+                const dequantized_weight: Tensor = .mul(
+                    blocks.convert(x.dtype()),
+                    self.scale.convert(x.dtype()).appendAxes(.{.d_block}),
+                );
+                var y = x.dot(dequantized_weight.merge(.{ .d = .{ .d, .d_block } }), .{.d});
+                std.log.warn("output shape: {_}", .{y});
+                std.debug.assert(y.shape().eql(res_shape));
+                y._shape = res_shape;
+                break :y y;
+            },
+        };
+        return if (self.bias) |bias| y.add(bias.broad(y.shape())) else y;
     }
 };
 
@@ -320,9 +377,8 @@ pub const LayerNorm = struct {
 pub fn rmsNorm(x: Tensor, axis: anytype, eps: f32) Tensor {
     const ax = x.axis(axis);
     // upcast to improve precision
-    const xf32 = x.convert(.f32);
-    const mean = xf32.mul(xf32).mean(ax);
-    const rsqrt = Tensor.rsqrt(mean.addConstant(eps)).convert(x.dtype());
+    const variance = x.convert(.f32).powByConst(2).mean(ax);
+    const rsqrt = Tensor.rsqrt(variance.addConstant(eps)).convert(x.dtype());
     return x.mul(rsqrt.broad(x.shape()));
 }
 
@@ -1104,6 +1160,7 @@ pub fn causalAttnMask(
 pub const SdpaOpts = struct {
     attn_mask: ?Tensor = null,
     scale: ?Tensor = null,
+    softmax_bias: ?Tensor = null,
     allow_cudnn: bool = true,
     // TODO: put a callback instead of all this field,
     // so that
@@ -1132,7 +1189,7 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
     stdx.debug.assert(k.shape().hasTags(.{ .h, .k, .hd }), err_template ++ "k is missing tags {{.h, .k, .hd}}", err_args);
     stdx.debug.assert(v.shape().hasTags(.{ .h, .k, .hd }), err_template ++ "v is missing tags {{.h, .k, .hd}}", err_args);
 
-    if (opts.allow_cudnn and cuda.canUseCudnnSdpa(q.shape())) {
+    if (opts.allow_cudnn and cuda.canUseCudnnSdpa(q.shape()) and opts.softmax_bias == null) {
         return cuda.sdpa(q, k, v, opts);
     }
 
@@ -1150,9 +1207,15 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
     k = k.mul(head_scaling.convert(k.dtype()));
 
     var attn_weights = q.dot(k, .{.hd});
-    // log.debug("attn_weights : {}, attn_mask : {?}", .{ attn_weights, attn_mask });
     if (attn_mask) |mask| attn_weights = attn_weights.add(mask.broad(attn_weights.shape()));
-    attn_weights = attn_weights.convert(.f32).softmax(.k).convert(q.dtype());
+    log.warn("attn_weights : {f}, attn_mask : {?f}", .{ attn_weights, attn_mask });
+    attn_weights = attn_weights.convert(.f32);
+    attn_weights = if (opts.softmax_bias) |softmax_bias| attn: {
+        // The split is needed because we also split q ourselves,
+        // but the contiguous seems brittle, what we want is a kind of "broadTranspose".
+        const bias = softmax_bias.splitAxis(.h, .{ .h = k.dim(.h), .hq = .auto }).contiguous(.{ .h, .q, .hq });
+        break :attn attn_weights.convert(.f32).softmaxBiased(.k, bias).convert(q.dtype());
+    } else attn_weights.convert(.f32).softmax(.k).convert(q.dtype());
 
     var attn = attn_weights.dot(v, .{.k});
     return attn.transpose(q.shape()).merge(.{ .h = .{ .h, .hq } });

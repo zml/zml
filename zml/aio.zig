@@ -122,7 +122,7 @@ pub const BufferStore = struct {
             else => @panic("`store.loadBufferById()` only works on Tensor created by `store.getTensor()`"),
         };
 
-        stdx.debug.assert(x.shape().eql(host_buffer.shape()), "Can't load buffer {f} for tensor {f}: shape mismatch", .{ host_buffer, x });
+        stdx.debug.assert(x.byteSize() == host_buffer.shape().byteSize(), "Can't load buffer {f} for tensor {f}: shape mismatch", .{ host_buffer, x });
         // Copy sharding info
         host_buffer._shape = x._shape;
         return try host_buffer.toDevice(platform);
