@@ -303,6 +303,13 @@ pub const Tensor = struct {
 
         res_shape = res_shape.withDtype(dt);
 
+        if (self._id == .buffer_id) {
+            // Allow to use bitcast outside of compilation.
+            var res = self;
+            res._shape = res_shape;
+            return res;
+        }
+
         const loc = self.getContext().location(@src(), "bitCast({s})", .{@tagName(dt)});
         const op = dialect.stablehlo.bitcast_convert(
             self.getContext().mlirCtx(),
@@ -720,7 +727,7 @@ pub const Tensor = struct {
                     };
                     const values = Tensor.constantTensor(HostBuffer.fromArray(&powers)).withTags(.{.d});
                     const counts = values.gather(.{ .d = samples }, .{}).sum(.n).bitCast(.u16);
-                    const actual_dist = counts.reshape(target_dist.shape()).convert(target_dist.dtype()).divByConst(s.dim(.n));
+                    const actual_dist = counts.convert(target_dist.dtype()).divByConst(s.dim(.n));
                     return .{ rng, .{ .mean = mean_, .variance = variance, .actual_dist = actual_dist } };
                 }
             };
@@ -1047,6 +1054,21 @@ pub const Tensor = struct {
         return _result(self._shape.withDtype(to), op.result(0));
     }
 
+    test convert {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        {
+            // We use u4 so that the bits of Float4E2M1 are correctly packed.
+            const input: [8]u4 = .{ 0, 9, 2, 11, 4, 13, 6, 15 };
+            const expect: [8]f32 = .{ 0.0, -0.5, 1.0, -1.5, 2.0, -3.0, 4.0, -6.0 };
+            const input_d = try zml.Buffer.fromBytes(platform, .init(.{8}, .f4e2m1), std.mem.asBytes(&input));
+            const output_d = try zml.testing.compileAndCall(platform, Tensor.convert, .{ input_d, .f32 });
+            const output = try output_d.getValue([8]f32);
+            try std.testing.expectEqualSlices(f32, &expect, &output);
+        }
+    }
+
     /// Returns a Tensor containing the element-wise rounding operation of the input Tensor.
     pub fn round(self: Tensor) Tensor {
         const loc = self.getContext().mlirCtx().location(@src());
@@ -1280,7 +1302,7 @@ pub const Tensor = struct {
     ///
     /// It's an even more crude approximation than gelu.
     pub fn quickGelu(x: Tensor) Tensor {
-        return x.scale(1.702).sigmoid().mul(x);
+        return x.mul(.sigmoid(x.scale(1.702)));
     }
 
     /// Returns a Tensor containing the Sigmoid Linear Unit (SiLU) activation function applied to each element of the input Tensor.
@@ -1288,21 +1310,38 @@ pub const Tensor = struct {
     /// silu(x) = x σ(x)
     /// https://paperswithcode.com/method/silu
     pub fn silu(x: Tensor) Tensor {
-        return x.mul(x.sigmoid());
+        return x.mul(.sigmoid(x));
     }
 
-    /// Returns a Tensor containing the softmax function applied to each element of the input Tensor.
+    /// Computes softmax along the given axis.
+    /// y[i] = exp(x[i]) / ( Σ_k exp(x[k]) + bias )
     pub fn softmax(self: Tensor, axis_: anytype) Tensor {
         const a = self.axis(axis_);
         const max_val = self.max(a);
-        const row_mask = max_val.cmp(.GT, Tensor.scalar(-std.math.inf(f64), self.dtype()));
+        const row_mask = max_val.cmp(.GT, .scalar(-std.math.inf(f64), self.dtype()));
 
-        const exp_diff_max = self.sub(self.max(a).broad(self._shape)).exp();
+        const exp_diff_max = self.sub(max_val).exp();
         const res = exp_diff_max.div(exp_diff_max.sum(a));
 
         // If a row is full -inf return full 0 instead of full nan,
         // this fix attention when mask hides a full row.
-        return row_mask.broad(self.shape()).select(res, Tensor.scalar(0, self.dtype()));
+        return row_mask.broad(self.shape()).select(res, .scalar(0, self.dtype()));
+    }
+
+    /// Computes softmax, but adds a bias to the sum of exponentiel.
+    /// y[i] = exp(x[i]) / ( Σ_k exp(x[k]) + bias )
+    pub fn softmaxBiased(self: Tensor, axis_: anytype, bias: ?Tensor) Tensor {
+        const a = self.axis(axis_);
+
+        if (bias == null) return self.softmax(axis_);
+        const b = bias.?.convert(self.dtype()).broad(self.shape().setDim(a, 1));
+        const max_val: Tensor = maximum(self.max(a), b);
+        const exp_diff_max = self.sub(max_val).exp();
+        const bias_diff_max = b.mul(.exp(.negate(max_val)));
+        const res = exp_diff_max.div(exp_diff_max.sum(a).add(bias_diff_max));
+
+        // The bias means that denominator won't be 0, we don't need to handle that case.
+        return res;
     }
 
     /// Returns a Tensor containing the log of the sum of exponential over the given axis.
@@ -2094,6 +2133,11 @@ pub const Tensor = struct {
     /// Reshapes the input Tensor with the given shape.
     pub fn reshape(self: Tensor, output_shape_: anytype) Tensor {
         const output_shape = self._shape.reshape(output_shape_);
+        if (self._id == .buffer_id) {
+            var res = self;
+            res._shape = output_shape;
+            return res;
+        }
         const tensor_type = mlirx.tensorType(self.getContext().mlirCtx(), output_shape);
         const loc = self.getContext().location(@src(), "reshape({f})", .{output_shape});
         const reshape_value = dialect.stablehlo.reshape(self.getContext().mlirCtx(), self.value(), tensor_type, loc);
@@ -4165,16 +4209,6 @@ fn _parseGatherCoord(self: Tensor, axes_: anytype) struct { bool, stdx.BoundedAr
         self.axes(axes_);
 
     return .{ axes_is_scalar, coord_axes };
-}
-
-fn parseArrayInfo(T: type) Shape {
-    return switch (@typeInfo(T)) {
-        .Array => |arr| {
-            const s = parseArrayInfo(arr.child);
-            return s.insert(0, .{arr.len});
-        },
-        else => .{ ._dtype = DataType.fromZigType(T) },
-    };
 }
 
 inline fn toI64(values: anytype) []i64 {

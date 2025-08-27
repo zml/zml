@@ -444,6 +444,15 @@ pub const Shape = struct {
         return true;
     }
 
+    test canBroadcastTo {
+        try std.testing.expect(canBroadcastTo(.scalar(.i32), .init(.{32}, .bf16)));
+        try std.testing.expect(canBroadcastTo(.scalar(.i32), .init(.{ 40, 16 }, .u16)));
+        try std.testing.expect(canBroadcastTo(.init(.{ 1, 16 }, .i32), .init(.{ 40, 16 }, .u16)));
+        try std.testing.expect(canBroadcastTo(.init(.{ .a = 16 }, .i32), .init(.{ .a = 16, .b = 32 }, .u16)));
+        try std.testing.expect(canBroadcastTo(.init(.{ .b = 32 }, .i32), .init(.{ .a = 16, .b = 32 }, .u16)));
+        try std.testing.expect(!canBroadcastTo(.init(.{ .b = 20 }, .i32), .init(.{ .a = 16, .b = 32 }, .u16)));
+    }
+
     pub fn reshape(self: Shape, new_shape_: anytype) Shape {
         var new_shape: Shape = .{ ._dtype = self.dtype() };
         new_shape._dims, new_shape._tags = parseDimensions(new_shape_);
@@ -1098,6 +1107,96 @@ pub const Shape = struct {
 
             res_shape = res_shape.appendDim(other.dim(ax), other.tag(ax));
         }
+        return res_shape;
+    }
+
+    pub fn dot(lhs: Shape, rhs: Shape, comptime contracting: anytype) Shape {
+        var contracting_axes: std.BoundedArray([2]i8, MAX_RANK) = .{};
+        if (@TypeOf(contracting) == EnumLiteral) {
+            contracting_axes.appendAssumeCapacity(.{ lhs.axis(contracting), rhs.axis(contracting) });
+        } else {
+            inline for (contracting) |c| {
+                contracting_axes.appendAssumeCapacity(.{ lhs.axis(c), rhs.axis(c) });
+            }
+        }
+
+        var batching_axes: std.BoundedArray([2]i8, MAX_RANK) = .{};
+        for (lhs.tags(), 0..) |l, li| {
+            stdx.debug.assert(l != Shape.TagUnknown, "Can't use `dot(..., {any})` on {any}, it need to be explictily tagged.", .{ contracting, lhs });
+
+            for (rhs.tags(), 0..) |r, ri| {
+                stdx.debug.assert(r != Shape.TagUnknown, "Can't use `dot(..., {any})` on {any}, it need to be explictily tagged.", .{ contracting, rhs });
+
+                if (l == r) {
+                    for (contracting_axes.slice()) |ct| {
+                        if (l == lhs.tag(ct[0])) {
+                            break;
+                        }
+                    } else {
+                        // tag is both in lhs and rhs but not in contracting -> it's a batching dim.
+                        batching_axes.appendAssumeCapacity(.{ @intCast(li), @intCast(ri) });
+                    }
+                }
+            }
+        }
+
+        return dot_(lhs, rhs, contracting_axes.slice(), batching_axes.slice());
+    }
+
+    pub fn dot_(
+        lhs: Shape,
+        rhs: Shape,
+        contracting_axes: []const [2]i8,
+        batching_axes: []const [2]i8,
+    ) Shape {
+        const Axes = std.BoundedArray(u8, MAX_RANK);
+
+        var res_shape: Shape = .{ ._dtype = lhs.dtype() };
+        // Validate batching axes
+        var lhs_batching_axes: Axes = .{};
+        var rhs_batching_axes: Axes = .{};
+        for (batching_axes) |b_axes| {
+            const l, const r = b_axes;
+            stdx.debug.assert(lhs.dim(l) == rhs.dim(r), "dotGeneral expects batching dimensions to be equal, got {} and {} in {} and {}", .{ l, r, lhs, rhs });
+            var t = lhs.tag(l);
+            if (t == Shape.TagUnknown) t = rhs.tag(r);
+            res_shape = res_shape.appendDim(lhs.dim(l), t);
+            lhs_batching_axes.appendAssumeCapacity(lhs.axis(l));
+            rhs_batching_axes.appendAssumeCapacity(rhs.axis(r));
+        }
+
+        // Validate contracting axes
+        var lhs_contracting_axes: Axes = .{};
+        var rhs_contracting_axes: Axes = .{};
+        for (contracting_axes) |c_axes| {
+            const l, const r = c_axes;
+            stdx.debug.assert(lhs.dim(l) == rhs.dim(r), "dotGeneral expects contracting dimensions to be equal, got {} and {} in {} and {}", .{ l, r, lhs, rhs });
+            lhs_contracting_axes.appendAssumeCapacity(lhs.axis(l));
+            rhs_contracting_axes.appendAssumeCapacity(rhs.axis(r));
+        }
+
+        // Result shape is obtained by concatenating batching dimensions, (already done)
+        // then dimensions from lhs axes that aren't contracting nor batching,
+        // then dimensions from rhs axes that aren't contracting nor batching.
+        for (0..lhs.rank()) |l| {
+            if (std.mem.indexOfScalar(u8, lhs_contracting_axes.constSlice(), @intCast(l))) |_| {
+                continue;
+            }
+            if (std.mem.indexOfScalar(u8, lhs_batching_axes.constSlice(), @intCast(l))) |_| {
+                continue;
+            }
+            res_shape = res_shape.appendDim(lhs.dim(l), lhs.tag(l));
+        }
+        for (0..rhs.rank()) |r| {
+            if (std.mem.indexOfScalar(u8, rhs_contracting_axes.constSlice(), @intCast(r))) |_| {
+                continue;
+            }
+            if (std.mem.indexOfScalar(u8, rhs_batching_axes.constSlice(), @intCast(r))) |_| {
+                continue;
+            }
+            res_shape = res_shape.appendDim(rhs.dim(r), rhs.tag(r));
+        }
+
         return res_shape;
     }
 };

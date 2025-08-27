@@ -10,7 +10,7 @@ const log = std.log.scoped(.Mixtral);
 /// Dimensions of activations: {.b, .s, .d}
 pub const MixtralLM = struct {
     pub const Config = struct {
-        bos_token_id: u32 = 0,
+        bos_token_id: u32 = 199998,
         eos_token_id: stdx.json.Union(union(enum) {
             int: u32,
             ints: []u32,
@@ -84,8 +84,8 @@ pub const MixtralLM = struct {
             const on_disk_moe = try zml.aio.populateModelWithPrefix(MoE.OnDisk, allocator, store, prefix.concat("mlp"));
             var moe = on_disk_moe.rewrite();
             {
-                moe.experts.gate_up_proj.weight = moe.experts.gate_up_proj.weight.withSharding(.{.expert});
-                moe.experts.down_proj.weight = moe.experts.down_proj.weight.withSharding(.{.expert});
+                moe.experts.gate_up_proj.blocks = moe.experts.gate_up_proj.blocks.withSharding(.{.expert});
+                moe.experts.down_proj.blocks = moe.experts.down_proj.blocks.withSharding(.{.expert});
             }
 
             layer.* = .{
@@ -178,7 +178,7 @@ pub const MixtralLM = struct {
                 .input_layernorm = try store.loadModelById(RmsNorm, noalloc, layer.input_layernorm, platform),
                 .self_attn = try store.loadModelById(SelfAttn, noalloc, layer.self_attn, platform),
                 .post_attention_layernorm = try store.loadModelById(RmsNorm, noalloc, layer.post_attention_layernorm, platform),
-                .mlp = try layer.mlp.loadSharded(store, &prefix, platform),
+                .mlp = try store.loadModelById(MoE, noalloc, layer.mlp, platform),
             };
         }
 
@@ -272,13 +272,14 @@ pub const TransformerLayer = struct {
 
 const RmsNorm = struct {
     weight: zml.Tensor,
-    eps: f32 = 1e-5,
+    eps: f32 = 1e-6,
 
     /// L2 normalization of input tensor along `.d` axis.
     pub fn forward(self: RmsNorm, input: zml.Tensor) zml.Tensor {
         const x = if (input.shape().isFullyTagged()) input else input.withPartialTags(.{.d});
-        const normalized = zml.nn.rmsNorm(x, .d, self.eps);
-        return normalized.mul(self.weight.convert(x.dtype()).withTags(.{.d}).broad(x.shape()));
+        // Note: contrary to Llama here the full layer is done in .f32, not just the variance computation.
+        const normalized = zml.nn.rmsNorm(x.convert(.f32), .d, self.eps);
+        return normalized.mul(self.weight.convert(.f32).withTags(.{.d}).broad(x.shape())).convert(input.dtype());
     }
 };
 
@@ -298,27 +299,28 @@ const MoE = struct {
         },
 
         pub fn rewrite(on_disk: OnDisk) MoE {
-            var mlp: Mlp = .{
+            const e = on_disk.experts;
+            const experts: Mlp = .{
                 .gate_up_proj = .{
-                    .weight = on_disk.experts.gate_up_proj_blocks,
-                    .bias = on_disk.experts.gate_up_proj_bias,
+                    // We need to bitcast the scale cause safetensors doesn't encode f8 types correctly
+                    .scale = e.gate_up_proj_scales.bitCast(.f8e8m0).withTags(.{ .expert, .out, .d }),
+                    // We don't bitcast here because PJRT doesn't handle packed host buffers
+                    .blocks = e.gate_up_proj_blocks.withTags(.{ .expert, .out, .d, .d_block }),
+                    .blocks_dtype = .f4e2m1,
+                    .bias = e.gate_up_proj_bias.withTags(.{ .expert, .d }),
                 },
                 .down_proj = .{
-                    .weight = on_disk.experts.down_proj_blocks,
-                    .bias = on_disk.experts.down_proj_bias,
+                    .blocks = e.down_proj_blocks.withTags(.{ .expert, .out, .d, .d_block }),
+                    .blocks_dtype = .f4e2m1,
+                    .scale = e.down_proj_scales.bitCast(.f8e8m0).withTags(.{ .expert, .out, .d }),
+                    .bias = e.down_proj_bias.withTags(.{ .expert, .d }),
                 },
             };
-            mlp.gate_up_proj.weight._shape = mlp.gate_up_proj.weight.shape().withTags(.{ .expert, .up, .blocks, .d });
-            if (mlp.gate_up_proj.bias) |*bias| {
-                bias._shape = bias.shape().withTags(.{ .expert, .up });
-            }
-            mlp.down_proj.weight._shape = mlp.down_proj.weight.shape().withTags(.{ .expert, .d, .blocks, .up });
-            if (mlp.down_proj.bias) |*bias| bias._shape = bias.shape().withTags(.{ .expert, .d });
 
             var router = on_disk.router;
             router.weight = router.weight.withTags(.{ .expert, .d });
 
-            return .{ .router = router, .experts = mlp };
+            return .{ .router = router, .experts = experts };
         }
     };
 
@@ -333,8 +335,8 @@ const MoE = struct {
         return .{
             .router = try store.loadModelById(zml.nn.Linear, stdx.noalloc, self.router, platform),
             .experts = .{
-                .gate_up_proj = .{ .weight = try loadShardedWeight(store, prefix, "w1", platform, self.experts.gate_up_proj.weight) },
-                .down_proj = .{ .weight = try loadShardedWeight(store, prefix, "w2", platform, self.experts.down_proj.weight) },
+                .gate_up_proj = .{ .blocks = try loadShardedWeight(store, prefix, "w1", platform, self.experts.gate_up_proj.blocks) },
+                .down_proj = .{ .blocks = try loadShardedWeight(store, prefix, "w2", platform, self.experts.down_proj.blocks) },
             },
         };
     }
@@ -384,15 +386,17 @@ const MoE = struct {
 };
 
 const Mlp = struct {
-    gate_up_proj: zml.nn.Linear, // (dim -> hidden_dim * 2)
-    down_proj: zml.nn.Linear, // (hidden_dim -> dim)
+    gate_up_proj: zml.nn.BlockScaledLinear, // {.out = intermediate_size * 2, .d = hidden_size / block_size, .d_block = block_size }
+    down_proj: zml.nn.BlockScaledLinear, // {.out = hidden_size * 2, .d = intermediate_size / block_size, .d_block = block_size }
 
     pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
-        const gate, const up = self.gate_up_proj.weight.dot(x, .d).silu().chunkExact(.up, 2);
+        const dt = x.dtype();
+        var gate, var up = zml.nn.splitRealImg(self.gate_up_proj.forward(x), .interleaved);
+        gate = .minimum(gate, .scalar(7, dt));
+        up = .clamp(up, .scalar(-7, dt), .scalar(7, dt));
 
-        const out = gate.mul(up).dot(self.down_proj.weight, .up);
-        log.warn("Mlp(x: {f}) -> up: {f} -> gate: {f} -> out: {f}", .{ x, up, gate, out });
-        return out;
+        const out = gate.quickGelu().mul(up.addConstant(1));
+        return zml.call(self.down_proj, .forward, .{out});
     }
 };
 
@@ -451,7 +455,9 @@ pub const SelfAttn = struct {
         k = new_kv_cache.keys().convert(dtype);
         v = new_kv_cache.values().convert(dtype);
 
-        const attn_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask, .allow_cudnn = true });
+        const softmax_bias = q.dot(self.sinks.withTags(.{.hd}), .hd);
+        std.log.warn("q: {}, sinks: {} -> softmax_bias: {}", .{ q, self.sinks, softmax_bias });
+        const attn_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask, .allow_cudnn = true, .softmax_bias = softmax_bias });
         // const attn_output = zml.nn.sdpaMemEfficient(q, k, v, .{ .attn_mask = attn_mask }, .{ .q_chunk_size = 4096, .k_chunk_size = 1024 });
         const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
         return .{ zml.call(self.o_proj, .forward, .{attn}), new_kv_cache };

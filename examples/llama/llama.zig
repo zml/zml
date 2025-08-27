@@ -235,8 +235,8 @@ const Mlp = struct {
 
     pub fn forward(self: Mlp, x: Tensor) Tensor {
         const proj = zml.call(self.up_proj, .forward, .{x});
-        var output = zml.call(self.gate_proj, .forward, .{x});
-        output = output.silu().mul(proj);
+        const gate = zml.call(self.gate_proj, .forward, .{x});
+        const output = gate.silu().mul(proj);
         return zml.call(self.down_proj, .forward, .{output});
     }
 };
