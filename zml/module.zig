@@ -506,7 +506,7 @@ pub const CompilationContext = struct {
         var tensor_args = .{ model, Tensor{ ._shape = s, ._id = .{ .buffer_id = 1234 } }, Tensor{ ._shape = s, ._id = .{ .buffer_id = 1235 } } };
         const f = try comp.emitMlir(Local._fwd, &tensor_args, .{ .name = "test.emitMlir.Local.forward", .kind = .main });
 
-        var mlir_bytecode = std.ArrayList(u8).init(std.testing.allocator);
+        var mlir_bytecode = std.array_list.Managed(u8).init(std.testing.allocator);
         defer mlir_bytecode.deinit();
         try mlir_bytecode.writer().print("{f}", .{f.mlir_fn.mlirFormatter(.{})});
 

@@ -358,10 +358,11 @@ pub fn MapRestrict(From: type, To: type) type {
                     const fields = union_info.fields;
                     var union_fields: [fields.len]std.builtin.Type.UnionField = undefined;
                     for (0.., fields) |i, field| {
+                        const FT = map(field.type);
                         union_fields[i] = .{
                             .name = field.name,
-                            .type = map(field.type),
-                            .alignment = 0,
+                            .type = FT,
+                            .alignment = @alignOf(FT),
                         };
                     }
                     return @Type(.{ .@"union" = .{
