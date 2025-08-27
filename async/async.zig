@@ -247,8 +247,8 @@ pub const File = struct {
         pos: u64 = 0,
 
         fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
-            const dest = limit.slice(try w.writableSliceGreedy(1));
             const self: *Reader = @alignCast(@fieldParentPtr("interface", r));
+            const dest = limit.slice(try w.writableSliceGreedy(1));
             const n = switch (self.mode) {
                 .streaming => self.file.read(dest),
                 .positional => self.file.pread(dest, self.pos),
@@ -271,19 +271,34 @@ pub const File = struct {
         mode: std.fs.File.Writer.Mode = .positional,
         pos: u64 = 0,
 
-        fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-            _ = data; // autofix
-            _ = splat; // autofix
-            const self: *Writer = @alignCast(@fieldParentPtr("interface", w));
+        fn write(self: *Writer, buf: []const u8) !usize {
             const n = switch (self.mode) {
-                .streaming => self.file.write(w.buffered()),
-                .positional => self.file.pwrite(w.buffered(), self.pos),
-                else => @panic("UNSUPPORTED"),
+                .streaming => self.file.write(buf),
+                .positional => self.file.pwrite(buf, self.pos),
+                else => unreachable,
             } catch {
                 return std.Io.Writer.Error.WriteFailed;
             };
             self.pos += n;
-            return w.consume(n);
+            return n;
+        }
+
+        fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+            // TODO: implement splat
+            _ = splat;
+            const self: *Writer = @alignCast(@fieldParentPtr("interface", w));
+            var total: usize = 0;
+            if (w.buffered().len > 0) {
+                total += w.consume(try self.write(w.buffered()));
+            }
+            for (data) |d| {
+                const n = try self.write(d);
+                total += n;
+                if (n < d.len) {
+                    return total;
+                }
+            }
+            return total;
         }
     };
 
@@ -456,14 +471,25 @@ pub const Socket = struct {
             socket: TCP,
 
             fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-                _ = data; // autofix
-                _ = splat; // autofix
+                // TODO: implement splat
+                _ = splat;
                 const self: *Writer = @alignCast(@fieldParentPtr("interface", w));
-                const n = self.socket.write(w.buffered()) catch {
-                    return std.Io.Writer.Error.WriteFailed;
-                };
-                std.debug.print(">>>> {d}\n", .{n});
-                return w.consume(n);
+                var total: usize = 0;
+                if (w.buffered().len >= 0) {
+                    total += w.consume(self.socket.write(w.buffered()) catch {
+                        return std.Io.Writer.Error.WriteFailed;
+                    });
+                }
+                for (data) |d| {
+                    const n = self.socket.write(d) catch {
+                        return std.Io.Writer.Error.WriteFailed;
+                    };
+                    total += n;
+                    if (n < d.len) {
+                        return total;
+                    }
+                }
+                return total;
             }
         };
 
@@ -681,8 +707,8 @@ pub fn logFn(comptime fallbackLogFn: LogFn) LogFn {
             mutex.lock();
             defer mutex.unlock();
             nosuspend {
-                stderr.interface.print(level_txt ++ prefix2 ++ format ++ "\n", args) catch return;
-                stderr.interface.flush() catch return;
+                stderr.interface.print(level_txt ++ prefix2 ++ format ++ "\n", args) catch unreachable;
+                stderr.interface.flush() catch unreachable;
             }
         }
     }.call;
