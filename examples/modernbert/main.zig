@@ -1,13 +1,14 @@
 const std = @import("std");
-const log = std.log.scoped(.modernbert);
-
-const modernbert = @import("modernbert.zig");
 
 const asynk = @import("async");
 const clap = @import("clap");
 const stdx = @import("stdx");
 const zml = @import("zml");
 const Tensor = zml.Tensor;
+
+const modernbert = @import("modernbert.zig");
+
+const log = std.log.scoped(.modernbert);
 
 pub const std_options: std.Options = .{
     .log_level = .info,
@@ -42,20 +43,20 @@ pub fn main() !void {
 
 pub fn asyncMain() !void {
     const allocator = std.heap.c_allocator;
-    const stderr = std.io.getStdErr().writer();
+    const stderr = std.fs.File.stderr();
 
     var diag: clap.Diagnostic = .{};
     var cli = clap.parse(clap.Help, &params, clap_parsers, .{
         .diagnostic = &diag,
         .allocator = allocator,
     }) catch |err| {
-        try diag.report(stderr, err);
+        try diag.reportToFile(stderr, err);
         try printUsageAndExit(stderr);
     };
     defer cli.deinit();
 
     if (cli.args.help != 0) {
-        try clap.help(stderr, clap.Help, &params, .{});
+        try clap.helpToFile(stderr, clap.Help, &params, .{});
         return;
     }
 
@@ -80,7 +81,9 @@ pub fn asyncMain() !void {
 
     // Detects the format of the model file (base on filename) and open it.
     const model_file = cli.args.model orelse {
-        stderr.print("Error: missing --model=...\n\n", .{}) catch {};
+        var buf: [256]u8 = undefined;
+        var writer = stderr.writer(&buf);
+        writer.interface.print("Error: missing --model=...\n\n", .{}) catch {};
         printUsageAndExit(stderr);
         unreachable;
     };
@@ -96,7 +99,7 @@ pub fn asyncMain() !void {
         if (cli.args.tokenizer) |tok| {
             log.info("\tLoading tokenizer from {s}", .{tok});
             var timer = try stdx.time.Timer.start();
-            defer log.info("✅\tLoaded tokenizer from {s} [{}]", .{ tok, timer.read() });
+            defer log.info("✅\tLoaded tokenizer from {s} [{D}]", .{ tok, timer.read() });
 
             break :blk try zml.tokenizer.Tokenizer.fromFile(model_arena, tok);
         } else {
@@ -123,13 +126,13 @@ pub fn asyncMain() !void {
     const seq_len = @as(i64, @intCast(cli.args.@"seq-len" orelse 256));
     const input_shape = zml.Shape.init(.{ .b = 1, .s = seq_len }, .u32);
 
-    var start = try std.time.Timer.start();
+    var start = try stdx.time.Timer.start();
 
     // Load weights
-    log.info("\tLoading ModernBERT weights from {?s}...", .{model_file});
+    log.info("\tLoading ModernBERT weights from {s}...", .{model_file});
     var bert_weights = try zml.aio.loadBuffers(modernbert.ModernBertForMaskedLM, .{modernbert_options}, tensor_store, model_arena, platform);
     defer zml.aio.unloadBuffers(&bert_weights);
-    log.info("✅\tLoaded weights in {d}ms", .{start.read() / std.time.ns_per_ms});
+    log.info("✅\tLoaded weights in {D}", .{start.read()});
 
     // Compile the model
     log.info("\tCompiling ModernBERT model...", .{});
@@ -143,7 +146,7 @@ pub fn asyncMain() !void {
     });
     var bert_module = (try fut_mod.awaitt()).prepare(bert_weights);
     defer bert_module.deinit();
-    log.info("✅\tLoaded weights and compiled model in {d}ms", .{start.read() / std.time.ns_per_ms});
+    log.info("✅\tLoaded weights and compiled model in {D}", .{start.read()});
 
     const text = cli.args.text orelse "Paris is the [MASK] of France.";
     log.info("\tInput text: {s}", .{text});
@@ -213,7 +216,7 @@ pub fn unmask(
 }
 
 pub fn tokenize(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, prompt: []const u8) ![]const u32 {
-    var tokens = std.ArrayList(u32).init(allocator);
+    var tokens = std.array_list.Managed(u32).init(allocator);
     var encoder = try tokenizer.encoder();
     defer encoder.deinit();
 
@@ -228,7 +231,7 @@ pub fn tokenize(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer
 }
 
 fn findMaskPositions(allocator: std.mem.Allocator, tokens: []const u32, mask_token: u32) ![]usize {
-    var mask_positions = std.ArrayList(usize).init(allocator);
+    var mask_positions = std.array_list.Managed(usize).init(allocator);
     defer mask_positions.deinit();
 
     for (tokens, 0..) |token, i| {
@@ -267,9 +270,7 @@ fn bool_parser(in: []const u8) error{}!bool {
     return std.mem.indexOfScalar(u8, "tTyY1", in[0]) != null;
 }
 
-fn printUsageAndExit(stderr: anytype) noreturn {
-    stderr.print("usage: ", .{}) catch {};
-    clap.usage(stderr, clap.Help, &params) catch {};
-    stderr.print("\n", .{}) catch {};
+fn printUsageAndExit(stderr: std.fs.File) noreturn {
+    clap.usageToFile(stderr, clap.Help, &params) catch {};
     std.process.exit(0);
 }
