@@ -1,6 +1,6 @@
 module(
     name = "rules_zig",
-    version = "20250826.0-2c0b363",
+    version = "20250827.0-35b6d57",
     compatibility_level = 1,
 )
 
