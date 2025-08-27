@@ -19,15 +19,35 @@ cc_library(
 
 zig_library(
     name = "zml",
-    srcs = glob([
-        "*.zig",
-        "aio/**/*.zig",
-        "nn/**/*.zig",
-        # TODO: test_runner.zig should not be here.
-        # It's here for now because it seems that test_runner property in zig_test is misbehaving.
-        # See https://github.com/zml/rules_zig/issues/2
+    srcs = [
+        "aio.zig",
+        "aio/json.zig",
+        "aio/safetensors.zig",
+        "aio/tinyllama.zig",
+        "buffer.zig",
+        "context.zig",
+        "dtype.zig",
+        "exe.zig",
+        "floats.zig",
+        "helpers.zig",
+        "hostbuffer.zig",
+        "meta.zig",
+        "mlirx.zig",
+        "module.zig",
+        "nn.zig",
+        "nn/cuda.zig",
+        "ops.zig",
+        "pjrtx.zig",
+        "platform.zig",
+        "posix.zig",
+        "quantization.zig",
+        "shape.zig",
+        "tensor.zig",
         "test_runner.zig",
-    ]),
+        "testing.zig",
+        "torch.zig",
+        "zml.zig",
+    ],
     copts = ["-lc"],
     main = "zml.zig",
     visibility = ["//visibility:public"],
@@ -52,10 +72,6 @@ zig_library(
 
 zig_test(
     name = "test",
-    data = [
-        "aio/torch/simple.pt",
-        "aio/torch/simple_test_4.pickle",
-    ],
     test_runner = ":test_runner",
     deps = [":zml"],
 )
