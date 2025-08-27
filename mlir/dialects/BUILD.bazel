@@ -3,18 +3,18 @@ load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 zig_library(
     name = "dialects",
     srcs = [
-        "arith.zig",
+        # "arith.zig",
         "func.zig",
-        "math.zig",
-        "scf.zig",
-        "tensor.zig",
+        # "math.zig",
+        # "scf.zig",
+        # "tensor.zig",
     ],
     import_name = "mlir/dialects",
     main = "dialects.zig",
     visibility = ["//visibility:public"],
     deps = [
-        "//mlir",
-        "//mlir/dialects/stablehlo",
+        "//mlir:mlir2",
+        # "//mlir/dialects/stablehlo",
         "//stdx",
     ],
 )

@@ -32,7 +32,11 @@ zig_test(
 zig_library(
     name = "mlir2",
     main = "registry.zig",
-    deps = [":c"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":c",
+        "//stdx",
+    ],
 )
 
 zig_binary(
@@ -41,6 +45,7 @@ zig_binary(
     visibility = ["//visibility:public"],
     deps = [
         ":mlir2",
+        "//mlir/dialects",
         # ":c",
         # "//stdx",
     ],

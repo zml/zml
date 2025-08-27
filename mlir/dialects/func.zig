@@ -1,29 +1,27 @@
 const std = @import("std");
 
-const mlir = @import("mlir");
+const mlir = @import("mlir2");
 const stdx = @import("stdx");
 
-pub fn func(
-    ctx: mlir.Context,
-    args: struct {
-        sym_name: []const u8,
-        args: []const mlir.Type,
-        arg_attrs: []const mlir.Attribute = &.{},
-        results: []const mlir.Type,
-        res_attrs: []const mlir.Attribute = &.{},
-        block: mlir.Block,
-        location: mlir.Location,
-    },
-) mlir.Operation {
-    var attrs_tuple_buffer = stdx.BoundedArray(mlir.AttrTuple, 4){};
-    attrs_tuple_buffer.appendAssumeCapacity(.{ "sym_name", .string(ctx, args.sym_name) });
-    attrs_tuple_buffer.appendAssumeCapacity(.{ "function_type", .type_(.function(ctx, args.args, args.results)) });
-    if (args.arg_attrs.len > 0) {
-        attrs_tuple_buffer.appendAssumeCapacity(.{ "arg_attrs", .array(ctx, args.arg_attrs) });
-    }
+const FuncOpArgs = struct {
+    name: []const u8,
+    args: []const *const mlir.Type,
+    args_attributes: ?[]const *const mlir.Attribute = null,
+    results: []const *const mlir.Type,
+    results_attributes: ?[]const *const mlir.Attribute = null,
+    block: *mlir.Block,
+    location: *const mlir.Location,
+};
 
-    if (args.res_attrs.len > 0) {
-        attrs_tuple_buffer.appendAssumeCapacity(.{ "res_attrs", .array(ctx, args.res_attrs) });
+pub fn func(ctx: *mlir.Context, args: FuncOpArgs) *mlir.Operation {
+    var attrs_tuple_buffer = stdx.BoundedArray(mlir.Operation.MakeArgs.AttrTuple, 4){};
+    attrs_tuple_buffer.appendAssumeCapacity(.{ "sym_name", mlir.stringAttribute(ctx, args.name) });
+    attrs_tuple_buffer.appendAssumeCapacity(.{ "function_type", mlir.typeAttribute(mlir.functionType(ctx, args.args, args.results)) });
+    if (args.args_attributes) |args_attributes| {
+        attrs_tuple_buffer.appendAssumeCapacity(.{ "arg_attrs", mlir.arrayAttribute(ctx, args_attributes) });
+    }
+    if (args.results_attributes) |results_attributes| {
+        attrs_tuple_buffer.appendAssumeCapacity(.{ "res_attrs", mlir.arrayAttribute(ctx, results_attributes) });
     }
 
     return mlir.Operation.make(ctx, "func.func", .{
@@ -33,20 +31,21 @@ pub fn func(
     });
 }
 
-pub fn call(ctx: mlir.Context, name: [:0]const u8, values: []const mlir.Value, results: []const mlir.Type, loc: mlir.Location) mlir.Operation {
+pub fn call(ctx: *mlir.Context, name: []const u8, values: []const *const mlir.Value, results: []const *const mlir.Type, loc: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "func.call", .{
-        .variadic_operands = &.{values},
-        .results = results,
-        .verify = true,
-        .attributes = &.{.{ "callee", .symbol(ctx, name) }},
+        .operands = .{ .variadic = &.{values} },
+        .results = .{ .flat = results },
+        .attributes = &.{
+            .{ "callee", mlir.flatSymbolRefAttribute(ctx, name) },
+        },
         .location = loc,
     });
 }
 
-pub fn return_(ctx: mlir.Context, values: []const mlir.Value, loc: mlir.Location) mlir.Operation {
+pub fn return_(ctx: *mlir.Context, values: []const *const mlir.Value, loc: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "func.return", .{
-        .operands = values,
-        .verify = false,
+        .operands = .{ .flat = values },
         .location = loc,
+        .verify = false,
     });
 }

@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const c = @import("c");
+const stdx = @import("stdx");
 
 const log = std.log.scoped(.mlir);
 
@@ -50,7 +51,7 @@ fn CastedPtr(comptime T1: type, comptime T2: type) type {
     return if (@typeInfo(T1).pointer.is_const) *const T2 else *T2;
 }
 
-pub fn StdMethods(comptime T: type, comptime NativeT: type) type {
+pub fn Methods(comptime T: type, comptime NativeT: type) type {
     return struct {
         pub const IsPtrConst = @typeInfo(@typeInfo(@FieldType(NativeT, "ptr")).optional.child).pointer.is_const;
         pub const Ptr = if (IsPtrConst) *const T else *T;
@@ -86,7 +87,7 @@ pub fn StdMethods(comptime T: type, comptime NativeT: type) type {
 }
 
 pub const DialectRegistry = opaque {
-    const M = StdMethods(DialectRegistry, c.MlirDialectRegistry);
+    const M = Methods(DialectRegistry, c.MlirDialectRegistry);
 
     pub const ptr = M.ptr;
 
@@ -104,7 +105,7 @@ pub const DialectRegistry = opaque {
 };
 
 pub const Context = opaque {
-    const M = StdMethods(Context, c.MlirContext);
+    const M = Methods(Context, c.MlirContext);
 
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirContextEqual);
@@ -165,7 +166,7 @@ pub const Context = opaque {
 };
 
 pub const Location = opaque {
-    const M = StdMethods(Location, c.MlirLocation);
+    const M = Methods(Location, c.MlirLocation);
 
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirLocationEqual);
@@ -224,7 +225,7 @@ pub const Location = opaque {
 };
 
 pub const Type = opaque {
-    const M = StdMethods(Type, c.MlirType);
+    const M = Methods(Type, c.MlirType);
 
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
@@ -237,7 +238,7 @@ pub const Type = opaque {
 };
 
 pub const IndexType = opaque {
-    const M = StdMethods(IndexType, c.MlirType);
+    const M = Methods(IndexType, c.MlirType);
 
     pub const isAFn = c.mlirTypeIsAIndex;
     pub const ptr = M.ptr;
@@ -256,7 +257,7 @@ pub const Signedness = enum {
 };
 
 pub const IntegerType = opaque {
-    const M = StdMethods(IntegerType, c.MlirType);
+    const M = Methods(IntegerType, c.MlirType);
 
     pub const isAFn = c.mlirTypeIsAInteger;
     pub const ptr = M.ptr;
@@ -298,7 +299,7 @@ pub const FloatTypes = enum {
 };
 
 pub fn FloatType(comptime ft: FloatTypes) type {
-    const Config = switch (ft) {
+    const _isAFn, const getter = switch (ft) {
         .f4e2m1fn => .{ c.mlirTypeIsAFloat4E2M1FN, c.mlirFloat4E2M1FNTypeGet },
         .f6e2m3fn => .{ c.mlirTypeIsAFloat6E2M3FN, c.mlirFloat6E2M3FNTypeGet },
         .f6e3m2fn => .{ c.mlirTypeIsAFloat6E3M2FN, c.mlirFloat6E3M2FNTypeGet },
@@ -319,15 +320,14 @@ pub fn FloatType(comptime ft: FloatTypes) type {
 
     return opaque {
         const Self = @This();
-        const M = StdMethods(Self, c.MlirType);
+        const M = Methods(Self, c.MlirType);
 
-        pub const isAFn = Config[0];
+        pub const isAFn = _isAFn;
         pub const ptr = M.ptr;
         pub const eql = M.eql(c.mlirTypeEqual);
         pub const format = M.format(c.mlirTypePrint);
 
         pub fn get(ctx: *Context) *const Self {
-            const getter = Config[1];
             return @ptrCast(getter(ctx.ptr()).ptr);
         }
     };
@@ -338,7 +338,7 @@ pub fn floatType(comptime ft: FloatTypes, ctx: *Context) *const Type {
 }
 
 pub const Attribute = opaque {
-    const M = StdMethods(Attribute, c.MlirAttribute);
+    const M = Methods(Attribute, c.MlirAttribute);
 
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
@@ -348,10 +348,18 @@ pub const Attribute = opaque {
     pub fn parse(ctx: *Context, attr: []const u8) Error!*const Attribute {
         return @ptrCast(c.mlirAttributeParseGet(ctx.ptr(), stringRef(attr)).ptr orelse return Error.InvalidMlir);
     }
+
+    pub fn context(self: *const Context) *Context {
+        return @ptrCast(c.mlirAttributeGetContext(self.ptr()).ptr);
+    }
+
+    pub fn dialect(self: *const Context) *const Dialect {
+        return @ptrCast(c.mlirAttributeGetDialect(self.ptr()).ptr);
+    }
 };
 
 pub const StringAttribute = opaque {
-    const M = StdMethods(StringAttribute, c.MlirAttribute);
+    const M = Methods(StringAttribute, c.MlirAttribute);
 
     pub const isAFn = c.mlirAttributeIsAString;
     pub const ptr = M.ptr;
@@ -372,7 +380,7 @@ pub fn stringAttribute(ctx: *Context, str: []const u8) *const Attribute {
 }
 
 pub const IntegerAttribute = opaque {
-    const M = StdMethods(IntegerAttribute, c.MlirAttribute);
+    const M = Methods(IntegerAttribute, c.MlirAttribute);
 
     pub const isAFn = c.mlirAttributeIsAInteger;
     pub const ptr = M.ptr;
@@ -405,7 +413,7 @@ pub fn integerAttribute(ctx: *Context, value_: anytype) *const Attribute {
 }
 
 pub const BoolAttribute = opaque {
-    const M = StdMethods(BoolAttribute, c.MlirAttribute);
+    const M = Methods(BoolAttribute, c.MlirAttribute);
 
     pub const isAFn = c.mlirAttributeIsABool;
     pub const ptr = M.ptr;
@@ -426,7 +434,7 @@ pub fn boolAttribute(ctx: *Context, value: bool) *const Attribute {
 }
 
 pub const TypeAttribute = opaque {
-    const M = StdMethods(TypeAttribute, c.MlirAttribute);
+    const M = Methods(TypeAttribute, c.MlirAttribute);
 
     pub const isAFn = c.mlirAttributeIsAType;
     pub const ptr = M.ptr;
@@ -442,12 +450,12 @@ pub const TypeAttribute = opaque {
     }
 };
 
-pub fn typeAttribute(type_: *const Type) *const TypeAttribute {
+pub fn typeAttribute(type_: *const Type) *const Attribute {
     return @ptrCast(TypeAttribute.init(type_));
 }
 
 pub const Dialect = struct {
-    const M = StdMethods(Dialect, c.MlirDialect);
+    const M = Methods(Dialect, c.MlirDialect);
 
     pub const ptr = M.ptr;
 
@@ -465,7 +473,7 @@ pub const Dialect = struct {
 };
 
 pub const DialectHandle = opaque {
-    const M = StdMethods(DialectHandle, c.MlirDialectHandle);
+    const M = Methods(DialectHandle, c.MlirDialectHandle);
 
     pub const ptr = M.ptr;
 
@@ -495,7 +503,7 @@ pub const DialectHandle = opaque {
 };
 
 pub const Identifier = opaque {
-    const M = StdMethods(Identifier, c.MlirIdentifier);
+    const M = Methods(Identifier, c.MlirIdentifier);
 
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirIdentifierEqual);
@@ -518,7 +526,7 @@ pub const Identifier = opaque {
 };
 
 pub const Module = opaque {
-    const M = StdMethods(Module, c.MlirModule);
+    const M = Methods(Module, c.MlirModule);
 
     const ptr = M.ptr;
 
@@ -552,7 +560,7 @@ pub const Module = opaque {
 };
 
 pub const Block = opaque {
-    const M = StdMethods(Block, c.MlirBlock);
+    const M = Methods(Block, c.MlirBlock);
 
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirBlockEqual);
@@ -645,7 +653,7 @@ pub const NamedAttribute = struct {
 };
 
 pub const DictionaryAttribute = opaque {
-    const M = StdMethods(DictionaryAttribute, c.MlirAttribute);
+    const M = Methods(DictionaryAttribute, c.MlirAttribute);
 
     pub const isAFn = c.mlirAttributeIsADictionary;
     pub const ptr = M.ptr;
@@ -656,7 +664,7 @@ pub const DictionaryAttribute = opaque {
         return @ptrCast(c.mlirDictionaryAttrGet(
             ctx.ptr(),
             @intCast(attributes.len),
-            @ptrCast(attributes.ptr),
+            @ptrCast(attributes),
         ).ptr);
     }
 
@@ -665,7 +673,7 @@ pub const DictionaryAttribute = opaque {
     }
 
     pub fn get(self: *const DictionaryAttribute, pos: usize) NamedAttribute {
-        return .{ .inner = c.mlirDictionaryAttrGetElement(self.ptr(), @bitCast(pos)) };
+        return .{ .inner = c.mlirDictionaryAttrGetElement(self.ptr(), @intCast(pos)) };
     }
 
     pub fn getByName(self: *const DictionaryAttribute, name: []const u8) ?*const Attribute {
@@ -674,7 +682,7 @@ pub const DictionaryAttribute = opaque {
 };
 
 pub const Value = opaque {
-    const M = StdMethods(Value, c.MlirValue);
+    const M = Methods(Value, c.MlirValue);
 
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirValueEqual);
@@ -699,7 +707,7 @@ pub const Value = opaque {
 };
 
 pub const OpOperand = opaque {
-    const M = StdMethods(OpOperand, c.MlirOpOperand);
+    const M = Methods(OpOperand, c.MlirOpOperand);
 
     pub const ptr = M.ptr;
 
@@ -717,7 +725,7 @@ pub const OpOperand = opaque {
 };
 
 pub const OpResult = opaque {
-    const M = StdMethods(OpResult, c.MlirValue);
+    const M = Methods(OpResult, c.MlirValue);
 
     pub const isAFn = c.mlirValueIsAOpResult;
     pub const ptr = M.ptr;
@@ -734,7 +742,7 @@ pub const OpResult = opaque {
 };
 
 pub const BlockArgument = opaque {
-    const M = StdMethods(BlockArgument, c.MlirValue);
+    const M = Methods(BlockArgument, c.MlirValue);
 
     pub const isAFn = c.mlirValueIsABlockArgument;
     pub const ptr = M.ptr;
@@ -755,47 +763,49 @@ pub const BlockArgument = opaque {
 };
 
 pub const OperationState = struct {
-    const M = StdMethods(OperationState, c.MlirOperationState);
+    inner: c.MlirOperationState,
 
-    name: []const u8,
-    location: *const Location,
-    results: []const *const Type = &.{},
-    operands: []const *const Value = &.{},
-    regions: []*const Region = &.{},
-    successors: []*const Block = &.{},
-    attributes: []NamedAttribute = &.{},
-    result_type_inference: bool = false,
+    pub fn init(name: []const u8, location: *const Location) OperationState {
+        return .{ .inner = c.mlirOperationStateGet(stringRef(name), location.ptr()) };
+    }
 
-    pub const ptr = M.ptr;
+    pub fn addResults(self: *OperationState, results: []const *const Type) void {
+        c.mlirOperationStateAddResults(&self.inner, @intCast(results.len), @ptrCast(results));
+    }
 
-    pub fn inner(self: OperationState) c.MlirOperationState {
-        return .{
-            .name = stringRef(self.name),
-            .nResults = @intCast(self.results.len),
-            .results = @constCast(@ptrCast(self.results)),
-            .nOperands = @intCast(self.operands.len),
-            .operands = @constCast(@ptrCast(self.operands)),
-            .nRegions = @intCast(self.regions.len),
-            .regions = @constCast(@ptrCast(self.regions)),
-            .nSuccessors = @intCast(self.successors.len),
-            .successors = @constCast(@ptrCast(self.successors)),
-            .nAttributes = @intCast(self.attributes.len),
-            .attributes = @constCast(@ptrCast(self.attributes)),
-            .enableResultTypeInference = self.result_type_inference,
-        };
+    pub fn addOperands(self: *OperationState, operands: []const *const Value) void {
+        c.mlirOperationStateAddOperands(&self.inner, @intCast(operands.len), @ptrCast(operands));
+    }
+
+    pub fn addOwnedRegions(self: *OperationState, regions: []const *Region) void {
+        c.mlirOperationStateAddOwnedRegions(&self.inner, @intCast(regions.len), @ptrCast(regions));
+    }
+
+    pub fn addSuccessors(self: *OperationState, successors: []*const Block) void {
+        c.mlirOperationStateAddSuccessors(&self.inner, @intCast(successors.len), @ptrCast(successors));
+    }
+
+    pub fn addAttributes(self: *OperationState, attributes: []const NamedAttribute) void {
+        c.mlirOperationStateAddAttributes(&self.inner, @intCast(attributes.len), @ptrCast(attributes.ptr));
+    }
+
+    pub fn enableResultTypeInference(self: *OperationState) void {
+        c.mlirOperationStateEnableResultTypeInference(&self.inner);
     }
 };
 
 pub const Operation = opaque {
-    const M = StdMethods(Operation, c.MlirOperation);
+    const M = Methods(Operation, c.MlirOperation);
+
+    const MAX_SEGMENTS = 32;
 
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirOperationEqual);
     pub const format = M.format(c.mlirOperationPrint);
 
     pub fn init(state: *OperationState) !*Operation {
-        var os = state.inner();
-        return @ptrCast(c.mlirOperationCreate(&os).ptr orelse return Error.InvalidMlir);
+        defer state.* = undefined;
+        return @ptrCast(c.mlirOperationCreate(&state.inner).ptr orelse return Error.InvalidMlir);
     }
 
     pub fn deinit(self: *Operation) void {
@@ -803,8 +813,12 @@ pub const Operation = opaque {
         c.mlirOperationDestroy(self.ptr());
     }
 
-    pub fn parse(ctx: *Context, source: []const u8, name: []const u8) Error!*Operation {
-        return @ptrCast(c.mlirOperationCreateParse(ctx.ptr(), stringRef(source), stringRef(name)).ptr orelse return Error.InvalidMlir);
+    pub fn parse(ctx: *Context, source: []const u8, name_: []const u8) Error!*Operation {
+        return @ptrCast(c.mlirOperationCreateParse(ctx.ptr(), stringRef(source), stringRef(name_)).ptr orelse return Error.InvalidMlir);
+    }
+
+    pub fn name(self: *const Operation) []const u8 {
+        return string(c.mlirOperationGetName(self.ptr()));
     }
 
     pub fn clone(self: *const Operation) *Operation {
@@ -819,6 +833,38 @@ pub const Operation = opaque {
         return @ptrCast(c.mlirOperationGetParentOperation(self.ptr()).ptr);
     }
 
+    pub fn removeFromParent(self: *Operation) void {
+        c.mlirOperationRemoveFromParent(self.ptr());
+    }
+
+    pub fn numOperands(self: *const Operation) usize {
+        return @intCast(c.mlirOperationGetNumOperands(self.ptr()));
+    }
+
+    pub fn operand(self: *const Operation, index: usize) *const Value {
+        return @ptrCast(c.mlirOperationGetOperand(self.ptr(), @intCast(index)).ptr);
+    }
+
+    pub fn setOperand(self: *Operation, index: usize, value: *const Value) void {
+        c.mlirOperationSetOperand(self.ptr(), @intCast(index), value.ptr());
+    }
+
+    pub fn numResults(self: *const Operation) usize {
+        return @intCast(c.mlirOperationGetNumResults(self.ptr()));
+    }
+
+    pub fn result(self: *const Operation, index: usize) Value {
+        return @ptrCast(c.mlirOperationGetResult(self.ptr(), @intCast(index)).ptr);
+    }
+
+    pub fn nextInBlock(self: *const Operation) *const Operation {
+        return @ptrCast(c.mlirOperationGetNextInBlock(self.ptr()).ptr);
+    }
+
+    pub fn context(self: *const Operation) *Context {
+        return @ptrCast(c.mlirOperationGetContext(self.ptr()).ptr);
+    }
+
     pub const PrintFlags = struct {
         elide_large_elements_attrs: ?usize = null,
         debug_info: bool = false,
@@ -827,13 +873,13 @@ pub const Operation = opaque {
         use_local_scope: bool = false,
         assume_verified: bool = false,
 
-        const FmtCtx = struct {
+        const Ctx = struct {
             self: *const Operation,
             flags: PrintFlags,
         };
     };
 
-    fn formatWithFlags(fctx: PrintFlags.FmtCtx, writer: *std.io.Writer) std.Io.Writer.Error!void {
+    fn formatWithFlags(fctx: PrintFlags.Ctx, writer: *std.io.Writer) std.Io.Writer.Error!void {
         const flags = c.mlirOpPrintingFlagsCreate();
         defer c.mlirOpPrintingFlagsDestroy(flags);
 
@@ -861,7 +907,7 @@ pub const Operation = opaque {
         }
     }
 
-    pub fn fmt(self: *const Operation, flags: PrintFlags) std.fmt.Alt(PrintFlags.FmtCtx, formatWithFlags) {
+    pub fn fmt(self: *const Operation, flags: PrintFlags) std.fmt.Alt(PrintFlags.Ctx, formatWithFlags) {
         return .{ .data = .{
             .self = self,
             .flags = flags,
@@ -871,82 +917,70 @@ pub const Operation = opaque {
     pub const MakeArgs = struct {
         pub const AttrTuple = struct { []const u8, *const Attribute };
 
-        operands: []const *const Value,
-        operands_variadic: ?[]const usize = null,
-        results: []const *const Type,
-        results_variadic: ?[]const usize = null,
+        pub const Operands = union(enum) {
+            flat: []const *const Value,
+            variadic: []const []const *const Value,
+        };
+
+        pub const ResultTypes = union(enum) {
+            flat: []const *const Type,
+            variadic: []const []const *const Type,
+        };
+
+        operands: ?Operands = null,
+        results: ?ResultTypes = null,
         result_type_inference: bool = false,
-        n_regions: usize = 0,
         attributes: ?[]const AttrTuple = null,
-        blocks: ?[]const *const Block = null,
+        blocks: ?[]const *Block = null,
         verify: bool = true,
-        location: *const Location,
+        location: ?*const Location = null,
     };
 
-    pub fn try_make(ctx: *Context, op_name: []const u8, args: MakeArgs) !*Operation {
-        _ = ctx; // autofix
-        var state: OperationState = .{
-            .name = op_name,
-            .location = args.location,
-            .result_type_inference = args.result_type_inference,
+    pub fn try_make(ctx: *Context, name_: []const u8, args: MakeArgs) !*Operation {
+        var state: OperationState = .init(name_, args.location orelse .unknown(ctx));
+        if (args.result_type_inference) {
+            state.enableResultTypeInference();
+        }
+        if (args.operands) |operands| switch (operands) {
+            .flat => |v| state.addOperands(v),
+            .variadic => |segments| {
+                var sizes: stdx.BoundedArray(i32, MAX_SEGMENTS) = .{};
+                for (segments) |segment_operands| {
+                    state.addOperands(segment_operands);
+                    sizes.appendAssumeCapacity(@intCast(segment_operands.len));
+                }
+                state.addAttributes(&.{
+                    .named(ctx, "operandSegmentSizes", denseArrayAttribute(ctx, .i32, sizes.constSlice())),
+                });
+            },
         };
-        // std.debug.assert(!(args.operands != null and args.variadic_operands != null));
-        state.addOperands(operands);
-
-        // if (args.operands) |operands| {
-        //     state.addOperands(operands);
-        //     // } else if (args.variadic_operands) |operands_segments| {
-        //     //     const MAX_SEGMENTS = 32;
-        //     //     var segments: std.BoundedArray(i32, MAX_SEGMENTS) = .{};
-
-        //     //     for (operands_segments) |operands| {
-        //     //         state.addOperands(operands);
-        //     //         segments.appendAssumeCapacity(@intCast(operands.len));
-        //     //     }
-        //     //     state.addAttribute(ctx, "operandSegmentSizes", .denseElements(ctx, &.{@intCast(segments.len)}, .i32, segments.constSlice()));
-        //     // } else if (args.tt_variadic_operands) |operands_segments| {
-        //     //     // stablehlo and triton seems to disagree on the expected type of operandSegmentSizes, let's fix that.
-        //     //     const MAX_SEGMENTS = 32;
-        //     //     var segments: std.BoundedArray(i32, MAX_SEGMENTS) = .{};
-
-        //     //     for (operands_segments) |operands| {
-        //     //         state.addOperands(operands);
-        //     //         segments.appendAssumeCapacity(@intCast(operands.len));
-        //     //     }
-        //     //     state.addAttribute(ctx, "operandSegmentSizes", .dense(ctx, .i32, segments.constSlice()));
-        // }
-        // std.debug.assert(!(args.results != null and args.variadic_results != null));
-        // if (args.results) |results| {
-        //     state.addResults(results);
-        //     // } else if (args.variadic_results) |result_segments| {
-        //     //     for (result_segments) |results| {
-        //     //         state.addResults(results);
-        //     //     }
-        // }
-        // for (0..args.n_regions) |_| {
-        //     var region_ = Region.init() catch {
-        //         @panic("Failed to create MLIR region");
-        //     };
-        //     state.addRegion(&region_);
-        // }
-        // if (args.attributes) |attrs| {
-        //     for (attrs) |attr| {
-        //         state.addAttributeRaw(
-        //             Identifier.get(ctx, attr[0]),
-        //             attr[1],
-        //         );
-        //     }
-        // }
-        // if (args.blocks) |blocks_| {
-        //     for (blocks_) |block_| {
-        //         var region_ = Region.init() catch {
-        //             @panic("Failed to create MLIR region");
-        //         };
-        //         region_.appendBlock(block_);
-        //         state.addRegion(&region_);
-        //     }
-        // }
-
+        if (args.results) |results| switch (results) {
+            .flat => |v| state.addResults(v),
+            .variadic => |segments| {
+                var sizes: stdx.BoundedArray(i32, MAX_SEGMENTS) = .{};
+                for (segments) |segment_results| {
+                    state.addResults(segment_results);
+                    sizes.appendAssumeCapacity(@intCast(segment_results.len));
+                }
+                state.addAttributes(&.{
+                    .named(ctx, "resultSegmentSizes", denseArrayAttribute(ctx, .i32, sizes.constSlice())),
+                });
+            },
+        };
+        if (args.attributes) |attrs| {
+            for (attrs) |attr_tuple| {
+                const attr_name, const attr = attr_tuple;
+                const named_attr = NamedAttribute.named(ctx, attr_name, attr);
+                state.addAttributes(&.{named_attr});
+            }
+        }
+        if (args.blocks) |blocks| {
+            const region = Region.init();
+            for (blocks) |block_| {
+                region.appendOwnedBlock(block_);
+            }
+            state.addOwnedRegions(&.{region});
+        }
         const new_op = try Operation.init(&state);
         if (args.verify and new_op.verify() == false) {
             log.err("Failed to verify MLIR operation:\n{f}", .{
@@ -957,7 +991,6 @@ pub const Operation = opaque {
             });
             return Error.InvalidMlir;
         }
-
         return new_op;
     }
 
@@ -1002,16 +1035,58 @@ pub const Operation = opaque {
             @intFromEnum(order),
         );
     }
+
+    pub const BytecodeWriterConfig = struct {
+        desired_emit_version: ?usize = null,
+
+        const Ctx = struct {
+            self: *const Operation,
+            config: ?BytecodeWriterConfig,
+        };
+    };
+
+    pub fn writeBytecode(self: *const Operation, config: ?BytecodeWriterConfig, writer: *std.Io.Writer) !void {
+        if (config) |config_| {
+            const bc_config = c.mlirBytecodeWriterConfigCreate();
+            defer c.mlirBytecodeWriterConfigDestroy(bc_config);
+            if (config_.desired_emit_version) |version| {
+                c.mlirBytecodeWriterConfigDesiredEmitVersion(bc_config, @intCast(version));
+            }
+            var sctx: StringCallbackCtx = .{ .writer = writer };
+            c.mlirOperationWriteBytecodeWithConfig(self.ptr(), bc_config, stringCallback, &sctx);
+            if (sctx.err) |err| {
+                return err;
+            }
+            return;
+        }
+
+        var sctx: StringCallbackCtx = .{ .writer = writer };
+        c.mlirOperationWriteBytecode(self.ptr(), stringCallback, &sctx);
+        if (sctx.err) |err| {
+            return err;
+        }
+    }
+
+    fn fmtBytecodeImpl(ctx: BytecodeWriterConfig.Ctx, writer: *std.io.Writer) std.Io.Writer.Error!void {
+        try ctx.self.writeBytecode(ctx.config, writer);
+    }
+
+    pub fn fmtBytecode(self: *const Operation, config: ?BytecodeWriterConfig) std.fmt.Alt(BytecodeWriterConfig.Ctx, fmtBytecodeImpl) {
+        return .{ .data = .{
+            .self = self,
+            .config = config,
+        } };
+    }
 };
 
 pub const Region = opaque {
-    const M = StdMethods(Region, c.MlirRegion);
+    const M = Methods(Region, c.MlirRegion);
 
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirRegionEqual);
 
-    pub fn init() Error!*Region {
-        return @ptrCast(c.mlirRegionCreate().ptr orelse return Error.InvalidMlir);
+    pub fn init() *Region {
+        return @ptrCast(c.mlirRegionCreate().ptr);
     }
 
     pub fn deinit(self: *Region) void {
@@ -1047,69 +1122,215 @@ pub const Region = opaque {
     }
 };
 
-// pub const Block = opaque {
-//     const M = StdMethods(Block, c.MlirBlock);
-//     // pub const wrapOr = helpers.wrapOr(Block, c.mlirBlockIsNull);
-//     // pub const deinit = helpers.deinit(Block, c.mlirBlockDestroy);
+pub const ShapedType = opaque {
+    const M = Methods(ShapedType, c.MlirType);
 
-//     // pub const eql = helpers.eql(Block, c.mlirBlockEqual);
+    pub const isAFn = c.mlirTypeIsAShaped;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
+    pub const isA = M.isA;
 
-//     pub fn init(args: []*const Type, locs: []const *const Location) !Block {
-//         return @ptrCast(c.mlirBlockCreate(@intCast(args.len), @ptrCast(args.ptr), @ptrCast(locs.ptr)) orelse return Error.InvalidMlir);
-//     }
+    pub fn elementType(self: *const ShapedType) *const Type {
+        return @ptrCast(c.mlirShapedTypeGetElementType(self.ptr()).ptr);
+    }
 
-//     pub fn argument(self: Block, index: usize) Value {
-//         return .{ ._inner = c.mlirBlockGetArgument(self._inner, @intCast(index)) };
-//     }
+    pub fn rank(self: *const ShapedType) usize {
+        return @intCast(c.mlirShapedTypeGetRank(self.ptr()));
+    }
 
-//     pub fn numArguments(self: Block) usize {
-//         return @intCast(c.mlirBlockGetNumArguments(self._inner));
-//     }
+    pub fn dimension(self: *const ShapedType, dim: usize) i64 {
+        return c.mlirShapedTypeGetDimSize(self.ptr(), @intCast(dim));
+    }
+};
 
-//     pub fn addArgument(self: *Block, typ: Type, loc: Location) Value {
-//         return .{ ._inner = c.mlirBlockAddArgument(self._inner, typ._inner, loc._inner) };
-//     }
+pub const RankedTensorType = opaque {
+    const M = Methods(RankedTensorType, c.MlirType);
 
-//     pub fn insertArgument(self: *Block, index: usize, typ: Type, loc: Location) Value {
-//         return .{ ._inner = c.mlirBlockInsertArgument(self._inner, @intCast(index), typ._inner, loc._inner) };
-//     }
+    pub const isAFn = c.mlirTypeIsARankedTensor;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
 
-//     pub fn equals(self: Block, other: Block) bool {
-//         return c.mlirBlockEqual(self._inner, other._inner);
-//     }
+    pub fn init(dimensions: []const i64, elemType: *const Type) *const RankedTensorType {
+        return @ptrCast(c.mlirRankedTensorTypeGet(
+            @intCast(dimensions.len),
+            @ptrCast(dimensions),
+            elemType.ptr(),
+            c.mlirAttributeGetNull(),
+        ).ptr);
+    }
 
-//     pub fn appendOperation(self: Block, op: Operation) void {
-//         c.mlirBlockAppendOwnedOperation(self._inner, op._inner);
-//     }
+    pub fn elementType(self: *const RankedTensorType) *const Type {
+        return @ptrCast(c.mlirShapedTypeGetElementType(self.ptr()).ptr);
+    }
 
-//     pub fn appendOperations(self: *Block, ops: []const Operation) void {
-//         for (ops) |op| {
-//             c.mlirBlockAppendOwnedOperation(self._inner, op._inner);
-//         }
-//     }
+    pub fn rank(self: *const RankedTensorType) usize {
+        return @intCast(c.mlirShapedTypeGetRank(self.ptr()));
+    }
 
-//     pub const RecursiveOpts = enum { open, hermetic };
+    pub fn dimension(self: *const RankedTensorType, dim: usize) i64 {
+        return c.mlirShapedTypeGetDimSize(self.ptr(), @intCast(dim));
+    }
 
-//     pub fn appendValueRecursive(self: Block, value: Value, opt: RecursiveOpts) void {
-//         switch (value.kind()) {
-//             .op_result => |parent_op| self.appendOperationRecursive(parent_op, opt),
-//             .block_argument => |arg| {
-//                 // Hermetic blocks are not allowed to use arguments from other blocks.
-//                 stdx.debug.assert(opt == .open or self.eql(arg.block()), "Can't add {} from {?x} block to {?x} block", .{ arg, arg.block()._inner.ptr, self._inner.ptr });
-//             },
-//             .null => @panic("InvalidMlir"),
-//         }
-//     }
+    pub fn shaped(self: *const RankedTensorType) *const ShapedType {
+        return @ptrCast(self);
+    }
+};
 
-//     pub fn appendOperationRecursive(self: Block, op: Operation, opt: RecursiveOpts) void {
-//         if (op.block()) |prev_block| {
-//             // Hermetic blocks are not allowed to reference values from other blocks.
-//             stdx.debug.assert(opt == .open or self.equals(prev_block), "Can't add {} from {?x} block to {?x} block", .{ op, prev_block._inner.ptr, self._inner.ptr });
-//             return;
-//         }
-//         for (0..op.numOperands()) |i| {
-//             self.appendValueRecursive(op.operand(i), opt);
-//         }
-//         self.appendOperation(op);
-//     }
-// };
+pub fn rankedTensorType(dimensions: []const i64, elemType: *const Type) *const Type {
+    return @ptrCast(RankedTensorType.init(dimensions, elemType));
+}
+
+pub const DenseElementsAttribute = opaque {
+    const M = Methods(DenseElementsAttribute, c.MlirAttribute);
+
+    pub const isAFn = c.mlirAttributeIsADenseElements;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
+
+    pub fn init(shaped_type: *const ShapedType, values: []const u8) *const DenseElementsAttribute {
+        return @ptrCast(c.mlirDenseElementsAttrRawBufferGet(
+            shaped_type.ptr(),
+            @intCast(values.len),
+            @ptrCast(values),
+        ).ptr orelse unreachable);
+    }
+};
+
+pub fn denseElementsAttribute(shaped_type: *const ShapedType, values: []const u8) *const Attribute {
+    return @ptrCast(DenseElementsAttribute.init(shaped_type, values));
+}
+
+pub const DenseArrayTypes = enum {
+    bool,
+    i8,
+    i16,
+    i32,
+    i64,
+    f32,
+    f64,
+
+    fn ZigType(comptime ElementType: @This()) type {
+        return switch (ElementType) {
+            .bool => i32,
+            .i8 => i8,
+            .i16 => i16,
+            .i32 => i32,
+            .i64 => i64,
+            .f32 => f32,
+            .f64 => f64,
+        };
+    }
+};
+
+pub fn DenseArrayAttribute(comptime ElementType: DenseArrayTypes) type {
+    const ElementTypeZig = ElementType.ZigType();
+
+    const _isAFn, const getFn, const getElementFn = switch (ElementType) {
+        .bool => .{ c.mlirAttributeIsADenseBoolArray, c.mlirDenseBoolArrayGet, c.mlirDenseBoolArrayGetElement },
+        .i8 => .{ c.mlirAttributeIsADenseI8Array, c.mlirDenseI8ArrayGet, c.mlirDenseI8ArrayGetElement },
+        .i16 => .{ c.mlirAttributeIsADenseI16Array, c.mlirDenseI16ArrayGet, c.mlirDenseI16ArrayGetElement },
+        .i32 => .{ c.mlirAttributeIsADenseI32Array, c.mlirDenseI32ArrayGet, c.mlirDenseI32ArrayGetElement },
+        .i64 => .{ c.mlirAttributeIsADenseI64Array, c.mlirDenseI64ArrayGet, c.mlirDenseI64ArrayGetElement },
+        .f32 => .{ c.mlirAttributeIsADenseF32Array, c.mlirDenseF32ArrayGet, c.mlirDenseF32ArrayGetElement },
+        .f64 => .{ c.mlirAttributeIsADenseF64Array, c.mlirDenseF64ArrayGet, c.mlirDenseF64ArrayGetElement },
+    };
+
+    return struct {
+        const Self = @This();
+
+        const M = Methods(@This(), c.MlirAttribute);
+
+        pub const isAFn = _isAFn;
+        pub const ptr = M.ptr;
+        pub const eql = M.eql(c.mlirAttributeEqual);
+        pub const format = M.format(c.mlirAttributePrint);
+
+        pub fn init(ctx: *Context, values: []const ElementTypeZig) *const Self {
+            return @ptrCast(getFn(ctx.ptr(), @intCast(values.len), @ptrCast(values)).ptr);
+        }
+
+        pub fn get(self: *const Self, pos: usize) ElementTypeZig {
+            return getElementFn(self.ptr(), @intCast(pos));
+        }
+
+        pub fn len(self: *const Self) usize {
+            return @intCast(c.mlirDenseArrayGetNumElements(self.ptr()));
+        }
+    };
+}
+
+pub fn denseArrayAttribute(ctx: *Context, comptime ElementType: DenseArrayTypes, values: []const ElementType.ZigType()) *const Attribute {
+    return @ptrCast(DenseArrayAttribute(ElementType).init(ctx, @ptrCast(values)));
+}
+
+pub const ArrayAttribute = opaque {
+    const M = Methods(ArrayAttribute, c.MlirAttribute);
+
+    pub const isAFn = c.mlirAttributeIsAArray;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
+
+    pub fn init(ctx: *Context, attrs: []const *const Attribute) *const ArrayAttribute {
+        return @ptrCast(c.mlirArrayAttrGet(ctx.ptr(), @intCast(attrs.len), @ptrCast(attrs)).ptr);
+    }
+
+    pub fn size(self: *const ArrayAttribute) usize {
+        return @intCast(c.mlirArrayAttrGetNumElements(self.ptr()));
+    }
+
+    pub fn get(self: *const ArrayAttribute, index: usize) Attribute {
+        return @ptrCast(c.mlirArrayAttrGetElement(self.ptr(), @intCast(index)).ptr);
+    }
+};
+
+pub fn arrayAttribute(ctx: *Context, attrs: []const *const Attribute) *const Attribute {
+    return @ptrCast(ArrayAttribute.init(ctx, attrs));
+}
+
+pub const FunctionType = opaque {
+    const M = Methods(FunctionType, c.MlirType);
+    pub const isAFn = c.mlirTypeIsAFunction;
+
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
+
+    pub fn init(ctx: *Context, args: []const *const Type, results: []const *const Type) *const FunctionType {
+        return @ptrCast(c.mlirFunctionTypeGet(
+            ctx.ptr(),
+            @intCast(args.len),
+            @ptrCast(args.ptr),
+            @intCast(results.len),
+            @ptrCast(results.ptr),
+        ).ptr);
+    }
+};
+
+pub fn functionType(ctx: *Context, args: []const *const Type, results: []const *const Type) *const Type {
+    return @ptrCast(FunctionType.init(ctx, args, results));
+}
+
+pub const FlatSymbolRefAttribute = opaque {
+    const M = Methods(FlatSymbolRefAttribute, c.MlirAttribute);
+
+    pub const isAFn = c.mlirAttributeIsAFlatSymbolRef;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
+
+    pub fn init(ctx: *Context, symbol_: []const u8) *const FlatSymbolRefAttribute {
+        return @ptrCast(c.mlirFlatSymbolRefAttrGet(ctx.ptr(), stringRef(symbol_)).ptr);
+    }
+
+    pub fn symbol(self: *const FlatSymbolRefAttribute) []const u8 {
+        return string(c.mlirFlatSymbolRefAttrGetValue(self.ptr()));
+    }
+};
+
+pub fn flatSymbolRefAttribute(ctx: *Context, symbol: []const u8) *const Attribute {
+    return @ptrCast(FlatSymbolRefAttribute.init(ctx, symbol));
+}
