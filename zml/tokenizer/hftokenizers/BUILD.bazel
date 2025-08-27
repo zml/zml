@@ -27,5 +27,6 @@ zig_library(
     deps = [
         ":hftokenizers_cc",
         "//ffi:zig",
+        "//stdx",
     ],
 )

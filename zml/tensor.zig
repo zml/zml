@@ -53,13 +53,12 @@ pub const Tensor = struct {
 
     pub fn format(
         self: Tensor,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
         writer: anytype,
     ) !void {
-        _ = options;
-        const bare_fmt = fmt.len == 1 and fmt[0] == '_';
-        try writer.print(if (bare_fmt) "{_}" else "Tensor({_})", .{self._shape});
+        // TODO(0.15.0) handle format
+        // const bare_fmt = fmt.len == 1 and fmt[0] == '_';
+        const bare_fmt = false;
+        try writer.print(if (bare_fmt) "{f}" else "Tensor({f})", .{self._shape});
     }
 
     /// Returns the shape of a Tensor.
@@ -99,7 +98,7 @@ pub const Tensor = struct {
         if (builtin.mode == .Debug) {
             // Check that the MLIR value actually have the same shape.
             const other = fromMlirValue(val);
-            stdx.debug.internalAssert(sh.eql(other._shape), "Created a {} from Mlir value but expected {}", .{ other._shape, res._shape });
+            stdx.debug.internalAssert(sh.eql(other._shape), "Created a {f} from Mlir value but expected {f}", .{ other._shape, res._shape });
         }
 
         return res;
@@ -145,7 +144,7 @@ pub const Tensor = struct {
     /// Returns the indices of each of the given axes.
     ///
     /// 'axis_' can be an integer or a tag.
-    pub fn axes(self: Tensor, axes_: anytype) std.BoundedArray(u3, Tensor.MAX_RANK) {
+    pub fn axes(self: Tensor, axes_: anytype) stdx.BoundedArray(u3, Tensor.MAX_RANK) {
         return self._shape.axes(axes_);
     }
 
@@ -260,7 +259,7 @@ pub const Tensor = struct {
     /// For `reuseBuffer` to be effective, it needs to propagate all the way through the output.
     pub fn reuseBuffer(self: Tensor, origin: Tensor) Tensor {
         // Note: check donation docs, this may be too permissive.
-        stdx.debug.assert(self.byteSize() == origin.byteSize(), "Can't reuse buffers between tensors of different size: {} and {}", .{ self, origin });
+        stdx.debug.assert(self.byteSize() == origin.byteSize(), "Can't reuse buffers between tensors of different size: {f} and {f}", .{ self, origin });
 
         // TODO: should we store all donations inside the context ?
         var res = self;
@@ -410,7 +409,7 @@ pub const Tensor = struct {
         stdx.debug.assert(self.dtype() == other.dtype(), "triangularSolve expects tensors to be of the same type, got {} and {}", .{ self.dtype(), other.dtype() });
         stdx.debug.assert(self.rank() <= 2 and self.rank() == other.rank(), "triangularSolve expects tensors to have the same rank and be <= 2, got {} and {}", .{ self.rank(), other.rank() });
 
-        const loc = self.getContext().location(@src(), "triangularSolve({_}, {})", .{ self, opts });
+        const loc = self.getContext().location(@src(), "triangularSolve({f}, {})", .{ self, opts });
         const op = dialect.stablehlo.triangular_solve(self.getContext().mlirCtx(), self.value(), other.value(), loc, opts);
         return _result(self._shape, op.result(0));
     }
@@ -435,7 +434,7 @@ pub const Tensor = struct {
 
     /// Returns a Tensor of complex number converted from a pair of real and imaginary Tensors.
     pub fn complex(re: Tensor, im: Tensor) Tensor {
-        stdx.debug.assert(re._shape.eql(im._shape), "complex expects tensor shapes to match, got {} and {}", .{ re._shape, im._shape });
+        stdx.debug.assert(re._shape.eql(im._shape), "complex expects tensor shapes to match, got {f} and {f}", .{ re._shape, im._shape });
         stdx.debug.assert(re.dtype() == .f32 or re.dtype() == .f64, "complex expects tensors type to be f32 or f64, got {}", .{re.dtype()});
 
         const loc = re.getContext().mlirCtx().location(@src());
@@ -523,7 +522,7 @@ pub const Tensor = struct {
             },
         };
 
-        const loc = self.getContext().location(@src(), "fft({_},{})", .{ self, opts });
+        const loc = self.getContext().location(@src(), "fft({f},{})", .{ self, opts });
         const op = dialect.stablehlo.fft(self.getContext().mlirCtx(), self.value(), loc, opts);
         return _result(sh, op.result(0));
     }
@@ -551,7 +550,7 @@ pub const Tensor = struct {
         /// but it is not guaranteed to be deterministic between implementations.
         pub fn bitGenerator(self: Rng, sh: Shape) struct { Rng, Tensor } {
             const ctx = CompilationContext.current();
-            const loc = ctx.location(@src(), "rand.bitGen({_})", .{sh});
+            const loc = ctx.location(@src(), "rand.bitGen({f})", .{sh});
             const op = dialect.stablehlo.rng_bit_generator(
                 ctx.mlirCtx(),
                 self.algorithm,
@@ -589,7 +588,7 @@ pub const Tensor = struct {
                 16 => .u16,
                 32 => .u32,
                 64 => .u64,
-                else => stdx.debug.panic("uniform don't support non-byte aligned dtype. Got: {}", .{shape_}),
+                else => stdx.debug.panic("uniform don't support non-byte aligned dtype. Got: {f}", .{shape_}),
             };
 
             const rng, const bits = self.bitGenerator(shape_.withDtype(uint_dtype));
@@ -674,7 +673,7 @@ pub const Tensor = struct {
             stdx.debug.assert(sh.dtype().isFloat(), "normal expects tensor type to be a float, got {}", .{sh.dtype()});
 
             const ctx = CompilationContext.current();
-            const loc = ctx.location(@src(), "rand.normal({_}, mean={},stddev={})", .{ sh, opts.mean, opts.stddev });
+            const loc = ctx.location(@src(), "rand.normal({f}, mean={},stddev={})", .{ sh, opts.mean, opts.stddev });
             const a = Tensor.constant(.{}, Data.init(sh.dtype(), opts.mean));
             const b = Tensor.constant(.{}, Data.init(sh.dtype(), opts.stddev));
             const res_shape = Tensor.constantTensor(HostBuffer.fromSlice(.{sh.rank()}, sh.dims()));
@@ -1046,7 +1045,7 @@ pub const Tensor = struct {
         if (to == self.dtype()) {
             return self;
         }
-        const loc = self.getContext().location(@src(), "convert({_},to={s})", .{ self, @tagName(to) });
+        const loc = self.getContext().location(@src(), "convert({f},to={s})", .{ self, @tagName(to) });
 
         const mlir_ctx = self.getContext().mlirCtx();
         const res_type = mlirx.tensorType(mlir_ctx, self.shape().withDtype(to));
@@ -1160,7 +1159,7 @@ pub const Tensor = struct {
     ) Tensor {
         stdx.debug.assert(lhs.dtype() == rhs.dtype(), "dotGeneral expects tensors to be of the same type, got {} and {}", .{ lhs.dtype(), rhs.dtype() });
 
-        const Axes = std.BoundedArray(i64, MAX_RANK);
+        const Axes = stdx.BoundedArray(i64, MAX_RANK);
 
         var res_shape: Shape = .{ ._dtype = lhs.dtype() };
         // Validate batching axes
@@ -1168,7 +1167,7 @@ pub const Tensor = struct {
         var rhs_batching_axes: Axes = .{};
         for (batching_axes) |b_axes| {
             const l, const r = b_axes;
-            stdx.debug.assert(lhs._shape.dim(l) == rhs._shape.dim(r), "dotGeneral expects batching dimensions to be equal, got {} and {} in {} and {}", .{ l, r, lhs, rhs });
+            stdx.debug.assert(lhs._shape.dim(l) == rhs._shape.dim(r), "dotGeneral expects batching dimensions to be equal, got {} and {} in {f} and {f}", .{ l, r, lhs, rhs });
             var t = lhs._shape.tag(l);
             if (t == Shape.TagUnknown) t = rhs._shape.tag(r);
             res_shape = res_shape.appendDim(lhs._shape.dim(l), t);
@@ -1181,7 +1180,7 @@ pub const Tensor = struct {
         var rhs_contracting_axes: Axes = .{};
         for (contracting_axes) |c_axes| {
             const l, const r = c_axes;
-            stdx.debug.assert(lhs._shape.dim(l) == rhs._shape.dim(r), "dotGeneral expects contracting dimensions to be equal, got {} and {} in {} and {}", .{ l, r, lhs, rhs });
+            stdx.debug.assert(lhs._shape.dim(l) == rhs._shape.dim(r), "dotGeneral expects contracting dimensions to be equal, got {} and {} in {f} and {f}", .{ l, r, lhs, rhs });
             lhs_contracting_axes.appendAssumeCapacity(lhs._shape.axis(l));
             rhs_contracting_axes.appendAssumeCapacity(rhs._shape.axis(r));
         }
@@ -1209,7 +1208,7 @@ pub const Tensor = struct {
         }
 
         const mlir_ctx = lhs.getContext().mlirCtx();
-        const loc = lhs.getContext().location(@src(), "dot({_},{_},contracting={any},batching={any}", .{ lhs, rhs, contracting_axes, batching_axes });
+        const loc = lhs.getContext().location(@src(), "dot({f},{f},contracting={any},batching={any}", .{ lhs, rhs, contracting_axes, batching_axes });
         const op = dialect.stablehlo.dot_general(
             mlir_ctx,
             lhs.value(),
@@ -1406,7 +1405,7 @@ pub const Tensor = struct {
         else
             toI64(axes__);
 
-        stdx.debug.assert(permutation.len == self.rank(), "transpose expects input tensor rank and 'axes_' length to be equal, got {_} and {d}", .{ self, permutation[0..@min(permutation.len, MAX_RANK + 2)] });
+        stdx.debug.assert(permutation.len == self.rank(), "transpose expects input tensor rank and 'axes_' length to be equal, got {f} and {any}", .{ self, permutation[0..@min(permutation.len, MAX_RANK + 2)] });
 
         if (std.mem.eql(i64, permutation, no_op[0..self.rank()])) {
             return self;
@@ -1417,7 +1416,7 @@ pub const Tensor = struct {
             return self.reshape(res_shape);
         }
 
-        const loc = self.getContext().location(@src(), "transpose({_}, {d})", .{ self, permutation });
+        const loc = self.getContext().location(@src(), "transpose({f}, {any})", .{ self, permutation });
         const op = dialect.stablehlo.transpose(
             self.getContext().mlirCtx(),
             self.value(),
@@ -1505,7 +1504,7 @@ pub const Tensor = struct {
         // stdx.debug.assert(a + 1 < self.rank(), "Can't flatten {} on the last axis {}.", .{ self, axis });
         const new_shape = old_shape.remove(a + 1).set(a, old_shape.dim(a) * old_shape.dim(a + 1));
 
-        const loc = self.getContext().location(@src(), "flatten({_},{})", .{ self, axis_ });
+        const loc = self.getContext().location(@src(), "flatten({f},{})", .{ self, axis_ });
         const reshaped_val = dialect.stablehlo.reshape(
             self.getContext().mlirCtx(),
             self.value(),
@@ -1684,7 +1683,7 @@ pub const Tensor = struct {
         const res_shape = shape0.insertTag(axis_, 1, tag);
 
         for (tensors[1..]) |tensor| {
-            stdx.debug.assert(shape0.eqlWithTags(tensor._shape), "stack expects tensor shapes to match, got {} and {}", .{ shape0, tensor._shape });
+            stdx.debug.assert(shape0.eqlWithTags(tensor._shape), "stack expects tensor shapes to match, got {f} and {f}", .{ shape0, tensor._shape });
         }
 
         var reshaped: [32]Tensor = undefined;
@@ -1859,7 +1858,7 @@ pub const Tensor = struct {
         const dt: DataType = if (sh.dim(a) <= std.math.maxInt(i32)) .i32 else .i64;
         const res_shape = sh.withDtype(dt);
         const ctx = CompilationContext.current();
-        const loc = ctx.location(@src(), "iota({_}, {})", .{ res_shape, a });
+        const loc = ctx.location(@src(), "iota({f}, {})", .{ res_shape, a });
 
         const mlir_ctx = ctx.mlirCtx();
         var op = dialect.stablehlo.iota(
@@ -1931,7 +1930,7 @@ pub const Tensor = struct {
     pub fn constant(dimz: anytype, val: Data) Tensor {
         const sh = Shape.init(dimz, val.dtype());
         const ctx = CompilationContext.current().mlirCtx();
-        const loc = CompilationContext.current().location(@src(), "dims={d}, value={}", .{ sh, val });
+        const loc = CompilationContext.current().location(@src(), "dims={f}, value={}", .{ sh, val });
 
         var constant_op = if (mlirx.denseElementAttrType(val.dtype())) |elem_type|
             dialect.stablehlo.constant(ctx, &.{}, elem_type, val.constSlice(), loc)
@@ -1951,7 +1950,7 @@ pub const Tensor = struct {
     pub fn constantTensor(val: HostBuffer) Tensor {
         const ctx = CompilationContext.current().mlirCtx();
         const loc = ctx.location(@src());
-        const elem_type = mlirx.denseElementAttrType(val.dtype()) orelse std.debug.panic("constantTensor expects a dtype that can be serialized to MLIR, like f32 or i32, got {}", .{val.shape()});
+        const elem_type = mlirx.denseElementAttrType(val.dtype()) orelse std.debug.panic("constantTensor expects a dtype that can be serialized to MLIR, like f32 or i32, got {f}", .{val.shape()});
         const constant_op = dialect.stablehlo.constant(ctx, val.shape().dims(), elem_type, val.bytes(), loc);
         return _result(val.shape(), constant_op.result(0));
     }
@@ -1975,10 +1974,10 @@ pub const Tensor = struct {
     /// you will lose the tags.
     /// To avoid use favorise `.broad(shape)` when working with tagged tensors.
     pub fn broadcast(self: Tensor, output_shape: Shape, axes_: []const i64) Tensor {
-        stdx.debug.assert(axes_.len == self.rank(), "broadcast expects axes_ to map all axes from self to axes of the output shape, got broadcast({}, {}, {d})", .{ self, output_shape, axes_ });
+        stdx.debug.assert(axes_.len == self.rank(), "broadcast expects axes_ to map all axes from self to axes of the output shape, got broadcast({f}, {f}, {any})", .{ self, output_shape, axes_ });
         for (0.., axes_) |self_ax, other_ax| {
             const d = self.dim(self_ax);
-            stdx.debug.assert(d == 1 or d == output_shape.dim(other_ax), "broadcast expects shape axes to either be 1-sized or to match the target size. got broadcast({}, {}, {d}), error on self axis {} mapping to other axis {}", .{ self, output_shape, axes_, self_ax, other_ax });
+            stdx.debug.assert(d == 1 or d == output_shape.dim(other_ax), "broadcast expects shape axes to either be 1-sized or to match the target size. got broadcast({f}, {f}, {any}), error on self axis {d} mapping to other axis {d}", .{ self, output_shape, axes_, self_ax, other_ax });
         }
 
         const res_shape = output_shape.withDtype(self.dtype());
@@ -1989,7 +1988,7 @@ pub const Tensor = struct {
         }
         const ctx = self.getContext();
         const result_type = mlirx.tensorType(ctx.mlirCtx(), res_shape);
-        const loc = ctx.location(@src(), "broadcast({_}, {_}, axes={d})", .{ self, res_shape, axes_ });
+        const loc = ctx.location(@src(), "broadcast({f}, {f}, axes={any})", .{ self, res_shape, axes_ });
         const broadcast_op = dialect.stablehlo.broadcast_in_dim(ctx.mlirCtx(), self.value(), axes_, result_type, loc);
 
         return _result(res_shape, broadcast_op.result(0));
@@ -1997,7 +1996,7 @@ pub const Tensor = struct {
 
     /// Broadcasts a Tensor to the given shape, adding axes at the beginning.
     pub fn broadcastLeft(self: Tensor, output_shape: Shape) Tensor {
-        stdx.debug.assert(self.rank() <= output_shape.rank(), "broadcastLeft expects tensor rank to be less than output tensor rank, got {} and {}", .{ self.rank(), output_shape.rank() });
+        stdx.debug.assert(self.rank() <= output_shape.rank(), "broadcastLeft expects tensor rank to be less than output tensor rank, got {d} and {d}", .{ self.rank(), output_shape.rank() });
 
         const a = output_shape.rank() - self.rank();
         if (self.rank() == output_shape.rank() and std.mem.eql(i64, self.dims(), output_shape.dims())) {
@@ -2009,7 +2008,7 @@ pub const Tensor = struct {
 
     /// Broadcasts a Tensor to the given shape, adding axes at the end.
     pub fn broadcastRight(self: Tensor, output_shape: Shape) Tensor {
-        stdx.debug.assert(self.rank() <= output_shape.rank(), "broadcastRight expects tensor rank to be less than output tensor rank, got {} and {}", .{ self.rank(), output_shape.rank() });
+        stdx.debug.assert(self.rank() <= output_shape.rank(), "broadcastRight expects tensor rank to be less than output tensor rank, got {d} and {d}", .{ self.rank(), output_shape.rank() });
 
         if (self.rank() == output_shape.rank() and self._shape.eql(output_shape)) {
             return self;
@@ -2022,7 +2021,7 @@ pub const Tensor = struct {
     pub fn broad(self: Tensor, other: Shape) Tensor {
         // TODO: broad is too restrictive because sometime you only want to specify one specific axis
         // Note: if you code below, make sure to update Shape.canBroadcastTo.
-        stdx.debug.assert(self._shape.canBroadcastTo(other), "Can't broadcast {} to {}", .{ self, other });
+        stdx.debug.assert(self._shape.canBroadcastTo(other), "Can't broadcast {f} to {f}", .{ self, other });
 
         // Already the right shape
         if (std.mem.eql(i64, self.dims(), other.dims())) return self;
@@ -2036,7 +2035,7 @@ pub const Tensor = struct {
         }
 
         // check that each axis of self maps to an axis of other
-        var axes_: std.BoundedArray(i64, MAX_RANK) = .{};
+        var axes_: stdx.BoundedArray(i64, MAX_RANK) = .{};
         for (self._shape.tags()) |t| {
             axes_.appendAssumeCapacity(@intCast(other.axis(t)));
         }
@@ -2047,14 +2046,14 @@ pub const Tensor = struct {
     pub fn reshape(self: Tensor, output_shape_: anytype) Tensor {
         const output_shape = self._shape.reshape(output_shape_);
         const tensor_type = mlirx.tensorType(self.getContext().mlirCtx(), output_shape);
-        const loc = self.getContext().location(@src(), "reshape({any})", .{output_shape});
+        const loc = self.getContext().location(@src(), "reshape({f})", .{output_shape});
         const reshape_value = dialect.stablehlo.reshape(self.getContext().mlirCtx(), self.value(), tensor_type, loc);
         return _result(output_shape, reshape_value.result(0));
     }
 
     /// Converts the given 1 element Tensor into a 0-rank Tensor.
     pub fn asScalar(self: Tensor) Tensor {
-        stdx.debug.assert(self.count() == 1, "Tensor.asScalar expects an input with exactly 1-element got {}", .{self});
+        stdx.debug.assert(self.count() == 1, "Tensor.asScalar expects an input with exactly 1-element got {f}", .{self});
         return self.reshape(.{});
     }
 
@@ -2177,12 +2176,12 @@ pub const Tensor = struct {
         stdx.debug.assert(coord_axes_.len > 0, "gatherValues expects 1 or more axes to operate one, received none. Example: `x.gatherValues(.a, indices, .{{}})`", .{});
         for (coord_axes_.constSlice(), 0..) |a, i| {
             if (i > 0) {
-                stdx.debug.assert(a == coord_axes_.get(i - 1) + 1, "gatherValues expects 'coord_axes' to be sequential. But {any} aren't sequential in {}", .{ coord_axes, self });
+                stdx.debug.assert(a == coord_axes_.get(i - 1) + 1, "gatherValues expects 'coord_axes' to be sequential. But {any} aren't sequential in {f}", .{ coord_axes, self });
             }
         }
 
         const AxisKind = enum { batching, offset, collapsed, indices };
-        var self_kind: std.BoundedArray(AxisKind, MAX_RANK) = .{};
+        var self_kind: stdx.BoundedArray(AxisKind, MAX_RANK) = .{};
         var indices_batch_axes: Shape.DimsArray = .{};
         for (self._shape.tags(), 0..self.rank()) |t, self_ax| {
             const maybe_coord_ax = std.mem.indexOfScalar(u3, coord_axes_.constSlice(), @intCast(self_ax));
@@ -2191,7 +2190,7 @@ pub const Tensor = struct {
                 // Note: tags are required for batching.
                 self_kind.appendAssumeCapacity(.batching);
                 indices_batch_axes.appendAssumeCapacity(id_ax);
-                stdx.debug.assert(maybe_coord_ax == null, "gatherValues expects axes to appear at most twice. Axis {s} has been found both in 'self={any}', in 'coord_axes_={any}' and in 'indices={}'", .{ self._shape._tags.get(self_ax), self, coord_axes, indices });
+                stdx.debug.assert(maybe_coord_ax == null, "gatherValues expects axes to appear at most twice. Axis {s} has been found both in 'self={f}', in 'coord_axes_={any}' and in 'indices={f}'", .{ self._shape._tags.get(self_ax), self, coord_axes, indices });
             } else if (maybe_coord_ax) |_| {
                 // for gatherValues we collapsed all gathered axes
                 // (contrary to gatherSlices where we collapse none)
@@ -2208,13 +2207,13 @@ pub const Tensor = struct {
             indices.rank()
         else blk: {
             const ax = indices._shape.hasTag(.coord) orelse indices._shape.axis(-1);
-            stdx.debug.assert(indices.dim(ax) == coord_axes_.len, "gatherValues with axes={any}, expects indices to be of shape [..., {}], got: {}", .{ coord_axes, coord_axes_.len, indices });
+            stdx.debug.assert(indices.dim(ax) == coord_axes_.len, "gatherValues with axes={any}, expects indices to be of shape [..., {}], got: {f}", .{ coord_axes, coord_axes_.len, indices });
             break :blk ax;
         };
 
         // compute res shape
         var res_shape = Shape.init(.{}, self.dtype());
-        var res_kind: std.BoundedArray(AxisKind, MAX_RANK) = .{};
+        var res_kind: stdx.BoundedArray(AxisKind, MAX_RANK) = .{};
         for (self_kind.constSlice(), 0..) |kind, ax_usize| {
             const ax: u3 = @intCast(ax_usize);
             if (ax == coord_axes_.get(0)) {
@@ -2275,7 +2274,7 @@ pub const Tensor = struct {
         );
 
         const mlir_shape = fromMlirValue(gather_op.result(0)).shape();
-        stdx.debug.assert(mlir_shape.eql(res_shape), "gatherValues expects that batching indices appear in the same order in 'self' and 'indices', got: self={}, indices={}. You should transpose one or the other.", .{ self, indices });
+        stdx.debug.assert(mlir_shape.eql(res_shape), "gatherValues expects that batching indices appear in the same order in 'self' and 'indices', got: self={f}, indices={f}. You should transpose one or the other.", .{ self, indices });
         return _result(res_shape, gather_op.result(0));
     }
 
@@ -2347,29 +2346,29 @@ pub const Tensor = struct {
     /// and gatherSlices can copy data by group of C'*D elements.
     pub fn gatherSlices(self: Tensor, slice_shape_: anytype, indices: Tensor, opts: GatherOpts) Tensor {
         const slice_shape = if (@TypeOf(slice_shape_) == Shape) slice_shape_ else Shape.init(slice_shape_, .i32);
-        // scoped_log.debug("gatherSlice({}, {_}, {})", .{ self, slice_shape, indices });
+        // scoped_log.debug("gatherSlice({}, {f}, {})", .{ self, slice_shape, indices });
 
         const tagged_api = slice_shape.isFullyTagged();
         if (tagged_api) {
             for (slice_shape.tags()) |t| {
-                stdx.debug.assert(self._shape.hasTag(t) != null, "gatherSlices expects `slices_shape` to only use tags from `self`. But {s} wasn't found in {}", .{ t, self });
+                stdx.debug.assert(self._shape.hasTag(t) != null, "gatherSlices expects `slices_shape` to only use tags from `self`. But {s} wasn't found in {f}", .{ t, self });
             }
         } else {
             // For untagged api, we require all slices to be specified.
             // Note: we could relax this and right align the slice.
-            stdx.debug.assert(slice_shape.rank() == self.rank(), "gatherSlices expects `slice_shape.rank()` to match `self.rank()`. Got: gatherSlices({}, slice={_}). To avoid specifying all axes in `slice_shape`, you can use tags.", .{ self, slice_shape });
+            stdx.debug.assert(slice_shape.rank() == self.rank(), "gatherSlices expects `slice_shape.rank()` to match `self.rank()`. Got: gatherSlices({f}, slice={f}). To avoid specifying all axes in `slice_shape`, you can use tags.", .{ self, slice_shape });
         }
 
         const index_coord_axis = indices._shape.hasTag(.coord) orelse indices._shape.axis(-1);
-        stdx.debug.assert(indices.dim(index_coord_axis) == slice_shape.rank(), "gatherSlices({}, slice={_}, indices) expects 'indices' to be a tensor [..., {}], got {}", .{ self, slice_shape, slice_shape.rank(), indices });
+        stdx.debug.assert(indices.dim(index_coord_axis) == slice_shape.rank(), "gatherSlices({f}, slice={f}, indices) expects 'indices' to be a tensor [..., {}], got {f}", .{ self, slice_shape, slice_shape.rank(), indices });
 
         // Compute result shape
         var res_shape = indices._shape.remove(index_coord_axis).withDtype(self.dtype());
         var slice_dims = self._shape._dims;
-        var self_batch_axes: std.BoundedArray(i64, MAX_RANK) = .{};
-        var indices_batch_axes: std.BoundedArray(i64, MAX_RANK) = .{};
-        var start_index_map: std.BoundedArray(i64, MAX_RANK) = .{};
-        var self_offset_axes: std.BoundedArray(i64, MAX_RANK) = .{};
+        var self_batch_axes: stdx.BoundedArray(i64, MAX_RANK) = .{};
+        var indices_batch_axes: stdx.BoundedArray(i64, MAX_RANK) = .{};
+        var start_index_map: stdx.BoundedArray(i64, MAX_RANK) = .{};
+        var self_offset_axes: stdx.BoundedArray(i64, MAX_RANK) = .{};
         for (self._shape.tags(), 0..self.rank()) |t, self_ax| {
             const maybe_slice_ax: ?u3 = if (tagged_api) slice_shape.hasTag(t) else @intCast(self_ax);
 
@@ -2379,12 +2378,12 @@ pub const Tensor = struct {
                 self_batch_axes.appendAssumeCapacity(@intCast(self_ax));
                 indices_batch_axes.appendAssumeCapacity(indices._shape.axis(t));
                 slice_dims.set(self_ax, 1);
-                stdx.debug.assert(slice_shape.hasTag(t) == null, "gatherSlices expect axes to be either batches or slices axes. Axis {s} has been found both in `slices={_}` and `indices={}`", .{ t, slice_shape, indices });
+                stdx.debug.assert(slice_shape.hasTag(t) == null, "gatherSlices expect axes to be either batches or slices axes. Axis {s} has been found both in `slices={f}` and `indices={f}`", .{ t, slice_shape, indices });
             } else if (maybe_slice_ax) |slice_ax| {
                 // Specified axes contains the start offset of the slices,
                 // and are collected in `start_index_map`.
                 const slice_dim = slice_shape.dim(slice_ax);
-                stdx.debug.assert(slice_dim <= self._shape.dim(self_ax), "gatherSlices expects `slice_shape` to be smaller than `self.shape()`. On axis {s}, got {} > {}.", .{ t, slice_shape, self._shape });
+                stdx.debug.assert(slice_dim <= self._shape.dim(self_ax), "gatherSlices expects `slice_shape` to be smaller than `self.shape()`. On axis {s}, got {f} > {f}.", .{ t, slice_shape, self._shape });
                 slice_dims.set(self_ax, slice_dim);
                 res_shape = res_shape.appendDim(slice_dim, t);
                 start_index_map.appendAssumeCapacity(@intCast(self_ax));
@@ -2396,7 +2395,7 @@ pub const Tensor = struct {
             }
         }
 
-        const loc = self.getContext().location(@src(), "gatherSlices({_}, slice_shape={_}, idx={_})", .{ self, slice_shape, indices });
+        const loc = self.getContext().location(@src(), "gatherSlices({f}, slice_shape={f}, idx={f})", .{ self, slice_shape, indices });
         const gather_op = dialect.stablehlo.gather(
             self.getContext().mlirCtx(),
             self.value(),
@@ -3172,7 +3171,7 @@ pub const Tensor = struct {
     /// Note: this doesn't support tagging, if you have tags,
     /// you should use `dynamicSlice` directly.
     pub fn dynamicSlice1d(self: Tensor, axis_: i8, slice_: DynSlice) Tensor {
-        stdx.debug.assert(slice_.start.rank() == 0, "dynamicSlice1d expects 'slice_.start' tensor rank to be a scalar, got {}", .{slice_.start});
+        stdx.debug.assert(slice_.start.rank() == 0, "dynamicSlice1d expects 'slice_.start' tensor rank to be a scalar, got {f}", .{slice_.start});
 
         const a = self.axis(axis_);
         const new_shape = self._shape.set(a, slice_.len);
@@ -3226,17 +3225,17 @@ pub const Tensor = struct {
             const offset = slice_.start;
             const len = slice_.len;
             if (slices_tags.len == 0) {
-                stdx.debug.assert(self.rank() == slices.len, "dynamicSlice expects tensor rank and 'slices_' length to be equal, got {} and {}", .{ self.rank(), slices.len });
+                stdx.debug.assert(self.rank() == slices.len, "dynamicSlice expects tensor rank and 'slices_' length to be equal, got {d} and {d}", .{ self.rank(), slices.len });
 
                 offset_values[i] = offset.value();
                 res_shape._dims.set(i, len);
 
-                stdx.debug.assert(len <= self.dim(i), "dynamicSlice expects slices 'len' to be less than or equal to their corresponding dimension in input tensor, got {} and {} for index {}", .{ len, self.dim(i), i });
+                stdx.debug.assert(len <= self.dim(i), "dynamicSlice expects slices 'len' to be less than or equal to their corresponding dimension in input tensor, got {d} and {d} for index {d}", .{ len, self.dim(i), i });
             } else {
                 const t = slices_tags.get(i);
-                const a = res_shape.hasTag(t) orelse stdx.debug.panic("dynamicSlice expects input tensor to have tags used in 'slices_' but {s} is missing (input shape is {})", .{ t, self._shape });
+                const a = res_shape.hasTag(t) orelse stdx.debug.panic("dynamicSlice expects input tensor to have tags used in 'slices_' but {s} is missing (input shape is {f})", .{ t, self._shape });
 
-                stdx.debug.assert(len <= self.dim(a), "dynamicSlice expects slices 'len' to be less than their corresponding dimension in input tensor, got {} and {} for axis {s}", .{ len, self.dim(a), t });
+                stdx.debug.assert(len <= self.dim(a), "dynamicSlice expects slices 'len' to be less than their corresponding dimension in input tensor, got {d} and {d} for axis {s}", .{ len, self.dim(a), t });
 
                 offset_values[a] = offset.value();
                 res_shape._dims.set(a, len);
@@ -3304,14 +3303,14 @@ pub const Tensor = struct {
         if (tagged_api) {
             // Check that all update tags are known.
             for (update._shape._tags.constSlice()) |t| {
-                stdx.debug.assert(self._shape.hasTag(t) != null, "dynamicUpdateSlice expects 'update_' tensor tags to be a subset of input tensor tags but {s} is missing (input shape is {})", .{ t, self._shape });
+                stdx.debug.assert(self._shape.hasTag(t) != null, "dynamicUpdateSlice expects 'update_' tensor tags to be a subset of input tensor tags but {s} is missing (input shape is {f})", .{ t, self._shape });
             }
 
             var update_shape = self._shape;
             var prev_ax: i8 = -1;
             for (self._shape.tags(), 0..) |t, self_ax| {
                 if (update._shape.hasTag(t)) |up_ax| {
-                    stdx.debug.assert(up_ax == prev_ax + 1, "dynamicUpdateSlice expects 'update_' and input tensor axis to have the same order, got {} and {}. (hint: you need to explicitly transpose 'update_')", .{ update_, self });
+                    stdx.debug.assert(up_ax == prev_ax + 1, "dynamicUpdateSlice expects 'update_' and input tensor axis to have the same order, got {f} and {f}. (hint: you need to explicitly transpose 'update_')", .{ update_, self });
 
                     update_shape._dims.set(self_ax, update.dim(up_ax));
                     prev_ax = up_ax;
@@ -3322,7 +3321,7 @@ pub const Tensor = struct {
             update = update.reshape(update_shape);
         }
 
-        stdx.debug.assert(self.rank() == update.rank(), "dynamicUpdateSlice expects input and computed update tensors to have the same rank, got {} and {}", .{ self, update });
+        stdx.debug.assert(self.rank() == update.rank(), "dynamicUpdateSlice expects input and computed update tensors to have the same rank, got {f} and {f}", .{ self, update });
 
         for (self.dims(), update.dims(), 0..) |self_d, up_d, ax| {
             const t = self._shape.debugTag(ax);
@@ -3350,7 +3349,7 @@ pub const Tensor = struct {
             // This is only allowed when using tagged sliced.
             offset_values = .{zero} ** MAX_RANK;
             for (offset.constSlice(), offset_tags.constSlice()) |start, t| {
-                const a = self._shape.hasTag(t) orelse stdx.debug.panic("dynamicUpdateSlice expects input tensor to have tags used in 'offset_' but {s} is missing (input shape is {})", .{ t, self._shape });
+                const a = self._shape.hasTag(t) orelse stdx.debug.panic("dynamicUpdateSlice expects input tensor to have tags used in 'offset_' but {s} is missing (input shape is {f})", .{ t, self._shape });
                 offset_values[a] = start.value();
             }
         }
@@ -3469,12 +3468,12 @@ pub const Tensor = struct {
 
     /// Returns a Tensor containing the element-wise result of the given 'cmp' comparison between the two input Tensors.
     pub fn cmp(self: Tensor, direction: dialect.stablehlo.ComparisonDirection.Direction, other: Tensor) Tensor {
-        stdx.debug.assert(self.dtype() == other.dtype(), "cmp expects input tensors to be of the same type, got {} and {}", .{ self.dtype(), other.dtype() });
+        stdx.debug.assert(self.dtype() == other.dtype(), "cmp expects input tensors to be of the same type, got {t} and {t}", .{ self.dtype(), other.dtype() });
 
         if (self.rank() == 0 and other.rank() != 0) return self.broadcast(other._shape, &.{}).cmp(direction, other);
         if (self.rank() != 0 and other.rank() == 0) return self.cmp(direction, other.broadcast(self._shape, &.{}));
 
-        stdx.debug.assert(self._shape.eql(other._shape), "cmp expects input tensor shapes to match, got {} and {}", .{ self._shape, other._shape });
+        stdx.debug.assert(self._shape.eql(other._shape), "cmp expects input tensor shapes to match, got {f} and {f}", .{ self._shape, other._shape });
 
         const loc = self.getContext().location(@src(), "cmp(.{s})", .{@tagName(direction)});
         const op = dialect.stablehlo.compare(
@@ -3492,7 +3491,7 @@ pub const Tensor = struct {
     /// For each vector in the input tensor,
     /// creates a diagonal-matrix where diagonal values are set to the vector values.
     pub fn toDiagonal(self: Tensor, axis_: anytype, new_tags: [2]EnumLiteral) Tensor {
-        stdx.debug.assert(self.rank() < MAX_RANK - 1, "toDiagonal expects input up to {} rank, got {}", .{ MAX_RANK - 1, self });
+        stdx.debug.assert(self.rank() < MAX_RANK - 1, "toDiagonal expects input up to {d} rank, got {f}", .{ MAX_RANK - 1, self });
         const a = self.axis(axis_);
         const d = self.dim(a);
         var res_shape = self._shape;
@@ -3622,8 +3621,8 @@ pub const Tensor = struct {
             return bool_tensor.select(on_true, on_false.broad(bool_tensor.shape()));
         }
 
-        stdx.debug.assert(bool_tensor._shape.eqlDims(on_true._shape), "select expects input tensor and 'on_true' tensor dimensions to match, got {} and {}", .{ bool_tensor._shape, on_true._shape });
-        stdx.debug.assert(bool_tensor._shape.eqlDims(on_false._shape), "select expects input tensor and 'on_false' tensor dimensions to match, got {} and {}", .{ bool_tensor._shape, on_false._shape });
+        stdx.debug.assert(bool_tensor._shape.eqlDims(on_true._shape), "select expects input tensor and 'on_true' tensor dimensions to match, got {f} and {f}", .{ bool_tensor._shape, on_true._shape });
+        stdx.debug.assert(bool_tensor._shape.eqlDims(on_false._shape), "select expects input tensor and 'on_false' tensor dimensions to match, got {f} and {f}", .{ bool_tensor._shape, on_false._shape });
 
         const loc = bool_tensor.getContext().mlirCtx().location(@src());
         const op = dialect.stablehlo.select(
@@ -3762,7 +3761,7 @@ pub const Tensor = struct {
     ///
     /// - res[a, b, c, d] == (A[a], B[b], C[c], D[d])
     pub fn cartesianProductStacked(vectors: []const Tensor) Tensor {
-        var out = std.BoundedArray(Tensor, Tensor.MAX_RANK).init(vectors.len) catch unreachable;
+        var out = stdx.BoundedArray(Tensor, Tensor.MAX_RANK).init(vectors.len) catch unreachable;
         _cartesianProduct(vectors, out.slice());
 
         return Tensor.stack(out.constSlice(), .last, .coord);
@@ -3801,7 +3800,7 @@ pub const Tensor = struct {
     ) fn (Tensor, Tensor) Tensor {
         return struct {
             pub fn binaryOpHelper(self: Tensor, other: Tensor) Tensor {
-                stdx.debug.assert(self.dtype() == other.dtype(), "{s} expects tensor to be of same type, got {} and {}", .{ op_name, self, other });
+                stdx.debug.assert(self.dtype() == other.dtype(), "{s} expects tensor to be of same type, got {f} and {f}", .{ op_name, self, other });
 
                 if (self.rank() == 0 and other.rank() != 0) {
                     return binaryOpHelper(self.broad(other._shape), other);
@@ -3811,10 +3810,10 @@ pub const Tensor = struct {
                     return binaryOpHelper(self, other.broad(self._shape));
                 }
 
-                stdx.debug.assert(self._shape.eql(other._shape), "{s} expects tensor shapes to match, got {} and {}", .{ op_name, self._shape, other._shape });
+                stdx.debug.assert(self._shape.eql(other._shape), "{s} expects tensor shapes to match, got {f} and {f}", .{ op_name, self._shape, other._shape });
 
                 const ctx = self.getContext();
-                const location = ctx.location(src, "{s}({_}, {_})", .{ op_name, self, other });
+                const location = ctx.location(src, "{s}({f}, {f})", .{ op_name, self, other });
                 const ret = @call(.auto, op_fn, .{ ctx.mlirCtx(), self.value(), other.value(), location });
                 return _result(self._shape, ret.result(0));
             }
@@ -3837,7 +3836,7 @@ pub const Tensor = struct {
 
     fn printCallback(_: ?*anyopaque, inputs: []const HostBuffer, outputs: []const HostBuffer) void {
         const host_buffer = inputs[0];
-        std.log.defaultLog(.info, .zml, "Device buffer: {}: {}", .{ host_buffer.shape(), host_buffer.pretty() });
+        std.log.defaultLog(.info, .zml, "Device buffer: {f}: {f}", .{ host_buffer.shape(), host_buffer.pretty() });
         // This is true because of the operand aliases.
         // Since the result is already pointing to the input we don't need to modify the buffer.
         std.debug.assert(host_buffer._data == outputs[0]._data);
@@ -4060,8 +4059,8 @@ test shapesOf {
     }
 }
 
-pub fn _collectAxes(T: type, bounded_array: std.BoundedArray(T, Tensor.MAX_RANK), value: T) std.BoundedArray(i64, Tensor.MAX_RANK) {
-    var res: std.BoundedArray(i64, Tensor.MAX_RANK) = .{};
+pub fn _collectAxes(T: type, bounded_array: stdx.BoundedArray(T, Tensor.MAX_RANK), value: T) stdx.BoundedArray(i64, Tensor.MAX_RANK) {
+    var res: stdx.BoundedArray(i64, Tensor.MAX_RANK) = .{};
     for (bounded_array.constSlice(), 0..) |v, ax| {
         if (v == value) {
             res.appendAssumeCapacity(@intCast(ax));
@@ -4070,12 +4069,12 @@ pub fn _collectAxes(T: type, bounded_array: std.BoundedArray(T, Tensor.MAX_RANK)
     return res;
 }
 
-fn _parseGatherCoord(self: Tensor, axes_: anytype) struct { bool, std.BoundedArray(u3, Tensor.MAX_RANK) } {
+fn _parseGatherCoord(self: Tensor, axes_: anytype) struct { bool, stdx.BoundedArray(u3, Tensor.MAX_RANK) } {
     const AxesT = @TypeOf(axes_);
     const axes_is_scalar = AxesT == EnumLiteral or AxesT == comptime_int or @typeInfo(AxesT) == .int;
 
     const coord_axes = if (axes_is_scalar)
-        std.BoundedArray(u3, Tensor.MAX_RANK).fromSlice(&.{self.axis(axes_)}) catch unreachable
+        stdx.BoundedArray(u3, Tensor.MAX_RANK).fromSlice(&.{self.axis(axes_)}) catch unreachable
     else
         self.axes(axes_);
 
@@ -4099,7 +4098,7 @@ inline fn toI64(values: anytype) []i64 {
 }
 
 fn transposeIsJustAReshape(x: Shape, permutation: []const i64) bool {
-    var perm: std.BoundedArray(struct { u8, bool }, Tensor.MAX_RANK) = .{};
+    var perm: stdx.BoundedArray(struct { u8, bool }, Tensor.MAX_RANK) = .{};
     // Don't rewrite on invalid inputs.
     if (permutation.len > x.rank()) return false;
     for (permutation) |ax| {

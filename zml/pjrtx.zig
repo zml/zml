@@ -75,14 +75,14 @@ pub const Client = opaque {
     }
 
     fn compileSync(self: *const Client, api: *const Api, allocator: std.mem.Allocator, module: mlir.Module, compile_options_pb: []const u8) CompileError!*LoadedExecutable {
-        var bytecode = std.ArrayList(u8).init(allocator);
+        var bytecode: std.array_list.Managed(u8) = .init(allocator);
         defer bytecode.deinit();
         module.op().writeBytecodeWithConfig(bytecode.writer(), .{ .desiredEmitedVersion = 1 }) catch |err| {
             log.err("failed to write module bytecode: {}", .{err});
             return err;
         };
 
-        var serialized_buffer = std.ArrayList(u8).init(allocator);
+        var serialized_buffer: std.array_list.Managed(u8) = .init(allocator);
         defer serialized_buffer.deinit();
 
         const stablehlo_version = blk: {
@@ -220,7 +220,7 @@ pub const Event = opaque {
         }{};
 
         try self.inner().onReady(api, &(struct {
-            fn call(err: ?*pjrt.Error, user_arg: ?*anyopaque) callconv(.C) void {
+            fn call(err: ?*pjrt.Error, user_arg: ?*anyopaque) callconv(.c) void {
                 const ctx_: *@TypeOf(ctx) = @ptrCast(@alignCast(user_arg.?));
                 ctx_.err = err;
                 ctx_.event.set();

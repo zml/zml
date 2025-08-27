@@ -608,7 +608,7 @@ fn findSimilarBufferKeys(original_key: []const u8, store: BufferStore, temp_allo
         if (std.mem.startsWith(u8, key, base_key)) {
             if (matches == 0) log.warn("Similar buffers found:", .{});
             if (!shown_keys.contains(key)) {
-                log.warn("  - {s}: {}", .{ key, entry.value_ptr.*.shape() });
+                log.warn("  - {s}: {f}", .{ key, entry.value_ptr.*.shape() });
                 shown_keys.put(key, {}) catch continue;
                 matches += 1;
             }
@@ -625,7 +625,7 @@ fn findSimilarBufferKeys(original_key: []const u8, store: BufferStore, temp_allo
                 const key = entry.key_ptr.*;
                 if (std.mem.indexOf(u8, key, component) != null and !shown_keys.contains(key)) {
                     if (matches == 0) log.warn("Partial matches for '{s}':", .{component});
-                    log.warn("  - {s}: {}", .{ key, entry.value_ptr.*.shape() });
+                    log.warn("  - {s}: {f}", .{ key, entry.value_ptr.*.shape() });
                     shown_keys.put(key, {}) catch continue;
                     matches += 1;
                     if (matches >= 5) break;
@@ -660,8 +660,8 @@ fn visitStructAndLoadBuffer(allocator: std.mem.Allocator, prefix_builder: *Prefi
         return if (buffer_store.get(prefix)) |host_buffer| {
             // obj._shape has been set inside `loadModelBuffersWithPrefix`, before calling us.
             var buf_with_metadata = host_buffer;
-            log.debug("Loading buffer {s} ({})", .{ prefix, obj._shape });
-            stdx.debug.assert(host_buffer.shape().eql(obj._shape), "loadModelBuffers expects to find the same shapes in the model and in the buffer store, got {} and {} for tensor {s}", .{ obj._shape, host_buffer, prefix });
+            log.debug("Loading buffer {s} ({f})", .{ prefix, obj._shape });
+            stdx.debug.assert(host_buffer.shape().eql(obj._shape), "loadModelBuffers expects to find the same shapes in the model and in the buffer store, got {f} and {f} for tensor {s}", .{ obj._shape, host_buffer, prefix });
             buf_with_metadata._shape = obj._shape;
             obj.* = try zml.Buffer.from(platform, buf_with_metadata, .{});
         } else {

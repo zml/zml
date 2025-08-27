@@ -31,7 +31,7 @@ pub const HostBuffer = struct {
         return .{
             ._shape = sh,
             ._strides = sh.computeStrides().buffer,
-            ._data = (try allocator.alignedAlloc(u8, 64, sh.byteSize())).ptr,
+            ._data = (try allocator.alignedAlloc(u8, .@"64", sh.byteSize())).ptr,
             ._memory = .{ .managed = .@"64" },
         };
     }
@@ -170,8 +170,8 @@ pub const HostBuffer = struct {
     /// Strided buffers can't use this method.
     pub fn items(self: HostBuffer, comptime T: type) []const T {
         // TODO we should allow interpreting the output as @Vector(8, f32) when the tensor is f32.
-        stdx.debug.assert(DataType.fromZigType(T) == self.dtype(), "Can't reinterpret {} as {s}", .{ self, @typeName(T) });
-        stdx.debug.assert(self.isContiguous(), "{} isn't contiguous, can't interpret as []const u8", .{self});
+        stdx.debug.assert(DataType.fromZigType(T) == self.dtype(), "Can't reinterpret {f} as {s}", .{ self, @typeName(T) });
+        stdx.debug.assert(self.isContiguous(), "{f} isn't contiguous, can't interpret as []const u8", .{self});
         const ptr: [*]const T = @alignCast(@ptrCast(self._data));
         return ptr[0..self._shape.count()];
     }
@@ -181,7 +181,7 @@ pub const HostBuffer = struct {
     }
 
     pub fn bytes(self: HostBuffer) []const u8 {
-        stdx.debug.assert(self.isContiguous(), "{} isn't contiguous, can't interpret as []const u8", .{self});
+        stdx.debug.assert(self.isContiguous(), "{f} isn't contiguous, can't interpret as []const u8", .{self});
         return self._data[0..self._shape.byteSize()];
     }
 
@@ -233,7 +233,7 @@ pub const HostBuffer = struct {
     }
 
     pub fn reshape(self: HostBuffer, shape_: anytype) HostBuffer {
-        stdx.debug.assert(self.isContiguous(), "reshape expects a contiguous tensor, got: {}", .{self});
+        stdx.debug.assert(self.isContiguous(), "reshape expects a contiguous tensor, got: {f}", .{self});
         var res = self;
         res._shape = self._shape.reshape(shape_);
         res._strides = res._shape.computeStrides().buffer;
@@ -252,9 +252,9 @@ pub const HostBuffer = struct {
         const start: i64 = if (s.start < 0) s.start + d else s.start;
         var end = s.end orelse d;
         if (end < 0) end += d;
-        stdx.debug.assert(start >= 0 and start < d, "slice1d({}, {}) expects the slice start to be between 0 and {} got: {}", .{ self, ax, d, s });
-        stdx.debug.assert(end >= 1 and end <= d, "slice1d({}, {}) expects the slice end to be between 1 and {} got: {}", .{ self, ax, d, s });
-        stdx.debug.assert(start < end, "slice1d({}, {}) expects the slice start ({}) to be smaller than the end ({}), got: {}", .{ self, ax, start, end, s });
+        stdx.debug.assert(start >= 0 and start < d, "slice1d({f}, {}) expects the slice start to be between 0 and {} got: {}", .{ self, ax, d, s });
+        stdx.debug.assert(end >= 1 and end <= d, "slice1d({f}, {}) expects the slice end to be between 1 and {} got: {}", .{ self, ax, d, s });
+        stdx.debug.assert(start < end, "slice1d({f}, {}) expects the slice start ({}) to be smaller than the end ({}), got: {}", .{ self, ax, start, end, s });
 
         const offset: usize = @intCast(start * self._strides[ax]);
         const new_shape = self.shape().set(ax, end - start);
@@ -308,9 +308,9 @@ pub const HostBuffer = struct {
 
     pub fn squeeze(self: HostBuffer, axis_: anytype) HostBuffer {
         const ax = self._shape.axis(axis_);
-        stdx.debug.assert(self.dim(ax) == 1, "squeeze expects a 1-d axis got {} in {}", .{ ax, self });
+        stdx.debug.assert(self.dim(ax) == 1, "squeeze expects a 1-d axis got {} in {f}", .{ ax, self });
 
-        var strd: std.BoundedArray(i64, Shape.MAX_RANK) = .{ .buffer = self._strides, .len = self.rank() };
+        var strd: stdx.BoundedArray(i64, Shape.MAX_RANK) = .{ .buffer = self._strides, .len = self.rank() };
         _ = strd.orderedRemove(ax);
 
         return .{
@@ -323,16 +323,11 @@ pub const HostBuffer = struct {
 
     pub fn format(
         self: HostBuffer,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
         writer: anytype,
     ) !void {
-        _ = options;
-        if (std.mem.eql(u8, fmt, "v")) {
-            try writer.print("HostBuffer(.{_})@0x{x}", .{ self._shape, @intFromPtr(self._data) });
-        } else {
-            try writer.print("HostBuffer(.{_})", .{self._shape});
-        }
+        // TODO debug option
+        // try writer.print("HostBuffer(.{f})@0x{x}", .{ self._shape, @intFromPtr(self._data) });
+        try writer.print("HostBuffer(.{f})", .{self._shape});
     }
 
     /// Formatter for a HostBuffer that also print the values not just the shape.
@@ -344,21 +339,23 @@ pub const HostBuffer = struct {
     pub const PrettyPrinter = struct {
         x: HostBuffer,
 
-        pub fn format(self: PrettyPrinter, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        // TODO(0.15.0) revisit pretty printer
+        pub fn format(self: PrettyPrinter, writer: anytype) !void {
             const fmt_: stdx.fmt.Fmt = switch (self.x.dtype().class()) {
-                .integer => .parse(i32, fmt),
-                .float => .parse(f32, fmt),
-                else => .parse(void, fmt),
+                .integer => .parse(i32, "d"),
+                .float => .parse(f32, "d"),
+                else => .parse(void, ""),
             };
+            const options: std.fmt.FormatOptions = .{};
             try prettyPrint(self.x, writer, .{ .fmt = fmt_, .options = options });
         }
     };
 
-    pub fn prettyPrint(self: HostBuffer, writer: anytype, options: stdx.fmt.FullFormatOptions) !void {
+    pub fn prettyPrint(self: HostBuffer, writer: *std.Io.Writer, options: stdx.fmt.FullFormatOptions) !void {
         return self.prettyPrintIndented(writer, 4, 0, options);
     }
 
-    fn prettyPrintIndented(self: HostBuffer, writer: anytype, num_rows: u8, indent_level: u8, options: stdx.fmt.FullFormatOptions) !void {
+    fn prettyPrintIndented(self: HostBuffer, writer: *std.Io.Writer, num_rows: u8, indent_level: u8, options: stdx.fmt.FullFormatOptions) !void {
         if (self.rank() == 0) {
             // Special case input tensor is a scalar
             return switch (self.dtype()) {
@@ -376,7 +373,7 @@ pub const HostBuffer = struct {
         if (self.rank() == 1) {
             // Print a contiguous slice of items from the buffer in one line.
             // The number of items printed is controlled by the user through format syntax.
-            try writer.writeByteNTimes(' ', indent_level);
+            try writer.splatByteAll(' ', indent_level);
             switch (self.dtype()) {
                 inline else => |dt| {
                     const values = self.items(dt.toZigType());
@@ -391,10 +388,10 @@ pub const HostBuffer = struct {
             return;
         }
         // TODO: consider removing the \n if dim is 1 for this axis.
-        try writer.writeByteNTimes(' ', indent_level);
+        try writer.splatByteAll(' ', indent_level);
         _ = try writer.write("{\n");
         defer {
-            writer.writeByteNTimes(' ', indent_level) catch {};
+            writer.splatByteAll(' ', indent_level) catch {};
             _ = writer.write("},\n") catch {};
         }
 
@@ -409,7 +406,7 @@ pub const HostBuffer = struct {
         if (n < num_rows) return;
         // Skip middle rows
         if (n > 2 * num_rows) {
-            try writer.writeByteNTimes(' ', indent_level + 2);
+            try writer.splatByteAll(' ', indent_level + 2);
             _ = try writer.write("...\n");
         }
         // Write last rows

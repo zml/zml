@@ -15,7 +15,7 @@ pub const CompilationOptions = struct {
     xla_dump_fusion_visualization: bool = false,
     xla_dump_hlo_pass_re: ?[]const u8 = null,
     sharding_enabled: bool = false,
-    sharding_axes: std.BoundedArray([*:0]const u8, 8) = .{},
+    sharding_axes: stdx.BoundedArray([*:0]const u8, 8) = .{},
 };
 
 pub const Platform = struct {

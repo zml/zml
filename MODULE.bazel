@@ -18,7 +18,7 @@ bazel_dep(name = "rules_oci", version = "2.2.6")
 bazel_dep(name = "rules_proto", version = "7.1.0")
 bazel_dep(name = "rules_python", version = "1.5.3")
 bazel_dep(name = "rules_rust", version = "0.63.0")
-bazel_dep(name = "rules_zig", version = "20250821.0-be53625")
+bazel_dep(name = "rules_zig", version = "20250827.0-35b6d57")
 bazel_dep(name = "toolchains_llvm_bootstrapped", version = "0.2.4")
 bazel_dep(name = "with_cfg.bzl", version = "0.11.0")
 
@@ -26,7 +26,7 @@ bazel_dep(name = "buildifier_prebuilt", version = "8.2.0.2", dev_dependency = Tr
 
 zig = use_extension("@rules_zig//zig:extensions.bzl", "zig")
 zig.index(file = "//bazel:zig_index.json")
-zig.toolchain(zig_version = "0.14.1")
+zig.toolchain(zig_version = "0.15.1")
 zig.mirrors(urls = [
     "https://mirror.zml.ai/zig",
     "https://ziglang.org/builds/",

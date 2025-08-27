@@ -9,6 +9,7 @@ zig_library(
     deps = [
         "//async",
         "//ffi:zig",
+        "//stdx",
         "//zml/tokenizer/hftokenizers",
         "//zml/tokenizer/sentencepiece",
     ],

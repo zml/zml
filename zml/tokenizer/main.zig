@@ -1,9 +1,10 @@
 const std = @import("std");
-const log = std.log.scoped(.@"//zml/tokenizer");
 
 const asynk = @import("async");
 const stdx = @import("stdx");
 const zml_tokenizer = @import("zml/tokenizer");
+
+const log = std.log.scoped(.@"//zml/tokenizer");
 
 const Flags = struct {
     tokenizer: []const u8,
@@ -35,7 +36,7 @@ pub fn asyncMain() !void {
 
     const prompt_tok = try encoder.encode(args.prompt);
 
-    log.info("Input: {s}\nOutput: {d}", .{ args.prompt, prompt_tok });
+    log.info("Input: {s}\nOutput: {any}", .{ args.prompt, prompt_tok });
 
     var errors: u8 = 0;
     {
@@ -47,14 +48,14 @@ pub fn asyncMain() !void {
     }
 
     if (args.expected.len > 0) {
-        var expected = try std.ArrayList(u32).initCapacity(allocator, args.prompt.len);
+        var expected = try std.array_list.Managed(u32).initCapacity(allocator, args.prompt.len);
         var it = std.mem.splitSequence(u8, args.expected, ",");
         while (it.next()) |int_token| {
             const tok = try std.fmt.parseInt(u32, int_token, 10);
             try expected.append(tok);
         }
         if (!std.mem.eql(u32, expected.items, prompt_tok)) {
-            log.err("Doesn't match expected: {d}", .{expected.items});
+            log.err("Doesn't match expected: {any}", .{expected.items});
             errors += 1;
         }
     }

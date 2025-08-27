@@ -1,3 +1,5 @@
+pub const BoundedArray = @import("bounded_array.zig").BoundedArray;
+pub const BoundedArrayAligned = @import("bounded_array.zig").BoundedArrayAligned;
 pub const debug = @import("debug.zig");
 pub const flags = @import("flags.zig");
 pub const fmt = @import("fmt.zig");

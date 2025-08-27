@@ -40,8 +40,8 @@ pub const TokenEmbedding = struct {
     weight: Tensor,
 
     pub fn forward(self: TokenEmbedding, idx: Tensor) Tensor {
-        stdx.debug.assert(idx.dtype().isInteger(), "TokenEmbedding expects an integer input, received: {}", .{idx});
-        stdx.debug.assert(self.weight.rank() == 2, "TokenEmbedding expects it's weight Tensor to be a 2D matrix, got {}", .{self.weight});
+        stdx.debug.assert(idx.dtype().isInteger(), "TokenEmbedding expects an integer input, received: {f}", .{idx});
+        stdx.debug.assert(self.weight.rank() == 2, "TokenEmbedding expects it's weight Tensor to be a 2D matrix, got {f}", .{self.weight});
         return self.weight.gatherValues(0, idx, .{});
     }
 };
@@ -204,13 +204,13 @@ pub const RopeOpts = struct {
 /// - pos_idx: optional tensor which indicates which positions are needed.
 ///   When not set `rope` return all positions from 0 to x.dim(.s) which is the max seq len.
 pub fn rope(x: Tensor, pos_idx: ?Tensor, opts: RopeOpts) Tensor {
-    stdx.debug.assert(@mod(x.dim(.hd), 2) == 0, "rope expects a even head dim (.hd), got {}", .{x});
+    stdx.debug.assert(@mod(x.dim(.hd), 2) == 0, "rope expects a even head dim (.hd), got {f}", .{x});
 
     const idx = if (pos_idx) |idx| blk: {
-        stdx.debug.assert(x.shape().hasTags(.{.hd}), "rope expects x argument to have .hd axes got: rope(x={}, idx={})", .{ x, idx });
+        stdx.debug.assert(x.shape().hasTags(.{.hd}), "rope expects x argument to have .hd axes got: rope(x={f}, idx={f})", .{ x, idx });
         break :blk idx;
     } else blk: {
-        stdx.debug.assert(x.shape().hasTags(.{ .s, .hd }), "rope expects x argument to have both .s and .hd axes got: rope(x={})", .{x});
+        stdx.debug.assert(x.shape().hasTags(.{ .s, .hd }), "rope expects x argument to have both .s and .hd axes got: rope(x={f})", .{x});
         break :blk Tensor.arange(.{ .end = x.dim(.s) }, .f32).withTags(.{.s});
     };
     const x_real, const x_imag = splitRealImg(x, opts.layout);
@@ -273,7 +273,7 @@ fn _invFreq(opts: RopeOpts, inv_freq: []f32) void {
     switch (opts.scaling) {
         .default => {},
         .custom => {
-            stdx.debug.assert(opts.scaling.custom.len == N, "rope expected custom inv_freq to match half head dimension {}, got {}", .{ N, opts.scaling.custom.len });
+            stdx.debug.assert(opts.scaling.custom.len == N, "rope expected custom inv_freq to match half head dimension {d}, got {d}", .{ N, opts.scaling.custom.len });
             @memcpy(inv_freq, opts.scaling.custom);
         },
         .llama3 => |s| {
@@ -318,7 +318,7 @@ test invFreq {
     var inv_freq: @TypeOf(llama_freq) = undefined;
     _invFreq(llama_conf, &inv_freq);
     for (llama_freq, inv_freq, 0..) |expected, actual, i| {
-        errdefer log.err("Mismatch at position {d}.\nExpected: {d}\nActual:   {d}", .{ i, llama_freq, inv_freq });
+        errdefer log.err("Mismatch at position {d}.\nExpected: {any}\nActual:   {any}", .{ i, llama_freq, inv_freq });
         try std.testing.expectApproxEqRel(expected, actual, 1e-5);
     }
 }
@@ -462,7 +462,7 @@ pub fn upsample(
 ) Tensor {
     // TODO(james): make `nearest` compatible with resizeBilinear and resizeBicubic, and wrap them here.
     // resize* have API which are more explicit, this assume you want to scale the N-2 last axes.
-    stdx.debug.assert(3 <= input.rank() and input.rank() <= 5, "upsample is only implemented for (3,4,5)-D tensors, received {}", .{input});
+    stdx.debug.assert(3 <= input.rank() and input.rank() <= 5, "upsample is only implemented for (3,4,5)-D tensors, received {f}", .{input});
     stdx.debug.assert(opts.scale_factor.len == 1 or opts.scale_factor.len == input.rank() - 2, "scale factors", .{});
     return switch (opts.mode) {
         .nearest => {
@@ -791,7 +791,7 @@ pub fn causalAttnMask(
     attn_window_len: ?u32,
 ) Tensor {
     const attn_shape = Shape.init(attn_shape_, dtype);
-    stdx.debug.assert(attn_shape.rank() == 2, "causalAttnMask({}) shape need to be exactly 2 axes", .{attn_shape});
+    stdx.debug.assert(attn_shape.rank() == 2, "causalAttnMask({f}) shape need to be exactly 2 axes", .{attn_shape});
     const qlen = attn_shape.dim(-2);
     const q_idx = Tensor.iota(attn_shape, -2);
     const klen = attn_shape.dim(-1);
@@ -843,7 +843,7 @@ pub const SdpaOpts = struct {
 pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
     var q, var k, var v = .{ q_, k_, v_ };
 
-    const err_template = "sdpa(q: {}, k: {}, v: {}, attn: {?}) is invalid ! ";
+    const err_template = "sdpa(q: {f}, k: {f}, v: {f}, attn: {?f}) is invalid ! ";
     const err_args = .{ q, k, v, opts.attn_mask };
     stdx.debug.assert(q.shape().hasTags(.{ .h, .q, .hd }), err_template ++ "q is missing tags {{.h, .q, .hd}}", err_args);
     stdx.debug.assert(k.shape().hasTags(.{ .h, .k, .hd }), err_template ++ "k is missing tags {{.h, .k, .hd}}", err_args);
@@ -909,8 +909,8 @@ const SdpaMemEfficient = struct {
     chunking: SdpaChunks,
 
     fn forward(self: SdpaMemEfficient) Tensor {
-        stdx.debug.assert(@mod(self.q.dim(.q), self.chunking.q_chunk_size) == 0, "sdpaMemEfficient expects the chunk_size to exactly divise the seq_len, got: sdpaMemEfficient({}, {})", .{ self.q, self.chunking });
-        stdx.debug.assert(@mod(self.k.dim(.k), self.chunking.k_chunk_size) == 0, "sdpaMemEfficient expects the chunk_size to exactly divise the seq_len, got: sdpaMemEfficient({}, {})", .{ self.k, self.chunking });
+        stdx.debug.assert(@mod(self.q.dim(.q), self.chunking.q_chunk_size) == 0, "sdpaMemEfficient expects the chunk_size to exactly divise the seq_len, got: sdpaMemEfficient({f}, {})", .{ self.q, self.chunking });
+        stdx.debug.assert(@mod(self.k.dim(.k), self.chunking.k_chunk_size) == 0, "sdpaMemEfficient expects the chunk_size to exactly divise the seq_len, got: sdpaMemEfficient({f}, {})", .{ self.k, self.chunking });
         const n_q_chunks: u32 = @intCast(@divExact(self.q.dim(.q), self.chunking.q_chunk_size));
 
         const ctx = zml.module.CompilationContext.current();
@@ -1054,7 +1054,7 @@ pub fn sdpaChunk(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) PartialSoft
     // Consider implementing sdpa from sdpaChunk.
     var q, var k, var v = .{ q_, k_, v_ };
 
-    const err_template = "sdpa(q: {}, k: {}, v: {}, attn: {?}) is invalid ! ";
+    const err_template = "sdpa(q: {f}, k: {f}, v: {f}, attn: {?f}) is invalid ! ";
     const err_args = .{ q, k, v, opts.attn_mask };
     stdx.debug.assert(q.shape().hasTags(.{ .h, .q, .hd }), err_template ++ "q is missing tags {{.h, .q, .hd}}", err_args);
     stdx.debug.assert(k.shape().hasTags(.{ .h, .k, .hd }), err_template ++ "k is missing tags {{.h, .k, .hd}}", err_args);

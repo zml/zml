@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const mlir = @import("mlir");
+const stdx = @import("stdx");
 
 pub fn func(
     ctx: mlir.Context,
@@ -14,7 +15,7 @@ pub fn func(
         location: mlir.Location,
     },
 ) mlir.Operation {
-    var attrs_tuple_buffer = std.BoundedArray(mlir.AttrTuple, 4){};
+    var attrs_tuple_buffer = stdx.BoundedArray(mlir.AttrTuple, 4){};
     attrs_tuple_buffer.appendAssumeCapacity(.{ "sym_name", .string(ctx, args.sym_name) });
     attrs_tuple_buffer.appendAssumeCapacity(.{ "function_type", .type_(.function(ctx, args.args, args.results)) });
     if (args.arg_attrs.len > 0) {

@@ -14,7 +14,7 @@ const Tensor = zml.Tensor;
 /// * `matmul(.{10}, .{10}) -> .{}`
 /// * `matmul(.{10}, .{10}) -> .{}`
 pub fn matmul(lhs: Tensor, rhs: Tensor) Tensor {
-    stdx.debug.assert(lhs.rank() >= 1 and rhs.rank() >= 1, "Can't matmul({}, {}) ! The two tensors need to have at least rank 1.", .{ lhs, rhs });
+    stdx.debug.assert(lhs.rank() >= 1 and rhs.rank() >= 1, "Can't matmul({f}, {f}) ! The two tensors need to have at least rank 1.", .{ lhs, rhs });
 
     const contracting = [_][2]i8{.{ -1, if (rhs.rank() >= 2) rhs.rank() - 2 else 0 }};
     if (lhs.rank() == 1 or rhs.rank() <= 2) {
@@ -22,7 +22,7 @@ pub fn matmul(lhs: Tensor, rhs: Tensor) Tensor {
         return lhs.dotGeneral(rhs, &contracting, &.{});
     }
 
-    stdx.debug.assert(lhs.rank() == 2, "Can't matmul({}, {}) ! One of the two tensors need to have a rank less than 2.", .{ lhs, rhs });
+    stdx.debug.assert(lhs.rank() == 2, "Can't matmul({f}, {f}) ! One of the two tensors need to have a rank less than 2.", .{ lhs, rhs });
 
     // Pytorch treats the extra dimensions of rhs has batching dimensions,
     // and implicitly broadcast lhs along those.
@@ -91,7 +91,7 @@ pub fn unsqueeze(
     self: Tensor,
     axis_: anytype,
 ) Tensor {
-    stdx.debug.assert(self.rank() < Tensor.MAX_RANK - 1, "Can't unsqueeze {}, it's already at max rank.", .{self});
+    stdx.debug.assert(self.rank() < Tensor.MAX_RANK - 1, "Can't unsqueeze {f}, it's already at max rank.", .{self});
     const a = switch (@typeInfo(@TypeOf(axis_))) {
         .int, .comptime_int => if (axis_ < 0)
             @as(i8, self.rank()) + 1 + axis_
@@ -125,9 +125,9 @@ test unsqueeze {
 /// ref: https://pytorch.org/docs/stable/generated/torch.nn.PixelShuffle.html#pixelshuffle
 pub fn pixelShuffle(tensor: Tensor, upscale_factor: u32) Tensor {
     const shape = tensor.shape();
-    stdx.debug.assert(shape.hasTags(.{ .c, .w, .h }), "pixelShuffle({}) is invalide. Missing tags {{.c, .w, .h}}", .{tensor});
+    stdx.debug.assert(shape.hasTags(.{ .c, .w, .h }), "pixelShuffle({f}) is invalide. Missing tags {{.c, .w, .h}}", .{tensor});
 
-    stdx.debug.assert(@mod(shape.dim(.c), upscale_factor * upscale_factor) == 0, "pixelShuffle({}) is invalide. Number of channels {}, isn't divisible by upscale factor {}**2", .{ tensor, shape.dim(.c), upscale_factor });
+    stdx.debug.assert(@mod(shape.dim(.c), upscale_factor * upscale_factor) == 0, "pixelShuffle({f}) is invalide. Number of channels {}, isn't divisible by upscale factor {}**2", .{ tensor, shape.dim(.c), upscale_factor });
 
     const s = tensor.splitAxis(.c, .{ .c = -1, .upscale_h = upscale_factor, .upscale_w = upscale_factor });
     const perm = s.shape().contiguousPerm(.{ .h, .upscale_h, .w, .upscale_w });

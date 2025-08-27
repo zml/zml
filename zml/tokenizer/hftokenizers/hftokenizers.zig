@@ -1,6 +1,8 @@
 const std = @import("std");
+
 const c = @import("c");
 const ffi = @import("ffi");
+const stdx = @import("stdx");
 
 pub const Encoder = struct {
     inner: *HFTokenizer,
@@ -33,8 +35,8 @@ pub const Encoder = struct {
 };
 
 pub const Decoder = struct {
-    const StringBuffer = std.BoundedArray(u8, 128);
-    const TokensIdsBuffer = std.BoundedArray(u32, 4);
+    const StringBuffer = stdx.BoundedArray(u8, 128);
+    const TokensIdsBuffer = stdx.BoundedArray(u32, 4);
 
     inner: *HFTokenizer,
     current_string: ?[]const u8 = null,

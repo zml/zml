@@ -22,9 +22,9 @@ pub const Shape = struct {
     pub const TagUnknown = "_".ptr;
     const TagLast = "last".ptr;
 
-    pub const DimsArray = std.BoundedArray(i64, MAX_RANK);
-    pub const TagsArray = std.BoundedArray(Tag, MAX_RANK);
-    pub const AxesArray = std.BoundedArray(u3, MAX_RANK);
+    pub const DimsArray = stdx.BoundedArray(i64, MAX_RANK);
+    pub const TagsArray = stdx.BoundedArray(Tag, MAX_RANK);
+    pub const AxesArray = stdx.BoundedArray(u3, MAX_RANK);
     pub const ShardingInfo = @Vector(MAX_RANK, bool);
 
     const UnknownTags: TagsArray = .{ .len = 0, .buffer = [_]Tag{TagUnknown} ** MAX_RANK };
@@ -300,7 +300,7 @@ pub const Shape = struct {
     fn axisFromInt(self: Shape, a: isize) u3 {
         const rk: i8 = self.rank();
         if (a < -rk or a > rk) {
-            stdx.debug.panic("Tensor {} doesn't have dimension: {d}", .{ self, a });
+            stdx.debug.panic("Tensor {f} doesn't have dimension: {d}", .{ self, a });
         }
         return if (a < 0)
             @intCast(a + rk)
@@ -341,9 +341,9 @@ pub const Shape = struct {
     }
 
     fn axisFromTag(self: Shape, d: Tag) u3 {
-        stdx.debug.assert(d != TagUnknown, "The unknown tag .{s} can't be used to fetch axis in {}", .{ d, self });
+        stdx.debug.assert(d != TagUnknown, "The unknown tag .{s} can't be used to fetch axis in {f}", .{ d, self });
         return self.axisFromTagMaybe(d) orelse {
-            stdx.debug.panic("Tensor {} doesn't have dimension with tag: {s}", .{ self, d });
+            stdx.debug.panic("Tensor {f} doesn't have dimension with tag: {s}", .{ self, d });
         };
     }
 
@@ -357,7 +357,7 @@ pub const Shape = struct {
     pub fn count(self: Shape) usize {
         var res: i64 = 1;
         for (self.dims()) |d| {
-            stdx.debug.assert(d >= 0, "Can't count elements in shape with negative dimension: {}", .{self});
+            stdx.debug.assert(d >= 0, "Can't count elements in shape with negative dimension: {f}", .{self});
             res *= d;
         }
         return @intCast(res);
@@ -388,12 +388,11 @@ pub const Shape = struct {
     /// Bare format {_}: "{.a=10, .b=20}, dtype=.f32"
     pub fn format(
         self: Shape,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
         writer: anytype,
     ) !void {
-        _ = options;
-        const bare_fmt = fmt.len == 1 and fmt[0] == '_';
+        // TODO: impl alternative format
+        // const bare_fmt = fmt.len == 1 and fmt[0] == '_';
+        const bare_fmt = true;
         _ = try writer.write(if (bare_fmt) "{" else "Shape({");
 
         var need_comma = false;
@@ -441,12 +440,12 @@ pub const Shape = struct {
         var new_shape: Shape = .{ ._dtype = self.dtype() };
         new_shape._dims, new_shape._tags = parseDimensions(new_shape_);
         new_shape.inferMissingAxis(self.count());
-        stdx.debug.assert(self.count() == new_shape.count(), "Can't reshape {d} to {d}", .{ self.dims(), new_shape.dims() });
+        stdx.debug.assert(self.count() == new_shape.count(), "Can't reshape {any} to {any}", .{ self.dims(), new_shape.dims() });
         return new_shape;
     }
 
     fn inferMissingAxis(self: *Shape, n_: usize) void {
-        stdx.debug.assert(std.mem.count(i64, self.dims(), &.{-1}) < 2, "Cannot infer multiple dimensions when reshaping to: {}", .{self.*});
+        stdx.debug.assert(std.mem.count(i64, self.dims(), &.{-1}) < 2, "Cannot infer multiple dimensions when reshaping to: {f}", .{self.*});
 
         const inferred_ax = std.mem.indexOfScalar(i64, self.dims(), -1) orelse return;
         // We can't use `self.count()` yet cause we have negative dims.
@@ -524,7 +523,7 @@ pub const Shape = struct {
     }
 
     pub fn insertTag(self: Shape, axis_: anytype, d: i64, tag_: anytype) Shape {
-        stdx.debug.assert(self.rank() < MAX_RANK - 1, "Can't insert new axis in {}, it's already at max rank.", .{self});
+        stdx.debug.assert(self.rank() < MAX_RANK - 1, "Can't insert new axis in {f}, it's already at max rank.", .{self});
 
         const ax = if (@TypeOf(axis_) == EnumLiteral and axis_ == .last)
             self.rank()
@@ -652,7 +651,7 @@ pub const Shape = struct {
         var res = self;
 
         if (comptime stdx.meta.isSliceOf(T, Tag) or stdx.meta.isSliceOf(T, EnumLiteral)) {
-            stdx.debug.assert(tagz.len == self.rank(), "Not enough tags for shape {}, got {any}", .{ self, tagz });
+            stdx.debug.assert(tagz.len == self.rank(), "Not enough tags for shape {f}, got {any}", .{ self, tagz });
             for (tagz, 0..) |tag_, i| {
                 res._tags.set(i, toTag(tag_));
             }
@@ -660,7 +659,7 @@ pub const Shape = struct {
         }
 
         if (comptime stdx.meta.isTupleOf(T, Tag) or stdx.meta.isTupleOf(T, EnumLiteral)) {
-            stdx.debug.assert(tagz.len == self.rank(), "Not enough tags for shape {}, got {}", .{ self, tagz });
+            stdx.debug.assert(tagz.len == self.rank(), "Not enough tags for shape {f}, got {}", .{ self, tagz });
             inline for (tagz, 0..) |tag_, i| {
                 res._tags.set(i, toTag(tag_));
             }
@@ -699,7 +698,7 @@ pub const Shape = struct {
         var res = self;
 
         if (comptime stdx.meta.isSliceOf(T, Tag) or stdx.meta.isSliceOf(T, EnumLiteral)) {
-            stdx.debug.assert(tagz.len <= self.rank(), "Too many tags for shape {}, got {any}", .{ self, tagz });
+            stdx.debug.assert(tagz.len <= self.rank(), "Too many tags for shape {f}, got {any}", .{ self, tagz });
             for (tagz, self.rank() - tagz.len..) |tag_, i| {
                 res._tags.set(i, toTag(tag_));
             }
@@ -707,7 +706,7 @@ pub const Shape = struct {
         }
 
         if (comptime stdx.meta.isTupleOf(T, Tag) or stdx.meta.isTupleOf(T, EnumLiteral)) {
-            stdx.debug.assert(tagz.len <= self.rank(), "Too many tags for shape {}, got {}", .{ self, tagz });
+            stdx.debug.assert(tagz.len <= self.rank(), "Too many tags for shape {f}, got {}", .{ self, tagz });
             inline for (tagz, self.rank() - tagz.len..) |tag_, i| {
                 res._tags.set(i, toTag(tag_));
             }
@@ -765,7 +764,7 @@ pub const Shape = struct {
         var res = self;
         inline for (std.meta.fields(T)) |field| {
             const new_field = @field(renames, field.name);
-            stdx.debug.assert(self.hasTag(new_field) == null, "{}.rename({any}) failed because of duplicated axis {}", .{ self, renames, new_field });
+            stdx.debug.assert(self.hasTag(new_field) == null, "{f}.rename({any}) failed because of duplicated axis {}", .{ self, renames, new_field });
             res._tags.set(self.axis(field), toTag(new_field));
         }
         return res;
@@ -785,9 +784,9 @@ pub const Shape = struct {
         }
     }
 
-    pub fn computeStrides(self: Shape) std.BoundedArray(i64, MAX_RANK) {
+    pub fn computeStrides(self: Shape) stdx.BoundedArray(i64, MAX_RANK) {
         const rk = self.rank();
-        var strides: std.BoundedArray(i64, MAX_RANK) = .{ .len = rk };
+        var strides: stdx.BoundedArray(i64, MAX_RANK) = .{ .len = rk };
         if (rk == 0) return strides;
 
         const V = @Vector(MAX_RANK, i64);
@@ -907,7 +906,7 @@ pub const Shape = struct {
         var new_dim: i64 = 1;
         for (axes__.constSlice(), first_axis..) |ax, counter| {
             new_dim *= self.dim(ax);
-            stdx.debug.assert(ax == counter, "Can't merge shape {} along non-contiguous axes {any}", .{ self, axes_ });
+            stdx.debug.assert(ax == counter, "Can't merge shape {f} along non-contiguous axes {any}", .{ self, axes_ });
         }
 
         var new_shape = self;
@@ -991,10 +990,10 @@ pub const Shape = struct {
         return res;
     }
 
-    pub fn parseStruct(T: type, v: anytype) struct { std.BoundedArray(T, MAX_RANK), TagsArray } {
+    pub fn parseStruct(T: type, v: anytype) struct { stdx.BoundedArray(T, MAX_RANK), TagsArray } {
         const V = @TypeOf(v);
 
-        var vals_: std.BoundedArray(T, MAX_RANK) = .{};
+        var vals_: stdx.BoundedArray(T, MAX_RANK) = .{};
         var tags_: TagsArray = .{};
 
         if (comptime stdx.meta.isSliceOf(V, T)) {
@@ -1029,10 +1028,10 @@ pub const Shape = struct {
     }
 
     /// Parses a struct literal into a list of options for each axes.
-    pub fn parseAxesOptions(self: Shape, T: type, options: anytype, default: T) std.BoundedArray(T, MAX_RANK) {
+    pub fn parseAxesOptions(self: Shape, T: type, options: anytype, default: T) stdx.BoundedArray(T, MAX_RANK) {
         const V = @TypeOf(options);
 
-        var res: std.BoundedArray(T, MAX_RANK) = .{};
+        var res: stdx.BoundedArray(T, MAX_RANK) = .{};
         if (comptime stdx.meta.isSliceOf(V, T)) {
             stdx.debug.assert(options.len == self.rank(), "expects exactly {} options in slice, for {} got {}", .{ self.rank(), self, options.len });
             for (options) |d| {
@@ -1084,7 +1083,7 @@ pub const Shape = struct {
         for (0..other.rank()) |ax| {
             if (other.tag(ax) != Shape.TagUnknown) {
                 if (self.hasTag(other.tag(ax))) |batching_ax| {
-                    stdx.debug.assert(batching_ax == batching_axes and batching_ax == ax, "outer expects batching dims to be the first dims in both tensors, got outer({}, {})", .{ self, other });
+                    stdx.debug.assert(batching_ax == batching_axes and batching_ax == ax, "outer expects batching dims to be the first dims in both tensors, got outer({f}, {f})", .{ self, other });
                     batching_axes += 1;
                 }
             }

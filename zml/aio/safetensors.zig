@@ -1,12 +1,15 @@
-const asynk = @import("async");
 const std = @import("std");
-const zml = @import("../zml.zig");
-const json = @import("json.zig");
-const HostBuffer = zml.HostBuffer;
+const Allocator = std.mem.Allocator;
+
+const asynk = @import("async");
+const stdx = @import("stdx");
+
 const MemoryMappedFile = @import("../aio.zig").MemoryMappedFile;
+const zml = @import("../zml.zig");
+const HostBuffer = zml.HostBuffer;
+const json = @import("json.zig");
 
 const StringBuilder = std.ArrayListUnmanaged(u8);
-const Allocator = std.mem.Allocator;
 const log = std.log.scoped(.@"zml/io");
 
 pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore {
@@ -16,7 +19,7 @@ pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore
     errdefer res.arena.deinit();
     const arena = res.arena.allocator();
 
-    var files = std.ArrayList(MemoryMappedFile).init(arena);
+    var files = std.array_list.Managed(MemoryMappedFile).init(arena);
     errdefer files.deinit();
 
     if (std.mem.endsWith(u8, path, ".safetensors.index.json")) {
@@ -28,17 +31,19 @@ pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore
     return res;
 }
 
-fn loadFromIndex(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.ArrayList(MemoryMappedFile), path: []const u8) !void {
+fn loadFromIndex(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.array_list.Managed(MemoryMappedFile), path: []const u8) !void {
     const file = asynk.File.open(path, .{}) catch |err| {
         log.err("Failed to open {s}: {}", .{ path, err });
         return err;
     };
     errdefer file.close() catch unreachable;
-    var r = file.reader();
+    var buffer: [4096]u8 = undefined;
+    var r = file.reader(&buffer);
 
-    const json_data = try allocator.alloc(u8, (try file.stat()).size);
-    _ = try r.readAtLeast(json_data, json_data.len);
-    const index = try std.json.parseFromSliceLeaky(std.json.Value, allocator, json_data, .{ .allocate = .alloc_if_needed });
+    // const json_data = try allocator.alloc(u8, (try file.stat()).size);
+    var json_reader = std.json.Reader.init(allocator, &r.interface);
+    // _ = try r.readAtLeast(json_data, json_data.len);
+    const index = try std.json.parseFromTokenSourceLeaky(std.json.Value, allocator, &json_reader, .{ .allocate = .alloc_if_needed });
     var loaded_files = std.StringHashMap(void).init(allocator);
 
     const weight_map = index.object.get("weight_map").?.object;
@@ -62,23 +67,24 @@ fn loadFromIndex(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.
     }
 }
 
-fn loadFile(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.ArrayList(MemoryMappedFile), path: []const u8) !void {
+fn loadFile(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.array_list.Managed(MemoryMappedFile), path: []const u8) !void {
     const file = asynk.File.open(path, .{}) catch |err| {
         log.err("Failed to open {s}: {}", .{ path, err });
         return err;
     };
     errdefer file.close() catch unreachable;
-    var r = file.reader();
+    var buffer: [16 * 1024]u8 = undefined;
+    var r = file.reader(&buffer);
 
-    const json_header_length: usize = @intCast(try r.readInt(u64, std.builtin.Endian.little));
+    const json_header_length: usize = @intCast(try r.interface.takeInt(u64, .little));
     const json_data = try allocator.alloc(u8, json_header_length);
-    const n = try r.readAll(json_data);
-    if (n != json_header_length) {
-        log.err("Failed to read the full {} bytes of json header from file {s}", .{ n, path });
-        return error.CorruptedFile;
-    }
+    try r.interface.readSliceAll(json_data);
+    // if (n != json_header_length) {
+    //     log.err("Failed to read the full {} bytes of json header from file {s}", .{ n, path });
+    //     return error.CorruptedFile;
+    // }
 
-    const metadata = try std.json.parseFromSliceLeaky(std.json.Value, allocator, json_data[0..n], .{});
+    const metadata = try std.json.parseFromSliceLeaky(std.json.Value, allocator, json_data, .{});
     var buffer_file = try MemoryMappedFile.init(file);
     errdefer buffer_file.deinit();
     buffer_file.data_offset = 8 + json_header_length;
@@ -105,7 +111,7 @@ fn loadFile(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.Array
         const start: usize = @intCast(offset_field.array.items[0].integer);
         const end: usize = @intCast(offset_field.array.items[1].integer);
         const dtype = try stringToDtype(val.object.get("dtype").?.string);
-        var dims: std.BoundedArray(i64, zml.Shape.MAX_RANK) = .{};
+        var dims: stdx.BoundedArray(i64, zml.Shape.MAX_RANK) = .{};
         for (shape_field.items) |d| {
             dims.appendAssumeCapacity(d.integer);
         }

@@ -51,7 +51,7 @@ pub const CompilationContext = struct {
 
     _module: mlir.Module,
 
-    _blocks: std.BoundedArray(TaggedBlock, 64) = .{},
+    _blocks: stdx.BoundedArray(TaggedBlock, 64) = .{},
     _fn_cache: FnCache = .{},
 
     _block_args: TensorToBlockArg = .{},
@@ -63,7 +63,7 @@ pub const CompilationContext = struct {
 
     const TaggedBlock = struct { mlir.Block, mlir.Block.RecursiveOpts };
     const TensorToBlockArg = std.AutoHashMapUnmanaged(Tensor._Id, struct { mlir.Value, Tensor._Donation });
-    const AttributeList = std.BoundedArray(mlir.NamedAttribute, 3);
+    const AttributeList = stdx.BoundedArray(mlir.NamedAttribute, 3);
 
     pub fn init(allocator_: std.mem.Allocator, full_name: []const u8, platform: Platform) !CompilationContext {
         const mlir_registry = mlir.Registry.init() catch unreachable;
@@ -185,7 +185,9 @@ pub const CompilationContext = struct {
             // Write the mlir to a file. All errors are discarded, since this is for debugging only.
             const mlir_name = "module.mlir";
             if (cache_dir.createFile(mlir_name, .{ .truncate = true })) |file| {
-                module.op().print(file.writer(), .{ .debug_info = true, .debug_info_pretty_form = false });
+                var write_buf: [4096]u8 = undefined;
+                var writer = file.writer(&write_buf);
+                module.op().print(&writer.interface, .{ .debug_info = true, .debug_info_pretty_form = false });
                 log.info("Wrote MLIR to {s}/{s}", .{ module_dir.?, mlir_name });
             } else |_| {
                 log.warn("Failed to open {s}", .{mlir_name});
@@ -219,7 +221,7 @@ pub const CompilationContext = struct {
         };
 
         log.debug("******** ZML generated MLIR ********", .{});
-        log.debug("{}", .{module.op().mlirFormatter(.{})});
+        log.debug("{f}", .{module.op().mlirFormatter(.{})});
 
         if (timer) |*t| {
             const time_ms = @divFloor(t.lap(), std.time.ns_per_ms);
@@ -339,7 +341,7 @@ pub const CompilationContext = struct {
         const locations = try arena.alloc(mlir.Location, tensor_count);
         @memset(locations, mlir.Location.unknown(mlir_ctx));
 
-        var input_shapes = try std.ArrayList(Shape).initCapacity(res_allocator, tensor_count);
+        var input_shapes: std.array_list.Managed(Shape) = try .initCapacity(res_allocator, tensor_count);
         meta.collect(Tensor.shape, {}, &input_shapes, args) catch unreachable;
         stdx.debug.internalAssert(input_shapes.items.len == tensor_count, "args have changed ?", .{});
 
@@ -416,7 +418,7 @@ pub const CompilationContext = struct {
         defer self._tracer.frameEnd(canonicalize_frame, "emitMlir.canonicalize");
         self._mlir_canonicalizer.runOnOp(mlir_fn) catch |err| switch (err) {
             error.InvalidMlir => {
-                log.err("Failed to canonicalize invalid mlir: {}", .{mlir_fn.mlirFormatter(.{})});
+                log.err("Failed to canonicalize invalid mlir: {f}", .{mlir_fn.mlirFormatter(.{})});
                 // user errors should have triggered a panic before we reach this.
                 @panic("ZML generated invalid mlir. Please open a bug report");
             },
@@ -464,7 +466,7 @@ pub const CompilationContext = struct {
                     // This will break the day we writer another attribute before donation.
                     // When the time come, do a more fancy lookup here to check if an argument
                     // is donated twice.
-                    stdx.debug.assert(attributes[a].len == 0, "Donation error ! Argument {} has been donated twice ! To {} and to {}", .{ a, index, attributes[a].buffer[0] });
+                    stdx.debug.assert(attributes[a].len == 0, "Donation error ! Argument {d} has been donated twice ! To {d} and to {any}", .{ a, index, attributes[a].buffer[0] });
                     attributes[a].appendAssumeCapacity(.named(ctx, "tf.aliasing_output", .int(ctx, .i32, @intCast(index))));
                     // log.debug("attribute: {}", .{attributes[a].constSlice()});
                 },
@@ -504,9 +506,9 @@ pub const CompilationContext = struct {
         var tensor_args = .{ model, Tensor{ ._shape = s, ._id = .{ .buffer_id = 1234 } }, Tensor{ ._shape = s, ._id = .{ .buffer_id = 1235 } } };
         const f = try comp.emitMlir(Local._fwd, &tensor_args, .{ .name = "test.emitMlir.Local.forward", .kind = .main });
 
-        var mlir_bytecode = std.ArrayList(u8).init(std.testing.allocator);
+        var mlir_bytecode = std.array_list.Managed(u8).init(std.testing.allocator);
         defer mlir_bytecode.deinit();
-        try mlir_bytecode.writer().print("{}", .{f.mlir_fn.mlirFormatter(.{})});
+        try mlir_bytecode.writer().print("{f}", .{f.mlir_fn.mlirFormatter(.{})});
 
         // Check that the `x` input argument gives its buffer to the result tensor.
         // `%arg0` is the bias of the model, `%arg1` is `x`, `%arg2` is `y`.
@@ -545,7 +547,7 @@ pub const CompilationContext = struct {
     pub fn getShardingAttr(self: CompilationContext, shape: Shape) mlir.Attribute {
         const ctx = self.mlirCtx();
         const num_partitions = self.numPartitions();
-        var sharding_str: std.BoundedArray(u8, 128) = .{};
+        var sharding_str: stdx.BoundedArray(u8, 128) = .{};
         writeShardingRepresentation(shape, num_partitions, sharding_str.writer()) catch unreachable;
         return mlir.Attribute.string(ctx, sharding_str.constSlice());
     }
@@ -622,7 +624,7 @@ pub const CompilationContext = struct {
             const full_name: [:0]const u8 = if (std.mem.eql(u8, "main", func_name))
                 try self.allocator().dupeZ(u8, func_name)
             else
-                try std.fmt.allocPrintZ(self.allocator(), "{s}_{x}", .{ func_name, key.input_hash });
+                try std.fmt.allocPrintSentinel(self.allocator(), "{s}_{x}", .{ func_name, key.input_hash }, 0);
 
             var arg_id: u16 = 0;
             var tensor_args: @TypeOf(args) = args;
@@ -702,7 +704,7 @@ pub const CompilationContext = struct {
 
                 const res = ctx.self._block_args.getOrPutAssumeCapacity(tensor._id);
                 if (res.found_existing) {
-                    stdx.debug.panic("Failed compilation because received two tensors arguments with the same ID: {} and {} at index {} ({}).", .{ res.value_ptr.*[0], tensor, ctx.index, tensor._id });
+                    stdx.debug.panic("Failed compilation because received two tensors arguments with the same ID: {f} and {f} at index {} ({}).", .{ res.value_ptr.*[0], tensor, ctx.index, tensor._id });
                 } else {
                     res.value_ptr.* = .{ arg_value, .{ .arg = @intCast(ctx.index) } };
                 }
@@ -777,7 +779,7 @@ pub const CompilationContext = struct {
             .buffer_id, .arg_id => if (self._block_args.get(tensor._id)) |res|
                 .{ res[0], res[1] }
             else {
-                log.err("Found unknown tensor id {}({})", .{ tensor, tensor._id });
+                log.err("Found unknown tensor id {f}({})", .{ tensor, tensor._id });
                 @panic("Found unknown tensor id");
             },
             .mlir => |v| .{ v, tensor._donation },

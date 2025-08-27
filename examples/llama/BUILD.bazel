@@ -10,6 +10,7 @@ zig_binary(
         "llama.zig",
     ],
     main = "main.zig",
+    visibility = ["//visibility:public"],
     deps = [
         "//async",
         "//stdx",

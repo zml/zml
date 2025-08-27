@@ -153,6 +153,6 @@ pub const Allocator = struct {
             @panic("Unsupported case");
         }
 
-        return @ptrCast(self.allocator.alignedAlloc(u8, @alignOf(*anyopaque), size) catch return null);
+        return @ptrCast(self.allocator.alignedAlloc(u8, std.mem.Alignment.of(*anyopaque), size) catch return null);
     }
 };

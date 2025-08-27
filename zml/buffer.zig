@@ -45,7 +45,7 @@ pub const Buffer = struct {
     _shards: Shards,
 
     pub const MAX_NUM_SHARDS: u8 = Platform.MAX_NUM_DEVICES;
-    pub const Shards = std.BoundedArray(*pjrt.Buffer, MAX_NUM_SHARDS);
+    pub const Shards = stdx.BoundedArray(*pjrt.Buffer, MAX_NUM_SHARDS);
 
     pub const FromOptions = struct {
         wait: bool = true,
@@ -67,7 +67,7 @@ pub const Buffer = struct {
         const n_partitions = platform.sharding().num_partitions;
         const chunk_size = if (sharding_ax) |ax| cs: {
             // This kind of sharding error should be detected earlier on.
-            stdx.debug.assert(@rem(host_buffer.dim(ax), n_partitions) == 0, "Buffer.from({}) expects the sharding axis {} to have a dimension divisble by the number of devices ({}).", .{ host_buffer, ax, n_partitions });
+            stdx.debug.assert(@rem(host_buffer.dim(ax), n_partitions) == 0, "Buffer.from({f}) expects the sharding axis {} to have a dimension divisble by the number of devices ({}).", .{ host_buffer, ax, n_partitions });
             break :cs @divExact(host_buffer.dim(ax), n_partitions);
         } else 0;
 
@@ -201,7 +201,7 @@ pub const Buffer = struct {
             const duration_ms = stdx.math.divFloat(f32, start.read(), std.time.ns_per_ms);
             if (duration_ms > 100) {
                 const size_gb = stdx.math.divFloat(f32, shape_.byteSize(), 1024 * 1024 * 1024);
-                log.info("Wrote constant({_}) to device ({d:.2}Gb) in {d:.0}ms: {d:.2}Gb/s", .{ shape_, size_gb, duration_ms, size_gb / duration_ms * 1000 });
+                log.debug("Wrote constant({f}) to device ({d:.2}Gb) in {d:.0}ms: {d:.2}Gb/s", .{ shape_, size_gb, duration_ms, size_gb / duration_ms * 1000 });
             }
         }
 
@@ -301,7 +301,7 @@ pub const Buffer = struct {
 
     /// Fetches the content of the given buffer into a stack variable of the given type.
     pub fn getValue(self: Buffer, T: type) !T {
-        stdx.debug.assert(self._shape.byteSize() == @sizeOf(T), "Buffer {} has {d} bytes of data, can't load it to a {s} with {d} bytes", .{ self, self._shape.byteSize(), @typeName(T), @sizeOf(T) });
+        stdx.debug.assert(self._shape.byteSize() == @sizeOf(T), "Buffer {f} has {d} bytes of data, can't load it to a {s} with {d} bytes", .{ self, self._shape.byteSize(), @typeName(T), @sizeOf(T) });
         var res: T = undefined;
         stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
         const maybe_event = try self._shards.get(0).toHostBuffer(self._api, std.mem.asBytes(&res));
@@ -375,13 +375,9 @@ pub const Buffer = struct {
 
     pub fn format(
         self: Buffer,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
         writer: anytype,
     ) !void {
-        _ = fmt;
-        _ = options;
-        try writer.print("Buffer({_})", .{self._shape});
+        try writer.print("Buffer({f})", .{self._shape});
     }
 
     pub fn getMemory(self: Buffer) *const pjrt.Memory {
