@@ -3,14 +3,15 @@ const std = @import("std");
 
 const c = @import("c");
 pub const TypeId = c.XLA_FFI_TypeId;
-comptime {
-    if (@typeInfo(TypeId).@"struct".fields.len != 1) @compileError("TypeId has changed");
-}
 const stdx = @import("stdx");
 
 const pjrt = @import("pjrt.zig");
 
 const log = std.log.scoped(.pjrt);
+
+comptime {
+    if (@typeInfo(TypeId).@"struct".fields.len != 1) @compileError("TypeId has changed");
+}
 
 /// The signature of a generic custom call.
 pub const Handler = fn (*CallFrame) callconv(.c) ?*Error;
@@ -42,7 +43,7 @@ pub const HandlerTraits = packed struct(u32) {
     /// that can be captured and then replayed.
     command_buffer_compatible: u1,
 
-    __unassigned__: u31,
+    __unassigned__: u31 = 0,
 };
 
 pub const Metadata = extern struct {
@@ -226,7 +227,7 @@ pub const ByteSpan = extern struct {
 
 pub const DataType = enum(c.XLA_FFI_DataType) {
     invalid = c.XLA_FFI_DataType_INVALID,
-    pred = c.XLA_FFI_DataType_PRED,
+    bool = c.XLA_FFI_DataType_PRED,
     i8 = c.XLA_FFI_DataType_S8,
     i16 = c.XLA_FFI_DataType_S16,
     i32 = c.XLA_FFI_DataType_S32,
@@ -397,6 +398,10 @@ pub const CallFrame = extern struct {
             return true;
         }
         return false;
+    }
+
+    pub fn stream(call_frame: CallFrame) ?*const Stream {
+        return call_frame.api.stream(call_frame.ctx);
     }
 };
 

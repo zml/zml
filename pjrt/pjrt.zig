@@ -164,7 +164,7 @@ pub const Api = struct {
         return @ptrCast(ret.context.?);
     }
 
-    pub fn ffi(api: *const Api) ?FFI {
+    pub fn ffi(api: *const Api) ?Ffi {
         if (api.lookupExtension(c.PJRT_FFI_Extension, c.PJRT_Extension_Type_FFI)) |ext| {
             return .{ .inner = ext };
         }
@@ -1278,7 +1278,7 @@ pub const NamedValue = extern struct {
     }
 };
 
-pub const FFI = extern struct {
+pub const Ffi = extern struct {
     inner: *const c.PJRT_FFI,
 
     pub const UserData = extern struct {
@@ -1293,19 +1293,15 @@ pub const FFI = extern struct {
         }
     };
 
-    pub const RegisterOptions = struct {
-        traits: RegisterHandlerTraits = @enumFromInt(0),
-    };
-
     // todo : support all missing handlers available in GPU plugin extension: handler_instantiate, handler_prepare, handler_initialize
     // introduced by https://github.com/openxla/xla/commit/ef85a7bcc308313492ebc50295a8a08b4e51b8f5
     pub fn register(
-        self: *const FFI,
+        self: *const Ffi,
         api: *const Api,
         target_name: []const u8,
         platform_name: []const u8,
         func: *const ffi.Handler,
-        options: RegisterOptions,
+        traits: ffi.HandlerTraits,
     ) ApiError!void {
         var ret = pjrtStruct(c.PJRT_FFI_Register_Handler_Args{
             .api_version = 1,
@@ -1314,7 +1310,7 @@ pub const FFI = extern struct {
             .handler = @ptrCast(@constCast(func)),
             .platform_name = platform_name.ptr,
             .platform_name_size = platform_name.len,
-            .traits = @intFromEnum(options.traits),
+            .traits = @bitCast(traits),
         });
         const result = self.inner.register_handler.?(&ret);
         if (result) |pjrt_c_error| {
@@ -1324,7 +1320,7 @@ pub const FFI = extern struct {
         }
     }
 
-    pub fn registerTypeId(self: *const FFI, api: *const Api, type_name: []const u8) ApiError!ffi.TypeId {
+    pub fn registerTypeId(self: *const Ffi, api: *const Api, type_name: []const u8) ApiError!ffi.TypeId {
         var ret = pjrtStruct(c.PJRT_FFI_TypeID_Register_Args{
             .type_name = type_name.ptr,
             .type_name_size = type_name.len,
@@ -1339,7 +1335,7 @@ pub const FFI = extern struct {
         return .{ .type_id = ret.type_id };
     }
 
-    pub fn addUserData(self: *const FFI, api: *const Api, context: *ExecuteContext, user_data: UserData) ApiError!void {
+    pub fn addUserData(self: *const Ffi, api: *const Api, context: *ExecuteContext, user_data: UserData) ApiError!void {
         var ret = pjrtStruct(c.PJRT_FFI_UserData_Add_Args{
             .context = @ptrCast(context),
             .user_data = user_data.toCStruct(),
@@ -1353,7 +1349,6 @@ pub const FFI = extern struct {
     }
 };
 
-pub const RegisterHandlerTraits = enum(c.PJRT_FFI_Handler_TraitsBits) {
-    command_buffer_compatible = c.PJRT_FFI_HANDLER_TRAITS_COMMAND_BUFFER_COMPATIBLE,
-    _,
+pub const CustomCallRegistry = extern struct {
+    inner: *const c.PJRT_FFI_Register_Handler,
 };

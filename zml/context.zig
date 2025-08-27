@@ -220,7 +220,7 @@ fn getShape(buffer_desc: *const pjrt.ffi.Buffer) zml.Shape {
     // log.warn("received buffer {}", .{buffer_desc});
     const dt: zml.DataType = switch (buffer_desc.dtype) {
         .invalid => @panic("invalid ffi"),
-        .pred => .bool,
+        .bool => .bool,
         .i8 => .i8,
         .i16 => .i16,
         .i32 => .i32,
