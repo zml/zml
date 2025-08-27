@@ -250,13 +250,57 @@ pub const IndexType = opaque {
     }
 };
 
-pub const Signedness = enum {
-    signless,
-    signed,
-    unsigned,
+pub const IntegerTypes = enum {
+    i1,
+    i4,
+    i8,
+    i16,
+    i32,
+    i64,
+    i128,
+    u1,
+    u4,
+    u8,
+    u16,
+    u32,
+    u64,
+    u128,
+    si1,
+    si4,
+    si8,
+    si16,
+    si32,
+    si64,
+    si128,
+
+    pub fn bitwidth(self: IntegerTypes) usize {
+        return switch (self) {
+            .i1, .u1, .si1 => 1,
+            .i4, .u4, .si4 => 4,
+            .i8, .u8, .si8 => 8,
+            .i16, .u16, .si16 => 16,
+            .i32, .u32, .si32 => 32,
+            .i64, .u64, .si64 => 64,
+            .i128, .u128, .si128 => 128,
+        };
+    }
+
+    pub fn signedness(self: IntegerTypes) IntegerType.Signedness {
+        return switch (self) {
+            .i1, .i4, .i8, .i16, .i32, .i64, .i128 => .signless,
+            .si1, .si4, .si8, .si16, .si32, .si64, .si128 => .signed,
+            .u1, .u4, .u8, .u16, .u32, .u64, .u128 => .unsigned,
+        };
+    }
 };
 
 pub const IntegerType = opaque {
+    pub const Signedness = enum {
+        signless,
+        signed,
+        unsigned,
+    };
+
     const M = Methods(IntegerType, c.MlirType);
 
     pub const isAFn = c.mlirTypeIsAInteger;
@@ -264,7 +308,11 @@ pub const IntegerType = opaque {
     pub const eql = M.eql(c.mlirTypeEqual);
     pub const format = M.format(c.mlirTypePrint);
 
-    fn get(ctx: *Context, bitwidth: usize, sign: Signedness) *const IntegerType {
+    fn get(ctx: *Context, it: IntegerTypes) *const IntegerType {
+        return exact(ctx, it.bitwidth(), it.signedness());
+    }
+
+    fn exact(ctx: *Context, bitwidth: usize, sign: Signedness) *const IntegerType {
         return @ptrCast(switch (sign) {
             .signless => c.mlirIntegerTypeGet(ctx.ptr(), @intCast(bitwidth)).ptr,
             .signed => c.mlirIntegerTypeSignedGet(ctx.ptr(), @intCast(bitwidth)).ptr,
@@ -273,8 +321,8 @@ pub const IntegerType = opaque {
     }
 };
 
-pub fn integerType(ctx: *Context, bitwidth: usize, sign: Signedness) *const Type {
-    return @ptrCast(IntegerType.get(ctx, bitwidth, sign));
+pub fn integerType(ctx: *Context, it: IntegerTypes) *const Type {
+    return @ptrCast(IntegerType.get(ctx, it));
 }
 
 pub const FloatTypes = enum {
@@ -387,14 +435,9 @@ pub const IntegerAttribute = opaque {
     pub const eql = M.eql(c.mlirAttributeEqual);
     pub const format = M.format(c.mlirAttributePrint);
 
-    pub fn init(ctx: *Context, value_: anytype) *const IntegerAttribute {
-        const ti = @typeInfo(@TypeOf(value_)).int;
-        const sign: Signedness = switch (ti.signedness) {
-            .signed => .signless,
-            .unsigned => .unsigned,
-        };
+    pub fn init(ctx: *Context, it: IntegerTypes, value_: anytype) *const IntegerAttribute {
         return @ptrCast(c.mlirIntegerAttrGet(
-            IntegerType.get(ctx, @intCast(ti.bits), sign).ptr(),
+            IntegerType.get(ctx, it).ptr(),
             @intCast(value_),
         ).ptr);
     }
@@ -408,8 +451,8 @@ pub const IntegerAttribute = opaque {
     }
 };
 
-pub fn integerAttribute(ctx: *Context, value_: anytype) *const Attribute {
-    return @ptrCast(IntegerAttribute.init(ctx, value_));
+pub fn integerAttribute(ctx: *Context, it: IntegerTypes, value_: anytype) *const Attribute {
+    return @ptrCast(IntegerAttribute.init(ctx, it, value_));
 }
 
 pub const BoolAttribute = opaque {
@@ -528,26 +571,26 @@ pub const Identifier = opaque {
 pub const Module = opaque {
     const M = Methods(Module, c.MlirModule);
 
-    const ptr = M.ptr;
+    pub const ptr = M.ptr;
 
-    pub fn init(loc: *const Location) *const Module {
-        return @ptrCast(c.mlirModuleCreateEmpty(loc.ptr()).ptr);
+    pub fn init(loc: *const Location) *Module {
+        return @constCast(@ptrCast(c.mlirModuleCreateEmpty(loc.ptr()).ptr));
     }
 
     pub fn deinit(self: *Module) void {
         c.mlirModuleDestroy(self.ptr());
     }
 
-    pub fn fromOperation(op: *Operation) *const Module {
-        return @ptrCast(c.mlirModuleFromOperation(op.ptr()).ptr);
+    pub fn fromOperation(op: *Operation) *Module {
+        return @constCast(@ptrCast(c.mlirModuleFromOperation(op.ptr()).ptr));
     }
 
     pub fn operation(self: *const Module) *Operation {
         return @ptrCast(c.mlirModuleGetOperation(self.ptr()).ptr);
     }
 
-    pub fn parse(ctx: *Context, source: []const u8) Error!*const Module {
-        return @ptrCast(c.mlirModuleCreateParse(ctx.ptr(), stringRef(source)).ptr orelse return Error.InvalidMlir);
+    pub fn parse(ctx: *Context, source: []const u8) Error!*Module {
+        return @constCast(@ptrCast(c.mlirModuleCreateParse(ctx.ptr(), stringRef(source)).ptr orelse return Error.InvalidMlir));
     }
 
     pub fn context(self: *const Module) *Context {
@@ -607,6 +650,10 @@ pub const Block = opaque {
 
     pub fn detach(self: *Block) void {
         c.mlirBlockDetach(self.ptr());
+    }
+
+    pub fn terminator(self: *const Block) ?*Operation {
+        return @ptrCast(c.mlirBlockGetTerminator(self.ptr()).ptr);
     }
 };
 
@@ -829,6 +876,11 @@ pub const Operation = opaque {
         return @ptrCast(c.mlirOperationGetBlock(self.ptr()).ptr);
     }
 
+    pub fn appendTo(self: *Operation, block_: *Block) *Operation {
+        block_.appendOwnedOperation(self);
+        return self;
+    }
+
     pub fn parent(self: *const Operation) ?*Operation {
         return @ptrCast(c.mlirOperationGetParentOperation(self.ptr()).ptr);
     }
@@ -853,7 +905,7 @@ pub const Operation = opaque {
         return @intCast(c.mlirOperationGetNumResults(self.ptr()));
     }
 
-    pub fn result(self: *const Operation, index: usize) Value {
+    pub fn result(self: *const Operation, index: usize) *const Value {
         return @ptrCast(c.mlirOperationGetResult(self.ptr(), @intCast(index)).ptr);
     }
 
@@ -930,7 +982,7 @@ pub const Operation = opaque {
         operands: ?Operands = null,
         results: ?ResultTypes = null,
         result_type_inference: bool = false,
-        attributes: ?[]const AttrTuple = null,
+        attributes: ?[]const NamedAttribute = null,
         blocks: ?[]const *Block = null,
         verify: bool = true,
         location: ?*const Location = null,
@@ -968,11 +1020,7 @@ pub const Operation = opaque {
             },
         };
         if (args.attributes) |attrs| {
-            for (attrs) |attr_tuple| {
-                const attr_name, const attr = attr_tuple;
-                const named_attr = NamedAttribute.named(ctx, attr_name, attr);
-                state.addAttributes(&.{named_attr});
-            }
+            state.addAttributes(attrs);
         }
         if (args.blocks) |blocks| {
             const region = Region.init();
@@ -982,6 +1030,7 @@ pub const Operation = opaque {
             state.addOwnedRegions(&.{region});
         }
         const new_op = try Operation.init(&state);
+        errdefer new_op.deinit();
         if (args.verify and new_op.verify() == false) {
             log.err("Failed to verify MLIR operation:\n{f}", .{
                 new_op.fmt(.{
@@ -1252,11 +1301,11 @@ pub fn DenseArrayAttribute(comptime ElementType: DenseArrayTypes) type {
             return @ptrCast(getFn(ctx.ptr(), @intCast(values.len), @ptrCast(values)).ptr);
         }
 
-        pub fn get(self: *const Self, pos: usize) ElementTypeZig {
+        pub fn element(self: *const Self, pos: usize) ElementTypeZig {
             return getElementFn(self.ptr(), @intCast(pos));
         }
 
-        pub fn len(self: *const Self) usize {
+        pub fn numElements(self: *const Self) usize {
             return @intCast(c.mlirDenseArrayGetNumElements(self.ptr()));
         }
     };
@@ -1278,12 +1327,12 @@ pub const ArrayAttribute = opaque {
         return @ptrCast(c.mlirArrayAttrGet(ctx.ptr(), @intCast(attrs.len), @ptrCast(attrs)).ptr);
     }
 
-    pub fn size(self: *const ArrayAttribute) usize {
-        return @intCast(c.mlirArrayAttrGetNumElements(self.ptr()));
+    pub fn element(self: *const ArrayAttribute, index: usize) Attribute {
+        return @ptrCast(c.mlirArrayAttrGetElement(self.ptr(), @intCast(index)).ptr);
     }
 
-    pub fn get(self: *const ArrayAttribute, index: usize) Attribute {
-        return @ptrCast(c.mlirArrayAttrGetElement(self.ptr(), @intCast(index)).ptr);
+    pub fn numElements(self: *const ArrayAttribute) usize {
+        return @intCast(c.mlirArrayAttrGetNumElements(self.ptr()));
     }
 };
 
@@ -1333,4 +1382,21 @@ pub const FlatSymbolRefAttribute = opaque {
 
 pub fn flatSymbolRefAttribute(ctx: *Context, symbol: []const u8) *const Attribute {
     return @ptrCast(FlatSymbolRefAttribute.init(ctx, symbol));
+}
+
+pub const UnitAttribute = opaque {
+    const M = Methods(UnitAttribute, c.MlirAttribute);
+
+    pub const isAFn = c.mlirAttributeIsAUnit;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
+
+    pub fn get(ctx: *Context) *const UnitAttribute {
+        return @ptrCast(c.mlirUnitAttrGet(ctx.ptr()).ptr);
+    }
+};
+
+pub fn unitAttribute(ctx: *Context) *const Attribute {
+    return @ptrCast(UnitAttribute.get(ctx));
 }

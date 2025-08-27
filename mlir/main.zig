@@ -4,14 +4,17 @@ const dialects = @import("mlir/dialects");
 const mlir = @import("mlir2");
 
 pub fn main() !void {
+    const allocator = std.heap.c_allocator;
     const registry = try mlir.DialectRegistry.init();
     defer registry.deinit();
 
     // const handle = mlir.DialectHandle.fromString("func");
 
-    inline for (.{ "arith", "func" }) |d| {
+    inline for (.{ "func", "stablehlo" }) |d| {
         registry.registerDialect(d);
     }
+
+    // mlir.registerPasses("AllStablehlo");
 
     const ctx = try mlir.Context.init(.{
         .registry = registry,
@@ -26,6 +29,16 @@ pub fn main() !void {
     const unk = mlir.Location.unknown(ctx);
     _ = unk; // autofix
 
+    var serialized: std.Io.Writer.Allocating = .init(allocator);
+    defer serialized.deinit();
+
+    // const stablehlo_version = blk: {
+    //     if (dialects.stablehlo.currentVersion()) |requested_version| {
+    //         break :blk dialects.stablehlo.stablehloGetSmallerVersion(requested_version, dialects.stablehlo.getCurrentVersion());
+    //     }
+    //     break :blk dialects.stablehlo.minimumVersion();
+    // };
+
     // const attr = mlir.integerAttribute(ctx, @as(i32, 5));
     // _ = attr; // autofix
 
@@ -38,31 +51,31 @@ pub fn main() !void {
     // });
     // _ = dict; // autofix
 
-    const int64 = mlir.integerType(ctx, 64, .signless);
+    const module = mlir.Module.init(.unknown(ctx));
+    defer module.deinit();
 
-    const block = mlir.Block.init(&.{ int64, int64 }, &.{ .unknown(ctx), .unknown(ctx) });
+    const tensor_i32 = mlir.rankedTensorType(&.{ 4096, 4096 }, mlir.integerType(ctx, .i32));
 
-    block.appendOwnedOperation(dialects.func.return_(ctx, &.{block.argument(0)}, .unknown(ctx)));
-
-    const op = dialects.func.func(ctx, .{
+    module.body().appendOwnedOperation(dialects.func.func(ctx, .{
         .name = "pouet",
-        .args = &.{ int64, int64 },
-        .results = &.{int64},
-        .block = block,
+        .visibility = .private,
+        .block = blk: {
+            const body = mlir.Block.init(&.{ tensor_i32, tensor_i32 }, &.{ .unknown(ctx), .unknown(ctx) });
+            const add_op = dialects.stablehlo.add(ctx, body.argument(0), body.argument(1), .unknown(ctx)).appendTo(body);
+            const mul_op = dialects.stablehlo.multiply(ctx, add_op.result(0), body.argument(1), .unknown(ctx)).appendTo(body);
+            _ = dialects.func.return_(ctx, mul_op.result(0), .unknown(ctx)).appendTo(body);
+            break :blk body;
+        },
         .location = .unknown(ctx),
-    });
+    }));
 
-    // const op = try mlir.Operation.parse(ctx, "func.func private @pouet()", "pouet");
+    std.debug.print(">>>>>>\n{f}\n", .{module.operation().fmt(.{ .print_generic_op_form = false })});
+    std.debug.print(">>>>>>\n{f}\n", .{module.operation().fmt(.{ .print_generic_op_form = true })});
 
-    // // // const mod = mlir.Module.init(mlir.Location.unknown(ctx));
-
-    // const op = mlir.Operation.make(ctx, "arith.addi", .{
-    //     .operands = .{ .flat = &.{ block.argument(0), block.argument(1) } },
-    //     .results = .{ .variadic = &.{ &.{ int64, int64 }, &.{int64} } },
-    // });
-    // defer op.deinit();
-
-    std.debug.print(">>>>>> {f}\n", .{op.fmt(.{ .print_generic_op_form = true })});
+    // dialects.stablehlo.serializePortableArtifact2(module, dialects.stablehlo.minimumVersion(), &serialized.writer) catch |err| {
+    //     std.debug.print("failed to serialize to portable artifact: {}\n", .{err});
+    //     return err;
+    // };
 
     // const body = mod.body();
     // _ = body.addArgument(mlir.integerType(ctx, 64, .signless), .unknown(ctx));

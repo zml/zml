@@ -6,8 +6,8 @@ zig_library(
     main = "stablehlo.zig",
     visibility = ["//mlir/dialects:__subpackages__"],
     deps = [
-        "//mlir",
         "//mlir:c",
+        "//mlir:mlir2",
         "//stdx",
         "@stablehlo//:stablehlo_dialect_capi",
     ],

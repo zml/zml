@@ -1,59 +1,61 @@
 const std = @import("std");
 
-const mlir = @import("mlir");
+const mlir = @import("mlir2");
 
-pub fn constant(ctx: mlir.Context, value: mlir.Attribute, location: mlir.Location) mlir.Operation {
+pub fn constant(ctx: *mlir.Context, value: *const mlir.Attribute, location: *const mlir.Location) *const mlir.Operation {
     return mlir.Operation.make(ctx, "arith.constant", .{
-        .attributes = &.{.{ "value", value }},
+        .attributes = &.{
+            .named(ctx, "value", value),
+        },
         .result_type_inference = true,
         .location = location,
     });
 }
 
-fn binary_fn(comptime op_name: [:0]const u8) fn (mlir.Context, mlir.Value, mlir.Value, mlir.Location) mlir.Operation {
+fn binaryOp(comptime op_name: []const u8) type {
     return struct {
-        pub fn call(ctx: mlir.Context, lhs: mlir.Value, rhs: mlir.Value, location: mlir.Location) mlir.Operation {
+        pub fn call(ctx: *mlir.Context, lhs: *const mlir.Value, rhs: *const mlir.Value, location: *const mlir.Location) *const mlir.Operation {
             return mlir.Operation.make(ctx, op_name, .{
-                .operands = &.{ lhs, rhs },
+                .operands = .{ .flat = &.{ lhs, rhs } },
                 .result_type_inference = true,
                 .location = location,
             });
         }
-    }.call;
+    };
 }
 
-fn cast_fn(comptime op_name: [:0]const u8) fn (mlir.Context, mlir.Value, mlir.Type, mlir.Location) mlir.Operation {
+fn castOp(comptime op_name: []const u8) type {
     return struct {
-        pub fn call(ctx: mlir.Context, value: mlir.Value, new_type: mlir.Type, location: mlir.Location) mlir.Operation {
+        pub fn call(ctx: mlir.Context, value: *const mlir.Value, new_type: *const mlir.Type, location: *const mlir.Location) *const mlir.Operation {
             return mlir.Operation.make(ctx, op_name, .{
-                .operands = &.{value},
-                .results = &.{new_type},
+                .operands = .{ .float = &.{value} },
+                .results = .{ .flat = &.{new_type} },
                 .location = location,
             });
         }
-    }.call;
+    };
 }
 
-pub const addi = binary_fn("arith.addi");
-pub const addf = binary_fn("arith.addf");
-pub const subi = binary_fn("arith.subi");
-pub const subf = binary_fn("arith.subf");
-pub const muli = binary_fn("arith.muli");
-pub const mulf = binary_fn("arith.mulf");
-pub const divsi = binary_fn("arith.divsi");
-pub const divui = binary_fn("arith.divui");
-pub const divf = binary_fn("arith.divf");
-pub const maxnumf = binary_fn("arith.maxnumf");
-pub const maxnumi = binary_fn("arith.maxnumi");
-pub const extsi = cast_fn("arith.extsi");
-pub const extui = cast_fn("arith.extui");
-pub const extf = cast_fn("arith.extf");
-pub const trunci = cast_fn("arith.trunci");
-pub const truncf = cast_fn("arith.truncf");
-pub const fptosi = cast_fn("arith.fptosi");
-pub const fptoui = cast_fn("arith.fptoui");
-pub const sitofp = cast_fn("arith.sitofp");
-pub const uitofp = cast_fn("arith.uitofp");
+pub const addi = binaryOp("arith.addi").call;
+pub const addf = binaryOp("arith.addf").call;
+pub const subi = binaryOp("arith.subi").call;
+pub const subf = binaryOp("arith.subf").call;
+pub const muli = binaryOp("arith.muli").call;
+pub const mulf = binaryOp("arith.mulf").call;
+pub const divsi = binaryOp("arith.divsi").call;
+pub const divui = binaryOp("arith.divui").call;
+pub const divf = binaryOp("arith.divf").call;
+pub const maxnumf = binaryOp("arith.maxnumf").call;
+pub const maxnumi = binaryOp("arith.maxnumi").call;
+pub const extsi = castOp("arith.extsi").call;
+pub const extui = castOp("arith.extui").call;
+pub const extf = castOp("arith.extf").call;
+pub const trunci = castOp("arith.trunci").call;
+pub const truncf = castOp("arith.truncf").call;
+pub const fptosi = castOp("arith.fptosi").call;
+pub const fptoui = castOp("arith.fptoui").call;
+pub const sitofp = castOp("arith.sitofp").call;
+pub const uitofp = castOp("arith.uitofp").call;
 
 pub const CmpIPredicate = enum {
     eq,
@@ -68,12 +70,12 @@ pub const CmpIPredicate = enum {
     uge,
 };
 
-pub fn cmpi(ctx: mlir.Context, predicate: CmpIPredicate, lhs: mlir.Value, rhs: mlir.Value, location: mlir.Location) mlir.Operation {
+pub fn cmpi(ctx: mlir.Context, predicate: CmpIPredicate, lhs: *const mlir.Value, rhs: *const mlir.Value, location: mlir.Location) *const mlir.Operation {
     return mlir.Operation.make(ctx, "arith.cmpi", .{
-        .operands = &.{ lhs, rhs },
+        .operands = .{ .flat = &.{ lhs, rhs } },
         .result_type_inference = true,
         .attributes = &.{
-            .{ "predicate", .int(ctx, .i64, @intFromEnum(predicate)) },
+            .{ "predicate", mlir.integerAttribute(ctx, .i64, @intFromEnum(predicate)) },
         },
         .location = location,
     });
@@ -98,12 +100,12 @@ pub const CmpFPredicate = enum {
     true,
 };
 
-pub fn cmpf(ctx: mlir.Context, predicate: CmpFPredicate, lhs: mlir.Value, rhs: mlir.Value, location: mlir.Location) mlir.Operation {
+pub fn cmpf(ctx: mlir.Context, predicate: CmpFPredicate, lhs: *const mlir.Value, rhs: *const mlir.Value, location: *const mlir.Location) *const mlir.Operation {
     return mlir.Operation.make(ctx, "arith.cmpf", .{
-        .operands = &.{ lhs, rhs },
+        .operands = .{ .flat = &.{ lhs, rhs } },
         .result_type_inference = true,
         .attributes = &.{
-            .{ "predicate", .int(ctx, .i64, @intFromEnum(predicate)) },
+            .named(ctx, "predicate", mlir.integerAttribute(ctx, .i64, @intFromEnum(predicate))),
         },
         .location = location,
     });

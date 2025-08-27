@@ -14,7 +14,7 @@ zig_library(
     visibility = ["//visibility:public"],
     deps = [
         "//mlir:mlir2",
-        # "//mlir/dialects/stablehlo",
+        "//mlir/dialects/stablehlo",
         "//stdx",
     ],
 )
