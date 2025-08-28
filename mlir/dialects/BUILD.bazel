@@ -5,7 +5,6 @@ zig_library(
     srcs = [
         # "arith.zig",
         "func.zig",
-        "memref.zig",
         # "math.zig",
         # "scf.zig",
         # "tensor.zig",

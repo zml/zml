@@ -58,7 +58,7 @@ pub fn func(ctx: *mlir.Context, args: FuncOpArgs) *mlir.Operation {
         attr_tuples_buffer.appendAssumeCapacity(.named(ctx, "no_inline", mlir.unitAttribute(ctx)));
     }
 
-    return .make(ctx, "func.func", .{
+    return mlir.Operation.make(ctx, "func.func", .{
         .blocks = &.{args.block},
         .attributes = attr_tuples_buffer.constSlice(),
         .location = args.location,

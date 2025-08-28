@@ -797,9 +797,8 @@ pub fn custom_call(ctx: *mlir.Context, inputs: []const *const mlir.Value, opts: 
     });
 }
 
-pub fn createBuffer(ctx: *mlir.Context, value: *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
-    const result_type = mlir.integerType(ctx, .i64);
-    return custom_call(ctx, &.{value}, .{
+pub fn createBuffer(ctx: *mlir.Context, result_type: *const mlir.Type, location: *const mlir.Location) *mlir.Operation {
+    return custom_call(ctx, &.{}, .{
         .call_target_name = "CreateBuffer",
         .api_version = .typed_ffi,
     }, &.{result_type}, location);
@@ -812,7 +811,7 @@ pub fn pin(ctx: *mlir.Context, value: *const mlir.Value, location: *const mlir.L
     return custom_call(ctx, &.{value}, .{
         .call_target_name = "Pin",
         .api_version = .typed_ffi,
-    }, &.{result_type}, location);
+    }, &.{ result_type}, location);
 }
 
 pub fn unpin(ctx: *mlir.Context, value: *const mlir.Value, location: *const mlir.Location) *mlir.Operation {

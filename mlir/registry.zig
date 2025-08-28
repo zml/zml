@@ -1178,6 +1178,8 @@ pub const Region = opaque {
 pub const ShapedType = opaque {
     const M = Methods(ShapedType, c.MlirType);
 
+    pub const MAX_RANK = 16;
+
     pub const isAFn = c.mlirTypeIsAShaped;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
@@ -1212,6 +1214,17 @@ pub const RankedTensorType = opaque {
             elemType.ptr(),
             c.mlirAttributeGetNull(),
         ).ptr);
+    }
+
+    pub fn fromShaped(other: *const ShapedType) *const RankedTensorType {
+        var dims: stdx.BoundedArray(i64, ShapedType.MAX_RANK) = .{};
+        for (other.rank()) |i| {
+            dims.appendAssumeCapacity(other.dimension(i));
+        }
+        return init(
+            other.elementType(),
+            dims.constSlice(),
+        );
     }
 
     pub fn elementType(self: *const RankedTensorType) *const Type {
@@ -1403,4 +1416,38 @@ pub const UnitAttribute = opaque {
 
 pub fn unitAttribute(ctx: *Context) *const Attribute {
     return @ptrCast(UnitAttribute.get(ctx));
+}
+
+pub const MemRefType = opaque {
+    const M = Methods(MemRefType, c.MlirType);
+
+    pub const isAFn = c.mlirTypeIsAInteger;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
+
+    pub fn init(element_type: *const Type, shape: []const i64, layout: ?*const Attribute, memory_space: ?*Attribute) *const MemRefType {
+        return @ptrCast(c.mlirMemRefTypeGet(element_type, shape.len, @ptrCast(shape), layout, memory_space).ptr);
+    }
+
+    pub fn fromShaped(other: *const ShapedType) *const MemRefType {
+        var dims: stdx.BoundedArray(i64, ShapedType.MAX_RANK) = .{};
+        for (other.rank()) |i| {
+            dims.appendAssumeCapacity(other.dimension(i));
+        }
+        return init(
+            other.elementType(),
+            dims.constSlice(),
+            null,
+            null,
+        );
+    }
+
+    pub fn shaped(self: *const MemRefType) *const ShapedType {
+        return @ptrCast(self);
+    }
+};
+
+pub fn memRefType(element_type: *const Type, shape: []const i64, layout: ?*const Attribute, memory_space: ?*const Attribute) *const Type {
+    return @ptrCast(MemRefType.init(element_type, shape, layout, memory_space));
 }
