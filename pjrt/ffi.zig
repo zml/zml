@@ -2,11 +2,16 @@
 const std = @import("std");
 
 const c = @import("c");
+const TypeId = c.XLA_FFI_TypeId;
 const stdx = @import("stdx");
 
-const pjrtStruct = @import("pjrt.zig").pjrtStruct;
+const pjrt = @import("pjrt.zig");
+const Stream = @import("pjrt.zig").Stream;
 
 const log = std.log.scoped(.pjrt);
+
+/// The signature of a generic custom call.
+pub const Handler = fn (*CallFrame) callconv(.c) ?*Error;
 
 pub const ApiVersion = extern struct {
     pub const major = c.XLA_FFI_API_MAJOR;
@@ -91,8 +96,8 @@ fn TransmuteMixin(comptime T: type, comptime InnerT: type) type {
 pub const Api = opaque {
     pub const inner = TransmuteMixin(Api, c.XLA_FFI_Api).to;
 
-    pub fn stream(self: *const Api, context: *const ExecutionContext) *Stream {
-        var ret = pjrtStruct(c.XLA_FFI_Stream_Get_Args{
+    pub fn stream(self: *const Api, context: *const ExecutionContext) *pjrt.Stream {
+        var ret = pjrt.pjrtStruct(c.XLA_FFI_Stream_Get_Args{
             .ctx = @constCast(context.inner()),
         });
         const result = self.inner().XLA_FFI_Stream_Get.?(&ret);
@@ -108,7 +113,7 @@ pub const Api = opaque {
     }
 
     pub fn allocateDeviceMemory(self: *const Api, context: *const ExecutionContext, size: usize, alignment: usize) ApiError!*anyopaque {
-        var ret = pjrtStruct(c.XLA_FFI_DeviceMemory_Allocate_Args{
+        var ret = pjrt.pjrtStruct(c.XLA_FFI_DeviceMemory_Allocate_Args{
             .ctx = @constCast(context.inner()),
             .size = size,
             .alignment = alignment,
@@ -128,7 +133,7 @@ pub const Api = opaque {
     }
 
     pub fn freeDeviceMemory(self: *const Api, context: *const ExecutionContext, data: *anyopaque, size: usize) ApiError!void {
-        var ret = pjrtStruct(c.XLA_FFI_DeviceMemory_Free_Args{
+        var ret = pjrt.pjrtStruct(c.XLA_FFI_DeviceMemory_Free_Args{
             .ctx = @constCast(context.inner()),
             .size = size,
             .data = data,
@@ -163,33 +168,33 @@ pub const ExecutionStage = enum(c.XLA_FFI_ExecutionStage) {
 pub const ExecutionContext = opaque {
     pub const inner = TransmuteMixin(ExecutionContext, c.XLA_FFI_ExecutionContext).to;
 
-    pub fn Context(comptime T: type) type {
-        return struct {
-            pub fn get(self: *const ExecutionContext, api: *const Api) ApiError!*T {
-                const type_id: TypeId = .{ .type_id = T.type_id };
-                var ret = pjrtStruct(c.XLA_FFI_ExecutionContext_Get_Args{
-                    .ctx = @constCast(self.inner()),
-                    .type_id = @constCast(&type_id),
-                });
-                const result = api.inner().XLA_FFI_ExecutionContext_Get.?(&ret);
-
-                if (result) |ffi_error| {
-                    const err = Error.fromInner(ffi_error);
-                    defer err.destroy(api);
-                    log.err("[ExecutionContext.get] {s}", .{err.getMessage(api)});
-
-                    // TODO(Corentin): Retrieve error code from Error when implemented in XLA.
-                    return error.Unknown;
-                }
-
-                if (ret.data == null) return error.NotFound;
-                return @ptrCast(@alignCast(ret.data.?));
-            }
+    pub fn getContext(self: *const ExecutionContext, T: type, api: *const Api) ApiError!*T {
+        const type_id: TypeId = .{ .type_id = T.type_id };
+        log.warn("[ExecutionContext.get] {*} api: {}", .{ self, api.inner().* });
+        var ret: c.XLA_FFI_ExecutionContext_Get_Args = .{
+            .struct_size = pjrt.pjrtStructSize(c.XLA_FFI_ExecutionContext_Get_Args),
+            .extension_start = api.inner().extension_start,
+            .ctx = @ptrCast(@constCast(self)),
+            .type_id = @constCast(&type_id),
+            .data = undefined, // set by XLA_FFI_ExecutionContext_Get.
         };
+        const maybe_err = api.inner().XLA_FFI_ExecutionContext_Get.?(&ret);
+
+        if (maybe_err) |ffi_error| {
+            const err = Error.fromInner(ffi_error);
+            defer err.destroy(api);
+            log.err("[ExecutionContext.get] {s}", .{err.getMessage(api)});
+
+            // TODO(Corentin): Retrieve error code from Error when implemented in XLA.
+            return error.Unknown;
+        }
+
+        if (ret.data == null) return error.NotFound;
+        return @ptrCast(@alignCast(ret.data.?));
     }
 
     pub fn getDeviceOrdinal(self: *const ExecutionContext, api: *const Api) ApiError!i32 {
-        var ret = pjrtStruct(c.XLA_FFI_DeviceOrdinal_Get_Args{
+        var ret = pjrt.pjrtStruct(c.XLA_FFI_DeviceOrdinal_Get_Args{
             .ctx = @constCast(self.inner()),
         });
         const result = api.inner().XLA_FFI_DeviceOrdinal_Get.?(&ret);
@@ -207,7 +212,7 @@ pub const ExecutionContext = opaque {
     }
 
     pub fn scheduleTask(self: *const ExecutionContext, api: *const Api, task: *const Task, data: *anyopaque) ApiError!void {
-        var ret = pjrtStruct(c.XLA_FFI_ThreadPool_Schedule_Args{
+        var ret = pjrt.pjrtStruct(c.XLA_FFI_ThreadPool_Schedule_Args{
             .ctx = @constCast(self.inner()),
             .task = @ptrCast(@alignCast(task)),
             .data = @ptrCast(@alignCast(data)),
@@ -225,21 +230,9 @@ pub const ExecutionContext = opaque {
             return error.Unknown;
         }
     }
-
-    fn getTypeId(type_name: []const u8) TypeId {
-        const id: i64 = @bitCast(std.hash.Fnv1a_64.hash(type_name));
-
-        return .{
-            .type_id = id,
-        };
-    }
 };
 
-const TypeId = c.XLA_FFI_TypeId;
-
 const Task = fn (*anyopaque) void;
-
-const Stream = @import("pjrt.zig").Stream;
 
 const ByteSpan = extern struct {
     ptr: [*]const u8,
@@ -399,6 +392,8 @@ pub const Attrs = extern struct {
     }
 };
 
+/// All informations needed by the user callback,
+/// including the list of input/ouput buffers to work on.
 pub const CallFrame = extern struct {
     struct_size: usize,
     extension_start: ?*ExtensionBase,
@@ -423,8 +418,6 @@ pub const CallFrame = extern struct {
         return false;
     }
 };
-
-pub const Handler = fn (*CallFrame) callconv(.c) ?*Error;
 
 pub const ErrorCode = enum(c.XLA_FFI_Error_Code) {
     cancelled = c.XLA_FFI_Error_Code_CANCELLED,
@@ -471,7 +464,7 @@ pub const Error = opaque {
     pub const fromInner = TransmuteMixin(Error, c.XLA_FFI_Error).from;
 
     pub fn create(api: *const Api, error_code: ErrorCode, message: []const u8) *Error {
-        var ret = pjrtStruct(c.XLA_FFI_Error_Create_Args{
+        var ret = pjrt.pjrtStruct(c.XLA_FFI_Error_Create_Args{
             .message = message.ptr,
             .errc = @intFromEnum(error_code),
         });
@@ -479,12 +472,12 @@ pub const Error = opaque {
     }
 
     pub fn destroy(err: *Error, api: *const Api) void {
-        var ret = pjrtStruct(c.XLA_FFI_Error_Destroy_Args{ .@"error" = err.inner() });
+        var ret = pjrt.pjrtStruct(c.XLA_FFI_Error_Destroy_Args{ .@"error" = err.inner() });
         api.inner().XLA_FFI_Error_Destroy.?(&ret);
     }
 
     pub fn getMessage(err: *Error, api: *const Api) [:0]const u8 {
-        var ret = pjrtStruct(c.XLA_FFI_Error_GetMessage_Args{
+        var ret = pjrt.pjrtStruct(c.XLA_FFI_Error_GetMessage_Args{
             .@"error" = err.inner(),
         });
         api.inner().XLA_FFI_Error_GetMessage.?(&ret);
@@ -497,7 +490,7 @@ pub const Future = opaque {
     pub const fromInner = TransmuteMixin(Future, c.XLA_FFI_Future).from;
 
     pub fn create(api: *const Api) ApiError!*Future {
-        var ret = pjrtStruct(c.XLA_FFI_Future_Create_Args{});
+        var ret = pjrt.pjrtStruct(c.XLA_FFI_Future_Create_Args{});
         const result = api.inner().XLA_FFI_Future_Create.?(&ret);
 
         if (result) |ffi_error| {
@@ -513,7 +506,7 @@ pub const Future = opaque {
     }
 
     pub fn setAvailable(self: *Future, api: *const Api) ApiError!void {
-        var ret = pjrtStruct(c.XLA_FFI_Future_SetAvailable_Args{
+        var ret = pjrt.pjrtStruct(c.XLA_FFI_Future_SetAvailable_Args{
             .future = self.inner(),
         });
 
@@ -530,7 +523,7 @@ pub const Future = opaque {
     }
 
     pub fn setError(self: *Future, api: *const Api, err: *Error) ApiError!void {
-        var ret = pjrtStruct(c.XLA_FFI_Future_SetError_Args{
+        var ret = pjrt.pjrtStruct(c.XLA_FFI_Future_SetError_Args{
             .future = self.inner(),
             .@"error" = err.inner(),
         });
