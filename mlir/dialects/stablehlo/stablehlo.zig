@@ -402,16 +402,16 @@ pub fn select(
 //     );
 // }
 
-// pub fn iota(ctx: *mlir.Context, dimension: i64, result_type: *const mlir.Type, location: *const mlir.Location) *mlir.Operation {
-//     return mlir.Operation.make(ctx, "stablehlo.iota", .{
-//         .operands = .{ .flat = &.{} },
-//         .results = .{ .flat = &.{result_type} },
-//         .attributes = &.{
-//             .{ "iota_dimension", mlir.integerType(ctx, .i64, dimension) },
-//         },
-//         .location = location,
-//     });
-// }
+pub fn iota(ctx: *mlir.Context, dimension: i64, result_type: *const mlir.Type, location: *const mlir.Location) *mlir.Operation {
+    return mlir.Operation.make(ctx, "stablehlo.iota", .{
+        .operands = .{ .flat = &.{} },
+        .results = .{ .flat = &.{result_type} },
+        .attributes = &.{
+            mlir.NamedAttribute.named(ctx, "iota_dimension", mlir.integerAttribute(ctx, .i64, dimension)),
+        },
+        .location = location,
+    });
+}
 
 // pub fn reverse(ctx: *mlir.Context, operand: *const mlir.Value, dimensions: []const i64, location: *const mlir.Location) *mlir.Operation {
 //     const result_type = operand.getType();
