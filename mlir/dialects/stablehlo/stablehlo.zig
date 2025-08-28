@@ -524,16 +524,22 @@ pub fn compare(
 //     });
 // }
 
-// pub fn dynamic_slice(ctx: *mlir.Context, operand: *const mlir.Value, new_dims: []const i64, start_indices: []const *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
-//     return mlir.Operation.make(ctx, "stablehlo.dynamic_slice", .{
-//         .operands = .{ .variadic = &.{ &.{operand}, start_indices } },
-//         .result_type_inference = true,
-//         .attributes = &.{
-//             .{ "slice_sizes", .dense(ctx, .i64, new_dims) },
-//         },
-//         .location = location,
-//     });
-// }
+pub fn dynamic_slice(
+    ctx: *mlir.Context,
+    operand: *const mlir.Value,
+    new_dims: []const i64,
+    start_indices: []const *const mlir.Value,
+    location: *const mlir.Location,
+) *mlir.Operation {
+    return mlir.Operation.make(ctx, "stablehlo.dynamic_slice", .{
+        .operands = .{ .variadic = &.{ &.{operand}, start_indices } },
+        .result_type_inference = true,
+        .attributes = &.{
+            .named(ctx, "slice_sizes", mlir.denseArrayAttribute(ctx, .i64, new_dims)),
+        },
+        .location = location,
+    });
+}
 
 // pub const PadOpts = struct {
 //     low: []const i64,
