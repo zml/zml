@@ -560,26 +560,26 @@ pub fn pad(ctx: *mlir.Context, value: *const mlir.Value, padding_value: *const m
     });
 }
 
-// pub const TriangularSolveOpts = struct {
-//     left_side: bool,
-//     lower: bool,
-//     unit_diagonal: bool,
-//     transpose_a: Transpose.Type,
-// };
+pub const TriangularSolveOpts = struct {
+    left_side: bool,
+    lower: bool,
+    unit_diagonal: bool,
+    transpose_a: TransposeAttribute.Type,
+};
 
-// pub fn triangular_solve(ctx: *mlir.Context, value: *const mlir.Value, other: *const mlir.Value, location: *const mlir.Location, opts: TriangularSolveOpts) *mlir.Operation {
-//     return mlir.Operation.make(ctx, "stablehlo.triangular_solve", .{
-//         .operands = .{ .flat = &.{ value, other } },
-//         .result_type_inference = true,
-//         .attributes = &.{
-//             .{ "left_side", .i1FromBool(ctx, opts.left_side) },
-//             .{ "lower", .i1FromBool(ctx, opts.lower) },
-//             .{ "unit_diagonal", .i1FromBool(ctx, opts.unit_diagonal) },
-//             .{ "transpose_a", Transpose.init(ctx, opts.transpose_a).asAttr() },
-//         },
-//         .location = location,
-//     });
-// }
+pub fn triangular_solve(ctx: *mlir.Context, value: *const mlir.Value, other: *const mlir.Value, location: *const mlir.Location, opts: TriangularSolveOpts) *mlir.Operation {
+    return mlir.Operation.make(ctx, "stablehlo.triangular_solve", .{
+        .operands = .{ .flat = &.{ value, other } },
+        .result_type_inference = true,
+        .attributes = &.{
+            .named(ctx, "left_side", mlir.integerAttribute(ctx, .i1, @intFromBool(opts.left_side))),
+            .named(ctx, "lower", mlir.integerAttribute(ctx, .i1, @intFromBool(opts.lower))),
+            .named(ctx, "unit_diagonal", mlir.integerAttribute(ctx, .i1, @intFromBool(opts.unit_diagonal))),
+            .named(ctx, "transpose_a", transposeAttribute(ctx, opts.transpose_a)),
+        },
+        .location = location,
+    });
+}
 
 // pub const FftOpts = struct {
 //     kind: FftType.Type,
@@ -1201,29 +1201,32 @@ pub fn compareType(ctx: *mlir.Context, value: CompareType.Type) *const mlir.Attr
     return @ptrCast(CompareType.init(ctx, value));
 }
 
-// pub const Transpose = struct {
-//     _inner: c.MlirAttribute,
+pub const TransposeAttribute = opaque {
+    const M = mlir.Methods(TransposeAttribute, mlir.Attribute);
 
-//     pub const isAFn = c.stablehloAttributeIsATransposeAttr;
-//     const Self = Transpose;
-//     pub const asAttr = mlir.Attribute.fromAny(Self);
-//     pub const eql = mlir.Attribute.eqlAny(Self);
+    pub const isAFn = c.stablehloAttributeIsATransposeAttr;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
 
-//     pub const Type = enum {
-//         NO_TRANSPOSE,
-//         TRANSPOSE,
-//         ADJOINT,
-//     };
+    pub const Type = enum {
+        NO_TRANSPOSE,
+        TRANSPOSE,
+        ADJOINT,
+    };
 
-//     pub fn init(ctx: *mlir.Context, value: Type) Self {
-//         return .{ ._inner = c.stablehloTransposeAttrGet(ctx._inner, stringRef(@tagName(value))) };
-//     }
+    pub fn init(ctx: *mlir.Context, value: Type) *const TransposeAttribute {
+        return @ptrCast(c.stablehloTransposeAttrGet(ctx.ptr(), mlir.stringRef(@tagName(value))).ptr);
+    }
 
-//     pub fn getValue(self: Self) Type {
-//         const value = mlir.fromStringRef(c.stablehloTransposeAttrGetValue(self._inner));
-//         return std.meta.stringToEnum(Type, value) orelse unreachable;
-//     }
-// };
+    pub fn getValue(self: *const TransposeAttribute) Type {
+        const value = mlir.fromStringRef(c.stablehloTransposeAttrGetValue(self.ptr()));
+        return std.meta.stringToEnum(Type, value) orelse unreachable;
+    }
+};
+
+pub fn transposeAttribute(ctx: *mlir.Context, value: TransposeAttribute.Type) *const mlir.Attribute {
+    return @ptrCast(TransposeAttribute.init(ctx, value));
+}
 
 // pub const FftType = struct {
 //     _inner: c.MlirAttribute,
