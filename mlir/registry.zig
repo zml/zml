@@ -385,8 +385,10 @@ pub fn FloatType(comptime ft: FloatTypes) type {
     };
 }
 
-pub fn floatType(comptime ft: FloatTypes, ctx: *Context) *const Type {
-    return @ptrCast(FloatType(ft).get(ctx));
+pub fn floatType(ft: FloatTypes, ctx: *Context) *const Type {
+    return switch (ft) {
+        inline else => |v| @ptrCast(FloatType(v).get(ctx)),
+    };
 }
 
 pub const Attribute = opaque {
