@@ -711,72 +711,70 @@ pub fn get_tuple_element(ctx: *mlir.Context, tuple_value: *const mlir.Value, ind
     });
 }
 
-// pub const ConvolutionOpts = struct {
-//     window_strides: []const i64,
-//     pad_value: []const i64,
-//     pad_shape: []const i64 = &.{},
-//     lhs_dilation: []const i64,
-//     rhs_dilation: []const i64,
-//     window_reversal: []const bool,
-//     input_batch_dimension: i64,
-//     input_feature_dimension: i64,
-//     input_spatial_dimensions: []const i64,
-//     kernel_input_feature_dimension: i64,
-//     kernel_output_feature_dimension: i64,
-//     kernel_spatial_dimensions: []const i64,
-//     output_batch_dimension: i64,
-//     output_feature_dimension: i64,
-//     output_spatial_dimensions: []const i64,
-//     feature_group_count: i64,
-//     batch_group_count: i64,
-//     precision_config: []const PrecisionAttribute.Precision = &.{},
-// };
+pub const ConvolutionOpts = struct {
+    window_strides: []const i64,
+    pad_value: []const i64,
+    pad_shape: []const i64 = &.{},
+    lhs_dilation: []const i64,
+    rhs_dilation: []const i64,
+    window_reversal: []const bool,
+    input_batch_dimension: i64,
+    input_feature_dimension: i64,
+    input_spatial_dimensions: []const i64,
+    kernel_input_feature_dimension: i64,
+    kernel_output_feature_dimension: i64,
+    kernel_spatial_dimensions: []const i64,
+    output_batch_dimension: i64,
+    output_feature_dimension: i64,
+    output_spatial_dimensions: []const i64,
+    feature_group_count: i64,
+    batch_group_count: i64,
+    precision_config: []const PrecisionAttribute.Precision = &.{},
+};
 
-// pub fn convolution(
-//     ctx: *mlir.Context,
-//     lhs: *const mlir.Value,
-//     rhs: *const mlir.Value,
-//     opts: ConvolutionOpts,
-//     res_type: *const mlir.Type,
-//     location: *const mlir.Location,
-// ) *mlir.Operation {
-//     var max_precisions: [2]mlir.Attribute = undefined;
-//     for (opts.precision_config, 0..) |p, i| {
-//         max_precisions[i] = PrecisionAttribute.init(ctx, p).asAttr();
-//     }
-//     var window_reversal: [3]i32 = undefined;
-//     for (opts.window_reversal, 0..) |w, i| {
-//         window_reversal[i] = @intCast(@intFromBool(w));
-//     }
-//     return mlir.Operation.make(ctx, "stablehlo.convolution", .{
-//         .operands = .{ .flat = &.{ lhs, rhs } },
-//         .results = &.{res_type},
-//         .attributes = &.{
-//             .{ "window_strides", .dense(ctx, .i64, opts.window_strides) },
-//             .{ "padding", .denseElements(ctx, opts.pad_shape, .i64, opts.pad_value) },
-//             .{ "lhs_dilation", .dense(ctx, .i64, opts.lhs_dilation) },
-//             .{ "rhs_dilation", .dense(ctx, .i64, opts.rhs_dilation) },
-//             .{ "window_reversal", .dense(ctx, .bool, window_reversal[0..opts.window_reversal.len]) },
-//             .{
-//                 "dimension_numbers", ConvDimensionNumbersAttribute.init(ctx, .{
-//                     .input_batch_dimension = opts.input_batch_dimension,
-//                     .input_feature_dimension = opts.input_feature_dimension,
-//                     .input_spatial_dimensions = opts.input_spatial_dimensions,
-//                     .kernel_input_feature_dimension = opts.kernel_input_feature_dimension,
-//                     .kernel_output_feature_dimension = opts.kernel_output_feature_dimension,
-//                     .kernel_spatial_dimensions = opts.kernel_spatial_dimensions,
-//                     .output_batch_dimension = opts.output_batch_dimension,
-//                     .output_feature_dimension = opts.output_feature_dimension,
-//                     .output_spatial_dimensions = opts.output_spatial_dimensions,
-//                 }).asAttr(),
-//             },
-//             .{ "feature_group_count", .int(ctx, .i64, opts.feature_group_count) },
-//             .{ "batch_group_count", .int(ctx, .i64, opts.batch_group_count) },
-//             .{ "precision_config", .array(ctx, &max_precisions) },
-//         },
-//         .location = location,
-//     });
-// }
+pub fn convolution(
+    ctx: *mlir.Context,
+    lhs: *const mlir.Value,
+    rhs: *const mlir.Value,
+    opts: ConvolutionOpts,
+    res_type: *const mlir.Type,
+    location: *const mlir.Location,
+) *mlir.Operation {
+    var max_precisions: [2]*const mlir.Attribute = undefined;
+    for (opts.precision_config, 0..) |p, i| {
+        max_precisions[i] = precisionAttribute(ctx, p);
+    }
+    var window_reversal: [3]i32 = undefined;
+    for (opts.window_reversal, 0..) |w, i| {
+        window_reversal[i] = @intCast(@intFromBool(w));
+    }
+    return mlir.Operation.make(ctx, "stablehlo.convolution", .{
+        .operands = .{ .flat = &.{ lhs, rhs } },
+        .results = .{ .flat = &.{res_type} },
+        .attributes = &.{
+            .named(ctx, "window_strides", mlir.denseArrayAttribute(ctx, .i64, opts.window_strides)),
+            .named(ctx, "padding", mlir.denseElementsAttribute(mlir.RankedTensorType.get(opts.pad_shape, mlir.integerType(ctx, .i64)).shaped(), opts.pad_value)),
+            .named(ctx, "lhs_dilation", mlir.denseArrayAttribute(ctx, .i64, opts.lhs_dilation)),
+            .named(ctx, "rhs_dilation", mlir.denseArrayAttribute(ctx, .i64, opts.rhs_dilation)),
+            .named(ctx, "window_reversal", mlir.denseArrayAttribute(ctx, .bool, window_reversal[0..opts.window_reversal.len])),
+            .named(ctx, "dimension_numbers", convDimensionNumbersAttribute(ctx, .{
+                .input_batch_dimension = opts.input_batch_dimension,
+                .input_feature_dimension = opts.input_feature_dimension,
+                .input_spatial_dimensions = opts.input_spatial_dimensions,
+                .kernel_input_feature_dimension = opts.kernel_input_feature_dimension,
+                .kernel_output_feature_dimension = opts.kernel_output_feature_dimension,
+                .kernel_spatial_dimensions = opts.kernel_spatial_dimensions,
+                .output_batch_dimension = opts.output_batch_dimension,
+                .output_feature_dimension = opts.output_feature_dimension,
+                .output_spatial_dimensions = opts.output_spatial_dimensions,
+            })),
+            .named(ctx, "feature_group_count", mlir.integerAttribute(ctx, .i64, opts.feature_group_count)),
+            .named(ctx, "batch_group_count", mlir.integerAttribute(ctx, .i64, opts.batch_group_count)),
+            .named(ctx, "precision_config", mlir.arrayAttribute(ctx, &max_precisions)),
+        },
+        .location = location,
+    });
+}
 
 pub const CustomCallOpts = struct {
     pub const ApiVersion = enum(i32) {
@@ -1110,92 +1108,96 @@ pub fn gatherDimensionNumbersAttribute(
     ));
 }
 
-// pub const ConvDimensionNumbersAttribute = struct {
-//     _inner: c.MlirAttribute,
+pub const ConvDimensionNumbersAttribute = opaque {
+    const M = mlir.Methods(ConvDimensionNumbersAttribute, mlir.Attribute);
 
-//     pub const isAFn = c.stablehloAttributeIsAConvDimensionNumbers;
-//     const Self = ConvDimensionNumbersAttribute;
-//     pub const asAttr = mlir.Attribute.fromAny(Self);
-//     pub const eql = mlir.Attribute.eqlAny(Self);
+    pub const isAFn = c.stablehloAttributeIsAConvDimensionNumbers;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
 
-//     pub fn init(ctx: *mlir.Context, args: struct {
-//         input_batch_dimension: i64,
-//         input_feature_dimension: i64,
-//         input_spatial_dimensions: []const i64,
-//         kernel_input_feature_dimension: i64,
-//         kernel_output_feature_dimension: i64,
-//         kernel_spatial_dimensions: []const i64,
-//         output_batch_dimension: i64,
-//         output_feature_dimension: i64,
-//         output_spatial_dimensions: []const i64,
-//     }) Self {
-//         return .{
-//             ._inner = c.stablehloConvDimensionNumbersGet(
-//                 ctx._inner,
-//                 args.input_batch_dimension,
-//                 args.input_feature_dimension,
-//                 @intCast(args.input_spatial_dimensions.len),
-//                 args.input_spatial_dimensions.ptr,
-//                 args.kernel_input_feature_dimension,
-//                 args.kernel_output_feature_dimension,
-//                 @intCast(args.kernel_spatial_dimensions.len),
-//                 args.kernel_spatial_dimensions.ptr,
-//                 args.output_batch_dimension,
-//                 args.output_feature_dimension,
-//                 @intCast(args.output_spatial_dimensions.len),
-//                 args.output_spatial_dimensions.ptr,
-//             ),
-//         };
-//     }
+    pub const InitArgs = struct {
+        input_batch_dimension: i64,
+        input_feature_dimension: i64,
+        input_spatial_dimensions: []const i64,
+        kernel_input_feature_dimension: i64,
+        kernel_output_feature_dimension: i64,
+        kernel_spatial_dimensions: []const i64,
+        output_batch_dimension: i64,
+        output_feature_dimension: i64,
+        output_spatial_dimensions: []const i64,
+    };
 
-//     pub fn getInputBatchDimension(self: Self) i64 {
-//         return c.stablehloConvDimensionNumbersGetInputBatchDimension(self._inner);
-//     }
+    pub fn init(ctx: *mlir.Context, args: InitArgs) *const ConvDimensionNumbersAttribute {
+        return @ptrCast(c.stablehloConvDimensionNumbersGet(
+            ctx.ptr(),
+            args.input_batch_dimension,
+            args.input_feature_dimension,
+            @intCast(args.input_spatial_dimensions.len),
+            args.input_spatial_dimensions.ptr,
+            args.kernel_input_feature_dimension,
+            args.kernel_output_feature_dimension,
+            @intCast(args.kernel_spatial_dimensions.len),
+            args.kernel_spatial_dimensions.ptr,
+            args.output_batch_dimension,
+            args.output_feature_dimension,
+            @intCast(args.output_spatial_dimensions.len),
+            args.output_spatial_dimensions.ptr,
+        ).ptr);
+    }
 
-//     pub fn getInputFeatureDimension(self: Self) i64 {
-//         return c.stablehloConvDimensionNumbersGetInputFeatureDimension(self._inner);
-//     }
+    pub fn getInputBatchDimension(self: *const ConvDimensionNumbersAttribute) i64 {
+        return c.stablehloConvDimensionNumbersGetInputBatchDimension(self.ptr());
+    }
 
-//     pub fn getInputSpatialDimensionsSize(self: Self) usize {
-//         return @intCast(c.stablehloConvDimensionNumbersGetInputSpatialDimensionsSize(self._inner));
-//     }
+    pub fn getInputFeatureDimension(self: *const ConvDimensionNumbersAttribute) i64 {
+        return c.stablehloConvDimensionNumbersGetInputFeatureDimension(self.ptr());
+    }
 
-//     pub fn getInputSpatialDimensionsElem(self: Self, pos: usize) i64 {
-//         return c.stablehloConvDimensionNumbersGetInputSpatialDimensionsElem(self._inner, @intCast(pos));
-//     }
+    pub fn getInputSpatialDimensionsSize(self: *const ConvDimensionNumbersAttribute) usize {
+        return @intCast(c.stablehloConvDimensionNumbersGetInputSpatialDimensionsSize(self.ptr()));
+    }
 
-//     pub fn getKernelInputFeatureDimension(self: Self) i64 {
-//         return c.stablehloConvDimensionNumbersGetKernelInputFeatureDimension(self._inner);
-//     }
+    pub fn getInputSpatialDimensionsElem(self: *const ConvDimensionNumbersAttribute, pos: usize) i64 {
+        return c.stablehloConvDimensionNumbersGetInputSpatialDimensionsElem(self.ptr(), @intCast(pos));
+    }
 
-//     pub fn getKernelOutputFeatureDimension(self: Self) i64 {
-//         return c.stablehloConvDimensionNumbersGetKernelOutputFeatureDimension(self._inner);
-//     }
+    pub fn getKernelInputFeatureDimension(self: *const ConvDimensionNumbersAttribute) i64 {
+        return c.stablehloConvDimensionNumbersGetKernelInputFeatureDimension(self.ptr());
+    }
 
-//     pub fn getKernelSpatialDimensionsSize(self: Self) usize {
-//         return @intCast(c.stablehloConvDimensionNumbersGetKernelSpatialDimensionsSize(self._inner));
-//     }
+    pub fn getKernelOutputFeatureDimension(self: *const ConvDimensionNumbersAttribute) i64 {
+        return c.stablehloConvDimensionNumbersGetKernelOutputFeatureDimension(self.ptr());
+    }
 
-//     pub fn getKernelSpatialDimensionsElem(self: Self, pos: usize) i64 {
-//         return c.stablehloConvDimensionNumbersGetKernelSpatialDimensionsElem(self._inner, @intCast(pos));
-//     }
+    pub fn getKernelSpatialDimensionsSize(self: *const ConvDimensionNumbersAttribute) usize {
+        return @intCast(c.stablehloConvDimensionNumbersGetKernelSpatialDimensionsSize(self.ptr()));
+    }
 
-//     pub fn getOutputBatchDimension(self: Self) i64 {
-//         return c.stablehloConvDimensionNumbersGetOutputBatchDimension(self._inner);
-//     }
+    pub fn getKernelSpatialDimensionsElem(self: *const ConvDimensionNumbersAttribute, pos: usize) i64 {
+        return c.stablehloConvDimensionNumbersGetKernelSpatialDimensionsElem(self.ptr(), @intCast(pos));
+    }
 
-//     pub fn getOutputFeatureDimension(self: Self) i64 {
-//         return c.stablehloConvDimensionNumbersGetOutputFeatureDimension(self._inner);
-//     }
+    pub fn getOutputBatchDimension(self: *const ConvDimensionNumbersAttribute) i64 {
+        return c.stablehloConvDimensionNumbersGetOutputBatchDimension(self.ptr());
+    }
 
-//     pub fn getOutputSpatialDimensionsSize(self: Self) usize {
-//         return @intCast(c.stablehloConvDimensionNumbersGetOutputSpatialDimensionsSize(self._inner));
-//     }
+    pub fn getOutputFeatureDimension(self: *const ConvDimensionNumbersAttribute) i64 {
+        return c.stablehloConvDimensionNumbersGetOutputFeatureDimension(self.ptr());
+    }
 
-//     pub fn getOutputSpatialDimensionsElem(self: Self, pos: usize) i64 {
-//         return c.stablehloConvDimensionNumbersGetOutputSpatialDimensionsElem(self._inner, @intCast(pos));
-//     }
-// };
+    pub fn getOutputSpatialDimensionsSize(self: *const ConvDimensionNumbersAttribute) usize {
+        return @intCast(c.stablehloConvDimensionNumbersGetOutputSpatialDimensionsSize(self.ptr()));
+    }
+
+    pub fn getOutputSpatialDimensionsElem(self: *const ConvDimensionNumbersAttribute, pos: usize) i64 {
+        return c.stablehloConvDimensionNumbersGetOutputSpatialDimensionsElem(self.ptr(), @intCast(pos));
+    }
+};
+
+pub fn convDimensionNumbersAttribute(ctx: *mlir.Context, args: ConvDimensionNumbersAttribute.InitArgs) *const mlir.Attribute {
+    return @ptrCast(ConvDimensionNumbersAttribute.init(ctx, args));
+}
 
 pub const OutputOperandAliasAttribute = opaque {
     const M = mlir.Methods(OutputOperandAliasAttribute, c.MlirAttribute);
