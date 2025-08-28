@@ -107,103 +107,104 @@ pub fn clamp(ctx: *mlir.Context, min: *const mlir.Value, value: *const mlir.Valu
     });
 }
 
-// pub const DotPrecision = union(enum) {
-//     fast,
-//     high,
-//     highest,
-//     algorithm: DotAlgorithm,
+pub const DotPrecision = union(enum) {
+    fast,
+    high,
+    highest,
+    algorithm: DotAlgorithm,
 
-//     pub fn precisionAttr(self: DotPrecision, ctx: *mlir.Context) *const mlir.Attribute {
-//         const precision = PrecisionAttribute.init(ctx, switch (self) {
-//             .fast => .DEFAULT,
-//             .high => .HIGH,
-//             .highest => .HIGHEST,
-//             // When we specify the dot algorithm, we should not specify the precision.
-//             .algorithm => .DEFAULT,
-//         });
-//         return precision.asAttr();
-//     }
+    pub fn precision(self: DotPrecision) PrecisionAttribute.Precision {
+        return switch (self) {
+            .fast => .DEFAULT,
+            .high => .HIGH,
+            .highest => .HIGHEST,
+            // When we specify the dot algorithm, we should not specify the precision.
+            .algorithm => .DEFAULT,
+        };
+    }
 
-//     pub fn algorithmAttr(self: DotPrecision, ctx: *mlir.Context, operand_type: mlir.RankedTensorType) ?mlir.Attribute {
-//         return switch (self) {
-//             .algorithm => |algo| algo.asAttr(ctx, operand_type),
-//             else => null,
-//         };
-//     }
-// };
+    pub fn algorithmAttr(self: DotPrecision, ctx: *mlir.Context, operand_type: mlir.RankedTensorType) ?mlir.Attribute {
+        return switch (self) {
+            .algorithm => |algo| algo.asAttr(ctx, operand_type),
+            else => null,
+        };
+    }
+};
 
-// pub const DotAlgorithm = struct {
-//     accumulation: mlir.FloatTypes,
-//     // Note stablehlo distinguish between left/right component_count
-//     // but all the supported algorithm have the same component_count on both side.
-//     component_count: u8 = 1,
-//     num_primitive_operations: u8 = 1,
-//     allow_imprecise_accumulation: bool = false,
+pub const DotAlgorithm = struct {
+    accumulation: mlir.FloatTypes,
+    // Note stablehlo distinguish between left/right component_count
+    // but all the supported algorithm have the same component_count on both side.
+    component_count: u8 = 1,
+    num_primitive_operations: u8 = 1,
+    allow_imprecise_accumulation: bool = false,
 
-//     // bf16_6x: each input is decomposed to 3 bf16 components, then 6 dot operations are done on those components, and the result is accumulated in f32.
-//     // not sure where this is available.
-//     pub const bf16_6x: DotAlgorithm = .{
-//         .operand = .bf16,
-//         .accumulation = .f32,
-//         .component_count = 1,
-//         .num_primitive_operations = 6,
-//         .allow_imprecise_accumulation = false,
-//     };
+    // bf16_6x: each input is decomposed to 3 bf16 components, then 6 dot operations are done on those components, and the result is accumulated in f32.
+    // not sure where this is available.
+    pub const bf16_6x: DotAlgorithm = .{
+        .accumulation = .f32,
+        .component_count = 1,
+        .num_primitive_operations = 6,
+        .allow_imprecise_accumulation = false,
+    };
+};
 
-//     pub fn asAttr(self: DotAlgorithm, ctx: *mlir.Context, tensor_type: mlir.RankedTensorType) *const mlir.Attribute {
-//         const elem_type = tensor_type.getElementType();
+pub fn dotAlgorithmAttribute(ctx: *mlir.Context, dot_algorithm: DotAlgorithm, element_type: *const mlir.Type) *const mlir.Attribute {
+    return @ptrCast(c.stablehloDotAlgorithmGet(
+        ctx.ptr(),
+        element_type.ptr(),
+        element_type.ptr(),
+        mlir.floatType(dot_algorithm.accumulation, ctx).ptr(),
+        dot_algorithm.component_count,
+        dot_algorithm.component_count,
+        dot_algorithm.num_primitive_operations,
+        dot_algorithm.allow_imprecise_accumulation,
+    ).ptr);
+}
 
-//         return mlir.Attribute.wrap(c.stablehloDotAlgorithmGet(
-//             ctx._inner,
-//             elem_type._inner,
-//             elem_type._inner,
-//             self.accumulation.asType(ctx)._inner,
-//             self.component_count,
-//             self.component_count,
-//             self.num_primitive_operations,
-//             self.allow_imprecise_accumulation,
-//         ));
-//     }
-// };
-
-// /// General matrix multiplication "a la Einstein sum"
-// /// Note: stablehlo doesn't do type inference for dot_general
-// pub fn dot_general(
-//     ctx: *mlir.Context,
-//     lhs: *const mlir.Value,
-//     rhs: *const mlir.Value,
-//     result_type: *const mlir.Type,
-//     location: *const mlir.Location,
-//     opts: struct {
-//         lhs_batching_dimensions: []const i64,
-//         rhs_batching_dimensions: []const i64,
-//         lhs_contracting_dimensions: []const i64,
-//         rhs_contracting_dimensions: []const i64,
-//         precision: DotPrecision,
-//     },
-// ) *mlir.Operation {
-//     const precisions: [2]mlir.Attribute = @splat(opts.precision.precisionAttr(ctx));
-//     const attributes = [3]mlir.AttrTuple{
-//         .{
-//             "dot_dimension_numbers", DotDimensionNumbersAttribute.init(ctx, .{
-//                 .lhs_batching_dimensions = opts.lhs_batching_dimensions,
-//                 .rhs_batching_dimensions = opts.rhs_batching_dimensions,
-//                 .lhs_contracting_dimensions = opts.lhs_contracting_dimensions,
-//                 .rhs_contracting_dimensions = opts.rhs_contracting_dimensions,
-//             }).asAttr(),
-//         },
-//         .{ "precision_config", .array(ctx, &precisions) },
-//         // keep algorithm as the last attribute so we can omit it when it's not set.
-//         .{ "algorithm", opts.precision.algorithmAttr(ctx, lhs.getType().as(mlir.RankedTensorType).?) orelse undefined },
-//     };
-//     const n_attributes = if (opts.precision == .algorithm) attributes.len else attributes.len - 1;
-//     return mlir.Operation.make(ctx, "stablehlo.dot_general", .{
-//         .operands = .{ .flat = &.{ lhs, rhs } },
-//         .results = .{ .flat = &.{result_type} },
-//         .attributes = attributes[0..n_attributes],
-//         .location = location,
-//     });
-// }
+/// General matrix multiplication "a la Einstein sum"
+/// Note: stablehlo doesn't do type inference for dot_general
+pub fn dot_general(
+    ctx: *mlir.Context,
+    lhs: *const mlir.Value,
+    rhs: *const mlir.Value,
+    result_type: *const mlir.Type,
+    location: *const mlir.Location,
+    opts: struct {
+        lhs_batching_dimensions: []const i64,
+        rhs_batching_dimensions: []const i64,
+        lhs_contracting_dimensions: []const i64,
+        rhs_contracting_dimensions: []const i64,
+        dot_precision: DotPrecision,
+    },
+) *mlir.Operation {
+    const precisions: [2]*const mlir.Attribute = @splat(precisionAttribute(ctx, opts.dot_precision.precision()));
+    const attributes = [3]mlir.NamedAttribute{
+        .named(
+            ctx,
+            "dot_dimension_numbers",
+            dotDimensionNumbersAttribute(ctx, .{
+                .lhs_batching_dimensions = opts.lhs_batching_dimensions,
+                .rhs_batching_dimensions = opts.rhs_batching_dimensions,
+                .lhs_contracting_dimensions = opts.lhs_contracting_dimensions,
+                .rhs_contracting_dimensions = opts.rhs_contracting_dimensions,
+            }),
+        ),
+        .named(ctx, "precision_config", mlir.arrayAttribute(ctx, &precisions)),
+        // keep algorithm as the last attribute so we can omit it when it's not set.
+        .named(ctx, "algorithm", switch (opts.dot_precision) {
+            .algorithm => |v| dotAlgorithmAttribute(ctx, v, lhs.type_()),
+            else => undefined,
+        }),
+    };
+    const n_attributes = if (opts.dot_precision == .algorithm) attributes.len else attributes.len - 1;
+    return mlir.Operation.make(ctx, "stablehlo.dot_general", .{
+        .operands = .{ .flat = &.{ lhs, rhs } },
+        .results = .{ .flat = &.{result_type} },
+        .attributes = attributes[0..n_attributes],
+        .location = location,
+    });
+}
 
 pub fn constant(
     ctx: *mlir.Context,
@@ -945,67 +946,71 @@ pub fn unpin(ctx: *mlir.Context, value: *const mlir.Value, location: *const mlir
     }, location);
 }
 
-// pub const DotDimensionNumbersAttribute = struct {
-//     _inner: c.MlirAttribute,
+pub const DotDimensionNumbersAttribute = opaque {
+    const M = mlir.Methods(DotDimensionNumbersAttribute, mlir.Attribute);
 
-//     pub const isAFn = c.stablehloAttributeIsADotDimensionNumbers;
-//     const Self = DotDimensionNumbersAttribute;
-//     pub const asAttr = mlir.Attribute.fromAny(Self);
-//     pub const eql = mlir.Attribute.eqlAny(Self);
+    pub const isAFn = c.stablehloAttributeIsADotDimensionNumbers;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
 
-//     pub fn init(ctx: *mlir.Context, args: struct {
-//         lhs_batching_dimensions: []const i64,
-//         rhs_batching_dimensions: []const i64,
-//         lhs_contracting_dimensions: []const i64,
-//         rhs_contracting_dimensions: []const i64,
-//     }) Self {
-//         return .{
-//             ._inner = c.stablehloDotDimensionNumbersGet(
-//                 ctx._inner,
-//                 @intCast(args.lhs_batching_dimensions.len),
-//                 args.lhs_batching_dimensions.ptr,
-//                 @intCast(args.rhs_batching_dimensions.len),
-//                 args.rhs_batching_dimensions.ptr,
-//                 @intCast(args.lhs_contracting_dimensions.len),
-//                 args.lhs_contracting_dimensions.ptr,
-//                 @intCast(args.rhs_contracting_dimensions.len),
-//                 args.rhs_contracting_dimensions.ptr,
-//             ),
-//         };
-//     }
+    pub const InitArgs = struct {
+        lhs_batching_dimensions: []const i64,
+        rhs_batching_dimensions: []const i64,
+        lhs_contracting_dimensions: []const i64,
+        rhs_contracting_dimensions: []const i64,
+    };
 
-//     pub fn getLhsBatchingDimensionsSize(self: Self) usize {
-//         return @intCast(c.stablehloDotDimensionNumbersGetLhsBatchingDimensionsSize(self._inner));
-//     }
+    pub fn init(ctx: *mlir.Context, args: InitArgs) *const DotDimensionNumbersAttribute {
+        return @ptrCast(c.stablehloDotDimensionNumbersGet(
+            ctx.ptr(),
+            @intCast(args.lhs_batching_dimensions.len),
+            args.lhs_batching_dimensions.ptr,
+            @intCast(args.rhs_batching_dimensions.len),
+            args.rhs_batching_dimensions.ptr,
+            @intCast(args.lhs_contracting_dimensions.len),
+            args.lhs_contracting_dimensions.ptr,
+            @intCast(args.rhs_contracting_dimensions.len),
+            args.rhs_contracting_dimensions.ptr,
+        ).ptr);
+    }
 
-//     pub fn getLhsBatchingDimensionsElem(self: Self, pos: usize) i64 {
-//         return c.stablehloDotDimensionNumbersGetLhsBatchingDimensionsElem(self._inner, @intCast(pos));
-//     }
+    pub fn getLhsBatchingDimensionsSize(self: *const DotDimensionNumbersAttribute) usize {
+        return @intCast(c.stablehloDotDimensionNumbersGetLhsBatchingDimensionsSize(self.ptr()));
+    }
 
-//     pub fn getRhsBatchingDimensionsSize(self: Self) usize {
-//         return @intCast(c.stablehloDotDimensionNumbersGetRhsBatchingDimensionsSize(self._inner));
-//     }
+    pub fn getLhsBatchingDimensionsElem(self: *const DotDimensionNumbersAttribute, pos: usize) i64 {
+        return c.stablehloDotDimensionNumbersGetLhsBatchingDimensionsElem(self.ptr(), @intCast(pos));
+    }
 
-//     pub fn getRhsBatchingDimensionsElem(self: Self, pos: usize) i64 {
-//         return c.stablehloDotDimensionNumbersGetRhsBatchingDimensionsElem(self._inner, @intCast(pos));
-//     }
+    pub fn getRhsBatchingDimensionsSize(self: *const DotDimensionNumbersAttribute) usize {
+        return @intCast(c.stablehloDotDimensionNumbersGetRhsBatchingDimensionsSize(self.ptr()));
+    }
 
-//     pub fn getLhsContractingDimensionsSize(self: Self) usize {
-//         return @intCast(c.stablehloDotDimensionNumbersGetLhsContractingDimensionsSize(self._inner));
-//     }
+    pub fn getRhsBatchingDimensionsElem(self: *const DotDimensionNumbersAttribute, pos: usize) i64 {
+        return c.stablehloDotDimensionNumbersGetRhsBatchingDimensionsElem(self.ptr(), @intCast(pos));
+    }
 
-//     pub fn getLhsContractingDimensionsElem(self: Self, pos: usize) i64 {
-//         return c.stablehloDotDimensionNumbersGetLhsContractingDimensionsElem(self._inner, @intCast(pos));
-//     }
+    pub fn getLhsContractingDimensionsSize(self: *const DotDimensionNumbersAttribute) usize {
+        return @intCast(c.stablehloDotDimensionNumbersGetLhsContractingDimensionsSize(self.ptr()));
+    }
 
-//     pub fn getRhsContractingDimensionsSize(self: Self) usize {
-//         return @intCast(c.stablehloDotDimensionNumbersGetRhsContractingDimensionsSize(self._inner));
-//     }
+    pub fn getLhsContractingDimensionsElem(self: *const DotDimensionNumbersAttribute, pos: usize) i64 {
+        return c.stablehloDotDimensionNumbersGetLhsContractingDimensionsElem(self.ptr(), @intCast(pos));
+    }
 
-//     pub fn getRhsContractingDimensionsElem(self: Self, pos: usize) i64 {
-//         return c.stablehloDotDimensionNumbersGetRhsContractingDimensionsElem(self._inner, @intCast(pos));
-//     }
-// };
+    pub fn getRhsContractingDimensionsSize(self: *const DotDimensionNumbersAttribute) usize {
+        return @intCast(c.stablehloDotDimensionNumbersGetRhsContractingDimensionsSize(self.ptr()));
+    }
+
+    pub fn getRhsContractingDimensionsElem(self: *const DotDimensionNumbersAttribute, pos: usize) i64 {
+        return c.stablehloDotDimensionNumbersGetRhsContractingDimensionsElem(self.ptr(), @intCast(pos));
+    }
+};
+
+pub fn dotDimensionNumbersAttribute(ctx: *mlir.Context, args: DotDimensionNumbersAttribute.InitArgs) *const mlir.Attribute {
+    return @ptrCast(DotDimensionNumbersAttribute.init(ctx, args));
+}
 
 // pub const GatherDimensionNumbersAttribute = struct {
 //     _inner: c.MlirAttribute,
@@ -1204,29 +1209,33 @@ pub fn outputOperandAliasAttribute(ctx: *mlir.Context, args: OutputOperandAliasA
     return @ptrCast(OutputOperandAliasAttribute.get(ctx, args));
 }
 
-// pub const PrecisionAttribute = struct {
-//     _inner: c.MlirAttribute,
+pub const PrecisionAttribute = opaque {
+    const M = mlir.Methods(PrecisionAttribute, mlir.Attribute);
 
-//     pub const isAFn = c.stablehloAttributeIsAPrecisionAttr;
-//     const Self = PrecisionAttribute;
-//     pub const asAttr = mlir.Attribute.fromAny(Self);
-//     pub const eql = mlir.Attribute.eqlAny(Self);
+    pub const isAFn = c.stablehloAttributeIsAPrecisionAttr;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
 
-//     pub const Precision = enum {
-//         DEFAULT,
-//         HIGH,
-//         HIGHEST,
-//     };
+    pub const Precision = enum {
+        DEFAULT,
+        HIGH,
+        HIGHEST,
+    };
 
-//     pub fn init(ctx: *mlir.Context, value: Precision) Self {
-//         return .{ ._inner = c.stablehloPrecisionAttrGet(ctx._inner, stringRef(@tagName(value))) };
-//     }
+    pub fn init(ctx: *mlir.Context, value: Precision) *const PrecisionAttribute {
+        return @ptrCast(c.stablehloPrecisionAttrGet(ctx.ptr(), stringRef(@tagName(value))).ptr);
+    }
 
-//     pub fn getValue(self: Self) Precision {
-//         const value = mlir.fromStringRef(c.stablehloPrecisionAttrGetValue(self._inner));
-//         return std.meta.stringToEnum(Precision, value) orelse unreachable;
-//     }
-// };
+    pub fn getValue(self: *const PrecisionAttribute) Precision {
+        const value = mlir.fromStringRef(c.stablehloPrecisionAttrGetValue(self.ptr()));
+        return std.meta.stringToEnum(Precision, value) orelse unreachable;
+    }
+};
+
+pub fn precisionAttribute(ctx: *mlir.Context, precision: PrecisionAttribute.Precision) *const mlir.Attribute {
+    return @ptrCast(PrecisionAttribute.init(ctx, precision));
+}
 
 pub const ComparisonDirection = opaque {
     const M = mlir.Methods(ComparisonDirection, c.MlirAttribute);
