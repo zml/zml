@@ -288,13 +288,19 @@ pub fn concatenate(ctx: *mlir.Context, inputs: []const *const mlir.Value, dimens
     });
 }
 
-// pub fn select(ctx: *mlir.Context, condition: *const mlir.Value, then: *const mlir.Value, else_: *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
-//     return mlir.Operation.make(ctx, "stablehlo.select", .{
-//         .operands = .{ .flat = &.{ condition, then, else_ } },
-//         .results = &.{then.getType()},
-//         .location = location,
-//     });
-// }
+pub fn select(
+    ctx: *mlir.Context,
+    condition: *const mlir.Value,
+    then: *const mlir.Value,
+    else_: *const mlir.Value,
+    location: *const mlir.Location,
+) *mlir.Operation {
+    return mlir.Operation.make(ctx, "stablehlo.select", .{
+        .operands = .{ .flat = &.{ condition, then, else_ } },
+        .results = .{ .flat = &.{then.type_()} },
+        .location = location,
+    });
+}
 
 // pub fn gather(
 //     ctx: *mlir.Context,
