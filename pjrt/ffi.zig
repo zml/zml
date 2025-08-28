@@ -37,11 +37,11 @@ pub const ExtensionBase = extern struct {
 };
 
 // Based of https://github.com/openxla/xla/blob/145f836bd5175dc5dd262f716a0c59af2b0297a0/xla/ffi/api/c_api.h#L449
-pub const HandlerTraits = packed struct(u32) {
+pub const HandlerTraits = packed struct(c_uint) {
     /// Calls to FFI handler are safe to trace into the command buffer.
     /// It means that calls to FFI handler always launch exactly the same device operations (can depend on attribute values)
     /// that can be captured and then replayed.
-    command_buffer_compatible: u1,
+    command_buffer_compatible: bool,
 
     __unassigned__: u31 = 0,
 };
@@ -400,7 +400,7 @@ pub const CallFrame = extern struct {
         return false;
     }
 
-    pub fn stream(call_frame: CallFrame) ?*const Stream {
+    pub fn stream(call_frame: CallFrame) ?*const pjrt.Stream {
         return call_frame.api.stream(call_frame.ctx);
     }
 };

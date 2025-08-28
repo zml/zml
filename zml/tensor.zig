@@ -6,8 +6,7 @@ const stdx = @import("stdx");
 
 const Buffer = @import("buffer.zig").Buffer;
 const CompilationContext = @import("module.zig").CompilationContext;
-const custom_call_ = @import("custom_call.zig");
-const custom_call = custom_call_.custom_call;
+const custom_call = @import("custom_call.zig");
 const Data = @import("dtype.zig").Data;
 const DataType = @import("dtype.zig").DataType;
 const HostBuffer = @import("hostbuffer.zig").HostBuffer;
@@ -3826,12 +3825,7 @@ pub const Tensor = struct {
     /// Only for debug purpose, it inserts device to host synchronization
     /// so it will slow down the program execution.
     pub fn print(input: Tensor) Tensor {
-        return custom_call(
-            custom_call_.Print,
-            .{input},
-            &.{input.shape()},
-            .{ .output_operand_aliases = &.{0}, .copy_inputs_to_host_pinned = true },
-        )[0];
+        return custom_call.customCall(custom_call.Print, .{input}, &.{input.shape()})[0];
     }
 };
 

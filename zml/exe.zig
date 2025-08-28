@@ -214,7 +214,7 @@ pub const BaseExe = struct {
 
             // Add extra data needed by the ZML provided custom calls.
             // Atm we don't have a mechanism to detect if the user need this or not.
-            inline for (custom_call.custom_call_internal_types) |T| {
+            inline for (custom_call.internal_custom_calls) |T| {
                 const value_ptr = try allocator.create(T);
                 value_ptr.* = try .init(platform);
                 try ffi.addUserData(platform.pjrt_api, execute_context.?, .{ .type_id = T.type_id.type_id, .user_data = @ptrCast(@constCast(value_ptr)) });
@@ -380,6 +380,10 @@ pub fn Exe(ArgsT: type, ReturnT: type) type {
             return new;
         }
 
+        /// For a given customCall inside this executable,
+        /// provide a pointer to runtime data.
+        /// The caller keeps memory ownership and need to ensure that the value
+        /// stays alive as long as the executable.
         pub fn bind(self: Self, comptime T: type, value: *T) !void {
             try self.inner.bind(T, value);
         }
