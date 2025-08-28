@@ -277,16 +277,16 @@ pub fn slice(
     });
 }
 
-// pub fn concatenate(ctx: *mlir.Context, inputs: []const *const mlir.Value, dimension: i64, location: *const mlir.Location) *mlir.Operation {
-//     return mlir.Operation.make(ctx, "stablehlo.concatenate", .{
-//         .operands = inputs,
-//         .result_type_inference = true,
-//         .attributes = &.{
-//             .{ "dimension", mlir.integerAttribute(ctx, .i64, dimension) },
-//         },
-//         .location = location,
-//     });
-// }
+pub fn concatenate(ctx: *mlir.Context, inputs: []const *const mlir.Value, dimension: i64, location: *const mlir.Location) *mlir.Operation {
+    return mlir.Operation.make(ctx, "stablehlo.concatenate", .{
+        .operands = .{ .flat = inputs },
+        .result_type_inference = true,
+        .attributes = &.{
+            mlir.NamedAttribute.named(ctx, "dimension", mlir.integerAttribute(ctx, .i64, dimension)),
+        },
+        .location = location,
+    });
+}
 
 // pub fn select(ctx: *mlir.Context, condition: *const mlir.Value, then: *const mlir.Value, else_: *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
 //     return mlir.Operation.make(ctx, "stablehlo.select", .{
