@@ -424,17 +424,24 @@ pub fn reverse(ctx: *mlir.Context, operand: *const mlir.Value, dimensions: []con
     });
 }
 
-// pub fn compare(ctx: *mlir.Context, lhs: *const mlir.Value, rhs: *const mlir.Value, comparison_direction: ComparisonDirection, compare_type: CompareType, location: *const mlir.Location) *mlir.Operation {
-//     return mlir.Operation.make(ctx, "stablehlo.compare", .{
-//         .operands = .{ .flat = &.{ lhs, rhs } },
-//         .result_type_inference = true,
-//         .attributes = &.{
-//             .{ "comparison_direction", comparison_direction.asAttr() },
-//             .{ "compare_type", compare_type.asAttr() },
-//         },
-//         .location = location,
-//     });
-// }
+pub fn compare(
+    ctx: *mlir.Context,
+    lhs: *const mlir.Value,
+    rhs: *const mlir.Value,
+    comparison_direction: ComparisonDirection.Direction,
+    compare_type: CompareType.Type,
+    location: *const mlir.Location,
+) *mlir.Operation {
+    return mlir.Operation.make(ctx, "stablehlo.compare", .{
+        .operands = .{ .flat = &.{ lhs, rhs } },
+        .result_type_inference = true,
+        .attributes = &.{
+            .named(ctx, "comparison_direction", comparisonDirection(ctx, comparison_direction)),
+            .named(ctx, "compare_type", compareType(ctx, compare_type)),
+        },
+        .location = location,
+    });
+}
 
 // pub fn reduce(
 //     ctx: *mlir.Context,
@@ -1130,57 +1137,63 @@ pub fn outputOperandAliasAttribute(ctx: *mlir.Context, args: OutputOperandAliasA
 //     }
 // };
 
-// pub const ComparisonDirection = struct {
-//     _inner: c.MlirAttribute,
+pub const ComparisonDirection = opaque {
+    const M = mlir.Methods(ComparisonDirection, c.MlirAttribute);
 
-//     pub const isAFn = c.stablehloAttributeIsAComparisonDirectionAttr;
-//     const Self = ComparisonDirection;
-//     pub const asAttr = mlir.Attribute.fromAny(Self);
-//     pub const eql = mlir.Attribute.eqlAny(Self);
+    pub const isAFn = c.stablehloAttributeIsAComparisonDirectionAttr;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
 
-//     pub const Direction = enum {
-//         EQ,
-//         NE,
-//         GE,
-//         GT,
-//         LE,
-//         LT,
-//     };
+    pub const Direction = enum {
+        EQ,
+        NE,
+        GE,
+        GT,
+        LE,
+        LT,
+    };
 
-//     pub fn init(ctx: *mlir.Context, value: Direction) Self {
-//         return .{ ._inner = c.stablehloComparisonDirectionAttrGet(ctx._inner, stringRef(@tagName(value))) };
-//     }
+    pub fn init(ctx: *mlir.Context, value: Direction) *const ComparisonDirection {
+        return @ptrCast(c.stablehloComparisonDirectionAttrGet(ctx.ptr(), mlir.stringRef(@tagName(value))).ptr);
+    }
 
-//     pub fn getValue(self: Self) Direction {
-//         const value = mlir.fromStringRef(c.stablehloComparisonDirectionAttrGetValue(self._inner));
-//         return std.meta.stringToEnum(Direction, value) orelse unreachable;
-//     }
-// };
+    pub fn getValue(self: *const ComparisonDirection) Direction {
+        const value = mlir.fromStringRef(c.stablehloComparisonDirectionAttrGetValue(self.ptr()));
+        return std.meta.stringToEnum(Direction, value) orelse unreachable;
+    }
+};
 
-// pub const CompareType = struct {
-//     _inner: c.MlirAttribute,
+pub fn comparisonDirection(ctx: *mlir.Context, value: ComparisonDirection.Direction) *const mlir.Attribute {
+    return @ptrCast(ComparisonDirection.init(ctx, value));
+}
 
-//     pub const isAFn = c.stablehloAttributeIsAComparisonTypeAttr;
-//     const Self = CompareType;
-//     pub const asAttr = mlir.Attribute.fromAny(Self);
-//     pub const eql = mlir.Attribute.eqlAny(Self);
+pub const CompareType = opaque {
+    const M = mlir.Methods(CompareType, c.MlirAttribute);
 
-//     pub const Type = enum {
-//         SIGNED,
-//         UNSIGNED,
-//         FLOAT,
-//         TOTALORDER,
-//     };
+    pub const isAFn = c.stablehloAttributeIsAComparisonTypeAttr;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
 
-//     pub fn init(ctx: *mlir.Context, value: Type) Self {
-//         return .{ ._inner = c.stablehloComparisonTypeAttrGet(ctx._inner, stringRef(@tagName(value))) };
-//     }
+    pub const Type = enum {
+        SIGNED,
+        UNSIGNED,
+        FLOAT,
+        TOTALORDER,
+    };
 
-//     pub fn getValue(self: Self) Type {
-//         const value = mlir.fromStringRef(c.stablehloComparisonTypeAttrGetValue(self._inner));
-//         return std.meta.stringToEnum(Type, value) orelse unreachable;
-//     }
-// };
+    pub fn init(ctx: *mlir.Context, value: Type) *const CompareType {
+        return @ptrCast(c.stablehloComparisonTypeAttrGet(ctx.ptr(), stringRef(@tagName(value))).ptr);
+    }
+
+    pub fn getValue(self: *const CompareType) Type {
+        const value = mlir.fromStringRef(c.stablehloComparisonTypeAttrGetValue(self.ptr()));
+        return std.meta.stringToEnum(Type, value) orelse unreachable;
+    }
+};
+
+pub fn compareType(ctx: *mlir.Context, value: CompareType.Type) *const mlir.Attribute {
+    return @ptrCast(CompareType.init(ctx, value));
+}
 
 // pub const Transpose = struct {
 //     _inner: c.MlirAttribute,
