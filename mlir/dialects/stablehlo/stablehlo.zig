@@ -239,16 +239,22 @@ pub fn broadcast_in_dim(
     });
 }
 
-// pub fn transpose(ctx: *mlir.Context, value: *const mlir.Value, result_type: *const mlir.Type, location: *const mlir.Location, opts: struct { permutation: []const i64 }) *mlir.Operation {
-//     return mlir.Operation.make(ctx, "stablehlo.transpose", .{
-//         .operands = .{ .flat = &.{value} },
-//         .results = .{ .flat = &.{result_type} },
-//         .attributes = &.{
-//             .{ "permutation", mlir.denseArrayAttribute(ctx, .i64, opts.permutation) },
-//         },
-//         .location = location,
-//     });
-// }
+pub fn transpose(
+    ctx: *mlir.Context,
+    value: *const mlir.Value,
+    result_type: *const mlir.Type,
+    location: *const mlir.Location,
+    opts: struct { permutation: []const i64 },
+) *mlir.Operation {
+    return mlir.Operation.make(ctx, "stablehlo.transpose", .{
+        .operands = .{ .flat = &.{value} },
+        .results = .{ .flat = &.{result_type} },
+        .attributes = &.{
+            mlir.NamedAttribute.named(ctx, "permutation", mlir.denseArrayAttribute(ctx, .i64, opts.permutation)),
+        },
+        .location = location,
+    });
+}
 
 // pub fn slice(ctx: *mlir.Context, operand: *const mlir.Value, start_indices: []const i64, limit_indices: []const i64, strides: []const i64, result_type: *const mlir.Type, location: *const mlir.Location) *mlir.Operation {
 //     return mlir.Operation.make(ctx, "stablehlo.slice", .{
