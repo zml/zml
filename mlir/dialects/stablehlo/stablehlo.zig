@@ -99,13 +99,13 @@ pub fn cholesky(ctx: *mlir.Context, value: *const mlir.Value, lower: bool, locat
     });
 }
 
-// pub fn clamp(ctx: *mlir.Context, min: *const mlir.Value, value: *const mlir.Value, max: *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
-//     return mlir.Operation.make(ctx, "stablehlo.clamp", .{
-//         .operands = .{ .flat = &.{ min, value, max } },
-//         .result_type_inference = true,
-//         .location = location,
-//     });
-// }
+pub fn clamp(ctx: *mlir.Context, min: *const mlir.Value, value: *const mlir.Value, max: *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
+    return mlir.Operation.make(ctx, "stablehlo.clamp", .{
+        .operands = .{ .flat = &.{ min, value, max } },
+        .result_type_inference = true,
+        .location = location,
+    });
+}
 
 // pub const DotPrecision = union(enum) {
 //     fast,
