@@ -1244,8 +1244,8 @@ pub const RankedTensorType = opaque {
     }
 };
 
-pub fn rankedTensorType(dimensions: []const i64, elemType: *const Type) *const Type {
-    return @ptrCast(RankedTensorType.init(dimensions, elemType));
+pub fn rankedTensorType(dimensions: []const i64, elem_type: *const Type) *const Type {
+    return @ptrCast(RankedTensorType.init(dimensions, elem_type));
 }
 
 pub const DenseElementsAttribute = opaque {

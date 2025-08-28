@@ -205,22 +205,22 @@ pub fn clamp(ctx: *mlir.Context, min: *const mlir.Value, value: *const mlir.Valu
 //     });
 // }
 
-// pub fn constant(
-//     ctx: *mlir.Context,
-//     dims: []const i64,
-//     elem_type: mlir.DenseElementsAttributeTypes,
-//     raw_bytes: []const u8,
-//     location: *const mlir.Location,
-// ) *mlir.Operation {
-//     return mlir.Operation.make(ctx, "stablehlo.constant", .{
-//         .operands = .{ .flat = &.{} },
-//         .results = &.{.tensor(dims, elem_type.mlirType(ctx))},
-//         .attributes = &.{
-//             .{ "value", .denseElementsFromBytes(ctx, dims, elem_type, raw_bytes) },
-//         },
-//         .location = location,
-//     });
-// }
+pub fn constant(
+    ctx: *mlir.Context,
+    dims: []const i64,
+    elem_type: *const mlir.Type,
+    raw_bytes: []const u8,
+    location: *const mlir.Location,
+) *mlir.Operation {
+    return mlir.Operation.make(ctx, "stablehlo.constant", .{
+        .operands = .{ .flat = &.{} },
+        .results = .{ .flat = &.{mlir.rankedTensorType(dims, elem_type)} },
+        .attributes = &.{
+            mlir.NamedAttribute.named(ctx, "value", mlir.denseElementsAttribute(mlir.RankedTensorType.init(dims, elem_type).shaped(), raw_bytes)),
+        },
+        .location = location,
+    });
+}
 
 // pub fn broadcast_in_dim(ctx: *mlir.Context, operand: *const mlir.Value, dims: []const i64, result_type: *const mlir.Type, location: *const mlir.Location) *mlir.Operation {
 //     return mlir.Operation.make(ctx, "stablehlo.broadcast_in_dim", .{
