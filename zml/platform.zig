@@ -71,14 +71,14 @@ pub const Platform = struct {
         return res;
     }
 
-    pub fn registerFFIType(self: Platform, comptime T: type) !void {
+    pub fn registerCustomCall(self: Platform, comptime CustomOp: type) pjrt.ApiError!void {
         if (self.pjrt_api.ffi()) |ffi| {
-            if (!@hasDecl(T, "type_id")) {
-                stdx.debug.panic("registerFFIType requires type {s} to have a `type_id` i64 field ", .{@typeName(T)});
-            }
-            try ffi.registerTypeId(self.pjrt_api, T);
+            stdx.debug.assertComptime(@hasDecl(CustomOp, "call"), "{} must have a call method", .{CustomOp});
+            stdx.debug.assertComptime(@hasDecl(CustomOp, "type_id") and @TypeOf(CustomOp.type_id) == pjrt.ffi.TypeId, "{} must have a field `pub var type_id: pjrt.ffi.TypeId`", .{CustomOp});
+
+            CustomOp.type_id = try ffi.registerTypeId(self.pjrt_api, @typeName(CustomOp));
         } else {
-            stdx.debug.panic("registerFFIType is not available for target {s}", .{@tagName(self.target)});
+            return error.Unavailable;
         }
     }
 

@@ -27,8 +27,8 @@ pub const std_options: std.Options = .{
     .logFn = asynk.logFn(std.log.defaultLog),
 };
 
-pub fn CustomCallInputsType(custom_op: type) type {
-    const ArgsT = stdx.meta.FnArgs(custom_op.call);
+pub fn CustomCallInputsType(CustomOp: type) type {
+    const ArgsT = stdx.meta.FnArgs(CustomOp.call);
     if (@typeInfo(ArgsT) != .@"struct") {
         @compileError("Expected struct type");
     }
@@ -52,14 +52,20 @@ pub const CustomCallOptions = struct {
     },
 };
 
+/// Insert a user-defined callback into the computation graph.
+/// The callback is defined with a struct.
+///
+/// ```zig
+/// const MyCallback
 pub fn custom_call(
-    comptime custom_op: type,
-    inputs: CustomCallInputsType(custom_op),
+    comptime CustomOp: type,
+    inputs: CustomCallInputsType(CustomOp),
     res_shapes_: []const Shape,
     comptime opts: CustomCallOptions,
 ) []Tensor {
-    stdx.debug.assert(@hasDecl(custom_op, "call"), "custom_op must have a call method", .{});
-    const op_name = @typeName(custom_op);
+    const op_name = @typeName(CustomOp);
+    stdx.debug.assertComptime(@hasDecl(CustomOp, "call"), "{s} must have a call method", .{op_name});
+    stdx.debug.assertComptime(@hasDecl(CustomOp, "type_id") and @TypeOf(CustomOp.type_id) == pjrt.ffi.TypeId, "{s} must have a field `pub var type_id: pjrt.ffi.TypeId`", .{op_name});
 
     const ctx = CompilationContext.current();
     const allocator = ctx.allocator();
@@ -72,11 +78,11 @@ pub fn custom_call(
         stdx.debug.panic("Custom calls are not supported for target {s}", .{@tagName(platform.target)});
     }
 
-    const ffi_func = customCallProxy(custom_op, opts);
-    const target_name = "callback_" ++ op_name;
+    const ffi_func = customCallProxy(CustomOp, opts);
+    const target_name = "zml$" ++ op_name;
 
     ffi_.?.register(pjrt_api, target_name, @tagName(platform.target), &ffi_func, opts.register_ffi_options) catch unreachable;
-    log.info("{s} / Registered custom call with target name \"{s}\" with proxy func {*}", .{ op_name, target_name, &ffi_func });
+    log.info("Registered custom call {s} with target name \"{s}\"", .{ op_name, target_name });
 
     const custom_call_inputs = allocator.alloc(mlir.Value, 8) catch unreachable;
     for (inputs, 0..) |t, i| {
@@ -126,12 +132,14 @@ fn customCallImpl(comptime CustomOp: type, opts: CustomCallOptions, call_frame: 
     if (call_frame.registeringHook()) return null;
 
     const execution_context = call_frame.ctx;
-    log.info("Custom call {s} called ! {*}", .{ @typeName(CustomOp), call_frame });
-    const user_ctx: *CustomOp = execution_context.getContext(CustomOp, call_frame.api) catch {
+    // log.info("Custom call {s} called !", .{ @typeName(CustomOp) });
+    const user_ctx_opaque = execution_context.getContext(CustomOp.type_id, call_frame.api) catch {
         return .create(call_frame.api, .internal, "failed to fetch user context for custom_call" ++ @typeName(CustomOp));
     };
+    const user_ctx: *CustomOp = @ptrCast(@alignCast(user_ctx_opaque));
     const platform: Platform = user_ctx.platform;
 
+    // Undocumented hook to get a cuda stream in the callback.
     if (@hasField(CustomOp, "stream") and platform.target != .cpu) {
         const stream = call_frame.api.stream(execution_context);
         user_ctx.stream = stream;
@@ -145,7 +153,7 @@ fn customCallImpl(comptime CustomOp: type, opts: CustomCallOptions, call_frame: 
         const ffi_buffer_shape = getShape(ffi_buffer);
         var zml_buffer: Buffer = undefined;
 
-        // TODO reconder using PJRT apis at all from pjrt callbacks.
+        // TODO reconsider using PJRT apis at all from pjrt callbacks.
         if (platform.target == .cpu) {
             zml_buffer = Buffer.asViewOfHostBuffer(platform, HostBuffer.fromBytes(ffi_buffer_shape, ffi_buffer.data[0..ffi_buffer_shape.byteSize()]));
         } else {
@@ -195,29 +203,23 @@ pub const custom_call_internal_types = [_]type{
     Print,
 };
 
-pub fn registerInternalCustomCalls(
-    platform: Platform,
-) !void {
+pub fn registerInternalCustomCalls(platform: Platform) !void {
     inline for (custom_call_internal_types) |custom_call_type| {
-        try platform.registerFFIType(custom_call_type);
-        log.info("Registered internal custom call {s} with type_id {any}", .{ @typeName(custom_call_type), custom_call_type.type_id });
+        try platform.registerCustomCall(custom_call_type);
+        log.info("Registered internal custom call {s} with type_id {d}", .{ @typeName(custom_call_type), custom_call_type.type_id.type_id });
     }
 }
 
+/// The print callback
 pub const Print = struct {
-    pub var type_id: i64 = undefined;
+    // a unique type_id will be set by the PJRT plugin during registration.
+    pub var type_id: pjrt.ffi.TypeId = undefined;
 
-    allocator: std.mem.Allocator,
     platform: Platform,
-    stream: *pjrt.Stream = undefined,
-
     results: [1]Buffer = undefined,
 
     pub fn init(platform: Platform) !Print {
-        return .{
-            .allocator = std.heap.smp_allocator,
-            .platform = platform,
-        };
+        return .{ .platform = platform };
     }
 
     pub fn call(_: *Print, input: Buffer) !void {

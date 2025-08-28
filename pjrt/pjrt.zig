@@ -1323,8 +1323,7 @@ pub const FFI = extern struct {
         }
     }
 
-    pub fn registerTypeId(self: *const FFI, api: *const Api, T: type) ApiError!void {
-        const type_name = @typeName(T);
+    pub fn registerTypeId(self: *const FFI, api: *const Api, type_name: []const u8) ApiError!ffi.TypeId {
         var ret = pjrtStruct(c.PJRT_FFI_TypeID_Register_Args{
             .type_name = type_name.ptr,
             .type_name_size = type_name.len,
@@ -1336,7 +1335,7 @@ pub const FFI = extern struct {
             return pjrt_error.getCode(api).toApiError();
         }
 
-        T.type_id = ret.type_id;
+        return .{ .type_id = ret.type_id };
     }
 
     pub fn addUserData(self: *const FFI, api: *const Api, context: *ExecuteContext, user_data: UserData) ApiError!void {
