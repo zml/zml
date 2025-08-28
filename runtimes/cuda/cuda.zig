@@ -28,7 +28,7 @@ fn hasCudaPathInLDPath() bool {
 
 fn setupXlaGpuCudaDirFlag(allocator: std.mem.Allocator, sandbox: []const u8) !void {
     const xla_flags = std.process.getEnvVarOwned(allocator, "XLA_FLAGS") catch "";
-    const new_xla_flagsZ = try std.fmt.allocPrintZ(allocator, "{s} --xla_gpu_cuda_data_dir={s}", .{ xla_flags, sandbox });
+    const new_xla_flagsZ = try std.fmt.allocPrintSentinel(allocator, "{s} --xla_gpu_cuda_data_dir={s}", .{ xla_flags, sandbox }, 0);
 
     _ = c.setenv("XLA_FLAGS", new_xla_flagsZ, 1);
 }

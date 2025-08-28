@@ -25,10 +25,10 @@ fn isRunningOnEC2() !bool {
     var f = try asynk.File.open("/sys/devices/virtual/dmi/id/sys_vendor", .{ .mode = .read_only });
     defer f.close() catch {};
 
-    var buf: [AmazonEC2.len]u8 = undefined;
-    _ = try f.reader().readAll(&buf);
+    var content: [AmazonEC2.len]u8 = undefined;
+    const n_read = try f.pread(&content, 0);
 
-    return std.mem.eql(u8, &buf, AmazonEC2);
+    return std.mem.eql(u8, content[0..n_read], AmazonEC2);
 }
 
 pub fn load() !*const pjrt.Api {
@@ -45,7 +45,7 @@ pub fn load() !*const pjrt.Api {
         return error.Unavailable;
     }
 
-    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
 
     var r_ = try runfiles.Runfiles.create(.{ .allocator = arena.allocator() }) orelse {
