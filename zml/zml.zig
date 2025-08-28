@@ -14,6 +14,7 @@ pub const Bufferized = @import("tensor.zig").Bufferized;
 pub const CompilationOptions = @import("platform.zig").CompilationOptions;
 pub const context = @import("context.zig");
 pub const Context = @import("context.zig").Context;
+pub const custom_call = @import("custom_call.zig").custom_call;
 pub const Data = @import("dtype.zig").Data;
 pub const DataType = @import("dtype.zig").DataType;
 pub const exe = @import("exe.zig");

@@ -2,9 +2,11 @@
 const std = @import("std");
 
 const c = @import("c");
+const TypeId = c.XLA_FFI_TypeId;
 const stdx = @import("stdx");
 
 const pjrtStruct = @import("pjrt.zig").pjrtStruct;
+const Stream = @import("pjrt.zig").Stream;
 
 const log = std.log.scoped(.pjrt);
 
@@ -169,7 +171,7 @@ pub const ExecutionContext = opaque {
                 const type_id: TypeId = .{ .type_id = T.type_id };
                 var ret = pjrtStruct(c.XLA_FFI_ExecutionContext_Get_Args{
                     .ctx = @constCast(self.inner()),
-                    .type_id = @constCast(&type_id.toCStruct()),
+                    .type_id = @constCast(&type_id),
                 });
                 const result = api.inner().XLA_FFI_ExecutionContext_Get.?(&ret);
 
@@ -235,11 +237,7 @@ pub const ExecutionContext = opaque {
     }
 };
 
-const TypeId = c.XLA_FFI_TypeId;
-
 const Task = fn (*anyopaque) void;
-
-const Stream = @import("pjrt.zig").Stream;
 
 const ByteSpan = extern struct {
     ptr: [*]const u8,

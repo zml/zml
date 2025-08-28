@@ -13,6 +13,7 @@ const pjrt = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
 const Target = @import("platform.zig").Target;
+const custom_call = @import("custom_call.zig");
 const zml_platform = @import("platform.zig");
 
 const PjrtApiMap = std.EnumArray(Target, ?*const pjrt.Api);
@@ -176,9 +177,9 @@ pub const Context = struct {
             return error.NoDevicesFound;
         }
 
-        try CustomCall.registerZmlCustomCalls(p);
-
         self.platforms.set(target, p);
+        try custom_call.registerInternalCustomCalls(p);
+
         return p;
     }
 
@@ -211,8 +212,6 @@ pub const Context = struct {
             }
         }
     }
-
-    pub const HostCallback = fn (?*anyopaque, []const HostBuffer, []const HostBuffer) void;
 };
 
 const CustomCall = struct {
