@@ -340,32 +340,15 @@ pub const HostBuffer = struct {
         try writer.print("HostBuffer(.{f})", .{self._shape});
     }
 
-    /// Formatter for a HostBuffer that also print the values not just the shape.
-    /// Usage: `std.log.info("my buffer: {}", .{buffer.pretty()});`
-    pub fn pretty(self: HostBuffer) PrettyPrinter {
-        return .{ .x = self };
+    pub fn formatNumber(self: HostBuffer, writer: *std.io.Writer, n: std.fmt.Number) std.io.Writer.Error!void {
+        return self.prettyPrintIndented(writer, 4, 0, n);
     }
 
-    pub const PrettyPrinter = struct {
-        x: HostBuffer,
-
-        // TODO(0.15.0) revisit pretty printer
-        pub fn format(self: PrettyPrinter, writer: anytype) !void {
-            const fmt_: stdx.fmt.Fmt = switch (self.x.dtype().class()) {
-                .integer => .parse(i32, "d"),
-                .float => .parse(f32, "d"),
-                else => .parse(void, ""),
-            };
-            const options: std.fmt.FormatOptions = .{};
-            try prettyPrint(self.x, writer, .{ .fmt = fmt_, .options = options });
-        }
-    };
-
-    pub fn prettyPrint(self: HostBuffer, writer: *std.Io.Writer, options: stdx.fmt.FullFormatOptions) !void {
+    pub fn prettyPrint(self: HostBuffer, writer: *std.Io.Writer, options: std.fmt.Number) !void {
         return self.prettyPrintIndented(writer, 4, 0, options);
     }
 
-    fn prettyPrintIndented(self: HostBuffer, writer: *std.Io.Writer, num_rows: u8, indent_level: u8, options: stdx.fmt.FullFormatOptions) !void {
+    fn prettyPrintIndented(self: HostBuffer, writer: *std.Io.Writer, num_rows: u8, indent_level: u8, options: std.fmt.Number) !void {
         if (self.rank() == 0) {
             // Special case input tensor is a scalar
             return switch (self.dtype()) {

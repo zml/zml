@@ -167,20 +167,20 @@ pub const Context = struct {
         };
     }
 
-    pub fn platform(self: *Context, target: zml.Target, opts: zml.Platform.CreateOptions) !Platform {
+    pub fn platform(self: *Context, target: zml.Target, opts: zml.Platform.CreateOptions) !zml.Platform {
         if (self.platforms.get(target)) |p| {
             return p;
         }
         const api = Context.apis.get(target);
         if (api == null) return error.PlatformNotCompiled;
-        const p = try Platform.init(target, api.?, opts);
+        const p = try zml.Platform.init(target, api.?, opts);
         if (p.getDevices().len == 0) {
             log.err("No device found for platform {} !", .{target});
             return error.NoDevicesFound;
         }
 
         self.platforms.set(target, p);
-        try custom_call.registerInternalCustomCalls(p);
+        try zml.custom_call.registerInternalCustomCalls(p);
 
         return p;
     }

@@ -186,7 +186,7 @@ pub const Buffer = struct {
 
     pub fn asHostBuffer(self: Buffer) HostBuffer {
         const memory = self.getMemory().kind(self._api);
-        stdx.debug.assert((memory == .pinned_host) or (memory == .unpinned_host), "asHostBuffer({}) expects a buffer allocated on host memory, got {}. see `copyToMemory`", .{ self, memory });
+        stdx.debug.assert((memory == .pinned_host) or (memory == .unpinned_host), "asHostBuffer({f}) expects a buffer allocated on host memory, got {t}. see `copyToMemory`", .{ self, memory });
         const ptr: [*]u8 = @ptrCast(self._shards.get(0).getOpaqueDeviceMemoryDataPointer(self._api) catch unreachable);
         return HostBuffer.fromBytes(self._shape, ptr[0..self._shape.byteSize()]);
     }
@@ -406,7 +406,7 @@ pub const Buffer = struct {
     pub fn copyToMemory(self: Buffer, platform: Platform, memory: Memory, opts: CopyToMemoryOpts) !Buffer {
         const pjrt_memory = platform.pjrt_client.memoryByKind(self._api, memory.toPjrtMemory());
         if (pjrt_memory == null) {
-            stdx.debug.panic("Memory destination `{s}` for {}", .{ memory.pjrtName(), self });
+            stdx.debug.panic("Memory destination `{s}` for {f}", .{ memory.pjrtName(), self });
         }
 
         var new_shards: Buffer.Shards = .{};

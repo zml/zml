@@ -12,7 +12,7 @@ pub const std_options: std.Options = .{
 const log = std.log.scoped(.@"examples/custom_call");
 
 fn add_op_host_func(data: *anyopaque) callconv(.c) void {
-    const ctx = @as(*AddOp, @alignCast(@ptrCast(data)));
+    const ctx = @as(*AddOp, @ptrCast(@alignCast(data)));
 
     const result = std.mem.bytesAsValue(f32, ctx.result.asHostBuffer().mutBytes());
     result.* = ctx.a.asHostBuffer().item(f32, 0) + ctx.b.asHostBuffer().item(f32, 0);

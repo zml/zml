@@ -72,7 +72,7 @@ pub fn custom_call(
         stdx.debug.panic("Custom calls are not supported for target {s}", .{@tagName(platform.target)});
     }
 
-    const ffi_func = proxy(custom_op, opts);
+    const ffi_func = customCallProxy(custom_op, opts);
     const target_name = "callback_" ++ op_name;
 
     ffi_.?.register(pjrt_api, target_name, @tagName(platform.target), &ffi_func, opts.register_ffi_options) catch unreachable;
@@ -114,60 +114,65 @@ pub fn custom_call(
     return custom_call_outputs[0..res_shapes_.len];
 }
 
-fn proxy(comptime custom_op: type, opts: CustomCallOptions) ffi.Handler {
+fn customCallProxy(CustomOp: type, comptime opts: CustomCallOptions) ffi.Handler {
     return struct {
-        const Self = @This();
-
-        pub fn proxy(call_frame: *ffi.CallFrame) callconv(.C) ?*ffi.Error {
-            if (call_frame.registeringHook()) return null;
-            const execution_context = call_frame.ctx;
-            const user_ctx: *custom_op = ffi.ExecutionContext.Context(custom_op).get(execution_context, call_frame.api) catch unreachable;
-            const platform: Platform = user_ctx.platform;
-
-            if (@hasField(custom_op, "stream") and platform.target != .cpu) {
-                const stream = call_frame.api.stream(execution_context);
-                user_ctx.stream = stream;
-            } else {
-                log.info("No stream field provided in container {s} for custom call", .{@typeName(custom_op)});
-            }
-
-            var callback_args: std.meta.ArgsTuple(@TypeOf(custom_op.call)) = undefined;
-            callback_args[0] = user_ctx;
-
-            inline for (1..callback_args.len) |i| {
-                const ffi_buffer = call_frame.args.buffers()[i - 1];
-                const ffi_buffer_shape = getShape(ffi_buffer);
-                var zml_buffer: Buffer = undefined;
-
-                if (platform.target == .cpu) {
-                    zml_buffer = Buffer.asViewOfHostBuffer(platform, HostBuffer.fromBytes(ffi_buffer_shape, ffi_buffer.data[0..ffi_buffer_shape.byteSize()]));
-                } else {
-                    zml_buffer = Buffer.asViewOfDeviceBuffer(platform, getShape(ffi_buffer), null, ffi_buffer.data);
-                }
-                if (opts.copy_inputs_to_host_pinned and platform.target != .cpu) {
-                    zml_buffer = zml_buffer.copyToMemory(platform, .host_pinned, .{ .wait = true }) catch unreachable;
-                }
-                callback_args[i] = zml_buffer;
-            }
-
-            for (0..call_frame.results.len) |i| {
-                const ffi_buffer = call_frame.results.buffers()[i];
-                const ffi_buffer_shape = getShape(ffi_buffer);
-
-                if (platform.target == .cpu) {
-                    user_ctx.results[i] = Buffer.asViewOfHostBuffer(platform, HostBuffer.fromBytes(ffi_buffer_shape, ffi_buffer.data[0..ffi_buffer_shape.byteSize()]));
-                } else {
-                    user_ctx.results[i] = Buffer.asViewOfDeviceBuffer(platform, getShape(ffi_buffer), null, ffi_buffer.data);
-                }
-            }
-
-            @call(.auto, custom_op.call, callback_args) catch |err| {
-                stdx.debug.panic("Error while calling {s} call func: {any}\n", .{ @typeName(custom_op), err });
-            };
-
-            return null;
+        pub fn cb(call_frame: *ffi.CallFrame) callconv(.c) ?*ffi.Error {
+            return customCallImpl(CustomOp, opts, call_frame);
         }
-    }.proxy;
+    }.cb;
+}
+
+fn customCallImpl(comptime CustomOp: type, opts: CustomCallOptions, call_frame: *ffi.CallFrame) ?*ffi.Error {
+    if (call_frame.registeringHook()) return null;
+
+    const execution_context = call_frame.ctx;
+    log.info("Custom call {s} called ! {*}", .{ @typeName(CustomOp), call_frame });
+    const user_ctx: *CustomOp = execution_context.getContext(CustomOp, call_frame.api) catch {
+        return .create(call_frame.api, .internal, "failed to fetch user context for custom_call" ++ @typeName(CustomOp));
+    };
+    const platform: Platform = user_ctx.platform;
+
+    if (@hasField(CustomOp, "stream") and platform.target != .cpu) {
+        const stream = call_frame.api.stream(execution_context);
+        user_ctx.stream = stream;
+    }
+
+    var callback_args: std.meta.ArgsTuple(@TypeOf(CustomOp.call)) = undefined;
+    callback_args[0] = user_ctx;
+
+    inline for (1..callback_args.len) |i| {
+        const ffi_buffer = call_frame.args.buffers()[i - 1];
+        const ffi_buffer_shape = getShape(ffi_buffer);
+        var zml_buffer: Buffer = undefined;
+
+        // TODO reconder using PJRT apis at all from pjrt callbacks.
+        if (platform.target == .cpu) {
+            zml_buffer = Buffer.asViewOfHostBuffer(platform, HostBuffer.fromBytes(ffi_buffer_shape, ffi_buffer.data[0..ffi_buffer_shape.byteSize()]));
+        } else {
+            zml_buffer = Buffer.asViewOfDeviceBuffer(platform, getShape(ffi_buffer), null, ffi_buffer.data);
+        }
+        if (opts.copy_inputs_to_host_pinned and platform.target != .cpu) {
+            zml_buffer = zml_buffer.copyToMemory(platform, .host_pinned, .{ .wait = true }) catch unreachable;
+        }
+        callback_args[i] = zml_buffer;
+    }
+
+    for (0..call_frame.results.len) |i| {
+        const ffi_buffer = call_frame.results.buffers()[i];
+        const ffi_buffer_shape = getShape(ffi_buffer);
+
+        if (platform.target == .cpu) {
+            user_ctx.results[i] = Buffer.asViewOfHostBuffer(platform, HostBuffer.fromBytes(ffi_buffer_shape, ffi_buffer.data[0..ffi_buffer_shape.byteSize()]));
+        } else {
+            user_ctx.results[i] = Buffer.asViewOfDeviceBuffer(platform, getShape(ffi_buffer), null, ffi_buffer.data);
+        }
+    }
+
+    @call(.auto, CustomOp.call, callback_args) catch |err| {
+        stdx.debug.panic("Error while calling {s} call func: {any}\n", .{ @typeName(CustomOp), err });
+    };
+
+    return null;
 }
 
 pub fn getShape(ffi_buffer: *const ffi.Buffer) Shape {
@@ -201,24 +206,21 @@ pub fn registerInternalCustomCalls(
 
 pub const Print = struct {
     pub var type_id: i64 = undefined;
-    const Self = @This();
 
     allocator: std.mem.Allocator,
     platform: Platform,
+    stream: *pjrt.Stream = undefined,
 
     results: [1]Buffer = undefined,
 
-    pub fn init(
-        allocator: std.mem.Allocator,
-        platform: Platform,
-    ) !Print {
+    pub fn init(platform: Platform) !Print {
         return .{
-            .allocator = allocator,
+            .allocator = std.heap.smp_allocator,
             .platform = platform,
         };
     }
 
-    pub fn call(_: *Self, input: Buffer) !void {
-        std.log.defaultLog(.info, .zml, "Device buffer: {}: {}", .{ input.shape(), input.asHostBuffer().pretty() });
+    pub fn call(_: *Print, input: Buffer) !void {
+        std.log.defaultLog(.info, .zml, "Device buffer: {f}: {d}", .{ input, input.asHostBuffer() });
     }
 };

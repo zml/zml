@@ -20,7 +20,7 @@ test {
 // as the way PJRT does it is not very robust.
 //
 // 1. https://github.com/openxla/xla/issues/10032
-fn pjrtStructSize(comptime T: type) usize {
+pub fn pjrtStructSize(comptime T: type) usize {
     // unsafe on purpose, we want this to fail if that ever changes
     const typedef_name = comptime blk: {
         const needle = ".struct_";

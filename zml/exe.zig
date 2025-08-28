@@ -6,9 +6,9 @@ const aio = @import("aio.zig");
 const Buffer = @import("buffer.zig").Buffer;
 const Bufferized = @import("tensor.zig").Bufferized;
 const CompilationContext = @import("module.zig").CompilationContext;
+const custom_call = @import("custom_call.zig");
 const meta = @import("meta.zig");
 const pjrt = @import("pjrtx.zig");
-const custom_call = @import("custom_call.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
 const ShapeOf = @import("tensor.zig").ShapeOf;
@@ -155,7 +155,7 @@ pub const BaseExe = struct {
     exe: *pjrt.LoadedExecutable,
 
     /// The execution context for this executable.
-    context: ?*pjrt.ExecuteContext = null,
+    execute_context: ?*pjrt.ExecuteContext,
 
     /// Pre-allocated slice of buffers to use as inputs when the module is called.
     input_per_device: []const [*]*pjrt.Buffer,
@@ -206,9 +206,26 @@ pub const BaseExe = struct {
         const all_shapes = try allocator.alloc(Shape, n_in + n_out);
         @memcpy(all_shapes[0..n_in], args.input_shapes);
         @memcpy(all_shapes[n_in..], args.result_shapes);
+
+        var execute_context: ?*pjrt.ExecuteContext = null;
+        if (platform.pjrt_api.ffi()) |ffi| {
+            log.info("Created context execution {*} for {*}", .{ execute_context, exe });
+            execute_context = try platform.pjrt_api.createExecuteContext();
+
+            // Add extra data needed by the ZML provided custom calls.
+            // Atm we don't have a mechanism to detect if the user need this or not.
+            inline for (custom_call.custom_call_internal_types) |T| {
+                const value_ptr = try allocator.create(T);
+                value_ptr.* = try .init(platform);
+                try ffi.addUserData(platform.pjrt_api, execute_context.?, .{ .type_id = T.type_id, .user_data = @ptrCast(@constCast(value_ptr)) });
+                log.info("Bound {s}@{x} with type id {d} on {any}", .{ @typeName(T), @intFromPtr(value_ptr), T.type_id, execute_context });
+            }
+        }
+
         return .{
             .platform = platform,
             .exe = exe,
+            .execute_context = execute_context,
             .ready_buffer_count = 0,
             .input_buffer_count = @intCast(n_in),
             .num_devices = args.n_devices,
@@ -221,7 +238,7 @@ pub const BaseExe = struct {
     }
 
     pub fn deinit(self: BaseExe) void {
-        if (self.context) |ctx| {
+        if (self.execute_context) |ctx| {
             ctx.deinit(self.platform.pjrt_api);
         }
         self._arena.deinit();
@@ -245,7 +262,7 @@ pub const BaseExe = struct {
             // even if it has been marked as "can be donated" during compilation.
             // TODO: expose it ?
             .non_donatable_input_indices = &.{},
-            .context = self.context,
+            .context = self.execute_context,
         }) catch |err| {
             std.debug.panic("PJRT_LoadedExecutable_Execute failed with: {}", .{err});
         };
@@ -287,15 +304,15 @@ pub const BaseExe = struct {
     }
 
     pub fn bind(self: BaseExe, comptime T: type, value: *T) !void {
-        stdx.debug.assert(self.context != null, "Exe doesn't have an execution context", .{});
+        stdx.debug.assert(self.execute_context != null, "Exe doesn't have an execution context", .{});
         const pjrt_api = self.platform.pjrt_api;
 
         if (pjrt_api.ffi()) |ffi| {
             const type_id = T.type_id;
             const user_data: *anyopaque = @ptrCast(@constCast(value));
 
-            try ffi.addUserData(pjrt_api, self.context.?, .{ .type_id = type_id, .user_data = user_data });
-            log.info("Bound {s}@{x} with type id {d} on {any}", .{ @typeName(T), user_data, T.type_id, self.context.? });
+            try ffi.addUserData(pjrt_api, self.execute_context.?, .{ .type_id = type_id, .user_data = user_data });
+            log.info("Bound {s}@{x} with type id {d} on {any}", .{ @typeName(T), user_data, T.type_id, self.execute_context.? });
         } else {
             stdx.debug.panic("Custom calls are not supported for target {s}", .{@tagName(self.platform.target)});
         }
@@ -334,7 +351,7 @@ pub const BaseExe = struct {
             .result_shapes = self.result_shapes,
             .n_devices = self.num_devices,
         });
-        exe.context = self.context;
+        exe.execute_context = self.execute_context;
         return exe;
     }
 };
@@ -361,24 +378,6 @@ pub fn Exe(ArgsT: type, ReturnT: type) type {
         pub fn prepare(self: Self, first_arg: Bufferized(stdx.meta.Head(ArgsT))) Exe(stdx.meta.Tail(ArgsT), ReturnT) {
             var new: Exe(stdx.meta.Tail(ArgsT), ReturnT) = .{ .inner = self.inner };
             new.inner.prepare(first_arg);
-            return new;
-        }
-
-        pub fn withExecutionContext(self: Self) !Self {
-            stdx.debug.assert(self.inner.context == null, "Exe already has an execution context", .{});
-            var new: Self = .{ .inner = self.inner };
-            var arena = &new.inner._arena;
-            var allocator = arena.allocator();
-
-            const pjrt_execute_context = try new.inner.platform.pjrt_api.createExecuteContext();
-            new.inner.context = pjrt_execute_context;
-            inline for (custom_call.custom_call_internal_types) |custom_call_internal_type| {
-                const value_ptr = try allocator.create(custom_call_internal_type);
-                value_ptr.* = try .init(allocator, new.platform());
-                try new.inner.bind(custom_call_internal_type, value_ptr);
-            }
-            log.info("Created context execution {*} for {*}", .{ pjrt_execute_context, self.inner.exe });
-
             return new;
         }
 

@@ -31,6 +31,7 @@ zig_library(
         "aio/torch/py.zig",
         "buffer.zig",
         "context.zig",
+        "custom_call.zig",
         "dtype.zig",
         "exe.zig",
         "floats.zig",
