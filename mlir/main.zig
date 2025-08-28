@@ -10,7 +10,7 @@ pub fn main() !void {
 
     // const handle = mlir.DialectHandle.fromString("func");
 
-    inline for (.{ "func", "stablehlo" }) |d| {
+    inline for (.{ "memref", "func", "stablehlo" }) |d| {
         registry.registerDialect(d);
     }
 
@@ -56,7 +56,7 @@ pub fn main() !void {
 
     const tensor_i32 = mlir.rankedTensorType(&.{ 4096, 4096 }, mlir.integerType(ctx, .i32));
 
-    module.body().appendOwnedOperation(dialects.func.func(ctx, .{
+    _ = dialects.func.func(ctx, .{
         .name = "pouet",
         .visibility = .private,
         .block = blk: {
@@ -67,7 +67,7 @@ pub fn main() !void {
             break :blk body;
         },
         .location = .unknown(ctx),
-    }));
+    }).appendTo(module.body());
 
     std.debug.print(">>>>>>\n{f}\n", .{module.operation().fmt(.{ .print_generic_op_form = false })});
     std.debug.print(">>>>>>\n{f}\n", .{module.operation().fmt(.{ .print_generic_op_form = true })});

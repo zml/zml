@@ -16,7 +16,7 @@ const FuncOpArgs = struct {
     results_attributes: ?[]const *const mlir.Attribute = null,
     block: *mlir.Block,
     location: *const mlir.Location,
-    no_inline: bool = true,
+    no_inline: bool = false,
     visibility: Visibility = .public,
 };
 
@@ -24,7 +24,8 @@ pub fn func(ctx: *mlir.Context, args: FuncOpArgs) *mlir.Operation {
     var args_buffer: stdx.BoundedArray(*const mlir.Type, 1024) = .{};
     var results_buffer: stdx.BoundedArray(*const mlir.Type, 32) = .{};
 
-    var attr_tuples_buffer = stdx.BoundedArray(mlir.NamedAttribute, 16).fromSlice(&.{
+    var attr_tuples_buffer: stdx.BoundedArray(mlir.NamedAttribute, 16) = .{};
+    attr_tuples_buffer.appendSliceAssumeCapacity(&.{
         .named(ctx, "sym_name", mlir.stringAttribute(ctx, args.name)),
         .named(ctx, "sym_visibility", mlir.stringAttribute(ctx, @tagName(args.visibility))),
         .named(ctx, "function_type", mlir.typeAttribute(mlir.functionType(
@@ -45,7 +46,7 @@ pub fn func(ctx: *mlir.Context, args: FuncOpArgs) *mlir.Operation {
                 break :results results_buffer.constSlice();
             },
         ))),
-    }) catch unreachable;
+    });
 
     if (args.args_attributes) |args_attributes| {
         attr_tuples_buffer.appendAssumeCapacity(.named(ctx, "arg_attrs", mlir.arrayAttribute(ctx, args_attributes)));
@@ -57,7 +58,7 @@ pub fn func(ctx: *mlir.Context, args: FuncOpArgs) *mlir.Operation {
         attr_tuples_buffer.appendAssumeCapacity(.named(ctx, "no_inline", mlir.unitAttribute(ctx)));
     }
 
-    return mlir.Operation.make(ctx, "func.func", .{
+    return .make(ctx, "func.func", .{
         .blocks = &.{args.block},
         .attributes = attr_tuples_buffer.constSlice(),
         .location = args.location,

@@ -8,8 +8,7 @@ cc_library(
     deps = [
         "@llvm-project//mlir:CAPIArith",
         "@llvm-project//mlir:CAPIIR",
-        "@llvm-project//mlir:CAPIMath",
-        "@llvm-project//mlir:CAPISCF",
+        "@llvm-project//mlir:CAPIMemRef",
         "@llvm-project//mlir:CAPITransforms",
     ],
 )

@@ -680,117 +680,163 @@ pub fn binaryOp(comptime op_name: []const u8) type {
 //     });
 // }
 
-// pub const CustomCallOpts = struct {
-//     pub const ApiVersion = enum(i32) {
-//         original = 1,
-//         status_returning = 2,
-//         status_returning_unified = 3,
-//         typed_ffi = 4,
-//     };
+pub const CustomCallOpts = struct {
+    pub const ApiVersion = enum(i32) {
+        original = 1,
+        status_returning = 2,
+        status_returning_unified = 3,
+        typed_ffi = 4,
+    };
 
-//     call_target_name: []const u8,
-//     has_side_effect: bool = false,
-//     backend_config: ?*const mlir.Attribute,
-//     operand_layouts: ?[]const []const usize = null,
-//     result_layouts: ?[]const []const usize = null,
-//     output_operand_aliases: ?[]const i64 = null,
-//     additional_attributes: ?[]const mlir.AttrTuple = &.{},
-//     api_version: ApiVersion,
-// };
+    pub const BackendConfig = union(ApiVersion) {
+        original: *const mlir.StringAttribute,
+        status_returning: *const mlir.StringAttribute,
+        status_returning_unified: *const mlir.StringAttribute,
+        typed_ffi: *const mlir.DictionaryAttribute,
+    };
 
-// pub fn custom_call(ctx: *mlir.Context, inputs: []const *const mlir.Value, opts: CustomCallOpts, result_types: []const *const mlir.Type, location: *const mlir.Location) *mlir.Operation {
-//     const MAX_OPERANDS = 64;
-//     const MAX_RESULTS = 16;
+    call_target_name: []const u8,
+    has_side_effect: bool = false,
+    api_version: ?ApiVersion,
+    backend_config: ?BackendConfig = null,
+    operand_layouts: ?[]const []const usize = null,
+    result_layouts: ?[]const []const usize = null,
+    output_operand_aliases: ?[]const i64 = null,
+    additional_attributes: []const mlir.NamedAttribute = &.{},
+};
 
-//     const backend_config = opts.backend_config orelse mlir.Attribute.string(ctx, "");
-//     if (@intFromEnum(opts.api_version) < @intFromEnum(CustomCallOpts.ApiVersion.typed_ffi)) {
-//         stdx.debug.assert(
-//             backend_config.isA(mlir.StringAttribute),
-//             "API version < 4 requires a string as backend_config, got {}",
-//             .{backend_config},
-//         );
-//     } else {
-//         stdx.debug.assert(
-//             backend_config.isA(mlir.DictionaryAttribute),
-//             "API version >= 4 requires a dictionary as backend_config, got {}",
-//             .{backend_config},
-//         );
-//     }
+pub fn custom_call(ctx: *mlir.Context, inputs: []const *const mlir.Value, opts: CustomCallOpts, result_types: []const *const mlir.Type, location: *const mlir.Location) *mlir.Operation {
+    const MAX_OPERANDS = 64;
+    _ = MAX_OPERANDS; // autofix
+    const MAX_RESULTS = 16;
 
-//     var attrs: stdx.BoundedArray(mlir.AttrTuple, 32) = .{};
-//     attrs.appendSliceAssumeCapacity(&[_]mlir.AttrTuple{
-//         .{ "api_version", .int(ctx, .i32, @intFromEnum(opts.api_version)) },
-//         .{ "call_target_name", .string(ctx, opts.call_target_name) },
-//         .{ "has_side_effect", .boolean(ctx, opts.has_side_effect) },
-//         .{ "backend_config", backend_config },
-//     });
+    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 32) = .{};
+    attrs.appendSliceAssumeCapacity(&.{
+        .named(ctx, "call_target_name", mlir.stringAttribute(ctx, opts.call_target_name)),
+        .named(ctx, "has_side_effect", mlir.boolAttribute(ctx, opts.has_side_effect)),
+    });
+    attrs.appendSliceAssumeCapacity(opts.additional_attributes);
 
-//     {
-//         var output_operand_aliases: stdx.BoundedArray(mlir.Attribute, MAX_RESULTS) = .{};
-//         for (opts.output_operand_aliases) |alias| {
-//             output_operand_aliases.appendAssumeCapacity(
-//                 OutputOperandAliasAttribute.init(ctx, &.{}, alias, &.{}).asAttr(),
-//             );
-//         }
-//         attrs.appendAssumeCapacity(.{ "output_operand_aliases", .array(ctx, output_operand_aliases.constSlice()) });
-//     }
+    if (opts.api_version orelse opts.backend_config) |v| {
+        attrs.appendAssumeCapacity(.named(ctx, "api_version", mlir.integerAttribute(ctx, .i32, @intFromEnum(v))));
+    }
+    if (opts.backend_config) |bc| {
+        switch (bc) {
+            else => |v| attrs.appendAssumeCapacity(.named(ctx, "backend_config", @ptrCast(v))),
+        }
+    }
 
-//     const MINOR_TO_MAJOR = blk: {
-//         const MAX_RANK = 8;
-//         var ret: [MAX_RANK]usize = undefined;
-//         for (0..MAX_RANK) |i| {
-//             ret[i] = @intCast(MAX_RANK - i - 1);
-//         }
-//         break :blk ret;
-//     };
+    {
+        var output_operand_aliases: stdx.BoundedArray(*const mlir.Attribute, MAX_RESULTS) = .{};
+        for (opts.output_operand_aliases) |alias| {
+            _ = alias; // autofix
+            // output_operand_aliases.appendAssumeCapacity(
+            //     OutputOperandAliasAttribute.init(ctx, &.{}, alias, &.{}).asAttr(),
+            // );
+        }
+        attrs.appendAssumeCapacity(.named(ctx, "output_operand_aliases", mlir.arrayAttribute(ctx, output_operand_aliases.constSlice())));
+    }
 
-//     if (opts.operand_layouts) |layouts| {
-//         var operand_layouts: stdx.BoundedArray(mlir.Attribute, MAX_OPERANDS) = .{};
-//         for (layouts) |ol| {
-//             operand_layouts.appendAssumeCapacity(.denseElements(ctx, &.{@intCast(ol.len)}, .index, ol));
-//         }
-//         attrs.appendAssumeCapacity(.{ "operand_layouts", .array(ctx, operand_layouts.constSlice()) });
-//     } else {
-//         const operand_layouts = blk: {
-//             var ret: stdx.BoundedArray(mlir.Attribute, MAX_OPERANDS) = .{};
-//             for (inputs) |input| {
-//                 const ranked_type = input.getType().as(mlir.RankedTensorType).?;
-//                 const ol = MINOR_TO_MAJOR[MINOR_TO_MAJOR.len - ranked_type.getRank() ..];
-//                 ret.appendAssumeCapacity(.denseElements(ctx, &.{@intCast(ol.len)}, .index, ol));
-//             }
-//             break :blk ret;
-//         };
-//         attrs.appendAssumeCapacity(.{ "operand_layouts", .array(ctx, operand_layouts.constSlice()) });
-//     }
+    //     var attrs: stdx.BoundedArray(mlir.AttrTuple, 32) = .{};
+    //     attrs.appendSliceAssumeCapacity(&[_]mlir.AttrTuple{
+    //         .{ "api_version", .int(ctx, .i32, @intFromEnum(opts.api_version)) },
+    //         .{ "call_target_name", .string(ctx, opts.call_target_name) },
+    //         .{ "has_side_effect", .boolean(ctx, opts.has_side_effect) },
+    //         .{ "backend_config", backend_config },
+    //     });
 
-//     if (opts.result_layouts) |layouts| {
-//         var result_layouts: stdx.BoundedArray(mlir.Attribute, MAX_RESULTS) = .{};
-//         for (layouts) |rl| {
-//             result_layouts.appendAssumeCapacity(.denseElements(ctx, &.{@intCast(rl.len)}, .index, rl));
-//         }
-//         attrs.appendAssumeCapacity(.{ "result_layouts", .array(ctx, result_layouts.constSlice()) });
-//     } else {
-//         const result_layouts = blk: {
-//             var ret: stdx.BoundedArray(mlir.Attribute, MAX_RESULTS) = .{};
-//             for (res_types) |t| {
-//                 const ranked_t = t.as(mlir.RankedTensorType).?;
-//                 const rl = MINOR_TO_MAJOR[MINOR_TO_MAJOR.len - ranked_t.getRank() ..];
-//                 ret.appendAssumeCapacity(.denseElements(ctx, &.{@intCast(rl.len)}, .index, rl));
-//             }
-//             break :blk ret;
-//         };
-//         attrs.appendAssumeCapacity(.{ "result_layouts", .array(ctx, result_layouts.constSlice()) });
-//     }
+    //     {
+    //         var output_operand_aliases: stdx.BoundedArray(mlir.Attribute, MAX_RESULTS) = .{};
+    //         for (opts.output_operand_aliases) |alias| {
+    //             output_operand_aliases.appendAssumeCapacity(
+    //                 OutputOperandAliasAttribute.init(ctx, &.{}, alias, &.{}).asAttr(),
+    //             );
+    //         }
+    //         attrs.appendAssumeCapacity(.{ "output_operand_aliases", .array(ctx, output_operand_aliases.constSlice()) });
+    //     }
 
-//     attrs.appendSlice(opts.additional_attributes) catch @panic("Too many additional_attributes");
+    //     const MINOR_TO_MAJOR = blk: {
+    //         const MAX_RANK = 8;
+    //         var ret: [MAX_RANK]usize = undefined;
+    //         for (0..MAX_RANK) |i| {
+    //             ret[i] = @intCast(MAX_RANK - i - 1);
+    //         }
+    //         break :blk ret;
+    //     };
 
-//     return mlir.Operation.make(ctx, "stablehlo.custom_call", .{
-//         .operands = inputs,
-//         .results = res_types,
-//         .attributes = attrs.constSlice(),
-//         .location = location,
-//     });
-// }
+    //     if (opts.operand_layouts) |layouts| {
+    //         var operand_layouts: stdx.BoundedArray(mlir.Attribute, MAX_OPERANDS) = .{};
+    //         for (layouts) |ol| {
+    //             operand_layouts.appendAssumeCapacity(.denseElements(ctx, &.{@intCast(ol.len)}, .index, ol));
+    //         }
+    //         attrs.appendAssumeCapacity(.{ "operand_layouts", .array(ctx, operand_layouts.constSlice()) });
+    //     } else {
+    //         const operand_layouts = blk: {
+    //             var ret: stdx.BoundedArray(mlir.Attribute, MAX_OPERANDS) = .{};
+    //             for (inputs) |input| {
+    //                 const ranked_type = input.getType().as(mlir.RankedTensorType).?;
+    //                 const ol = MINOR_TO_MAJOR[MINOR_TO_MAJOR.len - ranked_type.getRank() ..];
+    //                 ret.appendAssumeCapacity(.denseElements(ctx, &.{@intCast(ol.len)}, .index, ol));
+    //             }
+    //             break :blk ret;
+    //         };
+    //         attrs.appendAssumeCapacity(.{ "operand_layouts", .array(ctx, operand_layouts.constSlice()) });
+    //     }
+
+    //     if (opts.result_layouts) |layouts| {
+    //         var result_layouts: stdx.BoundedArray(mlir.Attribute, MAX_RESULTS) = .{};
+    //         for (layouts) |rl| {
+    //             result_layouts.appendAssumeCapacity(.denseElements(ctx, &.{@intCast(rl.len)}, .index, rl));
+    //         }
+    //         attrs.appendAssumeCapacity(.{ "result_layouts", .array(ctx, result_layouts.constSlice()) });
+    //     } else {
+    //         const result_layouts = blk: {
+    //             var ret: stdx.BoundedArray(mlir.Attribute, MAX_RESULTS) = .{};
+    //             for (res_types) |t| {
+    //                 const ranked_t = t.as(mlir.RankedTensorType).?;
+    //                 const rl = MINOR_TO_MAJOR[MINOR_TO_MAJOR.len - ranked_t.getRank() ..];
+    //                 ret.appendAssumeCapacity(.denseElements(ctx, &.{@intCast(rl.len)}, .index, rl));
+    //             }
+    //             break :blk ret;
+    //         };
+    //         attrs.appendAssumeCapacity(.{ "result_layouts", .array(ctx, result_layouts.constSlice()) });
+    //     }
+
+    //     attrs.appendSlice(opts.additional_attributes) catch @panic("Too many additional_attributes");
+
+    return mlir.Operation.make(ctx, "stablehlo.custom_call", .{
+        .operands = .{ .flat = inputs },
+        .results = .{ .flat = result_types },
+        .attributes = attrs.constSlice(),
+        .location = location,
+    });
+}
+
+pub fn createBuffer(ctx: *mlir.Context, value: *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
+    const result_type = mlir.integerType(ctx, .i64);
+    return custom_call(ctx, &.{value}, .{
+        .call_target_name = "CreateBuffer",
+        .api_version = .typed_ffi,
+    }, &.{result_type}, location);
+}
+
+pub fn pin(ctx: *mlir.Context, value: *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
+    const result_type = mlir.integerType(ctx, .i64);
+    const shape = value.type_().as(mlir.ShapedType).?;
+    _ = shape; // autofix
+    return custom_call(ctx, &.{value}, .{
+        .call_target_name = "Pin",
+        .api_version = .typed_ffi,
+    }, &.{result_type}, location);
+}
+
+pub fn unpin(ctx: *mlir.Context, value: *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
+    const result_type = mlir.integerType(ctx, .i64);
+    return custom_call(ctx, &.{value}, .{
+        .call_target_name = "Unpin",
+        .api_version = .typed_ffi,
+    }, &.{result_type}, location);
+}
 
 // pub const DotDimensionNumbersAttribute = struct {
 //     _inner: c.MlirAttribute,
