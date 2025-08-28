@@ -256,18 +256,26 @@ pub fn transpose(
     });
 }
 
-// pub fn slice(ctx: *mlir.Context, operand: *const mlir.Value, start_indices: []const i64, limit_indices: []const i64, strides: []const i64, result_type: *const mlir.Type, location: *const mlir.Location) *mlir.Operation {
-//     return mlir.Operation.make(ctx, "stablehlo.slice", .{
-//         .operands = .{ .flat = &.{operand} },
-//         .results = .{ .flat = &.{result_type} },
-//         .attributes = &.{
-//             .{ "start_indices", mlir.denseArrayAttribute(ctx, .i64, start_indices) },
-//             .{ "limit_indices", mlir.denseArrayAttribute(ctx, .i64, limit_indices) },
-//             .{ "strides", mlir.denseArrayAttribute(ctx, .i64, strides) },
-//         },
-//         .location = location,
-//     });
-// }
+pub fn slice(
+    ctx: *mlir.Context,
+    operand: *const mlir.Value,
+    start_indices: []const i64,
+    limit_indices: []const i64,
+    strides: []const i64,
+    result_type: *const mlir.Type,
+    location: *const mlir.Location,
+) *mlir.Operation {
+    return mlir.Operation.make(ctx, "stablehlo.slice", .{
+        .operands = .{ .flat = &.{operand} },
+        .results = .{ .flat = &.{result_type} },
+        .attributes = &.{
+            mlir.NamedAttribute.named(ctx, "start_indices", mlir.denseArrayAttribute(ctx, .i64, start_indices)),
+            mlir.NamedAttribute.named(ctx, "limit_indices", mlir.denseArrayAttribute(ctx, .i64, limit_indices)),
+            mlir.NamedAttribute.named(ctx, "strides", mlir.denseArrayAttribute(ctx, .i64, strides)),
+        },
+        .location = location,
+    });
+}
 
 // pub fn concatenate(ctx: *mlir.Context, inputs: []const *const mlir.Value, dimension: i64, location: *const mlir.Location) *mlir.Operation {
 //     return mlir.Operation.make(ctx, "stablehlo.concatenate", .{
