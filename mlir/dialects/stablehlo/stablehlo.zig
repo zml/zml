@@ -837,7 +837,7 @@ pub fn pin(ctx: *mlir.Context, value: *const mlir.Value, location: *const mlir.L
     return custom_call(ctx, &.{value}, .{
         .call_target_name = "Pin",
         .api_version = .typed_ffi,
-    }, &.{ result_type}, location);
+    }, &.{result_type}, location);
 }
 
 pub fn unpin(ctx: *mlir.Context, value: *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
