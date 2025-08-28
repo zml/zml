@@ -598,27 +598,86 @@ pub fn fft(ctx: *mlir.Context, value: *const mlir.Value, location: *const mlir.L
     });
 }
 
-// pub fn rng(ctx: *mlir.Context, a: *const mlir.Value, b: *const mlir.Value, shape: *const mlir.Value, rng_distribution: RngDistribution.Type, location: *const mlir.Location) *mlir.Operation {
-//     return mlir.Operation.make(ctx, "stablehlo.rng", .{
-//         .operands = .{ .flat = &.{ a, b, shape } },
-//         .result_type_inference = true,
-//         .attributes = &.{
-//             .{ "rng_distribution", RngDistribution.init(ctx, rng_distribution).asAttr() },
-//         },
-//         .location = location,
-//     });
-// }
+pub const RngDistribution = opaque {
+    const M = mlir.Methods(RngDistribution, c.MlirAttribute);
 
-// pub fn rng_bit_generator(ctx: *mlir.Context, rng_algorithm: RngAlgorithm.Type, initial_state: *const mlir.Value, res_state_type: *const mlir.Type, res_type: *const mlir.Type, location: *const mlir.Location) *mlir.Operation {
-//     return mlir.Operation.make(ctx, "stablehlo.rng_bit_generator", .{
-//         .operands = .{ .flat = &.{initial_state} },
-//         .results = &.{ res_state_type, res_type },
-//         .attributes = &.{
-//             .{ "rng_algorithm", RngAlgorithm.init(ctx, rng_algorithm).asAttr() },
-//         },
-//         .location = location,
-//     });
-// }
+    pub const isAFn = c.stablehloAttributeIsARngDistributionAttr;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
+
+    pub const Type = enum {
+        UNIFORM,
+        NORMAL,
+    };
+
+    pub fn get(ctx: *mlir.Context, value_: Type) *const RngDistribution {
+        return @ptrCast(c.stablehloRngDistributionAttrGet(ctx.ptr(), stringRef(@tagName(value_))).ptr);
+    }
+
+    pub fn value(self: *const RngDistribution) Type {
+        return std.meta.stringToEnum(
+            Type,
+            mlir.string(c.stablehloRngDistributionAttrGetValue(self.ptr())),
+        ) orelse unreachable;
+    }
+};
+
+pub fn rngDistribution(ctx: *mlir.Context, value: RngDistribution.Type) *const mlir.Attribute {
+    return @ptrCast(RngDistribution.get(ctx, value));
+}
+
+pub const RngAlgorithm = opaque {
+    const M = mlir.Methods(RngAlgorithm, c.MlirAttribute);
+
+    pub const isAFn = c.stablehloAttributeIsARngAlgorithmAttr;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
+
+    pub const Type = enum {
+        DEFAULT,
+        THREE_FRY,
+        PHILOX,
+    };
+
+    pub fn get(ctx: *mlir.Context, value_: Type) *const RngAlgorithm {
+        return @ptrCast(c.stablehloRngAlgorithmAttrGet(ctx.ptr(), stringRef(@tagName(value_))).ptr);
+    }
+
+    pub fn value(self: *const RngAlgorithm) Type {
+        return std.meta.stringToEnum(
+            Type,
+            mlir.string(c.stablehloRngAlgorithmAttrGetValue(self.ptr())),
+        ) orelse unreachable;
+    }
+};
+
+pub fn rngAlgorithm(ctx: *mlir.Context, value: RngAlgorithm.Type) *const mlir.Attribute {
+    return @ptrCast(RngAlgorithm.get(ctx, value));
+}
+
+pub fn rng(ctx: *mlir.Context, a: *const mlir.Value, b: *const mlir.Value, shape: *const mlir.Value, rng_distribution: RngDistribution.Type, location: *const mlir.Location) *mlir.Operation {
+    return mlir.Operation.make(ctx, "stablehlo.rng", .{
+        .operands = .{ .flat = &.{ a, b, shape } },
+        .result_type_inference = true,
+        .attributes = &.{
+            .named(ctx, "rng_distribution", rngDistribution(ctx, rng_distribution)),
+        },
+        .location = location,
+    });
+}
+
+pub fn rng_bit_generator(ctx: *mlir.Context, rng_algorithm: RngAlgorithm.Type, initial_state: *const mlir.Value, res_state_type: *const mlir.Type, res_type: *const mlir.Type, location: *const mlir.Location) *mlir.Operation {
+    return mlir.Operation.make(ctx, "stablehlo.rng_bit_generator", .{
+        .operands = .{ .flat = &.{initial_state} },
+        .results = &.{ res_state_type, res_type },
+        .attributes = &.{
+            .named(ctx, "rng_algorithm", rngAlgorithm(ctx, rng_algorithm)),
+        },
+        .location = location,
+    });
+}
 
 pub fn reduce_precision(ctx: *mlir.Context, value: *const mlir.Value, exponent_bits: i32, mantissa_bits: i32, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.reduce_precision", .{
@@ -1281,53 +1340,6 @@ pub const FftType = opaque {
 pub fn fftType(ctx: *mlir.Context, value: FftType.Type) *const mlir.Attribute {
     return @ptrCast(FftType.init(ctx, value));
 }
-
-// pub const RngDistribution = struct {
-//     _inner: c.MlirAttribute,
-
-//     pub const isAFn = c.stablehloAttributeIsARngDistributionAttr;
-//     const Self = RngDistribution;
-//     pub const asAttr = mlir.Attribute.fromAny(Self);
-//     pub const eql = mlir.Attribute.eqlAny(Self);
-
-//     pub const Type = enum {
-//         UNIFORM,
-//         NORMAL,
-//     };
-
-//     pub fn init(ctx: *mlir.Context, value: Type) Self {
-//         return .{ ._inner = c.stablehloRngDistributionAttrGet(ctx._inner, stringRef(@tagName(value))) };
-//     }
-
-//     pub fn getValue(self: Self) Type {
-//         const value = mlir.fromStringRef(c.stablehloRngDistributionAttrGetValue(self._inner));
-//         return std.meta.stringToEnum(Type, value) orelse unreachable;
-//     }
-// };
-
-// pub const RngAlgorithm = struct {
-//     _inner: c.MlirAttribute,
-
-//     pub const isAFn = c.stablehloAttributeIsARngAlgorithmAttr;
-//     const Self = RngAlgorithm;
-//     pub const asAttr = mlir.Attribute.fromAny(Self);
-//     pub const eql = mlir.Attribute.eqlAny(Self);
-
-//     pub const Type = enum {
-//         DEFAULT,
-//         THREE_FRY,
-//         PHILOX,
-//     };
-
-//     pub fn init(ctx: *mlir.Context, value: Type) Self {
-//         return .{ ._inner = c.stablehloRngAlgorithmAttrGet(ctx._inner, stringRef(@tagName(value))) };
-//     }
-
-//     pub fn getValue(self: Self) Type {
-//         const value = mlir.fromStringRef(c.stablehloRngAlgorithmAttrGetValue(self._inner));
-//         return std.meta.stringToEnum(Type, value) orelse unreachable;
-//     }
-// };
 
 fn stringFromStream(buf: []u8, streamFn: anytype, args: anytype) []const u8 {
     var writer = std.Io.Writer.fixed(buf);
