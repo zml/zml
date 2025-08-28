@@ -88,16 +88,16 @@ pub fn binaryOp(comptime op_name: []const u8) type {
     };
 }
 
-// pub fn cholesky(ctx: *mlir.Context, value: *const mlir.Value, lower: bool, location: *const mlir.Location) *mlir.Operation {
-//     return mlir.Operation.make(ctx, "stablehlo.cholesky", .{
-//         .operands = .{ .flat = &.{value} },
-//         .result_type_inference = true,
-//         .attributes = &.{
-//             .{ "lower", mlir.integerAttribute(ctx, .i1, @intFromBool(lower)) },
-//         },
-//         .location = location,
-//     });
-// }
+pub fn cholesky(ctx: *mlir.Context, value: *const mlir.Value, lower: bool, location: *const mlir.Location) *mlir.Operation {
+    return mlir.Operation.make(ctx, "stablehlo.cholesky", .{
+        .operands = .{ .flat = &.{value} },
+        .result_type_inference = true,
+        .attributes = &.{
+            mlir.NamedAttribute.named(ctx, "lower", mlir.integerAttribute(ctx, .i1, @intFromBool(lower))),
+        },
+        .location = location,
+    });
+}
 
 // pub fn clamp(ctx: *mlir.Context, min: *const mlir.Value, value: *const mlir.Value, max: *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
 //     return mlir.Operation.make(ctx, "stablehlo.clamp", .{
