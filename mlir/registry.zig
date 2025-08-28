@@ -728,6 +728,10 @@ pub const DictionaryAttribute = opaque {
     }
 };
 
+pub fn dictionaryAttribute(ctx: *Context, attributes: []const NamedAttribute) *const Attribute {
+    return @ptrCast(DictionaryAttribute.init(ctx, attributes));
+}
+
 pub const Value = opaque {
     const M = Methods(Value, c.MlirValue);
 

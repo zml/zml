@@ -718,42 +718,29 @@ pub fn custom_call(ctx: *mlir.Context, inputs: []const *const mlir.Value, opts: 
     attrs.appendSliceAssumeCapacity(opts.additional_attributes);
 
     if (opts.api_version orelse opts.backend_config) |v| {
-        attrs.appendAssumeCapacity(.named(ctx, "api_version", mlir.integerAttribute(ctx, .i32, @intFromEnum(v))));
+        attrs.appendAssumeCapacity(
+            .named(ctx, "api_version", mlir.integerAttribute(ctx, .i32, @intFromEnum(v))),
+        );
     }
-    if (opts.backend_config) |bc| {
-        switch (bc) {
-            else => |v| attrs.appendAssumeCapacity(.named(ctx, "backend_config", @ptrCast(v))),
+    if (opts.backend_config) |backend_config| {
+        switch (backend_config) {
+            inline else => |v| attrs.appendAssumeCapacity(
+                .named(ctx, "backend_config", @ptrCast(v)),
+            ),
         }
     }
 
-    {
-        var output_operand_aliases: stdx.BoundedArray(*const mlir.Attribute, MAX_RESULTS) = .{};
-        for (opts.output_operand_aliases) |alias| {
-            _ = alias; // autofix
-            // output_operand_aliases.appendAssumeCapacity(
-            //     OutputOperandAliasAttribute.init(ctx, &.{}, alias, &.{}).asAttr(),
-            // );
+    if (opts.output_operand_aliases) |output_operand_aliases| {
+        var buffer: stdx.BoundedArray(*const mlir.Attribute, MAX_RESULTS) = .{};
+        for (output_operand_aliases) |alias| {
+            buffer.appendAssumeCapacity(
+                outputOperandAliasAttribute.init(ctx, .{ .operand_index = alias }),
+            );
         }
-        attrs.appendAssumeCapacity(.named(ctx, "output_operand_aliases", mlir.arrayAttribute(ctx, output_operand_aliases.constSlice())));
+        attrs.appendAssumeCapacity(
+            .named(ctx, "output_operand_aliases", mlir.arrayAttribute(ctx, buffer.constSlice())),
+        );
     }
-
-    //     var attrs: stdx.BoundedArray(mlir.AttrTuple, 32) = .{};
-    //     attrs.appendSliceAssumeCapacity(&[_]mlir.AttrTuple{
-    //         .{ "api_version", .int(ctx, .i32, @intFromEnum(opts.api_version)) },
-    //         .{ "call_target_name", .string(ctx, opts.call_target_name) },
-    //         .{ "has_side_effect", .boolean(ctx, opts.has_side_effect) },
-    //         .{ "backend_config", backend_config },
-    //     });
-
-    //     {
-    //         var output_operand_aliases: stdx.BoundedArray(mlir.Attribute, MAX_RESULTS) = .{};
-    //         for (opts.output_operand_aliases) |alias| {
-    //             output_operand_aliases.appendAssumeCapacity(
-    //                 OutputOperandAliasAttribute.init(ctx, &.{}, alias, &.{}).asAttr(),
-    //             );
-    //         }
-    //         attrs.appendAssumeCapacity(.{ "output_operand_aliases", .array(ctx, output_operand_aliases.constSlice()) });
-    //     }
 
     //     const MINOR_TO_MAJOR = blk: {
     //         const MAX_RANK = 8;
@@ -801,8 +788,6 @@ pub fn custom_call(ctx: *mlir.Context, inputs: []const *const mlir.Value, opts: 
     //         };
     //         attrs.appendAssumeCapacity(.{ "result_layouts", .array(ctx, result_layouts.constSlice()) });
     //     }
-
-    //     attrs.appendSlice(opts.additional_attributes) catch @panic("Too many additional_attributes");
 
     return mlir.Operation.make(ctx, "stablehlo.custom_call", .{
         .operands = .{ .flat = inputs },
@@ -1067,29 +1052,35 @@ pub fn unpin(ctx: *mlir.Context, value: *const mlir.Value, location: *const mlir
 //     }
 // };
 
-// pub const OutputOperandAliasAttribute = struct {
-//     _inner: c.MlirAttribute,
+pub const OutputOperandAliasAttribute = opaque {
+    const M = mlir.Methods(OutputOperandAliasAttribute, c.MlirAttribute);
 
-//     pub const isAFn = c.stablehloAttributeIsAOutputOperandAlias;
-//     pub const asAttr = mlir.Attribute.fromAny(OutputOperandAliasAttribute);
-//     pub const eql = mlir.Attribute.eqlAny(OutputOperandAliasAttribute);
+    pub const isAFn = c.stablehloAttributeIsAOutputOperandAlias;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
 
-//     pub fn init(
-//         ctx: *mlir.Context,
-//         output_tuple_indices: []const i64,
-//         operand_index: i64,
-//         operand_tuple_indices: []const i64,
-//     ) OutputOperandAliasAttribute {
-//         return .{ ._inner = c.stablehloOutputOperandAliasGet(
-//             ctx._inner,
-//             @intCast(output_tuple_indices.len),
-//             output_tuple_indices.ptr,
-//             @intCast(operand_index),
-//             @intCast(operand_tuple_indices.len),
-//             operand_tuple_indices.ptr,
-//         ) };
-//     }
-// };
+    pub const InitArgs = struct {
+        output_tuple_indices: []const i64 = &.{},
+        operand_index: i64,
+        operand_tuple_indices: []const i64 = &.{},
+    };
+
+    pub fn init(ctx: *mlir.Context, args: InitArgs) *OutputOperandAliasAttribute {
+        return @ptrCast(c.stablehloOutputOperandAliasGet(
+            ctx.ptr(),
+            @intCast(args.output_tuple_indices.len),
+            @ptrCast(args.output_tuple_indices),
+            @intCast(args.operand_index),
+            @intCast(args.operand_tuple_indices.len),
+            @ptrCast(args.operand_tuple_indices),
+        ).ptr);
+    }
+};
+
+pub fn outputOperandAliasAttribute(ctx: *mlir.Context, args: OutputOperandAliasAttribute.InitArgs) *mlir.Attribute {
+    return @ptrCast(OutputOperandAliasAttribute.init(ctx, args));
+}
 
 // pub const PrecisionAttribute = struct {
 //     _inner: c.MlirAttribute,
