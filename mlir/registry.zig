@@ -250,6 +250,10 @@ pub const IndexType = opaque {
     }
 };
 
+pub fn indexType(ctx: *Context) *const Type {
+    return @ptrCast(IndexType.get(ctx));
+}
+
 pub const IntegerTypes = enum {
     i1,
     i4,
@@ -1207,7 +1211,7 @@ pub const RankedTensorType = opaque {
     pub const eql = M.eql(c.mlirTypeEqual);
     pub const format = M.format(c.mlirTypePrint);
 
-    pub fn init(dimensions: []const i64, elemType: *const Type) *const RankedTensorType {
+    pub fn get(dimensions: []const i64, elemType: *const Type) *const RankedTensorType {
         return @ptrCast(c.mlirRankedTensorTypeGet(
             @intCast(dimensions.len),
             @ptrCast(dimensions),
@@ -1218,12 +1222,12 @@ pub const RankedTensorType = opaque {
 
     pub fn fromShaped(other: *const ShapedType) *const RankedTensorType {
         var dims: stdx.BoundedArray(i64, ShapedType.MAX_RANK) = .{};
-        for (other.rank()) |i| {
+        for (0..other.rank()) |i| {
             dims.appendAssumeCapacity(other.dimension(i));
         }
-        return init(
-            other.elementType(),
+        return get(
             dims.constSlice(),
+            other.elementType(),
         );
     }
 
@@ -1245,7 +1249,7 @@ pub const RankedTensorType = opaque {
 };
 
 pub fn rankedTensorType(dimensions: []const i64, elem_type: *const Type) *const Type {
-    return @ptrCast(RankedTensorType.init(dimensions, elem_type));
+    return @ptrCast(RankedTensorType.get(dimensions, elem_type));
 }
 
 pub const DenseElementsAttribute = opaque {
@@ -1256,16 +1260,17 @@ pub const DenseElementsAttribute = opaque {
     pub const eql = M.eql(c.mlirAttributeEqual);
     pub const format = M.format(c.mlirAttributePrint);
 
-    pub fn init(shaped_type: *const ShapedType, values: []const u8) *const DenseElementsAttribute {
+    pub fn init(shaped_type: *const ShapedType, values: anytype) *const DenseElementsAttribute {
+        const bytes = std.mem.sliceAsBytes(values);
         return @ptrCast(c.mlirDenseElementsAttrRawBufferGet(
             shaped_type.ptr(),
-            @intCast(values.len),
-            @ptrCast(values),
+            @intCast(bytes.len),
+            @ptrCast(bytes),
         ).ptr orelse unreachable);
     }
 };
 
-pub fn denseElementsAttribute(shaped_type: *const ShapedType, values: []const u8) *const Attribute {
+pub fn denseElementsAttribute(shaped_type: *const ShapedType, values: anytype) *const Attribute {
     return @ptrCast(DenseElementsAttribute.init(shaped_type, values));
 }
 
@@ -1426,13 +1431,19 @@ pub const MemRefType = opaque {
     pub const eql = M.eql(c.mlirTypeEqual);
     pub const format = M.format(c.mlirTypePrint);
 
-    pub fn init(element_type: *const Type, shape: []const i64, layout: ?*const Attribute, memory_space: ?*Attribute) *const MemRefType {
-        return @ptrCast(c.mlirMemRefTypeGet(element_type, shape.len, @ptrCast(shape), layout, memory_space).ptr);
+    pub fn init(element_type: *const Type, shape: []const i64, layout: ?*const Attribute, memory_space: ?*const Attribute) *const MemRefType {
+        return @ptrCast(c.mlirMemRefTypeGet(
+            element_type.ptr(),
+            @intCast(shape.len),
+            @ptrCast(shape),
+            if (layout) |l| l.ptr() else .{},
+            if (memory_space) |m| m.ptr() else .{},
+        ).ptr);
     }
 
     pub fn fromShaped(other: *const ShapedType) *const MemRefType {
         var dims: stdx.BoundedArray(i64, ShapedType.MAX_RANK) = .{};
-        for (other.rank()) |i| {
+        for (0..other.rank()) |i| {
             dims.appendAssumeCapacity(other.dimension(i));
         }
         return init(
