@@ -169,7 +169,6 @@ pub fn dot_general(
     lhs: *const mlir.Value,
     rhs: *const mlir.Value,
     result_type: *const mlir.Type,
-    location: *const mlir.Location,
     opts: struct {
         lhs_batching_dimensions: []const i64,
         rhs_batching_dimensions: []const i64,
@@ -177,6 +176,7 @@ pub fn dot_general(
         rhs_contracting_dimensions: []const i64,
         dot_precision: DotPrecision,
     },
+    location: *const mlir.Location,
 ) *mlir.Operation {
     const precisions: [2]*const mlir.Attribute = @splat(precisionAttribute(ctx, opts.dot_precision.precision()));
     const attributes = [3]mlir.NamedAttribute{
@@ -244,8 +244,8 @@ pub fn transpose(
     ctx: *mlir.Context,
     value: *const mlir.Value,
     result_type: *const mlir.Type,
-    location: *const mlir.Location,
     opts: struct { permutation: []const i64 },
+    location: *const mlir.Location,
 ) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.transpose", .{
         .operands = .{ .flat = &.{value} },
@@ -308,7 +308,6 @@ pub fn gather(
     value: *const mlir.Value,
     indices: *const mlir.Value,
     slice_sizes: []const i64,
-    location: *const mlir.Location,
     args: struct {
         offset_dims: []const i64,
         collapsed_slice_dims: []const i64,
@@ -318,6 +317,7 @@ pub fn gather(
         index_vector_dim: i64,
         indices_are_sorted: bool = false,
     },
+    location: *const mlir.Location,
 ) *mlir.Operation {
     return mlir.Operation.make(
         ctx,
@@ -548,7 +548,7 @@ pub const PadOpts = struct {
     interior: []const i64,
 };
 
-pub fn pad(ctx: *mlir.Context, value: *const mlir.Value, padding_value: *const mlir.Value, opts: PadOpts, location: *const mlir.Location) *mlir.Operation {
+pub fn pad(ctx: *mlir.Context, value: *const mlir.Value, padding_value: *const mlir.Value, location: *const mlir.Location, opts: PadOpts) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.pad", .{
         .operands = .{ .flat = &.{ value, padding_value } },
         .result_type_inference = true,
@@ -568,7 +568,7 @@ pub const TriangularSolveOpts = struct {
     transpose_a: TransposeAttribute.Type,
 };
 
-pub fn triangular_solve(ctx: *mlir.Context, value: *const mlir.Value, other: *const mlir.Value, location: *const mlir.Location, opts: TriangularSolveOpts) *mlir.Operation {
+pub fn triangular_solve(ctx: *mlir.Context, value: *const mlir.Value, other: *const mlir.Value, opts: TriangularSolveOpts, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.triangular_solve", .{
         .operands = .{ .flat = &.{ value, other } },
         .result_type_inference = true,
@@ -587,7 +587,7 @@ pub const FftOpts = struct {
     length: []const i64,
 };
 
-pub fn fft(ctx: *mlir.Context, value: *const mlir.Value, location: *const mlir.Location, opts: FftOpts) *mlir.Operation {
+pub fn fft(ctx: *mlir.Context, value: *const mlir.Value, opts: FftOpts, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.fft", .{
         .operands = .{ .flat = &.{value} },
         .result_type_inference = true,
@@ -669,7 +669,14 @@ pub fn rng(ctx: *mlir.Context, a: *const mlir.Value, b: *const mlir.Value, shape
     });
 }
 
-pub fn rng_bit_generator(ctx: *mlir.Context, rng_algorithm: RngAlgorithm.Type, initial_state: *const mlir.Value, res_state_type: *const mlir.Type, res_type: *const mlir.Type, location: *const mlir.Location) *mlir.Operation {
+pub fn rng_bit_generator(
+    ctx: *mlir.Context,
+    rng_algorithm: RngAlgorithm.Type,
+    initial_state: *const mlir.Value,
+    res_state_type: *const mlir.Type,
+    res_type: *const mlir.Type,
+    location: *const mlir.Location,
+) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.rng_bit_generator", .{
         .operands = .{ .flat = &.{initial_state} },
         .results = &.{ res_state_type, res_type },
@@ -736,8 +743,8 @@ pub fn convolution(
     ctx: *mlir.Context,
     lhs: *const mlir.Value,
     rhs: *const mlir.Value,
-    opts: ConvolutionOpts,
     res_type: *const mlir.Type,
+    opts: ConvolutionOpts,
     location: *const mlir.Location,
 ) *mlir.Operation {
     var max_precisions: [2]*const mlir.Attribute = undefined;
