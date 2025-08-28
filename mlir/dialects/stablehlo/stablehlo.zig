@@ -541,24 +541,24 @@ pub fn dynamic_slice(
     });
 }
 
-// pub const PadOpts = struct {
-//     low: []const i64,
-//     high: []const i64,
-//     interior: []const i64,
-// };
+pub const PadOpts = struct {
+    low: []const i64,
+    high: []const i64,
+    interior: []const i64,
+};
 
-// pub fn pad(ctx: *mlir.Context, value: *const mlir.Value, padding_value: *const mlir.Value, opts: PadOpts, location: *const mlir.Location) *mlir.Operation {
-//     return mlir.Operation.make(ctx, "stablehlo.pad", .{
-//         .operands = .{ .flat = &.{ value, padding_value } },
-//         .result_type_inference = true,
-//         .attributes = &.{
-//             .{ "edge_padding_low", .dense(ctx, .i64, opts.low) },
-//             .{ "edge_padding_high", .dense(ctx, .i64, opts.high) },
-//             .{ "interior_padding", .dense(ctx, .i64, opts.interior) },
-//         },
-//         .location = location,
-//     });
-// }
+pub fn pad(ctx: *mlir.Context, value: *const mlir.Value, padding_value: *const mlir.Value, opts: PadOpts, location: *const mlir.Location) *mlir.Operation {
+    return mlir.Operation.make(ctx, "stablehlo.pad", .{
+        .operands = .{ .flat = &.{ value, padding_value } },
+        .result_type_inference = true,
+        .attributes = &.{
+            .named(ctx, "edge_padding_low", mlir.denseArrayAttribute(ctx, .i64, opts.low)),
+            .named(ctx, "edge_padding_high", mlir.denseArrayAttribute(ctx, .i64, opts.high)),
+            .named(ctx, "interior_padding", mlir.denseArrayAttribute(ctx, .i64, opts.interior)),
+        },
+        .location = location,
+    });
+}
 
 // pub const TriangularSolveOpts = struct {
 //     left_side: bool,
