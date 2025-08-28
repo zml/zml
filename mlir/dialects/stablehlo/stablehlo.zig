@@ -93,7 +93,7 @@ pub fn cholesky(ctx: *mlir.Context, value: *const mlir.Value, lower: bool, locat
         .operands = .{ .flat = &.{value} },
         .result_type_inference = true,
         .attributes = &.{
-            mlir.NamedAttribute.named(ctx, "lower", mlir.integerAttribute(ctx, .i1, @intFromBool(lower))),
+            .named(ctx, "lower", mlir.integerAttribute(ctx, .i1, @intFromBool(lower))),
         },
         .location = location,
     });
@@ -216,7 +216,7 @@ pub fn constant(
         .operands = .{ .flat = &.{} },
         .results = .{ .flat = &.{mlir.rankedTensorType(dims, elem_type)} },
         .attributes = &.{
-            mlir.NamedAttribute.named(ctx, "value", mlir.denseElementsAttribute(mlir.RankedTensorType.init(dims, elem_type).shaped(), raw_bytes)),
+            .named(ctx, "value", mlir.denseElementsAttribute(mlir.RankedTensorType.init(dims, elem_type).shaped(), raw_bytes)),
         },
         .location = location,
     });
@@ -233,7 +233,7 @@ pub fn broadcast_in_dim(
         .operands = .{ .flat = &.{operand} },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            mlir.NamedAttribute.named(ctx, "broadcast_dimensions", mlir.denseArrayAttribute(ctx, .i64, dims)),
+            .named(ctx, "broadcast_dimensions", mlir.denseArrayAttribute(ctx, .i64, dims)),
         },
         .location = location,
     });
@@ -250,7 +250,7 @@ pub fn transpose(
         .operands = .{ .flat = &.{value} },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            mlir.NamedAttribute.named(ctx, "permutation", mlir.denseArrayAttribute(ctx, .i64, opts.permutation)),
+            .named(ctx, "permutation", mlir.denseArrayAttribute(ctx, .i64, opts.permutation)),
         },
         .location = location,
     });
@@ -269,9 +269,9 @@ pub fn slice(
         .operands = .{ .flat = &.{operand} },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            mlir.NamedAttribute.named(ctx, "start_indices", mlir.denseArrayAttribute(ctx, .i64, start_indices)),
-            mlir.NamedAttribute.named(ctx, "limit_indices", mlir.denseArrayAttribute(ctx, .i64, limit_indices)),
-            mlir.NamedAttribute.named(ctx, "strides", mlir.denseArrayAttribute(ctx, .i64, strides)),
+            .named(ctx, "start_indices", mlir.denseArrayAttribute(ctx, .i64, start_indices)),
+            .named(ctx, "limit_indices", mlir.denseArrayAttribute(ctx, .i64, limit_indices)),
+            .named(ctx, "strides", mlir.denseArrayAttribute(ctx, .i64, strides)),
         },
         .location = location,
     });
@@ -282,7 +282,7 @@ pub fn concatenate(ctx: *mlir.Context, inputs: []const *const mlir.Value, dimens
         .operands = .{ .flat = inputs },
         .result_type_inference = true,
         .attributes = &.{
-            mlir.NamedAttribute.named(ctx, "dimension", mlir.integerAttribute(ctx, .i64, dimension)),
+            .named(ctx, "dimension", mlir.integerAttribute(ctx, .i64, dimension)),
         },
         .location = location,
     });
@@ -407,7 +407,7 @@ pub fn iota(ctx: *mlir.Context, dimension: i64, result_type: *const mlir.Type, l
         .operands = .{ .flat = &.{} },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            mlir.NamedAttribute.named(ctx, "iota_dimension", mlir.integerAttribute(ctx, .i64, dimension)),
+            .named(ctx, "iota_dimension", mlir.integerAttribute(ctx, .i64, dimension)),
         },
         .location = location,
     });
@@ -418,7 +418,7 @@ pub fn reverse(ctx: *mlir.Context, operand: *const mlir.Value, dimensions: []con
         .operands = .{ .flat = &.{operand} },
         .results = .{ .flat = &.{operand.type_()} },
         .attributes = &.{
-            mlir.NamedAttribute.named(ctx, "dimensions", mlir.denseArrayAttribute(ctx, .i64, dimensions)),
+            .named(ctx, "dimensions", mlir.denseArrayAttribute(ctx, .i64, dimensions)),
         },
         .location = location,
     });
