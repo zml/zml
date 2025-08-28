@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const mlir = @import("mlir2");
+const mlir = @import("mlir");
 const stdx = @import("stdx");
 
 const FuncOpArgs = struct {

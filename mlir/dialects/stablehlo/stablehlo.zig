@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const c = @import("c");
-const mlir = @import("mlir2");
+const mlir = @import("mlir");
 const stringRef = mlir.stringRef;
 const stdx = @import("stdx");
 

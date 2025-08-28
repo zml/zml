@@ -13,7 +13,7 @@ zig_library(
     main = "dialects.zig",
     visibility = ["//visibility:public"],
     deps = [
-        "//mlir:mlir2",
+        "//mlir:mlir",
         "//mlir/dialects/stablehlo",
         "//stdx",
     ],

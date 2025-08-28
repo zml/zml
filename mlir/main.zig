@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const dialects = @import("mlir/dialects");
-const mlir = @import("mlir2");
+const mlir = @import("mlir");
 
 pub fn main() !void {
     const allocator = std.heap.c_allocator;
