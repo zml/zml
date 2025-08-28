@@ -581,22 +581,22 @@ pub fn triangular_solve(ctx: *mlir.Context, value: *const mlir.Value, other: *co
     });
 }
 
-// pub const FftOpts = struct {
-//     kind: FftType.Type,
-//     length: []const i64,
-// };
+pub const FftOpts = struct {
+    kind: FftType.Type,
+    length: []const i64,
+};
 
-// pub fn fft(ctx: *mlir.Context, value: *const mlir.Value, location: *const mlir.Location, opts: FftOpts) *mlir.Operation {
-//     return mlir.Operation.make(ctx, "stablehlo.fft", .{
-//         .operands = .{ .flat = &.{value} },
-//         .result_type_inference = true,
-//         .attributes = &.{
-//             .{ "fft_type", FftType.init(ctx, opts.kind).asAttr() },
-//             .{ "fft_length", .dense(ctx, .i64, opts.length) },
-//         },
-//         .location = location,
-//     });
-// }
+pub fn fft(ctx: *mlir.Context, value: *const mlir.Value, location: *const mlir.Location, opts: FftOpts) *mlir.Operation {
+    return mlir.Operation.make(ctx, "stablehlo.fft", .{
+        .operands = .{ .flat = &.{value} },
+        .result_type_inference = true,
+        .attributes = &.{
+            .named(ctx, "fft_type", fftType(ctx, opts.kind)),
+            .named(ctx, "fft_length", mlir.denseArrayAttribute(ctx, .i64, opts.length)),
+        },
+        .location = location,
+    });
+}
 
 // pub fn rng(ctx: *mlir.Context, a: *const mlir.Value, b: *const mlir.Value, shape: *const mlir.Value, rng_distribution: RngDistribution.Type, location: *const mlir.Location) *mlir.Operation {
 //     return mlir.Operation.make(ctx, "stablehlo.rng", .{
@@ -1228,30 +1228,33 @@ pub fn transposeAttribute(ctx: *mlir.Context, value: TransposeAttribute.Type) *c
     return @ptrCast(TransposeAttribute.init(ctx, value));
 }
 
-// pub const FftType = struct {
-//     _inner: c.MlirAttribute,
+pub const FftType = opaque {
+    const M = mlir.Methods(FftType, mlir.Attribute);
 
-//     pub const isAFn = c.stablehloAttributeIsAFftTypeAttr;
-//     const Self = FftType;
-//     pub const asAttr = mlir.Attribute.fromAny(Self);
-//     pub const eql = mlir.Attribute.eqlAny(Self);
+    pub const isAFn = c.stablehloAttributeIsAFftTypeAttr;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
 
-//     pub const Type = enum {
-//         FFT,
-//         IFFT,
-//         RFFT,
-//         IRFFT,
-//     };
+    pub const Type = enum {
+        FFT,
+        IFFT,
+        RFFT,
+        IRFFT,
+    };
 
-//     pub fn init(ctx: *mlir.Context, value: Type) Self {
-//         return .{ ._inner = c.stablehloFftTypeAttrGet(ctx._inner, stringRef(@tagName(value))) };
-//     }
+    pub fn init(ctx: *mlir.Context, value: Type) *const FftType {
+        return @ptrCast(c.stablehloFftTypeAttrGet(ctx.ptr(), mlir.stringRef(@tagName(value))).ptr);
+    }
 
-//     pub fn getValue(self: Self) Type {
-//         const value = mlir.fromStringRef(c.stablehloFftTypeAttrGetValue(self._inner));
-//         return std.meta.stringToEnum(Type, value) orelse unreachable;
-//     }
-// };
+    pub fn getValue(self: *const FftType) Type {
+        const value = mlir.fromStringRef(c.stablehloFftTypeAttrGetValue(self.ptr()));
+        return std.meta.stringToEnum(Type, value) orelse unreachable;
+    }
+};
+
+pub fn fftType(ctx: *mlir.Context, value: FftType.Type) *const mlir.Attribute {
+    return @ptrCast(FftType.init(ctx, value));
+}
 
 // pub const RngDistribution = struct {
 //     _inner: c.MlirAttribute,
