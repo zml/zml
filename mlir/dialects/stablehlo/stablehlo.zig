@@ -303,45 +303,45 @@ pub fn select(
     });
 }
 
-// pub fn gather(
-//     ctx: *mlir.Context,
-//     value: *const mlir.Value,
-//     indices: *const mlir.Value,
-//     slice_sizes: []const i64,
-//     location: *const mlir.Location,
-//     args: struct {
-//         offset_dims: []const i64,
-//         collapsed_slice_dims: []const i64,
-//         operand_batching_dims: []const i64,
-//         start_indices_batching_dims: []const i64,
-//         start_index_map: []const i64,
-//         index_vector_dim: i64,
-//         indices_are_sorted: bool = false,
-//     },
-// ) *mlir.Operation {
-//     return mlir.Operation.make(
-//         ctx,
-//         "stablehlo.gather",
-//         .{
-//             .operands = .{ .flat = &.{ value, indices } },
-//             .result_type_inference = true,
-//             .attributes = &.{
-//                 .{ "dimension_numbers", GatherDimensionNumbersAttribute.init(
-//                     ctx,
-//                     args.offset_dims,
-//                     args.collapsed_slice_dims,
-//                     args.operand_batching_dims,
-//                     args.start_indices_batching_dims,
-//                     args.start_index_map,
-//                     args.index_vector_dim,
-//                 ).asAttr() },
-//                 .{ "slice_sizes", .dense(ctx, .i64, slice_sizes) },
-//                 .{ "indices_are_sorted", .boolean(ctx, args.indices_are_sorted) },
-//             },
-//             .location = location,
-//         },
-//     );
-// }
+pub fn gather(
+    ctx: *mlir.Context,
+    value: *const mlir.Value,
+    indices: *const mlir.Value,
+    slice_sizes: []const i64,
+    location: *const mlir.Location,
+    args: struct {
+        offset_dims: []const i64,
+        collapsed_slice_dims: []const i64,
+        operand_batching_dims: []const i64,
+        start_indices_batching_dims: []const i64,
+        start_index_map: []const i64,
+        index_vector_dim: i64,
+        indices_are_sorted: bool = false,
+    },
+) *mlir.Operation {
+    return mlir.Operation.make(
+        ctx,
+        "stablehlo.gather",
+        .{
+            .operands = .{ .flat = &.{ value, indices } },
+            .result_type_inference = true,
+            .attributes = &.{
+                .named(ctx, "dimension_numbers", gatherDimensionNumbersAttribute(
+                    ctx,
+                    args.offset_dims,
+                    args.collapsed_slice_dims,
+                    args.operand_batching_dims,
+                    args.start_indices_batching_dims,
+                    args.start_index_map,
+                    args.index_vector_dim,
+                )),
+                .named(ctx, "slice_sizes", mlir.denseArrayAttribute(ctx, .i64, slice_sizes)),
+                .named(ctx, "indices_are_sorted", mlir.boolAttribute(ctx, args.indices_are_sorted)),
+            },
+            .location = location,
+        },
+    );
+}
 
 // fn elementTypeOrSelf(typ: *const mlir.Type) *const mlir.Type {
 //     return if (typ.as(mlir.ShapedType)) |shaped| {
@@ -1012,85 +1012,103 @@ pub fn dotDimensionNumbersAttribute(ctx: *mlir.Context, args: DotDimensionNumber
     return @ptrCast(DotDimensionNumbersAttribute.init(ctx, args));
 }
 
-// pub const GatherDimensionNumbersAttribute = struct {
-//     _inner: c.MlirAttribute,
+pub const GatherDimensionNumbersAttribute = opaque {
+    const M = mlir.Methods(GatherDimensionNumbersAttribute, mlir.Attribute);
 
-//     pub const isAFn = c.stablehloAttributeIsAGatherDimensionNumbers;
-//     const Self = GatherDimensionNumbersAttribute;
-//     pub const asAttr = mlir.Attribute.fromAny(Self);
-//     pub const eql = mlir.Attribute.eqlAny(Self);
+    pub const isAFn = c.stablehloAttributeIsAGatherDimensionNumbers;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.eql(c.mlirAttributePrint);
 
-//     pub fn init(
-//         ctx: *mlir.Context,
-//         offset_dims: []const i64,
-//         collapsed_slice_dims: []const i64,
-//         operand_batching_dims: []const i64,
-//         start_indices_batching_dims: []const i64,
-//         start_index_map: []const i64,
-//         index_vector_dim: i64,
-//     ) Self {
-//         return .{
-//             ._inner = c.stablehloGatherDimensionNumbersGet(
-//                 ctx._inner,
-//                 @intCast(offset_dims.len),
-//                 offset_dims.ptr,
-//                 @intCast(collapsed_slice_dims.len),
-//                 collapsed_slice_dims.ptr,
-//                 @intCast(operand_batching_dims.len),
-//                 operand_batching_dims.ptr,
-//                 @intCast(start_indices_batching_dims.len),
-//                 start_indices_batching_dims.ptr,
-//                 @intCast(start_index_map.len),
-//                 start_index_map.ptr,
-//                 index_vector_dim,
-//             ),
-//         };
-//     }
+    pub fn init(
+        ctx: *mlir.Context,
+        offset_dims: []const i64,
+        collapsed_slice_dims: []const i64,
+        operand_batching_dims: []const i64,
+        start_indices_batching_dims: []const i64,
+        start_index_map: []const i64,
+        index_vector_dim: i64,
+    ) *const GatherDimensionNumbersAttribute {
+        return @ptrCast(c.stablehloGatherDimensionNumbersGet(
+            ctx.ptr(),
+            @intCast(offset_dims.len),
+            offset_dims.ptr,
+            @intCast(collapsed_slice_dims.len),
+            collapsed_slice_dims.ptr,
+            @intCast(operand_batching_dims.len),
+            operand_batching_dims.ptr,
+            @intCast(start_indices_batching_dims.len),
+            start_indices_batching_dims.ptr,
+            @intCast(start_index_map.len),
+            start_index_map.ptr,
+            index_vector_dim,
+        ).ptr);
+    }
 
-//     pub fn getOffsetDimsSize(self: Self) usize {
-//         return @intCast(c.stablehloGatherDimensionNumbersGetOffsetDimsSize(self._inner));
-//     }
+    pub fn getOffsetDimsSize(self: *const GatherDimensionNumbersAttribute) usize {
+        return @intCast(c.stablehloGatherDimensionNumbersGetOffsetDimsSize(self.ptr()));
+    }
 
-//     pub fn getOffsetDimsElem(self: Self, pos: usize) i64 {
-//         return c.stablehloGatherDimensionNumbersGetOffsetDimsElem(self._inner, @intCast(pos));
-//     }
+    pub fn getOffsetDimsElem(self: *const GatherDimensionNumbersAttribute, pos: usize) i64 {
+        return c.stablehloGatherDimensionNumbersGetOffsetDimsElem(self.ptr(), @intCast(pos));
+    }
 
-//     pub fn getCollapsedSliceDimsSize(self: Self) usize {
-//         return @intCast(c.stablehloGatherDimensionNumbersGetCollapsedSliceDimsSize(self._inner));
-//     }
+    pub fn getCollapsedSliceDimsSize(self: *const GatherDimensionNumbersAttribute) usize {
+        return @intCast(c.stablehloGatherDimensionNumbersGetCollapsedSliceDimsSize(self.ptr()));
+    }
 
-//     pub fn getCollapsedSliceDimsElem(self: Self, pos: usize) i64 {
-//         return c.stablehloGatherDimensionNumbersGetCollapsedSliceDimsElem(self._inner, @intCast(pos));
-//     }
+    pub fn getCollapsedSliceDimsElem(self: *const GatherDimensionNumbersAttribute, pos: usize) i64 {
+        return c.stablehloGatherDimensionNumbersGetCollapsedSliceDimsElem(self.ptr(), @intCast(pos));
+    }
 
-//     pub fn getStartIndexMapSize(self: Self) usize {
-//         return @intCast(c.stablehloGatherDimensionNumbersGetStartIndexMapSize(self._inner));
-//     }
+    pub fn getStartIndexMapSize(self: *const GatherDimensionNumbersAttribute) usize {
+        return @intCast(c.stablehloGatherDimensionNumbersGetStartIndexMapSize(self.ptr()));
+    }
 
-//     pub fn getOperandBatchingDimsSize(self: Self) usize {
-//         return @intCast(c.stablehloGatherDimensionNumbersGetOperandBatchingDimsSize(self._inner));
-//     }
+    pub fn getOperandBatchingDimsSize(self: *const GatherDimensionNumbersAttribute) usize {
+        return @intCast(c.stablehloGatherDimensionNumbersGetOperandBatchingDimsSize(self.ptr()));
+    }
 
-//     pub fn getOperandBatchingDimsElem(self: Self, pos: usize) i64 {
-//         return c.stablehloGatherDimensionNumbersGetOperandBatchingDimsElem(self._inner, @intCast(pos));
-//     }
+    pub fn getOperandBatchingDimsElem(self: *const GatherDimensionNumbersAttribute, pos: usize) i64 {
+        return c.stablehloGatherDimensionNumbersGetOperandBatchingDimsElem(self.ptr(), @intCast(pos));
+    }
 
-//     pub fn getStartIndicesBatchingDimsSize(self: Self) usize {
-//         return @intCast(c.stablehloGatherDimensionNumbersGetStartIndicesBatchingDimsSize(self._inner));
-//     }
+    pub fn getStartIndicesBatchingDimsSize(self: *const GatherDimensionNumbersAttribute) usize {
+        return @intCast(c.stablehloGatherDimensionNumbersGetStartIndicesBatchingDimsSize(self.ptr()));
+    }
 
-//     pub fn getStartIndicesBatchingDimsElem(self: Self, pos: usize) i64 {
-//         return c.stablehloGatherDimensionNumbersGetStartIndicesBatchingDimsElem(self._inner, @intCast(pos));
-//     }
+    pub fn getStartIndicesBatchingDimsElem(self: *const GatherDimensionNumbersAttribute, pos: usize) i64 {
+        return c.stablehloGatherDimensionNumbersGetStartIndicesBatchingDimsElem(self.ptr(), @intCast(pos));
+    }
 
-//     pub fn getStartIndexMapElem(self: Self, pos: usize) i64 {
-//         return c.stablehloGatherDimensionNumbersGetStartIndexMapElem(self._inner, @intCast(pos));
-//     }
+    pub fn getStartIndexMapElem(self: *const GatherDimensionNumbersAttribute, pos: usize) i64 {
+        return c.stablehloGatherDimensionNumbersGetStartIndexMapElem(self.ptr(), @intCast(pos));
+    }
 
-//     pub fn getIndexVectorDim(self: Self) usize {
-//         return @intCast(c.stablehloGatherDimensionNumbersGetIndexVectorDim(self._inner));
-//     }
-// };
+    pub fn getIndexVectorDim(self: *const GatherDimensionNumbersAttribute) usize {
+        return @intCast(c.stablehloGatherDimensionNumbersGetIndexVectorDim(self.ptr()));
+    }
+};
+
+pub fn gatherDimensionNumbersAttribute(
+    ctx: *mlir.Context,
+    offset_dims: []const i64,
+    collapsed_slice_dims: []const i64,
+    operand_batching_dims: []const i64,
+    start_indices_batching_dims: []const i64,
+    start_index_map: []const i64,
+    index_vector_dim: i64,
+) *const mlir.Attribute {
+    return @ptrCast(GatherDimensionNumbersAttribute.init(
+        ctx,
+        offset_dims,
+        collapsed_slice_dims,
+        operand_batching_dims,
+        start_indices_batching_dims,
+        start_index_map,
+        index_vector_dim,
+    ));
+}
 
 // pub const ConvDimensionNumbersAttribute = struct {
 //     _inner: c.MlirAttribute,
