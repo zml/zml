@@ -1263,6 +1263,7 @@ pub const ComparisonDirection = opaque {
     pub const isAFn = c.stablehloAttributeIsAComparisonDirectionAttr;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
 
     pub const Direction = enum {
         EQ,
@@ -1293,6 +1294,7 @@ pub const CompareType = opaque {
     pub const isAFn = c.stablehloAttributeIsAComparisonTypeAttr;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
 
     pub const Type = enum {
         SIGNED,
@@ -1321,6 +1323,7 @@ pub const TransposeAttribute = opaque {
     pub const isAFn = c.stablehloAttributeIsATransposeAttr;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
 
     pub const Type = enum {
         NO_TRANSPOSE,
@@ -1348,6 +1351,7 @@ pub const FftType = opaque {
     pub const isAFn = c.stablehloAttributeIsAFftTypeAttr;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
 
     pub const Type = enum {
         FFT,
