@@ -413,17 +413,16 @@ pub fn iota(ctx: *mlir.Context, dimension: i64, result_type: *const mlir.Type, l
     });
 }
 
-// pub fn reverse(ctx: *mlir.Context, operand: *const mlir.Value, dimensions: []const i64, location: *const mlir.Location) *mlir.Operation {
-//     const result_type = operand.getType();
-//     return mlir.Operation.make(ctx, "stablehlo.reverse", .{
-//         .operands = .{ .flat = &.{operand} },
-//         .results = .{ .flat = &.{result_type} },
-//         .attributes = &.{
-//             .{ "dimensions", mlir.denseArrayAttribute(ctx, .i64, dimensions) },
-//         },
-//         .location = location,
-//     });
-// }
+pub fn reverse(ctx: *mlir.Context, operand: *const mlir.Value, dimensions: []const i64, location: *const mlir.Location) *mlir.Operation {
+    return mlir.Operation.make(ctx, "stablehlo.reverse", .{
+        .operands = .{ .flat = &.{operand} },
+        .results = .{ .flat = &.{operand.type_()} },
+        .attributes = &.{
+            mlir.NamedAttribute.named(ctx, "dimensions", mlir.denseArrayAttribute(ctx, .i64, dimensions)),
+        },
+        .location = location,
+    });
+}
 
 // pub fn compare(ctx: *mlir.Context, lhs: *const mlir.Value, rhs: *const mlir.Value, comparison_direction: ComparisonDirection, compare_type: CompareType, location: *const mlir.Location) *mlir.Operation {
 //     return mlir.Operation.make(ctx, "stablehlo.compare", .{
