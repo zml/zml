@@ -2,7 +2,10 @@
 const std = @import("std");
 
 const c = @import("c");
-const TypeId = c.XLA_FFI_TypeId;
+pub const TypeId = c.XLA_FFI_TypeId;
+comptime {
+    if (@typeInfo(TypeId).@"struct".fields.len != 1) @compileError("TypeId has changed");
+}
 const stdx = @import("stdx");
 
 const pjrt = @import("pjrt.zig");
@@ -53,25 +56,6 @@ pub const MetadataExtension = extern struct {
     metadata: ?*Metadata,
 };
 
-pub const ApiError = error{
-    Cancelled,
-    Unknown,
-    InvalidArgument,
-    DeadlineExceeded,
-    NotFound,
-    AlreadyExists,
-    PermissionDenied,
-    ResourceExhausted,
-    FailedPrecondition,
-    Aborted,
-    OutOfRange,
-    Unimplemented,
-    Internal,
-    Unavailable,
-    DataLoss,
-    Unauthenticated,
-};
-
 fn TransmuteMixin(comptime T: type, comptime InnerT: type) type {
     return struct {
         pub fn to(self: anytype) switch (@TypeOf(self)) {
@@ -111,7 +95,7 @@ pub const Api = opaque {
         return @ptrCast(ret.stream.?);
     }
 
-    pub fn allocateDeviceMemory(self: *const Api, context: *const ExecutionContext, size: usize, alignment: usize) ApiError!*anyopaque {
+    pub fn allocateDeviceMemory(self: *const Api, context: *const ExecutionContext, size: usize, alignment: usize) pjrt.ApiError!*anyopaque {
         var ret = pjrt.pjrtStruct(c.XLA_FFI_DeviceMemory_Allocate_Args{
             .ctx = @constCast(context.inner()),
             .size = size,
@@ -131,7 +115,7 @@ pub const Api = opaque {
         return ret.data.?;
     }
 
-    pub fn freeDeviceMemory(self: *const Api, context: *const ExecutionContext, data: *anyopaque, size: usize) ApiError!void {
+    pub fn freeDeviceMemory(self: *const Api, context: *const ExecutionContext, data: *anyopaque, size: usize) pjrt.ApiError!void {
         var ret = pjrt.pjrtStruct(c.XLA_FFI_DeviceMemory_Free_Args{
             .ctx = @constCast(context.inner()),
             .size = size,
@@ -167,9 +151,7 @@ pub const ExecutionStage = enum(c.XLA_FFI_ExecutionStage) {
 pub const ExecutionContext = opaque {
     pub const inner = TransmuteMixin(ExecutionContext, c.XLA_FFI_ExecutionContext).to;
 
-    pub fn getContext(self: *const ExecutionContext, T: type, api: *const Api) ApiError!*T {
-        const type_id: TypeId = .{ .type_id = T.type_id };
-        log.warn("[ExecutionContext.get] {*} api: {}", .{ self, api.inner().* });
+    pub fn getContext(self: *const ExecutionContext, type_id: TypeId, api: *const Api) pjrt.ApiError!*anyopaque {
         var ret: c.XLA_FFI_ExecutionContext_Get_Args = .{
             .struct_size = pjrt.pjrtStructSize(c.XLA_FFI_ExecutionContext_Get_Args),
             .extension_start = api.inner().extension_start,
@@ -189,10 +171,10 @@ pub const ExecutionContext = opaque {
         }
 
         if (ret.data == null) return error.NotFound;
-        return @ptrCast(@alignCast(ret.data.?));
+        return ret.data.?;
     }
 
-    pub fn getDeviceOrdinal(self: *const ExecutionContext, api: *const Api) ApiError!i32 {
+    pub fn getDeviceOrdinal(self: *const ExecutionContext, api: *const Api) pjrt.ApiError!i32 {
         var ret = pjrt.pjrtStruct(c.XLA_FFI_DeviceOrdinal_Get_Args{
             .ctx = @constCast(self.inner()),
         });
@@ -210,7 +192,9 @@ pub const ExecutionContext = opaque {
         return ret.device_ordinal;
     }
 
-    pub fn scheduleTask(self: *const ExecutionContext, api: *const Api, task: *const Task, data: *anyopaque) ApiError!void {
+    const Task = fn (*anyopaque) void;
+
+    pub fn scheduleTask(self: *const ExecutionContext, api: *const Api, task: *const Task, data: *anyopaque) pjrt.ApiError!void {
         var ret = pjrt.pjrtStruct(c.XLA_FFI_ThreadPool_Schedule_Args{
             .ctx = @constCast(self.inner()),
             .task = @ptrCast(@alignCast(task)),
@@ -231,9 +215,7 @@ pub const ExecutionContext = opaque {
     }
 };
 
-const Task = fn (*anyopaque) void;
-
-const ByteSpan = extern struct {
+pub const ByteSpan = extern struct {
     ptr: [*]const u8,
     len: usize,
 
@@ -436,7 +418,7 @@ pub const ErrorCode = enum(c.XLA_FFI_Error_Code) {
     data_loss = c.XLA_FFI_Error_Code_DATA_LOSS,
     unauthenticated = c.XLA_FFI_Error_Code_UNAUTHENTICATED,
 
-    pub fn toApiError(code: ErrorCode) ApiError {
+    pub fn toApiError(code: ErrorCode) pjrt.ApiError {
         return switch (code) {
             .cancelled => error.Cancelled,
             .unknown => error.Unknown,
@@ -488,7 +470,7 @@ pub const Future = opaque {
     pub const inner = TransmuteMixin(Future, c.XLA_FFI_Future).to;
     pub const fromInner = TransmuteMixin(Future, c.XLA_FFI_Future).from;
 
-    pub fn create(api: *const Api) ApiError!*Future {
+    pub fn create(api: *const Api) pjrt.ApiError!*Future {
         var ret = pjrt.pjrtStruct(c.XLA_FFI_Future_Create_Args{});
         const result = api.inner().XLA_FFI_Future_Create.?(&ret);
 
@@ -504,7 +486,7 @@ pub const Future = opaque {
         return fromInner(ret.future.?);
     }
 
-    pub fn setAvailable(self: *Future, api: *const Api) ApiError!void {
+    pub fn setAvailable(self: *Future, api: *const Api) pjrt.ApiError!void {
         var ret = pjrt.pjrtStruct(c.XLA_FFI_Future_SetAvailable_Args{
             .future = self.inner(),
         });
@@ -521,7 +503,7 @@ pub const Future = opaque {
         }
     }
 
-    pub fn setError(self: *Future, api: *const Api, err: *Error) ApiError!void {
+    pub fn setError(self: *Future, api: *const Api, err: *Error) pjrt.ApiError!void {
         var ret = pjrt.pjrtStruct(c.XLA_FFI_Future_SetError_Args{
             .future = self.inner(),
             .@"error" = err.inner(),

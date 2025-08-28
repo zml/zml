@@ -217,8 +217,8 @@ pub const BaseExe = struct {
             inline for (custom_call.custom_call_internal_types) |T| {
                 const value_ptr = try allocator.create(T);
                 value_ptr.* = try .init(platform);
-                try ffi.addUserData(platform.pjrt_api, execute_context.?, .{ .type_id = T.type_id, .user_data = @ptrCast(@constCast(value_ptr)) });
-                log.info("Bound {s}@{x} with type id {d} on {any}", .{ @typeName(T), @intFromPtr(value_ptr), T.type_id, execute_context });
+                try ffi.addUserData(platform.pjrt_api, execute_context.?, .{ .type_id = T.type_id.type_id, .user_data = @ptrCast(@constCast(value_ptr)) });
+                log.info("Bound {s}@{x} with type id {d} on {any}", .{ @typeName(T), @intFromPtr(value_ptr), T.type_id.type_id, execute_context });
             }
         }
 
@@ -303,18 +303,17 @@ pub const BaseExe = struct {
         stdx.debug.internalAssert(local_ctx.index == self.result_shapes.len, "Pjrt call returned {} tensors, but the return type {s}, contains {} Buffers. Note that modules need to have a comptime know number of returned tensors.", .{ self.output_per_device.len, @typeName(T), local_ctx.index });
     }
 
-    pub fn bind(self: BaseExe, comptime T: type, value: *T) !void {
-        stdx.debug.assert(self.execute_context != null, "Exe doesn't have an execution context", .{});
-        const pjrt_api = self.platform.pjrt_api;
+    pub fn bind(exe: BaseExe, comptime CustomOp: type, op: *CustomOp) !void {
+        stdx.debug.assert(exe.execute_context != null, "Exe doesn't have an execution context", .{});
+        const pjrt_api = exe.platform.pjrt_api;
 
         if (pjrt_api.ffi()) |ffi| {
-            const type_id = T.type_id;
-            const user_data: *anyopaque = @ptrCast(@constCast(value));
+            const type_id: i64 = CustomOp.type_id.type_id;
 
-            try ffi.addUserData(pjrt_api, self.execute_context.?, .{ .type_id = type_id, .user_data = user_data });
-            log.info("Bound {s}@{x} with type id {d} on {any}", .{ @typeName(T), user_data, T.type_id, self.execute_context.? });
+            try ffi.addUserData(pjrt_api, exe.execute_context.?, .{ .type_id = type_id, .user_data = op });
+            log.info("Bound {s}@{x} with type id {d} on {any}", .{ @typeName(CustomOp), @intFromPtr(op), type_id, exe.execute_context.? });
         } else {
-            stdx.debug.panic("Custom calls are not supported for target {s}", .{@tagName(self.platform.target)});
+            stdx.debug.panic("Custom calls are not supported for target {s}", .{@tagName(exe.platform.target)});
         }
     }
 
