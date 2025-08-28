@@ -39,6 +39,13 @@ pub fn stringCallback(str: c.MlirStringRef, ctx_: ?*anyopaque) callconv(.c) void
     };
 }
 
+fn stringFromStream(buf: []u8, streamFn: anytype, args: anytype) []const u8 {
+    var writer = std.Io.Writer.fixed(buf);
+    var sctx: StringCallbackCtx = .{ .writer = &writer };
+    _ = @call(.auto, streamFn, args ++ .{ stringCallback, &sctx });
+    return writer.buffered();
+}
+
 pub fn registerPasses(comptime passes: []const u8) void {
     @field(c, "mlirRegister" ++ passes ++ "Passes")();
 }
@@ -102,6 +109,45 @@ pub const DialectRegistry = opaque {
     pub fn registerDialect(self: *DialectRegistry, comptime name: []const u8) void {
         DialectHandle.fromString(name).insertDialect(self);
     }
+};
+
+pub const PassManager = opaque {
+    const M = Methods(PassManager, c.MlirPassManager);
+
+    pub const ptr = M.ptr;
+
+    pub fn init(ctx: *Context) *PassManager {
+        return @ptrCast(c.mlirPassManagerCreate(ctx.ptr()).ptr);
+    }
+
+    pub fn deinit(self: *const PassManager) void {
+        c.mlirPassManagerDestroy(self.ptr());
+    }
+
+    pub fn asOpPassManager(self: *PassManager) *OpPassManager {
+        return @ptrCast(c.mlirPassManagerGetAsOpPassManager(self.ptr()).ptr);
+    }
+};
+
+pub const OpPassManager = opaque {
+    const M = Methods(OpPassManager, c.MlirOpPassManager);
+
+    pub const ptr = M.ptr;
+
+    pub fn addPipeline(self: *OpPassManager, pipeline_name: []const u8) !void {
+        var buffer: [1024]u8 = undefined;
+        const result = stringFromStream(&buffer, c.mlirOpPassManagerAddPipeline, .{ self.ptr(), stringRef(pipeline_name) });
+        if (result.len != 0) {
+            log.err("mlir error: {s}", .{result});
+            return error.MlirUnexpected;
+        }
+    }
+};
+
+pub const Pass = opaque {
+    const M = Methods(Pass, c.MlirPass);
+
+    pub const ptr = M.ptr;
 };
 
 pub const Context = opaque {
@@ -385,10 +431,35 @@ pub fn FloatType(comptime ft: FloatTypes) type {
     };
 }
 
-pub fn floatType(ft: FloatTypes, ctx: *Context) *const Type {
+pub fn floatType(ctx: *Context, ft: FloatTypes) *const Type {
     return switch (ft) {
         inline else => |v| @ptrCast(FloatType(v).get(ctx)),
     };
+}
+
+pub const ComplexTypes = enum {
+    c64,
+    c128,
+};
+
+pub const ComplexType = opaque {
+    const M = Methods(ComplexType, c.MlirType);
+
+    pub const isAFn = c.mlirTypeIsAComplex;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
+
+    pub fn get(ctx: *Context, complex_type: ComplexTypes) *const ComplexType {
+        return @ptrCast(c.mlirComplexTypeGet(switch (complex_type) {
+            .c64 => floatType(ctx, .f32).ptr(),
+            .c128 => floatType(ctx, .f64).ptr(),
+        }).ptr);
+    }
+};
+
+pub fn complexType(ctx: *Context, complex_type: ComplexTypes) *const Type {
+    return @ptrCast(ComplexType.get(ctx, complex_type));
 }
 
 pub const Attribute = opaque {
@@ -925,6 +996,10 @@ pub const Operation = opaque {
 
     pub fn context(self: *const Operation) *Context {
         return @ptrCast(c.mlirOperationGetContext(self.ptr()).ptr);
+    }
+
+    pub fn setAttributeByName(self: *Operation, name_: []const u8, attribute: *const Attribute) void {
+        c.mlirOperationSetAttributeByName(self.ptr(), stringRef(name_), attribute.ptr());
     }
 
     pub const PrintFlags = struct {

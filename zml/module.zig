@@ -29,10 +29,10 @@ pub const MlirFn = struct {
     name: []const u8,
     args_shapes: []Shape,
     res_tensors: *const anyopaque,
-    res_types: []mlir.Type,
+    res_types: []*const mlir.Type,
     res_shapes: []Shape,
     res_donations: []Tensor._Donation,
-    mlir_fn: mlir.Operation,
+    mlir_fn: *mlir.Operation,
 
     pub const Kind = enum {
         main,
@@ -40,16 +40,18 @@ pub const MlirFn = struct {
     };
 };
 
+const RecursiveOpts = enum { open, hermetic };
+
 pub const CompilationContext = struct {
     _platform: Platform,
     _name: []const u8,
 
     _arena: std.heap.ArenaAllocator,
-    _mlir_ctx: mlir.Context,
-    _mlir_registry: mlir.Registry,
-    _mlir_canonicalizer: mlir.PassManager,
+    _mlir_ctx: *mlir.Context,
+    _mlir_registry: *mlir.DialectRegistry,
+    _mlir_canonicalizer: *mlir.PassManager,
 
-    _module: mlir.Module,
+    _module: *mlir.Module,
 
     _blocks: stdx.BoundedArray(TaggedBlock, 64) = .{},
     _fn_cache: FnCache = .{},
@@ -61,16 +63,16 @@ pub const CompilationContext = struct {
     _previous: ?*CompilationContext = null,
     threadlocal var _current: ?*CompilationContext = null;
 
-    const TaggedBlock = struct { mlir.Block, mlir.Block.RecursiveOpts };
-    const TensorToBlockArg = std.AutoHashMapUnmanaged(Tensor._Id, struct { mlir.Value, Tensor._Donation });
+    const TaggedBlock = struct { *mlir.Block, RecursiveOpts };
+    const TensorToBlockArg = std.AutoHashMapUnmanaged(Tensor._Id, struct { *const mlir.Value, Tensor._Donation });
     const AttributeList = stdx.BoundedArray(mlir.NamedAttribute, 3);
 
     pub fn init(allocator_: std.mem.Allocator, full_name: []const u8, platform: Platform) !CompilationContext {
-        const mlir_registry = mlir.Registry.init() catch unreachable;
+        const mlir_registry = mlir.DialectRegistry.init() catch unreachable;
         inline for (.{ "func", "stablehlo" }) |d| {
             mlir.DialectHandle.fromString(d).insertDialect(mlir_registry);
         }
-        var mlir_ctx = mlir.Context.initWithRegistry(mlir_registry, false) catch unreachable;
+        var mlir_ctx = mlir.Context.init(.{ .registry = mlir_registry, .threading = false }) catch unreachable;
         mlir_ctx.loadAllAvailableDialects();
 
         // Too long module names create too long file paths and files failed to create.
@@ -79,11 +81,11 @@ pub const CompilationContext = struct {
         const max_name_len = @divFloor(std.fs.max_path_bytes, 2) - 17;
         const name = full_name[0..@min(max_name_len, full_name.len)];
 
-        const loc = mlir_ctx.location(@src()).named(mlir_ctx, "main");
+        const loc = mlir.Location.fromSrc(mlir_ctx, @src()).named(mlir_ctx, "main");
         const module = mlir.Module.init(loc);
-        module.op().setAttributeByName("sym_name", .string(mlir_ctx, "zml"));
+        module.operation().setAttributeByName("sym_name", mlir.stringAttribute(mlir_ctx, "zml"));
 
-        var canonicalizer = try mlir.PassManager.init(mlir_ctx);
+        var canonicalizer = mlir.PassManager.init(mlir_ctx);
         {
             var opm = canonicalizer.asOpPassManager();
             try opm.addPipeline("canonicalize");
@@ -138,7 +140,7 @@ pub const CompilationContext = struct {
         return self._platform.target;
     }
 
-    pub fn mlirCtx(self: *const CompilationContext) mlir.Context {
+    pub fn mlirCtx(self: *const CompilationContext) *mlir.Context {
         return self._mlir_ctx;
     }
 
@@ -164,12 +166,12 @@ pub const CompilationContext = struct {
         // Run in a dedicated thread because compilation relies on `threadlocal`.
         const f = try asynk.callBlocking(CompilationContext.emitMlir, .{ self, func, &tensor_args, CompilationContext.EmitMlirOpts{ .name = "main", .kind = .main } });
         const module = self._module;
-        module.getBody().appendOperation(f.mlir_fn);
+        _ = f.mlir_fn.appendTo(module.body());
 
         const sharding = self._platform.sharding();
         const mlir_ctx = self._mlir_ctx;
-        module.op().setAttributeByName("mhlo.num_replicas", .int(mlir_ctx, .i32, sharding.num_replicas));
-        module.op().setAttributeByName("mhlo.num_partitions", .int(mlir_ctx, .i32, sharding.num_partitions));
+        module.operation().setAttributeByName("mhlo.num_replicas", mlir.integerAttribute(mlir_ctx, .i32, sharding.num_replicas));
+        module.operation().setAttributeByName("mhlo.num_partitions", mlir.integerAttribute(mlir_ctx, .i32, sharding.num_partitions));
 
         const module_hash = computeModuleHash(self._platform, module);
         var module_dir: ?[]const u8 = null;
@@ -244,8 +246,8 @@ pub const CompilationContext = struct {
         return if (self._blocks.len > 0) self._blocks.get(self._blocks.len - 1) else null;
     }
 
-    pub fn openBlock(self: *CompilationContext, kind: mlir.Block.RecursiveOpts, args: []const mlir.Type, locs: []const mlir.Location) !TaggedBlock {
-        const block: TaggedBlock = .{ try mlir.Block.init(args, locs), kind };
+    pub fn openBlock(self: *CompilationContext, kind: RecursiveOpts, args: []const *const mlir.Type, locs: []const *const mlir.Location) !TaggedBlock {
+        const block: TaggedBlock = .{ mlir.Block.init(args, locs), kind };
         self.pushBlock(block);
         return block;
     }
@@ -336,17 +338,19 @@ pub const CompilationContext = struct {
         const tensor_count = meta.count(Tensor, args);
 
         const mlir_ctx = self.mlirCtx();
-        const loc = mlir_ctx.location(@src());
+        const loc: *const mlir.Location = .fromSrc(mlir_ctx, @src());
 
-        const locations = try arena.alloc(mlir.Location, tensor_count);
-        @memset(locations, mlir.Location.unknown(mlir_ctx));
+        const locations = try arena.alloc(*const mlir.Location, tensor_count);
+        @memset(locations, .unknown(mlir_ctx));
 
         var input_shapes: std.array_list.Managed(Shape) = try .initCapacity(res_allocator, tensor_count);
         meta.collect(Tensor.shape, {}, &input_shapes, args) catch unreachable;
         stdx.debug.internalAssert(input_shapes.items.len == tensor_count, "args have changed ?", .{});
 
-        const input_types = try arena.alloc(mlir.Type, tensor_count);
-        for (input_types, input_shapes.items) |*t, sh| t.* = mlirx.tensorType(mlir_ctx, sh);
+        const input_types = try arena.alloc(*const mlir.Type, tensor_count);
+        for (input_types, input_shapes.items) |*t, sh| {
+            t.* = mlir.rankedTensorType(sh.dims(), mlirx.Type.fromDType(mlir_ctx, sh.dtype()));
+        }
 
         const og_block_args = self._block_args;
         defer {
@@ -364,7 +368,7 @@ pub const CompilationContext = struct {
 
         // Those are returned to caller so we don't put them in the arena, but in the module allocator.
         const fn_res = try res_allocator.create(ReturnT);
-        const fn_res_types = try res_allocator.alloc(mlir.Type, out_tensor_count);
+        const fn_res_types = try res_allocator.alloc(*const mlir.Type, out_tensor_count);
         const fn_res_shapes = try res_allocator.alloc(Shape, out_tensor_count);
         const fn_res_donations = try res_allocator.alloc(Tensor._Donation, out_tensor_count);
         const fn_res_output_memory_kind = try res_allocator.alloc(Buffer.Memory, out_tensor_count);
@@ -382,10 +386,10 @@ pub const CompilationContext = struct {
                 break :forward @call(.auto, func, args.*);
             };
 
-            var fn_res_values: [out_tensor_count]mlir.Value = undefined;
+            var fn_res_values: [out_tensor_count]*const mlir.Value = undefined;
             self.extractValuesAndTypes(fn_res, &fn_res_values, fn_res_types, fn_res_shapes, fn_res_donations, fn_res_output_memory_kind);
 
-            const fn_ret = dialect.func.return_(mlir_ctx, &fn_res_values, loc);
+            const fn_ret = dialect.func.returns(mlir_ctx, &fn_res_values, loc);
             fn_body[0].appendOperationRecursive(fn_ret, fn_body[1]);
         }
 
@@ -690,10 +694,10 @@ pub const CompilationContext = struct {
     /// This is done so that we have a mapping between the arguments of the kernel associated with a module and the actual Tensors
     /// stored in the Module.
     /// Caller need to allocate required memory in self._block_args.
-    pub fn mapBlockArguments(self: *CompilationContext, v: anytype, block: mlir.Block, start: usize) usize {
+    pub fn mapBlockArguments(self: *CompilationContext, v: anytype, block: *mlir.Block, start: usize) usize {
         const LocalContext = struct {
             index: usize,
-            block: mlir.Block,
+            block: *mlir.Block,
             self: *CompilationContext,
         };
         var context = LocalContext{ .self = self, .block = block, .index = start };
@@ -736,8 +740,8 @@ pub const CompilationContext = struct {
     pub fn extractValuesAndTypes(
         self: *const CompilationContext,
         v: anytype,
-        values: []mlir.Value,
-        types: []mlir.Type,
+        values: []*const mlir.Value,
+        types: []*const mlir.Type,
         shapes: []Shape,
         donations: []Tensor._Donation,
         output_memory_kind: []Buffer.Memory,
@@ -746,8 +750,8 @@ pub const CompilationContext = struct {
         const LocalContext = struct {
             self: *const CompilationContext,
             index: usize = 0,
-            values: []mlir.Value,
-            types: []mlir.Type,
+            values: []*const mlir.Value,
+            types: []*const mlir.Type,
             shapes: []Shape,
             donations: []Tensor._Donation,
             output_memory_kind: []Buffer.Memory,

@@ -7,11 +7,6 @@ const Shape = @import("shape.zig").Shape;
 
 const mlirx = @This();
 
-/// Returns the mlir.Type corresponding to a given zml.Shape.
-pub fn tensorType(ctx: mlir.Context, sh: Shape) mlir.Type {
-    return .tensor(sh.dims(), mlirx.Type.fromDType(ctx, sh.dtype()));
-}
-
 pub fn denseElementAttrType(dt: dtype.DataType) ?mlir.DenseElementsAttributeTypes {
     return switch (dt) {
         .bool => .bool,
@@ -32,34 +27,34 @@ pub fn denseElementAttrType(dt: dtype.DataType) ?mlir.DenseElementsAttributeType
 }
 
 pub const Type = struct {
-    pub fn fromDType(ctx: mlir.Context, dt: dtype.DataType) mlir.Type {
+    pub fn fromDType(ctx: *mlir.Context, dt: dtype.DataType) *const mlir.Type {
         return switch (dt) {
-            .bool => .int(ctx, .i1),
-            .f8e4m3b11fnuz => .float(ctx, .f8e4m3b11fnuz),
-            .f8e4m3fn => .float(ctx, .f8e4m3fn),
-            .f8e4m3fnuz => .float(ctx, .f8e4m3fnuz),
-            .f8e5m2 => .float(ctx, .f8e5m2),
-            .f8e5m2fnuz => .float(ctx, .f8e5m2fnuz),
-            .bf16 => .float(ctx, .bf16),
-            .f16 => .float(ctx, .f16),
-            .f32 => .float(ctx, .f32),
-            .f64 => .float(ctx, .f64),
-            .i4 => .int(ctx, .i4),
-            .i8 => .int(ctx, .i8),
-            .i16 => .int(ctx, .i16),
-            .i32 => .int(ctx, .i32),
-            .i64 => .int(ctx, .i64),
-            .u4 => .int(ctx, .u4),
-            .u8 => .int(ctx, .u8),
-            .u16 => .int(ctx, .u16),
-            .u32 => .int(ctx, .u32),
-            .u64 => .int(ctx, .u64),
-            .c64 => .complex(ctx, .c64),
-            .c128 => .complex(ctx, .c128),
+            .bool => mlir.integerType(ctx, .i1),
+            .f8e4m3b11fnuz => mlir.floatType(ctx, .f8e4m3b11fnuz),
+            .f8e4m3fn => mlir.floatType(ctx, .f8e4m3fn),
+            .f8e4m3fnuz => mlir.floatType(ctx, .f8e4m3fnuz),
+            .f8e5m2 => mlir.floatType(ctx, .f8e5m2),
+            .f8e5m2fnuz => mlir.floatType(ctx, .f8e5m2fnuz),
+            .bf16 => mlir.floatType(ctx, .bf16),
+            .f16 => mlir.floatType(ctx, .f16),
+            .f32 => mlir.floatType(ctx, .f32),
+            .f64 => mlir.floatType(ctx, .f64),
+            .i4 => mlir.integerType(ctx, .i4),
+            .i8 => mlir.integerType(ctx, .i8),
+            .i16 => mlir.integerType(ctx, .i16),
+            .i32 => mlir.integerType(ctx, .i32),
+            .i64 => mlir.integerType(ctx, .i64),
+            .u4 => mlir.integerType(ctx, .u4),
+            .u8 => mlir.integerType(ctx, .u8),
+            .u16 => mlir.integerType(ctx, .u16),
+            .u32 => mlir.integerType(ctx, .u32),
+            .u64 => mlir.integerType(ctx, .u64),
+            .c64 => mlir.complexType(ctx, .c64),
+            .c128 => mlir.complexType(ctx, .c128),
         };
     }
 
-    pub fn toDType(mlir_type: mlir.Type) dtype.DataType {
+    pub fn toDType(mlir_type: *const mlir.Type) dtype.DataType {
         const mapping = .{
             .{ .bool, mlir.IntegerType(.i1) },
 
@@ -91,7 +86,7 @@ pub const Type = struct {
 
         inline for (mapping) |entry| {
             const dt, const mlirT = entry;
-            if (mlirT.is_a_fn(mlir_type._inner)) {
+            if (mlirT.isAFn(mlir_type._inner)) {
                 return dt;
             }
         }

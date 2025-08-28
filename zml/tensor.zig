@@ -42,7 +42,7 @@ pub const Tensor = struct {
     _output_memory_kind: Memory = .device,
 
     pub const _Donation = union(enum) { no_buffer, input_buffer, arg: u16 };
-    pub const _Id = union(enum) { mlir: mlir.Value, buffer_id: u64, arg_id: u64 };
+    pub const _Id = union(enum) { mlir: *const mlir.Value, buffer_id: u64, arg_id: u64 };
     pub const MAX_RANK = Shape.MAX_RANK;
 
     /// Returns the current compilation context.
