@@ -222,16 +222,22 @@ pub fn constant(
     });
 }
 
-// pub fn broadcast_in_dim(ctx: *mlir.Context, operand: *const mlir.Value, dims: []const i64, result_type: *const mlir.Type, location: *const mlir.Location) *mlir.Operation {
-//     return mlir.Operation.make(ctx, "stablehlo.broadcast_in_dim", .{
-//         .operands = .{ .flat = &.{operand} },
-//         .results = .{ .flat = &.{result_type} },
-//         .attributes = &.{
-//             .{ "broadcast_dimensions", mlir.denseArrayAttribute(ctx, .i64, dims) },
-//         },
-//         .location = location,
-//     });
-// }
+pub fn broadcast_in_dim(
+    ctx: *mlir.Context,
+    operand: *const mlir.Value,
+    dims: []const i64,
+    result_type: *const mlir.Type,
+    location: *const mlir.Location,
+) *mlir.Operation {
+    return mlir.Operation.make(ctx, "stablehlo.broadcast_in_dim", .{
+        .operands = .{ .flat = &.{operand} },
+        .results = .{ .flat = &.{result_type} },
+        .attributes = &.{
+            mlir.NamedAttribute.named(ctx, "broadcast_dimensions", mlir.denseArrayAttribute(ctx, .i64, dims)),
+        },
+        .location = location,
+    });
+}
 
 // pub fn transpose(ctx: *mlir.Context, value: *const mlir.Value, result_type: *const mlir.Type, location: *const mlir.Location, opts: struct { permutation: []const i64 }) *mlir.Operation {
 //     return mlir.Operation.make(ctx, "stablehlo.transpose", .{
