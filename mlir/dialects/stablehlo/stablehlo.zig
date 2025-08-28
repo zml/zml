@@ -620,17 +620,17 @@ pub fn fft(ctx: *mlir.Context, value: *const mlir.Value, location: *const mlir.L
 //     });
 // }
 
-// pub fn reduce_precision(ctx: *mlir.Context, value: *const mlir.Value, exponent_bits: i32, mantissa_bits: i32, location: *const mlir.Location) *mlir.Operation {
-//     return mlir.Operation.make(ctx, "stablehlo.reduce_precision", .{
-//         .operands = .{ .flat = &.{value} },
-//         .result_type_inference = true,
-//         .attributes = &.{
-//             .{ "exponent_bits", .int(ctx, .i32, exponent_bits) },
-//             .{ "mantissa_bits", .int(ctx, .i32, mantissa_bits) },
-//         },
-//         .location = location,
-//     });
-// }
+pub fn reduce_precision(ctx: *mlir.Context, value: *const mlir.Value, exponent_bits: i32, mantissa_bits: i32, location: *const mlir.Location) *mlir.Operation {
+    return mlir.Operation.make(ctx, "stablehlo.reduce_precision", .{
+        .operands = .{ .flat = &.{value} },
+        .result_type_inference = true,
+        .attributes = &.{
+            .named(ctx, "exponent_bits", mlir.integerAttribute(ctx, .i32, exponent_bits)),
+            .named(ctx, "mantissa_bits", mlir.integerAttribute(ctx, .i32, mantissa_bits)),
+        },
+        .location = location,
+    });
+}
 
 pub fn dynamic_update_slice(ctx: *mlir.Context, operand: *const mlir.Value, update: *const mlir.Value, start_indices: []const *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.dynamic_update_slice", .{
