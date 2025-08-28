@@ -632,13 +632,13 @@ pub fn fft(ctx: *mlir.Context, value: *const mlir.Value, location: *const mlir.L
 //     });
 // }
 
-// pub fn dynamic_update_slice(ctx: *mlir.Context, operand: *const mlir.Value, update: *const mlir.Value, start_indices: []const *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
-//     return mlir.Operation.make(ctx, "stablehlo.dynamic_update_slice", .{
-//         .operands = .{ .variadic = &.{ &.{operand}, &.{update}, start_indices } },
-//         .result_type_inference = true,
-//         .location = location,
-//     });
-// }
+pub fn dynamic_update_slice(ctx: *mlir.Context, operand: *const mlir.Value, update: *const mlir.Value, start_indices: []const *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
+    return mlir.Operation.make(ctx, "stablehlo.dynamic_update_slice", .{
+        .operands = .{ .variadic = &.{ &.{operand}, &.{update}, start_indices } },
+        .result_type_inference = true,
+        .location = location,
+    });
+}
 
 pub fn get_tuple_element(ctx: *mlir.Context, tuple_value: *const mlir.Value, index: i64, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.get_tuple_element", .{
