@@ -349,59 +349,59 @@ pub fn gather(
 //     } else typ;
 // }
 
-// pub const ScatterArgs = struct {
-//     update_window_dims: []const i64,
-//     inserted_window_dims: []const i64,
-//     input_batching_dims: []const i64,
-//     scatter_indices_batching_dims: []const i64,
-//     scatter_dims_to_operand_dims: []const i64,
-//     index_vector_dim: i64,
-//     indices_are_sorted: bool = false,
-//     unique_indices: bool = false,
+pub const ScatterArgs = struct {
+    update_window_dims: []const i64,
+    inserted_window_dims: []const i64,
+    input_batching_dims: []const i64,
+    scatter_indices_batching_dims: []const i64,
+    scatter_dims_to_operand_dims: []const i64,
+    index_vector_dim: i64,
+    indices_are_sorted: bool = false,
+    unique_indices: bool = false,
 
-//     pub fn getScatterDimensionNumbers(self: ScatterArgs, ctx: *mlir.Context) *const mlir.Attribute {
-//         return .{ ._inner = c.stablehloScatterDimensionNumbersGet(
-//             ctx._inner,
-//             @intCast(self.update_window_dims.len),
-//             self.update_window_dims.ptr,
-//             @intCast(self.inserted_window_dims.len),
-//             self.inserted_window_dims.ptr,
-//             @intCast(self.input_batching_dims.len),
-//             self.input_batching_dims.ptr,
-//             @intCast(self.scatter_indices_batching_dims.len),
-//             self.scatter_indices_batching_dims.ptr,
-//             @intCast(self.scatter_dims_to_operand_dims.len),
-//             self.scatter_dims_to_operand_dims.ptr,
-//             self.index_vector_dim,
-//         ) };
-//     }
-// };
+    pub fn getScatterDimensionNumbers(self: ScatterArgs, ctx: *mlir.Context) *const mlir.Attribute {
+        return @ptrCast(c.stablehloScatterDimensionNumbersGet(
+            ctx.ptr(),
+            @intCast(self.update_window_dims.len),
+            self.update_window_dims.ptr,
+            @intCast(self.inserted_window_dims.len),
+            self.inserted_window_dims.ptr,
+            @intCast(self.input_batching_dims.len),
+            self.input_batching_dims.ptr,
+            @intCast(self.scatter_indices_batching_dims.len),
+            self.scatter_indices_batching_dims.ptr,
+            @intCast(self.scatter_dims_to_operand_dims.len),
+            self.scatter_dims_to_operand_dims.ptr,
+            self.index_vector_dim,
+        ).ptr);
+    }
+};
 
-// pub fn scatter(
-//     ctx: *mlir.Context,
-//     inputs: []const *const mlir.Value,
-//     scatter_indices: []const *const mlir.Value,
-//     updates: []const *const mlir.Value,
-//     update_block: mlir.Block,
-//     args: ScatterArgs,
-//     location: *const mlir.Location,
-// ) *mlir.Operation {
-//     return mlir.Operation.make(
-//         ctx,
-//         "stablehlo.scatter",
-//         .{
-//             .operands = .{ .variadic = &.{ inputs, scatter_indices, updates } },
-//             .blocks = &.{update_block},
-//             .attributes = &.{
-//                 .{ "scatter_dimension_numbers", args.getScatterDimensionNumbers(ctx) },
-//                 .{ "indices_are_sorted", .boolean(ctx, args.indices_are_sorted) },
-//                 .{ "unique_indices", .boolean(ctx, args.unique_indices) },
-//             },
-//             .result_type_inference = true,
-//             .location = location,
-//         },
-//     );
-// }
+pub fn scatter(
+    ctx: *mlir.Context,
+    inputs: []const *const mlir.Value,
+    scatter_indices: []const *const mlir.Value,
+    updates: []const *const mlir.Value,
+    update_block: *mlir.Block,
+    args: ScatterArgs,
+    location: *const mlir.Location,
+) *mlir.Operation {
+    return mlir.Operation.make(
+        ctx,
+        "stablehlo.scatter",
+        .{
+            .operands = .{ .variadic = &.{ inputs, scatter_indices, updates } },
+            .blocks = &.{update_block},
+            .attributes = &.{
+                .named(ctx, "scatter_dimension_numbers", args.getScatterDimensionNumbers(ctx)),
+                .named(ctx, "indices_are_sorted", mlir.boolAttribute(ctx, args.indices_are_sorted)),
+                .named(ctx, "unique_indices", mlir.boolAttribute(ctx, args.unique_indices)),
+            },
+            .result_type_inference = true,
+            .location = location,
+        },
+    );
+}
 
 pub fn iota(ctx: *mlir.Context, dimension: i64, result_type: *const mlir.Type, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.iota", .{
