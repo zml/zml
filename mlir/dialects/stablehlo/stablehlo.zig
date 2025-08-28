@@ -640,16 +640,16 @@ pub fn fft(ctx: *mlir.Context, value: *const mlir.Value, location: *const mlir.L
 //     });
 // }
 
-// pub fn get_tuple_element(ctx: *mlir.Context, tuple_value: *const mlir.Value, index: i64, location: *const mlir.Location) *mlir.Operation {
-//     return mlir.Operation.make(ctx, "stablehlo.get_tuple_element", .{
-//         .operands = .{ .flat = &.{tuple_value} },
-//         .result_type_inference = true,
-//         .attributes = &.{
-//             .{ "index", .int(ctx, .i32, index) },
-//         },
-//         .location = location,
-//     });
-// }
+pub fn get_tuple_element(ctx: *mlir.Context, tuple_value: *const mlir.Value, index: i64, location: *const mlir.Location) *mlir.Operation {
+    return mlir.Operation.make(ctx, "stablehlo.get_tuple_element", .{
+        .operands = .{ .flat = &.{tuple_value} },
+        .result_type_inference = true,
+        .attributes = &.{
+            .named(ctx, "index", mlir.integerAttribute(ctx, .i32, index)),
+        },
+        .location = location,
+    });
+}
 
 // pub const ConvolutionOpts = struct {
 //     window_strides: []const i64,
