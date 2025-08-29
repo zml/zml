@@ -6,5 +6,7 @@ zig_binary(
     deps = [
         "@zml//async",
         "@zml//zml",
+        "@zml//runtimes",
     ],
+    copts = ["-lc"],
 )
