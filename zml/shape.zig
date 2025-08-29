@@ -1111,7 +1111,7 @@ pub const Shape = struct {
     }
 
     pub fn dot(lhs: Shape, rhs: Shape, comptime contracting: anytype) Shape {
-        var contracting_axes: std.BoundedArray([2]i8, MAX_RANK) = .{};
+        var contracting_axes: stdx.BoundedArray([2]i8, MAX_RANK) = .{};
         if (@TypeOf(contracting) == EnumLiteral) {
             contracting_axes.appendAssumeCapacity(.{ lhs.axis(contracting), rhs.axis(contracting) });
         } else {
@@ -1120,7 +1120,7 @@ pub const Shape = struct {
             }
         }
 
-        var batching_axes: std.BoundedArray([2]i8, MAX_RANK) = .{};
+        var batching_axes: stdx.BoundedArray([2]i8, MAX_RANK) = .{};
         for (lhs.tags(), 0..) |l, li| {
             stdx.debug.assert(l != Shape.TagUnknown, "Can't use `dot(..., {any})` on {any}, it need to be explictily tagged.", .{ contracting, lhs });
 
@@ -1149,7 +1149,7 @@ pub const Shape = struct {
         contracting_axes: []const [2]i8,
         batching_axes: []const [2]i8,
     ) Shape {
-        const Axes = std.BoundedArray(u8, MAX_RANK);
+        const Axes = stdx.BoundedArray(u8, MAX_RANK);
 
         var res_shape: Shape = .{ ._dtype = lhs.dtype() };
         // Validate batching axes
@@ -1157,7 +1157,7 @@ pub const Shape = struct {
         var rhs_batching_axes: Axes = .{};
         for (batching_axes) |b_axes| {
             const l, const r = b_axes;
-            stdx.debug.assert(lhs.dim(l) == rhs.dim(r), "dotGeneral expects batching dimensions to be equal, got {} and {} in {} and {}", .{ l, r, lhs, rhs });
+            stdx.debug.assert(lhs.dim(l) == rhs.dim(r), "dotGeneral expects batching dimensions to be equal, got {d} and {d} in {f} and {f}", .{ l, r, lhs, rhs });
             var t = lhs.tag(l);
             if (t == Shape.TagUnknown) t = rhs.tag(r);
             res_shape = res_shape.appendDim(lhs.dim(l), t);
@@ -1170,7 +1170,7 @@ pub const Shape = struct {
         var rhs_contracting_axes: Axes = .{};
         for (contracting_axes) |c_axes| {
             const l, const r = c_axes;
-            stdx.debug.assert(lhs.dim(l) == rhs.dim(r), "dotGeneral expects contracting dimensions to be equal, got {} and {} in {} and {}", .{ l, r, lhs, rhs });
+            stdx.debug.assert(lhs.dim(l) == rhs.dim(r), "dotGeneral expects contracting dimensions to be equal, got {d} and {d} in {f} and {f}", .{ l, r, lhs, rhs });
             lhs_contracting_axes.appendAssumeCapacity(lhs.axis(l));
             rhs_contracting_axes.appendAssumeCapacity(rhs.axis(r));
         }

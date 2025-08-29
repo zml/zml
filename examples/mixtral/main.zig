@@ -71,7 +71,9 @@ pub fn asyncMain() !void {
     const config = blk: {
         var config_json_file = try asynk.File.open(model_config_path, .{ .mode = .read_only });
         defer config_json_file.close() catch unreachable;
-        var reader = std.json.reader(allocator, config_json_file.reader());
+        var config_json_buffer: [256]u8 = undefined;
+        var config_reader = config_json_file.reader(&config_json_buffer);
+        var reader = std.json.Reader.init(allocator, &config_reader.interface);
         defer reader.deinit();
         const config_obj = try std.json.parseFromTokenSourceLeaky(mixtral.MixtralLM.Config, allocator, &reader, .{ .ignore_unknown_fields = true });
         break :blk config_obj;
@@ -146,16 +148,16 @@ pub fn asyncMain() !void {
         platform,
     });
 
-    log.info("\tLoading mixtral weights from {?s}...", .{model_weights_path});
+    log.info("\tLoading mixtral weights from {s}...", .{model_weights_path});
     var mixtral_weights = try model_instance.loadBuffers(model_arena.allocator(), store, platform);
     defer zml.aio.unloadBuffers(&mixtral_weights);
-    log.info("✅\tLoaded weights in {}", .{std.fmt.fmtDuration(start.read())});
+    log.info("✅\tLoaded weights in {D}", .{start.read()});
 
     var mixtral_module_prefill = (try fut_mod_prefill.awaitt()).prepare(mixtral_weights);
     defer mixtral_module_prefill.deinit();
     var mixtral_module = (try fut_mod.awaitt()).prepare(mixtral_weights);
     defer mixtral_module.deinit();
-    log.info("✅\tCompiled model in {}", .{std.fmt.fmtDuration(start.read())});
+    log.info("✅\tCompiled model in {D}", .{start.read()});
 
     log.info("Creating KvCache", .{});
     const kv_cache = try mixtral.KvCache.initBuffer(kv_shape, platform);
@@ -163,7 +165,7 @@ pub fn asyncMain() !void {
     var tokenizer = blk: {
         log.info("Loading tokenizer from {s}", .{model_tokenizer_path});
         var timer = try stdx.time.Timer.start();
-        defer log.info("Loaded tokenizer from {s} [{}]", .{ model_tokenizer_path, timer.read() });
+        defer log.info("Loaded tokenizer from {s} [{f}]", .{ model_tokenizer_path, timer.read() });
 
         break :blk try zml.tokenizer.Tokenizer.fromFile(model_arena.allocator(), model_tokenizer_path);
     };
@@ -174,14 +176,17 @@ pub fn asyncMain() !void {
 
     const seed = cli.args.seed orelse @as(u128, @bitCast(std.time.nanoTimestamp()));
     const skip_llama3_encoding = cli.args.@"no-llama3" orelse false;
-    const generated_text = try generateText(config, model_instance, mixtral_module_prefill, mixtral_module, kv_cache, tokenizer, allocator, seed, prompt[0..], skip_llama3_encoding);
+
+    // Unbuffered writing of the tokens to stdout.
+    var output = std.fs.File.stdout().writer(&.{});
+
+    try generateText(config, model_instance, mixtral_module_prefill, mixtral_module, kv_cache, tokenizer, allocator, seed, prompt[0..], skip_llama3_encoding, &output.interface);
     // generated text will be printed token by token.
-    defer allocator.free(generated_text);
 }
 
 pub fn tokenizePrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, config: MixtralLM.Config, prompt: []const u8, skip_llama3_encoding: bool) ![]u32 {
     _ = config; // autofix
-    var tokens = std.ArrayList(u32).init(allocator);
+    var tokens = std.array_list.Managed(u32).init(allocator);
     var encoder = try tokenizer.encoder();
     defer encoder.deinit();
 
@@ -223,9 +228,10 @@ pub fn generateText(
     seed: u128,
     prompt: []const u8,
     skip_llama3_encoding: bool,
-) ![]const u8 {
+    output: *std.Io.Writer,
+) !void {
     const prompt_tok: []const u32 = try tokenizePrompt(allocator, tokenizer, config, prompt, skip_llama3_encoding);
-    log.info("\t Tokenized prompt: {d}", .{prompt_tok});
+    log.info("\t Tokenized prompt: {any}", .{prompt_tok});
     defer allocator.free(prompt_tok);
 
     var tokenizer_decoder = try tokenizer.decoder();
@@ -260,10 +266,6 @@ pub fn generateText(
     var current_token = try zml.Buffer.fromSlice(platform, .{1}, &generated_token_buffer);
     defer current_token.deinit();
 
-    // Here we collect the generated text
-    var output = std.ArrayList(u8).init(allocator);
-    defer output.deinit();
-
     const output_tokens_len = max_seq_len - prompt_tok.len - 1;
     const start = std.time.microTimestamp();
 
@@ -275,8 +277,7 @@ pub fn generateText(
         num_tokens_generated += 1;
         const generated_token = generated_token_buffer[0];
         if (try tokenizer_decoder.next(generated_token)) |chunk| {
-            try output.appendSlice(chunk);
-            std.debug.print("{s}", .{chunk});
+            try output.writeAll(chunk);
         }
 
         // check for eos
@@ -304,9 +305,8 @@ pub fn generateText(
     const end = std.time.microTimestamp();
     const duration = stdx.math.divFloat(f64, end - start, std.time.us_per_s);
     const speed = @as(f64, @floatFromInt(num_tokens_generated)) / duration;
-    std.debug.print("\n", .{});
+
     log.info("✅ Generated {d} tokens in {:.3}s: {d:.3}tok/s", .{ num_tokens_generated, duration, speed });
-    return output.toOwnedSlice();
 }
 
 const ClapBoilerplate = struct {
@@ -325,19 +325,20 @@ const ClapBoilerplate = struct {
 
     pub fn parseCli(allocator: std.mem.Allocator) Cli {
         var diag: clap.Diagnostic = .{};
-        const stderr = std.io.getStdErr().writer();
+        var stderr_buffer: [1024]u8 = undefined;
+        var stderr = std.fs.File.stderr().writer(&stderr_buffer);
         const cli = clap.parse(clap.Help, &cli_params, parsers, .{
             .diagnostic = &diag,
             .allocator = allocator,
         }) catch |err| {
-            diag.report(stderr, err) catch {};
-            stderr.print("usage: ", .{}) catch {};
-            clap.usage(stderr, clap.Help, &cli_params) catch {};
-            stderr.print("\n", .{}) catch {};
+            diag.report(&stderr.interface, err) catch {};
+            stderr.interface.print("usage: ", .{}) catch {};
+            clap.usage(&stderr.interface, clap.Help, &cli_params) catch {};
+            stderr.interface.print("\n", .{}) catch {};
             std.process.exit(1);
         };
         if (cli.args.help != 0) {
-            clap.help(std.io.getStdErr().writer(), clap.Help, &cli_params, .{}) catch {};
+            clap.help(&stderr.interface, clap.Help, &cli_params, .{}) catch {};
             std.process.exit(0);
         }
         return cli;
