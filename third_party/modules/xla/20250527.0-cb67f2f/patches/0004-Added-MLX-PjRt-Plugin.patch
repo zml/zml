@@ -783,10 +783,10 @@ index 0000000000..cc56626953
 \ No newline at end of file
 diff --git a/xla/pjrt/plugin/mlx/client_cpp_pjrt.cc b/xla/pjrt/plugin/mlx/client_cpp_pjrt.cc
 new file mode 100644
-index 0000000000..4c64c20b7b
+index 0000000000..ca5caa92ea
 --- /dev/null
 +++ b/xla/pjrt/plugin/mlx/client_cpp_pjrt.cc
-@@ -0,0 +1,299 @@
+@@ -0,0 +1,303 @@
 +/* Copyright 2024 The OpenXLA Authors.
 +Licensed under the Apache License, Version 2.0 (the "License");
 +you may not use this file except in compliance with the License.
@@ -802,7 +802,6 @@ index 0000000000..4c64c20b7b
 +#include "xla/pjrt/plugin/mlx/client_cpp_pjrt.h"
 +
 +#include <cstddef>
-+#include <cstdint>
 +#include <cstdlib>
 +#include <memory>
 +#include <optional>
@@ -819,6 +818,7 @@ index 0000000000..4c64c20b7b
 +#include "xla/pjrt/pjrt_common.h"
 +#include "xla/pjrt/pjrt_compiler.h"
 +#include "xla/pjrt/plugin/mlx/buffer.h"
++#include "xla/pjrt/plugin/mlx/compile.h"
 +#include "xla/pjrt/plugin/mlx/device.h"
 +#include "xla/pjrt/plugin/mlx/executable.h"
 +#include "xla/pjrt/plugin/mlx/logging.h"
@@ -1077,6 +1077,10 @@ index 0000000000..4c64c20b7b
 +  std::vector<xla::PjRtDevice*> devices_;
 +  std::unique_ptr<xla::PjRtMemorySpace> owned_memory_space_;
 +  xla::PjRtMemorySpace* memory_space_;
++  // TODO(@cryptodeal): shared cache for optimized ops
++  // with the same hash value between executables.
++  // std::mutex cache_mutex_;
++  // std::unordered_map<uint64_t, utils::MlxFuncRef> mlx_cache_;
 +};  // end class
 +
 +std::unique_ptr<xla::PjRtClient> CreateStablehloMlxPjrtClient() {
@@ -1126,10 +1130,10 @@ index 0000000000..8c90942f0c
 \ No newline at end of file
 diff --git a/xla/pjrt/plugin/mlx/compile.cc b/xla/pjrt/plugin/mlx/compile.cc
 new file mode 100644
-index 0000000000..70d9a620e1
+index 0000000000..eec6b037b2
 --- /dev/null
 +++ b/xla/pjrt/plugin/mlx/compile.cc
-@@ -0,0 +1,1305 @@
+@@ -0,0 +1,1563 @@
 +#include "xla/pjrt/plugin/mlx/compile.h"
 +
 +#include <iostream>
@@ -1138,9 +1142,6 @@ index 0000000000..70d9a620e1
 +#include <optional>
 +#include <utility>
 +#include <cstddef>
-+#include <functional>
-+#include <unordered_map>
-+#include <vector>
 +#include <numeric>
 +#include <string>
 +#include <tuple>
@@ -1149,10 +1150,8 @@ index 0000000000..70d9a620e1
 +// TODO(@cryptodeal): might need to update `BUILD`
 +#include "mlir/IR/Visitors.h"
 +
-+#include "mlx/mlx.h"
 +#include "mlx/compile_impl.h"
 +#include "absl/log/log.h"
-+#include "absl/status/status.h"
 +#include "absl/status/statusor.h"
 +#include "llvm/ADT/TypeSwitch.h"
 +#include "mlir/Bytecode/BytecodeWriter.h"
@@ -1178,25 +1177,47 @@ index 0000000000..70d9a620e1
 +#include "xla/pjrt/pjrt_future.h"
 +#include "xla/pjrt/plugin/mlx/buffer.h"
 +#include "xla/pjrt/plugin/mlx/logging.h"
-+#include "xla/pjrt/plugin/mlx/utils.h"
 +#include "xla/service/computation_placer.h"
 +#include "tsl/platform/status.h"
 +#include "tsl/platform/statusor.h"
 +
-+namespace mx = mlx::core;
-+
 +namespace compile {
 +
 +namespace detail {
-+// cbrt implementation
-+std::vector<mx::array> cbrt(const std::vector<mx::array>& inputs) {
-+  return std::vector<mx::array>{mx::power(
-+      inputs[0], mx::full<float>(inputs[0].shape(), 1 / 3, inputs[0].dtype()))};
++std::pair<std::uintptr_t, MlxFunc> compile(
++    std::function<std::vector<mx::array>(const std::vector<mx::array>&)> fun,
++    bool shapeless /* false */) {
++  if (mx::detail::skip_compile()) {
++    return {0, fun};
++  }
++  auto fun_id = mx::detail::get_function_address(fun);
++  if (fun_id) {
++    // If the function has an addressable target then no need to manage it's
++    // lifetime
++    return {fun_id, mx::detail::compile(std::move(fun), fun_id, shapeless)};
++  } else {
++    auto pfun = std::shared_ptr<
++        std::function<std::vector<mx::array>(const std::vector<mx::array>&)>>(
++        new std::function<std::vector<mx::array>(
++            const std::vector<mx::array>&)>{fun},
++        [](auto* p) {
++          mx::detail::compile_erase(reinterpret_cast<std::uintptr_t>(p));
++          delete p;
++        });
++    fun_id = reinterpret_cast<std::uintptr_t>(pfun.get());
++    return {fun_id, mx::detail::compile(
++                        [pfun = std::move(pfun)](const auto& inputs) {
++                          return (*pfun)(inputs);
++                        },
++                        fun_id, shapeless)};
++  }
 +}
 +
-+std::vector<mx::array> func(mlir::ModuleOp mod, mlir::func::FuncOp op,
-+                            const std::vector<mx::array>& inputs,
-+                            bool recursive_compile) {
++std::vector<mx::array> func(
++    mlir::ModuleOp& mod, std::string func_name,
++    std::unordered_map<uint64_t, utils::MlxFuncRef>& mlx_cache,
++    const std::vector<mx::array>& inputs) {
++  auto op = mod.lookupSymbol<mlir::func::FuncOp>(func_name);
 +  auto& block = op.front();
 +  std::unordered_map<mlir::Operation*, std::vector<mx::array>> block_ctx;
 +  mlir::Operation* last_op = nullptr;
@@ -1214,7 +1235,7 @@ index 0000000000..70d9a620e1
 +                  return res;
 +                })
 +            .Case<mlir::func::CallOp>(
-+                [&block_ctx, &inputs, &mod, recursive_compile](auto o) {
++                [&block_ctx, &inputs, &mlx_cache, &mod](auto o) {
 +                  std::vector<mx::array> operands;
 +                  for (mlir::Value val : o.getOperands()) {
 +                    operands.emplace_back(utils::array::fromOperand(
@@ -1222,14 +1243,7 @@ index 0000000000..70d9a620e1
 +                  }
 +                  auto func_op =
 +                      mod.lookupSymbol<mlir::func::FuncOp>(o.getCallee());
-+                  // std::cout << "Calling function: " <<
-+                  // func_op.getName().str()
-+                  //           << std::endl;
-+                  if (recursive_compile) {
-+                    return compile::func(mod, func_op)(operands);
-+                  } else {
-+                    return func(mod, func_op, operands, false);
-+                  }
++                  return mlx_cache[utils::getHashValue(func_op)].call(operands);
 +                })
 +            // Handle StableHLO nullary ops
 +            .Case<mlir::stablehlo::ConstantOp>([](auto o) {
@@ -1268,8 +1282,9 @@ index 0000000000..70d9a620e1
 +                  o.getOperand(), block_ctx, inputs))};
 +            })
 +            .Case<mlir::stablehlo::CbrtOp>([&block_ctx, &inputs](auto o) {
-+              return mx::compile(cbrt)({utils::array::fromOperand(
-+                  o.getOperand(), block_ctx, inputs)});
++              return std::vector<mx::array>{
++                  mx::power(inputs[0], mx::full<float>(inputs[0].shape(), 1 / 3,
++                                                       inputs[0].dtype()))};
 +            })
 +            .Case<mlir::stablehlo::CeilOp>([&block_ctx, &inputs](auto o) {
 +              return std::vector<mx::array>{mx::ceil(utils::array::fromOperand(
@@ -1535,45 +1550,40 @@ index 0000000000..70d9a620e1
 +            // .Case<mlir::stablehlo::AllReduceOp>([](auto o) {})
 +            // .Case<mlir::stablehlo::ReduceScatterOp>([](auto o) {})
 +            // .Case<mlir::stablehlo::AllToAllOp>([](auto o) {})
-+            .Case<mlir::stablehlo::ReduceOp>([&block_ctx, &inputs](auto o) {
++            .Case<mlir::stablehlo::ReduceOp>([&block_ctx, &inputs,
++                                              &op](auto o) {
 +              auto operand =
 +                  utils::array::fromOperand(o.getOperand(0), block_ctx, inputs);
-+              if (utils::isArgMaxReduce(o)) {
-+                // std::cout << "ArgMaxReduce op: " << std::endl;
-+                auto axis = static_cast<int>(o.getDimensions()[0]);
-+                auto indices = mx::argmax(operand, axis);
++              mlir::Block& body_block = o.getBody().front();
 +
-+                mx::Dtype result_type = *utils::dtype::fromMlirType(
-+                    mlir::cast<mlir::ShapedType>(o.getResults()[1].getType())
-+                        .getElementType());
-+                return std::vector<mx::array>{mx::take(operand, indices, axis),
-+                                              mx::astype(indices, result_type)};
-+              }
-+              if (utils::isSumReduce(o)) {
-+                // std::cout << "SumReduce op: " << std::endl;
-+                return std::vector<mx::array>{
-+                    mx::sum(operand, static_cast<int>(o.getDimensions()[0]))};
-+              }
-+              if (utils::isMaxReduce(o)) {
-+                // std::cout << "MaxReduce op: " << std::endl;
-+                return std::vector<mx::array>{
-+                    mx::max(operand, static_cast<int>(o.getDimensions()[0]))};
-+              }
-+              if (utils::isMinReduce(o)) {
-+                // std::cout << "MinReduce op: " << std::endl;
-+                return std::vector<mx::array>{
-+                    mx::min(operand, static_cast<int>(o.getDimensions()[0]))};
-+              }
-+              // TODO(@cryptodeal): further cleanup module validation
-+              // done via call to `Compile` to check for valid reduce types.
++              switch (*utils::getReduceType(op, body_block)) {
++                case utils::ReduceType::ArgMax: {
++                  auto axis = static_cast<int>(o.getDimensions()[0]);
++                  auto indices = mx::argmax(operand, axis);
 +
-+              // For now, we assume `mx::any` if none of the above
++                  mx::Dtype result_type = *utils::dtype::fromMlirType(
++                      mlir::cast<mlir::ShapedType>(o.getResults()[1].getType())
++                          .getElementType());
++                  return std::vector<mx::array>{
++                      mx::take(operand, indices, axis),
++                      mx::astype(indices, result_type)};
++                }
++                case utils::ReduceType::Sum:
++                  return std::vector<mx::array>{
++                      mx::sum(operand, static_cast<int>(o.getDimensions()[0]))};
 +
-+              // if (isAnyReduce(o)) {
-+              // std::cout << "Unhandled reduce op: " << std::endl;
-+              return std::vector<mx::array>{
-+                  mx::any(operand, static_cast<int>(o.getDimensions()[0]))};
-+              //}
++                case utils::ReduceType::Max:
++                  return std::vector<mx::array>{
++                      mx::max(operand, static_cast<int>(o.getDimensions()[0]))};
++                case utils::ReduceType::Min:
++                  return std::vector<mx::array>{
++                      mx::min(operand, static_cast<int>(o.getDimensions()[0]))};
++                case utils::ReduceType::Any:
++                  return std::vector<mx::array>{
++                      mx::any(operand, static_cast<int>(o.getDimensions()[0]))};
++                default:
++                  __builtin_unreachable();
++              }
 +            })
 +            // Handle StableHLO tuple ops
 +            // .Case<mlir::stablehlo::GetTupleElementOp>([](auto o) {})
@@ -1727,8 +1737,9 @@ index 0000000000..70d9a620e1
 +                https://github.com/openxla/stablehlo/issues/2340
 +                https://github.com/openxla/stablehlo/pull/2283
 +            */
-+            .Case<mlir::stablehlo::DotGeneralOp>([&block_ctx, &inputs](auto o) {
-+              return compile::dotGeneral(o)(
++            .Case<mlir::stablehlo::DotGeneralOp>([&block_ctx, &inputs,
++                                                  &mlx_cache, &op](auto o) {
++              return mlx_cache[utils::getHashValue(&op)].call(
 +                  {utils::array::fromOperand(o.getLhs(), block_ctx, inputs),
 +                   utils::array::fromOperand(o.getRhs(), block_ctx, inputs)});
 +            })
@@ -1741,8 +1752,9 @@ index 0000000000..70d9a620e1
 +        */
 +            // .Case<mlir::stablehlo::FftOp>([](auto op) {})
 +            // TODO(@cryptodeal): definitely room for optimization here
-+            .Case<mlir::stablehlo::GatherOp>([&block_ctx, &inputs](auto o) {
-+              return compile::gather(o)(
++            .Case<mlir::stablehlo::GatherOp>([&block_ctx, &inputs, &mlx_cache,
++                                              &op](auto o) {
++              return mlx_cache[utils::getHashValue(&op)].call(
 +                  {utils::array::fromOperand(o.getOperand(), block_ctx, inputs),
 +                   utils::array::fromOperand(o.getStartIndices(), block_ctx,
 +                                             inputs)});
@@ -1763,22 +1775,23 @@ index 0000000000..70d9a620e1
 +                                       result_type.getShape().end()))};
 +            })
 +            // .Case<mlir::stablehlo::DynamicReshapeOp>([](auto o) {})
-+            .Case<mlir::stablehlo::ScatterOp>([&block_ctx, &inputs](auto o) {
-+              std::vector<mx::array> operands;
-+              for (auto val : o.getInputs()) {
-+                operands.emplace_back(
-+                    utils::array::fromOperand(val, block_ctx, inputs));
-+              }
-+              // Add updates to input list
-+              for (auto val : o.getUpdates()) {
-+                operands.emplace_back(
-+                    utils::array::fromOperand(val, block_ctx, inputs));
-+              }
-+              // Add scatter indices to input list
-+              operands.emplace_back(utils::array::fromOperand(
-+                  o.getScatterIndices(), block_ctx, inputs));
-+              return compile::scatter(o)(operands);
-+            })
++            .Case<mlir::stablehlo::ScatterOp>(
++                [&block_ctx, &inputs, &mlx_cache, &op](auto o) {
++                  std::vector<mx::array> operands;
++                  for (auto val : o.getInputs()) {
++                    operands.emplace_back(
++                        utils::array::fromOperand(val, block_ctx, inputs));
++                  }
++                  // Add updates to input list
++                  for (auto val : o.getUpdates()) {
++                    operands.emplace_back(
++                        utils::array::fromOperand(val, block_ctx, inputs));
++                  }
++                  // Add scatter indices to input list
++                  operands.emplace_back(utils::array::fromOperand(
++                      o.getScatterIndices(), block_ctx, inputs));
++                  return mlx_cache[utils::getHashValue(&op)].call(operands);
++                })
 +            .Case<mlir::stablehlo::SelectOp>([&block_ctx, &inputs](auto o) {
 +              return std::vector<mx::array>{mx::where(
 +                  utils::array::fromOperand(o.getOperand(0), block_ctx, inputs),
@@ -1810,8 +1823,9 @@ index 0000000000..70d9a620e1
 +            })
 +            // .Case<mlir::stablehlo::ReverseOp>([](auto o) {})
 +            // TODO (@cryptodeal): lots of room for optimization here
-+            .Case<mlir::stablehlo::PadOp>([&block_ctx, &inputs](auto o) {
-+              return compile::pad(o)(
++            .Case<mlir::stablehlo::PadOp>([&block_ctx, &inputs, &mlx_cache,
++                                           &op](auto o) {
++              return mlx_cache[utils::getHashValue(&op)].call(
 +                  {utils::array::fromOperand(o.getOperand(), block_ctx, inputs),
 +                   utils::array::fromOperand(o.getPaddingValue(), block_ctx,
 +                                             inputs)});
@@ -1890,9 +1904,38 @@ index 0000000000..70d9a620e1
 +  }
 +  return block_ctx.find(last_op)->second;
 +}
-+}  // namespace detail
 +
-+MlxFunc dotGeneral(mlir::stablehlo::DotGeneralOp op) {
++bool compileFunc(mlir::ModuleOp& mod, std::string func_name,
++                 std::unordered_map<uint64_t, utils::MlxFuncRef>& mlx_cache) {
++  auto func = mod.lookupSymbol<mlir::func::FuncOp>(func_name);
++  auto& cache_entry = mlx_cache[utils::getHashValue(func)];
++  if (cache_entry.isInitialized()) {
++    return true;
++  } else {
++    bool all_compiled = true;
++    auto& block = func.front();
++    auto call_ops = block.getOps<mlir::func::CallOp>();
++    for (mlir::func::CallOp call_op : call_ops) {
++      auto callee = mod.lookupSymbol<mlir::func::FuncOp>(call_op.getCallee());
++      if (!compileFunc(mod, callee.getName().str(), mlx_cache)) {
++        all_compiled = false;
++      }
++    }
++    if (all_compiled) {
++      MlxFunc fun = [&mod, &mlx_cache,
++                     func_name](const std::vector<mx::array>& inputs) {
++        return detail::func(mod, func_name, mlx_cache, inputs);
++      };
++      auto compiled_fun = detail::compile(std::move(fun));
++      cache_entry.initialize(std::move(compiled_fun.second),
++                             compiled_fun.first);
++    }
++    return all_compiled;
++  }
++}
++
++std::pair<std::uintptr_t, MlxFunc> dotGeneral(
++    mlir::stablehlo::DotGeneralOp op) {
 +  auto dot_dim_nums = op.getDotDimensionNumbers();
 +  std::vector<int32_t> lhs_batch_dims(
 +      dot_dim_nums.getLhsBatchingDimensions().begin(),
@@ -1968,10 +2011,10 @@ index 0000000000..70d9a620e1
 +    return std::vector<mx::array>{mx::einsum(
 +        lhs_subscript + "," + rhs_subscript + "->" + res_subscript, inputs)};
 +  };
-+  return mx::compile(std::move(fun));
++  return detail::compile(std::move(fun));
 +}
 +
-+MlxFunc gather(mlir::stablehlo::GatherOp op) {
++std::pair<std::uintptr_t, MlxFunc> gather(mlir::stablehlo::GatherOp op) {
 +  auto dim_nums = op.getDimensionNumbers();
 +  std::vector<int32_t> offset_dims(dim_nums.getOffsetDims().begin(),
 +                                   dim_nums.getOffsetDims().end());
@@ -2164,10 +2207,10 @@ index 0000000000..70d9a620e1
 +                   gather_axes, std::vector<int32_t>(operand.ndim(), 1)),
 +        result_shape)};
 +  };
-+  return mx::compile(fun);
++  return detail::compile(fun);
 +}
 +
-+MlxFunc pad(mlir::stablehlo::PadOp op) {
++std::pair<std::uintptr_t, MlxFunc> pad(mlir::stablehlo::PadOp op) {
 +  std::vector<int32_t> edge_pad_low(op.getEdgePaddingLow().begin(),
 +                                    op.getEdgePaddingLow().end());
 +  std::vector<int32_t> edge_pad_high(op.getEdgePaddingHigh().begin(),
@@ -2220,10 +2263,11 @@ index 0000000000..70d9a620e1
 +                   axes, std::vector<int32_t>(operand.ndim(), 1)),
 +        axes)};
 +  };
-+  return mx::compile(fun);
++  return detail::compile(std::move(fun));
 +}
 +
-+MlxFunc scatter(mlir::stablehlo::ScatterOp op) {
++std::pair<std::uintptr_t, MlxFunc> scatter(mlir::stablehlo::ScatterOp op,
++                                           utils::ScatterType scatter_type) {
 +  // Get scatter dimension numbers
 +  auto scatter_dim_nums = op.getScatterDimensionNumbers();
 +  auto index_vector_dim = scatter_dim_nums.getIndexVectorDim();
@@ -2242,14 +2286,8 @@ index 0000000000..70d9a620e1
 +  std::vector<int32_t> update_window_dims(
 +      scatter_dim_nums.getUpdateWindowDims().begin(),
 +      scatter_dim_nums.getUpdateWindowDims().end());
-+  mlir::Block& update_computation = op.getUpdateComputation().front();
-+  // TODO(@cryptodeal): need to experiment to see how `computeHash`
++  // TODO(@cryptodeal): need to experiment to see how `getHashValue`
 +  // handles hashing `update_computation` property.
-+  utils::ScatterType scatter_type = *utils::getScatterType(update_computation);
-+
-+  // mlir::Block& update_computation = o.getUpdateComputation().front();
-+  // utils::ScatterType scatter_type = *getScatterType(update_computation);
-+
 +  MlxFunc fun = [index_vector_dim,
 +                 input_batching_dims = std::move(input_batching_dims),
 +                 inserted_window_dims = std::move(inserted_window_dims),
@@ -2420,55 +2458,282 @@ index 0000000000..70d9a620e1
 +    }
 +    return res;
 +  };
-+  return mx::compile(fun);
++  return detail::compile(std::move(fun));
++}
++}  // namespace detail
++
++absl::StatusOr<std::unordered_map<uint64_t, utils::MlxFuncRef>>
++validateAndPrecompile(mlir::ModuleOp& mod) {
++  std::unordered_map<uint64_t, utils::MlxFuncRef> mlx_cache;
++  absl::Status status;
++  // TODO: some ops should have additional checks (e.g. `stablehlo::ReduceOp`,
++  // `stablehlo::SortOp`, `stablehlo::ScatterOp`, etc.) where we need additional
++  // checks at compile time to ensure that we're correctly mapping to the
++  // corresponding MLX op.
++  mod.walk([&mlx_cache, &status](mlir::Operation* op) {
++    // Series of checks to ensure we support the module.
++    // For some ops, we have to validate that the specific
++    // inner function (e.g. `comparator` for `stablehlo::SortOp`)
++    // is supported. Pre-compile complex ops (e.g. `stablehlo::DotGeneralOp`),
++    // which require chaining multiple MLX ops together in order
++    // to implement the op per StableHLO spec.
++    return llvm::TypeSwitch<mlir::Operation*, mlir::WalkResult>(op)
++        // Verify that we support the requested `sort` op
++        .Case<mlir::stablehlo::SortOp>([&status, &op](auto o) {
++          if (!utils::validateTypeRange(o->getOperands()) ||
++              !utils::validateTypeRange(o->getResults())) {
++            status = absl::UnimplementedError(absl::StrCat(
++                "Unsupported type: ", mlir::stablehlo::ToString(op)));
++            return mlir::WalkResult::interrupt();
++          }
++          mlir::Block& comparator = o.getComparator().front();
++          auto maybe_sort_info = utils::getSortInfo(comparator);
++          if (!maybe_sort_info.ok()) {
++            status = maybe_sort_info.status();
++            return mlir::WalkResult::interrupt();
++          } else
++            return mlir::WalkResult::advance();
++        })
++        // Verify that we support the requested `reduce` op
++        .Case<mlir::stablehlo::ReduceOp>([&status, &op](auto o) {
++          if (!utils::validateTypeRange(o->getOperands()) ||
++              !utils::validateTypeRange(o->getResults())) {
++            status = absl::UnimplementedError(absl::StrCat(
++                "Unsupported type: ", mlir::stablehlo::ToString(op)));
++            return mlir::WalkResult::interrupt();
++          }
++          mlir::Block& body_block = o.getBody().front();
++          auto maybe_reduce_type = utils::getReduceType(*op, body_block);
++          if (!maybe_reduce_type.ok()) {
++            status = maybe_reduce_type.status();
++            return mlir::WalkResult::interrupt();
++          } else
++            return mlir::WalkResult::advance();
++        })
++        // Validate, precompile, and cache `dot_general` op
++        .Case<mlir::stablehlo::DotGeneralOp>(
++            [&status, &mlx_cache, &op](auto o) {
++              if (!utils::validateTypeRange(o->getOperands()) ||
++                  !utils::validateTypeRange(o->getResults())) {
++                status = absl::UnimplementedError(absl::StrCat(
++                    "Unsupported type: ", mlir::stablehlo::ToString(op)));
++                return mlir::WalkResult::interrupt();
++              }
++              auto hash = utils::getHashValue(op);
++              auto& cache_entry = mlx_cache[hash];
++              if (!cache_entry.isInitialized()) {
++                // std::cout << "Compiling DotGeneralOp: " <<
++                // std::to_string(hash)
++                //           << std::endl
++                //           << mlir::stablehlo::ToString(op).c_str() <<
++                //           std::endl;
++                auto compiled_dot = detail::dotGeneral(o);
++                cache_entry.initialize(std::move(compiled_dot.second),
++                                       compiled_dot.first);
++              }
++              return mlir::WalkResult::advance();
++            })
++        // Verify that we support the requested `scatter` op;
++        // hash this instance of the op, precompile and cache
++        // accordingly.
++        .Case<mlir::stablehlo::ScatterOp>([&mlx_cache, &op, &status](auto o) {
++          if (!utils::validateTypeRange(o->getOperands()) ||
++              !utils::validateTypeRange(o->getResults())) {
++            status = absl::UnimplementedError(absl::StrCat(
++                "Unsupported type: ", mlir::stablehlo::ToString(op)));
++            return mlir::WalkResult::interrupt();
++          }
++          mlir::Block& update_computation = o.getUpdateComputation().front();
++          auto hash = utils::getHashValue(op);
++          auto& cache_entry = mlx_cache[hash];
++          if (!cache_entry.isInitialized()) {
++            // only need to validate if we've not already encountered
++            auto maybe_scatter_type = utils::getScatterType(update_computation);
++            if (!maybe_scatter_type.ok()) {
++              status = maybe_scatter_type.status();
++              return mlir::WalkResult::interrupt();
++            }
++            auto compiled_scatter = detail::scatter(o, *maybe_scatter_type);
++            cache_entry.initialize(std::move(compiled_scatter.second),
++                                   compiled_scatter.first);
++          }
++          return mlir::WalkResult::advance();
++        })
++        // Validate, precompile, and cache `gather` op
++        .Case<mlir::stablehlo::GatherOp>([&status, &mlx_cache, &op](auto o) {
++          if (!utils::validateTypeRange(o->getOperands()) ||
++              !utils::validateTypeRange(o->getResults())) {
++            status = absl::UnimplementedError(absl::StrCat(
++                "Unsupported type: ", mlir::stablehlo::ToString(op)));
++            return mlir::WalkResult::interrupt();
++          }
++          auto hash = utils::getHashValue(op);
++          auto& cache_entry = mlx_cache[hash];
++          if (!cache_entry.isInitialized()) {
++            auto compiled_gather = detail::gather(o);
++            cache_entry.initialize(std::move(compiled_gather.second),
++                                   compiled_gather.first);
++          }
++          return mlir::WalkResult::advance();
++        })
++        // Validate, precompile, and cache `pad` op
++        .Case<mlir::stablehlo::PadOp>([&status, &mlx_cache, &op](auto o) {
++          if (!utils::validateTypeRange(o->getOperands()) ||
++              !utils::validateTypeRange(o->getResults())) {
++            status = absl::UnimplementedError(absl::StrCat(
++                "Unsupported type: ", mlir::stablehlo::ToString(op)));
++            return mlir::WalkResult::interrupt();
++          }
++          auto hash = utils::getHashValue(op);
++          auto& cache_entry = mlx_cache[hash];
++          if (!cache_entry.isInitialized()) {
++            auto compiled_pad = detail::pad(o);
++            cache_entry.initialize(std::move(compiled_pad.second),
++                                   compiled_pad.first);
++          }
++          return mlir::WalkResult::advance();
++        })
++        .Case<mlir::ModuleOp, mlir::func::ReturnOp, mlir::stablehlo::ReturnOp,
++              mlir::func::CallOp, mlir::func::FuncOp,
++              mlir::stablehlo::ConstantOp, mlir::stablehlo::IotaOp,
++              mlir::stablehlo::AbsOp, mlir::stablehlo::CbrtOp,
++              mlir::stablehlo::CeilOp, mlir::stablehlo::ConvertOp,
++              mlir::stablehlo::CosineOp, mlir::stablehlo::ExpOp,
++              mlir::stablehlo::Expm1Op, mlir::stablehlo::FloorOp,
++              mlir::stablehlo::ImagOp, mlir::stablehlo::IsFiniteOp,
++              mlir::stablehlo::LogOp, mlir::stablehlo::Log1pOp,
++              mlir::stablehlo::LogisticOp, mlir::stablehlo::NotOp,
++              mlir::stablehlo::NegOp, mlir::stablehlo::RealOp,
++              mlir::stablehlo::RoundNearestEvenOp, mlir::stablehlo::RsqrtOp,
++              mlir::stablehlo::SignOp, mlir::stablehlo::SineOp,
++              mlir::stablehlo::SqrtOp, mlir::stablehlo::TanOp,
++              mlir::stablehlo::TanhOp, mlir::stablehlo::AddOp,
++              mlir::stablehlo::Atan2Op, mlir::stablehlo::DivOp,
++              mlir::stablehlo::MaxOp, mlir::stablehlo::MinOp,
++              mlir::stablehlo::MulOp, mlir::stablehlo::PowOp,
++              mlir::stablehlo::RemOp, mlir::stablehlo::ShiftLeftOp,
++              mlir::stablehlo::ShiftRightArithmeticOp,
++              mlir::stablehlo::ShiftRightLogicalOp, mlir::stablehlo::SubtractOp,
++              mlir::stablehlo::AndOp, mlir::stablehlo::OrOp,
++              mlir::stablehlo::XorOp, mlir::stablehlo::CompareOp,
++              mlir::stablehlo::SliceOp, mlir::stablehlo::DynamicSliceOp,
++              mlir::stablehlo::DynamicUpdateSliceOp,
++              mlir::stablehlo::BitcastConvertOp,
++              mlir::stablehlo::BroadcastInDimOp, mlir::stablehlo::ConcatenateOp,
++              mlir::stablehlo::GetDimensionSizeOp, mlir::stablehlo::ReshapeOp,
++              mlir::stablehlo::SelectOp, mlir::stablehlo::TransposeOp>(
++            [&status, &op](auto o) {
++              // Validate all operand and result types are compatible with mlx
++              if (!utils::validateTypeRange(o->getOperands()) ||
++                  !utils::validateTypeRange(o->getResults())) {
++                status = absl::UnimplementedError(absl::StrCat(
++                    "Unsupported type: ", mlir::stablehlo::ToString(op)));
++                return mlir::WalkResult::interrupt();
++              }
++              return mlir::WalkResult::advance();
++            })
++        // TODO(@cryptodeal): These ops were supported prior to `mlx::compile`
++        // need to modify the implementation to ensure no use of `mlx::eval` and
++        // ensure that `mlx::random::key` is being propogated correctly.
++        .Default([&status, &op](auto o) {
++          status = absl::UnimplementedError(
++              absl::StrCat("Unsupported op: ", mlir::stablehlo::ToString(op)));
++          return mlir::WalkResult::interrupt();
++        });
++  });
++
++  // If we encounter an unsupported op, type, etc., clear
++  // the compilation cache and return the corresponding status
++  if (!status.ok()) {
++    mlx_cache.clear();
++    return status;
++  }
++
++  return mlx_cache;
 +}
 +
-+MlxFunc func(mlir::ModuleOp mod, mlir::func::FuncOp op) {
-+  MlxFunc fun = [func_info = std::shared_ptr<utils::FuncInfo>(
-+                     new utils::FuncInfo(mod, op.getName().str()))](
-+                    const std::vector<mx::array>& inputs) mutable {
-+    auto mod = func_info->mod_.get();
-+    auto op = mod.lookupSymbol<mlir::func::FuncOp>(func_info->name_);
-+    return detail::func(mod, op, inputs);
++utils::MlxFuncRef* compileModule(
++    mlir::ModuleOp& mod,
++    std::unordered_map<uint64_t, utils::MlxFuncRef>& mlx_cache) {
++  auto op = mod.lookupSymbol<mlir::func::FuncOp>("main");
++
++  // compile inner function calls
++  auto& main_block = op.getBody();
++  while (true) {
++    auto call_ops = main_block.getOps<mlir::func::CallOp>();
++    bool all_compiled = true;
++    for (mlir::func::CallOp call_op : call_ops) {
++      auto callee = mod.lookupSymbol<mlir::func::FuncOp>(call_op.getCallee());
++
++      if (!detail::compileFunc(mod, callee.getName().str(), mlx_cache)) {
++        all_compiled = false;
++      }
++    }
++    if (all_compiled) break;
++  }
++
++  MlxFunc fun = [&mod, &mlx_cache](const std::vector<mx::array>& inputs) {
++    return detail::func(mod, "main", mlx_cache, inputs);
 +  };
-+  return mx::compile(std::move(fun));
++  auto hash = utils::getHashValue(op);
++  auto compiled_mod = detail::compile(fun);
++  auto& cache_entry = mlx_cache[hash];
++  cache_entry.initialize(std::move(compiled_mod.second), compiled_mod.first);
++
++  // force compilation by running w zeroed inputs
++  // input sizes remain constant, so we never modify
++  // mlx compiler state after initial compilation
++  std::vector<mx::array> tmp_inputs;
++  for (auto arg : main_block.getArguments()) {
++    auto shaped_type = mlir::cast<mlir::ShapedType>(arg.getType());
++    tmp_inputs.push_back(
++        mx::zeros(std::vector<int32_t>(shaped_type.getShape().begin(),
++                                       shaped_type.getShape().end()),
++                  *utils::dtype::fromMlirType(shaped_type.getElementType())));
++  }
++
++  cache_entry.call(tmp_inputs);
++  return &cache_entry;
 +}
 +
 +}  // namespace compile
 \ No newline at end of file
 diff --git a/xla/pjrt/plugin/mlx/compile.h b/xla/pjrt/plugin/mlx/compile.h
 new file mode 100644
-index 0000000000..af5cc7e342
+index 0000000000..d8ce0c1256
 --- /dev/null
 +++ b/xla/pjrt/plugin/mlx/compile.h
-@@ -0,0 +1,30 @@
+@@ -0,0 +1,33 @@
 +#ifndef XLA_PJRT_PLUGIN_STABLEHLO_MLX_COMPILE_H_
 +#define XLA_PJRT_PLUGIN_STABLEHLO_MLX_COMPILE_H_
 +
++#include <functional>
++#include <unordered_map>
++#include <utility>
 +#include <vector>
 +
++#include "absl/status/statusor.h"
 +#include "mlx/mlx.h"
 +#include "mlir/IR/Operation.h"
 +
 +#include "stablehlo/reference/Api.h"
 +#include "mlir/IR/Operation.h"
-+#include "mlir/Dialect/Func/IR/FuncOps.h"
 +#include "xla/pjrt/plugin/mlx/utils.h"
 +
 +namespace mx = mlx::core;
 +
 +namespace compile {
 +namespace detail {
-+std::vector<mx::array> cbrt(const std::vector<mx::array>& inputs);
-+std::vector<mx::array> func(mlir::ModuleOp mod, mlir::func::FuncOp op,
-+                            const std::vector<mx::array>& inputs,
-+                            bool recursive_compile = true);
++std::pair<std::uintptr_t, MlxFunc> compile(
++    std::function<std::vector<mx::array>(const std::vector<mx::array>&)> fun,
++    bool shapeless = false);
 +}  // namespace detail
-+MlxFunc dotGeneral(mlir::stablehlo::DotGeneralOp op);
-+MlxFunc gather(mlir::stablehlo::GatherOp op);
-+MlxFunc pad(mlir::stablehlo::PadOp op);
-+MlxFunc scatter(mlir::stablehlo::ScatterOp op);
-+MlxFunc func(mlir::ModuleOp mod, mlir::func::FuncOp op);
++
++absl::StatusOr<std::unordered_map<uint64_t, utils::MlxFuncRef>>
++validateAndPrecompile(mlir::ModuleOp& mod);
++utils::MlxFuncRef* compileModule(
++    mlir::ModuleOp& mod,
++    std::unordered_map<uint64_t, utils::MlxFuncRef>& mlx_cache);
 +}  // namespace compile
 +
 +#endif  // XLA_PJRT_PLUGIN_STABLEHLO_MLX_COMPILE_H_
@@ -2738,10 +3003,10 @@ index 0000000000..ef42968a3a
 \ No newline at end of file
 diff --git a/xla/pjrt/plugin/mlx/executable.cc b/xla/pjrt/plugin/mlx/executable.cc
 new file mode 100644
-index 0000000000..ec612eca89
+index 0000000000..b3dd63d442
 --- /dev/null
 +++ b/xla/pjrt/plugin/mlx/executable.cc
-@@ -0,0 +1,507 @@
+@@ -0,0 +1,409 @@
 +/* Copyright 2024 The OpenXLA Authors.
 +Licensed under the Apache License, Version 2.0 (the "License");
 +you may not use this file except in compliance with the License.
@@ -2771,7 +3036,6 @@ index 0000000000..ec612eca89
 +
 +// TODO(@cryptodeal): might need to update `BUILD`
 +#include "mlir/IR/Visitors.h"
-+#include "mlx/mlx.h"
 +#include "absl/log/log.h"
 +#include "absl/status/status.h"
 +#include "absl/status/statusor.h"
@@ -2787,6 +3051,8 @@ index 0000000000..ec612eca89
 +#include "mlir/Interfaces/DataLayoutInterfaces.h"
 +#include "mlir/Pass/PassManager.h"
 +#include "mlir/Support/LLVM.h"
++#include "mlx/compile_impl.h"
++#include "mlx/mlx.h"
 +#include "stablehlo/reference/Api.h"
 +#include "stablehlo/transforms/optimization/Passes.h"
 +#include "xla/hlo/translate/stablehlo.h"
@@ -2808,6 +3074,7 @@ index 0000000000..ec612eca89
 +#define DEBUG_TYPE "stablehlo-pjrt"
 +
 +namespace mx = mlx::core;
++
 +namespace mlir::stablehlo {
 +
 +#define UNIMPLEMENTED(name) \
@@ -2862,143 +3129,23 @@ index 0000000000..ec612eca89
 +  return success();
 +}
 +
-+absl::Status validateModule(ModuleOp mod) {
-+  absl::Status status;
-+  // TODO: some ops should have additional checks (e.g. `stablehlo::ReduceOp`,
-+  // `stablehlo::SortOp`, `stablehlo::ScatterOp`, etc.) where we need additional
-+  // checks at compile time to ensure that we're correctly mapping to the
-+  // corresponding MLX op.
-+  mod.walk([&status](Operation* op) {
-+    // Series of checks to ensure we support the module
-+    return llvm::TypeSwitch<Operation*, WalkResult>(op)
-+        .Case<ModuleOp, func::ReturnOp, stablehlo::ReturnOp, func::CallOp,
-+              func::FuncOp, stablehlo::ConstantOp, stablehlo::IotaOp,
-+              stablehlo::AbsOp, stablehlo::CbrtOp, stablehlo::CeilOp,
-+              stablehlo::ConvertOp, stablehlo::CosineOp, stablehlo::ExpOp,
-+              stablehlo::Expm1Op, stablehlo::FloorOp, stablehlo::ImagOp,
-+              stablehlo::IsFiniteOp, stablehlo::LogOp, stablehlo::Log1pOp,
-+              stablehlo::LogisticOp, stablehlo::NotOp, stablehlo::NegOp,
-+              stablehlo::RealOp, stablehlo::RoundNearestEvenOp,
-+              stablehlo::RsqrtOp, stablehlo::SignOp, stablehlo::SineOp,
-+              stablehlo::SqrtOp, stablehlo::TanOp, stablehlo::TanhOp,
-+              stablehlo::AddOp, stablehlo::Atan2Op, stablehlo::DivOp,
-+              stablehlo::MaxOp, stablehlo::MinOp, stablehlo::MulOp,
-+              stablehlo::PowOp, stablehlo::RemOp, stablehlo::ShiftLeftOp,
-+              stablehlo::ShiftRightArithmeticOp, stablehlo::ShiftRightLogicalOp,
-+              stablehlo::SubtractOp, stablehlo::AndOp, stablehlo::OrOp,
-+              stablehlo::XorOp, stablehlo::ReduceOp, stablehlo::CompareOp,
-+              stablehlo::SliceOp, stablehlo::DynamicSliceOp,
-+              stablehlo::DynamicUpdateSliceOp, stablehlo::BitcastConvertOp,
-+              stablehlo::BroadcastInDimOp, stablehlo::ConcatenateOp,
-+              stablehlo::DotGeneralOp, stablehlo::GatherOp,
-+              stablehlo::GetDimensionSizeOp, stablehlo::ReshapeOp,
-+              stablehlo::ScatterOp, stablehlo::SelectOp, stablehlo::SortOp,
-+              stablehlo::PadOp, stablehlo::TransposeOp>([&status, &op](auto o) {
-+          // Validate all input types are compatible with mlx
-+          for (auto operand : o->getOperands()) {
-+            auto primitive_type = xla::ConvertMlirTypeToPrimitiveType(
-+                mlir::cast<ShapedType>(operand.getType()).getElementType());
-+            switch (primitive_type) {
-+              case xla::PrimitiveType::PRED:
-+              case xla::PrimitiveType::U8:
-+              case xla::PrimitiveType::S8:
-+              case xla::PrimitiveType::U16:
-+              case xla::PrimitiveType::S16:
-+              case xla::PrimitiveType::U32:
-+              case xla::PrimitiveType::S32:
-+              case xla::PrimitiveType::U64:
-+              case xla::PrimitiveType::S64:
-+              case xla::PrimitiveType::F16:
-+              case xla::PrimitiveType::BF16:
-+              case xla::PrimitiveType::F32:
-+              case xla::PrimitiveType::C64:
-+                break;
-+              default: {
-+                std::cout << "Unsupported type: "
-+                          << xla::PrimitiveType_Name(primitive_type).c_str()
-+                          << std::endl;
-+                status = absl::UnimplementedError(
-+                    absl::StrCat("Unsupported type: ", ToString(op)));
-+                return WalkResult::interrupt();
-+              }
-+            }
-+          }
-+
-+          // Validate all result types are compatible with mlx
-+          for (auto result : o->getResults()) {
-+            auto primitive_type = xla::ConvertMlirTypeToPrimitiveType(
-+                mlir::cast<ShapedType>(result.getType()).getElementType());
-+            switch (primitive_type) {
-+              case xla::PrimitiveType::PRED:
-+              case xla::PrimitiveType::U8:
-+              case xla::PrimitiveType::S8:
-+              case xla::PrimitiveType::U16:
-+              case xla::PrimitiveType::S16:
-+              case xla::PrimitiveType::U32:
-+              case xla::PrimitiveType::S32:
-+              case xla::PrimitiveType::U64:
-+              case xla::PrimitiveType::S64:
-+              case xla::PrimitiveType::F16:
-+              case xla::PrimitiveType::BF16:
-+              case xla::PrimitiveType::F32:
-+              case xla::PrimitiveType::C64:
-+                break;
-+              default: {
-+                std::cout << "Unsupported type: "
-+                          << xla::PrimitiveType_Name(primitive_type).c_str()
-+                          << std::endl;
-+                status = absl::UnimplementedError(
-+                    absl::StrCat("Unsupported type: ", ToString(op)));
-+                return WalkResult::interrupt();
-+              }
-+            }
-+          }
-+          return mlir::WalkResult::advance();
-+        })
-+        // TODO(@cryptodeal): These ops were supported prior to `mlx::compile`
-+        // need to modify the implementation to ensure no use of `mlx::eval` and
-+        // ensure that `mlx::random::key` is being propogated correctly.
-+        .Default([&status, &op](auto o) {
-+          status = absl::UnimplementedError(
-+              absl::StrCat("Unsupported op: ", ToString(op)));
-+          return WalkResult::interrupt();
-+        });
-+  });
-+  return status;
-+}
-+
 +class MlirLoadedExecutable : public PjRtLoadedExecutable {
 + public:
-+  MlirLoadedExecutable(ModuleOp module, DeviceAssignment assignment,
-+                       absl::Span<PjRtDevice* const> devices,
-+                       PjRtClient* client)
++  MlirLoadedExecutable(
++      ModuleOp module,
++      std::unordered_map<uint64_t, utils::MlxFuncRef> mlx_cache,
++      DeviceAssignment assignment, absl::Span<PjRtDevice* const> devices,
++      PjRtClient* client)
 +      : PjRtLoadedExecutable(),
 +        name_("MlirLoadedExecutable"),
 +        assignment_(assignment),
 +        devices_(client->devices()),
 +        client_(client),
 +        context_(),
++        mlx_cache_(std::move(mlx_cache)),
 +        module_(cloneIntoContext(module, context_)) {
 +    // TRACE_ME_MEMBER;
-+
-+    auto main = module.lookupSymbol<mlir::func::FuncOp>("main");
-+    // std::cout << "Compiling module: " << std::to_string(getHashValue(main))
-+    //           << std::endl
-+    //           << std::endl;
-+    // std::cout << ToString(module_.get()).c_str() << std::endl << std::endl;
-+    compiled_module_ = compile::func(module_.get(), main);
-+
-+    auto& main_block = main.front();
-+    // force compilation by running w zeroed inputs
-+    std::vector<mx::array> tmp_inputs;
-+    for (auto arg : main_block.getArguments()) {
-+      auto shaped_type = mlir::cast<ShapedType>(arg.getType());
-+      tmp_inputs.push_back(
-+          mx::zeros(std::vector<int32_t>(shaped_type.getShape().begin(),
-+                                         shaped_type.getShape().end()),
-+                    *utils::dtype::fromMlirType(shaped_type.getElementType())));
-+    }
-+    compiled_module_(tmp_inputs);
++    compiled_module_ = compile::compileModule(module, mlx_cache_);
 +  }
 +
 +  static absl::StatusOr<std::unique_ptr<PjRtLoadedExecutable>> CompileAndLoad(
@@ -3016,9 +3163,15 @@ index 0000000000..ec612eca89
 +      return diagnostic_handler.ConsumeStatus();
 +    }
 +
-+    auto module_status = validateModule(module);
-+    if (!module_status.ok()) {
-+      return module_status;
++    // Lock mlx mutex whenever a thread modifies the
++    // mlx compilation cache state; since we force compilation
++    // by evaluating with zeroed inputs, the compilation cache
++    // will not be modified by this `Executable` until it is destroyed.
++    std::lock_guard<std::mutex> lock(mx::detail::compilation_mutex);
++
++    auto maybe_mlx_cache = compile::validateAndPrecompile(module);
++    if (!maybe_mlx_cache.ok()) {
++      return maybe_mlx_cache.status();
 +    }
 +
 +    // auto device_info = mx::metal::device_info();
@@ -3028,10 +3181,9 @@ index 0000000000..ec612eca89
 +    //   std::cout << std::endl;
 +    // }
 +
-+    auto executable = std::make_unique<MlirLoadedExecutable>(module, assignment,
-+                                                             devices, client);
-+
-+    return executable;
++    return std::make_unique<MlirLoadedExecutable>(
++        module, std::move(maybe_mlx_cache).value(), assignment, devices,
++        client);
 +  }
 +
 +  PjRtClient* client() const override {
@@ -3072,7 +3224,15 @@ index 0000000000..ec612eca89
 +      TF_ASSIGN_OR_RETURN(mx::array input, GetArrayFromBuffer(buffer));
 +      inputs.push_back(std::move(input));
 +    }
-+    auto mlx_res = compiled_module_(inputs);
++    std::vector<mx::array> mlx_res;
++    {
++      // Lock mlx compilation mutex while calling compiled
++      // functions, since it performs a lookup on MLX compilation
++      // cache, which might be modified by other threads.
++      std::lock_guard<std::mutex> lock(mx::detail::compilation_mutex);
++      mlx_res = compiled_module_->call(inputs);
++    }
++    // TODO (@cryptodeal): figure out best practice for returning strided data
 +    for (auto i = 0; i < mlx_res.size(); ++i) {
 +      mlx_res[i] = mx::contiguous(mlx_res[i]);
 +    }
@@ -3164,6 +3324,12 @@ index 0000000000..ec612eca89
 +
 +  void Delete() override {
 +    // TRACE_ME_MEMBER;
++    {
++      // lock mutex and clear compiled functions owned by this executable
++      std::lock_guard<std::mutex> lock(mx::detail::compilation_mutex);
++      mlx_cache_.clear();
++      compiled_module_ = nullptr;
++    }
 +    module_.release();
 +    module_ = nullptr;
 +  }
@@ -3224,7 +3390,8 @@ index 0000000000..ec612eca89
 +  absl::Span<PjRtDevice* const> devices_;
 +  PjRtClient* client_;
 +  // MLX compilation context
-+  MlxFunc compiled_module_;
++  std::unordered_map<uint64_t, utils::MlxFuncRef> mlx_cache_;
++  utils::MlxFuncRef* compiled_module_ = nullptr;
 +
 +  // MLIR
 +  MLIRContext context_;
@@ -3251,10 +3418,10 @@ index 0000000000..ec612eca89
 +}  // namespace mlir::stablehlo
 diff --git a/xla/pjrt/plugin/mlx/executable.h b/xla/pjrt/plugin/mlx/executable.h
 new file mode 100644
-index 0000000000..d970cde59d
+index 0000000000..cc11793e50
 --- /dev/null
 +++ b/xla/pjrt/plugin/mlx/executable.h
-@@ -0,0 +1,33 @@
+@@ -0,0 +1,36 @@
 +/* Copyright 2024 The OpenXLA Authors.
 +Licensed under the Apache License, Version 2.0 (the "License");
 +you may not use this file except in compliance with the License.
@@ -3272,10 +3439,13 @@ index 0000000000..d970cde59d
 +#include <memory>
 +
 +#include "mlir/IR/BuiltinOps.h"
++#include "mlx/mlx.h"
 +#include "xla/hlo/builder/xla_computation.h"
 +#include "xla/pjrt/pjrt_client.h"
++#include "xla/pjrt/plugin/mlx/utils.h"
 +#include "xla/service/computation_placer.h"
 +
++namespace mx = mlx::core;
 +namespace mlir::stablehlo {
 +
 +absl::StatusOr<std::unique_ptr<xla::PjRtLoadedExecutable>> StablehloMlxCompile(
@@ -3476,10 +3646,10 @@ index 0000000000..d56a22565f
 \ No newline at end of file
 diff --git a/xla/pjrt/plugin/mlx/utils.cc b/xla/pjrt/plugin/mlx/utils.cc
 new file mode 100644
-index 0000000000..384c5f1a4d
+index 0000000000..643a842d46
 --- /dev/null
 +++ b/xla/pjrt/plugin/mlx/utils.cc
-@@ -0,0 +1,632 @@
+@@ -0,0 +1,692 @@
 +#include <optional>
 +#include <string>
 +#include <tuple>
@@ -3526,6 +3696,182 @@ index 0000000000..384c5f1a4d
 +}
 +
 +namespace utils {
++namespace detail {
++// Returns true if the given `ReduceOp` matches
++// `zml.Tensor.argMax` op implementation.
++bool isArgMaxReduce(mlir::Block& body_block) {
++  unsigned op_count = 0;
++  // TODO (@cryptodeal): This is a lazy verification; maybe check operands
++  // for each operation in the block.
++  for (auto& op : body_block.getOperations()) {
++    switch (op_count) {
++      case 0: {
++        auto compare_op = llvm::dyn_cast<mlir::stablehlo::CompareOp>(op);
++        if (compare_op && compare_op.getComparisonDirection() ==
++                              mlir::stablehlo::ComparisonDirection::GT) {
++          break;
++        } else
++          return false;
++      }
++      case 1: {
++        auto compare_op = llvm::dyn_cast<mlir::stablehlo::CompareOp>(op);
++        if (compare_op && compare_op.getComparisonDirection() ==
++                              mlir::stablehlo::ComparisonDirection::NE) {
++          break;
++        } else
++          return false;
++      }
++      case 2:
++        if (llvm::dyn_cast<mlir::stablehlo::OrOp>(op)) {
++          break;
++        } else
++          return false;
++      case 3:
++        if (llvm::dyn_cast<mlir::stablehlo::SelectOp>(op)) {
++          break;
++        } else
++          return false;
++      case 4: {
++        auto compare_op = llvm::dyn_cast<mlir::stablehlo::CompareOp>(op);
++        if (compare_op && compare_op.getComparisonDirection() ==
++                              mlir::stablehlo::ComparisonDirection::EQ) {
++          break;
++        } else
++          return false;
++      }
++      case 5: {
++        auto compare_op = llvm::dyn_cast<mlir::stablehlo::CompareOp>(op);
++        if (compare_op && compare_op.getComparisonDirection() ==
++                              mlir::stablehlo::ComparisonDirection::LT) {
++          break;
++        } else
++          return false;
++      }
++      case 6:
++        if (llvm::dyn_cast<mlir::stablehlo::AndOp>(op)) {
++          break;
++        } else
++          return false;
++      case 7:
++        if (llvm::dyn_cast<mlir::stablehlo::OrOp>(op)) {
++          break;
++        } else
++          return false;
++      case 8:
++        if (llvm::dyn_cast<mlir::stablehlo::SelectOp>(op)) {
++          break;
++        } else
++          return false;
++      case 9:
++        if (llvm::dyn_cast<mlir::stablehlo::ReturnOp>(op)) {
++          break;
++        } else
++          return false;
++      default:
++        return false;
++    }
++    op_count++;
++  }
++  return true;
++}
++
++// Returns true if the given `ReduceOp` matches
++// `zml.Tensor.sum` op implementation.
++bool isSumReduce(mlir::Block& body_block) {
++  unsigned op_count = 0;
++  // TODO (@cryptodeal): This is a lazy verification; maybe check operands
++  // for each operation in the block.
++  for (auto& op : body_block.getOperations()) {
++    switch (op_count) {
++      case 0:
++        if (llvm::dyn_cast<mlir::stablehlo::AddOp>(op)) {
++          break;
++        } else
++          return false;
++      case 1:
++        if (llvm::dyn_cast<mlir::stablehlo::ReturnOp>(op)) {
++          break;
++        } else
++          return false;
++    }
++    op_count++;
++  }
++  return true;
++}
++
++// Returns true if the given `ReduceOp` matches
++// `zml.Tensor.max` op implementation.
++bool isMaxReduce(mlir::Block& body_block) {
++  unsigned op_count = 0;
++  // TODO (@cryptodeal): This is a lazy verification; maybe check operands
++  // for each operation in the block.
++  for (auto& op : body_block.getOperations()) {
++    switch (op_count) {
++      case 0:
++        if (llvm::dyn_cast<mlir::stablehlo::MaxOp>(op)) {
++          break;
++        } else
++          return false;
++      case 1:
++        if (llvm::dyn_cast<mlir::stablehlo::ReturnOp>(op)) {
++          break;
++        } else
++          return false;
++    }
++    op_count++;
++  }
++  return true;
++}
++
++// Returns true if the given `ReduceOp` matches
++// `zml.Tensor.max` op implementation.
++bool isMinReduce(mlir::Block& body_block) {
++  unsigned op_count = 0;
++  // TODO (@cryptodeal): This is a lazy verification; maybe check operands
++  // for each operation in the block.
++  for (auto& op : body_block.getOperations()) {
++    switch (op_count) {
++      case 0:
++        if (llvm::dyn_cast<mlir::stablehlo::MinOp>(op)) {
++          break;
++        } else
++          return false;
++      case 1:
++        if (llvm::dyn_cast<mlir::stablehlo::ReturnOp>(op)) {
++          break;
++        } else
++          return false;
++    }
++    op_count++;
++  }
++  return true;
++}
++
++// Returns true if the given `ReduceOp` matches
++// `zml.Tensor.any` op implementation.
++bool isAnyReduce(mlir::Block& body_block) {
++  unsigned op_count = 0;
++  // TODO (@cryptodeal): This is a lazy verification; maybe check operands
++  // for each operation in the block.
++  for (auto& op : body_block.getOperations()) {
++    switch (op_count) {
++      case 0:
++        if (llvm::dyn_cast<mlir::stablehlo::OrOp>(op)) {
++          break;
++        } else
++          return false;
++      case 1:
++        if (llvm::dyn_cast<mlir::stablehlo::ReturnOp>(op)) {
++          break;
++        } else
++          return false;
++    }
++    op_count++;
++  }
++  return true;
++}
++
++}  // namespace detail
 +
 +namespace dtype {
 +xla::PrimitiveType asXlaPrimitiveType(mx::Dtype dtype) {
@@ -3877,185 +4223,6 @@ index 0000000000..384c5f1a4d
 +  return std::make_pair(input_idx, comparator);
 +}
 +
-+// Returns true if the given `ReduceOp` matches
-+// `zml.Tensor.argMax` op implementation.
-+bool isArgMaxReduce(mlir::stablehlo::ReduceOp reduce_op) {
-+  mlir::Block& body_block = reduce_op.getBody().front();
-+  unsigned op_count = 0;
-+  // TODO (@cryptodeal): This is a lazy verification; maybe check operands
-+  // for each operation in the block.
-+  for (auto& op : body_block.getOperations()) {
-+    switch (op_count) {
-+      case 0: {
-+        auto compare_op = llvm::dyn_cast<mlir::stablehlo::CompareOp>(op);
-+        if (compare_op && compare_op.getComparisonDirection() ==
-+                              mlir::stablehlo::ComparisonDirection::GT) {
-+          break;
-+        } else
-+          return false;
-+      }
-+      case 1: {
-+        auto compare_op = llvm::dyn_cast<mlir::stablehlo::CompareOp>(op);
-+        if (compare_op && compare_op.getComparisonDirection() ==
-+                              mlir::stablehlo::ComparisonDirection::NE) {
-+          break;
-+        } else
-+          return false;
-+      }
-+      case 2:
-+        if (llvm::dyn_cast<mlir::stablehlo::OrOp>(op)) {
-+          break;
-+        } else
-+          return false;
-+      case 3:
-+        if (llvm::dyn_cast<mlir::stablehlo::SelectOp>(op)) {
-+          break;
-+        } else
-+          return false;
-+      case 4: {
-+        auto compare_op = llvm::dyn_cast<mlir::stablehlo::CompareOp>(op);
-+        if (compare_op && compare_op.getComparisonDirection() ==
-+                              mlir::stablehlo::ComparisonDirection::EQ) {
-+          break;
-+        } else
-+          return false;
-+      }
-+      case 5: {
-+        auto compare_op = llvm::dyn_cast<mlir::stablehlo::CompareOp>(op);
-+        if (compare_op && compare_op.getComparisonDirection() ==
-+                              mlir::stablehlo::ComparisonDirection::LT) {
-+          break;
-+        } else
-+          return false;
-+      }
-+      case 6:
-+        if (llvm::dyn_cast<mlir::stablehlo::AndOp>(op)) {
-+          break;
-+        } else
-+          return false;
-+      case 7:
-+        if (llvm::dyn_cast<mlir::stablehlo::OrOp>(op)) {
-+          break;
-+        } else
-+          return false;
-+      case 8:
-+        if (llvm::dyn_cast<mlir::stablehlo::SelectOp>(op)) {
-+          break;
-+        } else
-+          return false;
-+      case 9:
-+        if (llvm::dyn_cast<mlir::stablehlo::ReturnOp>(op)) {
-+          break;
-+        } else
-+          return false;
-+      default:
-+        return false;
-+    }
-+    op_count++;
-+  }
-+  return true;
-+}
-+
-+// Returns true if the given `ReduceOp` matches
-+// `zml.Tensor.sum` op implementation.
-+bool isSumReduce(mlir::stablehlo::ReduceOp reduce_op) {
-+  mlir::Block& body_block = reduce_op.getBody().front();
-+  unsigned op_count = 0;
-+  // TODO (@cryptodeal): This is a lazy verification; maybe check operands
-+  // for each operation in the block.
-+  for (auto& op : body_block.getOperations()) {
-+    switch (op_count) {
-+      case 0:
-+        if (llvm::dyn_cast<mlir::stablehlo::AddOp>(op)) {
-+          break;
-+        } else
-+          return false;
-+      case 1:
-+        if (llvm::dyn_cast<mlir::stablehlo::ReturnOp>(op)) {
-+          break;
-+        } else
-+          return false;
-+    }
-+    op_count++;
-+  }
-+  return true;
-+}
-+
-+// Returns true if the given `ReduceOp` matches
-+// `zml.Tensor.max` op implementation.
-+bool isMaxReduce(mlir::stablehlo::ReduceOp reduce_op) {
-+  mlir::Block& body_block = reduce_op.getBody().front();
-+  unsigned op_count = 0;
-+  // TODO (@cryptodeal): This is a lazy verification; maybe check operands
-+  // for each operation in the block.
-+  for (auto& op : body_block.getOperations()) {
-+    switch (op_count) {
-+      case 0:
-+        if (llvm::dyn_cast<mlir::stablehlo::MaxOp>(op)) {
-+          break;
-+        } else
-+          return false;
-+      case 1:
-+        if (llvm::dyn_cast<mlir::stablehlo::ReturnOp>(op)) {
-+          break;
-+        } else
-+          return false;
-+    }
-+    op_count++;
-+  }
-+  return true;
-+}
-+
-+// Returns true if the given `ReduceOp` matches
-+// `zml.Tensor.max` op implementation.
-+bool isMinReduce(mlir::stablehlo::ReduceOp reduce_op) {
-+  mlir::Block& body_block = reduce_op.getBody().front();
-+  unsigned op_count = 0;
-+  // TODO (@cryptodeal): This is a lazy verification; maybe check operands
-+  // for each operation in the block.
-+  for (auto& op : body_block.getOperations()) {
-+    switch (op_count) {
-+      case 0:
-+        if (llvm::dyn_cast<mlir::stablehlo::MinOp>(op)) {
-+          break;
-+        } else
-+          return false;
-+      case 1:
-+        if (llvm::dyn_cast<mlir::stablehlo::ReturnOp>(op)) {
-+          break;
-+        } else
-+          return false;
-+    }
-+    op_count++;
-+  }
-+  return true;
-+}
-+
-+// Returns true if the given `ReduceOp` matches
-+// `zml.Tensor.any` op implementation.
-+bool isAnyReduce(mlir::stablehlo::ReduceOp reduce_op) {
-+  mlir::Block& body_block = reduce_op.getBody().front();
-+  unsigned op_count = 0;
-+  // TODO (@cryptodeal): This is a lazy verification; maybe check operands
-+  // for each operation in the block.
-+  for (auto& op : body_block.getOperations()) {
-+    switch (op_count) {
-+      case 0:
-+        if (llvm::dyn_cast<mlir::stablehlo::OrOp>(op)) {
-+          break;
-+        } else
-+          return false;
-+      case 1:
-+        if (llvm::dyn_cast<mlir::stablehlo::ReturnOp>(op)) {
-+          break;
-+        } else
-+          return false;
-+    }
-+    op_count++;
-+  }
-+  return true;
-+}
-+
 +llvm::hash_code computeHash(
 +    mlir::Operation* op,
 +    llvm::function_ref<llvm::hash_code(mlir::Value)> hashOperands,
@@ -4090,6 +4257,24 @@ index 0000000000..384c5f1a4d
 +  return hash;
 +}
 +
++absl::StatusOr<ReduceType> getReduceType(mlir::Operation& op,
++                                         mlir::Block& body_block) {
++  if (detail::isArgMaxReduce(body_block)) {
++    return ReduceType::ArgMax;
++  } else if (detail::isSumReduce(body_block)) {
++    return ReduceType::Sum;
++  } else if (detail::isMaxReduce(body_block)) {
++    return ReduceType::Max;
++  } else if (detail::isMinReduce(body_block)) {
++    return ReduceType::Min;
++  } else if (detail::isAnyReduce(body_block)) {
++    return ReduceType::Any;
++  } else {
++    return xla::Internal("Unsupported reduce op: %s",
++                         mlir::stablehlo::ToString(op));
++  }
++}
++
 +uint64_t getHashValue(mlir::func::FuncOp func_op) {
 +  llvm::hash_code hash = {};
 +  for (mlir::NamedAttribute attr : func_op->getAttrs()) {
@@ -4111,13 +4296,58 @@ index 0000000000..384c5f1a4d
 +                     mlir::OperationEquivalence::ignoreHashValue);
 +}
 +
++bool isValidType(mlir::Type type) {
++  auto primitive_type = xla::ConvertMlirTypeToPrimitiveType(
++      mlir::cast<mlir::ShapedType>(type).getElementType());
++  switch (primitive_type) {
++    case xla::PrimitiveType::PRED:
++    case xla::PrimitiveType::U8:
++    case xla::PrimitiveType::S8:
++    case xla::PrimitiveType::U16:
++    case xla::PrimitiveType::S16:
++    case xla::PrimitiveType::U32:
++    case xla::PrimitiveType::S32:
++    case xla::PrimitiveType::U64:
++    case xla::PrimitiveType::S64:
++    case xla::PrimitiveType::F16:
++    case xla::PrimitiveType::BF16:
++    case xla::PrimitiveType::F32:
++    case xla::PrimitiveType::C64:
++      return true;
++    default: {
++      // std::cout << "Unsupported type: "
++      //           << xla::PrimitiveType_Name(primitive_type).c_str()
++      //           << std::endl;
++      return false;
++    }
++  }
++}
++
++bool validateTypeRange(mlir::Operation::operand_range range) {
++  for (auto operand : range) {
++    if (!isValidType(operand.getType())) {
++      return false;
++    }
++  }
++  return true;
++}
++
++bool validateTypeRange(mlir::Operation::result_range range) {
++  for (auto result : range) {
++    if (!isValidType(result.getType())) {
++      return false;
++    }
++  }
++  return true;
++}
++
 +}  // namespace utils
 diff --git a/xla/pjrt/plugin/mlx/utils.h b/xla/pjrt/plugin/mlx/utils.h
 new file mode 100644
-index 0000000000..f19257b5a2
+index 0000000000..6e38b50502
 --- /dev/null
 +++ b/xla/pjrt/plugin/mlx/utils.h
-@@ -0,0 +1,94 @@
+@@ -0,0 +1,136 @@
 +/* Copyright 2024 The OpenXLA Authors.
 +Licensed under the Apache License, Version 2.0 (the "License");
 +you may not use this file except in compliance with the License.
@@ -4132,7 +4362,8 @@ index 0000000000..f19257b5a2
 +
 +#ifndef XLA_PJRT_PLUGIN_STABLEHLO_MLX_UTILS_H_
 +#define XLA_PJRT_PLUGIN_STABLEHLO_MLX_UTILS_H_
-+
++#include <cstdint>
++#include <functional>
 +#include <optional>
 +#include <string>
 +#include <unordered_map>
@@ -4146,6 +4377,7 @@ index 0000000000..f19257b5a2
 +#include "mlir/IR/Types.h"
 +#include "mlir/IR/Operation.h"
 +#include "mlir/IR/Value.h"
++#include "mlx/compile_impl.h"
 +#include "mlx/mlx.h"
 +#include "xla/literal.h"
 +
@@ -4156,21 +4388,62 @@ index 0000000000..f19257b5a2
 +using OwnedMlxFunc = std::shared_ptr<MlxFunc>;
 +
 +namespace utils {
++class MlxFuncRef {
++ public:
++  MlxFuncRef() : fun_id_(0) {}
++  MlxFuncRef(MlxFunc ref, std::uintptr_t fun_id)
++      : ref_(std::move(ref)), fun_id_(fun_id) {}
 +
-+struct FuncInfo {
-+  mlir::OwningOpRef<mlir::ModuleOp> mod_;
-+  std::string name_;
++  ~MlxFuncRef() {
++    if (fun_id_) {
++      std::cout << "Destroying MlxFuncRef: " << std::to_string(fun_id_)
++                << std::endl;
++      mx::detail::compile_erase(fun_id_);
++    }
++  }
 +
-+  FuncInfo(mlir::ModuleOp mod, std::string name)
-+      : mod_(mod.clone()), name_(name) {}
++  MlxFuncRef(MlxFuncRef&& other) noexcept {
++    ref_ = std::move(other.ref_);
++    fun_id_ = other.fun_id_;
++  }
++
++  MlxFuncRef& operator=(MlxFuncRef&& other) noexcept {
++    ref_ = std::move(other.ref_);
++    fun_id_ = other.fun_id_;
++    return *this;
++  }
++
++  std::vector<mx::array> call(const std::vector<mx::array>& inputs) {
++    return ref_(inputs);
++  }
++
++  bool isInitialized() { return fun_id_ != 0; }
++
++  void initialize(MlxFunc ref, std::uintptr_t fun_id) {
++    // if (fun_id_ != 0) mx::detail::compile_erase(fun_id_);
++    ref_ = std::move(ref);
++    fun_id_ = fun_id;
++  }
++
++ private:
++  MlxFunc ref_;
++  std::uintptr_t fun_id_;
 +};
 +
-+enum ScatterType {
++enum class ScatterType {
 +  Replace,
 +  Add,
 +  Prod,
 +  Max,
 +  Min,
++};
++
++enum class ReduceType {
++  ArgMax,
++  Sum,
++  Max,
++  Min,
++  Any,
 +};
 +namespace dtype {
 +xla::PrimitiveType asXlaPrimitiveType(mx::Dtype dtype);
@@ -4202,13 +4475,12 @@ index 0000000000..f19257b5a2
 +absl::StatusOr<ScatterType> getScatterType(mlir::Block& block);
 +absl::StatusOr<std::pair<unsigned, mx::ComparatorType>> getSortInfo(
 +    mlir::Block& block);
-+bool isArgMaxReduce(mlir::stablehlo::ReduceOp reduce_op);
-+bool isSumReduce(mlir::stablehlo::ReduceOp reduce_op);
-+bool isMaxReduce(mlir::stablehlo::ReduceOp reduce_op);
-+bool isMinReduce(mlir::stablehlo::ReduceOp reduce_op);
-+bool isAnyReduce(mlir::stablehlo::ReduceOp reduce_op);
++absl::StatusOr<ReduceType> getReduceType(mlir::Operation& op,
++                                         mlir::Block& body_block);
 +uint64_t getHashValue(mlir::func::FuncOp func_op);
 +uint64_t getHashValue(mlir::Operation* op);
++bool validateTypeRange(mlir::Operation::operand_range range);
++bool validateTypeRange(mlir::Operation::result_range range);
 +}  // namespace utils
 +
 +#endif  // XLA_PJRT_PLUGIN_STABLEHLO_MLX_UTILS_H_

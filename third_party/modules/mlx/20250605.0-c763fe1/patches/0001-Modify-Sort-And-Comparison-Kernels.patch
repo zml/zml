@@ -59,6 +59,24 @@ index 000000000..28ed3894b
 +    ],
 +    deps = ["@mlx//:mlx"]
 +)
+diff --git a/mlx/array.h b/mlx/array.h
+index 98eef2e33..54ee53402 100644
+--- a/mlx/array.h
++++ b/mlx/array.h
+@@ -517,9 +517,10 @@ template <typename T>
+ array::array(
+     std::initializer_list<T> data,
+     Dtype dtype /* = TypeToDtype<T>() */)
+-    : array_desc_(std::make_shared<ArrayDesc>(
+-          Shape{static_cast<ShapeElem>(data.size())},
+-          dtype)) {
++    : array_desc_(
++          std::make_shared<ArrayDesc>(
++              Shape{static_cast<ShapeElem>(data.size())},
++              dtype)) {
+   init(data.begin());
+ }
+ 
 diff --git a/mlx/backend/cpu/make_compiled_preamble.sh b/mlx/backend/cpu/make_compiled_preamble.sh
 index 88b4c4615..ca567d83e 100644
 --- a/mlx/backend/cpu/make_compiled_preamble.sh
@@ -846,6 +864,114 @@ index 409aa2c89..6d49f1c60 100644
  NO_GPU(Real)
  NO_GPU(Reduce)
  NO_GPU(Reshape)
+diff --git a/mlx/compile.cpp b/mlx/compile.cpp
+index 79a55ba8f..ae073facc 100644
+--- a/mlx/compile.cpp
++++ b/mlx/compile.cpp
+@@ -194,6 +194,7 @@ std::vector<Shape> Compiled::output_shapes(const std::vector<array>& inputs) {
+ }
+ 
+ namespace detail {
++std::mutex compilation_mutex;
+ 
+ CompileMode& compile_mode() {
+   auto get_val = []() {
+@@ -244,17 +245,6 @@ void merge(array& dst, array& src, ParentsMap& parents_map) {
+     merge_one(dests[i], sources[i], parents_map);
+   }
+ }
+-
+-template <typename T, typename... U>
+-std::uintptr_t get_function_address(const std::function<T(U...)>& fun) {
+-  using FunType = T (*)(U...);
+-  const FunType* fun_ptr = fun.template target<FunType>();
+-  if (fun_ptr == nullptr) {
+-    return 0;
+-  }
+-  return reinterpret_cast<std::uintptr_t>(*fun_ptr);
+-}
+-
+ class CompilerCache {
+  public:
+   struct CacheEntry {
+diff --git a/mlx/compile.h b/mlx/compile.h
+index a076cfbca..ecd7b27ff 100644
+--- a/mlx/compile.h
++++ b/mlx/compile.h
+@@ -8,6 +8,9 @@ namespace mlx::core {
+ 
+ enum class CompileMode { disabled, no_simplify, no_fuse, enabled };
+ 
++template <typename T, typename... U>
++std::uintptr_t get_function_address(const std::function<T(U...)>& fun);
++
+ /** Compile takes a function and returns a compiled function. */
+ std::function<std::vector<array>(const std::vector<array>&)> compile(
+     std::function<std::vector<array>(const std::vector<array>&)> fun,
+diff --git a/mlx/compile_impl.h b/mlx/compile_impl.h
+index bc3f44b4e..d601cb181 100644
+--- a/mlx/compile_impl.h
++++ b/mlx/compile_impl.h
+@@ -1,12 +1,14 @@
+ // Copyright © 2023-2024 Apple Inc.
+ 
+ #pragma once
+-
++#include <cstdint>
++#include <mutex>
+ #include <unordered_map>
+ 
+ #include "mlx/array.h"
+ 
+ namespace mlx::core::detail {
++extern std::mutex compilation_mutex;
+ 
+ // This is not part of the general C++ API as calling with a bad id is a bad
+ // idea.
+@@ -19,6 +21,19 @@ std::function<std::vector<array>(const std::vector<array>&)> compile(
+ // Erase cached compile functions
+ void compile_erase(std::uintptr_t fun_id);
+ 
++template <typename T, typename... U>
++std::uintptr_t get_function_address(const std::function<T(U...)>& fun) {
++  using FunType = T (*)(U...);
++  const FunType* fun_ptr = fun.template target<FunType>();
++  if (fun_ptr == nullptr) {
++    return 0;
++  }
++  return reinterpret_cast<std::uintptr_t>(*fun_ptr);
++}
++
++// Returns true if `skip_compile` is set
++bool skip_compile();
++
+ // Clear the compiler cache causing a recompilation of all compiled functions
+ // when called again.
+ void compile_clear_cache();
+diff --git a/mlx/dtype_utils.h b/mlx/dtype_utils.h
+index 55de890f2..9208285b2 100644
+--- a/mlx/dtype_utils.h
++++ b/mlx/dtype_utils.h
+@@ -92,12 +92,13 @@ MLX_FORALL_DTYPES(SPECIALIZE_CppTypeToDtype)
+     break;                                                            \
+   }
+ 
+-#define MLX_INTERNAL_SWITCH_CHECKED(TYPE, NAME, ...)                  \
+-  switch (TYPE) {                                                     \
+-    __VA_ARGS__                                                       \
+-    default:                                                          \
+-      throw std::invalid_argument(fmt::format(                        \
+-          "Unhandled dtype %s for %s", dtype_to_string(TYPE), NAME)); \
++#define MLX_INTERNAL_SWITCH_CHECKED(TYPE, NAME, ...)                      \
++  switch (TYPE) {                                                         \
++    __VA_ARGS__                                                           \
++    default:                                                              \
++      throw std::invalid_argument(                                        \
++          fmt::format(                                                    \
++              "Unhandled dtype %s for %s", dtype_to_string(TYPE), NAME)); \
+   }
+ 
+ #define MLX_INTERNAL_SWITCH_CASE_INT_TYPES(CTYPE_ALIAS, ...)     \
 diff --git a/mlx/mlx.h b/mlx/mlx.h
 index cef8d806d..f8932873c 100644
 --- a/mlx/mlx.h
@@ -1247,10 +1373,18 @@ index cc60bcfb9..2b79c0d67 100644
  
  class Split : public Primitive {
 diff --git a/mlx/random.cpp b/mlx/random.cpp
-index 6c6d1eb95..5a4745a52 100644
+index 6c6d1eb95..15b1cff9e 100644
 --- a/mlx/random.cpp
 +++ b/mlx/random.cpp
-@@ -225,6 +225,23 @@ array normal(
+@@ -14,6 +14,7 @@ namespace mlx::core::random {
+ KeySequence::KeySequence(uint64_t seed) : key_(key(seed)) {}
+ 
+ void KeySequence::seed(uint64_t seed) {
++  std::lock_guard<std::mutex> lock(mutex_);
+   key_ = key((seed));
+ }
+ 
+@@ -225,6 +226,23 @@ array normal(
    return samples;
  }
  
@@ -1275,10 +1409,26 @@ index 6c6d1eb95..5a4745a52 100644
      const array& mean,
      const array& cov,
 diff --git a/mlx/random.h b/mlx/random.h
-index 0dfdab7a1..ebee726c8 100644
+index 0dfdab7a1..9358dd900 100644
 --- a/mlx/random.h
 +++ b/mlx/random.h
-@@ -134,6 +134,14 @@ inline array normal(
+@@ -3,6 +3,7 @@
+ #pragma once
+ 
+ #include <chrono>
++#include <mutex>
+ #include <optional>
+ 
+ #include "mlx/array.h"
+@@ -26,6 +27,7 @@ class KeySequence {
+ 
+  private:
+   array key_;
++  std::mutex mutex_;
+   static uint64_t get_current_time_seed() {
+     auto now = std::chrono::system_clock::now();
+     return std::chrono::duration_cast<std::chrono::milliseconds>(
+@@ -134,6 +136,14 @@ inline array normal(
    return normal(shape, float32, std::nullopt, std::nullopt, key, s);
  }
  
