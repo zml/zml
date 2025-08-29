@@ -303,9 +303,10 @@ pub const Buffer = struct {
         };
     }
 
-    pub fn opaqueDeviceMemoryDataPointer(self: Buffer) *anyopaque {
+    pub fn opaqueDeviceMemoryDataPointer(self: Buffer) [*]u8 {
         stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer", .{});
-        return self._shards.get(0).getOpaqueDeviceMemoryDataPointer(self._api) catch unreachable;
+        const opaque_ptr: *anyopaque = self._shards.get(0).getOpaqueDeviceMemoryDataPointer(self._api) catch unreachable;
+        return @ptrCast(opaque_ptr);
     }
 
     /// Fetches the content of the given buffer into a stack variable of the given type.

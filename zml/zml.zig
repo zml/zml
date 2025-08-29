@@ -6,6 +6,7 @@
 // Namespaces
 const std = @import("std");
 
+pub const platform_specific = @import("c");
 pub const tokenizer = @import("zml/tokenizer");
 
 pub const aio = @import("aio.zig");
@@ -45,7 +46,6 @@ pub const Tensor = @import("tensor.zig").Tensor;
 pub const testing = @import("testing.zig");
 pub const torch = @import("torch.zig");
 
-// pub const tokenizer = @import("tokenizer.zig");
 pub const tools = struct {
     pub const Tracer = @import("tools/tracer.zig").Tracer;
 };
