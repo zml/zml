@@ -34,8 +34,9 @@ zig_binary(
     visibility = ["//visibility:public"],
     deps = [
         ":mlir",
+        "//zml",
         "//mlir/dialects",
         # ":c",
-        # "//stdx",
+        "//stdx",
     ],
 )

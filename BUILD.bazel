@@ -12,8 +12,8 @@ zls_completion(
     deps = [
         # "//async",
         # "//examples/llama",
-        # "//stdx",
-        # "//zml",
+        "//stdx",
+        "//zml",
         "//mlir:main",
         # "//async",
         # "//stdx",
