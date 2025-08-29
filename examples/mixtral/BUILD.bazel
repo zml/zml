@@ -3,7 +3,7 @@ load("@rules_zig//zig:defs.bzl", "zig_binary")
 zig_binary(
     name = "mixtral",
     srcs = [
-        "mixtral.zig",
+        "Mixtral.zig",
     ],
     main = "main.zig",
     deps = [
