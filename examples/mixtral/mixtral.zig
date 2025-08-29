@@ -1,192 +1,190 @@
+///! Mixtral architecture, using huggingface transformers naming.
+///! Dimensions of activations: {.b, .s, .d}
 const std = @import("std");
-const testing = std.testing;
 
 const stdx = @import("stdx");
 const zml = @import("zml");
 
+const Mixtral = @This();
 const log = std.log.scoped(.Mixtral);
 
-/// Mixtral architecture, using huggingface transformers naming.
-/// Dimensions of activations: {.b, .s, .d}
-pub const MixtralLM = struct {
-    pub const Config = struct {
-        bos_token_id: u32 = 199998,
-        eos_token_id: stdx.json.Union(union(enum) {
-            int: u32,
-            ints: []u32,
-        }),
-        num_hidden_layers: usize,
-        num_attention_heads: usize,
-        num_key_value_heads: usize,
-        rope_theta: f32,
-        max_position_embeddings: usize,
-        rms_norm_eps: f32,
-        hf_rope_impl: bool = true,
-        rope_scaling: zml.nn.RopeOpts.Scaling = .{ .default = {} },
-    };
-
-    pub const Options = struct {
-        sampling_strategy: ?zml.nn.SamplingStrategy,
-        max_seq_len: usize,
-    };
-
-    lm_head: ?zml.nn.Linear,
-    model: Mixtral,
-
-    // Options controlling generation
-    gen_opts: zml.nn.SamplingStrategy = .{},
-    config: Config,
-
-    pub fn init(allocator: std.mem.Allocator, store: zml.aio.BufferStore, config: Config, options: Options) !MixtralLM {
-        var self: MixtralLM = .{
-            .config = config,
-            .gen_opts = options.sampling_strategy orelse .{},
-            .model = .{
-                .max_seq_len = @intCast(options.max_seq_len),
-                .num_heads = @intCast(config.num_attention_heads),
-                .num_kv_heads = @intCast(config.num_key_value_heads),
-                .rope_opts = .{
-                    .layout = if (config.hf_rope_impl) .sequential else .interleaved,
-                    .freq_base = config.rope_theta,
-                    .scaling = config.rope_scaling,
-                },
-
-                .embed_tokens = .{
-                    .weight = store.getTensor("model.embed_tokens.weight").withSharding(.{1}),
-                },
-                .layers = try allocator.alloc(TransformerLayer, config.num_hidden_layers),
-                .norm = .{
-                    .weight = store.getTensor("model.norm.weight"),
-                    .eps = config.rms_norm_eps,
-                },
-            },
-            .lm_head = .{ .weight = store.getTensor("lm_head.weight").withSharding(.{0}) },
-        };
-
-        var prefix: zml.aio.PrefixBuilder = try .initCapacity(allocator, 1024);
-        try prefix.push(stdx.noalloc, "model.layers");
-        for (self.model.layers, 0..) |*layer, i| {
-            try prefix.pushDigit(stdx.noalloc, i);
-            defer prefix.pop();
-
-            // TODO: safer layer init
-            var self_attn = try zml.aio.populateModelWithPrefix(SelfAttn, allocator, store, prefix.concat("self_attn"));
-            {
-                self_attn.num_heads = self.model.num_heads;
-                self_attn.num_kv_heads = self.model.num_kv_heads;
-                self_attn.rope_opts = self.model.rope_opts;
-                self_attn.q_proj.weight = self_attn.q_proj.weight.withSharding(.{0});
-                self_attn.k_proj.weight = self_attn.k_proj.weight.withSharding(.{0});
-                self_attn.v_proj.weight = self_attn.v_proj.weight.withSharding(.{0});
-                self_attn.o_proj.weight = self_attn.o_proj.weight.withSharding(.{1});
-            }
-
-            const on_disk_moe = try zml.aio.populateModelWithPrefix(MoE.OnDisk, allocator, store, prefix.concat("mlp"));
-            var moe = on_disk_moe.rewrite();
-            {
-                moe.experts.gate_up_proj.blocks = moe.experts.gate_up_proj.blocks.withSharding(.{.expert});
-                moe.experts.down_proj.blocks = moe.experts.down_proj.blocks.withSharding(.{.expert});
-            }
-
-            layer.* = .{
-                .input_layernorm = .{
-                    .weight = store.getTensor(prefix.concat("input_layernorm.weight")),
-                    .eps = config.rms_norm_eps,
-                },
-                .post_attention_layernorm = .{
-                    .weight = store.getTensor(prefix.concat("post_attention_layernorm.weight")),
-                    .eps = config.rms_norm_eps,
-                },
-                .self_attn = self_attn,
-                .mlp = moe,
-            };
-        }
-
-        // TODO(Corentin): Fix lm_head sharding when top-k sampling is enabled.
-        // It currently crashes/compilation fails
-        if (self.gen_opts.topk == 1 and self.lm_head != null) {
-            self.lm_head.?.weight = self.lm_head.?.weight.withSharding(.{0});
-        }
-
-        return self;
-    }
-
-    /// Predicts the token at `token_index` position.
-    /// Returns:
-    ///  - updated `tokens`,
-    ///  - updated KV cache
-    ///  - a Rng state to allow for probabilistic generation
-    pub fn forward(
-        self: MixtralLM,
-        tokens_: zml.Tensor,
-        token_index: zml.Tensor,
-        kv_cache: KvCache,
-        rng: zml.Tensor.Rng,
-    ) struct { zml.Tensor, KvCache, zml.Tensor.Rng } {
-        stdx.debug.assert(tokens_.dtype() == .u32 and tokens_.rank() >= 1 and token_index.dtype() == .u32 and token_index.rank() <= 1, "Can't run Mixtral ! Expected >=1d tokens and 0d token_index, got: {f} and {f}", .{ tokens_, token_index });
-        const tokens = tokens_.withPartialTags(.{.s});
-        const out, const updated_kv_cache = zml.call(self.model, .forward, .{ tokens, token_index, kv_cache });
-        const new_tokens, const new_rng = self.sampleTokens(self.lm_head, out, rng, self.gen_opts);
-        return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache, new_rng };
-    }
-
-    pub fn sampleTokens(
-        self: MixtralLM,
-        lm_head_: ?zml.nn.Linear,
-        out_: zml.Tensor,
-        rng: zml.Tensor.Rng,
-        opts: zml.nn.SamplingStrategy,
-    ) struct { zml.Tensor, zml.Tensor.Rng } {
-        const out = out_.withPartialTags(.{ .s, .d });
-
-        var logits = blk: {
-            if (lm_head_) |lm_head| {
-                break :blk zml.call(lm_head, .forward, .{out});
-            } else {
-                break :blk self.model.embed_tokens.weight.withTags(.{ .voc, .d }).dot(out, .{.d});
-            }
-        };
-
-        if (logits.shape().hasTag(.voc) == null)
-            logits = logits.rename(.{ .d = .voc });
-
-        const next_tokens, const new_rng = zml.nn.sampleTokens(logits, opts, rng);
-        return .{ next_tokens, new_rng };
-    }
-
-    pub fn loadBuffers(self: MixtralLM, allocator: std.mem.Allocator, store: zml.aio.BufferStore, platform: zml.Platform) !zml.Bufferized(MixtralLM) {
-        var prefix: zml.aio.PrefixBuilder = try .initCapacity(allocator, 256);
-        defer prefix.deinit(allocator);
-
-        const noalloc = stdx.noalloc;
-        const loaded: zml.Bufferized(MixtralLM) = .{
-            .model = .{
-                .embed_tokens = try store.loadModelById(zml.nn.TokenEmbedding, noalloc, self.model.embed_tokens, platform),
-                .layers = try allocator.alloc(zml.Bufferized(TransformerLayer), self.model.layers.len),
-                .norm = try store.loadModelById(RmsNorm, noalloc, self.model.norm, platform),
-            },
-            .lm_head = try store.loadModelById(?zml.nn.Linear, noalloc, self.lm_head, platform),
-        };
-
-        prefix.push(noalloc, "model.layers") catch unreachable;
-        for (loaded.model.layers, self.model.layers, 0..) |*d_layer, layer, layer_id| {
-            const ckpt = prefix.checkpoint();
-            defer prefix.restore(ckpt);
-
-            prefix.pushDigit(noalloc, layer_id) catch unreachable;
-            d_layer.* = .{
-                .input_layernorm = try store.loadModelById(RmsNorm, noalloc, layer.input_layernorm, platform),
-                .self_attn = try store.loadModelById(SelfAttn, noalloc, layer.self_attn, platform),
-                .post_attention_layernorm = try store.loadModelById(RmsNorm, noalloc, layer.post_attention_layernorm, platform),
-                .mlp = try store.loadModelById(MoE, noalloc, layer.mlp, platform),
-            };
-        }
-
-        return loaded;
-    }
+pub const Config = struct {
+    bos_token_id: u32 = 199998,
+    eos_token_id: stdx.json.Union(union(enum) {
+        int: u32,
+        ints: []u32,
+    }),
+    num_hidden_layers: usize,
+    num_attention_heads: usize,
+    num_key_value_heads: usize,
+    rope_theta: f32,
+    max_position_embeddings: usize,
+    rms_norm_eps: f32,
+    hf_rope_impl: bool = true,
+    rope_scaling: zml.nn.RopeOpts.Scaling = .{ .default = {} },
 };
 
-pub const Mixtral = struct {
+pub const Options = struct {
+    sampling_strategy: ?zml.nn.SamplingStrategy,
+    max_seq_len: usize,
+};
+
+lm_head: ?zml.nn.Linear,
+model: Model,
+
+// Options controlling generation
+gen_opts: zml.nn.SamplingStrategy = .{},
+config: Config,
+
+pub fn init(allocator: std.mem.Allocator, store: zml.aio.BufferStore, config: Config, options: Options) !Mixtral {
+    var self: Mixtral = .{
+        .config = config,
+        .gen_opts = options.sampling_strategy orelse .{},
+        .model = .{
+            .max_seq_len = @intCast(options.max_seq_len),
+            .num_heads = @intCast(config.num_attention_heads),
+            .num_kv_heads = @intCast(config.num_key_value_heads),
+            .rope_opts = .{
+                .layout = if (config.hf_rope_impl) .sequential else .interleaved,
+                .freq_base = config.rope_theta,
+                .scaling = config.rope_scaling,
+            },
+
+            .embed_tokens = .{
+                .weight = store.getTensor("model.embed_tokens.weight").withSharding(.{1}),
+            },
+            .layers = try allocator.alloc(TransformerLayer, config.num_hidden_layers),
+            .norm = .{
+                .weight = store.getTensor("model.norm.weight"),
+                .eps = config.rms_norm_eps,
+            },
+        },
+        .lm_head = .{ .weight = store.getTensor("lm_head.weight").withSharding(.{0}) },
+    };
+
+    var prefix: zml.aio.PrefixBuilder = try .initCapacity(allocator, 1024);
+    try prefix.push(stdx.noalloc, "model.layers");
+    for (self.model.layers, 0..) |*layer, i| {
+        try prefix.pushDigit(stdx.noalloc, i);
+        defer prefix.pop();
+
+        // TODO: safer layer init
+        var self_attn = try zml.aio.populateModelWithPrefix(SelfAttn, allocator, store, prefix.concat("self_attn"));
+        {
+            self_attn.num_heads = self.model.num_heads;
+            self_attn.num_kv_heads = self.model.num_kv_heads;
+            self_attn.rope_opts = self.model.rope_opts;
+            self_attn.q_proj.weight = self_attn.q_proj.weight.withSharding(.{0});
+            self_attn.k_proj.weight = self_attn.k_proj.weight.withSharding(.{0});
+            self_attn.v_proj.weight = self_attn.v_proj.weight.withSharding(.{0});
+            self_attn.o_proj.weight = self_attn.o_proj.weight.withSharding(.{1});
+        }
+
+        const on_disk_moe = try zml.aio.populateModelWithPrefix(MoE.OnDisk, allocator, store, prefix.concat("mlp"));
+        var moe = on_disk_moe.rewrite();
+        {
+            moe.experts.gate_up_proj.blocks = moe.experts.gate_up_proj.blocks.withSharding(.{.expert});
+            moe.experts.down_proj.blocks = moe.experts.down_proj.blocks.withSharding(.{.expert});
+        }
+
+        layer.* = .{
+            .input_layernorm = .{
+                .weight = store.getTensor(prefix.concat("input_layernorm.weight")),
+                .eps = config.rms_norm_eps,
+            },
+            .post_attention_layernorm = .{
+                .weight = store.getTensor(prefix.concat("post_attention_layernorm.weight")),
+                .eps = config.rms_norm_eps,
+            },
+            .self_attn = self_attn,
+            .mlp = moe,
+        };
+    }
+
+    // TODO(Corentin): Fix lm_head sharding when top-k sampling is enabled.
+    // It currently crashes/compilation fails
+    if (self.gen_opts.topk == 1 and self.lm_head != null) {
+        self.lm_head.?.weight = self.lm_head.?.weight.withSharding(.{0});
+    }
+
+    return self;
+}
+
+/// Predicts the token at `token_index` position.
+/// Returns:
+///  - updated `tokens`,
+///  - updated KV cache
+///  - a Rng state to allow for probabilistic generation
+pub fn forward(
+    self: Mixtral,
+    tokens_: zml.Tensor,
+    token_index: zml.Tensor,
+    kv_cache: KvCache,
+    rng: zml.Tensor.Rng,
+) struct { zml.Tensor, KvCache, zml.Tensor.Rng } {
+    stdx.debug.assert(tokens_.dtype() == .u32 and tokens_.rank() >= 1 and token_index.dtype() == .u32 and token_index.rank() <= 1, "Can't run Mixtral ! Expected >=1d tokens and 0d token_index, got: {f} and {f}", .{ tokens_, token_index });
+    const tokens = tokens_.withPartialTags(.{.s});
+    const out, const updated_kv_cache = zml.call(self.model, .forward, .{ tokens, token_index, kv_cache });
+    const new_tokens, const new_rng = self.sampleTokens(self.lm_head, out, rng, self.gen_opts);
+    return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache, new_rng };
+}
+
+pub fn sampleTokens(
+    self: Mixtral,
+    lm_head_: ?zml.nn.Linear,
+    out_: zml.Tensor,
+    rng: zml.Tensor.Rng,
+    opts: zml.nn.SamplingStrategy,
+) struct { zml.Tensor, zml.Tensor.Rng } {
+    const out = out_.withPartialTags(.{ .s, .d });
+
+    var logits = blk: {
+        if (lm_head_) |lm_head| {
+            break :blk zml.call(lm_head, .forward, .{out});
+        } else {
+            break :blk self.model.embed_tokens.weight.withTags(.{ .voc, .d }).dot(out, .{.d});
+        }
+    };
+
+    if (logits.shape().hasTag(.voc) == null)
+        logits = logits.rename(.{ .d = .voc });
+
+    const next_tokens, const new_rng = zml.nn.sampleTokens(logits, opts, rng);
+    return .{ next_tokens, new_rng };
+}
+
+pub fn loadBuffers(self: Mixtral, allocator: std.mem.Allocator, store: zml.aio.BufferStore, platform: zml.Platform) !zml.Bufferized(Mixtral) {
+    var prefix: zml.aio.PrefixBuilder = try .initCapacity(allocator, 256);
+    defer prefix.deinit(allocator);
+
+    const noalloc = stdx.noalloc;
+    const loaded: zml.Bufferized(Mixtral) = .{
+        .model = .{
+            .embed_tokens = try store.loadModelById(zml.nn.TokenEmbedding, noalloc, self.model.embed_tokens, platform),
+            .layers = try allocator.alloc(zml.Bufferized(TransformerLayer), self.model.layers.len),
+            .norm = try store.loadModelById(RmsNorm, noalloc, self.model.norm, platform),
+        },
+        .lm_head = try store.loadModelById(?zml.nn.Linear, noalloc, self.lm_head, platform),
+    };
+
+    prefix.push(noalloc, "model.layers") catch unreachable;
+    for (loaded.model.layers, self.model.layers, 0..) |*d_layer, layer, layer_id| {
+        const ckpt = prefix.checkpoint();
+        defer prefix.restore(ckpt);
+
+        prefix.pushDigit(noalloc, layer_id) catch unreachable;
+        d_layer.* = .{
+            .input_layernorm = try store.loadModelById(RmsNorm, noalloc, layer.input_layernorm, platform),
+            .self_attn = try store.loadModelById(SelfAttn, noalloc, layer.self_attn, platform),
+            .post_attention_layernorm = try store.loadModelById(RmsNorm, noalloc, layer.post_attention_layernorm, platform),
+            .mlp = try store.loadModelById(MoE, noalloc, layer.mlp, platform),
+        };
+    }
+
+    return loaded;
+}
+
+pub const Model = struct {
     embed_tokens: zml.nn.TokenEmbedding,
     norm: RmsNorm,
     layers: []TransformerLayer,
@@ -208,7 +206,7 @@ pub const Mixtral = struct {
         dtype: zml.DataType,
     };
 
-    pub fn shape(self: Mixtral) Shape {
+    pub fn shape(self: Model) Shape {
         const key_dim = self.layers[0].self_attn.k_proj.weight.dim(0);
         const num_kv_heads = if (self.num_kv_heads > 0) self.num_kv_heads else self.num_heads;
 
@@ -224,7 +222,7 @@ pub const Mixtral = struct {
 
     /// Forward one token, using KV cache for previous tokens.
     /// Returns result and updated KV cache.
-    pub fn forward(self: Mixtral, tokens: zml.Tensor, token_index: zml.Tensor, kv_cache: KvCache) struct { zml.Tensor, KvCache } {
+    pub fn forward(self: Model, tokens: zml.Tensor, token_index: zml.Tensor, kv_cache: KvCache) struct { zml.Tensor, KvCache } {
         const embeds = embed(self.embed_tokens, tokens);
         var hidden = embeds;
 

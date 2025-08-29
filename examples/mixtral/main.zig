@@ -8,12 +8,7 @@ const Buffer = zml.Buffer;
 const Tensor = zml.Tensor;
 const ShapeOf = zml.ShapeOf;
 
-const mixtral = @import("mixtral.zig");
-const MixtralLM = mixtral.MixtralLM;
-const Mixtral = mixtral.Llama;
-const KvCache = mixtral.KvCache;
-const TransformerLayer = mixtral.TransformerLayer;
-const SelfAttn = mixtral.SelfAttn;
+const Mixtral = @import("Mixtral.zig");
 
 const log = std.log.scoped(.mixtral);
 
@@ -75,7 +70,7 @@ pub fn asyncMain() !void {
         var config_reader = config_json_file.reader(&config_json_buffer);
         var reader = std.json.Reader.init(allocator, &config_reader.interface);
         defer reader.deinit();
-        const config_obj = try std.json.parseFromTokenSourceLeaky(mixtral.MixtralLM.Config, allocator, &reader, .{ .ignore_unknown_fields = true });
+        const config_obj = try std.json.parseFromTokenSourceLeaky(Mixtral.Config, allocator, &reader, .{ .ignore_unknown_fields = true });
         break :blk config_obj;
     };
 
@@ -104,14 +99,14 @@ pub fn asyncMain() !void {
     defer store.deinit();
 
     var model_arena = std.heap.ArenaAllocator.init(allocator);
-    const llama_options: mixtral.MixtralLM.Options = .{
+    const llama_options: Mixtral.Options = .{
         .max_seq_len = @intCast(cli.args.@"seq-len" orelse 256),
         .sampling_strategy = .{
             .topk = 1,
             .temperature = 1.0,
         },
     };
-    const model_instance = try mixtral.MixtralLM.init(model_arena.allocator(), store, config, llama_options);
+    const model_instance = try Mixtral.init(model_arena.allocator(), store, config, llama_options);
 
     const dims = model_instance.model.shape();
     const dtype = model_instance.model.embed_tokens.weight.dtype();
@@ -122,12 +117,12 @@ pub fn asyncMain() !void {
 
     const kv_shape = zml.Shape.init(.{ .layer = model_instance.model.layers.len, .k = dims.s, .h = dims.nkvh, .hd = dims.hd }, dtype).withSharding(.{.h});
 
-    const kv_cache_shape: zml.ShapeOf(mixtral.KvCache) = mixtral.KvCache.initShape(kv_shape);
+    const kv_cache_shape: zml.ShapeOf(Mixtral.KvCache) = Mixtral.KvCache.initShape(kv_shape);
     const rng_shape = zml.Tensor.Rng.shape();
 
     var start = try std.time.Timer.start();
     var fut_mod_prefill = try asynk.asyncc(zml.compileModel, .{
-        allocator, mixtral.MixtralLM.forward, model_instance,
+        allocator, Mixtral.forward, model_instance,
         .{
             tokens_shape_prefill,
             token_idx_shape,
@@ -138,7 +133,7 @@ pub fn asyncMain() !void {
     });
 
     var fut_mod = try asynk.asyncc(zml.compileModel, .{
-        allocator, mixtral.MixtralLM.forward, model_instance,
+        allocator, Mixtral.forward, model_instance,
         .{
             tokens_shape,
             token_idx_shape,
@@ -160,7 +155,7 @@ pub fn asyncMain() !void {
     log.info("✅\tCompiled model in {D}", .{start.read()});
 
     log.info("Creating KvCache", .{});
-    const kv_cache = try mixtral.KvCache.initBuffer(kv_shape, platform);
+    const kv_cache = try Mixtral.KvCache.initBuffer(kv_shape, platform);
 
     var tokenizer = blk: {
         log.info("Loading tokenizer from {s}", .{model_tokenizer_path});
@@ -184,7 +179,7 @@ pub fn asyncMain() !void {
     // generated text will be printed token by token.
 }
 
-pub fn tokenizePrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, config: MixtralLM.Config, prompt: []const u8, skip_llama3_encoding: bool) ![]u32 {
+pub fn tokenizePrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, config: Mixtral.Config, prompt: []const u8, skip_llama3_encoding: bool) ![]u32 {
     _ = config; // autofix
     var tokens = std.array_list.Managed(u32).init(allocator);
     var encoder = try tokenizer.encoder();
@@ -218,11 +213,11 @@ pub fn tokenizePrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tok
 }
 
 pub fn generateText(
-    config: MixtralLM.Config,
-    llama_: MixtralLM,
-    mod_prefill: zml.ModuleExe(MixtralLM.forward),
-    mod_generate: zml.ModuleExe(MixtralLM.forward),
-    kv_cache_: zml.Bufferized(mixtral.KvCache),
+    config: Mixtral.Config,
+    llama_: Mixtral,
+    mod_prefill: zml.ModuleExe(Mixtral.forward),
+    mod_generate: zml.ModuleExe(Mixtral.forward),
+    kv_cache_: zml.Bufferized(Mixtral.KvCache),
     tokenizer: zml.tokenizer.Tokenizer,
     allocator: std.mem.Allocator,
     seed: u128,
