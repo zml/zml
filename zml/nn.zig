@@ -83,7 +83,7 @@ pub const BlockScaledLinear = struct {
                     self.scale.convert(x.dtype()).appendAxes(.{.d_block}),
                 );
                 var y = x.dot(dequantized_weight.merge(.{ .d = .{ .d, .d_block } }), .{.d});
-                std.log.warn("output shape: {_}", .{y});
+                std.log.warn("output shape: {f}", .{y});
                 std.debug.assert(y.shape().eql(res_shape));
                 y._shape = res_shape;
                 break :y y;
