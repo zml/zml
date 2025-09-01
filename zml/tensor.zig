@@ -2716,7 +2716,7 @@ pub const Tensor = struct {
     /// that requires host<->device synchronization.
     /// ZML tries to generate the easiest to optimize IR, and will warn you if it generates known problematic IR.
     pub fn scatterSlices(self: Tensor, indices: anytype, updates: Tensor, opts: ScatterOpts) Tensor {
-        scoped_log.debug("scatterSlices({}, {any}, {})", .{ self, indices, updates });
+        scoped_log.debug("scatterSlices({f}, {any}, {f})", .{ self, indices, updates });
 
         const UpdateType = @TypeOf(ScatterOpts.increment);
 
