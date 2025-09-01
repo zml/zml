@@ -30,6 +30,14 @@ zig_test(
 
 zig_binary(
     name = "main",
+    args = [
+        "$(location @mnist//:mnist.safetensors)",
+        "$(location @mnist//:t10k-images.idx3-ubyte)",
+    ],
+    data = [
+        "@mnist//:mnist.safetensors",
+        "@mnist//:t10k-images.idx3-ubyte",
+    ],
     main = "main.zig",
     visibility = ["//visibility:public"],
     deps = [
@@ -38,5 +46,6 @@ zig_binary(
         "//mlir/dialects",
         # ":c",
         "//stdx",
+        "//async",
     ],
 )
