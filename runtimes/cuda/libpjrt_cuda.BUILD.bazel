@@ -1,5 +1,4 @@
 load("@aspect_bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
-load("@zml//bazel:cc_import.bzl", "cc_import")
 load("@zml//bazel:patchelf.bzl", "patchelf")
 
 cc_shared_library(
@@ -30,6 +29,7 @@ copy_to_directory(
         "@cuda_nvrtc",
         "@cuda_nvtx",
         "@cudnn",
+        "@libnvshmem",
         "@libcublas",
         "@libcufft",
         "@libcusolver",

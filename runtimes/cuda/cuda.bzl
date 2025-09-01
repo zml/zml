@@ -17,6 +17,10 @@ CUDNN_REDIST_PREFIX = "https://developer.download.nvidia.com/compute/cudnn/redis
 CUDNN_VERSION = "9.8.0"
 CUDNN_REDIST_JSON_SHA256 = "a1599fa1f8dcb81235157be5de5ab7d3936e75dfc4e1e442d07970afad3c4843"
 
+NVSHMEM_REDIST_PREFIX = "https://developer.download.nvidia.com/compute/nvshmem/redist/"
+NVSHMEM_VERSION = "3.2.5"
+NVSHMEM_REDIST_JSON_SHA256 = "6945425d3bfd24de23c045996f93ec720c010379bfd6f0860ac5f2716659442d"
+
 _UBUNTU_PACKAGES = {
     "zlib1g": packages.filegroup(name = "zlib1g", srcs = ["lib/x86_64-linux-gnu/libz.so.1"]),
 }
@@ -119,6 +123,17 @@ CUDNN_PACKAGES = {
     ]),
 }
 
+NVSHMEM_PACKAGES = {
+    "libnvshmem": packages.filegroup(
+        name = "libnvshmem",
+        srcs = [
+            "lib/libnvshmem_host.so.3",
+            "lib/nvshmem_bootstrap_uid.so.3",
+            "lib/nvshmem_transport_ibrc.so.3",
+        ],
+    ),
+}
+
 def _read_redist_json(mctx, url, sha256):
     fname = ".{}.json".format(sha256)
     mctx.download(
@@ -136,6 +151,12 @@ def _cuda_impl(mctx):
         mctx,
         url = CUDA_REDIST_PREFIX + "redistrib_{}.json".format(CUDA_VERSION),
         sha256 = CUDA_REDIST_JSON_SHA256,
+    )
+
+    NVSHMEM_REDIST = _read_redist_json(
+        mctx,
+        url = NVSHMEM_REDIST_PREFIX + "redistrib_{}.json".format(NVSHMEM_VERSION),
+        sha256 = NVSHMEM_REDIST_JSON_SHA256,
     )
 
     CUDNN_REDIST = _read_redist_json(
@@ -180,6 +201,20 @@ def _cuda_impl(mctx):
             strip_prefix = paths.basename(arch_data["relative_path"]).replace(".tar.xz", ""),
         )
 
+    for pkg, build_file_content in NVSHMEM_PACKAGES.items():
+        pkg_data = NVSHMEM_REDIST[pkg]
+        arch_data = pkg_data.get(ARCH)
+        if not arch_data:
+            continue
+        arch_data = arch_data.get("cuda12", arch_data)
+        http_archive(
+            name = pkg,
+            build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + build_file_content,
+            url = NVSHMEM_REDIST_PREFIX + arch_data["relative_path"],
+            sha256 = arch_data["sha256"],
+            strip_prefix = paths.basename(arch_data["relative_path"]).replace(".tar.xz", ""),
+        )
+
     http_archive(
         name = "nccl",
         urls = ["https://files.pythonhosted.org/packages/11/0c/8c78b7603f4e685624a3ea944940f1e75f36d71bd6504330511f4a0e1557/nvidia_nccl_cu12-2.25.1-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl"],
@@ -194,8 +229,8 @@ def _cuda_impl(mctx):
     http_archive(
         name = "libpjrt_cuda",
         build_file = "libpjrt_cuda.BUILD.bazel",
-        url = "https://github.com/zml/pjrt-artifacts/releases/download/v11.0.0/pjrt-cuda_linux-amd64.tar.gz",
-        sha256 = "08fa022a6067ddfb5c951bdf11ddc398e63de21fdcacc9ffd07f70b1463482c2",
+        url = "https://github.com/zml/pjrt-artifacts/releases/download/v13.0.0/pjrt-cuda_linux-amd64.tar.gz",
+        sha256 = "6cdac9bac6db904e4423c9745c61000cf3acaf3c7da8016ab0016f076869048a",
     )
 
     return mctx.extension_metadata(
