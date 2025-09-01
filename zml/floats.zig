@@ -352,7 +352,7 @@ pub const Float8E4M3 = packed struct(u8) {
     pub const neg = Helpers.neg;
     pub const fromF32 = Helpers.fromF32;
     pub const toF32 = Helpers.toF32;
-    pub const format = Helpers.format;
+    pub const formatNumber = Helpers.formatNumber;
 };
 
 pub const Float8E3M4 = packed struct(u8) {
@@ -383,33 +383,46 @@ pub const Float8E3M4 = packed struct(u8) {
     pub const neg = Helpers.neg;
     pub const fromF32 = Helpers.fromF32;
     pub const toF32 = Helpers.toF32;
-    pub const format = Helpers.format;
+    pub const formatNumber = Helpers.formatNumber;
 };
 
 pub const Float8E8M0 = packed struct(u8) {
-    mantissa: u0,
+    mantissa: u0 = 0,
     exponent: u8,
-    sign: u0,
+    sign: u0 = 0,
 
     /// Lossy conversion from f32, similar to @floatCast
     pub fn fromF32(f: f32) Float8E8M0 {
         const vf32: Float32 = @bitCast(f);
-        return .{ .mantissa = 0, .exponent = @intCast(vf32.exponent), .sign = 0 };
+        return .{ .exponent = @intCast(vf32.exponent) };
     }
 
     /// Lossless conversion to f32.
     pub fn toF32(x: Float8E8M0) f32 {
+        if (x.exponent == 0) return min_scale;
         const vf32: Float32 = .{
-            .sign = 1,
+            .sign = 0,
             .exponent = x.exponent,
             .mantissa = 0,
         };
         return @bitCast(vf32);
     }
 
+    pub const min_scale: f32 = Float32.toF32(.{ .sign = 0, .exponent = 0, .mantissa = 0b1 << 22 });
+
     const Helpers = FloatHelpers(@This());
-    pub const format = Helpers.format;
+    pub const formatNumber = Helpers.formatNumber;
 };
+
+test Float8E8M0 {
+    try std.testing.expectEqual(Float8E8M0{ .exponent = 127 }, Float8E8M0.fromF32(1.0));
+    // try std.testing.expectEqual(5.877472e-39, Float8E8M0.toF32(.{ .exponent = 0}));
+
+    try testCustomFloat(Float8E8M0, .{
+        .lossless = &[_]f32{ Float8E8M0.min_scale, 1.0, 64.0, 1.0 / 128.0, std.math.pow(f32, 2.0, 127) },
+        .lossy = &[_]f32{1.00001},
+    });
+}
 
 pub const Float4E2M1 = packed struct(u4) {
     mantissa: u1,
@@ -421,7 +434,7 @@ pub const Float4E2M1 = packed struct(u4) {
     pub const zero = Helpers.zero;
     pub const neg = Helpers.neg;
     pub const fromF32 = Helpers.fromF32;
-    pub const format = Helpers.format;
+    pub const formatNumber = Helpers.formatNumber;
 
     pub const values = [_]f32{ 0.0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6 };
 
