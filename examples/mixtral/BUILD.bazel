@@ -13,3 +13,14 @@ zig_binary(
         "@zml//zml",
     ],
 )
+
+zig_binary(
+     name = "test",
+     srcs = ["Mixtral.zig"],
+     main = "test.zig",
+     deps = [
+         "//async",
+         "//stdx",
+         "//zml",
+     ],
+ )
