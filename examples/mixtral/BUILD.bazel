@@ -12,6 +12,7 @@ zig_binary(
         "@zml//stdx",
         "@zml//zml",
     ],
+    visibility = ["//visibility:public"],
 )
 
 zig_binary(
@@ -23,4 +24,5 @@ zig_binary(
          "//stdx",
          "//zml",
      ],
+    visibility = ["//visibility:public"],
  )
