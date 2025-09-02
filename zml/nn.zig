@@ -47,15 +47,20 @@ pub const BlockScaledLinear = struct {
     pub fn forward(self: BlockScaledLinear, x: Tensor) Tensor {
         const ctx = x.getContext();
         const res_shape = x.shape().setDim(-1, self.blocks.dim(-3));
+        log.warn("BlockScaledLinear({f} ({t}), {f}, {f}) -> {f}", .{ self.blocks, self.blocks_dtype, self.scale, x, res_shape });
 
         // Bitcast to our actual type. This allows to load weights in a packed layout.
-        const blocks = self.blocks.bitCast(self.blocks_dtype).merge(.{ .d_block = .{ .d_block, .bitcast } });
+        const blocks_0 = self.blocks.bitCast(self.blocks_dtype);
+        const blocks = blocks_0.merge(.{ .d_block = .{ .d_block, .bitcast } });
+
+        const scale = self.scale.bitCast(.f8e8m0);
 
         // log.warn("BlockScaledLinear({}): {f} -> {f}", .{ self, x, res_shape });
         const y = switch (ctx._platform.target) {
-            .cuda, .rocm, .tpu => y: {
+            .rocm, .tpu => y: {
                 // Merge the .d and .d_block axes, the custom call takes care of dequant.
                 const weight = blocks.merge(.{ .d = .{ .d, .d_block } });
+                log.warn("BlockScaledLinear: {f} -> {f} -> {f}", .{ self.blocks, blocks, weight });
                 const scaled_dot_res_shape = weight.shape().dot(x.shape(), .{.d}).rename(.{ .out = .d }).withDtype(x.dtype());
                 const mlir_ctx = ctx.mlirCtx();
                 const loc = mlir_ctx.location(@src());
@@ -64,7 +69,7 @@ pub const BlockScaledLinear = struct {
                     &.{
                         weight.value(),
                         x.value(),
-                        self.scale.value(),
+                        scale.value(),
                     },
                     .{
                         .call_target_name = "__op$block_scaled_dot",
@@ -78,9 +83,9 @@ pub const BlockScaledLinear = struct {
                 break :y Tensor._result(scaled_dot_res_shape, op.result(0)).transpose(res_shape);
             },
             else => y: {
-                const dequantized_weight: Tensor = .mul(
+                var dequantized_weight: Tensor = .mul(
                     blocks.convert(x.dtype()),
-                    self.scale.convert(x.dtype()).appendAxes(.{.d_block}),
+                    scale.convert(x.dtype()).appendAxes(.{.d_block}),
                 );
                 var y = x.dot(dequantized_weight.merge(.{ .d = .{ .d, .d_block } }), .{.d});
                 std.log.warn("output shape: {f}", .{y});
@@ -90,6 +95,10 @@ pub const BlockScaledLinear = struct {
             },
         };
         return if (self.bias) |bias| y.add(bias.broad(y.shape())) else y;
+    }
+
+    pub fn format(self: BlockScaledLinear, writer: *std.Io.Writer) !void {
+        try writer.print("BlockScaledLinear(blocks={f}, scale={f}, bias={?f}, dt={t})", .{ self.blocks, self.scale, self.bias, self.blocks_dtype });
     }
 };
 
@@ -127,7 +136,7 @@ const MoeOpts = struct {
 /// - experts: .{ .expert, .d_out, .d } expert layer (need to have a .forward method).
 /// -> output: .{ .s, .d_out }
 pub fn mixtureOfExperts(Expert: type, experts: Expert, input: Tensor, gating: Tensor, opts: MoeOpts) Tensor {
-    log.warn("mixtureOfExperts({s}, {}, {f}, {f})", .{ @typeName(Expert), experts, input, gating });
+    log.warn("mixtureOfExperts({s}, {f}, {f}, {f})", .{ @typeName(Expert), experts, input, gating });
     const num_tokens = input.dim(.s);
     const num_experts = gating.dim(.expert);
     stdx.debug.assert(opts.experts_per_token > 0, "mixtureOfExperts expects opts.experts_per_token > 0, got {}", .{opts});
@@ -156,7 +165,7 @@ pub fn mixtureOfExperts(Expert: type, experts: Expert, input: Tensor, gating: Te
             output = if (output) |o| o.add(expert_output) else expert_output;
         }
 
-        log.debug("mixtureOfExperts({s}, {}, {f}, {f}) -> single-stream impl", .{ @typeName(Expert), experts, input, gating });
+        log.warn("mixtureOfExperts({s}, {f}, {f}) -> single-stream impl", .{ @typeName(Expert), input, gating });
         return output.?;
     }
 
@@ -168,7 +177,8 @@ pub fn mixtureOfExperts(Expert: type, experts: Expert, input: Tensor, gating: Te
         break :tpe tpe;
     } else num_tokens;
 
-    if (3 * tokens_per_expert <= 2 * num_tokens) {
+    // if (3 * tokens_per_expert <= 2 * num_tokens) {
+    if (false) {
         // Lot of tokens, each experts chose their tokens and compute on that.
         // It means that some tokens may have only one expert assigned.
         // Each token will get assigned to at least one expert IIF the input gating is sums up to 1 (typically softmax output).
@@ -219,12 +229,12 @@ pub fn mixtureOfExperts(Expert: type, experts: Expert, input: Tensor, gating: Te
             .{ .update_fn = zml.Tensor.ScatterOpts.increment },
         );
 
-        log.debug("mixtureOfExperts({s}, {}, {f}, {f}) -> fixed budget impl tpe: {d}, tokens: {d}", .{ @typeName(Expert), experts, input, gating, tokens_per_expert, num_tokens });
+        log.warn("mixtureOfExperts({s}, {f}, {f}) -> fixed budget impl tpe: {d}, tokens: {d}", .{ @typeName(Expert), input, gating, tokens_per_expert, num_tokens });
         return output;
     } else {
         // We send all tokens to all experts, then discard result from non-topk experts using hard_gating.
         const routing = gating.topK(.{ .top_expert = .expert }, opts.experts_per_token, .{});
-        const per_token_score = routing.values.div(routing.values.sum(.top_expert)).convert(input.dtype());
+        const per_token_score = routing.values.div(routing.values.sum(.top_expert)).convert(gating.dtype());
 
         // hard_gating is eql to gating where only the top-2 experts have a non-zero score.
         const hard_gating = zml.Tensor.scatterSlices(
@@ -233,8 +243,8 @@ pub fn mixtureOfExperts(Expert: type, experts: Expert, input: Tensor, gating: Te
             per_token_score,
             .{ .indices_are_unique = true },
         ).withSharding(.{.expert});
-        log.debug("mixtureOfExperts({s}, {}, {f}, {f}) -> all to all impl", .{ @typeName(Expert), experts, input, gating });
-        const output_per_expert = experts.forward(input);
+        log.warn("mixtureOfExperts({s}, {f}, {f}) -> all to all impl", .{ @typeName(Expert), input, gating });
+        const output_per_expert = experts.forward(input.insertAxes(0, .{.expert}).repeat1d(.expert, num_experts));
         return output_per_expert.dot(hard_gating.convert(input.dtype()), .expert);
     }
 }

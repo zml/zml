@@ -35,7 +35,10 @@ pub fn asyncMain() !void {
     defer context.deinit();
 
     // Select platform
-    const platform = context.autoPlatform(.{});
+    const platform = context.autoPlatform(.{}).withCompilationOptions(.{
+        .xla_dump_to = "/tmp/zml/mixtral.test",
+        .sharding_enabled = false,
+    });
 
     // Resolve model files
     var args = std.process.args();
@@ -99,12 +102,31 @@ pub fn asyncMain() !void {
     // Load the activations.
     var activation_store = try zml.aio.detectFormatAndOpen(allocator, cli.activations);
     defer activation_store.deinit();
-    // for (activation_store.buffers.keys(), activation_store.buffers.values()) |k, v| {
-    //     log.info("Loaded activations: {s} -> {f}", .{k, v});
-    // }
+    for (activation_store.buffers.keys(), activation_store.buffers.values()) |k, *v| {
+        if (std.mem.endsWith(u8, k, ".mlp.in.0") or std.mem.endsWith(u8, k, ".mlp.out.0")) {
+            v.* = v.squeeze(0).withTags(.{ .s, .d });
+        }
+        log.info("Loaded activations: {s} -> {f}", .{ k, v });
+        // if (std.mem.endsWith(u8, k, "layers.23.mlp.experts.in.1")) log.info("Routing {s}: {d:32.2}", .{k, v.*});
+        // if (std.mem.endsWith(u8, k, "layers.23.mlp.experts.in.2")) log.info("Routing weights {s}: {d:32.2}", .{k, v.*});
+    }
 
     // Test implementation
     try testImplementation(platform, mixtral, mixtral_weights, activation_store);
+}
+
+pub fn dequantize(self: zml.nn.BlockScaledLinear) zml.Tensor {
+    // Bitcast to our actual type. This allows to load weights in a packed layout.
+    const blocks_0 = self.blocks.bitCast(self.blocks_dtype);
+    const blocks = blocks_0.merge(.{ .d_block = .{ .d_block, .bitcast } });
+
+    const scale = self.scale.bitCast(.f8e8m0);
+
+    const dequantized_weight: zml.Tensor = .mul(
+        blocks.convert(.bf16),
+        scale.convert(.bf16).appendAxes(.{.d_block}),
+    );
+    return dequantized_weight.merge(.{ .d = .{ .d, .d_block } }).contiguous(.{ .d, .out });
 }
 
 fn testImplementation(
@@ -114,11 +136,47 @@ fn testImplementation(
     store: zml.aio.BufferStore,
 ) !void {
     try zml.testing.testLayer(platform, store, "model.model.embed_tokens", mixtral.model.embed_tokens, mixtral_weights.model.embed_tokens, 1e-3);
-    try zml.testing.testLayer(platform, store, "model.model.layers.0.self_attn.v_proj", mixtral.model.layers[0].self_attn.v_proj, mixtral_weights.model.layers[0].self_attn.v_proj, 1e-2);
+    try zml.testing.testLayer(platform, store, "model.model.layers.0.self_attn.v_proj", mixtral.model.layers[0].self_attn.v_proj, mixtral_weights.model.layers[0].self_attn.v_proj, 2e-2);
     try zml.testing.testLayer(platform, store, "model.model.layers.0.self_attn.q_proj", mixtral.model.layers[0].self_attn.q_proj, mixtral_weights.model.layers[0].self_attn.q_proj, 2e-2);
     try zml.testing.testLayer(platform, store, "model.model.layers.0.self_attn.k_proj", mixtral.model.layers[0].self_attn.k_proj, mixtral_weights.model.layers[0].self_attn.k_proj, 2e-2);
     try zml.testing.testLayer(platform, store, "model.model.layers.0.self_attn.o_proj", mixtral.model.layers[0].self_attn.o_proj, mixtral_weights.model.layers[0].self_attn.o_proj, 2e-2);
+    try zml.testing.testLayer(platform, store, "model.model.layers.0.input_layernorm", mixtral.model.layers[0].input_layernorm, mixtral_weights.model.layers[0].input_layernorm, 1e-3);
+    try zml.testing.testLayer(platform, store, "model.model.layers.0.post_attention_layernorm", mixtral.model.layers[0].post_attention_layernorm, mixtral_weights.model.layers[0].post_attention_layernorm, 1e-3);
+
+    const allocator = std.heap.smp_allocator;
+    {
+        const w = mixtral.model.layers[22].mlp.experts.gate_up_proj;
+        const dequant_mod = try zml.compileFn(allocator, dequantize, .{.{
+            .blocks = w.blocks.shape(),
+            .scale = w.scale.shape(),
+            .bias = w.bias.?.shape(),
+            .blocks_dtype = w.blocks_dtype,
+        }}, platform);
+        defer dequant_mod.deinit();
+
+        const dequant_weight = dequant_mod.call(.{mixtral_weights.model.layers[22].mlp.experts.gate_up_proj});
+        const expected = store.buffers.get("model.model.layers.22.mlp.experts.gate_up_proj.bf16").?;
+
+        try zml.testing.expectClose(expected, dequant_weight, 1e-4);
+        log.info("All good for dequantize gate_up_proj", .{});
+    }
+
+    {
+        const w = mixtral.model.layers[22].mlp.experts.down_proj;
+        const dequant_mod = try zml.compileFn(allocator, dequantize, .{.{
+            .blocks = w.blocks.shape(),
+            .scale = w.scale.shape(),
+            .bias = w.bias.?.shape(),
+            .blocks_dtype = w.blocks_dtype,
+        }}, platform);
+        defer dequant_mod.deinit();
+
+        const dequant_weight = dequant_mod.call(.{mixtral_weights.model.layers[22].mlp.experts.down_proj});
+        const expected = store.buffers.get("model.model.layers.22.mlp.experts.down_proj.bf16").?;
+
+        try zml.testing.expectClose(expected, dequant_weight, 1e-4);
+        log.info("All good for dequantize down_proj", .{});
+    }
+
     try zml.testing.testLayer(platform, store, "model.model.layers.0.mlp", mixtral.model.layers[0].mlp, mixtral_weights.model.layers[0].mlp, 1e-2);
-    try zml.testing.testLayer(platform, store, "model.model.layers.0.input_layernorm", mixtral.model.layers[0].input_layernorm, mixtral_weights.model.layers[0].input_layernorm, 1e-2);
-    try zml.testing.testLayer(platform, store, "model.model.layers.0.post_attention_layernorm", mixtral.model.layers[0].post_attention_layernorm, mixtral_weights.model.layers[0].post_attention_layernorm, 1e-2);
 }

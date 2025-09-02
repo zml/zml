@@ -303,12 +303,13 @@ pub const Tensor = struct {
 
         res_shape = res_shape.withDtype(dt);
 
-        if (self._id == .buffer_id) {
-            // Allow to use bitcast outside of compilation.
-            var res = self;
-            res._shape = res_shape;
-            return res;
-        }
+        // TODO: it would be nice to do the bitcast when loading the model, so that inference code don't need to deal with missing metadata in safetensor.
+        // if (self._id == .buffer_id) {
+        //     // Allow to use bitcast outside of compilation.
+        //     var res = self;
+        //     res._shape = res_shape;
+        //     return res;
+        // }
 
         const loc = self.getContext().location(@src(), "bitCast({s})", .{@tagName(dt)});
         const op = dialect.stablehlo.bitcast_convert(
@@ -2132,12 +2133,11 @@ pub const Tensor = struct {
 
     /// Reshapes the input Tensor with the given shape.
     pub fn reshape(self: Tensor, output_shape_: anytype) Tensor {
-        const output_shape = self._shape.reshape(output_shape_);
-        if (self._id == .buffer_id) {
-            var res = self;
-            res._shape = output_shape;
-            return res;
-        }
+        var output_shape = self._shape.reshape(output_shape_);
+        output_shape._dtype = self.dtype();
+        // TODO: it would be nice to allow reshape when loading the model,
+        // so that inference code don't need to deal with missing metadata in safetensor.
+
         const tensor_type = mlirx.tensorType(self.getContext().mlirCtx(), output_shape);
         const loc = self.getContext().location(@src(), "reshape({f})", .{output_shape});
         const reshape_value = dialect.stablehlo.reshape(self.getContext().mlirCtx(), self.value(), tensor_type, loc);

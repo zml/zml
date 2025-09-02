@@ -301,7 +301,7 @@ const MoE = struct {
             const experts: Mlp = .{
                 .gate_up_proj = .{
                     // We need to bitcast the scale cause safetensors doesn't encode f8 types correctly
-                    .scale = e.gate_up_proj_scales.bitCast(.f8e8m0).withTags(.{ .expert, .out, .d }),
+                    .scale = e.gate_up_proj_scales.withTags(.{ .expert, .out, .d }),
                     // We don't bitcast here because PJRT doesn't handle packed host buffers
                     .blocks = e.gate_up_proj_blocks.withTags(.{ .expert, .out, .d, .d_block }),
                     .blocks_dtype = .f4e2m1,
@@ -310,7 +310,7 @@ const MoE = struct {
                 .down_proj = .{
                     .blocks = e.down_proj_blocks.withTags(.{ .expert, .out, .d, .d_block }),
                     .blocks_dtype = .f4e2m1,
-                    .scale = e.down_proj_scales.bitCast(.f8e8m0).withTags(.{ .expert, .out, .d }),
+                    .scale = e.down_proj_scales.withTags(.{ .expert, .out, .d }),
                     .bias = e.down_proj_bias.withTags(.{ .expert, .d }),
                 },
             };
@@ -323,6 +323,7 @@ const MoE = struct {
     };
 
     pub fn forward(self: MoE, input: zml.Tensor) zml.Tensor {
+        log.warn("compiling moe with {f}", .{input});
         const gating = self.router.forward(input).convert(.f32).softmax(.expert);
         return zml.nn.mixtureOfExperts(Mlp, self.experts, input, gating, .{ .experts_per_token = 2, .tokens_per_expert_ratio = 1.5 });
     }
@@ -395,6 +396,10 @@ const Mlp = struct {
 
         const out = gate.quickGelu().mul(up.addConstant(1));
         return zml.call(self.down_proj, .forward, .{out});
+    }
+
+    pub fn format(self: Mlp, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writer.print("Mlp(gate_up_proj=.{f}, down_proj=.{f})", .{ self.gate_up_proj, self.down_proj });
     }
 };
 
