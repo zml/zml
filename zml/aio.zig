@@ -10,14 +10,11 @@ const HostBuffer = @import("hostbuffer.zig").HostBuffer;
 const posix = @import("posix.zig");
 const zml = @import("zml.zig");
 
-// pub const gguf = @import("aio/gguf.zig");
-// pub const tinyllama = @import("aio/tinyllama.zig");
 pub const log = std.log.scoped(.@"zml/aio");
 test {
     std.testing.refAllDecls(@This());
-    // std.testing.refAllDecls(gguf);
     std.testing.refAllDecls(safetensors);
-    // std.testing.refAllDecls(torch);
+    std.testing.refAllDecls(torch);
 }
 
 // TODO error set for weight loading
