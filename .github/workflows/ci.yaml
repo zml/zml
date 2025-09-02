@@ -44,7 +44,7 @@ jobs:
           bazelisk-version: 1.26.0
           bazelisk-cache: false
           bazelrc: |
-            common -c opt
+            common --config=debug
             common --verbose_failures
             common --keep_going
             common --test_output=streamed

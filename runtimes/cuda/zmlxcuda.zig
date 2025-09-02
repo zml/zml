@@ -26,3 +26,5 @@ pub export fn zmlxcuda_dlopen(filename: [*c]const u8, flags: c_int) ?*anyopaque 
 
     return std.c.dlopen(new_filename, @bitCast(flags));
 }
+
+// if this code is not compiling, add a character here: xxx
