@@ -13,9 +13,7 @@ const StringBuilder = std.ArrayListUnmanaged(u8);
 const log = std.log.scoped(.@"zml/io");
 
 pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore {
-    var res: zml.aio.BufferStore = .{
-        .arena = std.heap.ArenaAllocator.init(allocator),
-    };
+    var res: zml.aio.BufferStore = .init(allocator);
     errdefer res.arena.deinit();
     const arena = res.arena.allocator();
 

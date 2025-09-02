@@ -74,17 +74,27 @@ pub fn populateModelWithPrefix(comptime Model: type, allocator: std.mem.Allocato
 pub const BufferStore = struct {
     pub const Buffers = std.StringArrayHashMapUnmanaged(HostBuffer);
     pub const Metadatas = std.StringArrayHashMapUnmanaged(Metadata);
+    var _unique_store_id: std.atomic.Value(u64) = .init(0);
 
     arena: std.heap.ArenaAllocator,
     files: []MemoryMappedFile = &.{},
     buffers: Buffers = .{},
     _metadata: Metadatas = .{},
+    _unique_id: u64,
 
-    /// Create an empty BufferStore. Takes owneship of the given files.
-    pub fn init(allocator: std.mem.Allocator, files: []const MemoryMappedFile) error{OutOfMemory}!BufferStore {
-        var self: zml.aio.BufferStore = .{
+    /// Create an empty BufferStore.
+    /// Takes owneship of the given files.
+    pub fn init(allocator: std.mem.Allocator) BufferStore {
+        return .{
             .arena = std.heap.ArenaAllocator.init(allocator),
+            ._unique_id = _unique_store_id.fetchAdd(1024 * 1024 * 1024, .monotonic),
         };
+    }
+
+    /// Create an empty BufferStore.
+    /// Takes owneship of the given files.
+    pub fn initWithFiles(allocator: std.mem.Allocator, files: []const MemoryMappedFile) error{OutOfMemory}!BufferStore {
+        var self: BufferStore = .init(allocator);
         self.files = try self.arena.allocator().dupe(MemoryMappedFile, files);
         return self;
     }
@@ -98,6 +108,24 @@ pub const BufferStore = struct {
 
     pub fn get(self: BufferStore, key: []const u8) ?HostBuffer {
         return self.buffers.get(key);
+    }
+
+    pub fn getTensor(self: BufferStore, key: []const u8) zml.Tensor {
+        return self.getTensorOrNull(key) orelse {
+            findSimilarBufferKeys(key, self, std.heap.smp_allocator);
+            @panic("Tensor not found");
+        };
+    }
+
+    pub fn getTensorOrNull(self: BufferStore, key: []const u8) ?zml.Tensor {
+        return if (self.buffers.getIndex(key)) |entry_idx|
+            .{
+                ._shape = self.buffers.values()[entry_idx].shape(),
+                ._id = .{ .buffer_id = self._unique_id + entry_idx },
+                ._donation = .input_buffer,
+            }
+        else
+            return null;
     }
 
     /// Count layers starting with the given prefix.
@@ -260,7 +288,7 @@ pub const MemoryMappedFile = struct {
 /// Helper handling prefix building.
 ///
 /// This allows to easily push/pop prefixes and handles the generation of the string with the correct format.
-const PrefixBuilder = struct {
+pub const PrefixBuilder = struct {
     /// Stores the computed prefix.
     data: std.ArrayListUnmanaged(u8) = .{},
     /// Stack storing the size of the intermediary prefix.
@@ -269,6 +297,17 @@ const PrefixBuilder = struct {
     pub fn deinit(self: *PrefixBuilder, allocator: std.mem.Allocator) void {
         self.data.deinit(allocator);
         self.subprefixes.deinit(allocator);
+    }
+
+    pub fn items(self: PrefixBuilder) []const u8 {
+        return self.data.items;
+    }
+
+    pub fn concat(self: *PrefixBuilder, allocator: std.mem.Allocator, prefix: []const u8) []const u8 {
+        self.push(allocator, prefix) catch unreachable;
+        const res = self.items();
+        self.pop();
+        return res;
     }
 
     pub fn push(self: *PrefixBuilder, allocator: std.mem.Allocator, prefix: []const u8) !void {
@@ -322,13 +361,8 @@ fn _populateStruct(
 
     const prefix = prefix_builder.data.items;
     if (T == zml.Tensor) {
-        return if (buffer_store.buffers.getIndex(prefix)) |entry_idx| {
-            const buffer = buffer_store.get(prefix).?;
-            obj.* = zml.Tensor{
-                ._shape = buffer.shape(),
-                ._id = .{ .buffer_id = unique_id + entry_idx },
-                ._donation = .input_buffer,
-            };
+        return if (buffer_store.getTensorOrNull(prefix)) |tensor| {
+            obj.* = tensor;
             return true;
         } else {
             if (required) {
@@ -468,7 +502,7 @@ test populateModel {
 
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
-    var store: BufferStore = .{ .arena = arena_state };
+    var store: BufferStore = .init(arena_state.allocator());
     try store.buffers.ensureUnusedCapacity(arena_state.allocator(), 16);
     store.buffers.putAssumeCapacity("a", Model._newHostBuffer(10));
     store.buffers.putAssumeCapacity("b.a", Model._newHostBuffer(20));
