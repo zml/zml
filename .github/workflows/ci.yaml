@@ -1,4 +1,4 @@
-name: commit
+name: ci
 on:
   push:
     branches:
@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: ${{ !contains(github.ref, 'master')}}
 
 jobs:
-  framework-tests:
+  ci:
     runs-on: ["runs-on","runner=4cpu-linux-x64", "image=ubuntu24-amd64", "run-id=${{ github.run_id }}", "extras=s3-cache"]
     steps:
       - uses: runs-on/action@v1
@@ -44,6 +44,7 @@ jobs:
           bazelisk-version: 1.26.0
           bazelisk-cache: false
           bazelrc: |
+            common -c opt
             common --verbose_failures
             common --keep_going
             common --test_output=streamed
