@@ -38,7 +38,7 @@ var module_def: c.PyModuleDef = .{
         .{},
     }),
     .m_slots = @constCast(&[_]c.PyModuleDef_Slot{
-        .{ .slot = c.Py_mod_exec, .value = @constCast(@ptrCast(&module_exec)) },
+        .{ .slot = c.Py_mod_exec, .value = @ptrCast(@constCast(&module_exec)) },
         .{},
     }),
     .m_traverse = null,

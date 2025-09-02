@@ -95,7 +95,7 @@ pub fn serialize(ptr: anytype, arena: *c.upb_Arena) SerializeError![]const u8 {
 
 pub fn parseEx(comptime UpbType: type, arena: *c.upb_Arena, data: []const u8, opts: ParseOptions) ParseError!*UpbType {
     const obj = try new(UpbType, arena);
-    return switch (c.upb_Decode(@ptrCast(@constCast(data)), data.len, @alignCast(@ptrCast(obj)), Minitable(UpbType), null, @bitCast(opts), arena)) {
+    return switch (c.upb_Decode(@ptrCast(@constCast(data)), data.len, @ptrCast(@alignCast(obj)), Minitable(UpbType), null, @bitCast(opts), arena)) {
         c.kUpb_DecodeStatus_Ok => obj,
         c.kUpb_DecodeStatus_Malformed => ParseError.Malformed,
         c.kUpb_DecodeStatus_OutOfMemory => std.mem.Allocator.Error.OutOfMemory,

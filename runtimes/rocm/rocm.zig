@@ -37,7 +37,7 @@ pub fn load() !*const pjrt.Api {
         return error.Unavailable;
     }
 
-    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
 
     var r_ = try runfiles.Runfiles.create(.{ .allocator = arena.allocator() }) orelse {

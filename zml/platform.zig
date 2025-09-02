@@ -113,7 +113,7 @@ const _CreateOptions = struct {
             /// "Best-Fit with Coalescing" algorithm
             bfc: Options,
             /// use cudaMallocAsync
-            @"async": Options,
+            async: Options,
             /// use raw cuMalloc
             platform,
 
@@ -129,7 +129,7 @@ const _CreateOptions = struct {
                 .platform => {
                     values.appendAssumeCapacity(pjrt.NamedValue.fromString("allocator", "platform"));
                 },
-                .bfc, .@"async" => |opt| {
+                .bfc, .async => |opt| {
                     values.appendAssumeCapacity(pjrt.NamedValue.from("allocator", self.allocator));
                     values.appendAssumeCapacity(pjrt.NamedValue.from("preallocate", opt.preallocate));
                     if (opt.memory_fraction > 0) {

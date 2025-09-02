@@ -8,7 +8,6 @@ zig_library(
         "flags.zig",
         "fmt.zig",
         "fs.zig",
-        "io.zig",
         "json.zig",
         "math.zig",
         "meta.zig",

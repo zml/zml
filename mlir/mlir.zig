@@ -605,7 +605,7 @@ pub fn DenseElementsAttribute(comptime dt: DenseElementsAttributeTypes) type {
 
         pub fn items(self: Attr) []const dt.ZigType() {
             const raw_bytes: [*]const u8 = c.mlirDenseElementsAttrGetRawData(self._inner) orelse unreachable;
-            const ptr: [*]const dt.ZigType() = @alignCast(@ptrCast(raw_bytes));
+            const ptr: [*]const dt.ZigType() = @ptrCast(@alignCast(raw_bytes));
             // Note the mlir API returns us the number of elements, not the number of bytes,
             // that's why we track the element type at comptime to allow items to work.
             return ptr[0..self.len()];
@@ -1743,7 +1743,7 @@ pub const helpers = struct {
                     writer: *std.Io.Writer,
                     err: ?std.Io.Writer.Error = null,
                     fn printCallback(mlir_str: c.MlirStringRef, opaque_ctx: ?*anyopaque) callconv(.c) void {
-                        var ctx: *@This() = @alignCast(@ptrCast(opaque_ctx));
+                        var ctx: *@This() = @ptrCast(@alignCast(opaque_ctx));
                         if (ctx.err) |_| return;
                         _ = ctx.writer.write(mlir_str.data[0..mlir_str.length]) catch |err| {
                             ctx.err = err;

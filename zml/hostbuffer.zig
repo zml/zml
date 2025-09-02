@@ -172,7 +172,7 @@ pub const HostBuffer = struct {
         // TODO we should allow interpreting the output as @Vector(8, f32) when the tensor is f32.
         stdx.debug.assert(DataType.fromZigType(T) == self.dtype(), "Can't reinterpret {f} as {s}", .{ self, @typeName(T) });
         stdx.debug.assert(self.isContiguous(), "{f} isn't contiguous, can't interpret as []const u8", .{self});
-        const ptr: [*]const T = @alignCast(@ptrCast(self._data));
+        const ptr: [*]const T = @ptrCast(@alignCast(self._data));
         return ptr[0..self._shape.count()];
     }
 

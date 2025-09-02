@@ -1,12 +1,12 @@
-const builtin = @import("builtin");
 const std = @import("std");
+const builtin = @import("builtin");
 
 const asynk = @import("async");
-const pjrt = @import("pjrt");
-const c = @import("c");
-const stdx = @import("stdx");
 const bazel_builtin = @import("bazel_builtin");
+const c = @import("c");
+const pjrt = @import("pjrt");
 const runfiles = @import("runfiles");
+const stdx = @import("stdx");
 
 const log = std.log.scoped(.@"zml/runtime/tpu");
 
@@ -25,10 +25,10 @@ fn isOnGCP() !bool {
     var f = try asynk.File.open("/sys/devices/virtual/dmi/id/product_name", .{ .mode = .read_only });
     defer f.close() catch {};
 
-    var buf = [_]u8{0} ** GoogleComputeEngine.len;
-    _ = try f.reader().readAll(&buf);
+    var content: [GoogleComputeEngine.len]u8 = undefined;
+    const n_read = try f.pread(&content, 0);
 
-    return std.mem.eql(u8, &buf, GoogleComputeEngine);
+    return std.mem.eql(u8, content[0..n_read], GoogleComputeEngine);
 }
 
 pub fn load() !*const pjrt.Api {
@@ -42,7 +42,7 @@ pub fn load() !*const pjrt.Api {
         return error.Unavailable;
     }
 
-    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
 
     var r_ = try runfiles.Runfiles.create(.{ .allocator = arena.allocator() }) orelse {

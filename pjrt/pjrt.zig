@@ -58,7 +58,7 @@ pub const ApiError = error{
 fn InnerMixin(comptime innerT: type) type {
     return struct {
         fn inner(self: anytype) *innerT {
-            return @ptrCast(@constCast(@alignCast(self)));
+            return @ptrCast(@alignCast(@constCast(self)));
         }
     };
 }
@@ -125,10 +125,10 @@ pub const Api = struct {
     }
 
     pub fn lookupExtension(self: *const Api, comptime ExtensionT: type, ext_id: c_int) ?*const ExtensionT {
-        var cur: [*c]const c.PJRT_Extension_Base = @alignCast(@ptrCast(self.inner.extension_start));
+        var cur: [*c]const c.PJRT_Extension_Base = @ptrCast(@alignCast(self.inner.extension_start));
         while (cur != null) : (cur = cur.*.next) {
             if (cur.*.type == ext_id) {
-                return @alignCast(@ptrCast(cur));
+                return @ptrCast(@alignCast(cur));
             }
         }
 
@@ -432,7 +432,7 @@ pub const Client = opaque {
             .client = self.inner(),
         }) catch unreachable;
         if (ret.addressable_memories) |memories| {
-            return @constCast(@ptrCast(memories[0..ret.num_addressable_memories]));
+            return @ptrCast(@constCast(memories[0..ret.num_addressable_memories]));
         }
         return &.{};
     }
