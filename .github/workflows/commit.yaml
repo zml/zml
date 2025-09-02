@@ -1,70 +1,68 @@
-name: framework-tests
+name: commit
 on:
-    push:
-        branches:
-            - master
-        tags:
-            - "*"
-    pull_request:
+  push:
+    branches:
+    - master
+    tags:
+    - '*'
+  pull_request:
 
 concurrency:
-    group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-    cancel-in-progress: ${{ !contains(github.ref, 'master')}}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ !contains(github.ref, 'master')}}
 
 jobs:
-    framework-tests:
-        runs-on:
-            [
-                "runs-on",
-                "runner=4cpu-linux-x64",
-                "image=ubuntu24-amd64",
-                "run-id=${{ github.run_id }}",
-                "extras=s3-cache",
-            ]
-        steps:
-            - uses: runs-on/action@v1
-            - name: Checkout
-              uses: actions/checkout@v4
+  framework-tests:
+    runs-on: ["runs-on","runner=4cpu-linux-x64", "image=ubuntu24-amd64", "run-id=${{ github.run_id }}", "extras=s3-cache"]
+    steps:
+      - uses: runs-on/action@v1
+      - name: Checkout
+        uses: actions/checkout@v4
 
-            - uses: runs-on/snapshot@v1
-              with:
-                  path: /home/runner/.cache/bazel-disk
-                  volume_size: 350
+      - uses: runs-on/snapshot@v1
+        with:
+          path: /home/runner/.cache/bazel-disk
+          volume_size: 350
 
-            - name: TMP fix for the mount user
-              run: sudo chown -R runner:runner /home/runner/.cache/
+      - name: TMP fix for the mount user
+        run: sudo chown -R runner:runner /home/runner/.cache/
 
-            - name: Setup Zig
-              uses: mlugg/setup-zig@v2
-              with:
-                  version: 0.15.1
-                  mirror: https://mirror.zml.ai/zig
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.1
+          mirror: https://mirror.zml.ai/zig
 
-            - name: Zig Format
-              run: zig fmt --check  $(git ls-files --exclude-standard -- ':!third_party/*' '*.zig' | xargs)
+      - name: Zig Format
+        run: zig fmt --check  $(git ls-files --exclude-standard -- ':!third_party/*' '*.zig' | xargs)
 
-            - name: No autofix in Zig code
-              run: bash -c "! git grep -l '// autofix' -- '*.zig'"
+      - name: No autofix in Zig code
+        run: bash -c "! git grep -l '// autofix' -- '*.zig'"
 
-            - uses: bazel-contrib/setup-bazel@0.15.0
-              with:
-                  bazelisk-version: 1.26.0
-                  bazelisk-cache: false
-                  bazelrc: |
-                      common --config=debug
-                      common --verbose_failures
-                      common --keep_going
-                      common --test_output=streamed
-                      common --color=yes
-                      common --show_timestamps
-                      common --disk_cache=/home/runner/.cache/bazel-disk
-                      common --strip=always
+      - uses: bazel-contrib/setup-bazel@0.15.0
+        with:
+          bazelisk-version: 1.26.0
+          bazelisk-cache: false
+          bazelrc: |
+            common --verbose_failures
+            common --keep_going
+            common --test_output=streamed
+            common --color=yes
+            common --show_timestamps
+            common --disk_cache=/home/runner/.cache/bazel-disk
+            common --strip=always
 
-            - name: ZML / bazel mod explain
-              run: bazel mod explain
+      - name: ZML / bazel mod explain
+        run: bazel mod explain
 
-            - name: ZML / bazel mod graph
-              run: bazel mod graph
+      - name: ZML / bazel mod graph
+        run: bazel mod graph
 
-            - name: ZML / bazel test //...
-              run: bazel test //examples/... //mlir/... //zml/...
+      - name: ZML / bazel query //...
+        run: bazel query //...
+
+      - name: ZML / bazel build //...
+        run: bazel build //...
+
+      - name: ZML / bazel test //...
+        run: bazel test //...

@@ -10,6 +10,7 @@ zig_library(
         "executor.zig",
         "stack.zig",
     ],
+    copts = ["-lc"],
     extra_srcs = glob(["asm/*.s"]),
     main = "async.zig",
     visibility = ["//visibility:public"],

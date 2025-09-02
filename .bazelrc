@@ -87,6 +87,9 @@ common:macos    --macos_sdk_version=13.0
 # This is done only on Linux for now since we use the local toolchain on macOS
 common:linux    --repo_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
 
+# Required for protobuf upb on Linux
+common:linux    --copt=-fPIC
+
 # Print test errors in the console
 test            --test_output=errors
 
