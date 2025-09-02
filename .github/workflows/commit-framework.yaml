@@ -34,7 +34,7 @@ jobs:
           mirror: https://mirror.zml.ai/zig
 
       - name: Zig Format
-        run: zig fmt --check  $(git ls-files --exclude-standard -- '*.zig' | xargs)
+        run: zig fmt --check  $(git ls-files --exclude-standard -- ':!third_party/*' '*.zig' | xargs)
 
       - name: No autofix in Zig code
         run: bash -c "! git grep -l '// autofix' -- '*.zig'"
