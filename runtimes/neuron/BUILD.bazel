@@ -83,6 +83,7 @@ zig_shared_library(
         "-fno-stack-check",
         "-fPIC",
     ],
+    features = ["pic"],
     main = "libneuronxla.zig",
     shared_lib_name = "libneuronxla.so",
     visibility = ["@libpjrt_neuron//:__subpackages__"],

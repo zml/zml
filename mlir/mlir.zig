@@ -127,12 +127,59 @@ pub const PassManager = opaque {
     pub fn asOpPassManager(self: *PassManager) *OpPassManager {
         return @ptrCast(c.mlirPassManagerGetAsOpPassManager(self.ptr()).ptr);
     }
+
+    pub fn runOnOp(self: *const PassManager, op: *Operation) !void {
+        if (c.mlirLogicalResultIsFailure(c.mlirPassManagerRunOnOp(self.ptr(), op.ptr()))) {
+            // return error.MlirUnexpected;
+        }
+    }
+
+    pub const EnableIRPrintingOpts = struct {
+        printBeforeAll: bool = false,
+        printAfterAll: bool = false,
+        printModuleScope: bool = false,
+        printAfterOnlyOnChange: bool = false,
+        printAfterOnlyOnFailure: bool = false,
+        flags: Operation.PrintFlags = .{},
+        treePrintingPath: []const u8 = "",
+    };
+
+    pub fn enableIRPrinting(self: *PassManager, opts: EnableIRPrintingOpts) void {
+        const flags = opts.flags.createNative();
+        defer c.mlirOpPrintingFlagsDestroy(flags);
+
+        c.mlirPassManagerEnableIRPrinting(
+            self.ptr(),
+            opts.printBeforeAll,
+            opts.printAfterAll,
+            opts.printModuleScope,
+            opts.printAfterOnlyOnChange,
+            opts.printAfterOnlyOnFailure,
+            flags,
+            stringRef(opts.treePrintingPath),
+        );
+    }
+
+    // pub extern fn mlirPassManagerEnableIRPrinting(passManager: MlirPassManager, printBeforeAll: bool, printAfterAll: bool, printModuleScope: bool, printAfterOnlyOnChange: bool, printAfterOnlyOnFailure: bool, flags: MlirOpPrintingFlags, treePrintingPath: MlirStringRef) void;
+    // pub extern fn mlirPassManagerEnableVerifier(passManager: MlirPassManager, enable: bool) void;
+
 };
 
 pub const OpPassManager = opaque {
     const M = Methods(OpPassManager, c.MlirOpPassManager);
 
     pub const ptr = M.ptr;
+    pub const format = M.format(c.mlirPrintPassPipeline);
+
+    pub fn addPass(self: *OpPassManager, pass: *Pass) void {
+        c.mlirOpPassManagerAddOwnedPass(self.ptr(), pass.ptr());
+    }
+
+    pub fn addPasses(self: *OpPassManager, passes: []const *Pass) void {
+        for (passes) |pass| {
+            self.addPass(pass);
+        }
+    }
 
     pub fn addPipeline(self: *OpPassManager, pipeline_name: []const u8) !void {
         var buffer: [1024]u8 = undefined;
@@ -142,12 +189,25 @@ pub const OpPassManager = opaque {
             return error.MlirUnexpected;
         }
     }
+
+    // pub fn parsePipeline(self: *OpPassManager, pipeline: []const u8) !void {
+    //     var buffer: [1024]u8 = undefined;
+    //     const result = stringFromStream(&buffer, c.mlirOpPassManagerParsePipeline, .{ self.ptr(), stringRef(pipeline) });
+    //     if (result.len != 0) {
+    //         log.err("mlir error: {s}", .{result});
+    //         return error.MlirUnexpected;
+    //     }
+    // }
 };
 
 pub const Pass = opaque {
     const M = Methods(Pass, c.MlirPass);
 
     pub const ptr = M.ptr;
+
+    pub fn create(comptime name: @TypeOf(.enum_literal)) *Pass {
+        return @ptrCast(@field(c, "mlirCreate" ++ @tagName(name))().ptr);
+    }
 };
 
 pub const Context = opaque {
@@ -651,15 +711,19 @@ pub const Module = opaque {
     pub const ptr = M.ptr;
 
     pub fn init(loc: *const Location) *Module {
-        return @constCast(@ptrCast(c.mlirModuleCreateEmpty(loc.ptr()).ptr));
+        return @ptrCast(@constCast(c.mlirModuleCreateEmpty(loc.ptr()).ptr));
     }
 
     pub fn deinit(self: *Module) void {
         c.mlirModuleDestroy(self.ptr());
     }
 
+    pub fn format(self: *const Module, writer: *std.Io.Writer) !void {
+        return self.operation().format(writer);
+    }
+
     pub fn fromOperation(op: *Operation) *Module {
-        return @constCast(@ptrCast(c.mlirModuleFromOperation(op.ptr()).ptr));
+        return @ptrCast(@constCast(c.mlirModuleFromOperation(op.ptr()).ptr));
     }
 
     pub fn operation(self: *const Module) *Operation {
@@ -667,7 +731,7 @@ pub const Module = opaque {
     }
 
     pub fn parse(ctx: *Context, source: []const u8) Error!*Module {
-        return @constCast(@ptrCast(c.mlirModuleCreateParse(ctx.ptr(), stringRef(source)).ptr orelse return Error.InvalidMlir));
+        return @ptrCast(@constCast(c.mlirModuleCreateParse(ctx.ptr(), stringRef(source)).ptr orelse return Error.InvalidMlir));
     }
 
     pub fn context(self: *const Module) *Context {
@@ -1014,29 +1078,33 @@ pub const Operation = opaque {
             self: *const Operation,
             flags: PrintFlags,
         };
+
+        fn createNative(self: PrintFlags) c.MlirOpPrintingFlags {
+            const flags = c.mlirOpPrintingFlagsCreate();
+            if (self.elide_large_elements_attrs) |v| {
+                c.mlirOpPrintingFlagsElideLargeElementsAttrs(flags, @intCast(v));
+            }
+            c.mlirOpPrintingFlagsEnableDebugInfo(
+                flags,
+                self.debug_info,
+                self.debug_info_pretty_form,
+            );
+            if (self.print_generic_op_form) {
+                c.mlirOpPrintingFlagsPrintGenericOpForm(flags);
+            }
+            if (self.use_local_scope) {
+                c.mlirOpPrintingFlagsUseLocalScope(flags);
+            }
+            if (self.assume_verified) {
+                c.mlirOpPrintingFlagsAssumeVerified(flags);
+            }
+            return flags;
+        }
     };
 
     fn formatWithFlags(fctx: PrintFlags.Ctx, writer: *std.io.Writer) std.Io.Writer.Error!void {
-        const flags = c.mlirOpPrintingFlagsCreate();
+        const flags = fctx.flags.createNative();
         defer c.mlirOpPrintingFlagsDestroy(flags);
-
-        if (fctx.flags.elide_large_elements_attrs) |v| {
-            c.mlirOpPrintingFlagsElideLargeElementsAttrs(flags, @intCast(v));
-        }
-        c.mlirOpPrintingFlagsEnableDebugInfo(
-            flags,
-            fctx.flags.debug_info,
-            fctx.flags.debug_info_pretty_form,
-        );
-        if (fctx.flags.print_generic_op_form) {
-            c.mlirOpPrintingFlagsPrintGenericOpForm(flags);
-        }
-        if (fctx.flags.use_local_scope) {
-            c.mlirOpPrintingFlagsUseLocalScope(flags);
-        }
-        if (fctx.flags.assume_verified) {
-            c.mlirOpPrintingFlagsAssumeVerified(flags);
-        }
         var sctx: StringCallbackCtx = .{ .writer = writer };
         c.mlirOperationPrintWithFlags(fctx.self.ptr(), flags, stringCallback, &sctx);
         if (sctx.err) |err| {

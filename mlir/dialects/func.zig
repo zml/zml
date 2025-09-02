@@ -76,9 +76,9 @@ pub fn call(ctx: *mlir.Context, name: []const u8, values: []const *const mlir.Va
     });
 }
 
-pub fn return_(ctx: *mlir.Context, values: *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
+pub fn return_(ctx: *mlir.Context, value: *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "func.return", .{
-        .operands = .{ .flat = &.{values} },
+        .operands = .{ .flat = &.{value} },
         .location = location,
         .verify = false,
     });
@@ -86,7 +86,7 @@ pub fn return_(ctx: *mlir.Context, values: *const mlir.Value, location: *const m
 
 pub fn returns(ctx: *mlir.Context, values: []const *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "func.return", .{
-        .operands = .{ .variadic = &.{values} },
+        .operands = .{ .flat = values },
         .verify = false,
         .location = location,
     });

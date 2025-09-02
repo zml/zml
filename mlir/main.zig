@@ -1,8 +1,10 @@
-const asynk = @import("async");
 const std = @import("std");
+
+const asynk = @import("async");
+const dialects = @import("mlir/dialects");
+const mlir = @import("mlir");
 const stdx = @import("stdx");
 const zml = @import("zml");
-
 const Shape = zml.Shape;
 
 var global_compilation_context: ?*CompilationContext = null;
@@ -22,10 +24,26 @@ pub const Tensor = struct {
     var current_id: std.atomic.Value(usize) = .{ .raw = 1 };
 
     id: usize,
+    auto_broadcast: bool = false,
     _shape: zml.Shape,
     tensor_origin: TensorOrigin = .{ .argument = {} },
 
     pub const tensor = init;
+
+    fn mlirType(self: Tensor, mlir_ctx: *mlir.Context) *const mlir.Type {
+        return mlir.rankedTensorType(
+            self.dims(),
+            zml.mlir.Type.fromDType(mlir_ctx, self.dtype()),
+        );
+    }
+
+    fn mlirCtx() *mlir.Context {
+        return CompilationContext.current().mlir_ctx;
+    }
+
+    fn currentBlock() *mlir.Block {
+        return CompilationContext.current().currentBlock();
+    }
 
     pub fn init(shape_: zml.Shape) Tensor {
         return .{ .id = Tensor.current_id.fetchAdd(1, .seq_cst), ._shape = shape_ };
@@ -55,6 +73,12 @@ pub const Tensor = struct {
         return self._shape.count();
     }
 
+    pub fn autoBroadcast(self: Tensor) Tensor {
+        var ret = self;
+        ret.auto_broadcast = true;
+        return ret;
+    }
+
     pub fn matmul(lhs: Tensor, rhs: Tensor) Tensor {
         //stdx.debug.assert(lhs.rank() >= 1 and rhs.rank() >= 1, "Can't matmul({f}, {f}) ! The two tensors need to have at least rank 1.", .{ lhs, rhs });
 
@@ -82,6 +106,15 @@ pub const Tensor = struct {
             batching[i] = .{ @intCast(i), @intCast(i) };
         }
         return lhs_broad.dotGeneral(rhs, &contracting, batching[0..n_batching_axes]);
+    }
+
+    pub const DotArgs = struct {
+        contract_on: []const [2]i8,
+        batch_on: ?[]const [2]i8 = null,
+    };
+
+    pub fn dot(lhs: Tensor, rhs: Tensor, args: DotArgs) Tensor {
+        return lhs.dotGeneral(rhs, args.contract_on, args.batch_on orelse &.{});
     }
 
     pub fn dotGeneral(
@@ -176,26 +209,15 @@ pub const Tensor = struct {
         return res;
     }
 
-    pub fn constant(dimz: anytype, val: zml.Data) Tensor {
-        const sh = Shape.init(dimz, val.dtype());
-        const ctx = CompilationContext.current().mlir_ctx;
-        //const loc = CompilationContext.current().location(@src(), "dims={f}, value={}", .{ sh, val });
-        const loc = mlir.Location.unknown(ctx);
-
-        var constant_op = switch (val.dtype()) {
-            inline .bool, .i8, .i16, .i32, .i64, .u8, .u16, .u32, .u64, .bf16, .f16, .f32, .f64 => |t| dialects.stablehlo.constant(ctx, &.{}, zml.mlir.Type.fromDType(ctx, t), val.constSlice(), loc),
-            inline else => b: {
-                const val_f32 = val.as(f32);
-                break :b dialects.stablehlo.constant(ctx, &.{}, mlir.floatType(ctx, .f32), std.mem.asBytes(&val_f32), loc);
-            },
-        };
-        CompilationContext.current().currentBlock().appendOwnedOperation(constant_op);
-
-        if (sh.rank() > 0) {
-            constant_op = dialects.stablehlo.broadcast_in_dim(ctx, constant_op.result(0), &.{}, mlir.rankedTensorType(sh.dims(), zml.mlir.Type.fromDType(ctx, sh.dtype())), loc);
-            CompilationContext.current().currentBlock().appendOwnedOperation(constant_op);
-        }
-        return _result(sh, constant_op.result(0)).convert(val.dtype());
+    pub fn constant(val: zml.DataType.Value) Tensor {
+        const op = dialects.stablehlo.constant(
+            mlirCtx(),
+            &.{},
+            zml.mlir.Type.fromDType(mlirCtx(), val.dtype()),
+            val.constSlice(),
+            .unknown(mlirCtx()),
+        ).appendTo(currentBlock());
+        return _result(.init(&.{}, val.dtype()), op.result(0)).autoBroadcast();
     }
 
     pub fn add(self: Tensor, other: Tensor) Tensor {
@@ -207,7 +229,7 @@ pub const Tensor = struct {
     }
 
     pub fn relu(self: Tensor) Tensor {
-        return self.maximum(Tensor.constant(self.dims(), self.dtype().zero()));
+        return self.maximum(.constant(self.dtype().zero()));
     }
 
     pub fn flattenAll(self: Tensor) Tensor {
@@ -215,13 +237,63 @@ pub const Tensor = struct {
         return self.reshape(.{self.count()});
     }
 
+    pub fn broadcast(self: Tensor, output_shape: Shape, axes_: []const i64) Tensor {
+        stdx.debug.assert(axes_.len == self.rank(), "broadcast expects axes_ to map all axes from self to axes of the output shape, got broadcast({f}, {f}, {any})", .{ self, output_shape, axes_ });
+        for (0.., axes_) |self_ax, other_ax| {
+            const d = self.dim(self_ax);
+            stdx.debug.assert(d == 1 or d == output_shape.dim(other_ax), "broadcast expects shape axes to either be 1-sized or to match the target size. got broadcast({f}, {f}, {any}), error on self axis {d} mapping to other axis {d}", .{ self, output_shape, axes_, self_ax, other_ax });
+        }
+
+        const res_shape = output_shape.withDtype(self.dtype());
+        if (std.mem.eql(i64, self.dims(), output_shape.dims())) {
+            // No broadcast needed. We don't emit a new stablehlo value
+            // but we propagate output_shape tags.
+            return _result(res_shape, self.value());
+        }
+        const ctx = self.getContext();
+        const result_type = mlir.rankedTensorType(
+            res_shape.dims(),
+            zml.mlir.Type.fromDType(ctx.mlir_ctx, res_shape.dtype()),
+        );
+        const broadcast_op = dialects.stablehlo.broadcast_in_dim(ctx.mlir_ctx, self.value(), axes_, result_type, .unknown(ctx.mlir_ctx)).appendTo(ctx.currentBlock());
+        return _result(res_shape, broadcast_op.result(0));
+    }
+
+    pub fn broad(self: Tensor, other: Shape) Tensor {
+        // TODO: broad is too restrictive because sometime you only want to specify one specific axis
+        // Note: if you code below, make sure to update Shape.canBroadcastTo.
+        stdx.debug.assert(self._shape.canBroadcastTo(other), "Can't broadcast {f} to {f}", .{ self, other });
+
+        // Already the right shape
+        if (std.mem.eql(i64, self.dims(), other.dims())) return self;
+
+        // Non ambiguous broadcasting
+        // TODO: broad is error prone because of this:
+        // it will happily broadcast .{ .a = 10, .b = 1 } to .{ .b = 10, .a = 5 }
+        if (self._shape.rank() == 0 or self._shape.rank() == other.rank()) {
+            const all_axes = [MAX_RANK]i64{ 0, 1, 2, 3, 4, 5, 6, 7 };
+            return self.broadcast(other, all_axes[0..self.rank()]);
+        }
+
+        // check that each axis of self maps to an axis of other
+        var axes_: stdx.BoundedArray(i64, MAX_RANK) = .{};
+        for (self._shape.tags()) |t| {
+            axes_.appendAssumeCapacity(@intCast(other.axis(t)));
+        }
+        return self.broadcast(other, axes_.constSlice());
+    }
+
     pub fn reshape(self: Tensor, output_shape_: anytype) Tensor {
         const output_shape = self._shape.reshape(output_shape_);
         const ctx = self.getContext().mlir_ctx;
         const tensor_type = mlir.rankedTensorType(output_shape.dims(), zml.mlir.Type.fromDType(ctx, output_shape.dtype()));
         //const loc = self.getContext().location(@src(), "reshape({f})", .{output_shape});
-        const reshape_op = dialects.stablehlo.reshape(self.getContext().mlir_ctx, self.value(), tensor_type, .unknown(ctx));
-        CompilationContext.current().currentBlock().appendOwnedOperation(reshape_op);
+        const reshape_op = dialects.stablehlo.reshape(
+            self.getContext().mlir_ctx,
+            self.value(),
+            tensor_type,
+            .unknown(ctx),
+        ).appendTo(CompilationContext.current().currentBlock());
         return _result(output_shape, reshape_op.result(0));
     }
 
@@ -233,8 +305,12 @@ pub const Tensor = struct {
 
         const mlir_ctx = self.getContext().mlir_ctx;
         const res_type = mlir.rankedTensorType(self.dims(), zml.mlir.Type.fromDType(mlir_ctx, to));
-        const op = dialects.stablehlo.convert(mlir_ctx, self.value(), res_type, .unknown(mlir_ctx));
-        CompilationContext.current().currentBlock().appendOwnedOperation(op);
+        const op = dialects.stablehlo.convert(
+            mlir_ctx,
+            self.value(),
+            res_type,
+            .unknown(mlir_ctx),
+        ).appendTo(CompilationContext.current().currentBlock());
         return _result(self._shape.withDtype(to), op.result(0));
     }
 
@@ -276,6 +352,7 @@ pub const Tensor = struct {
     //        &.{a},
     //    );
     //}
+    //
 
     fn binaryOp(
         src: std.builtin.SourceLocation,
@@ -286,6 +363,7 @@ pub const Tensor = struct {
         _ = src; // autofix
         return struct {
             pub fn binaryOpHelper(self: Tensor, other: Tensor) Tensor {
+                const other_ = if (other.auto_broadcast) other.broad(self.shape()) else other;
                 //stdx.debug.assert(self.dtype() == other.dtype(), "{s} expects tensor to be of same type, got {f} and {f}", .{ op_name, self, other });
 
                 //if (self.rank() == 0 and other.rank() != 0) {
@@ -300,8 +378,7 @@ pub const Tensor = struct {
 
                 const ctx = self.getContext();
                 //const location = ctx.location(src, "{s}({f}, {f})", .{ op_name, self, other });
-                const ret = op_fn(ctx.mlir_ctx, self.value(), other.value(), .unknown(ctx.mlir_ctx));
-                CompilationContext.current().currentBlock().appendOwnedOperation(ret);
+                const ret = op_fn(mlirCtx(), self.value(), other_.value(), .unknown(ctx.mlir_ctx)).appendTo(currentBlock());
                 return _result(self._shape, ret.result(0));
             }
         }.binaryOpHelper;
@@ -334,29 +411,31 @@ pub const Tensor = struct {
 
 /// Model definition
 const Mnist = struct {
-    fc1: Layer,
-    fc2: Layer,
+    layers: [2]Layer,
 
     const Layer = struct {
         weight: Tensor,
         bias: Tensor,
 
         pub fn forward(self: Layer, input: Tensor) Tensor {
-            _ = self; // autofix
-            //return self.weight.matmul(input).add(self.bias).relu();
-            return input.relu();
+            return self.weight.dot(
+                input,
+                .{ .contract_on = .{ 0, 1 } },
+            ).matmul(input).add(self.bias).relu();
         }
     };
 
     pub fn init(buffer_store: zml.aio.BufferStore) Mnist {
         return .{
-            .fc1 = .{
-                .weight = .init(buffer_store.get("fc1.weight").?.shape()),
-                .bias = .init(buffer_store.get("fc1.bias").?.shape()),
-            },
-            .fc2 = .{
-                .weight = .init(buffer_store.get("fc2.weight").?.shape()),
-                .bias = .init(buffer_store.get("fc2.bias").?.shape()),
+            .layers = .{
+                .{
+                    .weight = .init(buffer_store.get("fc1.weight").?.shape()),
+                    .bias = .init(buffer_store.get("fc1.bias").?.shape()),
+                },
+                .{
+                    .weight = .init(buffer_store.get("fc2.weight").?.shape()),
+                    .bias = .init(buffer_store.get("fc2.bias").?.shape()),
+                },
             },
         };
     }
@@ -365,17 +444,13 @@ const Mnist = struct {
     pub fn forward(self: Mnist, input: Tensor) Tensor {
         // std.log.info("Compiling for target: {s}", .{@tagName(input.getContext().target())});
         var x = input.flattenAll().convert(.f32);
-        const layers: []const Layer = &.{ self.fc1, self.fc2 };
-        for (layers) |layer| {
+        for (self.layers) |layer| {
             x = layer.forward(x);
         }
         //return x.argMax(0).indices.convert(.u8);
         return x;
     }
 };
-
-const dialects = @import("mlir/dialects");
-const mlir = @import("mlir");
 
 pub fn main() !void {
     try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain);
@@ -413,6 +488,7 @@ const CompilationContext = struct {
     mappings: stdx.BoundedArray(std.AutoArrayHashMapUnmanaged(usize, usize), 16) = .{},
 
     pub fn init(allocator: std.mem.Allocator) CompilationContext {
+        mlir.registerPasses("Transforms");
         const mlir_registry = mlir.DialectRegistry.init() catch unreachable;
         inline for (.{ "func", "stablehlo" }) |d| {
             mlir.DialectHandle.fromString(d).insertDialect(mlir_registry);
@@ -500,12 +576,15 @@ fn compileModel(allocator: std.mem.Allocator, comptime func: anytype, model: std
     //    }
     //}.cb, &context, &args);
 
-    emitMlir(&compilation_context, func, .{model} ++ args);
+    emitMlir(&compilation_context, func, .{model} ++ args) catch unreachable;
 }
 
-fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, args: stdx.meta.FnArgs(func)) void {
+fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, args: stdx.meta.FnArgs(func)) !void {
     var arena = std.heap.ArenaAllocator.init(compilation_context.allocator);
     defer arena.deinit();
+
+    const module = mlir.Module.init(.unknown(compilation_context.mlir_ctx));
+    errdefer module.deinit();
 
     const block = mlir.Block.init(&.{}, &.{});
     errdefer block.deinit();
@@ -513,27 +592,21 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
     compilation_context.pushBlock(block);
     defer compilation_context.popBlock();
 
-    var input_types_list = std.array_list.Managed(*const mlir.Type).init(arena.allocator());
-    defer input_types_list.deinit();
-
     const LocalContext = struct {
         compilation_context: *CompilationContext,
-        input_types_list: std.array_list.Managed(*const mlir.Type),
         current_argument_id: usize = 0,
     };
     var context: LocalContext = .{
         .compilation_context = compilation_context,
-        .input_types_list = input_types_list,
     };
     zml.meta.visit(struct {
-        fn cb(inner_context: *LocalContext, tensor: *const Tensor) void {
-            _ = inner_context.compilation_context.currentBlock().addArgument(
-                mlir.rankedTensorType(tensor.dims(), zml.mlir.Type.fromDType(inner_context.compilation_context.mlir_ctx, tensor.dtype())),
-                .unknown(inner_context.compilation_context.mlir_ctx),
+        fn cb(ctx_: *LocalContext, tensor: *const Tensor) void {
+            _ = ctx_.compilation_context.currentBlock().addArgument(
+                tensor.mlirType(ctx_.compilation_context.mlir_ctx),
+                .unknown(ctx_.compilation_context.mlir_ctx),
             );
-            inner_context.compilation_context.currentMapping().put(inner_context.compilation_context.allocator, tensor.id, inner_context.current_argument_id) catch unreachable;
-            inner_context.input_types_list.append(mlir.rankedTensorType(tensor.dims(), zml.mlir.Type.fromDType(inner_context.compilation_context.mlir_ctx, tensor.dtype()))) catch unreachable;
-            inner_context.current_argument_id += 1;
+            ctx_.compilation_context.currentMapping().put(ctx_.compilation_context.allocator, tensor.id, ctx_.current_argument_id) catch unreachable;
+            ctx_.current_argument_id += 1;
         }
     }.cb, &context, &args);
 
@@ -541,20 +614,37 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
         global_compilation_context = compilation_context;
         defer global_compilation_context = null;
         const result = @call(.auto, func, args);
-        const fn_op = dialects.func.returns(compilation_context.mlir_ctx, &.{result.value()}, .unknown(compilation_context.mlir_ctx));
-        compilation_context.currentBlock().appendOwnedOperation(fn_op);
+        _ = dialects.func.return_(compilation_context.mlir_ctx, result.value(), .unknown(compilation_context.mlir_ctx)).appendTo(compilation_context.currentBlock());
     }
 
     const mlir_fn = dialects.func.func(compilation_context.mlir_ctx, .{
-        .name = "mnist",
-        .args = null,
-        .args_attributes = null,
-        .results = null,
-        .results_attributes = null,
+        .name = "main",
         .block = compilation_context.currentBlock(),
         .location = .unknown(compilation_context.mlir_ctx),
     });
-    _ = mlir_fn; // autofix
 
-    std.debug.print("{f}\n", .{compilation_context.currentBlock()});
+    var pass_manager = mlir.PassManager.init(compilation_context.mlir_ctx);
+    pass_manager.enableIRPrinting(.{
+        .printBeforeAll = true,
+    });
+    {
+        var opm = pass_manager.asOpPassManager();
+        const passes: []const []const u8 = &.{
+            "canonicalize",
+            "cse",
+            "canonicalize",
+        };
+        for (passes) |pass| {
+            try opm.addPipeline(pass);
+        }
+    }
+
+    pass_manager.runOnOp(mlir_fn) catch |err| {
+        std.debug.print("Failed to optimize module: {any}\n", .{err});
+        return err;
+    };
+
+    _ = mlir_fn.appendTo(module.body());
+
+    std.debug.print("{f}\n", .{module});
 }
