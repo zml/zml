@@ -103,30 +103,20 @@ pub fn asyncMain() !void {
     var activation_store = try zml.aio.detectFormatAndOpen(allocator, cli.activations);
     defer activation_store.deinit();
     for (activation_store.buffers.keys(), activation_store.buffers.values()) |k, *v| {
-        if (std.mem.endsWith(u8, k, ".mlp.in.0") or std.mem.endsWith(u8, k, ".mlp.out.0")) {
-            v.* = v.squeeze(0).withTags(.{ .s, .d });
+        if (std.mem.indexOf(u8, k, ".layers.") != null and (std.mem.endsWith(u8, k, ".in.0") or std.mem.endsWith(u8, k, ".out.0"))) {
+            if (v.dim(0) == 1 and v.rank() == 3) {
+                v.* = v.squeeze(0).withTags(.{ .s, .d });
+            }
         }
+
         log.info("Loaded activations: {s} -> {f}", .{ k, v });
         // if (std.mem.endsWith(u8, k, "layers.23.mlp.experts.in.1")) log.info("Routing {s}: {d:32.2}", .{k, v.*});
         // if (std.mem.endsWith(u8, k, "layers.23.mlp.experts.in.2")) log.info("Routing weights {s}: {d:32.2}", .{k, v.*});
+        if (std.mem.endsWith(u8, k, ".0.mlp.experts.in.2")) log.info("Routing weights {s}: {d:32.2}", .{ k, v.* });
     }
 
     // Test implementation
     try testImplementation(platform, mixtral, mixtral_weights, activation_store);
-}
-
-pub fn dequantize(self: zml.nn.BlockScaledLinear) zml.Tensor {
-    // Bitcast to our actual type. This allows to load weights in a packed layout.
-    const blocks_0 = self.blocks.bitCast(self.blocks_dtype);
-    const blocks = blocks_0.merge(.{ .d_block = .{ .d_block, .bitcast } });
-
-    const scale = self.scale.bitCast(.f8e8m0);
-
-    const dequantized_weight: zml.Tensor = .mul(
-        blocks.convert(.bf16),
-        scale.convert(.bf16).appendAxes(.{.d_block}),
-    );
-    return dequantized_weight.merge(.{ .d = .{ .d, .d_block } }).contiguous(.{ .d, .out });
 }
 
 fn testImplementation(
@@ -142,6 +132,7 @@ fn testImplementation(
     try zml.testing.testLayer(platform, store, "model.model.layers.0.self_attn.o_proj", mixtral.model.layers[0].self_attn.o_proj, mixtral_weights.model.layers[0].self_attn.o_proj, 2e-2);
     try zml.testing.testLayer(platform, store, "model.model.layers.0.input_layernorm", mixtral.model.layers[0].input_layernorm, mixtral_weights.model.layers[0].input_layernorm, 1e-3);
     try zml.testing.testLayer(platform, store, "model.model.layers.0.post_attention_layernorm", mixtral.model.layers[0].post_attention_layernorm, mixtral_weights.model.layers[0].post_attention_layernorm, 1e-3);
+    try zml.testing.testLayer(platform, store, "model.model.layers.0.mlp.router", mixtral.model.layers[0].mlp.router, mixtral_weights.model.layers[0].mlp.router, 1e-2);
 
     const allocator = std.heap.smp_allocator;
     {
@@ -178,5 +169,36 @@ fn testImplementation(
         log.info("All good for dequantize down_proj", .{});
     }
 
+    {
+        const moe: MoeAllToAll = .{ .experts = mixtral.model.layers[0].mlp.experts };
+
+        try zml.testing.testLayer(platform, store, "model.model.layers.0.mlp.experts", moe, .{ .experts = mixtral_weights.model.layers[0].mlp.experts }, 5e-2);
+    }
+
     try zml.testing.testLayer(platform, store, "model.model.layers.0.mlp", mixtral.model.layers[0].mlp, mixtral_weights.model.layers[0].mlp, 1e-2);
 }
+
+fn dequantize(self: zml.nn.BlockScaledLinear) zml.Tensor {
+    // Bitcast to our actual type. This allows to load weights in a packed layout.
+    const blocks_0 = self.blocks.bitCast(self.blocks_dtype);
+    const blocks = blocks_0.merge(.{ .d_block = .{ .d_block, .bitcast } });
+
+    const scale = self.scale.bitCast(.f8e8m0);
+
+    const dequantized_weight: zml.Tensor = .mul(
+        blocks.convert(.bf16),
+        scale.convert(.bf16).appendAxes(.{.d_block}),
+    );
+    return dequantized_weight.merge(.{ .d = .{ .d, .d_block } }).contiguous(.{ .d, .out });
+}
+
+const MoeAllToAll = struct {
+    experts: Mixtral.Mlp,
+
+    /// Fork of Mixtral.Moe where we also feed the gating.
+    pub fn forward(self: MoeAllToAll, input: zml.Tensor, routing: zml.Tensor, gating: zml.Tensor) zml.Tensor {
+        _ = routing;
+
+        return zml.nn.mixtureOfExpertsAllToAll(Mixtral.Mlp, self.experts, input, gating.withTags(.{ .s, .expert }));
+    }
+};
