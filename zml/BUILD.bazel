@@ -24,6 +24,11 @@ zig_library(
         "aio/json.zig",
         "aio/safetensors.zig",
         "aio/tinyllama.zig",
+        "aio/torch.zig",
+        "aio/torch/eval.zig",
+        "aio/torch/file.zig",
+        "aio/torch/pickle.zig",
+        "aio/torch/py.zig",
         "buffer.zig",
         "context.zig",
         "dtype.zig",
@@ -72,6 +77,10 @@ zig_library(
 
 zig_test(
     name = "test",
+    data = [
+        "aio/torch/simple.pt",
+        "aio/torch/simple_test_4.pickle",
+    ],
     test_runner = ":test_runner",
     deps = [":zml"],
 )

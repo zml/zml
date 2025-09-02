@@ -5,16 +5,19 @@ const c = @import("c");
 const stdx = @import("stdx");
 
 pub const safetensors = @import("aio/safetensors.zig");
-pub const tinyllama = @import("aio/tinyllama.zig");
+pub const torch = @import("aio/torch.zig");
 const HostBuffer = @import("hostbuffer.zig").HostBuffer;
 const posix = @import("posix.zig");
 const zml = @import("zml.zig");
 
+// pub const gguf = @import("aio/gguf.zig");
+// pub const tinyllama = @import("aio/tinyllama.zig");
 pub const log = std.log.scoped(.@"zml/aio");
-
 test {
     std.testing.refAllDecls(@This());
+    // std.testing.refAllDecls(gguf);
     std.testing.refAllDecls(safetensors);
+    // std.testing.refAllDecls(torch);
 }
 
 // TODO error set for weight loading
@@ -25,6 +28,12 @@ pub fn detectFormatAndOpen(allocator: std.mem.Allocator, model_path: []const u8)
         try safetensors.open(allocator, model_path)
     else if (std.mem.endsWith(u8, model_path, ".safetensors.index.json"))
         try safetensors.open(allocator, model_path)
+    else if (std.mem.endsWith(u8, model_path, ".pt"))
+        try torch.open(allocator, model_path)
+        // else if (std.mem.endsWith(u8, model_path, ".gguf"))
+        //     try gguf.open(allocator, model_path)
+        // else if (std.mem.endsWith(u8, model_path, ".tinyllama"))
+        //     try tinyllama.open(allocator, model_path)
     else {
         std.debug.panic("File extension not recognized: {s}", .{model_path});
     };
