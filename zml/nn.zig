@@ -142,8 +142,8 @@ pub fn mixtureOfExperts(Expert: type, experts: Expert, input: Tensor, gating: Te
     stdx.debug.assert(opts.experts_per_token > 0, "mixtureOfExperts expects opts.experts_per_token > 0, got {}", .{opts});
 
     if (num_tokens == 1) {
-        // Only one tokens: most experts are unused.
-        // select active experts and compute with that.
+        // Only one tokens: most experts are unused, experts have at most one token.
+        // Select active experts and compute with that.
         const routing = gating.topK(.{ .top_expert = .expert }, opts.experts_per_token, .{});
         const per_token_score = routing.values.div(routing.values.sum(.top_expert));
 
@@ -177,11 +177,82 @@ pub fn mixtureOfExperts(Expert: type, experts: Expert, input: Tensor, gating: Te
         break :tpe tpe;
     } else num_tokens;
 
-    // if (3 * tokens_per_expert <= 2 * num_tokens) {
-    if (false) {
-        // Lot of tokens, each experts chose their tokens and compute on that.
-        // It means that some tokens may have only one expert assigned.
-        // Each token will get assigned to at least one expert IIF the input gating is sums up to 1 (typically softmax output).
+    if (3 * tokens_per_expert <= 2 * num_tokens) {
+        const routing, const tokens_ids_per_expert = moe.dispatchTokens(gating, .{
+            .experts_per_token = opts.experts_per_token,
+            .tokens_per_expert = tokens_per_expert,
+        });
+        const scores_per_expert = routing.gather(.{ .s = tokens_ids_per_expert }, .{});
+        const input_per_expert = input.gather(.{ .s = tokens_ids_per_expert }, .{});
+        var output_per_expert = experts.forward(input_per_expert);
+        output_per_expert = output_per_expert.mul(scores_per_expert.convert(output_per_expert.dtype()).broad(output_per_expert.shape()));
+
+        // Reverse engineer the normal output shape that one expert would have produced for all tokens.
+        // If this fall short, we could use the "sliced_expert" strategy and call forward ourselves.
+        const output_shape = output_per_expert.shape().drop(.expert).rename(.{ .top_token = .s }).setDim(.s, num_tokens);
+        const output = zml.Tensor.scatterSlices(
+            .zeros(output_shape),
+            .{ .s = tokens_ids_per_expert },
+            output_per_expert,
+            .{ .update_fn = zml.Tensor.ScatterOpts.increment },
+        );
+
+        log.warn("mixtureOfExperts({s}, {f}, {f}) -> fixed budget impl tpe: {d}, tokens: {d}", .{ @typeName(Expert), input, gating, tokens_per_expert, num_tokens });
+        return output;
+    } else {
+        const routing = gating.print().topK(.{ .top_expert = .expert }, opts.experts_per_token, .{});
+        const per_token_score = routing.values.div(routing.values.sum(.top_expert)).convert(gating.dtype());
+
+        // hard_gating is eql to gating where only the top-2 experts have a non-zero score.
+        const hard_gating = zml.Tensor.scatterSlices(
+            .zeros(gating.shape()),
+            .{ .expert = routing.indices },
+            per_token_score,
+            .{ .indices_are_unique = true },
+        ).withSharding(.{.expert});
+
+        return mixtureOfExpertsAllToAll(Expert, experts, input, hard_gating.print());
+    }
+}
+
+/// Send all tokens to all experts, and apply gating.
+pub fn mixtureOfExpertsAllToAll(Expert: type, experts: Expert, input: Tensor, gating: Tensor) Tensor {
+    log.warn("mixtureOfExperts({s}, {f}, {f}) -> all to all impl", .{ @typeName(Expert), input, gating });
+    const num_experts = gating.dim(.expert);
+    // TODO: `input.insertAxes(0, .{.expert}).repeat1d(.expert, num_experts)` is too verbose for just broadcasting along a new axis`
+    const output_per_expert = experts.forward(input.insertAxes(0, .{.expert}).repeat1d(.expert, num_experts));
+    return output_per_expert.dot(gating.convert(input.dtype()), .expert);
+}
+
+pub const moe = struct {
+    /// Given `(token, expert) -> scores`,
+    /// keeps only the top-k expert per token, and normalize the scores accordingly.
+    /// Non selected experts will have a 0 score.
+    pub fn hardGating(gating: zml.Tensor, experts_per_token: u32) Tensor {
+        const routing = gating.topK(.{ .top_expert = .expert }, experts_per_token, .{});
+        const per_token_score = routing.values.div(routing.values.sum(.top_expert)).convert(gating.dtype());
+        return zml.Tensor.scatterSlices(
+            .zeros(gating.shape()),
+            .{ .expert = routing.indices },
+            per_token_score,
+            .{ .indices_are_unique = true },
+        );
+    }
+
+    /// Lot of tokens, each experts chose their tokens.
+    /// It means that some tokens may have only one expert assigned.
+    /// Each token will get assigned to at least one expert IIF the input gating is sums up to 1 (typically softmax output).
+    /// Returns the actual `(token, expert) -> scores` used.
+    pub fn dispatchTokens(
+        gating: zml.Tensor,
+        opts: struct {
+            // TODO take ratio
+            tokens_per_expert: u32,
+            experts_per_token: u32,
+        },
+    ) [2]Tensor {
+        const num_experts = gating.dim(.expert);
+
         const token_pref = gating.argsort(.expert, .{ .descending = true });
         var expert_rank: zml.Tensor = .scatterSlices(
             .zeros(gating.shape().withDtype(.i32)),
@@ -191,7 +262,7 @@ pub fn mixtureOfExperts(Expert: type, experts: Expert, input: Tensor, gating: Te
         );
         // The pow(expert_rank) here means that we strongly favor top 1 over top 2 and top 2 over top 3.
         // expert_routing: (expert, top_token) -> token
-        const expert_routing = gating.pow(expert_rank.convert(gating.dtype())).topK(.{ .top_token = .s }, tokens_per_expert, .{});
+        const expert_routing = gating.pow(expert_rank.convert(gating.dtype())).topK(.{ .top_token = .s }, opts.tokens_per_expert, .{});
         const scores_per_expert = gating.gather(.{ .s = expert_routing.indices }, .{});
 
         // Update the gating coefficient to account for the expert routing.
@@ -212,42 +283,11 @@ pub fn mixtureOfExperts(Expert: type, experts: Expert, input: Tensor, gating: Te
         );
         // Then normalize so the sum of experts scores for one token sums up to 1.
         gating_v3 = gating_v3.div(gating_v3.sum(.expert));
-        // Recompute scores_per_expert using the updated gating.
         const tokens_ids_per_expert = expert_routing.indices.transpose(.{ .expert, .top_token });
-        const scores_per_expert_v2 = gating_v3.gather(.{ .s = expert_routing.indices }, .{}).transpose(.{ .expert, .top_token });
-        const input_per_expert = input.gather(.{ .s = tokens_ids_per_expert }, .{});
-        var output_per_expert = experts.forward(input_per_expert);
-        output_per_expert = output_per_expert.mul(scores_per_expert_v2.convert(output_per_expert.dtype()).broad(output_per_expert.shape()));
 
-        // Reverse engineer the normal output shape that one expert would have produced for all tokens.
-        // If this fall short, we could use the "sliced_expert" strategy and call forward ourselves.
-        const output_shape = output_per_expert.shape().drop(.expert).rename(.{ .top_token = .s }).setDim(.s, num_tokens);
-        const output = zml.Tensor.scatterSlices(
-            .zeros(output_shape),
-            .{ .s = tokens_ids_per_expert },
-            output_per_expert,
-            .{ .update_fn = zml.Tensor.ScatterOpts.increment },
-        );
-
-        log.warn("mixtureOfExperts({s}, {f}, {f}) -> fixed budget impl tpe: {d}, tokens: {d}", .{ @typeName(Expert), input, gating, tokens_per_expert, num_tokens });
-        return output;
-    } else {
-        // We send all tokens to all experts, then discard result from non-topk experts using hard_gating.
-        const routing = gating.topK(.{ .top_expert = .expert }, opts.experts_per_token, .{});
-        const per_token_score = routing.values.div(routing.values.sum(.top_expert)).convert(gating.dtype());
-
-        // hard_gating is eql to gating where only the top-2 experts have a non-zero score.
-        const hard_gating = zml.Tensor.scatterSlices(
-            .zeros(gating.shape()),
-            .{ .expert = routing.indices },
-            per_token_score,
-            .{ .indices_are_unique = true },
-        ).withSharding(.{.expert});
-        log.warn("mixtureOfExperts({s}, {f}, {f}) -> all to all impl", .{ @typeName(Expert), input, gating });
-        const output_per_expert = experts.forward(input.insertAxes(0, .{.expert}).repeat1d(.expert, num_experts));
-        return output_per_expert.dot(hard_gating.convert(input.dtype()), .expert);
+        return .{ gating_v3, tokens_ids_per_expert };
     }
-}
+};
 
 test mixtureOfExperts {
     const asynk = @import("async");

@@ -281,12 +281,25 @@ const RmsNorm = struct {
     }
 };
 
+pub const Router = struct {
+    weight: zml.Tensor,
+    bias: zml.Tensor,
+    const expert_per_token: u32 = 4;
+
+    pub fn forward(self: Router, input: zml.Tensor) zml.Tensor {
+        const linear: zml.nn.Linear = .{ .weight = self.weight, .bias = self.bias };
+        const gating = linear.forward(input).convert(.f32).softmax(-1);
+
+        return zml.nn.moe.hardGating(gating, 4);
+    }
+};
+
 const MoE = struct {
-    router: zml.nn.Linear,
     experts: Mlp,
+    router: Router,
 
     pub const OnDisk = struct {
-        router: zml.nn.Linear,
+        router: Router,
         experts: struct {
             down_proj_bias: zml.Tensor,
             down_proj_blocks: zml.Tensor,
@@ -324,7 +337,7 @@ const MoE = struct {
 
     pub fn forward(self: MoE, input: zml.Tensor) zml.Tensor {
         log.warn("compiling moe with {f}", .{input});
-        const gating = self.router.forward(input).convert(.f32).softmax(.expert);
+        const gating = self.router.forward(input);
         return zml.nn.mixtureOfExperts(Mlp, self.experts, input, gating, .{ .experts_per_token = 2, .tokens_per_expert_ratio = 1.5 });
     }
 
@@ -384,7 +397,7 @@ const MoE = struct {
     }
 };
 
-const Mlp = struct {
+pub const Mlp = struct {
     gate_up_proj: zml.nn.BlockScaledLinear, // {.out = intermediate_size * 2, .d = hidden_size / block_size, .d_block = block_size }
     down_proj: zml.nn.BlockScaledLinear, // {.out = hidden_size * 2, .d = intermediate_size / block_size, .d_block = block_size }
 
