@@ -36,7 +36,7 @@ pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore
     const py_values = try eval.evaluate(tmp_alloc, ops, true);
 
     // file ownership is transferred to the BufferStore
-    var res = try zml.aio.BufferStore.init(allocator, &.{torch_file.mmap_file});
+    var res = try zml.aio.BufferStore.initWithFiles(allocator, &.{torch_file.buffer_file});
     try torch_file.parseModel(py_values, &res);
     return res;
 }
