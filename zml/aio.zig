@@ -384,7 +384,7 @@ fn _populateStruct(
                 partial_struct = partial_struct or field_found;
                 if (!field_found) {
                     if (field.default_value_ptr) |v| {
-                        @field(obj, field.name) = @as(*const field.type, @alignCast(@ptrCast(v))).*;
+                        @field(obj, field.name) = @as(*const field.type, @ptrCast(@alignCast(v))).*;
                     } else {
                         if (partial_struct) {
                             log.warn("Incomplete metadata '{0s}': {1s}. Missing field: '{2s}'. '{0s}' will be ignored.", .{ prefix, @typeName(T), field.name });

@@ -664,7 +664,7 @@ pub const CompilationContext = struct {
         // Create the result tensor object by combining the operand results,
         // as well as the registered shapes and donations.
         // Note: this assume res can be stack-allocated.
-        var res = @as(*const stdx.meta.FnResult(func), @alignCast(@ptrCast(function.res_tensors))).*;
+        var res = @as(*const stdx.meta.FnResult(func), @ptrCast(@alignCast(function.res_tensors))).*;
         const LocalContext = struct { index: usize = 0, op: mlir.Operation, function: MlirFn, donations: []Tensor._Donation };
         var context: LocalContext = .{ .op = op, .function = function, .donations = donations };
         meta.visit((struct {

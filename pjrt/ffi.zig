@@ -359,7 +359,7 @@ pub const Attrs = extern struct {
         value: *const anyopaque,
 
         pub fn get(self: Scalar, T: type) T {
-            const ptr: *const T = @alignCast(@ptrCast(self.value));
+            const ptr: *const T = @ptrCast(@alignCast(self.value));
             return ptr.*;
         }
     };
@@ -370,13 +370,13 @@ pub const Attrs = extern struct {
         data: [*]const u8,
 
         pub fn slice(self: Array, T: type) []const T {
-            const ptr: [*]const T = @alignCast(@ptrCast(self.data));
+            const ptr: [*]const T = @ptrCast(@alignCast(self.data));
             return ptr[0..self.len];
         }
     };
 
     pub fn slice(self: Array, T: type) []const T {
-        const ptr: [*]const T = @alignCast(@ptrCast(self.data));
+        const ptr: [*]const T = @ptrCast(@alignCast(self.data));
         return ptr[0..self.len];
     }
 
