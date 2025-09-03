@@ -124,7 +124,7 @@ pub fn forward(
 ) struct { zml.Tensor, KvCache, zml.Tensor.Rng } {
     stdx.debug.assert(tokens_.dtype() == .u32 and tokens_.rank() >= 1 and token_index.dtype() == .u32 and token_index.rank() <= 1, "Can't run Mixtral ! Expected >=1d tokens and 0d token_index, got: {f} and {f}", .{ tokens_, token_index });
     const tokens = tokens_.withPartialTags(.{.s});
-    const out, const updated_kv_cache = zml.call(self.model, .forward, .{ tokens, token_index, kv_cache });
+    const out, const updated_kv_cache = zml.call(self.model, .forward, .{ tokens, token_index.print(), kv_cache });
     const new_tokens, const new_rng = self.sampleTokens(self.lm_head, out, rng, self.gen_opts);
     return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache, new_rng };
 }
@@ -290,7 +290,7 @@ pub const Router = struct {
         const linear: zml.nn.Linear = .{ .weight = self.weight, .bias = self.bias };
         const gating = linear.forward(input).convert(.f32).softmax(-1);
 
-        return zml.nn.moe.hardGating(gating, 4);
+        return zml.nn.moe.hardGating(gating, expert_per_token).convert(input.dtype());
     }
 };
 
@@ -338,7 +338,7 @@ const MoE = struct {
     pub fn forward(self: MoE, input: zml.Tensor) zml.Tensor {
         log.warn("compiling moe with {f}", .{input});
         const gating = self.router.forward(input);
-        return zml.nn.mixtureOfExperts(Mlp, self.experts, input, gating, .{ .experts_per_token = 2, .tokens_per_expert_ratio = 1.5 });
+        return zml.nn.mixtureOfExperts(Mlp, self.experts, input, gating, .{ .experts_per_token = Router.expert_per_token, .tokens_per_expert_ratio = 1.5 });
     }
 
     pub fn loadSharded(self: MoE, store: zml.aio.BufferStore, prefix: *zml.aio.PrefixBuilder, platform: zml.Platform) !zml.Bufferized(MoE) {
