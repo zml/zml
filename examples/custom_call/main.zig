@@ -145,10 +145,9 @@ pub fn asyncMain() !void {
     defer result.deinit();
 
     const cpu_result = try result.toHostAlloc(arena);
-    _ = cpu_result; // autofix
 
-    // log.warn(
-    //     "\nThe result of {} + {} = {}\n",
-    //     .{ &input_a, &input_b, cpu_result.items(f32) },
-    // );
+    log.warn(
+        "\nThe result of {d} + {d} = {d}\n",
+        .{ input_a[0], input_b[0], cpu_result.items(f32)[0] },
+    );
 }

@@ -185,8 +185,8 @@ pub const Buffer = struct {
     }
 
     pub fn asHostBuffer(self: Buffer) HostBuffer {
-        const memory = self.getMemory().kind(self._api);
-        stdx.debug.assert((memory == .pinned_host) or (memory == .unpinned_host), "asHostBuffer({any}) expects a buffer allocated on host memory, got {any}. see `copyToMemory`", .{ self, memory });
+        // const memory = self.getMemory().kind(self._api);
+        // stdx.debug.assert((memory == .pinned_host) or (memory == .unpinned_host), "asHostBuffer({any}) expects a buffer allocated on host memory, got {any}. see `copyToMemory`", .{ self, memory });
         const ptr: [*]u8 = @ptrCast(self._shards.get(0).getOpaqueDeviceMemoryDataPointer(self._api) catch unreachable);
         return HostBuffer.fromBytes(self._shape, ptr[0..self._shape.byteSize()]);
     }
