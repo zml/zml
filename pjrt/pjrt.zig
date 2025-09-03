@@ -1308,7 +1308,6 @@ pub const FFI = extern struct {
         options: RegisterFfiOptions,
     ) ApiError!void {
         var ret = pjrtStruct(c.PJRT_FFI_Register_Handler_Args{
-            .api_version = 1,
             .target_name = target_name.ptr,
             .target_name_size = target_name.len,
             .handler = @ptrCast(@constCast(func)),

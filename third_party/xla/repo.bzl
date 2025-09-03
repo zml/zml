@@ -4,11 +4,9 @@ def repo():
     git_repository(
         name = "xla",
         remote = "https://github.com/openxla/xla.git",
-        commit = "ef07e787ea1303fa2f8d8a175d24d434bfb84107",
+        commit = "b3fbfeeb076f2b536897180f4a274680ed9d52eb",
         patch_args = ["-p1"],
         patches = [
-            "//third_party/xla:patches/0001-bazel-migration-to-bazel-8.1.1.patch",
-            "//third_party/xla:patches/0002-Added-FFI-handler-registration-API-to-the-FFI-PjRt.patch",
-            "//third_party/xla:patches/0003-Remove-unconventional-C-code-in-headers.patch",
+            # patches live in the patches directory
         ],
     )
