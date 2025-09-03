@@ -136,7 +136,7 @@ const MoeOpts = struct {
 /// - experts: .{ .expert, .d_out, .d } expert layer (need to have a .forward method).
 /// -> output: .{ .s, .d_out }
 pub fn mixtureOfExperts(Expert: type, experts: Expert, input: Tensor, gating: Tensor, opts: MoeOpts) Tensor {
-    log.warn("mixtureOfExperts({s}, {f}, {f}, {f})", .{ @typeName(Expert), experts, input, gating });
+    log.warn("mixtureOfExperts({s}, {f}, {f})", .{ @typeName(Expert), input, gating });
     const num_tokens = input.dim(.s);
     const num_experts = gating.dim(.expert);
     stdx.debug.assert(opts.experts_per_token > 0, "mixtureOfExperts expects opts.experts_per_token > 0, got {}", .{opts});
@@ -182,7 +182,7 @@ pub fn mixtureOfExperts(Expert: type, experts: Expert, input: Tensor, gating: Te
             .experts_per_token = opts.experts_per_token,
             .tokens_per_expert = tokens_per_expert,
         });
-        const scores_per_expert = routing.gather(.{ .s = tokens_ids_per_expert }, .{});
+        const scores_per_expert = routing.transpose(.{ .expert, .s }).gather(.{ .s = tokens_ids_per_expert }, .{});
         const input_per_expert = input.gather(.{ .s = tokens_ids_per_expert }, .{});
         var output_per_expert = experts.forward(input_per_expert);
         output_per_expert = output_per_expert.mul(scores_per_expert.convert(output_per_expert.dtype()).broad(output_per_expert.shape()));
@@ -200,7 +200,7 @@ pub fn mixtureOfExperts(Expert: type, experts: Expert, input: Tensor, gating: Te
         log.warn("mixtureOfExperts({s}, {f}, {f}) -> fixed budget impl tpe: {d}, tokens: {d}", .{ @typeName(Expert), input, gating, tokens_per_expert, num_tokens });
         return output;
     } else {
-        const routing = gating.print().topK(.{ .top_expert = .expert }, opts.experts_per_token, .{});
+        const routing = gating.topK(.{ .top_expert = .expert }, opts.experts_per_token, .{});
         const per_token_score = routing.values.div(routing.values.sum(.top_expert)).convert(gating.dtype());
 
         // hard_gating is eql to gating where only the top-2 experts have a non-zero score.
@@ -211,7 +211,7 @@ pub fn mixtureOfExperts(Expert: type, experts: Expert, input: Tensor, gating: Te
             .{ .indices_are_unique = true },
         ).withSharding(.{.expert});
 
-        return mixtureOfExpertsAllToAll(Expert, experts, input, hard_gating.print());
+        return mixtureOfExpertsAllToAll(Expert, experts, input, hard_gating);
     }
 }
 
