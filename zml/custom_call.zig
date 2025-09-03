@@ -47,9 +47,7 @@ pub fn CustomCallInputsType(CustomOp: type) type {
 pub const CustomCallOptions = struct {
     output_operand_aliases: []const i64 = &.{},
     copy_inputs_to_host_pinned: bool = false,
-    register_ffi_options: pjrt.FFI.RegisterOptions = .{
-        .traits = @enumFromInt(0),
-    },
+    traits: pjrt.ffi.HandlerTraits,
 };
 
 /// Insert a user-defined callback into the computation graph.
@@ -81,7 +79,7 @@ pub fn custom_call(
     const ffi_func = customCallProxy(CustomOp, opts);
     const target_name = "zml$" ++ op_name;
 
-    ffi_.?.register(pjrt_api, target_name, @tagName(platform.target), &ffi_func, opts.register_ffi_options) catch unreachable;
+    ffi_.?.register(pjrt_api, target_name, @tagName(platform.target), &ffi_func, opts.traits) catch unreachable;
     log.info("Registered custom call {s} with target name \"{s}\"", .{ op_name, target_name });
 
     const custom_call_inputs = allocator.alloc(mlir.Value, 8) catch unreachable;
@@ -186,11 +184,6 @@ fn customCallImpl(comptime CustomOp: type, opts: CustomCallOptions, call_frame: 
 pub fn getShape(ffi_buffer: *const ffi.Buffer) Shape {
     const dt: DataType = switch (ffi_buffer.dtype) {
         .invalid => stdx.debug.panic("Invalid FFI dtype {any} used by {any}", .{ ffi_buffer.dtype, ffi_buffer }),
-        .pred => .bool,
-        .i8 => .i8,
-        .i16 => .i16,
-        .i32 => .i32,
-        .i64 => .i64,
         .token, .f8e4m3, .f8e3m4 => stdx.debug.panic("Unsupported FFI dtype {any} used by {any}", .{ ffi_buffer.dtype, ffi_buffer }),
         inline else => |t| @field(DataType, @tagName(t)),
     };
