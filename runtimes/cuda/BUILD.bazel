@@ -5,7 +5,7 @@ zig_shared_library(
     name = "zmlxcuda",
     # Use Clang's compiler-rt, but disable stack checking
     # to avoid requiring on the _zig_probe_stack symbol.
-    copts = ["-fno-stack-check"],
+    copts = ["-fno-stack-check", "-fllvm"],
     main = "zmlxcuda.zig",
     shared_lib_name = "libzmlxcuda.so.0",
     visibility = ["@libpjrt_cuda//:__subpackages__"],
