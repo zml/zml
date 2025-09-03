@@ -4,6 +4,7 @@ const runtimes = @import("runtimes");
 pub const Target = runtimes.Platform;
 const stdx = @import("stdx");
 
+const custom_call = @import("custom_call.zig");
 const pjrt = @import("pjrtx.zig");
 
 const log = std.log.scoped(.zml);
@@ -22,6 +23,11 @@ pub const Platform = struct {
     target: Target,
     pjrt_api: *const pjrt.Api,
     pjrt_client: *pjrt.Client,
+
+    // This make the pjrt struct quite fat, but is only used during compilation.
+    // TODO: Reconsider having it here, and maybe pass explicitly to compile,
+    // or create an intermediary struct:
+    // `const comp = platform.compiler(compile_opts); const exe = comp.compile(...);`
     compilation_options: CompilationOptions = .{},
 
     pub const MAX_NUM_DEVICES: u8 = 32;
@@ -72,14 +78,17 @@ pub const Platform = struct {
     }
 
     pub fn registerCustomCall(self: Platform, comptime CustomOp: type) pjrt.ApiError!void {
-        if (self.pjrt_api.ffi()) |ffi| {
-            stdx.debug.assertComptime(@hasDecl(CustomOp, "call"), "{} must have a call method", .{CustomOp});
-            stdx.debug.assertComptime(@hasDecl(CustomOp, "type_id") and @TypeOf(CustomOp.type_id) == pjrt.ffi.TypeId, "{} must have a field `pub var type_id: pjrt.ffi.TypeId`", .{CustomOp});
+        stdx.debug.assertComptime(@hasDecl(CustomOp, "call"), "{} must have a call method", .{CustomOp});
+        stdx.debug.assertComptime(@hasDecl(CustomOp, "type_id") and @TypeOf(CustomOp.type_id) == pjrt.ffi.TypeId, "{} must have a field `pub var type_id: pjrt.ffi.TypeId`", .{CustomOp});
+        stdx.debug.assertComptime(@hasDecl(CustomOp, "custom_call_options") and @TypeOf(CustomOp.custom_call_options) == custom_call.CustomCallOptions, "{} must have a field `pub const custom_call_options: zml.CustomCallOptions`", .{CustomOp});
 
-            CustomOp.type_id = try ffi.registerTypeId(self.pjrt_api, @typeName(CustomOp));
-        } else {
-            return error.Unavailable;
-        }
+        const ffi = self.pjrt_api.ffi() orelse return error.Unavailable;
+        const target_name = "zml$" ++ @typeName(CustomOp);
+
+        const proxy = custom_call.proxy(CustomOp);
+        CustomOp.type_id = try ffi.registerTypeId(self.pjrt_api, @typeName(CustomOp));
+        try ffi.register(self.pjrt_api, target_name, @tagName(self.target), &proxy, CustomOp.custom_call_options.handler_traits);
+        log.info("Registered custom call {} with target name \"{s}\"", .{ CustomOp, target_name });
     }
 
     pub fn deinit(self: *Platform) void {
