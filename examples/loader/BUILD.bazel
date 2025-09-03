@@ -1,0 +1,11 @@
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+
+zig_binary(
+    name = "loader",
+    main = "main.zig",
+    deps = [
+        "//async",
+        "//stdx",
+        "//zml",
+    ],
+)
