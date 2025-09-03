@@ -43,8 +43,9 @@ jobs:
         with:
           bazelisk-version: 1.26.0
           bazelisk-cache: false
+          # todo: use `--config=debug` instead of `-c opt` when static archive bug is fixed
           bazelrc: |
-            common --config=debug
+            common -c opt
             common --verbose_failures
             common --keep_going
             common --test_output=streamed
