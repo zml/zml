@@ -15,6 +15,7 @@ zig_library(
         "signature.zig",
         "time.zig",
     ],
+    copts = ["-lc"],
     main = "stdx.zig",
     visibility = ["//visibility:public"],
 )
