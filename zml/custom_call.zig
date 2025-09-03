@@ -149,7 +149,7 @@ pub fn proxy(CustomOp: type) ffi.Handler {
 fn customCallImpl(comptime CustomOp: type, call_frame: *ffi.CallFrame) ?*ffi.Error {
     if (call_frame.registeringHook()) return null;
 
-    const opts = CustomOp.custom_call_options;
+    const opts = comptime CustomOp.custom_call_options;
 
     const execution_context = call_frame.ctx;
     log.info("Custom call {s} called !", .{@typeName(CustomOp)});
@@ -179,8 +179,11 @@ fn customCallImpl(comptime CustomOp: type, call_frame: *ffi.CallFrame) ?*ffi.Err
             .asViewOfDeviceBuffer(platform, shape, null, ffi_buffer.data);
         if (opts.copy_inputs_to_host_pinned and platform.target != .cpu) {
             log.info("Copying argument {} {f} {*} to host_pinned memory !", .{ i, zml_buffer, zml_buffer.opaqueDeviceMemoryDataPointer() });
-            zml_buffer = zml_buffer.copyToMemory(platform, .host_pinned, .{ .wait = true }) catch unreachable;
-            log.info("--> {f} {*} ({})", .{ zml_buffer, zml_buffer.opaqueDeviceMemoryDataPointer(), @as(*const f32, @ptrCast(@alignCast(zml_buffer.opaqueDeviceMemoryDataPointer()))).* });
+            zml_buffer = zml_buffer.copyToMemory(platform, .host_pinned, .{ .wait = true }) catch {
+                log.err("Failed to allocate {} bytes", .{zml_buffer.shape().byteSize()});
+                return .create(call_frame.api, .resource_exhausted, "OOM");
+            };
+            log.info("--> {f} {*}", .{ zml_buffer, zml_buffer.opaqueDeviceMemoryDataPointer() });
         }
         callback_args[i] = zml_buffer;
     }
@@ -199,6 +202,10 @@ fn customCallImpl(comptime CustomOp: type, call_frame: *ffi.CallFrame) ?*ffi.Err
     @call(.auto, CustomOp.call, callback_args) catch |err| {
         stdx.debug.panic("Error while calling {s} call func: {any}\n", .{ @typeName(CustomOp), err });
     };
+
+    if (opts.copy_inputs_to_host_pinned and platform.target != .cpu) {
+        inline for (1..callback_args.len) |i| callback_args[i].deinit();
+    }
 
     return null;
 }
@@ -247,6 +254,6 @@ pub const Print = struct {
     }
 
     pub fn call(_: *Print, input: Buffer) !void {
-        std.log.defaultLog(.info, .zml, "Device buffer: {f}: {d}", .{ input, input.asHostBuffer() });
+        std.log.defaultLog(.info, .zml, "Device buffer: {f}: {d:32.3}", .{ input, input.asHostBuffer() });
     }
 };
