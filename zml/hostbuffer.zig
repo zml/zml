@@ -176,11 +176,6 @@ pub const HostBuffer = struct {
         return ptr[0..self._shape.count()];
     }
 
-    pub fn item(self: HostBuffer, comptime T: type, index: usize) T {
-        stdx.debug.assert(index < self._shape.count(), "index {} out of bounds for shape {f}", .{ index, self._shape });
-        return self.items(T)[index];
-    }
-
     pub fn mutItems(self: HostBuffer, comptime T: type) []T {
         return @constCast(self.items(T));
     }
