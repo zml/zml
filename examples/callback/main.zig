@@ -21,7 +21,7 @@ const log = std.log.scoped(.@"examples/custom_call");
 pub const GrayScale = struct {
     // Mandatory fields to work with ZML custom call api
     pub var type_id: zml.pjrt.ffi.TypeId = undefined;
-    pub const custom_call_options: zml.CustomCallOptions = .{};
+    pub const callback_config: zml.callback.Config = .{};
     platform: zml.Platform,
 
     // Custom field to store our cuda module and function.
@@ -121,7 +121,7 @@ pub const GrayScale = struct {
 
 pub fn grayscale(rgb: zml.Tensor) zml.Tensor {
     const gray_shape = rgb.shape().setDim(0, @divExact(rgb.dim(0), 3));
-    const result = zml.customCall(GrayScale, .{rgb.print()}, &.{gray_shape});
+    const result = zml.callback.call(GrayScale, .{rgb.print()}, &.{gray_shape});
     return result[0];
 }
 
@@ -141,7 +141,7 @@ pub fn asyncMain() !void {
     context.printAvailablePlatforms(platform);
 
     // Register our custom call
-    try platform.registerCustomCall(GrayScale);
+    try platform.registerCallback(GrayScale);
 
     // Compile MLIR code containing our custom call.
     const rgb_shape = zml.Shape.init(.{12 * 3}, .u8);

@@ -10,12 +10,12 @@ const stdx = @import("stdx");
 const pjrt = @import("pjrtx.zig");
 
 const zml = struct {
-    pub const Platform = @import("platform.zig").Platform;
+    pub const callback = @import("callback.zig");
     pub const HostBuffer = @import("hostbuffer.zig").HostBuffer;
+    pub const Platform = @import("platform.zig").Platform;
+    pub const platform = @import("platform.zig");
     pub const Shape = @import("shape.zig").Shape;
     pub const Target = @import("platform.zig").Target;
-    pub const custom_call = @import("custom_call.zig");
-    pub const platform = @import("platform.zig");
 };
 
 const PjrtApiMap = std.EnumArray(zml.Target, ?*const pjrt.Api);
@@ -181,7 +181,7 @@ pub const Context = struct {
         }
 
         self.platforms.set(target, p);
-        try zml.custom_call.registerInternalCustomCalls(p);
+        try zml.callback.registerInternalCallbacks(p);
 
         return p;
     }

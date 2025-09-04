@@ -5,8 +5,8 @@ const stdx = @import("stdx");
 const aio = @import("aio.zig");
 const Buffer = @import("buffer.zig").Buffer;
 const Bufferized = @import("tensor.zig").Bufferized;
+const callback = @import("callback.zig");
 const CompilationContext = @import("module.zig").CompilationContext;
-const custom_call = @import("custom_call.zig");
 const meta = @import("meta.zig");
 const pjrt = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
@@ -211,15 +211,7 @@ pub const BaseExe = struct {
         if (platform.pjrt_api.ffi()) |ffi| {
             log.info("Created context execution {*} for {*}", .{ execute_context, exe });
             execute_context = try platform.pjrt_api.createExecuteContext();
-
-            // Add extra data needed by the ZML provided custom calls.
-            // Atm we don't have a mechanism to detect if the user need this or not.
-            inline for (custom_call.internal_custom_calls) |T| {
-                const value_ptr = try allocator.create(T);
-                value_ptr.* = try .init(platform);
-                try ffi.addUserData(platform.pjrt_api, execute_context.?, .{ .type_id = T.type_id.type_id, .user_data = @ptrCast(@constCast(value_ptr)) });
-                log.info("Bound {s}@{x} with type id {d} on {any}", .{ @typeName(T), @intFromPtr(value_ptr), T.type_id.type_id, execute_context });
-            }
+            try callback.bindInternalCallbacks(allocator, platform, ffi, execute_context.?);
         }
 
         return .{
@@ -303,17 +295,14 @@ pub const BaseExe = struct {
         stdx.debug.internalAssert(local_ctx.index == self.result_shapes.len, "Pjrt call returned {} tensors, but the return type {s}, contains {} Buffers. Note that modules need to have a comptime know number of returned tensors.", .{ self.output_per_device.len, @typeName(T), local_ctx.index });
     }
 
-    pub fn bind(exe: BaseExe, comptime CustomOp: type, op: *CustomOp) !void {
+    pub fn bind(exe: BaseExe, Callback: type, op: *Callback) !void {
         stdx.debug.assert(exe.execute_context != null, "Exe doesn't have an execution context", .{});
         const pjrt_api = exe.platform.pjrt_api;
 
         if (pjrt_api.ffi()) |ffi| {
-            const type_id: i64 = CustomOp.type_id.type_id;
-
-            try ffi.addUserData(pjrt_api, exe.execute_context.?, .{ .type_id = type_id, .user_data = op });
-            log.info("Bound {s}@{x} with type id {d} on {any}", .{ @typeName(CustomOp), @intFromPtr(op), type_id, exe.execute_context.? });
+            try callback.addUserData(Callback, pjrt_api, ffi, exe.execute_context.?, op);
         } else {
-            stdx.debug.panic("Custom calls are not supported for target {s}", .{@tagName(exe.platform.target)});
+            stdx.debug.panic("Callbacks are not supported for target {s}", .{@tagName(exe.platform.target)});
         }
     }
 

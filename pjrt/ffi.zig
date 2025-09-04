@@ -450,6 +450,8 @@ pub const Error = opaque {
     pub const inner = TransmuteMixin(Error, c.XLA_FFI_Error).to;
     pub const fromInner = TransmuteMixin(Error, c.XLA_FFI_Error).from;
 
+    pub const ok: ?*Error = null;
+
     pub fn create(api: *const Api, error_code: ErrorCode, message: []const u8) *Error {
         var ret = pjrt.pjrtStruct(c.XLA_FFI_Error_Create_Args{
             .message = message.ptr,
