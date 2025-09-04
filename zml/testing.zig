@@ -33,7 +33,7 @@ pub fn approxEq(comptime Float: type, l: Float, r: Float, tolerance: Float) bool
     return closeRel or closeAbs;
 }
 
-/// Testing utility. Accepts both Tensor and HostBuffer but Tensor will be copied to the
+/// Testing utility. Accepts both zml.Buffer and zml.HostBuffer but zml.Buffer will be copied to the
 /// host for comparison !
 pub fn expectClose(left_: anytype, right_: anytype, tolerance: f32) !void {
     const allocator = if (builtin.is_test) std.testing.allocator else std.heap.smp_allocator;
@@ -51,14 +51,14 @@ pub fn expectClose(left_: anytype, right_: anytype, tolerance: f32) !void {
         if (should_free_left) left.deinit(allocator);
         if (should_free_right) right.deinit(allocator);
     }
-    errdefer log.err("\n--> Left: {f}\n--> Right: {f}", .{ left.pretty(), right.pretty() });
+    errdefer log.err("\n--> Left: {0f}{0d:24.3}\n--> Right: {1f}{1d:24.3}", .{ left, right });
 
     if (!std.mem.eql(i64, left.shape().dims(), right.shape().dims())) {
         log.err("left.shape() {f} != right.shape() {f}", .{ left.shape(), right.shape() });
         return error.TestUnexpectedResult;
     }
     if (left.dtype() != right.dtype() and !(left.dtype() == .f16 and right.dtype() == .bf16)) {
-        log.err("left.dtype ({}) != right.dtype ({})", .{ left.dtype(), right.dtype() });
+        log.err("left.dtype ({f}) != right.dtype ({f})", .{ left.shape(), right.shape() });
         return error.TestUnexpectedResult;
     }
     switch (left.dtype()) {
@@ -66,11 +66,15 @@ pub fn expectClose(left_: anytype, right_: anytype, tolerance: f32) !void {
         .f16,
         .f32,
         .f64,
+        .f4e2m1,
+        .f8e3m4,
+        .f8e4m3,
         .f8e4m3b11fnuz,
         .f8e4m3fn,
         .f8e4m3fnuz,
         .f8e5m2,
         .f8e5m2fnuz,
+        .f8e8m0,
         => |t| {
             const L = t.toZigType();
             const left_data = left.items(L);
@@ -89,7 +93,7 @@ pub fn expectClose(left_: anytype, right_: anytype, tolerance: f32) !void {
                     const right_data = right.items(R);
                     for (left_data, right_data, 0..) |l, r, i| {
                         if (!approxEq(f32, zml.floats.floatCast(f32, l), zml.floats.floatCast(f32, r), tolerance)) {
-                            log.err("left.data != right_data.\n < {any:.3} \n > {any:.3}\n  error at idx {any}: {any:.3} != {any:.3}", .{ center(left_data, i), center(right_data, i), i, left_data[i], right_data[i] });
+                            log.err("left.data != right_data.\n < {d:40.3} \n > {d:40.3}\n  error at idx {d}: {d:.3} != {d:.3}", .{ stdx.fmt.slice(center(left_data, i)), stdx.fmt.slice(center(right_data, i)), i, left_data[i], right_data[i] });
                             return error.TestUnexpectedResult;
                         }
                     }
@@ -97,7 +101,7 @@ pub fn expectClose(left_: anytype, right_: anytype, tolerance: f32) !void {
                 else => unreachable,
             }
         },
-        inline .bool, .u4, .u8, .u16, .u32, .u64, .i4, .i8, .i16, .i32, .i64 => |t| {
+        inline .bool, .u2, .u4, .u8, .u16, .u32, .u64, .i2, .i4, .i8, .i16, .i32, .i64 => |t| {
             const T = t.toZigType();
             return std.testing.expectEqualSlices(T, left.items(T), right.items(T));
         },
@@ -222,8 +226,8 @@ pub fn testLayerOut(
     const exe = try zml.compileModel(alloc, fwd, layer, input_shapes, platform);
 
     const n_out_exp = activations.countLayers(out_name);
-    if (exe.inner.result_shapes.len != n_out_exp) {
-        log.warn("Reference models produces {d} outputs, but implementation produces {d}", .{ n_out_exp, exe.inner.result_shapes.len });
+    if (exe.inner.output_shapes.len != n_out_exp) {
+        log.warn("Reference models produces {d} outputs, but implementation produces {d}", .{ n_out_exp, exe.inner.output_shapes.len });
     }
     const mod = exe.prepare(layer_weights);
 
@@ -264,7 +268,7 @@ pub fn testLayerOut(
 
     var buf: [1024]u8 = undefined;
     var failed: bool = false;
-    for (0..mod.inner.result_shapes.len) |i| {
+    for (0..mod.inner.output_shapes.len) |i| {
         const full_name = std.fmt.bufPrint(&buf, "{s}.{d}", .{ out_name, i }) catch unreachable;
         const expected_out = activations.get(full_name) orelse {
             log.warn("Output buffer not found: {s}", .{full_name});
@@ -299,7 +303,7 @@ test testLayer {
     };
 
     // create a buffer store containing the activations:
-    var activations = try zml.aio.BufferStore.init(std.testing.allocator, &.{});
+    var activations = zml.aio.BufferStore.init(std.testing.allocator);
     defer activations.deinit();
     {
         const input = zml.HostBuffer.fromArray(&[2]f32{ 1, -1 });

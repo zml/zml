@@ -234,7 +234,7 @@ pub const CompilationContext = struct {
             loaded_executable,
             .{
                 .input_shapes = f.args_shapes,
-                .result_shapes = f.res_shapes,
+                .output_shapes = f.res_shapes,
                 .n_devices = sharding.num_replicas * sharding.num_partitions,
             },
         );
@@ -1178,9 +1178,9 @@ pub fn hash(hasher: *std.hash.Wyhash, key: anytype, comptime strat: std.hash.Str
         .@"anyframe", .@"fn" => hash(hasher, @intFromPtr(key), strat),
         .pointer => |info| switch (info.size) {
             .one => switch (strat) {
-                .shallow => hash(hasher, @intFromPtr(key), .Shallow),
-                .deep => hash(hasher, key.*, .Shallow),
-                .deeprecursive => switch (@typeInfo(info.child)) {
+                .Shallow => hash(hasher, @intFromPtr(key), .Shallow),
+                .Deep => hash(hasher, key.*, .Shallow),
+                .DeepRecursive => switch (@typeInfo(info.child)) {
                     .@"opaque", .@"fn" => hash(hasher, @intFromPtr(key), .Shallow),
                     else => hash(hasher, key.*, .DeepRecursive),
                 },
@@ -1196,7 +1196,7 @@ pub fn hash(hasher: *std.hash.Wyhash, key: anytype, comptime strat: std.hash.Str
             .many,
             .c,
             => switch (strat) {
-                .shallow => hash(hasher, @intFromPtr(key), .Shallow),
+                .Shallow => hash(hasher, @intFromPtr(key), .Shallow),
                 else => @compileError(
                     \\ unknown-length pointers and C pointers cannot be hashed deeply.
                     \\ Consider providing your own hash function.

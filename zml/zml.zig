@@ -6,6 +6,7 @@
 // Namespaces
 const std = @import("std");
 
+pub const platform_specific = @import("c");
 pub const tokenizer = @import("zml/tokenizer");
 
 pub const aio = @import("aio.zig");
@@ -14,6 +15,8 @@ pub const Bufferized = @import("tensor.zig").Bufferized;
 pub const CompilationOptions = @import("platform.zig").CompilationOptions;
 pub const context = @import("context.zig");
 pub const Context = @import("context.zig").Context;
+pub const customCall = @import("custom_call.zig").customCall;
+pub const CustomCallOptions = @import("custom_call.zig").CustomCallOptions;
 pub const Data = @import("dtype.zig").Data;
 pub const DataType = @import("dtype.zig").DataType;
 pub const exe = @import("exe.zig");
@@ -43,7 +46,6 @@ pub const Tensor = @import("tensor.zig").Tensor;
 pub const testing = @import("testing.zig");
 pub const torch = @import("torch.zig");
 
-// pub const tokenizer = @import("tokenizer.zig");
 pub const tools = struct {
     pub const Tracer = @import("tools/tracer.zig").Tracer;
 };

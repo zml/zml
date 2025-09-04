@@ -20,7 +20,7 @@ test {
 // as the way PJRT does it is not very robust.
 //
 // 1. https://github.com/openxla/xla/issues/10032
-fn pjrtStructSize(comptime T: type) usize {
+pub fn pjrtStructSize(comptime T: type) usize {
     // unsafe on purpose, we want this to fail if that ever changes
     const typedef_name = comptime blk: {
         const needle = ".struct_";
@@ -164,7 +164,7 @@ pub const Api = struct {
         return @ptrCast(ret.context.?);
     }
 
-    pub fn ffi(api: *const Api) ?FFI {
+    pub fn ffi(api: *const Api) ?Ffi {
         if (api.lookupExtension(c.PJRT_FFI_Extension, c.PJRT_Extension_Type_FFI)) |ext| {
             return .{ .inner = ext };
         }
@@ -264,22 +264,22 @@ pub const ShapeSpec = extern struct {
 
     inner: c.PJRT_ShapeSpec,
 
-    pub fn init(dims_: []const usize, bt: BufferType) ShapeSpec {
+    pub fn init(dims_: []const i64, bt: BufferType) ShapeSpec {
         return .{
             .inner = pjrtStruct(c.PJRT_ShapeSpec{
-                .dims = @ptrCast(@constCast(dims_.ptr)),
-                .num_dims = dims.len,
-                .buffer_type = @intFromEnum(bt),
+                .dims = @constCast(dims_.ptr),
+                .num_dims = dims_.len,
+                .element_type = @intFromEnum(bt),
             }),
         };
     }
 
-    pub fn dims(self: ShapeSpec) []usize {
+    pub fn dims(self: ShapeSpec) []i64 {
         return self.inner.dims[0..self.inner.num_dims];
     }
 
     pub fn bufferType(self: ShapeSpec) BufferType {
-        return @enumFromInt(self.inner.buffer_type);
+        return @enumFromInt(self.inner.element_type);
     }
 };
 
@@ -461,7 +461,7 @@ pub const Client = opaque {
     pub fn createBuffersForAsyncHostToDevice(self: *const Client, api: *const Api, args: CreateBuffersForAsyncHostToDeviceArgs) ApiError!*AsyncHostToDeviceTransferManager {
         const ret = try api.call(.PJRT_Client_CreateBuffersForAsyncHostToDevice, .{
             .client = self.inner(),
-            .shape_specs = @ptrCast(args.shape_specs.ptr),
+            .shape_specs = @ptrCast(@constCast(args.shape_specs.ptr)),
             .num_shape_specs = args.shape_specs.len,
             .device_layouts = if (args.device_layouts) |layouts| @ptrCast(@constCast(layouts.ptr)) else null,
             .num_device_layouts = if (args.device_layouts) |layouts| @intCast(layouts.len) else 0,
@@ -793,11 +793,13 @@ pub const LoadedExecutable = opaque {
 pub const BufferType = enum(c.PJRT_Buffer_Type) {
     invalid = c.PJRT_Buffer_Type_INVALID,
     bool = c.PJRT_Buffer_Type_PRED,
+    i2 = c.PJRT_Buffer_Type_S2,
     i4 = c.PJRT_Buffer_Type_S4,
     i8 = c.PJRT_Buffer_Type_S8,
     i16 = c.PJRT_Buffer_Type_S16,
     i32 = c.PJRT_Buffer_Type_S32,
     i64 = c.PJRT_Buffer_Type_S64,
+    u2 = c.PJRT_Buffer_Type_U2,
     u4 = c.PJRT_Buffer_Type_U4,
     u8 = c.PJRT_Buffer_Type_U8,
     u16 = c.PJRT_Buffer_Type_U16,
@@ -814,6 +816,10 @@ pub const BufferType = enum(c.PJRT_Buffer_Type) {
     f8e4m3b11fnuz = c.PJRT_Buffer_Type_F8E4M3B11FNUZ,
     f8e5m2fnuz = c.PJRT_Buffer_Type_F8E5M2FNUZ,
     f8e4m3fnuz = c.PJRT_Buffer_Type_F8E4M3FNUZ,
+    f8e4m3 = c.PJRT_Buffer_Type_F8E4M3,
+    f8e3m4 = c.PJRT_Buffer_Type_F8E3M4,
+    f8e8m0 = c.PJRT_Buffer_Type_F8E8M0FNU,
+    f4e2m1 = c.PJRT_Buffer_Type_F4E2M1FN,
 };
 
 pub const MemoryLayoutType = enum(c.PJRT_Buffer_MemoryLayout_Type) {
@@ -1278,7 +1284,7 @@ pub const NamedValue = extern struct {
     }
 };
 
-pub const FFI = extern struct {
+pub const Ffi = extern struct {
     inner: *const c.PJRT_FFI,
 
     pub const UserData = extern struct {
@@ -1293,19 +1299,15 @@ pub const FFI = extern struct {
         }
     };
 
-    pub const RegisterFfiOptions = struct {
-        traits: RegisterHandlerTraits = @enumFromInt(0),
-    };
-
     // todo : support all missing handlers available in GPU plugin extension: handler_instantiate, handler_prepare, handler_initialize
     // introduced by https://github.com/openxla/xla/commit/ef85a7bcc308313492ebc50295a8a08b4e51b8f5
     pub fn register(
-        self: *const FFI,
+        self: *const Ffi,
         api: *const Api,
         target_name: []const u8,
         platform_name: []const u8,
         func: *const ffi.Handler,
-        options: RegisterFfiOptions,
+        traits: ffi.HandlerTraits,
     ) ApiError!void {
         var ret = pjrtStruct(c.PJRT_FFI_Register_Handler_Args{
             .target_name = target_name.ptr,
@@ -1313,7 +1315,7 @@ pub const FFI = extern struct {
             .handler = @ptrCast(@constCast(func)),
             .platform_name = platform_name.ptr,
             .platform_name_size = platform_name.len,
-            .traits = @intFromEnum(options.traits),
+            .traits = @bitCast(traits),
         });
         const result = self.inner.register_handler.?(&ret);
         if (result) |pjrt_c_error| {
@@ -1323,8 +1325,7 @@ pub const FFI = extern struct {
         }
     }
 
-    pub fn registerTypeId(self: *const FFI, api: *const Api, T: type) ApiError!void {
-        const type_name = @typeName(T);
+    pub fn registerTypeId(self: *const Ffi, api: *const Api, type_name: []const u8) ApiError!ffi.TypeId {
         var ret = pjrtStruct(c.PJRT_FFI_TypeID_Register_Args{
             .type_name = type_name.ptr,
             .type_name_size = type_name.len,
@@ -1336,10 +1337,10 @@ pub const FFI = extern struct {
             return pjrt_error.getCode(api).toApiError();
         }
 
-        T.type_id = ret.type_id;
+        return .{ .type_id = ret.type_id };
     }
 
-    pub fn addUserData(self: *const FFI, api: *const Api, context: *ExecuteContext, user_data: UserData) ApiError!void {
+    pub fn addUserData(self: *const Ffi, api: *const Api, context: *ExecuteContext, user_data: UserData) ApiError!void {
         var ret = pjrtStruct(c.PJRT_FFI_UserData_Add_Args{
             .context = @ptrCast(context),
             .user_data = user_data.toCStruct(),
@@ -1351,11 +1352,6 @@ pub const FFI = extern struct {
             return pjrt_error.getCode(api).toApiError();
         }
     }
-};
-
-pub const RegisterHandlerTraits = enum(c.PJRT_FFI_Handler_TraitsBits) {
-    command_buffer_compatible = c.PJRT_FFI_HANDLER_TRAITS_COMMAND_BUFFER_COMPATIBLE,
-    _,
 };
 
 pub const CustomCallRegistry = extern struct {

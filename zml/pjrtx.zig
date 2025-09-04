@@ -5,24 +5,30 @@ const dialects = @import("mlir/dialects");
 const mlir = @import("mlir");
 const pjrt = @import("pjrt");
 pub const ffi = pjrt.ffi;
-pub const ApiError = pjrt.ApiError;
-pub const ErrorCode = pjrt.ErrorCode;
-pub const ExecuteContext = pjrt.ExecuteContext;
-pub const BufferType = pjrt.BufferType;
-pub const Device = pjrt.Device;
-pub const MemoryStats = pjrt.MemoryStats;
-pub const DeviceDescription = pjrt.DeviceDescription;
 pub const Api = pjrt.Api;
-pub const NamedValue = pjrt.NamedValue;
+pub const ApiError = pjrt.ApiError;
+pub const BufferType = pjrt.BufferType;
 pub const ClientInitError = pjrt.ClientInitError;
-pub const Error = pjrt.Error;
-pub const GetCostAnalysisError = pjrt.GetCostAnalysisError;
-pub const SerializeResult = pjrt.SerializeResult;
-pub const Executable = pjrt.Executable;
 pub const CompiledMemoryStats = pjrt.CompiledMemoryStats;
+pub const Device = pjrt.Device;
+pub const DeviceDescription = pjrt.DeviceDescription;
+pub const Error = pjrt.Error;
+pub const ErrorCode = pjrt.ErrorCode;
+pub const Executable = pjrt.Executable;
+pub const ExecuteContext = pjrt.ExecuteContext;
 pub const ExecuteError = ApiError;
+pub const GetCostAnalysisError = pjrt.GetCostAnalysisError;
 pub const Memory = pjrt.Memory;
+pub const MemoryStats = pjrt.MemoryStats;
+pub const NamedValue = pjrt.NamedValue;
+pub const Profiler = pjrt.Profiler;
+pub const SerializeResult = pjrt.SerializeResult;
+pub const ShapeSpec = pjrt.ShapeSpec;
 pub const Stream = pjrt.Stream;
+
+const zml = struct {
+    pub const DataType = @import("dtype.zig").DataType;
+};
 
 const log = std.log.scoped(.zml);
 
@@ -126,6 +132,12 @@ pub const Client = opaque {
     pub fn createUnitializedBuffer(self: *const Client, api: *const Api, args: CreateUninitializedBufferArgs) ApiError!*Buffer {
         return @ptrCast(try self.inner().createUninitializedBuffer(api, args));
     }
+
+    pub const CreateBuffersForAsyncHostToDeviceArgs = pjrt.Client.CreateBuffersForAsyncHostToDeviceArgs;
+
+    pub fn createBuffersForAsyncHostToDevice(self: *const Client, api: *const Api, args: CreateBuffersForAsyncHostToDeviceArgs) ApiError!*AsyncHostToDeviceTransferManager {
+        return @ptrCast(try self.inner().createBuffersForAsyncHostToDevice(api, args));
+    }
 };
 
 pub const Buffer = opaque {
@@ -159,8 +171,8 @@ pub const Buffer = opaque {
         return @ptrCast(try self.inner().toHostBuffer(api, dst));
     }
 
-    pub fn getElementType(self: *const Buffer, api: *const Api) BufferType {
-        return self.inner().getElementType(api);
+    pub fn getElementType(self: *const Buffer, api: *const Api) zml.DataType {
+        return dtypeFromBufferType(self.inner().getElementType(api));
     }
 
     pub fn getDimensions(self: *const Buffer, api: *const Api) []const i64 {
@@ -205,6 +217,13 @@ pub const Event = opaque {
 
     pub fn getEventError(self: *const Event, api: *const Api) ?*Error {
         return self.inner().getEventError(api);
+    }
+
+    pub fn awaitBlocking(self: *Event, api: *const Api) ApiError!void {
+        if (self.isReady(api)) {
+            return;
+        }
+        try self.inner().await_(api);
     }
 
     pub fn await_(self: *Event, api: *const Api) ApiError!void {
@@ -264,14 +283,22 @@ pub const LoadedExecutable = opaque {
     };
 
     pub fn execute(self: *const LoadedExecutable, api: *const Api, args: ExecuteArgs) ExecuteError!void {
-        try asynk.callBlocking(pjrt.LoadedExecutable.execute, .{ self.inner(), api, pjrt.LoadedExecutable.ExecuteArgs{
+        try self.inner().execute(api, pjrt.LoadedExecutable.ExecuteArgs{
             .num_args = args.num_args,
             .arguments = @ptrCast(args.arguments),
             .results = @ptrCast(args.results),
             .events = @ptrCast(args.events),
             .non_donatable_input_indices = args.non_donatable_input_indices,
             .context = args.context,
-        } });
+        });
+        // try asynk.callBlocking(pjrt.LoadedExecutable.execute, .{ self.inner(), api, pjrt.LoadedExecutable.ExecuteArgs{
+        //     .num_args = args.num_args,
+        //     .arguments = @ptrCast(args.arguments),
+        //     .results = @ptrCast(args.results),
+        //     .events = @ptrCast(args.events),
+        //     .non_donatable_input_indices = args.non_donatable_input_indices,
+        //     .context = args.context,
+        // } });
     }
 
     pub fn getExecutable(self: *LoadedExecutable, api: *const Api) ApiError!*Executable {
@@ -314,3 +341,29 @@ pub const AsyncHostToDeviceTransferManager = opaque {
         return self.inner().addMetadata(api, transfer_metadata);
     }
 };
+
+pub fn bufferTypeFromDtype(dt: zml.DataType) pjrt.BufferType {
+    return switch (dt) {
+        inline else => |tag| @field(pjrt.BufferType, @tagName(tag)),
+    };
+}
+
+pub fn dtypeFromBufferType(pjrt_type: pjrt.BufferType) zml.DataType {
+    return switch (pjrt_type) {
+        .invalid => @panic("Found an invalid pjrt buffer"),
+        inline else => |tag| @field(zml.DataType, @tagName(tag)),
+    };
+}
+
+test bufferTypeFromDtype {
+    inline for (@typeInfo(zml.DataType).@"enum".fields) |field| {
+        const dt: zml.DataType = @enumFromInt(field.value);
+        try std.testing.expectEqual(dt, dtypeFromBufferType(bufferTypeFromDtype(dt)));
+    }
+
+    inline for (@typeInfo(pjrt.BufferType).@"enum".fields) |field| {
+        const dt: pjrt.BufferType = @enumFromInt(field.value);
+        if (dt == .invalid) continue;
+        try std.testing.expectEqual(dt, bufferTypeFromDtype(dtypeFromBufferType(dt)));
+    }
+}

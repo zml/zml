@@ -49,7 +49,7 @@ pub const Buffer = struct {
 
     pub const FromOptions = struct {
         wait: bool = true,
-        memory: ?pjrt.Memory.Kind = null,
+        memory: ?Memory = null,
     };
 
     /// Copies the content of the given buffer from host memory to the accelerator memory.
@@ -71,7 +71,7 @@ pub const Buffer = struct {
             break :cs @divExact(host_buffer.dim(ax), n_partitions);
         } else 0;
 
-        const buffer_type = bufferTypeFromDtype(host_buffer.shape().dtype());
+        const buffer_type = pjrt.bufferTypeFromDtype(host_buffer.shape().dtype());
         const byte_strides = host_buffer.strides();
 
         const devices = platform.getDevices();
@@ -89,15 +89,20 @@ pub const Buffer = struct {
                 .byte_strides = byte_strides,
                 .host_buffer_semantics = .ImmutableUntilTransferCompletes,
             };
-            if (opts.memory) |memory_kind| {
-                const memories = try devices[i].addressableMemories(platform.pjrt_api);
-                const memory = for (memories) |m| {
-                    const kind = m.kind(platform.pjrt_api);
-                    if (kind == memory_kind) break m;
-                } else return error.NotFound;
-                args.memory = memory;
-            } else {
+            if (platform.target == .cpu or opts.memory == null) {
                 args.device = devices[i];
+            } else {
+                const memory = opts.memory.?;
+                const device_memories = try devices[i].addressableMemories(platform.pjrt_api);
+                // TODO measure the cost of this and consider caching on Zig side inside the platform.
+                const selected_memory = for (device_memories) |m| {
+                    const kind = m.kind(platform.pjrt_api);
+                    if (kind == memory.toPjrtMemory()) break m;
+                } else {
+                    log.warn("Platform {s} doesn't have memory {s}", .{ @tagName(platform.target), @tagName(memory) });
+                    return error.NotFound;
+                };
+                args.memory = selected_memory;
             }
 
             const pjrt_buffer, const event = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, args);
@@ -152,6 +157,32 @@ pub const Buffer = struct {
         return from(platform, HostBuffer.fromBytes(sh, data), .{});
     }
 
+    test fromBytes {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+        {
+            const data: [8]u32 = .{ 0, 9, 2, 11, 4, 13, 6, 15 };
+            const data_bytes: []const u8 = @ptrCast(&data);
+            try std.testing.expectEqual(@sizeOf(@TypeOf(data)), data_bytes.len);
+            const data_d = try zml.Buffer.fromBytes(platform, .init(.{8}, .u32), data_bytes);
+            const data_read = try data_d.toHostAlloc(std.testing.allocator);
+            defer data_read.deinit(std.testing.allocator);
+            try std.testing.expectEqualSlices(u32, &data, data_read.items(u32));
+        }
+
+        {
+            // We use u4 so that the bits are packed.
+            const data: [8]u4 = .{ 0, 9, 2, 11, 4, 13, 6, 15 };
+            const data_bytes: []const u8 = @ptrCast(&data);
+            try std.testing.expectEqual(@sizeOf(@TypeOf(data)), data_bytes.len);
+            const expect: [8]u4 = .{ 0, 9, 2, 11, 4, 13, 6, 15 };
+            const data_d = try zml.Buffer.fromBytes(platform, .init(.{8}, .u4), data_bytes);
+            const data_read = try data_d.toHostAlloc(std.testing.allocator);
+            defer data_read.deinit(std.testing.allocator);
+            try std.testing.expectEqualSlices(u8, std.mem.asBytes(&expect), data_read.bytes());
+        }
+    }
+
     /// Copies the given Zig array to the accelerator memory and
     /// return a Buffer using the array shape.
     pub fn fromArray(platform: Platform, arr: anytype) !Buffer {
@@ -179,10 +210,9 @@ pub const Buffer = struct {
         return try from(platform, host_buffer, opts);
     }
 
-    pub fn asPinnedHostBuffer(self: Buffer) HostBuffer {
-        // TODO restore assert
-        // const memory = self.getMemory().kind(self._api);
-        // stdx.debug.assert(memory == .pinned_host, "asPinnedHostBuffer({}) expects a buffer allocated on host memory, got {}. see `toMemory`", .{ self, memory });
+    pub fn asHostBuffer(self: Buffer) HostBuffer {
+        const memory = self.getMemory().kind(self._api);
+        stdx.debug.assert((memory == .pinned_host) or (memory == .unpinned_host), "asHostBuffer({f}) expects a buffer allocated on host memory, got {t}. see `copyToMemory`", .{ self, memory });
         const ptr: [*]u8 = @ptrCast(self._shards.get(0).getOpaqueDeviceMemoryDataPointer(self._api) catch unreachable);
         return HostBuffer.fromBytes(self._shape, ptr[0..self._shape.byteSize()]);
     }
@@ -276,7 +306,7 @@ pub const Buffer = struct {
 
         const pjrt_buffer = platform.pjrt_client.createViewOfDeviceBuffer(platform.pjrt_api, .{
             .data = device_data,
-            .element_type = bufferTypeFromDtype(shape_.dtype()),
+            .element_type = pjrt.bufferTypeFromDtype(shape_.dtype()),
             .dims = shape_.dims(),
             // TODO: exposes sharding in the API.
             .device = platform.getDevices()[0],
@@ -297,6 +327,12 @@ pub const Buffer = struct {
             ._shape = shape_,
             ._shards = shards,
         };
+    }
+
+    pub fn opaqueDeviceMemoryDataPointer(self: Buffer) [*]u8 {
+        stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer", .{});
+        const opaque_ptr: *anyopaque = self._shards.get(0).getOpaqueDeviceMemoryDataPointer(self._api) catch unreachable;
+        return @ptrCast(opaque_ptr);
     }
 
     /// Fetches the content of the given buffer into a stack variable of the given type.
@@ -390,11 +426,29 @@ pub const Buffer = struct {
         return @reduce(.Or, self._shape._sharding_info);
     }
 
-    pub fn copyToMemory(self: Buffer, memory: *const pjrt.Memory) !Buffer {
+    pub const CopyToMemoryOpts = struct {
+        wait: bool = true,
+    };
+
+    pub fn copyToMemory(self: Buffer, platform: Platform, memory: Memory, opts: CopyToMemoryOpts) !Buffer {
+        const pjrt_memory = platform.pjrt_client.memoryByKind(self._api, memory.toPjrtMemory());
+        if (pjrt_memory == null) {
+            stdx.debug.panic("Memory destination `{s}` for {f}", .{ memory.pjrtName(), self });
+        }
+
         var new_shards: Buffer.Shards = .{};
         for (self._shards.slice()) |shard| {
-            const new_shard = try shard.copyToMemory(self._api, memory);
+            const new_shard = try shard.copyToMemory(self._api, pjrt_memory.?);
             new_shards.appendAssumeCapacity(new_shard);
+        }
+
+        if (opts.wait) {
+            for (new_shards.constSlice()) |shard| {
+                const event = shard.getReadyEvent(self._api);
+                if (event) |e| {
+                    try e.awaitBlocking(self._api);
+                }
+            }
         }
 
         return Buffer{ ._shape = self._shape, ._shards = new_shards, ._api = self._api };
@@ -433,7 +487,7 @@ pub const Buffer = struct {
             break :s shard_shape;
         } else shape_;
 
-        const buffer_type = bufferTypeFromDtype(shape_.dtype());
+        const buffer_type = pjrt.bufferTypeFromDtype(shape_.dtype());
         const devices = platform.getDevices();
         for (0..n_partitions) |i| {
             var args = pjrt.Client.CreateUninitializedBufferArgs{
@@ -465,29 +519,3 @@ pub const Buffer = struct {
         return res;
     }
 };
-
-pub fn bufferTypeFromDtype(dt: DataType) pjrt.BufferType {
-    return switch (dt) {
-        inline else => |tag| @field(pjrt.BufferType, @tagName(tag)),
-    };
-}
-
-pub fn dtypeFromBufferType(pjrt_type: pjrt.BufferType) DataType {
-    return switch (pjrt_type) {
-        .invalid => @panic("Found an invalid pjrt buffer"),
-        inline else => |tag| @field(DataType, @tagName(tag)),
-    };
-}
-
-test bufferTypeFromDtype {
-    inline for (@typeInfo(DataType).@"enum".fields) |field| {
-        const dt: DataType = @enumFromInt(field.value);
-        try std.testing.expectEqual(dt, dtypeFromBufferType(bufferTypeFromDtype(dt)));
-    }
-
-    inline for (@typeInfo(pjrt.BufferType).@"enum".fields) |field| {
-        const dt: pjrt.BufferType = @enumFromInt(field.value);
-        if (dt == .invalid) continue;
-        try std.testing.expectEqual(dt, bufferTypeFromDtype(dtypeFromBufferType(dt)));
-    }
-}

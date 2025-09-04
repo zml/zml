@@ -48,6 +48,9 @@ fn FloatHelpers(Float: type) type {
                     return if (vf32.sign == 0) Float.inf else Float.minus_inf;
                 } else Float.nan;
             }
+            // TODO: This is too lossy.
+            // If exponent underflow, and the mantissa is zero we drop to 0,
+            // while we should set the mantissa to it's max value.
             return .{
                 .sign = vf32.sign,
                 .exponent = @intCast(exponent),
@@ -129,11 +132,7 @@ pub const Float8E4M3B11FNUZ = packed struct(u8) {
     exponent: u4,
     sign: u1,
 
-    pub const nan: Float8E4M3B11FNUZ = .{
-        .sign = 1,
-        .exponent = 0,
-        .mantissa = 0,
-    };
+    pub const nan: Float8E4M3B11FNUZ = .{ .sign = 1, .exponent = 0, .mantissa = 0 };
 
     pub fn isNan(self: Float8E4M3B11FNUZ) bool {
         return self.sign == 1 and self.exponent == 0 and self.mantissa == 0;
@@ -155,7 +154,7 @@ pub const Float8E4M3FN = packed struct(u8) {
     pub const nan: Float8E4M3FN = .{ .sign = 0, .exponent = std.math.maxInt(u4), .mantissa = std.math.maxInt(u3) };
 
     pub fn isNan(self: Float8E4M3FN) bool {
-        return allBitsOne(self.exponent) and allBitsOne(self.mantissa);
+        return self.exponent == nan.exponent and self.mantissa == nan.mantissa;
     }
     const Helpers = FloatHelpers(@This());
     pub const zero = Helpers.zero;
@@ -170,11 +169,7 @@ pub const Float8E4M3FNUZ = packed struct(u8) {
     exponent: u4,
     sign: u1,
 
-    pub const nan: Float8E4M3FNUZ = .{
-        .sign = 1,
-        .exponent = 0,
-        .mantissa = 0,
-    };
+    pub const nan: Float8E4M3FNUZ = .{ .sign = 1, .exponent = 0, .mantissa = 0 };
 
     pub fn isNan(self: Float8E4M3FNUZ) bool {
         return self.sign == 1 and self.exponent == 0 and self.mantissa == 0;
@@ -209,14 +204,10 @@ pub const Float8E5M2 = packed struct(u8) {
     exponent: u5,
     sign: u1,
 
-    pub const nan: Float8E5M2 = .{
-        .sign = 0,
-        .exponent = std.math.maxInt(u5),
-        .mantissa = 1,
-    };
+    pub const nan: Float8E5M2 = .{ .sign = 0, .exponent = std.math.maxInt(u5), .mantissa = 1 };
 
     pub fn isNan(self: Float8E5M2) bool {
-        return allBitsOne(self.exponent) and self.mantissa != 0;
+        return self.exponent == nan.exponent and self.mantissa != 0;
     }
 
     pub const minus_inf: Float8E5M2 = .{
@@ -232,7 +223,7 @@ pub const Float8E5M2 = packed struct(u8) {
     };
 
     pub fn isInf(self: Float8E5M2) bool {
-        return allBitsOne(self.exponent) and self.mantissa == 0;
+        return self == inf or self == minus_inf;
     }
 
     const Helpers = FloatHelpers(@This());
@@ -333,10 +324,157 @@ test BFloat16 {
     });
 }
 
+pub const Float8E4M3 = packed struct(u8) {
+    mantissa: u3,
+    exponent: u4,
+    sign: u1,
+
+    pub const nan: Float8E4M3 = @bitCast(0xFF);
+
+    pub fn isNan(self: Float8E4M3) bool {
+        return self == nan or self == comptime nan.neg();
+    }
+
+    pub const minus_inf: Float8E4M3 = .{
+        .sign = 1,
+        .exponent = std.math.maxInt(u4),
+        .mantissa = 0,
+    };
+
+    pub const inf: Float8E4M3 = .{
+        .sign = 0,
+        .exponent = std.math.maxInt(u4),
+        .mantissa = 0,
+    };
+
+    const Helpers = FloatHelpers(@This());
+    pub const zero = Helpers.zero;
+    pub const neg = Helpers.neg;
+    pub const fromF32 = Helpers.fromF32;
+    pub const toF32 = Helpers.toF32;
+    pub const formatNumber = Helpers.formatNumber;
+};
+
+pub const Float8E3M4 = packed struct(u8) {
+    mantissa: u4,
+    exponent: u3,
+    sign: u1,
+
+    pub const nan: Float8E3M4 = @bitCast(0xFF);
+
+    pub fn isNan(self: Float8E3M4) bool {
+        return self == nan or self == comptime nan.neg();
+    }
+
+    pub const minus_inf: Float8E3M4 = .{
+        .sign = 1,
+        .exponent = std.math.maxInt(u3),
+        .mantissa = 0,
+    };
+
+    pub const inf: Float8E3M4 = .{
+        .sign = 0,
+        .exponent = std.math.maxInt(u3),
+        .mantissa = 0,
+    };
+
+    const Helpers = FloatHelpers(@This());
+    pub const zero = Helpers.zero;
+    pub const neg = Helpers.neg;
+    pub const fromF32 = Helpers.fromF32;
+    pub const toF32 = Helpers.toF32;
+    pub const formatNumber = Helpers.formatNumber;
+};
+
+pub const Float8E8M0 = packed struct(u8) {
+    mantissa: u0 = 0,
+    exponent: u8,
+    sign: u0 = 0,
+
+    /// Lossy conversion from f32, similar to @floatCast
+    pub fn fromF32(f: f32) Float8E8M0 {
+        const vf32: Float32 = @bitCast(f);
+        return .{ .exponent = @intCast(vf32.exponent) };
+    }
+
+    /// Lossless conversion to f32.
+    pub fn toF32(x: Float8E8M0) f32 {
+        if (x.exponent == 0) return min_scale;
+        const vf32: Float32 = .{
+            .sign = 0,
+            .exponent = x.exponent,
+            .mantissa = 0,
+        };
+        return @bitCast(vf32);
+    }
+
+    pub const min_scale: f32 = Float32.toF32(.{ .sign = 0, .exponent = 0, .mantissa = 0b1 << 22 });
+
+    const Helpers = FloatHelpers(@This());
+    pub const formatNumber = Helpers.formatNumber;
+};
+
+test Float8E8M0 {
+    try std.testing.expectEqual(Float8E8M0{ .exponent = 127 }, Float8E8M0.fromF32(1.0));
+    // try std.testing.expectEqual(5.877472e-39, Float8E8M0.toF32(.{ .exponent = 0}));
+
+    try testCustomFloat(Float8E8M0, .{
+        .lossless = &[_]f32{ Float8E8M0.min_scale, 1.0, 64.0, 1.0 / 128.0, std.math.pow(f32, 2.0, 127) },
+        .lossy = &[_]f32{1.00001},
+    });
+}
+
+pub const Float4E2M1 = packed struct(u4) {
+    mantissa: u1,
+    exponent: u2,
+    sign: u1,
+
+    pub const nan: Float4E2M1 = @bitCast(@as(u4, 0xF));
+    const Helpers = FloatHelpers(@This());
+    pub const zero = Helpers.zero;
+    pub const neg = Helpers.neg;
+    pub const fromF32 = Helpers.fromF32;
+    pub const formatNumber = Helpers.formatNumber;
+
+    pub const values = [_]f32{ 0.0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6 };
+
+    pub fn toF32(x: Float4E2M1) f32 {
+        // the baseline toF32 doesn't work correctly:
+        // 0b0001 and 0b1001 shoud map to ±0.5, but are mapped to ±epsilon
+        return values[@as(u4, @bitCast(x))];
+    }
+
+    test toF32 {
+        var to_f32_res: [16]f32 = undefined;
+        for (&to_f32_res, 0..) |*r, i| {
+            const x_f4: Float4E2M1 = @bitCast(@as(u4, @intCast(i)));
+            r.* = x_f4.toF32();
+        }
+        try std.testing.expectEqualSlices(f32, &Float4E2M1.values, &to_f32_res);
+    }
+
+    test fromF32 {
+        // the baseline fromF32 doesn't work correctly:
+        // ±0.5 should map to 0b0001/0b1001 but are map to ±0.0 instead.
+        // TODO: it probably affects other types.
+        var from_f32_res: [16]Float4E2M1 = undefined;
+        for (&from_f32_res, 0..) |*r, i| {
+            r.* = .fromF32(Float4E2M1.values[i]);
+        }
+        try std.testing.expectEqualSlices(u4, &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 }, @ptrCast(&from_f32_res));
+    }
+};
+
 pub fn floatCast(T: type, x: anytype) T {
-    return switch (@TypeOf(x)) {
-        f64, f32, f16 => @floatCast(x),
-        else => @floatCast(x.toF32()),
+    return switch (T) {
+        f64, f32, f16 => switch (@TypeOf(x)) {
+            f64, f32, f16 => @floatCast(x),
+            else => @floatCast(x.toF32()),
+        },
+        else => switch (@TypeOf(x)) {
+            f64, f32, f16 => .fromF32(x),
+            else => .fromF32(x.toF32()),
+        },
     };
 }
 

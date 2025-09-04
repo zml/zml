@@ -169,7 +169,7 @@ test pixelShuffle {
 ///
 /// Note: at the difference of Pytorch, shifts need to be explicitly repeated, even if they are the same for all axes.
 /// ref: https://pytorch.org/docs/stable/generated/torch.roll.html
-pub fn roll(self: Tensor, shifts: []const i64, axes_: []const u8) Tensor {
+pub fn roll(self: Tensor, shifts: []const i64, axes_: []const i8) Tensor {
     // TODO(hugo) accept following syntax: x.roll(.{ .a = 5, .b = 8 })
     stdx.debug.assert(self.rank() > 0 and shifts.len == axes_.len, "Shifts length ({d}) and dims length ({d}) are not equal, we expect the same length.", .{ shifts.len, axes_.len });
 
@@ -180,11 +180,11 @@ pub fn roll(self: Tensor, shifts: []const i64, axes_: []const u8) Tensor {
         return roll(first_dim_rolled, tail_shifts, tail_dims);
     }
 
-    const a = axes_[0];
+    const a = self.axis(axes_[0]);
     const start = @mod(self.dim(a) - shifts[0], self.dim(a));
     const idx = Tensor.arange(.{ .start = start, .end = start + self.dim(a) }, .f32);
     const divisor: f32 = @floatFromInt(self.dim(a));
-    return self.gatherValues(a, idx.fmod(divisor).convert(.i32), .{});
+    return self.gather_(&.{a}, &.{idx.fmod(divisor).convert(.i32)}, .{});
 }
 
 test roll {
@@ -194,7 +194,7 @@ test roll {
     const res = try zml.testing.compileAndCall(
         platform,
         roll,
-        .{ input, &[_]i64{ 2, 1 }, &[_]u8{ 0, 1 } },
+        .{ input, &[_]i64{ 2, 1 }, &[_]i8{ 0, 1 } },
     );
 
     const expectation = zml.HostBuffer.fromSlice(.{ 4, 2 }, &[_]f32{ 6, 5, 8, 7, 2, 1, 4, 3 });
@@ -273,4 +273,13 @@ test meshgrid {
             try ys.getValue([4][6]i32),
         );
     }
+}
+
+/// Flattens the given axis and the next one, into one new axis.
+pub fn flatten(self: Tensor, axis_: anytype) Tensor {
+    const old_shape = self._shape;
+    const a = self.axis(axis_);
+    stdx.debug.assert(a + 1 < self.rank(), "Can't flatten {f} on the last axis {}.", .{ self, axis_ });
+    const new_shape = old_shape.mergeAxis(a, .{ a, a + 1 });
+    return self.reshape(new_shape);
 }
