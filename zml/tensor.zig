@@ -1316,33 +1316,77 @@ pub const Tensor = struct {
 
     /// Computes softmax along the given axis.
     /// y[i] = exp(x[i]) / ( Σ_k exp(x[k]) + bias )
-    pub fn softmax(self: Tensor, axis_: anytype) Tensor {
-        const a = self.axis(axis_);
-        const max_val = self.max(a);
-        const row_mask = max_val.cmp(.GT, .scalar(-std.math.inf(f64), self.dtype()));
+    pub fn softmax(x: Tensor, axis_: anytype) Tensor {
+        const a = x.axis(axis_);
+        const max_val = x.max(a);
 
-        const exp_diff_max = self.sub(max_val).exp();
-        const res = exp_diff_max.div(exp_diff_max.sum(a));
+        const exp_diff_max = x.sub(max_val).exp();
+        const y = exp_diff_max.div(exp_diff_max.sum(a));
 
         // If a row is full -inf return full 0 instead of full nan,
         // this fix attention when mask hides a full row.
-        return row_mask.broad(self.shape()).select(res, .scalar(0, self.dtype()));
+        const row_mask = max_val.cmp(.GT, .scalar(-std.math.inf(f64), x.dtype()));
+        return .select(row_mask.broad(y.shape()), y, .scalar(0, x.dtype()));
+    }
+
+    test softmax {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        const Local = struct {
+            pub fn _softmax(x: Tensor) Tensor {
+                return x.softmax(-1);
+            }
+        };
+
+        const logits_d = try zml.Buffer.fromArray(
+            platform,
+            [4]f32{ @log(2.0), @log(1.0), @log(4.0), @log(3.0) },
+        );
+        const res = try zml.testing.compileAndCall(platform, Local._softmax, .{logits_d});
+        try std.testing.expectEqual(
+            [4]f32{ 2.0 / 10.0, 1.0 / 10.0, 4.0 / 10.0, 3.0 / 10.0 },
+            try res.getValue([4]f32),
+        );
     }
 
     /// Computes softmax, but adds a bias to the sum of exponentiel.
-    /// y[i] = exp(x[i]) / ( Σ_k exp(x[k]) + bias )
-    pub fn softmaxBiased(self: Tensor, axis_: anytype, bias: ?Tensor) Tensor {
-        const a = self.axis(axis_);
+    /// y[i] = exp(x[i]) / ( Σ_k exp(x[k]) + exp(bias) )
+    ///
+    /// Note: the bias is passed pre-exponential, allowing to use precision tricks.
+    pub fn softmaxBiased(x: Tensor, axis_: anytype, bias: Tensor) Tensor {
+        const a = x.axis(axis_);
+        const b = bias.convert(x.dtype()).broad(x.shape().setDim(a, 1));
+        const max_val: Tensor = maximum(x.max(a), b);
+        const exp_diff_max = x.sub(max_val).exp();
+        const bias_diff_max = b.sub(max_val).exp();
+        const y = exp_diff_max.div(exp_diff_max.sum(a).add(bias_diff_max));
 
-        if (bias == null) return self.softmax(axis_);
-        const b = bias.?.convert(self.dtype()).broad(self.shape().setDim(a, 1));
-        const max_val: Tensor = maximum(self.max(a), b);
-        const exp_diff_max = self.sub(max_val).exp();
-        const bias_diff_max = b.mul(.exp(.negate(max_val)));
-        const res = exp_diff_max.div(exp_diff_max.sum(a).add(bias_diff_max));
+        const row_mask = max_val.cmp(.GT, .scalar(-std.math.inf(f64), x.dtype()));
+        return .select(row_mask.broad(y.shape()), y, .scalar(0, x.dtype()));
+    }
 
-        // The bias means that denominator won't be 0, we don't need to handle that case.
-        return res;
+    test softmaxBiased {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        const Local = struct {
+            pub fn _softmaxBiased(x: Tensor, bias: Tensor) Tensor {
+                return x.softmaxBiased(-1, bias);
+            }
+        };
+
+        const logits_d = try zml.Buffer.fromArray(
+            platform,
+            [4]f32{ @log(2.0), @log(1.0), @log(4.0), @log(3.0) },
+        );
+        const bias_d = try zml.Buffer.fromArray(platform, [1]f32{@log(5.0)});
+
+        try zml.testing.expectClose(
+            zml.HostBuffer.fromArray(&[4]f32{ 2.0 / 15.0, 1.0 / 15.0, 4.0 / 15.0, 3.0 / 15.0 }),
+            try zml.testing.compileAndCall(platform, Local._softmaxBiased, .{ logits_d, bias_d }),
+            1e-5,
+        );
     }
 
     /// Returns a Tensor containing the log of the sum of exponential over the given axis.

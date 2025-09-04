@@ -92,7 +92,7 @@ pub fn expectClose(left_: anytype, right_: anytype, tolerance: f32) !void {
                     const right_data = right.items(R);
                     for (left_data, right_data, 0..) |l, r, i| {
                         if (!approxEq(f32, zml.floats.floatCast(f32, l), zml.floats.floatCast(f32, r), tolerance)) {
-                            log.err("left.data != right_data.\n < {d:40.3} \n > {d:40.3}\n error at idx {d}: {d:.3} != {d:.3}", .{ stdx.fmt.slice(center(left_data, i)), stdx.fmt.slice(center(right_data, i)), i, left_data[i], right_data[i] });
+                            log.err("left.data != right_data.\n < {d:40.3} \n > {d:40.3}\n error at idx {d}: {d:.3} != {d:.3}", .{ stdx.fmt.slice(L, center(left_data, i)), stdx.fmt.slice(R, center(right_data, i)), i, left_data[i], right_data[i] });
                             return error.TestUnexpectedResult;
                         }
                     }

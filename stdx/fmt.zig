@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub fn slice(any_slice: anytype) FmtSlice(std.meta.Elem(@TypeOf(any_slice))) {
+pub fn slice(T: type, any_slice: []const T) FmtSlice(T) {
     return .{ .slice = any_slice };
 }
 

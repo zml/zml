@@ -109,10 +109,14 @@ pub fn asyncMain() !void {
             }
         }
 
-        log.info("Loaded activations: {s} -> {f}", .{ k, v });
+        // log.info("Loaded activations: {s} -> {f}", .{ k, v });
+        if (std.mem.indexOf(u8, k, ".22.self_attn.in.") != null) {
+            log.info("Self attn input {s}: {d:32.3}", .{ k, v.* });
+        }
+
         // if (std.mem.endsWith(u8, k, "layers.23.mlp.experts.in.1")) log.info("Routing {s}: {d:32.2}", .{k, v.*});
         // if (std.mem.endsWith(u8, k, "layers.23.mlp.experts.in.2")) log.info("Routing weights {s}: {d:32.2}", .{k, v.*});
-        if (std.mem.endsWith(u8, k, ".0.mlp.experts.in.2")) log.info("Routing weights {s}: {d:32.2}", .{ k, v.* });
+        // if (std.mem.endsWith(u8, k, ".0.mlp.experts.in.2")) log.info("Routing weights {s}: {d:32.2}", .{ k, v.* });
     }
 
     // Test implementation
@@ -135,6 +139,34 @@ fn testImplementation(
     try zml.testing.testLayer(platform, store, "model.model.layers.0.mlp.router", mixtral.model.layers[0].mlp.router, mixtral_weights.model.layers[0].mlp.router, 1e-2);
 
     const allocator = std.heap.smp_allocator;
+    {
+        const input: zml.HostBuffer = store.buffers.get("model.model.layers.22.self_attn.in.0").?;
+        const kv_shape = zml.Shape.init(.{ .layer = 1, .k = input.dim(.s), .h = 8, .hd = 64 }, .bf16);
+        const self_attn_mod = try zml.compileModel(
+            allocator,
+            Mixtral.SelfAttn.forward,
+            mixtral.model.layers[22].self_attn,
+            .{
+                store.buffers.get("model.model.layers.22.self_attn.in.0").?.shape(),
+                zml.Shape.scalar(.u32),
+                Mixtral.KvCache.initShape(kv_shape),
+            },
+            platform,
+        );
+        defer self_attn_mod.deinit();
+
+        const self_attn_exe = self_attn_mod.prepare(mixtral_weights.model.layers[22].self_attn);
+        const out, _ = self_attn_exe.call(.{
+            try input.toDevice(platform),
+            try .scalar(platform, 0, .u32),
+            try Mixtral.KvCache.initBuffer(kv_shape, platform),
+        });
+
+        const expected = store.buffers.get("model.model.layers.22.self_attn.out.0").?;
+        try zml.testing.expectClose(expected, out, 1e-2);
+        log.info("All good for self_attn", .{});
+    }
+
     {
         const w = mixtral.model.layers[22].mlp.experts.gate_up_proj;
         const dequant_mod = try zml.compileFn(allocator, dequantize, .{.{

@@ -705,7 +705,7 @@ test "invFreq Yarn" {
     var inv_freq: @TypeOf(yarn_freq) = undefined;
     _invFreq(yarn_conf, &inv_freq);
     for (yarn_freq, inv_freq, 0..) |expected, actual, i| {
-        errdefer log.err("Mismatch at position {d}.\nExpected: {d}\nActual:   {d}", .{ i, yarn_freq, inv_freq });
+        errdefer log.err("Mismatch at position {d}.\nExpected: {d}\nActual:   {d}", .{ i, stdx.fmt.slice(f32, &yarn_freq), stdx.fmt.slice(f32, &inv_freq) });
         try std.testing.expectApproxEqRel(expected, actual, 1e-5);
     }
     try std.testing.expectApproxEqRel(1.3465735902799727, yarn_conf.scaling.attentionScaling(), 1e-5);
@@ -1261,9 +1261,9 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
     log.warn("attn_weights : {f}, attn_mask : {?f}", .{ attn_weights, attn_mask });
     attn_weights = attn_weights.convert(.f32);
     attn_weights = if (opts.softmax_bias) |softmax_bias| attn: {
-        // The split is needed because we also split q ourselves,
-        // but the contiguous seems brittle, what we want is a kind of "broadTranspose".
-        const bias = softmax_bias.splitAxis(.h, .{ .h = k.dim(.h), .hq = .auto }).contiguous(.{ .h, .q, .hq });
+        // The split is needed because we also split q ourselves.
+        // TODO: consider letting the user do that.
+        const bias = softmax_bias.splitAxis(.h, .{ .h = k.dim(.h), .hq = .auto });
         break :attn attn_weights.convert(.f32).softmaxBiased(.k, bias).convert(q.dtype());
     } else attn_weights.convert(.f32).softmax(.k).convert(q.dtype());
 
