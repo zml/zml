@@ -330,8 +330,6 @@ pub const HostBuffer = struct {
         self: HostBuffer,
         writer: anytype,
     ) !void {
-        // TODO debug option
-        // try writer.print("HostBuffer(.{f})@0x{x}", .{ self._shape, @intFromPtr(self._data) });
         try writer.print("HostBuffer(.{f})", .{self._shape});
     }
 
@@ -351,9 +349,10 @@ pub const HostBuffer = struct {
                     const val: dt.toZigType() = self.items(dt.toZigType())[0];
                     return switch (comptime dt.class()) {
                         // Since we have custom floats, we need to explicitly convert to float32 ourselves.
-                        .float => stdx.fmt.formatFloatValue(floats.floatCast(f32, val), options, writer),
-                        .integer => stdx.fmt.formatIntValue(val, options, writer),
-                        .bool, .complex => stdx.fmt.formatAnyValue(val, options, writer),
+                        .float => stdx.fmt.formatFloat(floats.floatCast(f32, val), options, writer),
+                        .integer => stdx.fmt.formatInt(val, options, writer),
+                        .bool => stdx.fmt.formatBool(val, options, writer),
+                        .complex => stdx.fmt.formatComplex(val, options, writer),
                     };
                 },
             };
@@ -368,7 +367,8 @@ pub const HostBuffer = struct {
                     switch (comptime dt.class()) {
                         .float => try stdx.fmt.formatFloatSlice(values, options, writer),
                         .integer => try stdx.fmt.formatIntSlice(values, options, writer),
-                        .bool, .complex => try stdx.fmt.formatAnySlice(values, options, writer),
+                        .complex => try stdx.fmt.formatComplexSlice(values, options, writer),
+                        .bool => try stdx.fmt.formatBoolSlice(values, options, writer),
                     }
                 },
             }
