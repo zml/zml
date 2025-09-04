@@ -236,7 +236,7 @@ pub const Print = struct {
         // It also needs PJRT to copy the data on the host first so it can print it.
         .copy_inputs_to_host_pinned = true,
         // Print is fairly predictable and can be captured in an execution graph.
-        .handler_traits = .{ .command_buffer_compatible = true },
+        .handler_traits = .{ .command_buffer_compatible = false },
     };
 
     platform: Platform,
