@@ -200,6 +200,12 @@ fn CallbackImpl(comptime Callback: type, call_frame: *pjrt.ffi.CallFrame) ?*pjrt
         callback_args[i] = zml_buffer;
     }
 
+    defer {
+        if (opts.copy_inputs_to_host_pinned and platform.target != .cpu) {
+            inline for (1..callback_args.len) |i| callback_args[i].deinit();
+        }
+    }
+
     for (0..call_frame.results.len) |i| {
         const ffi_buffer = call_frame.results.buffers()[i];
         const ffi_buffer_shape = shapeFromFfi(ffi_buffer);
