@@ -355,12 +355,17 @@ pub const HostBuffer = struct {
             try writer.splatByteAll(' ', indent_level);
             switch (self.dtype()) {
                 inline else => |dt| {
-                    const values = self.items(dt.toZigType());
+                    const T = dt.toZigType();
+                    const n: i64 = self._shape.dim(0);
+                    // TODO: handle negative strides
+                    const byte_stride: i64 = self._strides[0];
+                    const elem_strides: i64 = @divExact(byte_stride, @sizeOf(T));
+                    const values: []const T = @ptrCast(@alignCast(self._data[0..@intCast(n * byte_stride)]));
                     switch (comptime dt.class()) {
-                        .float => try stdx.fmt.formatFloatSlice(values, options, writer),
-                        .integer => try stdx.fmt.formatIntSlice(values, options, writer),
-                        .complex => try stdx.fmt.formatComplexSlice(values, options, writer),
-                        .bool => try stdx.fmt.formatBoolSlice(values, options, writer),
+                        .float => try stdx.fmt.formatFloatSlice(values, options, elem_strides, writer),
+                        .integer => try stdx.fmt.formatIntSlice(values, options, elem_strides, writer),
+                        .complex => try stdx.fmt.formatComplexSlice(values, options, elem_strides, writer),
+                        .bool => try stdx.fmt.formatBoolSlice(values, options, elem_strides, writer),
                     }
                 },
             }
