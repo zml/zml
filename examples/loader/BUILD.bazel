@@ -1,11 +1,28 @@
-load("@rules_zig//zig:defs.bzl", "zig_binary")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
 
 zig_binary(
     name = "loader",
+    copts = ["-freference-trace=30"],
     main = "main.zig",
     deps = [
         "//async",
         "//stdx",
         "//zml",
     ],
+)
+
+zig_binary(
+    name = "experimentation",
+    main = "experimentation.zig",
+    deps = [
+        "//async",
+        "//stdx",
+        "//zml",
+    ],
+)
+
+zig_test(
+    name = "test_experimentation",
+    test_runner = "//zml:test_runner",
+    deps = [":experimentation"],
 )

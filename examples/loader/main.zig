@@ -17,26 +17,60 @@ const Shape = zml.Shape;
 const Dims = stdx.BoundedArray(i64, zml.Shape.MAX_RANK);
 const StringBuilder = std.ArrayListUnmanaged(u8);
 
-pub const TensorDescriptor = struct {
-    file: *asynk.File,
+/// This struct now describes a tensor and its location on disk.
+/// It no longer holds a live Reader object, which solves the lifetime issue.
+pub const Tensor = struct {
     shape: Shape,
-    start: usize,
+    file_index: u32, // Index into Registry.files
+    offset: u64, // Absolute byte offset within the file
+    size_in_bytes: u64,
 };
 
 pub const Registry = struct {
-    pub const TensorDescriptors = std.StringArrayHashMapUnmanaged(TensorDescriptor);
+    pub const Tensors = std.StringArrayHashMapUnmanaged(Tensor);
     pub const Metadatas = std.StringArrayHashMapUnmanaged(Metadata);
 
     arena: std.heap.ArenaAllocator,
     files: []asynk.File = &.{},
-    tensors: TensorDescriptors = .{},
+    tensors: Tensors = .{},
     metadata: Metadatas = .{},
 
     pub fn deinit(self: *Registry) void {
+        const allocator = self.arena.allocator();
+        // Deinitialize the hashmaps first
+        self.tensors.deinit(allocator);
+        self.metadata.deinit(allocator);
+
+        // Then close the files
         for (self.files) |file| {
-            file.close() catch unreachable;
+            file.close() catch |err| {
+                log.warn("failed to close file: {}", .{err});
+            };
         }
         self.arena.deinit();
+    }
+
+    /// This is the new "first-class" API for reading tensor data.
+    /// It performs the streaming operation for a given tensor to any writer.
+    /// The caller provides the destination (the writer) and a temporary
+    /// buffer for the read operations.
+    pub fn streamTensorTo(
+        self: *Registry,
+        tensor: Tensor,
+        writer: *std.io.Writer,
+        read_buffer: []u8,
+    ) !void {
+        const file = &self.files[tensor.file_index];
+
+        // Seek to the exact start of the tensor data
+        try file.seekTo(tensor.offset);
+
+        // Create a temporary reader for this specific operation
+        var file_reader = file.reader(read_buffer);
+
+        // In Zig 0.15.1, there's no std.io.copyN, but we can use
+        // streamExact to achieve the same result efficiently.
+        try file_reader.interface.streamExact(writer, tensor.size_in_bytes);
     }
 };
 
@@ -47,6 +81,8 @@ pub fn open(allocator: std.mem.Allocator, path: []const u8) !Registry {
     errdefer registry.deinit();
 
     const arena = registry.arena.allocator();
+    registry.tensors = Registry.Tensors{};
+    registry.metadata = Registry.Metadatas{};
 
     var files = std.array_list.Managed(asynk.File).init(arena);
     errdefer files.deinit();
@@ -67,13 +103,21 @@ fn loadFromIndex(allocator: std.mem.Allocator, registry: *Registry, files: *std.
         log.err("Failed to open {s}: {}", .{ path, err });
         return err;
     };
-    errdefer file.close() catch unreachable;
+    defer file.close() catch {};
     var buffer: [4096]u8 = undefined;
     var r = file.reader(&buffer);
 
-    var json_reader = std.json.Reader.init(allocator, &r.interface);
-    const index = try std.json.parseFromTokenSourceLeaky(std.json.Value, allocator, &json_reader, .{ .allocate = .alloc_if_needed });
-    var loaded_files = std.StringHashMap(void).init(allocator);
+    // Using a temporary allocator for JSON parsing
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const temp_allocator = gpa.allocator();
+
+    var json_reader = std.json.Reader.init(temp_allocator, &r.interface);
+    const index = try std.json.parseFromTokenSourceLeaky(std.json.Value, temp_allocator, &json_reader, .{ .allocate = .alloc_if_needed });
+    // defer std.json.parseFree(std.json.Value, temp_allocator, index);
+
+    var loaded_files = std.StringHashMap(void).init(temp_allocator);
+    defer loaded_files.deinit();
 
     const weight_map = index.object.get("weight_map").?.object;
     var it = weight_map.iterator();
@@ -87,7 +131,8 @@ fn loadFromIndex(allocator: std.mem.Allocator, registry: *Registry, files: *std.
         log.info("Loading file part: {s}", .{filename});
         try loaded_files.put(filename, {});
 
-        const full_filename = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(path).?, filename });
+        const dirname = std.fs.path.dirname(path) orelse ".";
+        const full_filename = try std.fs.path.join(temp_allocator, &.{ dirname, filename });
         try loadFile(allocator, registry, files, full_filename);
     }
 
@@ -102,23 +147,34 @@ fn loadFile(allocator: std.mem.Allocator, registry: *Registry, files: *std.array
         log.err("Failed to open {s}: {}", .{ path, err });
         return err;
     };
-    errdefer file.close() catch unreachable;
-    var buffer: [16 * 1024]u8 = undefined;
-    var r = file.reader(&buffer);
+    // The registry will own this file handle, so we don't close it here.
+    // If an error occurs before we append it, the `errdefer` in `open` will handle cleanup.
+
+    var r_buffer: [16 * 1024]u8 = undefined;
+    var r = file.reader(&r_buffer);
 
     const json_header_length: usize = @intCast(try r.interface.takeInt(u64, .little));
-    const json_data = try allocator.alloc(u8, json_header_length);
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const temp_allocator = gpa.allocator();
+
+    const json_data = try temp_allocator.alloc(u8, json_header_length);
+    defer temp_allocator.free(json_data);
     try r.interface.readSliceAll(json_data);
 
-    const metadata = try std.json.parseFromSliceLeaky(std.json.Value, allocator, json_data, .{});
+    // This is the absolute offset in the file where tensor data starts.
+    const data_start_offset = 8 + json_header_length;
 
+    const metadata = try std.json.parseFromSliceLeaky(std.json.Value, temp_allocator, json_data, .{});
+    // defer std.json.parseFree(std.json.Value, temp_allocator, metadata);
+
+    const file_index: u32 = @intCast(files.items.len);
     try files.append(file);
-    errdefer _ = files.pop();
 
     var it = metadata.object.iterator();
     while (it.next()) |entry| {
         const key = entry.key_ptr.*;
-        log.info("Key: {s}", .{key});
         if (std.mem.eql(u8, key, "__metadata__")) {
             var prefix_buf: [1024]u8 = undefined;
             try parseMetadata(allocator, registry, StringBuilder.initBuffer(&prefix_buf), entry.value_ptr.*);
@@ -127,27 +183,33 @@ fn loadFile(allocator: std.mem.Allocator, registry: *Registry, files: *std.array
         const val = entry.value_ptr.*;
         const shape_field = val.object.get("shape").?.array;
         if (shape_field.items.len > Shape.MAX_RANK) {
-            // Not an error until someone tries to read the tensor itself.
             log.warn("Can't load tensor {s}, too many dims: {}", .{ key, shape_field.items.len });
             continue;
         }
         const offset_field = val.object.get("data_offsets").?;
-        const start: usize = @intCast(offset_field.array.items[0].integer);
-        const end: usize = @intCast(offset_field.array.items[1].integer);
+        const start: u64 = @intCast(offset_field.array.items[0].integer);
+        const end: u64 = @intCast(offset_field.array.items[1].integer);
         const dtype = try stringToDtype(val.object.get("dtype").?.string);
+
         var dims: Dims = .{};
         for (shape_field.items) |d| {
             dims.appendAssumeCapacity(d.integer);
         }
 
         const out_shape = Shape.init(dims.constSlice(), dtype);
-        // We aren't storing 'end', so check we can infer it from the tensor shape.
-        // This is fine cause safetensor only allow storing contiguous tensors.
-        // https://github.com/huggingface/safetensors/blob/main/README.md#format
-        // > The byte buffer needs to be entirely indexed, and cannot contain holes. This prevents the creation of polyglot files.
-        std.debug.assert(end - start == out_shape.byteSize());
+        const size_in_bytes = end - start;
+        std.debug.assert(size_in_bytes == out_shape.byteSize());
 
-        try registry.tensors.put(allocator, try allocator.dupe(u8, key), .{ .start = start, .shape = out_shape, .file = &file });
+        // Create the Tensor struct with location info
+        const tensor_info = Tensor{
+            .shape = out_shape,
+            .file_index = file_index,
+            .offset = data_start_offset + start,
+            .size_in_bytes = size_in_bytes,
+        };
+
+        // Store the tensor location info in the registry
+        try registry.tensors.put(allocator, try allocator.dupe(u8, key), tensor_info);
     }
 }
 
@@ -162,20 +224,61 @@ pub fn asyncMain() !void {
     const allocator = gpa.allocator();
 
     var args = std.process.args();
-    // Skip executable path
-    _ = args.next().?;
+    _ = args.next().?; // Skip executable path
 
-    const file = if (args.next()) |path| blk: {
-        log.info("File path: {s}\n", .{path});
-        break :blk path;
-    } else {
-        log.err("Missing file path argument\n", .{});
-        log.err("Try: bazel run //examples/loader -- /path/to/mymodel.safetensors or /path/to/model.safetensors.index.json \n", .{}); // todo: add ` --config=release `
-        std.process.exit(0);
+    const file_path = if (args.next()) |path| path else {
+        log.err("Usage: <program> /path/to/model.safetensors or /path/to/model.safetensors.index.json", .{});
+        return;
     };
 
-    var registry = try open(allocator, file);
+    log.info("Loading from: {s}", .{file_path});
+
+    var registry = try open(allocator, file_path);
     defer registry.deinit();
+
+    log.info("Registry loaded with {d} tensors.", .{registry.tensors.count()});
+
+    var it = registry.tensors.iterator();
+    while (it.next()) |entry| {
+        const tensor_name = entry.key_ptr.*;
+        const tensor = entry.value_ptr.*;
+
+        log.info("Processing tensor {s} with shape {any}", .{ tensor_name, tensor.shape });
+
+        // --- PJRT Integration Point ---
+        // 1. Ask PJRT for a host-side buffer to write the weights into.
+        //    const pjrt_host_buffer: []u8 = ... get from PJRT C API ...
+        //
+        // 2. Create a Zig writer that targets this PJRT buffer.
+        //    var tensor_writer = std.io.Writer.fixed(pjrt_host_buffer);
+        //
+        // 3. Kick off the asynchronous transfer by streaming the file data
+        //    into the PJRT buffer using our new API.
+
+        // For this demo, we simulate steps 1 & 2 by allocating our own buffer.
+        const dest_buffer = try allocator.alloc(u8, tensor.size_in_bytes);
+        defer allocator.free(dest_buffer);
+
+        // This is the writer that points to our destination (the PJRT host buffer in a real scenario)
+        var tensor_writer = std.io.Writer.fixed(dest_buffer);
+
+        // We need a temporary buffer for the file->memory copy operation.
+        // This can be reused for all tensors. A larger buffer is more efficient.
+        var read_buffer: [64 * 1024]u8 = undefined;
+
+        log.info("Streaming {d} bytes...", .{tensor.size_in_bytes});
+
+        // Use our new first-class API!
+        try registry.streamTensorTo(tensor, &tensor_writer, &read_buffer);
+
+        // 4. At this point, `dest_buffer` is full. You would now tell PJRT
+        //    that the host-to-device transfer can proceed.
+        //    PJRT_AsyncHostToDeviceTransferManager_Transfer(...)
+
+        log.info("...done streaming tensor '{s}'.", .{tensor_name});
+    }
+
+    log.info("All tensors processed.", .{});
 }
 
 // all code below is unmodified (or slightly) / imported strucs / funcs from zml
