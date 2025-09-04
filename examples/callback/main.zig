@@ -141,7 +141,7 @@ pub fn asyncMain() !void {
     context.printAvailablePlatforms(platform);
 
     // Register our custom call
-    try platform.registerCallback(GrayScale);
+    try zml.callback.register(GrayScale, platform);
 
     // Compile MLIR code containing our custom call.
     const rgb_shape = zml.Shape.init(.{12 * 3}, .u8);

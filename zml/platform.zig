@@ -4,9 +4,6 @@ const runtimes = @import("runtimes");
 pub const Target = runtimes.Platform;
 const stdx = @import("stdx");
 
-const zml = struct {
-    const callback = @import("callback.zig");
-};
 const pjrt = @import("pjrtx.zig");
 
 const log = std.log.scoped(.zml);
@@ -77,10 +74,6 @@ pub const Platform = struct {
         var res = self;
         res.compilation_options = opts;
         return res;
-    }
-
-    pub fn registerCallback(platform: Platform, Callback: type) pjrt.ApiError!void {
-        try zml.callback.register(Callback, platform);
     }
 
     pub fn deinit(self: *Platform) void {
