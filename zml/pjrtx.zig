@@ -207,6 +207,13 @@ pub const Event = opaque {
         return self.inner().getEventError(api);
     }
 
+    pub fn awaitBlocking(self: *Event, api: *const Api) ApiError!void {
+        if (self.isReady(api)) {
+            return;
+        }
+        try self.inner().await_(api);
+    }
+
     pub fn await_(self: *Event, api: *const Api) ApiError!void {
         defer self.deinit(api);
 
@@ -264,14 +271,14 @@ pub const LoadedExecutable = opaque {
     };
 
     pub fn execute(self: *const LoadedExecutable, api: *const Api, args: ExecuteArgs) ExecuteError!void {
-        try asynk.callBlocking(pjrt.LoadedExecutable.execute, .{ self.inner(), api, pjrt.LoadedExecutable.ExecuteArgs{
+        try self.inner().execute(api, pjrt.LoadedExecutable.ExecuteArgs{
             .num_args = args.num_args,
             .arguments = @ptrCast(args.arguments),
             .results = @ptrCast(args.results),
             .events = @ptrCast(args.events),
             .non_donatable_input_indices = args.non_donatable_input_indices,
             .context = args.context,
-        } });
+        });
     }
 
     pub fn getExecutable(self: *LoadedExecutable, api: *const Api) ApiError!*Executable {

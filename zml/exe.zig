@@ -5,6 +5,7 @@ const stdx = @import("stdx");
 const aio = @import("aio.zig");
 const Buffer = @import("buffer.zig").Buffer;
 const Bufferized = @import("tensor.zig").Bufferized;
+const callback = @import("callback.zig");
 const CompilationContext = @import("module.zig").CompilationContext;
 const meta = @import("meta.zig");
 const pjrt = @import("pjrtx.zig");
@@ -154,7 +155,7 @@ pub const BaseExe = struct {
     exe: *pjrt.LoadedExecutable,
 
     /// The execution context for this executable.
-    context: ?*pjrt.ExecuteContext = null,
+    execute_context: ?*pjrt.ExecuteContext,
 
     /// Pre-allocated slice of buffers to use as inputs when the module is called.
     input_per_device: []const [*]*pjrt.Buffer,
@@ -205,9 +206,18 @@ pub const BaseExe = struct {
         const all_shapes = try allocator.alloc(Shape, n_in + n_out);
         @memcpy(all_shapes[0..n_in], args.input_shapes);
         @memcpy(all_shapes[n_in..], args.result_shapes);
+
+        var execute_context: ?*pjrt.ExecuteContext = null;
+        if (platform.pjrt_api.ffi()) |ffi| {
+            log.info("Created context execution {*} for {*}", .{ execute_context, exe });
+            execute_context = try platform.pjrt_api.createExecuteContext();
+            try callback.bindInternalCallbacks(allocator, platform, ffi, execute_context.?);
+        }
+
         return .{
             .platform = platform,
             .exe = exe,
+            .execute_context = execute_context,
             .ready_buffer_count = 0,
             .input_buffer_count = @intCast(n_in),
             .num_devices = args.n_devices,
@@ -220,7 +230,7 @@ pub const BaseExe = struct {
     }
 
     pub fn deinit(self: BaseExe) void {
-        if (self.context) |ctx| {
+        if (self.execute_context) |ctx| {
             ctx.deinit(self.platform.pjrt_api);
         }
         self._arena.deinit();
@@ -244,16 +254,16 @@ pub const BaseExe = struct {
             // even if it has been marked as "can be donated" during compilation.
             // TODO: expose it ?
             .non_donatable_input_indices = &.{},
-            .context = self.context,
+            .context = self.execute_context,
         }) catch |err| {
             std.debug.panic("PJRT_LoadedExecutable_Execute failed with: {}", .{err});
         };
 
-        for (events[0..sharding.num_partitions]) |e| {
-            if (e) |ev| {
-                ev.await_(self.platform.pjrt_api) catch unreachable;
-            }
-        }
+        // for (events[0..sharding.num_partitions]) |e| {
+        //     if (e) |ev| {
+        //         ev.await_(self.platform.pjrt_api) catch unreachable;
+        //     }
+        // }
     }
 
     pub fn _unsafeAssignResults(self: BaseExe, T: type, result: *T) void {
@@ -285,6 +295,17 @@ pub const BaseExe = struct {
         stdx.debug.internalAssert(local_ctx.index == self.result_shapes.len, "Pjrt call returned {} tensors, but the return type {s}, contains {} Buffers. Note that modules need to have a comptime know number of returned tensors.", .{ self.output_per_device.len, @typeName(T), local_ctx.index });
     }
 
+    pub fn bind(exe: BaseExe, Callback: type, op: *Callback) !void {
+        stdx.debug.assert(exe.execute_context != null, "Exe doesn't have an execution context", .{});
+        const pjrt_api = exe.platform.pjrt_api;
+
+        if (pjrt_api.ffi()) |ffi| {
+            try callback.addUserData(Callback, pjrt_api, ffi, exe.execute_context.?, op);
+        } else {
+            stdx.debug.panic("Callbacks are not supported for target {s}", .{@tagName(exe.platform.target)});
+        }
+    }
+
     pub fn serialize(self: BaseExe, writer: anytype) !void {
         var executable = try self.exe.getExecutable(self.platform.pjrt_api);
         var serialize_result = try executable.serialize(self.platform.pjrt_api);
@@ -314,11 +335,11 @@ pub const BaseExe = struct {
 
     pub fn clone(self: BaseExe, parent_allocator: std.mem.Allocator) !BaseExe {
         var exe: BaseExe = try .init(parent_allocator, self.platform, self.exe, .{
-            .n_in = self.input_buffer_count,
+            .input_shapes = self.input_shapes,
             .result_shapes = self.result_shapes,
             .n_devices = self.num_devices,
         });
-        exe.context = self.context;
+        exe.execute_context = self.execute_context;
         return exe;
     }
 };
@@ -346,6 +367,14 @@ pub fn Exe(ArgsT: type, ReturnT: type) type {
             var new: Exe(stdx.meta.Tail(ArgsT), ReturnT) = .{ .inner = self.inner };
             new.inner.prepare(first_arg);
             return new;
+        }
+
+        /// For a given customCall inside this executable,
+        /// provide a pointer to runtime data.
+        /// The caller keeps memory ownership and need to ensure that the value
+        /// stays alive as long as the executable.
+        pub fn bind(self: Self, comptime T: type, value: *T) !void {
+            try self.inner.bind(T, value);
         }
 
         pub fn serialize(self: Self, writer: anytype) !void {

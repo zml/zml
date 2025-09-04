@@ -22,6 +22,11 @@ pub const Platform = struct {
     target: Target,
     pjrt_api: *const pjrt.Api,
     pjrt_client: *pjrt.Client,
+
+    // This make the pjrt struct quite fat, but is only used during compilation.
+    // TODO: Reconsider having it here, and maybe pass explicitly to compile,
+    // or create an intermediary struct:
+    // `const comp = platform.compiler(compile_opts); const exe = comp.compile(...);`
     compilation_options: CompilationOptions = .{},
 
     pub const MAX_NUM_DEVICES: u8 = 32;
@@ -69,17 +74,6 @@ pub const Platform = struct {
         var res = self;
         res.compilation_options = opts;
         return res;
-    }
-
-    pub fn registerFFIType(self: Platform, comptime T: type) !void {
-        if (self.pjrt_api.ffi()) |ffi| {
-            if (!@hasDecl(T, "type_id")) {
-                stdx.debug.panic("registerFFIType requires type {s} to have a `type_id` i64 field ", .{@typeName(T)});
-            }
-            try ffi.registerTypeId(self.pjrt_api, T);
-        } else {
-            stdx.debug.panic("registerFFIType is not available for target {s}", .{@tagName(self.target)});
-        }
     }
 
     pub fn deinit(self: *Platform) void {

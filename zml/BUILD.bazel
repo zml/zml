@@ -31,6 +31,7 @@ zig_library(
         "aio/torch/py.zig",
         "buffer.zig",
         "context.zig",
+        "callback.zig",
         "dtype.zig",
         "exe.zig",
         "floats.zig",
@@ -53,7 +54,7 @@ zig_library(
         "torch.zig",
         "zml.zig",
     ],
-    copts = ["-lc"],
+    copts = ["-lc", "-freference-trace=20"],
     main = "zml.zig",
     visibility = ["//visibility:public"],
     deps = [

@@ -1,0 +1,11 @@
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+
+zig_binary(
+    name = "callback",
+    main = "main.zig",
+    deps = [
+        "@zml//async",
+        "@zml//zml",
+        "@zml//runtimes",
+    ],
+)

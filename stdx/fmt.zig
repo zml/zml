@@ -1,145 +1,117 @@
 const std = @import("std");
 
-pub const Fmt = union(enum) {
-    int: IntFmt,
-    float: FloatFmt,
-    generic: void,
+pub fn slice(any_slice: anytype) FmtSlice(std.meta.Elem(@TypeOf(any_slice))) {
+    return .{ .slice = any_slice };
+}
 
-    pub fn parse(T: type, comptime fmt_: []const u8) Fmt {
-        return switch (@typeInfo(T)) {
-            .float, .comptime_float => .{ .float = FloatFmt.parseComptime(fmt_) },
-            .int, .comptime_int => .{ .int = IntFmt.parseComptime(fmt_) },
-            else => .{ .generic = {} },
-        };
-    }
-};
+fn FmtSlice(T: type) type {
+    return struct {
+        slice: []const T,
 
-pub const FullFormatOptions = struct {
-    fmt: Fmt,
-    options: std.fmt.FormatOptions,
-};
-
-pub const IntFmt = struct {
-    base: u8,
-    case: std.fmt.Case = .lower,
-
-    pub fn parseComptime(comptime fmt_: []const u8) IntFmt {
-        return parse(fmt_) catch @panic("invalid fmt for int: " ++ fmt_);
-    }
-
-    pub fn parse(fmt_: []const u8) error{InvalidArgument}!IntFmt {
-        return if (fmt_.len == 0 or std.mem.eql(u8, fmt_, "d"))
-            .{ .base = 10, .case = .lower }
-        else if (std.mem.eql(u8, fmt_, "x"))
-            .{ .base = 16, .case = .lower }
-        else if (std.mem.eql(u8, fmt_, "X"))
-            .{ .base = 16, .case = .upper }
-        else if (std.mem.eql(u8, fmt_, "o"))
-            .{ .base = 8, .case = .upper }
-        else
-            // TODO: unicode/ascii
-            error.InvalidArgument;
-    }
-};
-
-pub const FloatFmt = enum(u8) {
-    scientific = @intFromEnum(std.fmt.Number.Mode.scientific),
-    decimal = @intFromEnum(std.fmt.Number.Mode.decimal),
-    hex,
-
-    pub fn parseComptime(comptime fmt_: []const u8) FloatFmt {
-        return parse(fmt_) catch @panic("invalid fmt for float: " ++ fmt_);
-    }
-
-    pub fn parse(fmt_: []const u8) error{InvalidArgument}!FloatFmt {
-        return if (fmt_.len == 0 or std.mem.eql(u8, fmt_, "e"))
-            .scientific
-        else if (std.mem.eql(u8, fmt_, "d"))
-            .decimal
-        else if (std.mem.eql(u8, fmt_, "x"))
-            .hex
-        else
-            error.InvalidArgument;
-    }
-};
-
-pub fn formatValue(value: anytype, full: FullFormatOptions, writer: anytype) !void {
-    return switch (@typeInfo(@TypeOf(value))) {
-        .comptime_float, .float => try formatFloatValue(value, full, writer),
-        .comptime_int, .int => try formatIntValue(value, full, writer),
-        else => try formatAnyValue(value, full, writer),
+        pub fn formatNumber(f: @This(), writer: *std.io.Writer, n: std.fmt.Number) std.io.Writer.Error!void {
+            return switch (@typeInfo(T)) {
+                .comptime_float, .float => try formatFloatSlice(f.slice, n, writer),
+                .comptime_int, .int => try formatIntSlice(f.slice, n, writer),
+                .bool => try formatBoolSlice(f.slice, n, writer),
+                .@"struct" => if (@hasField(T, "re") and @hasField(T, "im")) {
+                    try formatComplexSlice(f.slice, n, writer);
+                } else if (@hasDecl(T, "toF32")) {
+                    try formatFloatSlice(f.slice, n, writer);
+                } else {
+                    try formatSliceAny(f.slice, n, writer);
+                },
+                else => @compileError("FmtSlice doesn't support type: " ++ @typeName(T)),
+            };
+        }
     };
 }
 
-pub fn formatFloatValue(value: anytype, full: FullFormatOptions, writer: *std.Io.Writer) !void {
+pub fn formatFloat(value: anytype, spec: std.fmt.Number, writer: *std.Io.Writer) !void {
     const x = switch (@typeInfo(@TypeOf(value))) {
         .@"struct" => value.toF32(),
         .float => value,
-        else => @compileError("formatFloatValue expects a float, got: " ++ @typeName(@TypeOf(value))),
+        else => @compileError("formatFloat expects a float, got: " ++ @typeName(@TypeOf(value))),
     };
-    try switch (full.fmt.float) {
-        .scientific => writer.printFloat(x, .{ .mode = .scientific, .precision = full.options.precision }),
-        .decimal => writer.printFloat(x, .{ .mode = .decimal, .precision = full.options.precision }),
-        .hex => writer.printFloatHexOptions(x, .{ .mode = .hex }),
-    };
+    return writer.printFloat(x, spec);
 }
 
-pub fn formatIntValue(value: anytype, full: FullFormatOptions, writer: *std.Io.Writer) !void {
+pub fn formatInt(value: anytype, spec: std.fmt.Number, writer: *std.Io.Writer) !void {
     switch (@typeInfo(@TypeOf(value))) {
         .int => {},
-        else => @compileError("formatIntValue expects an int, got: " ++ @typeName(@TypeOf(value))),
+        else => @compileError("formatInt expects an int, got: " ++ @typeName(@TypeOf(value))),
     }
-    return writer.printInt(value, full.fmt.int.base, full.fmt.int.case, full.options);
+    return writer.printInt(value, spec.mode.base().?, spec.case, .{ .alignment = spec.alignment, .fill = spec.fill });
 }
 
-pub fn formatAnyValue(value: anytype, full: FullFormatOptions, writer: *std.Io.Writer) !void {
+pub fn formatComplex(value: anytype, spec: std.fmt.Number, writer: *std.Io.Writer) !void {
+    try writer.writeAll(".{.re=");
+    try writer.printFloat(value.re, spec);
+    try writer.writeAll(", .im=");
+    try writer.printFloat(value.im, spec);
+    try writer.writeAll("}");
+}
+
+pub fn formatBool(value: bool, spec: std.fmt.Number, writer: *std.Io.Writer) !void {
+    try writer.alignBufferOptions(if (value) "1" else "0", .{ .alignment = spec.alignment, .fill = spec.fill });
+}
+
+pub fn formatAny(value: anytype, spec: std.fmt.Number, writer: *std.Io.Writer) !void {
     var buf: [48]u8 = undefined;
-    const s = std.fmt.bufPrint(&buf, "{any}", .{value}) catch blk: {
+    const T = @TypeOf(value);
+    const fmt = if (@hasDecl(T, "formatNumber")) "{d}" else "{f}";
+
+    const s = std.fmt.bufPrint(&buf, fmt, .{value}) catch blk: {
         buf[45..].* = "...".*;
         break :blk buf[0..];
     };
-    return try writer.alignBufferOptions(s, full.options);
+    return try writer.alignBufferOptions(s, .{ .alignment = spec.alignment, .fill = spec.fill });
 }
 
-pub fn formatSliceCustom(fmt_func: anytype, values: anytype, full: FullFormatOptions, writer: anytype) !void {
-
-    // Write first rows
-    const num_cols: usize = full.options.width orelse 12;
+pub fn formatSliceCustom(fmt_func: anytype, values: anytype, spec: std.fmt.Number, writer: *std.Io.Writer) !void {
+    // use the format "width" for the number of columns instead of individual width.
+    const num_cols: usize = spec.width orelse 12;
+    var my_options = spec;
+    my_options.width = null;
     const n: usize = values.len;
+
     _ = try writer.write("{");
     if (n <= num_cols) {
         for (values, 0..) |v, i| {
             // Force inlining so that the switch and the buffer can be done once.
-            try @call(.always_inline, fmt_func, .{ v, full, writer });
+            try @call(.always_inline, fmt_func, .{ v, my_options, writer });
             if (i < n - 1) _ = try writer.write(",");
         }
     } else {
         const half = @divFloor(num_cols, 2);
         for (values[0..half]) |v| {
-            try @call(.always_inline, fmt_func, .{ v, full, writer });
+            try @call(.always_inline, fmt_func, .{ v, my_options, writer });
             _ = try writer.write(",");
         }
         _ = try writer.write(" ..., ");
         for (values[n - half ..], 0..) |v, i| {
-            try @call(.always_inline, fmt_func, .{ v, full, writer });
+            try @call(.always_inline, fmt_func, .{ v, my_options, writer });
             if (i < half - 1) _ = try writer.write(",");
         }
     }
     _ = try writer.write("}");
 }
 
-pub fn formatAny(values: anytype, full: FullFormatOptions, writer: anytype) !void {
-    return try formatSliceCustom(formatAnyValue, values, full, writer);
+pub fn formatSliceAny(values: anytype, spec: std.fmt.Number, writer: *std.Io.Writer) !void {
+    return try formatSliceCustom(formatAny, values, spec, writer);
 }
 
-pub fn formatFloatSlice(values: anytype, full: FullFormatOptions, writer: anytype) !void {
-    return try formatSliceCustom(formatFloatValue, values, full, writer);
+pub fn formatFloatSlice(values: anytype, spec: std.fmt.Number, writer: *std.Io.Writer) !void {
+    return try formatSliceCustom(formatFloat, values, spec, writer);
 }
 
-pub fn formatIntSlice(values: anytype, full: FullFormatOptions, writer: anytype) !void {
-    return try formatSliceCustom(formatIntValue, values, full, writer);
+pub fn formatIntSlice(values: anytype, spec: std.fmt.Number, writer: *std.Io.Writer) !void {
+    return try formatSliceCustom(formatInt, values, spec, writer);
 }
 
-pub fn formatAnySlice(values: anytype, full: FullFormatOptions, writer: anytype) !void {
-    return try formatSliceCustom(formatAnyValue, values, full, writer);
+pub fn formatComplexSlice(values: anytype, spec: std.fmt.Number, writer: *std.Io.Writer) !void {
+    return try formatSliceCustom(formatComplex, values, spec, writer);
+}
+
+pub fn formatBoolSlice(values: anytype, spec: std.fmt.Number, writer: *std.Io.Writer) !void {
+    return try formatSliceCustom(formatBool, values, spec, writer);
 }
