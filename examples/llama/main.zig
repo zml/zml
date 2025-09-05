@@ -169,16 +169,16 @@ pub fn asyncMain() !void {
     var diag: clap.Diagnostic = .{};
     var stderr_buffer: [1024]u8 = undefined;
     var stderr = std.fs.File.stderr().writer(&stderr_buffer);
-    defer stderr.interface.flush();
+    defer stderr.interface.flush() catch {};
 
     var cli = clap.parse(clap.Help, &params, parsers, .{
         .diagnostic = &diag,
         .allocator = allocator,
     }) catch |err| {
         diag.report(&stderr.interface, err) catch {};
-        stderr.interface.print("usage: ", .{}) catch {};
+        stderr.interface.writeAll("usage: ") catch {};
         clap.usage(&stderr.interface, clap.Help, &params) catch {};
-        stderr.interface.print("\n", .{}) catch {};
+        stderr.interface.writeAll("\n") catch {};
         return;
     };
     defer cli.deinit();
