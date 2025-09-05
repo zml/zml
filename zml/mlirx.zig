@@ -54,6 +54,8 @@ pub const Type = struct {
         };
     }
 
+    // TODO(Corentin): Maybe remove that as it now requires a mlir context.
+    // It's weird to have to provide a mlir context to get a zml.DataType from a mlir.Type.
     pub fn toDType(mlir_type: *const mlir.Type) dtype.DataType {
         const mapping = .{
             .{ .bool, mlir.IntegerType(.i1) },

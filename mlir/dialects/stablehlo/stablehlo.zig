@@ -154,7 +154,7 @@ pub fn dotAlgorithmAttribute(ctx: *mlir.Context, dot_algorithm: DotAlgorithm, el
         ctx.ptr(),
         element_type.ptr(),
         element_type.ptr(),
-        mlir.floatType(dot_algorithm.accumulation, ctx).ptr(),
+        mlir.floatType(ctx, dot_algorithm.accumulation).ptr(),
         dot_algorithm.component_count,
         dot_algorithm.component_count,
         dot_algorithm.num_primitive_operations,
@@ -1459,4 +1459,20 @@ pub fn serializePortableArtifact2(module: *mlir.Module, target_version: []const 
     if (c.mlirLogicalResultIsFailure(result)) {
         return error.InvalidMlirBytecodeVersion;
     }
+}
+
+pub fn return_(ctx: *mlir.Context, value: *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
+    return mlir.Operation.make(ctx, "stablehlo.return", .{
+        .operands = .{ .flat = &.{value} },
+        .location = location,
+        .verify = false,
+    });
+}
+
+pub fn returns(ctx: *mlir.Context, values: []const *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
+    return mlir.Operation.make(ctx, "stablehlo.return", .{
+        .operands = .{ .flat = values },
+        .verify = false,
+        .location = location,
+    });
 }
