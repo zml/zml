@@ -141,6 +141,7 @@ test MapType {
 /// Any `To` struct inside `from` will be copied over to the target.
 pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam(cb, 0), from: anytype, to: anytype) !void {
     // TODO: handle tuple to slice conversion
+    // TODO: handle error bubbling up
     const From = FnParam(cb, 1);
     const To = stdx.meta.FnResult(cb);
     const FromStruct = @TypeOf(from);

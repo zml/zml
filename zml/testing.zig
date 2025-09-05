@@ -298,7 +298,7 @@ test testLayer {
     };
 
     // create a buffer store containing the activations:
-    var activations = try zml.aio.BufferStore.init(std.testing.allocator, &.{});
+    var activations = zml.aio.BufferStore.init(std.testing.allocator);
     defer activations.deinit();
     {
         const input = zml.HostBuffer.fromArray(&[2]f32{ 1, -1 });

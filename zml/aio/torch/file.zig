@@ -480,7 +480,7 @@ test "Read pickle (zipped)" {
     // torch.save({ "model": model, "tensor": tensor}, "simple.pt")
     const file = try asynk.File.open("zml/aio/torch/simple.pt", .{ .mode = .read_only });
     const mmap_file = try zml.aio.MemoryMappedFile.init(file);
-    var store = try zml.aio.BufferStore.init(testing.allocator, &.{mmap_file});
+    var store = try zml.aio.BufferStore.initWithFiles(testing.allocator, &.{mmap_file});
     defer store.deinit();
 
     {
