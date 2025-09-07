@@ -122,7 +122,7 @@ pub const Context = struct {
         self.* = undefined;
     }
 
-    const prefered_targets = [_]zml.Target{ .tpu, .neuron, .cuda, .rocm, .cpu };
+    const prefered_targets = [_]zml.Target{ .tt, .tpu, .neuron, .cuda, .rocm, .cpu };
 
     /// Automatically selects the best Platform loaded in the current Context.
     ///

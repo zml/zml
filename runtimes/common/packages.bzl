@@ -32,6 +32,9 @@ cc_import(
 )
 """.format(name = name, hdrs_glob = repr(hdrs_glob), shared_library = repr(shared_library), deps = repr(deps), kwargs = _kwargs(**kwargs))
 
+def _glob(*args, **kwargs):
+    return """glob({}, {})""".format(repr(args), _kwargs(**kwargs))
+
 def _filegroup(**kwargs):
     return """filegroup({})""".format(_kwargs(**kwargs))
 
@@ -60,4 +63,5 @@ packages = struct(
     filegroup = _filegroup,
     load_ = _load,
     patchelf = _patchelf,
+    glob = _glob,
 )

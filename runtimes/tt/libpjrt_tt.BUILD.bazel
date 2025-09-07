@@ -1,0 +1,51 @@
+load("@aspect_bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+load("@aspect_bazel_lib//lib:tar.bzl", "tar")
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag", "string_list_flag")
+load("@zml//bazel:patchelf.bzl", "patchelf")
+
+patchelf(
+    name = "libpjrt_tt_so",
+    soname = "libpjrt_tt.so",
+    src = "purelib/jax_plugins/pjrt_plugin_tt/pjrt_plugin_tt.so",
+    set_rpath = "$ORIGIN",
+)
+
+filegroup(
+    name = "tt-mlir",
+    srcs = glob(["purelib/jax_plugins/pjrt_plugin_tt/tt-mlir/install/lib/**"]),
+)
+
+filegroup(
+    name = "tt-metal",
+    srcs = glob(["purelib/jax_plugins/pjrt_plugin_tt/tt-mlir/install/tt-metal/**"]),
+)
+
+copy_to_directory(
+    name = "sandbox",
+    srcs = [
+        ":libpjrt_tt_so",
+        ":tt-mlir",
+        ":tt-metal",
+        # "@libhwloc15",
+        # "@libopenmpi3",
+        "@libprotobuf23",
+        # "@libnsl2",
+        # "@zlib1g",
+    ],
+    replace_prefixes = {
+        "libpjrt_tt_so": "lib",
+        "jax_plugins/pjrt_plugin_tt": "lib",
+        "lib/x86_64-linux-gnu": "lib",
+        "usr/lib/x86_64-linux-gnu": "lib",
+        "purelib/jax_plugins/pjrt_plugin_tt/tt-mlir/install/lib": "lib",
+        "purelib/jax_plugins/pjrt_plugin_tt/tt-mlir/install/tt-metal": "tt-metal",
+    },
+    add_directory_to_runfiles = True,
+    include_external_repositories = ["**"],
+)
+
+cc_library(
+    name = "libpjrt_tt",
+    data = [":sandbox"],
+    visibility = ["@zml//runtimes/tt:__subpackages__"],
+)

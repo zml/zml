@@ -92,6 +92,9 @@ use_repo(tpu, "libpjrt_tpu")
 neuron = use_extension("//runtimes/neuron:neuron.bzl", "neuron_packages")
 use_repo(neuron, "aws-neuronx-collectives", "aws-neuronx-runtime-lib", "libgomp1", "libpjrt_neuron", "zlib1g")
 
+tt = use_extension("//runtimes/tt:tt.bzl", "tt_packages")
+use_repo(tt, "libpjrt_tt")
+
 zls = use_extension("//third_party/zls:zls.bzl", "repo")
 use_repo(zls, "zls_aarch64-macos", "zls_x86_64-linux", "zls_x86_64-macos")
 
@@ -156,20 +159,24 @@ apt.install(
     manifest = "//runtimes/cuda:packages.yaml",
 )
 use_repo(apt, "apt_cuda")
-
 apt.install(
     name = "apt_rocm",
     lock = "//runtimes/rocm:packages.lock.json",
     manifest = "//runtimes/rocm:packages.yaml",
 )
 use_repo(apt, "apt_rocm")
-
 apt.install(
     name = "apt_neuron",
     lock = "//runtimes/neuron:packages.lock.json",
     manifest = "//runtimes/neuron:packages.yaml",
 )
 use_repo(apt, "apt_neuron")
+apt.install(
+    name = "apt_tt",
+    lock = "//runtimes/tt:packages.lock.json",
+    manifest = "//runtimes/tt:packages.yaml",
+)
+use_repo(apt, "apt_tt")
 
 oci = use_extension("@rules_oci//oci:extensions.bzl", "oci")
 oci.pull(

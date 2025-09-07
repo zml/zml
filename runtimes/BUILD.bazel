@@ -9,6 +9,7 @@ RUNTIMES = {
     "rocm": False,
     "tpu": False,
     "neuron": False,
+    "tt": False,
 }
 
 [

@@ -1,0 +1,36 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_shared_library")
+
+cc_library(
+    name = "empty",
+)
+
+cc_library(
+    name = "libpjrt_tt",
+    defines = ["ZML_RUNTIME_TT"],
+    deps = ["@libpjrt_tt"],
+)
+
+zig_library(
+    name = "tt",
+    import_name = "runtimes/tt",
+    main = "tt.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pjrt",
+    ] + select({
+        "//runtimes:tt.enabled": [
+            ":libpjrt_tt",
+            "//async",
+            "//stdx",
+            "@rules_zig//zig/runfiles",
+        ],
+        "//conditions:default": [":empty"],
+    }),
+)
+
+filegroup(
+    name = "layers",
+    srcs = [],
+    visibility = ["//visibility:public"],
+)
