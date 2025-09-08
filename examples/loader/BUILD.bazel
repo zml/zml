@@ -11,18 +11,8 @@ zig_binary(
     ],
 )
 
-zig_binary(
-    name = "experimentation",
-    main = "experimentation.zig",
-    deps = [
-        "//async",
-        "//stdx",
-        "//zml",
-    ],
-)
-
 zig_test(
-    name = "test_experimentation",
+    name = "test",
     test_runner = "//zml:test_runner",
-    deps = [":experimentation"],
+    deps = [":test"],
 )
