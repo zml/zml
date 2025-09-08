@@ -316,6 +316,8 @@ fn loadFile(registry: *Registry, path: []const u8) !void {
 }
 
 // Core: Data Source, Sink, and Executor
+
+// todo: should not exist cause it's not using streaming stuffs and allocate a big buffer
 pub const BufferLoader = struct {
     allocator: std.mem.Allocator,
     buffers: std.StringHashMapUnmanaged([]u8),
@@ -380,12 +382,13 @@ pub const Executor = struct {
         // Source
         var file = self.registry.files.items[tensor.source_index];
 
+        // seek should not be present cause if it's correctly streamed from the upstream we don't need it
         try file.seekTo(tensor.offset); // important: seek before creating the reader
 
         var file_read_buffer: [16 * 1024]u8 = undefined;
         var file_reader = file.reader(&file_read_buffer);
 
-        var limited_reader = LimitingReader.init(&file_reader.interface, tensor.shape.byteSize());
+        var limited_reader: LimitingReader = .init(&file_reader.interface, tensor.shape.byteSize());
         const source_reader = &limited_reader.interface;
 
         // Sink
@@ -405,6 +408,7 @@ pub const Executor = struct {
         const bytes_copied = try io.copy(source_reader, writer_chain, &pump_buffer);
         std.debug.assert(bytes_copied == tensor.shape.byteSize());
 
+        // Flush
         try writer_chain.flush();
 
         log.info("--- Finished tensor: {s} ({d} bytes) ---", .{ tensor.name, bytes_copied });
@@ -424,12 +428,19 @@ pub fn asyncMain() !void {
     _ = args.next().?;
 
     const file_path = if (args.next()) |path| path else {
-        log.err("Usage: <program> /path/to/model.safetensors or /path/to/model.safetensors.index.json", .{});
+        log.err("Usage: bazel run //examples/loader /path/to/model.safetensors or /path/to/model.safetensors.index.json", .{});
         return;
     };
 
     var registry = try openSafetensors(allocator, file_path);
     defer registry.deinit();
+
+    var tensors = registry.tensors.iterator();
+
+    while (tensors.next()) |entry| {
+        const tensor = entry.value_ptr.*;
+        log.info("Registered tensor: {s} - {any} - {any} - {any}", .{ tensor.name, tensor.shape, tensor.offset, tensor.source_index });
+    }
 
     log.info("Registry loaded with {d} tensors.", .{registry.tensors.count()});
 
