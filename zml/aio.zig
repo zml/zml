@@ -111,7 +111,7 @@ pub const BufferStore = struct {
     }
 
     pub fn loadBufferById(self: BufferStore, x: zml.Tensor, platform: zml.Platform) !zml.Buffer {
-        const host_buffer: zml.HostBuffer = switch (x._id) {
+        var host_buffer: zml.HostBuffer = switch (x._id) {
             .buffer_id => |id| hb: {
                 if (id < self._unique_id or self._unique_id + _store_id_range <= id) {
                     @panic("`store.loadBufferById()` only works on Tensor created by `store.getTensor()`, using the same store object.");
@@ -121,7 +121,8 @@ pub const BufferStore = struct {
             else => @panic("`store.loadBufferById()` only works on Tensor created by `store.getTensor()`"),
         };
 
-        // TODO use x shape
+        // Use the sharding information stored in the tensor.
+        host_buffer._shape = x.shape();
         return try host_buffer.toDevice(platform);
     }
 
