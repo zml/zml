@@ -78,7 +78,7 @@ pub const Registry = struct {
 
 // Safetensors Loader
 
-pub fn openSafetensors(allocator: std.mem.Allocator, provider: anytype, path: []const u8) !Registry {
+pub fn registerSafetensors(allocator: std.mem.Allocator, provider: anytype, path: []const u8) !Registry {
     var registry: Registry = .{
         .arena = std.heap.ArenaAllocator.init(allocator),
         .tensors = .{},
@@ -95,15 +95,15 @@ pub fn openSafetensors(allocator: std.mem.Allocator, provider: anytype, path: []
     defer path_map.deinit();
 
     if (std.mem.endsWith(u8, path, ".safetensors.index.json")) {
-        try loadFromIndex(processing_allocator, &registry, provider, path, &path_map);
+        try registerFromIndex(processing_allocator, &registry, provider, path, &path_map);
     } else {
-        try loadFile(processing_allocator, &registry, provider, path, &path_map);
+        try registerPath(processing_allocator, &registry, provider, path, &path_map);
     }
 
     return registry;
 }
 
-fn loadFromIndex(allocator: std.mem.Allocator, registry: *Registry, provider: anytype, path: []const u8, path_map: *std.StringHashMap(u32)) !void {
+fn registerFromIndex(allocator: std.mem.Allocator, registry: *Registry, provider: anytype, path: []const u8, path_map: *std.StringHashMap(u32)) !void {
     const file = try provider.open(path);
     defer file.close();
 
@@ -125,7 +125,7 @@ fn loadFromIndex(allocator: std.mem.Allocator, registry: *Registry, provider: an
 
         log.info("Discovering file part: {s}", .{filename});
 
-        try loadFile(allocator, registry, provider, full_filename, path_map);
+        try registerPath(allocator, registry, provider, full_filename, path_map);
     }
 
     if (index.object.get("__metadata__")) |metadata| {
@@ -134,7 +134,7 @@ fn loadFromIndex(allocator: std.mem.Allocator, registry: *Registry, provider: an
     }
 }
 
-fn loadFile(allocator: std.mem.Allocator, registry: *Registry, provider: anytype, path: []const u8, path_map: *std.StringHashMap(u32)) !void {
+fn registerPath(allocator: std.mem.Allocator, registry: *Registry, provider: anytype, path: []const u8, path_map: *std.StringHashMap(u32)) !void {
     const registry_allocator = registry.arena.allocator();
 
     const file = try provider.open(path);
@@ -155,10 +155,10 @@ fn loadFile(allocator: std.mem.Allocator, registry: *Registry, provider: anytype
 
     const file_index: u32 = if (path_map.get(path)) |idx| idx else blk: {
         const new_index: u32 = @intCast(registry.source_paths.items.len);
-        const permanent_path = try registry_allocator.dupe(u8, path);
+        const registered_path = try registry_allocator.dupe(u8, path);
 
-        try registry.source_paths.append(registry_allocator, permanent_path);
-        try path_map.put(permanent_path, new_index);
+        try registry.source_paths.append(registry_allocator, registered_path);
+        try path_map.put(registered_path, new_index);
         break :blk new_index;
     };
 
@@ -444,7 +444,7 @@ pub fn asyncMain() !void {
         .base_dir = std.fs.path.dirname(file_path) orelse ".",
     };
 
-    var registry = try openSafetensors(allocator, provider, file_path);
+    var registry = try registerSafetensors(allocator, provider, file_path);
     defer registry.deinit();
 
     log.info("Registry loaded with {d} tensors from {d} source files.", .{ registry.tensors.count(), registry.source_paths.items.len });
