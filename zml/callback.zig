@@ -99,7 +99,7 @@ pub fn call(
             .api_version = .typed_ffi,
             .backend_config = .dict(mlir_ctx, &.{}),
             .additional_attributes = &.{.{ "mhlo.frontend_attributes", .dict(mlir_ctx, &.{}) }},
-            .has_side_effect = true,
+            .has_side_effect = Callback.callback_config.has_side_effect,
             .output_operand_aliases = Callback.callback_config.output_operand_aliases,
         },
         output_types,
@@ -123,6 +123,7 @@ pub const Config = struct {
     // TODO: document precisely what `command_buffer_compatible` is doing and its limitations.
     traits: pjrt.ffi.HandlerTraits = .{ .command_buffer_compatible = false },
     // TODO: handle sharded inputs
+    has_side_effect: bool = true,
 };
 
 /// Compile-time check that a callback has all informations we require.
@@ -282,6 +283,7 @@ pub const Print = struct {
         .copy_inputs_to_host_pinned = true,
         // Print is fairly predictable and can be captured in an execution graph.
         .traits = .{ .command_buffer_compatible = false },
+        .has_side_effect = false,
     };
 
     platform: Platform,
