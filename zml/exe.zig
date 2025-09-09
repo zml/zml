@@ -77,7 +77,7 @@ pub fn compileModel(
 ) !FnExe(func) {
     const ModelT = ModuleSignature(func).ModelT;
     const name = @typeName(ModelT) ++ ".forward";
-    log.info("Compiling {s} with {}", .{ name, args_shapes });
+    log.info("Compiling {s} with {f}", .{ name, stdx.fmt.any(args_shapes) });
 
     var context = try CompilationContext.init(allocator, name, platform);
     defer context.deinit();

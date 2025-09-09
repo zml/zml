@@ -1,5 +1,6 @@
 const std = @import("std");
 
+/// Properly format a slice of numbers.
 pub fn slice(any_slice: anytype) FmtSlice(std.meta.Elem(@TypeOf(any_slice))) {
     return .{ .slice = any_slice };
 }
@@ -114,4 +115,58 @@ pub fn formatComplexSlice(values: anytype, spec: std.fmt.Number, writer: *std.Io
 
 pub fn formatBoolSlice(values: anytype, spec: std.fmt.Number, writer: *std.Io.Writer) !void {
     return try formatSliceCustom(formatBool, values, spec, writer);
+}
+
+/// Format a struct using `format` method of subfields when possible.
+pub fn any(any_val: anytype) FmtAny(@TypeOf(any_val)) {
+    return .{ .data = any_val };
+}
+
+fn FmtAny(Data: type) type {
+    return struct {
+        data: Data,
+
+        pub inline fn format(self: @This(), writer: *std.io.Writer) std.io.Writer.Error!void {
+            try printValue(writer, .{}, self.data, std.options.fmt_max_depth);
+        }
+    };
+}
+
+/// Fix up of std.io.Writer.printValue that uses `format` method of subfields when possible
+fn printValue(
+    w: *std.io.Writer,
+    options: std.fmt.Options,
+    value: anytype,
+    max_depth: usize,
+) std.io.Writer.Error!void {
+    const T = @TypeOf(value);
+    if (std.meta.hasMethod(T, "format")) {
+        return try value.format(w);
+    }
+    if (std.meta.hasMethod(T, "formatNumber")) {
+        return try value.formatNumber(w, options.toNumber(.decimal, .lower));
+    }
+
+    if (max_depth == 0) {
+        try w.writeAll(".{ ... }");
+        return;
+    }
+
+    switch (@typeInfo(T)) {
+        .@"struct" => |info| {
+            try w.writeAll(".{ ");
+            inline for (info.fields, 0..) |f, i| {
+                if (i > 0) try w.writeAll(", ");
+
+                if (!info.is_tuple) {
+                    try w.writeByte('.');
+                    try w.writeAll(f.name);
+                    try w.writeAll(" = ");
+                }
+                try printValue(w, options, @field(value, f.name), max_depth - 1);
+            }
+            try w.writeAll(" }");
+        },
+        inline else => try w.printValue("any", options, value, max_depth - 1),
+    }
 }
