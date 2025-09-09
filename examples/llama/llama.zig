@@ -65,9 +65,6 @@ pub const LlamaLM = struct {
             self_attn.v_proj.weight = self_attn.v_proj.weight.withSharding(.{0});
             self_attn.o_proj.weight = self_attn.o_proj.weight.withSharding(.{1});
 
-            var post_attention_layernorm = try zml.aio.populateModelWithPrefix(RmsNorm, allocator, store, prefix.concat("post_attention_layernorm"));
-            post_attention_layernorm.eps = config.rms_norm_eps;
-
             var mlp = try zml.aio.populateModelWithPrefix(Mlp, allocator, store, prefix.concat("mlp"));
             mlp.up_proj.weight = mlp.up_proj.weight.withSharding(.{0});
             mlp.gate_proj.weight = mlp.gate_proj.weight.withSharding(.{0});
@@ -76,7 +73,6 @@ pub const LlamaLM = struct {
             layer.* = .{
                 .self_attn = self_attn,
                 .mlp = mlp,
-                .post_attention_layernorm = post_attention_layernorm,
                 .rms_norm_eps = config.rms_norm_eps,
             };
         }
@@ -198,7 +194,6 @@ pub const Llama = struct {
 
 pub const TransformerLayer = struct {
     self_attn: SelfAttn,
-    post_attention_layernorm: RmsNorm,
     mlp: Mlp,
 
     rms_norm_eps: f32,
