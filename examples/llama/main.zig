@@ -242,13 +242,6 @@ pub fn asyncMain() !void {
     var store = try zml.aio.detectFormatAndOpen(allocator, model_weights_path);
     defer store.deinit();
 
-    // Contains memory for llama_tensors and llama_buffers.
-    var compiler_arena = std.heap.ArenaAllocator.init(allocator);
-    defer compiler_arena.deinit();
-
-    // Read content of the .safetensors and store the shape of tensors inside a LlamaLm struct.
-    var llama_tensors = try zml.aio.populateModel(llama.LlamaLM, compiler_arena.allocator(), store);
-
     // Write metadata from the config file into the LlamaLm struct.
     const seq_len: u32 = cli.args.@"seq-len" orelse 256;
     const llama_options: llama.LlamaLM.Options = .{
@@ -258,7 +251,13 @@ pub fn asyncMain() !void {
             .temperature = 1.0,
         },
     };
-    llama_tensors.init(config, llama_options);
+
+    // Contains memory for llama_tensors and llama_buffers.
+    var compiler_arena = std.heap.ArenaAllocator.init(allocator);
+    defer compiler_arena.deinit();
+
+    // Read content of the .safetensors and store the shape of tensors inside a LlamaLm struct.
+    const llama_tensors: llama.LlamaLM = try .init(compiler_arena.allocator(), config, llama_options, store);
 
     // Specify shapes of input arguments
     const prefill_tokens_shape = zml.Shape.init(.{ .s = llama_options.max_seq_len }, .u32);

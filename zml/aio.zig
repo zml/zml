@@ -147,6 +147,7 @@ pub const BufferStore = struct {
 
     pub fn getTensor(self: BufferStore, key: []const u8) zml.Tensor {
         return self.getTensorOrNull(key) orelse {
+            log.err("Tensor not found: {s}", .{key});
             self.findSimilarBufferKeys(std.heap.smp_allocator, key);
             @panic("Tensor not found");
         };

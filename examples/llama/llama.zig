@@ -26,6 +26,7 @@ pub const LlamaLM = struct {
         max_position_embeddings: u32,
         rms_norm_eps: f32,
         hf_rope_impl: bool = true,
+        tie_word_embeddings: bool = false,
         rope_scaling: zml.nn.RopeOpts.Scaling = .{ .default = {} },
     };
 
@@ -41,39 +42,79 @@ pub const LlamaLM = struct {
     gen_opts: zml.nn.SamplingStrategy = .{},
     config: Config,
 
-    pub fn init(self: *LlamaLM, config: Config, options: Options) void {
-        self.config = config;
-        self.gen_opts = options.sampling_strategy orelse .{};
-        self.model.max_seq_len = @intCast(options.max_seq_len);
-        self.model.num_heads = @intCast(config.num_attention_heads);
-        self.model.num_kv_heads = @intCast(config.num_key_value_heads);
-        self.model.rope_opts = .{
+    pub fn init(allocator: std.mem.Allocator, config: Config, options: Options, store: zml.aio.BufferStore) !LlamaLM {
+        const rope_opts: zml.nn.RopeOpts = .{
             .layout = if (config.hf_rope_impl) .sequential else .interleaved,
             .freq_base = config.rope_theta,
             .scaling = config.rope_scaling,
         };
-        self.model.norm.eps = config.rms_norm_eps;
-        for (self.model.layers) |*layer| {
-            layer.self_attn.num_heads = self.model.num_heads;
-            layer.self_attn.num_kv_heads = self.model.num_kv_heads;
-            layer.self_attn.rope_opts = self.model.rope_opts;
-            layer.input_layernorm.eps = config.rms_norm_eps;
-            layer.post_attention_layernorm.eps = config.rms_norm_eps;
-            layer.mlp.up_proj.weight = layer.mlp.up_proj.weight.withSharding(.{0});
-            layer.mlp.gate_proj.weight = layer.mlp.gate_proj.weight.withSharding(.{0});
-            layer.mlp.down_proj.weight = layer.mlp.down_proj.weight.withSharding(.{1});
 
-            layer.self_attn.q_proj.weight = layer.self_attn.q_proj.weight.withSharding(.{0});
-            layer.self_attn.k_proj.weight = layer.self_attn.k_proj.weight.withSharding(.{0});
-            layer.self_attn.v_proj.weight = layer.self_attn.v_proj.weight.withSharding(.{0});
-            layer.self_attn.o_proj.weight = layer.self_attn.o_proj.weight.withSharding(.{1});
+        const layers = try allocator.alloc(TransformerLayer, config.num_hidden_layers);
+        var prefix = try zml.aio.PrefixBuilder.initCapacity(allocator, 1024);
+        try prefix.push(stdx.noalloc, "model.layers");
+        for (0.., layers) |i, *layer| {
+            try prefix.pushDigit(stdx.noalloc, i);
+            defer prefix.pop();
+            var self_attn = try zml.aio.populateModelWithPrefix(SelfAttn, allocator, store, prefix.concat("self_attn"));
+            self_attn.num_heads = config.num_attention_heads;
+            self_attn.num_kv_heads = config.num_key_value_heads;
+            self_attn.rope_opts = rope_opts;
+            self_attn.q_proj.weight = self_attn.q_proj.weight.withSharding(.{0});
+            self_attn.k_proj.weight = self_attn.k_proj.weight.withSharding(.{0});
+            self_attn.v_proj.weight = self_attn.v_proj.weight.withSharding(.{0});
+            self_attn.o_proj.weight = self_attn.o_proj.weight.withSharding(.{1});
+
+            var input_layernorm = try zml.aio.populateModelWithPrefix(RmsNorm, allocator, store, prefix.concat("input_layernorm"));
+            input_layernorm.eps = config.rms_norm_eps;
+
+            var post_attention_layernorm = try zml.aio.populateModelWithPrefix(RmsNorm, allocator, store, prefix.concat("post_attention_layernorm"));
+            post_attention_layernorm.eps = config.rms_norm_eps;
+
+            var mlp = try zml.aio.populateModelWithPrefix(Mlp, allocator, store, prefix.concat("mlp"));
+            mlp.up_proj.weight = mlp.up_proj.weight.withSharding(.{0});
+            mlp.gate_proj.weight = mlp.gate_proj.weight.withSharding(.{0});
+            mlp.down_proj.weight = mlp.down_proj.weight.withSharding(.{1});
+
+            layer.* = .{
+                .self_attn = self_attn,
+                .input_layernorm = input_layernorm,
+                .post_attention_layernorm = post_attention_layernorm,
+                .mlp = mlp,
+            };
         }
 
-        // TODO(Corentin): Fix lm_head sharding when top-k sampling is enabled.
-        // It currently crashes/compilation fails
-        if (self.gen_opts.topk == 1 and self.lm_head != null) {
-            self.lm_head.?.weight = self.lm_head.?.weight.withSharding(.{0});
+        var lm_head: ?zml.nn.Linear = null;
+        if (!config.tie_word_embeddings) {
+            lm_head = .{ .weight = store.getTensor("lm_head.weight") };
+            if (options.sampling_strategy) |gen_opts| {
+                if (gen_opts.topk == 1)
+                    lm_head.?.weight = lm_head.?.weight.withSharding(.{0});
+            }
         }
+
+        return .{
+            .config = config,
+            .gen_opts = options.sampling_strategy orelse .{},
+            .model = .{
+                // Weights
+                .layers = layers,
+                .embed_tokens = .{ .weight = store.getTensor("model.embed_tokens.weight") },
+                .norm = .{
+                    .weight = store.getTensor("model.norm.weight"),
+                    .eps = config.rms_norm_eps,
+                },
+                // Push down some configs
+                .max_seq_len = options.max_seq_len,
+                .num_heads = config.num_attention_heads,
+                .num_kv_heads = config.num_key_value_heads,
+                .rope_opts = .{
+                    .layout = if (config.hf_rope_impl) .sequential else .interleaved,
+                    .freq_base = config.rope_theta,
+                    .scaling = config.rope_scaling,
+                },
+            },
+            .lm_head = lm_head,
+        };
     }
 
     /// Predicts the token at `token_index` position.
@@ -130,8 +171,8 @@ pub const Llama = struct {
     layers: []TransformerLayer,
 
     max_seq_len: u32 = 0,
-    num_heads: i64 = 32,
-    num_kv_heads: i64 = 32,
+    num_heads: u32 = 32,
+    num_kv_heads: u32 = 32,
     rope_opts: zml.nn.RopeOpts = .{
         .layout = .interleaved,
         .freq_base = 10_000,
@@ -215,6 +256,9 @@ pub const SelfAttn = struct {
     k_proj: zml.nn.Linear,
     v_proj: zml.nn.Linear,
 
+    q_norm: ?RmsNorm,
+    k_norm: ?RmsNorm,
+
     o_proj: zml.nn.Linear,
     num_heads: i64 = undefined,
     num_kv_heads: i64 = 0,
@@ -252,6 +296,8 @@ pub const SelfAttn = struct {
             break :b temp.add(token_index.broad(temp.shape()));
         };
 
+        if (self.q_norm) |norm| q = norm.forward(q.rename(.{ .hd = .d })).rename(.{ .d = .hd });
+        if (self.k_norm) |norm| k = norm.forward(k.rename(.{ .hd = .d })).rename(.{ .d = .hd });
         q = zml.nn.rope(q, pos_index, self.rope_opts);
         k = zml.nn.rope(k, pos_index, self.rope_opts);
         q = q.rename(.{ .s = .q });

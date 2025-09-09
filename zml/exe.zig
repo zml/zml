@@ -209,9 +209,9 @@ pub const BaseExe = struct {
 
         var execute_context: ?*pjrt.ExecuteContext = null;
         if (platform.pjrt_api.ffi()) |ffi| {
-            log.info("Created context execution {*} for {*}", .{ execute_context, exe });
             execute_context = try platform.pjrt_api.createExecuteContext();
             try callback.bindInternalCallbacks(allocator, platform, ffi, execute_context.?);
+            // log.info("Created context execution {*} for {*}", .{ execute_context, exe });
         }
 
         return .{
