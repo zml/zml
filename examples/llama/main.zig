@@ -298,11 +298,58 @@ pub fn asyncMain() !void {
         platform,
     });
 
+    var fut_self_attn_merge_mod = try asynk.asyncc(zml.compileModel, .{
+        allocator, llama.SelfAttn.mergeInputLayerNorm, llama_tensors.model.layers[0].self_attn,
+        .{
+            store.get("model.layers.0.input_layernorm.weight").?.shape(),
+        },
+        platform,
+    });
+
+    var fut_mlp_merge_mod = try asynk.asyncc(zml.compileModel, .{
+        allocator, llama.Mlp.mergePostAttentionLayerNorm, llama_tensors.model.layers[0].mlp,
+        .{
+            store.get("model.layers.0.post_attention_layernorm.weight").?.shape(),
+        },
+        platform,
+    });
+
     // While we are still compiling load the weights to the device.
     log.info("\tLoading Llama weights from {s}...", .{model_weights_path});
     var llama_buffers = try store.loadModelById(llama.LlamaLM, compiler_arena.allocator(), llama_tensors, platform);
     defer zml.aio.unloadBuffers(&llama_buffers);
     log.info("✅\tLoaded weights in {D}", .{start.read()});
+
+    {
+        var self_attn_merge_mod = try fut_self_attn_merge_mod.awaitt();
+        defer self_attn_merge_mod.deinit();
+
+        var norm_name_buf: [1024]u8 = undefined;
+        for (0.., llama_buffers.model.layers) |i, *layer| {
+            const norm_name = try std.fmt.bufPrint(&norm_name_buf, "model.layers.{d}.input_layernorm.weight", .{i});
+            const norm = try store.loadBufferByName(norm_name, platform);
+            defer norm.deinit();
+            const wq, const wk, const wv = self_attn_merge_mod.call(.{ layer.self_attn, norm });
+            layer.self_attn.q_proj.weight = wq;
+            layer.self_attn.k_proj.weight = wk;
+            layer.self_attn.v_proj.weight = wv;
+        }
+    }
+
+    {
+        var mlp_merge_mod = try fut_mlp_merge_mod.awaitt();
+        defer mlp_merge_mod.deinit();
+
+        var norm_name_buf: [1024]u8 = undefined;
+        for (0.., llama_buffers.model.layers) |i, *layer| {
+            const norm_name = try std.fmt.bufPrint(&norm_name_buf, "model.layers.{d}.post_attention_layernorm.weight", .{i});
+            const norm = try store.loadBufferByName(norm_name, platform);
+            defer norm.deinit();
+            const wu, const wg = mlp_merge_mod.call(.{ layer.mlp, norm });
+            layer.mlp.up_proj.weight = wu;
+            layer.mlp.gate_proj.weight = wg;
+        }
+    }
 
     var llama_module_prefill = (try fut_mod_prefill.awaitt()).prepare(llama_buffers);
     defer llama_module_prefill.deinit();

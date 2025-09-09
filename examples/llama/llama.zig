@@ -218,7 +218,7 @@ pub const TransformerLayer = struct {
         const x1 = x0.add(delta0);
 
         // Fully Connected
-        const x1_normalized = zml.call(self.post_attention_layernorm, .forward, .{x1});
+        const x1_normalized = zml.nn.rmsNorm(x1, .d, self.rms_norm_eps);
         const x2 = zml.call(self.mlp, .forward, .{x1_normalized}).add(x1);
 
         return .{ x2.reuseBuffer(x0), updated_kv_cache };
@@ -237,7 +237,7 @@ const RmsNorm = struct {
     }
 };
 
-const Mlp = struct {
+pub const Mlp = struct {
     up_proj: zml.nn.Linear, // (dim -> hidden_dim)
     gate_proj: zml.nn.Linear, // (dim -> hidden_dim)
     down_proj: zml.nn.Linear, // (hidden_dim -> dim)
@@ -247,6 +247,13 @@ const Mlp = struct {
         var output = zml.call(self.gate_proj, .forward, .{x});
         output = output.silu().mul(proj);
         return zml.call(self.down_proj, .forward, .{output});
+    }
+
+    pub fn mergePostAttentionLayerNorm(self: Mlp, weight: Tensor) [2]Tensor {
+        return .{
+            self.up_proj.weight.mul(weight.broadcast(self.up_proj.weight.shape(), &.{1})).reuseBuffer(self.up_proj.weight),
+            self.gate_proj.weight.mul(weight.broadcast(self.gate_proj.weight.shape(), &.{1})).reuseBuffer(self.gate_proj.weight),
+        };
     }
 };
 
@@ -312,6 +319,14 @@ pub const SelfAttn = struct {
         // const attn_output = zml.nn.sdpaMemEfficient(q, k, v, .{ .attn_mask = attn_mask }, .{ .q_chunk_size = 4096, .k_chunk_size = 1024 });
         const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
         return .{ zml.call(self.o_proj, .forward, .{attn}), new_kv_cache };
+    }
+
+    pub fn mergeInputLayerNorm(self: SelfAttn, weight: Tensor) [3]Tensor {
+        return .{
+            self.q_proj.weight.mul(weight.broadcast(self.q_proj.weight.shape(), &.{1})).reuseBuffer(self.q_proj.weight),
+            self.k_proj.weight.mul(weight.broadcast(self.k_proj.weight.shape(), &.{1})).reuseBuffer(self.k_proj.weight),
+            self.v_proj.weight.mul(weight.broadcast(self.v_proj.weight.shape(), &.{1})).reuseBuffer(self.v_proj.weight),
+        };
     }
 };
 

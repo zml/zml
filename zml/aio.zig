@@ -110,6 +110,11 @@ pub const BufferStore = struct {
         return self.buffers.get(key);
     }
 
+    pub fn loadBufferByName(self: BufferStore, key: []const u8, platform: zml.Platform) !zml.Buffer {
+        const host_buffer: zml.HostBuffer = self.buffers.get(key) orelse return error.NotFound;
+        return try host_buffer.toDevice(platform);
+    }
+
     pub fn loadBufferById(self: BufferStore, x: zml.Tensor, platform: zml.Platform) !zml.Buffer {
         var host_buffer: zml.HostBuffer = switch (x._id) {
             .buffer_id => |id| hb: {
