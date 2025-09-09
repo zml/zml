@@ -76,7 +76,7 @@ pub const Registry = struct {
 
 // Safetensors parser
 
-pub fn registerSafetensors(allocator: std.mem.Allocator, source: anytype, path: []const u8) !Registry {
+pub fn registerSafetensors(allocator: std.mem.Allocator, source: Source, path: []const u8) !Registry {
     var registry: Registry = .{
         .arena = std.heap.ArenaAllocator.init(allocator),
         .tensors = .{},
@@ -103,10 +103,10 @@ pub fn registerSafetensors(allocator: std.mem.Allocator, source: anytype, path: 
 fn parseSafetensorsIndex(
     allocator: std.mem.Allocator,
     registry: *Registry,
-    source: anytype,
-    index_reader: *std.io.Reader,
+    source: Source,
+    reader: *std.io.Reader,
 ) !void {
-    var json_reader: std.json.Reader = .init(allocator, index_reader);
+    var json_reader: std.json.Reader = .init(allocator, reader);
     const index = try std.json.parseFromTokenSourceLeaky(std.json.Value, allocator, &json_reader, .{ .allocate = .alloc_if_needed });
 
     const weight_map = index.object.get("weight_map").?.object;
@@ -188,6 +188,17 @@ fn parseSafetensors(
 }
 
 // Source Providers
+
+pub const Source = union(enum) {
+    fs: *FileSystemSource,
+    // Future sources could be added here
+
+    pub fn reader(self: Source, path: []const u8) !std.fs.File.Reader {
+        return switch (self) {
+            .fs => |fs_source| fs_source.reader(path),
+        };
+    }
+};
 
 pub const SourceCallback = fn (ctx: anytype, stream: TensorReader) anyerror!void;
 
@@ -470,7 +481,9 @@ pub fn asyncMain() !void {
     var fs_source = FileSystemSource.init(allocator, std.fs.path.dirname(file_path) orelse ".");
     defer fs_source.deinit();
 
-    var registry = try registerSafetensors(allocator, &fs_source, std.fs.path.basename(file_path));
+    const source: Source = .{ .fs = &fs_source };
+
+    var registry = try registerSafetensors(allocator, source, std.fs.path.basename(file_path));
     defer registry.deinit();
 
     log.info("Registry loaded with {d} tensors from {d} source files.", .{ registry.tensors.count(), fs_source.path_to_file_map.count() });
@@ -479,11 +492,11 @@ pub fn asyncMain() !void {
 
     var sink: DiscardingSink = .init();
 
-    var digest: [32]u8 = undefined;
+    const digest: [32]u8 = undefined;
 
     const pipeline_stages = .{
         Quantizer{ .target_bits = 8 },
-        Checksumer{ .digest = &digest },
+        // Checksumer{ .digest = &digest },
     };
 
     const tensors_source = FileTensorSource{
