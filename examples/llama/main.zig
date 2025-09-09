@@ -256,7 +256,7 @@ pub fn asyncMain() !void {
     var compiler_arena = std.heap.ArenaAllocator.init(allocator);
     defer compiler_arena.deinit();
 
-    // Read content of the .safetensors and store the shape of tensors inside a LlamaLm struct.
+    // Initialize the Llama struct and map the content of the .safetensors to the model tensors.
     const llama_tensors: llama.LlamaLM = try .init(compiler_arena.allocator(), config, llama_options, store);
 
     // Specify shapes of input arguments
@@ -269,7 +269,7 @@ pub fn asyncMain() !void {
         .layer = llama_tensors.model.layers.len,
         .k = seq_len,
         .h = config.num_key_value_heads,
-        .hd = @divExact(config.hidden_size, config.num_attention_heads),
+        .hd = config.head_dim orelse @divExact(config.hidden_size, config.num_attention_heads),
     }, dtype).withSharding(.{.h});
     const kv_cache_shape: zml.ShapeOf(llama.KvCache) = llama.KvCache.initShape(kv_shape);
     const rng_shape = zml.Tensor.Rng.shape();
