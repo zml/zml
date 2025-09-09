@@ -79,31 +79,31 @@ pub const Registry = struct {
 // Safetensors Loader
 
 pub fn openSafetensors(allocator: std.mem.Allocator, provider: anytype, path: []const u8) !Registry {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-
     var registry: Registry = .{
-        .arena = arena,
+        .arena = std.heap.ArenaAllocator.init(allocator),
         .tensors = .{},
         .metadata = .{},
         .source_paths = .{},
     };
     errdefer registry.deinit();
 
-    var path_map = std.StringHashMap(u32).init(arena.allocator());
+    var processing_arena = std.heap.ArenaAllocator.init(allocator);
+    defer processing_arena.deinit();
+    const processing_allocator = processing_arena.allocator();
+
+    var path_map = std.StringHashMap(u32).init(processing_allocator);
     defer path_map.deinit();
 
     if (std.mem.endsWith(u8, path, ".safetensors.index.json")) {
-        try loadFromIndex(&registry, provider, path, &path_map);
+        try loadFromIndex(processing_allocator, &registry, provider, path, &path_map);
     } else {
-        try loadFile(&registry, provider, path, &path_map);
+        try loadFile(processing_allocator, &registry, provider, path, &path_map);
     }
 
     return registry;
 }
 
-fn loadFromIndex(registry: *Registry, provider: anytype, path: []const u8, path_map: *std.StringHashMap(u32)) !void {
-    const allocator = registry.arena.allocator();
-
+fn loadFromIndex(allocator: std.mem.Allocator, registry: *Registry, provider: anytype, path: []const u8, path_map: *std.StringHashMap(u32)) !void {
     const file = try provider.open(path);
     defer file.close();
 
@@ -119,24 +119,23 @@ fn loadFromIndex(registry: *Registry, provider: anytype, path: []const u8, path_
     while (it.next()) |entry| {
         const filename = entry.value_ptr.string;
 
-        const full_filename = try provider.resolve(filename);
-        defer provider.allocator.free(full_filename);
+        const full_filename = try std.fs.path.join(allocator, &.{ provider.base_dir, filename });
 
         if (path_map.contains(full_filename)) continue;
 
         log.info("Discovering file part: {s}", .{filename});
 
-        try loadFile(registry, provider, full_filename, path_map);
+        try loadFile(allocator, registry, provider, full_filename, path_map);
     }
 
     if (index.object.get("__metadata__")) |metadata| {
         var prefix_buf: [1024]u8 = undefined;
-        try parseMetadata(allocator, registry, StringBuilder.initBuffer(&prefix_buf), metadata);
+        try parseMetadata(registry, StringBuilder.initBuffer(&prefix_buf), metadata);
     }
 }
 
-fn loadFile(registry: *Registry, provider: anytype, path: []const u8, path_map: *std.StringHashMap(u32)) !void {
-    const allocator = registry.arena.allocator();
+fn loadFile(allocator: std.mem.Allocator, registry: *Registry, provider: anytype, path: []const u8, path_map: *std.StringHashMap(u32)) !void {
+    const registry_allocator = registry.arena.allocator();
 
     const file = try provider.open(path);
     defer file.close();
@@ -156,9 +155,9 @@ fn loadFile(registry: *Registry, provider: anytype, path: []const u8, path_map: 
 
     const file_index: u32 = if (path_map.get(path)) |idx| idx else blk: {
         const new_index: u32 = @intCast(registry.source_paths.items.len);
-        const permanent_path = try allocator.dupe(u8, path);
+        const permanent_path = try registry_allocator.dupe(u8, path);
 
-        try registry.source_paths.append(allocator, permanent_path);
+        try registry.source_paths.append(registry_allocator, permanent_path);
         try path_map.put(permanent_path, new_index);
         break :blk new_index;
     };
@@ -171,7 +170,7 @@ fn loadFile(registry: *Registry, provider: anytype, path: []const u8, path_map: 
 
         if (std.mem.eql(u8, key, "__metadata__")) {
             var prefix_buf: [1024]u8 = undefined;
-            try parseMetadata(allocator, registry, StringBuilder.initBuffer(&prefix_buf), value);
+            try parseMetadata(registry, StringBuilder.initBuffer(&prefix_buf), value);
             continue;
         }
 
@@ -197,13 +196,13 @@ fn loadFile(registry: *Registry, provider: anytype, path: []const u8, path_map: 
         std.debug.assert(size_in_bytes == shape.byteSize());
 
         const tensor: Tensor = .{
-            .name = key,
+            .name = try registry_allocator.dupe(u8, key),
             .shape = shape,
             .source_index = file_index,
             .offset = data_start_offset + start,
         };
 
-        try registry.tensors.put(allocator, key, tensor);
+        try registry.tensors.put(registry_allocator, key, tensor);
     }
 }
 
@@ -464,11 +463,11 @@ pub fn asyncMain() !void {
 
     var sink: DiscardingSink = .init();
 
-    const digest: [32]u8 = undefined;
+    var digest: [32]u8 = undefined;
 
     const pipeline_stages = .{
         Quantizer{ .target_bits = 8 },
-        // Checksumer{ .digest = &digest },
+        Checksumer{ .digest = &digest },
     };
 
     const source = FilesystemSource{
@@ -586,7 +585,8 @@ fn stringToDtype(safetensor_type: []const u8) !DataType {
     };
 }
 
-pub fn parseMetadata(allocator: std.mem.Allocator, registry: *Registry, prefix: StringBuilder, val: std.json.Value) !void {
+pub fn parseMetadata(registry: *Registry, prefix: StringBuilder, val: std.json.Value) !void {
+    const allocator = registry.arena.allocator();
     const metadata = &registry.metadata;
     const key = prefix.items;
     return switch (val) {
@@ -630,7 +630,7 @@ pub fn parseMetadata(allocator: std.mem.Allocator, registry: *Registry, prefix: 
                     if (prefix.items.len > 0)
                         new_prefix.appendAssumeCapacity('.');
                     new_prefix.items.len += std.fmt.printInt(new_prefix.unusedCapacitySlice(), i, 10, .lower, .{});
-                    try parseMetadata(allocator, registry, new_prefix, item);
+                    try parseMetadata(registry, new_prefix, item);
                 }
             };
         },
@@ -641,7 +641,7 @@ pub fn parseMetadata(allocator: std.mem.Allocator, registry: *Registry, prefix: 
                 if (prefix.items.len > 0)
                     new_prefix.appendAssumeCapacity('.');
                 new_prefix.appendSliceAssumeCapacity(entry.key_ptr.*);
-                try parseMetadata(allocator, registry, new_prefix, entry.value_ptr.*);
+                try parseMetadata(registry, new_prefix, entry.value_ptr.*);
             }
         },
     };
