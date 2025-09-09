@@ -49,33 +49,208 @@ const Tensor = struct {
     offset: u64,
 };
 
+pub const TensorReader = struct {
+    tensor: Tensor,
+    reader: *std.io.Reader,
+};
+
 pub const Registry = struct {
     pub const Tensors = std.StringArrayHashMapUnmanaged(Tensor);
     pub const Metadatas = std.StringArrayHashMapUnmanaged(Metadata);
-    pub const Files = std.ArrayListUnmanaged(std.fs.File);
+    pub const SourcePaths = std.ArrayListUnmanaged([]const u8);
 
     arena: std.heap.ArenaAllocator,
 
     tensors: Tensors,
     metadata: Metadatas,
-    files: Files,
+    source_paths: SourcePaths,
 
     pub fn deinit(self: *Registry) void {
         const allocator = self.arena.allocator();
 
-        for (self.files.items) |file| {
-            file.close();
-        }
-
         self.tensors.deinit(allocator);
         self.metadata.deinit(allocator);
-        self.files.deinit(allocator);
+        self.source_paths.deinit(allocator);
 
         self.arena.deinit();
     }
 };
 
+// Safetensors Loader
+
+pub fn openSafetensors(allocator: std.mem.Allocator, provider: anytype, path: []const u8) !Registry {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+
+    var registry: Registry = .{
+        .arena = arena,
+        .tensors = .{},
+        .metadata = .{},
+        .source_paths = .{},
+    };
+    errdefer registry.deinit();
+
+    var path_map = std.StringHashMap(u32).init(arena.allocator());
+    defer path_map.deinit();
+
+    if (std.mem.endsWith(u8, path, ".safetensors.index.json")) {
+        try loadFromIndex(&registry, provider, path, &path_map);
+    } else {
+        try loadFile(&registry, provider, path, &path_map);
+    }
+
+    return registry;
+}
+
+fn loadFromIndex(registry: *Registry, provider: anytype, path: []const u8, path_map: *std.StringHashMap(u32)) !void {
+    const allocator = registry.arena.allocator();
+
+    const file = try provider.open(path);
+    defer file.close();
+
+    var buffer: [4096]u8 = undefined;
+    var file_reader = file.reader(&buffer);
+
+    var json_reader: std.json.Reader = .init(allocator, &file_reader.interface);
+    const index = try std.json.parseFromTokenSourceLeaky(std.json.Value, allocator, &json_reader, .{ .allocate = .alloc_if_needed });
+
+    const weight_map = index.object.get("weight_map").?.object;
+    var it = weight_map.iterator();
+
+    while (it.next()) |entry| {
+        const filename = entry.value_ptr.string;
+
+        const full_filename = try provider.resolve(filename);
+        defer provider.allocator.free(full_filename);
+
+        if (path_map.contains(full_filename)) continue;
+
+        log.info("Discovering file part: {s}", .{filename});
+
+        try loadFile(registry, provider, full_filename, path_map);
+    }
+
+    if (index.object.get("__metadata__")) |metadata| {
+        var prefix_buf: [1024]u8 = undefined;
+        try parseMetadata(allocator, registry, StringBuilder.initBuffer(&prefix_buf), metadata);
+    }
+}
+
+fn loadFile(registry: *Registry, provider: anytype, path: []const u8, path_map: *std.StringHashMap(u32)) !void {
+    const allocator = registry.arena.allocator();
+
+    const file = try provider.open(path);
+    defer file.close();
+
+    var reader_buffer: [16 * 1024]u8 = undefined;
+    var file_reader = file.reader(&reader_buffer);
+
+    const json_header_length: usize = @intCast(try file_reader.interface.takeInt(u64, .little));
+
+    const json_data = try allocator.alloc(u8, json_header_length);
+    defer allocator.free(json_data);
+    try file_reader.interface.readSliceAll(json_data);
+
+    const data_start_offset = 8 + json_header_length;
+
+    const metadata = try std.json.parseFromSliceLeaky(std.json.Value, allocator, json_data, .{});
+
+    const file_index: u32 = if (path_map.get(path)) |idx| idx else blk: {
+        const new_index: u32 = @intCast(registry.source_paths.items.len);
+        const permanent_path = try allocator.dupe(u8, path);
+
+        try registry.source_paths.append(allocator, permanent_path);
+        try path_map.put(permanent_path, new_index);
+        break :blk new_index;
+    };
+
+    var it = metadata.object.iterator();
+
+    while (it.next()) |entry| {
+        const key = entry.key_ptr.*;
+        const value = entry.value_ptr.*;
+
+        if (std.mem.eql(u8, key, "__metadata__")) {
+            var prefix_buf: [1024]u8 = undefined;
+            try parseMetadata(allocator, registry, StringBuilder.initBuffer(&prefix_buf), value);
+            continue;
+        }
+
+        const shape_field = value.object.get("shape").?.array;
+
+        if (shape_field.items.len > Shape.MAX_RANK) {
+            log.warn("Can't load tensor {s}, too many dims: {}", .{ key, shape_field.items.len });
+            continue;
+        }
+
+        const offset_field = value.object.get("data_offsets").?;
+        const start: u64 = @intCast(offset_field.array.items[0].integer);
+        const end: u64 = @intCast(offset_field.array.items[1].integer);
+        const dtype = try stringToDtype(value.object.get("dtype").?.string);
+
+        var dims: Dims = .{};
+        for (shape_field.items) |d| {
+            dims.appendAssumeCapacity(d.integer);
+        }
+
+        const shape = Shape.init(dims.constSlice(), dtype);
+        const size_in_bytes = end - start;
+        std.debug.assert(size_in_bytes == shape.byteSize());
+
+        const tensor: Tensor = .{
+            .name = key,
+            .shape = shape,
+            .source_index = file_index,
+            .offset = data_start_offset + start,
+        };
+
+        try registry.tensors.put(allocator, key, tensor);
+    }
+}
+
+// Source Providers
+
+pub const SourceCallback = fn (ctx: anytype, stream: TensorReader) anyerror!void;
+
+pub const FileSystemSourceProvider = struct {
+    allocator: std.mem.Allocator,
+    base_dir: []const u8,
+
+    pub fn open(_: FileSystemSourceProvider, path: []const u8) !std.fs.File {
+        return std.fs.openFileAbsolute(path, .{ .mode = .read_only });
+    }
+
+    pub fn resolve(self: FileSystemSourceProvider, relative_path: []const u8) ![]const u8 {
+        return std.fs.path.join(self.allocator, &.{ self.base_dir, relative_path });
+    }
+};
+
+pub const FilesystemSource = struct {
+    registry: *Registry,
+    sources: []std.fs.File,
+
+    pub fn iterator(self: FilesystemSource, context: anytype, callback: SourceCallback) !void {
+        var it = self.registry.tensors.iterator();
+
+        while (it.next()) |entry| {
+            const tensor = entry.value_ptr.*;
+
+            var source_file = self.sources[tensor.source_index];
+            try source_file.seekTo(tensor.offset);
+
+            var file_read_buffer: [16 * 1024]u8 = undefined;
+            var file_reader = source_file.reader(&file_read_buffer);
+
+            var limited_reader_storage = LimitingReader.init(&file_reader.interface, tensor.shape.byteSize());
+
+            const stream: TensorReader = .{ .tensor = tensor, .reader = &limited_reader_storage.interface };
+
+            try callback(context, stream);
+        }
+    }
+};
+
 // Reusable Stream Processors
+
 pub const LimitingReader = struct {
     underlying_reader: *std.io.Reader,
     bytes_remaining: u64,
@@ -178,6 +353,7 @@ const ChecksummingWriter = struct {
     fn flush(w: *std.io.Writer) !void {
         const self = @as(*ChecksummingWriter, @alignCast(@fieldParentPtr("interface", w)));
         self.hasher.final(self.config.digest);
+        log.warn("Checksum {any}", .{self.config.digest});
         try self.next_writer.flush();
     }
 
@@ -187,231 +363,62 @@ const ChecksummingWriter = struct {
     };
 };
 
-// Safetensors Loader
+// Sinks
 
-pub fn openSafetensors(allocator: std.mem.Allocator, path: []const u8) !Registry {
-    var registry: Registry = .{
-        .arena = std.heap.ArenaAllocator.init(allocator),
-        .tensors = .{},
-        .metadata = .{},
-        .files = .{},
-    };
-    errdefer registry.deinit();
+pub const DiscardingSink = struct {
+    discarder: std.io.Writer.Discarding,
 
-    if (std.mem.endsWith(u8, path, ".safetensors.index.json")) {
-        try loadFromIndex(&registry, path);
-    } else {
-        try loadFile(&registry, path);
+    pub fn init() DiscardingSink {
+        return .{ .discarder = .init(&[_]u8{}) };
     }
 
-    return registry;
-}
-
-fn loadFromIndex(registry: *Registry, path: []const u8) !void {
-    const allocator = registry.arena.allocator();
-    const file = std.fs.openFileAbsolute(path, .{ .mode = .read_only }) catch |err| {
-        log.err("Failed to open {s}: {}", .{ path, err });
-        return err;
-    };
-    defer file.close();
-
-    var buffer: [4096]u8 = undefined;
-    var r = file.reader(&buffer);
-
-    var json_reader: std.json.Reader = .init(allocator, &r.interface);
-    const index = try std.json.parseFromTokenSourceLeaky(std.json.Value, allocator, &json_reader, .{ .allocate = .alloc_if_needed });
-
-    var loaded_files = std.StringHashMap(void).init(allocator);
-    defer loaded_files.deinit();
-
-    const weight_map = index.object.get("weight_map").?.object;
-    var it = weight_map.iterator();
-
-    while (it.next()) |entry| {
-        const filename = entry.value_ptr.string;
-        if (loaded_files.contains(filename)) {
-            continue;
-        }
-
-        log.info("Loading file part: {s}", .{filename});
-        try loaded_files.put(filename, {});
-
-        const full_filename = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(path).?, filename });
-
-        try loadFile(registry, full_filename);
-    }
-
-    if (index.object.get("__metadata__")) |metadata| {
-        var prefix_buf: [1024]u8 = undefined;
-        try parseMetadata(allocator, registry, StringBuilder.initBuffer(&prefix_buf), metadata);
-    }
-}
-
-fn loadFile(registry: *Registry, path: []const u8) !void {
-    const allocator = registry.arena.allocator();
-
-    const file = std.fs.openFileAbsolute(path, .{ .mode = .read_only }) catch |err| {
-        log.err("Failed to open {s}: {}", .{ path, err });
-        return err;
-    };
-
-    var reader_buffer: [16 * 1024]u8 = undefined;
-    var file_reader = file.reader(&reader_buffer);
-
-    const json_header_length: usize = @intCast(try file_reader.interface.takeInt(u64, .little));
-
-    const json_data = try allocator.alloc(u8, json_header_length);
-    defer allocator.free(json_data);
-    try file_reader.interface.readSliceAll(json_data);
-
-    const data_start_offset = 8 + json_header_length;
-
-    const metadata = try std.json.parseFromSliceLeaky(std.json.Value, allocator, json_data, .{});
-
-    const file_index: u32 = @intCast(registry.files.items.len);
-    try registry.files.append(allocator, file);
-
-    var it = metadata.object.iterator();
-
-    while (it.next()) |entry| {
-        const key = entry.key_ptr.*;
-        const value = entry.value_ptr.*;
-
-        if (std.mem.eql(u8, key, "__metadata__")) {
-            var prefix_buf: [1024]u8 = undefined;
-            try parseMetadata(allocator, registry, StringBuilder.initBuffer(&prefix_buf), value);
-            continue;
-        }
-
-        const shape_field = value.object.get("shape").?.array;
-
-        if (shape_field.items.len > Shape.MAX_RANK) {
-            log.warn("Can't load tensor {s}, too many dims: {}", .{ key, shape_field.items.len });
-            continue;
-        }
-
-        const offset_field = value.object.get("data_offsets").?;
-        const start: u64 = @intCast(offset_field.array.items[0].integer);
-        const end: u64 = @intCast(offset_field.array.items[1].integer);
-        const dtype = try stringToDtype(value.object.get("dtype").?.string);
-
-        var dims: Dims = .{};
-        for (shape_field.items) |d| {
-            dims.appendAssumeCapacity(d.integer);
-        }
-
-        const shape = Shape.init(dims.constSlice(), dtype);
-        const size_in_bytes = end - start;
-        std.debug.assert(size_in_bytes == shape.byteSize());
-
-        const tensor: Tensor = .{
-            .name = key,
-            .shape = shape,
-            .source_index = file_index,
-            .offset = data_start_offset + start,
-        };
-
-        try registry.tensors.put(allocator, try allocator.dupe(u8, key), tensor);
-    }
-}
-
-// Core: Data Source, Sink, and Executor
-
-// todo: should not exist cause it's not using streaming stuffs and allocate a big buffer
-pub const BufferLoader = struct {
-    allocator: std.mem.Allocator,
-    buffers: std.StringHashMapUnmanaged([]u8),
-
-    pub fn init(allocator: std.mem.Allocator) BufferLoader {
-        return .{ .allocator = allocator, .buffers = .{} };
-    }
-
-    pub fn deinit(self: *BufferLoader) void {
-        self.buffers.deinit(self.allocator);
-    }
-
-    pub fn planAndAllocate(self: *BufferLoader, registry: Registry) ![]u8 {
-        var total_size: u64 = 0;
-        var it = registry.tensors.iterator();
-
-        while (it.next()) |entry| {
-            total_size += entry.value_ptr.shape.byteSize();
-        }
-
-        const all_buffers = try self.allocator.alloc(u8, total_size);
-
-        var current_offset: usize = 0;
-        it.reset();
-
-        while (it.next()) |entry| {
-            const size: usize = @intCast(entry.value_ptr.shape.byteSize());
-            try self.buffers.put(self.allocator, entry.key_ptr.*, all_buffers[current_offset .. current_offset + size]);
-            current_offset += size;
-        }
-
-        return all_buffers;
-    }
-
-    pub fn getWriterForTensor(self: *BufferLoader, tensor: []const u8) std.io.Writer {
-        const buffer = self.buffers.get(tensor).?;
-
-        return std.io.Writer.fixed(buffer);
+    pub fn writer(self: *DiscardingSink, tensor: Tensor) *std.io.Writer {
+        _ = tensor;
+        return @constCast(&self.discarder.writer);
     }
 };
 
+// Executor
+
 pub const Executor = struct {
-    allocator: std.mem.Allocator,
-    registry: *Registry,
-
-    pub fn execute(self: Executor, pipeline_stages: anytype, loader: *BufferLoader) !void {
-        var it = self.registry.tensors.iterator();
-
-        while (it.next()) |entry| {
-            const tensor = entry.value_ptr.*;
-            try self.executeSingle(tensor, pipeline_stages, loader);
-        }
-    }
-
-    fn executeSingle(self: Executor, tensor: Tensor, stages: anytype, loader: *BufferLoader) !void {
+    pub fn process(context: anytype, stream: TensorReader) !void {
+        const tensor = stream.tensor;
         log.info("--- Processing tensor: {s} ---", .{tensor.name});
 
-        // todo: remove this arena and the alloc below
-        var arena = std.heap.ArenaAllocator.init(self.allocator);
-        defer arena.deinit();
+        var arena_buffer: [1024]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&arena_buffer);
+        const stack_allocator = fba.allocator();
 
-        // Source
-        var file = self.registry.files.items[tensor.source_index];
+        const final_writer = context.*.sink.writer(tensor);
+        var writer_chain: *std.io.Writer = final_writer;
 
-        // seek should not be present cause if it's correctly streamed from the upstream we don't need it
-        try file.seekTo(tensor.offset); // important: seek before creating the reader
-
-        var file_read_buffer: [16 * 1024]u8 = undefined;
-        var file_reader = file.reader(&file_read_buffer);
-
-        var limited_reader: LimitingReader = .init(&file_reader.interface, tensor.shape.byteSize());
-        const source_reader = &limited_reader.interface;
-
-        // Sink
-        var final_writer = loader.getWriterForTensor(tensor.name);
-        var writer_chain: *std.io.Writer = &final_writer;
-
-        inline for (stages) |stage_config| {
+        inline for (context.*.pipeline_stages) |stage_config| {
             const WriterType = @TypeOf(stage_config).Writer;
-            const new_writer = try arena.allocator().create(WriterType);
+            const new_writer = try stack_allocator.create(WriterType);
             new_writer.* = stage_config.writer(writer_chain);
             writer_chain = &new_writer.interface;
             log.info("  [Executor] Added '{s}' to pipeline", .{@typeName(WriterType)});
         }
 
-        // Execute
         var pump_buffer: [64 * 1024]u8 = undefined;
-        const bytes_copied = try io.copy(source_reader, writer_chain, &pump_buffer);
-        std.debug.assert(bytes_copied == tensor.shape.byteSize());
+        var total_bytes_copied: u64 = 0;
 
-        // Flush
+        while (true) {
+            const bytes_read = stream.reader.readSliceShort(&pump_buffer) catch |err| {
+                if (err == error.EndOfStream) break;
+                return err;
+            };
+
+            if (bytes_read == 0) break;
+            try writer_chain.writeAll(pump_buffer[0..bytes_read]);
+            total_bytes_copied += bytes_read;
+        }
+
+        std.debug.assert(total_bytes_copied == tensor.shape.byteSize());
+
         try writer_chain.flush();
 
-        log.info("--- Finished tensor: {s} ({d} bytes) ---", .{ tensor.name, bytes_copied });
+        log.info("--- Finished tensor: {s} ({d} bytes) ---", .{ tensor.name, total_bytes_copied });
     }
 };
 
@@ -427,45 +434,55 @@ pub fn asyncMain() !void {
     var args = std.process.args();
     _ = args.next().?;
 
-    const file_path = if (args.next()) |path| path else {
+    const file_path = args.next() orelse {
         log.err("Usage: bazel run //examples/loader /path/to/model.safetensors or /path/to/model.safetensors.index.json", .{});
         return;
     };
 
-    var registry = try openSafetensors(allocator, file_path);
+    log.info("--- Loading model metadata... ---", .{});
+    const provider: FileSystemSourceProvider = .{
+        .allocator = allocator,
+        .base_dir = std.fs.path.dirname(file_path) orelse ".",
+    };
+
+    var registry = try openSafetensors(allocator, provider, file_path);
     defer registry.deinit();
 
-    var tensors = registry.tensors.iterator();
+    log.info("Registry loaded with {d} tensors from {d} source files.", .{ registry.tensors.count(), registry.source_paths.items.len });
 
-    while (tensors.next()) |entry| {
-        const tensor = entry.value_ptr.*;
-        log.info("Registered tensor: {s} - {any} - {any} - {any}", .{ tensor.name, tensor.shape, tensor.offset, tensor.source_index });
+    log.info("--- Opening source files... ---", .{});
+    var files: std.ArrayList(std.fs.File) = .{};
+    defer {
+        for (files.items) |file| file.close();
+        files.deinit(allocator);
     }
 
-    log.info("Registry loaded with {d} tensors.", .{registry.tensors.count()});
+    for (registry.source_paths.items) |source_path| {
+        const file = try provider.open(source_path);
+        try files.append(allocator, file);
+    }
 
-    log.info("--- Configuring pipeline dependencies... ---", .{});
+    var sink: DiscardingSink = .init();
 
-    var buffer_loader = BufferLoader.init(allocator);
-    defer buffer_loader.deinit();
-
-    var digest: [32]u8 = undefined;
+    const digest: [32]u8 = undefined;
 
     const pipeline_stages = .{
         Quantizer{ .target_bits = 8 },
-        Checksumer{ .digest = &digest },
+        // Checksumer{ .digest = &digest },
     };
 
-    const host_buffers = try buffer_loader.planAndAllocate(registry);
-    defer allocator.free(host_buffers);
-
-    const executor: Executor = .{
-        .allocator = allocator,
+    const source = FilesystemSource{
         .registry = &registry,
+        .sources = files.items,
     };
 
-    log.info("--- Starting generic executor... ---", .{});
-    try executor.execute(pipeline_stages, &buffer_loader);
+    const executor_context = .{
+        .pipeline_stages = pipeline_stages,
+        .sink = &sink,
+    };
+
+    log.info("--- Starting tensor processing stream... ---", .{});
+    try source.iterator(&executor_context, Executor.process);
     log.info("--- Pipeline finished successfully. ---", .{});
 
     log.info("SHA256 of the last processed tensor was: {s}", .{std.fmt.bytesToHex(digest, .lower)});
