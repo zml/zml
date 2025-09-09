@@ -76,7 +76,7 @@ pub const Registry = struct {
     }
 };
 
-// Safetensors Loader
+// Safetensors parser
 
 pub fn registerSafetensors(allocator: std.mem.Allocator, provider: anytype, path: []const u8) !Registry {
     var registry: Registry = .{
