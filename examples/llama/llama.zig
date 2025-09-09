@@ -65,9 +65,6 @@ pub const LlamaLM = struct {
             self_attn.v_proj.weight = self_attn.v_proj.weight.withSharding(.{0});
             self_attn.o_proj.weight = self_attn.o_proj.weight.withSharding(.{1});
 
-            var input_layernorm = try zml.aio.populateModelWithPrefix(RmsNorm, allocator, store, prefix.concat("input_layernorm"));
-            input_layernorm.eps = config.rms_norm_eps;
-
             var post_attention_layernorm = try zml.aio.populateModelWithPrefix(RmsNorm, allocator, store, prefix.concat("post_attention_layernorm"));
             post_attention_layernorm.eps = config.rms_norm_eps;
 
@@ -78,9 +75,9 @@ pub const LlamaLM = struct {
 
             layer.* = .{
                 .self_attn = self_attn,
-                .input_layernorm = input_layernorm,
-                .post_attention_layernorm = post_attention_layernorm,
                 .mlp = mlp,
+                .post_attention_layernorm = post_attention_layernorm,
+                .rms_norm_eps = config.rms_norm_eps,
             };
         }
 
@@ -200,10 +197,11 @@ pub const Llama = struct {
 };
 
 pub const TransformerLayer = struct {
-    input_layernorm: RmsNorm,
     self_attn: SelfAttn,
     post_attention_layernorm: RmsNorm,
     mlp: Mlp,
+
+    rms_norm_eps: f32,
 
     pub fn forward(
         self: TransformerLayer,
@@ -215,7 +213,7 @@ pub const TransformerLayer = struct {
         //log.debug("TransformerLayer({f}) -> {f}", .{ x0, self.input_layernorm.forward(x0) });
         stdx.debug.assert(x0.rank() >= 2 and x0.shape().hasTags(.{ .s, .d }), "TransformerLayer expected input shape: {{..., .s, .d}}, received: {f}", .{x0});
 
-        const x0_normalized = zml.call(self.input_layernorm, .forward, .{x0});
+        const x0_normalized = zml.nn.rmsNorm(x0, .d, self.rms_norm_eps);
         const delta0, const updated_kv_cache = zml.call(self.self_attn, .forward, .{ x0_normalized, token_index, kv_cache });
         const x1 = x0.add(delta0);
 
