@@ -17,6 +17,10 @@ const Shape = zml.Shape;
 const Dims = stdx.BoundedArray(i64, zml.Shape.MAX_RANK);
 const StringBuilder = std.ArrayListUnmanaged(u8);
 
+const Platform = zml.Platform;
+const pjrtx = zml.pjrt;
+const pjrt = pjrtx.pjrt;
+
 // I/O Utilities
 const io = struct {
     pub fn copy(
@@ -54,9 +58,9 @@ const Tensor = struct {
         try source_reader.discardAll(self.offset);
 
         const limited_reader_buffer = try allocator.alloc(u8, 16 * 1024);
-        const limited_reader = try allocator.create(std.io.Reader.Limited);
+        const limited_reader = try allocator.create(LimitingReader);
 
-        limited_reader.* = std.io.Reader.Limited.init(
+        limited_reader.* = .init(
             source_reader,
             std.io.Limit.limited64(self.shape.byteSize()),
             limited_reader_buffer,
@@ -316,7 +320,12 @@ const QuantizingWriter = struct {
         return self.next_writer.writeSplat(data, splat);
     }
 
-    const vtable: std.io.Writer.VTable = .{ .drain = drain };
+    fn flush(w: *std.io.Writer) !void {
+        const self = @as(*QuantizingWriter, @alignCast(@fieldParentPtr("interface", w)));
+        try self.next_writer.flush();
+    }
+
+    const vtable: std.io.Writer.VTable = .{ .drain = drain, .flush = flush };
 };
 
 pub const Checksumer = struct {
@@ -325,7 +334,7 @@ pub const Checksumer = struct {
     digest: *[32]u8,
 
     pub fn writer(self: Checksumer, next: *std.io.Writer) Writer {
-        return Writer.init(next, self);
+        return .init(next, self);
     }
 };
 
@@ -348,6 +357,7 @@ const ChecksummingWriter = struct {
         const self = @as(*ChecksummingWriter, @alignCast(@fieldParentPtr("interface", w)));
 
         for (data) |d| self.hasher.update(d);
+
         if (splat > 1 and data.len > 0) {
             const last = data[data.len - 1];
             for (0..splat - 1) |_| self.hasher.update(last);
@@ -358,8 +368,9 @@ const ChecksummingWriter = struct {
 
     fn flush(w: *std.io.Writer) !void {
         const self = @as(*ChecksummingWriter, @alignCast(@fieldParentPtr("interface", w)));
+
         self.hasher.final(self.config.digest);
-        log.warn("Checksum {any}", .{self.config.digest});
+
         try self.next_writer.flush();
     }
 
@@ -384,62 +395,185 @@ pub const DiscardingSink = struct {
     }
 };
 
-// "Core"
+const MemoryWriter = struct {
+    api: *const pjrt.Api,
+    transfer_manager: *pjrtx.AsyncHostToDeviceTransferManager,
 
-pub const FanOut = struct {
-    source: *Source,
-    registry: *Registry,
+    buffer_index: usize,
+    tensor_byte_size: u64,
+    tensor_name: []const u8,
 
-    pub fn iterator(self: FanOut, context: anytype, callback: SourceCallback) !void {
-        var it = self.registry.tensors.iterator();
+    bytes_written: u64,
+    interface: std.io.Writer,
 
-        while (it.next()) |entry| {
-            const tensor = entry.value_ptr.*;
-            try callback(context, tensor);
+    pub fn init(
+        api: *const pjrt.Api,
+        transfer_manager: *pjrtx.AsyncHostToDeviceTransferManager,
+        index: usize,
+        size: u64,
+        name: []const u8,
+    ) MemoryWriter {
+        return .{
+            .api = api,
+            .transfer_manager = transfer_manager,
+            .buffer_index = index,
+            .tensor_byte_size = size,
+            .tensor_name = name,
+            .bytes_written = 0,
+            .interface = .{ .vtable = &vtable, .buffer = &[_]u8{}, .end = 0 },
+        };
+    }
+
+    fn drain(w: *std.io.Writer, data: []const []const u8, splat: usize) std.io.Writer.Error!usize {
+        const self = @as(*MemoryWriter, @alignCast(@fieldParentPtr("interface", w)));
+        std.debug.assert(data.len == 1 and splat == 1); // todo: implement fanout
+        const chunk = data[0];
+
+        if (chunk.len == 0) return 0;
+
+        std.debug.assert(self.bytes_written + chunk.len <= self.tensor_byte_size);
+
+        const is_last = (self.bytes_written + chunk.len == self.tensor_byte_size);
+
+        log.info("Transferring data for tensor {s} (buffer index {d}): chunk_size={d}, offset={d}, total_tensor_size={d}, bytes_written_so_far={d}, is_last={}", .{ self.tensor_name, self.buffer_index, chunk.len, self.bytes_written, self.tensor_byte_size, self.bytes_written, is_last });
+        const event = self.transfer_manager.transferData(self.api, self.buffer_index, chunk, 0, is_last) catch |err| {
+            log.err("[{s}] PJRT transferData failed for buffer index {d}: {any}", .{ self.tensor_name, self.buffer_index, err });
+            return error.WriteFailed;
+        };
+
+        event.awaitBlocking(self.api) catch |err| {
+            log.err("PJRT event await failed for buffer index {d}: {any}", .{ self.buffer_index, err });
+            return error.WriteFailed;
+        };
+
+        self.bytes_written += chunk.len;
+
+        return chunk.len;
+    }
+
+    fn flush(w: *std.io.Writer) !void {
+        const self = @as(*MemoryWriter, @alignCast(@fieldParentPtr("interface", w)));
+
+        if (self.tensor_byte_size == 0) {
+            std.debug.assert(self.bytes_written == 0);
+            const event = self.transfer_manager.transferData(self.api, self.buffer_index, &[_]u8{}, 0, true) catch |err| {
+                log.err("PJRT final transferData for zero-byte tensor failed (index {d}): {any}", .{ self.buffer_index, err });
+                return error.WriteFailed;
+            };
+            event.awaitBlocking(self.api) catch |err| {
+                log.err("PJRT final event await for zero-byte tensor failed (index {d}): {any}", .{ self.buffer_index, err });
+                return error.WriteFailed;
+            };
+        } else {
+            if (self.bytes_written != self.tensor_byte_size) {
+                log.err(
+                    "[{s}] flush called but stream was incomplete. Wrote {d} of {d} bytes.",
+                    .{ self.tensor_name, self.bytes_written, self.tensor_byte_size },
+                );
+                return error.WriteFailed;
+            }
         }
     }
+
+    const vtable: std.io.Writer.VTable = .{ .drain = drain, .flush = flush };
 };
 
-pub const Executor = struct {
-    pub fn process(context: anytype, tensor: Tensor) !void {
-        log.info("--- Processing tensor: {s} ---", .{tensor.name});
+pub const MemorySink = struct {
+    api: *const pjrt.Api,
+    transfer_manager: *pjrtx.AsyncHostToDeviceTransferManager,
 
-        var arena_buffer: [20 * 1024]u8 = undefined;
-        var fba = std.heap.FixedBufferAllocator.init(&arena_buffer);
-        const stack_allocator = fba.allocator();
+    tensor_name_to_index: std.StringHashMapUnmanaged(usize),
+    final_buffers: std.StringHashMapUnmanaged(*pjrtx.Buffer),
+    allocator: std.mem.Allocator,
 
-        const reader = try tensor.reader(stack_allocator, context.*.source);
+    pub fn plan(
+        allocator: std.mem.Allocator,
+        registry: *const Registry,
+        platform: Platform,
+        device: *const pjrt.Device,
+    ) !MemorySink {
+        var self: MemorySink = .{
+            .api = platform.pjrt_api,
+            .allocator = allocator,
+            .transfer_manager = undefined,
+            .tensor_name_to_index = .{},
+            .final_buffers = .{},
+        };
 
-        const final_writer = context.*.sink.writer(tensor);
-        var writer_chain: *std.io.Writer = final_writer;
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const arena_allocator = arena.allocator();
 
-        inline for (context.*.pipeline_stages) |stage_config| {
-            const WriterType = @TypeOf(stage_config).Writer;
-            const new_writer = try stack_allocator.create(WriterType);
-            new_writer.* = stage_config.writer(writer_chain);
-            writer_chain = &new_writer.interface;
-            log.info("  [Executor] Added '{s}' to pipeline", .{@typeName(WriterType)});
+        const tensors = &registry.tensors;
+        var shape_specs_list = try std.ArrayList(pjrt.ShapeSpec).initCapacity(arena_allocator, tensors.count());
+
+        const memory = (try device.addressableMemories(platform.pjrt_api))[0];
+
+        var it = tensors.iterator();
+        var index: usize = 0;
+
+        while (it.next()) |entry| : (index += 1) {
+            const tensor = entry.value_ptr.*;
+            shape_specs_list.appendAssumeCapacity(.init(tensor.shape.dims(), bufferTypeFromDtype(tensor.shape.dtype())));
+            try self.tensor_name_to_index.put(allocator, try allocator.dupe(u8, tensor.name), index);
         }
 
-        var pump_buffer: [64 * 1024]u8 = undefined;
-        var total_bytes_copied: u64 = 0;
+        self.transfer_manager = try platform.pjrt_client.createBuffersForAsyncHostToDevice(platform.pjrt_api, .{
+            .shape_specs = shape_specs_list.items,
+            .memory = memory,
+        });
 
-        while (true) {
-            const bytes_read = reader.readSliceShort(&pump_buffer) catch |err| {
-                if (err == error.EndOfStream) break;
-                return err;
-            };
+        return self;
+    }
 
-            if (bytes_read == 0) break;
-            try writer_chain.writeAll(pump_buffer[0..bytes_read]);
-            total_bytes_copied += bytes_read;
+    pub fn deinit(self: *MemorySink) void {
+        self.transfer_manager.deinit(self.api);
+
+        var it = self.tensor_name_to_index.keyIterator();
+        while (it.next()) |key| {
+            self.allocator.free(key.*);
         }
+        self.tensor_name_to_index.deinit(self.allocator);
 
-        std.debug.assert(total_bytes_copied == tensor.shape.byteSize());
+        var buffers_it = self.final_buffers.iterator();
+        while (buffers_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            entry.value_ptr.*.deinit(self.api);
+            self.allocator.destroy(entry.value_ptr);
+        }
+        self.final_buffers.deinit(self.allocator);
+    }
 
-        try writer_chain.flush();
+    pub fn writer(self: *MemorySink, allocator: std.mem.Allocator, tensor: Tensor) !*std.io.Writer {
+        const buffer_index = self.tensor_name_to_index.get(tensor.name).?;
+        const writer_instance = try allocator.create(MemoryWriter);
 
-        log.info("--- Finished tensor: {s} ({d} bytes) ---", .{ tensor.name, total_bytes_copied });
+        writer_instance.* = MemoryWriter.init(
+            self.api,
+            self.transfer_manager,
+            buffer_index,
+            tensor.shape.byteSize(),
+            tensor.name,
+        );
+        return &writer_instance.interface;
+    }
+
+    pub fn finish(self: *MemorySink) !void {
+        var it = self.tensor_name_to_index.iterator();
+        while (it.next()) |entry| {
+            const tensor_name = entry.key_ptr.*;
+            const buffer_index = entry.value_ptr.*;
+
+            const buffer_ptr = try self.allocator.create(*pjrtx.Buffer);
+            errdefer self.allocator.destroy(buffer_ptr);
+
+            buffer_ptr.* = try self.transfer_manager.retrieveBuffer(self.api, buffer_index);
+
+            const name_dupe = try self.allocator.dupe(u8, tensor_name);
+            errdefer self.allocator.free(name_dupe);
+
+            try self.final_buffers.put(self.allocator, name_dupe, buffer_ptr.*);
+        }
     }
 };
 
@@ -460,6 +594,12 @@ pub fn asyncMain() !void {
         return;
     };
 
+    var context = try zml.Context.init();
+    defer context.deinit();
+
+    const platform = context.autoPlatform(.{});
+    context.printAvailablePlatforms(platform);
+
     log.info("--- Loading model metadata... ---", .{});
     var fs_source = FsSource.init(allocator, std.fs.path.dirname(file_path) orelse ".");
     defer fs_source.deinit();
@@ -471,33 +611,63 @@ pub fn asyncMain() !void {
 
     log.info("Registry loaded with {d} tensors from {d} source files.", .{ registry.tensors.count(), fs_source.path_to_file_map.count() });
 
-    log.info("--- Preparing execution ---", .{});
+    log.info("--- Planning transfers ---", .{});
+    var memory_sink = try MemorySink.plan(
+        allocator,
+        &registry,
+        platform,
+        platform.getDevices()[0],
+    );
+    defer memory_sink.deinit();
 
-    var sink: DiscardingSink = .init();
-
-    const digest: [32]u8 = undefined;
-
-    const pipeline_stages = .{
-        Quantizer{ .target_bits = 8 },
-        // Checksumer{ .digest = &digest },
-    };
-
-    const pipe: FanOut = .{
-        .source = &source,
-        .registry = &registry,
-    };
-
-    const executor_context = .{
-        .source = &source,
-        .pipeline_stages = pipeline_stages,
-        .sink = &sink,
-    };
+    log.info("Memory Transfer Manager created for {d} tensors.", .{memory_sink.tensor_name_to_index.count()});
 
     log.info("--- Starting tensor processing stream... ---", .{});
-    try pipe.iterator(&executor_context, Executor.process);
-    log.info("--- Pipeline finished successfully. ---", .{});
 
-    log.info("SHA256 of the last processed tensor was: {s}", .{std.fmt.bytesToHex(digest, .lower)});
+    var tensor_it = registry.tensors.iterator();
+    while (tensor_it.next()) |entry| {
+        const tensor = entry.value_ptr.*;
+        log.info("--- Processing tensor: {s} ---", .{tensor.name});
+
+        var arena_buffer: [20 * 1024]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&arena_buffer);
+        const stack_allocator = fba.allocator();
+
+        const reader = try tensor.reader(stack_allocator, &source);
+
+        var digest: [32]u8 = undefined;
+        _ = &digest;
+
+        const pipeline_stages = .{
+            Quantizer{ .target_bits = 8 },
+            // Checksumer{ .digest = &digest },
+        };
+
+        const final_writer = try memory_sink.writer(stack_allocator, tensor);
+        var writer_chain: *std.io.Writer = final_writer;
+
+        inline for (pipeline_stages) |stage_config| {
+            const WriterType = @TypeOf(stage_config).Writer;
+            const new_writer = try stack_allocator.create(WriterType);
+            new_writer.* = stage_config.writer(writer_chain);
+            writer_chain = &new_writer.interface;
+            log.info("  [Pipeline] Added '{s}' to writer chain", .{@typeName(WriterType)});
+        }
+
+        var pump_buffer: [64 * 1024]u8 = undefined;
+        const total_bytes_copied = try io.copy(reader, writer_chain, &pump_buffer);
+
+        std.debug.assert(total_bytes_copied == tensor.shape.byteSize());
+
+        try writer_chain.flush();
+
+        log.info("--- Finished tensor: {s} ({d} bytes) ---", .{ tensor.name, total_bytes_copied });
+    }
+
+    log.info("--- All tensors processed successfully. ---", .{});
+
+    try memory_sink.finish();
+    log.info("Retrieved {d} buffers from device.", .{memory_sink.final_buffers.count()});
 }
 
 // all code below is unmodified (or slightly) / imported strucs / funcs from zml
@@ -677,4 +847,10 @@ fn validSlice(v: std.json.Array) ?std.meta.Tag(std.json.Value) {
     }
 
     return item_type;
+}
+
+pub fn bufferTypeFromDtype(dt: DataType) pjrtx.BufferType {
+    return switch (dt) {
+        inline else => |tag| @field(pjrtx.BufferType, @tagName(tag)),
+    };
 }
