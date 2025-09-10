@@ -17,6 +17,7 @@ const Shape = zml.Shape;
 const Dims = stdx.BoundedArray(i64, zml.Shape.MAX_RANK);
 const StringBuilder = std.ArrayListUnmanaged(u8);
 
+const Context = zml.Context;
 const Platform = zml.Platform;
 const pjrtx = zml.pjrt;
 const pjrt = pjrtx.pjrt;
@@ -380,21 +381,6 @@ const ChecksummingWriter = struct {
     };
 };
 
-// Sinks
-
-pub const DiscardingSink = struct {
-    discarder: std.io.Writer.Discarding,
-
-    pub fn init() DiscardingSink {
-        return .{ .discarder = .init(&[_]u8{}) };
-    }
-
-    pub fn writer(self: *DiscardingSink, tensor: Tensor) *std.io.Writer {
-        _ = tensor;
-        return @constCast(&self.discarder.writer);
-    }
-};
-
 const MemoryWriter = struct {
     api: *const pjrt.Api,
     transfer_manager: *pjrtx.AsyncHostToDeviceTransferManager,
@@ -435,8 +421,9 @@ const MemoryWriter = struct {
 
         const is_last = (self.bytes_written + chunk.len == self.tensor_byte_size);
 
-        log.info("Transferring data for tensor {s} (buffer index {d}): chunk_size={d}, offset={d}, total_tensor_size={d}, bytes_written_so_far={d}, is_last={}", .{ self.tensor_name, self.buffer_index, chunk.len, self.bytes_written, self.tensor_byte_size, self.bytes_written, is_last });
-        const event = self.transfer_manager.transferData(self.api, self.buffer_index, chunk, 0, is_last) catch |err| {
+        log.info("Transferring data for tensor {s} (buffer index {d}): chunk_size={d}, offset={d}, total_tensor_size={d}, is_last={}", .{ self.tensor_name, self.buffer_index, chunk.len, self.bytes_written, self.tensor_byte_size, is_last });
+
+        const event = self.transfer_manager.transferData(self.api, self.buffer_index, chunk, @intCast(self.bytes_written), is_last) catch |err| {
             log.err("[{s}] PJRT transferData failed for buffer index {d}: {any}", .{ self.tensor_name, self.buffer_index, err });
             return error.WriteFailed;
         };
@@ -478,6 +465,21 @@ const MemoryWriter = struct {
     const vtable: std.io.Writer.VTable = .{ .drain = drain, .flush = flush };
 };
 
+// Sinks
+
+pub const DiscardingSink = struct {
+    discarder: std.io.Writer.Discarding,
+
+    pub fn init() DiscardingSink {
+        return .{ .discarder = .init(&[_]u8{}) };
+    }
+
+    pub fn writer(self: *DiscardingSink, tensor: Tensor) *std.io.Writer {
+        _ = tensor;
+        return @constCast(&self.discarder.writer);
+    }
+};
+
 pub const MemorySink = struct {
     api: *const pjrt.Api,
     transfer_manager: *pjrtx.AsyncHostToDeviceTransferManager,
@@ -486,7 +488,7 @@ pub const MemorySink = struct {
     final_buffers: std.StringHashMapUnmanaged(*pjrtx.Buffer),
     allocator: std.mem.Allocator,
 
-    pub fn plan(
+    pub fn init(
         allocator: std.mem.Allocator,
         registry: *const Registry,
         platform: Platform,
@@ -514,6 +516,9 @@ pub const MemorySink = struct {
 
         while (it.next()) |entry| : (index += 1) {
             const tensor = entry.value_ptr.*;
+            const tensor_byte_size = tensor.shape.byteSize();
+            log.info("Planning tensor: {s}, byte_size: {d}, dims: {any}", .{ tensor.name, tensor_byte_size, tensor.shape.dims() });
+
             shape_specs_list.appendAssumeCapacity(.init(tensor.shape.dims(), bufferTypeFromDtype(tensor.shape.dtype())));
             try self.tensor_name_to_index.put(allocator, try allocator.dupe(u8, tensor.name), index);
         }
@@ -558,6 +563,7 @@ pub const MemorySink = struct {
         return &writer_instance.interface;
     }
 
+    // todo: this will be a reader
     pub fn finish(self: *MemorySink) !void {
         var it = self.tensor_name_to_index.iterator();
         while (it.next()) |entry| {
@@ -594,7 +600,7 @@ pub fn asyncMain() !void {
         return;
     };
 
-    var context = try zml.Context.init();
+    var context = try Context.init();
     defer context.deinit();
 
     const platform = context.autoPlatform(.{});
@@ -612,7 +618,7 @@ pub fn asyncMain() !void {
     log.info("Registry loaded with {d} tensors from {d} source files.", .{ registry.tensors.count(), fs_source.path_to_file_map.count() });
 
     log.info("--- Planning transfers ---", .{});
-    var memory_sink = try MemorySink.plan(
+    var memory_sink = try MemorySink.init(
         allocator,
         &registry,
         platform,
