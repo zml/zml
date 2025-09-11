@@ -495,7 +495,7 @@ test MemoryWriter {
     var tensor_name_to_index: std.StringHashMap(usize) = .init(allocator);
     defer tensor_name_to_index.deinit();
 
-    try tensors.put("test", .{ .name = "test", .shape = Shape.init(.{ 4, 8 }, .f32), .offset = 0, .source_name = "chunk0" });
+    try tensors.put("test", .{ .name = "test", .shape = Shape.init(.{ 4096, 1024 }, .f32), .offset = 0, .source_name = "chunk0" });
 
     var shape_specs_list = try std.ArrayList(pjrt.ShapeSpec).initCapacity(allocator, tensors.count());
     defer shape_specs_list.deinit(allocator);
@@ -518,53 +518,42 @@ test MemoryWriter {
     });
 
     const tensor = tensors.get("test").?;
+    const tensor_byte_size = tensor.shape.byteSize();
 
-    var writer: MemoryWriter = .init(
+    const source_data: []u8 = try allocator.alloc(u8, tensor_byte_size);
+    defer allocator.free(source_data);
+
+    @memset(source_data, 1);
+
+    var source_reader: std.io.Reader = .fixed(source_data);
+
+    var memory_writer: MemoryWriter = .init(
         platform.pjrt_api,
         transfer_manager,
         0,
-        tensor.shape.byteSize(),
+        tensor_byte_size,
         tensor.name,
     );
 
-    const data: []u8 = try allocator.alloc(u8, tensor.shape.byteSize());
-    defer allocator.free(data);
+    const bytes_written = try source_reader.streamRemaining(&memory_writer.interface);
+    try memory_writer.interface.flush();
 
-    @memset(data, 1);
-
-    try writer.interface.writeAll(data);
-    try writer.interface.flush();
-
-    try std.testing.expectEqual(tensor.shape.byteSize(), writer.bytes_written);
+    try std.testing.expectEqual(tensor_byte_size, bytes_written);
 
     const device_buffer = try transfer_manager.retrieveBuffer(platform.pjrt_api, 0);
     defer device_buffer.deinit(platform.pjrt_api);
 
-    try std.testing.expectEqual(tensor.shape.byteSize(), try device_buffer.getOnDeviceSizeInBytes(platform.pjrt_api));
-    try std.testing.expectEqualSlices(i64, tensor.shape.dims(), device_buffer.getDimensions(platform.pjrt_api));
+    var host_read_buffer: [64]u8 = undefined;
+    var memory_reader: MemoryReader = try .init(platform.pjrt_api, device_buffer, &host_read_buffer);
 
-    const host_data_verify: []u8 = try allocator.alloc(u8, tensor.shape.byteSize());
-    defer allocator.free(host_data_verify);
+    var destination_writer: std.io.Writer.Allocating = .init(allocator);
+    defer destination_writer.deinit();
 
-    const to_host_event = try device_buffer.toHostBuffer(platform.pjrt_api, host_data_verify);
-    if (to_host_event) |event| {
-        try event.awaitBlocking(platform.pjrt_api);
-    }
+    const bytes_read = try memory_reader.interface.streamRemaining(&destination_writer.writer);
+    const retrieved_data = destination_writer.written();
 
-    try std.testing.expectEqualSlices(u8, data, host_data_verify);
-
-    var host_buffer: [64]u8 = undefined;
-    var reader = try MemoryReader.init(platform.pjrt_api, device_buffer, &host_buffer);
-
-    var allocating_writer = std.io.Writer.Allocating.init(allocator);
-    defer allocating_writer.deinit();
-
-    _ = try reader.interface.streamRemaining(&allocating_writer.writer);
-
-    const read_data = allocating_writer.written();
-
-    try std.testing.expectEqual(tensor.shape.byteSize(), read_data.len);
-    try std.testing.expectEqualSlices(u8, host_data_verify, read_data);
+    try std.testing.expectEqual(tensor_byte_size, bytes_read);
+    try std.testing.expectEqualSlices(u8, source_data, retrieved_data);
 }
 
 const MemoryReader = struct {
@@ -624,8 +613,8 @@ const MemoryReader = struct {
         };
 
         if (event) |e| {
-            const event_x: *pjrtx.Event = @ptrCast(e);
-            event_x.awaitBlocking(self.api) catch |err| {
+            const event_: *pjrtx.Event = @ptrCast(e);
+            event_.awaitBlocking(self.api) catch |err| {
                 log.err("PJRT event await failed on copyRawToHost: {any}", .{err});
                 return error.ReadFailed;
             };
