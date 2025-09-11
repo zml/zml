@@ -188,6 +188,7 @@ pub const CompilationContext = struct {
                 var write_buf: [4096]u8 = undefined;
                 var writer = file.writer(&write_buf);
                 try module.op().print(&writer.interface, .{ .debug_info = true, .debug_info_pretty_form = false });
+                try writer.interface.flush();
                 log.info("Wrote MLIR to {s}/{s}", .{ module_dir.?, mlir_name });
             } else |_| {
                 log.warn("Failed to open {s}", .{mlir_name});
