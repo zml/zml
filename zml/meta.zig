@@ -679,7 +679,7 @@ test zip {
 
 /// Given a func(X) -> Y or a func(Ctx, X) -> Y,
 /// finds all X in the given object, and write the result of func(X) into an arraylist.
-pub fn collect(func: anytype, func_ctx: _CollectCtx(func), out: *std.array_list.Managed(stdx.meta.FnSignature(func, null).ReturnT), obj: anytype) error{OutOfMemory}!void {
+pub fn collectAlloc(func: anytype, func_ctx: _CollectCtx(func), out: *std.array_list.Managed(stdx.meta.FnSignature(func, null).ReturnT), obj: anytype) error{OutOfMemory}!void {
     stdx.debug.assertComptime(@typeInfo(@TypeOf(func)).@"fn".params.len <= 2, "zml.meta.collect expects a func with two arguments, got: {}", .{@TypeOf(func)});
     const LocalContext = struct {
         func_ctx: _CollectCtx(func),
@@ -700,7 +700,8 @@ pub fn collect(func: anytype, func_ctx: _CollectCtx(func), out: *std.array_list.
 }
 
 /// Given a func(X) -> Y or a func(Ctx, X) -> Y,
-/// finds all X in the given object, and write the result of func(X) into an arraylist.
+/// finds all X in the given object, and write the result of func(X) into a given slice.
+/// Asserts that the number of X found is equal to the slice len.
 pub fn collectBuf(func: anytype, func_ctx: _CollectCtx(func), obj: anytype, out: []stdx.meta.FnResult(func)) void {
     stdx.debug.assertComptime(@typeInfo(@TypeOf(func)).@"fn".params.len <= 2, "zml.meta.collectBuf expects a func with one or two arguments, got: {}", .{@TypeOf(func)});
     const LocalContext = struct {

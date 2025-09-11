@@ -341,12 +341,11 @@ pub const CompilationContext = struct {
         const locations = try arena.alloc(mlir.Location, tensor_count);
         @memset(locations, mlir.Location.unknown(mlir_ctx));
 
-        var input_shapes: std.array_list.Managed(Shape) = try .initCapacity(res_allocator, tensor_count);
-        meta.collect(Tensor.shape, {}, &input_shapes, args) catch unreachable;
-        stdx.debug.internalAssert(input_shapes.items.len == tensor_count, "args have changed ?", .{});
+        const input_shapes = try res_allocator.alloc(Shape, tensor_count);
+        meta.collectBuf(Tensor.shape, {}, args, input_shapes);
 
         const input_types = try arena.alloc(mlir.Type, tensor_count);
-        for (input_types, input_shapes.items) |*t, sh| t.* = mlirx.tensorType(mlir_ctx, sh);
+        for (input_types, input_shapes) |*t, sh| t.* = mlirx.tensorType(mlir_ctx, sh);
 
         const og_block_args = self._block_args;
         defer {
@@ -399,7 +398,7 @@ pub const CompilationContext = struct {
             self.addDonationsAttributes(arg_attrs, fn_res_donations);
             self.addOutputMemoryKindAttributes(res_attrs, fn_res_output_memory_kind);
             if (self._platform.sharding().num_partitions > 1) {
-                self.addShardingAttributes(arg_attrs, res_attrs, input_shapes.items, fn_res_shapes);
+                self.addShardingAttributes(arg_attrs, res_attrs, input_shapes, fn_res_shapes);
             }
         }
 
@@ -427,7 +426,7 @@ pub const CompilationContext = struct {
         return .{
             .mlir_fn = mlir_fn,
             .name = opts.name,
-            .args_shapes = input_shapes.items,
+            .args_shapes = input_shapes,
             .res_tensors = fn_res,
             .res_types = fn_res_types,
             .res_shapes = fn_res_shapes,

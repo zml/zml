@@ -189,10 +189,9 @@ pub const Tokenizer = struct {
             // Step by step visualization of the progress.
             if (options.debug) {
                 var _debug_buf: [256]u8 = undefined;
-                var _debug_alloc = std.heap.FixedBufferAllocator.init(&_debug_buf);
-                var debug_progress = std.array_list.Managed(u8).init(_debug_alloc.allocator());
-                self.decodeWithOpts(&debug_progress, tok_buff[0..num_tokens], .{ .sep = "|" }) catch {};
-                log.debug("tokens: {any} -> {s}", .{ tok_buff[0..num_tokens], debug_progress.items });
+                var debug_progress: std.Io.Writer = .fixed(&_debug_buf);
+                self.decodeWithOpts(tok_buff[0..num_tokens], &debug_progress, .{ .sep = "|" }) catch {};
+                log.debug("tokens: {any} -> {s}", .{ tok_buff[0..num_tokens], debug_progress.buffered() });
             }
             var best_score: f32 = -1e10;
             var best_token: u32 = 0;
@@ -311,22 +310,19 @@ pub const Tokenizer = struct {
     /// Converts the given slice of tokens back into bytes.
     /// Note that if the tokenizer allows sub-unicode bytes, it's possible
     /// the output is not valid utf8.
-    pub fn decode(self: *const Tokenizer, allocator: std.mem.Allocator, input: []const u32) error{OutOfMemory}![]u8 {
-        var output = std.array_list.Managed(u8).init(allocator);
-        errdefer output.deinit();
-
-        try self.decodeWithOpts(&output, input, .{});
-        return output.toOwnedSlice();
+    pub fn decode(self: *const Tokenizer, input: []const u32, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try self.decodeWithOpts(input, writer, .{});
     }
 
     pub fn decodeWithOpts(
         self: *const Tokenizer,
-        output: *std.array_list.Managed(u8),
         input: []const u32,
+        output: *std.Io.Writer,
         opts: struct { sep: []const u8 = "" },
-    ) error{OutOfMemory}!void {
+    ) std.Io.Writer.Error!void {
         const escaped = if (self.normalizer) |n| n.escapedSpace() else null;
         // Flag used to indicate if the first dummy whitespace has been consumed.
+        var first_token: bool = true;
         for (input) |id| {
             // Retrieve the slice corresponding to the id.
             var piece = self.lookupPiece(id);
@@ -337,12 +333,13 @@ pub const Tokenizer = struct {
                 while (std.mem.startsWith(u8, piece, escspc)) {
                     piece = piece[escspc.len..];
                     // don't output a space at beginning of text.
-                    if (output.items.len > 0) try output.append(' ');
+                    if (!first_token) try output.writeByte(' ');
                 }
             }
 
-            try output.appendSlice(piece);
-            if (opts.sep.len > 0) try output.appendSlice(opts.sep);
+            try output.writeAll(piece);
+            first_token = false;
+            try output.writeAll(opts.sep);
         }
     }
 
@@ -472,10 +469,13 @@ pub const Decoder = struct {
     }
 
     pub fn decode(self: *Decoder, ids: []const u32) ![]const u8 {
+        // TODO: revisite tokenizer api to use std.Io.Writer.
         self.reset();
-        const res = try self.inner.decode(self.arena.allocator(), ids);
-        self.current_string = res;
-        return res;
+        // Reuse the same warmup than in init, to maximize contiguous writes.
+        var arena_writer = std.Io.Writer.Allocating.initCapacity(self.arena.allocator(), 4096) catch unreachable;
+        try self.inner.decode(ids, &arena_writer.writer);
+        self.current_string = arena_writer.written();
+        return self.current_string.?;
     }
 
     pub fn string(self: *const Decoder) []const u8 {
