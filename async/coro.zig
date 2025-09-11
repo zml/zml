@@ -159,26 +159,21 @@ const Coro = struct {
     fn runcoro(from: *base.Coro, this: *base.Coro) callconv(.c) noreturn {
         const from_coro: *Coro = @fieldParentPtr("impl", from);
         const this_coro: *Coro = @fieldParentPtr("impl", this);
-        log(.debug, "coro start {any}", .{this_coro.id});
+        log(.debug, "coro start {f}", .{this_coro.*});
         @call(.auto, this_coro.func, .{});
         this_coro.status = .Done;
         thread_state.switchOut(from_coro);
 
         // Never returns
-        stdx.debug.panic("Cannot resume an already completed coroutine {any}", .{this_coro.id});
+        stdx.debug.panic("Cannot resume an already completed coroutine {f}", .{this_coro.*});
     }
 
     pub fn getStorage(self: Coro, comptime T: type) *T {
         return @ptrCast(@alignCast(self.storage));
     }
 
-    pub fn format(self: Coro, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-        _ = fmt;
-        _ = options;
-        try writer.print("Coro{{.id = {any}, .status = {s}}}", .{
-            self.id,
-            @tagName(self.status),
-        });
+    pub fn format(self: Coro, writer: *std.Io.Writer) !void {
+        try writer.print("Coro{{.id = {any}, .status = {t}}}", .{ self.id, self.status });
     }
 };
 
@@ -292,7 +287,7 @@ const ThreadState = struct {
 
     /// Called from resume
     fn switchIn(self: *ThreadState, target: Frame) void {
-        log(.debug, "coro resume {any} from {any}", .{ target.id, self.current().id });
+        log(.debug, "coro resume {f} from {f}", .{ target.id, self.current().id });
 
         // Switch to target, setting this coro as the resumer.
         self.switchTo(target, true);
@@ -307,7 +302,7 @@ const ThreadState = struct {
 
     /// Called from suspend
     fn switchOut(self: *ThreadState, target: Frame) void {
-        log(.debug, "coro suspend {any} to {any}", .{ self.current().id, target.id });
+        log(.debug, "coro suspend {f} to {f}", .{ self.current().id, target.id });
         self.switchTo(target, false);
     }
 
@@ -384,13 +379,8 @@ const CoroId = struct {
             self.invocation += 1;
         }
 
-        pub fn format(self: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-            _ = fmt;
-            _ = options;
-            try writer.print("CoroId{{.cid={d}, .i={d}}}", .{
-                self.id.coro,
-                self.invocation,
-            });
+        pub fn format(self: @This(), writer: *std.Io.Writer) !void {
+            try writer.print("CoroId{{.cid={d}, .i={d}}}", .{ self.id.coro, self.invocation });
         }
     };
 };

@@ -1,8 +1,9 @@
 const std = @import("std");
 const math = std.math;
-const log = std.log.scoped(.@"zml/aio");
 
 const pickle = @import("pickle.zig");
+
+const log = std.log.scoped(.@"zml/aio");
 
 /// Correspond to a function/constructor call
 pub const Object = struct {
@@ -206,12 +207,16 @@ pub const Any = union(Kind) {
         self.* = undefined;
     }
 
-    inline fn writeIndents(indents: usize, writer: anytype) !void {
+    inline fn writeIndents(indents: usize, writer: *std.Io.Writer) !void {
         try writer.writeBytesNTimes("  ", indents); // resolve tab = 2 spaces
         // try writer.writeByteNTimes('\t');
     }
 
-    fn internalFormat(value: Any, indents: usize, writer: anytype) !void {
+    pub fn format(self: Any, writer: *std.Io.Writer) !void {
+        return internalFormat(self, 0, writer);
+    }
+
+    fn internalFormat(value: Any, indents: usize, writer: *std.Io.Writer) !void {
         try writeIndents(indents, writer);
         try writer.writeAll(".{\n");
         try writeIndents(indents + 1, writer);
@@ -301,10 +306,6 @@ pub const Any = union(Kind) {
         try writer.writeByte('\n');
         try writeIndents(indents, writer);
         try writer.writeByte('}');
-    }
-
-    pub fn format(self: Any, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-        return internalFormat(self, 0, writer);
     }
 
     pub fn clone(self: Any, allocator: std.mem.Allocator) !Any {
