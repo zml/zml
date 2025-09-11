@@ -679,24 +679,33 @@ test zip {
 
 /// Given a func(X) -> Y or a func(Ctx, X) -> Y,
 /// finds all X in the given object, and write the result of func(X) into an arraylist.
-pub fn collectAlloc(func: anytype, func_ctx: _CollectCtx(func), out: *std.array_list.Managed(stdx.meta.FnSignature(func, null).ReturnT), obj: anytype) error{OutOfMemory}!void {
+pub fn collectAlloc(
+    func: anytype,
+    func_ctx: _CollectCtx(func),
+    allocator: std.mem.Allocator,
+    obj: anytype,
+) std.mem.Allocator.Error![]stdx.meta.FnSignature(func, null).ReturnT {
     stdx.debug.assertComptime(@typeInfo(@TypeOf(func)).@"fn".params.len <= 2, "zml.meta.collect expects a func with two arguments, got: {}", .{@TypeOf(func)});
-    const LocalContext = struct {
+
+    const CollectAllocCtx = struct {
         func_ctx: _CollectCtx(func),
-        out: *std.array_list.Managed(stdx.meta.FnSignature(func, null).ReturnT),
+        allocator: std.mem.Allocator,
+        out: std.ArrayList(stdx.meta.FnSignature(func, null).ReturnT) = .empty,
         oom: bool = false,
-    };
-    var context = LocalContext{ .func_ctx = func_ctx, .out = out };
-    visit((struct {
-        fn cb(ctx: *LocalContext, val: *const _CollectArg(func)) void {
+
+        fn cb(ctx: *@This(), val: *const _CollectArg(func)) void {
             if (ctx.oom) return;
             const res = if (_CollectCtx(func) == void) func(val.*) else func(ctx.func_ctx, val.*);
-            ctx.out.append(res) catch {
+            ctx.out.append(ctx.allocator, res) catch {
                 ctx.oom = true;
             };
         }
-    }).cb, &context, obj);
+    };
+    var context = CollectAllocCtx{ .func_ctx = func_ctx, .allocator = allocator };
+    visit(CollectAllocCtx.cb, &context, obj);
     if (context.oom) return error.OutOfMemory;
+
+    return context.out.toOwnedSlice(allocator);
 }
 
 /// Given a func(X) -> Y or a func(Ctx, X) -> Y,

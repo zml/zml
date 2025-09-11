@@ -9,6 +9,10 @@ fn FmtSlice(T: type) type {
     return struct {
         slice: []const T,
 
+        pub fn format(f: @This(), writer: *std.io.Writer) std.io.Writer.Error!void {
+            return try formatSliceAny(f.slice, .{}, writer);
+        }
+
         pub fn formatNumber(f: @This(), writer: *std.io.Writer, n: std.fmt.Number) std.io.Writer.Error!void {
             return switch (@typeInfo(T)) {
                 .comptime_float, .float => try formatFloatSlice(f.slice, n, writer),
