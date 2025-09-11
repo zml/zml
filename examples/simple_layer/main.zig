@@ -45,19 +45,14 @@ pub fn asyncMain() !void {
 
     // We manually produce a BufferStore. You would not normally do that.
     // A BufferStore is usually created by loading model data from a file.
-    var buffers: zml.aio.BufferStore.Buffers = .{};
-    try buffers.put(arena, "weight", zml.HostBuffer.fromArray(&weights));
-    try buffers.put(arena, "bias", zml.HostBuffer.fromArray(&bias));
-
-    // the actual BufferStore
-    const buffer_store: zml.aio.BufferStore = .{
-        .arena = arena_state,
-        .buffers = buffers,
-    };
+    var store: zml.aio.BufferStore = .init(allocator);
+    defer store.deinit();
+    try store.buffers.put(store.arena.allocator(), "weight", zml.HostBuffer.fromArray(&weights));
+    try store.buffers.put(store.arena.allocator(), "bias", zml.HostBuffer.fromArray(&bias));
 
     // A clone of our model, consisting of shapes. We only need shapes for compiling.
     // We use the BufferStore to infer the shapes.
-    var model_shapes = try zml.aio.populateModel(Layer, allocator, buffer_store);
+    var model_shapes = try zml.aio.populateModel(Layer, allocator, store);
     model_shapes.weight = model_shapes.weight.withSharding(.{-1});
     model_shapes.bias = model_shapes.bias.?.withSharding(.{-1});
 
@@ -68,7 +63,7 @@ pub fn asyncMain() !void {
     // Produce a bufferized weights struct from the fake BufferStore.
     // This is like the inferred shapes, but with actual values.
     // We will need to send those to the computation device later.
-    var model_weights = try zml.aio.loadModelBuffers(Layer, model_shapes, buffer_store, arena, platform);
+    var model_weights = try zml.aio.loadModelBuffers(Layer, model_shapes, store, arena, platform);
     defer zml.aio.unloadBuffers(&model_weights); // for good practice
 
     // Wait for compilation to finish

@@ -1,3 +1,6 @@
+const std = @import("std");
+const builtin = @import("builtin");
+
 pub const BoundedArray = @import("bounded_array.zig").BoundedArray;
 pub const BoundedArrayAligned = @import("bounded_array.zig").BoundedArrayAligned;
 pub const debug = @import("debug.zig");
@@ -11,7 +14,6 @@ pub const queue = @import("queue.zig");
 pub const time = @import("time.zig");
 
 test {
-    const std = @import("std");
     std.testing.refAllDecls(@This());
 }
 
@@ -20,3 +22,5 @@ pub inline fn stackSlice(comptime max_len: usize, T: type, len: usize) []T {
     var storage: [max_len]T = undefined;
     return storage[0..len];
 }
+
+pub const noalloc: std.mem.Allocator = if (builtin.mode == .ReleaseFast) undefined else std.testing.failing_allocator;

@@ -77,7 +77,7 @@ pub fn compileModel(
 ) !FnExe(func) {
     const ModelT = ModuleSignature(func).ModelT;
     const name = @typeName(ModelT) ++ ".forward";
-    log.info("Compiling {s} with {}", .{ name, args_shapes });
+    log.info("Compiling {s} with {f}", .{ name, stdx.fmt.any(args_shapes) });
 
     var context = try CompilationContext.init(allocator, name, platform);
     defer context.deinit();
@@ -209,9 +209,9 @@ pub const BaseExe = struct {
 
         var execute_context: ?*pjrt.ExecuteContext = null;
         if (platform.pjrt_api.ffi()) |ffi| {
-            log.info("Created context execution {*} for {*}", .{ execute_context, exe });
             execute_context = try platform.pjrt_api.createExecuteContext();
             try callback.bindInternalCallbacks(allocator, platform, ffi, execute_context.?);
+            // log.info("Created context execution {*} for {*}", .{ execute_context, exe });
         }
 
         return .{

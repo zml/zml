@@ -1129,7 +1129,7 @@ pub fn hashShape(hasher: *std.hash.Wyhash, shape: Shape) void {
     hash(hasher, shape._dtype, .Shallow);
     hash(hasher, shape._sharding_info, .Shallow);
     for (shape.tags()) |tag| {
-        hash(hasher, @intFromPtr(tag), .Shallow);
+        hashArray(hasher, std.mem.span(tag), .Shallow);
     }
 }
 
