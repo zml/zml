@@ -2033,7 +2033,7 @@ pub const Tensor = struct {
     /// Converts the given 1 element Tensor into a 0-rank Tensor.
     pub fn asScalar(self: Tensor) Tensor {
         stdx.debug.assert(self.count() == 1, "Tensor.asScalar expects an input with exactly 1-element got {f}", .{self});
-        return self.reshape(.{});
+        return if (self.rank() == 0) self else self.reshape(.{});
     }
 
     pub const Pad = struct {
