@@ -439,7 +439,7 @@ fn fillBuffers(v: anytype, shapes: []const Shape, buffers: []const [*]*pjrt.Buff
 fn prettyFnName(
     comptime func: anytype,
     allocator: std.mem.Allocator,
-) !std.ArrayListUnmanaged(u8) {
+) !std.ArrayList(u8) {
     const full_noisy_name = @typeName(@TypeOf(func));
     const og_len = full_noisy_name.len;
     const buffer = try allocator.alloc(u8, og_len);
