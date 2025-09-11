@@ -926,33 +926,18 @@ pub const Operation = struct {
         op: Operation,
         flags: OpPrintingFlags,
 
-        pub fn format(self: @This(), writer: *std.Io.Writer) !void {
+        pub fn format(self: MlirFormatter, writer: *std.Io.Writer) !void {
             try self.op.print(writer, self.flags);
         }
     };
 
-    pub fn print(self: Self, writer: *std.Io.Writer, flags: OpPrintingFlags) !void {
+    pub fn print(self: Self, writer: *std.Io.Writer, flags: OpPrintingFlags) std.Io.Writer.Error!void {
         const pflags = flags.create();
         defer c.mlirOpPrintingFlagsDestroy(pflags);
 
         var writer_err: WriterWithErr = .{ .writer = writer };
-
-        c.mlirOperationPrintWithFlags(
-            self._inner,
-            pflags,
-            (struct {
-                pub fn callback(str: c.MlirStringRef, ctx_: ?*anyopaque) callconv(.c) void {
-                    const _writer_err: *WriterWithErr = @ptrCast(@alignCast(ctx_));
-                    _writer_err.writer.writeAll(str.data[0..str.length]) catch |err| {
-                        _writer_err.err = err;
-                    };
-                }
-            }).callback,
-            &writer_err,
-        );
-
-        if (writer_err.err) |err| return err;
-        try writer_err.writer.flush();
+        c.mlirOperationPrintWithFlags(self._inner, pflags, WriterWithErr.printCallback, &writer_err);
+        return writer_err.check();
     }
 
     pub fn verify(self: Self) bool {
