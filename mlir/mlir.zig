@@ -881,7 +881,7 @@ pub const Operation = struct {
         return .{ ._inner = c.mlirOperationGetContext(self._inner) };
     }
 
-    pub fn writeBytecode(self: Self, writer: anytype) void {
+    pub fn writeBytecode(self: Self, writer: *std.Io.Writer) void {
         var writer_context = .{ .writer = writer };
         const WriterContext = @TypeOf(writer_context);
 
@@ -897,7 +897,7 @@ pub const Operation = struct {
         );
     }
 
-    pub fn writeBytecodeWithConfig(self: Self, writer: anytype, config: struct {
+    pub fn writeBytecodeWithConfig(self: Self, writer: *std.Io.Writer, config: struct {
         desiredEmitedVersion: ?i64 = null,
     }) !void {
         const cfg = c.mlirBytecodeWriterConfigCreate();
@@ -906,27 +906,14 @@ pub const Operation = struct {
             c.mlirBytecodeWriterConfigDesiredEmitVersion(cfg, v);
         }
 
-        const WriterContext = struct {
-            writer: @TypeOf(writer),
-            write_error: ?@TypeOf(writer).Error = null,
-        };
-        var writer_context: WriterContext = .{ .writer = writer };
-
+        var writer_with_err: WriterWithErr = .{ .writer = writer };
         try successOr(c.mlirOperationWriteBytecodeWithConfig(
             self._inner,
             cfg,
-            (struct {
-                pub fn callback(str: c.MlirStringRef, ctx_: ?*anyopaque) callconv(.c) void {
-                    const inner_writer_context: *WriterContext = @ptrCast(@alignCast(ctx_));
-                    _ = inner_writer_context.writer.write(str.data[0..str.length]) catch |err| {
-                        inner_writer_context.write_error = err;
-                    };
-                }
-            }).callback,
-            &writer_context,
+            &WriterWithErr.printCallback,
+            &writer_with_err,
         ), error.InvalidMlirBytecodeVersion);
-
-        if (writer_context.write_error) |err| return err;
+        return writer_with_err.check();
     }
 
     /// Enable a full dump of the IR.
@@ -939,26 +926,33 @@ pub const Operation = struct {
         op: Operation,
         flags: OpPrintingFlags,
 
-        pub fn format(self: @This(), writer: anytype) !void {
-            self.op.print(writer, self.flags);
+        pub fn format(self: @This(), writer: *std.Io.Writer) !void {
+            try self.op.print(writer, self.flags);
         }
     };
 
-    pub fn print(self: Self, writer: *std.Io.Writer, flags: OpPrintingFlags) void {
+    pub fn print(self: Self, writer: *std.Io.Writer, flags: OpPrintingFlags) !void {
         const pflags = flags.create();
         defer c.mlirOpPrintingFlagsDestroy(pflags);
+
+        var writer_err: WriterWithErr = .{ .writer = writer };
 
         c.mlirOperationPrintWithFlags(
             self._inner,
             pflags,
             (struct {
                 pub fn callback(str: c.MlirStringRef, ctx_: ?*anyopaque) callconv(.c) void {
-                    const _writer: *std.Io.Writer = @ptrCast(@alignCast(ctx_));
-                    _writer.writeAll(str.data[0..str.length]) catch @panic("Mlir print failed");
+                    const _writer_err: *WriterWithErr = @ptrCast(@alignCast(ctx_));
+                    _writer_err.writer.writeAll(str.data[0..str.length]) catch |err| {
+                        _writer_err.err = err;
+                    };
                 }
             }).callback,
-            writer,
+            &writer_err,
         );
+
+        if (writer_err.err) |err| return err;
+        try writer_err.writer.flush();
     }
 
     pub fn verify(self: Self) bool {
@@ -1121,7 +1115,7 @@ pub const Value = struct {
 
     pub const dump = helpers.dump(Value, c.mlirValueDump);
     pub const eql = helpers.eql(Value, c.mlirValueEqual);
-    pub const format = helpers.format(Value, c.mlirValuePrint).format;
+    pub const format = helpers.format(Value, c.mlirValuePrint);
     pub const wrapOr = helpers.wrapOr(Value, c.mlirValueIsNull);
 
     pub fn getType(val: Value) Type {
@@ -1183,7 +1177,7 @@ pub const BlockArgument = struct {
         return @bitCast(c.mlirBlockArgumentGetArgNumber(arg._inner));
     }
 
-    pub fn format(self: BlockArgument, writer: anytype) !void {
+    pub fn format(self: BlockArgument, writer: *std.Io.Writer) !void {
         const value = Value{ ._inner = self._inner };
         return value.format(writer);
     }
@@ -1232,7 +1226,7 @@ pub const Type = struct {
 
     pub fn formatAny(SpecificType: type) fn (SpecificType, SpecificType) type {
         return struct {
-            pub fn format(self: SpecificType, writer: anytype) !void {
+            pub fn format(self: SpecificType, writer: *std.Io.Writer) !void {
                 return try Type.format(self.asType(), writer);
             }
         };
@@ -1280,7 +1274,7 @@ pub const IndexType = struct {
 
     pub const asType = Type.fromAny(IndexType);
     pub const eql = Type.eqlAny(IndexType);
-    pub const format = Type.formatAny(IndexType).format;
+    pub const format = Type.formatAny(IndexType);
 
     pub fn init(ctx: Context) IndexType {
         return .{ ._inner = c.mlirIndexTypeGet(ctx._inner) };
@@ -1452,7 +1446,7 @@ pub fn ComplexType(comptime ct: ComplexTypes) type {
 
         pub const asType = Type.fromAny(Complex);
         pub const eql = Type.eqlAny(Complex);
-        pub const format = Type.formatAny(Complex).format;
+        pub const format = Type.formatAny(Complex);
         pub const ComplexTypeType: ComplexTypes = ct;
 
         pub const init = if (ct != .unknown) struct {
@@ -1736,27 +1730,15 @@ pub const helpers = struct {
         }.isNull;
     }
 
-    pub fn format(Any: type, print_fn: fn (@FieldType(Any, "_inner"), ?*const MlirStrCallback, ?*anyopaque) callconv(.c) void) type {
+    pub fn format(
+        Any: type,
+        print_fn: fn (@FieldType(Any, "_inner"), ?*const MlirStrCallback, ?*anyopaque) callconv(.c) void,
+    ) fn (Any, *std.Io.Writer) std.Io.Writer.Error!void {
         return struct {
-            pub fn format(self: Any, writer: *std.Io.Writer) !void {
-                const WriterWithErr = struct {
-                    writer: *std.Io.Writer,
-                    err: ?std.Io.Writer.Error = null,
-                    fn printCallback(mlir_str: c.MlirStringRef, opaque_ctx: ?*anyopaque) callconv(.c) void {
-                        var ctx: *@This() = @ptrCast(@alignCast(opaque_ctx));
-                        if (ctx.err) |_| return;
-                        _ = ctx.writer.write(mlir_str.data[0..mlir_str.length]) catch |err| {
-                            ctx.err = err;
-                            return;
-                        };
-                    }
-                };
-
-                var context: WriterWithErr = .{ .writer = writer };
-                print_fn(self._inner, &WriterWithErr.printCallback, &context);
-                if (context.err) |err| return err;
+            pub fn format(self: Any, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+                try callPrintFn(Any, self, print_fn, writer);
             }
-        };
+        }.format;
     }
 
     pub fn wrapOr(T: type, is_null_fn: fn (@FieldType(T, "_inner")) callconv(.c) bool) fn (@FieldType(T, "_inner")) ?T {
@@ -1771,5 +1753,34 @@ pub const helpers = struct {
     pub fn init(T: type, inner: @FieldType(T, "_inner"), is_null_fn: fn (@FieldType(T, "_inner")) callconv(.c) bool) ?T {
         if (is_null_fn(inner)) return null;
         return .{ ._inner = inner };
+    }
+};
+
+pub fn callPrintFn(
+    T: type,
+    value: T,
+    print_fn: fn (@FieldType(T, "_inner"), ?*const MlirStrCallback, ?*anyopaque) callconv(.c) void,
+    writer: *std.Io.Writer,
+) std.Io.Writer.Error!void {
+    var writer_with_err: WriterWithErr = .{ .writer = writer };
+    print_fn(value._inner, &WriterWithErr.printCallback, &writer_with_err);
+    return writer_with_err.check();
+}
+
+const WriterWithErr = struct {
+    writer: *std.Io.Writer,
+    err: ?std.Io.Writer.Error = null,
+
+    fn printCallback(mlir_str: c.MlirStringRef, opaque_ctx: ?*anyopaque) callconv(.c) void {
+        var ctx: *WriterWithErr = @ptrCast(@alignCast(opaque_ctx));
+        if (ctx.err) |_| return;
+        _ = ctx.writer.write(mlir_str.data[0..mlir_str.length]) catch |err| {
+            ctx.err = err;
+            return;
+        };
+    }
+
+    fn check(self: WriterWithErr) std.Io.Writer.Error!void {
+        if (self.err) |err| return err;
     }
 };

@@ -52,10 +52,7 @@ pub const Tensor = struct {
         return CompilationContext.current();
     }
 
-    pub fn format(
-        self: Tensor,
-        writer: anytype,
-    ) !void {
+    pub fn format(self: Tensor, writer: *std.Io.Writer) !void {
         // TODO(0.15.0) handle format
         // const bare_fmt = fmt.len == 1 and fmt[0] == '_';
         const bare_fmt = false;
@@ -1521,14 +1518,7 @@ pub const Tensor = struct {
 
         const to_the_end = std.math.maxInt(i64);
 
-        pub fn format(
-            self: Slice,
-            comptime fmt: []const u8,
-            options: std.fmt.FormatOptions,
-            writer: anytype,
-        ) !void {
-            _ = fmt;
-            _ = options;
+        pub fn format(self: Slice, writer: *std.Io.Writer) !void {
             if (self.singleton) {
                 try writer.print("[{}]", .{self.start});
             } else if (self.end == to_the_end and self.step == 1) {
@@ -2582,7 +2572,7 @@ pub const Tensor = struct {
     /// that requires host<->device synchronization.
     /// ZML tries to generate the easiest to optimize IR, and will warn you if it generates known problematic IR.
     pub fn scatterSlices(self: Tensor, indices: anytype, updates: Tensor, opts: ScatterOpts) Tensor {
-        scoped_log.debug("scatterSlices({}, {any}, {})", .{ self, indices, updates });
+        scoped_log.debug("scatterSlices({f}, {any}, {f})", .{ self, indices, updates });
 
         const UpdateType = @TypeOf(ScatterOpts.increment);
 

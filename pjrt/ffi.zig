@@ -265,16 +265,8 @@ pub const Buffer = extern struct {
         return self._dims[0..self.rank];
     }
 
-    pub fn format(
-        buffer: Buffer,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = fmt;
-        _ = options;
-
-        try writer.print("FfiBuffer({d}, .{s})@0x{x}", .{ buffer.dims(), @tagName(buffer.dtype), @intFromPtr(buffer.data) });
+    pub fn format(buffer: Buffer, writer: *std.Io.Writer) !void {
+        try writer.print("FfiBuffer({any}, .{t})@0x{x}", .{ buffer.dims(), buffer.dtype, @intFromPtr(buffer.data) });
     }
 };
 

@@ -95,6 +95,8 @@ pub fn compileFn(
 ) !FnExe(func) {
     var pretty_name = try prettyFnName(func, allocator);
     defer pretty_name.deinit(allocator);
+    log.info("Compiling {s} with {f}", .{ pretty_name.items, stdx.fmt.any(args) });
+
     var context = try CompilationContext.init(allocator, pretty_name.items, platform);
     defer context.deinit();
 
@@ -306,7 +308,7 @@ pub const BaseExe = struct {
         }
     }
 
-    pub fn serialize(self: BaseExe, writer: anytype) !void {
+    pub fn serialize(self: BaseExe, writer: *std.Io.Writer) !void {
         var executable = try self.exe.getExecutable(self.platform.pjrt_api);
         var serialize_result = try executable.serialize(self.platform.pjrt_api);
         defer serialize_result.deinit();
@@ -377,7 +379,7 @@ pub fn Exe(ArgsT: type, ReturnT: type) type {
             try self.inner.bind(T, value);
         }
 
-        pub fn serialize(self: Self, writer: anytype) !void {
+        pub fn serialize(self: Self, writer: *std.Io.Writer) !void {
             return try self.inner.serialize(writer);
         }
 

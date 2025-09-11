@@ -22,6 +22,7 @@ test {
 
 pub const Linear = struct {
     weight: Tensor,
+    // weight_scale_inv: ?Tensor = null,
     bias: ?Tensor = null,
 
     pub fn forward(self: Linear, x: Tensor) Tensor {

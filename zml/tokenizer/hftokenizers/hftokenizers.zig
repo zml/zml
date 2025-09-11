@@ -110,6 +110,7 @@ pub const HFTokenizer = opaque {
     }
 
     pub fn tokenToId(self: *HFTokenizer, token: []const u8) ?u32 {
-        return c.hftokenizers_token_to_id(@ptrCast(self), ffi.ZigSlice.from(token));
+        const id = c.hftokenizers_token_to_id(@ptrCast(self), ffi.ZigSlice.from(token));
+        return if (id == std.math.maxInt(u32)) null else id;
     }
 };

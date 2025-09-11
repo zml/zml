@@ -750,13 +750,13 @@ pub fn custom_call(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCa
     if (@intFromEnum(opts.api_version) < @intFromEnum(CustomCallOpts.ApiVersion.typed_ffi)) {
         stdx.debug.assert(
             backend_config.isA(mlir.StringAttribute),
-            "API version < 4 requires a string as backend_config, got {}",
+            "API version < 4 requires a string as backend_config, got {f}",
             .{backend_config},
         );
     } else {
         stdx.debug.assert(
             backend_config.isA(mlir.DictionaryAttribute),
-            "API version >= 4 requires a dictionary as backend_config, got {}",
+            "API version >= 4 requires a dictionary as backend_config, got {f}",
             .{backend_config},
         );
     }
@@ -1353,7 +1353,7 @@ pub fn getMinimumVersion() []const u8 {
     return state.str;
 }
 
-pub fn serializePortableArtifact(bytecode: []const u8, target_version: []const u8, writer: anytype) !void {
+pub fn serializePortableArtifact(bytecode: []const u8, target_version: []const u8, writer: *std.Io.Writer) !void {
     var context = .{ .writer = writer };
     const WriterContext = @TypeOf(context);
 

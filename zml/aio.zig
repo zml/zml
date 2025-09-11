@@ -315,14 +315,7 @@ pub const Metadata = union(enum) {
         };
     }
 
-    pub fn format(
-        self: Metadata,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = fmt;
-        _ = options;
+    pub fn format(self: Metadata, writer: *std.Io.Writer) !void {
         switch (self) {
             .null => _ = try writer.write("null"),
             inline .bool, .array_bool => |b| try writer.print("{any}", .{b}),
