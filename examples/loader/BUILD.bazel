@@ -14,5 +14,5 @@ zig_binary(
 zig_test(
     name = "test",
     test_runner = "//zml:test_runner",
-    deps = [":test"],
+    deps = [":loader"],
 )

@@ -412,10 +412,23 @@ const MemoryWriter = struct {
 
     fn drain(w: *std.io.Writer, data: []const []const u8, splat: usize) std.io.Writer.Error!usize {
         const self = @as(*MemoryWriter, @alignCast(@fieldParentPtr("interface", w)));
-        std.debug.assert(data.len == 1 and splat == 1); // todo: implement fanout
-        const chunk = data[0];
+        var total_bytes_drained: usize = 0;
+        for (data[0..data.len -| 1]) |chunk| {
+            try self.transferChunk(chunk);
+            total_bytes_drained += chunk.len;
+        }
+        if (data.len > 0) {
+            const last_chunk = data[data.len - 1];
+            for (0..splat) |_| {
+                try self.transferChunk(last_chunk);
+            }
+            total_bytes_drained += last_chunk.len * splat;
+        }
+        return total_bytes_drained;
+    }
 
-        if (chunk.len == 0) return 0;
+    fn transferChunk(self: *MemoryWriter, chunk: []const u8) !void {
+        if (chunk.len == 0) return;
 
         std.debug.assert(self.bytes_written + chunk.len <= self.tensor_byte_size);
 
@@ -423,19 +436,23 @@ const MemoryWriter = struct {
 
         log.info("Transferring data for tensor {s} (buffer index {d}): chunk_size={d}, offset={d}, total_tensor_size={d}, is_last={}", .{ self.tensor_name, self.buffer_index, chunk.len, self.bytes_written, self.tensor_byte_size, is_last });
 
-        const event = self.transfer_manager.transferData(self.api, self.buffer_index, chunk, @intCast(self.bytes_written), is_last) catch |err| {
+        const event = self.transfer_manager.transferData(
+            self.api,
+            self.buffer_index,
+            chunk,
+            @intCast(self.bytes_written),
+            is_last,
+        ) catch |err| {
             log.err("[{s}] PJRT transferData failed for buffer index {d}: {any}", .{ self.tensor_name, self.buffer_index, err });
             return error.WriteFailed;
         };
 
         event.awaitBlocking(self.api) catch |err| {
-            log.err("PJRT event await failed for buffer index {d}: {any}", .{ self.buffer_index, err });
+            log.err("[{s}] PJRT event await failed for buffer index {d}: {any}", .{ self.tensor_name, self.buffer_index, err });
             return error.WriteFailed;
         };
 
         self.bytes_written += chunk.len;
-
-        return chunk.len;
     }
 
     fn flush(w: *std.io.Writer) !void {
@@ -444,25 +461,207 @@ const MemoryWriter = struct {
         if (self.tensor_byte_size == 0) {
             std.debug.assert(self.bytes_written == 0);
             const event = self.transfer_manager.transferData(self.api, self.buffer_index, &[_]u8{}, 0, true) catch |err| {
-                log.err("PJRT final transferData for zero-byte tensor failed (index {d}): {any}", .{ self.buffer_index, err });
+                log.err("[{s}] PJRT final transferData for zero-byte tensor failed (index {d}): {any}", .{ self.tensor_name, self.buffer_index, err });
                 return error.WriteFailed;
             };
             event.awaitBlocking(self.api) catch |err| {
-                log.err("PJRT final event await for zero-byte tensor failed (index {d}): {any}", .{ self.buffer_index, err });
+                log.err("[{s}] PJRT final event await for zero-byte tensor failed (index {d}): {any}", .{ self.tensor_name, self.buffer_index, err });
                 return error.WriteFailed;
             };
-        } else {
-            if (self.bytes_written != self.tensor_byte_size) {
-                log.err(
-                    "[{s}] flush called but stream was incomplete. Wrote {d} of {d} bytes.",
-                    .{ self.tensor_name, self.bytes_written, self.tensor_byte_size },
-                );
-                return error.WriteFailed;
-            }
+            return;
+        }
+
+        if (self.bytes_written != self.tensor_byte_size) {
+            log.err(
+                "[{s}] flush called but stream was incomplete. Wrote {d} of {d} bytes.",
+                .{ self.tensor_name, self.bytes_written, self.tensor_byte_size },
+            );
+            return error.WriteFailed;
         }
     }
 
     const vtable: std.io.Writer.VTable = .{ .drain = drain, .flush = flush };
+};
+
+test MemoryWriter {
+    const platform = zml.testing.env();
+    const allocator = std.testing.allocator;
+    const device = platform.getDevices()[0];
+    const memory = (try device.addressableMemories(platform.pjrt_api))[0];
+
+    var tensors: std.StringHashMap(Tensor) = .init(allocator);
+    defer tensors.deinit();
+
+    var tensor_name_to_index: std.StringHashMap(usize) = .init(allocator);
+    defer tensor_name_to_index.deinit();
+
+    try tensors.put("test", .{ .name = "test", .shape = Shape.init(.{ 4, 8 }, .f32), .offset = 0, .source_name = "chunk0" });
+
+    var shape_specs_list = try std.ArrayList(pjrt.ShapeSpec).initCapacity(allocator, tensors.count());
+    defer shape_specs_list.deinit(allocator);
+
+    var it = tensors.iterator();
+    var index: usize = 0;
+
+    while (it.next()) |entry| : (index += 1) {
+        const tensor = entry.value_ptr.*;
+        const tensor_byte_size = tensor.shape.byteSize();
+        log.info("Planning tensor: {s}, byte_size: {d}, dims: {any}", .{ tensor.name, tensor_byte_size, tensor.shape.dims() });
+
+        shape_specs_list.appendAssumeCapacity(.init(tensor.shape.dims(), bufferTypeFromDtype(tensor.shape.dtype())));
+        try tensor_name_to_index.put(tensor.name, index);
+    }
+
+    const transfer_manager = try platform.pjrt_client.createBuffersForAsyncHostToDevice(platform.pjrt_api, .{
+        .shape_specs = shape_specs_list.items,
+        .memory = memory,
+    });
+
+    const tensor = tensors.get("test").?;
+
+    var writer: MemoryWriter = .init(
+        platform.pjrt_api,
+        transfer_manager,
+        0,
+        tensor.shape.byteSize(),
+        tensor.name,
+    );
+
+    const data: []u8 = try allocator.alloc(u8, tensor.shape.byteSize());
+    defer allocator.free(data);
+
+    @memset(data, 1);
+
+    try writer.interface.writeAll(data);
+    try writer.interface.flush();
+
+    try std.testing.expectEqual(tensor.shape.byteSize(), writer.bytes_written);
+
+    const device_buffer = try transfer_manager.retrieveBuffer(platform.pjrt_api, 0);
+    defer device_buffer.deinit(platform.pjrt_api);
+
+    try std.testing.expectEqual(tensor.shape.byteSize(), try device_buffer.getOnDeviceSizeInBytes(platform.pjrt_api));
+    try std.testing.expectEqualSlices(i64, tensor.shape.dims(), device_buffer.getDimensions(platform.pjrt_api));
+
+    const host_data_verify: []u8 = try allocator.alloc(u8, tensor.shape.byteSize());
+    defer allocator.free(host_data_verify);
+
+    const to_host_event = try device_buffer.toHostBuffer(platform.pjrt_api, host_data_verify);
+    if (to_host_event) |event| {
+        try event.awaitBlocking(platform.pjrt_api);
+    }
+
+    try std.testing.expectEqualSlices(u8, data, host_data_verify);
+
+    var host_buffer: [64]u8 = undefined;
+    var reader = try MemoryReader.init(platform.pjrt_api, device_buffer, &host_buffer);
+
+    var allocating_writer = std.io.Writer.Allocating.init(allocator);
+    defer allocating_writer.deinit();
+
+    _ = try reader.interface.streamRemaining(&allocating_writer.writer);
+
+    const read_data = allocating_writer.written();
+
+    try std.testing.expectEqual(tensor.shape.byteSize(), read_data.len);
+    try std.testing.expectEqualSlices(u8, host_data_verify, read_data);
+}
+
+const MemoryReader = struct {
+    api: *const pjrt.Api,
+    device_buffer: *const pjrtx.Buffer,
+
+    bytes_read: u64,
+    total_size: u64,
+
+    interface: std.io.Reader,
+
+    pub fn init(
+        api: *const pjrt.Api,
+        device_buffer: *const pjrtx.Buffer,
+        host_buffer: []u8,
+    ) !MemoryReader {
+        const total_size = try device_buffer.getOnDeviceSizeInBytes(api);
+        return .{
+            .api = api,
+            .device_buffer = device_buffer,
+            .bytes_read = 0,
+            .total_size = total_size,
+            .interface = .{
+                .vtable = &vtable,
+                .buffer = host_buffer,
+                .seek = 0,
+                .end = 0,
+            },
+        };
+    }
+
+    fn fillBuffer(self: *MemoryReader) std.io.Reader.Error!void {
+        const r = &self.interface;
+
+        const unread_len = r.end - r.seek;
+
+        if (unread_len > 0 and r.seek > 0) {
+            @memmove(r.buffer[0..unread_len], r.buffer[r.seek..r.end]);
+        }
+
+        r.seek = 0;
+        r.end = unread_len;
+
+        if (self.bytes_read >= self.total_size) return;
+
+        const remaining_on_device = self.total_size - self.bytes_read;
+        const free_space_in_buffer = r.buffer.len - r.end;
+        const bytes_to_fetch: usize = @min(remaining_on_device, free_space_in_buffer);
+
+        if (bytes_to_fetch == 0) return;
+
+        const dest_slice = r.buffer[r.end .. r.end + bytes_to_fetch];
+
+        const event = self.device_buffer.inner().copyRawToHost(self.api, dest_slice, @intCast(self.bytes_read)) catch |err| {
+            log.err("PJRT copyRawToHost failed: {any}", .{err});
+            return error.ReadFailed;
+        };
+
+        if (event) |e| {
+            const event_x: *pjrtx.Event = @ptrCast(e);
+            event_x.awaitBlocking(self.api) catch |err| {
+                log.err("PJRT event await failed on copyRawToHost: {any}", .{err});
+                return error.ReadFailed;
+            };
+        }
+
+        self.bytes_read += bytes_to_fetch;
+        r.end += @intCast(bytes_to_fetch);
+    }
+
+    fn stream(r: *std.io.Reader, w: *std.io.Writer, limit: std.io.Limit) std.io.Reader.StreamError!usize {
+        const self = @as(*MemoryReader, @alignCast(@fieldParentPtr("interface", r)));
+
+        const buffered_data = limit.slice(r.buffered());
+        if (buffered_data.len > 0) {
+            const written = try w.write(buffered_data);
+            r.toss(written);
+            return written;
+        }
+
+        if (self.bytes_read >= self.total_size) {
+            return error.EndOfStream;
+        }
+
+        try self.fillBuffer();
+
+        const newly_buffered = limit.slice(r.buffered());
+        if (newly_buffered.len == 0) {
+            return error.EndOfStream;
+        }
+
+        const written = try w.write(newly_buffered);
+        r.toss(written);
+        return written;
+    }
+
+    const vtable: std.io.Reader.VTable = .{ .stream = stream };
 };
 
 // Sinks
