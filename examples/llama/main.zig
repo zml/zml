@@ -42,22 +42,46 @@ pub fn tokenizePrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tok
         return try allocator.dupe(u32, try encoder.encode(prompt));
     }
 
-    const start_header = tokenizer.tokenToId("<|start_header_id|>") orelse return error.NoSuchToken;
-    const end_header = tokenizer.tokenToId("<|end_header_id|>") orelse return error.NoSuchToken;
-    const user = tokenizer.tokenToId("user") orelse return error.NoSuchToken;
-    const assistant = tokenizer.tokenToId("assistant") orelse return error.NoSuchToken;
-    const eot = tokenizer.tokenToId("<|eot_id|>") orelse return error.NoSuchToken;
-    const newline = (try encoder.encode("\n"))[0];
-
     var tokens: std.ArrayList(u32) = try .initCapacity(allocator, prompt.len);
-    try tokens.appendSlice(allocator, &.{ config.bos_token_id, start_header, user, end_header, newline });
+    if (tokenizer.tokenToId("<|start_header_id|>") != null and tokenizer.tokenToId("<|end_header_id|>") != null) {
+        // Llama chat template
+        const start_header = tokenizer.tokenToId("<|start_header_id|>").?;
+        const end_header = tokenizer.tokenToId("<|end_header_id|>").?;
+        const user = tokenizer.tokenToId("user").?;
+        const assistant = tokenizer.tokenToId("assistant").?;
+        const eot = tokenizer.tokenToId("<|eot_id|>").?;
+        const newline = tokenizer.tokenToId("\n").?;
 
-    try tokens.appendSlice(allocator, try encoder.encode(prompt));
-    try tokens.appendSlice(allocator, &.{ eot, newline });
+        try tokens.appendSlice(allocator, &.{ config.bos_token_id, start_header, user, end_header, newline });
 
-    try tokens.appendSlice(allocator, &.{ start_header, assistant, end_header, newline });
+        try tokens.appendSlice(allocator, try encoder.encode(prompt));
+        try tokens.appendSlice(allocator, &.{ eot, newline });
 
-    return tokens.toOwnedSlice(allocator);
+        try tokens.appendSlice(allocator, &.{ start_header, assistant, end_header, newline });
+
+        return tokens.toOwnedSlice(allocator);
+    }
+
+    if (tokenizer.tokenToId("<|im_start|>") != null and tokenizer.tokenToId("<|im_end|>") != null) {
+        // Qwen3 chat template
+        const start_message = tokenizer.tokenToId("<|im_start|>").?;
+        const end_message = tokenizer.tokenToId("<|im_end|>").?;
+        const user = tokenizer.tokenToId("user").?;
+        const assistant = tokenizer.tokenToId("assistant").?;
+        const newline = tokenizer.tokenToId("\n").?;
+
+        try tokens.appendSlice(allocator, &.{ start_message, user, newline });
+
+        try tokens.appendSlice(allocator, try encoder.encode(prompt));
+        try tokens.appendSlice(allocator, &.{ end_message, newline });
+
+        try tokens.appendSlice(allocator, &.{ start_message, assistant, newline });
+
+        return tokens.toOwnedSlice(allocator);
+    }
+
+    log.err("Tokenizer not recognized", .{});
+    return error.NotSupported;
 }
 
 pub fn generateText(
@@ -264,7 +288,7 @@ pub fn asyncMain() !void {
     const gen_tokens_shape = zml.Shape.init(.{ .s = 1 }, .u32);
     const token_idx_shape = zml.Shape.init(.{}, .u32);
 
-    const dtype = llama_tensors.model.embed_tokens.weight.dtype();
+    const dtype = llama_tensors.model.layers[0].self_attn.q_proj.weight.dtype();
     const kv_shape = zml.Shape.init(.{
         .layer = llama_tensors.model.layers.len,
         .k = seq_len,
