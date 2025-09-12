@@ -68,7 +68,7 @@ pub fn tokenizePrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tok
         const end_message = tokenizer.tokenToId("<|im_end|>").?;
         const user = tokenizer.tokenToId("user").?;
         const assistant = tokenizer.tokenToId("assistant").?;
-        const newline = tokenizer.tokenToId("\n").?;
+        const newline = tokenizer.tokenToId("\\n").?;
 
         try tokens.appendSlice(allocator, &.{ start_message, user, newline });
 
