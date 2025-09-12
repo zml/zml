@@ -504,6 +504,83 @@ const MemoryWriter = struct {
     const vtable: std.io.Writer.VTable = .{ .drain = drain, .flush = flush };
 };
 
+const VerifyingWriter = struct {
+    expected_data: []const u8,
+    bytes_verified: u64 = 0,
+    interface: std.io.Writer,
+
+    pub fn init(expected: []const u8, buffer: []u8) VerifyingWriter {
+        return .{
+            .expected_data = expected,
+            .interface = .{ .vtable = &vtable, .buffer = buffer, .end = 0 },
+        };
+    }
+
+    fn verifyChunk(self: *VerifyingWriter, chunk: []const u8) !void {
+        if (chunk.len == 0) return;
+
+        const current_offset = self.bytes_verified;
+        const next_offset = current_offset + chunk.len;
+
+        if (next_offset > self.expected_data.len) {
+            log.err(
+                "Verification failed: received more data than expected. Expected total {d}, but received at least {d}",
+                .{ self.expected_data.len, next_offset },
+            );
+            return error.WriteFailed;
+        }
+
+        const expected_chunk = self.expected_data[current_offset..next_offset];
+        if (!std.mem.eql(u8, expected_chunk, chunk)) {
+            log.err("Verification failed: data mismatch at offset {d} for chunk of size {d}", .{ current_offset, chunk.len });
+            return error.WriteFailed;
+        }
+        self.bytes_verified = next_offset;
+    }
+
+    fn drain(w: *std.io.Writer, data: []const []const u8, splat: usize) std.io.Writer.Error!usize {
+        const self = @as(*VerifyingWriter, @alignCast(@fieldParentPtr("interface", w)));
+
+        try self.verifyChunk(w.buffered());
+        w.end = 0;
+
+        var bytes_from_data: usize = 0;
+        for (data[0..data.len -| 1]) |chunk| {
+            try self.verifyChunk(chunk);
+            bytes_from_data += chunk.len;
+        }
+
+        if (data.len > 0) {
+            const last_chunk = data[data.len - 1];
+            for (0..splat) |_| {
+                try self.verifyChunk(last_chunk);
+            }
+            bytes_from_data += last_chunk.len * splat;
+        }
+
+        return bytes_from_data;
+    }
+
+    fn flush(w: *std.io.Writer) !void {
+        const self = @as(*VerifyingWriter, @alignCast(@fieldParentPtr("interface", w)));
+        try self.verifyChunk(w.buffered());
+        w.end = 0;
+
+        if (self.bytes_verified != self.expected_data.len) {
+            log.err("Verification failed: incomplete data. Expected {d} bytes, but received {d}", .{
+                self.expected_data.len,
+                self.bytes_verified,
+            });
+            return error.WriteFailed;
+        }
+    }
+
+    const vtable: std.io.Writer.VTable = .{
+        .drain = drain,
+        .flush = flush,
+    };
+};
+
 test "IoManager Integration" {
     const platform = zml.testing.env();
     const heap_allocator = std.testing.allocator;
@@ -545,47 +622,62 @@ test "IoManager Integration" {
     var io_manager = try IoManager.init(stack_allocator, platform, memory, &tensors);
     defer io_manager.deinit();
 
-    std.debug.print("--- Queueing writes for tensors ---\n", .{});
+    std.debug.print("--- Writing tensors... ---\n", .{});
+
     var pump_buffer: [BUF_8_KB]u8 = undefined;
 
     for (tensors) |tensor| {
-        // todo: limited buffer or something like that
         var reader: std.io.Reader = .fixed(blob[tensor.offset .. tensor.offset + tensor.shape.byteSize()]);
         var writer = io_manager.writer(tensor);
-
-        // todo: streamRemaining or something like that
-        _ = try io.copy(&reader, &writer.interface, &pump_buffer);
-        try writer.interface.flush();
-    }
-    std.debug.print("--- All writes queued and finalized ---\n", .{});
-
-    std.debug.print("--- Reading and verifying tensors ---\n", .{});
-
-    var host_buffer: [BUF_16_KB]u8 = undefined;
-    var verification_buffer: [BUF_8_KB]u8 = undefined;
-
-    for (tensors) |tensor| {
-        const original_data = blob[tensor.offset .. tensor.offset + tensor.shape.byteSize()];
-
-        var reader = try io_manager.reader(tensor, &host_buffer);
-        var bytes_verified: u64 = 0;
+        var total_bytes_copied: u64 = 0;
 
         while (true) {
-            const bytes_read = reader.interface.readSliceShort(&verification_buffer) catch |err| {
+            const bytes_read = reader.readSliceShort(&pump_buffer) catch |err| {
                 if (err == error.EndOfStream) break;
                 return err;
             };
 
             if (bytes_read == 0) break;
 
-            const retrieved_chunk = verification_buffer[0..bytes_read];
-            const original_chunk = original_data[bytes_verified .. bytes_verified + bytes_read];
-            try std.testing.expectEqualSlices(u8, original_chunk, retrieved_chunk);
+            try writer.interface.writeAll(pump_buffer[0..bytes_read]);
 
-            bytes_verified += bytes_read;
+            total_bytes_copied += bytes_read;
         }
 
-        try std.testing.expectEqual(@as(u64, original_data.len), bytes_verified);
+        try std.testing.expectEqual(tensor.shape.byteSize(), total_bytes_copied);
+        try writer.interface.flush();
+    }
+
+    std.debug.print("--- Reading and verifying tensors... ---\n", .{});
+
+    var reader_buffer: [BUF_16_KB]u8 = undefined;
+    var verification_buffer: [BUF_8_KB]u8 = undefined;
+
+    for (tensors) |tensor| {
+        const original_data = blob[tensor.offset .. tensor.offset + tensor.shape.byteSize()];
+
+        var reader = try io_manager.reader(tensor, &reader_buffer);
+        var bytes_verified: u64 = 0;
+
+        while (bytes_verified < original_data.len) {
+            const bytes_to_read = @min(verification_buffer.len, original_data.len - bytes_verified);
+            const chunk_to_verify = verification_buffer[0..bytes_to_read];
+
+            try reader.interface.readSliceAll(chunk_to_verify);
+
+            const original_chunk = original_data[bytes_verified .. bytes_verified + chunk_to_verify.len];
+            try std.testing.expectEqualSlices(u8, original_chunk, chunk_to_verify);
+
+            bytes_verified += chunk_to_verify.len;
+        }
+
+        const final_read = reader.interface.readSliceShort(&verification_buffer) catch |err| {
+            try std.testing.expect(err == error.EndOfStream);
+            break;
+        };
+
+        try std.testing.expectEqual(0, final_read);
+        try std.testing.expectEqual(original_data.len, bytes_verified);
         std.debug.print("Verification successful for tensor '{s}'\n", .{tensor.name});
     }
 }
