@@ -938,7 +938,17 @@ pub fn asyncMain() !void {
     log.info("--- Planning transfers ---", .{});
 
     const device = platform.getDevices()[0];
-    const memory = (try device.addressableMemories(platform.pjrt_api))[0];
+    const memories = try device.addressableMemories(platform.pjrt_api);
+    var memory = memories[0];
+
+    if (platform.target == .cuda) {
+        for (memories) |mem| {
+            if (mem.kind(platform.pjrt_api) == .device) {
+                memory = mem;
+                break;
+            }
+        }
+    }
 
     var io_manager = try IoManager.init(
         allocator,
