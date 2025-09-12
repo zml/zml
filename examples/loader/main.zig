@@ -5,7 +5,7 @@ const stdx = @import("stdx");
 const zml = @import("zml");
 
 pub const std_options: std.Options = .{
-    .log_level = .info,
+    .log_level = .warn,
     .logFn = asynk.logFn(std.log.defaultLog),
 };
 
@@ -443,8 +443,7 @@ const MemoryWriter = struct {
         // Data transfers are never the last transfer. `flush` is.
         const is_last = false;
 
-        // todo : revert to log.debug
-        std.debug.print("Queueing data for '{s}' {d} (bytes) : offset={d} index={d}, chunk_size={d}, bytes_written={d}, is_last={}\n", .{
+        log.debug("Queueing data for '{s}' {d} (bytes) : offset={d} index={d}, chunk_size={d}, bytes_written={d}, is_last={}\n", .{
             self.tensor.name,
             self.tensor.shape.byteSize(),
             self.tensor.offset,
@@ -481,8 +480,7 @@ const MemoryWriter = struct {
             return error.WriteFailed;
         }
 
-        // todo : revert to log.debug
-        std.debug.print("Queueing finalization for '{s}' {d} (bytes) : index={d}, chunk_size={d}, bytes_written={d}, is_last={}\n", .{
+        log.debug("Queueing finalization for '{s}' {d} (bytes) : index={d}, chunk_size={d}, bytes_written={d}, is_last={}\n", .{
             self.tensor.name,
             self.tensor.shape.byteSize(),
             self.buffer_index,
@@ -965,11 +963,13 @@ pub fn asyncMain() !void {
     var arena_buffer: [BUF_64_KB]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&arena_buffer);
 
-    var pump_buffer: [BUF_32_KB]u8 = undefined;
+    var pump_buffer: [2 * 1024 * 1024]u8 = undefined;
 
     var digest: [32]u8 = undefined;
 
     var tensor_it = registry.tensors.iterator();
+
+    var timer = try std.time.Timer.start();
 
     while (tensor_it.next()) |entry| {
         fba.reset();
@@ -1018,7 +1018,8 @@ pub fn asyncMain() !void {
         log.info("--- Finished tensor: {s} ({d} bytes) ---", .{ tensor.name, total_bytes_copied });
     }
 
-    log.info("--- All tensors processed successfully. ---", .{});
+    const elapsed = timer.read();
+    log.warn("--- All tensors processed successfully in {d} ms ---", .{elapsed / std.time.ns_per_ms});
 }
 
 // all code below is unmodified (or slightly) / imported strucs / funcs from zml
