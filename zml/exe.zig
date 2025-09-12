@@ -395,6 +395,10 @@ pub fn Exe(ArgsT: type, ReturnT: type) type {
             self.inner._unsafeAssignResults(Bufferized(ReturnT), &result);
             return result;
         }
+
+        pub fn clone(self: Self, allocator: std.mem.Allocator) !Self {
+            return .{ .inner = try self.inner.clone(allocator) };
+        }
     };
 }
 

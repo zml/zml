@@ -8,6 +8,7 @@ const HostBuffer = @import("hostbuffer.zig").HostBuffer;
 const pjrt = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
+const Target = @import("platform.zig").Target;
 
 test {
     std.testing.refAllDecls(@This());
@@ -42,6 +43,7 @@ pub const Buffer = struct {
 
     _shape: Shape,
     _api: *const pjrt.Api,
+    _target: Target,
     _shards: Shards,
 
     pub const MAX_NUM_SHARDS: u8 = Platform.MAX_NUM_DEVICES;
@@ -56,6 +58,7 @@ pub const Buffer = struct {
     pub fn from(platform: Platform, host_buffer: HostBuffer, opts: FromOptions) !Buffer {
         var res: Buffer = .{
             ._api = platform.pjrt_api,
+            ._target = platform.target,
             ._shape = host_buffer.shape(),
             ._shards = .{},
         };
@@ -89,20 +92,10 @@ pub const Buffer = struct {
                 .byte_strides = byte_strides,
                 .host_buffer_semantics = .ImmutableUntilTransferCompletes,
             };
-            if (platform.target == .cpu or opts.memory == null) {
+            if (opts.memory == null) {
                 args.device = devices[i];
             } else {
-                const memory = opts.memory.?;
-                const device_memories = try devices[i].addressableMemories(platform.pjrt_api);
-                // TODO measure the cost of this and consider caching on Zig side inside the platform.
-                const selected_memory = for (device_memories) |m| {
-                    const kind = m.kind(platform.pjrt_api);
-                    if (kind == memory.toPjrtMemory()) break m;
-                } else {
-                    log.warn("Platform {s} doesn't have memory {s}", .{ @tagName(platform.target), @tagName(memory) });
-                    return error.NotFound;
-                };
-                args.memory = selected_memory;
+                args.memory = platform.memoryForDevice(opts.memory.?.toPjrtMemory(), devices[i]);
             }
 
             const pjrt_buffer, const event = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, args);
@@ -139,6 +132,7 @@ pub const Buffer = struct {
         shards.appendSliceAssumeCapacity(pjrt_buffers);
         return .{
             ._api = platform.pjrt_api,
+            ._target = platform.target,
             ._shape = shape_,
             ._shards = shards,
         };
@@ -186,8 +180,10 @@ pub const Buffer = struct {
 
     pub fn asHostBuffer(self: Buffer) HostBuffer {
         // TODO: skip this check on cpu
-        // const memory = self.getMemory().kind(self._api);
-        // stdx.debug.assert((memory == .pinned_host) or (memory == .unpinned_host), "asHostBuffer({f}) expects a buffer allocated on host memory, got {t}. see `copyToMemory`", .{ self, memory });
+        // if (self._target != .cpu) {
+        //     const memory = self.getMemory().kind(self._api);
+        //     stdx.debug.assert((memory == .pinned_host) or (memory == .unpinned_host), "asHostBuffer({f}) expects a buffer allocated on host memory, got {t}. see `copyToMemory`", .{ self, memory });
+        // }
         const ptr: [*]u8 = @ptrCast(self._shards.get(0).getOpaqueDeviceMemoryDataPointer(self._api) catch unreachable);
         return HostBuffer.fromBytes(self._shape, ptr[0..self._shape.byteSize()]);
     }
@@ -200,7 +196,7 @@ pub const Buffer = struct {
     }
 
     /// Creates a Buffer with a single element repeated manytime.
-    pub fn constant(platform: Platform, shape_: Shape, val: anytype) !Buffer {
+    pub fn constant(platform: Platform, shape_: Shape, val: anytype, opts: FromOptions) !Buffer {
         var start = try std.time.Timer.start();
         defer {
             const duration_ms = stdx.math.divFloat(f32, start.read(), std.time.ns_per_ms);
@@ -245,14 +241,15 @@ pub const Buffer = struct {
             else => unreachable,
         }
         const host_buffer: HostBuffer = .{ ._shape = shape_, ._strides = strides, ._data = &bytes };
-        return try from(platform, host_buffer, .{ .wait = true });
+        std.debug.assert(opts.wait == true);
+        return try from(platform, host_buffer, opts);
     }
 
     test constant {
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
 
-        const x = try constant(platform, Shape.init(.{ 4, 3, 2 }, .u16), 42);
+        const x = try constant(platform, Shape.init(.{ 4, 3, 2 }, .u16), 42, .{ .wait = true });
         const y = try x.getValue([4 * 3 * 2]u16);
         try std.testing.expectEqual([_]u16{42} ** (4 * 3 * 2), y);
     }
@@ -299,15 +296,16 @@ pub const Buffer = struct {
         shards.appendAssumeCapacity(pjrt_buffer);
         return .{
             ._api = platform.pjrt_api,
+            ._target = platform.target,
             ._shape = shape_,
             ._shards = shards,
         };
     }
 
-    pub fn opaqueDeviceMemoryDataPointer(self: Buffer) [*]u8 {
+    pub fn devicePtr(self: Buffer) u64 {
         stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer", .{});
         const opaque_ptr: *anyopaque = self._shards.get(0).getOpaqueDeviceMemoryDataPointer(self._api) catch unreachable;
-        return @ptrCast(opaque_ptr);
+        return @intFromPtr(opaque_ptr);
     }
 
     /// Fetches the content of the given buffer into a stack variable of the given type.
@@ -385,7 +383,7 @@ pub const Buffer = struct {
     }
 
     pub fn format(self: Buffer, writer: *std.Io.Writer) !void {
-        try writer.print("Buffer({f})", .{self._shape});
+        try writer.print("Buffer({f})@{x}", .{ self._shape, self.devicePtr() });
     }
 
     pub fn getMemory(self: Buffer) *const pjrt.Memory {
@@ -423,7 +421,7 @@ pub const Buffer = struct {
             }
         }
 
-        return Buffer{ ._shape = self._shape, ._shards = new_shards, ._api = self._api };
+        return Buffer{ ._api = self._api, ._target = platform.target, ._shape = self._shape, ._shards = new_shards };
     }
 
     pub const UnitializedOptions = struct {
@@ -435,6 +433,7 @@ pub const Buffer = struct {
             ._api = platform.pjrt_api,
             ._shape = shape_,
             ._shards = .{},
+            ._target = platform.target,
         };
         errdefer for (res._shards.slice()) |shard| {
             shard.deinit(platform.pjrt_api);
@@ -473,18 +472,13 @@ pub const Buffer = struct {
                     },
                 },
             };
-            if (opts.memory) |memory_kind| {
-                const memories = try devices[i].addressableMemories(platform.pjrt_api);
-                const memory = for (memories) |m| {
-                    const kind = m.kind(platform.pjrt_api);
-                    if (kind == memory_kind) break m;
-                } else return error.NotFound;
-                args.memory = memory;
-            } else {
+            if (opts.memory == null) {
                 args.device = devices[i];
+            } else {
+                args.memory = platform.memoryForDevice(opts.memory.?, devices[i]);
             }
-            const pjrt_buffer = try platform.pjrt_client.createUnitializedBuffer(platform.pjrt_api, args);
 
+            const pjrt_buffer = try platform.pjrt_client.createUnitializedBuffer(platform.pjrt_api, args);
             res._shards.appendAssumeCapacity(pjrt_buffer);
         }
 
@@ -516,4 +510,16 @@ test bufferTypeFromDtype {
         if (dt == .invalid) continue;
         try std.testing.expectEqual(dt, bufferTypeFromDtype(dtypeFromBufferType(dt)));
     }
+}
+
+const _MINOR_TO_MAJOR = blk: {
+    var ret: [Shape.MAX_RANK]usize = undefined;
+    for (0..Shape.MAX_RANK) |i| {
+        ret[i] = @intCast(Shape.MAX_RANK - i - 1);
+    }
+    break :blk ret;
+};
+
+fn minorToMajor(rank: u8) []const usize {
+    return _MINOR_TO_MAJOR[_MINOR_TO_MAJOR.len - rank ..];
 }
