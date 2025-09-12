@@ -311,6 +311,11 @@ pub const Tensor = struct {
         return _result(res_shape, op.result(0));
     }
 
+    /// Returns the given tensor as one contiguous buffer of bytes.
+    pub fn bytes(self: Tensor) Tensor {
+        return self.bitCast(.u8).flattenAll().withTags(.{.bytes});
+    }
+
     /// Returns a Tensor containing the element-wise number of leading 0 bits in the input Tensor.
     pub fn countLeadingZeros(self: Tensor) Tensor {
         const loc = self.getContext().mlirCtx().location(@src());
