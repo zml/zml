@@ -1039,6 +1039,7 @@ test Gpt2TextDecoder {
     try testing.expectEqualStrings(" UINavigationController", try decoder.decode(&out, "ĠUINavigationController"));
     // Russian is wild
     try testing.expectEqualStrings(" работ", try decoder.decode(&out, "ĠÑĢÐ°Ð±Ð¾ÑĤ"));
+    try testing.expectEqualStrings("\n", try decoder.decode(&out, "Ċ"));
 }
 
 /// Open a json file in HF format and load the vocab from it.
