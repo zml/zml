@@ -1257,10 +1257,7 @@ pub const NamedValue = extern struct {
         }) };
     }
 
-    pub fn format(
-        self: NamedValue,
-        writer: *std.Io.Writer,
-    ) !void {
+    pub fn format(self: NamedValue, writer: *std.Io.Writer) !void {
         try writer.print("{s}{{ .name = {s},", .{ @typeName(NamedValue), self.inner.name[0..self.inner.name_size] });
         const u = self.inner.unnamed_0;
         switch (self.kind()) {

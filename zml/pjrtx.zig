@@ -97,7 +97,10 @@ pub const Client = opaque {
 
         dialects.stablehlo.serializePortableArtifact(bytecode.written(), stablehlo_version, &serialized_buffer.writer) catch |err| {
             log.err("failed to serialize to portable artifact: {}", .{err});
-            return err;
+            return switch (err) {
+                std.Io.Writer.Error.WriteFailed => error.OutOfMemory,
+                else => |e| e,
+            };
         };
 
         return @ptrCast(try self.inner().compile(api, .{

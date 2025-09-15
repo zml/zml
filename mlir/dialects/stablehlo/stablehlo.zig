@@ -1285,20 +1285,21 @@ pub fn stablehloVersionFromCompatibilityRequirement(requirement: c.MlirStablehlo
 }
 
 pub fn stablehloGetSmallerVersion(version1: []const u8, version2: []const u8) []const u8 {
-    var buf: [32]u8 = undefined;
+    const Cmp = struct {
+        v1: []const u8,
+        v1_is_smaller: bool = undefined,
 
-    var stream = std.io.fixedBufferStream(&buf);
-    var context = .{ .writer = stream.writer() };
-    const WriterContext = @TypeOf(context);
-
-    _ = c.stablehloGetSmallerVersion(mlir.stringRef(version1), mlir.stringRef(version2), (struct {
-        pub fn callback(mlir_str: c.MlirStringRef, userdata: ?*anyopaque) callconv(.c) void {
-            const inner_ctx: *WriterContext = @ptrCast(@alignCast(userdata));
-            _ = inner_ctx.writer.write(mlir.fromStringRef(mlir_str)) catch unreachable;
+        pub fn smallerCb(smaller_version: c.MlirStringRef, opaque_cmp: ?*anyopaque) callconv(.c) void {
+            var cmp: *@This() = @ptrCast(@alignCast(opaque_cmp));
+            cmp.v1_is_smaller = std.mem.eql(u8, cmp.v1, smaller_version.data[0..smaller_version.length]);
         }
-    }).callback, &context);
+    };
 
-    return if (std.mem.eql(u8, buf[0..stream.pos], version1)) version1 else version2;
+    var cmp_ctx: Cmp = .{ .v1 = version1 };
+    const cmp_res = c.stablehloGetSmallerVersion(mlir.stringRef(version1), mlir.stringRef(version2), Cmp.smallerCb, &cmp_ctx);
+
+    std.debug.assert(cmp_res.value != 0);
+    return if (cmp_ctx.v1_is_smaller) version1 else version2;
 }
 
 pub fn getCurrentVersion() []const u8 {
@@ -1308,18 +1309,9 @@ pub fn getCurrentVersion() []const u8 {
         var once = std.once(call);
 
         fn call() void {
-            var stream = std.io.fixedBufferStream(&buf);
-            var writer_ = stream.writer();
-            const ContextWriter = @TypeOf(writer_);
-
-            c.stablehloGetCurrentVersion((struct {
-                pub fn callback(mlir_str: c.MlirStringRef, userdata: ?*anyopaque) callconv(.c) void {
-                    const writer: *ContextWriter = @ptrCast(@alignCast(userdata));
-                    _ = writer.write(mlir.fromStringRef(mlir_str)) catch unreachable;
-                }
-            }).callback, &writer_);
-
-            str = buf[0..stream.pos];
+            var writer: std.Io.Writer = .fixed(&buf);
+            c.stablehloGetCurrentVersion(printCallbackNoFail, &writer);
+            str = writer.buffered();
         }
     };
 
@@ -1334,18 +1326,9 @@ pub fn getMinimumVersion() []const u8 {
         var once = std.once(call);
 
         fn call() void {
-            var stream = std.io.fixedBufferStream(&buf);
-            var context = .{ .writer = stream.writer() };
-            const WriterContext = @TypeOf(context);
-
-            c.stablehloGetMinimumVersion((struct {
-                pub fn callback(mlir_str: c.MlirStringRef, userdata: ?*anyopaque) callconv(.c) void {
-                    const inner_ctx: *WriterContext = @ptrCast(@alignCast(userdata));
-                    _ = inner_ctx.writer.write(mlir.fromStringRef(mlir_str)) catch unreachable;
-                }
-            }).callback, &context);
-
-            str = buf[0..stream.pos];
+            var writer: std.Io.Writer = .fixed(&buf);
+            c.stablehloGetMinimumVersion(printCallbackNoFail, &writer);
+            str = writer.buffered();
         }
     };
 
@@ -1354,13 +1337,22 @@ pub fn getMinimumVersion() []const u8 {
 }
 
 pub fn serializePortableArtifact(bytecode: []const u8, target_version: []const u8, writer: *std.Io.Writer) !void {
-    var context = .{ .writer = writer };
-    const WriterContext = @TypeOf(context);
+    var writer_err: mlir.WriterWithErr = .{ .writer = writer };
 
-    try mlir.successOr(c.stablehloSerializePortableArtifactFromStringRef(mlir.stringRef(bytecode), mlir.stringRef(target_version), (struct {
-        pub fn callback(mlir_str: c.MlirStringRef, userdata: ?*anyopaque) callconv(.c) void {
-            const inner_ctx: *WriterContext = @ptrCast(@alignCast(userdata));
-            _ = inner_ctx.writer.write(mlir.fromStringRef(mlir_str)) catch unreachable;
-        }
-    }).callback, &context), error.InvalidMlirBytecodeVersion);
+    try mlir.successOr(
+        c.stablehloSerializePortableArtifactFromStringRef(
+            mlir.stringRef(bytecode),
+            mlir.stringRef(target_version),
+            mlir.WriterWithErr.printCallback,
+            &writer_err,
+        ),
+        error.InvalidMlirBytecodeVersion,
+    );
+
+    return try writer_err.check();
+}
+
+fn printCallbackNoFail(mlir_str: c.MlirStringRef, opaque_writer: ?*anyopaque) callconv(.c) void {
+    const writer: *std.Io.Writer = @ptrCast(@alignCast(opaque_writer));
+    writer.writeAll(mlir.fromStringRef(mlir_str)) catch @panic("Failed to write MLIR");
 }
