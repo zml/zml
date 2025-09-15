@@ -67,7 +67,7 @@ pub fn load() !*const pjrt.Api {
     // See https://github.com/openxla/xla/issues/21428
     try setupXlaGpuCudaDirFlag(arena.allocator(), sandbox_path);
 
-    _ = c.setenv("XLA_PJRT_GPU_HOST_MEMORY_LIMIT_GB", "2", 1);
+    _ = c.setenv("XLA_PJRT_GPU_HOST_MEMORY_LIMIT_GB", "12", 1);
     _ = c.setenv("XLA_PJRT_GPU_HOST_MEMORY_PREALLOCATE", "true", 1);
 
     {
