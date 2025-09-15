@@ -50,7 +50,7 @@ pub fn tokenizePrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tok
         const user = tokenizer.tokenToId("user").?;
         const assistant = tokenizer.tokenToId("assistant").?;
         const eot = tokenizer.tokenToId("<|eot_id|>").?;
-        const newline = tokenizer.tokenToId("\n").?;
+        const newline = (try encoder.encode("\n"))[0];
 
         try tokens.appendSlice(allocator, &.{ config.bos_token_id, start_header, user, end_header, newline });
 
@@ -68,7 +68,7 @@ pub fn tokenizePrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tok
         const end_message = tokenizer.tokenToId("<|im_end|>").?;
         const user = tokenizer.tokenToId("user").?;
         const assistant = tokenizer.tokenToId("assistant").?;
-        const newline = tokenizer.tokenToId("\\n").?;
+        const newline = (try encoder.encode("\n"))[0];
 
         try tokens.appendSlice(allocator, &.{ start_message, user, newline });
 
