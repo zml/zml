@@ -202,10 +202,8 @@ pub const Tensor = struct {
                 const mlir_ctx = ctx.mlirCtx();
                 if (ctx.target() == .cpu) return self;
 
-                const memory_kind = @tagName(kind.toPjrtMemory());
-
                 const frontend_attributes = mlir.Attribute.dict(mlir_ctx, &.{
-                    .{ "_xla_buffer_placement", .string(mlir_ctx, memory_kind) },
+                    .{ "_xla_buffer_placement", .string(mlir_ctx, kind.pjrtName()) },
                 });
 
                 const op = dialect.stablehlo.custom_call(mlir_ctx, &.{self.value()}, .{
@@ -2683,7 +2681,7 @@ pub const Tensor = struct {
         }
         {
             // Test with actual values and batching along axis .a
-            const operand = try zml.Buffer.constant(platform, Shape.init(.{ .a = 2, .b = 3, .c = 4, .d = 2 }, .u16), 0);
+            const operand = try zml.Buffer.constant(platform, Shape.init(.{ .a = 2, .b = 3, .c = 4, .d = 2 }, .u16), 0, .{});
             defer operand.deinit();
             const start_indices = (try zml.Buffer.fromArray(
                 platform,
@@ -2704,6 +2702,7 @@ pub const Tensor = struct {
                 platform,
                 Shape.init(.{ .n = 2, .a = 2, .m = 3, .c = 2, .d = 2 }, .u16),
                 1,
+                .{},
             );
             defer values.deinit();
 

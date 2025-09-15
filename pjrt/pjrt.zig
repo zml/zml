@@ -430,7 +430,7 @@ pub const Client = opaque {
     pub fn addressableMemories(self: *const Client, api: *const Api) []*const Memory {
         const ret = api.call(.PJRT_Client_AddressableMemories, .{
             .client = self.inner(),
-        }) catch unreachable;
+        }) catch return &.{};
         if (ret.addressable_memories) |memories| {
             return @ptrCast(@constCast(memories[0..ret.num_addressable_memories]));
         }
@@ -556,10 +556,11 @@ pub const Device = opaque {
         return @intCast(ret.local_hardware_id);
     }
 
-    pub fn addressableMemories(self: *const Device, api: *const Api) ApiError![]const *Memory {
-        const ret = try api.call(.PJRT_Device_AddressableMemories, .{
-            .device = self.inner(),
-        });
+    pub fn addressableMemories(self: *const Device, api: *const Api) []const *Memory {
+        const ret = api.call(
+            .PJRT_Device_AddressableMemories,
+            .{ .device = self.inner() },
+        ) catch return &.{};
         return @ptrCast(ret.memories[0..ret.num_memories]);
     }
 
@@ -1048,8 +1049,16 @@ pub const Event = opaque {
 pub const Memory = opaque {
     pub const Kind = enum {
         device,
-        pinned_host,
-        unpinned_host,
+        host_pinned,
+        host_unpinned,
+
+        pub fn pjrtName(k: Kind) []const u8 {
+            return switch (k) {
+                .device => "device",
+                .host_pinned => "pinned_host",
+                .host_unpinned => "unpinned_host",
+            };
+        }
     };
 
     const inner = InnerMixin(c.PJRT_Memory).inner;
@@ -1061,8 +1070,12 @@ pub const Memory = opaque {
 
     pub fn kind(self: *const Memory, api: *const Api) Kind {
         const ret = api.call(.PJRT_Memory_Kind, .{ .memory = self.inner() }) catch unreachable;
-        const kind_ = ret.kind orelse unreachable;
-        return std.meta.stringToEnum(Kind, kind_[0..ret.kind_size]) orelse unreachable;
+        return switch (ret.kind_size) {
+            "device".len => .device,
+            "pinned_host".len => .host_pinned,
+            "unpinned_host".len => .host_unpinned,
+            else => @panic("Memory kind not supported"),
+        };
     }
 
     pub fn kindId(self: *const Memory, api: *const Api) u32 {

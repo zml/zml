@@ -10,6 +10,10 @@ const log = std.log.scoped(.zml);
 
 pub const available_targets = std.enums.values(Target);
 
+test {
+    std.testing.refAllDecls(@This());
+}
+
 pub const CompilationOptions = struct {
     xla_dump_to: ?[]const u8 = null,
     xla_dump_fusion_visualization: bool = false,
@@ -78,6 +82,40 @@ pub const Platform = struct {
 
     pub fn deinit(self: *Platform) void {
         self.pjrt_client.deinit(self.pjrt_api);
+    }
+
+    pub fn memoryForDevice(platform: Platform, memory: pjrt.Memory.Kind, device: *const pjrt.Device) *const pjrt.Memory {
+        const memory_target: pjrt.Memory.Kind = switch (memory) {
+            .host_unpinned => switch (platform.target) {
+                // Cuda doesn't have host_unpinned.
+                .cuda => .host_pinned,
+                else => .host_unpinned,
+            },
+            inline else => |t| t,
+        };
+        // TODO measure the cost of this and consider caching.
+        const device_memories = device.addressableMemories(platform.pjrt_api);
+        // for (device_memories) |m| {
+        //     log.warn("Platform {t}, device {*} -> memory {t}", .{platform.target, device, m.kind(platform.pjrt_api)});
+        // }
+        for (device_memories) |m| {
+            if (memory_target == m.kind(platform.pjrt_api)) {
+                return m;
+            }
+        }
+        log.err("Platform {t} doesn't have memory {t}", .{ platform.target, memory });
+        @panic("Memory kind not found");
+    }
+
+    test memoryForDevice {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+        const memory_fields = @typeInfo(pjrt.Memory.Kind).@"enum".fields;
+        inline for (memory_fields) |field| {
+            for (platform.getDevices()) |dev| {
+                _ = platform.memoryForDevice(@field(pjrt.Memory.Kind, field.name), dev);
+            }
+        }
     }
 };
 
