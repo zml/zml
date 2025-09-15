@@ -3077,7 +3077,7 @@ pub const Tensor = struct {
         const tail_chunk_size: i64 = @rem(d, chunk_size);
 
         const allocator = self.getContext().allocator();
-        var chunks = std.ArrayListUnmanaged(Tensor).initCapacity(allocator, n_chunks + 1) catch @panic("OOM");
+        var chunks = std.ArrayList(Tensor).initCapacity(allocator, n_chunks + 1) catch @panic("OOM");
         for (0..n_chunks) |i| {
             const start: i64 = @as(i64, @intCast(i)) * chunk_size;
             chunks.appendAssumeCapacity(

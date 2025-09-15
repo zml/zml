@@ -9,7 +9,6 @@ const zml = @import("../zml.zig");
 const HostBuffer = zml.HostBuffer;
 const json = @import("json.zig");
 
-const StringBuilder = std.ArrayListUnmanaged(u8);
 const log = std.log.scoped(.@"zml/io");
 
 pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore {
@@ -60,7 +59,7 @@ fn loadFromIndex(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.
 
     if (index.object.get("__metadata__")) |metadata| {
         var prefix_buf: [1024]u8 = undefined;
-        try json.parseMetadata(allocator, store, StringBuilder.initBuffer(&prefix_buf), metadata);
+        try json.parseMetadata(allocator, store, .initBuffer(&prefix_buf), metadata);
     }
 }
 
@@ -94,7 +93,7 @@ fn loadFile(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.Array
         const key = entry.key_ptr.*;
         if (std.mem.eql(u8, key, "__metadata__")) {
             var prefix_buf: [1024]u8 = undefined;
-            try json.parseMetadata(allocator, store, StringBuilder.initBuffer(&prefix_buf), entry.value_ptr.*);
+            try json.parseMetadata(allocator, store, .initBuffer(&prefix_buf), entry.value_ptr.*);
             continue;
         }
         const val = entry.value_ptr.*;

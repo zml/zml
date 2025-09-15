@@ -13,7 +13,7 @@ const py = @import("py.zig");
 const log = std.log.scoped(.@"zml/aio");
 
 // TODO(cryptodeal): use zml.aio.PrefixBuilder instead
-const StringBuilder = std.ArrayListUnmanaged(u8);
+const StringBuilder = std.ArrayList(u8);
 
 test {
     std.testing.refAllDecls(@This());
@@ -191,7 +191,7 @@ pub const File = struct {
                                     .boolval => bool,
                                     else => unreachable,
                                 };
-                                var values: std.ArrayListUnmanaged(ItemType) = .{};
+                                var values: std.ArrayList(ItemType) = .{};
                                 try values.append(allocator, val0);
                                 for (seq.values[1..], 1..) |val, i| {
                                     if (std.meta.activeTag(val) != tag) valid_slice = false;

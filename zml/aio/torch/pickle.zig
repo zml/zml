@@ -768,7 +768,7 @@ pub fn parse(arena: std.mem.Allocator, reader: *std.Io.Reader) ![]const Op {
     // It's not very efficient to interleave the results with the data copied from the stream,
     // because growth event in the results ArrayList will lead to fragmentation.
     // Trying to mitigate that by using a generous default size.
-    var results: std.ArrayListUnmanaged(Op) = try .initCapacity(arena, 512);
+    var results: std.ArrayList(Op) = try .initCapacity(arena, 512);
     errdefer results.deinit(arena);
     var alloc_writer = try std.Io.Writer.Allocating.initCapacity(arena, 512);
 
