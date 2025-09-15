@@ -93,7 +93,7 @@ pub fn generateText(
 
         var prefill_tokens = try zml.Buffer.fromSlice(platform, .{max_seq_len}, prefill_buffer);
         defer prefill_tokens.deinit();
-        var prefill_token_pos = try zml.Buffer.constant(platform, zml.Shape.init(.{}, .u32), 0);
+        var prefill_token_pos = try zml.Buffer.scalar(platform, 0, .u32);
         defer prefill_token_pos.deinit();
 
         const prefilled_tokens, const kv_cache, rng = mod_prefill.call(.{ prefill_tokens, prefill_token_pos, kv_cache_, rng });

@@ -703,7 +703,7 @@ pub fn loadModelBuffersWithPrefix(
     var res: zml.Bufferized(Model) = undefined;
     try zml.meta.mapAlloc(struct {
         pub fn initBuffer(_: void, tensor: zml.Tensor) zml.Buffer {
-            return .{ ._shape = tensor.shape(), ._api = undefined, ._shards = undefined };
+            return .{ ._shape = tensor.shape(), ._api = undefined, ._shards = undefined, ._target = undefined };
         }
     }.initBuffer, allocator, {}, model, &res);
 
