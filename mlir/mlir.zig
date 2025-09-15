@@ -12,13 +12,15 @@ test {
     _ = try Context.init();
 }
 
-const Error = error{
+pub const Error = error{
     /// Invalid Mlir was created.
     InvalidMlir,
     /// Another Mlir error. Check the log for more context.
     MlirUnexpected,
     /// A resource/executor was not found.
     NotFound,
+    /// Bytecode version incompatibility.
+    InvalidMlirBytecodeVersion,
     OutOfMemory,
 };
 
@@ -35,8 +37,8 @@ pub fn registerPasses(comptime passes: []const u8) void {
     @field(c, "mlirRegister" ++ passes ++ "Passes")();
 }
 
-pub fn successOr(res: c.MlirLogicalResult, err: anytype) !void {
-    return if (res.value == 0) err;
+pub fn successOr(res: c.MlirLogicalResult, err: anytype) @TypeOf(err)!void {
+    return if (res.value == 0) err else {};
 }
 
 pub const Registry = struct {
@@ -876,7 +878,7 @@ pub const Operation = struct {
         return .{ ._inner = c.mlirOperationGetContext(self._inner) };
     }
 
-    pub fn writeBytecode(self: Self, writer: *std.Io.Writer) void {
+    pub fn writeBytecode(self: Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         var writer_with_err: WriterWithErr = .{ .writer = writer };
         c.mlirOperationWriteBytecode(
             self._inner,
@@ -888,7 +890,7 @@ pub const Operation = struct {
 
     pub fn writeBytecodeWithConfig(self: Self, writer: *std.Io.Writer, config: struct {
         desiredEmitedVersion: ?i64 = null,
-    }) !void {
+    }) error{ InvalidMlirBytecodeVersion, WriteFailed }!void {
         const cfg = c.mlirBytecodeWriterConfigCreate();
         defer c.mlirBytecodeWriterConfigDestroy(cfg);
         if (config.desiredEmitedVersion) |v| {

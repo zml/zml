@@ -1336,9 +1336,12 @@ pub fn getMinimumVersion() []const u8 {
     return state.str;
 }
 
-pub fn serializePortableArtifact(bytecode: []const u8, target_version: []const u8, writer: *std.Io.Writer) !void {
+pub fn serializePortableArtifact(
+    bytecode: []const u8,
+    target_version: []const u8,
+    writer: *std.Io.Writer,
+) error{ InvalidMlirBytecodeVersion, WriteFailed }!void {
     var writer_err: mlir.WriterWithErr = .{ .writer = writer };
-
     try mlir.successOr(
         c.stablehloSerializePortableArtifactFromStringRef(
             mlir.stringRef(bytecode),
@@ -1348,7 +1351,6 @@ pub fn serializePortableArtifact(bytecode: []const u8, target_version: []const u
         ),
         error.InvalidMlirBytecodeVersion,
     );
-
     return try writer_err.check();
 }
 
