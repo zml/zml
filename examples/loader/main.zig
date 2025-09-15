@@ -5,7 +5,7 @@ const stdx = @import("stdx");
 const zml = @import("zml");
 
 pub const std_options: std.Options = .{
-    .log_level = .warn,
+    .log_level = .info,
     .logFn = asynk.logFn(std.log.defaultLog),
 };
 
@@ -19,14 +19,27 @@ const StringBuilder = std.ArrayListUnmanaged(u8);
 
 const Context = zml.Context;
 const Platform = zml.Platform;
+const Tracer = zml.tools.Tracer;
 const pjrtx = zml.pjrt;
 const pjrt = pjrtx.pjrt;
 
-const BUF_1_KB = 1 * 1024;
-const BUF_8_KB = 8 * 1024;
-const BUF_16_KB = 16 * 1024;
-const BUF_32_KB = 32 * 1024;
-const BUF_64_KB = 64 * 1024;
+const KB = 1024;
+const MB = 1024 * KB;
+
+const BUF_1_KB = 1 * KB;
+const BUF_4_KB = 4 * KB;
+const BUF_8_KB = 8 * KB;
+const BUF_16_KB = 16 * KB;
+const BUF_32_KB = 32 * KB;
+const BUF_64_KB = 64 * KB;
+
+const BUF_1_MB = 1 * MB;
+const BUF_8_MB = 8 * MB;
+const BUF_16_MB = 16 * MB;
+const BUF_32_MB = 32 * MB;
+const BUF_64_MB = 64 * MB;
+const BUF_128_MB = 128 * MB;
+const BUF_256_MB = 256 * MB;
 
 // I/O Utilities
 const io = struct {
@@ -59,23 +72,6 @@ const Tensor = struct {
     name: []const u8,
     shape: Shape,
     offset: u64,
-
-    // todo: remove allocator and interface return
-    pub fn reader(self: Tensor, allocator: std.mem.Allocator, source: *Source) !*std.io.Reader {
-        var source_reader = try source.reader(self.source_name);
-        try source_reader.discardAll(self.offset);
-
-        const limited_reader_buffer = try allocator.alloc(u8, BUF_16_KB);
-        const limited_reader = try allocator.create(LimitedReader);
-
-        limited_reader.* = .init(
-            source_reader,
-            std.io.Limit.limited64(self.shape.byteSize()),
-            limited_reader_buffer,
-        );
-
-        return &limited_reader.interface;
-    }
 };
 
 pub const Registry = struct {
@@ -111,10 +107,14 @@ pub fn registerSafetensors(allocator: std.mem.Allocator, source: *Source, path: 
 
     const processing_allocator = processing_arena.allocator();
 
-    const source_reader = try source.reader(path);
+    var io_buffer: [BUF_64_KB]u8 = undefined;
+    var reader_instance: Source.Reader = undefined;
+
+    try source.initReader(path, &io_buffer, &reader_instance);
+    const source_reader = sourceInterface(&reader_instance);
 
     if (std.mem.endsWith(u8, path, ".safetensors.index.json")) {
-        try parseSafetensorsIndex(processing_allocator, &registry, source, source_reader);
+        try parseSafetensorsIndex(processing_allocator, &registry, source, source_reader, &io_buffer, &reader_instance);
     } else {
         try parseSafetensors(processing_allocator, &registry, source_reader, path);
     }
@@ -127,6 +127,8 @@ fn parseSafetensorsIndex(
     registry: *Registry,
     source: *Source,
     reader: *std.io.Reader,
+    io_buffer: []u8,
+    reader_instance: *Source.Reader,
 ) !void {
     var json_reader: std.json.Reader = .init(allocator, reader);
     const index = try std.json.parseFromTokenSourceLeaky(std.json.Value, allocator, &json_reader, .{ .allocate = .alloc_if_needed });
@@ -136,8 +138,8 @@ fn parseSafetensorsIndex(
 
     while (it.next()) |entry| {
         const filename = entry.value_ptr.string;
-        const chunk_reader = try source.reader(filename);
-
+        try source.initReader(filename, io_buffer, reader_instance);
+        const chunk_reader = sourceInterface(reader_instance);
         try parseSafetensors(allocator, registry, chunk_reader, filename);
     }
 
@@ -211,81 +213,160 @@ fn parseSafetensors(
 
 pub const Source = union(enum) {
     fs: *FsSource,
-    // note: future sources could be added here
 
-    pub fn reader(self: Source, path: []const u8) !*std.io.Reader {
+    pub const Reader = union(enum) {
+        fs: std.fs.File.Reader,
+        direct_fs: DirectFileReader,
+    };
+
+    pub fn initReader(self: Source, path: []const u8, buffer: []u8, reader_mem: *Reader) !void {
         return switch (self) {
-            .fs => |fs_source| fs_source.reader(path),
+            .fs => |fs_source| try fs_source.initReader(path, buffer, reader_mem),
         };
     }
 };
 
+pub fn sourceInterface(reader: *Source.Reader) *std.io.Reader {
+    return switch (reader.*) {
+        .fs => |*r| &r.interface,
+        .direct_fs => |*r| &r.interface,
+    };
+}
 pub const FsSource = struct {
     const ManagedFile = struct {
         file: std.fs.File,
-        buffer: *[BUF_16_KB]u8,
     };
 
     allocator: std.mem.Allocator,
-    file_reader: std.fs.File.Reader,
     base_dir: []const u8,
     path_to_file_map: std.StringHashMapUnmanaged(ManagedFile),
+    path_to_direct_file_map: std.StringHashMapUnmanaged(ManagedFile),
 
     pub fn init(allocator: std.mem.Allocator, base_dir: []const u8) FsSource {
         return .{
             .allocator = allocator,
-            .file_reader = undefined,
             .base_dir = base_dir,
             .path_to_file_map = .{},
+            .path_to_direct_file_map = .{},
         };
     }
 
     pub fn deinit(self: *FsSource) void {
         var it = self.path_to_file_map.iterator();
-
         while (it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
             entry.value_ptr.file.close();
-            self.allocator.destroy(entry.value_ptr.buffer);
         }
-
         self.path_to_file_map.deinit(self.allocator);
+
+        var it2 = self.path_to_direct_file_map.iterator();
+        while (it2.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            entry.value_ptr.file.close();
+        }
+        self.path_to_direct_file_map.deinit(self.allocator);
     }
 
-    // todo: no alloc in reader
-    pub fn reader(self: *FsSource, path: []const u8) !*std.io.Reader {
-        const managed_file: ManagedFile = if (self.path_to_file_map.get(path)) |mf| mf else blk: {
+    pub fn initReader(self: *FsSource, path: []const u8, buffer: []u8, source_reader: *Source.Reader) !void {
+        const managed_file = if (self.path_to_file_map.get(path)) |mf| mf else blk: {
             const full_path = try std.fs.path.join(self.allocator, &.{ self.base_dir, path });
             defer self.allocator.free(full_path);
 
-            const file = try std.fs.openFileAbsolute(full_path, .{ .mode = .read_only });
-            errdefer file.close();
+            const file_fd = try std.posix.open(
+                full_path,
+                .{ .ACCMODE = .RDONLY, .DIRECT = false },
+                0,
+            );
 
-            const buffer = try self.allocator.create([BUF_16_KB]u8);
-            errdefer self.allocator.destroy(buffer);
+            const file: std.fs.File = .{ .handle = file_fd };
+            errdefer file.close();
 
             const path_dupe = try self.allocator.dupe(u8, path);
             errdefer self.allocator.free(path_dupe);
 
-            try self.path_to_file_map.put(self.allocator, path_dupe, .{
-                .file = file,
-                .buffer = buffer,
-            });
+            try self.path_to_file_map.put(self.allocator, path_dupe, .{ .file = file });
 
             break :blk self.path_to_file_map.get(path).?;
         };
 
         try managed_file.file.seekTo(0);
 
-        self.file_reader = managed_file.file.reader(managed_file.buffer);
-
-        return &self.file_reader.interface;
+        source_reader.* = .{ .fs = managed_file.file.reader(buffer) };
     }
 
-    pub fn getFile(self: *FsSource, name: []const u8) !std.fs.File {
-        return self.path_to_file_map.get(name).?.file;
+    pub fn initDirectReader(self: *FsSource, path: []const u8, buffer: []u8, source_reader: *Source.Reader) !void {
+        const managed_file = if (self.path_to_direct_file_map.get(path)) |mf| mf else blk: {
+            const full_path = try std.fs.path.join(self.allocator, &.{ self.base_dir, path });
+            defer self.allocator.free(full_path);
+
+            const file_fd = try std.posix.open(
+                full_path,
+                .{ .ACCMODE = .RDONLY, .DIRECT = true },
+                0,
+            );
+
+            const file: std.fs.File = .{ .handle = file_fd };
+            errdefer file.close();
+
+            const path_dupe = try self.allocator.dupe(u8, path);
+            errdefer self.allocator.free(path_dupe);
+
+            try self.path_to_direct_file_map.put(self.allocator, path_dupe, .{ .file = file });
+
+            break :blk self.path_to_direct_file_map.get(path).?;
+        };
+
+        try managed_file.file.seekTo(0);
+
+        source_reader.* = .{ .direct_fs = .init(managed_file.file, buffer) };
     }
 };
+
+test FsSource {
+    const allocator = std.testing.allocator;
+    const temp_dir = std.testing.tmpDir(.{});
+
+    const file_name = "weights.json";
+
+    var file = try temp_dir.dir.createFile(file_name, .{});
+    defer file.close();
+
+    const file_path = try temp_dir.dir.realpathAlloc(std.testing.allocator, file_name);
+    defer std.testing.allocator.free(file_path);
+
+    const data: [BUF_32_MB]u8 = undefined;
+    var io_buffer: [BUF_8_KB]u8 = undefined;
+
+    var writer_buffer: [BUF_16_KB]u8 = undefined;
+
+    var file_writer = file.writer(&writer_buffer);
+    try file_writer.interface.writeAll(&data);
+    try file_writer.interface.flush();
+
+    var fs_source = FsSource.init(allocator, std.fs.path.dirname(file_path).?);
+    defer fs_source.deinit();
+
+    var source = Source{ .fs = &fs_source };
+
+    var reader_instance: Source.Reader = undefined;
+
+    try source.initReader(file_name, &io_buffer, &reader_instance);
+    const reader = sourceInterface(&reader_instance);
+
+    var reader_buffer: [BUF_32_KB]u8 = undefined;
+    var offset: usize = 0;
+
+    while (true) {
+        const bytes_read = try reader.readSliceShort(&reader_buffer);
+
+        if (bytes_read == 0) break;
+
+        try std.testing.expectEqualSlices(u8, data[offset .. offset + bytes_read], reader_buffer[0..bytes_read]);
+        offset += bytes_read;
+    }
+
+    try std.testing.expectEqual(offset, data.len);
+}
 
 // Reusable Stream Processors
 
@@ -636,6 +717,130 @@ const MemoryReader = struct {
     const vtable: std.io.Reader.VTable = .{ .stream = stream, .readVec = readVec };
 };
 
+const DirectFileReader = struct {
+    file: std.fs.File,
+    pos: u64,
+
+    interface: std.io.Reader,
+
+    pub const block_size = 4096; // todo: from zig std?
+
+    pub fn init(file: std.fs.File, buffer: []u8) DirectFileReader {
+        std.debug.assert(buffer.len % block_size == 0);
+        std.debug.assert(@intFromPtr(buffer.ptr) % block_size == 0);
+
+        return .{
+            .file = file,
+            .pos = 0,
+            .interface = .{
+                .vtable = &vtable,
+                .buffer = buffer,
+                .seek = 0,
+                .end = 0,
+            },
+        };
+    }
+
+    fn fillBuffer(self: *DirectFileReader) std.io.Reader.Error!void {
+        const r = &self.interface;
+        const unread_len = r.end - r.seek;
+
+        if (unread_len > 0 and r.seek > 0) {
+            @memmove(r.buffer[0..unread_len], r.buffer[r.seek..r.end]);
+        }
+        r.seek = 0;
+        r.end = unread_len;
+
+        const free_space = r.buffer.len - r.end;
+        if (free_space < block_size) return;
+
+        const read_offset = (self.pos + r.end) / block_size * block_size;
+        const read_size = (free_space / block_size) * block_size;
+        if (read_size == 0) return;
+
+        const dest_slice = r.buffer[r.end .. r.end + read_size];
+        const bytes_read = std.posix.pread(self.file.handle, dest_slice, @intCast(read_offset)) catch |err| {
+            log.err("O_DIRECT pread failed: {any}", .{err});
+            return error.ReadFailed;
+        };
+
+        if (bytes_read == 0) return;
+
+        const prefix_to_skip = (self.pos + r.end) - read_offset;
+
+        r.seek = @intCast(prefix_to_skip);
+        r.end += @intCast(bytes_read);
+    }
+
+    fn discard(r: *std.io.Reader, limit: std.io.Limit) std.io.Reader.Error!usize {
+        const self = @as(*DirectFileReader, @alignCast(@fieldParentPtr("interface", r)));
+        const buffered_len = r.end - r.seek;
+        const requested_discard = limit.minInt(std.math.maxInt(usize));
+
+        if (requested_discard <= buffered_len) {
+            r.seek += requested_discard;
+            self.pos += requested_discard;
+            return requested_discard;
+        }
+
+        const to_discard_after_buffer = requested_discard - buffered_len;
+
+        self.pos += buffered_len + to_discard_after_buffer;
+        r.seek = 0;
+        r.end = 0;
+
+        return requested_discard;
+    }
+
+    fn stream(r: *std.io.Reader, w: *std.io.Writer, limit: std.io.Limit) std.io.Reader.StreamError!usize {
+        const self = @as(*DirectFileReader, @alignCast(@fieldParentPtr("interface", r)));
+        const buffered_data = limit.slice(r.buffered());
+
+        if (buffered_data.len > 0) {
+            const written = try w.write(buffered_data);
+            r.toss(written);
+            self.pos += written;
+            return written;
+        }
+
+        try self.fillBuffer();
+        const newly_buffered = limit.slice(r.buffered());
+        if (newly_buffered.len == 0) return error.EndOfStream;
+
+        const written = try w.write(newly_buffered);
+        r.toss(written);
+        self.pos += written;
+        return written;
+    }
+
+    fn readVec(r: *std.io.Reader, data: [][]u8) std.io.Reader.Error!usize {
+        const self = @as(*DirectFileReader, @alignCast(@fieldParentPtr("interface", r)));
+
+        if (r.seek == r.end) {
+            try self.fillBuffer();
+        }
+
+        var bytes_copied: usize = 0;
+        for (data) |dest_slice| {
+            const buffered = r.buffered();
+            if (buffered.len == 0) break;
+            const amount_to_copy = @min(dest_slice.len, buffered.len);
+            @memcpy(dest_slice[0..amount_to_copy], buffered[0..amount_to_copy]);
+            r.toss(amount_to_copy);
+            self.pos += amount_to_copy;
+            bytes_copied += amount_to_copy;
+            if (amount_to_copy < dest_slice.len) break;
+        }
+
+        if (bytes_copied == 0 and r.buffered().len == 0) {
+            return error.EndOfStream;
+        }
+        return bytes_copied;
+    }
+
+    const vtable: std.io.Reader.VTable = .{ .stream = stream, .discard = discard, .readVec = readVec };
+};
+
 const VerifyingWriter = struct {
     expected_data: []const u8,
     bytes_verified: u64 = 0,
@@ -798,7 +1003,7 @@ const IoManager = struct {
     }
 };
 
-test "IoManager Integration" {
+test IoManager {
     const platform = zml.testing.env();
     const heap_allocator = std.testing.allocator;
     const device = platform.getDevices()[0];
@@ -922,19 +1127,6 @@ pub fn asyncMain() !void {
     const platform = context.autoPlatform(.{});
     context.printAvailablePlatforms(platform);
 
-    log.info("--- Loading model metadata... ---", .{});
-    var fs_source = FsSource.init(allocator, std.fs.path.dirname(file_path) orelse ".");
-    defer fs_source.deinit();
-
-    var source: Source = .{ .fs = &fs_source };
-
-    var registry = try registerSafetensors(allocator, &source, std.fs.path.basename(file_path));
-    defer registry.deinit();
-
-    log.info("Registry loaded with {d} tensors from {d} source files.", .{ registry.tensors.count(), fs_source.path_to_file_map.count() });
-
-    log.info("--- Planning transfers ---", .{});
-
     const device = platform.getDevices()[0];
     const memories = try device.addressableMemories(platform.pjrt_api);
     var memory = memories[0];
@@ -948,78 +1140,163 @@ pub fn asyncMain() !void {
         }
     }
 
-    var io_manager = try IoManager.init(
-        allocator,
-        platform,
-        memory,
-        registry.tensors.values(),
-    );
-    defer io_manager.deinit();
+    log.info("--- Warming up... ---", .{});
+    {
+        var tensor: Tensor = .{ .source_name = "src", .name = "tensor_a", .shape = Shape.init(.{1024}, .f32), .offset = 0 };
 
-    log.info("IO Manager created for {d} tensors.", .{io_manager.tensor_name_to_index.count()});
+        const blob = try allocator.alloc(u8, tensor.shape.byteSize());
+        defer allocator.free(blob);
 
-    log.info("--- Starting tensor processing stream... ---", .{});
+        var io_manager = try IoManager.init(allocator, platform, memory, &.{tensor});
+        defer io_manager.deinit();
 
-    var arena_buffer: [BUF_64_KB]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&arena_buffer);
+        var pump_buffer: [BUF_8_KB]u8 = undefined;
 
-    var pump_buffer: [2 * 1024 * 1024]u8 = undefined;
-
-    var digest: [32]u8 = undefined;
-
-    var tensor_it = registry.tensors.iterator();
-
-    var timer = try std.time.Timer.start();
-
-    while (tensor_it.next()) |entry| {
-        fba.reset();
-        const stack_allocator = fba.allocator();
-
-        const tensor = entry.value_ptr.*;
-        log.info("--- Processing tensor: {s} ---", .{tensor.name});
-
-        const reader = try tensor.reader(stack_allocator, &source);
-
-        _ = &digest;
-
-        const pipeline_stages = .{
-            Quantizer{ .target_bits = 8 },
-            // Checksumer{ .digest = &digest },
-        };
-
-        var final_memory_writer = io_manager.writer(tensor);
-        var processor_chain: *std.io.Writer = &final_memory_writer.interface;
-
-        inline for (pipeline_stages) |stage_config| {
-            const WriterType = @TypeOf(stage_config).Writer;
-            const new_writer = try stack_allocator.create(WriterType);
-            new_writer.* = stage_config.writer(processor_chain);
-            processor_chain = &new_writer.interface;
-            log.info("  [Pipeline] Added '{s}' to writer chain", .{@typeName(WriterType)});
-        }
-
-        var total_bytes_copied: u64 = 0;
+        var reader: std.io.Reader = .fixed(blob[tensor.offset .. tensor.offset + tensor.shape.byteSize()]);
+        var writer = io_manager.writer(tensor);
 
         while (true) {
             const bytes_read = reader.readSliceShort(&pump_buffer) catch |err| {
                 if (err == error.EndOfStream) break;
                 return err;
             };
-            if (bytes_read == 0) break;
 
-            try processor_chain.writeAll(pump_buffer[0..bytes_read]);
-            total_bytes_copied += bytes_read;
+            if (bytes_read == 0) break;
+            try writer.interface.writeAll(pump_buffer[0..bytes_read]);
         }
 
-        try processor_chain.flush();
+        try writer.interface.flush();
+    }
 
-        std.debug.assert(total_bytes_copied == tensor.shape.byteSize());
+    log.info("--- Loading model metadata... ---", .{});
+    var fs_source = FsSource.init(allocator, std.fs.path.dirname(file_path) orelse ".");
+    defer fs_source.deinit();
 
-        log.info("--- Finished tensor: {s} ({d} bytes) ---", .{ tensor.name, total_bytes_copied });
+    var source: Source = .{ .fs = &fs_source };
+
+    var registry = try registerSafetensors(allocator, &source, std.fs.path.basename(file_path));
+    defer registry.deinit();
+
+    log.info("Registry loaded with {d} tensors.", .{registry.tensors.count()});
+
+    log.info("--- Planning transfers ---", .{});
+
+    var io_manager = try IoManager.init(allocator, platform, memory, registry.tensors.values());
+    defer io_manager.deinit();
+
+    log.info("--- Starting tensor processing stream (with O_DIRECT for weights)... ---", .{});
+
+    // Buffers for O_DIRECT and DMA must be page-aligned.
+    const page_allocator = std.heap.page_allocator;
+
+    const file_io_buffer = try page_allocator.alloc(u8, BUF_8_MB);
+    defer page_allocator.free(file_io_buffer);
+
+    const pump_buffer = try page_allocator.alloc(u8, BUF_16_MB);
+    defer page_allocator.free(pump_buffer);
+
+    var source_reader: Source.Reader = undefined;
+    var limited_reader: LimitedReader = undefined;
+
+    var sum_total_bytes_copied: u64 = 0;
+    var timer = try std.time.Timer.start();
+
+    var it = registry.tensors.iterator();
+    while (it.next()) |entry| {
+        const tensor = entry.value_ptr.*;
+        log.info("--- Processing tensor: {s} ---", .{tensor.name});
+
+        try fs_source.initDirectReader(tensor.source_name, file_io_buffer, &source_reader);
+        const sourced_reader = sourceInterface(&source_reader);
+
+        // try reader.discardAll(tensor.offset);
+
+        limited_reader = .init(sourced_reader, std.io.Limit.limited64(tensor.shape.byteSize()), &.{});
+        const reader = &limited_reader.interface;
+
+        var memory_writer = io_manager.writer(tensor);
+        const bytes_copied = try io.copy(reader, &memory_writer.interface, pump_buffer);
+        try memory_writer.interface.flush();
+
+        std.debug.assert(bytes_copied == tensor.shape.byteSize());
+        sum_total_bytes_copied += bytes_copied;
+
+        log.info("--- Finished tensor: {s} ({d} bytes) ---", .{ tensor.name, bytes_copied });
     }
 
     const elapsed = timer.read();
-    log.warn("--- All tensors processed successfully in {d} ms ---", .{elapsed / std.time.ns_per_ms});
+    const gb_copied = @as(f64, @floatFromInt(sum_total_bytes_copied)) / (1024.0 * 1024.0 * 1024.0);
+    const rate = if (elapsed > 0) gb_copied / (@as(f64, @floatFromInt(elapsed)) / 1_000_000_000.0) else 0;
+    log.warn(
+        "--- All tensors processed successfully in {d} ms ({d:.4} GB at {d:.2} GB/s) ---",
+        .{ elapsed / std.time.ns_per_ms, gb_copied, rate },
+    );
+
+    std.Thread.sleep(2 * std.time.ns_per_s); // for async pjrt transfers to complete
+}
+
+pub fn mainBench() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var args = std.process.args();
+    _ = args.next().?;
+
+    const file_path = args.next() orelse {
+        log.err("Usage: bazel run //examples/loader /path/to/model.safetensors or /path/to/model-00003-of-00004.safetensors", .{});
+        return;
+    };
+
+    const file_name = std.fs.path.basename(file_path);
+
+    const page_allocator = std.heap.page_allocator;
+
+    const io_buffer = page_allocator.alloc(u8, BUF_32_MB) catch |err| {
+        log.err("Failed to allocate io buffer: {any}", .{err});
+        return err;
+    };
+    defer page_allocator.free(io_buffer);
+
+    var fs_source = FsSource.init(allocator, std.fs.path.dirname(file_path).?);
+    defer fs_source.deinit();
+
+    var source = Source{ .fs = &fs_source };
+    var source_reader: Source.Reader = undefined;
+
+    try source.fs.initDirectReader(file_name, io_buffer, &source_reader);
+    const reader = sourceInterface(&source_reader);
+
+    const reader_buffer = page_allocator.alloc(u8, BUF_16_MB) catch |err| {
+        log.err("Failed to allocate reader buffer: {any}", .{err});
+        return err;
+    };
+    defer page_allocator.free(reader_buffer);
+
+    var offset: usize = 0;
+    var timer = try std.time.Timer.start();
+
+    while (true) {
+        const bytes_read = try reader.readSliceShort(reader_buffer);
+        if (bytes_read == 0) break;
+        offset += bytes_read;
+    }
+
+    const elapsed = timer.read();
+
+    const elapsed_ms = elapsed / std.time.ns_per_ms;
+    const elapsed_s = @as(f64, @floatFromInt(elapsed)) / 1_000_000_000.0;
+    const mb_read = @as(f64, @floatFromInt(offset)) / (1024.0 * 1024.0);
+    const gb_read = mb_read / 1024.0;
+    const throughput_mb_s = mb_read / elapsed_s;
+    const throughput_gb_s = gb_read / elapsed_s;
+
+    log.info("=== File Read Statistics ===", .{});
+    log.info("File: {s}", .{file_path});
+    log.info("Bytes read: {d} ({:.2} MB, {:.3} GB)", .{ offset, mb_read, gb_read });
+    log.info("Time elapsed: {d} ms ({:.3} s)", .{ elapsed_ms, elapsed_s });
+    log.info("Throughput: {:.2} MB/s ({:.3} GB/s)", .{ throughput_mb_s, throughput_gb_s });
+    log.info("Buffer size: {d} bytes ({:.1} MB)", .{ reader_buffer.len, @as(f64, @floatFromInt(reader_buffer.len)) / (1024.0 * 1024.0) });
 }
 
 // all code below is unmodified (or slightly) / imported strucs / funcs from zml
