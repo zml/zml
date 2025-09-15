@@ -396,52 +396,9 @@ pub const Buffer = struct {
     pub const UnitializedOptions = struct { memory: Memory = .device };
 
     pub fn uninitialized(platform: Platform, shape_: Shape, opts: UnitializedOptions) !Buffer {
-        var res: Buffer = .{
-            ._api = platform.pjrt_api,
-            ._shape = shape_,
-            ._shards = .{},
-            ._target = platform.target,
-        };
-        errdefer for (res._shards.slice()) |shard| {
-            shard.deinit(platform.pjrt_api);
-        };
-
-        stdx.debug.assert(platform.sharding().num_replicas == 1, "ZML doesn't support num_replicas > 1 for now, got: {}", .{platform.sharding()});
-        const sharding_ax: ?u3 = std.simd.firstTrue(shape_._sharding_info);
-        const n_partitions = platform.sharding().num_partitions;
-
-        const shard_shape = if (sharding_ax) |ax| s: {
-            // This kind of sharding error should be detected earlier on.
-            stdx.debug.assert(@rem(shape_.dim(ax), n_partitions) == 0, "Buffer.uninitialized() expects the sharding axis {} to have a dimension divisble by the number of devices ({}).", .{ ax, n_partitions });
-            const shard_shape = shape_.set(ax, @divExact(shape_.dim(ax), n_partitions));
-            break :s shard_shape;
-        } else shape_;
-
-        var args = pjrt.Client.CreateUninitializedBufferArgs{
-            .dims = shard_shape.dims(),
-            .element_type = bufferTypeFromDtype(shape_.dtype()),
-            .layout = .{
-                .tiled = .{
-                    .minor_to_major = minorToMajor(shape_.rank()),
-                    .tile_dims = &.{},
-                    .tile_dims_sizes = &.{},
-                },
-            },
-        };
-
-        const devices = platform.getDevices();
-        for (0..n_partitions) |i| {
-            if (opts.memory == .device) {
-                args.device = devices[i];
-            } else {
-                args.memory = platform.memoryForDevice(opts.memory, devices[i]);
-            }
-
-            const pjrt_buffer = try platform.pjrt_client.createUnitializedBuffer(platform.pjrt_api, args);
-            res._shards.appendAssumeCapacity(pjrt_buffer);
-        }
-
-        return res;
+        // XLA uninitialized is broken see https://github.com/openxla/xla/pull/31292
+        // TODO: use uninitialized when it works again.
+        return try constant(platform, shape_, 0, .{ .wait = true, .memory = opts.memory });
     }
 
     test uninitialized {
