@@ -419,7 +419,7 @@ const ChecksummingWriter = struct {
 
         var digest: [32]u8 = undefined;
         self.hasher.final(&digest);
-        self.hasher = std.crypto.hash.sha2.Sha256.init(.{});
+
         const allocator = self.config.registry.arena.allocator();
 
         self.config.registry.checksums.put(allocator, self.config.tensor_name, digest) catch |err| {
@@ -488,7 +488,6 @@ const ChecksumVerifyingWriter = struct {
         var actual_checksum: [32]u8 = undefined;
 
         self.hasher.final(&actual_checksum);
-        self.hasher = std.crypto.hash.sha2.Sha256.init(.{});
 
         const expected_checksum = self.config.registry.checksums.get(self.config.tensor_name) orelse {
             log.err("Checksum not found for tensor '{s}' during verification", .{self.config.tensor_name});
@@ -497,19 +496,6 @@ const ChecksumVerifyingWriter = struct {
 
         if (!std.mem.eql(u8, &expected_checksum, &actual_checksum)) {
             log.err("Checksum MISMATCH for tensor '{s}. Expected {x} got {x}'!", .{ self.config.tensor_name, &expected_checksum, &actual_checksum });
-
-            const values = self.config.registry.checksums.values();
-            var found_matching_checksum = false;
-            for (values) |checksum| {
-                if (std.mem.eql(u8, &checksum, &actual_checksum)) {
-                    log.err(">>>>>>>>>Found matching checksum in registry, but tensor name mismatch!", .{});
-                    found_matching_checksum = true;
-                    break;
-                }
-            }
-            if (!found_matching_checksum) {
-                log.err(">>>>>>>>>No matching checksum found in registry!", .{});
-            }
 
             return error.WriteFailed;
         }
@@ -1033,7 +1019,7 @@ pub fn asyncMain() !void {
         return;
     };
 
-    const verify_checksums = false;
+    const verify_checksums = true;
 
     var context = try Context.init();
     defer context.deinit();
