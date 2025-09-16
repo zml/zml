@@ -59,7 +59,7 @@ We use `bazel` to build ZML and its dependencies. The only prerequisite is
 for `bazel`.
 
 **Please note: If you do not wish to install `bazel`** system-wide, we provide
-[examples/bazel.sh](examples/bazel.sh) which downloads it to your home folder
+[bazel.sh](bazel.sh) which downloads it to your home folder
 and runs it.
 
 **Install Bazel** (recommended):
