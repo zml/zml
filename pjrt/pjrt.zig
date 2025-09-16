@@ -729,7 +729,6 @@ pub const LoadedExecutable = opaque {
         _ = api.call(.PJRT_LoadedExecutable_Destroy, .{
             .executable = self.inner(),
         }) catch {};
-        self.* = undefined;
     }
 
     pub fn delete(self: *LoadedExecutable, api: *const Api) void {

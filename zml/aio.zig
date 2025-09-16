@@ -121,12 +121,17 @@ pub const BufferStore = struct {
                 if (id < self._unique_id or self._unique_id + _store_id_range <= id) {
                     @panic("`store.loadBufferById()` only works on Tensor created by `store.getTensor()`, using the same store object.");
                 }
+                if (platform.target != .cpu) mem_debug: {
+                    const stats = platform.getDevices()[0].memoryStats(platform.pjrt_api) catch break :mem_debug;
+                    log.debug("Loading {s} -> {f} {d:>10} bytes ({d:>10} allocated / {d:>10} reserved)", .{ self.buffers.keys()[id - self._unique_id], x._shape, x.shape().byteSize(), stats.bytes_in_use, stats.bytes_reserved });
+                }
                 break :hb self.buffers.values()[id - self._unique_id];
             },
             else => @panic("`store.loadBufferById()` only works on Tensor created by `store.getTensor()`"),
         };
 
         // Use the sharding information stored in the tensor.
+        std.debug.assert(host_buffer.shape().eql(x.shape()));
         host_buffer._shape = x.shape();
         return try host_buffer.toDevice(platform);
     }

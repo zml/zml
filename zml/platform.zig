@@ -165,17 +165,21 @@ const _CreateOptions = struct {
         fn writeNamedValues(self: Cuda, values: *std.ArrayListUnmanaged(pjrt.NamedValue)) void {
             switch (self.allocator) {
                 .platform => {
-                    values.appendAssumeCapacity(pjrt.NamedValue.fromString("allocator", "platform"));
+                    values.appendAssumeCapacity(.fromString("allocator", "platform"));
                 },
                 .bfc, .async => |opt| {
-                    values.appendAssumeCapacity(pjrt.NamedValue.from("allocator", self.allocator));
-                    values.appendAssumeCapacity(pjrt.NamedValue.from("preallocate", opt.preallocate));
+                    values.appendAssumeCapacity(.fromString("allocator", switch (self.allocator) {
+                        .bfc => "bfc",
+                        .async => "cuda_async",
+                        .platform => unreachable,
+                    }));
+                    values.appendAssumeCapacity(.from("preallocate", opt.preallocate));
                     if (opt.memory_fraction > 0) {
-                        values.appendAssumeCapacity(pjrt.NamedValue.from("memory_fraction", opt.memory_fraction));
+                        values.appendAssumeCapacity(.from("memory_fraction", opt.memory_fraction));
                     }
                     if (opt.collective_memory_size_mb > 0) {
                         const collective = @as(i64, opt.collective_memory_size_mb) * 1024 * 1024;
-                        values.appendAssumeCapacity(pjrt.NamedValue.from("collective_memory_size", collective));
+                        values.appendAssumeCapacity(.from("collective_memory_size", collective));
                     }
                 },
             }

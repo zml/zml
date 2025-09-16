@@ -235,6 +235,7 @@ pub const BaseExe = struct {
         if (self.execute_context) |ctx| {
             ctx.deinit(self.platform.pjrt_api);
         }
+        self.exe.deinit(self.platform.pjrt_api);
         self._arena.deinit();
     }
 
