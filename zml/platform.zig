@@ -20,6 +20,7 @@ pub const CompilationOptions = struct {
     xla_dump_hlo_pass_re: ?[]const u8 = null,
     sharding_enabled: bool = false,
     sharding_axes: stdx.BoundedArray([*:0]const u8, 8) = .{},
+    device_memory_size: u64 = 0,
 };
 
 pub const Platform = struct {

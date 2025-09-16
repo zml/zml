@@ -887,6 +887,9 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, m
             c.xla_ExecutableBuildOptionsProto_set_num_replicas(exec_build_options, sharding.num_replicas);
             c.xla_ExecutableBuildOptionsProto_set_num_partitions(exec_build_options, sharding.num_partitions);
             c.xla_ExecutableBuildOptionsProto_set_use_spmd_partitioning(exec_build_options, sharding.num_partitions > 1 or sharding.num_replicas > 1);
+            if (platform.compilation_options.device_memory_size > 0) {
+                c.xla_ExecutableBuildOptionsProto_set_device_memory_size(exec_build_options, @intCast(platform.compilation_options.device_memory_size));
+            }
 
             c.xla_ExecutableBuildOptionsProto_set_device_assignment(exec_build_options, device_assignment_blk: {
                 const device_assignment = try upb.new(c.xla_DeviceAssignmentProto, upb_arena);
@@ -901,7 +904,6 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, m
                 }
                 break :device_assignment_blk device_assignment;
             });
-
             break :executable_build_options_blk exec_build_options;
         });
 
