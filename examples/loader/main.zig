@@ -77,17 +77,20 @@ const Tensor = struct {
 pub const Registry = struct {
     pub const Tensors = std.StringArrayHashMapUnmanaged(Tensor);
     pub const Metadatas = std.StringArrayHashMapUnmanaged(Metadata);
+    pub const Checksums = std.StringArrayHashMapUnmanaged([32]u8);
 
     arena: std.heap.ArenaAllocator,
 
     tensors: Tensors,
     metadata: Metadatas,
+    checksums: Checksums,
 
     pub fn deinit(self: *Registry) void {
         const allocator = self.arena.allocator();
 
         self.tensors.deinit(allocator);
         self.metadata.deinit(allocator);
+        self.checksums.deinit(allocator);
         self.arena.deinit();
     }
 };
@@ -99,6 +102,7 @@ pub fn registerSafetensors(allocator: std.mem.Allocator, source: *Source, path: 
         .arena = std.heap.ArenaAllocator.init(allocator),
         .tensors = .{},
         .metadata = .{},
+        .checksums = .{},
     };
     errdefer registry.deinit();
 
@@ -370,54 +374,11 @@ test FsSource {
 
 // Reusable Stream Processors
 
-pub const LimitedReader = std.io.Reader.Limited;
-
-pub const Quantizer = struct {
-    pub const Writer = QuantizingWriter;
-
-    target_bits: u8,
-
-    pub fn writer(self: Quantizer, next: *std.io.Writer) Writer {
-        return .init(next, self);
-    }
-};
-
-const QuantizingWriter = struct {
-    config: Quantizer,
-    next_writer: *std.io.Writer,
-    interface: std.io.Writer,
-
-    pub fn init(next_writer: *std.io.Writer, config: Quantizer) QuantizingWriter {
-        return .{
-            .next_writer = next_writer,
-            .config = config,
-            .interface = .{ .vtable = &vtable, .buffer = &[_]u8{}, .end = 0 },
-        };
-    }
-
-    fn drain(w: *std.io.Writer, data: []const []const u8, splat: usize) std.io.Writer.Error!usize {
-        const self = @as(*QuantizingWriter, @alignCast(@fieldParentPtr("interface", w)));
-
-        log.debug("Quantizing data to {d} bits...", .{self.config.target_bits});
-
-        return self.next_writer.writeSplat(data, splat);
-    }
-
-    fn flush(w: *std.io.Writer) !void {
-        const self = @as(*QuantizingWriter, @alignCast(@fieldParentPtr("interface", w)));
-        try self.next_writer.flush();
-    }
-
-    const vtable: std.io.Writer.VTable = .{
-        .drain = drain,
-        .flush = flush,
-    };
-};
-
 pub const Checksumer = struct {
     pub const Writer = ChecksummingWriter;
 
-    digest: *[32]u8,
+    registry: *Registry,
+    tensor_name: []const u8,
 
     pub fn writer(self: Checksumer, next: *std.io.Writer) Writer {
         return .init(next, self);
@@ -427,6 +388,7 @@ pub const Checksumer = struct {
 const ChecksummingWriter = struct {
     config: Checksumer,
     hasher: std.crypto.hash.sha2.Sha256,
+
     next_writer: *std.io.Writer,
     interface: std.io.Writer,
 
@@ -455,7 +417,15 @@ const ChecksummingWriter = struct {
     fn flush(w: *std.io.Writer) !void {
         const self = @as(*ChecksummingWriter, @alignCast(@fieldParentPtr("interface", w)));
 
-        self.hasher.final(self.config.digest);
+        var digest: [32]u8 = undefined;
+        self.hasher.final(&digest);
+        self.hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        const allocator = self.config.registry.arena.allocator();
+
+        self.config.registry.checksums.put(allocator, self.config.tensor_name, digest) catch |err| {
+            log.err("Failed to store checksum for tensor '{s}': {any}", .{ self.config.tensor_name, err });
+            return error.WriteFailed;
+        };
 
         try self.next_writer.flush();
     }
@@ -464,6 +434,90 @@ const ChecksummingWriter = struct {
         .drain = drain,
         .flush = flush,
     };
+};
+
+const Verifier = struct {
+    pub const Writer = ChecksumVerifyingWriter;
+
+    registry: *const Registry,
+    tensor_name: []const u8,
+
+    pub fn writer(self: Verifier) Writer {
+        return .init(self);
+    }
+};
+
+const ChecksumVerifyingWriter = struct {
+    config: Verifier,
+    hasher: std.crypto.hash.sha2.Sha256,
+
+    interface: std.io.Writer,
+
+    pub fn init(config: Verifier) ChecksumVerifyingWriter {
+        return .{
+            .config = config,
+            .hasher = std.crypto.hash.sha2.Sha256.init(.{}),
+            .interface = .{ .vtable = &vtable, .buffer = &[_]u8{}, .end = 0 },
+        };
+    }
+    fn drain(w: *std.io.Writer, data: []const []const u8, splat: usize) std.io.Writer.Error!usize {
+        const self = @as(*ChecksumVerifyingWriter, @alignCast(@fieldParentPtr("interface", w)));
+
+        var total_written: usize = 0;
+
+        for (data) |d| {
+            self.hasher.update(d);
+            total_written += d.len;
+        }
+
+        if (splat > 1 and data.len > 0) {
+            const last = data[data.len - 1];
+
+            for (0..splat - 1) |_| {
+                self.hasher.update(last);
+            }
+
+            total_written += last.len * (splat - 1);
+        }
+
+        return total_written;
+    }
+    fn flush(w: *std.io.Writer) !void {
+        const self = @as(*ChecksumVerifyingWriter, @alignCast(@fieldParentPtr("interface", w)));
+
+        var actual_checksum: [32]u8 = undefined;
+
+        self.hasher.final(&actual_checksum);
+        self.hasher = std.crypto.hash.sha2.Sha256.init(.{});
+
+        const expected_checksum = self.config.registry.checksums.get(self.config.tensor_name) orelse {
+            log.err("Checksum not found for tensor '{s}' during verification", .{self.config.tensor_name});
+            return error.WriteFailed;
+        };
+
+        if (!std.mem.eql(u8, &expected_checksum, &actual_checksum)) {
+            log.err("Checksum MISMATCH for tensor '{s}. Expected {x} got {x}'!", .{ self.config.tensor_name, &expected_checksum, &actual_checksum });
+
+            const values = self.config.registry.checksums.values();
+            var found_matching_checksum = false;
+            for (values) |checksum| {
+                if (std.mem.eql(u8, &checksum, &actual_checksum)) {
+                    log.err(">>>>>>>>>Found matching checksum in registry, but tensor name mismatch!", .{});
+                    found_matching_checksum = true;
+                    break;
+                }
+            }
+            if (!found_matching_checksum) {
+                log.err(">>>>>>>>>No matching checksum found in registry!", .{});
+            }
+
+            return error.WriteFailed;
+        }
+
+        log.info("Tensor '{s}' verified successfully.", .{self.config.tensor_name});
+    }
+
+    const vtable: std.io.Writer.VTable = .{ .drain = drain, .flush = flush };
 };
 
 const MemoryWriter = struct {
@@ -514,11 +568,10 @@ const MemoryWriter = struct {
                     return error.WriteFailed;
                 };
 
-                if (is_last_chunk) {
-                    self.completion_event = event;
-                } else {
-                    event.deinit(self.api);
-                }
+                event.awaitBlocking(self.api) catch |err| {
+                    log.err("PJRT event await failed on transferData: {any}", .{err});
+                    return error.WriteFailed;
+                };
 
                 self.bytes_written += chunk.len;
                 total_bytes_written += chunk.len;
@@ -528,7 +581,7 @@ const MemoryWriter = struct {
         return total_bytes_written;
     }
 
-    // `flush` is a no-op. The main loop will wait on the captured event.
+    // `flush` is a no-op. All writes are now synchronous within drain.
     fn flush(w: *std.io.Writer) !void {
         _ = w;
     }
@@ -791,98 +844,6 @@ const DirectFileReader = struct {
     const vtable: std.io.Reader.VTable = .{ .stream = stream, .discard = discard, .readVec = readVec };
 };
 
-const VerifyingWriter = struct {
-    expected_data: []const u8,
-    bytes_verified: u64 = 0,
-    interface: std.io.Writer,
-
-    pub fn init(expected: []const u8, buffer: []u8) VerifyingWriter {
-        return .{
-            .expected_data = expected,
-            .interface = .{ .vtable = &vtable, .buffer = buffer, .end = 0 },
-        };
-    }
-
-    fn verifyChunk(self: *VerifyingWriter, chunk: []const u8) !void {
-        if (chunk.len == 0) return;
-
-        const current_offset = self.bytes_verified;
-        const next_offset = current_offset + chunk.len;
-
-        if (next_offset > self.expected_data.len) {
-            log.err(
-                "Verification failed: received more data than expected. Expected total {d}, but received at least {d}",
-                .{ self.expected_data.len, next_offset },
-            );
-            return error.WriteFailed;
-        }
-
-        const expected_chunk = self.expected_data[current_offset..next_offset];
-        if (!std.mem.eql(u8, expected_chunk, chunk)) {
-            log.err("Verification failed: data mismatch at offset {d} for chunk of size {d}", .{ current_offset, chunk.len });
-            return error.WriteFailed;
-        }
-        self.bytes_verified = next_offset;
-    }
-
-    fn drain(w: *std.io.Writer, data: []const []const u8, splat: usize) std.io.Writer.Error!usize {
-        const self = @as(*VerifyingWriter, @alignCast(@fieldParentPtr("interface", w)));
-
-        try self.verifyChunk(w.buffered());
-        w.end = 0;
-
-        var bytes_from_data: usize = 0;
-        for (data[0..data.len -| 1]) |chunk| {
-            try self.verifyChunk(chunk);
-            bytes_from_data += chunk.len;
-        }
-
-        if (data.len > 0) {
-            const last_chunk = data[data.len - 1];
-            for (0..splat) |_| {
-                try self.verifyChunk(last_chunk);
-            }
-            bytes_from_data += last_chunk.len * splat;
-        }
-
-        return bytes_from_data;
-    }
-
-    fn flush(w: *std.io.Writer) !void {
-        const self = @as(*VerifyingWriter, @alignCast(@fieldParentPtr("interface", w)));
-        try self.verifyChunk(w.buffered());
-        w.end = 0;
-
-        if (self.bytes_verified != self.expected_data.len) {
-            log.err("Verification failed: incomplete data. Expected {d} bytes, but received {d}", .{
-                self.expected_data.len,
-                self.bytes_verified,
-            });
-            return error.WriteFailed;
-        }
-    }
-
-    const vtable: std.io.Writer.VTable = .{
-        .drain = drain,
-        .flush = flush,
-    };
-};
-
-// Sinks
-
-pub const DiscardingSink = struct {
-    discarder: std.io.Writer.Discarding,
-
-    pub fn init() DiscardingSink {
-        return .{ .discarder = .init(&[_]u8{}) };
-    }
-
-    pub fn writer(self: *DiscardingSink, tensor: Tensor) *std.io.Writer {
-        _ = tensor;
-        return @constCast(&self.discarder.writer);
-    }
-};
-
 // Executor
 
 const IoManager = struct {
@@ -1072,6 +1033,8 @@ pub fn asyncMain() !void {
         return;
     };
 
+    const verify_checksums = false;
+
     var context = try Context.init();
     defer context.deinit();
 
@@ -1133,22 +1096,31 @@ pub fn asyncMain() !void {
     var io_manager = try IoManager.init(allocator, platform, memory, registry.tensors.values());
     defer io_manager.deinit();
 
-    log.info("--- Starting pipelined tensor processing stream... ---", .{});
+    log.info("--- Starting tensor processing stream... ---", .{});
 
-    const file_io_buffer = try allocator.alloc(u8, BUF_16_MB);
+    const PUMP_BUFFER_SIZE = BUF_8_MB;
+    const FILE_IO_BUFFER_SIZE = BUF_16_MB;
+
+    const file_io_buffer = try allocator.alloc(u8, FILE_IO_BUFFER_SIZE);
     defer allocator.free(file_io_buffer);
 
-    const pump_buffer = try allocator.alloc(u8, BUF_8_MB);
+    const pump_buffer = try allocator.alloc(u8, PUMP_BUFFER_SIZE);
     defer allocator.free(pump_buffer);
 
     var source_reader: Source.Reader = undefined;
-    var limited_reader: LimitedReader = undefined;
+    var limited_reader: std.io.Reader.Limited = undefined;
 
     var sum_total_bytes_copied: u64 = 0;
     var timer = try std.time.Timer.start();
 
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
     var tensor_it = registry.tensors.iterator();
     while (tensor_it.next()) |entry| {
+        _ = arena.reset(.free_all);
+        const arena_allocator = arena.allocator();
+
         const tensor = entry.value_ptr.*;
         log.info("--- Processing tensor: {s} ---", .{tensor.name});
 
@@ -1158,18 +1130,31 @@ pub fn asyncMain() !void {
 
         limited_reader = .init(reader_iface, std.io.Limit.limited64(tensor.shape.byteSize()), &.{});
         const reader = &limited_reader.interface;
+
         var memory_writer = io_manager.writer(tensor);
+        var final_writer: *std.io.Writer = &memory_writer.interface;
 
-        const bytes_copied = try io.copy(reader, &memory_writer.interface, pump_buffer);
-        try memory_writer.interface.flush();
-
-        if (memory_writer.completion_event) |event| {
-            log.info("Awaiting transfer completion event {*} for tensor '{s}'...", .{ event, tensor.name });
-
-            event.awaitBlocking(platform.pjrt_api) catch |err| {
-                log.err("PJRT event await failed on tensor '{s}': {any}", .{ tensor.name, err });
-                return err;
+        if (verify_checksums) {
+            const checksumer: Checksumer = .{
+                .registry = &registry,
+                .tensor_name = tensor.name,
             };
+
+            const checksum_writer = try arena_allocator.create(ChecksummingWriter);
+            checksum_writer.* = checksumer.writer(final_writer);
+            final_writer = &checksum_writer.interface;
+        }
+
+        const bytes_copied = try io.copy(reader, final_writer, pump_buffer);
+        try final_writer.flush();
+
+        if (verify_checksums) {
+            // todo: temporary no config debug available
+            if (tensor.shape.byteSize() != bytes_copied) {
+                log.err("Byte count mismatch for tensor '{s}'. Expected {d}, got {d}", .{
+                    tensor.name, tensor.shape.byteSize(), bytes_copied,
+                });
+            }
         }
 
         std.debug.assert(bytes_copied == tensor.shape.byteSize());
@@ -1184,7 +1169,65 @@ pub fn asyncMain() !void {
         .{ elapsed / std.time.ns_per_ms, gb_copied, rate },
     );
 
-    std.Thread.sleep(2 * std.time.ns_per_s); // for async pjrt transfers to complete
+    std.Thread.sleep(2 * std.time.ns_per_s); // todo: async wait for all transfers to complete
+
+    if (verify_checksums) {
+        log.info("--- Starting post-load verification... ---", .{});
+        var verification_timer = try std.time.Timer.start();
+
+        const gpu_read_buffer = try allocator.alloc(u8, BUF_1_MB);
+        defer allocator.free(gpu_read_buffer);
+
+        const pump_buffer_verify = try allocator.alloc(u8, BUF_64_KB);
+        defer allocator.free(pump_buffer_verify);
+
+        var verification_errors: usize = 0;
+
+        var verify_it = registry.tensors.iterator();
+        while (verify_it.next()) |entry| {
+            const tensor = entry.value_ptr.*;
+
+            if (tensor.shape.byteSize() == 0) continue;
+
+            log.info("Verifying tensor: {s}", .{tensor.name});
+
+            var memory_reader = try io_manager.reader(tensor, gpu_read_buffer);
+            const reader: *std.io.Reader = &memory_reader.interface;
+
+            const verifier: Verifier = .{
+                .registry = &registry,
+                .tensor_name = tensor.name,
+            };
+
+            var verifying_writer = verifier.writer();
+
+            const bytes_verified = io.copy(reader, &verifying_writer.interface, pump_buffer_verify) catch |err| {
+                log.err("io.copy failed during verification for tensor '{s}': {any}", .{ tensor.name, err });
+                verification_errors += 1;
+                continue;
+            };
+
+            verifying_writer.interface.flush() catch {
+                verification_errors += 1;
+                continue;
+            };
+
+            if (bytes_verified != tensor.shape.byteSize()) {
+                log.err("Verification byte count mismatch for tensor '{s}'. Expected {d}, got {d}", .{
+                    tensor.name, tensor.shape.byteSize(), bytes_verified,
+                });
+                verification_errors += 1;
+            }
+        }
+
+        const verify_elapsed = verification_timer.read();
+
+        if (verification_errors == 0) {
+            log.warn("--- All tensors verified successfully in {d} ms ---", .{verify_elapsed / std.time.ns_per_ms});
+        } else {
+            log.err("--- Verification failed with {d} errors in {d} ms ---", .{ verification_errors, verify_elapsed / std.time.ns_per_ms });
+        }
+    }
 }
 
 pub fn mainBench() !void {
