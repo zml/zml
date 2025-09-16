@@ -221,6 +221,12 @@ pub const CompilationContext = struct {
             break :blk loaded_executable;
         };
 
+        {
+            const exe = try loaded_executable.getExecutable(self._platform.pjrt_api);
+            const stats = try exe.getCompiledMemoryStats(self._platform.pjrt_api);
+            log.debug("Compiled {s}: {any}", .{ self._name, stats });
+        }
+
         log.debug("******** ZML generated MLIR ********", .{});
         log.debug("{f}", .{module.op().mlirFormatter(.{})});
 

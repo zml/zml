@@ -317,6 +317,7 @@ pub const Buffer = struct {
     /// Depending on the platform, the memory is typically not released to the OS
     /// but just marked as available in the memory pool.
     pub fn deinit(self: *const Buffer) void {
+        // log.warn("Unloading {f} {d} bytes", .{ self._shape, self._shape.byteSize() });
         for (self._shards.constSlice()) |buffer| {
             buffer.deinit(self._api);
         }
