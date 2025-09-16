@@ -473,7 +473,7 @@ const MemoryWriter = struct {
     tensor_byte_size: u64,
 
     bytes_written: u64,
-    event_queue: stdx.BoundedArray(*pjrtx.Event, 2),
+    completion_event: ?*pjrtx.Event = null,
 
     interface: std.io.Writer,
 
@@ -489,27 +489,13 @@ const MemoryWriter = struct {
             .buffer_index = index,
             .tensor_byte_size = tensor.shape.byteSize(),
             .bytes_written = 0,
-            .event_queue = .{},
             .interface = .{ .vtable = &vtable, .buffer = &[_]u8{}, .end = 0 },
         };
-    }
-
-    fn awaitOldestEvent(self: *MemoryWriter) std.io.Writer.Error!void {
-        if (self.event_queue.len == self.event_queue.capacity()) {
-            const event = self.event_queue.orderedRemove(0);
-            _ = event; // autofix
-            // event.awaitBlocking(self.api) catch |err| {
-            //     log.err("PJRT event await failed: {any}", .{err});
-            //     return error.WriteFailed;
-            // };
-        }
     }
 
     fn drain(w: *std.io.Writer, data: []const []const u8, splat: usize) std.io.Writer.Error!usize {
         const self = @as(*MemoryWriter, @alignCast(@fieldParentPtr("interface", w)));
         var total_bytes_written: usize = 0;
-
-        try self.awaitOldestEvent();
 
         for (data) |chunk| {
             if (chunk.len == 0) continue;
@@ -528,7 +514,11 @@ const MemoryWriter = struct {
                     return error.WriteFailed;
                 };
 
-                self.event_queue.append(event) catch @panic("Event queue overflow");
+                if (is_last_chunk) {
+                    self.completion_event = event;
+                } else {
+                    event.deinit(self.api);
+                }
 
                 self.bytes_written += chunk.len;
                 total_bytes_written += chunk.len;
@@ -538,21 +528,9 @@ const MemoryWriter = struct {
         return total_bytes_written;
     }
 
-    fn flush(w: *std.io.Writer) std.io.Writer.Error!void {
-        const self = @as(*MemoryWriter, @alignCast(@fieldParentPtr("interface", w)));
-
-        while (self.event_queue.pop()) |event| {
-            _ = event; // autofix
-            // event.awaitBlocking(self.api) catch |err| {
-            //     log.err("PJRT event await failed: {any}", .{err});
-            //     return error.WriteFailed;
-            // };
-        }
-
-        if (self.bytes_written != self.tensor_byte_size) {
-            log.err("Flush called but stream was incomplete. Wrote {d} of {d} bytes.", .{ self.bytes_written, self.tensor_byte_size });
-            return error.WriteFailed;
-        }
+    // `flush` is a no-op. The main loop will wait on the captured event.
+    fn flush(w: *std.io.Writer) !void {
+        _ = w;
     }
 
     const vtable: std.io.Writer.VTable = .{
@@ -1078,6 +1056,7 @@ test IoManager {
 
 pub fn main() !void {
     try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain);
+    // try asynk.AsyncThread.main(std.heap.c_allocator, mainBench);
 }
 
 pub fn asyncMain() !void {
@@ -1156,13 +1135,11 @@ pub fn asyncMain() !void {
 
     log.info("--- Starting pipelined tensor processing stream... ---", .{});
 
-    const page_allocator = std.heap.page_allocator;
+    const file_io_buffer = try allocator.alloc(u8, BUF_16_MB);
+    defer allocator.free(file_io_buffer);
 
-    const file_io_buffer = try page_allocator.alignedAlloc(u8, null, BUF_8_MB);
-    defer page_allocator.free(file_io_buffer);
-
-    const pump_buffer = try page_allocator.alignedAlloc(u8, null, BUF_32_MB);
-    defer page_allocator.free(pump_buffer);
+    const pump_buffer = try allocator.alloc(u8, BUF_8_MB);
+    defer allocator.free(pump_buffer);
 
     var source_reader: Source.Reader = undefined;
     var limited_reader: LimitedReader = undefined;
@@ -1175,7 +1152,7 @@ pub fn asyncMain() !void {
         const tensor = entry.value_ptr.*;
         log.info("--- Processing tensor: {s} ---", .{tensor.name});
 
-        try fs_source.initDirectReader(tensor.source_name, file_io_buffer, &source_reader);
+        try fs_source.initReader(tensor.source_name, file_io_buffer, &source_reader);
         const reader_iface = sourceInterface(&source_reader);
         // try reader_iface.discardAll(tensor.offset);
 
@@ -1185,6 +1162,15 @@ pub fn asyncMain() !void {
 
         const bytes_copied = try io.copy(reader, &memory_writer.interface, pump_buffer);
         try memory_writer.interface.flush();
+
+        if (memory_writer.completion_event) |event| {
+            log.info("Awaiting transfer completion event {*} for tensor '{s}'...", .{ event, tensor.name });
+
+            event.awaitBlocking(platform.pjrt_api) catch |err| {
+                log.err("PJRT event await failed on tensor '{s}': {any}", .{ tensor.name, err });
+                return err;
+            };
+        }
 
         std.debug.assert(bytes_copied == tensor.shape.byteSize());
         sum_total_bytes_copied += bytes_copied;
@@ -1216,13 +1202,17 @@ pub fn mainBench() !void {
 
     const file_name = std.fs.path.basename(file_path);
 
-    const page_allocator = std.heap.page_allocator;
-
-    const io_buffer = page_allocator.alloc(u8, BUF_32_MB) catch |err| {
+    const io_buffer = allocator.alloc(u8, BUF_32_MB) catch |err| {
         log.err("Failed to allocate io buffer: {any}", .{err});
         return err;
     };
-    defer page_allocator.free(io_buffer);
+    defer allocator.free(io_buffer);
+
+    const reader_buffer = allocator.alloc(u8, BUF_16_MB) catch |err| {
+        log.err("Failed to allocate reader buffer: {any}", .{err});
+        return err;
+    };
+    defer allocator.free(reader_buffer);
 
     var fs_source = FsSource.init(allocator, std.fs.path.dirname(file_path).?);
     defer fs_source.deinit();
@@ -1232,12 +1222,6 @@ pub fn mainBench() !void {
 
     try source.fs.initDirectReader(file_name, io_buffer, &source_reader);
     const reader = sourceInterface(&source_reader);
-
-    const reader_buffer = page_allocator.alloc(u8, BUF_16_MB) catch |err| {
-        log.err("Failed to allocate reader buffer: {any}", .{err});
-        return err;
-    };
-    defer page_allocator.free(reader_buffer);
 
     var offset: usize = 0;
     var timer = try std.time.Timer.start();
