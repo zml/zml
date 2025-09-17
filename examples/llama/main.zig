@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const asynk = @import("async");
+const async = @import("async");
 const clap = @import("clap");
 const stdx = @import("stdx");
 const zml = @import("zml");
@@ -19,7 +19,7 @@ const log = std.log.scoped(.llama);
 
 pub const std_options: std.Options = .{
     .log_level = .info,
-    .logFn = asynk.logFn(std.log.defaultLog),
+    .logFn = async.logFn(std.log.defaultLog),
 };
 
 const params = clap.parseParamsComptime(
@@ -152,7 +152,7 @@ pub fn generateText(
 }
 
 pub fn main() !void {
-    try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain);
+    try async.AsyncThread.main(std.heap.c_allocator, asyncMain);
 }
 
 pub fn asyncMain() !void {
@@ -198,7 +198,7 @@ pub fn asyncMain() !void {
 
     const model_weights_path = b: {
         const simple_path = try std.fs.path.join(allocator, &.{ hf_model_path, "model.safetensors" });
-        if (asynk.File.access(simple_path, .{})) {
+        if (async.File.access(simple_path, .{})) {
             break :b simple_path;
         } else |_| {
             allocator.free(simple_path);
@@ -213,7 +213,7 @@ pub fn asyncMain() !void {
     defer allocator.free(model_tokenizer_path);
 
     const config = blk: {
-        var config_json_file = try asynk.File.open(model_config_path, .{ .mode = .read_only });
+        var config_json_file = try async.File.open(model_config_path, .{ .mode = .read_only });
         defer config_json_file.close() catch unreachable;
         var config_json_buffer: [256]u8 = undefined;
         var config_reader = config_json_file.reader(&config_json_buffer);
@@ -276,7 +276,7 @@ pub fn asyncMain() !void {
 
     // Compile the model twice, one for prefill, one for generation.
     var start = try std.time.Timer.start();
-    var fut_mod_prefill = try asynk.asyncc(zml.compileModel, .{
+    var fut_mod_prefill = try async.async(zml.compileModel, .{
         allocator, llama.LlamaLM.forward, llama_tensors,
         .{
             prefill_tokens_shape,
@@ -287,7 +287,7 @@ pub fn asyncMain() !void {
         platform,
     });
 
-    var fut_mod = try asynk.asyncc(zml.compileModel, .{
+    var fut_mod = try async.async(zml.compileModel, .{
         allocator, llama.LlamaLM.forward, llama_tensors,
         .{
             gen_tokens_shape,

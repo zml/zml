@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const asynk = @import("async");
+const async = @import("async");
 const zml = @import("zml");
 
 /// Model definition
@@ -18,7 +18,7 @@ const Layer = struct {
 };
 
 pub fn main() !void {
-    try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain);
+    try async.AsyncThread.main(std.heap.c_allocator, asyncMain);
 }
 
 pub fn asyncMain() !void {
@@ -58,7 +58,7 @@ pub fn asyncMain() !void {
 
     // Start compiling. This uses the inferred shapes from the BufferStore.
     // The shape of the input tensor, we have to pass in manually.
-    var compilation = try asynk.asyncc(zml.compileModel, .{ allocator, Layer.forward, model_shapes, .{input_shape}, platform });
+    var compilation = try async.async(zml.compileModel, .{ allocator, Layer.forward, model_shapes, .{input_shape}, platform });
 
     // Produce a bufferized weights struct from the fake BufferStore.
     // This is like the inferred shapes, but with actual values.

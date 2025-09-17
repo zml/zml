@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const asynk = @import("async");
+const async = @import("async");
 const mlir = @import("mlir");
 const pjrt = @import("pjrt");
 const stablehlo = @import("mlir/dialects").stablehlo;

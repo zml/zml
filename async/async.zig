@@ -63,7 +63,7 @@ fn FrameExx(comptime func: anytype, comptime argsT: type, comptime returnT: type
     };
 }
 
-pub fn asyncc(comptime func: anytype, args: anytype) !FrameEx(func, @TypeOf(args)) {
+pub fn async(comptime func: anytype, args: anytype) !FrameEx(func, @TypeOf(args)) {
     const Signature = stdx.meta.FnSignature(func, @TypeOf(args));
     const new_stack = try AsyncThread.current.stack_allocator.create();
     return .{

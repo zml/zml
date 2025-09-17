@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const asynk = @import("async");
+const async = @import("async");
 const stdx = @import("stdx");
 
 const DataType = @import("dtype.zig").DataType;

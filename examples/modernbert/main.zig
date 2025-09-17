@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const asynk = @import("async");
+const async = @import("async");
 const clap = @import("clap");
 const stdx = @import("stdx");
 const zml = @import("zml");
@@ -15,7 +15,7 @@ pub const std_options: std.Options = .{
     .log_scope_levels = &[_]std.log.ScopeLevel{
         .{ .scope = .modernbert, .level = .info },
     },
-    .logFn = asynk.logFn(std.log.defaultLog),
+    .logFn = async.logFn(std.log.defaultLog),
 };
 
 const params = clap.parseParamsComptime(
@@ -38,7 +38,7 @@ const clap_parsers = .{
 };
 
 pub fn main() !void {
-    try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain);
+    try async.AsyncThread.main(std.heap.c_allocator, asyncMain);
 }
 
 pub fn asyncMain() !void {
@@ -136,7 +136,7 @@ pub fn asyncMain() !void {
 
     // Compile the model
     log.info("\tCompiling ModernBERT model...", .{});
-    var fut_mod = try asynk.asyncc(zml.compile, .{
+    var fut_mod = try async.async(zml.compile, .{
         allocator,
         modernbert.ModernBertForMaskedLM.forward,
         .{modernbert_options},

@@ -1,13 +1,13 @@
 const std = @import("std");
 
-const asynk = @import("async");
+const async = @import("async");
 const runtimes = @import("runtimes");
 const zml = @import("zml");
 const cu = zml.platform_specific;
 
 pub const std_options: std.Options = .{
     .log_level = .info,
-    .logFn = asynk.logFn(std.log.defaultLog),
+    .logFn = async.logFn(std.log.defaultLog),
 };
 
 const log = std.log.scoped(.@"examples/custom_call");
@@ -126,7 +126,7 @@ pub fn grayscale(rgb: zml.Tensor) zml.Tensor {
 }
 
 pub fn main() !void {
-    try asynk.AsyncThread.main(std.heap.smp_allocator, asyncMain);
+    try async.AsyncThread.main(std.heap.smp_allocator, asyncMain);
 }
 
 pub fn asyncMain() !void {

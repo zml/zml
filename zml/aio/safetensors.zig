@@ -1,7 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const asynk = @import("async");
+const async = @import("async");
 const stdx = @import("stdx");
 
 const MemoryMappedFile = @import("../aio.zig").MemoryMappedFile;
@@ -30,7 +30,7 @@ pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore
 }
 
 fn loadFromIndex(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.array_list.Managed(MemoryMappedFile), path: []const u8) !void {
-    const file = asynk.File.open(path, .{}) catch |err| {
+    const file = async.File.open(path, .{}) catch |err| {
         log.err("Failed to open {s}: {}", .{ path, err });
         return err;
     };
@@ -66,7 +66,7 @@ fn loadFromIndex(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.
 }
 
 fn loadFile(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.array_list.Managed(MemoryMappedFile), path: []const u8) !void {
-    const file = asynk.File.open(path, .{}) catch |err| {
+    const file = async.File.open(path, .{}) catch |err| {
         log.err("Failed to open {s}: {}", .{ path, err });
         return err;
     };

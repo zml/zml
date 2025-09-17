@@ -1,7 +1,7 @@
 const clap = @import("clap");
 const std = @import("std");
 const zml = @import("zml");
-const asynk = @import("async");
+const async = @import("async");
 const log = std.log;
 const Tensor = zml.Tensor;
 const modernbert_module = @import("modernbert.zig");
@@ -20,7 +20,7 @@ fn printUsageAndExit(stderr: anytype) noreturn {
     std.process.exit(0);
 }
 pub fn main() !void {
-    try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain);
+    try async.AsyncThread.main(std.heap.c_allocator, asyncMain);
 }
 
 pub fn asyncMain() !void {

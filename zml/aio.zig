@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const asynk = @import("async");
+const async = @import("async");
 const c = @import("c");
 const stdx = @import("stdx");
 
@@ -336,13 +336,13 @@ pub const Metadata = union(enum) {
 /// This struct is meant to be wrapped into a format specific struct, like io.gguf.File.
 pub const MemoryMappedFile = struct {
     /// underlying file handle
-    file: asynk.File,
+    file: async.File,
     data: []align(std.heap.page_size_min) const u8,
     data_offset: u64 = 0,
 
-    pub fn init(file: asynk.File) !MemoryMappedFile {
+    pub fn init(file: async.File) !MemoryMappedFile {
         const data_len: usize = (try file.stat()).size;
-        const data_ = try asynk.callBlocking(std.posix.mmap, .{
+        const data_ = try async.callBlocking(std.posix.mmap, .{
             null,
             data_len,
             std.posix.PROT.READ,
@@ -351,7 +351,7 @@ pub const MemoryMappedFile = struct {
             0,
         });
 
-        try asynk.callBlocking(posix.madvise, .{
+        try async.callBlocking(posix.madvise, .{
             data_.ptr,
             @as(usize, @intCast(data_.len)),
             @as(u32, @intCast(c.MADV_SEQUENTIAL)),

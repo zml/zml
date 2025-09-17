@@ -99,10 +99,10 @@ Let's start by writing some Zig code, importing ZML and often-used modules:
 ```zig
 const std = @import("std");
 const zml = @import("zml");
-const asynk = @import("async");
+const async = @import("async");
 
-// shortcut to the asyncc function in the asynk module
-const asyncc = asynk.asyncc;
+// shortcut to the async function in the async module
+const async = async.async;
 ```
 
 You will use above lines probably in all ZML projects. Also, note that **ZML is
@@ -154,7 +154,7 @@ like this:
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    try asynk.AsyncThread.main(gpa.allocator(), asyncMain);
+    try async.AsyncThread.main(gpa.allocator(), asyncMain);
 }
 
 
@@ -251,7 +251,7 @@ const model_shapes = try zml.aio.populateModel(Layer, allocator, bs);
 
 // Start compiling. This uses the inferred shapes from the BufferStore.
 // The shape of the input tensor, we have to pass in manually.
-var compilation = try asyncc(
+var compilation = try async(
     zml.compileModel,
     .{ allocator, Layer.forward, model_shapes, .{input_shape}, platform },
 );
@@ -266,8 +266,8 @@ defer zml.aio.unloadBuffers(&model_weights);  // for good practice
 const compiled = try compilation.await();
 ```
 
-Compiling is happening in the background via the `asyncc` function. We call
-`asyncc` with the `zml.compileModel` function and its arguments
+Compiling is happening in the background via the `async` function. We call
+`async` with the `zml.compileModel` function and its arguments
 separately. The arguments themselves are basically the shapes of the weights in
 the BufferStore, the `.forward` function name in order to compile
 `Layer.forward`, the shape of the input tensor(s), and the platform for which to
@@ -371,7 +371,7 @@ top of the Zig file:
 
 ```zig
 const zml = @import("zml");
-const asynk = @import("async");
+const async = @import("async");
 ```
 
 
@@ -418,9 +418,9 @@ You can access the complete source code of this walkthrough here:
 ```zig
 const std = @import("std");
 const zml = @import("zml");
-const asynk = @import("async");
+const async = @import("async");
 
-const asyncc = asynk.asyncc;
+const async = async.async;
 
 /// Model definition
 const Layer = struct {
@@ -439,7 +439,7 @@ const Layer = struct {
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    try asynk.AsyncThread.main(gpa.allocator(), asyncMain);
+    try async.AsyncThread.main(gpa.allocator(), asyncMain);
 }
 
 pub fn asyncMain() !void {
@@ -482,7 +482,7 @@ pub fn asyncMain() !void {
 
     // Start compiling. This uses the inferred shapes from the BufferStore.
     // The shape of the input tensor, we have to pass in manually.
-    var compilation = try asyncc(zml.compileModel, .{ allocator, Layer.forward, model_shapes, .{input_shape}, platform });
+    var compilation = try async(zml.compileModel, .{ allocator, Layer.forward, model_shapes, .{input_shape}, platform });
 
     // Produce a bufferized weights struct from the fake BufferStore.
     // This is like the inferred shapes, but with actual values.

@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const asynk = @import("async");
+const async = @import("async");
 const stdx = @import("stdx");
 const zml_tokenizer = @import("zml/tokenizer");
 
@@ -14,7 +14,7 @@ const Flags = struct {
 };
 
 pub fn main() !void {
-    try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain);
+    try async.AsyncThread.main(std.heap.c_allocator, asyncMain);
 }
 
 pub fn asyncMain() !void {

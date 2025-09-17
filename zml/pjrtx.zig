@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const asynk = @import("async");
+const async = @import("async");
 const dialects = @import("mlir/dialects");
 const mlir = @import("mlir");
 const pjrt = @import("pjrt");
@@ -66,7 +66,7 @@ pub const Client = opaque {
     }
 
     pub fn deserializeAndLoad(self: *const Client, api: *const Api, bytes: []const u8) ApiError!*LoadedExecutable {
-        return @ptrCast(try asynk.callBlocking(pjrt.Client.deserializeAndLoad, .{ self.inner(), api, bytes }));
+        return @ptrCast(try async.callBlocking(pjrt.Client.deserializeAndLoad, .{ self.inner(), api, bytes }));
     }
 
     pub const CreateViewOfDeviceBufferArgs = pjrt.Client.CreateViewOfDeviceBufferArgs;
@@ -105,7 +105,7 @@ pub const Client = opaque {
     }
 
     pub fn compile(self: *const Client, api: *const Api, allocator: std.mem.Allocator, module: mlir.Module, compile_options_pb: []const u8) CompileError!*LoadedExecutable {
-        return try asynk.callBlocking(compileSync, .{ self, api, allocator, module, compile_options_pb });
+        return try async.callBlocking(compileSync, .{ self, api, allocator, module, compile_options_pb });
     }
 
     pub fn addressableMemories(self: *const Client, api: *const Api) []*const Memory {
@@ -223,7 +223,7 @@ pub const Event = opaque {
 
         var ctx = struct {
             err: ?*pjrt.Error = null,
-            event: asynk.threading.ResetEventSingle = .{},
+            event: async.threading.ResetEventSingle = .{},
         }{};
 
         try self.inner().onReady(api, &(struct {

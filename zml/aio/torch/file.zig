@@ -1,7 +1,7 @@
 const std = @import("std");
 const testing = std.testing;
 
-const asynk = @import("async");
+const async = @import("async");
 const stdx = @import("stdx");
 
 const zml = @import("../../zml.zig");
@@ -478,7 +478,7 @@ test "Read pickle (zipped)" {
     // model = torch.nn.Conv2d(2, 2, 3, stride=2, padding=[2, 4], dtype=torch.float16)
     // tensor = torch.tensor([[2, 4, 3, 2]], dtype=torch.uint8)
     // torch.save({ "model": model, "tensor": tensor}, "simple.pt")
-    const file = try asynk.File.open("zml/aio/torch/simple.pt", .{ .mode = .read_only });
+    const file = try async.File.open("zml/aio/torch/simple.pt", .{ .mode = .read_only });
     const mmap_file = try zml.aio.MemoryMappedFile.init(file);
     var store = try zml.aio.BufferStore.initWithFiles(testing.allocator, &.{mmap_file});
     defer store.deinit();
