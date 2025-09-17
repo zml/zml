@@ -34,7 +34,7 @@ pub const Platform = struct {
     // `const comp = platform.compiler(compile_opts); const exe = comp.compile(...);`
     compilation_options: CompilationOptions = .{},
 
-    pub const MAX_NUM_DEVICES: u8 = 32;
+    pub const MAX_NUM_DEVICES: u8 = if (runtimes.isEnabled(.tpu)) 32 else 8;
     pub const CreateOptions = _CreateOptions;
 
     pub fn init(target: Target, api: *const pjrt.Api, options: CreateOptions) !Platform {
