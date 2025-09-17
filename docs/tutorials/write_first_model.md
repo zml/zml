@@ -263,7 +263,7 @@ var model_weights = try zml.aio.loadBuffers(Layer, .{}, bs, arena, platform);
 defer zml.aio.unloadBuffers(&model_weights);  // for good practice
 
 // Wait for compilation to finish
-const compiled = try compilation.awaitt();
+const compiled = try compilation.await();
 ```
 
 Compiling is happening in the background via the `asyncc` function. We call
@@ -491,7 +491,7 @@ pub fn asyncMain() !void {
     defer zml.aio.unloadBuffers(&model_weights); // for good practice
 
     // Wait for compilation to finish
-    const compiled = try compilation.awaitt();
+    const compiled = try compilation.await();
 
     // pass the model weights to the compiled module to create an executable
     // module

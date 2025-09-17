@@ -736,7 +736,7 @@ pub fn unloadBuffers(model: anytype) void {
 pub fn awaitAll(buffers: anytype) !void {
     zml.meta.visit((struct {
         fn cb(_: void, buffer: *zml.Buffer) void {
-            buffer.* = buffer.awaitt() catch unreachable;
+            buffer.* = buffer.await() catch unreachable;
         }
     }).cb, {}, buffers);
 }

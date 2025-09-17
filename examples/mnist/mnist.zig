@@ -82,7 +82,7 @@ pub fn asyncMain() !void {
     defer zml.aio.unloadBuffers(&model_weights);
 
     // Wait for end of compilation and end of weights loading.
-    const compiled_mnist = try compilation.awaitt();
+    const compiled_mnist = try compilation.await();
     log.info("✅ Compiled model in {d}ms", .{start_time.read() / std.time.ns_per_ms});
 
     const mnist = compiled_mnist.prepare(model_weights);

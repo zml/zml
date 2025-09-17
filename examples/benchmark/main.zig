@@ -56,7 +56,7 @@ pub fn asyncMain() !void {
     var compilation = try asynk.asyncc(zml.compileFn, .{ allocator, benchmark, .{ a_shape, b_shape }, platform });
 
     // Wait for compilation to finish
-    const executable = try compilation.awaitt();
+    const executable = try compilation.await();
     defer executable.deinit();
     const compilation_elapsed = timer.lap() / std.time.ns_per_ms;
     std.debug.print("-" ** 160 ++ "\n\n", .{});

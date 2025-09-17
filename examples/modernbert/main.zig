@@ -144,7 +144,7 @@ pub fn asyncMain() !void {
         tensor_store,
         platform,
     });
-    var bert_module = (try fut_mod.awaitt()).prepare(bert_weights);
+    var bert_module = (try fut_mod.await()).prepare(bert_weights);
     defer bert_module.deinit();
     log.info("✅\tLoaded weights and compiled model in {D}", .{start.read()});
 

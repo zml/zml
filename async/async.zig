@@ -52,9 +52,7 @@ fn FrameExx(comptime func: anytype, comptime argsT: type, comptime returnT: type
 
         inner: FrameT,
 
-        pub const wait = await_;
-        pub const await_ = awaitt;
-        pub fn awaitt(self: *Self) returnT {
+        pub fn await(self: *Self) returnT {
             defer {
                 self.inner.deinit();
                 AsyncThread.current.stack_allocator.destroy(&self.inner._frame.stack);

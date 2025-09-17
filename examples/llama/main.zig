@@ -304,9 +304,9 @@ pub fn asyncMain() !void {
     defer zml.aio.unloadBuffers(&llama_buffers);
     log.info("✅\tLoaded weights in {D}", .{start.read()});
 
-    var llama_module_prefill = (try fut_mod_prefill.awaitt()).prepare(llama_buffers);
+    var llama_module_prefill = (try fut_mod_prefill.await()).prepare(llama_buffers);
     defer llama_module_prefill.deinit();
-    var llama_module = (try fut_mod.awaitt()).prepare(llama_buffers);
+    var llama_module = (try fut_mod.await()).prepare(llama_buffers);
     defer llama_module.deinit();
     log.info("✅\tCompiled model in {D}", .{start.read()});
     log.info("Creating KvCache", .{});
