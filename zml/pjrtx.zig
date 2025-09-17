@@ -211,10 +211,10 @@ pub const Event = opaque {
         if (self.isReady(api)) {
             return;
         }
-        try self.inner().await_(api);
+        try self.inner().await(api);
     }
 
-    pub fn await_(self: *Event, api: *const Api) ApiError!void {
+    pub fn await(self: *Event, api: *const Api) ApiError!void {
         defer self.deinit(api);
 
         if (self.isReady(api)) {
