@@ -56,7 +56,7 @@ jobs:
 
       - name: Ensure self hosted cache permissions
         if: ! ${{ matrix.platforms.enable_cache }}
-        run: sudo chown -R ${{ matrix.platforms.user }}:${{ matrix.platforms.user }} /tmp/zig-cache
+        run: sudo chmod -R 777 /tmp/zig-cache
 
       - uses: bazel-contrib/setup-bazel@0.15.0
         with:
