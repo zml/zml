@@ -65,23 +65,21 @@ pub const Buffer = struct {
                 break :buf host_buffer.slice1d(ax, .{ .start = start, .end = start + chunk_size });
             } else host_buffer;
 
-            var args = pjrt.Client.BufferFromHostBufferArgs{
+            const args = pjrt.Client.BufferFromHostBufferArgs{
                 .data = buf._data,
                 .buffer_type = buffer_type,
                 .dims = buf.shape().dims(),
                 .byte_strides = byte_strides,
                 .host_buffer_semantics = .ImmutableUntilTransferCompletes,
+                .dst = if (opts.memory == .device)
+                    .{ .device = devices[i] }
+                else
+                    .{ .memory = platform.memoryForDevice(opts.memory, devices[i]) },
             };
-            if (opts.memory == .device) {
-                args.device = devices[i];
-            } else {
-                args.memory = platform.memoryForDevice(opts.memory, devices[i]);
-            }
 
             const pjrt_buffer, const event = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, args);
 
             if (event) |ev| ev.deinit(platform.pjrt_api);
-
             res._shards.appendAssumeCapacity(pjrt_buffer);
         }
 
@@ -99,6 +97,15 @@ pub const Buffer = struct {
             }
         }
 
+        return self;
+    }
+
+    pub fn awaitBlocking(self: Buffer) !Buffer {
+        for (self._shards.constSlice()) |buffer| {
+            if (buffer.getReadyEvent(self._api)) |ev| {
+                try ev.awaitBlocking(self._api);
+            }
+        }
         return self;
     }
 
@@ -183,6 +190,8 @@ pub const Buffer = struct {
             }
         }
 
+        // Constant is always blocking because it uses pointer to stack memory.
+        const cst_opts: FromOptions = .{ .memory = opts.memory, .wait = true };
         // Convert val to the requested dtype.
         const x = shape_.dtype().constant(val);
         const byte_size = shape_.dtype().sizeOf();
@@ -195,7 +204,7 @@ pub const Buffer = struct {
                 ._strides = @splat(0),
                 ._data = x.constSlice().ptr,
             };
-            return try from(platform, host_buffer, .{ .wait = true });
+            return try from(platform, host_buffer, cst_opts);
         }
 
         // To speed up copies, duplicate the scalar value into a vector,
@@ -218,8 +227,7 @@ pub const Buffer = struct {
             else => unreachable,
         }
         const host_buffer: HostBuffer = .{ ._shape = shape_, ._strides = strides, ._data = &bytes };
-        std.debug.assert(opts.wait == true);
-        return try from(platform, host_buffer, opts);
+        return try from(platform, host_buffer, cst_opts);
     }
 
     test constant {
@@ -397,9 +405,61 @@ pub const Buffer = struct {
     pub const UnitializedOptions = struct { memory: Memory = .device };
 
     pub fn uninitialized(platform: Platform, shape_: Shape, opts: UnitializedOptions) !Buffer {
-        // XLA uninitialized is broken see https://github.com/openxla/xla/pull/31292
-        // TODO: use uninitialized when it works again.
-        return try constant(platform, shape_, 0, .{ .wait = true, .memory = opts.memory });
+        if (opts.memory != .device) {
+            // XLA uninitialized doesn't respect memory see https://github.com/openxla/xla/pull/31292
+            // TODO: use uninitialized when it works again.
+            const host_buffer: HostBuffer = try .empty(std.heap.smp_allocator, shape_);
+            defer host_buffer.deinit(std.heap.smp_allocator);
+            return try .from(platform, host_buffer, .{ .wait = true, .memory = opts.memory });
+        }
+
+        var res: Buffer = .{
+            ._api = platform.pjrt_api,
+            ._shape = shape_,
+            ._shards = .{},
+            ._target = platform.target,
+        };
+        errdefer for (res._shards.slice()) |shard| {
+            shard.deinit(platform.pjrt_api);
+        };
+
+        stdx.debug.assert(platform.sharding().num_replicas == 1, "ZML doesn't support num_replicas > 1 for now, got: {}", .{platform.sharding()});
+        const sharding_ax: ?u3 = std.simd.firstTrue(shape_._sharding_info);
+        const n_partitions = platform.sharding().num_partitions;
+
+        const shard_shape = if (sharding_ax) |ax| s: {
+            // This kind of sharding error should be detected earlier on.
+            stdx.debug.assert(@rem(shape_.dim(ax), n_partitions) == 0, "Buffer.uninitialized() expects the sharding axis {} to have a dimension divisble by the number of devices ({}).", .{ ax, n_partitions });
+            const shard_shape = shape_.set(ax, @divExact(shape_.dim(ax), n_partitions));
+            break :s shard_shape;
+        } else shape_;
+
+        var args = pjrt.Client.CreateUninitializedBufferArgs{
+            .dims = shard_shape.dims(),
+            .element_type = bufferTypeFromDtype(shape_.dtype()),
+            .layout = .{
+                .tiled = .{
+                    .minor_to_major = minorToMajor(shape_.rank()),
+                    .tile_dims = &.{},
+                    .tile_dims_sizes = &.{},
+                },
+            },
+            // set per device, see below.
+            .dst = undefined,
+        };
+
+        const devices = platform.getDevices();
+        for (0..n_partitions) |i| {
+            args.dst = if (opts.memory == .device)
+                .{ .device = devices[i] }
+            else
+                .{ .memory = platform.memoryForDevice(opts.memory, devices[i]) };
+
+            const shard = try platform.pjrt_client.createUnitializedBuffer(platform.pjrt_api, args);
+            res._shards.appendAssumeCapacity(shard);
+        }
+
+        return res;
     }
 
     test uninitialized {

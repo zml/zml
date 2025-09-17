@@ -360,9 +360,11 @@ pub const Client = opaque {
         buffer_type: BufferType,
         dims: []const i64,
         byte_strides: ?[]const i64,
-        device: ?*const Device = null,
         host_buffer_semantics: HostBufferSemantics,
-        memory: ?*const Memory = null,
+        dst: union(enum) {
+            device: *const Device,
+            memory: *const Memory,
+        },
     };
 
     pub fn bufferFromHostBuffer(self: *const Client, api: *const Api, args: BufferFromHostBufferArgs) ApiError!struct { *Buffer, ?*Event } {
@@ -375,11 +377,11 @@ pub const Client = opaque {
             .byte_strides = if (args.byte_strides) |bs| @ptrCast(@constCast(bs.ptr)) else null,
             .num_byte_strides = if (args.byte_strides) |bs| bs.len else 0,
             .host_buffer_semantics = @intFromEnum(args.host_buffer_semantics),
-            .device = @ptrCast(@constCast(args.device)),
-            .memory = @ptrCast(@constCast(args.memory)),
+            .device = if (args.dst == .device) @ptrCast(@constCast(args.dst.device)) else null,
+            .memory = if (args.dst == .memory) @ptrCast(@constCast(args.dst.memory)) else null,
             .device_layout = null, // TODO
-            .done_with_host_buffer = null,
-            .buffer = null,
+            .done_with_host_buffer = null, // out
+            .buffer = null, // out
         });
 
         return .{
@@ -474,8 +476,10 @@ pub const Client = opaque {
         dims: []const i64,
         element_type: BufferType,
         layout: MemoryLayout,
-        device: ?*const Device = null,
-        memory: ?*const Memory = null,
+        dst: union(enum) {
+            device: *const Device,
+            memory: *const Memory,
+        },
     };
 
     pub fn createUninitializedBuffer(self: *const Client, api: *const Api, args: CreateUninitializedBufferArgs) ApiError!*Buffer {
@@ -486,8 +490,8 @@ pub const Client = opaque {
             .shape_num_dims = @intCast(args.dims.len),
             .shape_element_type = @intFromEnum(args.element_type),
             .shape_layout = @ptrCast(&layout),
-            .device = @ptrCast(@constCast(args.device)),
-            .memory = @ptrCast(@constCast(args.memory)),
+            .device = if (args.dst == .device) @ptrCast(@constCast(args.dst.device)) else null,
+            .memory = if (args.dst == .memory) @ptrCast(@constCast(args.dst.memory)) else null,
         });
         return @ptrCast(ret.buffer.?);
     }
@@ -530,6 +534,8 @@ pub const MemoryStats = struct {
     pool_bytes_is_set: bool, // out
     peak_pool_bytes: u64, // out
     peak_pool_bytes_is_set: bool, // out
+
+    pub const zeroes = std.mem.zeroes(MemoryStats);
 };
 
 pub const Device = opaque {
@@ -759,6 +765,7 @@ pub const LoadedExecutable = opaque {
         non_donatable_input_indices: []const i64 = &.{},
         context: ?*ExecuteContext,
     };
+
     pub fn execute(self: *const LoadedExecutable, api: *const Api, args: ExecuteArgs) ApiError!void {
         var options = pjrtStruct(c.PJRT_ExecuteOptions{
             .send_callbacks = null,

@@ -243,7 +243,9 @@ pub const Event = opaque {
 
         if (ctx.err) |e| {
             defer e.deinit(api);
-            return e.getCode(api).toApiError();
+            const err_code = e.getCode(api).toApiError();
+            log.err("{t} {s}", .{ err_code, e.getMessage(api) });
+            return err_code;
         }
     }
 };

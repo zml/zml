@@ -118,6 +118,13 @@ pub const Platform = struct {
             }
         }
     }
+
+    pub fn memoryStats(platform: Platform, device_id: usize) pjrt.MemoryStats {
+        if (platform.target == .cpu) return .zeroes;
+
+        const device = platform.getDevices()[device_id];
+        return device.memoryStats(platform.pjrt_api) catch .zeroes;
+    }
 };
 
 const _CreateOptions = struct {
