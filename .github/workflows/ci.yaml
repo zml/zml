@@ -47,12 +47,16 @@ jobs:
       - uses: runs-on/snapshot@v1
         if: ${{ matrix.platforms.enable_cache }}
         with:
-          path: /home/runner/.cache/bazel-disk
+          path: /home/${{ matrix.platforms.user }}/.cache/bazel-disk
           volume_size: 350
 
       - name: TMP fix for the mount user
         if: ${{ matrix.platforms.enable_cache }}
-        run: sudo chown -R runner:runner /home/runner/.cache/
+        run: sudo chown -R ${{ matrix.platforms.user }}:${{ matrix.platforms.user }} /home/${{ matrix.platforms.user }}/.cache/
+
+      - name: Ensure self hosted cache permissions
+        if: ! ${{ matrix.platforms.enable_cache }}
+        run: sudo chown -R ${{ matrix.platforms.user }}:${{ matrix.platforms.user }} /tmp/zig-cache
 
       - uses: bazel-contrib/setup-bazel@0.15.0
         with:
