@@ -43,11 +43,17 @@ jobs:
       - uses: runs-on/action@v1
       - name: Checkout
         uses: actions/checkout@v4
+
       - uses: runs-on/snapshot@v1
         if: ${{ matrix.platforms.enable_cache }}
         with:
           path: /home/runner/.cache/bazel-disk
           volume_size: 350
+
+      - name: TMP fix for the mount user
+        if: ${{ matrix.platforms.enable_cache }}
+        run: sudo chown -R runner:runner /home/runner/.cache/
+
       - uses: bazel-contrib/setup-bazel@0.15.0
         with:
           bazelisk-version: 1.26.0
