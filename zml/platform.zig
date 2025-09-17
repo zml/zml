@@ -96,9 +96,6 @@ pub const Platform = struct {
         };
         // TODO measure the cost of this and consider caching.
         const device_memories = device.addressableMemories(platform.pjrt_api);
-        // for (device_memories) |m| {
-        //     log.warn("Platform {t}, device {*} -> memory {t}", .{platform.target, device, m.kind(platform.pjrt_api)});
-        // }
         for (device_memories) |m| {
             if (memory_target == m.kind(platform.pjrt_api)) {
                 return m;

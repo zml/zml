@@ -71,7 +71,8 @@ pub const Buffer = struct {
                 .dims = buf.shape().dims(),
                 .byte_strides = byte_strides,
                 .host_buffer_semantics = .ImmutableUntilTransferCompletes,
-                .dst = if (opts.memory == .device)
+                // CPU has no distinctions between memories.
+                .dst = if (platform.target == .cpu or opts.memory == .device)
                     .{ .device = devices[i] }
                 else
                     .{ .memory = platform.memoryForDevice(opts.memory, devices[i]) },
@@ -450,7 +451,7 @@ pub const Buffer = struct {
 
         const devices = platform.getDevices();
         for (0..n_partitions) |i| {
-            args.dst = if (opts.memory == .device)
+            args.dst = if (platform.target == .cpu or opts.memory == .device)
                 .{ .device = devices[i] }
             else
                 .{ .memory = platform.memoryForDevice(opts.memory, devices[i]) };
