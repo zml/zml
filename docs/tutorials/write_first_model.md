@@ -100,9 +100,6 @@ Let's start by writing some Zig code, importing ZML and often-used modules:
 const std = @import("std");
 const zml = @import("zml");
 const async = @import("async");
-
-// shortcut to the async function in the async module
-const async = async.async;
 ```
 
 You will use above lines probably in all ZML projects. Also, note that **ZML is
@@ -251,7 +248,7 @@ const model_shapes = try zml.aio.populateModel(Layer, allocator, bs);
 
 // Start compiling. This uses the inferred shapes from the BufferStore.
 // The shape of the input tensor, we have to pass in manually.
-var compilation = try async(
+var compilation = try async.async(
     zml.compileModel,
     .{ allocator, Layer.forward, model_shapes, .{input_shape}, platform },
 );
@@ -420,8 +417,6 @@ const std = @import("std");
 const zml = @import("zml");
 const async = @import("async");
 
-const async = async.async;
-
 /// Model definition
 const Layer = struct {
     bias: ?zml.Tensor = null,
@@ -482,7 +477,7 @@ pub fn asyncMain() !void {
 
     // Start compiling. This uses the inferred shapes from the BufferStore.
     // The shape of the input tensor, we have to pass in manually.
-    var compilation = try async(zml.compileModel, .{ allocator, Layer.forward, model_shapes, .{input_shape}, platform });
+    var compilation = try async.async(zml.compileModel, .{ allocator, Layer.forward, model_shapes, .{input_shape}, platform });
 
     // Produce a bufferized weights struct from the fake BufferStore.
     // This is like the inferred shapes, but with actual values.
