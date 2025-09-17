@@ -19,14 +19,17 @@ jobs:
           - target: cuda
             bazel_opts: "--@zml//runtimes:cuda=true --@zml//runtimes:cpu=false"
             enable_cache: false
+            user: actions
             runs-on: ["self-hosted", "platform=cuda"]
           - target: rocm
             bazel_opts: "--@zml//runtimes:rocm=true --@zml//runtimes:cpu=false"
             enable_cache: false
+            user: actions
             runs-on: ["self-hosted", "platform=rocm"]
           - target: cpu
             bazel_opts: "--@zml//runtimes:cpu=true"
             enable_cache: true
+            user: runner
             runs-on:
               [
                 "runs-on",
@@ -57,7 +60,7 @@ jobs:
             common --test_output=streamed
             common --color=yes
             common --show_timestamps
-            common --disk_cache=/home/runner/.cache/bazel-disk
+            common --disk_cache=/home/${{ matrix.platforms.user }}/.cache/bazel-disk
             common --strip=always
 
       - name: ZML / bazel build //...
@@ -122,9 +125,3 @@ jobs:
 
       - name: ZML / bazel query //...
         run: bazel query //...
-
-      - name: ZML / bazel build //...
-        run: bazel build //...
-
-      - name: ZML / bazel test //...
-        run: bazel test //...
