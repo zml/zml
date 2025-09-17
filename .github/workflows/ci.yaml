@@ -2,9 +2,9 @@ name: ci
 on:
   push:
     branches:
-    - master
+      - master
     tags:
-    - '*'
+      - "*"
   pull_request:
 
 concurrency:
@@ -12,8 +12,68 @@ concurrency:
   cancel-in-progress: ${{ !contains(github.ref, 'master')}}
 
 jobs:
+  platforms:
+    strategy:
+      matrix:
+        platforms:
+          - target: cuda
+            bazel_opts: ""
+            enable_cache: false
+            runs-on: ["self-hosted", "platform=cuda"]
+          - target: rocm
+            bazel_opts: ""
+            enable_cache: false
+            runs-on: ["self-hosted", "platform=rocm"]
+          - target: cpu
+            bazel_opts: ""
+            enable_cache: true
+            runs-on:
+              [
+                "runs-on",
+                "runner=4cpu-linux-x64",
+                "image=ubuntu24-amd64",
+                "run-id=${{ github.run_id }}",
+                "extras=s3-cache",
+              ]
+    runs-on: ${{ matrix.platforms.runs-on }}
+    steps:
+      - uses: runs-on/action@v1
+      - name: Checkout
+        uses: actions/checkout@v4
+      - uses: runs-on/snapshot@v1
+        if: ${{ matrix.platforms.enable_cache }}
+        with:
+          path: /home/runner/.cache/bazel-disk
+          volume_size: 350
+      - uses: bazel-contrib/setup-bazel@0.15.0
+        with:
+          bazelisk-version: 1.26.0
+          bazelisk-cache: false
+          # todo: use `--config=debug` instead of `-c opt` when static archive bug is fixed
+          bazelrc: |
+            common -c opt
+            common --verbose_failures
+            common --keep_going
+            common --test_output=streamed
+            common --color=yes
+            common --show_timestamps
+            common --disk_cache=/home/runner/.cache/bazel-disk
+            common --strip=always
+
+      - name: ZML / bazel build //...
+        run: bazel build ${{ matrix.platforms.bazel_opts }} //...
+
+      - name: ZML / bazel test //...
+        run: bazel test ${{ matrix.platforms.bazel_opts }} //...
   ci:
-    runs-on: ["runs-on","runner=4cpu-linux-x64", "image=ubuntu24-amd64", "run-id=${{ github.run_id }}", "extras=s3-cache"]
+    runs-on:
+      [
+        "runs-on",
+        "runner=4cpu-linux-x64",
+        "image=ubuntu24-amd64",
+        "run-id=${{ github.run_id }}",
+        "extras=s3-cache",
+      ]
     steps:
       - uses: runs-on/action@v1
       - name: Checkout
