@@ -17,19 +17,18 @@ pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore
     errdefer res.arena.deinit();
     const arena = res.arena.allocator();
 
-    var files = std.array_list.Managed(MemoryMappedFile).init(arena);
-    errdefer files.deinit();
+    var files: std.ArrayList(MemoryMappedFile) = .empty;
 
     if (std.mem.endsWith(u8, path, ".safetensors.index.json")) {
         try loadFromIndex(arena, &res, &files, path);
     } else {
         try loadFile(arena, &res, &files, path);
     }
-    res.files = try files.toOwnedSlice();
+    res.files = try files.toOwnedSlice(allocator);
     return res;
 }
 
-fn loadFromIndex(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.array_list.Managed(MemoryMappedFile), path: []const u8) !void {
+fn loadFromIndex(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.ArrayList(MemoryMappedFile), path: []const u8) !void {
     const file = async.File.open(path, .{}) catch |err| {
         log.err("Failed to open {s}: {}", .{ path, err });
         return err;
@@ -65,7 +64,7 @@ fn loadFromIndex(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.
     }
 }
 
-fn loadFile(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.array_list.Managed(MemoryMappedFile), path: []const u8) !void {
+fn loadFile(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.ArrayList(MemoryMappedFile), path: []const u8) !void {
     const file = async.File.open(path, .{}) catch |err| {
         log.err("Failed to open {s}: {}", .{ path, err });
         return err;
@@ -87,7 +86,7 @@ fn loadFile(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.array
     errdefer buffer_file.deinit();
     buffer_file.data_offset = 8 + json_header_length;
 
-    try files.append(buffer_file);
+    try files.append(allocator, buffer_file);
     errdefer _ = files.pop();
 
     var it = metadata.object.iterator();

@@ -1143,7 +1143,7 @@ pub const Tensor = struct {
         contracting_axes: []const [2]i8,
         batching_axes: []const [2]i8,
     ) Tensor {
-        stdx.debug.assert(lhs.dtype() == rhs.dtype(), "dotGeneral expects tensors to be of the same type, got {} and {}", .{ lhs.dtype(), rhs.dtype() });
+        stdx.debug.assert(lhs.dtype() == rhs.dtype(), "dotGeneral expects tensors to be of the same type, got {f} and {f}", .{ lhs, rhs });
 
         const Axes = stdx.BoundedArray(i64, MAX_RANK);
 
@@ -1153,7 +1153,7 @@ pub const Tensor = struct {
         var rhs_batching_axes: Axes = .{};
         for (batching_axes) |b_axes| {
             const l, const r = b_axes;
-            stdx.debug.assert(lhs._shape.dim(l) == rhs._shape.dim(r), "dotGeneral expects batching dimensions to be equal, got {} and {} in {f} and {f}", .{ l, r, lhs, rhs });
+            stdx.debug.assert(lhs._shape.dim(l) == rhs._shape.dim(r), "dotGeneral expects batching dimensions to be equal, got {d} and {d} in {f} and {f}", .{ l, r, lhs, rhs });
             var t = lhs._shape.tag(l);
             if (t == Shape.TagUnknown) t = rhs._shape.tag(r);
             res_shape = res_shape.appendDim(lhs._shape.dim(l), t);
