@@ -12,20 +12,26 @@ test {
 pub const DataType = enum(u8) {
     bool,
     // Note: the support of the float8 is a bit spotty, f8e4m3b11fnuz seems to be the most supported one on Cuda.
+    f4e2m1,
+    f8e3m4,
+    f8e4m3,
     f8e4m3b11fnuz,
     f8e4m3fn,
     f8e4m3fnuz,
     f8e5m2,
     f8e5m2fnuz,
+    f8e8m0,
     bf16,
     f16,
     f32,
     f64,
+    i2,
     i4,
     i8,
     i16,
     i32,
     i64,
+    u2,
     u4,
     u8,
     u16,
@@ -50,8 +56,21 @@ pub const DataType = enum(u8) {
     pub fn class(self: DataType) Class {
         return switch (self) {
             .bool => .bool,
-            .f8e4m3b11fnuz, .f8e4m3fn, .f8e4m3fnuz, .f8e5m2, .f8e5m2fnuz, .bf16, .f16, .f32, .f64 => .float,
-            .i4, .i8, .i16, .i32, .i64, .u4, .u8, .u16, .u32, .u64 => .integer,
+            .f4e2m1,
+            .f8e3m4,
+            .f8e4m3,
+            .f8e4m3b11fnuz,
+            .f8e4m3fn,
+            .f8e4m3fnuz,
+            .f8e5m2,
+            .f8e5m2fnuz,
+            .f8e8m0,
+            .bf16,
+            .f16,
+            .f32,
+            .f64,
+            => .float,
+            .i2, .i4, .i8, .i16, .i32, .i64, .u2, .u4, .u8, .u16, .u32, .u64 => .integer,
             .c64, .c128 => .complex,
         };
     }
@@ -70,21 +89,27 @@ pub const DataType = enum(u8) {
 
     pub fn fromZigType(comptime T: type) DataType {
         return switch (T) {
+            floats.Float4E2M1 => .f4e2m1,
+            floats.Float8E3M4 => .f8e3m4,
+            floats.Float8E4M3 => .f8e4m3,
             floats.Float8E4M3B11FNUZ => .f8e4m3b11fnuz,
             floats.Float8E4M3FN => .f8e4m3fn,
             floats.Float8E4M3FNUZ => .f8e4m3fnuz,
             floats.Float8E5M2 => .f8e5m2,
             floats.Float8E5M2FNUZ => .f8e5m2fnuz,
+            floats.Float8E8M0 => .f8e8m0,
             floats.BFloat16 => .bf16,
             f16 => .f16,
             f32 => .f32,
             f64 => .f64,
             bool => .bool,
+            i2 => .i2,
             i4 => .i4,
             i8 => .i8,
             i16 => .i16,
             i32 => .i32,
             i64 => .i64,
+            u2 => .u2,
             u4 => .u4,
             u8 => .u8,
             u16 => .u16,
@@ -192,10 +217,10 @@ pub const DataType = enum(u8) {
     pub fn maxValue(dtype: DataType) Data {
         return switch (dtype) {
             .bool => .{ .bool = true },
-            inline .f8e4m3b11fnuz, .f8e4m3fn, .f8e4m3fnuz, .f8e5m2fnuz => |tag| @panic("DataType doesn't have a max value: " ++ @tagName(tag)),
-            inline .f8e5m2, .bf16 => |tag| @unionInit(Data, @tagName(tag), @FieldType(Data, @tagName(tag)).inf),
+            inline .f4e2m1, .f8e4m3b11fnuz, .f8e4m3fn, .f8e4m3fnuz, .f8e5m2fnuz, .f8e8m0 => |tag| @panic("DataType doesn't have a max value: " ++ @tagName(tag)),
+            inline .f8e3m4, .f8e4m3, .f8e5m2, .bf16 => |tag| @unionInit(Data, @tagName(tag), @FieldType(Data, @tagName(tag)).inf),
             inline .f16, .f32, .f64 => |tag| @unionInit(Data, @tagName(tag), std.math.inf(@FieldType(Data, @tagName(tag)))),
-            inline .i4, .i8, .i16, .i32, .i64, .u4, .u8, .u16, .u32, .u64 => |tag| @unionInit(Data, @tagName(tag), std.math.maxInt(@FieldType(Data, @tagName(tag)))),
+            inline .i2, .i4, .i8, .i16, .i32, .i64, .u2, .u4, .u8, .u16, .u32, .u64 => |tag| @unionInit(Data, @tagName(tag), std.math.maxInt(@FieldType(Data, @tagName(tag)))),
             inline .c64, .c128 => |tag| @panic("DataType doesn't have a max value: " ++ @tagName(tag)),
         };
     }
@@ -207,20 +232,26 @@ pub const DataType = enum(u8) {
 
 pub const Data = union(DataType) {
     bool: bool,
+    f4e2m1: floats.Float4E2M1,
+    f8e3m4: floats.Float8E3M4,
+    f8e4m3: floats.Float8E4M3,
     f8e4m3b11fnuz: floats.Float8E4M3B11FNUZ,
     f8e4m3fn: floats.Float8E4M3FN,
     f8e4m3fnuz: floats.Float8E4M3FNUZ,
     f8e5m2: floats.Float8E5M2,
     f8e5m2fnuz: floats.Float8E5M2FNUZ,
+    f8e8m0: floats.Float8E8M0,
     bf16: floats.BFloat16,
     f16: f16,
     f32: f32,
     f64: f64,
+    i2: i2,
     i4: i4,
     i8: i8,
     i16: i16,
     i32: i32,
     i64: i64,
+    u2: u2,
     u4: u4,
     u8: u8,
     u16: u16,
@@ -244,7 +275,7 @@ pub const Data = union(DataType) {
                 .comptime_int, .int, .comptime_float, .float => .{ .bool = value != 0 },
                 else => @panic("Could not create Data of type bool from value of type " ++ @typeName(T)),
             },
-            inline .f8e4m3b11fnuz, .f8e4m3fn, .f8e4m3fnuz, .f8e5m2, .f8e5m2fnuz, .bf16 => |tag| switch (Ti) {
+            inline .f4e2m1, .f8e3m4, .f8e4m3, .f8e4m3b11fnuz, .f8e4m3fn, .f8e4m3fnuz, .f8e5m2, .f8e5m2fnuz, .f8e8m0, .bf16 => |tag| switch (Ti) {
                 .comptime_int, .int => @unionInit(Data, @tagName(tag), @FieldType(Data, @tagName(tag)).fromF32(@floatFromInt(value))),
                 .comptime_float, .float => @unionInit(Data, @tagName(tag), @FieldType(Data, @tagName(tag)).fromF32(@floatCast(value))),
                 else => @panic("Could not create Data of type bf16 from value of type " ++ @typeName(T)),
@@ -254,7 +285,7 @@ pub const Data = union(DataType) {
                 .comptime_float, .float => @unionInit(Data, @tagName(tag), @floatCast(value)),
                 else => @panic("Could not create Data of type " ++ @tagName(tag) ++ " from value of type " ++ @typeName(T)),
             },
-            inline .i4, .i8, .i16, .i32, .i64, .u4, .u8, .u16, .u32, .u64 => |tag| switch (Ti) {
+            inline .i2, .i4, .i8, .i16, .i32, .i64, .u2, .u4, .u8, .u16, .u32, .u64 => |tag| switch (Ti) {
                 .comptime_int => blk: {
                     const OutT = @FieldType(Data, @tagName(tag));
                     if (value >= std.math.minInt(OutT) and value <= std.math.maxInt(OutT)) {
