@@ -3,7 +3,7 @@ const std = @import("std");
 const testing = std.testing;
 const builtin = @import("builtin");
 
-const asynk = @import("async");
+const async = @import("async");
 
 // note: std_options.log_level does not respect testing.log_level
 // ref: https://github.com/ziglang/zig/issues/5738
@@ -19,7 +19,7 @@ var fba = std.heap.FixedBufferAllocator.init(&fba_buffer);
 
 pub fn main() anyerror!void {
     testing.log_level = log_level;
-    try asynk.AsyncThread.main(testing.allocator, asyncMain);
+    try async.AsyncThread.main(testing.allocator, asyncMain);
 }
 
 pub fn asyncMain() !void {

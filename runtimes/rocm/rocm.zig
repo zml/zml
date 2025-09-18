@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const asynk = @import("async");
+const async = @import("async");
 const bazel_builtin = @import("bazel_builtin");
 const c = @import("c");
 const pjrt = @import("pjrt");
@@ -16,7 +16,7 @@ pub fn isEnabled() bool {
 
 fn hasRocmDevices() bool {
     inline for (&.{ "/dev/kfd", "/dev/dri" }) |path| {
-        asynk.File.access(path, .{ .mode = .read_only }) catch return false;
+        async.File.access(path, .{ .mode = .read_only }) catch return false;
     }
     return true;
 }

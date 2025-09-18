@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const asynk = @import("async");
+const async = @import("async");
 
 const zml = @import("../zml.zig");
 const eval = @import("torch/eval.zig");
@@ -18,7 +18,7 @@ test {
 
 /// Opens and loads a BufferStore from the torch file at the given path.
 pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore {
-    const file = asynk.File.open(path, .{}) catch |err| {
+    const file = async.File.open(path, .{}) catch |err| {
         log.err("Failed to open {s}: {}", .{ path, err });
         return err;
     };
@@ -30,7 +30,7 @@ pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore
     const tmp_alloc = arena.allocator();
 
     const mmap_file = try zml.aio.MemoryMappedFile.init(file);
-    var torch_file = try asynk.callBlocking(File.init, .{ tmp_alloc, mmap_file });
+    var torch_file = try async.callBlocking(File.init, .{ tmp_alloc, mmap_file });
 
     const ops = try torch_file.parsePickle(tmp_alloc);
     const py_values = try eval.evaluate(tmp_alloc, ops, true);

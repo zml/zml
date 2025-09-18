@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const asynk = @import("async");
+const async = @import("async");
 const stdx = @import("stdx");
 
 const DataType = @import("dtype.zig").DataType;
@@ -115,16 +115,16 @@ pub const Buffer = struct {
         }
 
         if (opts.wait) {
-            res = try res.awaitt();
+            res = try res.await();
         }
 
         return res;
     }
 
-    pub fn awaitt(self: Buffer) !Buffer {
+    pub fn await(self: Buffer) !Buffer {
         for (self._shards.constSlice()) |buffer| {
             if (buffer.getReadyEvent(self._api)) |ev| {
-                try ev.await_(self._api);
+                try ev.await(self._api);
             }
         }
 
@@ -317,7 +317,7 @@ pub const Buffer = struct {
         stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
         const maybe_event = try self._shards.get(0).toHostBuffer(self._api, std.mem.asBytes(&res));
         if (maybe_event) |event| {
-            try event.await_(self._api);
+            try event.await(self._api);
         }
         return res;
     }
@@ -329,7 +329,7 @@ pub const Buffer = struct {
         stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
         const maybe_event = try self._shards.get(0).toHostBuffer(self._api, output);
         if (maybe_event) |event| {
-            try event.await_(self._api);
+            try event.await(self._api);
         }
         return HostBuffer.fromBytes(self.shape(), output);
     }
@@ -341,7 +341,7 @@ pub const Buffer = struct {
         stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
         const maybe_event = try self._shards.get(0).toHostBuffer(self._api, @constCast(output.bytes()));
         if (maybe_event) |event| {
-            try event.await_(self._api);
+            try event.await(self._api);
         }
         return output;
     }

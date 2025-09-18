@@ -261,7 +261,7 @@ pub const BaseExe = struct {
 
         // for (events[0..sharding.num_partitions]) |e| {
         //     if (e) |ev| {
-        //         ev.await_(self.platform.pjrt_api) catch unreachable;
+        //         ev.await(self.platform.pjrt_api) catch unreachable;
         //     }
         // }
     }

@@ -1,6 +1,6 @@
 /// Tools to load models from https://huggingface.co/karpathy/tinyllamas/
 /// Originally made to be run with https://github.com/karpathy/llama2.c
-const asynk = @import("async");
+const async = @import("async");
 const std = @import("std");
 const stdx = @import("stdx");
 
@@ -29,7 +29,7 @@ pub fn open(allocator: std.mem.Allocator, model_path: []const u8) !zml.aio.Buffe
     errdefer res.arena.deinit();
     const arena = res.arena.allocator();
 
-    const file = try asynk.File.open(model_path, .{});
+    const file = try async.File.open(model_path, .{});
     res.files = try arena.alloc(zml.aio.MemoryMappedFile, 1);
     res.files[0] = try zml.aio.MemoryMappedFile.init(file);
 

@@ -118,13 +118,13 @@ model. Put the following in `my_project/torch2zml.zig`.
 const std = @import("std");
 const log = std.log;
 
-const asynk = @import("async");
+const async = @import("async");
 const zml = @import("zml");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    try asynk.AsyncThread.main(gpa.allocator(), asyncMain, .{});
+    try async.AsyncThread.main(gpa.allocator(), asyncMain, .{});
 }
 
 pub fn asyncMain() !void {

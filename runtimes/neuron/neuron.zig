@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const asynk = @import("async");
+const async = @import("async");
 const bazel_builtin = @import("bazel_builtin");
 const c = @import("c");
 const pjrt = @import("pjrt");
@@ -15,14 +15,14 @@ pub fn isEnabled() bool {
 }
 
 fn hasNeuronDevice() bool {
-    asynk.File.access("/dev/neuron0", .{ .mode = .read_only }) catch return false;
+    async.File.access("/dev/neuron0", .{ .mode = .read_only }) catch return false;
     return true;
 }
 
 fn isRunningOnEC2() !bool {
     const AmazonEC2 = "Amazon EC2";
 
-    var f = try asynk.File.open("/sys/devices/virtual/dmi/id/sys_vendor", .{ .mode = .read_only });
+    var f = try async.File.open("/sys/devices/virtual/dmi/id/sys_vendor", .{ .mode = .read_only });
     defer f.close() catch {};
 
     var content: [AmazonEC2.len]u8 = undefined;
@@ -64,6 +64,6 @@ pub fn load() !*const pjrt.Api {
     return blk: {
         var lib_path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const path = try stdx.fs.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_neuron.so" });
-        break :blk asynk.callBlocking(pjrt.Api.loadFrom, .{path});
+        break :blk async.callBlocking(pjrt.Api.loadFrom, .{path});
     };
 }

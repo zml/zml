@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const asynk = @import("async");
+const async = @import("async");
 const bazel_builtin = @import("bazel_builtin");
 const c = @import("c");
 const pjrt = @import("pjrt");
@@ -17,7 +17,7 @@ pub fn isEnabled() bool {
 }
 
 fn hasNvidiaDevice() bool {
-    asynk.File.access("/dev/nvidiactl", .{ .mode = .read_only }) catch return false;
+    async.File.access("/dev/nvidiactl", .{ .mode = .read_only }) catch return false;
     return true;
 }
 
@@ -79,6 +79,6 @@ pub fn load() !*const pjrt.Api {
     return blk: {
         var lib_path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const path = try stdx.fs.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_cuda.so" });
-        break :blk asynk.callBlocking(pjrt.Api.loadFrom, .{path});
+        break :blk async.callBlocking(pjrt.Api.loadFrom, .{path});
     };
 }

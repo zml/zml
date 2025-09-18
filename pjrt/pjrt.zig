@@ -1030,7 +1030,7 @@ pub const Event = opaque {
         return @ptrCast(result);
     }
 
-    pub fn await_(self: *const Event, api: *const Api) ApiError!void {
+    pub fn await(self: *const Event, api: *const Api) ApiError!void {
         _ = try api.call(.PJRT_Event_Await, .{
             .event = self.inner(),
         });

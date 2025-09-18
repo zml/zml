@@ -1,13 +1,13 @@
 const std = @import("std");
 const zml = @import("zml");
 const stdx = @import("stdx");
-const asynk = @import("async");
+const async = @import("async");
 const flags = stdx.flags;
 
 // set log level to debug to print the generated IR
 pub const std_options: std.Options = .{
     .log_level = .warn,
-    .logFn = asynk.logFn(std.log.defaultLog),
+    .logFn = async.logFn(std.log.defaultLog),
 };
 
 pub fn benchmark(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
@@ -15,7 +15,7 @@ pub fn benchmark(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
 }
 
 pub fn main() !void {
-    try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain);
+    try async.AsyncThread.main(std.heap.c_allocator, asyncMain);
 }
 
 pub fn asyncMain() !void {
@@ -53,10 +53,10 @@ pub fn asyncMain() !void {
     // Start compiling.
     // The shape of the input tensor, we have to pass in manually.
     timer.reset();
-    var compilation = try asynk.asyncc(zml.compileFn, .{ allocator, benchmark, .{ a_shape, b_shape }, platform });
+    var compilation = try async.async(zml.compileFn, .{ allocator, benchmark, .{ a_shape, b_shape }, platform });
 
     // Wait for compilation to finish
-    const executable = try compilation.awaitt();
+    const executable = try compilation.await();
     defer executable.deinit();
     const compilation_elapsed = timer.lap() / std.time.ns_per_ms;
     std.debug.print("-" ** 160 ++ "\n\n", .{});

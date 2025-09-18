@@ -1,13 +1,13 @@
 const std = @import("std");
 
-const asynk = @import("async");
+const async = @import("async");
 const zml = @import("zml");
 
 const log = std.log.scoped(.mnist);
 
 pub const std_options: std.Options = .{
     .log_level = .info,
-    .logFn = asynk.logFn(std.log.defaultLog),
+    .logFn = async.logFn(std.log.defaultLog),
 };
 
 /// Model definition
@@ -37,7 +37,7 @@ const Mnist = struct {
 };
 
 pub fn main() !void {
-    try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain);
+    try async.AsyncThread.main(std.heap.c_allocator, asyncMain);
 }
 
 pub fn asyncMain() !void {
@@ -75,14 +75,14 @@ pub fn asyncMain() !void {
     // Start compiling
     log.info("Compiling model to MLIR....", .{});
     var start_time = try std.time.Timer.start();
-    var compilation = try asynk.asyncc(zml.compile, .{ allocator, Mnist.forward, .{}, .{zml.Shape.init(.{ 28, 28 }, .u8)}, buffer_store, platform });
+    var compilation = try async.async(zml.compile, .{ allocator, Mnist.forward, .{}, .{zml.Shape.init(.{ 28, 28 }, .u8)}, buffer_store, platform });
 
     // While compiling, start loading weights on the platform
     var model_weights = try zml.aio.loadModelBuffers(Mnist, mnist_model, buffer_store, arena, platform);
     defer zml.aio.unloadBuffers(&model_weights);
 
     // Wait for end of compilation and end of weights loading.
-    const compiled_mnist = try compilation.awaitt();
+    const compiled_mnist = try compilation.await();
     log.info("✅ Compiled model in {d}ms", .{start_time.read() / std.time.ns_per_ms});
 
     const mnist = compiled_mnist.prepare(model_weights);
@@ -92,7 +92,7 @@ pub fn asyncMain() !void {
     log.info("Starting inference...", .{});
 
     // Load a random digit image from the dataset.
-    const dataset = try asynk.File.open(t10kfilename, .{ .mode = .read_only });
+    const dataset = try async.File.open(t10kfilename, .{ .mode = .read_only });
     defer dataset.close() catch unreachable;
     var rng = std.Random.Xoshiro256.init(@intCast(std.time.timestamp()));
 

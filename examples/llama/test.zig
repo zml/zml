@@ -1,4 +1,4 @@
-const asynk = @import("async");
+const async = @import("async");
 const std = @import("std");
 const stdx = @import("stdx");
 const zml = @import("zml");
@@ -10,7 +10,7 @@ const LlamaLM = llama_mod.LlamaLM;
 const Tensor = zml.Tensor;
 
 pub fn main() !void {
-    try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain);
+    try async.AsyncThread.main(std.heap.c_allocator, asyncMain);
 }
 
 pub fn asyncMain() !void {
@@ -58,7 +58,7 @@ pub fn asyncMain() !void {
     const num_kv_heads: i64 = cli_args.num_kv_heads orelse buffer_store.metadata("num_kv_heads", .int) orelse num_heads;
 
     const config = blk: {
-        var config_json_file = try asynk.File.open(cli_args.config, .{ .mode = .read_only });
+        var config_json_file = try async.File.open(cli_args.config, .{ .mode = .read_only });
         defer config_json_file.close() catch unreachable;
         var reader = std.json.reader(allocator, config_json_file.reader());
         defer reader.deinit();

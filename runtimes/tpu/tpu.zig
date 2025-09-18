@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const asynk = @import("async");
+const async = @import("async");
 const bazel_builtin = @import("bazel_builtin");
 const c = @import("c");
 const pjrt = @import("pjrt");
@@ -22,7 +22,7 @@ fn isOnGCP() !bool {
     // TODO: abstract that in the client and fail init
     const GoogleComputeEngine = "Google Compute Engine";
 
-    var f = try asynk.File.open("/sys/devices/virtual/dmi/id/product_name", .{ .mode = .read_only });
+    var f = try async.File.open("/sys/devices/virtual/dmi/id/product_name", .{ .mode = .read_only });
     defer f.close() catch {};
 
     var content: [GoogleComputeEngine.len]u8 = undefined;
@@ -61,6 +61,6 @@ pub fn load() !*const pjrt.Api {
     return blk: {
         var lib_path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const path = try stdx.fs.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_tpu.so" });
-        break :blk asynk.callBlocking(pjrt.Api.loadFrom, .{path});
+        break :blk async.callBlocking(pjrt.Api.loadFrom, .{path});
     };
 }

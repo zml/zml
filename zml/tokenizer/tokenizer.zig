@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const asynk = @import("async");
+const async = @import("async");
 const hftokenizers = @import("hftokenizers");
 const sentencepiece = @import("sentencepiece");
 
@@ -98,15 +98,15 @@ pub const Tokenizer = union(Tokenizers) {
 
     pub fn fromFile(allocator: std.mem.Allocator, model: []const u8) !Tokenizer {
         if (std.mem.endsWith(u8, model, ".pb")) {
-            return .{ .sentencepiece = try asynk.callBlocking(sentencepiece.SentencePieceProcessor.fromFile, .{model}) };
+            return .{ .sentencepiece = try async.callBlocking(sentencepiece.SentencePieceProcessor.fromFile, .{model}) };
         }
         if (std.mem.endsWith(u8, model, ".json")) {
-            return .{ .hftokenizers = try asynk.callBlocking(hftokenizers.HFTokenizer.fromFile, .{model}) };
+            return .{ .hftokenizers = try async.callBlocking(hftokenizers.HFTokenizer.fromFile, .{model}) };
         }
 
         if (std.mem.endsWith(u8, model, ".tinyllama")) {
             const tokenizer = try allocator.create(homemade.Tokenizer);
-            tokenizer.* = try asynk.callBlocking(homemade.fromTinyLlamaFile, .{ allocator, model, 32000 });
+            tokenizer.* = try async.callBlocking(homemade.fromTinyLlamaFile, .{ allocator, model, 32000 });
             return .{ .homemade = tokenizer };
         }
 

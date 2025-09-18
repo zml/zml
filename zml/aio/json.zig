@@ -1,4 +1,4 @@
-const asynk = @import("async");
+const async = @import("async");
 const std = @import("std");
 const zml = @import("../zml.zig");
 

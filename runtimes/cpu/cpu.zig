@@ -1,6 +1,6 @@
 const builtin = @import("builtin");
 
-const asynk = @import("async");
+const async = @import("async");
 const c = @import("c");
 const pjrt = @import("pjrt");
 const bazel_builtin = @import("bazel_builtin");
@@ -44,6 +44,6 @@ pub fn load() !*const pjrt.Api {
 
         var lib_path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const path = try stdx.fs.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "libpjrt_cpu" ++ ext });
-        break :blk asynk.callBlocking(pjrt.Api.loadFrom, .{path});
+        break :blk async.callBlocking(pjrt.Api.loadFrom, .{path});
     };
 }
