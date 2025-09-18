@@ -187,7 +187,8 @@ pub const CompilationContext = struct {
             if (cache_dir.createFile(mlir_name, .{ .truncate = true })) |file| {
                 var write_buf: [4096]u8 = undefined;
                 var writer = file.writer(&write_buf);
-                module.op().print(&writer.interface, .{ .debug_info = true, .debug_info_pretty_form = false });
+                try module.op().print(&writer.interface, .{ .debug_info = true, .debug_info_pretty_form = false });
+                try writer.interface.flush();
                 log.info("Wrote MLIR to {s}/{s}", .{ module_dir.?, mlir_name });
             } else |_| {
                 log.warn("Failed to open {s}", .{mlir_name});
@@ -341,12 +342,11 @@ pub const CompilationContext = struct {
         const locations = try arena.alloc(mlir.Location, tensor_count);
         @memset(locations, mlir.Location.unknown(mlir_ctx));
 
-        var input_shapes: std.array_list.Managed(Shape) = try .initCapacity(res_allocator, tensor_count);
-        meta.collect(Tensor.shape, {}, &input_shapes, args) catch unreachable;
-        stdx.debug.internalAssert(input_shapes.items.len == tensor_count, "args have changed ?", .{});
+        const input_shapes = try res_allocator.alloc(Shape, tensor_count);
+        meta.collectBuf(Tensor.shape, {}, args, input_shapes);
 
         const input_types = try arena.alloc(mlir.Type, tensor_count);
-        for (input_types, input_shapes.items) |*t, sh| t.* = mlirx.tensorType(mlir_ctx, sh);
+        for (input_types, input_shapes) |*t, sh| t.* = mlirx.tensorType(mlir_ctx, sh);
 
         const og_block_args = self._block_args;
         defer {
@@ -399,7 +399,7 @@ pub const CompilationContext = struct {
             self.addDonationsAttributes(arg_attrs, fn_res_donations);
             self.addOutputMemoryKindAttributes(res_attrs, fn_res_output_memory_kind);
             if (self._platform.sharding().num_partitions > 1) {
-                self.addShardingAttributes(arg_attrs, res_attrs, input_shapes.items, fn_res_shapes);
+                self.addShardingAttributes(arg_attrs, res_attrs, input_shapes, fn_res_shapes);
             }
         }
 
@@ -427,7 +427,7 @@ pub const CompilationContext = struct {
         return .{
             .mlir_fn = mlir_fn,
             .name = opts.name,
-            .args_shapes = input_shapes.items,
+            .args_shapes = input_shapes,
             .res_tensors = fn_res,
             .res_types = fn_res_types,
             .res_shapes = fn_res_shapes,
@@ -506,9 +506,9 @@ pub const CompilationContext = struct {
         var tensor_args = .{ model, Tensor{ ._shape = s, ._id = .{ .buffer_id = 1234 } }, Tensor{ ._shape = s, ._id = .{ .buffer_id = 1235 } } };
         const f = try comp.emitMlir(Local._fwd, &tensor_args, .{ .name = "test.emitMlir.Local.forward", .kind = .main });
 
-        var mlir_bytecode = std.array_list.Managed(u8).init(std.testing.allocator);
-        defer mlir_bytecode.deinit();
-        try mlir_bytecode.writer().print("{f}", .{f.mlir_fn.mlirFormatter(.{})});
+        var mlir_code: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer mlir_code.deinit();
+        try f.mlir_fn.print(&mlir_code.writer, .{});
 
         // Check that the `x` input argument gives its buffer to the result tensor.
         // `%arg0` is the bias of the model, `%arg1` is `x`, `%arg2` is `y`.
@@ -518,8 +518,8 @@ pub const CompilationContext = struct {
         var buf = template.*;
         for (0..2) |i| {
             const alias_attr = std.fmt.bufPrint(&buf, template, .{i}) catch unreachable;
-            std.testing.expect(std.mem.indexOf(u8, mlir_bytecode.items, alias_attr) != null) catch |err| {
-                log.warn("Didn't produced the expected IR:\n{s}", .{mlir_bytecode.items});
+            std.testing.expect(std.mem.indexOf(u8, mlir_code.written(), alias_attr) != null) catch |err| {
+                log.warn("Didn't produced the expected IR:\n{s}", .{mlir_code.written()});
                 return err;
             };
         }
@@ -547,12 +547,14 @@ pub const CompilationContext = struct {
     pub fn getShardingAttr(self: CompilationContext, shape: Shape) mlir.Attribute {
         const ctx = self.mlirCtx();
         const num_partitions = self.numPartitions();
-        var sharding_str: stdx.BoundedArray(u8, 128) = .{};
-        writeShardingRepresentation(shape, num_partitions, sharding_str.writer()) catch unreachable;
-        return mlir.Attribute.string(ctx, sharding_str.constSlice());
+        // This is big enough, see test below for examples values
+        var sharding_str_buf: [64]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&sharding_str_buf);
+        writeShardingRepresentation(shape, num_partitions, &writer) catch unreachable;
+        return mlir.Attribute.string(ctx, writer.buffered());
     }
 
-    fn writeShardingRepresentation(shape: Shape, num_partitions: u8, writer: anytype) @TypeOf(writer).Error!void {
+    fn writeShardingRepresentation(shape: Shape, num_partitions: u8, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         const n_sharded: u8 = @popCount(@as(u8, @bitCast(shape._sharding_info)));
         if (n_sharded == 0 or num_partitions == 1) {
             try writer.writeAll("{replicated}");
@@ -567,26 +569,26 @@ pub const CompilationContext = struct {
     }
 
     test writeShardingRepresentation {
-        var rule: [64]u8 = undefined;
+        var attr_buf: [64]u8 = undefined;
         const x = Shape.init(.{ 16, 8 }, .f32);
 
         // By default tensors are replicated.
         {
-            var fbs = std.io.fixedBufferStream(&rule);
-            try writeShardingRepresentation(x, 4, fbs.writer());
-            try std.testing.expectEqualStrings("{replicated}", fbs.getWritten());
+            var writer: std.Io.Writer = .fixed(&attr_buf);
+            try writeShardingRepresentation(x, 4, &writer);
+            try std.testing.expectEqualStrings("{replicated}", writer.buffered());
         }
         // Shard along first axis.
         {
-            var fbs = std.io.fixedBufferStream(&rule);
-            try writeShardingRepresentation(x.withSharding(.{0}), 4, fbs.writer());
-            try std.testing.expectEqualStrings("{devices=[4,1]<=[4]}", fbs.getWritten());
+            var writer: std.Io.Writer = .fixed(&attr_buf);
+            try writeShardingRepresentation(x.withSharding(.{0}), 4, &writer);
+            try std.testing.expectEqualStrings("{devices=[4,1]<=[4]}", writer.buffered());
         }
         // Also shard along second axis.
         {
-            var fbs = std.io.fixedBufferStream(&rule);
-            try writeShardingRepresentation(x.withSharding(.{ 0, 1 }), 2, fbs.writer());
-            try std.testing.expectEqualStrings("{devices=[2,2]<=[2]}", fbs.getWritten());
+            var writer: std.Io.Writer = .fixed(&attr_buf);
+            try writeShardingRepresentation(x.withSharding(.{ 0, 1 }), 2, &writer);
+            try std.testing.expectEqualStrings("{devices=[2,2]<=[2]}", writer.buffered());
         }
     }
 

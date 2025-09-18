@@ -189,10 +189,9 @@ pub const Tokenizer = struct {
             // Step by step visualization of the progress.
             if (options.debug) {
                 var _debug_buf: [256]u8 = undefined;
-                var _debug_alloc = std.heap.FixedBufferAllocator.init(&_debug_buf);
-                var debug_progress = std.array_list.Managed(u8).init(_debug_alloc.allocator());
-                self.decodeWithOpts(&debug_progress, tok_buff[0..num_tokens], .{ .sep = "|" }) catch {};
-                log.debug("tokens: {any} -> {s}", .{ tok_buff[0..num_tokens], debug_progress.items });
+                var debug_progress: std.Io.Writer = .fixed(&_debug_buf);
+                self.decodeWithOpts(tok_buff[0..num_tokens], &debug_progress, .{ .sep = "|" }) catch {};
+                log.debug("tokens: {any} -> {s}", .{ tok_buff[0..num_tokens], debug_progress.buffered() });
             }
             var best_score: f32 = -1e10;
             var best_token: u32 = 0;
@@ -311,22 +310,19 @@ pub const Tokenizer = struct {
     /// Converts the given slice of tokens back into bytes.
     /// Note that if the tokenizer allows sub-unicode bytes, it's possible
     /// the output is not valid utf8.
-    pub fn decode(self: *const Tokenizer, allocator: std.mem.Allocator, input: []const u32) error{OutOfMemory}![]u8 {
-        var output = std.array_list.Managed(u8).init(allocator);
-        errdefer output.deinit();
-
-        try self.decodeWithOpts(&output, input, .{});
-        return output.toOwnedSlice();
+    pub fn decode(self: *const Tokenizer, input: []const u32, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try self.decodeWithOpts(input, writer, .{});
     }
 
     pub fn decodeWithOpts(
         self: *const Tokenizer,
-        output: *std.array_list.Managed(u8),
         input: []const u32,
+        output: *std.Io.Writer,
         opts: struct { sep: []const u8 = "" },
-    ) error{OutOfMemory}!void {
+    ) std.Io.Writer.Error!void {
         const escaped = if (self.normalizer) |n| n.escapedSpace() else null;
         // Flag used to indicate if the first dummy whitespace has been consumed.
+        var first_token: bool = true;
         for (input) |id| {
             // Retrieve the slice corresponding to the id.
             var piece = self.lookupPiece(id);
@@ -337,12 +333,13 @@ pub const Tokenizer = struct {
                 while (std.mem.startsWith(u8, piece, escspc)) {
                     piece = piece[escspc.len..];
                     // don't output a space at beginning of text.
-                    if (output.items.len > 0) try output.append(' ');
+                    if (!first_token) try output.writeByte(' ');
                 }
             }
 
-            try output.appendSlice(piece);
-            if (opts.sep.len > 0) try output.appendSlice(opts.sep);
+            try output.writeAll(piece);
+            first_token = false;
+            try output.writeAll(opts.sep);
         }
     }
 
@@ -472,10 +469,13 @@ pub const Decoder = struct {
     }
 
     pub fn decode(self: *Decoder, ids: []const u32) ![]const u8 {
+        // TODO: revisite tokenizer api to use std.Io.Writer.
         self.reset();
-        const res = try self.inner.decode(self.arena.allocator(), ids);
-        self.current_string = res;
-        return res;
+        // Reuse the same warmup than in init, to maximize contiguous writes.
+        var arena_writer = std.Io.Writer.Allocating.initCapacity(self.arena.allocator(), 4096) catch unreachable;
+        try self.inner.decode(ids, &arena_writer.writer);
+        self.current_string = arena_writer.written();
+        return self.current_string.?;
     }
 
     pub fn string(self: *const Decoder) []const u8 {
@@ -623,9 +623,9 @@ pub const Normalizer = struct {
         return if (self._whitespace.len > 1) self._whitespace.constSlice() else null;
     }
 
-    fn addSlice(data: []const u8, consumed: usize, normalized: *std.array_list.Managed(u8), normalized_to_origin: *std.array_list.Managed(usize)) !void {
-        try normalized.appendSlice(data);
-        for (data) |_| try normalized_to_origin.append(consumed);
+    fn addSlice(allocator: std.mem.Allocator, data: []const u8, consumed: usize, normalized: *std.ArrayList(u8), normalized_to_origin: *std.ArrayList(usize)) !void {
+        try normalized.appendSlice(allocator, data);
+        for (data) |_| try normalized_to_origin.append(allocator, consumed);
     }
 
     pub const Result = struct {
@@ -673,13 +673,13 @@ pub const Normalizer = struct {
         // Pre-allocate outputs
         const space = self.escapedSpace() orelse " ";
         const overhead = if (self.flags.split_on_punct_ascii) space.len + 1 else space.len;
-        var normalized = try std.array_list.Managed(u8).initCapacity(allocator, trimmed_input.len * overhead + 2 * space.len);
-        errdefer normalized.deinit();
-        var normalized_to_origin = try std.array_list.Managed(usize).initCapacity(allocator, normalized.capacity);
-        errdefer normalized_to_origin.deinit();
+        var normalized: std.ArrayList(u8) = try .initCapacity(allocator, trimmed_input.len * overhead + 2 * space.len);
+        errdefer normalized.deinit(allocator);
+        var normalized_to_origin: std.ArrayList(usize) = try .initCapacity(allocator, normalized.capacity);
+        errdefer normalized_to_origin.deinit(allocator);
 
         // If the spec asks for it, add a whitespace at the beginning.
-        if (self.flags.add_dummy_prefix) try addSlice(space, consumed, &normalized, &normalized_to_origin);
+        if (self.flags.add_dummy_prefix) try addSlice(allocator, space, consumed, &normalized, &normalized_to_origin);
 
         var is_prev_space: bool = true;
         var is_prev_word: bool = false;
@@ -706,23 +706,23 @@ pub const Normalizer = struct {
                 var byte = slice[0];
                 if (self.escapedSpace() != null and byte == ' ') {
                     // replace the space token by the special token
-                    try addSlice(space, origin, &normalized, &normalized_to_origin);
+                    try addSlice(allocator, space, origin, &normalized, &normalized_to_origin);
                     is_prev_word = false;
                     break :ascii;
                 } else if (self.flags.split_on_punct_ascii) {
                     if (is_prev_word and isPunct(slice)) {
                         // Insert a space, but continue handling the rest
-                        try addSlice(space, origin, &normalized, &normalized_to_origin);
+                        try addSlice(allocator, space, origin, &normalized, &normalized_to_origin);
                     }
                 }
                 if (self.flags.lower_case_ascii) {
                     byte = std.ascii.toLower(byte);
                 }
-                try normalized.append(byte);
-                try normalized_to_origin.append(origin);
+                try normalized.append(allocator, byte);
+                try normalized_to_origin.append(allocator, origin);
             } else {
                 // we can safely copy to the output.
-                try addSlice(slice, origin, &normalized, &normalized_to_origin);
+                try addSlice(allocator, slice, origin, &normalized, &normalized_to_origin);
             }
             is_prev_word = !is_prev_space and !isPunct(slice);
         }
@@ -732,20 +732,20 @@ pub const Normalizer = struct {
             while (std.mem.endsWith(u8, normalized.items, space)) {
                 const length = normalized.items.len - space.len;
                 consumed = normalized_to_origin.items[length];
-                try normalized.resize(length);
-                try normalized_to_origin.resize(length);
+                try normalized.resize(allocator, length);
+                try normalized_to_origin.resize(allocator, length);
             }
         }
 
-        try normalized_to_origin.append(consumed);
+        try normalized_to_origin.append(allocator, consumed);
 
         std.debug.assert(normalized_to_origin.items.len == normalized.items.len + 1);
 
-        if (self.flags.add_dummy_suffix) try addSlice(space, consumed, &normalized, &normalized_to_origin);
+        if (self.flags.add_dummy_suffix) try addSlice(allocator, space, consumed, &normalized, &normalized_to_origin);
 
         return .{
-            .normalized = try normalized.toOwnedSlice(),
-            .normalized_to_origin = try normalized_to_origin.toOwnedSlice(),
+            .normalized_to_origin = try normalized_to_origin.toOwnedSlice(allocator),
+            .normalized = try normalized.toOwnedSlice(allocator),
         };
     }
 
@@ -1006,8 +1006,7 @@ pub const Gpt2TextDecoder = struct {
 
     /// Transform bytes representing text under the gpt2 encoding,
     /// and write to the `unicode` buffer utf-8 bytes.
-    pub fn decode(self: Gpt2TextDecoder, unicode: *std.array_list.Managed(u8), bytes: []const u8) ![]const u8 {
-        const start = unicode.items.len;
+    pub fn decode(self: Gpt2TextDecoder, bytes: []const u8, writer: *std.Io.Writer) (error{InvalidInput} || std.Io.Writer.Error)!void {
         var it = std.unicode.Utf8Iterator{ .i = 0, .bytes = bytes };
         while (it.nextCodepointSlice()) |codepoint| {
             const code: Code = switch (codepoint.len) {
@@ -1016,9 +1015,8 @@ pub const Gpt2TextDecoder = struct {
                 else => return error.InvalidInput,
             };
             const byte = self.code_to_byte.get(code) orelse return error.InvalidInput;
-            try unicode.append(byte);
+            try writer.writeByte(byte);
         }
-        return unicode.items[start..];
     }
 
     inline fn isPrintableByte(c: u8) bool {
@@ -1030,15 +1028,33 @@ test Gpt2TextDecoder {
     var decoder = try Gpt2TextDecoder.init(testing.allocator);
     defer decoder.deinit();
 
-    var out = std.array_list.Managed(u8).init(testing.allocator);
-    defer out.deinit();
+    var buf: [128]u8 = undefined;
 
     // Ascii is not changed.
-    try testing.expectEqualStrings("getTitle", try decoder.decode(&out, "getTitle"));
+    {
+        var out: std.Io.Writer = .fixed(&buf);
+        try decoder.decode("getTitle", &out);
+        try testing.expectEqualStrings("getTitle", out.buffered());
+    }
+
+    {
+        var out: std.Io.Writer = .fixed(&buf);
+        try decoder.decode("Ċ", &out);
+        try testing.expectEqualStrings("\n", out.buffered());
+    }
+
     // Leading space are represented with 'Ġ'
-    try testing.expectEqualStrings(" UINavigationController", try decoder.decode(&out, "ĠUINavigationController"));
+    {
+        var out: std.Io.Writer = .fixed(&buf);
+        try decoder.decode("ĠUINavigationController", &out);
+        try testing.expectEqualStrings(" UINavigationController", out.buffered());
+    }
     // Russian is wild
-    try testing.expectEqualStrings(" работ", try decoder.decode(&out, "ĠÑĢÐ°Ð±Ð¾ÑĤ"));
+    {
+        var out: std.Io.Writer = .fixed(&buf);
+        try decoder.decode("ĠÑĢÐ°Ð±Ð¾ÑĤ", &out);
+        try testing.expectEqualStrings(" работ", out.buffered());
+    }
 }
 
 /// Open a json file in HF format and load the vocab from it.
@@ -1077,12 +1093,12 @@ pub fn fromHfJson(allocator: std.mem.Allocator, tokenizer_path: []const u8) !Tok
 
     // Buffer containing all concatenated tokens.
     // Reserve a big chunk, to avoid grow event, but release over-allocated memory.
-    var all_tokens = try std.array_list.Managed(u8).initCapacity(tokenizer.arena_state.allocator(), file_content.len);
-    const original_alloc = all_tokens.items.ptr;
+    var all_tokens: std.Io.Writer.Allocating = try .initCapacity(tokenizer.arena_state.allocator(), file_content.len);
+    const original_alloc = all_tokens.writer.buffer.ptr;
     // A re-alloc event here means we have invalidated all slices inside the tokenizer.
     // If this is too annoying we could switch to a custom type instead of slices.
     defer {
-        std.debug.assert(all_tokens.items.ptr == original_alloc);
+        std.debug.assert(all_tokens.writer.buffer.ptr == original_alloc);
     }
 
     // gpt2 based tokenizer got a special way of encoding unicode.
@@ -1094,16 +1110,18 @@ pub fn fromHfJson(allocator: std.mem.Allocator, tokenizer_path: []const u8) !Tok
     defer gpt2_decoder.deinit();
     var it = vocab.iterator();
     while (it.next()) |kv| {
-        const token = gpt2_decoder.decode(&all_tokens, kv.key_ptr.*) catch |err| {
+        const n = all_tokens.writer.buffered().len;
+        gpt2_decoder.decode(kv.key_ptr.*, &all_tokens.writer) catch |err| {
             switch (err) {
                 error.InvalidInput => {
                     is_gpt2_vocab = false;
                     break;
                 },
-                else => return err,
+                error.WriteFailed => return error.OutOfMemory,
             }
         };
         const idx: u32 = @intCast(kv.value_ptr.*.integer);
+        const token = all_tokens.written()[n..];
         tokenizer.addOwnedTokenByIndex(idx, @floatFromInt(vocab_size - idx), token);
     }
 
@@ -1126,15 +1144,16 @@ pub fn fromHfJson(allocator: std.mem.Allocator, tokenizer_path: []const u8) !Tok
         if (token_obj != .object) return error.InvalidFormat;
         const v = objectGet(token_obj.object, .string, "content") orelse return error.InvalidFormat;
         const id: u32 = @intCast(objectGet(token_obj.object, .integer, "id") orelse return error.InvalidFormat);
-        const token = try if (is_gpt2_vocab)
-            gpt2_decoder.decode(&all_tokens, v)
+        const n = all_tokens.written().len;
+        try if (is_gpt2_vocab)
+            gpt2_decoder.decode(v, &all_tokens.writer)
         else
-            dup(&all_tokens, v);
-
+            all_tokens.writer.writeAll(v);
+        const token = all_tokens.written()[n..];
         tokenizer.addOwnedTokenByIndex(id, 0, token);
     }
     // We won't add more tokens here, let release.
-    all_tokens.shrinkAndFree(all_tokens.items.len);
+    _ = try all_tokens.toOwnedSlice();
 
     var unk = tokenizer.lookup("<unk>");
     if (objectGet(model, .integer, "unk_token")) |unk_tok| {
@@ -1165,10 +1184,10 @@ pub fn fromHfJson(allocator: std.mem.Allocator, tokenizer_path: []const u8) !Tok
 }
 
 /// Returns a copy of the given string, stored inside the given ArrayList.
-fn dup(buffer: *std.array_list.Managed(u8), str: []const u8) ![]const u8 {
-    const n = buffer.items.len;
-    try buffer.appendSlice(str);
-    return buffer.items[n..];
+fn dup(allocating: *std.Io.Writer.Allocating, str: []const u8) std.Io.Writer.Error![]const u8 {
+    const n = allocating.written().len;
+    try allocating.writer.writeAll(str);
+    return allocating.written()[n..];
 }
 
 /// Returns the given entry in a json object only if it has the right type.

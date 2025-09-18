@@ -6,7 +6,6 @@ const zml = @import("../zml.zig");
 const eval = @import("torch/eval.zig");
 const File = @import("torch/file.zig").File;
 
-const StringBuilder = std.ArrayListUnmanaged(u8);
 const log = std.log.scoped(.@"zml/aio");
 
 test {

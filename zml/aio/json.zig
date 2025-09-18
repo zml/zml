@@ -1,10 +1,10 @@
-const async = @import("async");
 const std = @import("std");
+
+const async = @import("async");
+
 const zml = @import("../zml.zig");
 
-const StringBuilder = std.ArrayListUnmanaged(u8);
-const Allocator = std.mem.Allocator;
-
+const StringBuilder = std.ArrayList(u8);
 pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore {
     const file = try std.fs.cwd().openFile(path, .{});
     defer file.close();
@@ -26,7 +26,7 @@ pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore
     return res;
 }
 
-pub fn parseMetadata(allocator: Allocator, store: *zml.aio.BufferStore, prefix: StringBuilder, val: std.json.Value) !void {
+pub fn parseMetadata(allocator: std.mem.Allocator, store: *zml.aio.BufferStore, prefix: StringBuilder, val: std.json.Value) !void {
     const metadata = &store._metadata;
     const key = prefix.items;
     return switch (val) {

@@ -384,10 +384,7 @@ pub const Buffer = struct {
         return res;
     }
 
-    pub fn format(
-        self: Buffer,
-        writer: anytype,
-    ) !void {
+    pub fn format(self: Buffer, writer: *std.Io.Writer) !void {
         try writer.print("Buffer({f})", .{self._shape});
     }
 

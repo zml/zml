@@ -348,7 +348,7 @@ pub fn evaluate(arena: std.mem.Allocator, x: []const pickle.Op, resolve_refs: bo
 }
 
 fn append(allocator: std.mem.Allocator, current: *[]py.Any, values: []const py.Any) !void {
-    var array_list = std.ArrayListUnmanaged(py.Any).fromOwnedSlice(current.*);
+    var array_list = std.ArrayList(py.Any).fromOwnedSlice(current.*);
     try array_list.appendSlice(allocator, values);
     current.* = array_list.items;
 }

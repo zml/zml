@@ -229,7 +229,7 @@ pub fn testLayerOut(
     const FetchCtx = struct {
         store: zml.aio.BufferStore,
         index: u32,
-        prefix: std.ArrayListUnmanaged(u8),
+        prefix: std.ArrayList(u8),
         platform: zml.Platform,
 
         fn fetch(ctx: *@This(), x: zml.Tensor) zml.Buffer {

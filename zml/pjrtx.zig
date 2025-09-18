@@ -75,14 +75,17 @@ pub const Client = opaque {
     }
 
     fn compileSync(self: *const Client, api: *const Api, allocator: std.mem.Allocator, module: mlir.Module, compile_options_pb: []const u8) CompileError!*LoadedExecutable {
-        var bytecode: std.array_list.Managed(u8) = .init(allocator);
+        var bytecode: std.Io.Writer.Allocating = try .initCapacity(allocator, 4096);
         defer bytecode.deinit();
-        module.op().writeBytecodeWithConfig(bytecode.writer(), .{ .desiredEmitedVersion = 1 }) catch |err| {
+        module.op().writeBytecodeWithConfig(&bytecode.writer, .{ .desiredEmitedVersion = 1 }) catch |err| {
             log.err("failed to write module bytecode: {}", .{err});
-            return err;
+            return switch (err) {
+                std.Io.Writer.Error.WriteFailed => error.OutOfMemory,
+                else => |e| e,
+            };
         };
 
-        var serialized_buffer: std.array_list.Managed(u8) = .init(allocator);
+        var serialized_buffer: std.Io.Writer.Allocating = try .initCapacity(allocator, 4096);
         defer serialized_buffer.deinit();
 
         const stablehlo_version = blk: {
@@ -92,13 +95,16 @@ pub const Client = opaque {
             break :blk dialects.stablehlo.getMinimumVersion();
         };
 
-        dialects.stablehlo.serializePortableArtifact(bytecode.items, stablehlo_version, serialized_buffer.writer()) catch |err| {
+        dialects.stablehlo.serializePortableArtifact(bytecode.written(), stablehlo_version, &serialized_buffer.writer) catch |err| {
             log.err("failed to serialize to portable artifact: {}", .{err});
-            return err;
+            return switch (err) {
+                std.Io.Writer.Error.WriteFailed => error.OutOfMemory,
+                else => |e| e,
+            };
         };
 
         return @ptrCast(try self.inner().compile(api, .{
-            .bytecode = serialized_buffer.items,
+            .bytecode = serialized_buffer.written(),
             .bytecode_format = .mlir,
             .compile_options_pb = compile_options_pb,
         }));

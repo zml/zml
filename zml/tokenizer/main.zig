@@ -48,11 +48,11 @@ pub fn asyncMain() !void {
     }
 
     if (args.expected.len > 0) {
-        var expected = try std.array_list.Managed(u32).initCapacity(allocator, args.prompt.len);
+        var expected: std.ArrayList(u32) = try .initCapacity(allocator, args.prompt.len);
         var it = std.mem.splitSequence(u8, args.expected, ",");
         while (it.next()) |int_token| {
             const tok = try std.fmt.parseInt(u32, int_token, 10);
-            try expected.append(tok);
+            try expected.append(allocator, tok);
         }
         if (!std.mem.eql(u32, expected.items, prompt_tok)) {
             log.err("Doesn't match expected: {any}", .{expected.items});

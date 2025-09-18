@@ -52,10 +52,7 @@ pub const Tensor = struct {
         return CompilationContext.current();
     }
 
-    pub fn format(
-        self: Tensor,
-        writer: anytype,
-    ) !void {
+    pub fn format(self: Tensor, writer: *std.Io.Writer) !void {
         // TODO(0.15.0) handle format
         // const bare_fmt = fmt.len == 1 and fmt[0] == '_';
         const bare_fmt = false;
@@ -1146,7 +1143,7 @@ pub const Tensor = struct {
         contracting_axes: []const [2]i8,
         batching_axes: []const [2]i8,
     ) Tensor {
-        stdx.debug.assert(lhs.dtype() == rhs.dtype(), "dotGeneral expects tensors to be of the same type, got {} and {}", .{ lhs.dtype(), rhs.dtype() });
+        stdx.debug.assert(lhs.dtype() == rhs.dtype(), "dotGeneral expects tensors to be of the same type, got {f} and {f}", .{ lhs, rhs });
 
         const Axes = stdx.BoundedArray(i64, MAX_RANK);
 
@@ -1156,7 +1153,7 @@ pub const Tensor = struct {
         var rhs_batching_axes: Axes = .{};
         for (batching_axes) |b_axes| {
             const l, const r = b_axes;
-            stdx.debug.assert(lhs._shape.dim(l) == rhs._shape.dim(r), "dotGeneral expects batching dimensions to be equal, got {} and {} in {f} and {f}", .{ l, r, lhs, rhs });
+            stdx.debug.assert(lhs._shape.dim(l) == rhs._shape.dim(r), "dotGeneral expects batching dimensions to be equal, got {d} and {d} in {f} and {f}", .{ l, r, lhs, rhs });
             var t = lhs._shape.tag(l);
             if (t == Shape.TagUnknown) t = rhs._shape.tag(r);
             res_shape = res_shape.appendDim(lhs._shape.dim(l), t);
@@ -1521,14 +1518,7 @@ pub const Tensor = struct {
 
         const to_the_end = std.math.maxInt(i64);
 
-        pub fn format(
-            self: Slice,
-            comptime fmt: []const u8,
-            options: std.fmt.FormatOptions,
-            writer: anytype,
-        ) !void {
-            _ = fmt;
-            _ = options;
+        pub fn format(self: Slice, writer: *std.Io.Writer) !void {
             if (self.singleton) {
                 try writer.print("[{}]", .{self.start});
             } else if (self.end == to_the_end and self.step == 1) {
@@ -2043,7 +2033,7 @@ pub const Tensor = struct {
     /// Converts the given 1 element Tensor into a 0-rank Tensor.
     pub fn asScalar(self: Tensor) Tensor {
         stdx.debug.assert(self.count() == 1, "Tensor.asScalar expects an input with exactly 1-element got {f}", .{self});
-        return self.reshape(.{});
+        return if (self.rank() == 0) self else self.reshape(.{});
     }
 
     pub const Pad = struct {
@@ -2582,7 +2572,7 @@ pub const Tensor = struct {
     /// that requires host<->device synchronization.
     /// ZML tries to generate the easiest to optimize IR, and will warn you if it generates known problematic IR.
     pub fn scatterSlices(self: Tensor, indices: anytype, updates: Tensor, opts: ScatterOpts) Tensor {
-        scoped_log.debug("scatterSlices({}, {any}, {})", .{ self, indices, updates });
+        scoped_log.debug("scatterSlices({f}, {any}, {f})", .{ self, indices, updates });
 
         const UpdateType = @TypeOf(ScatterOpts.increment);
 
@@ -3087,7 +3077,7 @@ pub const Tensor = struct {
         const tail_chunk_size: i64 = @rem(d, chunk_size);
 
         const allocator = self.getContext().allocator();
-        var chunks = std.ArrayListUnmanaged(Tensor).initCapacity(allocator, n_chunks + 1) catch @panic("OOM");
+        var chunks = std.ArrayList(Tensor).initCapacity(allocator, n_chunks + 1) catch @panic("OOM");
         for (0..n_chunks) |i| {
             const start: i64 = @as(i64, @intCast(i)) * chunk_size;
             chunks.appendAssumeCapacity(

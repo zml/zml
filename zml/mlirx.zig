@@ -96,6 +96,6 @@ pub const Type = struct {
             }
         }
 
-        std.debug.panic("Could not convert mlir.Type to DataType: {}", .{mlir_type});
+        std.debug.panic("Could not convert mlir.Type to DataType: {f}", .{mlir_type});
     }
 };

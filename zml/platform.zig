@@ -95,7 +95,7 @@ const _CreateOptions = struct {
     pub const Cpu = struct {
         device_count: u32,
 
-        fn writeNamedValues(self: Cpu, values: *std.ArrayListUnmanaged(pjrt.NamedValue)) void {
+        fn writeNamedValues(self: Cpu, values: *std.ArrayList(pjrt.NamedValue)) void {
             values.appendAssumeCapacity(pjrt.NamedValue.from("cpu_device_count", @as(i64, self.device_count)));
         }
     };
@@ -124,7 +124,7 @@ const _CreateOptions = struct {
             };
         };
 
-        fn writeNamedValues(self: Cuda, values: *std.ArrayListUnmanaged(pjrt.NamedValue)) void {
+        fn writeNamedValues(self: Cuda, values: *std.ArrayList(pjrt.NamedValue)) void {
             switch (self.allocator) {
                 .platform => {
                     values.appendAssumeCapacity(pjrt.NamedValue.fromString("allocator", "platform"));
@@ -145,7 +145,7 @@ const _CreateOptions = struct {
     };
 
     pub fn toNamedValues(self: _CreateOptions, target: Target, out: []pjrt.NamedValue) []pjrt.NamedValue {
-        var values = std.ArrayListUnmanaged(pjrt.NamedValue).fromOwnedSlice(out);
+        var values = std.ArrayList(pjrt.NamedValue).fromOwnedSlice(out);
         values.shrinkRetainingCapacity(0);
         switch (target) {
             .cpu => self.cpu.writeNamedValues(&values),

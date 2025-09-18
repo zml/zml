@@ -443,29 +443,23 @@ pub fn if_(
     const true_branch_block, const true_branch_res = ctx.makeBlock(.open, TrueBlockSignature, &true_branch_fn, blkctx, {});
     const false_branch_block, const false_branch_res = ctx.makeBlock(.open, TrueBlockSignature, &false_branch_fn, blkctx, {});
 
-    var true_shapes = std.array_list.Managed(Shape).init(ctx.allocator());
-    defer true_shapes.deinit();
-    var false_shapes = std.array_list.Managed(Shape).init(ctx.allocator());
-    defer false_shapes.deinit();
+    check: {
+        const arena = ctx.allocator();
+        const true_shapes = meta.collectAlloc(Tensor.shape, {}, arena, &true_branch_res) catch break :check;
+        defer arena.free(true_shapes);
 
-    var failed_to_collect = false;
-    meta.collect(Tensor.shape, {}, &true_shapes, &true_branch_res) catch {
-        failed_to_collect = true;
-    };
-    meta.collect(Tensor.shape, {}, &false_shapes, &false_branch_res) catch {
-        failed_to_collect = true;
-    };
-    if (!failed_to_collect) {
-        stdx.debug.assert(true_shapes.items.len == false_shapes.items.len, "zml.ops.if_ expects the true and false branch to produce the same number of tensors. Got: \n - true branch: {any}\n -false branch: {any}", .{ true_shapes.items, false_shapes.items });
-        for (true_shapes.items, false_shapes.items) |true_shape, false_shape| {
-            stdx.debug.assert(true_shape.eqlWithTags(false_shape), "zml.ops.if_ expects the true and false branch to produce tensors of the same shape. Got: \n - true branch: {any}\n -false branch: {any}", .{ true_shapes.items, false_shapes.items });
+        const false_shapes = meta.collectAlloc(Tensor.shape, {}, arena, &false_branch_res) catch break :check;
+        defer arena.free(false_shapes);
+
+        stdx.debug.assert(true_shapes.len == false_shapes.len, "zml.ops.if_ expects the true and false branch to produce the same number of tensors. Got: \n - true branch: {f}\n -false branch: {f}", .{ stdx.fmt.slice(true_shapes), stdx.fmt.slice(false_shapes) });
+        for (true_shapes, false_shapes) |true_shape, false_shape| {
+            stdx.debug.assert(true_shape.eqlWithTags(false_shape), "zml.ops.if_ expects the true and false branch to produce tensors of the same shape. Got: \n - true branch: {f}\n -false branch: {f}", .{ stdx.fmt.slice(true_shapes), stdx.fmt.slice(false_shapes) });
         }
     }
 
-    const scalar_pred = if (pred.rank() == 0) pred else pred.flattenAll().squeeze(0);
     const loc = ctx.mlirCtx().location(@src());
     const op = mlir.Operation.make(ctx.mlirCtx(), "stablehlo.if", .{
-        .operands = &.{scalar_pred.value()},
+        .operands = &.{pred.asScalar().value()},
         .result_type_inference = true,
         .blocks = &.{ true_branch_block, false_branch_block },
         // We can't verify right away, cause the weights captured by the if haven't been added yet.
@@ -958,18 +952,20 @@ pub fn scatter(
     const UpdateS = BlockSign(update_fn);
     const update_block, _ = ctx.makeBlock(.hermetic, UpdateS, update_fn, blkctx, .{ _scalar, _scalar });
 
-    var input_values = std.array_list.Managed(mlir.Value).initCapacity(ctx.allocator(), n_inputs) catch @panic("OOM");
-    defer input_values.deinit();
-    meta.collect(CompilationContext.getValue, ctx, &input_values, &inputs) catch unreachable;
-    var updates_values = std.array_list.Managed(mlir.Value).initCapacity(ctx.allocator(), n_updates) catch @panic("OOM");
-    defer updates_values.deinit();
-    meta.collect(CompilationContext.getValue, ctx, &updates_values, &updates) catch unreachable;
+    const arena = ctx.allocator();
+    const input_values = arena.alloc(mlir.Value, n_inputs) catch @panic("OOM");
+    defer arena.free(input_values);
+    meta.collectBuf(CompilationContext.getValue, ctx, &inputs, input_values);
+
+    const updates_values = arena.alloc(mlir.Value, n_updates) catch @panic("OOM");
+    defer arena.free(updates_values);
+    meta.collectBuf(CompilationContext.getValue, ctx, &updates, updates_values);
 
     const op = dialect.stablehlo.scatter(
         mlir_ctx,
-        input_values.items,
+        input_values,
         &.{indices.value()},
-        updates_values.items,
+        updates_values,
         update_block,
         .{
             .update_window_dims = _collectAxes(AxisKind, config.up_kind, .update_window).constSlice(),

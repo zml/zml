@@ -7,18 +7,20 @@ const stdx = @import("stdx");
 const log = std.log.scoped(.mlir);
 
 test {
-    std.testing.refAllDecls(@This());
+    std.testing.refAllDeclsRecursive(@This());
 
     _ = try Context.init();
 }
 
-const Error = error{
+pub const Error = error{
     /// Invalid Mlir was created.
     InvalidMlir,
     /// Another Mlir error. Check the log for more context.
     MlirUnexpected,
     /// A resource/executor was not found.
     NotFound,
+    /// Bytecode version incompatibility.
+    InvalidMlirBytecodeVersion,
     OutOfMemory,
 };
 
@@ -35,12 +37,9 @@ pub fn registerPasses(comptime passes: []const u8) void {
     @field(c, "mlirRegister" ++ passes ++ "Passes")();
 }
 
-pub fn successOr(res: c.MlirLogicalResult, err: anytype) !void {
-    return if (res.value == 0) err;
+pub fn successOr(res: c.MlirLogicalResult, err: anytype) @TypeOf(err)!void {
+    return if (res.value == 0) err else {};
 }
-
-/// Alternative to MlirWrapperType
-pub const MlirStrCallback = fn (c.MlirStringRef, ?*anyopaque) callconv(.c) void;
 
 pub const Registry = struct {
     _inner: c.MlirDialectRegistry,
@@ -48,51 +47,51 @@ pub const Registry = struct {
     pub const deinit = helpers.deinit(Registry, c.mlirDialectRegistryDestroy);
 
     pub fn init() !Registry {
-        return helpers.init(Registry, c.mlirDialectRegistryCreate(), c.mlirDialectRegistryIsNull) orelse Error.MlirUnexpected;
+        const registry = c.mlirDialectRegistryCreate();
+        return .{ ._inner = .{ .ptr = registry.ptr orelse return Error.MlirUnexpected } };
     }
 };
 
 pub const Context = struct {
     _inner: c.MlirContext,
-    const Self = Context;
     pub const deinit = helpers.deinit(Context, c.mlirContextDestroy);
     pub const wrapOr = helpers.wrapOr(Context, c.mlirContextIsNull);
 
-    pub fn init() !Self {
-        return Self.wrapOr(c.mlirContextCreate()) orelse Error.MlirUnexpected;
+    pub fn init() !Context {
+        return Context.wrapOr(c.mlirContextCreate()) orelse Error.MlirUnexpected;
     }
 
-    pub fn initWithRegistry(registry: Registry, threadingEnabled: bool) !Self {
-        return Self.wrapOr(
+    pub fn initWithRegistry(registry: Registry, threadingEnabled: bool) !Context {
+        return Context.wrapOr(
             c.mlirContextCreateWithRegistry(registry._inner, threadingEnabled),
         ) orelse Error.InvalidMlir;
     }
 
-    pub fn setMultiThreading(self: *Self, enabled: bool) void {
+    pub fn setMultiThreading(self: *Context, enabled: bool) void {
         c.mlirContextEnableMultithreading(self._inner, enabled);
     }
 
-    pub fn appendDialectRegistry(self: *Self, registry: Registry) void {
+    pub fn appendDialectRegistry(self: *Context, registry: Registry) void {
         c.mlirContextAppendDialectRegistry(self._inner, registry._inner);
     }
 
-    pub fn loadAllAvailableDialects(self: *Self) void {
+    pub fn loadAllAvailableDialects(self: *Context) void {
         c.mlirContextLoadAllAvailableDialects(self._inner);
     }
 
-    pub fn numRegisteredDialects(self: Self) usize {
+    pub fn numRegisteredDialects(self: Context) usize {
         return @intCast(c.mlirContextGetNumRegisteredDialects(self._inner));
     }
 
-    pub fn numLoadedDialects(self: Self) usize {
+    pub fn numLoadedDialects(self: Context) usize {
         return @intCast(c.mlirContextGetNumLoadedDialects(self._inner));
     }
 
-    pub fn isRegisteredOperation(self: Self, op: [:0]const u8) bool {
+    pub fn isRegisteredOperation(self: Context, op: [:0]const u8) bool {
         return c.mlirContextIsRegisteredOperation(self._inner, stringRef(op));
     }
 
-    pub fn location(self: Self, src: std.builtin.SourceLocation) Location {
+    pub fn location(self: Context, src: std.builtin.SourceLocation) Location {
         return Location.fromSrc(self, src);
     }
 };
@@ -103,9 +102,7 @@ pub const Module = struct {
     pub const deinit = helpers.deinit(Module, c.mlirModuleDestroy);
     pub const wrapOr = helpers.wrapOr(Module, c.mlirModuleIsNull);
 
-    const Self = Module;
-
-    pub fn init(loc: Location) Self {
+    pub fn init(loc: Location) Module {
         return .{ ._inner = c.mlirModuleCreateEmpty(loc._inner) };
     }
 
@@ -142,29 +139,26 @@ pub const PassManager = struct {
     pub const deinit = helpers.deinit(PassManager, c.mlirPassManagerDestroy);
     pub const wrapOr = helpers.wrapOr(PassManager, c.mlirPassManagerIsNull);
 
-    const Self = PassManager;
-
-    pub fn init(ctx: Context) !Self {
-        return Self.wrapOr(
+    pub fn init(ctx: Context) !PassManager {
+        return PassManager.wrapOr(
             c.mlirPassManagerCreate(ctx._inner),
         ) orelse Error.MlirUnexpected;
     }
 
-    pub fn initOnOperation(ctx: Context, op: [:0]const u8) !Self {
-        return Self.wrapOr(
+    pub fn initOnOperation(ctx: Context, op: [:0]const u8) !PassManager {
+        return PassManager.wrapOr(
             c.mlirPassManagerCreateOnOperation(ctx._inner, stringRef(op)),
         ) orelse Error.MlirUnexpected;
     }
 
-    pub fn asOpPassManager(self: Self) OpPassManager {
+    pub fn asOpPassManager(self: PassManager) OpPassManager {
         return .{ ._inner = c.mlirPassManagerGetAsOpPassManager(self._inner) };
     }
 
-    pub fn enableIRPrinting(self: *Self) void {
-        c.mlirPassManagerEnableIRPrinting(self._inner);
-    }
+    // TODO mlirPassManagerEnableIRPrinting
+    // pub fn enableIRPrinting(self: *PassManager) void {}
 
-    pub fn runOnOp(self: *Self, op: Operation) error{InvalidMlir}!void {
+    pub fn runOnOp(self: *PassManager, op: Operation) error{InvalidMlir}!void {
         if (c.mlirPassManagerRunOnOp(self._inner, op._inner).value == 0) {
             return Error.InvalidMlir;
         }
@@ -193,21 +187,20 @@ pub const OpPassManager = struct {
 
 pub const Identifier = struct {
     _inner: c.MlirIdentifier,
-    const Self = Identifier;
 
-    pub fn get(ctx: Context, str_: [:0]const u8) Self {
+    pub fn get(ctx: Context, str_: [:0]const u8) Identifier {
         return .{ ._inner = c.mlirIdentifierGet(ctx._inner, stringRef(str_)) };
     }
 
-    pub fn context(self: Self) Context {
+    pub fn context(self: Identifier) Context {
         return .{ ._inner = c.mlirIdentifierGetContext(self._inner) };
     }
 
-    pub fn str(self: Self) []const u8 {
+    pub fn str(self: Identifier) []const u8 {
         return fromStringRef(c.mlirIdentifierStr(self._inner));
     }
 
-    pub fn equals(self: Self, other: Self) bool {
+    pub fn equals(self: Identifier, other: Identifier) bool {
         return c.mlirIdentifierEqual(self._inner, other._inner);
     }
 };
@@ -322,6 +315,14 @@ pub const Attribute = struct {
 
         return DictionaryAttribute.init(ctx, attrs).asAttr();
     }
+
+    pub fn eqlAny(Attr: type) fn (Attr, Attr) bool {
+        return struct {
+            fn eql(a: Attr, b: Attr) bool {
+                return a.asAttr().eql(b.asAttr());
+            }
+        }.eql;
+    }
 };
 
 pub const NamedAttribute = extern struct {
@@ -349,15 +350,14 @@ pub const NamedAttribute = extern struct {
 pub const StringAttribute = struct {
     _inner: c.MlirAttribute,
     pub const is_a_fn = c.mlirAttributeIsAString;
-    const Self = StringAttribute;
-    pub const asAttr = Attribute.fromAny(Self);
-    pub const eql = Attribute.eqlAny(Self);
+    pub const asAttr = Attribute.fromAny(StringAttribute);
+    pub const eql = Attribute.eqlAny(StringAttribute);
 
-    pub fn init(ctx: Context, str: []const u8) Self {
+    pub fn init(ctx: Context, str: []const u8) StringAttribute {
         return .{ ._inner = c.mlirStringAttrGet(ctx._inner, stringRef(str)) };
     }
 
-    pub fn value(self: Self) []const u8 {
+    pub fn value(self: StringAttribute) []const u8 {
         return fromStringRef(c.mlirStringAttrGetValue(self._inner));
     }
 };
@@ -365,15 +365,14 @@ pub const StringAttribute = struct {
 pub const BoolAttribute = struct {
     _inner: c.MlirAttribute,
     pub const is_a_fn = c.mlirAttributeIsABool;
-    const Self = BoolAttribute;
-    pub const asAttr = Attribute.fromAny(Self);
-    pub const eql = Attribute.eqlAny(Self);
+    pub const asAttr = Attribute.fromAny(BoolAttribute);
+    pub const eql = Attribute.eqlAny(BoolAttribute);
 
-    pub fn init(ctx: Context, value_: bool) Self {
+    pub fn init(ctx: Context, value_: bool) BoolAttribute {
         return .{ ._inner = c.mlirBoolAttrGet(ctx._inner, if (value_) 1 else 0) };
     }
 
-    pub fn value(self: Self) bool {
+    pub fn value(self: BoolAttribute) bool {
         return c.mlirBoolAttrGetValue(self._inner);
     }
 };
@@ -397,19 +396,18 @@ pub const TypeAttribute = struct {
 pub const ArrayAttribute = struct {
     _inner: c.MlirAttribute,
     pub const is_a_fn = c.mlirAttributeIsAArray;
-    const Self = ArrayAttribute;
-    pub const asAttr = Attribute.fromAny(Self);
-    pub const eql = Attribute.eqlAny(Self);
+    pub const asAttr = Attribute.fromAny(ArrayAttribute);
+    pub const eql = Attribute.eqlAny(ArrayAttribute);
 
-    pub fn init(ctx: Context, attrs: []const Attribute) Self {
+    pub fn init(ctx: Context, attrs: []const Attribute) ArrayAttribute {
         return .{ ._inner = c.mlirArrayAttrGet(ctx._inner, @intCast(attrs.len), @ptrCast(attrs.ptr)) };
     }
 
-    pub fn size(self: Self) usize {
+    pub fn size(self: ArrayAttribute) usize {
         return @intCast(c.mlirArrayAttrGetNumElements(self._inner));
     }
 
-    pub fn get(self: Self, index: usize) Attribute {
+    pub fn get(self: ArrayAttribute, index: usize) Attribute {
         return .{ ._inner = c.mlirArrayAttrGetElement(self._inner, @intCast(index)) };
     }
 };
@@ -590,13 +588,13 @@ pub fn DenseElementsAttribute(comptime dt: DenseElementsAttributeTypes) type {
 
         pub fn init(shaped_type: Type, slice: []const dt.ZigType()) Attr {
             const raw_bytes = std.mem.sliceAsBytes(slice);
-            const res: Attr = .{ ._inner = c.mlirDenseElementsAttrRawBufferGet(
+            const attr: Attr = .{ ._inner = c.mlirDenseElementsAttrRawBufferGet(
                 shaped_type._inner,
                 @intCast(raw_bytes.len),
                 @ptrCast(raw_bytes.ptr),
             ) };
-            std.debug.assert(Attribute.wrapOr(res._inner) != null);
-            return res;
+            std.debug.assert(attr._inner.ptr != null);
+            return attr;
         }
 
         pub fn len(self: Attr) usize {
@@ -717,7 +715,7 @@ pub const DictionaryAttribute = struct {
     }
 
     pub fn getByName(self: DictionaryAttribute, name: [:0]const u8) ?Attribute {
-        return Attribute.wrapOr(c.mlirDictionaryAttrGetElementByName(self._inner, name));
+        return Attribute.wrapOr(c.mlirDictionaryAttrGetElementByName(self._inner, stringRef(name)));
     }
 };
 
@@ -728,8 +726,7 @@ pub const Operation = struct {
     pub const dump = helpers.dump(Operation, c.mlirOperationDestroy);
     pub const deinit = helpers.deinit(Operation, c.mlirOperationDestroy);
     pub const wrapOr = helpers.wrapOr(Operation, c.mlirOperationIsNull);
-
-    pub const eql = Attribute.eqlAny(Self);
+    pub const eql = helpers.eql(Operation, c.mlirOperationEqual);
 
     pub fn init(state: *OperationState) !Self {
         return Self.wrapOr(c.mlirOperationCreate(&state._inner)) orelse Error.InvalidMlir;
@@ -881,52 +878,33 @@ pub const Operation = struct {
         return .{ ._inner = c.mlirOperationGetContext(self._inner) };
     }
 
-    pub fn writeBytecode(self: Self, writer: anytype) void {
-        var writer_context = .{ .writer = writer };
-        const WriterContext = @TypeOf(writer_context);
-
+    pub fn writeBytecode(self: Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        var writer_with_err: WriterWithErr = .{ .writer = writer };
         c.mlirOperationWriteBytecode(
             self._inner,
-            (struct {
-                pub fn callback(str: c.MlirStringRef, ctx_: ?*anyopaque) callconv(.c) void {
-                    const inner_writer_context: *WriterContext = @ptrCast(@alignCast(ctx_));
-                    _ = inner_writer_context.writer.write(str.data[0..str.length]) catch unreachable;
-                }
-            }).callback,
-            &writer_context,
+            WriterWithErr.printCallback,
+            &writer_with_err,
         );
+        return writer_with_err.check();
     }
 
-    pub fn writeBytecodeWithConfig(self: Self, writer: anytype, config: struct {
+    pub fn writeBytecodeWithConfig(self: Self, writer: *std.Io.Writer, config: struct {
         desiredEmitedVersion: ?i64 = null,
-    }) !void {
+    }) error{ InvalidMlirBytecodeVersion, WriteFailed }!void {
         const cfg = c.mlirBytecodeWriterConfigCreate();
         defer c.mlirBytecodeWriterConfigDestroy(cfg);
         if (config.desiredEmitedVersion) |v| {
             c.mlirBytecodeWriterConfigDesiredEmitVersion(cfg, v);
         }
 
-        const WriterContext = struct {
-            writer: @TypeOf(writer),
-            write_error: ?@TypeOf(writer).Error = null,
-        };
-        var writer_context: WriterContext = .{ .writer = writer };
-
+        var writer_with_err: WriterWithErr = .{ .writer = writer };
         try successOr(c.mlirOperationWriteBytecodeWithConfig(
             self._inner,
             cfg,
-            (struct {
-                pub fn callback(str: c.MlirStringRef, ctx_: ?*anyopaque) callconv(.c) void {
-                    const inner_writer_context: *WriterContext = @ptrCast(@alignCast(ctx_));
-                    _ = inner_writer_context.writer.write(str.data[0..str.length]) catch |err| {
-                        inner_writer_context.write_error = err;
-                    };
-                }
-            }).callback,
-            &writer_context,
+            &WriterWithErr.printCallback,
+            &writer_with_err,
         ), error.InvalidMlirBytecodeVersion);
-
-        if (writer_context.write_error) |err| return err;
+        return writer_with_err.check();
     }
 
     /// Enable a full dump of the IR.
@@ -939,26 +917,18 @@ pub const Operation = struct {
         op: Operation,
         flags: OpPrintingFlags,
 
-        pub fn format(self: @This(), writer: anytype) !void {
-            self.op.print(writer, self.flags);
+        pub fn format(self: MlirFormatter, writer: *std.Io.Writer) !void {
+            try self.op.print(writer, self.flags);
         }
     };
 
-    pub fn print(self: Self, writer: *std.Io.Writer, flags: OpPrintingFlags) void {
+    pub fn print(self: Self, writer: *std.Io.Writer, flags: OpPrintingFlags) std.Io.Writer.Error!void {
         const pflags = flags.create();
         defer c.mlirOpPrintingFlagsDestroy(pflags);
 
-        c.mlirOperationPrintWithFlags(
-            self._inner,
-            pflags,
-            (struct {
-                pub fn callback(str: c.MlirStringRef, ctx_: ?*anyopaque) callconv(.c) void {
-                    const _writer: *std.Io.Writer = @ptrCast(@alignCast(ctx_));
-                    _writer.writeAll(str.data[0..str.length]) catch @panic("Mlir print failed");
-                }
-            }).callback,
-            writer,
-        );
+        var writer_err: WriterWithErr = .{ .writer = writer };
+        c.mlirOperationPrintWithFlags(self._inner, pflags, WriterWithErr.printCallback, &writer_err);
+        return writer_err.check();
     }
 
     pub fn verify(self: Self) bool {
@@ -1065,27 +1035,25 @@ pub const OpPrintingFlags = struct {
 
 pub const OpOperand = struct {
     _inner: c.MlirOpOperand,
-    const Self = OpOperand;
+    pub const wrapOr = helpers.wrapOr(OpOperand, c.mlirOpOperandIsNull);
 
-    pub fn owner(self: Self) Operation {
+    pub fn owner(self: OpOperand) Operation {
         return .{ ._inner = c.mlirOpOperandGetOwner(self._inner) };
     }
 
-    pub fn number(self: Self) usize {
+    pub fn number(self: OpOperand) usize {
         return @intCast(c.mlirOpOperandGetOperandNumber(self._inner));
     }
 
-    pub fn nextUse(self: Self) ?Self {
-        return Self.wrapOr(
-            c.mlirOpOperandGetNextUse(self._inner),
-        );
+    pub fn nextUse(self: OpOperand) ?OpOperand {
+        return wrapOr(c.mlirOpOperandGetNextUse(self._inner));
     }
 };
 
 pub const Region = struct {
     _inner: c.MlirRegion,
 
-    pub const eql = helpers.eql(Region, c.mlirBlockEqual);
+    pub const eql = helpers.eql(Region, c.mlirRegionEqual);
     pub const deinit = helpers.deinit(Region, c.mlirRegionDestroy);
     pub const wrapOr = helpers.wrapOr(Region, c.mlirRegionIsNull);
 
@@ -1121,7 +1089,7 @@ pub const Value = struct {
 
     pub const dump = helpers.dump(Value, c.mlirValueDump);
     pub const eql = helpers.eql(Value, c.mlirValueEqual);
-    pub const format = helpers.format(Value, c.mlirValuePrint).format;
+    pub const format = helpers.format(Value, c.mlirValuePrint);
     pub const wrapOr = helpers.wrapOr(Value, c.mlirValueIsNull);
 
     pub fn getType(val: Value) Type {
@@ -1183,7 +1151,7 @@ pub const BlockArgument = struct {
         return @bitCast(c.mlirBlockArgumentGetArgNumber(arg._inner));
     }
 
-    pub fn format(self: BlockArgument, writer: anytype) !void {
+    pub fn format(self: BlockArgument, writer: *std.Io.Writer) !void {
         const value = Value{ ._inner = self._inner };
         return value.format(writer);
     }
@@ -1192,7 +1160,7 @@ pub const BlockArgument = struct {
 pub const Type = struct {
     _inner: c.MlirType,
 
-    pub const dump = helpers.eql(Type, c.mlirTypeDump);
+    pub const dump = helpers.dump(Type, c.mlirTypeDump);
     pub const eql = helpers.eql(Type, c.mlirTypeEqual);
     pub const format = helpers.format(Type, c.mlirTypePrint);
     pub const wrapOr = helpers.wrapOr(Type, c.mlirTypeIsNull);
@@ -1228,14 +1196,6 @@ pub const Type = struct {
                 return a.asType().eql(b.asType());
             }
         }.eql;
-    }
-
-    pub fn formatAny(SpecificType: type) fn (SpecificType, SpecificType) type {
-        return struct {
-            pub fn format(self: SpecificType, writer: anytype) !void {
-                return try Type.format(self.asType(), writer);
-            }
-        };
     }
 
     pub fn index(ctx: Context) Type {
@@ -1280,7 +1240,7 @@ pub const IndexType = struct {
 
     pub const asType = Type.fromAny(IndexType);
     pub const eql = Type.eqlAny(IndexType);
-    pub const format = Type.formatAny(IndexType).format;
+    pub const format = helpers.format(IndexType, c.mlirTypePrint);
 
     pub fn init(ctx: Context) IndexType {
         return .{ ._inner = c.mlirIndexTypeGet(ctx._inner) };
@@ -1452,7 +1412,7 @@ pub fn ComplexType(comptime ct: ComplexTypes) type {
 
         pub const asType = Type.fromAny(Complex);
         pub const eql = Type.eqlAny(Complex);
-        pub const format = Type.formatAny(Complex).format;
+        pub const format = helpers.format(Complex, c.mlirTypePrint);
         pub const ComplexTypeType: ComplexTypes = ct;
 
         pub const init = if (ct != .unknown) struct {
@@ -1468,51 +1428,50 @@ pub const TupleType = struct {
     _inner: c.MlirType,
     pub const is_a_fn = c.mlirTypeIsATuple;
 
-    const Self = TupleType;
-
-    pub fn init(ctx: Context, elements: []const Type) !Self {
-        return Self.wrapOr(c.mlirTupleTypeGet(
+    pub fn init(ctx: Context, elements: []const Type) !TupleType {
+        const tuple_type = c.mlirTupleTypeGet(
             ctx._inner,
             @intCast(elements.len),
             @ptrCast(elements.ptr),
-        )) orelse Error.InvalidMlir;
+        );
+        return .{ ._inner = .{ .ptr = tuple_type.ptr orelse return error.InvalidMlir } };
     }
 
-    pub fn getNumTypes(self: Self) usize {
+    pub fn getNumTypes(self: TupleType) usize {
         return @intCast(c.mlirTupleTypeGetNumTypes(self._inner));
     }
 
-    pub fn getElementType(self: Self, index: usize) Type {
+    pub fn getElementType(self: TupleType, index: usize) Type {
         return .{ ._inner = c.mlirTupleTypeGetType(self._inner, @intCast(index)) };
     }
 
-    pub const asType = Type.fromAny(Self);
+    pub const asType = Type.fromAny(TupleType);
 };
 
 pub const FunctionType = struct {
     _inner: c.MlirType,
     pub const is_a_fn = c.mlirTypeIsAFunction;
-    const Self = FunctionType;
-    pub const asType = Type.fromAny(Self);
-    pub const eql = Type.eqlAny(IndexType);
+    pub const asType = Type.fromAny(FunctionType);
+    pub const eql = Type.eqlAny(FunctionType);
 
-    pub fn init(ctx: Context, args: []const Type, results: []const Type) !Self {
-        const func = Type.wrapOr(c.mlirFunctionTypeGet(
+    pub fn init(ctx: Context, args: []const Type, results: []const Type) !FunctionType {
+        const func_type = c.mlirFunctionTypeGet(
             ctx._inner,
             @intCast(args.len),
             @ptrCast(args.ptr),
             @intCast(results.len),
             @ptrCast(results.ptr),
-        )) orelse return Error.InvalidMlir;
-        return func.as(Self).?;
+        );
+        return .{ ._inner = .{ .ptr = func_type.ptr orelse return error.InvalidMlir } };
     }
 };
 
 pub const RankedTensorType = struct {
     _inner: c.MlirType,
     pub const is_a_fn = c.mlirTypeIsARankedTensor;
+    pub const asType = Type.fromAny(RankedTensorType);
     pub const eql = Type.eqlAny(RankedTensorType);
-    pub const format = helpers.format(Type, c.mlirTypePrint);
+    pub const format = helpers.format(RankedTensorType, c.mlirTypePrint);
 
     pub fn init(dimensions: []const i64, elemType: Type) RankedTensorType {
         return .{ ._inner = c.mlirRankedTensorTypeGet(
@@ -1534,20 +1493,16 @@ pub const RankedTensorType = struct {
     pub fn getDimension(self: RankedTensorType, dim: usize) i64 {
         return c.mlirShapedTypeGetDimSize(self._inner, @intCast(dim));
     }
-
-    pub const asType = Type.fromAny(RankedTensorType);
 };
 
 pub const Dialect = struct {
     _inner: c.MlirDialect,
 
-    const Self = Dialect;
-
-    pub fn getContext(self: Self) Context {
+    pub fn getContext(self: Dialect) Context {
         return .{ ._inner = c.mlirDialectGetContext(self._inner) };
     }
 
-    pub fn getNamespace(self: Self) []const u8 {
+    pub fn getNamespace(self: Dialect) []const u8 {
         return fromStringRef(c.mlirDialectGetNamespace(self._inner));
     }
 };
@@ -1579,7 +1534,7 @@ pub const DialectHandle = struct {
 pub const Location = struct {
     _inner: c.MlirLocation,
 
-    pub const eql = helpers.eql(Type, c.mlirLocationEqual);
+    pub const eql = helpers.eql(Location, c.mlirLocationEqual);
     pub const format = helpers.format(Location, c.mlirLocationPrint);
 
     pub fn fromSrc(ctx: Context, src: std.builtin.SourceLocation) Location {
@@ -1613,17 +1568,17 @@ pub const Location = struct {
         ) };
     }
 
-    pub fn named(loc: Location, ctx: Context, loc_name: [:0]const u8) Location {
+    pub fn named(loc: Location, ctx: Context, loc_name: []const u8) Location {
         return .{ ._inner = c.mlirLocationNameGet(ctx._inner, stringRef(loc_name), loc._inner) };
     }
 
     pub fn namedFmt(loc: Location, ctx: Context, comptime fmt: [:0]const u8, args: anytype) Location {
         var buf: [256]u8 = undefined;
-        var stream = std.io.fixedBufferStream(&buf);
-        std.fmt.format(stream.writer(), fmt, args) catch {
+        var writer: std.Io.Writer = .fixed(&buf);
+        writer.print(fmt, args) catch {
             buf[256 - 3 ..].* = "...".*;
         };
-        return loc.named(ctx, @ptrCast(stream.getWritten()));
+        return loc.named(ctx, writer.buffered());
     }
 
     pub fn unknown(ctx: Context) Location {
@@ -1636,7 +1591,6 @@ pub const Block = struct {
 
     pub const wrapOr = helpers.wrapOr(Block, c.mlirBlockIsNull);
     pub const deinit = helpers.deinit(Block, c.mlirBlockDestroy);
-
     pub const eql = helpers.eql(Block, c.mlirBlockEqual);
 
     pub fn init(args: []const Type, locs: []const Location) !Block {
@@ -1736,27 +1690,15 @@ pub const helpers = struct {
         }.isNull;
     }
 
-    pub fn format(Any: type, print_fn: fn (@FieldType(Any, "_inner"), ?*const MlirStrCallback, ?*anyopaque) callconv(.c) void) type {
+    pub fn format(
+        Any: type,
+        print_fn: fn (@FieldType(Any, "_inner"), ?*const MlirStrCallback, ?*anyopaque) callconv(.c) void,
+    ) fn (Any, *std.Io.Writer) std.Io.Writer.Error!void {
         return struct {
-            pub fn format(self: Any, writer: *std.Io.Writer) !void {
-                const WriterWithErr = struct {
-                    writer: *std.Io.Writer,
-                    err: ?std.Io.Writer.Error = null,
-                    fn printCallback(mlir_str: c.MlirStringRef, opaque_ctx: ?*anyopaque) callconv(.c) void {
-                        var ctx: *@This() = @ptrCast(@alignCast(opaque_ctx));
-                        if (ctx.err) |_| return;
-                        _ = ctx.writer.write(mlir_str.data[0..mlir_str.length]) catch |err| {
-                            ctx.err = err;
-                            return;
-                        };
-                    }
-                };
-
-                var context: WriterWithErr = .{ .writer = writer };
-                print_fn(self._inner, &WriterWithErr.printCallback, &context);
-                if (context.err) |err| return err;
+            pub fn format(self: Any, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+                try callPrintFn(Any, self, print_fn, writer);
             }
-        };
+        }.format;
     }
 
     pub fn wrapOr(T: type, is_null_fn: fn (@FieldType(T, "_inner")) callconv(.c) bool) fn (@FieldType(T, "_inner")) ?T {
@@ -1767,9 +1709,35 @@ pub const helpers = struct {
             }
         }.wrapOr;
     }
+};
 
-    pub fn init(T: type, inner: @FieldType(T, "_inner"), is_null_fn: fn (@FieldType(T, "_inner")) callconv(.c) bool) ?T {
-        if (is_null_fn(inner)) return null;
-        return .{ ._inner = inner };
+pub const MlirStrCallback = fn (c.MlirStringRef, ?*anyopaque) callconv(.c) void;
+
+pub fn callPrintFn(
+    T: type,
+    value: T,
+    print_fn: fn (@FieldType(T, "_inner"), ?*const MlirStrCallback, ?*anyopaque) callconv(.c) void,
+    writer: *std.Io.Writer,
+) std.Io.Writer.Error!void {
+    var writer_with_err: WriterWithErr = .{ .writer = writer };
+    print_fn(value._inner, &WriterWithErr.printCallback, &writer_with_err);
+    return writer_with_err.check();
+}
+
+pub const WriterWithErr = struct {
+    writer: *std.Io.Writer,
+    err: ?std.Io.Writer.Error = null,
+
+    pub fn printCallback(mlir_str: c.MlirStringRef, opaque_ctx: ?*anyopaque) callconv(.c) void {
+        var ctx: *WriterWithErr = @ptrCast(@alignCast(opaque_ctx));
+        if (ctx.err) |_| return;
+        ctx.writer.writeAll(fromStringRef(mlir_str)) catch |err| {
+            ctx.err = err;
+            return;
+        };
+    }
+
+    pub fn check(self: WriterWithErr) std.Io.Writer.Error!void {
+        if (self.err) |err| return err;
     }
 };

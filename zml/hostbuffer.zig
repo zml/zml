@@ -321,10 +321,7 @@ pub const HostBuffer = struct {
         };
     }
 
-    pub fn format(
-        self: HostBuffer,
-        writer: anytype,
-    ) !void {
+    pub fn format(self: HostBuffer, writer: *std.Io.Writer) !void {
         try writer.print("HostBuffer(.{f})", .{self._shape});
     }
 

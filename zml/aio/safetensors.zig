@@ -9,7 +9,6 @@ const zml = @import("../zml.zig");
 const HostBuffer = zml.HostBuffer;
 const json = @import("json.zig");
 
-const StringBuilder = std.ArrayListUnmanaged(u8);
 const log = std.log.scoped(.@"zml/io");
 
 pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore {
@@ -17,19 +16,18 @@ pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore
     errdefer res.arena.deinit();
     const arena = res.arena.allocator();
 
-    var files = std.array_list.Managed(MemoryMappedFile).init(arena);
-    errdefer files.deinit();
+    var files: std.ArrayList(MemoryMappedFile) = .empty;
 
     if (std.mem.endsWith(u8, path, ".safetensors.index.json")) {
         try loadFromIndex(arena, &res, &files, path);
     } else {
         try loadFile(arena, &res, &files, path);
     }
-    res.files = try files.toOwnedSlice();
+    res.files = try files.toOwnedSlice(allocator);
     return res;
 }
 
-fn loadFromIndex(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.array_list.Managed(MemoryMappedFile), path: []const u8) !void {
+fn loadFromIndex(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.ArrayList(MemoryMappedFile), path: []const u8) !void {
     const file = async.File.open(path, .{}) catch |err| {
         log.err("Failed to open {s}: {}", .{ path, err });
         return err;
@@ -61,11 +59,11 @@ fn loadFromIndex(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.
 
     if (index.object.get("__metadata__")) |metadata| {
         var prefix_buf: [1024]u8 = undefined;
-        try json.parseMetadata(allocator, store, StringBuilder.initBuffer(&prefix_buf), metadata);
+        try json.parseMetadata(allocator, store, .initBuffer(&prefix_buf), metadata);
     }
 }
 
-fn loadFile(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.array_list.Managed(MemoryMappedFile), path: []const u8) !void {
+fn loadFile(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.ArrayList(MemoryMappedFile), path: []const u8) !void {
     const file = async.File.open(path, .{}) catch |err| {
         log.err("Failed to open {s}: {}", .{ path, err });
         return err;
@@ -87,7 +85,7 @@ fn loadFile(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.array
     errdefer buffer_file.deinit();
     buffer_file.data_offset = 8 + json_header_length;
 
-    try files.append(buffer_file);
+    try files.append(allocator, buffer_file);
     errdefer _ = files.pop();
 
     var it = metadata.object.iterator();
@@ -95,7 +93,7 @@ fn loadFile(allocator: Allocator, store: *zml.aio.BufferStore, files: *std.array
         const key = entry.key_ptr.*;
         if (std.mem.eql(u8, key, "__metadata__")) {
             var prefix_buf: [1024]u8 = undefined;
-            try json.parseMetadata(allocator, store, StringBuilder.initBuffer(&prefix_buf), entry.value_ptr.*);
+            try json.parseMetadata(allocator, store, .initBuffer(&prefix_buf), entry.value_ptr.*);
             continue;
         }
         const val = entry.value_ptr.*;

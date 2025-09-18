@@ -1,4 +1,4 @@
-load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library", "zig_test")
 
 zig_library(
     name = "tokenizer",
@@ -22,6 +22,17 @@ zig_binary(
     deps = [
         ":tokenizer",
         "//async",
+        "//stdx",
+    ],
+)
+
+zig_test(
+    name = "test",
+    main = "homemade.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//async",
+        "//ffi:zig",
         "//stdx",
     ],
 )
