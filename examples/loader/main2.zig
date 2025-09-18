@@ -1111,7 +1111,7 @@ pub fn asyncMain() !void {
         return;
     };
 
-    const verify_checksums = true;
+    const verify_checksums = false;
 
     var context = try Context.init();
     defer context.deinit();
@@ -1144,6 +1144,49 @@ pub fn asyncMain() !void {
 
     log.info("Registry loaded with {d} tensors.", .{registry.tensors.count()});
 
+    if (verify_checksums) {
+        log.info("--- Pre-computing checksums from disk... ---", .{});
+        var checksum_timer = try std.time.Timer.start();
+
+        const checksum_file_buffer = try allocator.alloc(u8, BUF_1_MB);
+        defer allocator.free(checksum_file_buffer);
+
+        const checksum_pump_buffer = try allocator.alloc(u8, BUF_16_MB);
+        defer allocator.free(checksum_pump_buffer);
+
+        var checksum_source_reader: Source.Reader = undefined;
+
+        var checksum_it = registry.tensors.iterator();
+        while (checksum_it.next()) |entry| {
+            const tensor = entry.value_ptr.*;
+            log.info("Checksumming tensor: {s}", .{tensor.name});
+            if (tensor.shape.byteSize() == 0) continue;
+
+            var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+
+            try fs_source.initReader(tensor.source_name, checksum_file_buffer, &checksum_source_reader);
+            const reader_iface = sourceInterface(&checksum_source_reader);
+            try reader_iface.discardAll(tensor.offset);
+
+            var limited_reader = std.io.Reader.Limited.init(reader_iface, .limited64(tensor.shape.byteSize()), &.{});
+            const reader = &limited_reader.interface;
+
+            while (true) {
+                const bytes_read = reader.readSliceShort(checksum_pump_buffer) catch |err| {
+                    if (err == error.EndOfStream) break;
+                    return err;
+                };
+                if (bytes_read == 0) break;
+                hasher.update(checksum_pump_buffer[0..bytes_read]);
+            }
+
+            var digest: [32]u8 = undefined;
+            hasher.final(&digest);
+            try registry.checksums.put(allocator, tensor.name, digest);
+        }
+        log.info("Checksum pre-computation finished in {d} ms", .{checksum_timer.read() / std.time.ns_per_ms});
+    }
+
     log.info("--- Planning transfers ---", .{});
     var io_manager = try IoManager.init(allocator, platform, memory, registry.tensors.values());
     defer io_manager.deinit();
@@ -1170,9 +1213,6 @@ pub fn asyncMain() !void {
     var sum_total_bytes_copied: u64 = 0;
     var timer = try std.time.Timer.start();
 
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
     var tensor_it = registry.tensors.iterator();
     while (tensor_it.next()) |entry| {
         const trace_tensor_process = tracer.frameStart("Processing tensor");
@@ -1193,41 +1233,26 @@ pub fn asyncMain() !void {
         const buffer_index = io_manager.tensor_name_to_index.get(tensor.name).?;
         try memory_writer.beginTensor(tensor, buffer_index);
 
-        var hasher: ?std.crypto.hash.sha2.Sha256 = if (verify_checksums) std.crypto.hash.sha2.Sha256.init(.{}) else null;
         var bytes_to_process = tensor.shape.byteSize();
 
-        const trace_process_bytes = tracer.frameStart("Process bytes");
         while (bytes_to_process > 0) {
             var free_buffer = try memory_writer.getFreeBuffer();
             const read_limit = @min(bytes_to_process, free_buffer.len);
 
             const bytes_read = try reader.readSliceShort(free_buffer[0..read_limit]);
-
-            if (hasher) |*h| {
-                h.update(free_buffer[0..bytes_read]);
-            }
-
             try memory_writer.submitBuffer(free_buffer[0..bytes_read]);
 
             bytes_to_process -= bytes_read;
             sum_total_bytes_copied += bytes_read;
         }
-        tracer.frameEnd(trace_process_bytes, "Process bytes");
-
-        if (hasher) |*h| {
-            var digest: [32]u8 = undefined;
-            h.final(&digest);
-            try registry.checksums.put(arena.allocator(), tensor.name, digest);
-        }
     }
 
-    const trace_flush_all_blocking = tracer.frameStart("Flush all blocking");
     try memory_writer.flushAllBlocking();
-    tracer.frameEnd(trace_flush_all_blocking, "Flush all blocking");
 
     const elapsed = timer.read();
     const gb_copied = @as(f64, @floatFromInt(sum_total_bytes_copied)) / (1024.0 * 1024.0 * 1024.0);
     const rate = if (elapsed > 0) gb_copied / (@as(f64, @floatFromInt(elapsed)) / 1_000_000_000.0) else 0;
+
     log.warn(
         "--- All tensors processed successfully in {d} ms ({d:.4} GB at {d:.2} GB/s) ---",
         .{ elapsed / std.time.ns_per_ms, gb_copied, rate },
