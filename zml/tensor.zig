@@ -311,7 +311,7 @@ pub const Tensor = struct {
 
     /// Returns the given tensor as one contiguous buffer of bytes.
     pub fn bytes(self: Tensor) Tensor {
-        return self.bitCast(.u8).flattenAll().withTags(.{.bytes});
+        return self.bitCast(.u8).flatten().withTags(.{.bytes});
     }
 
     /// Returns a Tensor containing the element-wise number of leading 0 bits in the input Tensor.
@@ -993,17 +993,22 @@ pub const Tensor = struct {
 
     /// Returns a Tensor containing the element-wise addition of the input Tensor with a constant.
     pub fn addConstant(self: Tensor, b: anytype) Tensor {
-        return self.add(Tensor.scalar(b, self.dtype()));
+        return self.add(.scalar(b, self.dtype()));
     }
 
     /// Returns a Tensor containing the element-wise division of the input Tensor by a constant.
     pub fn divByConst(self: Tensor, b: anytype) Tensor {
-        return self.div(Tensor.scalar(b, self.dtype()));
+        return self.div(.scalar(b, self.dtype()));
+    }
+
+    /// Returns a Tensor containing the element-wise power of the input Tensor by a constant.
+    pub fn powByConst(self: Tensor, b: anytype) Tensor {
+        return self.pow(.scalar(b, self.dtype()));
     }
 
     /// Returns a Tensor containing the element-wise multiplication of the input Tensor by a constant.
     pub inline fn scale(self: Tensor, val: anytype) Tensor {
-        return self.mul(Tensor.scalar(val, self.dtype()));
+        return self.mul(.scalar(val, self.dtype()));
     }
 
     pub const LogicalOp = enum { OR, XOR, AND };

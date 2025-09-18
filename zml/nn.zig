@@ -389,7 +389,7 @@ test "invFreq Yarn" {
     var inv_freq: @TypeOf(yarn_freq) = undefined;
     _invFreq(yarn_conf, &inv_freq);
     for (yarn_freq, inv_freq, 0..) |expected, actual, i| {
-        errdefer log.err("Mismatch at position {d}.\nExpected: {d}\nActual:   {d}", .{ i, yarn_freq, inv_freq });
+        errdefer log.err("Mismatch at position {d}.\nExpected: {d}\nActual:   {d}", .{ i, stdx.fmt.slice(&yarn_freq), stdx.fmt.slice(&inv_freq) });
         try std.testing.expectApproxEqRel(expected, actual, 1e-5);
     }
     try std.testing.expectApproxEqRel(1.3465735902799727, yarn_conf.scaling.attentionScaling(), 1e-5);
