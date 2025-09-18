@@ -477,6 +477,14 @@ pub const Buffer = struct {
             try std.testing.expectEqualStrings("hello!", &y);
         }
     }
+
+    pub fn isDeleted(self: Buffer) bool {
+        const deleted: bool = self._shards.get(0).isDeleted(self._api);
+        for (self._shards.slice()[1..]) |shard| {
+            stdx.debug.assert(shard.isDeleted(self._api) == deleted, "Buffer has some shards deleted but not others.", .{});
+        }
+        return deleted;
+    }
 };
 
 pub fn bufferTypeFromDtype(dt: DataType) pjrt.BufferType {
