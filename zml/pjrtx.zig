@@ -132,6 +132,14 @@ pub const Client = opaque {
     pub fn createBuffersForAsyncHostToDevice(self: *const Client, api: *const Api, args: CreateBuffersForAsyncHostToDeviceArgs) ApiError!*AsyncHostToDeviceTransferManager {
         return @ptrCast(try self.inner().createBuffersForAsyncHostToDevice(api, args));
     }
+
+    pub fn dmaMap(self: *Client, api: *const Api, ptr: []u8) ApiError!void {
+        return try self.inner().dmaMap(api, ptr);
+    }
+
+    pub fn dmaUnmap(self: *Client, api: *const Api, ptr: []u8) ApiError!void {
+        return try self.inner().dmaUnmap(api, ptr);
+    }
 };
 
 pub const Buffer = opaque {
@@ -189,6 +197,10 @@ pub const Buffer = opaque {
         return @ptrCast(try self.inner().copyToMemory(api, memory_));
     }
 
+    pub fn copyRawToHost(self: *const Buffer, api: *const Api, dest: []u8, offset: i64) ApiError!?*Event {
+        return @ptrCast(try self.inner().copyRawToHost(api, dest, offset));
+    }
+
     pub fn getReadyEvent(self: *const Buffer, api: *const Api) ?*Event {
         return @ptrCast(self.inner().getReadyEvent(api));
     }
@@ -214,7 +226,7 @@ pub const Event = opaque {
     }
 
     pub fn awaitBlocking(self: *Event, api: *const Api) ApiError!void {
-        defer self.deinit(api);
+        // defer self.deinit(api);
 
         if (self.isReady(api)) {
             return;

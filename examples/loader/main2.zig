@@ -44,6 +44,7 @@ const BUF_256_MB = 256 * MB;
 var tracer: Tracer = undefined;
 
 // I/O Utilities
+// todo" check usage
 const io = struct {
     pub fn copy(
         reader: *std.io.Reader,
@@ -90,9 +91,9 @@ pub const Registry = struct {
     pub fn deinit(self: *Registry) void {
         const allocator = self.arena.allocator();
 
+        self.checksums.deinit(allocator);
         self.tensors.deinit(allocator);
         self.metadata.deinit(allocator);
-        self.checksums.deinit(allocator);
         self.arena.deinit();
     }
 };
@@ -114,15 +115,22 @@ pub fn registerSafetensors(allocator: std.mem.Allocator, source: *Source, path: 
     const processing_allocator = processing_arena.allocator();
 
     var io_buffer: [BUF_64_KB]u8 = undefined;
-    var reader_instance: Source.Reader = undefined;
+    var source_reader: Source.Reader = undefined;
 
-    try source.initReader(path, &io_buffer, &reader_instance);
-    const source_reader = sourceInterface(&reader_instance);
+    try source.initReader(path, &io_buffer, &source_reader);
+    const source_iface = sourceInterface(&source_reader);
 
     if (std.mem.endsWith(u8, path, ".safetensors.index.json")) {
-        try parseSafetensorsIndex(processing_allocator, &registry, source, source_reader, &io_buffer, &reader_instance);
+        try parseSafetensorsIndex(
+            processing_allocator,
+            &registry,
+            source,
+            &source_reader,
+            source_iface,
+            &io_buffer,
+        );
     } else {
-        try parseSafetensors(processing_allocator, &registry, source_reader, path);
+        try parseSafetensors(processing_allocator, &registry, source_iface, path);
     }
 
     return registry;
@@ -132,20 +140,27 @@ fn parseSafetensorsIndex(
     allocator: std.mem.Allocator,
     registry: *Registry,
     source: *Source,
-    reader: *std.io.Reader,
+    source_reader: *Source.Reader,
+    io_reader: *std.io.Reader,
     io_buffer: []u8,
-    reader_instance: *Source.Reader,
 ) !void {
-    var json_reader: std.json.Reader = .init(allocator, reader);
-    const index = try std.json.parseFromTokenSourceLeaky(std.json.Value, allocator, &json_reader, .{ .allocate = .alloc_if_needed });
+    var json_reader: std.json.Reader = .init(allocator, io_reader);
+    const index = try std.json.parseFromTokenSourceLeaky(
+        std.json.Value,
+        allocator,
+        &json_reader,
+        .{ .allocate = .alloc_if_needed },
+    );
 
     const weight_map = index.object.get("weight_map").?.object;
     var it = weight_map.iterator();
 
     while (it.next()) |entry| {
         const filename = entry.value_ptr.string;
-        try source.initReader(filename, io_buffer, reader_instance);
-        const chunk_reader = sourceInterface(reader_instance);
+
+        try source.initReader(filename, io_buffer, source_reader);
+        const chunk_reader = sourceInterface(source_reader);
+
         try parseSafetensors(allocator, registry, chunk_reader, filename);
     }
 
@@ -511,6 +526,7 @@ const ChecksumVerifyingWriter = struct {
 const MemoryWriter = struct {
     const InflightRequest = struct {
         event: *pjrtx.Event,
+        buffer_idx: u16,
     };
 
     allocator: std.mem.Allocator,
@@ -519,20 +535,13 @@ const MemoryWriter = struct {
 
     // Buffer pool resources (owned by this struct)
     buffers: [][]u8,
-    requests: []InflightRequest,
-    free_queue: std.ArrayListUnmanaged(u16),
-    inflight_queue: std.ArrayListUnmanaged(u16),
+    free_queue: std.ArrayList(u16),
+    inflight_queue: std.ArrayList(InflightRequest),
 
     // Per-tensor state
     buffer_index: usize,
     tensor_byte_size: u64,
     bytes_submitted_to_device: u64,
-
-    // Current write state
-    current_buffer_idx: ?u16 = null,
-    current_buffer_offset: usize = 0,
-
-    interface: std.io.Writer,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -546,13 +555,11 @@ const MemoryWriter = struct {
             .platform = platform,
             .transfer_manager = transfer_manager,
             .buffers = try allocator.alloc([]u8, num_buffers),
-            .requests = try allocator.alloc(InflightRequest, num_buffers),
             .free_queue = .{},
             .inflight_queue = .{},
-            .buffer_index = 0, // Placeholder
-            .tensor_byte_size = 0, // Placeholder
+            .buffer_index = 0,
+            .tensor_byte_size = 0,
             .bytes_submitted_to_device = 0,
-            .interface = .{ .vtable = &vtable, .buffer = &[_]u8{}, .end = 0 },
         };
         errdefer self.deinit();
 
@@ -564,33 +571,25 @@ const MemoryWriter = struct {
             try platform.pjrt_client.dmaMap(platform.pjrt_api, self.buffers[i]);
             self.free_queue.appendAssumeCapacity(@intCast(i));
         }
-
         return self;
     }
 
     pub fn deinit(self: *MemoryWriter) void {
-        const trace = tracer.frameStart("MemoryWriter deinit");
-        defer tracer.frameEnd(trace, "MemoryWriter deinit");
-
-        _ = self.flushAllBlocking() catch |err| {
-            log.err("Error during deinit flush for MemoryWriter: {any}", .{err});
-        };
+        _ = self.flushAllBlocking() catch {};
         for (self.buffers) |buf| {
             self.platform.pjrt_client.dmaUnmap(self.platform.pjrt_api, buf) catch {};
             self.allocator.free(buf);
         }
         self.allocator.free(self.buffers);
-        self.allocator.free(self.requests);
         self.free_queue.deinit(self.allocator);
         self.inflight_queue.deinit(self.allocator);
     }
 
-    pub fn beginTensor(self: *MemoryWriter, tensor: Tensor, buffer_index: usize) void {
-        // This should only be called when the writer is in a clean state
-        // from the previous tensor. flush() ensures this.
-        // std.debug.assert(self.current_buffer_idx == null);
-        // std.debug.assert(self.inflight_queue.items.len == 0);
+    pub fn beginTensor(self: *MemoryWriter, tensor: Tensor, buffer_index: usize) !void {
+        const trace = tracer.frameStart("MemoryWriter beginTensor");
+        defer tracer.frameEnd(trace, "MemoryWriter beginTensor");
 
+        // try self.flushAllBlocking();
         self.buffer_index = buffer_index;
         self.tensor_byte_size = tensor.shape.byteSize();
         self.bytes_submitted_to_device = 0;
@@ -602,9 +601,7 @@ const MemoryWriter = struct {
 
         var i: usize = 0;
         while (i < self.inflight_queue.items.len) {
-            const req_idx = self.inflight_queue.items[i];
-            const req = &self.requests[req_idx];
-
+            const req = self.inflight_queue.items[i];
             if (req.event.isReady(self.platform.pjrt_api)) {
                 if (req.event.getEventError(self.platform.pjrt_api)) |e| {
                     log.err("PJRT transfer event failed", .{});
@@ -613,281 +610,70 @@ const MemoryWriter = struct {
                 }
                 req.event.deinit(self.platform.pjrt_api);
                 _ = self.inflight_queue.swapRemove(i);
-                try self.free_queue.append(self.allocator, req_idx);
+                self.free_queue.appendAssumeCapacity(req.buffer_idx);
             } else {
                 i += 1;
             }
         }
     }
 
-    fn getFreeBufferBlocking(self: *MemoryWriter) !u16 {
-        const trace = tracer.frameStart("MemoryWriter getFreeBufferBlocking");
-        defer tracer.frameEnd(trace, "MemoryWriter getFreeBufferBlocking");
+    pub fn getFreeBuffer(self: *MemoryWriter) ![]u8 {
+        const trace = tracer.frameStart("MemoryWriter getFreeBuffer");
+        defer tracer.frameEnd(trace, "MemoryWriter getFreeBuffer");
+
+        try self.checkCompletions();
+        if (self.free_queue.items.len > 0) {
+            return self.buffers[self.free_queue.pop().?];
+        }
 
         while (self.free_queue.items.len == 0) {
-            if (self.inflight_queue.items.len == 0) return error.WriteFailed;
-            const oldest_req_idx = self.inflight_queue.items[0];
-            try self.requests[oldest_req_idx].event.awaitBlocking(self.platform.pjrt_api);
+            if (self.inflight_queue.items.len == 0) return error.NoMoreBuffers;
+            const oldest_req = self.inflight_queue.items[0];
+            try oldest_req.event.awaitBlocking(self.platform.pjrt_api);
             try self.checkCompletions();
         }
-        return self.free_queue.pop().?;
+        return self.buffers[self.free_queue.pop().?];
     }
 
-    fn submitCurrentBuffer(self: *MemoryWriter) std.io.Writer.Error!void {
-        const trace = tracer.frameStart("MemoryWriter submitCurrentBuffer");
-        defer tracer.frameEnd(trace, "MemoryWriter submitCurrentBuffer");
-
-        const req_idx = self.current_buffer_idx orelse return;
-        const data_to_flush = self.buffers[req_idx][0..self.current_buffer_offset];
-
-        if (data_to_flush.len == 0) {
-            self.free_queue.append(self.allocator, req_idx) catch |err| {
-                log.err("Error re-adding empty buffer to free queue in MemoryWriter: {any}", .{err});
-                return error.WriteFailed;
-            };
-            self.current_buffer_idx = null;
-            return;
-        }
-
-        const is_last_chunk = (self.bytes_submitted_to_device + data_to_flush.len) >= self.tensor_byte_size;
-        const event = self.transfer_manager.transferData(
-            self.platform.pjrt_api,
-            self.buffer_index,
-            data_to_flush,
-            @intCast(self.bytes_submitted_to_device),
-            is_last_chunk,
-        ) catch |err| {
-            log.err("Error submitting data transfer in MemoryWriter: {any}", .{err});
-            return error.WriteFailed;
-        };
-
-        self.requests[req_idx].event = event;
-        self.inflight_queue.append(self.allocator, req_idx) catch |err| {
-            log.err("Error adding inflight request in MemoryWriter: {any}", .{err});
-            return error.WriteFailed;
-        };
-        self.bytes_submitted_to_device += data_to_flush.len;
-        self.current_buffer_idx = null;
-        self.current_buffer_offset = 0;
-    }
-
-    fn drain(w: *std.io.Writer, data: []const []const u8, splat: usize) std.io.Writer.Error!usize {
-        const trace_drain = tracer.frameStart("MemoryWriter drain");
-        defer tracer.frameEnd(trace_drain, "MemoryWriter drain");
-
-        const self = @as(*MemoryWriter, @alignCast(@fieldParentPtr("interface", w)));
-        std.debug.assert(splat == 1);
-        var total_written: usize = 0;
-
-        for (data) |chunk_const| {
-            const trace_chunk = tracer.frameStart("MemoryWriter chunk");
-            defer tracer.frameEnd(trace_chunk, "MemoryWriter chunk");
-
-            var chunk = chunk_const;
-            while (chunk.len > 0) {
-                if (self.current_buffer_idx == null) {
-                    const trace_current_buffer_idx_null = tracer.frameStart("MemoryWriter current_buffer_idx_null");
-                    defer tracer.frameEnd(trace_current_buffer_idx_null, "MemoryWriter current_buffer_idx_null");
-
-                    self.checkCompletions() catch |err| {
-                        log.err("Error checking completions in MemoryWriter: {any}", .{err});
-                        return error.WriteFailed;
-                    };
-                    if (self.free_queue.items.len > 0) {
-                        self.current_buffer_idx = self.free_queue.pop();
-                    } else {
-                        self.current_buffer_idx = self.getFreeBufferBlocking() catch |err| {
-                            log.err("Error getting free buffer in MemoryWriter: {any}", .{err});
-                            return error.WriteFailed;
-                        };
-                    }
-                    self.current_buffer_offset = 0;
-                }
-
-                const req_idx = self.current_buffer_idx.?;
-                const current_staging_buffer = self.buffers[req_idx];
-                const free_space = current_staging_buffer.len - self.current_buffer_offset;
-
-                const bytes_to_copy = @min(chunk.len, free_space);
-                const trace_chunk_memcpy = tracer.frameStart("MemoryWriter chunk_memcpy");
-                @memcpy(current_staging_buffer[self.current_buffer_offset..][0..bytes_to_copy], chunk[0..bytes_to_copy]);
-                tracer.frameEnd(trace_chunk_memcpy, "MemoryWriter chunk_memcpy");
-
-                self.current_buffer_offset += bytes_to_copy;
-                chunk = chunk[bytes_to_copy..];
-                total_written += bytes_to_copy;
-
-                if (self.current_buffer_offset == current_staging_buffer.len) {
-                    self.submitCurrentBuffer() catch |err| {
-                        log.err("Error submitting current buffer in MemoryWriter: {any}", .{err});
-                        return error.WriteFailed;
-                    };
-                }
+    fn bufferIndexFromSlice(self: *const MemoryWriter, slice: []u8) u16 {
+        for (self.buffers, 0..) |buf, i| {
+            if (buf.ptr == slice.ptr) {
+                return @intCast(i);
             }
         }
-        return total_written;
+        unreachable;
     }
 
-    // flush for a single tensor's data. Does not block.
-    fn flush(w: *std.io.Writer) std.io.Writer.Error!void {
-        const trace = tracer.frameStart("MemoryWriter flush");
-        defer tracer.frameEnd(trace, "MemoryWriter flush");
+    pub fn submitBuffer(self: *MemoryWriter, buffer: []u8) !void {
+        const trace = tracer.frameStart("MemoryWriter submitBuffer");
+        defer tracer.frameEnd(trace, "MemoryWriter submitBuffer");
 
-        const self = @as(*MemoryWriter, @alignCast(@fieldParentPtr("interface", w)));
-        try self.submitCurrentBuffer();
+        const buffer_idx = self.bufferIndexFromSlice(buffer);
+        const is_last_chunk = (self.bytes_submitted_to_device + buffer.len) >= self.tensor_byte_size;
+
+        const event = try self.transfer_manager.transferData(
+            self.platform.pjrt_api,
+            self.buffer_index,
+            buffer,
+            @intCast(self.bytes_submitted_to_device),
+            is_last_chunk,
+        );
+
+        self.inflight_queue.appendAssumeCapacity(.{ .event = event, .buffer_idx = buffer_idx });
+        self.bytes_submitted_to_device += buffer.len;
     }
 
-    // Waits for ALL outstanding transfers for ALL tensors to finish.
     pub fn flushAllBlocking(self: *MemoryWriter) !void {
         const trace = tracer.frameStart("MemoryWriter flushAllBlocking");
-        defer tracer.frameEnd(trace, "MemoryWriter flushAllBlocking");
+        defer tracer.frameEnd(trace, "MemoryWriter flushAllBlocking ");
 
-        try self.submitCurrentBuffer();
         while (self.inflight_queue.items.len > 0) {
-            _ = try self.getFreeBufferBlocking();
+            const oldest_req = self.inflight_queue.items[0];
+            try oldest_req.event.awaitBlocking(self.platform.pjrt_api);
+            try self.checkCompletions();
         }
     }
-
-    const vtable: std.io.Writer.VTable = .{ .drain = drain, .flush = flush };
 };
-
-// const MemoryWriter = struct {
-//     platform: Platform,
-//     transfer_manager: *pjrtx.AsyncHostToDeviceTransferManager,
-
-//     // PJRT buffer details
-//     buffer_index: usize,
-//     tensor_byte_size: u64,
-//     bytes_written_to_device: u64,
-
-//     // Double-buffering state
-//     staging_buffers: [2][]u8,
-//     staging_events: [2]?*pjrtx.Event,
-//     current_buffer_idx: u1,
-//     current_buffer_offset: usize,
-
-//     interface: std.io.Writer,
-
-//     pub fn init(
-//         platform: Platform,
-//         transfer_manager: *pjrtx.AsyncHostToDeviceTransferManager,
-//         index: usize,
-//         tensor: Tensor,
-//         staging_buffers: [2][]u8,
-//     ) !MemoryWriter {
-//         return .{
-//             .platform = platform,
-//             .transfer_manager = transfer_manager,
-//             .buffer_index = index,
-//             .tensor_byte_size = tensor.shape.byteSize(),
-//             .bytes_written_to_device = 0,
-//             .staging_buffers = staging_buffers,
-//             .staging_events = .{ null, null },
-//             .current_buffer_idx = 0,
-//             .current_buffer_offset = 0,
-//             .interface = .{ .vtable = &vtable, .buffer = &[_]u8{}, .end = 0 },
-//         };
-//     }
-//     fn flushCurrentBuffer(self: *MemoryWriter) std.io.Writer.Error!void {
-//         const buffer_to_flush = self.staging_buffers[self.current_buffer_idx];
-//         const data_to_flush = buffer_to_flush[0..self.current_buffer_offset];
-
-//         if (data_to_flush.len == 0) {
-//             return;
-//         }
-
-//         // Before submitting the new transfer, we must wait for the *previous* transfer
-//         // using the *other* buffer to complete. This ensures the PJRT backend is not
-//         // still reading from a buffer we are about to overwrite.
-//         const next_buffer_idx = self.current_buffer_idx ^ 1;
-//         if (self.staging_events[next_buffer_idx]) |event| {
-//             event.awaitBlocking(self.platform.pjrt_api) catch |err| {
-//                 log.err("Error awaiting staging event in MemoryWriter: {any}", .{err});
-//                 return error.WriteFailed;
-//             };
-//             self.staging_events[next_buffer_idx] = null;
-//         }
-
-//         const is_last_chunk = (self.bytes_written_to_device + data_to_flush.len) >= self.tensor_byte_size;
-
-//         const event = self.transfer_manager.transferData(
-//             self.platform.pjrt_api,
-//             self.buffer_index,
-//             data_to_flush,
-//             @intCast(self.bytes_written_to_device),
-//             is_last_chunk,
-//         ) catch |err| {
-//             log.err("PJRT transferData failed to queue: {any}", .{err});
-//             return error.WriteFailed;
-//         };
-
-//         self.staging_events[self.current_buffer_idx] = event;
-//         self.bytes_written_to_device += data_to_flush.len;
-
-//         // Swap to the other buffer
-//         self.current_buffer_idx = next_buffer_idx;
-//         self.current_buffer_offset = 0;
-//     }
-
-//     fn drain(w: *std.io.Writer, data: []const []const u8, splat: usize) std.io.Writer.Error!usize {
-//         const self = @as(*MemoryWriter, @alignCast(@fieldParentPtr("interface", w)));
-//         var total_bytes_written: usize = 0;
-
-//         std.debug.assert(splat == 1);
-
-//         for (data) |d| {
-//             var chunk = d;
-//             while (chunk.len > 0) {
-//                 const current_staging_buffer = self.staging_buffers[self.current_buffer_idx];
-//                 const free_space = current_staging_buffer.len - self.current_buffer_offset;
-
-//                 if (free_space == 0) {
-//                     self.flushCurrentBuffer() catch |err| {
-//                         log.err("Error flushing current buffer in MemoryWriter: {any}", .{err});
-//                         return error.WriteFailed;
-//                     };
-//                     continue; // Re-evaluate free space in the new buffer
-//                 }
-
-//                 const bytes_to_copy = @min(chunk.len, free_space);
-//                 @memcpy(
-//                     current_staging_buffer[self.current_buffer_offset..][0..bytes_to_copy],
-//                     chunk[0..bytes_to_copy],
-//                 );
-
-//                 self.current_buffer_offset += bytes_to_copy;
-//                 chunk = chunk[bytes_to_copy..];
-//                 total_bytes_written += bytes_to_copy;
-//             }
-//         }
-
-//         return total_bytes_written;
-//     }
-
-//     fn flush(w: *std.io.Writer) std.io.Writer.Error!void {
-//         const self = @as(*MemoryWriter, @alignCast(@fieldParentPtr("interface", w)));
-
-//         self.flushCurrentBuffer() catch |err| {
-//             log.err("Error flushing current buffer in MemoryWriter: {any}", .{err});
-//             return error.WriteFailed;
-//         };
-
-//         for (&self.staging_events) |*event_ptr| {
-//             if (event_ptr.*) |event| {
-//                 event.awaitBlocking(self.platform.pjrt_api) catch |err| {
-//                     log.err("Error awaiting staging event in MemoryWriter flush: {any}", .{err});
-//                     return error.WriteFailed;
-//                 };
-//                 event_ptr.* = null;
-//             }
-//         }
-//     }
-
-//     const vtable: std.io.Writer.VTable = .{
-//         .drain = drain,
-//         .flush = flush,
-//     };
-// };
 
 const MemoryReader = struct {
     api: *const pjrt.Api,
@@ -939,15 +725,13 @@ const MemoryReader = struct {
 
         const dest_slice = r.buffer[r.end .. r.end + bytes_to_fetch];
 
-        // todo: do not use inner
-        const event = self.device_buffer.inner().copyRawToHost(self.api, dest_slice, @intCast(self.bytes_read)) catch |err| {
+        const event = self.device_buffer.copyRawToHost(self.api, dest_slice, @intCast(self.bytes_read)) catch |err| {
             log.err("PJRT copyRawToHost failed: {any}", .{err});
             return error.ReadFailed;
         };
 
         if (event) |e| {
-            const event_: *pjrtx.Event = @ptrCast(e);
-            event_.awaitBlocking(self.api) catch |err| {
+            e.awaitBlocking(self.api) catch |err| {
                 log.err("PJRT event await failed on copyRawToHost: {any}", .{err});
                 return error.ReadFailed;
             };
@@ -1068,12 +852,13 @@ const DirectFileReader = struct {
 
         const prefix_to_skip = (self.pos + r.end) - read_offset;
 
-        r.seek = @intCast(prefix_to_skip);
-        r.end += @intCast(bytes_read);
+        r.seek = prefix_to_skip;
+        r.end += bytes_read;
     }
 
     fn discard(r: *std.io.Reader, limit: std.io.Limit) std.io.Reader.Error!usize {
         const self = @as(*DirectFileReader, @alignCast(@fieldParentPtr("interface", r)));
+
         const buffered_len = r.end - r.seek;
         const requested_discard = limit.minInt(std.math.maxInt(usize));
 
@@ -1094,6 +879,7 @@ const DirectFileReader = struct {
 
     fn stream(r: *std.io.Reader, w: *std.io.Writer, limit: std.io.Limit) std.io.Reader.StreamError!usize {
         const self = @as(*DirectFileReader, @alignCast(@fieldParentPtr("interface", r)));
+
         const buffered_data = limit.slice(r.buffered());
 
         if (buffered_data.len > 0) {
@@ -1105,11 +891,14 @@ const DirectFileReader = struct {
 
         try self.fillBuffer();
         const newly_buffered = limit.slice(r.buffered());
+
         if (newly_buffered.len == 0) return error.EndOfStream;
 
         const written = try w.write(newly_buffered);
+
         r.toss(written);
         self.pos += written;
+
         return written;
     }
 
@@ -1123,18 +912,24 @@ const DirectFileReader = struct {
         var bytes_copied: usize = 0;
         for (data) |dest_slice| {
             const buffered = r.buffered();
+
             if (buffered.len == 0) break;
+
             const amount_to_copy = @min(dest_slice.len, buffered.len);
+
             @memcpy(dest_slice[0..amount_to_copy], buffered[0..amount_to_copy]);
+
             r.toss(amount_to_copy);
             self.pos += amount_to_copy;
             bytes_copied += amount_to_copy;
+
             if (amount_to_copy < dest_slice.len) break;
         }
 
         if (bytes_copied == 0 and r.buffered().len == 0) {
             return error.EndOfStream;
         }
+
         return bytes_copied;
     }
 
@@ -1145,11 +940,9 @@ const DirectFileReader = struct {
 
 const IoManager = struct {
     allocator: std.mem.Allocator,
-
     platform: Platform,
     transfer_manager: *pjrtx.AsyncHostToDeviceTransferManager,
-
-    tensor_name_to_index: std.StringHashMapUnmanaged(usize),
+    tensor_name_to_index: std.StringArrayHashMapUnmanaged(usize),
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -1177,48 +970,26 @@ const IoManager = struct {
             .shape_specs = shape_specs_list.items,
             .memory = memory,
         });
-
         return self;
     }
 
     pub fn deinit(self: *IoManager) void {
         self.transfer_manager.deinit(self.platform.pjrt_api);
 
-        var it = self.tensor_name_to_index.keyIterator();
-        while (it.next()) |key| {
-            self.allocator.free(key.*);
+        var it = self.tensor_name_to_index.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
         }
 
         self.tensor_name_to_index.deinit(self.allocator);
     }
 
-    // pub fn writer(
-    //     self: *IoManager,
-    //     tensor: Tensor,
-    //     buffers: [][]u8,
-    //     requests: []MemoryWriter.InflightRequest,
-    //     free_queue: *std.ArrayListUnmanaged(u16),
-    //     inflight_queue: *std.ArrayListUnmanaged(u16),
-    // ) !MemoryWriter {
-    //     const index = self.tensor_name_to_index.get(tensor.name).?;
-
-    //     return try .init(
-    //         self.platform,
-    //         self.transfer_manager,
-    //         index,
-    //         tensor,
-    //         buffers,
-    //         requests,
-    //         free_queue,
-    //         inflight_queue,
-    //     );
-    // }
+    // todo: writer
 
     pub fn reader(self: *IoManager, tensor: Tensor, buffer: []u8) !MemoryReader {
         const index = self.tensor_name_to_index.get(tensor.name).?;
         const device_buffer = try self.transfer_manager.retrieveBuffer(self.platform.pjrt_api, index);
-
-        return try .init(self.platform.pjrt_api, device_buffer, buffer);
+        return try MemoryReader.init(self.platform.pjrt_api, device_buffer, buffer);
     }
 };
 
@@ -1325,7 +1096,6 @@ test IoManager {
 
 pub fn main() !void {
     try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain);
-    // try asynk.AsyncThread.main(std.heap.c_allocator, mainBench);
 }
 
 pub fn asyncMain() !void {
@@ -1341,7 +1111,7 @@ pub fn asyncMain() !void {
         return;
     };
 
-    const verify_checksums = false;
+    const verify_checksums = true;
 
     var context = try Context.init();
     defer context.deinit();
@@ -1364,35 +1134,6 @@ pub fn asyncMain() !void {
         }
     }
 
-    log.info("--- Warming up... ---", .{});
-    {
-        // Create a small, temporary set of resources to warm up the PJRT pipeline.
-        const warmup_tensor: Tensor = .{
-            .source_name = "warmup",
-            .name = "warmup_tensor",
-            .shape = Shape.init(.{256 * 1024}, .f32), // 1MB tensor
-            .offset = 0,
-        };
-        const warmup_blob = try allocator.alloc(u8, warmup_tensor.shape.byteSize());
-        defer allocator.free(warmup_blob);
-
-        var warmup_io_manager = try IoManager.init(allocator, platform, memory, &.{warmup_tensor});
-        defer warmup_io_manager.deinit();
-
-        var warmup_writer = try MemoryWriter.init(
-            allocator,
-            platform,
-            warmup_io_manager.transfer_manager,
-            1, // Only 1 buffer needed for simple warmup
-            warmup_blob.len,
-        );
-        defer warmup_writer.deinit();
-
-        warmup_writer.beginTensor(warmup_tensor, 0);
-        try warmup_writer.interface.writeAll(warmup_blob);
-        try warmup_writer.flushAllBlocking();
-    }
-
     log.info("--- Loading model metadata... ---", .{});
     var fs_source = FsSource.init(allocator, std.fs.path.dirname(file_path) orelse ".");
     defer fs_source.deinit();
@@ -1409,39 +1150,12 @@ pub fn asyncMain() !void {
 
     log.info("--- Starting tensor processing stream... ---", .{});
 
-    // This buffer is for the final copy from disk into host memory.
-    const PUMP_BUFFER_SIZE = BUF_32_MB;
-    // This buffer is for the reader interface of the file system source.
-    const FILE_IO_BUFFER_SIZE = BUF_32_MB;
-    // Configuration for MemoryWriter2's internal buffer pool.
-    const STAGING_QUEUE_DEPTH = 12;
-    const STAGING_BUFFER_SIZE = BUF_32_MB;
+    const FILE_IO_BUFFER_SIZE = BUF_128_MB;
+    const STAGING_QUEUE_DEPTH = 20;
+    const STAGING_BUFFER_SIZE = BUF_8_MB;
 
     const file_io_buffer = try allocator.alloc(u8, FILE_IO_BUFFER_SIZE);
     defer allocator.free(file_io_buffer);
-
-    log.info("Mapping {d:.2} MB of host memory for DMA transfers...", .{@as(f64, @floatFromInt(file_io_buffer.len)) / (1024.0 * 1024.0)});
-    try platform.pjrt_client.dmaMap(platform.pjrt_api, file_io_buffer);
-    defer {
-        log.info("Unmapping DMA memory...", .{});
-        platform.pjrt_client.dmaUnmap(platform.pjrt_api, file_io_buffer) catch |err| {
-            log.err("Failed to unmap DMA memory: {any}", .{err});
-        };
-    }
-
-    // Allocate and DMA-map the host buffer for transfers.
-    // This buffer will be used to read data from disk and then transfer to the device.
-    const pump_buffer = try allocator.alloc(u8, PUMP_BUFFER_SIZE);
-    defer allocator.free(pump_buffer);
-
-    log.info("Mapping {d:.2} MB of host memory for DMA transfers...", .{@as(f64, @floatFromInt(pump_buffer.len)) / (1024.0 * 1024.0)});
-    try platform.pjrt_client.dmaMap(platform.pjrt_api, pump_buffer);
-    defer {
-        log.info("Unmapping DMA memory...", .{});
-        platform.pjrt_client.dmaUnmap(platform.pjrt_api, pump_buffer) catch |err| {
-            log.err("Failed to unmap DMA memory: {any}", .{err});
-        };
-    }
 
     var memory_writer = try MemoryWriter.init(
         allocator,
@@ -1453,8 +1167,6 @@ pub fn asyncMain() !void {
     defer memory_writer.deinit();
 
     var source_reader: Source.Reader = undefined;
-    var limited_reader: std.io.Reader.Limited = undefined;
-
     var sum_total_bytes_copied: u64 = 0;
     var timer = try std.time.Timer.start();
 
@@ -1466,9 +1178,6 @@ pub fn asyncMain() !void {
         const trace_tensor_process = tracer.frameStart("Processing tensor");
         defer tracer.frameEnd(trace_tensor_process, "Processing tensor");
 
-        _ = arena.reset(.free_all);
-        const arena_allocator = arena.allocator();
-
         const tensor = entry.value_ptr.*;
         if (tensor.shape.byteSize() == 0) continue;
 
@@ -1478,43 +1187,43 @@ pub fn asyncMain() !void {
         const reader_iface = sourceInterface(&source_reader);
         // try reader_iface.discardAll(tensor.offset);
 
-        limited_reader = .init(reader_iface, std.io.Limit.limited64(tensor.shape.byteSize()), &.{});
+        var limited_reader = std.io.Reader.Limited.init(reader_iface, .limited64(tensor.shape.byteSize()), &.{});
         const reader = &limited_reader.interface;
 
         const buffer_index = io_manager.tensor_name_to_index.get(tensor.name).?;
-        memory_writer.beginTensor(tensor, buffer_index);
+        try memory_writer.beginTensor(tensor, buffer_index);
 
-        var final_writer: *std.io.Writer = &memory_writer.interface;
+        var hasher: ?std.crypto.hash.sha2.Sha256 = if (verify_checksums) std.crypto.hash.sha2.Sha256.init(.{}) else null;
+        var bytes_to_process = tensor.shape.byteSize();
 
-        if (verify_checksums) {
-            const checksumer: Checksumer = .{ .registry = &registry, .tensor_name = tensor.name };
-            const checksum_writer = try arena_allocator.create(ChecksummingWriter);
-            checksum_writer.* = checksumer.writer(final_writer);
-            final_writer = &checksum_writer.interface;
+        const trace_process_bytes = tracer.frameStart("Process bytes");
+        while (bytes_to_process > 0) {
+            var free_buffer = try memory_writer.getFreeBuffer();
+            const read_limit = @min(bytes_to_process, free_buffer.len);
+
+            const bytes_read = try reader.readSliceShort(free_buffer[0..read_limit]);
+
+            if (hasher) |*h| {
+                h.update(free_buffer[0..bytes_read]);
+            }
+
+            try memory_writer.submitBuffer(free_buffer[0..bytes_read]);
+
+            bytes_to_process -= bytes_read;
+            sum_total_bytes_copied += bytes_read;
         }
+        tracer.frameEnd(trace_process_bytes, "Process bytes");
 
-        var bytes_copied: u64 = 0;
-        const trace_read_pump_buffer = tracer.frameStart("Pump buffer read");
-        while (true) {
-            const bytes_read = reader.readSliceShort(pump_buffer) catch |err| {
-                if (err == error.EndOfStream) break;
-                return err;
-            };
-            if (bytes_read == 0) break;
-            try final_writer.writeAll(pump_buffer[0..bytes_read]);
-            bytes_copied += bytes_read;
+        if (hasher) |*h| {
+            var digest: [32]u8 = undefined;
+            h.final(&digest);
+            try registry.checksums.put(arena.allocator(), tensor.name, digest);
         }
-        tracer.frameEnd(trace_read_pump_buffer, "Pump buffer read");
-
-        const trace_final_writer = tracer.frameStart("Final writer flush");
-        try final_writer.flush();
-        tracer.frameEnd(trace_final_writer, "Final writer flush");
-
-        std.debug.assert(bytes_copied == tensor.shape.byteSize());
-        sum_total_bytes_copied += bytes_copied;
     }
 
+    const trace_flush_all_blocking = tracer.frameStart("Flush all blocking");
     try memory_writer.flushAllBlocking();
+    tracer.frameEnd(trace_flush_all_blocking, "Flush all blocking");
 
     const elapsed = timer.read();
     const gb_copied = @as(f64, @floatFromInt(sum_total_bytes_copied)) / (1024.0 * 1024.0 * 1024.0);
@@ -1581,68 +1290,6 @@ pub fn asyncMain() !void {
             log.err("--- Verification failed with {d} errors in {d} ms ---", .{ verification_errors, verify_elapsed / std.time.ns_per_ms });
         }
     }
-}
-
-pub fn mainBench() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    var args = std.process.args();
-    _ = args.next().?;
-
-    const file_path = args.next() orelse {
-        log.err("Usage: bazel run //examples/loader /path/to/model.safetensors or /path/to/model-00003-of-00004.safetensors", .{});
-        return;
-    };
-
-    const file_name = std.fs.path.basename(file_path);
-
-    const io_buffer = allocator.alloc(u8, BUF_32_MB) catch |err| {
-        log.err("Failed to allocate io buffer: {any}", .{err});
-        return err;
-    };
-    defer allocator.free(io_buffer);
-
-    const reader_buffer = allocator.alloc(u8, BUF_16_MB) catch |err| {
-        log.err("Failed to allocate reader buffer: {any}", .{err});
-        return err;
-    };
-    defer allocator.free(reader_buffer);
-
-    var fs_source = FsSource.init(allocator, std.fs.path.dirname(file_path).?);
-    defer fs_source.deinit();
-
-    var source = Source{ .fs = &fs_source };
-    var source_reader: Source.Reader = undefined;
-
-    try source.fs.initDirectReader(file_name, io_buffer, &source_reader);
-    const reader = sourceInterface(&source_reader);
-
-    var offset: usize = 0;
-    var timer = try std.time.Timer.start();
-
-    while (true) {
-        const bytes_read = try reader.readSliceShort(reader_buffer);
-        if (bytes_read == 0) break;
-        offset += bytes_read;
-    }
-
-    const elapsed = timer.read();
-
-    const elapsed_ms = elapsed / std.time.ns_per_ms;
-    const elapsed_s = @as(f64, @floatFromInt(elapsed)) / 1_000_000_000.0;
-    const mb_read = @as(f64, @floatFromInt(offset)) / (1024.0 * 1024.0);
-    const gb_read = mb_read / 1024.0;
-    const throughput_mb_s = mb_read / elapsed_s;
-    const throughput_gb_s = gb_read / elapsed_s;
-
-    log.info("=== File Read Statistics ===", .{});
-    log.info("File: {s}", .{file_path});
-    log.info("Bytes read: {d} ({:.2} MB, {:.3} GB)", .{ offset, mb_read, gb_read });
-    log.info("Time elapsed: {d} ms ({:.3} s)", .{ elapsed_ms, elapsed_s });
-    log.info("Throughput: {:.2} MB/s ({:.3} GB/s)", .{ throughput_mb_s, throughput_gb_s });
-    log.info("Buffer size: {d} bytes ({:.1} MB)", .{ reader_buffer.len, @as(f64, @floatFromInt(reader_buffer.len)) / (1024.0 * 1024.0) });
 }
 
 // all code below is unmodified (or slightly) / imported strucs / funcs from zml
