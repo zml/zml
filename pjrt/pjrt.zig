@@ -360,9 +360,11 @@ pub const Client = opaque {
         buffer_type: BufferType,
         dims: []const i64,
         byte_strides: ?[]const i64,
-        device: ?*const Device = null,
         host_buffer_semantics: HostBufferSemantics,
-        memory: ?*const Memory = null,
+        dst: union(enum) {
+            device: *const Device,
+            memory: *const Memory,
+        },
     };
 
     pub fn bufferFromHostBuffer(self: *const Client, api: *const Api, args: BufferFromHostBufferArgs) ApiError!struct { *Buffer, ?*Event } {
@@ -375,11 +377,11 @@ pub const Client = opaque {
             .byte_strides = if (args.byte_strides) |bs| @ptrCast(@constCast(bs.ptr)) else null,
             .num_byte_strides = if (args.byte_strides) |bs| bs.len else 0,
             .host_buffer_semantics = @intFromEnum(args.host_buffer_semantics),
-            .device = @ptrCast(@constCast(args.device)),
-            .memory = @ptrCast(@constCast(args.memory)),
+            .device = if (args.dst == .device) @ptrCast(@constCast(args.dst.device)) else null,
+            .memory = if (args.dst == .memory) @ptrCast(@constCast(args.dst.memory)) else null,
             .device_layout = null, // TODO
-            .done_with_host_buffer = null,
-            .buffer = null,
+            .done_with_host_buffer = null, // out
+            .buffer = null, // out
         });
 
         return .{
@@ -430,7 +432,7 @@ pub const Client = opaque {
     pub fn addressableMemories(self: *const Client, api: *const Api) []*const Memory {
         const ret = api.call(.PJRT_Client_AddressableMemories, .{
             .client = self.inner(),
-        }) catch unreachable;
+        }) catch return &.{};
         if (ret.addressable_memories) |memories| {
             return @ptrCast(@constCast(memories[0..ret.num_addressable_memories]));
         }
@@ -474,8 +476,10 @@ pub const Client = opaque {
         dims: []const i64,
         element_type: BufferType,
         layout: MemoryLayout,
-        device: ?*const Device = null,
-        memory: ?*const Memory = null,
+        dst: union(enum) {
+            device: *const Device,
+            memory: *const Memory,
+        },
     };
 
     pub fn createUninitializedBuffer(self: *const Client, api: *const Api, args: CreateUninitializedBufferArgs) ApiError!*Buffer {
@@ -486,8 +490,8 @@ pub const Client = opaque {
             .shape_num_dims = @intCast(args.dims.len),
             .shape_element_type = @intFromEnum(args.element_type),
             .shape_layout = @ptrCast(&layout),
-            .device = @ptrCast(@constCast(args.device)),
-            .memory = @ptrCast(@constCast(args.memory)),
+            .device = if (args.dst == .device) @ptrCast(@constCast(args.dst.device)) else null,
+            .memory = if (args.dst == .memory) @ptrCast(@constCast(args.dst.memory)) else null,
         });
         return @ptrCast(ret.buffer.?);
     }
@@ -530,6 +534,8 @@ pub const MemoryStats = struct {
     pool_bytes_is_set: bool, // out
     peak_pool_bytes: u64, // out
     peak_pool_bytes_is_set: bool, // out
+
+    pub const zeroes = std.mem.zeroes(MemoryStats);
 };
 
 pub const Device = opaque {
@@ -556,10 +562,11 @@ pub const Device = opaque {
         return @intCast(ret.local_hardware_id);
     }
 
-    pub fn addressableMemories(self: *const Device, api: *const Api) ApiError![]const *Memory {
-        const ret = try api.call(.PJRT_Device_AddressableMemories, .{
-            .device = self.inner(),
-        });
+    pub fn addressableMemories(self: *const Device, api: *const Api) []const *Memory {
+        const ret = api.call(
+            .PJRT_Device_AddressableMemories,
+            .{ .device = self.inner() },
+        ) catch return &.{};
         return @ptrCast(ret.memories[0..ret.num_memories]);
     }
 
@@ -728,7 +735,6 @@ pub const LoadedExecutable = opaque {
         _ = api.call(.PJRT_LoadedExecutable_Destroy, .{
             .executable = self.inner(),
         }) catch {};
-        self.* = undefined;
     }
 
     pub fn delete(self: *LoadedExecutable, api: *const Api) void {
@@ -759,6 +765,7 @@ pub const LoadedExecutable = opaque {
         non_donatable_input_indices: []const i64 = &.{},
         context: ?*ExecuteContext,
     };
+
     pub fn execute(self: *const LoadedExecutable, api: *const Api, args: ExecuteArgs) ApiError!void {
         var options = pjrtStruct(c.PJRT_ExecuteOptions{
             .send_callbacks = null,
@@ -1048,8 +1055,16 @@ pub const Event = opaque {
 pub const Memory = opaque {
     pub const Kind = enum {
         device,
-        pinned_host,
-        unpinned_host,
+        host_pinned,
+        host_unpinned,
+
+        pub fn pjrtName(k: Kind) []const u8 {
+            return switch (k) {
+                .device => "device",
+                .host_pinned => "pinned_host",
+                .host_unpinned => "unpinned_host",
+            };
+        }
     };
 
     const inner = InnerMixin(c.PJRT_Memory).inner;
@@ -1061,8 +1076,12 @@ pub const Memory = opaque {
 
     pub fn kind(self: *const Memory, api: *const Api) Kind {
         const ret = api.call(.PJRT_Memory_Kind, .{ .memory = self.inner() }) catch unreachable;
-        const kind_ = ret.kind orelse unreachable;
-        return std.meta.stringToEnum(Kind, kind_[0..ret.kind_size]) orelse unreachable;
+        return switch (ret.kind_size) {
+            "device".len => .device,
+            "pinned_host".len => .host_pinned,
+            "unpinned_host".len => .host_unpinned,
+            else => @panic("Memory kind not supported"),
+        };
     }
 
     pub fn kindId(self: *const Memory, api: *const Api) u32 {

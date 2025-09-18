@@ -41,8 +41,9 @@
 //!   caller to manage the lifetime. The caller should be skipping program name.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const assert = std.debug.assert;
+const builtin = @import("builtin");
+
 const debug = @import("debug.zig");
 
 /// Format and print an error message to stderr, then exit with an exit code of 1.
@@ -285,7 +286,7 @@ fn parse_flags(args: *std.process.ArgIterator, comptime Flags: type) Flags {
 
 fn assert_valid_value_type(comptime T: type) void {
     comptime {
-        if (T == []const u8 or T == [:0]const u8 or T == ByteSize or @typeInfo(T) == .int) return;
+        if (T == []const u8 or T == [:0]const u8 or T == ByteSize or @typeInfo(T) == .int or @typeInfo(T) == .float) return;
 
         if (@typeInfo(T) == .@"enum") {
             const info = @typeInfo(T).@"enum";
@@ -347,6 +348,7 @@ fn parse_value(comptime T: type, flag: []const u8, value: [:0]const u8) T {
     if (V == []const u8 or V == [:0]const u8) return value;
     if (V == ByteSize) return parse_value_size(flag, value);
     if (@typeInfo(V) == .int) return parse_value_int(V, flag, value);
+    if (@typeInfo(V) == .float) return parse_value_float(V, flag, value);
     if (@typeInfo(V) == .@"enum") return parse_value_enum(V, flag, value);
     comptime unreachable;
 }
@@ -509,6 +511,20 @@ fn parse_value_int(comptime T: type, flag: []const u8, value: [:0]const u8) T {
             ),
             error.InvalidCharacter => fatal(
                 "{s}: expected an integer value, but found '{s}' (invalid digit)",
+                .{ flag, value },
+            ),
+        }
+    };
+}
+
+/// Parse string value into a float, providing a nice error message for the user.
+fn parse_value_float(comptime T: type, flag: []const u8, value: [:0]const u8) T {
+    assert((flag[0] == '-' and flag[1] == '-') or flag[0] == '<');
+
+    return std.fmt.parseFloat(T, value) catch |err| {
+        switch (err) {
+            error.InvalidCharacter => fatal(
+                "{s}: expected a decimal value, but found '{s}' (invalid character)",
                 .{ flag, value },
             ),
         }

@@ -322,7 +322,7 @@ pub const HostBuffer = struct {
     }
 
     pub fn format(self: HostBuffer, writer: *std.Io.Writer) !void {
-        try writer.print("HostBuffer(.{f})", .{self._shape});
+        try writer.print("HostBuffer(.{f})@{x}", .{ self._shape, @intFromPtr(self._data) });
     }
 
     pub fn formatNumber(self: HostBuffer, writer: *std.io.Writer, n: std.fmt.Number) std.io.Writer.Error!void {

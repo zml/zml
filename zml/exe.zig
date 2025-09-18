@@ -235,6 +235,7 @@ pub const BaseExe = struct {
         if (self.execute_context) |ctx| {
             ctx.deinit(self.platform.pjrt_api);
         }
+        self.exe.deinit(self.platform.pjrt_api);
         self._arena.deinit();
     }
 
@@ -394,6 +395,10 @@ pub fn Exe(ArgsT: type, ReturnT: type) type {
             var result: Bufferized(ReturnT) = undefined;
             self.inner._unsafeAssignResults(Bufferized(ReturnT), &result);
             return result;
+        }
+
+        pub fn clone(self: Self, allocator: std.mem.Allocator) !Self {
+            return .{ .inner = try self.inner.clone(allocator) };
         }
     };
 }

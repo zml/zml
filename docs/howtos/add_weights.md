@@ -44,7 +44,7 @@ Then, in your `BUILD.bazel`, you can refer to the files you defined above, in
 the following way:
 
 ```python
-zig_cc_binary(
+zig_binary(
     name = "mnist",
     args = [
         "$(location @mnist//:mnist.pt)",
