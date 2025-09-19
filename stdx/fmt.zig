@@ -10,7 +10,7 @@ fn FmtSlice(T: type) type {
         slice: []const T,
 
         pub fn format(f: @This(), writer: *std.io.Writer) std.io.Writer.Error!void {
-            return try formatSliceAny(f.slice, .{}, writer);
+            return try formatSliceAny(f.slice, .{}, 1, writer);
         }
 
         pub fn formatNumber(f: @This(), writer: *std.io.Writer, n: std.fmt.Number) std.io.Writer.Error!void {
