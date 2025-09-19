@@ -43,11 +43,11 @@ if output:
 for i in range(4):
     print(activations[f"model.in.{i}"])
 
+# Ask pytorch to dequantize to check if our dequantize works too.
+activations["model.model.layers.22.mlp.experts.gate_up_proj"] = model.model.layers[22].mlp.experts.gate_up_proj.data.to(torch.bfloat16).cpu()
+activations["model.model.layers.22.mlp.experts.down_proj"] = model.model.layers[22].mlp.experts.down_proj.data.to(torch.bfloat16).cpu()
+
 # Save activations to a file.
 filename = model_path.split("/")[-1] + ".activations.pt"
-torch.save(activations, filename)
-print(f"Saved {len(activations)} activations to {filename}")
-
-filename = model_path.split("/")[-1] + ".activations.safetensors"
-safetensors.torch.save_file(activations, filename)
+zml_utils.save_with_confirmation(filename, activations)
 print(f"Saved {len(activations)} activations to {filename}")
