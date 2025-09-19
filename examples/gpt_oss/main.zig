@@ -24,19 +24,18 @@ const cli_params = clap.parseParamsComptime(
     \\--seed           <UINT>     random seed (optional)
     \\--seq-len        <UINT>     sequence length
     \\--create-options <STRING>   platform creation options JSON, defaults to {}
-    \\--no-llama3      <BOOL>     skip prompt template
+    \\--nochat      <BOOL>     skip prompt template
     \\--sharding       <BOOL>     default: true: sharding on or off
 );
 
 pub fn tokenizePrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, config: GptOss.Config, prompt: []const u8, skip_llama3_encoding: bool) ![]u32 {
-    _ = skip_llama3_encoding; // autofix
     _ = config; // autofix
     var encoder = try tokenizer.encoder();
     defer encoder.deinit();
 
     // mine: 200006, 17360, 200008, 3575, 553, 17554, 162016, 11, 261, 4410, 6439, 2359, 22203, 656, 7788, 17527, 558, 200007, 200006, 1428, 200008, 4827, 382, 290, 9029, 328, 10128, 30, 200007, 200006, 173781, 200008 }
     // transformer: 4827,   382,   290, 10574, 13983,    30]]
-    if (true) {
+    if (skip_llama3_encoding) {
         // Copy so the ownership is the same in both branches.
         return try allocator.dupe(u32, try encoder.encode(prompt));
     }
@@ -304,7 +303,7 @@ pub fn asyncMain() !void {
     log.info("✅\tPrompt: {s}", .{prompt});
 
     const seed = cli.args.seed orelse @as(u128, @bitCast(std.time.nanoTimestamp()));
-    const skip_llama3_encoding = cli.args.@"no-llama3" orelse false;
+    const skip_llama3_encoding = cli.args.nochat orelse false;
 
     // Unbuffered writing of the tokens to stdout.
     var output = std.fs.File.stdout().writer(&.{});
@@ -339,10 +338,12 @@ const ClapBoilerplate = struct {
             stderr.interface.print("usage: ", .{}) catch {};
             clap.usage(&stderr.interface, clap.Help, &cli_params) catch {};
             stderr.interface.print("\n", .{}) catch {};
+            stderr.interface.flush() catch {};
             std.process.exit(1);
         };
         if (cli.args.help != 0) {
             clap.help(&stderr.interface, clap.Help, &cli_params, .{}) catch {};
+            stderr.interface.flush() catch {};
             std.process.exit(0);
         }
         return cli;
