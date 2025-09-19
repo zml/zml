@@ -26,6 +26,9 @@ fn FloatHelpers(Float: type) type {
         const sign_bits: u8 = @typeInfo(@FieldType(Float, "sign")).int.bits;
         const mantissa_bits: u8 = @typeInfo(@FieldType(Float, "mantissa")).int.bits;
         const exponent_bits: u8 = @typeInfo(@FieldType(Float, "exponent")).int.bits;
+        const f32_mantissa_bits: u8 = @typeInfo(@FieldType(Float32, "mantissa")).int.bits;
+        const exp_bias: i16 = std.math.maxInt(std.meta.Int(.unsigned, exponent_bits - 1));
+        const exp_off: u8 = FloatHelpers(Float32).exp_bias - exp_bias;
 
         pub const zero: Float = .{ .sign = 0, .exponent = 0, .mantissa = 0 };
 
@@ -39,20 +42,28 @@ fn FloatHelpers(Float: type) type {
 
         /// Lossy conversion from f32, similar to @floatCast
         pub fn fromF32(f: f32) Float {
+            @setRuntimeSafety(false);
+
             const vf32: Float32 = @bitCast(f);
-            const exp_bias = comptime expBias();
-            const exponent = @as(u16, vf32.exponent) + exp_bias -| FloatHelpers(Float32).expBias();
+            const exponent: i16 = @as(i16, vf32.exponent) - exp_off;
             const overflow = exponent > std.math.maxInt(@FieldType(Float, "exponent"));
-            if (overflow) {
-                return if (@hasDecl(Float, "inf")) {
-                    return if (vf32.sign == 0) Float.inf else Float.minus_inf;
-                } else Float.nan;
-            }
-            return .{
-                .sign = vf32.sign,
-                .exponent = @intCast(exponent),
-                .mantissa = truncMantissa(vf32.mantissa),
-            };
+            return if (overflow)
+                if (@hasDecl(Float, "inf"))
+                    if (vf32.sign == 0) Float.inf else Float.minus_inf
+                else
+                    Float.nan
+            else if (exponent <= 0)
+                .{
+                    .sign = vf32.sign,
+                    .exponent = 0,
+                    .mantissa = shiftMantissa(vf32.mantissa, @intCast(-exponent)),
+                }
+            else
+                .{
+                    .sign = vf32.sign,
+                    .exponent = @intCast(exponent),
+                    .mantissa = truncMantissa(vf32.mantissa),
+                };
         }
 
         /// Lossless conversion to f32.
@@ -63,28 +74,33 @@ fn FloatHelpers(Float: type) type {
             }
             vf32 = .{
                 .sign = x.sign,
-                .exponent = if (x.exponent == 0) 0 else @intCast(@as(i16, x.exponent) + f32_exp_bias - expBias()),
+                // TODO: this is incorrect for x.exponent = 0
+                .exponent = if (x.exponent == 0) 0 else @as(u8, x.exponent) + exp_off,
                 .mantissa = f32Mantissa(x),
             };
+            // std.log.warn("F8: {any}, mantissa: {b:0>8} -> {any} -> {d}", .{ x, x.mantissa, vf32, @as(f32, @bitCast(vf32)) });
             return @bitCast(vf32);
         }
 
-        fn truncMantissa(x: anytype) @FieldType(Float, "mantissa") {
-            @setRuntimeSafety(false);
-            const off = @bitSizeOf(@TypeOf(x)) - mantissa_bits;
-            return @intCast(x >> off);
+        fn truncMantissa(f32_mantissa: u32) @FieldType(Float, "mantissa") {
+            const rounding_val: u32 = @as(u32, 1) << (f32_mantissa_bits - mantissa_bits - 1);
+            return @truncate((f32_mantissa + rounding_val) >> (f32_mantissa_bits - mantissa_bits));
+        }
+
+        fn shiftMantissa(f32_mantissa: u32, underflow: u8) @FieldType(Float, "mantissa") {
+            const upper_bit: u32 = @as(u32, 1) << f32_mantissa_bits;
+            const full_mant32: u32 = f32_mantissa | upper_bit;
+            // divide the mantissa proportionally to the exponent underflow
+            const shifted_mant: u32 = full_mant32 >> @truncate(underflow + 1);
+            const trunc_mant = truncMantissa(shifted_mant);
+            // std.log.warn("F32: {b:0>23}, underflow: {d: >4} -> shifted_mant: {b:0>23} -> trunc_mant: {b:0>4}", .{ f32_mantissa, underflow, shifted_mant, trunc_mant });
+            return trunc_mant;
         }
 
         fn f32Mantissa(x: Float) @FieldType(Float32, "mantissa") {
             @setRuntimeSafety(false);
             const Res = @FieldType(Float32, "mantissa");
-            const f32_mantissa_bits = @bitSizeOf(Res);
-
             return @shlExact(@as(Res, x.mantissa), f32_mantissa_bits - mantissa_bits);
-        }
-
-        fn expBias() u8 {
-            return std.math.maxInt(std.meta.Int(.unsigned, exponent_bits - 1));
         }
 
         pub fn formatNumber(x: Float, writer: *std.io.Writer, n: std.fmt.Number) std.io.Writer.Error!void {
@@ -372,7 +388,7 @@ pub const Float8E8M0 = packed struct(u8) {
     exponent: u8,
     sign: u0 = 0,
 
-    pub const min_scale: f32 = Float32.toF32(.{ .sign = 0, .exponent = 0, .mantissa = 0b1 << 22 });
+    pub const min_scale: f32 = @bitCast(Float32{ .sign = 0, .exponent = 0, .mantissa = 0b1 << 22 });
 
     /// Lossy conversion from f32, similar to @floatCast
     pub fn fromF32(f: f32) Float8E8M0 {
