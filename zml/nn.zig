@@ -110,9 +110,8 @@ pub const LayerNorm = struct {
 pub fn rmsNorm(x: Tensor, axis: anytype, eps: f32) Tensor {
     const ax = x.axis(axis);
     // upcast to improve precision
-    const xf32 = x.convert(.f32);
-    const mean = xf32.mul(xf32).mean(ax);
-    const rsqrt = Tensor.rsqrt(mean.addConstant(eps)).convert(x.dtype());
+    const variance = x.convert(.f32).powByConst(2).mean(ax);
+    const rsqrt = Tensor.rsqrt(variance.addConstant(eps)).convert(x.dtype());
     return x.mul(rsqrt.broad(x.shape()));
 }
 
@@ -816,7 +815,7 @@ pub fn resizeCubic1d(image: Tensor, axis: i8, new_len: u63, opt: ResizeOpts) Ten
         Tensor.constant(t.shape(), dtype.one()),
         t,
         t.mul(t),
-        t.pow(Tensor.scalar(3, dtype)),
+        t.powByConst(3),
     }, .last, ._interpolated);
 
     std.debug.assert(pos.dim(0) == new_len);
@@ -894,6 +893,7 @@ pub fn causalAttnMask(
 pub const SdpaOpts = struct {
     attn_mask: ?Tensor = null,
     scale: ?Tensor = null,
+    softmax_bias: ?Tensor = null,
     allow_cudnn: bool = true,
     // TODO: put a callback instead of all this field,
     // so that
@@ -922,7 +922,7 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
     stdx.debug.assert(k.shape().hasTags(.{ .h, .k, .hd }), err_template ++ "k is missing tags {{.h, .k, .hd}}", err_args);
     stdx.debug.assert(v.shape().hasTags(.{ .h, .k, .hd }), err_template ++ "v is missing tags {{.h, .k, .hd}}", err_args);
 
-    if (opts.allow_cudnn and cuda.canUseCudnnSdpa(q.shape())) {
+    if (opts.allow_cudnn and cuda.canUseCudnnSdpa(q.shape()) and opts.softmax_bias == null) {
         return cuda.sdpa(q, k, v, opts);
     }
 
@@ -940,9 +940,15 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
     k = k.mul(head_scaling.convert(k.dtype()));
 
     var attn_weights = q.dot(k, .{.hd});
-    // log.debug("attn_weights : {}, attn_mask : {?}", .{ attn_weights, attn_mask });
     if (attn_mask) |mask| attn_weights = attn_weights.add(mask.broad(attn_weights.shape()));
-    attn_weights = attn_weights.convert(.f32).softmax(.k).convert(q.dtype());
+    log.warn("attn_weights : {f}, attn_mask : {?f}", .{ attn_weights, attn_mask });
+    attn_weights = attn_weights.convert(.f32);
+    attn_weights = if (opts.softmax_bias) |softmax_bias| attn: {
+        // The split is needed because we also split q ourselves.
+        // TODO: consider letting the user do that.
+        const bias = softmax_bias.splitAxis(.h, .{ .h = k.dim(.h), .hq = .auto });
+        break :attn attn_weights.convert(.f32).softmaxBiased(.k, bias).convert(q.dtype());
+    } else attn_weights.convert(.f32).softmax(.k).convert(q.dtype());
 
     var attn = attn_weights.dot(v, .{.k});
     return attn.transpose(q.shape()).merge(.{ .h = .{ .h, .hq } });
