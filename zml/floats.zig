@@ -5,10 +5,6 @@ test {
     std.testing.refAllDecls(@This());
 }
 
-fn allBitsOne(v: anytype) bool {
-    return v == std.math.maxInt(@TypeOf(v));
-}
-
 fn FloatHelpers(Float: type) type {
     const info = @typeInfo(Float);
     const err_msg = "FloatHelpers expect a packed struct { mantissa: uXX, exponent: uXX, sign: u1}";
@@ -23,7 +19,6 @@ fn FloatHelpers(Float: type) type {
     }
 
     return struct {
-        const sign_bits: u8 = @typeInfo(@FieldType(Float, "sign")).int.bits;
         const mantissa_bits: u8 = @typeInfo(@FieldType(Float, "mantissa")).int.bits;
         const exponent_bits: u8 = @typeInfo(@FieldType(Float, "exponent")).int.bits;
         const f32_mantissa_bits: u8 = @typeInfo(@FieldType(Float32, "mantissa")).int.bits;
@@ -47,12 +42,15 @@ fn FloatHelpers(Float: type) type {
             const vf32: Float32 = @bitCast(f);
             const exponent: i16 = @as(i16, vf32.exponent) - exp_off;
             const overflow = exponent > std.math.maxInt(@FieldType(Float, "exponent"));
-            return if (overflow)
-                if (@hasDecl(Float, "inf"))
+            if (overflow) {
+                @branchHint(.unlikely);
+                return if (@hasDecl(Float, "inf"))
                     if (vf32.sign == 0) Float.inf else Float.minus_inf
                 else
-                    Float.nan
-            else if (exponent <= 0)
+                    Float.nan;
+            }
+
+            return if (exponent <= 0)
                 .{
                     .sign = vf32.sign,
                     .exponent = 0,
@@ -68,17 +66,26 @@ fn FloatHelpers(Float: type) type {
 
         /// Lossless conversion to f32.
         pub fn toF32(x: Float) f32 {
-            var vf32: Float32 = undefined;
-            if (@hasDecl(Float, "isInf") and x.isInf()) {
+            @setRuntimeSafety(false);
+
+            if (x == zero) return 0.0;
+            if (isInf(x)) {
+                @branchHint(.unlikely);
                 return if (x.sign == 0) std.math.inf(f32) else -std.math.inf(f32);
             }
-            vf32 = .{
-                .sign = x.sign,
-                // TODO: this is incorrect for x.exponent = 0
-                .exponent = if (x.exponent == 0) 0 else @as(u8, x.exponent) + exp_off,
-                .mantissa = f32Mantissa(x),
-            };
-            // std.log.warn("F8: {any}, mantissa: {b:0>8} -> {any} -> {d}", .{ x, x.mantissa, vf32, @as(f32, @bitCast(vf32)) });
+
+            const vf32: Float32 = if (x.exponent > 0)
+                .{
+                    .sign = x.sign,
+                    .exponent = @as(u8, x.exponent) + exp_off,
+                    .mantissa = f32Mantissa(x),
+                }
+            else
+                .{
+                    .sign = x.sign,
+                    .exponent = exp_off - @clz(x.mantissa),
+                    .mantissa = @as(u23, x.mantissa) << @clz(x.mantissa),
+                };
             return @bitCast(vf32);
         }
 
@@ -92,15 +99,12 @@ fn FloatHelpers(Float: type) type {
             const full_mant32: u32 = f32_mantissa | upper_bit;
             // divide the mantissa proportionally to the exponent underflow
             const shifted_mant: u32 = full_mant32 >> @truncate(underflow + 1);
-            const trunc_mant = truncMantissa(shifted_mant);
-            // std.log.warn("F32: {b:0>23}, underflow: {d: >4} -> shifted_mant: {b:0>23} -> trunc_mant: {b:0>4}", .{ f32_mantissa, underflow, shifted_mant, trunc_mant });
-            return trunc_mant;
+            return truncMantissa(shifted_mant);
         }
 
         fn f32Mantissa(x: Float) @FieldType(Float32, "mantissa") {
-            @setRuntimeSafety(false);
-            const Res = @FieldType(Float32, "mantissa");
-            return @shlExact(@as(Res, x.mantissa), f32_mantissa_bits - mantissa_bits);
+            const T = @FieldType(Float32, "mantissa");
+            return @as(T, x.mantissa) << f32_mantissa_bits - mantissa_bits;
         }
 
         pub fn formatNumber(x: Float, writer: *std.io.Writer, n: std.fmt.Number) std.io.Writer.Error!void {
@@ -116,6 +120,9 @@ pub const Float32 = packed struct(u32) {
     mantissa: u23,
     exponent: u8,
     sign: u1,
+
+    pub const inf: Float32 = .{ .sign = 0, .exponent = std.math.maxInt(u8), .mantissa = 0 };
+    pub const minus_inf = neg(inf);
 
     const Helpers = FloatHelpers(@This());
     pub const zero = Helpers.zero;
@@ -197,9 +204,10 @@ pub const Float8E4M3FNUZ = packed struct(u8) {
 };
 
 test "Float8E4" {
+    // With 4 bits of exponents power of two can be represented exactly up to 64.
     const test_case_e4: TestCase = .{
-        .lossless = &[_]f32{ 0, 1.0, -2, 1.0 / 64.0, -128 },
-        .lossy = &[_]f32{3.02344107628},
+        .lossless = &[_]f32{ 0, 1.0, -2, 1.0 / 64.0, -128, -1.125 / 64.0 },
+        .lossy = &[_]f32{ 3.02344107628, 1.0 / 128.0, 1.0 / 512.0 },
     };
 
     inline for (.{
@@ -208,7 +216,11 @@ test "Float8E4" {
         Float8E4M3FNUZ,
     }) |Float8T| {
         try testCustomFloat(Float8T, test_case_e4);
-        try std.testing.expectEqual(0.0, Float8T.fromF32(1.0 / 128.0).toF32());
+        try std.testing.expectEqual(0.0, Float8T.fromF32(1.0 / 2048.0).toF32());
+        if (@hasDecl(Float8T, "inf")) {
+            try std.testing.expectEqual(Float8T.inf, Float8T.fromF32(128.0));
+            try std.testing.expectEqual(Float8T.inf.neg(), Float8T.fromF32(-128.0));
+        }
     }
 }
 
@@ -230,10 +242,6 @@ pub const Float8E5M2 = packed struct(u8) {
     };
 
     pub const minus_inf: Float8E5M2 = .neg(inf);
-
-    pub fn isInf(self: Float8E5M2) bool {
-        return self == inf or self == minus_inf;
-    }
 
     const Helpers = FloatHelpers(@This());
     pub const zero = Helpers.zero;
@@ -291,10 +299,8 @@ pub const BFloat16 = packed struct(u16) {
 
     pub const minus_inf: BFloat16 = .neg(inf);
 
-    pub fn isInf(self: BFloat16) bool {
-        return allBitsOne(self.exponent) and self.mantissa == 0;
-    }
-
+    // Specialized versions of to/from F32. Since BFloat16 has the same exponent range than F32,
+    // no overflow/underflow can happen, simplifiying conversion logic.
     pub fn toF32(self: BFloat16) f32 {
         // Pad the BF16 with zeros 0
         return @bitCast([2]u16{ 0, @bitCast(self) });
@@ -346,7 +352,7 @@ pub const Float8E4M3 = packed struct(u8) {
         .mantissa = 0,
     };
 
-    pub const minus_inf: Float8E4M3 = .neg(inf);
+    pub const minus_inf = neg(inf);
 
     const Helpers = FloatHelpers(@This());
     pub const zero = Helpers.zero;
@@ -373,7 +379,7 @@ pub const Float8E3M4 = packed struct(u8) {
         .mantissa = 0,
     };
 
-    pub const minus_inf: Float8E3M4 = .neg(inf);
+    pub const minus_inf = neg(inf);
 
     const Helpers = FloatHelpers(@This());
     pub const zero = Helpers.zero;
@@ -473,6 +479,19 @@ pub fn floatCast(T: type, x: anytype) T {
             else => .fromF32(x.toF32()),
         },
     };
+}
+
+pub fn isInf(x: anytype) bool {
+    const Float = @TypeOf(x);
+    if (!@hasDecl(Float, "inf")) return false;
+
+    const FBits = std.meta.Int(.unsigned, @bitSizeOf(Float));
+    const remove_sign = ~@as(FBits, 0) >> 1;
+    return @as(FBits, @bitCast(x)) & remove_sign == @as(FBits, @bitCast(Float.inf));
+}
+
+fn allBitsOne(v: anytype) bool {
+    return v == std.math.maxInt(@TypeOf(v));
 }
 
 const TestCase = struct {
