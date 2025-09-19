@@ -1,4 +1,4 @@
-load("@rules_zig//zig:defs.bzl", "zig_binary")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
 
 zig_binary(
     name = "gpt_oss",
@@ -16,9 +16,20 @@ zig_binary(
 )
 
 zig_binary(
-     name = "test",
+     name = "test_activations",
      srcs = ["GptOss.zig"],
      main = "test.zig",
+     deps = [
+         "//async",
+         "//stdx",
+         "//zml",
+     ],
+    visibility = ["//visibility:public"],
+ )
+
+zig_test(
+     name = "test",
+     main = "GptOss.zig",
      deps = [
          "//async",
          "//stdx",

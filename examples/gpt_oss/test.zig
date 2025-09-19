@@ -5,9 +5,9 @@ const stdx = @import("stdx");
 const flags = stdx.flags;
 const zml = @import("zml");
 
-const Mixtral = @import("./Mixtral.zig");
+const GptOss = @import("./GptOss.zig");
 
-const log = std.log.scoped(.mixtral);
+const log = std.log.scoped(.gpt_oss);
 
 pub const std_options: std.Options = .{
     .log_level = .info,
@@ -21,7 +21,7 @@ pub fn main() !void {
 pub fn asyncMain() !void {
     const CliArgs = struct {
         pub const help =
-            \\ test-implementation --model-path=mixtral/ --config=config.json --reference=activation.pt
+            \\ test-implementation --model-path=gpt_oss/ --activations=activation.pt
         ;
         model_path: []const u8,
         activations: []const u8,
@@ -36,7 +36,7 @@ pub fn asyncMain() !void {
 
     // Select platform
     const platform = context.autoPlatform(.{}).withCompilationOptions(.{
-        .xla_dump_to = "/tmp/zml/mixtral.test",
+        .xla_dump_to = "/tmp/zml/GptOss.test",
         .sharding_enabled = false,
     });
 
@@ -53,7 +53,7 @@ pub fn asyncMain() !void {
     const model_arena = arena_state.allocator();
 
     // Parse model config
-    const config: Mixtral.Config = cfg: {
+    const config: GptOss.Config = cfg: {
         const model_config_path = try std.fs.path.join(allocator, &.{ cli.model_path, "config.json" });
         defer allocator.free(model_config_path);
         var config_json_file = try asynk.File.open(model_config_path, .{ .mode = .read_only });
@@ -62,9 +62,9 @@ pub fn asyncMain() !void {
         var config_reader = config_json_file.reader(&config_json_buffer);
         var reader = std.json.Reader.init(model_arena, &config_reader.interface);
         defer reader.deinit();
-        const cfg = try std.json.parseFromTokenSourceLeaky(Mixtral.Config, model_arena, &reader, .{ .ignore_unknown_fields = true });
+        const cfg = try std.json.parseFromTokenSourceLeaky(GptOss.Config, model_arena, &reader, .{ .ignore_unknown_fields = true });
 
-        std.log.info("Parsed mixtral config: {}", .{cfg});
+        std.log.info("Parsed GptOss config: {}", .{cfg});
         break :cfg cfg;
     };
 
@@ -74,30 +74,30 @@ pub fn asyncMain() !void {
         defer allocator.free(simple_path);
 
         if (asynk.File.access(simple_path, .{})) {
-            log.info("\tLoading mixtral weights from {s}...", .{simple_path});
+            log.info("\tLoading GptOss weights from {s}...", .{simple_path});
             break :st try zml.aio.detectFormatAndOpen(allocator, simple_path);
         } else |_| {}
 
         const sharded_path = try std.fs.path.join(allocator, &.{ cli.model_path, "model.safetensors.index.json" });
         defer allocator.free(sharded_path);
-        log.info("\tLoading mixtral weights from {s}...", .{sharded_path});
+        log.info("\tLoading GptOss weights from {s}...", .{sharded_path});
         break :st try zml.aio.detectFormatAndOpen(allocator, sharded_path);
     };
     defer store.deinit();
 
     // Create the model and configure it.
-    const options: Mixtral.Options = .{
+    const options: GptOss.Options = .{
         .max_seq_len = 256,
         .sampling_strategy = .{
             .topk = 1,
             .temperature = 1.0,
         },
     };
-    const mixtral = try Mixtral.init(model_arena, store, config, options);
+    const gpt_oss = try GptOss.init(model_arena, store, config, options);
 
     // Load the weights.
-    var mixtral_weights = try mixtral.loadBuffers(model_arena, store, platform);
-    defer zml.aio.unloadBuffers(&mixtral_weights);
+    var gpt_oss_weights = try gpt_oss.loadBuffers(model_arena, store, platform);
+    defer zml.aio.unloadBuffers(&gpt_oss_weights);
 
     // Load the activations.
     var activation_store = try zml.aio.detectFormatAndOpen(allocator, cli.activations);
@@ -120,23 +120,23 @@ pub fn asyncMain() !void {
     }
 
     // Test implementation
-    try testImplementation(platform, mixtral, mixtral_weights, activation_store);
+    try testImplementation(platform, gpt_oss, gpt_oss_weights, activation_store);
 }
 
 fn testImplementation(
     platform: zml.Platform,
-    mixtral: Mixtral,
-    mixtral_weights: zml.Bufferized(Mixtral),
+    gpt_oss: GptOss,
+    gpt_oss_weights: zml.Bufferized(GptOss),
     store: zml.aio.BufferStore,
 ) !void {
-    try zml.testing.testLayer(platform, store, "model.model.embed_tokens", mixtral.model.embed_tokens, mixtral_weights.model.embed_tokens, 1e-3);
-    try zml.testing.testLayer(platform, store, "model.model.layers.0.self_attn.v_proj", mixtral.model.layers[0].self_attn.v_proj, mixtral_weights.model.layers[0].self_attn.v_proj, 2e-2);
-    try zml.testing.testLayer(platform, store, "model.model.layers.0.self_attn.q_proj", mixtral.model.layers[0].self_attn.q_proj, mixtral_weights.model.layers[0].self_attn.q_proj, 2e-2);
-    try zml.testing.testLayer(platform, store, "model.model.layers.0.self_attn.k_proj", mixtral.model.layers[0].self_attn.k_proj, mixtral_weights.model.layers[0].self_attn.k_proj, 2e-2);
-    try zml.testing.testLayer(platform, store, "model.model.layers.0.self_attn.o_proj", mixtral.model.layers[0].self_attn.o_proj, mixtral_weights.model.layers[0].self_attn.o_proj, 2e-2);
-    try zml.testing.testLayer(platform, store, "model.model.layers.0.input_layernorm", mixtral.model.layers[0].input_layernorm, mixtral_weights.model.layers[0].input_layernorm, 1e-3);
-    try zml.testing.testLayer(platform, store, "model.model.layers.0.post_attention_layernorm", mixtral.model.layers[0].post_attention_layernorm, mixtral_weights.model.layers[0].post_attention_layernorm, 1e-3);
-    try zml.testing.testLayer(platform, store, "model.model.layers.0.mlp.router", mixtral.model.layers[0].mlp.router, mixtral_weights.model.layers[0].mlp.router, 1e-2);
+    try zml.testing.testLayer(platform, store, "model.model.embed_tokens", gpt_oss.model.embed_tokens, gpt_oss_weights.model.embed_tokens, 1e-3);
+    try zml.testing.testLayer(platform, store, "model.model.layers.0.self_attn.v_proj", gpt_oss.model.layers[0].self_attn.v_proj, gpt_oss_weights.model.layers[0].self_attn.v_proj, 2e-2);
+    try zml.testing.testLayer(platform, store, "model.model.layers.0.self_attn.q_proj", gpt_oss.model.layers[0].self_attn.q_proj, gpt_oss_weights.model.layers[0].self_attn.q_proj, 2e-2);
+    try zml.testing.testLayer(platform, store, "model.model.layers.0.self_attn.k_proj", gpt_oss.model.layers[0].self_attn.k_proj, gpt_oss_weights.model.layers[0].self_attn.k_proj, 2e-2);
+    try zml.testing.testLayer(platform, store, "model.model.layers.0.self_attn.o_proj", gpt_oss.model.layers[0].self_attn.o_proj, gpt_oss_weights.model.layers[0].self_attn.o_proj, 2e-2);
+    try zml.testing.testLayer(platform, store, "model.model.layers.0.input_layernorm", gpt_oss.model.layers[0].input_layernorm, gpt_oss_weights.model.layers[0].input_layernorm, 1e-3);
+    try zml.testing.testLayer(platform, store, "model.model.layers.0.post_attention_layernorm", gpt_oss.model.layers[0].post_attention_layernorm, gpt_oss_weights.model.layers[0].post_attention_layernorm, 1e-3);
+    try zml.testing.testLayer(platform, store, "model.model.layers.0.mlp.router", gpt_oss.model.layers[0].mlp.router, gpt_oss_weights.model.layers[0].mlp.router, 1e-2);
 
     const allocator = std.heap.smp_allocator;
     {
@@ -144,22 +144,22 @@ fn testImplementation(
         const kv_shape = zml.Shape.init(.{ .layer = 1, .k = input.dim(.s), .h = 8, .hd = 64 }, .bf16);
         const self_attn_mod = try zml.compileModel(
             allocator,
-            Mixtral.SelfAttn.forward,
-            mixtral.model.layers[22].self_attn,
+            GptOss.SelfAttn.forward,
+            gpt_oss.model.layers[22].self_attn,
             .{
                 store.buffers.get("model.model.layers.22.self_attn.in.0").?.shape(),
                 zml.Shape.scalar(.u32),
-                Mixtral.KvCache.initShape(kv_shape),
+                GptOss.KvCache.initShape(kv_shape),
             },
             platform,
         );
         defer self_attn_mod.deinit();
 
-        const self_attn_exe = self_attn_mod.prepare(mixtral_weights.model.layers[22].self_attn);
+        const self_attn_exe = self_attn_mod.prepare(gpt_oss_weights.model.layers[22].self_attn);
         const out, _ = self_attn_exe.call(.{
             try input.toDevice(platform),
             try .scalar(platform, 0, .u32),
-            try Mixtral.KvCache.initBuffer(kv_shape, platform),
+            try GptOss.KvCache.initBuffer(kv_shape, platform),
         });
 
         const expected = store.buffers.get("model.model.layers.22.self_attn.out.0").?;
@@ -168,7 +168,7 @@ fn testImplementation(
     }
 
     {
-        const w = mixtral.model.layers[22].mlp.experts.gate_up_proj;
+        const w = gpt_oss.model.layers[22].mlp.experts.gate_up_proj;
         const dequant_mod = try zml.compileFn(allocator, dequantize, .{.{
             .blocks = w.blocks.shape(),
             .scale = w.scale.shape(),
@@ -177,7 +177,7 @@ fn testImplementation(
         }}, platform);
         defer dequant_mod.deinit();
 
-        const dequant_weight = dequant_mod.call(.{mixtral_weights.model.layers[22].mlp.experts.gate_up_proj});
+        const dequant_weight = dequant_mod.call(.{gpt_oss_weights.model.layers[22].mlp.experts.gate_up_proj});
         const expected = store.buffers.get("model.model.layers.22.mlp.experts.gate_up_proj.bf16").?;
 
         try zml.testing.expectClose(expected, dequant_weight, 1e-4);
@@ -185,7 +185,7 @@ fn testImplementation(
     }
 
     {
-        const w = mixtral.model.layers[22].mlp.experts.down_proj;
+        const w = gpt_oss.model.layers[22].mlp.experts.down_proj;
         const dequant_mod = try zml.compileFn(allocator, dequantize, .{.{
             .blocks = w.blocks.shape(),
             .scale = w.scale.shape(),
@@ -194,7 +194,7 @@ fn testImplementation(
         }}, platform);
         defer dequant_mod.deinit();
 
-        const dequant_weight = dequant_mod.call(.{mixtral_weights.model.layers[22].mlp.experts.down_proj});
+        const dequant_weight = dequant_mod.call(.{gpt_oss_weights.model.layers[22].mlp.experts.down_proj});
         const expected = store.buffers.get("model.model.layers.22.mlp.experts.down_proj.bf16").?;
 
         try zml.testing.expectClose(expected, dequant_weight, 1e-4);
@@ -202,15 +202,15 @@ fn testImplementation(
     }
 
     {
-        const moe: MoeAllToAll = .{ .experts = mixtral.model.layers[0].mlp.experts };
+        const moe: MoeAllToAll = .{ .experts = gpt_oss.model.layers[0].mlp.experts };
 
-        try zml.testing.testLayer(platform, store, "model.model.layers.0.mlp.experts", moe, .{ .experts = mixtral_weights.model.layers[0].mlp.experts }, 5e-2);
+        try zml.testing.testLayer(platform, store, "model.model.layers.0.mlp.experts", moe, .{ .experts = gpt_oss_weights.model.layers[0].mlp.experts }, 5e-2);
     }
 
-    try zml.testing.testLayer(platform, store, "model.model.layers.0.mlp", mixtral.model.layers[0].mlp, mixtral_weights.model.layers[0].mlp, 1e-2);
+    try zml.testing.testLayer(platform, store, "model.model.layers.0.mlp", gpt_oss.model.layers[0].mlp, gpt_oss_weights.model.layers[0].mlp, 1e-2);
 }
 
-fn dequantize(self: zml.nn.BlockScaledLinear) zml.Tensor {
+fn dequantize(self: GptOss.BlockScaledLinear) zml.Tensor {
     // Bitcast to our actual type. This allows to load weights in a packed layout.
     const blocks_0 = self.blocks.bitCast(self.blocks_dtype);
     const blocks = blocks_0.merge(.{ .d_block = .{ .d_block, .bitcast } });
@@ -225,12 +225,12 @@ fn dequantize(self: zml.nn.BlockScaledLinear) zml.Tensor {
 }
 
 const MoeAllToAll = struct {
-    experts: Mixtral.Mlp,
+    experts: GptOss.Mlp,
 
-    /// Fork of Mixtral.Moe where we also feed the gating.
+    /// Fork of GptOss.Moe where we also feed the gating.
     pub fn forward(self: MoeAllToAll, input: zml.Tensor, routing: zml.Tensor, gating: zml.Tensor) zml.Tensor {
         _ = routing;
 
-        return zml.nn.mixtureOfExpertsAllToAll(Mixtral.Mlp, self.experts, input, gating.withTags(.{ .s, .expert }));
+        return GptOss.mixtureOfExpertsAllToAll(GptOss.Mlp, self.experts, input, gating.withTags(.{ .s, .expert }));
     }
 };

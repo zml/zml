@@ -262,13 +262,23 @@ const RmsNorm = struct {
 pub const Router = struct {
     weight: zml.Tensor,
     bias: zml.Tensor,
-    const expert_per_token: u32 = 4;
+    const experts_per_token: u32 = 4;
 
     pub fn forward(self: Router, input: zml.Tensor) zml.Tensor {
         const linear: zml.nn.Linear = .{ .weight = self.weight, .bias = self.bias };
-        const gating = linear.forward(input).convert(.f32).softmax(-1);
+        const gating = linear.forward(input);
 
-        return nn_moe.hardGating(gating, expert_per_token).convert(input.dtype());
+        const routing = gating.topK(.{ .top_expert = .expert }, experts_per_token, .{});
+        const per_token_score = routing.values.softmax(.top_expert);
+
+        const hard_gating = zml.Tensor.scatterSlices(
+            .zeroes(gating.shape()),
+            .{ .expert = routing.indices },
+            per_token_score,
+            .{ .indices_are_unique = true },
+        );
+
+        return hard_gating;
     }
 };
 
@@ -315,63 +325,10 @@ const MoE = struct {
 
     pub fn forward(self: MoE, input: zml.Tensor) zml.Tensor {
         log.warn("compiling moe with {f}", .{input});
-        const gating = self.router.forward(input);
-        return mixtureOfExperts(Mlp, self.experts, input, gating, .{ .experts_per_token = Router.expert_per_token, .tokens_per_expert_ratio = 1.5 });
-    }
-
-    pub fn loadSharded(self: MoE, store: zml.aio.BufferStore, prefix: *zml.aio.PrefixBuilder, platform: zml.Platform) !zml.Bufferized(MoE) {
-        prefix.push(stdx.noalloc, "block_sparse_moe.experts") catch unreachable;
-
-        return .{
-            .router = try store.loadModelById(zml.nn.Linear, stdx.noalloc, self.router, platform),
-            .experts = .{
-                .gate_up_proj = .{ .blocks = try loadShardedWeight(store, prefix, "w1", platform, self.experts.gate_up_proj.blocks) },
-                .down_proj = .{ .blocks = try loadShardedWeight(store, prefix, "w2", platform, self.experts.down_proj.blocks) },
-            },
-        };
-    }
-
-    fn loadShardedWeight(store: zml.aio.BufferStore, prefix: *zml.aio.PrefixBuilder, name: []const u8, platform: zml.Platform, weight: zml.Tensor) !zml.Buffer {
-        const devices = platform.getDevices();
-        const num_experts = weight.dim(.expert);
-        const num_shards = platform.sharding().num_partitions;
-
-        // Note: this requires num_devices == num_partitions, this is overly restrictive.
-        if (devices.len == num_shards and num_experts % num_shards == 0 and num_experts >= num_shards) {
-            const num_experts_per_shard = @divExact(num_experts, num_shards);
-            const tmp_buf: []u8 = try std.heap.smp_allocator.alloc(u8, 4096);
-            defer std.heap.smp_allocator.free(tmp_buf);
-            var fba: std.heap.FixedBufferAllocator = .init(tmp_buf);
-
-            const allocator = fba.allocator();
-            const transfer = try platform.batchedTransfer(allocator, &.{weight.shape()}, .device);
-
-            for (0..num_experts) |expert_id| {
-                const part_id = expert_id % num_experts_per_shard;
-                const shard_id = @divFloor(expert_id, num_experts_per_shard);
-                const ckpt = prefix.checkpoint();
-                defer prefix.restore(ckpt);
-                try prefix.pushDigit(stdx.noalloc, expert_id);
-                try prefix.push(stdx.noalloc, name);
-                try prefix.push(stdx.noalloc, "weight");
-
-                const expert = store.get(prefix.items()) orelse {
-                    log.err("Buffer not found: {s}", .{prefix.items()});
-                    store.findSimilarBufferKeys(std.heap.smp_allocator, prefix.items());
-                    @panic("Buffer not found");
-                };
-
-                const ev = transfer.transferData(
-                    .{ .buffer_id = 0, .device_id = @intCast(shard_id), .offset = expert.bytes().len * part_id },
-                    expert.bytes(),
-                    part_id + 1 == num_experts_per_shard,
-                );
-                _ = ev;
-            }
-            return transfer.buffers[0];
-        } else {
-            @panic("TODO");
-        }
+        var hard_gating = self.router.forward(input);
+        if (input.dim(0) > 1) hard_gating = hard_gating.print();
+        return mixtureOfExpertsAllToAll(Mlp, self.experts, input, hard_gating);
+        // return mixtureOfExperts(Mlp, self.experts, input, gating, .{ .experts_per_token = Router.expert_per_token, .tokens_per_expert_ratio = 1.5 });
     }
 };
 
@@ -652,7 +609,7 @@ pub fn mixtureOfExperts(Expert: type, experts: Expert, input: zml.Tensor, gating
         break :tpe tpe;
     } else num_tokens;
 
-    if (3 * tokens_per_expert <= 2 * num_tokens) {
+    if (1000 * tokens_per_expert <= 2 * num_tokens) {
         const routing, const tokens_ids_per_expert = nn_moe.dispatchTokens(gating, .{
             .experts_per_token = opts.experts_per_token,
             .tokens_per_expert = tokens_per_expert,

@@ -23,7 +23,7 @@ pub fn open(allocator: std.mem.Allocator, path: []const u8) !zml.aio.BufferStore
     } else {
         try loadFile(arena, &res, &files, path);
     }
-    res.files = try files.toOwnedSlice(allocator);
+    res.files = try files.toOwnedSlice(arena);
     return res;
 }
 

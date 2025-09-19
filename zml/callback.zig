@@ -294,7 +294,7 @@ pub const Print = struct {
     }
 
     pub fn call(_: *Print, input: Buffer) !void {
-        std.log.defaultLog(.info, .zml, "Device buffer: {f}: {d:20.3}", .{ input, input.asHostBuffer() });
+        std.log.defaultLog(.info, .zml, "Device buffer: {f}: {d:32.3}", .{ input, input.asHostBuffer() });
     }
 };
 

@@ -1,12 +1,23 @@
+# /// script
+# dependencies = [
+#   "accelerate",
+#   "torch",
+#   "transformers",
+#   "safetensors",
+# ]
+# ///
+import sys
+from pathlib import Path
+
+import safetensors
 import torch
 import transformers
-import sys
-import safetensors
 
-sys.path.append("/Users/guw/Documents/zml/tools")
+ROOT = Path(__file__).parents[2]
+sys.path.append(str(ROOT / "tools"))
 import zml_utils
 
-model_path = "/Users/guw/models/openai/gpt-oss-20b"
+model_path = "/var/models/openai/gpt-oss-20b"
 
 pipeline = transformers.pipeline(
     "text-generation",
@@ -28,6 +39,9 @@ output, activations = pipeline(prompt)
 # has stopped before the end of the inference
 if output:
     print(output)
+
+for i in range(4):
+    print(activations[f"model.in.{i}"])
 
 # Save activations to a file.
 filename = model_path.split("/")[-1] + ".activations.pt"

@@ -29,11 +29,14 @@ const cli_params = clap.parseParamsComptime(
 );
 
 pub fn tokenizePrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, config: GptOss.Config, prompt: []const u8, skip_llama3_encoding: bool) ![]u32 {
+    _ = skip_llama3_encoding; // autofix
     _ = config; // autofix
     var encoder = try tokenizer.encoder();
     defer encoder.deinit();
 
-    if (skip_llama3_encoding) {
+    // mine: 200006, 17360, 200008, 3575, 553, 17554, 162016, 11, 261, 4410, 6439, 2359, 22203, 656, 7788, 17527, 558, 200007, 200006, 1428, 200008, 4827, 382, 290, 9029, 328, 10128, 30, 200007, 200006, 173781, 200008 }
+    // transformer: 4827,   382,   290, 10574, 13983,    30]]
+    if (true) {
         // Copy so the ownership is the same in both branches.
         return try allocator.dupe(u32, try encoder.encode(prompt));
     }
@@ -297,7 +300,7 @@ pub fn asyncMain() !void {
     };
     errdefer tokenizer.deinit();
 
-    const prompt = cli.args.prompt orelse "What is the capital of France?";
+    const prompt = cli.args.prompt orelse "What is the largest animal?";
     log.info("✅\tPrompt: {s}", .{prompt});
 
     const seed = cli.args.seed orelse @as(u128, @bitCast(std.time.nanoTimestamp()));
