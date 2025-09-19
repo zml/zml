@@ -329,10 +329,10 @@ const MoE = struct {
 
     pub fn forward(self: MoE, input: zml.Tensor) zml.Tensor {
         log.warn("compiling moe with {f}", .{input});
-        var hard_gating = self.router.forward(input);
-        if (input.dim(0) > 1) hard_gating = hard_gating.print();
-        return mixtureOfExpertsAllToAll(Mlp, self.experts, input, hard_gating);
-        // return mixtureOfExperts(Mlp, self.experts, input, gating, .{ .experts_per_token = Router.expert_per_token, .tokens_per_expert_ratio = 1.5 });
+        const hard_gating = self.router.forward(input);
+        // if (input.dim(0) > 1) hard_gating = hard_gating.print();
+        // return mixtureOfExpertsAllToAll(Mlp, self.experts, input, hard_gating);
+        return mixtureOfExperts(Mlp, self.experts, input, hard_gating, .{ .experts_per_token = self.router.experts_per_token, .tokens_per_expert_ratio = 1.5 });
     }
 };
 
