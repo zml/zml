@@ -483,6 +483,10 @@ pub fn floatCast(T: type, x: anytype) T {
 
 pub fn isInf(x: anytype) bool {
     const Float = @TypeOf(x);
+    switch (Float) {
+        f64, f32, f16 => return std.math.isInf(x),
+        else => {},
+    }
     if (!@hasDecl(Float, "inf")) return false;
 
     const FBits = std.meta.Int(.unsigned, @bitSizeOf(Float));
