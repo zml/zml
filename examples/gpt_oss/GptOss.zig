@@ -18,6 +18,7 @@ pub const Config = struct {
     num_hidden_layers: u32,
     num_attention_heads: u32,
     num_key_value_heads: u32,
+    experts_per_token: u32,
     rope_theta: f32,
     max_position_embeddings: u32,
     rms_norm_eps: f32,
@@ -82,7 +83,7 @@ pub fn init(allocator: std.mem.Allocator, store: zml.aio.BufferStore, config: Co
         }
 
         const on_disk_moe = try zml.aio.populateModelWithPrefix(MoE.OnDisk, allocator, store, prefix.concat("mlp"));
-        var moe = on_disk_moe.rewrite();
+        var moe = on_disk_moe.rewrite(config.experts_per_token);
         {
             moe.experts.gate_up_proj.blocks = moe.experts.gate_up_proj.blocks.withSharding(.{.expert});
             moe.experts.down_proj.blocks = moe.experts.down_proj.blocks.withSharding(.{.expert});
@@ -262,13 +263,13 @@ const RmsNorm = struct {
 pub const Router = struct {
     weight: zml.Tensor,
     bias: zml.Tensor,
-    const experts_per_token: u32 = 4;
+    experts_per_token: u32,
 
     pub fn forward(self: Router, input: zml.Tensor) zml.Tensor {
         const linear: zml.nn.Linear = .{ .weight = self.weight, .bias = self.bias };
         const gating = linear.forward(input);
 
-        const routing = gating.topK(.{ .top_expert = .expert }, experts_per_token, .{});
+        const routing = gating.topK(.{ .top_expert = .expert }, self.experts_per_token, .{});
         const per_token_score = routing.values.softmax(.top_expert);
 
         const hard_gating = zml.Tensor.scatterSlices(
@@ -297,7 +298,7 @@ const MoE = struct {
             gate_up_proj_scales: zml.Tensor,
         },
 
-        pub fn rewrite(on_disk: OnDisk) MoE {
+        pub fn rewrite(on_disk: OnDisk, experts_per_token: u32) MoE {
             const e = on_disk.experts;
             const experts: Mlp = .{
                 .gate_up_proj = .{
@@ -316,8 +317,11 @@ const MoE = struct {
                 },
             };
 
-            var router = on_disk.router;
-            router.weight = router.weight.withTags(.{ .expert, .d });
+            const router: Router = .{
+                .weight = on_disk.router.weight.withTags(.{ .expert, .d }),
+                .bias = on_disk.router.bias.withTags(.{.expert}),
+                .experts_per_token = experts_per_token,
+            };
 
             return .{ .router = router, .experts = experts };
         }
