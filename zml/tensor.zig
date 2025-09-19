@@ -1348,7 +1348,7 @@ pub const Tensor = struct {
         const b = bias.?.convert(self.dtype()).broad(self.shape().setDim(a, 1));
         const max_val: Tensor = maximum(self.max(a), b);
         const exp_diff_max = self.sub(max_val).exp();
-        const bias_diff_max = b.mul(.exp(.negate(max_val)));
+        const bias_diff_max = b.sub(max_val).exp();
         const res = exp_diff_max.div(exp_diff_max.sum(a).add(bias_diff_max));
 
         // The bias means that denominator won't be 0, we don't need to handle that case.
