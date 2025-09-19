@@ -1,0 +1,28 @@
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+
+zig_binary(
+    name = "gpt_oss",
+    srcs = [
+        "GptOss.zig",
+    ],
+    main = "main.zig",
+    deps = [
+        "@com_github_hejsil_clap//:clap",
+        "@zml//async",
+        "@zml//stdx",
+        "@zml//zml",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+zig_binary(
+     name = "test",
+     srcs = ["GptOss.zig"],
+     main = "test.zig",
+     deps = [
+         "//async",
+         "//stdx",
+         "//zml",
+     ],
+    visibility = ["//visibility:public"],
+ )
