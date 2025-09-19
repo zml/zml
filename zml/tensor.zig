@@ -1042,6 +1042,40 @@ pub const Tensor = struct {
         return _result(self._shape.withDtype(to), op.result(0));
     }
 
+    test convert {
+        const floats = @import("floats.zig");
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        // f4e2m1
+        {
+            const x = [_]f32{ 0.0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6 };
+            var x_f4: [x.len]floats.Float4E2M1 = undefined;
+            for (&x_f4, &x) |*xi_f4, xi| xi_f4.* = .fromF32(xi);
+
+            const x_d = try zml.Buffer.fromArray(platform, x);
+            const x_f4_xla_d = try zml.testing.compileAndCall(platform, Tensor.convert, .{ x_d, .f4e2m1 });
+
+            const x_f4_xla = x_f4_xla_d.getValue(@TypeOf(x_f4));
+            errdefer std.log.warn("convert(.f4e2m1) failed !\nzml.floats computed:\n{any}\nxla computed:\n{any}", .{ x_f4, x_f4_xla });
+            try std.testing.expectEqualDeep(x_f4, x_f4_xla);
+        }
+
+        // f8e3m4
+        {
+            const x = [_]f32{ 0, 1.0, -2, 1.0 / 64.0, -128, 1 / 128 };
+            var x_f8e3: [x.len]floats.Float8E3M4 = undefined;
+            for (&x_f8e3, &x) |*xi_f8e3, xi| xi_f8e3.* = .fromF32(xi);
+
+            const x_d = try zml.Buffer.fromArray(platform, x);
+            const x_f8e3_xla_d = try zml.testing.compileAndCall(platform, Tensor.convert, .{ x_d, .f8e3m4 });
+
+            const x_f8e3_xla = x_f8e3_xla_d.getValue(@TypeOf(x_f8e3));
+            errdefer std.log.warn("convert(.f8e3m4) failed !\nzml.floats computed:\n{any}\nxla computed:\n{any}", .{ x_f8e3, x_f8e3_xla });
+            try std.testing.expectEqualDeep(x_f8e3, x_f8e3_xla);
+        }
+    }
+
     /// Returns a Tensor containing the element-wise rounding operation of the input Tensor.
     pub fn round(self: Tensor) Tensor {
         const loc = self.getContext().mlirCtx().location(@src());
