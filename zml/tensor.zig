@@ -1552,21 +1552,31 @@ pub const Tensor = struct {
         step: i32 = 1,
         singleton: bool = false,
 
+        const full = .{ .start = 0, .end = to_the_end, .step = 1 };
+
         pub fn single(offset: i64) Slice {
             return .{ .start = offset, .end = offset + 1, .singleton = true };
+        }
+
+        pub fn absolute(s: Slice, d: i64) Slice {
+            const start = if (s.start < 0) d + s.start else s.start;
+            const end = if (s.end == to_the_end) d else if (s.end < 0) d + s.end else s.end;
+            const res: Slice = .{ .start = start, .end = end, .step = s.step, .singleton = s.singleton };
+            stdx.debug.assert(start < end, "Slice {f} is invalid for axis of dimension {d} (resolved to {f}", .{ s, d, res });
+            return res;
         }
 
         const to_the_end = std.math.maxInt(i64);
 
         pub fn format(self: Slice, writer: *std.Io.Writer) !void {
             if (self.singleton) {
-                try writer.print("[{}]", .{self.start});
+                try writer.print("[{d}]", .{self.start});
             } else if (self.end == to_the_end and self.step == 1) {
-                try writer.print("[{}..]", .{self.start});
+                try writer.print("[{d}..]", .{self.start});
             } else if (self.step == 1) {
-                try writer.print("[{}..{}]", .{ self.start, self.end });
+                try writer.print("[{d}..{d}]", .{ self.start, self.end });
             } else {
-                try writer.print("[{}..{}:{}]", .{ self.start, self.end, self.step });
+                try writer.print("[{d}..{d}:{d}]", .{ self.start, self.end, self.step });
             }
         }
     };
@@ -1588,11 +1598,7 @@ pub const Tensor = struct {
         for (slices, 0..) |s, a| {
             stdx.debug.assert(s.step > 0, "slice expects 'step' to be positive, got {} at index {}", .{ s.step, a });
 
-            const args: Slice = .{
-                .start = self.wrapIndex(a, s.start),
-                .end = if (s.end == Slice.to_the_end) self.dim(a) else self.wrapIndex(a, s.end),
-                .step = s.step,
-            };
+            const args: Slice = s.absolute(self.dim(a));
             start_indices[a] = args.start;
             limit_indices[a] = args.end;
             strides[a] = args.step;
