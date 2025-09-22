@@ -1042,6 +1042,40 @@ pub const Tensor = struct {
         return _result(self._shape.withDtype(to), op.result(0));
     }
 
+    test convert {
+        const floats = @import("floats.zig");
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        // f4e2m1
+        {
+            const x = [_]f32{ 0.0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6 };
+            var x_f4: [x.len]floats.Float4E2M1 = undefined;
+            for (&x_f4, &x) |*xi_f4, xi| xi_f4.* = .fromF32(xi);
+
+            const x_d = try zml.Buffer.fromArray(platform, x);
+            const x_f4_xla_d = try zml.testing.compileAndCall(platform, Tensor.convert, .{ x_d, .f4e2m1 });
+
+            const x_f4_xla = x_f4_xla_d.getValue(@TypeOf(x_f4));
+            errdefer std.log.warn("convert(.f4e2m1) failed !\ninput f32:\n{e}\nzml.floats computed:\n{any}\nxla computed:\n{any}", .{ stdx.fmt.slice(&x), x_f4, x_f4_xla });
+            try std.testing.expectEqualDeep(x_f4, x_f4_xla);
+        }
+
+        // f8e3m4
+        {
+            const x = [_]f32{ 1.1 / 4.0, 1.1 / 8.0, 1.1 / 16.0, 1.1 / 32.0, 1.1 / 64.0, 1.1 / 128.0 };
+            var x_f8e3: [x.len]floats.Float8E3M4 = undefined;
+            for (&x_f8e3, &x) |*xi_f8e3, xi| xi_f8e3.* = .fromF32(xi);
+
+            const x_d = try zml.Buffer.fromArray(platform, x);
+            const x_f8e3_xla_d = try zml.testing.compileAndCall(platform, Tensor.convert, .{ x_d, .f8e3m4 });
+
+            const x_f8e3_xla = x_f8e3_xla_d.getValue(@TypeOf(x_f8e3));
+            errdefer std.log.warn("convert(.f8e3m4) failed !\ninput f32:\n{e}\nzml.floats computed:\n{any}\nxla computed:\n{any}", .{ stdx.fmt.slice(&x), x_f8e3, x_f8e3_xla });
+            try std.testing.expectEqualDeep(x_f8e3, x_f8e3_xla);
+        }
+    }
+
     /// Returns a Tensor containing the element-wise rounding operation of the input Tensor.
     pub fn round(self: Tensor) Tensor {
         const loc = self.getContext().mlirCtx().location(@src());
@@ -3844,11 +3878,11 @@ fn getPoolResDims(dt: DataType, in_dims: []const i64, base_dilations: @Vector(Te
 }
 
 fn getComparisonType(ctx: mlir.Context, dtype: DataType) dialect.stablehlo.CompareType {
-    return dialect.stablehlo.CompareType.init(ctx, switch (dtype) {
-        .i4, .i8, .i16, .i32, .i64 => .SIGNED,
-        .bool, .u4, .u8, .u16, .u32, .u64 => .UNSIGNED,
-        .f8e4m3b11fnuz, .f8e4m3fn, .f8e4m3fnuz, .f8e5m2, .f8e5m2fnuz, .bf16, .f16, .f32, .f64 => .FLOAT,
-        .c64, .c128 => @panic("Can't compare complex numbers"),
+    return dialect.stablehlo.CompareType.init(ctx, switch (dtype.class()) {
+        .bool => .UNSIGNED,
+        .integer => if (dtype.isSignedInt()) .SIGNED else .UNSIGNED,
+        .float => .FLOAT,
+        .complex => @panic("Can't compare complex numbers"),
     });
 }
 

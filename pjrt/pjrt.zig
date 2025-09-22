@@ -800,11 +800,13 @@ pub const LoadedExecutable = opaque {
 pub const BufferType = enum(c.PJRT_Buffer_Type) {
     invalid = c.PJRT_Buffer_Type_INVALID,
     bool = c.PJRT_Buffer_Type_PRED,
+    i2 = c.PJRT_Buffer_Type_S2,
     i4 = c.PJRT_Buffer_Type_S4,
     i8 = c.PJRT_Buffer_Type_S8,
     i16 = c.PJRT_Buffer_Type_S16,
     i32 = c.PJRT_Buffer_Type_S32,
     i64 = c.PJRT_Buffer_Type_S64,
+    u2 = c.PJRT_Buffer_Type_U2,
     u4 = c.PJRT_Buffer_Type_U4,
     u8 = c.PJRT_Buffer_Type_U8,
     u16 = c.PJRT_Buffer_Type_U16,
@@ -821,6 +823,10 @@ pub const BufferType = enum(c.PJRT_Buffer_Type) {
     f8e4m3b11fnuz = c.PJRT_Buffer_Type_F8E4M3B11FNUZ,
     f8e5m2fnuz = c.PJRT_Buffer_Type_F8E5M2FNUZ,
     f8e4m3fnuz = c.PJRT_Buffer_Type_F8E4M3FNUZ,
+    f8e4m3 = c.PJRT_Buffer_Type_F8E4M3,
+    f8e3m4 = c.PJRT_Buffer_Type_F8E3M4,
+    f8e8m0 = c.PJRT_Buffer_Type_F8E8M0FNU,
+    f4e2m1 = c.PJRT_Buffer_Type_F4E2M1FN,
 };
 
 pub const MemoryLayoutType = enum(c.PJRT_Buffer_MemoryLayout_Type) {
