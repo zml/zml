@@ -12,7 +12,7 @@ pub const Config = struct {
     bos_token_id: u32 = 199998,
     eos_token_id: stdx.json.Union(union(enum) {
         int: u32,
-        ints: []u32,
+        ints: []const u32,
     }),
     head_dim: u32,
     num_hidden_layers: u32,
@@ -27,21 +27,22 @@ pub const Config = struct {
 };
 
 pub const Options = struct {
-    sampling_strategy: ?zml.nn.SamplingStrategy,
-    max_seq_len: usize,
+    sampling_strategy: zml.nn.SamplingStrategy,
+    max_seq_len: u32,
+    max_prompt_len: u32,
+    tokens_per_expert_ratio: f32,
 };
 
 lm_head: ?zml.nn.Linear,
 model: Model,
 
-// Options controlling generation
-gen_opts: zml.nn.SamplingStrategy = .{},
 config: Config,
+options: Options,
 
 pub fn init(allocator: std.mem.Allocator, store: zml.aio.BufferStore, config: Config, options: Options) !GptOss {
     var self: GptOss = .{
         .config = config,
-        .gen_opts = options.sampling_strategy orelse .{},
+        .options = options,
         .model = .{
             .max_seq_len = @intCast(options.max_seq_len),
             .num_heads = @intCast(config.num_attention_heads),
@@ -83,7 +84,7 @@ pub fn init(allocator: std.mem.Allocator, store: zml.aio.BufferStore, config: Co
         }
 
         const on_disk_moe = try zml.aio.populateModelWithPrefix(MoE.OnDisk, allocator, store, prefix.concat("mlp"));
-        var moe = on_disk_moe.rewrite(config.experts_per_token);
+        var moe = on_disk_moe.rewrite(config.experts_per_token, options);
         {
             moe.experts.gate_up_proj.blocks = moe.experts.gate_up_proj.blocks.withSharding(.{.expert});
             moe.experts.down_proj.blocks = moe.experts.down_proj.blocks.withSharding(.{.expert});
@@ -105,7 +106,7 @@ pub fn init(allocator: std.mem.Allocator, store: zml.aio.BufferStore, config: Co
 
     // TODO(Corentin): Fix lm_head sharding when top-k sampling is enabled.
     // It currently crashes/compilation fails
-    if (self.gen_opts.topk == 1 and self.lm_head != null) {
+    if (self.options.sampling_strategy.topk == 1 and self.lm_head != null) {
         self.lm_head.?.weight = self.lm_head.?.weight.withSharding(.{0});
     }
 
@@ -127,7 +128,7 @@ pub fn forward(
     stdx.debug.assert(tokens_.dtype() == .u32 and tokens_.rank() >= 1 and token_index.dtype() == .u32 and token_index.rank() <= 1, "Can't run GptOss ! Expected >=1d tokens and 0d token_index, got: {f} and {f}", .{ tokens_, token_index });
     const tokens = tokens_.withPartialTags(.{.s});
     const out, const updated_kv_cache = zml.call(self.model, .forward, .{ tokens, token_index, kv_cache });
-    const new_tokens, const new_rng = self.sampleTokens(self.lm_head, out, rng, self.gen_opts);
+    const new_tokens, const new_rng = self.sampleTokens(self.lm_head, out, rng, self.options.sampling_strategy);
     return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache, new_rng };
 }
 
@@ -263,13 +264,13 @@ const RmsNorm = struct {
 pub const Router = struct {
     weight: zml.Tensor,
     bias: zml.Tensor,
-    experts_per_token: u32,
+    moe_opts: MoeOpts,
 
     pub fn forward(self: Router, input: zml.Tensor) zml.Tensor {
         const linear: zml.nn.Linear = .{ .weight = self.weight, .bias = self.bias };
         const gating = linear.forward(input);
 
-        const routing = gating.topK(.{ .top_expert = .expert }, self.experts_per_token, .{});
+        const routing = gating.topK(.{ .top_expert = .expert }, self.moe_opts.experts_per_token, .{});
         const per_token_score = routing.values.softmax(.top_expert);
 
         const hard_gating = zml.Tensor.scatterSlices(
@@ -298,7 +299,7 @@ const MoE = struct {
             gate_up_proj_scales: zml.Tensor,
         },
 
-        pub fn rewrite(on_disk: OnDisk, experts_per_token: u32) MoE {
+        pub fn rewrite(on_disk: OnDisk, experts_per_token: u32, options: Options) MoE {
             const e = on_disk.experts;
             const experts: Mlp = .{
                 .gate_up_proj = .{
@@ -320,7 +321,10 @@ const MoE = struct {
             const router: Router = .{
                 .weight = on_disk.router.weight.withTags(.{ .expert, .d }),
                 .bias = on_disk.router.bias.withTags(.{.expert}),
-                .experts_per_token = experts_per_token,
+                .moe_opts = .{
+                    .experts_per_token = experts_per_token,
+                    .tokens_per_expert_ratio = options.tokens_per_expert_ratio,
+                },
             };
 
             return .{ .router = router, .experts = experts };
@@ -330,9 +334,8 @@ const MoE = struct {
     pub fn forward(self: MoE, input: zml.Tensor) zml.Tensor {
         log.warn("compiling moe with {f}", .{input});
         const hard_gating = self.router.forward(input);
-        // if (input.dim(0) > 1) hard_gating = hard_gating.print();
-        // return mixtureOfExpertsAllToAll(Mlp, self.experts, input, hard_gating);
-        return mixtureOfExperts(Mlp, self.experts, input, hard_gating, .{ .experts_per_token = self.router.experts_per_token, .tokens_per_expert_ratio = 1.5 });
+
+        return mixtureOfExperts(Mlp, self.experts, input, hard_gating, self.router.moe_opts);
     }
 };
 
@@ -514,7 +517,6 @@ pub const BlockScaledLinear = struct {
     pub fn forward(self: BlockScaledLinear, x: zml.Tensor) zml.Tensor {
         const ctx = x.getContext();
         const res_shape = x.shape().setDim(-1, self.blocks.dim(-3));
-        log.warn("BlockScaledLinear({f} ({t}), {f}, {f}) -> {f}", .{ self.blocks, self.blocks_dtype, self.scale, x, res_shape });
 
         // Bitcast to our actual type. This allows to load weights in a packed layout.
         const blocks_0 = self.blocks.bitCast(self.blocks_dtype);
@@ -530,7 +532,7 @@ pub const BlockScaledLinear = struct {
                     scale.convert(x.dtype()).appendAxes(.{.d_block}),
                 );
                 var y = x.dot(dequantized_weight.merge(.{ .d = .{ .d, .d_block } }), .{.d});
-                std.log.warn("output shape: {f}", .{y});
+                // std.log.warn("output shape: {f}", .{y});
                 std.debug.assert(y.shape().eql(res_shape));
                 y._shape = res_shape;
                 break :y y;
@@ -568,7 +570,7 @@ const MoeOpts = struct {
 /// - experts: .{ .expert, .d_out, .d } expert layer (need to have a .forward method).
 /// -> output: .{ .s, .d_out }
 pub fn mixtureOfExperts(Expert: type, experts: Expert, input: zml.Tensor, gating: zml.Tensor, opts: MoeOpts) zml.Tensor {
-    log.warn("mixtureOfExperts({s}, {f}, {f})", .{ @typeName(Expert), input, gating });
+    log.warn("mixtureOfExperts({s}, {f}, {f}, {})", .{ @typeName(Expert), input, gating, opts });
     const num_tokens: u32 = @intCast(input.dim(.s));
     const num_experts = gating.dim(.expert);
     stdx.debug.assert(opts.experts_per_token > 0, "mixtureOfExperts expects opts.experts_per_token > 0, got {}", .{opts});
@@ -609,12 +611,12 @@ pub fn mixtureOfExperts(Expert: type, experts: Expert, input: zml.Tensor, gating
         const compute_budget = ratio * @as(f32, @floatFromInt(num_tokens * opts.experts_per_token));
         var tpe: u32 = @intFromFloat(stdx.math.divFloat(f32, compute_budget, num_experts));
         // Round to next multiple of 8 to avoid weird shapes.
-        tpe = tpe + 8 - (tpe % 8);
+        if (tpe % 8 != 0) tpe += 8 - (tpe % 8);
         break :tpe tpe;
     } else num_tokens;
 
-    if (1000 * tokens_per_expert <= 2 * num_tokens) {
-        const routing, const tokens_ids_per_expert = nn_moe.dispatchTokens(gating, .{
+    if (3 * tokens_per_expert <= 2 * num_tokens) {
+        const routing, const tokens_ids_per_expert = dispatchTokens(gating, .{
             .experts_per_token = opts.experts_per_token,
             .tokens_per_expert = tokens_per_expert,
         });
@@ -660,70 +662,68 @@ pub fn mixtureOfExpertsAllToAll(Expert: type, experts: Expert, input: zml.Tensor
     return output_per_expert.dot(gating.convert(input.dtype()), .expert);
 }
 
-pub const nn_moe = struct {
-    /// Given `(token, expert) -> scores`,
-    /// keeps only the top-k expert per token, and normalize the scores accordingly.
-    /// Non selected experts will have a 0 score.
-    pub fn hardGating(gating: zml.Tensor, experts_per_token: u32) zml.Tensor {
-        const routing = gating.topK(.{ .top_expert = .expert }, experts_per_token, .{});
-        const per_token_score = routing.values.div(routing.values.sum(.top_expert)).convert(gating.dtype());
-        return zml.Tensor.scatterSlices(
-            .zeroes(gating.shape()),
-            .{ .expert = routing.indices },
-            per_token_score,
-            .{ .indices_are_unique = true },
-        );
-    }
+/// Given `(token, expert) -> scores`,
+/// keeps only the top-k expert per token, and normalize the scores accordingly.
+/// Non selected experts will have a 0 score.
+pub fn hardGating(gating: zml.Tensor, experts_per_token: u32) zml.Tensor {
+    const routing = gating.topK(.{ .top_expert = .expert }, experts_per_token, .{});
+    const per_token_score = routing.values.div(routing.values.sum(.top_expert)).convert(gating.dtype());
+    return zml.Tensor.scatterSlices(
+        .zeroes(gating.shape()),
+        .{ .expert = routing.indices },
+        per_token_score,
+        .{ .indices_are_unique = true },
+    );
+}
 
-    /// Lot of tokens, each experts chose their tokens.
-    /// It means that some tokens may have only one expert assigned.
-    /// Each token will get assigned to at least one expert IIF the input gating is sums up to 1 (typically softmax output).
-    /// Returns the actual `(token, expert) -> scores` used.
-    pub fn dispatchTokens(
-        gating: zml.Tensor,
-        opts: struct {
-            // TODO take ratio
-            tokens_per_expert: u32,
-            experts_per_token: u32,
-        },
-    ) [2]zml.Tensor {
-        const num_experts = gating.dim(.expert);
+/// Lot of tokens, each experts chose their tokens.
+/// It means that some tokens may have only one expert assigned.
+/// Each token will get assigned to at least one expert IIF the input gating is sums up to 1 (typically softmax output).
+/// Returns the actual `(token, expert) -> scores` used.
+pub fn dispatchTokens(
+    gating: zml.Tensor,
+    opts: struct {
+        // TODO take ratio
+        tokens_per_expert: u32,
+        experts_per_token: u32,
+    },
+) [2]zml.Tensor {
+    const num_experts = gating.dim(.expert);
 
-        const token_pref = gating.argsort(.expert, .{ .descending = true });
-        var expert_rank: zml.Tensor = .scatterSlices(
-            .zeroes(gating.shape().withDtype(.i32)),
-            .{ .expert = token_pref },
-            .addConstant(.iota(gating.shape(), .expert), 1),
-            .{ .indices_are_unique = true },
-        );
-        // The pow(expert_rank) here means that we strongly favor top 1 over top 2 and top 2 over top 3.
-        // expert_routing: (expert, top_token) -> token
-        const expert_routing = gating.pow(expert_rank.convert(gating.dtype())).topK(.{ .top_token = .s }, opts.tokens_per_expert, .{});
-        const scores_per_expert = gating.gather(.{ .s = expert_routing.indices }, .{});
+    const token_pref = gating.argsort(.expert, .{ .descending = true });
+    var expert_rank: zml.Tensor = .scatterSlices(
+        .zeroes(gating.shape().withDtype(.i32)),
+        .{ .expert = token_pref },
+        .addConstant(.iota(gating.shape(), .expert), 1),
+        .{ .indices_are_unique = true },
+    );
+    // The pow(expert_rank) here means that we strongly favor top 1 over top 2 and top 2 over top 3.
+    // expert_routing: (expert, top_token) -> token
+    const expert_routing = gating.pow(expert_rank.convert(gating.dtype())).topK(.{ .top_token = .s }, opts.tokens_per_expert, .{});
+    const scores_per_expert = gating.gather(.{ .s = expert_routing.indices }, .{});
 
-        // Update the gating coefficient to account for the expert routing.
-        // Each (token, expert) which can't be computed within the given budget is left to 0.
-        const gating_v2: zml.Tensor = .scatterSlices(
-            .zeroes(gating.shape()),
-            .{ .s = expert_routing.indices },
-            scores_per_expert,
-            .{ .indices_are_unique = true, .update_fn = zml.Tensor.ScatterOpts.override },
-        );
-        // Now set to zero the scores (token, expert) for tokens that have been assigned more than experts_per_token.
-        const lowest_experts = gating_v2.topK(.{ .top_expert = .expert }, @intCast(num_experts - opts.experts_per_token), .{ .descending = false });
-        var gating_v3: zml.Tensor = .scatterSlices(
-            gating_v2,
-            .{ .expert = lowest_experts.indices },
-            .zeroes(lowest_experts.values.shape()),
-            .{ .indices_are_unique = true, .update_fn = zml.Tensor.ScatterOpts.override },
-        );
-        // Then normalize so the sum of experts scores for one token sums up to 1.
-        gating_v3 = gating_v3.div(gating_v3.sum(.expert));
-        const tokens_ids_per_expert = expert_routing.indices.transpose(.{ .expert, .top_token });
+    // Update the gating coefficient to account for the expert routing.
+    // Each (token, expert) which can't be computed within the given budget is left to 0.
+    const gating_v2: zml.Tensor = .scatterSlices(
+        .zeroes(gating.shape()),
+        .{ .s = expert_routing.indices },
+        scores_per_expert,
+        .{ .indices_are_unique = true, .update_fn = zml.Tensor.ScatterOpts.override },
+    );
+    // Now set to zero the scores (token, expert) for tokens that have been assigned more than experts_per_token.
+    const lowest_experts = gating_v2.topK(.{ .top_expert = .expert }, @intCast(num_experts - opts.experts_per_token), .{ .descending = false });
+    var gating_v3: zml.Tensor = .scatterSlices(
+        gating_v2,
+        .{ .expert = lowest_experts.indices },
+        .zeroes(lowest_experts.values.shape()),
+        .{ .indices_are_unique = true, .update_fn = zml.Tensor.ScatterOpts.override },
+    );
+    // Then normalize so the sum of experts scores for one token sums up to 1.
+    gating_v3 = gating_v3.div(gating_v3.sum(.expert));
+    const tokens_ids_per_expert = expert_routing.indices.transpose(.{ .expert, .top_token });
 
-        return .{ gating_v3, tokens_ids_per_expert };
-    }
-};
+    return .{ gating_v3, tokens_ids_per_expert };
+}
 
 test mixtureOfExperts {
     const async = @import("async");

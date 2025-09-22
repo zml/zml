@@ -3069,6 +3069,7 @@ pub const Tensor = struct {
 
     /// Returns a Tensor representing the result of Top-K over the given axis.
     pub fn topK(self: Tensor, named_axis_: anytype, k: u32, opts: struct { descending: bool = true }) SortRes {
+        stdx.debug.assert(k > 0, "topK expects a k > 0, got 0", .{});
         const err_msg = "topK named axis should be an integer or a named axis, eg `x.topK(.{{ .best_token = .token }}, 16)` or `x.topK(-1, 16)`";
         const has_name: ?[:0]const u8, const a = switch (@typeInfo(@TypeOf(named_axis_))) {
             .int, .comptime_int => .{ null, self.axis(@as(i64, @intCast(named_axis_))) },
