@@ -22,6 +22,7 @@ pub const Config = struct {
     rope_theta: f32,
     max_position_embeddings: u32,
     rms_norm_eps: f32,
+    sliding_window: u32,
     hf_rope_impl: bool = true,
     rope_scaling: zml.nn.RopeOpts.Scaling = .{ .default = {} },
 };
@@ -72,16 +73,23 @@ pub fn init(allocator: std.mem.Allocator, store: zml.aio.BufferStore, config: Co
         defer prefix.pop();
 
         // TODO: safer layer init
-        var self_attn = try zml.aio.populateModelWithPrefix(SelfAttn, allocator, store, prefix.concat("self_attn"));
-        {
-            self_attn.num_heads = self.model.num_heads;
-            self_attn.num_kv_heads = self.model.num_kv_heads;
-            self_attn.rope_opts = self.model.rope_opts;
-            self_attn.q_proj.weight = self_attn.q_proj.weight.withSharding(.{0});
-            self_attn.k_proj.weight = self_attn.k_proj.weight.withSharding(.{0});
-            self_attn.v_proj.weight = self_attn.v_proj.weight.withSharding(.{0});
-            self_attn.o_proj.weight = self_attn.o_proj.weight.withSharding(.{1});
-        }
+        var self_attn: SelfAttn = .{
+            .sinks = store.getTensor(prefix.concat("self_attn.sinks")),
+            .q_proj = try zml.aio.populateModelWithPrefix(zml.nn.Linear, allocator, store, prefix.concat("self_attn.q_proj")),
+            .k_proj = try zml.aio.populateModelWithPrefix(zml.nn.Linear, allocator, store, prefix.concat("self_attn.k_proj")),
+            .v_proj = try zml.aio.populateModelWithPrefix(zml.nn.Linear, allocator, store, prefix.concat("self_attn.v_proj")),
+            .o_proj = try zml.aio.populateModelWithPrefix(zml.nn.Linear, allocator, store, prefix.concat("self_attn.o_proj")),
+
+            .sliding_window = if (i % 2 == 0) config.sliding_window else null,
+            .num_heads = self.model.num_heads,
+            .num_kv_heads = self.model.num_kv_heads,
+            .rope_opts = self.model.rope_opts,
+        };
+
+        self_attn.q_proj.weight = self_attn.q_proj.weight.withSharding(.{0});
+        self_attn.k_proj.weight = self_attn.k_proj.weight.withSharding(.{0});
+        self_attn.v_proj.weight = self_attn.v_proj.weight.withSharding(.{0});
+        self_attn.o_proj.weight = self_attn.o_proj.weight.withSharding(.{1});
 
         const on_disk_moe = try zml.aio.populateModelWithPrefix(MoE.OnDisk, allocator, store, prefix.concat("mlp"));
         var moe = on_disk_moe.rewrite(config.experts_per_token, options);
@@ -366,9 +374,10 @@ pub const SelfAttn = struct {
 
     o_proj: zml.nn.Linear,
 
-    num_heads: i64 = undefined,
-    num_kv_heads: i64 = 0,
-    rope_opts: zml.nn.RopeOpts = undefined,
+    sliding_window: ?u32,
+    num_heads: i64,
+    num_kv_heads: i64,
+    rope_opts: zml.nn.RopeOpts,
 
     /// Self Attention.
     ///   - If token_index is set, x is assumed to be the representation of one new token,
@@ -383,14 +392,14 @@ pub const SelfAttn = struct {
         token_index: zml.Tensor,
         kv_cache: KvCache,
     ) struct { zml.Tensor, KvCache } {
-        const num_kv_heads = if (self.num_kv_heads > 0) self.num_kv_heads else self.num_heads;
+        const num_kv_heads = self.num_kv_heads;
         var q = zml.call(self.q_proj, .forward, .{x}).splitAxis(-1, .{ .h = self.num_heads, .hd = .auto }).withSharding(.{.h});
         var k = zml.call(self.k_proj, .forward, .{x}).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto }).withSharding(.{.h});
         var v = zml.call(self.v_proj, .forward, .{x}).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto }).withSharding(.{.h});
 
         // Generate the attention mask.
         const seq_len = kv_cache.k.dim(.k);
-        var attn_mask = zml.nn.causalAttnMask(.{ .q = seq_len, .k = seq_len }, x.dtype(), null);
+        var attn_mask = zml.nn.causalAttnMask(.{ .q = seq_len, .k = seq_len }, x.dtype(), self.sliding_window);
 
         // Note: in Pytorch it would be very inefficient to generate the full attn_mask,
         // then slice into it, but XLA is able to optimize this correctly.
@@ -412,6 +421,8 @@ pub const SelfAttn = struct {
         const new_kv_cache = kv_cache.update(k, v, token_index);
         k = new_kv_cache.keys().convert(dtype);
         v = new_kv_cache.values().convert(dtype);
+
+        // TODO ringbuffer kv cache.
 
         const softmax_bias = self.sinks.withTags(.{.h});
         const attn_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask, .allow_cudnn = true, .softmax_bias = softmax_bias });
@@ -683,7 +694,6 @@ pub fn hardGating(gating: zml.Tensor, experts_per_token: u32) zml.Tensor {
 pub fn dispatchTokens(
     gating: zml.Tensor,
     opts: struct {
-        // TODO take ratio
         tokens_per_expert: u32,
         experts_per_token: u32,
     },
