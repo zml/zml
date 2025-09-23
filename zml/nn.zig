@@ -195,9 +195,9 @@ pub const RopeOpts = struct {
             if (impl != .string) return error.InvalidEnumTag;
             if (std.mem.eql(u8, impl.string, "llama3")) {
                 // Note: leaky is fine here cause Llama3 struct don't need to allocate memory.
-                return .{ .llama3 = try std.json.parseFromValueLeaky(Llama3, undefined, content, .{ .ignore_unknown_fields = true }) };
+                return .{ .llama3 = try std.json.parseFromValueLeaky(Llama3, stdx.noalloc, content, .{ .ignore_unknown_fields = true }) };
             } else if (std.mem.eql(u8, impl.string, "yarn")) {
-                return .{ .yarn = try std.json.parseFromValueLeaky(Yarn, undefined, content, .{ .ignore_unknown_fields = true }) };
+                return .{ .yarn = try std.json.parseFromValueLeaky(Yarn, stdx.noalloc, content, .{ .ignore_unknown_fields = true }) };
             } else {
                 log.warn("Unsupported Rope implementation: {s}, will use the default one which will produce altered results", .{impl.string});
                 return .{ .default = {} };
