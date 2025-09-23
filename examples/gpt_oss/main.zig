@@ -25,6 +25,8 @@ const cli_params = clap.parseParamsComptime(
     \\--seed           <UINT>     random seed (optional)
     \\--seq-len        <UINT>     max sequence length
     \\--prompt-len     <UINT>     max prompt length
+    \\--temperature     <FLOAT>   temperature (default 1.0)
+    \\--topk           <UINT>     topk (default 10)
     \\--expert-budget  <FLOAT>    token budget per expert
     \\--platform-options  <STRING>   platform options, using Zon syntax, eg '.{.cuda=.{.allocator=.{.async=.{.memory_fraction=0.95}}}}'
     \\--nochat         <BOOL>     skip prompt template
@@ -234,7 +236,7 @@ pub fn asyncMain() !void {
         .max_prompt_len = cli.args.@"prompt-len" orelse 64,
         .tokens_per_expert_ratio = cli.args.@"expert-budget" orelse 4.0,
         .sampling_strategy = .{
-            .topk = 1,
+            .topk = cli.args.topk orelse 10,
             .temperature = 1.0,
         },
     };
