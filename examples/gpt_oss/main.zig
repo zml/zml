@@ -33,33 +33,35 @@ const cli_params = clap.parseParamsComptime(
     \\--sharding       <BOOL>     default: true: sharding on or off
 );
 
-pub fn tokenizePrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, prompt: []const u8, use_chat_template: bool) ![]u32 {
+pub fn tokenizePrompt(tokenizer: zml.tokenizer.Tokenizer, prompt: []const u8, no_chat: bool, out: []u32) ![]u32 {
     var encoder = try tokenizer.encoder();
     defer encoder.deinit();
 
-    if (use_chat_template) {
-        // Copy so the ownership is the same in both branches.
-        return try allocator.dupe(u32, try encoder.encode(prompt));
+    if (no_chat) {
+        const tokens = try encoder.encode(prompt);
+        if (tokens.len > out.len) return error.PromptTooLong;
+        @memcpy(out[0..tokens.len], tokens);
+        return out[0..tokens.len];
     }
 
     const start_header = tokenizer.tokenToId("<|start|>") orelse return error.NoSuchToken;
     const end_header_start_message = tokenizer.tokenToId("<|message|>") orelse return error.NoSuchToken;
     const end_message = tokenizer.tokenToId("<|end|>") orelse return error.NoSuchToken;
 
-    var tokens: std.ArrayList(u32) = try .initCapacity(allocator, prompt.len);
-    {
-        try tokens.appendSlice(allocator, &.{ start_header, tokenizer.tokenToId("system").?, end_header_start_message });
-        try tokens.appendSlice(allocator, try encoder.encode("You are ChatGPT, a large language model trained by OpenAI.\n"));
-        try tokens.append(allocator, end_message);
-    }
+    var tokens: std.ArrayList(u32) = .initBuffer(out);
 
-    {
-        try tokens.appendSlice(allocator, &.{ start_header, tokenizer.tokenToId("user").?, end_header_start_message });
-        try tokens.appendSlice(allocator, try encoder.encode(prompt));
-        try tokens.append(allocator, end_message);
-    }
+    const system_prompt = try encoder.encode("You are ChatGPT, a large language model trained by OpenAI.\n");
+    if (system_prompt.len + 4 > tokens.unusedCapacitySlice().len) return error.PromptTooLong;
+    tokens.appendSliceAssumeCapacity(&.{ start_header, tokenizer.tokenToId("system").?, end_header_start_message });
+    tokens.appendSliceAssumeCapacity(system_prompt);
+    tokens.appendAssumeCapacity(end_message);
 
-    try tokens.appendSlice(allocator, &.{
+    const user_prompt = try encoder.encode(prompt);
+    if (user_prompt.len + 9 > tokens.unusedCapacitySlice().len) return error.PromptTooLong;
+    tokens.appendSliceAssumeCapacity(&.{ start_header, tokenizer.tokenToId("user").?, end_header_start_message });
+    tokens.appendSliceAssumeCapacity(user_prompt);
+    tokens.appendSliceAssumeCapacity(&.{
+        end_message,
         start_header,
         tokenizer.tokenToId("assistant").?,
         tokenizer.tokenToId("<|channel|>") orelse return error.NoSuchToken,
@@ -67,9 +69,7 @@ pub fn tokenizePrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tok
         end_header_start_message,
     });
 
-    var decoder = try tokenizer.decoder();
-    defer decoder.deinit();
-    return tokens.toOwnedSlice(allocator);
+    return tokens.items;
 }
 
 pub fn generateText(
@@ -93,26 +93,24 @@ pub fn generateText(
     var rng = try zml.Tensor.Rng.init(platform, seed);
     var generated_token_buffer = [_]u32{undefined};
 
-    var kv_cache = prefill: {
+    var current_token, var kv_cache = prefill: {
         // prepare device buffers for the prefill tokens and their positions
         const prefill_buffer = try allocator.alloc(u32, options.max_prompt_len);
         @memcpy(prefill_buffer[0..prompt_tok.len], prompt_tok);
 
         var prefill_tokens = try zml.Buffer.fromSlice(platform, .{options.max_prompt_len}, prefill_buffer);
         defer prefill_tokens.deinit();
-        var prefill_token_pos = try zml.Buffer.scalar(platform, 0, .u32);
+        var prefill_token_pos = try zml.Buffer.scalar(platform, prompt_tok.len, .u32);
         defer prefill_token_pos.deinit();
 
-        const prefilled_tokens, const kv_cache, rng = mod_prefill.call(.{ prefill_tokens, prefill_token_pos, kv_cache_, rng });
-        _ = try prefilled_tokens.toHost(std.mem.sliceAsBytes(prefill_buffer));
-        generated_token_buffer[0] = prefill_buffer[prompt_tok.len - 1];
-        break :prefill kv_cache;
+        const first_token, const kv_cache, rng = mod_prefill.call(.{ prefill_tokens, .{ .prefill = prefill_token_pos }, kv_cache_, rng });
+
+        // extract the first generated token
+        _ = try first_token.toHost(std.mem.sliceAsBytes(&generated_token_buffer));
+        log.warn("first_token: {d}", .{generated_token_buffer[0]});
+        break :prefill .{ first_token, kv_cache };
     };
     defer zml.aio.unloadBuffers(&kv_cache);
-
-    // Prepare for token-by-token generation,
-    // start with the token generated based on the full prompt.
-    var current_token = try zml.Buffer.fromSlice(platform, .{1}, &generated_token_buffer);
     defer current_token.deinit();
 
     const output_tokens_len = options.max_seq_len - prompt_tok.len - 1;
@@ -146,7 +144,7 @@ pub fn generateText(
         defer token_pos.deinit();
 
         // call to generate the next token
-        current_token, kv_cache, rng = mod_generate.call(.{ current_token, token_pos, kv_cache, rng });
+        current_token, kv_cache, rng = mod_generate.call(.{ current_token, .{ .gen = token_pos }, kv_cache, rng });
 
         // extract the generated token from the buffer
         _ = try current_token.toHost(std.mem.sliceAsBytes(&generated_token_buffer));
@@ -232,8 +230,8 @@ pub fn asyncMain() !void {
     };
 
     const options: GptOss.Options = .{
-        .max_seq_len = cli.args.@"seq-len" orelse 1024,
-        .max_prompt_len = cli.args.@"prompt-len" orelse 64,
+        .max_seq_len = cli.args.@"seq-len" orelse 8192,
+        .max_prompt_len = cli.args.@"prompt-len" orelse 256,
         .tokens_per_expert_ratio = cli.args.@"expert-budget" orelse 4.0,
         .sampling_strategy = .{
             .topk = cli.args.topk orelse 10,
@@ -254,7 +252,7 @@ pub fn asyncMain() !void {
 
     const tokens_shape_prefill = zml.Shape.init(.{ .s = options.max_prompt_len }, .u32);
     const tokens_shape = zml.Shape.init(.{ .s = 1 }, .u32);
-    const token_idx_shape = zml.Shape.init(.{}, .u32);
+
     const dtype = model.model.embed_tokens.weight.dtype();
 
     const kv_shape = zml.Shape.init(.{
@@ -269,13 +267,25 @@ pub fn asyncMain() !void {
 
     var start = try std.time.Timer.start();
     var fut_mod_prefill = try async.async(zml.compileModel, .{
-        allocator,                                                             GptOss.forward, model,
-        .{ tokens_shape_prefill, token_idx_shape, kv_cache_shape, rng_shape }, platform,
+        allocator, GptOss.forward, model,
+        .{
+            tokens_shape_prefill,
+            zml.ShapeOf(GptOss.Mode){ .prefill = .scalar(.u32) },
+            kv_cache_shape,
+            rng_shape,
+        },
+        platform,
     });
 
     var fut_mod = try async.async(zml.compileModel, .{
-        allocator,                                                     GptOss.forward, model,
-        .{ tokens_shape, token_idx_shape, kv_cache_shape, rng_shape }, platform,
+        allocator, GptOss.forward, model,
+        .{
+            tokens_shape,
+            zml.ShapeOf(GptOss.Mode){ .gen = .scalar(.u32) },
+            kv_cache_shape,
+            rng_shape,
+        },
+        platform,
     });
 
     log.info("\tLoading GptOss weights from {s}...", .{model_weights_path});
@@ -307,10 +317,15 @@ pub fn asyncMain() !void {
     const prompt = cli.args.prompt orelse "What are some fun facts about animals?";
     log.info("✅\tPrompt: {s}", .{prompt});
 
-    const use_chat_template = cli.args.nochat orelse false;
-    const prompt_tok: []const u32 = try tokenizePrompt(allocator, tokenizer, prompt, use_chat_template);
-    defer allocator.free(prompt_tok);
-    log.info("\t Tokenized prompt: {any}", .{prompt_tok});
+    const no_chat = cli.args.nochat orelse false;
+    const prompt_tok_buf = try allocator.alloc(u32, options.max_prompt_len);
+    defer allocator.free(prompt_tok_buf);
+
+    const prompt_tok = tokenizePrompt(tokenizer, prompt, no_chat, prompt_tok_buf) catch |err| switch (err) {
+        error.PromptTooLong => std.debug.panic("Prompt too long, expected at most {d} tokens. Consider increasing --max-prompt-len", .{prompt_tok_buf.len}),
+        else => |e| return e,
+    };
+    log.info("\t Tokenized prompt: {any} ({d} tokens)", .{ prompt_tok, prompt_tok.len });
 
     const seed = cli.args.seed orelse @as(u128, @bitCast(std.time.nanoTimestamp()));
 
