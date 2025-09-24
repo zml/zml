@@ -26,6 +26,18 @@ zig_binary(
     ],
 )
 
+zig_binary(
+    name = "bench",
+    main = "bench.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":tokenizer",
+        "//stdx",
+        "//zml/tools",
+    ],
+    copts = ["-freference-trace=20"],
+)
+
 zig_test(
     name = "test",
     main = "homemade.zig",

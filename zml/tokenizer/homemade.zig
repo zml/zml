@@ -105,7 +105,7 @@ pub const Tokenizer = struct {
     /// Adds a new token (without copying it)
     pub fn addOwnedToken(self: *Tokenizer, score: f32, token: []const u8) void {
         const i = self.next_token_id;
-        std.debug.assert(i < self.vocab_size);
+        stdx.debug.assert(i < self.vocab_size, "Out of order insertion of token {s} at {d} (expected {d})", .{ token, i, self.vocab_size });
         self.next_token_id += 1;
 
         self.scores[i] = score;
@@ -117,7 +117,7 @@ pub const Tokenizer = struct {
     }
 
     pub fn addOwnedTokenByIndex(self: *Tokenizer, i: u32, score: f32, token: []const u8) void {
-        std.debug.assert(i < self.vocab_size);
+        stdx.debug.assert(i < self.vocab_size, "Out of order insertion of token {s} at {d} (expected {d})", .{ token, i, self.vocab_size });
         self.next_token_id += 1;
         self.scores[i] = score;
         self.tokens[i] = token;
@@ -158,14 +158,37 @@ pub const Tokenizer = struct {
         const MergeState = union(enum) { ready: u32, nope, hard_space, idk };
         const mergeable = try allocator.alloc(MergeState, tok_buff.len);
 
+        // Lookup space-only tokens
+        var space_tokens: [8]u32 = undefined;
+        const longest_space: u8 = longest: {
+            const spaces: [8]u8 = @splat(' ');
+            for (1..8) |l| {
+                if (self.lookup(spaces[0..l])) |t| {
+                    space_tokens[l] = t;
+                } else break :longest @intCast(l);
+            }
+            break :longest 8;
+        };
+
         var num_tokens: usize = 0;
         var it: CharTokenIterator = .{ .input = input };
         while (try it.nextCodepointToken(self)) |token| : (num_tokens += 1) {
-            tok_buff[num_tokens] = token;
-            mergeable[num_tokens] = if (token == self.special_tokens.hard_space)
-                .hard_space
-            else
-                .idk;
+            if (token == self.special_tokens.hard_space and it.input.len > 0 and it.input[0] == ' ') {
+                // Detect repeated spaces.
+                // Will merge spaces but leave the trailing one alone, to be merged with next word.
+                var merged_space_token = token;
+                for (2..@min(longest_space, input.len)) |l| {
+                    if (it.input[1] == ' ') {
+                        it.input = it.input[1..];
+                        merged_space_token = space_tokens[l];
+                    }
+                }
+                tok_buff[num_tokens] = merged_space_token;
+                mergeable[num_tokens] = .hard_space;
+            } else {
+                tok_buff[num_tokens] = token;
+                mergeable[num_tokens] = .idk;
+            }
         }
 
         var stable_prefix: usize = 0;
@@ -199,7 +222,7 @@ pub const Tokenizer = struct {
             var input_off: usize = stable_off;
 
             // Find best tokens to merge in all available tokens
-            for (stable_prefix..num_tokens - 1) |i| {
+            seq: for (stable_prefix..num_tokens - 1) |i| {
                 if (tok_buff[i] == self.special_tokens.unk) {
                     input_off += 1;
                     continue;
@@ -208,22 +231,20 @@ pub const Tokenizer = struct {
                 defer input_off += cur_tok.len;
 
                 // Lookup merge for current token, if not already done.
-                switch (mergeable[i]) {
-                    .nope => continue,
-                    .ready => {},
+                state: switch (mergeable[i]) {
+                    .nope => continue :seq,
                     .hard_space => {
                         // Since tokens are not allowed to merge through hard sep,
                         // we don't need to merge the sentence-wide best token.
                         // We can just merge the best token since beginning.
-                        if (best_idx != null) break;
+                        if (best_idx != null) break :seq;
                         // OTOH if there was no merge possible since beginning,
                         // we can skip the beginning in future iterations.
                         stable_prefix = i + 1;
                         stable_off = input_off + cur_tok.len;
-                        continue;
+                        continue :seq;
                     },
                     .idk => {
-
                         // Special tokens can't be concatenated.
                         if (builtin.mode == .Debug and tok_buff[i] != self.special_tokens.unk) {
                             // Detects memory corruption of tokens.
@@ -238,23 +259,20 @@ pub const Tokenizer = struct {
                         // if `next_tok` is `.unk`, length is 1; otherwise, it's the length of the token.
                         const next_tok_len = if (tok_buff[i + 1] == self.special_tokens.unk) 1 else next_tok.len;
                         const concat_tokens = input[input_off..][0 .. cur_tok.len + next_tok_len];
-                        // Save the result
-                        mergeable[i] = if (self.lookup(concat_tokens)) |tok|
-                            .{ .ready = tok }
-                        else
-                            .nope;
+                        if (self.lookup(concat_tokens)) |tok| {
+                            // Save the result
+                            mergeable[i] = .{ .ready = tok };
+                            continue :state .{ .ready = tok };
+                        } else mergeable[i] = .nope;
+                        continue :seq;
                     },
-                }
-
-                switch (mergeable[i]) {
-                    .idk, .hard_space => unreachable,
-                    .nope => continue,
                     .ready => |tok| {
                         if (self.scores[tok] > best_score) {
                             best_score = self.scores[tok];
                             best_token = tok;
                             best_idx = i;
                         }
+                        continue :seq;
                     },
                 }
             }
@@ -262,6 +280,10 @@ pub const Tokenizer = struct {
             if (best_idx) |bidx| {
                 // Apply the merge.
                 tok_buff[bidx] = best_token;
+                // TODO this copyForwards is really bad making the BPE a n2 algorithm.
+                // Consider:
+                // * splitting the input into word-aligned chunks so that we work on small buffers
+                // * leave tombstones
                 std.mem.copyForwards(u32, tok_buff[bidx + 1 ..], tok_buff[bidx + 2 .. num_tokens]);
                 std.mem.copyForwards(MergeState, mergeable[bidx + 1 ..], mergeable[bidx + 2 .. num_tokens]);
                 num_tokens -= 1;
@@ -425,7 +447,7 @@ pub const Encoder = struct {
     pub fn encode(self: *Encoder, input: []const u8) ![]const u32 {
         self.reset();
         const res = try self.inner.encode(self.arena.allocator(), input, .{
-            .add_bos = true,
+            .add_bos = false,
             .add_eos = false,
             .pad_to = 0,
             // Print tokenization intermediary steps.
@@ -1067,6 +1089,7 @@ pub fn fromHfJson(allocator: std.mem.Allocator, tokenizer_path: []const u8) !Tok
     const arena = arena_state.allocator();
     const file_content = try file.readToEndAlloc(arena, 32 * 1024 * 1024);
 
+    log.debug("read file, {} bytes", .{file_content.len});
     const info = try std.json.parseFromSliceLeaky(std.json.Value, arena, file_content, .{
         .duplicate_field_behavior = .use_last,
     });
@@ -1081,6 +1104,7 @@ pub fn fromHfJson(allocator: std.mem.Allocator, tokenizer_path: []const u8) !Tok
     const vocab = objectGet(model, .object, "vocab") orelse return error.InvalidFormat;
     const added_tokens = if (objectGet(main_object, .array, "added_tokens")) |added| added.items else &.{};
     const vocab_size: u32 = @intCast(vocab.count() + added_tokens.len);
+    log.debug("found {} tokens", .{vocab_size});
 
     const normalizer = if (objectGet(main_object, .object, "normalizer")) |normalizer_config|
         try Normalizer.fromHfJson(normalizer_config)
@@ -1094,12 +1118,8 @@ pub fn fromHfJson(allocator: std.mem.Allocator, tokenizer_path: []const u8) !Tok
     // Buffer containing all concatenated tokens.
     // Reserve a big chunk, to avoid grow event, but release over-allocated memory.
     var all_tokens: std.Io.Writer.Allocating = try .initCapacity(tokenizer.arena_state.allocator(), file_content.len);
+    log.debug("original alloc {*}", .{all_tokens.writer.buffer.ptr});
     const original_alloc = all_tokens.writer.buffer.ptr;
-    // A re-alloc event here means we have invalidated all slices inside the tokenizer.
-    // If this is too annoying we could switch to a custom type instead of slices.
-    defer {
-        std.debug.assert(all_tokens.writer.buffer.ptr == original_alloc);
-    }
 
     // gpt2 based tokenizer got a special way of encoding unicode.
     // we don't know in advance if this will be used by this tokenizer or not.
@@ -1152,7 +1172,12 @@ pub fn fromHfJson(allocator: std.mem.Allocator, tokenizer_path: []const u8) !Tok
         const token = all_tokens.written()[n..];
         tokenizer.addOwnedTokenByIndex(id, 0, token);
     }
+
     // We won't add more tokens here, let release.
+    // But before check that we didn't reallocated,
+    // otherwise we have invalidated all slices inside the tokenizer.
+    // If this is too annoying we could switch to a custom type instead of slices.
+    std.debug.assert(all_tokens.writer.buffer.ptr == original_alloc);
     _ = try all_tokens.toOwnedSlice();
 
     var unk = tokenizer.lookup("<unk>");
@@ -1162,10 +1187,16 @@ pub fn fromHfJson(allocator: std.mem.Allocator, tokenizer_path: []const u8) !Tok
 
     tokenizer.special_tokens = .{
         // TODO allow users to specify special tokens or read them from a tokenizer_config.json file
-        .bos = tokenizer.lookup("<s>") orelse tokenizer.lookup("<|begin_of_text|>") orelse @panic("bos token not found !"),
-        .eos = tokenizer.lookup("</s>") orelse tokenizer.lookup("<|end_of_text|>") orelse @panic("eos token not found !"),
+        .bos = tokenizer.lookup("<s>") orelse tokenizer.lookup("<|begin_of_text|>") orelse std.math.maxInt(u32),
+        .eos = tokenizer.lookup("</s>") orelse tokenizer.lookup("<|end_of_text|>") orelse std.math.maxInt(u32),
         .unk = unk orelse std.math.maxInt(u32),
+        .hard_space = tokenizer.lookup(" ") orelse std.math.maxInt(u32),
     };
+
+    if (tokenizer.lookup("  ") != null) {
+        // The tokenizer contains multi space tokens, so we should not merge them in normalization.
+        tokenizer.normalizer.?.flags.remove_extra_whitespaces = false;
+    }
 
     const byte_fallback = objectGet(model, .bool, "byte_fallback") orelse false;
     if (!byte_fallback and unk == null) {
