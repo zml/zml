@@ -789,7 +789,6 @@ pub fn parse(arena: std.mem.Allocator, reader: *std.Io.Reader) ![]const Op {
             .binint => .{ .int = try reader.takeInt(i32, .little) },
             .binint1 => .{ .int = try reader.takeByte() },
             .binint2 => .{ .int = try reader.takeInt(u16, .little) },
-            // TODO: long should handle the trailing 'L' -> add a test.
             .long => .{ .long = try readLine(reader, &alloc_writer) },
             .long1 => .{ .binlong = try _readSlice(reader, arena, 1) },
             .long4 => .{ .binlong = try _readSlice(reader, arena, 4) },
@@ -902,7 +901,7 @@ test "parse protocol 4" {
     const ops = try parse(arena.allocator(), &reader.interface);
 
     // this can be obtained by running: `python -m pickletools simple_test_4.pickle`
-    var expected = [_]Op{
+    const expected: []const Op = &.{
         .{ .proto = 4 },
         .{ .frame = 119 },
         .empty_dict,
@@ -943,7 +942,7 @@ test "parse protocol 4" {
         .setitems,
         .stop,
     };
-    try std.testing.expectEqualDeep(&expected, ops);
+    try std.testing.expectEqualDeep(expected, ops);
 }
 
 test "parse protocol 0" {
