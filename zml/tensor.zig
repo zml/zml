@@ -53,10 +53,7 @@ pub const Tensor = struct {
     }
 
     pub fn format(self: Tensor, writer: *std.Io.Writer) !void {
-        // TODO(0.15.0) handle format
-        // const bare_fmt = fmt.len == 1 and fmt[0] == '_';
-        const bare_fmt = false;
-        try writer.print(if (bare_fmt) "{f}" else "Tensor({f})", .{self._shape});
+        try writer.print("Tensor({f})", .{self._shape});
     }
 
     /// Returns the shape of a Tensor.
@@ -4052,11 +4049,10 @@ test "Tensor.maxPool2d" {
     );
 }
 
+/// Return a clone of a type with Tensors replaced by Buffer.
+/// Non-Tensor metadata is stripped out of the resulting struct.
+/// Recursively descends into the type.
 pub fn Bufferized(comptime T: type) type {
-    // TODO: we should strip out the non-buffer fields.
-    // Currently it's confusing cause the Bufferized struct contains field that are never read.
-    // Also it will simplify the layout of the Bufferized struct.
-    // accelerating the calls to execute.
     return meta.MapRestrict(Tensor, Buffer).map(T);
 }
 
