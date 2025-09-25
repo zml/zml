@@ -202,11 +202,6 @@ pub const HostBuffer = struct {
         return self._strides[0..self._shape.rank()];
     }
 
-    // TODO: rename .data into ._data and make it a [*]u8
-    // pub fn data(self: HostBuffer) []const u8 {
-    //     return self.data;
-    // }
-
     pub inline fn rank(self: HostBuffer) u4 {
         return self._shape.rank();
     }

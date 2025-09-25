@@ -12,9 +12,6 @@ const py = @import("py.zig");
 
 const log = std.log.scoped(.@"zml/aio");
 
-// TODO(cryptodeal): use zml.aio.PrefixBuilder instead
-const StringBuilder = std.ArrayList(u8);
-
 test {
     std.testing.refAllDecls(@This());
     std.testing.refAllDecls(File);
@@ -111,11 +108,11 @@ pub const File = struct {
         var prefix_buf: [1024]u8 = undefined;
         const allocator = store.arena.allocator();
         for (values) |item| {
-            try self.parseValue(allocator, store, StringBuilder.initBuffer(&prefix_buf), item);
+            try self.parseValue(allocator, store, .initBuffer(&prefix_buf), item);
         }
     }
 
-    pub fn parseValue(self: File, allocator: std.mem.Allocator, store: *zml.aio.BufferStore, prefix: StringBuilder, v: py.Any) !void {
+    pub fn parseValue(self: File, allocator: std.mem.Allocator, store: *zml.aio.BufferStore, prefix: std.ArrayList(u8), v: py.Any) !void {
         // log.warn("Parsing {}", .{v});
         switch (v) {
             .app, .object, .global => |object| {
@@ -303,7 +300,7 @@ pub const File = struct {
         }
     }
 
-    fn parseTorchGlobal(self: File, allocator: std.mem.Allocator, store: *zml.aio.BufferStore, prefix: StringBuilder, v: py.Any) !bool {
+    fn parseTorchGlobal(self: File, allocator: std.mem.Allocator, store: *zml.aio.BufferStore, prefix: std.ArrayList(u8), v: py.Any) !bool {
         return switch (v) {
             .global => |object| {
                 if (try self.parseTensor(allocator, object)) |host_buffer| {

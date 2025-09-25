@@ -442,8 +442,7 @@ pub const Float4E2M1 = packed struct(u4) {
     pub const values = [_]f32{ 0.0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6 };
 
     pub fn toF32(x: Float4E2M1) f32 {
-        // the baseline toF32 doesn't work correctly:
-        // 0b0001 and 0b1001 shoud map to ±0.5, but are mapped to ±epsilon
+        // faster implementation
         return values[@as(u4, @bitCast(x))];
     }
 
@@ -457,9 +456,6 @@ pub const Float4E2M1 = packed struct(u4) {
     }
 
     test fromF32 {
-        // the baseline fromF32 doesn't work correctly:
-        // ±0.5 should map to 0b0001/0b1001 but are map to ±0.0 instead.
-        // TODO: it probably affects other types.
         var from_f32_res: [16]Float4E2M1 = undefined;
         for (&from_f32_res, 0..) |*r, i| {
             r.* = .fromF32(Float4E2M1.values[i]);
