@@ -940,8 +940,8 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
     k = k.mul(head_scaling.convert(k.dtype()));
 
     var attn_weights = q.dot(k, .{.hd});
+    // log.debug("attn_weights : {f}, attn_mask : {?f}", .{ attn_weights, attn_mask });
     if (attn_mask) |mask| attn_weights = attn_weights.add(mask.broad(attn_weights.shape()));
-    log.warn("attn_weights : {f}, attn_mask : {?f}", .{ attn_weights, attn_mask });
     attn_weights = attn_weights.convert(.f32);
     attn_weights = if (opts.softmax_bias) |softmax_bias| attn: {
         // The split is needed because we also split q ourselves.
