@@ -311,7 +311,7 @@ pub const Tensor = struct {
 
     /// Returns the given tensor as one contiguous buffer of bytes.
     pub fn bytes(self: Tensor) Tensor {
-        return self.bitCast(.u8).flattenAll().withTags(.{.bytes});
+        return self.bitCast(.u8).flatten().withTags(.{.bytes});
     }
 
     /// Returns a Tensor containing the element-wise number of leading 0 bits in the input Tensor.
@@ -700,7 +700,7 @@ pub const Tensor = struct {
                 pub fn gumbelStats(rand: Rng, target_dist: Tensor) struct { Rng, Stats } {
                     const s = Shape.init(.{ .n = 1024, .d = 4 }, .f32);
                     const rng, const data = rand.gumbel(s);
-                    const flat = data.flattenAll();
+                    const flat = data.flatten();
                     const mean_ = flat.mean(0);
                     const variance = flat.sub(mean_.broad(flat.shape())).pow(Tensor.scalar(2, .f32)).mean(0);
 
@@ -719,7 +719,7 @@ pub const Tensor = struct {
                         break :blk powers;
                     };
                     const values = Tensor.constantTensor(HostBuffer.fromArray(&powers)).withTags(.{.d});
-                    const counts = values.gatherValues(.d, samples, .{}).sum(.n).bitCast(.u16);
+                    const counts = values.gather(.{ .d = samples }, .{}).sum(.n).bitCast(.u16);
                     const actual_dist = counts.reshape(target_dist.shape()).convert(target_dist.dtype()).divByConst(s.dim(.n));
                     return .{ rng, .{ .mean = mean_, .variance = variance, .actual_dist = actual_dist } };
                 }
@@ -993,17 +993,22 @@ pub const Tensor = struct {
 
     /// Returns a Tensor containing the element-wise addition of the input Tensor with a constant.
     pub fn addConstant(self: Tensor, b: anytype) Tensor {
-        return self.add(Tensor.scalar(b, self.dtype()));
+        return self.add(.scalar(b, self.dtype()));
     }
 
     /// Returns a Tensor containing the element-wise division of the input Tensor by a constant.
     pub fn divByConst(self: Tensor, b: anytype) Tensor {
-        return self.div(Tensor.scalar(b, self.dtype()));
+        return self.div(.scalar(b, self.dtype()));
+    }
+
+    /// Returns a Tensor containing the element-wise power of the input Tensor by a constant.
+    pub fn powByConst(self: Tensor, b: anytype) Tensor {
+        return self.pow(.scalar(b, self.dtype()));
     }
 
     /// Returns a Tensor containing the element-wise multiplication of the input Tensor by a constant.
     pub inline fn scale(self: Tensor, val: anytype) Tensor {
-        return self.mul(Tensor.scalar(val, self.dtype()));
+        return self.mul(.scalar(val, self.dtype()));
     }
 
     pub const LogicalOp = enum { OR, XOR, AND };
@@ -1325,7 +1330,7 @@ pub const Tensor = struct {
         const row_mask = max_val.cmp(.GT, Tensor.scalar(-std.math.inf(f64), self.dtype()));
 
         const exp_diff_max = self.sub(self.max(a).broad(self._shape)).exp();
-        const res = exp_diff_max.div(exp_diff_max.sum(a).broad(self._shape));
+        const res = exp_diff_max.div(exp_diff_max.sum(a));
 
         // If a row is full -inf return full 0 instead of full nan,
         // this fix attention when mask hides a full row.
@@ -1519,27 +1524,7 @@ pub const Tensor = struct {
         return self.transpose(perm.constSlice());
     }
 
-    /// Flattens the given axis and the next one, into one new axis.
-    pub fn flatten(self: Tensor, axis_: anytype) Tensor {
-        // TODO: move to torch.zig, this is equivalent to merge
-        const old_shape = self._shape;
-        const a = self.axis(axis_);
-        // stdx.debug.assert(a + 1 < self.rank(), "Can't flatten {} on the last axis {}.", .{ self, axis });
-        const new_shape = old_shape.remove(a + 1).set(a, old_shape.dim(a) * old_shape.dim(a + 1));
-
-        const loc = self.getContext().location(@src(), "flatten({f},{})", .{ self, axis_ });
-        const reshaped_val = dialect.stablehlo.reshape(
-            self.getContext().mlirCtx(),
-            self.value(),
-            mlirx.tensorType(self.getContext().mlirCtx(), new_shape),
-            loc,
-        );
-        // log.debug("flatten({d}, {d}) -> {d}", .{ self.dims(), axis_, new_shape[0 .. self.rank() - 1] });
-        return _result(new_shape, reshaped_val.result(0));
-    }
-
-    pub inline fn flattenAll(self: Tensor) Tensor {
-        // TODO: rename to just flatten, once flatten is moved to torch
+    pub inline fn flatten(self: Tensor) Tensor {
         return self.reshape(.{self.count()});
     }
 
@@ -1727,14 +1712,12 @@ pub const Tensor = struct {
         }
 
         const a = self.axis(axis_);
-        const broadshape = self._shape.insert(a + 1, .{n_rep});
-        const repeat_dims = Shape.range(self.rank() + 1, self.dtype()).remove(a + 1);
+        const res_shape = self._shape.setDim(a, self.dim(a) * n_rep);
 
-        var res = self.broadcast(broadshape, repeat_dims.dims()).flatten(a);
-        // Restor the tag that has been lost by flatten.
-        res._shape._tags.set(a, self._shape.tag(a));
+        const broadshape = self._shape.insert(a, .{n_rep});
+        const repeat_dims = Shape.range(self.rank() + 1, self.dtype()).remove(a);
 
-        return res;
+        return self.broadcast(broadshape, repeat_dims.dims()).reshape(res_shape);
     }
 
     /// Repeats a Tensor several times along the given axes.
@@ -1751,15 +1734,47 @@ pub const Tensor = struct {
         return res;
     }
 
+    test repeat1d {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        const Local = struct {
+            fn repeat1d(x: Tensor, axis_: u3, n_reps: u32) Tensor {
+                return x.repeat1d(axis_, n_reps);
+            }
+        };
+
+        {
+            const inputs: [3]u8 = .{ 1, 2, 3 };
+            const expectations: [6]u8 = .{ 1, 2, 3, 1, 2, 3 };
+
+            const input = try zml.Buffer.fromArray(platform, inputs);
+            const output = try zml.testing.compileAndCall(platform, Local.repeat1d, .{ input, 0, 2 });
+
+            try std.testing.expectEqual(expectations, output.getValue(@TypeOf(expectations)));
+        }
+        {
+            const inputs: [2][3]u8 = .{ .{ 1, 2, 3 }, .{ 4, 5, 6 } };
+            const expectations: [2][6]u8 = .{ .{ 1, 2, 3, 1, 2, 3 }, .{ 4, 5, 6, 4, 5, 6 } };
+
+            const input = try zml.Buffer.fromArray(platform, inputs);
+            const output = try zml.testing.compileAndCall(platform, Local.repeat1d, .{ input, 1, 2 });
+
+            try std.testing.expectEqual(expectations, output.getValue(@TypeOf(expectations)));
+        }
+    }
+
     /// Repeats in line each value along the given axis.
     ///
-    /// * stutter1d([0, 1, 2, 3], 0, 2) = [0, 0, 1, 1, 2, 2, 3, 3]
-    pub fn stutter1d(self: Tensor, axis_: i64, n_rep: u63) Tensor {
+    /// * stutter1d([0, 1, 2, 3], -1, 2) = [0, 0, 1, 1, 2, 2, 3, 3]
+    /// This is equivalent to repeat(ax+1) unless ax is the last axis.
+    pub fn stutter1d(self: Tensor, axis_: i8, n_rep: u63) Tensor {
         const a = self.axis(axis_);
         const broadshape = self._shape.insert(a + 1, .{n_rep});
-        const stutter_dims = Shape.range(self.rank() + 1, self.dtype()).remove(a + 1);
+        const res_shape = self._shape.setDim(a, self.dim(a) * n_rep);
 
-        return self.broadcast(broadshape, stutter_dims.dims()).flatten(a);
+        const stutter_dims = Shape.range(self.rank() + 1, self.dtype()).remove(a + 1);
+        return self.broadcast(broadshape, stutter_dims.dims()).reshape(res_shape);
     }
 
     /// Repeats in line each value along the given axes.
@@ -1773,6 +1788,45 @@ pub const Tensor = struct {
             res = res.stutter1d(@intCast(a), n_rep);
         }
         return res;
+    }
+
+    test stutter1d {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        const Local = struct {
+            fn stutter1d(x: Tensor, axis_: u3, n_reps: u32) Tensor {
+                return x.stutter1d(axis_, n_reps);
+            }
+        };
+
+        {
+            const inputs: [3]u8 = .{ 1, 2, 3 };
+            const expectations: [6]u8 = .{ 1, 1, 2, 2, 3, 3 };
+
+            const input = try zml.Buffer.fromArray(platform, inputs);
+            const output = try zml.testing.compileAndCall(platform, Local.stutter1d, .{ input, 0, 2 });
+
+            try std.testing.expectEqual(expectations, output.getValue(@TypeOf(expectations)));
+        }
+        {
+            const inputs: [2][3]u8 = .{ .{ 1, 2, 3 }, .{ 4, 5, 6 } };
+            const expectations: [2][6]u8 = .{ .{ 1, 1, 2, 2, 3, 3 }, .{ 4, 4, 5, 5, 6, 6 } };
+
+            const input = try zml.Buffer.fromArray(platform, inputs);
+            const output = try zml.testing.compileAndCall(platform, Local.stutter1d, .{ input, 1, 2 });
+
+            try std.testing.expectEqual(expectations, output.getValue(@TypeOf(expectations)));
+        }
+        {
+            const inputs: [2][3]u8 = .{ .{ 1, 2, 3 }, .{ 4, 5, 6 } };
+            const expectations: [2][6]u8 = .{ .{ 1, 2, 3, 1, 2, 3 }, .{ 4, 5, 6, 4, 5, 6 } };
+
+            const input = try zml.Buffer.fromArray(platform, inputs);
+            const output = try zml.testing.compileAndCall(platform, Local.stutter1d, .{ input, 0, 2 });
+
+            try std.testing.expectEqual(expectations, output.getValue(@TypeOf(expectations)));
+        }
     }
 
     /// Returns a Tensor containing the element-wise negation of the input Tensor.
@@ -2160,88 +2214,98 @@ pub const Tensor = struct {
 
     pub const GatherOpts = struct { indices_are_sorted: bool = false };
 
-    /// For each coordinate in `indices`,
-    /// `gatherValues` extracts a single value of the given tensor.
+    /// `gather` extracts slices from the given tensor at the specified offsets.
+    /// example: `values.gather(.{ .a = idx }, .{})`
     ///
-    /// * axes_ is a single axis, or a tuple of axis: .b, or .{ .b, .c }
-    /// * indices is an integer tensor
+    /// * indices is a named list of integer tensors: eg `.{ .a = idx }`.
+    /// Each names specify a gathering axis, it must refer to an axis of self,
+    /// and the corresponding idx Tensor must contains valid indices into axis .a.
+    /// All indices must have the same shape or broadcast to the same shape.
+    ///
     /// * result is a tensor whose shape is similar to the input shape
     /// where the gathered axes have been replaced by axes from 'indices'.
     ///
     /// Some example input for the base case where we work on one axis:
-    /// - gatherValues(f:[a]->float, .a, ind:[n]->int)[n] == f[ind[n]]
-    /// - gatherValues(f:[a, b], .a, ind:[n])[n, b] == f[ind[n], b]
-    /// - gatherValues(f: [a,b,c], .{.b}, ind: [n,m])[a, n, m, c] == f[a, ind[n, m], c]
+    /// - gather(f:[a], .{ .a = idx:[n]})[n] == f[idx[n]]
+    /// - gather(f:[a, b], .a, idx:[n])[n, b] == f[idx[n], b]
+    /// - gather(f:[a,b,c], .{.b = idx:[n,m]})[a, n, m, c] == f[a, idx[n, m], c]
     ///
     /// If an axis in common between `self` and `indices`,
     /// it is treated as a "batching" axis, meaning that semantically
-    /// the operator is doing a gatherValues one time per dimension of this axis:
-    /// - gatherValues(f: [a,b,c], .{.b}, ind: [a,n])[a, n] == f[a, ind[a, n]]
+    /// the operator is doing a gather one time per dimension of this axis:
+    /// - gather(f: [a,b,c], .{.b=idx: [a,n]})[a, n] == f[a, idx[a, n]]
     ///
-    /// It is an error to have an axis present in `self`, `axes_` and `indices`.
+    /// It's possible to pass several indices:
+    /// - gather(f: [a,b,c], .{.b=idx_b[n], .c=idx_c[n]})[a, n] == f[a, idx_b[n], idx_c[n]]
+    /// - gather(f: [a,b,c,d], .{.b=idx_b[a,n], .c=idx_c[a, n]})[a, n, d] == f[a, idx_b[a, n], idx_c[a, n], d]
     ///
-    /// If several axes are passed, then the last axis of indices is treated as coordinates:
-    /// - gatherValues(f: [a,b,c], .{.b, .c}, ind: [n,2])[a, n] == f[a, ind[n][0], ind[n][1]]
-    /// - gatherValues(f: [a,b,c,d], .{.b, .c}, ind: [a, n,2])[a, n, d] == f[a, ind[a, n][0], ind[a, n][1], d]
+    /// If `self` isn't tagged, you can use `gather_` to specify gathered axis by their position but batching won't be available.
     ///
-    /// It is possible to use gatherValues without tags, but batching won't be available.
-    pub fn gatherValues(self: Tensor, coord_axes: anytype, indices: Tensor, opts: GatherOpts) Tensor {
-        // scoped_log.debug("gatherValues({}, {any}, {})", .{ self, coord_axes, indices });
-        const single_coord, const coord_axes_ = _parseGatherCoord(self, coord_axes);
+    /// For performance it's better to have batching and gathering axes of `self` be the first one,
+    /// so that gather can
+    pub fn gather(self: Tensor, _indices: anytype, opts: GatherOpts) Tensor {
+        const idx_per_axis, const idx_tags = Shape.parseStruct(Tensor, _indices);
+        var idx_axes: Shape.AxesArray = .{};
+        for (idx_tags.slice()) |t| {
+            idx_axes.appendAssumeCapacity(self.axis(t));
+        }
 
-        stdx.debug.assert(coord_axes_.len > 0, "gatherValues expects 1 or more axes to operate one, received none. Example: `x.gatherValues(.a, indices, .{{}})`", .{});
-        for (coord_axes_.constSlice(), 0..) |a, i| {
+        // TODO: sort indices following self.shape instead of asking the user to do it.
+        return self.gather_(idx_axes.slice(), idx_per_axis.slice(), opts);
+    }
+
+    pub fn gather_(self: Tensor, idx_axes: []const u3, idx_per_axis: []const Tensor, opts: GatherOpts) Tensor {
+        stdx.debug.assert(idx_axes.len > 0, "gather expects 1 or more axes to operate one, received none. Example: `x.gather(.a, indices, .{{}})`", .{});
+        for (idx_axes, 0..) |a, i| {
             if (i > 0) {
-                stdx.debug.assert(a == coord_axes_.get(i - 1) + 1, "gatherValues expects 'coord_axes' to be sequential. But {any} aren't sequential in {f}", .{ coord_axes, self });
+                stdx.debug.assert(a == idx_axes[i - 1] + 1, "gather expects 'idx_axes' to be sequential. But {any} aren't sequential in {f}", .{ idx_axes, self });
             }
         }
+        var indices_shape = idx_per_axis[0].shape();
+        for (idx_per_axis[1..]) |idx| {
+            if (idx.rank() > indices_shape.rank()) {
+                indices_shape = idx.shape();
+            }
+        }
+        for (idx_per_axis) |idx| {
+            stdx.debug.assert(idx.shape().canBroadcastTo(indices_shape), "gather indices can't be broadcasted together {any}", .{idx_per_axis});
+        }
+
+        var idx_batch_axes: Shape.DimsArray = .{};
 
         const AxisKind = enum { batching, offset, collapsed, indices };
-        var self_kind: stdx.BoundedArray(AxisKind, MAX_RANK) = .{};
-        var indices_batch_axes: Shape.DimsArray = .{};
+        var self_kind: stdx.BoundedArray(AxisKind, MAX_RANK) = .{ .buffer = @splat(.offset), .len = self.rank() };
+
         for (self._shape.tags(), 0..self.rank()) |t, self_ax| {
-            const maybe_coord_ax = std.mem.indexOfScalar(u3, coord_axes_.constSlice(), @intCast(self_ax));
-            if (indices._shape.hasTag(t)) |id_ax| {
+            const is_gather_axis = std.mem.containsAtLeastScalar(u3, idx_axes, 1, @intCast(self_ax));
+            if (indices_shape.hasTag(t)) |id_ax| {
                 // tag is both in self and indices -> it's a batching dim
                 // Note: tags are required for batching.
-                self_kind.appendAssumeCapacity(.batching);
-                indices_batch_axes.appendAssumeCapacity(id_ax);
-                stdx.debug.assert(maybe_coord_ax == null, "gatherValues expects axes to appear at most twice. Axis {s} has been found both in 'self={f}', in 'coord_axes_={any}' and in 'indices={f}'", .{ self._shape._tags.get(self_ax), self, coord_axes, indices });
-            } else if (maybe_coord_ax) |_| {
-                // for gatherValues we collapsed all gathered axes
-                // (contrary to gatherSlices where we collapse none)
-                self_kind.appendAssumeCapacity(.collapsed);
+                self_kind.buffer[self_ax] = .batching;
+                idx_batch_axes.appendAssumeCapacity(id_ax);
+                stdx.debug.assert(!is_gather_axis, "gather expects axes to appear at most twice. Axis {s} has been found both in 'self={f}', in 'idx_axes={any}' and in 'indices={f}'", .{ t, self, idx_axes, indices_shape });
+            } else if (is_gather_axis) {
+                // we collapsed all gathered axes
+                self_kind.buffer[self_ax] = .collapsed;
+                // idx_kind.buffer[id_ax] = .indices;
             } else {
-                self_kind.appendAssumeCapacity(.offset);
+                self_kind.buffer[self_ax] = .offset;
             }
         }
-
-        // When we receive several coord_axes we need an extra dimension to store
-        // one index per axis, which makes the coordinates of one value.
-        // Otherwi se stablehlo uses the "indices.rank()" default value.
-        const index_coord_axis = if (single_coord)
-            indices.rank()
-        else blk: {
-            const ax = indices._shape.hasTag(.coord) orelse indices._shape.axis(-1);
-            stdx.debug.assert(indices.dim(ax) == coord_axes_.len, "gatherValues with axes={any}, expects indices to be of shape [..., {}], got: {f}", .{ coord_axes, coord_axes_.len, indices });
-            break :blk ax;
-        };
 
         // compute res shape
         var res_shape = Shape.init(.{}, self.dtype());
         var res_kind: stdx.BoundedArray(AxisKind, MAX_RANK) = .{};
-        for (self_kind.constSlice(), 0..) |kind, ax_usize| {
+        for (self_kind.slice(), 0..) |kind, ax_usize| {
             const ax: u3 = @intCast(ax_usize);
-            if (ax == coord_axes_.get(0)) {
+            if (ax == idx_axes[0]) {
                 // The first val_ax is special cause this is the place where we insert indices axes.
-                for (indices._shape.tags(), 0..indices.rank()) |t, id_ax| {
-                    if (id_ax == index_coord_axis) continue;
-                    if (std.mem.indexOfScalar(i64, indices_batch_axes.constSlice(), @intCast(id_ax))) |_| {
-                        // batching dim are already in res
-                        continue;
-                    }
+                for (0.., indices_shape.tags(), indices_shape.dims()) |id_axis_order, id_axis, id_inserted_dim| {
+                    const is_batching_axis = std.mem.containsAtLeastScalar(i64, idx_batch_axes.constSlice(), 1, @intCast(id_axis_order));
+                    // Batching axis is already in self.
+                    if (is_batching_axis) continue;
 
-                    res_shape = res_shape.appendDim(indices.dim(id_ax), t);
+                    res_shape = res_shape.appendDim(id_inserted_dim, id_axis);
                     res_kind.appendAssumeCapacity(.indices);
                 }
             }
@@ -2257,12 +2321,12 @@ pub const Tensor = struct {
         // This is not a gather, but a dynamicSlice.
         // Sometimes the backend recognize this pattern, but not always.
         // So let us handle that.
-        if (indices.count() == 1) {
-            return self.dynamicSlice1d(coord_axes_.get(0), .{ .start = indices.flattenAll().squeeze(0), .len = 1 }).reshape(res_shape);
+        if (indices_shape.count() == 1 and idx_axes.len == 1) {
+            return self.dynamicSlice1d(idx_axes[0], .{ .start = idx_per_axis[0].asScalar(), .len = 1 }).reshape(res_shape);
         }
 
         var slice_dims: Shape.DimsArray = .{};
-        for (self_kind.constSlice(), self.dims()) |k, d| {
+        for (self_kind.slice(), self.dims()) |k, d| {
             slice_dims.appendAssumeCapacity(switch (k) {
                 .batching, .collapsed => 1,
                 .offset => d,
@@ -2270,7 +2334,9 @@ pub const Tensor = struct {
             });
         }
 
-        // scoped_log.debug("gatherValues --> {} {any}", .{ res_shape, res_kind.constSlice() });
+        // TODO: try changing .last by other axis and see the perf impact.
+        const indices = Tensor.stack(idx_per_axis, .last, .coord);
+        // scoped_log.debug("gather --> {} {any}", .{ res_shape, res_kind.constSlice() });
         const loc = self.getContext().mlirCtx().location(@src());
         const gather_op = dialect.stablehlo.gather(
             self.getContext().mlirCtx(),
@@ -2282,21 +2348,29 @@ pub const Tensor = struct {
                 .offset_dims = _collectAxes(AxisKind, res_kind, .offset).constSlice(),
                 .collapsed_slice_dims = _collectAxes(AxisKind, self_kind, .collapsed).constSlice(),
                 .operand_batching_dims = _collectAxes(AxisKind, self_kind, .batching).constSlice(),
-                .start_indices_batching_dims = indices_batch_axes.constSlice(),
+                .start_indices_batching_dims = idx_batch_axes.constSlice(),
                 .start_index_map = _collectAxes(AxisKind, self_kind, .collapsed).constSlice(),
-                .index_vector_dim = index_coord_axis,
+                .index_vector_dim = indices.axis(.coord),
                 .indices_are_sorted = opts.indices_are_sorted,
             },
         );
 
         const mlir_shape = fromMlirValue(gather_op.result(0)).shape();
-        stdx.debug.assert(mlir_shape.eql(res_shape), "gatherValues expects that batching indices appear in the same order in 'self' and 'indices', got: self={f}, indices={f}. You should transpose one or the other.", .{ self, indices });
+        stdx.debug.assert(mlir_shape.eql(res_shape), "gather expects that batching indices appear in the same order in 'self' and 'indices', got: self={f}, indices={f}. You should transpose one or the other.", .{ self, indices });
         return _result(res_shape, gather_op.result(0));
     }
 
-    test gatherValues {
+    test gather {
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
+
+        const Local = struct {
+            pub fn _idx(idx_shape: anytype) Tensor {
+                return Tensor.constant(idx_shape, .{ .i32 = 0 });
+            }
+        };
+
+        const idx = Local._idx;
 
         {
             // Only test shapes
@@ -2306,32 +2380,38 @@ pub const Tensor = struct {
             defer comp.deactivate();
 
             inline for (.{
-                .{ .{ .a = 10 }, .a, .{}, .{} },
-                .{ .{ .a = 10 }, .a, .{ .n = 8 }, .{ .n = 8 } },
-                .{ .{ .a = 10, .b = 20 }, .a, .{}, .{ .b = 20 } },
-                .{ .{ .a = 10, .b = 20 }, .a, .{ .n = 8 }, .{ .n = 8, .b = 20 } },
-                .{ .{ .a = 10, .b = 20 }, 0, .{ .n = 8 }, .{ .n = 8, .b = 20 } },
+                .{ .{ .a = 10 }, .{ .a = idx(.{}) }, .{} },
+                .{ .{ .a = 10 }, .{ .a = idx(.{ .n = 8 }) }, .{ .n = 8 } },
+                .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{}) }, .{ .b = 20 } },
+                .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{ .n = 8 }) }, .{ .n = 8, .b = 20 } },
+                // .{ .{ .a = 10, .b = 20 }, 0, idx(.{ .n = 8 }), .{ .n = 8, .b = 20 } },
                 // Favor val shape, instead of indices shape.
-                .{ .{ .a = 10, .b = 20 }, .b, .{ .n = 8 }, .{ .a = 10, .n = 8 } },
-                .{ .{ .a = 10, .b = 20, .c = 30 }, .b, .{ .n = 8 }, .{ .a = 10, .n = 8, .c = 30 } },
+                .{ .{ .a = 10, .b = 20 }, .{ .b = idx(.{ .n = 8 }) }, .{ .a = 10, .n = 8 } },
+                .{ .{ .a = 10, .b = 20, .c = 30 }, .{ .b = idx(.{ .n = 8 }) }, .{ .a = 10, .n = 8, .c = 30 } },
                 // batching axes are implicits.
-                .{ .{ .a = 10, .b = 20 }, .b, .{ .a = 10 }, .{ .a = 10 } },
-                .{ .{ .a = 10, .b = 20 }, .a, .{ .b = 20 }, .{ .b = 20 } },
-                .{ .{ .a = 10, .b = 20 }, .b, .{ .a = 10, .n = 8 }, .{ .a = 10, .n = 8 } },
+                .{ .{ .a = 10, .b = 20 }, .{ .b = idx(.{ .a = 10 }) }, .{ .a = 10 } },
+                .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{ .b = 20 }) }, .{ .b = 20 } },
+                .{ .{ .a = 10, .b = 20 }, .{ .b = idx(.{ .a = 10, .n = 8 }) }, .{ .a = 10, .n = 8 } },
                 // stablehlo.gather is biased toward indices shape (like gatherSlice).
                 // This make it awkward to use when you have both batching dimension and new indices dimensions.
                 // For now we reject those, and let user explicitly transpose self or indices if needed.
-                // .{ .{ .a = 10, .b = 20 }, .b, .{ .n = 8, .a = 10 }, .{ .a = 10, .n = 8 } },
+                // .{ .{ .a = 10, .b = 20 }, .{.b = idx(.{ .n = 8, .a = 10 })}, .{ .a = 10, .n = 8 } },
                 // Also handle tuples
-                .{ .{ .a = 10, .b = 20 }, .{ .a, .b }, .{ .n = 8, ._ = 2 }, .{ .n = 8 } },
-                .{ .{ 10, 20 }, .{ -2, -1 }, .{ 8, 2 }, .{8} },
-                // and 1-tuple
-                .{ .{ .a = 10, .b = 20 }, .{.b}, .{ .n = 8, ._ = 1 }, .{ .a = 10, .n = 8 } },
+                .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{ .n = 8 }), .b = idx(.{ .n = 8 }) }, .{ .n = 8 } },
             }) |testcase| {
-                const x_shape, const tag, const idx_shape, const res_shape = testcase;
+                const x_shape, const indices, const res_shape = testcase;
                 const x = Tensor.constant(x_shape, .{ .f16 = 0 });
-                const idx = Tensor.constant(idx_shape, .{ .i32 = 0 });
-                const y = gatherValues(x, tag, idx, .{});
+                const y = gather(x, indices, .{});
+                try zml.testing.expectEqualShapes(Shape.init(res_shape, .f16), y.shape());
+                try std.testing.expect(y.value().owner().verify());
+            }
+
+            inline for (.{
+                .{ .{ 10, 20 }, &[_]u3{ 0, 1 }, &[_]Tensor{ idx(.{8}), idx(.{8}) }, .{8} },
+            }) |testcase| {
+                const x_shape, const idx_axes, const idx_per_axis, const res_shape = testcase;
+                const x = Tensor.constant(x_shape, .{ .f16 = 0 });
+                const y = gather_(x, idx_axes, idx_per_axis, .{});
                 try zml.testing.expectEqualShapes(Shape.init(res_shape, .f16), y.shape());
                 try std.testing.expect(y.value().owner().verify());
             }
@@ -2966,13 +3046,24 @@ pub const Tensor = struct {
     }
 
     /// Returns a Tensor representing the result of Top-K over the given axis.
-    pub fn topK(self: Tensor, k: u32, axis_: anytype, opts: struct { descending: bool = true }) SortRes {
-        const a = self.axis(axis_);
-        const result = self.sort(a, .{ .descending = opts.descending });
-        return .{
-            .values = result.values.slice1d(a, .{ .end = k }),
-            .indices = result.indices.slice1d(a, .{ .end = k }),
+    pub fn topK(self: Tensor, named_axis_: anytype, k: u32, opts: struct { descending: bool = true }) SortRes {
+        const err_msg = "topK named axis should be an integer or a named axis, eg `x.topK(.{{ .best_token = .token }}, 16)` or `x.topK(-1, 16)`";
+        const has_name: ?[:0]const u8, const a = switch (@typeInfo(@TypeOf(named_axis_))) {
+            .int, .comptime_int => .{ null, self.axis(@as(i64, @intCast(named_axis_))) },
+            .@"struct" => |info| blk: {
+                stdx.debug.assertComptime(info.fields.len == 1, err_msg, .{});
+                break :blk .{ info.fields[0].name, self.axis(@field(named_axis_, info.fields[0].name)) };
+            },
+            else => stdx.debug.compileError(err_msg, .{}),
         };
+        var result = self.sort(a, .{ .descending = opts.descending });
+        result.values = result.values.slice1d(a, .{ .end = k });
+        result.indices = result.indices.slice1d(a, .{ .end = k });
+        if (has_name) |new_name| {
+            result.values._shape._tags.set(a, new_name.ptr);
+            result.indices._shape._tags.set(a, new_name.ptr);
+        }
+        return result;
     }
 
     pub const MaxPoolRes = ArgMaxRes;
@@ -3827,11 +3918,20 @@ pub const Tensor = struct {
                     return binaryOpHelper(self, other.broad(self._shape));
                 }
 
-                stdx.debug.assert(self._shape.eql(other._shape), "{s} expects tensor shapes to match, got {f} and {f}", .{ op_name, self._shape, other._shape });
+                var other_ = other;
+                var same_shape = self._shape.eql(other._shape);
+                if (!same_shape and std.mem.eql(Shape.Tag, self._shape.tags(), other._shape.tags()) and other._shape.canBroadcastTo(self._shape)) {
+                    // Only a restrictive version of broadcasting is allowed here, where all the tags matches already.
+                    // Typical use case: `x.div(x.sum(.a))`
+                    same_shape = true;
+                    other_ = other.broad(self._shape);
+                }
+
+                stdx.debug.assert(same_shape, "{s} expects tensor shapes to match, got {f} and {f}", .{ op_name, self._shape, other._shape });
 
                 const ctx = self.getContext();
-                const location = ctx.location(src, "{s}({f}, {f})", .{ op_name, self, other });
-                const ret = @call(.auto, op_fn, .{ ctx.mlirCtx(), self.value(), other.value(), location });
+                const location = ctx.location(src, "{s}({f}, {f})", .{ op_name, self, other_ });
+                const ret = @call(.auto, op_fn, .{ ctx.mlirCtx(), self.value(), other_.value(), location });
                 return _result(self._shape, ret.result(0));
             }
         }.binaryOpHelper;
@@ -3904,21 +4004,14 @@ test "Tensor.maxPool1d" {
 
     const x = try zml.Buffer.fromSlice(platform, .{ 2, 2, 5 }, &data);
     const result = try zml.testing.compileAndCall(platform, MaxPool._fwd, .{x});
-    try zml.testing.expectEqualShapes(Shape.init(.{ 2, 2, 2 }, .f32), result.values.shape());
-    try zml.testing.expectEqualShapes(Shape.init(.{ 2, 2, 2 }, .i32), result.indices.shape());
-    const buffer = result.values.getValue([2][2][2]f32);
+    try zml.testing.expectEqualShapes(.init(.{ 2, 2, 2 }, .f32), result.values.shape());
+    try zml.testing.expectEqualShapes(.init(.{ 2, 2, 2 }, .i32), result.indices.shape());
     try std.testing.expectEqualDeep(
         [2][2][2]f32{
-            [2][2]f32{
-                [2]f32{ 2, 4 },
-                [2]f32{ 7, 9 },
-            },
-            [2][2]f32{
-                [2]f32{ 12, 14 },
-                [2]f32{ 17, 19 },
-            },
+            .{ .{ 2, 4 }, .{ 7, 9 } },
+            .{ .{ 12, 14 }, .{ 17, 19 } },
         },
-        buffer,
+        result.values.getValue([2][2][2]f32),
     );
 }
 
