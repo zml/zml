@@ -3,7 +3,7 @@ const std = @import("std");
 const hftokenizers = @import("hftokenizers");
 const sentencepiece = @import("sentencepiece");
 
-const homemade = @import("homemade.zig");
+pub const homemade = @import("homemade.zig");
 
 test {
     std.testing.refAllDecls(@This());
