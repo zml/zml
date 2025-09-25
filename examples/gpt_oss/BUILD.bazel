@@ -14,26 +14,3 @@ zig_binary(
     ],
     visibility = ["//visibility:public"],
 )
-
-zig_binary(
-     name = "test_activations",
-     srcs = ["GptOss.zig"],
-     main = "test.zig",
-     deps = [
-         "//async",
-         "//stdx",
-         "//zml",
-     ],
-    visibility = ["//visibility:public"],
- )
-
-zig_test(
-     name = "test",
-     main = "GptOss.zig",
-     deps = [
-         "//async",
-         "//stdx",
-         "//zml",
-     ],
-    visibility = ["//visibility:public"],
- )
