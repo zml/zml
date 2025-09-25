@@ -1105,13 +1105,16 @@ pub const Tensor = struct {
     /// Axes with the same tag on both sides, and which aren't contracting,
     /// are considered "batching axes".
     pub fn dot(lhs: Tensor, rhs: Tensor, comptime contracting: anytype) Tensor {
-        var contracting_axes: [contracting.len][2]i8 = undefined;
-        inline for (contracting, 0..) |c, i| {
-            contracting_axes[i] = .{ lhs.axis(c), rhs.axis(c) };
+        var contracting_axes: stdx.BoundedArray([2]i8, MAX_RANK) = .{};
+        if (@TypeOf(contracting) == EnumLiteral) {
+            contracting_axes.appendAssumeCapacity(.{ lhs.axis(contracting), rhs.axis(contracting) });
+        } else {
+            inline for (contracting) |c| {
+                contracting_axes.appendAssumeCapacity(.{ lhs.axis(c), rhs.axis(c) });
+            }
         }
 
-        var batching_axes: [MAX_RANK][2]i8 = undefined;
-        var n_batching: u8 = 0;
+        var batching_axes: stdx.BoundedArray([2]i8, MAX_RANK) = .{};
         for (lhs._shape.tags(), 0..) |l, li| {
             stdx.debug.assert(l != Shape.TagUnknown, "Can't use `dot(..., {any})` on {any}, it need to be explictily tagged.", .{ contracting, lhs });
 
@@ -1119,20 +1122,19 @@ pub const Tensor = struct {
                 stdx.debug.assert(r != Shape.TagUnknown, "Can't use `dot(..., {any})` on {any}, it need to be explictily tagged.", .{ contracting, rhs });
 
                 if (l == r) {
-                    for (contracting_axes) |ct| {
+                    for (contracting_axes.slice()) |ct| {
                         if (l == lhs._shape.tag(ct[0])) {
                             break;
                         }
                     } else {
                         // tag is both in lhs and rhs but not in contracting -> it's a batching dim.
-                        batching_axes[n_batching] = .{ @intCast(li), @intCast(ri) };
-                        n_batching += 1;
+                        batching_axes.appendAssumeCapacity(.{ @intCast(li), @intCast(ri) });
                     }
                 }
             }
         }
 
-        return dotGeneral(lhs, rhs, contracting_axes[0..], batching_axes[0..n_batching]);
+        return dotGeneral(lhs, rhs, contracting_axes.slice(), batching_axes.slice());
     }
 
     test dot {
@@ -1318,23 +1320,39 @@ pub const Tensor = struct {
     /// Returns a Tensor containing the Sigmoid Linear Unit (SiLU) activation function applied to each element of the input Tensor.
     ///
     /// silu(x) = x σ(x)
-    /// https://paperswithcode.com/method/silu
     pub fn silu(x: Tensor) Tensor {
-        return x.mul(x.sigmoid());
+        return x.mul(.sigmoid(x));
     }
 
-    /// Returns a Tensor containing the softmax function applied to each element of the input Tensor.
+    /// Computes softmax along the given axis.
+    /// y[i] = exp(x[i]) / ( Σ_k exp(x[k]) + bias )
     pub fn softmax(self: Tensor, axis_: anytype) Tensor {
         const a = self.axis(axis_);
         const max_val = self.max(a);
-        const row_mask = max_val.cmp(.GT, Tensor.scalar(-std.math.inf(f64), self.dtype()));
+        const row_mask = max_val.cmp(.GT, .scalar(-std.math.inf(f64), self.dtype()));
 
-        const exp_diff_max = self.sub(self.max(a).broad(self._shape)).exp();
-        const res = exp_diff_max.div(exp_diff_max.sum(a));
+        const exp_diff_max = self.sub(max_val).convert(.f32).exp();
+        const res = exp_diff_max.div(exp_diff_max.sum(a)).convert(self.dtype());
 
         // If a row is full -inf return full 0 instead of full nan,
         // this fix attention when mask hides a full row.
-        return row_mask.broad(self.shape()).select(res, Tensor.scalar(0, self.dtype()));
+        return row_mask.broad(self.shape()).select(res, .scalar(0, self.dtype()));
+    }
+
+    /// Computes softmax, but adds a bias to the sum of exponentiel.
+    /// y[i] = exp(x[i]) / ( Σ_k exp(x[k]) + bias )
+    pub fn softmaxBiased(self: Tensor, axis_: anytype, bias: ?Tensor) Tensor {
+        const a = self.axis(axis_);
+
+        if (bias == null) return self.softmax(axis_);
+        const b = bias.?.convert(self.dtype()).broad(self.shape().setDim(a, 1));
+        const max_val: Tensor = maximum(self.max(a), b);
+        const exp_diff_max = self.sub(max_val).exp();
+        const bias_diff_max = b.sub(max_val).exp();
+        const res = exp_diff_max.div(exp_diff_max.sum(a).add(bias_diff_max));
+
+        // The bias means that denominator won't be 0, we don't need to handle that case.
+        return res;
     }
 
     /// Returns a Tensor containing the log of the sum of exponential over the given axis.
@@ -1534,21 +1552,31 @@ pub const Tensor = struct {
         step: i32 = 1,
         singleton: bool = false,
 
+        const full = .{ .start = 0, .end = to_the_end, .step = 1 };
+
         pub fn single(offset: i64) Slice {
             return .{ .start = offset, .end = offset + 1, .singleton = true };
+        }
+
+        pub fn absolute(s: Slice, d: i64) Slice {
+            const start = if (s.start < 0) d + s.start else s.start;
+            const end = if (s.end == to_the_end) d else if (s.end < 0) d + s.end else s.end;
+            const res: Slice = .{ .start = start, .end = end, .step = s.step, .singleton = s.singleton };
+            stdx.debug.assert(start < end, "Slice {f} is invalid for axis of dimension {d} (resolved to {f}", .{ s, d, res });
+            return res;
         }
 
         const to_the_end = std.math.maxInt(i64);
 
         pub fn format(self: Slice, writer: *std.Io.Writer) !void {
             if (self.singleton) {
-                try writer.print("[{}]", .{self.start});
+                try writer.print("[{d}]", .{self.start});
             } else if (self.end == to_the_end and self.step == 1) {
-                try writer.print("[{}..]", .{self.start});
+                try writer.print("[{d}..]", .{self.start});
             } else if (self.step == 1) {
-                try writer.print("[{}..{}]", .{ self.start, self.end });
+                try writer.print("[{d}..{d}]", .{ self.start, self.end });
             } else {
-                try writer.print("[{}..{}:{}]", .{ self.start, self.end, self.step });
+                try writer.print("[{d}..{d}:{d}]", .{ self.start, self.end, self.step });
             }
         }
     };
@@ -1570,11 +1598,7 @@ pub const Tensor = struct {
         for (slices, 0..) |s, a| {
             stdx.debug.assert(s.step > 0, "slice expects 'step' to be positive, got {} at index {}", .{ s.step, a });
 
-            const args: Slice = .{
-                .start = self.wrapIndex(a, s.start),
-                .end = if (s.end == Slice.to_the_end) self.dim(a) else self.wrapIndex(a, s.end),
-                .step = s.step,
-            };
+            const args: Slice = s.absolute(self.dim(a));
             start_indices[a] = args.start;
             limit_indices[a] = args.end;
             strides[a] = args.step;
@@ -2014,6 +2038,10 @@ pub const Tensor = struct {
             constant_op = dialect.stablehlo.broadcast_in_dim(ctx, constant_op.result(0), &.{}, mlirx.tensorType(ctx, sh), loc);
         }
         return _result(sh, constant_op.result(0)).convert(val.dtype());
+    }
+
+    pub fn zeroes(sh: Shape) Tensor {
+        return .constant(sh, sh.dtype().zero());
     }
 
     /// Embeds a buffer with concrete values into an Mlir program.
@@ -3047,6 +3075,7 @@ pub const Tensor = struct {
 
     /// Returns a Tensor representing the result of Top-K over the given axis.
     pub fn topK(self: Tensor, named_axis_: anytype, k: u32, opts: struct { descending: bool = true }) SortRes {
+        stdx.debug.assert(k > 0, "topK expects a k > 0, got 0", .{});
         const err_msg = "topK named axis should be an integer or a named axis, eg `x.topK(.{{ .best_token = .token }}, 16)` or `x.topK(-1, 16)`";
         const has_name: ?[:0]const u8, const a = switch (@typeInfo(@TypeOf(named_axis_))) {
             .int, .comptime_int => .{ null, self.axis(@as(i64, @intCast(named_axis_))) },

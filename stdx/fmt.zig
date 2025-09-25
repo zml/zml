@@ -10,20 +10,20 @@ fn FmtSlice(T: type) type {
         slice: []const T,
 
         pub fn format(f: @This(), writer: *std.io.Writer) std.io.Writer.Error!void {
-            return try formatSliceAny(f.slice, .{}, writer);
+            return try formatSliceAny(f.slice, .{}, 1, writer);
         }
 
         pub fn formatNumber(f: @This(), writer: *std.io.Writer, n: std.fmt.Number) std.io.Writer.Error!void {
             return switch (@typeInfo(T)) {
-                .comptime_float, .float => try formatFloatSlice(f.slice, n, writer),
-                .comptime_int, .int => try formatIntSlice(f.slice, n, writer),
-                .bool => try formatBoolSlice(f.slice, n, writer),
+                .comptime_float, .float => try formatFloatSlice(f.slice, n, 1, writer),
+                .comptime_int, .int => try formatIntSlice(f.slice, n, 1, writer),
+                .bool => try formatBoolSlice(f.slice, n, 1, writer),
                 .@"struct" => if (@hasField(T, "re") and @hasField(T, "im")) {
-                    try formatComplexSlice(f.slice, n, writer);
+                    try formatComplexSlice(f.slice, n, 1, writer);
                 } else if (@hasDecl(T, "toF32")) {
-                    try formatFloatSlice(f.slice, n, writer);
+                    try formatFloatSlice(f.slice, n, 1, writer);
                 } else {
-                    try formatSliceAny(f.slice, n, writer);
+                    try formatSliceAny(f.slice, n, 1, writer);
                 },
                 else => @compileError("FmtSlice doesn't support type: " ++ @typeName(T)),
             };
@@ -72,53 +72,55 @@ pub fn formatAny(value: anytype, spec: std.fmt.Number, writer: *std.Io.Writer) !
     return try writer.alignBufferOptions(s, .{ .alignment = spec.alignment, .fill = spec.fill });
 }
 
-pub fn formatSliceCustom(fmt_func: anytype, values: anytype, spec: std.fmt.Number, writer: *std.Io.Writer) !void {
+pub fn formatSliceCustom(fmt_func: anytype, values: anytype, spec: std.fmt.Number, stride: i64, writer: *std.Io.Writer) !void {
     // use the format "width" for the number of columns instead of individual width.
     const num_cols: usize = spec.width orelse 12;
     var my_options = spec;
     my_options.width = null;
-    const n: usize = values.len;
+    // TODO: handle negative strides
+    const strd: usize = @intCast(stride);
+    const n: usize = @divTrunc(values.len, strd);
 
     _ = try writer.write("{");
     if (n <= num_cols) {
-        for (values, 0..) |v, i| {
+        for (0..n) |i| {
             // Force inlining so that the switch and the buffer can be done once.
-            try @call(.always_inline, fmt_func, .{ v, my_options, writer });
+            try @call(.always_inline, fmt_func, .{ values[i * strd], my_options, writer });
             if (i < n - 1) _ = try writer.write(",");
         }
     } else {
         const half = @divFloor(num_cols, 2);
-        for (values[0..half]) |v| {
-            try @call(.always_inline, fmt_func, .{ v, my_options, writer });
+        for (0..half) |i| {
+            try @call(.always_inline, fmt_func, .{ values[i * strd], my_options, writer });
             _ = try writer.write(",");
         }
         _ = try writer.write(" ..., ");
-        for (values[n - half ..], 0..) |v, i| {
-            try @call(.always_inline, fmt_func, .{ v, my_options, writer });
-            if (i < half - 1) _ = try writer.write(",");
+        for (n - half..n) |i| {
+            try @call(.always_inline, fmt_func, .{ values[i * strd], my_options, writer });
+            if (i < n - 1) _ = try writer.write(",");
         }
     }
     _ = try writer.write("}");
 }
 
-pub fn formatSliceAny(values: anytype, spec: std.fmt.Number, writer: *std.Io.Writer) !void {
-    return try formatSliceCustom(formatAny, values, spec, writer);
+pub fn formatSliceAny(values: anytype, spec: std.fmt.Number, stride: i64, writer: *std.Io.Writer) !void {
+    return try formatSliceCustom(formatAny, values, spec, stride, writer);
 }
 
-pub fn formatFloatSlice(values: anytype, spec: std.fmt.Number, writer: *std.Io.Writer) !void {
-    return try formatSliceCustom(formatFloat, values, spec, writer);
+pub fn formatFloatSlice(values: anytype, spec: std.fmt.Number, stride: i64, writer: *std.Io.Writer) !void {
+    return try formatSliceCustom(formatFloat, values, spec, stride, writer);
 }
 
-pub fn formatIntSlice(values: anytype, spec: std.fmt.Number, writer: *std.Io.Writer) !void {
-    return try formatSliceCustom(formatInt, values, spec, writer);
+pub fn formatIntSlice(values: anytype, spec: std.fmt.Number, stride: i64, writer: *std.Io.Writer) !void {
+    return try formatSliceCustom(formatInt, values, spec, stride, writer);
 }
 
-pub fn formatComplexSlice(values: anytype, spec: std.fmt.Number, writer: *std.Io.Writer) !void {
-    return try formatSliceCustom(formatComplex, values, spec, writer);
+pub fn formatComplexSlice(values: anytype, spec: std.fmt.Number, stride: i64, writer: *std.Io.Writer) !void {
+    return try formatSliceCustom(formatComplex, values, spec, stride, writer);
 }
 
-pub fn formatBoolSlice(values: anytype, spec: std.fmt.Number, writer: *std.Io.Writer) !void {
-    return try formatSliceCustom(formatBool, values, spec, writer);
+pub fn formatBoolSlice(values: anytype, spec: std.fmt.Number, stride: i64, writer: *std.Io.Writer) !void {
+    return try formatSliceCustom(formatBool, values, spec, stride, writer);
 }
 
 /// Format a struct using `format` method of subfields when possible.

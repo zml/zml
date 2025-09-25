@@ -21,16 +21,6 @@ import torch
 
 log = logging.getLogger(__name__)
 
-builtin_open = builtins.open
-
-
-def log_and_open(file, *args, **kwargs):
-    print("open:", file, args, kwargs)
-    return builtin_open(file, *args, **kwargs)
-
-
-builtins.open = log_and_open
-
 class ActivationCollector:
     """Wrap a given torch.nn.Module and collect all its intermediary activations.
 
