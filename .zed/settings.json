@@ -10,6 +10,9 @@
                 "source.fixAll": true,
                 "source.organizeImports": true
             }
+        },
+        "YAML": {
+            "tab_size": 2
         }
     },
     "file_scan_exclusions": [
