@@ -123,6 +123,9 @@ bazel run --config=release //examples/llama:Llama-3.2-1B-Instruct \
           -- --prompt="What is the capital of France?"
 ```
 
+## Troubleshooting
+
+If you run into trouble in the setup process, please check out the [Troubleshooting](../misc/troubleshooting.md) guide.
 
 ## Where to go next:
 
