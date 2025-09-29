@@ -39,6 +39,7 @@ http_deb_archive = repository_rule(
         "strip_prefix": attr.string(),
         "build_file": attr.label(allow_single_file = True),
         "build_file_content": attr.string(),
+        "patches": attr.label_list(allow_files = True),
         "workspace_file": attr.label(allow_single_file = True),
         "workspace_file_content": attr.string(),
     },
