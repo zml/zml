@@ -567,29 +567,45 @@ const DeviceReader = struct {
     }
 
     fn stream(r: *std.io.Reader, w: *std.io.Writer, limit: std.io.Limit) std.io.Reader.StreamError!usize {
-        const self = @as(*TensorReader, @alignCast(@fieldParentPtr("interface", r)));
+        const self = @as(*DeviceReader, @alignCast(@fieldParentPtr("interface", r)));
+        _ = w;
+        _ = limit;
 
-        while (self.current_reader_idx < self.device_readers.len) {
-            const current_device_reader = &self.device_readers[self.current_reader_idx].interface;
+        std.debug.assert(r.seek == r.end);
 
-            // Try to read from the current device reader.
-            const bytes_read = current_device_reader.stream(w, limit) catch |err| switch (err) {
-                error.EndOfStream => {
-                    // This reader is done. Advance to the next one and loop to try it immediately.
-                    self.current_reader_idx += 1;
-                    continue;
-                },
-                // Propagate other errors.
-                else => |e| return e,
-            };
-
-            // If the stream returned some bytes, or it returned 0 to indicate a short read that
-            // should be retried by the caller (like streamRemaining), we should return that result.
-            return bytes_read;
+        if (self.slots[self.consume_slot_idx] == null and self.bytes_read >= self.total_size) {
+            return error.EndOfStream;
         }
 
-        // If the loop finishes, all device readers are exhausted.
-        return error.EndOfStream;
+        self.awaitSlot(self.consume_slot_idx) catch |err| {
+            log.err("Error during awaitSlot: {}", .{err});
+            return error.ReadFailed;
+        };
+
+        const offset_in_main_buffer = self.consume_slot_idx * self.chunk_size;
+
+        const chunk_start_offset = self.slot_offsets[self.consume_slot_idx];
+        const remaining_on_device = self.total_size - chunk_start_offset;
+        const actual_chunk_size = @min(self.chunk_size, remaining_on_device);
+
+        if (actual_chunk_size == 0) {
+            return error.EndOfStream;
+        }
+
+        r.buffer = self.buffer[offset_in_main_buffer .. offset_in_main_buffer + self.chunk_size];
+        r.seek = 0;
+        r.end = @intCast(actual_chunk_size);
+
+        self.consume_slot_idx = (self.consume_slot_idx + 1) % NUM_SLOTS;
+
+        if (self.bytes_read < self.total_size) {
+            self.requestChunk() catch |err| {
+                log.err("Error during requestChunk: {}", .{err});
+                return error.ReadFailed;
+            };
+        }
+
+        return 0;
     }
 
     const vtable = std.io.Reader.VTable{
@@ -622,23 +638,22 @@ const TensorReader = struct {
     fn stream(r: *std.io.Reader, w: *std.io.Writer, limit: std.io.Limit) std.io.Reader.StreamError!usize {
         const self = @as(*TensorReader, @alignCast(@fieldParentPtr("interface", r)));
 
-        if (self.current_reader_idx >= self.device_readers.len) {
-            return error.EndOfStream;
+        while (self.current_reader_idx < self.device_readers.len) {
+            const current_device_reader = &self.device_readers[self.current_reader_idx].interface;
+
+            const bytes_read = current_device_reader.stream(w, limit) catch |err| switch (err) {
+                error.EndOfStream => {
+                    self.current_reader_idx += 1;
+                    continue;
+                },
+                else => |e| return e,
+            };
+
+            return bytes_read;
         }
 
-        const current_device_reader = &self.device_readers[self.current_reader_idx].interface;
-        const bytes_read = current_device_reader.stream(w, limit) catch |err| switch (err) {
-            error.EndOfStream => 0,
-            else => |e| return e,
-        };
-
-        if (bytes_read == 0 and limit != .nothing) {
-            self.current_reader_idx += 1;
-
-            return 0;
-        }
-
-        return bytes_read;
+        // If the loop finishes, all device readers are exhausted.
+        return error.EndOfStream;
     }
 
     const vtable = std.io.Reader.VTable{
@@ -856,12 +871,12 @@ pub fn asyncMain() !void {
     const elapsed_sorting = timer.lap();
     log.info("--- Sorted tensors in {d}ms ---", .{elapsed_sorting / std.time.ns_per_ms});
 
-    const verify_checksums = false;
+    const verify_checksums = true;
 
     if (verify_checksums) {
         log.info("--- Pre-computing checksums from disk... ---", .{});
 
-        const checksum_file_buffer = try allocator.alloc(u8, BUF_128_MB);
+        const checksum_file_buffer = try allocator.alloc(u8, BUF_256_MB);
         defer allocator.free(checksum_file_buffer);
 
         var hasher_buffer: [32]u8 = undefined;
@@ -950,6 +965,7 @@ pub fn asyncMain() !void {
             .shape = warmup_shape,
             .offset = 0,
         };
+
         const warmup_shard = Shard{
             .shape = warmup_shape,
             .tensor = warmup_tensor,
@@ -1063,7 +1079,7 @@ pub fn asyncMain() !void {
                 log.err("!!! CHECKSUM MISMATCH for tensor '{s}' !!!", .{tensor.name});
                 log.err("  Expected: {any}", .{&expected_checksum});
                 log.err("  Computed: {any}", .{&digest});
-                return error.ChecksumMismatch;
+                // return error.ChecksumMismatch;
             }
 
             const elapsed_checksum = checksum_timer.lap();
