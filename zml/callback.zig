@@ -120,7 +120,13 @@ pub fn call(
 pub const Config = struct {
     output_operand_aliases: []const i64 = &.{},
     copy_inputs_to_host_pinned: bool = false,
-    // TODO: document precisely what `command_buffer_compatible` is doing and its limitations.
+
+    /// Indicates that the handler is compatible with command buffers (ie Cuda graphs).
+    /// The Cuda backend traces the execution of the callback and records it as a Cuda graph.
+    /// To be compatible with CUDA graphs, the callback need:
+    ///   1. to not use any synchronous operations
+    ///   2. to not allocate any new host/device memory
+    /// See: https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#prohibited-and-unhandled-operations.
     traits: pjrt.ffi.HandlerTraits = .{ .command_buffer_compatible = false },
     // TODO: handle sharded inputs
     has_side_effect: bool = true,
