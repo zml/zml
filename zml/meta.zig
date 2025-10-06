@@ -172,7 +172,6 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
     }
 
     if (@sizeOf(ToStruct) == 0) return;
-
     switch (type_info_to) {
         .@"struct" => |info| inline for (info.fields) |field| {
             if (field.is_comptime or @sizeOf(field.type) == 0) continue;
@@ -193,7 +192,17 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
                 } else {
                     stdx.debug.compileError("Mapping {} -> {} inside {} failed. Missing field {s} in {}", .{ From, To, FromStruct, field.name, ToStruct });
                 },
-                else => @field(to, field.name) = @field(from, field.name),
+                else => {
+                    if (field.type == To) {
+                        if (@FieldType(FromStruct, field.name) == To) {
+                            @field(to, field.name) = @field(from, field.name);
+                        } else {
+                            @field(to, field.name) = cb(ctx, @field(from, field.name));
+                        }
+                    } else {
+                        @field(to, field.name) = @field(from, field.name);
+                    }
+                },
             }
         },
         .@"union" => {
@@ -773,4 +782,74 @@ pub fn Contains(Haystack: type, T: type) bool {
         .vector => |info| Contains(info.child, T),
         else => false,
     };
+}
+
+pub const Handle = enum(u32) { _ };
+
+pub fn describeLayout(
+    T: type,
+    allocator: std.mem.Allocator,
+    model: anytype,
+) std.mem.Allocator.Error!struct {
+    *MapRestrict(T, Handle).map(@TypeOf(model)),
+    []Handle,
+} {
+    const t_count: usize = count(T, &model);
+    // Assume that we have at worse one slice per item.
+    // If this become an issue, we could write a custom `count` function that computes the exact size needed, accounting for slices.
+    const pessimist_size = t_count * (@sizeOf([]Handle) / @sizeOf(Handle) + @sizeOf(Handle));
+    const layout_buffer = try allocator.alloc(Handle, pessimist_size);
+    errdefer allocator.free(layout_buffer);
+
+    var fba: std.heap.FixedBufferAllocator = .init(@ptrCast(layout_buffer));
+    var counter: u32 = 0;
+    const res = try fba.allocator().create(MapRestrict(T, Handle).map(@TypeOf(model)));
+    try mapAlloc(struct {
+        fn cb(counter_: *u32, _: T) Handle {
+            defer counter_.* += 1;
+            return @enumFromInt(counter_.*);
+        }
+    }.cb, fba.allocator(), &counter, model, res);
+
+    std.debug.assert(counter == t_count);
+    const used_handles = @divExact(std.mem.alignForward(usize, fba.end_index, @alignOf(Handle)), @sizeOf(Handle));
+    const owned_handles = if (allocator.resize(layout_buffer, used_handles)) used_handles else pessimist_size;
+    return .{ res, layout_buffer[0..owned_handles] };
+}
+
+test describeLayout {
+    const A = struct { value: f32 = 0.0 };
+    const AA = struct { a: A, aa: ?A };
+    const AModel = struct {
+        top: A,
+        metadata: u32,
+        layers: []const AA,
+        bottom: A,
+    };
+
+    {
+        const model: AModel = .{
+            .top = .{},
+            .metadata = 0xff,
+            .layers = &.{ .{ .a = .{}, .aa = null }, .{ .a = .{}, .aa = .{} }, .{ .a = .{}, .aa = null } },
+            .bottom = .{},
+        };
+        const ALayout = MapRestrict(A, Handle).map(AModel);
+        const layout: *const ALayout, const layout_mem: []Handle = try describeLayout(A, std.testing.allocator, model);
+        defer std.testing.allocator.free(layout_mem);
+
+        try std.testing.expectEqualDeep(&ALayout{
+            .top = @enumFromInt(0),
+            .layers = &.{
+                .{ .a = @enumFromInt(1) },
+                .{ .a = @enumFromInt(2), .aa = @enumFromInt(3) },
+                .{ .a = @enumFromInt(4) },
+            },
+            .bottom = @enumFromInt(5),
+        }, layout);
+        try std.testing.expectEqual(
+            @intFromPtr(layout) + @sizeOf(ALayout),
+            @intFromPtr(layout.layers.ptr),
+        );
+    }
 }
