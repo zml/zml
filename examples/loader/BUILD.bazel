@@ -3,7 +3,7 @@ load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
 zig_binary(
     name = "loader",
     copts = ["-freference-trace=30"],
-    main = "sharding.zig",
+    main = "sharding4.zig",
     deps = [
         "//async",
         "//stdx",

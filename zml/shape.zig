@@ -386,14 +386,8 @@ pub const Shape = struct {
     /// Format the shape.
     /// Default format: "Shape({.a=10, .b=20}, dtype=.f32)"
     /// Bare format {_}: "{.a=10, .b=20}, dtype=.f32"
-    pub fn format(
-        self: Shape,
-        writer: anytype,
-    ) !void {
-        // TODO: impl alternative format
-        // const bare_fmt = fmt.len == 1 and fmt[0] == '_';
-        const bare_fmt = true;
-        _ = try writer.write(if (bare_fmt) "{" else "Shape({");
+    pub fn format(self: Shape, writer: *std.Io.Writer) !void {
+        _ = try writer.writeByte('{');
 
         var need_comma = false;
         for (self.dims(), 0..) |d, i| {
@@ -411,7 +405,7 @@ pub const Shape = struct {
         }
         if (need_comma) try writer.writeByte(',');
         _ = try writer.write(@tagName(self.dtype()));
-        _ = try writer.write(if (bare_fmt) "}" else "})");
+        _ = try writer.writeByte('}');
     }
 
     /// Broadcasts a Tensor to the given shape, extending dimensions if needed.

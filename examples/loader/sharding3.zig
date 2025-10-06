@@ -201,25 +201,28 @@ fn parseSafetensors(
 }
 
 const DeviceWriter = struct {
-    pub const NUM_SLOTS = 10;
-
     platform: Platform,
     shard: Shard,
     transfer_manager: *pjrtx.AsyncHostToDeviceTransferManager,
     pjrt_buffer: *pjrtx.Buffer,
-    chunk_size: usize,
-    slots: [NUM_SLOTS]?*pjrtx.Event,
-    next_slot_idx: usize,
-    can_process_last_event: bool,
 
-    buffer: []u8,
+    dma_buffer: []u8,
+    chunk_size: usize,
+
+    events: [2]?*pjrtx.Event,
+    current_buffer_idx: u1,
+
     bytes_written: u64,
+    can_process_last_event: bool,
 
     interface: std.io.Writer,
 
     pub fn init(platform: Platform, shard: Shard, buffer: []u8) !DeviceWriter {
         const trace = tracer.frameStart("DeviceWriter.init");
         defer tracer.frameEnd(trace, "DeviceWriter.init");
+
+        std.debug.assert(buffer.len % 2 == 0);
+        const chunk_size = buffer.len / 2;
 
         const memories = try shard.device.addressableMemories(platform.pjrt_api);
         var memory = memories[0];
@@ -235,26 +238,22 @@ const DeviceWriter = struct {
 
         const shape_spec = pjrt.ShapeSpec.init(shard.shape.dims(), bufferTypeFromDtype(shard.shape.dtype()));
 
-        const trace_pjrt_transfer_manager = tracer.frameStart("DeviceWriter.init.createBuffersForAsyncHostToDevice");
         const transfer_manager = try platform.pjrt_client.createBuffersForAsyncHostToDevice(platform.pjrt_api, .{
             .shape_specs = &.{shape_spec},
             .memory = memory,
         });
-        tracer.frameEnd(trace_pjrt_transfer_manager, "DeviceWriter.init.createBuffersForAsyncHostToDevice");
-
-        const chunk_size = buffer.len / NUM_SLOTS;
 
         return .{
             .platform = platform,
             .shard = shard,
             .transfer_manager = transfer_manager,
             .pjrt_buffer = try transfer_manager.retrieveBuffer(platform.pjrt_api, 0),
+            .dma_buffer = buffer,
             .chunk_size = chunk_size,
-            .slots = [_]?*pjrtx.Event{null} ** NUM_SLOTS,
-            .next_slot_idx = 0,
-            .can_process_last_event = true,
-            .buffer = buffer,
+            .events = .{ null, null },
+            .current_buffer_idx = 0,
             .bytes_written = 0,
+            .can_process_last_event = true,
             .interface = .{ .vtable = &vtable, .buffer = buffer[0..chunk_size], .end = 0 },
         };
     }
@@ -263,110 +262,104 @@ const DeviceWriter = struct {
         self.pjrt_buffer.deinit(self.platform.pjrt_api);
     }
 
-    fn awaitSlot(self: *DeviceWriter, slot_index: usize) !void {
-        const trace = tracer.frameStart("DeviceWriter.awaitSlot");
-        defer tracer.frameEnd(trace, "DeviceWriter.awaitSlot");
-
-        if (self.slots[slot_index]) |event| {
+    fn awaitEvent(self: *DeviceWriter, idx: u1) !void {
+        if (self.events[idx]) |event| {
+            const trace_await = tracer.frameStart("DeviceWriter.awaitEvent");
+            defer tracer.frameEnd(trace_await, "DeviceWriter.awaitEvent");
             try event.awaitBlocking(self.platform.pjrt_api);
-            self.slots[slot_index] = null;
+            self.events[idx] = null;
         }
     }
 
-    fn awaitAllSlots(self: *DeviceWriter) !void {
-        const trace = tracer.frameStart("DeviceWriter.awaitAllSlots");
-        defer tracer.frameEnd(trace, "DeviceWriter.awaitAllSlots");
+    fn rebase(w: *std.io.Writer, preserve: usize, capacity: usize) std.io.Writer.Error!void {
+        const self = @as(*DeviceWriter, @alignCast(@fieldParentPtr("interface", w)));
 
-        for (0..NUM_SLOTS) |i| {
-            try self.awaitSlot(i);
+        std.debug.assert(preserve == 0);
+
+        const trace = tracer.frameStart("DeviceWriter.rebase (flip&wait)");
+        defer tracer.frameEnd(trace, "DeviceWriter.rebase (flip&wait)");
+
+        const old_idx = self.current_buffer_idx;
+        const new_idx = 1 - old_idx;
+
+        if (w.end > 0) {
+            const event = self.transfer_manager.transferData(self.platform.pjrt_api, 0, w.buffered(), @intCast(self.bytes_written), false) catch |err| {
+                log.err("Error during transferData in rebase: {}", .{err});
+                return error.WriteFailed;
+            };
+            self.events[old_idx] = event;
+            self.bytes_written += w.buffered().len;
         }
-    }
 
-    fn transfer(self: *DeviceWriter, data: []const u8) !void {
-        const trace = tracer.frameStart("DeviceWriter.transfer");
-        defer tracer.frameEnd(trace, "DeviceWriter.transfer");
-
-        try self.awaitSlot(self.next_slot_idx);
-
-        const trace_pjrt_transfer = tracer.frameStart("DeviceWriter.transfer.transferData");
-        const event = self.transfer_manager.transferData(self.platform.pjrt_api, 0, data, @intCast(self.bytes_written), false) catch |err| {
-            log.err("Error during transferData: {}", .{err});
+        self.awaitEvent(new_idx) catch |err| {
+            log.err("Error awaiting event in rebase: {}", .{err});
             return error.WriteFailed;
         };
-        tracer.frameEnd(trace_pjrt_transfer, "DeviceWriter.transfer.transferData");
 
-        self.slots[self.next_slot_idx] = event;
-        self.bytes_written += data.len;
+        self.current_buffer_idx = new_idx;
+        const new_offset = new_idx * self.chunk_size;
+        w.buffer = self.dma_buffer[new_offset .. new_offset + self.chunk_size];
+        w.end = 0;
 
-        self.next_slot_idx = (self.next_slot_idx + 1) % NUM_SLOTS;
+        std.debug.assert(w.buffer.len - w.end >= capacity);
     }
 
     fn drain(w: *std.io.Writer, data: []const []const u8, splat: usize) std.io.Writer.Error!usize {
-        const trace = tracer.frameStart("DeviceWriter.drain");
-        defer tracer.frameEnd(trace, "DeviceWriter.drain");
+        std.debug.assert(splat == 1);
 
-        const self = @as(*DeviceWriter, @alignCast(@fieldParentPtr("interface", w)));
-        var total_written: usize = 0;
+        try w.rebase(0, 1);
 
-        if (w.end > 0) {
-            self.transfer(w.buffered()) catch |err| {
-                log.err("Error during internal buffer transfer: {}", .{err});
-                return error.WriteFailed;
-            };
+        var total_written_from_data: usize = 0;
 
-            const next_chunk_start = self.next_slot_idx * self.chunk_size;
-            w.buffer = self.buffer[next_chunk_start .. next_chunk_start + self.chunk_size];
-            w.end = 0;
-        }
+        for (data) |slice| {
+            const space_left = w.unusedCapacityLen();
+            if (space_left == 0) break;
 
-        for (data) |d| {
-            self.transfer(d) catch |err| {
-                log.err("Error during external data transfer: {}", .{err});
-                return error.WriteFailed;
-            };
+            const to_copy = @min(slice.len, space_left);
+            std.mem.copyForwards(u8, w.unusedCapacitySlice()[0..to_copy], slice[0..to_copy]);
+            w.end += to_copy;
+            total_written_from_data += to_copy;
 
-            total_written += d.len;
-        }
-
-        if (splat > 1 and data.len > 0) {
-            const last_slice = data[data.len - 1];
-
-            for (0..splat - 1) |_| {
-                self.transfer(last_slice) catch |err| {
-                    log.err("Error during splat data transfer: {}", .{err});
-                    return error.WriteFailed;
-                };
-
-                total_written += last_slice.len;
+            if (to_copy < slice.len) {
+                return total_written_from_data;
             }
         }
-
-        return total_written;
+        return total_written_from_data;
     }
 
     fn flush(w: *std.io.Writer) std.io.Writer.Error!void {
         const trace = tracer.frameStart("DeviceWriter.flush");
         defer tracer.frameEnd(trace, "DeviceWriter.flush");
-
-        _ = try drain(w, &.{}, 1);
-
         const self = @as(*DeviceWriter, @alignCast(@fieldParentPtr("interface", w)));
 
-        self.awaitAllSlots() catch |err| {
-            log.err("Error during awaitAllSlots: {}", .{err});
+        if (w.end > 0) {
+            const current_chunk = w.buffered();
+            const event = self.transfer_manager.transferData(self.platform.pjrt_api, 0, current_chunk, @intCast(self.bytes_written), false) catch |err| {
+                log.err("Error during flush transfer: {}", .{err});
+                return error.WriteFailed;
+            };
+            self.events[self.current_buffer_idx] = event;
+            self.bytes_written += current_chunk.len;
+            w.end = 0;
+        }
+
+        self.awaitEvent(0) catch |err| {
+            log.err("Error awaiting event 0: {}", .{err});
+            return error.WriteFailed;
+        };
+        self.awaitEvent(1) catch |err| {
+            log.err("Error awaiting event 1: {}", .{err});
             return error.WriteFailed;
         };
 
         const is_final_transfer = self.bytes_written == self.shard.byteSize();
-
         if (is_final_transfer and self.can_process_last_event) {
             const last_event = self.transfer_manager.transferData(self.platform.pjrt_api, 0, &.{}, @intCast(self.bytes_written), true) catch |err| {
                 log.err("Error during final transferData: {}", .{err});
                 return error.WriteFailed;
             };
-
             last_event.awaitBlocking(self.platform.pjrt_api) catch |err| {
-                log.err("Error during final event awaitBlocking: {}", .{err});
+                log.err("Error during final awaitBlocking: {}", .{err});
                 return error.WriteFailed;
             };
 
@@ -379,122 +372,570 @@ const DeviceWriter = struct {
     const vtable: std.io.Writer.VTable = .{
         .drain = drain,
         .flush = flush,
-        .rebase = std.io.Writer.defaultRebase,
+        .rebase = rebase,
     };
 };
 
-const TensorWriter = struct {
-    shard_size: u64,
+const DeviceWriter2 = struct {
+    platform: Platform,
+    shard: Shard,
+    transfer_manager: *pjrtx.AsyncHostToDeviceTransferManager,
+    pjrt_buffer: *pjrtx.Buffer,
 
-    device_writers: []DeviceWriter,
+    dma_buffer: []u8,
+    chunk_size: usize,
+
+    events: [2]?*pjrtx.Event,
+    current_buffer_idx: u1,
+
     bytes_written: u64,
+    can_process_last_event: bool,
 
     interface: std.io.Writer,
 
-    pub fn init(device_writers: []DeviceWriter, buffer: []u8) TensorWriter {
+    pub fn init(platform: Platform, shard: Shard, buffer: []u8) !DeviceWriter2 {
+        const trace = tracer.frameStart("DeviceWriter2.init");
+        defer tracer.frameEnd(trace, "DeviceWriter2.init");
+
+        std.debug.assert(buffer.len % 2 == 0);
+        const chunk_size = buffer.len / 2;
+
+        const memories = try shard.device.addressableMemories(platform.pjrt_api);
+        var memory = memories[0];
+
+        if (platform.target == .cuda) {
+            for (memories) |mem| {
+                if (mem.kind(platform.pjrt_api) == .device) {
+                    memory = mem;
+                    break;
+                }
+            }
+        }
+
+        const shape_spec = pjrt.ShapeSpec.init(shard.shape.dims(), bufferTypeFromDtype(shard.shape.dtype()));
+
+        const transfer_manager = try platform.pjrt_client.createBuffersForAsyncHostToDevice(platform.pjrt_api, .{
+            .shape_specs = &.{shape_spec},
+            .memory = memory,
+        });
+
         return .{
-            .shard_size = device_writers[0].shard.byteSize(),
+            .platform = platform,
+            .shard = shard,
+            .transfer_manager = transfer_manager,
+            .pjrt_buffer = try transfer_manager.retrieveBuffer(platform.pjrt_api, 0),
+            .dma_buffer = buffer,
+            .chunk_size = chunk_size,
+            .events = .{ null, null },
+            .current_buffer_idx = 0,
             .bytes_written = 0,
-            .device_writers = device_writers,
-            .interface = .{ .vtable = &vtable, .buffer = buffer, .end = 0 },
+            .can_process_last_event = true,
+            .interface = .{ .vtable = &vtable, .buffer = buffer[0..chunk_size], .end = 0 },
         };
     }
 
-    fn drain(w: *std.io.Writer, data: []const []const u8, splat: usize) std.io.Writer.Error!usize {
-        const trace = tracer.frameStart("TensorWriter.drain");
-        defer tracer.frameEnd(trace, "TensorWriter.drain");
+    pub fn deinit(self: *DeviceWriter2) void {
+        self.pjrt_buffer.deinit(self.platform.pjrt_api);
+    }
 
-        const self = @as(*TensorWriter, @alignCast(@fieldParentPtr("interface", w)));
+    fn awaitEvent(self: *DeviceWriter2, idx: u1) !void {
+        if (self.events[idx]) |event| {
+            const trace_await = tracer.frameStart("DeviceWriter2.awaitEvent");
+            defer tracer.frameEnd(trace_await, "DeviceWriter2.awaitEvent");
+            try event.awaitBlocking(self.platform.pjrt_api);
+            self.events[idx] = null;
+        }
+    }
+
+    fn swap(self: *DeviceWriter2) void {
+        log.info("Swapping buffers: {d} -> {d}", .{ self.current_buffer_idx, 1 - self.current_buffer_idx });
+        self.current_buffer_idx = 1 - self.current_buffer_idx;
+        const new_offset = self.current_buffer_idx * self.chunk_size;
+        self.interface.buffer = self.dma_buffer[new_offset..][0..self.chunk_size];
+        self.interface.end = 0;
+        log.info("  Current buffer index: {d}, buffer range: [{}..{}]", .{ self.current_buffer_idx, new_offset, new_offset + self.chunk_size });
+    }
+
+    fn awaitTransfer(self: *DeviceWriter2) !void {
+        const idx = 1 - self.current_buffer_idx;
+        log.info("Awaiting transfer on buffer index: {d}", .{idx});
+        try self.awaitEvent(idx);
+    }
+
+    fn transfer(self: *DeviceWriter2, data: []const u8) !*pjrtx.Event {
+        defer self.bytes_written += data.len;
+        log.info("Transferring {d} bytes at offset {d}", .{ data.len, self.bytes_written });
+        return self.transfer_manager.transferData(self.platform.pjrt_api, 0, data, @intCast(self.bytes_written), false) catch |err| {
+            log.err("Error during transferData in drain: {}", .{err});
+            return error.WriteFailed;
+        };
+    }
+
+    fn transferAndSwap(self: *DeviceWriter2) !usize {
+        try self.awaitTransfer();
+        const len = self.interface.buffered().len;
+        self.events[self.current_buffer_idx] = self.transfer(self.interface.buffered()) catch |err| {
+            log.err("Error during transferAndSwap: {}", .{err});
+            return err;
+        };
+        self.swap();
+        return len;
+    }
+
+    fn drain(w: *std.io.Writer, data: []const []const u8, splat: usize) std.io.Writer.Error!usize {
+        const self = @as(*DeviceWriter2, @alignCast(@fieldParentPtr("interface", w)));
         std.debug.assert(splat == 1);
 
-        const is_sharded = self.device_writers[0].shard.byteSize() < self.device_writers[0].shard.tensor.byteSize();
+        log.info("DeviceWriter2.drain with buffer ptr=0x{x} called with {d} slices", .{ @intFromPtr(w.buffer.ptr), data.len });
+        log.info("  Current buffer state: idx={d}, end={d}, capacity={d}, buffered={d}", .{ self.current_buffer_idx, w.end, w.buffer.len, w.buffered().len });
+        log.info("  Bytes written so far: {d}/{d}", .{ self.bytes_written, self.shard.byteSize() });
+
+        for (data, 0..) |slice, i| {
+            log.info("  Slice[{d}]: ptr=0x{x}, len={d}", .{ i, @intFromPtr(slice.ptr), slice.len });
+        }
+
+        // std.debug.assert(data[0].ptr == self.interface.buffer.ptr);
+
+        const trace = tracer.frameStart("DeviceWriter2.drain (flip&wait)");
+        defer tracer.frameEnd(trace, "DeviceWriter2.drain (flip&wait)");
+
+        _ = self.transferAndSwap() catch |err| {
+            log.err("Error during transferAndSwap in drain: {}", .{err});
+            return error.WriteFailed;
+        };
+
+        return 0;
+
+        // const old_idx = self.current_buffer_idx;
+        // if (w.end > 0) {
+        //     const trace_transfer_data = tracer.frameStart("DeviceWriter2.drain pjrt transferData");
+        //     defer tracer.frameEnd(trace_transfer_data, "DeviceWriter2.drain pjrt transferData");
+
+        //     const event = self.transfer_manager.transferData(self.platform.pjrt_api, 0, data[0], @intCast(self.bytes_written), false) catch |err| {
+        //         log.err("Error during transferData in drain: {}", .{err});
+        //         return error.WriteFailed;
+        //     };
+        //     self.events[old_idx] = event;
+        //     self.bytes_written += data[0].len;
+        // }
+
+        // const new_idx = 1 - old_idx;
+        // self.awaitEvent(new_idx) catch |err| {
+        //     log.err("Error awaiting event in drain: {}", .{err});
+        //     return error.WriteFailed;
+        // };
+
+        // const trace_move = tracer.frameStart("DeviceWriter2.drain assign and move data");
+        // defer tracer.frameEnd(trace_move, "DeviceWriter2.drain assign and move data");
+
+        // self.current_buffer_idx = new_idx;
+        // const new_offset = new_idx * self.chunk_size;
+        // w.buffer = self.dma_buffer[new_offset..][0..self.chunk_size];
+        // w.end = 0;
+
+        // var total_written_from_data: usize = 0;
+        // for (data) |slice| {
+        //     const space_left = w.unusedCapacityLen();
+        //     if (space_left == 0) return total_written_from_data;
+
+        //     const to_copy = @min(slice.len, space_left);
+
+        //     const trace_memmove = tracer.frameStart("DeviceWriter2.drain memmove");
+        //     // log.info("DeviceWriter2.drain memmove to_copy: {}, space_left: {}, slice.len: {}", .{ to_copy, space_left, slice.len });
+        //     @memmove(w.unusedCapacitySlice()[0..to_copy], slice[0..to_copy]);
+        //     tracer.frameEnd(trace_memmove, "DeviceWriter2.drain memmove");
+
+        //     w.end += to_copy;
+        //     total_written_from_data += to_copy;
+
+        //     if (to_copy < slice.len) {
+        //         return total_written_from_data;
+        //     }
+        // }
+        // return total_written_from_data;
+    }
+
+    fn flush(w: *std.io.Writer) std.io.Writer.Error!void {
+        const trace = tracer.frameStart("DeviceWriter2.flush");
+        defer tracer.frameEnd(trace, "DeviceWriter2.flush");
+        const self = @as(*DeviceWriter2, @alignCast(@fieldParentPtr("interface", w)));
 
         if (w.end > 0) {
-            if (is_sharded) {
-                _ = try self.processChunkSharded(w.buffered());
-            } else {
-                _ = try self.processChunkReplicated(w.buffered());
-            }
-
+            const current_chunk = w.buffered();
+            const event = self.transfer_manager.transferData(self.platform.pjrt_api, 0, current_chunk, @intCast(self.bytes_written), false) catch |err| {
+                log.err("Error during flush transfer: {}", .{err});
+                return error.WriteFailed;
+            };
+            self.events[self.current_buffer_idx] = event;
+            self.bytes_written += current_chunk.len;
             w.end = 0;
         }
 
-        var total_written_from_data: usize = 0;
+        self.awaitEvent(0) catch |err| {
+            log.err("Error awaiting event 0: {}", .{err});
+            return error.WriteFailed;
+        };
+        self.awaitEvent(1) catch |err| {
+            log.err("Error awaiting event 1: {}", .{err});
+            return error.WriteFailed;
+        };
 
-        for (data) |d| {
-            const written = if (is_sharded)
-                try self.processChunkSharded(d)
-            else
-                try self.processChunkReplicated(d);
+        const is_final_transfer = self.bytes_written == self.shard.byteSize();
+        if (is_final_transfer and self.can_process_last_event) {
+            const last_event = self.transfer_manager.transferData(self.platform.pjrt_api, 0, &.{}, @intCast(self.bytes_written), true) catch |err| {
+                log.err("Error during final transferData: {}", .{err});
+                return error.WriteFailed;
+            };
+            last_event.awaitBlocking(self.platform.pjrt_api) catch |err| {
+                log.err("Error during final awaitBlocking: {}", .{err});
+                return error.WriteFailed;
+            };
 
-            total_written_from_data += written;
+            self.can_process_last_event = false;
+            self.transfer_manager.deinit(self.platform.pjrt_api);
+            self.transfer_manager = undefined;
         }
-
-        return total_written_from_data;
     }
 
-    fn processChunkReplicated(self: *TensorWriter, data: []const u8) !usize {
-        const trace = tracer.frameStart("TensorWriter.processChunkReplicated");
-        defer tracer.frameEnd(trace, "TensorWriter.processChunkReplicated");
+    pub fn rebase(w: *std.Io.Writer, preserve: usize, minimum_len: usize) std.Io.Writer.Error!void {
+        while (w.buffer.len - w.end < minimum_len) {
+            {
+                // TODO: instead of this logic that "hides" data from
+                // the implementation, introduce a seek index to Writer
+                const preserved_head = w.end -| preserve;
+                const preserved_tail = w.end;
+                const preserved_len = preserved_tail - preserved_head;
+                w.end = preserved_head;
+                defer w.end += preserved_len;
+                std.debug.assert(0 == try w.vtable.drain(w, &.{""}, 1));
+                std.debug.assert(w.end <= preserved_head + preserved_len);
+                // @memmove(w.buffer[w.end..][0..preserved_len], w.buffer[preserved_head..preserved_tail]);
+            }
 
-        for (self.device_writers) |*dw| {
-            try dw.interface.writeAll(data);
+            // If the loop condition was false this assertion would have passed
+            // anyway. Otherwise, give the implementation a chance to grow the
+            // buffer before asserting on the buffer length.
+            std.debug.assert(w.buffer.len - preserve >= minimum_len);
         }
-
-        self.bytes_written += data.len;
-
-        return data.len;
     }
 
-    fn processChunkSharded(self: *TensorWriter, data: []const u8) !usize {
-        const trace = tracer.frameStart("TensorWriter.processChunkSharded");
-        defer tracer.frameEnd(trace, "TensorWriter.processChunkSharded");
+    const vtable: std.io.Writer.VTable = .{
+        .drain = drain,
+        .flush = flush,
+        .rebase = rebase,
+    };
+};
+
+fn testDeviceWriterWrite() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var context = try Context.init();
+    defer context.deinit();
+
+    tracer = Tracer.init("ai.zml.test.DeviceWriterWrite");
+
+    const platform = context.autoPlatform(.{});
+    const devices = platform.getDevices();
+    const device = devices[0];
+
+    const TENSOR_SIZE = 2048 * MB;
+    const TEST_DMA_BUFFER_SIZE = 32 * MB;
+
+    const shape: Shape = .init(.{TENSOR_SIZE / @sizeOf(f32)}, .f32);
+    const tensor: Tensor = .{
+        .source_name = "test",
+        .name = "tensor",
+        .shape = shape,
+        .offset = 0,
+    };
+    const test_shard: Shard = .{
+        .shape = shape,
+        .tensor = tensor,
+        .device = device,
+    };
+
+    const dma_buffer = try allocator.alloc(u8, TEST_DMA_BUFFER_SIZE);
+    defer allocator.free(dma_buffer);
+
+    try platform.pjrt_client.dmaMap(platform.pjrt_api, dma_buffer);
+    defer platform.pjrt_client.dmaUnmap(platform.pjrt_api, dma_buffer) catch {};
+
+    var writer: DeviceWriter2 = try .init(platform, test_shard, dma_buffer);
+    defer writer.deinit();
+
+    const host_data_to_write = try allocator.alloc(u8, TENSOR_SIZE);
+    defer allocator.free(host_data_to_write);
+
+    try platform.pjrt_client.dmaMap(platform.pjrt_api, host_data_to_write);
+    defer platform.pjrt_client.dmaUnmap(platform.pjrt_api, host_data_to_write) catch {};
+
+    for (host_data_to_write, 0..) |*byte, i| {
+        byte.* = @intCast(i % 256);
+    }
+
+    const WRITE_CHUNK_SIZE = TEST_DMA_BUFFER_SIZE / 4;
+    var total_bytes_written: u64 = 0;
+
+    while (total_bytes_written < TENSOR_SIZE) {
+        const remaining = TENSOR_SIZE - total_bytes_written;
+        const chunk_size = @min(remaining, WRITE_CHUNK_SIZE);
+        const chunk = host_data_to_write[total_bytes_written..][0..chunk_size];
+        // log.info("Writing chunk {*} of size {d}, total_bytes_written: {d}", .{ chunk.ptr, chunk.len, total_bytes_written });
+        {
+            var index: usize = 0;
+            while (index < chunk.len) {
+                const trace_write = tracer.frameStart("writer.interface.write");
+                defer tracer.frameEnd(trace_write, "writer.interface.write");
+
+                log.info("Writing chunk {*} of size {d}, total_bytes_written: {d}", .{ chunk.ptr, chunk.len, total_bytes_written });
+                index += try writer.interface.write(chunk[index..]);
+            }
+        }
+        // try writer.interface.writeAll(chunk);
+        total_bytes_written += chunk.len;
+    }
+    try writer.interface.flush();
+
+    // // try std.testing.expectEqual(TENSOR_SIZE, writer.bytes_written);
+    // try std.testing.expectEqual(TENSOR_SIZE, total_bytes_written);
+
+    // const dma_read_buffer = try allocator.alloc(u8, 256 * KB);
+    // defer allocator.free(dma_read_buffer);
+    // try platform.pjrt_client.dmaMap(platform.pjrt_api, dma_read_buffer);
+    // defer platform.pjrt_client.dmaUnmap(platform.pjrt_api, dma_read_buffer) catch {};
+
+    // var device_reader = try DeviceReader.init(platform, writer.pjrt_buffer, dma_read_buffer);
+    // for (0..DeviceReader.NUM_SLOTS) |_| {
+    //     if (device_reader.bytes_read < device_reader.total_size) {
+    //         try device_reader.requestChunk();
+    //     }
+    // }
+
+    // const host_data_read_back = try allocator.alloc(u8, TENSOR_SIZE);
+    // defer allocator.free(host_data_read_back);
+
+    // var buffer_writer = std.io.Writer.fixed(host_data_read_back);
+    // const bytes_read = try device_reader.interface.streamRemaining(&buffer_writer);
+
+    // try std.testing.expectEqual(@as(usize, TENSOR_SIZE), bytes_read);
+    // try std.testing.expectEqualSlices(u8, host_data_to_write, host_data_read_back);
+}
+
+fn testDeviceWriterStreamRemaining() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var context = try Context.init();
+    defer context.deinit();
+
+    tracer = Tracer.init("ai.zml.test.DeviceWriter");
+
+    const platform = context.autoPlatform(.{});
+    const devices = platform.getDevices();
+    const device = devices[0];
+
+    const TENSOR_SIZE = 2048 * MB;
+    const TEST_DMA_BUFFER_SIZE = 128 * MB;
+
+    const shape: Shape = .init(.{TENSOR_SIZE / @sizeOf(f32)}, .f32);
+    const tensor: Tensor = .{
+        .source_name = "test",
+        .name = "tensor",
+        .shape = shape,
+        .offset = 0,
+    };
+    const test_shard: Shard = .{
+        .shape = shape,
+        .tensor = tensor,
+        .device = device,
+    };
+
+    const dma_buffer = try allocator.alignedAlloc(u8, .fromByteUnits(16 * 1024), TEST_DMA_BUFFER_SIZE);
+    defer allocator.free(dma_buffer);
+    try platform.pjrt_client.dmaMap(platform.pjrt_api, dma_buffer);
+    defer platform.pjrt_client.dmaUnmap(platform.pjrt_api, dma_buffer) catch {};
+
+    var writer: DeviceWriter2 = try .init(platform, test_shard, dma_buffer);
+    defer writer.deinit();
+
+    // const host_data_to_write = try allocator.alloc(u8, TENSOR_SIZE);
+    // defer allocator.free(host_data_to_write);
+
+    // for (host_data_to_write, 0..) |*byte, i| {
+    //     byte.* = @intCast(i % 256);
+    // }
+
+    // var data_reader = std.io.Reader.fixed(host_data_to_write);
+
+    // const file = try std.fs.openFileAbsolute("/home/hugo/zml/data.bin", .{ .mode = .read_only });
+    const file_fd = try std.posix.open(
+        "/home/hugo/zml/data.bin",
+        .{ .ACCMODE = .RDONLY, .DIRECT = true },
+        0,
+    );
+
+    const file: std.fs.File = .{ .handle = file_fd };
+
+    var file_reader = file.reader(&.{});
+
+    const bytes_written = try file_reader.interface.streamRemaining(&writer.interface);
+    _ = bytes_written; // autofix
+    try writer.interface.flush();
+
+    // try std.testing.expectEqual(TENSOR_SIZE, writer.bytes_written);
+    // try std.testing.expectEqual(TENSOR_SIZE, bytes_written);
+
+    // const dma_read_buffer = try allocator.alloc(u8, 256 * KB);
+    // defer allocator.free(dma_read_buffer);
+    // try platform.pjrt_client.dmaMap(platform.pjrt_api, dma_read_buffer);
+    // defer platform.pjrt_client.dmaUnmap(platform.pjrt_api, dma_read_buffer) catch {};
+
+    // var device_reader = try DeviceReader.init(platform, writer.pjrt_buffer, dma_read_buffer);
+    // for (0..DeviceReader.NUM_SLOTS) |_| {
+    //     if (device_reader.bytes_read < device_reader.total_size) {
+    //         try device_reader.requestChunk();
+    //     }
+    // }
+
+    // const host_data_read_back = try allocator.alloc(u8, TENSOR_SIZE);
+    // defer allocator.free(host_data_read_back);
+
+    // var buffer_writer = std.io.Writer.fixed(host_data_read_back);
+    // const bytes_read = try device_reader.interface.streamRemaining(&buffer_writer);
+
+    // try std.testing.expectEqual(TENSOR_SIZE, bytes_read);
+    // try std.testing.expectEqualSlices(u8, host_data_to_write, host_data_read_back);
+}
+
+const TensorWriter = struct {
+    const Self = @This();
+
+    device_writers: []DeviceWriter2,
+
+    buffer: []u8,
+    chunk_size: usize,
+    current_buffer_idx: u1,
+
+    shard_size: u64,
+    is_sharded: bool,
+    total_bytes_processed: u64,
+
+    interface: std.io.Writer,
+
+    pub fn init(device_writers: []DeviceWriter2, buffer: []u8) Self {
+        std.debug.assert(buffer.len % 2 == 0);
+        const chunk_size = buffer.len / 2;
+
+        const is_sharded = if (device_writers.len > 0)
+            device_writers[0].shard.byteSize() < device_writers[0].shard.tensor.byteSize()
+        else
+            false;
+
+        return .{
+            .device_writers = device_writers,
+            .buffer = buffer,
+            .chunk_size = chunk_size,
+            .current_buffer_idx = 0,
+            .shard_size = if (device_writers.len > 0) device_writers[0].shard.byteSize() else 0,
+            .is_sharded = is_sharded,
+            .total_bytes_processed = 0,
+            .interface = .{ .vtable = &vtable, .buffer = buffer[0..chunk_size], .end = 0 },
+        };
+    }
+
+    fn processChunk(self: *Self, data: []const u8) !void {
+        const trace = tracer.frameStart("TensorWriter.processChunk");
+        defer tracer.frameEnd(trace, "TensorWriter.processChunk");
 
         var data_offset: usize = 0;
         while (data_offset < data.len) {
-            const total_tensor_size = self.shard_size * self.device_writers.len;
-            const current_tensor_offset = self.bytes_written + data_offset;
+            const current_tensor_offset = self.total_bytes_processed + data_offset;
+            const remaining_in_data = data.len - data_offset;
 
-            if (current_tensor_offset >= total_tensor_size) {
-                break;
+            var chunk_size: u64 = 0;
+            var target_writers_start: usize = 0;
+            var target_writers_end: usize = 0;
+
+            if (self.is_sharded) {
+                const total_TENSOR_SIZE = self.shard_size * self.device_writers.len;
+                if (current_tensor_offset >= total_TENSOR_SIZE) break;
+                const current_shard_idx: usize = @intCast(current_tensor_offset / self.shard_size);
+                const offset_in_shard = current_tensor_offset % self.shard_size;
+                const remaining_in_shard = self.shard_size - offset_in_shard;
+                chunk_size = @min(@as(u64, @intCast(remaining_in_data)), remaining_in_shard);
+                target_writers_start = current_shard_idx;
+                target_writers_end = current_shard_idx + 1;
+            } else {
+                if (current_tensor_offset >= self.shard_size) break;
+                const remaining_in_tensor = self.shard_size - current_tensor_offset;
+                chunk_size = @min(@as(u64, @intCast(remaining_in_data)), remaining_in_tensor);
+                target_writers_start = 0;
+                target_writers_end = self.device_writers.len;
             }
 
-            const current_shard_idx: usize = @intCast(current_tensor_offset / self.shard_size);
-            const offset_in_shard = current_tensor_offset % self.shard_size;
-            const remaining_in_shard = self.shard_size - offset_in_shard;
+            const chunk_size_usize: usize = @intCast(chunk_size);
+            if (chunk_size_usize == 0) break;
+            const chunk_to_write = data[data_offset .. data_offset + chunk_size_usize];
+            for (self.device_writers[target_writers_start..target_writers_end]) |*dw| {
+                try dw.interface.writeAll(chunk_to_write);
+            }
+            data_offset += chunk_size_usize;
+        }
+        self.total_bytes_processed += data.len;
+    }
 
-            const remaining_in_data = data.len - data_offset;
-            const chunk_size = @min(remaining_in_data, remaining_in_shard);
+    fn rebase(w: *std.io.Writer, preserve: usize, capacity: usize) std.io.Writer.Error!void {
+        const self: *Self = @alignCast(@fieldParentPtr("interface", w));
+        std.debug.assert(preserve == 0);
+        _ = capacity;
 
-            if (chunk_size == 0) break;
+        const old_idx = self.current_buffer_idx;
+        const new_idx = 1 - old_idx;
 
-            const chunk_to_write = data[data_offset .. data_offset + chunk_size];
-            try self.device_writers[current_shard_idx].interface.writeAll(chunk_to_write);
-
-            data_offset += chunk_size;
+        const old_offset = old_idx * self.chunk_size;
+        const chunk_to_process = self.buffer[old_offset .. old_offset + w.end];
+        if (chunk_to_process.len > 0) {
+            self.processChunk(chunk_to_process) catch |err| {
+                log.err("Error in TensorWriter.processChunk: {}", .{err});
+                return error.WriteFailed;
+            };
         }
 
-        self.bytes_written += data_offset;
+        self.current_buffer_idx = new_idx;
+        const new_offset = new_idx * self.chunk_size;
+        w.buffer = self.buffer[new_offset .. new_offset + self.chunk_size];
+        w.end = 0;
+    }
 
-        return data_offset;
+    // `drain` is simple: it just delegates to `rebase` to do the heavy lifting.
+    fn drain(w: *std.io.Writer, data: []const []const u8, splat: usize) std.io.Writer.Error!usize {
+        w.rebase(0, 1) catch |err| {
+            log.err("Error during TensorWriter.rebase in drain: {}", .{err});
+            return error.WriteFailed;
+        };
+        return w.writeSplat(data, splat);
     }
 
     fn flush(w: *std.io.Writer) !void {
-        _ = try drain(w, &.{}, 1);
+        const self: *Self = @alignCast(@fieldParentPtr("interface", w));
 
-        const self = @as(*TensorWriter, @alignCast(@fieldParentPtr("interface", w)));
+        if (w.end > 0) {
+            self.processChunk(w.buffered()) catch |err| {
+                log.err("Error processing chunk in flush: {}", .{err});
+                return error.WriteFailed;
+            };
+            w.end = 0;
+        }
 
         for (self.device_writers) |*dw| {
-            try dw.interface.flush();
+            dw.interface.flush() catch |err| {
+                log.err("Error flushing downstream DeviceWriter: {}", .{err});
+                return error.WriteFailed;
+            };
         }
-    }
-
-    fn rebase(w: *std.io.Writer, preserve: usize, capacity: usize) !void {
-        _ = preserve;
-
-        try w.flush();
-
-        std.debug.assert(w.buffer.len >= capacity);
     }
 
     const vtable = std.io.Writer.VTable{ .drain = drain, .flush = flush, .rebase = rebase };
@@ -746,7 +1187,7 @@ fn computeShards(allocator: std.mem.Allocator, tensor: Tensor, devices: []const 
 }
 
 pub fn main() !void {
-    try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain);
+    try asynk.AsyncThread.main(std.heap.c_allocator, testDeviceWriterStreamRemaining);
 }
 
 pub fn asyncMain() !void {
@@ -913,7 +1354,7 @@ pub fn asyncMain() !void {
     log.info("--- Allocating buffers... ---", .{});
     const trace_allocation = tracer.frameStart("Buffers allocation and DMA mapping");
 
-    const DMA_STAGING_BUFFER_SIZE = BUF_1_MB * platform.getDevices().len;
+    const DMA_STAGING_BUFFER_SIZE = BUF_8_MB * platform.getDevices().len;
 
     const dma_write_buffer = try allocator.alloc(u8, DMA_STAGING_BUFFER_SIZE);
     defer allocator.free(dma_write_buffer);
@@ -921,17 +1362,17 @@ pub fn asyncMain() !void {
     try platform.pjrt_client.dmaMap(platform.pjrt_api, dma_write_buffer);
     defer platform.pjrt_client.dmaUnmap(platform.pjrt_api, dma_write_buffer) catch unreachable;
 
-    const dma_read_buffer = try allocator.alloc(u8, DMA_STAGING_BUFFER_SIZE);
+    const dma_read_buffer = try allocator.alloc(u8, BUF_8_MB);
     defer allocator.free(dma_read_buffer);
 
     try platform.pjrt_client.dmaMap(platform.pjrt_api, dma_read_buffer);
     defer platform.pjrt_client.dmaUnmap(platform.pjrt_api, dma_read_buffer) catch unreachable;
 
-    const file_buffer = try allocator.alloc(u8, BUF_1_MB);
+    const file_buffer = try allocator.alloc(u8, BUF_128_MB);
     defer allocator.free(file_buffer);
 
     const tensor_reader_buffer: [0]u8 = undefined;
-    const tensor_writer_buffer = try allocator.alloc(u8, BUF_1_MB);
+    const tensor_writer_buffer = try allocator.alloc(u8, BUF_8_MB);
     defer allocator.free(tensor_writer_buffer);
 
     try platform.pjrt_client.dmaMap(platform.pjrt_api, tensor_writer_buffer);
@@ -975,7 +1416,7 @@ pub fn asyncMain() !void {
         const warmp_buffer = try allocator.alloc(u8, BUF_8_MB);
         defer allocator.free(warmp_buffer);
 
-        var warmup_writer = try DeviceWriter.init(platform, warmup_shard, warmp_buffer);
+        var warmup_writer = try DeviceWriter2.init(platform, warmup_shard, warmp_buffer);
         defer warmup_writer.deinit();
 
         try warmup_writer.interface.writeAll(warmup_data);
@@ -1012,7 +1453,7 @@ pub fn asyncMain() !void {
         var file_reader = file.reader(file_buffer);
 
         var tensor_reader: std.io.Reader.Limited = .init(&file_reader.interface, .limited64(tensor.shape.byteSize()), &tensor_reader_buffer);
-        var device_writers: std.ArrayList(DeviceWriter) = try .initCapacity(arena_allocator, devices.len);
+        var device_writers: std.ArrayList(DeviceWriter2) = try .initCapacity(arena_allocator, devices.len);
         defer {
             for (device_writers.items) |*device_writer| {
                 device_writer.deinit();
@@ -1025,6 +1466,7 @@ pub fn asyncMain() !void {
         defer arena_allocator.free(shards);
 
         const per_device_dma_size = DMA_STAGING_BUFFER_SIZE / devices.len;
+        const per_device_dma_chunk_size = per_device_dma_size / 2;
 
         for (0..devices.len) |i| {
             const device_dma_slice = dma_write_buffer[i * per_device_dma_size .. (i + 1) * per_device_dma_size];
@@ -1035,7 +1477,15 @@ pub fn asyncMain() !void {
             ));
         }
 
-        var tensor_writer: TensorWriter = .init(device_writers.items, tensor_writer_buffer);
+        if (tensor_writer_buffer.len < per_device_dma_chunk_size) {
+            log.err("TensorWriter buffer is too small for optimal flow. Have {d}, need {d}", .{
+                tensor_writer_buffer.len, per_device_dma_chunk_size,
+            });
+            return error.BufferTooSmall;
+        }
+        const correctly_sized_tensor_writer_buffer = tensor_writer_buffer[0..per_device_dma_chunk_size];
+
+        var tensor_writer: TensorWriter = .init(device_writers.items, correctly_sized_tensor_writer_buffer);
 
         const bytes_copied = try tensor_reader.interface.streamRemaining(&tensor_writer.interface);
         try tensor_writer.interface.flush();
