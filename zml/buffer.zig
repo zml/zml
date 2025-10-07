@@ -327,6 +327,7 @@ pub const Buffer = struct {
     /// but just marked as available in the memory pool.
     pub fn deinit(self: *const Buffer) void {
         // log.warn("Unloading {f} {d} bytes", .{ self._shape, self._shape.byteSize() });
+        // log.warn("Deinit {f}", .{self});
         for (self._shards.constSlice()) |buffer| {
             buffer.deinit(self._api);
         }
@@ -362,7 +363,8 @@ pub const Buffer = struct {
     }
 
     pub fn format(self: Buffer, writer: *std.Io.Writer) !void {
-        try writer.print("Buffer({f})@{x}", .{ self._shape, self.devicePtr() });
+        const device_ptr: ?*anyopaque = self._shards.get(0).getOpaqueDeviceMemoryDataPointer(self._api) catch null;
+        try writer.print("0x{x}@{f}", .{ @intFromPtr(device_ptr), self._shape });
     }
 
     pub fn getMemory(self: Buffer) *const pjrt.Memory {

@@ -392,8 +392,9 @@ pub fn Exe(ArgsT: type, ReturnT: type) type {
             const total_ready = fillBuffers(&args, self.inner.input_shapes, self.inner.input_per_device, self.inner.ready_buffer_count);
             std.debug.assert(total_ready == self.inner.input_buffer_count);
             self.inner._unsafeCall();
-            var result: Bufferized(ReturnT) = undefined;
-            self.inner._unsafeAssignResults(Bufferized(ReturnT), &result);
+            const result = Bufferized(ReturnT).initStatic(std.heap.smp_allocator) catch @panic("TODO: pass allocator to call");
+            var flat: struct { []Buffer } = .{result.buffers};
+            self.inner._unsafeAssignResults(@TypeOf(flat), &flat);
             return result;
         }
 

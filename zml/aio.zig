@@ -146,9 +146,16 @@ pub const BufferStore = struct {
             }
         };
 
-        var res: zml.Bufferized(Model) = undefined;
-        try zml.meta.mapAlloc(Ctx.cb, allocator, .{ .platform = &platform, .store = &self }, model, &res);
-        return res;
+        const layout = try zml.meta.describeLayout(zml.Tensor, allocator, model);
+        errdefer layout.deinit(allocator);
+        const buffers = try allocator.alloc(zml.Buffer, layout.count);
+
+        zml.meta.collectBuf(Ctx.cb, .{ .platform = &platform, .store = &self }, &model, buffers);
+        return .{
+            .buffers = buffers,
+            .handles = layout.layout,
+            .handles_memory = layout.layout_memory,
+        };
     }
 
     pub fn getTensor(self: BufferStore, key: []const u8) zml.Tensor {

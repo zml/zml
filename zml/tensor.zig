@@ -523,10 +523,11 @@ pub const Tensor = struct {
             };
         }
 
-        pub fn init(platform: Platform, seed: u128) !Bufferized(Rng) {
-            return .{
-                ._state = try Buffer.fromBytes(platform, Rng.shape()._state, std.mem.asBytes(&seed)),
-            };
+        pub fn init(allocator: std.mem.Allocator, platform: Platform, seed: u128) !Bufferized(Rng) {
+            const rng: Bufferized(Rng) = try .initStatic(allocator);
+            rng.set(rng.handles._state, try Buffer.fromBytes(platform, Rng.shape()._state, std.mem.asBytes(&seed)));
+
+            return rng;
         }
 
         /// Returns a Tensor of the given shape, filled with uniform random bits, and a new Rng state.
@@ -4082,7 +4083,72 @@ test "Tensor.maxPool2d" {
 /// Non-Tensor metadata is stripped out of the resulting struct.
 /// Recursively descends into the type.
 pub fn Bufferized(comptime T: type) type {
-    return meta.MapRestrict(Tensor, Buffer).map(T);
+    return struct {
+        buffers: []Buffer,
+        handles: *const meta.MapRestrict(Tensor, meta.Handle).map(T),
+        handles_memory: []const meta.Handle,
+
+        pub fn initStatic(allocator: std.mem.Allocator) std.mem.Allocator.Error!@This() {
+            const template: T = undefined;
+            const N = comptime ops.staticCountTensors(T) orelse stdx.debug.compileError("Bufferized(T).initStatic is only available for struct with a compile-time known number of Buffers. Got {}", .{T});
+            const buffers = try allocator.alloc(Buffer, N);
+            errdefer allocator.free(buffers);
+            const layout = try meta.describeLayout(Tensor, allocator, template);
+            std.debug.assert(layout.count == N);
+            return .{
+                .buffers = buffers, // uninitialized
+                .handles = layout.layout,
+                .handles_memory = layout.layout_memory,
+            };
+        }
+
+        pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
+            try writer.print("[buffers: {f}, handles: {any}]", .{ stdx.fmt.slice(self.buffers), self.handles });
+        }
+
+        pub fn get(self: @This(), handle: meta.Handle) Buffer {
+            return self.buffers[@intFromEnum(handle)];
+        }
+
+        pub fn set(self: @This(), handle: meta.Handle, x: Buffer) void {
+            self.buffers[@intFromEnum(handle)] = x;
+        }
+
+        pub fn getSlice(self: @This(), handle: meta.Handle, n: usize) []const Buffer {
+            return self.buffers[@intFromEnum(handle)..][0..n];
+        }
+
+        pub fn setSlice(self: @This(), handle: meta.Handle, others: []const Buffer) void {
+            return @memcpy(self.buffers[@intFromEnum(handle)..][0..others.len], others);
+        }
+
+        pub fn getField(self: @This(), FieldType: type, handle: meta.MapRestrict(Tensor, meta.Handle).map(FieldType)) []const Buffer {
+            const N = comptime ops.staticCountTensors(FieldType) orelse stdx.debug.compileError("getField(FieldType) is only available for struct with a compile-time known number of Buffers. Got {}", .{FieldType});
+
+            const first_handle_ptr: *const meta.Handle = @ptrCast(@alignCast(&handle));
+            return self.buffers[@intFromEnum(first_handle_ptr.*)..][0..N];
+        }
+
+        pub fn setField(self: @This(), FieldType: type, handle: meta.MapRestrict(Tensor, meta.Handle).map(FieldType), buffers: []const Buffer) void {
+            const N = comptime ops.staticCountTensors(FieldType) orelse stdx.debug.compileError("setField(FieldType) is only available for struct with a compile-time known number of Buffers. Got {}", .{FieldType});
+            std.debug.assert(N == buffers.len);
+            // This is safe cause FieldType has a static number of Tensor so the Handle struct is just N Handle one after the other.
+            const first_handle_ptr: *const meta.Handle = @ptrCast(@alignCast(&handle));
+            return @memcpy(self.buffers[@intFromEnum(first_handle_ptr.*)..][0..N], buffers);
+        }
+
+        pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+            for (self.buffers) |buff| {
+                buff.deinit();
+            }
+            self.deinitStorage(allocator);
+        }
+
+        pub fn deinitStorage(self: @This(), allocator: std.mem.Allocator) void {
+            allocator.free(self.buffers);
+            allocator.free(self.handles_memory);
+        }
+    };
 }
 
 /// Return a clone of a type with Tensors replaced by Shapes.

@@ -723,14 +723,39 @@ pub fn staticCountTensors(comptime T: type) ?usize {
             return n;
         },
         .@"struct" => |struct_info| {
-            var count: usize = 0;
-            inline for (struct_info.fields) |field| {
-                count += staticCountTensors(field.type) orelse return null;
+            comptime var count: usize = 0;
+            comptime {
+                for (struct_info.fields) |field| {
+                    count += staticCountTensors(field.type) orelse return null;
+                }
             }
             return count;
         },
+        .optional => |opt_info| {
+            const n = staticCountTensors(opt_info.child) orelse return null;
+            if (n > 0) return null;
+        },
         else => 0,
     };
+}
+
+test staticCountTensors {
+    try std.testing.expectEqual(1, staticCountTensors(Tensor));
+    try std.testing.expectEqual(8, staticCountTensors([8]Tensor));
+    try std.testing.expectEqual(4, staticCountTensors(struct {
+        a: Tensor,
+        b: struct { ba: Tensor, bb: Tensor, bc: Tensor },
+    }));
+
+    try std.testing.expectEqual(10, staticCountTensors(struct {
+        a: Tensor,
+        b: [3]struct { ba: Tensor, bb: Tensor, bc: Tensor },
+    }));
+
+    try std.testing.expectEqual(null, staticCountTensors(struct {
+        a: Tensor,
+        b: struct { ba: Tensor, bb: ?Tensor, bc: Tensor },
+    }));
 }
 
 /// Create a Tensor struct similar to base, keeping base tags,

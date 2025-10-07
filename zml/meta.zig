@@ -760,6 +760,7 @@ pub fn Contains(Haystack: type, T: type) bool {
         anyopaque => return false,
         else => {},
     }
+    // @compileLog(Haystack, T);
 
     return switch (@typeInfo(Haystack)) {
         .@"struct" => |info| {
@@ -786,14 +787,23 @@ pub fn Contains(Haystack: type, T: type) bool {
 
 pub const Handle = enum(u32) { _ };
 
+pub fn Layout(ModelT: type, T: type) type {
+    return struct {
+        layout: *MapRestrict(T, Handle).map(ModelT),
+        layout_memory: []Handle,
+        count: u32,
+
+        pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+            return allocator.free(self.layout_memory);
+        }
+    };
+}
+
 pub fn describeLayout(
     T: type,
     allocator: std.mem.Allocator,
     model: anytype,
-) std.mem.Allocator.Error!struct {
-    *MapRestrict(T, Handle).map(@TypeOf(model)),
-    []Handle,
-} {
+) std.mem.Allocator.Error!Layout(@TypeOf(model), T) {
     const t_count: usize = count(T, &model);
     // Assume that we have at worse one slice per item.
     // If this become an issue, we could write a custom `count` function that computes the exact size needed, accounting for slices.
@@ -814,7 +824,11 @@ pub fn describeLayout(
     std.debug.assert(counter == t_count);
     const used_handles = @divExact(std.mem.alignForward(usize, fba.end_index, @alignOf(Handle)), @sizeOf(Handle));
     const owned_handles = if (allocator.resize(layout_buffer, used_handles)) used_handles else pessimist_size;
-    return .{ res, layout_buffer[0..owned_handles] };
+    return .{
+        .layout = res,
+        .layout_memory = layout_buffer[0..owned_handles],
+        .count = counter,
+    };
 }
 
 test describeLayout {

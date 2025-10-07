@@ -339,12 +339,14 @@ pub const KvCache = struct {
         };
     }
 
-    pub fn initBuffer(kv_shape: zml.Shape, platform: zml.Platform) !zml.Bufferized(KvCache) {
-        return .{
-            .k = try zml.Buffer.uninitialized(platform, kv_shape, .{}),
-            .v = try zml.Buffer.uninitialized(platform, kv_shape, .{}),
-            .layer_index = try zml.Buffer.scalar(platform, 0, .u32),
-        };
+    pub fn initBuffer(allocator: std.mem.Allocator, kv_shape: zml.Shape, platform: zml.Platform) !zml.Bufferized(KvCache) {
+        var kv: zml.Bufferized(KvCache) = try .initStatic(allocator);
+        kv.set(kv.handles.k, try zml.Buffer.uninitialized(platform, kv_shape, .{}));
+        kv.set(kv.handles.v, try zml.Buffer.uninitialized(platform, kv_shape, .{}));
+        kv.set(kv.handles.layer_index, try zml.Buffer.scalar(platform, 0, .u32));
+
+        log.warn("kv: {f}", .{kv});
+        return kv;
     }
 
     pub fn keys(self: KvCache) Tensor {
