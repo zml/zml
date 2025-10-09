@@ -58,7 +58,7 @@ pub const ApiError = error{
 fn InnerMixin(comptime innerT: type) type {
     return struct {
         fn inner(self: anytype) *innerT {
-            return @ptrCast(@constCast(@alignCast(self)));
+            return @ptrCast(@alignCast(@constCast(self)));
         }
     };
 }
@@ -125,10 +125,10 @@ pub const Api = struct {
     }
 
     pub fn lookupExtension(self: *const Api, comptime ExtensionT: type, ext_id: c_int) ?*const ExtensionT {
-        var cur: [*c]const c.PJRT_Extension_Base = @alignCast(@ptrCast(self.inner.extension_start));
+        var cur: [*c]const c.PJRT_Extension_Base = @ptrCast(@alignCast(self.inner.extension_start));
         while (cur != null) : (cur = cur.*.next) {
             if (cur.*.type == ext_id) {
-                return @alignCast(@ptrCast(cur));
+                return @ptrCast(@alignCast(cur));
             }
         }
 
@@ -264,22 +264,22 @@ pub const ShapeSpec = extern struct {
 
     inner: c.PJRT_ShapeSpec,
 
-    pub fn init(dims_: []const usize, bt: BufferType) ShapeSpec {
+    pub fn init(dims_: []const i64, bt: BufferType) ShapeSpec {
         return .{
             .inner = pjrtStruct(c.PJRT_ShapeSpec{
                 .dims = @ptrCast(@constCast(dims_.ptr)),
-                .num_dims = dims.len,
-                .buffer_type = @intFromEnum(bt),
+                .num_dims = dims_.len,
+                .element_type = @intFromEnum(bt),
             }),
         };
     }
 
-    pub fn dims(self: ShapeSpec) []usize {
+    pub fn dims(self: ShapeSpec) []const i64 {
         return self.inner.dims[0..self.inner.num_dims];
     }
 
     pub fn bufferType(self: ShapeSpec) BufferType {
-        return @enumFromInt(self.inner.buffer_type);
+        return @enumFromInt(self.inner.element_type);
     }
 };
 
@@ -432,7 +432,7 @@ pub const Client = opaque {
             .client = self.inner(),
         }) catch unreachable;
         if (ret.addressable_memories) |memories| {
-            return @constCast(@ptrCast(memories[0..ret.num_addressable_memories]));
+            return @ptrCast(@constCast(memories[0..ret.num_addressable_memories]));
         }
         return &.{};
     }
@@ -461,7 +461,7 @@ pub const Client = opaque {
     pub fn createBuffersForAsyncHostToDevice(self: *const Client, api: *const Api, args: CreateBuffersForAsyncHostToDeviceArgs) ApiError!*AsyncHostToDeviceTransferManager {
         const ret = try api.call(.PJRT_Client_CreateBuffersForAsyncHostToDevice, .{
             .client = self.inner(),
-            .shape_specs = @ptrCast(args.shape_specs.ptr),
+            .shape_specs = @ptrCast(@constCast(args.shape_specs.ptr)),
             .num_shape_specs = args.shape_specs.len,
             .device_layouts = if (args.device_layouts) |layouts| @ptrCast(@constCast(layouts.ptr)) else null,
             .num_device_layouts = if (args.device_layouts) |layouts| @intCast(layouts.len) else 0,

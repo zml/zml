@@ -42,6 +42,8 @@ pub const Target = @import("platform.zig").Target;
 pub const Tensor = @import("tensor.zig").Tensor;
 pub const testing = @import("testing.zig");
 pub const torch = @import("torch.zig");
+pub const upb = @import("upb");
+pub const c = @import("c");
 
 // pub const tokenizer = @import("tokenizer.zig");
 pub const tools = struct {

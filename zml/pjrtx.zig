@@ -23,6 +23,7 @@ pub const CompiledMemoryStats = pjrt.CompiledMemoryStats;
 pub const ExecuteError = ApiError;
 pub const Memory = pjrt.Memory;
 pub const Stream = pjrt.Stream;
+pub const ShapeSpec = pjrt.ShapeSpec;
 
 const log = std.log.scoped(.zml);
 
@@ -74,12 +75,16 @@ pub const Client = opaque {
         return @ptrCast(try self.inner().createViewOfDeviceBuffer(api, args));
     }
 
-    fn compileSync(self: *const Client, api: *const Api, allocator: std.mem.Allocator, module: mlir.Module, compile_options_pb: []const u8) CompileError!*LoadedExecutable {
+    fn compileSync(self: *const Client, api: *const Api, allocator: std.mem.Allocator, module: *const mlir.Module, compile_options_pb: []const u8) CompileError!*LoadedExecutable {
         var bytecode: std.array_list.Managed(u8) = .init(allocator);
         defer bytecode.deinit();
-        module.op().writeBytecodeWithConfig(bytecode.writer(), .{ .desiredEmitedVersion = 1 }) catch |err| {
+        var bytecode_adapter = bytecode.writer().adaptToNewApi(&.{});
+        module.operation().writeBytecode(.{ .desired_emit_version = 1 }, &bytecode_adapter.new_interface) catch |err| {
             log.err("failed to write module bytecode: {}", .{err});
-            return err;
+            return switch (err) {
+                error.InvalidMlirBytecodeVersion => error.InvalidMlirBytecodeVersion,
+                error.WriteFailed => error.OutOfMemory,
+            };
         };
 
         var serialized_buffer: std.array_list.Managed(u8) = .init(allocator);
@@ -87,14 +92,18 @@ pub const Client = opaque {
 
         const stablehlo_version = blk: {
             if (api.stablehloCurrentVersion()) |requested_version| {
-                break :blk dialects.stablehlo.stablehloGetSmallerVersion(requested_version, dialects.stablehlo.getCurrentVersion());
+                break :blk dialects.stablehlo.smallerVersion(requested_version, dialects.stablehlo.currentVersion());
             }
-            break :blk dialects.stablehlo.getMinimumVersion();
+            break :blk dialects.stablehlo.minimumVersion();
         };
 
-        dialects.stablehlo.serializePortableArtifact(bytecode.items, stablehlo_version, serialized_buffer.writer()) catch |err| {
+        var serialized_adapter = serialized_buffer.writer().adaptToNewApi(&.{});
+        dialects.stablehlo.serializePortableArtifact(bytecode.items, stablehlo_version, &serialized_adapter.new_interface) catch |err| {
             log.err("failed to serialize to portable artifact: {}", .{err});
-            return err;
+            return switch (err) {
+                error.InvalidMlirBytecodeVersion => error.InvalidMlirBytecodeVersion,
+                error.WriteFailed => error.OutOfMemory,
+            };
         };
 
         return @ptrCast(try self.inner().compile(api, .{
@@ -104,7 +113,7 @@ pub const Client = opaque {
         }));
     }
 
-    pub fn compile(self: *const Client, api: *const Api, allocator: std.mem.Allocator, module: mlir.Module, compile_options_pb: []const u8) CompileError!*LoadedExecutable {
+    pub fn compile(self: *const Client, api: *const Api, allocator: std.mem.Allocator, module: *const mlir.Module, compile_options_pb: []const u8) CompileError!*LoadedExecutable {
         return try asynk.callBlocking(compileSync, .{ self, api, allocator, module, compile_options_pb });
     }
 
@@ -125,6 +134,11 @@ pub const Client = opaque {
 
     pub fn createUnitializedBuffer(self: *const Client, api: *const Api, args: CreateUninitializedBufferArgs) ApiError!*Buffer {
         return @ptrCast(try self.inner().createUninitializedBuffer(api, args));
+    }
+
+    pub const CreateBuffersForAsyncHostToDeviceArgs = pjrt.Client.CreateBuffersForAsyncHostToDeviceArgs;
+    pub fn createBuffersForAsyncHostToDevice(self: *const Client, api: *const Api, args: CreateBuffersForAsyncHostToDeviceArgs) ApiError!*AsyncHostToDeviceTransferManager {
+        return @ptrCast(try self.inner().createBuffersForAsyncHostToDevice(api, args));
     }
 };
 
@@ -298,11 +312,11 @@ pub const AsyncHostToDeviceTransferManager = opaque {
         return @ptrCast(self.inner().device(api));
     }
 
-    pub fn bufferCount(self: *AsyncHostToDeviceTransferManager, api: *const Api) usize {
+    pub fn bufferCount(self: *AsyncHostToDeviceTransferManager, api: *const Api) ApiError!usize {
         return self.inner().bufferCount(api);
     }
 
-    pub fn bufferSize(self: *AsyncHostToDeviceTransferManager, api: *const Api, buffer_index: usize) usize {
+    pub fn bufferSize(self: *AsyncHostToDeviceTransferManager, api: *const Api, buffer_index: usize) ApiError!usize {
         return self.inner().bufferSize(api, buffer_index);
     }
 

@@ -180,7 +180,7 @@ pub const Shape = struct {
         };
     }
 
-    fn toTag(v: anytype) Tag {
+    pub fn toTag(v: anytype) Tag {
         const T = @TypeOf(v);
         return switch (T) {
             EnumLiteral => @tagName(v).ptr,
@@ -1091,5 +1091,16 @@ pub const Shape = struct {
             res_shape = res_shape.appendDim(other.dim(ax), other.tag(ax));
         }
         return res_shape;
+    }
+
+    pub fn concatenate(shapes: []const Shape, ax: anytype) Shape {
+        // TODO: Check that shapes are compatible
+        var new_shape = shapes[0];
+        var new_dim: i64 = 0;
+        for (shapes) |s| {
+            new_dim += s.dim(ax);
+        }
+        new_shape = new_shape.setDim(ax, new_dim);
+        return new_shape;
     }
 };

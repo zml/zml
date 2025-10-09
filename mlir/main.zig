@@ -1,11 +1,18 @@
 const std = @import("std");
 
+const llama = @import("llama.zig");
+
+const c = zml.c;
 const asynk = @import("async");
 const dialects = @import("mlir/dialects");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
+const upb = zml.upb;
 const zml = @import("zml");
+const pjrt = zml.pjrt;
 const Shape = zml.Shape;
+const EnumLiteral = @TypeOf(.enum_literal);
+const Platform = zml.Platform;
 
 var global_compilation_context: ?*CompilationContext = null;
 pub const MAX_RANK: u8 = 8;
@@ -28,8 +35,6 @@ pub const Tensor = struct {
     _shape: zml.Shape,
     tensor_origin: TensorOrigin = .{ .argument = {} },
 
-    pub const tensor = init;
-
     fn mlirType(self: Tensor, mlir_ctx: *mlir.Context) *const mlir.Type {
         return mlir.rankedTensorType(
             self.dims(),
@@ -49,32 +54,84 @@ pub const Tensor = struct {
         return .{ .id = Tensor.current_id.fetchAdd(1, .seq_cst), ._shape = shape_ };
     }
 
+    /// Returns the shape of a Tensor.
     pub fn shape(self: Tensor) Shape {
         return self._shape;
     }
 
+    /// Returns the datatype of a Tensor.
     pub fn dtype(self: Tensor) zml.DataType {
         return self._shape.dtype();
     }
 
+    /// Returns the rank of a Tensor.
     pub fn rank(self: Tensor) u4 {
         return self._shape.rank();
     }
 
+    /// Returns the number of element of a Tensor.
+    pub fn count(self: Tensor) usize {
+        return self._shape.count();
+    }
+
+    /// Returns the size in bytes of a Tensor.
+    pub fn byteSize(self: Tensor) usize {
+        return self._shape.byteSize();
+    }
+
+    /// Returns the dimension of axis 'axis_'.
+    ///
+    /// 'axis_' can be an integer or a tag.
     pub fn dim(self: Tensor, axis_: anytype) i64 {
         return self._shape.dim(axis_);
     }
 
+    /// Returns the dimensions of a Tensor as a slice.
     pub fn dims(self: *const Tensor) []const i64 {
         return self._shape.dims();
     }
 
+    /// Returns the index of axis 'axis_'.
+    ///
+    /// 'axis_' can be an integer or a tag.
     pub fn axis(self: Tensor, axis_: anytype) u3 {
         return self._shape.axis(axis_);
     }
 
-    pub fn count(self: Tensor) usize {
-        return self._shape.count();
+    /// Returns the indices of each of the given axes.
+    ///
+    /// 'axis_' can be an integer or a tag.
+    pub fn axes(self: Tensor, axes_: anytype) stdx.BoundedArray(u3, Tensor.MAX_RANK) {
+        return self._shape.axes(axes_);
+    }
+
+    /// Returns a Tensor tagged with the tags in 'tagz'.
+    pub fn withTags(self: Tensor, tagz: anytype) Tensor {
+        var res = self;
+        res._shape = self._shape.withTags(tagz);
+        return res;
+    }
+
+    /// Returns a Tensor tagged partially with the tags in 'tagz'.
+    ///
+    /// If 'tagz' is of length n, the n last dimensions of the Tensor will be tagged.
+    pub fn withPartialTags(self: Tensor, tagz: anytype) Tensor {
+        var res = self;
+        res._shape = self._shape.withPartialTags(tagz);
+        return res;
+    }
+
+    /// Returns a Tensor with new tag names.
+    pub fn rename(self: Tensor, renames: anytype) Tensor {
+        var res = self;
+        res._shape = self._shape.rename(renames);
+        return res;
+    }
+
+    pub fn renameAxis(self: Tensor, ax: i8, name: EnumLiteral) Tensor {
+        var res = self;
+        res._shape._tags.set(self.axis(ax), @tagName(name).ptr);
+        return res;
     }
 
     pub fn autoBroadcast(self: Tensor) Tensor {
@@ -112,15 +169,6 @@ pub const Tensor = struct {
         return lhs_broad.dotGeneral(rhs, &contracting, batching[0..n_batching_axes]);
     }
 
-    pub const DotArgs = struct {
-        contract_on: []const [2]i8,
-        batch_on: ?[]const [2]i8 = null,
-    };
-
-    pub fn dot(lhs: Tensor, rhs: Tensor, args: DotArgs) Tensor {
-        return lhs.dotGeneral(rhs, args.contract_on, args.batch_on orelse &.{});
-    }
-
     const ArgsKind = enum {
         simple,
         contracting_only,
@@ -140,12 +188,12 @@ pub const Tensor = struct {
         };
     }
 
-    pub fn dot2(lhs: Tensor, rhs: Tensor, args: anytype) Tensor {
-        _ = lhs; // autofix
-        _ = rhs; // autofix
-        const args_kind = getArgsKind(@TypeOf(args));
-        std.debug.print("{}\n", .{args_kind});
-        unreachable;
+    pub fn dot(lhs: Tensor, rhs: Tensor, args: anytype) Tensor {
+        //const args_kind = getArgsKind(@TypeOf(args));
+        //std.debug.print("{}\n", .{args_kind});
+        const lhs_contracting_dim: i8 = @intCast(lhs.shape().hasTag(args).?);
+        const rhs_contracting_dim: i8 = @intCast(rhs.shape().hasTag(args).?);
+        return lhs.dotGeneral(rhs, &.{.{ lhs_contracting_dim, rhs_contracting_dim }}, &.{});
     }
 
     pub fn dotGeneral(
@@ -254,6 +302,10 @@ pub const Tensor = struct {
 
     pub fn add(self: Tensor, other: Tensor) Tensor {
         return binaryOp(@src(), "add", dialects.stablehlo.add)(self, other);
+    }
+
+    pub fn mul(self: Tensor, other: Tensor) Tensor {
+        return binaryOp(@src(), "mul", dialects.stablehlo.multiply)(self, other);
     }
 
     pub fn maximum(self: Tensor, other: Tensor) Tensor {
@@ -418,97 +470,7 @@ pub const Tensor = struct {
     pub const ArgMaxRes = struct {
         values: Tensor,
         indices: Tensor,
-
-        fn cmpOld2(left: ArgMaxRes, right: ArgMaxRes) ArgMaxRes {
-            const left_val = left.values;
-            const right_val = right.values;
-            const left_idx = left.indices;
-            const right_idx = right.indices;
-
-            const left_gt_right = left_val.cmp(.GT, right_val);
-            const is_nan = left_val.cmp(.NE, left_val);
-            const left_gt_or_nan = left_gt_right.logical(.OR, is_nan);
-            // we are bubbling up Nan.
-            const max_val = left_gt_or_nan.select(left_val, right_val);
-
-            // If left_val == right_val: keep the smallest idx.
-            const is_same = left_val.cmp(.EQ, right_val);
-            const is_first = left_idx.cmp(.LT, right_idx);
-            const is_same_but_first = is_same.logical(.AND, is_first);
-            const keep_left_idx = left_gt_or_nan.logical(.OR, is_same_but_first);
-            const max_idx = keep_left_idx.select(left_idx, right_idx);
-
-            return .{ .values = max_val, .indices = max_idx };
-        }
-
-        fn cmpOld(left: [2]Tensor, right: [2]Tensor) [2]Tensor {
-            const left_val = left[0];
-            const right_val = right[0];
-            const left_idx = left[1];
-            const right_idx = right[1];
-
-            const left_gt_right = left_val.cmp(.GT, right_val);
-            const is_nan = left_val.cmp(.NE, left_val);
-            const left_gt_or_nan = left_gt_right.logical(.OR, is_nan);
-            // we are bubbling up Nan.
-            const max_val = left_gt_or_nan.select(left_val, right_val);
-
-            // If left_val == right_val: keep the smallest idx.
-            const is_same = left_val.cmp(.EQ, right_val);
-            const is_first = left_idx.cmp(.LT, right_idx);
-            const is_same_but_first = is_same.logical(.AND, is_first);
-            const keep_left_idx = left_gt_or_nan.logical(.OR, is_same_but_first);
-            const max_idx = keep_left_idx.select(left_idx, right_idx);
-
-            return .{ max_val, max_idx };
-        }
-
-        fn cmp(values: ReduceArgs, indices: ReduceArgs) struct { Tensor, Tensor } {
-            const left_gt_right = values.left.cmp(.GT, values.right);
-            const is_nan = values.left.cmp(.NE, values.left);
-            const left_gt_or_nan = left_gt_right.logical(.OR, is_nan);
-            // we are bubbling up Nan.
-            const max_val = left_gt_or_nan.select(values.left, values.right);
-
-            // If values.left == values.right: keep the smallest idx.
-            const is_same = values.left.cmp(.EQ, values.right);
-            const is_first = indices.left.cmp(.LT, indices.right);
-            const is_same_but_first = is_same.logical(.AND, is_first);
-            const keep_left_idx = left_gt_or_nan.logical(.OR, is_same_but_first);
-            const max_idx = keep_left_idx.select(indices.left, indices.right);
-
-            return .{ max_val, max_idx };
-        }
-
-        fn inputs(x: Tensor, dt: zml.DataType, axis_: i8) ArgMaxRes {
-            return .{ .values = x, .indices = Tensor.arange(.{ .end = x.dim(axis_) }, dt).broadcast(x.shape(), &.{axis_}) };
-        }
-
-        fn inits(x: Tensor, dt: zml.DataType) ArgMaxRes {
-            return .{ .values = Tensor.constant(x.dtype().minValue()), .indices = Tensor.constant(dt.zero()) };
-        }
-
-        fn operand(x: Tensor, dt: zml.DataType) ArgMaxRes {
-            return .{ .values = .init(.init(&.{}, x.dtype())), .indices = .init(.init(&.{}, dt)) };
-        }
     };
-
-    pub const ReduceArgs = struct {
-        left: Tensor,
-        right: Tensor,
-    };
-
-    //pub fn argMax(x: Tensor, axis_: anytype) ArgMaxRes {
-    //    const a = x.axis(axis_);
-    //    const dt: zml.DataType = if (x.dim(a) <= std.math.maxInt(i32)) .i32 else .i64;
-
-    //    return ops.reduce(
-    //        ArgMaxRes.cmp,
-    //        .{ .values = x, .indices = Tensor.arange(.{ .end = x.dim(a) }, dt).broadcast(x.shape(), &.{a}) },
-    //        .{ .values = Tensor.constant(&.{}, x.dtype().minValue()), .indices = Tensor.scalar(0, dt) },
-    //        &.{a},
-    //    );
-    //}
 
     pub const LogicalOp = enum { OR, XOR, AND };
     pub fn logical(self: Tensor, comptime logical_op: LogicalOp, other: Tensor) Tensor {
@@ -554,7 +516,6 @@ pub const Tensor = struct {
         const a = x.axis(axis_);
         const dt: zml.DataType = if (x.dim(a) <= std.math.maxInt(i32)) .i32 else .i64;
 
-        //return reduce(ArgMaxRes.cmp, .inputs(x, dt, a), .inits(x, dt), .operand(x, dt), .operand(x, dt), &.{a});
         const values, const indices = reduce(
             .{ x, Tensor.arange(.{ .end = x.dim(axis_) }, dt).broadcast(x.shape(), &.{a}) },
             .{ Tensor.constant(x.dtype().minValue()), Tensor.constant(dt.zero()) },
@@ -582,79 +543,12 @@ pub const Tensor = struct {
         return .{ .values = values, .indices = indices };
     }
 
-    fn collectValues(allocator: std.mem.Allocator, v: anytype) []const *const mlir.Value {
-        const LocalContext = struct {
-            list: *std.ArrayList(*const mlir.Value),
-            allocator: std.mem.Allocator,
-        };
+    pub const ReduceArgs = struct {
+        left: Tensor,
+        right: Tensor,
+    };
 
-        var list: std.ArrayList(*const mlir.Value) = .{};
-        var context: LocalContext = .{ .list = &list, .allocator = allocator };
-        zml.meta.visit(struct {
-            fn cb(context_: *LocalContext, t: *const Tensor) void {
-                context_.list.append(context_.allocator, t.value()) catch unreachable;
-            }
-        }.cb, &context, v);
-
-        return list.toOwnedSlice(allocator) catch unreachable;
-    }
-
-    fn collectShapes(allocator: std.mem.Allocator, v: anytype) []const zml.Shape {
-        const LocalContext = struct {
-            list: *std.ArrayList(zml.Shape),
-            allocator: std.mem.Allocator,
-        };
-
-        var list: std.ArrayList(zml.Shape) = .{};
-        var context: LocalContext = .{ .list = &list, .allocator = allocator };
-        zml.meta.visit(struct {
-            fn cb(context_: *LocalContext, t: *const Tensor) void {
-                context_.list.append(context_.allocator, t.shape()) catch unreachable;
-            }
-        }.cb, &context, v);
-
-        return list.toOwnedSlice(allocator) catch unreachable;
-    }
-
-    fn mapToArguments(compilation_context: *CompilationContext, v: anytype, starting_index: usize) usize {
-        const LocalContext = struct {
-            current_argument_index: usize,
-            compilation_context: *CompilationContext,
-        };
-
-        var context: LocalContext = .{
-            .current_argument_index = starting_index,
-            .compilation_context = compilation_context,
-        };
-
-        zml.meta.visit(struct {
-            fn cb(context_: *LocalContext, t: *const Tensor) void {
-                _ = context_.compilation_context.currentBlock().addArgument(
-                    mlir.rankedTensorType(t.dims(), zml.mlir.Type.fromDType(mlirCtx(), t.dtype())),
-                    .unknown(mlirCtx()),
-                );
-                context_.compilation_context.currentMapping().put(context_.compilation_context.allocator, t.id, context_.current_argument_index) catch unreachable;
-                context_.current_argument_index += 1;
-            }
-        }.cb, &context, v);
-
-        return context.current_argument_index;
-    }
-
-    fn ReduceResult(comptime T: anytype) type {
-        const type_info = @typeInfo(T);
-        return switch (type_info.@"struct".fields.len) {
-            0 => unreachable,
-            1 => type_info.@"struct".fields[0].type,
-            else => |len| @Type(.{ .array = .{
-                .len = len,
-                .sentinel_ptr = null,
-                .child = type_info.@"struct".fields[0].type,
-            } }),
-        };
-    }
-
-    fn reduce(inputs: anytype, inits: anytype, axes: []const i64, comptime func: anytype, context: anytype) stdx.meta.FnResult(func) {
+    fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func: anytype, context: anytype) stdx.meta.FnResult(func) {
         var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
         defer arena.deinit();
 
@@ -685,9 +579,12 @@ pub const Tensor = struct {
 
             var result = @call(.auto, func, args ++ context);
 
-            const result_values = collectValues(arena.allocator(), &result);
+            var result_values: [inits.len]*const mlir.Value = undefined;
+            inline for (0..inits.len) |i| {
+                result_values[i] = result[i].value();
+            }
 
-            _ = dialects.stablehlo.returns(mlirCtx(), result_values, .unknown(mlirCtx())).appendTo(reduce_block);
+            _ = dialects.stablehlo.returns(mlirCtx(), &result_values, .unknown(mlirCtx())).appendTo(reduce_block);
             break :b .{ reduce_block, result };
         };
         var input_values: [inputs.len]*const mlir.Value = undefined;
@@ -703,7 +600,7 @@ pub const Tensor = struct {
             .result_type_inference = true,
             .blocks = &.{reduce_block},
             .attributes = &.{
-                .named(mlirCtx(), "dimensions", mlir.denseArrayAttribute(mlirCtx(), .i64, axes)),
+                .named(mlirCtx(), "dimensions", mlir.denseArrayAttribute(mlirCtx(), .i64, axes_)),
             },
             .verify = false,
             .location = .unknown(mlirCtx()),
@@ -711,344 +608,13 @@ pub const Tensor = struct {
 
         inline for (0..result.len) |i| {
             const val = reduce_op.result(i);
-            const reduced_shape = inputs[i].shape().removeMany(axes);
+            var reduced_shape: Shape = inputs[i].shape();
+            for (axes_) |a| {
+                reduced_shape = reduced_shape.setDim(a, 1);
+            }
 
-            result[i] = ._result(reduced_shape, val).broad(inputs[i].shape());
+            result[i] = Tensor._result(result[i].shape(), val).broad(reduced_shape);
         }
-
-        return result;
-    }
-
-    fn reduceOld(comptime func: anytype, inputs: anytype, inits: anytype, axes: []const i64) ReduceResult(@TypeOf(inputs)) {
-        var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
-        defer arena.deinit();
-
-        const reduce_block = b: {
-            const reduce_block = mlir.Block.init(&.{}, &.{});
-            errdefer reduce_block.deinit();
-
-            CompilationContext.current().pushBlock(reduce_block);
-            defer CompilationContext.current().popBlock();
-
-            var lhs: [inputs.len]Tensor = undefined;
-            var rhs: [inputs.len]Tensor = undefined;
-            inline for (0..inits.len) |i| {
-                lhs[i] = Tensor.init(inits[i].shape());
-                rhs[i] = Tensor.init(inits[i].shape());
-            }
-            const arg_count = mapToArguments(CompilationContext.current(), &lhs, 0);
-            _ = mapToArguments(CompilationContext.current(), &rhs, arg_count);
-
-            var result = if (inputs.len == 1) func(lhs[0], rhs[0]) else func(lhs, rhs);
-
-            const result_values = collectValues(arena.allocator(), &result);
-
-            _ = dialects.stablehlo.returns(mlirCtx(), result_values, .unknown(mlirCtx())).appendTo(reduce_block);
-            break :b reduce_block;
-        };
-
-        const input_values = collectValues(arena.allocator(), &inputs);
-        const init_values = collectValues(arena.allocator(), &inits);
-
-        const reduce_op = mlir.Operation.make(mlirCtx(), "stablehlo.reduce", .{
-            .operands = .{ .variadic = &.{ input_values, init_values } },
-            .result_type_inference = true,
-            .blocks = &.{reduce_block},
-            .attributes = &.{
-                .named(mlirCtx(), "dimensions", mlir.denseArrayAttribute(mlirCtx(), .i64, axes)),
-            },
-            .verify = false,
-            .location = .unknown(mlirCtx()),
-        }).appendTo(CompilationContext.current().currentBlock());
-
-        var broadcasting_axes: stdx.BoundedArray(i64, MAX_RANK) = .{};
-        for (0..MAX_RANK) |i| {
-            if (std.mem.indexOfScalar(i64, axes, @intCast(i)) == null) {
-                broadcasting_axes.append(@intCast(i)) catch unreachable;
-            }
-        }
-
-        const LocalContext = struct {
-            axes: []const i64,
-            broadcasting_axes: []const i64,
-            n_reduced: u8,
-            current_id: usize = 0,
-            reduce_op: *mlir.Operation,
-        };
-        var context2: LocalContext = .{
-            .axes = axes,
-            .broadcasting_axes = broadcasting_axes.constSlice(),
-            .n_reduced = @intCast(axes.len),
-            .reduce_op = reduce_op,
-        };
-        var result: ReduceResult(@TypeOf(inputs)) = inputs;
-        zml.meta.visit(struct {
-            fn cb(context_: *LocalContext, t: *Tensor) void {
-                const val = context_.reduce_op.result(context_.current_id);
-                var reduced_shape = t.shape();
-                for (context_.axes) |a| {
-                    reduced_shape = reduced_shape.setDim(a, 1);
-                }
-
-                const broadcast_op = dialects.stablehlo.broadcast_in_dim(
-                    mlirCtx(),
-                    val,
-                    context_.broadcasting_axes[0 .. t.rank() - context_.n_reduced],
-                    mlir.rankedTensorType(reduced_shape.dims(), zml.mlir.Type.fromDType(mlirCtx(), reduced_shape.dtype())),
-                    .unknown(mlirCtx()),
-                ).appendTo(CompilationContext.current().currentBlock());
-                t.* = Tensor._result(reduced_shape, broadcast_op.result(0));
-                context_.current_id += 1;
-            }
-        }.cb, &context2, &result);
-
-        return result;
-    }
-
-    fn reduceOld2(
-        comptime func: anytype,
-        inputs: stdx.meta.FnParam(func, 0),
-        inits: stdx.meta.FnParam(func, 0),
-        lhs: stdx.meta.FnParam(func, 0),
-        rhs: stdx.meta.FnParam(func, 0),
-        axes: []const i64,
-    ) stdx.meta.FnResult(func) {
-        var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
-        defer arena.deinit();
-
-        const reduce_block = b: {
-            const reduce_block = mlir.Block.init(&.{}, &.{});
-            errdefer reduce_block.deinit();
-
-            CompilationContext.current().pushBlock(reduce_block);
-            defer CompilationContext.current().popBlock();
-
-            const arg_count = mapToArguments(CompilationContext.current(), &lhs, 0);
-            _ = mapToArguments(CompilationContext.current(), &rhs, arg_count);
-
-            var result = func(lhs, rhs);
-
-            const result_values = collectValues(arena.allocator(), &result);
-
-            _ = dialects.stablehlo.returns(mlirCtx(), result_values, .unknown(mlirCtx())).appendTo(reduce_block);
-            break :b reduce_block;
-        };
-
-        const input_values = collectValues(arena.allocator(), &inputs);
-        const init_values = collectValues(arena.allocator(), &inits);
-
-        const reduce_op = mlir.Operation.make(mlirCtx(), "stablehlo.reduce", .{
-            .operands = .{ .variadic = &.{ input_values, init_values } },
-            .result_type_inference = true,
-            .blocks = &.{reduce_block},
-            .attributes = &.{
-                .named(mlirCtx(), "dimensions", mlir.denseArrayAttribute(mlirCtx(), .i64, axes)),
-            },
-            .verify = false,
-            .location = .unknown(mlirCtx()),
-        }).appendTo(CompilationContext.current().currentBlock());
-
-        var broadcasting_axes: stdx.BoundedArray(i64, MAX_RANK) = .{};
-        for (0..MAX_RANK) |i| {
-            if (std.mem.indexOfScalar(i64, axes, @intCast(i)) == null) {
-                broadcasting_axes.append(@intCast(i)) catch unreachable;
-            }
-        }
-
-        const LocalContext = struct {
-            axes: []const i64,
-            broadcasting_axes: []const i64,
-            n_reduced: u8,
-            current_id: usize = 0,
-            reduce_op: *mlir.Operation,
-        };
-        var context2: LocalContext = .{
-            .axes = axes,
-            .broadcasting_axes = broadcasting_axes.constSlice(),
-            .n_reduced = @intCast(axes.len),
-            .reduce_op = reduce_op,
-        };
-        var result = inputs;
-        zml.meta.visit(struct {
-            fn cb(context_: *LocalContext, t: *Tensor) void {
-                const val = context_.reduce_op.result(context_.current_id);
-                var reduced_shape = t.shape();
-                for (context_.axes) |a| {
-                    reduced_shape = reduced_shape.setDim(a, 1);
-                }
-
-                const broadcast_op = dialects.stablehlo.broadcast_in_dim(
-                    mlirCtx(),
-                    val,
-                    context_.broadcasting_axes[0 .. t.rank() - context_.n_reduced],
-                    mlir.rankedTensorType(reduced_shape.dims(), zml.mlir.Type.fromDType(mlirCtx(), reduced_shape.dtype())),
-                    .unknown(mlirCtx()),
-                ).appendTo(CompilationContext.current().currentBlock());
-                t.* = Tensor._result(reduced_shape, broadcast_op.result(0));
-                context_.current_id += 1;
-            }
-        }.cb, &context2, &result);
-
-        return result;
-    }
-
-    fn reduceOld3(comptime func: anytype, inputs: stdx.meta.FnParam(func, 0), inits: stdx.meta.FnParam(func, 0), axes: []const i64) stdx.meta.FnResult(func) {
-        var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
-        defer arena.deinit();
-
-        const mlir_ctx = CompilationContext.current().mlir_ctx;
-
-        const input_values, const input_shapes = b: {
-            var values_list: std.ArrayList(*const mlir.Value) = .{};
-            var shapes_list: std.ArrayList(zml.Shape) = .{};
-            const LocalContext = struct {
-                values_list: *std.ArrayList(*const mlir.Value),
-                shapes_list: *std.ArrayList(zml.Shape),
-                allocator: std.mem.Allocator,
-            };
-            var context: LocalContext = .{
-                .values_list = &values_list,
-                .shapes_list = &shapes_list,
-                .allocator = arena.allocator(),
-            };
-            zml.meta.visit(struct {
-                fn cb(context_: *LocalContext, t: *const Tensor) void {
-                    context_.values_list.append(context_.allocator, t.value()) catch unreachable;
-                    context_.shapes_list.append(context_.allocator, t.shape()) catch unreachable;
-                }
-            }.cb, &context, &inputs);
-            break :b .{
-                values_list.toOwnedSlice(arena.allocator()) catch unreachable,
-                shapes_list.toOwnedSlice(arena.allocator()) catch unreachable,
-            };
-        };
-        const init_values = b: {
-            var list: std.ArrayList(*const mlir.Value) = .{};
-            const LocalContext = struct {
-                list: *std.ArrayList(*const mlir.Value),
-                allocator: std.mem.Allocator,
-            };
-            var context: LocalContext = .{ .list = &list, .allocator = arena.allocator() };
-            zml.meta.visit(struct {
-                fn cb(context_: *LocalContext, t: *const Tensor) void {
-                    context_.list.append(context_.allocator, t.value()) catch unreachable;
-                }
-            }.cb, &context, &inits);
-            break :b list.toOwnedSlice(arena.allocator()) catch unreachable;
-        };
-
-        const reduce_block, var result = b2: {
-            const reduce_block = mlir.Block.init(&.{}, &.{});
-            errdefer reduce_block.deinit();
-
-            CompilationContext.current().pushBlock(reduce_block);
-            defer CompilationContext.current().popBlock();
-
-            const LocalContext = struct {
-                current_argument_id: usize = 0,
-            };
-            var context: LocalContext = .{};
-
-            var lhs = inputs;
-            zml.meta.visit(struct {
-                fn cb(context_: *LocalContext, t: *Tensor) void {
-                    const dt = t.dtype();
-                    t.* = .init(.init(&.{}, dt));
-                    _ = CompilationContext.current().currentBlock().addArgument(
-                        mlir.rankedTensorType(t.dims(), zml.mlir.Type.fromDType(CompilationContext.current().mlir_ctx, t.dtype())),
-                        .unknown(CompilationContext.current().mlir_ctx),
-                    );
-                    CompilationContext.current().currentMapping().put(CompilationContext.current().allocator, t.id, context_.current_argument_id) catch unreachable;
-                    context_.current_argument_id += 1;
-                }
-            }.cb, &context, &lhs);
-
-            var rhs = inits;
-            zml.meta.visit(struct {
-                fn cb(context_: *LocalContext, t: *Tensor) void {
-                    const dt = t.dtype();
-                    t.* = .init(.init(&.{}, dt));
-                    _ = CompilationContext.current().currentBlock().addArgument(
-                        mlir.rankedTensorType(t.dims(), zml.mlir.Type.fromDType(CompilationContext.current().mlir_ctx, t.dtype())),
-                        .unknown(CompilationContext.current().mlir_ctx),
-                    );
-                    CompilationContext.current().currentMapping().put(CompilationContext.current().allocator, t.id, context_.current_argument_id) catch unreachable;
-                    context_.current_argument_id += 1;
-                }
-            }.cb, &context, &rhs);
-
-            var result = func(lhs, rhs);
-            const result_values = b: {
-                var list: std.ArrayList(*const mlir.Value) = .{};
-                const LocalContext2 = struct {
-                    list: *std.ArrayList(*const mlir.Value),
-                    allocator: std.mem.Allocator,
-                };
-                var context2: LocalContext2 = .{ .list = &list, .allocator = arena.allocator() };
-                zml.meta.visit(struct {
-                    fn cb(context_: *LocalContext2, t: *const Tensor) void {
-                        context_.list.append(context_.allocator, t.value()) catch unreachable;
-                    }
-                }.cb, &context2, &result);
-                break :b list.toOwnedSlice(arena.allocator()) catch unreachable;
-            };
-            _ = dialects.stablehlo.returns(mlir_ctx, result_values, .unknown(mlir_ctx)).appendTo(reduce_block);
-
-            break :b2 .{ reduce_block, result };
-        };
-        const reduce_op = mlir.Operation.make(CompilationContext.current().mlir_ctx, "stablehlo.reduce", .{
-            .operands = .{ .variadic = &.{ input_values, init_values } },
-            .result_type_inference = true,
-            .blocks = &.{reduce_block},
-            .attributes = &.{
-                .named(CompilationContext.current().mlir_ctx, "dimensions", mlir.denseArrayAttribute(CompilationContext.current().mlir_ctx, .i64, axes)),
-            },
-            .verify = false,
-            .location = .unknown(CompilationContext.current().mlir_ctx),
-        }).appendTo(CompilationContext.current().currentBlock());
-
-        var broadcasting_axes: stdx.BoundedArray(i64, MAX_RANK) = .{};
-        for (0..MAX_RANK) |i| {
-            if (std.mem.indexOfScalar(i64, axes, @intCast(i)) == null) {
-                broadcasting_axes.append(@intCast(i)) catch unreachable;
-            }
-        }
-
-        const LocalContext2 = struct {
-            axes: []const i64,
-            broadcasting_axes: []const i64,
-            n_reduced: u8,
-            current_id: usize = 0,
-            reduce_op: *mlir.Operation,
-            input_shapes: []const zml.Shape,
-        };
-        var context2: LocalContext2 = .{
-            .axes = axes,
-            .broadcasting_axes = broadcasting_axes.constSlice(),
-            .n_reduced = @intCast(axes.len),
-            .reduce_op = reduce_op,
-            .input_shapes = input_shapes,
-        };
-        zml.meta.visit(struct {
-            fn cb(context_: *LocalContext2, t: *Tensor) void {
-                const mlir_ctx_ = CompilationContext.current().mlir_ctx;
-
-                const val = context_.reduce_op.result(context_.current_id);
-                var reduced_shape = context_.input_shapes[context_.current_id];
-                for (context_.axes) |a| {
-                    reduced_shape = reduced_shape.setDim(a, 1);
-                }
-                const broadcast_op = dialects.stablehlo.broadcast_in_dim(
-                    mlir_ctx_,
-                    val,
-                    context_.broadcasting_axes[0 .. context_.input_shapes[context_.current_id].rank() - context_.n_reduced],
-                    mlir.rankedTensorType(reduced_shape.dims(), zml.mlir.Type.fromDType(mlir_ctx_, reduced_shape.dtype())),
-                    .unknown(mlir_ctx_),
-                ).appendTo(CompilationContext.current().currentBlock());
-                t.* = Tensor._result(reduced_shape, broadcast_op.result(0));
-                context_.current_id += 1;
-            }
-        }.cb, &context2, &result);
 
         return result;
     }
@@ -1083,6 +649,28 @@ pub const Tensor = struct {
         }.binaryOpHelper;
     }
 
+    pub fn concatenate(tensors: []const Tensor, axis_: anytype) Tensor {
+        if (tensors.len == 1) return tensors[0];
+        stdx.debug.assert(tensors.len <= 32, "concatenate only supports up to 32 tensors, got {}", .{tensors.len});
+        var buffer: [32]*const mlir.Value = undefined;
+        std.debug.assert(tensors.len <= buffer.len);
+        std.debug.assert(tensors.len > 0);
+        const a = tensors[0].axis(axis_);
+        // TODO(Corendos): Check that tensor axes match.
+
+        var concatenated_dim: i64 = 0;
+        for (tensors, 0..) |t, i| {
+            buffer[i] = t.value();
+            concatenated_dim += t.dim(a);
+        }
+
+        const res_shape = tensors[0]._shape.set(a, concatenated_dim);
+        const ctx = tensors[0].getContext();
+        const op = dialects.stablehlo.concatenate(ctx.mlir_ctx, buffer[0..tensors.len], a, .unknown(ctx.mlir_ctx)).appendTo(currentBlock());
+        // log.debug("concatenate({}, {}, {d}) -> {d}", .{ tensors[0], tensors[1], a, res_shape });
+        return _result(res_shape, op.result(0));
+    }
+
     pub fn value(self: Tensor) *const mlir.Value {
         return switch (self.tensor_origin) {
             .argument => b: {
@@ -1108,6 +696,105 @@ pub const Tensor = struct {
     }
 };
 
+const MoE = struct {
+    experts: Mlp,
+    router: zml.nn.Linear,
+
+    pub fn init(tensor_descriptor: TensorDescriptor.View) MoE {
+        return .{
+            .experts = .{
+                .gate_up_proj = .{
+                    // We need to bitcast the scale cause safetensors doesn't encode f8 types correctly
+                    .scale = tensor_descriptor.getWithTags("gate_up_proj_scales", .{ .expert, .out, .d }).?,
+                    // We don't bitcast here because PJRT doesn't handle packed host buffers
+                    .blocks = tensor_descriptor.getWithTags("gate_up_proj_blocks", .{ .expert, .out, .d, .d_block }),
+                    .blocks_dtype = .f4e2m1,
+                    .bias = tensor_descriptor.getWithTags("gate_up_proj_bias", .{ .expert, .d }),
+                },
+                .down_proj = .{
+                    .blocks = tensor_descriptor.getWithTags("down_proj_blocks", .{ .expert, .out, .d, .d_block }),
+                    .blocks_dtype = .f4e2m1,
+                    .scale = tensor_descriptor.getWithTags("down_proj_scales", .{ .expert, .out, .d }),
+                    .bias = tensor_descriptor.getWithTags("down_proj_bias", .{ .expert, .d }),
+                },
+            },
+            .router = .{
+                .weight = tensor_descriptor.getWithTags("router.weight", .{ .dout, .d }).?,
+                .bias = tensor_descriptor.getWithTags("router.bias", .{.d}).?,
+            },
+        };
+    }
+
+    pub fn loadBuffers(allocator: std.mem.Allocator, moe: MoE, buffer_store: BufferStore4.View, platform: Platform) !Bufferized(MoE) {
+        var transfer, const entries = try multiTransfer(allocator, .{
+            moe.experts.gate_up_proj.scale.shape(),
+            moe.experts.gate_up_proj.blocks.shape(),
+            moe.experts.gate_up_proj.bias.shape(),
+            moe.experts.down_proj.scale.shape(),
+            moe.experts.down_proj.blocks.shape(),
+            moe.experts.down_proj.bias.shape(),
+            moe.router.weight.shape(),
+            moe.router.bias.shape(),
+        }, platform);
+        defer transfer.deinit(allocator, platform);
+
+        const gate_up_proj_scales, const gate_up_proj_blocks, const gate_up_proj_bias, const down_proj_scales, const down_proj_blocks, const down_proj_bias, const router_weight, const router_bias = entries;
+        buffer_store.get("gate_up_proj_scales").?.reader().stream(gate_up_proj_scales.writer);
+        buffer_store.get("gate_up_proj_blocks").?.reader().stream(gate_up_proj_blocks.writer);
+        buffer_store.get("gate_up_proj_bias").?.reader().stream(gate_up_proj_bias.writer);
+        buffer_store.get("down_proj_scales").?.reader().stream(down_proj_scales.writer);
+        buffer_store.get("down_proj_blocks").?.reader().stream(down_proj_blocks.writer);
+        buffer_store.get("down_proj_bias").?.reader().stream(down_proj_bias.writer);
+        buffer_store.get("router.weight").?.reader().stream(router_weight.writer);
+        buffer_store.get("router.bias").?.reader().stream(router_bias.writer);
+
+        return .{
+            .experts = .{
+                .gate_up_proj = .{
+                    .scale = gate_up_proj_scales,
+                    .blocks = gate_up_proj_blocks,
+                    .bias = gate_up_proj_bias,
+                },
+                .down_proj = .{
+                    .scale = down_proj_scales,
+                    .blocks = down_proj_blocks,
+                    .bias = down_proj_bias,
+                },
+            },
+            .router = .{
+                .weight = router_weight,
+                .bias = router_bias,
+            },
+        };
+    }
+};
+
+pub const BlockScaledLinear = struct {
+    blocks: Tensor,
+    scale: Tensor,
+    bias: ?Tensor = null,
+    blocks_dtype: zml.DataType,
+};
+
+pub const Mlp = struct {
+    gate_up_proj: BlockScaledLinear, // {.out = intermediate_size * 2, .d = hidden_size / block_size, .d_block = block_size }
+    down_proj: BlockScaledLinear, // {.out = hidden_size * 2, .d = intermediate_size / block_size, .d_block = block_size }
+
+    pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
+        const dt = x.dtype();
+        var gate, var up = zml.nn.splitRealImg(self.gate_up_proj.forward(x), .interleaved);
+        gate = .minimum(gate, .scalar(7, dt));
+        up = .clamp(up, .scalar(-7, dt), .scalar(7, dt));
+
+        const out = gate.quickGelu().mul(up.addConstant(1));
+        return zml.call(self.down_proj, .forward, .{out});
+    }
+
+    pub fn format(self: Mlp, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writer.print("Mlp(gate_up_proj=.{f}, down_proj=.{f})", .{ self.gate_up_proj, self.down_proj });
+    }
+};
+
 /// Model definition
 const Mnist = struct {
     layers: [2]Layer,
@@ -1116,74 +803,712 @@ const Mnist = struct {
         weight: Tensor,
         bias: Tensor,
 
+        pub fn init(tensor_descriptor: TensorDescriptor.View) Layer {
+            return .{
+                .weight = tensor_descriptor.getWithTags("weight", .{ .dout, .d }).?,
+                .bias = tensor_descriptor.getWithTags("bias", .{.d}).?,
+            };
+        }
+
         pub fn forward(self: Layer, input: Tensor) Tensor {
-            return self.weight.matmul(input).add(self.bias).relu();
+            return self.weight.dot(input, .d).add(self.bias).relu();
+        }
+
+        pub fn loadBuffers(allocator: std.mem.Allocator, layer: Layer, buffer_store: BufferStore4.View, platform: Platform) !Bufferized(Layer) {
+            var transfer, const entries = try multiTransfer(allocator, .{ layer.weight.shape(), layer.bias.shape() }, platform);
+            defer transfer.deinit(allocator, platform);
+
+            const weight, const bias = entries;
+            buffer_store.get("weight").?.reader().stream(weight.writer);
+            buffer_store.get("bias").?.reader().stream(bias.writer);
+
+            return .{
+                .weight = weight.buffer,
+                .bias = bias.buffer,
+            };
         }
     };
 
-    pub fn init(buffer_store: zml.aio.BufferStore) Mnist {
-        return .{
-            .layers = .{
-                .{
-                    .weight = .init(buffer_store.get("fc1.weight").?.shape()),
-                    .bias = .init(buffer_store.get("fc1.bias").?.shape()),
-                },
-                .{
-                    .weight = .init(buffer_store.get("fc2.weight").?.shape()),
-                    .bias = .init(buffer_store.get("fc2.bias").?.shape()),
-                },
-            },
-        };
+    pub fn init(tensor_descriptor: TensorDescriptor.View) Mnist {
+        return .{ .layers = .{
+            Layer.init(tensor_descriptor.withPrefix("fc1")),
+            Layer.init(tensor_descriptor.withPrefix("fc2")),
+        } };
     }
 
     /// just two linear layers + relu activation
     pub fn forward(self: Mnist, input: Tensor) Tensor {
-        // std.log.info("Compiling for target: {s}", .{@tagName(input.getContext().target())});
-        var x = input.flattenAll().convert(.f32);
+        var x = input.flattenAll().convert(.f32).withTags(.{.d});
+        std.debug.print("x.shape: {f}\n", .{x.shape()});
         for (self.layers) |layer| {
-            x = layer.forward(x);
+            x = layer.forward(x).withTags(.{.d});
         }
         return x.argMax(0).indices.convert(.u8);
-        //return x;
+    }
+
+    pub fn loadBuffers(allocator: std.mem.Allocator, model: Mnist, buffer_store: BufferStore4.View, platform: Platform) !Bufferized(Mnist) {
+        return .{
+            .layers = .{
+                try Layer.loadBuffers(allocator, model.layers[0], buffer_store.withPrefix("fc1"), platform),
+                //try Layer.loadBuffers(allocator, model.layers[1], buffer_store.withPrefix("fc2"), platform),
+                //try autoLoad(allocator, model.layers[1], buffer_store.withPrefix("fc2"), platform),
+                try loadBuffersFromId(allocator, model.layers[1], buffer_store.withPrefix("fc2"), platform),
+            },
+        };
     }
 };
+
+pub const TransferEntry = struct {
+    buffer: zml.Buffer,
+    writer: Transfer.Writer,
+};
+
+fn TransferReturnType(comptime ShapeType: type) type {
+    if (ShapeType == zml.Shape) {
+        return std.meta.Tuple(&.{ Transfer, TransferEntry });
+    }
+    const type_info = @typeInfo(ShapeType);
+    return switch (type_info) {
+        .@"struct" => |struct_type_info| b: {
+            if (!struct_type_info.is_tuple) unreachable;
+            inline for (struct_type_info.fields) |field| {
+                if (field.type != zml.Shape) unreachable;
+            }
+            const types = [1]type{Transfer} ++ [_]type{TransferEntry} ** struct_type_info.fields.len;
+            break :b std.meta.Tuple(&types);
+        },
+        else => unreachable,
+    };
+}
+
+pub fn singleTransfer(allocator: std.mem.Allocator, shape: Shape, platform: Platform) !struct { Transfer, TransferEntry } {
+    var transfer = try Transfer.init(allocator, &.{shape}, platform);
+    errdefer transfer.deinit(allocator, platform);
+
+    const entry = .{
+        .buffer = zml.Buffer.fromPjrtBuffers(platform, shape, &.{transfer.get(0).buffer}),
+        .writer = transfer.get(0).writer(),
+    };
+
+    return .{ transfer, entry };
+}
+
+pub fn multiTransfer(allocator: std.mem.Allocator, shapes: anytype, platform: Platform) !struct { Transfer, [shapes.len]TransferEntry } {
+    var shapes_array: [shapes.len]zml.Shape = undefined;
+    inline for (shapes, 0..) |shape, index| shapes_array[index] = shape;
+
+    var transfer = try Transfer.init(allocator, &shapes_array, platform);
+    errdefer transfer.deinit(allocator, platform);
+
+    var entries: [shapes.len]TransferEntry = undefined;
+    inline for (shapes, 0..) |shape, index| {
+        entries[index].buffer = zml.Buffer.fromPjrtBuffers(platform, shape, &.{transfer.get(index).buffer});
+        entries[index].writer = transfer.get(index).writer();
+    }
+
+    return .{ transfer, entries };
+}
+
+fn autoLoad(allocator: std.mem.Allocator, model: anytype, buffer_store: BufferStore4.View, platform: Platform) !Bufferized(@TypeOf(model)) {
+    const Model = @TypeOf(model);
+    var result: Bufferized(Model) = undefined;
+
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    defer arena.deinit();
+
+    const shapes = try collectShapes(arena.allocator(), &model);
+
+    var transfer: Transfer = try .init(arena.allocator(), shapes, platform);
+    defer transfer.deinit(arena.allocator(), platform);
+
+    const readers = try arena.allocator().alloc(BufferStore4.Reader, shapes.len);
+
+    {
+        var index: usize = 0;
+        const type_info = @typeInfo(Model);
+        switch (type_info) {
+            .@"struct" => |struct_type_info| {
+                inline for (struct_type_info.fields) |field| {
+                    const reader = buffer_store.get(field.name).?.reader();
+                    readers[index] = reader;
+                    index += 1;
+                }
+            },
+            else => unreachable,
+        }
+    }
+
+    const LocalContext = struct {
+        readers: []BufferStore4.Reader,
+        shapes: []const Shape,
+        platform: Platform,
+        transfer: *Transfer,
+        index: usize = 0,
+    };
+    var context: LocalContext = .{ .readers = readers, .shapes = shapes, .platform = platform, .transfer = &transfer };
+    zml.meta.visit(struct {
+        fn cb(context_: *LocalContext, buffer: *zml.Buffer) void {
+            const writer = context_.transfer.get(context_.index).writer();
+            context_.readers[context_.index].stream(writer);
+
+            buffer.* = zml.Buffer.fromPjrtBuffers(context_.platform, context_.shapes[context_.index], &.{context_.transfer.get(context_.index).buffer});
+            context_.index += 1;
+        }
+    }.cb, &context, &result);
+
+    return result;
+}
+
+pub fn loadBuffersFromId(allocator: std.mem.Allocator, model: anytype, buffer_store: BufferStore5.View, platform: Platform) !Bufferized(@TypeOf(model)) {
+    const Model = @TypeOf(model);
+    var result: Bufferized(Model) = undefined;
+    initBufferizedFrom(model, &result);
+
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    defer arena.deinit();
+
+    const shapes = try collectShapes(arena.allocator(), &model);
+    std.debug.print("Found {d} shapes\n", .{shapes.len});
+
+    var transfer: Transfer = try .init(arena.allocator(), shapes, platform);
+    defer transfer.deinit(arena.allocator(), platform);
+
+    const readers = try collectReaders(arena.allocator(), buffer_store, &model);
+    std.debug.print("Found {d} readers\n", .{readers.len});
+
+    const LocalContext = struct {
+        readers: []BufferStore5.Reader,
+        shapes: []const Shape,
+        platform: Platform,
+        transfer: *Transfer,
+        index: usize = 0,
+    };
+    var context: LocalContext = .{ .readers = readers, .shapes = shapes, .platform = platform, .transfer = &transfer };
+    zml.meta.visit(struct {
+        fn cb(context_: *LocalContext, buffer: *zml.Buffer) void {
+            const writer = context_.transfer.get(context_.index).writer();
+            context_.readers[context_.index].stream(writer);
+
+            buffer.* = zml.Buffer.fromPjrtBuffers(context_.platform, context_.shapes[context_.index], &.{context_.transfer.get(context_.index).buffer});
+            context_.index += 1;
+        }
+    }.cb, &context, &result);
+
+    return result;
+}
+
+pub fn initBufferizedFrom(model: anytype, bufferized_: *Bufferized(@TypeOf(model))) void {
+    const Model = @TypeOf(model);
+    const type_info = @typeInfo(Bufferized(Model));
+    switch (type_info) {
+        .@"struct" => |struct_type_info| {
+            if (Bufferized(Model) == zml.Buffer) return;
+            inline for (struct_type_info.fields) |field| {
+                initBufferizedFrom(@field(model, field.name), &@field(bufferized_, field.name));
+            }
+        },
+        .@"union" => {
+            switch (model) {
+                inline else => |v, tag| {
+                    bufferized_.* = @unionInit(Bufferized(Model), @tagName(tag), undefined);
+                    initBufferizedFrom(v, @field(bufferized_, @tagName(tag)));
+                },
+            }
+        },
+        .optional => {
+            if (model == null) {
+                bufferized_.* = null;
+            } else {
+                bufferized_.* = undefined;
+                initBufferizedFrom(model.?, &bufferized_.*.?);
+            }
+        },
+        .void, .int, .@"enum", .bool, .enum_literal, .float, .pointer, .vector => {},
+        else => unreachable,
+    }
+}
+
+pub fn structTransfer(allocator: std.mem.Allocator, model: anytype, platform: Platform) !struct { Transfer, Transferized(@TypeOf(model)) } {
+    const Model = @TypeOf(model);
+    var result: Transferized(Model) = undefined;
+    initTransferizedFrom(model, &result);
+
+    const shapes = try collectShapes(allocator, &model);
+    defer allocator.free(shapes);
+    std.debug.print("Found {d} shapes\n", .{shapes.len});
+
+    var transfer: Transfer = try .init(allocator, shapes, platform);
+    errdefer transfer.deinit(allocator, platform);
+
+    const LocalContext = struct {
+        shapes: []const Shape,
+        platform: Platform,
+        transfer: *Transfer,
+        index: usize = 0,
+    };
+    var context: LocalContext = .{ .shapes = shapes, .platform = platform, .transfer = &transfer };
+    zml.meta.visit(struct {
+        fn cb(context_: *LocalContext, transfer_entry: *TransferEntry) void {
+            transfer_entry.buffer = zml.Buffer.fromPjrtBuffers(context_.platform, context_.shapes[context_.index], &.{context_.transfer.get(context_.index).buffer});
+            transfer_entry.writer = context_.transfer.get(context_.index).writer();
+            context_.index += 1;
+        }
+    }.cb, &context, &result);
+
+    return .{ transfer, result };
+}
+
+pub fn Transferized(comptime T: type) type {
+    return zml.meta.MapRestrict(Tensor, TransferEntry).map(T);
+}
+
+fn initTransferizedFrom(model: anytype, transferized: *Transferized(@TypeOf(model))) void {
+    const Model = @TypeOf(model);
+    const type_info = @typeInfo(Transferized(Model));
+    switch (type_info) {
+        .@"struct" => |struct_type_info| {
+            if (Transferized(Model) == TransferEntry) return;
+            inline for (struct_type_info.fields) |field| {
+                initTransferizedFrom(@field(model, field.name), &@field(transferized, field.name));
+            }
+        },
+        .@"union" => {
+            switch (model) {
+                inline else => |v, tag| {
+                    transferized.* = @unionInit(Bufferized(Model), @tagName(tag), undefined);
+                    initTransferizedFrom(v, @field(transferized, @tagName(tag)));
+                },
+            }
+        },
+        .optional => {
+            if (model == null) {
+                transferized.* = null;
+            } else {
+                transferized.* = undefined;
+                initTransferizedFrom(model.?, &transferized.*.?);
+            }
+        },
+        .void, .int, .@"enum", .bool, .enum_literal, .float, .pointer, .vector => {},
+        else => unreachable,
+    }
+}
+
+pub fn bufferTypeFromDtype(dt: zml.DataType) pjrt.BufferType {
+    return switch (dt) {
+        inline else => |tag| @field(pjrt.BufferType, @tagName(tag)),
+    };
+}
+
+const Transfer = struct {
+    entries: []Entry,
+    transfer_manager: *pjrt.AsyncHostToDeviceTransferManager,
+
+    pub const Writer = struct {
+        entry: *Entry,
+    };
+
+    pub const Entry = struct {
+        shape: Shape,
+        transfer_manager: *pjrt.AsyncHostToDeviceTransferManager,
+        buffer_index: usize,
+        buffer: *pjrt.Buffer,
+        platform: Platform,
+
+        pub fn writer(entry: *Entry) Writer {
+            return .{ .entry = entry };
+        }
+    };
+
+    pub fn init(allocator: std.mem.Allocator, shapes: []const Shape, platform: Platform) !Transfer {
+        const shape_specs = try allocator.alloc(pjrt.ShapeSpec, shapes.len);
+        defer allocator.free(shape_specs);
+
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+
+        for (shape_specs, shapes) |*spec, shape| {
+            const dims = try arena.allocator().dupe(i64, shape.dims());
+            spec.* = pjrt.ShapeSpec.init(dims, bufferTypeFromDtype(shape.dtype()));
+        }
+
+        const memory = platform.pjrt_client.memoryByKind(platform.pjrt_api, .unpinned_host).?;
+
+        const transfer_manager = try platform.pjrt_client.createBuffersForAsyncHostToDevice(platform.pjrt_api, .{ .shape_specs = shape_specs, .memory = memory });
+        errdefer transfer_manager.deinit(platform.pjrt_api);
+
+        const count = transfer_manager.bufferCount(platform.pjrt_api) catch unreachable;
+        for (0..count) |index| {
+            const buffer_size = transfer_manager.bufferSize(platform.pjrt_api, index) catch unreachable;
+            std.debug.print("index: {d} - size: {d}\n", .{ index, buffer_size });
+        }
+
+        const entries = try allocator.alloc(Entry, shapes.len);
+        errdefer allocator.free(entries);
+
+        for (entries, shapes, 0..) |*e, shape, index| {
+            const buffer = try transfer_manager.retrieveBuffer(platform.pjrt_api, index);
+            e.* = .{
+                .shape = shape,
+                .transfer_manager = transfer_manager,
+                .buffer_index = index,
+                .buffer = buffer,
+                .platform = platform,
+            };
+        }
+
+        return .{ .entries = entries, .transfer_manager = transfer_manager };
+    }
+
+    pub fn deinit(self: Transfer, allocator: std.mem.Allocator, platform: Platform) void {
+        allocator.free(self.entries);
+        self.transfer_manager.deinit(platform.pjrt_api);
+    }
+
+    pub fn get(self: *const Transfer, index: usize) *Entry {
+        return &self.entries[index];
+    }
+};
+
+pub const Linear = struct {
+    weight: Tensor,
+    bias: ?Tensor = null,
+    tag: Shape.Tag,
+
+    pub fn init(weight: Tensor, bias: ?Tensor, dot_tag: anytype) Linear {
+        return .{
+            .weight = weight,
+            .bias = bias,
+            .tag = zml.Shape.toTag(dot_tag),
+        };
+    }
+
+    pub fn forward(self: Linear, x: Tensor) Tensor {
+        var y = x.dot(self.weight.convert(x.dtype()), self.tag);
+
+        // log.debug("Linear({*}): {d} -> {d} -> {d}", .{ self, x.dims(), y.dims(), if (self.bias) |bias| y.add(bias).dims() else y.dims() });
+        return if (self.bias) |bias| y.add(bias.autoBroadcast()) else y;
+    }
+};
+
+const KvCacheKind = enum {
+    split,
+    unified,
+};
+
+const KvCache = union(KvCacheKind) {
+    split: struct {
+        k: Tensor,
+        v: Tensor,
+    },
+    unified: Tensor,
+};
+
+fn testKvCache(kv_cache: KvCache, input: Tensor) KvCache {
+    return switch (kv_cache) {
+        .split => |split_kv_cache| .{
+            .split = .{
+                .k = split_kv_cache.k.add(input.autoBroadcast()),
+                .v = split_kv_cache.v.add(input.autoBroadcast()),
+            },
+        },
+        .unified => |unified_kv_cache| .{ .unified = unified_kv_cache.add(input.autoBroadcast()) },
+    };
+}
+
+const RmsNorm = struct {
+    weight: Tensor,
+    eps: f32 = 1e-5,
+
+    /// L2 normalization of input tensor along `.d` axis.
+    pub fn forward(self: RmsNorm, input: Tensor) Tensor {
+        const x = if (input.shape().isFullyTagged()) input else input.withPartialTags(.{.d});
+        const normalized = zml.nn.rmsNorm(x, .d, self.eps);
+        return normalized.mul(self.weight.convert(x.dtype()).withTags(.{.d}).broad(x.shape()));
+    }
+};
+
+pub fn testLinear2(linear1: Linear, linear2: Linear, x: Tensor) Tensor {
+    const out1 = linear1.forward(x).rename(.{ .dout = .d });
+    std.debug.print("out1: {f}\n", .{out1});
+    const out2 = linear2.forward(out1).rename(.{ .dout = .d });
+    std.debug.print("out2: {f}\n", .{out1});
+    return out2;
+}
 
 pub fn main() !void {
     try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain);
 }
 
+pub fn asyncMain2() !void {
+    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    //const allocator = std.heap.c_allocator;
+    const allocator = gpa.allocator();
+
+    var context = try zml.Context.init();
+    defer context.deinit();
+
+    const platform = context.autoPlatform(.{});
+    context.printAvailablePlatforms(platform);
+
+    const exe = b: {
+        const linear1: Linear = .init(
+            Tensor.init(zml.Shape.init(.{ .dout = 128, .d = 128 }, .f32)),
+            Tensor.init(zml.Shape.init(.{ .dout = 128 }, .f32)),
+            .d,
+        );
+        const linear2: Linear = .init(
+            Tensor.init(zml.Shape.init(.{ .dout = 64, .d = 128 }, .f32)),
+            Tensor.init(zml.Shape.init(.{ .dout = 64 }, .f32)),
+            .d,
+        );
+
+        const x = Tensor.init(zml.Shape.init(.{ .b = 16, .s = 16, .d = 128 }, .f32));
+
+        const exe = try compile(allocator, testLinear2, .{ linear1, linear2, x }, platform);
+        errdefer exe.deinit();
+
+        break :b exe;
+    };
+    defer exe.deinit();
+}
+
 pub fn asyncMain() !void {
-    const allocator = std.heap.c_allocator;
+    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    //const allocator = std.heap.c_allocator;
+    const allocator = gpa.allocator();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
 
     const process_args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, process_args);
-    const pt_model = process_args[1];
-    const t10kfilename = process_args[2];
-    _ = t10kfilename; // autofix
 
-    // Read model shapes.
-    // Note this works because Mnist struct uses the same layer names as the pytorch model
-    var buffer_store = try zml.aio.detectFormatAndOpen(allocator, pt_model);
+    const model_config_path = try std.fs.path.join(allocator, &.{ process_args[1], "config.json" });
+    defer allocator.free(model_config_path);
+
+    const model_weights_path = b: {
+        const simple_path = try std.fs.path.join(allocator, &.{ process_args[1], "model.safetensors" });
+        if (asynk.File.access(simple_path, .{})) {
+            break :b simple_path;
+        } else |_| {
+            allocator.free(simple_path);
+        }
+
+        const sharded_path = try std.fs.path.join(allocator, &.{ process_args[1], "model.safetensors.index.json" });
+        break :b sharded_path;
+    };
+    defer allocator.free(model_weights_path);
+
+    const config = blk: {
+        var config_json_file = try asynk.File.open(model_config_path, .{ .mode = .read_only });
+        defer config_json_file.close() catch unreachable;
+        var config_json_buffer: [256]u8 = undefined;
+        var config_reader = config_json_file.reader(&config_json_buffer);
+        var reader = std.json.Reader.init(allocator, &config_reader.interface);
+        defer reader.deinit();
+        const config_obj = try std.json.parseFromTokenSourceLeaky(llama.LlamaLM.Config, arena.allocator(), &reader, .{ .ignore_unknown_fields = true });
+        break :blk config_obj;
+    };
+
+    var old_buffer_store = try zml.aio.detectFormatAndOpen(allocator, model_weights_path);
+    defer old_buffer_store.deinit();
+
+    var buffer_store: BufferStore5 = try .fromBufferStore(allocator, old_buffer_store);
     defer buffer_store.deinit();
 
-    const mnist: Mnist = .init(buffer_store);
-    _ = mnist; // autofix
+    var context = try zml.Context.init();
+    defer context.deinit();
 
-    const input: Tensor = .init(zml.Shape.init(.{ 28, 28 }, .u8));
-    _ = input; // autofix
+    const platform = context.autoPlatform(.{});
+    context.printAvailablePlatforms(platform);
+
+    var llama_model = try llama.LlamaLM.init(allocator, buffer_store.view(), config);
+    defer llama_model.deinit(allocator);
+
+    const llama_buffers = try llama.LlamaLM.loadBuffers(allocator, llama_model, buffer_store.view(), platform);
+    defer llama_buffers.deinit(allocator);
+
+    //const process_args = try std.process.argsAlloc(allocator);
+    //defer std.process.argsFree(allocator, process_args);
+    //const pt_model = process_args[1];
+    //const t10kfilename = process_args[2];
+    //_ = t10kfilename; // autofix
+
+    //// Read model shapes.
+    //// Note this works because Mnist struct uses the same layer names as the pytorch model
+    //var buffer_store = try zml.aio.detectFormatAndOpen(allocator, pt_model);
+    //defer buffer_store.deinit();
+
+    //var buffer_store2 = try BufferStore2.fromBufferStore(allocator, buffer_store, platform);
+    //defer buffer_store2.deinit();
+
+    //var tensor_descriptor = try TensorDescriptor.fromBufferStore(allocator, buffer_store);
+    //defer tensor_descriptor.deinit();
+
+    //// Compile MNIST Model
+    //const mnist: Mnist = .init(tensor_descriptor.view());
+    //const input: Tensor = .init(zml.Shape.init(.{ 28, 28 }, .u8));
+
+    //var buffer_store3 = try BufferStore3.fromTensorDescriptor(allocator, tensor_descriptor, buffer_store, platform);
+    //defer buffer_store3.deinit();
+
+    //std.debug.print("{f}\n", .{mnist.layers[0].weight.shape()});
+
+    //const exe = try compileModel(allocator, Mnist.forward, mnist, .{input}, platform);
+    //defer exe.deinit();
+
+    //// Create model, input and output buffers.
+    //const input_buffer = try zml.Buffer.fromBytes(platform, input.shape(), std.mem.sliceAsBytes(&[_]u8{0} ** (28 * 28)));
+    //_ = input_buffer; // autofix
+    ////const mnist_buffer = try Mnist.initBuffer(buffer_store2);
+
+    //const mnist_buffer = try bufferized(allocator, mnist, buffer_store3);
+    //_ = mnist_buffer; // autofix
+
+    //var buffer_store4: BufferStore4 = try .fromBufferStore(allocator, buffer_store, tensor_descriptor);
+    //defer buffer_store4.deinit();
+
+    //const mnist_buffer2 = try Mnist.loadBuffers(allocator, mnist, buffer_store4.view(), platform);
+    //_ = mnist_buffer2; // autofix
+
+    //var it = tensor_descriptor.map.iterator();
+    //while (it.next()) |entry| {
+    //    std.debug.print("key: \"{s}\" - value: {any}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
+    //}
+
+    //const mnist_buffer, const arena = try bufferized(mnist, buffer_store2);
+
+    // Create arguments (also prepare them) and results helper.
+    //var args = try exe.args(allocator);
+    //defer args.deinit(allocator);
+    //args.set(.{ mnist_buffer, input_buffer });
+
+    //var results = try exe.results(allocator);
+    //defer results.deinit(allocator);
+
+    //exe.call(args, &results);
+    //const output = results.get(zml.Buffer);
+    //defer output.deinit();
+
+    //const linear: Linear = .{
+    //    .weight = Tensor.init(Shape.init(.{ .d = 128, .d_out = 128 }, .f32)),
+    //    .bias = Tensor.init(Shape.init(.{ .d_out = 128 }, .f32)),
+    //    .tag = Shape.toTag(.d),
+    //};
+
+    //const mlp: Mlp = .{
+    //    .up_proj = .{
+    //        .weight = Tensor.init(Shape.init(.{ .d_hidden = 128, .d = 128 }, .f32)),
+    //        .bias = Tensor.init(Shape.init(.{ .d_hidden = 128 }, .f32)),
+    //    },
+    //    .gate_proj = .{
+    //        .weight = Tensor.init(Shape.init(.{ .d_hidden = 128, .d = 128 }, .f32)),
+    //        .bias = Tensor.init(Shape.init(.{ .d_hidden = 128 }, .f32)),
+    //    },
+    //    .down_proj = .{
+    //        .weight = Tensor.init(Shape.init(.{ .d = 128, .d_hidden = 128 }, .f32)),
+    //        .bias = Tensor.init(Shape.init(.{ .d = 128 }, .f32)),
+    //    },
+    //};
+    //_ = mlp; // autofix
+
+    //const x = Tensor.init(Shape.init(.{ .b = 16, .d = 128 }, .f32));
 
     //compileModel(allocator, Mnist.forward, mnist, .{input});
+    //const exe = try compile(allocator, testLinear, .{ linear, x }, platform);
+    //defer exe.deinit();
 
-    compile(allocator, testDot, .{ Tensor.init(.init(.{ .m = 256, .n = 128 }, .f32)), Tensor.init(.init(.{ .b = 16, .n = 128, .k = 256 }, .f32)) });
+    //const linear_buffers = zml.meta.MapRestrict(Tensor, zml.Buffer).map(Linear){
+    //    .weight = try zml.Buffer.fromBytes(platform, linear.weight.shape(), std.mem.sliceAsBytes(&[_]f32{2} ** (128 * 128))),
+    //    .bias = try zml.Buffer.fromBytes(platform, linear.bias.?.shape(), std.mem.sliceAsBytes(&[_]f32{3} ** (128))),
+    //};
+    //const x_buffer = try zml.Buffer.fromBytes(platform, x.shape(), std.mem.sliceAsBytes(&[_]f32{1} ** (16 * 128)));
+
+    //var inputs: [3]zml.Buffer = undefined;
+    //var outputs: [1]zml.Buffer = undefined;
+
+    //serialize(&.{ linear_buffers, x_buffer }, &inputs);
+    //exe.call(&inputs, &outputs);
+    //var result: zml.Buffer = undefined;
+    //deserialize(&result, outputs[0..1]);
+
+    //var host = try result.toHostAlloc(allocator);
+    //defer host.deinit(allocator);
+
+    //std.debug.print("{any}\n", .{host.items(f32)});
+
+    //compile(allocator, testMlp, .{ mlp, x });
+
+    //compile(allocator, testDot, .{ Tensor.init(.init(.{ .m = 256, .n = 128 }, .f32)), Tensor.init(.init(.{ .b = 16, .n = 128, .k = 256 }, .f32)) });
+
+    //try testSplitKvCache(allocator, platform);
+    //try testUnifiedKvCache(allocator, platform);
+    //try testMnist(allocator, buffer_store2, mnist, platform);
 }
 
+//fn testUnifiedKvCache(allocator: std.mem.Allocator, platform: Platform) !void {
+//    const kv_cache: KvCache = .{
+//        .unified = Tensor.init(Shape.init(.{ .layer = 10, .h = 16, .hd = 128 }, .f32)),
+//    };
+//
+//    const input = Tensor.init(Shape.init(.{ .hd = 128 }, .f32));
+//    const exe = try compile(allocator, testKvCache, .{ kv_cache, input }, platform);
+//    defer exe.deinit();
+//
+//    var kv_cache_buffers: zml.meta.MapRestrict(Tensor, zml.Buffer).map(KvCache) = .{
+//        .unified = try zml.Buffer.fromBytes(platform, kv_cache.unified.shape(), std.mem.sliceAsBytes(&[_]f32{1} ** (10 * 16 * 128))),
+//    };
+//    const input_buffer = try zml.Buffer.fromBytes(platform, input.shape(), std.mem.sliceAsBytes(&[_]f32{1} ** 128));
+//
+//    var inputs: [2]zml.Buffer = undefined;
+//    var outputs: [1]zml.Buffer = undefined;
+//
+//    serialize(&.{ kv_cache_buffers, input_buffer }, &inputs);
+//    exe.call(&inputs, &outputs);
+//    deserialize(&kv_cache_buffers, &outputs);
+//}
+
+//fn testSplitKvCache(allocator: std.mem.Allocator, platform: Platform) !void {
+//    const kv_cache: KvCache = .{
+//        .split = .{
+//            .k = Tensor.init(Shape.init(.{ .layer = 10, .h = 8, .hd = 128 }, .f32)),
+//            .v = Tensor.init(Shape.init(.{ .layer = 10, .h = 8, .hd = 128 }, .f32)),
+//        },
+//    };
+//
+//    const input = Tensor.init(Shape.init(.{ .hd = 128 }, .f32));
+//    const exe = try compile(allocator, testKvCache, .{ kv_cache, input }, platform);
+//    defer exe.deinit();
+//
+//    var kv_cache_buffers: zml.meta.MapRestrict(Tensor, zml.Buffer).map(KvCache) = .{
+//        .split = .{
+//            .k = try zml.Buffer.fromBytes(platform, kv_cache.split.k.shape(), std.mem.sliceAsBytes(&[_]f32{1} ** (10 * 8 * 128))),
+//            .v = try zml.Buffer.fromBytes(platform, kv_cache.split.k.shape(), std.mem.sliceAsBytes(&[_]f32{1} ** (10 * 8 * 128))),
+//        },
+//    };
+//    const input_buffer = try zml.Buffer.fromBytes(platform, input.shape(), std.mem.sliceAsBytes(&[_]f32{1} ** 128));
+//
+//    var inputs: [3]zml.Buffer = undefined;
+//    var outputs: [2]zml.Buffer = undefined;
+//
+//    serialize(&.{ kv_cache_buffers, input_buffer }, &inputs);
+//    exe.call(&inputs, &outputs);
+//    deserialize(&kv_cache_buffers, &outputs);
+//}
+
 fn testDot(a: Tensor, b: Tensor) Tensor {
-    _ = a.dot2(b, .n);
-    _ = a.dot2(b, .{ .n = .k });
-    _ = a.dot2(b, .{ .contracting = .{ .n = .k }, .batching = .{.b} });
-    _ = a.dot2(b, .{ .contracting = .{.n}, .batching = .{.b} });
+    _ = a.dot(b, .n);
+    _ = a.dot(b, .{ .n = .k });
+    _ = a.dot(b, .{ .contracting = .{ .n = .k }, .batching = .{.b} });
+    _ = a.dot(b, .{ .contracting = .{.n}, .batching = .{.b} });
     unreachable;
     //return a.dotGeneral(b, &.{.{ 1, 1 }}, &.{});
+}
+
+fn testLinear(linear: Linear, x: Tensor) Tensor {
+    return linear.forward(x);
 }
 
 const CompilationContext = struct {
@@ -1191,6 +1516,8 @@ const CompilationContext = struct {
 
     mlir_registry: *mlir.DialectRegistry,
     mlir_ctx: *mlir.Context,
+    mlir_pass_manager: *mlir.PassManager,
+    //mlir_op_pass_manager: *mlir.OpPassManager,
     module: *mlir.Module,
 
     blocks: stdx.BoundedArray(*mlir.Block, 16) = .{},
@@ -1209,26 +1536,37 @@ const CompilationContext = struct {
         const module = mlir.Module.init(.unknown(mlir_ctx));
         module.operation().setAttributeByName("sym_name", mlir.stringAttribute(mlir_ctx, "zml"));
 
+        const pass_manager = mlir.PassManager.init(mlir_ctx);
+        pass_manager.enableIRPrinting(.{
+            .printBeforeAll = true,
+        });
+        {
+            var opm = pass_manager.asOpPassManager();
+            const passes: []const []const u8 = &.{
+                "canonicalize",
+                "cse",
+                "canonicalize",
+            };
+            for (passes) |pass| {
+                opm.addPipeline(pass) catch unreachable;
+            }
+        }
+
         return .{
             .allocator = allocator,
             .mlir_registry = mlir_registry,
             .mlir_ctx = mlir_ctx,
+            .mlir_pass_manager = pass_manager,
             .module = module,
         };
     }
 
     pub fn deinit(self: *CompilationContext) void {
+        self.mlir_pass_manager.deinit();
         self.module.deinit();
         self.mlir_ctx.deinit();
         self.mlir_registry.deinit();
     }
-
-    //pub fn registerTensor(self: *CompilationContext, tensor_id: usize, argument_id: usize) !void {
-    //    const gop = try self.mapping.getOrPut(self.allocator, tensor_id);
-    //    std.debug.assert(!gop.found_existing);
-
-    //    gop.value_ptr.* = argument_id;
-    //}
 
     pub fn currentBlock(self: *const CompilationContext) *mlir.Block {
         return self.blocks.get(self.blocks.len - 1);
@@ -1265,18 +1603,86 @@ const Context = struct {
     current_id: usize = 0,
 };
 
-fn compileModel(allocator: std.mem.Allocator, comptime func: anytype, model: stdx.meta.Head(stdx.meta.FnArgs(func)), args: stdx.meta.Tail(stdx.meta.FnArgs(func))) void {
-    compile(allocator, func, .{model} ++ args);
+fn compileModel(allocator: std.mem.Allocator, comptime func: anytype, model: stdx.meta.Head(stdx.meta.FnArgs(func)), args: stdx.meta.Tail(stdx.meta.FnArgs(func)), platform: Platform) !Exe {
+    return compile(allocator, func, .{model} ++ args, platform);
 }
 
-fn compile(allocator: std.mem.Allocator, comptime func: anytype, args: stdx.meta.FnArgs(func)) void {
+pub fn compile(allocator: std.mem.Allocator, comptime func: anytype, args: stdx.meta.FnArgs(func), platform: Platform) !Exe {
     var compilation_context: CompilationContext = .init(allocator);
     defer compilation_context.deinit();
 
-    emitMlir(&compilation_context, func, args) catch unreachable;
+    const result = emitMlir(&compilation_context, func, args) catch unreachable;
+
+    _ = result.func.appendTo(compilation_context.module.body());
+    defer compilation_context.allocator.free(result.output_shapes);
+    defer compilation_context.allocator.free(result.input_shapes);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const loaded_executable = compileModuleToPjrtExecutable(arena.allocator(), platform, compilation_context.module, null) catch unreachable;
+
+    const num_devices = platform.sharding().num_replicas * platform.sharding().num_partitions;
+    const exe = try Exe.init(allocator, platform, loaded_executable, result.input_shapes, result.output_shapes, num_devices);
+    errdefer exe.deinit();
+
+    return exe;
 }
 
-fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, args: stdx.meta.FnArgs(func)) !void {
+fn collectShapes(allocator: std.mem.Allocator, v: anytype) ![]Shape {
+    const LocalContext = struct {
+        list: *std.array_list.Managed(Shape),
+    };
+    var list = std.array_list.Managed(Shape).init(allocator);
+    var context: LocalContext = .{ .list = &list };
+    zml.meta.visit(struct {
+        fn cb(ctx_: *LocalContext, tensor: *const Tensor) void {
+            ctx_.list.append(tensor.shape()) catch unreachable;
+        }
+    }.cb, &context, v);
+
+    return try list.toOwnedSlice();
+}
+
+fn collectValues(allocator: std.mem.Allocator, v: anytype) ![]*const mlir.Value {
+    const LocalContext = struct {
+        list: *std.array_list.Managed(*const mlir.Value),
+    };
+    var list = std.array_list.Managed(*const mlir.Value).init(allocator);
+    var context: LocalContext = .{ .list = &list };
+    zml.meta.visit(struct {
+        fn cb(ctx_: *LocalContext, tensor: *const Tensor) void {
+            ctx_.list.append(tensor.value()) catch unreachable;
+        }
+    }.cb, &context, v);
+
+    return try list.toOwnedSlice();
+}
+
+fn collectReaders(allocator: std.mem.Allocator, buffer_store: BufferStore5.View, v: anytype) ![]BufferStore5.Reader {
+    const LocalContext = struct {
+        list: *std.array_list.Managed(BufferStore5.Reader),
+        buffer_store: BufferStore5.View,
+    };
+    var list = std.array_list.Managed(BufferStore5.Reader).init(allocator);
+    var context: LocalContext = .{ .list = &list, .buffer_store = buffer_store };
+    zml.meta.visit(struct {
+        fn cb(ctx_: *LocalContext, tensor: *const Tensor) void {
+            const reader = ctx_.buffer_store.getReaderFromId(tensor.id).?;
+            ctx_.list.append(reader) catch unreachable;
+        }
+    }.cb, &context, v);
+
+    return try list.toOwnedSlice();
+}
+
+const EmitMlirResult = struct {
+    func: *mlir.Operation,
+    input_shapes: []const Shape,
+    output_shapes: []const Shape,
+};
+
+fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, args: stdx.meta.FnArgs(func)) !EmitMlirResult {
     var arena = std.heap.ArenaAllocator.init(compilation_context.allocator);
     defer arena.deinit();
 
@@ -1307,41 +1713,958 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
         }
     }.cb, &context, &args);
 
-    {
+    const input_shapes = try collectShapes(compilation_context.allocator, &args);
+    errdefer compilation_context.allocator.free(input_shapes);
+
+    const output_shapes = b: {
         global_compilation_context = compilation_context;
         defer global_compilation_context = null;
         const result = @call(.auto, func, args);
-        _ = dialects.func.return_(compilation_context.mlir_ctx, result.value(), .unknown(compilation_context.mlir_ctx)).appendTo(compilation_context.currentBlock());
-    }
+        const output_shapes = try collectShapes(compilation_context.allocator, &result);
+        const output_values = try collectValues(arena.allocator(), &result);
+        _ = dialects.func.returns(compilation_context.mlir_ctx, output_values, .unknown(compilation_context.mlir_ctx)).appendTo(compilation_context.currentBlock());
+        break :b output_shapes;
+    };
+    errdefer compilation_context.allocator.free(output_shapes);
 
-    const mlir_fn = dialects.func.func(compilation_context.mlir_ctx, .{
+    const mlir_func = dialects.func.func(compilation_context.mlir_ctx, .{
         .name = "main",
         .block = compilation_context.currentBlock(),
         .location = .unknown(compilation_context.mlir_ctx),
     });
 
-    var pass_manager = mlir.PassManager.init(compilation_context.mlir_ctx);
-    pass_manager.enableIRPrinting(.{
-        .printBeforeAll = true,
-    });
-    {
-        var opm = pass_manager.asOpPassManager();
-        const passes: []const []const u8 = &.{
-            "canonicalize",
-            "cse",
-            "canonicalize",
-        };
-        for (passes) |pass| {
-            try opm.addPipeline(pass);
-        }
-    }
-
-    pass_manager.runOnOp(mlir_fn) catch |err| {
-        std.debug.print("Failed to optimize module: {any}\n", .{err});
-        return err;
+    compilation_context.mlir_pass_manager.runOnOp(mlir_func) catch |err| switch (err) {
+        error.MlirUnexpected => {
+            std.log.err("Failed to canonicalize invalid mlir: {f}", .{mlir_func});
+            // user errors should have triggered a panic before we reach this.
+            @panic("ZML generated invalid mlir. Please open a bug report");
+        },
     };
 
-    _ = mlir_fn.appendTo(module.body());
-
-    std.debug.print("{f}\n", .{module});
+    return .{
+        .func = mlir_func,
+        .input_shapes = input_shapes,
+        .output_shapes = output_shapes,
+    };
 }
+
+fn setXlaOverrideFlag(map: *c.upb_Map, flag: []const u8, value: anytype, upb_arena: *c.upb_Arena) !void {
+    const result = c.upb_Map_Set(
+        map,
+        .{ .str_val = upb.stringView(flag) },
+        .{ .msg_val = blk: {
+            const field = try upb.new(c.xla_OptionOverrideProto, upb_arena);
+            switch (@typeInfo(@TypeOf(value))) {
+                .bool => c.xla_OptionOverrideProto_set_bool_field(field, value),
+                .comptime_int, .int => c.xla_OptionOverrideProto_set_int_field(field, @intCast(value)),
+                .comptime_float, .float => c.xla_OptionOverrideProto_set_double_field(field, @floatCast(value)),
+                else => c.xla_OptionOverrideProto_set_string_field(field, upb.stringView(value)),
+            }
+            break :blk @ptrCast(field);
+        } },
+        upb_arena,
+    );
+
+    if (result == false) {
+        return std.mem.Allocator.Error.OutOfMemory;
+    }
+}
+
+fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, module: *const mlir.Module, xla_dump_to_: ?[]const u8) !*pjrt.LoadedExecutable {
+    //const tracer = Tracer.init("ai.zml.compilation");
+    //const compile_frame = tracer.frameStart("pjrt compilation");
+    //defer tracer.frameEnd(compile_frame, "pjrt compilation");
+
+    const sharding = platform.sharding();
+
+    var upb_alloc: upb.Allocator = .init(arena);
+    const upb_arena = c.upb_Arena_Init(null, 0, upb_alloc.inner());
+    defer c.upb_Arena_Free(upb_arena);
+
+    const options = blk: {
+        const options = try upb.new(c.xla_CompileOptionsProto, upb_arena);
+        c.xla_CompileOptionsProto_set_executable_build_options(options, executable_build_options_blk: {
+            const exec_build_options = try upb.new(c.xla_ExecutableBuildOptionsProto, upb_arena);
+
+            c.xla_ExecutableBuildOptionsProto_set_device_ordinal(exec_build_options, -1);
+            c.xla_ExecutableBuildOptionsProto_set_num_replicas(exec_build_options, sharding.num_replicas);
+            c.xla_ExecutableBuildOptionsProto_set_num_partitions(exec_build_options, sharding.num_partitions);
+            c.xla_ExecutableBuildOptionsProto_set_use_spmd_partitioning(exec_build_options, sharding.num_partitions > 1 or sharding.num_replicas > 1);
+
+            c.xla_ExecutableBuildOptionsProto_set_device_assignment(exec_build_options, device_assignment_blk: {
+                const device_assignment = try upb.new(c.xla_DeviceAssignmentProto, upb_arena);
+
+                c.xla_DeviceAssignmentProto_set_replica_count(device_assignment, sharding.num_replicas);
+                c.xla_DeviceAssignmentProto_set_computation_count(device_assignment, sharding.num_partitions);
+
+                const computation_devices = c.xla_DeviceAssignmentProto_resize_computation_devices(device_assignment, sharding.num_partitions, upb_arena);
+                for (computation_devices[0..sharding.num_partitions], 0..) |*computation_device, i| {
+                    computation_device.* = try upb.new(c.xla_DeviceAssignmentProto_ComputationDevice, upb_arena);
+                    _ = c.xla_DeviceAssignmentProto_ComputationDevice_add_replica_device_ids(computation_device.*, @intCast(i), upb_arena);
+                }
+                break :device_assignment_blk device_assignment;
+            });
+
+            break :executable_build_options_blk exec_build_options;
+        });
+
+        const overrides_map = c._xla_CompileOptionsProto_env_option_overrides_mutable_upb_map(options, upb_arena);
+        switch (platform.target) {
+            .cuda => {
+                // NVIDIA recommends these settings
+                // https://github.com/NVIDIA/JAX-Toolbox?tab=readme-ov-file#environment-variables
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_triton_gemm", false, upb_arena);
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_latency_hiding_scheduler", true, upb_arena);
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_llvm_module_compilation_parallelism", true, upb_arena);
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_libnvptxcompiler", true, upb_arena);
+            },
+            .rocm => {
+                // Disable Triton GEMM on ROCM. For some reason it's much, much slower when
+                // enabled on CDNA and it's used on RDNA. Disable it altogether.
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_triton_gemm", false, upb_arena);
+                // Use lld from libllvm instead of invoking the ld.lld binary.
+                // This saves us from having to sandbox it.
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_use_inprocess_lld", true, upb_arena);
+            },
+            else => {},
+        }
+
+        if (xla_dump_to_ orelse platform.compilation_options.xla_dump_to) |xla_dump_to| {
+            try setXlaOverrideFlag(overrides_map, "xla_dump_to", xla_dump_to, upb_arena);
+            try setXlaOverrideFlag(overrides_map, "xla_dump_hlo_as_proto", true, upb_arena);
+            if (platform.compilation_options.xla_dump_fusion_visualization) {
+                try setXlaOverrideFlag(overrides_map, "xla_dump_fusion_visualization", true, upb_arena);
+            }
+            if (platform.compilation_options.xla_dump_hlo_pass_re) |re| {
+                try setXlaOverrideFlag(overrides_map, "xla_dump_hlo_pass_re", re, upb_arena);
+            }
+        }
+
+        break :blk options;
+    };
+
+    const loaded_executable = try platform.pjrt_client.compile(
+        platform.pjrt_api,
+        arena,
+        module,
+        try upb.serialize(options, upb_arena),
+    );
+    errdefer loaded_executable.deinit();
+
+    return loaded_executable;
+}
+
+const Exe = struct {
+    platform: Platform,
+    exe: *pjrt.LoadedExecutable,
+
+    context: ?*pjrt.ExecuteContext = null,
+
+    input_shapes: []const Shape,
+    output_shapes: []const Shape,
+
+    num_devices: u8,
+
+    arena: std.heap.ArenaAllocator,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        platform: Platform,
+        exe: *pjrt.LoadedExecutable,
+        input_shapes: []const Shape,
+        output_shapes: []const Shape,
+        num_devices: u8,
+    ) !Exe {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        errdefer arena.deinit();
+
+        const input_shapes_copy = try arena.allocator().dupe(Shape, input_shapes);
+        const output_shapes_copy = try arena.allocator().dupe(Shape, output_shapes);
+
+        return .{
+            .platform = platform,
+            .exe = exe,
+            .input_shapes = input_shapes_copy,
+            .output_shapes = output_shapes_copy,
+            .num_devices = num_devices,
+            .arena = arena,
+        };
+    }
+
+    pub fn deinit(self: *const Exe) void {
+        self.arena.deinit();
+    }
+
+    pub fn args(self: *const Exe, allocator: std.mem.Allocator) !Arguments {
+        return Arguments.init(allocator, self.input_shapes, self.num_devices);
+    }
+
+    pub fn results(self: *const Exe, allocator: std.mem.Allocator) !Results {
+        return Results.init(allocator, self.output_shapes, self.num_devices, self.platform);
+    }
+
+    pub const FlatBuffers = struct {
+        buffers: []const [*]*pjrt.Buffer,
+        raw_buffers: []const *pjrt.Buffer,
+
+        num_devices: usize,
+
+        pub fn init(allocator: std.mem.Allocator, count: usize, num_devices: usize) !FlatBuffers {
+            const raw_buffers = try allocator.alloc(*pjrt.Buffer, num_devices * count);
+            errdefer allocator.free(raw_buffers);
+
+            const buffers = try allocator.alloc([*]*pjrt.Buffer, num_devices);
+            errdefer allocator.free(buffers);
+
+            for (0..num_devices) |i| {
+                buffers[i] = raw_buffers[i * count ..].ptr;
+            }
+
+            return .{
+                .buffers = buffers,
+                .raw_buffers = raw_buffers,
+                .num_devices = num_devices,
+            };
+        }
+
+        pub fn deinit(self: *const FlatBuffers, allocator: std.mem.Allocator) void {
+            allocator.free(self.buffers);
+            allocator.free(self.raw_buffers);
+        }
+    };
+
+    pub const Arguments = struct {
+        flat_buffers: FlatBuffers,
+        expected_shapes: []const Shape,
+
+        pub fn init(allocator: std.mem.Allocator, shapes: []const Shape, num_devices: usize) !Arguments {
+            const flat_buffers = try FlatBuffers.init(allocator, shapes.len, num_devices);
+            errdefer flat_buffers.deinit(allocator);
+
+            const expected_shapes = try allocator.dupe(Shape, shapes);
+            errdefer allocator.free(expected_shapes);
+
+            return .{
+                .flat_buffers = flat_buffers,
+                .expected_shapes = expected_shapes,
+            };
+        }
+
+        pub fn deinit(self: *const Arguments, allocator: std.mem.Allocator) void {
+            allocator.free(self.expected_shapes);
+            self.flat_buffers.deinit(allocator);
+        }
+
+        pub fn set(self: *Arguments, v: anytype) void {
+            return self.setPartial(v, 0);
+        }
+
+        pub fn setPartial(self: *Arguments, v: anytype, offset: usize) void {
+            const LocalContext = struct {
+                self: *Arguments,
+                current_index: usize = 0,
+            };
+            var context: LocalContext = .{ .self = self, .current_index = offset };
+            zml.meta.visit(struct {
+                fn cb(context_: *LocalContext, buffer: *const zml.Buffer) void {
+                    for (0..context_.self.flat_buffers.num_devices) |device_index| {
+                        context_.self.flat_buffers.buffers[device_index][context_.current_index] = buffer._shards.get(device_index);
+                    }
+
+                    context_.current_index += 1;
+                }
+            }.cb, &context, &v);
+        }
+    };
+
+    pub const Results = struct {
+        platform: Platform,
+        flat_buffers: FlatBuffers,
+
+        expected_shapes: []const Shape,
+
+        pub fn init(allocator: std.mem.Allocator, shapes: []const Shape, num_devices: usize, platform: Platform) !Results {
+            const flat_buffers = try FlatBuffers.init(allocator, shapes.len, num_devices);
+            errdefer flat_buffers.deinit(allocator);
+
+            const expected_shapes = try allocator.dupe(Shape, shapes);
+            errdefer allocator.free(expected_shapes);
+
+            return .{
+                .platform = platform,
+                .flat_buffers = flat_buffers,
+                .expected_shapes = expected_shapes,
+            };
+        }
+
+        pub fn deinit(self: *const Results, allocator: std.mem.Allocator) void {
+            allocator.free(self.expected_shapes);
+            self.flat_buffers.deinit(allocator);
+        }
+
+        pub fn get(self: *Results, comptime T: type) T {
+            var result: T = undefined;
+            const LocalContext = struct {
+                self: *Results,
+                current_index: usize = 0,
+            };
+            var context: LocalContext = .{ .self = self, .current_index = 0 };
+            zml.meta.visit(struct {
+                fn cb(context_: *LocalContext, buffer: *zml.Buffer) void {
+                    var shards: zml.Buffer.Shards = .{};
+                    for (0..context_.self.flat_buffers.num_devices) |device_index| {
+                        shards.appendAssumeCapacity(context_.self.flat_buffers.buffers[device_index][context_.current_index]);
+                    }
+                    buffer.* = zml.Buffer.fromPjrtBuffers(context_.self.platform, context_.self.expected_shapes[context_.current_index], shards.constSlice());
+                    context_.current_index += 1;
+                }
+            }.cb, &context, &result);
+            return result;
+        }
+
+        pub fn fill(self: *Results, v: anytype) void {
+            const LocalContext = struct {
+                self: *Results,
+                current_index: usize = 0,
+            };
+            var context: LocalContext = .{ .self = self, .current_index = 0 };
+            zml.meta.visit(struct {
+                fn cb(context_: *LocalContext, buffer: *zml.Buffer) void {
+                    var shards: zml.Buffer.Shards = .{};
+                    for (0..context_.self.flat_buffers.num_devices) |device_index| {
+                        shards.appendAssumeCapacity(context_.self.flat_buffers.buffers[device_index][context_.current_index]);
+                    }
+                    buffer.* = zml.Buffer.fromPjrtBuffers(context_.self.platform, context_.self.expected_shapes[context_.current_index], shards.constSlice());
+                    context_.current_index += 1;
+                }
+            }.cb, &context, v);
+        }
+    };
+
+    pub fn call(self: *const Exe, arguments: Arguments, results_: *Results) void {
+        var events = [_]?*pjrt.Event{null} ** Platform.MAX_NUM_DEVICES;
+        const sharding = self.platform.sharding();
+
+        self.exe.execute(self.platform.pjrt_api, .{
+            .arguments = arguments.flat_buffers.buffers,
+            .num_args = arguments.expected_shapes.len,
+            .results = results_.flat_buffers.buffers,
+            .events = events[0..sharding.num_partitions],
+            // this allows to tell a specific buffer shouldn't be donated,
+            // even if it has been marked as "can be donated" during compilation.
+            // TODO: expose it ?
+            .non_donatable_input_indices = &.{},
+            .context = self.context,
+        }) catch |err| {
+            std.debug.panic("PJRT_LoadedExecutable_Execute failed with: {}", .{err});
+        };
+
+        for (events[0..sharding.num_partitions]) |e| {
+            if (e) |ev| {
+                ev.await_(self.platform.pjrt_api) catch unreachable;
+            }
+        }
+    }
+};
+
+pub const TensorDescriptor = struct {
+    map: std.StringHashMapUnmanaged(Entry),
+    allocator: std.mem.Allocator,
+
+    const Entry = struct {
+        shape: zml.Shape,
+        associated_tensor_id: ?usize = null,
+    };
+
+    pub const View = struct {
+        tensor_descriptor: *const TensorDescriptor,
+
+        prefix_buffer: [256]u8 = undefined,
+        prefix_length: usize = 0,
+
+        pub fn withPrefix(self: *const View, prefix_: []const u8) View {
+            var buffer: [256]u8 = undefined;
+            const new_prefix = std.fmt.bufPrint(&buffer, "{s}{s}.", .{ self.prefix() orelse "", prefix_ }) catch unreachable;
+
+            return .{
+                .tensor_descriptor = self.tensor_descriptor,
+                .prefix_buffer = buffer,
+                .prefix_length = new_prefix.len,
+            };
+        }
+
+        fn prefix(self: *const View) ?[]const u8 {
+            return if (self.prefix_length == 0) null else self.prefix_buffer[0..self.prefix_length];
+        }
+
+        pub fn get(self: *const View, subkey: []const u8) ?zml.Shape {
+            var buffer: [256]u8 = undefined;
+            const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey }) catch unreachable;
+            std.debug.print("Trying to get: {s}\n", .{key});
+            const entry = self.tensor_descriptor.getPtr(key) orelse return null;
+            return entry.shape;
+        }
+
+        pub fn getWithTags(self: View, subkey: []const u8, tagz: anytype) ?Tensor {
+            var buffer: [256]u8 = undefined;
+            const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey }) catch unreachable;
+            std.debug.print("Trying to get: {s}\n", .{key});
+            const ptr = self.tensor_descriptor.getPtr(key) orelse return null;
+            ptr.shape = ptr.shape.withTags(tagz).withSharding(.{0});
+            const tensor = Tensor.init(ptr.shape);
+            ptr.associated_tensor_id = tensor.id;
+            return tensor;
+        }
+    };
+
+    pub fn init(allocator: std.mem.Allocator) !TensorDescriptor {
+        return .{
+            .map = .{},
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *TensorDescriptor) void {
+        var it = self.map.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.map.deinit(self.allocator);
+    }
+
+    pub fn add(self: *TensorDescriptor, key: []const u8, shape: zml.Shape) !void {
+        const key_copy = try self.allocator.dupe(u8, key);
+        errdefer self.allocator.free(key_copy);
+
+        const gop = try self.map.getOrPut(self.allocator, key_copy);
+        if (gop.found_existing) {
+            return error.AlreadyExists;
+        }
+
+        errdefer self.map.removeByPtr(gop.key_ptr);
+
+        gop.value_ptr.* = .{ .shape = shape };
+    }
+
+    pub fn fromBufferStore(allocator: std.mem.Allocator, buffer_store: zml.aio.BufferStore) !TensorDescriptor {
+        var new_tensor_descriptor: TensorDescriptor = try .init(allocator);
+        errdefer new_tensor_descriptor.deinit();
+
+        var it = buffer_store.buffers.iterator();
+        while (it.next()) |entry| {
+            try new_tensor_descriptor.add(entry.key_ptr.*, entry.value_ptr.shape());
+        }
+
+        return new_tensor_descriptor;
+    }
+
+    pub fn withPrefix(self: *const TensorDescriptor, prefix_: []const u8) TensorDescriptor {
+        var buffer: [256]u8 = undefined;
+        const new_prefix = std.fmt.bufPrint(&buffer, "{s}{s}.", .{ self.prefix() orelse "", prefix_ }) catch unreachable;
+
+        return .{
+            .map = self.map,
+            .allocator = self.allocator,
+            .prefix_buffer = buffer,
+            .prefix_length = new_prefix.len,
+        };
+    }
+
+    fn prefix(self: *const TensorDescriptor) ?[]const u8 {
+        return if (self.prefix_length == 0) null else self.prefix_buffer[0..self.prefix_length];
+    }
+
+    fn getPtr(self: *const TensorDescriptor, key: []const u8) ?*Entry {
+        return self.map.getPtr(key);
+    }
+
+    pub fn view(self: *const TensorDescriptor) View {
+        return .{ .tensor_descriptor = self };
+    }
+};
+
+const BufferStore2 = struct {
+    buffers: std.StringHashMapUnmanaged(zml.Buffer),
+    allocator: std.mem.Allocator,
+
+    prefix_buffer: [256]u8 = undefined,
+    prefix_length: usize = 0,
+
+    pub fn init(allocator: std.mem.Allocator) !BufferStore2 {
+        return .{
+            .buffers = .{},
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *BufferStore2) void {
+        var it = self.buffers.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.deinit();
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.buffers.deinit(self.allocator);
+    }
+
+    pub fn add(self: *BufferStore2, key: []const u8, buffer: zml.Buffer) !void {
+        const key_copy = try self.allocator.dupe(u8, key);
+        errdefer self.allocator.free(key_copy);
+
+        const gop = try self.buffers.getOrPut(self.allocator, key_copy);
+        if (gop.found_existing) {
+            return error.AlreadyExists;
+        }
+
+        errdefer self.buffers.removeByPtr(gop.key_ptr);
+
+        gop.value_ptr.* = buffer;
+    }
+
+    pub fn fromBufferStore(allocator: std.mem.Allocator, buffer_store: zml.aio.BufferStore, platform: Platform) !BufferStore2 {
+        var new_buffer_store: BufferStore2 = try .init(allocator);
+        errdefer new_buffer_store.deinit();
+
+        var it = buffer_store.buffers.iterator();
+        while (it.next()) |entry| {
+            try new_buffer_store.add(entry.key_ptr.*, try entry.value_ptr.toDevice(platform));
+        }
+
+        return new_buffer_store;
+    }
+
+    pub fn withPrefix(self: *const BufferStore2, prefix_: []const u8) BufferStore2 {
+        var buffer: [256]u8 = undefined;
+        const new_prefix = std.fmt.bufPrint(&buffer, "{s}{s}.", .{ self.prefix() orelse "", prefix_ }) catch unreachable;
+
+        return .{
+            .buffers = self.buffers,
+            .allocator = self.allocator,
+            .prefix_buffer = buffer,
+            .prefix_length = new_prefix.len,
+        };
+    }
+
+    fn prefix(self: *const BufferStore2) ?[]const u8 {
+        return if (self.prefix_length == 0) null else self.prefix_buffer[0..self.prefix_length];
+    }
+
+    fn get(self: *const BufferStore2, subkey: []const u8) ?zml.Buffer {
+        var buffer: [256]u8 = undefined;
+        const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey }) catch unreachable;
+        std.debug.print("Trying to get: {s}\n", .{key});
+        return self.buffers.get(key);
+    }
+};
+
+const BufferStore3 = struct {
+    buffers: std.ArrayList(zml.Buffer) = .{},
+    id_to_buffer: std.AutoHashMapUnmanaged(usize, usize) = .{},
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator) !BufferStore3 {
+        return .{
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *BufferStore3) void {
+        self.buffers.deinit(self.allocator);
+        self.id_to_buffer.deinit(self.allocator);
+    }
+
+    pub fn fromTensorDescriptor(allocator: std.mem.Allocator, tensor_descriptor: TensorDescriptor, old_buffer_store: zml.aio.BufferStore, platform: Platform) !BufferStore3 {
+        var buffer_store: BufferStore3 = try .init(allocator);
+        errdefer for (buffer_store.buffers.items) |*item| item.deinit();
+        errdefer buffer_store.deinit();
+
+        var it = tensor_descriptor.map.iterator();
+        while (it.next()) |entry| {
+            var host_buffer = old_buffer_store.get(entry.key_ptr.*).?;
+            host_buffer._shape = entry.value_ptr.shape;
+            const buffer = try host_buffer.toDevice(platform);
+            errdefer buffer.deinit();
+
+            try buffer_store.add(buffer, entry.value_ptr.associated_tensor_id.?);
+        }
+        return buffer_store;
+    }
+
+    pub fn add(self: *BufferStore3, buffer: zml.Buffer, id: usize) !void {
+        const gop = try self.id_to_buffer.getOrPut(self.allocator, id);
+        if (gop.found_existing) return error.AlreadyExists;
+
+        errdefer self.id_to_buffer.removeByPtr(gop.key_ptr);
+
+        const new_index = self.buffers.items.len;
+
+        try self.buffers.append(self.allocator, buffer);
+        errdefer _ = self.buffers.pop();
+
+        gop.value_ptr.* = new_index;
+    }
+
+    pub fn getFromId(self: *const BufferStore3, id: usize) ?zml.Buffer {
+        const index = self.id_to_buffer.get(id) orelse return null;
+        return self.buffers.items[index];
+    }
+};
+
+pub fn bufferized(allocator: std.mem.Allocator, model: anytype, buffer_store: BufferStore3) !Bufferized(@TypeOf(model)) {
+    const T = @TypeOf(model);
+    const BufferizedT = Bufferized(T);
+    var buf: BufferizedT = undefined;
+
+    const LocalContext = struct {
+        buffer_store: *const BufferStore3,
+    };
+
+    var context: LocalContext = .{ .buffer_store = &buffer_store };
+
+    try zml.meta.mapAlloc(struct {
+        fn cb(context_: *LocalContext, tensor: Tensor) zml.Buffer {
+            const buffer = context_.buffer_store.getFromId(tensor.id).?;
+            return buffer;
+        }
+    }.cb, allocator, &context, model, &buf);
+
+    return buf;
+}
+
+pub fn Bufferized(comptime T: type) type {
+    // TODO: we should strip out the non-buffer fields.
+    // Currently it's confusing cause the Bufferized struct contains field that are never read.
+    // Also it will simplify the layout of the Bufferized struct.
+    // accelerating the calls to execute.
+    return zml.meta.MapRestrict(Tensor, zml.Buffer).map(T);
+}
+
+pub const ShardWriter = struct {
+    tensor_shape: Shape,
+    shard_shape: Shape,
+    interface: std.Io.Writer,
+    out: *std.Io.Writer,
+
+    tensor_index: usize = 0,
+    shard_index: usize = 0,
+    shard_coordinates: [2]usize,
+
+    fn init(out: *std.Io.Writer, buffer: []u8, tensor_shape: Shape, shard_shape: Shape) ShardWriter {
+        return .{
+            .tensor_shape = tensor_shape,
+            .shard_shape = shard_shape,
+            .interface = .{
+                .buffer = buffer,
+                .vtable = &.{ .drain = drain },
+            },
+            .out = out,
+        };
+    }
+
+    pub fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const self: *ShardWriter = @alignCast(@fieldParentPtr("interface", w));
+        _ = self; // autofix
+        _ = data; // autofix
+        _ = splat; // autofix
+    }
+
+    fn computeCoordinates(self: ShardWriter, offset: usize) [2]usize {
+        const y = offset / self.tensor_shape.dim(0);
+        const x = offset % self.tensor_shape.dim(0);
+
+        const x_shard = @divFloor(x, self.shard_shape.dim(1));
+        const y_shard = @divFloor(y, self.shard_shape.dim(0));
+
+        return .{ x_shard, y_shard };
+    }
+};
+
+const Slice = struct {
+    shape: Shape,
+    data: []const u8,
+};
+
+pub const BufferStore4 = struct {
+    slices: std.StringHashMapUnmanaged(Entry),
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator) !BufferStore4 {
+        return .{ .slices = .{}, .allocator = allocator };
+    }
+
+    pub fn deinit(self: *BufferStore4) void {
+        var it = self.slices.iterator();
+        while (it.next()) |entry| self.allocator.free(entry.key_ptr.*);
+        self.slices.deinit(self.allocator);
+    }
+
+    pub fn add(self: *BufferStore4, key: []const u8, slice: Slice, associated_tensor_id: ?usize) !void {
+        const key_copy = try self.allocator.dupe(u8, key);
+        errdefer self.allocator.free(key_copy);
+
+        const gop = try self.slices.getOrPut(self.allocator, key_copy);
+        if (gop.found_existing) {
+            return error.AlreadyExists;
+        }
+
+        errdefer self.slices.removeByPtr(gop.key_ptr);
+
+        gop.value_ptr.* = .{ .slice = slice, .associated_tensor_id = associated_tensor_id };
+    }
+
+    pub fn fromBufferStore(allocator: std.mem.Allocator, buffer_store: zml.aio.BufferStore, tensor_descriptor: TensorDescriptor) !BufferStore4 {
+        var new_buffer_store: BufferStore4 = try .init(allocator);
+        errdefer new_buffer_store.deinit();
+
+        var it = buffer_store.buffers.iterator();
+        while (it.next()) |entry| {
+            const descriptor_entry = tensor_descriptor.getPtr(entry.key_ptr.*).?;
+            const slice: Slice = .{ .shape = entry.value_ptr.shape(), .data = entry.value_ptr.bytes() };
+            try new_buffer_store.add(entry.key_ptr.*, slice, descriptor_entry.associated_tensor_id);
+        }
+
+        return new_buffer_store;
+    }
+
+    pub const Reader = struct {
+        entry: *const Entry,
+        pub fn stream(self: Reader, writer: Transfer.Writer) void {
+            const chunk_size = 1024 * 1024;
+            const chunk_count = (self.entry.slice.data.len + chunk_size - 1) / chunk_size;
+
+            for (0..chunk_count) |chunk_index| {
+                const start = chunk_index * chunk_size;
+                const end = @min((chunk_index + 1) * chunk_size, self.entry.slice.data.len);
+                const is_last_transfer = chunk_index == chunk_count - 1;
+                _ = writer.entry.transfer_manager.transferData(writer.entry.platform.pjrt_api, writer.entry.buffer_index, self.entry.slice.data[start..end], @intCast(start), is_last_transfer) catch unreachable;
+            }
+        }
+    };
+
+    pub const Entry = struct {
+        slice: Slice,
+        associated_tensor_id: ?usize = null,
+        pub fn reader(entry: *const Entry) Reader {
+            return .{ .entry = entry };
+        }
+    };
+
+    pub fn get(self: BufferStore4, key: []const u8) ?*Entry {
+        std.debug.print("Trying to get {s}\n", .{key});
+        return self.slices.getPtr(key);
+    }
+
+    pub fn view(self: *const BufferStore4) View {
+        return .{ .buffer_store = self };
+    }
+
+    pub const View = struct {
+        buffer_store: *const BufferStore4,
+
+        prefix_buffer: [256]u8 = undefined,
+        prefix_length: usize = 0,
+
+        pub fn withPrefix(self: *const View, prefix_: []const u8) View {
+            var buffer: [256]u8 = undefined;
+            const new_prefix = std.fmt.bufPrint(&buffer, "{s}{s}.", .{ self.prefix() orelse "", prefix_ }) catch unreachable;
+
+            return .{
+                .buffer_store = self.buffer_store,
+                .prefix_buffer = buffer,
+                .prefix_length = new_prefix.len,
+            };
+        }
+
+        fn prefix(self: *const View) ?[]const u8 {
+            return if (self.prefix_length == 0) null else self.prefix_buffer[0..self.prefix_length];
+        }
+
+        pub fn get(self: *const View, subkey: []const u8) ?*Entry {
+            var buffer: [256]u8 = undefined;
+            const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey }) catch unreachable;
+            std.debug.print("Trying to get: {s}\n", .{key});
+            return self.buffer_store.get(key);
+        }
+    };
+};
+
+pub const BufferStore5 = struct {
+    key_map: std.StringHashMapUnmanaged(usize),
+    id_map: std.AutoHashMapUnmanaged(usize, usize),
+    entries: std.ArrayList(Entry),
+    allocator: std.mem.Allocator,
+
+    pub const Entry = struct {
+        shape: zml.Shape,
+        // TODO(Corentin): Replace with reader ?
+        data: []const u8,
+        associated_tensor_id: ?usize = null,
+    };
+
+    pub fn init(allocator: std.mem.Allocator) !BufferStore5 {
+        return .{
+            .key_map = .empty,
+            .id_map = .empty,
+            .entries = .empty,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *BufferStore5) void {
+        var it = self.key_map.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.key_map.deinit(self.allocator);
+        self.id_map.deinit(self.allocator);
+        self.entries.deinit(self.allocator);
+    }
+
+    pub fn add(self: *BufferStore5, key: []const u8, shape: zml.Shape, data: []const u8) !void {
+        const new_entry_index = self.entries.items.len;
+        const new_entry = try self.entries.addOne(self.allocator);
+        errdefer _ = self.entries.pop();
+
+        const key_copy = try self.allocator.dupe(u8, key);
+        errdefer self.allocator.free(key_copy);
+
+        const gop = try self.key_map.getOrPut(self.allocator, key_copy);
+        if (gop.found_existing) {
+            return error.AlreadyExists;
+        }
+        errdefer self.key_map.removeByPtr(gop.key_ptr);
+
+        gop.value_ptr.* = new_entry_index;
+        new_entry.* = .{ .shape = shape, .data = data };
+    }
+
+    fn bindIdToKey(self: *BufferStore5, key: []const u8, id: usize) !void {
+        const index = self.key_map.get(key).?;
+
+        const gop = try self.id_map.getOrPut(self.allocator, id);
+        if (gop.found_existing) {
+            stdx.debug.panic("Key {s} already has an associated tensor (id: {})", .{ key, gop.value_ptr.* });
+        }
+        errdefer self.id_map.removeByPtr(gop.key_ptr);
+
+        gop.value_ptr.* = index;
+    }
+
+    pub fn fromBufferStore(allocator: std.mem.Allocator, buffer_store: zml.aio.BufferStore) !BufferStore5 {
+        var new_buffer_store: BufferStore5 = try .init(allocator);
+        errdefer new_buffer_store.deinit();
+
+        var it = buffer_store.buffers.iterator();
+        while (it.next()) |entry| {
+            try new_buffer_store.add(entry.key_ptr.*, entry.value_ptr.shape(), entry.value_ptr.bytes());
+        }
+
+        return new_buffer_store;
+    }
+
+    fn getPtrFromKey(self: *const BufferStore5, key: []const u8) ?*Entry {
+        const index = self.key_map.get(key) orelse return null;
+        return &self.entries.items[index];
+    }
+
+    fn getPtrFromId(self: *const BufferStore5, id: usize) ?*Entry {
+        const index = self.id_map.get(id) orelse return null;
+        return &self.entries.items[index];
+    }
+
+    pub fn view(self: *BufferStore5) View {
+        return .{ .store = self };
+    }
+
+    pub const Reader = struct {
+        entry: *const Entry,
+        pub fn stream(self: Reader, writer: Transfer.Writer) void {
+            const chunk_size = 1024 * 1024;
+            const chunk_count = (self.entry.data.len + chunk_size - 1) / chunk_size;
+
+            for (0..chunk_count) |chunk_index| {
+                const start = chunk_index * chunk_size;
+                const end = @min((chunk_index + 1) * chunk_size, self.entry.data.len);
+                const is_last_transfer = chunk_index == chunk_count - 1;
+                _ = writer.entry.transfer_manager.transferData(writer.entry.platform.pjrt_api, writer.entry.buffer_index, self.entry.data[start..end], @intCast(start), is_last_transfer) catch unreachable;
+            }
+        }
+    };
+
+    pub const View = struct {
+        store: *BufferStore5,
+
+        prefix_buffer: [256]u8 = undefined,
+        prefix_length: usize = 0,
+
+        pub fn withPrefix(self: *const View, prefix_: []const u8) View {
+            var buffer: [256]u8 = undefined;
+            const new_prefix = std.fmt.bufPrint(&buffer, "{s}{s}.", .{ self.prefix() orelse "", prefix_ }) catch unreachable;
+
+            return .{
+                .store = self.store,
+                .prefix_buffer = buffer,
+                .prefix_length = new_prefix.len,
+            };
+        }
+
+        fn prefix(self: *const View) ?[]const u8 {
+            return if (self.prefix_length == 0) null else self.prefix_buffer[0..self.prefix_length];
+        }
+
+        pub fn maybeCreateTensor(self: View, subkey: []const u8) ?Tensor {
+            var buffer: [256]u8 = undefined;
+            const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey }) catch unreachable;
+
+            const ptr = self.store.getPtrFromKey(key) orelse return null;
+
+            const tensor = Tensor.init(ptr.shape);
+            self.store.bindIdToKey(key, tensor.id) catch unreachable;
+
+            return tensor;
+        }
+
+        pub fn createTensor(self: View, subkey: []const u8) Tensor {
+            return self.maybeCreateTensor(subkey).?;
+        }
+
+        pub fn maybeCreateTensorWithTags(self: View, subkey: []const u8, tagz: anytype) ?Tensor {
+            var buffer: [256]u8 = undefined;
+            const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey }) catch unreachable;
+
+            const ptr = self.store.getPtrFromKey(key) orelse return null;
+            ptr.shape = ptr.shape.withTags(tagz).withSharding(.{0});
+
+            const tensor = Tensor.init(ptr.shape);
+            self.store.bindIdToKey(key, tensor.id) catch unreachable;
+
+            return tensor;
+        }
+
+        pub fn createTensorWithTags(self: View, subkey: []const u8, tagz: anytype) Tensor {
+            return self.maybeCreateTensorWithTags(subkey, tagz).?;
+        }
+
+        pub fn getReader(self: View, subkey: []const u8) ?Reader {
+            return self.getMaybeReader(subkey).?;
+        }
+
+        pub fn getMaybeReader(self: View, subkey: []const u8) ?Reader {
+            var buffer: [256]u8 = undefined;
+            const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey }) catch unreachable;
+            const entry_ptr = self.store.getPtrFromKey(key) orelse return null;
+            return .{ .entry = entry_ptr };
+        }
+
+        pub fn getReaderFromId(self: View, id: usize) ?Reader {
+            const entry_ptr = self.store.getPtrFromId(id) orelse return null;
+            return .{ .entry = entry_ptr };
+        }
+
+        pub fn getShape(self: View, subkey: []const u8) ?Shape {
+            var buffer: [256]u8 = undefined;
+            const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey }) catch unreachable;
+            const entry_ptr = self.store.getPtrFromKey(key) orelse return null;
+            return entry_ptr.shape;
+        }
+    };
+};

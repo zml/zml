@@ -30,15 +30,18 @@ zig_test(
 
 zig_binary(
     name = "main",
-    args = [
-        "$(location @mnist//:mnist.safetensors)",
-        "$(location @mnist//:t10k-images.idx3-ubyte)",
-    ],
-    data = [
-        "@mnist//:mnist.safetensors",
-        "@mnist//:t10k-images.idx3-ubyte",
-    ],
+    #args = [
+    #    "$(location @mnist//:mnist.safetensors)",
+    #    "$(location @mnist//:t10k-images.idx3-ubyte)",
+    #],
+    #data = [
+    #    "@mnist//:mnist.safetensors",
+    #    "@mnist//:t10k-images.idx3-ubyte",
+    #],
     main = "main.zig",
+    srcs = [
+        "llama.zig",
+    ],
     visibility = ["//visibility:public"],
     deps = [
         ":mlir",
@@ -48,4 +51,21 @@ zig_binary(
         "//stdx",
         "//async",
     ],
+)
+
+zig_library(
+    name = "writer",
+    main = "writer.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":c",
+        "//zml",
+        "//stdx",
+        "//async",
+    ],
+)
+
+zig_test(
+    name = "test_writer",
+    deps = [":writer"],
 )

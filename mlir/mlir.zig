@@ -129,8 +129,9 @@ pub const PassManager = opaque {
     }
 
     pub fn runOnOp(self: *const PassManager, op: *Operation) !void {
-        if (c.mlirLogicalResultIsFailure(c.mlirPassManagerRunOnOp(self.ptr(), op.ptr()))) {
-            // return error.MlirUnexpected;
+        const result = c.mlirPassManagerRunOnOp(self.ptr(), op.ptr());
+        if (result.value == 0) {
+            return error.MlirUnexpected;
         }
     }
 
@@ -1155,7 +1156,7 @@ pub const Operation = opaque {
                     sizes.appendAssumeCapacity(@intCast(segment_operands.len));
                 }
                 state.addAttributes(&.{
-                    .named(ctx, "operandSegmentSizes", denseArrayAttribute(ctx, .i32, sizes.constSlice())),
+                    .named(ctx, "operandSegmentSizes", denseElementsAttribute(RankedTensorType.get(&.{@intCast(sizes.len)}, integerType(ctx, .i32)).shaped(), sizes.constSlice())),
                 });
             },
         };
@@ -1168,7 +1169,7 @@ pub const Operation = opaque {
                     sizes.appendAssumeCapacity(@intCast(segment_results.len));
                 }
                 state.addAttributes(&.{
-                    .named(ctx, "resultSegmentSizes", denseArrayAttribute(ctx, .i32, sizes.constSlice())),
+                    .named(ctx, "resultSegmentSizes", denseElementsAttribute(RankedTensorType.get(&.{@intCast(sizes.len)}, integerType(ctx, .i32)).shaped(), sizes.constSlice())),
                 });
             },
         };
@@ -1247,7 +1248,9 @@ pub const Operation = opaque {
         };
     };
 
-    pub fn writeBytecode(self: *const Operation, config: ?BytecodeWriterConfig, writer: *std.Io.Writer) !void {
+    const WriteBytecodeError = error{InvalidMlirBytecodeVersion} || std.Io.Writer.Error;
+
+    pub fn writeBytecode(self: *const Operation, config: ?BytecodeWriterConfig, writer: *std.Io.Writer) WriteBytecodeError!void {
         if (config) |config_| {
             const bc_config = c.mlirBytecodeWriterConfigCreate();
             defer c.mlirBytecodeWriterConfigDestroy(bc_config);
@@ -1255,7 +1258,12 @@ pub const Operation = opaque {
                 c.mlirBytecodeWriterConfigDesiredEmitVersion(bc_config, @intCast(version));
             }
             var sctx: StringCallbackCtx = .{ .writer = writer };
-            c.mlirOperationWriteBytecodeWithConfig(self.ptr(), bc_config, stringCallback, &sctx);
+            const logical_result = c.mlirOperationWriteBytecodeWithConfig(self.ptr(), bc_config, stringCallback, &sctx);
+
+            if (logical_result.value == 0) {
+                return WriteBytecodeError.InvalidMlirBytecodeVersion;
+            }
+
             if (sctx.err) |err| {
                 return err;
             }

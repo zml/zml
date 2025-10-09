@@ -1384,7 +1384,7 @@ pub fn fftType(ctx: *mlir.Context, value: FftType.Type) *const mlir.Attribute {
 fn stringFromStream(buf: []u8, streamFn: anytype, args: anytype) []const u8 {
     var writer = std.Io.Writer.fixed(buf);
     var sctx: mlir.StringCallbackCtx = .{ .writer = &writer };
-    @call(.auto, streamFn, args ++ .{ mlir.stringCallback, &sctx });
+    _ = @call(.auto, streamFn, args ++ .{ mlir.stringCallback, &sctx });
     return writer.buffered();
 }
 
@@ -1439,7 +1439,7 @@ pub fn serializePortableArtifact(bytecode: []const u8, target_version: []const u
     if (sctx.err) |err| {
         return err;
     }
-    if (result.ptr == null) {
+    if (result.value == 0) {
         return error.InvalidMlirBytecodeVersion;
     }
 }
@@ -1463,7 +1463,7 @@ pub fn serializePortableArtifact2(module: *mlir.Module, target_version: []const 
 
 pub fn return_(ctx: *mlir.Context, value: *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.return", .{
-        .operands = .{ .flat = &.{value} },
+        .operands = .{ .flat = &.{&.{value}} },
         .location = location,
         .verify = false,
     });
@@ -1471,7 +1471,7 @@ pub fn return_(ctx: *mlir.Context, value: *const mlir.Value, location: *const ml
 
 pub fn returns(ctx: *mlir.Context, values: []const *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.return", .{
-        .operands = .{ .flat = values },
+        .operands = .{ .variadic = &.{values} },
         .verify = false,
         .location = location,
     });
