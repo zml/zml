@@ -3,6 +3,7 @@ load("@rules_zig//zig:defs.bzl", "zig_library")
 
 cc_library(
     name = "empty",
+    defines = ["ZML_RUNTIME_TPU_DISABLED"],
 )
 
 cc_library(

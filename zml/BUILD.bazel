@@ -54,7 +54,7 @@ zig_library(
         "torch.zig",
         "zml.zig",
     ],
-    copts = ["-lc", "-freference-trace=20"],
+    zigopts = ["-lc", "-freference-trace=20"],
     main = "zml.zig",
     visibility = ["//visibility:public"],
     deps = [
