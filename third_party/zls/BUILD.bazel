@@ -1,5 +1,74 @@
-load(":zls.bzl", "targets")
+load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+load(":resolved_toolchain.bzl", "resolved_toolchain")
 
-toolchain_type(name = "toolchain_type")
+# This is the ZLS binary toolchain type. Zig rule authors should use this
+# target in the `toolchains` parameter in order to access the appropriate ZLS
+# binary for the current execution platform.
+toolchain_type(
+    name = "toolchain_type",
+    visibility = ["//visibility:public"],
+)
 
-targets()
+resolved_toolchain(
+    name = "resolved_toolchain",
+    # Marked manual so that `bazel test //...` passes
+    # even if no toolchain is registered.
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+)
+
+exports_files(
+    [
+        "cat.zig",
+        "zls_build_runner.zig",
+        "zls_runner.zig",
+        "zls.completion.tpl",
+    ],
+)
+
+zig_binary(
+    name = "runner",
+    main = "runner.zig",
+    data = [
+        "//zig:resolved_toolchain",
+    ],
+    deps = ["@rules_zig//zig/runfiles"],
+)
+
+bzl_library(
+    name = "zls_completion",
+    srcs = ["zls_completion.bzl"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zig/private/common:zig_build",
+        "//zig/private/providers:zig_module_info",
+    ],
+)
+
+bzl_library(
+    name = "zls_toolchain",
+    srcs = ["zls_toolchain.bzl"],
+    visibility = ["//visibility:public"],
+    deps = ["@bazel_tools//tools/build_defs/repo:http.bzl"],
+)
+
+bzl_library(
+    name = "zls_runner",
+    srcs = ["zls_runner.bzl"],
+    visibility = ["//visibility:public"],
+)
+
+# Execute `bazel run //util:update_filegroups` to update this target.
+filegroup(
+    name = "all_files",
+    srcs = [
+        ":BUILD.bazel",
+        ":zls_build_runner.zig",
+        ":zls.completion.tpl",
+        ":zls_completion.bzl",
+        ":zls_runner.zig",
+        ":zls_toolchain.bzl",
+    ],
+    visibility = ["//zig:__pkg__"],
+)

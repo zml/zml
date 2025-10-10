@@ -92,10 +92,10 @@ use_repo(tpu, "libpjrt_tpu")
 neuron = use_extension("//runtimes/neuron:neuron.bzl", "neuron_packages")
 use_repo(neuron, "aws-neuronx-collectives", "aws-neuronx-runtime-lib", "libgomp1", "libpjrt_neuron", "zlib1g")
 
-zls = use_extension("//third_party/zls:zls.bzl", "repo")
-use_repo(zls, "zls_aarch64-macos", "zls_x86_64-linux", "zls_x86_64-macos")
+zls = use_extension("//third_party/zls:zls_toolchain.bzl", "zls_toolchains")
+use_repo(zls, "zls_toolchains")
 
-register_toolchains("//third_party/zls:all")
+register_toolchains("@zls_toolchains//:all")
 
 non_module_deps = use_extension("//:third_party/non_module_deps.bzl", "non_module_deps")
 use_repo(non_module_deps, "com_github_hejsil_clap", "com_google_sentencepiece", "mnist", "org_swig_swig", "xla")
