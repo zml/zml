@@ -181,13 +181,13 @@
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "aws-neuronx-runtime-lib_2.26.42.0-2ff3b5c7d_amd64",
+			"key": "aws-neuronx-runtime-lib_2.28.23.0-dd5879008_amd64",
 			"name": "aws-neuronx-runtime-lib",
-			"sha256": "57f6fd8e850f4054c2d229cd41a83fe1489ec9d9ee55bedf33a14cd6e8beed16",
+			"sha256": "f85a48eb86d96bfa98c8498f21709bc116eba626e0d9b40ec3331a1c618deadf",
 			"urls": [
-				"https://apt.repos.neuron.amazonaws.com/pool/main/a/aws-neuronx-runtime-lib/aws-neuronx-runtime-lib_2.26.42.0-2ff3b5c7d_amd64.deb"
+				"https://apt.repos.neuron.amazonaws.com/pool/main/a/aws-neuronx-runtime-lib/aws-neuronx-runtime-lib_2.28.23.0-dd5879008_amd64.deb"
 			],
-			"version": "2.26.42.0-2ff3b5c7d"
+			"version": "2.28.23.0-dd5879008"
 		},
 		{
 			"arch": "amd64",
@@ -333,13 +333,13 @@
 					"version": "252.36-1~deb12u1"
 				}
 			],
-			"key": "aws-neuronx-collectives_2.26.43.0-47cc904ea_amd64",
+			"key": "aws-neuronx-collectives_2.28.27.0-bc30ece58_amd64",
 			"name": "aws-neuronx-collectives",
-			"sha256": "4886f5aeeea21e4d502d445654a838190e2174a52ffb757da2cc3a8bf09be3f8",
+			"sha256": "f9f886c6d948dcb5136bbb36e80a87f6d1f001ddd27043597a455f6c112ded9a",
 			"urls": [
-				"https://apt.repos.neuron.amazonaws.com/pool/main/a/aws-neuronx-collectives/aws-neuronx-collectives_2.26.43.0-47cc904ea_amd64.deb"
+				"https://apt.repos.neuron.amazonaws.com/pool/main/a/aws-neuronx-collectives/aws-neuronx-collectives_2.28.27.0-bc30ece58_amd64.deb"
 			],
-			"version": "2.26.43.0-47cc904ea"
+			"version": "2.28.27.0-bc30ece58"
 		},
 		{
 			"arch": "amd64",

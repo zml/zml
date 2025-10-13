@@ -4,13 +4,13 @@
 --extra-index-url https://pip.repos.neuron.amazonaws.com
 --find-links https://mirror.zml.ai/pypi/aws-neuronx-runtime-discovery/index.html
 
-boto3==1.40.14 \
-    --hash=sha256:ab5798a03582d09c0de132d080c9aee53d5647b6461261a5b7621170ec80d92b \
-    --hash=sha256:d1d9998fc2b9619fc796c859d263ac81793d783e79331be62931b353dd1b68b9
+boto3==1.40.43 \
+    --hash=sha256:9ad9190672ce8736898bec2d94875aea6ae1ead2ac6d158e01d820f3ff9c23e0 \
+    --hash=sha256:c5d64ba2fb2d90c33c3969f3751869c45746d5efb5136e4cc619e3630ece89a3
     # via libneuronxla
-botocore==1.40.14 \
-    --hash=sha256:06c852be83543c8d45e18a530abcad31659db8b16bcb66fd371c930d38017e7c \
-    --hash=sha256:1810494c8c4190f20f9e17f2da4f7ee91eda863f429c6d690ea17ec41a8f83c4
+botocore==1.40.43 \
+    --hash=sha256:1639f38999fc0cf42c92c5c83c5fbe189a4857a86f55b842be868e3283c6d3bb \
+    --hash=sha256:d87412dc1ea785df156f412627d3417c9f9eb45601fd0846d8fe96fe3c78b630
     # via
     #   boto3
     #   libneuronxla
@@ -100,9 +100,9 @@ charset-normalizer==3.4.3 \
     --hash=sha256:fd10de089bcdcd1be95a2f73dbe6254798ec1bda9f450d5828c96f93e2536b9c \
     --hash=sha256:fdabf8315679312cfa71302f9bd509ded4f2f263fb5b765cf1433b39106c3cc9
     # via requests
-ec2-metadata==2.15.0 \
-    --hash=sha256:b066b268091ca40369fdd644b90a34ecbfd78225bce6f0e269f0bf9ce3ab1b75 \
-    --hash=sha256:daeec6b93229623942ac61f5ccc3026d0079ea1e7c84a5b18a3fb631db85600f
+ec2-metadata==2.16.0 \
+    --hash=sha256:d426bcf5a21543e079ecebfed2aa1236e50881a18910d7326b627d586137983f \
+    --hash=sha256:e916021077117357fa8321b490c30648aaf838aeb36a641978dedc07bb51aa9b
     # via neuronx-cc
 idna==3.10 \
     --hash=sha256:12f65c9b470abda6dc35cf8e63cc574b1c52b11df2c86030af0ac09b01b13ea9 \
@@ -156,8 +156,8 @@ jmespath==1.0.1 \
     # via
     #   boto3
     #   botocore
-libneuronxla==2.2.8201.0+f46ac1ef \
-    --hash=sha256:c5bb9d2c4ab45a786561e09919ef6a3e3b7839bb7b18f539130e8c8659a29b1e
+libneuronxla==2.2.12677.0+470fa032 \
+    --hash=sha256:f11fa452cf42bb1960d5f2df06295915a4208975d586535442e5076690772d58
     # via -r runtimes/neuron/requirements.in
 lockfile==0.12.2 \
     --hash=sha256:6aed02de03cba24efabcd600b30540140634fc06cfa603822d508d5361e9f799 \
@@ -204,8 +204,8 @@ networkx==2.8.8 \
     --hash=sha256:230d388117af870fce5647a3c52401fcf753e94720e6ea6b4197a5355648885e \
     --hash=sha256:e435dfa75b1d7195c7b8378c3859f0445cd88c6b0375c181ed66823a9ceb7524
     # via neuronx-cc
-neuronx-cc==2.20.9961.0+0acef03a \
-    --hash=sha256:22db1e09975f400b74edc2fab24a1b86d967386f060f5a29a3ec21756ecf5b0c
+neuronx-cc==2.21.18209.0+043b1bf7 \
+    --hash=sha256:0afa99346e370afb11244caf874da4cdb90bae11b2bdc09c84da26f2016be068
     # via
     #   -r runtimes/neuron/requirements.in
     #   libneuronxla
@@ -254,28 +254,27 @@ pgzip==0.3.5 \
     --hash=sha256:4e13ab66ecface5c51c5af51d8cd676aa51675cf85df000f501a86cf38c208c1 \
     --hash=sha256:dd35510f59f6bd6b64e31c4baf90c10cdbb2775235fcc079b14b404fbd7f46bf
     # via neuronx-cc
-protobuf==6.32.0 \
-    --hash=sha256:15eba1b86f193a407607112ceb9ea0ba9569aed24f93333fe9a497cf2fda37d3 \
-    --hash=sha256:501fe6372fd1c8ea2a30b4d9be8f87955a64d6be9c88a973996cef5ef6f0abf1 \
-    --hash=sha256:75a2aab2bd1aeb1f5dc7c5f33bcb11d82ea8c055c9becbb41c26a8c43fd7092c \
-    --hash=sha256:7db8ed09024f115ac877a1427557b838705359f047b2ff2f2b2364892d19dacb \
-    --hash=sha256:84f9e3c1ff6fb0308dbacb0950d8aa90694b0d0ee68e75719cb044b7078fe741 \
-    --hash=sha256:a81439049127067fc49ec1d36e25c6ee1d1a2b7be930675f919258d03c04e7d2 \
-    --hash=sha256:a8bdbb2f009cfc22a36d031f22a625a38b615b5e19e558a7b756b3279723e68e \
-    --hash=sha256:ba377e5b67b908c8f3072a57b63e2c6a4cbd18aea4ed98d2584350dbf46f2783 \
-    --hash=sha256:d52691e5bee6c860fff9a1c86ad26a13afbeb4b168cd4445c922b7e2cf85aaf0
+protobuf==6.32.1 \
+    --hash=sha256:2601b779fc7d32a866c6b4404f9d42a3f67c5b9f3f15b4db3cccabe06b95c346 \
+    --hash=sha256:2f5b80a49e1eb7b86d85fcd23fe92df154b9730a725c3b38c4e43b9d77018bf4 \
+    --hash=sha256:68ff170bac18c8178f130d1ccb94700cf72852298e016a2443bdb9502279e5f1 \
+    --hash=sha256:a8a32a84bc9f2aad712041b8b366190f71dde248926da517bde9e832e4412085 \
+    --hash=sha256:b00a7d8c25fa471f16bc8153d0e53d6c9e827f0953f3c09aaa4331c718cae5e1 \
+    --hash=sha256:b1864818300c297265c83a4982fd3169f97122c299f56a56e2445c3698d34710 \
+    --hash=sha256:d0975d0b2f3e6957111aa3935d08a0eb7e006b1505d825f862a1fffc8348e122 \
+    --hash=sha256:d8c7e6eb619ffdf105ee4ab76af5a68b60a9d0f66da3ea12d1640e6d8dab7281 \
+    --hash=sha256:ee2469e4a021474ab9baafea6cd070e5bf27c7d29433504ddea1a4ee5850f68d
     # via neuronx-cc
-psutil==7.0.0 \
-    --hash=sha256:101d71dc322e3cffd7cea0650b09b3d08b8e7c4109dd6809fe452dfd00e58b25 \
-    --hash=sha256:1e744154a6580bc968a0195fd25e80432d3afec619daf145b9e5ba16cc1d688e \
-    --hash=sha256:1fcee592b4c6f146991ca55919ea3d1f8926497a713ed7faaf8225e174581e91 \
-    --hash=sha256:39db632f6bb862eeccf56660871433e111b6ea58f2caea825571951d4b6aa3da \
-    --hash=sha256:4b1388a4f6875d7e2aff5c4ca1cc16c545ed41dd8bb596cefea80111db353a34 \
-    --hash=sha256:4cf3d4eb1aa9b348dec30105c55cd9b7d4629285735a102beb4441e38db90553 \
-    --hash=sha256:7be9c3eba38beccb6495ea33afd982a44074b78f28c434a1f51cc07fd315c456 \
-    --hash=sha256:84df4eb63e16849689f76b1ffcb36db7b8de703d1bc1fe41773db487621b6c17 \
-    --hash=sha256:a5f098451abc2828f7dc6b58d44b532b22f2088f4999a937557b603ce72b1993 \
-    --hash=sha256:ba3fcef7523064a6c9da440fc4d6bd07da93ac726b5733c29027d7dc95b39d99
+psutil==7.1.0 \
+    --hash=sha256:09ad740870c8d219ed8daae0ad3b726d3bf9a028a198e7f3080f6a1888b99bca \
+    --hash=sha256:22e4454970b32472ce7deaa45d045b34d3648ce478e26a04c7e858a0a6e75ff3 \
+    --hash=sha256:57f5e987c36d3146c0dd2528cd42151cf96cd359b9d67cfff836995cc5df9a3d \
+    --hash=sha256:5d007560c8c372efdff9e4579c2846d71de737e4605f611437255e81efcca2c5 \
+    --hash=sha256:655708b3c069387c8b77b072fc429a57d0e214221d01c0a772df7dfedcb3bcd2 \
+    --hash=sha256:6937cb68133e7c97b6cc9649a570c9a18ba0efebed46d8c5dae4c07fa1b67a07 \
+    --hash=sha256:76168cef4397494250e9f4e73eb3752b146de1dd950040b29186d0cce1d5ca13 \
+    --hash=sha256:7d4a113425c037300de3ac8b331637293da9be9713855c4fc9d2d97436d7259d \
+    --hash=sha256:8c70e113920d51e89f212dd7be06219a9b88014e63a4cec69b684c327bc474e3
     # via neuronx-cc
 python-daemon==3.1.2 \
     --hash=sha256:b906833cef63502994ad48e2eab213259ed9bb18d54fa8774dcba2ff7864cec6 \
@@ -295,9 +294,9 @@ requests-unixsocket==0.4.1 \
     --hash=sha256:60c4942e9dbecc2f64d611039fb1dfc25da382083c6434ac0316dca3ff908f4d \
     --hash=sha256:b2596158c356ecee68d27ba469a52211230ac6fb0cde8b66afb19f0ed47a1995
     # via neuronx-cc
-s3transfer==0.13.1 \
-    --hash=sha256:a981aa7429be23fe6dfc13e80e4020057cbab622b08c0315288758d67cabc724 \
-    --hash=sha256:c3fdba22ba1bd367922f27ec8032d6a1cf5f10c934fb5d68cf60fd5a23d936cf
+s3transfer==0.14.0 \
+    --hash=sha256:ea3b790c7077558ed1f02a3072fb3cb992bbbd253392f4b6e9e8976941c7d456 \
+    --hash=sha256:eff12264e7c8b4985074ccce27a3b38a485bb7f7422cc8046fee9be4983e4125
     # via boto3
 scipy==1.12.0 \
     --hash=sha256:196ebad3a4882081f62a5bf4aeb7326aa34b110e533aab23e4374fcccb0890dc \
@@ -334,9 +333,9 @@ tqdm==4.67.1 \
     --hash=sha256:26445eca388f82e72884e0d580d5464cd801a3ea01e63e5601bdff9ba6a48de2 \
     --hash=sha256:f8aef9c52c08c13a65f30ea34f4e5aac3fd1a34959879d7e59e63027286627f2
     # via neuronx-cc
-typing-extensions==4.14.1 \
-    --hash=sha256:38b39f4aeeab64884ce9f74c94263ef78f3c22467c8724005483154c26648d36 \
-    --hash=sha256:d1e1e3b58374dc93031d6eda2420a48ea44a36c2b4766a4fdeb3710755731d76
+typing-extensions==4.15.0 \
+    --hash=sha256:0cea48d173cc12fa28ecabc3b837ea3cf6f38c6d1136f85cbaaf598984861466 \
+    --hash=sha256:f0fa19c6845758ab08074a0cfa8b7aecb71c999ca73d62883bc25cc018c4e548
     # via neuronx-cc
 urllib3==2.5.0 \
     --hash=sha256:3fc47733c7e419d4bc3f6b3dc2b4f890bb743906a30d56ba4a5bfa4bbff92760 \

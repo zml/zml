@@ -196,7 +196,7 @@ fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t)
         "--framework=XLA",
         "--target",
         target,
-        "--verbose=info",
+        "--verbose=35",
         "--enable-internal-neff-wrapper",
         "--output",
         neff_file,

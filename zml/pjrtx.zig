@@ -137,6 +137,12 @@ pub const Client = opaque {
     pub fn createUnitializedBuffer(self: *const Client, api: *const Api, args: CreateUninitializedBufferArgs) ApiError!*Buffer {
         return @ptrCast(try self.inner().createUninitializedBuffer(api, args));
     }
+
+    pub const CreateBuffersForAsyncHostToDeviceArgs = pjrt.Client.CreateBuffersForAsyncHostToDeviceArgs;
+
+    pub fn createBuffersForAsyncHostToDevice(self: *const Client, api: *const Api, args: CreateBuffersForAsyncHostToDeviceArgs) ApiError!*AsyncHostToDeviceTransferManager {
+        return @ptrCast(try self.inner().createBuffersForAsyncHostToDevice(api, args));
+    }
 };
 
 pub const Buffer = opaque {

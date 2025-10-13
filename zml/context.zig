@@ -180,7 +180,10 @@ pub const Context = struct {
         }
 
         self.platforms.set(target, p);
-        try zml.callback.registerInternalCallbacks(p);
+        switch (target) {
+            .cuda => try zml.callback.registerInternalCallbacks(p),
+            else => {},
+        }
 
         return p;
     }

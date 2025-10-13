@@ -181,15 +181,15 @@ fn getPjrtApi() !*c.PJRT_Api {
 
     Static.proxy = dupePjrtApi(Static.inner);
     // Setup the API proxy functions
-    Static.proxy.PJRT_Plugin_Attributes = &struct {
-        const STRUCT_SIZE = 24; // according to the failing assertion
+    // Static.proxy.PJRT_Plugin_Attributes = &struct {
+    //     const STRUCT_SIZE = 24; // according to the failing assertion
 
-        fn call(args: [*c]c.PJRT_Plugin_Attributes_Args) callconv(.c) ?*c.PJRT_Error {
-            var new_args = args.*;
-            new_args.struct_size = @min(new_args.struct_size, STRUCT_SIZE);
-            return Static.inner.PJRT_Plugin_Attributes.?(&new_args);
-        }
-    }.call;
+    //     fn call(args: [*c]c.PJRT_Plugin_Attributes_Args) callconv(.c) ?*c.PJRT_Error {
+    //         var new_args = args.*;
+    //         new_args.struct_size = @min(new_args.struct_size, STRUCT_SIZE);
+    //         return Static.inner.PJRT_Plugin_Attributes.?(&new_args);
+    //     }
+    // }.call;
 
     return &Static.proxy;
 }

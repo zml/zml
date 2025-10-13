@@ -406,6 +406,12 @@ pub const Buffer = struct {
     pub const UnitializedOptions = struct { memory: Memory = .device };
 
     pub fn uninitialized(platform: Platform, shape_: Shape, opts: UnitializedOptions) !Buffer {
+        if (platform.target == .neuron) {
+            return try constant(platform, shape_, 0, .{
+                .memory = opts.memory,
+                .wait = true,
+            });
+        }
         if (opts.memory != .device) {
             // XLA uninitialized doesn't respect memory see https://github.com/openxla/xla/pull/31292
             // TODO: use uninitialized when it works again.
@@ -435,29 +441,52 @@ pub const Buffer = struct {
             break :s shard_shape;
         } else shape_;
 
-        var args = pjrt.Client.CreateUninitializedBufferArgs{
-            .dims = shard_shape.dims(),
-            .element_type = pjrt.bufferTypeFromDtype(shape_.dtype()),
-            .layout = .{
-                .tiled = .{
-                    .minor_to_major = minorToMajor(shape_.rank()),
-                    .tile_dims = &.{},
-                    .tile_dims_sizes = &.{},
-                },
+        switch (platform.target) {
+            .neuron => {
+                const devices = platform.getDevices();
+                for (0..n_partitions) |i| {
+                    var am = try platform.pjrt_client.createBuffersForAsyncHostToDevice(
+                        platform.pjrt_api,
+                        .{
+                            .shape_specs = &.{
+                                .init(@ptrCast(shard_shape.dims()), pjrt.bufferTypeFromDtype(shape_.dtype())),
+                            },
+                            .memory = platform.memoryForDevice(opts.memory, devices[i]),
+                        },
+                    );
+                    defer am.deinit(platform.pjrt_api);
+                    const event = try am.transferData(platform.pjrt_api, 0, &.{}, 0, true);
+                    try event.await(platform.pjrt_api);
+                    const shard = try am.retrieveBuffer(platform.pjrt_api, 0);
+                    res._shards.appendAssumeCapacity(shard);
+                }
             },
-            // set per device, see below.
-            .dst = undefined,
-        };
+            else => {
+                var args = pjrt.Client.CreateUninitializedBufferArgs{
+                    .dims = shard_shape.dims(),
+                    .element_type = pjrt.bufferTypeFromDtype(shape_.dtype()),
+                    .layout = .{
+                        .tiled = .{
+                            .minor_to_major = minorToMajor(shape_.rank()),
+                            .tile_dims = &.{},
+                            .tile_dims_sizes = &.{},
+                        },
+                    },
+                    // set per device, see below.
+                    .dst = undefined,
+                };
 
-        const devices = platform.getDevices();
-        for (0..n_partitions) |i| {
-            args.dst = if (platform.target == .cpu or opts.memory == .device)
-                .{ .device = devices[i] }
-            else
-                .{ .memory = platform.memoryForDevice(opts.memory, devices[i]) };
+                const devices = platform.getDevices();
+                for (0..n_partitions) |i| {
+                    args.dst = if (platform.target == .cpu or opts.memory == .device)
+                        .{ .device = devices[i] }
+                    else
+                        .{ .memory = platform.memoryForDevice(opts.memory, devices[i]) };
 
-            const shard = try platform.pjrt_client.createUnitializedBuffer(platform.pjrt_api, args);
-            res._shards.appendAssumeCapacity(shard);
+                    const shard = try platform.pjrt_client.createUnitializedBuffer(platform.pjrt_api, args);
+                    res._shards.appendAssumeCapacity(shard);
+                }
+            },
         }
 
         return res;

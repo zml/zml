@@ -1,10 +1,7 @@
 load("@aspect_bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
-load("@zml//bazel:patchelf.bzl", "patchelf")
-load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
 load("@bazel_skylib//rules:select_file.bzl", "select_file")
-load("@rules_cc//cc:cc_shared_library.bzl", "cc_shared_library")
+load("@zml//bazel:patchelf.bzl", "patchelf")
 load("@zml//bazel:runfiles.bzl", "runfiles_to_default")
-load("@rules_python//python:py_binary.bzl", "py_binary")
 
 runfiles_to_default(
     name = "libneuronxla_files",
@@ -19,14 +16,14 @@ select_file(
 
 patchelf(
     name = "libneuronpjrt_so",
-    set_rpath = '$ORIGIN',
+    set_rpath = "$ORIGIN",
     src = ":libneuronpjrt_so_orig",
     soname = "libneuronpjrt.so",
 )
 
 patchelf(
     name = "libpjrt_neuron_so",
-    set_rpath = '$ORIGIN',
+    set_rpath = "$ORIGIN",
     src = "@zml//runtimes/neuron:libpjrt_neuron",
     soname = "libpjrt_neuron.so",
 )
@@ -41,6 +38,7 @@ copy_to_directory(
         "@rules_python//python:current_py_toolchain",
         "@aws-neuronx-runtime-lib//:libnrt.patchelf",
         "@aws-neuronx-runtime-lib//:libncfw.patchelf",
+        "@aws-neuronx-runtime-lib//:libnrtucode_extisa",
         "@aws-neuronx-collectives//:libnccom",
         "@zlib1g",
         "@libgomp1",
@@ -52,6 +50,7 @@ copy_to_directory(
         "libpjrt_neuron_so": "lib",
         "libnrt.patchelf": "lib",
         "libncfw.patchelf": "lib",
+        "libnrtucode_extisa": "lib",
         "lib/x86_64-linux-gnu": "lib",
         "usr/lib/x86_64-linux-gnu": "lib",
         "opt/neuron": "lib",

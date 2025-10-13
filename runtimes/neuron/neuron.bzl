@@ -15,6 +15,7 @@ package(default_visibility = ["//visibility:public"])
 _UBUNTU_PACKAGES = {
     "zlib1g": packages.filegroup(name = "zlib1g", srcs = ["lib/x86_64-linux-gnu/libz.so.1"]),
     "libgomp1": packages.filegroup(name = "libgomp1", srcs = ["usr/lib/x86_64-linux-gnu/libgomp.so.1"]),
+    "libhwloc15": packages.filegroup(name = "libhwloc15", srcs = ["usr/lib/x86_64-linux-gnu/libhwloc.so.15"]),
 }
 
 _NEURON_PACKAGES = {
@@ -46,11 +47,18 @@ _NEURON_PACKAGES = {
             src = "lib/libncfw.so",
             soname = "libncfw.so.2",
         ),
+        packages.filegroup(
+            name = "libnrtucode_extisa",
+            srcs = ["lib/libnrtucode_extisa.so"],
+        ),
     ]),
     "aws-neuronx-collectives": "\n".join([
         packages.filegroup(
             name = "libnccom",
-            srcs = ["lib/libnccom.so.2"],
+            srcs = [
+                "lib/libnccom.so.2",
+                # "lib/libnccom-net.so",
+            ],
         ),
     ]),
 }
