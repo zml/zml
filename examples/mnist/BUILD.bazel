@@ -11,6 +11,7 @@ zig_binary(
         "@mnist//:mnist.safetensors",
         "@mnist//:t10k-images.idx3-ubyte",
     ],
+    zigopts = ["-fllvm"],
     main = "mnist.zig",
     deps = [
         "//async",

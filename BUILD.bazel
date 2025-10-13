@@ -1,10 +1,4 @@
-load("@rules_zig//zig:defs.bzl", "zls_completion")
-load("@zml//third_party/zls:zls.bzl", "zls_runner")
-
-zls_runner(
-    name = "zls",
-    target = ":completion",
-)
+load("//third_party/zls:zls_completion.bzl", "zls_completion")
 
 zls_completion(
     name = "completion",

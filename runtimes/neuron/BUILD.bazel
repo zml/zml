@@ -11,7 +11,7 @@ load("@zml//bazel:runfiles.bzl", "runfiles_to_default")
 # of neuronx-cc (see add_needed of the patchelf target below).
 zig_shared_library(
     name = "libpjrt_neuron",
-    copts = ["-fno-stack-check"],
+    zigopts = ["-fno-stack-check"],
     main = "libpjrt_neuron.zig",
     visibility = ["@libpjrt_neuron//:__subpackages__"],
     deps = [
@@ -48,6 +48,7 @@ cc_library(
 
 cc_library(
     name = "empty",
+    defines = ["ZML_RUNTIME_NEURON_DISABLED"],
 )
 
 cc_library(
@@ -79,7 +80,7 @@ upb_c_proto_library(
 
 zig_shared_library(
     name = "libneuronxla",
-    copts = [
+    zigopts = [
         "-fno-stack-check",
         "-fPIC",
     ],
