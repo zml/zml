@@ -226,7 +226,7 @@ pub const Event = opaque {
     }
 
     pub fn awaitBlocking(self: *Event, api: *const Api) ApiError!void {
-        // defer self.deinit(api);
+        defer self.deinit(api);
 
         if (self.isReady(api)) {
             return;
@@ -322,8 +322,8 @@ pub const AsyncHostToDeviceTransferManager = opaque {
         return @ptrCast(try self.inner().retrieveBuffer(api, buffer_index));
     }
 
-    pub fn device(self: *AsyncHostToDeviceTransferManager, api: *const Api) *Device {
-        return @ptrCast(self.inner().device(api));
+    pub fn device(self: *AsyncHostToDeviceTransferManager, api: *const Api) ApiError!*Device {
+        return @ptrCast(try self.inner().device(api));
     }
 
     pub fn bufferCount(self: *AsyncHostToDeviceTransferManager, api: *const Api) usize {

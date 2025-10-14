@@ -7,10 +7,13 @@ const asynk = @import("async");
 
 // note: std_options.log_level does not respect testing.log_level
 // ref: https://github.com/ziglang/zig/issues/5738
-const log_level: std.log.Level = .warn;
+const log_level: std.log.Level = .info;
 
 pub const std_options: std.Options = .{
     .log_level = log_level,
+    .log_scope_levels = &.{
+        .{ .scope = .@"zml/async", .level = .info },
+    },
 };
 
 var log_err_count: usize = 0;

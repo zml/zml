@@ -3,8 +3,9 @@ free -h
 sync && sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
 
 
+bazel run --config=release --@zml//runtimes:cpu=false --@zml//runtimes:cuda=true --run_under="sudo -E nsys profile -t cuda,syscall,nvtx,cublas,cublas-verbose,cusparse,cusparse-verbose,cudnn,osrt --inherit-environment=true --gpu-metrics-devices='cuda-visible' --cuda-memory-usage true --cuda-event-trace=false --backtrace=dwarf --cuda-graph-trace=node" //examples/loader:test
 
-bazel run --config=release --@zml//runtimes:cpu=false --@zml//runtimes:cuda=true --run_under="sudo -E nsys profile -t cuda,syscall,nvtx,cublas,cublas-verbose,cusparse,cusparse-verbose,cudnn,osrt --inherit-environment=true --gpu-metrics-devices='cuda-visible' --cuda-memory-usage true --cuda-event-trace=false --backtrace=dwarf --cuda-graph-trace=node" //examples/loader -- /home/hugo/Llama-3.1-8B-Instruct/model.safetensors.index.json
+bazel run --config=release --config=native --@zml//runtimes:cpu=false --@zml//runtimes:cuda=true --run_under="sudo -E nsys profile -t cuda,syscall,nvtx,cublas,cublas-verbose,cusparse,cusparse-verbose,cudnn,osrt --inherit-environment=true --gpu-metrics-devices='cuda-visible' --cuda-memory-usage true --cuda-event-trace=false --backtrace=dwarf --cuda-graph-trace=node" //examples/loader -- /home/hugo/Llama-3.1-8B-Instruct/model.safetensors.index.json
 
 bazel run --config=release --@zml//runtimes:cpu=false --@zml//runtimes:cuda=true --run_under="lldb --" //examples/loader -- /home/hugo/Llama-3.2-1B-Instruct/model.safetensors
 
