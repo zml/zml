@@ -16,7 +16,7 @@ zig_library(
     visibility = ["//visibility:public"],
     deps = [
         "//stdx",
-        "@libxev//:xev",
+        "@libxev",
     ],
 )
 
