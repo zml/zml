@@ -24,3 +24,13 @@ pub inline fn stackSlice(comptime max_len: usize, T: type, len: usize) []T {
 }
 
 pub const noalloc: std.mem.Allocator = if (builtin.mode == .ReleaseFast) undefined else std.testing.failing_allocator;
+
+pub fn pinToCore(core_id: usize) void {
+    if (builtin.os.tag == .linux) {
+        const CPUSet = std.bit_set.ArrayBitSet(usize, std.os.linux.CPU_SETSIZE * @sizeOf(usize));
+
+        var set: CPUSet = .initEmpty();
+        set.set(core_id);
+        std.os.linux.sched_setaffinity(0, @ptrCast(&set.masks)) catch {};
+    }
+}
