@@ -24,6 +24,6 @@ zig_library(
     visibility = ["//visibility:public"],
     deps = [
         ":libcoro_options",
-        "@libxev//:xev",
+        "@libxev",
     ],
 )

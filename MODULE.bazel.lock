@@ -69,6 +69,7 @@
     "https://bazel-registry.zml.ai/modules/jsoncpp/1.9.5/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/jsoncpp/1.9.6/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/libpfm/4.11.0/MODULE.bazel": "not found",
+    "https://bazel-registry.zml.ai/modules/libxev/0.0.0-20251014.0-9f785d2/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/nlohmann_json/3.6.1/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/package_metadata/0.0.2/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/patchelf/0.18.0/MODULE.bazel": "not found",
@@ -170,7 +171,6 @@
     "https://bazel-registry.zml.ai/modules/rules_shell/0.4.1/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_swift/1.16.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_swift/2.1.1/MODULE.bazel": "not found",
-    "https://bazel-registry.zml.ai/modules/rules_zig/0.12.1/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/stardoc/0.5.1/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/stardoc/0.5.3/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/stardoc/0.5.4/MODULE.bazel": "not found",
@@ -272,6 +272,8 @@
     "https://bcr.bazel.build/modules/jsoncpp/1.9.6/MODULE.bazel": "2f8d20d3b7d54143213c4dfc3d98225c42de7d666011528dc8fe91591e2e17b0",
     "https://bcr.bazel.build/modules/jsoncpp/1.9.6/source.json": "a04756d367a2126c3541682864ecec52f92cdee80a35735a3cb249ce015ca000",
     "https://bcr.bazel.build/modules/libpfm/4.11.0/MODULE.bazel": "45061ff025b301940f1e30d2c16bea596c25b176c8b6b3087e92615adbd52902",
+    "https://bcr.bazel.build/modules/libxev/0.0.0-20251014.0-9f785d2/MODULE.bazel": "d8bda6be48f8c0613d3393cfe15143467a7ee17d7e702fa15719ddc3e9fb646a",
+    "https://bcr.bazel.build/modules/libxev/0.0.0-20251014.0-9f785d2/source.json": "52ac2605138fd00de1413a13b2b8c5ceb4adc0d8e052133db888400f6768746f",
     "https://bcr.bazel.build/modules/nlohmann_json/3.6.1/MODULE.bazel": "6f7b417dcc794d9add9e556673ad25cb3ba835224290f4f848f8e2db1e1fca74",
     "https://bcr.bazel.build/modules/nlohmann_json/3.6.1/source.json": "f448c6e8963fdfa7eb831457df83ad63d3d6355018f6574fb017e8169deb43a9",
     "https://bcr.bazel.build/modules/package_metadata/0.0.2/MODULE.bazel": "fb8d25550742674d63d7b250063d4580ca530499f045d70748b1b142081ebb92",
@@ -396,8 +398,6 @@
     "https://bcr.bazel.build/modules/rules_swift/1.16.0/MODULE.bazel": "4a09f199545a60d09895e8281362b1ff3bb08bbde69c6fc87aff5b92fcc916ca",
     "https://bcr.bazel.build/modules/rules_swift/2.1.1/MODULE.bazel": "494900a80f944fc7aa61500c2073d9729dff0b764f0e89b824eb746959bc1046",
     "https://bcr.bazel.build/modules/rules_swift/2.1.1/source.json": "40fc69dfaac64deddbb75bd99cdac55f4427d9ca0afbe408576a65428427a186",
-    "https://bcr.bazel.build/modules/rules_zig/0.12.1/MODULE.bazel": "5953094b681c212eebe3dd4275809c52b9177aeaa058d8f1bff433822c0dcd01",
-    "https://bcr.bazel.build/modules/rules_zig/0.12.1/source.json": "d880cdc3473bfcf172c9aad9292e856430496e198d805539bb8be98e79f58a7c",
     "https://bcr.bazel.build/modules/stardoc/0.5.1/MODULE.bazel": "1a05d92974d0c122f5ccf09291442580317cdd859f07a8655f1db9a60374f9f8",
     "https://bcr.bazel.build/modules/stardoc/0.5.3/MODULE.bazel": "c7f6948dae6999bf0db32c1858ae345f112cacf98f174c7a8bb707e41b974f1c",
     "https://bcr.bazel.build/modules/stardoc/0.5.4/MODULE.bazel": "6569966df04610b8520957cb8e97cf2e9faac2c0309657c537ab51c16c18a2a4",
@@ -2811,7 +2811,7 @@
     "@@rules_zig+//zig:extensions.bzl%zig": {
       "general": {
         "bzlTransitiveDigest": "wV3euhBZSI0D2ZlqbY1YW592mghFY88d9H6zBMQRaJY=",
-        "usagesDigest": "T0xLzuDAWCJjFcphcIcT31t1HM/Yg7RxtfOUb+XmxTw=",
+        "usagesDigest": "FR3I3Uy7g7MHBta/AuDtKPMdikDVo0hgQZNdLunZDX4=",
         "recordedFileInputs": {
           "@@//bazel/zig_index.json": "42ea73420b15741770d5d8d0ded1311a2dfda1f963f0802dea3418f6e060ffef",
           "@@rules_zig+//zig/private/versions.json": "6eb85ebaee72c4e6fbc82d8ad73f69e0899d839b70a7e19caa792ab6a5fa0c36"
