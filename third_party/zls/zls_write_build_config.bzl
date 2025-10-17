@@ -2,6 +2,7 @@
 
 load("@rules_cc//cc/common:cc_common.bzl", "cc_common")
 load("@rules_cc//cc/common:cc_info.bzl", "CcInfo")
+load("@rules_cc//cc:find_cc_toolchain.bzl", "use_cc_toolchain")
 load("@rules_zig//zig/private:cc_helper.bzl", "need_translate_c")
 load("@rules_zig//zig/private/common:translate_c.bzl", "zig_translate_c")
 load("@rules_zig//zig/private/common:zig_cache.bzl", "zig_cache_output")
@@ -133,6 +134,6 @@ zls_write_build_config = rule(
     toolchains = [
         "@rules_zig//zig:toolchain_type",
         "@rules_zig//zig/target:toolchain_type",
-    ],
+    ] + use_cc_toolchain(mandatory = False),
     fragments = ["cpp"],
 )
