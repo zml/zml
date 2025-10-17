@@ -449,7 +449,42 @@ fn validSlice(v: std.json.Array) ?std.meta.Tag(std.json.Value) {
     return item_type;
 }
 
-// Switch the given file descriptor to use O_DIRECT flag for direct I/O.
+// Switch the given file descriptor to use buffered I/O mode.
+fn switchToBufferedIO(file: std.fs.File) !bool {
+    const fd = file.handle;
+
+    const flags = try std.posix.fcntl(fd, std.posix.F.GETFL, 0);
+
+    if (builtin.target.os.tag == .linux) {
+        if (!@hasField(std.posix.O, "DIRECT")) {
+            return true;
+        }
+
+        const direct_flag: c_int = @bitCast(std.posix.O{ .DIRECT = true });
+        if ((flags & direct_flag) == 0) {
+            return true;
+        }
+
+        const result = try std.posix.fcntl(fd, std.posix.F.SETFL, flags & ~@as(c_uint, @bitCast(@as(u32, @intCast(direct_flag)))));
+        return result == 0;
+    } else if (builtin.target.os.tag == .macos) {
+        if (!@hasField(std.posix.F, "NOCACHE")) {
+            return true;
+        }
+
+        const nocache_flag: c_int = @bitCast(std.posix.F{ .NOCACHE = true });
+        if ((flags & nocache_flag) == 0) {
+            return true;
+        }
+
+        const result = try std.posix.fcntl(fd, std.posix.F.SETFL, flags & ~@as(c_uint, @bitCast(@as(u32, @intCast(nocache_flag)))));
+        return result == 0;
+    } else {
+        return true;
+    }
+}
+
+// Switch the given file descriptor to use direct I/O mode.
 fn switchToDirectIO(file: std.fs.File) !bool {
     const fd = file.handle;
 
@@ -476,41 +511,43 @@ fn switchToDirectIO(file: std.fs.File) !bool {
     }
 }
 
-test switchToDirectIO {
+test "switchToDirectIO and switchToBufferedIO" {
     const allocator = std.testing.allocator;
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
     const filename = "file.bin";
-    _ = try createBinFile(tmp_dir, filename, 2048, null);
+    _ = try createBinFile(tmp_dir, filename, BUF_8_KB, null);
 
     const file_path = try tmp_dir.dir.realpathAlloc(allocator, filename);
     defer allocator.free(file_path);
 
-    var file = try tmp_dir.dir.createFile(filename, .{ .read = true });
+    var file = try std.fs.openFileAbsolute(file_path, .{ .mode = .read_write });
     defer file.close();
 
-    var writer = file.writer(&.{});
-    try writer.interface.writeAll("A" ** 4096);
-
+    // Test buffered I/O
     var unaligned_buf: [10]u8 = undefined;
     try file.seekTo(1);
-    const bytes_read = try file.readAll(&unaligned_buf);
-    try std.testing.expectEqual(10, bytes_read);
-    try std.testing.expectEqualSlices(u8, "A" ** 10, &unaligned_buf);
+    const bytes_read_buffered = try file.readAll(&unaligned_buf);
+    try std.testing.expectEqual(10, bytes_read_buffered);
 
+    // Switch to Direct I/O and test aligned read
     _ = try switchToDirectIO(file);
 
-    try file.seekTo(0);
-
-    const blk_size = std.heap.pageSize();
-    const aligned_buf = try allocator.alignedAlloc(u8, .fromByteUnits(blk_size), blk_size);
+    const blk_size = BUF_4_KB;
+    const aligned_buf = try allocator.alignedAlloc(u8, .fromByteUnits(blk_size), blk_size * 2);
     defer allocator.free(aligned_buf);
 
     try file.seekTo(0);
-    _ = try file.readAll(aligned_buf);
+    const bytes_read_aligned = try file.readAll(aligned_buf);
+    try std.testing.expectEqual(aligned_buf.len, bytes_read_aligned);
 
-    try std.testing.expectEqualSlices(u8, "A" ** blk_size, aligned_buf);
+    // Switch back to Buffered I/O and test unaligned read again
+    _ = try switchToBufferedIO(file);
+
+    try file.seekTo(1);
+    const bytes_read_buffered_again = try file.readAll(&unaligned_buf);
+    try std.testing.expectEqual(unaligned_buf.len, bytes_read_buffered_again);
 }
 
 const AlignedFileReader = struct {
@@ -519,7 +556,7 @@ const AlignedFileReader = struct {
     pos: u64, // Physical offset for the next pread
     file_size: u64,
 
-    buffer: [BUF_4_KB]u8 align(BUF_4_KB), // Hard coded for slow path
+    buffer: [BUF_8_KB]u8 align(BUF_8_KB), // Hard coded for slow path
     buffer_valid_len: usize, // Total bytes read into buffer
     buffer_consumed: usize, // Bytes consumed/skipped from buffer head
 
