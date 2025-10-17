@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const std = @import("std");
 
 const asynk = @import("async");
@@ -5,7 +6,7 @@ const stdx = @import("stdx");
 const zml = @import("zml");
 
 pub const std_options: std.Options = .{
-    .log_level = .debug,
+    .log_level = .info,
     .logFn = asynk.logFn(std.log.defaultLog),
     .log_scope_levels = &.{
         .{ .scope = .@"zml/async", .level = .info },
@@ -69,6 +70,42 @@ fn createBinFile(tmp_dir: std.testing.TmpDir, filename: []const u8, size: usize,
     try file_writer.interface.flush();
 
     return try file_writer.file.getEndPos();
+}
+
+// Warm up devices by allocating and freeing a 8MB buffer on each device which allocate the GPU BFC memory.
+fn warmupDevices(allocator: std.mem.Allocator, platform: Platform, devices: []const *const pjrt.Device) !void {
+    log.warn("--- Warming up devices (GPU bfc allocation) ---", .{});
+    var timer = try std.time.Timer.start();
+
+    for (devices) |device| {
+        const trace = tracer.frameStart("Warmup device");
+        defer tracer.frameEnd(trace, "Warmup device");
+
+        const shape = Shape.init(.{BUF_8_MB / @sizeOf(f32)}, .f32);
+
+        const warmup_data = try allocator.alloc(u8, shape.byteSize());
+        defer allocator.free(warmup_data);
+
+        const shard = Shard{
+            .shape = shape,
+            .tensor = .{
+                .source = "warmup",
+                .name = "tensor",
+                .shape = shape,
+                .offset = 0,
+            },
+            .device = device,
+        };
+
+        var writer: DeviceWriter = try .init(platform, shard, .device);
+        defer writer.deinit();
+
+        try writer.interface.writeAll(warmup_data);
+        try writer.interface.flush();
+    }
+
+    const elapsed = timer.lap();
+    log.warn("--- Warmed up {d} devices in {d}ms ---", .{ devices.len, elapsed / std.time.ns_per_ms });
 }
 
 const Tensor = struct {
@@ -412,13 +449,77 @@ fn validSlice(v: std.json.Array) ?std.meta.Tag(std.json.Value) {
     return item_type;
 }
 
+// Switch the given file descriptor to use O_DIRECT flag for direct I/O.
+fn switchToDirectIO(file: std.fs.File) !bool {
+    const fd = file.handle;
+
+    const flags = try std.posix.fcntl(fd, std.posix.F.GETFL, 0);
+
+    if (builtin.target.os.tag == .linux) {
+        if (!@hasField(std.posix.O, "DIRECT")) {
+            return false;
+        }
+
+        const direct_flag: c_int = @bitCast(std.posix.O{ .DIRECT = true });
+        const result = try std.posix.fcntl(fd, std.posix.F.SETFL, flags | direct_flag);
+        return result == 0;
+    } else if (builtin.target.os.tag == .macos) {
+        if (!@hasField(std.posix.F, "NOCACHE")) {
+            return false;
+        }
+
+        const nocache_flag: c_int = @bitCast(std.posix.F{ .NOCACHE = true });
+        const result = try std.posix.fcntl(fd, std.posix.F.SETFL, flags | nocache_flag);
+        return result == 0;
+    } else {
+        return false;
+    }
+}
+
+test switchToDirectIO {
+    const allocator = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    const filename = "file.bin";
+    _ = try createBinFile(tmp_dir, filename, 2048, null);
+
+    const file_path = try tmp_dir.dir.realpathAlloc(allocator, filename);
+    defer allocator.free(file_path);
+
+    var file = try tmp_dir.dir.createFile(filename, .{ .read = true });
+    defer file.close();
+
+    var writer = file.writer(&.{});
+    try writer.interface.writeAll("A" ** 4096);
+
+    var unaligned_buf: [10]u8 = undefined;
+    try file.seekTo(1);
+    const bytes_read = try file.readAll(&unaligned_buf);
+    try std.testing.expectEqual(10, bytes_read);
+    try std.testing.expectEqualSlices(u8, "A" ** 10, &unaligned_buf);
+
+    _ = try switchToDirectIO(file);
+
+    try file.seekTo(0);
+
+    const blk_size = std.heap.pageSize();
+    const aligned_buf = try allocator.alignedAlloc(u8, .fromByteUnits(blk_size), blk_size);
+    defer allocator.free(aligned_buf);
+
+    try file.seekTo(0);
+    _ = try file.readAll(aligned_buf);
+
+    try std.testing.expectEqualSlices(u8, "A" ** blk_size, aligned_buf);
+}
+
 const AlignedFileReader = struct {
     reader: std.fs.File.Reader,
     alignment: std.mem.Alignment,
     pos: u64, // Physical offset for the next pread
     file_size: u64,
 
-    buffer: [BUF_4_KB]u8 align(BUF_4_KB), // Hard coded
+    buffer: [BUF_4_KB]u8 align(BUF_4_KB), // Hard coded for slow path
     buffer_valid_len: usize, // Total bytes read into buffer
     buffer_consumed: usize, // Bytes consumed/skipped from buffer head
 
@@ -471,13 +572,14 @@ const AlignedFileReader = struct {
         if (self.pos >= self.file_size) return error.EndOfStream;
 
         const bytes_read = self.reader.file.pread(self.buffer[0..alignment_bytes], self.pos) catch |e| {
-            log.err("File pread error for aligned block: {}", .{e});
+            log.err("File pread error for aligned block at offset {d}: {}", .{ self.pos, e });
             return error.ReadFailed;
         };
+
         if (bytes_read == 0) return error.EndOfStream;
 
         self.buffer_valid_len = bytes_read;
-        self.pos += bytes_read;
+        self.pos += alignment_bytes;
     }
 
     fn stream(r: *std.io.Reader, w: *std.io.Writer, limit: std.io.Limit) std.io.Reader.StreamError!usize {
@@ -504,23 +606,24 @@ const AlignedFileReader = struct {
         const logical_data_remaining = limit.toInt() orelse (self.file_size - self.pos);
 
         if (w.writableSliceGreedy(alignment_bytes)) |dest_buffer| {
-            const max_read_size = @min(dest_buffer.len, self.file_size - self.pos);
-            const max_aligned_read = std.mem.alignBackward(usize, @min(max_read_size, logical_data_remaining), alignment_bytes);
+            if (self.pos % alignment_bytes == 0) {
+                const max_read_size = @min(dest_buffer.len, self.file_size - self.pos);
+                const max_aligned_read = std.mem.alignBackward(usize, @min(max_read_size, logical_data_remaining), alignment_bytes);
 
-            if (max_aligned_read > 0) {
-                const bytes_read = self.reader.file.pread(dest_buffer[0..max_aligned_read], self.pos) catch |e| {
-                    log.err("File pread error (fast path): {}", .{e});
-                    return error.ReadFailed;
-                };
-                if (bytes_read == 0) return error.EndOfStream;
+                if (max_aligned_read > 0) {
+                    const bytes_read = self.reader.file.pread(dest_buffer[0..max_aligned_read], self.pos) catch |e| {
+                        log.err("File pread error (fast path): {}", .{e});
+                        return error.ReadFailed;
+                    };
+                    if (bytes_read == 0) return error.EndOfStream;
 
-                w.advance(bytes_read);
-                self.pos += bytes_read;
-                return bytes_read;
+                    w.advance(bytes_read);
+                    self.pos += max_aligned_read;
+                    return bytes_read;
+                }
             }
         } else |err| {
-            log.err("Writer error (fast path): {}", .{err});
-            return err;
+            log.debug("Writer cannot provide slice for fast path: {}. Falling back to slow path.", .{err});
         }
 
         try self.loadAlignedBlockToInternal();
@@ -532,282 +635,208 @@ const AlignedFileReader = struct {
     };
 };
 
-// test "AlignedFileReader: read from aligned offset" {
-//     const allocator = std.testing.allocator;
-//     var tmp_dir = std.testing.tmpDir(.{});
-//     defer tmp_dir.cleanup();
+const TestAlignedFileReader = struct {
+    allocator: std.mem.Allocator,
+    tmp_dir: std.testing.TmpDir,
+    context: Context,
+    o_direct_file: std.fs.File,
+    reference_file: std.fs.File,
+    params: Params,
 
-//     const filename = "aligned.bin";
-//     const file_size = BUF_1_MB;
-//     const alignment = BUF_4_KB;
-//     _ = try createBinFile(tmp_dir, filename, file_size, alignment);
+    pub const Params = struct {
+        file_size: usize,
+        alignment: usize,
+        read_offset: u64 = 0,
+        read_size: usize,
+    };
 
-//     const file = try tmp_dir.dir.openFile(filename, .{ .mode = .read_only });
-//     defer file.close();
+    pub fn init(allocator: std.mem.Allocator, params: Params) !TestAlignedFileReader {
+        const context: Context = try .init();
 
-//     const o_direct_fd = try std.posix.open(
-//         try tmp_dir.dir.realpathAlloc(allocator, filename),
-//         .{ .ACCMODE = .RDONLY, .DIRECT = true },
-//         0,
-//     );
+        var tmp_dir = std.testing.tmpDir(.{});
+        errdefer tmp_dir.cleanup();
 
-//     const o_direct_file: std.fs.File = .{ .handle = o_direct_fd };
-//     defer o_direct_file.close();
+        const filename = "test.bin";
+        const actual_file_size = try createBinFile(tmp_dir, filename, params.file_size, params.alignment);
 
-//     const file_reader = o_direct_file.reader(&.{});
-//     var reader: AlignedFileReader = try .init(file_reader, .fromByteUnits(alignment));
+        const file_path = try tmp_dir.dir.realpathAlloc(allocator, filename);
+        defer allocator.free(file_path);
 
-//     const read_size = 10 * KB;
-//     const dest_buffer = try allocator.alloc(u8, read_size);
-//     defer allocator.free(dest_buffer);
+        const o_direct_fd = try std.posix.open(
+            file_path,
+            .{ .ACCMODE = .RDONLY, .DIRECT = true },
+            0,
+        );
+        const o_direct_file = std.fs.File{ .handle = o_direct_fd };
 
-//     var writer = std.io.Writer.fixed(dest_buffer);
-//     var total_read: usize = 0;
-//     while (total_read < read_size) {
-//         const n = try reader.interface.stream(&writer, .limited(read_size - total_read));
-//         if (n == 0) break;
-//         total_read += n;
-//     }
+        const reference_file = try std.fs.openFileAbsolute(file_path, .{ .mode = .read_only });
 
-//     try std.testing.expectEqual(@as(usize, read_size), total_read);
+        var new_params = params;
+        new_params.file_size = actual_file_size;
 
-//     // Verify content
-//     const expected_content = try allocator.alloc(u8, read_size);
-//     defer allocator.free(expected_content);
-//     _ = try file.readAll(expected_content);
+        return .{
+            .allocator = allocator,
+            .tmp_dir = tmp_dir,
+            .context = context,
+            .o_direct_file = o_direct_file,
+            .reference_file = reference_file,
+            .params = new_params,
+        };
+    }
 
-//     try std.testing.expectEqualSlices(u8, expected_content, dest_buffer);
-// }
+    pub fn deinit(self: *TestAlignedFileReader) void {
+        self.o_direct_file.close();
+        self.reference_file.close();
+        self.tmp_dir.cleanup();
+        self.context.deinit();
+    }
 
+    pub fn runReadExact(self: *TestAlignedFileReader, comptime dest_buffer_alignment: ?usize) !void {
+        var reader_init_buf: [1]u8 = undefined;
+        var file_reader = self.o_direct_file.reader(&reader_init_buf);
+        try file_reader.seekTo(self.params.read_offset);
+
+        var reader = try AlignedFileReader.init(file_reader, .fromByteUnits(self.params.alignment));
+
+        const dest_buffer = if (dest_buffer_alignment) |alignment|
+            try self.allocator.alignedAlloc(u8, .fromByteUnits(alignment), self.params.read_size)
+        else
+            try self.allocator.alloc(u8, self.params.read_size);
+        defer self.allocator.free(dest_buffer);
+
+        var writer: std.io.Writer = .fixed(dest_buffer);
+        var total_read: usize = 0;
+        while (total_read < self.params.read_size) {
+            const n = reader.interface.stream(&writer, .limited(self.params.read_size - total_read)) catch |err| switch (err) {
+                error.EndOfStream => break,
+                else => |e| return e,
+            };
+
+            if (n == 0) break;
+
+            total_read += n;
+        }
+
+        const expected_read_size = @min(self.params.read_size, self.params.file_size - @min(self.params.read_offset, self.params.file_size));
+        try std.testing.expectEqual(expected_read_size, total_read);
+
+        try self.reference_file.seekTo(self.params.read_offset);
+
+        const expected_content = try self.allocator.alloc(u8, expected_read_size);
+        defer self.allocator.free(expected_content);
+
+        if (expected_read_size > 0) {
+            _ = try self.reference_file.readAll(expected_content);
+        }
+
+        try std.testing.expectEqualSlices(u8, expected_content, dest_buffer[0..total_read]);
+    }
+};
+
+test "AlignedFileReader: read from aligned offset" {
+    var scenario: TestAlignedFileReader = try .init(std.testing.allocator, .{
+        .file_size = BUF_1_MB,
+        .alignment = BUF_4_KB,
+        .read_size = 10 * KB,
+    });
+    defer scenario.deinit();
+
+    try scenario.runReadExact(null);
+}
+
+// todo: implement unaligned read offset
 // test "AlignedFileReader: read from unaligned offset" {
-//     const allocator = std.testing.allocator;
-//     var tmp_dir = std.testing.tmpDir(.{});
-//     defer tmp_dir.cleanup();
+//     var scenario: TestAlignedFileReader = try .init(std.testing.allocator, .{
+//         .file_size = BUF_1_MB,
+//         .alignment = BUF_4_KB,
+//         .read_offset = 123,
+//         .read_size = 10 * KB,
+//     });
+//     defer scenario.deinit();
 
-//     const filename = "unaligned.bin";
-//     const file_size = BUF_1_MB;
-//     const alignment = BUF_4_KB;
-//     const unaligned_offset = 123;
-//     _ = try createBinFile(tmp_dir, filename, file_size, alignment);
-
-//     const file = try tmp_dir.dir.openFile(filename, .{ .mode = .read_only });
-//     defer file.close();
-
-//     const o_direct_fd = try std.posix.open(
-//         try tmp_dir.dir.realpathAlloc(allocator, filename),
-//         .{ .ACCMODE = .RDONLY, .DIRECT = true },
-//         0,
-//     );
-//     const o_direct_file = std.fs.File{ .handle = o_direct_fd };
-//     defer o_direct_file.close();
-
-//     var file_reader = o_direct_file.reader(&.{});
-//     try file_reader.seekTo(unaligned_offset);
-
-//     var reader = try AlignedFileReader.init(file_reader, .fromByteUnits(alignment));
-
-//     // Internal state check
-//     try std.testing.expectEqual(@as(u64, 0), reader.pos);
-//     try std.testing.expectEqual(@as(usize, unaligned_offset), reader.buffer_consumed);
-
-//     const read_size = 10 * KB;
-//     const dest_buffer = try allocator.alloc(u8, read_size);
-//     defer allocator.free(dest_buffer);
-
-//     var writer = std.io.Writer.fixed(dest_buffer);
-//     var total_read: usize = 0;
-//     while (total_read < read_size) {
-//         const n = try reader.interface.stream(&writer, .limited(read_size - total_read));
-//         if (n == 0) break;
-//         total_read += n;
-//     }
-//     try std.testing.expectEqual(@as(usize, read_size), total_read);
-
-//     // Verify content
-//     const expected_content = try allocator.alloc(u8, read_size);
-//     defer allocator.free(expected_content);
-//     _ = try file.seekTo(unaligned_offset);
-//     _ = try file.readAll(expected_content);
-
-//     try std.testing.expectEqualSlices(u8, expected_content, dest_buffer);
+//     try scenario.runReadExact(null);
 // }
 
-// test "AlignedFileReader: fast path direct read" {
-//     const allocator = std.testing.allocator;
-//     var tmp_dir = std.testing.tmpDir(.{});
-//     defer tmp_dir.cleanup();
+test "AlignedFileReader: fast path direct read" {
+    var scenario: TestAlignedFileReader = try .init(std.testing.allocator, .{
+        .file_size = BUF_1_MB,
+        .alignment = BUF_4_KB,
+        .read_size = 64 * KB, // Must be multiple of alignment
+    });
+    defer scenario.deinit();
 
-//     const filename = "fastpath.bin";
-//     const file_size = BUF_4_MB;
-//     const alignment = BUF_4_KB;
-//     _ = try createBinFile(tmp_dir, filename, file_size, alignment);
+    // Destination buffer must be aligned for fast path
+    try scenario.runReadExact(BUF_4_KB);
+}
 
-//     const file = try tmp_dir.dir.openFile(filename, .{ .mode = .read_only });
-//     defer file.close();
+test "AlignedFileReader: mixed path (fast then slow)" {
+    var scenario: TestAlignedFileReader = try .init(std.testing.allocator, .{
+        .file_size = BUF_1_MB,
+        .alignment = BUF_4_KB,
+        .read_size = 64 * KB + 123, // Not a multiple of alignment
+    });
+    defer scenario.deinit();
 
-//     const o_direct_fd = try std.posix.open(
-//         try tmp_dir.dir.realpathAlloc(allocator, filename),
-//         .{ .ACCMODE = .RDONLY, .DIRECT = true },
-//         0,
-//     );
-//     const o_direct_file = std.fs.File{ .handle = o_direct_fd };
-//     defer o_direct_file.close();
+    // Aligned buffer to trigger at least one fast path read
+    try scenario.runReadExact(BUF_4_KB);
+}
 
-//     const file_reader = o_direct_file.reader(&.{});
-//     var reader = try AlignedFileReader.init(file_reader, .fromByteUnits(alignment));
+test "AlignedFileReader: file smaller than alignment" {
+    var scenario: TestAlignedFileReader = try .init(std.testing.allocator, .{
+        .file_size = 1 * KB,
+        .alignment = BUF_4_KB,
+        .read_size = 1 * KB,
+    });
+    defer scenario.deinit();
 
-//     const read_size = BUF_1_MB; // Multiple of alignment
-//     const dest_buffer = try allocator.alignedAlloc(u8, .fromByteUnits(alignment), read_size);
-//     defer allocator.free(dest_buffer);
+    try scenario.runReadExact(null);
+}
 
-//     var writer = std.io.Writer.fixed(dest_buffer);
-//     const bytes_read = try reader.interface.stream(&writer, .limited(read_size));
+// todo: implement unaligned read offset
+// test "AlignedFileReader: read exact file size from unaligned offset" {
+//     var scenario: TestAlignedFileReader = try .init(std.testing.allocator, .{
+//         .file_size = 10 * KB + 5,
+//         .alignment = BUF_4_KB,
+//         .read_offset = 1,
+//         .read_size = 10 * KB + 4,
+//     });
+//     defer scenario.deinit();
 
-//     try std.testing.expectEqual(@as(usize, read_size), bytes_read);
-//     try std.testing.expectEqual(@as(u64, read_size), reader.pos); // Should have advanced via fast path
-
-//     const expected_content = try allocator.alloc(u8, read_size);
-//     defer allocator.free(expected_content);
-//     _ = try file.readAll(expected_content);
-
-//     try std.testing.expectEqualSlices(u8, expected_content, dest_buffer);
+//     try scenario.runReadExact(null);
 // }
 
-// test "AlignedFileReader: mixed path (fast then slow)" {
-//     const allocator = std.testing.allocator;
-//     var tmp_dir = std.testing.tmpDir(.{});
-//     defer tmp_dir.cleanup();
+test "AlignedFileReader: read until end of stream" {
+    const allocator = std.testing.allocator;
+    const file_size = 10 * KB + 5;
+    const alignment = BUF_4_KB;
 
-//     const filename = "mixedpath.bin";
-//     const file_size = BUF_4_MB;
-//     const alignment = BUF_4_KB;
-//     const read_size = BUF_1_MB + 123; // Not a multiple of alignment
-//     _ = try createBinFile(tmp_dir, filename, file_size, alignment);
+    var scenario: TestAlignedFileReader = try .init(allocator, .{
+        .file_size = file_size,
+        .alignment = alignment,
+        .read_size = file_size,
+    });
+    defer scenario.deinit();
 
-//     const file = try tmp_dir.dir.openFile(filename, .{ .mode = .read_only });
-//     defer file.close();
+    var reader_init_buf: [1]u8 = undefined;
+    const file_reader = scenario.o_direct_file.reader(&reader_init_buf);
+    var reader = try AlignedFileReader.init(file_reader, .fromByteUnits(alignment));
 
-//     const o_direct_fd = try std.posix.open(
-//         try tmp_dir.dir.realpathAlloc(allocator, filename),
-//         .{ .ACCMODE = .RDONLY, .DIRECT = true },
-//         0,
-//     );
-//     const o_direct_file = std.fs.File{ .handle = o_direct_fd };
-//     defer o_direct_file.close();
+    var writer = std.io.Writer.Allocating.init(allocator);
+    defer writer.deinit();
 
-//     const file_reader = o_direct_file.reader(&.{});
-//     var reader = try AlignedFileReader.init(file_reader, .fromByteUnits(alignment));
+    const bytes_read = try reader.interface.streamRemaining(&writer.writer);
 
-//     const dest_buffer = try allocator.alignedAlloc(u8, .fromByteUnits(alignment), read_size);
-//     defer allocator.free(dest_buffer);
+    const expected_physical_size = std.mem.alignForward(usize, file_size, alignment);
+    try std.testing.expectEqual(expected_physical_size, bytes_read);
 
-//     var writer = std.io.Writer.fixed(dest_buffer);
+    // Verify
+    try scenario.reference_file.seekTo(0);
 
-//     var total_read: usize = 0;
-//     while (total_read < read_size) {
-//         const n = reader.interface.stream(&writer, .limited(read_size - total_read)) catch |err| switch (err) {
-//             error.EndOfStream => break,
-//             else => |e| return e,
-//         };
-//         if (n == 0) break;
-//         total_read += n;
-//     }
+    const expected_content = try scenario.reference_file.readToEndAlloc(allocator, expected_physical_size + 1);
+    defer allocator.free(expected_content);
 
-//     try std.testing.expectEqual(@as(usize, read_size), total_read);
-
-//     const expected_content = try allocator.alloc(u8, read_size);
-//     defer allocator.free(expected_content);
-//     _ = try file.readAll(expected_content);
-
-//     try std.testing.expectEqualSlices(u8, expected_content, dest_buffer);
-// }
-
-// test "AlignedFileReader: file smaller than alignment" {
-//     const allocator = std.testing.allocator;
-//     var tmp_dir = std.testing.tmpDir(.{});
-//     defer tmp_dir.cleanup();
-
-//     const filename = "small.bin";
-//     const file_size = 1 * KB;
-//     const alignment = BUF_4_KB;
-//     _ = try createBinFile(tmp_dir, filename, file_size, alignment);
-
-//     const file = try tmp_dir.dir.openFile(filename, .{ .mode = .read_only });
-//     defer file.close();
-
-//     const o_direct_fd = try std.posix.open(
-//         try tmp_dir.dir.realpathAlloc(allocator, filename),
-//         .{ .ACCMODE = .RDONLY, .DIRECT = true },
-//         0,
-//     );
-//     const o_direct_file = std.fs.File{ .handle = o_direct_fd };
-//     defer o_direct_file.close();
-
-//     const file_reader = o_direct_file.reader(&.{});
-//     var reader = try AlignedFileReader.init(file_reader, .fromByteUnits(alignment));
-
-//     const dest_buffer = try allocator.alloc(u8, file_size);
-//     defer allocator.free(dest_buffer);
-
-//     var writer = std.io.Writer.fixed(dest_buffer);
-//     var total_read: usize = 0;
-//     while (true) {
-//         const n = reader.interface.stream(&writer, .unlimited) catch |err| switch (err) {
-//             error.EndOfStream => break,
-//             else => |e| return e,
-//         };
-//         if (n == 0) break;
-//         total_read += n;
-//     }
-
-//     try std.testing.expectEqual(@as(usize, file_size), total_read);
-
-//     const expected_content = try allocator.alloc(u8, file_size);
-//     defer allocator.free(expected_content);
-//     _ = try file.readAll(expected_content);
-
-//     try std.testing.expectEqualSlices(u8, expected_content, dest_buffer);
-// }
-
-// test "AlignedFileReader: read until end of stream" {
-//     const allocator = std.testing.allocator;
-//     var tmp_dir = std.testing.tmpDir(.{});
-//     defer tmp_dir.cleanup();
-
-//     const filename = "eos.bin";
-//     const file_size = 10 * KB + 5;
-//     const alignment = BUF_4_KB;
-//     _ = try createBinFile(tmp_dir, filename, file_size, alignment);
-
-//     const file = try tmp_dir.dir.openFile(filename, .{ .mode = .read_only });
-//     defer file.close();
-
-//     const o_direct_fd = try std.posix.open(
-//         try tmp_dir.dir.realpathAlloc(allocator, filename),
-//         .{ .ACCMODE = .RDONLY, .DIRECT = true },
-//         0,
-//     );
-//     const o_direct_file = std.fs.File{ .handle = o_direct_fd };
-//     defer o_direct_file.close();
-
-//     const file_reader = o_direct_file.reader(&.{});
-//     var reader = try AlignedFileReader.init(file_reader, .fromByteUnits(alignment));
-
-//     var writer = std.io.Writer.Allocating.init(allocator);
-
-//     const bytes_read = try reader.interface.streamRemaining(&writer.writer);
-
-//     try std.testing.expectEqual(@as(usize, file_size), bytes_read);
-
-//     const expected_content = try file.readToEndAlloc(allocator, file_size + 1);
-//     defer allocator.free(expected_content);
-
-//     try std.testing.expectEqualSlices(u8, expected_content, try writer.toOwnedSlice());
-
-//     // Check EndOfStream is sticky
-//     var dummy_writer = std.io.Writer.fixed(&[_]u8{});
-//     try std.testing.expectError(error.EndOfStream, reader.interface.stream(&dummy_writer, .unlimited));
-// }
+    try std.testing.expectEqualSlices(u8, expected_content, writer.writer.buffered());
+}
 
 const DeviceWriter = struct {
     platform: Platform,
@@ -861,6 +890,8 @@ const DeviceWriter = struct {
     }
 
     pub fn deinit(self: *DeviceWriter) void {
+        const buf = self.buffer() catch unreachable;
+        buf.deinit(self.platform.pjrt_api);
         self.transfer_manager.deinit(self.platform.pjrt_api);
         self.transfer_manager = undefined;
     }
@@ -982,21 +1013,87 @@ const DeviceWriter = struct {
     };
 };
 
-test "DeviceWriter: writeAll and read back" {
+test "DeviceWriter: write" {
+    const allocator = std.testing.allocator;
+
+    var context: Context = try .init();
+    defer context.deinit();
+
+    tracer = Tracer.init("ai.zml.test.DeviceWriter.write");
+    const trace = tracer.frameStart("DeviceWriter.test.write");
+    defer tracer.frameEnd(trace, "DeviceWriter.test.write");
+
+    const platform = context.autoPlatform(.{});
+    const device = platform.getDevices()[0];
+
+    try warmupDevices(allocator, platform, &.{device});
+
+    const chunk_size = BUF_64_MB;
+    const tensor_size = 4 * BUF_256_MB;
+    const shape: Shape = .init(.{tensor_size / @sizeOf(f32)}, .f32);
+    const shard: Shard = .{
+        .shape = shape,
+        .tensor = .{
+            .source = "test",
+            .name = "tensor",
+            .shape = shape,
+            .offset = 0,
+        },
+        .device = device,
+    };
+
+    var writer: DeviceWriter = try .init(platform, shard, .device);
+    defer writer.deinit();
+
+    const data = try allocator.alloc(u8, tensor_size);
+    defer allocator.free(data);
+
+    for (data, 0..) |*byte, i| byte.* = @intCast(i % 256);
+
+    try platform.pjrt_client.dmaMap(platform.pjrt_api, data);
+    defer platform.pjrt_client.dmaUnmap(platform.pjrt_api, data) catch {};
+
+    const trace_write = tracer.frameStart("DeviceWriter.test.write.loop");
+    defer tracer.frameEnd(trace_write, "DeviceWriter.test.write.loop");
+
+    var total_bytes_written: u64 = 0;
+    while (total_bytes_written < tensor_size) {
+        const remaining = tensor_size - total_bytes_written;
+        const chunk = data[total_bytes_written..][0..@min(remaining, chunk_size)];
+
+        var index: usize = 0;
+        while (index < chunk.len) {
+            const trace_write_chunk = tracer.frameStart("DeviceWriter.test.write.loop.write");
+            defer tracer.frameEnd(trace_write_chunk, "DeviceWriter.test.write.loop.write");
+
+            log.debug("Writing chunk {*} of size {d}, total_bytes_written: {d}", .{ chunk.ptr, chunk.len, total_bytes_written });
+            index += try writer.interface.write(chunk[index..]);
+        }
+
+        total_bytes_written += chunk.len;
+    }
+    try writer.interface.flush();
+
+    try std.testing.expectEqual(shard.byteSize(), writer.bytes_written);
+    try std.testing.expect(!writer.can_process_last_event);
+}
+
+test "DeviceWriter: writeAll" {
     const allocator = std.testing.allocator;
 
     var context: Context = try .init();
     defer context.deinit();
 
     tracer = Tracer.init("ai.zml.test.DeviceWriter.writeAll");
-    const trace = tracer.frameStart("DeviceWriter.test.writeAllandReadBack");
-    defer tracer.frameEnd(trace, "DeviceWriter.test.writeAllandReadBack");
+    const trace = tracer.frameStart("DeviceWriter.test.writeAll");
+    defer tracer.frameEnd(trace, "DeviceWriter.test.writeAll");
 
     const platform = context.autoPlatform(.{});
-
     const device = platform.getDevices()[0];
 
-    const tensor_size = 10 * 4 * BUF_256_MB;
+    try warmupDevices(allocator, platform, &.{device});
+
+    const tensor_size = BUF_256_MB;
     const shape: Shape = .init(.{tensor_size / @sizeOf(u8)}, .u8);
     const shard: Shard = .{
         .shape = shape,
@@ -1004,19 +1101,21 @@ test "DeviceWriter: writeAll and read back" {
         .device = device,
     };
 
-    const original_data = try allocator.alloc(u8, tensor_size);
-    defer allocator.free(original_data);
+    const data = try allocator.alloc(u8, tensor_size);
+    defer allocator.free(data);
 
-    for (original_data, 0..) |*byte, i| byte.* = @intCast(i % 256);
+    for (data, 0..) |*byte, i| byte.* = @intCast(i % 256);
 
-    try platform.pjrt_client.dmaMap(platform.pjrt_api, original_data);
-    defer platform.pjrt_client.dmaUnmap(platform.pjrt_api, original_data) catch {};
+    try platform.pjrt_client.dmaMap(platform.pjrt_api, data);
+    defer platform.pjrt_client.dmaUnmap(platform.pjrt_api, data) catch {};
 
     var writer: DeviceWriter = try .init(platform, shard, .device);
     defer writer.deinit();
 
-    try writer.interface.writeAll(original_data);
+    const trace_write_all = tracer.frameStart("DeviceWriter.test.writeAll.writer.writeAll");
+    try writer.interface.writeAll(data);
     try writer.interface.flush();
+    tracer.frameEnd(trace_write_all, "DeviceWriter.test.writeAll.writer.writeAll");
 
     try std.testing.expectEqual(shard.byteSize(), writer.bytes_written);
     try std.testing.expect(!writer.can_process_last_event);
@@ -1024,8 +1123,7 @@ test "DeviceWriter: writeAll and read back" {
     const pjrt_buffer = try writer.buffer();
     defer pjrt_buffer.deinit(platform.pjrt_api);
 
-    const reader_dma_buffer_size = BUF_32_MB;
-    const reader_buffer = try allocator.alignedAlloc(u8, .fromByteUnits(BUF_4_KB), reader_dma_buffer_size);
+    const reader_buffer = try allocator.alignedAlloc(u8, .fromByteUnits(BUF_4_KB), BUF_32_MB);
     defer allocator.free(reader_buffer);
 
     try platform.pjrt_client.dmaMap(platform.pjrt_api, reader_buffer);
@@ -1033,95 +1131,42 @@ test "DeviceWriter: writeAll and read back" {
 
     var reader: DeviceReader = try .init(platform, pjrt_buffer, reader_buffer);
 
-    var read_back_data = std.io.Writer.Allocating.init(allocator);
-    defer read_back_data.deinit();
+    const read_back_data = try allocator.alloc(u8, data.len);
+    defer allocator.free(read_back_data);
 
-    _ = try reader.interface.streamRemaining(&read_back_data.writer);
+    try platform.pjrt_client.dmaMap(platform.pjrt_api, read_back_data);
+    defer platform.pjrt_client.dmaUnmap(platform.pjrt_api, read_back_data) catch {};
 
-    const read_back_data_slice = try read_back_data.toOwnedSlice();
-    defer allocator.free(read_back_data_slice);
+    var read_back_writer: std.io.Writer = .fixed(read_back_data);
+    const read_bytes = try reader.interface.streamRemaining(&read_back_writer);
 
-    try std.testing.expectEqualSlices(u8, original_data, read_back_data_slice);
+    try std.testing.expectEqual(data.len, read_bytes);
+    try std.testing.expectEqualSlices(u8, data, read_back_data);
 }
 
-// test "DeviceWriter: write in chunks and read back" {
-//     const allocator = std.testing.allocator;
-
-//     var context: Context = try .init();
-//     defer context.deinit();
-//     tracer = Tracer.init("ai.zml.test.DeviceWriter.chunks");
-
-//     const platform = context.autoPlatform(.{});
-//     if (platform.getDevices().len == 0) {
-//         std.log.warn("Skipping test, no devices found", .{});
-//         return;
-//     }
-//     const device = platform.getDevices()[0];
-
-//     const tensor_size: usize = 32 * MB;
-//     const chunk_size: usize = 1 * MB;
-//     const shape: Shape = .init(.{tensor_size / @sizeOf(u8)}, .u8);
-//     const shard: Shard = .{
-//         .shape = shape,
-//         .tensor = .{ .source = "test", .name = "tensor2", .shape = shape, .offset = 0 },
-//         .device = device,
-//     };
-
-//     var original_data = try allocator.alloc(u8, tensor_size);
-//     defer allocator.free(original_data);
-//     for (original_data, 0..) |*byte, i| byte.* = @intCast(i % 256);
-
-//     try platform.pjrt_client.dmaMap(platform.pjrt_api, original_data);
-//     defer platform.pjrt_client.dmaUnmap(platform.pjrt_api, original_data) catch {};
-
-//     var writer = try DeviceWriter.init(platform, shard, .device);
-//     defer writer.deinit();
-
-//     var written: usize = 0;
-//     while (written < tensor_size) {
-//         const to_write = @min(chunk_size, tensor_size - written);
-//         const chunk = original_data[written .. written + to_write];
-//         try writer.interface.writeAll(chunk);
-//         written += to_write;
-//     }
-//     try writer.interface.flush();
-
-//     const pjrt_buffer = try writer.buffer();
-//     defer pjrt_buffer.deinit(platform.pjrt_api);
-
-//     const reader_dma_buffer_size = 32 * MB;
-//     const reader_buffer = try allocator.alignedAlloc(u8, .fromByteUnits(BUF_4_KB), reader_dma_buffer_size);
-//     defer allocator.free(reader_buffer);
-//     try platform.pjrt_client.dmaMap(platform.pjrt_api, reader_buffer);
-//     defer platform.pjrt_client.dmaUnmap(platform.pjrt_api, reader_buffer) catch {};
-
-//     var reader: DeviceReader = try .init(platform, pjrt_buffer, reader_buffer);
-
-//     var read_back_writer: std.io.Writer.Allocating = try .initCapacity(allocator, original_data.len);
-//     defer read_back_writer.deinit();
-
-//     _ = try reader.interface.streamRemaining(&read_back_writer.writer);
-
-//     const read_back_data = try read_back_writer.toOwnedSlice();
-//     defer allocator.free(read_back_data);
-
-//     try std.testing.expectEqualSlices(u8, original_data, read_back_data);
-// }
-
 test "DeviceWriter: flush finalizes transfer" {
-    const platform = zml.testing.env();
+    const allocator = std.testing.allocator;
+
+    var context: Context = try .init();
+    defer context.deinit();
+
+    tracer = Tracer.init("ai.zml.test.DeviceWriter.flush");
+    const trace = tracer.frameStart("DeviceWriter.test.flush");
+    defer tracer.frameEnd(trace, "DeviceWriter.test.flush");
+
+    const platform = context.autoPlatform(.{});
     const device = platform.getDevices()[0];
 
-    // Use zero size to test only the finalization logic
-    const tensor_size: usize = 0;
-    const shape = Shape.init(.{tensor_size}, .u8);
+    try warmupDevices(allocator, platform, &.{device});
+
+    const shape = Shape.init(.{0}, .u8);
     const shard: Shard = .{
         .shape = shape,
         .tensor = .{ .source = "test", .name = "tensor_flush", .shape = shape, .offset = 0 },
         .device = device,
     };
 
-    var writer = try DeviceWriter.init(platform, shard, .device);
+    var writer: DeviceWriter = try .init(platform, shard, .device);
     defer writer.deinit();
 
     try std.testing.expect(writer.can_process_last_event);
@@ -1131,77 +1176,6 @@ test "DeviceWriter: flush finalizes transfer" {
     try writer.interface.flush();
     try std.testing.expect(!writer.can_process_last_event);
 }
-
-// test "DeviceWriter + Write" {
-//     const allocator = std.testing.allocator;
-
-//     var context: Context = try .init();
-//     defer context.deinit();
-
-//     tracer = Tracer.init("ai.zml.test.DeviceWriter+Write");
-
-//     const platform = context.autoPlatform(.{});
-//     const devices = platform.getDevices();
-//     const device = devices[0];
-
-//     const TENSOR_SIZE = 1024 * MB;
-//     const DMA_BUFFER_SIZE = 32 * MB;
-
-//     const shape: Shape = .init(.{TENSOR_SIZE / @sizeOf(f32)}, .f32);
-//     const tensor: Tensor = .{
-//         .source = "test",
-//         .name = "tensor",
-//         .shape = shape,
-//         .offset = 0,
-//     };
-//     const shard: Shard = .{
-//         .shape = shape,
-//         .tensor = tensor,
-//         .device = device,
-//     };
-
-//     const dma_buffer = try allocator.alloc(u8, DMA_BUFFER_SIZE);
-//     defer allocator.free(dma_buffer);
-
-//     try platform.pjrt_client.dmaMap(platform.pjrt_api, dma_buffer);
-//     defer platform.pjrt_client.dmaUnmap(platform.pjrt_api, dma_buffer) catch {};
-
-//     var writer: DeviceWriter = try .init(platform, shard, .device);
-//     defer writer.deinit();
-
-//     const data = try allocator.alloc(u8, TENSOR_SIZE);
-//     defer allocator.free(data);
-
-//     try platform.pjrt_client.dmaMap(platform.pjrt_api, data);
-//     defer platform.pjrt_client.dmaUnmap(platform.pjrt_api, data) catch {};
-
-//     for (data, 0..) |*byte, i| {
-//         byte.* = @intCast(i % 256);
-//     }
-
-//     const WRITE_CHUNK_SIZE = DMA_BUFFER_SIZE / 4;
-//     var total_bytes_written: u64 = 0;
-
-//     while (total_bytes_written < TENSOR_SIZE) {
-//         const remaining = TENSOR_SIZE - total_bytes_written;
-//         const chunk_size = @min(remaining, WRITE_CHUNK_SIZE);
-//         const chunk = data[total_bytes_written..][0..chunk_size];
-//         log.debug("Writing chunk {*} of size {d}, total_bytes_written: {d}", .{ chunk.ptr, chunk.len, total_bytes_written });
-
-//         var index: usize = 0;
-//         while (index < chunk.len) {
-//             const trace_write = tracer.frameStart("writer.interface.write");
-//             defer tracer.frameEnd(trace_write, "writer.interface.write");
-
-//             log.debug("Writing chunk {*} of size {d}, total_bytes_written: {d}", .{ chunk.ptr, chunk.len, total_bytes_written });
-//             index += try writer.interface.write(chunk[index..]);
-//         }
-
-//         // try writer.interface.writeAll(chunk);
-//         total_bytes_written += chunk.len;
-//     }
-//     try writer.interface.flush();
-// }
 
 const TensorWriter = struct {
     device_writers: []DeviceWriter,
@@ -1213,7 +1187,6 @@ const TensorWriter = struct {
     total_bytes_processed: u64,
 
     buffer: []u8,
-
     interface: std.io.Writer,
 
     pub fn init(device_writers: []DeviceWriter, buffer: []u8) TensorWriter {
@@ -1375,7 +1348,7 @@ const TensorWriter = struct {
         }
     }
 
-    const vtable = std.io.Writer.VTable{
+    const vtable: std.io.Writer.VTable = .{
         .drain = drain,
         .flush = flush,
         .rebase = rebase,
@@ -1507,7 +1480,7 @@ const DeviceReader = struct {
         return 0;
     }
 
-    const vtable = std.io.Reader.VTable{
+    const vtable: std.io.Reader.VTable = .{
         .stream = stream,
     };
 };
@@ -1515,13 +1488,16 @@ const DeviceReader = struct {
 test "DeviceReader: streamRemaining" {
     const allocator = std.testing.allocator;
 
+    var context: Context = try .init();
+    defer context.deinit();
+
     tracer = Tracer.init("ai.zml.test.DeviceReader");
     const trace_test = tracer.frameStart("DeviceReader.test.streamRemaining");
     defer tracer.frameEnd(trace_test, "DeviceReader.test.streamRemaining");
 
-    const platform = zml.testing.env();
+    const platform = context.autoPlatform(.{});
 
-    const memory_kind: pjrtx.Memory.Kind = if (platform.target == .cuda) .device else .pinned_host;
+    const memory_kind: pjrtx.Memory.Kind = if (platform.target == .cpu) .pinned_host else .device;
     const memories = try platform.getDevices()[0].addressableMemories(platform.pjrt_api);
     const memory = for (memories) |m| {
         const kind = m.kind(platform.pjrt_api);
@@ -1544,8 +1520,7 @@ test "DeviceReader: streamRemaining" {
     });
     defer buffer.deinit(platform.pjrt_api);
 
-    const reader_buffer_size = BUF_64_MB;
-    const reader_buffer = try allocator.alignedAlloc(u8, .fromByteUnits(BUF_4_KB), reader_buffer_size);
+    const reader_buffer = try allocator.alignedAlloc(u8, .fromByteUnits(BUF_4_KB), BUF_64_MB);
     defer allocator.free(reader_buffer);
 
     try platform.pjrt_client.dmaMap(platform.pjrt_api, reader_buffer);
@@ -1556,9 +1531,7 @@ test "DeviceReader: streamRemaining" {
     const read_back_buffer = try allocator.alloc(u8, shape.byteSize());
     defer allocator.free(read_back_buffer);
 
-    var prng = std.Random.DefaultPrng.init(42);
-    const random = prng.random();
-    random.bytes(read_back_buffer);
+    for (read_back_buffer, 0..) |*byte, i| byte.* = @intCast(i % 256);
 
     try platform.pjrt_client.dmaMap(platform.pjrt_api, read_back_buffer);
     defer platform.pjrt_client.dmaUnmap(platform.pjrt_api, read_back_buffer) catch {};
@@ -1581,13 +1554,16 @@ test "DeviceReader: streamRemaining" {
 test "DeviceReader: discard writer" {
     const allocator = std.testing.allocator;
 
+    var context: Context = try .init();
+    defer context.deinit();
+
     tracer = Tracer.init("ai.zml.test.DeviceReader");
     const trace_test = tracer.frameStart("DeviceReader.test.discardWriter");
     defer tracer.frameEnd(trace_test, "DeviceReader.test.discardWriter");
 
-    const platform = zml.testing.env();
+    const platform = context.autoPlatform(.{});
 
-    const memory_kind: pjrtx.Memory.Kind = if (platform.target == .cuda) .device else .pinned_host;
+    const memory_kind: pjrtx.Memory.Kind = if (platform.target == .cpu) .pinned_host else .device;
     const memories = try platform.getDevices()[0].addressableMemories(platform.pjrt_api);
     const memory = for (memories) |m| {
         const kind = m.kind(platform.pjrt_api);
@@ -1671,7 +1647,7 @@ const TensorReader = struct {
         return error.EndOfStream;
     }
 
-    const vtable = std.io.Reader.VTable{
+    const vtable: std.io.Reader.VTable = .{
         .stream = stream,
     };
 };
@@ -1679,59 +1655,82 @@ const TensorReader = struct {
 test "Full Pipeline: TensorWriter -> GPU -> TensorReader" {
     const allocator = std.testing.allocator;
 
-    tracer = Tracer.init("ai.zml.test.FullPipeline");
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
 
-    const platform = zml.testing.env();
+    var context: Context = try .init();
+    defer context.deinit();
+
+    tracer = Tracer.init("ai.zml.test.FullPipeline");
+    const trace_test = tracer.frameStart("DeviceReader.test.streamRemaining");
+    defer tracer.frameEnd(trace_test, "DeviceReader.test.streamRemaining");
+
+    const platform = context.autoPlatform(.{});
+
     const devices = platform.getDevices();
+    const memory_kind: pjrtx.Memory.Kind = if (platform.target == .cpu) .pinned_host else .device;
+
+    try warmupDevices(allocator, platform, devices);
 
     if (devices.len < 2) {
         std.log.warn("Skipping test, requires at least 2 devices, found {d}", .{devices.len});
         return error.SkipZigTest;
     }
 
-    const devices_to_use = devices[0..2];
-
-    const tensor_size = 128 * MB;
-    const tensor_writer_buffer_size = 16 * MB;
-    const tensor_writer_chunk_size = 8 * MB;
-    const device_reader_buffer_size = 128 * MB;
+    const devices_to_use = devices[0..1];
+    const filename = "full_pipeline_test.bin";
+    const tensor_size = 1 * 4 * BUF_256_MB;
+    const file_buffer_size = BUF_128_MB;
+    const writer_buffer_size = BUF_64_MB;
+    const device_reader_buffer_size = BUF_128_MB;
     const alignment = BUF_4_KB;
 
-    const original_data = try allocator.alloc(u8, tensor_size);
-    defer allocator.free(original_data);
-    for (original_data, 0..) |*byte, i| byte.* = @intCast(i % 256);
-
-    const shape = Shape.init(.{tensor_size}, .u8).withSharding(.{0});
+    const shape = Shape.init(.{tensor_size / @sizeOf(f32)}, .f32).withSharding(.{0});
     const tensor: Tensor = .{ .source = "test", .name = "full_pipeline_tensor", .shape = shape, .offset = 0 };
+
+    _ = try createBinFile(tmp_dir, filename, shape.byteSize(), null);
+    const file_path = try tmp_dir.dir.realpathAlloc(allocator, filename);
+    defer allocator.free(file_path);
+
+    const file = try std.fs.openFileAbsolute(file_path, .{});
+    defer file.close();
+
+    _ = try switchToDirectIO(file);
 
     const shards = try computeShards(allocator, tensor, devices_to_use);
     defer allocator.free(shards);
 
-    const tensor_writer_buffer = try allocator.alignedAlloc(u8, .fromByteUnits(alignment), tensor_writer_buffer_size);
-    defer allocator.free(tensor_writer_buffer);
+    const file_buffer = try allocator.alignedAlloc(u8, .fromByteUnits(alignment), file_buffer_size);
+    defer allocator.free(file_buffer);
 
-    try platform.pjrt_client.dmaMap(platform.pjrt_api, tensor_writer_buffer);
-    defer platform.pjrt_client.dmaUnmap(platform.pjrt_api, tensor_writer_buffer) catch {};
+    try platform.pjrt_client.dmaMap(platform.pjrt_api, file_buffer);
+    defer platform.pjrt_client.dmaUnmap(platform.pjrt_api, file_buffer) catch {};
+
+    const writer_buffer = try allocator.alignedAlloc(u8, .fromByteUnits(alignment), writer_buffer_size);
+    defer allocator.free(writer_buffer);
+
+    try platform.pjrt_client.dmaMap(platform.pjrt_api, writer_buffer);
+    defer platform.pjrt_client.dmaUnmap(platform.pjrt_api, writer_buffer) catch {};
 
     var device_writers: std.ArrayList(DeviceWriter) = try .initCapacity(allocator, shards.len);
     errdefer for (device_writers.items) |*dw| dw.deinit();
     defer device_writers.deinit(allocator);
 
-    for (shards) |s| device_writers.appendAssumeCapacity(try .init(platform, s, .device));
+    for (shards) |s| device_writers.appendAssumeCapacity(try .init(platform, s, memory_kind));
 
-    var tensor_writer: TensorWriter = .init(device_writers.items, tensor_writer_buffer);
+    var file_reader = file.reader(&.{});
+    try file_reader.seekTo(tensor.offset);
 
-    var total_bytes_written: u64 = 0;
-    while (total_bytes_written < tensor_size) {
-        const remaining = tensor_size - total_bytes_written;
-        const chunk_size = @min(remaining, tensor_writer_chunk_size);
-        const chunk = original_data[total_bytes_written..][0..chunk_size];
+    var aligned_file_reader: AlignedFileReader = try .init(file_reader, .fromByteUnits(BUF_4_KB));
+    var limited_reader: std.io.Reader.Limited = .init(&aligned_file_reader.interface, .limited64(tensor.shape.byteSize()), file_buffer);
+    var tensor_writer: TensorWriter = .init(device_writers.items, writer_buffer);
 
-        try tensor_writer.interface.writeAll(chunk);
-
-        total_bytes_written += chunk.len;
-    }
+    const trace_write = tracer.frameStart("FullPipeline.TensorWriter.streamRemaining");
+    const bytes_copied = try limited_reader.interface.streamRemaining(&tensor_writer.interface);
     try tensor_writer.interface.flush();
+    tracer.frameEnd(trace_write, "FullPipeline.TensorWriter.streamRemaining");
+
+    try std.testing.expectEqual(tensor.shape.byteSize(), bytes_copied);
 
     var pjrt_buffers: [devices_to_use.len]*pjrtx.Buffer = undefined;
     for (device_writers.items, 0..) |*dw, i| {
@@ -1761,19 +1760,31 @@ test "Full Pipeline: TensorWriter -> GPU -> TensorReader" {
 
     var tensor_reader: TensorReader = try .init(device_readers.items);
 
-    var read_back_writer: std.io.Writer.Allocating = try .initCapacity(allocator, tensor_size);
-    defer read_back_writer.deinit();
+    try file_reader.seekTo(tensor.offset);
 
-    const bytes_read = try tensor_reader.interface.streamRemaining(&read_back_writer.writer);
+    const verification_chunk_size = BUF_32_MB;
+    const tensor_reader_buffer = try allocator.alloc(u8, verification_chunk_size);
+    defer allocator.free(tensor_reader_buffer);
 
-    try std.testing.expectEqual(tensor_size, bytes_read);
+    const file_reader_buffer = try allocator.alloc(u8, verification_chunk_size);
+    defer allocator.free(file_reader_buffer);
 
-    const read_back_data = try read_back_writer.toOwnedSlice();
-    defer allocator.free(read_back_data);
+    var total_bytes_read: u64 = 0;
+    while (total_bytes_read < tensor_size) {
+        const limit = @min(verification_chunk_size, tensor_size - total_bytes_read);
 
-    try std.testing.expectEqualSlices(u8, original_data, read_back_data);
+        const tensor_bytes_read = try tensor_reader.interface.readSliceShort(tensor_reader_buffer[0..limit]);
+        const file_bytes_read = try file_reader.interface.readSliceShort(file_reader_buffer[0..limit]);
 
-    log.warn("Full pipeline test completed successfully, transferred {d} bytes", .{bytes_read});
+        try std.testing.expectEqual(tensor_bytes_read, file_bytes_read);
+        if (tensor_bytes_read == 0) break;
+
+        try std.testing.expectEqualSlices(u8, file_reader_buffer[0..file_bytes_read], tensor_reader_buffer[0..tensor_bytes_read]);
+
+        total_bytes_read += tensor_bytes_read;
+    }
+
+    try std.testing.expectEqual(tensor_size, total_bytes_read);
 }
 
 // This is an example of how sharding metadata might be added to a model registry.
@@ -1891,6 +1902,7 @@ pub fn asyncMain() !void {
     const platform = context.autoPlatform(.{});
     context.printAvailablePlatforms(platform);
     const devices = platform.getDevices();
+    const memory_kind: pjrtx.Memory.Kind = if (platform.target == .cpu) .pinned_host else .device;
 
     const elapsed_init = timer.lap();
     log.warn("--- Initialized context and platform with {d} devices in {d}ms ---", .{ devices.len, elapsed_init / std.time.ns_per_ms });
@@ -1962,34 +1974,14 @@ pub fn asyncMain() !void {
     log.warn("--- Discovered {d} tensors in model ({d:.2} GB) in {d}ms ---", .{ registry.tensors.count(), registry.totalBytes() / (1024 * 1024 * 1024), elapsed_discovery / std.time.ns_per_ms });
 
     log.warn("--- Preparing streaming file handles... ---", .{});
-    var o_direct_files: std.StringHashMapUnmanaged(std.fs.File) = .{};
-    defer {
-        var it = o_direct_files.iterator();
-        while (it.next()) |entry| {
-            entry.value_ptr.close();
-            allocator.free(entry.key_ptr.*);
-        }
-        o_direct_files.deinit(allocator);
-    }
 
     var files_it = files.iterator();
     while (files_it.next()) |entry| {
-        const basename = entry.key_ptr.*;
-        const dirname = std.fs.path.dirname(file_path).?;
-        const full_path = try std.fs.path.join(allocator, &.{ dirname, basename });
-        defer allocator.free(full_path);
-
-        const file_fd = try std.posix.open(
-            full_path,
-            .{ .ACCMODE = .RDONLY, .DIRECT = true },
-            0,
-        );
-        const file = std.fs.File{ .handle = file_fd };
-        try o_direct_files.put(allocator, try allocator.dupe(u8, basename), file);
+        _ = try switchToDirectIO(entry.value_ptr.*);
     }
 
     const elapsed_streaming_prep = timer.lap();
-    log.warn("--- Prepared {d} streaming file handles in {d}ms ---", .{ o_direct_files.count(), elapsed_streaming_prep / std.time.ns_per_ms });
+    log.warn("--- Prepared {d} streaming file handles in {d}ms ---", .{ files.count(), elapsed_streaming_prep / std.time.ns_per_ms });
 
     log.warn("--- Applying sharding information... ---", .{});
     try addExampleShardingMetadata(&registry);
@@ -2021,14 +2013,17 @@ pub fn asyncMain() !void {
     log.warn("--- Allocating DMA buffers", .{});
     const trace_allocation = tracer.frameStart("Buffers allocation and DMA mapping");
 
-    const dma_writer_staging_buffer = try allocator.alignedAlloc(u8, .fromByteUnits(BUF_4_KB), BUF_32_MB);
-    defer allocator.free(dma_writer_staging_buffer);
+    const writer_buffer = try allocator.alignedAlloc(u8, .fromByteUnits(BUF_4_KB), BUF_64_MB);
+    defer allocator.free(writer_buffer);
 
-    try platform.pjrt_client.dmaMap(platform.pjrt_api, dma_writer_staging_buffer);
-    defer platform.pjrt_client.dmaUnmap(platform.pjrt_api, dma_writer_staging_buffer) catch unreachable;
+    try platform.pjrt_client.dmaMap(platform.pjrt_api, writer_buffer);
+    defer platform.pjrt_client.dmaUnmap(platform.pjrt_api, writer_buffer) catch unreachable;
 
-    const file_buffer = try allocator.alignedAlloc(u8, .fromByteUnits(BUF_4_KB), BUF_64_MB);
+    const file_buffer = try allocator.alignedAlloc(u8, .fromByteUnits(BUF_4_KB), BUF_128_MB);
     defer allocator.free(file_buffer);
+
+    try platform.pjrt_client.dmaMap(platform.pjrt_api, file_buffer);
+    defer platform.pjrt_client.dmaUnmap(platform.pjrt_api, file_buffer) catch unreachable;
 
     const tensor_reader_buffer: [0]u8 = undefined;
 
@@ -2036,41 +2031,7 @@ pub fn asyncMain() !void {
     tracer.frameEnd(trace_allocation, "Buffers allocation and DMA mapping");
     log.warn("--- Prepared for tensor processing in {d}ms ---", .{elasped_preparation / std.time.ns_per_ms});
 
-    log.warn("--- Warming up devices (GPU bfc allocation) ---", .{});
-    var warmup_timer = try std.time.Timer.start();
-
-    for (devices) |device| {
-        const trace_warmup = tracer.frameStart("Transfer Manager Warmup");
-        defer tracer.frameEnd(trace_warmup, "Transfer Manager Warmup");
-
-        const warmup_shape = Shape.init(.{BUF_1_MB / @sizeOf(f32)}, .f32);
-
-        const warmup_data = try allocator.alloc(u8, BUF_1_MB);
-        defer allocator.free(warmup_data);
-
-        const warmup_shard = Shard{
-            .shape = warmup_shape,
-            .tensor = .{
-                .source = "warmup",
-                .name = "warmup_tensor",
-                .shape = warmup_shape,
-                .offset = 0,
-            },
-            .device = device,
-        };
-
-        const warmp_buffer = try allocator.alloc(u8, BUF_4_MB);
-        defer allocator.free(warmp_buffer);
-
-        var warmup_writer = try DeviceWriter.init(platform, warmup_shard, .device);
-        defer warmup_writer.deinit();
-
-        try warmup_writer.interface.writeAll(warmup_data);
-        try warmup_writer.interface.flush();
-    }
-
-    const warmup_elapsed = warmup_timer.lap();
-    log.warn("--- Warmed up transfer managers for {d} devices in {d}ms ---", .{ devices.len, warmup_elapsed / std.time.ns_per_ms });
+    try warmupDevices(allocator, platform, devices);
 
     log.warn("--- Starting tensor processing stream... ---", .{});
     timer.reset();
@@ -2102,11 +2063,11 @@ pub fn asyncMain() !void {
 
         const arena_allocator = arena.allocator();
 
-        const file = o_direct_files.get(tensor.source).?;
+        const file = files.get(tensor.source).?;
         const shards = try computeShards(arena_allocator, tensor, devices);
 
         const trace_file_read = tracer.frameStart("File reader setup");
-        var file_reader = file.reader(&.{});
+        var file_reader = file.reader(file_buffer);
         try file_reader.seekTo(tensor.offset);
         tracer.frameEnd(trace_file_read, "File reader setup");
 
@@ -2121,10 +2082,10 @@ pub fn asyncMain() !void {
             device_writers.deinit(arena_allocator);
         }
         for (0..devices.len) |i| {
-            device_writers.appendAssumeCapacity(try .init(platform, shards[i], .device));
+            device_writers.appendAssumeCapacity(try .init(platform, shards[i], memory_kind));
         }
 
-        var tensor_writer: TensorWriter = .init(device_writers.items, dma_writer_staging_buffer);
+        var tensor_writer: TensorWriter = .init(device_writers.items, writer_buffer);
         const bytes_copied = try tensor_reader.interface.streamRemaining(&tensor_writer.interface);
         try tensor_writer.interface.flush();
 
