@@ -1,12 +1,6 @@
 load("@aspect_bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@zml//bazel:patchelf.bzl", "patchelf")
 
-cc_shared_library(
-    name = "zmlxcuda_so",
-    shared_lib_name = "lib/libzmlxcuda.so.0",
-    deps = ["@zml//runtimes/cuda:zmlxcuda_lib"],
-)
-
 patchelf(
     name = "libpjrt_cuda_so",
     src = "libpjrt_cuda.so",
