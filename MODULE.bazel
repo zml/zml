@@ -24,6 +24,14 @@ bazel_dep(name = "with_cfg.bzl", version = "0.11.0")
 
 bazel_dep(name = "buildifier_prebuilt", version = "8.2.0.2", dev_dependency = True)
 
+# Remove this when rules_zig@0.12.2 is released.
+archive_override(
+    module_name = "rules_zig",
+    urls = ["https://github.com/aherrmann/rules_zig/archive/cbf03e45c9ffa7d23a50790929649805a08afbf9.tar.gz"],
+    strip_prefix = "rules_zig-cbf03e45c9ffa7d23a50790929649805a08afbf9",
+    integrity = "sha256-lu6gNjulEIqG68I7DRyJzWInDVk3lL+mCj2J14vYKwc=",
+)
+
 zig = use_extension("@rules_zig//zig:extensions.bzl", "zig")
 zig.index(file = "//bazel:zig_index.json")
 zig.toolchain(zig_version = "0.15.1")
