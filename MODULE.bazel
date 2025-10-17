@@ -34,7 +34,7 @@ archive_override(
 
 zig = use_extension("@rules_zig//zig:extensions.bzl", "zig")
 zig.index(file = "//bazel:zig_index.json")
-zig.toolchain(zig_version = "0.15.1")
+zig.toolchain(zig_version = "0.15.2")
 zig.mirrors(urls = [
     "https://mirror.zml.ai/zig",
     "https://ziglang.org/builds/",
