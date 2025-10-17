@@ -83,8 +83,8 @@ pub const GrayScale = struct {
 
     pub fn grayScaleCuda(self: GrayScale, rgb_d: zml.Buffer, gray_d: zml.Buffer) !void {
         var args: [2][]u8 = .{
-            rgb_d.opaqueDeviceMemoryDataPointer()[0..rgb_d.shape().byteSize()],
-            gray_d.opaqueDeviceMemoryDataPointer()[0..gray_d.shape().byteSize()],
+            @as([*]u8, @ptrFromInt(rgb_d.devicePtr()))[0..rgb_d.shape().byteSize()],
+            @as([*]u8, @ptrFromInt(gray_d.devicePtr()))[0..gray_d.shape().byteSize()],
         };
         var args_ptr: [2:null]?*anyopaque = .{ @ptrCast(&args[0]), @ptrCast(&args[1]) };
         // This is a naive kernel with one block per pixel.
