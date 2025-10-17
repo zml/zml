@@ -14,4 +14,8 @@ zig_library(
     main = "upb.zig",
     visibility = ["//visibility:public"],
     deps = [":upb_c"],
+    zigopts = [
+        #TODO(cerisier): Remove me when this is done inside rules_zig.
+        "-fllvm",
+    ],
 )
