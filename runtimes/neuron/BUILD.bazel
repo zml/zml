@@ -25,7 +25,7 @@ zig_shared_library(
 zig_binary(
     name = "neuronx-cc",
     data = ["@neuron_py_deps//neuronx_cc"],
-    linkopts = ["-Wl,-rpath,$ORIGIN/../lib"],
+    linkopts = ["-Wl,-rpath,$$ORIGIN/../lib"],
     main = "neuronx-cc.zig",
     tags = ["manual"],
     deps = [":libpython"],
