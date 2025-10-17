@@ -54,7 +54,12 @@ zig_library(
         "torch.zig",
         "zml.zig",
     ],
-    zigopts = ["-lc", "-freference-trace=20"],
+    zigopts = [
+        "-lc",
+        "-freference-trace=20",
+        #TODO(cerisier): Remove me when this is done inside rules_zig.
+        "-fllvm",
+    ],
     main = "zml.zig",
     visibility = ["//visibility:public"],
     deps = [
