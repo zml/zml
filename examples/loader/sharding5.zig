@@ -74,7 +74,7 @@ fn createBinFile(tmp_dir: std.testing.TmpDir, filename: []const u8, size: usize,
 
 // Warm up devices by allocating and freeing a 8MB buffer on each device which allocate the GPU BFC memory.
 fn warmupDevices(allocator: std.mem.Allocator, platform: Platform, devices: []const *const pjrt.Device) !void {
-    log.warn("--- Warming up devices (GPU bfc allocation) ---", .{});
+    log.warn("Warming up devices (GPU bfc allocation)", .{});
     var timer = try std.time.Timer.start();
 
     for (devices) |device| {
@@ -105,7 +105,7 @@ fn warmupDevices(allocator: std.mem.Allocator, platform: Platform, devices: []co
     }
 
     const elapsed = timer.lap();
-    log.warn("--- Warmed up {d} devices in {d}ms ---", .{ devices.len, elapsed / std.time.ns_per_ms });
+    log.warn("Warmed up {d} devices in {d}ms", .{ devices.len, elapsed / std.time.ns_per_ms });
 }
 
 const Tensor = struct {
@@ -129,28 +129,27 @@ const Shard = struct {
     }
 };
 
-pub const Registry = struct {
-    pub const Tensors = std.StringArrayHashMapUnmanaged(Tensor);
-    pub const Metadatas = std.StringArrayHashMapUnmanaged(Metadata);
-    pub const Checksums = std.StringArrayHashMapUnmanaged([32]u8);
+pub const SafetensorsSources = std.StringArrayHashMapUnmanaged(void);
+pub const Tensors = std.StringArrayHashMapUnmanaged(Tensor);
+pub const Metadatas = std.StringArrayHashMapUnmanaged(Metadata);
+pub const Files = std.StringHashMapUnmanaged(std.fs.File);
 
+// todo: TensorRegistry
+pub const Registry = struct {
     arena: std.heap.ArenaAllocator,
     tensors: Tensors,
     metadata: Metadatas,
-    checksums: Checksums,
 
     pub fn init(allocator: std.mem.Allocator) Registry {
         return .{
             .arena = std.heap.ArenaAllocator.init(allocator),
             .tensors = .{},
             .metadata = .{},
-            .checksums = .{},
         };
     }
 
     pub fn deinit(self: *Registry) void {
         const allocator = self.arena.allocator();
-        self.checksums.deinit(allocator);
         self.tensors.deinit(allocator);
         self.metadata.deinit(allocator);
         self.arena.deinit();
@@ -168,22 +167,138 @@ pub const Registry = struct {
     }
 };
 
-pub const SafetensorsSource = []const u8;
-pub const SafetensorsSources = std.ArrayList(SafetensorsSource);
+pub const ParsedSafetensors = struct {
+    content: Content,
+    metadata: Metadatas,
+
+    pub const Content = union(enum) {
+        sources: SafetensorsSources,
+        tensors: Tensors,
+    };
+
+    pub fn deinit(self: *ParsedSafetensors, allocator: std.mem.Allocator) void {
+        self.metadata.deinit(allocator);
+        switch (self.content) {
+            .sources => |*s| s.deinit(allocator),
+            .tensors => |*t| t.deinit(allocator),
+        }
+    }
+};
+
+fn discoverModel(
+    allocator: std.mem.Allocator,
+    initial_path: []const u8,
+) !struct { registry: Registry, files: Files } {
+    var registry: Registry = .init(allocator);
+    var files: Files = .{};
+
+    errdefer {
+        registry.deinit();
+        var it = files.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.close();
+            allocator.free(entry.key_ptr.*);
+        }
+        files.deinit(allocator);
+    }
+
+    const registry_allocator = registry.arena.allocator();
+
+    var worklist: std.ArrayList([]const u8) = .{};
+    defer {
+        for (worklist.items) |p| allocator.free(p);
+        worklist.deinit(allocator);
+    }
+
+    try worklist.append(allocator, try allocator.dupe(u8, initial_path));
+
+    while (worklist.pop()) |current_path| {
+        defer allocator.free(current_path);
+
+        var parsed = try parsePath(registry_allocator, current_path);
+        defer parsed.result.deinit(registry_allocator);
+
+        const basename = try allocator.dupe(u8, std.fs.path.basename(current_path));
+        errdefer allocator.free(basename);
+
+        try files.put(allocator, basename, parsed.file);
+
+        var meta_it = parsed.result.metadata.iterator();
+        while (meta_it.next()) |entry| {
+            try registry.metadata.put(registry_allocator, entry.key_ptr.*, entry.value_ptr.*);
+        }
+
+        switch (parsed.result.content) {
+            .sources => |sources| {
+                const base_dir = std.fs.path.dirname(current_path) orelse ".";
+                const chunks = sources.keys();
+
+                for (chunks) |chunk_name| {
+                    const chunk_path = try std.fs.path.join(allocator, &.{ base_dir, chunk_name });
+                    try worklist.append(allocator, chunk_path);
+                }
+            },
+            .tensors => |tensors| {
+                var it = tensors.iterator();
+                while (it.next()) |entry| {
+                    try registry.tensors.put(registry_allocator, entry.key_ptr.*, entry.value_ptr.*);
+                }
+            },
+        }
+    }
+
+    return .{
+        .registry = registry,
+        .files = files,
+    };
+}
+
+fn parsePath(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+) !struct { result: ParsedSafetensors, file: std.fs.File } {
+    const file = try std.fs.openFileAbsolute(path, .{ .mode = .read_only });
+    errdefer file.close();
+
+    var reader_buffer: [BUF_4_KB]u8 = undefined;
+    var reader = file.reader(&reader_buffer);
+
+    if (std.mem.endsWith(u8, path, ".safetensors.index.json")) {
+        const index_result = try parseSafetensorsIndex(allocator, &reader.interface);
+
+        return .{
+            .result = .{
+                .content = .{ .sources = index_result.sources },
+                .metadata = index_result.metadata,
+            },
+            .file = file,
+        };
+    } else {
+        const basename = std.fs.path.basename(path);
+        const result = try parseSafetensors(allocator, &reader.interface, basename);
+
+        return .{
+            .result = .{
+                .content = .{ .tensors = result.tensors },
+                .metadata = result.metadata,
+            },
+            .file = file,
+        };
+    }
+}
 
 fn parseSafetensorsIndex(
     allocator: std.mem.Allocator,
     reader: *std.io.Reader,
-    registry: *Registry,
-) !SafetensorsSources {
-    var chunks: SafetensorsSources = .{};
+) !struct { sources: SafetensorsSources, metadata: Metadatas } {
+    var sources: SafetensorsSources = .{};
+    errdefer sources.deinit(allocator);
 
-    const registry_allocator = registry.arena.allocator();
-    var json_reader: std.json.Reader = .init(registry_allocator, reader);
+    var json_reader: std.json.Reader = .init(allocator, reader);
 
     const index = try std.json.parseFromTokenSourceLeaky(
         std.json.Value,
-        registry_allocator,
+        allocator,
         &json_reader,
         .{ .allocate = .alloc_if_needed },
     );
@@ -193,42 +308,46 @@ fn parseSafetensorsIndex(
 
     while (it.next()) |entry| {
         const filename = entry.value_ptr.string;
-        try chunks.append(allocator, try registry_allocator.dupe(u8, filename));
+
+        _ = try sources.getOrPut(allocator, try allocator.dupe(u8, filename));
     }
 
-    if (index.object.get("__metadata__")) |metadata| {
-        var prefix_buf: [BUF_1_KB]u8 = undefined;
-        try parseMetadata(registry, StringBuilder.initBuffer(&prefix_buf), metadata);
+    var metadatas: Metadatas = .{};
+    if (index.object.get("__metadata__")) |metadata_val| {
+        metadatas = try parseMetadata(allocator, metadata_val);
     }
 
-    return chunks;
+    return .{
+        .sources = sources,
+        .metadata = metadatas,
+    };
 }
 
 fn parseSafetensors(
     allocator: std.mem.Allocator,
-    registry: *Registry,
     reader: *std.io.Reader,
-    source: SafetensorsSource,
-) !void {
-    const registry_allocator = registry.arena.allocator();
+    source: []const u8,
+) !struct { tensors: Tensors, metadata: Metadatas } {
     const json_header_length: usize = @intCast(try reader.takeInt(u64, .little));
+
     const json_data = try allocator.alloc(u8, json_header_length);
-    defer allocator.free(json_data);
 
     try reader.readSliceAll(json_data);
 
     const data_start_offset = 8 + json_header_length;
-    const metadata = try std.json.parseFromSliceLeaky(std.json.Value, registry_allocator, json_data, .{});
+    const metadata_val = try std.json.parseFromSliceLeaky(std.json.Value, allocator, json_data, .{});
 
-    var it = metadata.object.iterator();
+    var tensors: Tensors = .{};
+    var metadatas: Metadatas = .{};
+
+    var it = metadata_val.object.iterator();
 
     while (it.next()) |entry| {
         const key = entry.key_ptr.*;
         const value = entry.value_ptr.*;
 
         if (std.mem.eql(u8, key, "__metadata__")) {
-            var prefix_buf: [BUF_1_KB]u8 = undefined;
-            try parseMetadata(registry, StringBuilder.initBuffer(&prefix_buf), value);
+            metadatas = try parseMetadata(allocator, value);
             continue;
         }
 
@@ -253,9 +372,10 @@ fn parseSafetensors(
         const size_in_bytes = end - start;
         std.debug.assert(size_in_bytes == shape.byteSize());
 
+        const tensor_name = try allocator.dupe(u8, key);
         const tensor: Tensor = .{
-            .source = try registry_allocator.dupe(u8, source),
-            .name = try registry_allocator.dupe(u8, key),
+            .source = try allocator.dupe(u8, source),
+            .name = tensor_name,
             .shape = shape,
             .offset = data_start_offset + start,
         };
@@ -268,8 +388,13 @@ fn parseSafetensors(
             size_in_bytes,
         });
 
-        try registry.tensors.put(registry_allocator, key, tensor);
+        try tensors.put(allocator, tensor_name, tensor);
     }
+
+    return .{
+        .tensors = tensors,
+        .metadata = metadatas,
+    };
 }
 
 pub const Metadata = union(enum) {
@@ -368,19 +493,17 @@ fn stringToDtype(safetensor_type: []const u8) !DataType {
     };
 }
 
-pub fn parseMetadata(registry: *Registry, prefix: StringBuilder, val: std.json.Value) !void {
-    const allocator = registry.arena.allocator();
-    const metadata = &registry.metadata;
+fn populateMetadata(allocator: std.mem.Allocator, prefix: *StringBuilder, val: std.json.Value, metadatas: *Metadatas) !void {
     const key = prefix.items;
     return switch (val) {
-        .null => try metadata.put(allocator, try allocator.dupe(u8, key), .null),
-        .bool => |v| try metadata.put(allocator, try allocator.dupe(u8, key), .{ .bool = v }),
-        .integer => |v| try metadata.put(allocator, try allocator.dupe(u8, key), .{ .int = v }),
-        .float => |v| try metadata.put(allocator, try allocator.dupe(u8, key), .{ .float = v }),
-        .number_string, .string => |v| try metadata.put(allocator, try allocator.dupe(u8, key), .{ .string = try allocator.dupe(u8, v) }),
+        .null => try metadatas.put(allocator, try allocator.dupe(u8, key), .null),
+        .bool => |v| try metadatas.put(allocator, try allocator.dupe(u8, key), .{ .bool = v }),
+        .integer => |v| try metadatas.put(allocator, try allocator.dupe(u8, key), .{ .int = v }),
+        .float => |v| try metadatas.put(allocator, try allocator.dupe(u8, key), .{ .float = v }),
+        .number_string, .string => |v| try metadatas.put(allocator, try allocator.dupe(u8, key), .{ .string = try allocator.dupe(u8, v) }),
         .array => |v| {
             if (v.items.len == 0) return;
-            return if (validSlice(v)) |item_type| {
+            if (validSlice(v)) |item_type| {
                 const data: Metadata = switch (item_type) {
                     .bool => blk: {
                         const values = try allocator.alloc(bool, v.items.len);
@@ -400,34 +523,48 @@ pub fn parseMetadata(registry: *Registry, prefix: StringBuilder, val: std.json.V
                     inline .string, .number_string => |tag| blk: {
                         const values = try allocator.alloc([]const u8, v.items.len);
                         for (v.items, 0..) |item, i| {
-                            values[i] = @field(item, @tagName(tag));
+                            values[i] = try allocator.dupe(u8, @field(item, @tagName(tag)));
                         }
                         break :blk .{ .array_string = values };
                     },
                     .null, .array, .object => unreachable,
                 };
-                try metadata.put(allocator, try allocator.dupe(u8, key), data);
+                try metadatas.put(allocator, try allocator.dupe(u8, key), data);
             } else {
                 for (v.items, 0..) |item, i| {
-                    var new_prefix = prefix;
-                    if (prefix.items.len > 0)
-                        new_prefix.appendAssumeCapacity('.');
-                    new_prefix.items.len += std.fmt.printInt(new_prefix.unusedCapacitySlice(), i, 10, .lower, .{});
-                    try parseMetadata(registry, new_prefix, item);
+                    const old_len = prefix.items.len;
+                    if (prefix.items.len > 0) {
+                        prefix.appendAssumeCapacity('.');
+                    }
+                    prefix.items.len += std.fmt.printInt(prefix.unusedCapacitySlice(), i, 10, .lower, .{});
+                    try populateMetadata(allocator, prefix, item, metadatas);
+                    prefix.items.len = old_len;
                 }
-            };
+            }
         },
         .object => |v| {
             var obj_iter = v.iterator();
             while (obj_iter.next()) |entry| {
-                var new_prefix = prefix;
-                if (prefix.items.len > 0)
-                    new_prefix.appendAssumeCapacity('.');
-                new_prefix.appendSliceAssumeCapacity(entry.key_ptr.*);
-                try parseMetadata(registry, new_prefix, entry.value_ptr.*);
+                const old_len = prefix.items.len;
+                if (prefix.items.len > 0) {
+                    prefix.appendAssumeCapacity('.');
+                }
+                prefix.appendSliceAssumeCapacity(entry.key_ptr.*);
+                try populateMetadata(allocator, prefix, entry.value_ptr.*, metadatas);
+                prefix.items.len = old_len;
             }
         },
     };
+}
+
+pub fn parseMetadata(allocator: std.mem.Allocator, val: std.json.Value) !Metadatas {
+    var metadatas: Metadatas = .{};
+    var prefix_buf: [BUF_1_KB]u8 = undefined;
+    var prefix = StringBuilder.initBuffer(&prefix_buf);
+
+    try populateMetadata(allocator, &prefix, val, &metadatas);
+
+    return metadatas;
 }
 
 /// We can only create a Zig slice out of json array, if all values
@@ -733,7 +870,7 @@ const TestAlignedFileReader = struct {
         var file_reader = self.o_direct_file.reader(&reader_init_buf);
         try file_reader.seekTo(self.params.read_offset);
 
-        var reader = try AlignedFileReader.init(file_reader, .fromByteUnits(self.params.alignment));
+        var reader: AlignedFileReader = try .init(file_reader, .fromByteUnits(self.params.alignment));
 
         const dest_buffer = if (dest_buffer_alignment) |alignment|
             try self.allocator.alignedAlloc(u8, .fromByteUnits(alignment), self.params.read_size)
@@ -742,6 +879,7 @@ const TestAlignedFileReader = struct {
         defer self.allocator.free(dest_buffer);
 
         var writer: std.io.Writer = .fixed(dest_buffer);
+
         var total_read: usize = 0;
         while (total_read < self.params.read_size) {
             const n = reader.interface.stream(&writer, .limited(self.params.read_size - total_read)) catch |err| switch (err) {
@@ -1930,7 +2068,7 @@ pub fn asyncMain() !void {
         return;
     };
 
-    log.warn("--- Initializing context and platform... ---", .{});
+    log.warn("Initializing context and platform...", .{});
     var context: Context = try .init();
     defer context.deinit();
 
@@ -1942,75 +2080,33 @@ pub fn asyncMain() !void {
     const memory_kind: pjrtx.Memory.Kind = if (platform.target == .cpu) .pinned_host else .device;
 
     const elapsed_init = timer.lap();
-    log.warn("--- Initialized context and platform with {d} devices in {d}ms ---", .{ devices.len, elapsed_init / std.time.ns_per_ms });
+    log.warn("Initialized context and platform with {d} devices in {d}ms", .{ devices.len, elapsed_init / std.time.ns_per_ms });
 
     const trace_post_init = tracer.frameStart("Main post context/platform init");
     defer tracer.frameEnd(trace_post_init, "Main post context/platform init");
 
-    log.warn("--- Discovering model... ---", .{});
+    log.warn("Discovering model...", .{});
     const trace_discovery = tracer.frameStart("Weights discovery");
 
-    var registry: Registry = .init(allocator);
-    defer registry.deinit();
+    const discovery_result = try discoverModel(allocator, file_path);
+    var registry = discovery_result.registry;
+    var files = discovery_result.files;
 
-    var files: std.StringHashMapUnmanaged(std.fs.File) = .{};
+    defer registry.deinit();
     defer {
         var it = files.iterator();
-
         while (it.next()) |entry| {
             entry.value_ptr.close();
             allocator.free(entry.key_ptr.*);
         }
-
         files.deinit(allocator);
-    }
-
-    if (std.mem.endsWith(u8, file_path, ".safetensors.index.json")) {
-        const index_file = try std.fs.openFileAbsolute(file_path, .{ .mode = .read_only });
-
-        const index_reader_buffer = try allocator.alloc(u8, BUF_4_MB);
-        defer allocator.free(index_reader_buffer);
-
-        var index_reader = index_file.reader(index_reader_buffer);
-        var chunks = try parseSafetensorsIndex(allocator, &index_reader.interface, &registry);
-        defer chunks.deinit(allocator);
-
-        const file_reader_buffer = try allocator.alloc(u8, BUF_4_MB);
-        defer allocator.free(file_reader_buffer);
-
-        for (chunks.items) |chunk| {
-            if (files.get(chunk)) |_| {
-                // model.safetensors.index.json weight map values may contain duplicates
-                continue;
-            }
-
-            const chunk_file_path = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(file_path).?, chunk });
-            defer allocator.free(chunk_file_path);
-
-            const chunk_file = try std.fs.openFileAbsolute(chunk_file_path, .{ .mode = .read_only });
-            try files.put(allocator, try allocator.dupe(u8, std.fs.path.basename(chunk_file_path)), chunk_file);
-
-            var chunk_reader = chunk_file.reader(file_reader_buffer);
-
-            try parseSafetensors(allocator, &registry, &chunk_reader.interface, chunk);
-        }
-    } else {
-        const file_reader_buffer = try allocator.alloc(u8, BUF_4_MB);
-        defer allocator.free(file_reader_buffer);
-
-        const file = try std.fs.openFileAbsolute(file_path, .{ .mode = .read_only });
-        try files.put(allocator, try allocator.dupe(u8, std.fs.path.basename(file_path)), file);
-
-        var chunk_reader = file.reader(file_reader_buffer);
-
-        try parseSafetensors(allocator, &registry, &chunk_reader.interface, std.fs.path.basename(file_path));
     }
 
     const elapsed_discovery = timer.lap();
     tracer.frameEnd(trace_discovery, "Weights discovery");
-    log.warn("--- Discovered {d} tensors in model ({d:.2} GB) in {d}ms ---", .{ registry.tensors.count(), registry.totalBytes() / (1024 * 1024 * 1024), elapsed_discovery / std.time.ns_per_ms });
+    log.warn("Discovered {d} tensors in model ({d:.2} GB) in {d}ms", .{ registry.tensors.count(), registry.totalBytes() / (1024 * 1024 * 1024), elapsed_discovery / std.time.ns_per_ms });
 
-    log.warn("--- Preparing streaming file handles... ---", .{});
+    log.warn("Preparing streaming file handles...", .{});
 
     var files_it = files.iterator();
     while (files_it.next()) |entry| {
@@ -2018,16 +2114,16 @@ pub fn asyncMain() !void {
     }
 
     const elapsed_streaming_prep = timer.lap();
-    log.warn("--- Prepared {d} streaming file handles in {d}ms ---", .{ files.count(), elapsed_streaming_prep / std.time.ns_per_ms });
+    log.warn("Prepared {d} streaming file handles in {d}ms", .{ files.count(), elapsed_streaming_prep / std.time.ns_per_ms });
 
-    log.warn("--- Applying sharding information... ---", .{});
+    log.warn("Applying sharding information...", .{});
     try addExampleShardingMetadata(&registry);
     try annotateShapesWithSharding(&registry);
 
     const elapsed_sharding = timer.lap();
-    log.warn("--- Applied sharding information in {d}ms ---", .{elapsed_sharding / std.time.ns_per_ms});
+    log.warn("Applied sharding information in {d}ms", .{elapsed_sharding / std.time.ns_per_ms});
 
-    log.warn("--- Sorting tensors by source and offset... ---", .{});
+    log.warn("Sorting tensors by source and offset...", .{});
     const tensors = blk: {
         const ts = registry.tensors.values();
 
@@ -2045,9 +2141,9 @@ pub fn asyncMain() !void {
         break :blk ts;
     };
     const elapsed_sorting = timer.lap();
-    log.warn("--- Sorted tensors in {d}ms ---", .{elapsed_sorting / std.time.ns_per_ms});
+    log.warn("Sorted tensors in {d}ms", .{elapsed_sorting / std.time.ns_per_ms});
 
-    log.warn("--- Allocating DMA buffers", .{});
+    log.warn("Allocating DMA buffers", .{});
     const trace_allocation = tracer.frameStart("Buffers allocation and DMA mapping");
 
     const writer_buffer = try allocator.alignedAlloc(u8, .fromByteUnits(BUF_4_KB), BUF_64_MB);
@@ -2066,11 +2162,11 @@ pub fn asyncMain() !void {
 
     const elasped_preparation = timer.lap();
     tracer.frameEnd(trace_allocation, "Buffers allocation and DMA mapping");
-    log.warn("--- Prepared for tensor processing in {d}ms ---", .{elasped_preparation / std.time.ns_per_ms});
+    log.warn("Prepared for tensor processing in {d}ms", .{elasped_preparation / std.time.ns_per_ms});
 
     try warmupDevices(allocator, platform, devices);
 
-    log.warn("--- Starting tensor processing stream... ---", .{});
+    log.warn("Starting tensor processing stream...", .{});
     timer.reset();
 
     const trace_processing = tracer.frameStart("Tensor Processing Stream");
@@ -2145,7 +2241,7 @@ pub fn asyncMain() !void {
     const gb_read = @as(f64, @floatFromInt(sum_total_bytes_read)) / (1.0 * 1024 * 1024 * 1024);
     const read_rate = if (elapsed > 0) gb_read / (@as(f64, @floatFromInt(elapsed)) / 1_000_000_000.0) else 0;
     const copy_rate = if (elapsed > 0) gb_copied / (@as(f64, @floatFromInt(elapsed)) / 1_000_000_000.0) else 0;
-    log.warn("--- All tensors loaded in {d}ms ({d:.2} GB read at {d:.2} GB/s, {d:.2} GB copied at {d:.2} GB/s) ---", .{ elapsed / std.time.ns_per_ms, gb_read, read_rate, gb_copied, copy_rate });
+    log.warn("All tensors loaded in {d}ms ({d:.2} GB read at {d:.2} GB/s, {d:.2} GB copied at {d:.2} GB/s)", .{ elapsed / std.time.ns_per_ms, gb_read, read_rate, gb_copied, copy_rate });
 }
 
 // all code below is unmodified (or slightly) / imported strucs / funcs from zml
