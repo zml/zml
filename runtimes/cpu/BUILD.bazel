@@ -20,6 +20,7 @@ config_setting(
 
 cc_library(
     name = "empty",
+    defines = ["ZML_RUNTIME_CPU_DISABLED"],
 )
 
 copy_to_directory(

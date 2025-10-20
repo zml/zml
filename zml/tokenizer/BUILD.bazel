@@ -19,6 +19,10 @@ zig_binary(
     name = "main",
     main = "main.zig",
     visibility = ["//visibility:public"],
+    zigopts = [
+        #TODO(cerisier): Remove me when this is done inside rules_zig.
+        "-fllvm"
+    ],
     deps = [
         ":tokenizer",
         "//async",

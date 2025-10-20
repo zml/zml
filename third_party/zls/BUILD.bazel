@@ -27,38 +27,6 @@ exports_files(
     ],
 )
 
-zig_binary(
-    name = "runner",
-    main = "runner.zig",
-    data = [
-        "//zig:resolved_toolchain",
-    ],
-    deps = ["@rules_zig//zig/runfiles"],
-)
-
-bzl_library(
-    name = "zls_completion",
-    srcs = ["zls_completion.bzl"],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//zig/private/common:zig_build",
-        "//zig/private/providers:zig_module_info",
-    ],
-)
-
-bzl_library(
-    name = "zls_toolchain",
-    srcs = ["zls_toolchain.bzl"],
-    visibility = ["//visibility:public"],
-    deps = ["@bazel_tools//tools/build_defs/repo:http.bzl"],
-)
-
-bzl_library(
-    name = "zls_runner",
-    srcs = ["zls_runner.bzl"],
-    visibility = ["//visibility:public"],
-)
-
 # Execute `bazel run //util:update_filegroups` to update this target.
 filegroup(
     name = "all_files",
@@ -70,5 +38,5 @@ filegroup(
         ":zls_runner.zig",
         ":zls_toolchain.bzl",
     ],
-    visibility = ["//zig:__pkg__"],
+    visibility = ["@rules_zig//zig:__pkg__"],
 )

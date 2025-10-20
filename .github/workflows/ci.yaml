@@ -56,7 +56,7 @@ jobs:
 
       - name: Ensure self hosted cache permissions
         if: ${{ !matrix.runtimes.enable_cache }}
-        run: sudo chmod -R 777 /tmp/zig-cache && sudo chmod -R 777 /tmp/zml
+        run: mkdir -p /tmp/zig-cache && mkdir -p /tmp/zml && sudo chmod -R 777 /tmp/zig-cache && sudo chmod -R 777 /tmp/zml
 
       - uses: bazel-contrib/setup-bazel@0.15.0
         with:
@@ -103,7 +103,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.1
+          version: 0.15.2
           mirror: https://mirror.zml.ai/zig
 
       - name: Zig Format
