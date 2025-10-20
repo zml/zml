@@ -51,6 +51,7 @@ zig_binary(
         "//stdx",
         "//async",
     ],
+    copts = ["-freference-trace"]
 )
 
 zig_library(
