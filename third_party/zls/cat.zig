@@ -8,7 +8,7 @@ pub fn main() !void {
     defer std.process.argsFree(gpa, args);
 
     const file_path = args[1];
-    var file = try std.fs.cwd().openFile(file_path, .{ .mode = .read_only});
+    var file = try std.fs.cwd().openFile(file_path, .{ .mode = .read_only });
     defer file.close();
 
     if (builtin.zig_version.major == 0 and builtin.zig_version.minor >= 15) {
