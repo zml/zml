@@ -1,0 +1,171 @@
+const std = @import("std");
+const async = @import("async");
+const zml = @import("zml");
+const qwen = @import("qwen_3_vl.zig");
+
+const log = std.log.scoped(.qwen);
+
+test {
+    // enregistre tous les tests
+    std.testing.refAllDecls(@This());
+}
+
+pub const std_options: std.Options = .{
+    .log_level = .debug,
+    .logFn = async.logFn(std.log.defaultLog),
+    .log_scope_levels = &[_]std.log.ScopeLevel{
+        .{ .scope = .@"zml/async", .level = .info },
+    },
+};
+
+pub fn main() !void {
+    try async.AsyncThread.main(std.heap.c_allocator, asyncMain);
+}
+
+pub fn asyncMain() !void {
+    const allocator = std.heap.c_allocator;
+
+    const hf_model_path = "/Users/louislechevalier/Documents/qwen3-vl-4b-instruct";
+
+    const model_config_path = try std.fs.path.join(allocator, &.{ hf_model_path, "config.json" });
+    defer allocator.free(model_config_path);
+
+    const model_weights_path = b: {
+        const simple_path = try std.fs.path.join(allocator, &.{ hf_model_path, "model.safetensors" });
+        if (async.File.access(simple_path, .{})) {
+            break :b simple_path;
+        } else |_| {
+            allocator.free(simple_path);
+        }
+
+        const sharded_path = try std.fs.path.join(allocator, &.{ hf_model_path, "model.safetensors.index.json" });
+        break :b sharded_path;
+    };
+    defer allocator.free(model_weights_path);
+
+    const config = blk: {
+        var config_json_file = try async.File.open(model_config_path, .{ .mode = .read_only });
+        defer config_json_file.close() catch unreachable;
+        var config_json_buffer: [256]u8 = undefined;
+        var config_reader = config_json_file.reader(&config_json_buffer);
+        var reader = std.json.Reader.init(allocator, &config_reader.interface);
+        defer reader.deinit();
+        const config_obj = try std.json.parseFromTokenSourceLeaky(qwen.Qwen3VL.Config, allocator, &reader, .{ .ignore_unknown_fields = true });
+        break :blk config_obj;
+    };
+
+    // Load the activations.
+    var activation_buffer_store = try zml.aio.torch.open(allocator, "/Users/louislechevalier/Documents/zml/examples/qwen_3_vl/activations/qwen3-vl-4b-instruct.activations.pt");
+    defer activation_buffer_store.deinit();
+
+    var iterator = activation_buffer_store.buffers.iterator();
+    while (iterator.next()) |entry| {
+        log.info("Buffer: {s} {f}", .{ entry.key_ptr.*, entry.value_ptr.shape() });
+    }
+
+    var context = try zml.Context.init();
+    defer context.deinit();
+
+    const compilation_options = zml.CompilationOptions{
+        .xla_dump_to = "/tmp/zml/qwen",
+        .sharding_enabled = true,
+    };
+
+    const create_opts_json = "{}";
+    const create_opts = try std.json.parseFromSlice(zml.Platform.CreateOptions, allocator, create_opts_json, .{});
+    const platform = context.autoPlatform(create_opts.value).withCompilationOptions(compilation_options);
+    create_opts.deinit();
+    context.printAvailablePlatforms(platform);
+
+    var store = try zml.aio.detectFormatAndOpen(allocator, model_weights_path);
+    defer store.deinit();
+
+    // Options pour Qwen3-VL
+    const qwen_options: qwen.Qwen3VL.Options = .{
+        .max_seq_len = 256,
+        .sampling_strategy = .{
+            .topk = 1,
+            .temperature = 1.0,
+        },
+    };
+
+    // Arena pour la compilation
+    var compiler_arena = std.heap.ArenaAllocator.init(allocator);
+    defer compiler_arena.deinit();
+
+    const qwen_tensors: qwen.Qwen3VL = try .init(compiler_arena.allocator(), config, qwen_options, store);
+
+    log.info("Qwen3-VL loaded!", .{});
+
+    log.info("\tLoading Llama weights from {s}...", .{model_weights_path});
+    var qwen_buffers = try store.loadModelById(qwen.Qwen3VL, compiler_arena.allocator(), qwen_tensors, platform);
+    defer zml.aio.unloadBuffers(&qwen_buffers);
+
+    try testImplementation(platform, qwen_tensors, qwen_buffers, activation_buffer_store);
+}
+
+fn testImplementation(
+    platform: zml.Platform,
+    qwen_model: qwen.Qwen3VL,
+    qwen_weights: zml.Bufferized(qwen.Qwen3VL),
+    activations: zml.aio.BufferStore,
+) !void {
+    try zml.testing.testLayer(platform, activations, "model.visual.patch_embed.proj", qwen_model.vision_transformer.vision_patch_embed.proj, qwen_weights.vision_transformer.vision_patch_embed.proj, 1e-3);
+    try zml.testing.testLayer(platform, activations, "model.visual.patch_embed", qwen_model.vision_transformer.vision_patch_embed, qwen_weights.vision_transformer.vision_patch_embed, 1e-3);
+    try zml.testing.testLayer(platform, activations, "model.visual.pos_embed", qwen_model.vision_transformer.pos_embed, qwen_weights.vision_transformer.pos_embed, 1e-3);
+    try zml.testing.testLayer(platform, activations, "model.visual.rotary_pos_emb", qwen_model.vision_transformer.rotary_pos_emb, {}, 1e-3);
+    try zml.testing.testLayer(platform, activations, "model.visual.blocks.0.norm1", qwen_model.vision_transformer.blocks[0].norm1, qwen_weights.vision_transformer.blocks[0].norm1, 1e-2);
+    try zml.testing.testLayer(platform, activations, "model.visual.blocks.0.norm2", qwen_model.vision_transformer.blocks[0].norm2, qwen_weights.vision_transformer.blocks[0].norm2, 1e-2);
+    try zml.testing.testLayer(platform, activations, "model.visual.blocks.0.attn.proj", qwen_model.vision_transformer.blocks[0].attn.proj, qwen_weights.vision_transformer.blocks[0].attn.proj, 1e-2);
+    try zml.testing.testLayer(platform, activations, "model.visual.blocks.0.mlp.linear_fc1", qwen_model.vision_transformer.blocks[0].mlp.linear_fc1, qwen_weights.vision_transformer.blocks[0].mlp.linear_fc1, 1e-2);
+    try zml.testing.testLayer(platform, activations, "model.visual.blocks.0.mlp.linear_fc2", qwen_model.vision_transformer.blocks[0].mlp.linear_fc2, qwen_weights.vision_transformer.blocks[0].mlp.linear_fc2, 1e-2);
+    try zml.testing.testLayer(platform, activations, "model.visual.merger.linear_fc1", qwen_model.vision_transformer.patch_merger.linear_fc1, qwen_weights.vision_transformer.patch_merger.linear_fc1, 1e-2);
+    try zml.testing.testLayer(platform, activations, "model.visual.merger.linear_fc2", qwen_model.vision_transformer.patch_merger.linear_fc2, qwen_weights.vision_transformer.patch_merger.linear_fc2, 1e-2);
+    try zml.testing.testLayer(platform, activations, "model.visual.merger.norm", qwen_model.vision_transformer.patch_merger.norm, qwen_weights.vision_transformer.patch_merger.norm, 1e-2);
+    try zml.testing.testLayer(platform, activations, "model.visual.deepstack_merger_list.0.linear_fc1", qwen_model.vision_transformer.deepstack_patch_mergers[0].linear_fc1, qwen_weights.vision_transformer.deepstack_patch_mergers[0].linear_fc1, 1e-2);
+    try zml.testing.testLayer(platform, activations, "model.visual.deepstack_merger_list.0.linear_fc2", qwen_model.vision_transformer.deepstack_patch_mergers[0].linear_fc2, qwen_weights.vision_transformer.deepstack_patch_mergers[0].linear_fc2, 1e-2);
+    try zml.testing.testLayer(platform, activations, "model.visual.deepstack_merger_list.0.norm", qwen_model.vision_transformer.deepstack_patch_mergers[0].norm, qwen_weights.vision_transformer.deepstack_patch_mergers[0].norm, 1e-2);
+}
+// test "Conv3D basic functionality" {
+//     // Créer des tensors de test
+//     const allocator = std.testing.allocator;
+//     const platform = zml.testing.env();
+
+//     const MyModule = struct {
+//         pub fn forward(input: zml.Tensor, kernel: zml.Tensor) zml.Tensor {
+//             return input.conv3d(kernel, .{
+//                 .window_strides = &.{ 2, 14, 14 },
+//                 .padding = &.{ 0, 0, 0, 0, 0, 0 },
+//                 .input_spatial_dimensions = &.{ 2, 3, 4 },
+//             });
+//         }
+//     };
+
+//     const input_dimz = .{ 1, 3, 8, 224, 224 };
+//     const input_shape = zml.Shape.init(input_dimz, .f32);
+//     const input_data = try allocator.alloc(f32, input_shape.count());
+//     defer allocator.free(input_data);
+//     const input = try zml.Buffer.fromSlice(platform, input_shape, input_data);
+//     //const buffer_awaited = try input_buf.await();
+
+//     const kernel_dimz = .{ 64, 3, 2, 14, 14 };
+//     const kernel_shape = zml.Shape.init(kernel_dimz, .f32);
+//     const kernel_data = try allocator.alloc(f32, kernel_shape.count());
+//     defer allocator.free(kernel_data);
+//     const kernel = try zml.Buffer.fromSlice(platform, kernel_shape, kernel_data);
+//     //const buffer_awaited2 = try kernel_buf.await();
+
+//     const exe = try zml.compileFn(allocator, MyModule.forward, .{ input_shape, kernel_shape }, platform);
+//     defer exe.deinit();
+//     const output = exe.call(.{ input, kernel });
+//     const output_cpu = try output.toHostAlloc(allocator);
+//     defer output_cpu.deinit(allocator);
+
+//     // Vérifier les dimensions
+//     try std.testing.expectEqual(@as(u32, 5), output.shape().rank());
+//     try std.testing.expectEqual(@as(u32, 1), output.shape().dim(0)); // batch
+//     try std.testing.expectEqual(@as(u32, 64), output.shape().dim(1)); // channels
+//     try std.testing.expectEqual(@as(u32, 4), output.shape().dim(2)); // time (8/2)
+//     try std.testing.expectEqual(@as(u32, 16), output.shape().dim(3)); // height (224/14)
+//     try std.testing.expectEqual(@as(u32, 16), output.shape().dim(4)); // width (224/14)
+// }
