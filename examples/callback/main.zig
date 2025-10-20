@@ -82,11 +82,7 @@ pub const GrayScale = struct {
     }
 
     pub fn grayScaleCuda(self: GrayScale, rgb_d: zml.Buffer, gray_d: zml.Buffer) !void {
-        var args: [2][]u8 = .{
-            @as([*]u8, @ptrFromInt(rgb_d.devicePtr()))[0..rgb_d.shape().byteSize()],
-            @as([*]u8, @ptrFromInt(gray_d.devicePtr()))[0..gray_d.shape().byteSize()],
-        };
-        var args_ptr: [2:null]?*anyopaque = .{ @ptrCast(&args[0]), @ptrCast(&args[1]) };
+        var args: [2:null]?*anyopaque = .{ rgb_d.devicePtr(), gray_d.devicePtr() };
         // This is a naive kernel with one block per pixel.
         try cuda.check(cuda.launchKernel.?(
             @ptrCast(self.cu_data[1]), // function
@@ -98,7 +94,7 @@ pub const GrayScale = struct {
             1, // num grids z
             0, // shared mem
             @ptrCast(self.stream),
-            &args_ptr,
+            &args,
             null,
         ));
         // Note: no explicit synchronization, we just enqueue work in the stream.
