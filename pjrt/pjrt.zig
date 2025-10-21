@@ -264,22 +264,22 @@ pub const ShapeSpec = extern struct {
 
     inner: c.PJRT_ShapeSpec,
 
-    pub fn init(dims_: []const usize, bt: BufferType) ShapeSpec {
+    pub fn init(dims_: []const i64, bt: BufferType) ShapeSpec {
         return .{
             .inner = pjrtStruct(c.PJRT_ShapeSpec{
-                .dims = @ptrCast(@constCast(dims_.ptr)),
-                .num_dims = dims.len,
-                .buffer_type = @intFromEnum(bt),
+                .dims = @constCast(dims_.ptr),
+                .num_dims = dims_.len,
+                .element_type = @intFromEnum(bt),
             }),
         };
     }
 
-    pub fn dims(self: ShapeSpec) []usize {
+    pub fn dims(self: ShapeSpec) []i64 {
         return self.inner.dims[0..self.inner.num_dims];
     }
 
     pub fn bufferType(self: ShapeSpec) BufferType {
-        return @enumFromInt(self.inner.buffer_type);
+        return @enumFromInt(self.inner.element_type);
     }
 };
 
@@ -440,7 +440,7 @@ pub const Client = opaque {
     }
 
     pub fn dmaMap(self: *const Client, api: *const Api, data: []const u8) ApiError!void {
-        try api.call(.PJRT_Client_DmaMap, .{
+        _ = try api.call(.PJRT_Client_DmaMap, .{
             .client = self.inner(),
             .data = @ptrCast(@constCast(data.ptr)),
             .size = @intCast(data.len),
@@ -448,7 +448,7 @@ pub const Client = opaque {
     }
 
     pub fn dmaUnmap(self: *const Client, api: *const Api, data: []const u8) ApiError!void {
-        try api.call(.PJRT_Client_DmaUnmap, .{
+        _ = try api.call(.PJRT_Client_DmaUnmap, .{
             .client = self.inner(),
             .data = @ptrCast(@constCast(data.ptr)),
         });
@@ -463,7 +463,7 @@ pub const Client = opaque {
     pub fn createBuffersForAsyncHostToDevice(self: *const Client, api: *const Api, args: CreateBuffersForAsyncHostToDeviceArgs) ApiError!*AsyncHostToDeviceTransferManager {
         const ret = try api.call(.PJRT_Client_CreateBuffersForAsyncHostToDevice, .{
             .client = self.inner(),
-            .shape_specs = @ptrCast(args.shape_specs.ptr),
+            .shape_specs = @ptrCast(@constCast(args.shape_specs.ptr)),
             .num_shape_specs = args.shape_specs.len,
             .device_layouts = if (args.device_layouts) |layouts| @ptrCast(@constCast(layouts.ptr)) else null,
             .num_device_layouts = if (args.device_layouts) |layouts| @intCast(layouts.len) else 0,

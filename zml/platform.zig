@@ -132,7 +132,7 @@ const _CreateOptions = struct {
     // bump memory fraction from XLA defaults of 75% to 90%.
     // Even on a 8GB GPU it should leave enough space for the Cuda driver
     // https://github.com/openxla/xla/blob/3e87afa11a865cf91137522492918ad18bfe5b7c/xla/pjrt/plugin/xla_gpu/xla_gpu_allocator_config.h#L25-L60
-    cuda: Cuda = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
+    cuda: Cuda = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.49 } } },
     rocm: struct {} = .{},
     tpu: struct {} = .{},
     neuron: struct {} = .{},

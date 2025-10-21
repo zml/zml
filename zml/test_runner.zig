@@ -11,6 +11,9 @@ const log_level: std.log.Level = .warn;
 
 pub const std_options: std.Options = .{
     .log_level = log_level,
+    .log_scope_levels = &.{
+        .{ .scope = .@"zml/async", .level = .info },
+    },
 };
 
 var log_err_count: usize = 0;

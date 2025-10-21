@@ -3,7 +3,7 @@ const std = @import("std");
 const async = @import("async");
 const dialects = @import("mlir/dialects");
 const mlir = @import("mlir");
-const pjrt = @import("pjrt");
+pub const pjrt = @import("pjrt");
 pub const ffi = pjrt.ffi;
 pub const Api = pjrt.Api;
 pub const ApiError = pjrt.ApiError;
@@ -137,6 +137,20 @@ pub const Client = opaque {
     pub fn createUnitializedBuffer(self: *const Client, api: *const Api, args: CreateUninitializedBufferArgs) ApiError!*Buffer {
         return @ptrCast(try self.inner().createUninitializedBuffer(api, args));
     }
+
+    pub const CreateBuffersForAsyncHostToDeviceArgs = pjrt.Client.CreateBuffersForAsyncHostToDeviceArgs;
+
+    pub fn createBuffersForAsyncHostToDevice(self: *const Client, api: *const Api, args: CreateBuffersForAsyncHostToDeviceArgs) ApiError!*AsyncHostToDeviceTransferManager {
+        return @ptrCast(try self.inner().createBuffersForAsyncHostToDevice(api, args));
+    }
+
+    pub fn dmaMap(self: *Client, api: *const Api, ptr: []u8) ApiError!void {
+        return try self.inner().dmaMap(api, ptr);
+    }
+
+    pub fn dmaUnmap(self: *Client, api: *const Api, ptr: []u8) ApiError!void {
+        return try self.inner().dmaUnmap(api, ptr);
+    }
 };
 
 pub const Buffer = opaque {
@@ -192,6 +206,10 @@ pub const Buffer = opaque {
 
     pub fn copyToMemory(self: *const Buffer, api: *const Api, memory_: *const Memory) ApiError!*Buffer {
         return @ptrCast(try self.inner().copyToMemory(api, memory_));
+    }
+
+    pub fn copyRawToHost(self: *const Buffer, api: *const Api, dest: []u8, offset: i64) ApiError!?*Event {
+        return @ptrCast(try self.inner().copyRawToHost(api, dest, offset));
     }
 
     pub fn getReadyEvent(self: *const Buffer, api: *const Api) ?*Event {
@@ -314,8 +332,8 @@ pub const AsyncHostToDeviceTransferManager = opaque {
         return @ptrCast(try self.inner().retrieveBuffer(api, buffer_index));
     }
 
-    pub fn device(self: *AsyncHostToDeviceTransferManager, api: *const Api) *Device {
-        return @ptrCast(self.inner().device(api));
+    pub fn device(self: *AsyncHostToDeviceTransferManager, api: *const Api) ApiError!*Device {
+        return @ptrCast(try self.inner().device(api));
     }
 
     pub fn bufferCount(self: *AsyncHostToDeviceTransferManager, api: *const Api) usize {
