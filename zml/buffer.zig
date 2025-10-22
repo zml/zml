@@ -280,10 +280,9 @@ pub const Buffer = struct {
         };
     }
 
-    pub fn devicePtr(self: Buffer) u64 {
+    pub fn devicePtr(self: Buffer) *anyopaque {
         stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer", .{});
-        const opaque_ptr: *anyopaque = self._shards.get(0).getOpaqueDeviceMemoryDataPointer(self._api) catch unreachable;
-        return @intFromPtr(opaque_ptr);
+        return self._shards.get(0).getOpaqueDeviceMemoryDataPointer(self._api) catch unreachable;
     }
 
     /// Fetches the content of the given buffer into a stack variable of the given type.
@@ -362,7 +361,7 @@ pub const Buffer = struct {
     }
 
     pub fn format(self: Buffer, writer: *std.Io.Writer) !void {
-        try writer.print("Buffer({f})@{x}", .{ self._shape, self.devicePtr() });
+        try writer.print("Buffer({f})@{x}", .{ self._shape, @intFromPtr(self.devicePtr()) });
     }
 
     pub fn getMemory(self: Buffer) *const pjrt.Memory {
@@ -470,7 +469,7 @@ pub const Buffer = struct {
         const host_visible_memories: []const Memory = &.{ .host_pinned, .host_unpinned };
         for (host_visible_memories) |memory| {
             const x = try uninitialized(platform, .init(.{6}, .u8), .{ .memory = memory });
-            const x_ptr: [*]u8 = @ptrFromInt(x.devicePtr());
+            const x_ptr: [*]u8 = @ptrCast(x.devicePtr());
             @memcpy(x_ptr, &[_]u8{ 104, 101, 108, 108, 111, 33 });
 
             const y = try x.getValue([6]u8);

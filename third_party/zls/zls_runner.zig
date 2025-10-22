@@ -1,5 +1,5 @@
 /// Custom ZLS launcher.
-/// 
+///
 /// Sets up paths to ZLS dependencies with Bazel runfiles.
 ///
 /// This file is used as a template by `zls_write_runner_zig_src.bzl`.

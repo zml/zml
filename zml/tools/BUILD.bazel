@@ -17,9 +17,8 @@ zig_library(
     main = "tools.zig",
     visibility = ["//visibility:public"],
     deps = select({
-        "@platforms//os:macos": [
-            ":macos_c",
-        ],
+        # TODO(cerisier): fix MacOsTracer
+        # "@platforms//os:macos": [ ":macos_c" ],
         "//conditions:default": [],
     }),
 )
