@@ -1,5 +1,5 @@
-// bazel run --config=release --config=native --@zml//runtimes:cpu=false --@zml//runtimes:cuda=true --run_under="sudo -E nsys profile -t cuda,syscall,nvtx,cublas,cublas-verbose,cusparse,cusparse-verbose,cudnn,osrt --inherit-environment=true --gpu-metrics-devices='cuda-visible' --cuda-memory-usage true --cuda-event-trace=false --backtrace=dwarf --cuda-graph-trace=node" //examples/loader -- /home/hugo/Llama-3.1-8B-Instruct/model.safetensors.index.json
-// bazel run --config=release --config=native --@zml//runtimes:cpu=false --@zml//runtimes:cuda=true --run_under="sudo -E nsys profile -t cuda,syscall,nvtx,cublas,cublas-verbose,cusparse,cusparse-verbose,cudnn,osrt --inherit-environment=true --gpu-metrics-devices='cuda-visible' --cuda-memory-usage true --cuda-event-trace=false --backtrace=dwarf --cuda-graph-trace=node" //examples/loader:test
+// bazel run --@zml//runtimes:cpu=false --@zml//runtimes:cuda=true --run_under="sudo -E nsys profile -t cuda,syscall,nvtx,cublas,cublas-verbose,cusparse,cusparse-verbose,cudnn,osrt --inherit-environment=true --gpu-metrics-devices='cuda-visible' --cuda-memory-usage true --cuda-event-trace=false --backtrace=dwarf --cuda-graph-trace=node" //examples/loader -- /home/hugo/Llama-3.1-8B-Instruct/model.safetensors.index.json
+// bazel run --@zml//runtimes:cpu=false --@zml//runtimes:cuda=true --run_under="sudo -E nsys profile -t cuda,syscall,nvtx,cublas,cublas-verbose,cusparse,cusparse-verbose,cudnn,osrt --inherit-environment=true --gpu-metrics-devices='cuda-visible' --cuda-memory-usage true --cuda-event-trace=false --backtrace=dwarf --cuda-graph-trace=node" //examples/loader:test
 
 // Display system memory usage including buffered disk cache
 // free -h
@@ -137,6 +137,7 @@ fn warmupDevices(allocator: std.mem.Allocator, platform: Platform, devices: []co
 }
 
 pub const ResourceURI = std.Uri;
+pub const ResourceIndexMap = std.ArrayHashMapUnmanaged(ResourceURI, std.ArrayList([]const u8), ResourceURIContext, false);
 pub const Resources = std.ArrayHashMapUnmanaged(ResourceURI, Resource, ResourceURIContext, false);
 pub const Tensors = std.StringArrayHashMapUnmanaged(Tensor);
 pub const Metadatas = std.StringArrayHashMapUnmanaged(Metadata);
@@ -145,6 +146,16 @@ pub const ResourceType = enum {
     index,
     safetensors,
     unknown,
+};
+
+const ResourceURIContext = struct {
+    // todo: implement full uri
+    pub fn hash(_: ResourceURIContext, uri: ResourceURI) u32 {
+        return std.array_hash_map.hashString(uri.path.percent_encoded);
+    }
+    pub fn eql(_: ResourceURIContext, a: ResourceURI, b: ResourceURI, _: usize) bool {
+        return std.mem.eql(u8, a.path.percent_encoded, b.path.percent_encoded);
+    }
 };
 
 const Tensor = struct {
@@ -168,137 +179,25 @@ const Shard = struct {
     }
 };
 
-pub const MemoryResource = struct {
-    pub const scheme = "memory";
+const ResourceIndex = struct {
+    arena: std.heap.ArenaAllocator,
 
-    uri: ResourceURI,
-    buffer: []u8,
+    map: ResourceIndexMap,
+    metadata: Metadatas,
 
-    pub fn init(buffer: []u8) !MemoryResource {
+    pub fn init(allocator: std.mem.Allocator) ResourceIndex {
         return .{
-            .uri = try .parse("memory://memory"),
-            .buffer = buffer,
+            .arena = std.heap.ArenaAllocator.init(allocator),
+            .map = .{},
+            .metadata = .{},
         };
     }
 
-    pub fn reader(_: *MemoryResource, buffer: []u8) std.io.Reader {
-        return std.io.Reader.fixed(buffer);
-    }
-
-    pub fn deinit(_: *MemoryResource) void {}
-};
-
-pub const FileResource = struct {
-    pub const scheme = "file";
-
-    uri: ResourceURI,
-    file: std.fs.File,
-
-    pub fn init(uri: ResourceURI) !FileResource {
-        return .{
-            .uri = uri,
-            .file = try std.fs.openFileAbsolute(uri.path.percent_encoded, .{ .mode = .read_only }),
-        };
-    }
-
-    pub fn reader(self: *FileResource, buffer: []u8) std.fs.File.Reader {
-        return self.file.reader(buffer);
-    }
-
-    pub fn deinit(self: *FileResource) void {
-        self.file.close();
-    }
-};
-
-pub const Resource = union(enum) {
-    memory: MemoryResource,
-    file: FileResource,
-
-    pub fn init(resource_uri: ResourceURI) !Resource {
-        if (std.mem.eql(u8, resource_uri.scheme, MemoryResource.scheme)) {
-            return .{ .memory = try .init(&[_]u8{}) };
-        } else if (std.mem.eql(u8, resource_uri.scheme, FileResource.scheme)) {
-            return .{ .file = try .init(resource_uri) };
-        } else {
-            return error.UnsupportedScheme;
-        }
-    }
-
-    pub fn deinit(self: *Resource) void {
-        switch (self.*) {
-            .memory => |*m| m.deinit(),
-            .file => |*f| f.deinit(),
-        }
-    }
-
-    pub fn reader(self: *Resource, buffer: []u8) IoReader {
-        return .init(self, buffer);
-    }
-
-    pub fn uri(self: *Resource) ResourceURI {
-        return switch (self.*) {
-            inline else => |*r| r.uri,
-        };
-    }
-
-    pub fn scheme(self: *Resource) []const u8 {
-        return switch (self.*) {
-            inline else => |*r| r.scheme,
-        };
-    }
-};
-
-fn resolveResourceType(resource: *Resource, reader_buffer: []u8) !ResourceType {
-    var reader = resource.reader(reader_buffer);
-
-    // Try to detect file type by examining its content
-    var magic_bytes_buffer: [8]u8 = undefined;
-    _ = reader.interface.readSliceShort(&magic_bytes_buffer) catch |err| {
-        if (err == error.EndOfStream) {
-            return .unknown;
-        }
-        return err;
-    };
-
-    // Check if it's a JSON file by looking at the first bytes
-    // JSON files typically start with '{' (0x7B) after optional whitespace
-    if (magic_bytes_buffer[0] == '{') {
-        // Read more content to check if it's an index file
-        var json_header_buffer: [100]u8 = undefined;
-        _ = reader.interface.readSliceShort(&json_header_buffer) catch |err| {
-            if (err == error.EndOfStream) {
-                return .unknown;
-            }
-            return err;
-        };
-
-        // If it contains "weight_map", it's likely an index file
-        if (std.mem.indexOf(u8, &json_header_buffer, "weight_map") != null) {
-            return .index;
-        }
-
-        return .unknown;
-    }
-
-    // Safetensors files start with a u64 header length
-    // Reinterpret first 8 bytes as little endian u64
-    const magic_number = std.mem.readInt(u64, &magic_bytes_buffer, .little);
-
-    // If the header is reasonable (< 10MB), it's likely a safetensors file
-    if (magic_number > 0 and magic_number < 10 * 1024 * 1024) {
-        return .safetensors;
-    }
-
-    return .unknown;
-}
-
-const ResourceURIContext = struct {
-    // todo: implement full uri
-    pub fn hash(_: ResourceURIContext, uri: ResourceURI) u32 {
-        return std.array_hash_map.hashString(uri.path.percent_encoded);
-    }
-    pub fn eql(_: ResourceURIContext, a: ResourceURI, b: ResourceURI, _: usize) bool {
-        return std.mem.eql(u8, a.path.percent_encoded, b.path.percent_encoded);
+    pub fn deinit(self: *ResourceIndex) void {
+        const allocator = self.arena.allocator();
+        self.map.deinit(allocator);
+        self.metadata.deinit(allocator);
+        self.arena.deinit();
     }
 };
 
@@ -425,31 +324,150 @@ pub const ModelPathResolver = struct {
     }
 };
 
-const ResourceIndex = struct {
-    arena: std.heap.ArenaAllocator,
+pub const MemoryResource = struct {
+    pub const scheme = "memory";
 
-    map: std.StringArrayHashMapUnmanaged(ResourceURI),
-    metadata: Metadatas,
+    uri: ResourceURI,
+    buffer: []u8,
 
-    pub fn init(allocator: std.mem.Allocator) ResourceIndex {
+    pub fn init(buffer: []u8) !MemoryResource {
         return .{
-            .arena = std.heap.ArenaAllocator.init(allocator),
-            .map = .{},
-            .metadata = .{},
+            .uri = try .parse("memory://memory"),
+            .buffer = buffer,
         };
     }
 
-    pub fn deinit(self: *ResourceIndex) void {
-        const allocator = self.arena.allocator();
-        self.map.deinit(allocator);
-        self.metadata.deinit(allocator);
-        self.arena.deinit();
+    pub fn reader(_: *MemoryResource, buffer: []u8) std.io.Reader {
+        return std.io.Reader.fixed(buffer);
+    }
+
+    pub fn deinit(_: *MemoryResource) void {}
+};
+
+pub const FileResource = struct {
+    pub const scheme = "file";
+
+    uri: ResourceURI,
+    file: std.fs.File,
+
+    pub fn init(uri: ResourceURI) !FileResource {
+        return .{
+            .uri = uri,
+            .file = try std.fs.openFileAbsolute(uri.path.percent_encoded, .{ .mode = .read_only }),
+        };
+    }
+
+    pub fn reader(self: *FileResource, buffer: []u8) std.fs.File.Reader {
+        return self.file.reader(buffer);
+    }
+
+    pub fn deinit(self: *FileResource) void {
+        self.file.close();
+    }
+};
+
+pub const S3Resource = struct {
+    pub const scheme = "s3";
+
+    allocator: std.mem.Allocator,
+    uri: ResourceURI, // The original s3:// uri
+    http_client: std.http.Client,
+    headers: std.ArrayList(std.http.Header),
+
+    // The full HTTP URL for requests, allocated and owned by this struct.
+    request_url_str: []u8,
+
+    total_size: ?u64,
+
+    pub fn init(allocator: std.mem.Allocator, uri: ResourceURI) !S3Resource {
+        const bucket = uri.host orelse return error.InvalidS3Uri;
+        // The object key in S3 doesn't have a leading slash.
+        const key = if (uri.path.percent_encoded.len > 0 and uri.path.percent_encoded[0] == '/')
+            uri.path.percent_encoded[1..]
+        else
+            uri.path.percent_encoded;
+
+        // NOTE: Using http:// as requested (no TLS). This will only work with
+        // S3-compatible endpoints that do not require encryption (e.g., local MinIO).
+        // Real AWS S3 requires https:// and a TLS configuration.
+        const url_str = try std.fmt.allocPrint(allocator, "http://127.0.0.1:9000/{s}/{s}", .{
+            bucket.percent_encoded, key,
+        });
+        errdefer allocator.free(url_str);
+
+        // This is a bit awkward. We parse the URL just to get the host for the Host header.
+        const temp_uri_for_host = try std.Uri.parse(url_str);
+        const host_header_val = temp_uri_for_host.host orelse return error.InvalidS3Uri;
+        _ = host_header_val; // autofix
+
+        var self = S3Resource{
+            .allocator = allocator,
+            .uri = uri,
+            .http_client = .{ .allocator = allocator },
+            .headers = .{},
+            .request_url_str = url_str,
+            .total_size = null,
+        };
+
+        try self.headers.append(allocator, .{ .name = "Accept", .value = "*/*" });
+        // try self.headers.append(allocator, .{ .name = "Host", .value = host_header_val.percent_encoded });
+
+        return self;
+    }
+
+    pub fn deinit(self: *S3Resource) void {
+        self.http_client.deinit();
+        self.headers.deinit(self.allocator);
+        self.allocator.free(self.request_url_str);
+    }
+};
+
+pub const Resource = union(enum) {
+    memory: MemoryResource,
+    file: FileResource,
+    s3: S3Resource,
+
+    pub fn init(allocator: std.mem.Allocator, resource_uri: ResourceURI) !Resource {
+        if (std.mem.eql(u8, resource_uri.scheme, MemoryResource.scheme)) {
+            return .{ .memory = try .init(&[_]u8{}) };
+        } else if (std.mem.eql(u8, resource_uri.scheme, FileResource.scheme)) {
+            return .{ .file = try .init(resource_uri) };
+        } else if (std.mem.eql(u8, resource_uri.scheme, S3Resource.scheme)) {
+            return .{ .s3 = try .init(allocator, resource_uri) };
+        } else {
+            return error.UnsupportedScheme;
+        }
+    }
+
+    pub fn deinit(self: *Resource) void {
+        switch (self.*) {
+            .memory => |*m| m.deinit(),
+            .file => |*f| f.deinit(),
+            .s3 => |*s| s.deinit(),
+        }
+    }
+
+    pub fn reader(self: *Resource, buffer: []u8) IoReader {
+        return .init(self, buffer);
+    }
+
+    pub fn uri(self: *Resource) ResourceURI {
+        return switch (self.*) {
+            inline else => |*r| r.uri,
+        };
+    }
+
+    pub fn scheme(self: *Resource) []const u8 {
+        return switch (self.*) {
+            inline else => |*r| r.scheme,
+        };
     }
 };
 
 pub const IoReader = struct {
     source: Source,
     interface: std.io.Reader,
+    pos: usize,
 
     const Source = union(enum) {
         file: std.fs.File,
@@ -457,6 +475,7 @@ pub const IoReader = struct {
             data: []const u8,
             pos: u64 = 0,
         },
+        s3: *S3Resource,
     };
 
     pub fn init(resource: *Resource, buffer: []u8) IoReader {
@@ -468,10 +487,12 @@ pub const IoReader = struct {
                 },
             },
             .file => |*f| .{ .file = f.file },
+            .s3 => |*s| .{ .s3 = s },
         };
 
         return .{
             .source = source,
+            .pos = 0,
             .interface = .{
                 .buffer = buffer,
                 .vtable = &vtable,
@@ -508,6 +529,90 @@ pub const IoReader = struct {
                 src.pos += copy_len;
                 return copy_len;
             },
+            .s3 => |s3_res| {
+                const request_uri = std.Uri.parse(s3_res.request_url_str) catch {
+                    log.err("Invalid S3 request URL: {s}", .{s3_res.request_url_str});
+                    return error.ReadFailed;
+                };
+
+                // First, send a HEAD request to get the total size of the object if we don't have it.
+                if (s3_res.total_size == null) {
+                    var head_req = s3_res.http_client.request(.HEAD, request_uri, .{
+                        .extra_headers = s3_res.headers.items,
+                    }) catch |err| {
+                        log.err("Failed to create S3 HEAD request: {any}", .{err});
+                        return error.ReadFailed;
+                    };
+                    defer head_req.deinit();
+
+                    try head_req.sendBodiless();
+                    const response = head_req.receiveHead(&.{}) catch |err| {
+                        log.err("Failed to receive S3 HEAD response: {any}", .{err});
+                        return error.ReadFailed;
+                    };
+
+                    if (response.head.status != .ok) {
+                        log.err("S3 HEAD request to {s} failed with status: {s}", .{ s3_res.request_url_str, @tagName(response.head.status) });
+                        return error.ReadFailed;
+                    }
+                    s3_res.total_size = response.head.content_length orelse {
+                        log.err("S3 resource {s} did not return Content-Length", .{s3_res.request_url_str});
+                        return error.ReadFailed;
+                    };
+                }
+
+                const total_size = s3_res.total_size.?;
+                if (self.pos >= total_size) return error.EndOfStream;
+
+                const range_start = self.pos;
+                const bytes_to_read = @min(r.buffer.len, total_size - range_start);
+                if (bytes_to_read == 0) return error.EndOfStream;
+                const range_end = range_start + bytes_to_read - 1;
+
+                var range_header_buf: [128]u8 = undefined;
+                const range_header_val = std.fmt.bufPrint(&range_header_buf, "bytes={d}-{d}", .{ range_start, range_end }) catch |err| {
+                    log.err("Failed to format Range header: {any}", .{err});
+                    return error.ReadFailed;
+                };
+                const range_header = std.http.Header{ .name = "Range", .value = range_header_val };
+
+                var all_headers = s3_res.headers.clone(s3_res.allocator) catch |err| {
+                    log.err("Failed to clone S3 headers: {any}", .{err});
+                    return error.ReadFailed;
+                };
+                defer all_headers.deinit(s3_res.allocator);
+                all_headers.append(s3_res.allocator, range_header) catch |err| {
+                    log.err("Failed to append Range header: {any}", .{err});
+                    return error.ReadFailed;
+                };
+
+                var get_req = s3_res.http_client.request(.GET, request_uri, .{
+                    .extra_headers = all_headers.items,
+                }) catch |err| {
+                    log.err("Failed to create S3 GET request: {any}", .{err});
+                    return error.ReadFailed;
+                };
+                defer get_req.deinit();
+
+                try get_req.sendBodiless();
+                var response = get_req.receiveHead(&.{}) catch |err| {
+                    log.err("Failed to receive S3 GET response: {any}", .{err});
+                    return error.ReadFailed;
+                };
+
+                if (response.head.status != .partial_content) {
+                    log.err("S3 GET request to {s} failed with status: {s} (expected 206 Partial Content)", .{ s3_res.request_url_str, @tagName(response.head.status) });
+                    return error.ReadFailed;
+                }
+
+                var temp_transfer_buf: [256]u8 = undefined;
+                var body_reader = response.reader(&temp_transfer_buf);
+
+                const n = try body_reader.readSliceShort(r.buffer[0..bytes_to_read]);
+                log.info("S3 read {d} bytes from {d}-{d}", .{ n, range_start, range_end });
+                self.pos += n;
+                return n;
+            },
         };
 
         r.end = bytes_read;
@@ -519,6 +624,50 @@ pub const IoReader = struct {
         .stream = stream,
     };
 };
+
+fn resolveResourceType(resource: *Resource, reader_buffer: []u8) !ResourceType {
+    var reader = resource.reader(reader_buffer);
+
+    // Try to detect file type by examining its content
+    var magic_bytes_buffer: [8]u8 = undefined;
+    _ = reader.interface.readSliceShort(&magic_bytes_buffer) catch |err| {
+        if (err == error.EndOfStream) {
+            return .unknown;
+        }
+        return err;
+    };
+
+    // Check if it's a JSON file by looking at the first bytes
+    // JSON files typically start with '{' (0x7B) after optional whitespace
+    if (magic_bytes_buffer[0] == '{') {
+        // Read more content to check if it's an index file
+        var json_header_buffer: [100]u8 = undefined;
+        _ = reader.interface.readSliceShort(&json_header_buffer) catch |err| {
+            if (err == error.EndOfStream) {
+                return .unknown;
+            }
+            return err;
+        };
+
+        // If it contains "weight_map", it's likely an index file
+        if (std.mem.indexOf(u8, &json_header_buffer, "weight_map") != null) {
+            return .index;
+        }
+
+        return .unknown;
+    }
+
+    // Safetensors files start with a u64 header length
+    // Reinterpret first 8 bytes as little endian u64
+    const magic_number = std.mem.readInt(u64, &magic_bytes_buffer, .little);
+
+    // If the header is reasonable (< 10MB), it's likely a safetensors file
+    if (magic_number > 0 and magic_number < 10 * 1024 * 1024) {
+        return .safetensors;
+    }
+
+    return .unknown;
+}
 
 fn parseSafetensorsIndex(
     allocator: std.mem.Allocator,
@@ -566,7 +715,8 @@ fn parseSafetensorsIndex(
                 .path = .{ .percent_encoded = resource_path },
             };
 
-            _ = try resource_index.map.put(arena_allocator, try arena_allocator.dupe(u8, weight_name), sibling_uri);
+            const map_entry = try resource_index.map.getOrPut(arena_allocator, sibling_uri);
+            try map_entry.value_ptr.*.append(arena_allocator, try arena_allocator.dupe(u8, weight_name));
         }
     } else {
         log.warn("No weight_map attribute found in index", .{});
@@ -2662,14 +2812,14 @@ pub fn asyncMain() !void {
         std.process.exit(1);
     };
 
-    var resource: Resource = try .init(uri);
+    var resource: Resource = try .init(allocator, uri);
     defer resource.deinit();
 
     const resource_type_buffer = try allocator.alloc(u8, BUF_8_KB);
     defer allocator.free(resource_type_buffer);
 
     const resource_type = try resolveResourceType(&resource, resource_type_buffer);
-    try resource.file.file.seekTo(0); // todo
+    // try resource.file.file.seekTo(0); // todo
 
     const buffer_reader = try allocator.alloc(u8, BUF_128_MB);
     defer allocator.free(buffer_reader);
@@ -2702,7 +2852,7 @@ pub fn asyncMain() !void {
 
             var index_entries = resource_index.map.iterator();
             while (index_entries.next()) |entry| {
-                var subresource: Resource = try .init(entry.value_ptr.*);
+                var subresource: Resource = try .init(allocator, entry.key_ptr.*);
                 defer subresource.deinit();
 
                 var reader2 = subresource.reader(buffer_index_reader);
@@ -2724,31 +2874,31 @@ pub fn asyncMain() !void {
     tracer.frameEnd(trace_discovery, "Weights discovery");
     log.warn("Discovered {d} tensors in model ({d:.2} GB) in {d}ms", .{ registry.tensors.count(), registry.totalBytes() / (1024 * 1024 * 1024), elapsed_discovery / std.time.ns_per_ms });
 
-    log.warn("Preparing streaming file handles...", .{});
+    // log.warn("Preparing streaming file handles...", .{});
 
-    var resources: Resources = .{};
-    defer {
-        var it = resources.iterator();
-        while (it.next()) |entry| {
-            entry.value_ptr.*.deinit();
-        }
-        resources.deinit(allocator);
-    }
+    // var resources: Resources = .{};
+    // defer {
+    //     var it = resources.iterator();
+    //     while (it.next()) |entry| {
+    //         entry.value_ptr.*.deinit();
+    //     }
+    //     resources.deinit(allocator);
+    // }
 
-    var tensors_it = registry.tensors.iterator();
-    while (tensors_it.next()) |entry| {
-        const tensor = entry.value_ptr.*;
-        const result = try resources.getOrPut(allocator, tensor.resource_uri);
+    // var tensors_it = registry.tensors.iterator();
+    // while (tensors_it.next()) |entry| {
+    //     const tensor = entry.value_ptr.*;
+    //     const result = try resources.getOrPut(allocator, tensor.resource_uri);
 
-        if (result.found_existing) {
-            const res: Resource = try .init(tensor.resource_uri);
-            _ = try switchToDirectIO(res.file.file);
-            result.value_ptr.* = res;
-        }
-    }
+    //     if (result.found_existing) {
+    //         const res: Resource = try .init(allocator, tensor.resource_uri);
+    //         _ = try switchToDirectIO(res.file.file);
+    //         result.value_ptr.* = res;
+    //     }
+    // }
 
-    const elapsed_streaming_prep = timer.lap();
-    log.warn("Prepared {d} streaming file handles in {d}ms", .{ resources.count(), elapsed_streaming_prep / std.time.ns_per_ms });
+    // const elapsed_streaming_prep = timer.lap();
+    // log.warn("Prepared {d} streaming file handles in {d}ms", .{ resources.count(), elapsed_streaming_prep / std.time.ns_per_ms });
 
     log.warn("Applying sharding information...", .{});
     try addExampleShardingMetadata(&registry);
@@ -2829,16 +2979,19 @@ pub fn asyncMain() !void {
         tracer.frameEnd(trace_arena_reset, "Arena reset");
 
         const arena_allocator = arena.allocator();
-        const file = resources.get(tensor.resource_uri).?.file.file; // todo
         const shards = try computeShards(arena_allocator, tensor, devices);
 
-        const trace_file_read = tracer.frameStart("File reader setup");
-        var file_reader = file.reader(file_buffer);
-        try file_reader.seekTo(tensor.offset);
-        tracer.frameEnd(trace_file_read, "File reader setup");
+        // const file = resources.get(tensor.resource_uri).?.file.file; // todo
+        // var file_reader = file.reader(file_buffer);
+        // try file_reader.seekTo(tensor.offset);
 
-        var aligned_file_reader: AlignedFileReader = try .init(file_reader, .fromByteUnits(BUF_4_KB));
-        var tensor_reader: std.io.Reader.Limited = .init(&aligned_file_reader.interface, .limited64(tensor.shape.byteSize()), &tensor_reader_buffer);
+        // var aligned_file_reader: AlignedFileReader = try .init(file_reader, .fromByteUnits(BUF_4_KB));
+
+        var tensor_resource: Resource = try .init(allocator, tensor.resource_uri);
+        defer tensor_resource.deinit();
+
+        var tensor_reader = tensor_resource.reader(file_buffer);
+        var tensor_reader_limited: std.io.Reader.Limited = .init(&tensor_reader.interface, .limited64(tensor.shape.byteSize()), &tensor_reader_buffer);
 
         var device_writers: std.ArrayList(DeviceWriter) = try .initCapacity(arena_allocator, devices.len);
         errdefer {
@@ -2852,7 +3005,7 @@ pub fn asyncMain() !void {
         }
 
         var tensor_writer: TensorWriter = .init(device_writers.items, writer_buffer);
-        const bytes_copied = try tensor_reader.interface.streamRemaining(&tensor_writer.interface);
+        const bytes_copied = try tensor_reader_limited.interface.streamRemaining(&tensor_writer.interface);
         try tensor_writer.interface.flush();
 
         const elapsed_tensor = tensor_timer.lap();
