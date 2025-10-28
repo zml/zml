@@ -14,7 +14,7 @@ bazel_dep(name = "protobuf", version = "32.0", repo_name = "com_google_protobuf"
 # Needs to be added before rules_cc so that the cc toolchain declared by
 # apple_support wins over the one in rules_cc.
 bazel_dep(name = "apple_support", version = "1.24.2")
-bazel_dep(name = "rules_cc", version = "0.12.2")
+bazel_dep(name = "rules_cc", version = "0.2.12")
 bazel_dep(name = "rules_distroless", version = "0.5.1")
 bazel_dep(name = "rules_license", version = "1.0.0")
 bazel_dep(name = "rules_oci", version = "2.2.6")
