@@ -77,6 +77,8 @@ common          --incompatible_disallow_empty_glob=false
 
 # Use the C linker to link Zig code
 common          --@rules_zig//zig/settings:use_cc_common_link=True
+# Zig self hosted backend is too fragile for now
+common          --@rules_zig//zig/settings:zigopt=-fllvm
 
 common          --@toolchains_llvm_bootstrapped//config:experimental_stub_libgcc_s=True
 
