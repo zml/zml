@@ -32,7 +32,7 @@ pub const Linear = struct {
         }
 
         // log.debug("Linear({*}): {d} -> {d} -> {d}", .{ self, x.dims(), y.dims(), if (self.bias) |bias| y.add(bias).dims() else y.dims() });
-        return if (self.bias) |bias| y.add(bias.broadcast(y.shape(), &.{y.axis(-1)})) else y;
+        return if (self.bias) |bias| y.add(bias.convert(y.dtype()).broadcast(y.shape(), &.{y.axis(-1)})) else y; //ajout du convert x.dtype() pour que le type de la sortie soit le même que le type de l'input.
     }
 };
 
@@ -100,8 +100,9 @@ pub const LayerNorm = struct {
     pub fn forward(self: LayerNorm, x: Tensor) Tensor {
         const normed = normalizeVariance(x, self.eps);
         const ax = x.axis(-1);
-        var out = normed.mul(self.weight.broadcast(x.shape(), &.{ax}));
-        if (self.bias) |bias| out = out.add(bias.broadcast(x.shape(), &.{ax}));
+        var out = normed.mul(self.weight.broadcast(x.shape(), &.{ax}).convert(x.dtype())); // ajout du convert x.dtype() pour que le type de la sortie soit le même que le type de l'input.
+
+        if (self.bias) |bias| out = out.add(bias.broadcast(x.shape(), &.{ax}).convert(x.dtype())); // ajout du convert x.dtype() pour que le type de la sortie soit le même que le type de l'input.
 
         return out;
     }
@@ -190,7 +191,7 @@ pub const RopeOpts = struct {
             if (content != .object) return error.InvalidEnumTag;
 
             const obj = content.object;
-            const impl = obj.get("rope_type") orelse return error.MissingField;
+            const impl = obj.get("rope_type") orelse obj.get("type") orelse return error.MissingField;
             if (impl != .string) return error.InvalidEnumTag;
             if (std.mem.eql(u8, impl.string, "llama3")) {
                 // Note: leaky is fine here cause Llama3 struct don't need to allocate memory.
@@ -938,9 +939,11 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
     const sqrtHeadDim: f32 = 1.0 / std.math.sqrt(@as(f32, @floatFromInt(dims.hd)));
     const head_scaling = if (opts.scale) |s| s else Tensor.scalar(sqrtHeadDim, k.dtype());
     k = k.mul(head_scaling.convert(k.dtype()));
-
+    log.info("q: {f}", .{q.shape()});
+    log.info("k: {f}", .{k.shape()});
     var attn_weights = q.dot(k, .{.hd});
-    // log.debug("attn_weights : {f}, attn_mask : {?f}", .{ attn_weights, attn_mask });
+    //log.info("attn_weights: {f}", .{attn_weights.shape()});
+    log.info("attn_weights : {f}, attn_mask : {?f}", .{ attn_weights, attn_mask });
     if (attn_mask) |mask| attn_weights = attn_weights.add(mask.broad(attn_weights.shape()));
     attn_weights = attn_weights.convert(.f32);
     attn_weights = if (opts.softmax_bias) |softmax_bias| attn: {
@@ -949,8 +952,9 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
         const bias = softmax_bias.splitAxis(.h, .{ .h = k.dim(.h), .hq = .auto });
         break :attn attn_weights.convert(.f32).softmaxBiased(.k, bias).convert(q.dtype());
     } else attn_weights.convert(.f32).softmax(.k).convert(q.dtype());
-
+    log.info("attn_weights: {f}", .{attn_weights.shape()});
     var attn = attn_weights.dot(v, .{.k});
+    log.info("attn: {f}", .{attn.shape()});
     return attn.transpose(q.shape()).merge(.{ .h = .{ .h, .hq } });
 }
 

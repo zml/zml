@@ -859,6 +859,49 @@ pub const Tensor = struct {
         return _result(new_shape, op.result(0));
     }
 
+    pub fn conv3d(
+        input: Tensor,
+        kernel: Tensor,
+        opts: struct {
+            window_strides: []const i64 = &.{ 1, 1, 1 }, //[time, height, width]
+            padding: []const i64 = &.{ 0, 0, 0, 0, 0, 0 }, //[front, back, top, bottom, left, right]
+            lhs_dilation: []const i64 = &.{ 1, 1, 1 }, //[time, height, width]
+            rhs_dilation: []const i64 = &.{ 1, 1, 1 }, //[time, height, width]
+            window_reversal: []const bool = &.{ false, false, false }, //[time, height, width]
+            input_batch_dimension: i64 = 0,
+            input_feature_dimension: i64 = 1,
+            input_spatial_dimensions: []const i64 = &.{ 2, 3, 4 },
+            kernel_input_feature_dimension: i64 = 1,
+            kernel_output_feature_dimension: i64 = 0,
+            kernel_spatial_dimensions: []const i64 = &.{ 2, 3, 4 },
+            output_batch_dimension: i64 = 0,
+            output_feature_dimension: i64 = 1,
+            output_spatial_dimensions: []const i64 = &.{ 2, 3, 4 },
+            feature_group_count: i64 = 1,
+            batch_group_count: i64 = 1,
+        },
+    ) Tensor {
+        const loc = input.getContext().location(@src(), "opts={}", .{opts});
+        return input.convolution(kernel, .{
+            .window_strides = opts.window_strides,
+            .pad_value = opts.padding,
+            .lhs_dilation = opts.lhs_dilation,
+            .rhs_dilation = opts.rhs_dilation,
+            .window_reversal = opts.window_reversal,
+            .input_batch_dimension = opts.input_batch_dimension,
+            .input_feature_dimension = opts.input_feature_dimension,
+            .input_spatial_dimensions = opts.input_spatial_dimensions,
+            .kernel_input_feature_dimension = opts.kernel_input_feature_dimension,
+            .kernel_output_feature_dimension = opts.kernel_output_feature_dimension,
+            .kernel_spatial_dimensions = opts.kernel_spatial_dimensions,
+            .output_batch_dimension = opts.output_batch_dimension,
+            .output_feature_dimension = opts.output_feature_dimension,
+            .output_spatial_dimensions = opts.output_spatial_dimensions,
+            .feature_group_count = opts.feature_group_count,
+            .batch_group_count = opts.batch_group_count,
+        }, loc);
+    }
+
     /// Returns a Tensor containing the result of the 1D convolution of 'input' by 'kernel'.
     pub fn conv1d(
         input: Tensor,
@@ -1979,9 +2022,10 @@ pub const Tensor = struct {
         const sh = Shape.init(.{args.steps}, dt);
         var iota_op = dialect.stablehlo.iota(ctx.mlirCtx(), 0, mlirx.tensorType(ctx.mlirCtx(), sh), loc);
         var res = _result(sh, iota_op.result(0));
+        const range = args.end - args.start;
 
         if (args.steps != 1) {
-            res = res.scale(args.steps);
+            res = res.scale(range / @as(f64, @floatFromInt(args.steps - 1)));
         }
 
         if (args.start != 0) {

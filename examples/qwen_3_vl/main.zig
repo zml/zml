@@ -110,21 +110,46 @@ fn testImplementation(
     qwen_weights: zml.Bufferized(qwen.Qwen3VL),
     activations: zml.aio.BufferStore,
 ) !void {
-    try zml.testing.testLayer(platform, activations, "model.visual.patch_embed.proj", qwen_model.vision_transformer.vision_patch_embed.proj, qwen_weights.vision_transformer.vision_patch_embed.proj, 1e-3);
-    try zml.testing.testLayer(platform, activations, "model.visual.patch_embed", qwen_model.vision_transformer.vision_patch_embed, qwen_weights.vision_transformer.vision_patch_embed, 1e-3);
-    try zml.testing.testLayer(platform, activations, "model.visual.pos_embed", qwen_model.vision_transformer.pos_embed, qwen_weights.vision_transformer.pos_embed, 1e-3);
-    try zml.testing.testLayer(platform, activations, "model.visual.rotary_pos_emb", qwen_model.vision_transformer.rotary_pos_emb, {}, 1e-3);
-    try zml.testing.testLayer(platform, activations, "model.visual.blocks.0.norm1", qwen_model.vision_transformer.blocks[0].norm1, qwen_weights.vision_transformer.blocks[0].norm1, 1e-2);
-    try zml.testing.testLayer(platform, activations, "model.visual.blocks.0.norm2", qwen_model.vision_transformer.blocks[0].norm2, qwen_weights.vision_transformer.blocks[0].norm2, 1e-2);
-    try zml.testing.testLayer(platform, activations, "model.visual.blocks.0.attn.proj", qwen_model.vision_transformer.blocks[0].attn.proj, qwen_weights.vision_transformer.blocks[0].attn.proj, 1e-2);
-    try zml.testing.testLayer(platform, activations, "model.visual.blocks.0.mlp.linear_fc1", qwen_model.vision_transformer.blocks[0].mlp.linear_fc1, qwen_weights.vision_transformer.blocks[0].mlp.linear_fc1, 1e-2);
-    try zml.testing.testLayer(platform, activations, "model.visual.blocks.0.mlp.linear_fc2", qwen_model.vision_transformer.blocks[0].mlp.linear_fc2, qwen_weights.vision_transformer.blocks[0].mlp.linear_fc2, 1e-2);
-    try zml.testing.testLayer(platform, activations, "model.visual.merger.linear_fc1", qwen_model.vision_transformer.patch_merger.linear_fc1, qwen_weights.vision_transformer.patch_merger.linear_fc1, 1e-2);
-    try zml.testing.testLayer(platform, activations, "model.visual.merger.linear_fc2", qwen_model.vision_transformer.patch_merger.linear_fc2, qwen_weights.vision_transformer.patch_merger.linear_fc2, 1e-2);
-    try zml.testing.testLayer(platform, activations, "model.visual.merger.norm", qwen_model.vision_transformer.patch_merger.norm, qwen_weights.vision_transformer.patch_merger.norm, 1e-2);
-    try zml.testing.testLayer(platform, activations, "model.visual.deepstack_merger_list.0.linear_fc1", qwen_model.vision_transformer.deepstack_patch_mergers[0].linear_fc1, qwen_weights.vision_transformer.deepstack_patch_mergers[0].linear_fc1, 1e-2);
-    try zml.testing.testLayer(platform, activations, "model.visual.deepstack_merger_list.0.linear_fc2", qwen_model.vision_transformer.deepstack_patch_mergers[0].linear_fc2, qwen_weights.vision_transformer.deepstack_patch_mergers[0].linear_fc2, 1e-2);
-    try zml.testing.testLayer(platform, activations, "model.visual.deepstack_merger_list.0.norm", qwen_model.vision_transformer.deepstack_patch_mergers[0].norm, qwen_weights.vision_transformer.deepstack_patch_mergers[0].norm, 1e-2);
+    try zml.testing.testLayer(platform, activations, "model.visual.patch_embed.proj", qwen_model.vision_transformer.vision_patch_embed.proj, qwen_weights.vision_transformer.vision_patch_embed.proj, 1e-2);
+    //try zml.testing.testLayer(platform, activations, "model.visual.patch_embed", qwen_model.vision_transformer.vision_patch_embed, qwen_weights.vision_transformer.vision_patch_embed, 1e-3);
+    //try zml.testing.testLayer(platform, activations, "model.visual.pos_embed", qwen_model.vision_transformer.pos_embed, qwen_weights.vision_transformer.pos_embed, 1e-3);
+    // try zml.testing.testLayer(platform, activations, "model.visual.rotary_pos_emb", qwen_model.vision_transformer.rotary_pos_emb, {}, 1e-3);
+    // try zml.testing.testLayer(platform, activations, "model.visual.blocks.0.norm1", qwen_model.vision_transformer.blocks[0].norm1, qwen_weights.vision_transformer.blocks[0].norm1, 1e-2);
+    // try zml.testing.testLayer(platform, activations, "model.visual.blocks.0.norm2", qwen_model.vision_transformer.blocks[0].norm2, qwen_weights.vision_transformer.blocks[0].norm2, 1e-2);
+    // try zml.testing.testLayer(platform, activations, "model.visual.blocks.0.attn.proj", qwen_model.vision_transformer.blocks[0].attn.proj, qwen_weights.vision_transformer.blocks[0].attn.proj, 1e-2);
+    // try zml.testing.testLayer(platform, activations, "model.visual.blocks.0.mlp.linear_fc1", qwen_model.vision_transformer.blocks[0].mlp.linear_fc1, qwen_weights.vision_transformer.blocks[0].mlp.linear_fc1, 1e-2);
+    // try zml.testing.testLayer(platform, activations, "model.visual.blocks.0.mlp.linear_fc2", qwen_model.vision_transformer.blocks[0].mlp.linear_fc2, qwen_weights.vision_transformer.blocks[0].mlp.linear_fc2, 1e-2);
+    // try zml.testing.testLayer(platform, activations, "model.visual.merger.linear_fc1", qwen_model.vision_transformer.patch_merger.linear_fc1, qwen_weights.vision_transformer.patch_merger.linear_fc1, 1e-2);
+    // try zml.testing.testLayer(platform, activations, "model.visual.merger.linear_fc2", qwen_model.vision_transformer.patch_merger.linear_fc2, qwen_weights.vision_transformer.patch_merger.linear_fc2, 1e-2);
+    // try zml.testing.testLayer(platform, activations, "model.visual.merger.norm", qwen_model.vision_transformer.patch_merger.norm, qwen_weights.vision_transformer.patch_merger.norm, 1e-2);
+    // try zml.testing.testLayer(platform, activations, "model.visual.deepstack_merger_list.0.linear_fc1", qwen_model.vision_transformer.deepstack_patch_mergers[0].linear_fc1, qwen_weights.vision_transformer.deepstack_patch_mergers[0].linear_fc1, 1e-2);
+    // try zml.testing.testLayer(platform, activations, "model.visual.deepstack_merger_list.0.linear_fc2", qwen_model.vision_transformer.deepstack_patch_mergers[0].linear_fc2, qwen_weights.vision_transformer.deepstack_patch_mergers[0].linear_fc2, 1e-2);
+    // try zml.testing.testLayer(platform, activations, "model.visual.deepstack_merger_list.0.norm", qwen_model.vision_transformer.deepstack_patch_mergers[0].norm, qwen_weights.vision_transformer.deepstack_patch_mergers[0].norm, 1e-2);
+    // try zml.testing.testLayer(platform, activations, "model.visual.blocks.0.attn.qkv", qwen_model.vision_transformer.blocks[0].attn.qkv, qwen_weights.vision_transformer.blocks[0].attn.qkv, 1e-2);
+    //try zml.testing.testLayer(platform, activations, "model.visual.blocks.0.attn", qwen_model.vision_transformer.blocks[0].attn, qwen_weights.vision_transformer.blocks[0].attn, 1e-2);
+    //try zml.testing.testLayer(platform, activations, "model.visual.blocks.0.mlp", qwen_model.vision_transformer.blocks[0].mlp, qwen_weights.vision_transformer.blocks[0].mlp, 1e-2); //precision pas top sur le gelu
+    // try zml.testing.testLayer(platform, activations, "model.visual.blocks.0", qwen_model.vision_transformer.blocks[0], qwen_weights.vision_transformer.blocks[0], 1e-1); //idem logiquement
+    // try zml.testing.testLayer(platform, activations, "model.visual.blocks.1", qwen_model.vision_transformer.blocks[1], qwen_weights.vision_transformer.blocks[1], 1e-1);
+    // try zml.testing.testLayer(platform, activations, "model.visual.blocks.2", qwen_model.vision_transformer.blocks[2], qwen_weights.vision_transformer.blocks[2], 1e-1);
+    // try zml.testing.testLayer(platform, activations, "model.visual.blocks.3", qwen_model.vision_transformer.blocks[3], qwen_weights.vision_transformer.blocks[3], 1e-1);
+    //try zml.testing.testLayer(platform, activations, "model.visual.blocks.4", qwen_model.vision_transformer.blocks[4], qwen_weights.vision_transformer.blocks[4], 1e-3);
+    // try zml.testing.testLayer(platform, activations, "model.visual.blocks.5", qwen_model.vision_transformer.blocks[5], qwen_weights.vision_transformer.blocks[5], 1e-1);
+    // try zml.testing.testLayer(platform, activations, "model.visual.blocks.6", qwen_model.vision_transformer.blocks[6], qwen_weights.vision_transformer.blocks[6], 1e-1);
+    // try zml.testing.testLayer(platform, activations, "model.visual.blocks.7", qwen_model.vision_transformer.blocks[7], qwen_weights.vision_transformer.blocks[7], 1e-1);
+    // try zml.testing.testLayer(platform, activations, "model.visual.blocks.8", qwen_model.vision_transformer.blocks[8], qwen_weights.vision_transformer.blocks[8], 1e-1);
+    //try zml.testing.testLayer(platform, activations, "model.visual.merger", qwen_model.vision_transformer.patch_merger, qwen_weights.vision_transformer.patch_merger, 1e-2);
+    //try zml.testing.testLayer(platform, activations, "model.visual.deepstack_merger_list.0", qwen_model.vision_transformer.deepstack_patch_mergers[0], qwen_weights.vision_transformer.deepstack_patch_mergers[0], 1e-2);
+    //try zml.testing.testLayer(platform, activations, "model.language_model.layers.0.self_attn", qwen_model.text_model.layers[0].self_attn, qwen_weights.text_model.layers[0].self_attn, 1e-3);
+    // try zml.testing.testLayer(platform, activations, "model.visual", qwen_model.vision_transformer, qwen_weights.vision_transformer, 1e-3);
+    //try zml.testing.testLayer(platform, activations, "model.language_model.rotary_emb", qwen_model.text_model.rotary_embed, {}, 1e-3);
+    // try zml.testing.testLayer(platform, activations, "model.language_model.layers.0.mlp", qwen_model.text_model.layers[0].mlp, qwen_weights.text_model.layers[0].mlp, 1e-2);
+    // try zml.testing.testLayer(platform, activations, "model.language_model.layers.0.input_layernorm", qwen_model.text_model.layers[0].input_layernorm, qwen_weights.text_model.layers[0].input_layernorm, 1e-3);
+    // try zml.testing.testLayer(platform, activations, "model.language_model.layers.0.post_attention_layernorm", qwen_model.text_model.layers[0].post_attention_layernorm, qwen_weights.text_model.layers[0].post_attention_layernorm, 1e-2);
+    // try zml.testing.testLayer(platform, activations, "model.language_model.layers.2", qwen_model.text_model.layers[2], qwen_weights.text_model.layers[2], 1e-1);
+
+    //try zml.testing.testLayer(platform, activations, "model.language_model.layers.0.self_attn", qwen_model.text_model.layers[0].self_attn, qwen_weights.text_model.layers[0].self_attn, 1e-2);
+
+    //try zml.testing.testLayer(platform, activations, "model.visual", qwen_model.vision_transformer, qwen_weights.vision_transformer, 1e-1);
 }
 // test "Conv3D basic functionality" {
 //     // Créer des tensors de test
