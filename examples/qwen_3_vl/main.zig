@@ -25,7 +25,7 @@ pub fn main() !void {
 pub fn asyncMain() !void {
     const allocator = std.heap.c_allocator;
 
-    const hf_model_path = "/Users/louislechevalier/Documents/qwen3-vl-4b-instruct";
+    const hf_model_path = "/home/louis/qwen3-vl-4b-instruct/qwen3-vl-4b-instruct";
 
     const model_config_path = try std.fs.path.join(allocator, &.{ hf_model_path, "config.json" });
     defer allocator.free(model_config_path);
@@ -55,7 +55,7 @@ pub fn asyncMain() !void {
     };
 
     // Load the activations.
-    var activation_buffer_store = try zml.aio.torch.open(allocator, "/Users/louislechevalier/Documents/zml/examples/qwen_3_vl/activations/qwen3-vl-4b-instruct.activations.pt");
+    var activation_buffer_store = try zml.aio.torch.open(allocator, "/home/louis/zml/qwen3-vl-4b-instruct.activations.pt");
     defer activation_buffer_store.deinit();
 
     var iterator = activation_buffer_store.buffers.iterator();
