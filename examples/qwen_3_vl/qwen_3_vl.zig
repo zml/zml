@@ -830,6 +830,7 @@ pub const SelfAttn = struct {
         cos: Tensor,
         sin: Tensor,
     ) Tensor {
+        _ = attention_mask; // autofix
         _ = position_ids; // autofix
         const num_kv_heads = if (self.num_kv_heads > 0) self.num_kv_heads else self.num_heads;
         _ = num_kv_heads; // autofix
@@ -839,7 +840,7 @@ pub const SelfAttn = struct {
         var q = zml.call(self.q_proj, .forward, .{x}).splitAxis(-1, .{ .h = 32, .hd = .auto }).convert(x.dtype());
         var k = zml.call(self.k_proj, .forward, .{x}).splitAxis(-1, .{ .h = 8, .hd = .auto }).convert(x.dtype());
         var v = zml.call(self.v_proj, .forward, .{x}).splitAxis(-1, .{ .h = 8, .hd = .auto }).convert(x.dtype());
-        //const attn_mask = zml.nn.causalAttnMask(.{ .q = 2766, .k = 2766 }, x.dtype(), null);
+        const attn_mask = zml.nn.causalAttnMask(.{ .q = 2766, .k = 2766 }, x.dtype(), null);
         // const seq_len = token_index.dim(1); // a changer
         // log.info("seq_len: {d}", .{seq_len});
         // var attn_mask = zml.nn.causalAttnMask(.{ .q = seq_len, .k = seq_len }, x.dtype(), null);
@@ -876,7 +877,7 @@ pub const SelfAttn = struct {
         log.info("k: {f}", .{k.shape()});
         log.info("v: {f}", .{v.shape()});
 
-        const attn_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = attention_mask.convert(.f32), .allow_cudnn = true });
+        const attn_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask, .allow_cudnn = true });
         // const attn_output = zml.nn.sdpaMemEfficient(q, k, v, .{ .attn_mask = attn_mask }, .{ .q_chunk_size = 4096, .k_chunk_size = 1024 });
         log.info("attn_output: {f}", .{attn_output.shape()});
         const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
