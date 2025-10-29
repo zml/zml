@@ -55,7 +55,7 @@ pub fn asyncMain() !void {
     };
 
     // Load the activations.
-    var activation_buffer_store = try zml.aio.torch.open(allocator, "/home/louis/zml/qwen3-vl-4b-instruct.activations.pt");
+    var activation_buffer_store = try zml.aio.torch.open(allocator, "/home/louis/zml/examples/qwen_3_vl/activations/qwen3-vl-4b-instruct.activations.pt");
     defer activation_buffer_store.deinit();
 
     var iterator = activation_buffer_store.buffers.iterator();
