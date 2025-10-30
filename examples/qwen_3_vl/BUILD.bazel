@@ -5,6 +5,7 @@ zig_binary(
     srcs = ["qwen_3_vl.zig"],
     main = "main.zig",
     deps = [
+        "@com_github_hejsil_clap//:clap",
         "@zml//async",
         "@zml//stdx",
         "@zml//zml",

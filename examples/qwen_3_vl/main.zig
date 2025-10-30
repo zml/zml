@@ -2,6 +2,15 @@ const std = @import("std");
 const async = @import("async");
 const zml = @import("zml");
 const qwen = @import("qwen_3_vl.zig");
+const clap = @import("clap");
+const stdx = @import("stdx");
+
+const params = clap.parseParamsComptime(
+    \\--help                 print this help
+    \\--hf-model-path <STRING>   path to the directory containing model weights, config, tokenizer
+    \\--activations    <STRING>   path to the activations .pt file
+    \\--create-options <STRING>   platform creation options JSON, defaults to {}
+);
 
 const log = std.log.scoped(.qwen);
 
@@ -25,7 +34,42 @@ pub fn main() !void {
 pub fn asyncMain() !void {
     const allocator = std.heap.c_allocator;
 
-    const hf_model_path = "/home/louis/qwen3-vl-4b-instruct/qwen3-vl-4b-instruct";
+    const parsers = comptime .{
+        .STRING = clap.parsers.string,
+        .PATH = clap.parsers.string,
+    };
+    var diag: clap.Diagnostic = .{};
+    var stderr_buffer: [1024]u8 = undefined;
+    var stderr = std.fs.File.stderr().writer(&stderr_buffer);
+    defer stderr.interface.flush() catch {};
+
+    var cli = clap.parse(clap.Help, &params, parsers, .{
+        .diagnostic = &diag,
+        .allocator = allocator,
+    }) catch |err| {
+        diag.report(&stderr.interface, err) catch {};
+        stderr.interface.writeAll("usage: ") catch {};
+        clap.usage(&stderr.interface, clap.Help, &params) catch {};
+        stderr.interface.writeAll("\n") catch {};
+        return;
+    };
+    defer cli.deinit();
+
+    if (cli.args.help != 0) {
+        clap.help(&stderr.interface, clap.Help, &params, .{}) catch {};
+        return;
+    }
+
+    const hf_model_path = cli.args.@"hf-model-path" orelse {
+        log.err("Missing --hf-model-path", .{});
+        return;
+    };
+    const activations_path = cli.args.activations orelse {
+        log.err("Missing --activations", .{});
+        return;
+    };
+
+    //const hf_model_path = "/home/louis/qwen3-vl-4b-instruct/qwen3-vl-4b-instruct";
 
     const model_config_path = try std.fs.path.join(allocator, &.{ hf_model_path, "config.json" });
     defer allocator.free(model_config_path);
@@ -55,7 +99,9 @@ pub fn asyncMain() !void {
     };
 
     // Load the activations.
-    var activation_buffer_store = try zml.aio.torch.open(allocator, "/home/louis/zml/examples/qwen_3_vl/activations/qwen3-vl-4b-instruct.activations.pt");
+    //var activation_buffer_store = try zml.aio.torch.open(allocator, "/home/louis/zml/examples/qwen_3_vl/activations/qwen3-vl-4b-instruct.activations.pt");
+    var activation_buffer_store = try zml.aio.torch.open(allocator, activations_path);
+
     defer activation_buffer_store.deinit();
 
     var iterator = activation_buffer_store.buffers.iterator();
