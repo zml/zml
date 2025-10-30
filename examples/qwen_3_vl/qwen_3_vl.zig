@@ -80,7 +80,6 @@ pub const Qwen3VL = struct {
         const mock_grid_thw = [3]i32{ 1, 86, 128 };
         var input_embeds = zml.call(self.text_model.embed_tokens, .forward, .{input_ids}).withTags(.{ .bs, .seq, .d });
         const image_embed, const deepstack_features_list = zml.call(self.vision_transformer, .forward, .{ pixel_values, image_grid_thw });
-        _ = deepstack_features_list; // autofix
         const image_mask = input_ids.cmp(.EQ, zml.Tensor.scalar(151655, input_ids.dtype()));
         log.info("image_embed: {f}", .{image_embed.shape()});
         log.info("input_embeds: {f}", .{input_embeds.shape()});
@@ -114,7 +113,7 @@ pub const Qwen3VL = struct {
         position_ids = zml.Tensor.stack(&.{ position_ids_t, position_ids_h, position_ids_w }, 0, .g);
         log.info("position_ids: {f}", .{position_ids.shape()});
 
-        const output = zml.call(self.text_model, .forward, .{ position_ids, attn_mask, input_embeds, cache_position, image_mask });
+        const output = zml.call(self.text_model, .forward, .{ position_ids, attn_mask, input_embeds, cache_position, image_mask, deepstack_features_list });
         //output = output.print();
         return output;
         //faire position ids et input embeds pour le text model
@@ -348,7 +347,7 @@ pub const VisionTransformer = struct {
                 log.info("index: {d}", .{index});
                 if (layer == index) {
                     log.info("deepstack features list count: {d}", .{count});
-                    deepstack_features_list[count] = zml.call(self.deepstack_patch_mergers[count], .forward, .{ hidden_states, true });
+                    deepstack_features_list[count] = zml.torch.unsqueeze(zml.call(self.deepstack_patch_mergers[count], .forward, .{ hidden_states, true }), 0);
                     log.info("deepstack_features_list[{d}]: {f}", .{ count, deepstack_features_list[count].shape() });
                     count += 1;
                 }
@@ -404,11 +403,11 @@ pub const Conv3d = struct {
             log.info("padding_dims: {d} at index {d}", .{ d, i });
         }
         //const weight = self.weight.convert(x.dtype()); // Convertir le poids au même type que l'input
-        var y = x.convert(self.weight.dtype()).conv3d(self.weight, .{ .padding = &padding, .window_strides = &strides });
+        var y = x.conv3d(self.weight.convert(x.dtype()), .{ .padding = &.{ 0, 0, 0, 0, 0, 0 }, .window_strides = &.{ 2, 16, 16 } });
         //, .window_strides = &strides
-        if (self.bias) |b| y = y.add(b.broadcast(y._shape, &.{1}));
+        if (self.bias) |b| y = y.add(b.convert(y.dtype()).broadcast(y._shape, &.{1}));
         //return if (input.rank() == 3) y.squeeze(0) else y;
-        return y.convert(x.dtype());
+        return y;
     }
 };
 
@@ -473,7 +472,7 @@ pub const VisionPatchEmbed = struct {
         const reshaped = hidden_states.reshape(.{ -1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size });
 
         // 2. Appliquer la convolution 3D
-        const conv_output = self.proj.forward(reshaped);
+        const conv_output = zml.call(self.proj, .forward, .{reshaped});
 
         // 3. Reshape final pour avoir [batch_size, embed_dim]
         // .view(-1, self.embed_dim)
@@ -698,16 +697,23 @@ pub const TextModel = struct {
     /// inputs_embeds: (bs, seq_len, hidden_size)
     /// cache_position: (seq_len)
     /// visual_pos_masks: (bs, seq_len)
-    pub fn forward(self: TextModel, position_ids: Tensor, attention_mask: Tensor, inputs_embeds: Tensor, cache_position: Tensor, visual_pos_masks: Tensor) Tensor {
+    pub fn forward(self: TextModel, position_ids: Tensor, attention_mask: Tensor, inputs_embeds: Tensor, cache_position: Tensor, visual_pos_masks: Tensor, deepstack_visual_embeds: [3]Tensor) Tensor {
+        _ = cache_position; // autofix
         _ = attention_mask; // autofix
         _ = visual_pos_masks; // autofix
         //const embeds = zml.call(self.embed_tokens, .forward, .{tokens});
         var hidden_states = inputs_embeds;
         const attn_mask = zml.nn.causalAttnMask(.{ .q = 2766, .k = 2766 }, inputs_embeds.dtype(), null);
         const cos, const sin = self.rotary_embed.forward(inputs_embeds, position_ids);
-        for (self.layers[0..1], 0..) |layer, i| {
+        var count: u32 = 0;
+
+        for (self.layers, 0..) |layer, i| {
             _ = i; // autofix
-            hidden_states = zml.call(layer, .forward, .{ hidden_states, attn_mask, cache_position, cos, sin });
+            hidden_states = zml.call(layer, .forward, .{ hidden_states, attn_mask, position_ids, cos, sin });
+            if (count < deepstack_visual_embeds.len) {
+                hidden_states = hidden_states.convert(.f32).dynamicUpdateSlice(.{ .seq = zml.Tensor.scalar(4, .u32) }, deepstack_visual_embeds[count]).convert(hidden_states.dtype());
+                count += 1;
+            }
         }
         const output = zml.call(self.norm, .forward, .{hidden_states});
         return output;
@@ -787,7 +793,8 @@ pub const TransformerLayer = struct {
         //const x0 = x.convert(.f32);
         const x0 = x;
 
-        const x0_normalized = zml.call(self.input_layernorm, .forward, .{x}).convert(x0.dtype());
+        var x0_normalized = zml.call(self.input_layernorm, .forward, .{x0});
+        x0_normalized = x0_normalized.print();
         const delta0 = zml.call(self.self_attn, .forward, .{
             x0_normalized,
             attn_mask,
@@ -796,12 +803,15 @@ pub const TransformerLayer = struct {
             sin,
         }).convert(x0.dtype());
         log.info("delta0: {f}", .{delta0.shape()});
-        const x1 = x0.add(delta0);
+        var x1 = x.add(delta0);
+        x1 = x1.print();
         log.info("x1: {f}", .{x1.shape()});
         // Fully Connected
-        const x1_normalized = zml.call(self.post_attention_layernorm, .forward, .{x1}).convert(x0.dtype());
+        var x1_normalized = zml.call(self.post_attention_layernorm, .forward, .{x1});
+        x1_normalized = x1_normalized.print();
         log.info("x1_normalized: {f}", .{x1_normalized.shape()});
-        const x2 = zml.call(self.mlp, .forward, .{x1_normalized}).add(x1);
+        var x2 = zml.call(self.mlp, .forward, .{x1_normalized}).add(x1);
+        x2 = x2.print();
         log.info("x2: {f}", .{x2.shape()});
         return x2.convert(x.dtype());
     }
