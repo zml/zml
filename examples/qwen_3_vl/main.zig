@@ -68,14 +68,16 @@ pub fn asyncMain() !void {
         log.err("Missing --activations", .{});
         return;
     };
-
+    log.info("hf_model_path: {s}", .{hf_model_path});
+    log.info("activations_path: {s}", .{activations_path});
     //const hf_model_path = "/home/louis/qwen3-vl-4b-instruct/qwen3-vl-4b-instruct";
 
     const model_config_path = try std.fs.path.join(allocator, &.{ hf_model_path, "config.json" });
     defer allocator.free(model_config_path);
-
+    log.info("model_config_path: {s}", .{model_config_path});
     const model_weights_path = b: {
         const simple_path = try std.fs.path.join(allocator, &.{ hf_model_path, "model.safetensors" });
+        log.info("simple_path: {s}", .{simple_path});
         if (async.File.access(simple_path, .{})) {
             break :b simple_path;
         } else |_| {
@@ -83,8 +85,10 @@ pub fn asyncMain() !void {
         }
 
         const sharded_path = try std.fs.path.join(allocator, &.{ hf_model_path, "model.safetensors.index.json" });
+        log.info("sharded_path: {s}", .{sharded_path});
         break :b sharded_path;
     };
+    log.info("model_weights_path: {s}", .{model_weights_path});
     defer allocator.free(model_weights_path);
 
     const config = blk: {
@@ -101,7 +105,7 @@ pub fn asyncMain() !void {
     // Load the activations.
     //var activation_buffer_store = try zml.aio.torch.open(allocator, "/home/louis/zml/examples/qwen_3_vl/activations/qwen3-vl-4b-instruct.activations.pt");
     var activation_buffer_store = try zml.aio.torch.open(allocator, activations_path);
-
+    log.info("activation_buffer_store: {s}", .{activations_path});
     defer activation_buffer_store.deinit();
 
     var iterator = activation_buffer_store.buffers.iterator();
