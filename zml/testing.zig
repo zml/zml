@@ -265,8 +265,6 @@ pub fn testLayerOut(
         _ = mod.call(input_buffers);
     }
 
-    if (true) return;
-
     var buf: [1024]u8 = undefined;
     var failed: bool = false;
     log.info("COMPARAISON DES SORTIES", .{});
