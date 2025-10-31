@@ -322,7 +322,7 @@ pub const VisionTransformer = struct {
         return output;
     }
 
-    pub fn forward(self: VisionTransformer, x: Tensor, grid_thw: Tensor) Tensor {
+    pub fn forward(self: VisionTransformer, x: Tensor, grid_thw: Tensor) struct { Tensor, [3]Tensor } {
         const mock_grid_thw = [3]i32{ 1, 86, 128 };
         const mock_grid_thw_array = [_][]const i32{&mock_grid_thw};
         var pos_embeds = self.fastPosEmbedInterpolate(&mock_grid_thw_array);
@@ -354,7 +354,7 @@ pub const VisionTransformer = struct {
             }
         }
         hidden_states = zml.call(self.patch_merger, .forward, .{ hidden_states, false });
-        return hidden_states;
+        return .{ hidden_states, deepstack_features_list };
     }
 };
 
