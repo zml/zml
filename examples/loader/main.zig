@@ -188,8 +188,8 @@ const ResourceIndex = struct {
     pub fn init(allocator: std.mem.Allocator) ResourceIndex {
         return .{
             .arena = std.heap.ArenaAllocator.init(allocator),
-            .map = .{},
-            .metadata = .{},
+            .map = .empty,
+            .metadata = .empty,
         };
     }
 
@@ -328,17 +328,13 @@ pub const MemoryResource = struct {
     pub const scheme = "memory";
 
     uri: ResourceURI,
-    buffer: []u8,
+    data: []const u8,
 
-    pub fn init(buffer: []u8) !MemoryResource {
+    pub fn init(data: []const u8) !MemoryResource {
         return .{
             .uri = try .parse("memory://memory"),
-            .buffer = buffer,
+            .data = data,
         };
-    }
-
-    pub fn reader(_: *MemoryResource, buffer: []u8) std.io.Reader {
-        return std.io.Reader.fixed(buffer);
     }
 
     pub fn deinit(_: *MemoryResource) void {}
@@ -371,52 +367,40 @@ pub const S3Resource = struct {
 
     allocator: std.mem.Allocator,
     uri: ResourceURI, // The original s3:// uri
-    http_client: std.http.Client,
     headers: std.ArrayList(std.http.Header),
+    authenticator: ?AwsAuthenticator,
 
-    // The full HTTP URL for requests, allocated and owned by this struct.
-    request_url_str: []u8,
-
-    total_size: ?u64,
+    request_url: std.Uri,
+    request_url_str: []const u8, // Back URI
 
     pub fn init(allocator: std.mem.Allocator, uri: ResourceURI) !S3Resource {
         const bucket = uri.host orelse return error.InvalidS3Uri;
-        // The object key in S3 doesn't have a leading slash.
+
         const key = if (uri.path.percent_encoded.len > 0 and uri.path.percent_encoded[0] == '/')
             uri.path.percent_encoded[1..]
         else
             uri.path.percent_encoded;
 
-        // NOTE: Using http:// as requested (no TLS). This will only work with
-        // S3-compatible endpoints that do not require encryption (e.g., local MinIO).
-        // Real AWS S3 requires https:// and a TLS configuration.
         const url_str = try std.fmt.allocPrint(allocator, "http://127.0.0.1:9000/{s}/{s}", .{
             bucket.percent_encoded, key,
         });
         errdefer allocator.free(url_str);
 
-        // This is a bit awkward. We parse the URL just to get the host for the Host header.
-        const temp_uri_for_host = try std.Uri.parse(url_str);
-        const host_header_val = temp_uri_for_host.host orelse return error.InvalidS3Uri;
-        _ = host_header_val; // autofix
-
-        var self = S3Resource{
+        var self: S3Resource = .{
             .allocator = allocator,
             .uri = uri,
-            .http_client = .{ .allocator = allocator },
-            .headers = .{},
             .request_url_str = url_str,
-            .total_size = null,
+            .headers = .{},
+            .request_url = try .parse(url_str),
+            .authenticator = null,
         };
 
         try self.headers.append(allocator, .{ .name = "Accept", .value = "*/*" });
-        // try self.headers.append(allocator, .{ .name = "Host", .value = host_header_val.percent_encoded });
 
         return self;
     }
 
     pub fn deinit(self: *S3Resource) void {
-        self.http_client.deinit();
         self.headers.deinit(self.allocator);
         self.allocator.free(self.request_url_str);
     }
@@ -447,8 +431,8 @@ pub const Resource = union(enum) {
         }
     }
 
-    pub fn reader(self: *Resource, buffer: []u8) IoReader {
-        return .init(self, buffer);
+    pub fn reader(self: *Resource, buffer: []u8, opts: IoReader.IoReaderOpts) !IoReader {
+        return .init(self, buffer, opts);
     }
 
     pub fn uri(self: *Resource) ResourceURI {
@@ -459,178 +443,77 @@ pub const Resource = union(enum) {
 
     pub fn scheme(self: *Resource) []const u8 {
         return switch (self.*) {
-            inline else => |*r| r.scheme,
+            inline else => |r| @TypeOf(r).scheme,
         };
     }
 };
 
 pub const IoReader = struct {
-    source: Source,
-    interface: std.io.Reader,
-    pos: usize,
-
-    const Source = union(enum) {
-        file: std.fs.File,
-        memory: struct {
-            data: []const u8,
-            pos: u64 = 0,
-        },
-        s3: *S3Resource,
+    pub const IoReaderOpts = struct {
+        offset: u64 = 0,
+        use_direct_io: bool = false,
+        use_aligned_reader: bool = false,
     };
 
-    pub fn init(resource: *Resource, buffer: []u8) IoReader {
-        const source: Source = switch (resource.*) {
-            .memory => |*m| .{
-                .memory = .{
-                    .data = m.buffer,
-                    .pos = 0,
-                },
-            },
-            .file => |*f| .{ .file = f.file },
-            .s3 => |*s| .{ .s3 = s },
-        };
+    reader: union(enum) {
+        memory: std.io.Reader,
+        file: std.fs.File.Reader,
+        s3: S3Reader,
+    },
+    resource: *Resource,
+    opts: IoReaderOpts,
 
+    pub fn init(resource: *Resource, buffer: []u8, opts: IoReaderOpts) !IoReader {
         return .{
-            .source = source,
-            .pos = 0,
-            .interface = .{
-                .buffer = buffer,
-                .vtable = &vtable,
-                .seek = 0,
-                .end = 0,
-            },
-        };
-    }
-
-    fn stream(r: *std.io.Reader, w: *std.io.Writer, limit: std.io.Limit) std.io.Reader.StreamError!usize {
-        _ = w;
-        _ = limit;
-        const self = @as(*IoReader, @alignCast(@fieldParentPtr("interface", r)));
-
-        std.debug.assert(r.seek == r.end);
-        r.seek = 0;
-        r.end = 0;
-
-        const bytes_read = switch (self.source) {
-            .file => |file| {
-                const n = file.read(r.buffer) catch |err| {
-                    log.err("Error reading from file resource: {any}", .{err});
-                    return error.ReadFailed;
-                };
-                if (n == 0) return error.EndOfStream;
-                return n;
-            },
-            .memory => |*src| {
-                const remaining_data = src.data[src.pos..];
-                if (remaining_data.len == 0) return error.EndOfStream;
-
-                const copy_len = @min(remaining_data.len, r.buffer.len);
-                @memcpy(r.buffer[0..copy_len], remaining_data[0..copy_len]);
-                src.pos += copy_len;
-                return copy_len;
-            },
-            .s3 => |s3_res| {
-                const request_uri = std.Uri.parse(s3_res.request_url_str) catch {
-                    log.err("Invalid S3 request URL: {s}", .{s3_res.request_url_str});
-                    return error.ReadFailed;
-                };
-
-                // First, send a HEAD request to get the total size of the object if we don't have it.
-                if (s3_res.total_size == null) {
-                    var head_req = s3_res.http_client.request(.HEAD, request_uri, .{
-                        .extra_headers = s3_res.headers.items,
-                    }) catch |err| {
-                        log.err("Failed to create S3 HEAD request: {any}", .{err});
-                        return error.ReadFailed;
-                    };
-                    defer head_req.deinit();
-
-                    try head_req.sendBodiless();
-                    const response = head_req.receiveHead(&.{}) catch |err| {
-                        log.err("Failed to receive S3 HEAD response: {any}", .{err});
-                        return error.ReadFailed;
-                    };
-
-                    if (response.head.status != .ok) {
-                        log.err("S3 HEAD request to {s} failed with status: {s}", .{ s3_res.request_url_str, @tagName(response.head.status) });
-                        return error.ReadFailed;
+            .reader = switch (resource.*) {
+                .memory => |*m| .{ .memory = .fixed(m.data[opts.offset..]) },
+                .file => |*f| blk: {
+                    if (opts.use_direct_io) {
+                        _ = try switchToDirectIO(f.file);
                     }
-                    s3_res.total_size = response.head.content_length orelse {
-                        log.err("S3 resource {s} did not return Content-Length", .{s3_res.request_url_str});
-                        return error.ReadFailed;
-                    };
-                }
-
-                const total_size = s3_res.total_size.?;
-                if (self.pos >= total_size) return error.EndOfStream;
-
-                const range_start = self.pos;
-                const bytes_to_read = @min(r.buffer.len, total_size - range_start);
-                if (bytes_to_read == 0) return error.EndOfStream;
-                const range_end = range_start + bytes_to_read - 1;
-
-                var range_header_buf: [128]u8 = undefined;
-                const range_header_val = std.fmt.bufPrint(&range_header_buf, "bytes={d}-{d}", .{ range_start, range_end }) catch |err| {
-                    log.err("Failed to format Range header: {any}", .{err});
-                    return error.ReadFailed;
-                };
-                const range_header = std.http.Header{ .name = "Range", .value = range_header_val };
-
-                var all_headers = s3_res.headers.clone(s3_res.allocator) catch |err| {
-                    log.err("Failed to clone S3 headers: {any}", .{err});
-                    return error.ReadFailed;
-                };
-                defer all_headers.deinit(s3_res.allocator);
-                all_headers.append(s3_res.allocator, range_header) catch |err| {
-                    log.err("Failed to append Range header: {any}", .{err});
-                    return error.ReadFailed;
-                };
-
-                var get_req = s3_res.http_client.request(.GET, request_uri, .{
-                    .extra_headers = all_headers.items,
-                }) catch |err| {
-                    log.err("Failed to create S3 GET request: {any}", .{err});
-                    return error.ReadFailed;
-                };
-                defer get_req.deinit();
-
-                try get_req.sendBodiless();
-                var response = get_req.receiveHead(&.{}) catch |err| {
-                    log.err("Failed to receive S3 GET response: {any}", .{err});
-                    return error.ReadFailed;
-                };
-
-                if (response.head.status != .partial_content) {
-                    log.err("S3 GET request to {s} failed with status: {s} (expected 206 Partial Content)", .{ s3_res.request_url_str, @tagName(response.head.status) });
-                    return error.ReadFailed;
-                }
-
-                var temp_transfer_buf: [256]u8 = undefined;
-                var body_reader = response.reader(&temp_transfer_buf);
-
-                const n = try body_reader.readSliceShort(r.buffer[0..bytes_to_read]);
-                log.info("S3 read {d} bytes from {d}-{d}", .{ n, range_start, range_end });
-                self.pos += n;
-                return n;
+                    var file_reader = f.file.reader(buffer);
+                    try file_reader.seekTo(opts.offset);
+                    break :blk .{ .file = file_reader };
+                },
+                .s3 => |*s| .{ .s3 = try .init(s, buffer, opts.offset) },
             },
+            .resource = resource,
+            .opts = opts,
         };
-
-        r.end = bytes_read;
-
-        return 0;
     }
 
-    const vtable: std.io.Reader.VTable = .{
-        .stream = stream,
-    };
+    pub fn deinit(self: *IoReader) void {
+        switch (self.reader) {
+            .memory => |_| {},
+            .file => |_| {},
+            .s3 => |*s| s.deinit(),
+        }
+    }
+
+    pub fn interface(self: *IoReader) *std.io.Reader {
+        return switch (self.reader) {
+            .memory => |*m| m,
+            .file => |*f| blk: {
+                if (self.opts.use_aligned_reader) {
+                    // todo: fragile
+                    var aligned_reader = AlignedFileReader.init(f.*, .fromByteUnits(BUF_4_KB)) catch unreachable;
+                    break :blk &aligned_reader.interface;
+                } else {
+                    break :blk &f.interface;
+                }
+            },
+            .s3 => |*s| &s.interface,
+        };
+    }
 };
 
 fn resolveResourceType(resource: *Resource, reader_buffer: []u8) !ResourceType {
-    var reader = resource.reader(reader_buffer);
+    var io_reader = try resource.reader(reader_buffer, .{});
+    const reader = io_reader.interface();
 
     // Try to detect file type by examining its content
     var magic_bytes_buffer: [8]u8 = undefined;
-    _ = reader.interface.readSliceShort(&magic_bytes_buffer) catch |err| {
+    _ = reader.readSliceShort(&magic_bytes_buffer) catch |err| {
         if (err == error.EndOfStream) {
             return .unknown;
         }
@@ -642,7 +525,7 @@ fn resolveResourceType(resource: *Resource, reader_buffer: []u8) !ResourceType {
     if (magic_bytes_buffer[0] == '{') {
         // Read more content to check if it's an index file
         var json_header_buffer: [100]u8 = undefined;
-        _ = reader.interface.readSliceShort(&json_header_buffer) catch |err| {
+        _ = reader.readSliceShort(&json_header_buffer) catch |err| {
             if (err == error.EndOfStream) {
                 return .unknown;
             }
@@ -716,6 +599,11 @@ fn parseSafetensorsIndex(
             };
 
             const map_entry = try resource_index.map.getOrPut(arena_allocator, sibling_uri);
+
+            if (!map_entry.found_existing) {
+                map_entry.value_ptr.* = .{};
+            }
+
             try map_entry.value_ptr.*.append(arena_allocator, try arena_allocator.dupe(u8, weight_name));
         }
     } else {
@@ -1141,6 +1029,350 @@ test "switchToDirectIO and switchToBufferedIO" {
     try file.seekTo(1);
     const bytes_read_buffered_again = try file.readAll(&unaligned_buf);
     try std.testing.expectEqual(unaligned_buf.len, bytes_read_buffered_again);
+}
+
+const S3Reader = struct {
+    resource: *S3Resource,
+    http_client: std.http.Client,
+    pos: u64,
+    total_size: u64,
+
+    interface: std.io.Reader,
+
+    pub fn init(resource: *S3Resource, buffer: []u8, offset: u64) !S3Reader {
+        var http_client: std.http.Client = .{ .allocator = resource.allocator };
+
+        var request = try http_client.request(.HEAD, resource.request_url, .{
+            .extra_headers = resource.headers.items,
+        });
+
+        const total_size = blk: {
+            try request.sendBodiless();
+            const response = try request.receiveHead(&.{});
+
+            if (response.head.status == .ok) {
+                const cl = response.head.content_length orelse {
+                    return error.ReadFailed;
+                };
+                break :blk cl;
+            } else {
+                log.err("Failed to HEAD S3 resource {any}, status: {d}", .{ request.uri, @intFromEnum(response.head.status) });
+                return error.ReadFailed;
+            }
+        };
+
+        request.deinit();
+        http_client.deinit();
+
+        log.warn("S3 resource total size: {d} bytes", .{total_size});
+
+        const self: S3Reader = .{
+            .resource = resource,
+            .http_client = .{ .allocator = resource.allocator },
+            .pos = offset,
+            .total_size = total_size,
+            .interface = .{
+                .vtable = &vtable,
+                .buffer = buffer,
+                .seek = 0,
+                .end = 0,
+            },
+        };
+
+        return self;
+    }
+
+    pub fn deinit(self: *S3Reader) void {
+        self.http_client.deinit();
+    }
+
+    fn stream(r: *std.io.Reader, w: *std.io.Writer, limit: std.io.Limit) std.io.Reader.StreamError!usize {
+        const trace = tracer.frameStart("S3Reader.stream");
+        defer tracer.frameEnd(trace, "S3Reader.stream");
+
+        // This function's job is to refill `r.buffer`. The `std.io` machinery
+        // will then copy from `r.buffer` to `w`, respecting `limit`.
+        _ = w;
+        _ = limit;
+
+        const self = @as(*S3Reader, @alignCast(@fieldParentPtr("interface", r)));
+        const resource = self.resource;
+
+        // This function is only called when r.seek == r.end. Reset buffer state.
+        r.seek = 0;
+        r.end = 0;
+
+        if (self.pos >= self.total_size) {
+            return error.EndOfStream;
+        }
+
+        const range_start = self.pos;
+        // Request a chunk up to our buffer's capacity, but not past the end of the file.
+        const bytes_to_read = @min(@as(u64, @intCast(r.buffer.len)), self.total_size - range_start);
+
+        if (bytes_to_read == 0) {
+            return error.EndOfStream;
+        }
+
+        const range_end = range_start + bytes_to_read - 1;
+        var range_header_buf: [128]u8 = undefined;
+
+        const trace_prepareHeaders = tracer.frameStart("S3Reader.stream.prepareHeaders");
+        var headers = self.resource.headers.clone(self.resource.allocator) catch |err| {
+            log.err("Failed to clone S3 headers: {any}", .{err});
+            return error.ReadFailed;
+        };
+        defer headers.deinit(self.resource.allocator);
+
+        var auth_headers: ?AwsAuthenticatorHeaders = null;
+        defer if (auth_headers) |*ah| {
+            ah.deinit(self.resource.allocator);
+        };
+
+        if (self.resource.authenticator) |authenticator| {
+            headers.ensureTotalCapacity(self.resource.allocator, headers.capacity + 3) catch |err| {
+                log.err("Failed to ensure S3 headers capacity: {any}", .{err});
+                return error.ReadFailed;
+            };
+
+            auth_headers = authenticator.generateHeadersValues(self.resource.allocator, .GET, resource.request_url.path.percent_encoded) catch |err| {
+                log.err("Failed to sign S3 GET request headers: {any}", .{err});
+                return error.ReadFailed;
+            };
+
+            headers.appendAssumeCapacity(.{ .name = "Date", .value = auth_headers.?.date });
+            headers.appendAssumeCapacity(.{ .name = "Authorization", .value = auth_headers.?.authorization });
+        } else {
+            headers.ensureTotalCapacity(self.resource.allocator, headers.capacity + 1) catch |err| {
+                log.err("Failed to ensure S3 headers capacity: {any}", .{err});
+                return error.ReadFailed;
+            };
+
+            log.info("No authenticator provided, proceeding without authentication", .{});
+        }
+
+        headers.appendAssumeCapacity(.{
+            .name = "Range",
+            .value = std.fmt.bufPrint(&range_header_buf, "bytes={d}-{d}", .{ range_start, range_end }) catch |err| {
+                log.err("Failed to format Range header: {any}", .{err});
+                return error.ReadFailed;
+            },
+        });
+        tracer.frameEnd(trace_prepareHeaders, "S3Reader.stream.prepareHeaders");
+
+        const trace_request = tracer.frameStart("S3Reader.stream.request");
+
+        var request = self.http_client.request(.GET, resource.request_url, .{
+            .extra_headers = headers.items,
+        }) catch |err| {
+            log.err("Failed to create S3 GET request: {any}", .{err});
+            return error.ReadFailed;
+        };
+        defer request.deinit();
+
+        tracer.frameEnd(trace_request, "S3Reader.stream.request");
+
+        const trace_sendBodiless = tracer.frameStart("S3Reader.stream.sendBodiless");
+        try request.sendBodiless();
+        tracer.frameEnd(trace_sendBodiless, "S3Reader.stream.sendBodiless");
+
+        const trace_receiveHead = tracer.frameStart("S3Reader.stream.receiveHead");
+        var response = request.receiveHead(&.{}) catch |err| {
+            log.err("Failed to receive S3 GET response: {any}", .{err});
+            return error.ReadFailed;
+        };
+        tracer.frameEnd(trace_receiveHead, "S3Reader.stream.receiveHead");
+
+        if (response.head.status != .partial_content and response.head.status != .ok) {
+            log.err("S3 GET request to {any} failed with status: {s} (expected 206 or 200)", .{ resource.request_url, @tagName(response.head.status) });
+            return error.ReadFailed;
+        }
+
+        var body_reader = response.reader(&.{});
+
+        const trace_read = tracer.frameStart("S3Reader.stream.readBody");
+        const n = try body_reader.readSliceShort(r.buffer[0..bytes_to_read]);
+        tracer.frameEnd(trace_read, "S3Reader.stream.readBody");
+
+        r.end = n;
+        self.pos += n;
+
+        log.debug("S3Reader: range: bytes={d}-{d}, status={s}, content length={any}", .{ range_start, range_end, @tagName(response.head.status), response.head.content_length });
+
+        // Return 0 because we did not write to `w`. The caller will now
+        // read from our freshly filled buffer.
+        return 0;
+    }
+
+    const vtable: std.io.Reader.VTable = .{
+        .stream = stream,
+    };
+};
+
+const AwsAuthenticatorHeaders = struct {
+    date: []const u8,
+    authorization: []const u8,
+
+    pub fn deinit(self: *AwsAuthenticatorHeaders, allocator: std.mem.Allocator) void {
+        allocator.free(self.date);
+        allocator.free(self.authorization);
+    }
+};
+
+const AwsAuthenticator = struct {
+    allocator: std.mem.Allocator,
+    access_key: []const u8,
+    secret_key: []const u8,
+
+    pub fn init(allocator: std.mem.Allocator) !AwsAuthenticator {
+        const access_key = std.process.getEnvVarOwned(allocator, "AWS_ACCESS_KEY_ID") catch |err| {
+            log.warn("AWS_ACCESS_KEY_ID not set, proceeding without authentication: {any}", .{err});
+            return error.AwsCredentialsNotFound;
+        };
+
+        const secret_key = std.process.getEnvVarOwned(allocator, "AWS_SECRET_ACCESS_KEY") catch |err| {
+            log.warn("AWS_SECRET_ACCESS_KEY not set, proceeding without authentication: {any}", .{err});
+            allocator.free(access_key);
+            return error.AwsCredentialsNotFound;
+        };
+
+        return .{
+            .allocator = allocator,
+            .access_key = access_key,
+            .secret_key = secret_key,
+        };
+    }
+
+    pub fn deinit(self: *AwsAuthenticator) void {
+        self.allocator.free(self.access_key);
+        self.allocator.free(self.secret_key);
+    }
+
+    /// Signs the given headers list for a request.
+    /// Appends `Date` and `Authorization` headers.
+    pub fn generateHeadersValues(
+        self: *const AwsAuthenticator,
+        allocator: std.mem.Allocator,
+        method: std.http.Method,
+        resource_path: []const u8,
+    ) !AwsAuthenticatorHeaders {
+        // Format according to RFC 1123: "%a, %d %b %Y %H:%M:%S GMT"
+        const now = std.time.timestamp();
+        const epoch_secs: std.time.epoch.EpochSeconds = .{ .secs = @intCast(now) };
+        const year_day = epoch_secs.getEpochDay().calculateYearDay();
+        const tm = year_day.calculateMonthDay();
+
+        var date_buffer: [32]u8 = undefined;
+        const weekday_names = [_][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+        const month_names = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+
+        const weekday = epoch_secs.getEpochDay();
+        const weekday_name = weekday_names[@mod(weekday.day, 7)];
+        const month_name = month_names[tm.month.numeric() - 1];
+
+        const hours = @mod(@divTrunc(now, 3600), 24);
+        const minutes = @mod(@divTrunc(now, 60), 60);
+        const seconds = @mod(now, 60);
+
+        const date = try std.fmt.bufPrint(&date_buffer, "{s}, {d:0>2} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} GMT", .{
+            weekday_name,
+            tm.day_index + 1,
+            month_name,
+            year_day.year,
+            @as(u32, @intCast(hours)),
+            @as(u32, @intCast(minutes)),
+            @as(u32, @intCast(seconds)),
+        });
+
+        // StringToSign = HTTP-Verb + "\n" +
+        //                Content-MD5 + "\n" +
+        //                Content-Type + "\n" +
+        //                Date + "\n" +
+        //                CanonicalizedAmzHeaders +
+        //                CanonicalizedResource;
+        // For a simple GET, MD5 and Type are empty, and we have no x-amz- headers.
+        const string_to_sign = try std.fmt.allocPrint(allocator, "{s}\n\n\n{s}\n{s}", .{
+            @tagName(method),
+            date,
+            resource_path,
+        });
+        defer allocator.free(string_to_sign);
+
+        var hmac: std.crypto.auth.hmac.HmacSha1 = .init(self.secret_key);
+        hmac.update(string_to_sign);
+        var signature_bytes: [std.crypto.hash.Sha1.digest_length]u8 = undefined;
+        hmac.final(&signature_bytes);
+
+        var b64_buffer: [std.base64.standard.Encoder.calcSize(signature_bytes.len)]u8 = undefined;
+        const signature_b64 = std.base64.standard.Encoder.encode(&b64_buffer, &signature_bytes);
+
+        const authorization = try std.fmt.allocPrint(allocator, "AWS {s}:{s}", .{
+            self.access_key,
+            signature_b64,
+        });
+
+        return .{
+            .date = try allocator.dupe(u8, date),
+            .authorization = authorization,
+        };
+    }
+};
+
+test AwsAuthenticator {
+    const allocator = std.testing.allocator;
+    var authenticator: AwsAuthenticator = try .init(allocator);
+    defer authenticator.deinit();
+
+    var headers = try authenticator.generateHeadersValues(allocator, .GET, "/my-bucket/my-key");
+    defer headers.deinit(allocator);
+
+    std.debug.print("Date: {s}\n", .{headers.date});
+    std.debug.print("Authorization: {s}\n", .{headers.authorization});
+}
+
+test "S3Reader: stream" {
+    const allocator = std.testing.allocator;
+    const platform = zml.testing.env();
+    _ = platform; // autofix
+
+    tracer = Tracer.init("ai.zml.test.S3Reader.stream");
+
+    const offset: u64 = 16;
+    const s3_uri: ResourceURI = try .parse("s3://models/meta-llama/Llama-3.1-8B/model-00002-of-00004.safetensors");
+
+    var authenticator: AwsAuthenticator = try .init(allocator);
+    defer authenticator.deinit();
+
+    var resource: S3Resource = try .init(allocator, s3_uri);
+    resource.authenticator = authenticator;
+
+    const reader_buffer = try allocator.alloc(u8, BUF_128_MB);
+    defer allocator.free(reader_buffer);
+
+    var s3_reader: S3Reader = try .init(&resource, reader_buffer, offset);
+    defer {
+        s3_reader.deinit();
+        resource.deinit();
+    }
+
+    const expected_bytes_read: u64 = s3_reader.total_size - offset;
+
+    var writer_impl: std.io.Writer.Discarding = .init(&.{});
+
+    // var writer_impl: std.io.Writer.Allocating = try .initCapacity(allocator, expected_bytes_read);
+    // defer writer_impl.deinit();
+
+    var limited_reader = std.io.Reader.Limited.init(&s3_reader.interface, .limited(s3_reader.total_size), &.{});
+
+    var timer: std.time.Timer = try .start();
+    const bytes_read = try limited_reader.interface.streamRemaining(&writer_impl.writer);
+
+    const elapsed = timer.read();
+    const gb_read = @as(f64, @floatFromInt(bytes_read)) / (1.0 * 1024 * 1024 * 1024);
+    const read_rate = if (elapsed > 0) gb_read / (@as(f64, @floatFromInt(elapsed)) / 1_000_000_000.0) else 0;
+    log.warn("All tensors loaded in {d}ms ({d:.2} GB read at {d:.2} GB/s)", .{ elapsed / std.time.ns_per_ms, gb_read, read_rate });
+
+    try std.testing.expectEqual(expected_bytes_read, bytes_read);
 }
 
 const AlignedFileReader = struct {
@@ -2115,7 +2347,7 @@ const TensorWriter = struct {
         };
     }
 
-    fn process(self: *TensorWriter, chunk_to_process: []u8) !void {
+    fn process(self: *TensorWriter, chunk_to_process: []const u8) !void {
         const trace = tracer.frameStart("TensorWriter.process");
         defer tracer.frameEnd(trace, "TensorWriter.process");
 
@@ -2213,11 +2445,10 @@ const TensorWriter = struct {
 
         const self: *TensorWriter = @alignCast(@fieldParentPtr("interface", w));
 
-        const total_incoming_bytes = blk: {
-            var sum: usize = 0;
-            for (data) |chunk| sum += chunk.len;
-            break :blk sum;
-        };
+        const total_incoming_bytes = if (data.len > 0)
+            std.io.Writer.countSplat(data, splat)
+        else
+            0;
 
         log.debug("TensorWriter.drain: incoming={d}B (splat={d}), buffered={d}B, processed={d}B, will_flip_buffer={}", .{
             total_incoming_bytes,
@@ -2229,9 +2460,20 @@ const TensorWriter = struct {
 
         try self.processAndSwap();
 
-        return w.writeSplat(data, splat);
-    }
+        if (data.len == 0) return 0;
 
+        var consumed: usize = 0;
+        for (data[0 .. data.len - 1]) |chunk| {
+            try self.process(chunk);
+            consumed += chunk.len;
+        }
+        const last_chunk = data[data.len - 1];
+        for (0..splat) |_| {
+            try self.process(last_chunk);
+            consumed += last_chunk.len;
+        }
+        return consumed;
+    }
     fn flush(w: *std.io.Writer) !void {
         const trace = tracer.frameStart("TensorWriter.flush");
         defer tracer.frameEnd(trace, "TensorWriter.flush");
@@ -2613,7 +2855,7 @@ test "Full Pipeline: TensorWriter -> GPU -> TensorReader" {
     try file_reader.seekTo(tensor.offset);
 
     var aligned_file_reader: AlignedFileReader = try .init(file_reader, .fromByteUnits(BUF_4_KB));
-    var limited_reader: std.io.Reader.Limited = .init(&aligned_file_reader.interface, .limited64(tensor.shape.byteSize()), file_buffer);
+    var limited_reader: std.io.Reader.Limited = .init(&aligned_file_reader.interface, .limited64(tensor.shape.byteSize()), &.{});
     var tensor_writer: TensorWriter = .init(device_writers.items, writer_buffer);
 
     const trace_write = tracer.frameStart("FullPipeline.TensorWriter.streamRemaining");
@@ -2818,19 +3060,18 @@ pub fn asyncMain() !void {
     const resource_type_buffer = try allocator.alloc(u8, BUF_8_KB);
     defer allocator.free(resource_type_buffer);
 
-    const resource_type = try resolveResourceType(&resource, resource_type_buffer);
-    // try resource.file.file.seekTo(0); // todo
+    const resource_type: ResourceType = try resolveResourceType(&resource, resource_type_buffer);
 
-    const buffer_reader = try allocator.alloc(u8, BUF_128_MB);
+    const buffer_reader = try allocator.alloc(u8, BUF_64_MB);
     defer allocator.free(buffer_reader);
 
-    var reader = resource.reader(buffer_reader);
+    var reader = try resource.reader(buffer_reader, .{});
 
     var registry: TensorRegistry = undefined;
     defer registry.deinit();
 
-    var resource_index: ResourceIndex = undefined;
-    defer resource_index.deinit();
+    var resource_index: ?ResourceIndex = null;
+    defer if (resource_index) |*ri| ri.deinit();
 
     switch (resource_type) {
         .safetensors => {
@@ -2839,28 +3080,28 @@ pub fn asyncMain() !void {
             try parseSafetensors(
                 &registry,
                 resource.uri(),
-                &reader.interface,
+                reader.interface(),
             );
         },
         .index => {
-            resource_index = try parseSafetensorsIndex(allocator, &resource, &reader.interface);
+            resource_index = try parseSafetensorsIndex(allocator, &resource, reader.interface());
 
-            registry = try .initWithMetadata(allocator, resource_index.metadata);
+            registry = try .initWithMetadata(allocator, resource_index.?.metadata);
 
-            const buffer_index_reader = try allocator.alloc(u8, BUF_64_MB);
+            const buffer_index_reader = try allocator.alloc(u8, BUF_16_MB);
             defer allocator.free(buffer_index_reader);
 
-            var index_entries = resource_index.map.iterator();
+            var index_entries = resource_index.?.map.iterator();
             while (index_entries.next()) |entry| {
                 var subresource: Resource = try .init(allocator, entry.key_ptr.*);
                 defer subresource.deinit();
 
-                var reader2 = subresource.reader(buffer_index_reader);
+                var subresource_reader = try subresource.reader(buffer_index_reader, .{});
 
                 try parseSafetensors(
                     &registry,
                     subresource.uri(),
-                    &reader2.interface,
+                    subresource_reader.interface(),
                 );
             }
         },
@@ -2873,32 +3114,6 @@ pub fn asyncMain() !void {
     const elapsed_discovery = timer.lap();
     tracer.frameEnd(trace_discovery, "Weights discovery");
     log.warn("Discovered {d} tensors in model ({d:.2} GB) in {d}ms", .{ registry.tensors.count(), registry.totalBytes() / (1024 * 1024 * 1024), elapsed_discovery / std.time.ns_per_ms });
-
-    // log.warn("Preparing streaming file handles...", .{});
-
-    // var resources: Resources = .{};
-    // defer {
-    //     var it = resources.iterator();
-    //     while (it.next()) |entry| {
-    //         entry.value_ptr.*.deinit();
-    //     }
-    //     resources.deinit(allocator);
-    // }
-
-    // var tensors_it = registry.tensors.iterator();
-    // while (tensors_it.next()) |entry| {
-    //     const tensor = entry.value_ptr.*;
-    //     const result = try resources.getOrPut(allocator, tensor.resource_uri);
-
-    //     if (result.found_existing) {
-    //         const res: Resource = try .init(allocator, tensor.resource_uri);
-    //         _ = try switchToDirectIO(res.file.file);
-    //         result.value_ptr.* = res;
-    //     }
-    // }
-
-    // const elapsed_streaming_prep = timer.lap();
-    // log.warn("Prepared {d} streaming file handles in {d}ms", .{ resources.count(), elapsed_streaming_prep / std.time.ns_per_ms });
 
     log.warn("Applying sharding information...", .{});
     try addExampleShardingMetadata(&registry);
@@ -2930,23 +3145,21 @@ pub fn asyncMain() !void {
     log.warn("Allocating DMA buffers", .{});
     const trace_allocation = tracer.frameStart("Buffers allocation and DMA mapping");
 
-    const writer_buffer = try allocator.alignedAlloc(u8, .fromByteUnits(BUF_64_KB), BUF_64_MB);
+    const writer_buffer = try allocator.alignedAlloc(u8, .fromByteUnits(BUF_4_KB), BUF_64_MB);
     defer allocator.free(writer_buffer);
 
     try platform.pjrt_client.dmaMap(platform.pjrt_api, writer_buffer);
     defer platform.pjrt_client.dmaUnmap(platform.pjrt_api, writer_buffer) catch unreachable;
 
-    const file_buffer = try allocator.alignedAlloc(u8, .fromByteUnits(BUF_64_KB), BUF_128_MB);
-    defer allocator.free(file_buffer);
+    const io_reader_buf = try allocator.alignedAlloc(u8, .fromByteUnits(BUF_4_KB), BUF_64_MB);
+    defer allocator.free(io_reader_buf);
 
-    try platform.pjrt_client.dmaMap(platform.pjrt_api, file_buffer);
-    defer platform.pjrt_client.dmaUnmap(platform.pjrt_api, file_buffer) catch unreachable;
+    try platform.pjrt_client.dmaMap(platform.pjrt_api, io_reader_buf);
+    defer platform.pjrt_client.dmaUnmap(platform.pjrt_api, io_reader_buf) catch unreachable;
 
-    const tensor_reader_buffer: [0]u8 = undefined;
-
-    const elasped_preparation = timer.lap();
+    const elapsed_preparation = timer.lap();
     tracer.frameEnd(trace_allocation, "Buffers allocation and DMA mapping");
-    log.warn("Prepared for tensor processing in {d}ms", .{elasped_preparation / std.time.ns_per_ms});
+    log.warn("Prepared for tensor processing in {d}ms", .{elapsed_preparation / std.time.ns_per_ms});
 
     try warmupDevices(allocator, platform, devices);
 
@@ -2981,17 +3194,22 @@ pub fn asyncMain() !void {
         const arena_allocator = arena.allocator();
         const shards = try computeShards(arena_allocator, tensor, devices);
 
-        // const file = resources.get(tensor.resource_uri).?.file.file; // todo
-        // var file_reader = file.reader(file_buffer);
-        // try file_reader.seekTo(tensor.offset);
-
-        // var aligned_file_reader: AlignedFileReader = try .init(file_reader, .fromByteUnits(BUF_4_KB));
-
         var tensor_resource: Resource = try .init(allocator, tensor.resource_uri);
         defer tensor_resource.deinit();
 
-        var tensor_reader = tensor_resource.reader(file_buffer);
-        var tensor_reader_limited: std.io.Reader.Limited = .init(&tensor_reader.interface, .limited64(tensor.shape.byteSize()), &tensor_reader_buffer);
+        // todo: better handling of different resource types
+        if (std.mem.eql(u8, tensor_resource.scheme(), S3Resource.scheme)) {
+            tensor_resource.s3.authenticator = try AwsAuthenticator.init(arena_allocator);
+        }
+
+        var tensor_reader = try tensor_resource.reader(io_reader_buf, .{
+            .offset = tensor.offset,
+            .use_aligned_reader = true,
+            .use_direct_io = true,
+        });
+        defer tensor_reader.deinit();
+
+        var tensor_reader_limited: std.io.Reader.Limited = .init(tensor_reader.interface(), .limited64(tensor.byteSize()), &.{});
 
         var device_writers: std.ArrayList(DeviceWriter) = try .initCapacity(arena_allocator, devices.len);
         errdefer {
