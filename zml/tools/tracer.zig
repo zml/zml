@@ -7,6 +7,27 @@ pub const Tracer = switch (builtin.os.tag) {
     else => FakeTracer,
 };
 
+var _tracer: Tracer = undefined;
+var _tracer_initialized: bool = false;
+
+pub fn tracer() *Tracer {
+    if (!_tracer_initialized) {
+        unreachable;
+    }
+    return &_tracer;
+}
+
+pub fn initTracer() void {
+    if (_tracer_initialized) return;
+    _tracer = Tracer.init("tracer");
+    _tracer_initialized = true;
+}
+
+pub fn deinitTracer() void {
+    if (!_tracer_initialized) return;
+    _tracer.deinit();
+}
+
 const CudaTracer = struct {
 
     // Those symbols are defined in cudaProfiler.h but their implementation is in libcuda.so

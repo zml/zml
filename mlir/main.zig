@@ -14,6 +14,310 @@ const Shape = zml.Shape;
 const EnumLiteral = @TypeOf(.enum_literal);
 const Platform = zml.Platform;
 
+const Dims = stdx.BoundedArray(i64, zml.Shape.MAX_RANK);
+const log = std.log.scoped(.main);
+
+const safetensor =
+    \\{
+    \\  "metadata": {
+    \\    "total_size": 16060522496
+    \\  },
+    \\  "weight_map": {
+    \\    "lm_head.weight": "model-00004-of-00004.safetensors",
+    \\    "model.embed_tokens.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.0.input_layernorm.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.0.mlp.down_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.0.mlp.gate_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.0.mlp.up_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.0.post_attention_layernorm.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.0.self_attn.k_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.0.self_attn.o_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.0.self_attn.q_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.0.self_attn.v_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.1.input_layernorm.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.1.mlp.down_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.1.mlp.gate_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.1.mlp.up_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.1.post_attention_layernorm.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.1.self_attn.k_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.1.self_attn.o_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.1.self_attn.q_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.1.self_attn.v_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.10.input_layernorm.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.10.mlp.down_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.10.mlp.gate_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.10.mlp.up_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.10.post_attention_layernorm.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.10.self_attn.k_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.10.self_attn.o_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.10.self_attn.q_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.10.self_attn.v_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.11.input_layernorm.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.11.mlp.down_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.11.mlp.gate_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.11.mlp.up_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.11.post_attention_layernorm.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.11.self_attn.k_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.11.self_attn.o_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.11.self_attn.q_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.11.self_attn.v_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.12.input_layernorm.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.12.mlp.down_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.12.mlp.gate_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.12.mlp.up_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.12.post_attention_layernorm.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.12.self_attn.k_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.12.self_attn.o_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.12.self_attn.q_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.12.self_attn.v_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.13.input_layernorm.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.13.mlp.down_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.13.mlp.gate_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.13.mlp.up_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.13.post_attention_layernorm.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.13.self_attn.k_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.13.self_attn.o_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.13.self_attn.q_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.13.self_attn.v_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.14.input_layernorm.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.14.mlp.down_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.14.mlp.gate_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.14.mlp.up_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.14.post_attention_layernorm.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.14.self_attn.k_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.14.self_attn.o_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.14.self_attn.q_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.14.self_attn.v_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.15.input_layernorm.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.15.mlp.down_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.15.mlp.gate_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.15.mlp.up_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.15.post_attention_layernorm.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.15.self_attn.k_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.15.self_attn.o_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.15.self_attn.q_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.15.self_attn.v_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.16.input_layernorm.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.16.mlp.down_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.16.mlp.gate_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.16.mlp.up_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.16.post_attention_layernorm.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.16.self_attn.k_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.16.self_attn.o_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.16.self_attn.q_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.16.self_attn.v_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.17.input_layernorm.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.17.mlp.down_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.17.mlp.gate_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.17.mlp.up_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.17.post_attention_layernorm.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.17.self_attn.k_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.17.self_attn.o_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.17.self_attn.q_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.17.self_attn.v_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.18.input_layernorm.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.18.mlp.down_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.18.mlp.gate_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.18.mlp.up_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.18.post_attention_layernorm.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.18.self_attn.k_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.18.self_attn.o_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.18.self_attn.q_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.18.self_attn.v_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.19.input_layernorm.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.19.mlp.down_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.19.mlp.gate_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.19.mlp.up_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.19.post_attention_layernorm.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.19.self_attn.k_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.19.self_attn.o_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.19.self_attn.q_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.19.self_attn.v_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.2.input_layernorm.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.2.mlp.down_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.2.mlp.gate_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.2.mlp.up_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.2.post_attention_layernorm.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.2.self_attn.k_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.2.self_attn.o_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.2.self_attn.q_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.2.self_attn.v_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.20.input_layernorm.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.20.mlp.down_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.20.mlp.gate_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.20.mlp.up_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.20.post_attention_layernorm.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.20.self_attn.k_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.20.self_attn.o_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.20.self_attn.q_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.20.self_attn.v_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.21.input_layernorm.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.21.mlp.down_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.21.mlp.gate_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.21.mlp.up_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.21.post_attention_layernorm.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.21.self_attn.k_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.21.self_attn.o_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.21.self_attn.q_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.21.self_attn.v_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.22.input_layernorm.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.22.mlp.down_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.22.mlp.gate_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.22.mlp.up_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.22.post_attention_layernorm.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.22.self_attn.k_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.22.self_attn.o_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.22.self_attn.q_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.22.self_attn.v_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.23.input_layernorm.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.23.mlp.down_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.23.mlp.gate_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.23.mlp.up_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.23.post_attention_layernorm.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.23.self_attn.k_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.23.self_attn.o_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.23.self_attn.q_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.23.self_attn.v_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.24.input_layernorm.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.24.mlp.down_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.24.mlp.gate_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.24.mlp.up_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.24.post_attention_layernorm.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.24.self_attn.k_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.24.self_attn.o_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.24.self_attn.q_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.24.self_attn.v_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.25.input_layernorm.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.25.mlp.down_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.25.mlp.gate_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.25.mlp.up_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.25.post_attention_layernorm.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.25.self_attn.k_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.25.self_attn.o_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.25.self_attn.q_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.25.self_attn.v_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.26.input_layernorm.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.26.mlp.down_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.26.mlp.gate_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.26.mlp.up_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.26.post_attention_layernorm.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.26.self_attn.k_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.26.self_attn.o_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.26.self_attn.q_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.26.self_attn.v_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.27.input_layernorm.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.27.mlp.down_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.27.mlp.gate_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.27.mlp.up_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.27.post_attention_layernorm.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.27.self_attn.k_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.27.self_attn.o_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.27.self_attn.q_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.27.self_attn.v_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.28.input_layernorm.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.28.mlp.down_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.28.mlp.gate_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.28.mlp.up_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.28.post_attention_layernorm.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.28.self_attn.k_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.28.self_attn.o_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.28.self_attn.q_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.28.self_attn.v_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.29.input_layernorm.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.29.mlp.down_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.29.mlp.gate_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.29.mlp.up_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.29.post_attention_layernorm.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.29.self_attn.k_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.29.self_attn.o_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.29.self_attn.q_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.29.self_attn.v_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.3.input_layernorm.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.3.mlp.down_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.3.mlp.gate_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.3.mlp.up_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.3.post_attention_layernorm.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.3.self_attn.k_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.3.self_attn.o_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.3.self_attn.q_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.3.self_attn.v_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.30.input_layernorm.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.30.mlp.down_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.30.mlp.gate_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.30.mlp.up_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.30.post_attention_layernorm.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.30.self_attn.k_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.30.self_attn.o_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.30.self_attn.q_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.30.self_attn.v_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.31.input_layernorm.weight": "model-00004-of-00004.safetensors",
+    \\    "model.layers.31.mlp.down_proj.weight": "model-00004-of-00004.safetensors",
+    \\    "model.layers.31.mlp.gate_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.31.mlp.up_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.31.post_attention_layernorm.weight": "model-00004-of-00004.safetensors",
+    \\    "model.layers.31.self_attn.k_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.31.self_attn.o_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.31.self_attn.q_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.31.self_attn.v_proj.weight": "model-00003-of-00004.safetensors",
+    \\    "model.layers.4.input_layernorm.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.4.mlp.down_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.4.mlp.gate_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.4.mlp.up_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.4.post_attention_layernorm.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.4.self_attn.k_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.4.self_attn.o_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.4.self_attn.q_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.4.self_attn.v_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.5.input_layernorm.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.5.mlp.down_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.5.mlp.gate_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.5.mlp.up_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.5.post_attention_layernorm.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.5.self_attn.k_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.5.self_attn.o_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.5.self_attn.q_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.5.self_attn.v_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.6.input_layernorm.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.6.mlp.down_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.6.mlp.gate_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.6.mlp.up_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.6.post_attention_layernorm.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.6.self_attn.k_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.6.self_attn.o_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.6.self_attn.q_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.6.self_attn.v_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.7.input_layernorm.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.7.mlp.down_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.7.mlp.gate_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.7.mlp.up_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.7.post_attention_layernorm.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.7.self_attn.k_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.7.self_attn.o_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.7.self_attn.q_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.7.self_attn.v_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.8.input_layernorm.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.8.mlp.down_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.8.mlp.gate_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.8.mlp.up_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.8.post_attention_layernorm.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.8.self_attn.k_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.8.self_attn.o_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.8.self_attn.q_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.8.self_attn.v_proj.weight": "model-00001-of-00004.safetensors",
+    \\    "model.layers.9.input_layernorm.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.9.mlp.down_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.9.mlp.gate_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.9.mlp.up_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.9.post_attention_layernorm.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.9.self_attn.k_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.9.self_attn.o_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.9.self_attn.q_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.layers.9.self_attn.v_proj.weight": "model-00002-of-00004.safetensors",
+    \\    "model.norm.weight": "model-00004-of-00004.safetensors"
+    \\  }
+    \\}
+;
+
 pub const std_options: std.Options = .{
     .log_level = .debug,
     .log_scope_levels = &.{
@@ -28,6 +332,8 @@ pub const TensorOriginType = enum {
     value,
 };
 
+const AttributeList = stdx.BoundedArray(mlir.NamedAttribute, 3);
+
 pub const TensorOrigin = union(TensorOriginType) {
     argument: void,
     value: *const mlir.Value,
@@ -37,12 +343,9 @@ pub const Tensor = struct {
     var current_id: std.atomic.Value(usize) = .{ .raw = 1 };
     pub const MAX_RANK = Shape.MAX_RANK;
 
-    pub const _Donation = union(enum) { no_buffer, input_buffer, arg: u16 };
-
     id: usize,
     auto_broadcast: bool = false,
     _shape: zml.Shape,
-    _donation: _Donation = .no_buffer,
     tensor_origin: TensorOrigin = .{ .argument = {} },
 
     fn mlirType(self: Tensor, mlir_ctx: *mlir.Context) *const mlir.Type {
@@ -57,7 +360,7 @@ pub const Tensor = struct {
     }
 
     fn currentBlock() *mlir.Block {
-        return CompilationContext.current().currentBlock();
+        return CompilationContext.current().currentScope().block;
     }
 
     pub fn init(shape_: zml.Shape) Tensor {
@@ -397,7 +700,7 @@ pub const Tensor = struct {
             res_shape.dims(),
             zml.mlir.Type.fromDType(ctx.mlir_ctx, res_shape.dtype()),
         );
-        const broadcast_op = dialects.stablehlo.broadcast_in_dim(ctx.mlir_ctx, self.value(), axes_, result_type, .unknown(ctx.mlir_ctx)).appendTo(ctx.currentBlock());
+        const broadcast_op = dialects.stablehlo.broadcast_in_dim(ctx.mlir_ctx, self.value(), axes_, result_type, .unknown(ctx.mlir_ctx)).appendTo(currentBlock());
         return _result(res_shape, broadcast_op.result(0));
     }
 
@@ -627,9 +930,10 @@ pub const Tensor = struct {
             CompilationContext.current().pushBlock(reduce_block);
             defer CompilationContext.current().popBlock();
 
+            const scope = CompilationContext.current().currentScope();
             inline for (0..inits.len) |i| {
-                CompilationContext.current().currentMapping().put(CompilationContext.current().allocator, args[i].left.id, i) catch unreachable;
-                CompilationContext.current().currentMapping().put(CompilationContext.current().allocator, args[i].right.id, i + inits.len) catch unreachable;
+                scope.id_to_argument.put(scope.arena.allocator(), args[i].left.id, i) catch unreachable;
+                scope.id_to_argument.put(scope.arena.allocator(), args[i].right.id, i + inits.len) catch unreachable;
             }
 
             var result = @call(.auto, func, args ++ context);
@@ -659,7 +963,7 @@ pub const Tensor = struct {
             },
             .verify = true,
             .location = .unknown(mlirCtx()),
-        }).appendTo(CompilationContext.current().currentBlock());
+        }).appendTo(currentBlock());
 
         // `stablehlo.reduce` drops axes. We want to avoid that to propagate tags.
         // So we need to broadcast the output of `stablehlo.reduce` to the input shapes.
@@ -748,11 +1052,16 @@ pub const Tensor = struct {
     pub fn value(self: Tensor) *const mlir.Value {
         return switch (self.tensor_origin) {
             .argument => b: {
-                const argument_index = self.getContext().getArgumentIndex(self.id);
-                break :b self.getContext().currentBlock().argument(argument_index);
+                const argument_index = self.getContext().currentScope().id_to_argument.get(self.id).?;
+                break :b self.getContext().currentScope().block.argument(argument_index);
             },
             .value => |v| v,
         };
+    }
+
+    /// Returns the donation data of the tensor.
+    pub fn donation(self: Tensor) ?usize {
+        return CompilationContext.current().currentScope().id_to_donation.get(self.id);
     }
 
     pub const Rng = struct {
@@ -788,12 +1097,12 @@ pub const Tensor = struct {
         //    return .{ self.update(op.result(0)), _result(sh, op.result(1)) };
         //}
 
-        //fn update(self: Rng, new_state: mlir.Value) Rng {
-        //    return .{
-        //        ._state = _result(self._state._shape, new_state).reuseBuffer(self._state),
-        //        .algorithm = self.algorithm,
-        //    };
-        //}
+        fn update(self: Rng, new_state: mlir.Value) Rng {
+            return .{
+                ._state = _result(self._state._shape, new_state).reuseBuffer(self._state),
+                .algorithm = self.algorithm,
+            };
+        }
 
         ///// Returns a Tensor of the given shape, filled with uniformly sampled floating point numbers from an interval,
         ///// and a new Rng state.
@@ -1001,10 +1310,22 @@ pub const Tensor = struct {
     /// is not allowed to reuse the donated input buffer after the call.
     /// For `reuseBuffer` to be effective, it needs to propagate all the way through the output.
     pub fn reuseBuffer(self: Tensor, origin: Tensor) Tensor {
-        //var res = self;
-        //res._donation = origin._donation;
-        //switch (origin.tensor_origin) {}
-        _ = origin; // autofix
+        const compilation_context = CompilationContext.current();
+        const scope = compilation_context.currentScope();
+        switch (origin.tensor_origin) {
+            .argument => {
+                const argument_index = scope.id_to_argument.get(origin.id).?;
+
+                const gop = scope.id_to_donation.getOrPut(scope.arena.allocator(), self.id) catch unreachable;
+                gop.value_ptr.* = argument_index;
+            },
+            .value => {
+                if (scope.id_to_donation.get(origin.id)) |origin_donation| {
+                    const gop = scope.id_to_donation.getOrPut(scope.arena.allocator(), self.id) catch unreachable;
+                    gop.value_ptr.* = origin_donation;
+                }
+            },
+        }
         return self;
     }
 
@@ -1716,9 +2037,10 @@ pub const Tensor = struct {
             CompilationContext.current().pushBlock(update_block);
             defer CompilationContext.current().popBlock();
 
+            const scope = CompilationContext.current().currentScope();
             inline for (0..inputs.len) |i| {
-                CompilationContext.current().currentMapping().put(CompilationContext.current().allocator, args[i].left.id, i) catch unreachable;
-                CompilationContext.current().currentMapping().put(CompilationContext.current().allocator, args[i].right.id, i + inputs.len) catch unreachable;
+                scope.id_to_argument.put(scope.arena.allocator(), args[i].left.id, i) catch unreachable;
+                scope.id_to_argument.put(scope.arena.allocator(), args[i].right.id, i + inputs.len) catch unreachable;
             }
 
             var result = @call(.auto, func, args ++ context);
@@ -2425,7 +2747,7 @@ const Mnist = struct {
 
 pub const TransferEntry = struct {
     buffer: zml.Buffer,
-    writer: Transfer.Writer,
+    writer: *Transfer.Writer,
 };
 
 fn TransferReturnType(comptime ShapeType: type) type {
@@ -2452,7 +2774,7 @@ pub fn singleTransfer(allocator: std.mem.Allocator, shape: Shape, platform: Plat
 
     const entry: TransferEntry = .{
         .buffer = zml.Buffer.fromPjrtBuffers(platform, shape, &.{transfer.get(0).buffer}),
-        .writer = transfer.get(0).writer(),
+        .writer = &transfer.get(0).writer,
     };
 
     return .{ transfer, entry };
@@ -2468,7 +2790,7 @@ pub fn multiTransfer(allocator: std.mem.Allocator, shapes: anytype, platform: Pl
     var entries: [shapes.len]TransferEntry = undefined;
     inline for (shapes, 0..) |shape, index| {
         entries[index].buffer = zml.Buffer.fromPjrtBuffers(platform, shape, &.{transfer.get(index).buffer});
-        entries[index].writer = transfer.get(index).writer();
+        entries[index].writer = &transfer.get(index).writer;
     }
 
     return .{ transfer, entries };
@@ -2477,8 +2799,22 @@ pub fn multiTransfer(allocator: std.mem.Allocator, shapes: anytype, platform: Pl
 pub fn bufferTransfer(allocator: std.mem.Allocator, buffer_store: BufferStore5.View, name: []const u8, platform: Platform) !zml.Buffer {
     const shape = buffer_store.getShape(name).?;
     var transfer, const entry = try singleTransfer(allocator, shape, platform);
-    defer transfer.deinit(allocator, platform);
-    buffer_store.getReader(name).stream(entry.writer);
+    defer transfer.deinit(platform);
+
+    const tensor_desc = buffer_store.store.getPtrFromKey(name).?;
+
+    var tensor_resource: Resource = .{
+        .http = try .init(buffer_store.store.http_client, allocator, tensor_desc.resource_uri, .{ .offset = tensor_desc.offset, .size = tensor_desc.shape.byteSize() }),
+    };
+    defer tensor_resource.deinit();
+
+    const buffer_reader = try allocator.alloc(u8, BUF_16_MB);
+    defer allocator.free(buffer_reader);
+
+    var reader = tensor_resource.reader(buffer_reader);
+
+    _ = try reader.interface().streamRemaining(&entry.writer.interface);
+    try entry.writer.interface.flush();
     return entry.buffer;
 }
 
@@ -2533,6 +2869,9 @@ pub fn autoLoad(allocator: std.mem.Allocator, model: anytype, buffer_store: Buff
 }
 
 pub fn loadBuffersFromId(allocator: std.mem.Allocator, model: anytype, buffer_store: BufferStore5.View, platform: Platform) !Bufferized(@TypeOf(model)) {
+    //const id = zml.tools.tracer.tracer().frameStart("loadBuffersFromId");
+    //defer zml.tools.tracer.tracer().frameEnd(id, "loadBuffersFromId");
+
     const Model = @TypeOf(model);
     var result: Bufferized(Model) = undefined;
     initBufferizedFrom(model, &result);
@@ -2544,23 +2883,49 @@ pub fn loadBuffersFromId(allocator: std.mem.Allocator, model: anytype, buffer_st
     std.debug.print("Found {d} shapes\n", .{shapes.len});
 
     var transfer: Transfer = try .init(arena.allocator(), shapes, platform);
-    defer transfer.deinit(arena.allocator(), platform);
+    defer transfer.deinit(platform);
 
-    const readers = try collectReaders(arena.allocator(), buffer_store, &model);
-    std.debug.print("Found {d} readers\n", .{readers.len});
+    const tensor_descs = try collectTensorDesc(arena.allocator(), buffer_store, &model);
+
+    const buffer_reader = try allocator.alloc(u8, BUF_16_MB);
+    defer allocator.free(buffer_reader);
+
+    //const readers = try collectReaders(arena.allocator(), buffer_store, &model);
+    //std.debug.print("Found {d} readers\n", .{readers.len});
 
     const LocalContext = struct {
-        readers: []BufferStore5.Reader,
+        tensor_descs: []TensorDesc,
         shapes: []const Shape,
         platform: Platform,
         transfer: *Transfer,
         index: usize = 0,
+        buffer_reader: []u8,
+        buffer_store_view: BufferStore5.View,
+        allocator: std.mem.Allocator,
     };
-    var context: LocalContext = .{ .readers = readers, .shapes = shapes, .platform = platform, .transfer = &transfer };
+    var context: LocalContext = .{
+        .tensor_descs = tensor_descs,
+        .shapes = shapes,
+        .platform = platform,
+        .transfer = &transfer,
+        .buffer_reader = buffer_reader,
+        .buffer_store_view = buffer_store,
+        .allocator = allocator,
+    };
     zml.meta.visit(struct {
         fn cb(context_: *LocalContext, buffer: *zml.Buffer) void {
-            const writer = context_.transfer.get(context_.index).writer();
-            context_.readers[context_.index].stream(writer);
+            const tensor_desc = context_.tensor_descs[context_.index];
+
+            var tensor_resource: Resource = .{
+                .http = HttpResource.init(context_.buffer_store_view.store.http_client, context_.allocator, tensor_desc.resource_uri, .{ .offset = tensor_desc.offset, .size = tensor_desc.shape.byteSize() }) catch unreachable,
+            };
+            defer tensor_resource.deinit();
+
+            var reader = tensor_resource.reader(context_.buffer_reader);
+            const entry = context_.transfer.get(context_.index);
+
+            _ = reader.interface().streamRemaining(&entry.writer.interface) catch unreachable;
+            entry.writer.interface.flush() catch unreachable;
 
             buffer.* = zml.Buffer.fromPjrtBuffers(context_.platform, context_.shapes[context_.index], &.{context_.transfer.get(context_.index).buffer});
             context_.index += 1;
@@ -2675,9 +3040,38 @@ pub fn bufferTypeFromDtype(dt: zml.DataType) pjrt.BufferType {
 const Transfer = struct {
     entries: []Entry,
     transfer_manager: *pjrt.AsyncHostToDeviceTransferManager,
+    arena: std.heap.ArenaAllocator,
 
     pub const Writer = struct {
-        entry: *Entry,
+        offset: usize = 0,
+        interface: std.Io.Writer,
+
+        pub fn init(buffer: []u8) Writer {
+            return .{
+                .interface = .{
+                    .buffer = buffer,
+                    .end = 0,
+                    .vtable = &.{
+                        .drain = drain,
+                    },
+                },
+            };
+        }
+
+        pub fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+            _ = data; // autofix
+            _ = splat; // autofix
+            const writer: *Writer = @alignCast(@fieldParentPtr("interface", w));
+            const entry: *Entry = @alignCast(@fieldParentPtr("writer", writer));
+            stdx.debug.assert(writer.offset + w.end <= entry.shape.byteSize(), "Can't write more data than required", .{});
+            const is_last_transfer = writer.offset + w.end >= entry.shape.byteSize();
+            log.debug("Writing {} bytes", .{w.end});
+            _ = entry.transfer_manager.transferData(entry.platform.pjrt_api, entry.buffer_index, w.buffer[0..w.end], @intCast(writer.offset), is_last_transfer) catch return error.WriteFailed;
+            const written = w.end;
+            writer.offset += written;
+            w.end = 0;
+            return 0;
+        }
     };
 
     pub const Entry = struct {
@@ -2686,21 +3080,21 @@ const Transfer = struct {
         buffer_index: usize,
         buffer: *pjrt.Buffer,
         platform: Platform,
-
-        pub fn writer(entry: *Entry) Writer {
-            return .{ .entry = entry };
-        }
+        writer: Writer,
     };
 
     pub fn init(allocator: std.mem.Allocator, shapes: []const Shape, platform: Platform) !Transfer {
         const shape_specs = try allocator.alloc(pjrt.ShapeSpec, shapes.len);
         defer allocator.free(shape_specs);
 
+        var temp_arena = std.heap.ArenaAllocator.init(allocator);
+        defer temp_arena.deinit();
+
         var arena = std.heap.ArenaAllocator.init(allocator);
-        defer arena.deinit();
+        errdefer arena.deinit();
 
         for (shape_specs, shapes) |*spec, shape| {
-            const dims = try arena.allocator().dupe(i64, shape.dims());
+            const dims = try temp_arena.allocator().dupe(i64, shape.dims());
             spec.* = pjrt.ShapeSpec.init(dims, bufferTypeFromDtype(shape.dtype()));
         }
 
@@ -2709,31 +3103,31 @@ const Transfer = struct {
         const transfer_manager = try platform.pjrt_client.createBuffersForAsyncHostToDevice(platform.pjrt_api, .{ .shape_specs = shape_specs, .memory = memory });
         errdefer transfer_manager.deinit(platform.pjrt_api);
 
-        const count = transfer_manager.bufferCount(platform.pjrt_api) catch unreachable;
-        for (0..count) |index| {
-            const buffer_size = transfer_manager.bufferSize(platform.pjrt_api, index) catch unreachable;
-            std.debug.print("index: {d} - size: {d}\n", .{ index, buffer_size });
-        }
+        //const count = transfer_manager.bufferCount(platform.pjrt_api) catch unreachable;
+        //for (0..count) |index| {
+        //    const buffer_size = transfer_manager.bufferSize(platform.pjrt_api, index) catch unreachable;
+        //    std.debug.print("index: {d} - size: {d}\n", .{ index, buffer_size });
+        //}
 
-        const entries = try allocator.alloc(Entry, shapes.len);
-        errdefer allocator.free(entries);
-
+        const entries = try arena.allocator().alloc(Entry, shapes.len);
         for (entries, shapes, 0..) |*e, shape, index| {
             const buffer = try transfer_manager.retrieveBuffer(platform.pjrt_api, index);
+            const writer_buffer = try arena.allocator().alloc(u8, BUF_16_MB);
             e.* = .{
                 .shape = shape,
                 .transfer_manager = transfer_manager,
                 .buffer_index = index,
                 .buffer = buffer,
                 .platform = platform,
+                .writer = .init(writer_buffer),
             };
         }
 
-        return .{ .entries = entries, .transfer_manager = transfer_manager };
+        return .{ .entries = entries, .transfer_manager = transfer_manager, .arena = arena };
     }
 
-    pub fn deinit(self: Transfer, allocator: std.mem.Allocator, platform: Platform) void {
-        allocator.free(self.entries);
+    pub fn deinit(self: Transfer, platform: Platform) void {
+        self.arena.deinit();
         self.transfer_manager.deinit(platform.pjrt_api);
     }
 
@@ -2810,6 +3204,163 @@ pub fn testLinear2(linear1: Linear, linear2: Linear, x: Tensor) Tensor {
 
 pub fn main() !void {
     try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain);
+}
+
+pub fn asyncMain3() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var context = try zml.Context.init();
+    defer context.deinit();
+
+    const platform = context.autoPlatform(.{});
+    context.printAvailablePlatforms(platform);
+
+    // var tmp_dir = std.testing.tmpDir(.{});
+    // defer tmp_dir.cleanup();
+
+    // const filename = "file.bin";
+    // _ = try createBinFile(tmp_dir, filename, BUF_8_KB, null);
+
+    // const file_path = try tmp_dir.dir.realpathAlloc(allocator, filename);
+    // defer allocator.free(file_path);
+    var client: std.http.Client = .{ .allocator = allocator, .write_buffer_size = 8192 };
+    try client.initDefaultProxies(arena.allocator());
+    defer client.deinit();
+
+    if (false) {
+        //var resource: Resource = .{ .memory = try .init(safetensor) };
+        //defer resource.deinit();
+
+        const buffer_reader = try allocator.alloc(u8, BUF_4_MB);
+        defer allocator.free(buffer_reader);
+
+        //var resource: Resource = .{ .http = try .init(&client, "http://localhost:8000/model.safetensors.index.json") };
+        var resource: Resource = .{ .http = try .init(&client, allocator, "https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct/raw/main/model.safetensors.index.json", null) };
+        defer resource.deinit();
+
+        //var resource: Resource = .{ .file = try .init("/Users/corendos/models/Llama-3.1-8B-Instruct/model.safetensors.index.json", buffer_reader) };
+        //defer resource.deinit();
+
+        var reader = resource.reader(buffer_reader);
+
+        var parsed_safetensors = try parseSafetensorsIndex(arena.allocator(), &resource, reader.interface());
+        defer parsed_safetensors.deinit();
+        {
+            //"model.layers.0.self_attn.o_proj.weight":{"dtype":"BF16","shape":[4096,4096],"data_offsets":[1411399680,1444954112]}
+            var tensor_resource: Resource = .{ .http = try .init(
+                &client,
+                allocator,
+                "https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct/resolve/main/model-00001-of-00004.safetensors",
+                .{ .offset = 8, .size = 4096 },
+            ) };
+            defer tensor_resource.deinit();
+
+            var reader2 = tensor_resource.reader(buffer_reader);
+
+            const buffer_writer = try allocator.alloc(u8, BUF_4_MB);
+            defer allocator.free(buffer_writer);
+            var writer = std.fs.File.stdout().writer(buffer_writer);
+
+            const result = try reader2.interface().streamRemaining(&writer.interface);
+            std.log.debug("{}", .{result});
+            try writer.interface.flush();
+        }
+    }
+
+    if (false) {
+        const shape = zml.Shape.init(.{ 128256, 4096 }, .bf16);
+
+        var transfer = try Transfer.init(allocator, &.{shape}, platform);
+        defer transfer.deinit(platform);
+
+        const entry = transfer.get(0);
+
+        const start = 0;
+        const end = 1050673152;
+        var tensor_resource: Resource = .{
+            .http = try .init(
+                &client,
+                allocator,
+                "http://localhost:8000/model-00001-of-00004.safetensors",
+                //"https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct/resolve/main/model-00001-of-00004.safetensors",
+                .{ .offset = start, .size = end - start },
+            ),
+        };
+        defer tensor_resource.deinit();
+
+        const buffer_reader = try allocator.alloc(u8, BUF_4_MB);
+        defer allocator.free(buffer_reader);
+        var reader = tensor_resource.reader(buffer_reader);
+
+        const written = try reader.interface().streamRemaining(&entry.writer.interface);
+        try entry.writer.interface.flush();
+        std.log.debug("Written {d} bytes", .{written});
+    }
+
+    if (true) {
+        const buffer_reader = try allocator.alloc(u8, BUF_4_MB);
+        defer allocator.free(buffer_reader);
+
+        var resource: Resource = .{ .http = try .init(&client, allocator, std.Uri.parse("https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct/resolve/main/model.safetensors.index.json") catch unreachable, null) };
+        defer resource.deinit();
+
+        var reader = resource.reader(buffer_reader);
+
+        var resource_index = try parseSafetensorsIndex(arena.allocator(), &resource, reader.interface());
+        defer resource_index.deinit();
+
+        var registry: TensorRegistry = try .initWithMetadata(allocator, resource_index.metadata);
+        defer registry.deinit();
+
+        var seen: std.ArrayHashMapUnmanaged(std.Uri, void, ResourceURIContext, false) = .empty;
+
+        var it = resource_index.map.iterator();
+        while (it.next()) |entry| {
+            if (seen.get(entry.value_ptr.*)) |_| {} else {
+                try seen.put(arena.allocator(), entry.value_ptr.*, {});
+
+                std.debug.print("subresource uri: {f}\n", .{entry.value_ptr.fmt(.all)});
+
+                var subresource: Resource = .{ .http = try .init(&client, allocator, entry.value_ptr.*, null) };
+                defer subresource.deinit();
+
+                std.log.debug("Opened subresource", .{});
+
+                var reader2 = subresource.reader(buffer_reader);
+
+                try parseSafetensors(&registry, entry.value_ptr.*, reader2.interface());
+            }
+        }
+
+        //const tensor_desc = registry.tensors.get("model.layers.0.self_attn.o_proj.weight").?;
+        const tensor_desc = registry.tensors.get("model.embed_tokens.weight").?;
+
+        var tensor_resource: Resource = .{
+            .http = try .init(
+                &client,
+                allocator,
+                tensor_desc.resource_uri,
+                .{ .offset = tensor_desc.offset, .size = tensor_desc.shape.byteSize() },
+            ),
+        };
+        defer tensor_resource.deinit();
+
+        var reader3 = tensor_resource.reader(buffer_reader);
+
+        var transfer = try Transfer.init(allocator, &.{tensor_desc.shape}, platform);
+        defer transfer.deinit(platform);
+
+        const entry = transfer.get(0);
+
+        const written = try reader3.interface().streamRemaining(&entry.writer.interface);
+        try entry.writer.interface.flush();
+        std.log.debug("Written {d} bytes", .{written});
+    }
 }
 
 pub fn asyncMain2() !void {
@@ -2930,14 +3481,67 @@ pub fn asyncMain() !void {
         .qkv_type = .merged,
     };
 
-    var old_buffer_store = try zml.aio.detectFormatAndOpen(allocator, model_weights_path);
-    defer old_buffer_store.deinit();
+    var client: std.http.Client = .{ .allocator = allocator, .write_buffer_size = 8192 };
+    try client.initDefaultProxies(arena.allocator());
+    defer client.deinit();
 
-    var buffer_store: BufferStore5 = try .fromBufferStore(allocator, old_buffer_store);
+    const buffer_reader = try allocator.alloc(u8, BUF_4_MB);
+    defer allocator.free(buffer_reader);
+
+    //var resource: Resource = .{ .http = try .init(&client, allocator, std.Uri.parse("https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct/resolve/main/model.safetensors.index.json") catch unreachable, null) };
+    var resource: Resource = .{ .http = try .init(&client, allocator, std.Uri.parse("http://localhost:8000/model.safetensors.index.json") catch unreachable, null) };
+    defer resource.deinit();
+
+    var reader = resource.reader(buffer_reader);
+
+    var resource_index = try parseSafetensorsIndex(arena.allocator(), &resource, reader.interface());
+    defer resource_index.deinit();
+
+    var registry: TensorRegistry = try .initWithMetadata(allocator, resource_index.metadata);
+    defer registry.deinit();
+
+    //var registry: TensorRegistry = .init(allocator);
+    //defer registry.deinit();
+
+    //var resource: Resource = .{ .http = try .init(&client, allocator, std.Uri.parse("https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct/resolve/main/model.safetensors") catch unreachable, null) };
+    //defer resource.deinit();
+
+    //var reader = resource.reader(buffer_reader);
+
+    //try parseSafetensors(&registry, resource.uri(), reader.interface());
+
+    var seen: std.ArrayHashMapUnmanaged(std.Uri, void, ResourceURIContext, false) = .empty;
+
+    var it = resource_index.map.iterator();
+    while (it.next()) |entry| {
+        if (seen.get(entry.value_ptr.*)) |_| {} else {
+            try seen.put(arena.allocator(), entry.value_ptr.*, {});
+
+            std.debug.print("subresource uri: {f}\n", .{entry.value_ptr.fmt(.all)});
+
+            var subresource: Resource = .{ .http = try .init(&client, allocator, entry.value_ptr.*, null) };
+            defer subresource.deinit();
+
+            std.log.debug("Opened subresource", .{});
+
+            var reader2 = subresource.reader(buffer_reader);
+
+            try parseSafetensors(&registry, entry.value_ptr.*, reader2.interface());
+        }
+    }
+
+    //var old_buffer_store = try zml.aio.detectFormatAndOpen(allocator, model_weights_path);
+    //defer old_buffer_store.deinit();
+
+    //var buffer_store: BufferStore5 = try .fromBufferStore(allocator, old_buffer_store);
+    var buffer_store: BufferStore5 = try .init(allocator, &registry, &client);
     defer buffer_store.deinit();
 
     var context = try zml.Context.init();
     defer context.deinit();
+
+    //zml.tools.tracer.initTracer();
+    //defer zml.tools.tracer.deinitTracer();
 
     const platform = context.autoPlatform(.{});
     context.printAvailablePlatforms(platform);
@@ -2978,20 +3582,21 @@ pub fn asyncMain() !void {
     defer kv_cache_buffer.k.deinit();
     defer kv_cache_buffer.v.deinit();
 
-    var token_index_buffer = try zml.Buffer.fromBytes(platform, token_index.shape(), std.mem.sliceAsBytes(&[1]u32{0}));
-    defer token_index_buffer.deinit();
+    //var token_index_buffer = try zml.Buffer.fromBytes(platform, token_index.shape(), std.mem.sliceAsBytes(&[1]u32{0}));
+    //defer token_index_buffer.deinit();
 
-    var token_buffer = try zml.Buffer.fromBytes(platform, tokens.shape(), std.mem.sliceAsBytes(&[1]u32{0}));
-    defer token_buffer.deinit();
+    //var token_buffer = try zml.Buffer.fromBytes(platform, tokens.shape(), std.mem.sliceAsBytes(&[1]u32{0}));
+    //defer token_buffer.deinit();
 
     var new_token_id: u32 = undefined;
     for (tokenized_prompt[0..], 0..) |token_id, i| {
         std.debug.print("Running iteration {} token id: {}\n", .{ i, token_id });
-        token_index_buffer.deinit();
-        token_index_buffer = try zml.Buffer.fromBytes(platform, token_index.shape(), std.mem.sliceAsBytes(&[1]u32{@intCast(i)}));
+        var token_index_buffer = try zml.Buffer.fromBytes(platform, token_index.shape(), std.mem.sliceAsBytes(&[1]u32{@intCast(i)}));
+        defer token_index_buffer.deinit();
 
-        token_buffer.deinit();
-        token_buffer = try zml.Buffer.fromBytes(platform, tokens.shape(), std.mem.sliceAsBytes(&[1]u32{token_id}));
+        var token_buffer = try zml.Buffer.fromBytes(platform, tokens.shape(), std.mem.sliceAsBytes(&[1]u32{token_id}));
+        defer token_buffer.deinit();
+
         var args = try exe.args(allocator);
         defer args.deinit(allocator);
 
@@ -3002,11 +3607,11 @@ pub fn asyncMain() !void {
         std.log.debug("Calling exe", .{});
         exe.call(args, &results);
 
-        token_buffer.deinit();
-        kv_cache_buffer.layer_index.deinit();
-        kv_cache_buffer.k.deinit();
-        kv_cache_buffer.v.deinit();
-        rng_buffer._state.deinit();
+        //token_buffer.deinit();
+        //kv_cache_buffer.layer_index.deinit();
+        //kv_cache_buffer.k.deinit();
+        //kv_cache_buffer.v.deinit();
+        //rng_buffer._state.deinit();
         results.fill(&.{ &token_buffer, &kv_cache_buffer, &rng_buffer._state });
 
         const host = try token_buffer.toHostAlloc(allocator);
@@ -3063,13 +3668,14 @@ pub fn asyncMain() !void {
         //}
     }
 
+    var token_buffer = try zml.Buffer.fromBytes(platform, tokens.shape(), std.mem.sliceAsBytes(&[1]u32{new_token_id}));
+    defer token_buffer.deinit();
+
     for (0..10) |i| {
         std.debug.print("Running iteration {}\n", .{i});
-        token_index_buffer.deinit();
-        token_index_buffer = try zml.Buffer.fromBytes(platform, token_index.shape(), std.mem.sliceAsBytes(&[1]u32{@intCast(i + tokenized_prompt.len)}));
+        var token_index_buffer = try zml.Buffer.fromBytes(platform, token_index.shape(), std.mem.sliceAsBytes(&[1]u32{@intCast(i + tokenized_prompt.len)}));
+        defer token_index_buffer.deinit();
 
-        token_buffer.deinit();
-        token_buffer = try zml.Buffer.fromBytes(platform, tokens.shape(), std.mem.sliceAsBytes(&[1]u32{new_token_id}));
         var args = try exe.args(allocator);
         defer args.deinit(allocator);
 
@@ -3093,7 +3699,6 @@ pub fn asyncMain() !void {
         const predicted_token = host.items(u32)[0];
         const predicted_token_str = try tokenizer_decoder.decode(&.{predicted_token});
         std.debug.print("Predicted: {} {s}\n", .{ predicted_token, predicted_token_str });
-        new_token_id = predicted_token;
     }
 
     //const process_args = try std.process.argsAlloc(allocator);
@@ -3297,6 +3902,27 @@ fn testLinear(linear: Linear, x: Tensor) Tensor {
 }
 
 pub const CompilationContext = struct {
+    pub const Scope = struct {
+        block: *mlir.Block,
+        id_to_argument: std.AutoArrayHashMapUnmanaged(usize, usize),
+        id_to_donation: std.AutoArrayHashMapUnmanaged(usize, usize),
+        arena: std.heap.ArenaAllocator,
+
+        pub fn initFromBlock(allocator: std.mem.Allocator, block: *mlir.Block) Scope {
+            const arena: std.heap.ArenaAllocator = .init(allocator);
+            return .{
+                .block = block,
+                .id_to_argument = .empty,
+                .id_to_donation = .empty,
+                .arena = arena,
+            };
+        }
+
+        pub fn deinit(self: *Scope) void {
+            self.arena.deinit();
+        }
+    };
+
     allocator: std.mem.Allocator,
 
     mlir_registry: *mlir.DialectRegistry,
@@ -3305,8 +3931,7 @@ pub const CompilationContext = struct {
     //mlir_op_pass_manager: *mlir.OpPassManager,
     module: *mlir.Module,
 
-    blocks: stdx.BoundedArray(*mlir.Block, 16) = .{},
-    mappings: stdx.BoundedArray(std.AutoArrayHashMapUnmanaged(usize, usize), 16) = .{},
+    scopes: stdx.BoundedArray(Scope, 16) = .{},
 
     pub fn init(allocator: std.mem.Allocator) CompilationContext {
         mlir.registerPasses("Transforms");
@@ -3353,28 +3978,19 @@ pub const CompilationContext = struct {
         self.mlir_registry.deinit();
     }
 
-    pub fn currentBlock(self: *const CompilationContext) *mlir.Block {
-        return self.blocks.get(self.blocks.len - 1);
-    }
-
-    pub fn currentMapping(self: *CompilationContext) *std.AutoArrayHashMapUnmanaged(usize, usize) {
-        return &self.mappings.slice()[self.blocks.len - 1];
-    }
-
-    pub fn getArgumentIndex(self: *CompilationContext, tensor_id: usize) usize {
-        return self.currentMapping().get(tensor_id).?;
+    pub fn currentScope(self: *CompilationContext) *Scope {
+        return &self.scopes.slice()[self.scopes.len - 1];
     }
 
     pub fn pushBlock(self: *CompilationContext, block: *mlir.Block) void {
-        self.blocks.appendAssumeCapacity(block);
-        self.mappings.appendAssumeCapacity(.{});
+        const scope = Scope.initFromBlock(self.allocator, block);
+        self.scopes.appendAssumeCapacity(scope);
     }
 
     pub fn popBlock(self: *CompilationContext) void {
-        _ = self.blocks.pop();
-        var maybe_popped = self.mappings.pop();
-        if (maybe_popped) |*popped| {
-            popped.deinit(self.allocator);
+        var maybe_popped_scope = self.scopes.pop();
+        if (maybe_popped_scope) |*popped| {
+            popped.deinit();
         }
     }
 
@@ -3397,10 +4013,10 @@ pub fn compile(allocator: std.mem.Allocator, comptime func: anytype, args: stdx.
     defer compilation_context.deinit();
 
     const result = emitMlir(&compilation_context, func, args) catch unreachable;
+    defer result.output_info.deinit(compilation_context.allocator);
+    defer compilation_context.allocator.free(result.input_shapes);
 
     _ = result.func.appendTo(compilation_context.module.body());
-    defer compilation_context.allocator.free(result.output_shapes);
-    defer compilation_context.allocator.free(result.input_shapes);
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -3408,7 +4024,7 @@ pub fn compile(allocator: std.mem.Allocator, comptime func: anytype, args: stdx.
     const loaded_executable = compileModuleToPjrtExecutable(arena.allocator(), platform, compilation_context.module, null) catch unreachable;
 
     const num_devices = platform.sharding().num_replicas * platform.sharding().num_partitions;
-    const exe = try Exe.init(allocator, platform, loaded_executable, result.input_shapes, result.output_shapes, num_devices);
+    const exe = try Exe.init(allocator, platform, loaded_executable, result.input_shapes, result.output_info.shapes, num_devices);
     errdefer exe.deinit();
 
     return exe;
@@ -3419,10 +4035,12 @@ fn collectShapes(allocator: std.mem.Allocator, v: anytype) ![]Shape {
         list: *std.array_list.Managed(Shape),
     };
     var list = std.array_list.Managed(Shape).init(allocator);
+    errdefer list.deinit();
+
     var context: LocalContext = .{ .list = &list };
-    zml.meta.visit(struct {
-        fn cb(ctx_: *LocalContext, tensor: *const Tensor) void {
-            ctx_.list.append(tensor.shape()) catch unreachable;
+    try zml.meta.visit2(struct {
+        fn cb(ctx_: *LocalContext, tensor: *const Tensor) !void {
+            try ctx_.list.append(tensor.shape());
         }
     }.cb, &context, v);
 
@@ -3461,11 +4079,79 @@ fn collectReaders(allocator: std.mem.Allocator, buffer_store: BufferStore5.View,
     return try list.toOwnedSlice();
 }
 
+fn collectTensorDesc(allocator: std.mem.Allocator, buffer_store: BufferStore5.View, v: anytype) ![]TensorDesc {
+    const LocalContext = struct {
+        list: *std.array_list.Managed(TensorDesc),
+        buffer_store: BufferStore5.View,
+    };
+    var list = std.array_list.Managed(TensorDesc).init(allocator);
+    var context: LocalContext = .{ .list = &list, .buffer_store = buffer_store };
+    zml.meta.visit(struct {
+        fn cb(ctx_: *LocalContext, tensor: *const Tensor) void {
+            const tensor_desc = ctx_.buffer_store.store.getPtrFromId(tensor.id).?.*;
+            ctx_.list.append(tensor_desc) catch unreachable;
+        }
+    }.cb, &context, v);
+
+    return try list.toOwnedSlice();
+}
+
+pub const OutputInfo = struct {
+    shapes: []Shape,
+    values: []*const mlir.Value,
+    donations: []?usize,
+
+    pub fn deinit(self: OutputInfo, allocator: std.mem.Allocator) void {
+        allocator.free(self.shapes);
+        allocator.free(self.values);
+        allocator.free(self.donations);
+    }
+};
+
+fn collectOutputInfo(allocator: std.mem.Allocator, v: anytype) !OutputInfo {
+    const LocalContext = struct {
+        shape_list: *std.array_list.Managed(Shape),
+        value_list: *std.array_list.Managed(*const mlir.Value),
+        donation_list: *std.array_list.Managed(?usize),
+    };
+
+    var shape_list = std.array_list.Managed(Shape).init(allocator);
+    errdefer shape_list.deinit();
+    var value_list = std.array_list.Managed(*const mlir.Value).init(allocator);
+    errdefer value_list.deinit();
+    var donation_list = std.array_list.Managed(?usize).init(allocator);
+    errdefer donation_list.deinit();
+
+    var context: LocalContext = .{ .shape_list = &shape_list, .value_list = &value_list, .donation_list = &donation_list };
+
+    try zml.meta.visit2(struct {
+        fn cb(ctx_: *LocalContext, tensor: *const Tensor) !void {
+            try ctx_.shape_list.append(tensor.shape());
+            try ctx_.value_list.append(tensor.value());
+            try ctx_.donation_list.append(tensor.donation());
+        }
+    }.cb, &context, v);
+
+    return .{
+        .shapes = try shape_list.toOwnedSlice(),
+        .values = try value_list.toOwnedSlice(),
+        .donations = try donation_list.toOwnedSlice(),
+    };
+}
+
 const EmitMlirResult = struct {
     func: *mlir.Operation,
     input_shapes: []const Shape,
-    output_shapes: []const Shape,
+    output_info: OutputInfo,
 };
+
+fn finalizeAttributeList(allocator_: std.mem.Allocator, mlir_ctx: *mlir.Context, attributes: []AttributeList) ![]*const mlir.Attribute {
+    const res = try allocator_.alloc(*const mlir.Attribute, attributes.len);
+    for (res, attributes) |*r, attr| {
+        r.* = mlir.dictionaryAttribute(mlir_ctx, attr.constSlice());
+    }
+    return res;
+}
 
 fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, args: stdx.meta.FnArgs(func)) !EmitMlirResult {
     var arena = std.heap.ArenaAllocator.init(compilation_context.allocator);
@@ -3489,11 +4175,12 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
     };
     zml.meta.visit(struct {
         fn cb(ctx_: *LocalContext, tensor: *const Tensor) void {
-            _ = ctx_.compilation_context.currentBlock().addArgument(
+            std.log.debug("Argument {} - shape: {f}", .{ ctx_.current_argument_id, tensor.shape() });
+            _ = ctx_.compilation_context.currentScope().block.addArgument(
                 tensor.mlirType(ctx_.compilation_context.mlir_ctx),
                 .unknown(ctx_.compilation_context.mlir_ctx),
             );
-            ctx_.compilation_context.currentMapping().put(ctx_.compilation_context.allocator, tensor.id, ctx_.current_argument_id) catch unreachable;
+            ctx_.compilation_context.currentScope().id_to_argument.put(ctx_.compilation_context.currentScope().arena.allocator(), tensor.id, ctx_.current_argument_id) catch unreachable;
             ctx_.current_argument_id += 1;
         }
     }.cb, &context, &args);
@@ -3501,21 +4188,32 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
     const input_shapes = try collectShapes(compilation_context.allocator, &args);
     errdefer compilation_context.allocator.free(input_shapes);
 
-    const output_shapes = b: {
+    const input_attributes = try arena.allocator().alloc(AttributeList, input_shapes.len);
+    @memset(input_attributes, .{});
+
+    const output_info = b: {
         global_compilation_context = compilation_context;
         defer global_compilation_context = null;
+
         const result = @call(.auto, func, args);
-        const output_shapes = try collectShapes(compilation_context.allocator, &result);
-        const output_values = try collectValues(arena.allocator(), &result);
-        _ = dialects.func.returns(compilation_context.mlir_ctx, output_values, .unknown(compilation_context.mlir_ctx)).appendTo(compilation_context.currentBlock());
-        break :b output_shapes;
+
+        const output_info = try collectOutputInfo(compilation_context.allocator, &result);
+        errdefer output_info.deinit(compilation_context.allocator);
+
+        break :b output_info;
     };
-    errdefer compilation_context.allocator.free(output_shapes);
+    errdefer output_info.deinit(compilation_context.allocator);
+
+    for (output_info.donations, 0..) |donation, index| if (donation) |argument_index| {
+        input_attributes[argument_index].appendAssumeCapacity(.named(compilation_context.mlir_ctx, "tf.aliasing_output", mlir.integerAttribute(compilation_context.mlir_ctx, .i32, index)));
+    };
+    _ = dialects.func.returns(compilation_context.mlir_ctx, output_info.values, .unknown(compilation_context.mlir_ctx)).appendTo(compilation_context.currentScope().block);
 
     const mlir_func = dialects.func.func(compilation_context.mlir_ctx, .{
         .name = "main",
-        .block = compilation_context.currentBlock(),
+        .block = compilation_context.currentScope().block,
         .location = .unknown(compilation_context.mlir_ctx),
+        .args_attributes = try finalizeAttributeList(arena.allocator(), compilation_context.mlir_ctx, input_attributes),
     });
 
     compilation_context.mlir_pass_manager.runOnOp(mlir_func) catch |err| switch (err) {
@@ -3529,7 +4227,7 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
     return .{
         .func = mlir_func,
         .input_shapes = input_shapes,
-        .output_shapes = output_shapes,
+        .output_info = output_info,
     };
 }
 
@@ -4274,7 +4972,7 @@ pub const BufferStore4 = struct {
     };
 };
 
-pub const BufferStore5 = struct {
+pub const BufferStoreOld = struct {
     key_map: std.StringHashMapUnmanaged(usize),
     id_map: std.AutoHashMapUnmanaged(usize, usize),
     entries: std.ArrayList(Entry),
@@ -4287,7 +4985,7 @@ pub const BufferStore5 = struct {
         associated_tensor_id: ?usize = null,
     };
 
-    pub fn init(allocator: std.mem.Allocator) !BufferStore5 {
+    pub fn init(allocator: std.mem.Allocator) !BufferStoreOld {
         return .{
             .key_map = .empty,
             .id_map = .empty,
@@ -4296,7 +4994,7 @@ pub const BufferStore5 = struct {
         };
     }
 
-    pub fn deinit(self: *BufferStore5) void {
+    pub fn deinit(self: *BufferStoreOld) void {
         var it = self.key_map.iterator();
         while (it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
@@ -4306,7 +5004,7 @@ pub const BufferStore5 = struct {
         self.entries.deinit(self.allocator);
     }
 
-    pub fn add(self: *BufferStore5, key: []const u8, shape: zml.Shape, data: []const u8) !void {
+    pub fn add(self: *BufferStoreOld, key: []const u8, shape: zml.Shape, data: []const u8) !void {
         const new_entry_index = self.entries.items.len;
         const new_entry = try self.entries.addOne(self.allocator);
         errdefer _ = self.entries.pop();
@@ -4324,7 +5022,7 @@ pub const BufferStore5 = struct {
         new_entry.* = .{ .shape = shape, .data = data };
     }
 
-    fn bindIdToKey(self: *BufferStore5, key: []const u8, id: usize) !void {
+    fn bindIdToKey(self: *BufferStoreOld, key: []const u8, id: usize) !void {
         const index = self.key_map.get(key).?;
 
         const gop = try self.id_map.getOrPut(self.allocator, id);
@@ -4336,8 +5034,8 @@ pub const BufferStore5 = struct {
         gop.value_ptr.* = index;
     }
 
-    pub fn fromBufferStore(allocator: std.mem.Allocator, buffer_store: zml.aio.BufferStore) !BufferStore5 {
-        var new_buffer_store: BufferStore5 = try .init(allocator);
+    pub fn fromBufferStore(allocator: std.mem.Allocator, buffer_store: zml.aio.BufferStore) !BufferStoreOld {
+        var new_buffer_store: BufferStoreOld = try .init(allocator);
         errdefer new_buffer_store.deinit();
 
         var it = buffer_store.buffers.iterator();
@@ -4348,17 +5046,17 @@ pub const BufferStore5 = struct {
         return new_buffer_store;
     }
 
-    fn getPtrFromKey(self: *const BufferStore5, key: []const u8) ?*Entry {
+    fn getPtrFromKey(self: *const BufferStoreOld, key: []const u8) ?*Entry {
         const index = self.key_map.get(key) orelse return null;
         return &self.entries.items[index];
     }
 
-    fn getPtrFromId(self: *const BufferStore5, id: usize) ?*Entry {
+    fn getPtrFromId(self: *const BufferStoreOld, id: usize) ?*Entry {
         const index = self.id_map.get(id) orelse return null;
         return &self.entries.items[index];
     }
 
-    pub fn view(self: *BufferStore5) View {
+    pub fn view(self: *BufferStoreOld) View {
         return .{ .store = self };
     }
 
@@ -4378,7 +5076,7 @@ pub const BufferStore5 = struct {
     };
 
     pub const View = struct {
-        store: *BufferStore5,
+        store: *BufferStoreOld,
 
         prefix_buffer: [256]u8 = undefined,
         prefix_length: usize = 0,
@@ -4484,3 +5182,874 @@ pub const BufferStore5 = struct {
         }
     };
 };
+
+pub const BufferStore5 = struct {
+    registry: *TensorRegistry,
+    id_map: std.AutoHashMapUnmanaged(usize, *TensorDesc),
+    allocator: std.mem.Allocator,
+    // Temporary
+    http_client: *std.http.Client,
+
+    pub fn init(allocator: std.mem.Allocator, registry: *TensorRegistry, http_client: *std.http.Client) !BufferStore5 {
+        return .{
+            .registry = registry,
+            .id_map = .empty,
+            .allocator = allocator,
+            .http_client = http_client,
+        };
+    }
+
+    pub fn deinit(self: *BufferStore5) void {
+        self.id_map.deinit(self.allocator);
+    }
+
+    fn bindIdToKey(self: *BufferStore5, key: []const u8, id: usize) !void {
+        const tensor_desc_ptr = self.registry.tensors.getPtr(key).?;
+
+        const gop = try self.id_map.getOrPut(self.allocator, id);
+        if (gop.found_existing) {
+            stdx.debug.panic("Key {s} already has an associated tensor (id: {})", .{ key, gop.value_ptr.* });
+        }
+        errdefer self.id_map.removeByPtr(gop.key_ptr);
+
+        gop.value_ptr.* = tensor_desc_ptr;
+    }
+
+    fn getPtrFromKey(self: *const BufferStore5, key: []const u8) ?*TensorDesc {
+        const tensor_desc_ptr = self.registry.tensors.getPtr(key) orelse return null;
+        return tensor_desc_ptr;
+    }
+
+    fn getPtrFromId(self: *const BufferStore5, id: usize) ?*TensorDesc {
+        const tensor_desc_ptr = self.id_map.get(id) orelse return null;
+        return tensor_desc_ptr;
+    }
+
+    pub fn view(self: *BufferStore5) View {
+        return .{ .store = self };
+    }
+
+    pub const View = struct {
+        store: *BufferStore5,
+
+        prefix_buffer: [256]u8 = undefined,
+        prefix_length: usize = 0,
+
+        pub fn root(self: *const View) View {
+            return .{
+                .store = self.store,
+            };
+        }
+
+        pub fn parent(self: *const View) View {
+            const slice = self.prefix() orelse unreachable;
+            const index = std.mem.lastIndexOfScalar(u8, slice[0 .. slice.len - 1], '.') orelse return self.root();
+            var buffer: [256]u8 = undefined;
+            @memcpy(buffer[0 .. index + 1], slice[0 .. index + 1]);
+            return .{
+                .store = self.store,
+                .prefix_buffer = buffer,
+                .prefix_length = index + 1,
+            };
+        }
+
+        pub fn withPrefix(self: *const View, prefix_: []const u8) View {
+            var buffer: [256]u8 = undefined;
+            const new_prefix = std.fmt.bufPrint(&buffer, "{s}{s}.", .{ self.prefix() orelse "", prefix_ }) catch unreachable;
+
+            return .{
+                .store = self.store,
+                .prefix_buffer = buffer,
+                .prefix_length = new_prefix.len,
+            };
+        }
+
+        fn prefix(self: *const View) ?[]const u8 {
+            return if (self.prefix_length == 0) null else self.prefix_buffer[0..self.prefix_length];
+        }
+
+        pub fn maybeCreateTensor(self: View, subkey: []const u8) ?Tensor {
+            var buffer: [256]u8 = undefined;
+            const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey }) catch unreachable;
+
+            const ptr = self.store.getPtrFromKey(key) orelse return null;
+
+            const tensor = Tensor.init(ptr.shape);
+            self.store.bindIdToKey(key, tensor.id) catch unreachable;
+
+            return tensor;
+        }
+
+        pub fn createTensor(self: View, subkey: []const u8) Tensor {
+            return self.maybeCreateTensor(subkey).?;
+        }
+
+        pub fn maybeCreateTensorWithTags(self: View, subkey: []const u8, tagz: anytype) ?Tensor {
+            var buffer: [256]u8 = undefined;
+            const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey }) catch unreachable;
+
+            const ptr = self.store.getPtrFromKey(key) orelse return null;
+            ptr.shape = ptr.shape.withTags(tagz).withSharding(.{0});
+
+            const tensor = Tensor.init(ptr.shape);
+            self.store.bindIdToKey(key, tensor.id) catch unreachable;
+
+            return tensor;
+        }
+
+        pub fn createTensorWithTags(self: View, subkey: []const u8, tagz: anytype) Tensor {
+            return self.maybeCreateTensorWithTags(subkey, tagz).?;
+        }
+
+        //pub fn getReader(self: View, subkey: []const u8) Reader {
+        //    return self.getMaybeReader(subkey).?;
+        //}
+
+        //pub fn getMaybeReader(self: View, subkey: []const u8) ?Reader {
+        //    var buffer: [256]u8 = undefined;
+        //    const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey }) catch unreachable;
+        //    const entry_ptr = self.store.getPtrFromKey(key) orelse return null;
+        //    return .{ .entry = entry_ptr };
+        //}
+
+        //pub fn getReaderFromId(self: View, id: usize) ?Reader {
+        //    const entry_ptr = self.store.getPtrFromId(id) orelse return null;
+        //    return .{ .entry = entry_ptr };
+        //}
+
+        pub fn getShape(self: View, subkey: []const u8) ?Shape {
+            var buffer: [256]u8 = undefined;
+            const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey }) catch unreachable;
+            const entry_ptr = self.store.getPtrFromKey(key) orelse return null;
+            return entry_ptr.shape;
+        }
+
+        pub fn getShapeOpts(self: View, subkey: []const u8, opts: struct { no_prefix: bool = false }) ?Shape {
+            var buffer: [256]u8 = undefined;
+            const key = if (opts.no_prefix)
+                subkey
+            else b: {
+                break :b std.fmt.bufPrint(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey }) catch unreachable;
+            };
+            const entry_ptr = self.store.getPtrFromKey(key) orelse return null;
+            return entry_ptr.shape;
+        }
+    };
+};
+
+const KB = 1024;
+const MB = 1024 * KB;
+
+const BUF_1_KB = 1 * KB;
+const BUF_4_KB = 4 * KB;
+const BUF_8_KB = 8 * KB;
+const BUF_16_KB = 16 * KB;
+const BUF_32_KB = 32 * KB;
+const BUF_64_KB = 64 * KB;
+
+const BUF_1_MB = 1 * MB;
+const BUF_4_MB = 4 * MB;
+const BUF_8_MB = 8 * MB;
+const BUF_16_MB = 16 * MB;
+const BUF_32_MB = 32 * MB;
+const BUF_64_MB = 64 * MB;
+const BUF_128_MB = 128 * MB;
+const BUF_256_MB = 256 * MB;
+
+pub const MemoryResource = struct {
+    uri: ResourceURI,
+    data: []const u8,
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator, data: []const u8) !MemoryResource {
+        return .{
+            .uri = try std.Uri.parse("memory://"),
+            .data = data,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(_: *MemoryResource) void {}
+};
+
+pub const FileResource = struct {
+    uri: ResourceURI,
+    uri_storage: []const u8,
+    file: std.fs.File,
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator, path: []const u8) !FileResource {
+        const uri_storage = try std.fmt.allocPrint(allocator, "file://{s}", .{path});
+        errdefer allocator.free(uri_storage);
+
+        const uri = std.Uri.parse(uri_storage);
+
+        const file = try std.fs.openFileAbsolute(path, .{ .mode = .read_only });
+        errdefer file.close();
+
+        return .{
+            .uri = uri,
+            .uri_storage = uri_storage,
+            .file = file,
+            .allocator = allocator,
+        };
+    }
+
+    // check ownership
+    pub fn deinit(self: *FileResource) void {
+        self.allocator.free(self.uri_storage);
+        self.file.close();
+    }
+};
+
+const Range = struct {
+    offset: usize,
+    size: usize,
+};
+
+pub const HttpResource = struct {
+    uri: ResourceURI,
+
+    request: std.http.Client.Request,
+    arena: std.heap.ArenaAllocator,
+
+    pub fn init(client: *std.http.Client, allocator: std.mem.Allocator, uri: std.Uri, maybe_range: ?Range) !HttpResource {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        errdefer arena.deinit();
+
+        var request = try client.request(.GET, uri, .{});
+        errdefer request.deinit();
+
+        request.headers.authorization = .{ .override = "Bearer <HUGGINGFACE_TOKEN>" };
+
+        const extra_headers = if (maybe_range) |range| b: {
+            var list: std.ArrayList(std.http.Header) = .empty;
+            const name = try arena.allocator().dupe(u8, "Range");
+            const value = try std.fmt.allocPrint(arena.allocator(), "bytes={}-{}", .{ range.offset, range.offset + range.size - 1 });
+            try list.append(arena.allocator(), .{ .name = name, .value = value });
+
+            break :b try list.toOwnedSlice(arena.allocator());
+        } else &.{};
+        request.extra_headers = extra_headers;
+        try request.sendBodiless();
+
+        const redirect_buffer = try arena.allocator().alloc(u8, 1024 * 1024);
+        const response = try request.receiveHead(redirect_buffer);
+        _ = response;
+
+        return .{
+            .uri = uri,
+            .request = request,
+            .arena = arena,
+        };
+    }
+
+    // check ownership
+    pub fn deinit(self: *HttpResource) void {
+        self.request.deinit();
+        self.arena.deinit();
+    }
+};
+
+pub const Resource = union(enum) {
+    memory: MemoryResource,
+    file: FileResource,
+    http: HttpResource,
+
+    pub fn deinit(self: *Resource) void {
+        switch (self.*) {
+            .memory => |*m| m.deinit(),
+            .file => |*f| f.deinit(),
+            .http => |*h| h.deinit(),
+        }
+    }
+
+    pub fn reader(self: *Resource, buffer: []u8) IoReader {
+        return .init(self, buffer);
+    }
+
+    pub fn uri(self: *Resource) std.Uri {
+        return switch (self.*) {
+            inline else => |*r| r.uri,
+        };
+    }
+};
+
+pub const IoReader = struct {
+    reader: union(enum) {
+        memory: std.io.Reader,
+        file: std.fs.File.Reader,
+        http: *std.io.Reader,
+    },
+    resource: *Resource,
+
+    pub fn init(resource: *Resource, buffer: []u8) IoReader {
+        return .{
+            .reader = switch (resource.*) {
+                .memory => |*m| .{ .memory = std.Io.Reader.fixed(m.data) },
+                .file => |*f| .{ .file = f.file.reader(buffer) },
+                .http => |*h| .{ .http = h.request.reader.bodyReader(buffer, h.request.response_transfer_encoding, h.request.response_content_length) },
+            },
+            .resource = resource,
+        };
+    }
+
+    pub fn interface(self: *IoReader) *std.io.Reader {
+        return switch (self.reader) {
+            .memory => |*m| m,
+            .file => |*f| &f.interface,
+            .http => |h| h,
+        };
+    }
+};
+
+pub const Metadata = union(enum) {
+    null: void,
+    int: i64,
+    float: f64,
+    bool: bool,
+    string: []const u8,
+
+    array_bool: []const bool,
+    array_int: []const i64,
+    array_float: []const f64,
+    array_string: []const []const u8,
+
+    pub const ItemType = enum {
+        int,
+        float,
+        bool,
+        string,
+
+        pub fn toZigType(comptime kind: ItemType) type {
+            return switch (kind) {
+                .int => i64,
+                .float => f64,
+                .bool => bool,
+                .string => []const u8,
+            };
+        }
+    };
+
+    pub fn wrap(x: anytype) Metadata {
+        return switch (@TypeOf(x)) {
+            inline u8, i8, u16, i16, u32, i32, u64, i64 => .{ .int = @intCast(x) },
+            inline f16, f32, f64 => .{ .float = @floatCast(x) },
+            bool => .{ .bool = x },
+            []const u8 => .{ .string = x },
+            else => @panic("Unsupported type for Value: " ++ @typeName(@TypeOf(x))),
+        };
+    }
+
+    pub fn copySlice(allocator: std.mem.Allocator, any_slice: anytype) !Metadata {
+        return switch (@TypeOf(any_slice[0])) {
+            inline u8, i8, u16, i16, u32, i32, u64, i64 => {
+                const res = try allocator.alloc(i64, any_slice.len);
+                for (res, any_slice) |*r, val| r.* = @intCast(val);
+                return .{ .array_int = res };
+            },
+            inline f16, f32, f64 => {
+                const res = try allocator.alloc(f64, any_slice.len);
+                for (res, any_slice) |*r, val| r.* = @floatCast(val);
+                return .{ .array_float = res };
+            },
+            bool => .{ .array_bool = try allocator.dupe(bool, any_slice) },
+            []const u8 => .{ .array_string = try allocator.dupe([]const u8, @alignCast(any_slice)) },
+            else => @panic("Unsupported type for Value: " ++ @typeName(@TypeOf(any_slice))),
+        };
+    }
+
+    pub fn format(
+        self: Metadata,
+        writer: *std.Io.Writer,
+    ) !void {
+        switch (self) {
+            .null => _ = try writer.write("null"),
+            .string => |s| try writer.print("{s}", .{s}),
+            .bool => |b| try writer.print("{}", .{b}),
+            .int => |i| try writer.print("{d}", .{i}),
+            .float => |f| try writer.print("{d}", .{f}),
+            .array_bool => |arr| {
+                try writer.writeByte('[');
+                for (arr, 0..) |v, i| {
+                    if (i > 0) try writer.write(", ");
+                    try writer.print("{}", .{v});
+                }
+                try writer.writeByte(']');
+            },
+            .array_int => |arr| {
+                try writer.writeByte('[');
+                for (arr, 0..) |v, i| {
+                    if (i > 0) try writer.write(", ");
+                    try writer.print("{d}", .{v});
+                }
+                try writer.writeByte(']');
+            },
+            .array_float => |arr| {
+                try writer.writeByte('[');
+                for (arr, 0..) |v, i| {
+                    if (i > 0) try writer.write(", ");
+                    try writer.print("{d}", .{v});
+                }
+                try writer.writeByte(']');
+            },
+            .array_string => |arr| {
+                try writer.writeByte('[');
+                for (arr, 0..) |v, i| {
+                    if (i > 0) try writer.write(", ");
+                    try writer.print("\"{s}\"", .{v});
+                }
+                try writer.writeByte(']');
+            },
+        }
+    }
+
+    pub fn deinit(self: Metadata, allocator: std.mem.Allocator) void {
+        switch (self) {
+            .string => |s| allocator.free(s),
+            .array_bool => |s| allocator.free(s),
+            .array_int => |s| allocator.free(s),
+            .array_float => |s| allocator.free(s),
+            .array_string => |s| {
+                for (s) |str| allocator.free(str);
+                allocator.free(s);
+            },
+            else => {},
+        }
+    }
+
+    pub fn clone(self: Metadata, allocator: std.mem.Allocator) !Metadata {
+        return switch (self) {
+            .null => .null,
+            .int => |v| .{ .int = v },
+            .float => |v| .{ .float = v },
+            .bool => |v| .{ .bool = v },
+            .string => |s| .{ .string = try allocator.dupe(u8, s) },
+            .array_bool => |s| .{ .array_bool = try allocator.dupe(bool, s) },
+            .array_int => |s| .{ .array_int = try allocator.dupe(i64, s) },
+            .array_float => |s| .{ .array_float = try allocator.dupe(f64, s) },
+            .array_string => |s| blk: {
+                const new_slice = try allocator.alloc([]const u8, s.len);
+                errdefer allocator.free(new_slice);
+                for (s, 0..) |str, i| {
+                    new_slice[i] = try allocator.dupe(u8, str);
+                }
+                break :blk .{ .array_string = new_slice };
+            },
+        };
+    }
+};
+
+pub const ResourceURI = std.Uri;
+pub const Resources = std.ArrayHashMapUnmanaged(ResourceURI, Resource, ResourceURIContext, false);
+pub const Tensors = std.StringArrayHashMapUnmanaged(TensorDesc);
+pub const Metadatas = std.StringArrayHashMapUnmanaged(Metadata);
+
+const ResourceURIContext = struct {
+    // todo: implement full uri
+    pub fn hash(_: ResourceURIContext, uri: ResourceURI) u32 {
+        return std.array_hash_map.hashString(uri.path.percent_encoded);
+    }
+
+    pub fn eql(_: ResourceURIContext, a: ResourceURI, b: ResourceURI, _: usize) bool {
+        return std.mem.eql(u8, a.path.percent_encoded, b.path.percent_encoded);
+    }
+};
+
+pub const ResourceType = enum {
+    index,
+    safetensors,
+    unknown,
+};
+
+const TensorDesc = struct {
+    resource_uri: ResourceURI,
+    name: []const u8,
+    shape: Shape,
+    offset: u64,
+
+    pub fn byteSize(self: Tensor) u64 {
+        return self.shape.byteSize();
+    }
+};
+
+pub const TensorRegistry = struct {
+    arena: std.heap.ArenaAllocator,
+
+    tensors: Tensors,
+    metadata: Metadatas,
+
+    pub fn init(allocator: std.mem.Allocator) TensorRegistry {
+        return .{
+            .arena = std.heap.ArenaAllocator.init(allocator),
+            .tensors = .{},
+            .metadata = .{},
+        };
+    }
+
+    pub fn initWithMetadata(
+        allocator: std.mem.Allocator,
+        metadata: Metadatas,
+    ) !TensorRegistry {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+
+        return .{
+            .arena = arena,
+            .tensors = .{},
+            .metadata = blk: {
+                var arena_allocator = arena.allocator();
+                var new_metadata: Metadatas = .{};
+
+                var it = metadata.iterator();
+                while (it.next()) |entry| {
+                    const key = try arena_allocator.dupe(u8, entry.key_ptr.*);
+                    const value = try entry.value_ptr.*.clone(arena_allocator);
+                    try new_metadata.put(arena_allocator, key, value);
+                }
+                break :blk new_metadata;
+            },
+        };
+    }
+
+    pub fn deinit(self: *TensorRegistry) void {
+        const allocator = self.arena.allocator();
+        self.tensors.deinit(allocator);
+        self.metadata.deinit(allocator);
+        self.arena.deinit();
+    }
+
+    pub fn totalBytes(self: *TensorRegistry) u64 {
+        var total: u64 = 0;
+
+        var it = self.tensors.iterator();
+        while (it.next()) |entry| {
+            total += entry.value_ptr.byteSize();
+        }
+
+        return total;
+    }
+};
+
+pub const ModelPathResolver = struct {
+    arena: std.heap.ArenaAllocator,
+
+    pub fn init(allocator: std.mem.Allocator) ModelPathResolver {
+        return .{
+            .arena = std.heap.ArenaAllocator.init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *ModelPathResolver) void {
+        self.arena.deinit();
+    }
+
+    pub fn resolve(self: *ModelPathResolver, path: []const u8) !ResourceURI {
+        const arena_allocator = self.arena.allocator();
+
+        const resource_uri: ResourceURI = ResourceURI.parse(path) catch .{
+            .scheme = "file",
+            .path = .{ .percent_encoded = path },
+        };
+
+        if (std.mem.eql(u8, resource_uri.scheme, FileResource.scheme)) {
+            const stat = std.fs.cwd().statFile(resource_uri.path.percent_encoded) catch |err| {
+                if (err == error.FileNotFound) {
+                    log.warn("Path not found: {s}", .{resource_uri.path.percent_encoded});
+                    return error.FileNotFound;
+                }
+                return err;
+            };
+
+            if (stat.kind == .file) {
+                return resource_uri;
+            } else if (stat.kind == .directory) {
+                const index_path = try std.fs.path.join(arena_allocator, &[_][]const u8{ resource_uri.path.percent_encoded, "model.safetensors.index.json" });
+                const model_path = try std.fs.path.join(arena_allocator, &[_][]const u8{ resource_uri.path.percent_encoded, "model.safetensors" });
+
+                if (std.fs.cwd().statFile(index_path)) |_| {
+                    return .{ .scheme = "file", .path = .{ .percent_encoded = index_path } };
+                } else |_| {
+                    if (std.fs.cwd().statFile(model_path)) |_| {
+                        return .{ .scheme = "file", .path = .{ .percent_encoded = model_path } };
+                    } else |_| {
+                        return error.ModelFileNotFound;
+                    }
+                }
+            } else {
+                log.err("Path is neither a file nor a directory: {s}", .{resource_uri.path.percent_encoded});
+                return error.InvalidPath;
+            }
+        } else {
+            return resource_uri;
+        }
+    }
+
+    pub fn resolveFromArgs(self: *ModelPathResolver, args: *std.process.ArgIterator) !ResourceURI {
+        _ = args.next().?; // Skip program name
+
+        const arg = args.next() orelse {
+            log.err("No model path provided", .{});
+            return error.NoModelPathProvided;
+        };
+
+        return self.resolve(arg);
+    }
+};
+
+const ResourceIndex = struct {
+    arena: std.heap.ArenaAllocator,
+
+    map: std.StringArrayHashMapUnmanaged(ResourceURI),
+    metadata: Metadatas,
+
+    pub fn init(allocator: std.mem.Allocator) ResourceIndex {
+        return .{
+            .arena = std.heap.ArenaAllocator.init(allocator),
+            .map = .{},
+            .metadata = .{},
+        };
+    }
+
+    pub fn deinit(self: *ResourceIndex) void {
+        const allocator = self.arena.allocator();
+        self.map.deinit(allocator);
+        self.metadata.deinit(allocator);
+        self.arena.deinit();
+    }
+};
+
+fn parseSafetensorsIndex(
+    allocator: std.mem.Allocator,
+    resource: *Resource,
+    reader: *std.io.Reader,
+) !ResourceIndex {
+    const resource_uri = resource.uri();
+    const path = resource_uri.path.percent_encoded;
+    const basename = path[0 .. std.mem.lastIndexOfScalar(u8, path, '/').? + 1];
+
+    var resource_index: ResourceIndex = .init(allocator);
+    errdefer resource_index.deinit();
+
+    const arena_allocator = resource_index.arena.allocator();
+
+    var json_reader: std.json.Reader = .init(arena_allocator, reader);
+
+    const index = try std.json.parseFromTokenSourceLeaky(
+        std.json.Value,
+        arena_allocator,
+        &json_reader,
+        .{ .allocate = .alloc_if_needed },
+    );
+
+    const weight_map = index.object.get("weight_map");
+
+    if (weight_map) |wm| {
+        var it = wm.object.iterator();
+
+        while (it.next()) |entry| {
+            const weight_name = entry.key_ptr.*;
+            const filename = entry.value_ptr.string;
+
+            const resource_path = try arena_allocator.alloc(u8, basename.len + filename.len);
+
+            @memcpy(resource_path[0..basename.len], basename);
+            @memcpy(resource_path[basename.len..], filename);
+
+            const sibling_uri: ResourceURI = .{
+                .scheme = resource_uri.scheme,
+                .user = resource_uri.user,
+                .password = resource_uri.password,
+                .host = resource_uri.host,
+                .port = resource_uri.port,
+                .path = .{ .percent_encoded = resource_path },
+            };
+
+            _ = try resource_index.map.put(arena_allocator, try arena_allocator.dupe(u8, weight_name), sibling_uri);
+        }
+    } else {
+        log.warn("No weight_map attribute found in index", .{});
+    }
+
+    if (index.object.get("__metadata__")) |metadata_val| {
+        resource_index.metadata = try parseMetadata(arena_allocator, metadata_val);
+    }
+
+    return resource_index;
+}
+
+fn parseSafetensors(
+    registry: *TensorRegistry,
+    resource_uri: ResourceURI,
+    reader: *std.io.Reader,
+) !void {
+    var arena_allocator = registry.arena.allocator();
+
+    const json_header_length: usize = @intCast(try reader.takeInt(u64, .little));
+    log.debug("json_header_length: {}", .{json_header_length});
+    const json_data = try arena_allocator.alloc(u8, json_header_length);
+    defer arena_allocator.free(json_data);
+
+    try reader.readSliceAll(json_data);
+
+    const data_start_offset = 8 + json_header_length;
+    const metadata_val = try std.json.parseFromSliceLeaky(std.json.Value, arena_allocator, json_data, .{});
+
+    var it = metadata_val.object.iterator();
+    while (it.next()) |entry| {
+        const key = entry.key_ptr.*;
+        const value = entry.value_ptr.*;
+
+        if (std.mem.eql(u8, key, "__metadata__")) {
+            registry.metadata = try parseMetadata(arena_allocator, value);
+            continue;
+        }
+
+        const shape_field = value.object.get("shape").?.array;
+
+        if (shape_field.items.len > Shape.MAX_RANK) {
+            log.warn("Can't load tensor {s}, too many dims: {}", .{ key, shape_field.items.len });
+            continue;
+        }
+
+        const offset_field = value.object.get("data_offsets").?;
+        const start: u64 = @intCast(offset_field.array.items[0].integer);
+        const end: u64 = @intCast(offset_field.array.items[1].integer);
+        const dtype = try stringToDtype(value.object.get("dtype").?.string);
+
+        var dims: Dims = .{};
+        for (shape_field.items) |d| {
+            dims.appendAssumeCapacity(d.integer);
+        }
+
+        const shape: Shape = .init(dims.constSlice(), dtype);
+        const size_in_bytes = end - start;
+        std.debug.assert(size_in_bytes == shape.byteSize());
+
+        const tensor_name = try arena_allocator.dupe(u8, key);
+        const tensor: TensorDesc = .{
+            .resource_uri = resource_uri,
+            .name = tensor_name,
+            .shape = shape,
+            .offset = data_start_offset + start,
+        };
+
+        try registry.tensors.put(arena_allocator, tensor_name, tensor);
+    }
+}
+
+fn stringToDtype(safetensor_type: []const u8) !zml.DataType {
+    const map = std.StaticStringMap(zml.DataType).initComptime(.{
+        .{ "F64", .f64 },
+        .{ "F32", .f32 },
+        .{ "F16", .f16 },
+        .{ "BF16", .bf16 },
+        .{ "F8_E4M3", .f8e4m3fn },
+        .{ "I64", .i64 },
+        .{ "I32", .i32 },
+        .{ "I16", .i16 },
+        .{ "I8", .i8 },
+        .{ "U64", .u64 },
+        .{ "U32", .u32 },
+        .{ "U16", .u16 },
+        .{ "U8", .u8 },
+        .{ "BOOL", .bool },
+    });
+
+    return map.get(safetensor_type) orelse {
+        log.err("Unsupported safetensor data type: {s}", .{safetensor_type});
+        return error.UnsupportedDataType;
+    };
+}
+
+fn populateMetadata(allocator: std.mem.Allocator, prefix: *StringBuilder, val: std.json.Value, metadatas: *Metadatas) !void {
+    const key = prefix.items;
+    return switch (val) {
+        .null => try metadatas.put(allocator, try allocator.dupe(u8, key), .null),
+        .bool => |v| try metadatas.put(allocator, try allocator.dupe(u8, key), .{ .bool = v }),
+        .integer => |v| try metadatas.put(allocator, try allocator.dupe(u8, key), .{ .int = v }),
+        .float => |v| try metadatas.put(allocator, try allocator.dupe(u8, key), .{ .float = v }),
+        .number_string, .string => |v| try metadatas.put(allocator, try allocator.dupe(u8, key), .{ .string = try allocator.dupe(u8, v) }),
+        .array => |v| {
+            if (v.items.len == 0) return;
+            if (validSlice(v)) |item_type| {
+                const data: Metadata = switch (item_type) {
+                    .bool => blk: {
+                        const values = try allocator.alloc(bool, v.items.len);
+                        for (v.items, 0..) |item, i| values[i] = item.bool;
+                        break :blk .{ .array_bool = values };
+                    },
+                    .integer => blk: {
+                        const values = try allocator.alloc(i64, v.items.len);
+                        for (v.items, 0..) |item, i| values[i] = item.integer;
+                        break :blk .{ .array_int = values };
+                    },
+                    .float => blk: {
+                        const values = try allocator.alloc(f64, v.items.len);
+                        for (v.items, 0..) |item, i| values[i] = item.float;
+                        break :blk .{ .array_float = values };
+                    },
+                    inline .string, .number_string => |tag| blk: {
+                        const values = try allocator.alloc([]const u8, v.items.len);
+                        for (v.items, 0..) |item, i| {
+                            values[i] = try allocator.dupe(u8, @field(item, @tagName(tag)));
+                        }
+                        break :blk .{ .array_string = values };
+                    },
+                    .null, .array, .object => unreachable,
+                };
+                try metadatas.put(allocator, try allocator.dupe(u8, key), data);
+            } else {
+                for (v.items, 0..) |item, i| {
+                    const old_len = prefix.items.len;
+                    if (prefix.items.len > 0) {
+                        prefix.appendAssumeCapacity('.');
+                    }
+                    prefix.items.len += std.fmt.printInt(prefix.unusedCapacitySlice(), i, 10, .lower, .{});
+                    try populateMetadata(allocator, prefix, item, metadatas);
+                    prefix.items.len = old_len;
+                }
+            }
+        },
+        .object => |v| {
+            var obj_iter = v.iterator();
+            while (obj_iter.next()) |entry| {
+                const old_len = prefix.items.len;
+                if (prefix.items.len > 0) {
+                    prefix.appendAssumeCapacity('.');
+                }
+                prefix.appendSliceAssumeCapacity(entry.key_ptr.*);
+                try populateMetadata(allocator, prefix, entry.value_ptr.*, metadatas);
+                prefix.items.len = old_len;
+            }
+        },
+    };
+}
+
+const StringBuilder = std.ArrayListUnmanaged(u8);
+
+pub fn parseMetadata(allocator: std.mem.Allocator, val: std.json.Value) !Metadatas {
+    var metadatas: Metadatas = .{};
+    var prefix_buf: [BUF_1_KB]u8 = undefined;
+    var prefix = StringBuilder.initBuffer(&prefix_buf);
+
+    try populateMetadata(allocator, &prefix, val, &metadatas);
+
+    return metadatas;
+}
+
+fn validSlice(v: std.json.Array) ?std.meta.Tag(std.json.Value) {
+    if (v.items.len == 0) return null;
+
+    const item_type: std.meta.Tag(std.json.Value) = v.items[0];
+    switch (item_type) {
+        .null, .array, .object => return null,
+        else => {},
+    }
+
+    for (v.items[1..]) |item| {
+        if (item != item_type)
+            return null;
+    }
+
+    return item_type;
+}

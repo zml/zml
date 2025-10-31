@@ -167,6 +167,10 @@ pub fn FnResult(comptime func: anytype) type {
     return @typeInfo(@TypeOf(func)).@"fn".return_type orelse @compileError("anytype is not supported");
 }
 
+pub fn FnError(comptime func: anytype) type {
+    return FnSignature(func, null).ReturnErrorSet.?;
+}
+
 pub fn Head(Tuple: type) type {
     return switch (@typeInfo(Tuple)) {
         .@"struct" => |struct_info| {

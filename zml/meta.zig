@@ -3,6 +3,7 @@ const testing = std.testing;
 
 const stdx = @import("stdx");
 const FnParam = stdx.meta.FnParam;
+const FnError = stdx.meta.FnError;
 const asSlice = stdx.meta.asSlice;
 
 test {
@@ -585,6 +586,92 @@ test visit {
         }).cb, &context, &container);
 
         try std.testing.expectEqual(14, context.result);
+    }
+}
+
+pub fn VisitReturn(comptime cb: anytype) type {
+    return if (stdx.meta.FnSignature(cb, null).ReturnErrorSet) |error_set|
+        @Type(std.builtin.Type{ .error_union = .{ .error_set = error_set, .payload = void } })
+    else
+        void;
+}
+
+pub fn visit2(comptime cb: anytype, ctx: FnParam(cb, 0), v: anytype) VisitReturn(cb) {
+    const Callback = @TypeOf(cb);
+    const Ptr = @TypeOf(v);
+    const type_info_v = @typeInfo(Ptr);
+    if (type_info_v != .pointer) {
+        stdx.debug.compileError("zml.meta.visit2({}) is expecting a pointer/slice input, but received: {}", .{ Callback, Ptr });
+    }
+    const ptr_info = type_info_v.pointer;
+    const Child = ptr_info.child;
+
+    const K, const mutating_cb = switch (@typeInfo(FnParam(cb, 1))) {
+        .pointer => |info| .{ info.child, !info.is_const },
+        else => stdx.debug.compileError("zml.meta.visit2 is expecting a callback with a pointer as second argument but found {}", .{FnParam(cb, 1)}),
+    };
+    // Abort if v doesnt' contain any K.
+    if (comptime !Contains(Ptr, K)) return;
+
+    // Handle simple cases.
+    switch (Ptr) {
+        *const K, *K => return try cb(ctx, v),
+        *const ?K, *?K => return if (v.*) |*val| try cb(ctx, val) else {},
+        []const K, []K => {
+            for (v) |*v_elem| try cb(ctx, v_elem);
+            return;
+        },
+        else => {},
+    }
+
+    // Handle stdx.BoundedArray that contains uninitalized data.
+    if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "constSlice") and @hasDecl(Child, "slice")) {
+        return visit2(cb, ctx, if (mutating_cb) v.slice() else v.constSlice());
+    }
+
+    // Recursively visit2 fields of v.
+    switch (ptr_info.size) {
+        .one => switch (@typeInfo(Child)) {
+            .@"struct" => |s| inline for (s.fields) |field| {
+                if (field.is_comptime or comptime !Contains(field.type, K)) continue;
+                const field_type_info = @typeInfo(field.type);
+                // If the field is already a pointer, we recurse with it directly, otherwise, we recurse with a pointer to the field.
+                switch (field_type_info) {
+                    .pointer => try visit2(cb, ctx, @field(v, field.name)),
+                    .array, .optional, .@"union", .@"struct" => try visit2(cb, ctx, &@field(v, field.name)),
+                    else => {},
+                }
+            },
+            .array => |_| for (v) |*elem| try visit2(cb, ctx, elem),
+            .optional => if (v.* != null) try visit2(cb, ctx, &v.*.?),
+            .@"union" => switch (v.*) {
+                inline else => |*v_field| try visit2(cb, ctx, v_field),
+            },
+            else => stdx.debug.compileError("zml.meta.visit2({}) doesn't support fields of type: {}", .{ Callback, Child }),
+        },
+        .slice => {
+            for (v) |*v_elem| {
+                switch (@typeInfo(Child)) {
+                    .@"struct" => |s| inline for (s.fields) |field| {
+                        if (field.is_comptime or comptime !Contains(field.type, K)) continue;
+                        const field_type_info = @typeInfo(field.type);
+                        // If the field is already a pointer, we recurse with it directly, otherwise, we recurse with a pointer to the field.
+                        if (field_type_info == .pointer) {
+                            try visit2(cb, ctx, @field(v_elem, field.name));
+                        } else {
+                            try visit2(cb, ctx, &@field(v_elem, field.name));
+                        }
+                    },
+                    .array => |_| for (v) |*elem| try visit2(cb, ctx, elem),
+                    .optional => if (v.* != null) try visit2(cb, ctx, &v.*.?),
+                    .@"union" => switch (v_elem.*) {
+                        inline else => |*v_field| try visit2(cb, ctx, v_field),
+                    },
+                    else => stdx.debug.compileError("zml.meta.visit2({}) doesn't support fields of type: {}", .{ Callback, Child }),
+                }
+            }
+        },
+        .many, .c => stdx.debug.compileError("zml.meta.visit2({}) doesn't support [*] style pointers, got: {}", .{ Callback, Ptr }),
     }
 }
 

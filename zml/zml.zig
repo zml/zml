@@ -47,6 +47,7 @@ pub const c = @import("c");
 
 // pub const tokenizer = @import("tokenizer.zig");
 pub const tools = struct {
+    pub const tracer = @import("tools/tracer.zig");
     pub const Tracer = @import("tools/tracer.zig").Tracer;
 };
 
