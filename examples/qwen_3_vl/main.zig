@@ -160,15 +160,15 @@ fn testImplementation(
     qwen_weights: zml.Bufferized(qwen.Qwen3VL),
     activations: zml.aio.BufferStore,
 ) !void {
-    try zml.testing.testLayer(platform, activations, "model.visual.blocks.0", qwen_model.vision_transformer.blocks[0], qwen_weights.vision_transformer.blocks[0], 1e-2);
+    //try zml.testing.testLayer(platform, activations, "model.visual.blocks.0", qwen_model.vision_transformer.blocks[0], qwen_weights.vision_transformer.blocks[0], 1e-2);
     inline for (0..24) |i| {
         const name = std.fmt.comptimePrint("model.visual.blocks.{d}", .{i});
         try zml.testing.testLayer(platform, activations, name ++ ".mlp.act_fn", qwen_model.vision_transformer.blocks[i].mlp.hidden_act, {}, 1e-3); // pas de poids ici meilleure precision on peurt en deduire peut etre problee de conversion sur le reste
         //try zml.testing.testLayer(platform, activations, name, qwen_model.vision_transformer.blocks[i], qwen_weights.vision_transformer.blocks[i], 1e-1); //pete sur la derniere comme mlp
-        // try zml.testing.testLayer(platform, activations, name ++ ".mlp", qwen_model.vision_transformer.blocks[i].mlp, qwen_weights.vision_transformer.blocks[i].mlp, 1e-1);//ne passe pas en 1e-2 sur le dernier block mlp
-        // try zml.testing.testLayer(platform, activations, name ++ ".attn", qwen_model.vision_transformer.blocks[i].attn, qwen_weights.vision_transformer.blocks[i].attn, 1e-1); //pete sur la meme que norm2 logique
-        // try zml.testing.testLayer(platform, activations, name ++ ".attn.qkv", qwen_model.vision_transformer.blocks[i].attn.qkv, qwen_weights.vision_transformer.blocks[i].attn.qkv, 1e-2);
-        // try zml.testing.testLayer(platform, activations, name ++ ".norm1", qwen_model.vision_transformer.blocks[i].norm1, qwen_weights.vision_transformer.blocks[i].norm1, 1e-2);
+        try zml.testing.testLayer(platform, activations, name ++ ".mlp", qwen_model.vision_transformer.blocks[i].mlp, qwen_weights.vision_transformer.blocks[i].mlp, 1e-2); //ne passe pas en 1e-2 sur le dernier block mlp
+        try zml.testing.testLayer(platform, activations, name ++ ".attn", qwen_model.vision_transformer.blocks[i].attn, qwen_weights.vision_transformer.blocks[i].attn, 1e-1); //pete sur la meme que norm2 logique
+        try zml.testing.testLayer(platform, activations, name ++ ".attn.qkv", qwen_model.vision_transformer.blocks[i].attn.qkv, qwen_weights.vision_transformer.blocks[i].attn.qkv, 1e-2);
+        try zml.testing.testLayer(platform, activations, name ++ ".norm1", qwen_model.vision_transformer.blocks[i].norm1, qwen_weights.vision_transformer.blocks[i].norm1, 1e-2);
         // try zml.testing.testLayer(platform, activations, name ++ ".norm2", qwen_model.vision_transformer.blocks[i].norm2, qwen_weights.vision_transformer.blocks[i].norm2, 1e-1); // une norm qui plante a 1e-2
         // try zml.testing.testLayer(platform, activations, name ++ ".attn.proj", qwen_model.vision_transformer.blocks[i].attn.proj, qwen_weights.vision_transformer.blocks[i].attn.proj, 1e-2);
         // try zml.testing.testLayer(platform, activations, name ++ ".mlp.linear_fc1", qwen_model.vision_transformer.blocks[i].mlp.linear_fc1, qwen_weights.vision_transformer.blocks[i].mlp.linear_fc1, 1e-2);
