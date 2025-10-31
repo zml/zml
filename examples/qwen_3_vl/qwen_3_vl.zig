@@ -101,9 +101,9 @@ pub const Qwen3VL = struct {
         log.info("h: {d}", .{h});
         const w = @divExact(mock_grid_thw[2], 2);
         log.info("w: {d}", .{w});
-        const t_index = zml.Tensor.iota(Shape.init(.{ .t = t }, .i32), .t).reshape(.{ .t = -1, .hw = 1 }).repeat1d(1, h * w).flatten();
-        const h_index = zml.Tensor.iota(Shape.init(.{ .h = h }, .i32), .h).reshape(.{ .t = 1, .h = -1, .w = 1 }).repeat1d(2, w).flatten();
-        const w_index = zml.Tensor.iota(Shape.init(.{ .w = w }, .i32), .w).reshape(.{ .t = 1, .h = 1, .w = -1 }).repeat1d(1, h).flatten();
+        const t_index = zml.Tensor.iota(Shape.init(.{ .t = t }, .i32), .t).reshape(.{ .t = -1, .hw = 1 }).repeat1d(1, h * w).flatten().addConstant(4);
+        const h_index = zml.Tensor.iota(Shape.init(.{ .h = h }, .i32), .h).reshape(.{ .t = 1, .h = -1, .w = 1 }).repeat1d(2, w).flatten().addConstant(4);
+        const w_index = zml.Tensor.iota(Shape.init(.{ .w = w }, .i32), .w).reshape(.{ .t = 1, .h = 1, .w = -1 }).repeat1d(1, h).flatten().addConstant(4);
         log.info("t_index: {f}", .{t_index.shape()});
         log.info("h_index: {f}", .{h_index.shape()});
         log.info("w_index: {f}", .{w_index.shape()});
@@ -112,7 +112,7 @@ pub const Qwen3VL = struct {
         const position_ids_w = position_ids.dynamicUpdateSlice(.{ .seq = zml.Tensor.scalar(4, .i32) }, zml.torch.unsqueeze(w_index, 0));
         position_ids = zml.Tensor.stack(&.{ position_ids_t, position_ids_h, position_ids_w }, 0, .g);
         log.info("position_ids: {f}", .{position_ids.shape()});
-
+        position_ids = position_ids.print();
         const output = zml.call(self.text_model, .forward, .{ position_ids, attn_mask, input_embeds, cache_position, image_mask, deepstack_features_list });
         //output = output.print();
         return output;
@@ -322,7 +322,7 @@ pub const VisionTransformer = struct {
         return output;
     }
 
-    pub fn forward(self: VisionTransformer, x: Tensor, grid_thw: Tensor) struct { Tensor, [3]Tensor } {
+    pub fn forward(self: VisionTransformer, x: Tensor, grid_thw: Tensor) Tensor {
         const mock_grid_thw = [3]i32{ 1, 86, 128 };
         const mock_grid_thw_array = [_][]const i32{&mock_grid_thw};
         var pos_embeds = self.fastPosEmbedInterpolate(&mock_grid_thw_array);
@@ -354,7 +354,7 @@ pub const VisionTransformer = struct {
             }
         }
         hidden_states = zml.call(self.patch_merger, .forward, .{ hidden_states, false });
-        return .{ hidden_states, deepstack_features_list };
+        return hidden_states;
     }
 };
 
@@ -423,6 +423,9 @@ pub const VisionBlock = struct {
     //is_full_attention: bool, // based on fullatt_block_indexes
     pub fn forward(self: VisionBlock, hidden_states: Tensor, cu_seqlen: Tensor, cos: Tensor, sin: Tensor) Tensor {
         log.info("hidden_states dims: {f}", .{hidden_states.shape()});
+        log.info("self.norm1 dims: {f}", .{self.norm1.weight.shape()});
+        log.info("self.attn dims: {f}", .{self.attn.qkv.weight.shape()});
+        log.info("self.mlp dims: {f}", .{self.mlp.linear_fc1.weight.shape()});
         log.info("cu_seqlen dims: {f}", .{cu_seqlen.shape()});
         log.info("cos dims: {f}", .{cos.shape()});
         log.info("sin dims: {f}", .{sin.shape()});
@@ -611,7 +614,7 @@ pub const PatchMerger = struct {
 pub const VisionMlp = struct { // MLP classique
     linear_fc1: zml.nn.Linear,
     linear_fc2: zml.nn.Linear,
-    hidden_act: zml.nn.Activation,
+    hidden_act: zml.nn.Activation = .{ .gelu = {} },
     pub fn forward(self: VisionMlp, x: Tensor) Tensor {
         const x1 = zml.call(self.linear_fc1, .forward, .{x});
         log.info("x1 mlp dims: {f}", .{x1.shape()});
@@ -793,8 +796,7 @@ pub const TransformerLayer = struct {
         //const x0 = x.convert(.f32);
         const x0 = x;
 
-        var x0_normalized = zml.call(self.input_layernorm, .forward, .{x0});
-        x0_normalized = x0_normalized.print();
+        const x0_normalized = zml.call(self.input_layernorm, .forward, .{x0});
         const delta0 = zml.call(self.self_attn, .forward, .{
             x0_normalized,
             attn_mask,
@@ -803,15 +805,12 @@ pub const TransformerLayer = struct {
             sin,
         }).convert(x0.dtype());
         log.info("delta0: {f}", .{delta0.shape()});
-        var x1 = x.add(delta0);
-        x1 = x1.print();
+        const x1 = x.add(delta0);
         log.info("x1: {f}", .{x1.shape()});
         // Fully Connected
-        var x1_normalized = zml.call(self.post_attention_layernorm, .forward, .{x1});
-        x1_normalized = x1_normalized.print();
+        const x1_normalized = zml.call(self.post_attention_layernorm, .forward, .{x1});
         log.info("x1_normalized: {f}", .{x1_normalized.shape()});
-        var x2 = zml.call(self.mlp, .forward, .{x1_normalized}).add(x1);
-        x2 = x2.print();
+        const x2 = zml.call(self.mlp, .forward, .{x1_normalized}).add(x1);
         log.info("x2: {f}", .{x2.shape()});
         return x2.convert(x.dtype());
     }
