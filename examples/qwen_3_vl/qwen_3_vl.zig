@@ -434,6 +434,7 @@ pub const VisionBlock = struct {
         log.info("x1 dims: {f}", .{x1.shape()});
         const x2 = zml.call(self.norm2, .forward, .{x1});
         const x3 = x1.add(zml.call(self.mlp, .forward, .{x2}));
+        log.info("x3 dims: {f}", .{x3.shape()});
         return x3; //REUSE BUFFER Je pense
     }
 };
