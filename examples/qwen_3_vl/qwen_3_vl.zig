@@ -769,8 +769,8 @@ pub const TextRotaryEmbedding = struct {
         freqs = freqs_t.scatterSlices(.{ .dh = w_indices }, w_input, .{ .update_fn = zml.Tensor.ScatterOpts.override });
         log.info("freqs: {f}", .{freqs.shape()});
         const emb = zml.Tensor.concatenate(&.{ freqs, freqs }, -1);
-        const cos = emb.cos().convert(.f16);
-        const sin = emb.sin().convert(.f16);
+        const cos = emb.cos();
+        const sin = emb.sin();
         return .{ cos, sin };
     }
 };
