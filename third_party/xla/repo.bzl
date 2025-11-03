@@ -4,9 +4,9 @@ def repo():
     git_repository(
         name = "xla",
         remote = "https://github.com/openxla/xla.git",
-        commit = "b3fbfeeb076f2b536897180f4a274680ed9d52eb",
+        commit = "9a77a882bb2bc75cb8c29620ff8cd0fd089bdc86",
         patch_args = ["-p1"],
         patches = [
-            # patches live in the patches directory
+            "third_party/xla/patches/0001-PjRT-C-API-male-header-C-compliant-for-PJRT-FFI-exte.patch",
         ],
     )

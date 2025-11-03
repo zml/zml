@@ -11,6 +11,7 @@ bazel_dep(name = "patchelf", version = "0.18.0")
 bazel_dep(name = "pcre2", version = "10.45")
 bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "protobuf", version = "32.0", repo_name = "com_google_protobuf")
+
 # Needs to be added before rules_cc so that the cc toolchain declared by
 # apple_support wins over the one in rules_cc.
 bazel_dep(name = "apple_support", version = "1.24.2")
@@ -111,10 +112,14 @@ use_repo(
     "local_config_cuda",
     "local_config_remote_execution",
     "local_config_rocm",
+    "local_config_sycl",
     "local_config_tensorrt",
     "python_version_repo",
     "rules_ml_toolchain",
+    "rules_shell",
     "stablehlo",
+    "sycl_configure",
+    "sycl_configure_ext",
     "triton",
     "tsl",
 )

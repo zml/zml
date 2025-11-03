@@ -1309,6 +1309,20 @@ pub const Ffi = extern struct {
                 .data = self.user_data,
             };
         }
+    };    
+    
+    pub const TypeInfo = struct {
+        deleter: ?*const fn (*anyopaque) callconv(.c) void = null,
+        serialize: ?*const fn () callconv(.c) void = null,
+        deserialize: ?*const fn () callconv(.c) void = null,
+
+        pub fn toCStruct(self: TypeInfo) c.PJRT_FFI_Type_Info {
+            return .{
+                .deleter = @ptrCast(self.deleter),
+                .serialize = @ptrCast(self.serialize),
+                .deserialize = @ptrCast(self.deserialize),
+            };
+        }
     };
 
     // todo : support all missing handlers available in GPU plugin extension: handler_instantiate, handler_prepare, handler_initialize
@@ -1337,13 +1351,14 @@ pub const Ffi = extern struct {
         }
     }
 
-    pub fn registerTypeId(self: *const Ffi, api: *const Api, type_name: []const u8) ApiError!ffi.TypeId {
-        var ret = pjrtStruct(c.PJRT_FFI_TypeID_Register_Args{
+    pub fn registerTypeId(self: *const Ffi, api: *const Api, type_name: []const u8, type_info: ?*const c.PJRT_FFI_Type_Info) ApiError!ffi.TypeId {
+        var ret = pjrtStruct(c.PJRT_FFI_Type_Register_Args{
             .type_name = type_name.ptr,
             .type_name_size = type_name.len,
             .type_id = 0, // let the plugin assign a unique type ID
+            .type_info = @ptrCast(@constCast(type_info)),
         });
-        const result = self.inner.type_id_register.?(&ret);
+        const result = self.inner.type_register.?(&ret);
         if (result) |pjrt_c_error| {
             const pjrt_error: *Error = @ptrCast(pjrt_c_error);
             return pjrt_error.getCode(api).toApiError();

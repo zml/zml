@@ -44,6 +44,15 @@ if_gpu_is_configured = always_if_false
 if_cuda_or_rocm = always_if_false
 """,
     })
+    simple_files(name = "local_config_sycl", files = {
+        "BUILD.bazel": "",
+        "sycl/BUILD.bazel": "",
+        "crosstool/BUILD.bazel": "",
+        "sycl/build_defs.bzl": _BZL_HELPERS + """\
+if_sycl = always_if_false
+if_sycl_is_configured = always_if_false
+""",
+    })
     simple_files(name = "local_config_remote_execution", files = {
         "remote_execution.bzl": """gpu_test_tags = lambda: []""",
     })
@@ -56,6 +65,17 @@ if_cuda_or_rocm = always_if_false
     simple_files(name = "rules_ml_toolchain", files = {
         "third_party/gpus/BUILD.bazel": "",
         "third_party/gpus/nvidia_common_rules.bzl": """cuda_rpath_flags = lambda *args, **kwargs: []""",
+        "third_party/extensions/sycl_configure.bzl": "",
+    })
+    simple_files(name = "sycl_configure_ext", files = {})
+    simple_files(name = "sycl_configure", files = {})
+    simple_files(name = "rules_shell", files = {
+        "BUILD.bazel": "",
+        "shell/BUILD.bazel": "",
+        "shell/sh_binary.bzl": """
+def sh_binary(**kwargs):
+    native.sh_binary(**kwargs)
+""",
     })
 
 def _xla_impl(mctx):
@@ -70,7 +90,7 @@ def _xla_impl(mctx):
         patch_file = ["//third_party/grpc:grpc.patch"],
         urls = tf_mirror_urls("https://github.com/grpc/grpc/archive/refs/tags/v1.74.0.tar.gz"),
     )
-    tf_vendored(name = "tsl", relpath = "third_party/tsl")
+    tf_vendored(name = "tsl", path = "third_party/tsl")
 
     _dummy_repos(mctx)
 
