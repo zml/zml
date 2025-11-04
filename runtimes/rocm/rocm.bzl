@@ -121,7 +121,7 @@ _ROCM_PACKAGES = {
                 "dlopen": "zmlxrocm_dlopen",
             },
         ),
-        packages.filegroup(name = "hiprtc", srcs = ["lib/libhiprtc.so.6"]),
+        packages.filegroup(name = "hiprtc", srcs = ["lib/libhiprtc.so.6", "lib/libhiprtc-builtins.so.6"]),
     ]),
     "hipsolver": packages.filegroup(name = "hipsolver", srcs = ["lib/libhipsolver.so.0"]),
 }
