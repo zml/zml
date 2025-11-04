@@ -1309,8 +1309,8 @@ pub const Ffi = extern struct {
                 .data = self.user_data,
             };
         }
-    };    
-    
+    };
+
     pub const TypeInfo = struct {
         deleter: ?*const fn (*anyopaque) callconv(.c) void = null,
         serialize: ?*const fn () callconv(.c) void = null,
