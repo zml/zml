@@ -41,6 +41,7 @@ zig_binary(
     main = "main.zig",
     srcs = [
         "llama.zig",
+        "writer.zig",
     ],
     visibility = ["//visibility:public"],
     deps = [

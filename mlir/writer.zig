@@ -154,10 +154,14 @@ pub const RandomReader = struct {
     }
 
     pub fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+        //std.log.info("Calling stream with limit: {any}", .{limit});
         const self: *RandomReader = @alignCast(@fieldParentPtr("interface", r));
-        const real_limit = limit.toInt() orelse 1024;
-        for (0..real_limit) |_| try w.writeByte(self.random.int(u8));
-        return real_limit;
+        const bytes = w.unusedCapacitySlice();
+        const to_write = @min(bytes.len, limit.toInt() orelse bytes.len);
+        self.random.bytes(bytes[0..to_write]);
+        //@memset(bytes[0..to_write], 0xca);
+
+        return to_write;
     }
 };
 

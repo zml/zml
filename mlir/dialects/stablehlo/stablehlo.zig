@@ -866,6 +866,7 @@ pub fn custom_call(ctx: *mlir.Context, inputs: []const *const mlir.Value, result
                     mlir.RankedTensorType.get(
                         &.{@intCast(ol.len)},
                         mlir.indexType(ctx),
+                        null,
                     ).shaped(),
                     ol,
                 ),
@@ -880,6 +881,7 @@ pub fn custom_call(ctx: *mlir.Context, inputs: []const *const mlir.Value, result
                     mlir.RankedTensorType.get(
                         &.{@intCast(ol.len)},
                         mlir.indexType(ctx),
+                        null,
                     ).shaped(),
                     ol,
                 ),
@@ -898,6 +900,7 @@ pub fn custom_call(ctx: *mlir.Context, inputs: []const *const mlir.Value, result
                     mlir.RankedTensorType.get(
                         &.{@intCast(rl.len)},
                         mlir.indexType(ctx),
+                        null,
                     ).shaped(),
                     rl,
                 ),
@@ -912,6 +915,7 @@ pub fn custom_call(ctx: *mlir.Context, inputs: []const *const mlir.Value, result
                     mlir.RankedTensorType.get(
                         &.{@intCast(rl.len)},
                         mlir.indexType(ctx),
+                        null,
                     ).shaped(),
                     rl,
                 ),
@@ -949,6 +953,13 @@ pub fn unpin(ctx: *mlir.Context, value: *const mlir.Value, location: *const mlir
         .call_target_name = "Unpin",
         .api_version = .typed_ffi,
     }, location);
+}
+
+pub fn partition_id(ctx: *mlir.Context, location: *const mlir.Location) *mlir.Operation {
+    return mlir.Operation.make(ctx, "stablehlo.partition_id", .{
+        .results = .{ .flat = &.{mlir.rankedTensorType(&.{}, mlir.integerType(ctx, .u32))} },
+        .location = location,
+    });
 }
 
 pub const DotDimensionNumbersAttribute = opaque {

@@ -8,6 +8,8 @@ const HostBuffer = @import("hostbuffer.zig").HostBuffer;
 const pjrt = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
+const Sharding = @import("partitioning.zig").Sharding;
+const Mesh = @import("partitioning.zig").Mesh;
 
 test {
     std.testing.refAllDecls(@This());
@@ -43,6 +45,7 @@ pub const Buffer = struct {
     _shape: Shape,
     _api: *const pjrt.Api,
     _shards: Shards,
+    _mesh: ?Mesh = null, // ? todo
 
     pub const MAX_NUM_SHARDS: u8 = Platform.MAX_NUM_DEVICES;
     pub const Shards = stdx.BoundedArray(*pjrt.Buffer, MAX_NUM_SHARDS);
@@ -314,14 +317,14 @@ pub const Buffer = struct {
     /// Copies the content of the Buffer back to host, in the given buffer,
     /// and return a new `HostBuffer` object with the same shape.
     /// The returned `HostBuffer` doesn't own the memory.
-    pub fn toHost(self: Buffer, output: []u8) !HostBuffer {
-        stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
-        const maybe_event = try self._shards.get(0).toHostBuffer(self._api, output);
-        if (maybe_event) |event| {
-            try event.await_(self._api);
-        }
-        return HostBuffer.fromBytes(self.shape(), output);
-    }
+    //pub fn toHost(self: Buffer, output: []u8) !HostBuffer {
+    //    stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
+    //    const maybe_event = try self._shards.get(0).toHostBuffer(self._api, output);
+    //    if (maybe_event) |event| {
+    //        try event.await_(self._api);
+    //    }
+    //    return HostBuffer.fromBytes(self.shape(), output);
+    //}
 
     /// Copies the content of the Buffer to the host.
     /// The returned `HostBuffer` does own the memory.
@@ -335,6 +338,91 @@ pub const Buffer = struct {
         return output;
     }
 
+    pub fn toHost(self: Buffer, allocator: std.mem.Allocator) ![]u8 {
+        const sharding: Sharding = .init(self._mesh.?, self.shape());
+        stdx.debug.assert(self._shards.len == sharding.mesh.numPartitions(), "Expected {} PJRT buffers, got {}", .{ sharding.mesh.numPartitions(), self._shards.len });
+
+        const global_buffer = try allocator.alloc(u8, sharding.global_shape.byteSize());
+        errdefer allocator.free(global_buffer);
+
+        if (sharding.getType() == .replicated) {
+            if (self._shards.len > 0) {
+                const event = try self._shards.get(0).toHostBuffer(self._api, global_buffer);
+                if (event) |e| try e.await_(self._api);
+            }
+            return global_buffer;
+        }
+
+        const shard_shape = sharding.shardShape();
+        const temp_shard_buffer = try allocator.alloc(u8, shard_shape.byteSize());
+        defer allocator.free(temp_shard_buffer);
+
+        const element_size = sharding.global_shape.dtype().sizeOf();
+        const global_element_strides = sharding.global_shape.computeElementStrides();
+        const rk = sharding.global_shape.rank();
+
+        var devices: [MAX_NUM_SHARDS]*const pjrt.Device = undefined;
+        for (self._shards.constSlice(), 0..) |shard, i| {
+            devices[i] = try shard.getDevice(self._api);
+        }
+
+        var sharding_iter = sharding.iterator(devices[0..self._shards.len]);
+        while (sharding_iter.next()) |device_shard| {
+            const shard_index: usize = @intCast(device_shard.index);
+            const src_buffer = self._shards.get(shard_index);
+
+            const event = try src_buffer.toHostBuffer(self._api, temp_shard_buffer);
+            if (event) |e| try e.await_(self._api);
+            if (rk == 0) {
+                if (global_buffer.len > 0) {
+                    @memcpy(global_buffer[0..element_size], temp_shard_buffer[0..element_size]);
+                }
+                continue;
+            }
+
+            const last_dim_size = shard_shape.dim(rk - 1);
+            const contiguous_row_bytes = @as(usize, @intCast(last_dim_size)) * element_size;
+            const outer_dims_shape = shard_shape.remove(rk - 1);
+
+            var iter = outer_dims_shape.iterator();
+
+            while (iter.next()) |item| {
+                const src_flat_index_start_of_row = item.flat_index * @as(usize, @intCast(last_dim_size));
+                const src_byte_offset = src_flat_index_start_of_row * element_size;
+
+                var dest_flat_index_start_of_row: i64 = 0;
+
+                for (0..rk) |dim_idx| {
+                    const shard_coord_in_dim = if (dim_idx < rk - 1) item.coords[dim_idx] else 0;
+
+                    const global_coord_for_dim = blk: {
+                        const part_spec = sharding.global_shape.partition(dim_idx);
+                        if (part_spec != .axis) break :blk shard_coord_in_dim; // Replicated axis
+                        const mesh_axis_tag = part_spec.toTag();
+                        if (device_shard.indices.hasTag(mesh_axis_tag) != null) {
+                            const coord = device_shard.indices.dim(mesh_axis_tag);
+                            break :blk (coord * shard_shape.dim(dim_idx)) + shard_coord_in_dim;
+                        } else {
+                            break :blk shard_coord_in_dim;
+                        }
+                    };
+
+                    dest_flat_index_start_of_row += global_coord_for_dim * global_element_strides.get(dim_idx);
+                }
+
+                const dest_byte_offset = @as(usize, @intCast(dest_flat_index_start_of_row)) * element_size;
+
+                if (contiguous_row_bytes > 0) {
+                    @memcpy(
+                        global_buffer[dest_byte_offset..][0..contiguous_row_bytes],
+                        temp_shard_buffer[src_byte_offset..][0..contiguous_row_bytes],
+                    );
+                }
+            }
+        }
+
+        return global_buffer;
+    }
     /// Frees the accelerator memory.
     /// Depending on the platform, the memory is typically not released to the OS
     /// but just marked as available in the memory pool.
@@ -387,7 +475,7 @@ pub const Buffer = struct {
 
     fn hasShardedAxis(self: Buffer) bool {
         if (self._shards.len == 1) return false;
-        return @reduce(.Or, self._shape._sharding_info);
+        return self._shape.hasAtLeastOnePartitionedAxis();
     }
 
     pub fn copyToMemory(self: Buffer, memory: *const pjrt.Memory) !Buffer {

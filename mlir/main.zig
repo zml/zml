@@ -13,6 +13,10 @@ const pjrt = zml.pjrt;
 const Shape = zml.Shape;
 const EnumLiteral = @TypeOf(.enum_literal);
 const Platform = zml.Platform;
+const Mesh = zml.partitioning.Mesh;
+const Sharding = zml.partitioning.Sharding;
+
+const RandomReader = @import("writer.zig").RandomReader;
 
 const Dims = stdx.BoundedArray(i64, zml.Shape.MAX_RANK);
 const log = std.log.scoped(.main);
@@ -346,7 +350,9 @@ pub const Tensor = struct {
     id: usize,
     auto_broadcast: bool = false,
     _shape: zml.Shape,
-    tensor_origin: TensorOrigin = .{ .argument = {} },
+    //tensor_origin: TensorOrigin = .{ .argument = {} },
+    _mesh: ?Mesh = null,
+    _value: ?*const mlir.Value = null,
 
     fn mlirType(self: Tensor, mlir_ctx: *mlir.Context) *const mlir.Type {
         return mlir.rankedTensorType(
@@ -597,7 +603,8 @@ pub const Tensor = struct {
     pub fn _result(sh: Shape, val: *const mlir.Value) Tensor {
         const res: Tensor = .{
             ._shape = sh,
-            .tensor_origin = .{ .value = val },
+            ._value = val,
+            //.tensor_origin = .{ .value = val },
             .id = Tensor.current_id.fetchAdd(1, .seq_cst),
         };
 
@@ -1050,13 +1057,11 @@ pub const Tensor = struct {
     }
 
     pub fn value(self: Tensor) *const mlir.Value {
-        return switch (self.tensor_origin) {
-            .argument => b: {
-                const argument_index = self.getContext().currentScope().id_to_argument.get(self.id).?;
-                break :b self.getContext().currentScope().block.argument(argument_index);
-            },
-            .value => |v| v,
-        };
+        if (self.getContext().currentScope().id_to_argument.get(self.id)) |argument_index| {
+            return self.getContext().currentScope().block.argument(argument_index);
+        } else if (self._value) |v| {
+            return v;
+        } else @panic("Something went really wrong, tensor is not an argument nor has an mlir.Value");
     }
 
     /// Returns the donation data of the tensor.
@@ -1312,20 +1317,13 @@ pub const Tensor = struct {
     pub fn reuseBuffer(self: Tensor, origin: Tensor) Tensor {
         const compilation_context = CompilationContext.current();
         const scope = compilation_context.currentScope();
-        switch (origin.tensor_origin) {
-            .argument => {
-                const argument_index = scope.id_to_argument.get(origin.id).?;
-
-                const gop = scope.id_to_donation.getOrPut(scope.arena.allocator(), self.id) catch unreachable;
-                gop.value_ptr.* = argument_index;
-            },
-            .value => {
-                if (scope.id_to_donation.get(origin.id)) |origin_donation| {
-                    const gop = scope.id_to_donation.getOrPut(scope.arena.allocator(), self.id) catch unreachable;
-                    gop.value_ptr.* = origin_donation;
-                }
-            },
-        }
+        if (scope.id_to_argument.get(origin.id)) |argument_index| {
+            const gop = scope.id_to_donation.getOrPut(scope.arena.allocator(), self.id) catch unreachable;
+            gop.value_ptr.* = argument_index;
+        } else if (scope.id_to_donation.get(origin.id)) |origin_donation| {
+            const gop = scope.id_to_donation.getOrPut(scope.arena.allocator(), self.id) catch unreachable;
+            gop.value_ptr.* = origin_donation;
+        } else @panic("Something went really wrong, tensor is not an argument nor has an mlir.Value");
         return self;
     }
 
@@ -2547,6 +2545,40 @@ pub const Tensor = struct {
         return _result(self._shape, op.result(0));
     }
 
+    pub fn withSharding(self: Tensor, axes_: anytype) Tensor {
+        const partitioned_shape = self._shape.withPartitioning(axes_);
+        //scoped_log.debug("withSharding {}: {} -> {}", .{ axes_, self._shape, partitioned_shape });
+
+        const ctx = self.getContext();
+        const mesh_ = ctx.currentMesh();
+
+        if (mesh_.isSinglePartition()) return self;
+
+        const sharding: Sharding = .init(mesh_, partitioned_shape);
+
+        const op = dialects.stablehlo.custom_call(
+            ctx.mlir_ctx,
+            &.{self.value()},
+            &.{self.value().type_()},
+            .{
+                .call_target_name = "Sharding",
+                .has_side_effect = false,
+                .backend_config = null,
+                .additional_attributes = &.{mlir.NamedAttribute.named(ctx.mlir_ctx, "mhlo.sharding", ctx.getShardingAttr(sharding))},
+                .api_version = .original,
+            },
+            .unknown(ctx.mlir_ctx),
+        ).appendTo(currentBlock());
+
+        return _result(partitioned_shape, op.result(0));
+    }
+
+    pub fn withMesh(self: Tensor, mesh: Mesh) Tensor {
+        var t = self;
+        t._mesh = mesh;
+        return t;
+    }
+
     pub fn getContext(self: Tensor) *CompilationContext {
         _ = self; // autofix
         return global_compilation_context.?;
@@ -2949,7 +2981,326 @@ const Transfer = struct {
 };
 
 pub fn main() !void {
-    try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain);
+    try asynk.AsyncThread.main(std.heap.c_allocator, asyncMain3);
+}
+
+pub fn asyncMain2() !void {
+    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var generator = std.Random.DefaultPrng.init(0);
+    const random = generator.random();
+
+    const buffer_reader = try allocator.alloc(u8, BUF_4_MB);
+    defer allocator.free(buffer_reader);
+
+    var reader = RandomReader.init(random, buffer_reader);
+    _ = &reader; // autofix
+
+    const file = try std.fs.openFileAbsolute("/dev/random", .{});
+    defer file.close();
+
+    var file_reader = file.reader(buffer_reader);
+
+    const buffer_writer = try allocator.alloc(u8, BUF_4_MB);
+    defer allocator.free(buffer_writer);
+
+    var writer = std.Io.Writer.Discarding.init(buffer_writer);
+
+    const COPY_SIZE = 1 * BUF_1_GB;
+
+    var timer = try stdx.time.Timer.start();
+    try file_reader.interface.streamExact(&writer.writer, COPY_SIZE);
+    try writer.writer.flush();
+    const elapsed = timer.read();
+
+    const elapsed_s: f64 = @as(f64, @floatFromInt(elapsed.ns)) / std.time.ns_per_s;
+
+    std.log.info("Elapsed: {f} - Throughput: {}GB/s", .{ elapsed, @as(f64, COPY_SIZE / (1024 * 1024 * 1024)) / elapsed_s });
+}
+
+pub const Adder = struct {
+    weight: Tensor,
+
+    pub fn init(allocator: std.mem.Allocator, mesh: Mesh) Adder {
+        _ = allocator; // autofix
+        var tensor = Tensor.init(zml.Shape.init(.{ .m = 128, .n = 128 }, .f32).withPartitioning(.{ .m = .x, .n = .y }));
+        tensor._mesh = mesh;
+        return .{ .weight = tensor };
+    }
+
+    pub fn loadBuffers(allocator: std.mem.Allocator, model: Adder, platform: Platform) Bufferized(Adder) {
+        _ = allocator; // autofix
+        _ = model; // autofix
+        _ = platform; // autofix
+    }
+
+    pub fn forward(self: Adder, input: Tensor) Tensor {
+        return self.weight.add(input);//.withSharding(.{ .m = .x, .n = .y });
+    }
+};
+
+pub const Simple = struct {
+    weight: Tensor,
+    internal: Internal,
+
+    pub const Internal = struct {
+        weight: Tensor,
+
+        pub fn init(mesh: Mesh) Internal {
+            return .{
+                .weight = Tensor.init(zml.Shape.init(.{ .m = 128, .n = 128 }, .f32)).withMesh(mesh),
+            };
+        }
+
+        pub fn forward(self: Internal, input: Tensor) Tensor {
+            return self.weight.add(input);
+        }
+    };
+
+    pub fn init(mesh: Mesh) Simple {
+        return .{
+            .weight = Tensor.init(zml.Shape.init(.{ .m = 128, .n = 128 }, .f32)).withMesh(mesh),
+            .internal = .init(mesh),
+        };
+    }
+
+    pub fn forward(self: Simple, input: Tensor) Tensor {
+        const temp = self.weight.mul(input);
+        return zmlCall(.forward, .{ self.internal, temp });
+        //return self.internal.forward(temp);
+    }
+};
+
+//pub fn Func(func_name: @TypeOf(.enum_literal), args: type) type {
+//    const func = ;
+//    return @TypeOf(func);
+//}
+
+pub fn zmlCall(comptime func_name: @TypeOf(.enum_literal), args: anytype) stdx.meta.FnResult(@field(@TypeOf(args[0]), @tagName(func_name))) {
+    return zmlCallInternal(func_name, args) catch unreachable;
+}
+
+pub fn zmlCallInternal(comptime func_name: @TypeOf(.enum_literal), args: anytype) !stdx.meta.FnResult(@field(@TypeOf(args[0]), @tagName(func_name))) {
+    const compilation_context = CompilationContext.current();
+
+    var arena = std.heap.ArenaAllocator.init(compilation_context.allocator);
+    defer arena.deinit();
+
+    const block = mlir.Block.init(&.{}, &.{});
+    errdefer block.deinit();
+
+    compilation_context.pushBlock(block);
+
+    const LocalContext = struct {
+        current_argument_id: usize = 0,
+        compilation_context: *CompilationContext,
+    };
+    var context: LocalContext = .{ .compilation_context = compilation_context };
+    zml.meta.visit(struct {
+        fn cb(ctx_: *LocalContext, tensor: *const Tensor) void {
+            std.log.debug("Argument {} - shape: {f}", .{ ctx_.current_argument_id, tensor.shape() });
+            _ = ctx_.compilation_context.currentScope().block.addArgument(
+                tensor.mlirType(ctx_.compilation_context.mlir_ctx),
+                .unknown(ctx_.compilation_context.mlir_ctx),
+            );
+            ctx_.compilation_context.currentScope().id_to_argument.put(ctx_.compilation_context.currentScope().arena.allocator(), tensor.id, ctx_.current_argument_id) catch unreachable;
+            ctx_.current_argument_id += 1;
+        }
+    }.cb, &context, &args);
+
+    const input_shapes = try collectShapes(arena.allocator(), &args);
+    const input_meshes = try collectMesh(arena.allocator(), &args);
+    const input_attributes = try arena.allocator().alloc(AttributeList, input_shapes.len);
+    @memset(input_attributes, .{});
+
+    const func = @field(@TypeOf(args[0]), @tagName(func_name));
+    var result = @call(.auto, func, args);
+    const output_info = try collectOutputInfo(arena.allocator(), &result);
+
+    const output_attributes = try arena.allocator().alloc(AttributeList, output_info.shapes.len);
+    @memset(output_attributes, .{});
+    const mesh = compilation_context.currentMesh();
+    compilation_context.addShardingAttributes(mesh, input_attributes, output_attributes, input_shapes, input_meshes, output_info);
+    _ = dialects.func.returns(compilation_context.mlir_ctx, output_info.values, .unknown(compilation_context.mlir_ctx)).appendTo(compilation_context.currentScope().block);
+
+    const mlir_func = dialects.func.func(compilation_context.mlir_ctx, .{
+        .name = @tagName(func_name),
+        .block = compilation_context.currentScope().block,
+        .location = .unknown(compilation_context.mlir_ctx),
+        .args_attributes = try finalizeAttributeList(arena.allocator(), compilation_context.mlir_ctx, input_attributes),
+    }).appendTo(compilation_context.module.body());
+    _ = mlir_func; // autofix
+
+    const output_types = try arena.allocator().alloc(*const mlir.Type, output_info.values.len);
+    for (output_info.values, output_types) |value, *t| t.* = value.type_();
+
+    compilation_context.popBlock();
+
+    const input_values = try collectValues(arena.allocator(), &args);
+    const call_op = dialects.func.call(compilation_context.mlir_ctx, @tagName(func_name), input_values, output_types, .unknown(compilation_context.mlir_ctx)).appendTo(compilation_context.currentScope().block);
+    const LocalContext2 = struct {
+        current_argument_id: usize = 0,
+        call_op: *const mlir.Operation,
+    };
+    var context2: LocalContext2 = .{ .call_op = call_op };
+    zml.meta.visit(struct {
+        fn cb(ctx_: *LocalContext2, tensor: *Tensor) void {
+            tensor._value = ctx_.call_op.operand(ctx_.current_argument_id);
+            ctx_.current_argument_id += 1;
+        }
+    }.cb, &context2, &result);
+
+    return result;
+}
+
+pub fn asyncMain3() !void {
+    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var context = try zml.Context.init();
+    defer context.deinit();
+
+    const platform = context.autoPlatform(.{});
+    context.printAvailablePlatforms(platform);
+
+    const devices = platform.getDevices();
+
+    for (devices, 0..) |device, i| {
+        const desc = device.getDescription(platform.pjrt_api);
+        log.info("  Device #{d}:", .{i});
+        log.info("    - ID: {}", .{desc.getId(platform.pjrt_api)});
+        log.info("    - Process Index: {}", .{desc.getProcessIndex(platform.pjrt_api)});
+        log.info("    - Kind: {s}", .{desc.getKind(platform.pjrt_api)});
+        log.info("    - Debug String: {s}", .{desc.debugString(platform.pjrt_api)});
+        log.info("    - To String: {s}", .{desc.toString(platform.pjrt_api)});
+
+        const attributes = desc.getAttributes(platform.pjrt_api);
+        if (attributes.len > 0) {
+            log.info("    - Attributes:", .{});
+            for (attributes) |attr| {
+                log.info("      - {s}:", .{attr.name()});
+                switch (attr.kind()) {
+                    .string => log.info("        (string): {s}", .{attr.inner.unnamed_0.string_value[0..attr.inner.value_size]}),
+                    .int64 => {
+                        log.info("        (int64): {}", .{attr.inner.unnamed_0.int64_value});
+                        if (std.mem.eql(u8, attr.name(), "memory_bandwidth")) {
+                            const bandwidth_gbps: f32 = @as(f32, @floatFromInt(attr.inner.unnamed_0.int64_value)) / (1024.0 * 1024.0 * 1024.0);
+                            log.info("          (Computed Bandwidth: {:.2} GB/s)", .{bandwidth_gbps});
+                        }
+                        if (std.mem.eql(u8, attr.name(), "core_count")) {
+                            log.info("          (Core Count: {})", .{attr.inner.unnamed_0.int64_value});
+                        }
+                    },
+                    .int64list => {
+                        const list_slice = attr.inner.unnamed_0.int64_array_value[0..attr.inner.value_size];
+                        log.info("        (int64list): {any}", .{list_slice});
+                    },
+                    .float => log.info("        (float): {}", .{attr.inner.unnamed_0.float_value}),
+                    .bool => log.info("        (bool): {any}", .{attr.inner.unnamed_0.bool_value}),
+                }
+            }
+        } else {
+            log.info("    - No specific attributes.", .{});
+        }
+    }
+
+    const topology: Shape = .init(.{ .x = 2, .y = 2 }, .u8);
+
+    const mesh: Mesh = .init(topology);
+
+    const adder: Adder = .init(allocator, mesh);
+
+    var input = Tensor.init(zml.Shape.init(.{ .m = 128, .n = 128 }, .f32).withPartitioning(.{ .m = .x, .n = .y }));
+    input._mesh = mesh;
+    const input_shard_shape = zml.Shape.init(.{ .m = 64, .n = 64 }, .f32);
+
+    const exe = try compileModel(allocator, Adder.forward, adder, .{input}, mesh, platform);
+    defer exe.deinit();
+
+    var input_buffer: zml.Buffer = .{ ._shape = input.shape(), ._api = platform.pjrt_api, ._shards = .{} };
+    var weight_buffer: zml.Buffer = .{ ._shape = adder.weight.shape(), ._api = platform.pjrt_api, ._shards = .{} };
+    for (0..mesh.numPartitions()) |partition_index| {
+        const shard_data = try allocator.alloc(f32, 64 * 64);
+        defer allocator.free(shard_data);
+        const value = std.math.pow(f32, 10, @floatFromInt(partition_index));
+        @memset(shard_data, value);
+
+        const input_pjrt_buffer = b: {
+            const pjrt_buffer, const event = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, .{
+                .data = std.mem.sliceAsBytes(shard_data).ptr,
+                .buffer_type = .f32,
+                .dims = input_shard_shape.dims(),
+                .byte_strides = input_shard_shape.computeByteStrides().slice(),
+                .host_buffer_semantics = .ImmutableUntilTransferCompletes,
+                .device = platform.getDevices()[partition_index],
+            });
+
+            if (event) |ev| ev.deinit(platform.pjrt_api);
+            break :b pjrt_buffer;
+        };
+
+        const weight_pjrt_buffer = b: {
+            const pjrt_buffer, const event = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, .{
+                .data = std.mem.sliceAsBytes(shard_data).ptr,
+                .buffer_type = .f32,
+                .dims = input_shard_shape.dims(),
+                .byte_strides = input_shard_shape.computeByteStrides().slice(),
+                .host_buffer_semantics = .ImmutableUntilTransferCompletes,
+                .device = platform.getDevices()[partition_index],
+            });
+
+            if (event) |ev| ev.deinit(platform.pjrt_api);
+            break :b pjrt_buffer;
+        };
+
+        input_buffer._shards.appendAssumeCapacity(input_pjrt_buffer);
+        weight_buffer._shards.appendAssumeCapacity(weight_pjrt_buffer);
+    }
+    defer input_buffer.deinit();
+    defer weight_buffer.deinit();
+
+    var args = try exe.args(allocator);
+    defer args.deinit(allocator);
+
+    var results = try exe.results(allocator);
+    defer results.deinit(allocator);
+
+    args.set(.{ weight_buffer, input_buffer });
+
+    exe.call(args, &results);
+
+    var output_buffer = results.get(zml.Buffer);
+    output_buffer._mesh = mesh;
+    defer output_buffer.deinit();
+
+    const output_raw_data = try output_buffer.toHost(allocator);
+    defer allocator.free(output_raw_data);
+
+    log.info("output: {any}", .{std.mem.bytesAsSlice(f32, output_raw_data)});
+}
+
+pub fn asyncMain4() !void {
+    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var context = try zml.Context.init();
+    defer context.deinit();
+
+    const platform = context.autoPlatform(.{});
+    context.printAvailablePlatforms(platform);
+
+    const mesh = Mesh.single();
+
+    const simple: Simple = .init(mesh);
+
+    const input = Tensor.init(zml.Shape.init(.{ .m = 128, .n = 128 }, .f32)).withMesh(mesh);
+
+    const exe = try compileModel(allocator, Simple.forward, simple, .{input}, mesh, platform);
+    defer exe.deinit();
 }
 
 pub fn tokenizePrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, config: llama.LlamaLM.Config, prompt: []const u8, skip_llama3_encoding: bool) ![]u32 {
@@ -3242,8 +3593,10 @@ pub const CompilationContext = struct {
     module: *mlir.Module,
 
     scopes: stdx.BoundedArray(Scope, 16) = .{},
+    _main_mesh: Mesh,
+    _current_mesh: ?Mesh = null,
 
-    pub fn init(allocator: std.mem.Allocator) CompilationContext {
+    pub fn init(allocator: std.mem.Allocator, mesh: Mesh) CompilationContext {
         mlir.registerPasses("Transforms");
         const mlir_registry = mlir.DialectRegistry.init() catch unreachable;
         inline for (.{ "func", "stablehlo" }) |d| {
@@ -3257,9 +3610,6 @@ pub const CompilationContext = struct {
         module.operation().setAttributeByName("sym_name", mlir.stringAttribute(mlir_ctx, "zml"));
 
         const pass_manager = mlir.PassManager.init(mlir_ctx);
-        pass_manager.enableIRPrinting(.{
-            .printBeforeAll = true,
-        });
         {
             var opm = pass_manager.asOpPassManager();
             const passes: []const []const u8 = &.{
@@ -3278,6 +3628,7 @@ pub const CompilationContext = struct {
             .mlir_ctx = mlir_ctx,
             .mlir_pass_manager = pass_manager,
             .module = module,
+            ._main_mesh = mesh,
         };
     }
 
@@ -3307,29 +3658,96 @@ pub const CompilationContext = struct {
     pub fn current() *CompilationContext {
         return global_compilation_context.?;
     }
+
+    pub fn pushMesh(self: *CompilationContext, mesh: Mesh) void {
+        if (self._current_mesh) |m| {
+            if (m.eql(mesh)) {
+                stdx.debug.panic("Mesh already pushed: {}", .{m});
+            }
+
+            stdx.debug.panic("Mesh already exists: {}", .{m});
+        }
+
+        self._current_mesh = mesh;
+        // log.info("Pushed mesh: {}", .{mesh});
+    }
+
+    pub fn popMesh(self: *CompilationContext) void {
+        if (self._current_mesh) |m| {
+            _ = m; // autofix
+            self._current_mesh = null;
+            // log.info("Poped mesh: {}", .{m});
+        } else {
+            stdx.debug.panic("No mesh to pop, main mesh: {}", .{self._main_mesh});
+        }
+    }
+
+    pub fn currentMesh(self: *CompilationContext) Mesh {
+        return self._current_mesh orelse self._main_mesh;
+    }
+
+    pub fn addShardingAttributes(
+        self: *const CompilationContext,
+        mesh: Mesh,
+        arg_attrs: []AttributeList,
+        res_attrs: []AttributeList,
+        input_shapes: []const Shape,
+        input_meshes: []const ?Mesh,
+        output_info: OutputInfo,
+    ) void {
+        if (mesh.isSinglePartition()) return; // No sharding attributes for single partition.
+
+        const default_layout = mlir.NamedAttribute.named(self.mlir_ctx, "mhlo.layout_mode", mlir.stringAttribute(self.mlir_ctx, "default"));
+        for (arg_attrs, input_shapes, input_meshes) |*attr, shape, input_mesh| {
+            attr.appendAssumeCapacity(default_layout);
+            if (input_mesh) |m| {
+                // log.warn("addShardingAttributes for {} with input mesh: {}", .{ shape, m });
+                attr.appendAssumeCapacity(.named(self.mlir_ctx, "mhlo.sharding", self.getShardingAttr(Sharding.init(m, shape))));
+            } else {
+                // log.warn("addShardingAttributes for {} with progran mesh: {}", .{ shape, mesh });
+                attr.appendAssumeCapacity(.named(self.mlir_ctx, "mhlo.sharding", self.getShardingAttr(Sharding.init(mesh, shape))));
+            }
+        }
+
+        for (res_attrs, output_info.shapes) |*attr, shape| {
+            attr.appendAssumeCapacity(default_layout);
+            attr.appendAssumeCapacity(.named(self.mlir_ctx, "mhlo.sharding", self.getShardingAttr(Sharding.init(mesh, shape))));
+        }
+    }
+
+    pub fn getShardingAttr(self: *const CompilationContext, sharding: Sharding) *const mlir.Attribute {
+        var sharding_str: stdx.BoundedArray(u8, 128) = .{};
+        sharding.writeShardingRepresentation(sharding_str.writer()) catch unreachable;
+        return mlir.stringAttribute(self.mlir_ctx, sharding_str.constSlice());
+    }
 };
 
-fn compileModel(allocator: std.mem.Allocator, comptime func: anytype, model: stdx.meta.Head(stdx.meta.FnArgs(func)), args: stdx.meta.Tail(stdx.meta.FnArgs(func)), platform: Platform) !Exe {
-    return compile(allocator, func, .{model} ++ args, platform);
+fn compileModel(allocator: std.mem.Allocator, comptime func: anytype, model: stdx.meta.Head(stdx.meta.FnArgs(func)), args: stdx.meta.Tail(stdx.meta.FnArgs(func)), mesh: Mesh, platform: Platform) !Exe {
+    return compile(allocator, func, .{model} ++ args, mesh, platform);
 }
 
-pub fn compile(allocator: std.mem.Allocator, comptime func: anytype, args: stdx.meta.FnArgs(func), platform: Platform) !Exe {
-    var compilation_context: CompilationContext = .init(allocator);
+pub fn compile(allocator: std.mem.Allocator, comptime func: anytype, args: stdx.meta.FnArgs(func), mesh: Mesh, platform: Platform) !Exe {
+    var compilation_context: CompilationContext = .init(allocator, mesh);
     defer compilation_context.deinit();
 
     const result = emitMlir(&compilation_context, func, args) catch unreachable;
     defer result.output_info.deinit(compilation_context.allocator);
     defer compilation_context.allocator.free(result.input_shapes);
+    defer compilation_context.allocator.free(result.input_meshes);
 
     _ = result.func.appendTo(compilation_context.module.body());
+    compilation_context.module.operation().setAttributeByName("mhlo.num_replicas", mlir.integerAttribute(compilation_context.mlir_ctx, .i32, mesh.numReplicas()));
+    compilation_context.module.operation().setAttributeByName("mhlo.num_partitions", mlir.integerAttribute(compilation_context.mlir_ctx, .i32, mesh.numPartitions()));
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    const loaded_executable = compileModuleToPjrtExecutable(arena.allocator(), platform, compilation_context.module, null) catch unreachable;
+    const loaded_executable = compileModuleToPjrtExecutable(arena.allocator(), mesh, platform, compilation_context.module, null) catch unreachable;
 
-    const num_devices = platform.sharding().num_replicas * platform.sharding().num_partitions;
-    const exe = try Exe.init(allocator, platform, loaded_executable, result.input_shapes, result.output_info.shapes, num_devices);
+    log.warn("******** ZML generated MLIR ********", .{});
+    log.warn("{f}", .{compilation_context.module.operation()});
+
+    const exe = try Exe.init(allocator, platform, loaded_executable, result.input_shapes, result.output_info.shapes, mesh.numDevices());
     errdefer exe.deinit();
 
     return exe;
@@ -3346,6 +3764,57 @@ fn collectShapes(allocator: std.mem.Allocator, v: anytype) ![]Shape {
     try zml.meta.visit2(struct {
         fn cb(ctx_: *LocalContext, tensor: *const Tensor) !void {
             try ctx_.list.append(tensor.shape());
+        }
+    }.cb, &context, v);
+
+    return try list.toOwnedSlice();
+}
+
+fn collectMesh(allocator: std.mem.Allocator, v: anytype) ![]?Mesh {
+    const LocalContext = struct {
+        list: *std.array_list.Managed(?Mesh),
+    };
+    var list = std.array_list.Managed(?Mesh).init(allocator);
+    errdefer list.deinit();
+
+    var context: LocalContext = .{ .list = &list };
+    try zml.meta.visit2(struct {
+        fn cb(ctx_: *LocalContext, tensor: *const Tensor) !void {
+            try ctx_.list.append(tensor._mesh);
+        }
+    }.cb, &context, v);
+
+    return try list.toOwnedSlice();
+}
+
+fn collectValues(allocator: std.mem.Allocator, v: anytype) ![]*const mlir.Value {
+    const LocalContext = struct {
+        list: *std.array_list.Managed(*const mlir.Value),
+    };
+    var list = std.array_list.Managed(*const mlir.Value).init(allocator);
+    errdefer list.deinit();
+
+    var context: LocalContext = .{ .list = &list };
+    try zml.meta.visit2(struct {
+        fn cb(ctx_: *LocalContext, tensor: *const Tensor) !void {
+            try ctx_.list.append(tensor.value());
+        }
+    }.cb, &context, v);
+
+    return try list.toOwnedSlice();
+}
+
+fn collectType(allocator: std.mem.Allocator, v: anytype) ![]*const mlir.Type {
+    const LocalContext = struct {
+        list: *std.array_list.Managed(*const mlir.Type),
+    };
+    var list = std.array_list.Managed(*const mlir.Type).init(allocator);
+    errdefer list.deinit();
+
+    var context: LocalContext = .{ .list = &list };
+    try zml.meta.visit2(struct {
+        fn cb(ctx_: *LocalContext, tensor: *const Tensor) !void {
+            try ctx_.list.append(tensor.value().type_());
         }
     }.cb, &context, v);
 
@@ -3414,7 +3883,9 @@ fn collectOutputInfo(allocator: std.mem.Allocator, v: anytype) !OutputInfo {
 
 const EmitMlirResult = struct {
     func: *mlir.Operation,
+    // TODO: Unify like output_info
     input_shapes: []const Shape,
+    input_meshes: []const ?Mesh,
     output_info: OutputInfo,
 };
 
@@ -3460,6 +3931,8 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
 
     const input_shapes = try collectShapes(compilation_context.allocator, &args);
     errdefer compilation_context.allocator.free(input_shapes);
+    const input_meshes = try collectMesh(compilation_context.allocator, &args);
+    errdefer compilation_context.allocator.free(input_meshes);
 
     const input_attributes = try arena.allocator().alloc(AttributeList, input_shapes.len);
     @memset(input_attributes, .{});
@@ -3477,10 +3950,18 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
     };
     errdefer output_info.deinit(compilation_context.allocator);
 
+    const output_attributes = try arena.allocator().alloc(AttributeList, output_info.shapes.len);
+    @memset(output_attributes, .{});
+
+    const mesh = compilation_context.currentMesh();
+
     for (output_info.donations, 0..) |donation, index| if (donation) |argument_index| {
         input_attributes[argument_index].appendAssumeCapacity(.named(compilation_context.mlir_ctx, "tf.aliasing_output", mlir.integerAttribute(compilation_context.mlir_ctx, .i32, index)));
     };
+    compilation_context.addShardingAttributes(mesh, input_attributes, output_attributes, input_shapes, input_meshes, output_info);
     _ = dialects.func.returns(compilation_context.mlir_ctx, output_info.values, .unknown(compilation_context.mlir_ctx)).appendTo(compilation_context.currentScope().block);
+
+    //self.add
 
     const mlir_func = dialects.func.func(compilation_context.mlir_ctx, .{
         .name = "main",
@@ -3500,6 +3981,7 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
     return .{
         .func = mlir_func,
         .input_shapes = input_shapes,
+        .input_meshes = input_meshes,
         .output_info = output_info,
     };
 }
@@ -3526,12 +4008,10 @@ fn setXlaOverrideFlag(map: *c.upb_Map, flag: []const u8, value: anytype, upb_are
     }
 }
 
-fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, module: *const mlir.Module, xla_dump_to_: ?[]const u8) !*pjrt.LoadedExecutable {
+fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, mesh: Mesh, platform: Platform, module: *const mlir.Module, xla_dump_to_: ?[]const u8) !*pjrt.LoadedExecutable {
     //const tracer = Tracer.init("ai.zml.compilation");
     //const compile_frame = tracer.frameStart("pjrt compilation");
     //defer tracer.frameEnd(compile_frame, "pjrt compilation");
-
-    const sharding = platform.sharding();
 
     var upb_alloc: upb.Allocator = .init(arena);
     const upb_arena = c.upb_Arena_Init(null, 0, upb_alloc.inner());
@@ -3543,20 +4023,24 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, m
             const exec_build_options = try upb.new(c.xla_ExecutableBuildOptionsProto, upb_arena);
 
             c.xla_ExecutableBuildOptionsProto_set_device_ordinal(exec_build_options, -1);
-            c.xla_ExecutableBuildOptionsProto_set_num_replicas(exec_build_options, sharding.num_replicas);
-            c.xla_ExecutableBuildOptionsProto_set_num_partitions(exec_build_options, sharding.num_partitions);
-            c.xla_ExecutableBuildOptionsProto_set_use_spmd_partitioning(exec_build_options, sharding.num_partitions > 1 or sharding.num_replicas > 1);
+            c.xla_ExecutableBuildOptionsProto_set_num_replicas(exec_build_options, mesh.numReplicas());
+            c.xla_ExecutableBuildOptionsProto_set_num_partitions(exec_build_options, mesh.numPartitions());
+            c.xla_ExecutableBuildOptionsProto_set_use_spmd_partitioning(exec_build_options, !mesh.isSinglePartition());
 
             c.xla_ExecutableBuildOptionsProto_set_device_assignment(exec_build_options, device_assignment_blk: {
                 const device_assignment = try upb.new(c.xla_DeviceAssignmentProto, upb_arena);
 
-                c.xla_DeviceAssignmentProto_set_replica_count(device_assignment, sharding.num_replicas);
-                c.xla_DeviceAssignmentProto_set_computation_count(device_assignment, sharding.num_partitions);
+                c.xla_DeviceAssignmentProto_set_replica_count(device_assignment, mesh.numReplicas());
+                c.xla_DeviceAssignmentProto_set_computation_count(device_assignment, mesh.numPartitions());
 
-                const computation_devices = c.xla_DeviceAssignmentProto_resize_computation_devices(device_assignment, sharding.num_partitions, upb_arena);
-                for (computation_devices[0..sharding.num_partitions], 0..) |*computation_device, i| {
+                const ordered_devices = try zml.platform.createDeviceMesh(arena, mesh, platform);
+                stdx.debug.assert(ordered_devices.len == mesh.numPartitions(), "createDeviceMesh returned {} devices, but mesh requires {}", .{ ordered_devices.len, mesh.numPartitions() });
+
+                const computation_devices = c.xla_DeviceAssignmentProto_resize_computation_devices(device_assignment, mesh.numPartitions(), upb_arena);
+                for (ordered_devices, computation_devices[0..mesh.numPartitions()]) |device, *computation_device| {
                     computation_device.* = try upb.new(c.xla_DeviceAssignmentProto_ComputationDevice, upb_arena);
-                    _ = c.xla_DeviceAssignmentProto_ComputationDevice_add_replica_device_ids(computation_device.*, @intCast(i), upb_arena);
+                    const device_id = @as(i64, @intCast(device.getDescription(platform.pjrt_api).getId(platform.pjrt_api)));
+                    _ = c.xla_DeviceAssignmentProto_ComputationDevice_add_replica_device_ids(computation_device.*, @intCast(device_id), upb_arena);
                 }
                 break :device_assignment_blk device_assignment;
             });
@@ -3973,6 +4457,7 @@ pub const BufferStore5 = struct {
 
 const KB = 1024;
 const MB = 1024 * KB;
+const GB = 1024 * MB;
 
 const BUF_1_KB = 1 * KB;
 const BUF_4_KB = 4 * KB;
@@ -3989,6 +4474,8 @@ const BUF_32_MB = 32 * MB;
 const BUF_64_MB = 64 * MB;
 const BUF_128_MB = 128 * MB;
 const BUF_256_MB = 256 * MB;
+
+const BUF_1_GB = 1 * GB;
 
 pub const MemoryResource = struct {
     uri: ResourceURI,

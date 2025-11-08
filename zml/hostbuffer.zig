@@ -30,7 +30,7 @@ pub const HostBuffer = struct {
     pub fn empty(allocator: std.mem.Allocator, sh: Shape) error{OutOfMemory}!HostBuffer {
         return .{
             ._shape = sh,
-            ._strides = sh.computeStrides().buffer,
+            ._strides = sh.computeByteStrides().buffer,
             ._data = (try allocator.alignedAlloc(u8, .@"64", sh.byteSize())).ptr,
             ._memory = .{ .managed = .@"64" },
         };
@@ -43,7 +43,7 @@ pub const HostBuffer = struct {
         stdx.debug.assert(shape_.byteSize() == data_.len, "shape {} and data {} don't match", .{ shape_.byteSize(), data_.len });
         return .{
             ._shape = shape_,
-            ._strides = shape_.computeStrides().buffer,
+            ._strides = shape_.computeByteStrides().buffer,
             ._data = data_.ptr,
             ._memory = .unmanaged,
         };
@@ -172,7 +172,7 @@ pub const HostBuffer = struct {
         // TODO we should allow interpreting the output as @Vector(8, f32) when the tensor is f32.
         stdx.debug.assert(DataType.fromZigType(T) == self.dtype(), "Can't reinterpret {f} as {s}", .{ self, @typeName(T) });
         stdx.debug.assert(self.isContiguous(), "{f} isn't contiguous, can't interpret as []const u8", .{self});
-        const ptr: [*]const T = @alignCast(@ptrCast(self._data));
+        const ptr: [*]const T = @ptrCast(@alignCast(self._data));
         return ptr[0..self._shape.count()];
     }
 
@@ -225,7 +225,7 @@ pub const HostBuffer = struct {
 
     pub fn isContiguous(self: HostBuffer) bool {
         const _strides = self._strides;
-        const cont_strides = self._shape.computeStrides();
+        const cont_strides = self._shape.computeByteStrides();
         for (self._shape.dims(), _strides[0..self.rank()], cont_strides.constSlice()) |d, stride, cont_stride| {
             if (d != 1 and stride != cont_stride) return false;
         }

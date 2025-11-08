@@ -37,6 +37,7 @@ zig_library(
         "nn.zig",
         "nn/cuda.zig",
         "ops.zig",
+        "partitioning.zig",
         "pjrtx.zig",
         "platform.zig",
         "posix.zig",

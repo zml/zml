@@ -1156,7 +1156,7 @@ pub const Operation = opaque {
                     sizes.appendAssumeCapacity(@intCast(segment_operands.len));
                 }
                 state.addAttributes(&.{
-                    .named(ctx, "operandSegmentSizes", denseElementsAttribute(RankedTensorType.get(&.{@intCast(sizes.len)}, integerType(ctx, .i32)).shaped(), sizes.constSlice())),
+                    .named(ctx, "operandSegmentSizes", denseElementsAttribute(RankedTensorType.get(&.{@intCast(sizes.len)}, integerType(ctx, .i32), null).shaped(), sizes.constSlice())),
                 });
             },
         };
@@ -1169,7 +1169,7 @@ pub const Operation = opaque {
                     sizes.appendAssumeCapacity(@intCast(segment_results.len));
                 }
                 state.addAttributes(&.{
-                    .named(ctx, "resultSegmentSizes", denseElementsAttribute(RankedTensorType.get(&.{@intCast(sizes.len)}, integerType(ctx, .i32)).shaped(), sizes.constSlice())),
+                    .named(ctx, "resultSegmentSizes", denseElementsAttribute(RankedTensorType.get(&.{@intCast(sizes.len)}, integerType(ctx, .i32), null).shaped(), sizes.constSlice())),
                 });
             },
         };
@@ -1364,12 +1364,12 @@ pub const RankedTensorType = opaque {
     pub const eql = M.eql(c.mlirTypeEqual);
     pub const format = M.format(c.mlirTypePrint);
 
-    pub fn get(dimensions: []const i64, elemType: *const Type) *const RankedTensorType {
+    pub fn get(dimensions: []const i64, elemType: *const Type, encoding: ?*Attribute) *const RankedTensorType {
         return @ptrCast(c.mlirRankedTensorTypeGet(
             @intCast(dimensions.len),
             @ptrCast(dimensions),
             elemType.ptr(),
-            c.mlirAttributeGetNull(),
+            if (encoding) |e| e.ptr() else c.mlirAttributeGetNull(),
         ).ptr);
     }
 
@@ -1402,7 +1402,11 @@ pub const RankedTensorType = opaque {
 };
 
 pub fn rankedTensorType(dimensions: []const i64, elem_type: *const Type) *const Type {
-    return @ptrCast(RankedTensorType.get(dimensions, elem_type));
+    return @ptrCast(RankedTensorType.get(dimensions, elem_type, null));
+}
+
+pub fn rankedTensorTypeWithEncoding(dimensions: []const i64, elem_type: *const Type, encoding: *Attribute) *const Type {
+    return @ptrCast(RankedTensorType.get(dimensions, elem_type, encoding));
 }
 
 pub const DenseElementsAttribute = opaque {
