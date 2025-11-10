@@ -305,7 +305,7 @@ pub fn testFinalOutput(
 
     const exe_decode = try zml.compileModel(alloc, fwd_decode, model, .{ output.shape(), cache_position.shape(), qwen.KvCache.initShape(kv_cache.k.shape()), mrope_position_deltas.shape() }, platform);
     const mod_decode = exe_decode.prepare(model_weights);
-    const gen = 1;
+    const gen = 30;
 
     var cur_token = output;
     var cur_position = cache_position;
