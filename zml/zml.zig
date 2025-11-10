@@ -42,6 +42,7 @@ pub const Shape = @import("shape.zig").Shape;
 pub const ShapeOf = @import("tensor.zig").ShapeOf;
 pub const Target = @import("platform.zig").Target;
 pub const Tensor = @import("tensor.zig").Tensor;
+pub const shapesOf = @import("tensor.zig").shapesOf;
 pub const testing = @import("testing.zig");
 pub const torch = @import("torch.zig");
 

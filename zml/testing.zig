@@ -214,7 +214,7 @@ pub fn testLayerOut(
     const FwdSign = zml.ModuleSignature(fwd);
 
     const input_tensors = try zml.aio.populateModelWithPrefix(FwdSign.ArgsT, alloc, activations, name ++ ".in");
-    const input_shapes = try shapesOf(input_tensors, alloc);
+    const input_shapes = try zml.shapesOf(input_tensors, alloc);
 
     const n_in = zml.module.countTensors(&input_tensors);
     const n_in_exp = activations.countLayers(name ++ ".in");
