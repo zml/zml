@@ -19,17 +19,7 @@ fn bitonic_sort_1(logits: *VF) VI {
 
     // Block size 4: crossover desc, merge 1
     simd_crossover(logits, &indices, 4, .desc);
-    //simd_merge(logits, &indices, 1);
-
-    // merge stride 1
-    compSwap(logits, &indices, 0, 1, false);
-    compSwap(logits, &indices, 2, 3, false);
-    compSwap(logits, &indices, 4, 5, false);
-    compSwap(logits, &indices, 6, 7, false);
-    compSwap(logits, &indices, 8, 9, false);
-    compSwap(logits, &indices, 10, 11, false);
-    compSwap(logits, &indices, 12, 13, false);
-    compSwap(logits, &indices, 14, 15, false);
+    simd_merge(logits, &indices, 1);
 
     // Block size 8: crossover desc
     simd_crossover(logits, &indices, 8, .desc);
@@ -90,25 +80,6 @@ fn bitonic_sort_1(logits: *VF) VI {
     return indices;
 }
 
-fn crossover_fwd(comptime blocksize: usize) @Vector(VECTOR_SIZE, i32) {
-    switch (blocksize) {
-        2 => return .{ 0, 2, 4, 6, 8, 10, 12, 14, 1, 3, 5, 7, 9, 11, 13, 15 },
-        4 => return .{ 0, 1, 4, 5, 8, 9, 12, 13, 3, 2, 7, 6, 11, 10, 15, 14 },
-        8 => return .{ 0, 1, 2, 3, 8, 9, 10, 11, 7, 6, 5, 4, 15, 14, 13, 12 },
-        16 => return .{ 0, 1, 2, 3, 4, 5, 6, 7, 15, 14, 13, 12, 11, 10, 9, 8 },
-        else => @compileError("unsupported blocksize"),
-    }
-}
-
-fn crossover_rev(comptime blocksize: usize) @Vector(VECTOR_SIZE, i32) {
-    switch (blocksize) {
-        2 => return .{ 0, 8, 1, 9, 2, 10, 3, 11, 4, 12, 5, 13, 6, 14, 7, 15 },
-        4 => return .{ 0, 1, 8, 9, 2, 3, 10, 11, 4, 5, 12, 13, 6, 7, 14, 15 },
-        8 => return .{ 0, 1, 2, 3, 8, 9, 10, 11, 4, 5, 6, 7, 12, 13, 14, 15 },
-        else => @compileError("unsupported blocksize"),
-    }
-}
-
 /// generates the permutation of the vector that corresponds to which element 
 /// the crossover operation should be compared against.
 fn crossover_permute(comptime blocksize: usize) @Vector(VECTOR_SIZE, i32) {
@@ -121,7 +92,7 @@ fn crossover_permute(comptime blocksize: usize) @Vector(VECTOR_SIZE, i32) {
     }
 }
 
-fn permute_mask(comptime blocksize: usize) @Vector(VECTOR_SIZE, bool) {
+fn crossover_mask(comptime blocksize: usize) @Vector(VECTOR_SIZE, bool) {
     switch (blocksize) {
         2 => return .{ true, false, true, false, true, false, true, false, true, false, true, false, true, false, true, false },
         4 => return .{ true, true, false, false, true, true, false, false, true, true, false, false, true, true, false, false },
@@ -131,15 +102,45 @@ fn permute_mask(comptime blocksize: usize) @Vector(VECTOR_SIZE, bool) {
     }
 }
 
+fn merge_permute(comptime stride: usize) @Vector(VECTOR_SIZE, i32) {
+    switch (stride) {
+        1 => return .{1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 15, 14 },
+        2 => return .{2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13 },
+        4 => return .{4, 5, 6, 7, 0, 1, 2, 3, 12, 13, 14, 15, 8, 9, 10, 11 },
+        8 => return .{8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7 },
+        else => @compileError("unsupported stride"),
+    }
+}
+
+fn merge_mask(comptime stride: usize) @Vector(VECTOR_SIZE, bool) {
+    switch (stride) {
+        1 => return .{ true, false, true, false, true, false, true, false, true, false, true, false, true, false, true, false },
+        2 => return .{ true, true, false, false, true, true, false, false, true, true, false, false, true, true, false, false },
+        4 => return .{ true, true, true, true, false, false, false, false, true, true, true, true, false, false, false, false },
+        8 => return .{ true, true, true, true, true, true, true, true, false, false, false, false, false, false, false, false },
+        else => @compileError("unsupported stride"),
+    }
+}
+
 inline fn simd_crossover(values: *VF, indices: *VI, comptime blocksize: usize, comptime direction: Direction) void {
     // create the comparison vectors
     const permuted_v = @shuffle(f32, values.*, undefined, crossover_permute(blocksize));
     const permuted_i = @shuffle(u32, indices.*, undefined, crossover_permute(blocksize));
 
     const compare = switch (direction) {
-        .asc => (permuted_v < values.*) != permute_mask(blocksize),
-        .desc => (permuted_v < values.*) == permute_mask(blocksize),
+        .asc => (permuted_v < values.*) != crossover_mask(blocksize),
+        .desc => (permuted_v < values.*) == crossover_mask(blocksize),
     };
+
+    values.* = @select(f32, compare, permuted_v, values.*);
+    indices.* = @select(u32, compare, permuted_i, indices.*);
+}
+
+inline fn simd_merge(values: *VF, indices: *VI, comptime stride: usize) void {
+    const permuted_v = @shuffle(f32, values.*, undefined, merge_permute(stride));
+    const permuted_i = @shuffle(u32, indices.*, undefined, merge_permute(stride));
+
+    const compare = (permuted_v < values.*) == merge_mask(stride);
 
     values.* = @select(f32, compare, permuted_v, values.*);
     indices.* = @select(u32, compare, permuted_i, indices.*);
