@@ -6,6 +6,10 @@ const VF = detokenizer.VF;
 
 /// vector of indices
 const VI = @Vector(VECTOR_SIZE, u32);
+/// half-vector of floats, for comparison operations
+const HVF = @Vector(VECTOR_SIZE / 2, f32);
+/// half-vector of indices
+const HVI = @Vector(VECTOR_SIZE / 2, u32);
 
 // SORTING UTILITIES
 
@@ -15,14 +19,15 @@ fn bitonic_sort_1(logits: *VF) VI {
     var indices: VI = .{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
 
     // Block size 2: crossover desc
-    compSwap(logits, &indices, 0, 1, true);
-    compSwap(logits, &indices, 2, 3, true);
-    compSwap(logits, &indices, 4, 5, true);
-    compSwap(logits, &indices, 6, 7, true);
-    compSwap(logits, &indices, 8, 9, true);
-    compSwap(logits, &indices, 10, 11, true);
-    compSwap(logits, &indices, 12, 13, true);
-    compSwap(logits, &indices, 14, 15, true);
+    simd_crossover(logits, &indices, 2);
+    //compSwap(logits, &indices, 0, 1, true);
+    //compSwap(logits, &indices, 2, 3, true);
+    //compSwap(logits, &indices, 4, 5, true);
+    //compSwap(logits, &indices, 6, 7, true);
+    //compSwap(logits, &indices, 8, 9, true);
+    //compSwap(logits, &indices, 10, 11, true);
+    //compSwap(logits, &indices, 12, 13, true);
+    //compSwap(logits, &indices, 14, 15, true);
 
     // Block size 4: crossover desc
     compSwap(logits, &indices, 0, 3, true);
@@ -115,6 +120,40 @@ fn bitonic_sort_1(logits: *VF) VI {
     compSwap(logits, &indices, 14, 15, false);  
 
     return indices;
+}
+
+fn crossover_fwd(comptime blocksize: usize) @Vector(VECTOR_SIZE, i32) {
+    switch (blocksize) {
+        2 => return .{0, 2, 4, 6, 8, 10, 12, 14, 1, 3, 5, 7, 9, 11, 13, 15},
+        else => @panic("unsupported blocksize")
+    }
+}
+
+fn crossover_rev(comptime blocksize: usize) @Vector(VECTOR_SIZE, i32) {
+    switch (blocksize) {
+        2 => return .{0, 8, 1, 9, 2, 10, 3, 11, 4, 12, 5, 13, 6, 14, 7, 15},
+        else => @panic("unsupported blocksize")
+    }
+}
+
+inline fn simd_crossover(values: *VF, indices: *VI, comptime blocksize: usize) void {
+    // convert to two half-sized SIMD vectors.
+    const split_v = @shuffle(f32, values.*, undefined, crossover_fwd(blocksize));
+    const split_i = @shuffle(u32, indices.*, undefined, crossover_fwd(blocksize));
+    const left_v, const right_v = @as([2]HVF, @bitCast(split_v));
+    const left_i, const right_i = @as([2]HVI, @bitCast(split_i));
+
+    const compare = left_v > right_v;
+    const new_left_v = @select(f32, compare, left_v, right_v);
+    const new_right_v = @select(f32, compare, right_v, left_v);
+    const new_left_i = @select(u32, compare, left_i, right_i);
+    const new_right_i = @select(u32, compare, right_i, left_i);
+
+    const sorted_v: VF = @bitCast([_]HVF{new_left_v, new_right_v});
+    const sorted_i: VI = @bitCast([_]HVI{new_left_i, new_right_i});
+
+    values.* = @shuffle(f32, sorted_v, undefined, crossover_rev(blocksize));
+    indices.* = @shuffle(u32, sorted_i, undefined, crossover_rev(blocksize));
 }
 
 inline fn compSwap(values: *VF, indices: *VI, i: u32, j: u32, asc: bool) void {
