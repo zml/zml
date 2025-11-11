@@ -21,61 +21,16 @@ fn bitonic_sort_1(logits: *VF) VI {
     simd_crossover(logits, &indices, 4, .desc);
     simd_merge(logits, &indices, 1);
 
-    // Block size 8: crossover desc
+    // Block size 8: crossover desc, merge 2, merge 1
     simd_crossover(logits, &indices, 8, .desc);
+    simd_merge(logits, &indices, 2);
+    simd_merge(logits, &indices, 1);
 
-    // merge stride 2
-    compSwap(logits, &indices, 0, 2, false);
-    compSwap(logits, &indices, 1, 3, false);
-    compSwap(logits, &indices, 4, 6, false);
-    compSwap(logits, &indices, 5, 7, false);
-    compSwap(logits, &indices, 8, 10, false);
-    compSwap(logits, &indices, 9, 11, false);
-    compSwap(logits, &indices, 12, 14, false);
-    compSwap(logits, &indices, 13, 15, false);
-
-    // merge stride 1
-    compSwap(logits, &indices, 0, 1, false);
-    compSwap(logits, &indices, 2, 3, false);
-    compSwap(logits, &indices, 4, 5, false);
-    compSwap(logits, &indices, 6, 7, false);
-    compSwap(logits, &indices, 8, 9, false);
-    compSwap(logits, &indices, 10, 11, false);
-    compSwap(logits, &indices, 12, 13, false);
-    compSwap(logits, &indices, 14, 15, false);
-
-    // Block size 16: crossover desc
+    // Block size 16: crossover desc, merge 4, merge 2, merge 1
     simd_crossover(logits, &indices, 16, .asc);
-
-    // merge stride 4
-    compSwap(logits, &indices, 0, 4, false);
-    compSwap(logits, &indices, 1, 5, false);
-    compSwap(logits, &indices, 2, 6, false);
-    compSwap(logits, &indices, 3, 7, false);
-    compSwap(logits, &indices, 8, 12, false);
-    compSwap(logits, &indices, 9, 13, false);
-    compSwap(logits, &indices, 10, 14, false);
-    compSwap(logits, &indices, 11, 15, false);
-
-    // merge stride 2
-    compSwap(logits, &indices, 0, 2, false);
-    compSwap(logits, &indices, 1, 3, false);
-    compSwap(logits, &indices, 4, 6, false);
-    compSwap(logits, &indices, 5, 7, false);
-    compSwap(logits, &indices, 8, 10, false);
-    compSwap(logits, &indices, 9, 11, false);
-    compSwap(logits, &indices, 12, 14, false);
-    compSwap(logits, &indices, 13, 15, false);
-
-    // merge stride 1
-    compSwap(logits, &indices, 0, 1, false);
-    compSwap(logits, &indices, 2, 3, false);
-    compSwap(logits, &indices, 4, 5, false);
-    compSwap(logits, &indices, 6, 7, false);
-    compSwap(logits, &indices, 8, 9, false);
-    compSwap(logits, &indices, 10, 11, false);
-    compSwap(logits, &indices, 12, 13, false);
-    compSwap(logits, &indices, 14, 15, false);
+    simd_merge(logits, &indices, 4);
+    simd_merge(logits, &indices, 2);
+    simd_merge(logits, &indices, 1);
 
     return indices;
 }
@@ -140,35 +95,10 @@ inline fn simd_merge(values: *VF, indices: *VI, comptime stride: usize) void {
     const permuted_v = @shuffle(f32, values.*, undefined, merge_permute(stride));
     const permuted_i = @shuffle(u32, indices.*, undefined, merge_permute(stride));
 
-    const compare = (permuted_v < values.*) == merge_mask(stride);
+    const compare = (permuted_v < values.*) != merge_mask(stride);
 
     values.* = @select(f32, compare, permuted_v, values.*);
     indices.* = @select(u32, compare, permuted_i, indices.*);
-}
-
-inline fn compSwap(values: *VF, indices: *VI, i: u32, j: u32, asc: bool) void {
-    const should_swap = if (asc) values[i] > values[j] else values[i] < values[j];
-    if (should_swap) {
-        const tmp_val = values[i];
-        values[i] = values[j];
-        values[j] = tmp_val;
-
-        const tmp_idx = indices[i];
-        indices[i] = indices[j];
-        indices[j] = tmp_idx;
-    }
-}
-
-inline fn compareExchange(values: *VF, indices: *VI, i: u32, j: u32) void {
-    if (values[i] > values[j]) {
-        const tmp_val = values[i];
-        values[i] = values[j];
-        values[j] = tmp_val;
-
-        const tmp_idx = indices[i];
-        indices[i] = indices[j];
-        indices[j] = tmp_idx;
-    }
 }
 
 fn seedFromHash(bytes: []const u8) u64 {
