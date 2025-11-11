@@ -14,11 +14,10 @@ const SamplingStrategy = struct { topk: u32 = 1, topp: ?f32 = null, temperature:
 /// Selects a token given activations and sampling options.  The output is the
 /// index of the selected token.
 pub fn sample(activations: []const VF, opts: SamplingStrategy, rng: anytype) usize {
-    _ = rng;
     if (opts.topk == 1) return greedy_sample(activations);
 
     // presort activations into descending order here.
-    if (opts.topp) |top_p| {
+    if (opts.topp) |_| {
         return nucleus_sample(activations, opts, rng);
     } else {
         return topk_sample(activations, opts, rng);
