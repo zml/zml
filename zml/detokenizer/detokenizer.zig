@@ -1,6 +1,7 @@
 // AVX-512 32-bit float vector type.  We may want to
 // generalize this later to other types (e.g. u16 for bfloat16).
-const VF = @Vector(16, f32);
+const VECTOR_SIZE = 16;
+const VF = @Vector(VECTOR_SIZE, f32);
 const std = @import("std");
 
 /// Options controlling generation. The default values correspond to greedy decoding.
@@ -13,7 +14,13 @@ const SamplingStrategy = struct { topk: u32 = 1, topp: ?f32 = null, temperature:
 pub fn sample(activations: []const VF, opts: SamplingStrategy, rng: anytype) usize {
     _ = rng;
     if (opts.topk == 1) return greedy_sample(activations);
-    @panic("not implemented yet");
+
+    // presort activations into descending order here.
+    if (opts.topp) |top_p| {
+        return nucleus_sample(activations, opts, rng);
+    } else {
+        return topk_sample(activations, opts, rng);
+    }
 }
 
 const minfloat = -std.math.inf(f32);
@@ -31,7 +38,7 @@ fn greedy_sample(activations: []const VF) usize {
             const map = max_chunk == chunk;
             // take the first index that matches
             const sub_index = @ctz(@as(u16, @bitCast(map)));
-            max_index = chunk_index * 16 + sub_index;
+            max_index = chunk_index * VECTOR_SIZE + sub_index;
         }
     }
     return max_index;
@@ -53,10 +60,10 @@ fn check_greedy(_: void, bytes: []const u8) !void {
     var biggestindex: usize = 0;
 
     for (activations, 0..) |chunk, i| {
-        for (0..16) |j| {
+        for (0..VECTOR_SIZE) |j| {
             if (chunk[j] > biggestvalue) {
                 biggestvalue = chunk[j];
-                biggestindex = i * 16 + j;
+                biggestindex = i * VECTOR_SIZE + j;
             }
         }
     }
@@ -77,6 +84,24 @@ test "greedy sample fuzz test" {
     try std.testing.fuzz({}, check_greedy, .{});
 }
 
+// NUCLEUS SAMPLING
+
+pub fn nucleus_sample(activations: []const VF, opts: SamplingStrategy, rng: anytype) usize {
+    _ = activations;
+    _ = opts;
+    _ = rng;
+    @panic("not implemented")
+}
+
+// TOP-K SAMPLING
+
+pub fn topk_sample(activations: []const VF, opts: SamplingStrategy, rng: anytype) usize {
+    _ = activations;
+    _ = opts;
+    _ = rng;
+    @panic("not implemented")
+}
+
 // RANDOMIZER UTILITIES
 
 fn seedFromHash(bytes: []const u8) u64 {
@@ -94,7 +119,7 @@ fn randUniform(r: *std.Random) f32 {
 
 fn randvec(r: *std.Random) VF {
     var result: VF = undefined;
-    for (0..16) |index| {
+    for (0..VECTOR_SIZE) |index| {
         result[index] = randUniform(r);
     }
     return result;
