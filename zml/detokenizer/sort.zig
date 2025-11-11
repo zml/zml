@@ -6,10 +6,6 @@ const VF = detokenizer.VF;
 
 /// vector of indices
 const VI = @Vector(VECTOR_SIZE, u32);
-/// half-vector of floats, for comparison operations
-const HVF = @Vector(VECTOR_SIZE / 2, f32);
-/// half-vector of indices
-const HVI = @Vector(VECTOR_SIZE / 2, u32);
 
 // SORTING UTILITIES
 
@@ -100,7 +96,7 @@ fn crossover_fwd(comptime blocksize: usize) @Vector(VECTOR_SIZE, i32) {
         4 => return .{ 0, 1, 4, 5, 8, 9, 12, 13, 3, 2, 7, 6, 11, 10, 15, 14 },
         8 => return .{ 0, 1, 2, 3, 8, 9, 10, 11, 7, 6, 5, 4, 15, 14, 13, 12 },
         16 => return .{ 0, 1, 2, 3, 4, 5, 6, 7, 15, 14, 13, 12, 11, 10, 9, 8 },
-        else => @panic("unsupported blocksize"),
+        else => @compileError("unsupported blocksize"),
     }
 }
 
@@ -109,38 +105,44 @@ fn crossover_rev(comptime blocksize: usize) @Vector(VECTOR_SIZE, i32) {
         2 => return .{ 0, 8, 1, 9, 2, 10, 3, 11, 4, 12, 5, 13, 6, 14, 7, 15 },
         4 => return .{ 0, 1, 8, 9, 2, 3, 10, 11, 4, 5, 12, 13, 6, 7, 14, 15 },
         8 => return .{ 0, 1, 2, 3, 8, 9, 10, 11, 4, 5, 6, 7, 12, 13, 14, 15 },
-        else => @panic("unsupported blocksize"),
+        else => @compileError("unsupported blocksize"),
+    }
+}
+
+/// generates the permutation of the vector that corresponds to which element 
+/// the crossover operation should be compared against.
+fn crossover_permute(comptime blocksize: usize) @Vector(VECTOR_SIZE, i32) {
+    switch (blocksize) {
+        2 => return .{1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 15, 14 },
+        4 => return .{3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12 },
+        8 => return .{7, 6, 5, 4, 3, 2, 1, 0, 15, 14, 13, 12, 11, 10, 9, 8 },
+        16 => return .{15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 },
+        else => @compileError("unsupported blocksize"),
+    }
+}
+
+fn permute_mask(comptime blocksize: usize) @Vector(VECTOR_SIZE, bool) {
+    switch (blocksize) {
+        2 => return .{ true, false, true, false, true, false, true, false, true, false, true, false, true, false, true, false },
+        4 => return .{ true, true, false, false, true, true, false, false, true, true, false, false, true, true, false, false },
+        8 => return .{ true, true, true, true, false, false, false, false, true, true, true, true, false, false, false, false },
+        16 => return .{ true, true, true, true, true, true, true, true, false, false, false, false, false, false, false, false },
+        else => @compileError("unsupported blocksize"),
     }
 }
 
 inline fn simd_crossover(values: *VF, indices: *VI, comptime blocksize: usize, comptime direction: Direction) void {
-    // convert to two half-sized SIMD vectors.
-    const split_v = @shuffle(f32, values.*, undefined, crossover_fwd(blocksize));
-    const split_i = @shuffle(u32, indices.*, undefined, crossover_fwd(blocksize));
-    const left_v, const right_v = @as([2]HVF, @bitCast(split_v));
-    const left_i, const right_i = @as([2]HVI, @bitCast(split_i));
+    // create the comparison vectors
+    const permuted_v = @shuffle(f32, values.*, undefined, crossover_permute(blocksize));
+    const permuted_i = @shuffle(u32, indices.*, undefined, crossover_permute(blocksize));
 
     const compare = switch (direction) {
-        .asc => left_v > right_v,
-        .desc => left_v < right_v,
+        .asc => (permuted_v < values.*) != permute_mask(blocksize),
+        .desc => (permuted_v < values.*) == permute_mask(blocksize),
     };
 
-    const new_left_v = @select(f32, compare, left_v, right_v);
-    const new_right_v = @select(f32, compare, right_v, left_v);
-    const new_left_i = @select(u32, compare, left_i, right_i);
-    const new_right_i = @select(u32, compare, right_i, left_i);
-
-    const sorted_v: VF = @bitCast([_]HVF{ new_left_v, new_right_v });
-    const sorted_i: VI = @bitCast([_]HVI{ new_left_i, new_right_i });
-
-    if (blocksize == VECTOR_SIZE) {
-        values.* = sorted_v;
-        indices.* = sorted_i;
-    } else {
-        values.* = @shuffle(f32, sorted_v, undefined, crossover_rev(blocksize));
-        indices.* = @shuffle(u32, sorted_i, undefined, crossover_rev(blocksize));
-        return;
-    }
+    values.* = @select(f32, compare, permuted_v, values.*);
+    indices.* = @select(u32, compare, permuted_i, indices.*);
 }
 
 inline fn compSwap(values: *VF, indices: *VI, i: u32, j: u32, asc: bool) void {
