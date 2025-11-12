@@ -151,7 +151,8 @@ pub fn register(Callback: type, platform: Platform) pjrt.ApiError!void {
     const target_name = "zml$" ++ @typeName(Callback);
 
     const proxy_cb = proxy(Callback);
-    Callback.type_id = try ffi.registerTypeId(platform.pjrt_api, @typeName(Callback));
+    const type_info: pjrt.Ffi.TypeInfo = .{};
+    Callback.type_id = try ffi.registerTypeId(platform.pjrt_api, @typeName(Callback), &type_info.toCStruct());
     try ffi.register(platform.pjrt_api, target_name, @tagName(platform.target), &proxy_cb, Callback.callback_config.traits);
     log.debug("Registered custom call {} with target name \"{s}\"", .{ Callback, target_name });
 }

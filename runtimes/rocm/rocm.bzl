@@ -121,7 +121,7 @@ _ROCM_PACKAGES = {
                 "dlopen": "zmlxrocm_dlopen",
             },
         ),
-        packages.filegroup(name = "hiprtc", srcs = ["lib/libhiprtc.so.6"]),
+        packages.filegroup(name = "hiprtc", srcs = ["lib/libhiprtc.so.6", "lib/libhiprtc-builtins.so.6"]),
     ]),
     "hipsolver": packages.filegroup(name = "hipsolver", srcs = ["lib/libhipsolver.so.0"]),
 }
@@ -153,8 +153,8 @@ def _rocm_impl(mctx):
     http_archive(
         name = "libpjrt_rocm",
         build_file = "libpjrt_rocm.BUILD.bazel",
-        url = "https://github.com/zml/pjrt-artifacts/releases/download/v13.0.0/pjrt-rocm_linux-amd64.tar.gz",
-        sha256 = "945c43c68325c0e91cd41eaa594a9f9f6e78da7cc06892d83bf345b69f7bd714",
+        url = "https://github.com/zml/pjrt-artifacts/releases/download/v14.0.1/pjrt-rocm_linux-amd64.tar.gz",
+        sha256 = "087858044f17bc06b70d7cbffc33e7f2bf590d732f3ce2c24425e41453ea1cf4",
     )
 
     return mctx.extension_metadata(
