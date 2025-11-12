@@ -5,19 +5,26 @@ const VI = @Vector(VECTOR_SIZE, u32);
 const sort = @import("sort.zig");
 const std = @import("std");
 
-/// Turns a array of logits into a max-heap in-place.
+// TODO: turn preconditions into switchable asserts.
+
+/// Turns a slice of logits into a min-heap in-place.
 /// Also, fills out an "indices" slice with the corresponding indices that
-/// the chunks came from.  this indices slice does not have to have any values
-/// in it beforehand.
-pub fn heapify(chunks: []VF, indices: []VI) void {
+/// the chunks came from.
+/// returns the heap's minimum value.
+///
+/// Contents of the indices slice may be undefined.
+pub fn heapify(chunks: []VF, indices: []VI) f32 {
     // preconditions:
     // - at least three chunks.
     // - indices length matches chunks length.
     if (chunks.len <= 2) @panic("use sort functions for chunk counts of 1 or 2");
     if (indices.len != chunks.len) @panic("indices length must match chunks length");
 
+    // postconditions:
+    //   the return value is the minimum value in the heap.
+
     // first sort the bottom-most chunks, and save in the indices.
-    // note that sorted list is by definition a max-heap.
+    // note that sorted list is by definition a min-heap.
     const first_chunks = sort.bitonic_2(chunks[0..2]);
     indices[0] = first_chunks[0];
     indices[1] = first_chunks[1];
@@ -29,6 +36,8 @@ pub fn heapify(chunks: []VF, indices: []VI) void {
     for (32..logits_len) |index| {
         heap_insert(logits_ptr, @ptrCast(indices.ptr), @intCast(index));
     }
+
+    return logits_ptr[0];
 }
 
 fn heap_insert(logits: [*]f32, indices: [*]u32, start_index: u32) void {
@@ -39,7 +48,7 @@ fn heap_insert(logits: [*]f32, indices: [*]u32, start_index: u32) void {
         const value = logits[index];
         const parent_value = logits[parent];
 
-        if (parent_value > value) return;
+        if (parent_value < value) return;
         logits[parent] = value;
         logits[index] = parent_value;
         // swap indices
@@ -53,9 +62,9 @@ inline fn parent_index(index: u32) u32 {
     return (index - 1) / 2;
 }
 
-fn is_heap(data: []f32) bool {
+fn is_min_heap(data: []f32) bool {
     for (1..data.len) |i| {
-        if (data[parent_index(@intCast(i))] < data[i]) {
+        if (data[parent_index(@intCast(i))] > data[i]) {
             return false;
         }
     }
@@ -67,18 +76,21 @@ test "heapify" {
 
     var data: [3]VF = @bitCast(original);
     var indices: [3]VI = undefined;
-    heapify(&data, &indices);
+    const min = heapify(&data, &indices);
 
     const indices_flat: []u32 = @ptrCast(&indices);
     const data_flat: []f32 = @ptrCast(&data);
 
-    // check max-heap property
-    try std.testing.expect(is_heap(@ptrCast(&data)));
+    // check min-heap property
+    try std.testing.expect(is_min_heap(@ptrCast(&data)));
     // check indices match.
 
     for (0..data_flat.len) |i| {
         try std.testing.expectEqual(data_flat[i], original[indices_flat[i]]);
     }
+    // check that minimum value is at root
+    try std.testing.expectEqual(data_flat[0], 0.5);
+    try std.testing.expectEqual(min, 0.5);
 }
 
 fn check_heapify(_: void, bytes: []const u8) !void {
@@ -107,24 +119,29 @@ fn check_heapify(_: void, bytes: []const u8) !void {
         }
     }
 
-    heapify(chunks, indices);
+    const min = heapify(chunks, indices);
 
     const data_flat: [*]f32 = @ptrCast(chunks.ptr);
     const indices_flat: [*]u32 = @ptrCast(indices.ptr);
     const data_len = chunk_count * VECTOR_SIZE;
 
-    // Verify max-heap property
-    try std.testing.expect(is_heap(data_flat[0..data_len]));
+    // Verify min-heap property
+    try std.testing.expect(is_min_heap(data_flat[0..data_len]));
 
     // Verify indices correctly map back to original values
     for (0..data_len) |i| {
         try std.testing.expectEqual(data_flat[i], original[indices_flat[i]]);
     }
+
+    // Verify all values are >= the minimum value
+    for (0..data_len) |i| {
+        try std.testing.expect(data_flat[i] >= min);
+    }
 }
 
-// test "heapify fuzz test" {
-//    try std.testing.fuzz({}, check_heapify, .{});
-//}
+test "heapify fuzz test" {
+    try std.testing.fuzz({}, check_heapify, .{});
+}
 
 // Utility functions for fuzz testing
 fn seedFromHash(bytes: []const u8) u64 {

@@ -13,22 +13,22 @@ const VM = @Vector(VECTOR_SIZE, bool);
 
 // SORTING UTILITIES
 const Direction = enum { asc, desc };
-const SimdParams = struct {VS, VM};
+const SimdParams = struct { VS, VM };
 
 pub fn bitonic_1(logits: *VF) VI {
     var indices: VI = .{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
 
-    // Block size 2: crossover desc
-    simd_sort_block(logits, &indices, crossover(2), .desc);
+    // Block size 2: crossover asc
+    simd_sort_block(logits, &indices, crossover(2), .asc);
 
     // Block size 4: crossover desc, merge 1
-    simd_sort_block(logits, &indices, crossover(4), .desc);
-    simd_sort_block(logits, &indices, merge(1), .asc);
+    simd_sort_block(logits, &indices, crossover(4), .asc);
+    simd_sort_block(logits, &indices, merge(1), .desc);
 
     // Block size 8: crossover desc, merge 2, merge 1
-    simd_sort_block(logits, &indices, crossover(8), .desc);
-    simd_sort_block(logits, &indices, merge(2), .asc);
-    simd_sort_block(logits, &indices, merge(1), .asc);
+    simd_sort_block(logits, &indices, crossover(8), .asc);
+    simd_sort_block(logits, &indices, merge(2), .desc);
+    simd_sort_block(logits, &indices, merge(1), .desc);
 
     // Block size 16: crossover desc, merge 4, merge 2, merge 1
     simd_sort_block(logits, &indices, crossover(16), .desc);
@@ -39,30 +39,30 @@ pub fn bitonic_1(logits: *VF) VI {
     return indices;
 }
 
-const REVERSE: VS = .{15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0};
+const REVERSE: VS = .{ 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 };
 
 pub fn bitonic_2(logits: *[2]VF) [2]VI {
     var indices: [2]VI = .{
         .{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 },
-        .{ 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31},
+        .{ 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31 },
     };
 
-    // TODO: reorder these steps to improve instruction-level parallelism
+    // TODO: consider reordering these steps to improve instruction-level parallelism
     inline for (0..2) |i| {
         // Block size 2: crossover desc
-        simd_sort_block(&logits[i], &indices[i], crossover(2), .desc);
+        simd_sort_block(&logits[i], &indices[i], crossover(2), .asc);
 
         // Block size 4: crossover desc, merge 1
-        simd_sort_block(&logits[i], &indices[i], crossover(4), .desc);
-        simd_sort_block(&logits[i], &indices[i], merge(1), .asc);
+        simd_sort_block(&logits[i], &indices[i], crossover(4), .asc);
+        simd_sort_block(&logits[i], &indices[i], merge(1), .desc);
 
         // Block size 8: crossover desc, merge 2, merge 1
-        simd_sort_block(&logits[i], &indices[i], crossover(8), .desc);
-        simd_sort_block(&logits[i], &indices[i], merge(2), .asc);
-        simd_sort_block(&logits[i], &indices[i], merge(1), .asc);
+        simd_sort_block(&logits[i], &indices[i], crossover(8), .asc);
+        simd_sort_block(&logits[i], &indices[i], merge(2), .desc);
+        simd_sort_block(&logits[i], &indices[i], merge(1), .desc);
 
-        // Block size 16: crossover desc, merge 4, merge 2, merge 1
-        simd_sort_block(&logits[i], &indices[i], crossover(16), .desc);
+        // Block size 16: crossover asc, merge 4, merge 2, merge 1
+        simd_sort_block(&logits[i], &indices[i], crossover(16), .asc);
         simd_sort_block(&logits[i], &indices[i], merge(4), .desc);
         simd_sort_block(&logits[i], &indices[i], merge(2), .desc);
         simd_sort_block(&logits[i], &indices[i], merge(1), .desc);
@@ -72,7 +72,7 @@ pub fn bitonic_2(logits: *[2]VF) [2]VI {
     const reverse_second_half_v = @shuffle(f32, logits[1], undefined, REVERSE);
     const reverse_second_half_i = @shuffle(u32, indices[1], undefined, REVERSE);
 
-    const compare = reverse_second_half_v > logits[0];
+    const compare = reverse_second_half_v < logits[0];
 
     logits[1] = @select(f32, compare, logits[0], reverse_second_half_v);
     indices[1] = @select(u32, compare, indices[0], reverse_second_half_i);
@@ -81,7 +81,7 @@ pub fn bitonic_2(logits: *[2]VF) [2]VI {
     indices[0] = @select(u32, compare, reverse_second_half_i, indices[0]);
 
     inline for (0..2) |i| {
-        // Block size 32: crossover desc
+        // Block size 32: final merges asc
         simd_sort_block(&logits[i], &indices[i], merge(8), .desc);
         simd_sort_block(&logits[i], &indices[i], merge(4), .desc);
         simd_sort_block(&logits[i], &indices[i], merge(2), .desc);
@@ -95,20 +95,20 @@ pub fn bitonic_2(logits: *[2]VF) [2]VI {
 
 fn crossover(comptime blocksize: usize) SimdParams {
     return switch (blocksize) {
-      2 => .{.{1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 15, 14 }, @bitCast(@as(u16, 0b1010_1010_1010_1010)) },
-      4 => .{.{3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12 }, @bitCast(@as(u16, 0b1100_1100_1100_1100)) },
-      8 => .{.{7, 6, 5, 4, 3, 2, 1, 0, 15, 14, 13, 12, 11, 10, 9, 8 }, @bitCast(@as(u16, 0b1111_0000_1111_0000)) },
-      16 => .{.{15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 }, @bitCast(@as(u16, 0b1111_1111_0000_0000)) },
-      else => @compileError("unsupported blocksize"),
+        2 => .{ .{ 1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 15, 14 }, @bitCast(@as(u16, 0b1010_1010_1010_1010)) },
+        4 => .{ .{ 3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12 }, @bitCast(@as(u16, 0b1100_1100_1100_1100)) },
+        8 => .{ .{ 7, 6, 5, 4, 3, 2, 1, 0, 15, 14, 13, 12, 11, 10, 9, 8 }, @bitCast(@as(u16, 0b1111_0000_1111_0000)) },
+        16 => .{ .{ 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 }, @bitCast(@as(u16, 0b1111_1111_0000_0000)) },
+        else => @compileError("unsupported blocksize"),
     };
 }
 
 fn merge(comptime stride: usize) SimdParams {
-    return switch(stride) {
-        1 => .{.{1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 15, 14 }, @bitCast(@as(u16, 0b1010_1010_1010_1010)) },
-        2 => .{.{2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13 }, @bitCast(@as(u16, 0b1100_1100_1100_1100)) },
-        4 => .{.{4, 5, 6, 7, 0, 1, 2, 3, 12, 13, 14, 15, 8, 9, 10, 11 }, @bitCast(@as(u16, 0b1111_0000_1111_0000)) },
-        8 => .{.{8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7 }, @bitCast(@as(u16, 0b1111_1111_0000_0000)) },
+    return switch (stride) {
+        1 => .{ .{ 1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 15, 14 }, @bitCast(@as(u16, 0b1010_1010_1010_1010)) },
+        2 => .{ .{ 2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13 }, @bitCast(@as(u16, 0b1100_1100_1100_1100)) },
+        4 => .{ .{ 4, 5, 6, 7, 0, 1, 2, 3, 12, 13, 14, 15, 8, 9, 10, 11 }, @bitCast(@as(u16, 0b1111_0000_1111_0000)) },
+        8 => .{ .{ 8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7 }, @bitCast(@as(u16, 0b1111_1111_0000_0000)) },
         else => @compileError("unsupported stride"),
     };
 }
@@ -121,8 +121,8 @@ fn simd_sort_block(values: *VF, indices: *VI, comptime simd_params: SimdParams, 
     const permuted_i = @shuffle(u32, indices.*, undefined, permutation);
 
     const compare = switch (direction) {
-        .asc => (permuted_v < values.*) != mask,
-        .desc => (permuted_v < values.*) == mask,
+        .desc => (permuted_v < values.*) != mask,
+        .asc => (permuted_v < values.*) == mask,
     };
 
     values.* = @select(f32, compare, permuted_v, values.*);
@@ -161,9 +161,9 @@ fn check_bitonic_1(_: void, bytes: []const u8) !void {
     // Sort it
     const indices = bitonic_1(&vec);
 
-    // Check that vec is sorted in descending order
+    // Check that vec is sorted in ascending order
     for (1..VECTOR_SIZE) |i| {
-        try std.testing.expect(vec[i - 1] >= vec[i]);
+        try std.testing.expect(vec[i - 1] <= vec[i]);
     }
 
     // Check that indices correctly map sorted values back to original positions
@@ -177,9 +177,9 @@ test "bitonic sort basic test" {
     const original = vec;
     const indices = bitonic_1(&vec);
 
-    // Check that vec is sorted in descending order
+    // Check that vec is sorted in ascending order
     for (1..VECTOR_SIZE) |i| {
-        try std.testing.expect(vec[i - 1] >= vec[i]);
+        try std.testing.expect(vec[i - 1] <= vec[i]);
     }
 
     // Check that indices correctly map sorted values back to original positions
@@ -205,9 +205,9 @@ fn check_bitonic_2(_: void, bytes: []const u8) !void {
     const indices: [32]u32 = @bitCast(result_indices);
     const sorted: [32]f32 = @bitCast(vecs);
 
-    // Check that the entire 32-element sequence is sorted in descending order
+    // Check that the entire 32-element sequence is sorted in ascending order
     for (1..32) |i| {
-        try std.testing.expect(sorted[i - 1] >= sorted[i]);
+        try std.testing.expect(sorted[i - 1] <= sorted[i]);
     }
 
     // Check that all 32 indices correctly map sorted values back to original positions
@@ -227,9 +227,9 @@ test "bitonic sort 2 basic test" {
     const indices: [32]u32 = @bitCast(result_indices);
     const sorted: [32]f32 = @bitCast(vecs);
 
-    // Check that the entire 32-element sequence is sorted in descending order
+    // Check that the entire 32-element sequence is sorted in ascending order
     for (1..32) |i| {
-        try std.testing.expect(sorted[i - 1] >= sorted[i]);
+        try std.testing.expect(sorted[i - 1] <= sorted[i]);
     }
 
     // Check that all 32 indices correctly map sorted values back to original positions
