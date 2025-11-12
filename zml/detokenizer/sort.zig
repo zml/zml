@@ -15,7 +15,7 @@ const VM = @Vector(VECTOR_SIZE, bool);
 const Direction = enum { asc, desc };
 const SimdParams = struct {VS, VM};
 
-fn bitonic_sort_1(logits: *VF) VI {
+pub fn bitonic_1(logits: *VF) VI {
     var indices: VI = .{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
 
     // Block size 2: crossover desc
@@ -41,12 +41,13 @@ fn bitonic_sort_1(logits: *VF) VI {
 
 const REVERSE: VS = .{15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0};
 
-fn bitonic_sort_2(logits: *[2]VF) [2]VI {
+pub fn bitonic_2(logits: *[2]VF) [2]VI {
     var indices: [2]VI = .{
         .{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 },
         .{ 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31},
     };
 
+    // TODO: reorder these steps to improve instruction-level parallelism
     inline for (0..2) |i| {
         // Block size 2: crossover desc
         simd_sort_block(&logits[i], &indices[i], crossover(2), .desc);
@@ -73,14 +74,11 @@ fn bitonic_sort_2(logits: *[2]VF) [2]VI {
 
     const compare = reverse_second_half_v > logits[0];
 
-    const orig_logits_0 = logits[0];
-    const orig_indices_0 = indices[0];
+    logits[1] = @select(f32, compare, logits[0], reverse_second_half_v);
+    indices[1] = @select(u32, compare, indices[0], reverse_second_half_i);
 
     logits[0] = @select(f32, compare, reverse_second_half_v, logits[0]);
     indices[0] = @select(u32, compare, reverse_second_half_i, indices[0]);
-
-    logits[1] = @select(f32, compare, orig_logits_0, reverse_second_half_v);
-    indices[1] = @select(u32, compare, orig_indices_0, reverse_second_half_i);
 
     inline for (0..2) |i| {
         // Block size 32: crossover desc
@@ -161,7 +159,7 @@ fn check_bitonic_1(_: void, bytes: []const u8) !void {
     const original = vec;
 
     // Sort it
-    const indices = bitonic_sort_1(&vec);
+    const indices = bitonic_1(&vec);
 
     // Check that vec is sorted in descending order
     for (1..VECTOR_SIZE) |i| {
@@ -177,7 +175,7 @@ fn check_bitonic_1(_: void, bytes: []const u8) !void {
 test "bitonic sort basic test" {
     var vec: VF = .{ 0.5, 0.2, 0.9, 0.1, 0.4, 0.8, 0.3, 0.7, 0.6, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75 };
     const original = vec;
-    const indices = bitonic_sort_1(&vec);
+    const indices = bitonic_1(&vec);
 
     // Check that vec is sorted in descending order
     for (1..VECTOR_SIZE) |i| {
@@ -203,7 +201,7 @@ fn check_bitonic_2(_: void, bytes: []const u8) !void {
     const originals: [32]f32 = @bitCast(vecs);
 
     // Sort them
-    const result_indices = bitonic_sort_2(&vecs);
+    const result_indices = bitonic_2(&vecs);
     const indices: [32]u32 = @bitCast(result_indices);
     const sorted: [32]f32 = @bitCast(vecs);
 
@@ -225,7 +223,7 @@ test "bitonic sort 2 basic test" {
     };
 
     const originals: [32]f32 = @bitCast(vecs);
-    const result_indices = bitonic_sort_2(&vecs);
+    const result_indices = bitonic_2(&vecs);
     const indices: [32]u32 = @bitCast(result_indices);
     const sorted: [32]f32 = @bitCast(vecs);
 
