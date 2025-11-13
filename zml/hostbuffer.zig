@@ -317,15 +317,17 @@ pub const HostBuffer = struct {
     }
 
     pub fn format(self: HostBuffer, writer: *std.Io.Writer) !void {
+        std.log.warn("==========================================format==========================================", .{});
         try writer.print("HostBuffer(.{f})@{x}", .{ self._shape, @intFromPtr(self._data) });
     }
 
     pub fn formatNumber(self: HostBuffer, writer: *std.io.Writer, n: std.fmt.Number) std.io.Writer.Error!void {
-        return self.prettyPrintIndented(writer, 4, 0, n);
+        return self.prettyPrintIndented(writer, 20, 0, n);
     }
 
     pub fn prettyPrint(self: HostBuffer, writer: *std.Io.Writer, options: std.fmt.Number) !void {
-        return self.prettyPrintIndented(writer, 4, 0, options);
+        std.log.warn("==========================================prettyPrint==========================================", .{});
+        return self.prettyPrintIndented(writer, 20, 0, options);
     }
 
     fn prettyPrintIndented(self: HostBuffer, writer: *std.Io.Writer, num_rows: u8, indent_level: u8, options: std.fmt.Number) !void {
