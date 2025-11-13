@@ -69,9 +69,9 @@ pub fn load() !*const pjrt.Api {
 
     {
         var lib_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path = try stdx.fs.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libnvToolsExt.so.1" });
+        const path = try stdx.fs.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libnvtx3interop.so" });
         _ = std.c.dlopen(path, .{ .NOW = true, .GLOBAL = true }) orelse {
-            log.err("Unable to dlopen libnvToolsExt.so.1: {s}", .{std.c.dlerror().?});
+            log.err("Unable to dlopen libnvtx3interop.so: {s}", .{std.c.dlerror().?});
             return error.DlError;
         };
     }

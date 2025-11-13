@@ -20,6 +20,7 @@ copy_to_directory(
         "@cuda_cudart",
         "@cuda_cupti",
         "@cuda_nvcc",
+        "@libnvvm",
         "@cuda_nvrtc",
         "@cuda_nvtx",
         "@cudnn",
