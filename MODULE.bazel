@@ -30,7 +30,7 @@ bazel_dep(name = "buildifier_prebuilt", version = "8.2.0.2", dev_dependency = Tr
 
 zig = use_extension("@rules_zig//zig:extensions.bzl", "zig")
 zig.index(file = "//bazel:zig_index.json")
-zig.toolchain(zig_version = "0.15.2")
+zig.toolchain(zig_version = "0.16.0-dev.1316+181b25ce4")
 zig.mirrors(urls = [
     "https://mirror.zml.ai/zig",
     "https://ziglang.org/builds/",
