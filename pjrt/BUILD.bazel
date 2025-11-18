@@ -1,16 +1,31 @@
+load("@com_google_protobuf//bazel:upb_proto_library.bzl", "upb_c_proto_library")
 load("@rules_zig//zig:defs.bzl", "zig_library")
 
 zig_library(
     name = "pjrt",
-    srcs = ["ffi.zig"],
+    srcs = [
+        "ffi.zig",
+        "profiler.zig",
+    ],
     main = "pjrt.zig",
     visibility = ["//visibility:public"],
+    zigopts = [
+        "-lc",
+        "-freference-trace=20",
+    ],
     deps = [
+        ":profiler_options_proto",
         "//stdx",
         "@xla//xla/ffi/api:c_api",
         "@xla//xla/pjrt/c:pjrt_c_api_ffi_extension_hdrs",
         "@xla//xla/pjrt/c:pjrt_c_api_gpu_extension_hdrs",
         "@xla//xla/pjrt/c:pjrt_c_api_hdrs",
+        "@xla//xla/pjrt/c:pjrt_c_api_profiler_extension_hdrs",
         "@xla//xla/pjrt/c:pjrt_c_api_triton_extension_hdrs",
     ],
+)
+
+upb_c_proto_library(
+    name = "profiler_options_proto",
+    deps = ["@xla//third_party/tsl/tsl/profiler/protobuf:profiler_options_proto"],
 )

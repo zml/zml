@@ -53,6 +53,10 @@ pub fn asyncMain() !void {
     const platform = context.autoPlatform(.{});
     context.printAvailablePlatforms(platform);
 
+    const profiler = platform.getProfiler(.{});
+    try profiler.start();
+    defer profiler.stop();
+
     // Parse program args
     const process_args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, process_args);

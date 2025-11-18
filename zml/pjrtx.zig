@@ -119,6 +119,13 @@ pub const Client = opaque {
         return try async.callBlocking(compileSync, .{ self, api, allocator, module, compile_options_pb });
     }
 
+    /// Returns the Profiler for this API.
+    /// Not all platform have a profiling api, for those the profiler object will do nothing.
+    /// Platforms with known profiler extensions: cuda, xpu
+    pub fn getProfiler(self: *const Client, api: *const Api, options: pjrt.Profiler.Options) pjrt.Profiler {
+        return self.inner().getProfiler(api, options);
+    }
+
     pub fn addressableMemories(self: *const Client, api: *const Api) []*const Memory {
         return self.inner().addressableMemories(api);
     }

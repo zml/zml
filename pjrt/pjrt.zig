@@ -5,6 +5,7 @@ const c = @import("c");
 const stdx = @import("stdx");
 
 pub const ffi = @import("ffi.zig");
+pub const Profiler = @import("profiler.zig").Profiler;
 
 const log = std.log.scoped(.pjrt);
 
@@ -388,6 +389,19 @@ pub const Client = opaque {
             @ptrCast(ret.buffer.?),
             @ptrCast(ret.done_with_host_buffer),
         };
+    }
+
+    /// Returns the Profiler for this API.
+    /// Not all platform have a profiling api, for those the profiler object will do nothing.
+    /// Platforms with known profiler extensions: cuda, xpu
+    pub fn getProfiler(self: *const Client, api: *const Api, options: Profiler.Options) Profiler {
+        if (api.version().minor >= 45) {
+            if (api.lookupExtension(c.PJRT_Profiler_Extension, c.PJRT_Extension_Type_Profiler)) |ext| {
+                return Profiler.init(ext.profiler_api.*, options);
+            }
+        }
+        log.warn("No profiler found for platform: {}", .{self});
+        return Profiler.init(null, null);
     }
 
     pub fn deserializeAndLoad(self: *const Client, api: *const Api, bytes: []const u8) ApiError!*LoadedExecutable {
