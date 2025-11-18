@@ -9,10 +9,6 @@ zig_library(
     ],
     main = "pjrt.zig",
     visibility = ["//visibility:public"],
-    zigopts = [
-        "-lc",
-        "-freference-trace=20",
-    ],
     deps = [
         ":profiler_options_proto",
         "//stdx",

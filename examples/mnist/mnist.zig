@@ -53,9 +53,12 @@ pub fn asyncMain() !void {
     const platform = context.autoPlatform(.{});
     context.printAvailablePlatforms(platform);
 
-    const profiler = platform.getProfiler(.{});
-    try profiler.start();
-    defer profiler.stop();
+    var profiler = platform.getProfiler(.{});
+    profiler.start();
+    defer {
+        profiler.stop();
+        profiler.dumpDataTo(std.heap.c_allocator, std.fs.openDirAbsolute("/home/hugo/zml", .{}) catch unreachable, "prof") catch unreachable;
+    }
 
     // Parse program args
     const process_args = try std.process.argsAlloc(allocator);
