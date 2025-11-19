@@ -24,6 +24,8 @@ zig_library(
         "aio/json.zig",
         "aio/safetensors.zig",
         "aio/tinyllama.zig",
+        "io.zig",
+        "io/file.zig",
         "buffer.zig",
         "context.zig",
         "dtype.zig",

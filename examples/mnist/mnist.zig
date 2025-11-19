@@ -41,81 +41,101 @@ pub fn main() !void {
 }
 
 pub fn asyncMain() !void {
-    const allocator = std.heap.c_allocator;
+    const allocator = std.heap.smp_allocator;
 
-    // // Create ZML context
-    var context = try zml.Context.init();
-    defer context.deinit();
+    var file_loader: zml.io.file.Loader = .init();
+    defer file_loader.deinit();
 
-    // log.info("\n===========================\n==   ZML MNIST Example   ==\n===========================\n\n", .{});
+    var loader: zml.io.Loader = .init(allocator);
+    defer loader.deinit();
 
-    // // Auto-select platform
-    const platform = context.autoPlatform(.{});
-    context.printAvailablePlatforms(platform);
+    loader.register(.file, &file_loader);
 
-    // Parse program args
-    const process_args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, process_args);
-    const pt_model = process_args[1];
-    const t10kfilename = process_args[2];
+    const resource = try loader.open(allocator, try std.Uri.parse("file:///Users/corendos/models/Llama-3.2-1B-Instruct/config.json?start=1&end=100"));
+    defer resource.deinit();
 
-    // Memory arena dedicated to model shapes and weights
-    var arena_state = std.heap.ArenaAllocator.init(allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
+    var read_buffer: [4096]u8 = undefined;
+    var reader = resource.reader(&read_buffer);
 
-    // Read model shapes.
-    // Note this works because Mnist struct uses the same layer names as the pytorch model
-    var buffer_store = try zml.aio.detectFormatAndOpen(allocator, pt_model);
-    defer buffer_store.deinit();
+    var write_buffer: [4096]u8 = undefined;
+    var writer = std.fs.File.stdout().writer(&write_buffer);
 
-    const mnist_model = try zml.aio.populateModel(Mnist, allocator, buffer_store);
-    log.info("Reading model shapes from PyTorch file {s}...", .{pt_model});
+    _ = try reader.interface().streamRemaining(&writer.interface);
+    try writer.interface.flush();
 
-    // Start compiling
-    log.info("Compiling model to MLIR....", .{});
-    var start_time = try std.time.Timer.start();
-    var compilation = try asynk.asyncc(zml.compile, .{ allocator, Mnist.forward, .{}, .{zml.Shape.init(.{ 28, 28 }, .u8)}, buffer_store, platform });
+    //// // Create ZML context
+    //var context = try zml.Context.init();
+    //defer context.deinit();
 
-    // While compiling, start loading weights on the platform
-    var model_weights = try zml.aio.loadModelBuffers(Mnist, mnist_model, buffer_store, arena, platform);
-    defer zml.aio.unloadBuffers(&model_weights);
+    //// log.info("\n===========================\n==   ZML MNIST Example   ==\n===========================\n\n", .{});
 
-    // Wait for end of compilation and end of weights loading.
-    const compiled_mnist = try compilation.awaitt();
-    log.info("✅ Compiled model in {d}ms", .{start_time.read() / std.time.ns_per_ms});
+    //// // Auto-select platform
+    //const platform = context.autoPlatform(.{});
+    //context.printAvailablePlatforms(platform);
 
-    const mnist = compiled_mnist.prepare(model_weights);
-    defer mnist.deinit();
-    log.info("✅ Weights transferred in {d}ms", .{start_time.read() / std.time.ns_per_ms});
+    //// Parse program args
+    //const process_args = try std.process.argsAlloc(allocator);
+    //defer std.process.argsFree(allocator, process_args);
+    //const pt_model = process_args[1];
+    //const t10kfilename = process_args[2];
 
-    log.info("Starting inference...", .{});
+    //// Memory arena dedicated to model shapes and weights
+    //var arena_state = std.heap.ArenaAllocator.init(allocator);
+    //defer arena_state.deinit();
+    //const arena = arena_state.allocator();
 
-    // Load a random digit image from the dataset.
-    const dataset = try asynk.File.open(t10kfilename, .{ .mode = .read_only });
-    defer dataset.close() catch unreachable;
-    var rng = std.Random.Xoshiro256.init(@intCast(std.time.timestamp()));
+    //// Read model shapes.
+    //// Note this works because Mnist struct uses the same layer names as the pytorch model
+    //var buffer_store = try zml.aio.detectFormatAndOpen(allocator, pt_model);
+    //defer buffer_store.deinit();
 
-    // inference - can be looped
-    {
-        const idx = rng.random().intRangeAtMost(u64, 0, 10000 - 1);
-        var sample: [28 * 28]u8 align(16) = undefined;
-        _ = try dataset.pread(&sample, 16 + (idx * 28 * 28));
-        var input = try zml.Buffer.from(platform, zml.HostBuffer.fromBytes(zml.Shape.init(.{ 28, 28 }, .u8), &sample), .{});
-        defer input.deinit();
+    //const mnist_model = try zml.aio.populateModel(Mnist, allocator, buffer_store);
+    //log.info("Reading model shapes from PyTorch file {s}...", .{pt_model});
 
-        printDigit(sample);
-        var result: zml.Buffer = mnist.call(.{input});
-        defer result.deinit();
+    //// Start compiling
+    //log.info("Compiling model to MLIR....", .{});
+    //var start_time = try std.time.Timer.start();
+    //var compilation = try asynk.asyncc(zml.compile, .{ allocator, Mnist.forward, .{}, .{zml.Shape.init(.{ 28, 28 }, .u8)}, buffer_store, platform });
 
-        log.info(
-            \\✅ RECOGNIZED DIGIT:
-            \\                       +-------------+
-            \\{s}
-            \\                       +-------------+
-            \\
-        , .{digits[try result.getValue(u8)]});
-    }
+    //// While compiling, start loading weights on the platform
+    //var model_weights = try zml.aio.loadModelBuffers(Mnist, mnist_model, buffer_store, arena, platform);
+    //defer zml.aio.unloadBuffers(&model_weights);
+
+    //// Wait for end of compilation and end of weights loading.
+    //const compiled_mnist = try compilation.awaitt();
+    //log.info("✅ Compiled model in {d}ms", .{start_time.read() / std.time.ns_per_ms});
+
+    //const mnist = compiled_mnist.prepare(model_weights);
+    //defer mnist.deinit();
+    //log.info("✅ Weights transferred in {d}ms", .{start_time.read() / std.time.ns_per_ms});
+
+    //log.info("Starting inference...", .{});
+
+    //// Load a random digit image from the dataset.
+    //const dataset = try asynk.File.open(t10kfilename, .{ .mode = .read_only });
+    //defer dataset.close() catch unreachable;
+    //var rng = std.Random.Xoshiro256.init(@intCast(std.time.timestamp()));
+
+    //// inference - can be looped
+    //{
+    //    const idx = rng.random().intRangeAtMost(u64, 0, 10000 - 1);
+    //    var sample: [28 * 28]u8 align(16) = undefined;
+    //    _ = try dataset.pread(&sample, 16 + (idx * 28 * 28));
+    //    var input = try zml.Buffer.from(platform, zml.HostBuffer.fromBytes(zml.Shape.init(.{ 28, 28 }, .u8), &sample), .{});
+    //    defer input.deinit();
+
+    //    printDigit(sample);
+    //    var result: zml.Buffer = mnist.call(.{input});
+    //    defer result.deinit();
+
+    //    log.info(
+    //        \\✅ RECOGNIZED DIGIT:
+    //        \\                       +-------------+
+    //        \\{s}
+    //        \\                       +-------------+
+    //        \\
+    //    , .{digits[try result.getValue(u8)]});
+    //}
 }
 
 fn printDigit(digit: [28 * 28]u8) void {

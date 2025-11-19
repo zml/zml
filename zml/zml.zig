@@ -45,6 +45,7 @@ pub const torch = @import("torch.zig");
 pub const upb = @import("upb");
 pub const c = @import("c");
 pub const partitioning = @import("partitioning.zig");
+pub const io = @import("io.zig");
 
 // pub const tokenizer = @import("tokenizer.zig");
 pub const tools = struct {
