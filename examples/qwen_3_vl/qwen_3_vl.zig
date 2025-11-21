@@ -158,10 +158,7 @@ pub const Qwen3VL = struct {
         const image_hwc = image_buffer_hwc;
         const in_ids = input_ids;
         const pixel_value, const image_grid_thw = self.processImage(image_hwc, image_dim, h_resized, w_resized);
-        var next_token, var next_position, const updated_cache, var mrope_position_deltas = zml.call(self.qwen, .forward, .{ in_ids, pixel_value, image_dim, token_index, image_grid_thw, kv_cache, prompt_shape });
-        next_token = next_token.print();
-        next_position = next_position.print();
-        mrope_position_deltas = mrope_position_deltas.print();
+        const next_token, const next_position, const updated_cache, const mrope_position_deltas = zml.call(self.qwen, .forward, .{ in_ids, pixel_value, image_dim, token_index, image_grid_thw, kv_cache, prompt_shape });
         return .{ next_token, next_position, updated_cache, mrope_position_deltas };
     }
 
@@ -221,10 +218,7 @@ pub const Qwen3VL = struct {
     }
 
     pub fn forward_decode(self: Qwen3VL, input_ids: Tensor, cache_position: Tensor, kv_cache: KvCache, mrope_position_deltas: Tensor) struct { Tensor, Tensor, KvCache, Tensor } {
-        var next_token, var next_position, const updated_cache, var updated_mrope_position_deltas = zml.call(self.qwen, .forward_decode, .{ input_ids, cache_position, kv_cache, mrope_position_deltas });
-        next_token = next_token.print();
-        next_position = next_position.print();
-        updated_mrope_position_deltas = updated_mrope_position_deltas.print();
+        const next_token, const next_position, const updated_cache, const updated_mrope_position_deltas = zml.call(self.qwen, .forward_decode, .{ input_ids, cache_position, kv_cache, mrope_position_deltas });
         return .{ next_token.convert(.u32), next_position, updated_cache, updated_mrope_position_deltas };
     }
 };
@@ -322,15 +316,13 @@ pub const Qwen = struct {
         // position_ids = position_ids.dynamicUpdateSlice(.{ .seq = num_image_tokens.add(text_before_image) }, end_text_position);
         const vision_ids = buildVisionPositionIds(position_ids, image_grid_thw);
         position_ids = zml.Tensor.stack(&.{ vision_ids.temporal, vision_ids.height, vision_ids.width }, 0, .g);
-        position_ids = position_ids.print();
         log.info("position_ids: {f}", .{position_ids.shape()});
 
         //position max after 3d compression - real seq len
         const position_max_after_3d_compression = zml.Tensor.scalar(@max(llm_grid_w, llm_grid_h, llm_grid_t), .i32).add(text_after_image).add(text_before_image);
         const real_seq_len = text_before_image.add(text_after_image).add(num_image_tokens);
-        var mrope_position_deltas = position_max_after_3d_compression.sub(real_seq_len).reshape(.{ .seq = 1 });
+        const mrope_position_deltas = position_max_after_3d_compression.sub(real_seq_len).reshape(.{ .seq = 1 });
 
-        mrope_position_deltas = mrope_position_deltas.print();
         const mock_cache_position = zml.Tensor.scalar(0, .i64);
         const hidden, const updated_cache = zml.call(self.text_model, .forward, .{ position_ids, causal_mask, text_with_image, mock_cache_position, image_mask, deepstack_features, kv_cache });
         const logits = projectToVocab(hidden, self.text_model.embed_tokens.weight);
@@ -345,8 +337,7 @@ pub const Qwen = struct {
     pub fn forward_decode(self: Qwen, input_ids: Tensor, cache_position: Tensor, kv_cache: KvCache, mrope_position_deltas: Tensor) struct { Tensor, Tensor, KvCache, Tensor } {
         const embedded = zml.call(self.text_model.embed_tokens, .forward, .{input_ids}).withTags(.{ .bs, .seq, .d });
         const attn_mask = buildDecodeMask(embedded, cache_position, kv_cache);
-        var position_ids = buildDecodePositionIds(cache_position, mrope_position_deltas);
-        position_ids = position_ids.print();
+        const position_ids = buildDecodePositionIds(cache_position, mrope_position_deltas);
         const hidden, const updated_cache = zml.call(self.text_model, .forward_decode, .{ position_ids, attn_mask, embedded, cache_position, kv_cache });
         const logits = projectToVocab(hidden, self.text_model.embed_tokens.weight);
         log.info("logits: {f}", .{logits.shape()});
