@@ -142,7 +142,6 @@ pub fn generateText(
     generation: for (0..token_gen) |i| {
         // collect and print generated sequence
         num_tokens_generated += 1;
-        log.info("num_tokens_generated: {d}", .{num_tokens_generated});
         const generated_token = generated_token_buffer[0];
         try generated_tokens.append(allocator, generated_token);
         if (try tokenizer_decoder.next(generated_token)) |chunk| {
@@ -155,7 +154,6 @@ pub fn generateText(
 
         // current token pos needs to go into a zml.Buffer
         const cache_position_buffer = &[_]i64{@intCast(total_seq_len - 1 + i)};
-        log.info("total_seq_len: {d}", .{total_seq_len});
         const cache_position = try zml.Buffer.fromSlice(platform, .{}, cache_position_buffer);
         defer cache_position.deinit();
 
