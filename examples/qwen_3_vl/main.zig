@@ -501,7 +501,7 @@ pub fn preprocessor(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Token
     log.info("height: {d}", .{height});
     log.info("width: {d}", .{width});
     const factor = preprocessor_config.patch_size * preprocessor_config.temporal_patch_size;
-    const min_pixels = 131072;
+    const min_pixels = preprocessor_config.size.shortest_edge;
     const max_pixels = preprocessor_config.size.longest_edge;
     stdx.debug.assert(@max(height, width) / @min(height, width) <= 200, "Invalid image size", .{});
     var h_resized = @round(@as(f64, @floatFromInt(height)) / @as(f64, @floatFromInt(factor))) * @as(f64, @floatFromInt(factor));
