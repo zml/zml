@@ -138,8 +138,8 @@ pub fn generateText(
 
     // Store the first token from prefill
     //try generated_tokens.append(allocator, generated_token_buffer[0]);
-    const token_gen = max_seq_len - total_seq_len - 1;
-    generation: for (0..token_gen) |i| {
+    //const token_gen = max_seq_len - total_seq_len - 1;
+    generation: for (0..5) |i| {
         // collect and print generated sequence
         num_tokens_generated += 1;
         const generated_token = generated_token_buffer[0];
@@ -153,7 +153,7 @@ pub fn generateText(
         if (generated_token == 151643 or generated_token == 151645) break :generation;
 
         // current token pos needs to go into a zml.Buffer
-        const cache_position_buffer = &[_]i64{@intCast(total_seq_len + i)};
+        const cache_position_buffer = &[_]i64{@intCast(total_seq_len - 1 + i)};
         log.info("total_seq_len: {d}", .{total_seq_len});
         const cache_position = try zml.Buffer.fromSlice(platform, .{}, cache_position_buffer);
         defer cache_position.deinit();
@@ -291,7 +291,7 @@ pub fn asyncMain() !void {
     };
 
     // Initialize ZML platform
-    const create_opts_json = cli.args.@"create-options" orelse "{}";
+    const create_opts_json = cli.args.@"create-options" orelse "{\"cpu\": {\"device_count\": 1}}";
     const create_opts = try std.json.parseFromSlice(zml.Platform.CreateOptions, allocator, create_opts_json, .{});
     const platform = context.autoPlatform(create_opts.value).withCompilationOptions(compilation_options);
     create_opts.deinit();

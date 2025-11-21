@@ -326,7 +326,7 @@ pub const Qwen = struct {
         log.info("position_ids: {f}", .{position_ids.shape()});
 
         //position max after 3d compression - real seq len
-        const position_max_after_3d_compression = zml.Tensor.scalar(@max(llm_grid_w, llm_grid_h, llm_grid_t), .i32).add(text_after_image).add(text_before_image).addConstant(1);
+        const position_max_after_3d_compression = zml.Tensor.scalar(@max(llm_grid_w, llm_grid_h, llm_grid_t), .i32).add(text_after_image).add(text_before_image);
         const real_seq_len = text_before_image.add(text_after_image).add(num_image_tokens);
         var mrope_position_deltas = position_max_after_3d_compression.sub(real_seq_len).reshape(.{ .seq = 1 });
 
@@ -334,7 +334,9 @@ pub const Qwen = struct {
         const mock_cache_position = zml.Tensor.scalar(0, .i64);
         const hidden, const updated_cache = zml.call(self.text_model, .forward, .{ position_ids, causal_mask, text_with_image, mock_cache_position, image_mask, deepstack_features, kv_cache });
         const logits = projectToVocab(hidden, self.text_model.embed_tokens.weight);
-        const next_token = logits.argMax(.voc).indices.squeeze(.voc).slice1d(.seq, .{ .start = 77, .end = 78 });
+        const indices = logits.argMax(.voc).indices.squeeze(.voc);
+        const last_pos = real_seq_len.addConstant(-1).asScalar();
+        const next_token = indices.dynamicSlice1d(indices.axis(.seq), .{ .start = last_pos, .len = 1 }).withTags(.{ .bs, .seq });
         const next_position = cache_position.withTags(.{.seq}).slice1d(.seq, .{ .start = cache_position.dim(0) - 1, .end = cache_position.dim(0) }).addConstant(1);
         return .{ next_token, next_position, updated_cache, mrope_position_deltas };
         //return hidden;
@@ -347,6 +349,7 @@ pub const Qwen = struct {
         position_ids = position_ids.print();
         const hidden, const updated_cache = zml.call(self.text_model, .forward_decode, .{ position_ids, attn_mask, embedded, cache_position, kv_cache });
         const logits = projectToVocab(hidden, self.text_model.embed_tokens.weight);
+        log.info("logits: {f}", .{logits.shape()});
         const next_token = logits.argMax(.voc).indices.squeeze(.voc).slice1d(.seq, .{ .start = logits.dim(.seq) - 1, .end = logits.dim(.seq) });
         const next_position = cache_position.addConstant(1);
         return .{ next_token, next_position, updated_cache, mrope_position_deltas };
