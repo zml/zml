@@ -138,10 +138,11 @@ pub fn generateText(
 
     // Store the first token from prefill
     //try generated_tokens.append(allocator, generated_token_buffer[0]);
-    const token_gen = max_seq_len - total_seq_len - 1;
+    const token_gen = max_seq_len - total_seq_len;
     generation: for (0..token_gen) |i| {
         // collect and print generated sequence
         num_tokens_generated += 1;
+        log.info("num_tokens_generated: {d}", .{num_tokens_generated});
         const generated_token = generated_token_buffer[0];
         try generated_tokens.append(allocator, generated_token);
         if (try tokenizer_decoder.next(generated_token)) |chunk| {
