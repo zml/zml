@@ -6,38 +6,198 @@ const clap = @import("clap");
 const stdx = @import("stdx");
 const floats = zml.floats;
 
-const shapesOf = zml.shapesOf;
-
-const params = clap.parseParamsComptime(
-    \\--help                 print this help
-    \\--hf-model-path <STRING>   path to the directory containing model weights, config, tokenizer
-    \\--activations    <STRING>   path to the activations .pt file
-    \\--create-options <STRING>   platform creation options JSON, defaults to {}
-);
-
 const log = std.log.scoped(.qwen);
 
 test {
-    // enregistre tous les tests
     std.testing.refAllDecls(@This());
 }
 
 pub const std_options: std.Options = .{
-    .log_level = .debug,
+    .log_level = .info,
     .logFn = async.logFn(std.log.defaultLog),
-    .log_scope_levels = &[_]std.log.ScopeLevel{
-        .{ .scope = .@"zml/async", .level = .info },
-    },
 };
+
+const params = clap.parseParamsComptime(
+    \\--help                      print this help
+    \\--prompt         <STRING>   the prompt
+    \\--image          <STRING>   path to the image file (BMP format)
+    \\--hf-model-path  <STRING>   path to the directory containing model weights, config and tokenizer
+    \\--activations    <STRING>   path to the activations .pt file (unused, kept for compatibility)
+    \\--seed           <UINT>     random seed (optional)
+    \\--seq-len        <UINT>     sequence length (default: 512)
+    \\--create-options <STRING>   platform creation options JSON, defaults to {}
+);
+
+pub fn generateText(
+    config: qwen.Qwen.Config,
+    _: qwen.Qwen3VL,
+    mod_prefill: zml.ModuleExe(qwen.Qwen3VL.forward),
+    mod_decode: zml.ModuleExe(qwen.Qwen3VL.forward_decode),
+    kv_cache_: zml.Bufferized(qwen.KvCache),
+    tokenizer: zml.tokenizer.Tokenizer,
+    allocator: std.mem.Allocator,
+    prompt: []const u8,
+    image_path: []const u8,
+    preprocessor_config: PreprocessorConfig,
+    max_seq_len: u32,
+    writer: *std.Io.Writer,
+) !void {
+    // Preprocess image and prompt
+    const preprocessor_input = try preprocessor(
+        allocator,
+        tokenizer,
+        prompt,
+        config,
+        preprocessor_config,
+        image_path,
+        max_seq_len,
+        1024, // max_side
+    );
+    defer {
+        preprocessor_input.image_buffer_chw.deinit(allocator);
+        preprocessor_input.prompt_tokens.deinit(allocator);
+        preprocessor_input.prompt_shape.deinit(allocator);
+        preprocessor_input.image_dim.deinit(allocator);
+        preprocessor_input.token_index.deinit(allocator);
+    }
+
+    const platform = mod_decode.platform();
+    var tokenizer_decoder = try tokenizer.decoder();
+    defer tokenizer_decoder.deinit();
+
+    // Extract prompt_shape values before converting to device buffer
+    const prompt_shape_values = preprocessor_input.prompt_shape.items(i32);
+    const text_before_image = @as(u32, @intCast(prompt_shape_values[0]));
+    const num_image_tokens = @as(u32, @intCast(prompt_shape_values[1]));
+    const text_after_image = @as(u32, @intCast(prompt_shape_values[2]));
+    log.info("text_before_image: {d}", .{text_before_image});
+    log.info("num_image_tokens: {d}", .{num_image_tokens});
+    log.info("text_after_image: {d}", .{text_after_image});
+    const total_seq_len = text_before_image + num_image_tokens + text_after_image;
+
+    // Prepare device buffers for prefill
+    const image_buffer_chw = try preprocessor_input.image_buffer_chw.toDevice(platform);
+    defer image_buffer_chw.deinit();
+
+    const prompt_tokens = try preprocessor_input.prompt_tokens.toDevice(platform);
+    defer prompt_tokens.deinit();
+
+    const prompt_shape = try preprocessor_input.prompt_shape.toDevice(platform);
+    defer prompt_shape.deinit();
+
+    const image_dim = try preprocessor_input.image_dim.toDevice(platform);
+    defer image_dim.deinit();
+
+    const token_index = try preprocessor_input.token_index.toDevice(platform);
+    defer token_index.deinit();
+
+    // Create a dummy pixel_value_mock for prefill (will be replaced by actual processing)
+    const pixel_value_mock_shape = zml.Shape.init(.{ .a = 1, .b = 1 }, .f32);
+    const pixel_value_mock = try zml.Buffer.uninitialized(platform, pixel_value_mock_shape, .{});
+    defer pixel_value_mock.deinit();
+
+    // init buffers
+    var generated_token_buffer = [_]u32{undefined};
+
+    // Prefill: process the full prompt with image
+    var kv_cache, var mrope_position_deltas = prefill: {
+        const next_token, const next_position, const kv_cache, const mrope_deltas = mod_prefill.call(.{
+            image_buffer_chw,
+            prompt_tokens,
+            image_dim,
+            token_index,
+            prompt_shape,
+            kv_cache_,
+
+            pixel_value_mock,
+        });
+        _ = next_position;
+
+        // Extract the generated token
+        _ = try next_token.toHost(std.mem.sliceAsBytes(&generated_token_buffer));
+
+        break :prefill .{ kv_cache, mrope_deltas };
+    };
+    defer zml.aio.unloadBuffers(&kv_cache);
+    defer mrope_position_deltas.deinit();
+
+    // Prepare for token-by-token generation,
+    // start with the token generated based on the full prompt.
+    var current_token = try zml.Buffer.fromSlice(platform, .{ .bs = 1, .seq = 1 }, &generated_token_buffer);
+    defer current_token.deinit();
+
+    const output_tokens_len = max_seq_len - total_seq_len - 1;
+    const start = std.time.microTimestamp();
+
+    // One token has already been generated by the prefill.
+    var num_tokens_generated: usize = 1;
+
+    // Store all generated tokens
+    var generated_tokens = try std.ArrayList(u32).initCapacity(allocator, output_tokens_len);
+    defer generated_tokens.deinit(allocator);
+
+    // Store the first token from prefill
+    //try generated_tokens.append(allocator, generated_token_buffer[0]);
+    const token_gen = max_seq_len - total_seq_len - 1;
+    generation: for (0..token_gen) |i| {
+        // collect and print generated sequence
+        num_tokens_generated += 1;
+        const generated_token = generated_token_buffer[0];
+        try generated_tokens.append(allocator, generated_token);
+        if (try tokenizer_decoder.next(generated_token)) |chunk| {
+            try writer.writeAll(chunk);
+        }
+
+        // check for eos
+        if (i == output_tokens_len) break :generation;
+        if (generated_token == 151643 or generated_token == 151645) break :generation;
+
+        // current token pos needs to go into a zml.Buffer
+        const cache_position_buffer = &[_]i64{@intCast(total_seq_len + i)};
+        log.info("total_seq_len: {d}", .{total_seq_len});
+        const cache_position = try zml.Buffer.fromSlice(platform, .{}, cache_position_buffer);
+        defer cache_position.deinit();
+
+        // call to generate the next token
+        const next_token, const next_position, const updated_kv_cache, const updated_mrope = mod_decode.call(.{ current_token, cache_position, kv_cache, mrope_position_deltas });
+        _ = next_position;
+
+        current_token = next_token;
+        kv_cache = updated_kv_cache;
+        mrope_position_deltas = updated_mrope;
+
+        // extract the generated token from the buffer
+        _ = try current_token.toHost(std.mem.sliceAsBytes(&generated_token_buffer));
+    }
+
+    const end = std.time.microTimestamp();
+    const duration = stdx.math.divFloat(f64, end - start, std.time.us_per_s);
+    const speed = @as(f64, @floatFromInt(num_tokens_generated)) / duration;
+
+    // Decode and print all generated tokens at the end
+    std.debug.print("\n", .{});
+    for (generated_tokens.items) |token| {
+        if (try tokenizer_decoder.next(token)) |chunk| {
+            try writer.writeAll(chunk);
+        }
+    }
+
+    std.debug.print("\n", .{});
+    log.info("✅ Generated {d} tokens in {:.3}s: {d:.3}tok/s", .{ num_tokens_generated, duration, speed });
+}
 
 pub fn main() !void {
     try async.AsyncThread.main(std.heap.c_allocator, asyncMain);
 }
 
 pub fn asyncMain() !void {
+    log.info("   Qwen3-VL was compiled with {}", .{@import("builtin").mode});
+
     const allocator = std.heap.c_allocator;
 
     const parsers = comptime .{
+        .BOOL = bool_parser,
+        .UINT = clap.parsers.int(u32, 0),
         .STRING = clap.parsers.string,
         .PATH = clap.parsers.string,
     };
@@ -67,20 +227,20 @@ pub fn asyncMain() !void {
         log.err("Missing --hf-model-path", .{});
         return;
     };
-    const activations_path = cli.args.activations orelse {
-        log.err("Missing --activations", .{});
+
+    const image_path = cli.args.image orelse {
+        log.err("Missing --image", .{});
         return;
     };
-    log.info("hf_model_path: {s}", .{hf_model_path});
-    log.info("activations_path: {s}", .{activations_path});
-    //const hf_model_path = "/home/louis/qwen3-vl-4b-instruct/qwen3-vl-4b-instruct";
+
+    // Handle activations argument (unused, kept for compatibility)
+    _ = cli.args.activations;
 
     const model_config_path = try std.fs.path.join(allocator, &.{ hf_model_path, "config.json" });
     defer allocator.free(model_config_path);
-    log.info("model_config_path: {s}", .{model_config_path});
+
     const model_weights_path = b: {
         const simple_path = try std.fs.path.join(allocator, &.{ hf_model_path, "model.safetensors" });
-        log.info("simple_path: {s}", .{simple_path});
         if (async.File.access(simple_path, .{})) {
             break :b simple_path;
         } else |_| {
@@ -88,15 +248,74 @@ pub fn asyncMain() !void {
         }
 
         const sharded_path = try std.fs.path.join(allocator, &.{ hf_model_path, "model.safetensors.index.json" });
-        log.info("sharded_path: {s}", .{sharded_path});
         break :b sharded_path;
     };
-    log.info("model_weights_path: {s}", .{model_weights_path});
     defer allocator.free(model_weights_path);
 
     const model_tokenizer_path = try std.fs.path.join(allocator, &.{ hf_model_path, "tokenizer.json" });
     defer allocator.free(model_tokenizer_path);
 
+    const preprocessor_config_path = try std.fs.path.join(allocator, &.{ hf_model_path, "preprocessor_config.json" });
+    defer allocator.free(preprocessor_config_path);
+
+    // Load config
+    const config = blk: {
+        var config_json_file = try async.File.open(model_config_path, .{ .mode = .read_only });
+        defer config_json_file.close() catch unreachable;
+        var config_json_buffer: [256]u8 = undefined;
+        var config_reader = config_json_file.reader(&config_json_buffer);
+        var reader = std.json.Reader.init(allocator, &config_reader.interface);
+        defer reader.deinit();
+        const config_obj = try std.json.parseFromTokenSourceLeaky(qwen.Qwen.Config, allocator, &reader, .{ .ignore_unknown_fields = true });
+        break :blk config_obj;
+    };
+
+    // Load preprocessor config
+    const preprocessor_config = blk: {
+        var preprocessor_config_json_file = try async.File.open(preprocessor_config_path, .{ .mode = .read_only });
+        defer preprocessor_config_json_file.close() catch unreachable;
+        var preprocessor_config_json_buffer: [256]u8 = undefined;
+        var preprocessor_config_reader = preprocessor_config_json_file.reader(&preprocessor_config_json_buffer);
+        var reader = std.json.Reader.init(allocator, &preprocessor_config_reader.interface);
+        defer reader.deinit();
+        const preprocessor_config_obj = try std.json.parseFromTokenSourceLeaky(PreprocessorConfig, allocator, &reader, .{ .ignore_unknown_fields = true });
+        break :blk preprocessor_config_obj;
+    };
+
+    var context = try zml.Context.init();
+    defer context.deinit();
+
+    const compilation_options = zml.CompilationOptions{
+        .xla_dump_to = "/tmp/zml/qwen3vl",
+        .sharding_enabled = true,
+    };
+
+    // Initialize ZML platform
+    const create_opts_json = cli.args.@"create-options" orelse "{}";
+    const create_opts = try std.json.parseFromSlice(zml.Platform.CreateOptions, allocator, create_opts_json, .{});
+    const platform = context.autoPlatform(create_opts.value).withCompilationOptions(compilation_options);
+    create_opts.deinit();
+    context.printAvailablePlatforms(platform);
+
+    var store = try zml.aio.detectFormatAndOpen(allocator, model_weights_path);
+    defer store.deinit();
+
+    // Initialize model
+    const seq_len: u32 = cli.args.@"seq-len" orelse 512;
+    const qwen_options: qwen.Qwen.Options = .{
+        .max_seq_len = seq_len,
+        .sampling_strategy = .{
+            .topk = 1,
+            .temperature = 1.0,
+        },
+    };
+
+    var compiler_arena = std.heap.ArenaAllocator.init(allocator);
+    defer compiler_arena.deinit();
+
+    const qwen_tensors: qwen.Qwen3VL = try qwen.Qwen3VL.init(compiler_arena.allocator(), config, qwen_options, store);
+
+    // Load tokenizer early (needed for preprocessor)
     var tokenizer = blk: {
         log.info("Loading tokenizer from {s}", .{model_tokenizer_path});
         var timer = try stdx.time.Timer.start();
@@ -106,128 +325,360 @@ pub fn asyncMain() !void {
     };
     errdefer tokenizer.deinit();
 
-    const config = blk: {
-        var config_json_file = try async.File.open(model_config_path, .{ .mode = .read_only });
-        defer config_json_file.close() catch unreachable;
-        var config_json_buffer: [256]u8 = undefined;
-        var config_reader = config_json_file.reader(&config_json_buffer);
-        var reader = std.json.Reader.init(allocator, &config_reader.interface);
-        defer reader.deinit();
-        const config_obj = try std.json.parseFromTokenSourceLeaky(qwen.Qwen3VL.Config, allocator, &reader, .{ .ignore_unknown_fields = true });
-        break :blk config_obj;
-    };
+    const prompt = cli.args.prompt orelse "Describe this image.";
 
-    // Load the activations.
-    //var activation_buffer_store = try zml.aio.torch.open(allocator, "/home/louis/zml/examples/qwen_3_vl/activations/qwen3-vl-4b-instruct.activations.pt");
-    var activation_buffer_store = try zml.aio.torch.open(allocator, activations_path);
-    try ensureStoreFloat32(&activation_buffer_store);
+    // Use preprocessor to calculate all needed values for compilation
+    const preprocessor_input = try preprocessor(
+        allocator,
+        tokenizer,
+        prompt,
+        config,
+        preprocessor_config,
+        image_path,
+        seq_len,
+        1024, // max_side
+    );
+    defer {
+        preprocessor_input.image_buffer_chw.deinit(allocator);
+        preprocessor_input.prompt_tokens.deinit(allocator);
+        preprocessor_input.prompt_shape.deinit(allocator);
+        preprocessor_input.image_dim.deinit(allocator);
+        preprocessor_input.token_index.deinit(allocator);
+    }
 
-    /////////////////Ajout du kv cache ///////////////////////////////
-    // Récupérer les paramètres nécessaires depuis la config
-    const num_layers = config.text_config.num_hidden_layers;
-    const num_kv_heads = config.text_config.num_key_value_heads;
-    const max_seq_len = 3000; // 256 dans votre cas
-    const hidden_size = config.text_config.hidden_size;
-    _ = hidden_size; // autofix
-    const num_heads = config.text_config.num_attention_heads;
-    _ = num_heads; // autofix
-    const head_dim = config.text_config.head_dim; // dimension par tête
+    // Use shapes from preprocessor for compilation
+    const image_buffer_shape = preprocessor_input.image_buffer_chw.shape();
+    const prompt_tokens_shape = preprocessor_input.prompt_tokens.shape();
+    const prompt_shape_shape = preprocessor_input.prompt_shape.shape();
+    const image_dim_shape = preprocessor_input.image_dim.shape();
+    const token_index_shape = preprocessor_input.token_index.shape();
+    const pixel_value_mock_shape = zml.Shape.init(.{ .a = 1, .b = 1 }, .f32);
 
-    const batch_size: u32 = 1; // ajustez selon vos besoins
-    _ = batch_size; // autofix
+    // Specify shapes for decode
+    const decode_input_ids_shape = zml.Shape.init(.{ .bs = 1, .seq = 1 }, .u32);
+    const decode_cache_position_shape = zml.Shape.init(.{}, .i64);
+    const decode_mrope_shape = zml.Shape.init(.{ .seq = 1 }, .i32);
 
-    // Créer les HostBuffers pour le KV cache
-    // Forme: [num_layers, batch_size, num_kv_heads, max_seq_len, head_dim]
+    const dtype = qwen_tensors.qwen.text_model.embed_tokens.weight.dtype();
     const kv_shape = zml.Shape.init(.{
-        @as(i64, num_layers),
-        @as(i64, max_seq_len),
-        @as(i64, num_kv_heads),
-        @as(i64, head_dim),
-    }, .f32);
+        .layer = config.text_config.num_hidden_layers,
+        .k = seq_len,
+        .h = config.text_config.num_key_value_heads,
+        .hd = config.text_config.head_dim,
+    }, dtype).withSharding(.{.h});
+    const kv_cache_shape: zml.ShapeOf(qwen.KvCache) = qwen.KvCache.initShape(kv_shape);
 
-    // Créer des buffers vides (initialisés à zéro)
-    var kv_k_buffer = try zml.HostBuffer.empty(activation_buffer_store.arena.allocator(), kv_shape);
-    var kv_v_buffer = try zml.HostBuffer.empty(activation_buffer_store.arena.allocator(), kv_shape);
-
-    // Initialiser à zéro (optionnel, empty() laisse la mémoire non initialisée)
-    // Si vous voulez initialiser à zéro ou à une valeur spécifique:
-    {
-        const k_items = kv_k_buffer.mutItems(f32);
-        @memset(k_items, 0);
-
-        const v_items = kv_v_buffer.mutItems(f32);
-        @memset(v_items, 0);
-    }
-
-    // Ajouter au BufferStore
-    try activation_buffer_store.buffers.put(activation_buffer_store.arena.allocator(), "model.in.5", kv_k_buffer);
-
-    try activation_buffer_store.buffers.put(activation_buffer_store.arena.allocator(), "model.in.6", kv_v_buffer);
-
-    // Ajouter le layer_index (scalaire u32 initialisé à 0)
-    const layer_index_shape = zml.Shape.init(.{}, .u32);
-    var layer_index_data: [1]u32 = .{0};
-    const layer_index_buffer = zml.HostBuffer.fromSlice(layer_index_shape, &layer_index_data);
-
-    try activation_buffer_store.buffers.put(activation_buffer_store.arena.allocator(), "model.in.7", layer_index_buffer);
-    log.info("activation_buffer_store: {s}", .{activations_path});
-    defer activation_buffer_store.deinit();
-
-    var iterator = activation_buffer_store.buffers.iterator();
-    while (iterator.next()) |entry| {
-        log.info("Buffer: {s} {f}", .{ entry.key_ptr.*, entry.value_ptr.shape() });
-    }
-
-    var context = try zml.Context.init();
-    defer context.deinit();
-
-    const compilation_options = zml.CompilationOptions{
-        .xla_dump_to = "/tmp/zml/qwen",
-        .sharding_enabled = false,
-    };
-
-    const create_opts_json = "{}";
-    const create_opts = try std.json.parseFromSlice(zml.Platform.CreateOptions, allocator, create_opts_json, .{});
-    const platform = context.autoPlatform(create_opts.value).withCompilationOptions(compilation_options);
-    create_opts.deinit();
-    context.printAvailablePlatforms(platform);
-
-    var store = try zml.aio.detectFormatAndOpen(allocator, model_weights_path);
-    try ensureStoreFloat32(&store);
-    defer store.deinit();
-
-    // Options pour Qwen3-VL
-    const qwen_options: qwen.Qwen3VL.Options = .{
-        .max_seq_len = 256,
-        .sampling_strategy = .{
-            .topk = 1,
-            .temperature = 1.0,
+    // Compile models asynchronously
+    var start = try std.time.Timer.start();
+    var fut_mod_prefill = try async.async(zml.compileModel, .{
+        allocator,
+        qwen.Qwen3VL.forward,
+        qwen_tensors,
+        .{
+            image_buffer_shape,
+            prompt_tokens_shape,
+            image_dim_shape,
+            token_index_shape,
+            prompt_shape_shape,
+            kv_cache_shape,
+            preprocessor_input.h_resized,
+            preprocessor_input.w_resized,
+            pixel_value_mock_shape,
         },
-    };
+        platform,
+    });
 
-    // Arena pour la compilation
-    var compiler_arena = std.heap.ArenaAllocator.init(allocator);
-    defer compiler_arena.deinit();
+    var fut_mod_decode = try async.async(zml.compileModel, .{
+        allocator,
+        qwen.Qwen3VL.forward_decode,
+        qwen_tensors,
+        .{
+            decode_input_ids_shape,
+            decode_cache_position_shape,
+            kv_cache_shape,
+            decode_mrope_shape,
+        },
+        platform,
+    });
 
-    const qwen_tensors: qwen.Qwen3VL = try .init(compiler_arena.allocator(), config, qwen_options, store);
-
-    log.info("Qwen3-VL loaded!", .{});
-
-    log.info("\tLoading Llama weights from {s}...", .{model_weights_path});
+    // Load weights while compiling
+    log.info("\tLoading Qwen3-VL weights from {s}...", .{model_weights_path});
     var qwen_buffers = try store.loadModelById(qwen.Qwen3VL, compiler_arena.allocator(), qwen_tensors, platform);
     defer zml.aio.unloadBuffers(&qwen_buffers);
-    try testImplementation(platform, qwen_tensors, qwen_buffers, activation_buffer_store);
-    // Unbuffered writing of the tokens to stdout.
-    // var stdout = std.fs.File.stdout().writer(&.{});
-    // const output = try testFinalOutput(platform, activation_buffer_store, "model", qwen_tensors, qwen_buffers, tokenizer, &stdout.interface);
-    // defer output.deinit();
-    // const host_output = try output.toHostAlloc(allocator);
+    log.info("✅\tLoaded weights in {D}", .{start.read()});
 
-    // defer host_output.deinit(allocator);
-    // log.info("host_output: {f}", .{host_output});
-    //try testImplementation(platform, qwen_tensors, qwen_buffers, activation_buffer_store);
+    var qwen_module_prefill = (try fut_mod_prefill.await()).prepare(qwen_buffers);
+    defer qwen_module_prefill.deinit();
+    var qwen_module_decode = (try fut_mod_decode.await()).prepare(qwen_buffers);
+    defer qwen_module_decode.deinit();
+    log.info("✅\tCompiled model in {D}", .{start.read()});
+
+    log.info("Creating KvCache", .{});
+    const kv_cache = try qwen.KvCache.initBuffer(kv_shape, platform);
+
+    log.info("✅\tPrompt: {s}", .{prompt});
+    log.info("✅\tImage: {s}", .{image_path});
+
+    var stdout = std.fs.File.stdout().writer(&.{});
+
+    try generateText(
+        config,
+        qwen_tensors,
+        qwen_module_prefill,
+        qwen_module_decode,
+        kv_cache,
+        tokenizer,
+        allocator,
+        prompt[0..],
+        image_path[0..],
+        preprocessor_config,
+        512,
+        &stdout.interface,
+    );
 }
 
+fn bool_parser(in: []const u8) error{}!bool {
+    return std.mem.indexOfScalar(u8, "tTyY1", in[0]) != null;
+}
+
+// Keep all existing helper functions unchanged
+pub const Size = struct {
+    longest_edge: f64,
+    shortest_edge: f64,
+};
+
+pub const PreprocessorConfig = struct {
+    size: Size,
+    patch_size: u32,
+    temporal_patch_size: u32,
+    image_mean: []const f32,
+    image_std: []const f32,
+};
+
+pub fn preprocessor(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, prompt: []const u8, config: qwen.Qwen.Config, preprocessor_config: PreprocessorConfig, image_path: []const u8, max_seq_len: u32, max_side: u32) !struct { image_buffer_chw: zml.HostBuffer, prompt_tokens: zml.HostBuffer, prompt_shape: zml.HostBuffer, image_dim: zml.HostBuffer, token_index: zml.HostBuffer, h_resized: u32, w_resized: u32 } {
+    var image_rgb = try loadBmpAsRgb(allocator, image_path);
+    defer image_rgb.deinit(allocator);
+    const image_hwc = image_rgb.data;
+
+    // Allouer le buffer de destination (max_side x max_side x 3)
+    const image_buffer = try allocator.alloc(u8, max_side * max_side * 3);
+    // Initialiser à zéro (padding)
+    @memset(image_buffer, 0);
+
+    // Créer le HostBuffer pour l'image réelle (petite)
+    const image_small_hwc = zml.HostBuffer.fromSlice(zml.Shape.init(.{ .h = image_rgb.height, .w = image_rgb.width, .c = 3 }, .u8), image_hwc);
+
+    // Créer le HostBuffer pour le buffer de destination (grand)
+    const image_buffer_hwc = zml.HostBuffer.fromSlice(zml.Shape.init(.{ .h = max_side, .w = max_side, .c = 3 }, .u8), image_buffer);
+
+    // Insérer l'image réelle dans le coin supérieur gauche du grand buffer
+    // Puisque le buffer de destination est contigu, on peut copier ligne par ligne
+    const small_height = @as(usize, @intCast(image_rgb.height));
+    const small_width = @as(usize, @intCast(image_rgb.width));
+    const channels = 3;
+    const row_size_small = small_width * channels;
+    const row_size_large = @as(usize, @intCast(max_side)) * channels;
+
+    // Copier ligne par ligne
+    const small_bytes = image_small_hwc.bytes();
+    var large_bytes = image_buffer_hwc.mutBytes();
+
+    for (0..small_height) |h| {
+        const src_offset = h * row_size_small;
+        const dst_offset = h * row_size_large;
+        @memcpy(large_bytes[dst_offset .. dst_offset + row_size_small], small_bytes[src_offset .. src_offset + row_size_small]);
+    }
+    //const image_buffer_chw = try image_buffer_hwc.reshape(.{ .c = 3, .h = image_rgb.height, .w = image_rgb.width });
+
+    //create host buffers
+    const image_size: [3]i32 = .{ @intCast(image_rgb.height), @intCast(image_rgb.width), 3 };
+    for (image_size) |size| {
+        log.info("image_size: {d}", .{size});
+    }
+
+    //compute h and w resized
+    const height = image_rgb.height;
+    const width = image_rgb.width;
+    log.info("height: {d}", .{height});
+    log.info("width: {d}", .{width});
+    const factor = preprocessor_config.patch_size * preprocessor_config.temporal_patch_size;
+    const min_pixels = preprocessor_config.size.shortest_edge;
+    const max_pixels = preprocessor_config.size.longest_edge;
+    stdx.debug.assert(@max(height, width) / @min(height, width) <= 200, "Invalid image size", .{});
+    var h_resized = @round(@as(f64, @floatFromInt(height)) / @as(f64, @floatFromInt(factor))) * @as(f64, @floatFromInt(factor));
+    var w_resized = @round(@as(f64, @floatFromInt(width)) / @as(f64, @floatFromInt(factor))) * @as(f64, @floatFromInt(factor));
+    log.info("h_resized: {d}", .{@as(u32, @intFromFloat(h_resized))});
+    log.info("w_resized: {d}", .{@as(u32, @intFromFloat(w_resized))});
+    if (h_resized * w_resized > max_pixels) {
+        const beta = std.math.sqrt(@as(f64, @floatFromInt(height * width)) / max_pixels);
+        h_resized = @max(@as(f64, @floatFromInt(factor)), std.math.floor(@as(f64, @floatFromInt(height)) / beta / @as(f64, @floatFromInt(factor))) * @as(f64, @floatFromInt(factor)));
+        w_resized = @max(@as(f64, @floatFromInt(factor)), std.math.floor(@as(f64, @floatFromInt(width)) / beta / @as(f64, @floatFromInt(factor))) * @as(f64, @floatFromInt(factor)));
+        log.info("h_resized first if: {d}", .{@as(u32, @intFromFloat(h_resized))});
+        log.info("w_resized first if: {d}", .{@as(u32, @intFromFloat(w_resized))});
+    } else if (h_resized * w_resized < min_pixels) {
+        const beta = std.math.sqrt(min_pixels) / @as(f64, @floatFromInt(height * width));
+        h_resized = @max(@as(f64, @floatFromInt(factor)), std.math.ceil(@as(f64, @floatFromInt(height)) * beta / @as(f64, @floatFromInt(factor))) * @as(f64, @floatFromInt(factor)));
+        w_resized = @max(@as(f64, @floatFromInt(factor)), std.math.ceil(@as(f64, @floatFromInt(width)) * beta / @as(f64, @floatFromInt(factor))) * @as(f64, @floatFromInt(factor)));
+        log.info("h_resized second if: {d}", .{@as(u32, @intFromFloat(h_resized))});
+        log.info("w_resized second if: {d}", .{@as(u32, @intFromFloat(w_resized))});
+    }
+    log.info("h_resized: {d}", .{@as(u32, @intFromFloat(h_resized))});
+    log.info("w_resized: {d}", .{@as(u32, @intFromFloat(w_resized))});
+    const patch_size = config.vision_config.patch_size;
+
+    const number_image_pad_tokens = 1 * (@as(u32, @intFromFloat(h_resized)) / patch_size) * (@as(u32, @intFromFloat(w_resized)) / patch_size) / std.math.pow(u32, config.vision_config.spatial_merge_size, 2);
+    log.info("number_image_pad_tokens: {d}", .{number_image_pad_tokens});
+    const result = try applyChatTemplate(allocator, tokenizer, prompt, number_image_pad_tokens);
+    const prompt_encoded = result.prompt_tokens;
+    const prompt_shape = result.prompt_shape;
+    var decoder = try tokenizer.decoder();
+    defer decoder.deinit();
+    const prompt_text = try decoder.decode(prompt_encoded);
+    log.info("prompt_text: {s}", .{prompt_text});
+    for (prompt_encoded) |token| {
+        log.info("token: {d}", .{token});
+    }
+    defer allocator.free(prompt_encoded);
+    const prompt_buffer = try allocator.alloc(u32, max_seq_len);
+    @memcpy(prompt_buffer[0..prompt_encoded.len], prompt_encoded);
+    const prompt_tokens = zml.HostBuffer.fromSlice(zml.Shape.init(.{ .bs = 1, .seq = max_seq_len }, .u32), prompt_buffer);
+
+    const prompt_shape_buffer = try zml.HostBuffer.empty(allocator, zml.Shape.init(.{ .chw = 3 }, .i32));
+    @memcpy(prompt_shape_buffer.mutItems(i32), &prompt_shape);
+
+    // Créer des HostBuffer qui possèdent leur mémoire
+    const image_size_buffer = try zml.HostBuffer.empty(allocator, zml.Shape.init(.{ .chw = 3 }, .i32));
+    @memcpy(image_size_buffer.mutItems(i32), &image_size);
+    log.info("image_size_buffer values: {d}, {d}, {d}", .{ image_size_buffer.items(i32)[0], image_size_buffer.items(i32)[1], image_size_buffer.items(i32)[2] });
+
+    const token_index_buffer = try zml.HostBuffer.empty(allocator, zml.Shape.init(.{1}, .i64));
+    const index: [1]i64 = .{0};
+    @memcpy(token_index_buffer.mutItems(i64), &index);
+
+    return .{ .image_buffer_chw = image_buffer_hwc, .prompt_tokens = prompt_tokens, .prompt_shape = prompt_shape_buffer, .image_dim = image_size_buffer, .token_index = token_index_buffer, .h_resized = @as(u32, @intFromFloat(h_resized)), .w_resized = @as(u32, @intFromFloat(w_resized)) };
+}
+
+pub fn applyChatTemplate(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, prompt: []const u8, number_image_pad_tokens: u32) !struct { prompt_tokens: []const u32, prompt_shape: [3]i32 } {
+    var encoder = try tokenizer.encoder();
+    defer encoder.deinit();
+    const im_start_id = tokenizer.tokenToId("<|im_start|>") orelse return error.NoSuchToken;
+    const im_end_id = tokenizer.tokenToId("<|im_end|>") orelse return error.NoSuchToken;
+    const user = tokenizer.tokenToId("user") orelse return error.NoSuchToken;
+    const assistant = tokenizer.tokenToId("assistant") orelse return error.NoSuchToken;
+    const vision_start_id = tokenizer.tokenToId("<|vision_start|>") orelse return error.NoSuchToken;
+    const vision_end_id = tokenizer.tokenToId("<|vision_end|>") orelse return error.NoSuchToken;
+    const image_pad_id = tokenizer.tokenToId("<|image_pad|>") orelse return error.NoSuchToken;
+    const newline = (try encoder.encode("\n"))[0];
+
+    var tokens: std.ArrayList(u32) = try .initCapacity(allocator, prompt.len);
+    try tokens.appendSlice(allocator, &.{ im_start_id, user, newline });
+    try tokens.appendSlice(allocator, &.{vision_start_id});
+    for (0..number_image_pad_tokens) |i| {
+        _ = i; // autofix
+        try tokens.appendSlice(allocator, &.{image_pad_id});
+    }
+    try tokens.appendSlice(allocator, &.{vision_end_id});
+    try tokens.appendSlice(allocator, try encoder.encode(prompt));
+    try tokens.appendSlice(allocator, &.{ im_end_id, newline });
+    try tokens.appendSlice(allocator, &.{ im_start_id, assistant, newline });
+    log.info("tokens: {d}", .{tokens.items.len});
+    const prompt_tokens = try encoder.encode(prompt);
+    log.info("prompt length: {d}", .{prompt_tokens.len});
+    const prompt_shape: [3]i32 = .{ 4, @as(i32, @intCast(number_image_pad_tokens)), @as(i32, @intCast(prompt_tokens.len)) + 6 };
+    return .{ .prompt_tokens = try tokens.toOwnedSlice(allocator), .prompt_shape = prompt_shape };
+}
+
+pub const RgbImage = struct {
+    width: u32,
+    height: u32,
+    data: []u8,
+
+    pub fn deinit(self: *RgbImage, allocator: std.mem.Allocator) void {
+        allocator.free(self.data);
+        self.* = undefined;
+    }
+};
+
+pub fn loadBmpAsRgb(allocator: std.mem.Allocator, path: []const u8) !RgbImage {
+    var file = try std.fs.cwd().openFile(path, .{ .mode = .read_only });
+    defer file.close();
+
+    const max_len = 64 * 1024 * 1024; // 64 MiB safety cap
+    const file_bytes = try file.readToEndAlloc(allocator, max_len);
+    defer allocator.free(file_bytes);
+
+    if (file_bytes.len < 54) return error.InvalidBmpHeader;
+    if (!std.mem.eql(u8, file_bytes[0..2], "BM")) return error.InvalidBmpSignature;
+
+    const readU16 = struct {
+        fn f(bytes: []const u8) u16 {
+            return std.mem.readInt(u16, bytes[0..2], .little);
+        }
+    }.f;
+    const readI32 = struct {
+        fn f(bytes: []const u8) i32 {
+            return std.mem.readInt(i32, bytes[0..4], .little);
+        }
+    }.f;
+    const readU32 = struct {
+        fn f(bytes: []const u8) u32 {
+            return std.mem.readInt(u32, bytes[0..4], .little);
+        }
+    }.f;
+
+    const data_offset = readU32(file_bytes[10..14]);
+    const dib_header_size = readU32(file_bytes[14..18]);
+    if (dib_header_size < 40) return error.UnsupportedBmpFormat;
+
+    const width_i32 = readI32(file_bytes[18..22]);
+    const height_i32 = readI32(file_bytes[22..26]);
+    if (width_i32 <= 0 or height_i32 == 0) return error.InvalidBmpDimensions;
+
+    const planes = readU16(file_bytes[26..28]);
+    const bits_per_pixel = readU16(file_bytes[28..30]);
+    const compression = readU32(file_bytes[30..34]);
+    if (planes != 1 or compression != 0 or bits_per_pixel != 24) return error.UnsupportedBmpFormat;
+
+    const width: u32 = @intCast(width_i32);
+    const abs_height: u32 = @intCast(if (height_i32 < 0) -height_i32 else height_i32);
+    const is_top_down = height_i32 < 0;
+
+    const row_stride = ((width * 3 + 3) / 4) * 4;
+    const pixel_array_size = row_stride * abs_height;
+    if (data_offset + pixel_array_size > file_bytes.len) return error.TruncatedBmp;
+
+    const rgb_len = width * abs_height * 3;
+    var rgb_data = try allocator.alloc(u8, rgb_len);
+    errdefer allocator.free(rgb_data);
+
+    var row: u32 = 0;
+    while (row < abs_height) : (row += 1) {
+        const src_row_index = if (is_top_down) row else abs_height - 1 - row;
+        const src_start = data_offset + src_row_index * row_stride;
+        const src_slice = file_bytes[src_start .. src_start + row_stride];
+
+        const dst_start = row * width * 3;
+        var col: u32 = 0;
+        while (col < width) : (col += 1) {
+            const src_pixel = col * 3;
+            const dst_pixel = dst_start + col * 3;
+            // BMP pixels are stored in BGR order.
+            rgb_data[dst_pixel + 0] = src_slice[src_pixel + 2];
+            rgb_data[dst_pixel + 1] = src_slice[src_pixel + 1];
+            rgb_data[dst_pixel + 2] = src_slice[src_pixel + 0];
+        }
+    }
+    log.info("width: {d}", .{width});
+    log.info("abs_height: {d}", .{abs_height});
+
+    return RgbImage{
+        .width = width,
+        .height = abs_height,
+        .data = rgb_data,
+    };
+}
+
+// Unused functions kept for compatibility with old activations-based workflow
 const ConvertError = error{
     UnsupportedFloatType,
 };
@@ -278,147 +729,60 @@ fn hostBufferToF32(allocator: std.mem.Allocator, src: zml.HostBuffer) !zml.HostB
 
 pub fn testFinalOutput(
     platform: zml.Platform,
-    activations: zml.aio.BufferStore,
-    comptime name: []const u8,
     model: anytype,
     model_weights: zml.Bufferized(@TypeOf(model)),
     tokenizer: zml.tokenizer.Tokenizer,
     writer: *std.Io.Writer,
-
-    //tokenizer: zml.tokenizer.Tokenizer,
+    preprocessor_config: PreprocessorConfig,
+    pixel_values_host: zml.HostBuffer,
 ) !zml.Buffer {
+    _ = writer; // autofix
     var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
     const fwd = @TypeOf(model).forward;
-    const FwdSign = zml.ModuleSignature(fwd);
 
-    const input_tensors = try zml.aio.populateModelWithPrefix(FwdSign.ArgsT, alloc, activations, name ++ ".in");
-    const input_shapes = try shapesOf(input_tensors, alloc);
-
-    // const n_in = zml.module.countTensors(&input_tensors);
-    // const n_in_exp = activations.countLayers(name ++ ".in");
-    // if (n_in != n_in_exp) {
-    //     log.warn("Reference models uses {d} inputs, but implementation uses {d}", .{ n_in_exp, n_in });
-    // }
     var tokenizer_decoder = try tokenizer.decoder();
     defer tokenizer_decoder.deinit();
 
-    const exe = try zml.compileModel(alloc, fwd, model, input_shapes, platform);
+    const preprocessor_input = try preprocessor(alloc, tokenizer, "Describe this image.", model.qwen.config, preprocessor_config, "/Users/louislechevalier/Downloads/snail.bmp", 512, 1024);
+    const image_buffer_chw = preprocessor_input.image_buffer_chw;
+    const prompt_tokens = preprocessor_input.prompt_tokens;
+    const prompt_shape = preprocessor_input.prompt_shape;
+    const image_dim = preprocessor_input.image_dim;
+    defer image_dim.deinit(alloc);
+    log.info("image_dim values before toDevice: {d}, {d}, {d}", .{ image_dim.items(i32)[0], image_dim.items(i32)[1], image_dim.items(i32)[2] });
+    const token_index = preprocessor_input.token_index;
+    defer token_index.deinit(alloc);
+    const h_resized = preprocessor_input.h_resized;
+    const w_resized = preprocessor_input.w_resized;
+
+    const kv_shape = zml.Shape.init(.{
+        .layer = model.qwen.config.text_config.num_hidden_layers,
+        .k = 512,
+        .h = model.qwen.config.text_config.num_key_value_heads,
+        .hd = model.qwen.config.text_config.head_dim,
+    }, .f32);
+    const kv_cache_shape: zml.ShapeOf(qwen.KvCache) = qwen.KvCache.initShape(kv_shape);
+
+    const exe = try zml.compileModel(alloc, fwd, model, .{ image_buffer_chw.shape(), prompt_tokens.shape(), image_dim.shape(), token_index.shape(), prompt_shape.shape(), kv_cache_shape, h_resized, w_resized, pixel_values_host.shape() }, platform);
     const mod = exe.prepare(model_weights);
-    const FetchCtx = struct {
-        store: zml.aio.BufferStore,
-        index: u32,
-        prefix: std.ArrayList(u8),
-        platform: zml.Platform,
-
-        fn fetch(ctx: *@This(), x: zml.Tensor) zml.Buffer {
-            _ = x;
-            defer ctx.index += 1;
-            var full_prefix = ctx.*.prefix;
-            _ = full_prefix.writer(undefined).print("{d}", .{ctx.index}) catch unreachable;
-            const host = ctx.store.get(full_prefix.items) orelse {
-                log.err("Didn't find test input: {s}", .{full_prefix.items});
-                @panic("Missing test input");
-            };
-            return host.toDevice(ctx.platform) catch unreachable;
-        }
-    };
-
-    // Note: zml.populateModelWithPrefix isn't enough,
-    // because it assumes we have the same structure in the activation file
-    // than in the function signature.
-    // But for sake of decoupling the reference implementation
-    // and ZML code that's not always the case.
-
-    var input_buffers: zml.Bufferized(FwdSign.ArgsT) = undefined;
-    var fetch_ctx: FetchCtx = .{ .store = activations, .index = 0, .prefix = .{}, .platform = platform };
-    try fetch_ctx.prefix.ensureTotalCapacity(alloc, name.len + 32);
-    fetch_ctx.prefix.appendSliceAssumeCapacity(name ++ ".in.");
-    try zml.meta.mapAlloc(FetchCtx.fetch, alloc, &fetch_ctx, input_tensors, &input_buffers);
-    defer zml.aio.unloadBuffers(&input_buffers);
-    const output_tuple = mod.call(input_buffers);
-    const output = output_tuple[0];
-    const cache_position = output_tuple[1];
-    const kv_cache = output_tuple[2];
-    const mrope_position_deltas = output_tuple[3];
-    const fwd_decode = @TypeOf(model).forward_decode;
-
-    const exe_decode = try zml.compileModel(alloc, fwd_decode, model, .{ output.shape(), cache_position.shape(), qwen.KvCache.initShape(kv_cache.k.shape()), mrope_position_deltas.shape() }, platform);
-    const mod_decode = exe_decode.prepare(model_weights);
-    const decode_steps = 20;
-
-    var cur_token = output;
-    var cur_position = cache_position;
-    var cur_cache = kv_cache;
-    var cur_mrope = mrope_position_deltas;
-    var generated = try std.ArrayList(u32).initCapacity(alloc, decode_steps);
-    defer generated.deinit(alloc);
-
-    var token_host = [_]u32{0};
-
-    for (0..decode_steps) |_| {
-        const new_token_buf, const new_position, const updated_cache, const updated_mrope =
-            mod_decode.call(.{ cur_token, cur_position, cur_cache, cur_mrope });
-
-        _ = try new_token_buf.toHost(std.mem.sliceAsBytes(&token_host));
-        const generated_token = token_host[0];
-        if (try tokenizer_decoder.next(generated_token)) |chunk| {
-            try writer.writeAll(chunk);
-        }
-        try generated.append(alloc, token_host[0]);
-
-        cur_token = new_token_buf;
-        cur_position = new_position;
-        cur_cache = updated_cache;
-        cur_mrope = updated_mrope;
-    }
-    if (generated.items.len != 0) {
-        const generated_text = try tokenizer_decoder.decode(generated.items);
-        std.debug.print("{s}\n", .{generated_text});
-        for (generated.items) |token| std.debug.print("{d} ", .{token});
-        std.debug.print("\n", .{});
-    }
-    return output;
-}
-
-pub fn tokenizePrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, prompt: []const u8) ![]const u32 {
-    var encoder = try tokenizer.encoder();
-    defer encoder.deinit();
-    const im_start_id = tokenizer.tokenToId("<|im_start|>") orelse return error.NoSuchToken;
-    const im_end_id = tokenizer.tokenToId("<|im_end|>") orelse return error.NoSuchToken;
-    const user = tokenizer.tokenToId("user") orelse return error.NoSuchToken;
-    const assistant = tokenizer.tokenToId("assistant") orelse return error.NoSuchToken;
-    const vision_start_id = tokenizer.tokenToId("<|vision_start|>") orelse return error.NoSuchToken;
-    const vision_end_id = tokenizer.tokenToId("<|vision_end|>") orelse return error.NoSuchToken;
-    const image_pad_id = tokenizer.tokenToId("<|image_pad|>") orelse return error.NoSuchToken;
-    const newline = (try encoder.encode("\n"))[0];
-
-    var tokens: std.ArrayList(u32) = try .initCapacity(allocator, prompt.len);
-    try tokens.appendSlice(allocator, &.{ im_start_id, user, newline });
-    try tokens.appendSlice(allocator, &.{ vision_start_id, image_pad_id, vision_end_id });
-    try tokens.appendSlice(allocator, try encoder.encode(prompt));
-    try tokens.appendSlice(allocator, &.{ im_end_id, newline });
-    try tokens.appendSlice(allocator, &.{ im_start_id, assistant, newline });
-    return tokens.toOwnedSlice(allocator);
-}
-
-pub fn generateText(
-    config: qwen.Qwen3VL.Config,
-    qwen_: qwen.Qwen3VL,
-    mod: zml.ModuleExe(qwen.Qwen3VL.forward),
-    tokenizer: zml.tokenizer.Tokenizer,
-    allocator: std.mem.Allocator,
-    prompt: []const u8,
-    writer: *std.Io.Writer,
-) !void {
-    _ = config; // autofix
-    _ = qwen_; // autofix
-    _ = mod; // autofix
-    _ = tokenizer; // autofix
-    _ = allocator; // autofix
-    _ = prompt; // autofix
-    _ = writer; // autofix
+    const image_buf = try image_buffer_chw.toDevice(platform);
+    defer image_buf.deinit();
+    const prompt_buf = try prompt_tokens.toDevice(platform);
+    defer prompt_buf.deinit();
+    const prompt_shape_buf = try prompt_shape.toDevice(platform);
+    defer prompt_shape_buf.deinit();
+    const image_dim_buf = try image_dim.toDevice(platform);
+    defer image_dim_buf.deinit();
+    const token_index_buf = try token_index.toDevice(platform);
+    defer token_index_buf.deinit();
+    const kv_cache_buf = try qwen.KvCache.initBuffer(kv_shape, platform);
+    const pixel_values_buf = try pixel_values_host.toDevice(platform);
+    defer pixel_values_buf.deinit();
+    const output_tuple = mod.call(.{ image_buf, prompt_buf, image_dim_buf, token_index_buf, prompt_shape_buf, kv_cache_buf, h_resized, w_resized, pixel_values_buf });
+    const output_buf = output_tuple[0];
+    return output_buf;
 }
 
 fn testImplementation(
@@ -427,136 +791,44 @@ fn testImplementation(
     qwen_weights: zml.Bufferized(qwen.Qwen3VL),
     activations: zml.aio.BufferStore,
 ) !void {
-    try zml.testing.testLayer(platform, activations, "model", qwen_model, qwen_weights, 5e-2);
-    //try zml.testing.testLayer(platform, activations, "model.visual", qwen_model.vision_transformer, qwen_weights.vision_transformer, 5e-3);
-    //try zml.testing.testLayer(platform, activations, "model.language_model", qwen_model.text_model, qwen_weights.text_model, 1e-3);
-    // try zml.testing.testLayer(platform, activations, "model.language_model.embed_tokens", qwen_model.text_model.embed_tokens, qwen_weights.text_model.embed_tokens, 1e-4);
-    //try zml.testing.testLayer(platform, activations, "model.language_model.rotary_emb", qwen_model.text_model.rotary_embed, {}, 1e-4);
-
-    // inline for (0..36) |i| {
-    //     const name = std.fmt.comptimePrint("model.language_model.layers.{d}", .{i});
-
-    //     // try zml.testing.testLayer(platform, activations, name ++ ".input_layernorm", qwen_model.text_model.layers[i].input_layernorm, qwen_weights.text_model.layers[i].input_layernorm, 1e-4);
-    //     // try zml.testing.testLayer(platform, activations, name ++ ".post_attention_layernorm", qwen_model.text_model.layers[i].post_attention_layernorm, qwen_weights.text_model.layers[i].post_attention_layernorm, 1e-4);
-    //     // try zml.testing.testLayer(platform, activations, name ++ ".self_attn.q_proj", qwen_model.text_model.layers[i].self_attn.q_proj, qwen_weights.text_model.layers[i].self_attn.q_proj, 1e-4);
-    //     // try zml.testing.testLayer(platform, activations, name ++ ".self_attn.q_norm", qwen_model.text_model.layers[i].self_attn.q_norm, qwen_weights.text_model.layers[i].self_attn.q_norm, 5e-3);
-
-    //     // try zml.testing.testLayer(platform, activations, name ++ ".self_attn.k_proj", qwen_model.text_model.layers[i].self_attn.k_proj, qwen_weights.text_model.layers[i].self_attn.k_proj, 1e-4);
-    //     // try zml.testing.testLayer(platform, activations, name ++ ".self_attn.k_norm", qwen_model.text_model.layers[i].self_attn.k_norm, qwen_weights.text_model.layers[i].self_attn.k_norm, 5e-3);
-
-    //     // try zml.testing.testLayer(platform, activations, name ++ ".self_attn.v_proj", qwen_model.text_model.layers[i].self_attn.v_proj, qwen_weights.text_model.layers[i].self_attn.v_proj, 1e-4);
-    //     // try zml.testing.testLayer(platform, activations, name ++ ".self_attn.o_proj", qwen_model.text_model.layers[i].self_attn.o_proj, qwen_weights.text_model.layers[i].self_attn.o_proj, 1e-4);
-
-    //     // try zml.testing.testLayer(platform, activations, name ++ ".mlp.up_proj", qwen_model.text_model.layers[i].mlp.up_proj, qwen_weights.text_model.layers[i].mlp.up_proj, 1e-4);
-    //     // try zml.testing.testLayer(platform, activations, name ++ ".mlp.gate_proj", qwen_model.text_model.layers[i].mlp.gate_proj, qwen_weights.text_model.layers[i].mlp.gate_proj, 1e-4);
-    //     // try zml.testing.testLayer(platform, activations, name ++ ".mlp.down_proj", qwen_model.text_model.layers[i].mlp.down_proj, qwen_weights.text_model.layers[i].mlp.down_proj, 5e-3);
-    //     try zml.testing.testLayer(platform, activations, name ++ ".self_attn", qwen_model.text_model.layers[i].self_attn, qwen_weights.text_model.layers[i].self_attn, 5e-3);
-    //     try zml.testing.testLayer(platform, activations, name ++ ".mlp", qwen_model.text_model.layers[i].mlp, qwen_weights.text_model.layers[i].mlp, 5e-3);
-    // }
-
-    //try zml.testing.testLayer(platform, activations, "model.language_model", qwen_model.text_model, qwen_weights.text_model, 1e-1);
-    //try zml.testing.testLayer(platform, activations, "model.visual.patch_embed", qwen_model.vision_transformer.vision_patch_embed, qwen_weights.vision_transformer.vision_patch_embed, 1e-4);
-    //try zml.testing.testLayer(platform, activations, "model.visual.rotary_pos_embed", qwen_model.vision_transformer.rotary_pos_emb, {}, 1e-4);
-    //try zml.testing.testLayer(platform, activations, "model.visual.merger", qwen_model.vision_transformer.patch_merger, qwen_weights.vision_transformer.patch_merger, 5e-3);
-    // try zml.testing.testLayer(platform, activations, "model.visual.deepstack_merger_list.0", qwen_model.vision_transformer.deepstack_patch_mergers[0], qwen_weights.vision_transformer.deepstack_patch_mergers[0], 5e-2);
-    // try zml.testing.testLayer(platform, activations, "model.visual.deepstack_merger_list.1", qwen_model.vision_transformer.deepstack_patch_mergers[1], qwen_weights.vision_transformer.deepstack_patch_mergers[1], 5e-4);
-    // try zml.testing.testLayer(platform, activations, "model.visual.deepstack_merger_list.2", qwen_model.vision_transformer.deepstack_patch_mergers[2], qwen_weights.vision_transformer.deepstack_patch_mergers[2], 5e-4);
-
-    // inline for (0..24) |i| {
-    //     const name = std.fmt.comptimePrint("model.visual.blocks.{d}", .{i});
-    //     try zml.testing.testLayer(platform, activations, name, qwen_model.vision_transformer.blocks[i], qwen_weights.vision_transformer.blocks[i], 1e-3); // pas de poids ici meilleure precision on peurt en deduire peut etre problee de conversion sur le reste
-    //     try zml.testing.testLayer(platform, activations, name ++ ".mlp", qwen_model.vision_transformer.blocks[i].mlp, qwen_weights.vision_transformer.blocks[i].mlp, 1e-4); //ne passe pas en 1e-2 sur le dernier block mlp
-    //     try zml.testing.testLayer(platform, activations, name ++ ".attn", qwen_model.vision_transformer.blocks[i].attn, qwen_weights.vision_transformer.blocks[i].attn, 1e-4); //pete sur la meme que norm2 logique
-    //     try zml.testing.testLayer(platform, activations, name ++ ".attn.qkv", qwen_model.vision_transformer.blocks[i].attn.qkv, qwen_weights.vision_transformer.blocks[i].attn.qkv, 1e-4);
-    //     try zml.testing.testLayer(platform, activations, name ++ ".norm1", qwen_model.vision_transformer.blocks[i].norm1, qwen_weights.vision_transformer.blocks[i].norm1, 5e-4);
-    //     try zml.testing.testLayer(platform, activations, name ++ ".norm2", qwen_model.vision_transformer.blocks[i].norm2, qwen_weights.vision_transformer.blocks[i].norm2, 1e-4); // une norm qui plante a 1e-2
-    //     try zml.testing.testLayer(platform, activations, name ++ ".norm1", qwen_model.vision_transformer.blocks[i].norm1, qwen_weights.vision_transformer.blocks[i].norm1, 1e-4);
-    //     try zml.testing.testLayer(platform, activations, name ++ ".norm2", qwen_model.vision_transformer.blocks[i].norm2, qwen_weights.vision_transformer.blocks[i].norm2, 1e-4);
-    //     try zml.testing.testLayer(platform, activations, name ++ ".attn.proj", qwen_model.vision_transformer.blocks[i].attn.proj, qwen_weights.vision_transformer.blocks[i].attn.proj, 1e-4);
-    //     try zml.testing.testLayer(platform, activations, name ++ ".mlp.linear_fc1", qwen_model.vision_transformer.blocks[i].mlp.linear_fc1, qwen_weights.vision_transformer.blocks[i].mlp.linear_fc1, 1e-4);
-    //     try zml.testing.testLayer(platform, activations, name ++ ".mlp.linear_fc2", qwen_model.vision_transformer.blocks[i].mlp.linear_fc2, qwen_weights.vision_transformer.blocks[i].mlp.linear_fc2, 1e-4);
-    // }
-
-    //try zml.testing.testLayer(platform, activations, "model", qwen_model, qwen_weights, 1e-2);
-    //try zml.testing.testLayer(platform, activations, "model.visual.pos_embed", qwen_model.vision_transformer.pos_embed, qwen_weights.vision_transformer.pos_embed, 1e-3);
-    // try zml.testing.testLayer(platform, activations, "model.visual.rotary_pos_emb", qwen_model.vision_transformer.rotary_pos_emb, {}, 1e-3);
-    // try zml.testing.testLayer(platform, activations, "model.visual.blocks.0.norm1", qwen_model.vision_transformer.blocks[0].norm1, qwen_weights.vision_transformer.blocks[0].norm1, 1e-2);
-    // try zml.testing.testLayer(platform, activations, "model.visual.blocks.0.norm2", qwen_model.vision_transformer.blocks[0].norm2, qwen_weights.vision_transformer.blocks[0].norm2, 1e-2);
-    // try zml.testing.testLayer(platform, activations, "model.visual.blocks.0.attn.proj", qwen_model.vision_transformer.blocks[0].attn.proj, qwen_weights.vision_transformer.blocks[0].attn.proj, 1e-2);
-    // try zml.testing.testLayer(platform, activations, "model.visual.blocks.0.mlp.linear_fc1", qwen_model.vision_transformer.blocks[0].mlp.linear_fc1, qwen_weights.vision_transformer.blocks[0].mlp.linear_fc1, 1e-2);
-    // try zml.testing.testLayer(platform, activations, "model.visual.blocks.0.mlp.linear_fc2", qwen_model.vision_transformer.blocks[0].mlp.linear_fc2, qwen_weights.vision_transformer.blocks[0].mlp.linear_fc2, 1e-2);
-    // try zml.testing.testLayer(platform, activations, "model.visual.merger.linear_fc1", qwen_model.vision_transformer.patch_merger.linear_fc1, qwen_weights.vision_transformer.patch_merger.linear_fc1, 1e-4);
-    // try zml.testing.testLayer(platform, activations, "model.visual.merger.linear_fc2", qwen_model.vision_transformer.patch_merger.linear_fc2, qwen_weights.vision_transformer.patch_merger.linear_fc2, 1e-4);
-    // try zml.testing.testLayer(platform, activations, "model.visual.merger.norm", qwen_model.vision_transformer.patch_merger.norm, qwen_weights.vision_transformer.patch_merger.norm, 1e-4);
-    // try zml.testing.testLayer(platform, activations, "model.visual.deepstack_merger_list.0.linear_fc1", qwen_model.vision_transformer.deepstack_patch_mergers[0].linear_fc1, qwen_weights.vision_transformer.deepstack_patch_mergers[0].linear_fc1, 1e-4);
-    // try zml.testing.testLayer(platform, activations, "model.visual.deepstack_merger_list.0.linear_fc2", qwen_model.vision_transformer.deepstack_patch_mergers[0].linear_fc2, qwen_weights.vision_transformer.deepstack_patch_mergers[0].linear_fc2, 1e-4);
-    // try zml.testing.testLayer(platform, activations, "model.visual.deepstack_merger_list.0.norm", qwen_model.vision_transformer.deepstack_patch_mergers[0].norm, qwen_weights.vision_transformer.deepstack_patch_mergers[0].norm, 1e-4);
-    // try zml.testing.testLayer(platform, activations, "model.visual.blocks.0.attn.qkv", qwen_model.vision_transformer.blocks[0].attn.qkv, qwen_weights.vision_transformer.blocks[0].attn.qkv, 1e-4);
-    // try zml.testing.testLayer(platform, activations, "model.visual.blocks.0.attn", qwen_model.vision_transformer.blocks[0].attn, qwen_weights.vision_transformer.blocks[0].attn, 1e-4);
-    // try zml.testing.testLayer(platform, activations, "model.visual.blocks.0.mlp", qwen_model.vision_transformer.blocks[0].mlp, qwen_weights.vision_transformer.blocks[0].mlp, 1e-4); //precision pas top sur le gelu
-    // try zml.testing.testLayer(platform, activations, "model.visual.blocks.0", qwen_model.vision_transformer.blocks[0], qwen_weights.vision_transformer.blocks[0], 1e-4); //idem logiquement
-    // try zml.testing.testLayer(platform, activations, "model.visual.blocks.1", qwen_model.vision_transformer.blocks[1], qwen_weights.vision_transformer.blocks[1], 1e-1);
-    // try zml.testing.testLayer(platform, activations, "model.visual.blocks.2", qwen_model.vision_transformer.blocks[2], qwen_weights.vision_transformer.blocks[2], 1e-1);
-    // try zml.testing.testLayer(platform, activations, "model.visual.blocks.3", qwen_model.vision_transformer.blocks[3], qwen_weights.vision_transformer.blocks[3], 1e-1);
-    //try zml.testing.testLayer(platform, activations, "model.visual.blocks.4", qwen_model.vision_transformer.blocks[4], qwen_weights.vision_transformer.blocks[4], 1e-3);
-    // try zml.testing.testLayer(platform, activations, "model.visual.blocks.5", qwen_model.vision_transformer.blocks[5], qwen_weights.vision_transformer.blocks[5], 1e-1);
-    // try zml.testing.testLayer(platform, activations, "model.visual.blocks.6", qwen_model.vision_transformer.blocks[6], qwen_weights.vision_transformer.blocks[6], 1e-1);
-    // try zml.testing.testLayer(platform, activations, "model.visual.blocks.7", qwen_model.vision_transformer.blocks[7], qwen_weights.vision_transformer.blocks[7], 1e-1);
-    // try zml.testing.testLayer(platform, activations, "model.visual.blocks.8", qwen_model.vision_transformer.blocks[8], qwen_weights.vision_transformer.blocks[8], 1e-1);
-    //try zml.testing.testLayer(platform, activations, "model.visual.merger", qwen_model.vision_transformer.patch_merger, qwen_weights.vision_transformer.patch_merger, 1e-2);
-    //try zml.testing.testLayer(platform, activations, "model.visual.deepstack_merger_list.0", qwen_model.vision_transformer.deepstack_patch_mergers[0], qwen_weights.vision_transformer.deepstack_patch_mergers[0], 1e-2);
-    //try zml.testing.testLayer(platform, activations, "model.language_model.layers.0.self_attn", qwen_model.text_model.layers[0].self_attn, qwen_weights.text_model.layers[0].self_attn, 1e-3);
-    //try zml.testing.testLayer(platform, activations, "model.visual", qwen_model.vision_transformer, qwen_weights.vision_transformer, 1e-2);
-    //try zml.testing.testLayer(platform, activations, "model.language_model.rotary_emb", qwen_model.text_model.rotary_embed, {}, 1e-3);
-    // try zml.testing.testLayer(platform, activations, "model.language_model.layers.0.mlp", qwen_model.text_model.layers[0].mlp, qwen_weights.text_model.layers[0].mlp, 1e-2);
-    // try zml.testing.testLayer(platform, activations, "model.language_model.layers.0.input_layernorm", qwen_model.text_model.layers[0].input_layernorm, qwen_weights.text_model.layers[0].input_layernorm, 1e-3);
-    // try zml.testing.testLayer(platform, activations, "model.language_model.layers.0.post_attention_layernorm", qwen_model.text_model.layers[0].post_attention_layernorm, qwen_weights.text_model.layers[0].post_attention_layernorm, 1e-2);
-    // try zml.testing.testLayer(platform, activations, "model.language_model.layers.0", qwen_model.text_model.layers[0], qwen_weights.text_model.layers[0], 1e-1);
-
-    //try zml.testing.testLayer(platform, activations, "model.language_model.layers.0.self_attn", qwen_model.text_model.layers[0].self_attn, qwen_weights.text_model.layers[0].self_attn, 1e-2);
-
-    //try zml.testing.testLayer(platform, activations, "model.visual", qwen_model.vision_transformer, qwen_weights.vision_transformer, 1e-1);
+    _ = platform;
+    _ = qwen_model;
+    _ = qwen_weights;
+    _ = activations;
+    // Unused function kept for compatibility
+    // try zml.testing.testLayer(platform, activations, "model", qwen_model, qwen_weights, 5e-2);
 }
-// test "Conv3D basic functionality" {
-//     // Créer des tensors de test
-//     const allocator = std.testing.allocator;
-//     const platform = zml.testing.env();
 
-//     const MyModule = struct {
-//         pub fn forward(input: zml.Tensor, kernel: zml.Tensor) zml.Tensor {
-//             return input.conv3d(kernel, .{
-//                 .window_strides = &.{ 2, 14, 14 },
-//                 .padding = &.{ 0, 0, 0, 0, 0, 0 },
-//                 .input_spatial_dimensions = &.{ 2, 3, 4 },
-//             });
-//         }
-//     };
+fn setupKvCacheFromActivations(activation_buffer_store: *zml.aio.BufferStore, config: qwen.Qwen.Config) !void {
+    const num_layers = config.text_config.num_hidden_layers;
+    const num_kv_heads = config.text_config.num_key_value_heads;
+    const max_seq_len = 3000;
+    const head_dim = config.text_config.head_dim;
 
-//     const input_dimz = .{ 1, 3, 8, 224, 224 };
-//     const input_shape = zml.Shape.init(input_dimz, .f32);
-//     const input_data = try allocator.alloc(f32, input_shape.count());
-//     defer allocator.free(input_data);
-//     const input = try zml.Buffer.fromSlice(platform, input_shape, input_data);
-//     //const buffer_awaited = try input_buf.await();
+    const kv_shape = zml.Shape.init(.{
+        @as(i64, num_layers),
+        @as(i64, max_seq_len),
+        @as(i64, num_kv_heads),
+        @as(i64, head_dim),
+    }, .f32);
 
-//     const kernel_dimz = .{ 64, 3, 2, 14, 14 };
-//     const kernel_shape = zml.Shape.init(kernel_dimz, .f32);
-//     const kernel_data = try allocator.alloc(f32, kernel_shape.count());
-//     defer allocator.free(kernel_data);
-//     const kernel = try zml.Buffer.fromSlice(platform, kernel_shape, kernel_data);
-//     //const buffer_awaited2 = try kernel_buf.await();
+    var kv_k_buffer = try zml.HostBuffer.empty(activation_buffer_store.arena.allocator(), kv_shape);
+    var kv_v_buffer = try zml.HostBuffer.empty(activation_buffer_store.arena.allocator(), kv_shape);
 
-//     const exe = try zml.compileFn(allocator, MyModule.forward, .{ input_shape, kernel_shape }, platform);
-//     defer exe.deinit();
-//     const output = exe.call(.{ input, kernel });
-//     const output_cpu = try output.toHostAlloc(allocator);
-//     defer output_cpu.deinit(allocator);
+    {
+        const k_items = kv_k_buffer.mutItems(f32);
+        @memset(k_items, 0);
 
-//     // Vérifier les dimensions
-//     try std.testing.expectEqual(@as(u32, 5), output.shape().rank());
-//     try std.testing.expectEqual(@as(u32, 1), output.shape().dim(0)); // batch
-//     try std.testing.expectEqual(@as(u32, 64), output.shape().dim(1)); // channels
-//     try std.testing.expectEqual(@as(u32, 4), output.shape().dim(2)); // time (8/2)
-//     try std.testing.expectEqual(@as(u32, 16), output.shape().dim(3)); // height (224/14)
-//     try std.testing.expectEqual(@as(u32, 16), output.shape().dim(4)); // width (224/14)
-// }
+        const v_items = kv_v_buffer.mutItems(f32);
+        @memset(v_items, 0);
+    }
+
+    try activation_buffer_store.buffers.put(activation_buffer_store.arena.allocator(), "model.in.5", kv_k_buffer);
+    try activation_buffer_store.buffers.put(activation_buffer_store.arena.allocator(), "model.in.6", kv_v_buffer);
+
+    const layer_index_shape = zml.Shape.init(.{}, .u32);
+    var layer_index_data: [1]u32 = .{0};
+    const layer_index_buffer = zml.HostBuffer.fromSlice(layer_index_shape, &layer_index_data);
+
+    try activation_buffer_store.buffers.put(activation_buffer_store.arena.allocator(), "model.in.7", layer_index_buffer);
+}
