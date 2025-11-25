@@ -128,13 +128,20 @@ pub const LlamaLM = struct {
         tokens_: Tensor,
         token_index: Tensor,
         kv_cache: KvCache,
-        rng: Tensor.Rng,
-    ) struct { Tensor, KvCache, Tensor.Rng } {
+    ) struct { Tensor, KvCache } {
         stdx.debug.assert(tokens_.dtype() == .u32 and tokens_.rank() >= 1 and token_index.dtype() == .u32 and token_index.rank() <= 1, "Can't run Llama ! Expected >=1d tokens and 0d token_index, got: {f} and {f}", .{ tokens_, token_index });
         const tokens = tokens_.withPartialTags(.{.s});
-        const out, const updated_kv_cache = zml.call(self.model, .forward, .{ tokens, token_index, kv_cache });
-        const new_tokens, const new_rng = self.sampleTokens(self.lm_head, out, rng, self.gen_opts);
-        return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache, new_rng };
+
+        var out, const updated_kv_cache = zml.call(self.model, .forward, .{ tokens, token_index, kv_cache });
+
+        out = out.withPartialTags(.{ .s, .d });
+        var logits = if (self.lm_head) |lm_head|
+            zml.call(lm_head, .forward, .{out})
+        else
+            self.model.embed_tokens.weight.withTags(.{ .voc, .d }).dot(out, .{.d});
+
+        if (logits.dim(.s) > 1) logits = logits.slice1d(.s, .{ .start = -1 });
+        return .{ logits.convert(.f32), updated_kv_cache };
     }
 
     pub fn sampleTokens(

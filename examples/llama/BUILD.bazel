@@ -8,7 +8,7 @@ zig_binary(
     name = "llama",
     srcs = [
         "llama.zig",
-    ],
+    ] + glob(["isaac/*.zig", "isaac/token_sampler/*.zig"]),
     main = "main.zig",
     visibility = ["//visibility:public"],
     deps = [
@@ -17,6 +17,10 @@ zig_binary(
         "//zml",
         "@com_github_hejsil_clap//:clap",
     ],
+    zigopts = select({
+        "@platforms//cpu:x86_64": ["-mcpu=native"],
+        "//conditions:default": [],
+    }) + ["-freference-trace=16"],
 )
 
 # TODO(steeve): Re-enable with a small, tokenless huggingface model.

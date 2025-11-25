@@ -28,6 +28,7 @@ const params = clap.parseParamsComptime(
     \\--hf-model-path  <STRING>   path to the directory containing model weights, config and tokenizer
     \\--seed           <UINT>     random seed (optional)
     \\--seq-len        <UINT>     sequence length
+    \\--topk            <UINT>     top k
     \\--create-options <STRING>   platform creation options JSON, defaults to {}
     \\--no-llama3      <BOOL>     skip prompt template
     \\--sharding       <BOOL>     default: true: sharding on or off
@@ -83,8 +84,16 @@ pub fn generateText(
     const max_seq_len = llama_.model.max_seq_len;
 
     // init RNG and buffers
-    var rng = try zml.Tensor.Rng.init(platform, seed);
     var generated_token_buffer = [_]u32{undefined};
+
+    const probs_shape = mod_prefill.inner.result_shapes[0];
+    std.debug.assert(probs_shape.eql(mod_generate.inner.result_shapes[0]));
+    var probs_h: zml.HostBuffer = try .empty(allocator, probs_shape);
+
+    const TokenSampler = @import("isaac/TokenSampler.zig");
+    const strategy: TokenSampler.Strategy = .{ .top_k = 16, .seed = @truncate(seed) };
+    var sampler: TokenSampler = try .init(allocator, strategy);
+    defer sampler.deinit();
 
     var kv_cache = prefill: {
         // prepare device buffers for the prefill tokens and their positions
@@ -96,9 +105,12 @@ pub fn generateText(
         var prefill_token_pos = try zml.Buffer.scalar(platform, 0, .u32);
         defer prefill_token_pos.deinit();
 
-        const prefilled_tokens, const kv_cache, rng = mod_prefill.call(.{ prefill_tokens, prefill_token_pos, kv_cache_, rng });
-        _ = try prefilled_tokens.toHost(std.mem.sliceAsBytes(prefill_buffer));
-        generated_token_buffer[0] = prefill_buffer[prompt_tok.len - 1];
+        const probs_d, const kv_cache = mod_prefill.call(.{ prefill_tokens, prefill_token_pos, kv_cache_ });
+        defer probs_d.deinit();
+
+        probs_h = try probs_d.toHost(probs_h.mutBytes());
+        _ = try sampler.vtable.writeFn(&sampler.state, @ptrCast(@alignCast(probs_h.items(f32))));
+        generated_token_buffer[0] = sampler.vtable.pick(&sampler.state, strategy);
         break :prefill kv_cache;
     };
     defer zml.aio.unloadBuffers(&kv_cache);
@@ -139,10 +151,14 @@ pub fn generateText(
         defer token_pos.deinit();
 
         // call to generate the next token
-        current_token, kv_cache, rng = mod_generate.call(.{ current_token, token_pos, kv_cache, rng });
+        const probs_d, kv_cache = mod_generate.call(.{ current_token, token_pos, kv_cache });
+        defer probs_d.deinit();
 
-        // extract the generated token from the buffer
-        _ = try current_token.toHost(std.mem.sliceAsBytes(&generated_token_buffer));
+        {
+            probs_h = try probs_d.toHost(probs_h.mutBytes());
+            _ = try sampler.vtable.writeFn(&sampler.state, @ptrCast(@alignCast(probs_h.items(f32))));
+            generated_token_buffer[0] = sampler.vtable.pick(&sampler.state, strategy);
+        }
     }
     const end = std.time.microTimestamp();
     const duration = stdx.math.divFloat(f64, end - start, std.time.us_per_s);
@@ -247,7 +263,7 @@ pub fn asyncMain() !void {
     const llama_options: llama.LlamaLM.Options = .{
         .max_seq_len = seq_len,
         .sampling_strategy = .{
-            .topk = 1,
+            .topk = cli.args.topk orelse 16,
             .temperature = 1.0,
         },
     };
@@ -272,7 +288,6 @@ pub fn asyncMain() !void {
         .hd = config.head_dim orelse @divExact(config.hidden_size, config.num_attention_heads),
     }, dtype).withSharding(.{.h});
     const kv_cache_shape: zml.ShapeOf(llama.KvCache) = llama.KvCache.initShape(kv_shape);
-    const rng_shape = zml.Tensor.Rng.shape();
 
     // Compile the model twice, one for prefill, one for generation.
     var start = try std.time.Timer.start();
@@ -282,7 +297,6 @@ pub fn asyncMain() !void {
             prefill_tokens_shape,
             token_idx_shape,
             kv_cache_shape,
-            rng_shape,
         },
         platform,
     });
@@ -293,7 +307,6 @@ pub fn asyncMain() !void {
             gen_tokens_shape,
             token_idx_shape,
             kv_cache_shape,
-            rng_shape,
         },
         platform,
     });
