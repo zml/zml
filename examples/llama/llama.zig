@@ -141,7 +141,7 @@ pub const LlamaLM = struct {
             self.model.embed_tokens.weight.withTags(.{ .voc, .d }).dot(out, .{.d});
 
         if (logits.dim(.s) > 1) logits = logits.slice1d(.s, .{ .start = -1 });
-        return .{ logits.convert(.f32), updated_kv_cache };
+        return .{ logits.convert(.f32).toMemory(.host_pinned), updated_kv_cache };
     }
 
     pub fn sampleTokens(

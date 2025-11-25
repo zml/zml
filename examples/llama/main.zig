@@ -88,7 +88,6 @@ pub fn generateText(
 
     const probs_shape = mod_prefill.inner.result_shapes[0];
     std.debug.assert(probs_shape.eql(mod_generate.inner.result_shapes[0]));
-    var probs_h: zml.HostBuffer = try .empty(allocator, probs_shape);
 
     const TokenSampler = @import("isaac/TokenSampler.zig");
     const strategy: TokenSampler.Strategy = .{ .top_k = 16, .seed = @truncate(seed) };
@@ -108,7 +107,8 @@ pub fn generateText(
         const probs_d, const kv_cache = mod_prefill.call(.{ prefill_tokens, prefill_token_pos, kv_cache_ });
         defer probs_d.deinit();
 
-        probs_h = try probs_d.toHost(probs_h.mutBytes());
+        // works cause we're using toMemory(.host_pinned) in llama.zig
+        const probs_h = probs_d.asHostBuffer();
         _ = try sampler.vtable.writeFn(&sampler.state, @ptrCast(@alignCast(probs_h.items(f32))));
         generated_token_buffer[0] = sampler.vtable.pick(&sampler.state, strategy);
         break :prefill kv_cache;
@@ -136,14 +136,14 @@ pub fn generateText(
 
         // check for eos
         if (i == output_tokens_len) break :generation;
-        switch (config.eos_token_id.value) {
-            .int => |eos| if (generated_token == @as(u32, @intCast(eos))) break :generation,
-            .ints => |eos_list| {
-                for (eos_list) |eos| {
-                    if (generated_token == @as(u32, @intCast(eos))) break :generation;
-                }
-            },
-        }
+        // switch (config.eos_token_id.value) {
+        //     .int => |eos| if (generated_token == @as(u32, @intCast(eos))) break :generation,
+        //     .ints => |eos_list| {
+        //         for (eos_list) |eos| {
+        //             if (generated_token == @as(u32, @intCast(eos))) break :generation;
+        //         }
+        //     },
+        // }
 
         // current token pos needs to go into a zml.Buffer
         const token_pos_buffer = &[_]u32{@intCast(prompt_tok.len + i)};
@@ -155,7 +155,7 @@ pub fn generateText(
         defer probs_d.deinit();
 
         {
-            probs_h = try probs_d.toHost(probs_h.mutBytes());
+            const probs_h = (try probs_d.await()).asHostBuffer();
             _ = try sampler.vtable.writeFn(&sampler.state, @ptrCast(@alignCast(probs_h.items(f32))));
             generated_token_buffer[0] = sampler.vtable.pick(&sampler.state, strategy);
         }
