@@ -733,6 +733,7 @@ pub const CustomCallOpts = struct {
     };
 
     call_target_name: [:0]const u8,
+    kernel_name: []const u8 = &.{},
     has_side_effect: bool,
     backend_config: ?mlir.Attribute,
     operand_layouts: ?[]const []const usize = null,
@@ -768,6 +769,7 @@ pub fn custom_call(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCa
         .{ "has_side_effect", .boolean(ctx, opts.has_side_effect) },
         .{ "backend_config", backend_config },
     });
+    if (opts.kernel_name.len > 0) attrs.appendAssumeCapacity(.{ "kernel_name", .string(ctx, opts.kernel_name) });
 
     {
         var output_operand_aliases: stdx.BoundedArray(mlir.Attribute, MAX_RESULTS) = .{};

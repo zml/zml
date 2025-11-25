@@ -2252,7 +2252,7 @@ pub const Tensor = struct {
     ///
     /// Some example input for the base case where we work on one axis:
     /// - gather(f:[a], .{ .a = idx:[n]})[n] == f[idx[n]]
-    /// - gather(f:[a, b], .a, idx:[n])[n, b] == f[idx[n], b]
+    /// - gather(f:[a, b], .{ .a = idx:[n]})[n, b] == f[idx[n], b]
     /// - gather(f:[a,b,c], .{.b = idx:[n,m]})[a, n, m, c] == f[a, idx[n, m], c]
     ///
     /// If an axis in common between `self` and `indices`,

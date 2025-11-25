@@ -1213,9 +1213,13 @@ fn TensorOrTensorArray(comptime T: type) type {
 pub const CustomCallOptions = struct {
     has_side_effect: bool,
     output_operand_aliases: ?[]const i64 = null,
+    kernel_name: []const u8 = &.{},
+    backend_config: []const u8 = &.{},
 };
 
 pub fn customCall(target_name: [:0]const u8, inputs: anytype, outputs: anytype, metadata: anytype, opts: CustomCallOptions) TensorOrTensorArray(@TypeOf(outputs)) {
+    // TODO(corendos): metadata aren't used
+    _ = metadata;
     // Transform generic inputs to flat slice.
     const inputs_: []const Tensor = switch (@typeInfo(@TypeOf(inputs))) {
         .@"struct" => |struct_info| b: {
@@ -1262,7 +1266,7 @@ pub fn customCall(target_name: [:0]const u8, inputs: anytype, outputs: anytype, 
         else => @compileError("Unsupported type: " ++ @typeName(@TypeOf(outputs))),
     };
 
-    const outputs_flat = customCallInternal(target_name, inputs_, output_shapes, metadata, opts);
+    const outputs_flat = customCallInternal(target_name, inputs_, output_shapes, opts);
 
     // Transform flat slice to generic outputs.
     return switch (@typeInfo(@TypeOf(outputs))) {
@@ -1288,7 +1292,7 @@ pub fn customCall(target_name: [:0]const u8, inputs: anytype, outputs: anytype, 
     };
 }
 
-fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs: []const Shape, metadata: anytype, opts: CustomCallOptions) []Tensor {
+fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs: []const Shape, opts: CustomCallOptions) []Tensor {
     const ctx = CompilationContext.current();
 
     const values = ctx.allocator().alloc(mlir.Value, inputs.len) catch unreachable;
@@ -1298,21 +1302,6 @@ fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs
     for (outputs, 0..) |output, i| {
         res_types[i] = mlirx.tensorType(ctx.mlirCtx(), output);
     }
-
-    const metadata_type_info = @typeInfo(@TypeOf(metadata));
-    var metadata_attributes_tuple: [metadata_type_info.@"struct".fields.len]mlir.AttrTuple = undefined;
-    inline for (metadata_type_info.@"struct".fields, 0..) |field, i| {
-        const attribute: mlir.Attribute = switch (@typeInfo(field.type)) {
-            .int, .comptime_int => .int(ctx.mlirCtx(), .u64, @bitCast(@field(metadata, field.name))),
-            else => @compileError("Unsupported metadata type: " ++ @typeName(field.type)),
-        };
-        metadata_attributes_tuple[i] = .{ field.name, attribute };
-    }
-
-    const backend_config = mlir.Attribute.dict(ctx.mlirCtx(), &(metadata_attributes_tuple ++ [_]mlir.AttrTuple{
-        .{ "pjrt_api", .int(ctx.mlirCtx(), .u64, @bitCast(@intFromPtr(ctx._platform.pjrt_api))) },
-        .{ "pjrt_client", .int(ctx.mlirCtx(), .u64, @bitCast(@intFromPtr(ctx._platform.pjrt_client))) },
-    }));
 
     const operands_layouts = ctx.allocator().alloc([]const usize, inputs.len) catch unreachable;
     for (inputs, 0..) |input, i| {
@@ -1329,7 +1318,8 @@ fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs
         values,
         .{
             .call_target_name = target_name,
-            .backend_config = backend_config,
+            .kernel_name = opts.kernel_name,
+            .backend_config = .string(ctx.mlirCtx(), opts.backend_config),
             .has_side_effect = opts.has_side_effect,
             .api_version = .typed_ffi,
             .operand_layouts = operands_layouts,

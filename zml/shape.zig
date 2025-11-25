@@ -442,7 +442,7 @@ pub const Shape = struct {
         var new_shape: Shape = .{ ._dtype = self.dtype() };
         new_shape._dims, new_shape._tags = parseDimensions(new_shape_);
         new_shape.inferMissingAxis(self.count());
-        stdx.debug.assert(self.count() == new_shape.count(), "Can't reshape {any} to {any}", .{ self.dims(), new_shape.dims() });
+        stdx.debug.assert(self.count() == new_shape.count(), "Can't reshape {f} to {f}", .{ self, new_shape });
         return new_shape;
     }
 
