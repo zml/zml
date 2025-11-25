@@ -1,38 +1,16 @@
-load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
+load("@rules_zig//zig:defs.bzl", "zig_binary")
 
 zig_binary(
     name = "qwen_3_vl",
     srcs = [
         "qwen_3_vl.zig",
-        "test_layernorm.zig",
     ],
     main = "main.zig",
     deps = [
+        "@com_github_bfactory_ai_zignal//:zignal",
         "@com_github_hejsil_clap//:clap",
         "@zml//async",
         "@zml//stdx",
         "@zml//zml",
     ],
-)
-
-zig_binary(
-    name = "test_layernorm",
-    srcs = [
-        "test_layernorm.zig",
-    ],
-    data = [
-        "tools/layernorm_refs.json",
-    ],
-    main = "test_layernorm.zig",
-    deps = [
-        "@zml//async",
-        "@zml//stdx",
-        "@zml//zml",
-    ],
-)
-
-zig_test(
-    name = "test",
-    test_runner = "//zml:test_runner",
-    deps = [":qwen_3_vl"],
 )

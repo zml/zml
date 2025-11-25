@@ -1,0 +1,9 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "zignal",
+    import_name = "zignal",
+    srcs = glob(["**/*.zig"], exclude = ["build.zig", "build.zig.zon"]),
+    main = "src/root.zig",  # Le fichier principal devrait être à la racine
+    visibility = ["//visibility:public"],
+)

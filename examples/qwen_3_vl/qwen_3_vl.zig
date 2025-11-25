@@ -16,44 +16,44 @@ pub const std_options: std.Options = .{
     .logFn = async.logFn(std.log.defaultLog),
 };
 
-pub fn myResizeBicubic(image: Tensor, resized_axes: anytype, opt: zml.nn.ResizeOpts) Tensor {
+/// Log a tensor with a label
+fn logTensor(label: []const u8, tensor: Tensor) void {
+    log.info("{s}: {f}", .{ label, tensor.shape() });
+}
+
+// Resize bicubic function
+// Resize the image using bicubic interpolation
+// image: Tensor, the image to be resized
+// resized_axes: anytype, the axes to be resized
+// opt: zml.nn.ResizeOpts, the options for the resize -> contain original length
+// returns: Tensor, the resized image
+pub fn ResizeBicubic(image: Tensor, resized_axes: anytype, opt: zml.nn.ResizeOpts) Tensor {
     const new_size, const tags_ = zml.Shape.parseStruct(u63, resized_axes);
     var out = image;
     for (new_size.constSlice(), tags_.constSlice()) |d, t| {
         const ax = image.shape().axis(t);
-        // Pass original_len as-is, myResizeCubic1d will extract the right dimension
         const child_opt: zml.nn.ResizeOpts = .{
-            .original_len = opt.original_len, // Pass the full vector, not extracted
+            .original_len = opt.original_len,
             .precision = opt.precision,
         };
-        out = myResizeCubic1d(out, ax, d, child_opt);
+        out = ResizeCubic1d(out, ax, d, child_opt);
     }
     return out;
 }
 
 /// Bicubic interpolation along a single axis
-fn myResizeCubic1d(image: Tensor, axis: i8, new_len: u63, opt: zml.nn.ResizeOpts) Tensor {
+fn ResizeCubic1d(image: Tensor, axis: i8, new_len: u63, opt: zml.nn.ResizeOpts) Tensor {
     const ax = image.axis(axis);
     const res_shape = image.shape().set(ax, new_len);
-
     const dtype = opt.precision orelse if (image.dtype().class() == .integer) .f32 else image.dtype();
 
     // Extract the correct dimension from original_len if it's a vector
     const og_len = if (opt.original_len) |o| blk: {
-        // If original_len is a vector (like {chw=3}), extract the dimension for this axis
+        // If original_len is a vector ( here chw=3), extract the dimension for this axis
         if (o.rank() == 1) {
-            // Find which index in original_len corresponds to this axis
-            // The image has tags like {c, h, w} and original_len has {chw}
-            // We need to find the tag of the axis and map it to the index in original_len
             const axis_tag = image.shape().tags()[ax];
             _ = axis_tag; // autofix
-            // original_len has shape {chw=3}, so we need to find the position
-            // For now, assume the mapping: if image axis is .h, use index 1, etc.
-            // But a better approach: use the axis number directly if original_len is ordered
-            // Actually, if original_len is {chw=3} with values [c, h, w], then:
-            // - axis 0 (c) -> index 0
-            // - axis 1 (h) -> index 1
-            // - axis 2 (w) -> index 2
+            // Get the index of the axis in the original length
             const idx_in_original = @as(i64, @intCast(ax));
             break :blk o.choose1d(0, idx_in_original).convert(dtype);
         } else {
@@ -63,7 +63,9 @@ fn myResizeCubic1d(image: Tensor, axis: i8, new_len: u63, opt: zml.nn.ResizeOpts
     } else Tensor.scalar(image.dim(ax), dtype);
 
     // Calculate scale
-    const align_corners = false; // Can be made configurable
+    const align_corners = false;
+
+    // Compute the scale between the original length (not the padded one) and the new length
     const scale = if (align_corners and new_len > 1)
         og_len.addConstant(-1).scale(stdx.math.divFloat(f32, 1, new_len - 1))
     else
@@ -91,7 +93,7 @@ fn myResizeCubic1d(image: Tensor, axis: i8, new_len: u63, opt: zml.nn.ResizeOpts
     var accumulated = Tensor.constant(res_shape, dtype.zero());
 
     inline for (0..4) |i| {
-        // Compute neighbor indices: start_idx + i, clamped to [0, original_len - 1]
+        // Compute neighbor indices
         const neighbor_idx_raw = start_idx.addConstant(@as(i32, @intCast(i)));
         const neighbor_idx_clamped = neighbor_idx_raw
             .maximum(Tensor.scalar(0, .i32))
@@ -102,7 +104,7 @@ fn myResizeCubic1d(image: Tensor, axis: i8, new_len: u63, opt: zml.nn.ResizeOpts
             .gather_(&.{ax}, &.{neighbor_idx_clamped}, .{ .indices_are_sorted = true })
             .convert(dtype);
 
-        // Get weight for this neighbor (weights[i] is a tensor of shape [new_len])
+        // Get weight for this neighbor
         const weight = weights[i];
 
         // Broadcast weight to res_shape (matching the output shape) along axis ax
@@ -142,6 +144,7 @@ fn computeBicubicWeights(t: Tensor, A: f32) [4]Tensor {
 
 pub const Qwen3VL = struct {
     qwen: Qwen,
+
     pub fn init(
         allocator: std.mem.Allocator,
         config: Qwen.Config,
@@ -153,77 +156,94 @@ pub const Qwen3VL = struct {
         };
     }
 
-    pub fn forward(self: Qwen3VL, image_buffer_hwc: Tensor, input_ids: Tensor, image_dim: Tensor, token_index: Tensor, prompt_shape: Tensor, kv_cache: KvCache, h_resized: u32, w_resized: u32, pixel_value_mock: Tensor) struct { Tensor, Tensor, KvCache, Tensor } {
-        _ = pixel_value_mock; // autofix
-        const image_hwc = image_buffer_hwc;
-        const in_ids = input_ids;
+    // Forward pass for the prefill phase
+    // image_hwc: Tensor, the image 3 dim Tensor (height, width, channels)
+    // input_ids: Tensor
+    // image_dim: Tensor, the image dimension (single dim vector with the the resizedshape of the image)
+    // token_index: Tensor, (0 for the prefill because we consider the whole sequence)
+    // prompt_shape: Tensor, the prompt shape
+    // kv_cache: KvCache, key-value cache
+    // h_resized: u32, height of the resized image (given at compilation time but not used in execution)
+    // w_resized: u32, width of the resized image (given at compilation time but not used in execution)
+    pub fn forward(
+        self: Qwen3VL,
+        image_hwc: Tensor,
+        input_ids: Tensor,
+        image_dim: Tensor,
+        token_index: Tensor,
+        prompt_shape: Tensor,
+        kv_cache: KvCache,
+        h_resized: u32,
+        w_resized: u32,
+        rng: Tensor.Rng,
+    ) struct { Tensor, KvCache, Tensor, Tensor.Rng } {
         const pixel_value, const image_grid_thw = self.processImage(image_hwc, image_dim, h_resized, w_resized);
-        const next_token, const next_position, const updated_cache, const mrope_position_deltas = zml.call(self.qwen, .forward, .{ in_ids, pixel_value, image_dim, token_index, image_grid_thw, kv_cache, prompt_shape });
-        return .{ next_token, next_position, updated_cache, mrope_position_deltas };
+        const next_token, const updated_cache, const mrope_position_deltas, const new_rng = zml.call(self.qwen, .forward, .{ input_ids, pixel_value, token_index, image_grid_thw, kv_cache, prompt_shape, rng });
+
+        return .{ next_token, updated_cache, mrope_position_deltas, new_rng };
     }
 
-    pub fn processImage(self: Qwen3VL, image_buffer_hwc: Tensor, image_size: Tensor, h_resized: u32, w_resized: u32) struct { Tensor, [3]u32 } {
-        log.info("image_dim: {f}", .{image_size.shape()});
-        var image_dim = image_size;
-        const height = image_dim.choose1d(0, 0);
-        const width = image_dim.choose1d(0, 1);
-        const channels = image_dim.choose1d(0, 2);
-        const total_size = height.mul(width).mul(channels);
-        _ = total_size; // autofix
-        var image_chw = image_buffer_hwc;
-        log.info("image_chw: {f}", .{image_chw.shape()});
-        image_chw = myResizeBicubic(image_chw, .{ .h = h_resized, .w = w_resized }, .{ .original_len = image_dim });
-        image_chw = image_chw.convert(.f32).transpose(.{ 2, 0, 1 });
-        log.info("image_chw: {f}", .{image_chw.shape()});
+    pub fn processImage(
+        self: Qwen3VL,
+        image_hwc: Tensor,
+        image_size: Tensor,
+        h_resized: u32,
+        w_resized: u32,
+    ) struct { Tensor, [3]u32 } {
+
+        // Resize the image and transpose (channels, height, width)
+        var image_chw = ResizeBicubic(image_hwc, .{ .h = h_resized, .w = w_resized }, .{ .original_len = image_size }).transpose(.{ 2, 0, 1 });
+        image_chw = image_chw.convert(.f32);
+
+        // Rescale and normalize the image
         const rescale_factor: f32 = 1.0 / 255.0;
-        log.info("rescale_factor: {d}", .{rescale_factor});
         const image_mean: f32 = 0.5;
         const image_std: f32 = 0.5;
         image_chw = image_chw.scale(rescale_factor); // pixel / 255.0
         var image_chw_rescaled_normalized = image_chw.sub(Tensor.scalar(image_mean, .f32)).div(Tensor.scalar(image_std, .f32));
-        log.info("image_chw: {f}", .{image_chw.shape()});
-        log.info("image_hwc_rescaled_normalized: {f}", .{image_chw_rescaled_normalized.shape()});
-        //image_chw_rescaled_normalized = image_chw_rescaled_normalized.print();
-        // rescale and normalize image_hwc
-        log.info("image_hwc: {f}", .{image_chw.shape()});
-        image_chw_rescaled_normalized = image_chw_rescaled_normalized.reshape(.{ .c = 3, .temporal_patch_size = 1, .h = h_resized, .w = w_resized });
 
+        // Introduce the temporal dimension (1)
+        image_chw_rescaled_normalized = image_chw_rescaled_normalized.reshape(.{ .c = 3, .temporal_patch_size = 1, .h = h_resized, .w = w_resized });
         const temporal_patch_size = self.qwen.config.vision_config.temporal_patch_size;
+
+        // Repeat the image 2 times in the temporal dimension
         image_chw_rescaled_normalized = image_chw_rescaled_normalized.repeat1d(1, 2);
-        log.info("image_chw_rescaled_normalized: {f}", .{image_chw_rescaled_normalized.shape()});
         const patch_size = self.qwen.config.vision_config.patch_size;
-        log.info("patch_size: {d}", .{patch_size});
-        log.info("temporal_patch_size: {d}", .{temporal_patch_size});
-        //hardcoded for now
+
+        //Hardcoded because we only have 1 temporal patch (image)
         const grid_t = 1;
+        // Compute the number of grid cells based on the patch size (size of the patch embedding)
         const grid_h: u32 = @intCast(@as(u32, @divExact(h_resized, patch_size)));
         const grid_w: u32 = @intCast(@as(u32, @divExact(w_resized, patch_size)));
         const grid_thw = [3]u32{ grid_t, grid_h, grid_w };
-        log.info("grid_t {d}, grid_h {d}, grid_w {d}", .{ grid_t, grid_h, grid_w });
 
         const merge_size = self.qwen.config.vision_config.spatial_merge_size;
-        log.info("merge_size: {d}", .{merge_size});
 
-        //Grid_t must be included in the reshape transpose
+        // Reshape the image to the correct shape for the vision transformer
         image_chw_rescaled_normalized = image_chw_rescaled_normalized.reshape(.{ .temporal_patch_size = temporal_patch_size, .c = 3, .h_div = @divExact(grid_h, merge_size), .m1 = merge_size, .patch1 = patch_size, .w_div = @divExact(grid_w, merge_size), .m2 = merge_size, .patch2 = patch_size });
-        log.info("image_chw_rescaled_normalized: {f}", .{image_chw_rescaled_normalized.shape()});
         image_chw_rescaled_normalized = image_chw_rescaled_normalized.transpose(.{ 2, 5, 3, 6, 1, 0, 4, 7 });
-        log.info("image_chw_rescaled_normalized: {f}", .{image_chw_rescaled_normalized.shape()});
-        var flatten_image = image_chw_rescaled_normalized.reshape(.{ .a = grid_h * grid_w, .b = 3 * temporal_patch_size * patch_size * patch_size });
-        //flatten_image = flatten_image.print();
-        log.info("flatten_image: {f}", .{flatten_image.shape()});
-        // compute grid_thw
-        //reshape
+        const flatten_image = image_chw_rescaled_normalized.reshape(.{ .a = grid_h * grid_w, .b = 3 * temporal_patch_size * patch_size * patch_size });
+
+        // Return the flattened image and the grid dimensions
         return .{ flatten_image, grid_thw };
     }
 
-    pub fn forward_decode(self: Qwen3VL, input_ids: Tensor, cache_position: Tensor, kv_cache: KvCache, mrope_position_deltas: Tensor) struct { Tensor, Tensor, KvCache, Tensor } {
-        const next_token, const next_position, const updated_cache, const updated_mrope_position_deltas = zml.call(self.qwen, .forward_decode, .{ input_ids, cache_position, kv_cache, mrope_position_deltas });
-        return .{ next_token.convert(.u32), next_position, updated_cache, updated_mrope_position_deltas };
+    pub fn forward_decode(
+        self: Qwen3VL,
+        input_ids: Tensor,
+        cache_position: Tensor,
+        kv_cache: KvCache,
+        mrope_position_deltas: Tensor,
+        rng: Tensor.Rng,
+    ) struct { Tensor, KvCache, Tensor, Tensor.Rng } {
+        const next_token, const updated_cache, const updated_mrope_position_deltas, const new_rng = zml.call(self.qwen, .forward_decode, .{ input_ids, cache_position, kv_cache, mrope_position_deltas, rng });
+        const result = .{ next_token.convert(.u32), updated_cache, updated_mrope_position_deltas, new_rng };
+
+        return result;
     }
 };
 
-/// Qwen2.5-VL architecture, using huggingface transformers naming.
+/// Qwen3-VL architecture, using huggingface transformers naming.
 /// Vision-Language model with vision transformer and text model.
 pub const Qwen = struct {
     pub const VisionConfig = struct {
@@ -236,12 +256,10 @@ pub const Qwen = struct {
         patch_size: u32 = 14,
         spatial_merge_size: u32 = 2,
         temporal_patch_size: u32 = 2,
-        //tokens_per_second: u32 = 2,
-        //window_size: u32 = 112,
         out_hidden_size: u32 = 2048,
-        //fullatt_block_indexes: []const u32 = &[_]u32{ 7, 15, 23, 31 },
         initializer_range: f32 = 0.02,
         deepstack_visual_indexes: []const u32 = &[_]u32{ 5, 11, 17 },
+        num_position_embeddings: u32 = 48 * 48,
     };
 
     pub const TextConfig = struct {
@@ -255,14 +273,13 @@ pub const Qwen = struct {
         max_position_embeddings: u32,
         rms_norm_eps: f32,
         tie_word_embeddings: bool = true,
+        rope_scaling: RopeScaling = .{ .mrope_section = .{ 24, 20, 20 } },
+        rope_theta: f32 = 5000000.0,
     };
 
     pub const Config = struct {
-        //Vision config (depuis vision_config)
         vision_config: VisionConfig,
         text_config: TextConfig,
-        // rope_theta: f32,
-        // hf_rope_impl: bool = true,
         tie_word_embeddings: bool = true,
     };
 
@@ -270,6 +287,11 @@ pub const Qwen = struct {
         sampling_strategy: ?zml.nn.SamplingStrategy,
         max_seq_len: u32,
     };
+
+    pub const RopeScaling = struct {
+        mrope_section: [3]u32 = .{ 24, 20, 20 },
+    };
+
     vision_transformer: VisionTransformer,
     text_model: TextModel,
 
@@ -277,6 +299,7 @@ pub const Qwen = struct {
     gen_opts: zml.nn.SamplingStrategy = .{},
     config: Config,
 
+    // Initialize the Qwen model (Vision and Text models)
     pub fn init(allocator: std.mem.Allocator, config: Config, options: Options, store: zml.aio.BufferStore) !Qwen {
         return .{
             .config = config,
@@ -286,64 +309,87 @@ pub const Qwen = struct {
         };
     }
 
-    pub fn forward(self: Qwen, input_ids: Tensor, pixel_values: Tensor, attention_mask: Tensor, cache_position: Tensor, image_grid_thw: [3]u32, kv_cache: KvCache, prompt_shape: Tensor) struct { Tensor, Tensor, KvCache, Tensor } {
-        _ = attention_mask;
-        const pix_val = pixel_values;
-        var embedded = zml.call(self.text_model.embed_tokens, .forward, .{input_ids}).withTags(.{ .bs, .seq, .d });
-        //embedded = embedded.print();
-        //useless mask
-        const causal_mask = zml.nn.causalAttnMask(.{ .q = kv_cache.k.dim(.k), .k = kv_cache.k.dim(.k) }, embedded.dtype(), null);
+    // Forward pass for the qwen model
+    pub fn forward(
+        self: Qwen,
+        input_ids: Tensor,
+        pixel_values: Tensor,
+        cache_position: Tensor,
+        image_grid_thw: [3]u32,
+        kv_cache: KvCache,
+        prompt_shape: Tensor,
+        rng: Tensor.Rng,
+    ) struct { Tensor, KvCache, Tensor, Tensor.Rng } {
 
-        const vision_embed, const deepstack_features = zml.call(self.vision_transformer, .forward, .{ pix_val, image_grid_thw });
-        //vision_embed = vision_embed.print();
-        const image_mask = input_ids.cmp(.EQ, zml.Tensor.scalar(151655, input_ids.dtype()));
+        // Embed the input ids
+        var embedded = zml.call(self.text_model.embed_tokens, .forward, .{input_ids}).withTags(.{ .bs, .seq, .d });
+
+        // Forward pass for the vision transformer
+        const vision_embed, const deepstack_features = zml.call(self.vision_transformer, .forward, .{ pixel_values, image_grid_thw });
+
+        // Get the number of text tokens before the image, the number of image tokens and the number of text tokens after the image
         const text_before_image = prompt_shape.choose1d(0, 0).convert(.i32);
         const num_image_tokens = prompt_shape.choose1d(0, 1).convert(.i32);
         const text_after_image = prompt_shape.choose1d(0, 2);
 
+        // Update the embedding with the vision embedding
         const text_with_image = embedded.dynamicUpdateSlice(.{ .seq = text_before_image }, zml.torch.unsqueeze(vision_embed.convert(embedded.dtype()), 0));
-        //text_with_image = text_with_image.print();
-        const before_image_positions = zml.Tensor.iota(Shape.init(.{ .bs = input_ids.dim(.bs), .seq = 4 }, .i32), .seq);
-        var position_ids = zml.Tensor.iota(Shape.init(.{ .bs = input_ids.dim(.bs), .seq = text_with_image.dim(.seq) }, .i32), .seq).sub(num_image_tokens).add(text_after_image).add(text_before_image);
-        position_ids = position_ids.dynamicUpdateSlice(.{ .seq = zml.Tensor.scalar(0, .i32) }, before_image_positions);
 
+        // Build the 3D positional ids
+        const before_image_positions = zml.Tensor.iota(Shape.init(.{ .bs = input_ids.dim(.bs), .seq = 4 }, .i32), .seq);
+        var position_ids = zml.Tensor.iota(
+            Shape.init(.{ .bs = input_ids.dim(.bs), .seq = text_with_image.dim(.seq) }, .i32),
+            .seq,
+        )
+            .sub(num_image_tokens)
+            .add(text_after_image)
+            .add(text_before_image);
+        position_ids = position_ids.dynamicUpdateSlice(.{ .seq = zml.Tensor.scalar(0, .i32) }, before_image_positions);
         const llm_grid_h = image_grid_thw[1] / self.config.vision_config.spatial_merge_size;
         const llm_grid_w = image_grid_thw[2] / self.config.vision_config.spatial_merge_size;
         const llm_grid_t = image_grid_thw[0];
-
-        // const end_text_position = zml.Tensor.arange(.{ .end = text_after_image }, .i32).withTags(.{.seq}).add(text_before_image).addConstant(llm_grid_w);
-
-        // position_ids = position_ids.dynamicUpdateSlice(.{ .seq = num_image_tokens.add(text_before_image) }, end_text_position);
         const vision_ids = buildVisionPositionIds(position_ids, image_grid_thw);
         position_ids = zml.Tensor.stack(&.{ vision_ids.temporal, vision_ids.height, vision_ids.width }, 0, .g);
-        log.info("position_ids: {f}", .{position_ids.shape()});
 
-        //position max after 3d compression - real seq len
+        // Position max after 3d compression - real seq len
         const position_max_after_3d_compression = zml.Tensor.scalar(@max(llm_grid_w, llm_grid_h, llm_grid_t), .i32).add(text_after_image).add(text_before_image);
         const real_seq_len = text_before_image.add(text_after_image).add(num_image_tokens);
         const mrope_position_deltas = position_max_after_3d_compression.sub(real_seq_len).reshape(.{ .seq = 1 });
 
-        const mock_cache_position = zml.Tensor.scalar(0, .i64);
-        const hidden, const updated_cache = zml.call(self.text_model, .forward, .{ position_ids, causal_mask, text_with_image, mock_cache_position, image_mask, deepstack_features, kv_cache });
-        const logits = projectToVocab(hidden, self.text_model.embed_tokens.weight);
-        const indices = logits.argMax(.voc).indices.squeeze(.voc);
+        const hidden, const updated_cache = zml.call(self.text_model, .forward, .{ position_ids, text_with_image, cache_position, deepstack_features, kv_cache });
+
+        // Sample the next token using RNG
         const last_pos = real_seq_len.addConstant(-1).asScalar();
-        const next_token = indices.dynamicSlice1d(indices.axis(.seq), .{ .start = last_pos, .len = 1 }).withTags(.{ .bs, .seq });
-        const next_position = cache_position.withTags(.{.seq}).slice1d(.seq, .{ .start = cache_position.dim(0) - 1, .end = cache_position.dim(0) }).addConstant(1);
-        return .{ next_token, next_position, updated_cache, mrope_position_deltas };
-        //return hidden;
+        const last_hidden = hidden.dynamicSlice1d(hidden.axis(.seq), .{ .start = last_pos, .len = 1 });
+        const last_logits = projectToVocab(last_hidden, self.text_model.embed_tokens.weight);
+        const next_token, const new_rng = self.sampleTokens(last_logits, rng);
+        const next_token_with_shape = next_token.withTags(.{ .bs, .seq });
+
+        const result = .{ next_token_with_shape, updated_cache, mrope_position_deltas, new_rng };
+
+        return result;
     }
 
-    pub fn forward_decode(self: Qwen, input_ids: Tensor, cache_position: Tensor, kv_cache: KvCache, mrope_position_deltas: Tensor) struct { Tensor, Tensor, KvCache, Tensor } {
+    // Forward decode pass for qwen model
+    // Do not recompute the visual embeddings
+    pub fn forward_decode(
+        self: Qwen,
+        input_ids: Tensor,
+        cache_position: Tensor,
+        kv_cache: KvCache,
+        mrope_position_deltas: Tensor,
+        rng: Tensor.Rng,
+    ) struct { Tensor, KvCache, Tensor, Tensor.Rng } {
         const embedded = zml.call(self.text_model.embed_tokens, .forward, .{input_ids}).withTags(.{ .bs, .seq, .d });
-        const attn_mask = buildDecodeMask(embedded, cache_position, kv_cache);
         const position_ids = buildDecodePositionIds(cache_position, mrope_position_deltas);
-        const hidden, const updated_cache = zml.call(self.text_model, .forward_decode, .{ position_ids, attn_mask, embedded, cache_position, kv_cache });
+        const hidden, const updated_cache = zml.call(self.text_model, .forward_decode, .{ position_ids, embedded, cache_position, kv_cache });
         const logits = projectToVocab(hidden, self.text_model.embed_tokens.weight);
-        log.info("logits: {f}", .{logits.shape()});
-        const next_token = logits.argMax(.voc).indices.squeeze(.voc).slice1d(.seq, .{ .start = logits.dim(.seq) - 1, .end = logits.dim(.seq) });
-        const next_position = cache_position.addConstant(1);
-        return .{ next_token, next_position, updated_cache, mrope_position_deltas };
+
+        // Sample the next token using RNG
+        const last_logits = logits.slice1d(.seq, .{ .start = logits.dim(.seq) - 1, .end = logits.dim(.seq) });
+        const next_token, const new_rng = self.sampleTokens(last_logits, rng);
+        const result = .{ next_token, updated_cache, mrope_position_deltas, new_rng };
+        return result;
     }
 
     fn initKvCache(k: Tensor, v: Tensor, layer_index: Tensor) KvCache {
@@ -358,19 +404,37 @@ pub const Qwen = struct {
         return hidden.convert(.f32).dotGeneral(embedding_weight.convert(.f32), &.{.{ -1, -1 }}, &.{}).withTags(.{ .bs, .seq, .voc });
     }
 
+    pub fn sampleTokens(
+        self: Qwen,
+        logits_: Tensor,
+        rng: Tensor.Rng,
+    ) struct { Tensor, Tensor.Rng } {
+        const logits = logits_.withPartialTags(.{ .bs, .seq, .voc });
+
+        if (logits.shape().hasTag(.voc) == null)
+            @panic("logits must have .voc tag");
+
+        const next_tokens, const new_rng = zml.nn.sampleTokens(logits, self.gen_opts, rng);
+        return .{ next_tokens, new_rng };
+    }
+
+    // Build the 3D positional ids for the vision transformer
     fn buildVisionPositionIds(position_ids: Tensor, image_grid_thw: [3]u32) struct { temporal: Tensor, height: Tensor, width: Tensor } {
         const t = image_grid_thw[0];
         const h = @divExact(image_grid_thw[1], 2);
         const w = @divExact(image_grid_thw[2], 2);
 
+        // Repeat the index along the 3 dimensions based on grid size (after the text (+4 tokens according to the chat template))
         const t_index = zml.Tensor.iota(Shape.init(.{ .t = t }, .i32), .t).reshape(.{ .t = -1, .hw = 1 }).repeat1d(1, h * w).flatten().addConstant(4);
         const h_index = zml.Tensor.iota(Shape.init(.{ .h = h }, .i32), .h).reshape(.{ .t = 1, .h = -1, .w = 1 }).repeat1d(2, w).flatten().addConstant(4);
         const w_index = zml.Tensor.iota(Shape.init(.{ .w = w }, .i32), .w).reshape(.{ .t = 1, .h = 1, .w = -1 }).repeat1d(1, h).flatten().addConstant(4);
 
+        // Update the position ids with the 3D positional ids
         const position_ids_t = position_ids.dynamicUpdateSlice(.{ .seq = zml.Tensor.scalar(4, .i32) }, zml.torch.unsqueeze(t_index, 0));
         const position_ids_h = position_ids.dynamicUpdateSlice(.{ .seq = zml.Tensor.scalar(4, .i32) }, zml.torch.unsqueeze(h_index, 0));
         const position_ids_w = position_ids.dynamicUpdateSlice(.{ .seq = zml.Tensor.scalar(4, .i32) }, zml.torch.unsqueeze(w_index, 0));
 
+        // For each dim, the output is the position ids (from 4 to grid size / merge size) repeated to reach the grid size
         return .{
             .temporal = position_ids_t,
             .height = position_ids_h,
@@ -378,11 +442,7 @@ pub const Qwen = struct {
         };
     }
 
-    fn buildDecodeMask(embedded: Tensor, cache_position: Tensor, kv_cache: KvCache) Tensor {
-        var attn_mask = zml.nn.causalAttnMask(.{ .q = kv_cache.k.dim(.k), .k = kv_cache.k.dim(.k) }, embedded.dtype(), null);
-        return attn_mask.gatherSlices(zml.Shape.init(.{ .q = embedded.dim(.seq) }, attn_mask.dtype()), cache_position.reshape(.{ .coord = 1 }), .{});
-    }
-
+    // Build 3d positionnal based on mrope delta (delta between the position max after 3d compression and the real sequence length)
     fn buildDecodePositionIds(cache_position: Tensor, mrope_position_deltas: Tensor) Tensor {
         const cache_pos = cache_position.reshape(.{ .bs = 1, .seq = 1 });
         const deltas = mrope_position_deltas.convert(.i64).reshape(.{ .bs = 1, .seq = 1 });
@@ -399,13 +459,13 @@ pub const VisionTransformer = struct {
     blocks: []VisionBlock,
     patch_merger: PatchMerger,
     deepstack_patch_mergers: []PatchMerger,
-    // Config values pushed down
     num_heads: u32,
-    //window_size: u32,
-    //fullatt_block_indexes: []u32,
-    //liste de vision patch merger
+    hidden_size: u32,
+    spatial_merge_size: u32,
+    num_position_embeddings: u32,
 
     pub fn init(allocator: std.mem.Allocator, config: Qwen.Config, store: zml.aio.BufferStore) !VisionTransformer {
+        const spatial_merge_size = config.vision_config.spatial_merge_size;
         const blocks = try allocator.alloc(VisionBlock, config.vision_config.depth);
         var prefix = try zml.aio.PrefixBuilder.initCapacity(allocator, 1024);
         try prefix.push(stdx.noalloc, "model.visual.blocks");
@@ -414,7 +474,6 @@ pub const VisionTransformer = struct {
             defer prefix.pop();
             var vision_attn = try zml.aio.populateModelWithPrefix(VisionAttention, allocator, store, prefix.concat("attn"));
             vision_attn.num_heads = config.vision_config.num_heads;
-            //vision_attn.window_size = config.window_size;
 
             var mlp = try zml.aio.populateModelWithPrefix(VisionMlp, allocator, store, prefix.concat("mlp"));
             mlp.hidden_act = zml.nn.Activation{ .gelu = {} };
@@ -431,8 +490,6 @@ pub const VisionTransformer = struct {
                 .norm1 = norm1,
                 .norm2 = norm2,
                 .num_heads = config.vision_config.num_heads,
-                //.window_size = config.window_size,
-                //.is_full_attention = std.mem.indexOfScalar(u32, config.fullatt_block_indexes, @intCast(i)) != null, // indexof voir dans zig std
             };
         }
 
@@ -452,10 +509,6 @@ pub const VisionTransformer = struct {
                 .out_hidden_size = config.vision_config.out_hidden_size,
             };
         }
-        log.info("patch_size: {d}", .{config.vision_config.patch_size});
-        log.info("temporal_patch_size: {d}", .{config.vision_config.temporal_patch_size});
-        log.info("in_channels: {d}", .{config.vision_config.in_channels});
-        log.info("out_hidden_size: {d}", .{config.vision_config.out_hidden_size});
 
         return .{
             .pos_embed = try zml.aio.populateModelWithPrefix(zml.nn.TokenEmbedding, allocator, store, "model.visual.pos_embed"),
@@ -468,50 +521,82 @@ pub const VisionTransformer = struct {
             },
             .num_heads = config.vision_config.num_heads,
             .deepstack_patch_mergers = deepstack_patch_mergers,
-            //.window_size = config.window_size,
-            //.fullatt_block_indexes = config.fullatt_block_indexes,
             .vision_patch_embed = try VisionPatchEmbed.init(allocator, config.vision_config.patch_size, config.vision_config.temporal_patch_size, config.vision_config.in_channels, config.vision_config.out_hidden_size, store),
             .rotary_pos_emb = try VisionRotaryEmbedding.init(allocator, config.vision_config.out_hidden_size, 10000.0),
+            .hidden_size = config.vision_config.hidden_size,
+            .spatial_merge_size = spatial_merge_size,
+            .num_position_embeddings = config.vision_config.num_position_embeddings,
         };
     }
+
+    // Forward pass for the vision transformer
+    // Outputs:
+    // - hidden_states: the hidden states of the vision transformer (visual embedding)
+    // - deepstack_features_list: the deepstack features (intermediate representation of the visual embedding)
+    pub fn forward(self: VisionTransformer, x_input: Tensor, grid_thw: [3]u32) struct { Tensor, [3]Tensor } {
+        const x = x_input;
+        var pos_embeds = self.fastPosEmbedInterpolate(&grid_thw);
+        var rotary_pos_emb = self.rotaryPosEmbed(&grid_thw);
+        rotary_pos_emb = zml.Tensor.concatenate(&.{ rotary_pos_emb, rotary_pos_emb }, 1);
+        var hidden_states = zml.call(self.vision_patch_embed, .forward, .{x});
+        hidden_states = hidden_states.add(pos_embeds[0].convert(hidden_states.dtype()));
+        const cos = rotary_pos_emb.cos();
+        const sin = rotary_pos_emb.sin();
+        const deepstack_visual_indexes = [3]u32{ 5, 11, 17 };
+        var count: usize = 0;
+        var deepstack_features_list: [3]Tensor = undefined;
+        for (0.., self.blocks) |layer, block| {
+            hidden_states = zml.call(block, .forward, .{ hidden_states, cos, sin });
+            for (deepstack_visual_indexes) |index| {
+                if (layer == index) {
+                    deepstack_features_list[count] = zml.call(self.deepstack_patch_mergers[count], .forward, .{ hidden_states, true });
+                    count += 1;
+                }
+            }
+        }
+        hidden_states = zml.call(self.patch_merger, .forward, .{ hidden_states, false });
+        return .{ hidden_states, deepstack_features_list };
+    }
+
+    // Positional embedding interpolation (representation of the image in a grid determined by the number of position embeddings 48 x 48)
     pub fn fastPosEmbedInterpolate(self: VisionTransformer, grid: []const u32) [1]Tensor {
-        // 1. Extraire les dimensions
-        const num_grid_per_side = std.math.pow(f32, 2304, 0.5); //sqrt num_positions_embeddings
-        log.info("num_grid_per_side: {d}", .{num_grid_per_side});
-        const m_size = 2; //spatial_merge_size
-        const embedding_dim = 1024; // config vision hidden size
-        // var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-        // defer arena.deinit();
-        // const allocator = arena.allocator();
+        // Calculate the number of grid points per side (sqrt of the number of position embeddings)
+        const num_grid_per_side = std.math.pow(f32, @as(f32, @floatFromInt(self.num_position_embeddings)), 0.5);
 
-        // var outputs = std.ArrayList(Tensor).init(allocator);
+        const m_size = self.spatial_merge_size;
+        const embedding_dim = self.hidden_size;
+
         var outputs = [1]Tensor{undefined};
-        //defer outputs.deinit(allocator);
 
+        // Retrieve the dims in the image grid
         const t = grid[0];
-        log.info("t: {d}", .{t});
         const h = grid[1];
-        log.info("h: {d}", .{h});
         const w = grid[2];
-        log.info("w: {d}", .{w});
         const tensor_filled_1_h = zml.Tensor.constant(.{h}, zml.Data.init(.f32, 1));
         const tensor_filled_1_w = zml.Tensor.constant(.{w}, zml.Data.init(.f32, 1));
 
+        // Build the indices for the height and width by linearly spacing the grid points
         const h_idxs = zml.Tensor.linspace(.{ .start = 0, .end = num_grid_per_side - 1, .steps = h }, .f32);
         const w_idxs = zml.Tensor.linspace(.{ .start = 0, .end = num_grid_per_side - 1, .steps = w }, .f32);
         const h_floor = h_idxs.floor();
         const w_floor = w_idxs.floor();
+
+        // Build the min and max clamp for the height and width
         const min_clamp_h = zml.Tensor.constant(.{h}, zml.Data.init(.f32, 0));
         const max_clamp_h = zml.Tensor.constant(.{h}, zml.Data.init(.f32, num_grid_per_side - 1));
         const min_clamp_w = zml.Tensor.constant(.{w}, zml.Data.init(.f32, 0));
         const max_clamp_w = zml.Tensor.constant(.{w}, zml.Data.init(.f32, num_grid_per_side - 1));
+
+        // Build the ceil and floor for the height and width
         const h_ceil = h_floor.add(tensor_filled_1_h).clamp(min_clamp_h, max_clamp_h);
         const w_ceil = w_floor.add(tensor_filled_1_w).clamp(min_clamp_w, max_clamp_w);
+
+        // Build the difference between the indices and the floor for the height and width -> delta with the grid points
         const dh = h_idxs.sub(h_floor);
         const dw = w_idxs.sub(w_floor);
 
+        // Build the meshgrid for the height and width
         const tensor_filled_1_h_v = zml.Tensor.constant(.{ h, w }, zml.Data.init(.f32, 1));
-
         const d_tensors_meshgrid = [2]Tensor{ dh, dw };
         const floor_tensors_meshgrid = [2]Tensor{ h_floor, w_floor };
         const ceil_tensors_meshgrid = [2]Tensor{ h_ceil, w_ceil };
@@ -519,36 +604,21 @@ pub const VisionTransformer = struct {
         const floorhw_grid = zml.torch.meshgrid(2, floor_tensors_meshgrid, .ij);
         const ceilhw_grid = zml.torch.meshgrid(2, ceil_tensors_meshgrid, .ij);
 
-        log.info("tensor_filled_1: {f}", .{tensor_filled_1_h_v.shape()});
-        log.info("dhw_grid[0]: {f}", .{dhw_grid[0].shape()});
-        log.info("dhw_grid[1]: {f}", .{dhw_grid[1].shape()});
-        log.info("h_floor: {f}", .{h_floor.shape()});
-        log.info("w_floor: {f}", .{w_floor.shape()});
-        log.info("h_ceil: {f}", .{h_ceil.shape()});
-        log.info("w_ceil: {f}", .{w_ceil.shape()});
-        log.info("dh: {f}", .{dh.shape()});
-        log.info("dw: {f}", .{dw.shape()});
+        // Compute the weights for the height and width
         const w11 = dhw_grid[0].mul(dhw_grid[1]);
         const w10 = dhw_grid[0].sub(w11);
         const w01 = dhw_grid[1].sub(w11);
-        log.info("w11: {f}", .{w11.shape()});
-        log.info("w10: {f}", .{w10.shape()});
-        log.info("w01: {f}", .{w01.shape()});
         const w00 = tensor_filled_1_h_v.sub(dhw_grid[0]).sub(w01);
-        log.info("w00: {f}", .{w00.shape()});
         const h_list = [4]Tensor{ floorhw_grid[0], floorhw_grid[0], ceilhw_grid[0], ceilhw_grid[0] };
         const w_list = [4]Tensor{ floorhw_grid[1], ceilhw_grid[1], floorhw_grid[1], ceilhw_grid[1] };
-        const h_grid = zml.Tensor.stack(&h_list, 0, .layers);
 
+        // Stack the height and width lists
+        const h_grid = zml.Tensor.stack(&h_list, 0, .layers);
         const w_grid = zml.Tensor.stack(&w_list, 0, .layers);
 
-        log.info("h_grid: {f}", .{h_grid.shape()});
-        log.info("w_grid: {f}", .{w_grid.shape()});
         const h_grid_idx = h_grid.scale(num_grid_per_side);
-        var indices = h_grid_idx.add(w_grid).reshape(.{ 4, -1 }).convert(.i32);
-
-        log.info("indices: {f}", .{indices.shape()});
-        var weights = zml.Tensor.stack(&[4]Tensor{ w00, w01, w10, w11 }, 0, .layers).reshape(.{ 4, -1, 1 }); // embedding des 4coins voisins pour chaque point cible
+        const indices = h_grid_idx.add(w_grid).reshape(.{ 4, -1 }).convert(.i32);
+        var weights = zml.Tensor.stack(&[4]Tensor{ w00, w01, w10, w11 }, 0, .layers).reshape(.{ 4, -1, 1 });
         const embeds = zml.call(self.pos_embed, .forward, .{indices});
         const weights_embed = embeds.convert(.f32).mul(weights.repeat1d(-1, embedding_dim));
         const combined = weights_embed.sum(0);
@@ -556,15 +626,15 @@ pub const VisionTransformer = struct {
         const combined_permuted = combined_reshape.transpose(.{ 0, 2, 1, 3, 4 }).reshape(.{ 1, -1, embedding_dim });
         const t_u63: u63 = @intCast(t);
 
-        const repeated = combined_permuted.repeat1d(0, t_u63).reshape(.{ -1, embedding_dim }); //meme embedding pour chaque temporalite
+        const repeated = combined_permuted.repeat1d(0, t_u63).reshape(.{ -1, embedding_dim });
         outputs[0] = repeated;
 
-        log.info("outputs: {f}", .{outputs[0].shape()});
         return outputs;
     }
 
+    // Rotary position embedding for the vision transformer
     pub fn rotaryPosEmbed(self: VisionTransformer, grid_thw: []const u32) Tensor {
-        const m_size = 2; //spatial_merge_size
+        const m_size = self.spatial_merge_size;
 
         const t = grid_thw[0];
         const h = grid_thw[1];
@@ -573,65 +643,20 @@ pub const VisionTransformer = struct {
         hpos_ids = hpos_ids.reshape(.{ @divExact(h, m_size), m_size, @divExact(w, m_size), m_size });
         hpos_ids = hpos_ids.transpose(.{ 0, 2, 1, 3 });
         hpos_ids = hpos_ids.flatten();
-        log.info("hpos_ids: {f}", .{hpos_ids.shape()});
 
         var wpos_ids = zml.torch.unsqueeze(zml.Tensor.arange(.{ .start = 0, .end = w, .step = 1 }, .f32), 0).repeat1d(0, @as(u63, @intCast(h)));
         wpos_ids = wpos_ids.reshape(.{ @divExact(h, m_size), m_size, @divExact(w, m_size), m_size });
         wpos_ids = wpos_ids.transpose(.{ 0, 2, 1, 3 });
         wpos_ids = wpos_ids.flatten();
-        log.info("wpos_ids: {f}", .{wpos_ids.shape()});
-        // hpos_ids = zml.torch.unsqueeze(hpos_ids, 1);
-        // wpos_ids = zml.torch.unsqueeze(wpos_ids, 1);
-        const pos_ids = zml.Tensor.stack(&[2]Tensor{ hpos_ids, wpos_ids }, 1, .layers).repeat1d(1, @as(u63, @intCast(t))).convert(.i32);
-        log.info("pos_ids: {f}", .{pos_ids.shape()});
-        const rotary_pos_emb_full = zml.call(self.rotary_pos_emb, .forward, .{});
-        log.info("rotary_pos_emb: {f}", .{rotary_pos_emb_full.shape()});
-        log.info("pos_ids: {f}", .{pos_ids.shape()});
-        const output = rotary_pos_emb_full.gather(.{ .d = pos_ids }, .{}).merge(.{ .d = .{ .layers, .s } });
-        log.info("output: {f}", .{output.shape()});
-        //const freq_table = zml.call(self.rotary_pos_emb, .forward, .{});
-        return output;
-    }
 
-    pub fn forward(self: VisionTransformer, x_input: Tensor, grid_thw: [3]u32) struct { Tensor, [3]Tensor } {
-        const x = x_input;
-        //x = x.print();
-        var pos_embeds = self.fastPosEmbedInterpolate(&grid_thw);
-        var rotary_pos_emb = self.rotaryPosEmbed(&grid_thw);
-        rotary_pos_emb = zml.Tensor.concatenate(&.{ rotary_pos_emb, rotary_pos_emb }, 1);
-        var hidden_states = zml.call(self.vision_patch_embed, .forward, .{x});
-        //hidden_states = hidden_states.print();
-        log.info("hidden_states_embed: {f}", .{hidden_states.shape()});
-        log.info("pos_embeds[0]: {f}", .{pos_embeds[0].shape()});
-        log.info("rotary_pos_emb: {f}", .{rotary_pos_emb.shape()});
-        hidden_states = hidden_states.add(pos_embeds[0].convert(hidden_states.dtype()));
-        const cos = rotary_pos_emb.cos();
-        const sin = rotary_pos_emb.sin();
-        log.info("cos: {f}", .{cos.shape()});
-        log.info("sin: {f}", .{sin.shape()});
-        const deepstack_visual_indexes = [3]u32{ 5, 11, 17 };
-        var count: usize = 0;
-        var deepstack_features_list: [3]Tensor = undefined;
-        for (0.., self.blocks) |layer, block| {
-            hidden_states = zml.call(block, .forward, .{ hidden_states, cos, sin });
-            log.info("layer: {d}", .{layer});
-            for (deepstack_visual_indexes) |index| {
-                log.info("index: {d}", .{index});
-                if (layer == index) {
-                    log.info("deepstack features list count: {d}", .{count});
-                    //deepstack_features_list[count] = zml.torch.unsqueeze(zml.call(self.deepstack_patch_mergers[count], .forward, .{ hidden_states, true }), 0);
-                    deepstack_features_list[count] = zml.call(self.deepstack_patch_mergers[count], .forward, .{ hidden_states, true });
-                    log.info("deepstack_features_list[{d}]: {f}", .{ count, deepstack_features_list[count].shape() });
-                    count += 1;
-                }
-            }
-        }
-        hidden_states = zml.call(self.patch_merger, .forward, .{ hidden_states, false });
-        //hidden_states = hidden_states.print();
-        return .{ hidden_states, deepstack_features_list };
+        const pos_ids = zml.Tensor.stack(&[2]Tensor{ hpos_ids, wpos_ids }, 1, .layers).repeat1d(1, @as(u63, @intCast(t))).convert(.i32);
+        const rotary_pos_emb_full = zml.call(self.rotary_pos_emb, .forward, .{self.hidden_size / self.num_heads / 2});
+        const output = rotary_pos_emb_full.gather(.{ .d = pos_ids }, .{}).merge(.{ .d = .{ .layers, .s } });
+        return output;
     }
 };
 
+// Get the padding for the convolution (same on all dimensions)
 fn getPaddingForSame(input_dims: [3]i64, kernel_dims: [3]i64, strides: [3]i64) [6]i64 {
     var res: [6]i64 = undefined;
     for (0..3) |i| {
@@ -648,94 +673,47 @@ fn getPaddingForSame(input_dims: [3]i64, kernel_dims: [3]i64, strides: [3]i64) [
 pub const Conv3d = struct {
     weight: Tensor,
     bias: ?Tensor = null,
+    temporal_stride: u32 = 2,
+    spatial_stride: u32 = 16,
 
     pub fn forward(self: Conv3d, input: Tensor) Tensor {
-        //const x = if (input.rank() == 4) zml.torch.unsqueeze(input, 0) else input;
         const x = input;
 
-        var strides: [3]i64 = undefined;
+        var strides: [3]i64 = .{ self.temporal_stride, self.spatial_stride, self.spatial_stride };
         for (self.weight.dims()[2..5], 0..) |k, out| strides[out] = k;
 
         const padding = getPaddingForSame(x.dims()[2..5].*, self.weight.dims()[2..5].*, strides);
-        for (0.., padding) |i, d| {
-            log.info("padding_dims: {d} at index {d}", .{ d, i });
-        }
-        //const weight = self.weight.convert(x.dtype()); // Convertir le poids au même type que l'input
-        var y = x.conv3d(self.weight.convert(x.dtype()), .{ .padding = &.{ 0, 0, 0, 0, 0, 0 }, .window_strides = &.{ 2, 16, 16 } });
-        //, .window_strides = &strides
+        var y = x.conv3d(self.weight.convert(x.dtype()), .{ .padding = &padding, .window_strides = &.{ 2, 16, 16 } });
         if (self.bias) |b| y = y.add(b.convert(y.dtype()).broadcast(y._shape, &.{1}));
-        //return if (input.rank() == 3) y.squeeze(0) else y;
         return y;
-    }
-};
-
-pub const MyLayerNorm = struct {
-    weight: Tensor,
-    bias: ?Tensor = null,
-    eps: f32 = 1e-6,
-
-    pub fn forward(self: MyLayerNorm, x: Tensor) Tensor {
-        const N: f32 = @floatFromInt(x.dim(-1));
-        const ax = x.axis(-1);
-        const xf32 = x.convert(.f32);
-        const mean = xf32.sum(-1).scale(1.0 / N);
-        const mean_sq = mean.mul(mean);
-        const x_squared = xf32.mul(xf32);
-        const mean_x_squared = x_squared.sum(-1).scale(1.0 / N);
-        const variance = mean_x_squared.sub(mean_sq);
-        // Normalisation
-        const rsqrt = Tensor.rsqrt(variance.addConstant(self.eps));
-        const mean_dev = xf32.sub(mean);
-        const normed = mean_dev.mul(rsqrt).convert(x.dtype());
-
-        // Affine transform
-        var out = normed.mul(self.weight.broadcast(x.shape(), &.{ax}).convert(x.dtype()));
-        if (self.bias) |b| {
-            out = out.add(b.broadcast(x.shape(), &.{ax}).convert(x.dtype()));
-        }
-        return out;
     }
 };
 
 pub const VisionBlock = struct {
     norm1: zml.nn.LayerNorm,
     norm2: zml.nn.LayerNorm,
-    attn: VisionAttention, // Ici window attention
+    attn: VisionAttention,
     mlp: VisionMlp,
-
-    // Config values pushed down
     num_heads: u32,
-    //window_size: u32,
-    //is_full_attention: bool, // based on fullatt_block_indexes
+
     pub fn forward(self: VisionBlock, hidden_states: Tensor, cos: Tensor, sin: Tensor) Tensor {
-        log.info("hidden_states dims: {f}", .{hidden_states.shape()});
-        log.info("self.norm1 dims: {f}", .{self.norm1.weight.shape()});
-        log.info("self.attn dims: {f}", .{self.attn.qkv.weight.shape()});
-        log.info("self.mlp dims: {f}", .{self.mlp.linear_fc1.weight.shape()});
-        log.info("cos dims: {f}", .{cos.shape()});
-        log.info("sin dims: {f}", .{sin.shape()});
         const x = zml.call(self.norm1, .forward, .{hidden_states});
         const x1 = hidden_states.add(zml.call(self.attn, .forward, .{ x, cos, sin }));
-        log.info("x1 dims: {f}", .{x1.shape()});
         const x2 = zml.call(self.norm2, .forward, .{x1});
         const x3 = x1.add(zml.call(self.mlp, .forward, .{x2}));
-        log.info("x3 dims: {f}", .{x3.shape()});
-        return x3; //REUSE BUFFER Je pense
+
+        return x3.reuseBuffer(hidden_states);
     }
 };
 
-// Necessite une couche convolutiom=nnelle 3D
-
+// Vision patch embedding
+// Project the image into a visual embedding by applying a 3D convolution along the temporal and spatial dims
 pub const VisionPatchEmbed = struct {
-    // Linear layer for patch embedding (fallback temporaire)
     proj: Conv3d,
-
-    // Config values
     patch_size: u32 = 14,
     temporal_patch_size: u32 = 2,
     in_channels: u32 = 3,
-    embed_dim: u32 = 1152, // correspond à hidden_size dans la config
-
+    embed_dim: u32 = 1152,
     pub fn init(
         allocator: std.mem.Allocator,
         patch_size: u32,
@@ -744,7 +722,9 @@ pub const VisionPatchEmbed = struct {
         embed_dim: u32,
         store: zml.aio.BufferStore,
     ) !VisionPatchEmbed {
-        const conv3d = try zml.aio.populateModelWithPrefix(Conv3d, allocator, store, "model.visual.patch_embed.proj");
+        var conv3d = try zml.aio.populateModelWithPrefix(Conv3d, allocator, store, "model.visual.patch_embed.proj");
+        conv3d.temporal_stride = temporal_patch_size;
+        conv3d.spatial_stride = patch_size;
 
         return .{
             .proj = conv3d,
@@ -756,20 +736,10 @@ pub const VisionPatchEmbed = struct {
     }
 
     pub fn forward(self: VisionPatchEmbed, hidden_states: Tensor) Tensor {
-        // 1. Reshape pour la convolution 3D
-        // hidden_states.view(-1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size)
         const reshaped = hidden_states.reshape(.{ -1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size });
-
-        // 2. Appliquer la convolution 3D
         const conv_output = zml.call(self.proj, .forward, .{reshaped});
-
-        // 3. Reshape final pour avoir [batch_size, embed_dim]
-        // .view(-1, self.embed_dim)
-
         const reshaped_output = conv_output.reshape(.{ conv_output.dim(0), conv_output.dim(1) });
-        for (0.., reshaped_output.dims()) |i, d| {
-            log.info("reshaped_output_dims: {d} at index {d}", .{ d, i });
-        }
+
         return reshaped_output;
     }
 };
@@ -790,17 +760,9 @@ pub const VisionRotaryEmbedding = struct {
         };
     }
 
-    pub fn forward(self: VisionRotaryEmbedding) Tensor {
-        const seqlen = 128;
-        // Utiliser directement invFreq de ZML
-        log.info("THETAself.rope_opts: {d}", .{self.rope_opts.freq_base});
+    pub fn forward(self: VisionRotaryEmbedding, seqlen: u32) Tensor {
         const inv_freq = zml.nn.invFreq(@intCast(32), self.rope_opts).withTags(.{.s});
-        //inv_freq par rapport a une dim;
-        log.info("inv_freq : {f}", .{inv_freq.shape()});
-        // Créer la séquence de positions
         const seq = zml.Tensor.arange(.{ .end = seqlen }, .f32).withTags(.{.d});
-
-        // Produit tensoriel
         return zml.Tensor.outer(seq, inv_freq);
     }
 };
@@ -812,24 +774,16 @@ pub fn rotate_half(x: Tensor) Tensor {
 }
 
 pub fn applyRotaryPositionalEmbedding(q: Tensor, k: Tensor, cos: Tensor, sin: Tensor) struct { Tensor, Tensor } {
-    //const cos_dtype = cos.convert(q.dtype());
-    //const sin_dtype = sin.convert(q.dtype());
-    log.info("q dims: {f}", .{q.shape()});
-    log.info("k dims: {f}", .{k.shape()});
-    log.info("ICI ", .{});
-    const cos_q_unsqueezed = zml.torch.unsqueeze(cos, -2).broad(q.shape()); //NECESSITTE POUR K ausii
+    const cos_q_unsqueezed = zml.torch.unsqueeze(cos, -2).broad(q.shape());
     const sin_q_unsqueezed = zml.torch.unsqueeze(sin, -2).broad(q.shape());
     const cos_k_unsqueezed = zml.torch.unsqueeze(cos, -2).broad(k.shape());
     const sin_k_unsqueezed = zml.torch.unsqueeze(sin, -2).broad(k.shape());
-    log.info("cos dims: {f}", .{cos.shape()});
-    log.info("sin dims: {f}", .{sin.shape()});
 
     const q_dtype = q.convert(cos.dtype());
     const k_dtype = k.convert(cos.dtype());
     const q_embed = q_dtype.mul(cos_q_unsqueezed).add(rotate_half(q_dtype).mul(sin_q_unsqueezed)).withTags(.{ .q, .h, .hd });
     const k_embed = k_dtype.mul(cos_k_unsqueezed).add(rotate_half(k_dtype).mul(sin_k_unsqueezed)).withTags(.{ .k, .h, .hd });
-    log.info("q_embed dims: {f}", .{q_embed.shape()});
-    log.info("k_embed dims: {f}", .{k_embed.shape()});
+
     return .{ q_embed.convert(q.dtype()), k_embed.convert(k.dtype()) };
 }
 
@@ -843,37 +797,24 @@ pub const VisionAttention = struct {
     //is_full_attention: bool,
 
     pub fn forward(self: VisionAttention, hidden_states: Tensor, cos: Tensor, sin: Tensor) Tensor {
-        log.info("qkv dims: {f}", .{self.qkv.weight.shape()});
-
         const qkv = zml.call(self.qkv, .forward, .{hidden_states});
-        log.info("qkv dims: {f}", .{qkv.shape()});
 
         const qkv_reshaped = qkv.reshape(.{
-            hidden_states.dim(0), // seq_length
+            hidden_states.dim(0),
             3,
-            16, //vision_config.num_heads
-            -1, // head_dim calculé automatiquement
+            self.num_heads,
+            -1, // head_dim
         });
-        log.info("qkv_reshaped dims: {f}", .{qkv_reshaped.shape()});
         const qkv_permuted = qkv_reshaped.transpose(.{ 1, 0, 2, 3 }).withTags(.{ .qkv, .s, .h, .hd });
-        log.info("qkv_permuted dims: {f}", .{qkv_permuted.shape()});
         const q = qkv_permuted.slice1d(0, .{ .end = 1 }).squeeze(0);
-        log.info("q dims: {f}", .{q.shape()});
         const k = qkv_permuted.slice1d(0, .{ .start = 1, .end = 2 }).squeeze(0);
-        log.info("k dims: {f}", .{k.shape()});
         const v = qkv_permuted.slice1d(0, .{ .start = 2, .end = 3 }).squeeze(0).withTags(.{ .k, .h, .hd });
-        log.info("v dims: {f}", .{v.shape()});
-        //const cos = postition_embedding.slice1d(1, .{ .end = 1 }).squeeze(-1);
-        //const sin = postition_embedding.slice1d(1, .{ .start = 1, .end = 2 }).squeeze(-1);
-        log.info("cos dims: {f}", .{cos.shape()});
-        log.info("sin dims: {f}", .{sin.shape()});
+
         const q_embed, const k_embed = applyRotaryPositionalEmbedding(q, k, cos, sin);
-        log.info("q_embed dims: {f}", .{q_embed.shape()});
-        log.info("k_embed dims: {f}", .{k_embed.shape()});
         const attn_output = zml.nn.sdpa(q_embed, k_embed, v, .{ .allow_cudnn = true });
-        // const attn_output = zml.nn.sdpaMemEfficient(q, k, v, .{ .attn_mask = attn_mask }, .{ .q_chunk_size = 4096, .k_chunk_size = 1024 });
         const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
-        return zml.call(self.proj, .forward, .{attn});
+        const result = zml.call(self.proj, .forward, .{attn});
+        return result;
     }
 };
 
@@ -881,17 +822,21 @@ pub const PatchMerger = struct {
     norm: zml.nn.LayerNorm,
     linear_fc1: zml.nn.Linear,
     linear_fc2: zml.nn.Linear,
-
-    // Config values
     out_hidden_size: u32,
 
     pub fn forward(self: PatchMerger, x: Tensor, use_post_shuffle_norm: bool) Tensor {
         const gelu = zml.nn.Activation{ .gelu = {} };
-        var x1 = if (use_post_shuffle_norm) zml.call(self.norm, .forward, .{x.reshape(.{ -1, 1024 * 4 })}) else zml.call(self.norm, .forward, .{x});
+        // Apply the post shuffle norm if needed
+        var x1 = if (use_post_shuffle_norm)
+            zml.call(self.norm, .forward, .{x.reshape(.{ -1, 1024 * 4 })})
+        else
+            zml.call(self.norm, .forward, .{x});
         x1 = x1.reshape(.{ -1, 1024 * 4 });
+
         const x2 = zml.call(self.linear_fc1, .forward, .{x1});
         const x3 = gelu.forward(x2);
         const x4 = zml.call(self.linear_fc2, .forward, .{x3});
+
         return x4;
     }
 };
@@ -902,14 +847,10 @@ pub const VisionMlp = struct { // MLP classique
     hidden_act: zml.nn.Activation = .{ .gelu = {} },
     pub fn forward(self: VisionMlp, x: Tensor) Tensor {
         const x1 = zml.call(self.linear_fc1, .forward, .{x});
-        log.info("x1 mlp dims: {f}", .{x1.shape()});
-        const gelu_tanh_approximation = zml.nn.Activation{ .gelu = {} }; // a verifier si equivalent a gelu pytorch tanh (je crois que oui)
-
+        const gelu_tanh_approximation = zml.nn.Activation{ .gelu = {} };
         const x2 = gelu_tanh_approximation.forward(x1.convert(.f32)).convert(x.dtype());
-        log.info("x2 mlp dims: {f}", .{x2.shape()});
-        //const x2 = x1.quickGelu();
         const x3 = zml.call(self.linear_fc2, .forward, .{x2});
-        log.info("x3 mlp dims: {f}", .{x3.shape()});
+
         return x3;
     }
 };
@@ -921,24 +862,17 @@ pub const TextModel = struct {
     layers: []TransformerLayer,
     norm: RmsNorm,
     rotary_embed: TextRotaryEmbedding,
-
-    // Config values pushed down
-    max_seq_len: u32 = 1000, // a definir en option
+    max_seq_len: u32 = 1000,
     num_heads: u32,
     num_kv_heads: u32,
-    // rope_opts: zml.nn.RopeOpts = .{
-    //     .layout = .interleaved,
-    //     .freq_base = 10_000,
-    // },
+    mrope_section: [3]u32,
 
     pub fn init(allocator: std.mem.Allocator, config: Qwen.Config, store: zml.aio.BufferStore) !TextModel {
-        // const rope_opts: zml.nn.RopeOpts = .{
-        //     .layout = if (config.hf_rope_impl) .sequential else .interleaved,
-        //     .freq_base = config.rope_theta,
-        //     //.scaling = config.rope_scaling,
-        // };
         const layers = try allocator.alloc(TransformerLayer, config.text_config.num_hidden_layers);
         var prefix = try zml.aio.PrefixBuilder.initCapacity(allocator, 1024);
+
+        const text_rotary_embed = try TextRotaryEmbedding.init(allocator, config.text_config.hidden_size, config.text_config.rope_theta, config.text_config.rope_scaling.mrope_section);
+
         try prefix.push(stdx.noalloc, "model.language_model.layers");
         for (0.., layers) |i, *layer| {
             try prefix.pushDigit(stdx.noalloc, i);
@@ -946,10 +880,8 @@ pub const TextModel = struct {
             var self_attn = try zml.aio.populateModelWithPrefix(SelfAttn, allocator, store, prefix.concat("self_attn"));
             self_attn.num_heads = config.text_config.num_attention_heads;
             self_attn.num_kv_heads = config.text_config.num_key_value_heads;
-            // self_attn.rope_opts = rope_opts;
 
             const mlp = try zml.aio.populateModelWithPrefix(Mlp, allocator, store, prefix.concat("mlp"));
-            //mlp.hidden_act = config.hidden_act;
 
             var input_layernorm = try zml.aio.populateModelWithPrefix(RmsNorm, allocator, store, prefix.concat("input_layernorm"));
             input_layernorm.eps = 1e-6;
@@ -965,79 +897,69 @@ pub const TextModel = struct {
                 .num_heads = config.text_config.num_attention_heads,
             };
         }
+
         return .{
             .embed_tokens = try zml.aio.populateModelWithPrefix(zml.nn.TokenEmbedding, allocator, store, "model.language_model.embed_tokens"),
             .layers = layers,
             .norm = try zml.aio.populateModelWithPrefix(RmsNorm, allocator, store, "model.language_model.norm"),
             .num_heads = config.text_config.num_attention_heads,
             .num_kv_heads = config.text_config.num_key_value_heads,
-            // .rope_opts = .{
-            //     .layout = if (config.hf_rope_impl) .sequential else .interleaved,
-            //     .freq_base = config.rope_theta,
-            //     //.scaling = config.rope_scaling,
-            // },
-            .rotary_embed = try TextRotaryEmbedding.init(allocator, config.text_config.hidden_size, 5000000.0),
+            .rotary_embed = text_rotary_embed,
+            .mrope_section = config.text_config.rope_scaling.mrope_section,
         };
     }
 
-    /// position_ids: (3, bs, seq_len)
-    /// attention_mask: (bs, seq_len)
-    /// inputs_embeds: (bs, seq_len, hidden_size)
-    /// cache_position: (seq_len)
-    /// visual_pos_masks: (bs, seq_len)
-    pub fn forward(self: TextModel, position_ids: Tensor, attention_mask: Tensor, inputs_embeds: Tensor, cache_position: Tensor, visual_pos_masks: Tensor, deepstack_visual_embeds: [3]Tensor, kv_cache: KvCache) struct { Tensor, KvCache } {
-        _ = visual_pos_masks;
+    // Forward prefill pass for the text model
+    pub fn forward(self: TextModel, position_ids: Tensor, inputs_embeds: Tensor, cache_position: Tensor, deepstack_visual_embeds: [3]Tensor, kv_cache: KvCache) struct { Tensor, KvCache } {
         var hidden_states = inputs_embeds;
-        const cos_sin = self.rotary_embed.forward(inputs_embeds, position_ids);
-
+        const cos_sin = self.rotary_embed.forward(position_ids);
         const cos = cos_sin.@"0";
         const sin = cos_sin.@"1";
         var count: u32 = 0;
 
+        // Build the indices for the deepstack visual embeddings addition
         const indices = zml.Tensor.iota(Shape.init(.{ .seq = deepstack_visual_embeds[0].dim(0) }, .u32), .seq).addConstant(4);
-        //indices = indices.print();
+
         var updated_kv_cache = kv_cache;
         for (self.layers, 0..) |layer, i| {
-            // hidden_states, updated_kv_cache = zml.call(layer, .forward, .{ hidden_states, attn_mask, cache_position, cos, sin, updated_kv_cache.atLayer(i) });
-            hidden_states, updated_kv_cache = zml.call(layer, .forward, .{ hidden_states, attention_mask, cache_position, cos, sin, updated_kv_cache.atLayer(i) });
-
+            hidden_states, updated_kv_cache = zml.call(layer, .forward, .{ hidden_states, cache_position, cos, sin, updated_kv_cache.atLayer(i) });
             hidden_states = hidden_states.withTags(.{ .bs, .seq, .d });
+
+            // Add the n visual embeddings at the n first layers outputs
             if (count < deepstack_visual_embeds.len) {
-                var deepstack = deepstack_visual_embeds[count];
-                log.info("deepstack: {f}", .{deepstack.shape()});
-                log.info("hidden_states: {f}", .{hidden_states.shape()});
+                const deepstack = deepstack_visual_embeds[count];
                 hidden_states = hidden_states.scatterSlices(.{ .seq = indices }, zml.torch.unsqueeze(deepstack, 0).convert(hidden_states.dtype()).withTags(.{ .bs, .seq, .d }), .{ .update_fn = zml.Tensor.ScatterOpts.increment });
                 count += 1;
             }
         }
         const output = zml.call(self.norm, .forward, .{hidden_states});
+
         return .{ output, updated_kv_cache };
     }
 
-    pub fn forward_decode(self: TextModel, position_ids: Tensor, attention_mask: Tensor, inputs_embeds: Tensor, cache_position: Tensor, kv_cache: KvCache) struct { Tensor, KvCache } {
+    // Forward decode pass for the text model
+    // Similar to the prefill pass, but without the deepstack visual embeddings addition
+    pub fn forward_decode(self: TextModel, position_ids: Tensor, inputs_embeds: Tensor, cache_position: Tensor, kv_cache: KvCache) struct { Tensor, KvCache } {
         var hidden_states = inputs_embeds;
-        const attn_mask = attention_mask;
-
-        const cos_sin = self.rotary_embed.forward(inputs_embeds, position_ids);
+        const cos_sin = self.rotary_embed.forward(position_ids);
         const cos = cos_sin.@"0";
         const sin = cos_sin.@"1";
-        log.info("cache_position: {f}", .{cache_position.shape()});
         var updated_kv_cache = kv_cache;
         for (self.layers, 0..) |layer, i| {
-            hidden_states, updated_kv_cache = zml.call(layer, .forward, .{ hidden_states, attn_mask, cache_position, cos, sin, updated_kv_cache.atLayer(i) });
+            hidden_states, updated_kv_cache = zml.call(layer, .forward, .{ hidden_states, cache_position, cos, sin, updated_kv_cache.atLayer(i) });
             hidden_states = hidden_states.withTags(.{ .bs, .seq, .d });
         }
         const output = zml.call(self.norm, .forward, .{hidden_states});
-
-        return .{ output, updated_kv_cache };
+        return .{ output, updated_kv_cache.reuseBuffer(kv_cache) };
     }
 };
 
 pub const TextRotaryEmbedding = struct {
     rope_opts: zml.nn.RopeOpts,
     dim: u32,
+    mrope_section: [3]u32,
 
-    pub fn init(allocator: std.mem.Allocator, dim: u32, theta: f32) !TextRotaryEmbedding {
+    pub fn init(allocator: std.mem.Allocator, dim: u32, theta: f32, mrope_section: [3]u32) !TextRotaryEmbedding {
         _ = allocator;
         return .{
             .rope_opts = zml.nn.RopeOpts{
@@ -1046,41 +968,40 @@ pub const TextRotaryEmbedding = struct {
                 .scaling = .{ .default = {} },
             },
             .dim = dim,
+            .mrope_section = mrope_section,
         };
     }
-    pub fn forward(self: TextRotaryEmbedding, x: Tensor, position_ids: Tensor) struct { Tensor, Tensor } {
-        _ = x; // autofix
-        const mrope_section = [3]i32{ 24, 20, 20 }; // from config 24 +20 +20 = 64 soit hd //2
+
+    pub fn forward(self: TextRotaryEmbedding, position_ids: Tensor) struct { Tensor, Tensor } {
+        const mrope_section = [3]u32{ self.mrope_section[0], self.mrope_section[1], self.mrope_section[2] }; // from config 24 +20 +20 = 64 i.e. hd / 2
         const inv_freq = zml.nn.invFreq(@intCast(128), self.rope_opts).withTags(.{.s}).convert(.f32);
-        const inv_freq_expanded = inv_freq.reshape(.{ -1, 1 }); // repat 3 times (t, h, w) on dim 0, pos id 1dim on dim 1 (number of images I think) (3, batch size, dim_head//2, 1)
+        // Repeat 3 times (t, h, w) on dim 0, pos id 1dim on dim 1 (number of images I think) (3, batch size, dim_head//2, 1)
+        const inv_freq_expanded = inv_freq.reshape(.{ -1, 1 });
         const position_ids_expanded = position_ids.reshape(.{ 3, @as(u32, @intCast(position_ids.dim(1))), 1, -1 }).convert(.f32); // (3, bs, 1, seq len)
-        log.info("inv_freq_expanded: {f}", .{inv_freq_expanded.shape()});
-        log.info("position_ids_expanded: {f}", .{position_ids_expanded.shape()});
         var freqs = inv_freq_expanded.matmul(position_ids_expanded).transpose(.{ 0, 1, 3, 2 }); // (3, bs, dim_head//2, seq len)
-        // interleaved mrope
+
+        // Interleaved mrope
+        // Slice the frequency tensor to get the frequency for the temporal, height and width dimensions
         var freqs_t = freqs.slice1d(0, .{ .start = 0, .end = 1 }).squeeze(0).withTags(.{ .bs, .seq, .dh });
         const freqs_h = freqs.slice1d(0, .{ .start = 1, .end = 2 }).squeeze(0).withTags(.{ .bs, .seq, .dh });
         const freqs_w = freqs.slice1d(0, .{ .start = 2, .end = 3 }).squeeze(0).withTags(.{ .bs, .seq, .dh });
-        log.info("freqs_t: {f}", .{freqs_t.shape()});
-        log.info("freqs_h: {f}", .{freqs_h.shape()});
-        log.info("freqs_w: {f}", .{freqs_w.shape()});
         const indices = zml.Tensor.iota(Shape.init(.{ .h = @as(u32, @intCast(mrope_section[1])) }, .i32), .h);
+
+        // Build the indices for the height and width dimensions
         const h_indices = indices.scale(3).addConstant(1);
         const w_indices = indices.scale(3).addConstant(2);
 
-        log.info("h_indices: {f}", .{h_indices.shape()});
-        log.info("w_indices: {f}", .{w_indices.shape()});
+        // Gather scatter the frequencies to build the tensor such as [t,h,w,t,h,w,...,t,h,w,t,t,t,t]
         const h_input = freqs_h.gather(.{ .dh = h_indices }, .{ .indices_are_sorted = true });
         const w_input = freqs_w.gather(.{ .dh = w_indices }, .{ .indices_are_sorted = true });
-        log.info("h_input: {f}", .{h_input.shape()});
-        log.info("w_input: {f}", .{w_input.shape()});
+        freqs_t = freqs_t.transpose(.{ 2, 0, 1 });
         freqs_t = freqs_t.scatterSlices(.{ .dh = h_indices }, h_input, .{ .update_fn = zml.Tensor.ScatterOpts.override });
-        log.info("freqs_t: {f}", .{freqs_t.shape()});
         freqs = freqs_t.scatterSlices(.{ .dh = w_indices }, w_input, .{ .update_fn = zml.Tensor.ScatterOpts.override });
-        log.info("freqs: {f}", .{freqs.shape()});
+        freqs = freqs.transpose(.{ 1, 2, 0 });
         const emb = zml.Tensor.concatenate(&.{ freqs, freqs }, -1);
         const cos = emb.cos();
         const sin = emb.sin();
+
         return .{ cos, sin };
     }
 };
@@ -1094,50 +1015,31 @@ pub const TransformerLayer = struct {
 
     pub fn forward(
         self: TransformerLayer,
-        x: Tensor,
-        attn_mask: Tensor,
+        x0: Tensor,
         token_index: Tensor,
         cos: Tensor,
         sin: Tensor,
         kv_cache: KvCache,
     ) struct { Tensor, KvCache } {
-        // Self Attention
-        //log.debug("TransformerLayer({f}) -> {f}", .{ x0, self.input_layernorm.forward(x0) });
-        //stdx.debug.assert(x0.rank() >= 2 and x0.shape().hasTags(.{ .s, .d }), "TransformerLayer expected input shape: {{..., .s, .d}}, received: {f}", .{x0});
-        //const x0 = x.convert(.f32);
-        const x0 = x;
-
         const x0_normalized = zml.call(self.input_layernorm, .forward, .{x0});
-        // var delta0, const updated_kv_cache = zml.call(self.self_attn, .forward, .{
-        //     x0_normalized,
-        //     attn_mask,
-        //     token_index,
-        //     cos,
-        //     sin,
-        //     kv_cache,
-        // });
+
         const delta0, const updated_kv_cache = zml.call(self.self_attn, .forward, .{
             x0_normalized,
-            attn_mask,
             token_index,
             cos,
             sin,
             kv_cache,
         });
-        //delta0 = delta0.convert(x0.dtype());
-        log.info("delta0: {f}", .{delta0.shape()});
-        const x1 = x.add(delta0);
-        log.info("x1: {f}", .{x1.shape()});
-        // Fully Connected
+
+        const x1 = x0.add(delta0);
         const x1_normalized = zml.call(self.post_attention_layernorm, .forward, .{x1});
-        log.info("x1_normalized: {f}", .{x1_normalized.shape()});
         const x2 = zml.call(self.mlp, .forward, .{x1_normalized}).add(x1);
-        log.info("x2: {f}", .{x2.shape()});
-        return .{ x2.reuseBuffer(x), updated_kv_cache };
+
+        const result = .{ x2.reuseBuffer(x0), updated_kv_cache };
+        return result;
     }
 };
 
-// Reuse Llama components
 pub const SelfAttn = struct {
     q_proj: zml.nn.Linear,
     k_proj: zml.nn.Linear,
@@ -1149,105 +1051,65 @@ pub const SelfAttn = struct {
     o_proj: zml.nn.Linear,
     num_heads: i64 = undefined,
     num_kv_heads: i64 = 0,
-    // rope_opts: zml.nn.RopeOpts = undefined,
 
     pub fn forward(
         self: SelfAttn,
         x: Tensor,
-        attention_mask: Tensor,
-        // kv_cache: KvCache, marche pas pour test, necessite de "developper la struct"
         token_position: Tensor,
         cos: Tensor,
         sin: Tensor,
         kv_cache: KvCache,
     ) struct { Tensor, KvCache } {
-        _ = attention_mask; // autofix
-        const num_kv_heads = if (self.num_kv_heads > 0) self.num_kv_heads else self.num_heads;
-        _ = num_kv_heads; // autofix
-        log.info("q_proj: {f}", .{self.q_proj.weight.shape()});
-        log.info("k_proj: {f}", .{self.k_proj.weight.shape()});
-        log.info("v_proj: {f}", .{self.v_proj.weight.shape()});
+
+        // Compute key query and value projections (split the dimension into head and dimension)
         var q = zml.call(self.q_proj, .forward, .{x}).splitAxis(-1, .{ .h = 32, .hd = .auto });
         var k = zml.call(self.k_proj, .forward, .{x}).splitAxis(-1, .{ .h = 8, .hd = .auto });
         var v = zml.call(self.v_proj, .forward, .{x}).splitAxis(-1, .{ .h = 8, .hd = .auto });
-        //_ = seq_len; // autofix
-        log.info("position_ids: {f}", .{token_position.shape()});
 
         const token_index = token_position.convert(kv_cache.layer_index.dtype());
-        //const token_index = token_position;
-        log.info("token_index: {f}", .{token_index.shape()});
-        // const seq_len = token_index.dim(1); // a changer
-        // log.info("seq_len: {d}", .{seq_len});
         const seq_len = kv_cache.k.dim(.k);
-        log.info("seq_len: {d}", .{seq_len});
-        log.info("x shape: {f}", .{x.shape()});
+
+        // Generate the attention mask
         var attn_mask = zml.nn.causalAttnMask(.{ .q = seq_len, .k = seq_len }, x.dtype(), null);
         attn_mask = attn_mask.gatherSlices(zml.Shape.init(.{ .q = x.dim(.seq) }, attn_mask.dtype()), token_index.reshape(.{ .coord = 1 }), .{});
-        log.info("q_norm: {f}", .{self.q_norm.weight.shape()});
-        log.info("k_norm: {f}", .{self.k_norm.weight.shape()});
-        log.info("q: {f}", .{q.shape()});
-        log.info("k: {f}", .{k.shape()});
-        log.info("v: {f}", .{v.shape()});
-        q = zml.call(self.q_norm, .forward, .{q.rename(.{ .hd = .d })}).rename(.{ .d = .hd }).squeeze(0); //squeeze sur la dim batch pour le test
-        k = zml.call(self.k_norm, .forward, .{k.rename(.{ .hd = .d })}).rename(.{ .d = .hd }).squeeze(0);
 
-        v = v.squeeze(0);
-        q = q.withTags(.{ .q, .h, .hd });
-        k = k.withTags(.{ .k, .h, .hd });
-        v = v.withTags(.{ .k, .h, .hd });
-        log.info("q: {f}", .{q.shape()});
-        log.info("k: {f}", .{k.shape()});
-        log.info("v: {f}", .{v.shape()});
+        q = zml.call(self.q_norm, .forward, .{q.rename(.{ .hd = .d })}).rename(.{ .d = .hd }).squeeze(0).withTags(.{ .q, .h, .hd });
+        k = zml.call(self.k_norm, .forward, .{k.rename(.{ .hd = .d })}).rename(.{ .d = .hd }).squeeze(0).withTags(.{ .k, .h, .hd });
+        v = v.squeeze(0).withTags(.{ .k, .h, .hd });
+
         q, k = applyRotaryPositionalEmbedding(q, k, cos.squeeze(0), sin.squeeze(0));
-        // const k_for_cache = k.gather(.{ .k = token_index }, .{ .indices_are_sorted = true }).withTags(.{ .k, .h, .hd });
-        // log.info("k_for_cache: {f}", .{k_for_cache.shape()});
-        // const v_for_cache = v.gather(.{ .k = token_index }, .{ .indices_are_sorted = true }).withTags(.{ .k, .h, .hd });
-        // log.info("v_for_cache: {f}", .{v_for_cache.shape()});
-        // const kv_cache_updated = kv_cache.update(k_for_cache, v_for_cache, token_index.withTags(.{.k}));
-        // q = zml.nn.rope(q, pos_index, self.rope_opts);
-        // k = zml.nn.rope(k, pos_index, self.rope_opts);
 
-        log.info("q: {f}", .{q.shape()});
-        log.info("k: {f}", .{k.shape()});
-        log.info("v: {f}", .{v.shape()});
-
-        // const cached_k = kv_cache_updated.keys();
-        // const cached_v = kv_cache_updated.values();
-
+        // Update the key-value cache
         const kv_cache_updated = kv_cache.update(k, v, token_index);
+        // Retrieve the cached key and value
         const cached_k = kv_cache_updated.keys().convert(q.dtype());
         const cached_v = kv_cache_updated.values().convert(q.dtype());
-        log.info("k from cache: {f}", .{cached_k.shape()});
-        log.info("v from cache: {f}", .{cached_v.shape()});
 
         const orig_dtype = q.dtype();
-        // const q_f32 = q.convert(.f32);
-        // const k_f32 = cached_k.convert(.f32);
-        // const v_f32 = cached_v.convert(.f32);
-        // const attn_mask_f32 = attn_mask.convert(.f32);
 
-        // const attn_output = zml.nn.sdpa(q_f32, k_f32, v_f32, .{ .attn_mask = attn_mask_f32, .allow_cudnn = true }).convert(orig_dtype);
-
+        // Attention
         const attn_output = zml.nn.sdpa(q, cached_k, cached_v, .{ .attn_mask = attn_mask, .allow_cudnn = true }).convert(orig_dtype);
 
-        // const attn_output = zml.nn.sdpaMemEfficient(q, k, v, .{ .attn_mask = attn_mask }, .{ .q_chunk_size = 4096, .k_chunk_size = 1024 });
-        log.info("attn_output: {f}", .{attn_output.shape()});
+        // Merge head and dimension back together
         const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
-        return .{ zml.torch.unsqueeze(zml.call(self.o_proj, .forward, .{attn}), 0), kv_cache_updated };
+        const result = .{ zml.torch.unsqueeze(zml.call(self.o_proj, .forward, .{attn}), 0), kv_cache_updated };
+
+        return result;
     }
 };
 
 pub const Mlp = struct {
-    up_proj: zml.nn.Linear, // (dim -> hidden_dim)
-    gate_proj: zml.nn.Linear, // (dim -> hidden_dim)
-    down_proj: zml.nn.Linear, // (hidden_dim -> dim)
-    //hidden_act: []const u8,
+    up_proj: zml.nn.Linear,
+    gate_proj: zml.nn.Linear,
+    down_proj: zml.nn.Linear,
 
     pub fn forward(self: Mlp, x: Tensor) Tensor {
         const proj = zml.call(self.up_proj, .forward, .{x});
         var output = zml.call(self.gate_proj, .forward, .{x});
         output = output.silu().mul(proj);
-        return zml.call(self.down_proj, .forward, .{output});
+        const result = zml.call(self.down_proj, .forward, .{output});
+
+        return result;
     }
 };
 
