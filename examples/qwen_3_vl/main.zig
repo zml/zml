@@ -566,9 +566,7 @@ pub fn preprocessor(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Token
     const result = try applyChatTemplate(allocator, tokenizer, prompt, number_image_pad_tokens);
     const prompt_encoded = result.prompt_tokens;
     const prompt_shape = result.prompt_shape;
-    var decoder = try tokenizer.decoder();
-    defer decoder.deinit();
-    _ = try decoder.decode(prompt_encoded);
+
     defer allocator.free(prompt_encoded);
     const prompt_buffer = try allocator.alloc(u32, max_seq_len);
 
@@ -605,7 +603,7 @@ pub fn applyChatTemplate(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.
     try tokens.appendSlice(allocator, &.{ im_start_id, user, newline });
     try tokens.appendSlice(allocator, &.{vision_start_id});
     for (0..number_image_pad_tokens) |i| {
-        _ = i; // autofix
+        _ = i;
         try tokens.appendSlice(allocator, &.{image_pad_id});
     }
     try tokens.appendSlice(allocator, &.{vision_end_id});

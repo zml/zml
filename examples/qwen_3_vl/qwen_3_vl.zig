@@ -51,8 +51,7 @@ fn ResizeCubic1d(image: Tensor, axis: i8, new_len: u63, opt: zml.nn.ResizeOpts) 
     const og_len = if (opt.original_len) |o| blk: {
         // If original_len is a vector ( here chw=3), extract the dimension for this axis
         if (o.rank() == 1) {
-            const axis_tag = image.shape().tags()[ax];
-            _ = axis_tag; // autofix
+
             // Get the index of the axis in the original length
             const idx_in_original = @as(i64, @intCast(ax));
             break :blk o.choose1d(0, idx_in_original).convert(dtype);
