@@ -16,6 +16,7 @@ const zml = struct {
     pub const platform = @import("platform.zig");
     pub const Shape = @import("shape.zig").Shape;
     pub const Target = @import("platform.zig").Target;
+    pub const tools = @import("tools/tools.zig");
 };
 
 const PjrtApiMap = std.EnumArray(zml.Target, ?*const pjrt.Api);
@@ -79,11 +80,19 @@ pub const Context = struct {
 
     platforms: PlatformsMap,
 
+    pub var tracer: zml.tools.Tracer = undefined;
+    var tracer_once = std.once(struct {
+        fn call() void {
+            tracer = .init("ai.zml");
+        }
+    }.call);
+
     /// Creates a ZML Context and returns it.
     pub fn init() !Context {
         Context.runfiles_once.call();
         Context.apis_once.call();
         Context.mlir_once.call();
+        Context.tracer_once.call();
 
         var num_platforms: u8 = 0;
         for (Context.apis.values) |api| {

@@ -5,6 +5,7 @@ const stdx = @import("stdx");
 
 const DataType = @import("dtype.zig").DataType;
 const HostBuffer = @import("hostbuffer.zig").HostBuffer;
+const Io = @import("Io.zig");
 const pjrt = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
@@ -484,6 +485,62 @@ pub const Buffer = struct {
         }
         return deleted;
     }
+
+    pub fn reader(self: Buffer, allocator: std.mem.Allocator, dma_buffer: []u8) !Reader {
+        return try .init(allocator, self, dma_buffer);
+    }
+
+    const Reader = struct {
+        // TODO: optimize a bit, there is a lot of redundant information across shards.
+        shards: []Io.ShardReader,
+        active: u8,
+        interface: std.Io.Reader,
+
+        pub fn init(allocator: std.mem.Allocator, input: Buffer, dma_buffer: []u8) !Reader {
+            const num_shards = input._shards.len;
+            std.debug.assert(num_shards > 0);
+            const dma_bytes_per_shard = std.math.divCeil(usize, dma_buffer.len, num_shards) catch unreachable;
+
+            const shard_readers = try allocator.alloc(Io.ShardReader, num_shards);
+            for (shard_readers, 0.., input._shards.slice()) |*r, i, shard_buffer| {
+                r.* = .init(
+                    input._api,
+                    shard_buffer,
+                    dma_buffer[i * dma_bytes_per_shard ..][0..dma_bytes_per_shard],
+                );
+            }
+
+            return .{
+                .active = 0,
+                .shards = shard_readers,
+                .interface = .{ .vtable = &vtable, .buffer = &.{}, .seek = 0, .end = 0 },
+            };
+        }
+
+        fn stream(r: *std.io.Reader, w: *std.io.Writer, limit: std.io.Limit) std.io.Reader.StreamError!usize {
+            // TODO(hugomano): this seem suboptimal, it only stream the first shard
+            // until end of stream, then switch to the second shard, ...
+            const self = @as(*Reader, @alignCast(@fieldParentPtr("interface", r)));
+
+            while (self.active < self.shards.len) {
+                const active = self.active;
+                var shard_reader: *Io.ShardReader = &self.shards[active];
+                const bytes_read = shard_reader.interface.stream(w, limit) catch |err| switch (err) {
+                    error.EndOfStream => {
+                        self.active += 1;
+                        continue;
+                    },
+                    else => |e| return e,
+                };
+                return bytes_read;
+            }
+            return error.EndOfStream;
+        }
+
+        const vtable: std.io.Reader.VTable = .{
+            .stream = stream,
+        };
+    };
 };
 
 const _MINOR_TO_MAJOR = blk: {

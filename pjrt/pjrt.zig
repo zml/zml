@@ -440,18 +440,18 @@ pub const Client = opaque {
     }
 
     pub fn dmaMap(self: *const Client, api: *const Api, data: []const u8) ApiError!void {
-        try api.call(.PJRT_Client_DmaMap, .{
+        _ = try api.call(.PJRT_Client_DmaMap, .{
             .client = self.inner(),
             .data = @ptrCast(@constCast(data.ptr)),
             .size = @intCast(data.len),
         });
     }
 
-    pub fn dmaUnmap(self: *const Client, api: *const Api, data: []const u8) ApiError!void {
-        try api.call(.PJRT_Client_DmaUnmap, .{
+    pub fn dmaUnmap(self: *const Client, api: *const Api, data: []const u8) void {
+        _ = api.call(.PJRT_Client_DmaUnmap, .{
             .client = self.inner(),
             .data = @ptrCast(@constCast(data.ptr)),
-        });
+        }) catch {};
     }
 
     pub const CreateBuffersForAsyncHostToDeviceArgs = struct {

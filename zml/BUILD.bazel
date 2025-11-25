@@ -37,6 +37,7 @@ zig_library(
         "floats.zig",
         "helpers.zig",
         "hostbuffer.zig",
+        "Io.zig",
         "meta.zig",
         "mlirx.zig",
         "module.zig",
