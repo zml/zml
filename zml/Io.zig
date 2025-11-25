@@ -3,7 +3,6 @@ const std = @import("std");
 
 const stdx = @import("stdx");
 const pjrt = @import("pjrtx.zig");
-const tracer = @import("context.zig").Context.tracer;
 const log = std.log.scoped(.@"zml.io");
 
 pub const ShardReader = struct {
@@ -45,8 +44,8 @@ pub const ShardReader = struct {
     }
 
     fn requestNextChunk(self: *ShardReader) std.io.Reader.StreamError!void {
-        const trace = tracer.frameStart("ShardReader.requestNextChunk");
-        defer tracer.frameEnd(trace, "ShardReader.requestNextChunk");
+        // const trace = tracer.frameStart("ShardReader.requestNextChunk");
+        // defer tracer.frameEnd(trace, "ShardReader.requestNextChunk");
 
         const slot_to_fill = self.next_request_slot;
         std.debug.assert(self.slots[slot_to_fill] == null);
@@ -78,8 +77,8 @@ pub const ShardReader = struct {
     }
 
     fn stream(r: *std.io.Reader, w: *std.io.Writer, limit: std.io.Limit) std.io.Reader.StreamError!usize {
-        const trace = tracer.frameStart("ShardReader.stream(vtable)");
-        defer tracer.frameEnd(trace, "ShardReader.stream(vtable)");
+        // const trace = tracer.frameStart("ShardReader.stream(vtable)");
+        // defer tracer.frameEnd(trace, "ShardReader.stream(vtable)");
 
         // From Io.Writer.vtable documentation:
         // > In addition to, or instead of writing to `w`,
@@ -103,8 +102,8 @@ pub const ShardReader = struct {
         const slot_to_consume = self.next_consume_slot;
 
         if (self.slots[slot_to_consume]) |event| {
-            const trace_await = tracer.frameStart("ShardReader.awaitEvent");
-            defer tracer.frameEnd(trace_await, "ShardReader.awaitEvent");
+            // const trace_await = tracer.frameStart("ShardReader.awaitEvent");
+            // defer tracer.frameEnd(trace_await, "ShardReader.awaitEvent");
 
             event.awaitBlocking(self.pjrt_api) catch |err| {
                 log.err("Error awaiting event in stream: {}", .{err});
@@ -146,6 +145,7 @@ test "ShardReader: streamRemaining" {
     const allocator = std.testing.allocator;
     const platform = zml.testing.env();
 
+    const tracer: zml.tools.Tracer = .init("ai.zml.io");
     const trace_test = tracer.frameStart("ShardReader.test.streamRemaining");
     defer tracer.frameEnd(trace_test, "ShardReader.test.streamRemaining");
 

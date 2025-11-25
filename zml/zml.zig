@@ -16,7 +16,6 @@ pub const callback = @import("callback.zig");
 pub const CompilationOptions = @import("platform.zig").CompilationOptions;
 pub const context = @import("context.zig");
 pub const Context = @import("context.zig").Context;
-pub const tracer = Context.tracer;
 pub const Data = @import("dtype.zig").Data;
 pub const DataType = @import("dtype.zig").DataType;
 pub const exe = @import("exe.zig");
