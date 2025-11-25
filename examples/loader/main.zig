@@ -2591,6 +2591,8 @@ const DeviceReader = struct {
             if (self.total_size == 0) return error.EndOfStream;
             log.debug("DeviceReader: Priming pipeline for {d} bytes...", .{self.total_size});
             for (0..NUM_SLOTS) |_| try self.requestNextChunk();
+        } else {
+            try self.requestNextChunk();
         }
 
         const slot_to_consume = self.next_consume_slot;
@@ -2612,8 +2614,6 @@ const DeviceReader = struct {
                 return error.ReadFailed;
             }
         }
-
-        try self.requestNextChunk();
 
         const offset_in_dma = slot_to_consume * self.chunk_size;
         const remaining_total = self.total_size - self.bytes_activated;
@@ -2689,6 +2689,51 @@ test "DeviceReader: streamRemaining" {
     tracer.frameEnd(trace_stream, "DeviceReader.streamRemaining");
 
     try std.testing.expectEqual(shape.byteSize(), bytes_read);
+}
+
+test "DeviceReader: arange / streamRemaining" {
+    const allocator = std.testing.allocator;
+    const platform = zml.testing.env();
+
+    const trace_test = tracer.frameStart("DeviceReader.test.streamRemaining");
+    defer tracer.frameEnd(trace_test, "DeviceReader.test.streamRemaining");
+
+    const Local = struct {
+        fn forward() zml.Tensor {
+            return .arange(.{ .end = 256 * MB }, .u32);
+        }
+    };
+
+    const x_d = try zml.testing.compileAndCall(platform, Local.forward, .{});
+    defer x_d.deinit();
+
+    const dma_buffer = try allocator.alignedAlloc(u8, .fromByteUnits(4 * KB), 1 * MB);
+    defer allocator.free(dma_buffer);
+
+    platform.pjrt_client.dmaMap(platform.pjrt_api, dma_buffer) catch {};
+    defer platform.pjrt_client.dmaUnmap(platform.pjrt_api, dma_buffer) catch unreachable;
+
+    var device_reader: DeviceReader = try .init(platform, x_d._shards.get(0), dma_buffer);
+
+    const x_h = try allocator.alignedAlloc(u32, .fromByteUnits(16 * KB), x_d.shape().count());
+    defer allocator.free(x_h);
+    var x_h_writer: std.io.Writer = .fixed(std.mem.sliceAsBytes(x_h));
+
+    const trace_stream = tracer.frameStart("DeviceReader.streamRemaining");
+    const bytes_read = try device_reader.interface.streamRemaining(&x_h_writer);
+    tracer.frameEnd(trace_stream, "DeviceReader.streamRemaining");
+
+    std.log.warn("Device: {f}, host: {d}, read: {d}", .{
+        x_d,
+        256 * MB * @sizeOf(u32),
+        bytes_read,
+    });
+    try std.testing.expectEqual(x_d.shape().byteSize(), bytes_read);
+    try std.testing.expectEqual(256 * MB * @sizeOf(u32), bytes_read);
+    for (x_h, 0..) |actual, expected| {
+        errdefer log.err("Mismatch at offset {d}, expected {x}, got {x}", .{ expected, expected, actual });
+        try std.testing.expectEqual(expected, actual);
+    }
 }
 
 test "DeviceReader: discard writer" {
