@@ -1,6 +1,7 @@
 const std = @import("std");
 const c = @import("c");
 // const tsl_proto = @import("//tsl:profiler_options_proto");
+const proto = c.tensorflow_ProfileOptions;
 
 const log = std.log.scoped(.@"pjrt/profiler");
 // const TraceContainer = @import("convert/trace_container.zig").TraceContainer;
@@ -14,9 +15,6 @@ pub const Profiler = struct {
 
     pub const Status = enum { ready, started, stopped, done };
     pub const Error = c.PLUGIN_Profiler_Error;
-    pub const Options = struct {
-        version: u32 = 1,
-    };
 
     pub const default_options: Options = .{
         .version = 1,
