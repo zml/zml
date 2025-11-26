@@ -737,8 +737,6 @@ pub fn loadBmpAsRgb(allocator: std.mem.Allocator, path: []const u8) !RgbImage {
             rgb_data[dst_pixel + 2] = src_slice[src_pixel + 0];
         }
     }
-    log.info("width: {d}", .{width});
-    log.info("abs_height: {d}", .{abs_height});
 
     return RgbImage{
         .width = width,

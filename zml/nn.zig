@@ -32,7 +32,7 @@ pub const Linear = struct {
         }
 
         // log.debug("Linear({*}): {d} -> {d} -> {d}", .{ self, x.dims(), y.dims(), if (self.bias) |bias| y.add(bias).dims() else y.dims() });
-        return if (self.bias) |bias| y.add(bias.convert(y.dtype()).broadcast(y.shape(), &.{y.axis(-1)})) else y; //ajout du convert x.dtype() pour que le type de la sortie soit le même que le type de l'input.
+        return if (self.bias) |bias| y.add(bias.convert(y.dtype()).broadcast(y.shape(), &.{y.axis(-1)})) else y;
     }
 };
 
@@ -100,9 +100,9 @@ pub const LayerNorm = struct {
     pub fn forward(self: LayerNorm, x: Tensor) Tensor {
         const normed = normalizeVariance(x, self.eps);
         const ax = x.axis(-1);
-        var out = normed.mul(self.weight.broadcast(x.shape(), &.{ax}).convert(.f32)); // ajout du convert x.dtype() pour que le type de la sortie soit le même que le type de l'input.
+        var out = normed.mul(self.weight.broadcast(x.shape(), &.{ax}).convert(.f32));
 
-        if (self.bias) |bias| out = out.add(bias.broadcast(x.shape(), &.{ax}).convert(.f32)); // ajout du convert x.dtype() pour que le type de la sortie soit le même que le type de l'input.
+        if (self.bias) |bias| out = out.add(bias.broadcast(x.shape(), &.{ax}).convert(.f32));
 
         return out.convert(x.dtype());
     }
@@ -111,10 +111,7 @@ pub const LayerNorm = struct {
 pub fn rmsNorm(x: Tensor, axis: anytype, eps: f32) Tensor {
     const ax = x.axis(axis);
     // upcast to improve precision
-    //const variance = x.powByConst(2).mean(ax);
     const variance = x.convert(.f32).powByConst(2).mean(ax);
-
-    //const rsqrt = Tensor.rsqrt(variance.addConstant(eps));
     const rsqrt = Tensor.rsqrt(variance.addConstant(eps)).convert(x.dtype());
 
     return x.mul(rsqrt.broad(x.shape()));
@@ -131,9 +128,9 @@ pub fn normalizeVariance(x: Tensor, eps: f32) Tensor {
     const mean = xf32.sum(-1).scale(1.0 / N);
     const mean_dev = xf32.sub(mean);
     const variance = mean_dev.mul(mean_dev).sum(-1).divByConst(N);
-    const sqrt = Tensor.sqrt(variance.addConstant(eps));
+    const rsqrt = Tensor.rsqrt(variance.addConstant(eps));
 
-    return mean_dev.div(sqrt);
+    return mean_dev.mul(rsqrt).convert(x.dtype());
 }
 
 // ref: https://pytorch.org/docs/stable/generated/torch.nn.functional.normalize.html
@@ -943,11 +940,9 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
     const sqrtHeadDim: f32 = 1.0 / std.math.sqrt(@as(f32, @floatFromInt(dims.hd)));
     const head_scaling = if (opts.scale) |s| s else Tensor.scalar(sqrtHeadDim, k.dtype());
     k = k.mul(head_scaling.convert(k.dtype()));
-    log.info("q: {f}", .{q.shape()});
-    log.info("k: {f}", .{k.shape()});
+
     var attn_weights = q.dot(k, .{.hd});
-    //log.info("attn_weights: {f}", .{attn_weights.shape()});
-    log.info("attn_weights : {f}, attn_mask : {?f}", .{ attn_weights, attn_mask });
+
     if (attn_mask) |mask| attn_weights = attn_weights.add(mask.broad(attn_weights.shape()));
     attn_weights = attn_weights.convert(.f32);
     attn_weights = if (opts.softmax_bias) |softmax_bias| attn: {
@@ -956,9 +951,7 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
         const bias = softmax_bias.splitAxis(.h, .{ .h = k.dim(.h), .hq = .auto });
         break :attn attn_weights.convert(.f32).softmaxBiased(.k, bias).convert(q.dtype());
     } else attn_weights.convert(.f32).softmax(.k).convert(q.dtype());
-    log.info("attn_weights: {f}", .{attn_weights.shape()});
     var attn = attn_weights.dot(v, .{.k});
-    log.info("attn: {f}", .{attn.shape()});
     return attn.transpose(q.shape()).merge(.{ .h = .{ .h, .hq } });
 }
 

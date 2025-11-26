@@ -262,11 +262,11 @@ pub const BaseExe = struct {
             std.debug.panic("PJRT_LoadedExecutable_Execute failed with: {}", .{err});
         };
 
-        for (events[0..sharding.num_partitions]) |e| {
-            if (e) |ev| {
-                ev.await(self.platform.pjrt_api) catch unreachable;
-            }
-        }
+        // for (events[0..sharding.num_partitions]) |e| {
+        //     if (e) |ev| {
+        //         ev.await(self.platform.pjrt_api) catch unreachable;
+        //     }
+        // }
     }
 
     pub fn _unsafeAssignResults(self: BaseExe, T: type, result: *T) void {

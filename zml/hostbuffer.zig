@@ -317,20 +317,18 @@ pub const HostBuffer = struct {
     }
 
     pub fn format(self: HostBuffer, writer: *std.Io.Writer) !void {
-        std.log.warn("==========================================format==========================================", .{});
         try writer.print("HostBuffer(.{f})@{x}", .{ self._shape, @intFromPtr(self._data) });
     }
 
     pub fn formatNumber(self: HostBuffer, writer: *std.io.Writer, n: std.fmt.Number) std.io.Writer.Error!void {
-        return self.prettyPrintIndented(writer, 20, 0, n);
+        return self.prettyPrintIndented(writer, 4, 0, n);
     }
 
     pub fn prettyPrint(self: HostBuffer, writer: *std.Io.Writer, options: std.fmt.Number) !void {
-        std.log.warn("==========================================prettyPrint==========================================", .{});
-        return self.prettyPrintIndented(writer, 20, 0, options);
+        return self.prettyPrintIndented(writer, 4, 0, options);
     }
 
-    fn prettyPrintIndented(self: HostBuffer, writer: *std.Io.Writer, num_rows: u8, indent_level: u8, options: std.fmt.Number) !void {
+    fn prettyPrintIndented(self: HostBuffer, writer: *std.Io.Writer, num_rows: u32, indent_level: u8, options: std.fmt.Number) !void {
         if (self.rank() == 0) {
             // Special case input tensor is a scalar
             return switch (self.dtype()) {
@@ -385,18 +383,18 @@ pub const HostBuffer = struct {
             try sliced_self.prettyPrintIndented(writer, num_rows, indent_level + 2, options);
         }
 
-        if (n < num_rows) return;
-        // Skip middle rows
-        if (n > 2 * num_rows) {
-            try writer.splatByteAll(' ', indent_level + 2);
-            _ = try writer.write("...\n");
-        }
-        // Write last rows
-        for (@max(n - num_rows, num_rows)..n) |d| {
-            const di: i64 = @intCast(d);
-            const sliced_self = self.slice1d(0, .{ .start = di, .end = di + 1 }).squeeze(0);
-            try sliced_self.prettyPrintIndented(writer, num_rows, indent_level + 2, options);
-        }
+        // if (n < num_rows) return;
+        // // Skip middle rows
+        // if (n > 2 * num_rows) {
+        //     try writer.splatByteAll(' ', indent_level + 2);
+        //     _ = try writer.write("...\n");
+        // }
+        // // Write last rows
+        // for (@max(n - num_rows, num_rows)..n) |d| {
+        //     const di: i64 = @intCast(d);
+        //     const sliced_self = self.slice1d(0, .{ .start = di, .end = di + 1 }).squeeze(0);
+        //     try sliced_self.prettyPrintIndented(writer, num_rows, indent_level + 2, options);
+        // }
     }
 };
 

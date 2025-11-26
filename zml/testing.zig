@@ -288,6 +288,7 @@ pub fn testLayerOut(
     log.info("all good for {s} !", .{name});
 }
 
+/// Test a forward pass without input.
 pub fn testLayerWithoutInput(
     platform: zml.Platform,
     activations: zml.aio.BufferStore,
@@ -300,16 +301,11 @@ pub fn testLayerWithoutInput(
     log.info("Testing {s} (no input)", .{name});
 
     const fwd = @TypeOf(layer).forward;
-
-    // Utiliser compileAndCall qui gère automatiquement les types
     const result = try zml.testing.compileAndCall(platform, fwd, layer_weights);
-
-    // Vérifier la sortie
     const expected_out = activations.get(out_name) orelse {
         log.warn("Output buffer not found: {s}", .{out_name});
         return;
     };
-
     try zml.testing.expectClose(expected_out, result, tolerance);
     log.info("all good for {s} !", .{name});
 }
