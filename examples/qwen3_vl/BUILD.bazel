@@ -1,0 +1,16 @@
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+
+zig_binary(
+    name = "qwen3_vl",
+    srcs = [
+        "qwen3_vl.zig",
+    ],
+    main = "main.zig",
+    deps = [
+        "@com_github_bfactory_ai_zignal//:zignal",
+        "@com_github_hejsil_clap//:clap",
+        "@zml//async",
+        "@zml//stdx",
+        "@zml//zml",
+    ],
+)
