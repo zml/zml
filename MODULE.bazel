@@ -10,7 +10,7 @@ bazel_dep(name = "libxev", version = "0.0.0-20251014.0-9f785d2")
 bazel_dep(name = "patchelf", version = "0.18.0")
 bazel_dep(name = "pcre2", version = "10.45")
 bazel_dep(name = "platforms", version = "1.0.0")
-bazel_dep(name = "protobuf", version = "32.0", repo_name = "com_google_protobuf")
+bazel_dep(name = "protobuf", version = "33.1", repo_name = "com_google_protobuf")
 
 # Needs to be added before rules_cc so that the cc toolchain declared by
 # apple_support wins over the one in rules_cc.
@@ -30,7 +30,7 @@ bazel_dep(name = "buildifier_prebuilt", version = "8.2.0.2", dev_dependency = Tr
 
 zig = use_extension("@rules_zig//zig:extensions.bzl", "zig")
 zig.index(file = "//bazel:zig_index.json")
-zig.toolchain(zig_version = "0.16.0-dev.1316+181b25ce4")
+zig.toolchain(zig_version = "0.16.0-dev.1458+755a3d957")
 zig.mirrors(urls = [
     "https://mirror.zml.ai/zig",
     "https://ziglang.org/builds/",
@@ -42,8 +42,9 @@ register_toolchains("@rules_zig//zig/target:all")
 register_toolchains("@zig_toolchains//:all")
 
 register_toolchains(
-    "@toolchains_llvm_bootstrapped//toolchain:linux_amd64",
-    "@toolchains_llvm_bootstrapped//toolchain:linux_aarch64",
+    "@toolchains_llvm_bootstrapped//toolchain:macos_aarch64_to_linux_x86_64",
+    # "@toolchains_llvm_bootstrapped//toolchain:linux_amd64",
+    # "@toolchains_llvm_bootstrapped//toolchain:linux_aarch64",
 )
 
 uv = use_extension("@rules_python//python/uv:uv.bzl", "uv", dev_dependency = True)
@@ -214,3 +215,13 @@ huggingface.model(
 )
 use_repo(huggingface, "ModernBERT-base", "ModernBERT-large")
 ################################################################################
+
+local_path_override(
+    module_name = "rules_zig",
+    path = "../rules_zig",
+)
+
+local_path_override(
+    module_name = "toolchains_llvm_bootstrapped",
+    path = "../toolchains_llvm_bootstrapped",
+)
