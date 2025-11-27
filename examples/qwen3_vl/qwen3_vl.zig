@@ -126,9 +126,9 @@ pub const Qwen3VL = struct {
         kv_cache: KvCache,
         mrope_position_deltas: Tensor,
         rng: Tensor.Rng,
-    ) struct { Tensor, KvCache, Tensor, Tensor.Rng } {
-        const next_token, const updated_cache, const updated_mrope_position_deltas, const new_rng = zml.call(self.qwen, .forward_decode, .{ input_ids, cache_position, kv_cache, mrope_position_deltas, rng });
-        const result = .{ next_token.convert(.u32), updated_cache, updated_mrope_position_deltas, new_rng };
+    ) struct { Tensor, KvCache, Tensor.Rng } {
+        const next_token, const updated_cache, const new_rng = zml.call(self.qwen, .forward_decode, .{ input_ids, cache_position, kv_cache, mrope_position_deltas, rng });
+        const result = .{ next_token.convert(.u32), updated_cache, new_rng };
 
         return result;
     }
@@ -259,7 +259,7 @@ pub const Qwen = struct {
         kv_cache: KvCache,
         mrope_position_deltas: Tensor,
         rng: Tensor.Rng,
-    ) struct { Tensor, KvCache, Tensor, Tensor.Rng } {
+    ) struct { Tensor, KvCache, Tensor.Rng } {
         const embedded = zml.call(self.text_model.embed_tokens, .forward, .{input_ids}).withTags(.{ .bs, .seq, .d });
         const position_ids = buildDecodePositionIds(cache_position, mrope_position_deltas);
         const hidden, const updated_cache = zml.call(self.text_model, .forward_decode, .{ position_ids, embedded, cache_position, kv_cache });
@@ -268,7 +268,7 @@ pub const Qwen = struct {
         // Sample the next token using RNG
         const last_logits = logits.slice1d(.seq, .{ .start = logits.dim(.seq) - 1, .end = logits.dim(.seq) });
         const next_token, const new_rng = self.sampleTokens(last_logits, rng);
-        const result = .{ next_token, updated_cache, mrope_position_deltas, new_rng };
+        const result = .{ next_token.reuseBuffer(input_ids), updated_cache, new_rng };
         return result;
     }
 
@@ -328,14 +328,14 @@ pub const Qwen = struct {
         position_ids = position_ids.dynamicUpdateSlice(.{ .seq = zml.Tensor.scalar(0, .i32) }, before_image_positions);
 
         // Repeat the index along the 3 dimensions based on grid size (after the text (+4 tokens according to the chat template))
-        const t_index = zml.Tensor.iota(.init(.{ .t = t, .hw = h * w }, .i32), .t).flatten().add(text_before_image);
-        const h_index = zml.Tensor.iota(.init(.{ .t = t, .h = h, .w = w }, .i32), .h).flatten().add(text_before_image);
-        const w_index = zml.Tensor.iota(.init(.{ .t = t, .h = h, .w = w }, .i32), .w).flatten().add(text_before_image);
+        const t_index = zml.Tensor.iota(.init(.{ .bs = input_ids.dim(.bs), .t = t, .hw = h * w }, .i32), .t).reshape(.{ .bs = input_ids.dim(.bs), .seq = -1 }).add(text_before_image);
+        const h_index = zml.Tensor.iota(.init(.{ .bs = input_ids.dim(.bs), .t = t, .h = h, .w = w }, .i32), .h).reshape(.{ .bs = input_ids.dim(.bs), .seq = -1 }).add(text_before_image);
+        const w_index = zml.Tensor.iota(.init(.{ .bs = input_ids.dim(.bs), .t = t, .h = h, .w = w }, .i32), .w).reshape(.{ .bs = input_ids.dim(.bs), .seq = -1 }).add(text_before_image);
 
         // Update the position ids with the 3D positional ids
-        const position_ids_t = position_ids.dynamicUpdateSlice(.{ .seq = text_before_image }, zml.torch.unsqueeze(t_index, 0));
-        const position_ids_h = position_ids.dynamicUpdateSlice(.{ .seq = text_before_image }, zml.torch.unsqueeze(h_index, 0));
-        const position_ids_w = position_ids.dynamicUpdateSlice(.{ .seq = text_before_image }, zml.torch.unsqueeze(w_index, 0));
+        const position_ids_t = position_ids.dynamicUpdateSlice(.{ .seq = text_before_image }, t_index);
+        const position_ids_h = position_ids.dynamicUpdateSlice(.{ .seq = text_before_image }, h_index);
+        const position_ids_w = position_ids.dynamicUpdateSlice(.{ .seq = text_before_image }, w_index);
 
         // Stack the position ids
         const stacked_position_ids = zml.Tensor.stack(&.{ position_ids_t, position_ids_h, position_ids_w }, 0, .g);
@@ -738,12 +738,31 @@ pub const Conv3d = struct {
 
     pub fn forward(self: Conv3d, input: Tensor) Tensor {
         const x = input;
-
         var strides: [3]i64 = .{ self.temporal_stride, self.spatial_stride, self.spatial_stride };
-        for (self.weight.dims()[2..5], 0..) |k, out| strides[out] = k;
-
         const padding = getPaddingForSame(x.dims()[2..5].*, self.weight.dims()[2..5].*, strides);
-        var y = x.conv3d(self.weight.convert(x.dtype()), .{ .padding = &padding, .window_strides = &.{ 2, 16, 16 } });
+        const loc = input.getContext().location(@src(), "Conv3d.forward", .{});
+        var y = x.convolution(
+            self.weight.convert(x.dtype()),
+            .{
+                .window_strides = &strides,
+                .pad_value = &padding,
+                .lhs_dilation = &.{ 1, 1, 1 },
+                .rhs_dilation = &.{ 1, 1, 1 },
+                .window_reversal = &.{ false, false, false },
+                .input_batch_dimension = 0,
+                .input_feature_dimension = 1,
+                .input_spatial_dimensions = &.{ 2, 3, 4 },
+                .kernel_input_feature_dimension = 1,
+                .kernel_output_feature_dimension = 0,
+                .kernel_spatial_dimensions = &.{ 2, 3, 4 },
+                .output_batch_dimension = 0,
+                .output_feature_dimension = 1,
+                .output_spatial_dimensions = &.{ 2, 3, 4 },
+                .feature_group_count = 1,
+                .batch_group_count = 1,
+            },
+            loc,
+        );
         if (self.bias) |b| y = y.add(b.convert(y.dtype()).broadcast(y._shape, &.{1}));
         return y;
     }

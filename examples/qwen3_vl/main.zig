@@ -149,11 +149,10 @@ pub fn generateText(
         defer cache_position.deinit();
 
         // Call to generate the next token
-        const next_token, const updated_kv_cache, const updated_mrope, const new_rng = mod_decode.call(.{ current_token, cache_position, kv_cache, mrope_position_deltas, rng });
+        const next_token, const updated_kv_cache, const new_rng = mod_decode.call(.{ current_token, cache_position, kv_cache, mrope_position_deltas, rng });
 
         current_token = next_token;
         kv_cache = updated_kv_cache;
-        mrope_position_deltas = updated_mrope;
         rng = new_rng;
 
         // Extract the generated token from the buffer
