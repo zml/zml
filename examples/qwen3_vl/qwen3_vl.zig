@@ -15,6 +15,10 @@ pub const std_options: std.Options = .{
     .logFn = async.logFn(std.log.defaultLog),
 };
 
+test {
+    std.testing.refAllDecls(@This());
+}
+
 pub const Qwen3VL = struct {
     qwen: Qwen,
 
@@ -223,25 +227,15 @@ pub const Qwen = struct {
         const text_with_image = embedded.dynamicUpdateSlice(.{ .seq = text_before_image }, zml.torch.unsqueeze(vision_embed.convert(embedded.dtype()), 0));
 
         // Build the 3D positional ids
-        const before_image_positions = zml.Tensor.iota(Shape.init(.{ .bs = input_ids.dim(.bs), .seq = 4 }, .i32), .seq);
-        var position_ids = zml.Tensor.iota(
-            Shape.init(.{ .bs = input_ids.dim(.bs), .seq = text_with_image.dim(.seq) }, .i32),
-            .seq,
-        )
-            .sub(num_image_tokens)
-            .add(text_after_image)
-            .add(text_before_image);
-        position_ids = position_ids.dynamicUpdateSlice(.{ .seq = zml.Tensor.scalar(0, .i32) }, before_image_positions);
-        const llm_grid_h = image_grid_thw[1] / self.config.vision_config.spatial_merge_size;
-        const llm_grid_w = image_grid_thw[2] / self.config.vision_config.spatial_merge_size;
-        const llm_grid_t = image_grid_thw[0];
-        position_ids = self.buildVisionPositionIds(position_ids, image_grid_thw, text_before_image);
+        const position_ids, const mrope_position_deltas = buildVisionPositionIds(
+            self.config.vision_config.spatial_merge_size,
+            input_ids,
+            text_with_image,
+            prompt_shape,
+            image_grid_thw,
+        );
 
-        // Position max after 3d compression - real seq len
-        const position_max_after_3d_compression = zml.Tensor.scalar(@max(llm_grid_w, llm_grid_h, llm_grid_t), .i32).add(text_after_image).add(text_before_image);
         const real_seq_len = text_before_image.add(text_after_image).add(num_image_tokens);
-        const mrope_position_deltas = position_max_after_3d_compression.sub(real_seq_len).reshape(.{ .seq = 1 });
-
         const hidden, const updated_cache = zml.call(self.text_model, .forward, .{ position_ids, text_with_image, cache_position, deepstack_features, kv_cache });
 
         // Sample the next token using RNG
@@ -305,26 +299,205 @@ pub const Qwen = struct {
     }
 
     // Build the 3D positional ids for the vision transformer
-    fn buildVisionPositionIds(self: Qwen, position_ids: Tensor, image_grid_thw: [3]u32, img_start_position: Tensor) Tensor {
-        const spatial_merge_size = self.config.vision_config.spatial_merge_size;
+    // Returns: (stacked_position_ids, mrope_position_deltas)
+    pub fn buildVisionPositionIds(
+        spatial_merge_size: u32,
+        input_ids: Tensor,
+        text_with_image: Tensor,
+        prompt_shape: Tensor,
+        image_grid_thw: [3]u32,
+    ) struct { Tensor, Tensor } {
+        // Get the number of text tokens before the image, the number of image tokens and the number of text tokens after the image
+        const text_before_image = prompt_shape.choose1d(0, 0).convert(.i32);
+        const num_image_tokens = prompt_shape.choose1d(0, 1).convert(.i32);
+        const text_after_image = prompt_shape.choose1d(0, 2);
+
+        // Build the 3D positional ids
+        const before_image_positions = zml.Tensor.iota(Shape.init(.{ .bs = input_ids.dim(.bs), .seq = 4 }, .i32), .seq);
+
         const t = image_grid_thw[0];
         const h = @divExact(image_grid_thw[1], spatial_merge_size);
         const w = @divExact(image_grid_thw[2], spatial_merge_size);
 
+        var position_ids = zml.Tensor.iota(
+            Shape.init(.{ .bs = input_ids.dim(.bs), .seq = text_with_image.dim(.seq) }, .i32),
+            .seq,
+        )
+            .sub(num_image_tokens)
+            .addConstant(@max(w, h, t));
+        position_ids = position_ids.dynamicUpdateSlice(.{ .seq = zml.Tensor.scalar(0, .i32) }, before_image_positions);
+
         // Repeat the index along the 3 dimensions based on grid size (after the text (+4 tokens according to the chat template))
-        const t_index = zml.Tensor.iota(.init(.{ .t = t, .hw = h * w }, .i32), .t).flatten().add(img_start_position);
-        const h_index = zml.Tensor.iota(.init(.{ .t = t, .h = h, .w = w }, .i32), .h).flatten().add(img_start_position);
-        const w_index = zml.Tensor.iota(.init(.{ .t = t, .h = h, .w = w }, .i32), .w).flatten().add(img_start_position);
+        const t_index = zml.Tensor.iota(.init(.{ .t = t, .hw = h * w }, .i32), .t).flatten().add(text_before_image);
+        const h_index = zml.Tensor.iota(.init(.{ .t = t, .h = h, .w = w }, .i32), .h).flatten().add(text_before_image);
+        const w_index = zml.Tensor.iota(.init(.{ .t = t, .h = h, .w = w }, .i32), .w).flatten().add(text_before_image);
 
         // Update the position ids with the 3D positional ids
-        const position_ids_t = position_ids.dynamicUpdateSlice(.{ .seq = img_start_position }, zml.torch.unsqueeze(t_index, 0));
-        const position_ids_h = position_ids.dynamicUpdateSlice(.{ .seq = img_start_position }, zml.torch.unsqueeze(h_index, 0));
-        const position_ids_w = position_ids.dynamicUpdateSlice(.{ .seq = img_start_position }, zml.torch.unsqueeze(w_index, 0));
+        const position_ids_t = position_ids.dynamicUpdateSlice(.{ .seq = text_before_image }, zml.torch.unsqueeze(t_index, 0));
+        const position_ids_h = position_ids.dynamicUpdateSlice(.{ .seq = text_before_image }, zml.torch.unsqueeze(h_index, 0));
+        const position_ids_w = position_ids.dynamicUpdateSlice(.{ .seq = text_before_image }, zml.torch.unsqueeze(w_index, 0));
 
-        // For each dim, the output is the position ids (from 4 to grid size / merge size) repeated to reach the grid size
-
+        // Stack the position ids
         const stacked_position_ids = zml.Tensor.stack(&.{ position_ids_t, position_ids_h, position_ids_w }, 0, .g);
-        return stacked_position_ids;
+
+        // Position max after 3d compression - real seq len
+        const position_max_after_3d_compression = zml.Tensor.scalar(@max(w, h, t), .i32).add(text_after_image).add(text_before_image);
+        const real_seq_len = text_before_image.add(text_after_image).add(num_image_tokens);
+        const mrope_position_deltas = position_max_after_3d_compression.sub(real_seq_len).reshape(.{ .seq = 1 });
+
+        return .{ stacked_position_ids, mrope_position_deltas };
+    }
+
+    test "buildVisionPositionIds" {
+        std.debug.print("buildVisionPositionIds test started\n", .{});
+
+        const platform = zml.testing.env();
+        const allocator = std.testing.allocator;
+
+        // Parameters
+        const spatial_merge: u32 = 2;
+        const batch_size: u32 = 1;
+        const seq_len: u32 = 79;
+        const grid_thw = [3]u32{ 1, 16, 16 }; // t=1, h=16, w=16
+
+        // Create input buffers
+        var input_ids_data = try allocator.alloc(i32, batch_size * seq_len);
+        defer allocator.free(input_ids_data);
+        for (0..batch_size * seq_len) |i| {
+            input_ids_data[i] = @intCast(i % seq_len);
+        }
+        const input_ids_buf = try zml.Buffer.fromSlice(platform, .{ .bs = batch_size, .seq = seq_len }, input_ids_data);
+        defer input_ids_buf.deinit();
+
+        var text_w_image_data = try allocator.alloc(f32, batch_size * seq_len);
+        defer allocator.free(text_w_image_data);
+        for (0..batch_size * seq_len) |i| {
+            text_w_image_data[i] = @floatFromInt(i % seq_len);
+        }
+        const text_w_image_buf = try zml.Buffer.fromSlice(platform, .{ .bs = batch_size, .seq = seq_len }, text_w_image_data);
+        defer text_w_image_buf.deinit();
+
+        const prompt_shape_data = [_]i32{ 4, 64, 11 };
+        const prompt_shape_buf = try zml.Buffer.fromSlice(platform, .{ .seq = 3 }, &prompt_shape_data);
+        defer prompt_shape_buf.deinit();
+
+        // Create expected tensor with the provided values
+        const expected_temporal = [_]i32{ 0, 1, 2, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22 };
+        const expected_height = [_]i32{ 0, 1, 2, 3, 4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 6, 6, 6, 6, 6, 6, 6, 6, 7, 7, 7, 7, 7, 7, 7, 7, 8, 8, 8, 8, 8, 8, 8, 8, 9, 9, 9, 9, 9, 9, 9, 9, 10, 10, 10, 10, 10, 10, 10, 10, 11, 11, 11, 11, 11, 11, 11, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22 };
+        const expected_width = [_]i32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 4, 5, 6, 7, 8, 9, 10, 11, 4, 5, 6, 7, 8, 9, 10, 11, 4, 5, 6, 7, 8, 9, 10, 11, 4, 5, 6, 7, 8, 9, 10, 11, 4, 5, 6, 7, 8, 9, 10, 11, 4, 5, 6, 7, 8, 9, 10, 11, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22 };
+
+        // Flatten expected values: [g0_seq0, g0_seq1, ..., g0_seq99, g1_seq0, ..., g2_seq99]
+        var expected_data = try allocator.alloc(i32, 3 * seq_len);
+        defer allocator.free(expected_data);
+
+        // Copy temporal (g=0)
+        @memcpy(expected_data[0..expected_temporal.len], &expected_temporal);
+        // Fill remaining with last value if needed
+        if (expected_temporal.len < seq_len) {
+            const last_val = expected_temporal[expected_temporal.len - 1];
+            @memset(expected_data[expected_temporal.len..seq_len], last_val);
+        }
+
+        // Copy height (g=1)
+        @memcpy(expected_data[seq_len .. seq_len + expected_height.len], &expected_height);
+        if (expected_height.len < seq_len) {
+            const last_val = expected_height[expected_height.len - 1];
+            @memset(expected_data[seq_len + expected_height.len .. 2 * seq_len], last_val);
+        }
+
+        // Copy width (g=2)
+        @memcpy(expected_data[2 * seq_len .. 2 * seq_len + expected_width.len], &expected_width);
+        if (expected_width.len < seq_len) {
+            const last_val = expected_width[expected_width.len - 1];
+            @memset(expected_data[2 * seq_len + expected_width.len .. 3 * seq_len], last_val);
+        }
+
+        // Create expected buffer
+        const expected_buffer = try zml.Buffer.fromSlice(platform, .{ .g = 3, .bs = batch_size, .seq = seq_len }, expected_data);
+        defer expected_buffer.deinit();
+
+        // Compile and execute buildVisionPositionIds
+        const Local = struct {
+            pub fn _fwd(
+                spatial_merge_size: u32,
+                input_ids: zml.Tensor,
+                text_with_image: zml.Tensor,
+                prompt_shape: zml.Tensor,
+                image_grid_thw: [3]u32,
+            ) struct { zml.Tensor, zml.Tensor } {
+                return buildVisionPositionIds(
+                    spatial_merge_size,
+                    input_ids,
+                    text_with_image,
+                    prompt_shape,
+                    image_grid_thw,
+                );
+            }
+        };
+
+        // Create tensors from buffers in compilation context
+        var comp = try zml.module.CompilationContext.init(allocator, "test_buildVisionPositionIds", platform);
+        defer comp.deinit();
+        comp.activate();
+        defer comp.deactivate();
+
+        // Convert buffers to tensors for compilation
+        const input_ids_host = try input_ids_buf.toHostAlloc(allocator);
+        defer input_ids_host.deinit(allocator);
+        const input_ids_tensor = zml.Tensor.constantTensor(input_ids_host);
+
+        const text_w_image_host = try text_w_image_buf.toHostAlloc(allocator);
+        defer text_w_image_host.deinit(allocator);
+        const text_w_image_tensor = zml.Tensor.constantTensor(text_w_image_host);
+
+        const prompt_shape_host = try prompt_shape_buf.toHostAlloc(allocator);
+        defer prompt_shape_host.deinit(allocator);
+        const prompt_shape_tensor = zml.Tensor.constantTensor(prompt_shape_host);
+
+        // Now ShapeOf
+        const shape_args: zml.ShapeOf(stdx.meta.FnArgs(Local._fwd)) = .{
+            spatial_merge,
+            input_ids_tensor.shape(),
+            text_w_image_tensor.shape(),
+            prompt_shape_tensor.shape(),
+            grid_thw,
+        };
+
+        const compiled = try zml.compileFn(
+            allocator,
+            Local._fwd,
+            shape_args,
+            platform,
+        );
+        defer compiled.deinit();
+
+        // Call only with the buffers (tensors converted back)
+        const buffer_args: zml.Bufferized(stdx.meta.FnArgs(Local._fwd)) = .{
+            input_ids_buf,
+            text_w_image_buf,
+            prompt_shape_buf,
+        };
+
+        const result = compiled.call(buffer_args);
+
+        const position_ids_buf = result[0];
+        const mrope_position_deltas_buf = result[1];
+
+        // Compare shapes
+        try zml.testing.expectEqualShapes(
+            Shape.init(.{ .g = 3, .bs = batch_size, .seq = seq_len }, .i32),
+            position_ids_buf.shape(),
+        );
+
+        try zml.testing.expectEqualShapes(
+            Shape.init(.{ .seq = 1 }, .i32),
+            mrope_position_deltas_buf.shape(),
+        );
+
+        // Compare values
+        try zml.testing.expectClose(expected_buffer, position_ids_buf, 0.0);
+
+        std.debug.print("✅ buildVisionPositionIds test passed - values match expected output\n", .{});
     }
 
     // Build 3d positionnal based on mrope delta (delta between the position max after 3d compression and the real sequence length)
@@ -420,7 +593,7 @@ pub const VisionTransformer = struct {
     // - deepstack_features_list: the deepstack features (intermediate representation of the visual embedding)
     pub fn forward(self: VisionTransformer, x_input: Tensor, grid_thw: [3]u32) struct { Tensor, [3]Tensor } {
         const x = x_input;
-        var pos_embeds = self.fastPosEmbedInterpolate(&grid_thw);
+        var pos_embeds = self.posEmbedInterpolate(&grid_thw);
         var rotary_pos_emb = self.rotaryPosEmbed(&grid_thw);
         rotary_pos_emb = zml.Tensor.concatenate(&.{ rotary_pos_emb, rotary_pos_emb }, 1);
         var hidden_states = zml.call(self.vision_patch_embed, .forward, .{x});
@@ -444,7 +617,7 @@ pub const VisionTransformer = struct {
     }
 
     // Positional embedding interpolation (representation of the image in a grid determined by the number of position embeddings 48 x 48)
-    pub fn fastPosEmbedInterpolate(self: VisionTransformer, grid: []const u32) [1]Tensor {
+    pub fn posEmbedInterpolate(self: VisionTransformer, grid: []const u32) [1]Tensor {
         // Calculate the number of grid points per side (sqrt of the number of position embeddings)
         const num_grid_per_side = std.math.pow(f32, @as(f32, @floatFromInt(self.num_position_embeddings)), 0.5);
 

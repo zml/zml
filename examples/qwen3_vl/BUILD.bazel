@@ -1,4 +1,4 @@
-load("@rules_zig//zig:defs.bzl", "zig_binary")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
 
 zig_binary(
     name = "qwen3_vl",
@@ -9,6 +9,17 @@ zig_binary(
     deps = [
         "@com_github_bfactory_ai_zignal//:zignal",
         "@com_github_hejsil_clap//:clap",
+        "@zml//async",
+        "@zml//stdx",
+        "@zml//zml",
+    ],
+)
+
+zig_test(
+    name = "test",
+    main = "qwen3_vl.zig",
+    test_runner = "//zml:test_runner",
+    deps = [
         "@zml//async",
         "@zml//stdx",
         "@zml//zml",
