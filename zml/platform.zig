@@ -5,6 +5,7 @@ pub const Target = runtimes.Platform;
 const stdx = @import("stdx");
 
 const pjrt = @import("pjrtx.zig");
+const tools = @import("tools/tools.zig");
 
 const log = std.log.scoped(.zml);
 
@@ -37,6 +38,15 @@ pub const Platform = struct {
     pub const MAX_NUM_DEVICES: u8 = if (runtimes.isEnabled(.tpu)) 32 else 8;
     pub const CreateOptions = _CreateOptions;
 
+    // Set by the first created Platform object.
+    pub var tracer: tools.Tracer = undefined;
+
+    var tracer_once = std.once(struct {
+        fn call() void {
+            tracer = .init("ai.zml");
+        }
+    }.call);
+
     pub fn init(target: Target, api: *const pjrt.Api, options: CreateOptions) !Platform {
         var named_values_buf: [16]pjrt.NamedValue = undefined;
         const pjrt_client = try pjrt.Client.init(api, options.toNamedValues(target, &named_values_buf));
@@ -44,6 +54,7 @@ pub const Platform = struct {
         if (true_num_devices > MAX_NUM_DEVICES) {
             log.warn("platform {} got {} devices, but ZML only support up to {} devices. Some devices won't be used.", .{ target, true_num_devices, MAX_NUM_DEVICES });
         }
+        tracer_once.call();
         return .{
             .target = target,
             .pjrt_api = api,
