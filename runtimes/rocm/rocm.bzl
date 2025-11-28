@@ -6,10 +6,10 @@ _BUILD_FILE_DEFAULT_VISIBILITY = """\
 package(default_visibility = ["//visibility:public"])
 """
 
-_ROCM_STRIP_PREFIX = "opt/rocm-6.4.1"
+_ROCM_STRIP_PREFIX = "opt/rocm-7.1.0"
 
 _UBUNTU_PACKAGES = {
-    "libdrm2-amdgpu": packages.filegroup(name = "libdrm2-amdgpu", srcs = ["opt/amdgpu/lib/x86_64-linux-gnu/libdrm.so.2"]),
+    #"libdrm2-amdgpu": packages.filegroup(name = "libdrm2-amdgpu", srcs = ["opt/amdgpu/lib/x86_64-linux-gnu/libdrm.so.2"]),
     "libelf1": "\n".join([
         packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
         packages.patchelf(
@@ -18,24 +18,24 @@ _UBUNTU_PACKAGES = {
             set_rpath = "$ORIGIN",
         ),
     ]),
-    "libdrm-amdgpu-common": packages.filegroup(name = "amdgpu_ids", srcs = ["opt/amdgpu/share/libdrm/amdgpu.ids"]),
+    #"libdrm-amdgpu-common": packages.filegroup(name = "amdgpu_ids", srcs = ["opt/amdgpu/share/libdrm/amdgpu.ids"]),
     "libnuma1": packages.filegroup(name = "libnuma1", srcs = ["usr/lib/x86_64-linux-gnu/libnuma.so.1"]),
     "libzstd1": packages.filegroup(name = "libzstd1", srcs = ["usr/lib/x86_64-linux-gnu/libzstd.so.1"]),
-    "libdrm-amdgpu-amdgpu1": "\n".join([
-        packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
-        packages.patchelf(
-            name = "libdrm-amdgpu-amdgpu1",
-            shared_library = "opt/amdgpu/lib/x86_64-linux-gnu/libdrm_amdgpu.so.1",
-            set_rpath = "$ORIGIN",
-        ),
-    ]),
+    #"libdrm-amdgpu-amdgpu1": "\n".join([
+    #    packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
+    #    packages.patchelf(
+    #        name = "libdrm-amdgpu-amdgpu1",
+    #        shared_library = "opt/amdgpu/lib/x86_64-linux-gnu/libdrm_amdgpu.so.1",
+    #        set_rpath = "$ORIGIN",
+    #    ),
+    #]),
     "libtinfo6": packages.filegroup(name = "libtinfo6", srcs = ["lib/x86_64-linux-gnu/libtinfo.so.6"]),
     "zlib1g": packages.filegroup(name = "zlib1g", srcs = ["lib/x86_64-linux-gnu/libz.so.1"]),
 }
 
 _ROCM_PACKAGES = {
     "rocm-core": packages.filegroup(name = "rocm-core", srcs = ["lib/librocm-core.so.1"]),
-    "rocm-smi-lib": packages.filegroup(name = "rocm_smi", srcs = ["lib/librocm_smi64.so.7"]),
+    "rocm-smi-lib": packages.filegroup(name = "rocm_smi", srcs = ["lib/librocm_smi64.so.1"]),
     "hsa-rocr": packages.filegroup(name = "hsa-runtime", srcs = ["lib/libhsa-runtime64.so.1"]),
     "hsa-amd-aqlprofile": packages.filegroup(name = "hsa-amd-aqlprofile", srcs = ["lib/libhsa-amd-aqlprofile64.so.1"]),
     "comgr": "\n".join([
@@ -59,7 +59,7 @@ _ROCM_PACKAGES = {
         packages.load_("@zml//runtimes/rocm:gfx.bzl", "bytecode_select"),
         packages.patchelf(
             name = "rocblas",
-            shared_library = "lib/librocblas.so.4",
+            shared_library = "lib/librocblas.so.5",
             add_needed = ["libzmlxrocm.so.0"],
             rename_dynamic_symbols = {
                 "dlopen": "zmlxrocm_dlopen",
@@ -90,7 +90,7 @@ _ROCM_PACKAGES = {
         packages.load_("@zml//runtimes/rocm:gfx.bzl", "bytecode_select"),
         packages.patchelf(
             name = "hipblaslt",
-            shared_library = "lib/libhipblaslt.so.0",
+            shared_library = "lib/libhipblaslt.so.1",
             add_needed = ["libzmlxrocm.so.0"],
             rename_dynamic_symbols = {
                 "dlopen": "zmlxrocm_dlopen",
@@ -116,7 +116,7 @@ _ROCM_PACKAGES = {
     "hipfft": packages.filegroup(name = "hipfft", srcs = ["lib/libhipfft.so.0"]),
     "hip-runtime-amd": "\n".join([
         packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
-        packages.filegroup(name = "amdhip", srcs = ["lib/libamdhip64.so.6"]),
+        packages.filegroup(name = "amdhip", srcs = ["lib/libamdhip64.so.7"]),
         packages.patchelf(
             name = "amdhip_patched",
             shared_library = ":amdhip",
@@ -125,9 +125,10 @@ _ROCM_PACKAGES = {
                 "dlopen": "zmlxrocm_dlopen",
             },
         ),
-        packages.filegroup(name = "hiprtc", srcs = ["lib/libhiprtc.so.6"]),
+        packages.filegroup(name = "hiprtc", srcs = ["lib/libhiprtc.so.7"]),
     ]),
-    "hipsolver": packages.filegroup(name = "hipsolver", srcs = ["lib/libhipsolver.so.0"]),
+    "hipsolver": packages.filegroup(name = "hipsolver", srcs = ["lib/libhipsolver.so.1"]),
+    "rocprofiler-sdk": packages.filegroup(name = "rocprofiler-sdk", srcs = ["lib/librocprofiler-sdk-attach.so.1"]),
 }
 
 def _rocm_impl(mctx):

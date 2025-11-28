@@ -54,3 +54,8 @@ filegroup(
     srcs = ["@libpjrt_rocm//:amdgpu_ids_layer"],
     visibility = ["//visibility:public"],
 )
+
+exports_files(
+    ["libpjrt_rocm.0.7.1.so", "libpjrt_rocm.so"],
+    visibility = ["//visibility:public"],
+)
