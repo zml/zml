@@ -1,0 +1,44 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_binary")
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+cc_library(
+    name = "posix",
+    hdrs = ["posix.h"],
+)
+
+zig_library(
+    name = "zml",
+    srcs = [
+        "zml.zig",
+        "platform.zig",
+        "pjrtx.zig",
+        "dtype.zig",
+        "floats.zig",
+    ],
+    zigopts = [
+        "-lc",
+        "-freference-trace=20",
+    ],
+    main = "zml.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//runtimes",
+        "//mlir",
+        "//mlir/dialects",
+        "//pjrt",
+        "//stdx",
+        "@rules_zig//zig/runfiles",
+        ":posix",
+    ],
+)
+
+zig_binary(
+    name = "main",
+    args = [],
+    data = [],
+    main = "main.zig",
+    deps = [
+        "//async",
+        "//zml2:zml",
+    ],
+)
