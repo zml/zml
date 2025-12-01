@@ -1,0 +1,111 @@
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
+
+write_file(
+    name = "system_defaults_zig",
+    out = "system_defaults.zig",
+    content = ["""\
+pub const enable_linker_build_id: bool = false;
+pub const linker: []const u8 = "";
+pub const sysroot: []const u8 = "";
+pub const gcc_install_prefix: []const u8 = "";
+pub const rtlib: []const u8 = "";
+pub const unwindlib: []const u8 = "";
+"""],
+)
+
+zig_library(
+    name = "system_defaults",
+    main = ":system_defaults_zig",
+)
+
+write_file(
+    name = "aro_options_zig",
+    out = "aro_options.zig",
+    content = ["""\
+pub const enable_tracy: bool = false;
+pub const enable_tracy_callstack: bool = false;
+pub const enable_tracy_allocation: bool = false;
+pub const debug_allocations: bool = false;
+pub const version_str: []const u8 = "<redacted>";
+"""],
+)
+
+zig_library(
+    name = "build_options",
+    main = ":aro_options_zig",
+)
+
+zig_library(
+    name = "zig",
+    srcs = glob(["deps/zig/**/*.zig"]),
+    main = "deps/zig/lib.zig",
+)
+
+zig_library(
+    name = "backend",
+    main = "src/backend.zig",
+    deps = [
+        ":build_options",
+        ":zig",
+    ],
+)
+
+zig_library(
+    name = "aro",
+    srcs = glob(["src/**/*.zig"]),
+    main = "src/aro.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":backend",
+        ":build_options",
+        ":system_defaults",
+    ] + [
+        ":{}".format(name.replace("src/aro/", ""))
+        for name in glob(["src/aro/**/*.def"])
+    ],
+)
+
+zig_library(
+    name = "assembly_backend",
+    main = "src/assembly_backend.zig",
+    deps = [
+        ":aro",
+    ],
+)
+
+zig_binary(
+    name = "arocc",
+    srcs = glob(["src/**/*.zig"]),
+    main = "src/main.zig",
+    deps = [
+        ":aro",
+        ":assembly_backend",
+        ":build_options",
+    ],
+    zigopts = ["-fm"],
+)
+
+zig_binary(
+    name = "generate-def",
+    main = "build/generate_def.zig",
+)
+
+[
+    genrule(
+        name = "def_{}".format(name),
+        srcs = [name],
+        outs = ["{}.zig".format(name)],
+        cmd = """$(location :generate-def) $< $@""",
+        tools = [":generate-def"],
+    )
+    for name in glob(["src/aro/**/*.def"])
+]
+
+[
+    zig_library(
+        name = "{}".format(name.replace("src/aro/", "")),
+        main = ":def_{}".format(name),
+    )
+    for name in glob(["src/aro/**/*.def"])
+]

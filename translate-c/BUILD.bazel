@@ -1,0 +1,17 @@
+alias(
+    name = "translate-c",
+    actual = "@translate-c",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "helpers",
+    actual = "@translate-c//:helpers",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "c_builtins",
+    actual = "@translate-c//:c_builtins",
+    visibility = ["//visibility:public"],
+)

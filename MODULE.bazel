@@ -23,14 +23,14 @@ bazel_dep(name = "rules_proto", version = "7.1.0")
 bazel_dep(name = "rules_python", version = "1.5.3")
 bazel_dep(name = "rules_rust", version = "0.63.0")
 bazel_dep(name = "rules_zig", version = "0.12.2")
-bazel_dep(name = "toolchains_llvm_bootstrapped", version = "0.2.4")
+bazel_dep(name = "toolchains_llvm_bootstrapped", version = "0.3.1")
 bazel_dep(name = "with_cfg.bzl", version = "0.11.0")
 
 bazel_dep(name = "buildifier_prebuilt", version = "8.2.0.2", dev_dependency = True)
 
 zig = use_extension("@rules_zig//zig:extensions.bzl", "zig")
 zig.index(file = "//bazel:zig_index.json")
-zig.toolchain(zig_version = "0.16.0-dev.1458+755a3d957")
+zig.toolchain(zig_version = "0.16.0-dev.1484+d0ba6642b")
 zig.mirrors(urls = [
     "https://mirror.zml.ai/zig",
     "https://ziglang.org/builds/",
@@ -103,7 +103,7 @@ use_repo(zls, "zls_toolchains")
 register_toolchains("@zls_toolchains//:all")
 
 non_module_deps = use_extension("//:third_party/non_module_deps.bzl", "non_module_deps")
-use_repo(non_module_deps, "com_github_hejsil_clap", "com_google_sentencepiece", "mnist", "org_swig_swig", "xla")
+use_repo(non_module_deps, "arocc", "com_github_hejsil_clap", "com_google_sentencepiece", "mnist", "org_swig_swig", "translate-c", "xla")
 
 xla = use_extension("//third_party/xla:xla.bzl", "xla")
 use_repo(
@@ -216,12 +216,20 @@ huggingface.model(
 use_repo(huggingface, "ModernBERT-base", "ModernBERT-large")
 ################################################################################
 
-local_path_override(
+git_override(
     module_name = "rules_zig",
-    path = "../rules_zig",
+    commit = "2c91b54305772d7b43445168e7cf0037b5cbc9e2",
+    remote = "https://github.com/zml/rules_zig.git",
 )
 
-local_path_override(
+git_override(
     module_name = "toolchains_llvm_bootstrapped",
-    path = "../toolchains_llvm_bootstrapped",
+    commit = "4902b6cadc4ca840645c97d52f985c6f67967b6f",
+    remote = "https://github.com/cerisier/toolchains_llvm_bootstrapped.git",
+)
+
+git_override(
+    module_name = "apple_support",
+    commit = "6ddcf9c1c46be1a7eb8767c7dbec7714dd47efb8",
+    remote = "https://github.com/cerisier/apple_support.git",
 )
