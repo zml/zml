@@ -2,112 +2,106 @@ const std = @import("std");
 
 const c = @import("c");
 const mlir = @import("mlir");
+const stringRef = mlir.stringRef;
 const stdx = @import("stdx");
 
-pub const abs = functors.unary_fn("stablehlo.abs").call;
-pub const cosine = functors.unary_fn("stablehlo.cosine").call;
-pub const sine = functors.unary_fn("stablehlo.sine").call;
-pub const exponential = functors.unary_fn("stablehlo.exponential").call;
-pub const exponential_minus_one = functors.unary_fn("stablehlo.exponential_minus_one").call;
-pub const floor = functors.unary_fn("stablehlo.floor").call;
-pub const log = functors.unary_fn("stablehlo.log").call;
-pub const log_plus_one = functors.unary_fn("stablehlo.log_plus_one").call;
-pub const not = functors.unary_fn("stablehlo.not").call;
-pub const negate = functors.unary_fn("stablehlo.negate").call;
-pub const sqrt = functors.unary_fn("stablehlo.sqrt").call;
-pub const tanh = functors.unary_fn("stablehlo.tanh").call;
-pub const cbrt = functors.unary_fn("stablehlo.cbrt").call;
-pub const ceil = functors.unary_fn("stablehlo.ceil").call;
-pub const rsqrt = functors.unary_fn("stablehlo.rsqrt").call;
-pub const count_leading_zeros = functors.unary_fn("stablehlo.count_leading_zeros").call;
-pub const is_finite = functors.unary_fn("stablehlo.is_finite").call;
-pub const logistic = functors.unary_fn("stablehlo.logistic").call;
-pub const popcnt = functors.unary_fn("stablehlo.popcnt").call;
-pub const sign = functors.unary_fn("stablehlo.sign").call;
-pub const real = functors.unary_fn("stablehlo.real").call;
-pub const imag = functors.unary_fn("stablehlo.imag").call;
+pub const abs = unaryOp("stablehlo.abs").call;
+pub const cosine = unaryOp("stablehlo.cosine").call;
+pub const sine = unaryOp("stablehlo.sine").call;
+pub const exponential = unaryOp("stablehlo.exponential").call;
+pub const exponential_minus_one = unaryOp("stablehlo.exponential_minus_one").call;
+pub const floor = unaryOp("stablehlo.floor").call;
+pub const log = unaryOp("stablehlo.log").call;
+pub const log_plus_one = unaryOp("stablehlo.log_plus_one").call;
+pub const not = unaryOp("stablehlo.not").call;
+pub const negate = unaryOp("stablehlo.negate").call;
+pub const sqrt = unaryOp("stablehlo.sqrt").call;
+pub const tanh = unaryOp("stablehlo.tanh").call;
+pub const cbrt = unaryOp("stablehlo.cbrt").call;
+pub const ceil = unaryOp("stablehlo.ceil").call;
+pub const rsqrt = unaryOp("stablehlo.rsqrt").call;
+pub const count_leading_zeros = unaryOp("stablehlo.count_leading_zeros").call;
+pub const is_finite = unaryOp("stablehlo.is_finite").call;
+pub const logistic = unaryOp("stablehlo.logistic").call;
+pub const popcnt = unaryOp("stablehlo.popcnt").call;
+pub const sign = unaryOp("stablehlo.sign").call;
+pub const real = unaryOp("stablehlo.real").call;
+pub const imag = unaryOp("stablehlo.imag").call;
+pub const round_nearest_afz = unaryOp("stablehlo.round_nearest_afz").call;
+pub const round_nearest_even = unaryOp("stablehlo.round_nearest_even").call;
+pub const tuple = unaryOp("stablehlo.tuple").call;
 
-pub const add = functors.binary_fn("stablehlo.add").call;
-pub const multiply = functors.binary_fn("stablehlo.multiply").call;
-pub const divide = functors.binary_fn("stablehlo.divide").call;
-pub const subtract = functors.binary_fn("stablehlo.subtract").call;
-pub const or_ = functors.binary_fn("stablehlo.or").call;
-pub const xor = functors.binary_fn("stablehlo.xor").call;
-pub const and_ = functors.binary_fn("stablehlo.and").call;
-pub const atan2 = functors.binary_fn("stablehlo.atan2").call;
-pub const maximum = functors.binary_fn("stablehlo.maximum").call;
-pub const minimum = functors.binary_fn("stablehlo.minimum").call;
-pub const power = functors.binary_fn("stablehlo.power").call;
-pub const remainder = functors.binary_fn("stablehlo.remainder").call;
-pub const shift_left = functors.binary_fn("stablehlo.shift_left").call;
-pub const shift_right_arithmetic = functors.binary_fn("stablehlo.shift_right_arithmetic").call;
-pub const shift_right_logical = functors.binary_fn("stablehlo.shift_right_logical").call;
-pub const complex = functors.binary_fn("stablehlo.complex").call;
+pub const add = binaryOp("stablehlo.add").call;
+pub const multiply = binaryOp("stablehlo.multiply").call;
+pub const divide = binaryOp("stablehlo.divide").call;
+pub const subtract = binaryOp("stablehlo.subtract").call;
+pub const or_ = binaryOp("stablehlo.or").call;
+pub const xor = binaryOp("stablehlo.xor").call;
+pub const and_ = binaryOp("stablehlo.and").call;
+pub const atan2 = binaryOp("stablehlo.atan2").call;
+pub const maximum = binaryOp("stablehlo.maximum").call;
+pub const minimum = binaryOp("stablehlo.minimum").call;
+pub const power = binaryOp("stablehlo.power").call;
+pub const remainder = binaryOp("stablehlo.remainder").call;
+pub const shift_left = binaryOp("stablehlo.shift_left").call;
+pub const shift_right_arithmetic = binaryOp("stablehlo.shift_right_arithmetic").call;
+pub const shift_right_logical = binaryOp("stablehlo.shift_right_logical").call;
+pub const complex = binaryOp("stablehlo.complex").call;
 
-const functors = struct {
-    fn unary_fn(comptime op_name: [:0]const u8) type {
-        return struct {
-            pub fn call(ctx: mlir.Context, value: mlir.Value, location: mlir.Location) mlir.Operation {
-                return mlir.Operation.make(ctx, op_name, .{
-                    .operands = &.{value},
-                    .result_type_inference = true,
-                    .location = location,
-                });
-            }
-        };
-    }
+pub const bitcast_convert = castOp("stablehlo.bitcast_convert").call;
+pub const convert = castOp("stablehlo.convert").call;
+pub const reshape = castOp("stablehlo.reshape").call;
 
-    pub fn binary_fn(comptime op_name: [:0]const u8) type {
-        return struct {
-            pub fn call(ctx: mlir.Context, lhs: mlir.Value, rhs: mlir.Value, location: mlir.Location) mlir.Operation {
-                return mlir.Operation.make(ctx, op_name, .{
-                    .operands = &.{ lhs, rhs },
-                    .result_type_inference = true,
-                    .location = location,
-                });
-            }
-        };
-    }
-};
-
-pub fn return_(ctx: mlir.Context, value: mlir.Value, location: mlir.Location) mlir.Operation {
-    return mlir.Operation.make(ctx, "stablehlo.return", .{
-        .variadic_operands = &.{&.{value}},
-        .verify = false,
-        .location = location,
-    });
+fn castOp(comptime op_name: []const u8) type {
+    return struct {
+        pub fn call(ctx: *mlir.Context, value: *const mlir.Value, result_type: *const mlir.Type, location: *const mlir.Location) *mlir.Operation {
+            return mlir.Operation.make(ctx, op_name, .{
+                .operands = .{ .flat = &.{value} },
+                .results = .{ .flat = &.{result_type} },
+                .location = location,
+            });
+        }
+    };
 }
 
-pub fn returns_(ctx: mlir.Context, values: []const mlir.Value, location: mlir.Location) mlir.Operation {
-    return mlir.Operation.make(ctx, "stablehlo.return", .{
-        .variadic_operands = &.{values},
-        .verify = false,
-        .location = location,
-    });
+fn unaryOp(comptime op_name: []const u8) type {
+    return struct {
+        pub fn call(ctx: *mlir.Context, value: *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
+            return mlir.Operation.make(ctx, op_name, .{
+                .operands = .{ .flat = &.{value} },
+                .result_type_inference = true,
+                .location = location,
+            });
+        }
+    };
 }
 
-pub fn bitcast_convert(ctx: mlir.Context, value: mlir.Value, result_type: mlir.Type, location: mlir.Location) mlir.Operation {
-    return mlir.Operation.make(ctx, "stablehlo.bitcast_convert", .{
-        .operands = &.{value},
-        .results = &.{result_type},
-        .location = location,
-    });
+pub fn binaryOp(comptime op_name: []const u8) type {
+    return struct {
+        pub fn call(ctx: *mlir.Context, lhs: *const mlir.Value, rhs: *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
+            return mlir.Operation.make(ctx, op_name, .{
+                .operands = .{ .flat = &.{ lhs, rhs } },
+                .result_type_inference = true,
+                .location = location,
+            });
+        }
+    };
 }
 
-pub fn cholesky(ctx: mlir.Context, value: mlir.Value, lower: bool, location: mlir.Location) mlir.Operation {
+pub fn cholesky(ctx: *mlir.Context, value: *const mlir.Value, lower: bool, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.cholesky", .{
-        .operands = &.{value},
+        .operands = .{ .flat = &.{value} },
         .result_type_inference = true,
         .attributes = &.{
-            .{ "lower", .i1FromBool(ctx, lower) },
+            .named(ctx, "lower", mlir.integerAttribute(ctx, .i1, @intFromBool(lower))),
         },
         .location = location,
     });
 }
 
-pub fn clamp(ctx: mlir.Context, min: mlir.Value, value: mlir.Value, max: mlir.Value, location: mlir.Location) mlir.Operation {
+pub fn clamp(ctx: *mlir.Context, min: *const mlir.Value, value: *const mlir.Value, max: *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.clamp", .{
-        .operands = &.{ min, value, max },
+        .operands = .{ .flat = &.{ min, value, max } },
         .result_type_inference = true,
         .location = location,
     });
@@ -119,18 +113,17 @@ pub const DotPrecision = union(enum) {
     highest,
     algorithm: DotAlgorithm,
 
-    pub fn precisionAttr(self: DotPrecision, ctx: mlir.Context) mlir.Attribute {
-        const precision = PrecisionAttribute.init(ctx, switch (self) {
+    pub fn precision(self: DotPrecision) PrecisionAttribute.Precision {
+        return switch (self) {
             .fast => .DEFAULT,
             .high => .HIGH,
             .highest => .HIGHEST,
             // When we specify the dot algorithm, we should not specify the precision.
             .algorithm => .DEFAULT,
-        });
-        return precision.asAttr();
+        };
     }
 
-    pub fn algorithmAttr(self: DotPrecision, ctx: mlir.Context, operand_type: mlir.RankedTensorType) ?mlir.Attribute {
+    pub fn algorithmAttr(self: DotPrecision, ctx: *mlir.Context, operand_type: mlir.RankedTensorType) ?mlir.Attribute {
         return switch (self) {
             .algorithm => |algo| algo.asAttr(ctx, operand_type),
             else => null,
@@ -149,159 +142,172 @@ pub const DotAlgorithm = struct {
     // bf16_6x: each input is decomposed to 3 bf16 components, then 6 dot operations are done on those components, and the result is accumulated in f32.
     // not sure where this is available.
     pub const bf16_6x: DotAlgorithm = .{
-        .operand = .bf16,
         .accumulation = .f32,
         .component_count = 1,
         .num_primitive_operations = 6,
         .allow_imprecise_accumulation = false,
     };
-
-    pub fn asAttr(self: DotAlgorithm, ctx: mlir.Context, tensor_type: mlir.RankedTensorType) mlir.Attribute {
-        const elem_type = tensor_type.getElementType();
-
-        return mlir.Attribute.wrap(c.stablehloDotAlgorithmGet(
-            ctx._inner,
-            elem_type._inner,
-            elem_type._inner,
-            self.accumulation.asType(ctx)._inner,
-            self.component_count,
-            self.component_count,
-            self.num_primitive_operations,
-            self.allow_imprecise_accumulation,
-        ));
-    }
 };
+
+pub fn dotAlgorithmAttribute(ctx: *mlir.Context, dot_algorithm: DotAlgorithm, element_type: *const mlir.Type) *const mlir.Attribute {
+    return @ptrCast(c.stablehloDotAlgorithmGet(
+        ctx.ptr(),
+        element_type.ptr(),
+        element_type.ptr(),
+        mlir.floatType(ctx, dot_algorithm.accumulation).ptr(),
+        dot_algorithm.component_count,
+        dot_algorithm.component_count,
+        dot_algorithm.num_primitive_operations,
+        dot_algorithm.allow_imprecise_accumulation,
+    ).ptr);
+}
 
 /// General matrix multiplication "a la Einstein sum"
 /// Note: stablehlo doesn't do type inference for dot_general
 pub fn dot_general(
-    ctx: mlir.Context,
-    lhs: mlir.Value,
-    rhs: mlir.Value,
-    result_type: mlir.Type,
-    location: mlir.Location,
+    ctx: *mlir.Context,
+    lhs: *const mlir.Value,
+    rhs: *const mlir.Value,
+    result_type: *const mlir.Type,
     opts: struct {
         lhs_batching_dimensions: []const i64,
         rhs_batching_dimensions: []const i64,
         lhs_contracting_dimensions: []const i64,
         rhs_contracting_dimensions: []const i64,
-        precision: DotPrecision,
+        dot_precision: DotPrecision,
     },
-) mlir.Operation {
-    const precisions: [2]mlir.Attribute = @splat(opts.precision.precisionAttr(ctx));
-    const attributes = [3]mlir.AttrTuple{
-        .{
-            "dot_dimension_numbers", DotDimensionNumbersAttribute.init(ctx, .{
+    location: *const mlir.Location,
+) *mlir.Operation {
+    const precisions: [2]*const mlir.Attribute = @splat(precisionAttribute(ctx, opts.dot_precision.precision()));
+    const attributes = [3]mlir.NamedAttribute{
+        .named(
+            ctx,
+            "dot_dimension_numbers",
+            dotDimensionNumbersAttribute(ctx, .{
                 .lhs_batching_dimensions = opts.lhs_batching_dimensions,
                 .rhs_batching_dimensions = opts.rhs_batching_dimensions,
                 .lhs_contracting_dimensions = opts.lhs_contracting_dimensions,
                 .rhs_contracting_dimensions = opts.rhs_contracting_dimensions,
-            }).asAttr(),
-        },
-        .{ "precision_config", .array(ctx, &precisions) },
+            }),
+        ),
+        .named(ctx, "precision_config", mlir.arrayAttribute(ctx, &precisions)),
         // keep algorithm as the last attribute so we can omit it when it's not set.
-        .{ "algorithm", opts.precision.algorithmAttr(ctx, lhs.getType().as(mlir.RankedTensorType).?) orelse undefined },
+        .named(ctx, "algorithm", switch (opts.dot_precision) {
+            .algorithm => |v| dotAlgorithmAttribute(ctx, v, lhs.type_()),
+            else => undefined,
+        }),
     };
-    const n_attributes = if (opts.precision == .algorithm) attributes.len else attributes.len - 1;
+    const n_attributes = if (opts.dot_precision == .algorithm) attributes.len else attributes.len - 1;
     return mlir.Operation.make(ctx, "stablehlo.dot_general", .{
-        .operands = &.{ lhs, rhs },
-        .results = &.{result_type},
+        .operands = .{ .flat = &.{ lhs, rhs } },
+        .results = .{ .flat = &.{result_type} },
         .attributes = attributes[0..n_attributes],
         .location = location,
     });
 }
 
 pub fn constant(
-    ctx: mlir.Context,
+    ctx: *mlir.Context,
     dims: []const i64,
-    elem_type: mlir.DenseElementsAttributeTypes,
+    elem_type: *const mlir.Type,
     raw_bytes: []const u8,
-    location: mlir.Location,
-) mlir.Operation {
+    location: *const mlir.Location,
+) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.constant", .{
-        .operands = &.{},
-        .results = &.{.tensor(dims, elem_type.mlirType(ctx))},
-        .attributes = &.{.{ "value", .denseElementsFromBytes(ctx, dims, elem_type, raw_bytes) }},
+        .operands = .{ .flat = &.{} },
+        .results = .{ .flat = &.{mlir.rankedTensorType(dims, elem_type)} },
+        .attributes = &.{
+            .named(ctx, "value", mlir.denseElementsAttribute(mlir.RankedTensorType.get(dims, elem_type).shaped(), raw_bytes)),
+        },
         .location = location,
     });
 }
 
-pub fn convert(ctx: mlir.Context, value: mlir.Value, result_type: mlir.Type, location: mlir.Location) mlir.Operation {
-    return mlir.Operation.make(ctx, "stablehlo.convert", .{
-        .operands = &.{value},
-        .results = &.{result_type},
-        .location = location,
-    });
-}
-
-pub fn broadcast_in_dim(ctx: mlir.Context, operand: mlir.Value, dims: []const i64, result_type: mlir.Type, location: mlir.Location) mlir.Operation {
+pub fn broadcast_in_dim(
+    ctx: *mlir.Context,
+    operand: *const mlir.Value,
+    dims: []const i64,
+    result_type: *const mlir.Type,
+    location: *const mlir.Location,
+) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.broadcast_in_dim", .{
-        .operands = &.{operand},
-        .results = &.{result_type},
+        .operands = .{ .flat = &.{operand} },
+        .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .{ "broadcast_dimensions", .dense(ctx, .i64, dims) },
+            .named(ctx, "broadcast_dimensions", mlir.denseArrayAttribute(ctx, .i64, dims)),
         },
         .location = location,
     });
 }
 
-pub fn transpose(ctx: mlir.Context, value: mlir.Value, result_type: mlir.Type, location: mlir.Location, opts: struct { permutation: []const i64 }) mlir.Operation {
+pub fn transpose(
+    ctx: *mlir.Context,
+    value: *const mlir.Value,
+    result_type: *const mlir.Type,
+    opts: struct { permutation: []const i64 },
+    location: *const mlir.Location,
+) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.transpose", .{
-        .operands = &.{value},
-        .results = &.{result_type},
+        .operands = .{ .flat = &.{value} },
+        .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .{ "permutation", .dense(ctx, .i64, opts.permutation) },
+            .named(ctx, "permutation", mlir.denseArrayAttribute(ctx, .i64, opts.permutation)),
         },
         .location = location,
     });
 }
 
-pub fn slice(ctx: mlir.Context, operand: mlir.Value, start_indices: []const i64, limit_indices: []const i64, strides: []const i64, result_type: mlir.Type, location: mlir.Location) mlir.Operation {
+pub fn slice(
+    ctx: *mlir.Context,
+    operand: *const mlir.Value,
+    start_indices: []const i64,
+    limit_indices: []const i64,
+    strides: []const i64,
+    result_type: *const mlir.Type,
+    location: *const mlir.Location,
+) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.slice", .{
-        .operands = &.{operand},
-        .results = &.{result_type},
+        .operands = .{ .flat = &.{operand} },
+        .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .{ "start_indices", .dense(ctx, .i64, start_indices) },
-            .{ "limit_indices", .dense(ctx, .i64, limit_indices) },
-            .{ "strides", .dense(ctx, .i64, strides) },
+            .named(ctx, "start_indices", mlir.denseArrayAttribute(ctx, .i64, start_indices)),
+            .named(ctx, "limit_indices", mlir.denseArrayAttribute(ctx, .i64, limit_indices)),
+            .named(ctx, "strides", mlir.denseArrayAttribute(ctx, .i64, strides)),
         },
         .location = location,
     });
 }
 
-pub fn concatenate(ctx: mlir.Context, inputs: []const mlir.Value, dimension: i64, location: mlir.Location) mlir.Operation {
+pub fn concatenate(ctx: *mlir.Context, inputs: []const *const mlir.Value, dimension: i64, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.concatenate", .{
-        .operands = inputs,
+        .operands = .{ .flat = inputs },
         .result_type_inference = true,
         .attributes = &.{
-            .{ "dimension", .int(ctx, .i64, dimension) },
+            .named(ctx, "dimension", mlir.integerAttribute(ctx, .i64, dimension)),
         },
         .location = location,
     });
 }
 
-pub fn reshape(ctx: mlir.Context, value: mlir.Value, result_type: mlir.Type, location: mlir.Location) mlir.Operation {
-    return mlir.Operation.make(ctx, "stablehlo.reshape", .{
-        .operands = &.{value},
-        .results = &.{result_type},
-        .location = location,
-    });
-}
-
-pub fn select(ctx: mlir.Context, condition: mlir.Value, then: mlir.Value, else_: mlir.Value, location: mlir.Location) mlir.Operation {
+pub fn select(
+    ctx: *mlir.Context,
+    condition: *const mlir.Value,
+    then: *const mlir.Value,
+    else_: *const mlir.Value,
+    location: *const mlir.Location,
+) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.select", .{
-        .operands = &.{ condition, then, else_ },
-        .results = &.{then.getType()},
+        .operands = .{ .flat = &.{ condition, then, else_ } },
+        .results = .{ .flat = &.{then.type_()} },
         .location = location,
     });
 }
 
 pub fn gather(
-    ctx: mlir.Context,
-    value: mlir.Value,
-    indices: mlir.Value,
+    ctx: *mlir.Context,
+    value: *const mlir.Value,
+    indices: *const mlir.Value,
     slice_sizes: []const i64,
-    location: mlir.Location,
     args: struct {
         offset_dims: []const i64,
         collapsed_slice_dims: []const i64,
@@ -311,15 +317,16 @@ pub fn gather(
         index_vector_dim: i64,
         indices_are_sorted: bool = false,
     },
-) mlir.Operation {
+    location: *const mlir.Location,
+) *mlir.Operation {
     return mlir.Operation.make(
         ctx,
         "stablehlo.gather",
         .{
-            .operands = &.{ value, indices },
+            .operands = .{ .flat = &.{ value, indices } },
             .result_type_inference = true,
             .attributes = &.{
-                .{ "dimension_numbers", GatherDimensionNumbersAttribute.init(
+                .named(ctx, "dimension_numbers", gatherDimensionNumbersAttribute(
                     ctx,
                     args.offset_dims,
                     args.collapsed_slice_dims,
@@ -327,19 +334,13 @@ pub fn gather(
                     args.start_indices_batching_dims,
                     args.start_index_map,
                     args.index_vector_dim,
-                ).asAttr() },
-                .{ "slice_sizes", .dense(ctx, .i64, slice_sizes) },
-                .{ "indices_are_sorted", .boolean(ctx, args.indices_are_sorted) },
+                )),
+                .named(ctx, "slice_sizes", mlir.denseArrayAttribute(ctx, .i64, slice_sizes)),
+                .named(ctx, "indices_are_sorted", mlir.boolAttribute(ctx, args.indices_are_sorted)),
             },
             .location = location,
         },
     );
-}
-
-fn elementTypeOrSelf(typ: mlir.Type) mlir.Type {
-    return if (typ.as(mlir.ShapedType)) |shaped| {
-        return shaped.elementType();
-    } else typ;
 }
 
 pub const ScatterArgs = struct {
@@ -352,9 +353,9 @@ pub const ScatterArgs = struct {
     indices_are_sorted: bool = false,
     unique_indices: bool = false,
 
-    pub fn getScatterDimensionNumbers(self: ScatterArgs, ctx: mlir.Context) mlir.Attribute {
-        return .{ ._inner = c.stablehloScatterDimensionNumbersGet(
-            ctx._inner,
+    pub fn getScatterDimensionNumbers(self: ScatterArgs, ctx: *mlir.Context) *const mlir.Attribute {
+        return @ptrCast(c.stablehloScatterDimensionNumbersGet(
+            ctx.ptr(),
             @intCast(self.update_window_dims.len),
             self.update_window_dims.ptr,
             @intCast(self.inserted_window_dims.len),
@@ -366,29 +367,29 @@ pub const ScatterArgs = struct {
             @intCast(self.scatter_dims_to_operand_dims.len),
             self.scatter_dims_to_operand_dims.ptr,
             self.index_vector_dim,
-        ) };
+        ).ptr);
     }
 };
 
 pub fn scatter(
-    ctx: mlir.Context,
-    inputs: []const mlir.Value,
-    scatter_indices: []const mlir.Value,
-    updates: []const mlir.Value,
-    update_block: mlir.Block,
+    ctx: *mlir.Context,
+    inputs: []const *const mlir.Value,
+    scatter_indices: []const *const mlir.Value,
+    updates: []const *const mlir.Value,
+    update_block: *mlir.Block,
     args: ScatterArgs,
-    location: mlir.Location,
-) mlir.Operation {
+    location: *const mlir.Location,
+) *mlir.Operation {
     return mlir.Operation.make(
         ctx,
         "stablehlo.scatter",
         .{
-            .variadic_operands = &.{ inputs, scatter_indices, updates },
+            .operands = .{ .variadic = &.{ inputs, scatter_indices, updates } },
             .blocks = &.{update_block},
             .attributes = &.{
-                .{ "scatter_dimension_numbers", args.getScatterDimensionNumbers(ctx) },
-                .{ "indices_are_sorted", .boolean(ctx, args.indices_are_sorted) },
-                .{ "unique_indices", .boolean(ctx, args.unique_indices) },
+                .named(ctx, "scatter_dimension_numbers", args.getScatterDimensionNumbers(ctx)),
+                .named(ctx, "indices_are_sorted", mlir.boolAttribute(ctx, args.indices_are_sorted)),
+                .named(ctx, "unique_indices", mlir.boolAttribute(ctx, args.unique_indices)),
             },
             .result_type_inference = true,
             .location = location,
@@ -396,145 +397,60 @@ pub fn scatter(
     );
 }
 
-pub fn iota(ctx: mlir.Context, dimension: i64, result_type: mlir.Type, location: mlir.Location) mlir.Operation {
+pub fn iota(ctx: *mlir.Context, dimension: i64, result_type: *const mlir.Type, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.iota", .{
-        .operands = &.{},
-        .results = &.{result_type},
+        .operands = .{ .flat = &.{} },
+        .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .{ "iota_dimension", .int(ctx, .i64, dimension) },
+            .named(ctx, "iota_dimension", mlir.integerAttribute(ctx, .i64, dimension)),
         },
         .location = location,
     });
 }
 
-pub fn reverse(ctx: mlir.Context, operand: mlir.Value, dimensions: []const i64, location: mlir.Location) mlir.Operation {
-    const result_type = operand.getType();
+pub fn reverse(ctx: *mlir.Context, operand: *const mlir.Value, dimensions: []const i64, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.reverse", .{
-        .operands = &.{operand},
-        .results = &.{result_type},
+        .operands = .{ .flat = &.{operand} },
+        .results = .{ .flat = &.{operand.type_()} },
         .attributes = &.{
-            .{ "dimensions", .dense(ctx, .i64, dimensions) },
+            .named(ctx, "dimensions", mlir.denseArrayAttribute(ctx, .i64, dimensions)),
         },
         .location = location,
     });
 }
 
-pub fn compare(ctx: mlir.Context, lhs: mlir.Value, rhs: mlir.Value, comparison_direction: ComparisonDirection, compare_type: CompareType, location: mlir.Location) mlir.Operation {
+pub fn compare(
+    ctx: *mlir.Context,
+    lhs: *const mlir.Value,
+    rhs: *const mlir.Value,
+    comparison_direction: ComparisonDirection.Direction,
+    compare_type: CompareType.Type,
+    location: *const mlir.Location,
+) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.compare", .{
-        .operands = &.{ lhs, rhs },
+        .operands = .{ .flat = &.{ lhs, rhs } },
         .result_type_inference = true,
         .attributes = &.{
-            .{ "comparison_direction", comparison_direction.asAttr() },
-            .{ "compare_type", compare_type.asAttr() },
+            .named(ctx, "comparison_direction", comparisonDirection(ctx, comparison_direction)),
+            .named(ctx, "compare_type", compareType(ctx, compare_type)),
         },
         .location = location,
     });
 }
 
-pub fn reduce(
-    ctx: mlir.Context,
-    inputs: []const mlir.Value,
-    init_values: []const mlir.Value,
-    dimensions: []const i64,
-    blkctx: anytype,
-    blkfn: fn (anytype, mlir.Context, []const mlir.Value, []const mlir.Value) mlir.Operation,
-    location: mlir.Location,
-) mlir.Operation {
-    const MaxBlockArguments = 32;
-
-    const block_n_args = inputs.len + init_values.len;
-    const locations = ([_]mlir.Location{mlir.Location.unknown(ctx)} ** MaxBlockArguments)[0..block_n_args];
-    var reduce_elem_types: [MaxBlockArguments]mlir.Type = undefined;
-    for (inputs, 0..) |input, i| {
-        const arg_type: mlir.Type = .tensor(&.{}, elementTypeOrSelf(input.getType()));
-        reduce_elem_types[i] = arg_type;
-        reduce_elem_types[inputs.len + i] = arg_type;
-    }
-    var block = mlir.Block.open(reduce_elem_types[0..block_n_args], locations) catch unreachable;
-    {
-        defer block.close();
-
-        var block_inputs: [MaxBlockArguments / 2]mlir.Value = undefined;
-        var block_accs: [MaxBlockArguments / 2]mlir.Value = undefined;
-        for (0..inputs.len) |i| {
-            block_inputs[i] = block.argument(i);
-            block_accs[i] = block.argument(inputs.len + i);
-        }
-        _ = blkfn(blkctx, ctx, block_inputs[0..inputs.len], block_accs[0..init_values.len]);
-    }
-
-    return mlir.Operation.make(ctx, "stablehlo.reduce", .{
-        .variadic_operands = &.{ inputs, init_values },
-        .result_type_inference = true,
-        .block = block,
-        .attributes = &.{
-            .{ "dimensions", .dense(ctx, .i64, dimensions) },
-        },
-        .location = location,
-    });
-}
-
-pub fn sort(
-    ctx: mlir.Context,
-    inputs: []const mlir.Value,
-    dimension: i64,
-    is_stable: bool,
-    blkctx: anytype,
-    compfn: fn (anytype, mlir.Context, []const mlir.Value) mlir.Operation,
-    location: mlir.Location,
-) mlir.Operation {
-    const MaxBlockArguments = 32;
-
-    const locations = ([_]mlir.Location{mlir.Location.unknown(ctx)} ** MaxBlockArguments)[0 .. inputs.len * 2];
-    var sort_elem_types: [MaxBlockArguments]mlir.Type = undefined;
-    for (inputs, 0..) |input, i| {
-        const arg_type: mlir.Type = .tensor(&.{}, elementTypeOrSelf(input.getType()));
-        sort_elem_types[i * 2] = arg_type;
-        sort_elem_types[i * 2 + 1] = arg_type;
-    }
-    var block = mlir.Block.init(sort_elem_types[0 .. inputs.len * 2], locations) catch unreachable;
-
-    var block_inputs: [MaxBlockArguments]mlir.Value = undefined;
-    for (0..inputs.len * 2) |i| {
-        block_inputs[i] = block.argument(i);
-    }
-    _ = compfn(blkctx, ctx, block_inputs[0 .. inputs.len * 2]);
-
-    return mlir.Operation.make(ctx, "stablehlo.sort", .{
-        .variadic_operands = &.{inputs},
-        .result_type_inference = true,
-        .block = block,
-        .attributes = &.{
-            .{ "dimension", .int(ctx, .i64, dimension) },
-            .{ "is_stable", .boolean(ctx, is_stable) },
-        },
-        .location = location,
-    });
-}
-
-pub fn dynamic_slice(ctx: mlir.Context, operand: mlir.Value, new_dims: []const i64, start_indices: []const mlir.Value, location: mlir.Location) mlir.Operation {
+pub fn dynamic_slice(
+    ctx: *mlir.Context,
+    operand: *const mlir.Value,
+    new_dims: []const i64,
+    start_indices: []const *const mlir.Value,
+    location: *const mlir.Location,
+) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.dynamic_slice", .{
-        .variadic_operands = &.{ &.{operand}, start_indices },
+        .operands = .{ .variadic = &.{ &.{operand}, start_indices } },
         .result_type_inference = true,
         .attributes = &.{
-            .{ "slice_sizes", .dense(ctx, .i64, new_dims) },
+            .named(ctx, "slice_sizes", mlir.denseArrayAttribute(ctx, .i64, new_dims)),
         },
-        .location = location,
-    });
-}
-
-pub fn round_nearest_afz(ctx: mlir.Context, value: mlir.Value, location: mlir.Location) mlir.Operation {
-    return mlir.Operation.make(ctx, "stablehlo.round_nearest_afz", .{
-        .operands = &.{value},
-        .result_type_inference = true,
-        .location = location,
-    });
-}
-
-pub fn round_nearest_even(ctx: mlir.Context, value: mlir.Value, location: mlir.Location) mlir.Operation {
-    return mlir.Operation.make(ctx, "stablehlo.round_nearest_even", .{
-        .operands = &.{value},
-        .result_type_inference = true,
         .location = location,
     });
 }
@@ -545,14 +461,14 @@ pub const PadOpts = struct {
     interior: []const i64,
 };
 
-pub fn pad(ctx: mlir.Context, value: mlir.Value, padding_value: mlir.Value, opts: PadOpts, location: mlir.Location) mlir.Operation {
+pub fn pad(ctx: *mlir.Context, value: *const mlir.Value, padding_value: *const mlir.Value, location: *const mlir.Location, opts: PadOpts) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.pad", .{
-        .operands = &.{ value, padding_value },
+        .operands = .{ .flat = &.{ value, padding_value } },
         .result_type_inference = true,
         .attributes = &.{
-            .{ "edge_padding_low", .dense(ctx, .i64, opts.low) },
-            .{ "edge_padding_high", .dense(ctx, .i64, opts.high) },
-            .{ "interior_padding", .dense(ctx, .i64, opts.interior) },
+            .named(ctx, "edge_padding_low", mlir.denseArrayAttribute(ctx, .i64, opts.low)),
+            .named(ctx, "edge_padding_high", mlir.denseArrayAttribute(ctx, .i64, opts.high)),
+            .named(ctx, "interior_padding", mlir.denseArrayAttribute(ctx, .i64, opts.interior)),
         },
         .location = location,
     });
@@ -562,18 +478,18 @@ pub const TriangularSolveOpts = struct {
     left_side: bool,
     lower: bool,
     unit_diagonal: bool,
-    transpose_a: Transpose.Type,
+    transpose_a: TransposeAttribute.Type,
 };
 
-pub fn triangular_solve(ctx: mlir.Context, value: mlir.Value, other: mlir.Value, location: mlir.Location, opts: TriangularSolveOpts) mlir.Operation {
+pub fn triangular_solve(ctx: *mlir.Context, value: *const mlir.Value, other: *const mlir.Value, opts: TriangularSolveOpts, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.triangular_solve", .{
-        .operands = &.{ value, other },
+        .operands = .{ .flat = &.{ value, other } },
         .result_type_inference = true,
         .attributes = &.{
-            .{ "left_side", .i1FromBool(ctx, opts.left_side) },
-            .{ "lower", .i1FromBool(ctx, opts.lower) },
-            .{ "unit_diagonal", .i1FromBool(ctx, opts.unit_diagonal) },
-            .{ "transpose_a", Transpose.init(ctx, opts.transpose_a).asAttr() },
+            .named(ctx, "left_side", mlir.integerAttribute(ctx, .i1, @intFromBool(opts.left_side))),
+            .named(ctx, "lower", mlir.integerAttribute(ctx, .i1, @intFromBool(opts.lower))),
+            .named(ctx, "unit_diagonal", mlir.integerAttribute(ctx, .i1, @intFromBool(opts.unit_diagonal))),
+            .named(ctx, "transpose_a", transposeAttribute(ctx, opts.transpose_a)),
         },
         .location = location,
     });
@@ -584,74 +500,132 @@ pub const FftOpts = struct {
     length: []const i64,
 };
 
-pub fn fft(ctx: mlir.Context, value: mlir.Value, location: mlir.Location, opts: FftOpts) mlir.Operation {
+pub fn fft(ctx: *mlir.Context, value: *const mlir.Value, opts: FftOpts, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.fft", .{
-        .operands = &.{value},
+        .operands = .{ .flat = &.{value} },
         .result_type_inference = true,
         .attributes = &.{
-            .{ "fft_type", FftType.init(ctx, opts.kind).asAttr() },
-            .{ "fft_length", .dense(ctx, .i64, opts.length) },
+            .named(ctx, "fft_type", fftType(ctx, opts.kind)),
+            .named(ctx, "fft_length", mlir.denseArrayAttribute(ctx, .i64, opts.length)),
         },
         .location = location,
     });
 }
 
-pub fn rng(ctx: mlir.Context, a: mlir.Value, b: mlir.Value, shape: mlir.Value, rng_distribution: RngDistribution.Type, location: mlir.Location) mlir.Operation {
+pub const RngDistribution = opaque {
+    const M = mlir.Methods(RngDistribution, c.MlirAttribute);
+
+    pub const isAFn = c.stablehloAttributeIsARngDistributionAttr;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
+
+    pub const Type = enum {
+        UNIFORM,
+        NORMAL,
+    };
+
+    pub fn get(ctx: *mlir.Context, value_: Type) *const RngDistribution {
+        return @ptrCast(c.stablehloRngDistributionAttrGet(ctx.ptr(), stringRef(@tagName(value_))).ptr);
+    }
+
+    pub fn value(self: *const RngDistribution) Type {
+        return std.meta.stringToEnum(
+            Type,
+            mlir.string(c.stablehloRngDistributionAttrGetValue(self.ptr())),
+        ) orelse unreachable;
+    }
+};
+
+pub fn rngDistribution(ctx: *mlir.Context, value: RngDistribution.Type) *const mlir.Attribute {
+    return @ptrCast(RngDistribution.get(ctx, value));
+}
+
+pub const RngAlgorithm = opaque {
+    const M = mlir.Methods(RngAlgorithm, c.MlirAttribute);
+
+    pub const isAFn = c.stablehloAttributeIsARngAlgorithmAttr;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
+
+    pub const Type = enum {
+        DEFAULT,
+        THREE_FRY,
+        PHILOX,
+    };
+
+    pub fn get(ctx: *mlir.Context, value_: Type) *const RngAlgorithm {
+        return @ptrCast(c.stablehloRngAlgorithmAttrGet(ctx.ptr(), stringRef(@tagName(value_))).ptr);
+    }
+
+    pub fn value(self: *const RngAlgorithm) Type {
+        return std.meta.stringToEnum(
+            Type,
+            mlir.string(c.stablehloRngAlgorithmAttrGetValue(self.ptr())),
+        ) orelse unreachable;
+    }
+};
+
+pub fn rngAlgorithm(ctx: *mlir.Context, value: RngAlgorithm.Type) *const mlir.Attribute {
+    return @ptrCast(RngAlgorithm.get(ctx, value));
+}
+
+pub fn rng(ctx: *mlir.Context, a: *const mlir.Value, b: *const mlir.Value, shape: *const mlir.Value, rng_distribution: RngDistribution.Type, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.rng", .{
-        .operands = &.{ a, b, shape },
+        .operands = .{ .flat = &.{ a, b, shape } },
         .result_type_inference = true,
         .attributes = &.{
-            .{ "rng_distribution", RngDistribution.init(ctx, rng_distribution).asAttr() },
+            .named(ctx, "rng_distribution", rngDistribution(ctx, rng_distribution)),
         },
         .location = location,
     });
 }
 
-pub fn rng_bit_generator(ctx: mlir.Context, rng_algorithm: RngAlgorithm.Type, initial_state: mlir.Value, res_state_type: mlir.Type, res_type: mlir.Type, location: mlir.Location) mlir.Operation {
+pub fn rng_bit_generator(
+    ctx: *mlir.Context,
+    rng_algorithm: RngAlgorithm.Type,
+    initial_state: *const mlir.Value,
+    res_state_type: *const mlir.Type,
+    res_type: *const mlir.Type,
+    location: *const mlir.Location,
+) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.rng_bit_generator", .{
-        .operands = &.{initial_state},
+        .operands = .{ .flat = &.{initial_state} },
         .results = &.{ res_state_type, res_type },
         .attributes = &.{
-            .{ "rng_algorithm", RngAlgorithm.init(ctx, rng_algorithm).asAttr() },
+            .named(ctx, "rng_algorithm", rngAlgorithm(ctx, rng_algorithm)),
         },
         .location = location,
     });
 }
 
-pub fn reduce_precision(ctx: mlir.Context, value: mlir.Value, exponent_bits: i32, mantissa_bits: i32, location: mlir.Location) mlir.Operation {
+pub fn reduce_precision(ctx: *mlir.Context, value: *const mlir.Value, exponent_bits: i32, mantissa_bits: i32, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.reduce_precision", .{
-        .operands = &.{value},
+        .operands = .{ .flat = &.{value} },
         .result_type_inference = true,
         .attributes = &.{
-            .{ "exponent_bits", .int(ctx, .i32, exponent_bits) },
-            .{ "mantissa_bits", .int(ctx, .i32, mantissa_bits) },
+            .named(ctx, "exponent_bits", mlir.integerAttribute(ctx, .i32, exponent_bits)),
+            .named(ctx, "mantissa_bits", mlir.integerAttribute(ctx, .i32, mantissa_bits)),
         },
         .location = location,
     });
 }
 
-pub fn dynamic_update_slice(ctx: mlir.Context, operand: mlir.Value, update: mlir.Value, start_indices: []const mlir.Value, location: mlir.Location) mlir.Operation {
+pub fn dynamic_update_slice(ctx: *mlir.Context, operand: *const mlir.Value, update: *const mlir.Value, start_indices: []const *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.dynamic_update_slice", .{
-        .variadic_operands = &.{ &.{operand}, &.{update}, start_indices },
+        .operands = .{ .variadic = &.{ &.{operand}, &.{update}, start_indices } },
         .result_type_inference = true,
         .location = location,
     });
 }
 
-pub fn tuple(ctx: mlir.Context, values: []const mlir.Value, location: mlir.Location) mlir.Operation {
-    return mlir.Operation.make(ctx, "stablehlo.tuple", .{
-        .operands = values,
-        .result_type_inference = true,
-        .location = location,
-    });
-}
-
-pub fn get_tuple_element(ctx: mlir.Context, tuple_value: mlir.Value, index: i64, location: mlir.Location) mlir.Operation {
+pub fn get_tuple_element(ctx: *mlir.Context, tuple_value: *const mlir.Value, index: i64, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.get_tuple_element", .{
-        .operands = &.{tuple_value},
+        .operands = .{ .flat = &.{tuple_value} },
         .result_type_inference = true,
         .attributes = &.{
-            .{ "index", .int(ctx, .i32, index) },
+            .named(ctx, "index", mlir.integerAttribute(ctx, .i32, index)),
         },
         .location = location,
     });
@@ -679,46 +653,44 @@ pub const ConvolutionOpts = struct {
 };
 
 pub fn convolution(
-    ctx: mlir.Context,
-    lhs: mlir.Value,
-    rhs: mlir.Value,
+    ctx: *mlir.Context,
+    lhs: *const mlir.Value,
+    rhs: *const mlir.Value,
+    res_type: *const mlir.Type,
     opts: ConvolutionOpts,
-    res_type: mlir.Type,
-    location: mlir.Location,
-) mlir.Operation {
-    var max_precisions: [2]mlir.Attribute = undefined;
+    location: *const mlir.Location,
+) *mlir.Operation {
+    var max_precisions: [2]*const mlir.Attribute = undefined;
     for (opts.precision_config, 0..) |p, i| {
-        max_precisions[i] = PrecisionAttribute.init(ctx, p).asAttr();
+        max_precisions[i] = precisionAttribute(ctx, p);
     }
     var window_reversal: [3]i32 = undefined;
     for (opts.window_reversal, 0..) |w, i| {
         window_reversal[i] = @intCast(@intFromBool(w));
     }
     return mlir.Operation.make(ctx, "stablehlo.convolution", .{
-        .operands = &.{ lhs, rhs },
-        .results = &.{res_type},
+        .operands = .{ .flat = &.{ lhs, rhs } },
+        .results = .{ .flat = &.{res_type} },
         .attributes = &.{
-            .{ "window_strides", .dense(ctx, .i64, opts.window_strides) },
-            .{ "padding", .denseElements(ctx, opts.pad_shape, .i64, opts.pad_value) },
-            .{ "lhs_dilation", .dense(ctx, .i64, opts.lhs_dilation) },
-            .{ "rhs_dilation", .dense(ctx, .i64, opts.rhs_dilation) },
-            .{ "window_reversal", .dense(ctx, .bool, window_reversal[0..opts.window_reversal.len]) },
-            .{
-                "dimension_numbers", ConvDimensionNumbersAttribute.init(ctx, .{
-                    .input_batch_dimension = opts.input_batch_dimension,
-                    .input_feature_dimension = opts.input_feature_dimension,
-                    .input_spatial_dimensions = opts.input_spatial_dimensions,
-                    .kernel_input_feature_dimension = opts.kernel_input_feature_dimension,
-                    .kernel_output_feature_dimension = opts.kernel_output_feature_dimension,
-                    .kernel_spatial_dimensions = opts.kernel_spatial_dimensions,
-                    .output_batch_dimension = opts.output_batch_dimension,
-                    .output_feature_dimension = opts.output_feature_dimension,
-                    .output_spatial_dimensions = opts.output_spatial_dimensions,
-                }).asAttr(),
-            },
-            .{ "feature_group_count", .int(ctx, .i64, opts.feature_group_count) },
-            .{ "batch_group_count", .int(ctx, .i64, opts.batch_group_count) },
-            .{ "precision_config", .array(ctx, &max_precisions) },
+            .named(ctx, "window_strides", mlir.denseArrayAttribute(ctx, .i64, opts.window_strides)),
+            .named(ctx, "padding", mlir.denseElementsAttribute(mlir.RankedTensorType.get(opts.pad_shape, mlir.integerType(ctx, .i64)).shaped(), opts.pad_value)),
+            .named(ctx, "lhs_dilation", mlir.denseArrayAttribute(ctx, .i64, opts.lhs_dilation)),
+            .named(ctx, "rhs_dilation", mlir.denseArrayAttribute(ctx, .i64, opts.rhs_dilation)),
+            .named(ctx, "window_reversal", mlir.denseArrayAttribute(ctx, .bool, window_reversal[0..opts.window_reversal.len])),
+            .named(ctx, "dimension_numbers", convDimensionNumbersAttribute(ctx, .{
+                .input_batch_dimension = opts.input_batch_dimension,
+                .input_feature_dimension = opts.input_feature_dimension,
+                .input_spatial_dimensions = opts.input_spatial_dimensions,
+                .kernel_input_feature_dimension = opts.kernel_input_feature_dimension,
+                .kernel_output_feature_dimension = opts.kernel_output_feature_dimension,
+                .kernel_spatial_dimensions = opts.kernel_spatial_dimensions,
+                .output_batch_dimension = opts.output_batch_dimension,
+                .output_feature_dimension = opts.output_feature_dimension,
+                .output_spatial_dimensions = opts.output_spatial_dimensions,
+            })),
+            .named(ctx, "feature_group_count", mlir.integerAttribute(ctx, .i64, opts.feature_group_count)),
+            .named(ctx, "batch_group_count", mlir.integerAttribute(ctx, .i64, opts.batch_group_count)),
+            .named(ctx, "precision_config", mlir.arrayAttribute(ctx, &max_precisions)),
         },
         .location = location,
     });
@@ -732,261 +704,350 @@ pub const CustomCallOpts = struct {
         typed_ffi = 4,
     };
 
-    call_target_name: [:0]const u8,
-    has_side_effect: bool,
-    backend_config: ?mlir.Attribute,
+    pub const BackendConfig = union(ApiVersion) {
+        original: []const u8,
+        status_returning: []const u8,
+        status_returning_unified: []const u8,
+        typed_ffi: *const mlir.DictionaryAttribute,
+    };
+
+    call_target_name: []const u8,
+    has_side_effect: ?bool = null,
+    api_version: ?ApiVersion = null,
+    backend_config: ?BackendConfig = null,
     operand_layouts: ?[]const []const usize = null,
     result_layouts: ?[]const []const usize = null,
-    output_operand_aliases: []const i64 = &.{},
-    additional_attributes: []const mlir.AttrTuple = &.{},
-    api_version: ApiVersion,
+    output_operand_aliases: ?[]const i64 = null,
+    additional_attributes: []const mlir.NamedAttribute = &.{},
 };
 
-pub fn custom_call(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCallOpts, res_types: []const mlir.Type, location: mlir.Location) mlir.Operation {
+pub fn custom_call(ctx: *mlir.Context, inputs: []const *const mlir.Value, result_types: []const *const mlir.Type, opts: CustomCallOpts, location: *const mlir.Location) *mlir.Operation {
     const MAX_OPERANDS = 64;
     const MAX_RESULTS = 16;
-
-    const backend_config = opts.backend_config orelse mlir.Attribute.string(ctx, "");
-    if (@intFromEnum(opts.api_version) < @intFromEnum(CustomCallOpts.ApiVersion.typed_ffi)) {
-        stdx.debug.assert(
-            backend_config.isA(mlir.StringAttribute),
-            "API version < 4 requires a string as backend_config, got {f}",
-            .{backend_config},
-        );
-    } else {
-        stdx.debug.assert(
-            backend_config.isA(mlir.DictionaryAttribute),
-            "API version >= 4 requires a dictionary as backend_config, got {f}",
-            .{backend_config},
-        );
-    }
-
-    var attrs: stdx.BoundedArray(mlir.AttrTuple, 32) = .{};
-    attrs.appendSliceAssumeCapacity(&[_]mlir.AttrTuple{
-        .{ "api_version", .int(ctx, .i32, @intFromEnum(opts.api_version)) },
-        .{ "call_target_name", .string(ctx, opts.call_target_name) },
-        .{ "has_side_effect", .boolean(ctx, opts.has_side_effect) },
-        .{ "backend_config", backend_config },
-    });
-
-    {
-        var output_operand_aliases: stdx.BoundedArray(mlir.Attribute, MAX_RESULTS) = .{};
-        for (opts.output_operand_aliases) |alias| {
-            output_operand_aliases.appendAssumeCapacity(
-                OutputOperandAliasAttribute.init(ctx, &.{}, alias, &.{}).asAttr(),
-            );
-        }
-        attrs.appendAssumeCapacity(.{ "output_operand_aliases", .array(ctx, output_operand_aliases.constSlice()) });
-    }
-
-    const MINOR_TO_MAJOR = blk: {
-        const MAX_RANK = 8;
-        var ret: [MAX_RANK]usize = undefined;
-        for (0..MAX_RANK) |i| {
-            ret[i] = @intCast(MAX_RANK - i - 1);
+    const MINOR_TO_MAJOR = comptime blk: {
+        var ret: [mlir.ShapedType.MAX_RANK]usize = undefined;
+        for (0..ret.len) |i| {
+            ret[i] = @intCast(mlir.ShapedType.MAX_RANK - i - 1);
         }
         break :blk ret;
     };
 
+    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 32) = .{};
+    attrs.appendSliceAssumeCapacity(&.{
+        .named(ctx, "call_target_name", mlir.stringAttribute(ctx, opts.call_target_name)),
+    });
+    attrs.appendSliceAssumeCapacity(opts.additional_attributes);
+
+    if (opts.has_side_effect) |has_side_effects| {
+        attrs.appendAssumeCapacity(
+            .named(ctx, "has_side_effect", mlir.boolAttribute(ctx, has_side_effects)),
+        );
+    }
+
+    const backend_config_api_version: ?CustomCallOpts.ApiVersion = if (opts.backend_config) |bc| bc else null;
+    if (opts.api_version orelse backend_config_api_version) |v| {
+        attrs.appendAssumeCapacity(
+            .named(ctx, "api_version", mlir.integerAttribute(ctx, .i32, @intFromEnum(v))),
+        );
+    }
+    if (opts.backend_config) |backend_config| {
+        attrs.appendAssumeCapacity(
+            .named(ctx, "backend_config", switch (backend_config) {
+                .typed_ffi => |v| @ptrCast(v),
+                inline else => |v| mlir.stringAttribute(ctx, v),
+            }),
+        );
+    }
+
+    if (opts.output_operand_aliases) |output_operand_aliases| {
+        var buffer: stdx.BoundedArray(*const mlir.Attribute, MAX_RESULTS) = .{};
+        for (output_operand_aliases) |alias| {
+            buffer.appendAssumeCapacity(
+                outputOperandAliasAttribute(ctx, .{ .operand_index = alias }),
+            );
+        }
+        attrs.appendAssumeCapacity(
+            .named(ctx, "output_operand_aliases", mlir.arrayAttribute(ctx, buffer.constSlice())),
+        );
+    }
+
+    var layouts_buffer: stdx.BoundedArray(*const mlir.Attribute, MAX_OPERANDS) = .{};
     if (opts.operand_layouts) |layouts| {
-        var operand_layouts: stdx.BoundedArray(mlir.Attribute, MAX_OPERANDS) = .{};
         for (layouts) |ol| {
-            operand_layouts.appendAssumeCapacity(.denseElements(ctx, &.{@intCast(ol.len)}, .index, ol));
+            layouts_buffer.appendAssumeCapacity(
+                mlir.denseElementsAttribute(
+                    mlir.RankedTensorType.get(
+                        &.{@intCast(ol.len)},
+                        mlir.indexType(ctx),
+                        null,
+                    ).shaped(),
+                    ol,
+                ),
+            );
         }
-        attrs.appendAssumeCapacity(.{ "operand_layouts", .array(ctx, operand_layouts.constSlice()) });
     } else {
-        const operand_layouts = blk: {
-            var ret: stdx.BoundedArray(mlir.Attribute, MAX_OPERANDS) = .{};
-            for (inputs) |input| {
-                const ranked_type = input.getType().as(mlir.RankedTensorType).?;
-                const ol = MINOR_TO_MAJOR[MINOR_TO_MAJOR.len - ranked_type.getRank() ..];
-                ret.appendAssumeCapacity(.denseElements(ctx, &.{@intCast(ol.len)}, .index, ol));
-            }
-            break :blk ret;
-        };
-        attrs.appendAssumeCapacity(.{ "operand_layouts", .array(ctx, operand_layouts.constSlice()) });
+        for (inputs) |input| {
+            const shaped_type = input.type_().isA(mlir.ShapedType).?;
+            const ol = MINOR_TO_MAJOR[MINOR_TO_MAJOR.len - shaped_type.rank() ..];
+            layouts_buffer.appendAssumeCapacity(
+                mlir.denseElementsAttribute(
+                    mlir.RankedTensorType.get(
+                        &.{@intCast(ol.len)},
+                        mlir.indexType(ctx),
+                        null,
+                    ).shaped(),
+                    ol,
+                ),
+            );
+        }
     }
+    attrs.appendAssumeCapacity(
+        .named(ctx, "operand_layouts", mlir.arrayAttribute(ctx, layouts_buffer.constSlice())),
+    );
 
+    layouts_buffer.clear();
     if (opts.result_layouts) |layouts| {
-        var result_layouts: stdx.BoundedArray(mlir.Attribute, MAX_RESULTS) = .{};
         for (layouts) |rl| {
-            result_layouts.appendAssumeCapacity(.denseElements(ctx, &.{@intCast(rl.len)}, .index, rl));
+            layouts_buffer.appendAssumeCapacity(
+                mlir.denseElementsAttribute(
+                    mlir.RankedTensorType.get(
+                        &.{@intCast(rl.len)},
+                        mlir.indexType(ctx),
+                        null,
+                    ).shaped(),
+                    rl,
+                ),
+            );
         }
-        attrs.appendAssumeCapacity(.{ "result_layouts", .array(ctx, result_layouts.constSlice()) });
     } else {
-        const result_layouts = blk: {
-            var ret: stdx.BoundedArray(mlir.Attribute, MAX_RESULTS) = .{};
-            for (res_types) |t| {
-                const ranked_t = t.as(mlir.RankedTensorType).?;
-                const rl = MINOR_TO_MAJOR[MINOR_TO_MAJOR.len - ranked_t.getRank() ..];
-                ret.appendAssumeCapacity(.denseElements(ctx, &.{@intCast(rl.len)}, .index, rl));
-            }
-            break :blk ret;
-        };
-        attrs.appendAssumeCapacity(.{ "result_layouts", .array(ctx, result_layouts.constSlice()) });
+        for (result_types) |result_type| {
+            const shaped_type = result_type.isA(mlir.ShapedType).?;
+            const rl = MINOR_TO_MAJOR[MINOR_TO_MAJOR.len - shaped_type.rank() ..];
+            layouts_buffer.appendAssumeCapacity(
+                mlir.denseElementsAttribute(
+                    mlir.RankedTensorType.get(
+                        &.{@intCast(rl.len)},
+                        mlir.indexType(ctx),
+                        null,
+                    ).shaped(),
+                    rl,
+                ),
+            );
+        }
     }
-
-    attrs.appendSlice(opts.additional_attributes) catch @panic("Too many additional_attributes");
+    attrs.appendAssumeCapacity(
+        .named(ctx, "result_layouts", mlir.arrayAttribute(ctx, layouts_buffer.constSlice())),
+    );
 
     return mlir.Operation.make(ctx, "stablehlo.custom_call", .{
-        .operands = inputs,
-        .results = res_types,
+        .operands = .{ .flat = inputs },
+        .results = .{ .flat = result_types },
         .attributes = attrs.constSlice(),
         .location = location,
     });
 }
 
-pub const DotDimensionNumbersAttribute = struct {
-    _inner: c.MlirAttribute,
+pub fn createBuffer(ctx: *mlir.Context, value: *const mlir.Type, location: *const mlir.Location) *mlir.Operation {
+    return custom_call(ctx, &.{}, &.{value}, .{
+        .call_target_name = "CreateBuffer",
+        .api_version = .typed_ffi,
+    }, location);
+}
 
-    pub const is_a_fn = c.stablehloAttributeIsADotDimensionNumbers;
-    const Self = DotDimensionNumbersAttribute;
-    pub const asAttr = mlir.Attribute.fromAny(Self);
-    pub const eql = mlir.Attribute.eqlAny(Self);
+pub fn pin(ctx: *mlir.Context, value: *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
+    return custom_call(ctx, &.{}, &.{@ptrCast(mlir.MemRefType.fromShaped(value.type_().isA(mlir.ShapedType).?))}, .{
+        .call_target_name = "Pin",
+        .api_version = .typed_ffi,
+    }, location);
+}
 
-    pub fn init(ctx: mlir.Context, args: struct {
+pub fn unpin(ctx: *mlir.Context, value: *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
+    return custom_call(ctx, &.{}, &.{@ptrCast(mlir.RankedTensorType.fromShaped(value.type_().isA(mlir.ShapedType).?))}, .{
+        .call_target_name = "Unpin",
+        .api_version = .typed_ffi,
+    }, location);
+}
+
+pub fn partition_id(ctx: *mlir.Context, location: *const mlir.Location) *mlir.Operation {
+    return mlir.Operation.make(ctx, "stablehlo.partition_id", .{
+        .results = .{ .flat = &.{mlir.rankedTensorType(&.{}, mlir.integerType(ctx, .u32))} },
+        .location = location,
+    });
+}
+
+pub const DotDimensionNumbersAttribute = opaque {
+    const M = mlir.Methods(DotDimensionNumbersAttribute, mlir.Attribute);
+
+    pub const isAFn = c.stablehloAttributeIsADotDimensionNumbers;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
+
+    pub const InitArgs = struct {
         lhs_batching_dimensions: []const i64,
         rhs_batching_dimensions: []const i64,
         lhs_contracting_dimensions: []const i64,
         rhs_contracting_dimensions: []const i64,
-    }) Self {
-        return .{
-            ._inner = c.stablehloDotDimensionNumbersGet(
-                ctx._inner,
-                @intCast(args.lhs_batching_dimensions.len),
-                args.lhs_batching_dimensions.ptr,
-                @intCast(args.rhs_batching_dimensions.len),
-                args.rhs_batching_dimensions.ptr,
-                @intCast(args.lhs_contracting_dimensions.len),
-                args.lhs_contracting_dimensions.ptr,
-                @intCast(args.rhs_contracting_dimensions.len),
-                args.rhs_contracting_dimensions.ptr,
-            ),
-        };
+    };
+
+    pub fn init(ctx: *mlir.Context, args: InitArgs) *const DotDimensionNumbersAttribute {
+        return @ptrCast(c.stablehloDotDimensionNumbersGet(
+            ctx.ptr(),
+            @intCast(args.lhs_batching_dimensions.len),
+            args.lhs_batching_dimensions.ptr,
+            @intCast(args.rhs_batching_dimensions.len),
+            args.rhs_batching_dimensions.ptr,
+            @intCast(args.lhs_contracting_dimensions.len),
+            args.lhs_contracting_dimensions.ptr,
+            @intCast(args.rhs_contracting_dimensions.len),
+            args.rhs_contracting_dimensions.ptr,
+        ).ptr);
     }
 
-    pub fn getLhsBatchingDimensionsSize(self: Self) usize {
-        return @intCast(c.stablehloDotDimensionNumbersGetLhsBatchingDimensionsSize(self._inner));
+    pub fn getLhsBatchingDimensionsSize(self: *const DotDimensionNumbersAttribute) usize {
+        return @intCast(c.stablehloDotDimensionNumbersGetLhsBatchingDimensionsSize(self.ptr()));
     }
 
-    pub fn getLhsBatchingDimensionsElem(self: Self, pos: usize) i64 {
-        return c.stablehloDotDimensionNumbersGetLhsBatchingDimensionsElem(self._inner, @intCast(pos));
+    pub fn getLhsBatchingDimensionsElem(self: *const DotDimensionNumbersAttribute, pos: usize) i64 {
+        return c.stablehloDotDimensionNumbersGetLhsBatchingDimensionsElem(self.ptr(), @intCast(pos));
     }
 
-    pub fn getRhsBatchingDimensionsSize(self: Self) usize {
-        return @intCast(c.stablehloDotDimensionNumbersGetRhsBatchingDimensionsSize(self._inner));
+    pub fn getRhsBatchingDimensionsSize(self: *const DotDimensionNumbersAttribute) usize {
+        return @intCast(c.stablehloDotDimensionNumbersGetRhsBatchingDimensionsSize(self.ptr()));
     }
 
-    pub fn getRhsBatchingDimensionsElem(self: Self, pos: usize) i64 {
-        return c.stablehloDotDimensionNumbersGetRhsBatchingDimensionsElem(self._inner, @intCast(pos));
+    pub fn getRhsBatchingDimensionsElem(self: *const DotDimensionNumbersAttribute, pos: usize) i64 {
+        return c.stablehloDotDimensionNumbersGetRhsBatchingDimensionsElem(self.ptr(), @intCast(pos));
     }
 
-    pub fn getLhsContractingDimensionsSize(self: Self) usize {
-        return @intCast(c.stablehloDotDimensionNumbersGetLhsContractingDimensionsSize(self._inner));
+    pub fn getLhsContractingDimensionsSize(self: *const DotDimensionNumbersAttribute) usize {
+        return @intCast(c.stablehloDotDimensionNumbersGetLhsContractingDimensionsSize(self.ptr()));
     }
 
-    pub fn getLhsContractingDimensionsElem(self: Self, pos: usize) i64 {
-        return c.stablehloDotDimensionNumbersGetLhsContractingDimensionsElem(self._inner, @intCast(pos));
+    pub fn getLhsContractingDimensionsElem(self: *const DotDimensionNumbersAttribute, pos: usize) i64 {
+        return c.stablehloDotDimensionNumbersGetLhsContractingDimensionsElem(self.ptr(), @intCast(pos));
     }
 
-    pub fn getRhsContractingDimensionsSize(self: Self) usize {
-        return @intCast(c.stablehloDotDimensionNumbersGetRhsContractingDimensionsSize(self._inner));
+    pub fn getRhsContractingDimensionsSize(self: *const DotDimensionNumbersAttribute) usize {
+        return @intCast(c.stablehloDotDimensionNumbersGetRhsContractingDimensionsSize(self.ptr()));
     }
 
-    pub fn getRhsContractingDimensionsElem(self: Self, pos: usize) i64 {
-        return c.stablehloDotDimensionNumbersGetRhsContractingDimensionsElem(self._inner, @intCast(pos));
+    pub fn getRhsContractingDimensionsElem(self: *const DotDimensionNumbersAttribute, pos: usize) i64 {
+        return c.stablehloDotDimensionNumbersGetRhsContractingDimensionsElem(self.ptr(), @intCast(pos));
     }
 };
 
-pub const GatherDimensionNumbersAttribute = struct {
-    _inner: c.MlirAttribute,
+pub fn dotDimensionNumbersAttribute(ctx: *mlir.Context, args: DotDimensionNumbersAttribute.InitArgs) *const mlir.Attribute {
+    return @ptrCast(DotDimensionNumbersAttribute.init(ctx, args));
+}
 
-    pub const is_a_fn = c.stablehloAttributeIsAGatherDimensionNumbers;
-    const Self = GatherDimensionNumbersAttribute;
-    pub const asAttr = mlir.Attribute.fromAny(Self);
-    pub const eql = mlir.Attribute.eqlAny(Self);
+pub const GatherDimensionNumbersAttribute = opaque {
+    const M = mlir.Methods(GatherDimensionNumbersAttribute, mlir.Attribute);
+
+    pub const isAFn = c.stablehloAttributeIsAGatherDimensionNumbers;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.eql(c.mlirAttributePrint);
 
     pub fn init(
-        ctx: mlir.Context,
+        ctx: *mlir.Context,
         offset_dims: []const i64,
         collapsed_slice_dims: []const i64,
         operand_batching_dims: []const i64,
         start_indices_batching_dims: []const i64,
         start_index_map: []const i64,
         index_vector_dim: i64,
-    ) Self {
-        return .{
-            ._inner = c.stablehloGatherDimensionNumbersGet(
-                ctx._inner,
-                @intCast(offset_dims.len),
-                offset_dims.ptr,
-                @intCast(collapsed_slice_dims.len),
-                collapsed_slice_dims.ptr,
-                @intCast(operand_batching_dims.len),
-                operand_batching_dims.ptr,
-                @intCast(start_indices_batching_dims.len),
-                start_indices_batching_dims.ptr,
-                @intCast(start_index_map.len),
-                start_index_map.ptr,
-                index_vector_dim,
-            ),
-        };
+    ) *const GatherDimensionNumbersAttribute {
+        return @ptrCast(c.stablehloGatherDimensionNumbersGet(
+            ctx.ptr(),
+            @intCast(offset_dims.len),
+            offset_dims.ptr,
+            @intCast(collapsed_slice_dims.len),
+            collapsed_slice_dims.ptr,
+            @intCast(operand_batching_dims.len),
+            operand_batching_dims.ptr,
+            @intCast(start_indices_batching_dims.len),
+            start_indices_batching_dims.ptr,
+            @intCast(start_index_map.len),
+            start_index_map.ptr,
+            index_vector_dim,
+        ).ptr);
     }
 
-    pub fn getOffsetDimsSize(self: Self) usize {
-        return @intCast(c.stablehloGatherDimensionNumbersGetOffsetDimsSize(self._inner));
+    pub fn getOffsetDimsSize(self: *const GatherDimensionNumbersAttribute) usize {
+        return @intCast(c.stablehloGatherDimensionNumbersGetOffsetDimsSize(self.ptr()));
     }
 
-    pub fn getOffsetDimsElem(self: Self, pos: usize) i64 {
-        return c.stablehloGatherDimensionNumbersGetOffsetDimsElem(self._inner, @intCast(pos));
+    pub fn getOffsetDimsElem(self: *const GatherDimensionNumbersAttribute, pos: usize) i64 {
+        return c.stablehloGatherDimensionNumbersGetOffsetDimsElem(self.ptr(), @intCast(pos));
     }
 
-    pub fn getCollapsedSliceDimsSize(self: Self) usize {
-        return @intCast(c.stablehloGatherDimensionNumbersGetCollapsedSliceDimsSize(self._inner));
+    pub fn getCollapsedSliceDimsSize(self: *const GatherDimensionNumbersAttribute) usize {
+        return @intCast(c.stablehloGatherDimensionNumbersGetCollapsedSliceDimsSize(self.ptr()));
     }
 
-    pub fn getCollapsedSliceDimsElem(self: Self, pos: usize) i64 {
-        return c.stablehloGatherDimensionNumbersGetCollapsedSliceDimsElem(self._inner, @intCast(pos));
+    pub fn getCollapsedSliceDimsElem(self: *const GatherDimensionNumbersAttribute, pos: usize) i64 {
+        return c.stablehloGatherDimensionNumbersGetCollapsedSliceDimsElem(self.ptr(), @intCast(pos));
     }
 
-    pub fn getStartIndexMapSize(self: Self) usize {
-        return @intCast(c.stablehloGatherDimensionNumbersGetStartIndexMapSize(self._inner));
+    pub fn getStartIndexMapSize(self: *const GatherDimensionNumbersAttribute) usize {
+        return @intCast(c.stablehloGatherDimensionNumbersGetStartIndexMapSize(self.ptr()));
     }
 
-    pub fn getOperandBatchingDimsSize(self: Self) usize {
-        return @intCast(c.stablehloGatherDimensionNumbersGetOperandBatchingDimsSize(self._inner));
+    pub fn getOperandBatchingDimsSize(self: *const GatherDimensionNumbersAttribute) usize {
+        return @intCast(c.stablehloGatherDimensionNumbersGetOperandBatchingDimsSize(self.ptr()));
     }
 
-    pub fn getOperandBatchingDimsElem(self: Self, pos: usize) i64 {
-        return c.stablehloGatherDimensionNumbersGetOperandBatchingDimsElem(self._inner, @intCast(pos));
+    pub fn getOperandBatchingDimsElem(self: *const GatherDimensionNumbersAttribute, pos: usize) i64 {
+        return c.stablehloGatherDimensionNumbersGetOperandBatchingDimsElem(self.ptr(), @intCast(pos));
     }
 
-    pub fn getStartIndicesBatchingDimsSize(self: Self) usize {
-        return @intCast(c.stablehloGatherDimensionNumbersGetStartIndicesBatchingDimsSize(self._inner));
+    pub fn getStartIndicesBatchingDimsSize(self: *const GatherDimensionNumbersAttribute) usize {
+        return @intCast(c.stablehloGatherDimensionNumbersGetStartIndicesBatchingDimsSize(self.ptr()));
     }
 
-    pub fn getStartIndicesBatchingDimsElem(self: Self, pos: usize) i64 {
-        return c.stablehloGatherDimensionNumbersGetStartIndicesBatchingDimsElem(self._inner, @intCast(pos));
+    pub fn getStartIndicesBatchingDimsElem(self: *const GatherDimensionNumbersAttribute, pos: usize) i64 {
+        return c.stablehloGatherDimensionNumbersGetStartIndicesBatchingDimsElem(self.ptr(), @intCast(pos));
     }
 
-    pub fn getStartIndexMapElem(self: Self, pos: usize) i64 {
-        return c.stablehloGatherDimensionNumbersGetStartIndexMapElem(self._inner, @intCast(pos));
+    pub fn getStartIndexMapElem(self: *const GatherDimensionNumbersAttribute, pos: usize) i64 {
+        return c.stablehloGatherDimensionNumbersGetStartIndexMapElem(self.ptr(), @intCast(pos));
     }
 
-    pub fn getIndexVectorDim(self: Self) usize {
-        return @intCast(c.stablehloGatherDimensionNumbersGetIndexVectorDim(self._inner));
+    pub fn getIndexVectorDim(self: *const GatherDimensionNumbersAttribute) usize {
+        return @intCast(c.stablehloGatherDimensionNumbersGetIndexVectorDim(self.ptr()));
     }
 };
 
-pub const ConvDimensionNumbersAttribute = struct {
-    _inner: c.MlirAttribute,
+pub fn gatherDimensionNumbersAttribute(
+    ctx: *mlir.Context,
+    offset_dims: []const i64,
+    collapsed_slice_dims: []const i64,
+    operand_batching_dims: []const i64,
+    start_indices_batching_dims: []const i64,
+    start_index_map: []const i64,
+    index_vector_dim: i64,
+) *const mlir.Attribute {
+    return @ptrCast(GatherDimensionNumbersAttribute.init(
+        ctx,
+        offset_dims,
+        collapsed_slice_dims,
+        operand_batching_dims,
+        start_indices_batching_dims,
+        start_index_map,
+        index_vector_dim,
+    ));
+}
 
-    pub const is_a_fn = c.stablehloAttributeIsAConvDimensionNumbers;
-    const Self = ConvDimensionNumbersAttribute;
-    pub const asAttr = mlir.Attribute.fromAny(Self);
-    pub const eql = mlir.Attribute.eqlAny(Self);
+pub const ConvDimensionNumbersAttribute = opaque {
+    const M = mlir.Methods(ConvDimensionNumbersAttribute, mlir.Attribute);
 
-    pub fn init(ctx: mlir.Context, args: struct {
+    pub const isAFn = c.stablehloAttributeIsAConvDimensionNumbers;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
+
+    pub const InitArgs = struct {
         input_batch_dimension: i64,
         input_feature_dimension: i64,
         input_spatial_dimensions: []const i64,
@@ -996,106 +1057,116 @@ pub const ConvDimensionNumbersAttribute = struct {
         output_batch_dimension: i64,
         output_feature_dimension: i64,
         output_spatial_dimensions: []const i64,
-    }) Self {
-        return .{
-            ._inner = c.stablehloConvDimensionNumbersGet(
-                ctx._inner,
-                args.input_batch_dimension,
-                args.input_feature_dimension,
-                @intCast(args.input_spatial_dimensions.len),
-                args.input_spatial_dimensions.ptr,
-                args.kernel_input_feature_dimension,
-                args.kernel_output_feature_dimension,
-                @intCast(args.kernel_spatial_dimensions.len),
-                args.kernel_spatial_dimensions.ptr,
-                args.output_batch_dimension,
-                args.output_feature_dimension,
-                @intCast(args.output_spatial_dimensions.len),
-                args.output_spatial_dimensions.ptr,
-            ),
-        };
+    };
+
+    pub fn init(ctx: *mlir.Context, args: InitArgs) *const ConvDimensionNumbersAttribute {
+        return @ptrCast(c.stablehloConvDimensionNumbersGet(
+            ctx.ptr(),
+            args.input_batch_dimension,
+            args.input_feature_dimension,
+            @intCast(args.input_spatial_dimensions.len),
+            args.input_spatial_dimensions.ptr,
+            args.kernel_input_feature_dimension,
+            args.kernel_output_feature_dimension,
+            @intCast(args.kernel_spatial_dimensions.len),
+            args.kernel_spatial_dimensions.ptr,
+            args.output_batch_dimension,
+            args.output_feature_dimension,
+            @intCast(args.output_spatial_dimensions.len),
+            args.output_spatial_dimensions.ptr,
+        ).ptr);
     }
 
-    pub fn getInputBatchDimension(self: Self) i64 {
-        return c.stablehloConvDimensionNumbersGetInputBatchDimension(self._inner);
+    pub fn getInputBatchDimension(self: *const ConvDimensionNumbersAttribute) i64 {
+        return c.stablehloConvDimensionNumbersGetInputBatchDimension(self.ptr());
     }
 
-    pub fn getInputFeatureDimension(self: Self) i64 {
-        return c.stablehloConvDimensionNumbersGetInputFeatureDimension(self._inner);
+    pub fn getInputFeatureDimension(self: *const ConvDimensionNumbersAttribute) i64 {
+        return c.stablehloConvDimensionNumbersGetInputFeatureDimension(self.ptr());
     }
 
-    pub fn getInputSpatialDimensionsSize(self: Self) usize {
-        return @intCast(c.stablehloConvDimensionNumbersGetInputSpatialDimensionsSize(self._inner));
+    pub fn getInputSpatialDimensionsSize(self: *const ConvDimensionNumbersAttribute) usize {
+        return @intCast(c.stablehloConvDimensionNumbersGetInputSpatialDimensionsSize(self.ptr()));
     }
 
-    pub fn getInputSpatialDimensionsElem(self: Self, pos: usize) i64 {
-        return c.stablehloConvDimensionNumbersGetInputSpatialDimensionsElem(self._inner, @intCast(pos));
+    pub fn getInputSpatialDimensionsElem(self: *const ConvDimensionNumbersAttribute, pos: usize) i64 {
+        return c.stablehloConvDimensionNumbersGetInputSpatialDimensionsElem(self.ptr(), @intCast(pos));
     }
 
-    pub fn getKernelInputFeatureDimension(self: Self) i64 {
-        return c.stablehloConvDimensionNumbersGetKernelInputFeatureDimension(self._inner);
+    pub fn getKernelInputFeatureDimension(self: *const ConvDimensionNumbersAttribute) i64 {
+        return c.stablehloConvDimensionNumbersGetKernelInputFeatureDimension(self.ptr());
     }
 
-    pub fn getKernelOutputFeatureDimension(self: Self) i64 {
-        return c.stablehloConvDimensionNumbersGetKernelOutputFeatureDimension(self._inner);
+    pub fn getKernelOutputFeatureDimension(self: *const ConvDimensionNumbersAttribute) i64 {
+        return c.stablehloConvDimensionNumbersGetKernelOutputFeatureDimension(self.ptr());
     }
 
-    pub fn getKernelSpatialDimensionsSize(self: Self) usize {
-        return @intCast(c.stablehloConvDimensionNumbersGetKernelSpatialDimensionsSize(self._inner));
+    pub fn getKernelSpatialDimensionsSize(self: *const ConvDimensionNumbersAttribute) usize {
+        return @intCast(c.stablehloConvDimensionNumbersGetKernelSpatialDimensionsSize(self.ptr()));
     }
 
-    pub fn getKernelSpatialDimensionsElem(self: Self, pos: usize) i64 {
-        return c.stablehloConvDimensionNumbersGetKernelSpatialDimensionsElem(self._inner, @intCast(pos));
+    pub fn getKernelSpatialDimensionsElem(self: *const ConvDimensionNumbersAttribute, pos: usize) i64 {
+        return c.stablehloConvDimensionNumbersGetKernelSpatialDimensionsElem(self.ptr(), @intCast(pos));
     }
 
-    pub fn getOutputBatchDimension(self: Self) i64 {
-        return c.stablehloConvDimensionNumbersGetOutputBatchDimension(self._inner);
+    pub fn getOutputBatchDimension(self: *const ConvDimensionNumbersAttribute) i64 {
+        return c.stablehloConvDimensionNumbersGetOutputBatchDimension(self.ptr());
     }
 
-    pub fn getOutputFeatureDimension(self: Self) i64 {
-        return c.stablehloConvDimensionNumbersGetOutputFeatureDimension(self._inner);
+    pub fn getOutputFeatureDimension(self: *const ConvDimensionNumbersAttribute) i64 {
+        return c.stablehloConvDimensionNumbersGetOutputFeatureDimension(self.ptr());
     }
 
-    pub fn getOutputSpatialDimensionsSize(self: Self) usize {
-        return @intCast(c.stablehloConvDimensionNumbersGetOutputSpatialDimensionsSize(self._inner));
+    pub fn getOutputSpatialDimensionsSize(self: *const ConvDimensionNumbersAttribute) usize {
+        return @intCast(c.stablehloConvDimensionNumbersGetOutputSpatialDimensionsSize(self.ptr()));
     }
 
-    pub fn getOutputSpatialDimensionsElem(self: Self, pos: usize) i64 {
-        return c.stablehloConvDimensionNumbersGetOutputSpatialDimensionsElem(self._inner, @intCast(pos));
+    pub fn getOutputSpatialDimensionsElem(self: *const ConvDimensionNumbersAttribute, pos: usize) i64 {
+        return c.stablehloConvDimensionNumbersGetOutputSpatialDimensionsElem(self.ptr(), @intCast(pos));
     }
 };
 
-pub const OutputOperandAliasAttribute = struct {
-    _inner: c.MlirAttribute,
+pub fn convDimensionNumbersAttribute(ctx: *mlir.Context, args: ConvDimensionNumbersAttribute.InitArgs) *const mlir.Attribute {
+    return @ptrCast(ConvDimensionNumbersAttribute.init(ctx, args));
+}
 
-    pub const is_a_fn = c.stablehloAttributeIsAOutputOperandAlias;
-    pub const asAttr = mlir.Attribute.fromAny(OutputOperandAliasAttribute);
-    pub const eql = mlir.Attribute.eqlAny(OutputOperandAliasAttribute);
+pub const OutputOperandAliasAttribute = opaque {
+    const M = mlir.Methods(OutputOperandAliasAttribute, c.MlirAttribute);
 
-    pub fn init(
-        ctx: mlir.Context,
-        output_tuple_indices: []const i64,
+    pub const isAFn = c.stablehloAttributeIsAOutputOperandAlias;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
+
+    pub const InitArgs = struct {
+        output_tuple_indices: []const i64 = &.{},
         operand_index: i64,
-        operand_tuple_indices: []const i64,
-    ) OutputOperandAliasAttribute {
-        return .{ ._inner = c.stablehloOutputOperandAliasGet(
-            ctx._inner,
-            @intCast(output_tuple_indices.len),
-            output_tuple_indices.ptr,
-            @intCast(operand_index),
-            @intCast(operand_tuple_indices.len),
-            operand_tuple_indices.ptr,
-        ) };
+        operand_tuple_indices: []const i64 = &.{},
+    };
+
+    pub fn get(ctx: *mlir.Context, args: InitArgs) *const OutputOperandAliasAttribute {
+        return @ptrCast(c.stablehloOutputOperandAliasGet(
+            ctx.ptr(),
+            @intCast(args.output_tuple_indices.len),
+            @ptrCast(args.output_tuple_indices),
+            @intCast(args.operand_index),
+            @intCast(args.operand_tuple_indices.len),
+            @ptrCast(args.operand_tuple_indices),
+        ).ptr);
     }
 };
 
-pub const PrecisionAttribute = struct {
-    _inner: c.MlirAttribute,
+pub fn outputOperandAliasAttribute(ctx: *mlir.Context, args: OutputOperandAliasAttribute.InitArgs) *const mlir.Attribute {
+    return @ptrCast(OutputOperandAliasAttribute.get(ctx, args));
+}
 
-    pub const is_a_fn = c.stablehloAttributeIsAPrecisionAttr;
-    const Self = PrecisionAttribute;
-    pub const asAttr = mlir.Attribute.fromAny(Self);
-    pub const eql = mlir.Attribute.eqlAny(Self);
+pub const PrecisionAttribute = opaque {
+    const M = mlir.Methods(PrecisionAttribute, mlir.Attribute);
+
+    pub const isAFn = c.stablehloAttributeIsAPrecisionAttr;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
 
     pub const Precision = enum {
         DEFAULT,
@@ -1103,23 +1174,27 @@ pub const PrecisionAttribute = struct {
         HIGHEST,
     };
 
-    pub fn init(ctx: mlir.Context, value: Precision) Self {
-        return .{ ._inner = c.stablehloPrecisionAttrGet(ctx._inner, mlir.stringRef(@tagName(value))) };
+    pub fn init(ctx: *mlir.Context, value: Precision) *const PrecisionAttribute {
+        return @ptrCast(c.stablehloPrecisionAttrGet(ctx.ptr(), stringRef(@tagName(value))).ptr);
     }
 
-    pub fn getValue(self: Self) Precision {
-        const value = mlir.fromStringRef(c.stablehloPrecisionAttrGetValue(self._inner));
+    pub fn getValue(self: *const PrecisionAttribute) Precision {
+        const value = mlir.fromStringRef(c.stablehloPrecisionAttrGetValue(self.ptr()));
         return std.meta.stringToEnum(Precision, value) orelse unreachable;
     }
 };
 
-pub const ComparisonDirection = struct {
-    _inner: c.MlirAttribute,
+pub fn precisionAttribute(ctx: *mlir.Context, precision: PrecisionAttribute.Precision) *const mlir.Attribute {
+    return @ptrCast(PrecisionAttribute.init(ctx, precision));
+}
 
-    pub const is_a_fn = c.stablehloAttributeIsAComparisonDirectionAttr;
-    const Self = ComparisonDirection;
-    pub const asAttr = mlir.Attribute.fromAny(Self);
-    pub const eql = mlir.Attribute.eqlAny(Self);
+pub const ComparisonDirection = opaque {
+    const M = mlir.Methods(ComparisonDirection, c.MlirAttribute);
+
+    pub const isAFn = c.stablehloAttributeIsAComparisonDirectionAttr;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
 
     pub const Direction = enum {
         EQ,
@@ -1130,23 +1205,27 @@ pub const ComparisonDirection = struct {
         LT,
     };
 
-    pub fn init(ctx: mlir.Context, value: Direction) Self {
-        return .{ ._inner = c.stablehloComparisonDirectionAttrGet(ctx._inner, mlir.stringRef(@tagName(value))) };
+    pub fn init(ctx: *mlir.Context, value: Direction) *const ComparisonDirection {
+        return @ptrCast(c.stablehloComparisonDirectionAttrGet(ctx.ptr(), mlir.stringRef(@tagName(value))).ptr);
     }
 
-    pub fn getValue(self: Self) Direction {
-        const value = mlir.fromStringRef(c.stablehloComparisonDirectionAttrGetValue(self._inner));
+    pub fn getValue(self: *const ComparisonDirection) Direction {
+        const value = mlir.fromStringRef(c.stablehloComparisonDirectionAttrGetValue(self.ptr()));
         return std.meta.stringToEnum(Direction, value) orelse unreachable;
     }
 };
 
-pub const CompareType = struct {
-    _inner: c.MlirAttribute,
+pub fn comparisonDirection(ctx: *mlir.Context, value: ComparisonDirection.Direction) *const mlir.Attribute {
+    return @ptrCast(ComparisonDirection.init(ctx, value));
+}
 
-    pub const is_a_fn = c.stablehloAttributeIsAComparisonTypeAttr;
-    const Self = CompareType;
-    pub const asAttr = mlir.Attribute.fromAny(Self);
-    pub const eql = mlir.Attribute.eqlAny(Self);
+pub const CompareType = opaque {
+    const M = mlir.Methods(CompareType, c.MlirAttribute);
+
+    pub const isAFn = c.stablehloAttributeIsAComparisonTypeAttr;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
 
     pub const Type = enum {
         SIGNED,
@@ -1155,23 +1234,27 @@ pub const CompareType = struct {
         TOTALORDER,
     };
 
-    pub fn init(ctx: mlir.Context, value: Type) Self {
-        return .{ ._inner = c.stablehloComparisonTypeAttrGet(ctx._inner, mlir.stringRef(@tagName(value))) };
+    pub fn init(ctx: *mlir.Context, value: Type) *const CompareType {
+        return @ptrCast(c.stablehloComparisonTypeAttrGet(ctx.ptr(), stringRef(@tagName(value))).ptr);
     }
 
-    pub fn getValue(self: Self) Type {
-        const value = mlir.fromStringRef(c.stablehloComparisonTypeAttrGetValue(self._inner));
+    pub fn getValue(self: *const CompareType) Type {
+        const value = mlir.fromStringRef(c.stablehloComparisonTypeAttrGetValue(self.ptr()));
         return std.meta.stringToEnum(Type, value) orelse unreachable;
     }
 };
 
-pub const Transpose = struct {
-    _inner: c.MlirAttribute,
+pub fn compareType(ctx: *mlir.Context, value: CompareType.Type) *const mlir.Attribute {
+    return @ptrCast(CompareType.init(ctx, value));
+}
 
-    pub const is_a_fn = c.stablehloAttributeIsATransposeAttr;
-    const Self = Transpose;
-    pub const asAttr = mlir.Attribute.fromAny(Self);
-    pub const eql = mlir.Attribute.eqlAny(Self);
+pub const TransposeAttribute = opaque {
+    const M = mlir.Methods(TransposeAttribute, mlir.Attribute);
+
+    pub const isAFn = c.stablehloAttributeIsATransposeAttr;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
 
     pub const Type = enum {
         NO_TRANSPOSE,
@@ -1179,23 +1262,27 @@ pub const Transpose = struct {
         ADJOINT,
     };
 
-    pub fn init(ctx: mlir.Context, value: Type) Self {
-        return .{ ._inner = c.stablehloTransposeAttrGet(ctx._inner, mlir.stringRef(@tagName(value))) };
+    pub fn init(ctx: *mlir.Context, value: Type) *const TransposeAttribute {
+        return @ptrCast(c.stablehloTransposeAttrGet(ctx.ptr(), mlir.stringRef(@tagName(value))).ptr);
     }
 
-    pub fn getValue(self: Self) Type {
-        const value = mlir.fromStringRef(c.stablehloTransposeAttrGetValue(self._inner));
+    pub fn getValue(self: *const TransposeAttribute) Type {
+        const value = mlir.fromStringRef(c.stablehloTransposeAttrGetValue(self.ptr()));
         return std.meta.stringToEnum(Type, value) orelse unreachable;
     }
 };
 
-pub const FftType = struct {
-    _inner: c.MlirAttribute,
+pub fn transposeAttribute(ctx: *mlir.Context, value: TransposeAttribute.Type) *const mlir.Attribute {
+    return @ptrCast(TransposeAttribute.init(ctx, value));
+}
 
-    pub const is_a_fn = c.stablehloAttributeIsAFftTypeAttr;
-    const Self = FftType;
-    pub const asAttr = mlir.Attribute.fromAny(Self);
-    pub const eql = mlir.Attribute.eqlAny(Self);
+pub const FftType = opaque {
+    const M = mlir.Methods(FftType, mlir.Attribute);
+
+    pub const isAFn = c.stablehloAttributeIsAFftTypeAttr;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
 
     pub const Type = enum {
         FFT,
@@ -1204,114 +1291,45 @@ pub const FftType = struct {
         IRFFT,
     };
 
-    pub fn init(ctx: mlir.Context, value: Type) Self {
-        return .{ ._inner = c.stablehloFftTypeAttrGet(ctx._inner, mlir.stringRef(@tagName(value))) };
+    pub fn init(ctx: *mlir.Context, value: Type) *const FftType {
+        return @ptrCast(c.stablehloFftTypeAttrGet(ctx.ptr(), mlir.stringRef(@tagName(value))).ptr);
     }
 
-    pub fn getValue(self: Self) Type {
-        const value = mlir.fromStringRef(c.stablehloFftTypeAttrGetValue(self._inner));
+    pub fn getValue(self: *const FftType) Type {
+        const value = mlir.fromStringRef(c.stablehloFftTypeAttrGetValue(self.ptr()));
         return std.meta.stringToEnum(Type, value) orelse unreachable;
     }
 };
 
-pub const RngDistribution = struct {
-    _inner: c.MlirAttribute,
-
-    pub const is_a_fn = c.stablehloAttributeIsARngDistributionAttr;
-    const Self = RngDistribution;
-    pub const asAttr = mlir.Attribute.fromAny(Self);
-    pub const eql = mlir.Attribute.eqlAny(Self);
-
-    pub const Type = enum {
-        UNIFORM,
-        NORMAL,
-    };
-
-    pub fn init(ctx: mlir.Context, value: Type) Self {
-        return .{ ._inner = c.stablehloRngDistributionAttrGet(ctx._inner, mlir.stringRef(@tagName(value))) };
-    }
-
-    pub fn getValue(self: Self) Type {
-        const value = mlir.fromStringRef(c.stablehloRngDistributionAttrGetValue(self._inner));
-        return std.meta.stringToEnum(Type, value) orelse unreachable;
-    }
-};
-
-pub const RngAlgorithm = struct {
-    _inner: c.MlirAttribute,
-
-    pub const is_a_fn = c.stablehloAttributeIsARngAlgorithmAttr;
-    const Self = RngAlgorithm;
-    pub const asAttr = mlir.Attribute.fromAny(Self);
-    pub const eql = mlir.Attribute.eqlAny(Self);
-
-    pub const Type = enum {
-        DEFAULT,
-        THREE_FRY,
-        PHILOX,
-    };
-
-    pub fn init(ctx: mlir.Context, value: Type) Self {
-        return .{ ._inner = c.stablehloRngAlgorithmAttrGet(ctx._inner, mlir.stringRef(@tagName(value))) };
-    }
-
-    pub fn getValue(self: Self) Type {
-        const value = mlir.fromStringRef(c.stablehloRngAlgorithmAttrGetValue(self._inner));
-        return std.meta.stringToEnum(Type, value) orelse unreachable;
-    }
-};
-
-pub fn stablehloVersionFromCompatibilityRequirement(requirement: c.MlirStablehloCompatibilityRequirement) []const u8 {
-    const state = struct {
-        var buf: [32]u8 = undefined;
-
-        fn call(req: c.MlirStablehloCompatibilityRequirement) []u8 {
-            var stream = std.io.fixedBufferStream(&buf);
-            var context = .{ .writer = stream.writer() };
-            const WriterContext = @TypeOf(context);
-
-            c.stablehloVersionFromCompatibilityRequirement(req, (struct {
-                pub fn callback(mlir_str: c.MlirStringRef, userdata: ?*anyopaque) callconv(.c) void {
-                    const inner_ctx: *WriterContext = @ptrCast(@alignCast(userdata));
-                    _ = inner_ctx.writer.write(mlir.fromStringRef(mlir_str)) catch unreachable;
-                }
-            }).callback, &context);
-
-            return buf[0..stream.pos];
-        }
-    };
-
-    return state.call(requirement);
+pub fn fftType(ctx: *mlir.Context, value: FftType.Type) *const mlir.Attribute {
+    return @ptrCast(FftType.init(ctx, value));
 }
 
-pub fn stablehloGetSmallerVersion(version1: []const u8, version2: []const u8) []const u8 {
-    const Cmp = struct {
-        v1: []const u8,
-        v1_is_smaller: bool = undefined,
-
-        pub fn smallerCb(smaller_version: c.MlirStringRef, opaque_cmp: ?*anyopaque) callconv(.c) void {
-            var cmp: *@This() = @ptrCast(@alignCast(opaque_cmp));
-            cmp.v1_is_smaller = std.mem.eql(u8, cmp.v1, smaller_version.data[0..smaller_version.length]);
-        }
-    };
-
-    var cmp_ctx: Cmp = .{ .v1 = version1 };
-    const cmp_res = c.stablehloGetSmallerVersion(mlir.stringRef(version1), mlir.stringRef(version2), Cmp.smallerCb, &cmp_ctx);
-
-    std.debug.assert(cmp_res.value != 0);
-    return if (cmp_ctx.v1_is_smaller) version1 else version2;
+fn stringFromStream(buf: []u8, streamFn: anytype, args: anytype) []const u8 {
+    var writer = std.Io.Writer.fixed(buf);
+    var sctx: mlir.StringCallbackCtx = .{ .writer = &writer };
+    _ = @call(.auto, streamFn, args ++ .{ mlir.stringCallback, &sctx });
+    return writer.buffered();
 }
 
-pub fn getCurrentVersion() []const u8 {
+pub fn versionFromCompatibilityRequirement(buffer: []u8, requirement: c.MlirStablehloCompatibilityRequirement) []const u8 {
+    return stringFromStream(buffer, c.stablehloVersionFromCompatibilityRequirement, .{requirement});
+}
+
+pub fn smallerVersion(version1: []const u8, version2: []const u8) []const u8 {
+    var buf: [32]u8 = undefined;
+    const result = stringFromStream(&buf, c.stablehloGetSmallerVersion, .{ stringRef(version1), stringRef(version2) });
+    return if (std.mem.eql(u8, result, version1)) version1 else version2;
+}
+
+pub fn currentVersion() []const u8 {
     const state = struct {
         var buf: [32]u8 = undefined;
         var str: []const u8 = undefined;
         var once = std.once(call);
 
         fn call() void {
-            var writer: std.Io.Writer = .fixed(&buf);
-            c.stablehloGetCurrentVersion(printCallbackNoFail, &writer);
-            str = writer.buffered();
+            str = stringFromStream(&buf, c.stablehloGetCurrentVersion, .{});
         }
     };
 
@@ -1319,16 +1337,14 @@ pub fn getCurrentVersion() []const u8 {
     return state.str;
 }
 
-pub fn getMinimumVersion() []const u8 {
+pub fn minimumVersion() []const u8 {
     const state = struct {
         var buf: [32]u8 = undefined;
         var str: []const u8 = undefined;
         var once = std.once(call);
 
         fn call() void {
-            var writer: std.Io.Writer = .fixed(&buf);
-            c.stablehloGetMinimumVersion(printCallbackNoFail, &writer);
-            str = writer.buffered();
+            str = stringFromStream(&buf, c.stablehloGetMinimumVersion, .{});
         }
     };
 
@@ -1336,25 +1352,51 @@ pub fn getMinimumVersion() []const u8 {
     return state.str;
 }
 
-pub fn serializePortableArtifact(
-    bytecode: []const u8,
-    target_version: []const u8,
-    writer: *std.Io.Writer,
-) error{ InvalidMlirBytecodeVersion, WriteFailed }!void {
-    var writer_err: mlir.WriterWithErr = .{ .writer = writer };
-    try mlir.successOr(
-        c.stablehloSerializePortableArtifactFromStringRef(
-            mlir.stringRef(bytecode),
-            mlir.stringRef(target_version),
-            mlir.WriterWithErr.printCallback,
-            &writer_err,
-        ),
-        error.InvalidMlirBytecodeVersion,
+pub fn serializePortableArtifact(bytecode: []const u8, target_version: []const u8, writer: *std.Io.Writer) !void {
+    var sctx: mlir.StringCallbackCtx = .{ .writer = writer };
+    const result = c.stablehloSerializePortableArtifactFromStringRef(
+        stringRef(bytecode),
+        stringRef(target_version),
+        mlir.stringCallback,
+        &sctx,
     );
-    return try writer_err.check();
+    if (sctx.err) |err| {
+        return err;
+    }
+    if (result.value == 0) {
+        return error.InvalidMlirBytecodeVersion;
+    }
 }
 
-fn printCallbackNoFail(mlir_str: c.MlirStringRef, opaque_writer: ?*anyopaque) callconv(.c) void {
-    const writer: *std.Io.Writer = @ptrCast(@alignCast(opaque_writer));
-    writer.writeAll(mlir.fromStringRef(mlir_str)) catch @panic("Failed to write MLIR");
+pub fn serializePortableArtifact2(module: *mlir.Module, target_version: []const u8, writer: *std.Io.Writer) !void {
+    var sctx: mlir.StringCallbackCtx = .{ .writer = writer };
+    const result = c.stablehloSerializePortableArtifactFromModule(
+        module.ptr(),
+        stringRef(target_version),
+        mlir.stringCallback,
+        &sctx,
+        true,
+    );
+    if (sctx.err) |err| {
+        return err;
+    }
+    if (c.mlirLogicalResultIsFailure(result)) {
+        return error.InvalidMlirBytecodeVersion;
+    }
+}
+
+pub fn return_(ctx: *mlir.Context, value: *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
+    return mlir.Operation.make(ctx, "stablehlo.return", .{
+        .operands = .{ .flat = &.{&.{value}} },
+        .location = location,
+        .verify = false,
+    });
+}
+
+pub fn returns(ctx: *mlir.Context, values: []const *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
+    return mlir.Operation.make(ctx, "stablehlo.return", .{
+        .operands = .{ .variadic = &.{values} },
+        .verify = false,
+        .location = location,
+    });
 }
