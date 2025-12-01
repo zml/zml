@@ -28,6 +28,7 @@ bazel_dep(name = "with_cfg.bzl", version = "0.11.0")
 
 bazel_dep(name = "buildifier_prebuilt", version = "8.2.0.2", dev_dependency = True)
 
+### Zig toolchain
 zig = use_extension("@rules_zig//zig:extensions.bzl", "zig")
 zig.index(file = "//bazel:zig_index.json")
 zig.toolchain(zig_version = "0.16.0-dev.1484+d0ba6642b")
@@ -40,12 +41,20 @@ use_repo(zig, "zig_toolchains")
 register_toolchains("@rules_zig//zig/target:all")
 
 register_toolchains("@zig_toolchains//:all")
+###
 
+### Apple C/C++ toolchain (needs to be first)
+apple_cc_configure = use_extension("@apple_support//crosstool:setup.bzl", "apple_cc_configure_extension")
+use_repo(apple_cc_configure, "local_config_apple_cc", "local_config_apple_cc_toolchains")
+
+register_toolchains("@local_config_apple_cc_toolchains//:all")
+###
+
+### LLVM Bootstrapped toolchains
 register_toolchains(
-    "@toolchains_llvm_bootstrapped//toolchain:macos_aarch64_to_linux_x86_64",
-    # "@toolchains_llvm_bootstrapped//toolchain:linux_amd64",
-    # "@toolchains_llvm_bootstrapped//toolchain:linux_aarch64",
+    "@toolchains_llvm_bootstrapped//toolchain:all",
 )
+###
 
 uv = use_extension("@rules_python//python/uv:uv.bzl", "uv", dev_dependency = True)
 uv.configure(version = "0.6.5")
