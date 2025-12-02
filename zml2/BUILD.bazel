@@ -14,6 +14,10 @@ zig_library(
         "pjrtx.zig",
         "dtype.zig",
         "floats.zig",
+        "shape.zig",
+        "tensor.zig",
+        "mlirx.zig",
+        "meta.zig",
     ],
     zigopts = [
         "-lc",
