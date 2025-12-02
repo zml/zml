@@ -1,6 +1,7 @@
 const std = @import("std");
-const upb = @import("upb");
+
 const c = @import("c");
+const upb = @import("upb");
 
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
@@ -47,5 +48,4 @@ pub fn main() !void {
     };
 
     _ = options;
-
 }

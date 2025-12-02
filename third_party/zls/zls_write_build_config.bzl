@@ -1,8 +1,9 @@
 """Generates the ZLS build config file."""
 
+load("@apple_support//lib:apple_support.bzl", "apple_support")
+load("@rules_cc//cc:find_cc_toolchain.bzl", "use_cc_toolchain")
 load("@rules_cc//cc/common:cc_common.bzl", "cc_common")
 load("@rules_cc//cc/common:cc_info.bzl", "CcInfo")
-load("@rules_cc//cc:find_cc_toolchain.bzl", "use_cc_toolchain")
 load("@rules_zig//zig/private:cc_helper.bzl", "need_translate_c")
 load("@rules_zig//zig/private/common:translate_c.bzl", "zig_translate_c")
 load("@rules_zig//zig/private/common:zig_cache.bzl", "zig_cache_output")
@@ -84,6 +85,7 @@ def _zls_write_build_config_impl(ctx):
         c_module = zig_translate_c(
             ctx = ctx,
             name = "c",
+            canonical_name = "c",
             zigtoolchaininfo = zigtoolchaininfo,
             global_args = global_args,
             cc_infos = [cc_info],
@@ -130,10 +132,21 @@ zls_write_build_config = rule(
             default = ":zls.completion.tpl",
             allow_single_file = True,
         ),
-    },
+        "_translate_c": attr.label(
+            default = Label("@rules_zig//zig/private/common:translate-c"),
+            cfg = "exec",
+            executable = True,
+        ),
+        "_c_helpers": attr.label(
+            default = Label("@rules_zig//zig/private/common:helpers"),
+        ),
+        "_c_builtins": attr.label(
+            default = Label("@rules_zig//zig/private/common:c_builtins"),
+        ),
+    } | apple_support.action_required_attrs() | apple_support.platform_constraint_attrs(),
     toolchains = [
         "@rules_zig//zig:toolchain_type",
         "@rules_zig//zig/target:toolchain_type",
     ] + use_cc_toolchain(mandatory = False),
-    fragments = ["cpp"],
+    fragments = ["cpp", "apple"],
 )

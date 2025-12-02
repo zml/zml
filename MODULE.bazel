@@ -2,6 +2,7 @@ module(
     name = "zml",
 )
 
+bazel_dep(name = "apple_support", version = "1.24.5")
 bazel_dep(name = "abseil-cpp", version = "20250814.0")
 bazel_dep(name = "aspect_bazel_lib", version = "2.21.2")
 bazel_dep(name = "aspect_rules_py", version = "1.6.3")
@@ -14,7 +15,6 @@ bazel_dep(name = "protobuf", version = "33.1", repo_name = "com_google_protobuf"
 
 # Needs to be added before rules_cc so that the cc toolchain declared by
 # apple_support wins over the one in rules_cc.
-bazel_dep(name = "apple_support", version = "1.24.2")
 bazel_dep(name = "rules_cc", version = "0.2.12")
 bazel_dep(name = "rules_distroless", version = "0.5.1")
 bazel_dep(name = "rules_license", version = "1.0.0")
@@ -225,10 +225,14 @@ huggingface.model(
 use_repo(huggingface, "ModernBERT-base", "ModernBERT-large")
 ################################################################################
 
-git_override(
+# git_override(
+#     module_name = "rules_zig",
+#     commit = "2c91b54305772d7b43445168e7cf0037b5cbc9e2",
+#     remote = "https://github.com/zml/rules_zig.git",
+# )
+local_path_override(
     module_name = "rules_zig",
-    commit = "2c91b54305772d7b43445168e7cf0037b5cbc9e2",
-    remote = "https://github.com/zml/rules_zig.git",
+    path = "../rules_zig",
 )
 
 git_override(

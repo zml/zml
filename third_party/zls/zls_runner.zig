@@ -43,7 +43,10 @@ pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     const allocator = arena.allocator();
 
-    var r_ = try runfiles.Runfiles.create(.{ .allocator = allocator }) orelse
+    var threaded: std.Io.Threaded = .init(gpa);
+    defer threaded.deinit();
+
+    var r_ = try runfiles.Runfiles.create(.{ .allocator = allocator, .io = threaded.io() }) orelse
         return error.RunfilesNotFound;
     defer r_.deinit(allocator);
 
