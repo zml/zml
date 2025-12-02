@@ -383,18 +383,18 @@ pub const HostBuffer = struct {
             try sliced_self.prettyPrintIndented(writer, num_rows, indent_level + 2, options);
         }
 
-        // if (n < num_rows) return;
-        // // Skip middle rows
-        // if (n > 2 * num_rows) {
-        //     try writer.splatByteAll(' ', indent_level + 2);
-        //     _ = try writer.write("...\n");
-        // }
-        // // Write last rows
-        // for (@max(n - num_rows, num_rows)..n) |d| {
-        //     const di: i64 = @intCast(d);
-        //     const sliced_self = self.slice1d(0, .{ .start = di, .end = di + 1 }).squeeze(0);
-        //     try sliced_self.prettyPrintIndented(writer, num_rows, indent_level + 2, options);
-        // }
+        if (n < num_rows) return;
+        // Skip middle rows
+        if (n > 2 * num_rows) {
+            try writer.splatByteAll(' ', indent_level + 2);
+            _ = try writer.write("...\n");
+        }
+        // Write last rows
+        for (@max(n - num_rows, num_rows)..n) |d| {
+            const di: i64 = @intCast(d);
+            const sliced_self = self.slice1d(0, .{ .start = di, .end = di + 1 }).squeeze(0);
+            try sliced_self.prettyPrintIndented(writer, num_rows, indent_level + 2, options);
+        }
     }
 };
 
