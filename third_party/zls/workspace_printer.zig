@@ -31,14 +31,14 @@ pub const StringReplaceReader = struct {
 };
 
 pub fn main_pre_015() !void {
-    const arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
 
     const args = try std.process.argsAlloc(arena.allocator());
     defer std.process.argsFree(arena.allocator(), args);
 
     const file_path = args[1];
-    const content = try std.fs.cwd().readFileAlloc(file_path, arena.allocator(), std.math.maxInt(usize));
+    const content = try std.fs.cwd().readFileAlloc(arena.allocator(), file_path, std.math.maxInt(usize));
     const build_workspace_directory = try std.process.getEnvVarOwned(arena.allocator(), "BUILD_WORKSPACE_DIRECTORY");
 
     const need = std.mem.replacementSize(u8, content, PATTERN, build_workspace_directory);
@@ -48,17 +48,18 @@ pub fn main_pre_015() !void {
 }
 
 pub fn main_015() !void {
-    const gpa = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
 
-    const args = try std.process.argsAlloc(gpa);
-    defer std.process.argsFree(gpa, args);
+    const args = try std.process.argsAlloc(arena.allocator());
+    defer std.process.argsFree(arena.allocator(), args);
 
     const file_path = args[1];
     var file = try std.fs.cwd().openFile(file_path, .{});
     defer file.close();
 
     var read_buffer: [8192]u8 = undefined;
-    var reader = file.reader(io, &read_buffer);
+    var reader = file.reader(&read_buffer);
 
     const build_workspace_directory = try std.process.getEnvVarOwned(arena.allocator(), "BUILD_WORKSPACE_DIRECTORY");
     var replacer: StringReplaceReader = .{
@@ -70,14 +71,8 @@ pub fn main_015() !void {
     var write_buffer: [8192]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&write_buffer);
 
-    var write_buffer: [8192]u8 = undefined;
-    var writer = std.fs.File.stdout().writer(&write_buffer);
-    _ = try replacer.interface.streamRemaining(&writer.interface);
-    try writer.interface.flush();
-
-    var reader = file.reader(&.{});
-    _ = try reader.interface.streamRemaining(&stdout_writer.interface);
-    try stdout.flush();
+    _ = try replacer.interface.streamRemaining(&stdout_writer.interface);
+    try stdout_writer.interface.flush();
 }
 
 pub fn main_016() !void {

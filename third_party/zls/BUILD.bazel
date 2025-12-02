@@ -19,7 +19,7 @@ resolved_toolchain(
 
 exports_files(
     [
-        "cat.zig",
+        "workspace_printer.zig",
         "zls_build_runner.zig",
         "zls_runner.zig",
         "zls.completion.tpl",

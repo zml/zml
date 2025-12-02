@@ -26,7 +26,7 @@ def zls_completion(name, deps, **kwargs):
     build_config_printer = "print_{}_build_config".format(name)
     zig_binary(
         name = build_config_printer,
-        main = Label("//third_party/zls:cat.zig"),
+        main = Label("//third_party/zls:workspace_printer.zig"),
         data = [
             ":{}".format(build_config),
         ],
