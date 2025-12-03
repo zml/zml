@@ -79,13 +79,13 @@ pub const Client = opaque {
         return @ptrCast(try self.inner().createViewOfDeviceBuffer(api, args));
     }
 
-    fn compileSync(self: *const Client, api: *const Api, allocator: std.mem.Allocator, module: mlir.Module, compile_options_pb: []const u8) CompileError!*LoadedExecutable {
+    fn compileSync(self: *const Client, api: *const Api, allocator: std.mem.Allocator, module: *const mlir.Module, compile_options_pb: []const u8) CompileError!*LoadedExecutable {
         var bytecode: std.Io.Writer.Allocating = try .initCapacity(allocator, 4096);
         defer bytecode.deinit();
-        module.op().writeBytecodeWithConfig(&bytecode.writer, .{ .desiredEmitedVersion = 1 }) catch |err| {
+        module.operation().writeBytecode(.{ .desired_emit_version = 1 }, &bytecode.writer) catch |err| {
             log.err("failed to write module bytecode: {}", .{err});
             return switch (err) {
-                std.Io.Writer.Error.WriteFailed => error.OutOfMemory,
+                error.WriteFailed => error.OutOfMemory,
                 else => |e| e,
             };
         };
@@ -95,9 +95,9 @@ pub const Client = opaque {
 
         const stablehlo_version = blk: {
             if (api.stablehloCurrentVersion()) |requested_version| {
-                break :blk dialects.stablehlo.stablehloGetSmallerVersion(requested_version, dialects.stablehlo.getCurrentVersion());
+                break :blk dialects.stablehlo.smallerVersion(requested_version, dialects.stablehlo.currentVersion());
             }
-            break :blk dialects.stablehlo.getMinimumVersion();
+            break :blk dialects.stablehlo.minimumVersion();
         };
 
         dialects.stablehlo.serializePortableArtifact(bytecode.written(), stablehlo_version, &serialized_buffer.writer) catch |err| {
@@ -115,7 +115,7 @@ pub const Client = opaque {
         }));
     }
 
-    pub fn compile(self: *const Client, api: *const Api, allocator: std.mem.Allocator, module: mlir.Module, compile_options_pb: []const u8) CompileError!*LoadedExecutable {
+    pub fn compile(self: *const Client, api: *const Api, allocator: std.mem.Allocator, module: *const mlir.Module, compile_options_pb: []const u8) CompileError!*LoadedExecutable {
         return try async.callBlocking(compileSync, .{ self, api, allocator, module, compile_options_pb });
     }
 

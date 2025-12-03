@@ -180,7 +180,7 @@ pub const Shape = struct {
         };
     }
 
-    fn toTag(v: anytype) Tag {
+    pub fn toTag(v: anytype) Tag {
         const T = @TypeOf(v);
         return switch (T) {
             EnumLiteral => @tagName(v).ptr,
