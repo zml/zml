@@ -1,5 +1,16 @@
-load("@rules_zig//zig:defs.bzl", "zig_library", "zig_binary")
+load("@com_google_protobuf//bazel:upb_proto_library.bzl", "upb_c_proto_library")
 load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
+
+upb_c_proto_library(
+    name = "xla_data_upb",
+    deps = ["@xla//xla:xla_data_proto"],
+)
+
+upb_c_proto_library(
+    name = "xla_compile_options_upb",
+    deps = ["@xla//xla/pjrt/proto:compile_options_proto"],
+)
 
 cc_library(
     name = "posix",
@@ -9,30 +20,36 @@ cc_library(
 zig_library(
     name = "zml",
     srcs = [
-        "zml.zig",
-        "platform.zig",
-        "pjrtx.zig",
         "dtype.zig",
+        "exe.zig",
         "floats.zig",
+        "meta.zig",
+        "mlirx.zig",
+        "module.zig",
+        "pjrtx.zig",
+        "platform.zig",
         "shape.zig",
         "tensor.zig",
-        "mlirx.zig",
-        "meta.zig",
+        "zml.zig",
     ],
+    main = "zml.zig",
+    visibility = ["//visibility:public"],
     zigopts = [
         "-lc",
         "-freference-trace=20",
     ],
-    main = "zml.zig",
-    visibility = ["//visibility:public"],
     deps = [
-        "//runtimes",
+        ":posix",
+        ":xla_compile_options_upb",
+        ":xla_data_upb",
+        "//async",
         "//mlir",
         "//mlir/dialects",
         "//pjrt",
+        "//runtimes",
         "//stdx",
+        "//upb",
         "@rules_zig//zig/runfiles",
-        ":posix",
     ],
 )
 

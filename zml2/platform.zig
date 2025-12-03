@@ -55,6 +55,21 @@ pub const Platform = struct {
         return all_devices;
     }
 
+    pub const Sharding = struct { num_replicas: u8, num_partitions: u8 };
+
+    pub fn sharding(self: Platform) Sharding {
+        // replicas run the same function but with different inputs,
+        // while partitions contribute to one evaluation over a shared input.
+        // Inside an inference process, we generally don't want replicas,
+        // as it's best to fully isolate replicas on different processes.
+        // For now we hardcode num_replicas = 1.
+        const num_devices: u8 = @intCast(self.getDevices().len);
+        return if (self.compilation_options.sharding_enabled)
+            .{ .num_replicas = 1, .num_partitions = num_devices }
+        else
+            .{ .num_replicas = 1, .num_partitions = 1 };
+    }
+
     pub fn withCompilationOptions(self: Platform, opts: CompilationOptions) Platform {
         var res = self;
         res.compilation_options = opts;

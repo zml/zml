@@ -10,7 +10,7 @@ const mlirx = @import("mlirx.zig");
 const dialects = @import("mlir/dialects");
 
 const DataType = @import("dtype.zig").DataType;
-const CompilationContext = struct {};
+const CompilationContext = @import("module.zig").CompilationContext;
 
 pub const Tensor = struct {
     var current_id: std.atomic.Value(usize) = .{ .raw = 1 };
@@ -20,6 +20,10 @@ pub const Tensor = struct {
     auto_broadcast: bool = false,
     _shape: Shape,
     _value: ?*const mlir.Value = null,
+
+    pub fn init(shape_: Shape) Tensor {
+        return .{ .id = Tensor.current_id.fetchAdd(1, .seq_cst), ._shape = shape_ };
+    }
 
     pub fn format(self: Tensor, writer: *std.Io.Writer) !void {
         try writer.print("Tensor({f})", .{self._shape});
@@ -72,15 +76,15 @@ pub const Tensor = struct {
     /// Creates a Tensor from a mlir.Value
     ///
     /// The shape is derived from the type of the mlir.Value.
-    pub fn fromMlirValue(val: mlir.Value) Tensor {
-        const ranked_tensor = val.getType().as(mlir.RankedTensorType).?;
-        const n = ranked_tensor.getRank();
+    pub fn fromMlirValue(val: *const mlir.Value) Tensor {
+        const ranked_tensor = val.type_().isA(mlir.RankedTensorType).?;
+        const n = ranked_tensor.rank();
 
         stdx.debug.assert(n <= MAX_RANK, "Can't represent MLIR tensor of rank {}, max supported rank is {}.", .{ n, MAX_RANK });
 
-        var sh: Shape = .{ ._dtype = mlirx.Type.toDType(ranked_tensor.getElementType()) };
+        var sh: Shape = .{ ._dtype = mlirx.Type.toDType(mlirCtx(), ranked_tensor.elementType()) };
         for (0..n) |i| {
-            sh._dims.appendAssumeCapacity(ranked_tensor.getDimension(i));
+            sh._dims.appendAssumeCapacity(ranked_tensor.dimension(i));
         }
         sh._tags.resize(n) catch unreachable;
 
@@ -158,8 +162,8 @@ pub const Tensor = struct {
     ///
     /// This will fail if used outside of a compilation context.
     pub fn value(self: Tensor) *const mlir.Value {
-        if (self.getContext().currentScope().id_to_argument.get(self.id)) |argument_index| {
-            return self.getContext().currentScope().block.argument(argument_index);
+        if (CompilationContext.current().currentScope().id_to_argument.get(self.id)) |argument_index| {
+            return CompilationContext.current().currentScope().block.argument(argument_index);
         } else if (self._value) |v| {
             return v;
         } else @panic("Something went really wrong, tensor is not an argument nor has an mlir.Value");
@@ -219,7 +223,7 @@ pub const Tensor = struct {
         res_shape = res_shape.withDtype(dt);
 
         const op = dialects.stablehlo.bitcast_convert(
-            self.getContext().mlirCtx(),
+            mlirCtx(),
             self.value(),
             mlir.rankedTensorType(res_shape.dims(), mlirx.Type.fromDType(mlirCtx(), res_shape.dtype())),
             .unknown(mlirCtx()),
@@ -567,10 +571,13 @@ pub const Tensor = struct {
             stdx.debug.assert(sh.dtype().isFloat(), "normal expects tensor type to be a float, got {}", .{sh.dtype()});
 
             const a = Tensor.constant(.{}, DataType.Value.init(sh.dtype(), opts.mean));
+            _ = a; // autofix
             const b = Tensor.constant(.{}, DataType.Value.init(sh.dtype(), opts.stddev));
-            const res_shape = Tensor.constantTensor(HostBuffer.fromSlice(.{sh.rank()}, sh.dims()));
-            const op = dialects.stablehlo.rng(mlirCtx(), a.value(), b.value(), res_shape.value(), .NORMAL, .unknown(mlirCtx())).appendTo(currentBlock());
-            return _result(sh, op.result(0));
+            _ = b; // autofix
+            unreachable;
+            //const res_shape = Tensor.constantTensor(HostBuffer.fromSlice(.{sh.rank()}, sh.dims()));
+            //const op = dialects.stablehlo.rng(mlirCtx(), a.value(), b.value(), res_shape.value(), .NORMAL, .unknown(mlirCtx())).appendTo(currentBlock());
+            //return _result(sh, op.result(0));
         }
 
         /// Returns a Tensor of the given shape, filled with floating point numbers sampled from a Gumbel distribution, and a new Rng state.
@@ -1117,13 +1124,11 @@ pub const Tensor = struct {
             res_shape = res_shape.appendDim(rhs._shape.dim(r), rhs._shape.tag(r));
         }
 
-        const mlir_ctx = lhs.getContext().mlir_ctx;
-        const loc = mlir.Location.unknown(mlirCtx());
         const op = dialects.stablehlo.dot_general(
-            mlir_ctx,
+            mlirCtx(),
             lhs.value(),
             rhs.value(),
-            mlir.rankedTensorType(res_shape.dims(), mlir.Type.fromDType(mlir_ctx, res_shape.dtype())),
+            mlir.rankedTensorType(res_shape.dims(), mlirx.Type.fromDType(mlirCtx(), res_shape.dtype())),
             .{
                 .lhs_batching_dimensions = lhs_batching_axes.constSlice(),
                 .rhs_batching_dimensions = rhs_batching_axes.constSlice(),
@@ -1131,7 +1136,7 @@ pub const Tensor = struct {
                 .rhs_contracting_dimensions = rhs_contracting_axes.constSlice(),
                 .dot_precision = .fast,
             },
-            loc,
+            .unknown(mlirCtx()),
         ).appendTo(currentBlock());
         return _result(res_shape, op.result(0));
     }
@@ -1374,7 +1379,7 @@ pub const Tensor = struct {
             mlirCtx(),
             self.value(),
             mlir.rankedTensorType(new_shape.dims(), mlirx.Type.fromDType(mlirCtx(), new_shape.dtype())),
-            mlirx.tensorType(self.getContext().mlirCtx(), new_shape),
+            mlirx.tensorType(mlirCtx(), new_shape),
             .unknown(mlirCtx()),
         ).appendTo(currentBlock());
         return _result(new_shape, reshaped_val.result(0));
@@ -1908,12 +1913,13 @@ pub const Tensor = struct {
 
     // TODO(Corentin)
     /// Embeds a buffer with concrete values into an Mlir program.
-    pub fn constantTensor(val: HostBuffer) Tensor {
-        const ctx = CompilationContext.current().mlirCtx();
-        const loc = ctx.location(@src());
-        const elem_type = mlirx.denseElementAttrType(val.dtype()) orelse std.debug.panic("constantTensor expects a dtype that can be serialized to MLIR, like f32 or i32, got {f}", .{val.shape()});
-        const constant_op = dialects.stablehlo.constant(ctx, val.shape().dims(), elem_type, val.bytes(), loc);
-        return _result(val.shape(), constant_op.result(0));
+    pub fn constantTensor() Tensor {
+        @panic("unimplemented");
+        //const ctx = CompilationContext.current().mlirCtx();
+        //const loc = ctx.location(@src());
+        //const elem_type = mlirx.denseElementAttrType(val.dtype()) orelse std.debug.panic("constantTensor expects a dtype that can be serialized to MLIR, like f32 or i32, got {f}", .{val.shape()});
+        //const constant_op = dialects.stablehlo.constant(ctx, val.shape().dims(), elem_type, val.bytes(), loc);
+        //return _result(val.shape(), constant_op.result(0));
     }
 
     /// Returns a Tensor containing the result of the outer product between the input Tensors.
@@ -2141,6 +2147,8 @@ pub const Tensor = struct {
         return self.gather_(idx_axes.slice(), idx_per_axis.slice(), opts);
     }
 
+    const GatherAxisKind = enum { batching, offset, collapsed, indices };
+
     pub fn gather_(self: Tensor, idx_axes: []const u3, idx_per_axis: []const Tensor, opts: GatherOpts) Tensor {
         stdx.debug.assert(idx_axes.len > 0, "gather expects 1 or more axes to operate one, received none. Example: `x.gather(.a, indices, .{{}})`", .{});
         for (idx_axes, 0..) |a, i| {
@@ -2160,8 +2168,7 @@ pub const Tensor = struct {
 
         var idx_batch_axes: Shape.DimsArray = .{};
 
-        const AxisKind = enum { batching, offset, collapsed, indices };
-        var self_kind: stdx.BoundedArray(AxisKind, MAX_RANK) = .{ .buffer = @splat(.offset), .len = self.rank() };
+        var self_kind: stdx.BoundedArray(GatherAxisKind, MAX_RANK) = .{ .buffer = @splat(.offset), .len = self.rank() };
 
         for (self._shape.tags(), 0..self.rank()) |t, self_ax| {
             const is_gather_axis = std.mem.containsAtLeastScalar(u3, idx_axes, 1, @intCast(self_ax));
@@ -2182,7 +2189,7 @@ pub const Tensor = struct {
 
         // compute res shape
         var res_shape = Shape.init(.{}, self.dtype());
-        var res_kind: stdx.BoundedArray(AxisKind, MAX_RANK) = .{};
+        var res_kind: stdx.BoundedArray(GatherAxisKind, MAX_RANK) = .{};
         for (self_kind.slice(), 0..) |kind, ax_usize| {
             const ax: u3 = @intCast(ax_usize);
             if (ax == idx_axes[0]) {
@@ -2230,11 +2237,11 @@ pub const Tensor = struct {
             indices.value(),
             slice_dims.constSlice(),
             .{
-                .offset_dims = _collectAxes(AxisKind, res_kind, .offset).constSlice(),
-                .collapsed_slice_dims = _collectAxes(AxisKind, self_kind, .collapsed).constSlice(),
-                .operand_batching_dims = _collectAxes(AxisKind, self_kind, .batching).constSlice(),
+                .offset_dims = _collectAxes(GatherAxisKind, res_kind, .offset).constSlice(),
+                .collapsed_slice_dims = _collectAxes(GatherAxisKind, self_kind, .collapsed).constSlice(),
+                .operand_batching_dims = _collectAxes(GatherAxisKind, self_kind, .batching).constSlice(),
                 .start_indices_batching_dims = idx_batch_axes.constSlice(),
-                .start_index_map = _collectAxes(AxisKind, self_kind, .collapsed).constSlice(),
+                .start_index_map = _collectAxes(GatherAxisKind, self_kind, .collapsed).constSlice(),
                 .index_vector_dim = indices.axis(.coord),
                 .indices_are_sorted = opts.indices_are_sorted,
             },
@@ -2618,9 +2625,9 @@ pub const Tensor = struct {
             &updates_values,
             update_block,
             .{
-                .update_window_dims = _collectAxes(AxisKind, config.up_kind, .update_window).constSlice(),
-                .inserted_window_dims = _collectAxes(AxisKind, config.op_kind, .inserted_window).constSlice(),
-                .input_batching_dims = _collectAxes(AxisKind, config.op_kind, .batching).constSlice(),
+                .update_window_dims = _collectAxes(ScatterAxisKind, config.up_kind, .update_window).constSlice(),
+                .inserted_window_dims = _collectAxes(ScatterAxisKind, config.op_kind, .inserted_window).constSlice(),
+                .input_batching_dims = _collectAxes(ScatterAxisKind, config.op_kind, .batching).constSlice(),
                 .scatter_indices_batching_dims = config.indices_batch_axes.constSlice(),
                 .scatter_dims_to_operand_dims = config.scatter_to_operand_axes.constSlice(),
                 .index_vector_dim = indices.rank() - 1,
@@ -2638,14 +2645,14 @@ pub const Tensor = struct {
     }
 
     const ScatterConfig = struct {
-        op_kind: stdx.BoundedArray(AxisKind, Tensor.MAX_RANK) = .{},
-        up_kind: stdx.BoundedArray(AxisKind, Tensor.MAX_RANK) = .{},
+        op_kind: stdx.BoundedArray(ScatterAxisKind, Tensor.MAX_RANK) = .{},
+        up_kind: stdx.BoundedArray(ScatterAxisKind, Tensor.MAX_RANK) = .{},
         indices_batch_axes: Shape.DimsArray = .{},
         scatter_to_operand_axes: Shape.DimsArray = .{},
         updates_transpose: Shape.AxesArray = .{},
     };
 
-    const AxisKind = enum { batching, update_window, inserted_window, window_id };
+    const ScatterAxisKind = enum { batching, update_window, inserted_window, window_id };
 
     fn scatterConfig(
         op: Shape,
@@ -2653,8 +2660,8 @@ pub const Tensor = struct {
         indices_per_axis: stdx.BoundedArray(Tensor, Tensor.MAX_RANK),
         indices_axes: Shape.TagsArray,
     ) ScatterConfig {
-        var op_kind: stdx.BoundedArray(AxisKind, Tensor.MAX_RANK) = .{};
-        var up_kind: stdx.BoundedArray(AxisKind, Tensor.MAX_RANK) = .{};
+        var op_kind: stdx.BoundedArray(ScatterAxisKind, Tensor.MAX_RANK) = .{};
+        var up_kind: stdx.BoundedArray(ScatterAxisKind, Tensor.MAX_RANK) = .{};
         var indices_batch_axes: Shape.DimsArray = .{};
         var scatter_to_operand_axes: Shape.DimsArray = .{};
         var updates_transpose: Shape.AxesArray = .{};
@@ -2788,7 +2795,7 @@ pub const Tensor = struct {
         indices_axes: *Shape.TagsArray,
     ) Tensor {
         var old_scatter_to_op_axes = cfg.scatter_to_operand_axes;
-        const batching = _collectAxes(AxisKind, cfg.op_kind, .batching);
+        const batching = _collectAxes(ScatterAxisKind, cfg.op_kind, .batching);
         for (batching.constSlice()) |batch_ax| {
             const id_shape = indices_per_axis.get(0).shape();
             // batching requires tagging, so we're sure to have a tag here.
@@ -3664,8 +3671,10 @@ pub const Tensor = struct {
         const chunk_size: i64 = @divFloor(d, n_chunks);
         const tail_chunk_size: i64 = @rem(d, chunk_size);
 
-        const allocator = self.getContext().allocator();
-        var chunks = std.ArrayList(Tensor).initCapacity(allocator, n_chunks + 1) catch @panic("OOM");
+        var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
+        defer arena.deinit();
+
+        var chunks = std.ArrayList(Tensor).initCapacity(arena.allocator(), n_chunks + 1) catch @panic("OOM");
         for (0..n_chunks) |i| {
             const start: i64 = @as(i64, @intCast(i)) * chunk_size;
             chunks.appendAssumeCapacity(
@@ -3723,9 +3732,10 @@ pub const Tensor = struct {
         for (split_sizes) |n| split_sum += n;
         stdx.debug.assert(split_sum == d, "split expects sum of 'split_sizes' values and axis dimension to be equal, got {} and {}", .{ split_sum, d });
 
-        const allocator = self.getContext().allocator();
-        const res = allocator.alloc(Tensor, split_sizes.len) catch @panic("OOM");
-        errdefer allocator.dealloc(res);
+        var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
+        defer arena.deinit();
+
+        const res = arena.allocator().alloc(Tensor, split_sizes.len) catch @panic("OOM");
 
         var start: i64 = 0;
         for (split_sizes, 0..) |n, i| {
@@ -4046,7 +4056,7 @@ pub const Tensor = struct {
             mlirCtx(),
             self.value(),
             other.value(),
-            dialects.stablehlo.ComparisonDirection.init(self.getContext().mlirCtx(), direction),
+            dialects.stablehlo.ComparisonDirection.init(mlirCtx(), direction),
             getComparisonType(mlirCtx(), self.dtype()),
             .unknown(mlirCtx()),
         ).appendTo(currentBlock());
@@ -4365,7 +4375,7 @@ pub const Tensor = struct {
 
     fn binaryOp(
         op_name: []const u8,
-        op_fn: fn (mlir.Context, mlir.Value, mlir.Value, mlir.Location) mlir.Operation,
+        op_fn: fn (*mlir.Context, *const mlir.Value, *const mlir.Value, *const mlir.Location) *mlir.Operation,
     ) fn (Tensor, Tensor) Tensor {
         return struct {
             pub fn binaryOpHelper(self: Tensor, other: Tensor) Tensor {
@@ -4390,7 +4400,7 @@ pub const Tensor = struct {
 
                 stdx.debug.assert(same_shape, "{s} expects tensor shapes to match, got {f} and {f}", .{ op_name, self._shape, other._shape });
 
-                const ret = @call(.auto, op_fn, .{ mlirCtx(), self.value(), other_.value(), .unknown(mlirCtx()) }).appendTo(currentBlock());
+                const ret = @call(.auto, op_fn, .{ mlirCtx(), self.value(), other_.value(), mlir.Location.unknown(mlirCtx()) }).appendTo(currentBlock());
                 return _result(self._shape, ret.result(0));
             }
         }.binaryOpHelper;
@@ -4411,6 +4421,11 @@ pub const Tensor = struct {
 
     fn currentBlock() *mlir.Block {
         return CompilationContext.current().currentScope().block;
+    }
+
+    /// Returns the donation data of the tensor.
+    pub fn donation(self: Tensor) ?usize {
+        return CompilationContext.current().currentScope().id_to_donation.get(self.id);
     }
 };
 
@@ -4521,6 +4536,28 @@ fn getComparisonType(ctx: mlir.Context, dtype: DataType) dialects.stablehlo.Comp
 //        buffer,
 //    );
 //}
+
+pub fn _collectAxes(T: type, bounded_array: stdx.BoundedArray(T, Tensor.MAX_RANK), value: T) stdx.BoundedArray(i64, Tensor.MAX_RANK) {
+    var res: stdx.BoundedArray(i64, Tensor.MAX_RANK) = .{};
+    for (bounded_array.constSlice(), 0..) |v, ax| {
+        if (v == value) {
+            res.appendAssumeCapacity(@intCast(ax));
+        }
+    }
+    return res;
+}
+
+fn _parseGatherCoord(self: Tensor, axes_: anytype) struct { bool, stdx.BoundedArray(u3, Tensor.MAX_RANK) } {
+    const AxesT = @TypeOf(axes_);
+    const axes_is_scalar = AxesT == @TypeOf(.enum_literal) or AxesT == comptime_int or @typeInfo(AxesT) == .int;
+
+    const coord_axes = if (axes_is_scalar)
+        stdx.BoundedArray(u3, Tensor.MAX_RANK).fromSlice(&.{self.axis(axes_)}) catch unreachable
+    else
+        self.axes(axes_);
+
+    return .{ axes_is_scalar, coord_axes };
+}
 
 fn toI64(values: anytype) []i64 {
     var res: [Tensor.MAX_RANK]i64 = undefined;

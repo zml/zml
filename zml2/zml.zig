@@ -7,7 +7,6 @@
 const std = @import("std");
 
 const c = @import("c");
-const mlir = @import("mlir");
 const runfiles = @import("runfiles");
 
 pub const platform = @import("platform.zig");
@@ -15,16 +14,18 @@ pub const Platform = platform.Platform;
 pub const Target = platform.Target;
 pub const CompilationOptions = platform.CompilationOptions;
 pub const floats = @import("floats.zig");
-const dtype = @import("dtype.zig");
+pub const dtype = @import("dtype.zig");
 pub const Data = dtype.Data;
 pub const DataType = dtype.DataType;
 pub const pjrt = @import("pjrtx.zig");
-
-var mlir_once = std.once(struct {
-    fn call() void {
-        mlir.registerPasses("Transforms");
-    }
-}.call);
+pub const module = @import("module.zig");
+pub const exe = @import("exe.zig");
+pub const meta = @import("meta.zig");
+pub const mlir = @import("mlirx.zig");
+pub const shape = @import("shape.zig");
+pub const Shape = shape.Shape;
+pub const tensor = @import("tensor.zig");
+pub const Tensor = tensor.Tensor;
 
 var runfiles_once = std.once(struct {
     fn call_() !void {
@@ -55,7 +56,7 @@ var runfiles_once = std.once(struct {
 
 pub fn init() void {
     runfiles_once.call();
-    mlir_once.call();
+    mlir.once.call();
 }
 
 pub fn deinit() void {}

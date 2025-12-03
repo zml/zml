@@ -427,7 +427,14 @@ test MapRestrict {
 
 /// Recursively visit the given struct and calls the callback for each K found.
 /// The `v` parameter must me a pointer, and tensor data need to be mutable if callbacks needs it.
-pub fn visit(comptime cb: anytype, ctx: FnParam(cb, 0), v: anytype) void {
+pub fn VisitReturn(comptime cb: anytype) type {
+    return if (stdx.meta.FnSignature(cb, null).ReturnErrorSet) |error_set|
+        @Type(std.builtin.Type{ .error_union = .{ .error_set = error_set, .payload = void } })
+    else
+        void;
+}
+
+pub fn visit(comptime cb: anytype, ctx: FnParam(cb, 0), v: anytype) VisitReturn(cb) {
     const Callback = @TypeOf(cb);
     const Ptr = @TypeOf(v);
     const type_info_v = @typeInfo(Ptr);
@@ -436,6 +443,7 @@ pub fn visit(comptime cb: anytype, ctx: FnParam(cb, 0), v: anytype) void {
     }
     const ptr_info = type_info_v.pointer;
     const Child = ptr_info.child;
+    const can_error = stdx.meta.FnSignature(cb, null).ReturnErrorSet != null;
 
     const K, const mutating_cb = switch (@typeInfo(FnParam(cb, 1))) {
         .pointer => |info| .{ info.child, !info.is_const },
@@ -468,15 +476,15 @@ pub fn visit(comptime cb: anytype, ctx: FnParam(cb, 0), v: anytype) void {
                 const field_type_info = @typeInfo(field.type);
                 // If the field is already a pointer, we recurse with it directly, otherwise, we recurse with a pointer to the field.
                 switch (field_type_info) {
-                    .pointer => visit(cb, ctx, @field(v, field.name)),
-                    .array, .optional, .@"union", .@"struct" => visit(cb, ctx, &@field(v, field.name)),
+                    .pointer => if (can_error) try visit(cb, ctx, @field(v, field.name)) else visit(cb, ctx, @field(v, field.name)),
+                    .array, .optional, .@"union", .@"struct" => if (can_error) try visit(cb, ctx, &@field(v, field.name)) else visit(cb, ctx, &@field(v, field.name)),
                     else => {},
                 }
             },
-            .array => |_| for (v) |*elem| visit(cb, ctx, elem),
-            .optional => if (v.* != null) visit(cb, ctx, &v.*.?),
+            .array => |_| for (v) |*elem| if (can_error) try visit(cb, ctx, elem) else visit(cb, ctx, elem),
+            .optional => if (v.* != null) if (can_error) try visit(cb, ctx, &v.*.?) else visit(cb, ctx, &v.*.?),
             .@"union" => switch (v.*) {
-                inline else => |*v_field| visit(cb, ctx, v_field),
+                inline else => |*v_field| if (can_error) try visit(cb, ctx, v_field) else visit(cb, ctx, v_field),
             },
             else => stdx.debug.compileError("zml.meta.visit({}) doesn't support fields of type: {}", .{ Callback, Child }),
         },
@@ -488,15 +496,15 @@ pub fn visit(comptime cb: anytype, ctx: FnParam(cb, 0), v: anytype) void {
                         const field_type_info = @typeInfo(field.type);
                         // If the field is already a pointer, we recurse with it directly, otherwise, we recurse with a pointer to the field.
                         if (field_type_info == .pointer) {
-                            visit(cb, ctx, @field(v_elem, field.name));
+                            if (can_error) try visit(cb, ctx, @field(v_elem, field.name)) else visit(cb, ctx, @field(v_elem, field.name));
                         } else {
-                            visit(cb, ctx, &@field(v_elem, field.name));
+                            if (can_error) try visit(cb, ctx, &@field(v_elem, field.name)) else visit(cb, ctx, &@field(v_elem, field.name));
                         }
                     },
-                    .array => |_| for (v) |*elem| visit(cb, ctx, elem),
-                    .optional => if (v.* != null) visit(cb, ctx, &v.*.?),
+                    .array => |_| for (v) |*elem| if (can_error) try visit(cb, ctx, elem) else visit(cb, ctx, elem),
+                    .optional => if (v.* != null) if (can_error) try visit(cb, ctx, &v.*.?) else visit(cb, ctx, &v.*.?),
                     .@"union" => switch (v_elem.*) {
-                        inline else => |*v_field| visit(cb, ctx, v_field),
+                        inline else => |*v_field| if (can_error) try visit(cb, ctx, v_field) else visit(cb, ctx, v_field),
                     },
                     else => stdx.debug.compileError("zml.meta.visit({}) doesn't support fields of type: {}", .{ Callback, Child }),
                 }
