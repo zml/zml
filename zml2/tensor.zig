@@ -1245,22 +1245,16 @@ pub const Tensor = struct {
         return max_.add(log_sum_exp);
     }
 
-    // TODO(Corentin)
     /// Returns a Tensor containing the sum of elements over the given axis.
     /// Output shape is the input shape with the axis_ dim set to 1.
-    //pub fn sum(self: Tensor, axis_: anytype) Tensor {
-    //    const a = self.axis(axis_);
-    //    return ops.reduce(
-    //        struct {
-    //            pub fn acc(x: Tensor, res: Tensor) Tensor {
-    //                return res.add(x.convert(res.dtype()));
-    //            }
-    //        }.acc,
-    //        self,
-    //        Tensor.scalar(0, self.dtype()),
-    //        &.{a},
-    //    );
-    //}
+    pub fn sum(self: Tensor, axis_: anytype) Tensor {
+        const a = self.axis(axis_);
+        return reduce(.{self}, .{Tensor.constant(self.dtype().zero())}, &.{a}, struct {
+            pub fn acc(args: ReduceArgs) Tensor {
+                return args.right.add(args.left.convert(args.right.dtype()));
+            }
+        }.acc, .{})[0];
+    }
 
     /// Returns a Tensor containing the mean of elements over the given axis.
     /// Output shape is the input shape with the axis_ dim set to 1.
@@ -1908,9 +1902,8 @@ pub const Tensor = struct {
         return _result(.init(&.{}, val.dtype()), op.result(0)).autoBroadcast();
     }
 
-    // TODO(Corentin)
     pub fn zeroes(sh: Shape) Tensor {
-        return .constant(sh.dtype().zero());
+        return .constant(sh.dtype().zero()).broad(sh);
     }
 
     // TODO(Corentin)
@@ -3098,6 +3091,23 @@ pub const Tensor = struct {
     pub const ArgMaxRes = struct {
         values: Tensor,
         indices: Tensor,
+
+        fn cmp(values: ReduceArgs, indices: ReduceArgs) struct { Tensor, Tensor } {
+            const left_gt_right = values.left.cmp(.GT, values.right);
+            const is_nan = values.left.cmp(.NE, values.left);
+            const left_gt_or_nan = left_gt_right.logical(.OR, is_nan);
+            // we are bubbling up Nan.
+            const max_val = left_gt_or_nan.select(values.left, values.right);
+
+            // If values.left == values.right: keep the smallest idx.
+            const is_same = values.left.cmp(.EQ, values.right);
+            const is_first = indices.left.cmp(.LT, indices.right);
+            const is_same_but_first = is_same.logical(.AND, is_first);
+            const keep_left_idx = left_gt_or_nan.logical(.OR, is_same_but_first);
+            const max_idx = keep_left_idx.select(indices.left, indices.right);
+
+            return .{ max_val, max_idx };
+        }
     };
 
     pub fn argMax(x: Tensor, axis_: anytype) ArgMaxRes {
@@ -3108,24 +3118,7 @@ pub const Tensor = struct {
             .{ x, Tensor.arange(.{ .end = x.dim(axis_) }, dt).broadcast(x.shape(), &.{a}) },
             .{ Tensor.constant(x.dtype().minValue()), Tensor.constant(dt.zero()) },
             &.{a},
-            struct {
-                fn cmp(values: ReduceArgs, indices: ReduceArgs) struct { Tensor, Tensor } {
-                    const left_gt_right = values.left.cmp(.GT, values.right);
-                    const is_nan = values.left.cmp(.NE, values.left);
-                    const left_gt_or_nan = left_gt_right.logical(.OR, is_nan);
-                    // we are bubbling up Nan.
-                    const max_val = left_gt_or_nan.select(values.left, values.right);
-
-                    // If values.left == values.right: keep the smallest idx.
-                    const is_same = values.left.cmp(.EQ, values.right);
-                    const is_first = indices.left.cmp(.LT, indices.right);
-                    const is_same_but_first = is_same.logical(.AND, is_first);
-                    const keep_left_idx = left_gt_or_nan.logical(.OR, is_same_but_first);
-                    const max_idx = keep_left_idx.select(indices.left, indices.right);
-
-                    return .{ max_val, max_idx };
-                }
-            }.cmp,
+            ArgMaxRes.cmp,
             .{},
         );
         return .{ .values = values, .indices = indices };
@@ -3447,93 +3440,176 @@ pub const Tensor = struct {
         return result;
     }
 
-    // TODO(Corentin)
-    //
-    //pub const MaxPoolRes = ArgMaxRes;
+    pub const ReduceWindowOpts = struct {
+        // TODO replace with Shape
+        window_dimensions: []const i64,
+        window_strides: []const i64,
+        base_dilations: []const i64,
+        window_dilations: []const i64,
+        padding: []const [2]i64,
+    };
+
+    fn reduceWindow(inputs: anytype, inits: anytype, opts: ReduceWindowOpts, comptime func: anytype, context: anytype) stdx.meta.FnResult(func) {
+        var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
+        defer arena.deinit();
+
+        const reduce_block, var result = b: {
+            const ArgsType = std.meta.Tuple(&[1]type{ReduceArgs} ** inits.len);
+            var args: ArgsType = undefined;
+            var block_types: [2 * inits.len]*const mlir.Type = undefined;
+
+            inline for (0..inits.len) |i| {
+                args[i].left = Tensor.init(inits[i].shape());
+                args[i].right = Tensor.init(inits[i].shape());
+
+                block_types[i] = mlir.rankedTensorType(args[i].left.dims(), mlirx.Type.fromDType(mlirCtx(), args[i].left.dtype()));
+                block_types[i + inits.len] = mlir.rankedTensorType(args[i].right.dims(), mlirx.Type.fromDType(mlirCtx(), args[i].right.dtype()));
+            }
+
+            const block_locs: [2 * inits.len]*const mlir.Location = @splat(mlir.Location.unknown(mlirCtx()));
+            const reduce_block = mlir.Block.init(&block_types, &block_locs);
+            errdefer reduce_block.deinit();
+
+            CompilationContext.current().pushBlock(reduce_block);
+            defer CompilationContext.current().popBlock();
+
+            const scope = CompilationContext.current().currentScope();
+            inline for (0..inits.len) |i| {
+                scope.id_to_argument.put(scope.arena.allocator(), args[i].left.id, i) catch unreachable;
+                scope.id_to_argument.put(scope.arena.allocator(), args[i].right.id, i + inits.len) catch unreachable;
+            }
+
+            var result = @call(.auto, func, args ++ context);
+
+            var result_values: [inits.len]*const mlir.Value = undefined;
+            inline for (0..inits.len) |i| {
+                result_values[i] = result[i].value();
+            }
+
+            _ = dialects.stablehlo.returns(mlirCtx(), &result_values, .unknown(mlirCtx())).appendTo(reduce_block);
+            break :b .{ reduce_block, result };
+        };
+        var input_values: [inputs.len]*const mlir.Value = undefined;
+        inline for (0..inputs.len) |i| {
+            input_values[i] = inputs[i].value();
+        }
+
+        var init_values: [inputs.len]*const mlir.Value = undefined;
+        inline for (0..inits.len) |i| init_values[i] = inits[i].value();
+
+        const reduce_op = mlir.Operation.make(mlirCtx(), "stablehlo.reduce_window", .{
+            .operands = .{ .variadic = &.{ &input_values, &init_values } },
+            .result_type_inference = true,
+            .blocks = &.{reduce_block},
+            .attributes = &.{
+                .named(mlirCtx(), "window_dimensions", mlir.denseArrayAttribute(mlirCtx(), .i64, opts.window_dimensions)),
+                .named(mlirCtx(), "window_strides", mlir.denseArrayAttribute(mlirCtx(), .i64, opts.window_strides)),
+                .named(mlirCtx(), "base_dilations", mlir.denseArrayAttribute(mlirCtx(), .i64, opts.base_dilations)),
+                .named(mlirCtx(), "window_dilations", mlir.denseArrayAttribute(mlirCtx(), .i64, opts.window_dilations)),
+                // Cast the [][2]i64 to []i64 (safe)
+                .named(mlirCtx(), "padding", mlir.denseElementsAttribute(mlir.RankedTensorType.get(&.{}, mlir.integerType(mlirCtx(), .i64), null).shaped(), @as([]const i64, @ptrCast(opts.padding)))),
+            },
+            .verify = true,
+            .location = .unknown(mlirCtx()),
+        }).appendTo(currentBlock());
+
+        inline for (0..result.len) |i| {
+            result[i] = Tensor._result(inputs[i].shape(), reduce_op.result(i));
+        }
+
+        return result;
+    }
+
+    pub const MaxPoolRes = ArgMaxRes;
+
     /// Computes the 1d maxPool operation on the input Tensor.
-    //pub fn maxPool1d(self: Tensor, opts: struct {
-    //    window_dimensions: i64,
-    //    window_strides: ?i64,
-    //    base_dilations: i64 = 1,
-    //    window_dilations: i64 = 1,
-    //    padding: [2]i64 = .{ 0, 0 },
-    //}) MaxPoolRes {
-    //    // TODO migrate to the following syntax.
-    //    // maxPool(.{.a = .{ .stride = 5, .dilation = 2, .padding = .{0, 1} },
-    //    //              .b = .{ .stride = 8, .dilation = 2, .padding = .{0, 1} }),
-    //    // maxPool(.{
-    //    //     .stride = .{ .a = 5, .b = 8 },
-    //    //     .dilation = .{ .a = 2, .b = 2 },
-    //    //     .padding = .{ .a = .{ 0, 2 }, .b = .{0, 2}
-    //    // })
+    pub fn maxPool1d(self: Tensor, opts: struct {
+        window_dimensions: i64,
+        window_strides: ?i64,
+        base_dilations: i64 = 1,
+        window_dilations: i64 = 1,
+        padding: [2]i64 = .{ 0, 0 },
+    }) MaxPoolRes {
+        // TODO migrate to the following syntax.
+        // maxPool(.{.a = .{ .stride = 5, .dilation = 2, .padding = .{0, 1} },
+        //              .b = .{ .stride = 8, .dilation = 2, .padding = .{0, 1} }),
+        // maxPool(.{
+        //     .stride = .{ .a = 5, .b = 8 },
+        //     .dilation = .{ .a = 2, .b = 2 },
+        //     .padding = .{ .a = .{ 0, 2 }, .b = .{0, 2}
+        // })
 
-    //    // TODO: support maxPool on non last axis
-    //    const a = self.axis(-1);
-    //    const ones = [_]i64{1} ** Tensor.MAX_RANK;
-    //    var window_dimensions = ones;
-    //    window_dimensions[a] = opts.window_dimensions;
-    //    var window_strides = window_dimensions;
-    //    if (opts.window_strides) |stride| window_strides[a] = stride;
+        // TODO: support maxPool on non last axis
+        const a = self.axis(-1);
+        const ones = [_]i64{1} ** Tensor.MAX_RANK;
+        var window_dimensions = ones;
+        window_dimensions[a] = opts.window_dimensions;
+        var window_strides = window_dimensions;
+        if (opts.window_strides) |stride| window_strides[a] = stride;
 
-    //    var base_dilations = ones;
-    //    base_dilations[a] = opts.base_dilations;
-    //    var window_dilations = ones;
-    //    window_dilations[a] = opts.window_dilations;
+        var base_dilations = ones;
+        base_dilations[a] = opts.base_dilations;
+        var window_dilations = ones;
+        window_dilations[a] = opts.window_dilations;
 
-    //    var padding = [_][2]i64{.{ 0, 0 }} ** Tensor.MAX_RANK;
-    //    padding[a] = opts.padding;
+        var padding = [_][2]i64{.{ 0, 0 }} ** Tensor.MAX_RANK;
+        padding[a] = opts.padding;
 
-    //    return ops.reduceWindow(
-    //        MaxPoolRes.cmp,
-    //        .{ .values = self, .indices = iota(self._shape, a) },
-    //        .{ .values = Tensor.constant(.{}, self.dtype().minValue()), .indices = Tensor.scalar(0, .i32) },
-    //        .{
-    //            .window_dimensions = window_dimensions[0..self.rank()],
-    //            .window_strides = window_strides[0..self.rank()],
-    //            .base_dilations = base_dilations[0..self.rank()],
-    //            .window_dilations = window_dilations[0..self.rank()],
-    //            .padding = padding[0..self.rank()],
-    //        },
-    //    );
-    //}
+        const result = reduceWindow(
+            .{ self, iota(self._shape, a) },
+            .{ Tensor.constant(self.dtype().minValue()), Tensor.scalar(0, .i32) },
+            .{
+                .window_dimensions = window_dimensions[0..self.rank()],
+                .window_strides = window_strides[0..self.rank()],
+                .base_dilations = base_dilations[0..self.rank()],
+                .window_dilations = window_dilations[0..self.rank()],
+                .padding = padding[0..self.rank()],
+            },
+            MaxPoolRes.cmp,
+            .{},
+        );
+        return .{ .values = result[0], .indices = result[1] };
+    }
 
-    ///// Computes the 2d maxPool operation on the input Tensor.
-    //pub fn maxPool2d(self: Tensor, opts: struct {
-    //    window_dimensions: [2]i64,
-    //    window_strides: ?[2]i64 = null,
-    //    base_dilations: [2]i64 = .{ 1, 1 },
-    //    window_dilations: [2]i64 = .{ 1, 1 },
-    //    padding: [2][2]i64 = .{ .{ 0, 0 }, .{ 0, 0 } },
-    //}) MaxPoolRes {
-    //    // TODO: rewrite using modern ZML
-    //    stdx.debug.guard(self.rank() == 3 or self.rank() == 4, @src());
+    /// Computes the 2d maxPool operation on the input Tensor.
+    pub fn maxPool2d(self: Tensor, opts: struct {
+        window_dimensions: [2]i64,
+        window_strides: ?[2]i64 = null,
+        base_dilations: [2]i64 = .{ 1, 1 },
+        window_dilations: [2]i64 = .{ 1, 1 },
+        padding: [2][2]i64 = .{ .{ 0, 0 }, .{ 0, 0 } },
+    }) MaxPoolRes {
+        // TODO: rewrite using modern ZML
+        stdx.debug.guard(self.rank() == 3 or self.rank() == 4, @src());
 
-    //    // TODO: support maxPool on non last axis
-    //    // Note: the problem is initPoolArg assuming last axis
-    //    const a = self.axis(-1);
+        // TODO: support maxPool on non last axis
+        // Note: the problem is initPoolArg assuming last axis
+        const a = self.axis(-1);
 
-    //    const window_dimensions = initPoolArg(self.rank(), &opts.window_dimensions);
-    //    const window_strides = if (opts.window_strides) |ws| initPoolArg(self.rank(), &ws) else window_dimensions;
-    //    const base_dilation = initPoolArg(self.rank(), &opts.base_dilations);
-    //    const window_dilations = initPoolArg(self.rank(), &opts.window_dilations);
+        const window_dimensions = initPoolArg(self.rank(), &opts.window_dimensions);
+        const window_strides = if (opts.window_strides) |ws| initPoolArg(self.rank(), &ws) else window_dimensions;
+        const base_dilation = initPoolArg(self.rank(), &opts.base_dilations);
+        const window_dilations = initPoolArg(self.rank(), &opts.window_dilations);
 
-    //    var padding = [_][2]i64{.{ 0, 0 }} ** Tensor.MAX_RANK;
-    //    padding[a - 1] = opts.padding[0];
-    //    padding[a] = opts.padding[1];
+        var padding = [_][2]i64{.{ 0, 0 }} ** Tensor.MAX_RANK;
+        padding[a - 1] = opts.padding[0];
+        padding[a] = opts.padding[1];
 
-    //    return ops.reduceWindow(
-    //        MaxPoolRes.cmp,
-    //        .{ .values = self, .indices = iota(self._shape, a) },
-    //        .{ .values = Tensor.constant(.{}, self.dtype().minValue()), .indices = Tensor.scalar(0, .i32) },
-    //        .{
-    //            .window_dimensions = window_dimensions[0..self.rank()],
-    //            .window_strides = window_strides[0..self.rank()],
-    //            .base_dilations = base_dilation[0..self.rank()],
-    //            .window_dilations = window_dilations[0..self.rank()],
-    //            .padding = padding[0..self.rank()],
-    //        },
-    //    );
-    //}
+        const result = reduceWindow(
+            .{ self, iota(self._shape, a) },
+            .{ Tensor.constant(self.dtype().minValue()), Tensor.scalar(0, .i32) },
+            .{
+                .window_dimensions = window_dimensions[0..self.rank()],
+                .window_strides = window_strides[0..self.rank()],
+                .base_dilations = base_dilation[0..self.rank()],
+                .window_dilations = window_dilations[0..self.rank()],
+                .padding = padding[0..self.rank()],
+            },
+            MaxPoolRes.cmp,
+            .{},
+        );
+        return .{ .values = result[0], .indices = result[1] };
+    }
 
     /// Chunk a given tensor into exactly n parts of equal shape.
     /// `self.dim(axis_)` must be divisible by n_chunks.
