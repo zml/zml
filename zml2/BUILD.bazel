@@ -26,6 +26,7 @@ zig_library(
         "meta.zig",
         "mlirx.zig",
         "module.zig",
+        "ops.zig",
         "pjrtx.zig",
         "platform.zig",
         "shape.zig",
