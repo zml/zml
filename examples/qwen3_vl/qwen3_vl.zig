@@ -220,9 +220,12 @@ pub const Qwen = struct {
         const vision_embed, const deepstack_features = zml.call(self.vision_transformer, .forward, .{ pixel_values, image_grid_thw });
 
         // Get the number of text tokens before the image, the number of image tokens and the number of text tokens after the image
+        // The number of text tokens before the image (4 tokens according to the chat template)
         const text_before_image = prompt_shape.choose1d(0, 0).convert(.i32);
+        // The number of image tokens (number of image tokens in the image grid, after the spatial merge -> number of patch on height dimension * number of patch on width dimension / spatial merge size^2)
         const num_image_tokens = prompt_shape.choose1d(0, 1).convert(.i32);
-        const text_after_image = prompt_shape.choose1d(0, 2);
+        // The number of text tokens after the image (prompt tokens + 6 according to the chat template)
+        const text_after_image = prompt_shape.choose1d(0, 2).convert(.i32);
 
         // Update the embedding with the vision embedding
         const text_with_image = embedded.dynamicUpdateSlice(.{ .seq = text_before_image }, zml.torch.unsqueeze(vision_embed.convert(embedded.dtype()), 0));
@@ -312,7 +315,7 @@ pub const Qwen = struct {
         // Get the number of text tokens before the image, the number of image tokens and the number of text tokens after the image
         const text_before_image = prompt_shape.choose1d(0, 0).convert(.i32);
         const num_image_tokens = prompt_shape.choose1d(0, 1).convert(.i32);
-        const text_after_image = prompt_shape.choose1d(0, 2);
+        const text_after_image = prompt_shape.choose1d(0, 2).convert(.i32);
 
         // Build the 3D positional ids
         const before_image_positions = zml.Tensor.iota(Shape.init(.{ .bs = input_ids.dim(.bs), .seq = 4 }, .i32), .seq);
@@ -414,7 +417,6 @@ pub const Qwen = struct {
 pub const VisionTransformer = struct {
     vision_patch_embed: VisionPatchEmbed,
     pos_embed: zml.nn.TokenEmbedding,
-    rotary_pos_emb: VisionRotaryEmbedding,
     blocks: []VisionBlock,
     patch_merger: PatchMerger,
     deepstack_patch_mergers: []PatchMerger,
@@ -422,6 +424,7 @@ pub const VisionTransformer = struct {
     hidden_size: u32,
     spatial_merge_size: u32,
     num_position_embeddings: u32,
+    rope_opts: zml.nn.RopeOpts,
 
     pub fn init(allocator: std.mem.Allocator, config: Qwen.Config, store: zml.aio.BufferStore) !VisionTransformer {
         const spatial_merge_size = config.vision_config.spatial_merge_size;
@@ -481,10 +484,14 @@ pub const VisionTransformer = struct {
             .num_heads = config.vision_config.num_heads,
             .deepstack_patch_mergers = deepstack_patch_mergers,
             .vision_patch_embed = try VisionPatchEmbed.init(allocator, config.vision_config.patch_size, config.vision_config.temporal_patch_size, config.vision_config.in_channels, config.vision_config.out_hidden_size, store),
-            .rotary_pos_emb = try VisionRotaryEmbedding.init(allocator, config.vision_config.out_hidden_size, 10000.0),
             .hidden_size = config.vision_config.hidden_size,
             .spatial_merge_size = spatial_merge_size,
             .num_position_embeddings = config.vision_config.num_position_embeddings,
+            .rope_opts = zml.nn.RopeOpts{
+                .layout = .sequential,
+                .freq_base = 10000.0,
+                .scaling = .{ .default = {} },
+            },
         };
     }
 
@@ -495,7 +502,7 @@ pub const VisionTransformer = struct {
     pub fn forward(self: VisionTransformer, x_input: Tensor, grid_thw: [3]u32) struct { Tensor, [3]Tensor } {
         const x = x_input;
         var pos_embeds = self.posEmbedInterpolate(&grid_thw);
-        var rotary_pos_emb = self.rotaryPosEmbed(&grid_thw);
+        var rotary_pos_emb = rotaryPosEmbed(&grid_thw, self.spatial_merge_size, self.hidden_size, self.num_heads, self.rope_opts);
         rotary_pos_emb = zml.Tensor.concatenate(&.{ rotary_pos_emb, rotary_pos_emb }, 2);
         var hidden_states = zml.call(self.vision_patch_embed, .forward, .{x});
         hidden_states = hidden_states.add(pos_embeds[0].convert(hidden_states.dtype()));
@@ -594,24 +601,33 @@ pub const VisionTransformer = struct {
     }
 
     // Rotary position embedding for the vision transformer
-    pub fn rotaryPosEmbed(self: VisionTransformer, grid_thw: []const u32) Tensor {
-        const m_size = self.spatial_merge_size;
-
+    pub fn rotaryPosEmbed(grid_thw: []const u32, m_size: u32, hidden_size: u32, num_heads: u32, rope_opts: zml.nn.RopeOpts) Tensor {
         const t = grid_thw[0];
         const h = grid_thw[1];
         const w = grid_thw[2];
-        var hpos_ids = zml.torch.unsqueeze(zml.Tensor.arange(.{ .start = 0, .end = h, .step = 1 }, .f32), 1).repeat1d(1, @as(u63, @intCast(w)));
-        hpos_ids = hpos_ids.reshape(.{ .h_div = @divExact(h, m_size), .m1 = m_size, .w_div = @divExact(w, m_size), .m2 = m_size });
+
+        const pos_shape = zml.Shape.init(.{ .h = h, .w = w }, .f32);
+        // Build the height position ids
+        var hpos_ids = zml.Tensor.iota(pos_shape, 0);
+
+        hpos_ids = hpos_ids.splitAxis(.h, .{ .h_div = @divExact(h, m_size), .m1 = m_size }).splitAxis(.w, .{ .w_div = @divExact(w, m_size), .m2 = m_size });
         hpos_ids = hpos_ids.transpose(.{ .h_div, .w_div, .m1, .m2 });
         hpos_ids = hpos_ids.reshape(.{ .seq = -1 });
 
-        var wpos_ids = zml.torch.unsqueeze(zml.Tensor.arange(.{ .start = 0, .end = w, .step = 1 }, .f32), 0).repeat1d(0, @as(u63, @intCast(h)));
-        wpos_ids = wpos_ids.reshape(.{ .h_div = @divExact(h, m_size), .m1 = m_size, .w_div = @divExact(w, m_size), .m2 = m_size });
+        // Build the width position ids
+        var wpos_ids = zml.Tensor.iota(pos_shape, 1);
+        wpos_ids = wpos_ids.splitAxis(.h, .{ .h_div = @divExact(h, m_size), .m1 = m_size }).splitAxis(.w, .{ .w_div = @divExact(w, m_size), .m2 = m_size });
         wpos_ids = wpos_ids.transpose(.{ .h_div, .w_div, .m1, .m2 });
         wpos_ids = wpos_ids.reshape(.{ .seq = -1 });
 
         const pos_ids = zml.Tensor.stack(&[2]Tensor{ hpos_ids, wpos_ids }, 1, .layers).repeat1d(1, @as(u63, @intCast(t))).convert(.i32);
-        const rotary_pos_emb_full = zml.call(self.rotary_pos_emb, .forward, .{self.hidden_size / self.num_heads / 2});
+
+        // Compute the inverse frequency
+        const inv_freq = zml.nn.invFreq(@intCast(32), rope_opts).withTags(.{.s});
+        const seq = zml.Tensor.arange(.{ .end = hidden_size / num_heads / 2 }, .f32).withTags(.{.d});
+        // Compute the outer product of the sequence and the inverse frequency
+        const rotary_pos_emb_full = zml.Tensor.outer(seq, inv_freq);
+
         const output = rotary_pos_emb_full.gather(.{ .d = pos_ids }, .{}).merge(.{ .d = .{ .layers, .s } });
         // Add a bs size for the output for the moment because the image processing is not done in batch but it is needed for the text processing
         const output_with_bs = output.reshape(.{ .bs = 1, .s = output.dim(.seq), .d = output.dim(.d) });
@@ -725,29 +741,6 @@ pub const VisionPatchEmbed = struct {
         const reshaped_output = conv_output.reshape(.{ conv_output.dim(0), conv_output.dim(1) });
 
         return reshaped_output;
-    }
-};
-
-pub const VisionRotaryEmbedding = struct {
-    rope_opts: zml.nn.RopeOpts,
-    dim: u32,
-
-    pub fn init(allocator: std.mem.Allocator, dim: u32, theta: f32) !VisionRotaryEmbedding {
-        _ = allocator;
-        return .{
-            .rope_opts = zml.nn.RopeOpts{
-                .layout = .sequential,
-                .freq_base = theta,
-                .scaling = .{ .default = {} },
-            },
-            .dim = dim,
-        };
-    }
-
-    pub fn forward(self: VisionRotaryEmbedding, seqlen: u32) Tensor {
-        const inv_freq = zml.nn.invFreq(@intCast(32), self.rope_opts).withTags(.{.s});
-        const seq = zml.Tensor.arange(.{ .end = seqlen }, .f32).withTags(.{.d});
-        return zml.Tensor.outer(seq, inv_freq);
     }
 };
 

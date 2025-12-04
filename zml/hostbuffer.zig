@@ -93,7 +93,7 @@ pub const HostBuffer = struct {
     /// Creates a tensor from a **pointer** to a "multi dimension" array.
     /// Note this doesn't copy, the pointee array need to survive the `HostBuffer` object.
     /// Typically this is use with constant arrays.
-    pub fn fromArray(arr_ptr: anytype) HostBuffer {
+    pub fn fromArrayPtr(arr_ptr: anytype) HostBuffer {
         const T = @TypeOf(arr_ptr.*);
         const sh = parseArrayInfo(T);
         std.debug.assert(sh.byteSize() == @sizeOf(T));
@@ -103,6 +103,17 @@ pub const HostBuffer = struct {
             ._data = @ptrCast(arr_ptr),
             ._memory = .unmanaged,
         };
+    }
+
+    /// Creates a tensor from an array by allocating and copying the content.
+    pub fn fromArray(allocator: std.mem.Allocator, arr: anytype) !HostBuffer {
+        const T = @TypeOf(arr);
+        const sh = parseArrayInfo(T);
+        std.debug.assert(sh.byteSize() == @sizeOf(T));
+
+        const buffer = try empty(allocator, sh);
+        @memcpy(std.mem.sliceAsBytes(buffer.mutItems(@TypeOf(arr[0]))), std.mem.sliceAsBytes(&arr));
+        return buffer;
     }
 
     /// Returns a HostBuffer tagged with the tags in 'tagz'.

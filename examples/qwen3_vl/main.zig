@@ -68,11 +68,8 @@ pub fn generateText(
     defer tokenizer_decoder.deinit();
 
     // Extract prompt_shape values before converting to device buffer
-    const prompt_shape_values = preprocessor_input.prompt_shape.items(i32);
-    const text_before_image = @as(u32, @intCast(prompt_shape_values[0]));
-    const num_image_tokens = @as(u32, @intCast(prompt_shape_values[1]));
-    const text_after_image = @as(u32, @intCast(prompt_shape_values[2]));
-    const total_seq_len = text_before_image + num_image_tokens + text_after_image;
+    const prompt_shape_values = preprocessor_input.prompt_shape.items(u32);
+    const total_seq_len = prompt_shape_values[0] + prompt_shape_values[1] + prompt_shape_values[2];
 
     // Prepare device buffers for prefill
     const image_buffer_chw = try preprocessor_input.image_buffer_chw.toDevice(platform);
@@ -351,6 +348,7 @@ pub fn asyncMain() !void {
 
     const dtype = qwen_tensors.qwen.text_model.embed_tokens.weight.dtype();
     const kv_shape = zml.Shape.init(.{
+        .bs = 1,
         .layer = config.text_config.num_hidden_layers,
         .k = seq_len,
         .h = config.text_config.num_key_value_heads,
@@ -439,8 +437,8 @@ fn bool_parser(in: []const u8) error{}!bool {
 
 // Keep all existing helper functions unchanged
 pub const Size = struct {
-    longest_edge: f64,
-    shortest_edge: f64,
+    longest_edge: u64,
+    shortest_edge: u64,
 };
 
 pub const PreprocessorConfig = struct {
@@ -572,44 +570,46 @@ pub fn preprocessor(
         @memcpy(large_bytes[dst_offset .. dst_offset + row_size_small], small_bytes[src_offset .. src_offset + row_size_small]);
     }
 
-    const image_size: [3]i32 = .{ @intCast(height), @intCast(width), 3 };
     const factor = preprocessor_config.patch_size * preprocessor_config.temporal_patch_size;
     const min_pixels = preprocessor_config.size.shortest_edge;
     const max_pixels = preprocessor_config.size.longest_edge;
     stdx.debug.assert(@max(height, width) / @min(height, width) <= 200, "Invalid image ratio", .{});
 
-    // Calculate the resized height and width
-    var h_resized = @round(stdx.math.divFloat(f64, height, factor)) * @as(f64, @floatFromInt(factor));
-    var w_resized = @round(stdx.math.divFloat(f64, width, factor)) * @as(f64, @floatFromInt(factor));
-    if (h_resized * w_resized > max_pixels) {
-        const beta = std.math.sqrt(@as(f64, @floatFromInt(height * width)) / max_pixels);
-        h_resized = @max(@as(f64, @floatFromInt(factor)), std.math.floor(@as(f64, @floatFromInt(height)) / beta / @as(f64, @floatFromInt(factor))) * @as(f64, @floatFromInt(factor)));
-        w_resized = @max(@as(f64, @floatFromInt(factor)), std.math.floor(@as(f64, @floatFromInt(width)) / beta / @as(f64, @floatFromInt(factor))) * @as(f64, @floatFromInt(factor)));
-    } else if (h_resized * w_resized < min_pixels) {
-        const beta = std.math.sqrt(min_pixels) / @as(f64, @floatFromInt(height * width));
-        h_resized = @max(@as(f64, @floatFromInt(factor)), std.math.ceil(@as(f64, @floatFromInt(height)) * beta / @as(f64, @floatFromInt(factor))) * @as(f64, @floatFromInt(factor)));
-        w_resized = @max(@as(f64, @floatFromInt(factor)), std.math.ceil(@as(f64, @floatFromInt(width)) * beta / @as(f64, @floatFromInt(factor))) * @as(f64, @floatFromInt(factor)));
+    // Calculate the resized height and width (rounded to nearest multiple of factor)
+    var h_resized: u32 = @as(u32, @intFromFloat(@round(stdx.math.divFloat(f64, height, factor)))) * factor;
+    var w_resized: u32 = @as(u32, @intFromFloat(@round(stdx.math.divFloat(f64, width, factor)))) * factor;
+
+    // Adjust if pixel count constraints are violated
+    if (@as(u64, h_resized) * @as(u64, w_resized) > max_pixels) {
+        const beta = std.math.sqrt(stdx.math.divFloat(f64, height * width, max_pixels));
+        const h_scaled = stdx.math.divFloat(f64, height, beta);
+        const w_scaled = stdx.math.divFloat(f64, width, beta);
+        h_resized = @max(factor, @as(u32, @intFromFloat(std.math.floor(stdx.math.divFloat(f64, h_scaled, factor)))) * factor);
+        w_resized = @max(factor, @as(u32, @intFromFloat(std.math.floor(stdx.math.divFloat(f64, w_scaled, factor)))) * factor);
+    } else if (@as(u64, h_resized) * @as(u64, w_resized) < min_pixels) {
+        const beta = std.math.sqrt(stdx.math.divFloat(f64, min_pixels, height * width));
+        const h_scaled = stdx.math.divFloat(f64, height, 1) * beta;
+        const w_scaled = stdx.math.divFloat(f64, width, 1) * beta;
+        h_resized = @max(factor, @as(u32, @intFromFloat(std.math.ceil(stdx.math.divFloat(f64, h_scaled, factor)))) * factor);
+        w_resized = @max(factor, @as(u32, @intFromFloat(std.math.ceil(stdx.math.divFloat(f64, w_scaled, factor)))) * factor);
     }
     const patch_size = config.vision_config.patch_size;
 
     // Calculate the number of image pad tokens
-    const number_image_pad_tokens = 1 * (@as(u32, @intFromFloat(h_resized)) / patch_size) * (@as(u32, @intFromFloat(w_resized)) / patch_size) / std.math.pow(u32, config.vision_config.spatial_merge_size, 2);
+    const number_image_pad_tokens = 1 * (h_resized / patch_size) * (w_resized / patch_size) / std.math.pow(u32, config.vision_config.spatial_merge_size, 2);
 
     // Apply the chat template to the prompt
-    const result = try applyChatTemplate(allocator, tokenizer, prompt, number_image_pad_tokens);
-    const prompt_encoded = result.prompt_tokens;
-    const prompt_shape = result.prompt_shape;
+    const prompt_processed = try applyChatTemplate(allocator, tokenizer, prompt, number_image_pad_tokens);
+    const prompt_shape = prompt_processed.prompt_shape;
 
-    defer allocator.free(prompt_encoded);
-    const prompt_buffer = try allocator.alloc(u32, max_seq_len);
-
-    // Create the HostBuffers for the prompt, prompt shape, image size and token index
-    @memcpy(prompt_buffer[0..prompt_encoded.len], prompt_encoded);
-    const prompt_tokens = zml.HostBuffer.fromSlice(zml.Shape.init(.{ .bs = 1, .seq = max_seq_len }, .u32), prompt_buffer);
-    const prompt_shape_buffer = try zml.HostBuffer.empty(allocator, zml.Shape.init(.{ .chw = 3 }, .i32));
-    @memcpy(prompt_shape_buffer.mutItems(i32), &prompt_shape);
-    const image_size_buffer = try zml.HostBuffer.empty(allocator, zml.Shape.init(.{ .chw = 3 }, .i32));
-    @memcpy(image_size_buffer.mutItems(i32), &image_size);
+    //Create the HostBuffer by reallocating the prompt tokens to the max_seq_len
+    const prompt_buffer = try allocator.realloc(prompt_processed.prompt_tokens, max_seq_len);
+    const prompt_tokens = zml.HostBuffer.fromSlice(.{ .bs = 1, .seq = max_seq_len }, prompt_buffer);
+    // Create the HostBuffer for the prompt shape
+    const prompt_shape_buffer = (try zml.HostBuffer.fromArray(allocator, prompt_shape)).withTags(.{.prompt_shape});
+    // Create the HostBuffer for the image size
+    const image_size_buffer = (try zml.HostBuffer.fromArray(allocator, [_]u32{ height, width, 3 })).withTags(.{.chw});
+    // Create the HostBuffer for the token index
     const token_index_buffer = try zml.HostBuffer.empty(allocator, zml.Shape.init(.{}, .i64));
     const index: i64 = 0;
     @memcpy(token_index_buffer.mutItems(i64), &[_]i64{index});
@@ -620,15 +620,15 @@ pub fn preprocessor(
         .prompt_shape = prompt_shape_buffer,
         .image_dim = image_size_buffer,
         .token_index = token_index_buffer,
-        .h_resized = @as(u32, @intFromFloat(h_resized)),
-        .w_resized = @as(u32, @intFromFloat(w_resized)),
+        .h_resized = h_resized,
+        .w_resized = w_resized,
     };
 }
 
 // Apply the chat template to the prompt
 // Returns the prompt tokens and the prompt shape
 // The shape is 4 txt tokens, n vision pad tokens, m + 6  text tokens (4 and 6 are the hardcoded tokens by the chat template )
-pub fn applyChatTemplate(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, prompt: []const u8, number_image_pad_tokens: u32) !struct { prompt_tokens: []const u32, prompt_shape: [3]i32 } {
+pub fn applyChatTemplate(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, prompt: []const u8, number_image_pad_tokens: u32) !struct { prompt_tokens: []u32, prompt_shape: [3]u32 } {
     var encoder = try tokenizer.encoder();
     defer encoder.deinit();
     const im_start_id = tokenizer.tokenToId("<|im_start|>") orelse return error.NoSuchToken;
@@ -652,7 +652,7 @@ pub fn applyChatTemplate(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.
     try tokens.appendSlice(allocator, &.{ im_end_id, newline });
     try tokens.appendSlice(allocator, &.{ im_start_id, assistant, newline });
     const prompt_tokens = try encoder.encode(prompt);
-    const prompt_shape: [3]i32 = .{ 4, @as(i32, @intCast(number_image_pad_tokens)), @as(i32, @intCast(prompt_tokens.len)) + 6 };
+    const prompt_shape: [3]u32 = .{ 4, number_image_pad_tokens, @as(u32, @intCast(prompt_tokens.len)) + 6 };
     return .{ .prompt_tokens = try tokens.toOwnedSlice(allocator), .prompt_shape = prompt_shape };
 }
 
