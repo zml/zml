@@ -715,7 +715,7 @@ pub const Tensor = struct {
                         for (&powers, 0..) |*p, i| p.* = std.math.pow(u64, 2, i * 16);
                         break :blk powers;
                     };
-                    const values = Tensor.constantTensor(HostBuffer.fromArray(&powers)).withTags(.{.d});
+                    const values = Tensor.constantTensor(HostBuffer.fromArrayPtr(&powers)).withTags(.{.d});
                     const counts = values.gather(.{ .d = samples }, .{}).sum(.n).bitCast(.u16);
                     const actual_dist = counts.reshape(target_dist.shape()).convert(target_dist.dtype()).divByConst(s.dim(.n));
                     return .{ rng, .{ .mean = mean_, .variance = variance, .actual_dist = actual_dist } };
@@ -1326,7 +1326,7 @@ pub const Tensor = struct {
         const input = try zml.Buffer.fromSlice(platform, .{2}, &[_]f32{ -0.6884, 1.6795 });
         const res = try zml.testing.compileAndCall(platform, leakyReLU, .{ input, 0.1 });
 
-        const expectation = zml.HostBuffer.fromArray(&[2]f32{ -0.0688, 1.6795 });
+        const expectation = zml.HostBuffer.fromArrayPtr(&[2]f32{ -0.0688, 1.6795 });
         try zml.testing.expectClose(expectation, res, 1e-4);
     }
 
@@ -2644,7 +2644,7 @@ pub const Tensor = struct {
 
         const result = try zml.testing.compileAndCall(platform, Local._gatherSlices, .{ operand, Shape.init(.{ .b = 2, .c = 3 }, .u16), start_indices, .{} });
 
-        const expected = zml.HostBuffer.fromArray(&[2][2][2][3]u16{
+        const expected = zml.HostBuffer.fromArrayPtr(&[2][2][2][3]u16{
             .{
                 .{ .{ 13, 14, 15 }, .{ 19, 20, 21 } },
                 .{ .{ 37, 38, 39 }, .{ 43, 44, 45 } },

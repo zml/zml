@@ -47,8 +47,8 @@ pub fn asyncMain() !void {
     // A BufferStore is usually created by loading model data from a file.
     var store: zml.aio.BufferStore = .init(allocator);
     defer store.deinit();
-    try store.buffers.put(store.arena.allocator(), "weight", zml.HostBuffer.fromArray(&weights));
-    try store.buffers.put(store.arena.allocator(), "bias", zml.HostBuffer.fromArray(&bias));
+    try store.buffers.put(store.arena.allocator(), "weight", zml.HostBuffer.fromArrayPtr(&weights));
+    try store.buffers.put(store.arena.allocator(), "bias", zml.HostBuffer.fromArrayPtr(&bias));
 
     // A clone of our model, consisting of shapes. We only need shapes for compiling.
     // We use the BufferStore to infer the shapes.

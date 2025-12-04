@@ -215,8 +215,8 @@ const input_shape = zml.Shape.init(.{3}, .f16);
 // We manually produce a BufferStore. You would not normally do that.
 // A BufferStore is usually created by loading model data from a file.
 var buffers: zml.aio.BufferStore.Buffers = .{};
-try buffers.put(arena, "weight", zml.HostBuffer.fromArray(&weights));
-try buffers.put(arena, "bias", zml.HostBuffer.fromArray(&bias));
+try buffers.put(arena, "weight", zml.HostBuffer.fromArrayPtr(&weights));
+try buffers.put(arena, "bias", zml.HostBuffer.fromArrayPtr(&bias));
 
 // the actual BufferStore
 const bs: zml.aio.BufferStore = .{
@@ -462,8 +462,8 @@ pub fn asyncMain() !void {
     // We manually produce a BufferStore. You would not normally do that.
     // A BufferStore is usually created by loading model data from a file.
     var buffers: zml.aio.BufferStore.Buffers = .{};
-    try buffers.put(arena, "weight", zml.HostBuffer.fromArray(&weights));
-    try buffers.put(arena, "bias", zml.HostBuffer.fromArray(&bias));
+    try buffers.put(arena, "weight", zml.HostBuffer.fromArrayPtr(&weights));
+    try buffers.put(arena, "bias", zml.HostBuffer.fromArrayPtr(&bias));
 
     // the actual BufferStore
     const bs: zml.aio.BufferStore = .{

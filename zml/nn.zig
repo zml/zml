@@ -585,7 +585,7 @@ test nearest {
         const result = try zml.testing.compileAndCall(platform, upsample, .{ input_3d_basic, .{ .scale_factor = &.{3}, .mode = .nearest } });
         try std.testing.expectEqualSlices(i64, &.{ 1, 1, 6 }, result.dims());
         const expected: [1][1][6]i32 = .{.{.{ 1, 1, 1, 2, 2, 2 }}};
-        try zml.testing.expectClose(zml.HostBuffer.fromArray(&expected), result, 0);
+        try zml.testing.expectClose(zml.HostBuffer.fromArrayPtr(&expected), result, 0);
     }
     // 3D Tensor (advanced)
     {
@@ -607,7 +607,7 @@ test nearest {
                 .{ 21, 21, 22, 22, 23, 23, 24, 24 },
             },
         };
-        try zml.testing.expectClose(zml.HostBuffer.fromArray(&expected), result, 0);
+        try zml.testing.expectClose(zml.HostBuffer.fromArrayPtr(&expected), result, 0);
     }
     // 4D Tensor (basic)
     {
@@ -665,7 +665,7 @@ test nearest {
                 },
             },
         };
-        try zml.testing.expectClose(zml.HostBuffer.fromArray(&expected), result, 0);
+        try zml.testing.expectClose(zml.HostBuffer.fromArrayPtr(&expected), result, 0);
     }
     // 5D Tensor (basic)
     {
@@ -690,7 +690,7 @@ test nearest {
                 },
             },
         };
-        try zml.testing.expectClose(zml.HostBuffer.fromArray(&expected), result, 0);
+        try zml.testing.expectClose(zml.HostBuffer.fromArrayPtr(&expected), result, 0);
     }
 }
 
@@ -837,7 +837,7 @@ pub fn resizeCubic1d(image: Tensor, axis: i8, new_len: u63, opt: ResizeOpts) Ten
         .{ 1, -2.5, 2, -0.5 },
         .{ -0.5, 1.5, -1.5, 0.5 },
     };
-    const weights = zml.Tensor.constantTensor(zml.HostBuffer.fromArray(&weights_)).convert(dtype).withTags(.{ ._interpolated, ._neighbors });
+    const weights = zml.Tensor.constantTensor(zml.HostBuffer.fromArrayPtr(&weights_)).convert(dtype).withTags(.{ ._interpolated, ._neighbors });
 
     // actually do the interpolation.
     // Note: ideally this matmul should be inlined with the gather, but that's currently not the case.

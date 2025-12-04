@@ -322,9 +322,9 @@ test testLayer {
     var activations = zml.aio.BufferStore.init(std.testing.allocator);
     defer activations.deinit();
     {
-        const input = zml.HostBuffer.fromArray(&[2]f32{ 1, -1 });
+        const input = zml.HostBuffer.fromArrayPtr(&[2]f32{ 1, -1 });
         try activations.buffers.put(activations.arena.allocator(), "model.layer.in.0", input);
-        const output = zml.HostBuffer.fromArray(&[5]f32{ 0, -1, -1, 0, -1 });
+        const output = zml.HostBuffer.fromArrayPtr(&[5]f32{ 0, -1, -1, 0, -1 });
         try activations.buffers.put(activations.arena.allocator(), "model.layer.out.0", output);
     }
 
@@ -356,7 +356,7 @@ test testLayer {
     };
 
     // Expected output
-    const expected_output = zml.HostBuffer.fromArray(&[3][4]f32{
+    const expected_output = zml.HostBuffer.fromArrayPtr(&[3][4]f32{
         .{ 1.0, 2.0, 3.0, 4.0 },
         .{ 5.0, 6.0, 7.0, 8.0 },
         .{ 9.0, 10.0, 11.0, 12.0 },
