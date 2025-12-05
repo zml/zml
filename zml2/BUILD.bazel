@@ -20,6 +20,7 @@ cc_library(
 zig_library(
     name = "zml",
     srcs = [
+        "constants.zig",
         "dtype.zig",
         "exe.zig",
         "floats.zig",

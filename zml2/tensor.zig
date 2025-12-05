@@ -9,13 +9,13 @@ const mlir = @import("mlir");
 const mlirx = @import("mlirx.zig");
 const dialects = @import("mlir/dialects");
 const ops = @import("ops.zig");
+const constants = @import("constants.zig");
 
 const DataType = @import("dtype.zig").DataType;
 const CompilationContext = @import("module.zig").CompilationContext;
 
 pub const Tensor = struct {
     var current_id: std.atomic.Value(usize) = .{ .raw = 1 };
-    pub const MAX_RANK = Shape.MAX_RANK;
 
     id: usize,
     auto_broadcast: bool = false,
@@ -81,7 +81,7 @@ pub const Tensor = struct {
         const ranked_tensor = val.type_().isA(mlir.RankedTensorType).?;
         const n = ranked_tensor.rank();
 
-        stdx.debug.assert(n <= MAX_RANK, "Can't represent MLIR tensor of rank {}, max supported rank is {}.", .{ n, MAX_RANK });
+        stdx.debug.assert(n <= constants.MAX_RANK, "Can't represent MLIR tensor of rank {}, max supported rank is {}.", .{ n, constants.MAX_RANK });
 
         var sh: Shape = .{ ._dtype = mlirx.Type.toDType(mlirCtx(), ranked_tensor.elementType()) };
         for (0..n) |i| {
@@ -114,7 +114,7 @@ pub const Tensor = struct {
     /// Returns the indices of each of the given axes.
     ///
     /// 'axis_' can be an integer or a tag.
-    pub fn axes(self: Tensor, axes_: anytype) stdx.BoundedArray(u3, Tensor.MAX_RANK) {
+    pub fn axes(self: Tensor, axes_: anytype) stdx.BoundedArray(u3, constants.MAX_RANK) {
         return self._shape.axes(axes_);
     }
 
@@ -1013,7 +1013,7 @@ pub const Tensor = struct {
         const lhs_contracting_dim: i8 = @intCast(lhs.shape().hasTag(args).?);
         const rhs_contracting_dim: i8 = @intCast(rhs.shape().hasTag(args).?);
 
-        var batching_axes: stdx.BoundedArray([2]i8, Shape.MAX_RANK) = .{};
+        var batching_axes: stdx.BoundedArray([2]i8, constants.MAX_RANK) = .{};
         for (0..lhs.rank()) |lhs_tag_index| {
             const lhs_tag = lhs.shape().tag(lhs_tag_index);
             if (lhs_tag == Shape.toTag(args)) continue;
@@ -1077,7 +1077,7 @@ pub const Tensor = struct {
     ) Tensor {
         stdx.debug.assert(lhs.dtype() == rhs.dtype(), "dotGeneral expects tensors to be of the same type, got {} and {}", .{ lhs.dtype(), rhs.dtype() });
 
-        const Axes = stdx.BoundedArray(i64, MAX_RANK);
+        const Axes = stdx.BoundedArray(i64, constants.MAX_RANK);
 
         var res_shape: Shape = .{ ._dtype = lhs.dtype() };
         // Validate batching axes
@@ -1325,15 +1325,15 @@ pub const Tensor = struct {
     /// Returns a transposed Tensor computed using the given axes.
     pub fn transpose(self: Tensor, axes_: anytype) Tensor {
         const axes__ = self.axes(axes_).constSlice();
-        const default_perm = [MAX_RANK]i64{ 7, 6, 5, 4, 3, 2, 1, 0 };
-        const no_op = [MAX_RANK]i64{ 0, 1, 2, 3, 4, 5, 6, 7 };
+        const default_perm = [constants.MAX_RANK]i64{ 7, 6, 5, 4, 3, 2, 1, 0 };
+        const no_op = [constants.MAX_RANK]i64{ 0, 1, 2, 3, 4, 5, 6, 7 };
 
         const permutation: []const i64 = if (axes__.len == 0)
-            default_perm[MAX_RANK - self.rank() ..]
+            default_perm[constants.MAX_RANK - self.rank() ..]
         else
             toI64(axes__);
 
-        stdx.debug.assert(permutation.len == self.rank(), "transpose expects input tensor rank and 'axes_' length to be equal, got {f} and {any}", .{ self, permutation[0..@min(permutation.len, MAX_RANK + 2)] });
+        stdx.debug.assert(permutation.len == self.rank(), "transpose expects input tensor rank and 'axes_' length to be equal, got {f} and {any}", .{ self, permutation[0..@min(permutation.len, constants.MAX_RANK + 2)] });
 
         if (std.mem.eql(i64, permutation, no_op[0..self.rank()])) {
             return self;
@@ -1370,7 +1370,7 @@ pub const Tensor = struct {
     /// unflatten((d0, d1, axis_m, d3), 2, n) -> (d0, d1, n, d2_m, d3)
     pub fn unflatten(self: Tensor, axis_: i8, n: i64) Tensor {
         // TODO: move to torch.zig, this equivalent to `spitAxis`
-        stdx.debug.assert(self.rank() < Tensor.MAX_RANK, "unflatten expects input tensor rank to be less than {}, got {}", .{ Tensor.MAX_RANK, self.rank() });
+        stdx.debug.assert(self.rank() < constants.MAX_RANK, "unflatten expects input tensor rank to be less than {}, got {}", .{ constants.MAX_RANK, self.rank() });
 
         const a = if (axis_ >= 0) self.axis(axis_) else self.axis(axis_) + 1;
         const new_dim = std.math.divExact(i64, self.dim(a), n) catch std.debug.panic("unflatten expects chosen dimension to be divisible by 'n' but {} is not divisible by {}", .{ self.dim(a), n });
@@ -1463,16 +1463,16 @@ pub const Tensor = struct {
 
     /// Slices the input Tensor over the given axis using the given parameters.
     pub fn slice1d(self: Tensor, axis_: anytype, s: Slice) Tensor {
-        var slices = [_]Slice{.{}} ** MAX_RANK;
+        var slices = [_]Slice{.{}} ** constants.MAX_RANK;
         slices[self.axis(axis_)] = s;
         return self.slice(slices[0..self.rank()]);
     }
 
     /// Slices the input Tensor using the given parameters.
     pub fn slice(self: Tensor, slices: []const Slice) Tensor {
-        var start_indices: [MAX_RANK]i64 = undefined;
-        var strides: [MAX_RANK]i64 = undefined;
-        var limit_indices: [MAX_RANK]i64 = undefined;
+        var start_indices: [constants.MAX_RANK]i64 = undefined;
+        var strides: [constants.MAX_RANK]i64 = undefined;
+        var limit_indices: [constants.MAX_RANK]i64 = undefined;
         var res_shape: Shape = self._shape;
 
         for (slices, 0..) |s, a| {
@@ -1542,7 +1542,7 @@ pub const Tensor = struct {
 
     pub fn choose(self: Tensor, offsets: anytype) Tensor {
         const off, const tags = Shape.parseDimensions(offsets);
-        var slices = [_]Slice{.{}} ** MAX_RANK;
+        var slices = [_]Slice{.{}} ** constants.MAX_RANK;
         for (off.constSlice(), tags.constSlice()) |o, t| {
             const ax = self.axis(t);
             slices[ax] = .single(o);
@@ -1998,12 +1998,11 @@ pub const Tensor = struct {
         // TODO: broad is error prone because of this:
         // it will happily broadcast .{ .a = 10, .b = 1 } to .{ .b = 10, .a = 5 }
         if (self._shape.rank() == 0 or self._shape.rank() == other.rank()) {
-            const all_axes = [MAX_RANK]i64{ 0, 1, 2, 3, 4, 5, 6, 7 };
-            return self.broadcast(other, all_axes[0..self.rank()]);
+            return self.broadcast(other, constants.AXES_IOTA[0..self.rank()]);
         }
 
         // check that each axis of self maps to an axis of other
-        var axes_: stdx.BoundedArray(i64, MAX_RANK) = .{};
+        var axes_: stdx.BoundedArray(i64, constants.MAX_RANK) = .{};
         for (self._shape.tags()) |t| {
             axes_.appendAssumeCapacity(@intCast(other.axis(t)));
         }
@@ -2035,7 +2034,7 @@ pub const Tensor = struct {
     pub fn pad(self: Tensor, padding_value: anytype, paddings: anytype) Tensor {
         const _paddings = self.shape().parseAxesOptions(Pad, paddings, .{});
 
-        const ZEROS = [_]i64{0} ** MAX_RANK;
+        const ZEROS = [_]i64{0} ** constants.MAX_RANK;
         var low = ZEROS;
         var high = ZEROS;
         var interior = ZEROS;
@@ -2073,7 +2072,7 @@ pub const Tensor = struct {
             self.axis(axis_);
 
         var res_shape = self._shape;
-        const ones = [_]i64{1} ** MAX_RANK;
+        const ones = [_]i64{1} ** constants.MAX_RANK;
         res_shape._dims.insertSlice(ax, ones[0..tags_.len]) catch unreachable;
         res_shape._tags.insertSlice(ax, tags_.constSlice()) catch unreachable;
 
@@ -2250,10 +2249,10 @@ pub const Tensor = struct {
         // Compute result shape
         var res_shape = indices._shape.remove(index_coord_axis).withDtype(self.dtype());
         var slice_dims = self._shape._dims;
-        var self_batch_axes: stdx.BoundedArray(i64, MAX_RANK) = .{};
-        var indices_batch_axes: stdx.BoundedArray(i64, MAX_RANK) = .{};
-        var start_index_map: stdx.BoundedArray(i64, MAX_RANK) = .{};
-        var self_offset_axes: stdx.BoundedArray(i64, MAX_RANK) = .{};
+        var self_batch_axes: stdx.BoundedArray(i64, constants.MAX_RANK) = .{};
+        var indices_batch_axes: stdx.BoundedArray(i64, constants.MAX_RANK) = .{};
+        var start_index_map: stdx.BoundedArray(i64, constants.MAX_RANK) = .{};
+        var self_offset_axes: stdx.BoundedArray(i64, constants.MAX_RANK) = .{};
         for (self._shape.tags(), 0..self.rank()) |t, self_ax| {
             const maybe_slice_ax: ?u3 = if (tagged_api) slice_shape.hasTag(t) else @intCast(self_ax);
 
@@ -2871,7 +2870,7 @@ pub const Tensor = struct {
 
         // TODO: support maxPool on non last axis
         const a = self.axis(-1);
-        const ones = [_]i64{1} ** Tensor.MAX_RANK;
+        const ones = [_]i64{1} ** constants.MAX_RANK;
         var window_dimensions = ones;
         window_dimensions[a] = opts.window_dimensions;
         var window_strides = window_dimensions;
@@ -2882,7 +2881,7 @@ pub const Tensor = struct {
         var window_dilations = ones;
         window_dilations[a] = opts.window_dilations;
 
-        var padding = [_][2]i64{.{ 0, 0 }} ** Tensor.MAX_RANK;
+        var padding = [_][2]i64{.{ 0, 0 }} ** constants.MAX_RANK;
         padding[a] = opts.padding;
 
         const result = ops.reduceWindow(
@@ -2921,7 +2920,7 @@ pub const Tensor = struct {
         const base_dilation = initPoolArg(self.rank(), &opts.base_dilations);
         const window_dilations = initPoolArg(self.rank(), &opts.window_dilations);
 
-        var padding = [_][2]i64{.{ 0, 0 }} ** Tensor.MAX_RANK;
+        var padding = [_][2]i64{.{ 0, 0 }} ** constants.MAX_RANK;
         padding[a - 1] = opts.padding[0];
         padding[a] = opts.padding[1];
 
@@ -3077,7 +3076,7 @@ pub const Tensor = struct {
         const a = self.axis(axis_);
         const new_shape = self._shape.set(a, slice_.len);
 
-        var start_indices = [_]*const mlir.Value{constant(slice_.start.dtype().zero()).value()} ** MAX_RANK;
+        var start_indices = [_]*const mlir.Value{constant(slice_.start.dtype().zero()).value()} ** constants.MAX_RANK;
         start_indices[a] = slice_.start.value();
 
         const op = dialects.stablehlo.dynamic_slice(
@@ -3118,7 +3117,7 @@ pub const Tensor = struct {
 
         const idx_dtype = if (slices.len > 0) slices.get(0).start.dtype() else .i32;
         const zero = Tensor.scalar(0, idx_dtype).value();
-        var offset_values = [_]*const mlir.Value{zero} ** MAX_RANK;
+        var offset_values = [_]*const mlir.Value{zero} ** constants.MAX_RANK;
         var res_shape = self._shape;
         for (slices.constSlice(), 0..) |slice_, i| {
             const offset = slice_.start;
@@ -3172,7 +3171,7 @@ pub const Tensor = struct {
     /// Note this is the untagged api, if you have tags, you should use dynamicUpdateSlice directly.
     pub fn dynamicUpdateSlice1d(self: Tensor, update: Tensor, axis_: i64, offset: Tensor) Tensor {
         const placeholder = Tensor.scalar(0, .i32);
-        var start_indices = [_]Tensor{placeholder} ** MAX_RANK;
+        var start_indices = [_]Tensor{placeholder} ** constants.MAX_RANK;
         start_indices[self.axis(axis_)] = offset;
         return self.dynamicUpdateSlice(start_indices[0..self.rank()], update);
     }
@@ -3236,7 +3235,7 @@ pub const Tensor = struct {
 
         const idx_dtype = if (offset.len > 0) offset.get(0).dtype() else .i32;
         const zero = Tensor.scalar(0, idx_dtype).value();
-        var offset_values: [MAX_RANK]*const mlir.Value = undefined;
+        var offset_values: [constants.MAX_RANK]*const mlir.Value = undefined;
         if (offset_tags.len == 0) {
             // Without offset tags we need the same number of offset than rank.
             stdx.debug.assert(self.rank() == offset.len, "dynamicUpdateSlice expects input tensor rank and 'offset_' length to be equal, got {} and {}", .{ self.rank(), offset.len });
@@ -3247,7 +3246,7 @@ pub const Tensor = struct {
         } else {
             // If an axis isn't specified, update the full slice.
             // This is only allowed when using tagged sliced.
-            offset_values = .{zero} ** MAX_RANK;
+            offset_values = .{zero} ** constants.MAX_RANK;
             for (offset.constSlice(), offset_tags.constSlice()) |start, t| {
                 const a = self._shape.hasTag(t) orelse stdx.debug.panic("dynamicUpdateSlice expects input tensor to have tags used in 'offset_' but {s} is missing (input shape is {f})", .{ t, self._shape });
                 offset_values[a] = start.value();
@@ -3390,7 +3389,7 @@ pub const Tensor = struct {
     /// For each vector in the input tensor,
     /// creates a diagonal-matrix where diagonal values are set to the vector values.
     pub fn toDiagonal(self: Tensor, axis_: anytype, new_tags: [2]@TypeOf(.enum_literal)) Tensor {
-        stdx.debug.assert(self.rank() < MAX_RANK - 1, "toDiagonal expects input up to {d} rank, got {f}", .{ MAX_RANK - 1, self });
+        stdx.debug.assert(self.rank() < constants.MAX_RANK - 1, "toDiagonal expects input up to {d} rank, got {f}", .{ constants.MAX_RANK - 1, self });
         const a = self.axis(axis_);
         const d = self.dim(a);
         var res_shape = self._shape;
@@ -3594,7 +3593,7 @@ pub const Tensor = struct {
 
     fn _cartesianProduct(vectors: []const Tensor, out: []Tensor) void {
         stdx.debug.assert(vectors.len >= 1, "cartesianProduct expects at least one input.", .{});
-        stdx.debug.assert(vectors.len < Tensor.MAX_RANK, "cartesianProduct expects at most {} input vectors, received {} !", .{ Tensor.MAX_RANK - 1, vectors.len });
+        stdx.debug.assert(vectors.len < constants.MAX_RANK, "cartesianProduct expects at most {} input vectors, received {} !", .{ constants.MAX_RANK - 1, vectors.len });
         for (vectors) |x| {
             stdx.debug.assert(x.rank() <= 1, "cartesianProduct expects 0 or 1 rank input vectors. Got: {any}", .{vectors});
             stdx.debug.assert(vectors[0].dtype() == x.dtype(), "cartesianProduct expects input vectors to have all the same dtype. Got: {any}", .{vectors});
@@ -3663,7 +3662,7 @@ pub const Tensor = struct {
     ///
     /// - res[a, b, c, d] == (A[a], B[b], C[c], D[d])
     pub fn cartesianProductStacked(vectors: []const Tensor) Tensor {
-        var out = stdx.BoundedArray(Tensor, Tensor.MAX_RANK).init(vectors.len) catch unreachable;
+        var out = stdx.BoundedArray(Tensor, constants.MAX_RANK).init(vectors.len) catch unreachable;
         _cartesianProduct(vectors, out.slice());
 
         return Tensor.stack(out.constSlice(), .last, .coord);
@@ -3752,24 +3751,24 @@ pub const Tensor = struct {
     }
 };
 
-fn initPoolArg(rank: usize, data: []const i64) [Tensor.MAX_RANK]i64 {
+fn initPoolArg(rank: usize, data: []const i64) [constants.MAX_RANK]i64 {
     // TODO use shape
-    var result = [_]i64{1} ** Tensor.MAX_RANK;
+    var result = [_]i64{1} ** constants.MAX_RANK;
     const start = rank - data.len;
     @memcpy(result[start .. start + data.len], data);
     return result;
 }
 
-fn getPoolResDims(dt: DataType, in_dims: []const i64, base_dilations: @Vector(Tensor.MAX_RANK, i64), padding: []const i64, window_dimensions: @Vector(Tensor.MAX_RANK, i64), window_dilations: @Vector(Tensor.MAX_RANK, i64), window_strides: @Vector(Tensor.MAX_RANK, i64)) Shape {
+fn getPoolResDims(dt: DataType, in_dims: []const i64, base_dilations: @Vector(constants.MAX_RANK, i64), padding: []const i64, window_dimensions: @Vector(constants.MAX_RANK, i64), window_dilations: @Vector(constants.MAX_RANK, i64), window_strides: @Vector(constants.MAX_RANK, i64)) Shape {
     // TODO use shape
-    var input_dims = [_]i64{1} ** Tensor.MAX_RANK;
+    var input_dims = [_]i64{1} ** constants.MAX_RANK;
     @memcpy(input_dims[0..in_dims.len], in_dims);
 
-    const input_dims_: @Vector(Tensor.MAX_RANK, i64) = input_dims;
-    const splat_one: @Vector(Tensor.MAX_RANK, i64) = @splat(1);
-    const dilated_input_shape: @Vector(Tensor.MAX_RANK, i64) = (input_dims_ - splat_one) * base_dilations + splat_one;
-    var pad_slice0: @Vector(Tensor.MAX_RANK, i64) = @splat(padding[0]);
-    var pad_slice1: @Vector(Tensor.MAX_RANK, i64) = @splat(padding[0]);
+    const input_dims_: @Vector(constants.MAX_RANK, i64) = input_dims;
+    const splat_one: @Vector(constants.MAX_RANK, i64) = @splat(1);
+    const dilated_input_shape: @Vector(constants.MAX_RANK, i64) = (input_dims_ - splat_one) * base_dilations + splat_one;
+    var pad_slice0: @Vector(constants.MAX_RANK, i64) = @splat(padding[0]);
+    var pad_slice1: @Vector(constants.MAX_RANK, i64) = @splat(padding[0]);
     if (padding.len > 1) {
         var idx: usize = 0;
         while (idx < in_dims.len * 2) : (idx += 2) {
@@ -3777,10 +3776,10 @@ fn getPoolResDims(dt: DataType, in_dims: []const i64, base_dilations: @Vector(Te
             pad_slice1[idx / 2] = padding[idx + 1];
         }
     }
-    const padded_input_shape: @Vector(Tensor.MAX_RANK, i64) = pad_slice0 + dilated_input_shape + pad_slice1;
+    const padded_input_shape: @Vector(constants.MAX_RANK, i64) = pad_slice0 + dilated_input_shape + pad_slice1;
     const dilated_window_shape = (window_dimensions - splat_one) * window_dilations + splat_one;
     const dims = @divFloor(padded_input_shape - dilated_window_shape, window_strides) + splat_one;
-    const dims_arr: [Tensor.MAX_RANK]i64 = @bitCast(dims);
+    const dims_arr: [constants.MAX_RANK]i64 = @bitCast(dims);
     return Shape.init(dims_arr[0..in_dims.len], dt);
 }
 
@@ -3860,12 +3859,12 @@ fn getComparisonType(ctx: mlir.Context, dtype: DataType) dialects.stablehlo.Comp
 //    );
 //}
 
-fn _parseGatherCoord(self: Tensor, axes_: anytype) struct { bool, stdx.BoundedArray(u3, Tensor.MAX_RANK) } {
+fn _parseGatherCoord(self: Tensor, axes_: anytype) struct { bool, stdx.BoundedArray(u3, constants.MAX_RANK) } {
     const AxesT = @TypeOf(axes_);
     const axes_is_scalar = AxesT == @TypeOf(.enum_literal) or AxesT == comptime_int or @typeInfo(AxesT) == .int;
 
     const coord_axes = if (axes_is_scalar)
-        stdx.BoundedArray(u3, Tensor.MAX_RANK).fromSlice(&.{self.axis(axes_)}) catch unreachable
+        stdx.BoundedArray(u3, constants.MAX_RANK).fromSlice(&.{self.axis(axes_)}) catch unreachable
     else
         self.axes(axes_);
 
@@ -3873,13 +3872,13 @@ fn _parseGatherCoord(self: Tensor, axes_: anytype) struct { bool, stdx.BoundedAr
 }
 
 fn toI64(values: anytype) []i64 {
-    var res: [Tensor.MAX_RANK]i64 = undefined;
+    var res: [constants.MAX_RANK]i64 = undefined;
     for (values, 0..) |val, i| res[i] = @intCast(val);
     return res[0..values.len];
 }
 
 fn transposeIsJustAReshape(x: Shape, permutation: []const i64) bool {
-    var perm: stdx.BoundedArray(struct { u8, bool }, Tensor.MAX_RANK) = .{};
+    var perm: stdx.BoundedArray(struct { u8, bool }, constants.MAX_RANK) = .{};
     // Don't rewrite on invalid inputs.
     if (permutation.len > x.rank()) return false;
     for (permutation) |ax| {

@@ -3,6 +3,7 @@ const testing = std.testing;
 const builtin = @import("builtin");
 
 const stdx = @import("stdx");
+const constants = @import("constants.zig");
 
 const DataType = @import("dtype.zig").DataType;
 
@@ -16,18 +17,16 @@ test {
 
 /// Represent the shape of a tensor.
 pub const Shape = struct {
-    pub const MAX_RANK: u8 = 8;
-
     pub const Tag = [*:0]const u8;
     pub const TagUnknown = "_".ptr;
     const TagLast = "last".ptr;
 
-    pub const DimsArray = stdx.BoundedArray(i64, MAX_RANK);
-    pub const TagsArray = stdx.BoundedArray(Tag, MAX_RANK);
-    pub const AxesArray = stdx.BoundedArray(u3, MAX_RANK);
-    pub const ShardingInfo = @Vector(MAX_RANK, bool);
+    pub const DimsArray = stdx.BoundedArray(i64, constants.MAX_RANK);
+    pub const TagsArray = stdx.BoundedArray(Tag, constants.MAX_RANK);
+    pub const AxesArray = stdx.BoundedArray(u3, constants.MAX_RANK);
+    pub const ShardingInfo = @Vector(constants.MAX_RANK, bool);
 
-    const UnknownTags: TagsArray = .{ .len = 0, .buffer = [_]Tag{TagUnknown} ** MAX_RANK };
+    const UnknownTags: TagsArray = .{ .len = 0, .buffer = [_]Tag{TagUnknown} ** constants.MAX_RANK };
 
     _dtype: DataType,
     _dims: DimsArray = .{},
@@ -398,7 +397,7 @@ pub const Shape = struct {
             } else {
                 try writer.print("{d}", .{d});
             }
-            if (@as([MAX_RANK]bool, self._sharding_info)[i]) {
+            if (@as([constants.MAX_RANK]bool, self._sharding_info)[i]) {
                 try writer.writeByte('!');
             }
             need_comma = true;
@@ -525,7 +524,7 @@ pub const Shape = struct {
     }
 
     pub fn insertTag(self: Shape, axis_: anytype, d: i64, tag_: anytype) Shape {
-        stdx.debug.assert(self.rank() < MAX_RANK - 1, "Can't insert new axis in {f}, it's already at max rank.", .{self});
+        stdx.debug.assert(self.rank() < constants.MAX_RANK - 1, "Can't insert new axis in {f}, it's already at max rank.", .{self});
 
         const ax = if (@TypeOf(axis_) == EnumLiteral and axis_ == .last)
             self.rank()
@@ -786,13 +785,13 @@ pub const Shape = struct {
         }
     }
 
-    pub fn computeStrides(self: Shape) stdx.BoundedArray(i64, MAX_RANK) {
+    pub fn computeStrides(self: Shape) stdx.BoundedArray(i64, constants.MAX_RANK) {
         const rk = self.rank();
-        var strides: stdx.BoundedArray(i64, MAX_RANK) = .{ .len = rk };
+        var strides: stdx.BoundedArray(i64, constants.MAX_RANK) = .{ .len = rk };
         if (rk == 0) return strides;
 
-        const V = @Vector(MAX_RANK, i64);
-        const rank_mask = std.simd.iota(u8, MAX_RANK) < @as(@Vector(MAX_RANK, u8), @splat(rk));
+        const V = @Vector(constants.MAX_RANK, i64);
+        const rank_mask = std.simd.iota(u8, constants.MAX_RANK) < @as(@Vector(constants.MAX_RANK, u8), @splat(rk));
         // For each axis compute the product of all following dimensions
         // and the element size in bytes.
         var d: V = @bitCast(self._dims.buffer);
@@ -992,10 +991,10 @@ pub const Shape = struct {
         return res;
     }
 
-    pub fn parseStruct(T: type, v: anytype) struct { stdx.BoundedArray(T, MAX_RANK), TagsArray } {
+    pub fn parseStruct(T: type, v: anytype) struct { stdx.BoundedArray(T, constants.MAX_RANK), TagsArray } {
         const V = @TypeOf(v);
 
-        var vals_: stdx.BoundedArray(T, MAX_RANK) = .{};
+        var vals_: stdx.BoundedArray(T, constants.MAX_RANK) = .{};
         var tags_: TagsArray = .{};
 
         if (comptime stdx.meta.isSliceOf(V, T)) {
@@ -1007,7 +1006,7 @@ pub const Shape = struct {
 
         if (comptime stdx.meta.isStruct(V)) {
             const fields = std.meta.fields(V);
-            stdx.debug.assertComptime(fields.len <= MAX_RANK, "Too many fields in struct {} ({d}). Max supported is {d}.", .{ V, fields.len, MAX_RANK });
+            stdx.debug.assertComptime(fields.len <= constants.MAX_RANK, "Too many fields in struct {} ({d}). Max supported is {d}.", .{ V, fields.len, constants.MAX_RANK });
             inline for (fields) |field| {
                 const fv = @field(v, field.name);
                 vals_.appendAssumeCapacity(fv);
@@ -1030,10 +1029,10 @@ pub const Shape = struct {
     }
 
     /// Parses a struct literal into a list of options for each axes.
-    pub fn parseAxesOptions(self: Shape, T: type, options: anytype, default: T) stdx.BoundedArray(T, MAX_RANK) {
+    pub fn parseAxesOptions(self: Shape, T: type, options: anytype, default: T) stdx.BoundedArray(T, constants.MAX_RANK) {
         const V = @TypeOf(options);
 
-        var res: stdx.BoundedArray(T, MAX_RANK) = .{};
+        var res: stdx.BoundedArray(T, constants.MAX_RANK) = .{};
         if (comptime stdx.meta.isSliceOf(V, T)) {
             stdx.debug.assert(options.len == self.rank(), "expects exactly {} options in slice, for {} got {}", .{ self.rank(), self, options.len });
             for (options) |d| {
@@ -1044,7 +1043,7 @@ pub const Shape = struct {
         if (comptime stdx.meta.isStruct(V)) {
             for (0..self.rank()) |_| res.appendAssumeCapacity(default);
             const fields = std.meta.fields(V);
-            stdx.debug.assertComptime(fields.len <= MAX_RANK, "expects up to {} options struct literal, got {}", .{ V, MAX_RANK, fields.len });
+            stdx.debug.assertComptime(fields.len <= constants.MAX_RANK, "expects up to {} options struct literal, got {}", .{ V, constants.MAX_RANK, fields.len });
             inline for (fields) |field| {
                 const a = self.axis(field);
                 res.buffer[a] = @field(options, field.name);

@@ -26,6 +26,7 @@ pub const shape = @import("shape.zig");
 pub const Shape = shape.Shape;
 pub const tensor = @import("tensor.zig");
 pub const Tensor = tensor.Tensor;
+pub const constants = @import("constants.zig");
 
 var runfiles_once = std.once(struct {
     fn call_() !void {
