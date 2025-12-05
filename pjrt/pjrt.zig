@@ -36,6 +36,12 @@ pub inline fn pjrtStruct(v: anytype) @TypeOf(v) {
     return ret;
 }
 
+pub fn pjrtStruct2(T: type, v: anytype) T {
+    var ret = std.mem.zeroInit(T, v);
+    ret.struct_size = pjrtStructSize(T);
+    return ret;
+}
+
 pub const ApiError = error{
     Cancelled,
     Unknown,
@@ -94,7 +100,7 @@ pub const Api = struct {
 
         const api = DynGetPjrtApi();
         log.info("Loaded library: {s}", .{library});
-        _ = api.call(.PJRT_Plugin_Initialize, .{}) catch unreachable;
+        _ = api.call(.PJRT_Plugin_Initialize, pjrtStruct2(c.PJRT_Plugin_Initialize_Args, .{})) catch unreachable;
 
         return api;
     }
@@ -107,8 +113,8 @@ pub const Api = struct {
         return arg_array_type_info.pointer.child;
     }
 
-    inline fn call(self: *const Api, comptime method: Funcs, arg: CallFnArgType(method)) ApiError!@TypeOf(arg) {
-        var ret = pjrtStruct(arg);
+    inline fn call(self: *const Api, comptime method: Funcs, arg: anytype) ApiError!CallFnArgType(method) {
+        var ret = pjrtStruct2(CallFnArgType(method), arg);
         const fn_ptr = @field(&self.inner, @tagName(method)).?;
         const result = fn_ptr(&ret);
         if (@TypeOf(result) == void) {
@@ -242,14 +248,14 @@ pub const Error = opaque {
 
     pub fn getCode(self: *Error, api: *const Api) ErrorCode {
         const ret = api.call(.PJRT_Error_GetCode, .{
-            .@"error" = @ptrCast(self),
+            .@"error" = @as(*c.PJRT_Error, @ptrCast(self)),
         }) catch unreachable;
         return @enumFromInt(ret.code);
     }
 
     pub fn getMessage(self: *Error, api: *const Api) []const u8 {
         const ret = api.call(.PJRT_Error_Message, .{
-            .@"error" = @ptrCast(self),
+            .@"error" = @as(*c.PJRT_Error, @ptrCast(self)),
         }) catch unreachable;
         return ret.message[0..ret.message_size];
     }
@@ -266,7 +272,7 @@ pub const ShapeSpec = extern struct {
 
     pub fn init(dims_: []const usize, bt: BufferType) ShapeSpec {
         return .{
-            .inner = pjrtStruct(c.PJRT_ShapeSpec{
+            .inner = pjrtStruct2(c.PJRT_ShapeSpec, .{
                 .dims = @ptrCast(@constCast(dims_.ptr)),
                 .num_dims = dims.len,
                 .buffer_type = @intFromEnum(bt),
@@ -296,7 +302,7 @@ pub const Client = opaque {
     pub fn init(api: *const Api, create_options: []const NamedValue) ClientInitError!*Client {
         // log.info("Loaded PJRT runtime plugin: {s}", .{api.Platform});
         const ret = try api.call(.PJRT_Client_Create, .{
-            .create_options = @ptrCast(create_options.ptr),
+            .create_options = @as([*c]const c.PJRT_NamedValue, @ptrCast(create_options.ptr)),
             .num_options = create_options.len,
             .kv_get_callback = null,
             .kv_put_callback = null,
@@ -342,13 +348,13 @@ pub const Client = opaque {
     pub fn compile(self: *const Client, api: *const Api, args: CompileArgs) ApiError!*LoadedExecutable {
         const bytecode_format_ = @tagName(args.bytecode_format);
         const ret = try api.call(.PJRT_Client_Compile, .{
-            .program = &pjrtStruct(c.PJRT_Program{
-                .code = @ptrCast(@constCast(args.bytecode.ptr)),
+            .program = &pjrtStruct2(c.PJRT_Program, .{
+                .code = @as([*c]u8, @ptrCast(@constCast(args.bytecode.ptr))),
                 .code_size = args.bytecode.len,
-                .format = @ptrCast(@constCast(bytecode_format_.ptr)),
+                .format = @as([*c]const u8, @ptrCast(@constCast(bytecode_format_.ptr))),
                 .format_size = bytecode_format_.len,
             }),
-            .compile_options = @ptrCast(@constCast(args.compile_options_pb.ptr)),
+            .compile_options = @as([*c]const u8, @ptrCast(@constCast(args.compile_options_pb.ptr))),
             .compile_options_size = args.compile_options_pb.len,
             .client = self.inner(),
         });
@@ -767,7 +773,7 @@ pub const LoadedExecutable = opaque {
     };
 
     pub fn execute(self: *const LoadedExecutable, api: *const Api, args: ExecuteArgs) ApiError!void {
-        var options = pjrtStruct(c.PJRT_ExecuteOptions{
+        var options = pjrtStruct2(c.PJRT_ExecuteOptions, .{
             .send_callbacks = null,
             .recv_callbacks = null,
             .num_send_ops = 0,
@@ -851,8 +857,8 @@ pub const MemoryLayout = union(MemoryLayoutType) {
     strides: Strides,
 
     fn toCStruct(self: MemoryLayout) c.PJRT_Buffer_MemoryLayout {
-        return pjrtStruct(switch (self) {
-            .tiled => |v| c.PJRT_Buffer_MemoryLayout{
+        return switch (self) {
+            .tiled => |v| pjrtStruct2(c.PJRT_Buffer_MemoryLayout, .{
                 .type = c.PJRT_Buffer_MemoryLayout_Type_Tiled,
                 .unnamed_0 = .{
                     .tiled = c.PJRT_Buffer_MemoryLayout_Tiled{
@@ -863,8 +869,8 @@ pub const MemoryLayout = union(MemoryLayoutType) {
                         .num_tiles = v.tile_dims_sizes.len,
                     },
                 },
-            },
-            .strides => |v| c.PJRT_Buffer_MemoryLayout{
+            }),
+            .strides => |v| pjrtStruct2(c.PJRT_Buffer_MemoryLayout, .{
                 .type = c.PJRT_Buffer_MemoryLayout_Type_Strides,
                 .unnamed_0 = .{
                     .strides = c.PJRT_Buffer_MemoryLayout_Strides{
@@ -872,8 +878,8 @@ pub const MemoryLayout = union(MemoryLayoutType) {
                         .num_byte_strides = v.byte_strides.len,
                     },
                 },
-            },
-        });
+            }),
+        };
     }
 };
 
@@ -1038,7 +1044,7 @@ pub const Event = opaque {
 
     pub fn getEventError(self: *const Event, api: *const Api) ?*Error {
         var args: Api.CallFnArgType(.PJRT_Event_Error) = .{ .event = self.inner() };
-        args = pjrtStruct(args);
+        args = pjrtStruct2(@TypeOf(args), args);
         const result: ?*c.PJRT_Error = api.inner.PJRT_Event_Error.?(&args);
         return @ptrCast(result);
     }
@@ -1233,53 +1239,63 @@ pub const NamedValue = extern struct {
     }
 
     pub fn fromString(name_: []const u8, value: []const u8) NamedValue {
-        return .{ .inner = pjrtStruct(c.PJRT_NamedValue{
-            .name = @ptrCast(@constCast(name_.ptr)),
+        return .{ .inner = c.PJRT_NamedValue{
+            .struct_size = c.PJRT_NamedValue_STRUCT_SIZE,
+            .extension_start = null,
+            .name = @as([*c]const u8, @ptrCast(@constCast(name_.ptr))),
             .name_size = name_.len,
             .type = c.PJRT_NamedValue_kString,
             .unnamed_0 = .{ .string_value = @ptrCast(@constCast(value.ptr)) },
             .value_size = value.len,
-        }) };
+        } };
     }
 
     pub fn fromInt64(name_: []const u8, value: i64) NamedValue {
-        return .{ .inner = pjrtStruct(c.PJRT_NamedValue{
-            .name = @ptrCast(@constCast(name_.ptr)),
+        return .{ .inner = c.PJRT_NamedValue{
+            .struct_size = c.PJRT_NamedValue_STRUCT_SIZE,
+            .extension_start = null,
+            .name = @as([*c]const u8, @ptrCast(@constCast(name_.ptr))),
             .name_size = name_.len,
             .type = c.PJRT_NamedValue_kInt64,
             .unnamed_0 = .{ .int64_value = value },
             .value_size = 1,
-        }) };
+        } };
     }
 
     pub fn fromInt64List(name_: []const u8, value: []const i64) NamedValue {
-        return .{ .inner = pjrtStruct(c.PJRT_NamedValue{
-            .name = @ptrCast(@constCast(name_.ptr)),
+        return .{ .inner = c.PJRT_NamedValue{
+            .struct_size = c.PJRT_NamedValue_STRUCT_SIZE,
+            .extension_start = null,
+            .name = @as([*c]const u8, @ptrCast(@constCast(name_.ptr))),
             .name_size = name_.len,
             .type = c.PJRT_NamedValue_kInt64List,
             .unnamed_0 = .{ .int64_array_value = @ptrCast(@constCast(value.ptr)) },
             .value_size = value.len,
-        }) };
+        } };
     }
 
     pub fn fromFloat(name_: []const u8, value: f32) NamedValue {
-        return .{ .inner = pjrtStruct(c.PJRT_NamedValue{
-            .name = @ptrCast(@constCast(name_.ptr)),
+        return .{ .inner = c.PJRT_NamedValue{
+            .struct_size = c.PJRT_NamedValue_STRUCT_SIZE,
+            .extension_start = null,
+            .name = @as([*c]const u8, @ptrCast(@constCast(name_.ptr))),
             .name_size = name_.len,
             .type = c.PJRT_NamedValue_kFloat,
             .unnamed_0 = .{ .float_value = value },
             .value_size = 1,
-        }) };
+        } };
     }
 
     pub fn fromBool(name_: []const u8, value: bool) NamedValue {
-        return .{ .inner = pjrtStruct(c.PJRT_NamedValue{
-            .name = @ptrCast(@constCast(name_.ptr)),
+        return .{ .inner = c.PJRT_NamedValue{
+            .struct_size = c.PJRT_NamedValue_STRUCT_SIZE,
+            .extension_start = null,
+            .name = @as([*c]const u8, @ptrCast(@constCast(name_.ptr))),
             .name_size = name_.len,
             .type = c.PJRT_NamedValue_kBool,
             .unnamed_0 = .{ .bool_value = value },
             .value_size = 1,
-        }) };
+        } };
     }
 
     pub fn format(self: NamedValue, writer: *std.Io.Writer) !void {
@@ -1335,7 +1351,7 @@ pub const Ffi = extern struct {
         func: *const ffi.Handler,
         traits: ffi.HandlerTraits,
     ) ApiError!void {
-        var ret = pjrtStruct(c.PJRT_FFI_Register_Handler_Args{
+        var ret = pjrtStruct2(c.PJRT_FFI_Register_Handler_Args, .{
             .target_name = target_name.ptr,
             .target_name_size = target_name.len,
             .handler = @ptrCast(@constCast(func)),
@@ -1352,7 +1368,7 @@ pub const Ffi = extern struct {
     }
 
     pub fn registerTypeId(self: *const Ffi, api: *const Api, type_name: []const u8, type_info: ?*const c.PJRT_FFI_Type_Info) ApiError!ffi.TypeId {
-        var ret = pjrtStruct(c.PJRT_FFI_Type_Register_Args{
+        var ret = pjrtStruct2(c.PJRT_FFI_Type_Register_Args, .{
             .type_name = type_name.ptr,
             .type_name_size = type_name.len,
             .type_id = 0, // let the plugin assign a unique type ID
@@ -1368,7 +1384,7 @@ pub const Ffi = extern struct {
     }
 
     pub fn addUserData(self: *const Ffi, api: *const Api, context: *ExecuteContext, user_data: UserData) ApiError!void {
-        var ret = pjrtStruct(c.PJRT_FFI_UserData_Add_Args{
+        var ret = pjrtStruct2(c.PJRT_FFI_UserData_Add_Args, .{
             .context = @ptrCast(context),
             .user_data = user_data.toCStruct(),
         });

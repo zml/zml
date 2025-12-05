@@ -128,7 +128,11 @@ pub fn TupleRange(comptime T: type, comptime start: ?usize, comptime end: ?usize
 
 pub fn TupleRangeX(comptime T: type, comptime start: usize, comptime end: usize) type {
     const fields = std.meta.fields(T);
-    var new_fields: [end - start]std.builtin.Type.StructField = undefined;
+
+    var field_names: [end - start][]const u8 = undefined;
+    var field_types: [end - start]type = undefined;
+    var field_attrs: [end - start]std.builtin.Type.StructField.Attributes = undefined;
+
     inline for (start..end, 0..) |i, j| {
         var new_field = fields[i];
         var num_buf: [32]u8 = undefined;
@@ -137,16 +141,15 @@ pub fn TupleRangeX(comptime T: type, comptime start: usize, comptime end: usize)
             num_buf[s] = 0;
             break :blk num_buf[0..s :0];
         };
-        new_fields[j] = new_field;
+        field_names[j] = new_field.name;
+        field_types[j] = new_field.type;
+        field_attrs[j] = .{
+            .@"comptime" = new_field.is_comptime,
+            .@"align" = new_field.alignment,
+            .default_value_ptr = new_field.default_value_ptr,
+        };
     }
-    return @Type(.{
-        .@"struct" = .{
-            .is_tuple = true,
-            .layout = .auto,
-            .decls = &.{},
-            .fields = &new_fields,
-        },
-    });
+    return @Struct(.auto, null, &field_names, &field_types, &field_attrs);
 }
 
 pub fn FnParam(comptime func: anytype, comptime n: comptime_int) type {

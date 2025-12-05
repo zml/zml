@@ -50,7 +50,6 @@ zig_library(
     ] + select({
         "//runtimes:cpu.enabled": [
             ":libpjrt_cpu",
-            "//async",
             "//stdx",
             "@rules_zig//zig/runfiles",
         ],

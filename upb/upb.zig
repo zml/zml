@@ -47,7 +47,7 @@ pub fn shallowClone(comptime UpbType: type, arena: *c.upb_Arena, msg: *const Upb
 }
 
 pub fn stringView(data: ?[]const u8) c.upb_StringView {
-    return if (data) |d| c.upb_StringView_FromDataAndSize(d.ptr, d.len) else .{};
+    return if (data) |d| c.upb_StringView_FromDataAndSize(d.ptr, d.len) else .{ .data = null, .size = 0 };
 }
 
 pub fn slice(sv: c.upb_StringView) ?[]const u8 {

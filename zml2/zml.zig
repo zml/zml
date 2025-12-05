@@ -33,12 +33,15 @@ var runfiles_once = std.once(struct {
             return;
         }
 
+        var io: std.Io.Threaded = .init_single_threaded;
+        defer io.deinit();
+
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         const allocator = arena.allocator();
         defer arena.deinit();
 
         var envMap = std.process.EnvMap.init(allocator);
-        var r = (try runfiles.Runfiles.create(.{ .allocator = allocator })) orelse return;
+        var r = (try runfiles.Runfiles.create(.{ .allocator = allocator, .io = io.io() })) orelse return;
         try r.environment(&envMap);
 
         var it = envMap.iterator();

@@ -182,18 +182,19 @@ fn parse_flags(args: *std.process.ArgIterator, comptime Flags: type) Flags {
     var result: Flags = undefined;
     // Would use std.enums.EnumFieldStruct(Flags, u32, 0) here but Flags is a struct not an Enum.
     var counts = comptime blk: {
-        var count_fields = std.meta.fields(Flags)[0..std.meta.fields(Flags).len].*;
-        for (&count_fields) |*field| {
-            field.type = u32;
-            field.alignment = @alignOf(u32);
-            field.default_value_ptr = @ptrCast(&@as(u32, 0));
+        const f = std.meta.fields(Flags);
+        var count_field_names: [fields.len][]const u8 = undefined;
+        var count_field_types: [fields.len]type = undefined;
+        var count_field_attrs: [fields.len]std.builtin.Type.StructField.Attributes = undefined;
+        for (f, &count_field_names, &count_field_types, &count_field_attrs) |field, *field_name, *field_type, *field_attr| {
+            field_name.* = field.name;
+            field_type.* = u32;
+            field_attr.* = .{
+                .@"align" = @alignOf(u32),
+                .default_value_ptr = @ptrCast(&@as(u32, 0)),
+            };
         }
-        break :blk @Type(.{ .@"struct" = .{
-            .layout = .auto,
-            .fields = &count_fields,
-            .decls = &.{},
-            .is_tuple = false,
-        } }){};
+        break :blk @Struct(.auto, null, count_field_names, count_field_types, count_field_attrs){};
     };
 
     // When parsing arguments, we must consider longer arguments first, such that `--foo-bar=92` is

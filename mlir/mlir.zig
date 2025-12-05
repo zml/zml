@@ -1094,7 +1094,7 @@ pub const Operation = opaque {
         }
     };
 
-    fn formatWithFlags(fctx: PrintFlags.Ctx, writer: *std.io.Writer) std.Io.Writer.Error!void {
+    fn formatWithFlags(fctx: PrintFlags.Ctx, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         const flags = fctx.flags.createNative();
         defer c.mlirOpPrintingFlagsDestroy(flags);
         var sctx: StringCallbackCtx = .{ .writer = writer };
@@ -1268,7 +1268,7 @@ pub const Operation = opaque {
         }
     }
 
-    fn fmtBytecodeImpl(ctx: BytecodeWriterConfig.Ctx, writer: *std.io.Writer) std.Io.Writer.Error!void {
+    fn fmtBytecodeImpl(ctx: BytecodeWriterConfig.Ctx, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try ctx.self.writeBytecode(ctx.config, writer);
     }
 

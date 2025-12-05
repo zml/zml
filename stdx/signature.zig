@@ -13,38 +13,19 @@ pub fn ArgsTuple(comptime funcT: anytype, comptime ArgsT: ?type) type {
     }
 
     const args = std.meta.fields(ArgsT orelse @compileError("generic function requires an explicit ArgsTuple"));
-    var tuple_fields: [params.len]std.builtin.Type.StructField = undefined;
+    var tuple_types: [params.len]type = undefined;
     if (params.len != args.len) {
         compileError("function {} expected {} args, got {}", .{ funcT, params.len, args.len });
     }
     inline for (params, args, 0..) |param, arg, i| {
         if (param.type == null) {
-            tuple_fields[i] = arg;
+            tuple_types[i] = arg.type;
             continue;
         }
-        const T = param.type.?;
-        var num_buf: [8]u8 = undefined;
-        tuple_fields[i] = .{
-            .name = blk: {
-                const s = std.fmt.printInt(&num_buf, i, 10, .lower, .{});
-                num_buf[s] = 0;
-                break :blk num_buf[0..s :0];
-            },
-            .type = T,
-            .default_value_ptr = null,
-            .is_comptime = false,
-            .alignment = if (@sizeOf(T) > 0) @alignOf(T) else 0,
-        };
+        tuple_types[i] = param.type.?;
     }
 
-    return @Type(.{
-        .@"struct" = .{
-            .is_tuple = true,
-            .layout = .auto,
-            .decls = &.{},
-            .fields = &tuple_fields,
-        },
-    });
+    return @Tuple(tuple_types);
 }
 
 pub const Signature = struct {

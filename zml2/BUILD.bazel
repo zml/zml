@@ -43,7 +43,6 @@ zig_library(
         ":posix",
         ":xla_compile_options_upb",
         ":xla_data_upb",
-        "//async",
         "//mlir",
         "//mlir/dialects",
         "//pjrt",
@@ -60,7 +59,6 @@ zig_binary(
     data = [],
     main = "main.zig",
     deps = [
-        "//async",
         "//zml2:zml",
     ],
 )

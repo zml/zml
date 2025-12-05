@@ -1,6 +1,5 @@
 const std = @import("std");
 
-const async = @import("async");
 const dialects = @import("mlir/dialects");
 const mlir = @import("mlir");
 const pjrt = @import("pjrt");
@@ -71,7 +70,8 @@ pub const Client = opaque {
     }
 
     pub fn deserializeAndLoad(self: *const Client, api: *const Api, bytes: []const u8) ApiError!*LoadedExecutable {
-        return @ptrCast(try async.callBlocking(pjrt.Client.deserializeAndLoad, .{ self.inner(), api, bytes }));
+        //return @ptrCast(try async.callBlocking(pjrt.Client.deserializeAndLoad, .{ self.inner(), api, bytes }));
+        return @ptrCast(pjrt.Client.deserializeAndLoad(self.inner(), api, bytes));
     }
 
     pub const CreateViewOfDeviceBufferArgs = pjrt.Client.CreateViewOfDeviceBufferArgs;
@@ -116,7 +116,8 @@ pub const Client = opaque {
     }
 
     pub fn compile(self: *const Client, api: *const Api, allocator: std.mem.Allocator, module: *const mlir.Module, compile_options_pb: []const u8) CompileError!*LoadedExecutable {
-        return try async.callBlocking(compileSync, .{ self, api, allocator, module, compile_options_pb });
+        //return try async.callBlocking(compileSync, .{ self, api, allocator, module, compile_options_pb });
+        return try compileSync(self, api, allocator, module, compile_options_pb);
     }
 
     pub fn addressableMemories(self: *const Client, api: *const Api) []*const Memory {
@@ -226,32 +227,35 @@ pub const Event = opaque {
     }
 
     pub fn await(self: *Event, api: *const Api) ApiError!void {
-        defer self.deinit(api);
+        _ = self; // autofix
+        _ = api; // autofix
+        @panic("Uh oh");
+        //defer self.deinit(api);
 
-        if (self.isReady(api)) {
-            return;
-        }
+        //if (self.isReady(api)) {
+        //    return;
+        //}
 
-        var ctx = struct {
-            err: ?*pjrt.Error = null,
-            event: async.threading.ResetEventSingle = .{},
-        }{};
+        //var ctx = struct {
+        //    err: ?*pjrt.Error = null,
+        //    event: async.threading.ResetEventSingle = .{},
+        //}{};
 
-        try self.inner().onReady(api, &(struct {
-            fn call(err: ?*pjrt.Error, user_arg: ?*anyopaque) callconv(.c) void {
-                const ctx_: *@TypeOf(ctx) = @ptrCast(@alignCast(user_arg.?));
-                ctx_.err = err;
-                ctx_.event.set();
-            }
-        }.call), &ctx);
-        ctx.event.wait();
+        //try self.inner().onReady(api, &(struct {
+        //    fn call(err: ?*pjrt.Error, user_arg: ?*anyopaque) callconv(.c) void {
+        //        const ctx_: *@TypeOf(ctx) = @ptrCast(@alignCast(user_arg.?));
+        //        ctx_.err = err;
+        //        ctx_.event.set();
+        //    }
+        //}.call), &ctx);
+        //ctx.event.wait();
 
-        if (ctx.err) |e| {
-            defer e.deinit(api);
-            const err_code = e.getCode(api).toApiError();
-            log.err("{t} {s}", .{ err_code, e.getMessage(api) });
-            return err_code;
-        }
+        //if (ctx.err) |e| {
+        //    defer e.deinit(api);
+        //    const err_code = e.getCode(api).toApiError();
+        //    log.err("{t} {s}", .{ err_code, e.getMessage(api) });
+        //    return err_code;
+        //}
     }
 };
 

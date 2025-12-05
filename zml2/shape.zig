@@ -398,7 +398,7 @@ pub const Shape = struct {
             } else {
                 try writer.print("{d}", .{d});
             }
-            if (self._sharding_info[i]) {
+            if (@as([MAX_RANK]bool, self._sharding_info)[i]) {
                 try writer.writeByte('!');
             }
             need_comma = true;

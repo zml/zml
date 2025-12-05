@@ -225,14 +225,10 @@ huggingface.model(
 use_repo(huggingface, "ModernBERT-base", "ModernBERT-large")
 ################################################################################
 
-# git_override(
-#     module_name = "rules_zig",
-#     commit = "2c91b54305772d7b43445168e7cf0037b5cbc9e2",
-#     remote = "https://github.com/zml/rules_zig.git",
-# )
-local_path_override(
+git_override(
     module_name = "rules_zig",
-    path = "../rules_zig",
+    commit = "566daebc8655bbf3ef18f187556daa83928afc84",
+    remote = "https://github.com/zml/rules_zig.git",
 )
 
 git_override(

@@ -26,64 +26,73 @@ pub fn MapType(From: type, To: type) type {
                 .@"struct" => |struct_infos| {
                     const fields = struct_infos.fields;
                     var same: bool = true;
-                    var struct_fields: [fields.len]std.builtin.Type.StructField = undefined;
-                    for (struct_fields[0..], fields) |*struct_field, field| {
+                    var struct_field_names: [fields.len][]const u8 = undefined;
+                    var struct_field_types: [fields.len]type = undefined;
+                    var struct_field_attrs: [fields.len]std.builtin.Type.StructField.Attributes = undefined;
+                    for (struct_field_names[0..], struct_field_types[0..], struct_field_attrs[0..], fields) |*field_name, *field_type, *field_attr, field| {
                         if (!field.is_comptime) {
                             const R = map(field.type);
                             if (R == field.type) {
-                                struct_field.* = field;
+                                field_name.* = field.name;
+                                field_type.* = field.type;
+                                field_attr.* = .{
+                                    .@"comptime" = field.is_comptime,
+                                    .@"align" = field.alignment,
+                                    .default_value_ptr = field.default_value_ptr,
+                                };
                             } else {
-                                struct_field.* = .{
-                                    .name = field.name,
-                                    .type = R,
-                                    .default_value_ptr = null,
-                                    .is_comptime = field.is_comptime,
-                                    .alignment = @alignOf(R),
+                                field_name.* = field.name;
+                                field_type.* = R;
+                                field_attr.* = .{
+                                    .@"comptime" = field.is_comptime,
+                                    .@"align" = @alignOf(R),
                                 };
                                 same = false;
                                 // Handle the case `field: ?Tensor = null`
                                 // Generic handling of default value is complicated,
                                 // it would require to call the callback at comptime.
                                 if (R == ?To) {
-                                    struct_field.default_value_ptr = &@as(R, null);
+                                    field_attr.default_value_ptr = &@as(R, null);
                                 }
                             }
                         } else {
-                            struct_field.* = field;
+                            field_name.* = field.name;
+                            field_type.* = field.type;
+                            field_attr.* = .{
+                                .@"comptime" = field.is_comptime,
+                                .@"align" = field.alignment,
+                                .default_value_ptr = field.default_value_ptr,
+                            };
                         }
                     }
                     if (same) return T;
-                    return @Type(.{ .@"struct" = .{
-                        .layout = .auto,
-                        .fields = struct_fields[0..],
-                        .decls = &.{},
-                        .is_tuple = struct_infos.is_tuple,
-                    } });
+                    return if (struct_infos.is_tuple) @Tuple(struct_field_types) else @Struct(.auto, null, struct_field_names, struct_field_types, struct_field_attrs);
                 },
                 .@"union" => |union_info| {
                     const fields = union_info.fields;
                     var same: bool = true;
-                    var union_fields: [fields.len]std.builtin.Type.UnionField = undefined;
-                    for (union_fields[0..], fields) |*union_field, field| {
+                    var union_field_names: [fields.len][]const u8 = undefined;
+                    var union_field_types: [fields.len]type = undefined;
+                    var union_field_attrs: [fields.len]std.builtin.Type.UnionField.Attributes = undefined;
+                    for (union_field_names[0..], union_field_types[0..], union_field_attrs[0..], fields) |*field_name, *field_type, *field_attr, field| {
                         const R = map(field.type);
                         if (R == field.type) {
-                            union_field.* = field;
+                            field_name.* = field.name;
+                            field_type.* = field.type;
+                            field_attr.* = .{
+                                .@"align" = field.alignment,
+                            };
                         } else {
-                            union_field.* = .{
-                                .name = field.name,
-                                .type = R,
-                                .alignment = @alignOf(R),
+                            field_name.* = field.name;
+                            field_type.* = R;
+                            field_attr.* = .{
+                                .@"align" = @alignOf(R),
                             };
                             same = false;
                         }
                     }
                     if (same) return T;
-                    return @Type(.{ .@"union" = .{
-                        .layout = .auto,
-                        .tag_type = union_info.tag_type,
-                        .fields = union_fields[0..],
-                        .decls = &.{},
-                    } });
+                    return @Union(.auto, union_info.tag_type, union_field_names, union_field_types, union_field_attrs);
                 },
                 .array => |arr_info| [arr_info.len]map(arr_info.child),
                 .pointer => |ptr_info| switch (ptr_info.size) {
@@ -321,57 +330,55 @@ pub fn MapRestrict(From: type, To: type) type {
                     const fields = struct_infos.fields;
                     var num_fields: usize = 0;
 
-                    var struct_fields: [fields.len]std.builtin.Type.StructField = undefined;
+                    var struct_field_names: [fields.len][]const u8 = undefined;
+                    var struct_field_types: [fields.len]type = undefined;
+                    var struct_field_attrs: [fields.len]std.builtin.Type.StructField.Attributes = undefined;
                     for (fields) |field| {
                         if (!field.is_comptime and Contains(field.type, From)) {
                             const R = map(field.type);
                             if (R == field.type) {
-                                struct_fields[num_fields] = field;
+                                struct_field_names[num_fields] = field.name;
+                                struct_field_types[num_fields] = field.type;
+                                struct_field_attrs[num_fields] = .{
+                                    .@"comptime" = field.is_comptime,
+                                    .@"align" = field.alignment,
+                                    .default_value_ptr = field.default_value_ptr,
+                                };
                             } else {
                                 const name = if (struct_infos.is_tuple) struct_infos.fields[num_fields].name else field.name;
-                                struct_fields[num_fields] = .{
-                                    .name = name,
-                                    .type = R,
-                                    .default_value_ptr = null,
-                                    .is_comptime = false,
-                                    .alignment = @alignOf(R),
+                                struct_field_names[num_fields] = name;
+                                struct_field_types[num_fields] = R;
+                                struct_field_attrs[num_fields] = .{
+                                    .@"align" = @alignOf(R),
                                 };
                                 // Handle the case `field: ?Tensor = null`
                                 // Generic handling of default value is not possible.
                                 if (R == ?To) {
-                                    struct_fields[num_fields].default_value_ptr = &@as(R, null);
+                                    struct_field_attrs[num_fields].default_value_ptr = &@as(R, null);
                                 }
                             }
                             num_fields += 1;
                         }
                     }
                     if (num_fields == 0) return void;
-                    return @Type(.{ .@"struct" = .{
-                        .layout = .auto,
-                        .fields = struct_fields[0..num_fields],
-                        .decls = &.{},
-                        .is_tuple = struct_infos.is_tuple,
-                    } });
+                    return if (struct_infos.is_tuple) @Tuple(struct_field_types) else @Struct(.auto, null, struct_field_names, struct_field_types, struct_field_attrs);
                 },
                 .@"union" => |union_info| {
                     // We know that at least one of the union field contains a From.
                     // We map each field individually. Fields without From, are replaced by "void".
                     const fields = union_info.fields;
-                    var union_fields: [fields.len]std.builtin.Type.UnionField = undefined;
+                    var union_field_names: [fields.len][]const u8 = undefined;
+                    var union_field_types: [fields.len]type = undefined;
+                    var union_field_attrs: [fields.len]std.builtin.Type.UnionField.Attributes = undefined;
                     for (0.., fields) |i, field| {
                         const FT = map(field.type);
-                        union_fields[i] = .{
-                            .name = field.name,
-                            .type = FT,
-                            .alignment = @alignOf(FT),
+                        union_field_names[i] = field.name;
+                        union_field_types[i] = FT;
+                        union_field_attrs[i] = .{
+                            .@"align" = @alignOf(FT),
                         };
                     }
-                    return @Type(.{ .@"union" = .{
-                        .layout = .auto,
-                        .tag_type = union_info.tag_type,
-                        .fields = union_fields[0..],
-                        .decls = &.{},
-                    } });
+                    return @Union(.auto, union_info.tag_type, union_field_names, union_field_types, union_field_attrs);
                 },
                 .array => |arr_info| [arr_info.len]map(arr_info.child),
                 .pointer => |ptr_info| switch (ptr_info.size) {
@@ -429,7 +436,7 @@ test MapRestrict {
 /// The `v` parameter must me a pointer, and tensor data need to be mutable if callbacks needs it.
 pub fn VisitReturn(comptime cb: anytype) type {
     return if (stdx.meta.FnSignature(cb, null).ReturnErrorSet) |error_set|
-        @Type(std.builtin.Type{ .error_union = .{ .error_set = error_set, .payload = void } })
+        error_set!void
     else
         void;
 }
