@@ -62,7 +62,7 @@ def _zls_write_build_config_impl(ctx):
 
     c_module_contexts = []
     c_module_inputs = []
-    cc_info = cc_common.merge_cc_infos(cc_infos = [dep[ZigModuleInfo].cc_info for dep in ctx.attr.deps if dep[ZigModuleInfo].cc_info])
+    cc_info = cc_common.merge_cc_infos(direct_cc_infos = [dep[ZigModuleInfo].cc_info for dep in ctx.attr.deps if dep[ZigModuleInfo].cc_info])
     if need_translate_c(cc_info):
         global_args = ctx.actions.args()
         global_args.use_param_file("@%s")
