@@ -22,13 +22,16 @@ pub const Model = struct {
 };
 
 pub fn main() !void {
-    zml.init();
-    defer zml.deinit();
-
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
 
     const allocator = gpa.allocator();
+
+    var io: std.Io.Threaded = .init(allocator);
+    defer io.deinit();
+
+    zml.init();
+    defer zml.deinit();
 
     var platform = try zml.Platform.init(.cpu, .{});
     defer platform.deinit();
@@ -36,6 +39,6 @@ pub fn main() !void {
     var model: Model = try .init();
     defer model.deinit();
 
-    var exe = try zml.module.compileModel(allocator, Model.forward, model, .{zml.Tensor.init(zml.Shape.init(.{ .n = 4096 }, .f32))}, platform);
+    var exe = try zml.module.compileModel(allocator, io.io(), Model.forward, model, .{zml.Tensor.init(zml.Shape.init(.{ .n = 4096 }, .f32))}, platform);
     defer exe.deinit();
 }

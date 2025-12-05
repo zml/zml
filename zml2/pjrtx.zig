@@ -69,9 +69,9 @@ pub const Client = opaque {
         return .{ @ptrCast(buffer), @ptrCast(event_) };
     }
 
-    pub fn deserializeAndLoad(self: *const Client, api: *const Api, bytes: []const u8) ApiError!*LoadedExecutable {
-        //return @ptrCast(try async.callBlocking(pjrt.Client.deserializeAndLoad, .{ self.inner(), api, bytes }));
-        return @ptrCast(pjrt.Client.deserializeAndLoad(self.inner(), api, bytes));
+    pub fn deserializeAndLoad(self: *const Client, api: *const Api, io: std.Io, bytes: []const u8) ApiError!*LoadedExecutable {
+        var future = io.async(pjrt.Client.deserializeAndLoad, .{ self.inner(), api, bytes });
+        return @ptrCast(future.await(io));
     }
 
     pub const CreateViewOfDeviceBufferArgs = pjrt.Client.CreateViewOfDeviceBufferArgs;
@@ -115,9 +115,9 @@ pub const Client = opaque {
         }));
     }
 
-    pub fn compile(self: *const Client, api: *const Api, allocator: std.mem.Allocator, module: *const mlir.Module, compile_options_pb: []const u8) CompileError!*LoadedExecutable {
-        //return try async.callBlocking(compileSync, .{ self, api, allocator, module, compile_options_pb });
-        return try compileSync(self, api, allocator, module, compile_options_pb);
+    pub fn compile(self: *const Client, api: *const Api, allocator: std.mem.Allocator, io: std.Io, module: *const mlir.Module, compile_options_pb: []const u8) CompileError!*LoadedExecutable {
+        var future = io.async(compileSync, .{ self, api, allocator, module, compile_options_pb });
+        return future.await(io);
     }
 
     pub fn addressableMemories(self: *const Client, api: *const Api) []*const Memory {

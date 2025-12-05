@@ -161,11 +161,11 @@ pub const CompilationContext = struct {
     //}
 };
 
-pub fn compileModel(allocator: std.mem.Allocator, comptime func: anytype, model: stdx.meta.Head(stdx.meta.FnArgs(func)), args: stdx.meta.Tail(stdx.meta.FnArgs(func)), platform: Platform) !Exe {
-    return compile(allocator, func, .{model} ++ args, platform);
+pub fn compileModel(allocator: std.mem.Allocator, io: std.Io, comptime func: anytype, model: stdx.meta.Head(stdx.meta.FnArgs(func)), args: stdx.meta.Tail(stdx.meta.FnArgs(func)), platform: Platform) !Exe {
+    return compile(allocator, io, func, .{model} ++ args, platform);
 }
 
-pub fn compile(allocator: std.mem.Allocator, comptime func: anytype, args: stdx.meta.FnArgs(func), platform: Platform) !Exe {
+pub fn compile(allocator: std.mem.Allocator, io: std.Io, comptime func: anytype, args: stdx.meta.FnArgs(func), platform: Platform) !Exe {
     var compilation_context: CompilationContext = .init(allocator);
     defer compilation_context.deinit();
 
@@ -181,7 +181,7 @@ pub fn compile(allocator: std.mem.Allocator, comptime func: anytype, args: stdx.
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    const loaded_executable = compileModuleToPjrtExecutable(arena.allocator(), platform, compilation_context.module, null) catch unreachable;
+    const loaded_executable = compileModuleToPjrtExecutable(arena.allocator(), io, platform, compilation_context.module, null) catch unreachable;
 
     log.warn("******** ZML generated MLIR ********", .{});
     log.warn("{f}", .{compilation_context.module.operation()});
@@ -402,7 +402,7 @@ fn setXlaOverrideFlag(map: *c.upb_Map, flag: []const u8, value: anytype, upb_are
     }
 }
 
-fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, module: *const mlir.Module, xla_dump_to_: ?[]const u8) !*pjrt.LoadedExecutable {
+fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform: Platform, module: *const mlir.Module, xla_dump_to_: ?[]const u8) !*pjrt.LoadedExecutable {
     //const tracer = Tracer.init("ai.zml.compilation");
     //const compile_frame = tracer.frameStart("pjrt compilation");
     //defer tracer.frameEnd(compile_frame, "pjrt compilation");
@@ -478,6 +478,7 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, platform: Platform, m
     const loaded_executable = try platform.pjrt_client.compile(
         platform.pjrt_api,
         arena,
+        io,
         module,
         try upb.serialize(options, upb_arena),
     );
