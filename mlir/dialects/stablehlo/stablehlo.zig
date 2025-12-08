@@ -217,7 +217,7 @@ pub fn constant(
         .operands = .{ .flat = &.{} },
         .results = .{ .flat = &.{mlir.rankedTensorType(dims, elem_type)} },
         .attributes = &.{
-            .named(ctx, "value", mlir.denseElementsAttribute(mlir.RankedTensorType.get(dims, elem_type).shaped(), raw_bytes)),
+            .named(ctx, "value", mlir.denseElementsAttribute(mlir.RankedTensorType.get(dims, elem_type, null).shaped(), raw_bytes)),
         },
         .location = location,
     });
