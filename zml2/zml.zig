@@ -28,6 +28,7 @@ pub const tensor = @import("tensor.zig");
 pub const Tensor = tensor.Tensor;
 pub const constants = @import("constants.zig");
 pub const Buffer = @import("buffer.zig").Buffer;
+pub const testing = @import("testing.zig");
 
 var runfiles_once = std.once(struct {
     fn call_() !void {
@@ -65,3 +66,14 @@ pub fn init() void {
 }
 
 pub fn deinit() void {}
+
+/// Return a clone of a type with Tensors replaced by Buffer.
+/// Non-Tensor metadata is stripped out of the resulting struct.
+/// Recursively descends into the type.
+pub fn Bufferized(comptime T: type) type {
+    return meta.MapRestrict(Tensor, Buffer).map(T);
+}
+
+test "zml" {
+    _ = Tensor;
+}

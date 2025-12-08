@@ -270,22 +270,28 @@ pub const Tensor = struct {
         return self.remainder(scalar(divisor, .f32).broadcast(self._shape, &.{}));
     }
 
-    // TODO(Corentin)
-    //test fmod {
-    //    const zml = @import("zml.zig");
-    //    const platform = zml.testing.env();
+    test fmod {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
 
-    //    const inputs: [2][6]f32 = .{ .{ -3.0, -2, -1, 1, 2, 3 }, .{ 1, 2, 3, 4, 5, -5 } };
-    //    const expectations: [2][6]f32 = .{ .{ -1.0, -0.0, -1.0, 1.0, 0.0, 1.0 }, .{ 1.0000, 0.5000, 0.0000, 1.0000, 0.5000, -0.5000 } };
-    //    const divisors: [2]f32 = .{ 2, -1.5 };
+        const inputs: [2][6]f32 = .{ .{ -3.0, -2, -1, 1, 2, 3 }, .{ 1, 2, 3, 4, 5, -5 } };
+        const expectations: [2][6]f32 = .{ .{ -1.0, -0.0, -1.0, 1.0, 0.0, 1.0 }, .{ 1.0000, 0.5000, 0.0000, 1.0000, 0.5000, -0.5000 } };
+        const divisors: [2]f32 = .{ 2, -1.5 };
 
-    //    inline for (inputs, expectations, divisors) |i, e, d| {
-    //        const input = try zml.Buffer.fromSlice(platform, .{6}, &i);
-    //        const output = try zml.testing.compileAndCall(platform, Tensor.fmod, .{ input, d });
+        inline for (inputs, expectations, divisors) |i, e, d| {
+            const input: zml.Tensor = .init(Shape.init(.{6}, .f32));
 
-    //        try zml.testing.expectClose(zml.HostBuffer.fromSlice(.{6}, &e), output, 1e-4);
-    //    }
-    //}
+            const exe = try zml.module.compile(std.testing.allocator, std.testing.io, Tensor.fmod, .{ input, d }, platform);
+            defer exe.deinit();
+
+            const input_buffer = try zml.Buffer.fromBytes(platform, input.shape(), std.mem.sliceAsBytes(&i), std.testing.io);
+            defer input_buffer.deinit();
+
+            const output = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.fmod, .{input_buffer});
+
+            try zml.testing.expectClose(std.testing.io, zml.testing.Slice.init(zml.Shape.init(.{6}, .f32), std.mem.sliceAsBytes(&e)), output, 1e-4);
+        }
+    }
 
     /// Returns a Tensor containing the element-wise left-shift operation of 'self' by 'other'.
     pub fn shiftLeft(self: Tensor, other: Tensor) Tensor {
@@ -1876,7 +1882,7 @@ pub const Tensor = struct {
             .float => stdx.debug.assert(!std.math.isNan(val), "scalar(NaN) is probably due to compiling a model with an uninitialized field", .{}),
             else => {},
         }
-        return Tensor.constant(.{}, data);
+        return Tensor.constant(data);
     }
 
     // TODO(Corentin)
@@ -1905,7 +1911,7 @@ pub const Tensor = struct {
             val.constSlice(),
             .unknown(mlirCtx()),
         ).appendTo(currentBlock());
-        return _result(.init(&.{}, val.dtype()), op.result(0)).autoBroadcast();
+        return _result(.init(&.{}, val.dtype()), op.result(0));
     }
 
     pub fn zeroes(sh: Shape) Tensor {
@@ -3918,18 +3924,19 @@ test transposeIsJustAReshape {
     try std.testing.expect(transposeIsJustAReshape(Shape.init(.{ 1, 10, 155, 1 }, .f32), &.{ 0, 1, 3, 2 }));
 }
 
-test "unused tensor" {
-    const zml = @import("zml.zig");
-    const platform = zml.testing.env();
-
-    const Local = struct {
-        pub fn _fwd(x: Tensor) Tensor {
-            const y = x.addConstant(1);
-            _ = y;
-            return x;
-        }
-    };
-
-    const mod = try zml.compileFn(std.testing.allocator, Local._fwd, .{Shape.init(.{10}, .f32)}, platform);
-    defer mod.deinit();
-}
+// TODO(Corentin)
+//test "unused tensor" {
+//    const zml = @import("zml.zig");
+//    const platform = zml.testing.env();
+//
+//    const Local = struct {
+//        pub fn _fwd(x: Tensor) Tensor {
+//            const y = x.addConstant(1);
+//            _ = y;
+//            return x;
+//        }
+//    };
+//
+//    const mod = try zml.compileFn(std.testing.allocator, Local._fwd, .{Shape.init(.{10}, .f32)}, platform);
+//    defer mod.deinit();
+//

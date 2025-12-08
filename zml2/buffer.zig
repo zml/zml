@@ -42,6 +42,11 @@ pub const Buffer = struct {
         }
     }
 
+    /// This Buffer shape.
+    pub fn shape(self: Buffer) Shape {
+        return self._shape;
+    }
+
     /// Copies the content of the given buffer from host memory to the accelerator memory.
     pub fn from(platform: Platform, shape_: Shape, data_: []const u8, io: std.Io, opts: FromOptions) !Buffer {
         var res: Buffer = .{
@@ -115,5 +120,35 @@ pub const Buffer = struct {
         }
 
         return self;
+    }
+
+    /// Wraps pre-exisiting `pjrt.Buffer` shards into one `zml.Buffer`.
+    pub fn fromPjrtBuffers(platform: Platform, shape_: Shape, pjrt_buffers: []const *pjrt.Buffer) Buffer {
+        stdx.debug.assert(pjrt_buffers.len <= MAX_NUM_SHARDS, "ZML doesn't support having more than {} shards. Received {} shards for one buffer.", .{ MAX_NUM_SHARDS, pjrt_buffers.len });
+        stdx.debug.assert(pjrt_buffers.len > 0, "fromPjrtBuffers expects at least one buffer, got 0.", .{});
+        var shards: Shards = .{};
+        shards.appendSliceAssumeCapacity(pjrt_buffers);
+        return .{
+            ._api = platform.pjrt_api,
+            ._target = platform.target,
+            ._shape = shape_,
+            ._shards = shards,
+        };
+    }
+
+    /// Copies the content of the Buffer to the host.
+    /// The returned `HostBuffer` does own the memory.
+    pub fn toHostAlloc(self: Buffer, allocator: std.mem.Allocator, io: std.Io) ![]u8 {
+        //const output = try allocator.alignedAlloc(u8, .fromByteUnits(self._shape.dtype().alignOf()), self._shape.byteSize());
+        //const output = try allocator.alignedAlloc(u8, .@"64", self._shape.byteSize());
+        const output = try allocator.alloc(u8, self._shape.byteSize());
+        errdefer allocator.free(output);
+
+        //stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
+        const maybe_event = try self._shards.get(0).toHostBuffer(self._api, output);
+        if (maybe_event) |event| {
+            try event.await(self._api, io);
+        }
+        return output;
     }
 };

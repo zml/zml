@@ -6,9 +6,7 @@ const meta = @import("meta.zig");
 const Shape = @import("shape.zig").Shape;
 
 const Platform = @import("platform.zig").Platform;
-
-// TODO(Corentin)
-const Buffer = struct {};
+const Buffer = @import("buffer.zig").Buffer;
 
 pub const Exe = struct {
     platform: Platform,
@@ -199,7 +197,7 @@ pub const Exe = struct {
         }
     };
 
-    pub fn call(self: *const Exe, arguments: Arguments, results_: *Results) void {
+    pub fn call(self: *const Exe, arguments: Arguments, results_: *Results, io: std.Io) void {
         var events = [_]?*pjrt.Event{null} ** Platform.MAX_NUM_DEVICES;
         const sharding = self.platform.sharding();
 
@@ -219,7 +217,7 @@ pub const Exe = struct {
 
         for (events[0..sharding.num_partitions]) |e| {
             if (e) |ev| {
-                ev.await_(self.platform.pjrt_api) catch unreachable;
+                ev.await(self.platform.pjrt_api, io) catch unreachable;
             }
         }
     }

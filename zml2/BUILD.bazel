@@ -1,6 +1,6 @@
 load("@com_google_protobuf//bazel:upb_proto_library.bzl", "upb_c_proto_library")
 load("@rules_cc//cc:defs.bzl", "cc_library")
-load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library", "zig_test")
 
 upb_c_proto_library(
     name = "xla_data_upb",
@@ -33,6 +33,7 @@ zig_library(
         "platform.zig",
         "shape.zig",
         "tensor.zig",
+        "testing.zig",
         "zml.zig",
     ],
     main = "zml.zig",
@@ -63,4 +64,22 @@ zig_binary(
     deps = [
         "//zml2:zml",
     ],
+)
+
+# All ZML Tests
+
+zig_test(
+    name = "test",
+    data = [
+        #"aio/torch/simple.pt",
+        #"aio/torch/simple_test_4.pickle",
+    ],
+    test_runner = ":test_runner",
+    deps = ["//zml2:zml"],
+)
+
+filegroup(
+    name = "test_runner",
+    srcs = ["test_runner.zig"],
+    visibility = ["//visibility:public"],
 )
