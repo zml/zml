@@ -32,6 +32,7 @@ const params = clap.parseParamsComptime(
     \\--create-options <STRING>   platform creation options JSON, defaults to {}
     \\--no-llama3      <BOOL>     skip prompt template
     \\--sharding       <BOOL>     default: true: sharding on or off
+    \\--bs              <UINT>     batch-size
 );
 
 pub fn tokenizePrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, config: LlamaLM.Config, prompt: []const u8, skip_llama3_encoding: bool) ![]u32 {
@@ -69,6 +70,7 @@ pub fn generateText(
     kv_cache_: zml.Bufferized(llama.KvCache),
     tokenizer: zml.tokenizer.Tokenizer,
     allocator: std.mem.Allocator,
+    b: u32,
     seed: u128,
     prompt: []const u8,
     skip_llama3_encoding: bool,
@@ -83,8 +85,11 @@ pub fn generateText(
     const platform = mod_generate.platform();
     const max_seq_len = llama_.model.max_seq_len;
 
+    const tracer: zml.tools.Tracer = .init("ai.zml.token_sampler");
+    defer tracer.deinit();
+
     // init RNG and buffers
-    var generated_token_buffer = [_]u32{undefined};
+    const generated_token_buffer = try allocator.alloc(u32, b);
 
     const probs_shape = mod_prefill.inner.result_shapes[0];
     std.debug.assert(probs_shape.eql(mod_generate.inner.result_shapes[0]));
@@ -96,10 +101,12 @@ pub fn generateText(
 
     var kv_cache = prefill: {
         // prepare device buffers for the prefill tokens and their positions
-        const prefill_buffer = try allocator.alloc(u32, max_seq_len);
-        @memcpy(prefill_buffer[0..prompt_tok.len], prompt_tok);
+        const prefill_buffer = try allocator.alloc(u32, b * max_seq_len);
+        for (0..b) |i| {
+            @memcpy(prefill_buffer[i * max_seq_len ..][0..prompt_tok.len], prompt_tok);
+        }
 
-        var prefill_tokens = try zml.Buffer.fromSlice(platform, .{max_seq_len}, prefill_buffer);
+        var prefill_tokens = try zml.Buffer.fromSlice(platform, .{ .b = b, .s = max_seq_len }, prefill_buffer);
         defer prefill_tokens.deinit();
         var prefill_token_pos = try zml.Buffer.scalar(platform, 0, .u32);
         defer prefill_token_pos.deinit();
@@ -109,15 +116,15 @@ pub fn generateText(
 
         // works cause we're using toMemory(.host_pinned) in llama.zig
         const probs_h = probs_d.asHostBuffer();
-        _ = try sampler.vtable.writeFn(&sampler.state, @ptrCast(@alignCast(probs_h.items(f32))));
-        generated_token_buffer[0] = sampler.vtable.pick(&sampler.state, strategy);
+        _ = try sampler.writer.writeAll(probs_h.bytes());
+        sampler.pick(generated_token_buffer.ptr);
         break :prefill kv_cache;
     };
     defer zml.aio.unloadBuffers(&kv_cache);
 
     // Prepare for token-by-token generation,
     // start with the token generated based on the full prompt.
-    var current_token = try zml.Buffer.fromSlice(platform, .{1}, &generated_token_buffer);
+    var current_token = try zml.Buffer.fromSlice(platform, .{ .b = b, .s = 1 }, generated_token_buffer);
     defer current_token.deinit();
 
     const output_tokens_len = max_seq_len - prompt_tok.len - 1;
@@ -155,10 +162,16 @@ pub fn generateText(
         defer probs_d.deinit();
 
         {
-            const probs_h = (try probs_d.await()).asHostBuffer();
-            _ = try sampler.vtable.writeFn(&sampler.state, @ptrCast(@alignCast(probs_h.items(f32))));
-            generated_token_buffer[0] = sampler.vtable.pick(&sampler.state, strategy);
+            const probs_d_ready = try probs_d.await();
+            const f_sample = tracer.frameStart("sample");
+            const probs_h = probs_d_ready.asHostBuffer();
+            _ = try sampler.writer.writeAll(probs_h.bytes());
+            sampler.pick(generated_token_buffer.ptr);
+            tracer.frameEnd(f_sample, "sample");
         }
+
+        current_token.deinit();
+        current_token = try zml.Buffer.fromSlice(platform, .{ .b = b, .s = 1 }, generated_token_buffer);
     }
     const end = std.time.microTimestamp();
     const duration = stdx.math.divFloat(f64, end - start, std.time.us_per_s);
@@ -259,7 +272,9 @@ pub fn asyncMain() !void {
     defer store.deinit();
 
     // Write metadata from the config file into the LlamaLm struct.
+    const b: u32 = cli.args.bs orelse 1;
     const seq_len: u32 = cli.args.@"seq-len" orelse 256;
+
     const llama_options: llama.LlamaLM.Options = .{
         .max_seq_len = seq_len,
         .sampling_strategy = .{
@@ -276,12 +291,13 @@ pub fn asyncMain() !void {
     const llama_tensors: llama.LlamaLM = try .init(compiler_arena.allocator(), config, llama_options, store);
 
     // Specify shapes of input arguments
-    const prefill_tokens_shape = zml.Shape.init(.{ .s = llama_options.max_seq_len }, .u32);
-    const gen_tokens_shape = zml.Shape.init(.{ .s = 1 }, .u32);
+    const prefill_tokens_shape = zml.Shape.init(.{ .b = b, .s = llama_options.max_seq_len }, .u32);
+    const gen_tokens_shape = zml.Shape.init(.{ .b = b, .s = 1 }, .u32);
     const token_idx_shape = zml.Shape.init(.{}, .u32);
 
     const dtype = llama_tensors.model.embed_tokens.weight.dtype();
     const kv_shape = zml.Shape.init(.{
+        .b = b,
         .layer = llama_tensors.model.layers.len,
         .k = seq_len,
         .h = config.num_key_value_heads,
@@ -351,6 +367,7 @@ pub fn asyncMain() !void {
         kv_cache,
         tokenizer,
         allocator,
+        b,
         seed,
         prompt[0..],
         skip_llama3_encoding,
