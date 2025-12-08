@@ -242,7 +242,7 @@ pub const ErrorCode = enum(c.PJRT_Error_Code) {
 pub const Error = opaque {
     pub fn deinit(self: *Error, api: *const Api) void {
         _ = api.call(.PJRT_Error_Destroy, .{
-            .@"error" = @ptrCast(self),
+            .@"error" = @as(*c.PJRT_Error, @ptrCast(self)),
         }) catch unreachable;
     }
 
@@ -378,13 +378,13 @@ pub const Client = opaque {
             .client = self.inner(),
             .data = @constCast(args.data),
             .type = @intFromEnum(args.buffer_type),
-            .dims = @ptrCast(@constCast(args.dims.ptr)),
+            .dims = @as([*c]const i64, @ptrCast(@constCast(args.dims.ptr))),
             .num_dims = args.dims.len,
-            .byte_strides = if (args.byte_strides) |bs| @ptrCast(@constCast(bs.ptr)) else null,
+            .byte_strides = @as([*c]const i64, if (args.byte_strides) |bs| @ptrCast(@constCast(bs.ptr)) else null),
             .num_byte_strides = if (args.byte_strides) |bs| bs.len else 0,
             .host_buffer_semantics = @intFromEnum(args.host_buffer_semantics),
-            .device = if (args.dst == .device) @ptrCast(@constCast(args.dst.device)) else null,
-            .memory = if (args.dst == .memory) @ptrCast(@constCast(args.dst.memory)) else null,
+            .device = @as(?*c.PJRT_Device, if (args.dst == .device) @ptrCast(@constCast(args.dst.device)) else null),
+            .memory = @as(?*c.PJRT_Memory, if (args.dst == .memory) @ptrCast(@constCast(args.dst.memory)) else null),
             .device_layout = null, // TODO
             .done_with_host_buffer = null, // out
             .buffer = null, // out
@@ -1058,7 +1058,7 @@ pub const Event = opaque {
     pub fn onReady(self: *Event, api: *const Api, func: *const fn (err: ?*Error, user_arg: ?*anyopaque) callconv(.c) void, user_arg: ?*anyopaque) ApiError!void {
         _ = try api.call(.PJRT_Event_OnReady, .{
             .event = self.inner(),
-            .callback = @ptrCast(func),
+            .callback = @as(c.PJRT_Event_OnReadyCallback, @ptrCast(func)),
             .user_arg = user_arg,
         });
     }

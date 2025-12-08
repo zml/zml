@@ -219,43 +219,56 @@ pub const Event = opaque {
         return self.inner().getEventError(api);
     }
 
-    pub fn awaitBlocking(self: *Event, api: *const Api) ApiError!void {
+    pub fn awaitBlocking(self: *Event, api: *const Api, io: std.Io) ApiError!void {
         if (self.isReady(api)) {
             return;
         }
-        try self.inner().await(api);
+        try self.inner().await(api, io);
     }
 
-    pub fn await(self: *Event, api: *const Api) ApiError!void {
-        _ = self; // autofix
-        _ = api; // autofix
-        @panic("Uh oh");
-        //defer self.deinit(api);
+    pub fn await(self: *Event, api: *const Api, io: std.Io) ApiError!void {
+        defer self.deinit(api);
 
-        //if (self.isReady(api)) {
-        //    return;
-        //}
+        if (self.isReady(api)) {
+            return;
+        }
 
-        //var ctx = struct {
-        //    err: ?*pjrt.Error = null,
-        //    event: async.threading.ResetEventSingle = .{},
-        //}{};
+        var mutex: std.Io.Mutex = .init;
+        var condvar: std.Io.Condition = .{};
+        var done: bool = false;
 
-        //try self.inner().onReady(api, &(struct {
-        //    fn call(err: ?*pjrt.Error, user_arg: ?*anyopaque) callconv(.c) void {
-        //        const ctx_: *@TypeOf(ctx) = @ptrCast(@alignCast(user_arg.?));
-        //        ctx_.err = err;
-        //        ctx_.event.set();
-        //    }
-        //}.call), &ctx);
-        //ctx.event.wait();
+        var ctx = struct {
+            err: ?*pjrt.Error = null,
+            mutex: *std.Io.Mutex,
+            condvar: *std.Io.Condition,
+            done: *bool,
+            io: std.Io,
+        }{ .mutex = &mutex, .condvar = &condvar, .done = &done, .io = io };
 
-        //if (ctx.err) |e| {
-        //    defer e.deinit(api);
-        //    const err_code = e.getCode(api).toApiError();
-        //    log.err("{t} {s}", .{ err_code, e.getMessage(api) });
-        //    return err_code;
-        //}
+        try self.inner().onReady(api, &(struct {
+            fn call(err: ?*pjrt.Error, user_arg: ?*anyopaque) callconv(.c) void {
+                const ctx_: *@TypeOf(ctx) = @ptrCast(@alignCast(user_arg.?));
+                ctx_.err = err;
+                {
+                    ctx_.mutex.lock(ctx_.io) catch unreachable;
+                    defer ctx_.mutex.unlock(ctx_.io);
+                    ctx_.done.* = true;
+                }
+
+                ctx_.condvar.signal(ctx_.io);
+            }
+        }.call), &ctx);
+        mutex.lock(io) catch unreachable;
+        while (!done) {
+            ctx.condvar.wait(io, &mutex) catch unreachable;
+        }
+
+        if (ctx.err) |e| {
+            defer e.deinit(api);
+            const err_code = e.getCode(api).toApiError();
+            log.err("{t} {s}", .{ err_code, e.getMessage(api) });
+            return err_code;
+        }
     }
 };
 
