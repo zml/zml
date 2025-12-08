@@ -76,6 +76,10 @@ pub fn generateText(
     const prompt_tok: []const u32 = try tokenizePrompt(allocator, tokenizer, config, prompt, skip_llama3_encoding);
     defer allocator.free(prompt_tok);
 
+    const tracer: zml.tools.Tracer = .init("ai.zml.sampling");
+    defer tracer.deinit();
+    var inter_token_frame: zml.tools.Tracer.Frame = undefined;
+
     var tokenizer_decoder = try tokenizer.decoder();
     defer tokenizer_decoder.deinit();
 
@@ -97,6 +101,8 @@ pub fn generateText(
         defer prefill_token_pos.deinit();
 
         const prefilled_tokens, const kv_cache, rng = mod_prefill.call(.{ prefill_tokens, prefill_token_pos, kv_cache_, rng });
+        _ = try prefill_tokens.await();
+        inter_token_frame = tracer.frameStart("inter_token");
         _ = try prefilled_tokens.toHost(std.mem.sliceAsBytes(prefill_buffer));
         generated_token_buffer[0] = prefill_buffer[prompt_tok.len - 1];
         break :prefill kv_cache;
@@ -139,8 +145,11 @@ pub fn generateText(
         defer token_pos.deinit();
 
         // call to generate the next token
+        tracer.frameEnd(inter_token_frame, "inter_token");
         current_token, kv_cache, rng = mod_generate.call(.{ current_token, token_pos, kv_cache, rng });
+        _ = try current_token.await();
 
+        inter_token_frame = tracer.frameStart("inter_token");
         // extract the generated token from the buffer
         _ = try current_token.toHost(std.mem.sliceAsBytes(&generated_token_buffer));
     }

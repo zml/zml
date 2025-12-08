@@ -10,6 +10,7 @@ pub const Tracer = switch (builtin.os.tag) {
 };
 
 const CudaTracer = struct {
+    pub const Frame = u64;
 
     // Those symbols are defined in cudaProfiler.h but their implementation is in libcuda.so
     // They will be bound at call time after libcuda.so is loaded (as a needed dependency of libpjrt_cuda.so).
@@ -39,12 +40,12 @@ const CudaTracer = struct {
         nvtxMarkA(message.ptr);
     }
 
-    pub fn frameStart(self: *const CudaTracer, message: [:0]const u8) u64 {
+    pub fn frameStart(self: *const CudaTracer, message: [:0]const u8) Frame {
         _ = self;
         return @intCast(nvtxRangeStartA(message.ptr));
     }
 
-    pub fn frameEnd(self: *const CudaTracer, interval_id: u64, message: [:0]const u8) void {
+    pub fn frameEnd(self: *const CudaTracer, interval_id: Frame, message: [:0]const u8) void {
         _ = self;
         _ = message;
         nvtxRangeEnd(@intCast(interval_id));
@@ -53,6 +54,7 @@ const CudaTracer = struct {
 };
 
 const MacOsTracer = struct {
+    pub const Frame = c.os_signpost_id_t;
     logger: c.os_log_t,
 
     pub fn init(name: [:0]const u8) MacOsTracer {
@@ -67,13 +69,13 @@ const MacOsTracer = struct {
         c.zml_os_signpost_event(self.logger, interval_id, message);
     }
 
-    pub fn frameStart(self: *const MacOsTracer, message: [:0]const u8) c.os_signpost_id_t {
+    pub fn frameStart(self: *const MacOsTracer, message: [:0]const u8) Frame {
         const interval_id = c.os_signpost_id_generate(self.logger);
         c.zml_os_signpost_interval_begin(self.logger, interval_id, message);
         return interval_id;
     }
 
-    pub fn frameEnd(self: *const MacOsTracer, interval_id: c.os_signpost_id_t, message: [:0]const u8) void {
+    pub fn frameEnd(self: *const MacOsTracer, interval_id: Frame, message: [:0]const u8) void {
         c.zml_os_signpost_interval_end(self.logger, interval_id, message);
     }
 };
