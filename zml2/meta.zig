@@ -66,7 +66,7 @@ pub fn MapType(From: type, To: type) type {
                         }
                     }
                     if (same) return T;
-                    return if (struct_infos.is_tuple) @Tuple(struct_field_types) else @Struct(.auto, null, struct_field_names, struct_field_types, struct_field_attrs);
+                    return if (struct_infos.is_tuple) @Tuple(&struct_field_types) else @Struct(.auto, null, &struct_field_names, &struct_field_types, &struct_field_attrs);
                 },
                 .@"union" => |union_info| {
                     const fields = union_info.fields;
@@ -92,7 +92,7 @@ pub fn MapType(From: type, To: type) type {
                         }
                     }
                     if (same) return T;
-                    return @Union(.auto, union_info.tag_type, union_field_names, union_field_types, union_field_attrs);
+                    return @Union(.auto, union_info.tag_type, &union_field_names, &union_field_types, &union_field_attrs);
                 },
                 .array => |arr_info| [arr_info.len]map(arr_info.child),
                 .pointer => |ptr_info| switch (ptr_info.size) {
@@ -361,7 +361,13 @@ pub fn MapRestrict(From: type, To: type) type {
                         }
                     }
                     if (num_fields == 0) return void;
-                    return if (struct_infos.is_tuple) @Tuple(struct_field_types) else @Struct(.auto, null, struct_field_names, struct_field_types, struct_field_attrs);
+                    return if (struct_infos.is_tuple) @Tuple(struct_field_types[0..num_fields]) else @Struct(
+                        .auto,
+                        null,
+                        struct_field_names[0..num_fields],
+                        struct_field_types[0..num_fields],
+                        struct_field_attrs[0..num_fields],
+                    );
                 },
                 .@"union" => |union_info| {
                     // We know that at least one of the union field contains a From.
@@ -378,7 +384,7 @@ pub fn MapRestrict(From: type, To: type) type {
                             .@"align" = @alignOf(FT),
                         };
                     }
-                    return @Union(.auto, union_info.tag_type, union_field_names, union_field_types, union_field_attrs);
+                    return @Union(.auto, union_info.tag_type, &union_field_names, &union_field_types, &union_field_attrs);
                 },
                 .array => |arr_info| [arr_info.len]map(arr_info.child),
                 .pointer => |ptr_info| switch (ptr_info.size) {

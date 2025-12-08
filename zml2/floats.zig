@@ -107,7 +107,7 @@ fn FloatHelpers(Float: type) type {
             return @as(T, x.mantissa) << f32_mantissa_bits - mantissa_bits;
         }
 
-        pub fn formatNumber(x: Float, writer: *std.io.Writer, n: std.fmt.Number) std.io.Writer.Error!void {
+        pub fn formatNumber(x: Float, writer: *std.Io.Writer, n: std.fmt.Number) std.Io.Writer.Error!void {
             switch (n.mode) {
                 .binary, .octal, .hex => try writer.print("{{ .sign={}, .exp={}, .mantissa={} }}", .{ x.sign, x.exponent, x.mantissa }),
                 else => try writer.printFloat(x.toF32(), n),

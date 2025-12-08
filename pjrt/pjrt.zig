@@ -779,18 +779,18 @@ pub const LoadedExecutable = opaque {
             .num_send_ops = 0,
             .num_recv_ops = 0,
             .launch_id = 0,
-            .non_donatable_input_indices = @ptrCast(args.non_donatable_input_indices.ptr),
+            .non_donatable_input_indices = @as([*c]const i64, @ptrCast(args.non_donatable_input_indices.ptr)),
             .num_non_donatable_input_indices = args.non_donatable_input_indices.len,
-            .context = @ptrCast(args.context),
+            .context = @as(?*c.PJRT_ExecuteContext, @ptrCast(args.context)),
         });
         _ = try api.call(.PJRT_LoadedExecutable_Execute, .{
             .executable = self.inner(),
-            .options = @ptrCast(&options),
-            .argument_lists = @ptrCast(args.arguments.ptr),
-            .num_devices = @intCast(args.arguments.len),
+            .options = @as(*c.PJRT_ExecuteOptions, @ptrCast(&options)),
+            .argument_lists = @as([*c]const [*c]const ?*c.PJRT_Buffer, @ptrCast(args.arguments.ptr)),
+            .num_devices = @as(usize, @intCast(args.arguments.len)),
             .num_args = args.num_args,
-            .output_lists = @ptrCast(args.results.ptr),
-            .device_complete_events = @ptrCast(args.events.ptr),
+            .output_lists = @as([*c]const [*c]?*c.PJRT_Buffer, @ptrCast(args.results.ptr)),
+            .device_complete_events = @as([*c]?*c.PJRT_Event, @ptrCast(args.events.ptr)),
             .execute_device = null,
         });
     }
@@ -929,7 +929,7 @@ pub const Buffer = opaque {
     pub fn toHostBuffer(self: *const Buffer, api: *const Api, dst: []u8) ApiError!?*Event {
         const ret = try api.call(.PJRT_Buffer_ToHostBuffer, .{
             .src = self.inner(),
-            .dst = @ptrCast(dst.ptr),
+            .dst = dst.ptr,
             .dst_size = dst.len,
         });
         return @ptrCast(ret.event);

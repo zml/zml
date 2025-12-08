@@ -9,11 +9,11 @@ fn FmtSlice(T: type) type {
     return struct {
         slice: []const T,
 
-        pub fn format(f: @This(), writer: *std.io.Writer) std.io.Writer.Error!void {
+        pub fn format(f: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
             return try formatSliceAny(f.slice, .{}, 1, writer);
         }
 
-        pub fn formatNumber(f: @This(), writer: *std.io.Writer, n: std.fmt.Number) std.io.Writer.Error!void {
+        pub fn formatNumber(f: @This(), writer: *std.Io.Writer, n: std.fmt.Number) std.Io.Writer.Error!void {
             return switch (@typeInfo(T)) {
                 .comptime_float, .float => try formatFloatSlice(f.slice, n, 1, writer),
                 .comptime_int, .int => try formatIntSlice(f.slice, n, 1, writer),
@@ -132,19 +132,19 @@ fn FmtAny(Data: type) type {
     return struct {
         data: Data,
 
-        pub inline fn format(self: @This(), writer: *std.io.Writer) std.io.Writer.Error!void {
+        pub inline fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
             try printValue(writer, .{}, self.data, std.options.fmt_max_depth);
         }
     };
 }
 
-/// Fix up of std.io.Writer.printValue that uses `format` method of subfields when possible
+/// Fix up of std.Io.Writer.printValue that uses `format` method of subfields when possible
 fn printValue(
-    w: *std.io.Writer,
+    w: *std.Io.Writer,
     options: std.fmt.Options,
     value: anytype,
     max_depth: usize,
-) std.io.Writer.Error!void {
+) std.Io.Writer.Error!void {
     const T = @TypeOf(value);
     if (std.meta.hasMethod(T, "format")) {
         return try value.format(w);
