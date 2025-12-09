@@ -3233,29 +3233,32 @@ pub const Tensor = struct {
         return _result(res_shape, op.result(0));
     }
 
-    // TODO(Corentin)
-    //test dynamicSlice {
-    //    const zml = @import("zml.zig");
-    //    const platform = zml.testing.env();
-    //    const T = f32;
+    test dynamicSlice {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
 
-    //    {
-    //        const x = try zml.Buffer.fromArray(platform, [10]T{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 });
-    //        const z = try zml.Buffer.scalar(platform, 4, .i32);
-    //        const res = try zml.testing.compileAndCall(platform, Tensor.dynamicSlice1d, .{ x, 0, .{ .len = 2, .start = z } });
+        inline for (.{
+            .{ [10]f32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }, Shape.init(.{10}, .f32), [2]f32{ 4, 5 }, 4, 0 },
+            .{ [2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } }, Shape.init(.{ 2, 5 }, .f32), [4]f32{ 3, 4, 8, 9 }, 3, 1 },
+        }) |testcase| {
+            const x_data, const x_shape, const expectation, const z_value: i32, const ax = testcase;
+            const x: Tensor = .init(x_shape);
+            const z: Tensor = .init(Shape.init(.{}, .i32));
 
-    //        try std.testing.expectEqual([2]T{ 4, 5 }, try res.getValue([2]T));
-    //    }
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Tensor.dynamicSlice1d, .{ x, ax, .{ .len = 2, .start = z } }, platform);
+            defer exe.deinit();
 
-    //    {
-    //        // Strided
-    //        const x = try zml.Buffer.fromArray(platform, [2][5]T{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } });
-    //        const z = try zml.Buffer.scalar(platform, 3, .i32);
+            var x_buffer: zml.Buffer = try .fromBytes(platform, x.shape(), std.mem.sliceAsBytes(&x_data), std.testing.io);
+            defer x_buffer.deinit();
+            var z_buffer: zml.Buffer = try .fromBytes(platform, z.shape(), std.mem.asBytes(&z_value), std.testing.io);
+            defer z_buffer.deinit();
 
-    //        const res = try zml.testing.compileAndCall(platform, Tensor.dynamicSlice1d, .{ x, 1, .{ .len = 2, .start = z } });
-    //        try std.testing.expectEqual([4]T{ 3, 4, 8, 9 }, res.getValue([4]T));
-    //    }
-    //}
+            const res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.dynamicSlice1d, .{ x_buffer, .{ .start = z_buffer } });
+            defer res.deinit();
+
+            try std.testing.expectEqual(expectation, try res.getValue(@TypeOf(expectation), std.testing.io));
+        }
+    }
 
     /// Updates a slice of the input Tensor along a specific axis using the given 'update' Tensor, with a start offset known at runtime.
     /// Note this is the untagged api, if you have tags, you should use dynamicUpdateSlice directly.
