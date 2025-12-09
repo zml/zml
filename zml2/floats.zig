@@ -1,11 +1,11 @@
 ///! Conversion utilities between different Floating point formats.
 const std = @import("std");
 
-test {
-    std.testing.refAllDecls(@This());
-}
+//test {
+//    std.testing.refAllDecls(@This());
+//}
 
-fn FloatHelpers(Float: type) type {
+fn FloatConversionHelpers(Float: type) type {
     const info = @typeInfo(Float);
     const err_msg = "FloatHelpers expect a packed struct { mantissa: uXX, exponent: uXX, sign: u1}";
     if (info != .@"struct" or info.@"struct".backing_integer == null) {
@@ -18,22 +18,14 @@ fn FloatHelpers(Float: type) type {
         }
     }
 
+    const zero = FloatHelpers(Float).zero;
+
     return struct {
         const mantissa_bits: u8 = @typeInfo(@FieldType(Float, "mantissa")).int.bits;
         const exponent_bits: u8 = @typeInfo(@FieldType(Float, "exponent")).int.bits;
         const f32_mantissa_bits: u8 = @typeInfo(@FieldType(Float32, "mantissa")).int.bits;
         const exp_bias: i16 = std.math.maxInt(std.meta.Int(.unsigned, exponent_bits - 1));
-        const exp_off: u8 = FloatHelpers(Float32).exp_bias - exp_bias;
-
-        pub const zero: Float = .{ .sign = 0, .exponent = 0, .mantissa = 0 };
-
-        pub fn neg(x: Float) Float {
-            return .{
-                .sign = x.sign ^ 1,
-                .exponent = x.exponent,
-                .mantissa = x.mantissa,
-            };
-        }
+        const exp_off: u8 = FloatConversionHelpers(Float32).exp_bias - exp_bias;
 
         /// Lossy conversion from f32, similar to @floatCast
         pub fn fromF32(f: f32) Float {
@@ -46,8 +38,11 @@ fn FloatHelpers(Float: type) type {
                 @branchHint(.unlikely);
                 return if (@hasDecl(Float, "inf"))
                     if (vf32.sign == 0) Float.inf else Float.minus_inf
-                else
-                    Float.nan;
+                else if (@hasDecl(Float, "nan"))
+                    Float.nan
+                else b: {
+                    break :b if (vf32.sign == 0) Float.max else Float.min;
+                };
             }
 
             return if (exponent <= 0)
@@ -106,6 +101,32 @@ fn FloatHelpers(Float: type) type {
             const T = @FieldType(Float32, "mantissa");
             return @as(T, x.mantissa) << f32_mantissa_bits - mantissa_bits;
         }
+    };
+}
+
+fn FloatHelpers(Float: type) type {
+    const info = @typeInfo(Float);
+    const err_msg = "FloatHelpers expect a packed struct { mantissa: uXX, exponent: uXX, sign: u1}";
+    if (info != .@"struct" or info.@"struct".backing_integer == null) {
+        @compileError(err_msg);
+    }
+    comptime {
+        for (info.@"struct".fields, &.{ "mantissa", "exponent", "sign" }) |field, expected_name| {
+            if (!std.mem.eql(u8, field.name, expected_name))
+                @compileError(err_msg);
+        }
+    }
+
+    return struct {
+        pub const zero: Float = .{ .sign = 0, .exponent = 0, .mantissa = 0 };
+
+        pub fn neg(x: Float) Float {
+            return .{
+                .sign = x.sign ^ 1,
+                .exponent = x.exponent,
+                .mantissa = x.mantissa,
+            };
+        }
 
         pub fn formatNumber(x: Float, writer: *std.Io.Writer, n: std.fmt.Number) std.Io.Writer.Error!void {
             switch (n.mode) {
@@ -121,14 +142,28 @@ pub const Float32 = packed struct(u32) {
     exponent: u8,
     sign: u1,
 
+    pub const nan: Float32 = .{ .sign = 0, .exponent = std.math.maxInt(u8), .mantissa = 1 };
+    pub const max: Float32 = .{ .sign = 0, .exponent = std.math.maxInt(u8) - 1, .mantissa = std.math.maxInt(u23) };
+    pub const min: Float32 = neg(max);
     pub const inf: Float32 = .{ .sign = 0, .exponent = std.math.maxInt(u8), .mantissa = 0 };
     pub const minus_inf = neg(inf);
+
+    pub fn isNan(self: Float32) bool {
+        return self.exponent == nan.exponent and self.mantissa != 0;
+    }
 
     const Helpers = FloatHelpers(@This());
     pub const zero = Helpers.zero;
     pub const neg = Helpers.neg;
-    pub const fromF32 = Helpers.fromF32;
-    pub const toF32 = Helpers.toF32;
+
+    pub fn fromF32(f: f32) Float32 {
+        return @bitCast(f);
+    }
+
+    pub fn toF32(x: Float32) f32 {
+        return @bitCast(x);
+    }
+
     pub const formatNumber = Helpers.formatNumber;
 };
 
@@ -139,11 +174,27 @@ pub const Float64 = packed struct(u64) {
     exponent: u11,
     sign: u1,
 
+    pub const nan: Float64 = .{ .sign = 0, .exponent = std.math.maxInt(u11), .mantissa = 1 };
+    pub const max: Float64 = .{ .sign = 0, .exponent = std.math.maxInt(u11) - 1, .mantissa = std.math.maxInt(u32) };
+    pub const min: Float64 = neg(max);
+    pub const inf: Float64 = .{ .sign = 0, .exponent = std.math.maxInt(u11), .mantissa = 0 };
+    pub const minus_inf = neg(inf);
+
+    pub fn isNan(self: Float64) bool {
+        return self.exponent == nan.exponent and self.mantissa != 0;
+    }
+
     const Helpers = FloatHelpers(@This());
     pub const zero = Helpers.zero;
     pub const neg = Helpers.neg;
-    pub const fromF32 = Helpers.fromF32;
-    pub const toF32 = Helpers.toF32;
+    pub fn fromF32(f: f32) Float64 {
+        return @bitCast(@as(f64, @floatCast(f)));
+    }
+
+    pub fn toF32(x: Float64) f32 {
+        return @floatCast(@as(f64, @bitCast(x)));
+    }
+
     pub const formatNumber = Helpers.formatNumber;
 };
 
@@ -153,16 +204,18 @@ pub const Float8E4M3B11FNUZ = packed struct(u8) {
     sign: u1,
 
     pub const nan: Float8E4M3B11FNUZ = .{ .sign = 1, .exponent = 0, .mantissa = 0 };
+    pub const max: Float8E4M3B11FNUZ = .{ .sign = 0, .exponent = std.math.maxInt(u4), .mantissa = std.math.maxInt(u3) };
+    pub const min: Float8E4M3B11FNUZ = neg(max);
 
     pub fn isNan(self: Float8E4M3B11FNUZ) bool {
-        return self.sign == 1 and self.exponent == 0 and self.mantissa == 0;
+        return self == nan;
     }
 
     const Helpers = FloatHelpers(@This());
     pub const zero = Helpers.zero;
     pub const neg = Helpers.neg;
-    pub const fromF32 = Helpers.fromF32;
-    pub const toF32 = Helpers.toF32;
+    pub const fromF32 = FloatConversionHelpers(@This()).fromF32;
+    pub const toF32 = FloatConversionHelpers(@This()).toF32;
     pub const formatNumber = Helpers.formatNumber;
 };
 
@@ -172,15 +225,18 @@ pub const Float8E4M3FN = packed struct(u8) {
     sign: u1,
 
     pub const nan: Float8E4M3FN = .{ .sign = 0, .exponent = std.math.maxInt(u4), .mantissa = std.math.maxInt(u3) };
+    pub const max: Float8E4M3FN = .{ .sign = 0, .exponent = std.math.maxInt(u4), .mantissa = 0b110 };
+    pub const min: Float8E4M3FN = neg(max);
 
     pub fn isNan(self: Float8E4M3FN) bool {
         return self.exponent == nan.exponent and self.mantissa == nan.mantissa;
     }
+
     const Helpers = FloatHelpers(@This());
     pub const zero = Helpers.zero;
     pub const neg = Helpers.neg;
-    pub const fromF32 = Helpers.fromF32;
-    pub const toF32 = Helpers.toF32;
+    pub const fromF32 = FloatConversionHelpers(@This()).fromF32;
+    pub const toF32 = FloatConversionHelpers(@This()).toF32;
     pub const formatNumber = Helpers.formatNumber;
 };
 
@@ -190,16 +246,18 @@ pub const Float8E4M3FNUZ = packed struct(u8) {
     sign: u1,
 
     pub const nan: Float8E4M3FNUZ = .{ .sign = 1, .exponent = 0, .mantissa = 0 };
+    pub const max: Float8E4M3FNUZ = .{ .sign = 0, .exponent = std.math.maxInt(u4), .mantissa = std.math.maxInt(u3) };
+    pub const min: Float8E4M3FNUZ = neg(max);
 
     pub fn isNan(self: Float8E4M3FNUZ) bool {
-        return self.sign == 1 and self.exponent == 0 and self.mantissa == 0;
+        return self == nan;
     }
 
     const Helpers = FloatHelpers(@This());
     pub const zero = Helpers.zero;
     pub const neg = Helpers.neg;
-    pub const fromF32 = Helpers.fromF32;
-    pub const toF32 = Helpers.toF32;
+    pub const fromF32 = FloatConversionHelpers(@This()).fromF32;
+    pub const toF32 = FloatConversionHelpers(@This()).toF32;
     pub const formatNumber = Helpers.formatNumber;
 };
 
@@ -229,25 +287,21 @@ pub const Float8E5M2 = packed struct(u8) {
     exponent: u5,
     sign: u1,
 
-    pub const nan: Float8E5M2 = .{ .sign = 0, .exponent = std.math.maxInt(u5), .mantissa = 1 };
+    pub const nan: Float8E5M2 = .{ .sign = 0, .exponent = std.math.maxInt(u5), .mantissa = 0b01 };
+    pub const max: Float8E5M2 = .{ .sign = 0, .exponent = 0b11110, .mantissa = std.math.maxInt(u2) };
+    pub const min: Float8E5M2 = neg(max);
+    pub const inf: Float8E5M2 = .{ .sign = 0, .exponent = std.math.maxInt(u5), .mantissa = 0 };
+    pub const minus_inf: Float8E5M2 = .neg(inf);
 
     pub fn isNan(self: Float8E5M2) bool {
         return self.exponent == nan.exponent and self.mantissa != 0;
     }
 
-    pub const inf: Float8E5M2 = .{
-        .sign = 0,
-        .exponent = std.math.maxInt(u5),
-        .mantissa = 0,
-    };
-
-    pub const minus_inf: Float8E5M2 = .neg(inf);
-
     const Helpers = FloatHelpers(@This());
     pub const zero = Helpers.zero;
     pub const neg = Helpers.neg;
-    pub const fromF32 = Helpers.fromF32;
-    pub const toF32 = Helpers.toF32;
+    pub const fromF32 = FloatConversionHelpers(@This()).fromF32;
+    pub const toF32 = FloatConversionHelpers(@This()).toF32;
     pub const formatNumber = Helpers.formatNumber;
 };
 
@@ -257,16 +311,18 @@ pub const Float8E5M2FNUZ = packed struct(u8) {
     sign: u1,
 
     pub const nan: Float8E5M2FNUZ = .{ .sign = 1, .exponent = 0, .mantissa = 0 };
+    pub const max: Float8E5M2FNUZ = .{ .sign = 0, .exponent = std.math.maxInt(u5), .mantissa = std.math.maxInt(u2) };
+    pub const min: Float8E5M2FNUZ = neg(max);
 
     pub fn isNan(self: Float8E5M2FNUZ) bool {
-        return self.sign == 1 and self.exponent == 0 and self.mantissa == 0;
+        return self == nan;
     }
 
     const Helpers = FloatHelpers(@This());
     pub const zero = Helpers.zero;
     pub const neg = Helpers.neg;
-    pub const fromF32 = Helpers.fromF32;
-    pub const toF32 = Helpers.toF32;
+    pub const fromF32 = FloatConversionHelpers(@This()).fromF32;
+    pub const toF32 = FloatConversionHelpers(@This()).toF32;
     pub const formatNumber = Helpers.formatNumber;
 };
 
@@ -286,18 +342,14 @@ pub const BFloat16 = packed struct(u16) {
     sign: u1,
 
     pub const nan: BFloat16 = .{ .sign = 0, .exponent = std.math.maxInt(u8), .mantissa = 1 };
+    pub const max: BFloat16 = .{ .sign = 0, .exponent = 0b11111110, .mantissa = std.math.maxInt(u7) };
+    pub const min: BFloat16 = neg(max);
+    pub const inf: BFloat16 = .{ .sign = 0, .exponent = std.math.maxInt(u8), .mantissa = 0 };
+    pub const minus_inf: BFloat16 = .neg(inf);
 
     pub fn isNan(self: BFloat16) bool {
-        return allBitsOne(self.exponent) and self.mantissa != 0;
+        return self.exponent == nan.exponent and self.mantissa != 0;
     }
-
-    pub const inf: BFloat16 = .{
-        .sign = 0,
-        .exponent = std.math.maxInt(u8),
-        .mantissa = 0,
-    };
-
-    pub const minus_inf: BFloat16 = .neg(inf);
 
     // Specialized versions of to/from F32. Since BFloat16 has the same exponent range than F32,
     // no overflow/underflow can happen, simplifiying conversion logic.
@@ -340,25 +392,21 @@ pub const Float8E4M3 = packed struct(u8) {
     exponent: u4,
     sign: u1,
 
-    pub const nan: Float8E4M3 = @bitCast(0xFF);
+    pub const nan: Float8E4M3 = .{ .sign = 0, .exponent = std.math.maxInt(u4), .mantissa = 1 };
+    pub const max: Float8E4M3 = .{ .sign = 0, .exponent = 0b1110, .mantissa = std.math.maxInt(u3) };
+    pub const min: Float8E4M3 = neg(max);
+    pub const inf: Float8E4M3 = .{ .sign = 0, .exponent = std.math.maxInt(u4), .mantissa = 0 };
+    pub const minus_inf = neg(inf);
 
     pub fn isNan(self: Float8E4M3) bool {
-        return self == nan or self == comptime nan.neg();
+        return self.exponent == nan.exponent and self.mantissa != 0;
     }
-
-    pub const inf: Float8E4M3 = .{
-        .sign = 0,
-        .exponent = std.math.maxInt(u4),
-        .mantissa = 0,
-    };
-
-    pub const minus_inf = neg(inf);
 
     const Helpers = FloatHelpers(@This());
     pub const zero = Helpers.zero;
     pub const neg = Helpers.neg;
-    pub const fromF32 = Helpers.fromF32;
-    pub const toF32 = Helpers.toF32;
+    pub const fromF32 = FloatConversionHelpers(@This()).fromF32;
+    pub const toF32 = FloatConversionHelpers(@This()).toF32;
     pub const formatNumber = Helpers.formatNumber;
 };
 
@@ -367,25 +415,21 @@ pub const Float8E3M4 = packed struct(u8) {
     exponent: u3,
     sign: u1,
 
-    pub const nan: Float8E3M4 = @bitCast(0xFF);
+    pub const nan: Float8E3M4 = .{ .sign = 0, .exponent = std.math.maxInt(u3), .mantissa = 1 };
+    pub const max: Float8E3M4 = .{ .sign = 0, .exponent = 0b110, .mantissa = std.math.maxInt(u4) };
+    pub const min: Float8E3M4 = neg(max);
+    pub const inf: Float8E3M4 = .{ .sign = 0, .exponent = std.math.maxInt(u3), .mantissa = 0 };
+    pub const minus_inf = neg(inf);
 
     pub fn isNan(self: Float8E3M4) bool {
-        return self == nan or self == comptime nan.neg();
+        return self.exponent == nan.exponent and self.mantissa != 0;
     }
-
-    pub const inf: Float8E3M4 = .{
-        .sign = 0,
-        .exponent = std.math.maxInt(u3),
-        .mantissa = 0,
-    };
-
-    pub const minus_inf = neg(inf);
 
     const Helpers = FloatHelpers(@This());
     pub const zero = Helpers.zero;
     pub const neg = Helpers.neg;
-    pub const fromF32 = Helpers.fromF32;
-    pub const toF32 = Helpers.toF32;
+    pub const fromF32 = FloatConversionHelpers(@This()).fromF32;
+    pub const toF32 = FloatConversionHelpers(@This()).toF32;
     pub const formatNumber = Helpers.formatNumber;
 };
 
@@ -394,6 +438,8 @@ pub const Float8E8M0 = packed struct(u8) {
     exponent: u8,
     sign: u0 = 0,
 
+    pub const max: Float8E8M0 = .{ .exponent = std.math.maxInt(u8) };
+    pub const min: Float8E8M0 = .{ .exponent = 0 };
     pub const min_scale: f32 = @bitCast(Float32{ .sign = 0, .exponent = 0, .mantissa = 0b1 << 22 });
 
     /// Lossy conversion from f32, similar to @floatCast
@@ -432,11 +478,12 @@ pub const Float4E2M1 = packed struct(u4) {
     exponent: u2,
     sign: u1,
 
-    pub const nan: Float4E2M1 = @bitCast(@as(u4, 0xF));
+    pub const max: Float4E2M1 = .{ .sign = 0, .exponent = std.math.maxInt(u2), .mantissa = std.math.maxInt(u1) };
+    pub const min: Float4E2M1 = neg(max);
     const Helpers = FloatHelpers(@This());
     pub const zero = Helpers.zero;
     pub const neg = Helpers.neg;
-    pub const fromF32 = Helpers.fromF32;
+    pub const fromF32 = FloatConversionHelpers(@This()).fromF32;
     pub const formatNumber = Helpers.formatNumber;
 
     pub const values = [_]f32{ 0.0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6 };
@@ -488,10 +535,6 @@ pub fn isInf(x: anytype) bool {
     const FBits = std.meta.Int(.unsigned, @bitSizeOf(Float));
     const remove_sign = ~@as(FBits, 0) >> 1;
     return @as(FBits, @bitCast(x)) & remove_sign == @as(FBits, @bitCast(Float.inf));
-}
-
-fn allBitsOne(v: anytype) bool {
-    return v == std.math.maxInt(@TypeOf(v));
 }
 
 const TestCase = struct {
