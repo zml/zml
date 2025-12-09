@@ -3071,18 +3071,18 @@ pub const Tensor = struct {
     /// When `self.dim(axis_)` is divisible by `n_chunks` it will return exactly `n_chunks`.
     pub fn chunkAllowTrailing(
         self: Tensor,
+        allocator: std.mem.Allocator,
         axis_: i64,
         n_chunks: comptime_int,
-    ) []Tensor {
+    ) ![]Tensor {
         const a = self.axis(axis_);
         const d = self.dim(a);
         const chunk_size: i64 = @divFloor(d, n_chunks);
         const tail_chunk_size: i64 = @rem(d, chunk_size);
 
-        var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
-        defer arena.deinit();
+        var chunks = std.ArrayList(Tensor).initCapacity(allocator, n_chunks + 1) catch @panic("OOM");
+        defer chunks.deinit(allocator);
 
-        var chunks = std.ArrayList(Tensor).initCapacity(arena.allocator(), n_chunks + 1) catch @panic("OOM");
         for (0..n_chunks) |i| {
             const start: i64 = @as(i64, @intCast(i)) * chunk_size;
             chunks.appendAssumeCapacity(
@@ -3093,43 +3093,47 @@ pub const Tensor = struct {
             const start: i64 = n_chunks * chunk_size;
             chunks.appendAssumeCapacity(self.slice1d(a, .{ .start = start }));
         }
-        return chunks.items;
+        return chunks.toOwnedSlice(allocator);
     }
 
-    // TODO(Corentin)
-    //test chunkAllowTrailing {
-    //    const zml = @import("zml.zig");
-    //    const platform = zml.testing.env();
+    test chunkAllowTrailing {
+        const zml = @import("zml.zig");
 
-    //    // Only test shapes
-    //    var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
-    //    defer comp.deinit();
-    //    comp.activate();
-    //    defer comp.deactivate();
+        // Only test shapes
+        var comp = zml.module.CompilationContext.init(std.testing.allocator);
+        defer comp.deinit();
+        comp.activate();
+        defer comp.deactivate();
 
-    //    inline for (.{
-    //        .{ .{ .a = 10 }, .a, 3, .{ .a = 3 }, .{ .a = 1 } },
-    //        .{ .{ .a = 10, .b = 2 }, .a, 3, .{ .a = 3, .b = 2 }, .{ .a = 1, .b = 2 } },
-    //        .{ .{ 10, 2 }, 0, 3, .{ 3, 2 }, .{ 1, 2 } },
-    //        .{ .{ 12, 2 }, 0, 3, .{ 4, 2 }, .{} },
-    //    }) |testcase| {
-    //        const x_shape, const ax, const n_chunks, const res, const trailing = testcase;
-    //        const x = Tensor.constant(x_shape, .{ .f16 = 0 });
-    //        const chunks = x.chunkAllowTrailing(x.axis(ax), n_chunks);
+        const block = mlir.Block.init(&.{}, &.{});
+        defer block.deinit();
+        comp.pushBlock(block);
+        defer comp.popBlock();
 
-    //        const res_shape = Shape.init(res, .f16);
-    //        for (chunks[0..n_chunks]) |chk| {
-    //            try zml.testing.expectEqualShapes(res_shape, chk.shape());
-    //        }
-    //        const trailing_shape = Shape.init(trailing, .f16);
-    //        if (trailing_shape.rank() > 0) {
-    //            try std.testing.expectEqual(n_chunks + 1, chunks.len);
-    //            try zml.testing.expectEqualShapes(trailing_shape, chunks[n_chunks].shape());
-    //        } else {
-    //            try std.testing.expectEqual(n_chunks, chunks.len);
-    //        }
-    //    }
-    //}
+        inline for (.{
+            .{ .{ .a = 10 }, .a, 3, .{ .a = 3 }, .{ .a = 1 } },
+            .{ .{ .a = 10, .b = 2 }, .a, 3, .{ .a = 3, .b = 2 }, .{ .a = 1, .b = 2 } },
+            .{ .{ 10, 2 }, 0, 3, .{ 3, 2 }, .{ 1, 2 } },
+            .{ .{ 12, 2 }, 0, 3, .{ 4, 2 }, .{} },
+        }) |testcase| {
+            const x_shape, const ax, const n_chunks, const res, const trailing = testcase;
+            const x = Tensor.constant(.{ .f16 = 0 }).broad(Shape.init(x_shape, .f16));
+            const chunks = try x.chunkAllowTrailing(std.testing.allocator, x.axis(ax), n_chunks);
+            defer std.testing.allocator.free(chunks);
+
+            const res_shape = Shape.init(res, .f16);
+            for (chunks[0..n_chunks]) |chk| {
+                try zml.testing.expectEqualShapes(res_shape, chk.shape());
+            }
+            const trailing_shape = Shape.init(trailing, .f16);
+            if (trailing_shape.rank() > 0) {
+                try std.testing.expectEqual(n_chunks + 1, chunks.len);
+                try zml.testing.expectEqualShapes(trailing_shape, chunks[n_chunks].shape());
+            } else {
+                try std.testing.expectEqual(n_chunks, chunks.len);
+            }
+        }
+    }
 
     pub fn split(self: Tensor, axis_: anytype, split_sizes: []const i64) []Tensor {
         stdx.debug.assert(split_sizes.len > 0, "split expects at least one 'split_sizes', got 0", .{});
