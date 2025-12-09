@@ -2533,148 +2533,162 @@ pub const Tensor = struct {
         return ops.scatter(.{self}, indices, .{updates}, Custom.inc, .{opts.update_fn}, opts)[0];
     }
 
-    // TODO(Corentin)
-    //test scatterSlices {
-    //    const zml = @import("zml.zig");
-    //    const platform = zml.testing.env();
+    test scatterSlices {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
 
-    //    const Local = struct {
-    //        pub fn _scatter(self: Tensor, indices: []const Tensor, updates: Tensor) Tensor {
-    //            return self.scatterSlices(
-    //                indices,
-    //                updates,
-    //                .{ .update_fn = ScatterOpts.increment },
-    //            );
-    //        }
+        const Local = struct {
+            pub fn _scatter(self: Tensor, indices: []const Tensor, updates: Tensor) Tensor {
+                return self.scatterSlices(
+                    indices,
+                    updates,
+                    .{ .update_fn = ScatterOpts.increment },
+                );
+            }
 
-    //        pub fn _scatterCB(self: Tensor, coords: Tensor, updates: Tensor) Tensor {
-    //            return self.scatterSlices(
-    //                .{ .c = coords.choose1d(.coord, 0), .b = coords.choose1d(.coord, 1) },
-    //                updates,
-    //                .{ .update_fn = ScatterOpts.increment },
-    //            );
-    //        }
+            pub fn _scatterCB(self: Tensor, coords: Tensor, updates: Tensor) Tensor {
+                return self.scatterSlices(
+                    .{ .c = coords.choose1d(.coord, 0), .b = coords.choose1d(.coord, 1) },
+                    updates,
+                    .{ .update_fn = ScatterOpts.increment },
+                );
+            }
 
-    //        pub fn _idx(idx_shape: anytype) Tensor {
-    //            return Tensor.constant(idx_shape, .{ .i32 = 0 });
-    //        }
-    //    };
+            pub fn _idx(idx_shape: anytype) Tensor {
+                return Tensor.constant(.{ .i32 = 0 }).broad(Shape.init(idx_shape, .i32));
+            }
+        };
 
-    //    {
-    //        // Only test shapes
-    //        var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
-    //        defer comp.deinit();
-    //        comp.activate();
-    //        defer comp.deactivate();
-    //        const idx = Local._idx;
+        {
+            // Only test shapes
+            var comp = zml.module.CompilationContext.init(std.testing.allocator);
+            defer comp.deinit();
+            comp.activate();
+            defer comp.deactivate();
 
-    //        inline for (.{
-    //            // This is equivalent to a dynamic update slice, update 3 values at given offset of axis .a:
-    //            .{ .{ .a = 10 }, .{ .a = idx(.{}) }, .{ .a = 3 } },
-    //            // Use .a as a batching axis with .a=10 x .n=8 updates of 2 elements of .b
-    //            .{ .{ .a = 10, .b = 20 }, .{ .b = idx(.{ .a = 10, .n = 8 }) }, .{ .a = 10, .n = 8, .b = 2 } },
-    //            // Same but with update transposed
-    //            .{ .{ .a = 10, .b = 20 }, .{ .b = idx(.{ .a = 10, .n = 8 }) }, .{ .a = 10, .b = 2, .n = 8 } },
-    //            // similar, but use the normalized form where a is no longer an explicit batching axis.
-    //            .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{ .a2 = 10, .n = 8 }), .b = idx(.{ .a2 = 10, .n = 8 }) }, .{ .a2 = 10, .n = 8, .b = 2 } },
-    //            .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{ .a = 10, .n = 8 }), .b = idx(.{ .a = 10, .n = 8 }) }, .{ .a = 10, .n = 8, .b = 2 } },
-    //            .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{ .n = 8 }) }, .{ .n = 8, .a = 2 } },
-    //            .{ .{ .a = 10, .b = 20 }, .{ .b = idx(.{ .n = 8 }), .a = idx(.{ .n = 8 }) }, .{ .n = 8, .a = 3, .b = 2 } },
-    //            .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{ .n = 8 }), .b = idx(.{ .n = 8 }) }, .{ .a = 3, .n = 8, .b = 2 } },
-    //        }) |testcase| {
-    //            const x_shape, const indices, const updates_shapes = testcase;
-    //            const x = Tensor.constant(x_shape, .{ .f16 = 0 });
-    //            const updates = Tensor.constant(updates_shapes, .{ .f16 = 0 });
+            const block = mlir.Block.init(&.{}, &.{});
+            defer block.deinit();
+            comp.pushBlock(block);
+            defer comp.popBlock();
 
-    //            const y = scatterSlices(x, indices, updates, .{});
-    //            // Shape doesn't change with scatterSlices
-    //            try zml.testing.expectEqualShapes(x.shape(), y.shape());
-    //            try std.testing.expect(y.value().owner().verify());
-    //        }
-    //    }
-    //    // Test with actual values, no batching.
-    //    {
-    //        const a_host = try zml.HostBuffer.arange(std.testing.allocator, .{ .end = 9 }, .i32);
-    //        const a = (try zml.Buffer.from(platform, a_host.reshape(.{ 3, 3 }), .{})).withTags(.{ .a, .b });
-    //        defer a.deinit();
-    //        a_host.deinit(std.testing.allocator);
+            const idx = Local._idx;
 
-    //        const scatter_indices = try zml.Buffer.fromArray(platform, [2]i32{ 0, 2 });
-    //        const updates = try zml.Buffer.fromArray(platform, [2][3]i32{ .{ 10, 20, 30 }, .{ 70, 80, 90 } });
+            inline for (.{
+                // This is equivalent to a dynamic update slice, update 3 values at given offset of axis .a:
+                .{ .{ .a = 10 }, .{ .a = idx(.{}) }, .{ .a = 3 } },
+                // Use .a as a batching axis with .a=10 x .n=8 updates of 2 elements of .b
+                .{ .{ .a = 10, .b = 20 }, .{ .b = idx(.{ .a = 10, .n = 8 }) }, .{ .a = 10, .n = 8, .b = 2 } },
+                // Same but with update transposed
+                .{ .{ .a = 10, .b = 20 }, .{ .b = idx(.{ .a = 10, .n = 8 }) }, .{ .a = 10, .b = 2, .n = 8 } },
+                // similar, but use the normalized form where a is no longer an explicit batching axis.
+                .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{ .a2 = 10, .n = 8 }), .b = idx(.{ .a2 = 10, .n = 8 }) }, .{ .a2 = 10, .n = 8, .b = 2 } },
+                .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{ .a = 10, .n = 8 }), .b = idx(.{ .a = 10, .n = 8 }) }, .{ .a = 10, .n = 8, .b = 2 } },
+                .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{ .n = 8 }) }, .{ .n = 8, .a = 2 } },
+                .{ .{ .a = 10, .b = 20 }, .{ .b = idx(.{ .n = 8 }), .a = idx(.{ .n = 8 }) }, .{ .n = 8, .a = 3, .b = 2 } },
+                .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{ .n = 8 }), .b = idx(.{ .n = 8 }) }, .{ .a = 3, .n = 8, .b = 2 } },
+            }) |testcase| {
+                const x_shape, const indices, const updates_shapes = testcase;
+                const x = Tensor.constant(.{ .f16 = 0 }).broad(Shape.init(x_shape, .f16));
+                const updates = Tensor.constant(.{ .f16 = 0 }).broad(Shape.init(updates_shapes, .f16));
 
-    //        const expected = [3][3]i32{ .{ 10, 21, 32 }, .{ 3, 4, 5 }, .{ 76, 87, 98 } };
-    //        const result = try zml.testing.compileAndCall(platform, Local._scatter, .{
-    //            a,
-    //            &.{scatter_indices.withTags(.{.n})},
-    //            updates.withTags(.{ .n, .b }),
-    //        });
-    //        try std.testing.expect(a.shape().eql(result.shape()));
-    //        try std.testing.expectEqual(expected, result.getValue(@TypeOf(expected)));
-    //    }
-    //    // Test with setting individual values (no batching)
-    //    {
-    //        const a_host = try zml.HostBuffer.arange(std.testing.allocator, .{ .end = 9 }, .i32);
-    //        const a = try zml.Buffer.from(platform, a_host, .{});
-    //        defer a.deinit();
-    //        a_host.deinit(std.testing.allocator);
+                const y = scatterSlices(x, indices, updates, .{});
+                // Shape doesn't change with scatterSlices
+                try zml.testing.expectEqualShapes(x.shape(), y.shape());
+                try std.testing.expect(y.value().owner().verify());
+            }
+        }
+        // Test with actual values, no batching.
+        {
+            const a: Tensor = .init(Shape.init(.{ 3, 3 }, .i32));
 
-    //        const scatter_indices = try zml.Buffer.fromArray(platform, [2]i32{ 2, 7 });
-    //        const updates = try zml.Buffer.fromArray(platform, [2]i32{ 20, 70 });
+            const scatter_indices = Tensor.init(Shape.init(.{2}, .i32)).withTags(.{.n});
+            const updates = Tensor.init(Shape.init(.{ 2, 3 }, .i32)).withTags(.{ .n, .b });
 
-    //        const expected = [9]i32{ 0, 1, 22, 3, 4, 5, 6, 77, 8 };
-    //        const result = try zml.testing.compileAndCall(platform, Local._scatter, .{
-    //            a,
-    //            &.{scatter_indices.withTags(.{.n})},
-    //            updates.withTags(.{.n}),
-    //        });
-    //        try std.testing.expect(a.shape().eql(result.shape()));
-    //        try std.testing.expectEqual(expected, result.getValue(@TypeOf(expected)));
-    //    }
-    //    {
-    //        // Test with actual values and batching along axis .a
-    //        const operand = try zml.Buffer.constant(platform, Shape.init(.{ .a = 2, .b = 3, .c = 4, .d = 2 }, .u16), 0, .{});
-    //        defer operand.deinit();
-    //        const start_indices = (try zml.Buffer.fromArray(
-    //            platform,
-    //            [2][2][3][2]i32{
-    //                .{
-    //                    .{ .{ 0, 0 }, .{ 1, 0 }, .{ 2, 1 } },
-    //                    .{ .{ 0, 1 }, .{ 1, 1 }, .{ 0, 9 } },
-    //                },
-    //                .{
-    //                    .{ .{ 0, 0 }, .{ 2, 1 }, .{ 2, 2 } },
-    //                    .{ .{ 1, 2 }, .{ 0, 1 }, .{ 1, 0 } },
-    //                },
-    //            },
-    //        )).withTags(.{ .n, .a, .m, .coord });
-    //        defer start_indices.deinit();
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._scatter, .{ a, &.{scatter_indices}, updates }, platform);
+            defer exe.deinit();
 
-    //        const values = try zml.Buffer.constant(
-    //            platform,
-    //            Shape.init(.{ .n = 2, .a = 2, .m = 3, .c = 2, .d = 2 }, .u16),
-    //            1,
-    //            .{},
-    //        );
-    //        defer values.deinit();
+            var a_buffer: zml.Buffer = try .fromBytes(platform, a.shape(), std.mem.sliceAsBytes(&[9]i32{ 0, 1, 2, 3, 4, 5, 6, 7, 8 }), std.testing.io);
+            defer a_buffer.deinit();
+            var scatter_indices_buffer: zml.Buffer = try .fromBytes(platform, scatter_indices.shape(), std.mem.sliceAsBytes(&[2]i32{ 0, 2 }), std.testing.io);
+            defer scatter_indices_buffer.deinit();
+            var updates_buffer: zml.Buffer = try .fromBytes(platform, updates.shape(), std.mem.sliceAsBytes(&[2][3]i32{ .{ 10, 20, 30 }, .{ 70, 80, 90 } }), std.testing.io);
+            defer updates_buffer.deinit();
 
-    //        const result = try zml.testing.compileAndCall(platform, Local._scatterCB, .{ operand, start_indices, values });
+            var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._scatter, .{ a_buffer, &.{scatter_indices_buffer}, updates_buffer });
+            defer result.deinit();
 
-    //        const expected = [2][3][4][2]u16{
-    //            .{
-    //                .{ .{ 2, 2 }, .{ 3, 3 }, .{ 1, 1 }, .{ 0, 0 } },
-    //                .{ .{ 0, 0 }, .{ 0, 0 }, .{ 2, 2 }, .{ 2, 2 } },
-    //                .{ .{ 0, 0 }, .{ 0, 0 }, .{ 1, 1 }, .{ 1, 1 } },
-    //            },
-    //            .{
-    //                .{ .{ 0, 0 }, .{ 1, 1 }, .{ 1, 1 }, .{ 0, 0 } },
-    //                .{ .{ 2, 2 }, .{ 3, 3 }, .{ 1, 1 }, .{ 0, 0 } },
-    //                .{ .{ 0, 0 }, .{ 1, 1 }, .{ 1, 1 }, .{ 0, 0 } },
-    //            },
-    //        };
-    //        try std.testing.expect(operand.shape().eql(result.shape()));
-    //        try std.testing.expectEqual(expected, result.getValue(@TypeOf(expected)));
-    //    }
-    //}
+            const expected = [3][3]i32{ .{ 10, 21, 32 }, .{ 3, 4, 5 }, .{ 76, 87, 98 } };
+            try std.testing.expect(a.shape().eql(result.shape()));
+            try std.testing.expectEqual(expected, result.getValue(@TypeOf(expected), std.testing.io));
+        }
+        // Test with setting individual values (no batching)
+        {
+            const a: Tensor = .init(Shape.init(.{9}, .i32));
+
+            const scatter_indices = Tensor.init(Shape.init(.{2}, .i32)).withTags(.{.n});
+            const updates = Tensor.init(Shape.init(.{2}, .i32)).withTags(.{.n});
+
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._scatter, .{ a, &.{scatter_indices}, updates }, platform);
+            defer exe.deinit();
+
+            var a_buffer: zml.Buffer = try .fromBytes(platform, a.shape(), std.mem.sliceAsBytes(&[9]i32{ 0, 1, 2, 3, 4, 5, 6, 7, 8 }), std.testing.io);
+            defer a_buffer.deinit();
+            var scatter_indices_buffer: zml.Buffer = try .fromBytes(platform, scatter_indices.shape(), std.mem.sliceAsBytes(&[2]i32{ 2, 7 }), std.testing.io);
+            defer scatter_indices_buffer.deinit();
+            var updates_buffer: zml.Buffer = try .fromBytes(platform, updates.shape(), std.mem.sliceAsBytes(&[2]i32{ 20, 70 }), std.testing.io);
+            defer updates_buffer.deinit();
+
+            var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._scatter, .{ a_buffer, &.{scatter_indices_buffer}, updates_buffer });
+            defer result.deinit();
+
+            const expected = [9]i32{ 0, 1, 22, 3, 4, 5, 6, 77, 8 };
+            try std.testing.expect(a.shape().eql(result.shape()));
+            try std.testing.expectEqual(expected, result.getValue(@TypeOf(expected), std.testing.io));
+        }
+        {
+            // Test with actual values and batching along axis .a
+            const operand: Tensor = .init(Shape.init(.{ .a = 2, .b = 3, .c = 4, .d = 2 }, .u16));
+            const start_indices: Tensor = .init(Shape.init(.{ .n = 2, .a = 2, .m = 3, .coord = 2 }, .i32));
+            const values: Tensor = .init((Shape.init(.{ .n = 2, .a = 2, .m = 3, .c = 2, .d = 2 }, .u16)));
+
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._scatterCB, .{ operand, start_indices, values }, platform);
+            defer exe.deinit();
+
+            var operand_buffer: zml.Buffer = try .fromBytes(platform, operand.shape(), std.mem.sliceAsBytes(&@as([2 * 3 * 4 * 2]u16, @splat(0))), std.testing.io);
+            defer operand_buffer.deinit();
+            var start_indices_buffer: zml.Buffer = try .fromBytes(platform, start_indices.shape(), std.mem.sliceAsBytes(&[2][2][3][2]i32{
+                .{
+                    .{ .{ 0, 0 }, .{ 1, 0 }, .{ 2, 1 } },
+                    .{ .{ 0, 1 }, .{ 1, 1 }, .{ 0, 9 } },
+                },
+                .{
+                    .{ .{ 0, 0 }, .{ 2, 1 }, .{ 2, 2 } },
+                    .{ .{ 1, 2 }, .{ 0, 1 }, .{ 1, 0 } },
+                },
+            }), std.testing.io);
+            defer start_indices_buffer.deinit();
+            var values_buffer: zml.Buffer = try .fromBytes(platform, values.shape(), std.mem.sliceAsBytes(&@as([2 * 2 * 3 * 2 * 2]u16, @splat(1))), std.testing.io);
+            defer values_buffer.deinit();
+
+            var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._scatterCB, .{ operand_buffer, start_indices_buffer, values_buffer });
+            defer result.deinit();
+
+            const expected = [2][3][4][2]u16{
+                .{
+                    .{ .{ 2, 2 }, .{ 3, 3 }, .{ 1, 1 }, .{ 0, 0 } },
+                    .{ .{ 0, 0 }, .{ 0, 0 }, .{ 2, 2 }, .{ 2, 2 } },
+                    .{ .{ 0, 0 }, .{ 0, 0 }, .{ 1, 1 }, .{ 1, 1 } },
+                },
+                .{
+                    .{ .{ 0, 0 }, .{ 1, 1 }, .{ 1, 1 }, .{ 0, 0 } },
+                    .{ .{ 2, 2 }, .{ 3, 3 }, .{ 1, 1 }, .{ 0, 0 } },
+                    .{ .{ 0, 0 }, .{ 1, 1 }, .{ 1, 1 }, .{ 0, 0 } },
+                },
+            };
+            try std.testing.expect(operand.shape().eql(result.shape()));
+            try std.testing.expectEqual(expected, result.getValue(@TypeOf(expected), std.testing.io));
+        }
+    }
 
     /// Returns a Tensor containing the maximum over a given axis.
     pub fn max(self: Tensor, axis_: anytype) Tensor {

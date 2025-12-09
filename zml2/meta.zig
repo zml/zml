@@ -470,7 +470,7 @@ pub fn visit(comptime cb: anytype, ctx: FnParam(cb, 0), v: anytype) VisitReturn(
         *const K, *K => return cb(ctx, v),
         *const ?K, *?K => return if (v.*) |*val| cb(ctx, val) else {},
         []const K, []K => {
-            for (v) |*v_elem| cb(ctx, v_elem);
+            for (v) |*v_elem| if (can_error) try cb(ctx, v_elem) else cb(ctx, v_elem);
             return;
         },
         else => {},
