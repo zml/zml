@@ -1543,33 +1543,37 @@ pub const Tensor = struct {
         return res.reshape(res_shape.removeMany(to_remove.constSlice()));
     }
 
-    // TODO(Corentin)
-    //test slice {
-    //    const zml = @import("zml.zig");
-    //    const platform = zml.testing.env();
+    test slice {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
 
-    //    const x = try zml.Buffer.fromSlice(platform, .{ 2, 5 }, &[_]f32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 });
+        const x: Tensor = .init(Shape.init(.{ 2, 5 }, .f32));
 
-    //    // Wrap slice1d to hide the anytype in the signature.
-    //    const Local = struct {
-    //        pub fn _slice1dAxis(input: Tensor, ax: i8, slice_: Tensor.Slice) Tensor {
-    //            return input.slice1d(ax, slice_);
-    //        }
-    //    };
+        const x_buffer: zml.Buffer = try .fromBytes(platform, x.shape(), std.mem.sliceAsBytes(&[_]f32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }), std.testing.io);
+        defer x_buffer.deinit();
 
-    //    {
-    //        const res = try zml.testing.compileAndCall(platform, Local._slice1dAxis, .{ x, 0, .{ .end = 1 } });
-    //        try std.testing.expectEqual([5]f32{ 0, 1, 2, 3, 4 }, try res.getValue([5]f32));
-    //    }
-    //    {
-    //        const res = try zml.testing.compileAndCall(platform, Local._slice1dAxis, .{ x, 1, .{ .start = 1, .step = 2 } });
-    //        try std.testing.expectEqual([4]f32{ 1, 3, 6, 8 }, try res.getValue([4]f32));
-    //    }
-    //    {
-    //        const res = try zml.testing.compileAndCall(platform, Local._slice1dAxis, .{ x, -1, .{ .start = -2 } });
-    //        try std.testing.expectEqual([4]f32{ 3, 4, 8, 9 }, try res.getValue([4]f32));
-    //    }
-    //}
+        // Wrap slice1d to hide the anytype in the signature.
+        const Local = struct {
+            pub fn _slice1dAxis(input: Tensor, ax: i8, slice_: Tensor.Slice) Tensor {
+                return input.slice1d(ax, slice_);
+            }
+        };
+
+        inline for (.{
+            .{ 0, Tensor.Slice{ .end = 1 }, [5]f32{ 0, 1, 2, 3, 4 } },
+            .{ 1, Tensor.Slice{ .start = 1, .step = 2 }, [4]f32{ 1, 3, 6, 8 } },
+            .{ -1, Tensor.Slice{ .start = -2 }, [4]f32{ 3, 4, 8, 9 } },
+        }) |testcase| {
+            const ax, const slice_, const expectation = testcase;
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._slice1dAxis, .{ x, ax, slice_ }, platform);
+            defer exe.deinit();
+
+            const res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._slice1dAxis, .{x_buffer});
+            defer res.deinit();
+
+            try std.testing.expectEqual(expectation, try res.getValue(@TypeOf(expectation), std.testing.io));
+        }
+    }
 
     inline fn wrapIndex(self: Tensor, axis_: usize, idx: i64) i64 {
         return if (idx < 0) self.dim(axis_) + idx else idx;
