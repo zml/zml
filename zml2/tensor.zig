@@ -3037,32 +3037,35 @@ pub const Tensor = struct {
         return chunks;
     }
 
-    // TODO(Corentin)
-    //test chunkExact {
-    //    const zml = @import("zml.zig");
-    //    const platform = zml.testing.env();
+    test chunkExact {
+        const zml = @import("zml.zig");
 
-    //    // Only test shapes
-    //    var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
-    //    defer comp.deinit();
-    //    comp.activate();
-    //    defer comp.deactivate();
+        // Only test shapes
+        var comp = zml.module.CompilationContext.init(std.testing.allocator);
+        defer comp.deinit();
+        comp.activate();
+        defer comp.deactivate();
 
-    //    inline for (.{
-    //        .{ .{ .a = 12 }, .a, 3, .{ .a = 4 } },
-    //        .{ .{ .a = 12, .b = 2 }, .a, 3, .{ .a = 4, .b = 2 } },
-    //        .{ .{ 12, 2 }, 0, 3, .{ 4, 2 } },
-    //    }) |testcase| {
-    //        const x_shape, const ax, const n_chunks, const res = testcase;
-    //        const x = Tensor.constant(x_shape, .{ .f16 = 0 });
-    //        const chunks = x.chunkExact(ax, n_chunks);
+        const block = mlir.Block.init(&.{}, &.{});
+        defer block.deinit();
+        comp.pushBlock(block);
+        defer comp.popBlock();
 
-    //        const res_shape = Shape.init(res, .f16);
-    //        for (chunks) |chk| {
-    //            try zml.testing.expectEqualShapes(res_shape, chk.shape());
-    //        }
-    //    }
-    //}
+        inline for (.{
+            .{ .{ .a = 12 }, .a, 3, .{ .a = 4 } },
+            .{ .{ .a = 12, .b = 2 }, .a, 3, .{ .a = 4, .b = 2 } },
+            .{ .{ 12, 2 }, 0, 3, .{ 4, 2 } },
+        }) |testcase| {
+            const x_shape, const ax, const n_chunks, const res = testcase;
+            const x = Tensor.constant(.{ .f16 = 0 }).broad(Shape.init(x_shape, .f16));
+            const chunks = x.chunkExact(ax, n_chunks);
+
+            const res_shape = Shape.init(res, .f16);
+            for (chunks) |chk| {
+                try zml.testing.expectEqualShapes(res_shape, chk.shape());
+            }
+        }
+    }
 
     /// Chunk a given tensor into n parts of equal shape, and one part with the remaining items.
     /// When `self.dim(axis_)` is divisible by `n_chunks` it will return exactly `n_chunks`.
