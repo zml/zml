@@ -958,40 +958,57 @@ pub const Tensor = struct {
         return _result(self._shape.withDtype(to), op.result(0));
     }
 
-    // TODO(Corentin)
-    //test convert {
-    //    const floats = @import("floats.zig");
-    //    const zml = @import("zml.zig");
-    //    const platform = zml.testing.env();
+    test convert {
+        const floats = @import("floats.zig");
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
 
-    //    // f4e2m1
-    //    {
-    //        const x = [_]f32{ 0.0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6 };
-    //        var x_f4: [x.len]floats.Float4E2M1 = undefined;
-    //        for (&x_f4, &x) |*xi_f4, xi| xi_f4.* = .fromF32(xi);
+        // f4e2m1
+        {
+            const x = [_]f32{ 0.0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6 };
+            var x_f4: [x.len]floats.Float4E2M1 = undefined;
+            for (&x_f4, &x) |*xi_f4, xi| xi_f4.* = .fromF32(xi);
 
-    //        const x_d = try zml.Buffer.fromArray(platform, x);
-    //        const x_f4_xla_d = try zml.testing.compileAndCall(platform, Tensor.convert, .{ x_d, .f4e2m1 });
+            const x_d: Tensor = .init(Shape.init(.{x.len}, .f32));
+            const exe = try zml.module.compile(std.testing.allocator, std.testing.io, Tensor.convert, .{ x_d, .f4e2m1 }, platform);
+            defer exe.deinit();
 
-    //        const x_f4_xla = x_f4_xla_d.getValue(@TypeOf(x_f4));
-    //        errdefer std.log.warn("convert(.f4e2m1) failed !\ninput f32:\n{e}\nzml.floats computed:\n{any}\nxla computed:\n{any}", .{ stdx.fmt.slice(&x), x_f4, x_f4_xla });
-    //        try std.testing.expectEqualDeep(x_f4, x_f4_xla);
-    //    }
+            const x_d_buffer: zml.Buffer = try .fromBytes(platform, x_d.shape(), std.mem.sliceAsBytes(&x), std.testing.io);
+            defer x_d_buffer.deinit();
 
-    //    // f8e3m4
-    //    {
-    //        const x = [_]f32{ 1.1 / 4.0, 1.1 / 8.0, 1.1 / 16.0, 1.1 / 32.0, 1.1 / 64.0, 1.1 / 128.0 };
-    //        var x_f8e3: [x.len]floats.Float8E3M4 = undefined;
-    //        for (&x_f8e3, &x) |*xi_f8e3, xi| xi_f8e3.* = .fromF32(xi);
+            const x_f4_xla_d = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.convert, .{x_d_buffer});
+            const x_f4_xla_bytes = try x_f4_xla_d.toHostAlloc(std.testing.allocator, std.testing.io);
+            defer std.testing.allocator.free(x_f4_xla_bytes);
 
-    //        const x_d = try zml.Buffer.fromArray(platform, x);
-    //        const x_f8e3_xla_d = try zml.testing.compileAndCall(platform, Tensor.convert, .{ x_d, .f8e3m4 });
+            const x_f4_xla = std.mem.bytesAsSlice(floats.Float4E2M1, x_f4_xla_bytes);
 
-    //        const x_f8e3_xla = x_f8e3_xla_d.getValue(@TypeOf(x_f8e3));
-    //        errdefer std.log.warn("convert(.f8e3m4) failed !\ninput f32:\n{e}\nzml.floats computed:\n{any}\nxla computed:\n{any}", .{ stdx.fmt.slice(&x), x_f8e3, x_f8e3_xla });
-    //        try std.testing.expectEqualDeep(x_f8e3, x_f8e3_xla);
-    //    }
-    //}
+            errdefer std.log.warn("convert(.f4e2m1) failed !\ninput f32:\n{e}\nzml.floats computed:\n{any}\nxla computed:\n{any}", .{ stdx.fmt.slice(&x), x_f4, x_f4_xla });
+            try std.testing.expectEqualDeep(&x_f4, x_f4_xla);
+        }
+
+        // f8e3m4
+        {
+            const x = [_]f32{ 1.1 / 4.0, 1.1 / 8.0, 1.1 / 16.0, 1.1 / 32.0, 1.1 / 64.0, 1.1 / 128.0 };
+            var x_f8e3: [x.len]floats.Float8E3M4 = undefined;
+            for (&x_f8e3, &x) |*xi_f8e3, xi| xi_f8e3.* = .fromF32(xi);
+
+            const x_d: Tensor = .init(Shape.init(.{x.len}, .f32));
+            const exe = try zml.module.compile(std.testing.allocator, std.testing.io, Tensor.convert, .{ x_d, .f8e3m4 }, platform);
+            defer exe.deinit();
+
+            const x_d_buffer: zml.Buffer = try .fromBytes(platform, x_d.shape(), std.mem.sliceAsBytes(&x), std.testing.io);
+            defer x_d_buffer.deinit();
+
+            const x_f8e3_xla_d = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.convert, .{x_d_buffer});
+            const x_f8e3_xla_bytes = try x_f8e3_xla_d.toHostAlloc(std.testing.allocator, std.testing.io);
+            defer std.testing.allocator.free(x_f8e3_xla_bytes);
+
+            const x_f8e3_xla = std.mem.bytesAsSlice(floats.Float8E3M4, x_f8e3_xla_bytes);
+
+            errdefer std.log.warn("convert(.f8e3m4) failed !\ninput f32:\n{e}\nzml.floats computed:\n{any}\nxla computed:\n{any}", .{ stdx.fmt.slice(&x), x_f8e3, x_f8e3_xla });
+            try std.testing.expectEqualDeep(&x_f8e3, x_f8e3_xla);
+        }
+    }
 
     /// Returns a Tensor containing the element-wise rounding operation of the input Tensor.
     pub fn round(self: Tensor) Tensor {
