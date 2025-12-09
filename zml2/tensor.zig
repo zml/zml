@@ -381,7 +381,7 @@ pub const Tensor = struct {
 
         // Real tensors don't have imaginary part.
         if (self.dtype().isFloat()) {
-            return Tensor.constant(self._shape, self.dtype().zero());
+            return Tensor.constant(self.dtype().zero()).broad(self._shape);
         }
 
         const dt: DataType = switch (self.dtype()) {
@@ -390,7 +390,7 @@ pub const Tensor = struct {
             .c128 => .f64,
             else => unreachable,
         };
-        const op = dialects.stablehlo.imag(mlirCtx(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.imag(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
         return _result(self._shape.withDtype(dt), op.result(0));
     }
 
@@ -467,7 +467,7 @@ pub const Tensor = struct {
             return .{ self.update(op.result(0)), _result(sh, op.result(1)) };
         }
 
-        fn update(self: Rng, new_state: mlir.Value) Rng {
+        fn update(self: Rng, new_state: *const mlir.Value) Rng {
             return .{
                 ._state = _result(self._state._shape, new_state).reuseBuffer(self._state),
                 .algorithm = self.algorithm,
@@ -577,9 +577,9 @@ pub const Tensor = struct {
         pub fn normal(sh: Shape, opts: struct { mean: f64 = 0, stddev: f64 = 1 }) Tensor {
             stdx.debug.assert(sh.dtype().isFloat(), "normal expects tensor type to be a float, got {}", .{sh.dtype()});
 
-            const a = Tensor.constant(.{}, DataType.Value.init(sh.dtype(), opts.mean));
+            const a = Tensor.constant(DataType.Value.init(sh.dtype(), opts.mean));
             _ = a; // autofix
-            const b = Tensor.constant(.{}, DataType.Value.init(sh.dtype(), opts.stddev));
+            const b = Tensor.constant(DataType.Value.init(sh.dtype(), opts.stddev));
             _ = b; // autofix
             unreachable;
             //const res_shape = Tensor.constantTensor(HostBuffer.fromSlice(.{sh.rank()}, sh.dims()));
@@ -683,7 +683,7 @@ pub const Tensor = struct {
         return _result(self._shape, op.result(0));
     }
 
-    fn convolution(self: Tensor, other: Tensor, opts: dialects.stablehlo.ConvolutionOpts, loc: mlir.Location) Tensor {
+    fn convolution(self: Tensor, other: Tensor, opts: dialects.stablehlo.ConvolutionOpts, loc: *const mlir.Location) Tensor {
         _ = loc; // autofix
         stdx.debug.assert(self.rank() == other.rank(), "convolution expects tensor ranks to match, got {} and {}", .{ self.rank(), other.rank() });
         const N = self.rank();
@@ -771,8 +771,8 @@ pub const Tensor = struct {
             mlirCtx(),
             self.value(),
             other.value(),
-            used_opts,
             mlir.rankedTensorType(new_shape.dims(), mlirx.Type.fromDType(mlirCtx(), new_shape.dtype())),
+            used_opts,
             .unknown(mlirCtx()),
         ).appendTo(currentBlock());
 
@@ -1158,7 +1158,7 @@ pub const Tensor = struct {
 
     /// Returns a Tensor containing the ReLU activation function applied to each element of the input Tensor.
     pub fn relu(self: Tensor) Tensor {
-        return self.maximum(.constant(self.dims(), self.dtype().zero()));
+        return self.maximum(Tensor.constant(self.dtype().zero()).broad(.init(self.dims(), self.dtype())));
     }
 
     /// Returns a Tensor containing the leaky-ReLU activation function applied to each element of the input Tensor.
@@ -1183,11 +1183,11 @@ pub const Tensor = struct {
     //}
 
     /// Returns a Tensor containing the SwiGLU activation function applied to the input Tensor.
-    pub fn swiglu(self: Tensor, beta: f32, w: Tensor, b: Tensor) Tensor {
-        const sigmoid_tensor = self.mul(.constant(self._shape, DataType.Value.init(self.dtype(), beta))).sigmoid();
-        const one_minus_sigmoid_tensor: Tensor = .constant(self._shape, .init(self.dtype(), 1)).sub(sigmoid_tensor);
+    pub fn swiglu(self: Tensor, beta: f32, w: Tensor, b: Tensor, tag: Shape.Tag) Tensor {
+        const sigmoid_tensor = self.mul(Tensor.constant(DataType.Value.init(self.dtype(), beta)).broad(.init(self._shape, self.dtype()))).sigmoid();
+        const one_minus_sigmoid_tensor = Tensor.constant(.init(self.dtype(), 1)).broad(.init(self._shape, self.dtype())).sub(sigmoid_tensor);
 
-        return self.mul(sigmoid_tensor).add(one_minus_sigmoid_tensor.mul(w.matmul(self).add(b)));
+        return self.mul(sigmoid_tensor).add(one_minus_sigmoid_tensor.mul(w.dot(self, tag).add(b)));
     }
 
     /// Returns a Tensor containing the Gaussian Error Linear Units (GeLU) activation function applied to each element of the input Tensor.
@@ -1386,7 +1386,6 @@ pub const Tensor = struct {
             mlirCtx(),
             self.value(),
             mlir.rankedTensorType(new_shape.dims(), mlirx.Type.fromDType(mlirCtx(), new_shape.dtype())),
-            mlirx.tensorType(mlirCtx(), new_shape),
             .unknown(mlirCtx()),
         ).appendTo(currentBlock());
         return _result(new_shape, reshaped_val.result(0));
@@ -1560,7 +1559,7 @@ pub const Tensor = struct {
     pub fn concatenate(tensors: []const Tensor, axis_: anytype) Tensor {
         if (tensors.len == 1) return tensors[0];
         stdx.debug.assert(tensors.len <= 32, "concatenate only supports up to 32 tensors, got {}", .{tensors.len});
-        var buffer: [32]mlir.Value = undefined;
+        var buffer: [32]*const mlir.Value = undefined;
         std.debug.assert(tensors.len <= buffer.len);
         std.debug.assert(tensors.len > 0);
         const a = tensors[0].axis(axis_);
@@ -1915,7 +1914,7 @@ pub const Tensor = struct {
     }
 
     pub fn zeroes(sh: Shape) Tensor {
-        return .constant(sh.dtype().zero()).broad(sh);
+        return Tensor.constant(sh.dtype().zero()).broad(sh);
     }
 
     // TODO(Corentin)
@@ -3384,8 +3383,8 @@ pub const Tensor = struct {
             mlirCtx(),
             self.value(),
             other.value(),
-            dialects.stablehlo.ComparisonDirection.init(mlirCtx(), direction),
-            getComparisonType(mlirCtx(), self.dtype()),
+            dialects.stablehlo.ComparisonDirection.init(mlirCtx(), direction).getValue(),
+            getComparisonType(mlirCtx(), self.dtype()).getValue(),
             .unknown(mlirCtx()),
         ).appendTo(currentBlock());
 
@@ -3739,6 +3738,7 @@ pub const Tensor = struct {
     /// so it will slow down the program execution.
     pub fn print(input: Tensor) Tensor {
         _ = input; // autofix
+        unreachable;
         // TODO(Corentin)
         //return callback.call(callback.Print, .{input}, &.{input.shape()})[0];
     }
@@ -3789,7 +3789,7 @@ fn getPoolResDims(dt: DataType, in_dims: []const i64, base_dilations: @Vector(co
     return Shape.init(dims_arr[0..in_dims.len], dt);
 }
 
-fn getComparisonType(ctx: mlir.Context, dtype: DataType) dialects.stablehlo.CompareType {
+fn getComparisonType(ctx: *mlir.Context, dtype: DataType) *const dialects.stablehlo.CompareType {
     return dialects.stablehlo.CompareType.init(ctx, switch (dtype.class()) {
         .bool => .UNSIGNED,
         .integer => if (dtype.isSignedInt()) .SIGNED else .UNSIGNED,

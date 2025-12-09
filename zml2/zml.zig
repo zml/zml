@@ -75,5 +75,5 @@ pub fn Bufferized(comptime T: type) type {
 }
 
 test "zml" {
-    _ = Tensor;
+    std.testing.refAllDeclsRecursive(@This());
 }

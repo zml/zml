@@ -11,10 +11,6 @@ const EnumLiteral = @TypeOf(.enum_literal);
 
 const log = std.log.scoped(.shape);
 
-test {
-    std.testing.refAllDecls(Shape);
-}
-
 /// Represent the shape of a tensor.
 pub const Shape = struct {
     pub const Tag = [*:0]const u8;
