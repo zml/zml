@@ -1678,36 +1678,33 @@ pub const Tensor = struct {
         return res;
     }
 
-    // TODO(Corentin)
-    //test repeat1d {
-    //    const zml = @import("zml.zig");
-    //    const platform = zml.testing.env();
+    test repeat1d {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
 
-    //    const Local = struct {
-    //        fn repeat1d(x: Tensor, axis_: u3, n_reps: u32) Tensor {
-    //            return x.repeat1d(axis_, n_reps);
-    //        }
-    //    };
+        const Local = struct {
+            fn repeat1d(x: Tensor, axis_: u3, n_reps: u32) Tensor {
+                return x.repeat1d(axis_, n_reps);
+            }
+        };
 
-    //    {
-    //        const inputs: [3]u8 = .{ 1, 2, 3 };
-    //        const expectations: [6]u8 = .{ 1, 2, 3, 1, 2, 3 };
+        inline for (.{
+            .{ [3]u8{ 1, 2, 3 }, Shape.init(.{3}, .u8), [6]u8{ 1, 2, 3, 1, 2, 3 }, 0, 2 },
+            .{ [2][3]u8{ .{ 1, 2, 3 }, .{ 4, 5, 6 } }, Shape.init(.{ 2, 3 }, .u8), [2][6]u8{ .{ 1, 2, 3, 1, 2, 3 }, .{ 4, 5, 6, 4, 5, 6 } }, 1, 2 },
+        }) |testcase| {
+            const input_data, const shape_, const expectation, const ax, const reps = testcase;
+            const input: Tensor = .init(shape_);
 
-    //        const input = try zml.Buffer.fromArray(platform, inputs);
-    //        const output = try zml.testing.compileAndCall(platform, Local.repeat1d, .{ input, 0, 2 });
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local.repeat1d, .{ input, ax, reps }, platform);
+            defer exe.deinit();
 
-    //        try std.testing.expectEqual(expectations, output.getValue(@TypeOf(expectations)));
-    //    }
-    //    {
-    //        const inputs: [2][3]u8 = .{ .{ 1, 2, 3 }, .{ 4, 5, 6 } };
-    //        const expectations: [2][6]u8 = .{ .{ 1, 2, 3, 1, 2, 3 }, .{ 4, 5, 6, 4, 5, 6 } };
+            var input_buffer: zml.Buffer = try .fromBytes(platform, input.shape(), std.mem.sliceAsBytes(&input_data), std.testing.io);
+            defer input_buffer.deinit();
 
-    //        const input = try zml.Buffer.fromArray(platform, inputs);
-    //        const output = try zml.testing.compileAndCall(platform, Local.repeat1d, .{ input, 1, 2 });
-
-    //        try std.testing.expectEqual(expectations, output.getValue(@TypeOf(expectations)));
-    //    }
-    //}
+            const output = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local.repeat1d, .{input_buffer});
+            try std.testing.expectEqual(expectation, try output.getValue(@TypeOf(expectation), std.testing.io));
+        }
+    }
 
     /// Repeats in line each value along the given axis.
     ///
