@@ -2744,40 +2744,47 @@ pub const Tensor = struct {
         return .{ .values = values, .indices = indices };
     }
 
-    // TODO(Corentin)
-    //test argMax {
-    //    const zml = @import("zml.zig");
-    //    const platform = zml.testing.env();
-    //    const allocator = std.testing.allocator;
-    //    const ArgMaxTest = struct {
-    //        pub fn _fwd(x: Tensor) Tensor.ArgMaxRes {
-    //            return x.argMax(1);
-    //        }
-    //    };
+    test argMax {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+        const allocator = std.testing.allocator;
+        const ArgMaxTest = struct {
+            pub fn _fwd(x: Tensor) Tensor.ArgMaxRes {
+                return x.argMax(1);
+            }
+        };
 
-    //    const argmax = try zml.compileFn(allocator, ArgMaxTest._fwd, .{Shape.init(.{ 1, 5 }, .f32)}, platform);
-    //    defer argmax.deinit();
-    //    // Test with tie
-    //    {
-    //        const x = try zml.Buffer.fromArray(platform, [1][5]f32{.{ 5.0, 4.1, 7.9, 0, 7.9 }});
-    //        const res = argmax.call(.{x});
-    //        const max_ = res.values.getValue(f32);
-    //        const max_idx = res.indices.getValue(i32);
-    //        try std.testing.expectEqual(max_, 7.9);
-    //        // We should always return the first max found.
-    //        try std.testing.expectEqual(max_idx, 2);
-    //    }
+        const x: Tensor = .init(Shape.init(.{ 1, 5 }, .f32));
+        var exe = try zml.module.compile(allocator, std.testing.io, ArgMaxTest._fwd, .{x}, platform);
+        defer exe.deinit();
 
-    //    // Test with Nan
-    //    {
-    //        const x = try zml.Buffer.fromArray(platform, [1][5]f32{.{ 5.0, std.math.nan(f32), 7.9, 0, 7.9 }});
-    //        const res = argmax.call(.{x});
-    //        const max_ = try res.values.getValue(f32);
-    //        const max_idx = try res.indices.getValue(i32);
-    //        try std.testing.expect(std.math.isNan(max_));
-    //        try std.testing.expectEqual(max_idx, 1);
-    //    }
-    //}
+        {
+            var x_buffer: zml.Buffer = try .fromBytes(platform, x.shape(), std.mem.sliceAsBytes(&[1][5]f32{.{ 5.0, 4.1, 7.9, 0, 7.9 }}), std.testing.io);
+            defer x_buffer.deinit();
+
+            const res = try zml.testing.autoCall(allocator, std.testing.io, &exe, ArgMaxTest._fwd, .{x_buffer});
+            defer res.values.deinit();
+            defer res.indices.deinit();
+            const max_ = res.values.getValue(f32, std.testing.io);
+            const max_idx = res.indices.getValue(i32, std.testing.io);
+            try std.testing.expectEqual(max_, 7.9);
+            // We should always return the first max found.
+            try std.testing.expectEqual(max_idx, 2);
+        }
+
+        {
+            var x_buffer: zml.Buffer = try .fromBytes(platform, x.shape(), std.mem.sliceAsBytes(&[1][5]f32{.{ 5.0, std.math.nan(f32), 7.9, 0, 7.9 }}), std.testing.io);
+            defer x_buffer.deinit();
+
+            const res = try zml.testing.autoCall(allocator, std.testing.io, &exe, ArgMaxTest._fwd, .{x_buffer});
+            defer res.values.deinit();
+            defer res.indices.deinit();
+            const max_ = try res.values.getValue(f32, std.testing.io);
+            const max_idx = try res.indices.getValue(i32, std.testing.io);
+            try std.testing.expect(std.math.isNan(max_));
+            try std.testing.expectEqual(max_idx, 1);
+        }
+    }
 
     pub const SortRes = ArgMaxRes;
 
