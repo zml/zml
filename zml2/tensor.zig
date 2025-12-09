@@ -3551,60 +3551,78 @@ pub const Tensor = struct {
         const x = Tensor.iota(self.shape(), _axes.get(0));
         const y = Tensor.iota(self.shape(), _axes.get(1));
 
-        const zeros = Tensor.constant(self.shape(), self.dtype().zero());
+        const zeros = Tensor.constant(self.dtype().zero()).broad(self.shape());
         return x.addConstant(num_diagonals).cmp(.GE, y).select(self, zeros);
     }
 
-    // TODO(Corentin)
-    //test triangular {
-    //    const zml = @import("zml.zig");
-    //    const platform = zml.testing.env();
+    test triangular {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
 
-    //    const Local = struct {
-    //        pub fn _tri(input: Tensor, num_diagonals: i32) Tensor {
-    //            return input.triangular(.{ -2, -1 }, num_diagonals);
-    //        }
-    //    };
+        const Local = struct {
+            pub fn _tri(input: Tensor, num_diagonals: i32) Tensor {
+                return input.triangular(.{ -2, -1 }, num_diagonals);
+            }
+        };
 
-    //    const x = try zml.Buffer.fromArray(platform, [3][3]u8{
-    //        .{ 1, 1, 1 },
-    //        .{ 1, 1, 1 },
-    //        .{ 1, 1, 1 },
-    //    });
-    //    {
-    //        const res = try zml.testing.compileAndCall(platform, Local._tri, .{ x, 0 });
-    //        try std.testing.expectEqual(
-    //            [3][3]u8{
-    //                .{ 1, 0, 0 },
-    //                .{ 1, 1, 0 },
-    //                .{ 1, 1, 1 },
-    //            },
-    //            try res.getValue([3][3]u8),
-    //        );
-    //    }
-    //    {
-    //        const res = try zml.testing.compileAndCall(platform, Local._tri, .{ x, 1 });
-    //        try std.testing.expectEqual(
-    //            [3][3]u8{
-    //                .{ 1, 1, 0 },
-    //                .{ 1, 1, 1 },
-    //                .{ 1, 1, 1 },
-    //            },
-    //            try res.getValue([3][3]u8),
-    //        );
-    //    }
-    //    {
-    //        const res = try zml.testing.compileAndCall(platform, Local._tri, .{ x, -1 });
-    //        try std.testing.expectEqual(
-    //            [3][3]u8{
-    //                .{ 0, 0, 0 },
-    //                .{ 1, 0, 0 },
-    //                .{ 1, 1, 0 },
-    //            },
-    //            try res.getValue([3][3]u8),
-    //        );
-    //    }
-    //}
+        const x: Tensor = .init(Shape.init(.{ 3, 3 }, .u8));
+
+        var x_buffer: zml.Buffer = try .fromBytes(platform, x.shape(), std.mem.sliceAsBytes(&[3][3]u8{
+            .{ 1, 1, 1 },
+            .{ 1, 1, 1 },
+            .{ 1, 1, 1 },
+        }), std.testing.io);
+        defer x_buffer.deinit();
+
+        {
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._tri, .{ x, 0 }, platform);
+            defer exe.deinit();
+
+            const res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._tri, .{x_buffer});
+            defer res.deinit();
+
+            try std.testing.expectEqual(
+                [3][3]u8{
+                    .{ 1, 0, 0 },
+                    .{ 1, 1, 0 },
+                    .{ 1, 1, 1 },
+                },
+                try res.getValue([3][3]u8, std.testing.io),
+            );
+        }
+        {
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._tri, .{ x, 1 }, platform);
+            defer exe.deinit();
+
+            const res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._tri, .{x_buffer});
+            defer res.deinit();
+
+            try std.testing.expectEqual(
+                [3][3]u8{
+                    .{ 1, 1, 0 },
+                    .{ 1, 1, 1 },
+                    .{ 1, 1, 1 },
+                },
+                try res.getValue([3][3]u8, std.testing.io),
+            );
+        }
+        {
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._tri, .{ x, -1 }, platform);
+            defer exe.deinit();
+
+            const res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._tri, .{x_buffer});
+            defer res.deinit();
+
+            try std.testing.expectEqual(
+                [3][3]u8{
+                    .{ 0, 0, 0 },
+                    .{ 1, 0, 0 },
+                    .{ 1, 1, 0 },
+                },
+                try res.getValue([3][3]u8, std.testing.io),
+            );
+        }
+    }
 
     /// For each element at index `i`, if `bool_tensor[i] == true`, `output[i] = on_true[i]`
     /// otherwise, if `bool_tensor[i] == false`, `output[i] = on_false[i]`
