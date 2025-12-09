@@ -206,19 +206,19 @@ pub const DataType = enum(u8) {
     pub fn minValue(dtype: DataType) Value {
         return switch (dtype) {
             .bool => .{ .bool = false },
-            inline .f8e4m3b11fnuz, .f8e4m3fn, .f8e4m3fnuz, .f8e5m2fnuz => |tag| @unionInit(Value, @tagName(tag), @FieldType(Value, @tagName(tag)).zero),
-            inline .f8e5m2, .bf16 => |tag| @unionInit(Value, @tagName(tag), @FieldType(Value, @tagName(tag)).minus_inf),
+            inline .f8e4m3b11fnuz, .f8e4m3fn, .f8e4m3fnuz, .f8e5m2fnuz, .f8e8m0, .f4e2m1 => |tag| @unionInit(Value, @tagName(tag), @FieldType(Value, @tagName(tag)).min),
+            inline .f8e5m2, .f8e3m4, .f8e4m3, .bf16 => |tag| @unionInit(Value, @tagName(tag), @FieldType(Value, @tagName(tag)).minus_inf),
             inline .f16, .f32, .f64 => |tag| @unionInit(Value, @tagName(tag), -std.math.inf(@FieldType(Value, @tagName(tag)))),
             inline .i2, .i4, .i8, .i16, .i32, .i64, .u2, .u4, .u8, .u16, .u32, .u64 => |tag| @unionInit(Value, @tagName(tag), std.math.minInt(@FieldType(Value, @tagName(tag)))),
-            inline else => |tag| @panic("Unsupported type: " ++ @tagName(tag)),
+            inline .c64, .c128 => |tag| @panic("DataType doesn't have a min value: " ++ @tagName(tag)),
         };
     }
 
     pub fn maxValue(dtype: DataType) Value {
         return switch (dtype) {
             .bool => .{ .bool = true },
-            inline .f8e4m3b11fnuz, .f8e4m3fn, .f8e4m3fnuz, .f8e5m2fnuz => |tag| @panic("DataType doesn't have a max value: " ++ @tagName(tag)),
-            inline .f8e5m2, .bf16 => |tag| @unionInit(Value, @tagName(tag), @FieldType(Value, @tagName(tag)).inf),
+            inline .f8e4m3b11fnuz, .f8e4m3fn, .f8e4m3fnuz, .f8e5m2fnuz, .f8e8m0, .f4e2m1 => |tag| @unionInit(Value, @tagName(tag), @FieldType(Value, @tagName(tag)).max),
+            inline .f8e5m2, .f8e3m4, .f8e4m3, .bf16 => |tag| @unionInit(Value, @tagName(tag), @FieldType(Value, @tagName(tag)).inf),
             inline .f16, .f32, .f64 => |tag| @unionInit(Value, @tagName(tag), std.math.inf(@FieldType(Value, @tagName(tag)))),
             inline .i2, .i4, .i8, .i16, .i32, .i64, .u2, .u4, .u8, .u16, .u32, .u64 => |tag| @unionInit(Value, @tagName(tag), std.math.maxInt(@FieldType(Value, @tagName(tag)))),
             inline .c64, .c128 => |tag| @panic("DataType doesn't have a max value: " ++ @tagName(tag)),
