@@ -592,7 +592,7 @@ pub fn rng_bit_generator(
 ) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.rng_bit_generator", .{
         .operands = .{ .flat = &.{initial_state} },
-        .results = &.{ res_state_type, res_type },
+        .results = .{ .flat = &.{ res_state_type, res_type } },
         .attributes = &.{
             .named(ctx, "rng_algorithm", rngAlgorithm(ctx, rng_algorithm)),
         },
@@ -673,7 +673,7 @@ pub fn convolution(
         .results = .{ .flat = &.{res_type} },
         .attributes = &.{
             .named(ctx, "window_strides", mlir.denseArrayAttribute(ctx, .i64, opts.window_strides)),
-            .named(ctx, "padding", mlir.denseElementsAttribute(mlir.RankedTensorType.get(opts.pad_shape, mlir.integerType(ctx, .i64)).shaped(), opts.pad_value)),
+            .named(ctx, "padding", mlir.denseElementsAttribute(mlir.RankedTensorType.get(opts.pad_shape, mlir.integerType(ctx, .i64), null).shaped(), opts.pad_value)),
             .named(ctx, "lhs_dilation", mlir.denseArrayAttribute(ctx, .i64, opts.lhs_dilation)),
             .named(ctx, "rhs_dilation", mlir.denseArrayAttribute(ctx, .i64, opts.rhs_dilation)),
             .named(ctx, "window_reversal", mlir.denseArrayAttribute(ctx, .bool, window_reversal[0..opts.window_reversal.len])),
@@ -1179,7 +1179,7 @@ pub const PrecisionAttribute = opaque {
     }
 
     pub fn getValue(self: *const PrecisionAttribute) Precision {
-        const value = mlir.fromStringRef(c.stablehloPrecisionAttrGetValue(self.ptr()));
+        const value = mlir.string(c.stablehloPrecisionAttrGetValue(self.ptr()));
         return std.meta.stringToEnum(Precision, value) orelse unreachable;
     }
 };
@@ -1210,7 +1210,7 @@ pub const ComparisonDirection = opaque {
     }
 
     pub fn getValue(self: *const ComparisonDirection) Direction {
-        const value = mlir.fromStringRef(c.stablehloComparisonDirectionAttrGetValue(self.ptr()));
+        const value = mlir.string(c.stablehloComparisonDirectionAttrGetValue(self.ptr()));
         return std.meta.stringToEnum(Direction, value) orelse unreachable;
     }
 };
@@ -1239,7 +1239,7 @@ pub const CompareType = opaque {
     }
 
     pub fn getValue(self: *const CompareType) Type {
-        const value = mlir.fromStringRef(c.stablehloComparisonTypeAttrGetValue(self.ptr()));
+        const value = mlir.string(c.stablehloComparisonTypeAttrGetValue(self.ptr()));
         return std.meta.stringToEnum(Type, value) orelse unreachable;
     }
 };
@@ -1267,7 +1267,7 @@ pub const TransposeAttribute = opaque {
     }
 
     pub fn getValue(self: *const TransposeAttribute) Type {
-        const value = mlir.fromStringRef(c.stablehloTransposeAttrGetValue(self.ptr()));
+        const value = mlir.string(c.stablehloTransposeAttrGetValue(self.ptr()));
         return std.meta.stringToEnum(Type, value) orelse unreachable;
     }
 };
@@ -1296,7 +1296,7 @@ pub const FftType = opaque {
     }
 
     pub fn getValue(self: *const FftType) Type {
-        const value = mlir.fromStringRef(c.stablehloFftTypeAttrGetValue(self.ptr()));
+        const value = mlir.string(c.stablehloFftTypeAttrGetValue(self.ptr()));
         return std.meta.stringToEnum(Type, value) orelse unreachable;
     }
 };
