@@ -2173,67 +2173,71 @@ pub const Tensor = struct {
         }
 
         // TODO: sort indices following self.shape instead of asking the user to do it.
-        return ops.gather_(self, idx_axes.slice(), idx_per_axis.slice(), opts);
+        return ops.gather(self, idx_axes.slice(), idx_per_axis.slice(), opts);
     }
 
-    // TODO(Corentin)
-    //test gather {
-    //    const zml = @import("zml.zig");
-    //    const platform = zml.testing.env();
+    test gather {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+        _ = platform; // autofix
 
-    //    const Local = struct {
-    //        pub fn _idx(idx_shape: anytype) Tensor {
-    //            return Tensor.constant(idx_shape, .{ .i32 = 0 });
-    //        }
-    //    };
+        const Local = struct {
+            pub fn _idx(idx_shape: anytype) Tensor {
+                return Tensor.constant(.{ .i32 = 0 }).broad(Shape.init(idx_shape, .i64));
+            }
+        };
 
-    //    const idx = Local._idx;
+        const idx = Local._idx;
 
-    //    {
-    //        // Only test shapes
-    //        var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
-    //        defer comp.deinit();
-    //        comp.activate();
-    //        defer comp.deactivate();
+        {
+            // Only test shapes
+            var comp = zml.module.CompilationContext.init(std.testing.allocator);
+            defer comp.deinit();
+            comp.activate();
+            defer comp.deactivate();
 
-    //        inline for (.{
-    //            .{ .{ .a = 10 }, .{ .a = idx(.{}) }, .{} },
-    //            .{ .{ .a = 10 }, .{ .a = idx(.{ .n = 8 }) }, .{ .n = 8 } },
-    //            .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{}) }, .{ .b = 20 } },
-    //            .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{ .n = 8 }) }, .{ .n = 8, .b = 20 } },
-    //            // .{ .{ .a = 10, .b = 20 }, 0, idx(.{ .n = 8 }), .{ .n = 8, .b = 20 } },
-    //            // Favor val shape, instead of indices shape.
-    //            .{ .{ .a = 10, .b = 20 }, .{ .b = idx(.{ .n = 8 }) }, .{ .a = 10, .n = 8 } },
-    //            .{ .{ .a = 10, .b = 20, .c = 30 }, .{ .b = idx(.{ .n = 8 }) }, .{ .a = 10, .n = 8, .c = 30 } },
-    //            // batching axes are implicits.
-    //            .{ .{ .a = 10, .b = 20 }, .{ .b = idx(.{ .a = 10 }) }, .{ .a = 10 } },
-    //            .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{ .b = 20 }) }, .{ .b = 20 } },
-    //            .{ .{ .a = 10, .b = 20 }, .{ .b = idx(.{ .a = 10, .n = 8 }) }, .{ .a = 10, .n = 8 } },
-    //            // stablehlo.gather is biased toward indices shape (like gatherSlice).
-    //            // This make it awkward to use when you have both batching dimension and new indices dimensions.
-    //            // For now we reject those, and let user explicitly transpose self or indices if needed.
-    //            // .{ .{ .a = 10, .b = 20 }, .{.b = idx(.{ .n = 8, .a = 10 })}, .{ .a = 10, .n = 8 } },
-    //            // Also handle tuples
-    //            .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{ .n = 8 }), .b = idx(.{ .n = 8 }) }, .{ .n = 8 } },
-    //        }) |testcase| {
-    //            const x_shape, const indices, const res_shape = testcase;
-    //            const x = Tensor.constant(x_shape, .{ .f16 = 0 });
-    //            const y = gather(x, indices, .{});
-    //            try zml.testing.expectEqualShapes(Shape.init(res_shape, .f16), y.shape());
-    //            try std.testing.expect(y.value().owner().verify());
-    //        }
+            const block = mlir.Block.init(&.{}, &.{});
+            comp.pushBlock(block);
+            defer comp.popBlock();
 
-    //        inline for (.{
-    //            .{ .{ 10, 20 }, &[_]u3{ 0, 1 }, &[_]Tensor{ idx(.{8}), idx(.{8}) }, .{8} },
-    //        }) |testcase| {
-    //            const x_shape, const idx_axes, const idx_per_axis, const res_shape = testcase;
-    //            const x = Tensor.constant(x_shape, .{ .f16 = 0 });
-    //            const y = gather_(x, idx_axes, idx_per_axis, .{});
-    //            try zml.testing.expectEqualShapes(Shape.init(res_shape, .f16), y.shape());
-    //            try std.testing.expect(y.value().owner().verify());
-    //        }
-    //    }
-    //}
+            inline for (.{
+                .{ .{ .a = 10 }, .{ .a = idx(.{}) }, .{} },
+                .{ .{ .a = 10 }, .{ .a = idx(.{ .n = 8 }) }, .{ .n = 8 } },
+                .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{}) }, .{ .b = 20 } },
+                .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{ .n = 8 }) }, .{ .n = 8, .b = 20 } },
+                // .{ .{ .a = 10, .b = 20 }, 0, idx(.{ .n = 8 }), .{ .n = 8, .b = 20 } },
+                // Favor val shape, instead of indices shape.
+                .{ .{ .a = 10, .b = 20 }, .{ .b = idx(.{ .n = 8 }) }, .{ .a = 10, .n = 8 } },
+                .{ .{ .a = 10, .b = 20, .c = 30 }, .{ .b = idx(.{ .n = 8 }) }, .{ .a = 10, .n = 8, .c = 30 } },
+                // batching axes are implicits.
+                .{ .{ .a = 10, .b = 20 }, .{ .b = idx(.{ .a = 10 }) }, .{ .a = 10 } },
+                .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{ .b = 20 }) }, .{ .b = 20 } },
+                .{ .{ .a = 10, .b = 20 }, .{ .b = idx(.{ .a = 10, .n = 8 }) }, .{ .a = 10, .n = 8 } },
+                // stablehlo.gather is biased toward indices shape (like gatherSlice).
+                // This make it awkward to use when you have both batching dimension and new indices dimensions.
+                // For now we reject those, and let user explicitly transpose self or indices if needed.
+                // .{ .{ .a = 10, .b = 20 }, .{.b = idx(.{ .n = 8, .a = 10 })}, .{ .a = 10, .n = 8 } },
+                // Also handle tuples
+                .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{ .n = 8 }), .b = idx(.{ .n = 8 }) }, .{ .n = 8 } },
+            }) |testcase| {
+                const x_shape, const indices, const res_shape = testcase;
+                const x = Tensor.constant(.{ .f16 = 0 }).broad(Shape.init(x_shape, .i64));
+                const y = gather(x, indices, .{});
+                try zml.testing.expectEqualShapes(Shape.init(res_shape, .f16), y.shape());
+                try std.testing.expect(y.value().owner().verify());
+            }
+
+            inline for (.{
+                .{ .{ 10, 20 }, &[_]u3{ 0, 1 }, &[_]Tensor{ idx(.{8}), idx(.{8}) }, .{8} },
+            }) |testcase| {
+                const x_shape, const idx_axes, const idx_per_axis, const res_shape = testcase;
+                const x = Tensor.constant(.{ .f16 = 0 }).broad(Shape.init(x_shape, .i64));
+                const y = ops.gather(x, idx_axes, idx_per_axis, .{});
+                try zml.testing.expectEqualShapes(Shape.init(res_shape, .f16), y.shape());
+                try std.testing.expect(y.value().owner().verify());
+            }
+        }
+    }
 
     /// Gathers slices along the given axes with runtime indices.
     /// * slice_shape represents the shape of the slices to extract,

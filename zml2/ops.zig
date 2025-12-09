@@ -616,7 +616,7 @@ pub fn gather(self: Tensor, idx_axes: []const u3, idx_per_axis: []const Tensor, 
 
     var idx_batch_axes: Shape.DimsArray = .{};
 
-    var self_kind: stdx.BoundedArray(GatherAxisKind, Shape.MAX_RANK) = .{ .buffer = @splat(.offset), .len = self.rank() };
+    var self_kind: stdx.BoundedArray(GatherAxisKind, constants.MAX_RANK) = .{ .buffer = @splat(.offset), .len = self.rank() };
 
     for (self._shape.tags(), 0..self.rank()) |t, self_ax| {
         const is_gather_axis = std.mem.containsAtLeastScalar(u3, idx_axes, 1, @intCast(self_ax));
@@ -637,7 +637,7 @@ pub fn gather(self: Tensor, idx_axes: []const u3, idx_per_axis: []const Tensor, 
 
     // compute res shape
     var res_shape = Shape.init(.{}, self.dtype());
-    var res_kind: stdx.BoundedArray(GatherAxisKind, Shape.MAX_RANK) = .{};
+    var res_kind: stdx.BoundedArray(GatherAxisKind, constants.MAX_RANK) = .{};
     for (self_kind.slice(), 0..) |kind, ax_usize| {
         const ax: u3 = @intCast(ax_usize);
         if (ax == idx_axes[0]) {

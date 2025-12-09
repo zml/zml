@@ -160,7 +160,6 @@ pub const PassManager = opaque {
             stringRef(opts.treePrintingPath),
         );
     }
-
 };
 
 pub const OpPassManager = opaque {
@@ -887,6 +886,10 @@ pub const Value = opaque {
 
     pub fn replaceAllUsesWith(self: *const Value, with: *const Value) void {
         c.mlirValueReplaceAllUsesOfWith(self.ptr(), with.ptr());
+    }
+
+    pub fn owner(self: *const Value) *Operation {
+        return @ptrCast(c.mlirOpResultGetOwner(self.ptr()).ptr);
     }
 };
 
