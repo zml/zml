@@ -3729,48 +3729,58 @@ pub const Tensor = struct {
         }
     }
 
-    // TODO(Corentin)
-    //test cartesianProduct {
-    //    const zml = @import("zml.zig");
-    //    const client = zml.testing.env();
+    test cartesianProduct {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
 
-    //    const x = try zml.Buffer.fromSlice(client, .{6}, &[_]i32{ 0, 1, 2, 3, 4, 5 });
-    //    const y = try zml.Buffer.fromSlice(client, .{4}, &[_]i32{ 0, 1, 2, 3 });
+        const x: Tensor = .init(Shape.init(.{6}, .i32));
+        const y: Tensor = .init(Shape.init(.{4}, .i32));
 
-    //    const Local = struct {
-    //        pub fn _cartesianProduct2(a: Tensor, b: Tensor) [2]Tensor {
-    //            return cartesianProduct(2, .{ a, b });
-    //        }
-    //    };
+        const Local = struct {
+            pub fn _cartesianProduct2(a: Tensor, b: Tensor) [2]Tensor {
+                return cartesianProduct(2, .{ a, b });
+            }
+        };
 
-    //    {
-    //        const xs, const ys = try zml.testing.compileAndCall(client, Local._cartesianProduct2, .{ x, y });
-    //        try std.testing.expectEqualSlices(i64, &.{ 6, 4 }, xs.shape().dims());
-    //        try std.testing.expectEqualSlices(i64, &.{ 6, 4 }, ys.shape().dims());
-    //        try std.testing.expectEqualDeep(
-    //            [6][4]i32{
-    //                .{ 0, 0, 0, 0 },
-    //                .{ 1, 1, 1, 1 },
-    //                .{ 2, 2, 2, 2 },
-    //                .{ 3, 3, 3, 3 },
-    //                .{ 4, 4, 4, 4 },
-    //                .{ 5, 5, 5, 5 },
-    //            },
-    //            try xs.getValue([6][4]i32),
-    //        );
-    //        try std.testing.expectEqualDeep(
-    //            [6][4]i32{
-    //                .{ 0, 1, 2, 3 },
-    //                .{ 0, 1, 2, 3 },
-    //                .{ 0, 1, 2, 3 },
-    //                .{ 0, 1, 2, 3 },
-    //                .{ 0, 1, 2, 3 },
-    //                .{ 0, 1, 2, 3 },
-    //            },
-    //            try ys.getValue([6][4]i32),
-    //        );
-    //    }
-    //}
+        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._cartesianProduct2, .{ x, y }, platform);
+        defer exe.deinit();
+
+        {
+            var x_buffer: zml.Buffer = try .fromBytes(platform, x.shape(), std.mem.sliceAsBytes(&[_]i32{ 0, 1, 2, 3, 4, 5 }), std.testing.io);
+            defer x_buffer.deinit();
+            var y_buffer: zml.Buffer = try .fromBytes(platform, y.shape(), std.mem.sliceAsBytes(&[_]i32{ 0, 1, 2, 3 }), std.testing.io);
+            defer y_buffer.deinit();
+
+            var xs, var ys = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._cartesianProduct2, .{ x_buffer, y_buffer });
+            defer xs.deinit();
+            defer ys.deinit();
+
+            try std.testing.expectEqualSlices(i64, &.{ 6, 4 }, xs.shape().dims());
+            try std.testing.expectEqualSlices(i64, &.{ 6, 4 }, ys.shape().dims());
+            try std.testing.expectEqualDeep(
+                [6][4]i32{
+                    .{ 0, 0, 0, 0 },
+                    .{ 1, 1, 1, 1 },
+                    .{ 2, 2, 2, 2 },
+                    .{ 3, 3, 3, 3 },
+                    .{ 4, 4, 4, 4 },
+                    .{ 5, 5, 5, 5 },
+                },
+                try xs.getValue([6][4]i32, std.testing.io),
+            );
+            try std.testing.expectEqualDeep(
+                [6][4]i32{
+                    .{ 0, 1, 2, 3 },
+                    .{ 0, 1, 2, 3 },
+                    .{ 0, 1, 2, 3 },
+                    .{ 0, 1, 2, 3 },
+                    .{ 0, 1, 2, 3 },
+                    .{ 0, 1, 2, 3 },
+                },
+                try ys.getValue([6][4]i32, std.testing.io),
+            );
+        }
+    }
 
     /// Given a set of N vectors of lengths A, B, C, D,
     /// returns 1 tensors of rank N+1, and shape (A, B, C, D, N).
