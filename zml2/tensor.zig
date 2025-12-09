@@ -1908,22 +1908,22 @@ pub const Tensor = struct {
         return Tensor.constant(data);
     }
 
-    // TODO(Corentin)
-    //test scalar {
-    //    const zml = @import("zml.zig");
-    //    const platform = zml.testing.env();
+    test scalar {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
 
-    //    const Local = struct {
-    //        pub fn _fwd() [6]Tensor {
-    //            var res: [6]Tensor = undefined;
-    //            const dtypes = .{ .bool, .u8, .i32, .f32, .bf16, .u64 };
-    //            inline for (0..6) |i| res[i] = scalar(0, dtypes[i]);
-    //            return res;
-    //        }
-    //    };
+        const Local = struct {
+            pub fn _fwd() [6]Tensor {
+                var res: [6]Tensor = undefined;
+                const dtypes = .{ .bool, .u8, .i32, .f32, .bf16, .u64 };
+                inline for (0..6) |i| res[i] = scalar(0, dtypes[i]);
+                return res;
+            }
+        };
 
-    //    _ = try zml.testing.compileAndCall(platform, Local._fwd, .{});
-    //}
+        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._fwd, .{}, platform);
+        defer exe.deinit();
+    }
 
     /// Returns a constant Tensor with the given value.
     pub fn constant(val: DataType.Value) Tensor {
