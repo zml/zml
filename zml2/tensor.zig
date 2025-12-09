@@ -1189,17 +1189,23 @@ pub const Tensor = struct {
         return self.relu().add(below_zero);
     }
 
-    // TODO(Corentin)
-    //test leakyReLU {
-    //    const zml = @import("zml.zig");
-    //    const platform = zml.testing.env();
+    test leakyReLU {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
 
-    //    const input = try zml.Buffer.fromSlice(platform, .{2}, &[_]f32{ -0.6884, 1.6795 });
-    //    const res = try zml.testing.compileAndCall(platform, leakyReLU, .{ input, 0.1 });
+        const input: Tensor = .init(Shape.init(.{2}, .f32));
+        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Tensor.leakyReLU, .{ input, 0.1 }, platform);
+        defer exe.deinit();
 
-    //    const expectation = zml.HostBuffer.fromArray(&[2]f32{ -0.0688, 1.6795 });
-    //    try zml.testing.expectClose(expectation, res, 1e-4);
-    //}
+        const input_buffer: zml.Buffer = try .fromBytes(platform, input.shape(), std.mem.sliceAsBytes(&[_]f32{ -0.6884, 1.6795 }), std.testing.io);
+        defer input_buffer.deinit();
+
+        const res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.leakyReLU, .{input_buffer});
+        defer res.deinit();
+
+        const expectation: zml.testing.Slice = .init(input.shape(), std.mem.sliceAsBytes(&[2]f32{ -0.0688, 1.6795 }));
+        try zml.testing.expectClose(std.testing.io, expectation, res, 1e-4);
+    }
 
     /// Returns a Tensor containing the SwiGLU activation function applied to the input Tensor.
     pub fn swiglu(self: Tensor, beta: f32, w: Tensor, b: Tensor, tag: Shape.Tag) Tensor {
