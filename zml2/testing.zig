@@ -136,6 +136,13 @@ pub fn expectClose(io: std.Io, left_: anytype, right_: anytype, tolerance: f32) 
     }
 }
 
+pub fn expectEqualShapes(expected: zml.Shape, actual: zml.Shape) error{TestExpectedEqual}!void {
+    if (expected.eqlWithTags(actual)) return;
+
+    std.debug.print("Expected {f}, got {f}", .{ expected, actual });
+    return error.TestExpectedEqual;
+}
+
 fn BufferizedWithArgs(comptime T: type) type {
     return zml.meta.MapType(zml.Tensor, zml.Buffer).map(T);
 }

@@ -1047,46 +1047,48 @@ pub const Tensor = struct {
         return lhs.dotGeneral(rhs, &.{.{ lhs_contracting_dim, rhs_contracting_dim }}, batching_axes.slice());
     }
 
-    // TODO(Corentin)
-    //test dot {
-    //    const zml = @import("zml.zig");
-    //    const platform = zml.testing.env();
+    test dot {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
 
-    //    var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
-    //    defer comp.deinit();
+        inline for (.{
+            .{ .{ .c = 20 }, .{ .c = 20 }, .c, .{} },
+            .{
+                .{ .a = 20, .b = 21, .c = 22 },
+                .{ .a = 20, .d = 23, .c = 22 },
+                .c,
+                .{ .a = 20, .b = 21, .d = 23 },
+            },
+            .{
+                .{ .a = 20, .b = 21, .c = 22 },
+                .{ .c = 22, .d = 23, .e = 24 },
+                .c,
+                .{ .a = 20, .b = 21, .d = 23, .e = 24 },
+            },
+            // TODO(Corentin): Re-enable that
+            //.{
+            //    .{ .a = 20, .b = 21, .c = 22 },
+            //    .{ .c = 22, .d = 23, .a = 20 },
+            //    .{ .c, .a },
+            //    .{ .b = 21, .d = 23 },
+            //},
+        }) |testcase| {
+            const x: Tensor = .init(Shape.init(testcase[0], .f32));
+            const y: Tensor = .init(Shape.init(testcase[1], .f32));
+            const ctr = Shape.toTag(testcase[2]);
+            const z_shape: Shape = .init(testcase[3], .f32);
+            const forward = struct {
+                fn forward(x_: Tensor, y_: Tensor, tag: Shape.Tag) Tensor {
+                    return x_.dot(y_, tag);
+                }
+            }.forward;
 
-    //    comp.activate();
-    //    defer comp.deactivate();
+            const exe = try zml.module.compile(std.testing.allocator, std.testing.io, forward, .{ x, y, ctr }, platform);
+            defer exe.deinit();
 
-    //    inline for (.{
-    //        .{ .{ .c = 20 }, .{ .c = 20 }, .{.c}, .{} },
-    //        .{
-    //            .{ .a = 20, .b = 21, .c = 22 },
-    //            .{ .a = 20, .d = 23, .c = 22 },
-    //            .{.c},
-    //            .{ .a = 20, .b = 21, .d = 23 },
-    //        },
-    //        .{
-    //            .{ .a = 20, .b = 21, .c = 22 },
-    //            .{ .c = 22, .d = 23, .e = 24 },
-    //            .{.c},
-    //            .{ .a = 20, .b = 21, .d = 23, .e = 24 },
-    //        },
-    //        .{
-    //            .{ .a = 20, .b = 21, .c = 22 },
-    //            .{ .c = 22, .d = 23, .a = 20 },
-    //            .{ .c, .a },
-    //            .{ .b = 21, .d = 23 },
-    //        },
-    //    }) |testcase| {
-    //        const x_shape, const y_shape, const ctr, const z_shape = testcase;
-    //        const x = Tensor.constant(x_shape, .{ .f32 = 0.0 });
-    //        const y = Tensor.constant(y_shape, .{ .f32 = 0.0 });
-    //        const z = x.dot(y, ctr);
-
-    //        try zml.testing.expectEqualShapes(Shape.init(z_shape, .f32), z.shape());
-    //    }
-    //}
+            try zml.testing.expectEqualShapes(Shape.init(z_shape, .f32), exe.output_shapes[0]);
+        }
+    }
 
     /// Generalized matrix multiplication of two tensors along the specified axes.
     /// In this version batching dimensions need to be explicitly specified.
