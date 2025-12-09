@@ -4052,19 +4052,18 @@ test transposeIsJustAReshape {
     try std.testing.expect(transposeIsJustAReshape(Shape.init(.{ 1, 10, 155, 1 }, .f32), &.{ 0, 1, 3, 2 }));
 }
 
-// TODO(Corentin)
-//test "unused tensor" {
-//    const zml = @import("zml.zig");
-//    const platform = zml.testing.env();
-//
-//    const Local = struct {
-//        pub fn _fwd(x: Tensor) Tensor {
-//            const y = x.addConstant(1);
-//            _ = y;
-//            return x;
-//        }
-//    };
-//
-//    const mod = try zml.compileFn(std.testing.allocator, Local._fwd, .{Shape.init(.{10}, .f32)}, platform);
-//    defer mod.deinit();
-//
+test "unused tensor" {
+    const zml = @import("zml.zig");
+    const platform = zml.testing.env();
+
+    const Local = struct {
+        pub fn _fwd(x: Tensor) Tensor {
+            const y = x.addConstant(1);
+            _ = y;
+            return x;
+        }
+    };
+
+    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._fwd, .{Tensor.init(Shape.init(.{10}, .f32))}, platform);
+    defer exe.deinit();
+}
