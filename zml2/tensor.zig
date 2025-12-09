@@ -3490,7 +3490,7 @@ pub const Tensor = struct {
         res_shape._tags.replaceRange(a, 1, &.{ @tagName(new_tags[0]), @tagName(new_tags[1]) }) catch unreachable;
 
         const values = self.insertAxes(a + 1, .{new_tags[1]}).broad(res_shape);
-        const zeros = Tensor.constant(res_shape, self.dtype().zero());
+        const zeros = Tensor.constant(self.dtype().zero()).broad(res_shape);
 
         const x = Tensor.iota(res_shape, a);
         const y = Tensor.iota(res_shape, a + 1);
@@ -3499,35 +3499,40 @@ pub const Tensor = struct {
         return res;
     }
 
-    // TODO(Corentin)
-    //test toDiagonal {
-    //    const zml = @import("zml.zig");
-    //    const platform = zml.testing.env();
+    test toDiagonal {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
 
-    //    const Local = struct {
-    //        pub fn _toDiag(input: Tensor) Tensor {
-    //            const res = input.toDiagonal(-1, .{ .x, .y });
-    //            std.debug.assert(res.dim(.x) == input.dim(-1));
-    //            std.debug.assert(res.dim(.y) == input.dim(-1));
-    //            return res;
-    //        }
-    //    };
+        const Local = struct {
+            pub fn _toDiag(input: Tensor) Tensor {
+                const res = input.toDiagonal(-1, .{ .x, .y });
+                std.debug.assert(res.dim(.x) == input.dim(-1));
+                std.debug.assert(res.dim(.y) == input.dim(-1));
+                return res;
+            }
+        };
 
-    //    const x = try zml.Buffer.fromArray(platform, [2][2]u8{ .{ 1, 2 }, .{ 3, 4 } });
-    //    {
-    //        const res = try zml.testing.compileAndCall(platform, Local._toDiag, .{x});
-    //        try std.testing.expectEqual(
-    //            [2][2][2]u8{ .{
-    //                .{ 1, 0 },
-    //                .{ 0, 2 },
-    //            }, .{
-    //                .{ 3, 0 },
-    //                .{ 0, 4 },
-    //            } },
-    //            try res.getValue([2][2][2]u8),
-    //        );
-    //    }
-    //}
+        const x: Tensor = .init(Shape.init(.{ 2, 2 }, .u8));
+
+        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._toDiag, .{x}, platform);
+        defer exe.deinit();
+
+        var x_buffer: zml.Buffer = try .fromBytes(platform, x.shape(), std.mem.sliceAsBytes(&[2][2]u8{ .{ 1, 2 }, .{ 3, 4 } }), std.testing.io);
+        defer x_buffer.deinit();
+
+        const res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._toDiag, .{x_buffer});
+        defer res.deinit();
+        try std.testing.expectEqual(
+            [2][2][2]u8{ .{
+                .{ 1, 0 },
+                .{ 0, 2 },
+            }, .{
+                .{ 3, 0 },
+                .{ 0, 4 },
+            } },
+            try res.getValue([2][2][2]u8, std.testing.io),
+        );
+    }
 
     /// For each matrix specified by the two axes, returns the lower triangular part of it.
     /// The other elements are set to 0.
