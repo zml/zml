@@ -20,7 +20,6 @@ pub const GetCostAnalysisError = pjrt.GetCostAnalysisError;
 pub const Memory = pjrt.Memory;
 pub const MemoryStats = pjrt.MemoryStats;
 pub const NamedValue = pjrt.NamedValue;
-pub const Profiler = pjrt.Profiler;
 pub const SerializeResult = pjrt.SerializeResult;
 pub const Stream = pjrt.Stream;
 
@@ -71,7 +70,7 @@ pub const Client = opaque {
 
     pub fn deserializeAndLoad(self: *const Client, api: *const Api, io: std.Io, bytes: []const u8) ApiError!*LoadedExecutable {
         var future = io.async(pjrt.Client.deserializeAndLoad, .{ self.inner(), api, bytes });
-        return @ptrCast(future.await(io));
+        return @ptrCast(try future.await(io));
     }
 
     pub const CreateViewOfDeviceBufferArgs = pjrt.Client.CreateViewOfDeviceBufferArgs;
@@ -187,8 +186,8 @@ pub const Buffer = opaque {
         return try self.inner().getOnDeviceSizeInBytes(api);
     }
 
-    pub fn copyToDevice(self: *const Buffer, api: *const Api, device: Device) ApiError!*Buffer {
-        return @ptrCast(self.inner().copyToDevice(api, device));
+    pub fn copyToDevice(self: *const Buffer, api: *const Api, device: *Device) ApiError!*Buffer {
+        return @ptrCast(try self.inner().copyToDevice(api, device));
     }
 
     pub fn copyToMemory(self: *const Buffer, api: *const Api, memory_: *const Memory) ApiError!*Buffer {
@@ -219,11 +218,11 @@ pub const Event = opaque {
         return self.inner().getEventError(api);
     }
 
-    pub fn awaitBlocking(self: *Event, api: *const Api, io: std.Io) ApiError!void {
+    pub fn awaitBlocking(self: *Event, api: *const Api) ApiError!void {
         if (self.isReady(api)) {
             return;
         }
-        try self.inner().await(api, io);
+        try self.inner().await(api);
     }
 
     pub fn await(self: *Event, api: *const Api, io: std.Io) ApiError!void {
@@ -287,7 +286,7 @@ pub const LoadedExecutable = opaque {
         return self.inner().isDeleted(api);
     }
 
-    pub fn getAddressableDevices(self: *const LoadedExecutable, api: *const Api) []*const Device {
+    pub fn getAddressableDevices(self: *const LoadedExecutable, api: *const Api) []const *Device {
         return self.inner().getAddressableDevices(api);
     }
 
@@ -331,23 +330,23 @@ pub const AsyncHostToDeviceTransferManager = opaque {
         return @ptrCast(try self.inner().retrieveBuffer(api, buffer_index));
     }
 
-    pub fn device(self: *AsyncHostToDeviceTransferManager, api: *const Api) *Device {
-        return @ptrCast(self.inner().device(api));
+    pub fn device(self: *AsyncHostToDeviceTransferManager, api: *const Api) ApiError!*Device {
+        return @ptrCast(try self.inner().device(api));
     }
 
-    pub fn bufferCount(self: *AsyncHostToDeviceTransferManager, api: *const Api) usize {
+    pub fn bufferCount(self: *AsyncHostToDeviceTransferManager, api: *const Api) ApiError!usize {
         return self.inner().bufferCount(api);
     }
 
-    pub fn bufferSize(self: *AsyncHostToDeviceTransferManager, api: *const Api, buffer_index: usize) usize {
+    pub fn bufferSize(self: *AsyncHostToDeviceTransferManager, api: *const Api, buffer_index: usize) ApiError!usize {
         return self.inner().bufferSize(api, buffer_index);
     }
 
-    pub fn setBufferError(self: *AsyncHostToDeviceTransferManager, api: *const Api, buffer_index: usize, error_code: ErrorCode, error_message: []const u8) void {
-        self.inner().setBufferError(api, buffer_index, error_code, error_message);
+    pub fn setBufferError(self: *AsyncHostToDeviceTransferManager, api: *const Api, buffer_index: usize, error_code: ErrorCode, error_message: []const u8) ApiError!void {
+        return self.inner().setBufferError(api, buffer_index, @intFromEnum(error_code), error_message);
     }
 
-    pub fn addMetadata(self: *AsyncHostToDeviceTransferManager, api: *const Api, transfer_metadata: []const NamedValue) void {
+    pub fn addMetadata(self: *AsyncHostToDeviceTransferManager, api: *const Api, transfer_metadata: []const NamedValue) ApiError!void {
         return self.inner().addMetadata(api, transfer_metadata);
     }
 };

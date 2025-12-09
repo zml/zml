@@ -82,7 +82,7 @@ pub const Api = opaque {
     pub const inner = TransmuteMixin(Api, c.XLA_FFI_Api).to;
 
     pub fn stream(self: *const Api, context: *const ExecutionContext) *pjrt.Stream {
-        var ret = pjrt.pjrtStruct(c.XLA_FFI_Stream_Get_Args{
+        var ret = pjrt.pjrtStruct2(c.XLA_FFI_Stream_Get_Args, .{
             .ctx = @constCast(context.inner()),
         });
         const result = self.inner().XLA_FFI_Stream_Get.?(&ret);
@@ -98,7 +98,7 @@ pub const Api = opaque {
     }
 
     pub fn allocateDeviceMemory(self: *const Api, context: *const ExecutionContext, size: usize, alignment: usize) pjrt.ApiError!*anyopaque {
-        var ret = pjrt.pjrtStruct(c.XLA_FFI_DeviceMemory_Allocate_Args{
+        var ret = pjrt.pjrtStruct2(c.XLA_FFI_DeviceMemory_Allocate_Args, .{
             .ctx = @constCast(context.inner()),
             .size = size,
             .alignment = alignment,
@@ -118,7 +118,7 @@ pub const Api = opaque {
     }
 
     pub fn freeDeviceMemory(self: *const Api, context: *const ExecutionContext, data: *anyopaque, size: usize) pjrt.ApiError!void {
-        var ret = pjrt.pjrtStruct(c.XLA_FFI_DeviceMemory_Free_Args{
+        var ret = pjrt.pjrtStruct2(c.XLA_FFI_DeviceMemory_Free_Args, .{
             .ctx = @constCast(context.inner()),
             .size = size,
             .data = data,
@@ -177,7 +177,7 @@ pub const ExecutionContext = opaque {
     }
 
     pub fn getDeviceOrdinal(self: *const ExecutionContext, api: *const Api) pjrt.ApiError!i32 {
-        var ret = pjrt.pjrtStruct(c.XLA_FFI_DeviceOrdinal_Get_Args{
+        var ret = pjrt.pjrtStruct2(c.XLA_FFI_DeviceOrdinal_Get_Args, .{
             .ctx = @constCast(self.inner()),
         });
         const result = api.inner().XLA_FFI_DeviceOrdinal_Get.?(&ret);
@@ -197,10 +197,10 @@ pub const ExecutionContext = opaque {
     const Task = fn (*anyopaque) void;
 
     pub fn scheduleTask(self: *const ExecutionContext, api: *const Api, task: *const Task, data: *anyopaque) pjrt.ApiError!void {
-        var ret = pjrt.pjrtStruct(c.XLA_FFI_ThreadPool_Schedule_Args{
+        var ret = pjrt.pjrtStruct2(c.XLA_FFI_ThreadPool_Schedule_Args, .{
             .ctx = @constCast(self.inner()),
-            .task = @ptrCast(@alignCast(task)),
-            .data = @ptrCast(@alignCast(data)),
+            .task = @as(?*const c.XLA_FFI_Task, @ptrCast(@alignCast(task))),
+            .data = data,
         });
 
         const result = api.inner().XLA_FFI_ThreadPool_Schedule.?(&ret);
@@ -422,7 +422,7 @@ pub const ErrorCode = enum(c.XLA_FFI_Error_Code) {
             .unknown => error.Unknown,
             .invalid_argument => error.InvalidArgument,
             .deadline_exceeded => error.DeadlineExceeded,
-            .not_found => error.FfiNotFound,
+            .not_found => error.NotFound,
             .already_exists => error.AlreadyExists,
             .permission_denied => error.PermissionDenied,
             .resource_exhausted => error.ResourceExhausted,
@@ -445,7 +445,7 @@ pub const Error = opaque {
     pub const ok: ?*Error = null;
 
     pub fn create(api: *const Api, error_code: ErrorCode, message: []const u8) *Error {
-        var ret = pjrt.pjrtStruct(c.XLA_FFI_Error_Create_Args{
+        var ret = pjrt.pjrtStruct2(c.XLA_FFI_Error_Create_Args, .{
             .message = message.ptr,
             .errc = @intFromEnum(error_code),
         });
@@ -453,12 +453,12 @@ pub const Error = opaque {
     }
 
     pub fn destroy(err: *Error, api: *const Api) void {
-        var ret = pjrt.pjrtStruct(c.XLA_FFI_Error_Destroy_Args{ .@"error" = err.inner() });
+        var ret = pjrt.pjrtStruct2(c.XLA_FFI_Error_Destroy_Args, .{ .@"error" = err.inner() });
         api.inner().XLA_FFI_Error_Destroy.?(&ret);
     }
 
     pub fn getMessage(err: *Error, api: *const Api) [:0]const u8 {
-        var ret = pjrt.pjrtStruct(c.XLA_FFI_Error_GetMessage_Args{
+        var ret = pjrt.pjrtStruct2(c.XLA_FFI_Error_GetMessage_Args, .{
             .@"error" = err.inner(),
         });
         api.inner().XLA_FFI_Error_GetMessage.?(&ret);
@@ -471,7 +471,7 @@ pub const Future = opaque {
     pub const fromInner = TransmuteMixin(Future, c.XLA_FFI_Future).from;
 
     pub fn create(api: *const Api) pjrt.ApiError!*Future {
-        var ret = pjrt.pjrtStruct(c.XLA_FFI_Future_Create_Args{});
+        var ret = pjrt.pjrtStruct2(c.XLA_FFI_Future_Create_Args, .{});
         const result = api.inner().XLA_FFI_Future_Create.?(&ret);
 
         if (result) |ffi_error| {
@@ -487,7 +487,7 @@ pub const Future = opaque {
     }
 
     pub fn setAvailable(self: *Future, api: *const Api) pjrt.ApiError!void {
-        var ret = pjrt.pjrtStruct(c.XLA_FFI_Future_SetAvailable_Args{
+        var ret = pjrt.pjrtStruct2(c.XLA_FFI_Future_SetAvailable_Args, .{
             .future = self.inner(),
         });
 
@@ -504,7 +504,7 @@ pub const Future = opaque {
     }
 
     pub fn setError(self: *Future, api: *const Api, err: *Error) pjrt.ApiError!void {
-        var ret = pjrt.pjrtStruct(c.XLA_FFI_Future_SetError_Args{
+        var ret = pjrt.pjrtStruct2(c.XLA_FFI_Future_SetError_Args, .{
             .future = self.inner(),
             .@"error" = err.inner(),
         });
