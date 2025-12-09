@@ -47,6 +47,10 @@ pub const Buffer = struct {
         return self._shape;
     }
 
+    pub fn format(self: Buffer, writer: *std.Io.Writer) !void {
+        try writer.print("Buffer({f})@{x}", .{ self._shape, @intFromPtr(self.devicePtr()) });
+    }
+
     /// Copies the content of the given buffer from host memory to the accelerator memory.
     pub fn from(platform: Platform, shape_: Shape, data_: []const u8, io: std.Io, opts: FromOptions) !Buffer {
         var res: Buffer = .{
@@ -136,6 +140,29 @@ pub const Buffer = struct {
         };
     }
 
+    pub fn devicePtr(self: Buffer) *anyopaque {
+        //stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer", .{});
+        return self._shards.get(0).getOpaqueDeviceMemoryDataPointer(self._api) catch unreachable;
+    }
+
+    /// Fetches the content of the given buffer into a stack variable of the given type.
+    pub fn getValue(self: Buffer, T: type, io: std.Io) !T {
+        stdx.debug.assert(self._shape.byteSize() == @sizeOf(T), "Buffer {f} has {d} bytes of data, can't load it to a {s} with {d} bytes", .{ self, self._shape.byteSize(), @typeName(T), @sizeOf(T) });
+        var res: T = undefined;
+
+        try self.toHost(std.mem.asBytes(&res), io);
+
+        return res;
+    }
+
+    pub fn toHost(self: Buffer, buf: []u8, io: std.Io) !void {
+        //stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
+        const maybe_event = try self._shards.get(0).toHostBuffer(self._api, buf);
+        if (maybe_event) |event| {
+            try event.await(self._api, io);
+        }
+    }
+
     /// Copies the content of the Buffer to the host.
     /// The returned `HostBuffer` does own the memory.
     pub fn toHostAlloc(self: Buffer, allocator: std.mem.Allocator, io: std.Io) ![]u8 {
@@ -144,11 +171,8 @@ pub const Buffer = struct {
         const output = try allocator.alloc(u8, self._shape.byteSize());
         errdefer allocator.free(output);
 
-        //stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
-        const maybe_event = try self._shards.get(0).toHostBuffer(self._api, output);
-        if (maybe_event) |event| {
-            try event.await(self._api, io);
-        }
+        try self.toHost(output, io);
+
         return output;
     }
 };
