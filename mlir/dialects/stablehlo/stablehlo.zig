@@ -1387,7 +1387,7 @@ pub fn serializePortableArtifact2(module: *mlir.Module, target_version: []const 
 
 pub fn return_(ctx: *mlir.Context, value: *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.return", .{
-        .operands = .{ .flat = &.{&.{value}} },
+        .operands = .{ .flat = &.{value} },
         .location = location,
         .verify = false,
     });

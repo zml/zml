@@ -197,13 +197,13 @@ pub const SortArgs = struct {
     right: Tensor,
 };
 
-pub fn sort(inputs: anytype, axis_: i64, comptime func: anytype, context: anytype, is_stable: bool) stdx.meta.FnResult(func) {
+pub fn sort(inputs: anytype, axis_: i64, comptime func: anytype, context: anytype, is_stable: bool) [inputs.len]Tensor {
     var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
     defer arena.deinit();
 
     const mlir_ctx = CompilationContext.current().mlir_ctx;
 
-    const sort_block, var result = b: {
+    const sort_block = b: {
         const ArgsType = std.meta.Tuple(&[1]type{SortArgs} ** inputs.len);
         var args: ArgsType = undefined;
         var block_types: [2 * inputs.len]*const mlir.Type = undefined;
@@ -212,8 +212,8 @@ pub fn sort(inputs: anytype, axis_: i64, comptime func: anytype, context: anytyp
             args[i].left = Tensor.init(Shape.init(.{}, inputs[i].shape().dtype()));
             args[i].right = Tensor.init(Shape.init(.{}, inputs[i].shape().dtype()));
 
-            block_types[i] = mlir.rankedTensorType(args[i].left.dims(), mlirx.Type.fromDType(mlir_ctx, args[i].left.dtype()));
-            block_types[i + inputs.len] = mlir.rankedTensorType(args[i].right.dims(), mlirx.Type.fromDType(mlir_ctx, args[i].right.dtype()));
+            block_types[2 * i] = mlir.rankedTensorType(args[i].left.dims(), mlirx.Type.fromDType(mlir_ctx, args[i].left.dtype()));
+            block_types[2 * i + 1] = mlir.rankedTensorType(args[i].right.dims(), mlirx.Type.fromDType(mlir_ctx, args[i].right.dtype()));
         }
 
         const block_locs: [2 * inputs.len]*const mlir.Location = @splat(mlir.Location.unknown(mlir_ctx));
@@ -225,19 +225,14 @@ pub fn sort(inputs: anytype, axis_: i64, comptime func: anytype, context: anytyp
 
         const scope = CompilationContext.current().currentScope();
         inline for (0..inputs.len) |i| {
-            scope.id_to_argument.put(scope.arena.allocator(), args[i].left.id, i) catch unreachable;
-            scope.id_to_argument.put(scope.arena.allocator(), args[i].right.id, i + inputs.len) catch unreachable;
+            scope.id_to_argument.put(scope.arena.allocator(), args[i].left.id, 2 * i) catch unreachable;
+            scope.id_to_argument.put(scope.arena.allocator(), args[i].right.id, 2 * i + 1) catch unreachable;
         }
 
         var result = @call(.auto, func, args ++ context);
 
-        var result_values: [inputs.len]*const mlir.Value = undefined;
-        inline for (0..inputs.len) |i| {
-            result_values[i] = result[i].value();
-        }
-
-        _ = dialects.stablehlo.returns(mlir_ctx, &result_values, .unknown(mlir_ctx)).appendTo(sort_block);
-        break :b .{ sort_block, result };
+        _ = dialects.stablehlo.return_(mlir_ctx, result.value(), .unknown(mlir_ctx)).appendTo(sort_block);
+        break :b sort_block;
     };
 
     var input_values: [inputs.len]*const mlir.Value = undefined;
@@ -257,7 +252,8 @@ pub fn sort(inputs: anytype, axis_: i64, comptime func: anytype, context: anytyp
         .location = .unknown(mlir_ctx),
     }).appendTo(CompilationContext.current().currentScope().block);
 
-    inline for (0..result.len) |i| {
+    var result: [inputs.len]Tensor = undefined;
+    inline for (0..inputs.len) |i| {
         result[i] = Tensor._result(inputs[i].shape(), sort_op.result(i));
     }
 

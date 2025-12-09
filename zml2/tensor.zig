@@ -2794,11 +2794,12 @@ pub const Tensor = struct {
     pub fn sort(self: Tensor, axis_: anytype, opts: SortOpts) SortRes {
         const a = self.axis(axis_);
         const indices = Tensor.arange(.{ .end = self.dim(a) }, .i32).broadcast(self._shape, &.{a});
+        const direction: dialects.stablehlo.ComparisonDirection.Direction = if (opts.descending) .GT else .LT;
         const res = ops.sort(.{ self, indices }, a, struct {
-            fn call(direction: dialects.stablehlo.ComparisonDirection.Direction, values: ops.SortArgs, _: ops.SortArgs) Tensor {
-                return values.left.cmp(direction, values.right);
+            fn call(values: ops.SortArgs, _: ops.SortArgs, direction_: dialects.stablehlo.ComparisonDirection.Direction) Tensor {
+                return values.left.cmp(direction_, values.right);
             }
-        }.call, .{if (opts.descending) .GT else .LT}, true);
+        }.call, .{direction}, true);
         return .{ .values = res[0], .indices = res[1] };
     }
 
@@ -2809,72 +2810,103 @@ pub const Tensor = struct {
         return self.sort(axis_, .{ .descending = opts.descending }).indices;
     }
 
-    // TODO(Corentin)
-    //test argsort {
-    //    const zml = @import("zml.zig");
-    //    const platform = zml.testing.env();
+    test argsort {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
 
-    //    const Local = struct {
-    //        pub fn _argsort(x: Tensor, axis_: u3, opts: ArgSortOpts) Tensor {
-    //            return x.argsort(axis_, opts);
-    //        }
-    //    };
+        const Local = struct {
+            pub fn _argsort(x: Tensor, axis_: u3, opts: ArgSortOpts) Tensor {
+                return x.argsort(axis_, opts);
+            }
+        };
 
-    //    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    //    defer arena_state.deinit();
-    //    const allocator = arena_state.allocator();
-    //    // 2D Tensor - dim = 1, ascending
-    //    {
-    //        const x = try zml.Buffer.fromSlice(platform, .{ 2, 5 }, &[_]f32{ -0.9264, 0.7156, 1.0202, 0.3992, 1.2349, 1.0003, -0.1932, 1.3935, 0.7316, 0.0851 });
-    //        const res = try zml.testing.compileAndCall(platform, Local._argsort, .{ x, 1, .{} });
-    //        const res_cpu = try res.toHostAlloc(allocator);
-    //        try std.testing.expectEqualSlices(i32, &.{ 0, 3, 1, 2, 4, 1, 4, 3, 0, 2 }, res_cpu.items(i32));
-    //    }
-    //    // 3D Tensor, dim = 1, descending
-    //    {
-    //        const x = try zml.Buffer.fromSlice(platform, .{ 1, 5, 10 }, &[_]f16{
-    //            -0.2505, 1.2520,  -0.7041, 0.1066,  1.2773,  -1.7246, 0.8389,  1.1094,  0.0601,  1.0684,
-    //            0.9619,  1.3916,  1.2246,  -0.1406, 0.3674,  -1.2480, -1.7051, -0.0934, 0.3435,  0.4373,
-    //            1.3809,  0.5444,  -0.6079, 1.2031,  -0.6880, 1.2979,  -0.1869, 0.2991,  0.0156,  0.1847,
-    //            0.6626,  -0.3040, -0.8726, -1.4805, -1.6943, 1.1055,  -2.0078, -0.5288, 0.8813,  0.8008,
-    //            2.0527,  1.1230,  0.5430,  0.2494,  -0.9434, 0.7876,  0.1818,  0.9258,  -2.4902, 1.5918,
-    //        });
-    //        const res_dev = try zml.testing.compileAndCall(platform, Local._argsort, .{ x, 1, .{ .descending = true } });
-    //        const res = try res_dev.toHostAlloc(allocator);
-    //        try std.testing.expectEqualSlices(i32, &.{
-    //            4, 1, 1, 2, 0, 2, 0, 0, 3, 4,
-    //            2, 0, 4, 4, 1, 3, 4, 4, 1, 0,
-    //            1, 4, 2, 0, 2, 4, 2, 2, 0, 3,
-    //            3, 2, 0, 1, 4, 1, 1, 1, 2, 1,
-    //            0, 3, 3, 3, 3, 0, 3, 3, 4, 2,
-    //        }, res.items(i32));
-    //    }
-    //    // 4D Tensor, dim = 3, ascending
-    //    {
-    //        const x = try zml.Buffer.fromSlice(platform, .{ 4, 2, 1, 4 }, &[_]i32{
-    //            89, 31, 22, 42,
-    //            64, 39, 0,  30,
-    //            64, 71, 46, 31,
-    //            89, 82, 78, 86,
-    //            55, 32, 43, 19,
-    //            93, 24, 45, 72,
-    //            64, 86, 62, 88,
-    //            57, 21, 19, 12,
-    //        });
-    //        const res_dev = try zml.testing.compileAndCall(platform, Local._argsort, .{ x, 3, .{} });
-    //        const res = try res_dev.toHostAlloc(allocator);
-    //        try std.testing.expectEqualSlices(i32, &.{
-    //            2, 1, 3, 0,
-    //            2, 3, 1, 0,
-    //            3, 2, 0, 1,
-    //            2, 1, 3, 0,
-    //            3, 1, 2, 0,
-    //            1, 2, 3, 0,
-    //            2, 0, 1, 3,
-    //            3, 2, 1, 0,
-    //        }, res.items(i32));
-    //    }
-    //}
+        // 2D Tensor - dim = 1, ascending
+        {
+            const x: Tensor = .init(Shape.init(.{ 2, 5 }, .f32));
+
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._argsort, .{ x, 1, .{} }, platform);
+            defer exe.deinit();
+
+            var x_buffer: zml.Buffer = try .fromBytes(platform, x.shape(), std.mem.sliceAsBytes(&[_]f32{ -0.9264, 0.7156, 1.0202, 0.3992, 1.2349, 1.0003, -0.1932, 1.3935, 0.7316, 0.0851 }), std.testing.io);
+            defer x_buffer.deinit();
+
+            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._argsort, .{x_buffer});
+            defer res.deinit();
+
+            const res_cpu = try res.toHostAlloc(std.testing.allocator, std.testing.io);
+            defer std.testing.allocator.free(res_cpu);
+
+            try std.testing.expectEqualSlices(i32, &.{ 0, 3, 1, 2, 4, 1, 4, 3, 0, 2 }, @alignCast(std.mem.bytesAsSlice(i32, res_cpu)));
+        }
+
+        // 3D Tensor, dim = 1, descending
+        {
+            const x: Tensor = .init(Shape.init(.{ 1, 5, 10 }, .f16));
+
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._argsort, .{ x, 1, .{ .descending = true } }, platform);
+            defer exe.deinit();
+
+            var x_buffer: zml.Buffer = try .fromBytes(platform, x.shape(), std.mem.sliceAsBytes(&[_]f16{
+                -0.2505, 1.2520,  -0.7041, 0.1066,  1.2773,  -1.7246, 0.8389,  1.1094,  0.0601,  1.0684,
+                0.9619,  1.3916,  1.2246,  -0.1406, 0.3674,  -1.2480, -1.7051, -0.0934, 0.3435,  0.4373,
+                1.3809,  0.5444,  -0.6079, 1.2031,  -0.6880, 1.2979,  -0.1869, 0.2991,  0.0156,  0.1847,
+                0.6626,  -0.3040, -0.8726, -1.4805, -1.6943, 1.1055,  -2.0078, -0.5288, 0.8813,  0.8008,
+                2.0527,  1.1230,  0.5430,  0.2494,  -0.9434, 0.7876,  0.1818,  0.9258,  -2.4902, 1.5918,
+            }), std.testing.io);
+            defer x_buffer.deinit();
+
+            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._argsort, .{x_buffer});
+            defer res.deinit();
+
+            const res_cpu = try res.toHostAlloc(std.testing.allocator, std.testing.io);
+            defer std.testing.allocator.free(res_cpu);
+
+            try std.testing.expectEqualSlices(i32, &.{
+                4, 1, 1, 2, 0, 2, 0, 0, 3, 4,
+                2, 0, 4, 4, 1, 3, 4, 4, 1, 0,
+                1, 4, 2, 0, 2, 4, 2, 2, 0, 3,
+                3, 2, 0, 1, 4, 1, 1, 1, 2, 1,
+                0, 3, 3, 3, 3, 0, 3, 3, 4, 2,
+            }, @alignCast(std.mem.bytesAsSlice(i32, res_cpu)));
+        }
+
+        // 4D Tensor, dim = 3, ascending
+        {
+            const x: Tensor = .init(Shape.init(.{ 4, 2, 1, 4 }, .i32));
+
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._argsort, .{ x, 3, .{} }, platform);
+            defer exe.deinit();
+
+            var x_buffer: zml.Buffer = try .fromBytes(platform, x.shape(), std.mem.sliceAsBytes(&[_]i32{
+                89, 31, 22, 42,
+                64, 39, 0,  30,
+                64, 71, 46, 31,
+                89, 82, 78, 86,
+                55, 32, 43, 19,
+                93, 24, 45, 72,
+                64, 86, 62, 88,
+                57, 21, 19, 12,
+            }), std.testing.io);
+            defer x_buffer.deinit();
+
+            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._argsort, .{x_buffer});
+            defer res.deinit();
+
+            const res_cpu = try res.toHostAlloc(std.testing.allocator, std.testing.io);
+            defer std.testing.allocator.free(res_cpu);
+
+            try std.testing.expectEqualSlices(i32, &.{
+                2, 1, 3, 0,
+                2, 3, 1, 0,
+                3, 2, 0, 1,
+                2, 1, 3, 0,
+                3, 1, 2, 0,
+                1, 2, 3, 0,
+                2, 0, 1, 3,
+                3, 2, 1, 0,
+            }, @alignCast(std.mem.bytesAsSlice(i32, res_cpu)));
+        }
+    }
 
     pub const TopKOpts = SortOpts;
 
