@@ -186,7 +186,7 @@ pub fn reduceWindow(inputs: anytype, inits: anytype, opts: ReduceWindowOpts, com
     }).appendTo(CompilationContext.current().currentScope().block);
 
     inline for (0..result.len) |i| {
-        result[i] = Tensor._result(inputs[i].shape(), reduce_op.result(i));
+        result[i] = Tensor.fromMlirValue(reduce_op.result(i)).withTags(inputs[i].shape());
     }
 
     return result;

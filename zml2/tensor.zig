@@ -3926,72 +3926,91 @@ fn getComparisonType(ctx: *mlir.Context, dtype: DataType) *const dialects.stable
     });
 }
 
-// TODO(Corentin)
-//test "Tensor.maxPool1d" {
-//    const zml = @import("zml.zig");
-//    const platform = zml.testing.env();
-//
-//    const MaxPool = struct {
-//        pub fn _fwd(x: zml.Tensor) Tensor.ArgMaxRes {
-//            return x.maxPool1d(.{
-//                .window_dimensions = 3,
-//                .window_strides = 2,
-//            });
-//        }
-//    };
-//
-//    var data: [20]f32 = undefined;
-//    for (&data, 0..) |*v, i| v.* = @floatFromInt(i);
-//
-//    const x = try zml.Buffer.fromSlice(platform, .{ 2, 2, 5 }, &data);
-//    const result = try zml.testing.compileAndCall(platform, MaxPool._fwd, .{x});
-//    try zml.testing.expectEqualShapes(.init(.{ 2, 2, 2 }, .f32), result.values.shape());
-//    try zml.testing.expectEqualShapes(.init(.{ 2, 2, 2 }, .i32), result.indices.shape());
-//    try std.testing.expectEqualDeep(
-//        [2][2][2]f32{
-//            .{ .{ 2, 4 }, .{ 7, 9 } },
-//            .{ .{ 12, 14 }, .{ 17, 19 } },
-//        },
-//        result.values.getValue([2][2][2]f32),
-//    );
-//}
-//
-//test "Tensor.maxPool2d" {
-//    const zml = @import("zml.zig");
-//    const platform = zml.testing.env();
-//
-//    const MaxPool = struct {
-//        pub fn _fwd(x: Tensor) Tensor.ArgMaxRes {
-//            return x.maxPool2d(.{
-//                .window_dimensions = .{ 3, 2 },
-//                .window_strides = .{ 2, 1 },
-//            });
-//        }
-//    };
-//
-//    var data: [100]f32 = undefined;
-//    for (&data, 0..) |*v, i| v.* = @floatFromInt(i);
-//    const x = try zml.Buffer.fromSlice(platform, .{ 2, 2, 5, 5 }, &data);
-//
-//    const result = try zml.testing.compileAndCall(platform, MaxPool._fwd, .{x});
-//    try zml.testing.expectEqualShapes(Shape.init(.{ 2, 2, 2, 4 }, .f32), result.values.shape());
-//    try zml.testing.expectEqualShapes(Shape.init(.{ 2, 2, 2, 4 }, .i32), result.indices.shape());
-//    var buffer: [2][2][2][4]f32 = undefined;
-//    _ = try result.values.toHost(std.mem.asBytes(&buffer));
-//    try std.testing.expectEqualDeep(
-//        [2][2][2][4]f32{
-//            .{
-//                .{ .{ 11, 12, 13, 14 }, .{ 21, 22, 23, 24 } },
-//                .{ .{ 36, 37, 38, 39 }, .{ 46, 47, 48, 49 } },
-//            },
-//            .{
-//                .{ .{ 61, 62, 63, 64 }, .{ 71, 72, 73, 74 } },
-//                .{ .{ 86, 87, 88, 89 }, .{ 96, 97, 98, 99 } },
-//            },
-//        },
-//        buffer,
-//    );
-//}
+test "Tensor.maxPool1d" {
+    const zml = @import("zml.zig");
+    const platform = zml.testing.env();
+
+    const MaxPool = struct {
+        pub fn _fwd(x: zml.Tensor) Tensor.ArgMaxRes {
+            return x.maxPool1d(.{
+                .window_dimensions = 3,
+                .window_strides = 2,
+            });
+        }
+    };
+
+    var data: [20]f32 = undefined;
+    for (&data, 0..) |*v, i| v.* = @floatFromInt(i);
+
+    const x: Tensor = .init(Shape.init(.{ 2, 2, 5 }, .f32));
+
+    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, MaxPool._fwd, .{x}, platform);
+    defer exe.deinit();
+
+    var x_buffer: zml.Buffer = try .fromBytes(platform, x.shape(), std.mem.sliceAsBytes(&data), std.testing.io);
+    defer x_buffer.deinit();
+
+    const result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, MaxPool._fwd, .{x_buffer});
+    defer result.values.deinit();
+    defer result.indices.deinit();
+
+    try zml.testing.expectEqualShapes(.init(.{ 2, 2, 2 }, .f32), result.values.shape());
+    try zml.testing.expectEqualShapes(.init(.{ 2, 2, 2 }, .i32), result.indices.shape());
+    try std.testing.expectEqualDeep(
+        [2][2][2]f32{
+            .{ .{ 2, 4 }, .{ 7, 9 } },
+            .{ .{ 12, 14 }, .{ 17, 19 } },
+        },
+        result.values.getValue([2][2][2]f32, std.testing.io),
+    );
+}
+
+test "Tensor.maxPool2d" {
+    const zml = @import("zml.zig");
+    const platform = zml.testing.env();
+
+    const MaxPool = struct {
+        pub fn _fwd(x: Tensor) Tensor.ArgMaxRes {
+            return x.maxPool2d(.{
+                .window_dimensions = .{ 3, 2 },
+                .window_strides = .{ 2, 1 },
+            });
+        }
+    };
+
+    var data: [100]f32 = undefined;
+    for (&data, 0..) |*v, i| v.* = @floatFromInt(i);
+
+    const x: Tensor = .init(Shape.init(.{ 2, 2, 5, 5 }, .f32));
+
+    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, MaxPool._fwd, .{x}, platform);
+    defer exe.deinit();
+
+    var x_buffer: zml.Buffer = try .fromBytes(platform, x.shape(), std.mem.sliceAsBytes(&data), std.testing.io);
+    defer x_buffer.deinit();
+
+    const result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, MaxPool._fwd, .{x_buffer});
+    defer result.values.deinit();
+    defer result.indices.deinit();
+
+    try zml.testing.expectEqualShapes(Shape.init(.{ 2, 2, 2, 4 }, .f32), result.values.shape());
+    try zml.testing.expectEqualShapes(Shape.init(.{ 2, 2, 2, 4 }, .i32), result.indices.shape());
+    var buffer: [2][2][2][4]f32 = undefined;
+    _ = try result.values.toHost(std.mem.asBytes(&buffer), std.testing.io);
+    try std.testing.expectEqualDeep(
+        [2][2][2][4]f32{
+            .{
+                .{ .{ 11, 12, 13, 14 }, .{ 21, 22, 23, 24 } },
+                .{ .{ 36, 37, 38, 39 }, .{ 46, 47, 48, 49 } },
+            },
+            .{
+                .{ .{ 61, 62, 63, 64 }, .{ 71, 72, 73, 74 } },
+                .{ .{ 86, 87, 88, 89 }, .{ 96, 97, 98, 99 } },
+            },
+        },
+        buffer,
+    );
+}
 
 fn _parseGatherCoord(self: Tensor, axes_: anytype) struct { bool, stdx.BoundedArray(u3, constants.MAX_RANK) } {
     const AxesT = @TypeOf(axes_);
