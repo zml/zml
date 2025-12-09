@@ -3370,107 +3370,157 @@ pub const Tensor = struct {
         return _result(self._shape, op.result(0));
     }
 
-    // TODO(Corentin)
-    //test dynamicUpdateSlice {
-    //    const zml = @import("zml.zig");
-    //    const platform = zml.testing.env();
+    test dynamicUpdateSlice {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
 
-    //    {
-    //        const x = try zml.Buffer.fromArray(platform, [10]f32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 });
-    //        const y = try zml.Buffer.fromArray(platform, [2]f32{ -1, -1 });
-    //        const idx = try zml.Buffer.scalar(platform, 4, .i32);
-    //        const res = try zml.testing.compileAndCall(
-    //            platform,
-    //            struct {
-    //                pub fn _fwd(x_: Tensor, idx_: struct { a: Tensor }, y_: Tensor) Tensor {
-    //                    return x_.dynamicUpdateSlice(idx_, y_);
-    //                }
-    //            }._fwd,
-    //            .{ x.withTags(.{.a}), .{ .a = idx }, y.withTags(.{.a}) },
-    //        );
-    //        try std.testing.expectEqual([10]f32{ 0, 1, 2, 3, -1, -1, 6, 7, 8, 9 }, try res.getValue([10]f32));
-    //    }
+        {
+            const x = Tensor.init(Shape.init(.{10}, .f32)).withTags(.{.a});
+            const y = Tensor.init(Shape.init(.{2}, .f32)).withTags(.{.a});
+            const ids: Tensor = .init(Shape.init(.{}, .i32));
+            const forward = struct {
+                pub fn _fwd(x_: Tensor, idx_: struct { a: Tensor }, y_: Tensor) Tensor {
+                    return x_.dynamicUpdateSlice(idx_, y_);
+                }
+            }._fwd;
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, forward, .{ x, .{ .a = ids }, y }, platform);
+            defer exe.deinit();
 
-    //    {
-    //        // Updates 2D, tagged api
-    //        const x = try zml.Buffer.fromArray(platform, [2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } });
-    //        const y = try zml.Buffer.fromArray(platform, [2]f32{ -1, -1 });
-    //        const idx = try zml.Buffer.scalar(platform, 3, .i32);
+            var x_buffer: zml.Buffer = try .fromBytes(platform, x.shape(), std.mem.sliceAsBytes(&[10]f32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }), std.testing.io);
+            defer x_buffer.deinit();
+            var y_buffer: zml.Buffer = try .fromBytes(platform, y.shape(), std.mem.sliceAsBytes(&[2]f32{ -1, -1 }), std.testing.io);
+            defer y_buffer.deinit();
+            var ids_buffer: zml.Buffer = try .fromBytes(platform, ids.shape(), std.mem.sliceAsBytes(&[1]i32{4}), std.testing.io);
+            defer ids_buffer.deinit();
 
-    //        const res = try zml.testing.compileAndCall(
-    //            platform,
-    //            struct {
-    //                pub fn _fwd(x_: Tensor, idx_: Tensor, y_: Tensor) Tensor {
-    //                    return x_.dynamicUpdateSlice(.{ .b = idx_ }, y_);
-    //                }
-    //            }._fwd,
-    //            .{ x.withTags(.{ .a, .b }), idx, y.withTags(.{.a}) },
-    //        );
-    //        try std.testing.expectEqualDeep(
-    //            [2][5]f32{ .{ 0, 1, 2, -1, 4 }, .{ 5, 6, 7, -1, 9 } },
-    //            try res.getValue([2][5]f32),
-    //        );
-    //    }
+            const res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, forward, .{ x_buffer, .{ .a = ids_buffer }, y_buffer });
+            defer res.deinit();
 
-    //    {
-    //        // Updates 2D slice, un-tagged api. Note that `y` needs to have a 1 dimension axis.
-    //        const x = try zml.Buffer.fromArray(platform, [2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } });
-    //        const y = try zml.Buffer.fromArray(platform, [2][1]f32{ .{-1}, .{-1} });
-    //        const idx = try zml.Buffer.scalar(platform, 3, .i32);
-    //        const res = try zml.testing.compileAndCall(
-    //            platform,
-    //            struct {
-    //                pub fn _fwd(x_: Tensor, idx_: Tensor, y_: Tensor) Tensor {
-    //                    return x_.dynamicUpdateSlice(.{ zml.Tensor.scalar(0, .i32), idx_ }, y_);
-    //                }
-    //            }._fwd,
-    //            .{ x, idx, y },
-    //        );
-    //        try std.testing.expectEqualDeep(
-    //            [2][5]f32{ .{ 0, 1, 2, -1, 4 }, .{ 5, 6, 7, -1, 9 } },
-    //            res.getValue([2][5]f32),
-    //        );
-    //    }
+            try std.testing.expectEqual([10]f32{ 0, 1, 2, 3, -1, -1, 6, 7, 8, 9 }, try res.getValue([10]f32, std.testing.io));
+        }
 
-    //    {
-    //        // Updates 2D, partial update
-    //        const x = try zml.Buffer.fromArray(platform, [2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } });
-    //        const y = try zml.Buffer.fromArray(platform, [1]f32{-1});
-    //        const idx_a = try zml.Buffer.scalar(platform, 1, .i32);
-    //        const idx_b = try zml.Buffer.scalar(platform, 3, .i32);
-    //        const res = try zml.testing.compileAndCall(
-    //            platform,
-    //            struct {
-    //                pub fn _fwd(x_: Tensor, idx_: struct { a: Tensor, b: Tensor }, y_: Tensor) Tensor {
-    //                    return x_.dynamicUpdateSlice(idx_, y_);
-    //                }
-    //            }._fwd,
-    //            .{ x.withTags(.{ .a, .b }), .{ .a = idx_a, .b = idx_b }, y.withTags(.{.a}) },
-    //        );
-    //        try std.testing.expectEqualDeep(
-    //            [2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, -1, 9 } },
-    //            res.getValue([2][5]f32),
-    //        );
-    //    }
+        {
+            // Updates 2D, tagged api
+            const x = Tensor.init(Shape.init(.{ 2, 5 }, .f32)).withTags(.{ .a, .b });
+            const y = Tensor.init(Shape.init(.{2}, .f32)).withTags(.{.a});
+            const ids: Tensor = .init(Shape.init(.{}, .i32));
+            const forward = struct {
+                pub fn _fwd(x_: Tensor, idx_: Tensor, y_: Tensor) Tensor {
+                    return x_.dynamicUpdateSlice(.{ .b = idx_ }, y_);
+                }
+            }._fwd;
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, forward, .{ x, ids, y }, platform);
+            defer exe.deinit();
 
-    //    {
-    //        // Updates 2D, partial update, un-tagged api.
-    //        const x = try zml.Buffer.fromArray(platform, [2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } });
-    //        const y = try zml.Buffer.fromArray(platform, [1][1]f32{.{-1}});
-    //        const idx_a = try zml.Buffer.scalar(platform, 1, .i32);
-    //        const idx_b = try zml.Buffer.scalar(platform, 3, .i32);
-    //        const A = struct {
-    //            pub fn _fwd(x_: Tensor, idx_: [2]Tensor, y_: Tensor) Tensor {
-    //                return x_.dynamicUpdateSlice(&idx_, y_);
-    //            }
-    //        };
-    //        const res = try zml.testing.compileAndCall(platform, A._fwd, .{ x, .{ idx_a, idx_b }, y });
-    //        try std.testing.expectEqualDeep(
-    //            [2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, -1, 9 } },
-    //            res.getValue([2][5]f32),
-    //        );
-    //    }
-    //}
+            var x_buffer: zml.Buffer = try .fromBytes(platform, x.shape(), std.mem.sliceAsBytes(&[2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } }), std.testing.io);
+            defer x_buffer.deinit();
+            var y_buffer: zml.Buffer = try .fromBytes(platform, y.shape(), std.mem.sliceAsBytes(&[2]f32{ -1, -1 }), std.testing.io);
+            defer y_buffer.deinit();
+            var ids_buffer: zml.Buffer = try .fromBytes(platform, ids.shape(), std.mem.sliceAsBytes(&[1]i32{3}), std.testing.io);
+            defer ids_buffer.deinit();
+
+            const res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, forward, .{ x_buffer, ids_buffer, y_buffer });
+            defer res.deinit();
+
+            try std.testing.expectEqualDeep(
+                [2][5]f32{ .{ 0, 1, 2, -1, 4 }, .{ 5, 6, 7, -1, 9 } },
+                try res.getValue([2][5]f32, std.testing.io),
+            );
+        }
+
+        {
+            // Updates 2D slice, un-tagged api. Note that `y` needs to have a 1 dimension axis.
+            const x: Tensor = .init(Shape.init(.{ 2, 5 }, .f32));
+            const y: Tensor = .init(Shape.init(.{ 2, 1 }, .f32));
+            const ids: Tensor = .init(Shape.init(.{}, .i32));
+            const forward = struct {
+                pub fn _fwd(x_: Tensor, idx_: Tensor, y_: Tensor) Tensor {
+                    return x_.dynamicUpdateSlice(.{ zml.Tensor.scalar(0, .i32), idx_ }, y_);
+                }
+            }._fwd;
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, forward, .{ x, ids, y }, platform);
+            defer exe.deinit();
+
+            var x_buffer: zml.Buffer = try .fromBytes(platform, x.shape(), std.mem.sliceAsBytes(&[2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } }), std.testing.io);
+            defer x_buffer.deinit();
+            var y_buffer: zml.Buffer = try .fromBytes(platform, y.shape(), std.mem.sliceAsBytes(&[2][1]f32{ .{-1}, .{-1} }), std.testing.io);
+            defer y_buffer.deinit();
+            var ids_buffer: zml.Buffer = try .fromBytes(platform, ids.shape(), std.mem.sliceAsBytes(&[1]i32{3}), std.testing.io);
+            defer ids_buffer.deinit();
+
+            const res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, forward, .{ x_buffer, ids_buffer, y_buffer });
+            defer res.deinit();
+
+            try std.testing.expectEqualDeep(
+                [2][5]f32{ .{ 0, 1, 2, -1, 4 }, .{ 5, 6, 7, -1, 9 } },
+                res.getValue([2][5]f32, std.testing.io),
+            );
+        }
+
+        {
+            // Updates 2D, partial update
+            const x = Tensor.init(Shape.init(.{ 2, 5 }, .f32)).withTags(.{ .a, .b });
+            const y = Tensor.init(Shape.init(.{1}, .f32)).withTags(.{.a});
+            const idx_a: Tensor = .init(Shape.init(.{}, .i32));
+            const idx_b: Tensor = .init(Shape.init(.{}, .i32));
+            const forward = struct {
+                pub fn _fwd(x_: Tensor, idx_: struct { a: Tensor, b: Tensor }, y_: Tensor) Tensor {
+                    return x_.dynamicUpdateSlice(idx_, y_);
+                }
+            }._fwd;
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, forward, .{ x, .{ .a = idx_a, .b = idx_b }, y }, platform);
+            defer exe.deinit();
+
+            var x_buffer: zml.Buffer = try .fromBytes(platform, x.shape(), std.mem.sliceAsBytes(&[2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } }), std.testing.io);
+            defer x_buffer.deinit();
+            var y_buffer: zml.Buffer = try .fromBytes(platform, y.shape(), std.mem.sliceAsBytes(&[1]f32{-1}), std.testing.io);
+            defer y_buffer.deinit();
+            var idx_a_buffer: zml.Buffer = try .fromBytes(platform, idx_a.shape(), std.mem.sliceAsBytes(&[1]i32{1}), std.testing.io);
+            defer idx_a_buffer.deinit();
+            var idx_b_buffer: zml.Buffer = try .fromBytes(platform, idx_b.shape(), std.mem.sliceAsBytes(&[1]i32{3}), std.testing.io);
+            defer idx_b_buffer.deinit();
+
+            const res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, forward, .{ x_buffer, .{ .a = idx_a_buffer, .b = idx_b_buffer }, y_buffer });
+            defer res.deinit();
+
+            try std.testing.expectEqualDeep(
+                [2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, -1, 9 } },
+                res.getValue([2][5]f32, std.testing.io),
+            );
+        }
+
+        {
+            // Updates 2D, partial update, un-tagged api.
+            const x: Tensor = .init(Shape.init(.{ 2, 5 }, .f32));
+            const y: Tensor = .init(Shape.init(.{ 1, 1 }, .f32));
+            const idx_a: Tensor = .init(Shape.init(.{}, .i32));
+            const idx_b: Tensor = .init(Shape.init(.{}, .i32));
+            const forward = struct {
+                pub fn _fwd(x_: Tensor, idx_: [2]Tensor, y_: Tensor) Tensor {
+                    return x_.dynamicUpdateSlice(&idx_, y_);
+                }
+            }._fwd;
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, forward, .{ x, .{ idx_a, idx_b }, y }, platform);
+            defer exe.deinit();
+
+            var x_buffer: zml.Buffer = try .fromBytes(platform, x.shape(), std.mem.sliceAsBytes(&[2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } }), std.testing.io);
+            defer x_buffer.deinit();
+            var y_buffer: zml.Buffer = try .fromBytes(platform, y.shape(), std.mem.sliceAsBytes(&[1][1]f32{.{-1}}), std.testing.io);
+            defer y_buffer.deinit();
+            var idx_a_buffer: zml.Buffer = try .fromBytes(platform, idx_a.shape(), std.mem.sliceAsBytes(&[1]i32{1}), std.testing.io);
+            defer idx_a_buffer.deinit();
+            var idx_b_buffer: zml.Buffer = try .fromBytes(platform, idx_b.shape(), std.mem.sliceAsBytes(&[1]i32{3}), std.testing.io);
+            defer idx_b_buffer.deinit();
+
+            const res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, forward, .{ x_buffer, .{ idx_a_buffer, idx_b_buffer }, y_buffer });
+            defer res.deinit();
+
+            try std.testing.expectEqualDeep(
+                [2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, -1, 9 } },
+                res.getValue([2][5]f32, std.testing.io),
+            );
+        }
+    }
 
     /// Returns a Tensor containing the element-wise result of the given 'cmp' comparison between the two input Tensors.
     pub fn cmp(self: Tensor, direction: dialects.stablehlo.ComparisonDirection.Direction, other: Tensor) Tensor {
