@@ -179,7 +179,7 @@ pub fn reduceWindow(inputs: anytype, inits: anytype, opts: ReduceWindowOpts, com
             .named(mlir_ctx, "base_dilations", mlir.denseArrayAttribute(mlir_ctx, .i64, opts.base_dilations)),
             .named(mlir_ctx, "window_dilations", mlir.denseArrayAttribute(mlir_ctx, .i64, opts.window_dilations)),
             // Cast the [][2]i64 to []i64 (safe)
-            .named(mlir_ctx, "padding", mlir.denseElementsAttribute(mlir.RankedTensorType.get(&.{}, mlir.integerType(mlir_ctx, .i64), null).shaped(), @as([]const i64, @ptrCast(opts.padding)))),
+            .named(mlir_ctx, "padding", mlir.denseElementsAttribute(mlir.RankedTensorType.get(&.{ @intCast(opts.padding.len), 2 }, mlir.integerType(mlir_ctx, .i64), null).shaped(), @as([]const i64, @ptrCast(opts.padding)))),
         },
         .verify = true,
         .location = .unknown(mlir_ctx),
