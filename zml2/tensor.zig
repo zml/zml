@@ -2331,83 +2331,94 @@ pub const Tensor = struct {
         return _result(res_shape, gather_op.result(0));
     }
 
-    // TODO(Corentin)
-    //test gatherSlices {
-    //    const zml = @import("zml.zig");
-    //    const platform = zml.testing.env();
+    test gatherSlices {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
 
-    //    const Local = struct {
-    //        pub fn _gatherSlices(self: Tensor, slice_shape: Shape, indices: Tensor, opts: GatherOpts) Tensor {
-    //            return self.gatherSlices(slice_shape, indices, opts);
-    //        }
-    //    };
+        const Local = struct {
+            pub fn _gatherSlices(self: Tensor, slice_shape: Shape, indices: Tensor, opts: GatherOpts) Tensor {
+                return self.gatherSlices(slice_shape, indices, opts);
+            }
+        };
 
-    //    {
-    //        // Only test shapes
-    //        var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
-    //        defer comp.deinit();
-    //        comp.activate();
-    //        defer comp.deactivate();
+        {
+            // Only test shapes
+            var comp = zml.module.CompilationContext.init(std.testing.allocator);
+            defer comp.deinit();
+            comp.activate();
+            defer comp.deactivate();
 
-    //        inline for (.{
-    //            .{ .{ .a = 10 }, .{}, .{ ._ = 0 }, .{ .a = 10 } },
-    //            .{ .{ .a = 10 }, .{ .a = 7 }, .{ ._ = 1 }, .{ .a = 7 } },
-    //            .{ .{ .a = 10 }, .{ .a = 7 }, .{ .n = 8, ._ = 1 }, .{ .n = 8, .a = 7 } },
-    //            .{ .{ .a = 10 }, .{ .a = 7 }, .{ .coord = 1, .n = 8 }, .{ .n = 8, .a = 7 } },
-    //            // tags aren't required.
-    //            .{ .{10}, .{7}, .{ .n = 8, ._ = 1 }, .{ .n = 8, ._ = 7 } },
-    //            .{ .{ .a = 10, .b = 20 }, .{ .a = 7 }, .{ ._ = 1 }, .{ .a = 7, .b = 20 } },
-    //            .{ .{ .a = 10, .b = 20 }, .{ .a = 7 }, .{ .n = 8, ._ = 1 }, .{ .n = 8, .a = 7, .b = 20 } },
-    //            .{ .{ .a = 10, .b = 20 }, .{ .a = 7 }, .{ .n = 8, .coord = 1, .m = 9 }, .{ .n = 8, .m = 9, .a = 7, .b = 20 } },
-    //            .{ .{ .a = 10, .b = 20 }, .{ .b = 17 }, .{ .n = 8, ._ = 1 }, .{ .n = 8, .a = 10, .b = 17 } },
-    //            .{ .{ .a = 10, .b = 20 }, .{ .a = 7, .b = 17 }, .{ .n = 8, ._ = 2 }, .{ .n = 8, .a = 7, .b = 17 } },
-    //            // Note: currently the order of the axes in the slice is not used.
-    //            .{ .{ .a = 10, .b = 20 }, .{ .b = 17, .a = 7 }, .{ .n = 8, ._ = 2 }, .{ .n = 8, .a = 7, .b = 17 } },
-    //            .{ .{ .a = 10, .b = 20, .c = 20 }, .{ .b = 17 }, .{ .n = 8, ._ = 1 }, .{ .n = 8, .a = 10, .b = 17, .c = 20 } },
-    //            // batching dims
-    //            .{ .{ .a = 10, .b = 20 }, .{ .b = 17 }, .{ .a = 10, ._ = 1 }, .{ .a = 10, .b = 17 } },
-    //            .{ .{ .b = 200, .a = 100, .c = 300 }, .{ .c = 300 }, .{ .a = 100, .b = 200, ._ = 1 }, .{ .a = 100, .b = 200, .c = 300 } },
-    //        }) |testcase| {
-    //            const x_shape, const slice_dims, const idx_shape, const res_shape = testcase;
-    //            const x = Tensor.constant(x_shape, .{ .f16 = 0 });
-    //            const slice_shape = Shape.init(slice_dims, .u16);
-    //            const idx = Tensor.constant(idx_shape, .{ .i32 = 0 });
-    //            const y = gatherSlices(x, slice_shape, idx, .{});
-    //            try zml.testing.expectEqualShapes(Shape.init(res_shape, .f16), y.shape());
-    //            try std.testing.expect(y.value().owner().verify());
+            const block = mlir.Block.init(&.{}, &.{});
+            comp.pushBlock(block);
+            defer comp.popBlock();
 
-    //            const mod = try zml.compileFn(
-    //                std.testing.allocator,
-    //                Local._gatherSlices,
-    //                .{ x.shape(), slice_shape, idx.shape(), .{ .indices_are_sorted = true } },
-    //                platform,
-    //            );
-    //            defer mod.deinit();
-    //        }
-    //    }
+            inline for (.{
+                .{ .{ .a = 10 }, .{}, .{ ._ = 0 }, .{ .a = 10 } },
+                .{ .{ .a = 10 }, .{ .a = 7 }, .{ ._ = 1 }, .{ .a = 7 } },
+                .{ .{ .a = 10 }, .{ .a = 7 }, .{ .n = 8, ._ = 1 }, .{ .n = 8, .a = 7 } },
+                .{ .{ .a = 10 }, .{ .a = 7 }, .{ .coord = 1, .n = 8 }, .{ .n = 8, .a = 7 } },
+                // tags aren't required.
+                .{ .{10}, .{7}, .{ .n = 8, ._ = 1 }, .{ .n = 8, ._ = 7 } },
+                .{ .{ .a = 10, .b = 20 }, .{ .a = 7 }, .{ ._ = 1 }, .{ .a = 7, .b = 20 } },
+                .{ .{ .a = 10, .b = 20 }, .{ .a = 7 }, .{ .n = 8, ._ = 1 }, .{ .n = 8, .a = 7, .b = 20 } },
+                .{ .{ .a = 10, .b = 20 }, .{ .a = 7 }, .{ .n = 8, .coord = 1, .m = 9 }, .{ .n = 8, .m = 9, .a = 7, .b = 20 } },
+                .{ .{ .a = 10, .b = 20 }, .{ .b = 17 }, .{ .n = 8, ._ = 1 }, .{ .n = 8, .a = 10, .b = 17 } },
+                .{ .{ .a = 10, .b = 20 }, .{ .a = 7, .b = 17 }, .{ .n = 8, ._ = 2 }, .{ .n = 8, .a = 7, .b = 17 } },
+                // Note: currently the order of the axes in the slice is not used.
+                .{ .{ .a = 10, .b = 20 }, .{ .b = 17, .a = 7 }, .{ .n = 8, ._ = 2 }, .{ .n = 8, .a = 7, .b = 17 } },
+                .{ .{ .a = 10, .b = 20, .c = 20 }, .{ .b = 17 }, .{ .n = 8, ._ = 1 }, .{ .n = 8, .a = 10, .b = 17, .c = 20 } },
+                // batching dims
+                .{ .{ .a = 10, .b = 20 }, .{ .b = 17 }, .{ .a = 10, ._ = 1 }, .{ .a = 10, .b = 17 } },
+                .{ .{ .b = 200, .a = 100, .c = 300 }, .{ .c = 300 }, .{ .a = 100, .b = 200, ._ = 1 }, .{ .a = 100, .b = 200, .c = 300 } },
+            }) |testcase| {
+                const x_shape, const slice_dims, const idx_shape, const res_shape = testcase;
+                const x = Tensor.constant(.{ .f16 = 0 }).broad(Shape.init(x_shape, .f16));
+                const slice_shape = Shape.init(slice_dims, .u16);
+                const idx = Tensor.constant(.{ .i32 = 0 }).broad(Shape.init(idx_shape, .i32));
+                const y = gatherSlices(x, slice_shape, idx, .{});
+                try zml.testing.expectEqualShapes(Shape.init(res_shape, .f16), y.shape());
+                try std.testing.expect(y.value().owner().verify());
 
-    //    // Test with actual values.
-    //    const range = try zml.HostBuffer.arange(std.testing.allocator, .{ .end = 2 * 4 * 6 }, .u16);
-    //    defer range.deinit(std.testing.allocator);
-    //    const operand = try range.reshape(.{ .a = 2, .b = 4, .c = 6 }).toDevice(platform);
-    //    defer operand.deinit();
-    //    const start_indices = (try zml.Buffer.fromArray(platform, [2][2]i32{ .{ 2, 1 }, .{ 0, 3 } })).withTags(.{ .n, ._ });
-    //    defer start_indices.deinit();
+                _ = Local._gatherSlices(x, slice_shape, idx, .{ .indices_are_sorted = true });
+            }
+        }
 
-    //    const result = try zml.testing.compileAndCall(platform, Local._gatherSlices, .{ operand, Shape.init(.{ .b = 2, .c = 3 }, .u16), start_indices, .{} });
+        // Test with actual values.
+        const operand: Tensor = .init(Shape.init(.{ .a = 2, .b = 4, .c = 6 }, .u16));
+        const indices: Tensor = .init(Shape.init(.{ .n = 2, ._ = 2 }, .i32));
+        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._gatherSlices, .{ operand, Shape.init(.{ .b = 2, .c = 3 }, .u16), indices, .{} }, platform);
+        defer exe.deinit();
 
-    //    const expected = zml.HostBuffer.fromArray(&[2][2][2][3]u16{
-    //        .{
-    //            .{ .{ 13, 14, 15 }, .{ 19, 20, 21 } },
-    //            .{ .{ 37, 38, 39 }, .{ 43, 44, 45 } },
-    //        },
-    //        .{
-    //            .{ .{ 3, 4, 5 }, .{ 9, 10, 11 } },
-    //            .{ .{ 27, 28, 29 }, .{ 33, 34, 35 } },
-    //        },
-    //    });
-    //    try zml.testing.expectClose(expected, result, 0);
-    //}
+        const indices_buffer: zml.Buffer = try .fromBytes(platform, indices.shape(), std.mem.sliceAsBytes(&[2][2]i32{ .{ 2, 1 }, .{ 0, 3 } }), std.testing.io);
+        defer indices_buffer.deinit();
+        const operand_buffer: zml.Buffer = b: {
+            const temp_func = struct {
+                fn forward() Tensor {
+                    return Tensor.arange(.{ .end = 2 * 4 * 6 }, .u16).reshape(.{ .a = 2, .b = 4, .c = 6 });
+                }
+            }.forward;
+            var temp_exe = try zml.module.compile(std.testing.allocator, std.testing.io, temp_func, .{}, platform);
+            defer temp_exe.deinit();
+
+            const buffer = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &temp_exe, temp_func, {});
+            break :b buffer;
+        };
+        defer operand_buffer.deinit();
+        const result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._gatherSlices, .{ operand_buffer, indices_buffer });
+        defer result.deinit();
+
+        const expected: zml.testing.Slice = .init(Shape.init(.{ 2, 2, 2, 3 }, .u16), std.mem.sliceAsBytes(&[2][2][2][3]u16{
+            .{
+                .{ .{ 13, 14, 15 }, .{ 19, 20, 21 } },
+                .{ .{ 37, 38, 39 }, .{ 43, 44, 45 } },
+            },
+            .{
+                .{ .{ 3, 4, 5 }, .{ 9, 10, 11 } },
+                .{ .{ 27, 28, 29 }, .{ 33, 34, 35 } },
+            },
+        }));
+        try zml.testing.expectClose(std.testing.io, expected, result, 0);
+    }
 
     pub const ScatterOpts = struct {
         /// Promise scatter that all coordinates in `indices` are sorted, wrt to the final offset in `self`
