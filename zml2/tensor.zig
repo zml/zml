@@ -444,12 +444,11 @@ pub const Tensor = struct {
             return .{ ._state = .init(Shape.init(.{2}, .u64)) };
         }
 
-        // TODO(Corentin)
-        //pub fn initBuffer(platform: Platform, seed: u128) !Bufferized(Rng) {
-        //    return .{
-        //        ._state = try zml.Buffer.fromBytes(platform, Shape.init(.{2}, .u64), std.mem.asBytes(&seed)),
-        //    };
-        //}
+        pub fn initBuffer(platform: Platform, seed: u128, io: std.Io) !Bufferized(Rng) {
+            return .{
+                ._state = try .fromBytes(platform, Shape.init(.{2}, .u64), std.mem.asBytes(&seed), io),
+            };
+        }
 
         /// Returns a Tensor of the given shape, filled with uniform random bits, and a new Rng state.
         ///
@@ -514,62 +513,68 @@ pub const Tensor = struct {
             return .{ rng, floats.convert(shape_.dtype()) };
         }
 
-        //test uniform {
-        //    const zml = @import("zml.zig");
-        //    const Stats = struct {
-        //        const Stats = @This();
+        test uniform {
+            const zml = @import("zml.zig");
+            const Stats = struct {
+                const Stats = @This();
 
-        //        mean: Tensor,
-        //        variance: Tensor,
-        //        min: Tensor,
-        //        max: Tensor,
+                mean: Tensor,
+                variance: Tensor,
+                min: Tensor,
+                max: Tensor,
 
-        //        pub fn uniformStats(
-        //            rand: Rng,
-        //            shape_: Shape,
-        //            opts: struct { min: f64, max: f64 },
-        //        ) struct { Rng, Stats } {
-        //            const rng, const data = rand.uniform(shape_, .{ .min = opts.min, .max = opts.max });
-        //            const mean_ = data.mean(0);
-        //            const variance = data.sub(mean_.broad(data.shape())).pow(Tensor.scalar(2, .f32)).mean(0);
-        //            return .{ rng, .{
-        //                .mean = mean_,
-        //                .variance = variance,
-        //                .min = data.min(0),
-        //                .max = data.max(0),
-        //            } };
-        //        }
-        //    };
+                pub fn uniformStats(
+                    rand: Rng,
+                    shape_: Shape,
+                    opts: struct { min: f64, max: f64 },
+                ) struct { Rng, Stats } {
+                    const rng, const data = rand.uniform(shape_, .{ .min = opts.min, .max = opts.max });
+                    const mean_ = data.mean(0);
+                    const variance = data.sub(mean_.broad(data.shape())).pow(Tensor.scalar(2, .f32)).mean(0);
+                    return .{ rng, .{
+                        .mean = mean_,
+                        .variance = variance,
+                        .min = data.min(0),
+                        .max = data.max(0),
+                    } };
+                }
+            };
 
-        //    const platform = zml.testing.env();
-        //    // Compute stats over a uniform distribution on [-2, 10].
-        //    const rand, const stats = try zml.testing.compileAndCallWithTensors(
-        //        platform,
-        //        Stats.uniformStats,
-        //        .{ Rng.shape(), zml.Shape.init(.{1024}, .f32), .{ .min = -2, .max = 10 } },
-        //        .{try Rng.init(platform, 1234)},
-        //    );
+            const platform = zml.testing.env();
+            // Compute stats over a uniform distribution on [-2, 10].
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Stats.uniformStats, .{ Rng.init(), Shape.init(.{1024}, .f32), .{ .min = -2, .max = 10 } }, platform);
+            defer exe.deinit();
 
-        //    // Check the Rng state has been modified.
-        //    try std.testing.expect(try rand._state.getValue(u128) != 1234);
+            const rng_buffer = try Rng.initBuffer(platform, 1234, std.testing.io);
+            defer rng_buffer._state.deinit();
 
-        //    // Check the mean and variance are close to theoritical values.
-        //    const mean_ = try stats.mean.getValue(f32);
-        //    try std.testing.expectApproxEqAbs(4, mean_, 0.03);
+            const rand, const stats = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Stats.uniformStats, .{rng_buffer});
+            defer rand._state.deinit();
+            defer stats.mean.deinit();
+            defer stats.variance.deinit();
+            defer stats.min.deinit();
+            defer stats.max.deinit();
 
-        //    const variance = try stats.variance.getValue(f32);
-        //    try std.testing.expectApproxEqAbs(12.0 * 12.0 / 12.0, variance, 0.01);
+            // Check the Rng state has been modified.
+            try std.testing.expect(try rand._state.getValue(u128, std.testing.io) != 1234);
 
-        //    // Check that no value is outside of the interval
-        //    // and we have samples close to the edges.
-        //    const min_ = try stats.min.getValue(f32);
-        //    try std.testing.expect(min_ >= -2);
-        //    try std.testing.expectApproxEqAbs(-2, min_, 0.05);
+            // Check the mean and variance are close to theoritical values.
+            const mean_ = try stats.mean.getValue(f32, std.testing.io);
+            try std.testing.expectApproxEqAbs(4, mean_, 0.03);
 
-        //    const max_ = try stats.max.getValue(f32);
-        //    try std.testing.expect(max_ < 10);
-        //    try std.testing.expectApproxEqAbs(10, max_, 0.05);
-        //}
+            const variance = try stats.variance.getValue(f32, std.testing.io);
+            try std.testing.expectApproxEqAbs(12.0 * 12.0 / 12.0, variance, 0.01);
+
+            // Check that no value is outside of the interval
+            // and we have samples close to the edges.
+            const min_ = try stats.min.getValue(f32, std.testing.io);
+            try std.testing.expect(min_ >= -2);
+            try std.testing.expectApproxEqAbs(-2, min_, 0.05);
+
+            const max_ = try stats.max.getValue(f32, std.testing.io);
+            try std.testing.expect(max_ < 10);
+            try std.testing.expectApproxEqAbs(10, max_, 0.05);
+        }
 
         /// Returns a Tensor of the given shape, filled with floating point numbers sampled from a normal distribution.
         ///
@@ -579,13 +584,10 @@ pub const Tensor = struct {
             stdx.debug.assert(sh.dtype().isFloat(), "normal expects tensor type to be a float, got {}", .{sh.dtype()});
 
             const a = Tensor.constant(DataType.Value.init(sh.dtype(), opts.mean));
-            _ = a; // autofix
             const b = Tensor.constant(DataType.Value.init(sh.dtype(), opts.stddev));
-            _ = b; // autofix
-            unreachable;
-            //const res_shape = Tensor.constantTensor(HostBuffer.fromSlice(.{sh.rank()}, sh.dims()));
-            //const op = dialects.stablehlo.rng(mlirCtx(), a.value(), b.value(), res_shape.value(), .NORMAL, .unknown(mlirCtx())).appendTo(currentBlock());
-            //return _result(sh, op.result(0));
+            const res_tensor_shape = Tensor.constantTensor(Shape.init(.{sh.rank()}, .i64), std.mem.sliceAsBytes(sh.dims()));
+            const op = dialects.stablehlo.rng(mlirCtx(), a.value(), b.value(), res_tensor_shape.value(), .NORMAL, .unknown(mlirCtx())).appendTo(currentBlock());
+            return _result(sh, op.result(0));
         }
 
         /// Returns a Tensor of the given shape, filled with floating point numbers sampled from a Gumbel distribution, and a new Rng state.
@@ -606,72 +608,81 @@ pub const Tensor = struct {
             return .{ rand, u.log().scale(-1).log().scale(-1).convert(shape_.dtype()) };
         }
 
-        //test gumbel {
-        //    const zml = @import("zml.zig");
-        //    const Stats = struct {
-        //        const Stats = @This();
+        test gumbel {
+            const zml = @import("zml.zig");
+            const Stats = struct {
+                const Stats = @This();
 
-        //        mean: Tensor,
-        //        variance: Tensor,
-        //        actual_dist: Tensor,
+                mean: Tensor,
+                variance: Tensor,
+                actual_dist: Tensor,
 
-        //        pub fn gumbelStats(rand: Rng, target_dist: Tensor) struct { Rng, Stats } {
-        //            const s = Shape.init(.{ .n = 1024, .d = 4 }, .f32);
-        //            const rng, const data = rand.gumbel(s);
-        //            const flat = data.flattenAll();
-        //            const mean_ = flat.mean(0);
-        //            const variance = flat.sub(mean_.broad(flat.shape())).pow(Tensor.scalar(2, .f32)).mean(0);
+                pub fn gumbelStats(rand: Rng, target_dist: Tensor) struct { Rng, Stats } {
+                    const s = Shape.init(.{ .n = 1024, .d = 4 }, .f32);
+                    const rng, const data = rand.gumbel(s);
+                    const flat = data.flatten();
+                    const mean_ = flat.mean(0);
+                    const variance = flat.sub(mean_.broad(flat.shape())).pow(Tensor.scalar(2, .f32)).mean(0);
 
-        //            // Test out the gumbel reparametrization trick
-        //            var x = target_dist.log().withTags(.{.d}).broad(s);
-        //            x = x.add(data);
-        //            const samples = x.argMax(.d).indices.squeeze(.d);
+                    // Test out the gumbel reparametrization trick
+                    var x = target_dist.log().withTags(.{.d}).broad(s);
+                    x = x.add(data);
+                    const samples = x.argMax(.d).indices.squeeze(.d);
 
-        //            // count 0, 1, 2 and 3 in samples:
-        //            // - map 0 to 1, 1 to 2**16, 2 to 2**32, 3 to N**58
-        //            // - sum in u64
-        //            // - split to [4]u16
-        //            const powers = blk: {
-        //                var powers: [4]u64 = undefined;
-        //                for (&powers, 0..) |*p, i| p.* = std.math.pow(u64, 2, i * 16);
-        //                break :blk powers;
-        //            };
-        //            const values = Tensor.constantTensor(HostBuffer.fromArray(&powers)).withTags(.{.d});
-        //            const counts = values.gatherValues(.d, samples, .{}).sum(.n).bitCast(.u16);
-        //            const actual_dist = counts.reshape(target_dist.shape()).convert(target_dist.dtype()).divByConst(s.dim(.n));
-        //            return .{ rng, .{ .mean = mean_, .variance = variance, .actual_dist = actual_dist } };
-        //        }
-        //    };
+                    // count 0, 1, 2 and 3 in samples:
+                    // - map 0 to 1, 1 to 2**16, 2 to 2**32, 3 to N**58
+                    // - sum in u64
+                    // - split to [4]u16
+                    const powers = blk: {
+                        var powers: [4]u64 = undefined;
+                        for (&powers, 0..) |*p, i| p.* = std.math.pow(u64, 2, i * 16);
+                        break :blk powers;
+                    };
+                    const values = Tensor.constantTensor(Shape.init(.{4}, .u64), std.mem.sliceAsBytes(&powers)).withTags(.{.d});
+                    const counts = values.gather(.{ .d = samples }, .{}).sum(.n).bitCast(.u16);
+                    const actual_dist = counts.reshape(target_dist.shape()).convert(target_dist.dtype()).divByConst(s.dim(.n));
+                    return .{ rng, .{ .mean = mean_, .variance = variance, .actual_dist = actual_dist } };
+                }
+            };
 
-        //    const platform = zml.testing.env();
-        //    const tgt_dist = [_]f32{ 2.0, 1.0, 4.0, 3.0 };
-        //    const rand, const stats = try zml.testing.compileAndCallWithTensors(
-        //        platform,
-        //        Stats.gumbelStats,
-        //        .{ Rng.shape(), zml.Shape.init(.{tgt_dist.len}, .f32) },
-        //        .{ try Rng.init(platform, 1234), try .fromArray(platform, tgt_dist) },
-        //    );
-        //    // Check the Rng state has been modified.
-        //    try std.testing.expect(try rand._state.getValue(i128) != 1234);
+            const platform = zml.testing.env();
+            const tgt_dist_data = [_]f32{ 2.0, 1.0, 4.0, 3.0 };
+            const tgt_dist: Tensor = .init(Shape.init(.{tgt_dist_data.len}, .f32));
 
-        //    // Check the mean and variance are close to theoritical values.
-        //    const mean_ = try stats.mean.getValue(f32);
-        //    try std.testing.expectApproxEqAbs(0.5772, mean_, 0.02);
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Stats.gumbelStats, .{ Rng.init(), tgt_dist }, platform);
+            defer exe.deinit();
 
-        //    const variance = try stats.variance.getValue(f32);
-        //    const pi = std.math.pi;
-        //    try std.testing.expectApproxEqAbs(pi * pi / 6.0, variance, 0.03);
+            const rng_buffer = try Rng.initBuffer(platform, 1234, std.testing.io);
+            defer rng_buffer._state.deinit();
+            const tgt_dist_buffer: Buffer = try .fromBytes(platform, tgt_dist.shape(), std.mem.sliceAsBytes(&tgt_dist_data), std.testing.io);
+            defer tgt_dist_buffer.deinit();
 
-        //    // Check the distribution obtained with the gumbel trick matches the target distribution.
-        //    const actual_dist = try stats.actual_dist.getValue([4]f32);
-        //    scoped_log.debug("tgt_dist: {d}, actual_dist: {d}", .{ tgt_dist, actual_dist });
-        //    for (tgt_dist, actual_dist) |tgt, actual| {
-        //        // We normalize tgt_dist to make it a well formed distribution.
-        //        // We didn't do it before calling gumbel, because the gumbel trick
-        //        // doesn't require normalized distributions as input.
-        //        try std.testing.expectApproxEqAbs(tgt / 10.0, actual, 0.05);
-        //    }
-        //}
+            const rand, const stats = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Stats.gumbelStats, .{ rng_buffer, tgt_dist_buffer });
+            defer rand._state.deinit();
+            defer stats.mean.deinit();
+            defer stats.variance.deinit();
+            defer stats.actual_dist.deinit();
+
+            // Check the Rng state has been modified.
+            try std.testing.expect(try rand._state.getValue(i128, std.testing.io) != 1234);
+
+            // Check the mean and variance are close to theoritical values.
+            const mean_ = try stats.mean.getValue(f32, std.testing.io);
+            try std.testing.expectApproxEqAbs(0.5772, mean_, 0.02);
+
+            const variance = try stats.variance.getValue(f32, std.testing.io);
+            const pi = std.math.pi;
+            try std.testing.expectApproxEqAbs(pi * pi / 6.0, variance, 0.03);
+
+            // Check the distribution obtained with the gumbel trick matches the target distribution.
+            const actual_dist = try stats.actual_dist.getValue([4]f32, std.testing.io);
+            for (tgt_dist_data, actual_dist) |tgt, actual| {
+                // We normalize tgt_dist to make it a well formed distribution.
+                // We didn't do it before calling gumbel, because the gumbel trick
+                // doesn't require normalized distributions as input.
+                try std.testing.expectApproxEqAbs(tgt / 10.0, actual, 0.05);
+            }
+        }
     };
 
     /// Returns a Tensor containing the element-wise conversion to another floating point type.
@@ -1288,8 +1299,8 @@ pub const Tensor = struct {
     pub fn sum(self: Tensor, axis_: anytype) Tensor {
         const a = self.axis(axis_);
         return ops.reduce(.{self}, .{Tensor.constant(self.dtype().zero())}, &.{a}, struct {
-            pub fn acc(args: ops.ReduceArgs) Tensor {
-                return args.right.add(args.left.convert(args.right.dtype()));
+            pub fn acc(args: ops.ReduceArgs) struct { Tensor } {
+                return .{args.right.add(args.left.convert(args.right.dtype()))};
             }
         }.acc, .{})[0];
     }
@@ -1366,13 +1377,17 @@ pub const Tensor = struct {
     /// Returns a transposed Tensor computed using the given axes.
     pub fn transpose(self: Tensor, axes_: anytype) Tensor {
         const axes__ = self.axes(axes_).constSlice();
-        const default_perm = [constants.MAX_RANK]i64{ 7, 6, 5, 4, 3, 2, 1, 0 };
-        const no_op = [constants.MAX_RANK]i64{ 0, 1, 2, 3, 4, 5, 6, 7 };
+        const no_op = constants.AXES_IOTA;
+        const default_perm = b: {
+            var buf = constants.AXES_IOTA;
+            std.mem.reverse(i64, &buf);
+            break :b buf;
+        };
 
         const permutation: []const i64 = if (axes__.len == 0)
             default_perm[constants.MAX_RANK - self.rank() ..]
         else
-            toI64(axes__);
+            toI64(axes__).constSlice();
 
         stdx.debug.assert(permutation.len == self.rank(), "transpose expects input tensor rank and 'axes_' length to be equal, got {f} and {any}", .{ self, permutation[0..@min(permutation.len, constants.MAX_RANK + 2)] });
 
@@ -1389,7 +1404,7 @@ pub const Tensor = struct {
             mlirCtx(),
             self.value(),
             mlir.rankedTensorType(res_shape.dims(), mlirx.Type.fromDType(mlirCtx(), res_shape.dtype())),
-            .{ .permutation = toI64(permutation) },
+            .{ .permutation = toI64(permutation).constSlice() },
             .unknown(mlirCtx()),
         ).appendTo(currentBlock());
         return _result(res_shape, op.result(0));
@@ -1942,15 +1957,12 @@ pub const Tensor = struct {
         return Tensor.constant(sh.dtype().zero()).broad(sh);
     }
 
-    // TODO(Corentin)
     /// Embeds a buffer with concrete values into an Mlir program.
-    pub fn constantTensor() Tensor {
-        @panic("unimplemented");
-        //const ctx = CompilationContext.current().mlirCtx();
-        //const loc = ctx.location(@src());
+    pub fn constantTensor(sh: Shape, bytes_: []const u8) Tensor {
+        const elem_type = mlirx.Type.fromDType(mlirCtx(), sh.dtype());
         //const elem_type = mlirx.denseElementAttrType(val.dtype()) orelse std.debug.panic("constantTensor expects a dtype that can be serialized to MLIR, like f32 or i32, got {f}", .{val.shape()});
-        //const constant_op = dialects.stablehlo.constant(ctx, val.shape().dims(), elem_type, val.bytes(), loc);
-        //return _result(val.shape(), constant_op.result(0));
+        const constant_op = dialects.stablehlo.constant(mlirCtx(), sh.dims(), elem_type, bytes_, .unknown(mlirCtx())).appendTo(currentBlock());
+        return _result(sh, constant_op.result(0));
     }
 
     /// Returns a Tensor containing the result of the outer product between the input Tensors.
@@ -2131,7 +2143,7 @@ pub const Tensor = struct {
     pub fn reverse(self: Tensor, axes_: anytype) Tensor {
         const actual_axes = self._shape.axes(axes_);
 
-        const reverse_op = dialects.stablehlo.reverse(mlirCtx(), self.value(), toI64(actual_axes.constSlice()), .unknown(mlirCtx())).appendTo(currentBlock());
+        const reverse_op = dialects.stablehlo.reverse(mlirCtx(), self.value(), toI64(actual_axes.constSlice()).constSlice(), .unknown(mlirCtx())).appendTo(currentBlock());
         return _result(self._shape, reverse_op.result(0));
     }
 
@@ -2702,7 +2714,7 @@ pub const Tensor = struct {
                 pub fn cmp(args: ops.ReduceArgs) struct { Tensor } {
                     return .{args.left.maximum(args.right)};
                 }
-            },
+            }.cmp,
             .{},
         )[0];
     }
@@ -2718,7 +2730,7 @@ pub const Tensor = struct {
                 pub fn cmp(args: ops.ReduceArgs) struct { Tensor } {
                     return .{args.left.minimum(args.right)};
                 }
-            },
+            }.cmp,
             .{},
         )[0];
     }
@@ -4089,10 +4101,10 @@ fn _parseGatherCoord(self: Tensor, axes_: anytype) struct { bool, stdx.BoundedAr
     return .{ axes_is_scalar, coord_axes };
 }
 
-fn toI64(values: anytype) []i64 {
-    var res: [constants.MAX_RANK]i64 = undefined;
-    for (values, 0..) |val, i| res[i] = @intCast(val);
-    return res[0..values.len];
+fn toI64(values: anytype) stdx.BoundedArray(i64, constants.MAX_RANK) {
+    var res: stdx.BoundedArray(i64, constants.MAX_RANK) = .{};
+    for (values) |val| res.appendAssumeCapacity(@intCast(val));
+    return res;
 }
 
 fn transposeIsJustAReshape(x: Shape, permutation: []const i64) bool {
