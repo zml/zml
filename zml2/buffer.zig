@@ -63,17 +63,17 @@ pub const Buffer = struct {
         // We shard only on the first axis so that the chunks are still contiguous.
         // TODO: support more advanced sharding specs
         stdx.debug.assert(platform.sharding().num_replicas == 1, "ZML doesn't support num_replicas > 1 for now, got: {}", .{platform.sharding()});
-        const sharding_ax: ?u3 = std.simd.firstTrue(shape_._sharding_info);
+        //const sharding_ax: ?u3 = std.simd.firstTrue(shape_._sharding_info);
         const n_partitions = platform.sharding().num_partitions;
-        const chunk_size = if (sharding_ax) |ax| cs: {
-            // This kind of sharding error should be detected earlier on.
-            stdx.debug.assert(@rem(shape_.dim(ax), n_partitions) == 0, "Buffer.from({f}) expects the sharding axis {} to have a dimension divisble by the number of devices ({}).", .{ shape_, ax, n_partitions });
-            break :cs @divExact(shape_.dim(ax), n_partitions);
-        } else 0;
-        _ = chunk_size; // autofix
+        //const chunk_size = if (sharding_ax) |ax| cs: {
+        //    // This kind of sharding error should be detected earlier on.
+        //    stdx.debug.assert(@rem(shape_.dim(ax), n_partitions) == 0, "Buffer.from({f}) expects the sharding axis {} to have a dimension divisble by the number of devices ({}).", .{ shape_, ax, n_partitions });
+        //    break :cs @divExact(shape_.dim(ax), n_partitions);
+        //} else 0;
+        //_ = chunk_size; // autofix
 
         const buffer_type = pjrt.bufferTypeFromDtype(shape_.dtype());
-        const byte_strides = shape_.computeStrides();
+        const byte_strides = shape_.computeByteStrides();
 
         const devices = platform.getDevices();
         for (0..n_partitions) |i| {

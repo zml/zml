@@ -88,6 +88,7 @@ pub const Tensor = struct {
             sh._dims.appendAssumeCapacity(ranked_tensor.dimension(i));
         }
         sh._tags.resize(n) catch unreachable;
+        sh._partitioning.resize(n) catch unreachable;
 
         return .{ ._shape = sh, ._value = val, .id = Tensor.current_id.fetchAdd(1, .seq_cst) };
     }
