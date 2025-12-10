@@ -1,0 +1,10 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "vfs",
+    srcs = [
+        "http.zig",
+    ],
+    main = "index.zig",
+    visibility = ["//visibility:public"],
+)

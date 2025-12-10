@@ -25,6 +25,7 @@ zig_library(
         "dtype.zig",
         "exe.zig",
         "floats.zig",
+        "io.zig",
         "meta.zig",
         "mlirx.zig",
         "module.zig",
@@ -54,6 +55,7 @@ zig_library(
         "//runtimes",
         "//stdx",
         "//upb",
+        "//zml2/io",
         "@rules_zig//zig/runfiles",
     ],
 )
@@ -63,6 +65,16 @@ zig_binary(
     args = [],
     data = [],
     main = "main.zig",
+    deps = [
+        "//zml2:zml",
+    ],
+)
+
+zig_binary(
+    name = "main_io",
+    args = [],
+    data = [],
+    main = "main_io.zig",
     deps = [
         "//zml2:zml",
     ],
