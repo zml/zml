@@ -15,6 +15,17 @@ zig_binary(
     ],
 )
 
+zig_binary(
+    name = "mlp_capacity",
+    main = "mlp_capacity.zig",
+    deps = [
+        "@com_github_hejsil_clap//:clap",
+        "@zml//async",
+        "@zml//stdx",
+        "@zml//zml",
+    ],
+)
+
 zig_test(
     name = "test",
     main = "qwen3_vl.zig",
