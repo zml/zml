@@ -19,6 +19,7 @@ pub const VFS = struct {
     };
 
     pub const HTTP = @import("vfs").HTTP;
+    pub const File = @import("vfs").File;
 
     const FsFile = struct {
         backend: std.Io,
