@@ -5,10 +5,6 @@ const stdx = @import("stdx");
 const FnParam = stdx.meta.FnParam;
 const asSlice = stdx.meta.asSlice;
 
-test {
-    std.testing.refAllDecls(@This());
-}
-
 /// Visit a given type `T` and replace all fields containing `From` by fields containing `To`.
 pub fn MapType(From: type, To: type) type {
     return struct {

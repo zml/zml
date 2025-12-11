@@ -1,15 +1,15 @@
 const std = @import("std");
 
-const stdx = @import("stdx");
-const meta = @import("meta.zig");
-const mlir = @import("mlir");
-const mlirx = @import("mlirx.zig");
 const dialects = @import("mlir/dialects");
-const constants = @import("constants.zig");
+const mlir = @import("mlir");
+const stdx = @import("stdx");
 
-const Tensor = @import("tensor.zig").Tensor;
-const Shape = @import("shape.zig").Shape;
 const CompilationContext = @import("module.zig").CompilationContext;
+const constants = @import("constants.zig");
+const meta = @import("meta.zig");
+const mlirx = @import("mlirx.zig");
+const Shape = @import("shape.zig").Shape;
+const Tensor = @import("tensor.zig").Tensor;
 
 pub const ReduceArgs = struct {
     left: Tensor,

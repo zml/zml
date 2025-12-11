@@ -2,17 +2,11 @@ const std = @import("std");
 
 const stdx = @import("stdx");
 
-const pjrt = @import("pjrtx.zig");
-
-const Shape = @import("shape.zig").Shape;
 const DataType = @import("dtype.zig").DataType;
+const pjrt = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
+const Shape = @import("shape.zig").Shape;
 const Target = @import("platform.zig").Target;
-
-test {
-    std.testing.refAllDecls(@This());
-    std.testing.refAllDecls(Buffer);
-}
 
 const log = std.log.scoped(.zml);
 

@@ -1,18 +1,17 @@
 const std = @import("std");
 
-const stdx = @import("stdx");
-const pjrt = @import("pjrtx.zig");
-const mlir = @import("mlir");
 const c = @import("c");
+const dialects = @import("mlir/dialects");
+const mlir = @import("mlir");
+const stdx = @import("stdx");
 const upb = @import("upb");
 
+const Exe = @import("exe.zig").Exe;
 const meta = @import("meta.zig");
-const dialects = @import("mlir/dialects");
 const mlirx = @import("mlirx.zig");
-
+const pjrt = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
-const Exe = @import("exe.zig").Exe;
 const Tensor = @import("tensor.zig").Tensor;
 
 const log = std.log.scoped(.@"zml/module");

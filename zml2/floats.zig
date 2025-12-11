@@ -1,10 +1,6 @@
 ///! Conversion utilities between different Floating point formats.
 const std = @import("std");
 
-//test {
-//    std.testing.refAllDecls(@This());
-//}
-
 fn FloatConversionHelpers(Float: type) type {
     const info = @typeInfo(Float);
     const err_msg = "FloatHelpers expect a packed struct { mantissa: uXX, exponent: uXX, sign: u1}";

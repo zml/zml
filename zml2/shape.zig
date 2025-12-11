@@ -3,8 +3,8 @@ const testing = std.testing;
 const builtin = @import("builtin");
 
 const stdx = @import("stdx");
-const constants = @import("constants.zig");
 
+const constants = @import("constants.zig");
 const DataType = @import("dtype.zig").DataType;
 
 const EnumLiteral = @TypeOf(.enum_literal);

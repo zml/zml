@@ -1,12 +1,12 @@
 const std = @import("std");
 
 const stdx = @import("stdx");
-const pjrt = @import("pjrtx.zig");
-const meta = @import("meta.zig");
-const Shape = @import("shape.zig").Shape;
 
-const Platform = @import("platform.zig").Platform;
 const Buffer = @import("buffer.zig").Buffer;
+const meta = @import("meta.zig");
+const pjrt = @import("pjrtx.zig");
+const Platform = @import("platform.zig").Platform;
+const Shape = @import("shape.zig").Shape;
 
 pub const Exe = struct {
     platform: Platform,

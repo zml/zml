@@ -1,20 +1,20 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const stdx = @import("stdx");
-const meta = @import("meta.zig");
-
-const Shape = @import("shape.zig").Shape;
-const mlir = @import("mlir");
-const mlirx = @import("mlirx.zig");
 const dialects = @import("mlir/dialects");
-const ops = @import("ops.zig");
-const constants = @import("constants.zig");
+const mlir = @import("mlir");
+const stdx = @import("stdx");
 
-const DataType = @import("dtype.zig").DataType;
-const CompilationContext = @import("module.zig").CompilationContext;
-const Bufferized = @import("zml.zig").Bufferized;
 const Buffer = @import("buffer.zig").Buffer;
+const Bufferized = @import("zml.zig").Bufferized;
+const CompilationContext = @import("module.zig").CompilationContext;
+const constants = @import("constants.zig");
+const DataType = @import("dtype.zig").DataType;
+const meta = @import("meta.zig");
+const mlirx = @import("mlirx.zig");
+const ops = @import("ops.zig");
+const Platform = @import("platform.zig").Platform;
+const Shape = @import("shape.zig").Shape;
 
 pub const Tensor = struct {
     var current_id: std.atomic.Value(usize) = .{ .raw = 1 };
