@@ -260,6 +260,136 @@ pub fn sort(inputs: anytype, axis_: i64, comptime func: anytype, context: anytyp
     return result;
 }
 
+pub const TritonOps = struct {
+    debug: bool = false,
+    name: [:0]const u8,
+    ir: [:0]const u8,
+    grid: [3]i32,
+    num_stages: i32,
+    num_warps: i32,
+    output_operand_aliases: []const i64 = &.{},
+};
+
+/// Generate an MLIR call to the given member function with the given tensors.
+pub fn triton(inputs: anytype, outputs: anytype, opts: TritonOps) [outputs.len]Tensor {
+    const mlir_ctx = CompilationContext.current().mlir_ctx;
+    var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
+    defer arena.deinit();
+
+    var values: [inputs.len]*const mlir.Value = undefined;
+    inline for (0..inputs.len) |i| {
+        values[i] = inputs[i].value();
+    }
+
+    var res_types: [outputs.len]*const mlir.Type = undefined;
+    inline for (outputs, 0..) |output, i| {
+        res_types[i] = mlir.rankedTensorType(output.dims(), mlirx.Type.fromDType(mlir_ctx, output.dtype()));
+    }
+
+    const backend_config = mlir.dictionaryAttribute(mlir_ctx, &.{
+        mlir.NamedAttribute.named(mlir_ctx, "name", mlir.stringAttribute(mlir_ctx, opts.name)),
+        mlir.NamedAttribute.named(mlir_ctx, "ir", mlir.stringAttribute(mlir_ctx, opts.ir)),
+        mlir.NamedAttribute.named(mlir_ctx, "grid_x", mlir.integerAttribute(mlir_ctx, .i32, opts.grid[0])),
+        mlir.NamedAttribute.named(mlir_ctx, "grid_y", mlir.integerAttribute(mlir_ctx, .i32, opts.grid[1])),
+        mlir.NamedAttribute.named(mlir_ctx, "grid_z", mlir.integerAttribute(mlir_ctx, .i32, opts.grid[2])),
+        mlir.NamedAttribute.named(mlir_ctx, "num_stages", mlir.integerAttribute(mlir_ctx, .i32, opts.num_stages)),
+        mlir.NamedAttribute.named(mlir_ctx, "num_warps", mlir.integerAttribute(mlir_ctx, .i32, opts.num_warps)),
+    });
+
+    var operands_layouts: [inputs.len][]const usize = undefined;
+    inline for (inputs, 0..) |input, i| {
+        operands_layouts[i] = arena.allocator().dupe(usize, toUsize(constants.minorToMajor(input.rank())).constSlice()) catch unreachable;
+    }
+
+    var results_layouts: [outputs.len][]const usize = undefined;
+    inline for (outputs, 0..) |output, i| {
+        results_layouts[i] = arena.allocator().dupe(usize, toUsize(constants.minorToMajor(output.rank())).constSlice()) catch unreachable;
+    }
+
+    const op = dialects.stablehlo.custom_call(
+        mlir_ctx,
+        &values,
+        &res_types,
+        .{
+            .call_target_name = "__gpu$xla.gpu.triton",
+            .backend_config = .{ .typed_ffi = backend_config },
+            .has_side_effect = false,
+            .operand_layouts = &operands_layouts,
+            .result_layouts = &results_layouts,
+            .output_operand_aliases = opts.output_operand_aliases,
+        },
+        .unknown(mlir_ctx),
+    ).appendTo(CompilationContext.current().currentScope().block);
+
+    var outputs_: [outputs.len]Tensor = undefined;
+    inline for (outputs, 0..) |output, i| {
+        outputs_[i] = Tensor._result(output, op.result(i));
+    }
+
+    return outputs_;
+}
+
+test "triton" {
+    const zml = @import("zml.zig");
+    const platform = zml.testing.env();
+
+    if (platform.target != .cuda and platform.target != .rocm) return error.SkipZigTest;
+
+    const ir =
+        \\ module {
+        \\   tt.func public @add_one(%arg0: !tt.ptr<f32, 1> {tt.divisibility = 32 : i32}, %arg1: !tt.ptr<f32, 1> {tt.divisibility = 32 : i32}, %arg2: !tt.ptr<f32, 1> {tt.divisibility = 32 : i32}, %arg3: !tt.ptr<f32, 1> {tt.divisibility = 32 : i32}) {
+        \\     %0 = tt.get_program_id x : i32
+        \\     %1 = tt.load %arg0 {cache = 1 : i32, evict = 1 : i32, isVolatile = false} : !tt.ptr<f32>
+        \\     %2 = tt.load %arg1 {cache = 1 : i32, evict = 1 : i32, isVolatile = false} : !tt.ptr<f32>
+        \\     %cst = arith.constant 1.000000e+00 : f32
+        \\     %3 = arith.addf %1, %cst : f32
+        \\     tt.store %arg2, %3 {cache = 1 : i32, evict = 1 : i32} : !tt.ptr<f32>
+        \\     tt.store %arg3, %2 {cache = 1 : i32, evict = 1 : i32} : !tt.ptr<f32>
+        \\     tt.return
+        \\   }
+        \\ }
+    ;
+
+    const TritonMod = struct {
+        pub fn forward(a: Tensor, b: Tensor) [2]Tensor {
+            return triton(.{ a, b }, .{ a.shape(), b.shape() }, .{
+                .debug = false,
+                .name = "add_one",
+                .ir = ir,
+                .grid = .{ 1, 1, 1 },
+                .num_stages = 1,
+                .num_warps = 1,
+            });
+        }
+    };
+
+    const a: zml.Tensor = .init(Shape.init(.{}, .f32));
+    const b: zml.Tensor = .init(Shape.init(.{}, .f32));
+
+    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, TritonMod.forward, .{ a, b }, platform);
+    defer exe.deinit();
+
+    var a_buffer: zml.Buffer = try .fromBytes(platform, a.shape(), std.mem.sliceAsBytes(&[1]f32{1}), std.testing.io);
+    defer a_buffer.deinit();
+    var b_buffer: zml.Buffer = try .fromBytes(platform, b.shape(), std.mem.sliceAsBytes(&[1]f32{3}), std.testing.io);
+    defer b_buffer.deinit();
+
+    const results = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, TritonMod.forward, .{ a_buffer, b_buffer });
+    defer results[0].deinit();
+    defer results[1].deinit();
+
+    var cpu_result_0 = try results[0].toSliceAlloc(std.testing.allocator, std.testing.io);
+    defer cpu_result_0.free(std.testing.allocator);
+    var cpu_result_1 = try results[1].toSliceAlloc(std.testing.allocator, std.testing.io);
+    defer cpu_result_1.free(std.testing.allocator);
+
+    const expected_result_a: f32 = 2.0;
+    const expected_result_b: f32 = 3.0;
+
+    try std.testing.expectEqual(expected_result_a, cpu_result_0.items(f32)[0]);
+    try std.testing.expectEqual(expected_result_b, cpu_result_1.items(f32)[0]);
+}
+
 pub const ScatterArgs = struct {
     input: Tensor,
     update: Tensor,
@@ -704,5 +834,11 @@ pub fn _collectAxes(T: type, bounded_array: stdx.BoundedArray(T, constants.MAX_R
             res.appendAssumeCapacity(@intCast(ax));
         }
     }
+    return res;
+}
+
+fn toUsize(values: anytype) stdx.BoundedArray(usize, constants.MAX_RANK) {
+    var res: stdx.BoundedArray(usize, constants.MAX_RANK) = .{};
+    for (values) |val| res.appendAssumeCapacity(@intCast(val));
     return res;
 }

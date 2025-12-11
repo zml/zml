@@ -708,7 +708,7 @@ pub const CustomCallOpts = struct {
         original: []const u8,
         status_returning: []const u8,
         status_returning_unified: []const u8,
-        typed_ffi: *const mlir.DictionaryAttribute,
+        typed_ffi: *const mlir.Attribute,
     };
 
     call_target_name: []const u8,
