@@ -34,18 +34,22 @@ pub fn main() !void {
     try http_client.initDefaultProxies(allocator);
     defer http_client.deinit();
 
+    var vfs_file: zml.io.VFS.File = .init(threaded.io());
+
     var vfs_http: zml.io.VFS.HTTP = try .init(allocator, threaded.io(), &http_client, .{});
     defer vfs_http.deinit();
 
     var vfs: zml.io.VFS = .init(allocator, threaded.io());
     defer vfs.deinit();
 
+    try vfs.register("file", vfs_file.io());
     try vfs.register("http", vfs_http.io());
     try vfs.register("https", vfs_http.io());
 
     const io = vfs.io();
 
-    const repo_uri = "https://storage.googleapis.com/zig-vfs/Llama-3.1-8B-Instruct/";
+    const repo_uri = "file:///Users/hugo/Developer/Llama-3.1-8B-Instruct";
+    // const repo_uri = "https://storage.googleapis.com/zig-vfs/Llama-3.1-8B-Instruct/";
     // const repo_uri = "http://9960x-5090x2:8003/";
 
     {
