@@ -3097,7 +3097,6 @@ pub const Tensor = struct {
     /// When `self.dim(axis_)` is divisible by `n_chunks` it will return exactly `n_chunks`.
     pub fn chunkAllowTrailing(
         self: Tensor,
-        allocator: std.mem.Allocator,
         axis_: i64,
         n_chunks: comptime_int,
     ) ![]Tensor {
@@ -3105,6 +3104,8 @@ pub const Tensor = struct {
         const d = self.dim(a);
         const chunk_size: i64 = @divFloor(d, n_chunks);
         const tail_chunk_size: i64 = @rem(d, chunk_size);
+
+        const allocator = CompilationContext.current().arena.allocator();
 
         var chunks = std.ArrayList(Tensor).initCapacity(allocator, n_chunks + 1) catch @panic("OOM");
         defer chunks.deinit(allocator);
@@ -3145,8 +3146,7 @@ pub const Tensor = struct {
         }) |testcase| {
             const x_shape, const ax, const n_chunks, const res, const trailing = testcase;
             const x = Tensor.constant(.{ .f16 = 0 }).broad(Shape.init(x_shape, .f16));
-            const chunks = try x.chunkAllowTrailing(std.testing.allocator, x.axis(ax), n_chunks);
-            defer std.testing.allocator.free(chunks);
+            const chunks = try x.chunkAllowTrailing(x.axis(ax), n_chunks);
 
             const res_shape = Shape.init(res, .f16);
             for (chunks[0..n_chunks]) |chk| {
