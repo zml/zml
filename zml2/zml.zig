@@ -21,6 +21,7 @@ pub const mlir = @import("mlirx.zig");
 pub const module = @import("module.zig");
 pub const nn = @import("nn.zig");
 pub const pjrt = @import("pjrtx.zig");
+pub const io = @import("io.zig");
 pub const platform = @import("platform.zig");
 pub const Platform = platform.Platform;
 pub const Target = platform.Target;
@@ -40,15 +41,15 @@ var runfiles_once = std.once(struct {
             return;
         }
 
-        var io: std.Io.Threaded = .init_single_threaded;
-        defer io.deinit();
+        var io_: std.Io.Threaded = .init_single_threaded;
+        defer io_.deinit();
 
         var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         const allocator = arena.allocator();
         defer arena.deinit();
 
         var envMap = std.process.EnvMap.init(allocator);
-        var r = (try runfiles.Runfiles.create(.{ .allocator = allocator, .io = io.io() })) orelse return;
+        var r = (try runfiles.Runfiles.create(.{ .allocator = allocator, .io = io_.io() })) orelse return;
         try r.environment(&envMap);
 
         var it = envMap.iterator();

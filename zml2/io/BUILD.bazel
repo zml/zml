@@ -1,0 +1,14 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "io",
+    srcs = [
+        "vfs.zig",
+    ],
+    main = "io.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//stdx",
+        "//zml2/io/vfs",
+    ],
+)
