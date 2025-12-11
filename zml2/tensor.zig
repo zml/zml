@@ -2191,7 +2191,6 @@ pub const Tensor = struct {
     test gather {
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
-        _ = platform; // autofix
 
         const Local = struct {
             pub fn _idx(idx_shape: anytype) Tensor {
@@ -2203,7 +2202,7 @@ pub const Tensor = struct {
 
         {
             // Only test shapes
-            var comp = zml.module.CompilationContext.init(std.testing.allocator);
+            var comp = zml.module.CompilationContext.init(std.testing.allocator, platform);
             defer comp.deinit();
             comp.activate();
             defer comp.deactivate();
@@ -2355,7 +2354,7 @@ pub const Tensor = struct {
 
         {
             // Only test shapes
-            var comp = zml.module.CompilationContext.init(std.testing.allocator);
+            var comp = zml.module.CompilationContext.init(std.testing.allocator, platform);
             defer comp.deinit();
             comp.activate();
             defer comp.deactivate();
@@ -2573,7 +2572,7 @@ pub const Tensor = struct {
 
         {
             // Only test shapes
-            var comp = zml.module.CompilationContext.init(std.testing.allocator);
+            var comp = zml.module.CompilationContext.init(std.testing.allocator, platform);
             defer comp.deinit();
             comp.activate();
             defer comp.deactivate();
@@ -3065,9 +3064,10 @@ pub const Tensor = struct {
 
     test chunkExact {
         const zml = @import("zml.zig");
+        const platform = zml.testing.env();
 
         // Only test shapes
-        var comp = zml.module.CompilationContext.init(std.testing.allocator);
+        var comp = zml.module.CompilationContext.init(std.testing.allocator, platform);
         defer comp.deinit();
         comp.activate();
         defer comp.deactivate();
@@ -3124,9 +3124,10 @@ pub const Tensor = struct {
 
     test chunkAllowTrailing {
         const zml = @import("zml.zig");
+        const platform = zml.testing.env();
 
         // Only test shapes
-        var comp = zml.module.CompilationContext.init(std.testing.allocator);
+        var comp = zml.module.CompilationContext.init(std.testing.allocator, platform);
         defer comp.deinit();
         comp.activate();
         defer comp.deactivate();

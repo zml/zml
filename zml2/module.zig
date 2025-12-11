@@ -41,18 +41,20 @@ pub const CompilationContext = struct {
     };
 
     allocator: std.mem.Allocator,
+    arena: std.heap.ArenaAllocator,
 
     mlir_registry: *mlir.DialectRegistry,
     mlir_ctx: *mlir.Context,
     mlir_pass_manager: *mlir.PassManager,
     //mlir_op_pass_manager: *mlir.OpPassManager,
     module: *mlir.Module,
+    platform: Platform,
 
     scopes: stdx.BoundedArray(Scope, 16) = .{},
 
     threadlocal var _current: ?*CompilationContext = null;
 
-    pub fn init(allocator: std.mem.Allocator) CompilationContext {
+    pub fn init(allocator: std.mem.Allocator, platform: Platform) CompilationContext {
         mlir.registerPasses("Transforms");
         const mlir_registry = mlir.DialectRegistry.init() catch unreachable;
         inline for (.{ "func", "stablehlo" }) |d| {
@@ -80,10 +82,12 @@ pub const CompilationContext = struct {
 
         return .{
             .allocator = allocator,
+            .arena = std.heap.ArenaAllocator.init(allocator),
             .mlir_registry = mlir_registry,
             .mlir_ctx = mlir_ctx,
             .mlir_pass_manager = pass_manager,
             .module = module,
+            .platform = platform,
         };
     }
 
@@ -92,6 +96,7 @@ pub const CompilationContext = struct {
         self.module.deinit();
         self.mlir_ctx.deinit();
         self.mlir_registry.deinit();
+        self.arena.deinit();
     }
 
     pub fn activate(self: *CompilationContext) void {
@@ -165,7 +170,7 @@ pub fn compileModel(allocator: std.mem.Allocator, io: std.Io, comptime func: any
 }
 
 pub fn compile(allocator: std.mem.Allocator, io: std.Io, comptime func: anytype, args: stdx.meta.FnArgs(func), platform: Platform) !Exe {
-    var compilation_context: CompilationContext = .init(allocator);
+    var compilation_context: CompilationContext = .init(allocator, platform);
     defer compilation_context.deinit();
 
     const result = emitMlir(&compilation_context, func, args) catch unreachable;

@@ -629,8 +629,9 @@ fn scatterConfig(
 
 test scatterConfig {
     const zml = @import("zml.zig");
+    const platform = zml.testing.env();
 
-    var comp = zml.module.CompilationContext.init(std.testing.allocator);
+    var comp = zml.module.CompilationContext.init(std.testing.allocator, platform);
     defer comp.deinit();
     comp.activate();
     defer comp.deactivate();

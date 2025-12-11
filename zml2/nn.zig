@@ -772,8 +772,9 @@ pub fn resizeBilinear(image: Tensor, resized_axes: anytype, opt: ResizeOpts) Ten
 }
 
 test resizeBilinear {
+    const platform = zml.testing.env();
     // Only test shapes
-    var comp = zml.module.CompilationContext.init(std.testing.allocator);
+    var comp = zml.module.CompilationContext.init(std.testing.allocator, platform);
     defer comp.deinit();
     comp.activate();
     defer comp.deactivate();
@@ -837,8 +838,9 @@ pub fn resizeBicubic(image: Tensor, resized_axes: anytype, opt: ResizeOpts) Tens
 }
 
 test resizeBicubic {
+    const platform = zml.testing.env();
     // Only test shapes
-    var comp = zml.module.CompilationContext.init(std.testing.allocator);
+    var comp = zml.module.CompilationContext.init(std.testing.allocator, platform);
     defer comp.deinit();
     comp.activate();
     defer comp.deactivate();
