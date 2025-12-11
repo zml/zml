@@ -22,6 +22,7 @@ pub const module = @import("module.zig");
 pub const exe = @import("exe.zig");
 pub const meta = @import("meta.zig");
 pub const mlir = @import("mlirx.zig");
+pub const nn = @import("nn.zig");
 pub const shape = @import("shape.zig");
 pub const Shape = shape.Shape;
 pub const tensor = @import("tensor.zig");

@@ -336,7 +336,7 @@ pub const DataType = enum(u8) {
             return std.meta.activeTag(self);
         }
 
-        pub fn constSlice(data: *const Value) []const u8 {
+        pub fn asBytes(data: *const Value) []const u8 {
             return switch (data.*) {
                 inline else => |*value| std.mem.asBytes(value),
             };

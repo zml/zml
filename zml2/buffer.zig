@@ -5,6 +5,7 @@ const stdx = @import("stdx");
 const pjrt = @import("pjrtx.zig");
 
 const Shape = @import("shape.zig").Shape;
+const DataType = @import("dtype.zig").DataType;
 const Platform = @import("platform.zig").Platform;
 const Target = @import("platform.zig").Target;
 
@@ -114,6 +115,12 @@ pub const Buffer = struct {
     /// return a Buffer with the given dimensions.
     pub fn fromBytes(platform: Platform, sh: Shape, data: []const u8, io: std.Io) !Buffer {
         return from(platform, sh, data, io, .{});
+    }
+
+    /// Creates a Buffer with a single element.
+    pub fn scalar(platform: Platform, val: anytype, dtype_: DataType, io: std.Io) !Buffer {
+        const x = dtype_.constant(val);
+        return fromBytes(platform, Shape.init(.{}, dtype_), x.asBytes(), io);
     }
 
     pub fn await(self: Buffer, io: std.Io) !Buffer {

@@ -13,6 +13,8 @@ const constants = @import("constants.zig");
 
 const DataType = @import("dtype.zig").DataType;
 const CompilationContext = @import("module.zig").CompilationContext;
+const Bufferized = @import("zml.zig").Bufferized;
+const Buffer = @import("buffer.zig").Buffer;
 
 pub const Tensor = struct {
     var current_id: std.atomic.Value(usize) = .{ .raw = 1 };
@@ -1947,7 +1949,7 @@ pub const Tensor = struct {
             mlirCtx(),
             &.{},
             mlirx.Type.fromDType(mlirCtx(), val.dtype()),
-            val.constSlice(),
+            val.asBytes(),
             .unknown(mlirCtx()),
         ).appendTo(currentBlock());
         return _result(.init(&.{}, val.dtype()), op.result(0));

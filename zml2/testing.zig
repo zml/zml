@@ -230,3 +230,7 @@ fn center(slice: anytype, i: usize) @TypeOf(slice) {
     const end = @min(start + 2 * c, slice.len);
     return slice[start..end];
 }
+
+pub inline fn expectEqual(expected: anytype, actual: @TypeOf(expected)) !void {
+    return std.testing.expectEqual(expected, actual);
+}
