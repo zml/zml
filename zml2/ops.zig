@@ -840,6 +840,194 @@ pub fn _collectAxes(T: type, bounded_array: stdx.BoundedArray(T, constants.MAX_R
     return res;
 }
 
+fn TensorOrTensorArray(comptime T: type) type {
+    const type_info = @typeInfo(T);
+    return switch (type_info) {
+        .@"struct" => |struct_info| b: {
+            if (T == Tensor) break :b Tensor;
+            if (!struct_info.is_tuple) @compileError("Expected tuple");
+            break :b if (struct_info.fields.len == 1)
+                Tensor
+            else
+                [struct_info.fields.len]Tensor;
+        },
+        .array => |array_info| b: {
+            break :b if (array_info.len == 1)
+                Tensor
+            else
+                [array_info.len]Tensor;
+        },
+        .pointer => |pointer_info| b: {
+            if (pointer_info.size != .slice) @compileError("Expected slice");
+            break :b []Tensor;
+        },
+        else => @compileError("Unsupported type: " ++ @typeName(T)),
+    };
+}
+
+pub const CustomCallOptions = struct {
+    has_side_effect: bool,
+    output_operand_aliases: ?[]const i64 = null,
+};
+
+pub fn customCall(target_name: [:0]const u8, inputs: anytype, outputs: anytype, metadata: anytype, opts: CustomCallOptions) TensorOrTensorArray(@TypeOf(outputs)) {
+    // Transform generic inputs to flat slice.
+    const inputs_: []const Tensor = switch (@typeInfo(@TypeOf(inputs))) {
+        .@"struct" => |struct_info| b: {
+            if (@TypeOf(inputs) == Tensor) {
+                break :b &[1]Tensor{inputs};
+            }
+            if (!struct_info.is_tuple) @compileError("Expected tuple");
+            var inputs_: [struct_info.fields.len]Tensor = undefined;
+            meta.collectBuf((struct {
+                pub fn func(t: Tensor) Tensor {
+                    return t;
+                }
+            }).func, {}, &inputs, &inputs_);
+            break :b &inputs_;
+        },
+        .array => &inputs,
+        .pointer => |pointer_info| b: {
+            if (pointer_info.size != .slice) @compileError("Expected slice");
+            break :b inputs;
+        },
+        else => @compileError("Unsupported type: " ++ @typeName(@TypeOf(inputs))),
+    };
+
+    // Transform generic outputs to flat slice.
+    const output_shapes: []const Shape = switch (@typeInfo(@TypeOf(outputs))) {
+        .@"struct" => |struct_info| b: {
+            if (@TypeOf(outputs) == Shape) {
+                break :b &[1]Shape{outputs};
+            }
+            if (!struct_info.is_tuple) @compileError("Expected tuple");
+            var output_shapes: [struct_info.fields.len]Shape = undefined;
+            meta.collectBuf((struct {
+                pub fn func(t: Shape) Shape {
+                    return t;
+                }
+            }).func, {}, &outputs, &output_shapes);
+            break :b &output_shapes;
+        },
+        .array => &outputs,
+        .pointer => |pointer_info| b: {
+            if (pointer_info.size != .slice) @compileError("Expected slice");
+            break :b outputs;
+        },
+        else => @compileError("Unsupported type: " ++ @typeName(@TypeOf(outputs))),
+    };
+
+    const outputs_flat = customCallInternal(target_name, inputs_, output_shapes, metadata, opts);
+
+    // Transform flat slice to generic outputs.
+    return switch (@typeInfo(@TypeOf(outputs))) {
+        .@"struct" => |struct_info| b: {
+            if (@TypeOf(outputs) == Shape) break :b outputs_flat[0];
+            if (!struct_info.is_tuple) @compileError("Expected tuple");
+            if (struct_info.fields.len == 1) break :b outputs_flat[0];
+            var outputs_: [struct_info.fields.len]Tensor = undefined;
+            @memcpy(&outputs_, outputs_flat);
+            break :b outputs_;
+        },
+        .array => |array_info| b: {
+            if (array_info.len == 1) break :b outputs_flat[0];
+            var outputs_: [array_info.fields.len]Tensor = undefined;
+            @memcpy(&outputs_, outputs_flat);
+            break :b outputs_;
+        },
+        .pointer => |pointer_info| b: {
+            if (pointer_info.size != .slice) @compileError("Expected slice");
+            break :b outputs_flat;
+        },
+        else => @compileError("Unsupported type: " ++ @typeName(@TypeOf(outputs))),
+    };
+}
+
+fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs: []const Shape, metadata: anytype, opts: CustomCallOptions) []Tensor {
+    const ctx = CompilationContext.current();
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+
+    const values = arena.allocator().alloc(*const mlir.Value, inputs.len) catch unreachable;
+    for (0..inputs.len) |i| {
+        values[i] = inputs[i].value();
+    }
+
+    const res_types = arena.allocator().alloc(*const mlir.Type, outputs.len) catch unreachable;
+    for (outputs, 0..) |output, i| {
+        res_types[i] = mlir.rankedTensorType(output.dims(), mlirx.Type.fromDType(ctx.mlir_ctx, output.dtype()));
+    }
+
+    const metadata_type_info = @typeInfo(@TypeOf(metadata));
+    var metadata_attributes: [metadata_type_info.@"struct".fields.len]mlir.NamedAttribute = undefined;
+    inline for (metadata_type_info.@"struct".fields, 0..) |field, i| {
+        const attribute: *const mlir.Attribute = switch (@typeInfo(field.type)) {
+            .int, .comptime_int => mlir.integerAttribute(ctx.mlir_ctx, .u64, @as(u64, @bitCast(@field(metadata, field.name)))),
+            else => @compileError("Unsupported metadata type: " ++ @typeName(field.type)),
+        };
+        metadata_attributes[i] = mlir.NamedAttribute.named(ctx.mlir_ctx, field.name, attribute);
+    }
+
+    const backend_config = mlir.dictionaryAttribute(ctx.mlir_ctx, &(metadata_attributes ++ [_]mlir.NamedAttribute{
+        .named(ctx.mlir_ctx, "pjrt_api", mlir.integerAttribute(ctx.mlir_ctx, .u64, @as(u64, @bitCast(@intFromPtr(ctx.platform.pjrt_api))))),
+        .named(ctx.mlir_ctx, "pjrt_client", mlir.integerAttribute(ctx.mlir_ctx, .u64, @as(u64, @bitCast(@intFromPtr(ctx.platform.pjrt_client))))),
+    }));
+
+    const operands_layouts = arena.allocator().alloc([]const usize, inputs.len) catch unreachable;
+    for (inputs, 0..) |input, i| {
+        operands_layouts[i] = arena.allocator().dupe(usize, toUsize(constants.minorToMajor(input.rank())).constSlice()) catch unreachable;
+    }
+
+    const results_layouts = arena.allocator().alloc([]const usize, outputs.len) catch unreachable;
+    for (outputs, 0..) |output, i| {
+        results_layouts[i] = arena.allocator().dupe(usize, toUsize(constants.minorToMajor(output.rank())).constSlice()) catch unreachable;
+    }
+
+    const op = dialects.stablehlo.custom_call(
+        ctx.mlir_ctx,
+        values,
+        res_types,
+        .{
+            .call_target_name = target_name,
+            .backend_config = .{ .typed_ffi = backend_config },
+            .has_side_effect = opts.has_side_effect,
+            .operand_layouts = operands_layouts,
+            .result_layouts = results_layouts,
+            .output_operand_aliases = opts.output_operand_aliases orelse &.{},
+        },
+        .unknown(ctx.mlir_ctx),
+    );
+
+    const outputs_ = ctx.arena.allocator().alloc(Tensor, outputs.len) catch unreachable;
+    for (outputs, 0..) |output, i| {
+        outputs_[i] = Tensor._result(output, op.result(i));
+    }
+
+    return outputs_;
+}
+
+test customCall {
+    const zml = @import("zml.zig");
+    const platform = zml.testing.env();
+
+    var comp = zml.module.CompilationContext.init(std.testing.allocator, platform);
+    defer comp.deinit();
+    comp.activate();
+    defer comp.deactivate();
+
+    const block = mlir.Block.init(&.{}, &.{});
+    comp.pushBlock(block);
+    defer comp.popBlock();
+
+    const input = Tensor.constant(zml.DataType.bf16.constant(0)).broad(Shape.init(.{128}, .bf16));
+    const output = customCall("my_custom_call", .{input}, .{zml.Shape.init(.{128}, .bf16)}, .{}, .{
+        .has_side_effect = false,
+        .output_operand_aliases = &.{0},
+    });
+
+    try zml.testing.expectEqualShapes(input.shape(), output.shape());
+}
+
 fn toUsize(values: anytype) stdx.BoundedArray(usize, constants.MAX_RANK) {
     var res: stdx.BoundedArray(usize, constants.MAX_RANK) = .{};
     for (values) |val| res.appendAssumeCapacity(@intCast(val));
