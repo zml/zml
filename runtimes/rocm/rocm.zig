@@ -1,7 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const async = @import("async");
 const bazel_builtin = @import("bazel_builtin");
 const c = @import("c");
 const pjrt = @import("pjrt");
@@ -14,9 +13,10 @@ pub fn isEnabled() bool {
     return @hasDecl(c, "ZML_RUNTIME_ROCM");
 }
 
-fn hasRocmDevices() bool {
+fn hasRocmDevices(io: std.Io) bool {
+    _ = io; // autofix
     inline for (&.{ "/dev/kfd", "/dev/dri" }) |path| {
-        async.File.access(path, .{ .mode = .read_only }) catch return false;
+        std.fs.accessAbsolute(path, .{ .read = true }) catch return false;
     }
     return true;
 }
@@ -26,21 +26,21 @@ fn setupRocmEnv(rocm_data_dir: []const u8) !void {
     _ = c.setenv("ROCM_PATH", try stdx.fs.path.bufJoinZ(&buf, &.{rocm_data_dir}), 1); // must be zero terminated
 }
 
-pub fn load() !*const pjrt.Api {
+pub fn load(io: std.Io) !*const pjrt.Api {
     if (comptime !isEnabled()) {
         return error.Unavailable;
     }
     if (comptime builtin.os.tag != .linux) {
         return error.Unavailable;
     }
-    if (!hasRocmDevices()) {
+    if (!hasRocmDevices(io)) {
         return error.Unavailable;
     }
 
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
 
-    var r_ = try runfiles.Runfiles.create(.{ .allocator = arena.allocator() }) orelse {
+    var r_ = try runfiles.Runfiles.create(.{ .allocator = arena.allocator(), .io = io }) orelse {
         stdx.debug.panic("Unable to find runfiles", .{});
     };
 

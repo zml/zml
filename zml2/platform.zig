@@ -30,8 +30,8 @@ pub const Platform = struct {
 
     pub const MAX_NUM_DEVICES: u8 = if (runtimes.isEnabled(.tpu)) 32 else 8;
 
-    pub fn init(target: Target, options: CreateOptions) !Platform {
-        const api = try runtimes.load(target);
+    pub fn init(target: Target, io: std.Io, options: CreateOptions) !Platform {
+        const api = try runtimes.load(target, io);
 
         var named_values_buf: [16]pjrt.NamedValue = undefined;
         const pjrt_client = try pjrt.Client.init(api, options.toNamedValues(target, &named_values_buf));

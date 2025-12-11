@@ -1,3 +1,5 @@
+const std = @import("std");
+
 const pjrt = @import("pjrt");
 const cpu = @import("runtimes/cpu");
 const cuda = @import("runtimes/cuda");
@@ -13,13 +15,13 @@ pub const Platform = enum {
     neuron,
 };
 
-pub fn load(tag: Platform) !*const pjrt.Api {
+pub fn load(tag: Platform, io: std.Io) !*const pjrt.Api {
     return switch (tag) {
-        .cpu => try cpu.load(),
-        .cuda => try cuda.load(),
-        .rocm => try rocm.load(),
-        .tpu => try tpu.load(),
-        .neuron => try neuron.load(),
+        .cpu => try cpu.load(io),
+        .cuda => try cuda.load(io),
+        .rocm => try rocm.load(io),
+        .tpu => try tpu.load(io),
+        .neuron => try neuron.load(io),
     };
 }
 

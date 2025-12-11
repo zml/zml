@@ -13,18 +13,15 @@ pub fn isEnabled() bool {
     return @hasDecl(c, "ZML_RUNTIME_CPU");
 }
 
-pub fn load() !*const pjrt.Api {
+pub fn load(io: std.Io) !*const pjrt.Api {
     if (comptime !isEnabled()) {
         return error.Unavailable;
     }
 
-    var io: std.Io.Threaded = .init_single_threaded;
-    defer io.deinit();
-
     var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
     defer arena.deinit();
 
-    var r_ = try runfiles.Runfiles.create(.{ .allocator = arena.allocator(), .io = io.io() }) orelse {
+    var r_ = try runfiles.Runfiles.create(.{ .allocator = arena.allocator(), .io = io }) orelse {
         stdx.debug.panic("Unable to find runfiles", .{});
     };
 
@@ -46,6 +43,11 @@ pub fn load() !*const pjrt.Api {
 
         var lib_path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const path = try stdx.fs.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "libpjrt_cpu" ++ ext });
-        break :blk pjrt.Api.loadFrom(path);
+        var future = io.async(struct {
+            fn call(path_: [:0]const u8) !*const pjrt.Api {
+                return pjrt.Api.loadFrom(path_);
+            }
+        }.call, .{path});
+        break :blk future.await(io);
     };
 }

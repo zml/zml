@@ -43,7 +43,6 @@ zig_library(
     ] + select({
         "//runtimes:rocm.enabled": [
             ":libpjrt_rocm",
-            "//async",
             "//stdx",
             "@rules_zig//zig/runfiles",
         ],

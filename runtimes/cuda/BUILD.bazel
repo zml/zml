@@ -34,7 +34,6 @@ zig_library(
     ] + select({
         "//runtimes:cuda.enabled": [
             ":libpjrt_cuda",
-            "//async",
             "//stdx",
             "@rules_zig//zig/runfiles",
         ],

@@ -1,7 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const async = @import("async");
 const bazel_builtin = @import("bazel_builtin");
 const c = @import("c");
 const pjrt = @import("pjrt");
@@ -18,11 +17,12 @@ pub fn isEnabled() bool {
 /// metadata server, hanging the process. So only do it on GCP.
 /// Do it using the official method at:
 /// https://cloud.google.com/compute/docs/instances/detect-compute-engine?hl=en#use_operating_system_tools_to_detect_if_a_vm_is_running_in
-fn isOnGCP() !bool {
+fn isOnGCP(io: std.Io) !bool {
+    _ = io; // autofix
     // TODO: abstract that in the client and fail init
     const GoogleComputeEngine = "Google Compute Engine";
 
-    var f = try async.File.open("/sys/devices/virtual/dmi/id/product_name", .{ .mode = .read_only });
+    var f = try std.fs.openFileAbsolute("/sys/devices/virtual/dmi/id/product_name", .{ .read = true });
     defer f.close() catch {};
 
     var content: [GoogleComputeEngine.len]u8 = undefined;
@@ -31,14 +31,14 @@ fn isOnGCP() !bool {
     return std.mem.eql(u8, content[0..n_read], GoogleComputeEngine);
 }
 
-pub fn load() !*const pjrt.Api {
+pub fn load(io: std.Io) !*const pjrt.Api {
     if (comptime !isEnabled()) {
         return error.Unavailable;
     }
     if (comptime builtin.os.tag != .linux) {
         return error.Unavailable;
     }
-    if (!(isOnGCP() catch false)) {
+    if (!(isOnGCP(io) catch false)) {
         return error.Unavailable;
     }
 
@@ -61,6 +61,11 @@ pub fn load() !*const pjrt.Api {
     return blk: {
         var lib_path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const path = try stdx.fs.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_tpu.so" });
-        break :blk async.callBlocking(pjrt.Api.loadFrom, .{path});
+        var future = io.async(struct {
+            fn call(path_: [:0]const u8) !*const pjrt.Api {
+                return pjrt.Api.loadFrom(path_);
+            }
+        }.call, .{path});
+        break :blk future.await(io);
     };
 }

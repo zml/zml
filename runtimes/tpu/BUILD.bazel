@@ -22,7 +22,6 @@ zig_library(
     ] + select({
         "//runtimes:tpu.enabled": [
             ":libpjrt_tpu",
-            "//async",
             "//stdx",
             "@rules_zig//zig/runfiles",
         ],

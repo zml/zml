@@ -1,7 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const async = @import("async");
 const bazel_builtin = @import("bazel_builtin");
 const c = @import("c");
 const pjrt = @import("pjrt");
@@ -14,15 +13,17 @@ pub fn isEnabled() bool {
     return @hasDecl(c, "ZML_RUNTIME_NEURON");
 }
 
-fn hasNeuronDevice() bool {
-    async.File.access("/dev/neuron0", .{ .mode = .read_only }) catch return false;
+fn hasNeuronDevice(io: std.Io) bool {
+    _ = io; // autofix
+    std.fs.accessAbsolute("/dev/neuron0", .{ .read = true }) catch return false;
     return true;
 }
 
-fn isRunningOnEC2() !bool {
+fn isRunningOnEC2(io: std.Io) !bool {
+    _ = io; // autofix
     const AmazonEC2 = "Amazon EC2";
 
-    var f = try async.File.open("/sys/devices/virtual/dmi/id/sys_vendor", .{ .mode = .read_only });
+    var f = try std.fs.openFileAbsolute("/sys/devices/virtual/dmi/id/sys_vendor", .{ .read = true });
     defer f.close() catch {};
 
     var content: [AmazonEC2.len]u8 = undefined;
@@ -31,24 +32,24 @@ fn isRunningOnEC2() !bool {
     return std.mem.eql(u8, content[0..n_read], AmazonEC2);
 }
 
-pub fn load() !*const pjrt.Api {
+pub fn load(io: std.Io) !*const pjrt.Api {
     if (comptime !isEnabled()) {
         return error.Unavailable;
     }
     if (comptime builtin.os.tag != .linux) {
         return error.Unavailable;
     }
-    if (!(isRunningOnEC2() catch false)) {
+    if (!(isRunningOnEC2(io) catch false)) {
         return error.Unavailable;
     }
-    if (!hasNeuronDevice()) {
+    if (!hasNeuronDevice(io)) {
         return error.Unavailable;
     }
 
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
 
-    var r_ = try runfiles.Runfiles.create(.{ .allocator = arena.allocator() }) orelse {
+    var r_ = try runfiles.Runfiles.create(.{ .allocator = arena.allocator(), .io = io }) orelse {
         stdx.debug.panic("Unable to find runfiles", .{});
     };
 
@@ -64,6 +65,11 @@ pub fn load() !*const pjrt.Api {
     return blk: {
         var lib_path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const path = try stdx.fs.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_neuron.so" });
-        break :blk async.callBlocking(pjrt.Api.loadFrom, .{path});
+        var future = io.async(struct {
+            fn call(path_: [:0]const u8) !*const pjrt.Api {
+                return pjrt.Api.loadFrom(path_);
+            }
+        }.call, .{path});
+        break :blk future.await(io);
     };
 }
