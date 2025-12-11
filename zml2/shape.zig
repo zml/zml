@@ -7,8 +7,6 @@ const stdx = @import("stdx");
 const constants = @import("constants.zig");
 const DataType = @import("dtype.zig").DataType;
 
-const EnumLiteral = @TypeOf(.enum_literal);
-
 const log = std.log.scoped(.shape);
 
 /// Represent the shape of a tensor.
@@ -28,7 +26,7 @@ pub const Shape = struct {
                 return value;
             }
 
-            if (comptime T == EnumLiteral) {
+            if (comptime T == @EnumLiteral()) {
                 const name = @tagName(value);
                 inline for (std.meta.fields(PartitionSpec)) |field| {
                     if (field.type == void and std.mem.eql(u8, field.name, name)) {
@@ -186,7 +184,7 @@ pub const Shape = struct {
                 const fv = @field(v, field.name);
                 if (comptime stdx.meta.isInteger(field.type)) {
                     dims_.appendAssumeCapacity(@intCast(fv));
-                } else if (@TypeOf(fv) == EnumLiteral and comptime isAutoDim(fv)) {
+                } else if (@TypeOf(fv) == @EnumLiteral() and comptime isAutoDim(fv)) {
                     dims_.appendAssumeCapacity(-1);
                 } else {
                     stdx.debug.compileError("Field {s} should be an integer or an auto dimension, got {}", .{ field.name, field.type });
@@ -243,7 +241,7 @@ pub const Shape = struct {
 
     pub fn parseTags(v: anytype) TagsArray {
         const T = @TypeOf(v);
-        stdx.debug.assertComptime(stdx.meta.isTupleOf(T, EnumLiteral), "Wrong type, got {}. Expected .{{ .a, .b }}", .{T});
+        stdx.debug.assertComptime(stdx.meta.isTupleOf(T, @EnumLiteral()), "Wrong type, got {}. Expected .{{ .a, .b }}", .{T});
         var tags_ = TagsArray.init(0) catch unreachable;
         inline for (v) |field| {
             tags_.appendAssumeCapacity(toTag(field));
@@ -304,7 +302,7 @@ pub const Shape = struct {
 
     fn isTagConvertible(comptime T: type) bool {
         return switch (T) {
-            EnumLiteral => true,
+            @EnumLiteral() => true,
             std.builtin.Type.StructField => true,
             Tag => true,
             else => false,
@@ -314,10 +312,10 @@ pub const Shape = struct {
     pub fn toTag(v: anytype) Tag {
         const T = @TypeOf(v);
         return switch (T) {
-            EnumLiteral => @tagName(v).ptr,
+            @EnumLiteral() => @tagName(v).ptr,
             std.builtin.Type.StructField => v.name.ptr,
             Tag => v,
-            else => stdx.debug.compileError("Shape tag should be an EnumLiteral, a Shape.Tag or a StructField, got {}", .{T}),
+            else => stdx.debug.compileError("Shape tag should be an @EnumLiteral(), a Shape.Tag or a StructField, got {}", .{T}),
         };
     }
 
@@ -357,7 +355,7 @@ pub const Shape = struct {
     pub fn hasTags(self: Shape, tagz: anytype) bool {
         const T = @TypeOf(tagz);
 
-        if (comptime stdx.meta.isSliceOf(T, Tag) or stdx.meta.isSliceOf(T, EnumLiteral)) {
+        if (comptime stdx.meta.isSliceOf(T, Tag) or stdx.meta.isSliceOf(T, @EnumLiteral())) {
             for (tagz) |t| {
                 if (self.hasTag(t) == null) {
                     return false;
@@ -366,7 +364,7 @@ pub const Shape = struct {
             return true;
         }
 
-        if (comptime stdx.meta.isTupleOf(T, Tag) or stdx.meta.isTupleOf(T, EnumLiteral)) {
+        if (comptime stdx.meta.isTupleOf(T, Tag) or stdx.meta.isTupleOf(T, @EnumLiteral())) {
             inline for (tagz) |t| {
                 if (self.hasTag(t) == null) {
                     return false;
@@ -635,7 +633,7 @@ pub const Shape = struct {
     /// ```
     pub fn insert(self: Shape, axis_: anytype, dimz: anytype) Shape {
         const dims_, const tags_ = parseDimensions(dimz);
-        const ax = if (@TypeOf(axis_) == EnumLiteral and axis_ == .last)
+        const ax = if (@TypeOf(axis_) == @EnumLiteral() and axis_ == .last)
             self.rank()
         else
             self.axis(axis_);
@@ -660,7 +658,7 @@ pub const Shape = struct {
     pub fn insertTag(self: Shape, axis_: anytype, d: i64, tag_: anytype) Shape {
         stdx.debug.assert(self.rank() < constants.MAX_RANK - 1, "Can't insert new axis in {f}, it's already at max rank.", .{self});
 
-        const ax = if (@TypeOf(axis_) == EnumLiteral and axis_ == .last)
+        const ax = if (@TypeOf(axis_) == @EnumLiteral() and axis_ == .last)
             self.rank()
         else
             self.axis(axis_);
@@ -802,7 +800,7 @@ pub const Shape = struct {
 
         var res = self;
 
-        if (comptime stdx.meta.isSliceOf(T, Tag) or stdx.meta.isSliceOf(T, EnumLiteral)) {
+        if (comptime stdx.meta.isSliceOf(T, Tag) or stdx.meta.isSliceOf(T, @EnumLiteral())) {
             stdx.debug.assert(tagz.len == self.rank(), "Not enough tags for shape {f}, got {any}", .{ self, tagz });
             for (tagz, 0..) |tag_, i| {
                 res._tags.set(i, toTag(tag_));
@@ -810,7 +808,7 @@ pub const Shape = struct {
             return res;
         }
 
-        if (comptime stdx.meta.isTupleOf(T, Tag) or stdx.meta.isTupleOf(T, EnumLiteral)) {
+        if (comptime stdx.meta.isTupleOf(T, Tag) or stdx.meta.isTupleOf(T, @EnumLiteral())) {
             stdx.debug.assert(tagz.len == self.rank(), "Not enough tags for shape {f}, got {}", .{ self, tagz });
             inline for (tagz, 0..) |tag_, i| {
                 res._tags.set(i, toTag(tag_));
@@ -849,7 +847,7 @@ pub const Shape = struct {
 
         var res = self;
 
-        if (comptime stdx.meta.isSliceOf(T, Tag) or stdx.meta.isSliceOf(T, EnumLiteral)) {
+        if (comptime stdx.meta.isSliceOf(T, Tag) or stdx.meta.isSliceOf(T, @EnumLiteral())) {
             stdx.debug.assert(tagz.len <= self.rank(), "Too many tags for shape {f}, got {any}", .{ self, tagz });
             for (tagz, self.rank() - tagz.len..) |tag_, i| {
                 res._tags.set(i, toTag(tag_));
@@ -857,7 +855,7 @@ pub const Shape = struct {
             return res;
         }
 
-        if (comptime stdx.meta.isTupleOf(T, Tag) or stdx.meta.isTupleOf(T, EnumLiteral)) {
+        if (comptime stdx.meta.isTupleOf(T, Tag) or stdx.meta.isTupleOf(T, @EnumLiteral())) {
             stdx.debug.assert(tagz.len <= self.rank(), "Too many tags for shape {f}, got {}", .{ self, tagz });
             inline for (tagz, self.rank() - tagz.len..) |tag_, i| {
                 res._tags.set(i, toTag(tag_));

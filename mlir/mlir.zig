@@ -193,7 +193,7 @@ pub const Pass = opaque {
 
     pub const ptr = M.ptr;
 
-    pub fn create(comptime name: @TypeOf(.enum_literal)) *Pass {
+    pub fn create(comptime name: @EnumLiteral()) *Pass {
         return @ptrCast(@field(c, "mlirCreate" ++ @tagName(name))().ptr);
     }
 };

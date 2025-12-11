@@ -157,7 +157,7 @@ pub const Tensor = struct {
         return res;
     }
 
-    pub fn renameAxis(self: Tensor, ax: i8, name: @TypeOf(.enum_literal)) Tensor {
+    pub fn renameAxis(self: Tensor, ax: i8, name: @EnumLiteral()) Tensor {
         var res = self;
         res._shape._tags.set(self.axis(ax), @tagName(name).ptr);
         return res;
@@ -1464,7 +1464,7 @@ pub const Tensor = struct {
     /// Merges two or more non-contiguous axes into one axis.
     /// Will make a transpose if needed.
     /// .{ .a, .b, .c }.mergeTranspose(.{ .a, .c }, .ac) -> .{ .b, .ac }
-    pub fn mergeTranspose(self: Tensor, axes_: anytype, merged: @TypeOf(.enum_literal)) Tensor {
+    pub fn mergeTranspose(self: Tensor, axes_: anytype, merged: @EnumLiteral()) Tensor {
         const cont = self.contiguous(axes_);
         return cont.reshape(cont._shape.mergeAxis(merged, axes_));
     }
@@ -1653,7 +1653,7 @@ pub const Tensor = struct {
 
         // Be careful here: we need to resolve ax before calling concatenate,
         // because we added an axis, so all
-        const ax = if (@TypeOf(axis_) == @TypeOf(.enum_literal) and axis_ == .last)
+        const ax = if (@TypeOf(axis_) == @EnumLiteral() and axis_ == .last)
             shape0.rank()
         else
             shape0.axis(axis_);
@@ -2107,7 +2107,7 @@ pub const Tensor = struct {
     /// `.{.a = 5, .b = 4}.insert(.b, .{ .c, .d }) -> .{ .a = 5, .c = 1, .d = 1, .b = 4 }`
     pub fn insertAxes(self: Tensor, axis_: anytype, tags: anytype) Tensor {
         const tags_ = Shape.parseTags(tags);
-        const ax = if (@TypeOf(axis_) == @TypeOf(.enum_literal) and axis_ == .last)
+        const ax = if (@TypeOf(axis_) == @EnumLiteral() and axis_ == .last)
             self.rank()
         else
             self.axis(axis_);
@@ -3557,7 +3557,7 @@ pub const Tensor = struct {
 
     /// For each vector in the input tensor,
     /// creates a diagonal-matrix where diagonal values are set to the vector values.
-    pub fn toDiagonal(self: Tensor, axis_: anytype, new_tags: [2]@TypeOf(.enum_literal)) Tensor {
+    pub fn toDiagonal(self: Tensor, axis_: anytype, new_tags: [2]@EnumLiteral()) Tensor {
         stdx.debug.assert(self.rank() < constants.MAX_RANK - 1, "toDiagonal expects input up to {d} rank, got {f}", .{ constants.MAX_RANK - 1, self });
         const a = self.axis(axis_);
         const d = self.dim(a);
@@ -4093,7 +4093,7 @@ test "Tensor.maxPool2d" {
 
 fn _parseGatherCoord(self: Tensor, axes_: anytype) struct { bool, stdx.BoundedArray(u3, constants.MAX_RANK) } {
     const AxesT = @TypeOf(axes_);
-    const axes_is_scalar = AxesT == @TypeOf(.enum_literal) or AxesT == comptime_int or @typeInfo(AxesT) == .int;
+    const axes_is_scalar = AxesT == @EnumLiteral() or AxesT == comptime_int or @typeInfo(AxesT) == .int;
 
     const coord_axes = if (axes_is_scalar)
         stdx.BoundedArray(u3, constants.MAX_RANK).fromSlice(&.{self.axis(axes_)}) catch unreachable
