@@ -627,45 +627,47 @@ fn scatterConfig(
     };
 }
 
-// TODO(Corentin)
-//test scatterConfig {
-//    const zml = @import("zml.zig");
-//    const platform = zml.testing.env();
+test scatterConfig {
+    const zml = @import("zml.zig");
 
-//    var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
-//    defer comp.deinit();
-//    comp.activate();
-//    defer comp.deactivate();
+    var comp = zml.module.CompilationContext.init(std.testing.allocator);
+    defer comp.deinit();
+    comp.activate();
+    defer comp.deactivate();
 
-//    const Local = struct {
-//        pub fn _idx(idx_shape: anytype) Tensor {
-//            return Tensor.constant(idx_shape, .{ .i32 = 0 });
-//        }
-//    };
+    const block = mlir.Block.init(&.{}, &.{});
+    comp.pushBlock(block);
+    defer comp.popBlock();
 
-//    const idx = Local._idx;
-//    const op = Shape.init(.{ .a = 10, .b = 20 }, .f32);
+    const Local = struct {
+        pub fn _idx(idx_shape: anytype) Tensor {
+            return Tensor.constant(.{ .i32 = 0 }).broad(Shape.init(idx_shape, .i32));
+        }
+    };
 
-//    // Use .a as a batching axis with .a=10 x .n=8 updates of 2 elements of .b
-//    {
-//        const indices, const coords_tags = Shape.parseStruct(Tensor, .{ .b = idx(.{ .a = 10, .n = 8 }) });
-//        const update = Shape.init(.{ .a = 10, .n = 8, .b = 2 }, .f32);
+    const idx = Local._idx;
+    const op = Shape.init(.{ .a = 10, .b = 20 }, .f32);
 
-//        const cfg = scatterConfig(op, update, indices, coords_tags);
-//        try std.testing.expectEqualSlices(AxisKind, &.{ .batching, .update_window }, cfg.op_kind.constSlice());
-//        try std.testing.expectEqualSlices(AxisKind, &.{ .batching, .window_id, .update_window }, cfg.up_kind.constSlice());
-//    }
+    // Use .a as a batching axis with .a=10 x .n=8 updates of 2 elements of .b
+    {
+        const indices, const coords_tags = Shape.parseStruct(Tensor, .{ .b = idx(.{ .a = 10, .n = 8 }) });
+        const update = Shape.init(.{ .a = 10, .n = 8, .b = 2 }, .f32);
 
-//    // similar, but use the normalized form where .a is no longer an explicit batching axis.
-//    {
-//        const indices, const coords_tags = Shape.parseStruct(Tensor, .{ .a = idx(.{ .a = 10, .n = 8 }), .b = idx(.{ .a = 10, .n = 8 }) });
-//        const update = Shape.init(.{ .a = 10, .n = 8, .b = 2 }, .f32);
+        const cfg = scatterConfig(op, update, indices, coords_tags);
+        try std.testing.expectEqualSlices(ScatterAxisKind, &.{ .batching, .update_window }, cfg.op_kind.constSlice());
+        try std.testing.expectEqualSlices(ScatterAxisKind, &.{ .batching, .window_id, .update_window }, cfg.up_kind.constSlice());
+    }
 
-//        const cfg = scatterConfig(op, update, indices, coords_tags);
-//        try std.testing.expectEqualSlices(AxisKind, &.{ .inserted_window, .update_window }, cfg.op_kind.constSlice());
-//        try std.testing.expectEqualSlices(AxisKind, &.{ .window_id, .window_id, .update_window }, cfg.up_kind.constSlice());
-//    }
-//}
+    // similar, but use the normalized form where .a is no longer an explicit batching axis.
+    {
+        const indices, const coords_tags = Shape.parseStruct(Tensor, .{ .a = idx(.{ .a = 10, .n = 8 }), .b = idx(.{ .a = 10, .n = 8 }) });
+        const update = Shape.init(.{ .a = 10, .n = 8, .b = 2 }, .f32);
+
+        const cfg = scatterConfig(op, update, indices, coords_tags);
+        try std.testing.expectEqualSlices(ScatterAxisKind, &.{ .inserted_window, .update_window }, cfg.op_kind.constSlice());
+        try std.testing.expectEqualSlices(ScatterAxisKind, &.{ .window_id, .window_id, .update_window }, cfg.up_kind.constSlice());
+    }
+}
 
 /// Concatenate all indices tensor in one tensor.
 ///
