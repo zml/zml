@@ -3562,9 +3562,12 @@ pub const Tensor = struct {
         stdx.debug.assert(self.rank() < constants.MAX_RANK - 1, "toDiagonal expects input up to {d} rank, got {f}", .{ constants.MAX_RANK - 1, self });
         const a = self.axis(axis_);
         const d = self.dim(a);
+        const p = self.shape()._partitioning.get(a);
         var res_shape = self._shape;
         res_shape._dims.replaceRange(a, 1, &.{ d, d }) catch unreachable;
         res_shape._tags.replaceRange(a, 1, &.{ @tagName(new_tags[0]), @tagName(new_tags[1]) }) catch unreachable;
+        // TODO(Corentin): Not sure about that
+        res_shape._partitioning.replaceRange(a, 1, &.{ p, p }) catch unreachable;
 
         const values = self.insertAxes(a + 1, .{new_tags[1]}).broad(res_shape);
         const zeros = Tensor.constant(self.dtype().zero()).broad(res_shape);
