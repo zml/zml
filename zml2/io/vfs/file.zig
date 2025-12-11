@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const log = std.log.scoped(.@"zml/io/vfs/file");
+
 pub const File = struct {
     inner: std.Io,
     vtable: std.Io.VTable,

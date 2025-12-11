@@ -1,4 +1,5 @@
 const std = @import("std");
+const vfs = @import("vfs");
 
 const log = std.log.scoped(.@"zml/io/vfs");
 
@@ -18,8 +19,9 @@ pub const VFS = struct {
         InvalidURI,
     };
 
-    pub const HTTP = @import("vfs").HTTP;
-    pub const File = @import("vfs").File;
+    pub const File = vfs.File;
+    pub const HTTP = vfs.HTTP;
+    pub const HF = vfs.HF;
 
     const FsFile = struct {
         backend: std.Io,

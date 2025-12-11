@@ -39,16 +39,31 @@ pub fn main() !void {
     var vfs_http: zml.io.VFS.HTTP = try .init(allocator, threaded.io(), &http_client, .{});
     defer vfs_http.deinit();
 
+    var hf_auth: zml.io.VFS.HF.Auth = try .auto(allocator, threaded.io());
+    defer hf_auth.deinit(allocator);
+
+    var hf_vfs: zml.io.VFS.HF = try .init(.{
+        .allocator = allocator,
+        .io = threaded.io(),
+        .http_client = &http_client,
+        .config = .{
+            .auth = hf_auth,
+        },
+    });
+    defer hf_vfs.deinit();
+
     var vfs: zml.io.VFS = .init(allocator, threaded.io());
     defer vfs.deinit();
 
     try vfs.register("file", vfs_file.io());
     try vfs.register("http", vfs_http.io());
     try vfs.register("https", vfs_http.io());
+    try vfs.register("hf", hf_vfs.io());
 
     const io = vfs.io();
 
-    const repo_uri = "file:///Users/hugo/Developer/Llama-3.1-8B-Instruct";
+    const repo_uri = "hf://Qwen/Qwen3-8B";
+    // const repo_uri = "file:///Users/hugo/Developer/Llama-3.1-8B-Instruct";
     // const repo_uri = "https://storage.googleapis.com/zig-vfs/Llama-3.1-8B-Instruct/";
     // const repo_uri = "http://9960x-5090x2:8003/";
 
@@ -70,7 +85,7 @@ pub fn main() !void {
     }
 
     {
-        const path = try std.fs.path.join(allocator, &.{ repo_uri, "model-00004-of-00004.safetensors" });
+        const path = try std.fs.path.join(allocator, &.{ repo_uri, "model-00004-of-00005.safetensors" });
         defer allocator.free(path);
 
         const file = try vfs.openAbsoluteFile(io, path, .{});
@@ -116,7 +131,7 @@ pub fn main() !void {
     }
 
     {
-        const path = try std.fs.path.join(allocator, &.{ repo_uri, "model-00004-of-00004.safetensors" });
+        const path = try std.fs.path.join(allocator, &.{ repo_uri, "model-00004-of-00005.safetensors" });
         defer allocator.free(path);
 
         const file = try vfs.openAbsoluteFile(io, path, .{});
@@ -134,7 +149,7 @@ pub fn main() !void {
     }
 
     {
-        const path = try std.fs.path.join(allocator, &.{ repo_uri, "model-00004-of-00004.safetensors" }); // SHA256: 92ecfe1a2414458b4821ac8c13cf8cb70aed66b5eea8dc5ad9eeb4ff309d6d7b
+        const path = try std.fs.path.join(allocator, &.{ repo_uri, "model-00004-of-00005.safetensors" }); // SHA256: 92ecfe1a2414458b4821ac8c13cf8cb70aed66b5eea8dc5ad9eeb4ff309d6d7b
         defer allocator.free(path);
 
         const file = try vfs.openAbsoluteFile(io, path, .{});
