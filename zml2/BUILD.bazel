@@ -33,6 +33,7 @@ zig_library(
         "pjrtx.zig",
         "platform.zig",
         "shape.zig",
+        "slice.zig",
         "tensor.zig",
         "testing.zig",
         "zml.zig",

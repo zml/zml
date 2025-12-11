@@ -6,7 +6,9 @@ const DataType = @import("dtype.zig").DataType;
 const pjrt = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
+const Slice = @import("slice.zig").Slice;
 const Target = @import("platform.zig").Target;
+const testing = @import("testing.zig");
 
 const log = std.log.scoped(.zml);
 
@@ -151,29 +153,28 @@ pub const Buffer = struct {
         stdx.debug.assert(self._shape.byteSize() == @sizeOf(T), "Buffer {f} has {d} bytes of data, can't load it to a {s} with {d} bytes", .{ self, self._shape.byteSize(), @typeName(T), @sizeOf(T) });
         var res: T = undefined;
 
-        try self.toHost(std.mem.asBytes(&res), io);
+        try self.toSlice(.init(self.shape(), std.mem.asBytes(&res)), io);
 
         return res;
     }
 
-    pub fn toHost(self: Buffer, buf: []u8, io: std.Io) !void {
+    /// Copies the content of the Buffer to the provided slice.
+    pub fn toSlice(self: Buffer, slice: Slice, io: std.Io) !void {
         //stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
-        const maybe_event = try self._shards.get(0).toHostBuffer(self._api, buf);
+        const maybe_event = try self._shards.get(0).toHostBuffer(self._api, slice.data);
         if (maybe_event) |event| {
             try event.await(self._api, io);
         }
     }
 
-    /// Copies the content of the Buffer to the host.
-    /// The returned `HostBuffer` does own the memory.
-    pub fn toHostAlloc(self: Buffer, allocator: std.mem.Allocator, io: std.Io) ![]u8 {
-        //const output = try allocator.alignedAlloc(u8, .fromByteUnits(self._shape.dtype().alignOf()), self._shape.byteSize());
-        //const output = try allocator.alignedAlloc(u8, .@"64", self._shape.byteSize());
-        const output = try allocator.alloc(u8, self._shape.byteSize());
-        errdefer allocator.free(output);
+    /// Copies the content of the Buffer to the provided slice.
+    /// The returned slice owns the memory.
+    pub fn toSliceAlloc(self: Buffer, allocator: std.mem.Allocator, io: std.Io) !Slice {
+        const slice = try Slice.alloc(allocator, self.shape());
+        errdefer slice.free(allocator);
 
-        try self.toHost(output, io);
+        try self.toSlice(slice, io);
 
-        return output;
+        return slice;
     }
 };

@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 
 const stdx = @import("stdx");
 
+const ConstSlice = @import("slice.zig").ConstSlice;
 const Platform = @import("platform.zig").Platform;
 const zml = @import("zml.zig");
 
@@ -21,36 +22,6 @@ pub fn env() Platform {
     return _platform.?;
 }
 
-pub const Slice = struct {
-    data: []const u8,
-    shape: zml.Shape,
-
-    pub fn init(shape: zml.Shape, data: []const u8) Slice {
-        return .{ .data = data, .shape = shape };
-    }
-
-    pub fn dtype(self: Slice) zml.DataType {
-        return self.shape.dtype();
-    }
-
-    pub fn items(self: Slice, comptime T: type) []const T {
-        return @alignCast(std.mem.bytesAsSlice(T, self.data));
-    }
-
-    pub fn format(
-        self: @This(),
-        writer: *std.Io.Writer,
-    ) std.Io.Writer.Error!void {
-        return writer.print("{any}", .{self});
-    }
-
-    pub fn formatNumber(self: @This(), writer: *std.Io.Writer, n: std.fmt.Number) std.Io.Writer.Error!void {
-        _ = self; // autofix
-        _ = n; // autofix
-        return writer.print("TODO", .{});
-    }
-};
-
 /// In neural network we generally care about the relative precision,
 /// but on a given dimension, if the output is close to 0, then the precision
 /// don't matter as much.
@@ -64,19 +35,19 @@ pub fn approxEq(comptime Float: type, l: Float, r: Float, tolerance: Float) bool
 /// host for comparison !
 pub fn expectClose(io: std.Io, left_: anytype, right_: anytype, tolerance: f32) !void {
     const allocator = if (builtin.is_test) std.testing.allocator else std.heap.smp_allocator;
-    var left: Slice, const should_free_left = if (@TypeOf(left_) == zml.Buffer) b: {
-        const bytes = try left_.toHostAlloc(allocator, io);
-        break :b .{ .init(left_.shape(), bytes), true };
+    var left: ConstSlice, const should_free_left = if (@TypeOf(left_) == zml.Buffer) b: {
+        const slice = try left_.toSliceAlloc(allocator, io);
+        break :b .{ slice.constSlice(), true };
     } else .{ left_, false };
 
-    var right: Slice, const should_free_right = if (@TypeOf(right_) == zml.Buffer) b: {
-        const bytes = try right_.toHostAlloc(allocator, io);
-        break :b .{ .init(right_.shape(), bytes), true };
+    var right: ConstSlice, const should_free_right = if (@TypeOf(right_) == zml.Buffer) b: {
+        const slice = try right_.toSliceAlloc(allocator, io);
+        break :b .{ slice.constSlice(), true };
     } else .{ right_, false };
 
     defer {
-        if (should_free_left) allocator.free(left.data);
-        if (should_free_right) allocator.free(right.data);
+        if (should_free_left) left.free(allocator);
+        if (should_free_right) right.free(allocator);
     }
     errdefer log.err("\n--> Left: {0f}{0d:24.3}\n--> Right: {1f}{1d:24.3}", .{ left, right });
     if (!std.mem.eql(i64, left.shape.dims(), right.shape.dims())) {

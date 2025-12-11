@@ -9,6 +9,7 @@ const Buffer = @import("buffer.zig").Buffer;
 const Bufferized = @import("zml.zig").Bufferized;
 const CompilationContext = @import("module.zig").CompilationContext;
 const constants = @import("constants.zig");
+const ConstSlice = @import("slice.zig").ConstSlice;
 const DataType = @import("dtype.zig").DataType;
 const meta = @import("meta.zig");
 const mlirx = @import("mlirx.zig");
@@ -292,7 +293,7 @@ pub const Tensor = struct {
 
             const output = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.fmod, .{input_buffer});
 
-            try zml.testing.expectClose(std.testing.io, zml.testing.Slice.init(zml.Shape.init(.{6}, .f32), std.mem.sliceAsBytes(&e)), output, 1e-4);
+            try zml.testing.expectClose(std.testing.io, ConstSlice.init(zml.Shape.init(.{6}, .f32), std.mem.sliceAsBytes(&e)), output, 1e-4);
         }
     }
 
@@ -991,13 +992,11 @@ pub const Tensor = struct {
             defer x_d_buffer.deinit();
 
             const x_f4_xla_d = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.convert, .{x_d_buffer});
-            const x_f4_xla_bytes = try x_f4_xla_d.toHostAlloc(std.testing.allocator, std.testing.io);
-            defer std.testing.allocator.free(x_f4_xla_bytes);
-
-            const x_f4_xla = std.mem.bytesAsSlice(floats.Float4E2M1, x_f4_xla_bytes);
+            const x_f4_xla = try x_f4_xla_d.toSliceAlloc(std.testing.allocator, std.testing.io);
+            defer x_f4_xla.free(std.testing.allocator);
 
             errdefer std.log.warn("convert(.f4e2m1) failed !\ninput f32:\n{e}\nzml.floats computed:\n{any}\nxla computed:\n{any}", .{ stdx.fmt.slice(&x), x_f4, x_f4_xla });
-            try std.testing.expectEqualDeep(&x_f4, x_f4_xla);
+            try std.testing.expectEqualDeep(&x_f4, x_f4_xla.items(floats.Float4E2M1));
         }
 
         // f8e3m4
@@ -1014,13 +1013,11 @@ pub const Tensor = struct {
             defer x_d_buffer.deinit();
 
             const x_f8e3_xla_d = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.convert, .{x_d_buffer});
-            const x_f8e3_xla_bytes = try x_f8e3_xla_d.toHostAlloc(std.testing.allocator, std.testing.io);
-            defer std.testing.allocator.free(x_f8e3_xla_bytes);
-
-            const x_f8e3_xla = std.mem.bytesAsSlice(floats.Float8E3M4, x_f8e3_xla_bytes);
+            const x_f8e3_xla = try x_f8e3_xla_d.toSliceAlloc(std.testing.allocator, std.testing.io);
+            defer x_f8e3_xla.free(std.testing.allocator);
 
             errdefer std.log.warn("convert(.f8e3m4) failed !\ninput f32:\n{e}\nzml.floats computed:\n{any}\nxla computed:\n{any}", .{ stdx.fmt.slice(&x), x_f8e3, x_f8e3_xla });
-            try std.testing.expectEqualDeep(&x_f8e3, x_f8e3_xla);
+            try std.testing.expectEqualDeep(&x_f8e3, x_f8e3_xla.items(floats.Float8E3M4));
         }
     }
 
@@ -1217,7 +1214,7 @@ pub const Tensor = struct {
         const res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.leakyReLU, .{input_buffer});
         defer res.deinit();
 
-        const expectation: zml.testing.Slice = .init(input.shape(), std.mem.sliceAsBytes(&[2]f32{ -0.0688, 1.6795 }));
+        const expectation: ConstSlice = .init(input.shape(), std.mem.sliceAsBytes(&[2]f32{ -0.0688, 1.6795 }));
         try zml.testing.expectClose(std.testing.io, expectation, res, 1e-4);
     }
 
@@ -2422,7 +2419,7 @@ pub const Tensor = struct {
         const result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._gatherSlices, .{ operand_buffer, indices_buffer });
         defer result.deinit();
 
-        const expected: zml.testing.Slice = .init(Shape.init(.{ 2, 2, 2, 3 }, .u16), std.mem.sliceAsBytes(&[2][2][2][3]u16{
+        const expected: ConstSlice = .init(Shape.init(.{ 2, 2, 2, 3 }, .u16), std.mem.sliceAsBytes(&[2][2][2][3]u16{
             .{
                 .{ .{ 13, 14, 15 }, .{ 19, 20, 21 } },
                 .{ .{ 37, 38, 39 }, .{ 43, 44, 45 } },
@@ -2862,10 +2859,10 @@ pub const Tensor = struct {
             var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._argsort, .{x_buffer});
             defer res.deinit();
 
-            const res_cpu = try res.toHostAlloc(std.testing.allocator, std.testing.io);
-            defer std.testing.allocator.free(res_cpu);
+            const res_cpu = try res.toSliceAlloc(std.testing.allocator, std.testing.io);
+            defer res_cpu.free(std.testing.allocator);
 
-            try std.testing.expectEqualSlices(i32, &.{ 0, 3, 1, 2, 4, 1, 4, 3, 0, 2 }, @alignCast(std.mem.bytesAsSlice(i32, res_cpu)));
+            try std.testing.expectEqualSlices(i32, &.{ 0, 3, 1, 2, 4, 1, 4, 3, 0, 2 }, res_cpu.items(i32));
         }
 
         // 3D Tensor, dim = 1, descending
@@ -2887,8 +2884,8 @@ pub const Tensor = struct {
             var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._argsort, .{x_buffer});
             defer res.deinit();
 
-            const res_cpu = try res.toHostAlloc(std.testing.allocator, std.testing.io);
-            defer std.testing.allocator.free(res_cpu);
+            const res_cpu = try res.toSliceAlloc(std.testing.allocator, std.testing.io);
+            defer res_cpu.free(std.testing.allocator);
 
             try std.testing.expectEqualSlices(i32, &.{
                 4, 1, 1, 2, 0, 2, 0, 0, 3, 4,
@@ -2896,7 +2893,7 @@ pub const Tensor = struct {
                 1, 4, 2, 0, 2, 4, 2, 2, 0, 3,
                 3, 2, 0, 1, 4, 1, 1, 1, 2, 1,
                 0, 3, 3, 3, 3, 0, 3, 3, 4, 2,
-            }, @alignCast(std.mem.bytesAsSlice(i32, res_cpu)));
+            }, res_cpu.items(i32));
         }
 
         // 4D Tensor, dim = 3, ascending
@@ -2921,8 +2918,8 @@ pub const Tensor = struct {
             var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._argsort, .{x_buffer});
             defer res.deinit();
 
-            const res_cpu = try res.toHostAlloc(std.testing.allocator, std.testing.io);
-            defer std.testing.allocator.free(res_cpu);
+            const res_cpu = try res.toSliceAlloc(std.testing.allocator, std.testing.io);
+            defer res_cpu.free(std.testing.allocator);
 
             try std.testing.expectEqualSlices(i32, &.{
                 2, 1, 3, 0,
@@ -2933,7 +2930,7 @@ pub const Tensor = struct {
                 1, 2, 3, 0,
                 2, 0, 1, 3,
                 3, 2, 1, 0,
-            }, @alignCast(std.mem.bytesAsSlice(i32, res_cpu)));
+            }, res_cpu.items(i32));
         }
     }
 
@@ -4078,7 +4075,7 @@ test "Tensor.maxPool2d" {
     try zml.testing.expectEqualShapes(Shape.init(.{ 2, 2, 2, 4 }, .f32), result.values.shape());
     try zml.testing.expectEqualShapes(Shape.init(.{ 2, 2, 2, 4 }, .i32), result.indices.shape());
     var buffer: [2][2][2][4]f32 = undefined;
-    _ = try result.values.toHost(std.mem.asBytes(&buffer), std.testing.io);
+    _ = try result.values.toSlice(.init(result.values.shape(), std.mem.asBytes(&buffer)), std.testing.io);
     try std.testing.expectEqualDeep(
         [2][2][2][4]f32{
             .{
