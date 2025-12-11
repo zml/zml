@@ -25,7 +25,11 @@ pub const Tensor = struct {
     _shape: Shape,
     _value: ?*const mlir.Value = null,
 
-    pub fn init(shape_: Shape) Tensor {
+    pub fn init(shape_like: anytype, dt: DataType) Tensor {
+        return .fromShape(.init(shape_like, dt));
+    }
+
+    pub fn fromShape(shape_: Shape) Tensor {
         return .{ .id = Tensor.current_id.fetchAdd(1, .seq_cst), ._shape = shape_ };
     }
 
@@ -283,7 +287,7 @@ pub const Tensor = struct {
         const divisors: [2]f32 = .{ 2, -1.5 };
 
         inline for (inputs, expectations, divisors) |i, e, d| {
-            const input: zml.Tensor = .init(Shape.init(.{6}, .f32));
+            const input: zml.Tensor = .init(.{6}, .f32);
 
             const exe = try zml.module.compile(std.testing.allocator, std.testing.io, Tensor.fmod, .{ input, d }, platform);
             defer exe.deinit();
@@ -444,7 +448,7 @@ pub const Tensor = struct {
         algorithm: dialects.stablehlo.RngAlgorithm.Type = .DEFAULT,
 
         pub fn init() Rng {
-            return .{ ._state = .init(Shape.init(.{2}, .u64)) };
+            return .{ ._state = .init(.{2}, .u64) };
         }
 
         pub fn initBuffer(platform: Platform, seed: u128, io: std.Io) !Bufferized(Rng) {
@@ -650,7 +654,7 @@ pub const Tensor = struct {
 
             const platform = zml.testing.env();
             const tgt_dist_data = [_]f32{ 2.0, 1.0, 4.0, 3.0 };
-            const tgt_dist: Tensor = .init(Shape.init(.{tgt_dist_data.len}, .f32));
+            const tgt_dist: Tensor = .init(.{tgt_dist_data.len}, .f32);
 
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Stats.gumbelStats, .{ Rng.init(), tgt_dist }, platform);
             defer exe.deinit();
@@ -984,7 +988,7 @@ pub const Tensor = struct {
             var x_f4: [x.len]floats.Float4E2M1 = undefined;
             for (&x_f4, &x) |*xi_f4, xi| xi_f4.* = .fromF32(xi);
 
-            const x_d: Tensor = .init(Shape.init(.{x.len}, .f32));
+            const x_d: Tensor = .init(.{x.len}, .f32);
             const exe = try zml.module.compile(std.testing.allocator, std.testing.io, Tensor.convert, .{ x_d, .f4e2m1 }, platform);
             defer exe.deinit();
 
@@ -1005,7 +1009,7 @@ pub const Tensor = struct {
             var x_f8e3: [x.len]floats.Float8E3M4 = undefined;
             for (&x_f8e3, &x) |*xi_f8e3, xi| xi_f8e3.* = .fromF32(xi);
 
-            const x_d: Tensor = .init(Shape.init(.{x.len}, .f32));
+            const x_d: Tensor = .init(.{x.len}, .f32);
             const exe = try zml.module.compile(std.testing.allocator, std.testing.io, Tensor.convert, .{ x_d, .f8e3m4 }, platform);
             defer exe.deinit();
 
@@ -1084,8 +1088,8 @@ pub const Tensor = struct {
             //    .{ .b = 21, .d = 23 },
             //},
         }) |testcase| {
-            const x: Tensor = .init(Shape.init(testcase[0], .f32));
-            const y: Tensor = .init(Shape.init(testcase[1], .f32));
+            const x: Tensor = .init(testcase[0], .f32);
+            const y: Tensor = .init(testcase[1], .f32);
             const ctr = Shape.toTag(testcase[2]);
             const z_shape: Shape = .init(testcase[3], .f32);
             const forward = struct {
@@ -1204,7 +1208,7 @@ pub const Tensor = struct {
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
 
-        const input: Tensor = .init(Shape.init(.{2}, .f32));
+        const input: Tensor = .init(.{2}, .f32);
         var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Tensor.leakyReLU, .{ input, 0.1 }, platform);
         defer exe.deinit();
 
@@ -1359,7 +1363,7 @@ pub const Tensor = struct {
             }
         };
 
-        const x: Tensor = .init(Shape.init(.{ 2, 5 }, .f32));
+        const x: Tensor = .init(.{ 2, 5 }, .f32);
 
         var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._cumsum, .{x}, platform);
         defer exe.deinit();
@@ -1562,7 +1566,7 @@ pub const Tensor = struct {
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
 
-        const x: Tensor = .init(Shape.init(.{ 2, 5 }, .f32));
+        const x: Tensor = .init(.{ 2, 5 }, .f32);
 
         const x_buffer: zml.Buffer = try .fromBytes(platform, x.shape(), std.mem.sliceAsBytes(&[_]f32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }), std.testing.io);
         defer x_buffer.deinit();
@@ -1708,7 +1712,7 @@ pub const Tensor = struct {
             .{ [2][3]u8{ .{ 1, 2, 3 }, .{ 4, 5, 6 } }, Shape.init(.{ 2, 3 }, .u8), [2][6]u8{ .{ 1, 2, 3, 1, 2, 3 }, .{ 4, 5, 6, 4, 5, 6 } }, 1, 2 },
         }) |testcase| {
             const input_data, const shape_, const expectation, const ax, const reps = testcase;
-            const input: Tensor = .init(shape_);
+            const input: Tensor = .fromShape(shape_);
 
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local.repeat1d, .{ input, ax, reps }, platform);
             defer exe.deinit();
@@ -1763,7 +1767,7 @@ pub const Tensor = struct {
             .{ [2][3]u8{ .{ 1, 2, 3 }, .{ 4, 5, 6 } }, Shape.init(.{ 2, 3 }, .u8), [2][6]u8{ .{ 1, 2, 3, 1, 2, 3 }, .{ 4, 5, 6, 4, 5, 6 } }, 0, 2 },
         }) |testcase| {
             const input_data, const shape_, const expectation, const ax, const reps = testcase;
-            const input: Tensor = .init(shape_);
+            const input: Tensor = .fromShape(shape_);
 
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local.stutter1d, .{ input, ax, reps }, platform);
             defer exe.deinit();
@@ -2395,8 +2399,8 @@ pub const Tensor = struct {
         }
 
         // Test with actual values.
-        const operand: Tensor = .init(Shape.init(.{ .a = 2, .b = 4, .c = 6 }, .u16));
-        const indices: Tensor = .init(Shape.init(.{ .n = 2, ._ = 2 }, .i32));
+        const operand: Tensor = .init(.{ .a = 2, .b = 4, .c = 6 }, .u16);
+        const indices: Tensor = .init(.{ .n = 2, ._ = 2 }, .i32);
         var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._gatherSlices, .{ operand, Shape.init(.{ .b = 2, .c = 3 }, .u16), indices, .{} }, platform);
         defer exe.deinit();
 
@@ -2610,10 +2614,10 @@ pub const Tensor = struct {
         }
         // Test with actual values, no batching.
         {
-            const a: Tensor = .init(Shape.init(.{ 3, 3 }, .i32));
+            const a: Tensor = .init(.{ 3, 3 }, .i32);
 
-            const scatter_indices = Tensor.init(Shape.init(.{2}, .i32)).withTags(.{.n});
-            const updates = Tensor.init(Shape.init(.{ 2, 3 }, .i32)).withTags(.{ .n, .b });
+            const scatter_indices = Tensor.init(.{2}, .i32).withTags(.{.n});
+            const updates = Tensor.init(.{ 2, 3 }, .i32).withTags(.{ .n, .b });
 
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._scatter, .{ a, &.{scatter_indices}, updates }, platform);
             defer exe.deinit();
@@ -2634,10 +2638,10 @@ pub const Tensor = struct {
         }
         // Test with setting individual values (no batching)
         {
-            const a: Tensor = .init(Shape.init(.{9}, .i32));
+            const a: Tensor = .init(.{9}, .i32);
 
-            const scatter_indices = Tensor.init(Shape.init(.{2}, .i32)).withTags(.{.n});
-            const updates = Tensor.init(Shape.init(.{2}, .i32)).withTags(.{.n});
+            const scatter_indices = Tensor.init(.{2}, .i32).withTags(.{.n});
+            const updates = Tensor.init(.{2}, .i32).withTags(.{.n});
 
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._scatter, .{ a, &.{scatter_indices}, updates }, platform);
             defer exe.deinit();
@@ -2658,9 +2662,9 @@ pub const Tensor = struct {
         }
         {
             // Test with actual values and batching along axis .a
-            const operand: Tensor = .init(Shape.init(.{ .a = 2, .b = 3, .c = 4, .d = 2 }, .u16));
-            const start_indices: Tensor = .init(Shape.init(.{ .n = 2, .a = 2, .m = 3, .coord = 2 }, .i32));
-            const values: Tensor = .init((Shape.init(.{ .n = 2, .a = 2, .m = 3, .c = 2, .d = 2 }, .u16)));
+            const operand: Tensor = .init(.{ .a = 2, .b = 3, .c = 4, .d = 2 }, .u16);
+            const start_indices: Tensor = .init(.{ .n = 2, .a = 2, .m = 3, .coord = 2 }, .i32);
+            const values: Tensor = .init(.{ .n = 2, .a = 2, .m = 3, .c = 2, .d = 2 }, .u16);
 
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._scatterCB, .{ operand, start_indices, values }, platform);
             defer exe.deinit();
@@ -2779,7 +2783,7 @@ pub const Tensor = struct {
             }
         };
 
-        const x: Tensor = .init(Shape.init(.{ 1, 5 }, .f32));
+        const x: Tensor = .init(.{ 1, 5 }, .f32);
         var exe = try zml.module.compile(allocator, std.testing.io, ArgMaxTest._fwd, .{x}, platform);
         defer exe.deinit();
 
@@ -2847,7 +2851,7 @@ pub const Tensor = struct {
 
         // 2D Tensor - dim = 1, ascending
         {
-            const x: Tensor = .init(Shape.init(.{ 2, 5 }, .f32));
+            const x: Tensor = .init(.{ 2, 5 }, .f32);
 
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._argsort, .{ x, 1, .{} }, platform);
             defer exe.deinit();
@@ -2866,7 +2870,7 @@ pub const Tensor = struct {
 
         // 3D Tensor, dim = 1, descending
         {
-            const x: Tensor = .init(Shape.init(.{ 1, 5, 10 }, .f16));
+            const x: Tensor = .init(.{ 1, 5, 10 }, .f16);
 
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._argsort, .{ x, 1, .{ .descending = true } }, platform);
             defer exe.deinit();
@@ -2897,7 +2901,7 @@ pub const Tensor = struct {
 
         // 4D Tensor, dim = 3, ascending
         {
-            const x: Tensor = .init(Shape.init(.{ 4, 2, 1, 4 }, .i32));
+            const x: Tensor = .init(.{ 4, 2, 1, 4 }, .i32);
 
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._argsort, .{ x, 3, .{} }, platform);
             defer exe.deinit();
@@ -3269,8 +3273,8 @@ pub const Tensor = struct {
             .{ [2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } }, Shape.init(.{ 2, 5 }, .f32), [4]f32{ 3, 4, 8, 9 }, 3, 1 },
         }) |testcase| {
             const x_data, const x_shape, const expectation, const z_value: i32, const ax = testcase;
-            const x: Tensor = .init(x_shape);
-            const z: Tensor = .init(Shape.init(.{}, .i32));
+            const x: Tensor = .fromShape(x_shape);
+            const z: Tensor = .init(.{}, .i32);
 
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Tensor.dynamicSlice1d, .{ x, ax, .{ .len = 2, .start = z } }, platform);
             defer exe.deinit();
@@ -3388,9 +3392,9 @@ pub const Tensor = struct {
         const platform = zml.testing.env();
 
         {
-            const x = Tensor.init(Shape.init(.{10}, .f32)).withTags(.{.a});
-            const y = Tensor.init(Shape.init(.{2}, .f32)).withTags(.{.a});
-            const ids: Tensor = .init(Shape.init(.{}, .i32));
+            const x = Tensor.init(.{10}, .f32).withTags(.{.a});
+            const y = Tensor.init(.{2}, .f32).withTags(.{.a});
+            const ids: Tensor = .init(.{}, .i32);
             const forward = struct {
                 pub fn _fwd(x_: Tensor, idx_: struct { a: Tensor }, y_: Tensor) Tensor {
                     return x_.dynamicUpdateSlice(idx_, y_);
@@ -3414,9 +3418,9 @@ pub const Tensor = struct {
 
         {
             // Updates 2D, tagged api
-            const x = Tensor.init(Shape.init(.{ 2, 5 }, .f32)).withTags(.{ .a, .b });
-            const y = Tensor.init(Shape.init(.{2}, .f32)).withTags(.{.a});
-            const ids: Tensor = .init(Shape.init(.{}, .i32));
+            const x = Tensor.init(.{ 2, 5 }, .f32).withTags(.{ .a, .b });
+            const y = Tensor.init(.{2}, .f32).withTags(.{.a});
+            const ids: Tensor = .init(.{}, .i32);
             const forward = struct {
                 pub fn _fwd(x_: Tensor, idx_: Tensor, y_: Tensor) Tensor {
                     return x_.dynamicUpdateSlice(.{ .b = idx_ }, y_);
@@ -3443,9 +3447,9 @@ pub const Tensor = struct {
 
         {
             // Updates 2D slice, un-tagged api. Note that `y` needs to have a 1 dimension axis.
-            const x: Tensor = .init(Shape.init(.{ 2, 5 }, .f32));
-            const y: Tensor = .init(Shape.init(.{ 2, 1 }, .f32));
-            const ids: Tensor = .init(Shape.init(.{}, .i32));
+            const x: Tensor = .init(.{ 2, 5 }, .f32);
+            const y: Tensor = .init(.{ 2, 1 }, .f32);
+            const ids: Tensor = .init(.{}, .i32);
             const forward = struct {
                 pub fn _fwd(x_: Tensor, idx_: Tensor, y_: Tensor) Tensor {
                     return x_.dynamicUpdateSlice(.{ zml.Tensor.scalar(0, .i32), idx_ }, y_);
@@ -3472,10 +3476,10 @@ pub const Tensor = struct {
 
         {
             // Updates 2D, partial update
-            const x = Tensor.init(Shape.init(.{ 2, 5 }, .f32)).withTags(.{ .a, .b });
-            const y = Tensor.init(Shape.init(.{1}, .f32)).withTags(.{.a});
-            const idx_a: Tensor = .init(Shape.init(.{}, .i32));
-            const idx_b: Tensor = .init(Shape.init(.{}, .i32));
+            const x = Tensor.init(.{ 2, 5 }, .f32).withTags(.{ .a, .b });
+            const y = Tensor.init(.{1}, .f32).withTags(.{.a});
+            const idx_a: Tensor = .init(.{}, .i32);
+            const idx_b: Tensor = .init(.{}, .i32);
             const forward = struct {
                 pub fn _fwd(x_: Tensor, idx_: struct { a: Tensor, b: Tensor }, y_: Tensor) Tensor {
                     return x_.dynamicUpdateSlice(idx_, y_);
@@ -3504,10 +3508,10 @@ pub const Tensor = struct {
 
         {
             // Updates 2D, partial update, un-tagged api.
-            const x: Tensor = .init(Shape.init(.{ 2, 5 }, .f32));
-            const y: Tensor = .init(Shape.init(.{ 1, 1 }, .f32));
-            const idx_a: Tensor = .init(Shape.init(.{}, .i32));
-            const idx_b: Tensor = .init(Shape.init(.{}, .i32));
+            const x: Tensor = .init(.{ 2, 5 }, .f32);
+            const y: Tensor = .init(.{ 1, 1 }, .f32);
+            const idx_a: Tensor = .init(.{}, .i32);
+            const idx_b: Tensor = .init(.{}, .i32);
             const forward = struct {
                 pub fn _fwd(x_: Tensor, idx_: [2]Tensor, y_: Tensor) Tensor {
                     return x_.dynamicUpdateSlice(&idx_, y_);
@@ -3592,7 +3596,7 @@ pub const Tensor = struct {
             }
         };
 
-        const x: Tensor = .init(Shape.init(.{ 2, 2 }, .u8));
+        const x: Tensor = .init(.{ 2, 2 }, .u8);
 
         var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._toDiag, .{x}, platform);
         defer exe.deinit();
@@ -3645,7 +3649,7 @@ pub const Tensor = struct {
             }
         };
 
-        const x: Tensor = .init(Shape.init(.{ 3, 3 }, .u8));
+        const x: Tensor = .init(.{ 3, 3 }, .u8);
 
         var x_buffer: zml.Buffer = try .fromBytes(platform, x.shape(), std.mem.sliceAsBytes(&[3][3]u8{
             .{ 1, 1, 1 },
@@ -3813,8 +3817,8 @@ pub const Tensor = struct {
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
 
-        const x: Tensor = .init(Shape.init(.{6}, .i32));
-        const y: Tensor = .init(Shape.init(.{4}, .i32));
+        const x: Tensor = .init(.{6}, .i32);
+        const y: Tensor = .init(.{4}, .i32);
 
         const Local = struct {
             pub fn _cartesianProduct2(a: Tensor, b: Tensor) [2]Tensor {
@@ -3875,8 +3879,8 @@ pub const Tensor = struct {
     test cartesianProductStacked {
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
-        const x: Tensor = .init(Shape.init(.{6}, .i32));
-        const y: Tensor = .init(Shape.init(.{4}, .i32));
+        const x: Tensor = .init(.{6}, .i32);
+        const y: Tensor = .init(.{4}, .i32);
 
         const Local = struct {
             pub fn _fwd(a: Tensor, b: Tensor) Tensor {
@@ -4022,7 +4026,7 @@ test "Tensor.maxPool1d" {
     var data: [20]f32 = undefined;
     for (&data, 0..) |*v, i| v.* = @floatFromInt(i);
 
-    const x: Tensor = .init(Shape.init(.{ 2, 2, 5 }, .f32));
+    const x: Tensor = .init(.{ 2, 2, 5 }, .f32);
 
     var exe = try zml.module.compile(std.testing.allocator, std.testing.io, MaxPool._fwd, .{x}, platform);
     defer exe.deinit();
@@ -4061,7 +4065,7 @@ test "Tensor.maxPool2d" {
     var data: [100]f32 = undefined;
     for (&data, 0..) |*v, i| v.* = @floatFromInt(i);
 
-    const x: Tensor = .init(Shape.init(.{ 2, 2, 5, 5 }, .f32));
+    const x: Tensor = .init(.{ 2, 2, 5, 5 }, .f32);
 
     var exe = try zml.module.compile(std.testing.allocator, std.testing.io, MaxPool._fwd, .{x}, platform);
     defer exe.deinit();
@@ -4163,6 +4167,6 @@ test "unused tensor" {
         }
     };
 
-    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._fwd, .{Tensor.init(Shape.init(.{10}, .f32))}, platform);
+    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._fwd, .{Tensor.init(.{10}, .f32)}, platform);
     defer exe.deinit();
 }

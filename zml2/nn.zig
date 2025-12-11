@@ -120,7 +120,7 @@ pub fn normalizeL2(input: Tensor, eps: f32) Tensor {
 test normalizeL2 {
     const platform = zml.testing.env();
 
-    const input: zml.Tensor = .init(Shape.init(.{ 2, 2 }, .f32));
+    const input: zml.Tensor = .init(.{ 2, 2 }, .f32);
 
     var exe = try zml.module.compile(std.testing.allocator, std.testing.io, normalizeL2, .{ input, 1e-12 }, platform);
     defer exe.deinit();
@@ -511,7 +511,7 @@ test rope {
 
     // x is made such as the interleaved and sequential reps are the same.
     // So the two implementations should give the same results.
-    const x: zml.Tensor = .init(Shape.init(.{ .b = 1, .s = 5, .hd = 4 }, .f32));
+    const x: zml.Tensor = .init(.{ .b = 1, .s = 5, .hd = 4 }, .f32);
     var exe_interleaved = try zml.module.compile(std.testing.allocator, std.testing.io, Local._fwd, .{ x, RopeOpts{ .layout = .interleaved } }, platform);
     defer exe_interleaved.deinit();
 
@@ -590,7 +590,7 @@ test nearest {
 
     // 3D Tensor (basic)
     {
-        const input_3d_basic: zml.Tensor = .init(Shape.init(.{ 1, 1, 2 }, .i32));
+        const input_3d_basic: zml.Tensor = .init(.{ 1, 1, 2 }, .i32);
         var exe = try zml.module.compile(std.testing.allocator, std.testing.io, upsample, .{ input_3d_basic, .{ .scale_factor = &.{3}, .mode = .nearest } }, platform);
         defer exe.deinit();
 
@@ -607,7 +607,7 @@ test nearest {
 
     // 3D Tensor (advanced)
     {
-        const input_3d_advanced: zml.Tensor = .init(Shape.init(.{ 2, 3, 4 }, .i32));
+        const input_3d_advanced: zml.Tensor = .init(.{ 2, 3, 4 }, .i32);
         var exe = try zml.module.compile(std.testing.allocator, std.testing.io, upsample, .{ input_3d_advanced, .{ .scale_factor = &.{2}, .mode = .nearest } }, platform);
         defer exe.deinit();
 
@@ -638,7 +638,7 @@ test nearest {
 
     // 4D Tensor (basic)
     {
-        const input_4d_basic: zml.Tensor = .init(Shape.init(.{ 1, 1, 2, 2 }, .i32));
+        const input_4d_basic: zml.Tensor = .init(.{ 1, 1, 2, 2 }, .i32);
         var exe = try zml.module.compile(std.testing.allocator, std.testing.io, upsample, .{ input_4d_basic, .{ .scale_factor = &.{ 3, 3 }, .mode = .nearest } }, platform);
         defer exe.deinit();
 
@@ -661,7 +661,7 @@ test nearest {
     }
     // 4D Tensor (advanced)
     {
-        const input_4d_advanced: zml.Tensor = .init(Shape.init(.{ 2, 2, 2, 2 }, .i32));
+        const input_4d_advanced: zml.Tensor = .init(.{ 2, 2, 2, 2 }, .i32);
         var exe = try zml.module.compile(std.testing.allocator, std.testing.io, upsample, .{ input_4d_advanced, .{ .scale_factor = &.{ 2, 2 }, .mode = .nearest } }, platform);
         defer exe.deinit();
 
@@ -712,7 +712,7 @@ test nearest {
     }
     // 5D Tensor (basic)
     {
-        const input_5d: zml.Tensor = .init(Shape.init(.{ 1, 1, 1, 2, 2 }, .i32));
+        const input_5d: zml.Tensor = .init(.{ 1, 1, 1, 2, 2 }, .i32);
         var exe = try zml.module.compile(std.testing.allocator, std.testing.io, upsample, .{ input_5d, .{ .scale_factor = &.{2}, .mode = .nearest } }, platform);
         defer exe.deinit();
 
@@ -1055,7 +1055,7 @@ test sampleTokens {
     const platform = zml.testing.env();
 
     const rng: zml.Tensor.Rng = .init();
-    const activations: zml.Tensor = .init(Shape.init(.{ .voc = 4 }, .f32));
+    const activations: zml.Tensor = .init(.{ .voc = 4 }, .f32);
 
     var exe = try zml.module.compile(std.testing.allocator, std.testing.io, sampleTokens, .{ activations, .{ .topk = 4, .temperature = 2.0 }, rng }, platform);
     defer exe.deinit();
@@ -1101,10 +1101,10 @@ pub const DynamicSamplingStrategy = struct {
         const scalar_i32_shape = Shape.init(.{}, .i32);
         return .{
             .max_top_k = max_top_k,
-            .top_k = .init(scalar_i32_shape),
-            .temperature = .init(scalar_float_shape),
-            .top_p = .init(scalar_float_shape),
-            .min_p = .init(scalar_float_shape),
+            .top_k = .fromShape(scalar_i32_shape),
+            .temperature = .fromShape(scalar_float_shape),
+            .top_p = .fromShape(scalar_float_shape),
+            .min_p = .fromShape(scalar_float_shape),
         };
     }
 
@@ -1194,7 +1194,7 @@ test sampleTokensDynamic {
     const logits_data = [_]f32{ @log(2.0), @log(1.0), @log(4.0), @log(3.0) };
     const top_k_indices = [_]i32{ 2, 3, 0, 1 };
 
-    const logits: zml.Tensor = .init(zml.Shape.init(.{ .voc = logits_data.len }, .f32));
+    const logits: zml.Tensor = .init(.{ .voc = logits_data.len }, .f32);
     const dynamic_sampling_strategy = DynamicSamplingStrategy.init(.f32, 0);
 
     var exe = try zml.module.compile(std.testing.allocator, std.testing.io, fixupLogits, .{ logits, dynamic_sampling_strategy }, platform);
@@ -1232,7 +1232,7 @@ test sampleTokensDynamic {
         // Similar but use bf16, and uses infinity to trigger nans after the softmax.
         const bf16 = zml.floats.BFloat16;
 
-        const logits_bf16: zml.Tensor = .init(Shape.init(.{ .voc = logits_data.len }, .bf16));
+        const logits_bf16: zml.Tensor = .init(.{ .voc = logits_data.len }, .bf16);
         const dynamic_sampling_strategy_bf16 = DynamicSamplingStrategy.init(.bf16, 0);
         var exe_bf16 = try zml.module.compile(std.testing.allocator, std.testing.io, fixupLogits, .{ logits_bf16, dynamic_sampling_strategy_bf16 }, platform);
         defer exe_bf16.deinit();

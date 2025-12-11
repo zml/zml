@@ -7,8 +7,8 @@ pub const Model = struct {
 
     pub fn init() !Model {
         return .{
-            .weight = .init(zml.Shape.init(.{ .m = 4096, .n = 4096 }, .f32)),
-            .bias = .init(zml.Shape.init(.{ .m = 4096 }, .f32)),
+            .weight = .init(.{ .m = 4096, .n = 4096 }, .f32),
+            .bias = .init(.{ .m = 4096 }, .f32),
         };
     }
 
@@ -63,7 +63,7 @@ pub fn main() !void {
     var model: Model = try .init();
     defer model.deinit();
 
-    const input: zml.Tensor = .init(zml.Shape.init(.{ .n = 4096 }, .f32));
+    const input: zml.Tensor = .init(.{ .n = 4096 }, .f32);
     var exe = try zml.module.compileModel(allocator, io, Model.forward, model, .{input}, platform);
     defer exe.deinit();
 

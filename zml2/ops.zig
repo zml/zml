@@ -28,8 +28,8 @@ pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func
         var block_types: [2 * inits.len]*const mlir.Type = undefined;
 
         inline for (0..inits.len) |i| {
-            args[i].left = Tensor.init(inits[i].shape());
-            args[i].right = Tensor.init(inits[i].shape());
+            args[i].left = .fromShape(inits[i].shape());
+            args[i].right = .fromShape(inits[i].shape());
 
             block_types[i] = mlir.rankedTensorType(args[i].left.dims(), mlirx.Type.fromDType(mlir_ctx, args[i].left.dtype()));
             block_types[i + inits.len] = mlir.rankedTensorType(args[i].right.dims(), mlirx.Type.fromDType(mlir_ctx, args[i].right.dtype()));
@@ -131,8 +131,8 @@ pub fn reduceWindow(inputs: anytype, inits: anytype, opts: ReduceWindowOpts, com
         var block_types: [2 * inits.len]*const mlir.Type = undefined;
 
         inline for (0..inits.len) |i| {
-            args[i].left = Tensor.init(inits[i].shape());
-            args[i].right = Tensor.init(inits[i].shape());
+            args[i].left = .fromShape(inits[i].shape());
+            args[i].right = .fromShape(inits[i].shape());
 
             block_types[i] = mlir.rankedTensorType(args[i].left.dims(), mlirx.Type.fromDType(mlir_ctx, args[i].left.dtype()));
             block_types[i + inits.len] = mlir.rankedTensorType(args[i].right.dims(), mlirx.Type.fromDType(mlir_ctx, args[i].right.dtype()));
@@ -209,8 +209,8 @@ pub fn sort(inputs: anytype, axis_: i64, comptime func: anytype, context: anytyp
         var block_types: [2 * inputs.len]*const mlir.Type = undefined;
 
         inline for (0..inputs.len) |i| {
-            args[i].left = Tensor.init(Shape.init(.{}, inputs[i].shape().dtype()));
-            args[i].right = Tensor.init(Shape.init(.{}, inputs[i].shape().dtype()));
+            args[i].left = Tensor.init(.{}, inputs[i].shape().dtype());
+            args[i].right = Tensor.init(.{}, inputs[i].shape().dtype());
 
             block_types[2 * i] = mlir.rankedTensorType(args[i].left.dims(), mlirx.Type.fromDType(mlir_ctx, args[i].left.dtype()));
             block_types[2 * i + 1] = mlir.rankedTensorType(args[i].right.dims(), mlirx.Type.fromDType(mlir_ctx, args[i].right.dtype()));
@@ -363,8 +363,8 @@ test "triton" {
         }
     };
 
-    const a: zml.Tensor = .init(Shape.init(.{}, .f32));
-    const b: zml.Tensor = .init(Shape.init(.{}, .f32));
+    const a: zml.Tensor = .init(.{}, .f32);
+    const b: zml.Tensor = .init(.{}, .f32);
 
     var exe = try zml.module.compile(std.testing.allocator, std.testing.io, TritonMod.forward, .{ a, b }, platform);
     defer exe.deinit();
@@ -423,8 +423,8 @@ pub fn scatter(
         var block_types: [2 * inputs.len]*const mlir.Type = undefined;
 
         inline for (0..inputs.len) |i| {
-            args[i].input = Tensor.init(Shape.init(.{}, inputs[i].dtype()));
-            args[i].update = Tensor.init(Shape.init(.{}, inputs[i].dtype()));
+            args[i].input = Tensor.init(.{}, inputs[i].dtype());
+            args[i].update = Tensor.init(.{}, inputs[i].dtype());
 
             block_types[i] = mlir.rankedTensorType(args[i].input.dims(), mlirx.Type.fromDType(mlir_ctx, args[i].input.dtype()));
             block_types[i + inputs.len] = mlir.rankedTensorType(args[i].update.dims(), mlirx.Type.fromDType(mlir_ctx, args[i].update.dtype()));

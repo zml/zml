@@ -153,7 +153,7 @@ pub fn compileAndCall(
     var context2: LocalContext2 = .{ .shape_list = &shape_list };
     try zml.meta.visit(struct {
         fn cb(context_: *LocalContext2, tensor: *zml.Tensor) !void {
-            tensor.* = zml.Tensor.init(context_.shape_list.items[context_.index]);
+            tensor.* = .fromShape(context_.shape_list.items[context_.index]);
             context_.index += 1;
         }
     }.cb, &context2, &func_args);
