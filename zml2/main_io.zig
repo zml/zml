@@ -62,10 +62,10 @@ pub fn main() !void {
 
     const io = vfs.io();
 
-    // const repo_uri = "hf://Qwen/Qwen3-8B";
+    const repo_uri = "hf://Qwen/Qwen3-8B";
     // const repo_uri = "file:///Users/hugo/Developer/Llama-3.1-8B-Instruct";
     // const repo_uri = "https://storage.googleapis.com/zig-vfs/Llama-3.1-8B-Instruct/";
-    const repo_uri = "http://9960x-5090x2:8003/";
+    // const repo_uri = "http://9960x-5090x2:8003/";
 
     {
         var timer = try std.time.Timer.start();
