@@ -99,74 +99,104 @@ pub fn main() !void {
         const file_type = zml.safetensors.resolveFiletype(file_path);
         log.info("Resolved file type for '{s}': {any}", .{ uri, file_type });
 
-        const index_file_path = file_path;
+        var registry: zml.safetensors.TensorRegistry = undefined;
+        defer registry.deinit();
 
-        const index_file = try vfs.openAbsoluteFile(io, index_file_path, .{});
-        defer index_file.close(io);
+        switch (file_type) {
+            .index => {
+                const index_file = try vfs.openAbsoluteFile(io, file_path, .{});
+                defer index_file.close(io);
 
-        const file_reader_buf = try allocator.alloc(u8, 1 * 1024 * 1024);
-        defer allocator.free(file_reader_buf);
+                const file_reader_buf = try allocator.alloc(u8, 4 * 1024);
+                defer allocator.free(file_reader_buf);
 
-        var index_reader = index_file.reader(io, file_reader_buf);
+                var index_reader = index_file.reader(io, file_reader_buf);
 
-        var safetensors_index = try zml.safetensors.parseSafetensorsIndex(
-            allocator,
-            &index_reader.interface,
-        );
-        defer safetensors_index.deinit();
+                var safetensors_index = try zml.safetensors.parseSafetensorsIndex(
+                    allocator,
+                    &index_reader.interface,
+                );
+                defer safetensors_index.deinit();
 
-        var tensor_registry: zml.safetensors.TensorRegistry = try .initWithMetadata(allocator, safetensors_index.metadata);
-        defer tensor_registry.deinit();
+                registry = try .initWithMetadata(allocator, safetensors_index.metadata);
 
-        const AsyncParseSafetensors = struct {
-            pub fn run(allocator_: std.mem.Allocator, io_: std.Io, repo_: std.Io.Dir, registry: *zml.safetensors.TensorRegistry, repo_uri_: []const u8, filename: []const u8, err_ptr: *?anyerror) void {
-                parseSafetensors(allocator_, io_, repo_, registry, repo_uri_, filename) catch |err| {
-                    err_ptr.* = err;
-                };
-            }
+                const AsyncParseSafetensors = struct {
+                    pub fn run(
+                        allocator_: std.mem.Allocator,
+                        io_: std.Io,
+                        repo_: std.Io.Dir,
+                        registry_: *zml.safetensors.TensorRegistry,
+                        repo_path_: []const u8,
+                        filename: []const u8,
+                        err_ptr: *?anyerror,
+                    ) void {
+                        parseSafetensors(allocator_, io_, repo_, registry_, repo_path_, filename) catch |err| {
+                            err_ptr.* = err;
+                        };
+                    }
 
-            fn parseSafetensors(allocator_: std.mem.Allocator, io_: std.Io, repo_: std.Io.Dir, registry: *zml.safetensors.TensorRegistry, repo_uri_: []const u8, filename: []const u8) !void {
-                const file_uri = try std.fs.path.join(allocator_, &.{ repo_uri_, filename });
-                defer allocator_.free(file_uri);
+                    fn parseSafetensors(
+                        allocator_: std.mem.Allocator,
+                        io_: std.Io,
+                        repo_: std.Io.Dir,
+                        registry_: *zml.safetensors.TensorRegistry,
+                        repo_path_: []const u8,
+                        filename: []const u8,
+                    ) !void {
+                        const file_uri = try std.fs.path.join(allocator_, &.{ repo_path_, filename });
+                        defer allocator_.free(file_uri);
 
-                const file = try repo_.openFile(io_, filename, .{});
-                defer file.close(io_);
+                        const file = try repo_.openFile(io_, filename, .{});
+                        defer file.close(io_);
 
-                const header_buf = try allocator_.alloc(u8, 1 * 1024 * 1024);
-                defer allocator_.free(header_buf);
+                        const header_buf = try allocator_.alloc(u8, 4 * 1024);
+                        defer allocator_.free(header_buf);
 
-                var reader = file.reader(io_, header_buf);
+                        var reader = file.reader(io_, header_buf);
 
-                try zml.safetensors.parseSafetensors(allocator_, registry, file_uri, &reader.interface);
-            }
-        }.run;
+                        try zml.safetensors.parseSafetensors(allocator_, registry_, file_uri, &reader.interface);
+                    }
+                }.run;
 
-        var group: std.Io.Group = .init;
-        defer group.cancel(io);
+                var group: std.Io.Group = .init;
+                defer group.cancel(io);
 
-        var err: ?anyerror = null;
+                var err: ?anyerror = null;
 
-        var safetensors_it = safetensors_index.iterator();
-        while (safetensors_it.next()) |entry| {
-            const filename = entry.key_ptr.*;
+                var safetensors_it = safetensors_index.iterator();
+                while (safetensors_it.next()) |entry| {
+                    const filename = entry.key_ptr.*;
 
-            group.async(threaded.io(), AsyncParseSafetensors, .{ allocator, io, repo, &tensor_registry, repo_uri, filename, &err });
+                    group.async(threaded.io(), AsyncParseSafetensors, .{ allocator, io, repo, &registry, repo_path, filename, &err });
+                }
+
+                group.wait(io);
+
+                if (err) |e| return e;
+            },
+            .safetensors => {
+                registry = .init(allocator);
+
+                const file = try repo.openFile(io, file_path, .{});
+                defer file.close(io);
+
+                const header_buf = try allocator.alloc(u8, 4 * 1024);
+                defer allocator.free(header_buf);
+
+                var reader = file.reader(io, header_buf);
+
+                try zml.safetensors.parseSafetensors(allocator, &registry, file_path, &reader.interface);
+            },
+            else => return error.InvalidPath,
         }
 
-        group.wait(io);
-
-        if (err) |e| return e;
-
-        var it = tensor_registry.iterator();
+        var it = registry.iterator();
         while (it.next()) |entry| {
             const tensor = entry.value_ptr.*;
             log.info("Tensor: {f}", .{tensor});
         }
 
-        log.info("Parsed {d} tensors across {d} files", .{
-            tensor_registry.tensors.count(),
-            safetensors_index.map.count(),
-        });
+        log.info("Parsed {d} tensors", .{registry.tensors.count()});
     }
 
     // {
