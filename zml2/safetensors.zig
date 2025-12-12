@@ -46,9 +46,8 @@ pub fn resolveModelPathEntrypoint(allocator: std.mem.Allocator, io: std.Io, vfs:
             break;
         }
     } else {
-        if (std.mem.startsWith(u8, path, "/") or std.mem.startsWith(u8, path, "./") or std.mem.startsWith(u8, path, "../")) {
-            // assume file scheme
-            // continue
+        if (std.mem.startsWith(u8, path, "/")) {
+            // continue, local file path
         } else {
             log.err("Unsupported URI scheme in path: {s}", .{path});
             return ModelPathResolutionError.InvalidPath;
