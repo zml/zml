@@ -62,127 +62,205 @@ pub fn main() !void {
 
     const io = vfs.io();
 
-    const repo_uri = "hf://Qwen/Qwen3-8B";
+    // const repo_uri = "hf://Qwen/Qwen3-8B";
     // const repo_uri = "file:///Users/hugo/Developer/Llama-3.1-8B-Instruct";
     // const repo_uri = "https://storage.googleapis.com/zig-vfs/Llama-3.1-8B-Instruct/";
-    // const repo_uri = "http://9960x-5090x2:8003/";
+    const repo_uri = "http://9960x-5090x2:8003/";
 
     {
-        const root_dir = try vfs.openAbsoluteDir(io, "https://storage.googleapis.com", .{});
-        defer root_dir.close(io);
+        var timer = try std.time.Timer.start();
+        defer {
+            const elapsed = timer.read();
+            log.info("Completed in {d} ms", .{elapsed / std.time.ns_per_ms});
+        }
 
-        const buckets_dir = try root_dir.openDir(io, "zig-vfs", .{});
-        defer buckets_dir.close(io);
+        const repo = try vfs.openAbsoluteDir(io, repo_uri, .{});
+        defer repo.close(io);
 
-        const model_dir = try buckets_dir.openDir(io, "Llama-3.1-8B-Instruct", .{});
-        defer model_dir.close(io);
+        const index_file = try repo.openFile(io, "model.safetensors.index.json", .{});
+        defer index_file.close(io);
 
-        const file = try model_dir.openFile(io, "model.safetensors.index.json", .{});
-        defer file.close(io);
+        const file_reader_buf = try allocator.alloc(u8, 1 * 1024 * 1024);
+        defer allocator.free(file_reader_buf);
 
-        const stat = try file.stat(io);
-        log.info("Opened remote file with size: {d} bytes by navigating dirs", .{stat.size});
-    }
+        var index_reader = index_file.reader(io, file_reader_buf);
 
-    {
-        const path = try std.fs.path.join(allocator, &.{ repo_uri, "model-00004-of-00005.safetensors" });
-        defer allocator.free(path);
+        var safetensors_index = try zml.safetensors.parseSafetensorsIndex(
+            allocator,
+            &index_reader.interface,
+        );
+        defer safetensors_index.deinit();
 
-        const file = try vfs.openAbsoluteFile(io, path, .{});
-        defer file.close(io);
+        var tensor_registry: zml.safetensors.TensorRegistry = try .initWithMetadata(allocator, safetensors_index.metadata);
+        defer tensor_registry.deinit();
 
-        const stat = try file.stat(io);
+        const AsyncParseSafetensors = struct {
+            pub fn run(allocator_: std.mem.Allocator, io_: std.Io, repo_: std.Io.Dir, registry: *zml.safetensors.TensorRegistry, filename: []const u8, err_ptr: *?anyerror) void {
+                parseSafetensors(allocator_, io_, repo_, registry, filename) catch |err| {
+                    err_ptr.* = err;
+                };
+            }
+
+            fn parseSafetensors(allocator_: std.mem.Allocator, io_: std.Io, repo_: std.Io.Dir, registry: *zml.safetensors.TensorRegistry, filename: []const u8) !void {
+                const file_uri = try std.fs.path.join(allocator_, &.{ repo_uri, filename });
+                defer allocator_.free(file_uri);
+
+                const file = try repo_.openFile(io_, filename, .{});
+                defer file.close(io_);
+
+                const header_buf = try allocator_.alloc(u8, 1 * 1024 * 1024);
+                defer allocator_.free(header_buf);
+
+                var reader = file.reader(io_, header_buf);
+
+                try zml.safetensors.parseSafetensors(allocator_, registry, file_uri, &reader.interface);
+            }
+        }.run;
 
         var group: std.Io.Group = .init;
         defer group.cancel(io);
 
-        const chunk_size: usize = 32 * 1024 * 1024;
-        const num_chunks = (stat.size + chunk_size - 1) / chunk_size;
+        var err: ?anyerror = null;
 
-        for (0..num_chunks) |i| {
-            const offset = i * chunk_size;
-            const size = if (offset + chunk_size > stat.size) stat.size - offset else chunk_size;
+        var safetensors_it = safetensors_index.iterator();
+        while (safetensors_it.next()) |entry| {
+            const filename = entry.key_ptr.*;
 
-            group.async(threaded.io(), readData, .{ allocator, io, &vfs, path, offset, size, i });
+            group.async(threaded.io(), AsyncParseSafetensors, .{ allocator, io, repo, &tensor_registry, filename, &err });
         }
 
         group.wait(io);
-    }
 
-    {
-        const path = try std.fs.path.join(allocator, &.{ repo_uri, "model.safetensors.index.json" });
-        defer allocator.free(path);
+        if (err) |e| return e;
 
-        const file = try vfs.openAbsoluteFile(io, path, .{});
-        defer file.close(io);
-
-        const stat = try file.stat(io);
-        log.info("Opened remote file with size: {d} bytes with openAbsoluteFile", .{stat.size});
-    }
-
-    {
-        const model_dir = try vfs.openAbsoluteDir(io, repo_uri, .{});
-
-        const safetensors_index = try model_dir.openFile(io, "model.safetensors.index.json", .{});
-        defer safetensors_index.close(io);
-
-        const stat = try safetensors_index.stat(io);
-        log.info("Opened remote index file with size: {d} bytes with openAbsoluteDir + openFile", .{stat.size});
-    }
-
-    {
-        const path = try std.fs.path.join(allocator, &.{ repo_uri, "model-00004-of-00005.safetensors" });
-        defer allocator.free(path);
-
-        const file = try vfs.openAbsoluteFile(io, path, .{});
-        defer file.close(io);
-
-        var reader = file.reader(io, &.{});
-
-        const read_size = 16 * 1024 * 1024;
-
-        var allocating_writer: std.Io.Writer.Allocating = try .initCapacity(allocator, read_size);
-        defer allocating_writer.deinit();
-
-        const read = try reader.interface.stream(&allocating_writer.writer, .limited(read_size));
-        std.debug.assert(read == read_size);
-    }
-
-    {
-        const path = try std.fs.path.join(allocator, &.{ repo_uri, "model-00004-of-00005.safetensors" }); // SHA256: 92ecfe1a2414458b4821ac8c13cf8cb70aed66b5eea8dc5ad9eeb4ff309d6d7b
-        defer allocator.free(path);
-
-        const file = try vfs.openAbsoluteFile(io, path, .{});
-        defer file.close(io);
-
-        const stat = try file.stat(io);
-
-        const buf_size = 64 * 1024 * 1024;
-        const buf = try allocator.alloc(u8, buf_size);
-        defer allocator.free(buf);
-
-        var sha256: std.crypto.hash.sha2.Sha256 = .init(.{});
-        const compute_sha = true;
-
-        // Read directly without extra buffering layers
-        var total_read: usize = 0;
-        var bufs = [_][]u8{buf};
-
-        while (true) {
-            const n = try io.vtable.fileReadStreaming(io.userdata, file, &bufs);
-            if (n == 0) break;
-            if (compute_sha) sha256.update(buf[0..n]);
-            total_read += n;
+        var it = tensor_registry.iterator();
+        while (it.next()) |entry| {
+            const tensor = entry.value_ptr.*;
+            log.info("Tensor: {f}", .{tensor});
         }
 
-        if (compute_sha) {
-            var hash: [32]u8 = undefined;
-            sha256.final(&hash);
-            log.info("SHA256: {x}", .{hash});
-        }
-
-        std.debug.assert(total_read == stat.size);
+        log.info("Parsed {d} tensors across {d} files", .{
+            tensor_registry.tensors.count(),
+            safetensors_index.map.count(),
+        });
     }
+
+    // {
+    //     const root_dir = try vfs.openAbsoluteDir(io, "https://storage.googleapis.com", .{});
+    //     defer root_dir.close(io);
+
+    //     const buckets_dir = try root_dir.openDir(io, "zig-vfs", .{});
+    //     defer buckets_dir.close(io);
+
+    //     const model_dir = try buckets_dir.openDir(io, "Llama-3.1-8B-Instruct", .{});
+    //     defer model_dir.close(io);
+
+    //     const file = try model_dir.openFile(io, "model.safetensors.index.json", .{});
+    //     defer file.close(io);
+
+    //     const stat = try file.stat(io);
+    //     log.info("Opened remote file with size: {d} bytes by navigating dirs", .{stat.size});
+    // }
+
+    // {
+    //     const path = try std.fs.path.join(allocator, &.{ repo_uri, "model-00004-of-00005.safetensors" });
+    //     defer allocator.free(path);
+
+    //     const file = try vfs.openAbsoluteFile(io, path, .{});
+    //     defer file.close(io);
+
+    //     const stat = try file.stat(io);
+
+    //     var group: std.Io.Group = .init;
+    //     defer group.cancel(io);
+
+    //     const chunk_size: usize = 32 * 1024 * 1024;
+    //     const num_chunks = (stat.size + chunk_size - 1) / chunk_size;
+
+    //     for (0..num_chunks) |i| {
+    //         const offset = i * chunk_size;
+    //         const size = if (offset + chunk_size > stat.size) stat.size - offset else chunk_size;
+
+    //         group.async(threaded.io(), readData, .{ allocator, io, &vfs, path, offset, size, i });
+    //     }
+
+    //     group.wait(io);
+    // }
+
+    // {
+    //     const path = try std.fs.path.join(allocator, &.{ repo_uri, "model.safetensors.index.json" });
+    //     defer allocator.free(path);
+
+    //     const file = try vfs.openAbsoluteFile(io, path, .{});
+    //     defer file.close(io);
+
+    //     const stat = try file.stat(io);
+    //     log.info("Opened remote file with size: {d} bytes with openAbsoluteFile", .{stat.size});
+    // }
+
+    // {
+    //     const model_dir = try vfs.openAbsoluteDir(io, repo_uri, .{});
+
+    //     const safetensors_index = try model_dir.openFile(io, "model.safetensors.index.json", .{});
+    //     defer safetensors_index.close(io);
+
+    //     const stat = try safetensors_index.stat(io);
+    //     log.info("Opened remote index file with size: {d} bytes with openAbsoluteDir + openFile", .{stat.size});
+    // }
+
+    // {
+    //     const path = try std.fs.path.join(allocator, &.{ repo_uri, "model-00004-of-00005.safetensors" });
+    //     defer allocator.free(path);
+
+    //     const file = try vfs.openAbsoluteFile(io, path, .{});
+    //     defer file.close(io);
+
+    //     var reader = file.reader(io, &.{});
+
+    //     const read_size = 16 * 1024 * 1024;
+
+    //     var allocating_writer: std.Io.Writer.Allocating = try .initCapacity(allocator, read_size);
+    //     defer allocating_writer.deinit();
+
+    //     const read = try reader.interface.stream(&allocating_writer.writer, .limited(read_size));
+    //     std.debug.assert(read == read_size);
+    // }
+
+    // {
+    //     const path = try std.fs.path.join(allocator, &.{ repo_uri, "model-00004-of-00005.safetensors" }); // SHA256: 92ecfe1a2414458b4821ac8c13cf8cb70aed66b5eea8dc5ad9eeb4ff309d6d7b
+    //     defer allocator.free(path);
+
+    //     const file = try vfs.openAbsoluteFile(io, path, .{});
+    //     defer file.close(io);
+
+    //     const stat = try file.stat(io);
+
+    //     const buf_size = 64 * 1024 * 1024;
+    //     const buf = try allocator.alloc(u8, buf_size);
+    //     defer allocator.free(buf);
+
+    //     var sha256: std.crypto.hash.sha2.Sha256 = .init(.{});
+    //     const compute_sha = true;
+
+    //     // Read directly without extra buffering layers
+    //     var total_read: usize = 0;
+    //     var bufs = [_][]u8{buf};
+
+    //     while (true) {
+    //         const n = try io.vtable.fileReadStreaming(io.userdata, file, &bufs);
+    //         if (n == 0) break;
+    //         if (compute_sha) sha256.update(buf[0..n]);
+    //         total_read += n;
+    //     }
+
+    //     if (compute_sha) {
+    //         var hash: [32]u8 = undefined;
+    //         sha256.final(&hash);
+    //         log.info("SHA256: {x}", .{hash});
+    //     }
+
+    //     std.debug.assert(total_read == stat.size);
+    // }
 }
 
 fn readData(

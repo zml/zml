@@ -2,6 +2,8 @@ const std = @import("std");
 
 const log = std.log.scoped(.@"zml/io/vfs/hf");
 
+// todo : refactor this code to align with http vfs
+
 pub const HF = struct {
     pub const Auth = union(enum) {
         none,

@@ -3,7 +3,7 @@ const std = @import("std");
 const log = std.log.scoped(.@"zml/io/vfs/http");
 
 pub const HTTP = struct {
-    pub const HandleId = i32;
+    const HandleId = i32;
 
     pub const FileHandle = struct {
         allocator: std.mem.Allocator,
@@ -11,7 +11,7 @@ pub const HTTP = struct {
         url: []const u8,
         pos: u64,
         size: ?u64,
-        redirect_buffer: [1024 * 1024]u8,
+        redirect_buffer: [std.fs.max_path_bytes]u8,
         request: ?*std.http.Client.Request,
         response: ?std.http.Client.Response,
         body_reader: ?*std.Io.Reader,
@@ -122,7 +122,7 @@ pub const HTTP = struct {
 
     vtable: std.Io.VTable,
 
-    pub fn init(allocator: std.mem.Allocator, base_io: std.Io, http_client: *std.http.Client, config: Config) !HTTP {
+    pub fn init(allocator: std.mem.Allocator, base_io: std.Io, http_client: *std.http.Client, config: Config) std.mem.Allocator.Error!HTTP {
         var self: HTTP = .{
             .allocator = allocator,
             .mutex = .{},
@@ -212,17 +212,20 @@ pub const HTTP = struct {
         sub_path: []const u8,
     ) std.Io.File.OpenError!std.Io.File {
         const dir_handle = self.dirHandle(dir) orelse {
-            log.err("Directory handle not found for dirOpenFile", .{});
+            log.err("Directory handle not found for dirOpenFile with dir={any} sub_path={s}", .{ dir.handle, sub_path });
             return std.Io.File.OpenError.FileNotFound;
         };
 
         const handle = FileHandle.init(self.allocator, dir_handle.url, sub_path) catch {
-            log.err("Failed to create FileHandle in dirOpenFile", .{});
+            log.err("Failed to create FileHandle in openFile with dir={any} sub_path={s}", .{ dir.handle, sub_path });
             return std.Io.File.OpenError.SystemResources;
         };
         errdefer handle.deinit();
 
-        const handle_id = self.registerFileHandle(handle) catch return error.SystemResources;
+        const handle_id = self.registerFileHandle(handle) catch {
+            log.err("Failed to register FileHandle in openFile with dir={any} sub_path={s}", .{ dir.handle, sub_path });
+            return std.Io.File.OpenError.SystemResources;
+        };
 
         return .{ .handle = @intCast(handle_id) };
     }
