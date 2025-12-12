@@ -57,8 +57,13 @@ pub fn main() !void {
     zml.init();
     defer zml.deinit();
 
-    var platform = try zml.Platform.init(.cpu, io, .{});
+    const available = zml.Platform.availablePlatforms(io);
+    std.log.info("Available platforms: {any}", .{available});
+
+    var platform = try zml.Platform.auto(io, .{});
     defer platform.deinit();
+
+    std.log.info("Selected platform: {f}", .{platform});
 
     var model: Model = try .init();
     defer model.deinit();

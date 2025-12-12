@@ -17,6 +17,29 @@ pub const CompilationOptions = struct {
     device_memory_size: u64 = 0,
 };
 
+fn StaticPlatformMap(comptime E: type, comptime T: type) type {
+    const tag_count = @typeInfo(E).@"enum".fields.len;
+    var struct_field_names: [tag_count][]const u8 = undefined;
+    var struct_field_types: [tag_count]type = @splat(T);
+    const is_optional = @typeInfo(T) == .optional;
+    const default_value_ptr: ?*const anyopaque = if (is_optional) @ptrCast(&@as(T, null)) else null;
+    var struct_field_attrs: [tag_count]std.builtin.Type.StructField.Attributes = @splat(.{ .default_value_ptr = default_value_ptr });
+    inline for (@typeInfo(E).@"enum".fields, 0..) |f, i| struct_field_names[i] = f.name;
+    return @Struct(.auto, null, &struct_field_names, &struct_field_types, &struct_field_attrs);
+}
+
+var api_map: StaticPlatformMap(Target, ?*const pjrt.Api) = .{};
+
+fn loadOrGetApi(target: Target, io: std.Io) !*const pjrt.Api {
+    return switch (target) {
+        inline else => |tag| @field(api_map, @tagName(tag)) orelse b: {
+            const api = try runtimes.load(tag, io);
+            @field(api_map, @tagName(tag)) = api;
+            break :b api;
+        },
+    };
+}
+
 pub const Platform = struct {
     target: Target,
     pjrt_api: *const pjrt.Api,
@@ -31,7 +54,7 @@ pub const Platform = struct {
     pub const MAX_NUM_DEVICES: u8 = if (runtimes.isEnabled(.tpu)) 32 else 8;
 
     pub fn init(target: Target, io: std.Io, options: CreateOptions) !Platform {
-        const api = try runtimes.load(target, io);
+        const api = try loadOrGetApi(target, io);
 
         var named_values_buf: [16]pjrt.NamedValue = undefined;
         const pjrt_client = try pjrt.Client.init(api, options.toNamedValues(target, &named_values_buf));
@@ -45,6 +68,38 @@ pub const Platform = struct {
             .pjrt_client = pjrt_client,
             .compilation_options = .{},
         };
+    }
+
+    pub fn auto(io: std.Io, options: CreateOptions) !Platform {
+        const ordered_targets = [_]Target{ .tpu, .neuron, .cuda, .rocm, .cpu };
+        return for (ordered_targets) |target| {
+            break init(target, io, options) catch continue;
+        } else error.Unavailable;
+    }
+
+    pub fn availablePlatforms(io: std.Io) StaticPlatformMap(Target, bool) {
+        var result: StaticPlatformMap(Target, bool) = undefined;
+        inline for (@typeInfo(Target).@"enum".fields) |field| {
+            if (@field(api_map, field.name) != null) {
+                @field(result, field.name) = true;
+            } else {
+                if (loadOrGetApi(@enumFromInt(field.value), io)) |_| {
+                    @field(result, field.name) = true;
+                } else |_| {
+                    @field(result, field.name) = false;
+                }
+            }
+        }
+        return result;
+    }
+
+    pub fn printAvailablePlatforms(io: std.Io) void {
+        const available_platforms = availablePlatforms(io);
+        inline for (@typeInfo(Target).@"enum".fields) |field| {
+            if (@field(available_platforms, field.name)) {
+                std.log.info("{f}", .{@field(api_map, field.name).?});
+            }
+        }
     }
 
     pub fn getDevices(self: Platform) []const *const pjrt.Device {
@@ -118,6 +173,17 @@ pub const Platform = struct {
 
         const device = platform.getDevices()[device_id];
         return device.memoryStats(platform.pjrt_api) catch .zeroes;
+    }
+
+    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writer.print("{s} {{ ", .{@tagName(self.target)});
+        const devices = self.getDevices();
+        for (0..devices.len) |i| {
+            const description = devices[i].getDescription(self.pjrt_api);
+            try writer.print("{s}(\"{s}\")", .{ description.toString(self.pjrt_api), description.getKind(self.pjrt_api) });
+            if (i < devices.len - 1) try writer.writeAll(", ");
+        }
+        try writer.writeAll(" }");
     }
 };
 
