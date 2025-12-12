@@ -194,7 +194,7 @@ fn parse_flags(args: *std.process.ArgIterator, comptime Flags: type) Flags {
                 .default_value_ptr = @ptrCast(&@as(u32, 0)),
             };
         }
-        break :blk @Struct(.auto, null, count_field_names, count_field_types, count_field_attrs){};
+        break :blk @Struct(.auto, null, &count_field_names, &count_field_types, &count_field_attrs){};
     };
 
     // When parsing arguments, we must consider longer arguments first, such that `--foo-bar=92` is
