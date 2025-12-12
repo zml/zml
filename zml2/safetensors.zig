@@ -2,6 +2,7 @@ const std = @import("std");
 
 const Shape = @import("shape.zig").Shape;
 const DataType = @import("dtype.zig").DataType;
+const VFS = @import("io").VFS;
 
 const Dims = Shape.DimsArray;
 const StringBuilder = std.ArrayListUnmanaged(u8);
@@ -13,12 +14,86 @@ const log = std.log.scoped(.@"zml/ssafetensors");
 
 const BYTES_HEADER = 8;
 
-// todo: check usage
 pub const ResourceType = enum {
     index,
     safetensors,
     unknown,
+
+    pub fn fromPath(path: []const u8) ResourceType {
+        if (std.mem.endsWith(u8, path, ".safetensors.index.json")) {
+            return .index;
+        } else if (std.mem.endsWith(u8, path, ".safetensors")) {
+            return .safetensors;
+        } else {
+            return .unknown;
+        }
+    }
 };
+
+pub const ModelPathResolutionError = error{
+    IndexFileNotFound,
+    ModelFileNotFound,
+    SafetensorsFileNotFound,
+    FileNotFound,
+    InvalidPath,
+} || std.mem.Allocator.Error;
+
+pub fn resolveModelPathEntrypoint(allocator: std.mem.Allocator, io: std.Io, vfs: *VFS, path: []const u8) ModelPathResolutionError!std.Io.File {
+    var supported_schemes_it = vfs.backends.keyIterator();
+
+    while (supported_schemes_it.next()) |scheme| {
+        if (std.mem.startsWith(u8, path, scheme.*)) {
+            break;
+        }
+    } else {
+        if (std.mem.startsWith(u8, path, "/") or std.mem.startsWith(u8, path, "./") or std.mem.startsWith(u8, path, "../")) {
+            // assume file scheme
+            // continue
+        } else {
+            log.err("Unsupported URI scheme in path: {s}", .{path});
+            return ModelPathResolutionError.InvalidPath;
+        }
+    }
+
+    // If path is already a file, try to open it directly
+    if (std.mem.endsWith(u8, path, ".safetensors.index.json") or
+        std.mem.endsWith(u8, path, ".safetensors"))
+    {
+        if (vfs.openAbsoluteFile(io, path, .{})) |file| {
+            if (file.stat(io)) |_| {
+                return file;
+            } else |_| {
+                file.close(io);
+            }
+        } else |_| {}
+        return ModelPathResolutionError.FileNotFound;
+    }
+
+    const index_path = try std.fs.path.join(allocator, &[_][]const u8{ path, "model.safetensors.index.json" });
+    defer allocator.free(index_path);
+    const model_path = try std.fs.path.join(allocator, &[_][]const u8{ path, "model.safetensors" });
+    defer allocator.free(model_path);
+
+    // Try index file first
+    if (vfs.openAbsoluteFile(io, index_path, .{})) |index_file| {
+        if (index_file.stat(io)) |_| {
+            return index_file;
+        } else |_| {
+            index_file.close(io);
+        }
+    } else |_| {}
+
+    // Fall back to model.safetensors
+    if (vfs.openAbsoluteFile(io, model_path, .{})) |model_file| {
+        if (model_file.stat(io)) |_| {
+            return model_file;
+        } else |_| {
+            model_file.close(io);
+        }
+    } else |_| {}
+
+    return ModelPathResolutionError.ModelFileNotFound;
+}
 
 pub const Tensor = struct {
     file_uri: []const u8,
@@ -31,7 +106,7 @@ pub const Tensor = struct {
     }
 
     pub fn format(self: Tensor, writer: *std.Io.Writer) !void {
-        try writer.print("Tensor({s} shape={f} size={d}, offset={d}, file_uri={s})", .{
+        try writer.print("Tensor(name={s} shape={f} size={d}, offset={d}, file_uri={s})", .{
             self.name,
             self.shape,
             self.byteSize(),
@@ -90,6 +165,18 @@ pub const TensorRegistry = struct {
         self.arena.deinit();
     }
 
+    pub fn registerTensor(
+        self: *TensorRegistry,
+        tensor: Tensor,
+    ) !void {
+        const allocator = self.arena.allocator();
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        try self.tensors.put(allocator, tensor.name, tensor);
+    }
+
     pub fn iterator(self: *TensorRegistry) Tensors.Iterator {
         return self.tensors.iterator();
     }
@@ -115,13 +202,12 @@ pub fn parseSafetensors(
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    var arena_allocator = registry.arena.allocator();
+    var registry_allocator = registry.arena.allocator();
     const json_header_length: u64 = try reader.takeInt(u64, .little);
 
     const data_start_offset = BYTES_HEADER + json_header_length;
 
     const json_data = try arena.allocator().alloc(u8, @intCast(json_header_length));
-    // defer arena_allocator.free(json_data);
 
     try reader.readSliceAll(json_data);
 
@@ -138,7 +224,7 @@ pub fn parseSafetensors(
         const value = entry.value_ptr.*;
 
         if (std.mem.eql(u8, key, "__metadata__")) {
-            registry.metadata = try parseMetadata(arena_allocator, value);
+            registry.metadata = try parseMetadata(registry_allocator, value);
             continue;
         }
 
@@ -159,22 +245,17 @@ pub fn parseSafetensors(
         }
 
         const tensor: Tensor = .{
-            .file_uri = try arena_allocator.dupe(u8, file_uri),
-            .name = try arena_allocator.dupe(u8, key),
+            .file_uri = try registry_allocator.dupe(u8, file_uri),
+            .name = try registry_allocator.dupe(u8, key),
             .shape = .init(dims.slice(), dtype),
             .offset = data_start_offset + start,
         };
 
-        registry.mutex.lock();
-        defer registry.mutex.unlock();
-
-        // todo
-
-        try registry.tensors.put(arena_allocator, tensor.name, tensor);
+        try registry.registerTensor(tensor);
     }
 }
 
-const SafetensorsIndex = struct {
+pub const SafetensorsIndex = struct {
     pub const Map = std.StringArrayHashMapUnmanaged(std.ArrayList([]const u8));
 
     arena: std.heap.ArenaAllocator,

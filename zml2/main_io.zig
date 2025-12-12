@@ -62,10 +62,21 @@ pub fn main() !void {
 
     const io = vfs.io();
 
-    const repo_uri = "hf://Qwen/Qwen3-8B";
-    // const repo_uri = "file:///Users/hugo/Developer/Llama-3.1-8B-Instruct";
-    // const repo_uri = "https://storage.googleapis.com/zig-vfs/Llama-3.1-8B-Instruct/";
-    // const repo_uri = "http://9960x-5090x2:8003/";
+    const default_repo_uri = "hf://Qwen/Qwen3-8B";
+    // const default_repo_uri = "file:///Users/hugo/Developer/Llama-3.1-8B-Instruct";
+    // const default_repo_uri = "https://storage.googleapis.com/zig-vfs/Llama-3.1-8B-Instruct/";
+    // const default_repo_uri = "http://9960x-5090x2:8003/";
+
+    var args = std.process.args();
+    _ = args.next(); // skip program name
+
+    const repo_uri = if (args.next()) |uri| blk: {
+        log.info("Using repo URI from args: {s}", .{uri});
+        break :blk uri;
+    } else blk: {
+        log.info("Using default repo URI: {s}", .{default_repo_uri});
+        break :blk default_repo_uri;
+    };
 
     {
         var timer = try std.time.Timer.start();
@@ -77,7 +88,7 @@ pub fn main() !void {
         const repo = try vfs.openAbsoluteDir(io, repo_uri, .{});
         defer repo.close(io);
 
-        const index_file = try repo.openFile(io, "model.safetensors.index.json", .{});
+        const index_file = try zml.safetensors.resolveModelPathEntrypoint(allocator, io, &vfs, repo_uri);
         defer index_file.close(io);
 
         const file_reader_buf = try allocator.alloc(u8, 1 * 1024 * 1024);
@@ -95,14 +106,14 @@ pub fn main() !void {
         defer tensor_registry.deinit();
 
         const AsyncParseSafetensors = struct {
-            pub fn run(allocator_: std.mem.Allocator, io_: std.Io, repo_: std.Io.Dir, registry: *zml.safetensors.TensorRegistry, filename: []const u8, err_ptr: *?anyerror) void {
-                parseSafetensors(allocator_, io_, repo_, registry, filename) catch |err| {
+            pub fn run(allocator_: std.mem.Allocator, io_: std.Io, repo_: std.Io.Dir, registry: *zml.safetensors.TensorRegistry, repo_uri_: []const u8, filename: []const u8, err_ptr: *?anyerror) void {
+                parseSafetensors(allocator_, io_, repo_, registry, repo_uri_, filename) catch |err| {
                     err_ptr.* = err;
                 };
             }
 
-            fn parseSafetensors(allocator_: std.mem.Allocator, io_: std.Io, repo_: std.Io.Dir, registry: *zml.safetensors.TensorRegistry, filename: []const u8) !void {
-                const file_uri = try std.fs.path.join(allocator_, &.{ repo_uri, filename });
+            fn parseSafetensors(allocator_: std.mem.Allocator, io_: std.Io, repo_: std.Io.Dir, registry: *zml.safetensors.TensorRegistry, repo_uri_: []const u8, filename: []const u8) !void {
+                const file_uri = try std.fs.path.join(allocator_, &.{ repo_uri_, filename });
                 defer allocator_.free(file_uri);
 
                 const file = try repo_.openFile(io_, filename, .{});
@@ -126,7 +137,7 @@ pub fn main() !void {
         while (safetensors_it.next()) |entry| {
             const filename = entry.key_ptr.*;
 
-            group.async(threaded.io(), AsyncParseSafetensors, .{ allocator, io, repo, &tensor_registry, filename, &err });
+            group.async(threaded.io(), AsyncParseSafetensors, .{ allocator, io, repo, &tensor_registry, repo_uri, filename, &err });
         }
 
         group.wait(io);
