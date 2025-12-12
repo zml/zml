@@ -62,20 +62,20 @@ pub fn main() !void {
 
     const io = vfs.io();
 
-    const default_repo_uri = "hf://Qwen/Qwen3-8B";
-    // const default_repo_uri = "file:///Users/hugo/Developer/Llama-3.1-8B-Instruct";
-    // const default_repo_uri = "https://storage.googleapis.com/zig-vfs/Llama-3.1-8B-Instruct/";
-    // const default_repo_uri = "http://9960x-5090x2:8003/";
+    const default_uri = "hf://Qwen/Qwen3-8B";
+    // const default_uri = "file:///Users/hugo/Developer/Llama-3.1-8B-Instruct";
+    // const default_uri = "https://storage.googleapis.com/zig-vfs/Llama-3.1-8B-Instruct/";
+    // const default_uri = "http://9960x-5090x2:8003/";
 
     var args = std.process.args();
     _ = args.next(); // skip program name
 
-    const repo_uri = if (args.next()) |uri| blk: {
+    const uri = if (args.next()) |uri| blk: {
         log.info("Using repo URI from args: {s}", .{uri});
         break :blk uri;
     } else blk: {
-        log.info("Using default repo URI: {s}", .{default_repo_uri});
-        break :blk default_repo_uri;
+        log.info("Using default repo URI: {s}", .{default_uri});
+        break :blk default_uri;
     };
 
     {
@@ -85,10 +85,23 @@ pub fn main() !void {
             log.info("Completed in {d} ms", .{elapsed / std.time.ns_per_ms});
         }
 
-        const repo = try vfs.openAbsoluteDir(io, repo_uri, .{});
+        const file_path = try zml.safetensors.resolveModelPathEntrypoint(allocator, io, &vfs, uri);
+        defer allocator.free(file_path);
+        log.info("Resolved model path entrypoint for '{s}': {s}", .{ uri, file_path });
+
+        const repo_path = try zml.safetensors.resolveModelRepoPath(allocator, io, &vfs, uri);
+        defer allocator.free(repo_path);
+        log.info("Resolved model repo path for '{s}': {s}", .{ uri, repo_path });
+
+        const repo = try vfs.openAbsoluteDir(io, repo_path, .{});
         defer repo.close(io);
 
-        const index_file = try zml.safetensors.resolveModelPathEntrypoint(allocator, io, &vfs, repo_uri);
+        const file_type = zml.safetensors.resolveFiletype(file_path);
+        log.info("Resolved file type for '{s}': {any}", .{ uri, file_type });
+
+        const index_file_path = file_path;
+
+        const index_file = try vfs.openAbsoluteFile(io, index_file_path, .{});
         defer index_file.close(io);
 
         const file_reader_buf = try allocator.alloc(u8, 1 * 1024 * 1024);

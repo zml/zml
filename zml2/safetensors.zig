@@ -14,31 +14,61 @@ const log = std.log.scoped(.@"zml/ssafetensors");
 
 const BYTES_HEADER = 8;
 
-pub const ResourceType = enum {
+pub const FileType = enum {
     index,
     safetensors,
     unknown,
-
-    pub fn fromPath(path: []const u8) ResourceType {
-        if (std.mem.endsWith(u8, path, ".safetensors.index.json")) {
-            return .index;
-        } else if (std.mem.endsWith(u8, path, ".safetensors")) {
-            return .safetensors;
-        } else {
-            return .unknown;
-        }
-    }
 };
 
+pub fn resolveFiletype(path: []const u8) FileType {
+    if (std.mem.endsWith(u8, path, ".safetensors.index.json")) {
+        return .index;
+    } else if (std.mem.endsWith(u8, path, ".safetensors")) {
+        return .safetensors;
+    } else {
+        return .unknown;
+    }
+}
+
 pub const ModelPathResolutionError = error{
-    IndexFileNotFound,
-    ModelFileNotFound,
-    SafetensorsFileNotFound,
     FileNotFound,
     InvalidPath,
 } || std.mem.Allocator.Error;
 
-pub fn resolveModelPathEntrypoint(allocator: std.mem.Allocator, io: std.Io, vfs: *VFS, path: []const u8) ModelPathResolutionError!std.Io.File {
+pub fn resolveModelRepoPath(allocator: std.mem.Allocator, io: std.Io, vfs: *VFS, path: []const u8) ModelPathResolutionError![]const u8 {
+    var supported_schemes_it = vfs.backends.keyIterator();
+
+    while (supported_schemes_it.next()) |scheme| {
+        if (std.mem.startsWith(u8, path, scheme.*)) {
+            break;
+        }
+    } else {
+        if (std.mem.startsWith(u8, path, "/")) {
+            // continue, local file path
+        } else {
+            log.err("Unsupported URI scheme in path: {s}", .{path});
+            return ModelPathResolutionError.InvalidPath;
+        }
+    }
+
+    // If path points to a file, return its parent directory
+    if (std.mem.endsWith(u8, path, ".safetensors.index.json") or
+        std.mem.endsWith(u8, path, ".safetensors"))
+    {
+        const dir_path = std.fs.path.dirname(path) orelse return ModelPathResolutionError.InvalidPath;
+        return try allocator.dupe(u8, dir_path);
+    }
+
+    // Try to open as a directory to verify it exists
+    if (vfs.openAbsoluteDir(io, path, .{})) |dir| {
+        defer dir.close(io);
+        return try allocator.dupe(u8, path);
+    } else |_| {}
+
+    return ModelPathResolutionError.FileNotFound;
+}
+
+pub fn resolveModelPathEntrypoint(allocator: std.mem.Allocator, io: std.Io, vfs: *VFS, path: []const u8) ModelPathResolutionError![]const u8 {
     var supported_schemes_it = vfs.backends.keyIterator();
 
     while (supported_schemes_it.next()) |scheme| {
@@ -59,39 +89,41 @@ pub fn resolveModelPathEntrypoint(allocator: std.mem.Allocator, io: std.Io, vfs:
         std.mem.endsWith(u8, path, ".safetensors"))
     {
         if (vfs.openAbsoluteFile(io, path, .{})) |file| {
+            defer file.close(io);
             if (file.stat(io)) |_| {
-                return file;
-            } else |_| {
-                file.close(io);
-            }
+                return try allocator.dupe(u8, path);
+            } else |_| {}
         } else |_| {}
         return ModelPathResolutionError.FileNotFound;
     }
 
     const index_path = try std.fs.path.join(allocator, &[_][]const u8{ path, "model.safetensors.index.json" });
-    defer allocator.free(index_path);
-    const model_path = try std.fs.path.join(allocator, &[_][]const u8{ path, "model.safetensors" });
-    defer allocator.free(model_path);
+    errdefer allocator.free(index_path);
 
     // Try index file first
     if (vfs.openAbsoluteFile(io, index_path, .{})) |index_file| {
+        defer index_file.close(io);
         if (index_file.stat(io)) |_| {
-            return index_file;
-        } else |_| {
-            index_file.close(io);
-        }
+            return index_path;
+        } else |_| {}
     } else |_| {}
+
+    allocator.free(index_path);
+
+    const model_path = try std.fs.path.join(allocator, &[_][]const u8{ path, "model.safetensors" });
+    errdefer allocator.free(model_path);
 
     // Fall back to model.safetensors
     if (vfs.openAbsoluteFile(io, model_path, .{})) |model_file| {
+        defer model_file.close(io);
         if (model_file.stat(io)) |_| {
-            return model_file;
-        } else |_| {
-            model_file.close(io);
-        }
+            return model_path;
+        } else |_| {}
     } else |_| {}
 
-    return ModelPathResolutionError.ModelFileNotFound;
+    allocator.free(model_path);
+
+    return ModelPathResolutionError.FileNotFound;
 }
 
 pub const Tensor = struct {
