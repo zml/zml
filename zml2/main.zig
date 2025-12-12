@@ -25,9 +25,9 @@ pub const Model = struct {
         defer bias_slice.free(allocator);
         @memset(bias_slice.items(f32), 2);
 
-        const weight_buffer: zml.Buffer = try .fromBytes(platform, weight_slice.shape, weight_slice.data, io);
+        const weight_buffer: zml.Buffer = try .fromSlice(io, platform, weight_slice);
         errdefer weight_buffer.deinit();
-        const bias_buffer: zml.Buffer = try .fromBytes(platform, bias_slice.shape, bias_slice.data, io);
+        const bias_buffer: zml.Buffer = try .fromSlice(io, platform, bias_slice);
         errdefer bias_buffer.deinit();
 
         return .{ .weight = weight_buffer, .bias = bias_buffer };
@@ -79,7 +79,7 @@ pub fn main() !void {
     var model_buffers = try model.loadBuffers(allocator, io, platform);
     defer Model.unloadBuffers(&model_buffers);
 
-    const input_buffer: zml.Buffer = try .fromBytes(platform, slice.shape, slice.data, io);
+    const input_buffer: zml.Buffer = try .fromSlice(io, platform, slice);
     defer input_buffer.deinit();
 
     var args = try exe.args(allocator);

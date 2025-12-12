@@ -2,6 +2,7 @@ const std = @import("std");
 
 const stdx = @import("stdx");
 
+const ConstSlice = @import("slice.zig").ConstSlice;
 const DataType = @import("dtype.zig").DataType;
 const pjrt = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
@@ -107,11 +108,18 @@ pub const Buffer = struct {
         return res;
     }
 
-    /// Copies the given Zig slice to the accelerator memory and
+    /// Copies the given Zig bytes to the accelerator memory and
     /// return a Buffer with the given dimensions.
     pub fn fromBytes(io: std.Io, platform: Platform, sh: Shape, data: []const u8) !Buffer {
         return from(io, platform, sh, data, .{});
     }
+
+    /// Copies the given zml.Slice or zml.ConstSlice to the accelerator memory and
+    /// return a Buffer.
+    pub fn fromSlice(io: std.Io, platform: Platform, slice: anytype) !Buffer {
+        if (@TypeOf(slice) != Slice and @TypeOf(slice) != ConstSlice) @compileError("Buffer.fromSlice expects a Slice or ConstSlice, got " ++ @typeName(@TypeOf(slice)));
+        const real_slice: ConstSlice = if (@TypeOf(slice) == Slice) slice.constSlice() else slice;
+        return from(io, platform, real_slice.shape, std.mem.sliceAsBytes(real_slice.data), .{});
     }
 
     /// Creates a Buffer with a single element.
