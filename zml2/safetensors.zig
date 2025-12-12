@@ -123,6 +123,69 @@ pub fn resolveModelPathEntrypoint(allocator: std.mem.Allocator, io: std.Io, vfs:
     return ModelPathResolutionError.FileNotFound;
 }
 
+pub const TensorReader = struct {
+    file: std.Io.File,
+    file_reader: std.Io.File.Reader,
+    remaining: u64,
+    io: std.Io,
+    interface: std.Io.Reader,
+
+    pub const Error = error{TensorNotFound} || std.Io.File.OpenError || std.Io.File.Reader.SeekError || std.mem.Allocator.Error;
+
+    pub fn init(
+        io: std.Io,
+        vfs: *VFS,
+        tensor: Tensor,
+        buffer: []u8,
+    ) Error!TensorReader {
+        const file = try vfs.openAbsoluteFile(io, tensor.file_uri, .{});
+        errdefer file.close(io);
+
+        var file_reader = file.reader(io, buffer);
+        try file_reader.seekTo(tensor.offset);
+
+        return .{
+            .file = file,
+            .file_reader = file_reader,
+            .remaining = tensor.byteSize(),
+            .io = io,
+            .interface = .{
+                .vtable = &.{
+                    .stream = stream,
+                    .discard = discard,
+                },
+                .buffer = buffer,
+                .seek = 0,
+                .end = 0,
+            },
+        };
+    }
+
+    pub fn deinit(self: *TensorReader) void {
+        self.file.close(self.io);
+    }
+
+    fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+        const self: *TensorReader = @fieldParentPtr("interface", r);
+        if (self.remaining == 0) return error.EndOfStream;
+
+        const combined_limit = limit.min(.limited64(self.remaining));
+        const n = try self.file_reader.interface.stream(w, combined_limit);
+        self.remaining -= n;
+        return n;
+    }
+
+    fn discard(r: *std.Io.Reader, limit: std.Io.Limit) std.Io.Reader.Error!usize {
+        const self: *TensorReader = @fieldParentPtr("interface", r);
+        if (self.remaining == 0) return error.EndOfStream;
+
+        const combined_limit = limit.min(.limited64(self.remaining));
+        const n = try self.file_reader.interface.discard(combined_limit);
+        self.remaining -= n;
+        return n;
+    }
+};
+
 pub const Tensor = struct {
     file_uri: []const u8,
     name: []const u8,
@@ -203,6 +266,21 @@ pub const TensorRegistry = struct {
         defer self.mutex.unlock();
 
         try self.tensors.put(allocator, tensor.name, tensor);
+    }
+
+    pub fn reader(
+        self: *TensorRegistry,
+        io: std.Io,
+        vfs: *VFS,
+        tensor_name: []const u8,
+        buffer: []u8,
+    ) TensorReader.Error!TensorReader {
+        const tensor = self.tensors.get(tensor_name) orelse {
+            log.err("Tensor {s} not found in registry", .{tensor_name});
+            return TensorReader.Error.TensorNotFound;
+        };
+
+        return try .init(io, vfs, tensor, buffer);
     }
 
     pub fn iterator(self: *TensorRegistry) Tensors.Iterator {
