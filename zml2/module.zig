@@ -165,10 +165,6 @@ pub const CompilationContext = struct {
     //}
 };
 
-pub fn compileModel(allocator: std.mem.Allocator, io: std.Io, comptime func: anytype, model: stdx.meta.Head(stdx.meta.FnArgs(func)), args: stdx.meta.Tail(stdx.meta.FnArgs(func)), platform: Platform) !Exe {
-    return compile(allocator, io, func, .{model} ++ args, platform);
-}
-
 pub fn compile(allocator: std.mem.Allocator, io: std.Io, comptime func: anytype, args: stdx.meta.FnArgs(func), platform: Platform) !Exe {
     var compilation_context: CompilationContext = .init(allocator, platform);
     defer compilation_context.deinit();

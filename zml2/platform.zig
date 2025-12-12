@@ -4,7 +4,9 @@ const runtimes = @import("runtimes");
 pub const Target = runtimes.Platform;
 const stdx = @import("stdx");
 
+const Exe = @import("exe.zig").Exe;
 const pjrt = @import("pjrtx.zig");
+const zml = @import("zml.zig");
 
 const log = std.log.scoped(.zml);
 
@@ -158,7 +160,6 @@ pub const Platform = struct {
     }
 
     test memoryForDevice {
-        const zml = @import("zml.zig");
         const platform = zml.testing.env();
         const memory_fields = @typeInfo(pjrt.Memory.Kind).@"enum".fields;
         inline for (memory_fields) |field| {
@@ -173,6 +174,14 @@ pub const Platform = struct {
 
         const device = platform.getDevices()[device_id];
         return device.memoryStats(platform.pjrt_api) catch .zeroes;
+    }
+
+    pub fn compileModel(self: Platform, allocator: std.mem.Allocator, io: std.Io, comptime func: anytype, model: stdx.meta.Head(stdx.meta.FnArgs(func)), args: stdx.meta.Tail(stdx.meta.FnArgs(func))) !Exe {
+        return self.compile(allocator, io, func, .{model} ++ args);
+    }
+
+    pub fn compile(self: Platform, allocator: std.mem.Allocator, io: std.Io, comptime func: anytype, args: stdx.meta.FnArgs(func)) !Exe {
+        return zml.module.compile(allocator, io, func, args, self);
     }
 
     pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {

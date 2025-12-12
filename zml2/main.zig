@@ -69,7 +69,7 @@ pub fn main() !void {
     defer model.deinit();
 
     const input: zml.Tensor = .init(.{ .n = 4096 }, .f32);
-    var exe = try zml.module.compileModel(allocator, io, Model.forward, model, .{input}, platform);
+    var exe = try platform.compileModel(allocator, io, Model.forward, model, .{input});
     defer exe.deinit();
 
     const slice: zml.Slice = try .alloc(allocator, input.shape());
