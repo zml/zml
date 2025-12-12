@@ -369,9 +369,9 @@ test "triton" {
     var exe = try zml.module.compile(std.testing.allocator, std.testing.io, TritonMod.forward, .{ a, b }, platform);
     defer exe.deinit();
 
-    var a_buffer: zml.Buffer = try .fromBytes(platform, a.shape(), std.mem.sliceAsBytes(&[1]f32{1}), std.testing.io);
+    var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), std.mem.sliceAsBytes(&[1]f32{1}));
     defer a_buffer.deinit();
-    var b_buffer: zml.Buffer = try .fromBytes(platform, b.shape(), std.mem.sliceAsBytes(&[1]f32{3}), std.testing.io);
+    var b_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, b.shape(), std.mem.sliceAsBytes(&[1]f32{3}));
     defer b_buffer.deinit();
 
     const results = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, TritonMod.forward, .{ a_buffer, b_buffer });

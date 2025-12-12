@@ -125,7 +125,7 @@ test normalizeL2 {
     var exe = try zml.module.compile(std.testing.allocator, std.testing.io, normalizeL2, .{ input, 1e-12 }, platform);
     defer exe.deinit();
 
-    var input_buffer: zml.Buffer = try .fromBytes(platform, input.shape(), std.mem.sliceAsBytes(&[_]f32{ -0.9686, -1.0058, -1.7808, 0.6698 }), std.testing.io);
+    var input_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), std.mem.sliceAsBytes(&[_]f32{ -0.9686, -1.0058, -1.7808, 0.6698 }));
     defer input_buffer.deinit();
 
     var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, normalizeL2, .{input_buffer});
@@ -518,7 +518,7 @@ test rope {
     var exe_sequential = try zml.module.compile(std.testing.allocator, std.testing.io, Local._fwd, .{ x, RopeOpts{ .layout = .sequential } }, platform);
     defer exe_sequential.deinit();
 
-    var x_buffer: zml.Buffer = try .fromBytes(platform, x.shape(), std.mem.sliceAsBytes(&[_]f32{ 1.0, 0.1, -1.0, -0.5 } ** 5), std.testing.io);
+    var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[_]f32{ 1.0, 0.1, -1.0, -0.5 } ** 5));
     defer x_buffer.deinit();
 
     var res1 = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe_interleaved, Local._fwd, .{x_buffer});
@@ -594,7 +594,7 @@ test nearest {
         var exe = try zml.module.compile(std.testing.allocator, std.testing.io, upsample, .{ input_3d_basic, .{ .scale_factor = &.{3}, .mode = .nearest } }, platform);
         defer exe.deinit();
 
-        var input_3d_basic_buffer: zml.Buffer = try .fromBytes(platform, input_3d_basic.shape(), std.mem.sliceAsBytes(&[1][1][2]i32{.{.{ 1, 2 }}}), std.testing.io);
+        var input_3d_basic_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_3d_basic.shape(), std.mem.sliceAsBytes(&[1][1][2]i32{.{.{ 1, 2 }}}));
         defer input_3d_basic_buffer.deinit();
 
         const result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, upsample, .{input_3d_basic_buffer});
@@ -611,10 +611,10 @@ test nearest {
         var exe = try zml.module.compile(std.testing.allocator, std.testing.io, upsample, .{ input_3d_advanced, .{ .scale_factor = &.{2}, .mode = .nearest } }, platform);
         defer exe.deinit();
 
-        var input_3d_advanced_buffer: zml.Buffer = try .fromBytes(platform, input_3d_advanced.shape(), std.mem.sliceAsBytes(&[2][3][4]i32{
+        var input_3d_advanced_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_3d_advanced.shape(), std.mem.sliceAsBytes(&[2][3][4]i32{
             .{ .{ 1, 2, 3, 4 }, .{ 5, 6, 7, 8 }, .{ 9, 10, 11, 12 } },
             .{ .{ 13, 14, 15, 16 }, .{ 17, 18, 19, 20 }, .{ 21, 22, 23, 24 } },
-        }), std.testing.io);
+        }));
         defer input_3d_advanced_buffer.deinit();
 
         const result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, upsample, .{input_3d_advanced_buffer});
@@ -642,7 +642,7 @@ test nearest {
         var exe = try zml.module.compile(std.testing.allocator, std.testing.io, upsample, .{ input_4d_basic, .{ .scale_factor = &.{ 3, 3 }, .mode = .nearest } }, platform);
         defer exe.deinit();
 
-        var input_4d_basic_buffer: zml.Buffer = try .fromBytes(platform, input_4d_basic.shape(), std.mem.sliceAsBytes(&[_]i32{ 1, 2, 3, 4 }), std.testing.io);
+        var input_4d_basic_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_4d_basic.shape(), std.mem.sliceAsBytes(&[_]i32{ 1, 2, 3, 4 }));
         defer input_4d_basic_buffer.deinit();
 
         const result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, upsample, .{input_4d_basic_buffer});
@@ -665,13 +665,13 @@ test nearest {
         var exe = try zml.module.compile(std.testing.allocator, std.testing.io, upsample, .{ input_4d_advanced, .{ .scale_factor = &.{ 2, 2 }, .mode = .nearest } }, platform);
         defer exe.deinit();
 
-        var input_4d_advanced_buffer: zml.Buffer = try .fromBytes(platform, input_4d_advanced.shape(), std.mem.sliceAsBytes(&[2][2][2][2]i32{ .{
+        var input_4d_advanced_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_4d_advanced.shape(), std.mem.sliceAsBytes(&[2][2][2][2]i32{ .{
             .{ .{ 1, 2 }, .{ 3, 4 } },
             .{ .{ 5, 6 }, .{ 7, 8 } },
         }, .{
             .{ .{ 9, 10 }, .{ 11, 12 } },
             .{ .{ 13, 14 }, .{ 15, 16 } },
-        } }), std.testing.io);
+        } }));
         defer input_4d_advanced_buffer.deinit();
 
         const result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, upsample, .{input_4d_advanced_buffer});
@@ -716,7 +716,7 @@ test nearest {
         var exe = try zml.module.compile(std.testing.allocator, std.testing.io, upsample, .{ input_5d, .{ .scale_factor = &.{2}, .mode = .nearest } }, platform);
         defer exe.deinit();
 
-        var input_5d_buffer: zml.Buffer = try .fromBytes(platform, input_5d.shape(), std.mem.sliceAsBytes(&[_]i32{ 1, 2, 3, 4 }), std.testing.io);
+        var input_5d_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_5d.shape(), std.mem.sliceAsBytes(&[_]i32{ 1, 2, 3, 4 }));
         defer input_5d_buffer.deinit();
 
         const result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, upsample, .{input_5d_buffer});
@@ -1072,7 +1072,7 @@ test sampleTokens {
     }) |logits_expected| {
         const logits, const expected: i32 = logits_expected;
 
-        const activations_buffer: zml.Buffer = try .fromBytes(platform, activations.shape(), std.mem.sliceAsBytes(&logits), std.testing.io);
+        const activations_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, activations.shape(), std.mem.sliceAsBytes(&logits));
         defer activations_buffer.deinit();
 
         var sampled, rng_buffer = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, sampleTokens, .{ activations_buffer, rng_buffer });
@@ -1109,16 +1109,16 @@ pub const DynamicSamplingStrategy = struct {
     }
 
     pub fn makeBuffers(
-        platform: zml.Platform,
         io: std.Io,
+        platform: zml.Platform,
         dtype: zml.DataType,
         opts: Opts,
     ) !zml.Bufferized(DynamicSamplingStrategy) {
         return .{
-            .top_k = try zml.Buffer.scalar(platform, opts.top_k, .i32, io),
-            .temperature = try zml.Buffer.scalar(platform, opts.temperature, dtype, io),
-            .top_p = try zml.Buffer.scalar(platform, opts.top_p, dtype, io),
-            .min_p = try zml.Buffer.scalar(platform, opts.min_p, dtype, io),
+            .top_k = try zml.Buffer.scalar(io, platform, opts.top_k, .i32),
+            .temperature = try zml.Buffer.scalar(io, platform, opts.temperature, dtype),
+            .top_p = try zml.Buffer.scalar(io, platform, opts.top_p, dtype),
+            .min_p = try zml.Buffer.scalar(io, platform, opts.min_p, dtype),
         };
     }
 
@@ -1200,7 +1200,7 @@ test sampleTokensDynamic {
     var exe = try zml.module.compile(std.testing.allocator, std.testing.io, fixupLogits, .{ logits, dynamic_sampling_strategy }, platform);
     defer exe.deinit();
 
-    var logits_buffer: zml.Buffer = try .fromBytes(platform, logits.shape(), std.mem.sliceAsBytes(&logits_data), std.testing.io);
+    var logits_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, logits.shape(), std.mem.sliceAsBytes(&logits_data));
     defer logits_buffer.deinit();
 
     const Args = struct { DynamicSamplingStrategy.Opts, [4]f32 };
@@ -1219,7 +1219,7 @@ test sampleTokensDynamic {
         .{ .{ .top_k = 4, .top_p = 0.901, .min_p = 0.6 }, [_]f32{ @log(4.0), @log(3.0), ___, ___ } },
     }) |args_expected| {
         const args, const expected = args_expected;
-        var dynamic_sampling_strategy_buffers = try DynamicSamplingStrategy.makeBuffers(platform, std.testing.io, .f32, args);
+        var dynamic_sampling_strategy_buffers = try DynamicSamplingStrategy.makeBuffers(std.testing.io, platform, .f32, args);
         defer DynamicSamplingStrategy.deinitBuffers(&dynamic_sampling_strategy_buffers);
         var new_logits, var indices = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, fixupLogits, .{ logits_buffer, dynamic_sampling_strategy_buffers });
         defer new_logits.deinit();
@@ -1240,9 +1240,9 @@ test sampleTokensDynamic {
         const boost = bf16.inf;
         const nerf = bf16.minus_inf;
 
-        var logits_bf16_buffer: zml.Buffer = try .fromBytes(platform, logits_bf16.shape(), std.mem.sliceAsBytes(&[4]bf16{ boost, boost, bf16.fromF32(2), nerf }), std.testing.io);
+        var logits_bf16_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, logits_bf16.shape(), std.mem.sliceAsBytes(&[4]bf16{ boost, boost, bf16.fromF32(2), nerf }));
         defer logits_bf16_buffer.deinit();
-        var dynamic_sampling_strategy_bf16_buffers = try DynamicSamplingStrategy.makeBuffers(platform, std.testing.io, .bf16, .{ .top_k = 4, .top_p = 0.9, .min_p = 0.1 });
+        var dynamic_sampling_strategy_bf16_buffers = try DynamicSamplingStrategy.makeBuffers(std.testing.io, platform, .bf16, .{ .top_k = 4, .top_p = 0.9, .min_p = 0.1 });
         defer DynamicSamplingStrategy.deinitBuffers(&dynamic_sampling_strategy_bf16_buffers);
 
         var new_logits, var indices = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe_bf16, fixupLogits, .{ logits_bf16_buffer, dynamic_sampling_strategy_bf16_buffers });

@@ -49,7 +49,7 @@ pub const Buffer = struct {
     }
 
     /// Copies the content of the given buffer from host memory to the accelerator memory.
-    pub fn from(platform: Platform, shape_: Shape, data_: []const u8, io: std.Io, opts: FromOptions) !Buffer {
+    pub fn from(io: std.Io, platform: Platform, shape_: Shape, data_: []const u8, opts: FromOptions) !Buffer {
         var res: Buffer = .{
             ._api = platform.pjrt_api,
             ._target = platform.target,
@@ -109,14 +109,15 @@ pub const Buffer = struct {
 
     /// Copies the given Zig slice to the accelerator memory and
     /// return a Buffer with the given dimensions.
-    pub fn fromBytes(platform: Platform, sh: Shape, data: []const u8, io: std.Io) !Buffer {
-        return from(platform, sh, data, io, .{});
+    pub fn fromBytes(io: std.Io, platform: Platform, sh: Shape, data: []const u8) !Buffer {
+        return from(io, platform, sh, data, .{});
+    }
     }
 
     /// Creates a Buffer with a single element.
-    pub fn scalar(platform: Platform, val: anytype, dtype_: DataType, io: std.Io) !Buffer {
+    pub fn scalar(io: std.Io, platform: Platform, val: anytype, dtype_: DataType) !Buffer {
         const x = dtype_.constant(val);
-        return fromBytes(platform, Shape.init(.{}, dtype_), x.asBytes(), io);
+        return fromBytes(io, platform, Shape.init(.{}, dtype_), x.asBytes());
     }
 
     pub fn await(self: Buffer, io: std.Io) !Buffer {
