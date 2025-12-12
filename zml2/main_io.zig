@@ -197,6 +197,23 @@ pub fn main() !void {
         }
 
         log.info("Parsed {d} tensors", .{registry.tensors.count()});
+
+        const my_tensor = "model.layers.7.mlp.gate_proj.weight";
+
+        const tensor = registry.tensors.get(my_tensor) orelse return error.TensorNotFound;
+        const tensor_file = try vfs.openAbsoluteFile(io, tensor.file_uri, .{});
+        defer tensor_file.close(io);
+
+        const tensor_reader_buf = try allocator.alloc(u8, 4 * 1024 * 1024);
+        defer allocator.free(tensor_reader_buf);
+
+        var allocating_writer: std.Io.Writer.Allocating = try .initCapacity(allocator, tensor.byteSize());
+        defer allocating_writer.deinit();
+
+        var tensor_reader = tensor_file.reader(io, tensor_reader_buf);
+        try tensor_reader.seekTo(tensor.offset);
+        const read = try tensor_reader.interface.stream(&allocating_writer.writer, .limited64(tensor.byteSize()));
+        log.info("Read tensor '{s}' data of size {d} bytes", .{ my_tensor, read });
     }
 
     // {
