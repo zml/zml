@@ -128,6 +128,9 @@ pub fn main() !void {
         {
             var err: ?anyerror = null;
 
+            var pool: MemoryPool = try .init(allocator, threaded.async_limit.toInt() orelse 16, 256 * 1024 * 1024);
+            defer pool.deinit(io);
+
             var group: std.Io.Group = .init;
             defer group.cancel(io);
 
@@ -135,7 +138,7 @@ pub fn main() !void {
             var it = registry.iterator();
             while (it.next()) |entry| {
                 const tensor_name = entry.key_ptr.*;
-                group.async(threaded.io(), readTensor, .{ allocator, io, &vfs, &registry, tensor_name, &err });
+                group.async(threaded.io(), readTensor, .{ io, &vfs, &pool, &registry, tensor_name, &err });
             }
 
             group.wait(io);
@@ -271,23 +274,23 @@ pub fn main() !void {
 }
 
 fn readTensor(
-    allocator: std.mem.Allocator,
     io: std.Io,
     vfs: *zml.io.VFS,
+    pool: *MemoryPool,
     registry: *zml.safetensors.TensorRegistry,
     tensor_name: []const u8,
     err_ptr: *?anyerror,
 ) void {
-    readTensorImpl(allocator, io, vfs, registry, tensor_name) catch |err| {
+    readTensorImpl(io, vfs, pool, registry, tensor_name) catch |err| {
         err_ptr.* = err;
         log.err("Failed to read tensor {s}: {any}", .{ tensor_name, err });
     };
 }
 
 pub fn readTensorImpl(
-    allocator: std.mem.Allocator,
     io: std.Io,
     vfs: *zml.io.VFS,
+    pool: *MemoryPool,
     registry: *zml.safetensors.TensorRegistry,
     tensor_name: []const u8,
 ) !void {
@@ -295,13 +298,13 @@ pub fn readTensorImpl(
 
     const tensor = registry.tensors.get(tensor_name) orelse return error.TensorNotFound;
 
-    const buff = try allocator.alloc(u8, tensor.byteSize() * 2);
-    defer allocator.free(buff);
+    const handle = try pool.alloc(io, tensor.byteSize() * 2);
+    defer pool.free(io, handle.index);
 
-    var tensor_reader = try registry.reader(io, vfs, tensor_name, buff[0..tensor.byteSize()]);
+    var tensor_reader = try registry.reader(io, vfs, tensor_name, handle.data[0..tensor.byteSize()]);
     defer tensor_reader.deinit();
 
-    var writer: std.Io.Writer = .fixed(buff[tensor.byteSize()..]);
+    var writer: std.Io.Writer = .fixed(handle.data[tensor.byteSize()..]);
 
     var read_timer = try std.time.Timer.start();
     const read = try tensor_reader.interface.streamRemaining(&writer);
@@ -322,6 +325,85 @@ pub fn readTensorImpl(
         throughput,
     });
 }
+
+const MemoryPool = struct {
+    const Slots = std.ArrayList(Slot);
+    const Slot = struct {
+        buf: []u8,
+        capacity: usize,
+        in_use: bool,
+    };
+
+    allocator: std.mem.Allocator,
+    mutex: std.Io.Mutex,
+
+    slots: Slots,
+    default_capacity: usize,
+
+    pub fn init(allocator: std.mem.Allocator, initial_count: usize, slot_size: usize) !MemoryPool {
+        var slots: Slots = .{};
+
+        for (0..initial_count) |_| {
+            const buf = try allocator.alloc(u8, slot_size);
+            try slots.append(allocator, .{ .buf = buf, .capacity = slot_size, .in_use = false });
+        }
+
+        return .{
+            .allocator = allocator,
+            .slots = slots,
+            .default_capacity = slot_size,
+            .mutex = .init,
+        };
+    }
+
+    pub fn deinit(self: *MemoryPool, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+
+        for (self.slots.items) |slot| {
+            self.allocator.free(slot.buf);
+        }
+
+        self.mutex.unlock(io);
+        self.slots.deinit(self.allocator);
+    }
+
+    pub fn alloc(self: *MemoryPool, io: std.Io, n: usize) !struct { data: []u8, index: usize } {
+        self.mutex.lockUncancelable(io);
+
+        var idx: usize = 0;
+        while (idx < self.slots.items.len) : (idx += 1) {
+            if (!self.slots.items[idx].in_use and self.slots.items[idx].capacity >= n) {
+                self.slots.items[idx].in_use = true;
+                const data = self.slots.items[idx].buf[0..n];
+                self.mutex.unlock(io);
+                return .{ .data = data, .index = idx };
+            }
+        }
+
+        const capacity = if (n > self.default_capacity) n else self.default_capacity;
+
+        log.warn("MemoryPool: growing pool, allocating new slot of size {d} bytes", .{capacity});
+
+        const buf = try self.allocator.alloc(u8, capacity);
+        try self.slots.append(self.allocator, .{ .buf = buf, .capacity = capacity, .in_use = true });
+
+        const new_index = self.slots.items.len - 1;
+        const data = buf[0..n];
+
+        self.mutex.unlock(io);
+
+        return .{ .data = data, .index = new_index };
+    }
+
+    pub fn free(self: *MemoryPool, io: std.Io, index: usize) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+
+        if (index < self.slots.items.len) {
+            self.slots.items[index].in_use = false;
+        }
+    }
+};
 
 fn readData(
     allocator: std.mem.Allocator,

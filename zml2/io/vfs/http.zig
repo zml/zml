@@ -111,7 +111,7 @@ pub const HTTP = struct {
     };
 
     allocator: std.mem.Allocator,
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
 
     file_handles: std.AutoHashMapUnmanaged(HandleId, *FileHandle),
     dir_handles: std.AutoHashMapUnmanaged(HandleId, *DirHandle),
@@ -126,7 +126,7 @@ pub const HTTP = struct {
     pub fn init(allocator: std.mem.Allocator, base_io: std.Io, http_client: *std.http.Client, config: Config) std.mem.Allocator.Error!HTTP {
         var self: HTTP = .{
             .allocator = allocator,
-            .mutex = .{},
+            .mutex = .init,
             .file_handles = .{},
             .dir_handles = .{},
             .next_file_handle_id = 0,
@@ -170,8 +170,8 @@ pub const HTTP = struct {
     }
 
     fn registerFileHandle(self: *HTTP, handle: *FileHandle) std.mem.Allocator.Error!HandleId {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io());
+        defer self.mutex.unlock(self.io());
 
         const handle_id = self.next_file_handle_id;
         self.next_file_handle_id += 1;
@@ -182,15 +182,15 @@ pub const HTTP = struct {
     }
 
     fn fileHandle(self: *HTTP, file: std.Io.File) ?*FileHandle {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io());
+        defer self.mutex.unlock(self.io());
 
         return self.file_handles.get(file.handle);
     }
 
     fn registerDirHandle(self: *HTTP, handle: *DirHandle) std.mem.Allocator.Error!HandleId {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io());
+        defer self.mutex.unlock(self.io());
 
         const handle_id = self.next_dir_handle_id;
         self.next_dir_handle_id += 1;
@@ -201,8 +201,8 @@ pub const HTTP = struct {
     }
 
     fn dirHandle(self: *HTTP, dir: std.Io.Dir) ?*DirHandle {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io());
+        defer self.mutex.unlock(self.io());
 
         return self.dir_handles.get(dir.handle);
     }
@@ -253,8 +253,8 @@ pub const HTTP = struct {
     }
 
     fn closeDir(self: *HTTP, dir: std.Io.Dir) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io());
+        defer self.mutex.unlock(self.io());
 
         const handle_kv = self.dir_handles.fetchRemove(dir.handle) orelse {
             log.warn("Attempted to close non-existent dir handle: {d}", .{dir.handle});
@@ -265,8 +265,8 @@ pub const HTTP = struct {
     }
 
     fn closeFile(self: *HTTP, file: std.Io.File) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io());
+        defer self.mutex.unlock(self.io());
 
         const handle_kv = self.file_handles.fetchRemove(file.handle) orelse {
             log.warn("Attempted to close non-existent file handle: {d}", .{file.handle});

@@ -81,7 +81,7 @@ pub const HF = struct {
     file_handles: std.AutoHashMapUnmanaged(HandleId, *FileHandle),
     dir_handles: std.AutoHashMapUnmanaged(HandleId, *DirHandle),
     next_handle_id: HandleId,
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
     vtable: std.Io.VTable,
 
     pub const HandleId = i32;
@@ -195,7 +195,7 @@ pub const HF = struct {
             .file_handles = .{},
             .dir_handles = .{},
             .next_handle_id = 1,
-            .mutex = .{},
+            .mutex = .init,
             .vtable = makeVTable(args.io),
         };
 
@@ -232,8 +232,8 @@ pub const HF = struct {
     }
 
     fn allocateHandleId(self: *HF) HandleId {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io());
+        defer self.mutex.unlock(self.io());
 
         const id = self.next_handle_id;
         self.next_handle_id += 1;
@@ -241,45 +241,45 @@ pub const HF = struct {
     }
 
     fn registerFileHandle(self: *HF, handle: *FileHandle) std.mem.Allocator.Error!void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io());
+        defer self.mutex.unlock(self.io());
 
         try self.file_handles.put(self.allocator, handle.id, handle);
     }
 
     fn unregisterFileHandle(self: *HF, id: HandleId) ?*FileHandle {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io());
+        defer self.mutex.unlock(self.io());
 
         const kv = self.file_handles.fetchRemove(id) orelse return null;
         return kv.value;
     }
 
     fn getFileHandle(self: *HF, id: HandleId) ?*FileHandle {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io());
+        defer self.mutex.unlock(self.io());
 
         return self.file_handles.get(id);
     }
 
     fn registerDirHandle(self: *HF, handle: *DirHandle) std.mem.Allocator.Error!void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io());
+        defer self.mutex.unlock(self.io());
 
         try self.dir_handles.put(self.allocator, handle.id, handle);
     }
 
     fn unregisterDirHandle(self: *HF, id: HandleId) ?*DirHandle {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io());
+        defer self.mutex.unlock(self.io());
 
         const kv = self.dir_handles.fetchRemove(id) orelse return null;
         return kv.value;
     }
 
     fn getDirHandle(self: *HF, id: HandleId) ?*DirHandle {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io());
+        defer self.mutex.unlock(self.io());
         return self.dir_handles.get(id);
     }
 
