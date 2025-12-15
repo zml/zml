@@ -46,28 +46,62 @@ pub const VFS = struct {
     next_dir_handle: std.Io.Dir.Handle,
 
     vtable: std.Io.VTable,
+    base_io: std.Io,
 
     pub fn init(allocator: std.mem.Allocator, base_io: std.Io) VFS {
-        var vtable = base_io.vtable.*;
-        vtable.dirMake = dirMake;
-        vtable.dirMakePath = dirMakePath;
-        vtable.dirMakeOpenPath = dirMakeOpenPath;
-        vtable.dirStat = dirStat;
-        vtable.dirStatPath = dirStatPath;
-        vtable.dirAccess = dirAccess;
-        vtable.dirCreateFile = dirCreateFile;
-        vtable.dirOpenFile = dirOpenFile;
-        vtable.dirOpenDir = dirOpenDir;
-        vtable.dirClose = dirClose;
-        vtable.fileStat = fileStat;
-        vtable.fileClose = fileClose;
-        vtable.fileWriteStreaming = fileWriteStreaming;
-        vtable.fileWritePositional = fileWritePositional;
-        vtable.fileReadStreaming = fileReadStreaming;
-        vtable.fileReadPositional = fileReadPositional;
-        vtable.fileSeekBy = fileSeekBy;
-        vtable.fileSeekTo = fileSeekTo;
-        vtable.openSelfExe = openSelfExe;
+        const vtable: std.Io.VTable = .{
+            .async = async,
+            .concurrent = concurrent,
+            .await = await,
+            .cancel = cancel,
+            .cancelRequested = cancelRequested,
+            .groupAsync = groupAsync,
+            .groupConcurrent = groupConcurrent,
+            .groupWait = groupWait,
+            .groupCancel = groupCancel,
+            .select = select,
+            .mutexLock = mutexLock,
+            .mutexLockUncancelable = mutexLockUncancelable,
+            .mutexUnlock = mutexUnlock,
+            .conditionWait = conditionWait,
+            .conditionWaitUncancelable = conditionWaitUncancelable,
+            .conditionWake = conditionWake,
+            .now = now,
+            .sleep = sleep,
+            .netListenIp = netListenIp,
+            .netAccept = netAccept,
+            .netBindIp = netBindIp,
+            .netConnectIp = netConnectIp,
+            .netListenUnix = netListenUnix,
+            .netConnectUnix = netConnectUnix,
+            .netSend = netSend,
+            .netReceive = netReceive,
+            .netRead = netRead,
+            .netWrite = netWrite,
+            .netClose = netClose,
+            .netInterfaceNameResolve = netInterfaceNameResolve,
+            .netInterfaceName = netInterfaceName,
+            .netLookup = netLookup,
+            .dirMake = dirMake,
+            .dirMakePath = dirMakePath,
+            .dirMakeOpenPath = dirMakeOpenPath,
+            .dirStat = dirStat,
+            .dirStatPath = dirStatPath,
+            .dirAccess = dirAccess,
+            .dirCreateFile = dirCreateFile,
+            .dirOpenFile = dirOpenFile,
+            .dirOpenDir = dirOpenDir,
+            .dirClose = dirClose,
+            .fileStat = fileStat,
+            .fileClose = fileClose,
+            .fileWriteStreaming = fileWriteStreaming,
+            .fileWritePositional = fileWritePositional,
+            .fileReadStreaming = fileReadStreaming,
+            .fileReadPositional = fileReadPositional,
+            .fileSeekBy = fileSeekBy,
+            .fileSeekTo = fileSeekTo,
+            .openSelfExe = openSelfExe,
+        };
 
         return .{
             .allocator = allocator,
@@ -78,6 +112,7 @@ pub const VFS = struct {
             .next_file_handle = 0,
             .next_dir_handle = 1, // 0 reserved for ROOT_DIR_HANDLE
             .vtable = vtable,
+            .base_io = base_io,
         };
     }
 
@@ -580,5 +615,265 @@ pub const VFS = struct {
         _ = userdata;
         _ = flags;
         return std.Io.File.OpenSelfExeError.NotSupported;
+    }
+
+    // Forwarding wrappers
+
+    fn async(
+        userdata: ?*anyopaque,
+        result: []u8,
+        result_alignment: std.mem.Alignment,
+        context: []const u8,
+        context_alignment: std.mem.Alignment,
+        start: *const fn (context: *const anyopaque, result: *anyopaque) void,
+    ) ?*std.Io.AnyFuture {
+        const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
+        const f = self.base_io.vtable.async;
+        return f(self.base_io.userdata, result, result_alignment, context, context_alignment, start);
+    }
+
+    fn concurrent(
+        userdata: ?*anyopaque,
+        result_len: usize,
+        result_alignment: std.mem.Alignment,
+        context: []const u8,
+        context_alignment: std.mem.Alignment,
+        start: *const fn (context: *const anyopaque, result: *anyopaque) void,
+    ) std.Io.ConcurrentError!*std.Io.AnyFuture {
+        const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
+        const f = self.base_io.vtable.concurrent;
+        return f(self.base_io.userdata, result_len, result_alignment, context, context_alignment, start);
+    }
+
+    fn await(
+        userdata: ?*anyopaque,
+        any_future: *std.Io.AnyFuture,
+        result: []u8,
+        result_alignment: std.mem.Alignment,
+    ) void {
+        const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
+        const f = self.base_io.vtable.await;
+        f(self.base_io.userdata, any_future, result, result_alignment);
+    }
+
+    fn cancel(
+        userdata: ?*anyopaque,
+        any_future: *std.Io.AnyFuture,
+        result: []u8,
+        result_alignment: std.mem.Alignment,
+    ) void {
+        const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
+        const f = self.base_io.vtable.cancel;
+        f(self.base_io.userdata, any_future, result, result_alignment);
+    }
+
+    fn cancelRequested(userdata: ?*anyopaque) bool {
+        const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
+        const f = self.base_io.vtable.cancelRequested;
+        return f(self.base_io.userdata);
+    }
+
+    fn groupAsync(
+        userdata: ?*anyopaque,
+        group: *std.Io.Group,
+        context: []const u8,
+        context_alignment: std.mem.Alignment,
+        start: *const fn (*std.Io.Group, context: *const anyopaque) void,
+    ) void {
+        const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
+        const f = self.base_io.vtable.groupAsync;
+        f(self.base_io.userdata, group, context, context_alignment, start);
+    }
+
+    fn groupConcurrent(
+        userdata: ?*anyopaque,
+        group: *std.Io.Group,
+        context: []const u8,
+        context_alignment: std.mem.Alignment,
+        start: *const fn (*std.Io.Group, context: *const anyopaque) void,
+    ) std.Io.ConcurrentError!void {
+        const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
+        return self.base_io.vtable.groupConcurrent(self.base_io.userdata, group, context, context_alignment, start);
+    }
+
+    fn groupWait(userdata: ?*anyopaque, group: *std.Io.Group, token: *anyopaque) void {
+        const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
+        const f = self.base_io.vtable.groupWait;
+        f(self.base_io.userdata, group, token);
+    }
+
+    fn groupCancel(userdata: ?*anyopaque, group: *std.Io.Group, token: *anyopaque) void {
+        const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
+        const f = self.base_io.vtable.groupCancel;
+        f(self.base_io.userdata, group, token);
+    }
+
+    fn select(userdata: ?*anyopaque, futures: []const *std.Io.AnyFuture) std.Io.Cancelable!usize {
+        const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
+        return self.base_io.vtable.select(self.base_io.userdata, futures);
+    }
+
+    fn mutexLock(userdata: ?*anyopaque, prev_state: std.Io.Mutex.State, mutex: *std.Io.Mutex) std.Io.Cancelable!void {
+        const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
+        return self.base_io.vtable.mutexLock(self.base_io.userdata, prev_state, mutex);
+    }
+
+    fn mutexLockUncancelable(userdata: ?*anyopaque, prev_state: std.Io.Mutex.State, mutex: *std.Io.Mutex) void {
+        const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
+        const f = self.base_io.vtable.mutexLockUncancelable;
+        f(self.base_io.userdata, prev_state, mutex);
+    }
+
+    fn mutexUnlock(userdata: ?*anyopaque, prev_state: std.Io.Mutex.State, mutex: *std.Io.Mutex) void {
+        const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
+        const f = self.base_io.vtable.mutexUnlock;
+        f(self.base_io.userdata, prev_state, mutex);
+    }
+
+    fn conditionWait(userdata: ?*anyopaque, cond: *std.Io.Condition, mutex: *std.Io.Mutex) std.Io.Cancelable!void {
+        const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
+        return self.base_io.vtable.conditionWait(self.base_io.userdata, cond, mutex);
+    }
+
+    fn conditionWaitUncancelable(userdata: ?*anyopaque, cond: *std.Io.Condition, mutex: *std.Io.Mutex) void {
+        const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
+        const f = self.base_io.vtable.conditionWaitUncancelable;
+        f(self.base_io.userdata, cond, mutex);
+    }
+
+    fn conditionWake(userdata: ?*anyopaque, cond: *std.Io.Condition, wake: std.Io.Condition.Wake) void {
+        const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
+        const f = self.base_io.vtable.conditionWake;
+        f(self.base_io.userdata, cond, wake);
+    }
+
+    fn now(userdata: ?*anyopaque, clock: std.Io.Clock) std.Io.Clock.Error!std.Io.Timestamp {
+        const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
+        return self.base_io.vtable.now(self.base_io.userdata, clock);
+    }
+
+    fn sleep(userdata: ?*anyopaque, timeout: std.Io.Timeout) std.Io.SleepError!void {
+        const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
+        return self.base_io.vtable.sleep(self.base_io.userdata, timeout);
+    }
+
+    fn netListenIp(
+        userdata: ?*anyopaque,
+        address: std.Io.net.IpAddress,
+        options: std.Io.net.IpAddress.ListenOptions,
+    ) std.Io.net.IpAddress.ListenError!std.Io.net.Server {
+        const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
+        return self.base_io.vtable.netListenIp(self.base_io.userdata, address, options);
+    }
+
+    fn netAccept(userdata: ?*anyopaque, server: std.Io.net.Socket.Handle) std.Io.net.Server.AcceptError!std.Io.net.Stream {
+        const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
+        return self.base_io.vtable.netAccept(self.base_io.userdata, server);
+    }
+
+    fn netBindIp(
+        userdata: ?*anyopaque,
+        address: *const std.Io.net.IpAddress,
+        options: std.Io.net.IpAddress.BindOptions,
+    ) std.Io.net.IpAddress.BindError!std.Io.net.Socket {
+        const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
+        return self.base_io.vtable.netBindIp(self.base_io.userdata, address, options);
+    }
+
+    fn netConnectIp(
+        userdata: ?*anyopaque,
+        address: *const std.Io.net.IpAddress,
+        options: std.Io.net.IpAddress.ConnectOptions,
+    ) std.Io.net.IpAddress.ConnectError!std.Io.net.Stream {
+        const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
+        return self.base_io.vtable.netConnectIp(self.base_io.userdata, address, options);
+    }
+
+    fn netListenUnix(
+        userdata: ?*anyopaque,
+        address: *const std.Io.net.UnixAddress,
+        options: std.Io.net.UnixAddress.ListenOptions,
+    ) std.Io.net.UnixAddress.ListenError!std.Io.net.Socket.Handle {
+        const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
+        return self.base_io.vtable.netListenUnix(self.base_io.userdata, address, options);
+    }
+
+    fn netConnectUnix(
+        userdata: ?*anyopaque,
+        address: *const std.Io.net.UnixAddress,
+    ) std.Io.net.UnixAddress.ConnectError!std.Io.net.Socket.Handle {
+        const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
+        return self.base_io.vtable.netConnectUnix(self.base_io.userdata, address);
+    }
+
+    fn netSend(
+        userdata: ?*anyopaque,
+        handle: std.Io.net.Socket.Handle,
+        msgs: []std.Io.net.OutgoingMessage,
+        flags: std.Io.net.SendFlags,
+    ) struct { ?std.Io.net.Socket.SendError, usize } {
+        const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
+        return self.base_io.vtable.netSend(self.base_io.userdata, handle, msgs, flags);
+    }
+
+    fn netReceive(
+        userdata: ?*anyopaque,
+        handle: std.Io.net.Socket.Handle,
+        message_buffer: []std.Io.net.IncomingMessage,
+        data_buffer: []u8,
+        flags: std.Io.net.ReceiveFlags,
+        timeout: std.Io.Timeout,
+    ) struct { ?std.Io.net.Socket.ReceiveTimeoutError, usize } {
+        const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
+        return self.base_io.vtable.netReceive(self.base_io.userdata, handle, message_buffer, data_buffer, flags, timeout);
+    }
+
+    fn netRead(userdata: ?*anyopaque, src: std.Io.net.Socket.Handle, data: [][]u8) std.Io.net.Stream.Reader.Error!usize {
+        const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
+        return self.base_io.vtable.netRead(self.base_io.userdata, src, data);
+    }
+
+    fn netWrite(
+        userdata: ?*anyopaque,
+        dest: std.Io.net.Socket.Handle,
+        header: []const u8,
+        data: []const []const u8,
+        splat: usize,
+    ) std.Io.net.Stream.Writer.Error!usize {
+        const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
+        return self.base_io.vtable.netWrite(self.base_io.userdata, dest, header, data, splat);
+    }
+
+    fn netClose(userdata: ?*anyopaque, handle: std.Io.net.Socket.Handle) void {
+        const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
+        const f = self.base_io.vtable.netClose;
+        f(self.base_io.userdata, handle);
+    }
+
+    fn netInterfaceNameResolve(
+        userdata: ?*anyopaque,
+        name: *const std.Io.net.Interface.Name,
+    ) std.Io.net.Interface.Name.ResolveError!std.Io.net.Interface {
+        const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
+        return self.base_io.vtable.netInterfaceNameResolve(self.base_io.userdata, name);
+    }
+
+    fn netInterfaceName(
+        userdata: ?*anyopaque,
+        iface: std.Io.net.Interface,
+    ) std.Io.net.Interface.NameError!std.Io.net.Interface.Name {
+        const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
+        return self.base_io.vtable.netInterfaceName(self.base_io.userdata, iface);
+    }
+
+    fn netLookup(
+        userdata: ?*anyopaque,
+        host: std.Io.net.HostName,
+        q: *std.Io.Queue(std.Io.net.HostName.LookupResult),
+        options: std.Io.net.HostName.LookupOptions,
+    ) void {
+        const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
+        const f = self.base_io.vtable.netLookup;
+        f(self.base_io.userdata, host, q, options);
     }
 };

@@ -5,6 +5,14 @@ const zml = @import("zml");
 
 const log = std.log.scoped(.@"zml/main_io");
 
+pub const std_options: std.Options = .{
+    .log_level = .debug,
+    .log_scope_levels = &[_]std.log.ScopeLevel{
+        .{ .scope = .@"zml/safetensors", .level = .debug },
+        .{ .scope = .@"zml/io/vfs/http", .level = .info },
+    },
+};
+
 pub fn main() !void {
     var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(debug_allocator.deinit() == .ok);
@@ -79,136 +87,69 @@ pub fn main() !void {
     };
 
     {
-        var timer = try std.time.Timer.start();
+        var timer: std.time.Timer = try .start();
         defer {
             const elapsed = timer.read();
             log.info("Completed in {d} ms", .{elapsed / std.time.ns_per_ms});
         }
 
-        const file_path = try zml.safetensors.resolveModelPathEntrypoint(allocator, io, &vfs, uri);
-        defer allocator.free(file_path);
-        log.info("Resolved model path entrypoint for '{s}': {s}", .{ uri, file_path });
-
-        const repo_path = try zml.safetensors.resolveModelRepoPath(allocator, io, &vfs, uri);
-        defer allocator.free(repo_path);
-        log.info("Resolved model repo path for '{s}': {s}", .{ uri, repo_path });
-
-        const repo = try vfs.openAbsoluteDir(io, repo_path, .{});
-        defer repo.close(io);
-
-        const file_type = zml.safetensors.resolveFiletype(file_path);
-        log.info("Resolved file type for '{s}': {any}", .{ uri, file_type });
-
-        var registry: zml.safetensors.TensorRegistry = undefined;
+        var registry = try zml.safetensors.parseFromPath(allocator, io, &vfs, uri);
         defer registry.deinit();
 
-        switch (file_type) {
-            .index => {
-                const index_file = try vfs.openAbsoluteFile(io, file_path, .{});
-                defer index_file.close(io);
-
-                const file_reader_buf = try allocator.alloc(u8, 4 * 1024);
-                defer allocator.free(file_reader_buf);
-
-                var index_reader = index_file.reader(io, file_reader_buf);
-
-                var safetensors_index = try zml.safetensors.parseSafetensorsIndex(
-                    allocator,
-                    &index_reader.interface,
-                );
-                defer safetensors_index.deinit();
-
-                registry = try .initWithMetadata(allocator, safetensors_index.metadata);
-
-                const AsyncParseSafetensors = struct {
-                    pub fn run(
-                        allocator_: std.mem.Allocator,
-                        io_: std.Io,
-                        repo_: std.Io.Dir,
-                        registry_: *zml.safetensors.TensorRegistry,
-                        repo_path_: []const u8,
-                        filename: []const u8,
-                        err_ptr: *?anyerror,
-                    ) void {
-                        parseSafetensors(allocator_, io_, repo_, registry_, repo_path_, filename) catch |err| {
-                            err_ptr.* = err;
-                        };
-                    }
-
-                    fn parseSafetensors(
-                        allocator_: std.mem.Allocator,
-                        io_: std.Io,
-                        repo_: std.Io.Dir,
-                        registry_: *zml.safetensors.TensorRegistry,
-                        repo_path_: []const u8,
-                        filename: []const u8,
-                    ) !void {
-                        const file_uri = try std.fs.path.join(allocator_, &.{ repo_path_, filename });
-                        defer allocator_.free(file_uri);
-
-                        const file = try repo_.openFile(io_, filename, .{});
-                        defer file.close(io_);
-
-                        const header_buf = try allocator_.alloc(u8, 4 * 1024);
-                        defer allocator_.free(header_buf);
-
-                        var reader = file.reader(io_, header_buf);
-
-                        try zml.safetensors.parseSafetensors(allocator_, registry_, file_uri, &reader.interface);
-                    }
-                }.run;
-
-                var group: std.Io.Group = .init;
-                defer group.cancel(io);
-
-                var err: ?anyerror = null;
-
-                var safetensors_it = safetensors_index.iterator();
-                while (safetensors_it.next()) |entry| {
-                    const filename = entry.key_ptr.*;
-
-                    group.async(threaded.io(), AsyncParseSafetensors, .{ allocator, io, repo, &registry, repo_path, filename, &err });
-                }
-
-                group.wait(io);
-
-                if (err) |e| return e;
-            },
-            .safetensors => {
-                registry = .init(allocator);
-
-                const file = try repo.openFile(io, file_path, .{});
-                defer file.close(io);
-
-                const header_buf = try allocator.alloc(u8, 4 * 1024);
-                defer allocator.free(header_buf);
-
-                var reader = file.reader(io, header_buf);
-
-                try zml.safetensors.parseSafetensors(allocator, &registry, file_path, &reader.interface);
-            },
-            else => return error.InvalidPath,
-        }
-
-        var it = registry.iterator();
-        while (it.next()) |entry| {
-            const tensor = entry.value_ptr.*;
-            log.info("Tensor: {f}", .{tensor});
-        }
+        // var it = registry.iterator();
+        // while (it.next()) |entry| {
+        //     const tensor = entry.value_ptr.*;
+        //     log.info("{f}", .{tensor});
+        // }
 
         log.info("Parsed {d} tensors", .{registry.tensors.count()});
 
-        const tensor_reader_buf = try allocator.alloc(u8, 4 * 1024 * 1024);
-        defer allocator.free(tensor_reader_buf);
+        {
+            const tensor_name = "model.layers.31.mlp.down_proj.weight";
+            // const tensor_name = "model.layers.31.input_layernorm.weight";
+            const tensor = registry.tensors.get(tensor_name) orelse return error.TensorNotFound;
+            log.info("Reading {f}...", .{tensor});
 
-        var tensor_reader = try registry.reader(io, &vfs, "model.layers.7.mlp.gate_proj.weight", tensor_reader_buf);
-        defer tensor_reader.deinit();
+            const tensor_reader_buf = try allocator.alloc(u8, tensor.byteSize());
+            defer allocator.free(tensor_reader_buf);
 
-        var allocating_writer: std.Io.Writer.Allocating = try .initCapacity(allocator, 32 * 1024 * 1024);
-        defer allocating_writer.deinit();
+            const writer_buffer = try allocator.alloc(u8, tensor.byteSize());
+            defer allocator.free(writer_buffer);
 
-        const read = try tensor_reader.interface.streamRemaining(&allocating_writer.writer);
-        log.info("Read tensor data of size {d} bytes", .{read});
+            var tensor_reader = try registry.reader(io, &vfs, tensor_name, tensor_reader_buf);
+            defer tensor_reader.deinit();
+
+            var writer: std.Io.Writer = .fixed(writer_buffer);
+            const read = try tensor_reader.interface.streamRemaining(&writer);
+
+            log.info("Read tensor data: {d} bytes", .{read});
+        }
+
+        {
+            var err: ?anyerror = null;
+
+            var group: std.Io.Group = .init;
+            defer group.cancel(io);
+
+            var timer_async_read: std.time.Timer = try .start();
+            var it = registry.iterator();
+            while (it.next()) |entry| {
+                const tensor_name = entry.key_ptr.*;
+                group.async(threaded.io(), readTensor, .{ allocator, io, &vfs, &registry, tensor_name, &err });
+            }
+
+            group.wait(io);
+
+            if (err) |e| {
+                log.err("Error reading tensor: {any}", .{e});
+                return e;
+            }
+
+            const elapsed = timer_async_read.read();
+            const read_mb = @as(f64, @floatFromInt(registry.totalBytes())) / (1024.0 * 1024.0);
+            const read_time_s = @as(f64, @floatFromInt(elapsed)) / @as(f64, std.time.ns_per_s);
+            log.info("Throughput: {d:.2} MB in {d:.2} s = {d:.2} MB/s", .{ read_mb, read_time_s, read_mb / read_time_s });
+        }
     }
 
     // {
@@ -229,7 +170,7 @@ pub fn main() !void {
     // }
 
     // {
-    //     const path = try std.fs.path.join(allocator, &.{ repo_uri, "model-00004-of-00005.safetensors" });
+    //     const path = try std.fs.path.join(allocator, &.{ default_uri, "model-00004-of-00005.safetensors" });
     //     defer allocator.free(path);
 
     //     const file = try vfs.openAbsoluteFile(io, path, .{});
@@ -293,7 +234,7 @@ pub fn main() !void {
     // }
 
     // {
-    //     const path = try std.fs.path.join(allocator, &.{ repo_uri, "model-00004-of-00005.safetensors" }); // SHA256: 92ecfe1a2414458b4821ac8c13cf8cb70aed66b5eea8dc5ad9eeb4ff309d6d7b
+    //     const path = try std.fs.path.join(allocator, &.{ default_uri, "model-00004-of-00005.safetensors" }); // SHA256: 92ecfe1a2414458b4821ac8c13cf8cb70aed66b5eea8dc5ad9eeb4ff309d6d7b
     //     defer allocator.free(path);
 
     //     const file = try vfs.openAbsoluteFile(io, path, .{});
@@ -327,6 +268,59 @@ pub fn main() !void {
 
     //     std.debug.assert(total_read == stat.size);
     // }
+}
+
+fn readTensor(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    vfs: *zml.io.VFS,
+    registry: *zml.safetensors.TensorRegistry,
+    tensor_name: []const u8,
+    err_ptr: *?anyerror,
+) void {
+    readTensorImpl(allocator, io, vfs, registry, tensor_name) catch |err| {
+        err_ptr.* = err;
+        log.err("Failed to read tensor {s}: {any}", .{ tensor_name, err });
+    };
+}
+
+pub fn readTensorImpl(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    vfs: *zml.io.VFS,
+    registry: *zml.safetensors.TensorRegistry,
+    tensor_name: []const u8,
+) !void {
+    var total_timer = try std.time.Timer.start();
+
+    const tensor = registry.tensors.get(tensor_name) orelse return error.TensorNotFound;
+
+    const buff = try allocator.alloc(u8, tensor.byteSize() * 2);
+    defer allocator.free(buff);
+
+    var tensor_reader = try registry.reader(io, vfs, tensor_name, buff[0..tensor.byteSize()]);
+    defer tensor_reader.deinit();
+
+    var writer: std.Io.Writer = .fixed(buff[tensor.byteSize()..]);
+
+    var read_timer = try std.time.Timer.start();
+    const read = try tensor_reader.interface.streamRemaining(&writer);
+
+    const read_time = read_timer.read();
+    const total_time = total_timer.read();
+    const read_mb = @as(f64, @floatFromInt(read)) / (1024.0 * 1024.0);
+    const read_time_s = @as(f64, @floatFromInt(read_time)) / @as(f64, std.time.ns_per_s);
+    const throughput = if (read_time_s > 0) read_mb / read_time_s else 0;
+
+    log.info("Tensor {s} read {d}/{d} bytes at offset {d} | read={d}ms total={d}ms | {d:.2} MB/s", .{
+        tensor.name,
+        read,
+        tensor.byteSize(),
+        tensor.offset,
+        read_time / std.time.ns_per_ms,
+        total_time / std.time.ns_per_ms,
+        throughput,
+    });
 }
 
 fn readData(

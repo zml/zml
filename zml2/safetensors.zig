@@ -10,9 +10,80 @@ const StringBuilder = std.ArrayListUnmanaged(u8);
 pub const Tensors = std.StringArrayHashMapUnmanaged(Tensor);
 pub const Metadatas = std.StringArrayHashMapUnmanaged(Metadata);
 
-const log = std.log.scoped(.@"zml/ssafetensors");
+const log = std.log.scoped(.@"zml/safetensors");
 
 const BYTES_HEADER = 8;
+
+pub fn parseFromPath(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    vfs: *VFS, // todo: remove pointer when std.Io.Dir/File ready
+    path: []const u8,
+) !TensorRegistry {
+    const file_path = try resolveModelPathEntrypoint(allocator, io, vfs, path);
+    defer allocator.free(file_path);
+    log.debug("Resolved model path entrypoint for '{s}': {s}", .{ path, file_path });
+
+    const repo_path = try resolveModelRepoPath(allocator, io, vfs, path);
+    defer allocator.free(repo_path);
+    log.info("Resolved model repo path for '{s}': {s}", .{ path, repo_path });
+
+    const repo = try vfs.openAbsoluteDir(io, repo_path, .{});
+    defer repo.close(io);
+
+    const file_type = resolveFiletype(file_path);
+    log.info("Resolved file type for '{s}': {any}", .{ path, file_type });
+
+    return switch (file_type) {
+        .index => blk: {
+            const index_file = try vfs.openAbsoluteFile(io, file_path, .{});
+            defer index_file.close(io);
+
+            const file_reader_buf = try allocator.alloc(u8, 64 * 1024);
+            defer allocator.free(file_reader_buf);
+
+            var index_reader = index_file.reader(io, file_reader_buf);
+
+            var safetensors_index = try parseSafetensorsIndex(
+                allocator,
+                &index_reader.interface,
+            );
+            defer safetensors_index.deinit();
+
+            var registry: TensorRegistry = try .initWithMetadata(allocator, safetensors_index.metadata);
+
+            try parseSafetensorsIndexFiles(
+                allocator,
+                io,
+                safetensors_index,
+                &registry,
+                repo,
+                repo_path,
+            );
+
+            break :blk registry;
+        },
+        .safetensors => blk: {
+            var registry: TensorRegistry = .init(allocator);
+
+            log.info("Parsing single safetensors file '{s}'", .{file_path});
+            const file = try repo.openFile(io, file_path, .{});
+            defer file.close(io);
+
+            log.info("Opened safetensors file '{s}'", .{file_path});
+
+            const header_buf = try allocator.alloc(u8, 16 * 1024);
+            defer allocator.free(header_buf);
+
+            var reader = file.reader(io, header_buf);
+
+            try parseSafetensors(allocator, file_path, &reader.interface, &registry);
+
+            break :blk registry;
+        },
+        else => return error.InvalidPath,
+    };
+}
 
 pub const FileType = enum {
     index,
@@ -228,25 +299,16 @@ pub const TensorRegistry = struct {
         allocator: std.mem.Allocator,
         metadata: Metadatas,
     ) !TensorRegistry {
-        var arena = std.heap.ArenaAllocator.init(allocator);
-
-        return .{
-            .arena = arena,
+        var self: TensorRegistry = .{
+            .arena = std.heap.ArenaAllocator.init(allocator),
             .tensors = .{},
-            .metadata = blk: {
-                var arena_allocator = arena.allocator();
-                var new_metadata: Metadatas = .{};
-
-                var it = metadata.iterator();
-                while (it.next()) |entry| {
-                    const key = try arena_allocator.dupe(u8, entry.key_ptr.*);
-                    const value = try entry.value_ptr.*.clone(arena_allocator);
-                    try new_metadata.put(arena_allocator, key, value);
-                }
-                break :blk new_metadata;
-            },
+            .metadata = .empty,
             .mutex = .{},
         };
+
+        try self.mergeMetadata(metadata);
+
+        return self;
     }
 
     pub fn deinit(self: *TensorRegistry) void {
@@ -254,6 +316,32 @@ pub const TensorRegistry = struct {
         self.tensors.deinit(allocator);
         self.metadata.deinit(allocator);
         self.arena.deinit();
+    }
+
+    pub fn mergeMetadata(
+        self: *TensorRegistry,
+        other: Metadatas,
+    ) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const allocator = self.arena.allocator();
+
+        var it = other.iterator();
+        while (it.next()) |entry| {
+            const key = try allocator.dupe(u8, entry.key_ptr.*);
+            const value = try entry.value_ptr.*.clone(allocator);
+
+            const gop = try self.metadata.getOrPut(allocator, key);
+            if (gop.found_existing) {
+                gop.value_ptr.*.deinit(allocator);
+                gop.value_ptr.* = value;
+                log.warn("Overwrote existing metadata key={s} with value={f}", .{ key, value });
+            } else {
+                gop.value_ptr.* = value;
+                log.debug("Added new metadata key={s} with value={f}", .{ key, value });
+            }
+        }
     }
 
     pub fn registerTensor(
@@ -265,7 +353,12 @@ pub const TensorRegistry = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        try self.tensors.put(allocator, tensor.name, tensor);
+        var tensor_copy = tensor;
+
+        tensor_copy.name = try allocator.dupe(u8, tensor.name);
+        tensor_copy.file_uri = try allocator.dupe(u8, tensor.file_uri);
+
+        try self.tensors.put(allocator, tensor_copy.name, tensor_copy);
     }
 
     pub fn reader(
@@ -301,14 +394,13 @@ pub const TensorRegistry = struct {
 
 pub fn parseSafetensors(
     allocator: std.mem.Allocator,
-    registry: *TensorRegistry,
-    file_uri: []const u8, // todo: real path lookup from file missing as of today
+    file_uri: []const u8,
     reader: *std.Io.Reader,
+    registry: *TensorRegistry,
 ) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    var registry_allocator = registry.arena.allocator();
     const json_header_length: u64 = try reader.takeInt(u64, .little);
 
     const data_start_offset = BYTES_HEADER + json_header_length;
@@ -330,7 +422,14 @@ pub fn parseSafetensors(
         const value = entry.value_ptr.*;
 
         if (std.mem.eql(u8, key, "__metadata__")) {
-            registry.metadata = try parseMetadata(registry_allocator, value);
+            // Parse metadata into a local arena to avoid concurrent allocations
+            // against registry.arena (which is not thread-safe).
+            var local_arena = std.heap.ArenaAllocator.init(allocator);
+            defer local_arena.deinit();
+
+            const metas = try parseMetadata(local_arena.allocator(), value);
+            try registry.mergeMetadata(metas);
+
             continue;
         }
 
@@ -351,8 +450,8 @@ pub fn parseSafetensors(
         }
 
         const tensor: Tensor = .{
-            .file_uri = try registry_allocator.dupe(u8, file_uri),
-            .name = try registry_allocator.dupe(u8, key),
+            .file_uri = file_uri,
+            .name = key,
             .shape = .init(dims.slice(), dtype),
             .offset = data_start_offset + start,
         };
@@ -430,12 +529,85 @@ pub fn parseSafetensorsIndex(
         log.warn("No weight_map attribute found in index", .{});
     }
 
-    if (index.object.get("__metadata__")) |metadata_val| {
+    if (index.object.get("metadata")) |metadata_val| {
         safetensors_index.metadata = try parseMetadata(arena_allocator, metadata_val);
     }
 
     return safetensors_index;
 }
+
+pub fn parseSafetensorsIndexFiles(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    safetensors_index: SafetensorsIndex,
+    registry: *TensorRegistry,
+    repo: std.Io.Dir,
+    repo_path: []const u8,
+) !void {
+    var group: std.Io.Group = .init;
+    defer group.cancel(io);
+
+    var err: ?anyerror = null;
+
+    const filenames = safetensors_index.map.keys();
+
+    for (filenames) |filename| {
+        group.async(io, AsyncParseSafetensorsIndexFile.run, .{
+            allocator,
+            io,
+            registry,
+            repo,
+            repo_path,
+            filename,
+            &err,
+        });
+    }
+
+    group.wait(io);
+
+    if (err) |e| {
+        log.err("Error parsing safetensors index files: {any}", .{e});
+        return e;
+    }
+}
+
+const AsyncParseSafetensorsIndexFile = struct {
+    pub fn run(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        registry: *TensorRegistry,
+        repo: std.Io.Dir,
+        repo_path: []const u8, // todo: Dir.realPath when ready
+        filename: []const u8,
+        err_ptr: *?anyerror,
+    ) void {
+        parse(allocator, io, registry, repo, repo_path, filename) catch |err| {
+            err_ptr.* = err;
+        };
+    }
+
+    fn parse(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        registry: *TensorRegistry,
+        repo: std.Io.Dir,
+        repo_path: []const u8, // todo: Dir.realPath when ready
+        filename: []const u8,
+    ) !void {
+        const file_uri = try std.fs.path.join(allocator, &.{ repo_path, filename });
+        defer allocator.free(file_uri);
+
+        const file = try repo.openFile(io, filename, .{});
+        defer file.close(io);
+
+        const header_buf = try allocator.alloc(u8, 64 * 1024);
+        defer allocator.free(header_buf);
+
+        var reader = file.reader(io, header_buf);
+
+        try parseSafetensors(allocator, file_uri, &reader.interface, registry);
+    }
+};
 
 pub const Metadata = union(enum) {
     null: void,
@@ -506,7 +678,7 @@ pub const Metadata = union(enum) {
             .array_bool => |arr| {
                 try writer.writeByte('[');
                 for (arr, 0..) |v, i| {
-                    if (i > 0) try writer.write(", ");
+                    if (i > 0) try writer.writeAll(", ");
                     try writer.print("{}", .{v});
                 }
                 try writer.writeByte(']');
@@ -514,7 +686,7 @@ pub const Metadata = union(enum) {
             .array_int => |arr| {
                 try writer.writeByte('[');
                 for (arr, 0..) |v, i| {
-                    if (i > 0) try writer.write(", ");
+                    if (i > 0) try writer.writeAll(", ");
                     try writer.print("{d}", .{v});
                 }
                 try writer.writeByte(']');
@@ -522,7 +694,7 @@ pub const Metadata = union(enum) {
             .array_float => |arr| {
                 try writer.writeByte('[');
                 for (arr, 0..) |v, i| {
-                    if (i > 0) try writer.write(", ");
+                    if (i > 0) try writer.writeAll(", ");
                     try writer.print("{d}", .{v});
                 }
                 try writer.writeByte(']');
@@ -530,7 +702,7 @@ pub const Metadata = union(enum) {
             .array_string => |arr| {
                 try writer.writeByte('[');
                 for (arr, 0..) |v, i| {
-                    if (i > 0) try writer.write(", ");
+                    if (i > 0) try writer.writeAll(", ");
                     try writer.print("\"{s}\"", .{v});
                 }
                 try writer.writeByte(']');

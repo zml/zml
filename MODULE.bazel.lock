@@ -645,7 +645,7 @@
     },
     "@@rules_apple+//apple:apple.bzl%provisioning_profile_repository_extension": {
       "general": {
-        "bzlTransitiveDigest": "Oa+WNwUQ6db3WoQOwZ8qU+aRE5kJufCF45z4ZCs6298=",
+        "bzlTransitiveDigest": "asHlWWwDeYTUAyZk9zlK+dm0Ezyb97q8UBEfsY8p83k=",
         "usagesDigest": "vsJl8Rw5NL+5Ag2wdUDoTeRF/5klkXO8545Iy7U1Q08=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},
@@ -2531,7 +2531,7 @@
     },
     "@@rules_rust+//crate_universe/private:internal_extensions.bzl%cu_nr": {
       "general": {
-        "bzlTransitiveDigest": "XkpmtSAoMsVR5D0IWKWoGVKSPjnIiH3NEyMQqyFvqm8=",
+        "bzlTransitiveDigest": "ANGVT5r/yDVCawqIISn+1Gh62Yw8VCMEqxi/JAAJCzw=",
         "usagesDigest": "3vKI8uvqTpJCf+t8aU6UD5d5cUWinWhtMjKkRpCLR+A=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},
