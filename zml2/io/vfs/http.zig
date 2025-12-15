@@ -318,31 +318,35 @@ pub const HTTP = struct {
 
         var total_read: usize = 0;
 
-        log.debug("Starting HTTP read handle={d} pos={d} buffers={d} url={s}", .{ file.handle, handle.pos, data.len, handle.url });
-
         for (data) |buf| {
-            log.debug("  buffer len={d}", .{buf.len});
-        }
-
-        for (data, 0..) |buf, buf_index| {
             var offset: usize = 0;
 
             while (offset < buf.len) {
+                const file_size = blk: {
+                    if (handle.size) |size| break :blk size;
+
+                    const stat = self.fetchFileStat(file) catch {
+                        log.err("Failed to fetch file stat during read for handle={d} url={s}", .{ file.handle, handle.url });
+                        return std.Io.File.Reader.Error.Unexpected;
+                    };
+
+                    handle.size = stat.size;
+
+                    break :blk stat.size;
+                };
+
                 // Check EOF against known file size
-                if (handle.size) |size| {
-                    if (handle.pos >= size) {
-                        return total_read;
-                    }
+                if (handle.pos >= file_size) {
+                    return total_read;
                 }
 
-                var desired: u64 = 0;
-                for (data[buf_index..]) |b| desired += b.len;
-                desired -= offset;
+                const start = handle.pos;
+                var desired_read_len: u64 = @max(@as(u64, @intCast(buf.len)), self.config.request_range_min);
+                if (desired_read_len > self.config.request_range_max) desired_read_len = self.config.request_range_max;
 
-                if (desired < self.config.request_range_min) desired = self.config.request_range_min;
-                if (desired > self.config.request_range_max) desired = self.config.request_range_max;
+                const end = if (handle.size.? > 0 and start < file_size) @min(start + desired_read_len - 1, file_size - 1) else start + desired_read_len - 1;
 
-                try self.requestRead(file, desired);
+                try self.requestRead(file, start, end);
                 const reader = handle.body_reader.?;
 
                 const dest = buf[offset..];
@@ -359,43 +363,20 @@ pub const HTTP = struct {
                     },
                 };
 
-                if (n == 0) {
-                    // log.debug("readVec returned 0 (no progress) handle={d} pos={d} buf_index={d} offset={d}", .{ file.handle, handle.pos, buf_index, offset });
-                    continue;
-                }
-
-                // log.debug("readVec wrote {d} bytes for handle={d} pos(before)={d} buf_index={d} offset(before)={d}", .{ n, file.handle, handle.pos, buf_index, offset });
-
                 offset += n;
                 handle.pos += n;
                 total_read += n;
             }
         }
-
         return total_read;
     }
 
-    fn requestRead(self: *HTTP, file: std.Io.File, desired: u64) std.Io.File.Reader.Error!void {
+    fn requestRead(self: *HTTP, file: std.Io.File, start: u64, end: u64) std.Io.File.Reader.Error!void {
         const handle = self.fileHandle(file) orelse return std.Io.File.Reader.Error.Unexpected;
 
-        if (handle.body_reader != null) return;
+        if (handle.request) |_| return;
 
-        log.debug("Starting HTTP request lifecycle handle={d} pos={d} desired={d} url={s}", .{ file.handle, handle.pos, desired, handle.url });
-
-        if (handle.size == null) {
-            const stat = self.fetchFileStat(file) catch |err| {
-                log.err("Failed to fetch file stat during read: {}", .{err});
-                return std.Io.File.Reader.Error.SystemResources;
-            };
-            handle.size = stat.size;
-        }
-
-        const size = handle.size.?;
-
-        if (handle.pos >= size) return;
-
-        const start = handle.pos;
-        const end = @min(start + desired, size) - 1;
+        std.debug.assert(start <= end);
 
         var range_buf: [64]u8 = undefined;
         const range_header = std.fmt.bufPrint(&range_buf, "bytes={d}-{d}", .{ start, end }) catch unreachable;
@@ -461,7 +442,6 @@ pub const HTTP = struct {
         handle.request = request;
         handle.response = response;
         handle.body_reader = handle.response.?.reader(&.{});
-        log.debug("Initialized body_reader len={d} seek={d} for handle={s}", .{ handle.body_reader.?.buffer.len, handle.body_reader.?.seek, handle.url });
     }
 
     pub const FileStat = struct {
@@ -542,7 +522,6 @@ pub const HTTP = struct {
                         log.err("HTTP stat response missing Content-Length", .{});
                         return std.Io.File.StatError.SystemResources;
                     };
-                    handle.size = size;
 
                     return .{
                         .inode = @intCast(file.handle),

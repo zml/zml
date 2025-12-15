@@ -14,10 +14,12 @@ pub const std_options: std.Options = .{
 };
 
 pub fn main() !void {
-    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
-    defer std.debug.assert(debug_allocator.deinit() == .ok);
+    // var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    // defer std.debug.assert(debug_allocator.deinit() == .ok);
 
-    const allocator = debug_allocator.allocator();
+    // const allocator = debug_allocator.allocator();
+
+    const allocator = std.heap.c_allocator;
 
     var threaded: std.Io.Threaded = .init(allocator);
     defer threaded.deinit();
@@ -104,26 +106,39 @@ pub fn main() !void {
 
         log.info("Parsed {d} tensors", .{registry.tensors.count()});
 
-        {
-            const tensor_name = "model.layers.31.mlp.down_proj.weight";
-            // const tensor_name = "model.layers.31.input_layernorm.weight";
-            const tensor = registry.tensors.get(tensor_name) orelse return error.TensorNotFound;
-            log.info("Reading {f}...", .{tensor});
+        // {
+        //     const tensor_name = "model.layers.31.mlp.down_proj.weight";
+        //     // const tensor_name = "model.layers.31.input_layernorm.weight";
+        //     // const tensor_name = "lm_head.weight";
+        //     const tensor = registry.tensors.get(tensor_name) orelse return error.TensorNotFound;
+        //     log.info("Reading {f}...", .{tensor});
 
-            const tensor_reader_buf = try allocator.alloc(u8, tensor.byteSize());
-            defer allocator.free(tensor_reader_buf);
+        //     const tensor_reader_buf = try allocator.alloc(u8, tensor.byteSize());
+        //     defer allocator.free(tensor_reader_buf);
 
-            const writer_buffer = try allocator.alloc(u8, tensor.byteSize());
-            defer allocator.free(writer_buffer);
+        //     const writer_buffer = try allocator.alloc(u8, tensor.byteSize());
+        //     defer allocator.free(writer_buffer);
 
-            var tensor_reader = try registry.reader(io, &vfs, tensor_name, tensor_reader_buf);
-            defer tensor_reader.deinit();
+        //     var tensor_reader = try registry.reader(io, &vfs, tensor_name, tensor_reader_buf);
+        //     defer tensor_reader.deinit();
 
-            var writer: std.Io.Writer = .fixed(writer_buffer);
-            const read = try tensor_reader.interface.streamRemaining(&writer);
+        //     var writer: std.Io.Writer = .fixed(writer_buffer);
 
-            log.info("Read tensor data: {d} bytes", .{read});
-        }
+        //     var timer_read: std.time.Timer = try .start();
+
+        //     const read = try tensor_reader.interface.streamRemaining(&writer);
+
+        //     const elapsed = timer_read.read();
+        //     const read_mb = @as(f64, @floatFromInt(read)) / (1024.0 * 1024.0);
+        //     const read_time_s = @as(f64, @floatFromInt(elapsed)) / @as(f64, std.time.ns_per_s);
+        //     const throughput_gbps = (read_mb * 8.0) / 1024.0 / read_time_s;
+
+        //     log.info("Read completed in {d} ms | {d:.2} MB/s | {d:.2} Gbps", .{
+        //         elapsed / std.time.ns_per_ms,
+        //         read_mb / read_time_s,
+        //         throughput_gbps,
+        //     });
+        // }
 
         {
             var err: ?anyerror = null;
@@ -138,7 +153,7 @@ pub fn main() !void {
             var it = registry.iterator();
             while (it.next()) |entry| {
                 const tensor_name = entry.key_ptr.*;
-                group.async(threaded.io(), readTensor, .{ io, &vfs, &pool, &registry, tensor_name, &err });
+                group.async(io, readTensor, .{ allocator, io, &vfs, &pool, &registry, tensor_name, &err });
             }
 
             group.wait(io);
@@ -151,7 +166,12 @@ pub fn main() !void {
             const elapsed = timer_async_read.read();
             const read_mb = @as(f64, @floatFromInt(registry.totalBytes())) / (1024.0 * 1024.0);
             const read_time_s = @as(f64, @floatFromInt(elapsed)) / @as(f64, std.time.ns_per_s);
-            log.info("Throughput: {d:.2} MB in {d:.2} s = {d:.2} MB/s", .{ read_mb, read_time_s, read_mb / read_time_s });
+            log.info("Throughput: {d:.2} MB in {d:.2} s = {d:.2} MB/s | {d:.2} Gbps", .{
+                read_mb,
+                read_time_s,
+                read_mb / read_time_s,
+                (read_mb * 8.0) / 1024.0 / read_time_s,
+            });
         }
     }
 
@@ -274,6 +294,7 @@ pub fn main() !void {
 }
 
 fn readTensor(
+    allocator: std.mem.Allocator,
     io: std.Io,
     vfs: *zml.io.VFS,
     pool: *MemoryPool,
@@ -281,13 +302,14 @@ fn readTensor(
     tensor_name: []const u8,
     err_ptr: *?anyerror,
 ) void {
-    readTensorImpl(io, vfs, pool, registry, tensor_name) catch |err| {
+    readTensorImpl(allocator, io, vfs, pool, registry, tensor_name) catch |err| {
         err_ptr.* = err;
         log.err("Failed to read tensor {s}: {any}", .{ tensor_name, err });
     };
 }
 
 pub fn readTensorImpl(
+    _: std.mem.Allocator,
     io: std.Io,
     vfs: *zml.io.VFS,
     pool: *MemoryPool,
@@ -298,15 +320,16 @@ pub fn readTensorImpl(
 
     const tensor = registry.tensors.get(tensor_name) orelse return error.TensorNotFound;
 
-    const handle = try pool.alloc(io, tensor.byteSize() * 2);
-    defer pool.free(io, handle.index);
+    const mem_slot = try pool.alloc(io, tensor.byteSize() * 2);
+    defer pool.free(io, mem_slot.index);
 
-    var tensor_reader = try registry.reader(io, vfs, tensor_name, handle.data[0..tensor.byteSize()]);
+    var tensor_reader = try registry.reader(io, vfs, tensor_name, mem_slot.data[0..tensor.byteSize()]);
     defer tensor_reader.deinit();
 
-    var writer: std.Io.Writer = .fixed(handle.data[tensor.byteSize()..]);
-
     var read_timer = try std.time.Timer.start();
+
+    var writer: std.Io.Writer = .fixed(mem_slot.data[tensor.byteSize()..]);
+
     const read = try tensor_reader.interface.streamRemaining(&writer);
 
     const read_time = read_timer.read();

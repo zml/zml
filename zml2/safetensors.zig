@@ -26,13 +26,13 @@ pub fn parseFromPath(
 
     const repo_path = try resolveModelRepoPath(allocator, io, vfs, path);
     defer allocator.free(repo_path);
-    log.info("Resolved model repo path for '{s}': {s}", .{ path, repo_path });
+    log.debug("Resolved model repo path for '{s}': {s}", .{ path, repo_path });
 
     const repo = try vfs.openAbsoluteDir(io, repo_path, .{});
     defer repo.close(io);
 
     const file_type = resolveFiletype(file_path);
-    log.info("Resolved file type for '{s}': {any}", .{ path, file_type });
+    log.debug("Resolved file type for '{s}': {any}", .{ path, file_type });
 
     return switch (file_type) {
         .index => blk: {
@@ -225,7 +225,7 @@ pub const TensorReader = struct {
                     .stream = stream,
                     .discard = discard,
                 },
-                .buffer = buffer,
+                .buffer = &.{},
                 .seek = 0,
                 .end = 0,
             },
