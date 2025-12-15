@@ -17,6 +17,18 @@ pub const Linear = struct {
     weight: Tensor,
     bias: ?Tensor = null,
 
+    pub fn init(shape: Shape, bias: bool) Linear {
+        return .{
+            .weight = .init(shape),
+            .bias = if (bias) .init(Shape.init(.{shape.dim(1)}, shape.dtype())) else null,
+        };
+    }
+
+    pub fn deinit(self: Linear) void {
+        self.weight.deinit();
+        if (self.bias) |bias| bias.deinit();
+    }
+
     pub fn forward(self: Linear, x: Tensor) Tensor {
         var y = x.dotGeneral(self.weight.convert(x.dtype()), &.{.{ -1, -1 }}, &.{});
         // If self.weight doesn't have tags, preserve tags from x.

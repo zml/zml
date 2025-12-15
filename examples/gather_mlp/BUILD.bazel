@@ -1,0 +1,12 @@
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library", "zig_test")
+
+
+zig_binary(
+    name = "main",
+    main = "main.zig",
+    deps = [
+        "@com_github_hejsil_clap//:clap",
+        "@zml//stdx",
+        "@zml//zml2:zml",
+    ],
+)
