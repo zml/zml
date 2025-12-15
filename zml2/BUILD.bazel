@@ -33,6 +33,7 @@ zig_library(
         "ops.zig",
         "pjrtx.zig",
         "platform.zig",
+        "safetensors.zig",
         "shape.zig",
         "slice.zig",
         "tensor.zig",

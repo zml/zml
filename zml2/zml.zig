@@ -28,6 +28,7 @@ pub const Target = platform.Target;
 pub const CompilationOptions = platform.CompilationOptions;
 pub const shape = @import("shape.zig");
 pub const Shape = shape.Shape;
+pub const safetensors = @import("safetensors.zig");
 pub const slice = @import("slice.zig");
 pub const Slice = slice.Slice;
 pub const ConstSlice = slice.ConstSlice;

@@ -3,7 +3,7 @@ const std = @import("std");
 const log = std.log.scoped(.@"zml/io/vfs/http");
 
 pub const HTTP = struct {
-    pub const HandleId = i32;
+    const HandleId = i32;
 
     pub const FileHandle = struct {
         allocator: std.mem.Allocator,
@@ -11,7 +11,7 @@ pub const HTTP = struct {
         url: []const u8,
         pos: u64,
         size: ?u64,
-        redirect_buffer: [1024 * 1024]u8,
+        redirect_buffer: [std.fs.max_path_bytes]u8,
         request: ?*std.http.Client.Request,
         response: ?std.http.Client.Response,
         body_reader: ?*std.Io.Reader,
@@ -106,7 +106,8 @@ pub const HTTP = struct {
 
     pub const Config = struct {
         max_fetch_attempts: u32 = 10,
-        request_range_size: u64 = 128 * 1024 * 1024,
+        request_range_min: u64 = 8 * 1024,
+        request_range_max: u64 = 128 * 1024 * 1024,
     };
 
     allocator: std.mem.Allocator,
@@ -122,7 +123,7 @@ pub const HTTP = struct {
 
     vtable: std.Io.VTable,
 
-    pub fn init(allocator: std.mem.Allocator, base_io: std.Io, http_client: *std.http.Client, config: Config) !HTTP {
+    pub fn init(allocator: std.mem.Allocator, base_io: std.Io, http_client: *std.http.Client, config: Config) std.mem.Allocator.Error!HTTP {
         var self: HTTP = .{
             .allocator = allocator,
             .mutex = .{},
@@ -212,17 +213,20 @@ pub const HTTP = struct {
         sub_path: []const u8,
     ) std.Io.File.OpenError!std.Io.File {
         const dir_handle = self.dirHandle(dir) orelse {
-            log.err("Directory handle not found for dirOpenFile", .{});
+            log.err("Directory handle not found for dirOpenFile with dir={any} sub_path={s}", .{ dir.handle, sub_path });
             return std.Io.File.OpenError.FileNotFound;
         };
 
         const handle = FileHandle.init(self.allocator, dir_handle.url, sub_path) catch {
-            log.err("Failed to create FileHandle in dirOpenFile", .{});
+            log.err("Failed to create FileHandle in openFile with dir={any} sub_path={s}", .{ dir.handle, sub_path });
             return std.Io.File.OpenError.SystemResources;
         };
         errdefer handle.deinit();
 
-        const handle_id = self.registerFileHandle(handle) catch return error.SystemResources;
+        const handle_id = self.registerFileHandle(handle) catch {
+            log.err("Failed to register FileHandle in openFile with dir={any} sub_path={s}", .{ dir.handle, sub_path });
+            return std.Io.File.OpenError.SystemResources;
+        };
 
         return .{ .handle = @intCast(handle_id) };
     }
@@ -243,7 +247,7 @@ pub const HTTP = struct {
         };
         errdefer handle.deinit();
 
-        const handle_id = self.registerDirHandle(handle) catch return error.SystemResources;
+        const handle_id = self.registerDirHandle(handle) catch return std.Io.Dir.OpenError.SystemResources;
 
         return .{ .handle = @intCast(handle_id) };
     }
@@ -273,13 +277,13 @@ pub const HTTP = struct {
     }
 
     fn setAbsolutePos(self: *HTTP, file: std.Io.File, pos: u64) std.Io.File.SeekError!void {
-        const handle = self.fileHandle(file) orelse return error.Unexpected;
+        const handle = self.fileHandle(file) orelse return std.Io.File.SeekError.Unexpected;
         handle.releaseRequest();
         handle.pos = pos;
     }
 
     fn setRelativeOffset(self: *HTTP, file: std.Io.File, offset: i64) std.Io.File.SeekError!void {
-        const handle = self.fileHandle(file) orelse return error.Unexpected;
+        const handle = self.fileHandle(file) orelse return std.Io.File.SeekError.Unexpected;
         handle.releaseRequest();
 
         const new_pos = @as(i64, @intCast(handle.pos)) + offset;
@@ -314,7 +318,13 @@ pub const HTTP = struct {
 
         var total_read: usize = 0;
 
+        log.debug("Starting HTTP read handle={d} pos={d} buffers={d} url={s}", .{ file.handle, handle.pos, data.len, handle.url });
+
         for (data) |buf| {
+            log.debug("  buffer len={d}", .{buf.len});
+        }
+
+        for (data, 0..) |buf, buf_index| {
             var offset: usize = 0;
 
             while (offset < buf.len) {
@@ -325,17 +335,22 @@ pub const HTTP = struct {
                     }
                 }
 
-                try self.requestRead(file);
-                const reader = handle.body_reader orelse {
-                    return total_read; // todo: handle this properly
-                };
+                var desired: u64 = 0;
+                for (data[buf_index..]) |b| desired += b.len;
+                desired -= offset;
+
+                if (desired < self.config.request_range_min) desired = self.config.request_range_min;
+                if (desired > self.config.request_range_max) desired = self.config.request_range_max;
+
+                try self.requestRead(file, desired);
+                const reader = handle.body_reader.?;
 
                 const dest = buf[offset..];
                 var iov = [_][]u8{dest};
 
                 const n = reader.readVec(&iov) catch |err| switch (err) {
                     error.EndOfStream => {
-                        // Current HTTP range exhausted, need new request
+                        log.debug("Reached EndOfStream for handle={d} pos={d}, will re-request remaining", .{ file.handle, handle.pos });
                         handle.releaseRequest();
                         continue;
                     },
@@ -344,10 +359,12 @@ pub const HTTP = struct {
                     },
                 };
 
-                // Data not ready yet, just retry same read
                 if (n == 0) {
+                    // log.debug("readVec returned 0 (no progress) handle={d} pos={d} buf_index={d} offset={d}", .{ file.handle, handle.pos, buf_index, offset });
                     continue;
                 }
+
+                // log.debug("readVec wrote {d} bytes for handle={d} pos(before)={d} buf_index={d} offset(before)={d}", .{ n, file.handle, handle.pos, buf_index, offset });
 
                 offset += n;
                 handle.pos += n;
@@ -358,10 +375,12 @@ pub const HTTP = struct {
         return total_read;
     }
 
-    fn requestRead(self: *HTTP, file: std.Io.File) std.Io.File.Reader.Error!void {
-        const handle = self.fileHandle(file) orelse return error.Unexpected;
+    fn requestRead(self: *HTTP, file: std.Io.File, desired: u64) std.Io.File.Reader.Error!void {
+        const handle = self.fileHandle(file) orelse return std.Io.File.Reader.Error.Unexpected;
 
         if (handle.body_reader != null) return;
+
+        log.debug("Starting HTTP request lifecycle handle={d} pos={d} desired={d} url={s}", .{ file.handle, handle.pos, desired, handle.url });
 
         if (handle.size == null) {
             const stat = self.fetchFileStat(file) catch |err| {
@@ -376,7 +395,7 @@ pub const HTTP = struct {
         if (handle.pos >= size) return;
 
         const start = handle.pos;
-        const end = @min(start + self.config.request_range_size, size) - 1;
+        const end = @min(start + desired, size) - 1;
 
         var range_buf: [64]u8 = undefined;
         const range_header = std.fmt.bufPrint(&range_buf, "bytes={d}-{d}", .{ start, end }) catch unreachable;
@@ -412,15 +431,20 @@ pub const HTTP = struct {
         };
 
         const response = request.receiveHead(&handle.redirect_buffer) catch |err| {
-            log.err("Failed to receive HTTP response head: {}", .{err});
+            log.err("Failed to receive HTTP response head for handle={d} url={s}: {}", .{ file.handle, handle.url, err });
             return std.Io.File.Reader.Error.Unexpected;
         };
 
         const latency = timer.read();
         handle.recordLatency(latency);
 
-        log.debug("HTTP request: range={s} latency={d}ms avg={d}ms min={d}ms max={d}ms for {s}", .{
-            range_header,
+        log.debug("HTTP call: handle={d} status={s} content_length={?} range={d}-{d} ({d}) latency={d}ms avg={d}ms min={d}ms max={d}ms for {s}", .{
+            file.handle,
+            @tagName(response.head.status),
+            response.head.content_length,
+            start,
+            end,
+            end - start + 1,
             latency / std.time.ns_per_ms,
             handle.avgLatencyMs(),
             handle.min_latency_ns / std.time.ns_per_ms,
@@ -431,12 +455,13 @@ pub const HTTP = struct {
         if (response.head.status != .partial_content and response.head.status != .ok) {
             request.deinit();
             self.allocator.destroy(request);
-            return error.Unexpected;
+            return std.Io.File.Reader.Error.Unexpected;
         }
 
         handle.request = request;
         handle.response = response;
         handle.body_reader = handle.response.?.reader(&.{});
+        log.debug("Initialized body_reader len={d} seek={d} for handle={s}", .{ handle.body_reader.?.buffer.len, handle.body_reader.?.seek, handle.url });
     }
 
     pub const FileStat = struct {
@@ -445,14 +470,14 @@ pub const HTTP = struct {
     };
 
     fn fetchFileStat(self: *HTTP, file: std.Io.File) std.Io.File.StatError!FileStat {
-        const handle = self.fileHandle(file) orelse return error.Unexpected;
+        const handle = self.fileHandle(file) orelse return std.Io.File.StatError.Unexpected;
 
         var attempt: u32 = 0;
         while (attempt < self.config.max_fetch_attempts) : (attempt += 1) {
             const req = self.allocator.create(std.http.Client.Request) catch continue;
             errdefer self.allocator.destroy(req);
 
-            req.* = self.client.request(.HEAD, std.Uri.parse(handle.url) catch return error.Unexpected, .{
+            req.* = self.client.request(.HEAD, std.Uri.parse(handle.url) catch return std.Io.File.StatError.Unexpected, .{
                 .headers = .{ .accept_encoding = .{ .override = "identity" } },
             }) catch {
                 self.allocator.destroy(req);
@@ -605,7 +630,7 @@ pub const HTTP = struct {
         _ = sub_path;
         _ = options;
         log.err("HTTP VFS is read-only, dirMakeOpenPath not supported", .{});
-        return error.Unexpected;
+        return std.Io.Dir.MakeOpenPathError.Unexpected;
     }
 
     fn dirStat(
