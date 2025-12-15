@@ -52,15 +52,25 @@ pub fn main() !void {
     var threaded: std.Io.Threaded = .init(allocator);
     defer threaded.deinit();
 
-    const io = threaded.io();
+    var vfs_file: zml.io.VFS.File = .init(threaded.io());
+
+    var vfs: zml.io.VFS = .init(allocator, threaded.io());
+    defer vfs.deinit();
+
+    try vfs.register("file", vfs_file.io());
+
+    const io = vfs.io();
+
+    const file = try vfs.openAbsoluteFile(io, "//private/var/tmp/_bazel_corendos/c1731bd4fcb7bdb2687c1972ca03d70f/external/+non_module_deps+mnist/mnist.safetensors", .{ .mode = .read_only });
+    defer file.close(io);
 
     zml.init();
     defer zml.deinit();
 
-    const available = zml.Platform.availablePlatforms(io);
+    const available = zml.Platform.availablePlatforms(threaded.io());
     std.log.info("Available platforms: {any}", .{available});
 
-    var platform = try zml.Platform.auto(io, .{});
+    var platform = try zml.Platform.auto(threaded.io(), .{});
     defer platform.deinit();
 
     std.log.info("Selected platform: {f}", .{platform});

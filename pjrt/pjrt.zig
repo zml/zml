@@ -270,12 +270,12 @@ pub const ShapeSpec = extern struct {
 
     inner: c.PJRT_ShapeSpec,
 
-    pub fn init(dims_: []const usize, bt: BufferType) ShapeSpec {
+    pub fn init(dims_: []const i64, bt: BufferType) ShapeSpec {
         return .{
             .inner = pjrtStruct2(c.PJRT_ShapeSpec, .{
-                .dims = @ptrCast(@constCast(dims_.ptr)),
-                .num_dims = dims.len,
-                .buffer_type = @intFromEnum(bt),
+                .dims = @as([*c]const i64, @ptrCast(@constCast(dims_.ptr))),
+                .num_dims = dims_.len,
+                .element_type = @intFromEnum(bt),
             }),
         };
     }
@@ -469,11 +469,11 @@ pub const Client = opaque {
     pub fn createBuffersForAsyncHostToDevice(self: *const Client, api: *const Api, args: CreateBuffersForAsyncHostToDeviceArgs) ApiError!*AsyncHostToDeviceTransferManager {
         const ret = try api.call(.PJRT_Client_CreateBuffersForAsyncHostToDevice, .{
             .client = self.inner(),
-            .shape_specs = @ptrCast(args.shape_specs.ptr),
+            .shape_specs = @as([*c]c.PJRT_ShapeSpec, @ptrCast(@constCast(args.shape_specs.ptr))),
             .num_shape_specs = args.shape_specs.len,
-            .device_layouts = if (args.device_layouts) |layouts| @ptrCast(@constCast(layouts.ptr)) else null,
-            .num_device_layouts = if (args.device_layouts) |layouts| @intCast(layouts.len) else 0,
-            .memory = @ptrCast(@constCast(args.memory)),
+            .device_layouts = @as([*c][*c]c.PJRT_Buffer_MemoryLayout, if (args.device_layouts) |layouts| @ptrCast(@constCast(layouts.ptr)) else null),
+            .num_device_layouts = @as(usize, if (args.device_layouts) |layouts| @intCast(layouts.len) else 0),
+            .memory = @as(?*c.PJRT_Memory, @ptrCast(@constCast(args.memory))),
         });
         return @ptrCast(ret.transfer_manager.?);
     }

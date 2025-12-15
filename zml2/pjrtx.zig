@@ -22,6 +22,7 @@ pub const MemoryStats = pjrt.MemoryStats;
 pub const NamedValue = pjrt.NamedValue;
 pub const SerializeResult = pjrt.SerializeResult;
 pub const Stream = pjrt.Stream;
+pub const ShapeSpec = pjrt.ShapeSpec;
 
 const zml = struct {
     pub const DataType = @import("dtype.zig").DataType;
@@ -136,6 +137,12 @@ pub const Client = opaque {
 
     pub fn createUnitializedBuffer(self: *const Client, api: *const Api, args: CreateUninitializedBufferArgs) ApiError!*Buffer {
         return @ptrCast(try self.inner().createUninitializedBuffer(api, args));
+    }
+
+    pub const CreateBuffersForAsyncHostToDeviceArgs = pjrt.Client.CreateBuffersForAsyncHostToDeviceArgs;
+
+    pub fn createBuffersForAsyncHostToDevice(self: *const Client, api: *const Api, args: CreateBuffersForAsyncHostToDeviceArgs) ApiError!*AsyncHostToDeviceTransferManager {
+        return @ptrCast(try self.inner().createBuffersForAsyncHostToDevice(api, args));
     }
 };
 
