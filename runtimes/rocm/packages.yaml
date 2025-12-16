@@ -5,9 +5,9 @@ version: 1
 
 sources:
     - channel: jammy main
-      url: https://repo.radeon.com/amdgpu/6.4.1/ubuntu
+      url: https://repo.radeon.com/rocm/apt/7.1.1
     - channel: jammy main
-      url: https://repo.radeon.com/rocm/apt/6.4.1
+      url: https://repo.radeon.com/graphics/7.1.1/ubuntu
     - channel: jammy main
       url: https://snapshot.ubuntu.com/ubuntu/20250711T030400Z
     - channel: jammy-security main
@@ -27,6 +27,7 @@ packages:
     - "hsa-amd-aqlprofile"
     - "comgr"
     - "rocprofiler-register"
+    - "rocprofiler-sdk"
     - "miopen-hip"
     - "rccl"
     - "rocm-device-libs"
