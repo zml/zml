@@ -16,6 +16,7 @@ const mlirx = @import("mlirx.zig");
 const ops = @import("ops.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
+const Memory = Buffer.Memory;
 
 pub const Tensor = struct {
     var current_id: std.atomic.Value(usize) = .{ .raw = 1 };
@@ -149,10 +150,33 @@ pub const Tensor = struct {
         @panic("TODO");
     }
 
-    // TODO(Corentin)
-    //pub fn toMemory(self: Tensor, kind: Memory) Tensor {
-    //    @panic("TODO");
-    //}
+    pub fn toMemory(self: Tensor, kind: Memory) Tensor {
+        const ctx = CompilationContext.current();
+        if (ctx.platform.target == .cpu) return self;
+
+        const frontend_attributes = mlir.dictionaryAttribute(ctx.mlir_ctx, &.{
+            .named(ctx.mlir_ctx, "_xla_buffer_placement", mlir.stringAttribute(ctx.mlir_ctx, kind.pjrtName())),
+        });
+
+        const op = dialects.stablehlo.custom_call(
+            ctx.mlir_ctx,
+            &.{self.value()},
+            &.{self.value().type_()},
+            .{
+                .call_target_name = "annotate_device_placement",
+                .has_side_effect = true,
+                .backend_config = .{ .original = "" },
+                .additional_attributes = &.{
+                    .named(ctx.mlir_ctx, "mhlo.frontend_attributes", frontend_attributes),
+                },
+            },
+            .unknown(ctx.mlir_ctx),
+        );
+
+        var res = _result(self._shape, op.result(0));
+        ctx.currentScope().id_to_output_memory_kind.put(ctx.currentScope().arena.allocator(), res.id, kind) catch unreachable;
+        return res;
+    }
 
     /// Returns a Tensor with new tag names.
     pub fn rename(self: Tensor, renames: anytype) Tensor {
@@ -3966,6 +3990,11 @@ pub const Tensor = struct {
     /// Returns the donation data of the tensor.
     pub fn donation(self: Tensor) ?usize {
         return CompilationContext.current().currentScope().id_to_donation.get(self.id);
+    }
+
+    /// Returns the output memory kind of the tensor.
+    pub fn outputMemoryKind(self: Tensor) Buffer.Memory {
+        return CompilationContext.current().currentScope().id_to_output_memory_kind.get(self.id) orelse .device;
     }
 };
 
