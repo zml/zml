@@ -35,6 +35,7 @@ pub const ConstSlice = slice.ConstSlice;
 pub const tensor = @import("tensor.zig");
 pub const Tensor = tensor.Tensor;
 pub const testing = @import("testing.zig");
+pub const tokenizer = @import("zml/tokenizer");
 
 var runfiles_once = std.once(struct {
     fn call_() !void {
