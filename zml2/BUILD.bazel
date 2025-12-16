@@ -56,6 +56,7 @@ zig_library(
         "//runtimes",
         "//stdx",
         "//upb",
+        "//zml2/tokenizer",
         "//zml2/io",
         "@rules_zig//zig/runfiles",
     ],
