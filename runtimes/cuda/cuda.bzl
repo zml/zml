@@ -229,8 +229,8 @@ def _cuda_impl(mctx):
     http_archive(
         name = "libpjrt_cuda",
         build_file = "libpjrt_cuda.BUILD.bazel",
-        url = "https://github.com/zml/pjrt-artifacts/releases/download/v14.0.1/pjrt-cuda_linux-amd64.tar.gz",
-        sha256 = "4b618f05f9cd4cd14966717f7a521b1aa80b425999755870ce2d1caf45685578",
+        url = "https://github.com/zml/pjrt-artifacts/releases/download/v15.0.1/pjrt-cuda_linux-amd64.tar.gz",
+        sha256 = "9f7af463dfb799d1b6c6d2e8b5d2191eb06c66fcdf1686e6b7f8289cfa70dd77",
     )
 
     return mctx.extension_metadata(
