@@ -115,3 +115,8 @@ common:alldebug --strategy=local
 common:release  --compilation_mode=opt
 common:release  --copt=-Ofast
 common:release  --@rules_zig//zig/settings:mode=release_safe
+
+# --config=native builds everything optimized for the local CPU
+common:native   --copt=-march=native
+common:native   --@rules_zig//zig/settings:zigopt=-mcpu=native
+common:native   --@rules_rust//rust/settings:extra_rustc_flag=-Ctarget-cpu=native

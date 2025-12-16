@@ -36,7 +36,7 @@ pub const VFS = struct {
     const ROOT_DIR_HANDLE: std.Io.Dir.Handle = 0;
 
     allocator: std.mem.Allocator,
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
 
     backends: std.StringHashMapUnmanaged(std.Io),
     // Maps virtual file and dir handles to backend handles
@@ -105,7 +105,7 @@ pub const VFS = struct {
 
         return .{
             .allocator = allocator,
-            .mutex = .{},
+            .mutex = .init,
             .backends = .{},
             .files = .{},
             .dirs = .{},
@@ -133,15 +133,15 @@ pub const VFS = struct {
     }
 
     pub fn register(self: *VFS, scheme: []const u8, backend: std.Io) std.mem.Allocator.Error!void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.base_io);
+        defer self.mutex.unlock(self.base_io);
 
         try self.backends.put(self.allocator, scheme, backend);
     }
 
     pub fn unregister(self: *VFS, scheme: []const u8) bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.base_io);
+        defer self.mutex.unlock(self.base_io);
 
         return self.backends.remove(scheme);
     }
@@ -167,8 +167,8 @@ pub const VFS = struct {
             .handle = handle,
         };
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.base_io);
+        defer self.mutex.unlock(self.base_io);
 
         const virtual_handle = self.next_file_handle;
         self.next_file_handle += 1;
@@ -179,9 +179,9 @@ pub const VFS = struct {
     }
 
     fn closeFile(self: *VFS, virtual_handle: std.Io.File.Handle) void {
-        self.mutex.lock();
+        self.mutex.lockUncancelable(self.base_io);
         const entry = self.files.fetchRemove(virtual_handle);
-        self.mutex.unlock();
+        self.mutex.unlock(self.base_io);
 
         if (entry) |kv| {
             const fs_file = kv.value;
@@ -191,8 +191,8 @@ pub const VFS = struct {
     }
 
     fn fsFile(self: *VFS, virtual_handle: std.Io.File.Handle) FileEntryError!FsFile {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.base_io);
+        defer self.mutex.unlock(self.base_io);
 
         const entry = self.files.get(virtual_handle) orelse return FileEntryError.MissingVirtualFileHandle;
         return entry.*;
@@ -207,8 +207,8 @@ pub const VFS = struct {
             .handle = handle,
         };
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.base_io);
+        defer self.mutex.unlock(self.base_io);
 
         const virtual_handle = self.next_dir_handle;
         self.next_dir_handle += 1;
@@ -220,9 +220,9 @@ pub const VFS = struct {
     fn closeDir(self: *VFS, virtual_handle: std.Io.Dir.Handle) void {
         if (virtual_handle == ROOT_DIR_HANDLE) return;
 
-        self.mutex.lock();
+        self.mutex.lockUncancelable(self.base_io);
         const entry = self.dirs.fetchRemove(virtual_handle);
-        self.mutex.unlock();
+        self.mutex.unlock(self.base_io);
 
         if (entry) |kv| {
             const fs_dir = kv.value;
@@ -238,8 +238,8 @@ pub const VFS = struct {
             return .{ .backend = backend, .handle = ROOT_DIR_HANDLE };
         }
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.base_io);
+        defer self.mutex.unlock(self.base_io);
 
         const entry = self.dirs.get(virtual_handle) orelse return DirEntryError.MissingVirtualDirHandle;
         return entry.*;
