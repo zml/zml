@@ -12,9 +12,8 @@ zig_binary(
     main = "main.zig",
     visibility = ["//visibility:public"],
     deps = [
-        "//async",
         "//stdx",
-        "//zml",
+        "//zml2:zml",
         "@com_github_hejsil_clap//:clap",
     ],
 )

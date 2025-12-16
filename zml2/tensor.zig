@@ -218,7 +218,7 @@ pub const Tensor = struct {
         } else if (scope.id_to_donation.get(origin.id)) |origin_donation| {
             const gop = scope.id_to_donation.getOrPut(scope.arena.allocator(), self.id) catch unreachable;
             gop.value_ptr.* = origin_donation;
-        } else @panic("Something went really wrong, tensor is not an argument nor has an mlir.Value");
+        }
         return self;
     }
 

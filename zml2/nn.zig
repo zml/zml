@@ -16,16 +16,21 @@ const log = std.log.scoped(.@"zml/nn");
 pub const Linear = struct {
     weight: Tensor,
     bias: ?Tensor = null,
+    tag: Shape.Tag,
+
+    pub fn init(weight: Tensor, bias: ?Tensor, tag: anytype) Linear {
+        return .{
+            .weight = weight,
+            .bias = bias,
+            .tag = zml.Shape.toTag(tag),
+        };
+    }
 
     pub fn forward(self: Linear, x: Tensor) Tensor {
-        var y = x.dotGeneral(self.weight.convert(x.dtype()), &.{.{ -1, -1 }}, &.{});
-        // If self.weight doesn't have tags, preserve tags from x.
-        if (y.shape().tag(-1) == Shape.TagUnknown) {
-            y._shape._tags.set(y.rank() - 1, x.shape().tag(-1));
-        }
+        var y = x.dot(self.weight.convert(x.dtype()), self.tag);
 
         // log.debug("Linear({*}): {d} -> {d} -> {d}", .{ self, x.dims(), y.dims(), if (self.bias) |bias| y.add(bias).dims() else y.dims() });
-        return if (self.bias) |bias| y.add(bias.broadcast(y.shape(), &.{y.axis(-1)})) else y;
+        return if (self.bias) |bias| y.add(bias.broad(y.shape())) else y;
     }
 };
 
@@ -939,8 +944,8 @@ pub fn causalAttnMask(
     }
 
     if (dtype.isFloat()) {
-        const zeros = Tensor.constant(mask.shape(), dtype.zero());
-        const minus_inf = Tensor.constant(mask.shape(), dtype.minValue());
+        const zeros = Tensor.constant(dtype.zero()).broad(mask.shape());
+        const minus_inf = Tensor.constant(dtype.minValue()).broad(mask.shape());
         mask = Tensor.select(mask, zeros, minus_inf);
     } else {
         mask = mask.convert(dtype);
