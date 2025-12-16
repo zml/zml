@@ -13,6 +13,7 @@ const pjrt = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
 const Tensor = @import("tensor.zig").Tensor;
+const Buffer = @import("buffer.zig").Buffer;
 
 const log = std.log.scoped(.@"zml/module");
 
@@ -23,6 +24,7 @@ pub const CompilationContext = struct {
         block: *mlir.Block,
         id_to_argument: std.AutoArrayHashMapUnmanaged(usize, usize),
         id_to_donation: std.AutoArrayHashMapUnmanaged(usize, usize),
+        id_to_output_memory_kind: std.AutoArrayHashMapUnmanaged(usize, Buffer.Memory),
         arena: std.heap.ArenaAllocator,
 
         pub fn initFromBlock(allocator: std.mem.Allocator, block: *mlir.Block) Scope {
@@ -31,6 +33,7 @@ pub const CompilationContext = struct {
                 .block = block,
                 .id_to_argument = .empty,
                 .id_to_donation = .empty,
+                .id_to_output_memory_kind = .empty,
                 .arena = arena,
             };
         }
@@ -214,11 +217,13 @@ pub const OutputInfo = struct {
     shapes: []Shape,
     values: []*const mlir.Value,
     donations: []?usize,
+    output_memory_kinds: []Buffer.Memory,
 
     pub fn deinit(self: OutputInfo, allocator: std.mem.Allocator) void {
         allocator.free(self.shapes);
         allocator.free(self.values);
         allocator.free(self.donations);
+        allocator.free(self.output_memory_kinds);
     }
 };
 
@@ -227,6 +232,7 @@ fn collectOutputInfo(allocator: std.mem.Allocator, v: anytype) !OutputInfo {
         shape_list: *std.array_list.Managed(Shape),
         value_list: *std.array_list.Managed(*const mlir.Value),
         donation_list: *std.array_list.Managed(?usize),
+        output_memory_kind_list: *std.array_list.Managed(Buffer.Memory),
     };
 
     var shape_list = std.array_list.Managed(Shape).init(allocator);
@@ -235,14 +241,22 @@ fn collectOutputInfo(allocator: std.mem.Allocator, v: anytype) !OutputInfo {
     errdefer value_list.deinit();
     var donation_list = std.array_list.Managed(?usize).init(allocator);
     errdefer donation_list.deinit();
+    var output_memory_kind_list = std.array_list.Managed(Buffer.Memory).init(allocator);
+    errdefer output_memory_kind_list.deinit();
 
-    var context: LocalContext = .{ .shape_list = &shape_list, .value_list = &value_list, .donation_list = &donation_list };
+    var context: LocalContext = .{
+        .shape_list = &shape_list,
+        .value_list = &value_list,
+        .donation_list = &donation_list,
+        .output_memory_kind_list = &output_memory_kind_list,
+    };
 
     try meta.visit(struct {
         fn cb(ctx_: *LocalContext, tensor: *const Tensor) !void {
             try ctx_.shape_list.append(tensor.shape());
             try ctx_.value_list.append(tensor.value());
             try ctx_.donation_list.append(tensor.donation());
+            try ctx_.output_memory_kind_list.append(tensor.outputMemoryKind());
         }
     }.cb, &context, v);
 
@@ -250,6 +264,7 @@ fn collectOutputInfo(allocator: std.mem.Allocator, v: anytype) !OutputInfo {
         .shapes = try shape_list.toOwnedSlice(),
         .values = try value_list.toOwnedSlice(),
         .donations = try donation_list.toOwnedSlice(),
+        .output_memory_kinds = try output_memory_kind_list.toOwnedSlice(),
     };
 }
 
@@ -353,15 +368,18 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
     for (output_info.donations, 0..) |donation, index| if (donation) |argument_index| {
         input_attributes[argument_index].appendAssumeCapacity(.named(compilation_context.mlir_ctx, "tf.aliasing_output", mlir.integerAttribute(compilation_context.mlir_ctx, .i32, index)));
     };
+    for (output_info.output_memory_kinds, 0..) |output_memory_kind, index| {
+        if (output_memory_kind == .device) continue;
+        output_attributes[index].appendAssumeCapacity(.named(compilation_context.mlir_ctx, "mhlo.memory_kind", mlir.stringAttribute(compilation_context.mlir_ctx, output_memory_kind.pjrtName())));
+    }
     _ = dialects.func.returns(compilation_context.mlir_ctx, output_info.values, .unknown(compilation_context.mlir_ctx)).appendTo(compilation_context.currentScope().block);
-
-    //self.add
 
     const mlir_func = dialects.func.func(compilation_context.mlir_ctx, .{
         .name = "main",
         .block = compilation_context.currentScope().block,
         .location = .unknown(compilation_context.mlir_ctx),
         .args_attributes = try finalizeAttributeList(arena.allocator(), compilation_context.mlir_ctx, input_attributes),
+        .results_attributes = try finalizeAttributeList(arena.allocator(), compilation_context.mlir_ctx, output_attributes),
     });
 
     compilation_context.mlir_pass_manager.runOnOp(mlir_func) catch |err| switch (err) {
