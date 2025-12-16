@@ -1,12 +1,9 @@
 const std = @import("std");
-
 const async = @import("async");
-//const clap = @import("clap");
 const zml = @import("zml");
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
 const ShapeOf = zml.ShapeOf;
-//const Tracer = zml.tools.Tracer;
 const floats = zml.floats;
 
 const log = std.log.scoped(.gather_mlp);
@@ -19,12 +16,9 @@ pub const Gather = struct {
 
     pub fn forward(self: Gather, input: zml.Tensor, indices: zml.Tensor) zml.Tensor {
         const slice_size = @divExact(input.dim(.d), self.split_number);
-        log.info("slice size = {d}", .{slice_size});
-        log.info("Input shape = {f}", .{input.shape()});
-        var gathered = input.gatherSlices(Shape.init(.{ .b = input.dim(.b), .d = slice_size }, .f32), indices.scale(slice_size), .{ .indices_are_sorted = true });
-        log.info("Gathered shape = {f}", .{gathered.shape()});
+        var gathered = input.gatherSlices(Shape.init(.{ .b = 1, .d = slice_size }, .f32), indices.scale(slice_size), .{});
+        log.info("Gathered shape: {f}", .{gathered.shape()});
         gathered = gathered.transpose(.{ .b, .n, .d }).reshape(Shape.init(.{ .b = input.dim(.b), .d = input.dim(.d) }, .f32));
-        log.info("Gathered shape = {f}", .{gathered.shape()});
         return gathered;
     }
 };
@@ -33,14 +27,17 @@ pub const Scatter = struct {
     split_number: i64 = 32,
 
     pub fn forward(self: Scatter, input: zml.Tensor, indices: zml.Tensor, empty: zml.Tensor) zml.Tensor {
-        _ = self; // autofix
-
+        _ = self;
         //var scattered = Tensor.constant(.{ .f32 = 0 }).broad(Shape.init(.{ .b = input.dim(.b), .d = input.dim(.d) }, .f32));
-        //log.info("Input shape = {f}", .{input.shape()});
-
+        log.info("Input shape: {f}", .{input.shape()});
+        log.info("Indices shape: {f}", .{indices.shape()});
+        log.info("Empty shape: {f}", .{empty.shape()});
         const scattered = empty.scatterSlices(.{ .d = indices }, input, .{});
-
-        //log.info("Scattered shape = {f}", .{scattered.shape()});
+        log.info("Scattered shape: {f}", .{scattered.shape()});
+        // scattered = scattered.reshape(Shape.init(.{
+        //     .b = 256,
+        //     .d = 8192,
+        // }, .f32));
         return scattered;
     }
 };
@@ -97,13 +94,13 @@ pub const Mlp = struct {
         }
         std.log.info("Down proj weights: {any}", .{down_proj_weight_slice.items(f32)[0..10]});
 
-        const up_proj_weight_buffer: zml.Buffer = try .fromBytes(platform, up_proj_weight_slice.shape, up_proj_weight_slice.data, io); // COOL LE SLICE.DATA
+        const up_proj_weight_buffer: zml.Buffer = try .fromBytes(io, platform, up_proj_weight_slice.shape, up_proj_weight_slice.data); // COOL LE SLICE.DATA
         errdefer up_proj_weight_buffer.deinit();
 
-        const gate_proj_weight_buffer: zml.Buffer = try .fromBytes(platform, gate_proj_weight_slice.shape, gate_proj_weight_slice.data, io);
+        const gate_proj_weight_buffer: zml.Buffer = try .fromBytes(io, platform, gate_proj_weight_slice.shape, gate_proj_weight_slice.data);
         errdefer gate_proj_weight_buffer.deinit();
 
-        const down_proj_weight_buffer: zml.Buffer = try .fromBytes(platform, down_proj_weight_slice.shape, down_proj_weight_slice.data, io);
+        const down_proj_weight_buffer: zml.Buffer = try .fromBytes(io, platform, down_proj_weight_slice.shape, down_proj_weight_slice.data);
         errdefer down_proj_weight_buffer.deinit();
 
         return .{ .up_proj = .{ .weight = up_proj_weight_buffer }, .gate_proj = .{ .weight = gate_proj_weight_buffer }, .down_proj = .{ .weight = down_proj_weight_buffer } };
@@ -154,7 +151,7 @@ pub const ScatterMlp = struct {
     pub fn forward(self: ScatterMlp, input: zml.Tensor, indices: zml.Tensor, empty: zml.Tensor) zml.Tensor {
         const scattered = self.scatter.forward(input, indices, empty);
         const output = self.mlp.forward(scattered);
-        return output;
+        return output.reuseBuffer(empty);
     }
 };
 
@@ -176,7 +173,6 @@ pub const GatherMlp = struct {
     pub fn loadBuffers(self: GatherMlp, allocator: std.mem.Allocator, io: std.Io, platform: zml.Platform) !zml.Bufferized(GatherMlp) {
         const mlp_buffers = try self.mlp.loadBuffers(allocator, io, platform);
         return .{
-            //.gather = .{}, // I wanted to put a void struct here
             .mlp = mlp_buffers,
         };
     }
@@ -233,15 +229,17 @@ pub fn main() !void {
         .down_proj_shape = zml.Shape.init(.{ 8192, 28672 }, .f32),
     };
 
-    const batch_size = 1;
+    const batch_size = 256;
     const hidden_size = config.up_proj_shape.dim(1);
-    const input: zml.Tensor = .init(zml.Shape.init(.{ .b = batch_size, .d = hidden_size }, .f32));
+    // const input: zml.Tensor = .init(zml.Shape.init(.{ .b = batch_size, .d = hidden_size }, .f32), .f32);
+    const input: zml.Tensor = .init(zml.Shape.init(.{ .b = batch_size, .d = hidden_size }, .f32), .f32);
 
     const split_number = 32;
     const sub_slice_size = @as(usize, @intCast(@divExact(hidden_size, split_number)));
 
-    const indices_shape = zml.Shape.init(.{ .n = split_number, .dim = 2 }, .u32);
-    const indices: zml.Tensor = .init(indices_shape);
+    const indices_shape = zml.Shape.init(.{ .n = split_number * batch_size, .dim = 2 }, .u32);
+    const indices: zml.Tensor = .fromShape(indices_shape);
+    _ = indices; // autofix
     const indices_slice: zml.Slice = try .alloc(allocator, indices_shape);
     defer indices_slice.free(allocator);
 
@@ -249,13 +247,14 @@ pub fn main() !void {
     defer slice.free(allocator);
 
     const f32_items = slice.items(f32);
-    const indices_slice_size = split_number * 2; // 2 coordonnées par index
+    const indices_slice_size = batch_size * split_number * 2; // 2 coord per index
     const indices_slice_data = try allocator.alloc(u32, indices_slice_size);
     defer allocator.free(indices_slice_data);
 
-    for (0..split_number) |i| {
+    for (0..split_number * batch_size) |i| {
+        const b = @divFloor(i, split_number);
         const i_as_f32: f32 = @as(f32, @floatFromInt(i));
-        const value_to_assign: f32 = 32.0 - 1.0 - i_as_f32;
+        const value_to_assign: f32 = try std.math.mod(f32, (32.0 - 1.0 - i_as_f32), split_number);
 
         const sub_slice = f32_items[i * sub_slice_size .. (i + 1) * sub_slice_size];
 
@@ -263,77 +262,12 @@ pub fn main() !void {
             val.* = value_to_assign;
         }
 
-        const index_value: u32 = 32 - 1 - @as(u32, @intCast(i)); // Convert to u32
+        const index_value: u32 = 32 - 1 - @as(u32, @intCast(try std.math.mod(u32, @as(u32, @intCast(i)), split_number))); // Convert to u32
 
-        indices_slice.items(u32)[i * 2 + 0] = 0; // b_offset
+        indices_slice.items(u32)[i * 2 + 0] = @as(u32, @intCast(b)); // batch offset
 
         indices_slice.items(u32)[i * 2 + 1] = index_value;
     }
-
-    const indices_scatter_shape = zml.Shape.init(.{ .d = hidden_size }, .u32);
-    const indices_scatter: zml.Tensor = .init(indices_scatter_shape);
-    const indices_scatter_slice: zml.Slice = try .alloc(allocator, indices_scatter_shape);
-    defer indices_scatter_slice.free(allocator);
-
-    for (0..split_number) |i| {
-        const shuffle_i_u32: u32 = 32 - 1 - @as(u32, @intCast(i));
-        for (0..sub_slice_size) |j| {
-            const scatter_index = i * sub_slice_size + j;
-            const scatter_value = shuffle_i_u32 * @as(u32, @intCast(sub_slice_size)) + @as(u32, @intCast(j));
-
-            indices_scatter_slice.items(u32)[scatter_index] = scatter_value;
-        }
-    }
-
-    std.log.info("Input: {any}", .{slice.items(f32)[0..]});
-    std.log.info("Indices: {any}", .{indices_slice.items(u32)[0..8]});
-
-    const input_buffer: zml.Buffer = try .from(platform, slice.shape, slice.data, io, .{ .wait = true, .memory = .host_pinned });
-    defer input_buffer.deinit();
-
-    const indices_buffer: zml.Buffer = try .from(platform, indices_shape, indices_slice.data, io, .{ .wait = true, .memory = .host_pinned });
-    defer indices_buffer.deinit();
-
-    const indices_scatter_buffer: zml.Buffer = try .from(platform, indices_scatter_shape, indices_scatter_slice.data, io, .{ .wait = true, .memory = .host_pinned });
-    defer indices_scatter_buffer.deinit();
-
-    const empty: zml.Tensor = .init(zml.Shape.init(.{ .b = batch_size, .d = hidden_size }, .f32));
-    const empty_slice: zml.Slice = try .alloc(allocator, empty.shape());
-    defer empty_slice.free(allocator);
-    for (empty_slice.items(f32)) |*val| {
-        val.* = 0.0;
-    }
-    const empty_buffer: zml.Buffer = try .from(platform, empty.shape(), empty_slice.data, io, .{ .wait = true, .memory = .host_pinned });
-    defer empty_buffer.deinit();
-
-    {
-        var scatter_mlp = try ScatterMlp.init(config);
-        defer scatter_mlp.deinit();
-
-        var model_buffers = try scatter_mlp.loadBuffers(allocator, io, platform);
-        defer ScatterMlp.unloadBuffers(&model_buffers);
-
-        log.info("Input : {f}", .{input.shape()});
-        var exe_scatter_mlp = try zml.module.compileModel(allocator, io, ScatterMlp.forward, scatter_mlp, .{ input, indices_scatter, empty }, platform);
-        defer exe_scatter_mlp.deinit();
-        var scatter_mlp_args = try exe_scatter_mlp.args(allocator);
-        defer scatter_mlp_args.deinit(allocator);
-        var scatter_mlp_results = try exe_scatter_mlp.results(allocator);
-        defer scatter_mlp_results.deinit(allocator);
-        log.info("input buffer : {f}", .{input_buffer.shape()});
-        scatter_mlp_args.set(.{ model_buffers, input_buffer, indices_scatter_buffer, empty_buffer });
-        //warmup
-        exe_scatter_mlp.call(scatter_mlp_args, &scatter_mlp_results, io);
-        //Real call
-        exe_scatter_mlp.call(scatter_mlp_args, &scatter_mlp_results, io);
-        const output = scatter_mlp_results.get(zml.Buffer);
-        defer output.deinit();
-        const output_slice = try output.toSliceAlloc(allocator, io);
-        defer output_slice.free(allocator);
-        std.log.info("Output scatter mlp: {any}", .{output_slice.items(f32)[0..10]});
-    }
-
-    log.info("After scatter_mlp", .{});
 
     // {
     //     var gather_mlp = try GatherMlp.init(config);
@@ -343,13 +277,19 @@ pub fn main() !void {
     //     defer GatherMlp.unloadBuffers(&model_buffers);
 
     //     log.info("Input : {f}", .{input.shape()});
-    //     var exe_gather_mlp = try zml.module.compileModel(allocator, io, GatherMlp.forward, gather_mlp, .{ input, indices }, platform);
+    //     var exe_gather_mlp = try platform.compileModel(allocator, io, GatherMlp.forward, gather_mlp, .{ input, indices });
     //     defer exe_gather_mlp.deinit();
     //     var gather_mlp_args = try exe_gather_mlp.args(allocator);
     //     defer gather_mlp_args.deinit(allocator);
     //     var gather_mlp_results = try exe_gather_mlp.results(allocator);
     //     defer gather_mlp_results.deinit(allocator);
-    //     log.info("input buffer : {f}", .{input_buffer.shape()});
+
+    //     const input_buffer: zml.Buffer = try .from(io, platform, slice.shape, slice.data, .{ .wait = true, .memory = .host_pinned });
+    //     defer input_buffer.deinit();
+
+    //     const indices_buffer: zml.Buffer = try .from(io, platform, indices_shape, indices_slice.data, .{ .wait = true, .memory = .host_pinned });
+    //     defer indices_buffer.deinit();
+
     //     gather_mlp_args.set(.{ model_buffers, input_buffer, indices_buffer });
     //     //warmup
     //     exe_gather_mlp.call(gather_mlp_args, &gather_mlp_results, io);
@@ -363,6 +303,136 @@ pub fn main() !void {
     // }
 
     // {
+    //     const gather = Gather{};
+    //     var exe_gather = try platform.compileModel(allocator, io, Gather.forward, gather, .{ input, indices });
+    //     defer exe_gather.deinit();
+    //     var gather_args = try exe_gather.args(allocator);
+    //     defer gather_args.deinit(allocator);
+    //     var gather_results = try exe_gather.results(allocator);
+    //     defer gather_results.deinit(allocator);
+
+    //     const input_buffer: zml.Buffer = try .from(io, platform, slice.shape, slice.data, .{ .wait = true, .memory = .host_pinned });
+    //     defer input_buffer.deinit();
+
+    //     const indices_buffer: zml.Buffer = try .from(io, platform, indices_shape, indices_slice.data, .{ .wait = true, .memory = .host_pinned });
+    //     defer indices_buffer.deinit();
+
+    //     gather_args.set(.{ input_buffer, indices_buffer });
+    //     //warmup
+    //     exe_gather.call(gather_args, &gather_results, io);
+    //     //Real call
+    //     exe_gather.call(gather_args, &gather_results, io);
+    //     const output = gather_results.get(zml.Buffer);
+    //     defer output.deinit();
+    //     const output_slice = try output.toSliceAlloc(allocator, io);
+    //     defer output_slice.free(allocator);
+    //     std.log.info("Output gather: {any}", .{output_slice.items(f32)[8192..16384]});
+    // }
+
+    const indices_scatter_shape = zml.Shape.init(.{ .b = batch_size, .d = hidden_size }, .u32);
+    const indices_scatter: zml.Tensor = .init(indices_scatter_shape, .u32);
+    const indices_scatter_slice: zml.Slice = try .alloc(allocator, indices_scatter_shape);
+    defer indices_scatter_slice.free(allocator);
+
+    log.info("Indices scatter shape: {f}", .{indices_scatter.shape()});
+
+    for (0..split_number * batch_size) |i| {
+        const shuffle_i_u32: u32 = 32 - 1 - (try std.math.mod(u32, @as(u32, @intCast(i)), split_number));
+        for (0..sub_slice_size) |j| {
+            const scatter_index = i * sub_slice_size + j;
+            const scatter_value = shuffle_i_u32 * @as(u32, @intCast(sub_slice_size)) + @as(u32, @intCast(j));
+
+            indices_scatter_slice.items(u32)[scatter_index] = scatter_value;
+        }
+    }
+
+    log.info("Indices scatter slice: {any}", .{indices_scatter_slice.items(u32)[0..8192]});
+
+    // std.log.info("Input: {any}", .{slice.items(f32)[0..8192]});
+    // std.log.info("Indices: {any}", .{indices_slice.items(u32)[0..]});
+
+    // const indices_buffer: zml.Buffer = try .fromSlice(io, platform, indices_slice);
+    // defer indices_buffer.deinit();
+
+    // const indices_scatter_buffer: zml.Buffer = try .fromSlice(io, platform, indices_scatter_slice);
+    // defer indices_scatter_buffer.deinit();
+
+    const empty: zml.Tensor = .init(zml.Shape.init(.{ .b = batch_size, .d = hidden_size }, .f32), .f32);
+    const empty_slice: zml.Slice = try .alloc(allocator, empty.shape());
+    defer empty_slice.free(allocator);
+    for (empty_slice.items(f32)) |*val| {
+        val.* = 0.0;
+    }
+
+    // const empty_buffer: zml.Buffer = try .fromSlice(io, platform, empty_slice);
+    // defer empty_buffer.deinit();
+
+    {
+        var scatter_mlp = try ScatterMlp.init(config);
+        defer scatter_mlp.deinit();
+
+        var model_buffers = try scatter_mlp.loadBuffers(allocator, io, platform);
+        defer ScatterMlp.unloadBuffers(&model_buffers);
+
+        log.info("Input : {f}", .{input.shape()});
+        var exe_scatter_mlp = try platform.compileModel(allocator, io, ScatterMlp.forward, scatter_mlp, .{ input, indices_scatter, empty });
+        defer exe_scatter_mlp.deinit();
+        var scatter_mlp_args = try exe_scatter_mlp.args(allocator);
+        defer scatter_mlp_args.deinit(allocator);
+        var scatter_mlp_results = try exe_scatter_mlp.results(allocator);
+        defer scatter_mlp_results.deinit(allocator);
+
+        const indices_scatter_buffer: zml.Buffer = try .from(io, platform, indices_scatter_shape, indices_scatter_slice.data, .{ .wait = true, .memory = .host_pinned });
+        defer indices_scatter_buffer.deinit();
+
+        const input_buffer: zml.Buffer = try .from(io, platform, slice.shape, slice.data, .{ .wait = true, .memory = .host_pinned });
+        defer input_buffer.deinit();
+
+        var empty_buffer: zml.Buffer = try .fromSlice(io, platform, empty_slice);
+        defer empty_buffer.deinit();
+        
+
+        //warmup
+        scatter_mlp_args.set(.{ model_buffers, input_buffer, indices_scatter_buffer, empty_buffer });
+        exe_scatter_mlp.call(scatter_mlp_args, &scatter_mlp_results, io);
+        empty_buffer = scatter_mlp_results.get(zml.Buffer);
+
+        //Real call
+        scatter_mlp_args.set(.{ model_buffers, input_buffer, indices_scatter_buffer, empty_buffer });
+        exe_scatter_mlp.call(scatter_mlp_args, &scatter_mlp_results, io);
+        empty_buffer = scatter_mlp_results.get(zml.Buffer);
+
+        const output_slice = try empty_buffer.toSliceAlloc(allocator, io);
+        defer output_slice.free(allocator);
+        std.log.info("Output scatter mlp: {any}", .{output_slice.items(f32)[0..10]});
+    }
+
+    // {
+    //     var mlp = try Mlp.init(config);
+    //     defer mlp.deinit();
+    //     var model_buffers = try mlp.loadBuffers(allocator, io, platform);
+    //     defer Mlp.unloadBuffers(&model_buffers);
+    //     var exe_mlp = try platform.compileModel(allocator, io, Mlp.forward, mlp, .{input});
+    //     defer exe_mlp.deinit();
+    //     var mlp_args = try exe_mlp.args(allocator);
+    //     defer mlp_args.deinit(allocator);
+    //     var mlp_results = try exe_mlp.results(allocator);
+    //     defer mlp_results.deinit(allocator);
+    //     mlp_args.set(.{ model_buffers, input_buffer });
+    //     //warmup
+    //     exe_mlp.call(mlp_args, &mlp_results, io);
+    //     //Real call
+    //     exe_mlp.call(mlp_args, &mlp_results, io);
+    //     const output = mlp_results.get(zml.Buffer);
+    //     defer output.deinit();
+    //     const output_slice = try output.toSliceAlloc(allocator, io);
+    //     defer output_slice.free(allocator);
+    //     std.log.info("Output mlp: {any}", .{output_slice.items(f32)[0..8192]});
+    // }
+
+    // log.info("After scatter_mlp", .{});
+
+    // {
     //     var model: Mlp = try .init(config);
     //     defer model.deinit();
 
@@ -370,7 +440,7 @@ pub fn main() !void {
 
     //     defer Mlp.unloadBuffers(&model_buffers);
 
-    //     var exe = try zml.module.compileModel(allocator, io, Mlp.forward, model, .{input}, platform);
+    //     var exe = try platform.compileModel(allocator, io, Mlp.forward, model, .{input});
     //     defer exe.deinit();
 
     //     var args = try exe.args(allocator);
@@ -390,47 +460,32 @@ pub fn main() !void {
     //     std.log.info("Output: {any}", .{output_slice.items(f32)[0..10]});
     // }
 
-    {
-        const scatter = Scatter{};
-        var exe_scatter = try zml.module.compileModel(allocator, io, Scatter.forward, scatter, .{ input, indices_scatter, empty }, platform);
-        defer exe_scatter.deinit();
-        var scatter_args = try exe_scatter.args(allocator);
-        defer scatter_args.deinit(allocator);
-        var scatter_results = try exe_scatter.results(allocator);
-        defer scatter_results.deinit(allocator);
-        scatter_args.set(.{ input_buffer, indices_scatter_buffer, empty_buffer });
-        //warmup
-        exe_scatter.call(scatter_args, &scatter_results, io);
+    //Simple scatter
 
-        //Real call
-        exe_scatter.call(scatter_args, &scatter_results, io);
-        const output = scatter_results.get(zml.Buffer);
-        defer output.deinit();
-        const output_slice = try output.toSliceAlloc(allocator, io);
-        defer output_slice.free(allocator);
-        std.log.info("Output scatter: {any}", .{output_slice.items(f32)[0..]});
-    }
-    log.info("After scatter", .{});
+    // {
+    //     const scatter = Scatter{};
+    //     var exe_scatter = try platform.compileModel(allocator, io, Scatter.forward, scatter, .{ input, indices_scatter, empty });
+    //     defer exe_scatter.deinit();
+    //     var scatter_args = try exe_scatter.args(allocator);
+    //     defer scatter_args.deinit(allocator);
+    //     var scatter_results = try exe_scatter.results(allocator);
+    //     defer scatter_results.deinit(allocator);
+    //     scatter_args.set(.{ input_buffer, indices_scatter_buffer, empty_buffer });
+    //     //warmup
+    //     exe_scatter.call(scatter_args, &scatter_results, io);
 
-    {
-        const gather = Gather{};
-        var exe_gather = try zml.module.compileModel(allocator, io, Gather.forward, gather, .{ input, indices }, platform);
-        defer exe_gather.deinit();
-        var gather_args = try exe_gather.args(allocator);
-        defer gather_args.deinit(allocator);
-        var gather_results = try exe_gather.results(allocator);
-        defer gather_results.deinit(allocator);
-        gather_args.set(.{ input_buffer, indices_buffer });
-        //warmup
-        exe_gather.call(gather_args, &gather_results, io);
-        //Real call
-        exe_gather.call(gather_args, &gather_results, io);
-        const output = gather_results.get(zml.Buffer);
-        defer output.deinit();
-        const output_slice = try output.toSliceAlloc(allocator, io);
-        defer output_slice.free(allocator);
-        std.log.info("Output gather: {any}", .{output_slice.items(f32)[0..]});
-    }
+    //     //Real call
+    //     exe_scatter.call(scatter_args, &scatter_results, io);
+    //     const output = scatter_results.get(zml.Buffer);
+    //     defer output.deinit();
+    //     const output_slice = try output.toSliceAlloc(allocator, io);
+    //     defer output_slice.free(allocator);
+    //     std.log.info("Output scatter: {any}", .{output_slice.items(f32)[0..]});
+    // }
+    // log.info("After scatter", .{});
+
+    // Simple Gather
+
 }
 
 // pub fn convertBufferType(

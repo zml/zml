@@ -19,8 +19,8 @@ pub const Linear = struct {
 
     pub fn init(shape: Shape, bias: bool) Linear {
         return .{
-            .weight = .init(shape),
-            .bias = if (bias) .init(Shape.init(.{shape.dim(1)}, shape.dtype())) else null,
+            .weight = .init(shape, shape.dtype()),
+            .bias = if (bias) .init(Shape.init(.{shape.dim(1)}, shape.dtype()), shape.dtype()) else null,
         };
     }
 
