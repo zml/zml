@@ -92,7 +92,7 @@ pub fn main() !void {
     const t10kfilename = process_args[2];
 
     // Read model shapes.
-    var registry = try zml.safetensors.parseFromPath(allocator, io, model_path);
+    var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, model_path);
     defer registry.deinit();
 
     // Init model

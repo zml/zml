@@ -112,7 +112,7 @@ pub fn main() !void {
             log.info("Completed in {d} ms", .{elapsed / std.time.ns_per_ms});
         }
 
-        var registry = try zml.safetensors.parseFromPath(allocator, io, uri);
+        var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, uri);
         defer registry.deinit();
 
         // var it = registry.iterator();
