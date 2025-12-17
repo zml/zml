@@ -61,6 +61,23 @@ pub const LlamaLM = struct {
         self.model.deinit(allocator);
     }
 
+    pub fn loadBuffers(self: *const LlamaLM, allocator: std.mem.Allocator, io: std.Io, store: zml.io.TensorStore.View, platform: zml.Platform) !zml.Bufferized(LlamaLM) {
+        const lm_head = if (self.lm_head) |lm_head| try zml.io.loadBuffersFromId(allocator, io, lm_head, store.withPrefix("lm_head"), platform) else null;
+        // TODO(Corentin): errdefer
+
+        const model = try self.model.loadBuffers(allocator, io, store.withPrefix("model"), platform);
+
+        return .{
+            .lm_head = lm_head,
+            .model = model,
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(LlamaLM), allocator: std.mem.Allocator) void {
+        if (self.lm_head) |*lm_head| lm_head.weight.deinit();
+        Llama.unloadBuffers(&self.model, allocator);
+    }
+
     /// Predicts the token at `token_index` position.
     /// Returns:
     ///  - updated `tokens`,
@@ -141,6 +158,30 @@ pub const Llama = struct {
         allocator.free(self.layers);
     }
 
+    pub fn loadBuffers(self: *const Llama, allocator: std.mem.Allocator, io: std.Io, store: zml.io.TensorStore.View, platform: zml.Platform) !zml.Bufferized(Llama) {
+        const layers = try allocator.alloc(zml.Bufferized(TransformerLayer), self.layers.len);
+        errdefer allocator.free(layers);
+
+        for (layers, 0..) |*layer, i| {
+            layer.* = try zml.io.loadBuffersFromId(allocator, io, self.layers[i], store.withLayer(i), platform);
+        }
+
+        return .{
+            .embed_tokens = try zml.io.loadBuffersFromId(allocator, io, self.embed_tokens, store.withPrefix("embed_tokens"), platform),
+            .layers = layers,
+            .norm = try zml.io.loadBuffersFromId(allocator, io, self.norm, store.withPrefix("norm"), platform),
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(Llama), allocator: std.mem.Allocator) void {
+        self.embed_tokens.weight.deinit();
+        RmsNorm.unloadBuffers(&self.norm);
+        for (self.layers) |*layer| {
+            TransformerLayer.unloadBuffers(layer);
+        }
+        allocator.free(self.layers);
+    }
+
     /// Forward one token, using KV cache for previous tokens.
     /// Returns result and updated KV cache.
     pub fn forward(self: Llama, tokens: Tensor, token_index: Tensor, kv_cache: KvCache) struct { Tensor, KvCache } {
@@ -176,6 +217,13 @@ pub const TransformerLayer = struct {
         };
     }
 
+    pub fn unloadBuffers(self: *zml.Bufferized(TransformerLayer)) void {
+        RmsNorm.unloadBuffers(&self.input_layernorm);
+        SelfAttn.unloadBuffers(&self.self_attn);
+        RmsNorm.unloadBuffers(&self.post_attention_layernorm);
+        Mlp.unloadBuffers(&self.mlp);
+    }
+
     pub fn forward(
         self: TransformerLayer,
         x0: Tensor,
@@ -206,6 +254,10 @@ const RmsNorm = struct {
         return .{ .weight = store.createTensorWithTags("weight", .{.d}), .eps = eps };
     }
 
+    pub fn unloadBuffers(self: *zml.Bufferized(RmsNorm)) void {
+        self.weight.deinit();
+    }
+
     /// L2 normalization of input tensor along `.d` axis.
     pub fn forward(self: RmsNorm, input: Tensor) Tensor {
         const x = if (input.shape().isFullyTagged()) input else input.withPartialTags(.{.d});
@@ -229,6 +281,15 @@ const Mlp = struct {
             .gate_proj = initLinear(store.withPrefix("gate_proj")),
             .down_proj = initLinear(store.withPrefix("down_proj")),
         };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(Mlp)) void {
+        self.up_proj.weight.deinit();
+        if (self.up_proj.bias) |*bias| bias.deinit();
+        self.gate_proj.weight.deinit();
+        if (self.gate_proj.bias) |*bias| bias.deinit();
+        self.down_proj.weight.deinit();
+        if (self.down_proj.bias) |*bias| bias.deinit();
     }
 
     pub fn forward(self: Mlp, x: Tensor) Tensor {
@@ -274,6 +335,20 @@ pub const SelfAttn = struct {
                 .scaling = config.rope_scaling,
             },
         };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(SelfAttn)) void {
+        self.q_proj.weight.deinit();
+        if (self.q_proj.bias) |*bias| bias.deinit();
+        self.k_proj.weight.deinit();
+        if (self.k_proj.bias) |*bias| bias.deinit();
+        self.v_proj.weight.deinit();
+        if (self.v_proj.bias) |*bias| bias.deinit();
+        self.o_proj.weight.deinit();
+        if (self.o_proj.bias) |*bias| bias.deinit();
+
+        if (self.q_norm) |*q_norm| RmsNorm.unloadBuffers(q_norm);
+        if (self.k_norm) |*k_norm| RmsNorm.unloadBuffers(k_norm);
     }
 
     /// Self Attention.

@@ -271,8 +271,11 @@ pub fn main() !void {
 
     // Specify shapes of input arguments
     const prefill_tokens: zml.Tensor = .init(.{ .s = llama_options.max_seq_len }, .u32);
+    _ = prefill_tokens; // autofix
     const decode_tokens: zml.Tensor = .init(.{ .s = 1 }, .u32);
+    _ = decode_tokens; // autofix
     const token_index: zml.Tensor = .init(.{}, .u32);
+    _ = token_index; // autofix
 
     const dtype = llama_model.model.embed_tokens.weight.dtype();
     const kv_cache: llama.KvCache = .init(zml.Shape.init(.{
@@ -281,36 +284,22 @@ pub fn main() !void {
         .h = config.num_key_value_heads,
         .hd = config.head_dim orelse @divExact(config.hidden_size, config.num_attention_heads),
     }, dtype));
+    _ = kv_cache; // autofix
     const rng: zml.Tensor.Rng = .init();
+    _ = rng; // autofix
 
-    var prefill_exe = try platform.compileModel(allocator, io, llama.LlamaLM.forward, llama_model, .{ prefill_tokens, token_index, kv_cache, rng });
-    defer prefill_exe.deinit();
-    var decode_exe = try platform.compileModel(allocator, io, llama.LlamaLM.forward, llama_model, .{ decode_tokens, token_index, kv_cache, rng });
-    defer decode_exe.deinit();
+    // Compile the model twice, one for prefill, one for generation.
+    //var prefill_exe = try platform.compileModel(allocator, io, llama.LlamaLM.forward, llama_model, .{ prefill_tokens, token_index, kv_cache, rng });
+    //defer prefill_exe.deinit();
+    //var decode_exe = try platform.compileModel(allocator, io, llama.LlamaLM.forward, llama_model, .{ decode_tokens, token_index, kv_cache, rng });
+    //defer decode_exe.deinit();
 
-    //// Compile the model twice, one for prefill, one for generation.
-    //var start = try std.time.Timer.start();
-    //var fut_mod_prefill = try async.async(zml.compileModel, .{
-    //    allocator, llama.LlamaLM.forward, llama_tensors,
-    //    .{
-    //        prefill_tokens_shape,
-    //        token_idx_shape,
-    //        kv_cache_shape,
-    //        rng_shape,
-    //    },
-    //    platform,
-    //});
-
-    //var fut_mod = try async.async(zml.compileModel, .{
-    //    allocator, llama.LlamaLM.forward, llama_tensors,
-    //    .{
-    //        gen_tokens_shape,
-    //        token_idx_shape,
-    //        kv_cache_shape,
-    //        rng_shape,
-    //    },
-    //    platform,
-    //});
+    {
+        var timer = try stdx.time.Timer.start();
+        defer log.info("Model loaded [{D}]", .{timer.read()});
+        var llama_buffers = try llama_model.loadBuffers(allocator, io, store.view(), platform);
+        defer LlamaLM.unloadBuffers(&llama_buffers, allocator);
+    }
 
     //// While we are still compiling load the weights to the device.
     //log.info("\tLoading Llama weights from {s}...", .{model_weights_path});
