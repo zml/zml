@@ -44,7 +44,12 @@ pub fn main() !void {
     try http_client.initDefaultProxies(allocator);
     defer http_client.deinit();
 
-    var vfs_file: zml.io.VFS.File = .init(threaded.io());
+    var vfs_file: zml.io.VFS.File = .init(
+        threaded.io(),
+        .{
+            .direct_io = try std.process.hasEnvVar(allocator, "DIRECT"),
+        },
+    );
 
     var vfs_http: zml.io.VFS.HTTP = try .init(allocator, threaded.io(), &http_client, .{});
     defer vfs_http.deinit();
@@ -88,22 +93,22 @@ pub fn main() !void {
         break :blk default_uri;
     };
 
-    {
-        // const initial_path = "/Users/hugo/Developer/Llama-3.1-8B-Instruct/Llama-3.1-8B-Instruct";
-        // const initial_path = "file:///Users/hugo/Developer/Llama-3.1-8B-Instruct/Llama-3.1-8B-Instruct";
-        const initial_path = "https://storage.googleapis.com/zig-vfs/Llama-3.1-8B-Instruct/Llama-3.1-8B-Instruct";
+    // {
+    //     // const initial_path = "/Users/hugo/Developer/Llama-3.1-8B-Instruct/Llama-3.1-8B-Instruct";
+    //     // const initial_path = "file:///Users/hugo/Developer/Llama-3.1-8B-Instruct/Llama-3.1-8B-Instruct";
+    //     const initial_path = "https://storage.googleapis.com/zig-vfs/Llama-3.1-8B-Instruct/Llama-3.1-8B-Instruct";
 
-        const llama_dir = try std.Io.Dir.openDir(.cwd(), io, initial_path, .{});
-        defer llama_dir.close(io);
+    //     const llama_dir = try std.Io.Dir.openDir(.cwd(), io, initial_path, .{});
+    //     defer llama_dir.close(io);
 
-        const filepath = "../model.safetensors.index.json";
+    //     const filepath = "../model.safetensors.index.json";
 
-        const index_file = try llama_dir.openFile(io, filepath, .{});
-        defer index_file.close(io);
+    //     const index_file = try llama_dir.openFile(io, filepath, .{});
+    //     defer index_file.close(io);
 
-        const stat = try index_file.stat(io);
-        log.info("Opened local index file with size: {d} bytes", .{stat.size});
-    }
+    //     const stat = try index_file.stat(io);
+    //     log.info("Opened local index file with size: {d} bytes", .{stat.size});
+    // }
 
     {
         var timer: std.time.Timer = try .start();
