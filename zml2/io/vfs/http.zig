@@ -227,7 +227,11 @@ pub const HTTP = struct {
             };
         }
 
-        return self.dir_handles.get(dir.handle).?.*;
+        if (self.dir_handles.get(dir.handle)) |handle_ptr| {
+            return handle_ptr.*;
+        } else {
+            return null;
+        }
     }
 
     fn openFile(
