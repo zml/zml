@@ -205,7 +205,7 @@ pub fn main() !void {
         log.err("Missing --hf-model-path", .{});
         return;
     };
-    const repo = try vfs.openAbsoluteDir(io, hf_model_path, .{});
+    const repo = try std.Io.Dir.openDir(.cwd(), io, hf_model_path, .{});
     defer repo.close(io);
 
     const model_tokenizer_path = try std.fs.path.join(allocator, &.{ hf_model_path, "tokenizer.json" });
@@ -230,12 +230,12 @@ pub fn main() !void {
         const create_opts_json = cli.args.@"create-options" orelse "{}";
         const create_opts = try std.json.parseFromSlice(zml.platform.CreateOptions, allocator, create_opts_json, .{});
         defer create_opts.deinit();
-        const platform: zml.Platform = try .auto(threaded.io(), create_opts.value);
+        const platform: zml.Platform = try .auto(io, create_opts.value);
         break :b platform;
     };
     defer platform.deinit();
 
-    var registry = try zml.safetensors.parseFromPath(allocator, io, &vfs, hf_model_path);
+    var registry = try zml.safetensors.parseFromPath(allocator, io, hf_model_path);
     defer registry.deinit();
 
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);

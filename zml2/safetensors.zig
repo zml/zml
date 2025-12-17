@@ -20,17 +20,17 @@ pub fn parseFromPath(
 ) !TensorRegistry {
     var entrypoint = try resolveModelEntrypoint(allocator, io, path);
     defer entrypoint.deinit(allocator, io);
-    log.debug("Resolved model path entrypoint for '{s}': {s}", .{ path, entrypoint.path });
+    log.debug("Resolved model path entrypoint: {s}", .{entrypoint.path});
 
     const repo_path = try resolveModelRepoPath(allocator, io, path);
     defer allocator.free(repo_path);
-    log.debug("Resolved model repo path for '{s}': {s}", .{ path, repo_path });
+    log.debug("Resolved model repo path: {s}", .{repo_path});
 
     const repo = try std.Io.Dir.openDir(.cwd(), io, repo_path, .{});
     defer repo.close(io);
 
     const file_type = resolveFiletype(entrypoint.path);
-    log.debug("Resolved file type for '{s}': {any}", .{ path, file_type });
+    log.debug("Resolved file type: {any}", .{file_type});
 
     return switch (file_type) {
         .index => blk: {
@@ -64,11 +64,9 @@ pub fn parseFromPath(
         .safetensors => blk: {
             var registry: TensorRegistry = .init(allocator);
 
-            log.info("Parsing single safetensors file '{s}'", .{entrypoint.path});
             const file = try repo.openFile(io, entrypoint.path, .{});
             defer file.close(io);
 
-            log.info("Opened safetensors file '{s}'", .{entrypoint.path});
             const header_buf = try allocator.alloc(u8, 16 * 1024);
             defer allocator.free(header_buf);
 
@@ -141,25 +139,25 @@ pub fn resolveModelEntrypoint(allocator: std.mem.Allocator, io: std.Io, path: []
     else
         try allocator.dupe(u8, path);
 
-    log.info("Resolving model entrypoint for path: {s}", .{resolved_path});
-
     if (std.mem.endsWith(u8, resolved_path, ".safetensors.index.json") or
         std.mem.endsWith(u8, resolved_path, ".safetensors"))
     {
         const file = std.Io.Dir.openFile(.cwd(), io, resolved_path, .{ .mode = .read_only }) catch |e| {
             allocator.free(resolved_path);
-            // Only propagate FileNotFound, everything else is InvalidPath
             log.err("Error opening model entrypoint file '{s}': {any}", .{ resolved_path, e });
+
             return switch (e) {
                 error.FileNotFound => ModelPathResolutionError.FileNotFound,
                 else => ModelPathResolutionError.InvalidPath,
             };
         };
+
         return .{ .file = file, .path = resolved_path };
     }
 
     const repo = std.Io.Dir.openDir(.cwd(), io, resolved_path, .{}) catch |e| {
         allocator.free(resolved_path);
+
         return switch (e) {
             error.FileNotFound => ModelPathResolutionError.FileNotFound,
             else => ModelPathResolutionError.InvalidPath,
@@ -501,9 +499,6 @@ pub fn parseSafetensorsIndex(
     const weight_map = index.object.get("weight_map");
 
     if (weight_map) |wm| {
-        const num_tensors = wm.object.count();
-        log.debug("Found {} tensors in weight_map", .{num_tensors});
-
         var it = wm.object.iterator();
 
         while (it.next()) |entry| {

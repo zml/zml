@@ -55,14 +55,14 @@ pub const TensorStore = struct {
         return tensor_desc_ptr;
     }
 
-    pub fn getReader(self: *const TensorStore, key: []const u8, io: std.Io, vfs: *VFS, buffer: []u8) !safetensors.TensorReader {
-        return self.registry.reader(io, vfs, key, buffer);
+    pub fn getReader(self: *const TensorStore, key: []const u8, io: std.Io, buffer: []u8) !safetensors.TensorReader {
+        return self.registry.reader(io, key, buffer);
     }
 
-    pub fn getReaderById(self: *const TensorStore, id: usize, io: std.Io, vfs: *VFS, buffer: []u8) !safetensors.TensorReader {
+    pub fn getReaderById(self: *const TensorStore, id: usize, io: std.Io, buffer: []u8) !safetensors.TensorReader {
         const tensor_desc = self.id_map.get(id) orelse return error.NotFound;
 
-        return safetensors.TensorReader.init(io, vfs, tensor_desc.*, buffer);
+        return safetensors.TensorReader.init(io, tensor_desc.*, buffer);
     }
 
     pub fn view(self: *TensorStore) View {
@@ -170,10 +170,10 @@ pub const TensorStore = struct {
             return entry_ptr.shape;
         }
 
-        pub fn getReader(self: View, subkey: []const u8, io: std.Io, vfs: *VFS, buffer: []u8) !safetensors.TensorReader {
+        pub fn getReader(self: View, subkey: []const u8, io: std.Io, buffer: []u8) !safetensors.TensorReader {
             var key_buffer: [256]u8 = undefined;
             const key = std.fmt.bufPrint(&key_buffer, "{s}{s}", .{ self.prefix() orelse "", subkey }) catch unreachable;
-            return self.store.getReader(key, io, vfs, buffer);
+            return self.store.getReader(key, io, buffer);
         }
     };
 };
@@ -212,7 +212,7 @@ fn collectTensorDesc(allocator: std.mem.Allocator, store: TensorStore.View, v: a
     return try list.toOwnedSlice();
 }
 
-pub fn loadBuffersFromId(allocator: std.mem.Allocator, io: std.Io, vfs: *VFS, model: anytype, store: TensorStore.View, platform: Platform) !Bufferized(@TypeOf(model)) {
+pub fn loadBuffersFromId(allocator: std.mem.Allocator, io: std.Io, model: anytype, store: TensorStore.View, platform: Platform) !Bufferized(@TypeOf(model)) {
     const Model = @TypeOf(model);
     var result: Bufferized(Model) = undefined;
     initBufferizedFrom(model, &result);
@@ -244,7 +244,6 @@ pub fn loadBuffersFromId(allocator: std.mem.Allocator, io: std.Io, vfs: *VFS, mo
         store: TensorStore.View,
         allocator: std.mem.Allocator,
         io: std.Io,
-        vfs: *VFS,
     };
     var context: LocalContext = .{
         .tensor_descs = tensor_descs,
@@ -256,13 +255,12 @@ pub fn loadBuffersFromId(allocator: std.mem.Allocator, io: std.Io, vfs: *VFS, mo
         .store = store,
         .allocator = allocator,
         .io = io,
-        .vfs = vfs,
     };
     try meta.visit(struct {
         fn cb(context_: *LocalContext, buffer: *Buffer) !void {
             const tensor_desc = context_.tensor_descs[context_.index];
 
-            var reader = try safetensors.TensorReader.init(context_.io, context_.vfs, tensor_desc, context_.buffer_reader);
+            var reader = try safetensors.TensorReader.init(context_.io, tensor_desc, context_.buffer_reader);
             defer reader.deinit();
 
             var writer = try context_.transfer.getWriter(context_.io, context_.index, context_.buffer_writer);
