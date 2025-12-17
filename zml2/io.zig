@@ -265,7 +265,7 @@ pub fn loadBuffersFromId(allocator: std.mem.Allocator, io: std.Io, vfs: *VFS, mo
             var reader = try safetensors.TensorReader.init(context_.io, context_.vfs, tensor_desc, context_.buffer_reader);
             defer reader.deinit();
 
-            var writer = try context_.transfer.getWriter(context_.index, context_.buffer_writer);
+            var writer = try context_.transfer.getWriter(context_.io, context_.index, context_.buffer_writer);
 
             _ = try reader.interface.streamRemaining(&writer.interface);
             try writer.interface.flush();
@@ -311,14 +311,16 @@ pub fn initBufferizedFrom(model: anytype, bufferized_: *Bufferized(@TypeOf(model
 
 pub const SimpleWriter = struct {
     offset: usize = 0,
+    io: std.Io,
     transfer_manager: *pjrt.AsyncHostToDeviceTransferManager,
     shape: Shape,
     buffer_index: usize,
     platform: Platform,
     interface: std.Io.Writer,
 
-    pub fn init(buffer: []u8, transfer_manager: *pjrt.AsyncHostToDeviceTransferManager, shape: Shape, buffer_index: usize, platform: Platform) SimpleWriter {
+    pub fn init(buffer: []u8, io: std.Io, transfer_manager: *pjrt.AsyncHostToDeviceTransferManager, shape: Shape, buffer_index: usize, platform: Platform) SimpleWriter {
         return .{
+            .io = io,
             .transfer_manager = transfer_manager,
             .shape = shape,
             .buffer_index = buffer_index,
@@ -340,7 +342,8 @@ pub const SimpleWriter = struct {
         stdx.debug.assert(writer.offset + w.end <= writer.shape.byteSize(), "Can't write more data than required", .{});
         const is_last_transfer = writer.offset + w.end >= writer.shape.byteSize();
         log.debug("Writing {} bytes", .{w.end});
-        _ = writer.transfer_manager.transferData(writer.platform.pjrt_api, writer.buffer_index, w.buffer[0..w.end], @intCast(writer.offset), is_last_transfer) catch return error.WriteFailed;
+        const event = writer.transfer_manager.transferData(writer.platform.pjrt_api, writer.buffer_index, w.buffer[0..w.end], @intCast(writer.offset), is_last_transfer) catch return error.WriteFailed;
+        event.await(writer.platform.pjrt_api, writer.io) catch return error.WriteFailed;
         const written = w.end;
         writer.offset += written;
         w.end = 0;
@@ -392,8 +395,8 @@ pub const Transfer = struct {
         return .fromPjrtBuffers(self.platform, self.shapes[index], &.{pjrt_buffer});
     }
 
-    pub fn getWriter(self: *const Transfer, index: usize, buffer: []u8) !SimpleWriter {
-        const writer: SimpleWriter = .init(buffer, self.transfer_manager, self.shapes[index], index, self.platform);
+    pub fn getWriter(self: *const Transfer, io: std.Io, index: usize, buffer: []u8) !SimpleWriter {
+        const writer: SimpleWriter = .init(buffer, io, self.transfer_manager, self.shapes[index], index, self.platform);
         return writer;
     }
 };
