@@ -481,6 +481,10 @@ pub const Tensor = struct {
             };
         }
 
+        pub fn deinitBuffer(self: *Bufferized(Rng)) void {
+            self._state.deinit();
+        }
+
         /// Returns a Tensor of the given shape, filled with uniform random bits, and a new Rng state.
         ///
         /// The given Rng state should not be used anymore (or you'll get the same numbers again).

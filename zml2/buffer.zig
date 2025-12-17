@@ -10,6 +10,7 @@ const Shape = @import("shape.zig").Shape;
 const Slice = @import("slice.zig").Slice;
 const Target = @import("platform.zig").Target;
 const testing = @import("testing.zig");
+const constants = @import("constants.zig");
 
 const log = std.log.scoped(.zml);
 
@@ -117,9 +118,13 @@ pub const Buffer = struct {
     /// Copies the given zml.Slice or zml.ConstSlice to the accelerator memory and
     /// return a Buffer.
     pub fn fromSlice(io: std.Io, platform: Platform, slice: anytype) !Buffer {
+        return fromSliceOpts(io, platform, slice, .{});
+    }
+
+    pub fn fromSliceOpts(io: std.Io, platform: Platform, slice: anytype, opts: FromOptions) !Buffer {
         if (@TypeOf(slice) != Slice and @TypeOf(slice) != ConstSlice) @compileError("Buffer.fromSlice expects a Slice or ConstSlice, got " ++ @typeName(@TypeOf(slice)));
         const real_slice: ConstSlice = if (@TypeOf(slice) == Slice) slice.constSlice() else slice;
-        return from(io, platform, real_slice.shape, std.mem.sliceAsBytes(real_slice.data), .{});
+        return from(io, platform, real_slice.shape, std.mem.sliceAsBytes(real_slice.data), opts);
     }
 
     /// Creates a Buffer with a single element.
@@ -136,6 +141,66 @@ pub const Buffer = struct {
         }
 
         return self;
+    }
+
+    pub const UnitializedOptions = struct { memory: Memory = .device };
+
+    pub fn uninitialized(io: std.Io, platform: Platform, shape_: Shape, opts: UnitializedOptions) !Buffer {
+        if (opts.memory != .device) {
+            // XLA uninitialized doesn't respect memory see https://github.com/openxla/xla/pull/31292
+            // TODO: use uninitialized when it works again.
+            const slice: Slice = try .alloc(std.heap.smp_allocator, shape_);
+            defer slice.free(std.heap.smp_allocator);
+            return .fromSliceOpts(io, platform, slice, .{ .memory = opts.memory });
+        }
+
+        var res: Buffer = .{
+            ._api = platform.pjrt_api,
+            ._shape = shape_,
+            ._shards = .{},
+            ._target = platform.target,
+        };
+        errdefer for (res._shards.slice()) |shard| {
+            shard.deinit(platform.pjrt_api);
+        };
+
+        stdx.debug.assert(platform.sharding().num_replicas == 1, "ZML doesn't support num_replicas > 1 for now, got: {}", .{platform.sharding()});
+        //const sharding_ax: ?u3 = std.simd.firstTrue(shape_._sharding_info);
+        const n_partitions = platform.sharding().num_partitions;
+
+        //const shard_shape = if (sharding_ax) |ax| s: {
+        //    // This kind of sharding error should be detected earlier on.
+        //    stdx.debug.assert(@rem(shape_.dim(ax), n_partitions) == 0, "Buffer.uninitialized() expects the sharding axis {} to have a dimension divisble by the number of devices ({}).", .{ ax, n_partitions });
+        //    const shard_shape = shape_.set(ax, @divExact(shape_.dim(ax), n_partitions));
+        //    break :s shard_shape;
+        //} else shape_;
+
+        var args = pjrt.Client.CreateUninitializedBufferArgs{
+            .dims = shape_.dims(),
+            .element_type = pjrt.bufferTypeFromDtype(shape_.dtype()),
+            .layout = .{
+                .tiled = .{
+                    .minor_to_major = constants.minorToMajor(shape_.rank()),
+                    .tile_dims = &.{},
+                    .tile_dims_sizes = &.{},
+                },
+            },
+            // set per device, see below.
+            .dst = undefined,
+        };
+
+        const devices = platform.getDevices();
+        for (0..n_partitions) |i| {
+            args.dst = if (platform.target == .cpu or opts.memory == .device)
+                .{ .device = devices[i] }
+            else
+                .{ .memory = platform.memoryForDevice(opts.memory, devices[i]) };
+
+            const shard = try platform.pjrt_client.createUnitializedBuffer(platform.pjrt_api, args);
+            res._shards.appendAssumeCapacity(shard);
+        }
+
+        return res;
     }
 
     /// Wraps pre-exisiting `pjrt.Buffer` shards into one `zml.Buffer`.
