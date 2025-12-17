@@ -44,12 +44,14 @@ pub fn main() !void {
     try http_client.initDefaultProxies(allocator);
     defer http_client.deinit();
 
-    var vfs_file: zml.io.VFS.File = .init(
+    var vfs_file: zml.io.VFS.File = try .init(
+        allocator,
         threaded.io(),
         .{
             .direct_io = try std.process.hasEnvVar(allocator, "DIRECT"),
         },
     );
+    defer vfs_file.deinit();
 
     var vfs_http: zml.io.VFS.HTTP = try .init(allocator, threaded.io(), &http_client, .{});
     defer vfs_http.deinit();
