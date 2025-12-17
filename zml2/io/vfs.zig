@@ -33,8 +33,6 @@ pub const VFS = struct {
         handle: std.Io.Dir.Handle,
     };
 
-    const ROOT_DIR_HANDLE: std.Io.Dir.Handle = 0;
-
     allocator: std.mem.Allocator,
     mutex: std.Io.Mutex,
 
@@ -110,7 +108,7 @@ pub const VFS = struct {
             .files = .{},
             .dirs = .{},
             .next_file_handle = 0,
-            .next_dir_handle = 1, // 0 reserved for ROOT_DIR_HANDLE
+            .next_dir_handle = 0,
             .vtable = vtable,
             .base_io = base_io,
         };
@@ -154,6 +152,7 @@ pub const VFS = struct {
     }
 
     fn backendFromAbsolutePath(self: *VFS, path: []const u8) ResolveAbsolutePathError!std.Io {
+        if (std.fs.path.isAbsolutePosix(path)) return self.base_io;
         const uri = std.Uri.parse(path) catch return ResolveAbsolutePathError.InvalidURI;
         return self.backends.get(uri.scheme) orelse return ResolveAbsolutePathError.SchemeNotRegistered;
     }
@@ -218,8 +217,6 @@ pub const VFS = struct {
     }
 
     fn closeDir(self: *VFS, virtual_handle: std.Io.Dir.Handle) void {
-        if (virtual_handle == ROOT_DIR_HANDLE) return;
-
         self.mutex.lockUncancelable(self.base_io);
         const entry = self.dirs.fetchRemove(virtual_handle);
         self.mutex.unlock(self.base_io);
@@ -231,36 +228,18 @@ pub const VFS = struct {
         }
     }
 
-    fn fsDir(self: *VFS, virtual_handle: std.Io.Dir.Handle, sub_path: ?[]const u8) DirEntryError!FsDir {
-        if (virtual_handle == ROOT_DIR_HANDLE) {
+    fn fsDir(self: *VFS, dir: std.Io.Dir, sub_path: ?[]const u8) DirEntryError!FsDir {
+        if (std.meta.eql(dir, std.Io.Dir.cwd())) {
             std.debug.assert(sub_path != null);
-            const backend = try self.backendFromAbsolutePath(sub_path.?);
-            return .{ .backend = backend, .handle = ROOT_DIR_HANDLE };
+            const backend = self.backendFromAbsolutePath(sub_path.?) catch self.base_io;
+            return .{ .backend = backend, .handle = dir.handle };
         }
 
         self.mutex.lockUncancelable(self.base_io);
         defer self.mutex.unlock(self.base_io);
 
-        const entry = self.dirs.get(virtual_handle) orelse return DirEntryError.MissingVirtualDirHandle;
+        const entry = self.dirs.get(dir.handle) orelse return DirEntryError.MissingVirtualDirHandle;
         return entry.*;
-    }
-
-    pub fn rootDir(self: *VFS) std.Io.Dir {
-        _ = self;
-        return .{ .handle = ROOT_DIR_HANDLE };
-    }
-
-    pub fn openAbsoluteDir(self: *VFS, vfs_io: std.Io, path: []const u8, options: std.Io.Dir.OpenOptions) std.Io.Dir.OpenError!std.Io.Dir {
-        const backend_dir = try vfs_io.vtable.dirOpenDir(vfs_io.userdata, .{ .handle = ROOT_DIR_HANDLE }, path, options);
-        const virtual_handle = self.registerDir(vfs_io, backend_dir.handle) catch return std.Io.Dir.OpenError.Unexpected;
-
-        return .{ .handle = virtual_handle };
-    }
-
-    pub fn openAbsoluteFile(self: *VFS, vfs_io: std.Io, path: []const u8, flags: std.Io.File.OpenFlags) std.Io.File.OpenError!std.Io.File {
-        const file = try vfs_io.vtable.dirOpenFile(vfs_io.userdata, .{ .handle = ROOT_DIR_HANDLE }, path, flags);
-        const virtual_handle = self.registerFile(vfs_io, file.handle) catch return std.Io.File.OpenError.SystemResources;
-        return .{ .handle = virtual_handle };
     }
 
     // VTable implementations
@@ -273,7 +252,7 @@ pub const VFS = struct {
     ) std.Io.Dir.MakeError!void {
         const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
 
-        const fs_dir = self.fsDir(dir.handle, sub_path) catch |err| {
+        const fs_dir = self.fsDir(dir, sub_path) catch |err| {
             return switch (err) {
                 DirEntryError.SchemeNotRegistered => std.Io.Dir.MakeError.BadPathName,
                 DirEntryError.InvalidURI => std.Io.Dir.MakeError.BadPathName,
@@ -292,7 +271,7 @@ pub const VFS = struct {
     ) std.Io.Dir.MakeError!void {
         const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
 
-        const fs_dir = self.fsDir(dir.handle, sub_path) catch |err| {
+        const fs_dir = self.fsDir(dir, sub_path) catch |err| {
             return switch (err) {
                 DirEntryError.SchemeNotRegistered => std.Io.Dir.MakeError.BadPathName,
                 DirEntryError.InvalidURI => std.Io.Dir.MakeError.BadPathName,
@@ -311,7 +290,7 @@ pub const VFS = struct {
     ) std.Io.Dir.MakeOpenPathError!std.Io.Dir {
         const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
 
-        const fs_dir = self.fsDir(dir.handle, sub_path) catch |err| {
+        const fs_dir = self.fsDir(dir, sub_path) catch |err| {
             return switch (err) {
                 DirEntryError.SchemeNotRegistered => std.Io.Dir.MakeOpenPathError.BadPathName,
                 DirEntryError.InvalidURI => std.Io.Dir.MakeOpenPathError.BadPathName,
@@ -336,9 +315,7 @@ pub const VFS = struct {
     ) std.Io.Dir.StatError!std.Io.Dir.Stat {
         const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
 
-        if (dir.handle == ROOT_DIR_HANDLE) return std.Io.Dir.StatError.Unexpected;
-
-        const fs_dir = self.fsDir(dir.handle, null) catch |err| {
+        const fs_dir = self.fsDir(dir, null) catch |err| {
             return switch (err) {
                 DirEntryError.SchemeNotRegistered => std.Io.Dir.StatError.Unexpected,
                 DirEntryError.InvalidURI => std.Io.Dir.StatError.Unexpected,
@@ -357,7 +334,7 @@ pub const VFS = struct {
     ) std.Io.Dir.StatPathError!std.Io.Dir.Stat {
         const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
 
-        const fs_dir = self.fsDir(dir.handle, sub_path) catch |err| {
+        const fs_dir = self.fsDir(dir, sub_path) catch |err| {
             return switch (err) {
                 DirEntryError.SchemeNotRegistered => std.Io.Dir.StatPathError.BadPathName,
                 DirEntryError.InvalidURI => std.Io.Dir.StatPathError.BadPathName,
@@ -376,7 +353,7 @@ pub const VFS = struct {
     ) std.Io.Dir.AccessError!void {
         const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
 
-        const fs_dir = self.fsDir(dir.handle, sub_path) catch |err| {
+        const fs_dir = self.fsDir(dir, sub_path) catch |err| {
             return switch (err) {
                 DirEntryError.SchemeNotRegistered => std.Io.Dir.AccessError.BadPathName,
                 DirEntryError.InvalidURI => std.Io.Dir.AccessError.BadPathName,
@@ -395,7 +372,7 @@ pub const VFS = struct {
     ) std.Io.File.OpenError!std.Io.File {
         const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
 
-        const fs_dir = self.fsDir(dir.handle, sub_path) catch |err| {
+        const fs_dir = self.fsDir(dir, sub_path) catch |err| {
             return switch (err) {
                 DirEntryError.SchemeNotRegistered => std.Io.File.OpenError.BadPathName,
                 DirEntryError.InvalidURI => std.Io.File.OpenError.BadPathName,
@@ -422,7 +399,7 @@ pub const VFS = struct {
     ) std.Io.File.OpenError!std.Io.File {
         const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
 
-        const fs_dir = self.fsDir(dir.handle, sub_path) catch |err| {
+        const fs_dir = self.fsDir(dir, sub_path) catch |err| {
             return switch (err) {
                 DirEntryError.SchemeNotRegistered => std.Io.File.OpenError.BadPathName,
                 DirEntryError.InvalidURI => std.Io.File.OpenError.BadPathName,
@@ -449,7 +426,7 @@ pub const VFS = struct {
     ) std.Io.Dir.OpenError!std.Io.Dir {
         const self: *VFS = @ptrCast(@alignCast(userdata orelse unreachable));
 
-        const fs_dir = self.fsDir(dir.handle, sub_path) catch |err| {
+        const fs_dir = self.fsDir(dir, sub_path) catch |err| {
             return switch (err) {
                 DirEntryError.SchemeNotRegistered => std.Io.Dir.OpenError.BadPathName,
                 DirEntryError.InvalidURI => std.Io.Dir.OpenError.BadPathName,

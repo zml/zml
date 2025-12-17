@@ -14,12 +14,12 @@ pub const std_options: std.Options = .{
 };
 
 pub fn main() !void {
-    // var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
-    // defer std.debug.assert(debug_allocator.deinit() == .ok);
+    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    defer std.debug.assert(debug_allocator.deinit() == .ok);
 
-    // const allocator = debug_allocator.allocator();
+    const allocator = debug_allocator.allocator();
 
-    const allocator = std.heap.c_allocator;
+    // const allocator = std.heap.c_allocator;
 
     var threaded: std.Io.Threaded = .init(allocator);
     defer threaded.deinit();
@@ -89,13 +89,30 @@ pub fn main() !void {
     };
 
     {
+        // const initial_path = "/Users/hugo/Developer/Llama-3.1-8B-Instruct/Llama-3.1-8B-Instruct";
+        // const initial_path = "file:///Users/hugo/Developer/Llama-3.1-8B-Instruct/Llama-3.1-8B-Instruct";
+        const initial_path = "https://storage.googleapis.com/zig-vfs/Llama-3.1-8B-Instruct/Llama-3.1-8B-Instruct";
+
+        const llama_dir = try std.Io.Dir.openDir(.cwd(), io, initial_path, .{});
+        defer llama_dir.close(io);
+
+        const filepath = "../model.safetensors.index.json";
+
+        const index_file = try llama_dir.openFile(io, filepath, .{});
+        defer index_file.close(io);
+
+        const stat = try index_file.stat(io);
+        log.info("Opened local index file with size: {d} bytes", .{stat.size});
+    }
+
+    {
         var timer: std.time.Timer = try .start();
         defer {
             const elapsed = timer.read();
             log.info("Completed in {d} ms", .{elapsed / std.time.ns_per_ms});
         }
 
-        var registry = try zml.safetensors.parseFromPath(allocator, io, &vfs, uri);
+        var registry = try zml.safetensors.parseFromPath(allocator, io, uri);
         defer registry.deinit();
 
         // var it = registry.iterator();
@@ -153,7 +170,7 @@ pub fn main() !void {
             var it = registry.iterator();
             while (it.next()) |entry| {
                 const tensor_name = entry.key_ptr.*;
-                group.async(io, readTensor, .{ allocator, io, &vfs, &pool, &registry, tensor_name, &err });
+                group.async(io, readTensor, .{ io, &pool, &registry, tensor_name, &err });
             }
 
             group.wait(io);
@@ -294,24 +311,20 @@ pub fn main() !void {
 }
 
 fn readTensor(
-    allocator: std.mem.Allocator,
     io: std.Io,
-    vfs: *zml.io.VFS,
     pool: *MemoryPool,
     registry: *zml.safetensors.TensorRegistry,
     tensor_name: []const u8,
     err_ptr: *?anyerror,
 ) void {
-    readTensorImpl(allocator, io, vfs, pool, registry, tensor_name) catch |err| {
+    readTensorImpl(io, pool, registry, tensor_name) catch |err| {
         err_ptr.* = err;
         log.err("Failed to read tensor {s}: {any}", .{ tensor_name, err });
     };
 }
 
 pub fn readTensorImpl(
-    _: std.mem.Allocator,
     io: std.Io,
-    vfs: *zml.io.VFS,
     pool: *MemoryPool,
     registry: *zml.safetensors.TensorRegistry,
     tensor_name: []const u8,
@@ -323,7 +336,7 @@ pub fn readTensorImpl(
     const mem_slot = try pool.alloc(io, tensor.byteSize() * 2);
     defer pool.free(io, mem_slot.index);
 
-    var tensor_reader = try registry.reader(io, vfs, tensor_name, mem_slot.data[0..tensor.byteSize()]);
+    var tensor_reader = try registry.reader(io, tensor_name, mem_slot.data[0..tensor.byteSize()]);
     defer tensor_reader.deinit();
 
     var read_timer = try std.time.Timer.start();

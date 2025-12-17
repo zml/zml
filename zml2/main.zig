@@ -61,16 +61,16 @@ pub fn main() !void {
 
     const io = vfs.io();
 
-    const file = try vfs.openAbsoluteFile(io, "//private/var/tmp/_bazel_corendos/c1731bd4fcb7bdb2687c1972ca03d70f/external/+non_module_deps+mnist/mnist.safetensors", .{ .mode = .read_only });
+    const file = try std.Io.Dir.openFile(.cwd(), io, "/private/var/tmp/_bazel_corendos/c1731bd4fcb7bdb2687c1972ca03d70f/external/+non_module_deps+mnist/mnist.safetensors", .{ .mode = .read_only });
     defer file.close(io);
 
     zml.init();
     defer zml.deinit();
 
-    const available = zml.Platform.availablePlatforms(threaded.io());
+    const available = zml.Platform.availablePlatforms(io);
     std.log.info("Available platforms: {any}", .{available});
 
-    var platform = try zml.Platform.auto(threaded.io(), .{});
+    var platform = try zml.Platform.auto(io, .{});
     defer platform.deinit();
 
     std.log.info("Selected platform: {f}", .{platform});

@@ -2,7 +2,6 @@ const std = @import("std");
 
 const Shape = @import("shape.zig").Shape;
 const DataType = @import("dtype.zig").DataType;
-const VFS = @import("io").VFS;
 
 const Dims = Shape.DimsArray;
 const StringBuilder = std.ArrayListUnmanaged(u8);
@@ -17,26 +16,25 @@ const BYTES_HEADER = 8;
 pub fn parseFromPath(
     allocator: std.mem.Allocator,
     io: std.Io,
-    vfs: *VFS, // todo: remove pointer when std.Io.Dir/File ready
     path: []const u8,
 ) !TensorRegistry {
-    const file_path = try resolveModelPathEntrypoint(allocator, io, vfs, path);
-    defer allocator.free(file_path);
-    log.debug("Resolved model path entrypoint for '{s}': {s}", .{ path, file_path });
+    var entrypoint = try resolveModelEntrypoint(allocator, io, path);
+    defer entrypoint.deinit(allocator, io);
+    log.debug("Resolved model path entrypoint for '{s}': {s}", .{ path, entrypoint.path });
 
-    const repo_path = try resolveModelRepoPath(allocator, io, vfs, path);
+    const repo_path = try resolveModelRepoPath(allocator, io, path);
     defer allocator.free(repo_path);
     log.debug("Resolved model repo path for '{s}': {s}", .{ path, repo_path });
 
-    const repo = try vfs.openAbsoluteDir(io, repo_path, .{});
+    const repo = try std.Io.Dir.openDir(.cwd(), io, repo_path, .{});
     defer repo.close(io);
 
-    const file_type = resolveFiletype(file_path);
+    const file_type = resolveFiletype(entrypoint.path);
     log.debug("Resolved file type for '{s}': {any}", .{ path, file_type });
 
     return switch (file_type) {
         .index => blk: {
-            const index_file = try vfs.openAbsoluteFile(io, file_path, .{});
+            const index_file = try std.Io.Dir.openFile(.cwd(), io, entrypoint.path, .{ .mode = .read_only });
             defer index_file.close(io);
 
             const file_reader_buf = try allocator.alloc(u8, 64 * 1024);
@@ -66,18 +64,17 @@ pub fn parseFromPath(
         .safetensors => blk: {
             var registry: TensorRegistry = .init(allocator);
 
-            log.info("Parsing single safetensors file '{s}'", .{file_path});
-            const file = try repo.openFile(io, file_path, .{});
+            log.info("Parsing single safetensors file '{s}'", .{entrypoint.path});
+            const file = try repo.openFile(io, entrypoint.path, .{});
             defer file.close(io);
 
-            log.info("Opened safetensors file '{s}'", .{file_path});
-
+            log.info("Opened safetensors file '{s}'", .{entrypoint.path});
             const header_buf = try allocator.alloc(u8, 16 * 1024);
             defer allocator.free(header_buf);
 
             var reader = file.reader(io, header_buf);
 
-            try parseSafetensors(allocator, file_path, &reader.interface, &registry);
+            try parseSafetensors(allocator, entrypoint.path, &reader.interface, &registry);
 
             break :blk registry;
         },
@@ -106,23 +103,12 @@ pub const ModelPathResolutionError = error{
     InvalidPath,
 } || std.mem.Allocator.Error;
 
-pub fn resolveModelRepoPath(allocator: std.mem.Allocator, io: std.Io, vfs: *VFS, path: []const u8) ModelPathResolutionError![]const u8 {
+pub fn resolveModelRepoPath(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ModelPathResolutionError![]const u8 {
     const resolved_path = if (std.mem.startsWith(u8, path, "/"))
         try std.fmt.allocPrint(allocator, "file://{s}", .{path})
     else
         try allocator.dupe(u8, path);
     defer allocator.free(resolved_path);
-
-    var supported_schemes_it = vfs.backends.keyIterator();
-
-    while (supported_schemes_it.next()) |scheme| {
-        if (std.mem.startsWith(u8, resolved_path, scheme.*)) {
-            break;
-        }
-    } else {
-        log.err("Unsupported URI scheme in path: {s}", .{resolved_path});
-        return ModelPathResolutionError.InvalidPath;
-    }
 
     if (std.mem.endsWith(u8, resolved_path, ".safetensors.index.json") or
         std.mem.endsWith(u8, resolved_path, ".safetensors"))
@@ -131,7 +117,7 @@ pub fn resolveModelRepoPath(allocator: std.mem.Allocator, io: std.Io, vfs: *VFS,
         return try allocator.dupe(u8, dir_path);
     }
 
-    if (vfs.openAbsoluteDir(io, resolved_path, .{})) |dir| {
+    if (std.Io.Dir.openDir(.cwd(), io, resolved_path, .{})) |dir| {
         defer dir.close(io);
         return try allocator.dupe(u8, resolved_path);
     } else |_| {}
@@ -139,58 +125,67 @@ pub fn resolveModelRepoPath(allocator: std.mem.Allocator, io: std.Io, vfs: *VFS,
     return ModelPathResolutionError.FileNotFound;
 }
 
-pub fn resolveModelPathEntrypoint(allocator: std.mem.Allocator, io: std.Io, vfs: *VFS, path: []const u8) ModelPathResolutionError![]const u8 {
+pub const ModelEntrypoint = struct {
+    file: std.Io.File,
+    path: []const u8,
+
+    pub fn deinit(self: *ModelEntrypoint, allocator: std.mem.Allocator, io: std.Io) void {
+        self.file.close(io);
+        allocator.free(self.path);
+    }
+};
+
+pub fn resolveModelEntrypoint(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ModelPathResolutionError!ModelEntrypoint {
     const resolved_path = if (std.mem.startsWith(u8, path, "/"))
         try std.fmt.allocPrint(allocator, "file://{s}", .{path})
     else
         try allocator.dupe(u8, path);
-    defer allocator.free(resolved_path);
 
-    var supported_schemes_it = vfs.backends.keyIterator();
-
-    while (supported_schemes_it.next()) |scheme| {
-        if (std.mem.startsWith(u8, resolved_path, scheme.*)) {
-            break;
-        }
-    } else {
-        log.err("Unsupported URI scheme in path: {s}", .{resolved_path});
-        return ModelPathResolutionError.InvalidPath;
-    }
+    log.info("Resolving model entrypoint for path: {s}", .{resolved_path});
 
     if (std.mem.endsWith(u8, resolved_path, ".safetensors.index.json") or
         std.mem.endsWith(u8, resolved_path, ".safetensors"))
     {
-        if (vfs.openAbsoluteFile(io, resolved_path, .{})) |file| {
-            defer file.close(io);
-            if (file.stat(io)) |_| {
-                return try allocator.dupe(u8, resolved_path);
-            } else |_| {}
-        } else |_| {}
-        return ModelPathResolutionError.FileNotFound;
+        const file = std.Io.Dir.openFile(.cwd(), io, resolved_path, .{ .mode = .read_only }) catch |e| {
+            allocator.free(resolved_path);
+            // Only propagate FileNotFound, everything else is InvalidPath
+            log.err("Error opening model entrypoint file '{s}': {any}", .{ resolved_path, e });
+            return switch (e) {
+                error.FileNotFound => ModelPathResolutionError.FileNotFound,
+                else => ModelPathResolutionError.InvalidPath,
+            };
+        };
+        return .{ .file = file, .path = resolved_path };
     }
 
-    const index_path = try std.fs.path.join(allocator, &[_][]const u8{ resolved_path, "model.safetensors.index.json" });
+    const repo = std.Io.Dir.openDir(.cwd(), io, resolved_path, .{}) catch |e| {
+        allocator.free(resolved_path);
+        return switch (e) {
+            error.FileNotFound => ModelPathResolutionError.FileNotFound,
+            else => ModelPathResolutionError.InvalidPath,
+        };
+    };
+    defer repo.close(io);
 
-    if (vfs.openAbsoluteFile(io, index_path, .{})) |index_file| {
-        defer index_file.close(io);
-        if (index_file.stat(io)) |_| {
-            return index_path;
+    {
+        const index_name = "model.safetensors.index.json";
+        if (repo.openFile(io, index_name, .{ .mode = .read_only })) |index_file| {
+            const index_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ resolved_path, index_name });
+            allocator.free(resolved_path);
+            return .{ .file = index_file, .path = index_path };
         } else |_| {}
-    } else |_| {}
+    }
 
-    allocator.free(index_path);
-
-    const model_path = try std.fs.path.join(allocator, &[_][]const u8{ resolved_path, "model.safetensors" });
-
-    if (vfs.openAbsoluteFile(io, model_path, .{})) |model_file| {
-        defer model_file.close(io);
-        if (model_file.stat(io)) |_| {
-            return model_path;
+    {
+        const model_name = "model.safetensors";
+        if (repo.openFile(io, model_name, .{ .mode = .read_only })) |model_file| {
+            const model_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ resolved_path, model_name });
+            allocator.free(resolved_path);
+            return .{ .file = model_file, .path = model_path };
         } else |_| {}
-    } else |_| {}
+    }
 
-    allocator.free(model_path);
-
+    allocator.free(resolved_path);
     return ModelPathResolutionError.FileNotFound;
 }
 
@@ -205,11 +200,10 @@ pub const TensorReader = struct {
 
     pub fn init(
         io: std.Io,
-        vfs: *VFS,
         tensor: Tensor,
         buffer: []u8,
     ) Error!TensorReader {
-        const file = try vfs.openAbsoluteFile(io, tensor.file_uri, .{});
+        const file = try std.Io.Dir.openFile(.cwd(), io, tensor.file_uri, .{ .mode = .read_only });
         errdefer file.close(io);
 
         var file_reader = file.reader(io, buffer);
@@ -364,7 +358,6 @@ pub const TensorRegistry = struct {
     pub fn reader(
         self: *TensorRegistry,
         io: std.Io,
-        vfs: *VFS,
         tensor_name: []const u8,
         buffer: []u8,
     ) TensorReader.Error!TensorReader {
@@ -373,7 +366,7 @@ pub const TensorRegistry = struct {
             return TensorReader.Error.TensorNotFound;
         };
 
-        return try .init(io, vfs, tensor, buffer);
+        return try .init(io, tensor, buffer);
     }
 
     pub fn iterator(self: *TensorRegistry) Tensors.Iterator {

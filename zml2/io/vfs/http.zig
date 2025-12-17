@@ -10,7 +10,7 @@ pub const HTTP = struct {
 
         url: []const u8,
         pos: u64,
-        size: ?u64,
+        size: u64,
         redirect_buffer: [std.fs.max_path_bytes]u8,
         request: ?*std.http.Client.Request,
         response: ?std.http.Client.Response,
@@ -29,12 +29,14 @@ pub const HTTP = struct {
                 .allocator = allocator,
                 .url = try resolveUri(allocator, parent_path, sub_path),
                 .pos = 0,
-                .size = null,
+                .size = undefined,
                 .redirect_buffer = undefined,
                 .request = null,
                 .response = null,
                 .body_reader = null,
             };
+
+            log.info("Created HTTP FileHandle for URL: {s}", .{handle.url});
 
             return handle;
         }
@@ -68,14 +70,25 @@ pub const HTTP = struct {
         }
 
         fn resolveUri(allocator: std.mem.Allocator, parent_path: []const u8, sub_path: []const u8) std.mem.Allocator.Error![]const u8 {
-            // todo: check uri
             if (std.mem.startsWith(u8, sub_path, "http://") or
                 std.mem.startsWith(u8, sub_path, "https://"))
             {
                 return try allocator.dupe(u8, sub_path);
             }
 
-            return std.fs.path.join(allocator, &.{ parent_path, sub_path });
+            const base_uri = std.Uri.parse(parent_path) catch unreachable;
+            var aux_buf: [std.fs.max_path_bytes]u8 = undefined;
+            // if (sub_path.len > aux_buf.len) return error.InvalidPath;
+            @memcpy(aux_buf[0..sub_path.len], sub_path);
+            var aux_slice: []u8 = aux_buf[0..];
+            const resolved = std.Uri.resolveInPlace(base_uri, sub_path.len, &aux_slice) catch unreachable;
+            return std.fmt.allocPrint(allocator, "{f}", .{resolved.fmt(.{
+                .scheme = true,
+                .authority = true,
+                .path = true,
+                .query = true,
+                .fragment = true,
+            })});
         }
     };
 
@@ -87,8 +100,19 @@ pub const HTTP = struct {
             const self = try allocator.create(DirHandle);
             errdefer allocator.destroy(self);
 
-            const url = try std.fs.path.join(allocator, &.{ parent_path, sub_path });
+            var url = try FileHandle.resolveUri(allocator, parent_path, sub_path);
             errdefer allocator.free(url);
+
+            // Ensure directory URLs have a trailing slash.
+            // According to RFC 3986, if the parent path lacks a trailing slash, it is treated as a file and the last segment is replaced.
+
+            if (url.len == 0 or url[url.len - 1] != '/') {
+                const with_slash = try std.fmt.allocPrint(allocator, "{s}/", .{url});
+                allocator.free(url);
+                url = with_slash;
+            }
+
+            log.info("Created HTTP DirHandle for URL: {s}", .{url});
 
             self.* = .{
                 .allocator = allocator,
@@ -124,7 +148,7 @@ pub const HTTP = struct {
     vtable: std.Io.VTable,
 
     pub fn init(allocator: std.mem.Allocator, base_io: std.Io, http_client: *std.http.Client, config: Config) std.mem.Allocator.Error!HTTP {
-        var self: HTTP = .{
+        return .{
             .allocator = allocator,
             .mutex = .init,
             .file_handles = .{},
@@ -135,17 +159,6 @@ pub const HTTP = struct {
             .config = config,
             .vtable = makeVTable(base_io),
         };
-
-        // Used by VFS
-        const root_dir_handle = DirHandle.init(allocator, "", "") catch {
-            log.err("Failed to create root DirHandle", .{});
-            return self;
-        };
-        errdefer root_dir_handle.deinit();
-
-        _ = try self.registerDirHandle(root_dir_handle);
-
-        return self;
     }
 
     pub fn deinit(self: *HTTP) void {
@@ -200,11 +213,18 @@ pub const HTTP = struct {
         return handle_id;
     }
 
-    fn dirHandle(self: *HTTP, dir: std.Io.Dir) ?*DirHandle {
+    fn dirHandle(self: *HTTP, dir: std.Io.Dir) ?DirHandle {
         self.mutex.lockUncancelable(self.io());
         defer self.mutex.unlock(self.io());
 
-        return self.dir_handles.get(dir.handle);
+        if (std.meta.eql(dir, std.Io.Dir.cwd())) {
+            return .{
+                .allocator = self.allocator,
+                .url = "",
+            };
+        }
+
+        return self.dir_handles.get(dir.handle).?.*;
     }
 
     fn openFile(
@@ -228,7 +248,22 @@ pub const HTTP = struct {
             return std.Io.File.OpenError.SystemResources;
         };
 
-        return .{ .handle = @intCast(handle_id) };
+        const file: std.Io.File = .{ .handle = @intCast(handle_id) };
+
+        const stat = self.fetchFileStat(file) catch |err| switch (err) {
+            error.AccessDenied, error.SystemResources => {
+                log.err("File not found during openFile for handle={d} url={s}", .{ file.handle, handle.url });
+                return std.Io.File.OpenError.FileNotFound;
+            },
+            else => {
+                log.err("Failed to fetch file stat during openFile for handle={d} url={s}", .{ file.handle, handle.url });
+                return std.Io.File.OpenError.Unexpected;
+            },
+        };
+
+        handle.size = stat.size;
+
+        return file;
     }
 
     fn openDir(
@@ -322,21 +357,8 @@ pub const HTTP = struct {
             var offset: usize = 0;
 
             while (offset < buf.len) {
-                const file_size = blk: {
-                    if (handle.size) |size| break :blk size;
-
-                    const stat = self.fetchFileStat(file) catch {
-                        log.err("Failed to fetch file stat during read for handle={d} url={s}", .{ file.handle, handle.url });
-                        return std.Io.File.Reader.Error.Unexpected;
-                    };
-
-                    handle.size = stat.size;
-
-                    break :blk stat.size;
-                };
-
                 // Check EOF against known file size
-                if (handle.pos >= file_size) {
+                if (handle.pos >= handle.size) {
                     return total_read;
                 }
 
@@ -344,7 +366,7 @@ pub const HTTP = struct {
                 var desired_read_len: u64 = @max(@as(u64, @intCast(buf.len)), self.config.request_range_min);
                 if (desired_read_len > self.config.request_range_max) desired_read_len = self.config.request_range_max;
 
-                const end = if (handle.size.? > 0 and start < file_size) @min(start + desired_read_len - 1, file_size - 1) else start + desired_read_len - 1;
+                const end = if (handle.size > 0 and start < handle.size) @min(start + desired_read_len - 1, handle.size - 1) else start + desired_read_len - 1;
 
                 try self.requestRead(file, start, end);
                 const reader = handle.body_reader.?;
@@ -454,8 +476,10 @@ pub const HTTP = struct {
 
         var attempt: u32 = 0;
         while (attempt < self.config.max_fetch_attempts) : (attempt += 1) {
-            const req = self.allocator.create(std.http.Client.Request) catch continue;
-            errdefer self.allocator.destroy(req);
+            const req = self.allocator.create(std.http.Client.Request) catch {
+                log.err("Failed to allocate HTTP HEAD request", .{});
+                return std.Io.File.StatError.SystemResources;
+            };
 
             req.* = self.client.request(.HEAD, std.Uri.parse(handle.url) catch return std.Io.File.StatError.Unexpected, .{
                 .headers = .{ .accept_encoding = .{ .override = "identity" } },
