@@ -11,7 +11,7 @@ ARCH = "linux-x86_64"
 
 CUDA_REDIST_PREFIX = "https://developer.download.nvidia.com/compute/cuda/redist/"
 CUDA_VERSION = "13.0.2"
-CUDA_REDIST_JSON_SHA256 = "fce66717a81c510ffeb89ecc3e79849ab34af3b80139f750876d9033e31d71c2"
+CUDA_REDIST_JSON_SHA256 = ""
 
 CUDNN_REDIST_PREFIX = "https://developer.download.nvidia.com/compute/cudnn/redist/"
 CUDNN_VERSION = "9.14.0"

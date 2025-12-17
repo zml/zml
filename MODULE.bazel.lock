@@ -36,6 +36,7 @@
     "https://bazel-registry.zml.ai/modules/bazel_features/1.28.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/bazel_features/1.3.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/bazel_features/1.30.0/MODULE.bazel": "not found",
+    "https://bazel-registry.zml.ai/modules/bazel_features/1.32.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/bazel_features/1.33.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/bazel_features/1.34.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/bazel_features/1.4.1/MODULE.bazel": "not found",
@@ -114,6 +115,7 @@
     "https://bazel-registry.zml.ai/modules/rules_cc/0.2.11/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_cc/0.2.12/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_cc/0.2.14/MODULE.bazel": "not found",
+    "https://bazel-registry.zml.ai/modules/rules_cc/0.2.4/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_distroless/0.5.1/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_foreign_cc/0.9.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_fuzzing/0.5.2/MODULE.bazel": "not found",
@@ -166,7 +168,7 @@
     "https://bazel-registry.zml.ai/modules/rules_python/0.40.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_python/1.5.3/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_python/1.6.0/MODULE.bazel": "not found",
-    "https://bazel-registry.zml.ai/modules/rules_rust/0.63.0/MODULE.bazel": "not found",
+    "https://bazel-registry.zml.ai/modules/rules_rust/0.68.1/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_shell/0.2.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_shell/0.3.0/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_shell/0.4.1/MODULE.bazel": "not found",
@@ -232,6 +234,7 @@
     "https://bcr.bazel.build/modules/bazel_features/1.28.0/MODULE.bazel": "4b4200e6cbf8fa335b2c3f43e1d6ef3e240319c33d43d60cc0fbd4b87ece299d",
     "https://bcr.bazel.build/modules/bazel_features/1.3.0/MODULE.bazel": "cdcafe83ec318cda34e02948e81d790aab8df7a929cec6f6969f13a489ccecd9",
     "https://bcr.bazel.build/modules/bazel_features/1.30.0/MODULE.bazel": "a14b62d05969a293b80257e72e597c2da7f717e1e69fa8b339703ed6731bec87",
+    "https://bcr.bazel.build/modules/bazel_features/1.32.0/MODULE.bazel": "095d67022a58cb20f7e20e1aefecfa65257a222c18a938e2914fd257b5f1ccdc",
     "https://bcr.bazel.build/modules/bazel_features/1.33.0/MODULE.bazel": "8b8dc9d2a4c88609409c3191165bccec0e4cb044cd7a72ccbe826583303459f6",
     "https://bcr.bazel.build/modules/bazel_features/1.34.0/MODULE.bazel": "e8475ad7c8965542e0c7aac8af68eb48c4af904be3d614b6aa6274c092c2ea1e",
     "https://bcr.bazel.build/modules/bazel_features/1.34.0/source.json": "dfa5c4b01110313153b484a735764d247fee5624bbab63d25289e43b151a657a",
@@ -331,6 +334,7 @@
     "https://bcr.bazel.build/modules/rules_cc/0.2.12/MODULE.bazel": "4216c383ce3223c7dfbd3afcb09c7056265156150b2a3bd3fd9d02949a7ee1bc",
     "https://bcr.bazel.build/modules/rules_cc/0.2.14/MODULE.bazel": "353c99ed148887ee89c54a17d4100ae7e7e436593d104b668476019023b58df8",
     "https://bcr.bazel.build/modules/rules_cc/0.2.14/source.json": "55d0a4587c5592fad350f6e698530f4faf0e7dd15e69d43f8d87e220c78bea54",
+    "https://bcr.bazel.build/modules/rules_cc/0.2.4/MODULE.bazel": "1ff1223dfd24f3ecf8f028446d4a27608aa43c3f41e346d22838a4223980b8cc",
     "https://bcr.bazel.build/modules/rules_distroless/0.5.1/MODULE.bazel": "2a63f4744d30749128105da5f96adf7caf5628e37548293f89e7fa39c3b3f2c2",
     "https://bcr.bazel.build/modules/rules_distroless/0.5.1/source.json": "c6b9ff7f325bfed89c3671757f14c1d1bc6077d0fcef809b8aa2d007cac7dd1d",
     "https://bcr.bazel.build/modules/rules_foreign_cc/0.9.0/MODULE.bazel": "c9e8c682bf75b0e7c704166d79b599f93b72cfca5ad7477df596947891feeef6",
@@ -392,8 +396,8 @@
     "https://bcr.bazel.build/modules/rules_python/1.5.3/MODULE.bazel": "d0b7fb08458ca7fd80a26bc00c9e0f1d011609cc3da0381faa2eccd88c6ebd98",
     "https://bcr.bazel.build/modules/rules_python/1.6.0/MODULE.bazel": "7e04ad8f8d5bea40451cf80b1bd8262552aa73f841415d20db96b7241bd027d8",
     "https://bcr.bazel.build/modules/rules_python/1.6.0/source.json": "e980f654cf66ec4928672f41fc66c4102b5ea54286acf4aecd23256c84211be6",
-    "https://bcr.bazel.build/modules/rules_rust/0.63.0/MODULE.bazel": "4144e1606661c7168d23e8b4e7c5f6fb28ef519d9d5d63e0bd789d1b2a4611f8",
-    "https://bcr.bazel.build/modules/rules_rust/0.63.0/source.json": "638d4731ad05d31835ba45cffc06e8dc1cca01692a681daf831378cf952ee7e6",
+    "https://bcr.bazel.build/modules/rules_rust/0.68.1/MODULE.bazel": "8d3332ef4079673385eb81f8bd68b012decc04ac00c9d5a01a40eff90301732c",
+    "https://bcr.bazel.build/modules/rules_rust/0.68.1/source.json": "3378e746f81b62457fdfd37391244fa8ff075ba85c05931ee4f3a20ac1efe963",
     "https://bcr.bazel.build/modules/rules_shell/0.2.0/MODULE.bazel": "fda8a652ab3c7d8fee214de05e7a9916d8b28082234e8d2c0094505c5268ed3c",
     "https://bcr.bazel.build/modules/rules_shell/0.3.0/MODULE.bazel": "de4402cd12f4cc8fda2354fce179fdb068c0b9ca1ec2d2b17b3e21b24c1a937b",
     "https://bcr.bazel.build/modules/rules_shell/0.4.1/MODULE.bazel": "00e501db01bbf4e3e1dd1595959092c2fadf2087b2852d3f553b5370f5633592",
@@ -1190,7 +1194,7 @@
     },
     "@@rules_rust+//crate_universe:extensions.bzl%crate": {
       "general": {
-        "bzlTransitiveDigest": "dgvl+ECngVEy/RaoBW5zRnnG7OibigZhl1yu8+X1gzg=",
+        "bzlTransitiveDigest": "xnOdcJlDn8jAdyIY4BnC1iO+osURpMjNcjvqwmM3hfE=",
         "usagesDigest": "mup6mgSFatk34Q0znMZPpIEOFZyk9v3xf6jRIXEFTxc=",
         "recordedFileInputs": {
           "@@//zml/tokenizer/hftokenizers/Cargo.lock": "d78ffab37ef69bf8ff45a4d686b25175f30e8fed4d8375612e84dcf6db0cfc9c",
@@ -1204,6 +1208,7 @@
           "CARGO_BAZEL_ISOLATED": null,
           "CARGO_BAZEL_REPIN": null,
           "CARGO_BAZEL_REPIN_ONLY": null,
+          "CARGO_BAZEL_TIMEOUT": null,
           "REPIN": null
         },
         "generatedRepoSpecs": {
