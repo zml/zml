@@ -37,8 +37,8 @@ const Mnist = struct {
         };
     }
 
-    pub fn loadBuffers(self: Mnist, allocator: std.mem.Allocator, io: std.Io, vfs: *zml.io.VFS, store: zml.io.TensorStore.View, platform: zml.Platform) !zml.Bufferized(Mnist) {
-        return zml.io.loadBuffersFromId(allocator, io, vfs, self, store, platform);
+    pub fn loadBuffers(self: Mnist, allocator: std.mem.Allocator, io: std.Io, store: zml.io.TensorStore.View, platform: zml.Platform) !zml.Bufferized(Mnist) {
+        return zml.io.loadBuffersFromId(allocator, io, self, store, platform);
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Mnist)) void {
@@ -92,7 +92,7 @@ pub fn main() !void {
     const t10kfilename = process_args[2];
 
     // Read model shapes.
-    var registry = try zml.safetensors.parseFromPath(allocator, io, &vfs, model_path);
+    var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, model_path);
     defer registry.deinit();
 
     // Init model
@@ -116,14 +116,14 @@ pub fn main() !void {
     defer results.deinit(allocator);
 
     // Load buffers
-    var mnist_buffers = try mnist_model.loadBuffers(allocator, io, &vfs, store.view(), platform);
+    var mnist_buffers = try mnist_model.loadBuffers(allocator, io, store.view(), platform);
     defer Mnist.unloadBuffers(&mnist_buffers);
     log.info("✅ Weights transferred in {f}", .{timer.read()});
 
     log.info("Starting inference...", .{});
 
     // Load a random digit image from the dataset.
-    const dataset = try vfs.openAbsoluteFile(io, t10kfilename, .{ .mode = .read_only });
+    const dataset = try std.Io.Dir.openFile(.cwd(), io, t10kfilename, .{ .mode = .read_only });
     defer dataset.close(io);
 
     const now = std.Io.Clock.now(.awake, io) catch unreachable;

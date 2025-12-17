@@ -4,8 +4,8 @@ load("@rules_zig//zig:defs.bzl", "zig_binary")
 zig_binary(
     name = "mnist",
     args = [
-        #"$(location @mnist//:mnist.safetensors)",
-        #"$(location @mnist//:t10k-images.idx3-ubyte)",
+        "$(location @mnist//:mnist.safetensors)",
+        "$(location @mnist//:t10k-images.idx3-ubyte)",
     ],
     data = [
         "@mnist//:mnist.safetensors",

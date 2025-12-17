@@ -163,10 +163,26 @@ pub fn main() !void {
 
     var vfs_file: zml.io.VFS.File = .init(threaded.io());
 
+    var http_client: std.http.Client = .{
+        .allocator = allocator,
+        .io = threaded.io(),
+        .connection_pool = .{
+            .free_size = threaded.async_limit.toInt() orelse 16,
+        },
+    };
+
+    try http_client.initDefaultProxies(allocator);
+    defer http_client.deinit();
+
+    var vfs_http: zml.io.VFS.HTTP = try .init(allocator, threaded.io(), &http_client, .{});
+    defer vfs_http.deinit();
+
     var vfs: zml.io.VFS = .init(allocator, threaded.io());
     defer vfs.deinit();
 
     try vfs.register("file", vfs_file.io());
+    try vfs.register("http", vfs_http.io());
+    try vfs.register("https", vfs_http.io());
 
     const io = vfs.io();
 
@@ -205,16 +221,14 @@ pub fn main() !void {
         log.err("Missing --hf-model-path", .{});
         return;
     };
-    const repo = try vfs.openAbsoluteDir(io, hf_model_path, .{});
-    defer repo.close(io);
 
-    const model_tokenizer_path = try std.fs.path.join(allocator, &.{ hf_model_path, "tokenizer.json" });
-    defer allocator.free(model_tokenizer_path);
+    var repo = try zml.safetensors.resolveModelRepo(allocator, io, hf_model_path);
+    defer repo.deinit(allocator, io);
 
     const config = blk: {
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
-        const config_json_file = try repo.openFile(io, "config.json", .{});
+        const config_json_file = try repo.dir.openFile(io, "config.json", .{});
         defer config_json_file.close(io);
         var config_json_buffer: [256]u8 = undefined;
         var config_reader = config_json_file.reader(io, &config_json_buffer);
@@ -230,12 +244,12 @@ pub fn main() !void {
         const create_opts_json = cli.args.@"create-options" orelse "{}";
         const create_opts = try std.json.parseFromSlice(zml.platform.CreateOptions, allocator, create_opts_json, .{});
         defer create_opts.deinit();
-        const platform: zml.Platform = try .auto(threaded.io(), create_opts.value);
+        const platform: zml.Platform = try .auto(io, create_opts.value);
         break :b platform;
     };
     defer platform.deinit();
 
-    var registry = try zml.safetensors.parseFromPath(allocator, io, &vfs, hf_model_path);
+    var registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
     defer registry.deinit();
 
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
@@ -317,7 +331,7 @@ pub fn main() !void {
         var timer = try stdx.time.Timer.start();
         defer log.info("Loaded tokenizer [{D}]", .{timer.read()});
         const bytes = b: {
-            const file = try repo.openFile(io, "tokenizer.json", .{});
+            const file = try repo.dir.openFile(io, "tokenizer.json", .{});
             defer file.close(io);
 
             var reader = file.reader(io, &.{});
