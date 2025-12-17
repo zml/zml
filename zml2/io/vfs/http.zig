@@ -5,6 +5,12 @@ const log = std.log.scoped(.@"zml/io/vfs/http");
 pub const HTTP = struct {
     const HandleId = i32;
 
+    pub const InitHandleError = error{
+        PathTooLong,
+        AllocationFailed,
+        PathUnresolvable,
+    } || std.mem.Allocator.Error;
+
     pub const FileHandle = struct {
         allocator: std.mem.Allocator,
 
@@ -21,7 +27,7 @@ pub const HTTP = struct {
         min_latency_ns: u64 = std.math.maxInt(u64),
         max_latency_ns: u64 = 0,
 
-        pub fn init(allocator: std.mem.Allocator, parent_path: []const u8, sub_path: []const u8) std.mem.Allocator.Error!*FileHandle {
+        pub fn init(allocator: std.mem.Allocator, parent_path: []const u8, sub_path: []const u8) InitHandleError!*FileHandle {
             const handle = try allocator.create(FileHandle);
             errdefer allocator.destroy(handle);
 
@@ -35,8 +41,6 @@ pub const HTTP = struct {
                 .response = null,
                 .body_reader = null,
             };
-
-            log.info("Created HTTP FileHandle for URL: {s}", .{handle.url});
 
             return handle;
         }
@@ -69,19 +73,21 @@ pub const HTTP = struct {
             return (self.total_latency_ns / self.total_requests) / std.time.ns_per_ms;
         }
 
-        fn resolveUri(allocator: std.mem.Allocator, parent_path: []const u8, sub_path: []const u8) std.mem.Allocator.Error![]const u8 {
+        fn resolveUri(allocator: std.mem.Allocator, parent_path: []const u8, sub_path: []const u8) InitHandleError![]const u8 {
             if (std.mem.startsWith(u8, sub_path, "http://") or
                 std.mem.startsWith(u8, sub_path, "https://"))
             {
                 return try allocator.dupe(u8, sub_path);
             }
 
-            const base_uri = std.Uri.parse(parent_path) catch unreachable;
+            const base_uri = std.Uri.parse(parent_path) catch return InitHandleError.PathTooLong;
             var aux_buf: [std.fs.max_path_bytes]u8 = undefined;
-            // if (sub_path.len > aux_buf.len) return error.InvalidPath;
+
+            if (sub_path.len > aux_buf.len) return InitHandleError.PathTooLong;
+
             @memcpy(aux_buf[0..sub_path.len], sub_path);
             var aux_slice: []u8 = aux_buf[0..];
-            const resolved = std.Uri.resolveInPlace(base_uri, sub_path.len, &aux_slice) catch unreachable;
+            const resolved = std.Uri.resolveInPlace(base_uri, sub_path.len, &aux_slice) catch return InitHandleError.PathUnresolvable;
             return std.fmt.allocPrint(allocator, "{f}", .{resolved.fmt(.{
                 .scheme = true,
                 .authority = true,
@@ -96,7 +102,7 @@ pub const HTTP = struct {
         allocator: std.mem.Allocator,
         url: []const u8,
 
-        pub fn init(allocator: std.mem.Allocator, parent_path: []const u8, sub_path: []const u8) std.mem.Allocator.Error!*DirHandle {
+        pub fn init(allocator: std.mem.Allocator, parent_path: []const u8, sub_path: []const u8) InitHandleError!*DirHandle {
             const self = try allocator.create(DirHandle);
             errdefer allocator.destroy(self);
 
@@ -105,14 +111,11 @@ pub const HTTP = struct {
 
             // Ensure directory URLs have a trailing slash.
             // According to RFC 3986, if the parent path lacks a trailing slash, it is treated as a file and the last segment is replaced.
-
             if (url.len == 0 or url[url.len - 1] != '/') {
                 const with_slash = try std.fmt.allocPrint(allocator, "{s}/", .{url});
                 allocator.free(url);
                 url = with_slash;
             }
-
-            log.info("Created HTTP DirHandle for URL: {s}", .{url});
 
             self.* = .{
                 .allocator = allocator,

@@ -6,7 +6,7 @@ const zml = @import("zml");
 const log = std.log.scoped(.mnist);
 
 pub const std_options: std.Options = .{
-    .log_level = .debug,
+    .log_level = .info,
 };
 
 /// Model definition

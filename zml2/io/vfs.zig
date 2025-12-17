@@ -231,7 +231,10 @@ pub const VFS = struct {
     fn fsDir(self: *VFS, dir: std.Io.Dir, sub_path: ?[]const u8) DirEntryError!FsDir {
         if (std.meta.eql(dir, std.Io.Dir.cwd())) {
             std.debug.assert(sub_path != null);
-            const backend = self.backendFromAbsolutePath(sub_path.?) catch self.base_io;
+            const backend = self.backendFromAbsolutePath(sub_path.?) catch blk: {
+                log.warn("Unable to resolve backend for relative path {s} in cwd, falling back to base_io", .{sub_path.?});
+                break :blk self.base_io;
+            };
             return .{ .backend = backend, .handle = dir.handle };
         }
 
