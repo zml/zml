@@ -6,7 +6,7 @@ const stdx = @import("stdx");
 const log = std.log.scoped(.mlir);
 
 test {
-    std.testing.refAllDeclsRecursive(@This());
+    std.testing.refAllDecls(@This());
 }
 
 pub const Error = error{

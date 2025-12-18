@@ -193,7 +193,7 @@ pub const Exe = struct {
                     buffer.* = Buffer.fromPjrtBuffers(context_.self.platform, context_.self.expected_shapes[context_.current_index], shards.constSlice());
                     context_.current_index += 1;
                 }
-            }.cb, &context, v);
+            }.cb, &context, &v);
         }
     };
 

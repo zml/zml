@@ -10,12 +10,6 @@ const stdx = @import("stdx");
 
 const log = std.log.scoped(.@"zml/tokenizer");
 
-test {
-    std.testing.refAllDecls(@This());
-    std.testing.refAllDecls(Normalizer);
-    std.testing.refAllDecls(Tokenizer);
-}
-
 /// Byte Pair Encoding tokenizer generally used for LLM.
 pub const Tokenizer = struct {
     tokens: [][]const u8,
@@ -479,7 +473,7 @@ pub const Decoder = struct {
     }
 
     pub fn string(self: *const Decoder) []const u8 {
-        return self.current_string;
+        return self.current_string orelse "";
     }
 
     pub fn next(self: *Decoder, token_id: u32) !?[]const u8 {

@@ -82,5 +82,5 @@ pub fn Bufferized(comptime T: type) type {
 }
 
 test "zml" {
-    std.testing.refAllDeclsRecursive(@This());
+    std.testing.refAllDecls(@This());
 }

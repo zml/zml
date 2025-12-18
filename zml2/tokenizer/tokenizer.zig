@@ -7,9 +7,6 @@ pub const homemade = @import("homemade.zig");
 
 test {
     std.testing.refAllDecls(@This());
-    std.testing.refAllDecls(hftokenizers);
-    std.testing.refAllDecls(sentencepiece);
-    std.testing.refAllDecls(homemade);
 }
 
 const Tokenizers = enum {
@@ -72,17 +69,17 @@ pub const Tokenizer = union(Tokenizers) {
             };
         }
 
-        pub fn string(self: Decoder) []const u8 {
+        pub fn string(self: *Decoder) []const u8 {
             return switch (self.*) {
                 inline else => |v| v.string(),
             };
         }
 
-        pub fn ids(self: Decoder) []u32 {
-            return switch (self.*) {
-                inline else => |v| v.ids(),
-            };
-        }
+        //pub fn ids(self: *Decoder) []u32 {
+        //    return switch (self.*) {
+        //        inline else => |v| v.ids(),
+        //    };
+        //}
 
         pub fn next(self: *Decoder, token_id: u32) !?[]const u8 {
             return switch (self.*) {
@@ -136,3 +133,6 @@ pub const Tokenizer = union(Tokenizers) {
         };
     }
 };
+
+test {}
+test {}

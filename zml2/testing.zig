@@ -118,64 +118,6 @@ fn BufferizedWithArgs(comptime T: type) type {
     return zml.meta.MapType(zml.Tensor, zml.Buffer).map(T);
 }
 
-/// Compile a function and immediatly call it with the given buffers.
-/// The compiled module is discarded after the call.
-/// Useful during testing when a module is typically called only once.
-///
-/// Note: `func` needs explicit types on all parameters.
-/// To test a function with `anytype` (typically for tagged API), you need to create a specialized version of it with specific types.
-pub fn compileAndCall(
-    io: std.Io,
-    platform: zml.Platform,
-    func: anytype,
-    buffer_and_args: BufferizedWithArgs(stdx.meta.FnArgs(func)),
-) !zml.Bufferized(stdx.meta.FnResult(func)) {
-    // This simplify test API and also ensure this fn isn't used outside of tests.
-    const allocator = std.testing.allocator;
-
-    var shape_list: std.array_list.Managed(zml.Shape) = .init(allocator);
-    defer shape_list.deinit();
-    const LocalContext1 = struct {
-        shape_list: *std.array_list.Managed(zml.Shape),
-    };
-    var context1: LocalContext1 = .{ .shape_list = &shape_list };
-    try zml.meta.visit(struct {
-        fn cb(context_: *LocalContext1, buffer: *const zml.Buffer) !void {
-            try context_.shape_list.append(buffer.shape());
-        }
-    }.cb, &context1, &buffer_and_args);
-
-    var func_args: stdx.meta.FnArgs(func) = undefined;
-    const LocalContext2 = struct {
-        shape_list: *std.array_list.Managed(zml.Shape),
-        index: usize = 0,
-    };
-    var context2: LocalContext2 = .{ .shape_list = &shape_list };
-    try zml.meta.visit(struct {
-        fn cb(context_: *LocalContext2, tensor: *zml.Tensor) !void {
-            tensor.* = .fromShape(context_.shape_list.items[context_.index]);
-            context_.index += 1;
-        }
-    }.cb, &context2, &func_args);
-
-    var exe = try zml.module.compile(allocator, io, func, func_args, platform);
-    defer exe.deinit();
-
-    var args = try exe.args(allocator);
-    defer args.deinit(allocator);
-
-    args.set(buffer_and_args);
-
-    var results = try exe.results(allocator);
-    defer results.deinit(allocator);
-
-    exe.call(args, &results, io);
-
-    var result: zml.Bufferized(stdx.meta.FnResult(func)) = undefined;
-    results.fill(&result);
-    return result;
-}
-
 /// Automatically calls the executable with the given arguments, taking care of arguments and results allocation.
 /// This helper can be used in tests to make the code a bit less verbose.
 /// It doesn't handle pointers in inputs/outputs structs.
@@ -190,7 +132,7 @@ pub fn autoCall(allocator: std.mem.Allocator, io: std.Io, exe: *const zml.exe.Ex
     exe.call(args, &results, io);
 
     var output: zml.Bufferized(stdx.meta.FnResult(func)) = undefined;
-    results.fill(&output);
+    results.fill(.{&output});
 
     return output;
 }

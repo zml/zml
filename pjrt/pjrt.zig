@@ -280,12 +280,12 @@ pub const ShapeSpec = extern struct {
         };
     }
 
-    pub fn dims(self: ShapeSpec) []usize {
+    pub fn dims(self: ShapeSpec) []const i64 {
         return self.inner.dims[0..self.inner.num_dims];
     }
 
     pub fn bufferType(self: ShapeSpec) BufferType {
-        return @enumFromInt(self.inner.buffer_type);
+        return @enumFromInt(self.inner.element_type);
     }
 };
 
