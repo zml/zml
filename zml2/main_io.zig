@@ -14,12 +14,12 @@ pub const std_options: std.Options = .{
 };
 
 pub fn main() !void {
-    // var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
-    // defer std.debug.assert(debug_allocator.deinit() == .ok);
+    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    defer std.debug.assert(debug_allocator.deinit() == .ok);
 
-    // const allocator = debug_allocator.allocator();
+    const allocator = debug_allocator.allocator();
 
-    const allocator = std.heap.smp_allocator;
+    // const allocator = std.heap.smp_allocator;
 
     var threaded: std.Io.Threaded = .init(allocator);
     defer threaded.deinit();
@@ -52,6 +52,7 @@ pub fn main() !void {
             .direct_io_alignment = .fromByteUnits(4 * 1024),
         },
     );
+    defer vfs_file.deinit();
 
     var vfs_http: zml.io.VFS.HTTP = try .init(allocator, threaded.io(), &http_client, .{});
     defer vfs_http.deinit();

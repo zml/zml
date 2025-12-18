@@ -90,6 +90,10 @@ pub const File = struct {
         };
     }
 
+    pub fn deinit(self: *File) void {
+        self.direct_io_map.deinit(self.allocator);
+    }
+
     pub fn io(self: *File) std.Io {
         return .{
             .userdata = self,
