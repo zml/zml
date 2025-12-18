@@ -19,7 +19,7 @@ pub fn main() !void {
 
     const allocator = debug_allocator.allocator();
 
-    // const allocator = std.heap.c_allocator;
+    // const allocator = std.heap.smp_allocator;
 
     var threaded: std.Io.Threaded = .init(allocator);
     defer threaded.deinit();
@@ -44,7 +44,15 @@ pub fn main() !void {
     try http_client.initDefaultProxies(allocator);
     defer http_client.deinit();
 
-    var vfs_file: zml.io.VFS.File = .init(threaded.io());
+    var vfs_file: zml.io.VFS.File = .init(
+        allocator,
+        threaded.io(),
+        .{
+            .direct_io = std.process.hasEnvVarConstant("DIRECT"),
+            .direct_io_alignment = .fromByteUnits(4 * 1024),
+        },
+    );
+    defer vfs_file.deinit();
 
     var vfs_http: zml.io.VFS.HTTP = try .init(allocator, threaded.io(), &http_client, .{});
     defer vfs_http.deinit();
@@ -88,21 +96,70 @@ pub fn main() !void {
         break :blk default_uri;
     };
 
+    // {
+    //     // const initial_path = "/Users/hugo/Developer/Llama-3.1-8B-Instruct/Llama-3.1-8B-Instruct";
+    //     // const initial_path = "file:///Users/hugo/Developer/Llama-3.1-8B-Instruct/Llama-3.1-8B-Instruct";
+    //     const initial_path = "https://storage.googleapis.com/zig-vfs/Llama-3.1-8B-Instruct/Llama-3.1-8B-Instruct";
+
+    //     const llama_dir = try std.Io.Dir.openDir(.cwd(), io, initial_path, .{});
+    //     defer llama_dir.close(io);
+
+    //     const filepath = "../model.safetensors.index.json";
+
+    //     const index_file = try llama_dir.openFile(io, filepath, .{});
+    //     defer index_file.close(io);
+
+    //     const stat = try index_file.stat(io);
+    //     log.info("Opened local index file with size: {d} bytes", .{stat.size});
+    // }
+
     {
-        // const initial_path = "/Users/hugo/Developer/Llama-3.1-8B-Instruct/Llama-3.1-8B-Instruct";
-        // const initial_path = "file:///Users/hugo/Developer/Llama-3.1-8B-Instruct/Llama-3.1-8B-Instruct";
-        const initial_path = "https://storage.googleapis.com/zig-vfs/Llama-3.1-8B-Instruct/Llama-3.1-8B-Instruct";
+        const repo = try std.Io.Dir.openDir(.cwd(), io, "file:///home/hugo/Llama-3.1-8B-Instruct/", .{});
+        defer repo.close(io);
 
-        const llama_dir = try std.Io.Dir.openDir(.cwd(), io, initial_path, .{});
-        defer llama_dir.close(io);
+        const file = try repo.openFile(io, "model-00001-of-00004.safetensors", .{});
+        defer file.close(io);
 
-        const filepath = "../model.safetensors.index.json";
+        const buf_size = 256 * 1024 * 1024;
+        const buf = try allocator.alignedAlloc(u8, .fromByteUnits(4 * 1024), buf_size);
+        defer allocator.free(buf);
 
-        const index_file = try llama_dir.openFile(io, filepath, .{});
-        defer index_file.close(io);
+        var sha256: std.crypto.hash.sha2.Sha256 = .init(.{});
+        const compute_sha = false;
 
-        const stat = try index_file.stat(io);
-        log.info("Opened local index file with size: {d} bytes", .{stat.size});
+        var total_read: usize = 1 * 1024;
+        var bufs = [_][]u8{buf};
+
+        var timer: std.time.Timer = try .start();
+        defer {
+            const elapsed = timer.read();
+            log.info("File read in {d} ms", .{elapsed / std.time.ns_per_ms});
+        }
+
+        while (true) {
+            const n = try io.vtable.fileReadStreaming(io.userdata, file, &bufs);
+            if (n == 0) break;
+            if (compute_sha) sha256.update(buf[0..n]);
+            total_read += n;
+        }
+
+        const elapsed = timer.read();
+        const read_mb = @as(f64, @floatFromInt(total_read)) / (1024.0 * 1024.0);
+        const read_time_s = @as(f64, @floatFromInt(elapsed)) / @as(f64, std.time.ns_per_s);
+        const throughput_mb_s = if (read_time_s > 0) read_mb / read_time_s else 0;
+        const throughput_gbps = if (read_time_s > 0) (read_mb * 8.0) / 1024.0 / read_time_s else 0;
+        log.info("Read {d:.2} MB in {d:.2} s = {d:.2} MB/s | {d:.2} Gbps", .{
+            read_mb,
+            read_time_s,
+            throughput_mb_s,
+            throughput_gbps,
+        });
+
+        if (compute_sha) {
+            var hash: [32]u8 = undefined;
+            sha256.final(&hash);
+            log.info("SHA256: {x}", .{hash});
+        }
     }
 
     {
@@ -122,40 +179,6 @@ pub fn main() !void {
         // }
 
         log.info("Parsed {d} tensors", .{registry.tensors.count()});
-
-        // {
-        //     const tensor_name = "model.layers.31.mlp.down_proj.weight";
-        //     // const tensor_name = "model.layers.31.input_layernorm.weight";
-        //     // const tensor_name = "lm_head.weight";
-        //     const tensor = registry.tensors.get(tensor_name) orelse return error.TensorNotFound;
-        //     log.info("Reading {f}...", .{tensor});
-
-        //     const tensor_reader_buf = try allocator.alloc(u8, tensor.byteSize());
-        //     defer allocator.free(tensor_reader_buf);
-
-        //     const writer_buffer = try allocator.alloc(u8, tensor.byteSize());
-        //     defer allocator.free(writer_buffer);
-
-        //     var tensor_reader = try registry.reader(io, &vfs, tensor_name, tensor_reader_buf);
-        //     defer tensor_reader.deinit();
-
-        //     var writer: std.Io.Writer = .fixed(writer_buffer);
-
-        //     var timer_read: std.time.Timer = try .start();
-
-        //     const read = try tensor_reader.interface.streamRemaining(&writer);
-
-        //     const elapsed = timer_read.read();
-        //     const read_mb = @as(f64, @floatFromInt(read)) / (1024.0 * 1024.0);
-        //     const read_time_s = @as(f64, @floatFromInt(elapsed)) / @as(f64, std.time.ns_per_s);
-        //     const throughput_gbps = (read_mb * 8.0) / 1024.0 / read_time_s;
-
-        //     log.info("Read completed in {d} ms | {d:.2} MB/s | {d:.2} Gbps", .{
-        //         elapsed / std.time.ns_per_ms,
-        //         read_mb / read_time_s,
-        //         throughput_gbps,
-        //     });
-        // }
 
         {
             var err: ?anyerror = null;
