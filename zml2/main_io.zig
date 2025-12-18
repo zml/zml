@@ -45,9 +45,11 @@ pub fn main() !void {
     defer http_client.deinit();
 
     var vfs_file: zml.io.VFS.File = .init(
+        allocator,
         threaded.io(),
         .{
             .direct_io = std.process.hasEnvVarConstant("DIRECT"),
+            .direct_io_alignment = .fromByteUnits(4 * 1024),
         },
     );
 
@@ -118,12 +120,6 @@ pub fn main() !void {
         const file = try repo.openFile(io, "model-00001-of-00004.safetensors", .{});
         defer file.close(io);
 
-        if (std.process.hasEnvVarConstant("DIRECT")) {
-            log.info("Switching to Direct I/O", .{});
-            const r = try vfs.switchToDirectIO(file);
-            log.info("Direct I/O : {}", .{r});
-        }
-
         const buf_size = 256 * 1024 * 1024;
         const buf = try allocator.alignedAlloc(u8, .fromByteUnits(4 * 1024), buf_size);
         defer allocator.free(buf);
@@ -131,7 +127,7 @@ pub fn main() !void {
         var sha256: std.crypto.hash.sha2.Sha256 = .init(.{});
         const compute_sha = false;
 
-        var total_read: usize = 0;
+        var total_read: usize = 2 * 1024;
         var bufs = [_][]u8{buf};
 
         var timer: std.time.Timer = try .start();
