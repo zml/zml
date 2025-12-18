@@ -94,7 +94,6 @@ pub fn main() !void {
         log.info("Using default repo URI: {s}", .{default_uri});
         break :blk default_uri;
     };
-    _ = uri; // autofix
 
     // {
     //     // const initial_path = "/Users/hugo/Developer/Llama-3.1-8B-Instruct/Llama-3.1-8B-Instruct";
@@ -127,7 +126,7 @@ pub fn main() !void {
         var sha256: std.crypto.hash.sha2.Sha256 = .init(.{});
         const compute_sha = false;
 
-        var total_read: usize = 2 * 1024;
+        var total_read: usize = 1 * 1024;
         var bufs = [_][]u8{buf};
 
         var timer: std.time.Timer = try .start();
@@ -137,7 +136,7 @@ pub fn main() !void {
         }
 
         while (true) {
-            const n = try io.vtable.fileReadPositional(io.userdata, file, &bufs, total_read);
+            const n = try io.vtable.fileReadStreaming(io.userdata, file, &bufs);
             if (n == 0) break;
             if (compute_sha) sha256.update(buf[0..n]);
             total_read += n;
@@ -162,92 +161,58 @@ pub fn main() !void {
         }
     }
 
-    // {
-    //     var timer: std.time.Timer = try .start();
-    //     defer {
-    //         const elapsed = timer.read();
-    //         log.info("Completed in {d} ms", .{elapsed / std.time.ns_per_ms});
-    //     }
+    {
+        var timer: std.time.Timer = try .start();
+        defer {
+            const elapsed = timer.read();
+            log.info("Completed in {d} ms", .{elapsed / std.time.ns_per_ms});
+        }
 
-    //     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, uri);
-    //     defer registry.deinit();
+        var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, uri);
+        defer registry.deinit();
 
-    //     // var it = registry.iterator();
-    //     // while (it.next()) |entry| {
-    //     //     const tensor = entry.value_ptr.*;
-    //     //     log.info("{f}", .{tensor});
-    //     // }
+        // var it = registry.iterator();
+        // while (it.next()) |entry| {
+        //     const tensor = entry.value_ptr.*;
+        //     log.info("{f}", .{tensor});
+        // }
 
-    //     log.info("Parsed {d} tensors", .{registry.tensors.count()});
+        log.info("Parsed {d} tensors", .{registry.tensors.count()});
 
-    //     // {
-    //     //     const tensor_name = "model.layers.31.mlp.down_proj.weight";
-    //     //     // const tensor_name = "model.layers.31.input_layernorm.weight";
-    //     //     // const tensor_name = "lm_head.weight";
-    //     //     const tensor = registry.tensors.get(tensor_name) orelse return error.TensorNotFound;
-    //     //     log.info("Reading {f}...", .{tensor});
+        {
+            var err: ?anyerror = null;
 
-    //     //     const tensor_reader_buf = try allocator.alloc(u8, tensor.byteSize());
-    //     //     defer allocator.free(tensor_reader_buf);
+            var pool: MemoryPool = try .init(allocator, threaded.async_limit.toInt() orelse 16, 256 * 1024 * 1024);
+            defer pool.deinit(io);
 
-    //     //     const writer_buffer = try allocator.alloc(u8, tensor.byteSize());
-    //     //     defer allocator.free(writer_buffer);
+            var group: std.Io.Group = .init;
+            defer group.cancel(io);
 
-    //     //     var tensor_reader = try registry.reader(io, &vfs, tensor_name, tensor_reader_buf);
-    //     //     defer tensor_reader.deinit();
+            var timer_async_read: std.time.Timer = try .start();
+            var it = registry.iterator();
+            while (it.next()) |entry| {
+                const tensor_name = entry.key_ptr.*;
+                group.async(io, readTensor, .{ io, &pool, &registry, tensor_name, &err });
+            }
 
-    //     //     var writer: std.Io.Writer = .fixed(writer_buffer);
+            group.wait(io);
 
-    //     //     var timer_read: std.time.Timer = try .start();
+            if (err) |e| {
+                log.err("Error reading tensor: {any}", .{e});
+                return e;
+            }
 
-    //     //     const read = try tensor_reader.interface.streamRemaining(&writer);
-
-    //     //     const elapsed = timer_read.read();
-    //     //     const read_mb = @as(f64, @floatFromInt(read)) / (1024.0 * 1024.0);
-    //     //     const read_time_s = @as(f64, @floatFromInt(elapsed)) / @as(f64, std.time.ns_per_s);
-    //     //     const throughput_gbps = (read_mb * 8.0) / 1024.0 / read_time_s;
-
-    //     //     log.info("Read completed in {d} ms | {d:.2} MB/s | {d:.2} Gbps", .{
-    //     //         elapsed / std.time.ns_per_ms,
-    //     //         read_mb / read_time_s,
-    //     //         throughput_gbps,
-    //     //     });
-    //     // }
-
-    //     {
-    //         var err: ?anyerror = null;
-
-    //         var pool: MemoryPool = try .init(allocator, threaded.async_limit.toInt() orelse 16, 256 * 1024 * 1024);
-    //         defer pool.deinit(io);
-
-    //         var group: std.Io.Group = .init;
-    //         defer group.cancel(io);
-
-    //         var timer_async_read: std.time.Timer = try .start();
-    //         var it = registry.iterator();
-    //         while (it.next()) |entry| {
-    //             const tensor_name = entry.key_ptr.*;
-    //             group.async(io, readTensor, .{ io, &vfs, &pool, &registry, tensor_name, &err });
-    //         }
-
-    //         group.wait(io);
-
-    //         if (err) |e| {
-    //             log.err("Error reading tensor: {any}", .{e});
-    //             return e;
-    //         }
-
-    //         const elapsed = timer_async_read.read();
-    //         const read_mb = @as(f64, @floatFromInt(registry.totalBytes())) / (1024.0 * 1024.0);
-    //         const read_time_s = @as(f64, @floatFromInt(elapsed)) / @as(f64, std.time.ns_per_s);
-    //         log.info("Throughput: {d:.2} MB in {d:.2} s = {d:.2} MB/s | {d:.2} Gbps", .{
-    //             read_mb,
-    //             read_time_s,
-    //             read_mb / read_time_s,
-    //             (read_mb * 8.0) / 1024.0 / read_time_s,
-    //         });
-    //     }
-    // }
+            const elapsed = timer_async_read.read();
+            const read_mb = @as(f64, @floatFromInt(registry.totalBytes())) / (1024.0 * 1024.0);
+            const read_time_s = @as(f64, @floatFromInt(elapsed)) / @as(f64, std.time.ns_per_s);
+            log.info("Throughput: {d:.2} MB in {d:.2} s = {d:.2} MB/s | {d:.2} Gbps", .{
+                read_mb,
+                read_time_s,
+                read_mb / read_time_s,
+                (read_mb * 8.0) / 1024.0 / read_time_s,
+            });
+        }
+    }
 
     // {
     //     const root_dir = try vfs.openAbsoluteDir(io, "https://storage.googleapis.com", .{});
