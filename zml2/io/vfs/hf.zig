@@ -1030,15 +1030,21 @@ pub const HF = struct {
             return std.Io.File.Reader.Error.Unexpected;
         };
 
-        self.http_headers[1] = .{ .name = "Range", .value = range_header };
+        var local_headers: [2]std.http.Header = undefined;
+        if (self.config.auth == .hf_token) {
+            local_headers[0] = self.http_headers[0];
+            local_headers[1] = .{ .name = "Range", .value = range_header };
+        } else {
+            local_headers[0] = .{ .name = "Range", .value = range_header };
+        }
 
         var extra_headers: []std.http.Header = &.{};
         switch (self.config.auth) {
             .hf_token => |_| {
-                extra_headers = self.http_headers[0..2];
+                extra_headers = if (self.config.auth == .hf_token) local_headers[0..2] else local_headers[1..2];
             },
             else => {
-                extra_headers = self.http_headers[1..2];
+                extra_headers = local_headers[0..1];
             },
         }
 
@@ -1080,6 +1086,19 @@ pub const HF = struct {
 
         if (response.head.status != .partial_content and response.head.status != .ok) {
             log.err("Unexpected HTTP status ({s}) for GET {s}", .{ @tagName(response.head.status), api_url });
+            log.err("Requested bytes {d}-{d} for handle={d} from {s}", .{ start, end, file.handle, api_url });
+            log.err("Request headers:", .{});
+            // Log known request headers
+            log.err("Request header  host: {any}", .{request.headers.host});
+            log.err("Request header  authorization: {any}", .{request.headers.authorization});
+            log.err("Request header  user_agent: {any}", .{request.headers.user_agent});
+            log.err("Request header  connection: {any}", .{request.headers.connection});
+            log.err("Request header  accept_encoding: {any}", .{request.headers.accept_encoding});
+            log.err("Request header  content_type: {any}", .{request.headers.content_type});
+            log.err("Extra headers:", .{});
+            for (extra_headers) |hdr| {
+                log.err(" Request header {s}: {s}", .{ hdr.name, hdr.value });
+            }
             var it = response.head.iterateHeaders();
             while (it.next()) |hdr| {
                 log.err("Header: {s}: {s}", .{ hdr.name, hdr.value });
