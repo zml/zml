@@ -43,6 +43,15 @@ pub fn main() !void {
     var threaded: std.Io.Threaded = .init(allocator);
     defer threaded.deinit();
 
+    if (try std.process.hasEnvVar(allocator, "ASYNC_LIMIT")) {
+        const limit = try std.process.getEnvVarOwned(allocator, "ASYNC_LIMIT");
+        defer allocator.free(limit);
+
+        threaded.async_limit = .limited(try std.fmt.parseInt(usize, limit, 10));
+    }
+
+    log.debug("Running with threaded async limit: {?d}", .{threaded.async_limit.toInt()});
+
     var vfs_file: zml.io.VFS.File = .init(allocator, threaded.io(), .{});
 
     var http_client: std.http.Client = .{
