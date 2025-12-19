@@ -248,7 +248,6 @@ pub const HTTP = struct {
             log.err("Failed to create FileHandle in openFile with dir={any} sub_path={s}", .{ dir.handle, sub_path });
             return std.Io.File.OpenError.SystemResources;
         };
-        errdefer handle.deinit();
 
         const handle_id = self.registerFileHandle(handle) catch {
             log.err("Failed to register FileHandle in openFile with dir={any} sub_path={s}", .{ dir.handle, sub_path });
@@ -287,7 +286,6 @@ pub const HTTP = struct {
             log.err("Failed to create DirHandle in dirOpenFile", .{});
             return std.Io.Dir.OpenError.SystemResources;
         };
-        errdefer handle.deinit();
 
         const handle_id = self.registerDirHandle(handle) catch return std.Io.Dir.OpenError.SystemResources;
 
