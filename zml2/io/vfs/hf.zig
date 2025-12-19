@@ -831,17 +831,17 @@ pub const HF = struct {
         sub_path: []const u8,
     ) std.Io.File.OpenError!std.Io.File {
         const dir_handle = self.dirHandle(dir) orelse {
-            log.err("Directory handle not found for dirOpenFile with dir={any} sub_path={s}", .{ dir.handle, sub_path });
+            log.warn("Directory handle not found for dirOpenFile with dir={any} sub_path={s}", .{ dir.handle, sub_path });
             return std.Io.File.OpenError.FileNotFound;
         };
 
         const handle = self.initFileHandle(dir_handle, sub_path) catch {
-            log.err("Failed to init FileHandle in openFile with dir={any} sub_path={s}", .{ dir.handle, sub_path });
+            log.warn("Failed to init FileHandle in openFile with dir={any} sub_path={s}", .{ dir.handle, sub_path });
             return std.Io.File.OpenError.SystemResources;
         };
 
         const handle_id = self.registerFileHandle(handle) catch {
-            log.err("Failed to register FileHandle in openFile with dir={any} sub_path={s}", .{ dir.handle, sub_path });
+            log.warn("Failed to register FileHandle in openFile with dir={any} sub_path={s}", .{ dir.handle, sub_path });
             return std.Io.File.OpenError.SystemResources;
         };
 
@@ -854,17 +854,17 @@ pub const HF = struct {
         sub_path: []const u8,
     ) std.Io.Dir.OpenError!std.Io.Dir {
         const dir_handle = self.dirHandle(dir) orelse {
-            log.err("Directory handle not found for dirOpenFile", .{});
+            log.warn("Directory handle not found for dirOpenFile", .{});
             return std.Io.Dir.OpenError.FileNotFound;
         };
 
         const handle = self.initDirHandle(dir_handle.uri, sub_path) catch {
-            log.err("Failed to init DirHandle in openDir with dir={any} sub_path={s}", .{ dir.handle, sub_path });
+            log.warn("Failed to init DirHandle in openDir with dir={any} sub_path={s}", .{ dir.handle, sub_path });
             return std.Io.Dir.OpenError.SystemResources;
         };
 
         const handle_id = self.registerDirHandle(handle) catch {
-            log.err("Failed to register DirHandle in openDir with dir={any} sub_path={s}", .{ dir.handle, sub_path });
+            log.warn("Failed to register DirHandle in openDir with dir={any} sub_path={s}", .{ dir.handle, sub_path });
             return std.Io.Dir.OpenError.SystemResources;
         };
 
@@ -1030,9 +1030,21 @@ pub const HF = struct {
             return std.Io.File.Reader.Error.Unexpected;
         };
 
+        self.http_headers[1] = .{ .name = "Range", .value = range_header };
+
+        var extra_headers: []std.http.Header = &.{};
+        switch (self.config.auth) {
+            .hf_token => |_| {
+                extra_headers = self.http_headers[0..2];
+            },
+            else => {
+                extra_headers = self.http_headers[1..2];
+            },
+        }
+
         request.* = self.client.request(.GET, api_uri, .{
             .headers = .{ .accept_encoding = .{ .override = "identity" } },
-            .extra_headers = &.{.{ .name = "Range", .value = range_header }},
+            .extra_headers = extra_headers,
         }) catch |err| {
             log.err("Failed to create GET request: {}", .{err});
             return std.Io.File.Reader.Error.SystemResources;
@@ -1067,9 +1079,17 @@ pub const HF = struct {
         });
 
         if (response.head.status != .partial_content and response.head.status != .ok) {
-            request.deinit();
-            self.allocator.destroy(request);
-            return std.Io.File.Reader.Error.Unexpected;
+            log.err("Unexpected HTTP status ({s}) for GET {s}", .{ @tagName(response.head.status), api_url });
+            var it = response.head.iterateHeaders();
+            while (it.next()) |hdr| {
+                log.err("Header: {s}: {s}", .{ hdr.name, hdr.value });
+            }
+
+            if (response.head.status == .unauthorized) {
+                return std.Io.File.Reader.Error.AccessDenied;
+            } else {
+                return std.Io.File.Reader.Error.Unexpected;
+            }
         }
 
         handle.request = request;

@@ -240,7 +240,7 @@ pub fn main() !void {
 fn parseConfig(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !std.json.Parsed(LlamaLM.Config) {
     var timer = try stdx.time.Timer.start();
     log.info("Loading model config", .{});
-    defer log.info("Loaded model config [{D}]", .{timer.read()});
+
     const parsed_config = blk: {
         const config_json_file = try dir.openFile(io, "config.json", .{});
         defer config_json_file.close(io);
@@ -251,6 +251,8 @@ fn parseConfig(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !std.j
         break :blk try std.json.parseFromTokenSource(llama.LlamaLM.Config, allocator, &reader, .{ .ignore_unknown_fields = true });
     };
     errdefer parsed_config.deinit();
+
+    log.info("Loaded model config [{D}]", .{timer.read()});
 
     return parsed_config;
 }
