@@ -185,7 +185,7 @@ pub fn main() !void {
     var threaded: std.Io.Threaded = .init(allocator);
     defer threaded.deinit();
 
-    var vfs_file: zml.io.VFS.File = .init(threaded.io());
+    var vfs_file: zml.io.VFS.File = .init(allocator, threaded.io(), .{});
 
     var http_client: std.http.Client = .{
         .allocator = allocator,
