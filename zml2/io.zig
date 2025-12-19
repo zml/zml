@@ -16,21 +16,104 @@ const meta = @import("meta.zig");
 const Bufferized = @import("zml.zig").Bufferized;
 const pjrt = @import("pjrtx.zig");
 
+const MemoryPool = struct {
+    const Slots = std.ArrayList(Slot);
+    const Slot = struct {
+        buf: []u8,
+        capacity: usize,
+        in_use: bool,
+    };
+
+    allocator: std.mem.Allocator,
+    mutex: std.Io.Mutex,
+
+    slots: Slots,
+    default_capacity: usize,
+
+    pub fn init(allocator: std.mem.Allocator, initial_count: usize, slot_size: usize) !MemoryPool {
+        var slots: Slots = .{};
+
+        for (0..initial_count) |_| {
+            const buf = try allocator.alloc(u8, slot_size);
+            try slots.append(allocator, .{ .buf = buf, .capacity = slot_size, .in_use = false });
+        }
+
+        return .{
+            .allocator = allocator,
+            .slots = slots,
+            .default_capacity = slot_size,
+            .mutex = .init,
+        };
+    }
+
+    pub fn deinit(self: *MemoryPool, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+
+        for (self.slots.items) |slot| {
+            self.allocator.free(slot.buf);
+        }
+
+        self.mutex.unlock(io);
+        self.slots.deinit(self.allocator);
+    }
+
+    pub fn alloc(self: *MemoryPool, io: std.Io, n: usize) !struct { data: []u8, index: usize } {
+        self.mutex.lockUncancelable(io);
+
+        var idx: usize = 0;
+        while (idx < self.slots.items.len) : (idx += 1) {
+            if (!self.slots.items[idx].in_use and self.slots.items[idx].capacity >= n) {
+                self.slots.items[idx].in_use = true;
+                const data = self.slots.items[idx].buf[0..n];
+                self.mutex.unlock(io);
+                return .{ .data = data, .index = idx };
+            }
+        }
+
+        const capacity = if (n > self.default_capacity) n else self.default_capacity;
+
+        log.debug("MemoryPool: growing pool, allocating new slot of size {d} bytes", .{capacity});
+
+        const buf = try self.allocator.alloc(u8, capacity);
+        try self.slots.append(self.allocator, .{ .buf = buf, .capacity = capacity, .in_use = true });
+
+        const new_index = self.slots.items.len - 1;
+        const data = buf[0..n];
+
+        self.mutex.unlock(io);
+
+        return .{ .data = data, .index = new_index };
+    }
+
+    pub fn free(self: *MemoryPool, io: std.Io, index: usize) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+
+        if (index < self.slots.items.len) {
+            self.slots.items[index].in_use = false;
+        }
+    }
+};
+
 pub const TensorStore = struct {
     registry: *safetensors.TensorRegistry,
     id_map: std.AutoHashMapUnmanaged(usize, *safetensors.Tensor),
     allocator: std.mem.Allocator,
+    pool: MemoryPool,
 
     pub fn fromRegistry(allocator: std.mem.Allocator, registry: *safetensors.TensorRegistry) TensorStore {
         return .{
             .registry = registry,
             .id_map = .empty,
             .allocator = allocator,
+            // .pool = MemoryPool.init(allocator, 48, 256 * 1024 * 1024) catch unreachable,
+            .pool = MemoryPool.init(allocator, 1, 16 * 1024 * 1024) catch unreachable,
         };
     }
 
     pub fn deinit(self: *TensorStore) void {
         self.id_map.deinit(self.allocator);
+        // self.pool.deinit(std.io.getStdIo().io);
     }
 
     fn bindIdToKey(self: *TensorStore, key: []const u8, id: usize) !void {
@@ -227,11 +310,14 @@ pub fn loadBuffersFromId(allocator: std.mem.Allocator, io: std.Io, model: anytyp
 
     const tensor_descs = try collectTensorDesc(arena.allocator(), store, &model);
 
+    const buffer_reader_pool = try store.store.pool.alloc(io, 32 * 1024 * 1024);
+    defer store.store.pool.free(io, buffer_reader_pool.index);
+
+    const buffer_writer_pool = try store.store.pool.alloc(io, 32 * 1024 * 1024);
+    defer store.store.pool.free(io, buffer_writer_pool.index);
     // TODO(Corentin): Find a way to inject that
-    const buffer_reader = try allocator.alloc(u8, 16 * 1024 * 1024);
-    defer allocator.free(buffer_reader);
-    const buffer_writer = try allocator.alloc(u8, 16 * 1024 * 1024);
-    defer allocator.free(buffer_writer);
+    const buffer_reader = buffer_reader_pool.data;
+    const buffer_writer = buffer_writer_pool.data;
 
     const LocalContext = struct {
         tensor_descs: []safetensors.Tensor,

@@ -18,6 +18,12 @@ const log = std.log.scoped(.llama);
 
 pub const std_options: std.Options = .{
     .log_level = .info,
+    .log_scope_levels = &[_]std.log.ScopeLevel{
+        .{ .scope = .@"zml/safetensors", .level = .info },
+        .{ .scope = .@"zml/io/vfs/file", .level = .info },
+        .{ .scope = .@"zml/io/vfs/http", .level = .info },
+        .{ .scope = .@"zml/io/vfs/hf", .level = .info },
+    },
 };
 
 const params = clap.parseParamsComptime(
@@ -32,6 +38,7 @@ const params = clap.parseParamsComptime(
 );
 
 pub fn main() !void {
+    var global_timer = try std.time.Timer.start();
     log.info("LLama was compiled with {}", .{@import("builtin").mode});
 
     const allocator = std.heap.c_allocator;
@@ -149,11 +156,15 @@ pub fn main() !void {
     };
     defer platform.deinit();
 
+    var timer_registry = try stdx.time.Timer.start();
     var registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
     defer registry.deinit();
+    log.info("Loaded TensorRegistry [{D}]", .{timer_registry.read()});
 
+    var timer_store = try stdx.time.Timer.start();
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
     defer store.deinit();
+    log.info("Loaded TensorStore [{D}]", .{timer_store.read()});
 
     // Write metadata from the config file into the LlamaLm struct.
     const seq_len: u32 = cli.args.@"seq-len" orelse 256;
@@ -166,8 +177,10 @@ pub fn main() !void {
     };
 
     // Initialize the Llama struct and map the content of the .safetensors to the model tensors.
+    var ns_timer = try stdx.time.Timer.start();
     const llama_model: llama.LlamaLM = try .init(allocator, store.view(), config, llama_options);
     defer llama_model.deinit(allocator);
+    log.info("llama_model.init() took {D}", .{ns_timer.read()});
 
     // Specify shapes of input arguments
     const dtype = llama_model.model.embed_tokens.weight.dtype();
@@ -204,19 +217,42 @@ pub fn main() !void {
         LlamaLM.unloadBuffers(&v, allocator);
     }
 
-    const compiled_model_result = try compiled_model_result_future.await(io);
-    defer compiled_model_result.prefill_exe.deinit();
-    defer compiled_model_result.decode_exe.deinit();
+    log.info("Creating KvCache", .{});
+    var kv_cache_future = io.async(struct {
+        fn call(io_: std.Io, platform_: zml.Platform, kv_cache_template: llama.KvCache) !zml.Bufferized(llama.KvCache) {
+            return kv_cache_template.initBuffer(io_, platform_);
+        }
+    }.call, .{ io, platform, llama_parameters.kv_cache });
+    errdefer b: {
+        var v = kv_cache_future.cancel(io) catch break :b;
+        llama.KvCache.deinitBuffer(&v);
+    }
+
+    var tokenizer_future = io.async(struct {
+        fn call(allocator_: std.mem.Allocator, io_: std.Io, dir_: std.Io.Dir) !zml.tokenizer.Tokenizer {
+            return loadTokenizer(allocator_, io_, dir_);
+        }
+    }.call, .{ allocator, io, repo.dir });
+    errdefer b: {
+        var v = tokenizer_future.cancel(io) catch break :b;
+        v.deinit();
+    }
 
     var llama_buffers = try llama_buffers_future.await(io);
     defer LlamaLM.unloadBuffers(&llama_buffers, allocator);
 
-    log.info("Creating KvCache", .{});
-    var kv_cache_buffers = try llama_parameters.kv_cache.initBuffer(io, platform);
+    const compiled_model_result = try compiled_model_result_future.await(io);
+    defer compiled_model_result.prefill_exe.deinit();
+    defer compiled_model_result.decode_exe.deinit();
+
+    var kv_cache_buffers = try kv_cache_future.await(io);
     defer llama.KvCache.deinitBuffer(&kv_cache_buffers);
 
-    var tokenizer = try loadTokenizer(allocator, io, repo.dir);
+    var tokenizer = try tokenizer_future.await(io);
     defer tokenizer.deinit();
+
+    const duration = global_timer.read();
+    log.info("Setup completed in {d}ms", .{duration / std.time.ns_per_ms});
 
     const prompt = cli.args.prompt orelse "What is the capital of France?";
     log.info("✅\tPrompt: {s}", .{prompt});
