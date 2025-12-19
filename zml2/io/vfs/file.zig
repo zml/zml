@@ -11,14 +11,14 @@ pub const DirectIoError = error{
 } || std.posix.FcntlError;
 
 fn canUseDirectIO() bool {
-    if (comptime builtin.target.os.tag == .linux) {
+    if (builtin.target.os.tag == .linux) {
         return @hasField(std.posix.O, "DIRECT");
     }
     return false;
 }
 
 fn useDirectIO(file: std.Io.File) DirectIoError!bool {
-    if (canUseDirectIO()) {
+    if (comptime canUseDirectIO()) {
         const flags = try std.posix.fcntl(file.handle, std.posix.F.GETFL, 0);
         const direct_flag: c_int = @bitCast(std.posix.O{ .DIRECT = true });
         return (flags & direct_flag) != 0;
@@ -28,7 +28,7 @@ fn useDirectIO(file: std.Io.File) DirectIoError!bool {
 }
 
 fn switchToBufferedIO(file: std.fs.File) DirectIoError!void {
-    if (canUseDirectIO()) {
+    if (comptime canUseDirectIO()) {
         const flags = try std.posix.fcntl(file.handle, std.posix.F.GETFL, 0);
         const direct_flag: c_int = @bitCast(std.posix.O{ .DIRECT = true });
         if ((flags & direct_flag) == 0) return;
@@ -229,9 +229,14 @@ pub const File = struct {
             const direct_io_file = try self.inner.vtable.dirOpenFile(self.inner.userdata, dir, stripScheme(sub_path), flags);
             errdefer direct_io_file.close(self.inner);
 
-            switchToDirectIO(direct_io_file) catch |err| {
-                log.err("Failed to switch to Direct I/O mode: {any}", .{err});
-                return std.Io.File.OpenError.Unexpected;
+            switchToDirectIO(direct_io_file) catch |err| switch (err) {
+                DirectIoError.UnsupportedPlatform => {
+                    log.debug("Direct I/O is not supported on this platform", .{});
+                },
+                else => {
+                    log.err("Failed to switch to Direct I/O mode: {any}", .{err});
+                    return std.Io.File.OpenError.Unexpected;
+                },
             };
 
             self.mutex.lockUncancelable(self.inner);

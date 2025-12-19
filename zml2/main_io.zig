@@ -9,6 +9,7 @@ pub const std_options: std.Options = .{
     .log_level = .debug,
     .log_scope_levels = &[_]std.log.ScopeLevel{
         .{ .scope = .@"zml/safetensors", .level = .debug },
+        .{ .scope = .@"zml/io/vfs/file", .level = .info },
         .{ .scope = .@"zml/io/vfs/http", .level = .info },
         .{ .scope = .@"zml/io/vfs/hf", .level = .info },
     },
