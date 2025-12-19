@@ -2965,7 +2965,7 @@ pub const Tensor = struct {
         }
     }
 
-    pub const TopKOpts = SortOpts;
+    pub const TopKOpts = struct { descending: bool = true };
 
     /// Returns a Tensor representing the result of Top-K over the given axis.
     pub fn topK(self: Tensor, named_axis_: anytype, k: u32, opts: TopKOpts) SortRes {
@@ -2979,7 +2979,7 @@ pub const Tensor = struct {
             },
             else => stdx.debug.compileError(err_msg, .{}),
         };
-        var result = self.sort(a, opts);
+        var result = self.sort(a, .{ .descending = opts.descending });
         result.values = result.values.slice1d(a, .{ .end = k });
         result.indices = result.indices.slice1d(a, .{ .end = k });
         if (has_name) |new_name| {
