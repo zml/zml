@@ -7,47 +7,30 @@ pub const HTTP = struct {
 
     pub const InitHandleError = error{
         PathTooLong,
-        AllocationFailed,
         PathUnresolvable,
+        FailedToFetchRemoteResource,
+        MissingRessource,
     } || std.mem.Allocator.Error;
 
     pub const FileHandle = struct {
         allocator: std.mem.Allocator,
 
-        url: []const u8,
+        uri: []const u8,
         pos: u64,
         size: u64,
-        redirect_buffer: [std.fs.max_path_bytes]u8,
-        request: ?*std.http.Client.Request,
-        response: ?std.http.Client.Response,
-        body_reader: ?*std.Io.Reader,
+        redirect_buffer: [std.fs.max_path_bytes]u8 = undefined,
+        request: ?*std.http.Client.Request = null,
+        response: ?std.http.Client.Response = null,
+        body_reader: ?*std.Io.Reader = null,
 
         total_requests: u64 = 0,
         total_latency_ns: u64 = 0,
         min_latency_ns: u64 = std.math.maxInt(u64),
         max_latency_ns: u64 = 0,
 
-        pub fn init(allocator: std.mem.Allocator, parent_path: []const u8, sub_path: []const u8) InitHandleError!*FileHandle {
-            const handle = try allocator.create(FileHandle);
-            errdefer allocator.destroy(handle);
-
-            handle.* = .{
-                .allocator = allocator,
-                .url = try resolveUri(allocator, parent_path, sub_path),
-                .pos = 0,
-                .size = undefined,
-                .redirect_buffer = undefined,
-                .request = null,
-                .response = null,
-                .body_reader = null,
-            };
-
-            return handle;
-        }
-
         pub fn deinit(self: *FileHandle) void {
             self.releaseRequest();
-            self.allocator.free(self.url);
+            self.allocator.free(self.uri);
             self.allocator.destroy(self);
         }
 
@@ -72,61 +55,14 @@ pub const HTTP = struct {
             if (self.total_requests == 0) return 0;
             return (self.total_latency_ns / self.total_requests) / std.time.ns_per_ms;
         }
-
-        fn resolveUri(allocator: std.mem.Allocator, parent_path: []const u8, sub_path: []const u8) InitHandleError![]const u8 {
-            if (std.mem.startsWith(u8, sub_path, "http://") or
-                std.mem.startsWith(u8, sub_path, "https://"))
-            {
-                return try allocator.dupe(u8, sub_path);
-            }
-
-            const base_uri = std.Uri.parse(parent_path) catch return InitHandleError.PathTooLong;
-            var aux_buf: [std.fs.max_path_bytes]u8 = undefined;
-
-            if (sub_path.len > aux_buf.len) return InitHandleError.PathTooLong;
-
-            @memcpy(aux_buf[0..sub_path.len], sub_path);
-            var aux_slice: []u8 = aux_buf[0..];
-            const resolved = std.Uri.resolveInPlace(base_uri, sub_path.len, &aux_slice) catch return InitHandleError.PathUnresolvable;
-            return std.fmt.allocPrint(allocator, "{f}", .{resolved.fmt(.{
-                .scheme = true,
-                .authority = true,
-                .path = true,
-                .query = true,
-                .fragment = true,
-            })});
-        }
     };
 
     pub const DirHandle = struct {
         allocator: std.mem.Allocator,
-        url: []const u8,
-
-        pub fn init(allocator: std.mem.Allocator, parent_path: []const u8, sub_path: []const u8) InitHandleError!*DirHandle {
-            const self = try allocator.create(DirHandle);
-            errdefer allocator.destroy(self);
-
-            var url = try FileHandle.resolveUri(allocator, parent_path, sub_path);
-            errdefer allocator.free(url);
-
-            // Ensure directory URLs have a trailing slash.
-            // According to RFC 3986, if the parent path lacks a trailing slash, it is treated as a file and the last segment is replaced.
-            if (url.len == 0 or url[url.len - 1] != '/') {
-                const with_slash = try std.fmt.allocPrint(allocator, "{s}/", .{url});
-                allocator.free(url);
-                url = with_slash;
-            }
-
-            self.* = .{
-                .allocator = allocator,
-                .url = url,
-            };
-
-            return self;
-        }
+        uri: []const u8,
 
         pub fn deinit(self: *DirHandle) void {
-            self.allocator.free(self.url);
+            self.allocator.free(self.uri);
             self.allocator.destroy(self);
         }
     };
@@ -185,6 +121,75 @@ pub const HTTP = struct {
         };
     }
 
+    const URIKind = union(enum) {
+        dir,
+        file,
+    };
+
+    fn resolveUri(self: *HTTP, parent_path: []const u8, sub_path: []const u8, kind: URIKind) InitHandleError![]const u8 {
+        if (std.mem.startsWith(u8, sub_path, "http://") or std.mem.startsWith(u8, sub_path, "https://")) {
+            if (kind == .dir and !std.mem.endsWith(u8, sub_path, "/")) {
+                return std.fmt.allocPrint(self.allocator, "{s}/", .{sub_path});
+            } else {
+                return try self.allocator.dupe(u8, sub_path);
+            }
+        }
+
+        const base_uri = std.Uri.parse(parent_path) catch return InitHandleError.PathUnresolvable;
+        var aux_buf: [std.fs.max_path_bytes]u8 = undefined;
+
+        if (sub_path.len > aux_buf.len) return InitHandleError.PathTooLong;
+
+        @memcpy(aux_buf[0..sub_path.len], sub_path);
+        var aux_slice: []u8 = aux_buf[0..];
+        const resolved = std.Uri.resolveInPlace(base_uri, sub_path.len, &aux_slice) catch return InitHandleError.PathUnresolvable;
+        if (kind == .dir and !std.mem.endsWith(u8, resolved.path.percent_encoded, "/")) {
+            return std.fmt.allocPrint(self.allocator, "{f}/", .{resolved.fmt(.{
+                .scheme = true,
+                .authority = true,
+                .path = true,
+                .query = false,
+                .fragment = false,
+            })});
+        } else {
+            return std.fmt.allocPrint(self.allocator, "{f}", .{resolved.fmt(.{
+                .scheme = true,
+                .authority = true,
+                .path = true,
+                .query = false,
+                .fragment = false,
+            })});
+        }
+    }
+
+    fn initFileHandle(
+        self: *HTTP,
+        dir: DirHandle,
+        sub_path: []const u8,
+    ) InitHandleError!*FileHandle {
+        const handle = try self.allocator.create(FileHandle);
+        errdefer self.allocator.destroy(handle);
+
+        const uri = try self.resolveUri(dir.uri, sub_path, .file);
+        errdefer self.allocator.free(uri);
+
+        handle.* = .{
+            .allocator = self.allocator,
+            .uri = uri,
+            .pos = 0,
+            .size = undefined,
+        };
+
+        const stat = self.fetchFileStat(handle) catch {
+            log.err("Failed to fetch file stat for URI {s}", .{uri});
+            return InitHandleError.FailedToFetchRemoteResource;
+        };
+
+        handle.size = stat.size;
+
+        return handle;
+    }
+
     fn registerFileHandle(self: *HTTP, handle: *FileHandle) std.mem.Allocator.Error!HandleId {
         self.mutex.lockUncancelable(self.io());
         defer self.mutex.unlock(self.io());
@@ -202,6 +207,25 @@ pub const HTTP = struct {
         defer self.mutex.unlock(self.io());
 
         return self.file_handles.get(file.handle);
+    }
+
+    fn initDirHandle(
+        self: *HTTP,
+        parent_path: []const u8,
+        sub_path: []const u8,
+    ) InitHandleError!*DirHandle {
+        const dir_handle = try self.allocator.create(DirHandle);
+        errdefer self.allocator.destroy(dir_handle);
+
+        const uri = try self.resolveUri(parent_path, sub_path, .dir);
+        errdefer self.allocator.free(uri);
+
+        dir_handle.* = .{
+            .allocator = self.allocator,
+            .uri = uri,
+        };
+
+        return dir_handle;
     }
 
     fn registerDirHandle(self: *HTTP, handle: *DirHandle) std.mem.Allocator.Error!HandleId {
@@ -223,7 +247,7 @@ pub const HTTP = struct {
         if (std.meta.eql(dir, std.Io.Dir.cwd())) {
             return .{
                 .allocator = self.allocator,
-                .url = "",
+                .uri = "",
             };
         }
 
@@ -244,33 +268,17 @@ pub const HTTP = struct {
             return std.Io.File.OpenError.FileNotFound;
         };
 
-        const handle = FileHandle.init(self.allocator, dir_handle.url, sub_path) catch {
-            log.err("Failed to create FileHandle in openFile with dir={any} sub_path={s}", .{ dir.handle, sub_path });
+        const handle = self.initFileHandle(dir_handle, sub_path) catch {
+            log.err("Failed to init FileHandle in openFile with dir={any} sub_path={s}", .{ dir.handle, sub_path });
             return std.Io.File.OpenError.SystemResources;
         };
-        errdefer handle.deinit();
 
         const handle_id = self.registerFileHandle(handle) catch {
             log.err("Failed to register FileHandle in openFile with dir={any} sub_path={s}", .{ dir.handle, sub_path });
             return std.Io.File.OpenError.SystemResources;
         };
 
-        const file: std.Io.File = .{ .handle = @intCast(handle_id) };
-
-        const stat = self.fetchFileStat(file) catch |err| switch (err) {
-            error.AccessDenied, error.SystemResources => {
-                log.err("File not found during openFile for handle={d} url={s}", .{ file.handle, handle.url });
-                return std.Io.File.OpenError.FileNotFound;
-            },
-            else => {
-                log.err("Failed to fetch file stat during openFile for handle={d} url={s}", .{ file.handle, handle.url });
-                return std.Io.File.OpenError.Unexpected;
-            },
-        };
-
-        handle.size = stat.size;
-
-        return file;
+        return .{ .handle = @intCast(handle_id) };
     }
 
     fn openDir(
@@ -280,16 +288,18 @@ pub const HTTP = struct {
     ) std.Io.Dir.OpenError!std.Io.Dir {
         const dir_handle = self.dirHandle(dir) orelse {
             log.err("Directory handle not found for dirOpenFile", .{});
-            return std.Io.File.OpenError.FileNotFound;
+            return std.Io.Dir.OpenError.FileNotFound;
         };
 
-        const handle = DirHandle.init(self.allocator, dir_handle.url, sub_path) catch {
-            log.err("Failed to create DirHandle in dirOpenFile", .{});
+        const handle = self.initDirHandle(dir_handle.uri, sub_path) catch {
+            log.err("Failed to init DirHandle in openDir with dir={any} sub_path={s}", .{ dir.handle, sub_path });
             return std.Io.Dir.OpenError.SystemResources;
         };
-        errdefer handle.deinit();
 
-        const handle_id = self.registerDirHandle(handle) catch return std.Io.Dir.OpenError.SystemResources;
+        const handle_id = self.registerDirHandle(handle) catch {
+            log.err("Failed to register DirHandle in openDir with dir={any} sub_path={s}", .{ dir.handle, sub_path });
+            return std.Io.Dir.OpenError.SystemResources;
+        };
 
         return .{ .handle = @intCast(handle_id) };
     }
@@ -352,7 +362,7 @@ pub const HTTP = struct {
 
     fn performRead(self: *HTTP, file: std.Io.File, data: [][]u8) std.Io.File.Reader.Error!usize {
         const handle = self.fileHandle(file) orelse {
-            log.err("Invalid file handle in HTTP VFS read", .{});
+            log.err("Invalid file handle in VFS read", .{});
             return std.Io.File.Reader.Error.Unexpected;
         };
 
@@ -411,18 +421,18 @@ pub const HTTP = struct {
         const range_header = std.fmt.bufPrint(&range_buf, "bytes={d}-{d}", .{ start, end }) catch unreachable;
 
         var timer = std.time.Timer.start() catch {
-            log.err("Failed to start timer for HTTP request", .{});
+            log.err("Failed to start timer for request", .{});
             return std.Io.File.Reader.Error.SystemResources;
         };
 
         const request = self.allocator.create(std.http.Client.Request) catch {
-            log.err("Failed to allocate HTTP request", .{});
+            log.err("Failed to allocate request", .{});
             return std.Io.File.Reader.Error.SystemResources;
         };
         errdefer self.allocator.destroy(request);
 
-        const uri = std.Uri.parse(handle.url) catch |err| {
-            log.err("Failed to parse URL during read request: {}", .{err});
+        const uri = std.Uri.parse(handle.uri) catch |err| {
+            log.err("Failed to parse URI during read request: {}", .{err});
             return std.Io.File.Reader.Error.Unexpected;
         };
 
@@ -430,25 +440,25 @@ pub const HTTP = struct {
             .headers = .{ .accept_encoding = .{ .override = "identity" } },
             .extra_headers = &.{.{ .name = "Range", .value = range_header }},
         }) catch |err| {
-            log.err("Failed to create HTTP GET request: {}", .{err});
+            log.err("Failed to create GET request: {}", .{err});
             return std.Io.File.Reader.Error.SystemResources;
         };
         errdefer request.deinit();
 
         request.sendBodiless() catch |err| {
-            log.err("Failed to send HTTP GET request: {}", .{err});
+            log.err("Failed to send GET request: {}", .{err});
             return std.Io.File.Reader.Error.SystemResources;
         };
 
         const response = request.receiveHead(&handle.redirect_buffer) catch |err| {
-            log.err("Failed to receive HTTP response head for handle={d} url={s}: {}", .{ file.handle, handle.url, err });
+            log.err("Failed to receive HTTP response head for handle={d} uri={s}: {}", .{ file.handle, handle.uri, err });
             return std.Io.File.Reader.Error.Unexpected;
         };
 
         const latency = timer.read();
         handle.recordLatency(latency);
 
-        log.debug("HTTP call: handle={d} status={s} content_length={?} range={d}-{d} ({d}) latency={d}ms avg={d}ms min={d}ms max={d}ms for {s}", .{
+        log.debug("GET call: handle={d} status={s} content_length={?} range={d}-{d} ({d}) latency={d}ms avg={d}ms min={d}ms max={d}ms for {s}", .{
             file.handle,
             @tagName(response.head.status),
             response.head.content_length,
@@ -459,7 +469,7 @@ pub const HTTP = struct {
             handle.avgLatencyMs(),
             handle.min_latency_ns / std.time.ns_per_ms,
             handle.max_latency_ns / std.time.ns_per_ms,
-            handle.url,
+            handle.uri,
         });
 
         if (response.head.status != .partial_content and response.head.status != .ok) {
@@ -474,13 +484,10 @@ pub const HTTP = struct {
     }
 
     pub const FileStat = struct {
-        inode: u64,
         size: u64,
     };
 
-    fn fetchFileStat(self: *HTTP, file: std.Io.File) std.Io.File.StatError!FileStat {
-        const handle = self.fileHandle(file) orelse return std.Io.File.StatError.Unexpected;
-
+    fn fetchFileStat(self: *HTTP, handle: *FileHandle) std.Io.File.StatError!FileStat {
         var attempt: u32 = 0;
         while (attempt < self.config.max_fetch_attempts) : (attempt += 1) {
             const req = self.allocator.create(std.http.Client.Request) catch {
@@ -488,7 +495,7 @@ pub const HTTP = struct {
                 return std.Io.File.StatError.SystemResources;
             };
 
-            req.* = self.client.request(.HEAD, std.Uri.parse(handle.url) catch return std.Io.File.StatError.Unexpected, .{
+            req.* = self.client.request(.HEAD, std.Uri.parse(handle.uri) catch return std.Io.File.StatError.Unexpected, .{
                 .headers = .{ .accept_encoding = .{ .override = "identity" } },
             }) catch {
                 self.allocator.destroy(req);
@@ -522,7 +529,7 @@ pub const HTTP = struct {
 
                         var aux_buf: []u8 = buf[0..];
 
-                        const uri = std.Uri.parse(handle.url) catch |err| {
+                        const uri = std.Uri.parse(handle.uri) catch |err| {
                             log.err("Failed to parse URL during redirect: {}", .{err});
                             return std.Io.File.StatError.Unexpected;
                         };
@@ -531,7 +538,7 @@ pub const HTTP = struct {
                             log.err("Failed to resolve redirect URL: {}", .{err});
                             return std.Io.File.StatError.Unexpected;
                         };
-                        const new_url = std.fmt.allocPrint(self.allocator, "{f}", .{resolved.fmt(.{
+                        const new_uri = std.fmt.allocPrint(self.allocator, "{f}", .{resolved.fmt(.{
                             .scheme = true,
                             .authority = true,
                             .path = true,
@@ -542,8 +549,8 @@ pub const HTTP = struct {
                             return std.Io.File.StatError.SystemResources;
                         };
 
-                        self.allocator.free(handle.url);
-                        handle.url = new_url;
+                        self.allocator.free(handle.uri);
+                        handle.uri = new_uri;
 
                         continue;
                     }
@@ -555,7 +562,6 @@ pub const HTTP = struct {
                     };
 
                     return .{
-                        .inode = @intCast(file.handle),
                         .size = size,
                     };
                 },
@@ -611,7 +617,7 @@ pub const HTTP = struct {
         _ = dir;
         _ = sub_path;
         _ = mode;
-        log.err("HTTP VFS is read-only, dirMake not supported", .{});
+        log.err("VFS is read-only, dirMake not supported", .{});
         return std.Io.Dir.MakeError.ReadOnlyFileSystem;
     }
 
@@ -625,7 +631,7 @@ pub const HTTP = struct {
         _ = dir;
         _ = sub_path;
         _ = mode;
-        log.err("HTTP VFS is read-only, dirMakePath not supported", .{});
+        log.err("VFS is read-only, dirMakePath not supported", .{});
         return std.Io.Dir.MakeError.ReadOnlyFileSystem;
     }
 
@@ -639,7 +645,7 @@ pub const HTTP = struct {
         _ = dir;
         _ = sub_path;
         _ = options;
-        log.err("HTTP VFS is read-only, dirMakeOpenPath not supported", .{});
+        log.err("VFS is read-only, dirMakeOpenPath not supported", .{});
         return std.Io.Dir.MakeOpenPathError.Unexpected;
     }
 
@@ -649,7 +655,7 @@ pub const HTTP = struct {
     ) std.Io.Dir.StatError!std.Io.Dir.Stat {
         _ = userdata;
         _ = dir;
-        log.err("HTTP VFS does not support dirStat", .{});
+        log.err("VFS does not support dirStat", .{});
         return std.Io.Dir.StatError.AccessDenied;
     }
 
@@ -663,7 +669,7 @@ pub const HTTP = struct {
         _ = dir;
         _ = sub_path;
         _ = options;
-        @panic("TODO: implement HTTP VFS dirStatPath");
+        @panic("TODO: implement VFS dirStatPath");
     }
 
     fn dirAccess(
@@ -680,7 +686,7 @@ pub const HTTP = struct {
             return std.Io.Dir.AccessError.ReadOnlyFileSystem;
         }
 
-        log.err("HTTP VFS does not support dirAccess", .{});
+        log.err("VFS does not support dirAccess", .{});
         return std.Io.Dir.AccessError.AccessDenied;
     }
 
@@ -694,7 +700,7 @@ pub const HTTP = struct {
         _ = dir;
         _ = sub_path;
         _ = flags;
-        log.err("HTTP VFS is read-only, dirCreateFile not supported", .{});
+        log.err("VFS is read-only, dirCreateFile not supported", .{});
         return std.Io.File.OpenError.Unexpected;
     }
 
@@ -730,12 +736,16 @@ pub const HTTP = struct {
         file: std.Io.File,
     ) std.Io.File.StatError!std.Io.File.Stat {
         const self: *HTTP = @ptrCast(@alignCast(userdata orelse unreachable));
-        const stat = try self.fetchFileStat(file);
+        const handle = self.fileHandle(file) orelse {
+            log.err("Invalid file handle in VFS stat", .{});
+
+            return std.Io.File.StatError.Unexpected;
+        };
 
         return .{
-            .inode = stat.inode,
+            .inode = @intCast(file.handle),
             .kind = .file,
-            .size = stat.size,
+            .size = handle.size,
             .mode = 0o444,
             .atime = .{ .nanoseconds = 0 },
             .mtime = .{ .nanoseconds = 0 },
@@ -756,7 +766,7 @@ pub const HTTP = struct {
         _ = userdata;
         _ = file;
         _ = buffer;
-        log.err("HTTP VFS is read-only, fileWriteStreaming not supported", .{});
+        log.err("VFS is read-only, fileWriteStreaming not supported", .{});
         return std.Io.File.WriteStreamingError.Unexpected;
     }
 
@@ -770,7 +780,7 @@ pub const HTTP = struct {
         _ = file;
         _ = buffer;
         _ = offset;
-        log.err("HTTP VFS is read-only, fileWritePositional not supported", .{});
+        log.err("VFS is read-only, fileWritePositional not supported", .{});
         return std.Io.File.WritePositionalError.Unexpected;
     }
 
@@ -817,7 +827,7 @@ pub const HTTP = struct {
     ) std.Io.File.OpenSelfExeError!std.Io.File {
         _ = userdata;
         _ = flags;
-        log.err("HTTP VFS does not support openSelfExe", .{});
+        log.err("VFS does not support openSelfExe", .{});
         return std.Io.File.OpenSelfExeError.NotSupported;
     }
 };

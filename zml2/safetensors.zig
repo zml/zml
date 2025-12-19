@@ -19,108 +19,6 @@ pub const FileType = enum {
     unknown,
 };
 
-pub fn resolveFiletype(path: []const u8) FileType {
-    if (std.mem.endsWith(u8, path, ".safetensors.index.json")) {
-        return .index;
-    } else if (std.mem.endsWith(u8, path, ".safetensors")) {
-        return .safetensors;
-    } else {
-        return .unknown;
-    }
-}
-
-pub const ModelPathResolutionError = error{
-    FileNotFound,
-    InvalidPath,
-} || std.mem.Allocator.Error;
-
-pub const ModelRepo = struct {
-    dir: std.Io.Dir,
-    path: []const u8,
-
-    pub fn deinit(self: *ModelRepo, allocator: std.mem.Allocator, io: std.Io) void {
-        self.dir.close(io);
-        allocator.free(self.path);
-    }
-};
-
-pub fn resolveModelRepo(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    path: []const u8,
-) ModelPathResolutionError!ModelRepo {
-    const resolved_path = try allocator.dupe(u8, path);
-
-    if (std.mem.endsWith(u8, resolved_path, ".safetensors.index.json") or
-        std.mem.endsWith(u8, resolved_path, ".safetensors"))
-    {
-        const dir_path = std.fs.path.dirname(resolved_path) orelse {
-            allocator.free(resolved_path);
-            return ModelPathResolutionError.InvalidPath;
-        };
-        const dir_path_dup = try allocator.dupe(u8, dir_path);
-        allocator.free(resolved_path);
-
-        const dir = std.Io.Dir.openDir(.cwd(), io, dir_path_dup, .{}) catch |e| {
-            allocator.free(dir_path_dup);
-            return switch (e) {
-                error.FileNotFound => ModelPathResolutionError.FileNotFound,
-                else => ModelPathResolutionError.InvalidPath,
-            };
-        };
-
-        return .{
-            .dir = dir,
-            .path = dir_path_dup,
-        };
-    }
-
-    const dir = std.Io.Dir.openDir(.cwd(), io, resolved_path, .{}) catch |e| {
-        allocator.free(resolved_path);
-        return switch (e) {
-            error.FileNotFound => ModelPathResolutionError.FileNotFound,
-            else => ModelPathResolutionError.InvalidPath,
-        };
-    };
-
-    return .{
-        .dir = dir,
-        .path = resolved_path,
-    };
-}
-
-pub const ModelEntrypoint = struct {
-    file: std.Io.File,
-    path: []const u8,
-
-    pub fn deinit(self: *ModelEntrypoint, allocator: std.mem.Allocator, io: std.Io) void {
-        self.file.close(io);
-        allocator.free(self.path);
-    }
-};
-
-pub fn resolveModelEntrypoint(allocator: std.mem.Allocator, io: std.Io, repo: ModelRepo) ModelPathResolutionError!ModelEntrypoint {
-    {
-        const index_name = "model.safetensors.index.json";
-        log.warn("Trying to resolve model entrypoint: {s}/{s}", .{ repo.path, index_name });
-        if (repo.dir.openFile(io, index_name, .{ .mode = .read_only })) |index_file| {
-            const index_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo.path, index_name });
-            return .{ .file = index_file, .path = index_path };
-        } else |_| {}
-    }
-
-    {
-        const model_name = "model.safetensors";
-        log.warn("Trying to resolve model entrypoint: {s}/{s}", .{ repo.path, model_name });
-        if (repo.dir.openFile(io, model_name, .{ .mode = .read_only })) |model_file| {
-            const model_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo.path, model_name });
-            return .{ .file = model_file, .path = model_path };
-        } else |_| {}
-    }
-
-    return ModelPathResolutionError.FileNotFound;
-}
-
 pub fn fetchRegistry(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -622,6 +520,124 @@ const AsyncParseSafetensorsIndexFile = struct {
         try parseSafetensors(allocator, file_uri, &reader.interface, registry);
     }
 };
+
+pub fn resolveFiletype(path: []const u8) FileType {
+    if (std.mem.endsWith(u8, path, ".safetensors.index.json")) {
+        return .index;
+    } else if (std.mem.endsWith(u8, path, ".safetensors")) {
+        return .safetensors;
+    } else {
+        return .unknown;
+    }
+}
+
+pub const ModelPathResolutionError = error{
+    FileNotFound,
+    InvalidPath,
+} || std.mem.Allocator.Error;
+
+pub const ModelRepo = struct {
+    dir: std.Io.Dir,
+    path: []const u8,
+
+    pub fn deinit(self: *ModelRepo, allocator: std.mem.Allocator, io: std.Io) void {
+        self.dir.close(io);
+        allocator.free(self.path);
+    }
+};
+
+// Helper to ensure trailing slash from the given user input path.
+fn ensureTrailingSlash(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    if (input.len == 0 or input[input.len - 1] == std.fs.path.sep) {
+        return try allocator.dupe(u8, input);
+    } else {
+        var out = try allocator.alloc(u8, input.len + 1);
+        @memcpy(out[0..input.len], input);
+        out[input.len] = std.fs.path.sep;
+        return out;
+    }
+}
+
+pub fn resolveModelRepo(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    path: []const u8,
+) ModelPathResolutionError!ModelRepo {
+    const resolved_path = try allocator.dupe(u8, path);
+
+    if (std.mem.endsWith(u8, resolved_path, ".safetensors.index.json") or
+        std.mem.endsWith(u8, resolved_path, ".safetensors"))
+    {
+        const dir_path = std.fs.path.dirname(resolved_path) orelse {
+            allocator.free(resolved_path);
+            return ModelPathResolutionError.InvalidPath;
+        };
+
+        const dir_path_with_slash = try ensureTrailingSlash(allocator, dir_path);
+        allocator.free(resolved_path);
+
+        const dir = std.Io.Dir.openDir(.cwd(), io, dir_path_with_slash, .{}) catch |e| {
+            allocator.free(dir_path_with_slash);
+            return switch (e) {
+                error.FileNotFound => ModelPathResolutionError.FileNotFound,
+                else => ModelPathResolutionError.InvalidPath,
+            };
+        };
+
+        return .{
+            .dir = dir,
+            .path = dir_path_with_slash,
+        };
+    }
+
+    const path_with_slash = try ensureTrailingSlash(allocator, resolved_path);
+    allocator.free(resolved_path);
+
+    const dir = std.Io.Dir.openDir(.cwd(), io, path_with_slash, .{}) catch |e| {
+        allocator.free(path_with_slash);
+        return switch (e) {
+            error.FileNotFound => ModelPathResolutionError.FileNotFound,
+            else => ModelPathResolutionError.InvalidPath,
+        };
+    };
+
+    return .{
+        .dir = dir,
+        .path = path_with_slash,
+    };
+}
+
+pub const ModelEntrypoint = struct {
+    file: std.Io.File,
+    path: []const u8,
+
+    pub fn deinit(self: *ModelEntrypoint, allocator: std.mem.Allocator, io: std.Io) void {
+        self.file.close(io);
+        allocator.free(self.path);
+    }
+};
+
+pub fn resolveModelEntrypoint(allocator: std.mem.Allocator, io: std.Io, repo: ModelRepo) ModelPathResolutionError!ModelEntrypoint {
+    {
+        const index_name = "model.safetensors.index.json";
+        log.warn("Trying to resolve model entrypoint: {s}{s}", .{ repo.path, index_name });
+        if (repo.dir.openFile(io, index_name, .{ .mode = .read_only })) |index_file| {
+            const index_path = try std.fmt.allocPrint(allocator, "{s}{s}", .{ repo.path, index_name });
+            return .{ .file = index_file, .path = index_path };
+        } else |_| {}
+    }
+
+    {
+        const model_name = "model.safetensors";
+        log.warn("Trying to resolve model entrypoint: {s}{s}", .{ repo.path, model_name });
+        if (repo.dir.openFile(io, model_name, .{ .mode = .read_only })) |model_file| {
+            const model_path = try std.fmt.allocPrint(allocator, "{s}{s}", .{ repo.path, model_name });
+            return .{ .file = model_file, .path = model_path };
+        } else |_| {}
+    }
+
+    return ModelPathResolutionError.FileNotFound;
+}
 
 pub const Metadata = union(enum) {
     null: void,
