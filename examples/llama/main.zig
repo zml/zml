@@ -31,6 +31,295 @@ const params = clap.parseParamsComptime(
     \\--sharding       <BOOL>     default: true: sharding on or off
 );
 
+pub fn main() !void {
+    log.info("LLama was compiled with {}", .{@import("builtin").mode});
+
+    const allocator = std.heap.c_allocator;
+    //var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    //defer _ = gpa.deinit();
+
+    //const allocator = gpa.allocator();
+
+    var threaded: std.Io.Threaded = .init(allocator);
+    defer threaded.deinit();
+
+    var vfs_file: zml.io.VFS.File = .init(allocator, threaded.io(), .{});
+
+    var http_client: std.http.Client = .{
+        .allocator = allocator,
+        .io = threaded.io(),
+        .connection_pool = .{
+            .free_size = threaded.async_limit.toInt() orelse 16,
+        },
+    };
+
+    try http_client.initDefaultProxies(allocator);
+    defer http_client.deinit();
+
+    var vfs_http: zml.io.VFS.HTTP = try .init(allocator, threaded.io(), &http_client, .{});
+    defer vfs_http.deinit();
+
+    var hf_auth: zml.io.VFS.HF.Auth = try .auto(allocator, threaded.io());
+    defer hf_auth.deinit(allocator);
+
+    var hf_vfs: zml.io.VFS.HF = try .init(
+        allocator,
+        threaded.io(),
+        &http_client,
+        .{
+            .request_range_min = 8 * 1024,
+            .request_range_max = 128 * 1024 * 1024,
+            .hf_pagination_limit = 100,
+            .auth = hf_auth,
+        },
+    );
+    defer hf_vfs.deinit();
+
+    var vfs: zml.io.VFS = .init(allocator, threaded.io());
+    defer vfs.deinit();
+
+    try vfs.register("file", vfs_file.io());
+    try vfs.register("http", vfs_http.io());
+    try vfs.register("https", vfs_http.io());
+    try vfs.register("hf", hf_vfs.io());
+
+    const io = vfs.io();
+
+    zml.init();
+    defer zml.deinit();
+
+    const parsers = comptime .{
+        .BOOL = bool_parser,
+        .UINT = clap.parsers.int(u32, 0),
+        .STRING = clap.parsers.string,
+        .PATH = clap.parsers.string,
+    };
+    var diag: clap.Diagnostic = .{};
+    var stderr_buffer: [1024]u8 = undefined;
+    var stderr = std.fs.File.stderr().writer(&stderr_buffer);
+    defer stderr.interface.flush() catch {};
+
+    var cli = clap.parse(clap.Help, &params, parsers, .{
+        .diagnostic = &diag,
+        .allocator = allocator,
+    }) catch |err| {
+        diag.report(&stderr.interface, err) catch {};
+        stderr.interface.writeAll("usage: ") catch {};
+        clap.usage(&stderr.interface, clap.Help, &params) catch {};
+        stderr.interface.writeAll("\n") catch {};
+        return;
+    };
+    defer cli.deinit();
+
+    if (cli.args.help != 0) {
+        clap.help(&stderr.interface, clap.Help, &params, .{}) catch {};
+        return;
+    }
+
+    const hf_model_path = cli.args.@"hf-model-path" orelse {
+        log.err("Missing --hf-model-path", .{});
+        return;
+    };
+
+    log.info("Resolving Model repo", .{});
+    var repo = try zml.safetensors.resolveModelRepo(allocator, io, hf_model_path);
+    defer repo.deinit(allocator, io);
+
+    const parsed_config = try parseConfig(allocator, io, repo.dir);
+    defer parsed_config.deinit();
+    const config = parsed_config.value;
+
+    // initialize ZML platform with optional create options
+    // eg: --create-options='{"cuda":{"allocator":{"bfc":{"memory_fraction": 0.99}}}}'
+    var platform = b: {
+        const create_opts_json = cli.args.@"create-options" orelse "{}";
+        const create_opts = try std.json.parseFromSlice(zml.platform.CreateOptions, allocator, create_opts_json, .{});
+        defer create_opts.deinit();
+        const platform: zml.Platform = try .auto(io, create_opts.value);
+        break :b platform;
+    };
+    defer platform.deinit();
+
+    var registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
+    defer registry.deinit();
+
+    var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
+    defer store.deinit();
+
+    // Write metadata from the config file into the LlamaLm struct.
+    const seq_len: u32 = cli.args.@"seq-len" orelse 256;
+    const llama_options: llama.LlamaLM.Options = .{
+        .max_seq_len = seq_len,
+        .sampling_strategy = .{
+            .topk = 2,
+            .temperature = 1.0,
+        },
+    };
+
+    // Initialize the Llama struct and map the content of the .safetensors to the model tensors.
+    const llama_model: llama.LlamaLM = try .init(allocator, store.view(), config, llama_options);
+    defer llama_model.deinit(allocator);
+
+    // Specify shapes of input arguments
+    const dtype = llama_model.model.embed_tokens.weight.dtype();
+    const llama_parameters: LlamaParameters = .{
+        .prefill_tokens = .init(.{ .s = llama_options.max_seq_len }, .u32),
+        .decode_tokens = .init(.{ .s = 1 }, .u32),
+        .token_index = .init(.{}, .u32),
+        .kv_cache = .init(zml.Shape.init(.{
+            .layer = llama_model.model.layers.len,
+            .k = seq_len,
+            .h = config.num_key_value_heads,
+            .hd = config.head_dim orelse @divExact(config.hidden_size, config.num_attention_heads),
+        }, dtype)),
+        .rng = .init(),
+    };
+
+    var compiled_model_result_future = io.async(struct {
+        fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: zml.Platform, llama_model_: llama.LlamaLM, llama_parameters_: LlamaParameters) !CompileModelResult {
+            return compileModel(allocator_, io_, platform_, llama_model_, llama_parameters_);
+        }
+    }.call, .{ allocator, io, platform, llama_model, llama_parameters });
+    errdefer if (compiled_model_result_future.cancel(io)) |v| {
+        defer v.prefill_exe.deinit();
+        defer v.decode_exe.deinit();
+    } else |_| {};
+
+    var llama_buffers_future = io.async(struct {
+        fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: zml.Platform, store_: *zml.io.TensorStore, llama_model_: llama.LlamaLM) !zml.Bufferized(llama.LlamaLM) {
+            return loadModelBuffers(allocator_, io_, platform_, store_, llama_model_);
+        }
+    }.call, .{ allocator, io, platform, &store, llama_model });
+    errdefer b: {
+        var v = llama_buffers_future.cancel(io) catch break :b;
+        LlamaLM.unloadBuffers(&v, allocator);
+    }
+
+    const compiled_model_result = try compiled_model_result_future.await(io);
+    defer compiled_model_result.prefill_exe.deinit();
+    defer compiled_model_result.decode_exe.deinit();
+
+    var llama_buffers = try llama_buffers_future.await(io);
+    defer LlamaLM.unloadBuffers(&llama_buffers, allocator);
+
+    log.info("Creating KvCache", .{});
+    var kv_cache_buffers = try llama_parameters.kv_cache.initBuffer(io, platform);
+    defer llama.KvCache.deinitBuffer(&kv_cache_buffers);
+
+    var tokenizer = try loadTokenizer(allocator, io, repo.dir);
+    defer tokenizer.deinit();
+
+    const prompt = cli.args.prompt orelse "What is the capital of France?";
+    log.info("✅\tPrompt: {s}", .{prompt});
+
+    // Unbuffered writing of the tokens to stdout.
+    var stdout = std.fs.File.stdout().writer(&.{});
+
+    const now = try std.Io.Clock.now(.boot, io);
+    const seed: u128 = cli.args.seed orelse @intCast(now.nanoseconds);
+    const skip_llama3_encoding = cli.args.@"no-llama3" orelse false;
+
+    try generateText(
+        allocator,
+        io,
+        llama_buffers,
+        compiled_model_result.prefill_exe,
+        compiled_model_result.decode_exe,
+        &kv_cache_buffers,
+        tokenizer,
+        config,
+        llama_options,
+        seed,
+        prompt[0..],
+        skip_llama3_encoding,
+        &stdout.interface,
+        platform,
+    );
+}
+
+fn parseConfig(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !std.json.Parsed(LlamaLM.Config) {
+    var timer = try stdx.time.Timer.start();
+    log.info("Loading model config", .{});
+    defer log.info("Loaded model config [{D}]", .{timer.read()});
+    const parsed_config = blk: {
+        const config_json_file = try dir.openFile(io, "config.json", .{});
+        defer config_json_file.close(io);
+        var config_json_buffer: [256]u8 = undefined;
+        var config_reader = config_json_file.reader(io, &config_json_buffer);
+        var reader = std.json.Reader.init(allocator, &config_reader.interface);
+        defer reader.deinit();
+        break :blk try std.json.parseFromTokenSource(llama.LlamaLM.Config, allocator, &reader, .{ .ignore_unknown_fields = true });
+    };
+    errdefer parsed_config.deinit();
+
+    return parsed_config;
+}
+
+fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !zml.tokenizer.Tokenizer {
+    var timer = try stdx.time.Timer.start();
+    log.info("Loading tokenizer", .{});
+    defer log.info("Loaded tokenizer [{D}]", .{timer.read()});
+    const bytes = b: {
+        const file = try dir.openFile(io, "tokenizer.json", .{});
+        defer file.close(io);
+
+        var reader = file.reader(io, &.{});
+        var writer: std.Io.Writer.Allocating = .init(allocator);
+        defer writer.deinit();
+        _ = try reader.interface.streamRemaining(&writer.writer);
+        break :b try writer.toOwnedSlice();
+    };
+    defer allocator.free(bytes);
+
+    return .{ .hftokenizers = try zml.tokenizer.hftokenizers.HFTokenizer.fromBytes(bytes) };
+}
+
+const LlamaParameters = struct {
+    prefill_tokens: zml.Tensor,
+    decode_tokens: zml.Tensor,
+    token_index: zml.Tensor,
+    kv_cache: llama.KvCache,
+    rng: zml.Tensor.Rng,
+};
+
+const CompileModelResult = struct {
+    prefill_exe: zml.Exe,
+    decode_exe: zml.Exe,
+};
+
+fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: zml.Platform, llama_model: llama.LlamaLM, parameters: LlamaParameters) !CompileModelResult {
+    var timer = try stdx.time.Timer.start();
+    log.info("Compiling model", .{});
+    defer log.info("Compiled model [{D}]", .{timer.read()});
+
+    // Compile the model twice, one for prefill, one for generation.
+    var prefill_future = io.async(struct {
+        fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: zml.Platform, llama_model_: llama.LlamaLM, parameters_: LlamaParameters) !zml.Exe {
+            return platform_.compileModel(allocator_, io_, llama.LlamaLM.forward, llama_model_, .{ parameters_.prefill_tokens, parameters_.token_index, parameters_.kv_cache, parameters_.rng });
+        }
+    }.call, .{ allocator, io, platform, llama_model, parameters });
+    errdefer if (prefill_future.cancel(io)) |v| v.deinit() else |_| {};
+
+    var decode_future = io.async(struct {
+        fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: zml.Platform, llama_model_: llama.LlamaLM, parameters_: LlamaParameters) !zml.Exe {
+            return platform_.compileModel(allocator_, io_, llama.LlamaLM.forward, llama_model_, .{ parameters_.decode_tokens, parameters_.token_index, parameters_.kv_cache, parameters_.rng });
+        }
+    }.call, .{ allocator, io, platform, llama_model, parameters });
+    errdefer if (decode_future.cancel(io)) |v| v.deinit() else |_| {};
+
+    const prefill_exe = try prefill_future.await(io);
+    const decode_exe = try decode_future.await(io);
+
+    return .{ .prefill_exe = prefill_exe, .decode_exe = decode_exe };
+}
+
+fn loadModelBuffers(allocator: std.mem.Allocator, io: std.Io, platform: zml.Platform, store: *zml.io.TensorStore, llama_model: llama.LlamaLM) !zml.Bufferized(llama.LlamaLM) {
+    var timer = try stdx.time.Timer.start();
+    log.info("Loading model", .{});
+    defer log.info("Loaded model [{D}]", .{timer.read()});
+    return llama_model.loadBuffers(allocator, io, store.view(), platform);
+}
+
 pub fn tokenizePrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, config: LlamaLM.Config, prompt: []const u8, skip_llama3_encoding: bool) ![]u32 {
     var encoder = try tokenizer.encoder();
     defer encoder.deinit();
@@ -171,202 +460,6 @@ pub fn generateText(
     const speed = @as(f64, @floatFromInt(num_tokens_generated)) / duration_s;
     std.debug.print("\n", .{});
     log.info("✅ Generated {} tokens in {D}: {:.3}tok/s", .{ num_tokens_generated, duration.ns, speed });
-}
-
-pub fn main() !void {
-    log.info("   LLama was compiled with {}", .{@import("builtin").mode});
-
-    //const allocator = std.heap.c_allocator;
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-
-    const allocator = gpa.allocator();
-
-    var threaded: std.Io.Threaded = .init(allocator);
-    defer threaded.deinit();
-
-    var vfs_file: zml.io.VFS.File = .init(allocator, threaded.io(), .{});
-
-    var http_client: std.http.Client = .{
-        .allocator = allocator,
-        .io = threaded.io(),
-        .connection_pool = .{
-            .free_size = threaded.async_limit.toInt() orelse 16,
-        },
-    };
-
-    try http_client.initDefaultProxies(allocator);
-    defer http_client.deinit();
-
-    var vfs_http: zml.io.VFS.HTTP = try .init(allocator, threaded.io(), &http_client, .{});
-    defer vfs_http.deinit();
-
-    var vfs: zml.io.VFS = .init(allocator, threaded.io());
-    defer vfs.deinit();
-
-    try vfs.register("file", vfs_file.io());
-    try vfs.register("http", vfs_http.io());
-    try vfs.register("https", vfs_http.io());
-
-    const io = vfs.io();
-
-    zml.init();
-    defer zml.deinit();
-
-    const parsers = comptime .{
-        .BOOL = bool_parser,
-        .UINT = clap.parsers.int(u32, 0),
-        .STRING = clap.parsers.string,
-        .PATH = clap.parsers.string,
-    };
-    var diag: clap.Diagnostic = .{};
-    var stderr_buffer: [1024]u8 = undefined;
-    var stderr = std.fs.File.stderr().writer(&stderr_buffer);
-    defer stderr.interface.flush() catch {};
-
-    var cli = clap.parse(clap.Help, &params, parsers, .{
-        .diagnostic = &diag,
-        .allocator = allocator,
-    }) catch |err| {
-        diag.report(&stderr.interface, err) catch {};
-        stderr.interface.writeAll("usage: ") catch {};
-        clap.usage(&stderr.interface, clap.Help, &params) catch {};
-        stderr.interface.writeAll("\n") catch {};
-        return;
-    };
-    defer cli.deinit();
-
-    if (cli.args.help != 0) {
-        clap.help(&stderr.interface, clap.Help, &params, .{}) catch {};
-        return;
-    }
-
-    const hf_model_path = cli.args.@"hf-model-path" orelse {
-        log.err("Missing --hf-model-path", .{});
-        return;
-    };
-
-    var repo = try zml.safetensors.resolveModelRepo(allocator, io, hf_model_path);
-    defer repo.deinit(allocator, io);
-
-    const parsed_config = blk: {
-        const config_json_file = try repo.dir.openFile(io, "config.json", .{});
-        defer config_json_file.close(io);
-        var config_json_buffer: [256]u8 = undefined;
-        var config_reader = config_json_file.reader(io, &config_json_buffer);
-        var reader = std.json.Reader.init(allocator, &config_reader.interface);
-        defer reader.deinit();
-        break :blk try std.json.parseFromTokenSource(llama.LlamaLM.Config, allocator, &reader, .{ .ignore_unknown_fields = true });
-    };
-    defer parsed_config.deinit();
-    const config = parsed_config.value;
-
-    // initialize ZML platform with optional create options
-    // eg: --create-options='{"cuda":{"allocator":{"bfc":{"memory_fraction": 0.99}}}}'
-    var platform = b: {
-        const create_opts_json = cli.args.@"create-options" orelse "{}";
-        const create_opts = try std.json.parseFromSlice(zml.platform.CreateOptions, allocator, create_opts_json, .{});
-        defer create_opts.deinit();
-        const platform: zml.Platform = try .auto(io, create_opts.value);
-        break :b platform;
-    };
-    defer platform.deinit();
-
-    var registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
-    defer registry.deinit();
-
-    var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
-    defer store.deinit();
-
-    // Write metadata from the config file into the LlamaLm struct.
-    const seq_len: u32 = cli.args.@"seq-len" orelse 256;
-    const llama_options: llama.LlamaLM.Options = .{
-        .max_seq_len = seq_len,
-        .sampling_strategy = .{
-            .topk = 2,
-            .temperature = 1.0,
-        },
-    };
-
-    // Initialize the Llama struct and map the content of the .safetensors to the model tensors.
-    const llama_model: llama.LlamaLM = try .init(allocator, store.view(), config, llama_options);
-    defer llama_model.deinit(allocator);
-
-    // Specify shapes of input arguments
-    const prefill_tokens: zml.Tensor = .init(.{ .s = llama_options.max_seq_len }, .u32);
-    const decode_tokens: zml.Tensor = .init(.{ .s = 1 }, .u32);
-    const token_index: zml.Tensor = .init(.{}, .u32);
-
-    const dtype = llama_model.model.embed_tokens.weight.dtype();
-    const kv_cache: llama.KvCache = .init(zml.Shape.init(.{
-        .layer = llama_model.model.layers.len,
-        .k = seq_len,
-        .h = config.num_key_value_heads,
-        .hd = config.head_dim orelse @divExact(config.hidden_size, config.num_attention_heads),
-    }, dtype));
-    const rng: zml.Tensor.Rng = .init();
-
-    // Compile the model twice, one for prefill, one for generation.
-    var prefill_exe = try platform.compileModel(allocator, io, llama.LlamaLM.forward, llama_model, .{ prefill_tokens, token_index, kv_cache, rng });
-    defer prefill_exe.deinit();
-    var decode_exe = try platform.compileModel(allocator, io, llama.LlamaLM.forward, llama_model, .{ decode_tokens, token_index, kv_cache, rng });
-    defer decode_exe.deinit();
-
-    var llama_buffers = try llama_model.loadBuffers(allocator, io, store.view(), platform);
-    defer LlamaLM.unloadBuffers(&llama_buffers, allocator);
-
-    log.info("Creating KvCache", .{});
-    var kv_cache_buffers = try kv_cache.initBuffer(io, platform);
-    defer llama.KvCache.deinitBuffer(&kv_cache_buffers);
-
-    var tokenizer = blk: {
-        log.info("Loading tokenizer", .{});
-        var timer = try stdx.time.Timer.start();
-        defer log.info("Loaded tokenizer [{D}]", .{timer.read()});
-        const bytes = b: {
-            const file = try repo.dir.openFile(io, "tokenizer.json", .{});
-            defer file.close(io);
-
-            var reader = file.reader(io, &.{});
-            var writer: std.Io.Writer.Allocating = .init(allocator);
-            defer writer.deinit();
-            _ = try reader.interface.streamRemaining(&writer.writer);
-            break :b try writer.toOwnedSlice();
-        };
-        defer allocator.free(bytes);
-
-        const tokenizer: zml.tokenizer.Tokenizer = .{ .hftokenizers = try zml.tokenizer.hftokenizers.HFTokenizer.fromBytes(bytes) };
-        break :blk tokenizer;
-    };
-    errdefer tokenizer.deinit();
-
-    const prompt = cli.args.prompt orelse "What is the capital of France?";
-    log.info("✅\tPrompt: {s}", .{prompt});
-
-    // Unbuffered writing of the tokens to stdout.
-    var stdout = std.fs.File.stdout().writer(&.{});
-
-    const now = try std.Io.Clock.now(.boot, io);
-    std.log.info("now: {}", .{now.nanoseconds});
-    const seed: u128 = cli.args.seed orelse @intCast(now.nanoseconds);
-    const skip_llama3_encoding = cli.args.@"no-llama3" orelse false;
-
-    try generateText(
-        allocator,
-        io,
-        llama_buffers,
-        prefill_exe,
-        decode_exe,
-        &kv_cache_buffers,
-        tokenizer,
-        config,
-        llama_options,
-        seed,
-        prompt[0..],
-        skip_llama3_encoding,
-        &stdout.interface,
-        platform,
-    );
 }
 
 fn bool_parser(in: []const u8) error{}!bool {

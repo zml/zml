@@ -15,6 +15,7 @@ pub const dtype = @import("dtype.zig");
 pub const Data = dtype.Data;
 pub const DataType = dtype.DataType;
 pub const exe = @import("exe.zig");
+pub const Exe = exe.Exe;
 pub const floats = @import("floats.zig");
 pub const meta = @import("meta.zig");
 pub const mlir = @import("mlirx.zig");
