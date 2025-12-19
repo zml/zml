@@ -51,7 +51,7 @@ pub const LlamaLM = struct {
 
         return .{
             .lm_head = lm_head,
-            .model = try .init(allocator, store.withPrefix("model"), config, options),
+            .model = try .init(allocator, store.withPrefix("model"), config),
             .gen_opts = options.sampling_strategy orelse .{},
             .config = config,
         };
@@ -120,10 +120,6 @@ pub const LlamaLM = struct {
         const next_tokens, const new_rng = zml.nn.sampleTokens(logits, opts, rng);
         return .{ next_tokens, new_rng };
     }
-
-    pub fn increment(_: u8, token_index: Tensor) Tensor {
-        return token_index.addConstant(1).reuseBuffer(token_index);
-    }
 };
 
 pub const Llama = struct {
@@ -139,12 +135,12 @@ pub const Llama = struct {
         .freq_base = 10_000,
     },
 
-    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: LlamaLM.Config, options: LlamaLM.Options) !Llama {
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: LlamaLM.Config) !Llama {
         const layers = try allocator.alloc(TransformerLayer, config.num_hidden_layers);
         errdefer allocator.free(layers);
 
         for (layers, 0..) |*layer, i| {
-            layer.* = try .init(store.withPrefix("layers").withLayer(i), config, options);
+            layer.* = try .init(store.withPrefix("layers").withLayer(i), config);
         }
 
         return .{
@@ -208,10 +204,10 @@ pub const TransformerLayer = struct {
     post_attention_layernorm: RmsNorm,
     mlp: Mlp,
 
-    pub fn init(store: zml.io.TensorStore.View, config: LlamaLM.Config, options: LlamaLM.Options) !TransformerLayer {
+    pub fn init(store: zml.io.TensorStore.View, config: LlamaLM.Config) !TransformerLayer {
         return .{
             .input_layernorm = .init(store.withPrefix("input_layernorm"), config.rms_norm_eps),
-            .self_attn = try .init(store.withPrefix("self_attn"), config, options),
+            .self_attn = try .init(store.withPrefix("self_attn"), config),
             .post_attention_layernorm = .init(store.withPrefix("post_attention_layernorm"), config.rms_norm_eps),
             .mlp = .init(store.withPrefix("mlp")),
         };
@@ -317,8 +313,7 @@ pub const SelfAttn = struct {
         return .init(store.createTensorWithTags("weight", .{ .dout, .d }), store.maybeCreateTensorWithTags("bias", .{.dout}), .d);
     }
 
-    pub fn init(store: zml.io.TensorStore.View, config: LlamaLM.Config, options: LlamaLM.Options) !SelfAttn {
-        _ = options; // autofix
+    pub fn init(store: zml.io.TensorStore.View, config: LlamaLM.Config) !SelfAttn {
         return .{
             .q_proj = initProj(store.withPrefix("q_proj")),
             .k_proj = initProj(store.withPrefix("k_proj")),

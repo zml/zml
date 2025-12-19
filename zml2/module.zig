@@ -186,8 +186,8 @@ pub fn compile(allocator: std.mem.Allocator, io: std.Io, comptime func: anytype,
 
     const loaded_executable = compileModuleToPjrtExecutable(arena.allocator(), io, platform, compilation_context.module, null) catch unreachable;
 
-    log.warn("******** ZML generated MLIR ********", .{});
-    log.warn("{f}", .{compilation_context.module.operation()});
+    log.debug("******** ZML generated MLIR ********", .{});
+    log.debug("{f}", .{compilation_context.module.operation()});
 
     const num_devices = sharding.num_partitions * sharding.num_replicas;
     const exe = try Exe.init(allocator, platform, loaded_executable, result.input_info.shapes, result.output_info.shapes, num_devices);

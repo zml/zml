@@ -109,7 +109,7 @@ pub fn generateText(
 
         prefill_exe.call(prefill_args, &prefill_results, io);
 
-        prefill_results.fill(&.{ &prefill_tokens_buffer, kv_cache_buffers, &rng_buffers });
+        prefill_results.fill(.{ &prefill_tokens_buffer, kv_cache_buffers, &rng_buffers });
         try prefill_tokens_buffer.toSlice(prefill_tokens_slice, io);
         generated_token_slice.items(u32)[0] = prefill_tokens_slice.items(u32)[prompt_tok.len - 1];
     }
@@ -161,7 +161,7 @@ pub fn generateText(
 
         decode_exe.call(decode_args, &decode_results, io);
 
-        decode_results.fill(&.{ &current_token_buffer, kv_cache_buffers, &rng_buffers });
+        decode_results.fill(.{ &current_token_buffer, kv_cache_buffers, &rng_buffers });
 
         // extract the generated token from the buffer
         try current_token_buffer.toSlice(generated_token_slice, io);
@@ -283,7 +283,7 @@ pub fn main() !void {
     const llama_options: llama.LlamaLM.Options = .{
         .max_seq_len = seq_len,
         .sampling_strategy = .{
-            .topk = 1,
+            .topk = 2,
             .temperature = 1.0,
         },
     };
@@ -346,8 +346,9 @@ pub fn main() !void {
     // Unbuffered writing of the tokens to stdout.
     var stdout = std.fs.File.stdout().writer(&.{});
 
-    //const seed: u128 = cli.args.seed orelse @bitCast(std.time.nanoTimestamp());
-    const seed: u128 = cli.args.seed orelse 0;
+    const now = try std.Io.Clock.now(.boot, io);
+    std.log.info("now: {}", .{now.nanoseconds});
+    const seed: u128 = cli.args.seed orelse @intCast(now.nanoseconds);
     const skip_llama3_encoding = cli.args.@"no-llama3" orelse false;
 
     try generateText(
