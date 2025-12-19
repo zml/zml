@@ -11,7 +11,7 @@ pub const DirectIoError = error{
 } || std.posix.FcntlError;
 
 fn canUseDirectIO() bool {
-    if (builtin.target.os.tag == .linux) {
+    if (comptime builtin.target.os.tag == .linux) {
         return @hasField(std.posix.O, "DIRECT");
     }
     return false;

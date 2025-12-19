@@ -10,6 +10,7 @@ pub const std_options: std.Options = .{
     .log_scope_levels = &[_]std.log.ScopeLevel{
         .{ .scope = .@"zml/safetensors", .level = .debug },
         .{ .scope = .@"zml/io/vfs/http", .level = .info },
+        .{ .scope = .@"zml/io/vfs/hf", .level = .info },
     },
 };
 
@@ -48,7 +49,7 @@ pub fn main() !void {
         allocator,
         threaded.io(),
         .{
-            .direct_io = std.process.hasEnvVarConstant("DIRECT"),
+            .direct_io = true,
             .direct_io_alignment = .fromByteUnits(4 * 1024),
         },
     );
@@ -67,6 +68,7 @@ pub fn main() !void {
         .{
             .request_range_min = 8 * 1024,
             .request_range_max = 128 * 1024 * 1024,
+            .hf_pagination_limit = 100,
             .auth = hf_auth,
         },
     );
@@ -99,7 +101,8 @@ pub fn main() !void {
     };
 
     {
-        const repo = try std.Io.Dir.openDir(.cwd(), io, uri, .{});
+        const local_uri = "hf://openai/gpt-oss-20b@6cee5e8";
+        const repo = try std.Io.Dir.openDir(.cwd(), io, local_uri, .{});
         defer repo.close(io);
 
         const index_file = try repo.openFile(io, "model.safetensors.index.json", .{});
@@ -121,7 +124,8 @@ pub fn main() !void {
     }
 
     {
-        const repo = try std.Io.Dir.openDir(.cwd(), io, uri, .{});
+        const local_uri = "hf://openai/gpt-oss-20b@6cee5e8";
+        const repo = try std.Io.Dir.openDir(.cwd(), io, local_uri, .{});
         defer repo.close(io);
 
         const original_config = try repo.openFile(io, "original/config.json", .{});
@@ -132,7 +136,8 @@ pub fn main() !void {
     }
 
     {
-        const original_uri = try std.fmt.allocPrint(allocator, "{s}/original", .{uri});
+        const local_uri = "hf://openai/gpt-oss-20b@6cee5e8";
+        const original_uri = try std.fmt.allocPrint(allocator, "{s}/original", .{local_uri});
         defer allocator.free(original_uri);
 
         const repo = try std.Io.Dir.openDir(.cwd(), io, original_uri, .{});
@@ -194,58 +199,51 @@ pub fn main() !void {
     //     }
     // }
 
-    // {
-    //     var timer: std.time.Timer = try .start();
-    //     defer {
-    //         const elapsed = timer.read();
-    //         log.info("Completed in {d} ms", .{elapsed / std.time.ns_per_ms});
-    //     }
+    {
+        var pool: MemoryPool = try .init(allocator, threaded.async_limit.toInt() orelse 16, 256 * 1024 * 1024);
+        defer pool.deinit(io);
 
-    //     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, uri);
-    //     defer registry.deinit();
+        var timer: std.time.Timer = try .start();
+        defer {
+            const elapsed = timer.read();
+            log.info("Completed in {d} ms", .{elapsed / std.time.ns_per_ms});
+        }
 
-    //     // var it = registry.iterator();
-    //     // while (it.next()) |entry| {
-    //     //     const tensor = entry.value_ptr.*;
-    //     //     log.info("{f}", .{tensor});
-    //     // }
+        var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, uri);
+        defer registry.deinit();
 
-    //     log.info("Parsed {d} tensors", .{registry.tensors.count()});
+        log.info("Parsed {d} tensors", .{registry.tensors.count()});
 
-    //     {
-    //         var err: ?anyerror = null;
+        var err: ?anyerror = null;
 
-    //         var pool: MemoryPool = try .init(allocator, threaded.async_limit.toInt() orelse 16, 256 * 1024 * 1024);
-    //         defer pool.deinit(io);
+        var group: std.Io.Group = .init;
+        defer group.cancel(io);
 
-    //         var group: std.Io.Group = .init;
-    //         defer group.cancel(io);
+        var timer_async_read: std.time.Timer = try .start();
+        var it = registry.iterator();
 
-    //         var timer_async_read: std.time.Timer = try .start();
-    //         var it = registry.iterator();
-    //         while (it.next()) |entry| {
-    //             const tensor_name = entry.key_ptr.*;
-    //             group.async(io, readTensor, .{ io, &pool, &registry, tensor_name, &err });
-    //         }
+        while (it.next()) |entry| {
+            const tensor_name = entry.key_ptr.*;
+            group.async(io, readTensor, .{ io, &pool, &registry, tensor_name, &err });
+        }
 
-    //         group.wait(io);
+        group.wait(io);
 
-    //         if (err) |e| {
-    //             log.err("Error reading tensor: {any}", .{e});
-    //             return e;
-    //         }
+        if (err) |e| {
+            log.err("Error reading tensor: {any}", .{e});
+            return e;
+        }
 
-    //         const elapsed = timer_async_read.read();
-    //         const read_mb = @as(f64, @floatFromInt(registry.totalBytes())) / (1024.0 * 1024.0);
-    //         const read_time_s = @as(f64, @floatFromInt(elapsed)) / @as(f64, std.time.ns_per_s);
-    //         log.info("Throughput: {d:.2} MB in {d:.2} s = {d:.2} MB/s | {d:.2} Gbps", .{
-    //             read_mb,
-    //             read_time_s,
-    //             read_mb / read_time_s,
-    //             (read_mb * 8.0) / 1024.0 / read_time_s,
-    //         });
-    //     }
-    // }
+        const elapsed = timer_async_read.read();
+        const read_mb = @as(f64, @floatFromInt(registry.totalBytes())) / (1024.0 * 1024.0);
+        const read_time_s = @as(f64, @floatFromInt(elapsed)) / @as(f64, std.time.ns_per_s);
+        log.info("Throughput: {d:.2} MB in {d:.2} s = {d:.2} MB/s | {d:.2} Gbps", .{
+            read_mb,
+            read_time_s,
+            read_mb / read_time_s,
+            (read_mb * 8.0) / 1024.0 / read_time_s,
+        });
+    }
 
     // {
     //     const root_dir = try vfs.openAbsoluteDir(io, "https://storage.googleapis.com", .{});
