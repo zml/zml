@@ -253,6 +253,8 @@ fn parseConfig(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !std.j
     };
     errdefer parsed_config.deinit();
 
+    log.info("Loaded model config [{D}]", .{timer.read()});
+
     return parsed_config;
 }
 
