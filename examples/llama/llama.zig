@@ -155,12 +155,48 @@ pub const Llama = struct {
     }
 
     pub fn loadBuffers(self: *const Llama, allocator: std.mem.Allocator, io: std.Io, store: zml.io.TensorStore.View, platform: zml.Platform) !zml.Bufferized(Llama) {
-        const layers = try allocator.alloc(zml.Bufferized(TransformerLayer), self.layers.len);
+        var layers = try allocator.alloc(zml.Bufferized(TransformerLayer), self.layers.len);
         errdefer allocator.free(layers);
 
-        for (layers, 0..) |*layer, i| {
-            layer.* = try zml.io.loadBuffersFromId(allocator, io, self.layers[i], store.withLayer(i), platform);
+        var group: std.Io.Group = .init;
+        defer group.cancel(io);
+
+        var errors = try allocator.alloc(?anyerror, self.layers.len);
+        defer allocator.free(errors);
+        for (errors) |*e| e.* = null;
+
+        const load_struct = struct {
+            pub fn load_layer(
+                group_ptr: *std.Io.Group,
+                allocator_: std.mem.Allocator,
+                io_: std.Io,
+                platform_: zml.Platform,
+                layer_template_: TransformerLayer,
+                store_view: zml.io.TensorStore.View,
+                idx: usize,
+                out_layers: *[]zml.Bufferized(TransformerLayer),
+                out_errors: *[]?anyerror,
+            ) void {
+                const out_layers_ref = out_layers.*;
+                const out_errors_ref = out_errors.*;
+                const res = zml.io.loadBuffersFromId(allocator_, io_, layer_template_, store_view.withLayer(idx), platform_) catch |err| {
+                    out_errors_ref[idx] = err;
+                    group_ptr.cancel(io_);
+                    return;
+                };
+                out_layers_ref[idx] = res;
+            }
+        }.load_layer;
+
+        for (self.layers, 0..) |layer_template, i| {
+            group.async(io, load_struct, .{ &group, allocator, io, platform, layer_template, store, i, &layers, &errors });
         }
+
+        group.wait(io);
+
+        for (errors) |e| if (e != null) {
+            log.err("Error loading Llama model layer: {any}", .{e.?});
+        };
 
         return .{
             .embed_tokens = try zml.io.loadBuffersFromId(allocator, io, self.embed_tokens, store.withPrefix("embed_tokens"), platform),
