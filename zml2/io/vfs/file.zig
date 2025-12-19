@@ -41,7 +41,7 @@ fn switchToBufferedIO(file: std.fs.File) DirectIoError!void {
 }
 
 fn switchToDirectIO(file: std.Io.File) DirectIoError!void {
-    if (canUseDirectIO()) {
+    if (builtin.os.tag == .linux and canUseDirectIO()) {
         const flags = try std.posix.fcntl(file.handle, std.posix.F.GETFL, 0);
         const direct_flag: c_int = @bitCast(std.posix.O{ .DIRECT = true });
 
