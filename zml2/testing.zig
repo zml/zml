@@ -16,7 +16,7 @@ pub fn env() Platform {
     if (_platform == null) {
         zml.init();
 
-        _platform = Platform.init(.cpu, std.testing.io, .{}) catch unreachable;
+        _platform = Platform.auto(std.testing.io, .{}) catch unreachable;
     }
 
     return _platform.?;
