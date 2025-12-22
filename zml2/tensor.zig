@@ -1064,12 +1064,6 @@ pub const Tensor = struct {
         return _result(self._shape, op.result(0));
     }
 
-    // TODO(Corentin)
-    /// See torch.matmul
-    //pub fn matmul(lhs: Tensor, rhs: Tensor) Tensor {
-    //    return @import("torch.zig").matmul(lhs, rhs);
-    //}
-
     /// Matrix multiplication, where contracting axes are specified using their tags.
     /// eg dot(.{ .a, .b, .c }, .{ .a, .c, .d }, .c) -> .{ .a, .b, .d }
     /// Axes with the same tag on both sides, and which aren't contracting,
