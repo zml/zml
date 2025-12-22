@@ -162,8 +162,8 @@ pub fn main() !void {
     log.info("Loaded TensorRegistry [{D}]", .{timer_registry.read()});
 
     var timer_store = try stdx.time.Timer.start();
-    var store: zml.io.TensorStore = .fromRegistry(allocator, &registry, threaded.async_limit);
-    defer store.deinit(io);
+    var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
+    defer store.deinit();
     log.info("Loaded TensorStore [{D}]", .{timer_store.read()});
 
     // Write metadata from the config file into the LlamaLm struct.
