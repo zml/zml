@@ -18,7 +18,8 @@ pub fn isEnabled() bool {
 /// Do it using the official method at:
 /// https://cloud.google.com/compute/docs/instances/detect-compute-engine?hl=en#use_operating_system_tools_to_detect_if_a_vm_is_running_in
 fn isOnGCP(io: std.Io) !bool {
-    _ = io; // autofix
+    // TODO(Corentin): Plug that when fs stuff is merged in std.Io
+    _ = io;
     // TODO: abstract that in the client and fail init
     const GoogleComputeEngine = "Google Compute Engine";
 

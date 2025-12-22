@@ -16,7 +16,8 @@ pub fn isEnabled() bool {
 }
 
 fn hasNvidiaDevice(io: std.Io) bool {
-    _ = io; // autofix
+    // TODO(Corentin): Plug that when fs stuff is merged in std.Io
+    _ = io;
     std.fs.accessAbsolute("/dev/nvidiactl", .{ .read = true }) catch return false;
     return true;
 }

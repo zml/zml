@@ -14,13 +14,15 @@ pub fn isEnabled() bool {
 }
 
 fn hasNeuronDevice(io: std.Io) bool {
-    _ = io; // autofix
+    // TODO(Corentin): Plug that when fs stuff is merged in std.Io
+    _ = io;
     std.fs.accessAbsolute("/dev/neuron0", .{ .read = true }) catch return false;
     return true;
 }
 
 fn isRunningOnEC2(io: std.Io) !bool {
-    _ = io; // autofix
+    // TODO(Corentin): Plug that when fs stuff is merged in std.Io
+    _ = io;
     const AmazonEC2 = "Amazon EC2";
 
     var f = try std.fs.openFileAbsolute("/sys/devices/virtual/dmi/id/sys_vendor", .{ .read = true });

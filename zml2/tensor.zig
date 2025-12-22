@@ -145,9 +145,9 @@ pub const Tensor = struct {
 
     // TODO(Corentin)
     pub fn withSharding(self: Tensor, axes_: anytype) Tensor {
-        _ = self; // autofix
-        _ = axes_; // autofix
-        @panic("TODO");
+        _ = self;
+        _ = axes_;
+        @panic("Unimplemented");
     }
 
     pub fn toMemory(self: Tensor, kind: Memory) Tensor {
@@ -730,8 +730,7 @@ pub const Tensor = struct {
         return _result(self._shape, op.result(0));
     }
 
-    fn convolution(self: Tensor, other: Tensor, opts: dialects.stablehlo.ConvolutionOpts, loc: *const mlir.Location) Tensor {
-        _ = loc; // autofix
+    fn convolution(self: Tensor, other: Tensor, opts: dialects.stablehlo.ConvolutionOpts) Tensor {
         stdx.debug.assert(self.rank() == other.rank(), "convolution expects tensor ranks to match, got {} and {}", .{ self.rank(), other.rank() });
         const N = self.rank();
         stdx.debug.guard(opts.window_strides.len == N - 2, @src());
@@ -866,7 +865,7 @@ pub const Tensor = struct {
             .output_spatial_dimensions = &.{opts.output_spatial_dimensions},
             .feature_group_count = opts.feature_group_count,
             .batch_group_count = opts.batch_group_count,
-        }, .unknown(mlirCtx()));
+        });
     }
 
     /// Returns a Tensor containing the result of the 2D convolution of 'input' by 'kernel'.
@@ -910,7 +909,7 @@ pub const Tensor = struct {
             .output_spatial_dimensions = opts.output_spatial_dimensions,
             .feature_group_count = opts.feature_group_count,
             .batch_group_count = opts.batch_group_count,
-        }, .unknown(mlirCtx()));
+        });
     }
 
     /// Returns a Tensor containing the element-wise addition of the input Tensors.
@@ -3977,10 +3976,9 @@ pub const Tensor = struct {
     /// Only for debug purpose, it inserts device to host synchronization
     /// so it will slow down the program execution.
     pub fn print(input: Tensor) Tensor {
-        _ = input; // autofix
-        unreachable;
         // TODO(Corentin)
-        //return callback.call(callback.Print, .{input}, &.{input.shape()})[0];
+        _ = input;
+        @panic("Unimplemented");
     }
 
     fn mlirCtx() *mlir.Context {

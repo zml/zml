@@ -14,7 +14,8 @@ pub fn isEnabled() bool {
 }
 
 fn hasRocmDevices(io: std.Io) bool {
-    _ = io; // autofix
+    // TODO(Corentin): Plug that when fs stuff is merged in std.Io
+    _ = io;
     inline for (&.{ "/dev/kfd", "/dev/dri" }) |path| {
         std.fs.accessAbsolute(path, .{ .read = true }) catch return false;
     }

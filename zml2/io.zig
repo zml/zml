@@ -334,8 +334,8 @@ pub const SimpleWriter = struct {
     }
 
     pub fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-        _ = data; // autofix
-        _ = splat; // autofix
+        _ = data;
+        _ = splat;
         const writer: *SimpleWriter = @alignCast(@fieldParentPtr("interface", w));
         stdx.debug.assert(writer.offset + w.end <= writer.shape.byteSize(), "Can't write more data than required", .{});
         const is_last_transfer = writer.offset + w.end >= writer.shape.byteSize();

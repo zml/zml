@@ -69,7 +69,7 @@ pub const Buffer = struct {
         //    stdx.debug.assert(@rem(shape_.dim(ax), n_partitions) == 0, "Buffer.from({f}) expects the sharding axis {} to have a dimension divisble by the number of devices ({}).", .{ shape_, ax, n_partitions });
         //    break :cs @divExact(shape_.dim(ax), n_partitions);
         //} else 0;
-        //_ = chunk_size; // autofix
+        //_ = chunk_size;
 
         const buffer_type = pjrt.bufferTypeFromDtype(shape_.dtype());
         const byte_strides = shape_.computeByteStrides();
