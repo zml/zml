@@ -77,14 +77,14 @@ pub fn main() !void {
 
     // Ignore first run
     {
-        exe.call(exe_args, &exe_results, io);
+        exe.call(exe_args, &exe_results);
         var result = exe_results.get(zml.Buffer);
         defer result.deinit();
     }
 
     // call our executable module
     timer.reset();
-    exe.call(exe_args, &exe_results, io);
+    exe.call(exe_args, &exe_results);
     var result = exe_results.get(zml.Buffer);
     defer result.deinit();
     const elapsed_ns = timer.lap();

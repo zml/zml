@@ -397,7 +397,7 @@ pub fn generateText(
 
         prefill_args.set(.{ llama_buffers, prefill_tokens_buffer, prefill_token_pos_buffer, kv_cache_buffers, rng_buffers });
 
-        prefill_exe.call(prefill_args, &prefill_results, io);
+        prefill_exe.call(prefill_args, &prefill_results);
 
         prefill_results.fill(.{ &prefill_tokens_buffer, kv_cache_buffers, &rng_buffers });
         try prefill_tokens_buffer.toSlice(prefill_tokens_slice, io);
@@ -449,7 +449,7 @@ pub fn generateText(
         // call to generate the next token
         decode_args.set(.{ llama_buffers, current_token_buffer, token_pos_buffer, kv_cache_buffers, rng_buffers });
 
-        decode_exe.call(decode_args, &decode_results, io);
+        decode_exe.call(decode_args, &decode_results);
 
         decode_results.fill(.{ &current_token_buffer, kv_cache_buffers, &rng_buffers });
 

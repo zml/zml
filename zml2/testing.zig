@@ -129,7 +129,7 @@ pub fn autoCall(allocator: std.mem.Allocator, io: std.Io, exe: *const zml.exe.Ex
     defer results.deinit(allocator);
 
     args.set(inputs);
-    exe.call(args, &results, io);
+    exe.callOpts(io, args, &results, .{ .wait = true });
 
     var output: zml.Bufferized(stdx.meta.FnResult(func)) = undefined;
     results.fill(.{&output});

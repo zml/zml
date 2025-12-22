@@ -82,7 +82,7 @@ pub fn main() !void {
     args.set(.{ model_buffers, input_buffer });
 
     // Call our executable module
-    exe.call(args, &results, io);
+    exe.call(args, &results);
 
     // Retrieve the output
     var result = results.get(zml.Buffer);

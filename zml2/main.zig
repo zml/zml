@@ -99,7 +99,7 @@ pub fn main() !void {
     defer results.deinit(allocator);
 
     args.set(.{ model_buffers, input_buffer });
-    exe.call(args, &results, io);
+    exe.call(args, &results);
 
     const output = results.get(zml.Buffer);
     defer output.deinit();

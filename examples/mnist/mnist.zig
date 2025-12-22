@@ -143,7 +143,7 @@ pub fn main() !void {
         args.set(.{ mnist_buffers, input_buffer });
 
         printDigit(sample);
-        exe.call(args, &results, io);
+        exe.call(args, &results);
 
         var result: zml.Buffer = results.get(zml.Buffer);
         defer result.deinit();

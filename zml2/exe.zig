@@ -197,15 +197,17 @@ pub const Exe = struct {
         }
     };
 
-    pub fn call(self: *const Exe, arguments: Arguments, results_: *Results, io: std.Io) void {
+    pub fn internalCall(self: *const Exe, io: ?std.Io, arguments: Arguments, results_: *Results, opts: CallOpts) void {
+        stdx.debug.assert(opts.wait == false or io != null, "io should not be null when waiting for execution completion", .{});
         var events = [_]?*pjrt.Event{null} ** Platform.MAX_NUM_DEVICES;
         const sharding = self.platform.sharding();
+        const events_slice: ?[]?*pjrt.Event = if (opts.wait) events[0..sharding.num_partitions] else null;
 
         self.exe.execute(self.platform.pjrt_api, .{
             .arguments = arguments.flat_buffers.buffers,
             .num_args = arguments.expected_shapes.len,
             .results = results_.flat_buffers.buffers,
-            .events = events[0..sharding.num_partitions],
+            .events = events_slice,
             // this allows to tell a specific buffer shouldn't be donated,
             // even if it has been marked as "can be donated" during compilation.
             // TODO: expose it ?
@@ -215,10 +217,24 @@ pub const Exe = struct {
             std.debug.panic("PJRT_LoadedExecutable_Execute failed with: {}", .{err});
         };
 
-        for (events[0..sharding.num_partitions]) |e| {
-            if (e) |ev| {
-                ev.await(self.platform.pjrt_api, io) catch unreachable;
+        if (opts.wait) {
+            for (events_slice.?) |e| {
+                if (e) |ev| {
+                    ev.await(self.platform.pjrt_api, io.?) catch unreachable;
+                }
             }
         }
+    }
+
+    pub const CallOpts = struct {
+        wait: bool = false,
+    };
+
+    pub fn callOpts(self: *const Exe, io: std.Io, arguments: Arguments, results_: *Results, opts: CallOpts) void {
+        return self.internalCall(io, arguments, results_, opts);
+    }
+
+    pub fn call(self: *const Exe, arguments: Arguments, results_: *Results) void {
+        return self.internalCall(null, arguments, results_, .{});
     }
 };
