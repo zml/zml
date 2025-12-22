@@ -148,10 +148,10 @@ pub const ScatterMlp = struct {
         Mlp.unloadBuffers(&self.mlp);
     }
 
-    pub fn forward(self: ScatterMlp, input: zml.Tensor, indices: zml.Tensor, empty: zml.Tensor) zml.Tensor {
+    pub fn forward(self: ScatterMlp, input: zml.Tensor, indices: zml.Tensor, empty: zml.Tensor) struct { zml.Tensor, zml.Tensor, zml.Tensor } {
         const scattered = self.scatter.forward(input, indices, empty);
         const output = self.mlp.forward(scattered);
-        return output.reuseBuffer(empty);
+        return .{ output.reuseBuffer(empty), indices.reuseBuffer(indices), input.reuseBuffer(input) };
     }
 };
 
@@ -346,7 +346,7 @@ pub fn main() !void {
         }
     }
 
-    log.info("Indices scatter slice: {any}", .{indices_scatter_slice.items(u32)[0..8192]});
+    log.info("Indices scatter slice: {any}", .{indices_scatter_slice.items(u32)[0..10]});
 
     // std.log.info("Input: {any}", .{slice.items(f32)[0..8192]});
     // std.log.info("Indices: {any}", .{indices_slice.items(u32)[0..]});
@@ -382,29 +382,40 @@ pub fn main() !void {
         var scatter_mlp_results = try exe_scatter_mlp.results(allocator);
         defer scatter_mlp_results.deinit(allocator);
 
-        const indices_scatter_buffer: zml.Buffer = try .from(io, platform, indices_scatter_shape, indices_scatter_slice.data, .{ .wait = true, .memory = .host_pinned });
+        var indices_scatter_buffer: zml.Buffer = try .from(io, platform, indices_scatter_shape, indices_scatter_slice.data, .{ .wait = true, .memory = .host_pinned });
         defer indices_scatter_buffer.deinit();
-
-        const input_buffer: zml.Buffer = try .from(io, platform, slice.shape, slice.data, .{ .wait = true, .memory = .host_pinned });
+        log.info("Indices scatter buffer: {any}", .{indices_scatter_buffer.devicePtr()});
+        var input_buffer: zml.Buffer = try .from(io, platform, slice.shape, slice.data, .{ .wait = true, .memory = .host_pinned });
         defer input_buffer.deinit();
+        log.info("Input buffer: {any}", .{input_buffer.devicePtr()});
 
         var empty_buffer: zml.Buffer = try .fromSlice(io, platform, empty_slice);
+        log.info("Empty buffer: {any}", .{empty_buffer.devicePtr()});
+
         defer empty_buffer.deinit();
-        
 
         //warmup
         scatter_mlp_args.set(.{ model_buffers, input_buffer, indices_scatter_buffer, empty_buffer });
         exe_scatter_mlp.call(scatter_mlp_args, &scatter_mlp_results, io);
-        empty_buffer = scatter_mlp_results.get(zml.Buffer);
+        empty_buffer, indices_scatter_buffer, input_buffer = scatter_mlp_results.get(struct { zml.Buffer, zml.Buffer, zml.Buffer });
 
         //Real call
         scatter_mlp_args.set(.{ model_buffers, input_buffer, indices_scatter_buffer, empty_buffer });
         exe_scatter_mlp.call(scatter_mlp_args, &scatter_mlp_results, io);
-        empty_buffer = scatter_mlp_results.get(zml.Buffer);
+        empty_buffer, indices_scatter_buffer, input_buffer = scatter_mlp_results.get(struct { zml.Buffer, zml.Buffer, zml.Buffer });
+        scatter_mlp_args.set(.{ model_buffers, input_buffer, indices_scatter_buffer, empty_buffer });
+        exe_scatter_mlp.call(scatter_mlp_args, &scatter_mlp_results, io);
+        empty_buffer, indices_scatter_buffer, input_buffer = scatter_mlp_results.get(struct { zml.Buffer, zml.Buffer, zml.Buffer });
+        scatter_mlp_args.set(.{ model_buffers, input_buffer, indices_scatter_buffer, empty_buffer });
+        exe_scatter_mlp.call(scatter_mlp_args, &scatter_mlp_results, io);
+        empty_buffer, indices_scatter_buffer, input_buffer = scatter_mlp_results.get(struct { zml.Buffer, zml.Buffer, zml.Buffer });
+
+        log.info("Indices scatter buffer after call: {any}", .{indices_scatter_buffer.devicePtr()});
+        log.info("Input buffer after call: {any}", .{input_buffer.devicePtr()});
+        log.info("Empty buffer after call: {any}", .{empty_buffer.devicePtr()});
 
         const output_slice = try empty_buffer.toSliceAlloc(allocator, io);
         defer output_slice.free(allocator);
-        std.log.info("Output scatter mlp: {any}", .{output_slice.items(f32)[0..10]});
     }
 
     // {
