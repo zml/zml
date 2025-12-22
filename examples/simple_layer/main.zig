@@ -1,6 +1,5 @@
 const std = @import("std");
 
-const async = @import("async");
 const zml = @import("zml");
 
 /// Model definition
@@ -18,77 +17,82 @@ const Layer = struct {
 };
 
 pub fn main() !void {
-    try async.AsyncThread.main(std.heap.c_allocator, asyncMain);
-}
-
-pub fn asyncMain() !void {
     // Short lived allocations
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // Arena allocator for BufferStore etc.
-    var arena_state = std.heap.ArenaAllocator.init(allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
+    // Io runtime
+    var threaded: std.Io.Threaded = .init(allocator);
+    defer threaded.deinit();
 
-    var context = try zml.Context.init();
-    defer context.deinit();
+    const io = threaded.io();
 
-    const platform = context.autoPlatform(.{});
-    context.printAvailablePlatforms(platform);
+    // Initialize ZML globally
+    zml.init();
+    defer zml.deinit();
+
+    // Auto-select platform
+    const platform: zml.Platform = try .auto(io, .{});
+
+    // Initialize model instance and input
+    const model: Layer = .{
+        .weight = zml.Tensor.init(.{4}, .f32),
+        .bias = zml.Tensor.init(.{4}, .f32),
+    };
+    const input: zml.Tensor = .init(.{4}, .f32);
+
+    // Compile our executable
+    var exe = try platform.compileModel(allocator, io, Layer.forward, model, .{input});
+    defer exe.deinit();
 
     // Our weights and bias to use
-    var weights = [4]f32{ 2.0, 2.0, 2.0, 2.0 };
-    var bias = [4]f32{ 1.0, 2.0, 3.0, 4.0 };
-    const input_shape = zml.Shape.init(.{4}, .f32);
+    const weights_data = [4]f32{ 2.0, 2.0, 2.0, 2.0 };
+    const weights_slice: zml.ConstSlice = .init(model.weight.shape(), std.mem.sliceAsBytes(&weights_data));
+    var weights_buffer: zml.Buffer = try .fromSlice(io, platform, weights_slice);
 
-    // We manually produce a BufferStore. You would not normally do that.
-    // A BufferStore is usually created by loading model data from a file.
-    var store: zml.aio.BufferStore = .init(allocator);
-    defer store.deinit();
-    try store.buffers.put(store.arena.allocator(), "weight", zml.HostBuffer.fromArray(&weights));
-    try store.buffers.put(store.arena.allocator(), "bias", zml.HostBuffer.fromArray(&bias));
+    const bias_data = [4]f32{ 1.0, 2.0, 3.0, 4.0 };
+    const bias_slice: zml.ConstSlice = .init(model.bias.?.shape(), std.mem.sliceAsBytes(&bias_data));
+    var bias_buffer: zml.Buffer = try .fromSlice(io, platform, bias_slice);
 
-    // A clone of our model, consisting of shapes. We only need shapes for compiling.
-    // We use the BufferStore to infer the shapes.
-    var model_shapes = try zml.aio.populateModel(Layer, allocator, store);
-    model_shapes.weight = model_shapes.weight.withSharding(.{-1});
-    model_shapes.bias = model_shapes.bias.?.withSharding(.{-1});
+    // Don't forget to deinit buffers
+    defer weights_buffer.deinit();
+    defer bias_buffer.deinit();
 
-    // Start compiling. This uses the inferred shapes from the BufferStore.
-    // The shape of the input tensor, we have to pass in manually.
-    var compilation = try async.async(zml.compileModel, .{ allocator, Layer.forward, model_shapes, .{input_shape}, platform });
+    // Init the bufferized version of the model
+    const model_buffers: zml.Bufferized(Layer) = .{
+        .weight = weights_buffer,
+        .bias = bias_buffer,
+    };
 
-    // Produce a bufferized weights struct from the fake BufferStore.
-    // This is like the inferred shapes, but with actual values.
-    // We will need to send those to the computation device later.
-    var model_weights = try zml.aio.loadModelBuffers(Layer, model_shapes, store, arena, platform);
-    defer zml.aio.unloadBuffers(&model_weights); // for good practice
-
-    // Wait for compilation to finish
-    const compiled = try compilation.await();
-
-    // pass the model weights to the compiled module to create an executable module
-    var executable = compiled.prepare(model_weights);
-    defer executable.deinit();
-
-    // prepare an input buffer
-    // Here, we use zml.HostBuffer.fromSlice to show how you would create a HostBuffer
-    // with a specific shape from an array.
-    // For situations where e.g. you have an [4]f32 array but need a .{2, 2} input shape.
-    var input = [4]f32{ 5.0, 5.0, 5.0, 5.0 };
-    var input_buffer = try zml.Buffer.from(platform, zml.HostBuffer.fromSlice(input_shape, &input), .{});
+    // Prepare an input buffer
+    var input_data = [4]f32{ 5.0, 5.0, 5.0, 5.0 };
+    const input_slice: zml.Slice = .init(input.shape(), std.mem.sliceAsBytes(&input_data));
+    var input_buffer: zml.Buffer = try .fromSlice(io, platform, input_slice);
     defer input_buffer.deinit();
 
-    // call our executable module
-    var result: zml.Buffer = executable.call(.{input_buffer});
+    // Create the Arguments and Results struct to interact with the executable
+    var args = try exe.args(allocator);
+    defer args.deinit(allocator);
+
+    var results = try exe.results(allocator);
+    defer results.deinit(allocator);
+
+    // Set the arguments from the bufferized version of the model and the input buffer
+    args.set(.{ model_buffers, input_buffer });
+
+    // Call our executable module
+    exe.call(args, &results, io);
+
+    // Retrieve the output
+    var result = results.get(zml.Buffer);
     defer result.deinit();
 
     // fetch the result to CPU memory
-    const cpu_result = try result.toHostAlloc(arena);
+    const cpu_result = try result.toSliceAlloc(allocator, io);
+    defer cpu_result.free(allocator);
     std.debug.print(
-        "\nThe result of {any} * {any} + {any} = {any}\n",
-        .{ &weights, &input, &bias, cpu_result.items(f32) },
+        "\nThe result of {d} * {d} + {d} = {d}\n",
+        .{ weights_slice, input_slice, bias_slice, cpu_result },
     );
 }

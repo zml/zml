@@ -8,8 +8,7 @@ zig_binary(
     name = "simple_layer",
     main = "main.zig",
     deps = [
-        "//async",
-        "//zml",
+        "//zml2:zml",
     ],
 )
 
