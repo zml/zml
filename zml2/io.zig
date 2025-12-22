@@ -350,9 +350,21 @@ pub fn loadBuffersFromId(allocator: std.mem.Allocator, io: std.Io, model: anytyp
             defer reader.deinit();
 
             var writer = try context_.transfer.getWriter(context_.io, context_.index, context_.buffer_writer);
-
+            var timer = try stdx.time.Timer.start();
             _ = try reader.interface.streamRemaining(&writer.interface);
             try writer.interface.flush();
+
+            const elapsed = timer.read().ns;
+            const read_mb = @as(f64, @floatFromInt(tensor_desc.byteSize())) / (1024.0 * 1024.0);
+            const read_time_ms = @as(f64, @floatFromInt(elapsed)) / std.time.ns_per_ms;
+            const read_time_s = read_time_ms / 1000.0;
+            const throughput_mb_s = read_mb / read_time_s;
+            log.info("Read {s} {d:.2} MB in {d:.2} ms ({d:.2} MB/s)", .{
+                tensor_desc.name,
+                read_mb,
+                read_time_ms,
+                throughput_mb_s,
+            });
 
             buffer.* = try context_.transfer.getBuffer(context_.index);
             context_.index += 1;

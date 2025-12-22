@@ -62,10 +62,10 @@ pub const LlamaLM = struct {
     }
 
     pub fn loadBuffers(self: *const LlamaLM, allocator: std.mem.Allocator, io: std.Io, store: zml.io.TensorStore.View, platform: zml.Platform) !zml.Bufferized(LlamaLM) {
+        const model = try self.model.loadBuffers(allocator, io, store.withPrefix("model"), platform);
+
         const lm_head = if (self.lm_head) |lm_head| try zml.io.loadBuffersFromId(allocator, io, lm_head, store.withPrefix("lm_head"), platform) else null;
         // TODO(Corentin): errdefer
-
-        const model = try self.model.loadBuffers(allocator, io, store.withPrefix("model"), platform);
 
         return .{
             .lm_head = lm_head,
@@ -165,8 +165,8 @@ pub const Llama = struct {
         defer allocator.free(errors);
         for (errors) |*e| e.* = null;
 
-        const load_struct = struct {
-            pub fn load_layer(
+        const AsyncLoadBuffers = struct {
+            pub fn call(
                 group_ptr: *std.Io.Group,
                 allocator_: std.mem.Allocator,
                 io_: std.Io,
@@ -186,10 +186,40 @@ pub const Llama = struct {
                 };
                 out_layers_ref[idx] = res;
             }
-        }.load_layer;
+        }.call;
+
+        var embed_buf: zml.Bufferized(zml.nn.TokenEmbedding) = undefined;
+        var norm_buf: zml.Bufferized(RmsNorm) = undefined;
+        var embed_err: ?anyerror = null;
+        var norm_err: ?anyerror = null;
+
+        const AsyncLoadEmbed = struct {
+            pub fn call(group_ptr: *std.Io.Group, allocator_: std.mem.Allocator, io_: std.Io, platform_: zml.Platform, template: zml.nn.TokenEmbedding, store_view: zml.io.TensorStore.View, out: *zml.Bufferized(zml.nn.TokenEmbedding), out_err: *?anyerror) void {
+                const res = zml.io.loadBuffersFromId(allocator_, io_, template, store_view, platform_) catch |err| {
+                    out_err.* = err;
+                    group_ptr.cancel(io_);
+                    return;
+                };
+                out.* = res;
+            }
+        }.call;
+
+        const AsyncLoadNorm = struct {
+            pub fn call(group_ptr: *std.Io.Group, allocator_: std.mem.Allocator, io_: std.Io, platform_: zml.Platform, template: RmsNorm, store_view: zml.io.TensorStore.View, out: *zml.Bufferized(RmsNorm), out_err: *?anyerror) void {
+                const res = zml.io.loadBuffersFromId(allocator_, io_, template, store_view, platform_) catch |err| {
+                    out_err.* = err;
+                    group_ptr.cancel(io_);
+                    return;
+                };
+                out.* = res;
+            }
+        }.call;
+
+        group.async(io, AsyncLoadEmbed, .{ &group, allocator, io, platform, self.embed_tokens, store.withPrefix("embed_tokens"), &embed_buf, &embed_err });
+        group.async(io, AsyncLoadNorm, .{ &group, allocator, io, platform, self.norm, store.withPrefix("norm"), &norm_buf, &norm_err });
 
         for (self.layers, 0..) |layer_template, i| {
-            group.async(io, load_struct, .{ &group, allocator, io, platform, layer_template, store, i, &layers, &errors });
+            group.async(io, AsyncLoadBuffers, .{ &group, allocator, io, platform, layer_template, store, i, &layers, &errors });
         }
 
         group.wait(io);
@@ -198,10 +228,13 @@ pub const Llama = struct {
             log.err("Error loading Llama model layer: {any}", .{e.?});
         };
 
+        if (embed_err != null) return embed_err.?;
+        if (norm_err != null) return norm_err.?;
+
         return .{
-            .embed_tokens = try zml.io.loadBuffersFromId(allocator, io, self.embed_tokens, store.withPrefix("embed_tokens"), platform),
+            .embed_tokens = embed_buf,
             .layers = layers,
-            .norm = try zml.io.loadBuffersFromId(allocator, io, self.norm, store.withPrefix("norm"), platform),
+            .norm = norm_buf,
         };
     }
 
