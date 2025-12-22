@@ -7,18 +7,11 @@ const stdx = @import("stdx");
 
 const log = std.log.scoped(.@"zml/runtimes/neuron");
 
-fn findFreeTcpPort() !u16 {
-    var address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0);
-    const sockfd = try std.posix.socket(
-        std.posix.AF.INET,
-        std.posix.SOCK.STREAM,
-        std.posix.IPPROTO.TCP,
-    );
-    defer std.posix.close(sockfd);
-    var socklen = address.getOsSockLen();
-    try std.posix.bind(sockfd, &address.any, socklen);
-    try std.posix.getsockname(sockfd, &address.any, &socklen);
-    return address.getPort();
+fn findFreeTcpPort(io: std.Io) !u16 {
+    var address: std.Io.net.IpAddress = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } };
+    var socket: std.Io.net.Socket = try address.bind(io, .{ .ip6_only = false, .mode = .stream, .protocol = .tcp });
+    defer socket.close(io);
+    return socket.address.getPort();
 }
 
 pub export fn zmlxneuron_dlopen(filename: [*c]const u8, flags: c_int) ?*anyopaque {
@@ -41,11 +34,11 @@ pub export fn zmlxneuron_dlopen(filename: [*c]const u8, flags: c_int) ?*anyopaqu
 }
 
 extern fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-fn setupNeuronEnv() !void {
+fn setupNeuronEnv(io: std.Io) !void {
     var buf: [256]u8 = undefined;
     _ = setenv(
         "NEURON_RT_ROOT_COMM_ID",
-        try std.fmt.bufPrintZ(&buf, "127.0.0.1:{d}", .{try findFreeTcpPort()}),
+        try std.fmt.bufPrintZ(&buf, "127.0.0.1:{d}", .{try findFreeTcpPort(io)}),
         1,
     );
     _ = setenv(
@@ -152,7 +145,9 @@ fn getPjrtApi() !*c.PJRT_Api {
         "..",
     });
 
-    try setupNeuronEnv();
+    var io_: std.Io.Threaded = .init_single_threaded;
+
+    try setupNeuronEnv(io_.io());
     try setupPythonEnv(sandbox_path);
 
     Static.inner = blk: {

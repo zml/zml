@@ -12,39 +12,11 @@ pub fn makeTempDir(buf: []u8, prefix: []const u8) ![]const u8 {
         tmp_dir,
         std.fs.path.sep_str_posix,
         prefix,
-        std.time.microTimestamp(),
+        0, //TODO(corendos): use whatever is the replacement for std.time.microTimestamp()
     });
     try std.fs.makeDirAbsolute(ret);
     return ret;
 }
-
-var module_def: c.PyModuleDef = .{
-    .m_base = .{},
-    .m_name = "libneuronxla",
-    .m_size = 0,
-    .m_methods = @constCast(&[_]c.PyMethodDef{
-        .{
-            .ml_name = "hook",
-            .ml_meth = @ptrCast(&hook),
-            .ml_flags = c.METH_NOARGS,
-            .ml_doc = "Return a greeting from Zig.",
-        },
-        .{
-            .ml_name = "neuronx_cc",
-            .ml_meth = @ptrCast(&neuronx_cc),
-            .ml_flags = c.METH_FASTCALL,
-            .ml_doc = "Return a greeting from Zig.",
-        },
-        .{},
-    }),
-    .m_slots = @constCast(&[_]c.PyModuleDef_Slot{
-        .{ .slot = c.Py_mod_exec, .value = @ptrCast(@constCast(&module_exec)) },
-        .{},
-    }),
-    .m_traverse = null,
-    .m_clear = null,
-    .m_free = null,
-};
 
 fn module_exec(module: ?*c.PyObject) callconv(.c) c_int {
     _ = module;
@@ -103,7 +75,7 @@ fn wrapNeffAsCustomCall(allocator: std.mem.Allocator, hlo_code: []const u8, neff
         defer neff_file.close();
         const stat = try neff_file.stat();
         const neff_buf = try allocator.alloc(u8, stat.size);
-        const size = try neff_file.readAll(neff_buf);
+        const size = try neff_file.read(neff_buf);
         break :blk upb.stringView(neff_buf[0..size]);
     });
 
@@ -245,5 +217,26 @@ fn neuronx_cc(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t) 
 }
 
 pub export fn PyInit_libneuronxla() callconv(.c) ?*c.PyObject {
+    var module_def = std.mem.zeroes(c.PyModuleDef);
+    module_def.m_name = "libneuronxla";
+    module_def.m_methods = @constCast(&[_]c.PyMethodDef{
+        .{
+            .ml_name = "hook",
+            .ml_meth = @ptrCast(&hook),
+            .ml_flags = c.METH_NOARGS,
+            .ml_doc = "Return a greeting from Zig.",
+        },
+        .{
+            .ml_name = "neuronx_cc",
+            .ml_meth = @ptrCast(&neuronx_cc),
+            .ml_flags = c.METH_FASTCALL,
+            .ml_doc = "Return a greeting from Zig.",
+        },
+        std.mem.zeroes(c.PyMethodDef),
+    });
+    module_def.m_slots = @constCast(&[_]c.PyModuleDef_Slot{
+        .{ .slot = c.Py_mod_exec, .value = @ptrCast(@constCast(&module_exec)) },
+        std.mem.zeroes(c.PyModuleDef_Slot),
+    });
     return c.PyModuleDef_Init(&module_def);
 }
