@@ -767,7 +767,7 @@ pub const LoadedExecutable = opaque {
         num_args: usize,
         arguments: []const [*]const *const Buffer,
         results: []const [*]*Buffer,
-        events: []?*Event,
+        events: ?[]?*Event,
         non_donatable_input_indices: []const i64 = &.{},
         context: ?*ExecuteContext,
     };
@@ -790,7 +790,7 @@ pub const LoadedExecutable = opaque {
             .num_devices = @as(usize, @intCast(args.arguments.len)),
             .num_args = args.num_args,
             .output_lists = @as([*c]const [*c]?*c.PJRT_Buffer, @ptrCast(args.results.ptr)),
-            .device_complete_events = @as([*c]?*c.PJRT_Event, @ptrCast(args.events.ptr)),
+            .device_complete_events = @as([*c]?*c.PJRT_Event, if (args.events) |ev| @ptrCast(ev.ptr) else null),
             .execute_device = null,
         });
     }

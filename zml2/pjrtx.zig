@@ -301,7 +301,7 @@ pub const LoadedExecutable = opaque {
         arguments: []const [*]const *const Buffer,
         num_args: usize,
         results: []const [*]*Buffer,
-        events: []?*Event,
+        events: ?[]?*Event,
         non_donatable_input_indices: []const i64 = &.{},
         context: ?*ExecuteContext,
     };
