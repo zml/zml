@@ -4105,7 +4105,7 @@ test "Tensor.maxPool2d" {
     try zml.testing.expectEqualShapes(Shape.init(.{ 2, 2, 2, 4 }, .f32), result.values.shape());
     try zml.testing.expectEqualShapes(Shape.init(.{ 2, 2, 2, 4 }, .i32), result.indices.shape());
     var buffer: [2][2][2][4]f32 = undefined;
-    _ = try result.values.toSlice(.init(result.values.shape(), std.mem.asBytes(&buffer)), std.testing.io);
+    _ = try result.values.toSlice(std.testing.io, .init(result.values.shape(), std.mem.asBytes(&buffer)));
     try std.testing.expectEqualDeep(
         [2][2][2][4]f32{
             .{

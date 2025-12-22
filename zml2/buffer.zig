@@ -227,13 +227,13 @@ pub const Buffer = struct {
         stdx.debug.assert(self._shape.byteSize() == @sizeOf(T), "Buffer {f} has {d} bytes of data, can't load it to a {s} with {d} bytes", .{ self, self._shape.byteSize(), @typeName(T), @sizeOf(T) });
         var res: T = undefined;
 
-        try self.toSlice(.init(self.shape(), std.mem.asBytes(&res)), io);
+        try self.toSlice(io, .init(self.shape(), std.mem.asBytes(&res)));
 
         return res;
     }
 
     /// Copies the content of the Buffer to the provided slice.
-    pub fn toSlice(self: Buffer, slice: Slice, io: std.Io) !void {
+    pub fn toSlice(self: Buffer, io: std.Io, slice: Slice) !void {
         //stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
         const maybe_event = try self._shards.get(0).toHostBuffer(self._api, slice.data);
         if (maybe_event) |event| {
@@ -247,7 +247,7 @@ pub const Buffer = struct {
         const slice = try Slice.alloc(allocator, self.shape());
         errdefer slice.free(allocator);
 
-        try self.toSlice(slice, io);
+        try self.toSlice(io, slice);
 
         return slice;
     }

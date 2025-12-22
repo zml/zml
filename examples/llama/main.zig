@@ -400,7 +400,7 @@ pub fn generateText(
         prefill_exe.call(prefill_args, &prefill_results);
 
         prefill_results.fill(.{ &prefill_tokens_buffer, kv_cache_buffers, &rng_buffers });
-        try prefill_tokens_buffer.toSlice(prefill_tokens_slice, io);
+        try prefill_tokens_buffer.toSlice(io, prefill_tokens_slice);
         generated_token_slice.items(u32)[0] = prefill_tokens_slice.items(u32)[prompt_tok.len - 1];
     }
 
@@ -454,7 +454,7 @@ pub fn generateText(
         decode_results.fill(.{ &current_token_buffer, kv_cache_buffers, &rng_buffers });
 
         // extract the generated token from the buffer
-        try current_token_buffer.toSlice(generated_token_slice, io);
+        try current_token_buffer.toSlice(io, generated_token_slice);
     }
     const duration = timer.read();
     const duration_s = stdx.math.divFloat(f64, duration.ns, std.time.ns_per_s);
