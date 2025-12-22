@@ -256,7 +256,7 @@ pub const TensorRegistry = struct {
             if (gop.found_existing) {
                 gop.value_ptr.*.deinit(allocator);
                 gop.value_ptr.* = value;
-                log.warn("Overwrote existing metadata key={s} with value={f}", .{ key, value });
+                log.info("Overwrote existing metadata key={s} with value={f}", .{ key, value });
             } else {
                 gop.value_ptr.* = value;
                 log.debug("Added new metadata key={s} with value={f}", .{ key, value });
@@ -620,7 +620,6 @@ pub const ModelEntrypoint = struct {
 pub fn resolveModelEntrypoint(allocator: std.mem.Allocator, io: std.Io, repo: ModelRepo) ModelPathResolutionError!ModelEntrypoint {
     {
         const index_name = "model.safetensors.index.json";
-        log.warn("Trying to resolve model entrypoint: {s}{s}", .{ repo.path, index_name });
         if (repo.dir.openFile(io, index_name, .{ .mode = .read_only })) |index_file| {
             const index_path = try std.fmt.allocPrint(allocator, "{s}{s}", .{ repo.path, index_name });
             return .{ .file = index_file, .path = index_path };
@@ -629,7 +628,6 @@ pub fn resolveModelEntrypoint(allocator: std.mem.Allocator, io: std.Io, repo: Mo
 
     {
         const model_name = "model.safetensors";
-        log.warn("Trying to resolve model entrypoint: {s}{s}", .{ repo.path, model_name });
         if (repo.dir.openFile(io, model_name, .{ .mode = .read_only })) |model_file| {
             const model_path = try std.fmt.allocPrint(allocator, "{s}{s}", .{ repo.path, model_name });
             return .{ .file = model_file, .path = model_path };
