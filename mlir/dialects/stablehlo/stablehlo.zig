@@ -771,9 +771,19 @@ pub fn custom_call(ctx: mlir.Context, inputs: []const mlir.Value, opts: CustomCa
 
     {
         var output_operand_aliases: stdx.BoundedArray(mlir.Attribute, MAX_RESULTS) = .{};
-        for (opts.output_operand_aliases) |alias| {
+        for (opts.output_operand_aliases, 0..) |operand_idx, output_idx| {
+            var tuple_indices_storage: [1]i64 = undefined;
+            var tuple_indices: []const i64 = &.{};
+
+            // If the result is a tuple, we specify the index within the tuple
+            // If not, we leave it empty.
+            if (res_types.len > 1) {
+                tuple_indices_storage[0] = @intCast(output_idx);
+                tuple_indices = &tuple_indices_storage;
+            }
+
             output_operand_aliases.appendAssumeCapacity(
-                OutputOperandAliasAttribute.init(ctx, &.{}, alias, &.{}).asAttr(),
+                OutputOperandAliasAttribute.init(ctx, tuple_indices, operand_idx, &.{}).asAttr(),
             );
         }
         attrs.appendAssumeCapacity(.{ "output_operand_aliases", .array(ctx, output_operand_aliases.constSlice()) });

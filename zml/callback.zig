@@ -168,6 +168,28 @@ fn proxy(Callback: type) pjrt.ffi.Handler {
 fn CallbackImpl(comptime Callback: type, call_frame: *pjrt.ffi.CallFrame) ?*pjrt.ffi.Error {
     if (call_frame.registeringHook()) return null;
 
+    if (@hasDecl(Callback, "rawCall")) {
+        const execution_context = call_frame.ctx;
+        const user_ctx_opaque = execution_context.getContext(Callback.type_id, call_frame.api) catch {
+            log.err("{} user data was never given for current executable", .{Callback});
+            return .create(call_frame.api, .failed_precondition, "failed to fetch user context" ++ @typeName(Callback));
+        };
+        const user_ctx: *Callback = @ptrCast(@alignCast(user_ctx_opaque));
+        const platform: Platform = user_ctx.platform;
+
+        // Hook to get a cuda stream in the callback.
+        if (@hasField(Callback, "stream") and platform.target != .cpu) {
+            const stream = call_frame.api.stream(execution_context);
+            user_ctx.stream = stream;
+        }
+
+        @call(.auto, Callback.rawCall, .{ user_ctx, call_frame }) catch |err| {
+            log.err("Callback {} failed with {}", .{ Callback, err });
+            return .create(call_frame.api, .internal, "internal callback error");
+        };
+        return .ok;
+    }
+
     const opts = Callback.callback_config;
 
     const execution_context = call_frame.ctx;
