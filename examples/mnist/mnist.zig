@@ -70,7 +70,7 @@ pub fn main() !void {
     var threaded: std.Io.Threaded = .init(allocator);
     defer threaded.deinit();
 
-    var vfs_file: zml.io.VFS.File = .init(threaded.io());
+    var vfs_file: zml.io.VFS.File = .init(allocator, threaded.io(), .{});
 
     var vfs: zml.io.VFS = .init(allocator, threaded.io());
     defer vfs.deinit();
@@ -83,7 +83,7 @@ pub fn main() !void {
     defer zml.deinit();
 
     // Auto-select platform
-    const platform: zml.Platform = try .auto(threaded.io(), .{});
+    const platform: zml.Platform = try .auto(io, .{});
 
     // Parse program args
     const process_args = try std.process.argsAlloc(allocator);
