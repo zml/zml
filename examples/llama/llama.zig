@@ -71,17 +71,6 @@ pub const LlamaLM = struct {
         var group: std.Io.Group = .init;
         defer group.cancel(io);
 
-        const AsyncLoadModel = struct {
-            pub fn call(group_ptr: *std.Io.Group, allocator_: std.mem.Allocator, io_: std.Io, platform_: zml.Platform, model_template: Llama, store_view: zml.io.TensorStore.View, out_model: *zml.Bufferized(Llama), out_err: *?anyerror) void {
-                const res = model_template.loadBuffers(allocator_, io_, store_view, platform_) catch |err| {
-                    out_err.* = err;
-                    group_ptr.cancel(io_);
-                    return;
-                };
-                out_model.* = res;
-            }
-        }.call;
-
         const AsyncLoadLmHead = struct {
             pub fn call(group_ptr: *std.Io.Group, allocator_: std.mem.Allocator, io_: std.Io, platform_: zml.Platform, lm_head_template: zml.nn.Linear, store_view: zml.io.TensorStore.View, out_lm_head: *?zml.Bufferized(zml.nn.Linear), out_err: *?anyerror) void {
                 const res = zml.io.loadBuffersFromId(allocator_, io_, lm_head_template, store_view, platform_) catch |err| {
@@ -93,11 +82,22 @@ pub const LlamaLM = struct {
             }
         }.call;
 
-        group.async(io, AsyncLoadModel, .{ &group, allocator, io, platform, self.model, store.withPrefix("model"), &model_buf, &model_err });
+        const AsyncLoadModel = struct {
+            pub fn call(group_ptr: *std.Io.Group, allocator_: std.mem.Allocator, io_: std.Io, platform_: zml.Platform, model_template: Llama, store_view: zml.io.TensorStore.View, out_model: *zml.Bufferized(Llama), out_err: *?anyerror) void {
+                const res = model_template.loadBuffers(allocator_, io_, store_view, platform_) catch |err| {
+                    out_err.* = err;
+                    group_ptr.cancel(io_);
+                    return;
+                };
+                out_model.* = res;
+            }
+        }.call;
 
         if (self.lm_head) |lm_head_template| {
             group.async(io, AsyncLoadLmHead, .{ &group, allocator, io, platform, lm_head_template, store.withPrefix("lm_head"), &lm_head_buf, &lm_head_err });
         }
+
+        group.async(io, AsyncLoadModel, .{ &group, allocator, io, platform, self.model, store.withPrefix("model"), &model_buf, &model_err });
 
         group.wait(io);
 
