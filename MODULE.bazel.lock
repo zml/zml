@@ -112,7 +112,6 @@
     "https://bazel-registry.zml.ai/modules/rules_cc/0.0.9/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_cc/0.1.1/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_cc/0.2.0/MODULE.bazel": "not found",
-    "https://bazel-registry.zml.ai/modules/rules_cc/0.2.11/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_cc/0.2.14/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_cc/0.2.16/MODULE.bazel": "not found",
     "https://bazel-registry.zml.ai/modules/rules_cc/0.2.4/MODULE.bazel": "not found",
@@ -330,7 +329,6 @@
     "https://bcr.bazel.build/modules/rules_cc/0.0.9/MODULE.bazel": "836e76439f354b89afe6a911a7adf59a6b2518fafb174483ad78a2a2fde7b1c5",
     "https://bcr.bazel.build/modules/rules_cc/0.1.1/MODULE.bazel": "2f0222a6f229f0bf44cd711dc13c858dad98c62d52bd51d8fc3a764a83125513",
     "https://bcr.bazel.build/modules/rules_cc/0.2.0/MODULE.bazel": "b5c17f90458caae90d2ccd114c81970062946f49f355610ed89bebf954f5783c",
-    "https://bcr.bazel.build/modules/rules_cc/0.2.11/MODULE.bazel": "e94f24f065bf2191dba2dace951814378b66a94bb3bcc48077492fe0508059b5",
     "https://bcr.bazel.build/modules/rules_cc/0.2.14/MODULE.bazel": "353c99ed148887ee89c54a17d4100ae7e7e436593d104b668476019023b58df8",
     "https://bcr.bazel.build/modules/rules_cc/0.2.16/MODULE.bazel": "9242fa89f950c6ef7702801ab53922e99c69b02310c39fb6e62b2bd30df2a1d4",
     "https://bcr.bazel.build/modules/rules_cc/0.2.16/source.json": "d03d5cde49376d87e14ec14b666c56075e5e3926930327fd5d0484a1ff2ac1cc",
@@ -1194,7 +1192,7 @@
     },
     "@@rules_rust+//crate_universe:extensions.bzl%crate": {
       "general": {
-        "bzlTransitiveDigest": "xnOdcJlDn8jAdyIY4BnC1iO+osURpMjNcjvqwmM3hfE=",
+        "bzlTransitiveDigest": "NvjljZ+5m2nc1Qpf7ekjzs+FJrjYYY9DwXvwuXnippI=",
         "usagesDigest": "mup6mgSFatk34Q0znMZPpIEOFZyk9v3xf6jRIXEFTxc=",
         "recordedFileInputs": {
           "@@//zml/tokenizer/hftokenizers/Cargo.lock": "d78ffab37ef69bf8ff45a4d686b25175f30e8fed4d8375612e84dcf6db0cfc9c",

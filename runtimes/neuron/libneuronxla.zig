@@ -136,6 +136,7 @@ fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t)
         .{ "1.0", "inf1" },
         .{ "2.0", "trn1" },
         .{ "3.0", "trn2" },
+        .{ "4.0", "trn3" },
     }).get(platform_version) orelse {
         log.err("Unknown platform version: {s}\n", .{platform_version});
         return error.UnknownPlatformVersion;
@@ -216,10 +217,9 @@ fn neuronx_cc(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t) 
     };
 }
 
-pub export fn PyInit_libneuronxla() callconv(.c) ?*c.PyObject {
-    var module_def = std.mem.zeroes(c.PyModuleDef);
-    module_def.m_name = "libneuronxla";
-    module_def.m_methods = @constCast(&[_]c.PyMethodDef{
+var module_def = std.mem.zeroInit(c.PyModuleDef, .{
+    .m_name = "libneuronxla",
+    .m_methods = @constCast(&[_]c.PyMethodDef{
         .{
             .ml_name = "hook",
             .ml_meth = @ptrCast(&hook),
@@ -233,10 +233,13 @@ pub export fn PyInit_libneuronxla() callconv(.c) ?*c.PyObject {
             .ml_doc = "Return a greeting from Zig.",
         },
         std.mem.zeroes(c.PyMethodDef),
-    });
-    module_def.m_slots = @constCast(&[_]c.PyModuleDef_Slot{
+    }),
+    .m_slots = @constCast(&[_]c.PyModuleDef_Slot{
         .{ .slot = c.Py_mod_exec, .value = @ptrCast(@constCast(&module_exec)) },
         std.mem.zeroes(c.PyModuleDef_Slot),
-    });
+    }),
+});
+
+pub export fn PyInit_libneuronxla() callconv(.c) ?*c.PyObject {
     return c.PyModuleDef_Init(&module_def);
 }
