@@ -46,6 +46,10 @@ _NEURON_PACKAGES = {
             src = "lib/libncfw.so",
             soname = "libncfw.so.2",
         ),
+        packages.filegroup(
+            name = "libnrtucode_extisa",
+            srcs = ["lib/libnrtucode_extisa.so"],
+        ),
     ]),
     "aws-neuronx-collectives": "\n".join([
         packages.filegroup(
