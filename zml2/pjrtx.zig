@@ -239,35 +239,20 @@ pub const Event = opaque {
             return;
         }
 
-        var mutex: std.Io.Mutex = .init;
-        var condvar: std.Io.Condition = .{};
-        var done: bool = false;
-
         var ctx = struct {
             err: ?*pjrt.Error = null,
-            mutex: *std.Io.Mutex,
-            condvar: *std.Io.Condition,
-            done: *bool,
+            event: std.Io.Event = .unset,
             io: std.Io,
-        }{ .mutex = &mutex, .condvar = &condvar, .done = &done, .io = io };
+        }{ .io = io };
 
-        try self.inner().onReady(api, &(struct {
+        try self.inner().onReady(api, struct {
             fn call(err: ?*pjrt.Error, user_arg: ?*anyopaque) callconv(.c) void {
                 const ctx_: *@TypeOf(ctx) = @ptrCast(@alignCast(user_arg.?));
                 ctx_.err = err;
-                {
-                    ctx_.mutex.lock(ctx_.io) catch unreachable;
-                    defer ctx_.mutex.unlock(ctx_.io);
-                    ctx_.done.* = true;
-                }
-
-                ctx_.condvar.signal(ctx_.io);
+                ctx_.event.set(ctx_.io);
             }
-        }.call), &ctx);
-        mutex.lock(io) catch unreachable;
-        while (!done) {
-            ctx.condvar.wait(io, &mutex) catch unreachable;
-        }
+        }.call, &ctx);
+        ctx.event.waitUncancelable(io);
 
         if (ctx.err) |e| {
             defer e.deinit(api);

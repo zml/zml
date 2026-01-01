@@ -1,6 +1,6 @@
 const std = @import("std");
-const stdx = @import("stdx");
 
+const stdx = @import("stdx");
 const zml = @import("zml");
 
 const log = std.log.scoped(.mnist);
@@ -67,17 +67,19 @@ pub fn main() !void {
 
     //const allocator = gpa.allocator();
 
-    var threaded: std.Io.Threaded = .init(allocator);
+    var threaded: std.Io.Threaded = .init(allocator, .{});
     defer threaded.deinit();
 
-    var vfs_file: zml.io.VFS.File = .init(allocator, threaded.io(), .{});
+    // var vfs_file: zml.io.VFS.File = .init(allocator, threaded.io(), .{});
 
-    var vfs: zml.io.VFS = .init(allocator, threaded.io());
-    defer vfs.deinit();
+    // var vfs: zml.io.VFS = .init(allocator, threaded.io());
+    // defer vfs.deinit();
 
-    try vfs.register("file", vfs_file.io());
+    // try vfs.register("file", vfs_file.io());
 
-    const io = vfs.io();
+    // const io = vfs.io();
+    //
+    const io = threaded.io();
 
     zml.init();
     defer zml.deinit();

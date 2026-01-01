@@ -1,9 +1,9 @@
 const std = @import("std");
 
-const Shape = @import("shape.zig").Shape;
 const DataType = @import("dtype.zig").DataType;
-
+const Shape = @import("shape.zig").Shape;
 const Dims = Shape.DimsArray;
+
 const StringBuilder = std.ArrayListUnmanaged(u8);
 
 pub const Tensors = std.StringArrayHashMapUnmanaged(Tensor);
@@ -477,7 +477,7 @@ pub fn parseSafetensorsIndexFiles(
         });
     }
 
-    group.wait(io);
+    try group.await(io);
 
     if (err) |e| {
         log.err("Error parsing safetensors index files: {any}", .{e});
