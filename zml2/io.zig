@@ -1,20 +1,19 @@
-const builtin = @import("builtin");
 const std = @import("std");
+const builtin = @import("builtin");
 
 const stdx = @import("stdx");
-
 pub const VFS = @import("io").VFS;
 
-const log = std.log.scoped(.@"zml/io");
-
-const safetensors = @import("safetensors.zig");
-const Tensor = @import("tensor.zig").Tensor;
-const Shape = @import("shape.zig").Shape;
-const Platform = @import("platform.zig").Platform;
 const Buffer = @import("buffer.zig").Buffer;
-const meta = @import("meta.zig");
 const Bufferized = @import("zml.zig").Bufferized;
+const meta = @import("meta.zig");
 const pjrt = @import("pjrtx.zig");
+const Platform = @import("platform.zig").Platform;
+const safetensors = @import("safetensors.zig");
+const Shape = @import("shape.zig").Shape;
+const Tensor = @import("tensor.zig").Tensor;
+
+const log = std.log.scoped(.@"zml/io");
 
 pub const TensorStore = struct {
     registry: *safetensors.TensorRegistry,

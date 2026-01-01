@@ -79,7 +79,7 @@ pub fn main_016() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
 
-    var threaded = std.Io.Threaded.init(arena.allocator());
+    var threaded: std.Io.Threaded = .init(arena.allocator(), .{});
     defer threaded.deinit();
     const io = threaded.io();
 

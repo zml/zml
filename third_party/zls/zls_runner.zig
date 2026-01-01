@@ -7,21 +7,9 @@ const std = @import("std");
 const runfiles = @import("runfiles");
 const bazel_builtin = @import("bazel_builtin");
 
-fn getRandomFilename(buf: *[std.fs.max_name_bytes]u8, extension: []const u8) ![]const u8 {
-    const random_bytes_count = 12;
-    const sub_path_len = comptime std.fs.base64_encoder.calcSize(random_bytes_count);
-
-    var random_bytes: [random_bytes_count]u8 = undefined;
-    std.crypto.random.bytes(&random_bytes);
-    var random_name: [sub_path_len]u8 = undefined;
-    _ = std.fs.base64_encoder.encode(&random_name, &random_bytes);
-
-    const fmt_template = "/tmp/{s}{s}";
-    const fmt_args = .{
-        @as([]const u8, &random_name),
-        extension,
-    };
-    return std.fmt.bufPrint(buf, fmt_template, fmt_args) catch @panic("OOM");
+fn getRandomFilename(io: std.Io, buf: []u8, extension: []const u8) ![]const u8 {
+    const now = try std.Io.Clock.real.now(io);
+    return std.fmt.bufPrint(buf, "/tmp/{d}{s}", .{ now.nanoseconds, extension }) catch @panic("OOM");
 }
 
 const Config = struct {
@@ -43,10 +31,12 @@ pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     const allocator = arena.allocator();
 
-    var threaded: std.Io.Threaded = .init(gpa);
+    var threaded: std.Io.Threaded = .init(gpa, .{});
     defer threaded.deinit();
 
-    var r_ = try runfiles.Runfiles.create(.{ .allocator = allocator, .io = threaded.io() }) orelse
+    const io = threaded.io();
+
+    var r_ = try runfiles.Runfiles.create(.{ .allocator = allocator, .io = io }) orelse
         return error.RunfilesNotFound;
     defer r_.deinit(allocator);
 
@@ -91,15 +81,15 @@ pub fn main() !void {
         .global_cache_path = global_cache_path,
     };
 
-    var buf: [std.fs.max_name_bytes]u8 = undefined;
-    const tmp_file_path = try getRandomFilename(&buf, ".json");
+    var buf: [std.Io.Dir.max_name_bytes]u8 = undefined;
+    const tmp_file_path = try getRandomFilename(io, &buf, ".json");
 
     {
-        var tmp_file = try std.fs.createFileAbsolute(tmp_file_path, .{});
-        defer tmp_file.close();
+        var tmp_file = try std.Io.Dir.createFileAbsolute(io, tmp_file_path, .{});
+        defer tmp_file.close(io);
 
         var out_buf: [4096]u8 = undefined;
-        var tmp_file_writer = tmp_file.writer(&out_buf);
+        var tmp_file_writer = tmp_file.writer(io, &out_buf);
 
         const formatter = std.json.fmt(config, .{ .whitespace = .indent_2 });
 

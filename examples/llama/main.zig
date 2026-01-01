@@ -40,7 +40,7 @@ pub fn main() !void {
 
     //const allocator = gpa.allocator();
 
-    var threaded: std.Io.Threaded = .init(allocator);
+    var threaded: std.Io.Threaded = .init(allocator, .{});
     defer threaded.deinit();
 
     var vfs_file: zml.io.VFS.File = .init(allocator, threaded.io(), .{});
