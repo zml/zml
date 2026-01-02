@@ -35,55 +35,11 @@ pub fn main() !void {
     log.info("LLama was compiled with {}", .{@import("builtin").mode});
 
     const allocator = std.heap.c_allocator;
-    //var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    //defer _ = gpa.deinit();
-
-    //const allocator = gpa.allocator();
 
     var threaded: std.Io.Threaded = .init(allocator, .{});
     defer threaded.deinit();
 
-    var vfs_file: zml.io.VFS.File = .init(allocator, threaded.io(), .{});
-
-    var http_client: std.http.Client = .{
-        .allocator = allocator,
-        .io = threaded.io(),
-        .connection_pool = .{
-            .free_size = threaded.async_limit.toInt() orelse 16,
-        },
-    };
-
-    try http_client.initDefaultProxies(allocator);
-    defer http_client.deinit();
-
-    var vfs_http: zml.io.VFS.HTTP = try .init(allocator, threaded.io(), &http_client, .{});
-    defer vfs_http.deinit();
-
-    var hf_auth: zml.io.VFS.HF.Auth = try .auto(allocator, threaded.io());
-    defer hf_auth.deinit(allocator);
-
-    var hf_vfs: zml.io.VFS.HF = try .init(
-        allocator,
-        threaded.io(),
-        &http_client,
-        .{
-            .request_range_min = 8 * 1024,
-            .request_range_max = 128 * 1024 * 1024,
-            .hf_pagination_limit = 100,
-            .auth = hf_auth,
-        },
-    );
-    defer hf_vfs.deinit();
-
-    var vfs: zml.io.VFS = .init(allocator, threaded.io());
-    defer vfs.deinit();
-
-    try vfs.register("file", vfs_file.io());
-    try vfs.register("http", vfs_http.io());
-    try vfs.register("https", vfs_http.io());
-    try vfs.register("hf", hf_vfs.io());
-
-    const io = vfs.io();
+    const io = threaded.io();
 
     zml.init();
     defer zml.deinit();
@@ -96,7 +52,7 @@ pub fn main() !void {
     };
     var diag: clap.Diagnostic = .{};
     var stderr_buffer: [1024]u8 = undefined;
-    var stderr = std.fs.File.stderr().writer(&stderr_buffer);
+    var stderr = std.Io.File.stderr().writer(io, &stderr_buffer);
     defer stderr.interface.flush() catch {};
 
     var cli = clap.parse(clap.Help, &params, parsers, .{
@@ -213,7 +169,7 @@ pub fn main() !void {
     log.info("✅\tPrompt: {s}", .{prompt});
 
     // Unbuffered writing of the tokens to stdout.
-    var stdout = std.fs.File.stdout().writer(&.{});
+    var stdout = std.Io.File.stdout().writer(io, &.{});
 
     const now = try std.Io.Clock.now(.boot, io);
     const seed: u128 = cli.args.seed orelse @intCast(now.nanoseconds);
