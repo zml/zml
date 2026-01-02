@@ -196,7 +196,7 @@ pub const HF = struct {
         }
     }
 
-    pub fn performRead(self: *HF, handle: *Handle, data: [][]u8, offset: u64) std.Io.File.Reader.Error!usize {
+    pub fn performRead(self: *HF, handle: *Handle, data: []const []u8, offset: u64) std.Io.File.Reader.Error!usize {
         if (offset >= handle.size) {
             log.info("EOF", .{});
             return 0;
@@ -231,22 +231,16 @@ pub const HF = struct {
         };
 
         const reader = resp.reader(&.{});
-        var total_n: usize = 0;
-        while (true) {
-            total_n += reader.readSliceShort(buffer: []u8) .readVec(data) catch |err| return switch (err) {
-                std.Io.Reader.Error.EndOfStream => return total_n,
-                else => std.Io.File.Reader.Error.Unexpected,
-            };
-        }
+        return reader.readSliceShort(data[0]) catch return std.Io.File.Reader.Error.Unexpected;
     }
 
-    pub fn fileReadPositional(userdata: ?*anyopaque, file: std.Io.File, data: [][]u8, offset: u64) std.Io.File.ReadPositionalError!usize {
+    pub fn fileReadPositional(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
         const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
         const handle = self.getFileHandle(file);
         return try self.performRead(handle, data, offset);
     }
 
-    fn fileReadStreaming(userdata: ?*anyopaque, file: std.Io.File, data: [][]u8) std.Io.File.Reader.Error!usize {
+    fn fileReadStreaming(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8) std.Io.File.Reader.Error!usize {
         const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
         const handle = self.getFileHandle(file);
         const total = try self.performRead(handle, data, handle.pos);
@@ -254,16 +248,18 @@ pub const HF = struct {
         return total;
     }
 
-    fn fileClose(userdata: ?*anyopaque, file: std.Io.File) void {
+    fn fileClose(userdata: ?*anyopaque, files: []const std.Io.File) void {
         const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
-        self.closeHandle(@intCast(file.handle)) catch unreachable;
+        for (files) |file| {
+            self.closeHandle(@intCast(file.handle)) catch unreachable;
+        }
     }
 };
 
 pub fn main() !void {
     const allocator = std.heap.smp_allocator;
 
-    var threaded: std.Io.Threaded = .init(allocator);
+    var threaded: std.Io.Threaded = .init(allocator, .{});
     defer threaded.deinit();
 
     var client: std.http.Client = .{
@@ -289,96 +285,9 @@ pub fn main() !void {
     const buffer = try allocator.alloc(u8, 128 * 1024 * 1024);
     var reader = file.reader(io, &.{});
     defer log.info("DONE", .{});
-    while (true) {
-        const read = try reader.interface.readSliceShort(buffer);
-        log.info("Read {d} bytes", .{read});
-        if (read == 0) break;
-    }
 
-    // var uri_buffer: [512]u8 = undefined;
-    // const repo: HF.Repo = try .parse("Qwen/Qwen3-8B@main/config.json");
+    const stdout: std.Io.File = .stdout();
+    var stdout_writer = stdout.writer(io, buffer);
 
-    // var buffer: [256]u8 = undefined;
-    // const gna = try std.fmt.bufPrint(&buffer, API.TREE_URL_TEMPLATE, repo);
-    // log.info(">>>> repo |{s}|", .{gna});
-
-    // var req = try self.client.request(.GET, try .parse(std.fmt.bufPrint(&uri_buffer, API.TREE_URL_TEMPLATE, .{repo})), .{
-    //     .headers = .{
-    //         .authorization = .{ .override = self.token() },
-    //     },
-    // });
-    // defer req.deinit();
-
-    // req.sendBodiless() catch {
-    //     log.err("Failed to send HTTP request for HF model size API URL", .{});
-    //     return;
-    // };
-
-    // var redirect_buffer: [8 * 1024]u8 = undefined;
-    // var resp = req.receiveHead(&redirect_buffer) catch {
-    //     log.err("Failed to receive HTTP response for HF model size API URL", .{});
-    //     return std.Io.Dir.OpenError.FileNotFound;
-    // };
-
-    // var read_buffer: [8 * 1024]u8 = undefined;
-    // const reader = resp.reader(&read_buffer);
-    // _ = reader; // autofix
-
-    // https://huggingface.co/Qwen/Qwen3-8B/resolve/main/config.json
-    // https://huggingface.co/api/models/meta-llama/Llama-3.1-8B-Instruct/tree/main
-    //
-    // var req = try client.request(.GET, try .parse("https://huggingface.co/Qwen/Qwen3-8B/resolve/main/config.json"), .{
-    //     .headers = .{
-    //         .accept_encoding = .{ .override = "identity" },
-    //         .authorization = .{ .override = "Bearer XXX" },
-    //     },
-    // });
-    // defer req.deinit();
-
-    // req.sendBodiless() catch {
-    //     log.err("Failed to send HTTP request for HF model size API URL", .{});
-    //     return;
-    // };
-
-    // var redirect_buffer: [16 * 1024]u8 = undefined;
-    // var resp = req.receiveHead(&redirect_buffer) catch {
-    //     log.err("Failed to receive HTTP response for HF model size API URL", .{});
-    //     return;
-    // };
-
-    // log.info(">>>> {any}", .{resp.head});
-
-    // var read_buffer: [8 * 1024]u8 = undefined;
-    // const reader = resp.reader(&read_buffer);
-
-    // var json_reader: std.json.Reader = .init(allocator, reader);
-    // const entries = std.json.parseFromTokenSourceLeaky([]API.Entry, allocator, &json_reader, .{ .ignore_unknown_fields = true }) catch |err| {
-    //     log.err("Failed to parse HF model size response: {any}", .{err});
-    //     return;
-    // };
-
-    // log.info(">>>> {any}", .{entries});
-
-    // req.
-    // defer req.deinit();
-
-    // req.sendBodiless() catch {
-    //     log.err("Failed to send HTTP request for HF model size API URL {s}", .{api_url});
-    //     return Error.RequestFailed;
-    // };
-
-    // var resp = req.receiveHead(&redirect_buffer) catch {
-    //     log.err("Failed to receive HTTP response for HF model size API URL {s}", .{api_url});
-    //     return Error.RequestFailed;
-    // };
-
-    // if (resp.head.status != .ok) {
-    //     log.err("Failed to fetch HF model size, got {s} for {s}", .{ @tagName(resp.head.status), api_url });
-    //     return Error.RequestFailed;
-    // }
-
-    // const content_length = resp.head.content_length orelse {
-    //     log.err("Missing Content-Length in HF model size response for {s}", .{api_url});
-    //     return Error.ResponseParsingFailed;
-    // };
+    _ = try reader.interface.stream(&stdout_writer.interface, .unlimited);
 }
