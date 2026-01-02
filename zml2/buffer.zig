@@ -2,6 +2,7 @@ const std = @import("std");
 
 const stdx = @import("stdx");
 
+const constants = @import("constants.zig");
 const ConstSlice = @import("slice.zig").ConstSlice;
 const DataType = @import("dtype.zig").DataType;
 const pjrt = @import("pjrtx.zig");
@@ -10,7 +11,6 @@ const Shape = @import("shape.zig").Shape;
 const Slice = @import("slice.zig").Slice;
 const Target = @import("platform.zig").Target;
 const testing = @import("testing.zig");
-const constants = @import("constants.zig");
 
 const log = std.log.scoped(.zml);
 
@@ -135,9 +135,7 @@ pub const Buffer = struct {
 
     pub fn await(self: Buffer, io: std.Io) !Buffer {
         for (self._shards.constSlice()) |buffer| {
-            if (buffer.getReadyEvent(self._api)) |ev| {
-                try ev.await(self._api, io);
-            }
+            try buffer.getReadyEvent(self._api).await(self._api, io);
         }
 
         return self;

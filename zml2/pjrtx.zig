@@ -23,6 +23,10 @@ pub const NamedValue = pjrt.NamedValue;
 pub const SerializeResult = pjrt.SerializeResult;
 pub const Stream = pjrt.Stream;
 pub const ShapeSpec = pjrt.ShapeSpec;
+pub const Buffer = pjrt.Buffer;
+pub const Event = pjrt.Event;
+pub const LoadedExecutable = pjrt.LoadedExecutable;
+pub const AsyncHostToDeviceTransferManager = pjrt.AsyncHostToDeviceTransferManager;
 
 const zml = struct {
     pub const DataType = @import("dtype.zig").DataType;
@@ -79,7 +83,7 @@ pub const Client = opaque {
         return @ptrCast(try self.inner().createViewOfDeviceBuffer(api, args));
     }
 
-    fn compileSync(self: *const Client, api: *const Api, allocator: std.mem.Allocator, module: *const mlir.Module, compile_options_pb: []const u8) CompileError!*LoadedExecutable {
+    pub fn compile(self: *const Client, api: *const Api, allocator: std.mem.Allocator, io: std.Io, module: *const mlir.Module, compile_options_pb: []const u8) CompileError!*LoadedExecutable {
         var bytecode: std.Io.Writer.Allocating = try .initCapacity(allocator, 4096);
         defer bytecode.deinit();
         module.operation().writeBytecode(.{ .desired_emit_version = 1 }, &bytecode.writer) catch |err| {
@@ -90,9 +94,6 @@ pub const Client = opaque {
             };
         };
 
-        var serialized_buffer: std.Io.Writer.Allocating = try .initCapacity(allocator, 4096);
-        defer serialized_buffer.deinit();
-
         const stablehlo_version = blk: {
             if (api.stablehloCurrentVersion()) |requested_version| {
                 break :blk dialects.stablehlo.smallerVersion(requested_version, dialects.stablehlo.currentVersion());
@@ -100,6 +101,8 @@ pub const Client = opaque {
             break :blk dialects.stablehlo.minimumVersion();
         };
 
+        var serialized_buffer: std.Io.Writer.Allocating = try .initCapacity(allocator, 4096);
+        defer serialized_buffer.deinit();
         dialects.stablehlo.serializePortableArtifact(bytecode.written(), stablehlo_version, &serialized_buffer.writer) catch |err| {
             log.err("failed to serialize to portable artifact: {}", .{err});
             return switch (err) {
@@ -108,16 +111,11 @@ pub const Client = opaque {
             };
         };
 
-        return @ptrCast(try self.inner().compile(api, .{
+        return @ptrCast(try self.inner().compile(api, io, .{
             .bytecode = serialized_buffer.written(),
             .bytecode_format = .mlir,
             .compile_options_pb = compile_options_pb,
         }));
-    }
-
-    pub fn compile(self: *const Client, api: *const Api, allocator: std.mem.Allocator, io: std.Io, module: *const mlir.Module, compile_options_pb: []const u8) CompileError!*LoadedExecutable {
-        var future = io.async(compileSync, .{ self, api, allocator, module, compile_options_pb });
-        return future.await(io);
     }
 
     pub fn addressableMemories(self: *const Client, api: *const Api) []*const Memory {
@@ -143,203 +141,6 @@ pub const Client = opaque {
 
     pub fn createBuffersForAsyncHostToDevice(self: *const Client, api: *const Api, args: CreateBuffersForAsyncHostToDeviceArgs) ApiError!*AsyncHostToDeviceTransferManager {
         return @ptrCast(try self.inner().createBuffersForAsyncHostToDevice(api, args));
-    }
-};
-
-pub const Buffer = opaque {
-    pub const inner = InnerMixin(pjrt.Buffer).inner;
-
-    pub fn deinit(self: *Buffer, api: *const Api) void {
-        self.inner().deinit(api);
-    }
-
-    pub fn getDevice(self: *const Buffer, api: *const Api) ApiError!*Device {
-        return try self.inner().getDevice(api);
-    }
-
-    pub fn delete(self: *Buffer, api: *const Api) void {
-        self.inner().delete(api);
-    }
-
-    pub fn isDeleted(self: *const Buffer, api: *const Api) bool {
-        return self.inner().isDeleted(api);
-    }
-
-    pub fn isOnCpu(self: *const Buffer, api: *const Api) bool {
-        return self.inner().isOnCpu(api);
-    }
-
-    pub fn memory(self: *const Buffer, api: *const Api) *const Memory {
-        return self.inner().memory(api);
-    }
-
-    pub fn toHostBuffer(self: *const Buffer, api: *const Api, dst: []u8) ApiError!?*Event {
-        return @ptrCast(try self.inner().toHostBuffer(api, dst));
-    }
-
-    pub fn getElementType(self: *const Buffer, api: *const Api) zml.DataType {
-        return dtypeFromBufferType(self.inner().getElementType(api));
-    }
-
-    pub fn getDimensions(self: *const Buffer, api: *const Api) []const i64 {
-        return self.inner().getDimensions(api);
-    }
-
-    pub fn getUnpaddedDimensions(self: *const Buffer, api: *const Api) ApiError![]const i64 {
-        return try self.inner().getUnpaddedDimensions(api);
-    }
-
-    pub fn getOnDeviceSizeInBytes(self: *const Buffer, api: *const Api) ApiError!usize {
-        return try self.inner().getOnDeviceSizeInBytes(api);
-    }
-
-    pub fn copyToDevice(self: *const Buffer, api: *const Api, device: *Device) ApiError!*Buffer {
-        return @ptrCast(try self.inner().copyToDevice(api, device));
-    }
-
-    pub fn copyToMemory(self: *const Buffer, api: *const Api, memory_: *const Memory) ApiError!*Buffer {
-        return @ptrCast(try self.inner().copyToMemory(api, memory_));
-    }
-
-    pub fn getReadyEvent(self: *const Buffer, api: *const Api) ?*Event {
-        return @ptrCast(self.inner().getReadyEvent(api));
-    }
-
-    pub fn getOpaqueDeviceMemoryDataPointer(self: *const Buffer, api: *const Api) ApiError!*anyopaque {
-        return try self.inner().getOpaqueDeviceMemoryDataPointer(api);
-    }
-};
-
-pub const Event = opaque {
-    pub const inner = InnerMixin(pjrt.Event).inner;
-
-    pub fn deinit(self: *Event, api: *const Api) void {
-        self.inner().deinit(api);
-    }
-
-    pub fn isReady(self: *const Event, api: *const Api) bool {
-        return self.inner().isReady(api);
-    }
-
-    pub fn getEventError(self: *const Event, api: *const Api) ?*Error {
-        return self.inner().getEventError(api);
-    }
-
-    pub fn awaitBlocking(self: *Event, api: *const Api) ApiError!void {
-        if (self.isReady(api)) {
-            return;
-        }
-        try self.inner().await(api);
-    }
-
-    pub fn await(self: *Event, api: *const Api, io: std.Io) ApiError!void {
-        defer self.deinit(api);
-
-        if (self.isReady(api)) {
-            return;
-        }
-
-        var ctx = struct {
-            err: ?*pjrt.Error = null,
-            event: std.Io.Event = .unset,
-            io: std.Io,
-        }{ .io = io };
-
-        try self.inner().onReady(api, struct {
-            fn call(err: ?*pjrt.Error, user_arg: ?*anyopaque) callconv(.c) void {
-                const ctx_: *@TypeOf(ctx) = @ptrCast(@alignCast(user_arg.?));
-                ctx_.err = err;
-                ctx_.event.set(ctx_.io);
-            }
-        }.call, &ctx);
-        ctx.event.waitUncancelable(io);
-
-        if (ctx.err) |e| {
-            defer e.deinit(api);
-            const err_code = e.getCode(api).toApiError();
-            log.err("{t} {s}", .{ err_code, e.getMessage(api) });
-            return err_code;
-        }
-    }
-};
-
-pub const LoadedExecutable = opaque {
-    const inner = InnerMixin(pjrt.LoadedExecutable).inner;
-
-    pub fn deinit(self: *LoadedExecutable, api: *const Api) void {
-        self.inner().deinit(api);
-    }
-
-    pub fn delete(self: *LoadedExecutable, api: *const Api) void {
-        self.inner().delete(api);
-    }
-
-    pub fn isDeleted(self: *const LoadedExecutable, api: *const Api) bool {
-        return self.inner().isDeleted(api);
-    }
-
-    pub fn getAddressableDevices(self: *const LoadedExecutable, api: *const Api) []const *Device {
-        return self.inner().getAddressableDevices(api);
-    }
-
-    pub const ExecuteArgs = struct {
-        arguments: []const [*]const *const Buffer,
-        num_args: usize,
-        results: []const [*]*Buffer,
-        events: ?[]?*Event,
-        non_donatable_input_indices: []const i64 = &.{},
-        context: ?*ExecuteContext,
-    };
-
-    pub fn execute(self: *const LoadedExecutable, api: *const Api, args: ExecuteArgs) ExecuteError!void {
-        try self.inner().execute(api, pjrt.LoadedExecutable.ExecuteArgs{
-            .num_args = args.num_args,
-            .arguments = @ptrCast(args.arguments),
-            .results = @ptrCast(args.results),
-            .events = @ptrCast(args.events),
-            .non_donatable_input_indices = args.non_donatable_input_indices,
-            .context = args.context,
-        });
-    }
-
-    pub fn getExecutable(self: *LoadedExecutable, api: *const Api) ApiError!*Executable {
-        return try self.inner().getExecutable(api);
-    }
-};
-
-pub const AsyncHostToDeviceTransferManager = opaque {
-    const inner = InnerMixin(pjrt.AsyncHostToDeviceTransferManager).inner;
-
-    pub fn deinit(self: *AsyncHostToDeviceTransferManager, api: *const Api) void {
-        self.inner().deinit(api);
-    }
-
-    pub fn transferData(self: *AsyncHostToDeviceTransferManager, api: *const Api, buffer_index: usize, data: []const u8, offset: i64, is_last_transfer: bool) ApiError!*Event {
-        return @ptrCast(try self.inner().transferData(api, buffer_index, data, offset, is_last_transfer));
-    }
-
-    pub fn retrieveBuffer(self: *AsyncHostToDeviceTransferManager, api: *const Api, buffer_index: usize) ApiError!*Buffer {
-        return @ptrCast(try self.inner().retrieveBuffer(api, buffer_index));
-    }
-
-    pub fn device(self: *AsyncHostToDeviceTransferManager, api: *const Api) ApiError!*Device {
-        return @ptrCast(try self.inner().device(api));
-    }
-
-    pub fn bufferCount(self: *AsyncHostToDeviceTransferManager, api: *const Api) ApiError!usize {
-        return self.inner().bufferCount(api);
-    }
-
-    pub fn bufferSize(self: *AsyncHostToDeviceTransferManager, api: *const Api, buffer_index: usize) ApiError!usize {
-        return self.inner().bufferSize(api, buffer_index);
-    }
-
-    pub fn setBufferError(self: *AsyncHostToDeviceTransferManager, api: *const Api, buffer_index: usize, error_code: ErrorCode, error_message: []const u8) ApiError!void {
-        return self.inner().setBufferError(api, buffer_index, @intFromEnum(error_code), error_message);
-    }
-
-    pub fn addMetadata(self: *AsyncHostToDeviceTransferManager, api: *const Api, transfer_metadata: []const NamedValue) ApiError!void {
-        return self.inner().addMetadata(api, transfer_metadata);
     }
 };
 

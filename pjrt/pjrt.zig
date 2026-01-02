@@ -345,7 +345,7 @@ pub const Client = opaque {
         compile_options_pb: []const u8,
     };
 
-    pub fn compile(self: *const Client, api: *const Api, args: CompileArgs) ApiError!*LoadedExecutable {
+    pub fn compileRaw(self: *const Client, api: *const Api, args: CompileArgs) ApiError!*LoadedExecutable {
         const bytecode_format_ = @tagName(args.bytecode_format);
         const ret = try api.call(.PJRT_Client_Compile, .{
             .program = &pjrtStruct2(c.PJRT_Program, .{
@@ -359,6 +359,11 @@ pub const Client = opaque {
             .client = self.inner(),
         });
         return @ptrCast(ret.executable.?);
+    }
+
+    pub fn compile(self: *const Client, api: *const Api, io: std.Io, args: CompileArgs) ApiError!*LoadedExecutable {
+        var future = io.async(compileRaw, .{ self, api, args });
+        return future.await(io);
     }
 
     pub const BufferFromHostBufferArgs = struct {
@@ -1058,7 +1063,37 @@ pub const Event = opaque {
         return @ptrCast(result);
     }
 
-    pub fn await(self: *const Event, api: *const Api) ApiError!void {
+    pub fn await(self: *Event, api: *const Api, io: std.Io) ApiError!void {
+        defer self.deinit(api);
+
+        if (self.isReady(api)) {
+            return;
+        }
+
+        var ctx = struct {
+            err: ?*Error = null,
+            event: std.Io.Event = .unset,
+            io: std.Io,
+        }{ .io = io };
+
+        try self.onReady(api, struct {
+            fn call(err: ?*Error, user_arg: ?*anyopaque) callconv(.c) void {
+                const ctx_: *@TypeOf(ctx) = @ptrCast(@alignCast(user_arg.?));
+                ctx_.err = err;
+                ctx_.event.set(ctx_.io);
+            }
+        }.call, &ctx);
+        ctx.event.waitUncancelable(io);
+
+        if (ctx.err) |e| {
+            defer e.deinit(api);
+            const err_code = e.getCode(api).toApiError();
+            log.err("{t} {s}", .{ err_code, e.getMessage(api) });
+            return err_code;
+        }
+    }
+
+    pub fn awaitRaw(self: *const Event, api: *const Api) ApiError!void {
         _ = try api.call(.PJRT_Event_Await, .{
             .event = self.inner(),
         });
