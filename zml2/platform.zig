@@ -55,6 +55,33 @@ pub const Platform = struct {
 
     pub const MAX_NUM_DEVICES: u8 = if (runtimes.isEnabled(.tpu)) 32 else 8;
 
+    pub const Device = struct {
+        pub const Iterator = struct {
+            api: *const pjrt.Api,
+            devices: []const *const pjrt.Device,
+            current: usize = 0,
+
+            pub fn next(self: *Iterator) ?Device {
+                if (self.current >= self.devices.len) {
+                    return null;
+                }
+                defer self.current += 1;
+                return .{
+                    .api = self.api,
+                    .device = self.devices[self.current],
+                };
+            }
+        };
+
+        api: *const pjrt.Api,
+        device: *const pjrt.Device,
+
+        pub fn format(self: Device, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+            const description = self.device.getDescription(self.api);
+            try writer.print("{s} ({s})", .{ description.getKind(self.api), description.debugString(self.api) });
+        }
+    };
+
     pub fn init(target: Target, io: std.Io, options: CreateOptions) !Platform {
         const api = try loadOrGetApi(target, io);
 
@@ -73,7 +100,13 @@ pub const Platform = struct {
     }
 
     pub fn auto(io: std.Io, options: CreateOptions) !Platform {
-        const ordered_targets = [_]Target{ .tpu, .neuron, .cuda, .rocm, .cpu };
+        const ordered_targets = [_]Target{
+            .tpu,
+            .neuron,
+            .cuda,
+            .rocm,
+            .cpu,
+        };
         return for (ordered_targets) |target| {
             break init(target, io, options) catch continue;
         } else error.Unavailable;
@@ -102,6 +135,27 @@ pub const Platform = struct {
                 std.log.info("{f}", .{@field(api_map, field.name).?});
             }
         }
+    }
+
+    pub fn devicesIterator(self: Platform) Device.Iterator {
+        return .{
+            .api = self.pjrt_api,
+            .devices = self.getDevices(),
+        };
+    }
+
+    pub fn formatWithDevices(self: Platform, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writer.print("Platform: {s}\n", .{@tagName(self.target)});
+        const devices = self.getDevices();
+        try writer.print("Devices total={d}\n", .{devices.len});
+        for (devices, 0..) |device, i| {
+            const description = device.getDescription(self.pjrt_api);
+            try writer.print("\t#{d}: {s}\n", .{ i, description.getKind(self.pjrt_api) });
+        }
+    }
+
+    pub fn fmtVerbose(self: Platform) std.fmt.Alt(Platform, formatWithDevices) {
+        return .{ .data = self };
     }
 
     pub fn getDevices(self: Platform) []const *const pjrt.Device {
@@ -193,7 +247,7 @@ pub const Platform = struct {
     }
 
     pub fn compileModel(self: Platform, allocator: std.mem.Allocator, io: std.Io, comptime func: anytype, model: stdx.meta.Head(stdx.meta.FnArgs(func)), args: stdx.meta.Tail(stdx.meta.FnArgs(func))) !Exe {
-        return self.compile(allocator, io, func, .{model} ++ args);
+        return self.compileFn(allocator, io, func, .{model} ++ args);
     }
 
     pub fn compileFn(self: Platform, allocator: std.mem.Allocator, io: std.Io, comptime func: anytype, args: stdx.meta.FnArgs(func)) !Exe {

@@ -96,6 +96,12 @@ pub fn main() !void {
     };
     defer platform.deinit();
 
+    log.info("{f}", .{platform.fmtVerbose()});
+    var it = platform.devicesIterator();
+    while (it.next()) |device| {
+        log.info(" - {f}", .{device});
+    }
+
     var registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
     defer registry.deinit();
 
