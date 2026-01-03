@@ -106,7 +106,7 @@ pub fn main() !void {
     log.info("Compiling model to MLIR....", .{});
     var timer = try stdx.time.Timer.start();
     const input: zml.Tensor = .init(.{ 28, 28 }, .u8);
-    var exe = try platform.compileModel(allocator, io, Mnist.forward, mnist_model, .{input});
+    var exe = try platform.compile(allocator, io, mnist_model, .forward, .{input});
     defer exe.deinit();
 
     log.info("✅ Compiled model in {f}", .{timer.read()});

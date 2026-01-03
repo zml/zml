@@ -255,14 +255,14 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: zml.Platform
     // Compile the model twice, one for prefill, one for generation.
     var prefill_future = io.async(struct {
         fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: zml.Platform, llama_model_: llama.LlamaLM, parameters_: LlamaParameters) !zml.Exe {
-            return platform_.compileModel(allocator_, io_, llama.LlamaLM.forward, llama_model_, .{ parameters_.prefill_tokens, parameters_.token_index, parameters_.kv_cache, parameters_.rng });
+            return platform_.compile(allocator_, io_, llama_model_, .forward, .{ parameters_.prefill_tokens, parameters_.token_index, parameters_.kv_cache, parameters_.rng });
         }
     }.call, .{ allocator, io, platform, llama_model, parameters });
     errdefer if (prefill_future.cancel(io)) |v| v.deinit() else |_| {};
 
     var decode_future = io.async(struct {
         fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: zml.Platform, llama_model_: llama.LlamaLM, parameters_: LlamaParameters) !zml.Exe {
-            return platform_.compileModel(allocator_, io_, llama.LlamaLM.forward, llama_model_, .{ parameters_.decode_tokens, parameters_.token_index, parameters_.kv_cache, parameters_.rng });
+            return platform_.compile(allocator_, io_, llama_model_, .forward, .{ parameters_.decode_tokens, parameters_.token_index, parameters_.kv_cache, parameters_.rng });
         }
     }.call, .{ allocator, io, platform, llama_model, parameters });
     errdefer if (decode_future.cancel(io)) |v| v.deinit() else |_| {};

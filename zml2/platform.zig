@@ -176,11 +176,27 @@ pub const Platform = struct {
         return device.memoryStats(platform.pjrt_api) catch .zeroes;
     }
 
+    pub fn compile(
+        self: Platform,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        model_: anytype,
+        comptime func: std.meta.DeclEnum(@TypeOf(model_)),
+        args: stdx.meta.Tail(stdx.meta.FnArgs(@field(@TypeOf(model_), @tagName(func)))),
+    ) !Exe {
+        return self.compileFn(
+            allocator,
+            io,
+            @field(@TypeOf(model_), @tagName(func)),
+            .{model_} ++ args,
+        );
+    }
+
     pub fn compileModel(self: Platform, allocator: std.mem.Allocator, io: std.Io, comptime func: anytype, model: stdx.meta.Head(stdx.meta.FnArgs(func)), args: stdx.meta.Tail(stdx.meta.FnArgs(func))) !Exe {
         return self.compile(allocator, io, func, .{model} ++ args);
     }
 
-    pub fn compile(self: Platform, allocator: std.mem.Allocator, io: std.Io, comptime func: anytype, args: stdx.meta.FnArgs(func)) !Exe {
+    pub fn compileFn(self: Platform, allocator: std.mem.Allocator, io: std.Io, comptime func: anytype, args: stdx.meta.FnArgs(func)) !Exe {
         return zml.module.compile(allocator, io, func, args, self);
     }
 
