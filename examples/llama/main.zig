@@ -138,7 +138,10 @@ pub fn main() !void {
     };
 
     var tokenizer_future = io.async(loadTokenizer, .{ allocator, io, repo.dir });
-    errdefer _ = tokenizer_future.cancel(io) catch {};
+    errdefer blk: {
+        var v = tokenizer_future.cancel(io) catch break :blk;
+        v.deinit();
+    }
 
     var compiled_model_result_future = io.async(struct {
         fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: zml.Platform, llama_model_: llama.LlamaLM, llama_parameters_: LlamaParameters) !CompileModelResult {
