@@ -93,20 +93,25 @@ pub const Tokenizer = union(Tokenizers) {
     homemade: *homemade.Tokenizer,
 
     pub fn fromFile(allocator: std.mem.Allocator, io: std.Io, model: []const u8) !Tokenizer {
+        _ = allocator; // autofix
+        _ = io; // autofix
         if (std.mem.endsWith(u8, model, ".pb")) {
-            return .{ .sentencepiece = try sentencepiece.SentencePieceProcessor.fromFile(model) };
+            return .{ .sentencepiece = try .fromFile(model) };
         }
         if (std.mem.endsWith(u8, model, ".json")) {
-            return .{ .hftokenizers = try hftokenizers.HFTokenizer.fromFile(model) };
-        }
-
-        if (std.mem.endsWith(u8, model, ".tinyllama")) {
-            const tokenizer = try allocator.create(homemade.Tokenizer);
-            tokenizer.* = try homemade.fromTinyLlamaFile(allocator, io, model, 32000);
-            return .{ .homemade = tokenizer };
+            return .{ .hftokenizers = try .fromFile(model) };
         }
 
         return error.InvalidArgument;
+    }
+
+    pub fn fromBytes(allocator: std.mem.Allocator, io: std.Io, bytes: []const u8) !Tokenizer {
+        _ = allocator; // autofix
+        _ = io; // autofix
+        if (bytes[0] == '{') {
+            return .{ .hftokenizers = try .fromBytes(bytes) };
+        }
+        return .{ .sentencepiece = try .fromBytes(bytes) };
     }
 
     pub fn deinit(self: *Tokenizer) void {

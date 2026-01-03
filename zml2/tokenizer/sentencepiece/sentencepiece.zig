@@ -173,6 +173,13 @@ pub const SentencePieceProcessor = opaque {
         return sp;
     }
 
+    pub fn fromBytes(bytes: []const u8) !*SentencePieceProcessor {
+        const sp: *SentencePieceProcessor = @ptrCast(c.SentencePieceProcessor_new());
+        errdefer sp.deinit();
+        try assertOk(c.SentencePieceProcessor_LoadFromSerializedProto(@ptrCast(sp), ffi.ZigSlice.from(bytes)));
+        return sp;
+    }
+
     pub fn deinit(self: *SentencePieceProcessor) void {
         c.SentencePieceProcessor_delete(@ptrCast(self));
     }

@@ -81,6 +81,7 @@ namespace sentencepiece {
     class SentencePieceProcessor {
     public:
         virtual sentencepiece::util::Status Load(absl::string_view filename);
+        virtual sentencepiece::util::Status LoadFromSerializedProto(absl::string_view serialized);
         virtual sentencepiece::util::Status Encode(absl::string_view input, std::vector<int> *ids) const;
         virtual sentencepiece::util::Status Decode(const std::vector<int> &ids, std::string *detokenized) const;
         virtual int PieceToId(absl::string_view piece) const;
