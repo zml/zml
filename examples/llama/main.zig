@@ -206,7 +206,7 @@ fn parseConfig(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !std.j
         defer config_json_file.close(io);
         var config_json_buffer: [256]u8 = undefined;
         var config_reader = config_json_file.reader(io, &config_json_buffer);
-        var reader = std.json.Reader.init(allocator, &config_reader.interface);
+        var reader: std.json.Reader = .init(allocator, &config_reader.interface);
         defer reader.deinit();
         break :blk try std.json.parseFromTokenSource(llama.LlamaLM.Config, allocator, &reader, .{ .ignore_unknown_fields = true });
     };
@@ -222,12 +222,8 @@ fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !zml
     const bytes = b: {
         const file = try dir.openFile(io, "tokenizer.json", .{});
         defer file.close(io);
-
         var reader = file.reader(io, &.{});
-        var writer: std.Io.Writer.Allocating = .init(allocator);
-        defer writer.deinit();
-        _ = try reader.interface.streamRemaining(&writer.writer);
-        break :b try writer.toOwnedSlice();
+        break :b try reader.interface.readAlloc(allocator, try file.length(io));
     };
     defer allocator.free(bytes);
 
