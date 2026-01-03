@@ -197,7 +197,7 @@ pub fn main() !void {
 }
 
 fn parseConfig(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !std.json.Parsed(LlamaLM.Config) {
-    var timer = try stdx.time.Timer.start();
+    var timer = try std.time.Timer.start();
     log.info("Loading model config", .{});
     defer log.info("Loaded model config [{D}]", .{timer.read()});
 
