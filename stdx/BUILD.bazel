@@ -3,14 +3,15 @@ load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 zig_library(
     name = "stdx",
     srcs = [
+        "Io.zig",
         "bounded_array.zig",
         "debug.zig",
         "flags.zig",
         "fmt.zig",
-        "fs.zig",
         "json.zig",
         "math.zig",
         "meta.zig",
+        "process.zig",
         "queue.zig",
         "signature.zig",
         "time.zig",

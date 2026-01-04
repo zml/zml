@@ -58,14 +58,14 @@ pub fn load(io: std.Io) !*const pjrt.Api {
     const source_repo = bazel_builtin.current_repository;
     const r = r_.withSourceRepo(source_repo);
 
-    var sandbox_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var sandbox_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const sandbox_path = try r.rlocation("libpjrt_neuron/sandbox", &sandbox_path_buf) orelse {
         log.err("Failed to find sandbox path for NEURON runtime", .{});
         return error.FileNotFound;
     };
 
     return blk: {
-        var lib_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const path = try stdx.fs.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_neuron.so" });
         var future = io.async(struct {
             fn call(path_: [:0]const u8) !*const pjrt.Api {

@@ -169,7 +169,7 @@ fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t)
         return error.UnknownPlatformVersion;
     };
 
-    var tmp_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var tmp_dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const tmp_dir = try makeTempDir(&tmp_dir_buf, "zml-neuronxcc-");
     defer std.fs.deleteTreeAbsolute(tmp_dir) catch |err| {
         log.err("Error deleting temporary directory {s}: {}\n", .{ tmp_dir, err });
@@ -184,7 +184,7 @@ fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t)
 
     const neff_file = try std.fs.path.join(arena.allocator(), &.{ tmp_dir, "file.neff" });
 
-    var neuronx_cc_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var neuronx_cc_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var child = std.process.Child.init(&.{
         try stdx.fs.path.bufJoin(&neuronx_cc_buf, &.{
             stdx.fs.selfSharedObjectDirPath(),

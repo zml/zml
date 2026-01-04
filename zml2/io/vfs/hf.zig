@@ -1,5 +1,5 @@
-const std = @import("std");
 const json = @import("std").json;
+const std = @import("std");
 
 const log = std.log.scoped(.@"zml/io/vfs/hf");
 
@@ -183,8 +183,8 @@ const HFApi = struct {
             break :blk "main";
         };
 
-        var redirect_buffer: [std.fs.max_path_bytes]u8 = undefined;
-        var url_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var redirect_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        var url_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const api_url = std.fmt.bufPrint(
             &url_buf,
             "https://huggingface.co/api/models/{s}/{s}/treesize/{s}/",
@@ -296,8 +296,8 @@ const HFRecords = struct {
     ) Error!void {
         const allocator = self.arena.allocator();
 
-        var url_buf: [std.fs.max_path_bytes]u8 = undefined;
-        var redirect_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        var url_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        var redirect_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
 
         const api_url = url orelse blk: {
             const model = try HFApi.modelFromUri(repo_uri);
@@ -502,7 +502,7 @@ pub const HF = struct {
         uri: []const u8,
         pos: u64,
         size: u64,
-        redirect_buffer: [std.fs.max_path_bytes]u8 = undefined,
+        redirect_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined,
         request: ?*std.http.Client.Request = null,
         response: ?std.http.Client.Response = null,
         body_reader: ?*std.Io.Reader = null,
@@ -638,7 +638,7 @@ pub const HF = struct {
         }
 
         const base_uri = std.Uri.parse(parent_path) catch return InitHandleError.PathUnresolvable;
-        var aux_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var aux_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
 
         if (sub_path.len > aux_buf.len) return InitHandleError.PathTooLong;
 
@@ -998,7 +998,7 @@ pub const HF = struct {
         };
         errdefer self.allocator.destroy(request);
 
-        var url_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var url_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
 
         const path = HFApi.filePathFromUri(handle.uri) catch |err| {
             log.err("Failed to extract file path from URI {s}: {}", .{ handle.uri, err });

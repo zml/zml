@@ -15,11 +15,11 @@ pub export fn zmlxcuda_dlopen(filename: [*c]const u8, flags: c_int) ?*anyopaque 
         .{ "libnccl.so", "libnccl.so.2" },
     });
 
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const new_filename: [*c]const u8 = if (filename) |f| blk: {
         const replacement = replacements.get(std.fs.path.basename(std.mem.span(f))) orelse break :blk f;
-        break :blk stdx.fs.path.bufJoinZ(&buf, &.{
-            stdx.fs.selfSharedObjectDirPath(),
+        break :blk stdx.Io.Dir.path.bufJoinZ(&buf, &.{
+            stdx.process.selfSharedObjectDirPath(),
             replacement,
         }) catch unreachable;
     } else null;

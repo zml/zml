@@ -18,7 +18,7 @@ pub const HTTP = struct {
         uri: []const u8,
         pos: u64,
         size: u64,
-        redirect_buffer: [std.fs.max_path_bytes]u8 = undefined,
+        redirect_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined,
         request: ?*std.http.Client.Request = null,
         response: ?std.http.Client.Response = null,
         body_reader: ?*std.Io.Reader = null,
@@ -136,7 +136,7 @@ pub const HTTP = struct {
         }
 
         const base_uri = std.Uri.parse(parent_path) catch return InitHandleError.PathUnresolvable;
-        var aux_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var aux_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
 
         if (sub_path.len > aux_buf.len) return InitHandleError.PathTooLong;
 
@@ -530,7 +530,7 @@ pub const HTTP = struct {
             switch (response.head.status) {
                 .moved_permanently, .found, .see_other, .temporary_redirect, .permanent_redirect => {
                     if (response.head.location) |location| {
-                        var buf: [std.fs.max_path_bytes]u8 = undefined;
+                        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
 
                         if (location.len > buf.len) return std.Io.File.StatError.Unexpected;
                         @memcpy(buf[0..location.len], location);

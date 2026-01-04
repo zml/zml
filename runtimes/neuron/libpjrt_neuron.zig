@@ -28,7 +28,7 @@ pub export fn zmlxneuron_dlopen(filename: [*c]const u8, flags: c_int) ?*anyopaqu
         .{ "libncfw.so", "libncfw.so.2" },
     });
 
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const new_filename: [*c]const u8 = if (filename) |f| blk: {
         const replacement = replacements.get(std.fs.path.basename(std.mem.span(f))) orelse break :blk f;
         break :blk stdx.fs.path.bufJoinZ(&buf, &.{
@@ -100,7 +100,7 @@ fn setupPythonEnv(sandbox_path: []const u8) !void {
     Static.py_config.write_bytecode = 0;
 
     {
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const home = try std.fmt.bufPrintZ(&buf, "{f}{d}.{d}", .{
             std.fs.path.fmtJoin(&.{
                 sandbox_path,
@@ -115,7 +115,7 @@ fn setupPythonEnv(sandbox_path: []const u8) !void {
     }
 
     {
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const site_packages = try stdx.fs.path.bufJoin(&buf, &.{
             sandbox_path,
             "site-packages",
@@ -146,7 +146,7 @@ fn getPjrtApi() !*c.PJRT_Api {
         var proxy: c.PJRT_Api = undefined;
     };
 
-    var sandbox_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var sandbox_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const sandbox_path = try stdx.fs.path.bufJoin(&sandbox_path_buf, &.{
         stdx.fs.selfSharedObjectDirPath(),
         "..",
@@ -160,7 +160,7 @@ fn getPjrtApi() !*c.PJRT_Api {
             var lib: std.DynLib = .{
                 .inner = .{
                     .handle = handle_blk: {
-                        var lib_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+                        var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
                         const library = try stdx.fs.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libneuronpjrt.so" });
                         break :handle_blk std.c.dlopen(library, .{ .LAZY = true, .NODELETE = true }) orelse {
                             log.err("Unable to dlopen plugin: {?s}", .{std.mem.span(std.c.dlerror())});

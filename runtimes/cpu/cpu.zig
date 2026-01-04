@@ -1,11 +1,11 @@
+const std = @import("std");
 const builtin = @import("builtin");
 
+const bazel_builtin = @import("bazel_builtin");
 const c = @import("c");
 const pjrt = @import("pjrt");
-const bazel_builtin = @import("bazel_builtin");
-const std = @import("std");
-const stdx = @import("stdx");
 const runfiles = @import("runfiles");
+const stdx = @import("stdx");
 
 const log = std.log.scoped(.@"zml/runtime/cpu");
 
@@ -28,7 +28,7 @@ pub fn load(io: std.Io) !*const pjrt.Api {
     const source_repo = bazel_builtin.current_repository;
     const r = r_.withSourceRepo(source_repo);
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const sandbox_path = try r.rlocation("zml/runtimes/cpu/sandbox/lib", &path_buf) orelse {
         log.err("Failed to find sandbox path for CPU runtime", .{});
         return error.FileNotFound;
@@ -41,8 +41,8 @@ pub fn load(io: std.Io) !*const pjrt.Api {
             else => ".so",
         };
 
-        var lib_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path = try stdx.fs.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "libpjrt_cpu" ++ ext });
+        var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "libpjrt_cpu" ++ ext });
         var future = io.async(struct {
             fn call(path_: [:0]const u8) !*const pjrt.Api {
                 return pjrt.Api.loadFrom(path_);

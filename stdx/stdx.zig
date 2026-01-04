@@ -6,10 +6,11 @@ pub const BoundedArrayAligned = @import("bounded_array.zig").BoundedArrayAligned
 pub const debug = @import("debug.zig");
 pub const flags = @import("flags.zig");
 pub const fmt = @import("fmt.zig");
-pub const fs = @import("fs.zig");
+pub const Io = @import("Io.zig");
 pub const json = @import("json.zig");
 pub const math = @import("math.zig");
 pub const meta = @import("meta.zig");
+pub const process = @import("process.zig");
 pub const queue = @import("queue.zig");
 pub const time = @import("time.zig");
 

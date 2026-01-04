@@ -56,7 +56,7 @@ pub fn load(io: std.Io) !*const pjrt.Api {
     const source_repo = bazel_builtin.current_repository;
     const r = r_.withSourceRepo(source_repo);
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const sandbox_path = try r.rlocation("libpjrt_cuda/sandbox", &path_buf) orelse {
         log.err("Failed to find sandbox path for CUDA runtime", .{});
         return error.FileNotFound;
@@ -67,8 +67,8 @@ pub fn load(io: std.Io) !*const pjrt.Api {
     try setupXlaGpuCudaDirFlag(arena.allocator(), sandbox_path);
 
     {
-        var lib_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path = try stdx.fs.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libnvtx3interop.so" });
+        var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libnvtx3interop.so" });
         _ = std.c.dlopen(path, .{ .NOW = true, .GLOBAL = true }) orelse {
             log.err("Unable to dlopen libnvtx3interop.so: {s}", .{std.c.dlerror().?});
             return error.DlError;
@@ -76,13 +76,9 @@ pub fn load(io: std.Io) !*const pjrt.Api {
     }
 
     return blk: {
-        var lib_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path = try stdx.fs.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_cuda.so" });
-        var future = io.async(struct {
-            fn call(path_: [:0]const u8) !*const pjrt.Api {
-                return pjrt.Api.loadFrom(path_);
-            }
-        }.call, .{path});
+        var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_cuda.so" });
+        var future = io.async(pjrt.Api.loadFrom, .{path});
         break :blk future.await(io);
     };
 }

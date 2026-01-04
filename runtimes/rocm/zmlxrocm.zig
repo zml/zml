@@ -22,7 +22,7 @@ pub export fn zmlxrocm_dlopen(filename: [*c]const u8, flags: c_int) ?*anyopaque 
         .{ "libhiprtc.so", "libhiprtc.so.7" },
     });
 
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const new_filename: [*c]const u8 = if (filename) |f| blk: {
         const replacement = replacements.get(std.fs.path.basename(std.mem.span(f))) orelse break :blk f;
         break :blk stdx.fs.path.bufJoinZ(&buf, &.{
@@ -39,7 +39,7 @@ pub export fn zmlxrocm_fopen64(pathname: [*c]const u8, mode: [*c]const u8) ?*std
         .{ "/opt/amdgpu/share/libdrm/amdgpu.ids", "../share/libdrm/amdgpu.ids" },
     });
 
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const new_pathname: [*c]const u8 = blk: {
         const replacement = replacements.get(std.mem.span(pathname)) orelse break :blk pathname;
         break :blk stdx.fs.path.bufJoinZ(&buf, &.{

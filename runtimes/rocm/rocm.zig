@@ -23,7 +23,7 @@ fn hasRocmDevices(io: std.Io) bool {
 }
 
 fn setupRocmEnv(rocm_data_dir: []const u8) !void {
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     _ = c.setenv("ROCM_PATH", try stdx.fs.path.bufJoinZ(&buf, &.{rocm_data_dir}), 1); // must be zero terminated
 }
 
@@ -48,7 +48,7 @@ pub fn load(io: std.Io) !*const pjrt.Api {
     const source_repo = bazel_builtin.current_repository;
     const r = r_.withSourceRepo(source_repo);
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const sandbox_path = try r.rlocation("libpjrt_rocm/sandbox", &path_buf) orelse {
         log.err("Failed to find sandbox path for ROCm runtime", .{});
         return error.FileNotFound;
@@ -56,7 +56,7 @@ pub fn load(io: std.Io) !*const pjrt.Api {
 
     try setupRocmEnv(sandbox_path);
 
-    var lib_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const lib_path = try stdx.fs.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_rocm.so" });
 
     // We must load the PJRT plugin from the main thread.
