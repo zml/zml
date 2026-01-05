@@ -6,6 +6,11 @@ pub fn main() !void {
     defer arena_.deinit();
     const arena = arena_.allocator();
 
+    var threaded: std.Io.Threaded = .init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+
+    const io = threaded.io();
+
     const build_workspace_directory = try std.process.getEnvVarOwned(arena, "BUILD_WORKSPACE_DIRECTORY");
     var child = std.process.Child.init(&.{
         "bazel",
@@ -17,7 +22,7 @@ pub fn main() !void {
     child.stderr_behavior = .Inherit;
     child.cwd = build_workspace_directory;
 
-    try child.spawn();
+    try child.spawn(io);
 
     // var out = child.stdout.?;
     // _ = out; // autofix

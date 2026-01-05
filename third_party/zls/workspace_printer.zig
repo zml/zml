@@ -101,7 +101,7 @@ pub fn main_016() !void {
     };
 
     var write_buffer: [8192]u8 = undefined;
-    var writer = std.fs.File.stdout().writer(&write_buffer);
+    var writer = std.Io.File.stdout().writer(io, &write_buffer);
     _ = try replacer.interface.streamRemaining(&writer.interface);
     try writer.interface.flush();
 }
