@@ -18,7 +18,7 @@ pub const LlamaLM = struct {
             int: u32,
             ints: []u32,
         }),
-        head_dim: ?u32,
+        head_dim: ?u32 = null,
         hidden_size: u32,
         num_hidden_layers: u32,
         num_attention_heads: u32,
