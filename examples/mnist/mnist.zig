@@ -84,9 +84,6 @@ pub fn main() !void {
     zml.init();
     defer zml.deinit();
 
-    // Auto-select platform
-    const platform: zml.Platform = try .auto(io, .{});
-
     // Parse program args
     const process_args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, process_args);
@@ -100,16 +97,29 @@ pub fn main() !void {
     // Init model
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
     defer store.deinit();
-    const mnist_model = Mnist.init(store.view());
+    const mnist_model: Mnist = .init(store.view());
+
+    // Auto-select platform
+    const platform: zml.Platform = try .auto(io, .{});
 
     // Compile model
-    log.info("Compiling model to MLIR....", .{});
-    var timer = try stdx.time.Timer.start();
     const input: zml.Tensor = .init(.{ 28, 28 }, .u8);
-    var exe = try platform.compile(allocator, io, mnist_model, .forward, .{input});
+    var exe = blk: {
+        log.info("Compiling model....", .{});
+        var timer = try std.time.Timer.start();
+        defer log.info("✅ Compiled model in {D}", .{timer.read()});
+        break :blk try platform.compile(allocator, io, mnist_model, .forward, .{input});
+    };
     defer exe.deinit();
 
-    log.info("✅ Compiled model in {f}", .{timer.read()});
+    // Load buffers
+    var mnist_buffers = blk: {
+        log.info("Transfering weights....", .{});
+        var timer = try std.time.Timer.start();
+        defer log.info("✅ Transferred weights in {D}", .{timer.read()});
+        break :blk try mnist_model.loadBuffers(allocator, io, store.view(), platform);
+    };
+    defer Mnist.unloadBuffers(&mnist_buffers);
 
     var args = try exe.args(allocator);
     defer args.deinit(allocator);
@@ -117,36 +127,28 @@ pub fn main() !void {
     var results = try exe.results(allocator);
     defer results.deinit(allocator);
 
-    // Load buffers
-    var mnist_buffers = try mnist_model.loadBuffers(allocator, io, store.view(), platform);
-    defer Mnist.unloadBuffers(&mnist_buffers);
-    log.info("✅ Weights transferred in {f}", .{timer.read()});
-
-    log.info("Starting inference...", .{});
-
     // Load a random digit image from the dataset.
     const dataset = try std.Io.Dir.openFile(.cwd(), io, t10kfilename, .{ .mode = .read_only });
     defer dataset.close(io);
 
-    const now = std.Io.Clock.now(.awake, io) catch unreachable;
-    var rng = std.Random.Xoshiro256.init(@intCast(now.toMilliseconds()));
+    var rng: std.Random.DefaultPrng = blk: {
+        const now = try std.Io.Clock.now(.awake, io);
+        break :blk .init(@intCast(now.toMilliseconds()));
+    };
 
     // inference - can be looped
-    {
-        const idx = rng.random().intRangeAtMost(u64, 0, 10000 - 1);
+    while (true) {
+        const idx = rng.random().uintLessThan(u64, 10000);
         var sample: [28 * 28]u8 align(16) = undefined;
-        var reader = dataset.reader(io, &.{});
-        try reader.seekTo(16 + (idx * 28 * 28));
-        _ = try reader.interface.readSliceShort(&sample);
+        _ = try dataset.readPositionalAll(io, &sample, 16 + (idx * 28 * 28));
 
         var input_buffer: zml.Buffer = try .fromSlice(io, platform, zml.Slice.init(input.shape(), &sample));
         defer input_buffer.deinit();
 
-        args.set(.{ mnist_buffers, input_buffer });
-
         printDigit(sample);
-        exe.call(args, &results);
 
+        args.set(.{ mnist_buffers, input_buffer });
+        exe.call(args, &results);
         var result: zml.Buffer = results.get(zml.Buffer);
         defer result.deinit();
 
