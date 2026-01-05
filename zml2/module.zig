@@ -6,6 +6,7 @@ const mlir = @import("mlir");
 const stdx = @import("stdx");
 const upb = @import("upb");
 
+const Buffer = @import("buffer.zig").Buffer;
 const Exe = @import("exe.zig").Exe;
 const meta = @import("meta.zig");
 const mlirx = @import("mlirx.zig");
@@ -13,7 +14,6 @@ const pjrt = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
 const Tensor = @import("tensor.zig").Tensor;
-const Buffer = @import("buffer.zig").Buffer;
 
 const log = std.log.scoped(.@"zml/module");
 
@@ -186,8 +186,7 @@ pub fn compile(allocator: std.mem.Allocator, io: std.Io, comptime func: anytype,
 
     const loaded_executable = compileModuleToPjrtExecutable(arena.allocator(), io, platform, compilation_context.module, null) catch unreachable;
 
-    log.debug("******** ZML generated MLIR ********", .{});
-    log.debug("{f}", .{compilation_context.module.operation()});
+    log.debug("\n******** ZML generated MLIR ********\n{f}", .{compilation_context.module.operation()});
 
     const num_devices = sharding.num_partitions * sharding.num_replicas;
     const exe = try Exe.init(allocator, platform, loaded_executable, result.input_info.shapes, result.output_info.shapes, num_devices);
