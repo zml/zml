@@ -45,7 +45,7 @@ pub const HF = struct {
                 .repo = parts.first(),
                 .model = parts.next() orelse return error.InvalidURI,
                 .rev = "main",
-                .path = parts.rest(),
+                .path = std.mem.trimEnd(u8, parts.rest(), "/"),
             };
             if (std.mem.findScalar(u8, repo.model, '@')) |at_index| {
                 repo.rev = repo.model[at_index + 1 ..];
@@ -88,7 +88,6 @@ pub const HF = struct {
 
     base: VFSBase,
     authorization: std.http.Client.Request.Headers.Value = .default,
-    token_len: usize = 0,
     allocator: std.mem.Allocator,
     client: *std.http.Client,
     handles: std.ArrayList(Handle) = .{},
@@ -100,7 +99,7 @@ pub const HF = struct {
             .base = .init(io_),
             .client = http_client_,
             .authorization = .{
-                .override = "Bearer XXX",
+                .override = "Bearer xxxx",
             },
         };
     }
@@ -208,7 +207,7 @@ pub const HF = struct {
             for (data) |buf| {
                 total_bytes += buf.len;
             }
-            break :blk std.fmt.bufPrint(&range_buf, "bytes={d}-{d}", .{ offset, offset + total_bytes }) catch unreachable;
+            break :blk std.fmt.bufPrint(&range_buf, "bytes={d}-{d}", .{ offset, @min(handle.size - offset, offset + total_bytes) }) catch unreachable;
         };
 
         var req = self.client.request(.GET, handle.uri, .{
@@ -230,7 +229,23 @@ pub const HF = struct {
             return std.Io.File.Reader.Error.Unexpected;
         };
 
+        const range = blk: {
+            var it = resp.head.iterateHeaders();
+            while (it.next()) |header| {
+                if (std.ascii.eqlIgnoreCase(header.name, "Content-Range")) {
+                    break :blk parseContentRange(header.value);
+                }
+            } else break :blk .{ 0, 0, 0 };
+        };
+
+        log.info(">>>>> {any}", .{range});
+
         const reader = resp.reader(&.{});
+
+        if (range.@"0" < offset) {
+            reader.discardAll(offset - range.@"0") catch return std.Io.File.Reader.Error.Unexpected;
+        }
+
         return reader.readSliceShort(data[0]) catch return std.Io.File.Reader.Error.Unexpected;
     }
 
@@ -282,12 +297,20 @@ pub fn main() !void {
 
     log.info(">>>>>>> {any}", .{file});
 
-    const buffer = try allocator.alloc(u8, 128 * 1024 * 1024);
     var reader = file.reader(io, &.{});
+    reader.mode = reader.mode.toSimple();
     defer log.info("DONE", .{});
 
-    const stdout: std.Io.File = .stdout();
-    var stdout_writer = stdout.writer(io, buffer);
+    // const data = try reader.interface.readAlloc(allocator, 1024);
+    // defer allocator.free(data);
+    // log.info("READ {s}", .{data});
 
-    _ = try reader.interface.stream(&stdout_writer.interface, .unlimited);
+    const buffer = try allocator.alloc(u8, 256 * 1024 * 1024);
+    var stdout_writer = std.Io.File.stdout().writer(io, buffer);
+    defer stdout_writer.interface.flush() catch {};
+
+    _ = reader.interface.streamRemaining(&stdout_writer.interface) catch |err| {
+        log.err("Failed to stream HF file: {any}", .{err});
+        unreachable;
+    };
 }
