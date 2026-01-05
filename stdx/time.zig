@@ -11,6 +11,10 @@ pub const Duration = struct {
         return (1 * std.time.ns_per_s) / self.ns;
     }
 
+    pub fn hzFloat(self: Duration) f64 {
+        return (1 * std.time.ns_per_s) / @as(f64, @floatFromInt(self.ns));
+    }
+
     pub fn formatDuration(duration: Duration, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try writer.printDuration(duration.ns, .{});
     }
