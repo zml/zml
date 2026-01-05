@@ -148,7 +148,7 @@ test pixelShuffle {
 
     const output = try zml.testing.compileAndCall(platform, pixelShuffle, .{ input, upscale_factor });
 
-    const exp = zml.HostBuffer.fromArray(&[1][1][12][12]i32{.{.{
+    const exp = zml.HostBuffer.fromArrayPtr(&[1][1][12][12]i32{.{.{
         .{ 0, 16, 32, 1, 17, 33, 2, 18, 34, 3, 19, 35 },
         .{ 48, 64, 80, 49, 65, 81, 50, 66, 82, 51, 67, 83 },
         .{ 96, 112, 128, 97, 113, 129, 98, 114, 130, 99, 115, 131 },

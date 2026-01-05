@@ -1,3 +1,4 @@
+load("//third_party/com_github_bfactory_ai_zignal:repo.bzl", com_github_bfactory_ai_zignal = "repo")
 load("//third_party/com_github_hejsil_clap:repo.bzl", com_github_hejsil_clap = "repo")
 load("//third_party/com_google_sentencepiece:repo.bzl", com_google_sentencepiece = "repo")
 load("//third_party/mnist:repo.bzl", mnist = "repo")
@@ -10,6 +11,7 @@ def _non_module_deps_impl(mctx):
     com_github_hejsil_clap()
     mnist()
     xla()
+    com_github_bfactory_ai_zignal()
 
     return mctx.extension_metadata(
         reproducible = True,

@@ -213,14 +213,28 @@ pub fn testLayerOut(
     const fwd = @TypeOf(layer).forward;
     const FwdSign = zml.ModuleSignature(fwd);
 
-    const input_tensors = try zml.aio.populateModelWithPrefix(FwdSign.ArgsT, alloc, activations, name ++ ".in");
-    const input_shapes = try shapesOf(input_tensors, alloc);
+    const ArgsT = FwdSign.ArgsT;
 
-    const n_in = zml.module.countTensors(&input_tensors);
-    const n_in_exp = activations.countLayers(name ++ ".in");
-    if (n_in != n_in_exp) {
-        log.warn("Reference models uses {d} inputs, but implementation uses {d}", .{ n_in_exp, n_in });
-    }
+    // Check if layer has inputs
+    const has_inputs = switch (@typeInfo(ArgsT)) {
+        .@"struct" => |info| info.fields.len > 0,
+        else => false,
+    };
+
+    // Get input shapes (empty for layers without input)
+    const input_shapes = if (has_inputs) blk: {
+        const input_tensors = try zml.aio.populateModelWithPrefix(FwdSign.ArgsT, alloc, activations, name ++ ".in");
+        const n_in = zml.module.countTensors(&input_tensors);
+        const n_in_exp = activations.countLayers(name ++ ".in");
+        if (n_in != n_in_exp) {
+            log.warn("Reference models uses {d} inputs, but implementation uses {d}", .{ n_in_exp, n_in });
+        }
+        break :blk try zml.shapesOf(input_tensors, alloc);
+    } else blk: {
+        // For layers without input, ArgsT should be void or empty tuple
+        const empty_shapes: zml.ShapeOf(ArgsT) = undefined;
+        break :blk empty_shapes;
+    };
 
     const exe = try zml.compileModel(alloc, fwd, layer, input_shapes, platform);
 
@@ -230,32 +244,29 @@ pub fn testLayerOut(
     }
     const mod = exe.prepare(layer_weights);
 
-    const FetchCtx = struct {
-        store: zml.aio.BufferStore,
-        index: u32,
-        prefix: std.ArrayList(u8),
-        platform: zml.Platform,
+    // Call the module with input buffers (empty for layers without input)
+    if (has_inputs) {
+        const FetchCtx = struct {
+            store: zml.aio.BufferStore,
+            index: u32,
+            prefix: std.ArrayList(u8),
+            platform: zml.Platform,
 
-        fn fetch(ctx: *@This(), x: zml.Tensor) zml.Buffer {
-            _ = x;
-            defer ctx.index += 1;
-            var full_prefix = ctx.*.prefix;
-            _ = full_prefix.writer(undefined).print("{d}", .{ctx.index}) catch unreachable;
-            log.info("prefix: {s}", .{full_prefix.items});
-            const host = ctx.store.get(full_prefix.items) orelse {
-                log.err("Didn't find test input: {s}", .{full_prefix.items});
-                @panic("Missing test input");
-            };
-            return host.toDevice(ctx.platform) catch unreachable;
-        }
-    };
+            fn fetch(ctx: *@This(), x: zml.Tensor) zml.Buffer {
+                _ = x;
+                defer ctx.index += 1;
+                var full_prefix = ctx.*.prefix;
+                _ = full_prefix.writer(undefined).print("{d}", .{ctx.index}) catch unreachable;
+                log.info("prefix: {s}", .{full_prefix.items});
+                const host = ctx.store.get(full_prefix.items) orelse {
+                    log.err("Didn't find test input: {s}", .{full_prefix.items});
+                    @panic("Missing test input");
+                };
+                return host.toDevice(ctx.platform) catch unreachable;
+            }
+        };
 
-    // Note: zml.populateModelWithPrefix isn't enough,
-    // because it assumes we have the same structure in the activation file
-    // than in the function signature.
-    // But for sake of decoupling the reference implementation
-    // and ZML code that's not always the case.
-    {
+        const input_tensors = try zml.aio.populateModelWithPrefix(FwdSign.ArgsT, alloc, activations, name ++ ".in");
         var input_buffers: zml.Bufferized(FwdSign.ArgsT) = undefined;
         var fetch_ctx: FetchCtx = .{ .store = activations, .index = 0, .prefix = .{}, .platform = platform };
         try fetch_ctx.prefix.ensureTotalCapacity(alloc, name.len + 32);
@@ -263,10 +274,16 @@ pub fn testLayerOut(
         try zml.meta.mapAlloc(FetchCtx.fetch, alloc, &fetch_ctx, input_tensors, &input_buffers);
         defer zml.aio.unloadBuffers(&input_buffers);
         _ = mod.call(input_buffers);
+    } else {
+        // For layers without input, ArgsT should be void
+        // Bufferized(void) is void, so we can't call mod.call normally
+        // Use _unsafeCall directly and then get the results manually
+        mod.inner._unsafeCall();
     }
 
     var buf: [1024]u8 = undefined;
     var failed: bool = false;
+    log.info("COMPARAISON DES SORTIES", .{});
     for (0..mod.inner.result_shapes.len) |i| {
         const full_name = std.fmt.bufPrint(&buf, "{s}.{d}", .{ out_name, i }) catch unreachable;
         const expected_out = activations.get(full_name) orelse {
@@ -305,14 +322,49 @@ test testLayer {
     var activations = zml.aio.BufferStore.init(std.testing.allocator);
     defer activations.deinit();
     {
-        const input = zml.HostBuffer.fromArray(&[2]f32{ 1, -1 });
+        const input = zml.HostBuffer.fromArrayPtr(&[2]f32{ 1, -1 });
         try activations.buffers.put(activations.arena.allocator(), "model.layer.in.0", input);
-        const output = zml.HostBuffer.fromArray(&[5]f32{ 0, -1, -1, 0, -1 });
+        const output = zml.HostBuffer.fromArrayPtr(&[5]f32{ 0, -1, -1, 0, -1 });
         try activations.buffers.put(activations.arena.allocator(), "model.layer.out.0", output);
     }
 
-    // test the ZML layer reproduces the "captured" activations:
+    // Test the ZML layer reproduces the activations:
     try zml.testing.testLayer(platform, activations, "model.layer", layer, layer_weights, 1e-5);
+
+    const LayerWithoutInput = struct {
+        weight: zml.Tensor,
+
+        pub fn forward(self: @This()) zml.Tensor {
+            // Return the weights
+            return self.weight;
+        }
+    };
+
+    const layer_no_input: LayerWithoutInput = .{
+        .weight = zml.Tensor{ ._shape = zml.Shape.init(.{ 3, 4 }, .f32), ._id = .{ .buffer_id = 43 } },
+    };
+
+    const layer_no_input_weights: zml.Bufferized(LayerWithoutInput) = .{
+        .weight = try zml.Buffer.fromArray(
+            platform,
+            [3][4]f32{
+                .{ 1.0, 2.0, 3.0, 4.0 },
+                .{ 5.0, 6.0, 7.0, 8.0 },
+                .{ 9.0, 10.0, 11.0, 12.0 },
+            },
+        ),
+    };
+
+    // Expected output
+    const expected_output = zml.HostBuffer.fromArrayPtr(&[3][4]f32{
+        .{ 1.0, 2.0, 3.0, 4.0 },
+        .{ 5.0, 6.0, 7.0, 8.0 },
+        .{ 9.0, 10.0, 11.0, 12.0 },
+    });
+    try activations.buffers.put(activations.arena.allocator(), "model.layer_no_input.out.0", expected_output);
+
+    // Test the ZML layer without input reproduces the "captured" activations:
+    try zml.testing.testLayer(platform, activations, "model.layer_no_input", layer_no_input, layer_no_input_weights, 1e-5);
 }
 
 pub inline fn expectEqual(expected: anytype, actual: @TypeOf(expected)) !void {

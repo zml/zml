@@ -32,7 +32,7 @@ pub const Linear = struct {
         }
 
         // log.debug("Linear({*}): {d} -> {d} -> {d}", .{ self, x.dims(), y.dims(), if (self.bias) |bias| y.add(bias).dims() else y.dims() });
-        return if (self.bias) |bias| y.add(bias.broadcast(y.shape(), &.{y.axis(-1)})) else y;
+        return if (self.bias) |bias| y.add(bias.convert(y.dtype()).broadcast(y.shape(), &.{y.axis(-1)})) else y;
     }
 };
 
@@ -100,10 +100,11 @@ pub const LayerNorm = struct {
     pub fn forward(self: LayerNorm, x: Tensor) Tensor {
         const normed = normalizeVariance(x, self.eps);
         const ax = x.axis(-1);
-        var out = normed.mul(self.weight.broadcast(x.shape(), &.{ax}));
-        if (self.bias) |bias| out = out.add(bias.broadcast(x.shape(), &.{ax}));
+        var out = normed.mul(self.weight.broadcast(x.shape(), &.{ax}).convert(.f32));
 
-        return out;
+        if (self.bias) |bias| out = out.add(bias.broadcast(x.shape(), &.{ax}).convert(.f32));
+
+        return out.convert(x.dtype());
     }
 };
 
@@ -112,6 +113,7 @@ pub fn rmsNorm(x: Tensor, axis: anytype, eps: f32) Tensor {
     // upcast to improve precision
     const variance = x.convert(.f32).powByConst(2).mean(ax);
     const rsqrt = Tensor.rsqrt(variance.addConstant(eps)).convert(x.dtype());
+
     return x.mul(rsqrt.broad(x.shape()));
 }
 
@@ -190,7 +192,7 @@ pub const RopeOpts = struct {
             if (content != .object) return error.InvalidEnumTag;
 
             const obj = content.object;
-            const impl = obj.get("rope_type") orelse return error.MissingField;
+            const impl = obj.get("rope_type") orelse obj.get("type") orelse return error.MissingField;
             if (impl != .string) return error.InvalidEnumTag;
             if (std.mem.eql(u8, impl.string, "llama3")) {
                 // Note: leaky is fine here cause Llama3 struct don't need to allocate memory.
@@ -583,7 +585,7 @@ test nearest {
         const result = try zml.testing.compileAndCall(platform, upsample, .{ input_3d_basic, .{ .scale_factor = &.{3}, .mode = .nearest } });
         try std.testing.expectEqualSlices(i64, &.{ 1, 1, 6 }, result.dims());
         const expected: [1][1][6]i32 = .{.{.{ 1, 1, 1, 2, 2, 2 }}};
-        try zml.testing.expectClose(zml.HostBuffer.fromArray(&expected), result, 0);
+        try zml.testing.expectClose(zml.HostBuffer.fromArrayPtr(&expected), result, 0);
     }
     // 3D Tensor (advanced)
     {
@@ -605,7 +607,7 @@ test nearest {
                 .{ 21, 21, 22, 22, 23, 23, 24, 24 },
             },
         };
-        try zml.testing.expectClose(zml.HostBuffer.fromArray(&expected), result, 0);
+        try zml.testing.expectClose(zml.HostBuffer.fromArrayPtr(&expected), result, 0);
     }
     // 4D Tensor (basic)
     {
@@ -663,7 +665,7 @@ test nearest {
                 },
             },
         };
-        try zml.testing.expectClose(zml.HostBuffer.fromArray(&expected), result, 0);
+        try zml.testing.expectClose(zml.HostBuffer.fromArrayPtr(&expected), result, 0);
     }
     // 5D Tensor (basic)
     {
@@ -688,7 +690,7 @@ test nearest {
                 },
             },
         };
-        try zml.testing.expectClose(zml.HostBuffer.fromArray(&expected), result, 0);
+        try zml.testing.expectClose(zml.HostBuffer.fromArrayPtr(&expected), result, 0);
     }
 }
 
@@ -835,7 +837,7 @@ pub fn resizeCubic1d(image: Tensor, axis: i8, new_len: u63, opt: ResizeOpts) Ten
         .{ 1, -2.5, 2, -0.5 },
         .{ -0.5, 1.5, -1.5, 0.5 },
     };
-    const weights = zml.Tensor.constantTensor(zml.HostBuffer.fromArray(&weights_)).convert(dtype).withTags(.{ ._interpolated, ._neighbors });
+    const weights = zml.Tensor.constantTensor(zml.HostBuffer.fromArrayPtr(&weights_)).convert(dtype).withTags(.{ ._interpolated, ._neighbors });
 
     // actually do the interpolation.
     // Note: ideally this matmul should be inlined with the gather, but that's currently not the case.
@@ -940,7 +942,7 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
     k = k.mul(head_scaling.convert(k.dtype()));
 
     var attn_weights = q.dot(k, .{.hd});
-    // log.debug("attn_weights : {f}, attn_mask : {?f}", .{ attn_weights, attn_mask });
+
     if (attn_mask) |mask| attn_weights = attn_weights.add(mask.broad(attn_weights.shape()));
     attn_weights = attn_weights.convert(.f32);
     attn_weights = if (opts.softmax_bias) |softmax_bias| attn: {
@@ -949,7 +951,6 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
         const bias = softmax_bias.splitAxis(.h, .{ .h = k.dim(.h), .hq = .auto });
         break :attn attn_weights.convert(.f32).softmaxBiased(.k, bias).convert(q.dtype());
     } else attn_weights.convert(.f32).softmax(.k).convert(q.dtype());
-
     var attn = attn_weights.dot(v, .{.k});
     return attn.transpose(q.shape()).merge(.{ .h = .{ .h, .hq } });
 }

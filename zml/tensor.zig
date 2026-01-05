@@ -715,7 +715,7 @@ pub const Tensor = struct {
                         for (&powers, 0..) |*p, i| p.* = std.math.pow(u64, 2, i * 16);
                         break :blk powers;
                     };
-                    const values = Tensor.constantTensor(HostBuffer.fromArray(&powers)).withTags(.{.d});
+                    const values = Tensor.constantTensor(HostBuffer.fromArrayPtr(&powers)).withTags(.{.d});
                     const counts = values.gather(.{ .d = samples }, .{}).sum(.n).bitCast(.u16);
                     const actual_dist = counts.reshape(target_dist.shape()).convert(target_dist.dtype()).divByConst(s.dim(.n));
                     return .{ rng, .{ .mean = mean_, .variance = variance, .actual_dist = actual_dist } };
@@ -764,7 +764,7 @@ pub const Tensor = struct {
         return _result(self._shape, op.result(0));
     }
 
-    inline fn convolution(self: Tensor, other: Tensor, opts: dialect.stablehlo.ConvolutionOpts, loc: mlir.Location) Tensor {
+    pub inline fn convolution(self: Tensor, other: Tensor, opts: dialect.stablehlo.ConvolutionOpts, loc: mlir.Location) Tensor {
         stdx.debug.assert(self.rank() == other.rank(), "convolution expects tensor ranks to match, got {} and {}", .{ self.rank(), other.rank() });
         const N = self.rank();
         stdx.debug.guard(opts.window_strides.len == N - 2, @src());
@@ -857,6 +857,49 @@ pub const Tensor = struct {
         );
 
         return _result(new_shape, op.result(0));
+    }
+
+    pub fn conv3d(
+        input: Tensor,
+        kernel: Tensor,
+        opts: struct {
+            window_strides: []const i64 = &.{ 1, 1, 1 }, //[time, height, width]
+            padding: []const i64 = &.{ 0, 0, 0, 0, 0, 0 }, //[front, back, top, bottom, left, right]
+            lhs_dilation: []const i64 = &.{ 1, 1, 1 }, //[time, height, width]
+            rhs_dilation: []const i64 = &.{ 1, 1, 1 }, //[time, height, width]
+            window_reversal: []const bool = &.{ false, false, false }, //[time, height, width]
+            input_batch_dimension: i64 = 0,
+            input_feature_dimension: i64 = 1,
+            input_spatial_dimensions: []const i64 = &.{ 2, 3, 4 },
+            kernel_input_feature_dimension: i64 = 1,
+            kernel_output_feature_dimension: i64 = 0,
+            kernel_spatial_dimensions: []const i64 = &.{ 2, 3, 4 },
+            output_batch_dimension: i64 = 0,
+            output_feature_dimension: i64 = 1,
+            output_spatial_dimensions: []const i64 = &.{ 2, 3, 4 },
+            feature_group_count: i64 = 1,
+            batch_group_count: i64 = 1,
+        },
+    ) Tensor {
+        const loc = input.getContext().location(@src(), "opts={}", .{opts});
+        return input.convolution(kernel, .{
+            .window_strides = opts.window_strides,
+            .pad_value = opts.padding,
+            .lhs_dilation = opts.lhs_dilation,
+            .rhs_dilation = opts.rhs_dilation,
+            .window_reversal = opts.window_reversal,
+            .input_batch_dimension = opts.input_batch_dimension,
+            .input_feature_dimension = opts.input_feature_dimension,
+            .input_spatial_dimensions = opts.input_spatial_dimensions,
+            .kernel_input_feature_dimension = opts.kernel_input_feature_dimension,
+            .kernel_output_feature_dimension = opts.kernel_output_feature_dimension,
+            .kernel_spatial_dimensions = opts.kernel_spatial_dimensions,
+            .output_batch_dimension = opts.output_batch_dimension,
+            .output_feature_dimension = opts.output_feature_dimension,
+            .output_spatial_dimensions = opts.output_spatial_dimensions,
+            .feature_group_count = opts.feature_group_count,
+            .batch_group_count = opts.batch_group_count,
+        }, loc);
     }
 
     /// Returns a Tensor containing the result of the 1D convolution of 'input' by 'kernel'.
@@ -1283,7 +1326,7 @@ pub const Tensor = struct {
         const input = try zml.Buffer.fromSlice(platform, .{2}, &[_]f32{ -0.6884, 1.6795 });
         const res = try zml.testing.compileAndCall(platform, leakyReLU, .{ input, 0.1 });
 
-        const expectation = zml.HostBuffer.fromArray(&[2]f32{ -0.0688, 1.6795 });
+        const expectation = zml.HostBuffer.fromArrayPtr(&[2]f32{ -0.0688, 1.6795 });
         try zml.testing.expectClose(expectation, res, 1e-4);
     }
 
@@ -1979,9 +2022,10 @@ pub const Tensor = struct {
         const sh = Shape.init(.{args.steps}, dt);
         var iota_op = dialect.stablehlo.iota(ctx.mlirCtx(), 0, mlirx.tensorType(ctx.mlirCtx(), sh), loc);
         var res = _result(sh, iota_op.result(0));
+        const range = args.end - args.start;
 
         if (args.steps != 1) {
-            res = res.scale(args.steps);
+            res = res.scale(range / @as(f64, @floatFromInt(args.steps - 1)));
         }
 
         if (args.start != 0) {
@@ -2600,7 +2644,7 @@ pub const Tensor = struct {
 
         const result = try zml.testing.compileAndCall(platform, Local._gatherSlices, .{ operand, Shape.init(.{ .b = 2, .c = 3 }, .u16), start_indices, .{} });
 
-        const expected = zml.HostBuffer.fromArray(&[2][2][2][3]u16{
+        const expected = zml.HostBuffer.fromArrayPtr(&[2][2][2][3]u16{
             .{
                 .{ .{ 13, 14, 15 }, .{ 19, 20, 21 } },
                 .{ .{ 37, 38, 39 }, .{ 43, 44, 45 } },

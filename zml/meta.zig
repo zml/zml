@@ -302,6 +302,8 @@ test mapAlloc {
 pub fn MapRestrict(From: type, To: type) type {
     return struct {
         pub fn map(T: type) type {
+            @setEvalBranchQuota(10_000);
+
             switch (T) {
                 From => return To,
                 ?From => return ?To,

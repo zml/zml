@@ -140,7 +140,7 @@ pub const Buffer = struct {
     /// Copies the given Zig array to the accelerator memory and
     /// return a Buffer using the array shape.
     pub fn fromArray(platform: Platform, arr: anytype) !Buffer {
-        const host_buffer = HostBuffer.fromArray(&arr);
+        const host_buffer = HostBuffer.fromArrayPtr(&arr);
         return try from(platform, host_buffer, .{ .wait = true });
     }
 
@@ -160,7 +160,7 @@ pub const Buffer = struct {
     /// Copies the given Zig array to the accelerator memory and
     /// return a Buffer using the array shape.
     pub fn fromArrayOpts(platform: Platform, arr: anytype, opts: FromOptions) !Buffer {
-        const host_buffer = HostBuffer.fromArray(&arr);
+        const host_buffer = HostBuffer.fromArrayPtr(&arr);
         return try from(platform, host_buffer, opts);
     }
 
