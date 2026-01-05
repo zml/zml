@@ -25,6 +25,10 @@ fn hasCudaPathInLDPath() bool {
     return std.ascii.indexOfIgnoreCase(std.mem.span(ldLibraryPath), nvidiaLibsPath) != null;
 }
 
+pub fn disableXlaLogs() void {
+    _ = c.setenv("TF_CPP_MIN_LOG_LEVEL", "3", 1);
+}
+
 fn setupXlaGpuCudaDirFlag(allocator: std.mem.Allocator, sandbox: []const u8) !void {
     const xla_flags = std.process.getEnvVarOwned(allocator, "XLA_FLAGS") catch "";
     const new_xla_flagsZ = try std.fmt.allocPrintSentinel(allocator, "{s} --xla_gpu_cuda_data_dir={s}", .{ xla_flags, sandbox }, 0);
@@ -65,6 +69,8 @@ pub fn load(io: std.Io) !*const pjrt.Api {
     // CUDA path has to be set _before_ loading the PJRT plugin.
     // See https://github.com/openxla/xla/issues/21428
     try setupXlaGpuCudaDirFlag(arena.allocator(), sandbox_path);
+
+    disableXlaLogs();
 
     {
         var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
