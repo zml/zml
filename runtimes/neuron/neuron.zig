@@ -14,24 +14,23 @@ pub fn isEnabled() bool {
 }
 
 fn hasNeuronDevice(io: std.Io) bool {
-    // TODO(Corentin): Plug that when fs stuff is merged in std.Io
-    _ = io;
-    std.fs.accessAbsolute("/dev/neuron0", .{ .read = true }) catch return false;
+    std.Io.Dir.accessAbsolute(io, "/dev/neuron0", .{ .read = true }) catch return false;
     return true;
 }
 
 fn isRunningOnEC2(io: std.Io) !bool {
-    // TODO(Corentin): Plug that when fs stuff is merged in std.Io
-    _ = io;
     const AmazonEC2 = "Amazon EC2";
-
-    var f = try std.fs.openFileAbsolute("/sys/devices/virtual/dmi/id/sys_vendor", .{ .read = true });
-    defer f.close() catch {};
-
-    var content: [AmazonEC2.len]u8 = undefined;
-    const n_read = try f.pread(&content, 0);
-
-    return std.mem.eql(u8, content[0..n_read], AmazonEC2);
+    var buffer: [AmazonEC2.len]u8 = undefined;
+    return std.mem.eql(
+        u8,
+        AmazonEC2,
+        try std.Io.Dir.readFile(
+            .cwd(),
+            io,
+            "/sys/devices/virtual/dmi/id/product_name",
+            &buffer,
+        ),
+    );
 }
 
 pub fn load(io: std.Io) !*const pjrt.Api {
@@ -66,7 +65,7 @@ pub fn load(io: std.Io) !*const pjrt.Api {
 
     return blk: {
         var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const path = try stdx.fs.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_neuron.so" });
+        const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_neuron.so" });
         var future = io.async(struct {
             fn call(path_: [:0]const u8) !*const pjrt.Api {
                 return pjrt.Api.loadFrom(path_);

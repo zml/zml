@@ -18,18 +18,18 @@ pub fn isEnabled() bool {
 /// Do it using the official method at:
 /// https://cloud.google.com/compute/docs/instances/detect-compute-engine?hl=en#use_operating_system_tools_to_detect_if_a_vm_is_running_in
 fn isOnGCP(io: std.Io) !bool {
-    // TODO(Corentin): Plug that when fs stuff is merged in std.Io
-    _ = io;
-    // TODO: abstract that in the client and fail init
     const GoogleComputeEngine = "Google Compute Engine";
-
-    var f = try std.fs.openFileAbsolute("/sys/devices/virtual/dmi/id/product_name", .{ .read = true });
-    defer f.close() catch {};
-
-    var content: [GoogleComputeEngine.len]u8 = undefined;
-    const n_read = try f.pread(&content, 0);
-
-    return std.mem.eql(u8, content[0..n_read], GoogleComputeEngine);
+    var buffer: [GoogleComputeEngine.len]u8 = undefined;
+    return std.mem.eql(
+        u8,
+        GoogleComputeEngine,
+        try std.Io.Dir.readFile(
+            .cwd(),
+            io,
+            "/sys/devices/virtual/dmi/id/product_name",
+            &buffer,
+        ),
+    );
 }
 
 pub fn load(io: std.Io) !*const pjrt.Api {
@@ -61,7 +61,7 @@ pub fn load(io: std.Io) !*const pjrt.Api {
 
     return blk: {
         var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const path = try stdx.fs.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_tpu.so" });
+        const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_tpu.so" });
         var future = io.async(struct {
             fn call(path_: [:0]const u8) !*const pjrt.Api {
                 return pjrt.Api.loadFrom(path_);

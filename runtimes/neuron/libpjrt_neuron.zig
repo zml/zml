@@ -30,9 +30,9 @@ pub export fn zmlxneuron_dlopen(filename: [*c]const u8, flags: c_int) ?*anyopaqu
 
     var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const new_filename: [*c]const u8 = if (filename) |f| blk: {
-        const replacement = replacements.get(std.fs.path.basename(std.mem.span(f))) orelse break :blk f;
+        const replacement = replacements.get(std.Io.Dir.path.basename(std.mem.span(f))) orelse break :blk f;
         break :blk stdx.fs.path.bufJoinZ(&buf, &.{
-            stdx.fs.selfSharedObjectDirPath(),
+            stdx.process.selfSharedObjectDirPath(),
             replacement,
         }) catch unreachable;
     } else null;
@@ -102,7 +102,7 @@ fn setupPythonEnv(sandbox_path: []const u8) !void {
     {
         var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const home = try std.fmt.bufPrintZ(&buf, "{f}{d}.{d}", .{
-            std.fs.path.fmtJoin(&.{
+            std.Io.Dir.path.fmtJoin(&.{
                 sandbox_path,
                 "lib",
                 "python",
@@ -116,7 +116,7 @@ fn setupPythonEnv(sandbox_path: []const u8) !void {
 
     {
         var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const site_packages = try stdx.fs.path.bufJoin(&buf, &.{
+        const site_packages = try stdx.Io.Dir.path.bufJoin(&buf, &.{
             sandbox_path,
             "site-packages",
         });
@@ -147,8 +147,8 @@ fn getPjrtApi() !*c.PJRT_Api {
     };
 
     var sandbox_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const sandbox_path = try stdx.fs.path.bufJoin(&sandbox_path_buf, &.{
-        stdx.fs.selfSharedObjectDirPath(),
+    const sandbox_path = try stdx.Io.Dir.path.bufJoin(&sandbox_path_buf, &.{
+        stdx.process.selfSharedObjectDirPath(),
         "..",
     });
 
@@ -161,7 +161,7 @@ fn getPjrtApi() !*c.PJRT_Api {
                 .inner = .{
                     .handle = handle_blk: {
                         var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-                        const library = try stdx.fs.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libneuronpjrt.so" });
+                        const library = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libneuronpjrt.so" });
                         break :handle_blk std.c.dlopen(library, .{ .LAZY = true, .NODELETE = true }) orelse {
                             log.err("Unable to dlopen plugin: {?s}", .{std.mem.span(std.c.dlerror())});
                             return error.DlOpenFailed;

@@ -6,22 +6,26 @@ const upb = @import("upb");
 
 const log = std.log.scoped(.@"zml/runtimes/neuron/libneuronxla");
 
-pub fn makeTempDir(buf: []u8, prefix: []const u8) ![]const u8 {
+pub fn makeTempDir(io: std.Io, buf: []u8, prefix: []const u8) ![]const u8 {
     const tmp_dir = std.posix.getenv("TMPDIR") orelse "/tmp";
     const ret = try std.fmt.bufPrint(buf, "{s}{s}{s}{d}", .{
         tmp_dir,
-        std.fs.path.sep_str_posix,
+        std.Io.Dir.path.sep_str_posix,
         prefix,
         std.time.microTimestamp(),
     });
-    try std.fs.makeDirAbsolute(ret);
+    try std.Io.Dir.createDir(.cwd(), io, ret, .fromMode(0o700));
     return ret;
 }
+
+const ModuleState = struct {
+    threaded: std.Io.Threaded,
+};
 
 var module_def: c.PyModuleDef = .{
     .m_base = .{},
     .m_name = "libneuronxla",
-    .m_size = 0,
+    .m_size = @sizeOf(ModuleState),
     .m_methods = @constCast(&[_]c.PyMethodDef{
         .{
             .ml_name = "hook",
@@ -66,7 +70,7 @@ pub fn PyBytes_AsStringAndSize(object: *c.PyObject) []u8 {
     return buf[0..@intCast(len)];
 }
 
-fn wrapNeffAsCustomCall(allocator: std.mem.Allocator, hlo_code: []const u8, neff_file_path: []const u8) ![]const u8 {
+fn wrapNeffAsCustomCall(allocator: std.mem.Allocator, io: std.Io, hlo_code: []const u8, neff_file_path: []const u8) ![]const u8 {
     var upb_alloc: upb.Allocator = .init(allocator);
     const upb_arena = c.upb_Arena_Init(null, 0, upb_alloc.inner());
 
@@ -98,14 +102,12 @@ fn wrapNeffAsCustomCall(allocator: std.mem.Allocator, hlo_code: []const u8, neff
 
     c.xla_HloInstructionProto_set_opcode(fused_root, upb.stringView("custom-call"));
     c.xla_HloInstructionProto_set_custom_call_target(fused_root, upb.stringView("AwsNeuronNeff"));
-    c.xla_HloInstructionProto_set_backend_config(fused_root, blk: {
-        const neff_file = try std.fs.openFileAbsolute(neff_file_path, .{});
-        defer neff_file.close();
-        const stat = try neff_file.stat();
-        const neff_buf = try allocator.alloc(u8, stat.size);
-        const size = try neff_file.readAll(neff_buf);
-        break :blk upb.stringView(neff_buf[0..size]);
-    });
+    c.xla_HloInstructionProto_set_backend_config(
+        fused_root,
+        try upb.stringView(
+            try stdx.Io.Dir.readFileAlloc(.cwd(), io, neff_file_path, allocator, .unlimited),
+        ),
+    );
 
     const parameters_len = blk: {
         var size: usize = undefined;
@@ -150,7 +152,8 @@ fn wrapNeffAsCustomCall(allocator: std.mem.Allocator, hlo_code: []const u8, neff
 }
 
 fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t) !?*c.PyObject {
-    _ = self;
+    const state: *ModuleState = @ptrCast(@alignCast(c.PyModule_GetState(self)));
+    const io = state.threaded.io();
 
     var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
     defer arena.deinit();
@@ -170,24 +173,24 @@ fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t)
     };
 
     var tmp_dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const tmp_dir = try makeTempDir(&tmp_dir_buf, "zml-neuronxcc-");
-    defer std.fs.deleteTreeAbsolute(tmp_dir) catch |err| {
+    const tmp_dir = try makeTempDir(io, &tmp_dir_buf, "zml-neuronxcc-");
+    defer std.Io.Dir.deleteTree(.cwd(), io, tmp_dir) catch |err| {
         log.err("Error deleting temporary directory {s}: {}\n", .{ tmp_dir, err });
     };
 
-    const code_file = try std.fs.path.join(arena.allocator(), &.{ tmp_dir, "file.code" });
+    const code_file = try std.Io.Dir.path.join(arena.allocator(), &.{ tmp_dir, "file.code" });
     {
-        const file = try std.fs.cwd().createFile(code_file, .{ .truncate = true });
+        const file = try std.Io.Dir.createFile(.cwd(), io, code_file, .{ .truncate = true });
         defer file.close();
         try file.writeAll(code);
     }
 
-    const neff_file = try std.fs.path.join(arena.allocator(), &.{ tmp_dir, "file.neff" });
+    const neff_file = try std.Io.Dir.path.join(arena.allocator(), &.{ tmp_dir, "file.neff" });
 
     var neuronx_cc_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    var child = std.process.Child.init(&.{
-        try stdx.fs.path.bufJoin(&neuronx_cc_buf, &.{
-            stdx.fs.selfSharedObjectDirPath(),
+    var child: std.process.Child = .init(&.{
+        try stdx.Io.Dir.path.bufJoin(&neuronx_cc_buf, &.{
+            stdx.process.selfSharedObjectDirPath(),
             "..",
             "bin",
             "neuronx-cc",
@@ -212,7 +215,7 @@ fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t)
     child.stdout_behavior = .Inherit;
     child.stderr_behavior = .Inherit;
     child.cwd = tmp_dir;
-    _ = try child.spawnAndWait();
+    _ = try child.spawnAndWait(io);
 
     std.debug.print(">>>> {s}\n", .{tmp_dir});
 
@@ -245,5 +248,15 @@ fn neuronx_cc(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t) 
 }
 
 pub export fn PyInit_libneuronxla() callconv(.c) ?*c.PyObject {
-    return c.PyModuleDef_Init(&module_def);
+    const module = c.PyModuleDef_Init(&module_def);
+    if (module == null) {
+        return null;
+    }
+
+    const state: *ModuleState = @ptrCast(@alignCast(c.PyModule_GetState(module)));
+    state.* = .{
+        .threaded = .init(std.heap.c_allocator, .{}),
+    };
+
+    return module;
 }

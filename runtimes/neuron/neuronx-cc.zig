@@ -43,12 +43,12 @@ pub fn main() !void {
     _ = c.PyConfig_SetBytesArgv(&config, @intCast(std.os.argv.len), @ptrCast(std.os.argv));
 
     var self_exe_dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const self_exe_dir = try std.fs.selfExeDirPath(&self_exe_dir_buf);
+    const self_exe_dir = try std.process.executableDirPath(io, &self_exe_dir_buf);
 
     {
         var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const home = try std.fmt.bufPrintZ(&buf, "{f}{d}.{d}", .{
-            std.fs.path.fmtJoin(&.{
+            std.Io.Dir.path.fmtJoin(&.{
                 self_exe_dir,
                 "..",
                 "lib",
@@ -64,7 +64,7 @@ pub fn main() !void {
     {
         var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const site_packages = try std.fmt.bufPrint(&buf, "{f}", .{
-            std.fs.path.fmtJoin(&.{
+            std.Io.Dir.path.fmtJoin(&.{
                 self_exe_dir,
                 "..",
                 "site-packages",

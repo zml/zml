@@ -14,17 +14,15 @@ pub fn isEnabled() bool {
 }
 
 fn hasRocmDevices(io: std.Io) bool {
-    // TODO(Corentin): Plug that when fs stuff is merged in std.Io
-    _ = io;
     inline for (&.{ "/dev/kfd", "/dev/dri" }) |path| {
-        std.fs.accessAbsolute(path, .{ .read = true }) catch return false;
+        std.Io.Dir.accessAbsolute(io, path, .{ .read = true }) catch return false;
     }
     return true;
 }
 
 fn setupRocmEnv(rocm_data_dir: []const u8) !void {
     var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    _ = c.setenv("ROCM_PATH", try stdx.fs.path.bufJoinZ(&buf, &.{rocm_data_dir}), 1); // must be zero terminated
+    _ = c.setenv("ROCM_PATH", try stdx.Io.Dir.path.bufJoinZ(&buf, &.{rocm_data_dir}), 1); // must be zero terminated
 }
 
 pub fn load(io: std.Io) !*const pjrt.Api {
@@ -57,7 +55,7 @@ pub fn load(io: std.Io) !*const pjrt.Api {
     try setupRocmEnv(sandbox_path);
 
     var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const lib_path = try stdx.fs.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_rocm.so" });
+    const lib_path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_rocm.so" });
 
     // We must load the PJRT plugin from the main thread.
     //

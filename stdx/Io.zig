@@ -12,4 +12,12 @@ pub const Dir = struct {
             return try std.Io.Dir.path.joinZ(fa.allocator(), paths);
         }
     };
+
+    pub fn readFileAlloc(dir: std.Io.Dir, io: std.Io, sub_path: []const u8, gpa: std.mem.Allocator, limit: std.Io.Limit) ![]u8 {
+        const stat = try std.Io.Dir.statFile(dir, io, sub_path, .{});
+        const buffer = try gpa.alloc(u8, limit.min(.limited64(stat.size)));
+        errdefer gpa.free(buffer);
+        _ = try std.Io.Dir.readFile(.cwd(), io, sub_path, buffer);
+        return buffer;
+    }
 };
