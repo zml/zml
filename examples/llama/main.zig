@@ -352,6 +352,10 @@ pub fn generateText(
     var current_token_buffer: zml.Buffer = try .fromSlice(io, platform, generated_token_slice);
     defer current_token_buffer.deinit();
 
+    const token_pos_slice: zml.ConstSlice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{0}));
+    const token_pos_buffer: zml.Buffer = try .fromSliceOpts(io, platform, token_pos_slice, .{ .wait = true, .memory = .host_pinned });
+    defer token_pos_buffer.deinit();
+
     const output_tokens_len = max_seq_len - prompt_tok.len - 1;
     var timer = try stdx.time.Timer.start();
 
@@ -379,9 +383,11 @@ pub fn generateText(
         }
 
         // current token pos needs to go into a zml.Buffer
-        const token_pos_slice: zml.ConstSlice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{@intCast(prompt_tok.len + i)}));
-        const token_pos_buffer: zml.Buffer = try .fromSlice(io, platform, token_pos_slice);
-        defer token_pos_buffer.deinit();
+        const token_pos_raw: *[1]u32 = @ptrCast(@alignCast(token_pos_buffer.devicePtr()));
+        token_pos_raw[0] = @intCast(prompt_tok.len + i);
+        //const token_pos_slice: zml.ConstSlice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{@intCast(prompt_tok.len + i)}));
+        //const token_pos_buffer: zml.Buffer = try .fromSliceOpts(io, platform, token_pos_slice, .{ .wait = false });
+        //defer token_pos_buffer.deinit();
 
         // call to generate the next token
         decode_args.set(.{ current_token_buffer, token_pos_buffer, kv_cache_buffers, rng_buffers });
