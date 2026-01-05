@@ -409,6 +409,8 @@ pub fn generateText(
     var decode_args = try decode_exe.args(allocator);
     defer decode_args.deinit(allocator);
 
+    decode_args.bake(.{llama_buffers});
+
     var decode_results = try decode_exe.results(allocator);
     defer decode_results.deinit(allocator);
 
@@ -447,7 +449,7 @@ pub fn generateText(
         defer token_pos_buffer.deinit();
 
         // call to generate the next token
-        decode_args.set(.{ llama_buffers, current_token_buffer, token_pos_buffer, kv_cache_buffers, rng_buffers });
+        decode_args.set(.{ current_token_buffer, token_pos_buffer, kv_cache_buffers, rng_buffers });
 
         decode_exe.call(decode_args, &decode_results);
 
