@@ -1,5 +1,6 @@
 const std = @import("std");
 
+const c = @import("c");
 const pjrt = @import("pjrt");
 const pjrtx = @import("pjrt");
 const runtimes = @import("runtimes");
@@ -33,9 +34,18 @@ fn StaticPlatformMap(comptime E: type, comptime T: type) type {
 
 var api_map: StaticPlatformMap(Target, ?*const pjrt.Api) = .{};
 
+fn disableXlaLogs() void {
+    _ = c.setenv(
+        "TF_CPP_MIN_LOG_LEVEL",
+        std.posix.getenv("TF_CPP_MIN_LOG_LEVEL") orelse "3",
+        1,
+    );
+}
+
 fn loadOrGetApi(target: Target, io: std.Io) !*const pjrt.Api {
     return switch (target) {
         inline else => |tag| @field(api_map, @tagName(tag)) orelse b: {
+            disableXlaLogs();
             const api = try runtimes.load(tag, io);
             @field(api_map, @tagName(tag)) = api;
             break :b api;
