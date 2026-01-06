@@ -94,7 +94,7 @@ pub const LlamaLM = struct {
         const tokens = tokens_.withPartialTags(.{.s});
         const out, const updated_kv_cache = self.model.forward(tokens, token_index, kv_cache);
         const new_tokens, const new_rng = self.sampleTokens(self.lm_head, out, rng, self.gen_opts);
-        return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache, new_rng };
+        return .{ new_tokens.convert(tokens.dtype()), updated_kv_cache, new_rng };
     }
 
     pub fn sampleTokens(
