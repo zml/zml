@@ -1,11 +1,12 @@
 const std = @import("std");
 
+const pjrt = @import("pjrt");
 const stdx = @import("stdx");
 
 const constants = @import("constants.zig");
 const ConstSlice = @import("slice.zig").ConstSlice;
 const DataType = @import("dtype.zig").DataType;
-const pjrt = @import("pjrtx.zig");
+const pjrtx = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
 const Slice = @import("slice.zig").Slice;
@@ -71,7 +72,7 @@ pub const Buffer = struct {
         //} else 0;
         //_ = chunk_size;
 
-        const buffer_type = pjrt.bufferTypeFromDtype(shape_.dtype());
+        const buffer_type = pjrtx.bufferTypeFromDtype(shape_.dtype());
         const byte_strides = shape_.computeByteStrides();
 
         const devices = platform.getDevices();
@@ -175,7 +176,7 @@ pub const Buffer = struct {
 
         var args = pjrt.Client.CreateUninitializedBufferArgs{
             .dims = shape_.dims(),
-            .element_type = pjrt.bufferTypeFromDtype(shape_.dtype()),
+            .element_type = pjrtx.bufferTypeFromDtype(shape_.dtype()),
             .layout = .{
                 .tiled = .{
                     .minor_to_major = constants.minorToMajor(shape_.rank()),
@@ -194,7 +195,7 @@ pub const Buffer = struct {
             else
                 .{ .memory = platform.memoryForDevice(opts.memory, devices[i]) };
 
-            const shard = try platform.pjrt_client.createUnitializedBuffer(platform.pjrt_api, args);
+            const shard = try platform.pjrt_client.createUninitializedBuffer(platform.pjrt_api, args);
             res._shards.appendAssumeCapacity(shard);
         }
 

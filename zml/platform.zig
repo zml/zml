@@ -1,11 +1,12 @@
 const std = @import("std");
 
+const pjrt = @import("pjrt");
+const pjrtx = @import("pjrt");
 const runtimes = @import("runtimes");
 pub const Target = runtimes.Platform;
 const stdx = @import("stdx");
 
 const Exe = @import("exe.zig").Exe;
-const pjrt = @import("pjrtx.zig");
 const zml = @import("zml.zig");
 
 const log = std.log.scoped(.zml);

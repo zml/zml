@@ -1,13 +1,14 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const pjrt = @import("pjrt");
 const stdx = @import("stdx");
 pub const VFS = @import("io").VFS;
 
 const Buffer = @import("buffer.zig").Buffer;
 const Bufferized = @import("zml.zig").Bufferized;
 const meta = @import("meta.zig");
-const pjrt = @import("pjrtx.zig");
+const pjrtx = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const safetensors = @import("safetensors.zig");
 const Shape = @import("shape.zig").Shape;
@@ -366,10 +367,10 @@ pub const Transfer = struct {
 
         for (shape_specs, shapes) |*spec, shape| {
             const dims = try temp_arena.allocator().dupe(i64, shape.dims());
-            spec.* = pjrt.ShapeSpec.init(dims, pjrt.bufferTypeFromDtype(shape.dtype()));
+            spec.* = pjrt.ShapeSpec.init(dims, pjrtx.bufferTypeFromDtype(shape.dtype()));
         }
 
-        const memory = platform.pjrt_client.memoryByKind(platform.pjrt_api, .device).?;
+        const memory = pjrtx.Client.memoryByKind(platform.pjrt_client, platform.pjrt_api, .device).?;
 
         const transfer_manager = try platform.pjrt_client.createBuffersForAsyncHostToDevice(platform.pjrt_api, .{ .shape_specs = shape_specs, .memory = memory });
         errdefer transfer_manager.deinit(platform.pjrt_api);

@@ -3,6 +3,7 @@ const std = @import("std");
 const c = @import("c");
 const dialects = @import("mlir/dialects");
 const mlir = @import("mlir");
+const pjrt = @import("pjrt");
 const stdx = @import("stdx");
 const upb = @import("upb");
 
@@ -10,7 +11,7 @@ const Buffer = @import("buffer.zig").Buffer;
 const Exe = @import("exe.zig").Exe;
 const meta = @import("meta.zig");
 const mlirx = @import("mlirx.zig");
-const pjrt = @import("pjrtx.zig");
+const pjrtx = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
 const Tensor = @import("tensor.zig").Tensor;
@@ -490,7 +491,8 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
         break :blk options;
     };
 
-    const loaded_executable = try platform.pjrt_client.compile(
+    const loaded_executable = try pjrtx.Client.compile(
+        platform.pjrt_client,
         platform.pjrt_api,
         arena,
         io,

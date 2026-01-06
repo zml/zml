@@ -1,10 +1,10 @@
 const std = @import("std");
 
+const pjrt = @import("pjrt");
 const stdx = @import("stdx");
 
 const Buffer = @import("buffer.zig").Buffer;
 const meta = @import("meta.zig");
-const pjrt = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
 
