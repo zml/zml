@@ -25,8 +25,8 @@ fn isRunningOnEC2(io: std.Io) !bool {
     _ = io;
     const AmazonEC2 = "Amazon EC2";
 
-    var f = try std.fs.openFileAbsolute("/sys/devices/virtual/dmi/id/sys_vendor", .{ .read = true });
-    defer f.close() catch {};
+    var f = try std.fs.openFileAbsolute("/sys/devices/virtual/dmi/id/sys_vendor", .{ .mode = .read_only });
+    defer f.close();
 
     var content: [AmazonEC2.len]u8 = undefined;
     const n_read = try f.pread(&content, 0);

@@ -40,6 +40,7 @@ copy_to_directory(
         "@zml//runtimes/neuron:libneuronxla",
         "@rules_python//python:current_py_toolchain",
         "@aws-neuronx-runtime-lib//:libnrt.patchelf",
+        "@aws-neuronx-runtime-lib//:libnrtucode_extisa",
         "@aws-neuronx-runtime-lib//:libncfw.patchelf",
         "@aws-neuronx-collectives//:libnccom",
         "@zlib1g",
@@ -58,7 +59,7 @@ copy_to_directory(
     },
     exclude_srcs_patterns = [
         "**/tests/**",
-        "**/include/**",
+        "**/numpy/core/include/**",
         "**/_solib_*/**",
     ],
     include_srcs_patterns = [
