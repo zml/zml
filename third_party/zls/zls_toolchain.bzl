@@ -2,7 +2,7 @@
 
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
-_VERSION = "0.15.0"
+_VERSION = "0.16.0-dev.82+cbb62284"
 
 _ZLS_PLATFORMS = {
     "x86_64-linux": struct(
@@ -26,9 +26,9 @@ _ZLS_PLATFORMS = {
 }
 
 _ZLS_VERSIONS = {
-    "x86_64-linux": "508bfe3fd637d2a02f07f3fc7da8900351f407116b03685c5dae26b4f01a30de",
-    "x86_64-macos": "46c31838bfef5adcc7fee82428c3ec2b9abbfae38242639afea5f242ee133d93",
-    "aarch64-macos": "76c7a23190f67e67970024065f689c2c49b3c7b0fc16876fb24ef199fb05fc2a",
+    "x86_64-linux": "27277ee215687fda4a80fa518fb38061f4abb56a469349853ac3e5671e005421",
+    "x86_64-macos": "98e3618d41532fcb1b6148bed75f081fc2f42e74fa6a23827870eb328dfbf87c",
+    "aarch64-macos": "083bc9b5fd9f70c7cd380766bffa7ce72a626237c62d7cf26ae3ac0395530ee0",
 }
 
 ZlsToolchainInfo = provider(
@@ -74,7 +74,7 @@ def _zls_toolchains_repos_impl(mctx):
     for platform, _ in _ZLS_PLATFORMS.items():
         http_archive(
             name = "zls_{}".format(platform),
-            url = "https://github.com/zigtools/zls/releases/download/{version}/zls-{platform}.tar.xz".format(
+            url = "https://builds.zigtools.org/zls-{platform}-{version}.tar.xz".format(
                 version = _VERSION,
                 platform = platform,
             ),
