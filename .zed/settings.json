@@ -34,7 +34,7 @@
     "lsp": {
         "zls": {
             "binary": {
-                "path": "./tools/zls.sh"
+                "path": "tools/zls.sh"
             }
         }
     }

@@ -23,7 +23,7 @@ def zls_completion(name, deps, **kwargs):
     )
 
     # Create a target that will be invoked by ZLS using our customer build_runner.
-    build_config_printer = "print_{}_build_config".format(name)
+    build_config_printer = "{}.print_build_config".format(name)
     zig_binary(
         name = build_config_printer,
         main = Label("//third_party/zls:workspace_printer.zig"),
