@@ -1,4 +1,0 @@
-torch
-transformers==4.48.1
-accelerate
-numpy==1.26.4
