@@ -170,8 +170,8 @@ def _rocm_impl(mctx):
     http_archive(
         name = "libpjrt_rocm",
         build_file = "libpjrt_rocm.BUILD.bazel",
-        url = "https://github.com/zml/pjrt-artifacts/releases/download/v15.0.2/pjrt-rocm_linux-amd64.tar.gz",
-        sha256 = "b3f0dc66eec0f72835ba7fac66a88eef967f5caa2ba5cb3bb5ef7ee040d736cd",
+        url = "https://github.com/zml/pjrt-artifacts/releases/download/v16.0.0/pjrt-rocm_linux-amd64.tar.gz",
+        sha256 = "6a70cf6a5a8330809f173072dd5fae5332c3ec8fba80acb9b77ddd97bda6572b",
     )
 
     return mctx.extension_metadata(
